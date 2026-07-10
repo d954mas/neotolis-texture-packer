@@ -173,6 +173,32 @@ are minor glue.
     correct model (rTexPacker existence proof, `unity-raylib.md` Lessons #1). Noted
     so no one tries to add it.
 
+### 2.4 Canvas rendering — exactly what is drawn (owner Q&A 2026-07-10)
+
+The canvas draws the **real packed page texture** (principle 2), so baked
+transforms are inherently visible: a rotated/flipped sprite *is* rotated/flipped
+in the page pixels. On top of the pixels, overlay draws (shape renderer, all
+data straight from `tp_result`):
+
+- **☑ outline** — each region's true placement silhouette in page space. For
+  RECT shapes that's the frame rect; for CONVEX/CONCAVE shapes it is the **actual
+  hull polygon** (`tp_sprite.verts` mapped through the D4 `transform` to page
+  coords) — the user sees exactly the concave outline the packer nested, not a
+  bounding box.
+- **☐ trim** — trimmed rect vs. original source bounds.
+- **☐ pivot** — pivot markers (may sit outside the frame).
+- **Transform indication** — hover/selection readout shows the sprite name +
+  size + explicit transform decode ("rot 90°", "flip H", "rot 90° + flip V", or
+  "—"); sprite-tree rows carry a compact badge (↻ / ⇋) for any non-identity
+  transform so rotated/flipped sprites are findable without hovering the canvas.
+- **Selection sync** — click a region on the canvas ⇄ selects the row in the
+  sprite tree, and vice versa; selected region gets an accent outline.
+
+Multiple atlases: one atlas at a time on the canvas — the selected row in the
+atlas list (region C) drives the sprite tree, canvas pages, settings, and stats.
+Each atlas is an independent object in the project (own sources, settings,
+animations); pages within the selected atlas switch via the page bar (E').
+
 ---
 
 ## 3. Key flows
