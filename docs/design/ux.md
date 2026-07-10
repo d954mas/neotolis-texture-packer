@@ -213,6 +213,34 @@ so a drag does not repack every frame.
    re-runs.
 3. Canvas + stats + notices refresh. Project is marked dirty (● in the menu bar).
 
+### 3.3b Pack/Export button state & staleness (owner feedback 2026-07-10)
+
+Two independent dirty bits, surfaced differently:
+
+- **Project dirty** (unsaved to disk): ● next to the project name in the menu
+  bar (§2.1 A). Cleared by Save.
+- **Preview stale** (sources/settings changed since the last successful pack):
+  any model mutation — add/remove image or folder, any setting change — sets it.
+  Cleared only by a successful `tp_pack` run.
+
+Surfacing the stale bit:
+1. **Pack button state**: normal when preview is current; **accent/highlighted
+   with a "stale" badge** when a repack is needed; a spinner/progress state while
+   packing. Tooltip (`nt_ui_tooltip`) always explains: current → "Atlas is up to
+   date (packed 34 ms ago)"; stale → "Sources or settings changed — press to
+   repack"; packing → "Packing…".
+2. **Canvas watermark**: while stale, the canvas dims slightly and shows a
+   corner tag "outdated — press Pack" so the on-screen atlas is never mistaken
+   for the current settings' result. (With auto-pack ON the stale window is a
+   debounce tick, so the tag barely flashes.)
+3. **Export honors staleness**: Export All on a stale preview first repacks
+   (per-target anyway, §3.5) — it never writes files from a stale layout; its
+   tooltip says what it will write and where.
+4. Semantics recap (tooltips carry this): **Pack** = repack now with current
+   project settings and refresh the preview (session `.ntpack` only, no files
+   exported). **Export All** = pack per enabled target (∩ capabilities) and
+   write that target's files to its output path.
+
 ### 3.4 Configure export targets
 1. In Export Targets (region G), toggle a target on/off (`nt_ui_checkbox`), pick
    its exporter id (`nt_ui_dropdown`: `json-neotolis` / `defold`), set its output
