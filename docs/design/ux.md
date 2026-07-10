@@ -297,6 +297,15 @@ cheap (projects are KBs):
   `project_dirty` recomputes by comparing the restored snapshot to the
   last-saved snapshot, so undoing back to the saved state clears the ● marker).
 
+### 3.3d Keyboard shortcuts (v1 set, owner-requested)
+
+Standard desktop bindings, all routed through the same actions as the menus
+(no hidden key-only behavior): Ctrl+N New, Ctrl+O Open…, **Ctrl+S Save**,
+Ctrl+Shift+S Save As…, Ctrl+Z Undo, Ctrl+Y / Ctrl+Shift+Z Redo, F5 Refresh
+(rescan sources), Ctrl+P Pack, Ctrl+E Export All, Esc closes open menus/modals
+(already live). Shortcuts shown next to their menu items. Text-input focus
+swallows keys first (no accidental global actions while typing).
+
 ### 3.4 Configure export targets
 1. In Export Targets (region G), toggle a target on/off (`nt_ui_checkbox`), pick
    its exporter id (`nt_ui_dropdown`: `json-neotolis` / `defold`), set its output
