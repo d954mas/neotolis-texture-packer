@@ -267,6 +267,25 @@ Surfacing the stale bit:
    exported). **Export All** = pack per enabled target (∩ capabilities) and
    write that target's files to its output path.
 
+### 3.3c Undo/redo (owner decision 2026-07-10: required)
+
+Snapshot-based history, not command objects. The deterministic project
+serializer (tp_project save-to-buffer) makes snapshots trivially correct and
+cheap (projects are KBs):
+
+- Every model mutation already funnels through one choke point (the GUI's
+  `touch` wrapper) — it pushes the PRE-mutation serialized snapshot onto the
+  undo stack and clears the redo stack. Undo = deserialize snapshot back into
+  the live model (GUI selection re-clamped); redo = mirror stack.
+- **Coalescing:** continuous gestures (slider drags, text typing) snapshot once
+  per gesture (on begin/commit), not per frame/keystroke.
+- Depth ~100 entries (ring); Ctrl+Z / Ctrl+Y (+ Ctrl+Shift+Z alias), Edit menu
+  Undo/Redo with greyed state and action names later (v1: plain Undo/Redo).
+- Scope: undo covers the PROJECT MODEL only — never disk files, never the
+  packed preview directly (a restored model recomputes `preview_stale`;
+  `project_dirty` recomputes by comparing the restored snapshot to the
+  last-saved snapshot, so undoing back to the saved state clears the ● marker).
+
 ### 3.4 Configure export targets
 1. In Export Targets (region G), toggle a target on/off (`nt_ui_checkbox`), pick
    its exporter id (`nt_ui_dropdown`: `json-neotolis` / `defold`), set its output
