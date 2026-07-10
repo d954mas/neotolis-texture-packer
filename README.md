@@ -6,9 +6,17 @@ formats. The packer is the engine's NFP/Minkowski **concave** vector packer —
 it nests true silhouettes (not just rectangles), tries all 8 D4 orientations
 (4 rotations × 2 flips), trims, deduplicates, and packs deterministically.
 
-**Status: in active development.** The GUI is a working project editor with
-live packing; the CLI (Phase 4) and the Defold exporter (Phase 5) are next.
-See `docs/ROADMAP.md` for the full plan and current phase.
+**Status: first test release (v0.1.0).** The GUI is a working atlas tool:
+live packing, settings, animations, and two export formats. The CLI (Phase 4)
+is next. See `docs/ROADMAP.md` for the full plan.
+
+## Download
+
+Prebuilt binaries for Windows / Linux / macOS:
+[**Releases**](https://github.com/d954mas/neotolis-texture-packer/releases).
+Unzip and run `ntpacker-gui`. Try it on
+`examples/showcase/showcase.ntpacker_project` (60 CC0 animal sprites) or the
+Defold comparison demo below.
 
 ## What works today
 
@@ -16,8 +24,21 @@ See `docs/ROADMAP.md` for the full plan and current phase.
   image files and live-linked folders; multiple atlases per project; rename
   atlases/regions (inline, file on disk untouched); undo/redo (Ctrl+Z/Y);
   refresh sources (F5) with add/remove/change detection; missing files are
-  flagged, never fatal; per-monitor DPI scaling; in-process packing with the
-  packed atlas rendered on a zoom/pan canvas.
+  flagged, never fatal; per-monitor DPI scaling; in-process (threaded)
+  packing with the packed atlas on a zoom/pan canvas — hull/frame/trim/pivot
+  overlays, per-region vertex readout, pack stats.
+- **Settings panel** — all packing knobs (shape, page size up to 16384,
+  padding, alpha threshold, rotations, POT…) plus **per-region overrides**
+  (shape/rotation/max-vertices/margin/extrude, inherit by default); invalid
+  combinations are disabled with a reason, never a crash.
+- **Animations** — multi-select sprites → "Create animation from selection";
+  frame reorder, fps, the full Defold playback set, flips; preview player
+  with scrubber. Explicit assembly only — no name-based auto-detection, by
+  design (`docs/research/animation-grouping.md`).
+- **Export dialog** (Ctrl+E) — per-target enable + output path, then export.
+- **Export: `defold`** — `.tpinfo`/`.tpatlas` for
+  [extension-texturepacker](https://github.com/defold/extension-texturepacker)
+  (pinned 2.7.0), including animations; see `docs/formats/defold-tpinfo.md`.
 - **Export: `json-neotolis`** — full-fidelity JSON (D4 transforms, polygon
   hulls, pivots, slice-9, aliases, multi-page, animations) + page PNGs.
   Schema: `docs/formats/json-neotolis.md`. Deterministic byte-identical output.
@@ -29,16 +50,33 @@ See `docs/ROADMAP.md` for the full plan and current phase.
   also the GUI preview artifact: what you see is literally the atlas that
   ships).
 
+## Known limitations (v0.1.0)
+
+- No CLI yet (next phase) — exports run from the GUI.
+- Packing runs synchronously: the window can stall for a few seconds on very
+  large atlases (worker-thread + progress is planned).
+- The Defold target packs without rotations until the engine grows a
+  rotation-only transform mode
+  ([engine#285](https://github.com/d954mas/neotolis-engine/issues/285));
+  9-slice is dropped for Defold with a notice.
+- Duplicate frames are only merged when the source files are identical;
+  identical-after-trim dedup is engine work in progress
+  ([engine#286](https://github.com/d954mas/neotolis-engine/issues/286)).
+- A sprite that cannot fit the page size aborts the app
+  ([engine#287](https://github.com/d954mas/neotolis-engine/issues/287)) —
+  keep `max page size` comfortably larger than your biggest sprite.
+- Polygon hulls on anti-aliased edges can be noisy — raise the alpha
+  threshold or lower max vertices
+  ([engine#288](https://github.com/d954mas/neotolis-engine/issues/288)).
+- The window's X button bypasses the unsaved-changes prompt (engine gap);
+  window size / recent projects are not remembered yet.
+
 ## Planned (roadmap order)
 
 - `ntpacker` CLI: `ntpacker pack project.ntpacker_project` — byte-identical
   to GUI export (tool-parity invariant).
-- Defold exporter: `.tpinfo`/`.tpatlas` for
-  [extension-texturepacker](https://github.com/defold/extension-texturepacker)
-  + native `.atlas` fallback; in-repo demo project built headless by bob in CI
-  (`examples/defold-demo/` already carries the comparison assets).
-- Animation editor + preview player (explicit assembly, Defold-style; no
-  name-based auto-detection by design — see `docs/research/animation-grouping.md`).
+- Defold demo built headless by bob in CI; native `.atlas` export preset.
+- Async packing with progress; notices panel; list search/filter.
 - Watch mode (auto-repack on source changes).
 
 ## Build
