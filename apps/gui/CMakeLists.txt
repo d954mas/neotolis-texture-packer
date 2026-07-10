@@ -64,6 +64,13 @@ endif()
 nt_set_warning_flags(ntpacker-gui)
 nt_set_sanitizer_flags(ntpacker-gui)
 set_target_properties(ntpacker-gui PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${GUI_OUTPUT_DIR}")
+# Shipped Windows GUI is a windows-subsystem app (no console window behind the
+# GUI; javaw pattern). Debug keeps the console -- logs, NT_ASSERT text and the
+# self-test output stay visible in a terminal. Entry stays plain main().
+if(WIN32 AND CMAKE_BUILD_TYPE STREQUAL "Release")
+    set_target_properties(ntpacker-gui PROPERTIES WIN32_EXECUTABLE ON)
+    target_link_options(ntpacker-gui PRIVATE "LINKER:/entry:mainCRTStartup")
+endif()
 
 set(GUI_PACK_NAMES ntpacker_ui.ntpack)
 
