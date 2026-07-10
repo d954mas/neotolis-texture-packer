@@ -17,8 +17,10 @@ extern "C" {
 #endif
 
 typedef struct gui_scan_entry {
-    char rel[256];  /* path relative to the scanned root, '/'-normalized (e.g. "tank/walk_01.png") */
-    char abs[512];  /* absolute path on disk (what the canvas decodes) */
+    char rel[256];       /* path relative to the scanned root, '/'-normalized (e.g. "tank/walk_01.png") */
+    char abs[512];       /* absolute path on disk (what the canvas decodes) */
+    long long size;      /* file size in bytes (change detection for Refresh) */
+    long long mtime;     /* platform last-write time (opaque; compared for equality only) */
 } gui_scan_entry;
 
 typedef struct gui_scan_result {
@@ -34,6 +36,14 @@ const gui_scan_result *gui_scan_get(const char *abs_dir);
 /* True if abs points at an existing directory (distinguishes a folder source from a file
  * source without trusting the extension). False for files, missing paths, and NULL. */
 bool gui_scan_is_dir(const char *abs);
+
+/* True if `abs` exists on disk (file OR directory). Used to render missing-file rows
+ * (ux.md §3.7) and to keep a stale argv Open from being fatal (F6b). */
+bool gui_scan_exists(const char *abs);
+
+/* Stats a FILE at `abs`: writes size + platform mtime, returns true if it exists as a
+ * regular file. Change detection for Refresh (F4). Any out pointer may be NULL. */
+bool gui_scan_stat(const char *abs, long long *out_size, long long *out_mtime);
 
 /* Drops every cached scan. Cheap; the next gui_scan_get rescans from disk. Call after any
  * mutation that could change what a folder contains or which folders exist. */

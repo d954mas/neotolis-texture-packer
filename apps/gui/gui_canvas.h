@@ -62,6 +62,13 @@ bool gui_canvas_set_image(gui_canvas *c, const char *abs_path, char *err_out, si
 /* Drops the current image (no selection). */
 void gui_canvas_clear(gui_canvas *c);
 
+/* Forgets the decode cache key WITHOUT dropping the current texture, so the next
+ * gui_canvas_set_image re-decodes from disk even for the same path (Refresh, F4). */
+void gui_canvas_invalidate(gui_canvas *c);
+
+/* The absolute path of the currently decoded image ("" when none). */
+const char *gui_canvas_loaded_path(const gui_canvas *c);
+
 bool gui_canvas_has_image(const gui_canvas *c);
 int gui_canvas_img_w(const gui_canvas *c);
 int gui_canvas_img_h(const gui_canvas *c);

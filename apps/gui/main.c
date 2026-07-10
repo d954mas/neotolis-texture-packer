@@ -35,6 +35,7 @@
 #include "resource/nt_resource.h"
 #include "ui/nt_ui.h"
 #include "ui/nt_ui_button.h"
+#include "ui/nt_ui_input.h"
 #include "ui/nt_ui_label.h"
 #include "ui/nt_ui_menu.h"
 #include "ui/nt_ui_modal.h"
@@ -48,8 +49,10 @@
 #include "clay.h"
 
 #include "gui_canvas.h"
+#include "gui_history.h"
 #include "gui_project.h"
 #include "gui_scan.h"
+#include "gui_version.h"
 #include "tinyfiledialogs.h"
 
 #include <stdarg.h>
@@ -109,7 +112,9 @@ static const nt_ui_label_style_t g_row_base = {.font_id = 0, .font_size = FS_ROW
 static const nt_ui_label_style_t g_caption_base = {.font_id = 0, .font_size = FS_CAPTION, .color = {150.0F, 156.0F, 168.0F, 255.0F}};
 static const nt_ui_label_style_t g_canvas_hint_base = {.font_id = 0, .font_size = FS_HINT, .color = {120.0F, 126.0F, 140.0F, 255.0F}, .align = CLAY_TEXT_ALIGN_CENTER};
 static const nt_ui_label_style_t g_tag_base = {.font_id = 0, .font_size = FS_TAG, .color = {245.0F, 238.0F, 232.0F, 255.0F}};
-static nt_ui_label_style_t g_title, g_body, g_row, g_caption, g_canvas_hint, g_tag; /* scaled each frame */
+/* Missing-file rows / placeholder (ux.md §3.7): amber warning accent. */
+static const nt_ui_label_style_t g_warn_base = {.font_id = 0, .font_size = FS_ROW, .color = {224.0F, 158.0F, 96.0F, 255.0F}};
+static nt_ui_label_style_t g_title, g_body, g_row, g_caption, g_canvas_hint, g_tag, g_warn; /* scaled each frame */
 
 static nt_ui_button_style_t g_btn = {
     .idle = {.bg_tint = 0xFF4A4238U, .scale = 1.0F, .opacity = 1.0F},
@@ -151,6 +156,7 @@ static nt_ui_button_style_t g_menubtn = {
 static nt_ui_menu_style_t s_menu_style;
 static nt_ui_modal_style_t s_modal_style;
 static nt_ui_tooltip_style_t s_tip_style;
+static nt_ui_input_style_t s_rename_input; /* inline rename field (atlas + sprite) */
 // #endregion
 
 // #region engine state
@@ -182,14 +188,34 @@ static char s_exe_dir[1024];
 // #endregion
 
 // #region ui ids + menu state
-static uint32_t s_id_btn_pack, s_id_btn_export, s_id_vlist, s_id_modal;
+static uint32_t s_id_btn_pack, s_id_btn_export, s_id_btn_refresh, s_id_vlist, s_id_modal, s_id_about;
+static uint32_t s_id_rename; /* the single inline rename input (one edit active at a time) */
 static bool s_ids_ready;
 
-static uint32_t s_id_mb_file, s_id_mb_view, s_id_mb_help;
-static uint32_t s_id_menu_file, s_id_menu_view, s_id_menu_help;
-static nt_ui_menu_state_t s_file_state, s_view_state, s_help_state;
-static nt_ui_menu_ctx_t s_file_menu, s_view_menu, s_help_menu;
-enum { MK_NEW = 1, MK_OPEN, MK_SAVE, MK_SAVEAS, MK_EXIT, MK_ZIN, MK_ZOUT, MK_FIT, MK_ABOUT, MK_S100, MK_S125, MK_S150, MK_S200 };
+static uint32_t s_id_mb_file, s_id_mb_edit, s_id_mb_view, s_id_mb_help;
+static uint32_t s_id_menu_file, s_id_menu_edit, s_id_menu_view, s_id_menu_help;
+static nt_ui_menu_state_t s_file_state, s_edit_state, s_view_state, s_help_state;
+static nt_ui_menu_ctx_t s_file_menu, s_edit_menu, s_view_menu, s_help_menu;
+enum {
+    MK_NEW = 1, MK_OPEN, MK_SAVE, MK_SAVEAS, MK_REFRESH, MK_EXIT,
+    MK_UNDO, MK_REDO,
+    MK_ZIN, MK_ZOUT, MK_FIT, MK_ABOUT, MK_S100, MK_S125, MK_S150, MK_S200,
+    MK_CTX_RENAME, MK_CTX_REMOVE
+};
+
+/* Right-click context menu: one cursor-anchored menu whose items depend on the row a
+ * right-click armed it over (§3.3e mouse-complete access). Its actions call the same code
+ * paths as the [x] buttons / inline editors. */
+static uint32_t s_id_ctx_menu;
+static nt_ui_menu_state_t s_ctx_state;
+static nt_ui_menu_ctx_t s_ctx_menu;
+enum { CTX_NONE = 0, CTX_ATLAS, CTX_SPRITE };
+static int s_ctx_kind;
+static int s_ctx_atlas;         /* CTX_ATLAS target index */
+static int s_ctx_src = -1;      /* CTX_SPRITE source index (for Remove) */
+static char s_ctx_sprite[192];  /* CTX_SPRITE override key (for Rename) */
+static bool s_ctx_leaf;         /* a renamable leaf sprite (file source or folder child) */
+static bool s_ctx_removable;    /* a removable source row (has an [x] today) */
 // #endregion
 
 // #region editor state
@@ -199,19 +225,29 @@ static int s_sel_atlas;      /* selected atlas index */
 static int s_sel_src = -1;   /* selected source index within the atlas */
 static int s_sel_child = -1; /* selected folder-child index (-1 = the source row / a file) */
 static char s_sel_abs[512];  /* resolved absolute image path of the selection ("" = none/folder) */
+static bool s_sel_missing;   /* selection is a missing file -> canvas shows a placeholder (§3.7) */
 
 /* deferred side effects (dialogs + model mutations), applied at the top of the next frame */
-static bool s_pending_open, s_pending_save, s_pending_save_as, s_pending_add_files, s_pending_add_folder, s_pending_add_atlas;
+static bool s_pending_open, s_pending_save, s_pending_save_as, s_pending_add_files, s_pending_add_folder, s_pending_add_atlas, s_pending_refresh;
 static int s_pending_remove_atlas = -1;
 static int s_pending_remove_source = -1;
 enum { AFTER_NONE = 0, AFTER_NEW, AFTER_EXIT };
 static int s_after_confirm;
 static bool s_confirm_open;
+static bool s_about_open;
 enum { MODAL_NONE = 0, MODAL_SAVE, MODAL_DISCARD, MODAL_CANCEL };
 static int s_modal_action;
 
+/* Inline rename edit (F1): one active at a time. kind 0 none / 1 atlas / 2 sprite. */
+enum { EDIT_NONE = 0, EDIT_ATLAS, EDIT_SPRITE };
+static int s_edit_kind;
+static int s_edit_atlas;         /* atlas being renamed (EDIT_ATLAS) */
+static char s_edit_sprite[192];  /* atlas-relative sprite name being renamed (EDIT_SPRITE) */
+static char s_edit_buf[192];     /* the input buffer */
+
 /* Pack-button state cached for the tooltip pass (declared at root). */
 static bool s_pack_has_sources, s_pack_stale;
+static float s_content_w = 1280.0F; /* logical content width, for caption/status truncation */
 
 /* Flattened sprite rows for the current atlas, rebuilt each frame. */
 #define MAX_ROWS 4096
@@ -221,11 +257,22 @@ typedef struct sprite_row {
     int indent;
     bool is_source;
     bool is_folder;
-    char label[160];
+    bool missing;             /* source path gone from disk (§3.7) */
+    char label[224];          /* display label (rename-aware: "final (file.png)") */
+    char sprite_name[192];    /* atlas-relative override key ("" for folders / missing) */
     char abs[512];
 } sprite_row;
 static sprite_row s_rows[MAX_ROWS];
 static int s_row_count;
+
+/* Per-frame collected row tooltips for TRUNCATED labels (full text on hover). */
+#define MAX_ROW_TIPS 96
+typedef struct row_tip {
+    uint32_t id;
+    char full[224];
+} row_tip;
+static row_tip s_row_tips[MAX_ROW_TIPS];
+static int s_row_tip_count;
 // #endregion
 
 // #region small helpers
@@ -274,6 +321,97 @@ static void reset_selection(void) {
     s_sel_src = -1;
     s_sel_child = -1;
     s_sel_abs[0] = '\0';
+    s_sel_missing = false;
+}
+
+static void cancel_edit(void) {
+    s_edit_kind = EDIT_NONE;
+    s_edit_atlas = -1;
+    s_edit_sprite[0] = '\0';
+    s_edit_buf[0] = '\0';
+}
+
+/* Truncate `src` with a trailing "..." so its rendered width at `size` fits `max_w` px.
+ * Uniform font per row (no per-row shrink); returns true when it truncated. Font must be
+ * bound (only called on the render path). */
+static bool truncate_to_width(const char *src, float size, float max_w, char *out, size_t cap) {
+    (void)snprintf(out, cap, "%s", src);
+    if (max_w <= 1.0F || !s_font_bound) {
+        return false;
+    }
+    const size_t n = strlen(out);
+    if (nt_font_measure_n(s_font, out, n, size, 0.0F).width <= max_w) {
+        return false;
+    }
+    const float ell_w = nt_font_measure_n(s_font, "...", 3U, size, 0.0F).width;
+    if (ell_w >= max_w) {
+        (void)snprintf(out, cap, "...");
+        return true;
+    }
+    size_t len = n;
+    while (len > 0U) {
+        /* keep UTF-8 codepoints whole */
+        while (len > 0U && ((unsigned char)out[len - 1U] & 0xC0U) == 0x80U) {
+            len--;
+        }
+        if (len > 0U) {
+            len--;
+        }
+        if (nt_font_measure_n(s_font, out, len, size, 0.0F).width + ell_w <= max_w) {
+            break;
+        }
+    }
+    (void)snprintf(out + len, cap - len, "...");
+    return true;
+}
+
+/* Left-panel available text width for a row at `indent_px`, minus an optional [x] button. */
+static float left_row_text_w(float indent_px, bool has_x) {
+    float w = S(BASE_LEFT_PANEL_W - 24.0F) - indent_px - S(4.0F) - S(4.0F);
+    if (has_x) {
+        w -= S(24.0F + 4.0F);
+    }
+    return (w < S(20.0F)) ? S(20.0F) : w;
+}
+
+static void record_row_tip(uint32_t id, const char *full) {
+    if (s_row_tip_count >= MAX_ROW_TIPS) {
+        return;
+    }
+    s_row_tips[s_row_tip_count].id = id;
+    (void)snprintf(s_row_tips[s_row_tip_count].full, sizeof s_row_tips[0].full, "%s", full);
+    s_row_tip_count++;
+}
+
+/* Atlas-name validation (F1): non-empty, unique among atlases, and normalization-safe
+ * (no path separators, not dots-only). Fills `err` on failure. */
+static bool atlas_name_valid(const char *name, int self_idx, char *err, size_t cap) {
+    if (!name || name[0] == '\0') {
+        (void)snprintf(err, cap, "Atlas name cannot be empty");
+        return false;
+    }
+    bool only_dots = true;
+    for (const char *c = name; *c; c++) {
+        if (*c == '/' || *c == '\\') {
+            (void)snprintf(err, cap, "Atlas name cannot contain / or \\");
+            return false;
+        }
+        if (*c != '.') {
+            only_dots = false;
+        }
+    }
+    if (only_dots) {
+        (void)snprintf(err, cap, "Atlas name cannot be dots-only");
+        return false;
+    }
+    tp_project *p = gui_project_get();
+    for (int i = 0; p && i < p->atlas_count; i++) {
+        if (i != self_idx && strcmp(p->atlases[i].name, name) == 0) {
+            (void)snprintf(err, cap, "Atlas '%s' already exists", name);
+            return false;
+        }
+    }
+    return true;
 }
 
 static void clamp_selection(void) {
@@ -308,8 +446,13 @@ static void do_open(void) {
     if (!path) {
         return;
     }
+    if (!gui_scan_exists(path)) {
+        set_statusf("project not found: %s", path); /* never fatal (F6b) */
+        return;
+    }
     char err[256];
     if (gui_project_open(path, err, sizeof err) == TP_STATUS_OK) {
+        cancel_edit();
         clamp_selection();
         reset_selection();
         set_statusf("Opened %s", gui_project_display_name());
@@ -357,6 +500,7 @@ static void do_add_files(void) {
     char buf[8192];
     (void)snprintf(buf, sizeof buf, "%s", res);
     int added = 0;
+    int dup = 0;
     char *start = buf;
     for (;;) {
         char *bar = strchr(start, '|');
@@ -365,8 +509,11 @@ static void do_add_files(void) {
         }
         if (start[0] != '\0') {
             normalize_slashes(start);
-            if (gui_project_add_source(s_sel_atlas, start)) {
+            const gui_add_status r = gui_project_add_source(s_sel_atlas, start);
+            if (r == GUI_ADD_ADDED) {
                 added++;
+            } else if (r == GUI_ADD_DUPLICATE) {
+                dup++;
             }
         }
         if (!bar) {
@@ -374,7 +521,11 @@ static void do_add_files(void) {
         }
         start = bar + 1;
     }
-    set_statusf("Added %d file source(s) to %s", added, "the atlas");
+    if (dup > 0) {
+        set_statusf("Added %d file source(s); %d already added", added, dup);
+    } else {
+        set_statusf("Added %d file source(s)", added);
+    }
 }
 
 static void do_add_folder(void) {
@@ -385,8 +536,11 @@ static void do_add_folder(void) {
     char norm[600];
     (void)snprintf(norm, sizeof norm, "%s", dir);
     normalize_slashes(norm);
-    if (gui_project_add_source(s_sel_atlas, norm)) {
+    const gui_add_status r = gui_project_add_source(s_sel_atlas, norm);
+    if (r == GUI_ADD_ADDED) {
         set_statusf("Added folder %s", path_last(norm));
+    } else if (r == GUI_ADD_DUPLICATE) {
+        set_statusf("already added: %s", path_last(norm));
     } else {
         set_status("Add folder failed.");
     }
@@ -400,6 +554,7 @@ static void request_new(void) {
         s_confirm_open = true;
     } else {
         gui_project_new();
+        cancel_edit();
         clamp_selection();
         reset_selection();
         set_status("New project.");
@@ -416,6 +571,7 @@ static void request_exit(void) {
 static void confirm_perform(void) {
     if (s_after_confirm == AFTER_NEW) {
         gui_project_new();
+        cancel_edit();
         clamp_selection();
         reset_selection();
         set_status("New project.");
@@ -423,6 +579,160 @@ static void confirm_perform(void) {
         nt_app_quit();
     }
     s_after_confirm = AFTER_NONE;
+}
+// #endregion
+
+// #region undo/redo + refresh actions
+static void do_undo(void) {
+    if (gui_project_undo()) {
+        cancel_edit();
+        clamp_selection();
+        reset_selection();
+        gui_canvas_invalidate(&s_canvas);
+        set_statusf("Undo (undo:%d redo:%d)", gui_history_undo_depth(), gui_history_redo_depth());
+    } else {
+        set_status("Nothing to undo.");
+    }
+}
+static void do_redo(void) {
+    if (gui_project_redo()) {
+        cancel_edit();
+        clamp_selection();
+        reset_selection();
+        gui_canvas_invalidate(&s_canvas);
+        set_statusf("Redo (undo:%d redo:%d)", gui_history_undo_depth(), gui_history_redo_depth());
+    } else {
+        set_status("Nothing to redo.");
+    }
+}
+
+/* Fingerprint every source (folders expand to their scanned children, files stat
+ * directly) so a Refresh can diff added/removed/changed. Missing entries carry
+ * size==-1 so a vanish/restore reads as removed/added. */
+typedef struct fp_entry {
+    char abs[512];
+    long long size;
+    long long mtime;
+} fp_entry;
+
+static void fp_collect(fp_entry **arr, int *count, int *cap) {
+    tp_project *p = gui_project_get();
+    for (int ai = 0; p && ai < p->atlas_count; ai++) {
+        const tp_project_atlas *a = &p->atlases[ai];
+        for (int si = 0; si < a->source_count; si++) {
+            char abs[512];
+            if (tp_project_resolve_path(p, a->sources[si], abs, sizeof abs) != TP_STATUS_OK) {
+                continue;
+            }
+            if (gui_scan_is_dir(abs)) {
+                const gui_scan_result *sc = gui_scan_get(abs);
+                for (int ci = 0; ci < sc->count; ci++) {
+                    if (*count == *cap) {
+                        int nc = *cap ? *cap * 2 : 64;
+                        fp_entry *ne = (fp_entry *)realloc(*arr, (size_t)nc * sizeof *ne);
+                        if (!ne) {
+                            return;
+                        }
+                        *arr = ne;
+                        *cap = nc;
+                    }
+                    (void)snprintf((*arr)[*count].abs, sizeof (*arr)[0].abs, "%s", sc->entries[ci].abs);
+                    (*arr)[*count].size = sc->entries[ci].size;
+                    (*arr)[*count].mtime = sc->entries[ci].mtime;
+                    (*count)++;
+                }
+            } else {
+                if (*count == *cap) {
+                    int nc = *cap ? *cap * 2 : 64;
+                    fp_entry *ne = (fp_entry *)realloc(*arr, (size_t)nc * sizeof *ne);
+                    if (!ne) {
+                        return;
+                    }
+                    *arr = ne;
+                    *cap = nc;
+                }
+                long long sz = -1;
+                long long mt = -1;
+                (void)gui_scan_stat(abs, &sz, &mt);
+                (void)snprintf((*arr)[*count].abs, sizeof (*arr)[0].abs, "%s", abs);
+                (*arr)[*count].size = sz;
+                (*arr)[*count].mtime = mt;
+                (*count)++;
+            }
+        }
+    }
+}
+
+static const fp_entry *fp_find(const fp_entry *arr, int n, const char *abs) {
+    for (int i = 0; i < n; i++) {
+        if (strcmp(arr[i].abs, abs) == 0) {
+            return &arr[i];
+        }
+    }
+    return NULL;
+}
+
+/* F4: rescan all sources, diff, evict the canvas cache, mark preview stale (NOT dirty). */
+static void do_refresh(void) {
+    fp_entry *before = NULL;
+    int bn = 0;
+    int bc = 0;
+    fp_collect(&before, &bn, &bc);
+
+    gui_scan_invalidate_all(); /* drop per-dir caches so fp_collect below rescans disk */
+
+    fp_entry *after = NULL;
+    int an = 0;
+    int ac = 0;
+    fp_collect(&after, &an, &ac);
+
+    int added = 0;
+    int removed = 0;
+    int changed = 0;
+    for (int i = 0; i < an; i++) {
+        const fp_entry *b = fp_find(before, bn, after[i].abs);
+        if (!b) {
+            added++;
+        } else if (b->size != after[i].size || b->mtime != after[i].mtime) {
+            changed++;
+        }
+    }
+    for (int i = 0; i < bn; i++) {
+        if (!fp_find(after, an, before[i].abs)) {
+            removed++;
+        }
+    }
+    free(before);
+    free(after);
+
+    gui_canvas_invalidate(&s_canvas); /* force the shown image to reload (or show missing) */
+    gui_project_mark_stale();         /* disk changed -> preview stale, project NOT dirtied */
+    set_statusf("Refresh: +%d new, %d removed, %d changed", added, removed, changed);
+}
+// #endregion
+
+// #region inline rename commit
+static void commit_atlas_rename(void) {
+    char err[128];
+    if (!atlas_name_valid(s_edit_buf, s_edit_atlas, err, sizeof err)) {
+        set_status(err); /* keep editing on invalid input */
+        return;
+    }
+    if (gui_project_set_atlas_name(s_edit_atlas, s_edit_buf)) {
+        set_statusf("Renamed atlas to '%s'", s_edit_buf);
+    }
+    cancel_edit();
+}
+static void commit_sprite_rename(void) {
+    /* empty input clears the override back to the file-derived name */
+    if (gui_project_set_sprite_rename(s_sel_atlas, s_edit_sprite, s_edit_buf)) {
+        if (s_edit_buf[0] == '\0') {
+            set_statusf("Cleared rename on '%s'", s_edit_sprite);
+        } else {
+            set_statusf("Renamed '%s' -> '%s'", s_edit_sprite, s_edit_buf);
+        }
+    }
+    cancel_edit();
 }
 // #endregion
 
@@ -471,23 +781,49 @@ static void apply_pending(void) {
     if (s_pending_remove_source >= 0) {
         gui_project_remove_source(s_sel_atlas, s_pending_remove_source);
         reset_selection();
-        set_status("Removed source (no undo -- v1).");
+        set_status("Removed source (Ctrl+Z to undo).");
     }
     if (s_pending_remove_atlas >= 0) {
         gui_project_remove_atlas(s_pending_remove_atlas);
         clamp_selection();
         reset_selection();
-        set_status("Removed atlas (no undo -- v1).");
+        set_status("Removed atlas (Ctrl+Z to undo).");
+    }
+    if (s_pending_refresh) {
+        do_refresh();
     }
 
     s_pending_open = s_pending_save = s_pending_save_as = false;
     s_pending_add_files = s_pending_add_folder = s_pending_add_atlas = false;
+    s_pending_refresh = false;
     s_pending_remove_source = -1;
     s_pending_remove_atlas = -1;
 }
 // #endregion
 
 // #region row model
+/* Strip only a trailing extension on the basename, keeping any folder prefix (so a
+ * folder child's override key is atlas-relative, e.g. "tank/walk_01"). */
+static void strip_ext(const char *in, char *out, size_t cap) {
+    (void)snprintf(out, cap, "%s", in);
+    char *dot = strrchr(out, '.');
+    char *slash = strrchr(out, '/');
+    if (dot && dot != out && (!slash || dot > slash)) {
+        *dot = '\0';
+    }
+}
+
+/* Rename-aware display label: a renamed sprite shows "final (file.png)" so the mapping
+ * stays visible; otherwise the file-derived base label. */
+static void row_display(tp_project_atlas *a, const char *sprite_name, const char *base_label, const char *paren, char *out, size_t cap) {
+    const tp_project_sprite *ov = tp_project_atlas_find_sprite(a, sprite_name);
+    if (ov && ov->rename) {
+        (void)snprintf(out, cap, "%s (%s)", ov->rename, paren);
+    } else {
+        (void)snprintf(out, cap, "%s", base_label);
+    }
+}
+
 static void build_rows(tp_project *proj, tp_project_atlas *a) {
     s_row_count = 0;
     if (!a) {
@@ -499,7 +835,8 @@ static void build_rows(tp_project *proj, tp_project_atlas *a) {
         if (tp_project_resolve_path(proj, sp, abs, sizeof abs) != TP_STATUS_OK) {
             abs[0] = '\0';
         }
-        const bool is_dir = gui_scan_is_dir(abs);
+        const bool exists = gui_scan_exists(abs);
+        const bool is_dir = exists && gui_scan_is_dir(abs);
         sprite_row *r = &s_rows[s_row_count++];
         memset(r, 0, sizeof *r);
         r->src = si;
@@ -507,7 +844,11 @@ static void build_rows(tp_project *proj, tp_project_atlas *a) {
         r->is_source = true;
         r->is_folder = is_dir;
         r->indent = 0;
-        if (is_dir) {
+        if (!exists) { /* missing source: row stays, warning badge, selectable (§3.7) */
+            r->missing = true;
+            (void)snprintf(r->label, sizeof r->label, "(!) %s", path_last(sp));
+            (void)snprintf(r->abs, sizeof r->abs, "%s", abs);
+        } else if (is_dir) {
             (void)snprintf(r->label, sizeof r->label, "%s/", path_last(sp));
             r->abs[0] = '\0';
             const gui_scan_result *sc = gui_scan_get(abs);
@@ -518,11 +859,15 @@ static void build_rows(tp_project *proj, tp_project_atlas *a) {
                 cr->child = ci;
                 cr->is_source = false;
                 cr->indent = 1;
-                (void)snprintf(cr->label, sizeof cr->label, "%s", sc->entries[ci].rel);
+                strip_ext(sc->entries[ci].rel, cr->sprite_name, sizeof cr->sprite_name);
+                row_display(a, cr->sprite_name, sc->entries[ci].rel, path_last(sc->entries[ci].rel), cr->label, sizeof cr->label);
                 (void)snprintf(cr->abs, sizeof cr->abs, "%s", sc->entries[ci].abs);
             }
-        } else {
-            path_stem(sp, r->label, sizeof r->label);
+        } else { /* file source: a leaf sprite */
+            char stem[192];
+            path_stem(sp, stem, sizeof stem);
+            (void)snprintf(r->sprite_name, sizeof r->sprite_name, "%s", stem);
+            row_display(a, r->sprite_name, stem, path_last(sp), r->label, sizeof r->label);
             (void)snprintf(r->abs, sizeof r->abs, "%s", abs);
         }
     }
@@ -571,19 +916,34 @@ static void ensure_ids(void) {
     }
     s_id_btn_pack = nt_ui_id("ntpacker/btn_pack");
     s_id_btn_export = nt_ui_id("ntpacker/btn_export");
+    s_id_btn_refresh = nt_ui_id("ntpacker/btn_refresh");
     s_id_vlist = nt_ui_id("ntpacker/sprite_vlist");
     s_id_modal = nt_ui_id("ntpacker/confirm_modal");
+    s_id_about = nt_ui_id("ntpacker/about_modal");
+    s_id_rename = nt_ui_id("ntpacker/rename_input");
     s_id_mb_file = nt_ui_id("ntpacker/mb_file");
+    s_id_mb_edit = nt_ui_id("ntpacker/mb_edit");
     s_id_mb_view = nt_ui_id("ntpacker/mb_view");
     s_id_mb_help = nt_ui_id("ntpacker/mb_help");
     s_id_menu_file = nt_ui_id("ntpacker/menu_file");
+    s_id_menu_edit = nt_ui_id("ntpacker/menu_edit");
     s_id_menu_view = nt_ui_id("ntpacker/menu_view");
     s_id_menu_help = nt_ui_id("ntpacker/menu_help");
+    s_id_ctx_menu = nt_ui_id("ntpacker/ctx_menu");
 
     s_menu_style = nt_ui_menu_style_defaults();
     s_menu_style.icon_size = 0U;
     s_modal_style = nt_ui_modal_style_defaults();
     s_tip_style = nt_ui_tooltip_style_defaults();
+
+    s_rename_input = nt_ui_input_style_defaults();
+    s_rename_input.text.font_id = 0;
+    s_rename_input.text.color = (Clay_Color){225.0F, 228.0F, 235.0F, 255.0F};
+    s_rename_input.placeholder.font_id = 0;
+    s_rename_input.placeholder.color = (Clay_Color){120.0F, 126.0F, 138.0F, 255.0F};
+    s_rename_input.skin[NT_UI_INPUT_IDLE].bg_color = 0xFF2A2E38U;
+    s_rename_input.skin[NT_UI_INPUT_FOCUSED].bg_color = 0xFF343A46U;
+    s_rename_input.skin[NT_UI_INPUT_FOCUSED].border_color = 0xFFA0764AU;
     s_ids_ready = true;
 }
 
@@ -603,6 +963,12 @@ static void apply_ui_scale(void) {
     g_canvas_hint.font_size = S(FS_HINT);
     g_tag = g_tag_base;
     g_tag.font_size = S(FS_TAG);
+    g_warn = g_warn_base;
+    g_warn.font_size = S(FS_ROW);
+
+    s_rename_input.text.font_size = S(FS_ROW);
+    s_rename_input.placeholder.font_size = S(FS_ROW);
+    s_rename_input.pad_x = S(6.0F);
 
     s_menu_style.font_size = S(15.0F);
     s_menu_style.item_height = Su(28.0F);
@@ -645,30 +1011,60 @@ static bool ui_btn(nt_ui_context_t *ctx, uint32_t id, const char *text, nt_ui_bu
     nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), text, lbl);
     return nt_ui_button_end(ctx) && enabled;
 }
+
+/* Ellipsis-truncated label so text never draws past `max_w`; records a hover tooltip
+ * (full text) against `tip_id` when it truncated (tip_id 0 = no tooltip). */
+static void ui_label_fit(nt_ui_context_t *ctx, const char *text, const nt_ui_label_style_t *lbl, float max_w, uint32_t tip_id) {
+    char buf[256];
+    const bool cut = truncate_to_width(text, lbl->font_size, max_w, buf, sizeof buf);
+    nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), buf, lbl);
+    if (cut && tip_id != 0U) {
+        record_row_tip(tip_id, text);
+    }
+}
 // #endregion
 
 // #region menu bar
-static void close_all_menus(void) {
+static void close_menubar_menus(void) {
     s_file_state.open = false;
+    s_edit_state.open = false;
     s_view_state.open = false;
     s_help_state.open = false;
 }
+static void close_all_menus(void) {
+    close_menubar_menus();
+    s_ctx_state.open = false;
+}
 static void file_items(nt_ui_menu_ctx_t *m) {
-    if (nt_ui_menu_item(m, MK_NEW, "New")) {
+    if (nt_ui_menu_item_ex(m, MK_NEW, "New", (nt_ui_menu_item_opts_t){.shortcut = "Ctrl+N"})) {
         request_new();
     }
-    if (nt_ui_menu_item(m, MK_OPEN, "Open...")) {
+    if (nt_ui_menu_item_ex(m, MK_OPEN, "Open...", (nt_ui_menu_item_opts_t){.shortcut = "Ctrl+O"})) {
         s_pending_open = true;
     }
-    if (nt_ui_menu_item(m, MK_SAVE, "Save")) {
+    if (nt_ui_menu_item_ex(m, MK_SAVE, "Save", (nt_ui_menu_item_opts_t){.shortcut = "Ctrl+S"})) {
         s_pending_save = true;
     }
-    if (nt_ui_menu_item(m, MK_SAVEAS, "Save As...")) {
+    if (nt_ui_menu_item_ex(m, MK_SAVEAS, "Save As...", (nt_ui_menu_item_opts_t){.shortcut = "Ctrl+Shift+S"})) {
         s_pending_save_as = true;
+    }
+    nt_ui_menu_separator(m);
+    if (nt_ui_menu_item_ex(m, MK_REFRESH, "Refresh", (nt_ui_menu_item_opts_t){.shortcut = "F5"})) {
+        s_pending_refresh = true;
     }
     nt_ui_menu_separator(m);
     if (nt_ui_menu_item(m, MK_EXIT, "Exit")) {
         request_exit();
+    }
+}
+static void edit_items(nt_ui_menu_ctx_t *m) {
+    nt_ui_menu_item_opts_t u = {.shortcut = "Ctrl+Z", .disabled = !gui_project_can_undo()};
+    if (nt_ui_menu_item_ex(m, MK_UNDO, "Undo", u)) {
+        do_undo();
+    }
+    nt_ui_menu_item_opts_t r = {.shortcut = "Ctrl+Y", .disabled = !gui_project_can_redo()};
+    if (nt_ui_menu_item_ex(m, MK_REDO, "Redo", r)) {
+        do_redo();
     }
 }
 /* Radio-style UI-scale item. The ASCII font has no check glyph, so the active one is marked
@@ -700,7 +1096,7 @@ static void view_items(nt_ui_menu_ctx_t *m) {
 }
 static void help_items(nt_ui_menu_ctx_t *m) {
     if (nt_ui_menu_item(m, MK_ABOUT, "About")) {
-        set_status("ntpacker -- Neotolis Texture Packer. Project editor; packing blocked by engine #282.");
+        s_about_open = true; /* opens the real modal (F6a) */
     }
 }
 static void menubar_entry(nt_ui_context_t *ctx, uint32_t btn_id, const char *label, nt_ui_menu_state_t *st) {
@@ -730,6 +1126,7 @@ static void declare_menubar(nt_ui_context_t *ctx) {
           .backgroundColor = C_STATUS,
           .cornerRadius = CLAY_CORNER_RADIUS(S(6))}) {
         menubar_entry(ctx, s_id_mb_file, "File", &s_file_state);
+        menubar_entry(ctx, s_id_mb_edit, "Edit", &s_edit_state);
         menubar_entry(ctx, s_id_mb_view, "View", &s_view_state);
         menubar_entry(ctx, s_id_mb_help, "Help", &s_help_state);
         /* right side: project name + dirty dot */
@@ -763,11 +1160,58 @@ static void declare_toolbar(nt_ui_context_t *ctx) {
         if (ui_btn(ctx, s_id_btn_export, "Export All", &g_btn, s_pack_has_sources, 122.0F, 36.0F, &g_body)) {
             set_status("Exporters land in Phase 2.");
         }
+        if (ui_btn(ctx, s_id_btn_refresh, "Refresh", &g_btn_ghost, true, 100.0F, 36.0F, &g_body)) {
+            s_pending_refresh = true;
+        }
     }
 }
 // #endregion
 
 // #region left panel (atlases + sprites)
+static const nt_ui_input_props_t s_rename_props = {
+    .placeholder = "name", .allow = NULL, .max_length = 0U, .keyboard = NT_UI_KB_TEXT, .password = false};
+static const nt_ui_events_cfg_t s_dbl_cfg = {.long_press_secs = 0.0F, .double_click = true};
+
+static void start_atlas_edit(int i) {
+    tp_project *p = gui_project_get();
+    if (!p || i < 0 || i >= p->atlas_count) {
+        return;
+    }
+    cancel_edit();
+    s_edit_kind = EDIT_ATLAS;
+    s_edit_atlas = i;
+    (void)snprintf(s_edit_buf, sizeof s_edit_buf, "%s", p->atlases[i].name);
+    set_status("Rename atlas: type, Enter to commit, Esc to cancel.");
+}
+static void start_sprite_edit_named(const char *sprite_name) {
+    if (!sprite_name || sprite_name[0] == '\0') {
+        return;
+    }
+    tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
+    cancel_edit();
+    s_edit_kind = EDIT_SPRITE;
+    (void)snprintf(s_edit_sprite, sizeof s_edit_sprite, "%s", sprite_name);
+    const tp_project_sprite *ov = a ? tp_project_atlas_find_sprite(a, sprite_name) : NULL;
+    (void)snprintf(s_edit_buf, sizeof s_edit_buf, "%s", (ov && ov->rename) ? ov->rename : "");
+    set_status("Rename region: type, Enter to commit, Esc clears/cancels.");
+}
+static void start_sprite_edit(const sprite_row *row) {
+    if (!row || row->is_folder || row->missing || row->sprite_name[0] == '\0') {
+        return;
+    }
+    start_sprite_edit_named(row->sprite_name);
+}
+
+/* The single inline rename field, sized to fill its (bounded) parent so it clips to the row. */
+static bool render_rename_field(nt_ui_context_t *ctx) {
+    bool submitted = false;
+    const Clay_ElementDeclaration decl = {
+        .layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H - 5.0F))}}};
+    (void)nt_ui_input_text(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, s_id_rename, s_edit_buf, sizeof s_edit_buf,
+                           &s_rename_props, &s_rename_input, &decl, true, &submitted);
+    return submitted;
+}
+
 static void declare_atlas_list(nt_ui_context_t *ctx, tp_project *proj) {
     nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "ATLASES", &g_title);
     for (int i = 0; i < proj->atlas_count; i++) {
@@ -775,15 +1219,28 @@ static void declare_atlas_list(nt_ui_context_t *ctx, tp_project *proj) {
         (void)snprintf(idbuf, sizeof idbuf, "ntpacker/atlas_row_%d", i);
         const uint32_t row_id = nt_ui_id(idbuf);
         const uint32_t x_id = nt_ui_child_id(row_id, "x");
+        const bool editing = (s_edit_kind == EDIT_ATLAS && s_edit_atlas == i);
         const bool selected = (i == s_sel_atlas);
-        const nt_ui_events_t ev = nt_ui_events(ctx, row_id, NULL);
+        const nt_ui_events_t ev = nt_ui_events(ctx, row_id, &s_dbl_cfg);
         const nt_ui_events_t xev = nt_ui_events(ctx, x_id, NULL);
         if (xev.clicked) {
             s_pending_remove_atlas = i;
+        } else if (ev.double_clicked) {
+            start_atlas_edit(i);
         } else if (ev.clicked && i != s_sel_atlas) {
             s_sel_atlas = i;
             reset_selection();
+            cancel_edit();
         }
+        if (nt_ui_menu_open_trigger(ctx, s_id_ctx_menu, row_id, false, &s_ctx_state)) {
+            close_menubar_menus();
+            s_sel_atlas = i; /* right-click selects the row first */
+            reset_selection();
+            cancel_edit();
+            s_ctx_kind = CTX_ATLAS;
+            s_ctx_atlas = i;
+        }
+        const bool has_x = (proj->atlas_count > 1);
         const Clay_Color bg = selected ? C_SEL : (ev.hovered ? C_HOVER : C_TRANSPARENT);
         CLAY({.id = {.id = row_id},
               .layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H))},
@@ -793,9 +1250,15 @@ static void declare_atlas_list(nt_ui_context_t *ctx, tp_project *proj) {
               .backgroundColor = bg,
               .cornerRadius = CLAY_CORNER_RADIUS(S(4))}) {
             CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
-                nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), proj->atlases[i].name, &g_row);
+                if (editing) {
+                    if (render_rename_field(ctx)) {
+                        commit_atlas_rename();
+                    }
+                } else {
+                    ui_label_fit(ctx, proj->atlases[i].name, &g_row, left_row_text_w(S(8.0F), has_x), row_id);
+                }
             }
-            if (proj->atlas_count > 1) {
+            if (has_x) {
                 (void)ui_btn(ctx, x_id, "x", &g_btn_ghost, true, 24.0F, 22.0F, &g_caption);
             }
         }
@@ -834,9 +1297,11 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
             const uint32_t row_id = nt_ui_vlist_item_id(ctx, i);
             const uint32_t hit_id = nt_ui_child_id(row_id, "hit");
             const uint32_t x_id = nt_ui_child_id(row_id, "x");
+            const bool editing = (s_edit_kind == EDIT_SPRITE && row->sprite_name[0] != '\0' &&
+                                  strcmp(s_edit_sprite, row->sprite_name) == 0);
             const bool selected = (row->is_source ? (s_sel_src == row->src && s_sel_child == -1)
                                                   : (s_sel_src == row->src && s_sel_child == row->child));
-            const nt_ui_events_t ev = nt_ui_events(ctx, hit_id, NULL);
+            const nt_ui_events_t ev = nt_ui_events(ctx, hit_id, &s_dbl_cfg);
             bool x_clicked = false;
             if (row->is_source) {
                 const nt_ui_events_t xev = nt_ui_events(ctx, x_id, NULL);
@@ -845,13 +1310,33 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
                     s_pending_remove_source = row->src;
                 }
             }
-            if (ev.clicked && !x_clicked) {
+            if (ev.double_clicked && !row->is_folder && !row->missing) {
                 s_sel_src = row->src;
                 s_sel_child = row->child;
+                s_sel_missing = false;
                 (void)snprintf(s_sel_abs, sizeof s_sel_abs, "%s", row->abs);
+                start_sprite_edit(row);
+            } else if (ev.clicked && !x_clicked) {
+                s_sel_src = row->src;
+                s_sel_child = row->child;
+                s_sel_missing = row->missing;
+                (void)snprintf(s_sel_abs, sizeof s_sel_abs, "%s", row->abs);
+            }
+            if (nt_ui_menu_open_trigger(ctx, s_id_ctx_menu, hit_id, false, &s_ctx_state)) {
+                close_menubar_menus();
+                s_sel_src = row->src; /* right-click selects the row first */
+                s_sel_child = row->child;
+                s_sel_missing = row->missing;
+                (void)snprintf(s_sel_abs, sizeof s_sel_abs, "%s", row->abs);
+                s_ctx_kind = CTX_SPRITE;
+                s_ctx_src = row->src;
+                (void)snprintf(s_ctx_sprite, sizeof s_ctx_sprite, "%s", row->sprite_name);
+                s_ctx_leaf = (!row->is_folder && !row->missing && row->sprite_name[0] != '\0');
+                s_ctx_removable = row->is_source;
             }
             const Clay_Color bg = selected ? C_SEL : (ev.hovered ? C_HOVER : C_TRANSPARENT);
             const uint16_t indent = Su(8.0F + ((float)row->indent * 16.0F));
+            const nt_ui_label_style_t *lbl = row->missing ? &g_warn : (row->is_folder ? &g_body : &g_row);
             CLAY({.id = {.id = row_id},
                   .layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H))},
                              .padding = {indent, Su(4), 0, 0},
@@ -861,7 +1346,13 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
                   .cornerRadius = CLAY_CORNER_RADIUS(S(4))}) {
                 CLAY({.id = {.id = hit_id},
                       .layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
-                    nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), row->label, row->is_folder ? &g_body : &g_row);
+                    if (editing) {
+                        if (render_rename_field(ctx)) {
+                            commit_sprite_rename();
+                        }
+                    } else {
+                        ui_label_fit(ctx, row->label, lbl, left_row_text_w(S(8.0F + (float)row->indent * 16.0F), row->is_source), hit_id);
+                    }
                 }
                 if (row->is_source) {
                     (void)ui_btn(ctx, x_id, "x", &g_btn_ghost, true, 24.0F, 22.0F, &g_caption);
@@ -874,6 +1365,7 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
 
 static void declare_left_panel(nt_ui_context_t *ctx) {
     tp_project *proj = gui_project_get();
+    s_row_tip_count = 0; /* per-frame; filled by ui_label_fit when a row truncates */
     CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(S(BASE_LEFT_PANEL_W)), CLAY_SIZING_GROW(0)},
                      .padding = {Su(12), Su(12), Su(12), Su(12)},
                      .layoutDirection = CLAY_TOP_TO_BOTTOM,
@@ -887,6 +1379,13 @@ static void declare_left_panel(nt_ui_context_t *ctx) {
         declare_sprite_list(ctx);
     }
 }
+
+/* Emit hover tooltips (full text) for the truncated rows collected this frame. */
+static void declare_row_tooltips(nt_ui_context_t *ctx) {
+    for (int i = 0; i < s_row_tip_count; i++) {
+        (void)nt_ui_tooltip(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, s_row_tips[i].id, s_row_tips[i].full, &s_tip_style);
+    }
+}
 // #endregion
 
 // #region canvas
@@ -896,9 +1395,12 @@ static void declare_canvas(nt_ui_context_t *ctx) {
     if (has_img) {
         (void)snprintf(label, sizeof label, "%s  --  %d x %d", path_last(s_sel_abs), gui_canvas_img_w(&s_canvas),
                        gui_canvas_img_h(&s_canvas));
+    } else if (s_sel_missing) {
+        (void)snprintf(label, sizeof label, "file missing: %s", s_sel_abs);
     } else {
         (void)snprintf(label, sizeof label, "No image selected");
     }
+    const float cap_w = s_content_w - S(BASE_LEFT_PANEL_W) - S(60.0F);
 
     CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)},
                      .padding = {Su(10), Su(10), Su(10), Su(10)},
@@ -908,13 +1410,16 @@ static void declare_canvas(nt_ui_context_t *ctx) {
           .backgroundColor = C_CANVAS,
           .cornerRadius = CLAY_CORNER_RADIUS(S(8)),
           .border = {.color = C_BORDER, .width = {Su(1), Su(1), Su(1), Su(1), 0}}}) {
-        /* view area: the custom-drawn source image, OR placeholder + the stale tag */
+        /* view area: the custom-drawn source image, OR a missing/placeholder + the stale tag */
         CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)},
                          .layoutDirection = CLAY_TOP_TO_BOTTOM,
                          .childGap = Su(8),
                          .childAlignment = {CLAY_ALIGN_X_CENTER, CLAY_ALIGN_Y_CENTER}}}) {
             if (has_img) {
                 nt_ui_custom(ctx, NT_UI_DATA_LAYER(LAYER_IMG), &s_canvas);
+            } else if (s_sel_missing) {
+                ui_label_fit(ctx, label, &g_warn, cap_w, 0U);
+                nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Restore the file and press Refresh (F5) to bring it back.", &g_caption);
             } else {
                 /* atlas-preview placeholder -> the "outdated" tag lives here (not over a source view) */
                 if (s_pack_stale && s_pack_has_sources) {
@@ -927,7 +1432,7 @@ static void declare_canvas(nt_ui_context_t *ctx) {
             }
         }
         CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(22))}, .childAlignment = {CLAY_ALIGN_X_CENTER, CLAY_ALIGN_Y_CENTER}}}) {
-            nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), label, &g_caption);
+            ui_label_fit(ctx, label, &g_caption, cap_w, 0U);
         }
     }
 }
@@ -940,7 +1445,7 @@ static void declare_statusbar(nt_ui_context_t *ctx) {
                      .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}},
           .backgroundColor = C_STATUS,
           .cornerRadius = CLAY_CORNER_RADIUS(S(6))}) {
-        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), s_status, &g_caption);
+        ui_label_fit(ctx, s_status, &g_caption, s_content_w - S(40.0F), 0U); /* clip, never wrap/overflow */
     }
 }
 
@@ -948,6 +1453,9 @@ static void declare_menus(nt_ui_context_t *ctx) {
     nt_ui_menu_begin(&s_file_menu, ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, s_id_menu_file, &s_file_state, &s_menu_style);
     file_items(&s_file_menu);
     nt_ui_menu_end(&s_file_menu);
+    nt_ui_menu_begin(&s_edit_menu, ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, s_id_menu_edit, &s_edit_state, &s_menu_style);
+    edit_items(&s_edit_menu);
+    nt_ui_menu_end(&s_edit_menu);
     nt_ui_menu_begin(&s_view_menu, ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, s_id_menu_view, &s_view_state, &s_menu_style);
     view_items(&s_view_menu);
     nt_ui_menu_end(&s_view_menu);
@@ -956,13 +1464,44 @@ static void declare_menus(nt_ui_context_t *ctx) {
     nt_ui_menu_end(&s_help_menu);
 }
 
+/* Row right-click menu: same code paths as the [x] buttons / inline editors (§3.3e). Declared
+ * every frame (open or not); items no-op while closed. */
+static void declare_context_menu(nt_ui_context_t *ctx) {
+    nt_ui_menu_begin(&s_ctx_menu, ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, s_id_ctx_menu, &s_ctx_state, &s_menu_style);
+    if (s_ctx_kind == CTX_ATLAS) {
+        if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_RENAME, "Rename")) {
+            start_atlas_edit(s_ctx_atlas);
+        }
+        const tp_project *cp = gui_project_get();
+        nt_ui_menu_item_opts_t rm = {.disabled = (cp == NULL || cp->atlas_count <= 1)};
+        if (nt_ui_menu_item_ex(&s_ctx_menu, MK_CTX_REMOVE, "Remove", rm)) {
+            s_pending_remove_atlas = s_ctx_atlas;
+        }
+    } else if (s_ctx_kind == CTX_SPRITE) {
+        if (s_ctx_leaf) {
+            if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_RENAME, "Rename")) {
+                start_sprite_edit_named(s_ctx_sprite);
+            }
+        }
+        if (s_ctx_removable) {
+            if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_REMOVE, "Remove")) {
+                s_pending_remove_source = s_ctx_src;
+            }
+        }
+    }
+    nt_ui_menu_end(&s_ctx_menu);
+}
+
 static void declare_tooltips(nt_ui_context_t *ctx) {
     const char *pack_tip = s_pack_stale
-        ? "Pack: repack now with current settings and refresh the preview. Sources or settings changed -- press to repack. (Packing is blocked until engine fix #282 -- coming soon.)"
-        : "Pack: repack now with current settings (session preview only, no files exported). (Packing is blocked until engine fix #282 -- coming soon.)";
+        ? "Pack (Ctrl+P): repack now with current settings and refresh the preview. Sources or settings changed -- press to repack. (Packing is blocked until engine fix #282 -- coming soon.)"
+        : "Pack (Ctrl+P): repack now with current settings (session preview only, no files exported). (Packing is blocked until engine fix #282 -- coming soon.)";
     (void)nt_ui_tooltip(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, s_id_btn_pack, pack_tip, &s_tip_style);
     (void)nt_ui_tooltip(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, s_id_btn_export,
-                        "Export All: pack per enabled target and write each target's files to its output path. Exporters land in Phase 2.",
+                        "Export All (Ctrl+E): pack per enabled target and write each target's files to its output path. Exporters land in Phase 2.",
+                        &s_tip_style);
+    (void)nt_ui_tooltip(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, s_id_btn_refresh,
+                        "Refresh (F5): rescan all source folders/files from disk; updates the sprite list and marks the preview stale.",
                         &s_tip_style);
 }
 
@@ -992,6 +1531,31 @@ static void declare_confirm_modal(nt_ui_context_t *ctx) {
         nt_ui_modal_end(ctx);
     }
 }
+
+static void declare_about_modal(nt_ui_context_t *ctx) {
+    if (nt_ui_modal_visible(ctx, s_id_about, &s_modal_style, &s_about_open)) {
+        CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(S(460)), CLAY_SIZING_FIT(0)},
+                         .padding = {Su(24), Su(24), Su(22), Su(22)},
+                         .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                         .childGap = Su(10)},
+              .backgroundColor = C_PANEL,
+              .cornerRadius = CLAY_CORNER_RADIUS(S(8)),
+              .border = {.color = C_BORDER, .width = {Su(1), Su(1), Su(1), Su(1), 0}}}) {
+            nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "ntpacker-gui", &g_body);
+            nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Neotolis Texture Packer", &g_caption);
+            nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Version " NTPACKER_VERSION, &g_caption);
+            nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Engine: " NTPACKER_ENGINE_NAME, &g_caption);
+            nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), NTPACKER_REPO_URL, &g_caption);
+            CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(4))}}}) {}
+            CLAY({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+                if (ui_btn(ctx, nt_ui_id("ntpacker/about_ok"), "OK", &g_btn_accent, true, 100.0F, 34.0F, &g_body)) {
+                    s_about_open = false;
+                }
+            }
+        }
+        nt_ui_modal_end(ctx);
+    }
+}
 // #endregion
 
 // #region self-test (headless smoke of the project ops; OFF by default)
@@ -1012,6 +1576,7 @@ static void run_selftest(void) {
     gui_project_init();
     tp_project *p = gui_project_get();
     NT_ASSERT(p && p->atlas_count == 1);
+    (void)p;
 
     /* Absolute paths (from cwd=workspace) so they survive relativize-on-save + resolve-on-load. */
     char folder[512];
@@ -1019,13 +1584,12 @@ static void run_selftest(void) {
     to_abs("examples/defold-demo/examples/anim_trim/anims", folder, sizeof folder);
     to_abs("examples/defold-demo/examples/anim_trim/anims/sq1.png", file, sizeof file);
 
-    bool ok = gui_project_add_source(0, folder);
-    nt_log_info("SELFTEST: add folder source -> %d (dirty=%d stale=%d)", ok, gui_project_is_dirty(), gui_project_is_stale());
-    ok = gui_project_add_source(0, file);
-    nt_log_info("SELFTEST: add file source -> %d", ok);
-
-    const gui_scan_result *sc = gui_scan_get(folder);
-    nt_log_info("SELFTEST: folder scan found %d image(s)", sc->count);
+    const gui_add_status a1 = gui_project_add_source(0, folder);
+    nt_log_info("SELFTEST: add folder -> %d (dirty=%d stale=%d)", (int)a1, gui_project_is_dirty(), gui_project_is_stale());
+    const gui_add_status a2 = gui_project_add_source(0, file);
+    nt_log_info("SELFTEST: add file -> %d", (int)a2);
+    const gui_add_status a3 = gui_project_add_source(0, folder); /* dedupe (F6c): expect DUPLICATE(2) */
+    nt_log_info("SELFTEST: dedupe add folder again -> %d (expect %d)", (int)a3, (int)GUI_ADD_DUPLICATE);
 
     char err[256] = {0};
     const bool dec = gui_canvas_set_image(&s_canvas, file, err, sizeof err);
@@ -1037,25 +1601,137 @@ static void run_selftest(void) {
     nt_log_info("SELFTEST: save '%s' -> %s (dirty=%d)", save_path, tp_status_str(st), gui_project_is_dirty());
 
     st = gui_project_open(save_path, err, sizeof err);
-    tp_project *rp = gui_project_get();
-    const int nsrc = rp ? rp->atlases[0].source_count : -1;
-    nt_log_info("SELFTEST: reload -> %s, atlas0 sources=%d", tp_status_str(st), nsrc);
+    const int nsrc = gui_project_get() ? gui_project_get()->atlases[0].source_count : -1;
+    nt_log_info("SELFTEST: reload -> %s, atlas0 sources=%d (dirty=%d)", tp_status_str(st), nsrc, gui_project_is_dirty());
 
-    /* Leave a live selection so the auto-quit frames actually draw the decoded image (Task 5). */
-    if (rp && nsrc > 0) {
-        char resolved[512];
-        if (tp_project_resolve_path(rp, rp->atlases[0].sources[nsrc - 1], resolved, sizeof resolved) == TP_STATUS_OK) {
-            (void)snprintf(s_sel_abs, sizeof s_sel_abs, "%s", resolved);
-            s_sel_atlas = 0;
-            s_sel_src = nsrc - 1;
-            s_sel_child = -1;
+    /* --- rename atlas + undo/redo (verify model reverts and dirty recomputes) --- */
+    char name0[64];
+    (void)snprintf(name0, sizeof name0, "%s", gui_project_get()->atlases[0].name);
+    gui_project_set_atlas_name(0, "hero_atlas");
+    nt_log_info("SELFTEST: rename atlas '%s' -> '%s' (dirty=%d)", name0, gui_project_get()->atlases[0].name, gui_project_is_dirty());
+    const bool undone = gui_project_undo();
+    nt_log_info("SELFTEST: undo -> %d name='%s' (dirty=%d) [expect name reverted, dirty=0]", undone, gui_project_get()->atlases[0].name, gui_project_is_dirty());
+    const bool redone = gui_project_redo();
+    nt_log_info("SELFTEST: redo -> %d name='%s' (dirty=%d)", redone, gui_project_get()->atlases[0].name, gui_project_is_dirty());
+
+    /* --- rename a region (sprite override), verify it is stored on the model --- */
+    char folder_abs[512];
+    if (tp_project_resolve_path(gui_project_get(), gui_project_get()->atlases[0].sources[0], folder_abs, sizeof folder_abs) == TP_STATUS_OK) {
+        const gui_scan_result *sc = gui_scan_get(folder_abs);
+        nt_log_info("SELFTEST: folder scan found %d image(s)", sc->count);
+        if (sc->count > 0) {
+            char sprite[192];
+            (void)snprintf(sprite, sizeof sprite, "%s", sc->entries[0].rel);
+            char *dot = strrchr(sprite, '.');
+            if (dot) {
+                *dot = '\0';
+            }
+            gui_project_set_sprite_rename(0, sprite, "renamed_region");
+            tp_project_atlas *a0 = tp_project_get_atlas(gui_project_get(), 0);
+            const tp_project_sprite *ov = tp_project_atlas_find_sprite(a0, sprite);
+            nt_log_info("SELFTEST: rename region '%s' -> override='%s'", sprite, (ov && ov->rename) ? ov->rename : "(none)");
         }
     }
-    /* Exercise the scaled layout during the auto-quit frames (verifies no element/arena overflow). */
-    g_ui_scale = 1.5F;
-    nt_log_info("SELFTEST: end (canvas selection '%s'; forced UI scale 1.5 for render)", s_sel_abs);
+
+    /* --- save_buffer / load_buffer round-trip in-app --- */
+    char *bb = NULL;
+    size_t bl = 0;
+    tp_error be = {0};
+    const tp_status bst = tp_project_save_buffer(gui_project_get(), &bb, &bl, &be);
+    tp_project *lp = NULL;
+    tp_error le = {0};
+    const tp_status lst = (bst == TP_STATUS_OK) ? tp_project_load_buffer(bb, bl, &lp, &le) : bst;
+    nt_log_info("SELFTEST: save_buffer(%zuB)->%s; load_buffer->%s atlas0='%s'", bl, tp_status_str(bst), tp_status_str(lst),
+                (lp && lp->atlas_count > 0) ? lp->atlases[0].name : "(none)");
+    tp_project_destroy(lp);
+    free(bb);
+
+    /* --- refresh cycle: create + delete a temp png, observe the scan change --- */
+    char rdir[600];
+    char rfile[700];
+    (void)snprintf(rdir, sizeof rdir, "%s/selftest_refresh", s_exe_dir);
+#ifdef _WIN32
+    (void)CreateDirectoryA(rdir, NULL);
+#endif
+    (void)snprintf(rfile, sizeof rfile, "%s/temp.png", rdir);
+    FILE *tf = fopen(rfile, "wb");
+    if (tf) {
+        (void)fputs("PNGDATA", tf);
+        (void)fclose(tf);
+    }
+    gui_scan_invalidate_all();
+    const int before_n = gui_scan_get(rdir)->count;
+    (void)remove(rfile);
+    gui_scan_invalidate_all();
+    const int after_n = gui_scan_get(rdir)->count;
+    nt_log_info("SELFTEST: refresh cycle temp png before=%d after=%d (removed=%d)", before_n, after_n, before_n - after_n);
+#ifdef _WIN32
+    (void)RemoveDirectoryA(rdir);
+#endif
+
+    /* --- About modal: open it so the auto-quit frames render it (OK/Esc close it interactively) --- */
+    s_about_open = true;
+    nt_log_info("SELFTEST: About modal opened=%d", s_about_open);
+
+    /* Leave a live selection so the auto-quit frames draw the decoded image. */
+    tp_project *cur = gui_project_get();
+    const int ns = cur ? cur->atlases[0].source_count : 0;
+    if (cur && ns > 0) {
+        char resolved[512];
+        if (tp_project_resolve_path(cur, cur->atlases[0].sources[ns - 1], resolved, sizeof resolved) == TP_STATUS_OK) {
+            (void)snprintf(s_sel_abs, sizeof s_sel_abs, "%s", resolved);
+            s_sel_atlas = 0;
+            s_sel_src = ns - 1;
+            s_sel_child = -1;
+            s_sel_missing = false;
+        }
+    }
+    g_ui_scale = 1.5F; /* exercise the scaled layout during the auto-quit frames */
+    nt_log_info("SELFTEST: end (undo:%d redo:%d history:%zuB; selection '%s')", gui_history_undo_depth(),
+                gui_history_redo_depth(), gui_history_bytes(), s_sel_abs);
 }
 #endif
+// #endregion
+
+// #region keyboard shortcuts (ux.md §3.3d)
+/* Global shortcuts routed through the SAME actions as the menus. Text-input focus swallows
+ * them first (no accidental global actions while typing); an open modal blocks them too. */
+static void handle_shortcuts(void) {
+    if (nt_ui_input_any_focused(s_ctx) || s_confirm_open || s_about_open) {
+        return;
+    }
+    if (nt_input_key_is_pressed(NT_KEY_F5)) {
+        s_pending_refresh = true;
+    }
+    const bool ctrl = nt_input_key_is_down(NT_KEY_LCTRL) || nt_input_key_is_down(NT_KEY_RCTRL);
+    if (!ctrl) {
+        return;
+    }
+    const bool shift = nt_input_key_is_down(NT_KEY_LSHIFT) || nt_input_key_is_down(NT_KEY_RSHIFT);
+    if (nt_input_key_is_pressed(NT_KEY_N)) {
+        request_new();
+    } else if (nt_input_key_is_pressed(NT_KEY_O)) {
+        s_pending_open = true;
+    } else if (nt_input_key_is_pressed(NT_KEY_S)) {
+        if (shift) {
+            s_pending_save_as = true;
+        } else {
+            s_pending_save = true;
+        }
+    } else if (nt_input_key_is_pressed(NT_KEY_Z)) {
+        if (shift) {
+            do_redo(); /* Ctrl+Shift+Z alias */
+        } else {
+            do_undo();
+        }
+    } else if (nt_input_key_is_pressed(NT_KEY_Y)) {
+        do_redo();
+    } else if (nt_input_key_is_pressed(NT_KEY_P)) {
+        set_status("In-process packing blocked by neotolis-engine#282 -- see README.");
+    } else if (nt_input_key_is_pressed(NT_KEY_E)) {
+        set_status("Export All: exporters land in Phase 2.");
+    }
+}
 // #endregion
 
 // #region frame
@@ -1063,6 +1739,7 @@ static void frame(void) {
     nt_window_poll();
     nt_input_poll();
     nt_mem_scratch_reset();
+    gui_project_tick(g_nt_app.time); /* history coalescing clock */
 
 #ifdef NTPACKER_GUI_SELFTEST
     /* Verification build: render a few real frames (proves the canvas draw + walk), then quit
@@ -1078,13 +1755,20 @@ static void frame(void) {
     apply_pending();
 
     if (nt_input_key_is_pressed(NT_KEY_ESCAPE)) {
-        if (s_confirm_open) {
+        if (s_edit_kind != EDIT_NONE) {
+            cancel_edit();
+            set_status("Rename cancelled.");
+        } else if (s_about_open) {
+            s_about_open = false;
+        } else if (s_confirm_open) {
             s_confirm_open = false;
             s_after_confirm = AFTER_NONE;
         } else {
             close_all_menus();
         }
     }
+
+    handle_shortcuts();
 
     nt_resource_step();
     nt_material_step();
@@ -1157,6 +1841,7 @@ static void frame(void) {
 
         clamp_selection();
         build_rows(gui_project_get(), tp_project_get_atlas(gui_project_get(), s_sel_atlas));
+        s_content_w = scale.logical_w; /* for caption/status truncation */
 
         nt_ui_begin(s_ctx, scale.logical_w, scale.logical_h, g_nt_app.dt, &g_nt_input.pointers[0], 1);
         nt_ui_set_viewport(s_ctx, nt_ui_viewport_from_scale(&scale));
@@ -1177,18 +1862,23 @@ static void frame(void) {
             declare_statusbar(s_ctx);
         }
 
+        declare_row_tooltips(s_ctx);
         declare_menus(s_ctx);
+        declare_context_menu(s_ctx);
         declare_tooltips(s_ctx);
         declare_confirm_modal(s_ctx);
+        declare_about_modal(s_ctx);
 
         nt_ui_end(s_ctx);
 
         /* selection captured this frame -> refresh the canvas texture before the walk draws it */
-        if (s_sel_abs[0] != '\0') {
+        if (s_sel_missing) {
+            gui_canvas_clear(&s_canvas); /* placeholder is drawn by declare_canvas (§3.7) */
+        } else if (s_sel_abs[0] != '\0') {
             char err[256];
             if (!gui_canvas_set_image(&s_canvas, s_sel_abs, err, sizeof err)) {
                 set_statusf("Decode failed: %s", err);
-                s_sel_abs[0] = '\0';
+                s_sel_missing = true; /* show the missing placeholder instead of a blank canvas */
             }
         } else {
             gui_canvas_clear(&s_canvas);
@@ -1320,7 +2010,9 @@ int main(int argc, char *argv[]) {
     /* open a project passed on the command line (errors go to the status bar) */
     if (argc > 1) {
         char err[256];
-        if (gui_project_open(argv[1], err, sizeof err) == TP_STATUS_OK) {
+        if (!gui_scan_exists(argv[1])) {
+            set_statusf("project not found: %s", argv[1]); /* stale argv -> continue with untitled (F6b) */
+        } else if (gui_project_open(argv[1], err, sizeof err) == TP_STATUS_OK) {
             set_statusf("Opened %s", gui_project_display_name());
         } else {
             set_statusf("Open '%s' failed: %s", argv[1], err);

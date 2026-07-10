@@ -261,6 +261,7 @@ static void tp_free_atlas(tp_project_atlas *a) {
     free(a->sources);
     for (int i = 0; i < a->sprite_count; i++) {
         free(a->sprites[i].name);
+        free(a->sprites[i].rename);
     }
     free(a->sprites);
     for (int i = 0; i < a->animation_count; i++) {
@@ -324,6 +325,20 @@ void tp_project_destroy(tp_project *p) {
 tp_status tp_project_atlas_add_source(tp_project_atlas *a, const char *path) {
     if (!a || !path) {
         return TP_STATUS_INVALID_ARGUMENT;
+    }
+    /* Dedupe: skip the append when the same '/'-normalized path already exists. */
+    char norm[TP_PATH_MAX];
+    if ((size_t)snprintf(norm, sizeof norm, "%s", path) >= sizeof norm) {
+        return TP_STATUS_OUT_OF_BOUNDS;
+    }
+    tp_normalize_slashes(norm);
+    for (int i = 0; i < a->source_count; i++) {
+        char existing[TP_PATH_MAX];
+        (void)snprintf(existing, sizeof existing, "%s", a->sources[i]);
+        tp_normalize_slashes(existing);
+        if (strcmp(existing, norm) == 0) {
+            return TP_STATUS_OK; /* already added -- no-op */
+        }
     }
     if (!tp_grow((void **)&a->sources, &a->source_cap, a->source_count + 1, sizeof(char *))) {
         return TP_STATUS_OOM;
@@ -399,6 +414,7 @@ tp_status tp_project_atlas_remove_sprite(tp_project_atlas *a, const char *name) 
     for (int i = 0; i < a->sprite_count; i++) {
         if (strcmp(a->sprites[i].name, name) == 0) {
             free(a->sprites[i].name);
+            free(a->sprites[i].rename);
             for (int j = i; j < a->sprite_count - 1; j++) {
                 a->sprites[j] = a->sprites[j + 1];
             }
@@ -407,6 +423,43 @@ tp_status tp_project_atlas_remove_sprite(tp_project_atlas *a, const char *name) 
         }
     }
     return TP_STATUS_OUT_OF_BOUNDS;
+}
+
+/* An override entry that would serialize to just its name (safe to drop). */
+static bool tp_sprite_is_default(const tp_project_sprite *s) {
+    return s->origin_x == TP_PROJECT_ORIGIN_DEFAULT && s->origin_y == TP_PROJECT_ORIGIN_DEFAULT &&
+           s->slice9_lrtb[0] == 0 && s->slice9_lrtb[1] == 0 && s->slice9_lrtb[2] == 0 && s->slice9_lrtb[3] == 0 &&
+           s->rename == NULL;
+}
+
+tp_status tp_project_atlas_set_sprite_rename(tp_project_atlas *a, const char *sprite_name, const char *rename) {
+    if (!a || !sprite_name) {
+        return TP_STATUS_INVALID_ARGUMENT;
+    }
+    if (rename == NULL || rename[0] == '\0') { /* clear back to the file-derived name */
+        tp_project_sprite *s = tp_project_atlas_find_sprite(a, sprite_name);
+        if (!s) {
+            return TP_STATUS_OK;
+        }
+        free(s->rename);
+        s->rename = NULL;
+        if (tp_sprite_is_default(s)) {
+            return tp_project_atlas_remove_sprite(a, sprite_name);
+        }
+        return TP_STATUS_OK;
+    }
+    tp_project_sprite *s = NULL;
+    tp_status st = tp_project_atlas_add_sprite(a, sprite_name, &s);
+    if (st != TP_STATUS_OK) {
+        return st;
+    }
+    char *copy = tp_strdup(rename);
+    if (!copy) {
+        return TP_STATUS_OOM;
+    }
+    free(s->rename);
+    s->rename = copy;
+    return TP_STATUS_OK;
 }
 
 tp_status tp_project_atlas_add_animation(tp_project_atlas *a, const char *id, tp_project_anim **out) {
@@ -629,6 +682,10 @@ static void tp_emit_sprite(tp_sb *sb, int depth, const tp_project_sprite *s) {
         tp_sb_num(sb, (double)s->origin_y);
         tp_sb_char(sb, ']');
     }
+    if (s->rename) { /* ASCII-sorted position: name < origin < rename < slice9 */
+        tp_obj_key(sb, depth + 1, &first, "rename");
+        tp_sb_json_string(sb, s->rename);
+    }
     if (s->slice9_lrtb[0] || s->slice9_lrtb[1] || s->slice9_lrtb[2] || s->slice9_lrtb[3]) {
         tp_obj_key(sb, depth + 1, &first, "slice9");
         tp_sb_char(sb, '[');
@@ -810,6 +867,25 @@ static void tp_emit_root(tp_sb *sb, const tp_project *p, const tp_pack_settings 
 /* save                                                                     */
 /* ======================================================================== */
 
+tp_status tp_project_save_buffer(const tp_project *p, char **out, size_t *out_len, tp_error *err) {
+    if (!p || !out || !out_len) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_project_save_buffer: NULL argument");
+    }
+    *out = NULL;
+    *out_len = 0;
+    tp_pack_settings defaults;
+    tp_pack_settings_defaults(&defaults);
+    tp_sb sb = {0};
+    tp_emit_root(&sb, p, &defaults);
+    if (sb.oom) {
+        free(sb.buf);
+        return tp_error_set(err, TP_STATUS_OOM, "tp_project_save_buffer: out of memory building JSON");
+    }
+    *out = sb.buf;
+    *out_len = sb.len;
+    return TP_STATUS_OK;
+}
+
 tp_status tp_project_save(tp_project *p, const char *path, tp_error *err) {
     if (!p || !path) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_project_save: NULL project or path");
@@ -857,25 +933,23 @@ tp_status tp_project_save(tp_project *p, const char *path, tp_error *err) {
     free(p->project_dir);
     p->project_dir = dir_copy;
 
-    tp_pack_settings defaults;
-    tp_pack_settings_defaults(&defaults);
-
-    tp_sb sb = {0};
-    tp_emit_root(&sb, p, &defaults);
-    if (sb.oom) {
-        free(sb.buf);
-        return tp_error_set(err, TP_STATUS_OOM, "tp_project_save: out of memory building JSON");
+    /* file-save = relativize (above) + buffer-write + fwrite. */
+    char *buf = NULL;
+    size_t len = 0;
+    tp_status bst = tp_project_save_buffer(p, &buf, &len, err);
+    if (bst != TP_STATUS_OK) {
+        return bst;
     }
 
     FILE *f = fopen(path, "wb"); /* binary: keep LF, no CRLF translation */
     if (!f) {
-        free(sb.buf);
+        free(buf);
         return tp_error_set(err, TP_STATUS_BAD_PROJECT, "tp_project_save: cannot open %s for writing", path);
     }
-    const size_t wrote = fwrite(sb.buf, 1U, sb.len, f);
+    const size_t wrote = fwrite(buf, 1U, len, f);
     (void)fclose(f);
-    free(sb.buf);
-    if (wrote != sb.len) {
+    free(buf);
+    if (wrote != len) {
         return tp_error_set(err, TP_STATUS_BAD_PROJECT, "tp_project_save: short write to %s", path);
     }
     return TP_STATUS_OK;
@@ -941,6 +1015,17 @@ static tp_status tp_load_sprite(tp_project_atlas *a, const cJSON *js, tp_error *
         }
         s->origin_x = (float)cJSON_GetArrayItem(origin, 0)->valuedouble;
         s->origin_y = (float)cJSON_GetArrayItem(origin, 1)->valuedouble;
+    }
+    const cJSON *rename = cJSON_GetObjectItemCaseSensitive(js, "rename");
+    if (rename) {
+        if (!cJSON_IsString(rename) || !rename->valuestring) {
+            return tp_error_set(err, TP_STATUS_BAD_PROJECT, "sprite 'rename' must be a string");
+        }
+        free(s->rename);
+        s->rename = tp_strdup(rename->valuestring);
+        if (!s->rename) {
+            return tp_error_set(err, TP_STATUS_OOM, "out of memory reading sprite rename");
+        }
     }
     const cJSON *slice9 = cJSON_GetObjectItemCaseSensitive(js, "slice9");
     if (slice9) {
@@ -1145,28 +1230,17 @@ static char *tp_read_file(const char *path, size_t *out_len) {
     return buf;
 }
 
-tp_status tp_project_load(const char *path, tp_project **out, tp_error *err) {
-    if (out) {
-        *out = NULL;
-    }
-    if (!path || !out) {
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_project_load: NULL path or out");
-    }
-
-    size_t len = 0;
-    char *text = tp_read_file(path, &len);
-    if (!text) {
-        return tp_error_set(err, TP_STATUS_BAD_PROJECT, "tp_project_load: cannot open %s", path);
-    }
+/* Parse core shared by load (from file) + load_buffer (from memory). Borrows
+ * `text` (does not free it); leaves project_dir NULL -- the file loader sets it. */
+static tp_status tp_project_parse(const char *text, size_t len, tp_project **out, tp_error *err) {
+    *out = NULL;
 
     const char *parse_end = NULL;
     cJSON *root = cJSON_ParseWithLengthOpts(text, len, &parse_end, 0);
     if (!root) {
         const char *ep = cJSON_GetErrorPtr();
         const long off = (ep && ep >= text) ? (long)(ep - text) : -1L;
-        tp_status s = tp_error_set(err, TP_STATUS_BAD_PROJECT, "tp_project_load: malformed JSON near offset %ld", off);
-        free(text);
-        return s;
+        return tp_error_set(err, TP_STATUS_BAD_PROJECT, "tp_project_load: malformed JSON near offset %ld", off);
     }
 
     tp_status status = TP_STATUS_OK;
@@ -1217,27 +1291,60 @@ tp_status tp_project_load(const char *path, tp_project **out, tp_error *err) {
         }
     }
 
-    char dir[TP_PATH_MAX];
-    status = tp_abs_dir_of(path, dir, sizeof dir);
-    if (status != TP_STATUS_OK) {
-        status = tp_error_set(err, status, "tp_project_load: path too long: %s", path);
-        goto done;
-    }
-    p->project_dir = tp_strdup(dir);
-    if (!p->project_dir) {
-        status = tp_error_set(err, TP_STATUS_OOM, "tp_project_load: out of memory");
-        goto done;
-    }
-
 done:
     cJSON_Delete(root);
-    free(text);
     if (status != TP_STATUS_OK) {
         tp_project_destroy(p);
         return status;
     }
     *out = p;
     return TP_STATUS_OK;
+}
+
+tp_status tp_project_load(const char *path, tp_project **out, tp_error *err) {
+    if (out) {
+        *out = NULL;
+    }
+    if (!path || !out) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_project_load: NULL path or out");
+    }
+
+    size_t len = 0;
+    char *text = tp_read_file(path, &len);
+    if (!text) {
+        return tp_error_set(err, TP_STATUS_BAD_PROJECT, "tp_project_load: cannot open %s", path);
+    }
+
+    tp_status status = tp_project_parse(text, len, out, err);
+    free(text);
+    if (status != TP_STATUS_OK) {
+        return status;
+    }
+
+    char dir[TP_PATH_MAX];
+    status = tp_abs_dir_of(path, dir, sizeof dir);
+    if (status != TP_STATUS_OK) {
+        tp_project_destroy(*out);
+        *out = NULL;
+        return tp_error_set(err, status, "tp_project_load: path too long: %s", path);
+    }
+    (*out)->project_dir = tp_strdup(dir);
+    if (!(*out)->project_dir) {
+        tp_project_destroy(*out);
+        *out = NULL;
+        return tp_error_set(err, TP_STATUS_OOM, "tp_project_load: out of memory");
+    }
+    return TP_STATUS_OK;
+}
+
+tp_status tp_project_load_buffer(const char *buf, size_t len, tp_project **out, tp_error *err) {
+    if (out) {
+        *out = NULL;
+    }
+    if (!buf || !out) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_project_load_buffer: NULL buf or out");
+    }
+    return tp_project_parse(buf, len, out, err); /* project_dir stays NULL */
 }
 
 /* ======================================================================== */

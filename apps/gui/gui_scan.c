@@ -33,7 +33,7 @@ typedef struct scan_vec {
     int cap;
 } scan_vec;
 
-static bool scan_vec_push(scan_vec *v, const char *rel, const char *abs) {
+static bool scan_vec_push(scan_vec *v, const char *rel, const char *abs, long long size, long long mtime) {
     if (v->count == v->cap) {
         int ncap = (v->cap == 0) ? 32 : v->cap * 2;
         gui_scan_entry *nd = (gui_scan_entry *)realloc(v->data, (size_t)ncap * sizeof *nd);
@@ -46,6 +46,8 @@ static bool scan_vec_push(scan_vec *v, const char *rel, const char *abs) {
     gui_scan_entry *e = &v->data[v->count];
     (void)snprintf(e->rel, sizeof e->rel, "%s", rel);
     (void)snprintf(e->abs, sizeof e->abs, "%s", abs);
+    e->size = size;
+    e->mtime = mtime;
     v->count++;
     return true;
 }
@@ -116,7 +118,10 @@ static void scan_dir(const char *abs_dir, const char *rel_prefix, scan_vec *out)
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
             scan_dir(child_abs, child_rel, out);
         } else if (has_image_ext(name)) {
-            (void)scan_vec_push(out, child_rel, child_abs);
+            const long long sz = ((long long)fd.nFileSizeHigh << 32) | (long long)fd.nFileSizeLow;
+            const long long mt =
+                ((long long)fd.ftLastWriteTime.dwHighDateTime << 32) | (long long)fd.ftLastWriteTime.dwLowDateTime;
+            (void)scan_vec_push(out, child_rel, child_abs, sz, mt);
         }
     } while (FindNextFileA(h, &fd));
     FindClose(h);
@@ -146,7 +151,7 @@ static void scan_dir(const char *abs_dir, const char *rel_prefix, scan_vec *out)
         if (S_ISDIR(st.st_mode)) {
             scan_dir(child_abs, child_rel, out);
         } else if (has_image_ext(name)) {
-            (void)scan_vec_push(out, child_rel, child_abs);
+            (void)scan_vec_push(out, child_rel, child_abs, (long long)st.st_size, (long long)st.st_mtime);
         }
     }
     closedir(d);
@@ -200,6 +205,52 @@ bool gui_scan_is_dir(const char *abs) {
 #else
     struct stat st;
     return stat(abs, &st) == 0 && S_ISDIR(st.st_mode);
+#endif
+}
+
+bool gui_scan_exists(const char *abs) {
+    if (!abs || abs[0] == '\0') {
+        return false;
+    }
+#ifdef _WIN32
+    return GetFileAttributesA(abs) != INVALID_FILE_ATTRIBUTES;
+#else
+    struct stat st;
+    return stat(abs, &st) == 0;
+#endif
+}
+
+bool gui_scan_stat(const char *abs, long long *out_size, long long *out_mtime) {
+    if (!abs || abs[0] == '\0') {
+        return false;
+    }
+#ifdef _WIN32
+    WIN32_FILE_ATTRIBUTE_DATA fad;
+    if (!GetFileAttributesExA(abs, GetFileExInfoStandard, &fad)) {
+        return false;
+    }
+    if (fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+        return false;
+    }
+    if (out_size) {
+        *out_size = ((long long)fad.nFileSizeHigh << 32) | (long long)fad.nFileSizeLow;
+    }
+    if (out_mtime) {
+        *out_mtime = ((long long)fad.ftLastWriteTime.dwHighDateTime << 32) | (long long)fad.ftLastWriteTime.dwLowDateTime;
+    }
+    return true;
+#else
+    struct stat st;
+    if (stat(abs, &st) != 0 || S_ISDIR(st.st_mode)) {
+        return false;
+    }
+    if (out_size) {
+        *out_size = (long long)st.st_size;
+    }
+    if (out_mtime) {
+        *out_mtime = (long long)st.st_mtime;
+    }
+    return true;
 #endif
 }
 

@@ -24,7 +24,7 @@ if(WIN32)
     target_link_libraries(tinyfiledialogs PUBLIC comdlg32 ole32 shell32 user32)
 endif()
 
-add_executable(ntpacker-gui main.c gui_project.c gui_scan.c gui_canvas.c)
+add_executable(ntpacker-gui main.c gui_project.c gui_scan.c gui_canvas.c gui_history.c)
 # Lean link set derived from examples/ui_showcase: dropped nt_shape_renderer (no 3D/
 # shape draws), nt_debug_overlay + nt_metrics (no HUD), nt_platform (no mem probe).
 # Kept the concrete impls the engine's *_interface deps require at final link:

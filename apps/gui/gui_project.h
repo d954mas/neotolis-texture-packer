@@ -1,16 +1,25 @@
 #ifndef NTPACKER_GUI_PROJECT_H
 #define NTPACKER_GUI_PROJECT_H
 
-/* GUI-owned project state (ux.md §3.3b, Task 2): exactly ONE tp_project + its absolute
- * file path (empty while unsaved) + two independent dirty bits:
- *   - project_dirty : unsaved changes on disk. Cleared by Save. Shows the menu-bar dot.
+/* GUI-owned project state (ux.md §3.3b/§3.3c, Task 2): exactly ONE tp_project + its
+ * absolute file path (empty while unsaved) + two independent dirty bits:
+ *   - project_dirty : unsaved changes on disk. RECOMPUTED by comparing the current
+ *                     model snapshot to the last-SAVED snapshot (so undoing back to the
+ *                     saved state clears it). Cleared by Save/Open/New. Menu-bar dot.
  *   - preview_stale : model changed since the last successful pack. Since in-process
  *                     packing is blocked (engine #282), nothing clears it this round --
  *                     once set it stays set, driving the Pack button's stale state.
  *
- * Every model mutation goes through a wrapper here that funnels the two bits through one
- * choke point (gui_project_touch), so no caller can forget to mark dirty/stale. File
- * operations take explicit paths (the OS dialogs live in the UI layer) so they can be
+ * Every model mutation goes through a wrapper here that funnels through one choke point
+ * (gui_project_touch): it serializes the model, memcmp-dedups against the previous
+ * snapshot, pushes the PRE-mutation snapshot onto the undo history (gui_history), and
+ * recomputes project_dirty. Undo/redo swap a snapshot back into the live model.
+ *
+ * Refresh (F4) is deliberately NOT a model mutation: rescanning disk sources changes what
+ * is DISPLAYED/packed, not the PROJECT MODEL (sources are paths). So Refresh calls
+ * gui_project_mark_stale (preview_stale only) and never touches project_dirty.
+ *
+ * File operations take explicit paths (the OS dialogs live in the UI layer) so they can be
  * driven headless by the startup self-test. */
 
 #include <stddef.h>
@@ -20,6 +29,21 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* Result of an add-source attempt (the GUI surfaces "already added" distinctly). */
+typedef enum { GUI_ADD_FAILED = 0, GUI_ADD_ADDED, GUI_ADD_DUPLICATE } gui_add_status;
+
+/* Action tag for undo coalescing: same-tag mutations within one gesture window fold
+ * into a single undo entry (ux.md §3.3c). */
+typedef enum {
+    GUI_ACT_NONE = 0,
+    GUI_ACT_ADD_SOURCE,
+    GUI_ACT_REMOVE_SOURCE,
+    GUI_ACT_ADD_ATLAS,
+    GUI_ACT_REMOVE_ATLAS,
+    GUI_ACT_RENAME_ATLAS,
+    GUI_ACT_RENAME_SPRITE
+} gui_action;
 
 /* Creates the initial in-memory project (one default atlas, no path, clean). */
 void gui_project_init(void);
@@ -34,16 +58,37 @@ bool gui_project_is_dirty(void);
 bool gui_project_is_stale(void);
 
 /* --- dirty/stale choke point --- */
-/* Sets BOTH project_dirty and preview_stale. Every mutation wrapper calls it. */
-void gui_project_touch(void);
+/* Serializes + snapshots the model, pushes the pre-mutation snapshot to undo history
+ * (coalesced by `act`), sets preview_stale, and recomputes project_dirty. Every
+ * mutation wrapper calls it AFTER mutating. */
+void gui_project_touch(gui_action act);
 /* Clears preview_stale after a successful pack (unused this round; #282). */
 void gui_project_mark_packed(void);
+/* Marks the preview stale WITHOUT dirtying the project (Refresh: disk changed, model
+ * did not). */
+void gui_project_mark_stale(void);
+/* Advances the history clock (seconds) each frame -- drives undo coalescing windows. */
+void gui_project_tick(double now_seconds);
 
 /* --- mutation wrappers (all funnel through gui_project_touch) --- */
-int gui_project_add_atlas(void);                     /* returns new atlas index, or -1 */
+int gui_project_add_atlas(void);                          /* returns new atlas index, or -1 */
 void gui_project_remove_atlas(int index);
-bool gui_project_add_source(int atlas_index, const char *path); /* stored verbatim; relativized on save */
+gui_add_status gui_project_add_source(int atlas_index, const char *path); /* stored verbatim; relativized on save */
 void gui_project_remove_source(int atlas_index, int source_index);
+
+/* Renames atlas `index` (caller validates non-empty/unique/normalization-safe). */
+bool gui_project_set_atlas_name(int atlas_index, const char *name);
+/* Sets/clears a sprite's rename export-name override (empty/NULL clears it). */
+bool gui_project_set_sprite_rename(int atlas_index, const char *sprite_name, const char *rename);
+
+/* --- undo / redo (ux.md §3.3c) --- */
+bool gui_project_can_undo(void);
+bool gui_project_can_redo(void);
+/* Swap a history snapshot into the live model; recomputes dirty, sets stale, drops the
+ * display caches. Selection re-clamp is the caller's job. Returns false when the stack
+ * is empty (or on a restore error). */
+bool gui_project_undo(void);
+bool gui_project_redo(void);
 
 /* --- file operations (paths explicit; dialogs live in the UI layer) --- */
 /* Fresh empty project: replaces the current one, clears path + both bits. */

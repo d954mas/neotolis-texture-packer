@@ -172,6 +172,9 @@ void gui_canvas_clear(gui_canvas *c) {
     c->loaded_path[0] = '\0';
 }
 
+void gui_canvas_invalidate(gui_canvas *c) { c->loaded_path[0] = '\0'; }
+const char *gui_canvas_loaded_path(const gui_canvas *c) { return c->loaded_path; }
+
 bool gui_canvas_has_image(const gui_canvas *c) { return c->has_tex; }
 int gui_canvas_img_w(const gui_canvas *c) { return c->img_w; }
 int gui_canvas_img_h(const gui_canvas *c) { return c->img_h; }

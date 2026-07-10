@@ -41,13 +41,14 @@ struct tp_pack_settings;
 #define TP_PROJECT_SCHEMA_VERSION 1
 
 /* Per-sprite override. Sparse: an entry exists only when at least one field is
- * non-default. Defaults: origin (0.5,0.5), slice9 all-zero (see the *_DEFAULT
- * constants below). */
+ * non-default. Defaults: origin (0.5,0.5), slice9 all-zero, rename NULL (see the
+ * *_DEFAULT constants below). */
 typedef struct tp_project_sprite {
     char *name; /* atlas-relative sprite name; the override key */
     float origin_x;
     float origin_y;
     uint16_t slice9_lrtb[4]; /* [left,right,top,bottom] px; all-zero = none */
+    char *rename;            /* final export name override (NULL = file-derived); consumed by tp_normalize overrides */
 } tp_project_sprite;
 
 #define TP_PROJECT_ORIGIN_DEFAULT 0.5F
@@ -148,7 +149,10 @@ void tp_project_atlas_set_defaults(tp_project_atlas *a);
 
 /* --- source mutation --- */
 
-/* Appends a source path (stored verbatim; save normalizes/relativizes it). */
+/* Appends a source path (stored verbatim; save normalizes/relativizes it).
+ * Dedupe: a no-op returning TP_STATUS_OK when the same '/'-normalized path is
+ * already present in this atlas (source_count is unchanged -- the caller detects
+ * the no-op by comparing the count). */
 tp_status tp_project_atlas_add_source(tp_project_atlas *a, const char *path);
 
 /* Removes source `index`. Out-of-range -> OUT_OF_BOUNDS. */
@@ -165,6 +169,11 @@ tp_status tp_project_atlas_add_sprite(tp_project_atlas *a, const char *name, tp_
 
 /* Removes the override for `name`. Absent -> OUT_OF_BOUNDS. */
 tp_status tp_project_atlas_remove_sprite(tp_project_atlas *a, const char *name);
+
+/* Sets (or clears) a sprite's `rename` export-name override. A non-empty `rename`
+ * ensures the override entry and stores it verbatim; NULL or "" clears it and
+ * removes the entry if it then holds only defaults (keeps storage sparse). */
+tp_status tp_project_atlas_set_sprite_rename(tp_project_atlas *a, const char *sprite_name, const char *rename);
 
 /* --- animation mutation --- */
 
@@ -197,8 +206,19 @@ tp_status tp_project_load(const char *path, tp_project **out, tp_error *err);
 /* Writes `p` deterministically to `path` (see the serialization contract above),
  * updating p->project_dir to path's absolute directory and relativizing absolute
  * source paths against it. `p` is non-const because Save/Save-As updates the
- * in-memory project_dir + path forms (mutation-friendly, GUI live edit). */
+ * in-memory project_dir + path forms (mutation-friendly, GUI live edit).
+ * file-save = relativize + tp_project_save_buffer + fwrite. */
 tp_status tp_project_save(tp_project *p, const char *path, tp_error *err);
+
+/* Serializes `p` to a freshly malloc'd buffer (*out, NUL-terminated; *out_len
+ * excludes the NUL), byte-identical to what tp_project_save writes for a project
+ * whose sources are already relative. PURE: no relativize, no project_dir change
+ * -- so it is the exact snapshot primitive undo/redo needs. Caller frees *out. */
+tp_status tp_project_save_buffer(const tp_project *p, char **out, size_t *out_len, tp_error *err);
+
+/* Parses `len` bytes of project JSON at `buf` into a new project (*out). Mirror
+ * of tp_project_load minus the file read; project_dir stays NULL (no path). */
+tp_status tp_project_load_buffer(const char *buf, size_t len, tp_project **out, tp_error *err);
 
 /* --- path helpers --- */
 

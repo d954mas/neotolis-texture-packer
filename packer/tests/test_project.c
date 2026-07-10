@@ -89,6 +89,7 @@ static tp_project *build_rich(void) {
     sp->slice9_lrtb[1] = 4;
     sp->slice9_lrtb[2] = 8;
     sp->slice9_lrtb[3] = 8;
+    sp->rename = dupstr("player_walk_01"); /* export-name override */
 
     tp_project_anim *an = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_animation(hero, "walk", &an));
@@ -145,6 +146,12 @@ static void assert_atlas_equal(const tp_project_atlas *a, const tp_project_atlas
         feq(a->sprites[i].origin_y, b->sprites[i].origin_y);
         for (int k = 0; k < 4; k++) {
             TEST_ASSERT_EQUAL_UINT16(a->sprites[i].slice9_lrtb[k], b->sprites[i].slice9_lrtb[k]);
+        }
+        if (a->sprites[i].rename == NULL) {
+            TEST_ASSERT_NULL(b->sprites[i].rename);
+        } else {
+            TEST_ASSERT_NOT_NULL(b->sprites[i].rename);
+            TEST_ASSERT_EQUAL_STRING(a->sprites[i].rename, b->sprites[i].rename);
         }
     }
     TEST_ASSERT_EQUAL_INT(a->animation_count, b->animation_count);
@@ -242,6 +249,7 @@ void test_sparse_defaults_absent(void) {
     TEST_ASSERT_NULL(strstr(buf, "pixels_per_unit"));
     /* default sub-fields absent */
     TEST_ASSERT_NULL(strstr(buf, "slice9"));   /* sprite kept default slice9 */
+    TEST_ASSERT_NULL(strstr(buf, "rename"));   /* sprite kept default (NULL) rename */
     TEST_ASSERT_NULL(strstr(buf, "\"fps\""));  /* anim kept default fps */
     TEST_ASSERT_NULL(strstr(buf, "playback")); /* anim kept default playback */
     TEST_ASSERT_NULL(strstr(buf, "flip_h"));
@@ -468,6 +476,84 @@ void test_mutation_helpers(void) {
     tp_project_destroy(p);
 }
 
+/* 8. buffer save/load: save_buffer bytes == file bytes; load_buffer deep-equals a
+ * from-file load (project_dir aside). Sources are relative, so file == buffer. */
+void test_buffer_roundtrip(void) {
+    char p1[512];
+    join(p1, sizeof p1, "buf1.ntpacker_project");
+
+    tp_project *p = build_rich();
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, tp_project_save(p, p1, &err), err.msg);
+
+    size_t nf = 0;
+    char *bf = read_all(p1, &nf);
+
+    char *bb = NULL;
+    size_t nb = 0;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, tp_project_save_buffer(p, &bb, &nb, &err), err.msg);
+    TEST_ASSERT_NOT_NULL(bb);
+    TEST_ASSERT_EQUAL_size_t(nf, nb);
+    TEST_ASSERT_EQUAL_INT(0, memcmp(bf, bb, nf));
+
+    tp_project *from_file = NULL;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, tp_project_load(p1, &from_file, &err), err.msg);
+    tp_project *from_buf = NULL;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, tp_project_load_buffer(bb, nb, &from_buf, &err), err.msg);
+    TEST_ASSERT_NULL(from_buf->project_dir);  /* buffer load leaves it NULL */
+    TEST_ASSERT_NOT_NULL(from_file->project_dir);
+    assert_project_equal(from_file, from_buf);
+
+    free(bf);
+    free(bb);
+    tp_project_destroy(from_file);
+    tp_project_destroy(from_buf);
+    tp_project_destroy(p);
+}
+
+/* 9. add_source dedupe: an exact ('/'-normalized) duplicate is an OK no-op. */
+void test_add_source_dedupe(void) {
+    tp_project *p = tp_project_create();
+    tp_project_atlas *a = tp_project_get_atlas(p, 0);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_source(a, "art/hero"));
+    TEST_ASSERT_EQUAL_INT(1, a->source_count);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_source(a, "art/hero")); /* dup no-op */
+    TEST_ASSERT_EQUAL_INT(1, a->source_count);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_source(a, "art\\hero")); /* normalizes equal */
+    TEST_ASSERT_EQUAL_INT(1, a->source_count);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_source(a, "art/ui")); /* distinct -> appends */
+    TEST_ASSERT_EQUAL_INT(2, a->source_count);
+    tp_project_destroy(p);
+}
+
+/* 10. sprite rename override: set creates the sparse entry; clear removes it when
+ * the entry would then hold only defaults, else keeps it. */
+void test_sprite_rename_override(void) {
+    tp_project *p = tp_project_create();
+    tp_project_atlas *a = tp_project_get_atlas(p, 0);
+
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_set_sprite_rename(a, "walk_01", "hero_walk"));
+    tp_project_sprite *s = tp_project_atlas_find_sprite(a, "walk_01");
+    TEST_ASSERT_NOT_NULL(s);
+    TEST_ASSERT_EQUAL_STRING("hero_walk", s->rename);
+    TEST_ASSERT_EQUAL_INT(1, a->sprite_count);
+
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_set_sprite_rename(a, "walk_01", NULL)); /* clears + drops */
+    TEST_ASSERT_NULL(tp_project_atlas_find_sprite(a, "walk_01"));
+    TEST_ASSERT_EQUAL_INT(0, a->sprite_count);
+
+    tp_project_sprite *sp = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_sprite(a, "walk_02", &sp));
+    sp->origin_x = 0.1F; /* non-default -> the entry survives a rename clear */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_set_sprite_rename(a, "walk_02", "hero_walk2"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_set_sprite_rename(a, "walk_02", ""));
+    sp = tp_project_atlas_find_sprite(a, "walk_02");
+    TEST_ASSERT_NOT_NULL(sp);
+    TEST_ASSERT_NULL(sp->rename);
+
+    tp_project_destroy(p);
+}
+
 int main(int argc, char **argv) {
     g_dir = (argc > 1) ? argv[1] : ".";
     UNITY_BEGIN();
@@ -482,5 +568,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_resolve_path);
     RUN_TEST(test_to_settings_mapping);
     RUN_TEST(test_mutation_helpers);
+    RUN_TEST(test_buffer_roundtrip);
+    RUN_TEST(test_add_source_dedupe);
+    RUN_TEST(test_sprite_rename_override);
     return UNITY_END();
 }
