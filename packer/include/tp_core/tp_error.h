@@ -23,7 +23,8 @@ typedef enum tp_status {
     TP_STATUS_UNKNOWN_REGION,
     TP_STATUS_PAGE_NOT_FOUND,
     TP_STATUS_UNSUPPORTED_TEXTURE,
-    TP_STATUS_OOM
+    TP_STATUS_OOM,
+    TP_STATUS_BUILDER_FAILED /* nt_builder start/finish returned an error (tp_pack) */
 } tp_status;
 
 /* Fixed-size message buffer -- no heap, safe to embed by value on the stack. */
@@ -68,6 +69,7 @@ static inline const char *tp_status_str(tp_status status) {
         case TP_STATUS_PAGE_NOT_FOUND: return "page not found";
         case TP_STATUS_UNSUPPORTED_TEXTURE: return "unsupported texture";
         case TP_STATUS_OOM: return "out of memory";
+        case TP_STATUS_BUILDER_FAILED: return "builder failed";
     }
     return "unknown status";
 }

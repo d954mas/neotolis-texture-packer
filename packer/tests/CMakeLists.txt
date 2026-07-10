@@ -32,3 +32,12 @@ target_link_libraries(tp_test_uv_property PRIVATE tp_core unity)
 target_include_directories(tp_test_uv_property PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_compile_options(tp_test_uv_property PRIVATE -U_DLL)
 add_test(NAME tp_uv_property COMMAND tp_test_uv_property)
+
+# Phase 1b tp_pack invariants + determinism (plan §3.4): drives nt_builder
+# (transitive through tp_core) then parses back. Needs a scratch dir for the
+# session .ntpack files.
+add_executable(tp_test_pack test_pack.c)
+target_link_libraries(tp_test_pack PRIVATE tp_core unity)
+target_compile_options(tp_test_pack PRIVATE -U_DLL)
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_pack_test")
+add_test(NAME tp_pack COMMAND tp_test_pack "${CMAKE_BINARY_DIR}/tp_pack_test")
