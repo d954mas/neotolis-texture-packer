@@ -374,6 +374,16 @@ always reference an animation id — upstream `basic.collection` uses both
   nothing; suggestions can be disabled per atlas. tp_normalize's grouping
   runs in compute-suggestions mode for the GUI and is OFF in the export path
   (Phase 2 shipped it export-on; the animations packet flips this).
+  Validated + refined by `docs/research/animation-grouping.md` (2026-07-10):
+  (a) heuristic requires shared prefix + consistent separator + consistent
+  zero-pad + contiguous range of ≥3 frames, shown as a range
+  ("walk_01..walk_12, 12 frames"); (b) PRIMARY manual gesture = select
+  frames → "Create animation from selection" (id from common prefix) — the
+  fast path every explicit-assembly tool has (Godot/Unity/TexturePacker);
+  (c) suggestions accept/ignore individually (finer than TexturePacker's
+  global toggle); (d) invariant: exported region names NEVER strip numeric
+  suffixes — keeps the libGDX/Phaser runtime-convention path working
+  alongside explicit animations.
 - **Playback enum pinned to Defold's set** (tp_core enum + GUI dropdown +
   Phase 5 .tpatlas mapping): once_forward (default 0), loop_forward,
   once_backward, loop_backward, once_pingpong, loop_pingpong, none.
