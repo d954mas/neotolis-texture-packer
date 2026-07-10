@@ -1,0 +1,107 @@
+{
+  "version": 1,
+  "atlas": "rotate",
+  "pages": [
+    {
+      "file": "rotate_nt_json-0.png",
+      "h": 512,
+      "premultiplied": false,
+      "w": 256
+    }
+  ],
+  "pixels_per_unit": 1,
+  "sprites": [
+    {
+      "alias_of": null,
+      "frame": {
+        "h": 257,
+        "w": 171,
+        "x": 0,
+        "y": 0
+      },
+      "name": "a",
+      "page": 0,
+      "polygon": {
+        "indices": [1, 0, 2, 3, 2, 0],
+        "verts": [
+          [171, 258],
+          [-1, 258],
+          [-1, 0],
+          [171, 0]
+        ]
+      },
+      "sourceSize": {
+        "h": 256,
+        "w": 170
+      },
+      "spriteSourceSize": {
+        "h": 257,
+        "w": 171,
+        "x": 0,
+        "y": -1
+      }
+    },
+    {
+      "alias_of": null,
+      "frame": {
+        "h": 81,
+        "w": 127,
+        "x": 0,
+        "y": 258
+      },
+      "name": "b",
+      "page": 0,
+      "polygon": {
+        "indices": [1, 0, 2, 3, 2, 0],
+        "verts": [
+          [127, 82],
+          [-1, 82],
+          [-1, 0],
+          [127, 0]
+        ]
+      },
+      "sourceSize": {
+        "h": 80,
+        "w": 126
+      },
+      "spriteSourceSize": {
+        "h": 81,
+        "w": 127,
+        "x": 0,
+        "y": -1
+      }
+    },
+    {
+      "alias_of": null,
+      "frame": {
+        "h": 81,
+        "w": 131,
+        "x": 172,
+        "y": 0
+      },
+      "name": "c",
+      "page": 0,
+      "polygon": {
+        "indices": [1, 0, 2, 3, 2, 0],
+        "verts": [
+          [131, 82],
+          [-1, 82],
+          [-1, 0],
+          [131, 0]
+        ]
+      },
+      "sourceSize": {
+        "h": 80,
+        "w": 130
+      },
+      "spriteSourceSize": {
+        "h": 81,
+        "w": 131,
+        "x": 0,
+        "y": -1
+      },
+      "transform": 4,
+      "transformStr": "diag"
+    }
+  ]
+}

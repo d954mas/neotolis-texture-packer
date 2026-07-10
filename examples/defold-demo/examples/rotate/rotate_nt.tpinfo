@@ -1,0 +1,153 @@
+# Exported by neotolis-texture-packer
+# Format: Defold extension-texturepacker .tpinfo (protobuf text)
+
+version: "2.0"
+description: "Exported using neotolis-texture-packer"
+pages {
+  name: "rotate_nt-0.png"
+  size {
+    width: 256
+    height: 512
+  }
+  sprites {
+    name: "a"
+    trimmed: true
+    rotated: false
+    is_solid: false
+    corner_offset {
+      x: -1
+      y: -1
+    }
+    source_rect {
+      x: -1
+      y: -1
+      width: 172
+      height: 258
+    }
+    pivot {
+      x: 85
+      y: 128
+    }
+    frame_rect {
+      x: 0
+      y: 0
+      width: 172
+      height: 258
+    }
+    untrimmed_size {
+      width: 170
+      height: 256
+    }
+    indices: [1, 0, 2, 3, 2, 0]
+    vertices {
+      x: 171
+      y: 257
+    }
+    vertices {
+      x: -1
+      y: 257
+    }
+    vertices {
+      x: -1
+      y: -1
+    }
+    vertices {
+      x: 171
+      y: -1
+    }
+  }
+  sprites {
+    name: "b"
+    trimmed: true
+    rotated: false
+    is_solid: false
+    corner_offset {
+      x: -1
+      y: -1
+    }
+    source_rect {
+      x: -1
+      y: -1
+      width: 128
+      height: 82
+    }
+    pivot {
+      x: 63
+      y: 40
+    }
+    frame_rect {
+      x: 0
+      y: 340
+      width: 128
+      height: 82
+    }
+    untrimmed_size {
+      width: 126
+      height: 80
+    }
+    indices: [1, 0, 2, 3, 2, 0]
+    vertices {
+      x: 127
+      y: 81
+    }
+    vertices {
+      x: -1
+      y: 81
+    }
+    vertices {
+      x: -1
+      y: -1
+    }
+    vertices {
+      x: 127
+      y: -1
+    }
+  }
+  sprites {
+    name: "c"
+    trimmed: true
+    rotated: false
+    is_solid: false
+    corner_offset {
+      x: -1
+      y: -1
+    }
+    source_rect {
+      x: -1
+      y: -1
+      width: 132
+      height: 82
+    }
+    pivot {
+      x: 65
+      y: 40
+    }
+    frame_rect {
+      x: 0
+      y: 258
+      width: 132
+      height: 82
+    }
+    untrimmed_size {
+      width: 130
+      height: 80
+    }
+    indices: [1, 0, 2, 3, 2, 0]
+    vertices {
+      x: 131
+      y: 81
+    }
+    vertices {
+      x: -1
+      y: 81
+    }
+    vertices {
+      x: -1
+      y: -1
+    }
+    vertices {
+      x: 131
+      y: -1
+    }
+  }
+}

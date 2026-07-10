@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "atlases": [
+    {
+      "name": "animals",
+      "sources": [
+        "animals"
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "out_path": "out/animals.json"
+        },
+        {
+          "exporter_id": "defold",
+          "out_path": "out/animals-defold"
+        }
+      ]
+    }
+  ]
+}

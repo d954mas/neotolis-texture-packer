@@ -1,5 +1,5 @@
 [bootstrap]
-main_collection = /examples/basic/basic.collectionc
+main_collection = /examples/compare/compare.collectionc
 
 [script]
 shared_state = 1

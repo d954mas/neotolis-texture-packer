@@ -95,3 +95,11 @@ target_compile_definitions(tp_test_export_defold PRIVATE
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_export_defold_test")
 add_test(NAME tp_export_defold
     COMMAND tp_test_export_defold "${CMAKE_BINARY_DIR}/tp_export_defold_test" "${CMAKE_SOURCE_DIR}/examples/defold-demo")
+
+# Dev driver / smoke tool (NOT a ctest): load a `.ntpacker_project`, scan each
+# atlas's sources for sprites, and run every enabled target -> the project's
+# out_paths. Regenerates the Defold demo's ntpacker exports deterministically.
+#   tp_demo_export <project.ntpacker_project> [work_dir]
+add_executable(tp_demo_export tp_demo_export.c)
+target_link_libraries(tp_demo_export PRIVATE tp_build stb_image)
+target_compile_options(tp_demo_export PRIVATE -U_DLL)

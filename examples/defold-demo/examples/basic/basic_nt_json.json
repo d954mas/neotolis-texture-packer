@@ -1,0 +1,398 @@
+{
+  "version": 1,
+  "animations": [
+    {
+      "flip_h": false,
+      "flip_v": false,
+      "fps": 4,
+      "frames": [
+        "box_fill_128",
+        "box_fill_64"
+      ],
+      "id": "BoxFlip",
+      "playback": 1
+    }
+  ],
+  "atlas": "basic",
+  "pages": [
+    {
+      "file": "basic_nt_json-0.png",
+      "h": 256,
+      "premultiplied": false,
+      "w": 256
+    },
+    {
+      "file": "basic_nt_json-1.png",
+      "h": 256,
+      "premultiplied": false,
+      "w": 256
+    }
+  ],
+  "pixels_per_unit": 1,
+  "sprites": [
+    {
+      "alias_of": null,
+      "frame": {
+        "h": 65,
+        "w": 65,
+        "x": 1,
+        "y": 141
+      },
+      "name": "anim/test-0",
+      "page": 1,
+      "polygon": {
+        "indices": [1, 0, 2, 3, 2, 0],
+        "verts": [
+          [65, 66],
+          [-1, 66],
+          [-1, 0],
+          [65, 0]
+        ]
+      },
+      "sourceSize": {
+        "h": 64,
+        "w": 64
+      },
+      "spriteSourceSize": {
+        "h": 65,
+        "w": 65,
+        "x": 0,
+        "y": -1
+      }
+    },
+    {
+      "alias_of": null,
+      "frame": {
+        "h": 69,
+        "w": 69,
+        "x": 1,
+        "y": 150
+      },
+      "name": "anim/test-1",
+      "page": 0,
+      "polygon": {
+        "indices": [2, 4, 3, 1, 4, 2, 4, 1, 5, 0, 5, 1, 6, 5, 7, 5, 0, 7],
+        "verts": [
+          [63, 14],
+          [69, 48],
+          [43, 74],
+          [9, 68],
+          [-5, 48],
+          [-5, 26],
+          [10, 5],
+          [43, 0]
+        ]
+      },
+      "sourceSize": {
+        "h": 64,
+        "w": 64
+      },
+      "spriteSourceSize": {
+        "h": 69,
+        "w": 69,
+        "x": 0,
+        "y": -5
+      }
+    },
+    {
+      "alias_of": null,
+      "frame": {
+        "h": 65,
+        "w": 65,
+        "x": 146,
+        "y": 1
+      },
+      "name": "anim/test-2",
+      "page": 0,
+      "polygon": {
+        "indices": [3, 2, 1, 3, 1, 4, 0, 4, 1, 4, 0, 5, 6, 5, 0],
+        "verts": [
+          [35, 1],
+          [65, 62],
+          [65, 66],
+          [-1, 66],
+          [-1, 61],
+          [29, 0],
+          [33, 0]
+        ]
+      },
+      "sourceSize": {
+        "h": 64,
+        "w": 64
+      },
+      "spriteSourceSize": {
+        "h": 65,
+        "w": 65,
+        "x": 0,
+        "y": -1
+      },
+      "transform": 2,
+      "transformStr": "flipV"
+    },
+    {
+      "alias_of": null,
+      "frame": {
+        "h": 129,
+        "w": 129,
+        "x": 1,
+        "y": 1
+      },
+      "name": "box_fill_128",
+      "page": 0,
+      "polygon": {
+        "indices": [1, 0, 2, 3, 2, 0],
+        "verts": [
+          [129, 130],
+          [-1, 130],
+          [-1, 0],
+          [129, 0]
+        ]
+      },
+      "sourceSize": {
+        "h": 128,
+        "w": 128
+      },
+      "spriteSourceSize": {
+        "h": 129,
+        "w": 129,
+        "x": 0,
+        "y": -1
+      }
+    },
+    {
+      "alias_of": "anim/test-0",
+      "frame": {
+        "h": 65,
+        "w": 65,
+        "x": 1,
+        "y": 141
+      },
+      "name": "box_fill_64",
+      "page": 1,
+      "polygon": {
+        "indices": [1, 0, 2, 3, 2, 0],
+        "verts": [
+          [65, 66],
+          [-1, 66],
+          [-1, 0],
+          [65, 0]
+        ]
+      },
+      "sourceSize": {
+        "h": 64,
+        "w": 64
+      },
+      "spriteSourceSize": {
+        "h": 65,
+        "w": 65,
+        "x": 0,
+        "y": -1
+      }
+    },
+    {
+      "alias_of": null,
+      "frame": {
+        "h": 64,
+        "w": 41,
+        "x": 1,
+        "y": 209
+      },
+      "name": "box_small_128",
+      "page": 1,
+      "polygon": {
+        "indices": [1, 0, 2, 3, 2, 0],
+        "verts": [
+          [41, 65],
+          [-1, 65],
+          [-1, 0],
+          [41, 0]
+        ]
+      },
+      "sourceSize": {
+        "h": 128,
+        "w": 128
+      },
+      "spriteSourceSize": {
+        "h": 64,
+        "w": 41,
+        "x": 80,
+        "y": 57
+      },
+      "transform": 4,
+      "transformStr": "diag"
+    },
+    {
+      "alias_of": null,
+      "frame": {
+        "h": 135,
+        "w": 134,
+        "x": 1,
+        "y": 1
+      },
+      "name": "circle_fill_128",
+      "page": 1,
+      "polygon": {
+        "indices": [4, 3, 5, 5, 3, 1, 3, 2, 1, 6, 5, 7, 5, 1, 7, 1, 0, 7],
+        "verts": [
+          [105, 11],
+          [134, 53],
+          [125, 110],
+          [82, 141],
+          [23, 131],
+          [-7, 85],
+          [3, 31],
+          [49, 0]
+        ]
+      },
+      "sourceSize": {
+        "h": 128,
+        "w": 128
+      },
+      "spriteSourceSize": {
+        "h": 135,
+        "w": 134,
+        "x": 0,
+        "y": -7
+      }
+    },
+    {
+      "alias_of": "anim/test-1",
+      "frame": {
+        "h": 69,
+        "w": 69,
+        "x": 1,
+        "y": 150
+      },
+      "name": "circle_fill_64",
+      "page": 0,
+      "polygon": {
+        "indices": [2, 4, 3, 1, 4, 2, 4, 1, 5, 0, 5, 1, 6, 5, 7, 5, 0, 7],
+        "verts": [
+          [63, 14],
+          [69, 48],
+          [43, 74],
+          [9, 68],
+          [-5, 48],
+          [-5, 26],
+          [10, 5],
+          [43, 0]
+        ]
+      },
+      "sourceSize": {
+        "h": 64,
+        "w": 64
+      },
+      "spriteSourceSize": {
+        "h": 69,
+        "w": 69,
+        "x": 0,
+        "y": -5
+      }
+    },
+    {
+      "alias_of": null,
+      "frame": {
+        "h": 129,
+        "w": 129,
+        "x": 19,
+        "y": 18
+      },
+      "name": "shape_L_128",
+      "page": 0,
+      "polygon": {
+        "indices": [3, 2, 0, 2, 1, 0, 3, 0, 4, 5, 4, 0],
+        "verts": [
+          [15, 115],
+          [129, 115],
+          [129, 130],
+          [-1, 130],
+          [-1, 0],
+          [15, 0]
+        ]
+      },
+      "sourceSize": {
+        "h": 128,
+        "w": 128
+      },
+      "spriteSourceSize": {
+        "h": 129,
+        "w": 129,
+        "x": 0,
+        "y": -1
+      },
+      "transform": 1,
+      "transformStr": "flipH"
+    },
+    {
+      "alias_of": null,
+      "frame": {
+        "h": 130,
+        "w": 130,
+        "x": 119,
+        "y": 1
+      },
+      "name": "triangle_fill_128",
+      "page": 1,
+      "polygon": {
+        "indices": [3, 2, 0, 2, 1, 0, 4, 3, 5, 3, 0, 5, 6, 5, 7, 5, 0, 7],
+        "verts": [
+          [125, 121],
+          [127, 122],
+          [130, 132],
+          [-2, 132],
+          [2, 119],
+          [4, 118],
+          [61, 0],
+          [66, 0]
+        ]
+      },
+      "sourceSize": {
+        "h": 128,
+        "w": 128
+      },
+      "spriteSourceSize": {
+        "h": 130,
+        "w": 130,
+        "x": 0,
+        "y": -2
+      },
+      "transform": 3,
+      "transformStr": "flipH|flipV"
+    },
+    {
+      "alias_of": "anim/test-2",
+      "frame": {
+        "h": 65,
+        "w": 65,
+        "x": 146,
+        "y": 1
+      },
+      "name": "triangle_fill_64",
+      "page": 0,
+      "polygon": {
+        "indices": [3, 2, 1, 3, 1, 4, 0, 4, 1, 4, 0, 5, 6, 5, 0],
+        "verts": [
+          [35, 1],
+          [65, 62],
+          [65, 66],
+          [-1, 66],
+          [-1, 61],
+          [29, 0],
+          [33, 0]
+        ]
+      },
+      "sourceSize": {
+        "h": 64,
+        "w": 64
+      },
+      "spriteSourceSize": {
+        "h": 65,
+        "w": 65,
+        "x": 0,
+        "y": -1
+      },
+      "transform": 2,
+      "transformStr": "flipV"
+    }
+  ]
+}

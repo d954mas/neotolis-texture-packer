@@ -1,0 +1,390 @@
+{
+  "version": 1,
+  "animations": [
+    {
+      "flip_h": false,
+      "flip_v": false,
+      "fps": 6,
+      "frames": [
+        "sq1",
+        "sq2",
+        "sq3",
+        "sq4",
+        "sq5",
+        "sq6",
+        "sq7",
+        "sq8",
+        "sq9",
+        "sq10"
+      ],
+      "id": "anim_trim",
+      "playback": 1
+    }
+  ],
+  "atlas": "anim_trim",
+  "pages": [
+    {
+      "file": "anim_trim_nt_json-0.png",
+      "h": 128,
+      "premultiplied": false,
+      "w": 128
+    }
+  ],
+  "pixels_per_unit": 1,
+  "sprites": [
+    {
+      "alias_of": null,
+      "frame": {
+        "h": 30,
+        "w": 29,
+        "x": 1,
+        "y": 52
+      },
+      "name": "sq1",
+      "page": 0,
+      "polygon": {
+        "indices": [6, 5, 4, 4, 3, 2, 6, 4, 2, 2, 1, 0, 6, 2, 7, 2, 0, 7],
+        "verts": [
+          [29, 14],
+          [29, 18],
+          [5, 28],
+          [5, 30],
+          [3, 30],
+          [3, 31],
+          [-1, 31],
+          [-1, 0]
+        ]
+      },
+      "sourceSize": {
+        "h": 128,
+        "w": 128
+      },
+      "spriteSourceSize": {
+        "h": 30,
+        "w": 29,
+        "x": 16,
+        "y": 21
+      },
+      "transform": 3,
+      "transformStr": "flipH|flipV"
+    },
+    {
+      "alias_of": null,
+      "frame": {
+        "h": 11,
+        "w": 11,
+        "x": 1,
+        "y": 81
+      },
+      "name": "sq10",
+      "page": 0,
+      "polygon": {
+        "indices": [2, 4, 3, 1, 4, 2, 4, 1, 5, 0, 5, 1, 5, 0, 6, 7, 6, 0],
+        "verts": [
+          [11, 3],
+          [11, 9],
+          [8, 12],
+          [2, 12],
+          [-1, 9],
+          [-1, 3],
+          [2, 0],
+          [8, 0]
+        ]
+      },
+      "sourceSize": {
+        "h": 128,
+        "w": 128
+      },
+      "spriteSourceSize": {
+        "h": 11,
+        "w": 11,
+        "x": 64,
+        "y": 28
+      }
+    },
+    {
+      "alias_of": null,
+      "frame": {
+        "h": 30,
+        "w": 29,
+        "x": 1,
+        "y": 86
+      },
+      "name": "sq2",
+      "page": 0,
+      "polygon": {
+        "indices": [6, 5, 4, 4, 3, 2, 6, 4, 2, 2, 1, 0, 6, 2, 7, 2, 0, 7],
+        "verts": [
+          [29, 14],
+          [29, 18],
+          [5, 28],
+          [5, 30],
+          [3, 30],
+          [3, 31],
+          [-1, 31],
+          [-1, 0]
+        ]
+      },
+      "sourceSize": {
+        "h": 128,
+        "w": 128
+      },
+      "spriteSourceSize": {
+        "h": 30,
+        "w": 29,
+        "x": 34,
+        "y": 19
+      },
+      "transform": 3,
+      "transformStr": "flipH|flipV"
+    },
+    {
+      "alias_of": null,
+      "frame": {
+        "h": 30,
+        "w": 29,
+        "x": 33,
+        "y": 66
+      },
+      "name": "sq3",
+      "page": 0,
+      "polygon": {
+        "indices": [6, 5, 4, 4, 3, 2, 6, 4, 2, 2, 1, 0, 6, 2, 7, 2, 0, 7],
+        "verts": [
+          [29, 14],
+          [29, 18],
+          [5, 28],
+          [5, 30],
+          [3, 30],
+          [3, 31],
+          [-1, 31],
+          [-1, 0]
+        ]
+      },
+      "sourceSize": {
+        "h": 128,
+        "w": 128
+      },
+      "spriteSourceSize": {
+        "h": 30,
+        "w": 29,
+        "x": 52,
+        "y": 15
+      },
+      "transform": 1,
+      "transformStr": "flipH"
+    },
+    {
+      "alias_of": null,
+      "frame": {
+        "h": 30,
+        "w": 29,
+        "x": 29,
+        "y": 96
+      },
+      "name": "sq4",
+      "page": 0,
+      "polygon": {
+        "indices": [6, 5, 4, 4, 3, 2, 6, 4, 2, 2, 1, 0, 6, 2, 7, 2, 0, 7],
+        "verts": [
+          [29, 14],
+          [29, 18],
+          [5, 28],
+          [5, 30],
+          [3, 30],
+          [3, 31],
+          [-1, 31],
+          [-1, 0]
+        ]
+      },
+      "sourceSize": {
+        "h": 128,
+        "w": 128
+      },
+      "spriteSourceSize": {
+        "h": 30,
+        "w": 29,
+        "x": 85,
+        "y": 11
+      },
+      "transform": 7,
+      "transformStr": "flipH|flipV|diag"
+    },
+    {
+      "alias_of": null,
+      "frame": {
+        "h": 30,
+        "w": 29,
+        "x": 53,
+        "y": 1
+      },
+      "name": "sq5",
+      "page": 0,
+      "polygon": {
+        "indices": [6, 5, 4, 4, 3, 2, 6, 4, 2, 2, 1, 0, 6, 2, 7, 2, 0, 7],
+        "verts": [
+          [29, 14],
+          [29, 18],
+          [5, 28],
+          [5, 30],
+          [3, 30],
+          [3, 31],
+          [-1, 31],
+          [-1, 0]
+        ]
+      },
+      "sourceSize": {
+        "h": 128,
+        "w": 128
+      },
+      "spriteSourceSize": {
+        "h": 30,
+        "w": 29,
+        "x": 93,
+        "y": 46
+      },
+      "transform": 5,
+      "transformStr": "flipH|diag"
+    },
+    {
+      "alias_of": null,
+      "frame": {
+        "h": 34,
+        "w": 26,
+        "x": 1,
+        "y": 1
+      },
+      "name": "sq6",
+      "page": 0,
+      "polygon": {
+        "indices": [2, 1, 3, 1, 0, 3, 4, 3, 5, 3, 0, 5, 5, 0, 6, 6, 0, 7],
+        "verts": [
+          [26, 36],
+          [0, 23],
+          [-2, 19],
+          [9, 13],
+          [11, 10],
+          [13, 10],
+          [15, 7],
+          [26, 0]
+        ]
+      },
+      "sourceSize": {
+        "h": 128,
+        "w": 128
+      },
+      "spriteSourceSize": {
+        "h": 34,
+        "w": 26,
+        "x": 91,
+        "y": 93
+      }
+    },
+    {
+      "alias_of": null,
+      "frame": {
+        "h": 34,
+        "w": 26,
+        "x": 1,
+        "y": 26
+      },
+      "name": "sq7",
+      "page": 0,
+      "polygon": {
+        "indices": [2, 1, 3, 1, 0, 3, 4, 3, 5, 3, 0, 5, 5, 0, 6, 6, 0, 7],
+        "verts": [
+          [26, 36],
+          [0, 23],
+          [-2, 19],
+          [9, 13],
+          [11, 10],
+          [13, 10],
+          [15, 7],
+          [26, 0]
+        ]
+      },
+      "sourceSize": {
+        "h": 128,
+        "w": 128
+      },
+      "spriteSourceSize": {
+        "h": 34,
+        "w": 26,
+        "x": 68,
+        "y": 76
+      },
+      "transform": 1,
+      "transformStr": "flipH"
+    },
+    {
+      "alias_of": null,
+      "frame": {
+        "h": 34,
+        "w": 26,
+        "x": 31,
+        "y": 1
+      },
+      "name": "sq8",
+      "page": 0,
+      "polygon": {
+        "indices": [2, 1, 3, 1, 0, 3, 4, 3, 5, 3, 0, 5, 5, 0, 6, 6, 0, 7],
+        "verts": [
+          [26, 36],
+          [0, 23],
+          [-2, 19],
+          [9, 13],
+          [11, 10],
+          [13, 10],
+          [15, 7],
+          [26, 0]
+        ]
+      },
+      "sourceSize": {
+        "h": 128,
+        "w": 128
+      },
+      "spriteSourceSize": {
+        "h": 34,
+        "w": 26,
+        "x": 41,
+        "y": 55
+      },
+      "transform": 1,
+      "transformStr": "flipH"
+    },
+    {
+      "alias_of": null,
+      "frame": {
+        "h": 34,
+        "w": 26,
+        "x": 31,
+        "y": 26
+      },
+      "name": "sq9",
+      "page": 0,
+      "polygon": {
+        "indices": [2, 1, 3, 1, 0, 3, 4, 3, 5, 3, 0, 5, 5, 0, 6, 6, 0, 7],
+        "verts": [
+          [26, 36],
+          [0, 23],
+          [-2, 19],
+          [9, 13],
+          [11, 10],
+          [13, 10],
+          [15, 7],
+          [26, 0]
+        ]
+      },
+      "sourceSize": {
+        "h": 128,
+        "w": 128
+      },
+      "spriteSourceSize": {
+        "h": 34,
+        "w": 26,
+        "x": 16,
+        "y": 31
+      }
+    }
+  ]
+}
