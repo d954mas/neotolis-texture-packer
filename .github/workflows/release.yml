@@ -1,0 +1,81 @@
+name: Release
+
+# Tag-driven releases: push a semver tag (v0.1.0) and CI builds all three
+# platforms and attaches the archives to a GitHub Release.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            slug: linux-x64
+          - os: windows-latest
+            slug: windows-x64
+          - os: macos-latest
+            slug: macos-arm64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Pull submodule LFS files
+        run: git submodule foreach --recursive 'git lfs pull || true'
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update && sudo apt-get install -y clang ninja-build \
+            libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
+            libwayland-dev wayland-protocols libxkbcommon-dev libgl-dev
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja
+
+      - name: Install dependencies (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ninja -y --no-progress
+
+      - name: Configure
+        run: cmake --preset native-release
+
+      - name: Build
+        run: cmake --build --preset native-release
+
+      - name: Test
+        run: ctest --preset native-release
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME}"
+          stage="neotolis-texture-packer-${version}-${{ matrix.slug }}"
+          mkdir -p "dist/${stage}"
+          # Ship every app built for this preset (cli/gui as they land; smoke for now).
+          find build/apps -type d -name native-release | while read -r dir; do
+            cp -r "$dir"/. "dist/${stage}/"
+          done
+          cp README.md LICENSE* "dist/${stage}/" 2>/dev/null || true
+          cd dist
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            7z a "${stage}.zip" "${stage}"
+          else
+            zip -r "${stage}.zip" "${stage}"
+          fi
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+          generate_release_notes: true

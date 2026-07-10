@@ -57,4 +57,13 @@ cmake --preset native-debug
 cmake --build --preset native-debug
 ```
 
-Outputs land in `build/<area>/<target>/<preset>/`.
+Outputs land in `build/<area>/<target>/<preset>/`. Tests run via
+`ctest --preset native-release` (or `native-debug`).
+
+## CI / Releases
+
+GitHub Actions (`.github/workflows/`): `ci.yml` builds and tests on
+Linux/Windows/macOS for every push/PR; `release.yml` is tag-driven — pushing a
+semver tag (`v0.1.0`) builds all three platforms and attaches archives to a
+GitHub Release. The engine's own CI covers Linux native only, so macOS
+breakage is possible and belongs upstream (issue/PR to the engine repo).

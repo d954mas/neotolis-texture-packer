@@ -7,3 +7,7 @@ target_compile_options(tp_smoke PRIVATE -U_DLL)
 nt_set_warning_flags(tp_smoke)
 nt_set_sanitizer_flags(tp_smoke)
 set_target_properties(tp_smoke PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${SMOKE_OUTPUT_DIR}")
+
+# Smoke pack as a ctest test: proves toolchain + builder pipeline end to end.
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/smoke_test")
+add_test(NAME tp_smoke COMMAND tp_smoke "${CMAKE_BINARY_DIR}/smoke_test/smoke.ntpack")
