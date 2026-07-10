@@ -96,6 +96,7 @@ static inline uint16_t Su(float px) { return (uint16_t)((px * g_ui_scale) + 0.5F
 #define BASE_LEFT_PANEL_W 300.0F
 #define BASE_RIGHT_PANEL_W 300.0F /* settings panel (regions F/G), fixed width, own scroll */
 #define BASE_ROW_H 27.0F
+#define PANEL_LABEL_W 116.0F /* settings-row label column (base; runtime-clamped in compute_panel_widths) */
 
 /* Pack an sRGB triple into the engine's 0xAABBGGRR (opaque) -- clearer than hand-swizzling. */
 #define RGBA8(r, g, b) ((uint32_t)0xFF000000u | ((uint32_t)(b) << 16) | ((uint32_t)(g) << 8) | (uint32_t)(r))
@@ -259,6 +260,7 @@ static uint32_t s_id_btn_pack, s_id_btn_export, s_id_btn_refresh, s_id_vlist, s_
 static uint32_t s_id_canvas;      /* the atlas-page custom element (bbox drives zoom/pan/hit input) */
 static uint32_t s_id_rename;      /* the single inline rename input (one edit active at a time) */
 static uint32_t s_id_right_panel; /* settings-panel container (bbox: press-outside blurs focused inputs) */
+static uint32_t s_id_export_modal; /* the Export dialog */
 static bool s_ids_ready;
 
 static uint32_t s_id_mb_file, s_id_mb_edit, s_id_mb_view, s_id_mb_help;
@@ -266,7 +268,7 @@ static uint32_t s_id_menu_file, s_id_menu_edit, s_id_menu_view, s_id_menu_help;
 static nt_ui_menu_state_t s_file_state, s_edit_state, s_view_state, s_help_state;
 static nt_ui_menu_ctx_t s_file_menu, s_edit_menu, s_view_menu, s_help_menu;
 enum {
-    MK_NEW = 1, MK_OPEN, MK_SAVE, MK_SAVEAS, MK_REFRESH, MK_EXIT,
+    MK_NEW = 1, MK_OPEN, MK_SAVE, MK_SAVEAS, MK_EXPORT, MK_REFRESH, MK_EXIT,
     MK_UNDO, MK_REDO,
     MK_ZIN, MK_ZOUT, MK_FIT, MK_ABOUT, MK_S100, MK_S125, MK_S150, MK_S200,
     MK_OV_OUTLINE, MK_OV_FRAME, MK_OV_TRIM, MK_OV_PIVOT, MK_CTX_FIT, MK_CTX_100,
@@ -365,6 +367,7 @@ static float s_content_w = 1280.0F; /* logical content width, for caption/status
  * a minimal canvas, so the panels never get pushed off-screen (recomputed each frame). */
 static float s_left_panel_w = 300.0F;
 static float s_right_panel_w = 300.0F;
+static float s_panel_label_w = 116.0F; /* settings-row label column; shrinks so the widget cell never hits 0 */
 
 /* --- right settings panel: session-remembered disclosure state + dropdown open bits --- */
 #define GUI_MAX_TARGETS 16
@@ -376,7 +379,10 @@ static bool s_dd_ov_shape_open, s_dd_ov_rot_open, s_dd_ov_mv_open; /* per-region
 static bool s_dd_target_open[GUI_MAX_TARGETS];         /* per-target exporter combos */
 static bool s_pending_add_target;
 static int s_pending_remove_target = -1;
-static int s_pending_browse_target = -1; /* target whose out-path "..." dialog is queued */
+static int s_pending_browse_target = -1;        /* target whose out-path "..." dialog is queued */
+static int s_pending_export_browse_atlas = -1;  /* Export dialog: atlas of the queued out-path browse */
+static int s_pending_export_browse_target = -1; /* Export dialog: target index of the queued browse */
+static bool s_export_open;                       /* the Export dialog (modal) */
 /* Numeric/text field edit buffers (game-owned; nt_ui_input edits in place). Synced from
  * the model each frame while unfocused, parsed+clamped into the model on edit. */
 static char s_nb_pad[16], s_nb_margin[16], s_nb_extrude[16], s_nb_maxv[16], s_nb_ppu[24];
@@ -697,6 +703,16 @@ static void compute_panel_widths(float logical_w) {
         s_left_panel_w = base_l;
         s_right_panel_w = base_r;
     }
+    /* Label column caps at ~45% of the right-panel content so the widget/input cell always keeps a
+     * positive width -- a fixed 116px label on a narrow-clamped panel would squeeze inputs to 0 width,
+     * which collapses their floating text/caret clip and trips the engine's empty-scissor assert. */
+    const float content = s_right_panel_w - S(20.0F);
+    float label_w = S(PANEL_LABEL_W);
+    const float cap = content * 0.45F;
+    if (label_w > cap) {
+        label_w = cap;
+    }
+    s_panel_label_w = fmaxf(label_w, S(24.0F));
 }
 
 static void record_row_tip(uint32_t id, const char *full) {
@@ -1038,9 +1054,10 @@ static void relativize_to_project(const char *abs, char *out, size_t cap) {
     normalize_slashes(out);
 }
 
-/* Save dialog for a target's output path, relativized to the project like sources. */
-static void do_browse_target(int ti) {
-    tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
+/* Save dialog for a target's output path, relativized to the project like sources. Atlas-explicit so
+ * the Export dialog (which spans all atlases) can browse any target, not just the selected atlas's. */
+static void do_browse_target_at(int atlas, int ti) {
+    tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), atlas);
     if (!a || ti < 0 || ti >= a->target_count) {
         return;
     }
@@ -1051,10 +1068,11 @@ static void do_browse_target(int ti) {
     }
     char rel[600];
     relativize_to_project(path, rel, sizeof rel);
-    if (gui_project_set_target(s_sel_atlas, ti, t->exporter_id, rel, t->enabled)) {
+    if (gui_project_set_target(atlas, ti, t->exporter_id, rel, t->enabled)) {
         set_statusf("Output path: %s", rel);
     }
 }
+static void do_browse_target(int ti) { do_browse_target_at(s_sel_atlas, ti); }
 
 static void do_add_folder(void) {
     const char *dir = tinyfd_selectFolderDialog("Add Folder", "");
@@ -1473,6 +1491,9 @@ static void apply_pending(void) {
         gui_project_remove_target(s_sel_atlas, s_pending_remove_target);
         set_status("Removed export target (Ctrl+Z to undo).");
     }
+    if (s_pending_export_browse_atlas >= 0 && s_pending_export_browse_target >= 0) {
+        do_browse_target_at(s_pending_export_browse_atlas, s_pending_export_browse_target);
+    }
     if (s_pending_browse_target >= 0) {
         do_browse_target(s_pending_browse_target);
     }
@@ -1521,6 +1542,8 @@ static void apply_pending(void) {
     s_pending_remove_source = -1;
     s_pending_remove_atlas = -1;
     s_pending_remove_target = -1;
+    s_pending_export_browse_atlas = -1;
+    s_pending_export_browse_target = -1;
     s_pending_remove_anim = -1;
     s_pending_browse_target = -1;
 }
@@ -1648,6 +1671,7 @@ static void ensure_ids(void) {
     s_id_about = nt_ui_id("ntpacker/about_modal");
     s_id_rename = nt_ui_id("ntpacker/rename_input");
     s_id_right_panel = nt_ui_id("ntpacker/right_panel");
+    s_id_export_modal = nt_ui_id("ntpacker/export_modal");
     s_id_mb_file = nt_ui_id("ntpacker/mb_file");
     s_id_mb_edit = nt_ui_id("ntpacker/mb_edit");
     s_id_mb_view = nt_ui_id("ntpacker/mb_view");
@@ -1880,6 +1904,10 @@ static void file_items(nt_ui_menu_ctx_t *m) {
         s_pending_save_as = true;
     }
     nt_ui_menu_separator(m);
+    if (nt_ui_menu_item_ex(m, MK_EXPORT, "Export\xE2\x80\xA6", (nt_ui_menu_item_opts_t){.shortcut = "Ctrl+E"})) {
+        s_export_open = true;
+    }
+    nt_ui_menu_separator(m);
     if (nt_ui_menu_item_ex(m, MK_REFRESH, "Refresh", (nt_ui_menu_item_opts_t){.shortcut = "F5"})) {
         s_pending_refresh = true;
     }
@@ -2035,8 +2063,9 @@ static void start_sprite_edit(const sprite_row *row) {
 /* The single inline rename field, sized to fill its (bounded) parent so it clips to the row. */
 static bool render_rename_field(nt_ui_context_t *ctx) {
     bool submitted = false;
+    /* min width: a 0-width field collapses its floating text/caret clip -> empty-scissor assert. */
     const Clay_ElementDeclaration decl = {
-        .layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H - 5.0F))}}};
+        .layout = {.sizing = {CLAY_SIZING_GROW(S(28.0F), 0), CLAY_SIZING_FIXED(S(BASE_ROW_H - 5.0F))}}};
     (void)nt_ui_input_text(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, s_id_rename, s_edit_buf, sizeof s_edit_buf,
                            &s_rename_props, &s_rename_input, &decl, true, &submitted);
     return submitted;
@@ -2318,7 +2347,6 @@ static void declare_left_panel(nt_ui_context_t *ctx) {
                      .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_TOP}},
           .backgroundColor = C_PANEL,
           .cornerRadius = CLAY_CORNER_RADIUS(S(8)),
-          .clip = {.horizontal = true},
           .border = {.color = C_BORDER, .width = {Su(1), Su(1), Su(1), Su(1), 0}}}) {
         declare_atlas_list(ctx, proj);
         CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(1))}}, .backgroundColor = C_BORDER}) {}
@@ -2367,7 +2395,7 @@ static void handle_canvas_input(void) {
      * stay live while a text field holds focus. A press outside the panels also blurs that field (see
      * the blur-request block before nt_ui_begin). */
     if (gui_canvas_get_mode(&s_canvas) != GUI_CANVAS_ATLAS || !gui_canvas_has_atlas(&s_canvas) ||
-        s_confirm_open || s_about_open || s_edit_kind != EDIT_NONE) {
+        s_confirm_open || s_about_open || s_export_open || s_edit_kind != EDIT_NONE) {
         s_lmb_armed = s_lmb_panning = s_mmb_panning = false;
         return;
     }
@@ -2496,7 +2524,7 @@ static void declare_canvas_strip(nt_ui_context_t *ctx, bool atlas) {
             s_pending_pack = true;
         }
         if (ui_btn(ctx, s_id_btn_export, "Export", &g_btn, s_pack_has_sources, 78.0F, 26.0F, &g_body)) {
-            s_pending_export = true;
+            s_export_open = true;
         }
         if (ui_btn(ctx, s_id_btn_refresh, "\xE2\x9F\xB3", &g_btn_ghost, true, 34.0F, 26.0F, &g_body)) { /* U+27F3 */
             s_pending_refresh = true;
@@ -2693,8 +2721,15 @@ static void declare_canvas(nt_ui_context_t *ctx) {
                 ui_label_fit(ctx, label, &g_warn, cap_w, 0U);
                 nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Restore the file and press Refresh (F5) to bring it back.", &g_caption);
             } else {
-                nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "No atlas preview yet -- press Pack (Ctrl+P) to build it.", &g_canvas_hint);
-                nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Or select a sprite on the left to preview its source image.", &g_caption);
+                /* Bounded, centered column so long hints WRAP within the canvas instead of clipping both edges. */
+                const float hint_w = fmaxf(S(80.0F), fminf(cap_w, S(460.0F)));
+                CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(hint_w), CLAY_SIZING_FIT(0)},
+                                 .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                                 .childGap = Su(6),
+                                 .childAlignment = {CLAY_ALIGN_X_CENTER, CLAY_ALIGN_Y_CENTER}}}) {
+                    nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "No atlas preview yet -- press Pack (Ctrl+P) to build it.", &g_canvas_hint);
+                    nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Or select a sprite on the left to preview its source image.", &g_canvas_hint);
+                }
             }
         }
         /* stats/readout line; dimmed when stale (it describes the LAST pack, not current settings) */
@@ -2820,6 +2855,126 @@ static void declare_tooltips(nt_ui_context_t *ctx) {
                         &s_tip_style);
 }
 
+/* Export dialog (mouse-complete): every atlas's targets, toggle/browse per target, then Export runs the
+ * same do_export path. All edits go through gui_project_set_target (dirty + undo, no parallel state). */
+static void declare_export_modal(nt_ui_context_t *ctx) {
+    if (!nt_ui_modal_visible(ctx, s_id_export_modal, &s_modal_style, &s_export_open)) {
+        return;
+    }
+    tp_project *p = gui_project_get();
+    int enabled_targets = 0;
+    int atlases_with = 0;
+    int total_targets = 0;
+    int line_count = 0;
+    for (int ai = 0; p && ai < p->atlas_count; ai++) {
+        const tp_project_atlas *a = &p->atlases[ai];
+        if (a->target_count > 0) {
+            atlases_with++;
+            line_count += 1 + a->target_count;
+        }
+        for (int ti = 0; ti < a->target_count; ti++) {
+            total_targets++;
+            enabled_targets += a->targets[ti].enabled ? 1 : 0;
+        }
+    }
+    CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(S(560)), CLAY_SIZING_FIT(0)},
+                     .padding = {Su(22), Su(22), Su(20), Su(20)},
+                     .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                     .childGap = Su(14)},
+          .backgroundColor = C_PANEL,
+          .cornerRadius = CLAY_CORNER_RADIUS(S(8)),
+          .border = {.color = C_BORDER, .width = {Su(1), Su(1), Su(1), Su(1), 0}}}) {
+        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Export", &g_body);
+        if (total_targets == 0) {
+            nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "This project has no export targets yet.", &g_caption);
+            CLAY({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = Su(12), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+                if (ui_btn(ctx, nt_ui_id("export/goto"), "Add targets in the panel", &g_btn_accent, true, 0.0F, 34.0F, &g_body)) {
+                    s_export_open = false;
+                    s_sec_export_open = true;
+                }
+                if (ui_btn(ctx, nt_ui_id("export/close0"), "Close", &g_btn, true, 100.0F, 34.0F, &g_body)) {
+                    s_export_open = false;
+                }
+            }
+            nt_ui_modal_end(ctx);
+            return;
+        }
+        const int ne = tp_exporter_count();
+        float list_h = (float)line_count * S(30.0F) + S(6.0F);
+        const float list_cap = S(330.0F);
+        if (list_h > list_cap) {
+            list_h = list_cap;
+        }
+        nt_ui_scroll_begin(ctx, NULL, nt_ui_id("export/scroll"), &s_panel_scroll,
+                           &(Clay_ElementDeclaration){.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(list_h)}}});
+        CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)}, .layoutDirection = CLAY_TOP_TO_BOTTOM, .childGap = Su(4), .padding = {0, Su(8), 0, 0}}}) {
+            for (int ai = 0; ai < p->atlas_count; ai++) {
+                tp_project_atlas *a = &p->atlases[ai];
+                if (a->target_count == 0) {
+                    continue;
+                }
+                nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), a->name, &g_row);
+                for (int ti = 0; ti < a->target_count && ti < GUI_MAX_TARGETS; ti++) {
+                    tp_project_target *t = &a->targets[ti];
+                    char idb[48];
+                    (void)snprintf(idb, sizeof idb, "export/a%d_t%d", ai, ti);
+                    const uint32_t rid = nt_ui_id(idb);
+                    const char *exp_name = t->exporter_id;
+                    for (int i = 0; i < ne; i++) {
+                        const tp_exporter *e = tp_exporter_at(i);
+                        if (e && strcmp(e->id, t->exporter_id) == 0) {
+                            exp_name = (e->display_name && e->display_name[0]) ? e->display_name : e->id;
+                            break;
+                        }
+                    }
+                    const bool has_path = (t->out_path && t->out_path[0] != '\0');
+                    const nt_ui_events_t pev = nt_ui_events(ctx, nt_ui_child_id(rid, "path"), NULL);
+                    if (pev.clicked) {
+                        s_pending_export_browse_atlas = ai;
+                        s_pending_export_browse_target = ti;
+                    }
+                    CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H))},
+                                     .padding = {Su(8), Su(6), 0, 0},
+                                     .childGap = Su(8),
+                                     .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+                        if (tp_checkbox(ctx, nt_ui_child_id(rid, "en"), t->enabled, true)) {
+                            gui_project_set_target(ai, ti, t->exporter_id, t->out_path, !t->enabled);
+                        }
+                        CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(S(96)), CLAY_SIZING_GROW(0)}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+                            ui_label_fit(ctx, exp_name, &g_caption, S(96), 0U);
+                        }
+                        CLAY({.id = {.id = nt_ui_child_id(rid, "path")},
+                              .layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .padding = {Su(6), Su(6), 0, 0}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}},
+                              .backgroundColor = pev.hovered ? C_HOVER : C_BG,
+                              .cornerRadius = CLAY_CORNER_RADIUS(S(4))}) {
+                            ui_label_fit(ctx, has_path ? t->out_path : "(click to set output path)", has_path ? &g_row : &g_dim, S(300), 0U);
+                        }
+                        if (ui_btn(ctx, nt_ui_child_id(rid, "br"), "\xE2\x80\xA6", &g_btn_ghost, true, 28.0F, 22.0F, &g_caption)) {
+                            s_pending_export_browse_atlas = ai;
+                            s_pending_export_browse_target = ti;
+                        }
+                    }
+                }
+            }
+        }
+        nt_ui_scroll_end(ctx);
+        char summary[96];
+        (void)snprintf(summary, sizeof summary, "%d target%s enabled across %d atlas%s", enabled_targets, enabled_targets == 1 ? "" : "s", atlases_with,
+                       atlases_with == 1 ? "" : "es");
+        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), summary, &g_caption);
+        CLAY({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = Su(12), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+            if (ui_btn(ctx, nt_ui_id("export/run"), "Export", &g_btn_accent, enabled_targets > 0, 120.0F, 34.0F, &g_body)) {
+                s_pending_export = true;
+                s_export_open = false;
+            }
+            if (ui_btn(ctx, nt_ui_id("export/cancel"), "Cancel", &g_btn, true, 100.0F, 34.0F, &g_body)) {
+                s_export_open = false;
+            }
+        }
+    }
+    nt_ui_modal_end(ctx);
+}
+
 static void declare_confirm_modal(nt_ui_context_t *ctx) {
     if (nt_ui_modal_visible(ctx, s_id_modal, &s_modal_style, &s_confirm_open)) {
         CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(S(460)), CLAY_SIZING_FIT(0)},
@@ -2881,7 +3036,6 @@ static void declare_about_modal(nt_ui_context_t *ctx) {
 // #endregion
 
 // #region right settings panel (regions F/G + per-region packing overrides)
-#define PANEL_LABEL_W 116.0F
 static const char *const k_shape_names[3] = {"Rect", "Convex hull", "Concave contour"};
 static const int k_size_presets[7] = {256, 512, 1024, 2048, 4096, 8192, 16384};
 
@@ -2895,7 +3049,9 @@ static bool ui_int_field(nt_ui_context_t *ctx, uint32_t id, char *buf, size_t ca
     }
     static const nt_ui_input_props_t np = {
         .placeholder = NULL, .allow = nt_ui_filter_numeric, .max_length = 0U, .keyboard = NT_UI_KB_NUMERIC, .password = false};
-    const Clay_ElementDeclaration decl = {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H - 4.0F))}}};
+    /* min width keeps the field from collapsing to 0 on a narrow-clamped panel -- a 0-width input
+     * collapses its floating text/caret clip and trips the engine empty-scissor assert (max 0 = unbounded). */
+    const Clay_ElementDeclaration decl = {.layout = {.sizing = {CLAY_SIZING_GROW(S(28.0F), 0), CLAY_SIZING_FIXED(S(BASE_ROW_H - 4.0F))}}};
     bool submitted = false;
     const bool changed = nt_ui_input_text(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, id, buf, cap, &np, &s_num_input,
                                           &decl, enabled && !s_blur_inputs, &submitted);
@@ -2920,7 +3076,9 @@ static bool ui_float_field(nt_ui_context_t *ctx, uint32_t id, char *buf, size_t 
     }
     static const nt_ui_input_props_t np = {
         .placeholder = NULL, .allow = nt_ui_filter_numeric, .max_length = 0U, .keyboard = NT_UI_KB_NUMERIC, .password = false};
-    const Clay_ElementDeclaration decl = {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H - 4.0F))}}};
+    /* min width keeps the field from collapsing to 0 on a narrow-clamped panel -- a 0-width input
+     * collapses its floating text/caret clip and trips the engine empty-scissor assert (max 0 = unbounded). */
+    const Clay_ElementDeclaration decl = {.layout = {.sizing = {CLAY_SIZING_GROW(S(28.0F), 0), CLAY_SIZING_FIXED(S(BASE_ROW_H - 4.0F))}}};
     bool submitted = false;
     const bool changed = nt_ui_input_text(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, id, buf, cap, &np, &s_num_input,
                                           &decl, enabled && !s_blur_inputs, &submitted);
@@ -2946,7 +3104,9 @@ static bool ui_text_field(nt_ui_context_t *ctx, uint32_t id, char *buf, size_t c
     }
     const nt_ui_input_props_t tp = {
         .placeholder = placeholder, .allow = NULL, .max_length = 0U, .keyboard = NT_UI_KB_TEXT, .password = false};
-    const Clay_ElementDeclaration decl = {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H - 4.0F))}}};
+    /* min width keeps the field from collapsing to 0 on a narrow-clamped panel -- a 0-width input
+     * collapses its floating text/caret clip and trips the engine empty-scissor assert (max 0 = unbounded). */
+    const Clay_ElementDeclaration decl = {.layout = {.sizing = {CLAY_SIZING_GROW(S(28.0F), 0), CLAY_SIZING_FIXED(S(BASE_ROW_H - 4.0F))}}};
     bool submitted = false;
     const bool changed = nt_ui_input_text(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, id, buf, cap, &tp, &s_num_input,
                                           &decl, enabled && !s_blur_inputs, &submitted);
@@ -2986,10 +3146,9 @@ static void panel_note(nt_ui_context_t *ctx, const char *text) {
     CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H))},                                 \
                      .childGap = Su(8),                                                                                 \
                      .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {                                    \
-        CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(S(PANEL_LABEL_W)), CLAY_SIZING_GROW(0)},                          \
-                         .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}},                                   \
-              .clip = {.horizontal = true}}) {                                                                          \
-            ui_label_fit(ctx, (lbl_text), (lbl_style), S(PANEL_LABEL_W), 0U);                                           \
+        CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(s_panel_label_w), CLAY_SIZING_GROW(0)},                           \
+                         .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {                                \
+            ui_label_fit(ctx, (lbl_text), (lbl_style), s_panel_label_w, 0U);                                            \
         }                                                                                                              \
         CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)},                                         \
                          .childGap = Su(6),                                                                            \
@@ -3023,11 +3182,16 @@ static bool row_slider(nt_ui_context_t *ctx, const char *label, uint32_t id, cha
                        int mx, bool enabled, int *out) {
     int v = cur;
     bool changed = false;
+    /* On a narrow-clamped panel the fixed-width slider + input can't share the widget cell; drop the
+     * slider (input stays, exact entry still works) so nothing overruns the panel. */
+    const bool show_slider = s_right_panel_w >= S(250.0F);
     PANEL_ROW_BEGIN(label, enabled ? &g_row : &g_dim) {
-        const Clay_ElementDeclaration sd = {
-            .layout = {.sizing = {CLAY_SIZING_FIT(0), CLAY_SIZING_FIXED(S(20.0F))}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}};
-        if (nt_ui_slider_int(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, id, NULL, &v, mn, mx, 1, &s_slider_style, &sd, enabled)) {
-            changed = true;
+        if (show_slider) {
+            const Clay_ElementDeclaration sd = {
+                .layout = {.sizing = {CLAY_SIZING_FIT(0), CLAY_SIZING_FIXED(S(20.0F))}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}};
+            if (nt_ui_slider_int(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, id, NULL, &v, mn, mx, 1, &s_slider_style, &sd, enabled)) {
+                changed = true;
+            }
         }
         int iv = 0;
         if (ui_int_field(ctx, nt_ui_child_id(id, "num"), buf, cap, v, mn, mx, enabled, &iv)) {
@@ -3219,7 +3383,7 @@ static void declare_region_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
     char fname[224];
     (void)snprintf(fname, sizeof fname, "%s", (ov && ov->rename) ? ov->rename : sprite);
     PANEL_ROW_BEGIN("Final name", &g_row) {
-        ui_label_fit(ctx, fname, &g_body, S(PANEL_LABEL_W + 30.0F), 0U);
+        ui_label_fit(ctx, fname, &g_body, right_panel_text_w(s_panel_label_w + S(14.0F)), 0U);
         if (ui_btn(ctx, nt_ui_id("reg/rename"), "Rename", &g_btn_ghost, true, 0.0F, 24.0F, &g_caption)) {
             start_sprite_edit_named(sprite);
         }
@@ -3235,7 +3399,7 @@ static void declare_region_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
         (void)snprintf(src, sizeof src, "%s  (pack to measure)", path_last(row->abs));
     }
     PANEL_ROW_BEGIN("Source", &g_caption) {
-        ui_label_fit(ctx, src, &g_caption, S(150.0F), 0U);
+        ui_label_fit(ctx, src, &g_caption, right_panel_text_w(s_panel_label_w + S(14.0F)), 0U);
     }
     PANEL_ROW_END;
 
@@ -3280,7 +3444,7 @@ static void declare_region_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
         (void)snprintf(rd, sizeof rd, "frame %dx%d @ %d,%d  \xC2\xB7  %s  \xC2\xB7  %s", s->frame.w, s->frame.h,
                        s->frame.x, s->frame.y, transform_decode_str(s->transform), geom);
         PANEL_ROW_BEGIN("Packed", &g_caption) {
-            ui_label_fit(ctx, rd, &g_caption, S(150.0F), 0U);
+            ui_label_fit(ctx, rd, &g_caption, right_panel_text_w(s_panel_label_w + S(14.0F)), 0U);
         }
         PANEL_ROW_END;
     }
@@ -3472,7 +3636,7 @@ static void declare_animation_editor(nt_ui_context_t *ctx, tp_project_atlas *a) 
                 commit_anim_rename();
             }
         } else {
-            ui_label_fit(ctx, an->id, &g_body, S(PANEL_LABEL_W - 20.0F), 0U);
+            ui_label_fit(ctx, an->id, &g_body, right_panel_text_w(s_panel_label_w + S(14.0F)), 0U);
             if (ui_btn(ctx, nt_ui_id("anim/rename"), "Rename", &g_btn_ghost, true, 0.0F, 24.0F, &g_caption)) {
                 start_anim_edit(s_sel_anim);
             }
@@ -3546,8 +3710,7 @@ static void declare_animation_editor(nt_ui_context_t *ctx, tp_project_atlas *a) 
               .cornerRadius = CLAY_CORNER_RADIUS(S(4))}) {
             char lab[224];
             (void)snprintf(lab, sizeof lab, "%02d  %s", fi + 1, an->frames[fi]);
-            CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}},
-                  .clip = {.horizontal = true}}) {
+            CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
                 ui_label_fit(ctx, lab, &g_row, right_panel_text_w(S(98.0F)), row_id); /* reserve: up/down/x + gaps */
             }
             if (ui_btn(ctx, nt_ui_child_id(row_id, "up"), "\xE2\x86\x91", &g_btn_ghost, fi > 0, 26.0F, 22.0F, &g_caption)) {
@@ -3584,7 +3747,6 @@ static void declare_right_panel(nt_ui_context_t *ctx) {
                      .layoutDirection = CLAY_TOP_TO_BOTTOM},
           .backgroundColor = C_PANEL,
           .cornerRadius = CLAY_CORNER_RADIUS(S(8)),
-          .clip = {.horizontal = true},
           .border = {.color = C_BORDER, .width = {Su(1), Su(1), Su(1), Su(1), 0}}}) {
         nt_ui_scroll_begin(ctx, NULL, nt_ui_id("panel/scroll"), &s_panel_scroll,
                            &(Clay_ElementDeclaration){.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}});
@@ -4080,6 +4242,29 @@ static void run_selftest(void) {
     s_about_open = true;
     nt_log_info("SELFTEST: About modal opened=%d", s_about_open);
 
+    /* --- Export dialog: exercise its data path (toggle a target the way the dialog checkbox does) and
+     * leave it open so the warmup frames render the modal (a Clay layout bug there would crash them). --- */
+    {
+        tp_project *ep = gui_project_get();
+        int e_atlas = -1;
+        for (int i = 0; ep && i < ep->atlas_count; i++) {
+            if (ep->atlases[i].target_count > 0) {
+                e_atlas = i;
+                break;
+            }
+        }
+        if (e_atlas >= 0) {
+            const tp_project_target *t0 = &gui_project_get()->atlases[e_atlas].targets[0];
+            const bool was = t0->enabled;
+            gui_project_set_target(e_atlas, 0, t0->exporter_id, t0->out_path, !was); /* dialog toggle path */
+            const bool now = gui_project_get()->atlases[e_atlas].targets[0].enabled;
+            gui_project_set_target(e_atlas, 0, gui_project_get()->atlases[e_atlas].targets[0].exporter_id,
+                                   gui_project_get()->atlases[e_atlas].targets[0].out_path, was); /* restore */
+            nt_log_info("SELFTEST: export-dialog toggle atlas=%d target0 %d->%d (restored=%d)", e_atlas, was, now, was);
+        }
+        s_export_open = true;
+    }
+
     /* Leave a live selection so the auto-quit frames draw the decoded image. */
     tp_project *cur = gui_project_get();
     const int ns = cur ? cur->atlases[0].source_count : 0;
@@ -4177,6 +4362,7 @@ static void selftest_pre_frame(void) {
             return; /* warm up: first scene + GL page uploads settle */
         }
         s_about_open = false;
+        s_export_open = false; /* close the Export dialog exercised during warmup before the pixel probe */
         preview_stop();
         int found = -1;
         tp_project *p = gui_project_get();
@@ -4223,6 +4409,41 @@ static void selftest_pre_frame(void) {
             free(s_st_baseline);
             s_st_baseline = NULL;
             s_st_phase = 3;
+            s_st_pf = 0;
+        }
+    } else if (s_st_phase == 3) {
+        /* Section-toggle sweep at a CLAMPED panel width: collapsed/expanded + empty sections (the fresh
+         * project has no sprites/anims) under the clipped scroll must never yield a degenerate float. */
+        g_nt_window.fb_width = 520;
+        g_nt_window.fb_height = 440;
+        s_sec_atlas_open = (s_st_pf / 2) % 2 == 0;
+        s_atlas_adv_open = (s_st_pf / 3) % 2 == 0;
+        s_sec_region_open = (s_st_pf / 2) % 2 != 0;
+        s_sec_anim_open = (s_st_pf / 4) % 2 == 0;
+        s_sec_export_open = (s_st_pf / 3) % 2 != 0;
+        if (s_st_pf > 16) {
+            g_nt_window.fb_width = 1280;
+            g_nt_window.fb_height = 800;
+            s_sec_atlas_open = s_atlas_adv_open = s_sec_region_open = s_sec_anim_open = s_sec_export_open = true;
+            nt_log_info("SELFTEST: section-toggle sweep OK (no empty-scissor assert)");
+            s_st_phase = 4;
+            s_st_pf = 0;
+        }
+    } else if (s_st_phase == 4) {
+        /* Tiny-window sweep: the layout solve must not assert (empty scissor) at any size. Override the
+         * framebuffer dims for two frames each (restored at the end) -- nt_window_poll re-reads them next
+         * frame, so this only affects the current frame's scale. Covers panels-declared-and-clamped down
+         * to the have_room skip threshold. */
+        static const int sizes[8][2] = {{700, 500}, {560, 420}, {480, 360}, {420, 320}, {360, 280}, {240, 180}, {120, 120}, {64, 64}};
+        const int idx = s_st_pf / 2;
+        if (idx >= 8) {
+            g_nt_window.fb_width = 1280;
+            g_nt_window.fb_height = 800;
+            nt_log_info("SELFTEST: tiny-window sweep OK (no empty-scissor assert)");
+            s_st_phase = 5;
+        } else {
+            g_nt_window.fb_width = (uint32_t)sizes[idx][0];
+            g_nt_window.fb_height = (uint32_t)sizes[idx][1];
         }
     } else {
         nt_app_quit();
@@ -4267,7 +4488,7 @@ static void selftest_post_draw(void) {
 /* Global shortcuts routed through the SAME actions as the menus. Text-input focus swallows
  * them first (no accidental global actions while typing); an open modal blocks them too. */
 static void handle_shortcuts(void) {
-    if (nt_ui_input_any_focused(s_ctx) || s_confirm_open || s_about_open) {
+    if (nt_ui_input_any_focused(s_ctx) || s_confirm_open || s_about_open || s_export_open) {
         return;
     }
     /* Preview + editor accelerators (each also a button; §3.3e). */
@@ -4308,7 +4529,7 @@ static void handle_shortcuts(void) {
     } else if (nt_input_key_is_pressed(NT_KEY_P)) {
         s_pending_pack = true;
     } else if (nt_input_key_is_pressed(NT_KEY_E)) {
-        s_pending_export = true;
+        s_export_open = true;
     }
 }
 // #endregion
@@ -4333,6 +4554,8 @@ static void frame(void) {
         if (s_edit_kind != EDIT_NONE) {
             cancel_edit();
             set_status("Rename cancelled.");
+        } else if (s_export_open) {
+            s_export_open = false;
         } else if (s_about_open) {
             s_about_open = false;
         } else if (s_confirm_open) {
@@ -4487,10 +4710,17 @@ static void frame(void) {
                          .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_TOP}},
               .backgroundColor = C_BG}) {
             declare_menubar(s_ctx);
+            /* Below this the columns can't lay out without collapsing a clip/input box to 0 (empty-scissor
+             * assert); skip the whole middle row rather than declare a degenerate subtree. */
+            const bool have_room = scale.logical_w >= S(280.0F) && scale.logical_h >= S(200.0F);
             CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = Su(8), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_TOP}}}) {
-                declare_left_panel(s_ctx);
-                declare_canvas(s_ctx);
-                declare_right_panel(s_ctx);
+                if (have_room) {
+                    declare_left_panel(s_ctx);
+                    declare_canvas(s_ctx);
+                    declare_right_panel(s_ctx);
+                } else {
+                    nt_ui_label(s_ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Window too small.", &g_caption);
+                }
             }
             declare_statusbar(s_ctx);
         }
@@ -4501,6 +4731,7 @@ static void frame(void) {
         declare_tooltips(s_ctx);
         declare_confirm_modal(s_ctx);
         declare_about_modal(s_ctx);
+        declare_export_modal(s_ctx);
 
         nt_ui_end(s_ctx);
 
