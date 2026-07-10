@@ -118,10 +118,12 @@ skipping the serialize→parse round-trip). No upstream dependency remains.
 **Deliverables**
 - PNG page writer (vendored `stb_image_write` / `fpng`), straight-alpha default
   with an optional premultiply toggle.
-- Hardcoded C exporters over the canonical model: **`json-neotolis`** (own
-  full-fidelity schema: D4 transform mask, polygons, pivot, slice9 — the
-  reference target that supports everything), `json-hash` (TexturePacker-
-  compatible, rot90-only) and `json-array`.
+- Hardcoded C exporter over the canonical model: **`json-neotolis`** (own
+  full-fidelity schema: D4 transform mask, polygons, pivot, slice9, pages —
+  the reference target that supports everything). Schema documented in
+  `docs/formats/json-neotolis.md` as part of this phase.
+  (TexturePacker-compatible `json-hash`/`json-array` dropped from scope —
+  `SUMMARY.md §6 Q3`; possible later as Phase 7 templates.)
 - Exporter **registry** + capability-flag struct (even for hardcoded ones) so
   Phase 7 templates and the GUI/CLI reuse one interface.
 - Per-target packing (`SUMMARY.md §5h`): each export target packs with
@@ -133,8 +135,11 @@ skipping the serialize→parse round-trip). No upstream dependency remains.
   munging (ext strip / folder prefix), scale multiply — done before any exporter.
 
 **Acceptance**
-- Golden-file test: exported `json-hash` matches the documented TexturePacker
-  schema for a fixed sprite set (`SUMMARY.md §5d` example fields).
+- Golden-file test: exported `json-neotolis` matches its documented schema for
+  a fixture set covering rotated, flipped, trimmed, polygon, slice9, alias and
+  multi-page sprites (full fidelity — nothing dropped).
+- Per-target packing proven: same project exported to `json-neotolis` (full D4)
+  and to a rotation-less target produces different, correct layouts.
 - Exported PNG decodes to expected page dims; a parse-back reconstructs frames.
 - Byte-identical output on re-run (determinism).
 

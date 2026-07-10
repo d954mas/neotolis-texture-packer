@@ -120,8 +120,10 @@ Rationale: binary/fiddly formats need C; the long tail is cheaply data-driven; m
 
 - **Hardcode in C**: our `.ntpack` (already `nt_builder`'s job), **`json-neotolis`** (own
   full-fidelity schema — the only JSON that can express D4 flips/polygons/slice9, see §5h),
-  `json-hash`, `json-array`, and **Defold `.tpinfo`** (its rotation-corner and vertex/index rules
-  are error-prone — hardcode, don't template).
+  and **Defold `.tpinfo`** (its rotation-corner and vertex/index rules are error-prone —
+  hardcode, don't template). TexturePacker-compatible `json-hash`/`json-array` are **out of v1
+  scope** (owner: TexturePacker mattered only as the reference for hooking an external packer
+  into Defold); if ever demanded they land as Phase 7 templates.
 - **Mustache engine** (<1k LOC, vendor or implement) + FTP's **formatter extension**
   (`add/subtract/multiply/divide/offsetLeft/offsetRight/mirror/escapeName`) for coordinate conventions.
   Long-tail formats (libGDX `.atlas`, Godot, Phaser3, CSS) ship as templates.
@@ -298,8 +300,10 @@ what is available there", not error out.
 
 1. **CLI+GUI packaging** (§5c): two binaries (recommended) vs one dual-mode exe?
 2. **Project scope** (§5a): `atlases[]` array (recommended) vs one-atlas-per-file?
-3. **v1 foreign-format set**: Defold `.tpinfo` + `json-hash`/`json-array` are in. Which next —
-   libGDX `.atlas`, Godot, Phaser3, Unity? (Drives how early Phase 7's template engine lands.)
+3. **v1 format set — resolved (owner)**: `json-neotolis` + Defold `.tpinfo` + `.ntpack` only.
+   TexturePacker-compatible JSON dropped (TP was researched as the Defold-integration reference,
+   not a compatibility target). Others (libGDX, Godot, Phaser3) later as Phase 7 templates if
+   demanded.
 4. **Transform policy** (§4/§5g): OK to ship foreign atlases identity-only for v1 and add the
    optional rotation-only engine PR later? Or invest in that second PR up front?
 5. **Own-engine story**: is `.ntpack` (via `nt_builder`) the canonical own-engine output, with the
