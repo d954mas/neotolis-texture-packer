@@ -24,7 +24,8 @@ typedef enum tp_status {
     TP_STATUS_PAGE_NOT_FOUND,
     TP_STATUS_UNSUPPORTED_TEXTURE,
     TP_STATUS_OOM,
-    TP_STATUS_BUILDER_FAILED /* nt_builder start/finish returned an error (tp_pack) */
+    TP_STATUS_BUILDER_FAILED, /* nt_builder start/finish returned an error (tp_pack) */
+    TP_STATUS_BAD_PROJECT     /* malformed/invalid .ntpacker_project JSON (tp_project) */
 } tp_status;
 
 /* Fixed-size message buffer -- no heap, safe to embed by value on the stack. */
@@ -70,6 +71,7 @@ static inline const char *tp_status_str(tp_status status) {
         case TP_STATUS_UNSUPPORTED_TEXTURE: return "unsupported texture";
         case TP_STATUS_OOM: return "out of memory";
         case TP_STATUS_BUILDER_FAILED: return "builder failed";
+        case TP_STATUS_BAD_PROJECT: return "bad project file";
     }
     return "unknown status";
 }

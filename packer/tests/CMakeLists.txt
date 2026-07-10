@@ -41,3 +41,11 @@ target_link_libraries(tp_test_pack PRIVATE tp_core unity)
 target_compile_options(tp_test_pack PRIVATE -U_DLL)
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_pack_test")
 add_test(NAME tp_pack COMMAND tp_test_pack "${CMAKE_BINARY_DIR}/tp_pack_test")
+
+# Phase 3 tp_project load/save: round-trip, sparse, determinism, version refusal,
+# path relativization, to_settings bridge. Needs a scratch dir for project files.
+add_executable(tp_test_project test_project.c)
+target_link_libraries(tp_test_project PRIVATE tp_core unity)
+target_compile_options(tp_test_project PRIVATE -U_DLL)
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_project_test")
+add_test(NAME tp_project COMMAND tp_test_project "${CMAKE_BINARY_DIR}/tp_project_test")
