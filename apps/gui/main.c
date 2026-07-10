@@ -135,6 +135,7 @@ static const nt_ui_label_style_t g_link_base = {.font_id = 0, .font_size = FS_CA
 /* Dimmed caption for stale stats (they describe the LAST pack, not current settings). */
 static const nt_ui_label_style_t g_dim_base = {.font_id = 0, .font_size = FS_CAPTION, .color = {110.0F, 114.0F, 124.0F, 200.0F}};
 static nt_ui_label_style_t g_title, g_body, g_row, g_caption, g_canvas_hint, g_tag, g_warn, g_link, g_dim; /* scaled each frame */
+static nt_ui_label_style_t g_check;                                                                        /* checkbox tick glyph (scaled each frame) */
 
 static nt_ui_button_style_t g_btn = {
     .idle = {.bg_tint = 0xFF4A4238U, .scale = 1.0F, .opacity = 1.0F},
@@ -204,7 +205,6 @@ static nt_ui_input_style_t s_rename_input; /* inline rename field (atlas + sprit
  * is flat-color. Sizes are rescaled each frame in apply_ui_scale. */
 static nt_atlas_region_ref_t s_white_ref;
 static nt_ui_dropdown_style_t s_dd_style;
-static nt_ui_checkbox_style_t s_check_style;
 static nt_ui_slider_style_t s_slider_style;
 static nt_ui_input_style_t s_num_input;   /* numeric + short text fields */
 static nt_ui_scroll_style_t s_panel_scroll;
@@ -256,8 +256,9 @@ static char s_exe_dir[1024];
 
 // #region ui ids + menu state
 static uint32_t s_id_btn_pack, s_id_btn_export, s_id_btn_refresh, s_id_vlist, s_id_modal, s_id_about;
-static uint32_t s_id_canvas; /* the atlas-page custom element (bbox drives zoom/pan/hit input) */
-static uint32_t s_id_rename; /* the single inline rename input (one edit active at a time) */
+static uint32_t s_id_canvas;      /* the atlas-page custom element (bbox drives zoom/pan/hit input) */
+static uint32_t s_id_rename;      /* the single inline rename input (one edit active at a time) */
+static uint32_t s_id_right_panel; /* settings-panel container (bbox: press-outside blurs focused inputs) */
 static bool s_ids_ready;
 
 static uint32_t s_id_mb_file, s_id_mb_edit, s_id_mb_view, s_id_mb_help;
@@ -333,6 +334,7 @@ static int s_preview_frame_count; /* resolved (missing-frame-skipped) frame coun
 static bool s_pending_open, s_pending_save, s_pending_save_as, s_pending_add_files, s_pending_add_folder, s_pending_add_atlas, s_pending_refresh;
 static bool s_pending_pack, s_pending_export;
 static bool s_pending_commit_edit; /* a press landed outside the active inline-edit field -> commit it */
+static bool s_blur_inputs;         /* one frame: a press landed outside the panels -> declare inputs disabled so the engine drops focus */
 static bool s_pending_add_anim;    /* "+ Animation" -> append empty animation, select it */
 static bool s_pending_create_anim; /* "Create animation from selection" */
 static bool s_pending_open_preview;/* open the anim preview player on s_ctx_anim / s_sel_anim */
@@ -359,6 +361,10 @@ static bool s_pack_has_sources, s_pack_stale;
 static double s_last_pack_ms;      /* wall-clock ms of the last successful pack (for the stats line) */
 static int s_last_pack_atlas = -1; /* which atlas that timing belongs to */
 static float s_content_w = 1280.0F; /* logical content width, for caption/status truncation */
+/* Runtime (already SCALED) column widths. Clamped narrow when the window can't fit both side panels +
+ * a minimal canvas, so the panels never get pushed off-screen (recomputed each frame). */
+static float s_left_panel_w = 300.0F;
+static float s_right_panel_w = 300.0F;
 
 /* --- right settings panel: session-remembered disclosure state + dropdown open bits --- */
 #define GUI_MAX_TARGETS 16
@@ -374,6 +380,7 @@ static int s_pending_browse_target = -1; /* target whose out-path "..." dialog i
 /* Numeric/text field edit buffers (game-owned; nt_ui_input edits in place). Synced from
  * the model each frame while unfocused, parsed+clamped into the model on edit. */
 static char s_nb_pad[16], s_nb_margin[16], s_nb_extrude[16], s_nb_maxv[16], s_nb_ppu[24];
+static char s_nb_alpha[16]; /* alpha-threshold numeric input (paired with the slider) */
 static char s_nb_ox[24], s_nb_oy[24], s_nb_s9[4][16];
 static char s_nb_ov_margin[16], s_nb_ov_extrude[16];
 static char s_nb_target_path[GUI_MAX_TARGETS][256];
@@ -654,11 +661,42 @@ static bool truncate_to_width(const char *src, float size, float max_w, char *ou
 
 /* Left-panel available text width for a row at `indent_px`, minus an optional [x] button. */
 static float left_row_text_w(float indent_px, bool has_x) {
-    float w = S(BASE_LEFT_PANEL_W - 24.0F) - indent_px - S(4.0F) - S(4.0F);
+    float w = s_left_panel_w - S(24.0F) - indent_px - S(4.0F) - S(4.0F);
     if (has_x) {
         w -= S(24.0F + 4.0F);
     }
     return (w < S(20.0F)) ? S(20.0F) : w;
+}
+
+/* Right-panel text width for a row, minus `reserved_px` (a trailing widget/button cluster). Used to
+ * ellipsize long names so they never overrun the (narrow-clamped) settings panel. */
+static float right_panel_text_w(float reserved_px) {
+    const float w = s_right_panel_w - S(20.0F) /* L+R padding */ - S(12.0F) /* scrollbar */ - reserved_px;
+    return (w < S(24.0F)) ? S(24.0F) : w;
+}
+
+/* Clamp the two fixed side-panel widths so the window always fits left + right + a minimal canvas.
+ * Below the fit threshold both panels scale down proportionally to a floor; the canvas (GROW) takes
+ * whatever remains. All values are in scaled layout units (== scale.logical_w units). */
+static void compute_panel_widths(float logical_w) {
+    const float base_l = S(BASE_LEFT_PANEL_W);
+    const float base_r = S(BASE_RIGHT_PANEL_W);
+    const float min_canvas = S(120.0F);
+    const float min_panel = S(120.0F);
+    const float overhead = S(20.0F) + (S(8.0F) * 2.0F); /* root L/R padding + two inter-column gaps */
+    const float base_sum = base_l + base_r;
+    const float avail = logical_w - min_canvas - overhead;
+    if (avail < base_sum && base_sum > 1.0F) {
+        float f = avail / base_sum;
+        if (f < 0.0F) {
+            f = 0.0F;
+        }
+        s_left_panel_w = fmaxf(base_l * f, min_panel);
+        s_right_panel_w = fmaxf(base_r * f, min_panel);
+    } else {
+        s_left_panel_w = base_l;
+        s_right_panel_w = base_r;
+    }
 }
 
 static void record_row_tip(uint32_t id, const char *full) {
@@ -1609,6 +1647,7 @@ static void ensure_ids(void) {
     s_id_modal = nt_ui_id("ntpacker/confirm_modal");
     s_id_about = nt_ui_id("ntpacker/about_modal");
     s_id_rename = nt_ui_id("ntpacker/rename_input");
+    s_id_right_panel = nt_ui_id("ntpacker/right_panel");
     s_id_mb_file = nt_ui_id("ntpacker/mb_file");
     s_id_mb_edit = nt_ui_id("ntpacker/mb_edit");
     s_id_mb_view = nt_ui_id("ntpacker/mb_view");
@@ -1650,17 +1689,6 @@ static void ensure_ids(void) {
     s_dd_style.row_selected.fill = RGBA8(52, 78, 120);
     s_dd_style.panel_corner_radius = 4U;
     s_dd_style.max_visible_rows = 8U;
-
-    s_check_style = nt_ui_checkbox_style_defaults();
-    s_check_style.text_base = (nt_ui_label_style_t){.font_id = 0, .font_size = 16.0F, .color = {206.0F, 212.0F, 222.0F, 255.0F}};
-    s_check_style.unchecked[NT_UI_CB_IDLE].box = s_white_ref;
-    s_check_style.unchecked[NT_UI_CB_IDLE].box_tint = RGBA8(74, 78, 88);
-    s_check_style.checked[NT_UI_CB_IDLE].box = s_white_ref;
-    s_check_style.checked[NT_UI_CB_IDLE].box_tint = RGBA8(78, 126, 192);
-    s_check_style.checked[NT_UI_CB_IDLE].check = s_white_ref;
-    s_check_style.checked[NT_UI_CB_IDLE].check_tint = RGBA8(240, 244, 250);
-    s_check_style.unchecked[NT_UI_CB_DISABLED].opacity = 0.4F;
-    s_check_style.checked[NT_UI_CB_DISABLED].opacity = 0.4F;
 
     s_slider_style = nt_ui_slider_style_defaults();
     s_slider_style.states[NT_UI_SLIDER_IDLE].track = s_white_ref;
@@ -1735,13 +1763,10 @@ static void apply_ui_scale(void) {
     s_dd_style.row_height = Su(26.0F);
     s_dd_style.min_width = Su(110.0F);
     s_dd_style.pad = Su(8.0F);
-    s_check_style.box_w = S(20.0F);
-    s_check_style.box_h = S(20.0F);
-    s_check_style.overlay_w = S(12.0F);
-    s_check_style.overlay_h = S(12.0F);
-    s_check_style.gap = S(8.0F);
-    s_check_style.text_base.font_size = S(FS_ROW);
-    s_slider_style.track_w = S(120.0F);
+    g_check = g_row_base;
+    g_check.font_size = S(13.0F);
+    g_check.color = (Clay_Color){225.0F, 236.0F, 250.0F, 255.0F};
+    s_slider_style.track_w = S(92.0F);
     s_slider_style.track_h = S(8.0F);
     s_slider_style.thumb_w = S(16.0F);
     s_slider_style.thumb_h = S(16.0F);
@@ -1792,6 +1817,41 @@ static void ui_label_fit(nt_ui_context_t *ctx, const char *text, const nt_ui_lab
     if (cut && tip_id != 0U) {
         record_row_tip(tip_id, text);
     }
+}
+
+/* Boolean checkbox: an outlined box that draws a centered check GLYPH (U+2713) when on. The engine
+ * nt_ui_checkbox only draws atlas art for the mark, which read as a solid blue square; the font
+ * already bakes the tick, so we hand-roll box + glyph. Returns true the frame it is clicked (the
+ * caller flips its own value, like the menu toggles). enabled=false = inert, dimmed. */
+static bool tp_checkbox(nt_ui_context_t *ctx, uint32_t id, bool cur, bool enabled) {
+    nt_ui_events_t ev = {0};
+    if (enabled) {
+        ev = nt_ui_events(ctx, id, NULL);
+    }
+    Clay_Color bg = (Clay_Color){42.0F, 46.0F, 56.0F, 255.0F};
+    if (!enabled) {
+        bg = (Clay_Color){32.0F, 34.0F, 40.0F, 255.0F};
+    } else if (ev.pressed) {
+        bg = (Clay_Color){36.0F, 40.0F, 50.0F, 255.0F};
+    } else if (ev.hovered) {
+        bg = (Clay_Color){54.0F, 60.0F, 74.0F, 255.0F};
+    }
+    const Clay_Color border = cur ? (Clay_Color){78.0F, 126.0F, 192.0F, 255.0F} : (Clay_Color){96.0F, 102.0F, 116.0F, 255.0F};
+    nt_ui_label_style_t glyph = g_check;
+    if (!enabled) {
+        glyph.color = (Clay_Color){120.0F, 126.0F, 138.0F, 255.0F};
+    }
+    CLAY({.id = {.id = id},
+          .layout = {.sizing = {CLAY_SIZING_FIXED(S(18.0F)), CLAY_SIZING_FIXED(S(18.0F))},
+                     .childAlignment = {CLAY_ALIGN_X_CENTER, CLAY_ALIGN_Y_CENTER}},
+          .backgroundColor = bg,
+          .cornerRadius = CLAY_CORNER_RADIUS(S(4)),
+          .border = {.color = border, .width = {Su(1), Su(1), Su(1), Su(1), 0}}}) {
+        if (cur) {
+            nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "\xE2\x9C\x93", &glyph); /* U+2713 check */
+        }
+    }
+    return enabled && ev.clicked;
 }
 // #endregion
 
@@ -2251,13 +2311,14 @@ static void declare_left_panel(nt_ui_context_t *ctx) {
     tp_project *proj = gui_project_get();
     tp_project_atlas *a = tp_project_get_atlas(proj, s_sel_atlas);
     s_row_tip_count = 0; /* per-frame; filled by ui_label_fit when a row truncates */
-    CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(S(BASE_LEFT_PANEL_W)), CLAY_SIZING_GROW(0)},
+    CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(s_left_panel_w), CLAY_SIZING_GROW(0)},
                      .padding = {Su(12), Su(12), Su(12), Su(12)},
                      .layoutDirection = CLAY_TOP_TO_BOTTOM,
                      .childGap = Su(6),
                      .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_TOP}},
           .backgroundColor = C_PANEL,
           .cornerRadius = CLAY_CORNER_RADIUS(S(8)),
+          .clip = {.horizontal = true},
           .border = {.color = C_BORDER, .width = {Su(1), Su(1), Su(1), Su(1), 0}}}) {
         declare_atlas_list(ctx, proj);
         CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(1))}}, .backgroundColor = C_BORDER}) {}
@@ -2302,8 +2363,11 @@ static void select_row_for_region(int region_idx) {
  * Selection never blocks pan/zoom. Runs after build_rows so region->row mapping sees current rows. */
 static void handle_canvas_input(void) {
     s_canvas.hover_sprite = -1;
+    /* NOTE: intentionally NOT gated on nt_ui_input_any_focused -- pan/zoom/select over the atlas must
+     * stay live while a text field holds focus. A press outside the panels also blurs that field (see
+     * the blur-request block before nt_ui_begin). */
     if (gui_canvas_get_mode(&s_canvas) != GUI_CANVAS_ATLAS || !gui_canvas_has_atlas(&s_canvas) ||
-        nt_ui_input_any_focused(s_ctx) || s_confirm_open || s_about_open || s_edit_kind != EDIT_NONE) {
+        s_confirm_open || s_about_open || s_edit_kind != EDIT_NONE) {
         s_lmb_armed = s_lmb_panning = s_mmb_panning = false;
         return;
     }
@@ -2484,7 +2548,7 @@ static void declare_canvas_strip(nt_ui_context_t *ctx, bool atlas) {
 static void declare_canvas_preview(nt_ui_context_t *ctx) {
     const tp_project_anim *an = current_anim();
     const bool have = (an != NULL && gui_pack_result(s_sel_atlas) != NULL && s_preview_frame_count > 0);
-    const float cap_w = s_content_w - S(BASE_LEFT_PANEL_W) - S(BASE_RIGHT_PANEL_W) - S(70.0F);
+    const float cap_w = s_content_w - s_left_panel_w - s_right_panel_w - S(70.0F);
     char caption[192];
     if (an) {
         const char *pb = (an->playback >= 0 && an->playback < 7) ? k_playback_names[an->playback] : "?";
@@ -2556,7 +2620,7 @@ static void declare_canvas(nt_ui_context_t *ctx) {
     }
     const bool atlas = gui_canvas_get_mode(&s_canvas) == GUI_CANVAS_ATLAS && gui_canvas_has_atlas(&s_canvas);
     const bool has_img = gui_canvas_has_image(&s_canvas);
-    const float cap_w = s_content_w - S(BASE_LEFT_PANEL_W) - S(BASE_RIGHT_PANEL_W) - S(70.0F);
+    const float cap_w = s_content_w - s_left_panel_w - s_right_panel_w - S(70.0F);
 
     /* caption / hover readout */
     char label[256];
@@ -2834,7 +2898,7 @@ static bool ui_int_field(nt_ui_context_t *ctx, uint32_t id, char *buf, size_t ca
     const Clay_ElementDeclaration decl = {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H - 4.0F))}}};
     bool submitted = false;
     const bool changed = nt_ui_input_text(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, id, buf, cap, &np, &s_num_input,
-                                          &decl, enabled, &submitted);
+                                          &decl, enabled && !s_blur_inputs, &submitted);
     if ((changed || submitted) && enabled) {
         long v = strtol(buf, NULL, 10);
         if (v < mn) {
@@ -2859,7 +2923,7 @@ static bool ui_float_field(nt_ui_context_t *ctx, uint32_t id, char *buf, size_t 
     const Clay_ElementDeclaration decl = {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H - 4.0F))}}};
     bool submitted = false;
     const bool changed = nt_ui_input_text(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, id, buf, cap, &np, &s_num_input,
-                                          &decl, enabled, &submitted);
+                                          &decl, enabled && !s_blur_inputs, &submitted);
     if ((changed || submitted) && enabled) {
         double v = strtod(buf, NULL);
         if (!(v > (double)mn)) {
@@ -2885,7 +2949,7 @@ static bool ui_text_field(nt_ui_context_t *ctx, uint32_t id, char *buf, size_t c
     const Clay_ElementDeclaration decl = {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H - 4.0F))}}};
     bool submitted = false;
     const bool changed = nt_ui_input_text(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, id, buf, cap, &tp, &s_num_input,
-                                          &decl, enabled, &submitted);
+                                          &decl, enabled && !s_blur_inputs, &submitted);
     return (changed || submitted) && enabled;
 }
 
@@ -2923,8 +2987,9 @@ static void panel_note(nt_ui_context_t *ctx, const char *text) {
                      .childGap = Su(8),                                                                                 \
                      .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {                                    \
         CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(S(PANEL_LABEL_W)), CLAY_SIZING_GROW(0)},                          \
-                         .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {                                \
-            nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), (lbl_text), (lbl_style));                                    \
+                         .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}},                                   \
+              .clip = {.horizontal = true}}) {                                                                          \
+            ui_label_fit(ctx, (lbl_text), (lbl_style), S(PANEL_LABEL_W), 0U);                                           \
         }                                                                                                              \
         CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)},                                         \
                          .childGap = Su(6),                                                                            \
@@ -2952,35 +3017,38 @@ static int row_combo(nt_ui_context_t *ctx, const char *label, uint32_t id, bool 
     return sel;
 }
 
-/* A labeled slider + numeric readout. Returns true (writes *out) on change. */
-static bool row_slider(nt_ui_context_t *ctx, const char *label, uint32_t id, int cur, int mn, int mx, bool enabled,
-                       int *out) {
+/* A labeled slider + editable numeric input, both bound to the same [mn,mx] int field (exact entry
+ * without the clumsy drag-only slider). Returns true (writes *out) on change from either control. */
+static bool row_slider(nt_ui_context_t *ctx, const char *label, uint32_t id, char *buf, size_t cap, int cur, int mn,
+                       int mx, bool enabled, int *out) {
     int v = cur;
     bool changed = false;
     PANEL_ROW_BEGIN(label, enabled ? &g_row : &g_dim) {
         const Clay_ElementDeclaration sd = {
             .layout = {.sizing = {CLAY_SIZING_FIT(0), CLAY_SIZING_FIXED(S(20.0F))}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}};
         if (nt_ui_slider_int(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, id, NULL, &v, mn, mx, 1, &s_slider_style, &sd, enabled)) {
-            *out = v;
             changed = true;
         }
-        char vb[16];
-        (void)snprintf(vb, sizeof vb, "%d", v);
-        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), vb, &g_caption);
+        int iv = 0;
+        if (ui_int_field(ctx, nt_ui_child_id(id, "num"), buf, cap, v, mn, mx, enabled, &iv)) {
+            v = iv;
+            changed = true;
+        }
     }
     PANEL_ROW_END;
+    if (changed) {
+        *out = v;
+    }
     return changed;
 }
 
 /* A labeled checkbox (indicator only; the text lives in the label cell). Returns true
  * (writes the flipped value to *out) on change. */
 static bool row_check(nt_ui_context_t *ctx, const char *label, uint32_t id, bool cur, bool enabled, bool *out) {
-    bool v = cur;
     bool changed = false;
     PANEL_ROW_BEGIN(label, enabled ? &g_row : &g_dim) {
-        const Clay_ElementDeclaration cd = {.layout = {.sizing = {CLAY_SIZING_FIT(0), CLAY_SIZING_FIXED(S(22.0F))}}};
-        if (nt_ui_checkbox(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, id, NULL, &v, &s_check_style, &cd, enabled)) {
-            *out = v;
+        if (tp_checkbox(ctx, id, cur, enabled)) {
+            *out = !cur;
             changed = true;
         }
     }
@@ -3071,7 +3139,8 @@ static void declare_atlas_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
     if (!extrude_ok) {
         panel_note(ctx, "Extrude requires Rect shape \xE2\x80\x94 use Padding for polygon modes.");
     }
-    if (row_slider(ctx, "Alpha threshold", nt_ui_id("set/alpha"), a->alpha_threshold, 0, 255, true, &iv) &&
+    if (row_slider(ctx, "Alpha threshold", nt_ui_id("set/alpha"), s_nb_alpha, sizeof s_nb_alpha, a->alpha_threshold, 0,
+                   255, true, &iv) &&
         iv != a->alpha_threshold) {
         a->alpha_threshold = iv;
         gui_project_touch_setting();
@@ -3261,9 +3330,10 @@ static void declare_region_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
     {
         bool on = (ov_margin != TP_PROJECT_OV_INHERIT);
         PANEL_ROW_BEGIN("Margin ovr", &g_row) {
-            const Clay_ElementDeclaration cd = {.layout = {.sizing = {CLAY_SIZING_FIT(0), CLAY_SIZING_FIXED(S(22.0F))}}};
-            const bool cbc = nt_ui_checkbox(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, nt_ui_id("reg/ov_mcb"), NULL, &on,
-                                            &s_check_style, &cd, true);
+            const bool cbc = tp_checkbox(ctx, nt_ui_id("reg/ov_mcb"), on, true);
+            if (cbc) {
+                on = !on;
+            }
             const int seed = (a->margin >= 1) ? (a->margin > 255 ? 255 : a->margin) : 1;
             if (cbc) {
                 gui_project_set_sprite_override(s_sel_atlas, sprite, GUI_SPRITE_OV_MARGIN, on ? seed : TP_PROJECT_OV_INHERIT);
@@ -3282,9 +3352,10 @@ static void declare_region_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
         const bool ex_enabled = (eff_shape == 0 /* RECT */);
         bool on = (ov_extrude != TP_PROJECT_OV_INHERIT);
         PANEL_ROW_BEGIN("Extrude ovr", ex_enabled ? &g_row : &g_dim) {
-            const Clay_ElementDeclaration cd = {.layout = {.sizing = {CLAY_SIZING_FIT(0), CLAY_SIZING_FIXED(S(22.0F))}}};
-            const bool cbc = nt_ui_checkbox(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, nt_ui_id("reg/ov_ecb"), NULL, &on,
-                                            &s_check_style, &cd, ex_enabled);
+            const bool cbc = tp_checkbox(ctx, nt_ui_id("reg/ov_ecb"), on, ex_enabled);
+            if (cbc) {
+                on = !on;
+            }
             const int seed = (a->extrude >= 1) ? (a->extrude > 255 ? 255 : a->extrude) : 1;
             if (cbc && ex_enabled) {
                 gui_project_set_sprite_override(s_sel_atlas, sprite, GUI_SPRITE_OV_EXTRUDE, on ? seed : TP_PROJECT_OV_INHERIT);
@@ -3345,11 +3416,8 @@ static void declare_export_targets(nt_ui_context_t *ctx, tp_project_atlas *a) {
               .cornerRadius = CLAY_CORNER_RADIUS(S(4))}) {
             /* row 1: enabled checkbox + exporter dropdown */
             CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H))}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
-                bool en = t->enabled;
-                const Clay_ElementDeclaration cd = {.layout = {.sizing = {CLAY_SIZING_FIT(0), CLAY_SIZING_FIXED(S(22.0F))}}};
-                if (nt_ui_checkbox(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, nt_ui_child_id(row_id, "en"), NULL, &en,
-                                   &s_check_style, &cd, true)) {
-                    gui_project_set_target(s_sel_atlas, ti, t->exporter_id, t->out_path, en);
+                if (tp_checkbox(ctx, nt_ui_child_id(row_id, "en"), t->enabled, true)) {
+                    gui_project_set_target(s_sel_atlas, ti, t->exporter_id, t->out_path, !t->enabled);
                 }
                 CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
                     const char *pv = (cur_exp >= 0) ? exp_labels[cur_exp] : t->exporter_id;
@@ -3478,8 +3546,9 @@ static void declare_animation_editor(nt_ui_context_t *ctx, tp_project_atlas *a) 
               .cornerRadius = CLAY_CORNER_RADIUS(S(4))}) {
             char lab[224];
             (void)snprintf(lab, sizeof lab, "%02d  %s", fi + 1, an->frames[fi]);
-            CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
-                ui_label_fit(ctx, lab, &g_row, S(PANEL_LABEL_W), row_id);
+            CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}},
+                  .clip = {.horizontal = true}}) {
+                ui_label_fit(ctx, lab, &g_row, right_panel_text_w(S(98.0F)), row_id); /* reserve: up/down/x + gaps */
             }
             if (ui_btn(ctx, nt_ui_child_id(row_id, "up"), "\xE2\x86\x91", &g_btn_ghost, fi > 0, 26.0F, 22.0F, &g_caption)) {
                 fact = 2;
@@ -3510,10 +3579,12 @@ static void declare_animation_editor(nt_ui_context_t *ctx, tp_project_atlas *a) 
 
 static void declare_right_panel(nt_ui_context_t *ctx) {
     tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
-    CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(S(BASE_RIGHT_PANEL_W)), CLAY_SIZING_GROW(0)},
+    CLAY({.id = {.id = s_id_right_panel},
+          .layout = {.sizing = {CLAY_SIZING_FIXED(s_right_panel_w), CLAY_SIZING_GROW(0)},
                      .layoutDirection = CLAY_TOP_TO_BOTTOM},
           .backgroundColor = C_PANEL,
           .cornerRadius = CLAY_CORNER_RADIUS(S(8)),
+          .clip = {.horizontal = true},
           .border = {.color = C_BORDER, .width = {Su(1), Su(1), Su(1), Su(1), 0}}}) {
         nt_ui_scroll_begin(ctx, NULL, nt_ui_id("panel/scroll"), &s_panel_scroll,
                            &(Clay_ElementDeclaration){.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}});
@@ -4049,6 +4120,146 @@ static void run_selftest(void) {
     nt_log_info("SELFTEST: end (undo:%d redo:%d history:%zuB; selection '%s')", gui_history_undo_depth(),
                 gui_history_redo_depth(), gui_history_bytes(), s_sel_abs);
 }
+
+/* --- Overlay pixel probe (F) + touch-on-render guard, driven across the auto-quit frames --- */
+static int s_st_phase;      /* 0 warmup, 1 outline pixel probe, 2 touch-on-render guard, 3 done */
+static int s_st_pf;         /* frames spent in the current phase */
+static int s_st_cyan0;      /* outline-OFF cyan count (baseline of the diff test) */
+static char *s_st_baseline; /* fresh-project bytes captured with zero input */
+static size_t s_st_baseline_n;
+
+/* Count blue/cyan overlay pixels in the current canvas box (framebuffer read, top-left origin). The
+ * region-outline colour is (0.30,0.72,1.0): B high, B>>R, G>R -- distinct from grey checker + sprites. */
+static int selftest_probe_cyan(void) {
+    if (gui_canvas_get_mode(&s_canvas) != GUI_CANVAS_ATLAS || !gui_canvas_has_atlas(&s_canvas)) {
+        return -1;
+    }
+    const float *bb = s_canvas.last_bb;
+    int x = (int)bb[0];
+    int y = (int)bb[1];
+    int w = (int)bb[2];
+    int h = (int)bb[3];
+    if (w < 8 || h < 8) {
+        return -1;
+    }
+    if (w > 900) {
+        w = 900;
+    }
+    if (h > 900) {
+        h = 900;
+    }
+    const uint32_t capn = (uint32_t)w * (uint32_t)h * 4u;
+    uint8_t *px = (uint8_t *)malloc(capn);
+    if (!px) {
+        return -1;
+    }
+    int cyan = -1;
+    if (nt_gfx_read_pixels(x, y, w, h, px, capn)) {
+        cyan = 0;
+        for (uint32_t i = 0; i + 3u < capn; i += 4u) {
+            const int r = px[i];
+            const int g = px[i + 1];
+            const int b = px[i + 2];
+            if (b > 150 && b > r + 40 && g > r + 25 && g > 110) {
+                cyan++;
+            }
+        }
+    }
+    free(px);
+    return cyan;
+}
+
+/* Top-of-frame phase driver: sets up each phase's scene BEFORE the layout/walk. */
+static void selftest_pre_frame(void) {
+    s_st_pf++;
+    if (s_st_phase == 0) {
+        if (s_st_pf < 12) {
+            return; /* warm up: first scene + GL page uploads settle */
+        }
+        s_about_open = false;
+        preview_stop();
+        int found = -1;
+        tp_project *p = gui_project_get();
+        for (int i = 0; p && i < p->atlas_count; i++) {
+            const tp_result *r = gui_pack_result(i);
+            if (r && r->sprite_count > 0 && r->page_count > 0) {
+                found = i;
+                break;
+            }
+        }
+        if (found < 0) {
+            s_sel_atlas = 0;
+            do_pack();
+            found = (gui_pack_result(0) && gui_pack_result(0)->sprite_count > 0) ? 0 : -1;
+        }
+        s_sel_atlas = (found >= 0) ? found : 0;
+        gui_canvas_select(&s_canvas, -1); /* no selection -> plain hull outlines */
+        s_canvas.mode = GUI_CANVAS_ATLAS;
+        s_canvas.show_outline = true;
+        s_canvas.show_trim = false;
+        s_canvas.show_frame = false;
+        s_canvas.show_pivot = false;
+        s_st_phase = 1;
+        s_st_pf = 0;
+    } else if (s_st_phase == 1) {
+        s_canvas.mode = GUI_CANVAS_ATLAS; /* hold ATLAS mode through the probe frames */
+        if (s_st_pf == 3) {
+            s_canvas.show_outline = false; /* OFF frame (diff baseline) */
+        } else if (s_st_pf == 6) {
+            s_canvas.show_outline = true; /* ON frame */
+        }
+    } else if (s_st_phase == 2) {
+        if (s_st_pf > 10) {
+            const bool dirty = gui_project_is_dirty();
+            char *nb = NULL;
+            size_t nn = 0;
+            tp_error e = {0};
+            const bool saved = tp_project_save_buffer(gui_project_get(), &nb, &nn, &e) == TP_STATUS_OK;
+            const bool same = saved && s_st_baseline && nn == s_st_baseline_n && memcmp(nb, s_st_baseline, nn) == 0;
+            nt_log_info("SELFTEST: touch-on-render guard dirty=%d bytes_match=%d (%zu vs %zu)", dirty, same, nn, s_st_baseline_n);
+            NT_ASSERT(!dirty); /* a control that writes its widget value on first render flips this */
+            NT_ASSERT(same);
+            free(nb);
+            free(s_st_baseline);
+            s_st_baseline = NULL;
+            s_st_phase = 3;
+        }
+    } else {
+        nt_app_quit();
+    }
+}
+
+/* Post-walk hook: pixel readbacks happen after nt_ui_walk has drawn the overlay. */
+static void selftest_post_draw(void) {
+    if (s_st_phase != 1) {
+        return;
+    }
+    if (s_st_pf == 3) {
+        s_st_cyan0 = selftest_probe_cyan();
+    } else if (s_st_pf == 6) {
+        const int c1 = selftest_probe_cyan();
+        nt_log_info("SELFTEST: outline pixel probe cyan off=%d on=%d delta=%d", s_st_cyan0, c1, c1 - s_st_cyan0);
+        NT_ASSERT(s_st_cyan0 >= 0 && c1 >= 0);
+        NT_ASSERT(c1 - s_st_cyan0 >= 8); /* the hull outline MUST add cyan pixels (regression: cam on-plane -> 0-width) */
+        /* Hand off to the touch-on-render guard: a truly fresh project, no input, all sections expanded. */
+        gui_project_new();
+        s_sel_atlas = 0;
+        reset_selection();
+        s_about_open = false;
+        s_sec_atlas_open = true;
+        s_atlas_adv_open = true;
+        s_sec_region_open = true;
+        s_sec_anim_open = true;
+        s_sec_export_open = true;
+        free(s_st_baseline);
+        s_st_baseline = NULL;
+        s_st_baseline_n = 0;
+        tp_error e = {0};
+        (void)tp_project_save_buffer(gui_project_get(), &s_st_baseline, &s_st_baseline_n, &e);
+        s_st_phase = 2;
+        s_st_pf = 0;
+    }
+}
 #endif
 // #endregion
 
@@ -4110,13 +4321,9 @@ static void frame(void) {
     gui_project_tick(g_nt_app.time); /* history coalescing clock */
 
 #ifdef NTPACKER_GUI_SELFTEST
-    /* Verification build: render a few real frames (proves the canvas draw + walk), then quit
-     * cleanly so the process returns 0 without interaction. */
-    static float s_selftest_elapsed = 0.0F;
-    s_selftest_elapsed += g_nt_app.dt;
-    if (s_selftest_elapsed > 2.5F) {
-        nt_app_quit();
-    }
+    /* Verification build: render real frames (proves the canvas draw + walk + a pixel-level proof that
+     * region outlines actually rasterize), verify no control writes the model without input, then quit. */
+    selftest_pre_frame();
 #endif
 
     /* dialogs + model mutations queued last frame run here, cleanly between frames */
@@ -4241,6 +4448,24 @@ static void frame(void) {
         }
         build_rows(gui_project_get(), tp_project_get_atlas(gui_project_get(), s_sel_atlas));
         s_content_w = scale.logical_w; /* for caption/status truncation */
+        compute_panel_widths(scale.logical_w); /* clamp side-panel widths so they never leave the screen */
+
+        /* Blur focused text fields when a press/scroll lands outside the settings panel (desktop UX).
+         * The engine exposes no programmatic blur, so we declare the inputs disabled for one frame,
+         * which drives the engine's disabled-drop of keyboard focus. Values commit on-change every
+         * keystroke, so nothing is lost. Uses last frame's panel bbox vs this frame's press. */
+        s_blur_inputs = false;
+        if (nt_ui_input_any_focused(s_ctx)) {
+            const nt_pointer_t *bp = &g_nt_input.pointers[0];
+            const bool press = bp->buttons[NT_BUTTON_LEFT].is_pressed || bp->buttons[NT_BUTTON_MIDDLE].is_pressed ||
+                               bp->buttons[NT_BUTTON_RIGHT].is_pressed || bp->wheel_dy != 0.0F;
+            if (press) {
+                const nt_ui_bbox_t rb = nt_ui_get_bbox(s_ctx, s_id_right_panel);
+                const bool in_panel = rb.width > 0.0F && bp->x >= rb.x && bp->x < (rb.x + rb.width) &&
+                                      bp->y >= rb.y && bp->y < (rb.y + rb.height);
+                s_blur_inputs = !in_panel;
+            }
+        }
 
         /* Bind the selected atlas's pack result to the canvas (repack / atlas switch / clear). */
         const tp_result *want = gui_pack_result(s_sel_atlas);
@@ -4301,6 +4526,10 @@ static void frame(void) {
         }
         nt_shape_renderer_set_vp((const float *)vp); /* overlays share the sprite view_proj */
         nt_shape_renderer_set_depth(false);
+        /* The line shader billboards width via cross(edge, cam_pos - point); overlay points sit on the
+         * z=0 layout plane, so a cam ON that plane (the memset-0 default) collapses `side` onto z and the
+         * lines render zero-width -> invisible. Park the camera far up +z so `side` lies in the screen plane. */
+        nt_shape_renderer_set_cam_pos((const float[3]){0.0F, 0.0F, 100000.0F});
 
         nt_ui_target_t target = nt_ui_scale_make_target(&scale);
         nt_ui_walk(s_ctx, &target);
@@ -4309,6 +4538,10 @@ static void frame(void) {
     nt_gfx_end_pass();
     nt_gfx_end_segment();
     nt_gfx_end_frame();
+
+#ifdef NTPACKER_GUI_SELFTEST
+    selftest_post_draw(); /* read back the drawn overlay before the buffers swap */
+#endif
 
     nt_window_swap_buffers();
 }
