@@ -78,4 +78,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*.zip
-          generate_release_notes: true
+          # Notes are written by hand after the build (all three matrix jobs
+          # share one release; auto-notes here would be appended three times).
+          generate_release_notes: false

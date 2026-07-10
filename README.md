@@ -108,6 +108,7 @@ over real assets.
 | `apps/gui/` | `ntpacker-gui` (engine `nt_ui` frontend) |
 | `apps/smoke/` | toolchain smoke test |
 | `examples/defold-demo/` | Defold project with real assets (from [extension-texturepacker](https://github.com/defold/extension-texturepacker), MIT) for the three-way atlas comparison: Defold native / TexturePacker / ntpacker |
+| `examples/showcase/` | ready-made project over 60 CC0 animal sprites ([Kenney](https://kenney.nl)) — open it and press Pack |
 | `docs/` | roadmap, UX design, format specs, competitor research |
 | `external/neotolis-engine` | the engine (submodule, read-only here — changes go upstream) |
 
