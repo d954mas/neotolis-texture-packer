@@ -70,8 +70,9 @@ freshly built `.ntpack` — the engine stays untouched (`SUMMARY.md §5g`).
   and texture-asset mip0 → pages (dims + straight-alpha RGBA8) and regions
   (frame rect from u16 UVs, D4 transform, trim, pivot, slice9, polygon
   verts/indices, aliases).
-- Name reverse-map: xxh64(input sprite name) → name string (tool knows all
-  inputs; hash collision reported as error).
+- Name reverse-map: engine `nt_hash64_str(raw sprite name)` → name string (the
+  atlas blob hashes the RAW name, not the normalized resource id — see
+  `docs/plans/phase-1.md §2`; tool knows all inputs; collision = error).
 - Export-friendly pack settings profile used for export/preview passes:
   `premultiplied=false`, `compress=NULL`, `gen_mipmaps=false`.
 
@@ -98,8 +99,11 @@ skipping the serialize→parse round-trip). No upstream dependency remains.
 - `packer/` (`tp_core`) target: `add_subdirectory(packer)` in root CMake; C17,
   engine warning flags (`nt_set_warning_flags`).
 - Canonical `tp_result` / `tp_sprite` / `tp_page` model (`SUMMARY.md §5d`).
-- `tp_pack(project*, arena*) -> tp_result*`: drives `nt_builder` begin/add/end,
-  captures the export snapshot into an owned `tp_result` (sorted by name).
+- `tp_pack(settings*, arena*) -> tp_result*`: takes a MINIMAL settings struct
+  (the full `.ntpacker_project` loader is Phase 3, not a 1b dependency); drives
+  `nt_builder` begin/add/end, writes the session `.ntpack`, parses it back via
+  `tp_pack_read` into an owned `tp_result` (sorted by name). `arena` is a
+  `tp_core`-local bump allocator (`tp_arena` — the engine exposes none).
 - No I/O opinions in core: it returns data; frontends write files.
 
 **Acceptance**
