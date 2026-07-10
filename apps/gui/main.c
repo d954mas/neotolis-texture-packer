@@ -20,6 +20,7 @@
 #include "core/nt_assert.h"
 #include "core/nt_core.h"
 #include "font/nt_font.h"
+#include "fpng/nt_fpng.h"
 #include "fs/nt_fs.h"
 #include "graphics/nt_gfx.h"
 #include "hash/nt_hash.h"
@@ -4484,6 +4485,90 @@ static void selftest_post_draw(void) {
 #endif
 // #endregion
 
+// #region screenshot mode (dev tooling)
+/* `--shot=out.png [--size=WxH] [--scale=F] [project]` renders the real UI at the requested window
+ * size, packs the selected atlas, selects the first packed region (so the Region panel populates),
+ * dumps ONE full-frame PNG at the pre-swap point, and quits. Lets tooling/agents SEE the actual UI
+ * at arbitrary resolutions without a human taking screenshots. Not documented in --help/README on
+ * purpose -- it is a dev seam, same spirit as NTPACKER_GUI_SELFTEST but available in every build. */
+static bool s_shot_active;
+static char s_shot_path[1024];
+static int s_shot_w = 1280;
+static int s_shot_h = 800;
+static float s_shot_scale;  /* 0 = keep the DPI-detected scale */
+static int s_shot_frame;    /* counts only frames the UI actually rendered (can_render) */
+static bool s_shot_written; /* capture happened; quit on the next frame boundary */
+
+/* Runs inside the can_render block, after build_rows (selection needs the row model). */
+static void shot_tick(void) {
+    if (!s_shot_active) {
+        return;
+    }
+    s_shot_frame++;
+    if (s_shot_frame == 6) { /* resources are bound; pack the selected atlas like Ctrl+P would */
+        if (s_sel_atlas < 0) {
+            s_sel_atlas = 0;
+        }
+        if (!gui_pack_result(s_sel_atlas)) {
+            do_pack();
+        }
+    } else if (s_shot_frame == 10) { /* pages uploaded; mimic a canvas click on region 0 */
+        const tp_result *r = gui_pack_result(s_sel_atlas);
+        if (r && r->sprite_count > 0) {
+            s_canvas.mode = GUI_CANVAS_ATLAS;
+            gui_canvas_select(&s_canvas, 0);
+            select_row_for_region(0);
+        }
+    }
+}
+
+/* Pre-swap capture (same GL-valid point as selftest_post_draw). */
+static void shot_post_draw(void) {
+    if (!s_shot_active || s_shot_frame < 16) {
+        return;
+    }
+    if (s_shot_written) { /* captured last frame -> quit at a clean frame boundary */
+        s_shot_active = false;
+        nt_app_quit();
+        return;
+    }
+    const uint32_t w = g_nt_window.fb_width;
+    const uint32_t h = g_nt_window.fb_height;
+    if (w == 0 || h == 0) {
+        return;
+    }
+    const uint32_t rgba_n = w * h * 4u;
+    uint8_t *rgba = (uint8_t *)malloc(rgba_n);
+    uint8_t *rgb = (uint8_t *)malloc((size_t)w * h * 3u);
+    uint8_t *png = (uint8_t *)malloc(rgba_n + 65536u);
+    bool ok = rgba && rgb && png && nt_gfx_read_pixels(0, 0, (int)w, (int)h, rgba, rgba_n);
+    if (ok) {
+        for (uint32_t i = 0, j = 0; i < rgba_n; i += 4u, j += 3u) {
+            rgb[j] = rgba[i];
+            rgb[j + 1] = rgba[i + 1];
+            rgb[j + 2] = rgba[i + 2];
+        }
+        nt_fpng_init();
+        const uint32_t n = nt_fpng_encode_rgb(rgb, w, h, png, rgba_n + 65536u);
+        FILE *f = (n > 0) ? fopen(s_shot_path, "wb") : NULL;
+        ok = f && fwrite(png, 1, n, f) == n;
+        if (f) {
+            (void)fclose(f);
+        }
+        if (ok) {
+            nt_log_info("SHOT: wrote %s (%ux%u, scale %.2f)", s_shot_path, w, h, (double)g_ui_scale);
+        }
+    }
+    if (!ok) {
+        nt_log_error("SHOT: capture failed (%s)", s_shot_path);
+    }
+    free(png);
+    free(rgb);
+    free(rgba);
+    s_shot_written = true;
+}
+// #endregion
+
 // #region keyboard shortcuts (ux.md §3.3d)
 /* Global shortcuts routed through the SAME actions as the menus. Text-input focus swallows
  * them first (no accidental global actions while typing); an open modal blocks them too. */
@@ -4672,6 +4757,7 @@ static void frame(void) {
         build_rows(gui_project_get(), tp_project_get_atlas(gui_project_get(), s_sel_atlas));
         s_content_w = scale.logical_w; /* for caption/status truncation */
         compute_panel_widths(scale.logical_w); /* clamp side-panel widths so they never leave the screen */
+        shot_tick(); /* screenshot mode: pack + select + (post-draw) capture; no-op unless --shot */
 
         /* Blur focused text fields when a press/scroll lands outside the settings panel (desktop UX).
          * The engine exposes no programmatic blur, so we declare the inputs disabled for one frame,
@@ -4773,6 +4859,7 @@ static void frame(void) {
 #ifdef NTPACKER_GUI_SELFTEST
     selftest_post_draw(); /* read back the drawn overlay before the buffers swap */
 #endif
+    shot_post_draw(); /* screenshot mode: full-frame PNG capture at the same pre-swap point */
 
     nt_window_swap_buffers();
 }
@@ -4788,8 +4875,31 @@ int main(int argc, char *argv[]) {
     }
     nt_log_info("ntpacker-gui: %s build (%s)", nt_engine_build_string(), nt_engine_preset_string());
 
-    g_nt_window.width = 1280;
-    g_nt_window.height = 800;
+    /* dev screenshot flags + optional project path (first non-flag arg; see the screenshot region) */
+    const char *proj_arg = NULL;
+    for (int i = 1; i < argc; i++) {
+        if (strncmp(argv[i], "--shot=", 7) == 0) {
+            (void)snprintf(s_shot_path, sizeof s_shot_path, "%s", argv[i] + 7);
+            s_shot_active = s_shot_path[0] != '\0';
+        } else if (strncmp(argv[i], "--size=", 7) == 0) {
+            int w = 0;
+            int h = 0;
+            if (sscanf(argv[i] + 7, "%dx%d", &w, &h) == 2 && w >= 64 && h >= 64 && w <= 16384 && h <= 16384) {
+                s_shot_w = w;
+                s_shot_h = h;
+            }
+        } else if (strncmp(argv[i], "--scale=", 8) == 0) {
+            const double f = atof(argv[i] + 8);
+            if (f >= 0.5 && f <= 4.0) {
+                s_shot_scale = (float)f;
+            }
+        } else if (proj_arg == NULL) {
+            proj_arg = argv[i];
+        }
+    }
+
+    g_nt_window.width = s_shot_active ? (uint32_t)s_shot_w : 1280;
+    g_nt_window.height = s_shot_active ? (uint32_t)s_shot_h : 800;
     nt_window_init();
     nt_input_init();
 
@@ -4885,6 +4995,9 @@ int main(int argc, char *argv[]) {
 
     g_ui_scale = detect_dpi_scale();
     nt_log_info("ntpacker-gui: UI scale %.2f (from system DPI)", (double)g_ui_scale);
+    if (s_shot_scale > 0.0F) {
+        g_ui_scale = s_shot_scale; /* screenshot mode: pin the scale for reproducible captures */
+    }
 
     /* editor state + the canvas custom-draw handler (registered outside begin/end) */
     gui_canvas_init(&s_canvas);
@@ -4897,14 +5010,14 @@ int main(int argc, char *argv[]) {
     gui_pack_init(pack_session);
 
     /* open a project passed on the command line (errors go to the status bar) */
-    if (argc > 1) {
+    if (proj_arg != NULL) {
         char err[256];
-        if (!gui_scan_exists(argv[1])) {
-            set_statusf("project not found: %s", argv[1]); /* stale argv -> continue with untitled (F6b) */
-        } else if (gui_project_open(argv[1], err, sizeof err) == TP_STATUS_OK) {
+        if (!gui_scan_exists(proj_arg)) {
+            set_statusf("project not found: %s", proj_arg); /* stale argv -> continue with untitled (F6b) */
+        } else if (gui_project_open(proj_arg, err, sizeof err) == TP_STATUS_OK) {
             set_statusf("Opened %s", gui_project_display_name());
         } else {
-            set_statusf("Open '%s' failed: %s", argv[1], err);
+            set_statusf("Open '%s' failed: %s", proj_arg, err);
         }
     } else {
         set_status("Ready. New project -- add files or a folder to start.");

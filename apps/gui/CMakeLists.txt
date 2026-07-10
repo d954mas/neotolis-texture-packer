@@ -41,6 +41,7 @@ target_link_libraries(ntpacker-gui PRIVATE
     nt_sprite_renderer nt_text_renderer nt_font nt_ui
     nt_render nt_hash nt_mem_scratch nt_shape_renderer
     nt_gfx nt_http_stub nt_fs nt_clipboard
+    nt_fpng # dev screenshot mode (--shot): PNG-encode the framebuffer readback
     tp_build stb_image tinyfiledialogs
 )
 # Generated asset header from the pack builder (ntpacker_ui_assets.h).
