@@ -352,6 +352,36 @@ free-tex-packer, whose absolute paths silently break on another machine).
    crash. CLI: warnings to stderr, still exit 0 if anything packed; non-zero only if
    a *requested* atlas has zero usable input and produces no output.
 
+### 3.7b Animations — assemble, edit, preview (owner requirement 2026-07-10)
+
+Model follows Defold's atlas exactly: an atlas holds named flipbook animations;
+every single image is implicitly also a 1-frame animation (Defold sprites
+always reference an animation id — upstream `basic.collection` uses both
+`"box_small_128"` (single frame) and `"BoxFlip"` (flipbook) as
+`default_animation`).
+
+- **Manual assembly is the primary UX** (owner: "как в Defold"): an
+  ANIMATIONS block for the selected atlas — list + "+ Animation"; selecting
+  one opens its editor: id (inline rename), ordered frame list (add frames
+  from the atlas's sprites via multi-select picker, reorder ↑/↓, remove),
+  fps (numeric), playback (dropdown of the Defold modes), flip_h/flip_v.
+- **Numeric-suffix auto-grouping is only a convenience default** (walk_01,
+  walk_02 → suggested group "walk", the TexturePacker/libGDX convention):
+  suggestions appear as regular editable animations; explicit ones always
+  win (already implemented in tp_normalize, Phase 2).
+- **Playback enum pinned to Defold's set** (tp_core enum + GUI dropdown +
+  Phase 5 .tpatlas mapping): once_forward (default 0), loop_forward,
+  once_backward, loop_backward, once_pingpong, loop_pingpong, none.
+- **Animation preview player** in the canvas: selecting an animation plays
+  it at its fps with its playback mode — play/pause, frame step, current
+  frame indicator ("3/10"), honors flip_h/v. Pre-pack it plays from source
+  images (decode cache); post-#282 the same player runs on packed regions,
+  which also visually validates trims/pivots in motion.
+- Defold verification: upstream extension examples already play `.tpatlas`
+  animations in stock Defold (see above); OUR generated `.tpatlas` is proven
+  the same way in the Phase 5 demo (bob-built in CI; acceptance: "walk
+  animation plays").
+
 ### 3.8 Later phases
 
 **Pivot editing (post-v1).** Select a sprite in the canvas (`nt_ui_events`
