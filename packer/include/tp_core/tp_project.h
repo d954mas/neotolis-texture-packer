@@ -200,6 +200,14 @@ tp_status tp_project_atlas_remove_animation(tp_project_atlas *a, const char *id)
 /* Appends a frame (sprite name) to an animation, preserving order. */
 tp_status tp_project_anim_add_frame(tp_project_anim *anim, const char *frame_name);
 
+/* Removes frame `index` (0-based), preserving the order of the rest. Out-of-range -> OUT_OF_BOUNDS. */
+tp_status tp_project_anim_remove_frame(tp_project_anim *anim, int index);
+
+/* Moves frame `index` by `delta` slots (negative = earlier), clamping the destination into range and
+ * preserving every other frame's relative order. A move that changes nothing is an OK no-op.
+ * Out-of-range `index` -> OUT_OF_BOUNDS. */
+tp_status tp_project_anim_move_frame(tp_project_anim *anim, int index, int delta);
+
 /* --- target mutation --- */
 
 /* Appends an export target (enabled by default). Written to *out (if non-NULL). */

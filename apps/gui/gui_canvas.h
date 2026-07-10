@@ -29,7 +29,9 @@
 extern "C" {
 #endif
 
-typedef enum { GUI_CANVAS_SOURCE = 0, GUI_CANVAS_ATLAS } gui_canvas_mode;
+/* ANIM = the animation preview player: draws a single packed region per frame in untrimmed source
+ * space (so trim never shifts the pivot -> no jitter between frames), honoring per-animation flips. */
+typedef enum { GUI_CANVAS_SOURCE = 0, GUI_CANVAS_ATLAS, GUI_CANVAS_ANIM } gui_canvas_mode;
 
 #define GUI_CANVAS_MAX_PAGES 16
 
@@ -55,6 +57,11 @@ typedef struct gui_canvas {
     int hover_sprite;        /* subtle-outline region index, -1 none (set by the handler each frame) */
     bool show_outline, show_trim, show_pivot, show_frame; /* overlay toggles (frame = placed AABB) */
     float overlay_scale;     /* DPI/UI scale for overlay line widths (set by the host each frame) */
+
+    /* --- ANIM preview (host sets these each frame; the handler draws one region) --- */
+    int anim_sprite;                  /* result sprite index of the current frame, -1 = none */
+    int anim_ref_w, anim_ref_h;       /* untrimmed reference box (source px) for stable scale/centering */
+    bool anim_flip_h, anim_flip_v;    /* per-animation flips, applied on top of the baked D4 transform */
 
     /* --- ATLAS view: scale (screen px per page px; 1.0 == 100%) + pan of page centre from canvas
      * centre (layout px). fit_pending refits on the next draw. --- */
@@ -128,6 +135,13 @@ int gui_canvas_selected(const gui_canvas *c);
 
 /* The CUSTOM element draw handler. Register via nt_ui_set_custom_handler(ctx, fn, c). */
 void gui_canvas_handler(const nt_ui_custom_frame_t *frame, void *userdata);
+
+/* --- animation playback (pure; no GL) --- */
+/* Frame index to display at `elapsed` seconds for a `frame_count`-frame flipbook at `fps`, under the
+ * Defold-pinned playback id (0 once_forward, 1 loop_forward, 2 once_backward, 3 loop_backward,
+ * 4 once_pingpong, 5 loop_pingpong, 6 none). `finished` (nullable) is set true once a non-looping mode
+ * has reached its final logical frame (and for `none`). Bounds-safe for count<=1 / fps<=0. */
+int gui_canvas_anim_frame_at(double elapsed, float fps, int playback, int frame_count, bool *finished);
 
 #ifdef __cplusplus
 }

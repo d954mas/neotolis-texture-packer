@@ -46,7 +46,12 @@ typedef enum {
     GUI_ACT_SET_SETTING, /* atlas knob or per-sprite override edit (coalesces a gesture) */
     GUI_ACT_SET_TARGET,
     GUI_ACT_ADD_TARGET,
-    GUI_ACT_REMOVE_TARGET
+    GUI_ACT_REMOVE_TARGET,
+    GUI_ACT_ADD_ANIM,
+    GUI_ACT_REMOVE_ANIM,
+    GUI_ACT_RENAME_ANIM,
+    GUI_ACT_SET_ANIM,   /* fps / playback / flips edit (coalesces a gesture) */
+    GUI_ACT_ANIM_FRAMES /* add / remove / reorder frames */
 } gui_action;
 
 /* Per-sprite packing-override field selector (region-panel "Packing overrides"). */
@@ -104,6 +109,25 @@ bool gui_project_set_sprite_origin(int atlas_index, const char *sprite_name, flo
 bool gui_project_set_sprite_slice9(int atlas_index, const char *sprite_name, int lrtb_index, int value);
 /* Per-sprite packing override; `value` == TP_PROJECT_OV_INHERIT clears it. */
 bool gui_project_set_sprite_override(int atlas_index, const char *sprite_name, gui_sprite_ov which, int value);
+
+/* --- animations (ux.md §3.7b: explicit manual assembly only) --- */
+/* Appends an animation and fills it with `frames` (in the given order) as ONE undo entry. The id is
+ * the first free of {base, base"2", base"3", ...}; a NULL/empty base auto-names "anim1"/"anim2"/...
+ * `frames` may be NULL/0 for an empty animation. Returns the new animation index, or -1. */
+int gui_project_create_animation(int atlas_index, const char *base, const char *const *frames, int frame_count);
+/* Removes the animation with `id`. */
+void gui_project_remove_animation(int atlas_index, const char *id);
+/* True if the atlas already has an animation named `id`. */
+bool gui_project_anim_id_exists(int atlas_index, const char *id);
+/* Renames animation `anim_index`; fails on empty or a name already used by another animation. */
+bool gui_project_set_anim_id(int atlas_index, int anim_index, const char *new_id);
+bool gui_project_set_anim_fps(int atlas_index, int anim_index, float fps);         /* clamps >= 1 */
+bool gui_project_set_anim_playback(int atlas_index, int anim_index, int playback); /* clamps 0..6 */
+bool gui_project_set_anim_flip(int atlas_index, int anim_index, bool flip_h, bool flip_v);
+/* Appends `frames` (in order) to animation `anim_index` as ONE undo entry. */
+bool gui_project_anim_add_frames(int atlas_index, int anim_index, const char *const *frames, int count);
+bool gui_project_anim_remove_frame(int atlas_index, int anim_index, int frame_index);
+bool gui_project_anim_move_frame(int atlas_index, int anim_index, int frame_index, int delta);
 
 /* --- export targets (region G, audit I1) --- */
 /* Appends a default json-neotolis target "out/<atlas>.<ext>"; returns its index or -1. */

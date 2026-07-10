@@ -121,6 +121,7 @@ void gui_canvas_init(gui_canvas *c) {
     c->mode = GUI_CANVAS_SOURCE;
     c->sel_sprite = -1;
     c->hover_sprite = -1;
+    c->anim_sprite = -1;
     c->show_outline = true;
     c->overlay_scale = 1.0F;
     c->scale = 1.0F;
@@ -523,6 +524,154 @@ static void draw_tex_quad(gui_canvas *c, const float world[16], nt_texture_t tex
     draw_quad(c, world, c->vbo, tex, c->sampler, x0, y0, x1, y1, 0.0F, 0.0F, 1.0F, 1.0F, alpha);
 }
 
+/* Textured quad with independent per-corner layout positions + UVs (order TL,TR,BR,BL). Unlike
+ * draw_tex_quad this maps each corner's UV explicitly, so a region baked rotated/flipped into the page
+ * can be re-drawn upright (the animation preview). */
+static void draw_quad_corners(gui_canvas *c, const float world[16], nt_texture_t tex, const float pos[4][2],
+                              const float uv[4][2], float alpha) {
+    canvas_vert v[4];
+    for (int i = 0; i < 4; i++) {
+        vec4 in = {pos[i][0], pos[i][1], 0.0F, 1.0F};
+        vec4 o;
+        glm_mat4_mulv((vec4 *)world, in, o);
+        v[i].pos[0] = o[0];
+        v[i].pos[1] = o[1];
+        v[i].pos[2] = o[2];
+        v[i].col[0] = 1.0F;
+        v[i].col[1] = 1.0F;
+        v[i].col[2] = 1.0F;
+        v[i].col[3] = alpha;
+        v[i].uv[0] = uv[i][0];
+        v[i].uv[1] = uv[i][1];
+    }
+    nt_gfx_update_buffer(c->vbo, v, sizeof v);
+    nt_gfx_bind_pipeline(c->pipe);
+    nt_gfx_bind_uniform_buffer(c->frame_ubo, 0);
+    nt_gfx_bind_vertex_buffer(c->vbo);
+    nt_gfx_bind_index_buffer(c->ibo);
+    nt_gfx_bind_texture(tex, 0);
+    nt_gfx_bind_sampler(c->sampler, 0);
+    nt_gfx_draw_indexed(0, 6, 4);
+}
+
+/* Draws the current animation-preview frame: region `c->anim_sprite` placed in untrimmed source space
+ * (frame's source box centered on the canvas, trimmed content offset by spriteSourceSize -> no jitter),
+ * with a checkerboard behind. `flip_h/flip_v` mirror the quad about the source-box centre. */
+static void draw_anim_frame(gui_canvas *c, const float world[16], const float box[4], float alpha) {
+    const int rw = (c->anim_ref_w > 0) ? c->anim_ref_w : 1;
+    const int rh = (c->anim_ref_h > 0) ? c->anim_ref_h : 1;
+    const float sx = box[2] / (float)rw;
+    const float sy = box[3] / (float)rh;
+    float pscale = (sx < sy ? sx : sy) * 0.9F;
+    pscale = clampf(pscale, 0.001F, 4096.0F);
+    const float cx = box[0] + box[2] * 0.5F;
+    const float cy = box[1] + box[3] * 0.5F;
+
+    if (c->checker_valid) {
+        const float rbw = (float)rw * pscale;
+        const float rbh = (float)rh * pscale;
+        const float x0 = cx - rbw * 0.5F;
+        const float y0 = cy - rbh * 0.5F;
+        draw_quad(c, world, c->vbo_checker, c->checker_tex, c->checker_sampler, x0, y0, x0 + rbw, y0 + rbh, 0.0F, 0.0F,
+                  rbw / 16.0F, rbh / 16.0F, alpha);
+    }
+
+    const int si = c->anim_sprite;
+    if (si < 0 || !c->result || si >= c->result->sprite_count) {
+        return;
+    }
+    const tp_sprite *s = &c->result->sprites[si];
+    const int pg = s->page;
+    if (pg < 0 || pg >= c->page_count || !c->page_valid[pg]) {
+        return;
+    }
+    const float pw = (float)c->page_w[pg];
+    const float ph = (float)c->page_h[pg];
+    const float srcW = (float)s->sourceSize.w;
+    const float srcH = (float)s->sourceSize.h;
+    const float sboxX = cx - srcW * pscale * 0.5F;
+    const float sboxY = cy - srcH * pscale * 0.5F;
+    const float tw = (float)s->frame.w;
+    const float th = (float)s->frame.h;
+    const float dx0 = sboxX + (float)s->spriteSourceSize.x * pscale;
+    const float dy0 = sboxY + (float)s->spriteSourceSize.y * pscale;
+    const float dx1 = dx0 + tw * pscale;
+    const float dy1 = dy0 + th * pscale;
+    float pos[4][2] = {{dx0, dy0}, {dx1, dy0}, {dx1, dy1}, {dx0, dy1}};
+    for (int i = 0; i < 4; i++) {
+        if (c->anim_flip_h) {
+            pos[i][0] = 2.0F * cx - pos[i][0];
+        }
+        if (c->anim_flip_v) {
+            pos[i][1] = 2.0F * cy - pos[i][1];
+        }
+    }
+    /* Each display corner maps to a trim-local corner; d4_decode bakes the page rotation/flip into UV. */
+    const int32_t lc[4][2] = {{0, 0}, {s->frame.w, 0}, {s->frame.w, s->frame.h}, {0, s->frame.h}};
+    float uv[4][2];
+    for (int i = 0; i < 4; i++) {
+        int32_t px = 0;
+        int32_t py = 0;
+        d4_decode(lc[i][0], lc[i][1], s->transform, s->frame.w, s->frame.h, &px, &py);
+        uv[i][0] = ((float)s->frame.x + (float)px) / pw;
+        uv[i][1] = ((float)s->frame.y + (float)py) / ph;
+    }
+    draw_quad_corners(c, world, c->pages[pg], pos, uv, alpha);
+}
+
+int gui_canvas_anim_frame_at(double elapsed, float fps, int playback, int frame_count, bool *finished) {
+    bool fin_local = false;
+    if (!finished) {
+        finished = &fin_local;
+    }
+    *finished = false;
+    if (frame_count <= 1 || playback == 6 /* none */) {
+        *finished = true;
+        return 0;
+    }
+    if (!(fps > 0.0F)) {
+        return 0;
+    }
+    if (elapsed < 0.0) {
+        elapsed = 0.0;
+    }
+    const long step = (long)floor(elapsed * (double)fps);
+    const long n = frame_count;
+    switch (playback) {
+        case 0: /* once forward */
+            if (step >= n - 1) {
+                *finished = true;
+                return (int)(n - 1);
+            }
+            return (int)step;
+        case 1: /* loop forward */
+            return (int)(step % n);
+        case 2: /* once backward */
+            if (step >= n - 1) {
+                *finished = true;
+                return 0;
+            }
+            return (int)(n - 1 - step);
+        case 3: /* loop backward */
+            return (int)(n - 1 - (step % n));
+        case 4: { /* once pingpong: 0..n-1..0 then hold at 0 */
+            const long period = 2 * n - 2;
+            if (step >= period) {
+                *finished = true;
+                return 0;
+            }
+            return (int)((step < n) ? step : (period - step));
+        }
+        case 5: { /* loop pingpong */
+            const long period = 2 * n - 2;
+            const long k = step % period;
+            return (int)((k < n) ? k : (period - k));
+        }
+        default:
+            return (int)(step % n);
+    }
+}
+
 /* layout (x,y) -> world 3-vec for the shape renderer. */
 static void layout_to_world(const float world[16], float lx, float ly, float out[3]) {
     vec4 in = {lx, ly, 0.0F, 1.0F};
@@ -680,6 +829,12 @@ void gui_canvas_handler(const nt_ui_custom_frame_t *frame, void *userdata) {
     }
     const float *world = frame->world_mat4;
     const float alpha = frame->opacity;
+
+    if (c->mode == GUI_CANVAS_ANIM) {
+        const float box[4] = {bb.x, bb.y, bb.width, bb.height};
+        draw_anim_frame(c, world, box, alpha);
+        return;
+    }
 
     if (c->mode == GUI_CANVAS_ATLAS && c->page_count > 0 && c->cur_page < c->page_count &&
         c->page_valid[c->cur_page]) {

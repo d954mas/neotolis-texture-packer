@@ -487,6 +487,46 @@ void test_mutation_helpers(void) {
     tp_project_destroy(p);
 }
 
+/* 7b. animation frame edit: add preserves order; remove shifts; move reorders with clamping. */
+void test_anim_frame_edit(void) {
+    tp_project *p = tp_project_create();
+    tp_project_atlas *a = tp_project_get_atlas(p, 0);
+
+    tp_project_anim *an = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_animation(a, "walk", &an));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "f0"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "f1"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "f2"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "f3"));
+    TEST_ASSERT_EQUAL_INT(4, an->frame_count);
+
+    /* move first frame down by 2 -> f1,f2,f0,f3 */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_move_frame(an, 0, 2));
+    TEST_ASSERT_EQUAL_STRING("f1", an->frames[0]);
+    TEST_ASSERT_EQUAL_STRING("f2", an->frames[1]);
+    TEST_ASSERT_EQUAL_STRING("f0", an->frames[2]);
+    TEST_ASSERT_EQUAL_STRING("f3", an->frames[3]);
+
+    /* move last frame up by 1 -> f1,f2,f3,f0 */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_move_frame(an, 3, -1));
+    TEST_ASSERT_EQUAL_STRING("f3", an->frames[2]);
+    TEST_ASSERT_EQUAL_STRING("f0", an->frames[3]);
+
+    /* over-clamp: moving index 0 up stays put (no-op), moving down past the end clamps to last */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_move_frame(an, 0, -5));
+    TEST_ASSERT_EQUAL_STRING("f1", an->frames[0]);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_move_frame(an, 0, 99));
+    TEST_ASSERT_EQUAL_STRING("f1", an->frames[3]); /* f1 rode to the end */
+
+    /* remove the middle -> shifts the tail down */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_remove_frame(an, 1));
+    TEST_ASSERT_EQUAL_INT(3, an->frame_count);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS, tp_project_anim_remove_frame(an, 9));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS, tp_project_anim_move_frame(an, 9, 1));
+
+    tp_project_destroy(p);
+}
+
 /* 8. buffer save/load: save_buffer bytes == file bytes; load_buffer deep-equals a
  * from-file load (project_dir aside). Sources are relative, so file == buffer. */
 void test_buffer_roundtrip(void) {
@@ -647,6 +687,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_resolve_path);
     RUN_TEST(test_to_settings_mapping);
     RUN_TEST(test_mutation_helpers);
+    RUN_TEST(test_anim_frame_edit);
     RUN_TEST(test_buffer_roundtrip);
     RUN_TEST(test_add_source_dedupe);
     RUN_TEST(test_sprite_rename_override);

@@ -269,7 +269,7 @@ enum {
     MK_UNDO, MK_REDO,
     MK_ZIN, MK_ZOUT, MK_FIT, MK_ABOUT, MK_S100, MK_S125, MK_S150, MK_S200,
     MK_OV_OUTLINE, MK_OV_FRAME, MK_OV_TRIM, MK_OV_PIVOT, MK_CTX_FIT, MK_CTX_100,
-    MK_CTX_RENAME, MK_CTX_REMOVE, MK_CTX_TOGGLE
+    MK_CTX_RENAME, MK_CTX_REMOVE, MK_CTX_TOGGLE, MK_CTX_CREATE_ANIM, MK_CTX_PREVIEW
 };
 
 /* Right-click context menu: one cursor-anchored menu whose items depend on the row a
@@ -278,9 +278,10 @@ enum {
 static uint32_t s_id_ctx_menu;
 static nt_ui_menu_state_t s_ctx_state;
 static nt_ui_menu_ctx_t s_ctx_menu;
-enum { CTX_NONE = 0, CTX_ATLAS, CTX_SPRITE, CTX_CANVAS, CTX_TARGET };
+enum { CTX_NONE = 0, CTX_ATLAS, CTX_SPRITE, CTX_CANVAS, CTX_TARGET, CTX_ANIM };
 static int s_ctx_kind;
 static int s_ctx_atlas;         /* CTX_ATLAS target index */
+static int s_ctx_anim = -1;     /* CTX_ANIM animation index */
 static int s_ctx_target = -1;   /* CTX_TARGET target index (enable/disable, remove) */
 static int s_ctx_src = -1;      /* CTX_SPRITE source index (for Remove) */
 static char s_ctx_sprite[192];  /* CTX_SPRITE override key (for Rename) */
@@ -307,12 +308,37 @@ static int s_sel_child = -1; /* selected folder-child index (-1 = the source row
 static char s_sel_abs[512];  /* resolved absolute image path of the selection ("" = none/folder) */
 static bool s_sel_missing;   /* selection is a missing file -> canvas shows a placeholder (§3.7) */
 
+/* Multi-select set over leaf sprite NAMES (stable identity; rows rebuild each frame). Drives
+ * "Create animation from selection" + the editor's "Add frames" (ux.md §3.7b). s_sel_src/child stays
+ * the PRIMARY (last-clicked) selection for the region panel + canvas sync. */
+#define MAX_MULTI_SEL 4096
+static char s_multi_sel[MAX_MULTI_SEL][192];
+static int s_multi_sel_count;
+static int s_sel_anchor_row = -1; /* row index anchor for Shift-range selection */
+
+/* Animation selection + editor state (ux.md §3.7b). */
+static int s_sel_anim = -1;       /* selected animation index in the current atlas, -1 none */
+static int s_sel_anim_frame = -1; /* selected frame row in the editor (for the Del hotkey), -1 none */
+
+/* Animation preview player (canvas ANIM mode). s_preview_time is the master clock; the frame index is
+ * a pure function of it (gui_canvas_anim_frame_at), so play/pause/step all reduce to moving the clock. */
+static bool s_preview_active;
+static bool s_preview_playing;
+static bool s_preview_finished;
+static double s_preview_time;
+static int s_preview_cur;         /* resolved current frame index (0-based) this frame */
+static int s_preview_frame_count; /* resolved (missing-frame-skipped) frame count this frame */
+
 /* deferred side effects (dialogs + model mutations), applied at the top of the next frame */
 static bool s_pending_open, s_pending_save, s_pending_save_as, s_pending_add_files, s_pending_add_folder, s_pending_add_atlas, s_pending_refresh;
 static bool s_pending_pack, s_pending_export;
 static bool s_pending_commit_edit; /* a press landed outside the active inline-edit field -> commit it */
+static bool s_pending_add_anim;    /* "+ Animation" -> append empty animation, select it */
+static bool s_pending_create_anim; /* "Create animation from selection" */
+static bool s_pending_open_preview;/* open the anim preview player on s_ctx_anim / s_sel_anim */
 static int s_pending_remove_atlas = -1;
 static int s_pending_remove_source = -1;
+static int s_pending_remove_anim = -1; /* animation index to remove */
 enum { AFTER_NONE = 0, AFTER_NEW, AFTER_EXIT, AFTER_OPEN };
 static int s_after_confirm;
 static bool s_confirm_open;
@@ -320,10 +346,11 @@ static bool s_about_open;
 enum { MODAL_NONE = 0, MODAL_SAVE, MODAL_DISCARD, MODAL_CANCEL };
 static int s_modal_action;
 
-/* Inline rename edit (F1): one active at a time. kind 0 none / 1 atlas / 2 sprite. */
-enum { EDIT_NONE = 0, EDIT_ATLAS, EDIT_SPRITE };
+/* Inline rename edit (F1): one active at a time. kind 0 none / 1 atlas / 2 sprite / 3 animation. */
+enum { EDIT_NONE = 0, EDIT_ATLAS, EDIT_SPRITE, EDIT_ANIM };
 static int s_edit_kind;
 static int s_edit_atlas;         /* atlas being renamed (EDIT_ATLAS) */
+static int s_edit_anim;          /* animation index being renamed (EDIT_ANIM) */
 static char s_edit_sprite[192];  /* atlas-relative sprite name being renamed (EDIT_SPRITE) */
 static char s_edit_buf[192];     /* the input buffer */
 
@@ -350,6 +377,13 @@ static char s_nb_pad[16], s_nb_margin[16], s_nb_extrude[16], s_nb_maxv[16], s_nb
 static char s_nb_ox[24], s_nb_oy[24], s_nb_s9[4][16];
 static char s_nb_ov_margin[16], s_nb_ov_extrude[16];
 static char s_nb_target_path[GUI_MAX_TARGETS][256];
+/* --- animation editor (right-panel section 4) --- */
+static bool s_sec_anim_open = true; /* the "Animation" section disclosure */
+static bool s_dd_playback_open;     /* playback-mode combo open bit */
+static char s_nb_anim_fps[16];      /* fps field edit buffer */
+/* Playback mode labels, order == the Defold-pinned enum (0 once_forward .. 6 none). */
+static const char *const k_playback_names[7] = {"Once forward",  "Loop forward",  "Once backward", "Loop backward",
+                                                "Once pingpong", "Loop pingpong", "None"};
 
 /* Flattened sprite rows for the current atlas, rebuilt each frame. */
 #define MAX_ROWS 4096
@@ -440,11 +474,141 @@ static void path_stem(const char *p, char *buf, size_t cap) {
     }
 }
 
+// #region multi-select + natural sort (ux.md §3.7b selection gesture)
+static bool multi_sel_contains(const char *name) {
+    if (!name || !name[0]) {
+        return false;
+    }
+    for (int i = 0; i < s_multi_sel_count; i++) {
+        if (strcmp(s_multi_sel[i], name) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+static void multi_sel_clear(void) { s_multi_sel_count = 0; }
+static void multi_sel_add(const char *name) {
+    if (!name || !name[0] || multi_sel_contains(name) || s_multi_sel_count >= MAX_MULTI_SEL) {
+        return;
+    }
+    (void)snprintf(s_multi_sel[s_multi_sel_count], sizeof s_multi_sel[0], "%s", name);
+    s_multi_sel_count++;
+}
+static void multi_sel_remove(const char *name) {
+    for (int i = 0; i < s_multi_sel_count; i++) {
+        if (strcmp(s_multi_sel[i], name) == 0) {
+            for (int j = i; j < s_multi_sel_count - 1; j++) {
+                memcpy(s_multi_sel[j], s_multi_sel[j + 1], sizeof s_multi_sel[0]);
+            }
+            s_multi_sel_count--;
+            return;
+        }
+    }
+}
+static void multi_sel_set_single(const char *name) {
+    multi_sel_clear();
+    multi_sel_add(name);
+}
+
+/* Natural order: digit runs compare numerically (walk_2 before walk_10), the rest byte-wise. */
+static int nat_cmp(const char *a, const char *b) {
+    while (*a && *b) {
+        const bool da = (*a >= '0' && *a <= '9');
+        const bool db = (*b >= '0' && *b <= '9');
+        if (da && db) {
+            while (*a == '0') {
+                a++;
+            }
+            while (*b == '0') {
+                b++;
+            }
+            const char *sa = a;
+            const char *sb = b;
+            while (*a >= '0' && *a <= '9') {
+                a++;
+            }
+            while (*b >= '0' && *b <= '9') {
+                b++;
+            }
+            const size_t la = (size_t)(a - sa);
+            const size_t lb = (size_t)(b - sb);
+            if (la != lb) {
+                return (la < lb) ? -1 : 1;
+            }
+            const int c = strncmp(sa, sb, la);
+            if (c != 0) {
+                return c;
+            }
+        } else {
+            if (*a != *b) {
+                return ((unsigned char)*a < (unsigned char)*b) ? -1 : 1;
+            }
+            a++;
+            b++;
+        }
+    }
+    if (*a) {
+        return 1;
+    }
+    if (*b) {
+        return -1;
+    }
+    return 0;
+}
+static int nat_cmp_qsort(const void *a, const void *b) { return nat_cmp((const char *)a, (const char *)b); }
+
+/* Longest common prefix of `names`, trimmed of trailing digits/separators so walk_01/walk_02 -> "walk". */
+static void names_common_prefix(char names[][192], int count, char *out, size_t cap) {
+    out[0] = '\0';
+    if (count <= 0 || cap == 0) {
+        return;
+    }
+    size_t pfx = strlen(names[0]);
+    for (int i = 1; i < count; i++) {
+        size_t k = 0;
+        while (k < pfx && names[i][k] && names[0][k] == names[i][k]) {
+            k++;
+        }
+        pfx = k;
+    }
+    while (pfx > 0) {
+        const char c = names[0][pfx - 1];
+        if ((c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.' || c == ' ' || c == '/') {
+            pfx--;
+        } else {
+            break;
+        }
+    }
+    if (pfx >= cap) {
+        pfx = cap - 1;
+    }
+    memcpy(out, names[0], pfx);
+    out[pfx] = '\0';
+}
+
+/* Stops the animation preview player and restores the canvas to its atlas/source view. */
+static void preview_stop(void) {
+    s_preview_active = false;
+    s_preview_playing = false;
+    s_preview_finished = false;
+    s_preview_time = 0.0;
+    s_canvas.anim_sprite = -1;
+    if (gui_canvas_get_mode(&s_canvas) == GUI_CANVAS_ANIM) {
+        s_canvas.mode = gui_canvas_has_atlas(&s_canvas) ? GUI_CANVAS_ATLAS : GUI_CANVAS_SOURCE;
+    }
+}
+// #endregion
+
 static void reset_selection(void) {
     s_sel_src = -1;
     s_sel_child = -1;
     s_sel_abs[0] = '\0';
     s_sel_missing = false;
+    multi_sel_clear();
+    s_sel_anchor_row = -1;
+    s_sel_anim = -1;
+    s_sel_anim_frame = -1;
+    preview_stop();
 }
 
 static void cancel_edit(void) {
@@ -550,6 +714,173 @@ static void clamp_selection(void) {
     if (s_sel_atlas < 0) {
         s_sel_atlas = 0;
     }
+}
+// #endregion
+
+// #region animation + preview actions (ux.md §3.7b)
+/* The selected animation of the selected atlas, or NULL. */
+static tp_project_anim *current_anim(void) {
+    tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
+    if (!a || s_sel_anim < 0 || s_sel_anim >= a->animation_count) {
+        return NULL;
+    }
+    return &a->animations[s_sel_anim];
+}
+
+/* Shared scratch for the selection-gesture sort (frame lists are small; static avoids stack blow-up). */
+static char s_sel_sort_buf[MAX_MULTI_SEL][192];
+static const char *s_sel_sort_ptr[MAX_MULTI_SEL];
+/* Copies the multi-selection into the shared buffers, natural-sorted; returns the count. */
+static int build_sorted_selection(void) {
+    const int n = s_multi_sel_count;
+    for (int i = 0; i < n; i++) {
+        (void)snprintf(s_sel_sort_buf[i], sizeof s_sel_sort_buf[0], "%s", s_multi_sel[i]);
+    }
+    qsort(s_sel_sort_buf, (size_t)n, sizeof s_sel_sort_buf[0], nat_cmp_qsort);
+    for (int i = 0; i < n; i++) {
+        s_sel_sort_ptr[i] = s_sel_sort_buf[i];
+    }
+    return n;
+}
+
+/* Creates an animation from the current multi-selection: frames natural-sorted, id from the common
+ * prefix (auto "animN" when there is none). Selects the new animation (opens its editor). */
+static int create_animation_from_selection(void) {
+    if (s_multi_sel_count <= 0) {
+        return -1;
+    }
+    const int n = build_sorted_selection();
+    char base[192];
+    names_common_prefix(s_sel_sort_buf, n, base, sizeof base);
+    const int idx = gui_project_create_animation(s_sel_atlas, base[0] ? base : NULL, s_sel_sort_ptr, n);
+    if (idx >= 0) {
+        s_sel_anim = idx;
+        s_sel_anim_frame = -1;
+        tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
+        set_statusf("Created animation '%s' with %d frame(s) (Ctrl+Z to undo).", a->animations[idx].id, n);
+    }
+    return idx;
+}
+
+/* Appends the current multi-selection (natural-sorted) as frames of animation `anim_index`. */
+static void add_selection_frames_to_anim(int anim_index) {
+    if (s_multi_sel_count <= 0) {
+        return;
+    }
+    const int n = build_sorted_selection();
+    if (gui_project_anim_add_frames(s_sel_atlas, anim_index, s_sel_sort_ptr, n)) {
+        set_statusf("Added %d frame(s) to the animation (Ctrl+Z to undo).", n);
+    }
+}
+
+/* Opens the preview player on animation `anim_index` (plays from the packed regions; if the atlas is
+ * not packed yet, the canvas shows a "Pack to preview" hint). */
+static void open_preview(int anim_index) {
+    tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
+    if (!a || anim_index < 0 || anim_index >= a->animation_count) {
+        return;
+    }
+    cancel_edit();
+    s_sel_anim = anim_index;
+    s_preview_active = true;
+    s_preview_playing = true;
+    s_preview_finished = false;
+    s_preview_time = 0.0;
+    if (!gui_pack_result(s_sel_atlas)) {
+        set_status("Pack (Ctrl+P) to preview the animation on packed regions.");
+    } else {
+        set_statusf("Previewing '%s' \xE2\x80\x94 Space play/pause.", a->animations[anim_index].id);
+    }
+}
+
+static void preview_toggle_play(void) {
+    if (!s_preview_active) {
+        return;
+    }
+    if (s_preview_playing) {
+        s_preview_playing = false;
+    } else {
+        if (s_preview_finished) {
+            s_preview_time = 0.0;
+            s_preview_finished = false;
+        }
+        s_preview_playing = true;
+    }
+}
+
+/* Nudges the preview timeline by `delta` frame-ticks (pauses first). */
+static void preview_step(int delta) {
+    if (!s_preview_active) {
+        return;
+    }
+    const tp_project_anim *an = current_anim();
+    const float fps = (an && an->fps >= 1.0F) ? an->fps : 1.0F;
+    s_preview_playing = false;
+    s_preview_finished = false;
+    long step = (long)floor(s_preview_time * (double)fps);
+    step += delta;
+    if (step < 0) {
+        step = 0;
+    }
+    s_preview_time = ((double)step + 0.5) / (double)fps;
+}
+
+/* Resolves the selected animation's frames to packed regions and pushes the current frame to the
+ * canvas each frame. Advances the clock while playing. No-op (leaves the hint) without a pack result. */
+static void update_preview(void) {
+    if (!s_preview_active) {
+        return;
+    }
+    tp_project_anim *an = current_anim();
+    const tp_result *pr = gui_pack_result(s_sel_atlas);
+    s_canvas.anim_sprite = -1;
+    s_preview_frame_count = 0;
+    if (!an || !pr) {
+        return; /* declare_canvas draws the "Pack to preview" hint */
+    }
+    static int idxs[512];
+    int n = 0;
+    int rw = 1;
+    int rh = 1;
+    for (int i = 0; i < an->frame_count && n < 512; i++) {
+        const int si = gui_pack_find_sprite(s_sel_atlas, an->frames[i]);
+        if (si >= 0 && si < pr->sprite_count) {
+            idxs[n++] = si;
+            if (pr->sprites[si].sourceSize.w > rw) {
+                rw = pr->sprites[si].sourceSize.w;
+            }
+            if (pr->sprites[si].sourceSize.h > rh) {
+                rh = pr->sprites[si].sourceSize.h;
+            }
+        }
+    }
+    s_preview_frame_count = n;
+    if (n == 0) {
+        return;
+    }
+    const float fps = (an->fps >= 1.0F) ? an->fps : 1.0F;
+    if (s_preview_playing) {
+        s_preview_time += (double)g_nt_app.dt;
+    }
+    bool finished = false;
+    int cur = gui_canvas_anim_frame_at(s_preview_time, fps, an->playback, n, &finished);
+    if (finished && s_preview_playing) {
+        s_preview_playing = false;
+    }
+    s_preview_finished = finished;
+    if (cur < 0) {
+        cur = 0;
+    }
+    if (cur >= n) {
+        cur = n - 1;
+    }
+    s_preview_cur = cur;
+    s_canvas.mode = GUI_CANVAS_ANIM;
+    s_canvas.anim_sprite = idxs[cur];
+    s_canvas.anim_ref_w = rw;
+    s_canvas.anim_ref_h = rh;
+    s_canvas.anim_flip_h = an->flip_h;
+    s_canvas.anim_flip_v = an->flip_v;
 }
 // #endregion
 
@@ -986,6 +1317,18 @@ static void commit_sprite_rename(void) {
     }
     cancel_edit();
 }
+static void commit_anim_rename(void) {
+    if (s_edit_buf[0] == '\0') {
+        set_status("Animation name cannot be empty.");
+        return; /* keep editing */
+    }
+    if (gui_project_set_anim_id(s_sel_atlas, s_edit_anim, s_edit_buf)) {
+        set_statusf("Renamed animation to '%s'", s_edit_buf);
+        cancel_edit();
+    } else {
+        set_statusf("Animation '%s' already exists.", s_edit_buf); /* keep editing */
+    }
+}
 
 /* Commit the active inline edit as if Enter was pressed (click-outside / model-change path).
  * `force` = the editor is being dismissed involuntarily: an invalid atlas name CANCELS instead of
@@ -1007,6 +1350,16 @@ static void commit_active_edit(bool force) {
         cancel_edit();
     } else if (s_edit_kind == EDIT_SPRITE) {
         commit_sprite_rename();
+    } else if (s_edit_kind == EDIT_ANIM) {
+        if (s_edit_buf[0] == '\0' || !gui_project_set_anim_id(s_sel_atlas, s_edit_anim, s_edit_buf)) {
+            set_status(s_edit_buf[0] == '\0' ? "Animation name cannot be empty." : "Animation name must be unique.");
+            if (force) {
+                cancel_edit();
+            }
+            return;
+        }
+        set_statusf("Renamed animation to '%s'", s_edit_buf);
+        cancel_edit();
     }
 }
 // #endregion
@@ -1085,6 +1438,33 @@ static void apply_pending(void) {
     if (s_pending_browse_target >= 0) {
         do_browse_target(s_pending_browse_target);
     }
+    if (s_pending_add_anim) {
+        const int idx = gui_project_create_animation(s_sel_atlas, NULL, NULL, 0);
+        if (idx >= 0) {
+            s_sel_anim = idx;
+            s_sel_anim_frame = -1;
+            set_statusf("Added animation '%s' (Ctrl+Z to undo).",
+                        tp_project_get_atlas(gui_project_get(), s_sel_atlas)->animations[idx].id);
+        }
+    }
+    if (s_pending_create_anim) {
+        (void)create_animation_from_selection();
+    }
+    if (s_pending_remove_anim >= 0) {
+        tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
+        if (a && s_pending_remove_anim < a->animation_count) {
+            if (s_preview_active && s_sel_anim == s_pending_remove_anim) {
+                preview_stop();
+            }
+            gui_project_remove_animation(s_sel_atlas, a->animations[s_pending_remove_anim].id);
+            s_sel_anim = -1;
+            s_sel_anim_frame = -1;
+            set_status("Removed animation (Ctrl+Z to undo).");
+        }
+    }
+    if (s_pending_open_preview) {
+        open_preview(s_sel_anim);
+    }
     if (s_pending_refresh) {
         do_refresh();
     }
@@ -1099,9 +1479,11 @@ static void apply_pending(void) {
     s_pending_add_files = s_pending_add_folder = s_pending_add_atlas = false;
     s_pending_refresh = s_pending_pack = s_pending_export = false;
     s_pending_add_target = false;
+    s_pending_add_anim = s_pending_create_anim = s_pending_open_preview = false;
     s_pending_remove_source = -1;
     s_pending_remove_atlas = -1;
     s_pending_remove_target = -1;
+    s_pending_remove_anim = -1;
     s_pending_browse_target = -1;
 }
 // #endregion
@@ -1556,6 +1938,17 @@ static void start_atlas_edit(int i) {
     (void)snprintf(s_edit_buf, sizeof s_edit_buf, "%s", p->atlases[i].name);
     set_status("Rename atlas: type, Enter to commit, Esc to cancel.");
 }
+static void start_anim_edit(int i) {
+    tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
+    if (!a || i < 0 || i >= a->animation_count) {
+        return;
+    }
+    cancel_edit();
+    s_edit_kind = EDIT_ANIM;
+    s_edit_anim = i;
+    (void)snprintf(s_edit_buf, sizeof s_edit_buf, "%s", a->animations[i].id);
+    set_status("Rename animation: type, Enter to commit, Esc to cancel.");
+}
 static void start_sprite_edit_named(const char *sprite_name) {
     if (!sprite_name || sprite_name[0] == '\0') {
         return;
@@ -1645,6 +2038,49 @@ static void declare_atlas_list(nt_ui_context_t *ctx, tp_project *proj) {
     }
 }
 
+/* Applies a click on sprite row `i` (Ctrl toggles, Shift range-selects from the anchor, plain replaces)
+ * to the multi-selection, and updates the PRIMARY selection (region panel / canvas sync). */
+static void select_sprite_row(int i, bool ctrl, bool shift) {
+    if (i < 0 || i >= s_row_count) {
+        return;
+    }
+    const sprite_row *row = &s_rows[i];
+    const bool leaf = (!row->is_folder && !row->missing && row->sprite_name[0] != '\0');
+    s_sel_src = row->src;
+    s_sel_child = row->child;
+    s_sel_missing = row->missing;
+    (void)snprintf(s_sel_abs, sizeof s_sel_abs, "%s", row->abs);
+    if (leaf) {
+        if (shift && s_sel_anchor_row >= 0 && s_sel_anchor_row < s_row_count) {
+            multi_sel_clear();
+            const int lo = (s_sel_anchor_row < i) ? s_sel_anchor_row : i;
+            const int hi = (s_sel_anchor_row < i) ? i : s_sel_anchor_row;
+            for (int k = lo; k <= hi; k++) {
+                const sprite_row *rk = &s_rows[k];
+                if (!rk->is_folder && !rk->missing && rk->sprite_name[0] != '\0') {
+                    multi_sel_add(rk->sprite_name);
+                }
+            }
+        } else if (ctrl) {
+            if (multi_sel_contains(row->sprite_name)) {
+                multi_sel_remove(row->sprite_name);
+            } else {
+                multi_sel_add(row->sprite_name);
+            }
+            s_sel_anchor_row = i;
+        } else {
+            multi_sel_set_single(row->sprite_name);
+            s_sel_anchor_row = i;
+        }
+    } else if (!ctrl && !shift) {
+        multi_sel_clear();
+        s_sel_anchor_row = -1;
+    }
+    if (gui_canvas_get_mode(&s_canvas) == GUI_CANVAS_ATLAS && leaf) {
+        gui_canvas_select(&s_canvas, gui_pack_find_sprite(s_sel_atlas, row->sprite_name));
+    }
+}
+
 static void declare_sprite_list(nt_ui_context_t *ctx) {
     CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(28))}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
         nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "SPRITES", &g_title);
@@ -1677,8 +2113,10 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
             const uint32_t x_id = nt_ui_child_id(row_id, "x");
             const bool editing = (s_edit_kind == EDIT_SPRITE && row->sprite_name[0] != '\0' &&
                                   strcmp(s_edit_sprite, row->sprite_name) == 0);
-            const bool selected = (row->is_source ? (s_sel_src == row->src && s_sel_child == -1)
+            const bool leaf_row = (!row->is_folder && !row->missing && row->sprite_name[0] != '\0');
+            const bool primary = (row->is_source ? (s_sel_src == row->src && s_sel_child == -1)
                                                   : (s_sel_src == row->src && s_sel_child == row->child));
+            const bool selected = primary || (leaf_row && multi_sel_contains(row->sprite_name));
             const nt_ui_events_t ev = nt_ui_events(ctx, hit_id, &s_dbl_cfg);
             bool x_clicked = false;
             if (row->is_source) {
@@ -1689,31 +2127,28 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
                 }
             }
             if (ev.double_clicked && !row->is_folder && !row->missing) {
-                s_sel_src = row->src;
-                s_sel_child = row->child;
-                s_sel_missing = false;
-                (void)snprintf(s_sel_abs, sizeof s_sel_abs, "%s", row->abs);
+                select_sprite_row((int)i, false, false);
                 start_sprite_edit(row);
             } else if (ev.clicked && !x_clicked) {
-                s_sel_src = row->src;
-                s_sel_child = row->child;
-                s_sel_missing = row->missing;
-                (void)snprintf(s_sel_abs, sizeof s_sel_abs, "%s", row->abs);
-                /* atlas mode: highlight + centre this sprite's region on the canvas (row -> region) */
-                if (gui_canvas_get_mode(&s_canvas) == GUI_CANVAS_ATLAS && !row->is_folder && row->sprite_name[0] != '\0') {
-                    gui_canvas_select(&s_canvas, gui_pack_find_sprite(s_sel_atlas, row->sprite_name));
-                }
+                const bool ctrl = nt_input_key_is_down(NT_KEY_LCTRL) || nt_input_key_is_down(NT_KEY_RCTRL);
+                const bool shift = nt_input_key_is_down(NT_KEY_LSHIFT) || nt_input_key_is_down(NT_KEY_RSHIFT);
+                select_sprite_row((int)i, ctrl, shift);
             }
             if (nt_ui_menu_open_trigger(ctx, s_id_ctx_menu, hit_id, false, &s_ctx_state)) {
                 close_menubar_menus();
-                s_sel_src = row->src; /* right-click selects the row first */
-                s_sel_child = row->child;
-                s_sel_missing = row->missing;
-                (void)snprintf(s_sel_abs, sizeof s_sel_abs, "%s", row->abs);
+                /* right-click a row NOT in the multi-set selects just it; keep an existing set otherwise */
+                if (!(leaf_row && multi_sel_contains(row->sprite_name))) {
+                    select_sprite_row((int)i, false, false);
+                } else {
+                    s_sel_src = row->src;
+                    s_sel_child = row->child;
+                    s_sel_missing = row->missing;
+                    (void)snprintf(s_sel_abs, sizeof s_sel_abs, "%s", row->abs);
+                }
                 s_ctx_kind = CTX_SPRITE;
                 s_ctx_src = row->src;
                 (void)snprintf(s_ctx_sprite, sizeof s_ctx_sprite, "%s", row->sprite_name);
-                s_ctx_leaf = (!row->is_folder && !row->missing && row->sprite_name[0] != '\0');
+                s_ctx_leaf = leaf_row;
                 s_ctx_removable = row->is_source;
             }
             const Clay_Color bg = selected ? C_SEL : (ev.hovered ? C_HOVER : C_TRANSPARENT);
@@ -1745,8 +2180,76 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
     nt_ui_vlist_end(ctx);
 }
 
+/* ANIMATIONS block (ux.md §2.1 region D, §3.7b): one row per animation (id + frame count), a per-row
+ * [x] remove + right-click Rename/Remove/Preview, "+ Animation" to add. Double-click a row = preview. */
+static void declare_animations_list(nt_ui_context_t *ctx, tp_project_atlas *a) {
+    CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(28))}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "ANIMATIONS", &g_title);
+        CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}}) {}
+        if (ui_btn(ctx, nt_ui_id("ntpacker/add_anim"), "+ Animation", &g_btn_ghost, true, 0.0F, 24.0F, &g_caption)) {
+            s_pending_add_anim = true;
+        }
+    }
+    if (!a || a->animation_count == 0) {
+        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "None. Multi-select sprites, then right-click \xE2\x86\x92 Create animation.",
+                    &g_caption);
+        return;
+    }
+    for (int i = 0; i < a->animation_count; i++) {
+        char idbuf[64];
+        (void)snprintf(idbuf, sizeof idbuf, "ntpacker/anim_row_%d", i);
+        const uint32_t row_id = nt_ui_id(idbuf);
+        const uint32_t x_id = nt_ui_child_id(row_id, "x");
+        const bool editing = (s_edit_kind == EDIT_ANIM && s_edit_anim == i);
+        const bool selected = (i == s_sel_anim);
+        const nt_ui_events_t ev = nt_ui_events(ctx, row_id, &s_dbl_cfg);
+        const nt_ui_events_t xev = nt_ui_events(ctx, x_id, NULL);
+        if (xev.clicked) {
+            s_pending_remove_anim = i;
+        } else if (ev.double_clicked) {
+            s_sel_anim = i;
+            s_sel_anim_frame = -1;
+            s_pending_open_preview = true;
+        } else if (ev.clicked) {
+            s_sel_anim = i;
+            s_sel_anim_frame = -1;
+            cancel_edit();
+        }
+        if (nt_ui_menu_open_trigger(ctx, s_id_ctx_menu, row_id, false, &s_ctx_state)) {
+            close_menubar_menus();
+            s_sel_anim = i; /* right-click selects the row first */
+            s_sel_anim_frame = -1;
+            s_ctx_kind = CTX_ANIM;
+            s_ctx_anim = i;
+        }
+        const Clay_Color bg = selected ? C_SEL : (ev.hovered ? C_HOVER : C_TRANSPARENT);
+        CLAY({.id = {.id = row_id},
+              .layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H))},
+                         .padding = {Su(8), Su(4), 0, 0},
+                         .childGap = Su(4),
+                         .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}},
+              .backgroundColor = bg,
+              .cornerRadius = CLAY_CORNER_RADIUS(S(4))}) {
+            CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+                if (editing) {
+                    if (render_rename_field(ctx)) {
+                        commit_anim_rename();
+                    }
+                } else {
+                    ui_label_fit(ctx, a->animations[i].id, &g_row, left_row_text_w(S(8.0F), true) - S(28.0F), row_id);
+                }
+            }
+            char fc[16];
+            (void)snprintf(fc, sizeof fc, "%df", a->animations[i].frame_count);
+            nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), fc, &g_caption);
+            (void)ui_btn(ctx, x_id, "x", &g_btn_ghost, true, 24.0F, 22.0F, &g_caption);
+        }
+    }
+}
+
 static void declare_left_panel(nt_ui_context_t *ctx) {
     tp_project *proj = gui_project_get();
+    tp_project_atlas *a = tp_project_get_atlas(proj, s_sel_atlas);
     s_row_tip_count = 0; /* per-frame; filled by ui_label_fit when a row truncates */
     CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(S(BASE_LEFT_PANEL_W)), CLAY_SIZING_GROW(0)},
                      .padding = {Su(12), Su(12), Su(12), Su(12)},
@@ -1759,6 +2262,8 @@ static void declare_left_panel(nt_ui_context_t *ctx) {
         declare_atlas_list(ctx, proj);
         CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(1))}}, .backgroundColor = C_BORDER}) {}
         declare_sprite_list(ctx);
+        CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(1))}}, .backgroundColor = C_BORDER}) {}
+        declare_animations_list(ctx, a);
     }
 }
 
@@ -1974,7 +2479,81 @@ static void declare_canvas_strip(nt_ui_context_t *ctx, bool atlas) {
     }
 }
 
+/* Animation preview player in the canvas area (ux.md §3.7b): a control strip (play/pause, frame step,
+ * "cur/total", Close) over the ANIM-mode custom element, or a "Pack to preview" hint without a result. */
+static void declare_canvas_preview(nt_ui_context_t *ctx) {
+    const tp_project_anim *an = current_anim();
+    const bool have = (an != NULL && gui_pack_result(s_sel_atlas) != NULL && s_preview_frame_count > 0);
+    const float cap_w = s_content_w - S(BASE_LEFT_PANEL_W) - S(BASE_RIGHT_PANEL_W) - S(70.0F);
+    char caption[192];
+    if (an) {
+        const char *pb = (an->playback >= 0 && an->playback < 7) ? k_playback_names[an->playback] : "?";
+        (void)snprintf(caption, sizeof caption, "%s  \xC2\xB7  %s  \xC2\xB7  %g fps%s%s", an->id, pb, (double)an->fps,
+                       an->flip_h ? "  \xC2\xB7  flip H" : "", an->flip_v ? "  \xC2\xB7  flip V" : "");
+    } else {
+        (void)snprintf(caption, sizeof caption, "No animation");
+    }
+
+    CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)},
+                     .padding = {Su(10), Su(10), Su(10), Su(10)},
+                     .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                     .childGap = Su(8),
+                     .childAlignment = {CLAY_ALIGN_X_CENTER, CLAY_ALIGN_Y_CENTER}},
+          .backgroundColor = C_CANVAS,
+          .cornerRadius = CLAY_CORNER_RADIUS(S(8)),
+          .border = {.color = C_BORDER, .width = {Su(1), Su(1), Su(1), Su(1), 0}}}) {
+        const Clay_Color strip_bg = {30.0F, 34.0F, 42.0F, 205.0F};
+        CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(34))},
+                         .padding = {Su(8), Su(8), Su(4), Su(4)},
+                         .childGap = Su(6),
+                         .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}},
+              .backgroundColor = strip_bg,
+              .cornerRadius = CLAY_CORNER_RADIUS(S(6))}) {
+            if (ui_btn(ctx, nt_ui_id("prev/play"), s_preview_playing ? "\xE2\x9D\x9A\xE2\x9D\x9A" : "\xE2\x96\xB6",
+                       &g_btn, have, 40.0F, 26.0F, &g_body)) { /* U+275A pause / U+25B6 play */
+                preview_toggle_play();
+            }
+            if (ui_btn(ctx, nt_ui_id("prev/back"), "\xE2\x97\x80", &g_btn_ghost, have, 30.0F, 24.0F, &g_caption)) {
+                preview_step(-1);
+            }
+            char fnum[24];
+            (void)snprintf(fnum, sizeof fnum, "%d/%d", have ? (s_preview_cur + 1) : 0, s_preview_frame_count);
+            nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), fnum, &g_caption);
+            if (ui_btn(ctx, nt_ui_id("prev/fwd"), "\xE2\x96\xB6", &g_btn_ghost, have, 30.0F, 24.0F, &g_caption)) {
+                preview_step(+1);
+            }
+            CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}}) {}
+            if (ui_btn(ctx, nt_ui_id("prev/close"), "Close", &g_btn_ghost, true, 0.0F, 24.0F, &g_caption)) {
+                preview_stop();
+            }
+        }
+        CLAY({.id = {.id = s_id_canvas},
+              .layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)},
+                         .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                         .childGap = Su(8),
+                         .childAlignment = {CLAY_ALIGN_X_CENTER, CLAY_ALIGN_Y_CENTER}},
+              .clip = {.horizontal = true, .vertical = true}}) {
+            if (have) {
+                nt_ui_custom(ctx, NT_UI_DATA_LAYER(LAYER_IMG), &s_canvas);
+            } else if (an && an->frame_count == 0) {
+                nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "This animation has no frames yet.", &g_canvas_hint);
+            } else if (an && gui_pack_result(s_sel_atlas) == NULL) {
+                nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Pack to preview \xE2\x80\x94 press Pack (Ctrl+P).", &g_canvas_hint);
+            } else {
+                nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "No frames resolve to packed regions \xE2\x80\x94 repack (Ctrl+P).", &g_canvas_hint);
+            }
+        }
+        CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(22))}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+            ui_label_fit(ctx, caption, &g_caption, cap_w, 0U);
+        }
+    }
+}
+
 static void declare_canvas(nt_ui_context_t *ctx) {
+    if (s_preview_active) {
+        declare_canvas_preview(ctx);
+        return;
+    }
     const bool atlas = gui_canvas_get_mode(&s_canvas) == GUI_CANVAS_ATLAS && gui_canvas_has_atlas(&s_canvas);
     const bool has_img = gui_canvas_has_image(&s_canvas);
     const float cap_w = s_content_w - S(BASE_LEFT_PANEL_W) - S(BASE_RIGHT_PANEL_W) - S(70.0F);
@@ -2114,10 +2693,28 @@ static void declare_context_menu(nt_ui_context_t *ctx) {
                 start_sprite_edit_named(s_ctx_sprite);
             }
         }
+        if (s_multi_sel_count > 0) {
+            char lbl[48];
+            (void)snprintf(lbl, sizeof lbl, "Create animation from selection (%d)", s_multi_sel_count);
+            if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_CREATE_ANIM, lbl)) {
+                s_pending_create_anim = true;
+            }
+        }
         if (s_ctx_removable) {
             if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_REMOVE, "Remove")) {
                 s_pending_remove_source = s_ctx_src;
             }
+        }
+    } else if (s_ctx_kind == CTX_ANIM) {
+        if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_PREVIEW, "Preview")) {
+            s_sel_anim = s_ctx_anim;
+            s_pending_open_preview = true;
+        }
+        if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_RENAME, "Rename")) {
+            start_anim_edit(s_ctx_anim);
+        }
+        if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_REMOVE, "Remove")) {
+            s_pending_remove_anim = s_ctx_anim;
         }
     } else if (s_ctx_kind == CTX_TARGET) {
         tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
@@ -2792,6 +3389,125 @@ static void declare_export_targets(nt_ui_context_t *ctx, tp_project_atlas *a) {
     }
 }
 
+/* --- Animation editor (ux.md §3.7b): id / fps / playback / flips + ordered frame list --- */
+static void declare_animation_editor(nt_ui_context_t *ctx, tp_project_atlas *a) {
+    if (s_sel_anim < 0 || s_sel_anim >= a->animation_count) {
+        panel_note(ctx, "Select an animation (left panel) to edit its frames, fps, playback and flips.");
+        return;
+    }
+    tp_project_anim *an = &a->animations[s_sel_anim];
+    const bool editing_id = (s_edit_kind == EDIT_ANIM && s_edit_anim == s_sel_anim);
+
+    PANEL_ROW_BEGIN("Id", &g_row) {
+        if (editing_id) {
+            if (render_rename_field(ctx)) {
+                commit_anim_rename();
+            }
+        } else {
+            ui_label_fit(ctx, an->id, &g_body, S(PANEL_LABEL_W - 20.0F), 0U);
+            if (ui_btn(ctx, nt_ui_id("anim/rename"), "Rename", &g_btn_ghost, true, 0.0F, 24.0F, &g_caption)) {
+                start_anim_edit(s_sel_anim);
+            }
+        }
+    }
+    PANEL_ROW_END;
+
+    PANEL_ROW_BEGIN("Preview", &g_row) {
+        if (ui_btn(ctx, nt_ui_id("anim/play"), s_preview_active ? "Playing\xE2\x80\xA6" : "Play", &g_btn, true, 0.0F, 24.0F,
+                   &g_caption)) {
+            s_pending_open_preview = true;
+        }
+    }
+    PANEL_ROW_END;
+
+    float fv = 0.0F;
+    if (row_float(ctx, "FPS", nt_ui_id("anim/fps"), s_nb_anim_fps, sizeof s_nb_anim_fps, an->fps, 1.0F, 240.0F, true,
+                  &fv)) {
+        gui_project_set_anim_fps(s_sel_atlas, s_sel_anim, fv);
+    }
+    const char *pv = (an->playback >= 0 && an->playback < 7) ? k_playback_names[an->playback] : "?";
+    const int npb = row_combo(ctx, "Playback", nt_ui_id("anim/pb"), &s_dd_playback_open, pv, an->playback,
+                              k_playback_names, 7, true);
+    if (npb >= 0 && npb != an->playback) {
+        gui_project_set_anim_playback(s_sel_atlas, s_sel_anim, npb);
+    }
+    bool bv = false;
+    if (row_check(ctx, "Flip H", nt_ui_id("anim/fh"), an->flip_h, true, &bv)) {
+        gui_project_set_anim_flip(s_sel_atlas, s_sel_anim, bv, an->flip_v);
+    }
+    if (row_check(ctx, "Flip V", nt_ui_id("anim/fv"), an->flip_v, true, &bv)) {
+        gui_project_set_anim_flip(s_sel_atlas, s_sel_anim, an->flip_h, bv);
+    }
+
+    /* Frames header + "Add frames" (from the current sprite multi-selection). */
+    CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H))}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+        char fh[32];
+        (void)snprintf(fh, sizeof fh, "Frames (%d)", an->frame_count);
+        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), fh, &g_row);
+        CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}}) {}
+        if (ui_btn(ctx, nt_ui_id("anim/addf"), "Add frames", &g_btn_ghost, s_multi_sel_count > 0, 0.0F, 24.0F,
+                   &g_caption)) {
+            add_selection_frames_to_anim(s_sel_anim);
+        }
+    }
+    if (an->frame_count == 0) {
+        panel_note(ctx, "No frames. Multi-select sprites on the left, then press Add frames.");
+    }
+
+    /* Frame rows: reorder (up/down) + remove. Mutations are captured and applied after the loop so the
+     * array is not resized mid-iteration. */
+    int fact = 0; /* 1 remove, 2 up, 3 down */
+    int fidx = -1;
+    const int fcount = an->frame_count;
+    for (int fi = 0; fi < fcount; fi++) {
+        char idbuf[48];
+        (void)snprintf(idbuf, sizeof idbuf, "anim/frame_%d", fi);
+        const uint32_t row_id = nt_ui_id(idbuf);
+        const nt_ui_events_t ev = nt_ui_events(ctx, row_id, NULL);
+        if (ev.clicked) {
+            s_sel_anim_frame = fi;
+        }
+        const bool sel = (fi == s_sel_anim_frame);
+        const Clay_Color bg = sel ? C_SEL : (ev.hovered ? C_HOVER : C_BG);
+        CLAY({.id = {.id = row_id},
+              .layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H))},
+                         .padding = {Su(6), Su(4), 0, 0},
+                         .childGap = Su(4),
+                         .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}},
+              .backgroundColor = bg,
+              .cornerRadius = CLAY_CORNER_RADIUS(S(4))}) {
+            char lab[224];
+            (void)snprintf(lab, sizeof lab, "%02d  %s", fi + 1, an->frames[fi]);
+            CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+                ui_label_fit(ctx, lab, &g_row, S(PANEL_LABEL_W), row_id);
+            }
+            if (ui_btn(ctx, nt_ui_child_id(row_id, "up"), "\xE2\x86\x91", &g_btn_ghost, fi > 0, 26.0F, 22.0F, &g_caption)) {
+                fact = 2;
+                fidx = fi;
+            }
+            if (ui_btn(ctx, nt_ui_child_id(row_id, "dn"), "\xE2\x86\x93", &g_btn_ghost, fi < fcount - 1, 26.0F, 22.0F,
+                       &g_caption)) {
+                fact = 3;
+                fidx = fi;
+            }
+            if (ui_btn(ctx, nt_ui_child_id(row_id, "x"), "x", &g_btn_ghost, true, 24.0F, 22.0F, &g_caption)) {
+                fact = 1;
+                fidx = fi;
+            }
+        }
+    }
+    if (fact == 1 && fidx >= 0) {
+        gui_project_anim_remove_frame(s_sel_atlas, s_sel_anim, fidx);
+        s_sel_anim_frame = -1;
+    } else if (fact == 2 && fidx >= 0) {
+        gui_project_anim_move_frame(s_sel_atlas, s_sel_anim, fidx, -1);
+        s_sel_anim_frame = fidx - 1;
+    } else if (fact == 3 && fidx >= 0) {
+        gui_project_anim_move_frame(s_sel_atlas, s_sel_anim, fidx, +1);
+        s_sel_anim_frame = fidx + 1;
+    }
+}
+
 static void declare_right_panel(nt_ui_context_t *ctx) {
     tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
     CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(S(BASE_RIGHT_PANEL_W)), CLAY_SIZING_GROW(0)},
@@ -2818,6 +3534,11 @@ static void declare_right_panel(nt_ui_context_t *ctx) {
                 panel_header(ctx, nt_ui_id("sec/region"), "Region", &s_sec_region_open, &g_title, C_STATUS);
                 if (s_sec_region_open) {
                     declare_region_settings(ctx, a);
+                }
+                CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(6))}}}) {}
+                panel_header(ctx, nt_ui_id("sec/anim"), "Animation", &s_sec_anim_open, &g_title, C_STATUS);
+                if (s_sec_anim_open) {
+                    declare_animation_editor(ctx, a);
                 }
                 CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(6))}}}) {}
                 panel_header(ctx, nt_ui_id("sec/export"), "Export targets", &s_sec_export_open, &g_title, C_STATUS);
@@ -2997,21 +3718,37 @@ static void run_selftest(void) {
             nt_log_info("SELFTEST: pack 'basic' -> %d in %.1f ms sprites=%d pages=%d %s", okb, ms_b,
                         rb ? rb->sprite_count : -1, rb ? rb->page_count : -1, okb ? "" : pe2);
 
-            /* export 'rotate' to its json-neotolis target + assert the files exist and the json parses.
+            /* export 'rotate' via gui_pack_export, ISOLATED to a throwaway base under the build dir so
+             * the demo's committed exports (owned by another agent) are never touched: disable the
+             * atlas's other targets, point json-neotolis at the temp base, then assert the files exist.
              * tp_export_run uses the target out_path as the exporter BASE and appends .json / -N.png. */
+            tp_project_atlas *rot_a = tp_project_get_atlas(dp, i_rotate);
+            int jtarget = -1;
+            for (int k = 0; rot_a && k < rot_a->target_count; k++) {
+                if (strcmp(rot_a->targets[k].exporter_id, "json-neotolis") == 0) {
+                    jtarget = k;
+                } else {
+                    gui_project_set_target(i_rotate, k, rot_a->targets[k].exporter_id, rot_a->targets[k].out_path, false);
+                }
+            }
+            char tbase[700] = {0};
+            (void)snprintf(tbase, sizeof tbase, "%s/selftest_rotate_export", s_exe_dir);
+            if (jtarget >= 0) {
+                gui_project_set_target(i_rotate, jtarget, "json-neotolis", tbase, true);
+            }
             int etg = 0;
             int enc = 0;
             char eerr[256] = {0};
             char enote[128] = {0};
-            const bool oke = (i_rotate >= 0) && gui_pack_export(i_rotate, &etg, &enc, eerr, sizeof eerr, enote, sizeof enote);
-            char base[600] = {0};
-            char jpath[640] = {0};
-            char ppath[640] = {0};
+            const bool oke = (i_rotate >= 0 && jtarget >= 0) &&
+                             gui_pack_export(i_rotate, &etg, &enc, eerr, sizeof eerr, enote, sizeof enote);
+            char jpath[720] = {0};
+            char ppath[720] = {0};
+            (void)snprintf(jpath, sizeof jpath, "%s.json", tbase);
+            (void)snprintf(ppath, sizeof ppath, "%s-0.png", tbase);
             bool jok = false;
             bool pok = false;
-            if (tp_project_resolve_path(dp, "out/rotate.json", base, sizeof base) == TP_STATUS_OK) {
-                (void)snprintf(jpath, sizeof jpath, "%s.json", base);
-                (void)snprintf(ppath, sizeof ppath, "%s-0.png", base);
+            {
                 FILE *jf = fopen(jpath, "rb");
                 if (jf) {
                     jok = (fgetc(jf) == '{'); /* lightweight parse check; full parse is in ctest test_export_json */
@@ -3019,14 +3756,14 @@ static void run_selftest(void) {
                 }
                 FILE *pf = fopen(ppath, "rb");
                 if (pf) {
-                    pok = true;
+                    pok = (fgetc(pf) != EOF); /* exists AND non-empty */
                     (void)fclose(pf);
                 }
             }
             nt_log_info("SELFTEST: export 'rotate' -> ok=%d targets=%d notices=%d json{=%d png0=%d %s", oke, etg, enc,
                         jok, pok, oke ? "" : eerr);
             NT_ASSERT(oke && jok && pok && "export rotate: json + page png must exist");
-            (void)remove(jpath); /* keep the repo clean */
+            (void)remove(jpath); /* throwaway under the build dir */
             (void)remove(ppath);
         } else {
             nt_log_info("SELFTEST: demo project open failed: %s", perr);
@@ -3208,6 +3945,66 @@ static void run_selftest(void) {
         (void)remove(fpath);
     }
 
+    /* --- animations (ux.md §3.7b): pure playback map, create-from-selection natural sort, reorder,
+     *     round-trip preserves frames order + playback + flips, remove-frame path --- */
+    {
+        bool fin = false;
+        NT_ASSERT(gui_canvas_anim_frame_at(0.0, 10.0F, 2, 4, &fin) == 3 && !fin && "once_backward step0");
+        NT_ASSERT(gui_canvas_anim_frame_at(0.35, 10.0F, 2, 4, &fin) == 0 && fin && "once_backward finishes at 0");
+        NT_ASSERT(gui_canvas_anim_frame_at(0.45, 10.0F, 3, 4, &fin) == 3 && "loop_backward wraps");
+        NT_ASSERT(gui_canvas_anim_frame_at(0.35, 10.0F, 4, 3, &fin) == 1 && "once_pingpong return leg");
+        NT_ASSERT(gui_canvas_anim_frame_at(0.45, 10.0F, 4, 3, &fin) == 0 && fin && "once_pingpong finishes at 0");
+        NT_ASSERT(gui_canvas_anim_frame_at(0.55, 10.0F, 5, 3, &fin) == 1 && "loop_pingpong wraps");
+
+        const int aidx = gui_project_add_atlas();
+        s_sel_atlas = aidx;
+        multi_sel_clear();
+        multi_sel_add("walk_10"); /* deliberately out of natural order */
+        multi_sel_add("walk_2");
+        multi_sel_add("walk_1");
+        const int ai = create_animation_from_selection();
+        tp_project_atlas *aa = tp_project_get_atlas(gui_project_get(), aidx);
+        NT_ASSERT(ai == 0 && aa && aa->animation_count == 1 && "create animation from selection");
+        tp_project_anim *an = &aa->animations[0];
+        nt_log_info("SELFTEST: anim '%s' frames [%s,%s,%s]", an->id, an->frames[0], an->frames[1], an->frames[2]);
+        NT_ASSERT(an->frame_count == 3 && strcmp(an->frames[0], "walk_1") == 0 && strcmp(an->frames[1], "walk_2") == 0 &&
+                  strcmp(an->frames[2], "walk_10") == 0 && "frames natural-sorted (walk_2 before walk_10)");
+
+        gui_project_set_anim_playback(aidx, 0, 5); /* loop pingpong */
+        gui_project_set_anim_flip(aidx, 0, true, false);
+        gui_project_set_anim_fps(aidx, 0, 12.0F);
+        gui_project_anim_move_frame(aidx, 0, 0, 2); /* walk_1 rides to the end */
+        aa = tp_project_get_atlas(gui_project_get(), aidx);
+        an = &aa->animations[0];
+        NT_ASSERT(strcmp(an->frames[0], "walk_2") == 0 && strcmp(an->frames[2], "walk_1") == 0 && "reorder a frame");
+
+        char *abuf = NULL;
+        size_t alen = 0;
+        tp_error abe = {0};
+        tp_project *alp = NULL;
+        tp_error ale = {0};
+        const tp_status abs_st = tp_project_save_buffer(gui_project_get(), &abuf, &alen, &abe);
+        const tp_status als_st = (abs_st == TP_STATUS_OK) ? tp_project_load_buffer(abuf, alen, &alp, &ale) : abs_st;
+        const tp_project_anim *rl = (alp && alp->atlas_count > aidx && alp->atlases[aidx].animation_count > 0)
+                                        ? &alp->atlases[aidx].animations[0]
+                                        : NULL;
+        nt_log_info("SELFTEST: anim RT save=%s load=%s playback=%d flip_h=%d fps=%g", tp_status_str(abs_st),
+                    tp_status_str(als_st), rl ? rl->playback : -1, rl ? rl->flip_h : -1, rl ? (double)rl->fps : 0.0);
+        NT_ASSERT(rl && rl->frame_count == 3 && rl->playback == 5 && rl->flip_h && !rl->flip_v && rl->fps == 12.0F &&
+                  strcmp(rl->frames[0], "walk_2") == 0 && strcmp(rl->frames[2], "walk_1") == 0 &&
+                  "round-trip preserves frame order + playback + flips");
+        tp_project_destroy(alp);
+        free(abuf);
+
+        NT_ASSERT(gui_project_anim_remove_frame(aidx, 0, 1) && aa->animations[0].frame_count == 2 && "remove a frame");
+        nt_log_info("SELFTEST: animation create/reorder/round-trip OK");
+
+        multi_sel_clear();
+        s_sel_anim = -1;
+        s_sel_anim_frame = -1;
+        s_sel_atlas = 0;
+    }
+
     /* --- About modal: open it so the auto-quit frames render it (OK/Esc close it interactively) --- */
     s_about_open = true;
     nt_log_info("SELFTEST: About modal opened=%d", s_about_open);
@@ -3225,6 +4022,29 @@ static void run_selftest(void) {
             s_sel_missing = false;
         }
     }
+    /* Render coverage: leave a real animation selected + previewing so the auto-quit frames exercise the
+     * left-panel animations rows, the right-panel editor, and the canvas preview (draw_anim_frame on the
+     * packed regions) -- a Clay layout bug in the new UI would crash these frames. */
+    {
+        s_sel_atlas = 0;
+        tp_project_atlas *pa = tp_project_get_atlas(gui_project_get(), 0);
+        const tp_result *pr = gui_pack_result(0);
+        if (pa && pr && pr->sprite_count > 0) {
+            multi_sel_clear();
+            for (int i = 0; i < pr->sprite_count && i < 4; i++) {
+                char key[192];
+                strip_ext(pr->sprites[i].name, key, sizeof key);
+                multi_sel_add(key);
+            }
+            const int pai = create_animation_from_selection();
+            if (pai >= 0) {
+                open_preview(pai);
+                nt_log_info("SELFTEST: preview anim '%s' active=%d frames=%d", pa->animations[pai].id, s_preview_active,
+                            pa->animations[pai].frame_count);
+            }
+            multi_sel_clear();
+        }
+    }
     g_ui_scale = 1.5F; /* exercise the scaled layout during the auto-quit frames */
     nt_log_info("SELFTEST: end (undo:%d redo:%d history:%zuB; selection '%s')", gui_history_undo_depth(),
                 gui_history_redo_depth(), gui_history_bytes(), s_sel_abs);
@@ -3238,6 +4058,15 @@ static void run_selftest(void) {
 static void handle_shortcuts(void) {
     if (nt_ui_input_any_focused(s_ctx) || s_confirm_open || s_about_open) {
         return;
+    }
+    /* Preview + editor accelerators (each also a button; §3.3e). */
+    if (s_preview_active && nt_input_key_is_pressed(NT_KEY_SPACE)) {
+        preview_toggle_play();
+    }
+    if (s_edit_kind == EDIT_NONE && s_sel_anim >= 0 && s_sel_anim_frame >= 0 &&
+        nt_input_key_is_pressed(NT_KEY_DELETE)) {
+        gui_project_anim_remove_frame(s_sel_atlas, s_sel_anim, s_sel_anim_frame);
+        s_sel_anim_frame = -1;
     }
     if (nt_input_key_is_pressed(NT_KEY_F5)) {
         s_pending_refresh = true;
@@ -3302,6 +4131,9 @@ static void frame(void) {
         } else if (s_confirm_open) {
             s_confirm_open = false;
             s_after_confirm = AFTER_NONE;
+        } else if (s_preview_active && !s_ctx_state.open) {
+            preview_stop();
+            set_status("Closed animation preview.");
         } else {
             close_all_menus();
         }
@@ -3396,6 +4228,17 @@ static void frame(void) {
         gui_canvas_set_ui_scale(&s_canvas, g_ui_scale); /* overlay line widths scale with DPI */
 
         clamp_selection();
+        /* keep the animation selection valid after undo/redo/atlas changes */
+        {
+            tp_project_atlas *sel_a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
+            if (!sel_a || s_sel_anim >= sel_a->animation_count) {
+                s_sel_anim = -1;
+                s_sel_anim_frame = -1;
+                if (s_preview_active) {
+                    preview_stop();
+                }
+            }
+        }
         build_rows(gui_project_get(), tp_project_get_atlas(gui_project_get(), s_sel_atlas));
         s_content_w = scale.logical_w; /* for caption/status truncation */
 
@@ -3405,6 +4248,7 @@ static void frame(void) {
             gui_canvas_set_result(&s_canvas, want);
             s_shown_result = want;
         }
+        update_preview();      /* resolve the current preview frame + set ANIM mode before input/handler */
         handle_canvas_input(); /* wheel/pan/click over the atlas page (uses last frame's draw box) */
 
         nt_ui_begin(s_ctx, scale.logical_w, scale.logical_h, g_nt_app.dt, &g_nt_input.pointers[0], 1);

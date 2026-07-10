@@ -523,6 +523,52 @@ tp_status tp_project_anim_add_frame(tp_project_anim *anim, const char *frame_nam
     return TP_STATUS_OK;
 }
 
+tp_status tp_project_anim_remove_frame(tp_project_anim *anim, int index) {
+    if (!anim) {
+        return TP_STATUS_INVALID_ARGUMENT;
+    }
+    if (index < 0 || index >= anim->frame_count) {
+        return TP_STATUS_OUT_OF_BOUNDS;
+    }
+    free(anim->frames[index]);
+    for (int j = index; j < anim->frame_count - 1; j++) {
+        anim->frames[j] = anim->frames[j + 1];
+    }
+    anim->frame_count--;
+    return TP_STATUS_OK;
+}
+
+tp_status tp_project_anim_move_frame(tp_project_anim *anim, int index, int delta) {
+    if (!anim) {
+        return TP_STATUS_INVALID_ARGUMENT;
+    }
+    if (index < 0 || index >= anim->frame_count) {
+        return TP_STATUS_OUT_OF_BOUNDS;
+    }
+    int dst = index + delta;
+    if (dst < 0) {
+        dst = 0;
+    }
+    if (dst > anim->frame_count - 1) {
+        dst = anim->frame_count - 1;
+    }
+    if (dst == index) {
+        return TP_STATUS_OK; /* no-op */
+    }
+    char *moved = anim->frames[index];
+    if (dst > index) {
+        for (int j = index; j < dst; j++) {
+            anim->frames[j] = anim->frames[j + 1];
+        }
+    } else {
+        for (int j = index; j > dst; j--) {
+            anim->frames[j] = anim->frames[j - 1];
+        }
+    }
+    anim->frames[dst] = moved;
+    return TP_STATUS_OK;
+}
+
 tp_status tp_project_atlas_add_target(tp_project_atlas *a, const char *exporter_id, const char *out_path,
                                       tp_project_target **out) {
     if (!a || !exporter_id || !out_path) {

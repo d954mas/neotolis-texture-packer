@@ -359,6 +359,178 @@ bool gui_project_set_target(int atlas_index, int index, const char *exporter_id,
 }
 // #endregion
 
+// #region animations
+static tp_project_anim *anim_at(int atlas_index, int anim_index) {
+    tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
+    if (!a || anim_index < 0 || anim_index >= a->animation_count) {
+        return NULL;
+    }
+    return &a->animations[anim_index];
+}
+
+bool gui_project_anim_id_exists(int atlas_index, const char *id) {
+    tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
+    if (!a || !id) {
+        return false;
+    }
+    for (int i = 0; i < a->animation_count; i++) {
+        if (strcmp(a->animations[i].id, id) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+int gui_project_create_animation(int atlas_index, const char *base, const char *const *frames, int frame_count) {
+    tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
+    if (!a) {
+        return -1;
+    }
+    /* unique id: prefer `base` verbatim, else base"2"/"3"...; a NULL/empty base auto-names "animN". */
+    char id[128];
+    if (base && base[0]) {
+        (void)snprintf(id, sizeof id, "%s", base);
+        for (int n = 2; gui_project_anim_id_exists(atlas_index, id); n++) {
+            (void)snprintf(id, sizeof id, "%s%d", base, n);
+        }
+    } else {
+        for (int n = 1;; n++) {
+            (void)snprintf(id, sizeof id, "anim%d", n);
+            if (!gui_project_anim_id_exists(atlas_index, id)) {
+                break;
+            }
+        }
+    }
+    tp_project_anim *an = NULL;
+    if (tp_project_atlas_add_animation(a, id, &an) != TP_STATUS_OK) {
+        return -1;
+    }
+    for (int i = 0; frames && i < frame_count; i++) {
+        if (frames[i] && frames[i][0]) {
+            (void)tp_project_anim_add_frame(an, frames[i]);
+        }
+    }
+    gui_project_touch(GUI_ACT_ADD_ANIM);
+    return a->animation_count - 1;
+}
+
+void gui_project_remove_animation(int atlas_index, const char *id) {
+    tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
+    if (a && id && tp_project_atlas_remove_animation(a, id) == TP_STATUS_OK) {
+        gui_project_touch(GUI_ACT_REMOVE_ANIM);
+    }
+}
+
+bool gui_project_set_anim_id(int atlas_index, int anim_index, const char *new_id) {
+    tp_project_anim *an = anim_at(atlas_index, anim_index);
+    if (!an || !new_id || new_id[0] == '\0') {
+        return false;
+    }
+    if (strcmp(an->id, new_id) == 0) {
+        return true; /* no-op */
+    }
+    tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
+    for (int i = 0; a && i < a->animation_count; i++) {
+        if (i != anim_index && strcmp(a->animations[i].id, new_id) == 0) {
+            return false; /* clashes with another animation */
+        }
+    }
+    char *copy = dupstr(new_id);
+    if (!copy) {
+        return false;
+    }
+    free(an->id);
+    an->id = copy;
+    gui_project_touch(GUI_ACT_RENAME_ANIM);
+    return true;
+}
+
+bool gui_project_set_anim_fps(int atlas_index, int anim_index, float fps) {
+    tp_project_anim *an = anim_at(atlas_index, anim_index);
+    if (!an) {
+        return false;
+    }
+    if (!(fps >= 1.0F)) {
+        fps = 1.0F;
+    }
+    if (an->fps == fps) {
+        return true;
+    }
+    an->fps = fps;
+    gui_project_touch(GUI_ACT_SET_ANIM);
+    return true;
+}
+
+bool gui_project_set_anim_playback(int atlas_index, int anim_index, int playback) {
+    tp_project_anim *an = anim_at(atlas_index, anim_index);
+    if (!an) {
+        return false;
+    }
+    if (playback < 0) {
+        playback = 0;
+    }
+    if (playback > 6) {
+        playback = 6;
+    }
+    if (an->playback == playback) {
+        return true;
+    }
+    an->playback = playback;
+    gui_project_touch(GUI_ACT_SET_ANIM);
+    return true;
+}
+
+bool gui_project_set_anim_flip(int atlas_index, int anim_index, bool flip_h, bool flip_v) {
+    tp_project_anim *an = anim_at(atlas_index, anim_index);
+    if (!an) {
+        return false;
+    }
+    if (an->flip_h == flip_h && an->flip_v == flip_v) {
+        return true;
+    }
+    an->flip_h = flip_h;
+    an->flip_v = flip_v;
+    gui_project_touch(GUI_ACT_SET_ANIM);
+    return true;
+}
+
+bool gui_project_anim_add_frames(int atlas_index, int anim_index, const char *const *frames, int count) {
+    tp_project_anim *an = anim_at(atlas_index, anim_index);
+    if (!an || !frames || count <= 0) {
+        return false;
+    }
+    int added = 0;
+    for (int i = 0; i < count; i++) {
+        if (frames[i] && frames[i][0] && tp_project_anim_add_frame(an, frames[i]) == TP_STATUS_OK) {
+            added++;
+        }
+    }
+    if (added == 0) {
+        return false;
+    }
+    gui_project_touch(GUI_ACT_ANIM_FRAMES);
+    return true;
+}
+
+bool gui_project_anim_remove_frame(int atlas_index, int anim_index, int frame_index) {
+    tp_project_anim *an = anim_at(atlas_index, anim_index);
+    if (!an || tp_project_anim_remove_frame(an, frame_index) != TP_STATUS_OK) {
+        return false;
+    }
+    gui_project_touch(GUI_ACT_ANIM_FRAMES);
+    return true;
+}
+
+bool gui_project_anim_move_frame(int atlas_index, int anim_index, int frame_index, int delta) {
+    tp_project_anim *an = anim_at(atlas_index, anim_index);
+    if (!an || tp_project_anim_move_frame(an, frame_index, delta) != TP_STATUS_OK) {
+        return false;
+    }
+    gui_project_touch(GUI_ACT_ANIM_FRAMES);
+    return true;
+}
+// #endregion
+
 // #region undo / redo
 bool gui_project_can_undo(void) { return gui_history_can_undo(); }
 bool gui_project_can_redo(void) { return gui_history_can_redo(); }
