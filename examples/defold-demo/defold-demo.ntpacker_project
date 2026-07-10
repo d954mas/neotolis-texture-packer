@@ -1,0 +1,88 @@
+{
+  "version": 1,
+  "atlases": [
+    {
+      "animations": [
+        {
+          "fps": 4,
+          "frames": [
+            "box_fill_128",
+            "box_fill_64"
+          ],
+          "id": "BoxFlip",
+          "playback": 1
+        }
+      ],
+      "name": "basic",
+      "sources": [
+        "examples/basic/original"
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "out_path": "out/basic.json"
+        },
+        {
+          "enabled": false,
+          "exporter_id": "defold",
+          "out_path": "out/basic.tpinfo"
+        }
+      ]
+    },
+    {
+      "name": "rotate",
+      "sources": [
+        "examples/rotate/a.png",
+        "examples/rotate/b.png",
+        "examples/rotate/c.png"
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "out_path": "out/rotate.json"
+        },
+        {
+          "enabled": false,
+          "exporter_id": "defold",
+          "out_path": "out/rotate.tpinfo"
+        }
+      ]
+    },
+    {
+      "animations": [
+        {
+          "fps": 6,
+          "frames": [
+            "sq1",
+            "sq2",
+            "sq3",
+            "sq4",
+            "sq5",
+            "sq6",
+            "sq7",
+            "sq8",
+            "sq9",
+            "sq10"
+          ],
+          "id": "anim_trim",
+          "playback": 1
+        }
+      ],
+      "name": "anim_trim",
+      "sources": [
+        "examples/anim_trim/anims"
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "out_path": "out/anim_trim.json"
+        },
+        {
+          "enabled": false,
+          "exporter_id": "defold",
+          "out_path": "out/anim_trim.tpinfo"
+        }
+      ]
+    }
+  ]
+}
