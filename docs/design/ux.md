@@ -281,6 +281,17 @@ cheap (projects are KBs):
   per gesture (on begin/commit), not per frame/keystroke.
 - Depth ~100 entries (ring); Ctrl+Z / Ctrl+Y (+ Ctrl+Shift+Z alias), Edit menu
   Undo/Redo with greyed state and action names later (v1: plain Undo/Redo).
+- **Scale guard (owner challenge: 10 atlases × 1000 objects).** First, the
+  model keeps SOURCES + sparse overrides, not per-object entries — folder-fed
+  atlases stay tiny regardless of sprite count. The pathological case
+  (thousands of per-file sources and overrides) is ~1-2 MB of JSON. Guards,
+  in order of adoption: (1) skip-if-identical (byte-stable serialization →
+  memcmp dedup); (2) snapshots stored compressed (miniz is already in the
+  engine deps; JSON compresses 10-20×, so worst case ≈ 50-150 KB/step);
+  (3) history budget counted in BYTES (e.g. 32 MB ring), not steps — small
+  projects get deep history, huge ones shallower. Escalation only if real
+  projects still hurt: per-atlas snapshots (mutations are atlas-local; full
+  snapshot only for cross-atlas ops). Not built until measurements demand it.
 - Scope: undo covers the PROJECT MODEL only — never disk files, never the
   packed preview directly (a restored model recomputes `preview_stale`;
   `project_dirty` recomputes by comparing the restored snapshot to the
