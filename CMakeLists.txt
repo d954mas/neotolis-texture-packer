@@ -19,3 +19,4 @@ add_subdirectory(external/neotolis-engine/tools/builder nt_builder)
 
 enable_testing()
 add_subdirectory(apps/smoke)
+add_subdirectory(packer)

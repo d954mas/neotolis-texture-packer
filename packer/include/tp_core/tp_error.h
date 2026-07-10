@@ -1,0 +1,79 @@
+#ifndef TP_CORE_TP_ERROR_H
+#define TP_CORE_TP_ERROR_H
+
+/* tp_core error model: no asserts on bad input anywhere in tp_core -- every
+ * fallible entry point returns a tp_status and (optionally) fills a tp_error
+ * message buffer instead of crashing on caller-supplied data. */
+
+#include <stdarg.h>
+#include <stdio.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef enum tp_status {
+    TP_STATUS_OK = 0,
+    TP_STATUS_UNIMPLEMENTED,
+    TP_STATUS_INVALID_ARGUMENT,
+    TP_STATUS_BAD_MAGIC,
+    TP_STATUS_BAD_VERSION,
+    TP_STATUS_OUT_OF_BOUNDS,
+    TP_STATUS_HASH_COLLISION,
+    TP_STATUS_UNKNOWN_REGION,
+    TP_STATUS_PAGE_NOT_FOUND,
+    TP_STATUS_UNSUPPORTED_TEXTURE,
+    TP_STATUS_OOM
+} tp_status;
+
+/* Fixed-size message buffer -- no heap, safe to embed by value on the stack. */
+typedef struct tp_error {
+    char msg[256];
+} tp_error;
+
+#if defined(__GNUC__) || defined(__clang__)
+#define TP_PRINTF_ATTR(fmt_idx, args_idx) __attribute__((format(printf, fmt_idx, args_idx)))
+#else
+#define TP_PRINTF_ATTR(fmt_idx, args_idx)
+#endif
+
+/* Formats into err->msg (if err != NULL) and returns status, so call sites can
+ * write `return tp_error_set(err, TP_STATUS_X, "...", ...);` in one line. */
+static inline tp_status tp_error_set(tp_error *err, tp_status status, const char *fmt, ...) TP_PRINTF_ATTR(3, 4);
+
+static inline tp_status tp_error_set(tp_error *err, tp_status status, const char *fmt, ...) {
+    if (err) {
+        if (fmt) {
+            va_list args;
+            va_start(args, fmt);
+            (void)vsnprintf(err->msg, sizeof(err->msg), fmt, args);
+            va_end(args);
+        } else {
+            err->msg[0] = '\0';
+        }
+    }
+    return status;
+}
+
+static inline const char *tp_status_str(tp_status status) {
+    switch (status) {
+        case TP_STATUS_OK: return "ok";
+        case TP_STATUS_UNIMPLEMENTED: return "unimplemented";
+        case TP_STATUS_INVALID_ARGUMENT: return "invalid argument";
+        case TP_STATUS_BAD_MAGIC: return "bad magic";
+        case TP_STATUS_BAD_VERSION: return "bad version";
+        case TP_STATUS_OUT_OF_BOUNDS: return "out of bounds";
+        case TP_STATUS_HASH_COLLISION: return "hash collision";
+        case TP_STATUS_UNKNOWN_REGION: return "unknown region";
+        case TP_STATUS_PAGE_NOT_FOUND: return "page not found";
+        case TP_STATUS_UNSUPPORTED_TEXTURE: return "unsupported texture";
+        case TP_STATUS_OOM: return "out of memory";
+    }
+    return "unknown status";
+}
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* TP_CORE_TP_ERROR_H */
