@@ -221,9 +221,14 @@ skipping the serialize→parse round-trip). No upstream dependency remains.
   optional `.tpatlas` starter; `.atlas`+loose-PNG **fallback** preset.
 - `.tpatlas` generation from the project's `animations[]` + auto-grouped
   animations (`SUMMARY.md §5a`, Phase 2 normalization).
-- `examples/defold-demo/`: `game.project` (dependency pinned to a matching
-  extension tag), generated `.tpinfo` + page PNG, `.tpatlas`, one collection
-  with a sprite (incl. a rotated + trimmed sprite and one flipbook animation).
+- `examples/defold-demo/`: base LANDED 2026-07-10 (owner decision) — real-asset
+  examples copied from extension-texturepacker (MIT, `UPSTREAM-LICENSE`;
+  basic/rotate/anim_trim/skins incl. source PNGs, TexturePacker `.tps`/
+  `.tpinfo`/`.tpatlas` outputs and the native `rotate_d.atlas`), `game.project`
+  pinned to extension 2.7.0 ↔ Defold 1.12.4 + dirtylarry@6f2070e909a9.
+  Phase 5 adds OUR generated `.tpinfo` + page PNGs + `.tpatlas` over the same
+  source images → direct three-way diff (Defold native / TexturePacker / ours)
+  incl. a rotated + trimmed sprite and one flipbook animation.
 - CI job: install JDK, download `bob.jar` (version-matched), `bob resolve` +
   `bob build --variant headless`; assert green.
 - Version pinning: demo + CI pin the newest extension-texturepacker release

@@ -1,0 +1,408 @@
+# Exported by Defold Exporter
+# For documentation of the fields: https://www.codeandweb.com/texturepacker/documentation/custom-exporter#sprite-type
+
+pages {
+  name: "anim_trim.png"
+  size {
+    width: 128
+    height: 128
+  }
+  sprites {
+    name: "sq9"
+    trimmed: true
+    rotated: false
+    is_solid: false
+    corner_offset {
+      x: 13
+      y: 25
+    }
+    source_rect {
+      x: 13
+      y: 25
+      width: 34
+      height: 54
+    }
+    frame_rect {
+      x: 0
+      y: 0
+      width: 34
+      height: 54
+    }
+    untrimmed_size {
+      width: 128
+      height: 128
+    }
+    vertices {
+      x: 41
+      y: 79
+    }
+    vertices {
+      x: 13
+      y: 51
+    }
+    vertices {
+      x: 47
+      y: 25
+    }
+    indices: [0, 1, 2]
+  }
+  sprites {
+    name: "sq7"
+    trimmed: true
+    rotated: false
+    is_solid: false
+    corner_offset {
+      x: 65
+      y: 70
+    }
+    source_rect {
+      x: 65
+      y: 70
+      width: 34
+      height: 54
+    }
+    frame_rect {
+      x: 32
+      y: 0
+      width: 34
+      height: 54
+    }
+    untrimmed_size {
+      width: 128
+      height: 128
+    }
+    vertices {
+      x: 93
+      y: 124
+    }
+    vertices {
+      x: 65
+      y: 96
+    }
+    vertices {
+      x: 99
+      y: 70
+    }
+    indices: [0, 1, 2]
+  }
+  sprites {
+    name: "sq8"
+    trimmed: true
+    rotated: false
+    is_solid: false
+    corner_offset {
+      x: 38
+      y: 49
+    }
+    source_rect {
+      x: 38
+      y: 49
+      width: 34
+      height: 54
+    }
+    frame_rect {
+      x: 32
+      y: 0
+      width: 34
+      height: 54
+    }
+    untrimmed_size {
+      width: 128
+      height: 128
+    }
+    vertices {
+      x: 66
+      y: 103
+    }
+    vertices {
+      x: 38
+      y: 75
+    }
+    vertices {
+      x: 72
+      y: 49
+    }
+    indices: [0, 1, 2]
+  }
+  sprites {
+    name: "sq6"
+    trimmed: true
+    rotated: false
+    is_solid: false
+    corner_offset {
+      x: 89
+      y: 88
+    }
+    source_rect {
+      x: 89
+      y: 88
+      width: 32
+      height: 40
+    }
+    frame_rect {
+      x: 64
+      y: 0
+      width: 32
+      height: 40
+    }
+    untrimmed_size {
+      width: 128
+      height: 128
+    }
+    vertices {
+      x: 117
+      y: 128
+    }
+    vertices {
+      x: 89
+      y: 128
+    }
+    vertices {
+      x: 89
+      y: 111
+    }
+    vertices {
+      x: 121
+      y: 88
+    }
+    indices: [0, 2, 3, 0, 1, 2]
+  }
+  sprites {
+    name: "sq1"
+    trimmed: true
+    rotated: false
+    is_solid: false
+    corner_offset {
+      x: 15
+      y: 20
+    }
+    source_rect {
+      x: 15
+      y: 20
+      width: 34
+      height: 34
+    }
+    frame_rect {
+      x: 0
+      y: 41
+      width: 34
+      height: 34
+    }
+    untrimmed_size {
+      width: 128
+      height: 128
+    }
+    vertices {
+      x: 49
+      y: 37
+    }
+    vertices {
+      x: 15
+      y: 54
+    }
+    vertices {
+      x: 15
+      y: 20
+    }
+    indices: [0, 1, 2]
+  }
+  sprites {
+    name: "sq2"
+    trimmed: true
+    rotated: false
+    is_solid: false
+    corner_offset {
+      x: 33
+      y: 18
+    }
+    source_rect {
+      x: 33
+      y: 18
+      width: 34
+      height: 34
+    }
+    frame_rect {
+      x: 0
+      y: 41
+      width: 34
+      height: 34
+    }
+    untrimmed_size {
+      width: 128
+      height: 128
+    }
+    vertices {
+      x: 67
+      y: 35
+    }
+    vertices {
+      x: 33
+      y: 52
+    }
+    vertices {
+      x: 33
+      y: 18
+    }
+    indices: [0, 1, 2]
+  }
+  sprites {
+    name: "sq3"
+    trimmed: true
+    rotated: false
+    is_solid: false
+    corner_offset {
+      x: 51
+      y: 14
+    }
+    source_rect {
+      x: 51
+      y: 14
+      width: 34
+      height: 34
+    }
+    frame_rect {
+      x: 0
+      y: 41
+      width: 34
+      height: 34
+    }
+    untrimmed_size {
+      width: 128
+      height: 128
+    }
+    vertices {
+      x: 85
+      y: 31
+    }
+    vertices {
+      x: 51
+      y: 48
+    }
+    vertices {
+      x: 51
+      y: 14
+    }
+    indices: [0, 1, 2]
+  }
+  sprites {
+    name: "sq4"
+    trimmed: true
+    rotated: false
+    is_solid: false
+    corner_offset {
+      x: 84
+      y: 10
+    }
+    source_rect {
+      x: 84
+      y: 10
+      width: 34
+      height: 34
+    }
+    frame_rect {
+      x: 0
+      y: 41
+      width: 34
+      height: 34
+    }
+    untrimmed_size {
+      width: 128
+      height: 128
+    }
+    vertices {
+      x: 118
+      y: 27
+    }
+    vertices {
+      x: 84
+      y: 44
+    }
+    vertices {
+      x: 84
+      y: 10
+    }
+    indices: [0, 1, 2]
+  }
+  sprites {
+    name: "sq5"
+    trimmed: true
+    rotated: false
+    is_solid: false
+    corner_offset {
+      x: 92
+      y: 45
+    }
+    source_rect {
+      x: 92
+      y: 45
+      width: 34
+      height: 34
+    }
+    frame_rect {
+      x: 0
+      y: 41
+      width: 34
+      height: 34
+    }
+    untrimmed_size {
+      width: 128
+      height: 128
+    }
+    vertices {
+      x: 126
+      y: 62
+    }
+    vertices {
+      x: 92
+      y: 79
+    }
+    vertices {
+      x: 92
+      y: 45
+    }
+    indices: [0, 1, 2]
+  }
+  sprites {
+    name: "sq10"
+    trimmed: true
+    rotated: false
+    is_solid: false
+    corner_offset {
+      x: 63
+      y: 28
+    }
+    source_rect {
+      x: 63
+      y: 28
+      width: 12
+      height: 12
+    }
+    frame_rect {
+      x: 37
+      y: 0
+      width: 12
+      height: 12
+    }
+    untrimmed_size {
+      width: 128
+      height: 128
+    }
+    vertices {
+      x: 75
+      y: 40
+    }
+    vertices {
+      x: 63
+      y: 40
+    }
+    vertices {
+      x: 63
+      y: 28
+    }
+    vertices {
+      x: 75
+      y: 28
+    }
+    indices: [1, 2, 3, 0, 1, 3]
+  }
+}

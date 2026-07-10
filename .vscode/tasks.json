@@ -1,0 +1,53 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "configure (native-debug)",
+            "type": "shell",
+            "command": "cmake --preset native-debug",
+            "problemMatcher": []
+        },
+        {
+            "label": "build (native-debug)",
+            "type": "shell",
+            "command": "cmake --build --preset native-debug",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": ["$gcc"]
+        },
+        {
+            "label": "test (native-debug)",
+            "type": "shell",
+            "command": "ctest --preset native-debug --output-on-failure",
+            "dependsOn": ["build (native-debug)"],
+            "group": {
+                "kind": "test",
+                "isDefault": true
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "configure (native-release)",
+            "type": "shell",
+            "command": "cmake --preset native-release",
+            "problemMatcher": []
+        },
+        {
+            "label": "build (native-release)",
+            "type": "shell",
+            "command": "cmake --build --preset native-release",
+            "group": "build",
+            "problemMatcher": ["$gcc"]
+        },
+        {
+            "label": "test (native-release)",
+            "type": "shell",
+            "command": "ctest --preset native-release --output-on-failure",
+            "dependsOn": ["build (native-release)"],
+            "group": "test",
+            "problemMatcher": []
+        }
+    ]
+}
