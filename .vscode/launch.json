@@ -10,7 +10,7 @@
             "type": "cppvsdbg",
             "request": "launch",
             "program": "${workspaceFolder}/build/apps/gui/native-debug/ntpacker-gui.exe",
-            "args": ["${workspaceFolder}/examples/demo.ntpacker_project"],
+            "args": [],
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
             "preLaunchTask": "build (native-debug)"
