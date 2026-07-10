@@ -282,11 +282,9 @@ Headless, CI-first. One console binary `ntpacker`; the windowed sibling is
 CLI does argv + disk I/O only and calls the same `tp_core` the GUI does — so CLI
 output byte-matches the library test and the GUI (ROADMAP Phase 4 acceptance).
 
-> **Naming note (open question).** This task packet writes `ntpacker export …`;
-> ROADMAP Phase 4 writes `pack <project>`. This doc uses **`pack`** as the
-> canonical verb (ecosystem norm — rTexPacker/gdx/texpack; ROADMAP deliverable)
-> and accepts **`export`** as an alias. Recommend the owner pick one; flagged in
-> the final report.
+> **Naming note (resolved, 2026-07-10).** **`pack`** is the canonical verb
+> (ecosystem norm — rTexPacker/gdx/texpack; ROADMAP deliverable); **`export`**
+> is accepted as an alias.
 
 ### 4.1 Verbs
 
