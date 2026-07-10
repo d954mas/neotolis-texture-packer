@@ -223,6 +223,13 @@ tp_status tp_export_json_neotolis_write(const tp_export_prepared *prep, const tp
 /* json-neotolis schema version emitted in the "version" field. */
 #define TP_JSON_NEOTOLIS_SCHEMA_VERSION 1
 
+/* The Defold serializer (extension-texturepacker `.tpinfo` + `.tpatlas` + page
+ * PNGs), exposed so tools/tests can drive it directly. Writes three artifacts at
+ * out_path_base: "<base>.tpinfo", "<base>.tpatlas", "<base>-<N>.png". Contract:
+ * docs/formats/defold-tpinfo.md. */
+tp_status tp_export_defold_write(const tp_export_prepared *prep, const tp_export_caps *caps, const char *out_path_base,
+                                 tp_export_notices *notices, tp_error *err);
+
 #ifdef __cplusplus
 }
 #endif

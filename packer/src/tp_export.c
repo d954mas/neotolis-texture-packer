@@ -123,8 +123,29 @@ static const tp_exporter g_json_neotolis = {
     .write = tp_export_json_neotolis_write,
 };
 
-/* Built-in table: the v1 user-facing exporter (SUMMARY.md §6 Q5). */
-static const tp_exporter *const g_builtins[] = {&g_json_neotolis};
+/* Defold (extension-texturepacker .tpinfo). Caps = the FORMAT's real abilities
+ * (docs/research/defold.md): 90-degree rotation, trim, polygons, pivots (v2.0),
+ * multipage and aliases YES; region-level flips NO (flips are per-animation only)
+ * and 9-slice NO (dropped with a notice). rotate90 && !flips means the per-target
+ * clamp packs Defold identity-only in v1 (the anticipated "rotate90-only target"
+ * in tp_export_effective_settings) -- correct output, rotation density deferred to
+ * the future engine transform-policy PR. */
+static const tp_exporter g_defold = {
+    .id = "defold",
+    .display_name = "Defold (.tpinfo + .tpatlas)",
+    .extension = "tpinfo",
+    .caps = {.rotate90 = true,
+             .flips = false,
+             .polygons = true,
+             .pivot = true,
+             .slice9 = false,
+             .multipage = true,
+             .aliases = true},
+    .write = tp_export_defold_write,
+};
+
+/* Built-in table: the v1 user-facing exporters (SUMMARY.md §6 Q5). */
+static const tp_exporter *const g_builtins[] = {&g_json_neotolis, &g_defold};
 #define TP_BUILTIN_COUNT ((int)(sizeof g_builtins / sizeof g_builtins[0]))
 
 /* Runtime overflow table (Phase 7 templates; tests inject descriptors). */

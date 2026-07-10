@@ -23,9 +23,8 @@
           "out_path": "out/basic.json"
         },
         {
-          "enabled": false,
           "exporter_id": "defold",
-          "out_path": "out/basic.tpinfo"
+          "out_path": "out/basic-defold"
         }
       ]
     },
@@ -42,9 +41,8 @@
           "out_path": "out/rotate.json"
         },
         {
-          "enabled": false,
           "exporter_id": "defold",
-          "out_path": "out/rotate.tpinfo"
+          "out_path": "out/rotate-defold"
         }
       ]
     },
@@ -78,9 +76,8 @@
           "out_path": "out/anim_trim.json"
         },
         {
-          "enabled": false,
           "exporter_id": "defold",
-          "out_path": "out/anim_trim.tpinfo"
+          "out_path": "out/anim_trim-defold"
         }
       ]
     }

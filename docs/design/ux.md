@@ -336,7 +336,12 @@ outcome, at any layer:
      silhouette envelope, not an extrude band around the trim rect. Non-RECT
      shapes must use `padding` instead.
    - `max_vertices` ∈ [1..16] (engine hard cap; default 8).
-   - `max_size` ∈ [1..4096] (`NT_BUILD_MAX_TEXTURE_SIZE`).
+   - `max_size` ∈ [1..16384] (`NT_BUILD_MAX_TEXTURE_SIZE`, raised from the
+     engine's mobile-safe 4096 via a build-wide define — owner ruling
+     2026-07-10; format-exact per plan §2.5 up to ~32K, memory is the real
+     ceiling: an RGBA 16384² page is 1 GiB). Default stays 2048; values over
+     4096 get an inline info line "may not load on mobile GPUs / stock engine
+     runtime".
    - `alpha_threshold` ∈ [0..255]; `padding/margin/extrude` ≥ 0;
      `pixels_per_unit` > 0 and finite.
    - Sprite names unique and non-empty; files must exist.
@@ -361,6 +366,20 @@ outcome, at any layer:
    preview keeps the last good atlas, stale badge stays on. Never a dialog loop,
    never a crash.
 4. **CLI**: same core message on stderr, non-zero exit (§4.4).
+
+### 3.3g Per-region packing overrides (owner ruling 2026-07-10)
+
+The settings model is two-level, mirroring the engine: **atlas settings +
+optional per-region overrides** (`nt_atlas_sprite_opts_t`: shape, allow_rotate,
+max_vertices, margin, extrude — engine encodes 0 = inherit). The Region panel
+carries a "Packing overrides" subsection where every control follows the
+Default/override pattern: first entry "Default (inherited: <atlas value>)",
+then explicit values. §3.3f applies per sprite (extrude override requires that
+sprite's EFFECTIVE shape = Rect). Slice-9 shows shape/rotate as
+overridden-by-slice9 (disabled, info). Project schema stores overrides
+sparsely (absent = inherit). Engine limitation, backlog candidate: an explicit
+override to 0 for margin/extrude/max_vertices is unrepresentable (0 means
+inherit in the builder API).
 
 ### 3.4 Configure export targets
 1. In Export Targets (region G), toggle a target on/off (`nt_ui_checkbox`), pick

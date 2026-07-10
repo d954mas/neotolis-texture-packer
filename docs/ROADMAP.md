@@ -215,12 +215,23 @@ skipping the serialize→parse round-trip). No upstream dependency remains.
 
 **Goal:** prove a `.tpinfo` from our packer renders in a stock Defold build.
 
+**Status:** exporter + `.tpatlas` + tests LANDED. `packer/src/tp_export_defold.c`
+(registered `defold` built-in) emits `.tpinfo` + `.tpatlas` + page PNGs; contract
+in `docs/formats/defold-tpinfo.md`. Tests `tp_export_defold` (golden bytes,
+rotated-geometry, determinism over real fixtures, per-target identity repack +
+9-slice notice, playback enum table, and a clean run over the three real
+`examples/defold-demo` atlases) green in both presets; the demo's `defold` targets
+are enabled. **Still open:** the bob.jar CI job below (build/parse/compile
+validation) — a later phase, out of scope for the exporter packet.
+
 **Deliverables**
 - Hardcoded `.tpinfo` exporter (protobuf-text) per `defold.md §(b)` checklist
   (rotation corner rule, quad fallback, pivot, vertices, all `required` fields);
-  optional `.tpatlas` starter; `.atlas`+loose-PNG **fallback** preset.
+  optional `.tpatlas` starter; `.atlas`+loose-PNG **fallback** preset. *(`.tpinfo`
+  + `.tpatlas` DONE; `.atlas`+loose-PNG fallback preset not yet started.)*
 - `.tpatlas` generation from the project's `animations[]` + auto-grouped
-  animations (`SUMMARY.md §5a`, Phase 2 normalization).
+  animations (`SUMMARY.md §5a`, Phase 2 normalization). *(DONE — explicit
+  `animations[]`; per ux.md §3.7b export uses explicit animations only.)*
 - `examples/defold-demo/`: base LANDED 2026-07-10 (owner decision) — real-asset
   examples copied from extension-texturepacker (MIT, `UPSTREAM-LICENSE`;
   basic/rotate/anim_trim/skins incl. source PNGs, TexturePacker `.tps`/

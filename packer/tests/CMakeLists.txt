@@ -81,3 +81,17 @@ target_link_libraries(tp_test_export_run PRIVATE tp_build unity cjson)
 target_compile_options(tp_test_export_run PRIVATE -U_DLL)
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_export_run_test")
 add_test(NAME tp_export_run COMMAND tp_test_export_run "${CMAKE_BINARY_DIR}/tp_export_run_test")
+
+# Phase 5 Defold exporter: golden .tpinfo/.tpatlas bytes, rotated-geometry,
+# determinism over real fixtures, per-target identity repack + 9-slice notice,
+# playback enum mapping, and a clean run over the real defold-demo atlases
+# (basic/rotate/anim_trim). Builds fixtures via nt_builder (tp_build) and decodes
+# the demo PNGs via stb_image.
+add_executable(tp_test_export_defold test_export_defold.c tp_fixtures.c)
+target_link_libraries(tp_test_export_defold PRIVATE tp_build unity stb_image)
+target_compile_options(tp_test_export_defold PRIVATE -U_DLL)
+target_compile_definitions(tp_test_export_defold PRIVATE
+    TP_DEFOLD_DEMO_DIR="${CMAKE_SOURCE_DIR}/examples/defold-demo")
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_export_defold_test")
+add_test(NAME tp_export_defold
+    COMMAND tp_test_export_defold "${CMAKE_BINARY_DIR}/tp_export_defold_test" "${CMAKE_SOURCE_DIR}/examples/defold-demo")
