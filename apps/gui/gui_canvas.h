@@ -1,19 +1,21 @@
 #ifndef NTPACKER_GUI_CANVAS_H
 #define NTPACKER_GUI_CANVAS_H
 
-/* The center-canvas source-image preview (ux.md region E, Task 5): a self-contained
- * textured-quad draw inside an nt_ui CUSTOM element. The selected sprite/source row's
- * image is stb-decoded to RGBA8, premultiplied, uploaded to a GPU texture, and drawn
- * letterboxed into the canvas box through the CUSTOM handler's world_mat4.
+/* The center canvas, now DUAL-MODE (ux.md region E / §2.4):
+ *   - SOURCE mode: a single stb-decoded source image, letterboxed (selecting a sprite row with no
+ *     pack result). Original Task-5 behaviour.
+ *   - ATLAS mode: the REAL packed page texture from a tp_result, drawn at a game-owned zoom/pan with
+ *     a checkerboard behind transparency and region overlays (outline / hull / selection) via the
+ *     shape renderer. This is the live artifact -- baked rotations/flips are visible in the pixels.
  *
- * Why a dedicated pipeline and not the sprite renderer: the sprite renderer always binds
- * the atlas PAGE texture to slot 0, so it cannot show an arbitrary decoded image. Instead
- * we build one small pipeline from the already-packed sprite shaders (per-vertex, not
- * instanced) and bind our own texture to slot 0 -- the walker flushes the renderers before
- * the handler and the handler owns its GL state, so this composes cleanly.
+ * Both modes share one small textured-quad pipeline built from the sprite shaders (the sprite
+ * renderer always binds the atlas PAGE, so it cannot show an arbitrary texture -- we bind our own).
+ * The page-draw helper (draw_region_at) is structured so the next packet's animation preview window
+ * can reuse it to draw a named region into a small rect.
  *
- * This struct is the SEED of the future atlas-page canvas (zoom/pan/overlays); the fit math
- * and draw are structured so zoom/pan slot in later. */
+ * Coordinate spaces: the CUSTOM handler gets a LAYOUT-space (Y-down) bounding box + a world_mat4 that
+ * bakes LAYOUT->world (incl. the screen Y-flip). Page pixels (y-down) map to layout via a game-owned
+ * scale + pan, then to world via world_mat4. Overlays feed the shape renderer world-space verts. */
 
 #include <stddef.h>
 
@@ -21,57 +23,98 @@
 #include "material/nt_material.h"
 #include "ui/nt_ui.h"
 
+#include "tp_core/tp_model.h" /* tp_result / tp_sprite */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+typedef enum { GUI_CANVAS_SOURCE = 0, GUI_CANVAS_ATLAS } gui_canvas_mode;
+
+#define GUI_CANVAS_MAX_PAGES 16
+
 typedef struct gui_canvas {
-    /* decoded source image */
+    gui_canvas_mode mode;
+
+    /* --- SOURCE image --- */
     nt_texture_t tex;
     bool has_tex;
     int img_w, img_h;
-    char loaded_path[512]; /* cache key: skip re-decode when unchanged */
+    char loaded_path[512]; /* decode cache key */
 
-    /* draw resources (lazy: pipeline waits for the sprite shaders to resolve) */
+    /* --- ATLAS pages --- */
+    nt_texture_t pages[GUI_CANVAS_MAX_PAGES];
+    bool page_valid[GUI_CANVAS_MAX_PAGES];
+    int page_w[GUI_CANVAS_MAX_PAGES], page_h[GUI_CANVAS_MAX_PAGES];
+    int page_count;
+    int cur_page;
+    const tp_result *result; /* borrowed (arena-owned by gui_pack); NULL = no atlas */
+    bool pages_dirty;        /* result set but textures not yet uploaded (GL deferred to the pass) */
+    int sel_sprite;          /* accent-outlined region index, -1 none */
+    int hover_sprite;        /* subtle-outline region index, -1 none (set by the handler each frame) */
+    bool show_outline, show_trim, show_pivot; /* overlay toggles */
+
+    /* --- ATLAS view: scale (screen px per page px; 1.0 == 100%) + pan of page centre from canvas
+     * centre (layout px). fit_pending refits on the next draw. --- */
+    float scale;
+    float cam_x, cam_y;
+    bool fit_pending;
+    /* last drawn geometry (captured in the handler) so main.c input maps layout<->page consistently */
+    float last_bb[4];    /* canvas box x,y,w,h (layout) */
+    float last_scale;    /* actual scale used */
+    float last_ox, last_oy; /* layout coords of current page's pixel (0,0) */
+
+    /* --- shared draw resources --- */
     nt_pipeline_t pipe;
     bool pipe_ready;
     nt_buffer_t vbo; /* dynamic, 4 verts */
     nt_buffer_t ibo; /* static, 6 indices */
     nt_sampler_t sampler;
     bool buffers_ready;
-    nt_buffer_t frame_ubo; /* view_proj (Globals) -- refreshed each frame by the host */
+    nt_buffer_t frame_ubo; /* view_proj (Globals) */
 } gui_canvas;
 
-/* Creates the static index buffer, dynamic vertex buffer, and sampler. */
 void gui_canvas_init(gui_canvas *c);
 void gui_canvas_shutdown(gui_canvas *c);
-
-/* Rebuilds GPU-side buffers/sampler after a context loss (call from the restore path). */
 void gui_canvas_restore_gpu(gui_canvas *c);
-
-/* Builds the pipeline from the resolved sprite shaders once they are ready. No-op after. */
 void gui_canvas_ensure_pipeline(gui_canvas *c, const nt_material_info_t *sprite_info);
-
-/* Host binds the per-frame view_proj UBO here before nt_ui_walk (handle changes on restore). */
 void gui_canvas_set_frame_ubo(gui_canvas *c, nt_buffer_t ubo);
 
-/* Decodes+uploads abs_path (cached by path). On failure fills err_out and clears the image.
- * Returns true on success (including the cached no-op). */
+/* --- SOURCE mode --- */
 bool gui_canvas_set_image(gui_canvas *c, const char *abs_path, char *err_out, size_t err_cap);
-
-/* Drops the current image (no selection). */
-void gui_canvas_clear(gui_canvas *c);
-
-/* Forgets the decode cache key WITHOUT dropping the current texture, so the next
- * gui_canvas_set_image re-decodes from disk even for the same path (Refresh, F4). */
+void gui_canvas_clear(gui_canvas *c); /* drops source image; leaves atlas state */
 void gui_canvas_invalidate(gui_canvas *c);
-
-/* The absolute path of the currently decoded image ("" when none). */
 const char *gui_canvas_loaded_path(const gui_canvas *c);
-
 bool gui_canvas_has_image(const gui_canvas *c);
 int gui_canvas_img_w(const gui_canvas *c);
 int gui_canvas_img_h(const gui_canvas *c);
+
+/* --- ATLAS mode --- */
+/* Borrows `result` (NULL clears the atlas view). Marks pages dirty; the actual GPU upload happens in
+ * gui_canvas_upload_pages (call inside the render pass). Switches mode to ATLAS and refits. */
+void gui_canvas_set_result(gui_canvas *c, const tp_result *result);
+/* Uploads any pending page textures (GL; call once per frame inside the pass). No-op when clean. */
+void gui_canvas_upload_pages(gui_canvas *c);
+bool gui_canvas_has_atlas(const gui_canvas *c);
+int gui_canvas_page_count(const gui_canvas *c);
+int gui_canvas_cur_page(const gui_canvas *c);
+void gui_canvas_set_page(gui_canvas *c, int page);
+void gui_canvas_set_mode(gui_canvas *c, gui_canvas_mode mode);
+gui_canvas_mode gui_canvas_get_mode(const gui_canvas *c);
+
+/* zoom/pan (bb = canvas box in layout px, from nt_ui_get_bbox). zoom_pct: 100 == 1:1. */
+float gui_canvas_zoom_pct(const gui_canvas *c);
+void gui_canvas_fit(gui_canvas *c);
+void gui_canvas_set_zoom_pct(gui_canvas *c, const float bb[4], float pct);
+void gui_canvas_zoom_at(gui_canvas *c, const float bb[4], float cursor_x, float cursor_y, float wheel_notches);
+void gui_canvas_pan(gui_canvas *c, const float bb[4], float dx, float dy);
+
+/* Region hit-test at layout point (lx,ly): the sprite index on the current page whose placed AABB
+ * contains the point, or -1. Uses the last drawn geometry. */
+int gui_canvas_hit(const gui_canvas *c, float lx, float ly);
+/* Selects a region (accent outline); -1 clears. If the region is on another page, switches to it. */
+void gui_canvas_select(gui_canvas *c, int sprite_index);
+int gui_canvas_selected(const gui_canvas *c);
 
 /* The CUSTOM element draw handler. Register via nt_ui_set_custom_handler(ctx, fn, c). */
 void gui_canvas_handler(const nt_ui_custom_frame_t *frame, void *userdata);

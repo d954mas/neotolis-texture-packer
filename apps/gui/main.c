@@ -1,15 +1,16 @@
 /* ntpacker-gui -- native GUI for the Neotolis Texture Packer.
  *
- * PROJECT EDITOR (this iteration): create/open/save .ntpacker_project files, manage
- * atlases, add image files/folders as sources, browse+select sprites, and preview the
- * selected SOURCE image on the center canvas. The single source of truth is the linked
- * tp_project (tp_core) -- the GUI is a thin editor (AGENTS tool-parity). In-process PACKING
- * is still blocked by engine issue #282, so the live atlas preview is deferred; the Pack
- * button surfaces the "preview stale" state per ux.md §3.3b.
+ * PROJECT EDITOR + LIVE PACKER (this iteration): create/open/save .ntpacker_project files,
+ * manage atlases, add image files/folders as sources, browse+select sprites, PACK atlases
+ * in-process (gui_pack -> tp_pack), render the real packed page on the center canvas with
+ * zoom/pan + region overlays + selection sync, and EXPORT target files (gui_pack -> tp_export_run).
+ * The single source of truth is the linked tp_project (tp_core) -- the GUI is a thin editor
+ * (AGENTS tool-parity). The Pack button surfaces the "preview stale" state per ux.md §3.3b.
  *
  * Module split: gui_project (state + dirty bits + load/save), gui_scan (display-only folder
- * enumeration), gui_canvas (the source-image preview via a custom nt_ui element). main.c is
- * init/frame/shutdown + layout + the OS file dialogs (tinyfiledialogs).
+ * enumeration), gui_pack (in-process pack + export orchestration), gui_canvas (dual-mode
+ * source-image / atlas-page custom nt_ui element). main.c is init/frame/shutdown + layout +
+ * the OS file dialogs (tinyfiledialogs).
  *
  * Wiring template: external/neotolis-engine/examples/ui_showcase/main.c. */
 
@@ -30,6 +31,7 @@
 #include "memory/nt_mem_scratch.h"
 #include "nt_pack_format.h"
 #include "render/nt_render_defs.h"
+#include "renderers/nt_shape_renderer.h"
 #include "renderers/nt_sprite_renderer.h"
 #include "renderers/nt_text_renderer.h"
 #include "resource/nt_resource.h"
@@ -50,6 +52,7 @@
 
 #include "gui_canvas.h"
 #include "gui_history.h"
+#include "gui_pack.h"
 #include "gui_project.h"
 #include "gui_scan.h"
 #include "gui_version.h"
@@ -58,6 +61,7 @@
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #ifdef _WIN32
@@ -101,7 +105,6 @@ static const Clay_Color C_BORDER = {58.0F, 64.0F, 78.0F, 255.0F};
 static const Clay_Color C_STATUS = {24.0F, 26.0F, 34.0F, 255.0F};
 static const Clay_Color C_SEL = {52.0F, 78.0F, 120.0F, 255.0F};       /* selected-row accent fill */
 static const Clay_Color C_HOVER = {42.0F, 48.0F, 60.0F, 255.0F};      /* row hover */
-static const Clay_Color C_TAG = {158.0F, 98.0F, 70.0F, 235.0F};       /* stale/outdated amber */
 static const Clay_Color C_TRANSPARENT = {0.0F, 0.0F, 0.0F, 0.0F};
 
 /* Base label styles (font_size = base px); rescale_styles() copies these into the g_* below
@@ -114,7 +117,10 @@ static const nt_ui_label_style_t g_canvas_hint_base = {.font_id = 0, .font_size 
 static const nt_ui_label_style_t g_tag_base = {.font_id = 0, .font_size = FS_TAG, .color = {245.0F, 238.0F, 232.0F, 255.0F}};
 /* Missing-file rows / placeholder (ux.md §3.7): amber warning accent. */
 static const nt_ui_label_style_t g_warn_base = {.font_id = 0, .font_size = FS_ROW, .color = {224.0F, 158.0F, 96.0F, 255.0F}};
-static nt_ui_label_style_t g_title, g_body, g_row, g_caption, g_canvas_hint, g_tag, g_warn; /* scaled each frame */
+/* Hyperlink label (About repo link): link-blue so it reads as clickable; hover tint on the button
+ * behind it is the extra affordance (no cursor-shape API). */
+static const nt_ui_label_style_t g_link_base = {.font_id = 0, .font_size = FS_CAPTION, .color = {110.0F, 170.0F, 245.0F, 255.0F}};
+static nt_ui_label_style_t g_title, g_body, g_row, g_caption, g_canvas_hint, g_tag, g_warn, g_link; /* scaled each frame */
 
 static nt_ui_button_style_t g_btn = {
     .idle = {.bg_tint = 0xFF4A4238U, .scale = 1.0F, .opacity = 1.0F},
@@ -135,12 +141,33 @@ static nt_ui_button_style_t g_btn_accent = {
     .hit_padding_lrtb = {4, 4, 4, 4},
     .slice9_scale = 1.0F,
 };
+/* Stale/outdated chip: amber so it reads as "action needed"; clickable -> Pack. */
+static nt_ui_button_style_t g_btn_stale = {
+    .idle = {.bg_tint = 0xFF46629EU, .scale = 1.0F, .opacity = 1.0F},
+    .hover = {.bg_tint = 0xFF5A78B4U, .scale = 1.02F, .opacity = 1.0F},
+    .pressed = {.bg_tint = 0xFF3A5088U, .scale = 0.97F, .offset_y = 1.0F, .opacity = 1.0F},
+    .disabled = {.bg_tint = 0xFF46629EU, .scale = 1.0F, .opacity = 0.5F},
+    .transition_speed = 12.0F,
+    .hit_padding_lrtb = {4, 4, 4, 4},
+    .slice9_scale = 1.0F,
+};
 static nt_ui_button_style_t g_btn_ghost = {
     .idle = {.bg_tint = 0xFF2A2E38U, .scale = 1.0F, .opacity = 1.0F},
     .hover = {.bg_tint = 0xFF3C4250U, .scale = 1.02F, .opacity = 1.0F},
     .pressed = {.bg_tint = 0xFF242832U, .scale = 0.97F, .opacity = 1.0F},
     .disabled = {.bg_tint = 0xFF2A2E38U, .scale = 1.0F, .opacity = 0.35F},
     .transition_speed = 14.0F,
+    .hit_padding_lrtb = {2, 2, 2, 2},
+    .slice9_scale = 1.0F,
+};
+/* Link button: idle tint matches the panel (invisible box), faint lighten on hover/press so the
+ * link-blue label reads as a hyperlink. bg_tint alpha must be non-zero (engine hides alpha=0). */
+static nt_ui_button_style_t g_btn_link = {
+    .idle = {.bg_tint = 0xFF2A221EU, .scale = 1.0F, .opacity = 1.0F},
+    .hover = {.bg_tint = 0xFF3A322AU, .scale = 1.0F, .opacity = 1.0F},
+    .pressed = {.bg_tint = 0xFF241E1AU, .scale = 0.99F, .opacity = 1.0F},
+    .disabled = {.bg_tint = 0xFF2A221EU, .scale = 1.0F, .opacity = 0.4F},
+    .transition_speed = 16.0F,
     .hit_padding_lrtb = {2, 2, 2, 2},
     .slice9_scale = 1.0F,
 };
@@ -160,8 +187,24 @@ static nt_ui_input_style_t s_rename_input; /* inline rename field (atlas + sprit
 // #endregion
 
 // #region engine state
-#define UI_MAX_ELEMENTS ((uint32_t)4096U)
-#define UI_ARENA_SIZE ((size_t)16U * 1024U * 1024U)
+/* UI context capacities -- provisioned with generous headroom for a heavy desktop session
+ * (thousands of project rows). The sprite list is virtualized (nt_ui_vlist): only the visible
+ * window materializes Clay elements + widget state each frame, and per-row ids RECYCLE through
+ * the vlist id_ring, so live widgets are bounded by the viewport, not by project size.
+ * nt_ui_state has NO per-frame eviction -- a state cell persists until its id is reused -- so the
+ * pool must hold every DISTINCT id that appears over a session. With recycling that is
+ * id_ring x per-row stateful children + fixed chrome (menus, overlay cluster, page bar, modals).
+ *   UI_STATE_SLOTS     : power-of-2 retained-state cells. Was 512 -> overflowed once a 500-file
+ *                        folder scrolled through every ring slot (256 ring x [hit + x] ~= 512).
+ *   UI_STATE_PROBE_MAX : linear-probe window. The engine default (4) is far too small at this
+ *                        load -- placement failed well below capacity and fired the "pool
+ *                        overflow" assert (nt_ui_state.c:38). THIS was the real crash trigger.
+ *   UI_MAX_ELEMENTS    : Clay layout-element cap (also Clay's persistent per-id hashmap). */
+#define UI_MAX_ELEMENTS ((uint32_t)8192U)
+#define UI_STATE_SLOTS ((uint32_t)4096U)
+#define UI_STATE_PROBE_MAX ((uint32_t)64U)
+#define UI_ROW_ID_RING ((uint32_t)128U) /* per-row id recycle modulus; must exceed max visible rows */
+#define UI_ARENA_SIZE ((size_t)24U * 1024U * 1024U)
 #define SCRATCH_ARENA_SIZE ((size_t)4U * 1024U * 1024U)
 
 static NT_UI_DECLARE_ARENA(s_ui_arena, UI_ARENA_SIZE);
@@ -189,6 +232,7 @@ static char s_exe_dir[1024];
 
 // #region ui ids + menu state
 static uint32_t s_id_btn_pack, s_id_btn_export, s_id_btn_refresh, s_id_vlist, s_id_modal, s_id_about;
+static uint32_t s_id_canvas; /* the atlas-page custom element (bbox drives zoom/pan/hit input) */
 static uint32_t s_id_rename; /* the single inline rename input (one edit active at a time) */
 static bool s_ids_ready;
 
@@ -220,6 +264,9 @@ static bool s_ctx_removable;    /* a removable source row (has an [x] today) */
 
 // #region editor state
 static gui_canvas s_canvas;
+static const tp_result *s_shown_result; /* pack result currently bound to the canvas (sync guard) */
+static bool s_canvas_panning;            /* mid/left-drag pan in progress on the atlas canvas */
+static float s_pan_last_x, s_pan_last_y;
 
 static int s_sel_atlas;      /* selected atlas index */
 static int s_sel_src = -1;   /* selected source index within the atlas */
@@ -229,6 +276,8 @@ static bool s_sel_missing;   /* selection is a missing file -> canvas shows a pl
 
 /* deferred side effects (dialogs + model mutations), applied at the top of the next frame */
 static bool s_pending_open, s_pending_save, s_pending_save_as, s_pending_add_files, s_pending_add_folder, s_pending_add_atlas, s_pending_refresh;
+static bool s_pending_pack, s_pending_export;
+static bool s_pending_commit_edit; /* a press landed outside the active inline-edit field -> commit it */
 static int s_pending_remove_atlas = -1;
 static int s_pending_remove_source = -1;
 enum { AFTER_NONE = 0, AFTER_NEW, AFTER_EXIT };
@@ -297,6 +346,27 @@ static void normalize_slashes(char *s) {
             *s = '/';
         }
     }
+}
+
+/* Opens `url` in the OS default browser. Reusable helper (About link now; future notices/docs
+ * links reuse it). Windows: ShellExecuteA (shell32 -- already linked via tinyfiledialogs).
+ * POSIX: xdg-open/open, best-effort. Returns true if the open was dispatched. */
+static bool gui_open_url(const char *url) {
+    if (!url || url[0] == '\0') {
+        return false;
+    }
+#ifdef _WIN32
+    HINSTANCE rc = ShellExecuteA(NULL, "open", url, NULL, NULL, SW_SHOWNORMAL);
+    return (INT_PTR)rc > 32; /* ShellExecute returns a value > 32 on success */
+#elif defined(__APPLE__)
+    char cmd[1200];
+    (void)snprintf(cmd, sizeof cmd, "open '%s' >/dev/null 2>&1 &", url);
+    return system(cmd) == 0;
+#else
+    char cmd[1200];
+    (void)snprintf(cmd, sizeof cmd, "xdg-open '%s' >/dev/null 2>&1 &", url);
+    return system(cmd) == 0;
+#endif
 }
 
 static const char *path_last(const char *p) {
@@ -452,6 +522,7 @@ static void do_open(void) {
     }
     char err[256];
     if (gui_project_open(path, err, sizeof err) == TP_STATUS_OK) {
+        gui_pack_clear(-1);
         cancel_edit();
         clamp_selection();
         reset_selection();
@@ -554,6 +625,7 @@ static void request_new(void) {
         s_confirm_open = true;
     } else {
         gui_project_new();
+        gui_pack_clear(-1);
         cancel_edit();
         clamp_selection();
         reset_selection();
@@ -571,6 +643,7 @@ static void request_exit(void) {
 static void confirm_perform(void) {
     if (s_after_confirm == AFTER_NEW) {
         gui_project_new();
+        gui_pack_clear(-1);
         cancel_edit();
         clamp_selection();
         reset_selection();
@@ -585,6 +658,7 @@ static void confirm_perform(void) {
 // #region undo/redo + refresh actions
 static void do_undo(void) {
     if (gui_project_undo()) {
+        gui_pack_clear(-1);
         cancel_edit();
         clamp_selection();
         reset_selection();
@@ -596,6 +670,7 @@ static void do_undo(void) {
 }
 static void do_redo(void) {
     if (gui_project_redo()) {
+        gui_pack_clear(-1);
         cancel_edit();
         clamp_selection();
         reset_selection();
@@ -709,6 +784,81 @@ static void do_refresh(void) {
     gui_project_mark_stale();         /* disk changed -> preview stale, project NOT dirtied */
     set_statusf("Refresh: +%d new, %d removed, %d changed", added, removed, changed);
 }
+
+/* Ctrl+P / Pack: pack the selected atlas in-process (gui_pack -> tp_pack). On success clear the
+ * preview-stale bit and upload the packed pages to the canvas (atlas-page view); on failure the
+ * previous result + the "outdated" tag stay (ux.md §3.3b). */
+static void do_pack(void) {
+    tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
+    if (!a || a->source_count == 0) {
+        set_status("No sources to pack -- add files or a folder first.");
+        return;
+    }
+    char err[256] = {0};
+    char note[128] = {0};
+    double ms = 0.0;
+    if (gui_pack_atlas(s_sel_atlas, &ms, err, sizeof err, note, sizeof note)) {
+        gui_project_mark_packed(); /* clears preview_stale for the current model */
+        /* the per-frame canvas<->atlas sync (frame()) picks up the new result pointer and uploads. */
+        const tp_result *r = gui_pack_result(s_sel_atlas);
+        if (note[0] != '\0') {
+            set_statusf("Packed %d sprites, %d page(s) in %.0f ms (%s)", r->sprite_count, r->page_count, ms, note);
+        } else {
+            set_statusf("Packed %d sprites, %d page(s) in %.0f ms", r->sprite_count, r->page_count, ms);
+        }
+    } else {
+        set_statusf("Pack failed: %s", err);
+    }
+}
+
+/* Ctrl+E / Export All: for every atlas with sources + >=1 enabled target, tp_export_run packs per
+ * target (project INTERSECT target caps) and writes its files. Per-atlas failures are non-fatal
+ * (ux.md §3.5); notices + counts summarize in the status bar. */
+static void do_export(void) {
+    tp_project *p = gui_project_get();
+    if (!p) {
+        return;
+    }
+    int total_targets = 0;
+    int total_notices = 0;
+    int atlases_ok = 0;
+    int atlases_fail = 0;
+    char first_err[256] = {0};
+    for (int ai = 0; ai < p->atlas_count; ai++) {
+        tp_project_atlas *a = &p->atlases[ai];
+        bool any_enabled = false;
+        for (int t = 0; t < a->target_count; t++) {
+            if (a->targets[t].enabled) {
+                any_enabled = true;
+            }
+        }
+        if (!any_enabled || a->source_count == 0) {
+            continue;
+        }
+        int tg = 0;
+        int nc = 0;
+        char err[256] = {0};
+        char note[128] = {0};
+        if (gui_pack_export(ai, &tg, &nc, err, sizeof err, note, sizeof note)) {
+            total_targets += tg;
+            total_notices += nc;
+            atlases_ok++;
+        } else {
+            atlases_fail++;
+            if (first_err[0] == '\0') {
+                (void)snprintf(first_err, sizeof first_err, "%s: %s", a->name, err);
+            }
+        }
+    }
+    if (atlases_fail > 0) {
+        set_statusf("Exported %d target(s); %d atlas(es) failed -- %s", total_targets, atlases_fail, first_err);
+    } else if (atlases_ok == 0) {
+        set_status("Nothing to export -- enable a target and add sources.");
+    } else {
+        set_statusf("Exported %d target(s)%s", total_targets,
+                    total_notices > 0 ? " (metadata notices raised)" : "");
+    }
+}
 // #endregion
 
 // #region inline rename commit
@@ -734,10 +884,41 @@ static void commit_sprite_rename(void) {
     }
     cancel_edit();
 }
+
+/* Commit the active inline edit as if Enter was pressed (click-outside / model-change path).
+ * `force` = the editor is being dismissed involuntarily: an invalid atlas name CANCELS instead of
+ * keeping a zombie editor (the validation message stays in the status bar). Sprite rename never
+ * zombies (empty clears the override). No-op when nothing is being edited. */
+static void commit_active_edit(bool force) {
+    if (s_edit_kind == EDIT_ATLAS) {
+        char err[128];
+        if (!atlas_name_valid(s_edit_buf, s_edit_atlas, err, sizeof err)) {
+            set_status(err);
+            if (force) {
+                cancel_edit();
+            }
+            return;
+        }
+        if (gui_project_set_atlas_name(s_edit_atlas, s_edit_buf)) {
+            set_statusf("Renamed atlas to '%s'", s_edit_buf);
+        }
+        cancel_edit();
+    } else if (s_edit_kind == EDIT_SPRITE) {
+        commit_sprite_rename();
+    }
+}
 // #endregion
 
 // #region deferred side-effects (run at the top of the frame, between frames)
 static void apply_pending(void) {
+    /* A press landed outside the active inline editor last frame -> commit it (desktop rename UX).
+     * Also fires before any pending model change (remove/refresh/open/new) so no orphaned editor
+     * survives a mutation. */
+    if (s_edit_kind != EDIT_NONE && s_pending_commit_edit) {
+        commit_active_edit(true);
+    }
+    s_pending_commit_edit = false;
+
     if (s_modal_action == MODAL_SAVE) {
         do_save();
         s_confirm_open = false;
@@ -792,10 +973,16 @@ static void apply_pending(void) {
     if (s_pending_refresh) {
         do_refresh();
     }
+    if (s_pending_pack) {
+        do_pack();
+    }
+    if (s_pending_export) {
+        do_export();
+    }
 
     s_pending_open = s_pending_save = s_pending_save_as = false;
     s_pending_add_files = s_pending_add_folder = s_pending_add_atlas = false;
-    s_pending_refresh = false;
+    s_pending_refresh = s_pending_pack = s_pending_export = false;
     s_pending_remove_source = -1;
     s_pending_remove_atlas = -1;
 }
@@ -918,6 +1105,7 @@ static void ensure_ids(void) {
     s_id_btn_export = nt_ui_id("ntpacker/btn_export");
     s_id_btn_refresh = nt_ui_id("ntpacker/btn_refresh");
     s_id_vlist = nt_ui_id("ntpacker/sprite_vlist");
+    s_id_canvas = nt_ui_id("ntpacker/canvas");
     s_id_modal = nt_ui_id("ntpacker/confirm_modal");
     s_id_about = nt_ui_id("ntpacker/about_modal");
     s_id_rename = nt_ui_id("ntpacker/rename_input");
@@ -965,6 +1153,8 @@ static void apply_ui_scale(void) {
     g_tag.font_size = S(FS_TAG);
     g_warn = g_warn_base;
     g_warn.font_size = S(FS_ROW);
+    g_link = g_link_base;
+    g_link.font_size = S(FS_CAPTION);
 
     s_rename_input.text.font_size = S(FS_ROW);
     s_rename_input.placeholder.font_size = S(FS_ROW);
@@ -1080,13 +1270,13 @@ static void scale_item(nt_ui_menu_ctx_t *m, uint32_t key, const char *pct, float
 }
 static void view_items(nt_ui_menu_ctx_t *m) {
     if (nt_ui_menu_item(m, MK_ZIN, "Zoom In")) {
-        set_status("Zoom -- lands with the atlas-page canvas.");
+        gui_canvas_set_zoom_pct(&s_canvas, s_canvas.last_bb, gui_canvas_zoom_pct(&s_canvas) * 1.25F);
     }
     if (nt_ui_menu_item(m, MK_ZOUT, "Zoom Out")) {
-        set_status("Zoom -- lands with the atlas-page canvas.");
+        gui_canvas_set_zoom_pct(&s_canvas, s_canvas.last_bb, gui_canvas_zoom_pct(&s_canvas) * 0.8F);
     }
     if (nt_ui_menu_item(m, MK_FIT, "Fit")) {
-        set_status("Fit -- source preview already fits to canvas.");
+        gui_canvas_fit(&s_canvas);
     }
     nt_ui_menu_separator(m);
     scale_item(m, MK_S100, "UI Scale 100%", 1.0F);
@@ -1155,10 +1345,10 @@ static void declare_toolbar(nt_ui_context_t *ctx) {
           .border = {.color = C_BORDER, .width = {Su(1), Su(1), Su(1), Su(1), 0}}}) {
         if (ui_btn(ctx, s_id_btn_pack, accent ? "Pack  (stale)" : "Pack", accent ? &g_btn_accent : &g_btn,
                    s_pack_has_sources, 132.0F, 36.0F, &g_body)) {
-            set_status("In-process packing blocked by neotolis-engine#282 -- see README.");
+            s_pending_pack = true;
         }
         if (ui_btn(ctx, s_id_btn_export, "Export All", &g_btn, s_pack_has_sources, 122.0F, 36.0F, &g_body)) {
-            set_status("Exporters land in Phase 2.");
+            s_pending_export = true;
         }
         if (ui_btn(ctx, s_id_btn_refresh, "Refresh", &g_btn_ghost, true, 100.0F, 36.0F, &g_body)) {
             s_pending_refresh = true;
@@ -1192,7 +1382,11 @@ static void start_sprite_edit_named(const char *sprite_name) {
     s_edit_kind = EDIT_SPRITE;
     (void)snprintf(s_edit_sprite, sizeof s_edit_sprite, "%s", sprite_name);
     const tp_project_sprite *ov = a ? tp_project_atlas_find_sprite(a, sprite_name) : NULL;
-    (void)snprintf(s_edit_buf, sizeof s_edit_buf, "%s", (ov && ov->rename) ? ov->rename : "");
+    /* Seed with the CURRENT name: the rename override if set, else the file-derived final name
+     * (sprite_name is the ext-stripped atlas-relative key = the default export name). The input
+     * string is game-owned (nt_ui_input edits s_edit_buf in place), so seeding it here is the fix
+     * for the "field opens empty" bug -- previously it seeded the (empty) override. */
+    (void)snprintf(s_edit_buf, sizeof s_edit_buf, "%s", (ov && ov->rename) ? ov->rename : sprite_name);
     set_status("Rename region: type, Enter to commit, Esc clears/cancels.");
 }
 static void start_sprite_edit(const sprite_row *row) {
@@ -1288,6 +1482,7 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
 
     nt_ui_vlist_style_t vs = nt_ui_vlist_style_defaults();
     vs.overscan = 3;
+    vs.id_ring = UI_ROW_ID_RING; /* bound per-row state to the viewport, not project size */
     const nt_ui_vlist_range_t r = nt_ui_vlist_begin(
         ctx, NULL, s_id_vlist, (uint32_t)s_row_count, S(BASE_ROW_H), NT_UI_AXIS_Y, &vs,
         &(Clay_ElementDeclaration){.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}});
@@ -1321,6 +1516,10 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
                 s_sel_child = row->child;
                 s_sel_missing = row->missing;
                 (void)snprintf(s_sel_abs, sizeof s_sel_abs, "%s", row->abs);
+                /* atlas mode: highlight + centre this sprite's region on the canvas (row -> region) */
+                if (gui_canvas_get_mode(&s_canvas) == GUI_CANVAS_ATLAS && !row->is_folder && row->sprite_name[0] != '\0') {
+                    gui_canvas_select(&s_canvas, gui_pack_find_sprite(s_sel_atlas, row->sprite_name));
+                }
             }
             if (nt_ui_menu_open_trigger(ctx, s_id_ctx_menu, hit_id, false, &s_ctx_state)) {
                 close_menubar_menus();
@@ -1389,10 +1588,163 @@ static void declare_row_tooltips(nt_ui_context_t *ctx) {
 // #endregion
 
 // #region canvas
+/* Selects the sprite-tree row matching a canvas region (region -> row selection sync). The region's
+ * raw name stripped of its extension == the row's override key. */
+static void select_row_for_region(int region_idx) {
+    const tp_result *r = gui_pack_result(s_sel_atlas);
+    if (!r || region_idx < 0 || region_idx >= r->sprite_count) {
+        return;
+    }
+    char key[192];
+    strip_ext(r->sprites[region_idx].name, key, sizeof key);
+    for (int i = 0; i < s_row_count; i++) {
+        if (!s_rows[i].is_folder && s_rows[i].sprite_name[0] != '\0' && strcmp(s_rows[i].sprite_name, key) == 0) {
+            s_sel_src = s_rows[i].src;
+            s_sel_child = s_rows[i].child;
+            s_sel_missing = false;
+            (void)snprintf(s_sel_abs, sizeof s_sel_abs, "%s", s_rows[i].abs);
+            return;
+        }
+    }
+}
+
+/* Atlas-canvas mouse: wheel = zoom around cursor; middle-drag / left-drag-on-empty = pan; left-click
+ * on a region = select (+ sync the sprite list row); hover outlines the region under the cursor.
+ * Runs after build_rows so region->row mapping sees the current rows. */
+static void handle_canvas_input(void) {
+    s_canvas.hover_sprite = -1;
+    if (gui_canvas_get_mode(&s_canvas) != GUI_CANVAS_ATLAS || !gui_canvas_has_atlas(&s_canvas) ||
+        nt_ui_input_any_focused(s_ctx) || s_confirm_open || s_about_open || s_edit_kind != EDIT_NONE) {
+        s_canvas_panning = false;
+        return;
+    }
+    /* Use the box the handler actually drew the page into (captured last frame) -- exact and avoids
+     * any custom-element id mismatch. Layout px == framebuffer px in this app (STRETCH ref = fb). */
+    const float *box = s_canvas.last_bb;
+    if (box[2] <= 1.0F) {
+        s_canvas_panning = false;
+        return;
+    }
+    const nt_pointer_t *p = &g_nt_input.pointers[0];
+    const bool inside = p->x >= box[0] && p->x < (box[0] + box[2]) && p->y >= box[1] && p->y < (box[1] + box[3]);
+
+    if (inside && p->wheel_dy != 0.0F) {
+        gui_canvas_zoom_at(&s_canvas, box, p->x, p->y, p->wheel_dy);
+    }
+    if (inside && p->buttons[NT_BUTTON_LEFT].is_pressed) {
+        const int hit = gui_canvas_hit(&s_canvas, p->x, p->y);
+        if (hit >= 0) {
+            gui_canvas_select(&s_canvas, hit);
+            select_row_for_region(hit);
+            s_canvas_panning = false;
+        } else {
+            gui_canvas_select(&s_canvas, -1);
+            s_canvas_panning = true;
+        }
+        s_pan_last_x = p->x;
+        s_pan_last_y = p->y;
+    }
+    if (inside && p->buttons[NT_BUTTON_MIDDLE].is_pressed) {
+        s_canvas_panning = true;
+        s_pan_last_x = p->x;
+        s_pan_last_y = p->y;
+    }
+    const bool dragging = p->buttons[NT_BUTTON_LEFT].is_down || p->buttons[NT_BUTTON_MIDDLE].is_down;
+    if (s_canvas_panning && dragging) {
+        gui_canvas_pan(&s_canvas, box, p->x - s_pan_last_x, p->y - s_pan_last_y);
+        s_pan_last_x = p->x;
+        s_pan_last_y = p->y;
+    } else {
+        s_canvas_panning = false;
+    }
+    if (inside && !s_canvas_panning) {
+        s_canvas.hover_sprite = gui_canvas_hit(&s_canvas, p->x, p->y);
+    }
+}
+
+/* Compact D4 transform decode for the hover/selection readout (ux.md §2.4). */
+static const char *transform_decode_str(uint8_t t) {
+    switch (t & 7u) {
+        case 0: return "--";
+        case 1: return "flip H";
+        case 2: return "flip V";
+        case 3: return "rot 180";
+        case 4: return "transpose";
+        case 5: return "rot 90";
+        case 6: return "rot 270";
+        default: return "anti-transpose";
+    }
+}
+
+/* Page bar (E'): page switcher (multipage), zoom controls, overlay toggle, stale chip, stats. */
+static void declare_page_bar(nt_ui_context_t *ctx, bool atlas) {
+    const int pc = gui_canvas_page_count(&s_canvas);
+    const int cur = gui_canvas_cur_page(&s_canvas);
+    CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(30))},
+                     .childGap = Su(6),
+                     .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+        if (atlas && pc > 1) {
+            if (ui_btn(ctx, nt_ui_id("ntpacker/pg_prev"), "<", &g_btn_ghost, cur > 0, 30.0F, 24.0F, &g_caption)) {
+                gui_canvas_set_page(&s_canvas, cur - 1);
+            }
+            char pl[32];
+            (void)snprintf(pl, sizeof pl, "page %d/%d", cur + 1, pc);
+            nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), pl, &g_caption);
+            if (ui_btn(ctx, nt_ui_id("ntpacker/pg_next"), ">", &g_btn_ghost, cur < pc - 1, 30.0F, 24.0F, &g_caption)) {
+                gui_canvas_set_page(&s_canvas, cur + 1);
+            }
+        }
+        if (atlas) {
+            if (ui_btn(ctx, nt_ui_id("ntpacker/zoom_out"), "-", &g_btn_ghost, true, 28.0F, 24.0F, &g_caption)) {
+                gui_canvas_set_zoom_pct(&s_canvas, s_canvas.last_bb, gui_canvas_zoom_pct(&s_canvas) * 0.8F);
+            }
+            char zl[16];
+            (void)snprintf(zl, sizeof zl, "%.0f%%", (double)gui_canvas_zoom_pct(&s_canvas));
+            if (ui_btn(ctx, nt_ui_id("ntpacker/zoom_100"), zl, &g_btn_ghost, true, 64.0F, 24.0F, &g_caption)) {
+                gui_canvas_set_zoom_pct(&s_canvas, s_canvas.last_bb, 100.0F);
+            }
+            if (ui_btn(ctx, nt_ui_id("ntpacker/zoom_in"), "+", &g_btn_ghost, true, 28.0F, 24.0F, &g_caption)) {
+                gui_canvas_set_zoom_pct(&s_canvas, s_canvas.last_bb, gui_canvas_zoom_pct(&s_canvas) * 1.25F);
+            }
+            if (ui_btn(ctx, nt_ui_id("ntpacker/zoom_fit"), "Fit", &g_btn_ghost, true, 44.0F, 24.0F, &g_caption)) {
+                gui_canvas_fit(&s_canvas);
+            }
+            if (ui_btn(ctx, nt_ui_id("ntpacker/ov_outline"), s_canvas.show_outline ? "outline*" : "outline",
+                       &g_btn_ghost, true, 0.0F, 24.0F, &g_caption)) {
+                s_canvas.show_outline = !s_canvas.show_outline;
+            }
+        }
+        CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}}) {}
+        /* Actionable status hints should be CLICKABLE, not just descriptive: the stale chip triggers
+         * the same Pack action as the toolbar button / Ctrl+P (owner rule -- apply to future hints too). */
+        if (s_pack_stale && s_pack_has_sources) {
+            if (ui_btn(ctx, nt_ui_id("ntpacker/stale_chip"), "outdated -- press Pack", &g_btn_stale, true, 0.0F, 24.0F,
+                       &g_tag)) {
+                s_pending_pack = true;
+            }
+        }
+    }
+}
+
 static void declare_canvas(nt_ui_context_t *ctx) {
+    const bool atlas = gui_canvas_get_mode(&s_canvas) == GUI_CANVAS_ATLAS && gui_canvas_has_atlas(&s_canvas);
     const bool has_img = gui_canvas_has_image(&s_canvas);
+    const float cap_w = s_content_w - S(BASE_LEFT_PANEL_W) - S(60.0F);
+
+    /* caption / hover readout */
     char label[256];
-    if (has_img) {
+    if (atlas) {
+        const tp_result *r = gui_pack_result(s_sel_atlas);
+        const int h = (s_canvas.hover_sprite >= 0) ? s_canvas.hover_sprite : gui_canvas_selected(&s_canvas);
+        if (r && h >= 0 && h < r->sprite_count) {
+            const tp_sprite *s = &r->sprites[h];
+            (void)snprintf(label, sizeof label, "%s   %dx%d   %s", s->name, s->frame.w, s->frame.h,
+                           transform_decode_str(s->transform));
+        } else {
+            (void)snprintf(label, sizeof label, "%d sprites   %d page(s)   %.0f%%", r ? r->sprite_count : 0,
+                           r ? r->page_count : 0, (double)gui_canvas_zoom_pct(&s_canvas));
+        }
+    } else if (has_img) {
         (void)snprintf(label, sizeof label, "%s  --  %d x %d", path_last(s_sel_abs), gui_canvas_img_w(&s_canvas),
                        gui_canvas_img_h(&s_canvas));
     } else if (s_sel_missing) {
@@ -1400,7 +1752,6 @@ static void declare_canvas(nt_ui_context_t *ctx) {
     } else {
         (void)snprintf(label, sizeof label, "No image selected");
     }
-    const float cap_w = s_content_w - S(BASE_LEFT_PANEL_W) - S(60.0F);
 
     CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)},
                      .padding = {Su(10), Su(10), Su(10), Su(10)},
@@ -1410,28 +1761,23 @@ static void declare_canvas(nt_ui_context_t *ctx) {
           .backgroundColor = C_CANVAS,
           .cornerRadius = CLAY_CORNER_RADIUS(S(8)),
           .border = {.color = C_BORDER, .width = {Su(1), Su(1), Su(1), Su(1), 0}}}) {
-        /* view area: the custom-drawn source image, OR a missing/placeholder + the stale tag */
-        CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)},
+        CLAY({.id = {.id = s_id_canvas},
+              .layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)},
                          .layoutDirection = CLAY_TOP_TO_BOTTOM,
                          .childGap = Su(8),
                          .childAlignment = {CLAY_ALIGN_X_CENTER, CLAY_ALIGN_Y_CENTER}}}) {
-            if (has_img) {
+            if (atlas || has_img) {
                 nt_ui_custom(ctx, NT_UI_DATA_LAYER(LAYER_IMG), &s_canvas);
             } else if (s_sel_missing) {
                 ui_label_fit(ctx, label, &g_warn, cap_w, 0U);
                 nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Restore the file and press Refresh (F5) to bring it back.", &g_caption);
             } else {
-                /* atlas-preview placeholder -> the "outdated" tag lives here (not over a source view) */
-                if (s_pack_stale && s_pack_has_sources) {
-                    CLAY({.layout = {.padding = {Su(8), Su(8), Su(3), Su(3)}}, .backgroundColor = C_TAG, .cornerRadius = CLAY_CORNER_RADIUS(S(4))}) {
-                        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "outdated -- press Pack", &g_tag);
-                    }
-                }
-                nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "No atlas preview yet -- packing is blocked by engine #282.", &g_canvas_hint);
-                nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Select a sprite on the left to preview its source image.", &g_caption);
+                nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "No atlas preview yet -- press Pack (Ctrl+P) to build it.", &g_canvas_hint);
+                nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Or select a sprite on the left to preview its source image.", &g_caption);
             }
         }
-        CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(22))}, .childAlignment = {CLAY_ALIGN_X_CENTER, CLAY_ALIGN_Y_CENTER}}}) {
+        declare_page_bar(ctx, atlas);
+        CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(22))}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
             ui_label_fit(ctx, label, &g_caption, cap_w, 0U);
         }
     }
@@ -1494,11 +1840,11 @@ static void declare_context_menu(nt_ui_context_t *ctx) {
 
 static void declare_tooltips(nt_ui_context_t *ctx) {
     const char *pack_tip = s_pack_stale
-        ? "Pack (Ctrl+P): repack now with current settings and refresh the preview. Sources or settings changed -- press to repack. (Packing is blocked until engine fix #282 -- coming soon.)"
-        : "Pack (Ctrl+P): repack now with current settings (session preview only, no files exported). (Packing is blocked until engine fix #282 -- coming soon.)";
+        ? "Pack (Ctrl+P): sources or settings changed -- press to repack now and refresh the atlas preview (session only, no files exported)."
+        : "Pack (Ctrl+P): atlas is up to date. Repacks with current settings and refreshes the preview (session only, no files exported).";
     (void)nt_ui_tooltip(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, s_id_btn_pack, pack_tip, &s_tip_style);
     (void)nt_ui_tooltip(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, s_id_btn_export,
-                        "Export All (Ctrl+E): pack per enabled target and write each target's files to its output path. Exporters land in Phase 2.",
+                        "Export All (Ctrl+E): for every enabled target, pack (project settings INTERSECT the target's capabilities) and write its files to the target's output path. Repacks stale atlases first.",
                         &s_tip_style);
     (void)nt_ui_tooltip(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, s_id_btn_refresh,
                         "Refresh (F5): rescan all source folders/files from disk; updates the sprite list and marks the preview stale.",
@@ -1545,7 +1891,14 @@ static void declare_about_modal(nt_ui_context_t *ctx) {
             nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Neotolis Texture Packer", &g_caption);
             nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Version " NTPACKER_VERSION, &g_caption);
             nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Engine: " NTPACKER_ENGINE_NAME, &g_caption);
-            nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), NTPACKER_REPO_URL, &g_caption);
+            /* Clickable repo link: looks like a hyperlink (link-blue + hover tint), opens the browser. */
+            if (ui_btn(ctx, nt_ui_id("ntpacker/about_link"), NTPACKER_REPO_URL, &g_btn_link, true, 0.0F, 24.0F, &g_link)) {
+                if (gui_open_url(NTPACKER_REPO_URL)) {
+                    set_statusf("Opening %s", NTPACKER_REPO_URL);
+                } else {
+                    set_status("Could not open browser -- " NTPACKER_REPO_URL);
+                }
+            }
             CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(4))}}}) {}
             CLAY({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
                 if (ui_btn(ctx, nt_ui_id("ntpacker/about_ok"), "OK", &g_btn_accent, true, 100.0F, 34.0F, &g_body)) {
@@ -1669,6 +2022,76 @@ static void run_selftest(void) {
     (void)RemoveDirectoryA(rdir);
 #endif
 
+    /* --- in-process pack of the demo atlases: real tp_pack via gui_pack (timing + assertions) --- */
+    {
+        char proj[600];
+        to_abs("examples/defold-demo/defold-demo.ntpacker_project", proj, sizeof proj);
+        char perr[256] = {0};
+        if (gui_project_open(proj, perr, sizeof perr) == TP_STATUS_OK) {
+            tp_project *dp = gui_project_get();
+            int i_rotate = -1;
+            int i_basic = -1;
+            for (int i = 0; i < dp->atlas_count; i++) {
+                if (strcmp(dp->atlases[i].name, "rotate") == 0) {
+                    i_rotate = i;
+                } else if (strcmp(dp->atlases[i].name, "basic") == 0) {
+                    i_basic = i;
+                }
+            }
+            gui_scan_invalidate_all();
+            double ms_r = 0.0;
+            double ms_b = 0.0;
+            char pe[256] = {0};
+            char note[128] = {0};
+            const bool okr = (i_rotate >= 0) && gui_pack_atlas(i_rotate, &ms_r, pe, sizeof pe, note, sizeof note);
+            const tp_result *rr = gui_pack_result(i_rotate);
+            nt_log_info("SELFTEST: pack 'rotate' -> %d in %.1f ms sprites=%d pages=%d (find 'a'=%d) %s", okr, ms_r,
+                        rr ? rr->sprite_count : -1, rr ? rr->page_count : -1, gui_pack_find_sprite(i_rotate, "a"),
+                        okr ? "" : pe);
+            NT_ASSERT(okr && rr && rr->sprite_count == 3 && rr->page_count >= 1 && "pack rotate");
+            NT_ASSERT(gui_pack_find_sprite(i_rotate, "a") >= 0 && "region lookup 'a'");
+            char pe2[256] = {0};
+            const bool okb = (i_basic >= 0) && gui_pack_atlas(i_basic, &ms_b, pe2, sizeof pe2, note, sizeof note);
+            const tp_result *rb = gui_pack_result(i_basic);
+            nt_log_info("SELFTEST: pack 'basic' -> %d in %.1f ms sprites=%d pages=%d %s", okb, ms_b,
+                        rb ? rb->sprite_count : -1, rb ? rb->page_count : -1, okb ? "" : pe2);
+
+            /* export 'rotate' to its json-neotolis target + assert the files exist and the json parses.
+             * tp_export_run uses the target out_path as the exporter BASE and appends .json / -N.png. */
+            int etg = 0;
+            int enc = 0;
+            char eerr[256] = {0};
+            char enote[128] = {0};
+            const bool oke = (i_rotate >= 0) && gui_pack_export(i_rotate, &etg, &enc, eerr, sizeof eerr, enote, sizeof enote);
+            char base[600] = {0};
+            char jpath[640] = {0};
+            char ppath[640] = {0};
+            bool jok = false;
+            bool pok = false;
+            if (tp_project_resolve_path(dp, "out/rotate.json", base, sizeof base) == TP_STATUS_OK) {
+                (void)snprintf(jpath, sizeof jpath, "%s.json", base);
+                (void)snprintf(ppath, sizeof ppath, "%s-0.png", base);
+                FILE *jf = fopen(jpath, "rb");
+                if (jf) {
+                    jok = (fgetc(jf) == '{'); /* lightweight parse check; full parse is in ctest test_export_json */
+                    (void)fclose(jf);
+                }
+                FILE *pf = fopen(ppath, "rb");
+                if (pf) {
+                    pok = true;
+                    (void)fclose(pf);
+                }
+            }
+            nt_log_info("SELFTEST: export 'rotate' -> ok=%d targets=%d notices=%d json{=%d png0=%d %s", oke, etg, enc,
+                        jok, pok, oke ? "" : eerr);
+            NT_ASSERT(oke && jok && pok && "export rotate: json + page png must exist");
+            (void)remove(jpath); /* keep the repo clean */
+            (void)remove(ppath);
+        } else {
+            nt_log_info("SELFTEST: demo project open failed: %s", perr);
+        }
+    }
+
     /* --- About modal: open it so the auto-quit frames render it (OK/Esc close it interactively) --- */
     s_about_open = true;
     nt_log_info("SELFTEST: About modal opened=%d", s_about_open);
@@ -1727,9 +2150,9 @@ static void handle_shortcuts(void) {
     } else if (nt_input_key_is_pressed(NT_KEY_Y)) {
         do_redo();
     } else if (nt_input_key_is_pressed(NT_KEY_P)) {
-        set_status("In-process packing blocked by neotolis-engine#282 -- see README.");
+        s_pending_pack = true;
     } else if (nt_input_key_is_pressed(NT_KEY_E)) {
-        set_status("Export All: exporters land in Phase 2.");
+        s_pending_export = true;
     }
 }
 // #endregion
@@ -1769,6 +2192,21 @@ static void frame(void) {
     }
 
     handle_shortcuts();
+
+    /* Click/right-click OUTSIDE the active inline editor commits it (Enter-equivalent desktop UX);
+     * Esc still cancels. Uses last frame's field bbox vs this frame's press. The UI is configured
+     * STRETCH with ref = framebuffer, so logical bbox coords and framebuffer pointer px coincide. */
+    if (s_edit_kind != EDIT_NONE) {
+        const nt_pointer_t *p = &g_nt_input.pointers[0];
+        if (p->buttons[NT_BUTTON_LEFT].is_pressed || p->buttons[NT_BUTTON_RIGHT].is_pressed) {
+            const nt_ui_bbox_t fb = nt_ui_get_bbox(s_ctx, s_id_rename);
+            const bool inside = fb.width > 0.0F && p->x >= fb.x && p->x < (fb.x + fb.width) &&
+                                p->y >= fb.y && p->y < (fb.y + fb.height);
+            if (!inside) {
+                s_pending_commit_edit = true;
+            }
+        }
+    }
 
     nt_resource_step();
     nt_material_step();
@@ -1814,6 +2252,7 @@ static void frame(void) {
         });
         nt_sprite_renderer_restore_gpu();
         nt_text_renderer_restore_gpu();
+        nt_shape_renderer_restore_gpu();
         gui_canvas_restore_gpu(&s_canvas);
         s_atlas_bound = false;
         s_font_bound = false;
@@ -1843,6 +2282,14 @@ static void frame(void) {
         build_rows(gui_project_get(), tp_project_get_atlas(gui_project_get(), s_sel_atlas));
         s_content_w = scale.logical_w; /* for caption/status truncation */
 
+        /* Bind the selected atlas's pack result to the canvas (repack / atlas switch / clear). */
+        const tp_result *want = gui_pack_result(s_sel_atlas);
+        if (want != s_shown_result) {
+            gui_canvas_set_result(&s_canvas, want);
+            s_shown_result = want;
+        }
+        handle_canvas_input(); /* wheel/pan/click over the atlas page (uses last frame's draw box) */
+
         nt_ui_begin(s_ctx, scale.logical_w, scale.logical_h, g_nt_app.dt, &g_nt_input.pointers[0], 1);
         nt_ui_set_viewport(s_ctx, nt_ui_viewport_from_scale(&scale));
 
@@ -1871,18 +2318,25 @@ static void frame(void) {
 
         nt_ui_end(s_ctx);
 
-        /* selection captured this frame -> refresh the canvas texture before the walk draws it */
-        if (s_sel_missing) {
-            gui_canvas_clear(&s_canvas); /* placeholder is drawn by declare_canvas (§3.7) */
-        } else if (s_sel_abs[0] != '\0') {
-            char err[256];
-            if (!gui_canvas_set_image(&s_canvas, s_sel_abs, err, sizeof err)) {
-                set_statusf("Decode failed: %s", err);
-                s_sel_missing = true; /* show the missing placeholder instead of a blank canvas */
+        /* SOURCE mode: refresh the decoded image for the selection before the walk draws it. In
+         * ATLAS mode the canvas draws the packed pages, so leave the source texture alone. */
+        if (gui_canvas_get_mode(&s_canvas) == GUI_CANVAS_SOURCE) {
+            if (s_sel_missing) {
+                gui_canvas_clear(&s_canvas); /* placeholder is drawn by declare_canvas (§3.7) */
+            } else if (s_sel_abs[0] != '\0') {
+                char err[256];
+                if (!gui_canvas_set_image(&s_canvas, s_sel_abs, err, sizeof err)) {
+                    set_statusf("Decode failed: %s", err);
+                    s_sel_missing = true; /* show the missing placeholder instead of a blank canvas */
+                }
+            } else {
+                gui_canvas_clear(&s_canvas);
             }
-        } else {
-            gui_canvas_clear(&s_canvas);
         }
+
+        gui_canvas_upload_pages(&s_canvas);          /* GL upload of packed pages (deferred from pack) */
+        nt_shape_renderer_set_vp((const float *)vp); /* overlays share the sprite view_proj */
+        nt_shape_renderer_set_depth(false);
 
         nt_ui_target_t target = nt_ui_scale_make_target(&scale);
         nt_ui_walk(s_ctx, &target);
@@ -1931,11 +2385,13 @@ int main(int argc, char *argv[]) {
     nt_sprite_renderer_desc_t sr_desc = nt_sprite_renderer_desc_defaults();
     nt_sprite_renderer_init(&sr_desc);
     nt_text_renderer_init();
+    nt_shape_renderer_init(); /* atlas-canvas region overlays (outlines / hulls / selection) */
 
     nt_ui_module_init();
     nt_ui_create_desc_t ui_desc = nt_ui_create_desc_defaults();
     ui_desc.max_elements = UI_MAX_ELEMENTS;
-    ui_desc.state_slots = 512U;
+    ui_desc.state_slots = UI_STATE_SLOTS;
+    ui_desc.state_probe_max = UI_STATE_PROBE_MAX;
     s_ctx = nt_ui_create_context(s_ui_arena, sizeof s_ui_arena, &ui_desc);
     NT_ASSERT(s_ctx != NULL && "ntpacker-gui: failed to create UI context");
 
@@ -2007,6 +2463,11 @@ int main(int argc, char *argv[]) {
     nt_ui_set_custom_handler(s_ctx, gui_canvas_handler, &s_canvas);
     gui_project_init();
 
+    /* in-process packing: session .ntpack goes under the exe dir (existing convention) */
+    char pack_session[1152];
+    (void)snprintf(pack_session, sizeof pack_session, "%s/pack_session", s_exe_dir);
+    gui_pack_init(pack_session);
+
     /* open a project passed on the command line (errors go to the status bar) */
     if (argc > 1) {
         char err[256];
@@ -2026,15 +2487,17 @@ int main(int argc, char *argv[]) {
 #endif
 
     clamp_selection();
-    nt_log_info("ntpacker-gui: starting (project editor; packing blocked by engine #282)");
+    nt_log_info("ntpacker-gui: starting (live in-process packing + atlas-page canvas)");
 
     nt_app_run(frame);
 
     gui_canvas_shutdown(&s_canvas);
+    gui_pack_shutdown();
     gui_scan_shutdown();
     gui_project_shutdown();
     nt_ui_destroy_context(s_ctx);
     nt_ui_module_shutdown();
+    nt_shape_renderer_shutdown();
     nt_text_renderer_shutdown();
     nt_sprite_renderer_shutdown();
     nt_font_destroy(s_font);

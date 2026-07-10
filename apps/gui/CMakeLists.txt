@@ -24,24 +24,24 @@ if(WIN32)
     target_link_libraries(tinyfiledialogs PUBLIC comdlg32 ole32 shell32 user32)
 endif()
 
-add_executable(ntpacker-gui main.c gui_project.c gui_scan.c gui_canvas.c gui_history.c)
-# Lean link set derived from examples/ui_showcase: dropped nt_shape_renderer (no 3D/
-# shape draws), nt_debug_overlay + nt_metrics (no HUD), nt_platform (no mem probe).
-# Kept the concrete impls the engine's *_interface deps require at final link:
-# nt_gfx (font/ui), nt_fs + nt_http_stub (resource), nt_clipboard (ui).
+add_executable(ntpacker-gui main.c gui_project.c gui_scan.c gui_canvas.c gui_pack.c gui_history.c)
+# Link set derived from examples/ui_showcase; nt_shape_renderer is re-added for the atlas-page
+# canvas overlays (region outlines / hull polygons / pivot markers). Kept the concrete impls the
+# engine's *_interface deps require at final link: nt_gfx (font/ui), nt_fs + nt_http_stub
+# (resource), nt_clipboard (ui).
 #
-# tp_core is now linked (issue #282 resolved for the GUI by the packer/ split): tp_core is
-# the read/model/edit core WITHOUT nt_builder, so it carries no nt_basisu_encoder and no
-# static-CRT pin -- it links cleanly alongside nt_gfx. tp_build (the pack orchestrator that
-# DOES pull nt_builder) is deliberately NOT linked; in-process packing still waits on #282.
-# stb_image decodes the selected source image for the canvas preview (Task 5).
+# tp_build (in-process packing) is now linked: engine issue #282 is FIXED (basisu single shared
+# transcoder TU, commit 8d0133cb), so nt_builder + nt_basisu_encoder no longer duplicate the render
+# runtime's transcoder symbol and coexist with nt_gfx in one image. tp_build PUBLIC-links tp_core +
+# nt_builder, so the read/model/edit core comes transitively. The GUI packs atlases live via
+# gui_pack.c -> tp_pack. stb_image decodes source images for the canvas source-preview mode.
 target_link_libraries(ntpacker-gui PRIVATE
     nt_core nt_app nt_input nt_window nt_math nt_log nt_time nt_resource
     nt_material nt_shared nt_atlas
     nt_sprite_renderer nt_text_renderer nt_font nt_ui
-    nt_render nt_hash nt_mem_scratch
+    nt_render nt_hash nt_mem_scratch nt_shape_renderer
     nt_gfx nt_http_stub nt_fs nt_clipboard
-    tp_core stb_image tinyfiledialogs
+    tp_build stb_image tinyfiledialogs
 )
 # Generated asset header from the pack builder (ntpacker_ui_assets.h).
 target_include_directories(ntpacker-gui PRIVATE "${GUI_GENERATED_DIR}")
