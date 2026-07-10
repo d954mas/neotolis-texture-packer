@@ -83,8 +83,8 @@ typedef struct tp_export_name_override {
 } tp_export_name_override;
 
 /* One explicit animation from the project (SUMMARY.md §5a). Frames are FINAL
- * export names in explicit playback order. Explicit animations OVERRIDE an
- * auto-grouped animation that shares the same id. */
+ * export names in explicit playback order. Animations are assembled EXPLICITLY
+ * (docs/design/ux.md 3.7b) -- there is no numeric-suffix auto-grouping. */
 typedef struct tp_export_anim_in {
     const char *id;
     const char *const *frames;
@@ -105,11 +105,9 @@ typedef struct tp_normalize_opts {
     const tp_export_name_override *overrides;
     int override_count;
 
-    /* Explicit animations (override auto groups by id). */
+    /* Explicit project animations (assembled verbatim; no auto-grouping). */
     const tp_export_anim_in *animations;
     int animation_count;
-
-    bool auto_group_animations; /* default true: numeric-suffix auto-grouping */
 } tp_normalize_opts;
 
 /* Seeds `out` with the documented defaults. */
@@ -147,8 +145,8 @@ typedef struct tp_export_prepared {
 
 /* Builds `out` from `result` + `opts`. Final names are computed (override ->
  * folder-strip -> ext-strip), sprites are sorted by final name (determinism
- * key), aliases keep their link, and animations are the merge of explicit +
- * numeric-suffix auto groups. A final-name collision after munging (e.g. a.png
+ * key), aliases keep their link, and animations are the explicit project
+ * animations (sorted by id). A final-name collision after munging (e.g. a.png
  * + a.jpg -> "a", or an override colliding with another final name) is a
  * TP_STATUS_INVALID_ARGUMENT with a clear message. */
 tp_status tp_normalize(const tp_result *result, const tp_normalize_opts *opts, struct tp_arena *arena,

@@ -23,6 +23,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#include <direct.h>
+#define TP_TEST_MKDIR(p) _mkdir(p)
+#else
+#include <sys/stat.h>
+#define TP_TEST_MKDIR(p) mkdir((p), 0777)
+#endif
+
 #include "stb_image.h"
 
 #include "tp_core/tp_arena.h"
@@ -82,6 +90,111 @@ static int count_occurrences(const char *hay, const char *needle) {
 static const tp_export_caps *defold_caps(void) {
     const tp_exporter *e = tp_exporter_find("defold");
     return e ? &e->caps : NULL;
+}
+
+static void ensure_dir(const char *path) {
+    (void)TP_TEST_MKDIR(path); /* ignore EEXIST */
+}
+
+/* Writes a minimal game.project marker into `dir` so the exporter's project-root
+ * walk resolves the .tpatlas file reference deterministically. */
+static void write_game_project(const char *dir) {
+    char p[1200];
+    (void)snprintf(p, sizeof p, "%s/game.project", dir);
+    FILE *f = fopen(p, "wb");
+    if (f) {
+        (void)fputs("[project]\ntitle = test\n", f);
+        (void)fclose(f);
+    }
+}
+
+/* Parse "<key> <int>" (protobuf text) forward from `p`; advances `*p` past it. */
+static long scan_int(const char **p, const char *key) {
+    const char *k = strstr(*p, key);
+    if (!k) {
+        return 0;
+    }
+    k += strlen(key);
+    long v = strtol(k, NULL, 10);
+    *p = k;
+    return v;
+}
+
+/* Parity invariant (matches TexturePacker's own basic.tpinfo): a sprite's
+ * `vertices` bounding box EQUALS its `source_rect`. Parses the named sprite's
+ * block out of a .tpinfo text and asserts min/max(vertices) == source_rect. */
+static void assert_bbox_equals_source_rect(const char *tpinfo, const char *name) {
+    char needle[160];
+    (void)snprintf(needle, sizeof needle, "name: \"%s\"", name);
+    const char *b = strstr(tpinfo, needle);
+    TEST_ASSERT_NOT_NULL_MESSAGE(b, name);
+    const char *end = strstr(b + strlen(needle), "sprites {");
+    if (!end) {
+        end = tpinfo + strlen(tpinfo);
+    }
+    /* source_rect fields appear in fixed order x,y,width,height. */
+    const char *sr = strstr(b, "source_rect {");
+    TEST_ASSERT_TRUE_MESSAGE(sr != NULL && sr < end, "source_rect present");
+    const char *c = sr;
+    long sx = scan_int(&c, "x:");
+    long sy = scan_int(&c, "y:");
+    long sw = scan_int(&c, "width:");
+    long sh = scan_int(&c, "height:");
+
+    long minx = 0, maxx = 0, miny = 0, maxy = 0;
+    int nv = 0;
+    const char *v = strstr(b, "vertices {");
+    while (v != NULL && v < end) {
+        const char *vc = v;
+        long x = scan_int(&vc, "x:");
+        long y = scan_int(&vc, "y:");
+        if (nv == 0) {
+            minx = maxx = x;
+            miny = maxy = y;
+        } else {
+            if (x < minx) { minx = x; }
+            if (x > maxx) { maxx = x; }
+            if (y < miny) { miny = y; }
+            if (y > maxy) { maxy = y; }
+        }
+        nv++;
+        v = strstr(vc, "vertices {");
+    }
+    TEST_ASSERT_TRUE_MESSAGE(nv > 0, "at least one vertex");
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)sx, (int)minx, "vertex x-min == source_rect.x");
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)sy, (int)miny, "vertex y-min == source_rect.y");
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)(sx + sw), (int)maxx, "vertex x-max == source_rect.x+width");
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)(sy + sh), (int)maxy, "vertex y-max == source_rect.y+height");
+}
+
+/* Referential integrity: every `images:` frame id in the .tpatlas MUST name a
+ * `name:` sprite present in the paired .tpinfo. A dangling frame id NPEs bob
+ * (owner repro: an auto-grouped "sq" flipbook referenced non-existent frames).
+ * The quoted-name needle includes the closing quote, so "test-0" never matches
+ * a longer "test-01". */
+static void assert_tpatlas_refs_exist(const char *tpinfo, const char *tpatlas) {
+    const char *p = tpatlas;
+    int checked = 0;
+    while ((p = strstr(p, "images: \"")) != NULL) {
+        p += strlen("images: \"");
+        const char *q = strchr(p, '"');
+        TEST_ASSERT_NOT_NULL_MESSAGE(q, "malformed images: entry");
+        size_t len = (size_t)(q - p);
+        char frame[256];
+        if (len >= sizeof frame) {
+            len = sizeof frame - 1;
+        }
+        memcpy(frame, p, len);
+        frame[len] = '\0';
+        char needle[300];
+        (void)snprintf(needle, sizeof needle, "name: \"%s\"", frame);
+        char msg[400];
+        (void)snprintf(msg, sizeof msg, "anim frame '%s' must exist as a sprite in the paired .tpinfo", frame);
+        TEST_ASSERT_TRUE_MESSAGE(strstr(tpinfo, needle) != NULL, msg);
+        checked++;
+        p = q + 1;
+    }
+    (void)checked;
 }
 // #endregion
 
@@ -226,7 +339,7 @@ static const char *const EXPECTED_TPINFO =
     "}\n";
 
 static const char *const EXPECTED_TPATLAS =
-    "file: \"defold_golden.tpinfo\"\n"
+    "file: \"/defold_golden.tpinfo\"\n"
     "rename_patterns: \"\"\n"
     "animations {\n"
     "  id: \"spin\"\n"
@@ -321,8 +434,15 @@ void test_golden_bytes(void) {
 
     tp_export_notices notices;
     tp_export_notices_init(&notices);
-    char base[1024];
-    (void)snprintf(base, sizeof base, "%s/defold_golden", g_dir);
+    /* Write inside a dir that has a game.project, so the .tpatlas file reference
+     * resolves to the deterministic project-absolute "/defold_golden.tpinfo"
+     * (and raises no notice). */
+    char proj[1024];
+    (void)snprintf(proj, sizeof proj, "%s/gp_golden", g_dir);
+    ensure_dir(proj);
+    write_game_project(proj);
+    char base[1088];
+    (void)snprintf(base, sizeof base, "%s/defold_golden", proj);
     TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, tp_export_defold_write(&prep, defold_caps(), base, &notices, &e), e.msg);
     TEST_ASSERT_EQUAL_INT_MESSAGE(0, notices.count, "full-fidelity golden must raise zero notices");
     tp_export_notices_free(&notices);
@@ -398,8 +518,12 @@ void test_rotated_geometry(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_normalize(&r, NULL, ar, &prep, &e));
     tp_export_notices notices;
     tp_export_notices_init(&notices);
-    char base[1024];
-    (void)snprintf(base, sizeof base, "%s/defold_rot", g_dir);
+    char proj[1024];
+    (void)snprintf(proj, sizeof proj, "%s/gp_rot", g_dir);
+    ensure_dir(proj);
+    write_game_project(proj);
+    char base[1088];
+    (void)snprintf(base, sizeof base, "%s/defold_rot", proj);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_export_defold_write(&prep, defold_caps(), base, &notices, &e));
     TEST_ASSERT_EQUAL_INT_MESSAGE(0, notices.count, "representable rotation raises no notice");
     tp_export_notices_free(&notices);
@@ -415,6 +539,260 @@ void test_rotated_geometry(void) {
     TEST_ASSERT_TRUE_MESSAGE(strstr(got, "source_rect {\n      x: 0\n      y: 0\n      width: 8\n      height: 4\n    }") != NULL,
                              "source_rect stays unrotated");
     free(got);
+    tp_arena_destroy(ar);
+}
+// #endregion
+
+// #region (b2) hull untrimmed-space geometry --------------------------------
+/* Asymmetric trimmed hull whose clipper2-inflated envelope reaches a NEGATIVE
+ * minimum local X (as tp_pack_read hands us). The exporter must place every
+ * `vertices` entry at its true untrimmed-source position AND emit corner_offset/
+ * source_rect/frame_rect from the ACTUAL vertex bbox -- otherwise the extension
+ * draws the hull |min_x| px too far left (owner repro: circle offset, sq9 spike).
+ * Every expected value below is derived by hand from the source geometry. */
+void test_hull_untrimmed_space(void) {
+    tp_arena *ar = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(ar);
+
+    static uint8_t px[128 * 128 * 4]; /* fully transparent -> is_solid:false */
+    memset(px, 0, sizeof px);
+    tp_page page;
+    memset(&page, 0, sizeof page);
+    page.image_name = "hull";
+    page.w = 128;
+    page.h = 128;
+    page.rgba = px;
+
+    /* Untrimmed source 32x32. tp_pack_read reports the trim rect as the hull's
+     * max local coord assuming its min is (0,0): spriteSourceSize = (10,5,12,18).
+     * The real hull (clipper2-inflated) reaches x=-3 on the left -- a left-pointing
+     * triangle. verts are trim-local, y-down (post-decode; y-min already 0). */
+    static tp_point verts[3] = {{-3, 0}, {12, 0}, {5, 18}};
+    static uint16_t idx[3] = {0, 1, 2};
+    tp_sprite s;
+    memset(&s, 0, sizeof s);
+    s.name = "tri";
+    s.page = 0;
+    s.frame.x = 100;
+    s.frame.y = 50;
+    s.frame.w = 12; /* decode-style: trim_w = max local x */
+    s.frame.h = 18;
+    s.trimmed = true;
+    s.spriteSourceSize.x = 10;
+    s.spriteSourceSize.y = 5;
+    s.spriteSourceSize.w = 12;
+    s.spriteSourceSize.h = 18;
+    s.sourceSize.w = 32;
+    s.sourceSize.h = 32;
+    s.pivot.x = 0.5F;
+    s.pivot.y = 0.5F;
+    s.verts = verts;
+    s.vert_count = 3;
+    s.indices = idx;
+    s.index_count = 3;
+    s.alias_of = -1;
+
+    tp_result r;
+    memset(&r, 0, sizeof r);
+    r.atlas_name = "hull";
+    r.pixels_per_unit = 1.0F;
+    r.pages = &page;
+    r.page_count = 1;
+    r.sprites = &s;
+    r.sprite_count = 1;
+
+    tp_export_prepared prep;
+    tp_error e = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_normalize(&r, NULL, ar, &prep, &e));
+    tp_export_notices notices;
+    tp_export_notices_init(&notices);
+    char base[1024];
+    (void)snprintf(base, sizeof base, "%s/defold_hull", g_dir);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_export_defold_write(&prep, defold_caps(), base, &notices, &e));
+    tp_export_notices_free(&notices);
+
+    char path[1088];
+    (void)snprintf(path, sizeof path, "%s.tpinfo", base);
+    char *got = read_whole_file(path, NULL);
+    TEST_ASSERT_NOT_NULL(got);
+
+    /* Independently derived expected UNTRIMMED-SOURCE positions:
+     *   trim origin (spriteSourceSize.xy) = (10,5).
+     *   hull spans trim-local x[-3,12], y[0,18] -> true bbox in source space:
+     *     left  = 10 + (-3) = 7    right  = 10 + 12 = 22
+     *     top   =  5 +   0  = 5    bottom =  5 + 18 = 23
+     *   corner_offset = source_rect.xy = (7,5); size = (22-7, 23-5) = (15,18).
+     *   frame_rect footprint = same size (15,18) at the page origin (100,50).
+     *   vertices = trim-local + trim origin (10,5):
+     *     (-3,0)->(7,5)   (12,0)->(22,5)   (5,18)->(15,23)
+     *   Leftmost vertex x (7) == source_rect.x, so the extension's
+     *   `frame_rect.x + (vertex.x - corner_offset.x)` draws the hull FLUSH with
+     *   the sprite. The pre-fix code emitted corner_offset=(10,5),
+     *   source_rect=(10,5,12,18): its x-min (10) != the vertex x-min (7), the
+     *   |min_x|=3 px left shift this test guards against. */
+    TEST_ASSERT_TRUE_MESSAGE(strstr(got, "corner_offset {\n      x: 7\n      y: 5\n    }") != NULL,
+                             "corner_offset = hull bbox origin");
+    TEST_ASSERT_TRUE_MESSAGE(strstr(got, "source_rect {\n      x: 7\n      y: 5\n      width: 15\n      height: 18\n    }") != NULL,
+                             "source_rect = hull bbox");
+    TEST_ASSERT_TRUE_MESSAGE(strstr(got, "frame_rect {\n      x: 100\n      y: 50\n      width: 15\n      height: 18\n    }") != NULL,
+                             "frame_rect footprint = hull bbox size");
+    TEST_ASSERT_TRUE_MESSAGE(strstr(got, "vertices {\n      x: 7\n      y: 5\n    }") != NULL, "v0 -> (7,5)");
+    TEST_ASSERT_TRUE_MESSAGE(strstr(got, "vertices {\n      x: 22\n      y: 5\n    }") != NULL, "v1 -> (22,5)");
+    TEST_ASSERT_TRUE_MESSAGE(strstr(got, "vertices {\n      x: 15\n      y: 23\n    }") != NULL, "v2 -> (15,23)");
+    TEST_ASSERT_TRUE_MESSAGE(strstr(got, "indices: [0, 1, 2]") != NULL, "indices verbatim");
+
+    /* Parity: our polygon's vertex bbox equals its source_rect -- the SAME
+     * relationship TexturePacker's own basic.tpinfo entries hold. */
+    assert_bbox_equals_source_rect(got, "tri");
+    free(got);
+    tp_arena_destroy(ar);
+}
+// #endregion
+
+// #region (b3) .tpatlas file reference (Defold project resource) -------------
+static bool export_trivial(const char *base, tp_arena *ar, tp_export_notices *notices) {
+    static uint8_t px[8 * 8 * 4];
+    for (size_t i = 0; i < sizeof px / 4; i++) {
+        px[i * 4 + 3] = 255;
+    }
+    tp_page page;
+    memset(&page, 0, sizeof page);
+    page.image_name = "t";
+    page.w = 8;
+    page.h = 8;
+    page.rgba = px;
+    tp_sprite s;
+    memset(&s, 0, sizeof s);
+    s.name = "t";
+    s.frame.w = 8;
+    s.frame.h = 8;
+    s.spriteSourceSize.w = 8;
+    s.spriteSourceSize.h = 8;
+    s.sourceSize.w = 8;
+    s.sourceSize.h = 8;
+    s.pivot.x = 0.5F;
+    s.pivot.y = 0.5F;
+    s.alias_of = -1;
+    tp_result r;
+    memset(&r, 0, sizeof r);
+    r.atlas_name = "t";
+    r.pixels_per_unit = 1.0F;
+    r.pages = &page;
+    r.page_count = 1;
+    r.sprites = &s;
+    r.sprite_count = 1;
+    tp_export_prepared prep;
+    tp_error e = {{0}};
+    if (tp_normalize(&r, NULL, ar, &prep, &e) != TP_STATUS_OK) {
+        return false;
+    }
+    return tp_export_defold_write(&prep, defold_caps(), base, notices, &e) == TP_STATUS_OK;
+}
+
+void test_tpatlas_file_ref(void) {
+    tp_arena *ar = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(ar);
+
+    /* POSITIVE: game.project two dirs above the output -> project-absolute path,
+     * relative to the project root, no notice. */
+    char proj[1024], sub[1024], subdir[1024], base[1088];
+    (void)snprintf(proj, sizeof proj, "%s/gp_a", g_dir);
+    (void)snprintf(sub, sizeof sub, "%s/gp_a/sub", g_dir);
+    (void)snprintf(subdir, sizeof subdir, "%s/gp_a/sub/dir", g_dir);
+    ensure_dir(proj);
+    write_game_project(proj);
+    ensure_dir(sub);
+    ensure_dir(subdir);
+    (void)snprintf(base, sizeof base, "%s/thing", subdir);
+
+    tp_export_notices n1;
+    tp_export_notices_init(&n1);
+    TEST_ASSERT_TRUE(export_trivial(base, ar, &n1));
+    char path[1120];
+    (void)snprintf(path, sizeof path, "%s.tpatlas", base);
+    char *tpa = read_whole_file(path, NULL);
+    TEST_ASSERT_NOT_NULL(tpa);
+    TEST_ASSERT_TRUE_MESSAGE(strstr(tpa, "file: \"/sub/dir/thing.tpinfo\"") != NULL,
+                             "file must be project-absolute, relative to game.project dir");
+    free(tpa);
+    bool gp_notice = false;
+    for (int i = 0; i < n1.count; i++) {
+        if (strstr(n1.items[i].msg, "game.project")) {
+            gp_notice = true;
+        }
+    }
+    TEST_ASSERT_FALSE_MESSAGE(gp_notice, "resolved file must not raise a game.project notice");
+    tp_export_notices_free(&n1);
+
+    /* NEGATIVE: no game.project on any ancestor (g_dir root has none) -> bare
+     * basename + a metadata notice. */
+    char nodir[1024], nobase[1088];
+    (void)snprintf(nodir, sizeof nodir, "%s/no_gp_here", g_dir);
+    ensure_dir(nodir);
+    (void)snprintf(nobase, sizeof nobase, "%s/thing", nodir);
+    tp_export_notices n2;
+    tp_export_notices_init(&n2);
+    TEST_ASSERT_TRUE(export_trivial(nobase, ar, &n2));
+    (void)snprintf(path, sizeof path, "%s.tpatlas", nobase);
+    tpa = read_whole_file(path, NULL);
+    TEST_ASSERT_NOT_NULL(tpa);
+    TEST_ASSERT_TRUE_MESSAGE(strstr(tpa, "file: \"thing.tpinfo\"") != NULL,
+                             "no game.project -> bare co-located basename");
+    free(tpa);
+    gp_notice = false;
+    for (int i = 0; i < n2.count; i++) {
+        if (strstr(n2.items[i].msg, "game.project")) {
+            gp_notice = true;
+        }
+    }
+    TEST_ASSERT_TRUE_MESSAGE(gp_notice, "missing game.project must raise a notice");
+    tp_export_notices_free(&n2);
+
+    tp_arena_destroy(ar);
+}
+// #endregion
+
+// #region (b4) .tpatlas referential integrity -------------------------------
+/* Every emitted flipbook frame id must resolve to a sprite in the paired
+ * .tpinfo. Uses the golden hero+gem atlas with the explicit "spin" animation. */
+void test_tpatlas_referential_integrity(void) {
+    tp_arena *ar = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(ar);
+    tp_sprite sprites[2];
+    tp_page page;
+    tp_result r = golden_result(sprites, &page);
+    const char *spin_frames[2] = {"hero", "gem"};
+    tp_export_anim_in spin = {.id = "spin",
+                              .frames = spin_frames,
+                              .frame_count = 2,
+                              .fps = 12.0F,
+                              .playback = 1,
+                              .flip_h = false,
+                              .flip_v = false};
+    tp_normalize_opts opts;
+    tp_normalize_opts_defaults(&opts);
+    opts.animations = &spin;
+    opts.animation_count = 1;
+    tp_export_prepared prep;
+    tp_error e = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, tp_normalize(&r, &opts, ar, &prep, &e), e.msg);
+    tp_export_notices notices;
+    tp_export_notices_init(&notices);
+    char base[1024];
+    (void)snprintf(base, sizeof base, "%s/defold_refint", g_dir);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_export_defold_write(&prep, defold_caps(), base, &notices, &e));
+    tp_export_notices_free(&notices);
+
+    char ip[1088], ap[1088];
+    (void)snprintf(ip, sizeof ip, "%s.tpinfo", base);
+    (void)snprintf(ap, sizeof ap, "%s.tpatlas", base);
+    char *ti = read_whole_file(ip, NULL);
+    char *ta = read_whole_file(ap, NULL);
+    TEST_ASSERT_NOT_NULL(ti);
+    TEST_ASSERT_NOT_NULL(ta);
+    assert_tpatlas_refs_exist(ti, ta);
+    free(ti);
+    free(ta);
     tp_arena_destroy(ar);
 }
 // #endregion
@@ -791,9 +1169,7 @@ static bool pack_demo_atlas(const demo_atlas *da, tp_arena *ar) {
             opts.animations = &anim;
             opts.animation_count = 1;
         }
-        /* explicit animations only for the demo (matches ux.md export ruling). */
-        opts.auto_group_animations = false;
-
+        /* explicit animations only (auto-grouping removed, ux.md 3.7b). */
         tp_export_prepared prep;
         if (ok) {
             ok = tp_normalize(res, &opts, ar, &prep, &e) == TP_STATUS_OK;
@@ -849,7 +1225,6 @@ static void assert_demo_structure(const char *atlas, const demo_file *files, int
         (void)snprintf(msg, sizeof msg, "demo '%s' sprite '%s'", atlas, files[i].sprite_name);
         TEST_ASSERT_TRUE_MESSAGE(strstr(tpi, want) != NULL, msg);
     }
-    free(tpi);
 
     (void)snprintf(path, sizeof path, "%s/demo_%s.tpatlas", g_dir, atlas);
     char *tpa = read_whole_file(path, NULL);
@@ -864,6 +1239,9 @@ static void assert_demo_structure(const char *atlas, const demo_file *files, int
         (void)snprintf(msg, sizeof msg, "demo '%s' playback '%s'", atlas, playback_token);
         TEST_ASSERT_TRUE_MESSAGE(strstr(tpa, playback_token) != NULL, msg);
     }
+    /* every flipbook frame id must resolve to a sprite in the paired .tpinfo. */
+    assert_tpatlas_refs_exist(tpi, tpa);
+    free(tpi);
     free(tpa);
 }
 
@@ -906,6 +1284,25 @@ void test_demo_atlases(void) {
     assert_demo_structure("rotate", rotate_files, rotate.file_count, NULL, NULL);
     assert_demo_structure("anim_trim", trim_files, anim_trim.file_count, "anim_trim", "playback: PLAYBACK_LOOP_FORWARD");
 
+    /* Convention parity: TexturePacker's own basic.tpinfo holds vertices-bbox ==
+     * source_rect for circle_fill_128 / shape_L_128; our exported polygon hulls
+     * for the same sprites hold the identical relationship (the hull fix). */
+    char up[1120];
+    (void)snprintf(up, sizeof up, "%s/examples/basic/basic.tpinfo", g_demo_dir);
+    char *upstream = read_whole_file(up, NULL);
+    if (upstream) {
+        assert_bbox_equals_source_rect(upstream, "circle_fill_128");
+        assert_bbox_equals_source_rect(upstream, "shape_L_128");
+        free(upstream);
+    }
+    char ours[1120];
+    (void)snprintf(ours, sizeof ours, "%s/demo_basic.tpinfo", g_dir);
+    char *nt = read_whole_file(ours, NULL);
+    TEST_ASSERT_NOT_NULL_MESSAGE(nt, "demo_basic.tpinfo readable for parity check");
+    assert_bbox_equals_source_rect(nt, "circle_fill_128");
+    assert_bbox_equals_source_rect(nt, "shape_L_128");
+    free(nt);
+
     tp_arena_destroy(ar);
 }
 // #endregion
@@ -921,6 +1318,9 @@ int main(int argc, char **argv) {
     UNITY_BEGIN();
     RUN_TEST(test_golden_bytes);
     RUN_TEST(test_rotated_geometry);
+    RUN_TEST(test_hull_untrimmed_space);
+    RUN_TEST(test_tpatlas_file_ref);
+    RUN_TEST(test_tpatlas_referential_integrity);
     RUN_TEST(test_determinism_byte_identical);
     RUN_TEST(test_caps_repack_identity_and_slice9_notice);
     RUN_TEST(test_playback_enum_and_flags);

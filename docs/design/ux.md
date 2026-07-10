@@ -392,7 +392,17 @@ inherit in the builder API).
    interchange used for preview and the always-shipped engine artifact).
 
 ### 3.5 Export all
-1. Toolbar **Export All** → for each enabled target, `tp_core` packs with
+
+**Amendment (owner ruling 2026-07-10): Export ALWAYS opens an Export dialog
+first** — never silently writes to configured paths. The dialog is a front-end
+over the same target model (region G): per atlas, one row per target with
+enabled checkbox, exporter id, and an editable out path (browse via save
+dialog, relativized to the project); edits write back through the touch choke
+point (dirty + undo). Footer: "N targets enabled across M atlases", [Export] /
+[Cancel] (Esc). Empty state links to adding a target in region G. Triggers:
+strip button, File > Export…, Ctrl+E.
+
+1. Toolbar **Export All** → (after dialog confirm) for each enabled target, `tp_core` packs with
    `project ∩ target capabilities` (targets with identical effective settings
    share one pack run) and writes the target's files under its output path.
 2. Progress via `nt_ui_progress`; per-target results and metadata-loss notices

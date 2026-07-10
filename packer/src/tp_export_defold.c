@@ -55,6 +55,75 @@ static const char *path_basename(const char *p) {
     return base;
 }
 
+/* True if a regular file exists at `path` (portable fopen probe). */
+static bool file_probe(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (f) {
+        (void)fclose(f);
+        return true;
+    }
+    return false;
+}
+
+/* How many parent directories we walk looking for the Defold project root. */
+#define TP_DEFOLD_GAME_PROJECT_MAX_UP 10
+
+/* Resolve the `.tpatlas` `file:` reference. extension-texturepacker declares that
+ * field a Defold RESOURCE (tpatlas.proto `[(resource)=true]`) resolved from the
+ * PROJECT ROOT, so it must be a project-absolute "/dir/base.tpinfo" -- a bare
+ * basename resolves to "/base.tpinfo" (project root) and the build fails. We find
+ * the project root by walking UP from the .tpinfo's own directory (bounded to
+ * TP_DEFOLD_GAME_PROJECT_MAX_UP levels) looking for a `game.project` file. On
+ * success `out` gets "/<relpath>/<base>.tpinfo" (forward slashes) and the fn
+ * returns true; on failure `out` gets the bare "<base>.tpinfo" and returns false
+ * (the caller raises a metadata notice). Zero configuration: matches the demo
+ * layout (examples/defold-demo/game.project). */
+static bool resolve_tpatlas_file_ref(const char *out_path_base, const char *tpinfo_basename, char *out, size_t out_sz) {
+    /* Work on a forward-slash-normalized copy of the full .tpinfo path. */
+    char full[TP_DEFOLD_PATH_MAX];
+    int n = snprintf(full, sizeof full, "%s.tpinfo", out_path_base);
+    if (n < 0 || (size_t)n >= sizeof full) {
+        (void)snprintf(out, out_sz, "%s.tpinfo", tpinfo_basename);
+        return false;
+    }
+    for (char *c = full; *c; c++) {
+        if (*c == '\\') {
+            *c = '/';
+        }
+    }
+    const char *last_slash = strrchr(full, '/');
+    if (!last_slash) {
+        (void)snprintf(out, out_sz, "%s.tpinfo", tpinfo_basename); /* no directory to walk */
+        return false;
+    }
+    size_t dir_len = (size_t)(last_slash - full); /* length of the current candidate dir */
+    for (int up = 0; up <= TP_DEFOLD_GAME_PROJECT_MAX_UP; up++) {
+        char probe[TP_DEFOLD_PATH_MAX];
+        int pn = snprintf(probe, sizeof probe, "%.*s/game.project", (int)dir_len, full);
+        if (pn > 0 && (size_t)pn < sizeof probe && file_probe(probe)) {
+            /* project root = full[0..dir_len); resource = "/" + full[dir_len+1..]. */
+            int rn = snprintf(out, out_sz, "/%s", full + dir_len + 1);
+            return rn > 0 && (size_t)rn < out_sz;
+        }
+        /* Ascend one level: new dir = parent of the current candidate dir. */
+        const char *prev = NULL;
+        for (size_t i = 0; i < dir_len; i++) {
+            if (full[i] == '/') {
+                prev = full + i;
+            }
+        }
+        if (!prev) {
+            break; /* no parent component left (relative path exhausted) */
+        }
+        dir_len = (size_t)(prev - full);
+        if (dir_len == 0) {
+            break; /* reached filesystem root */
+        }
+    }
+    (void)snprintf(out, out_sz, "%s.tpinfo", tpinfo_basename);
+    return false;
+}
+
 /* True when the sprite's hull is exactly the axis-aligned trim quad (a plain
  * RECT) -- then the canonical source-rect quad is emitted, not the hull mesh.
  * Mirrors the json-neotolis writer's test (verts are trim-local, 0..frame.w/h). */
@@ -254,15 +323,58 @@ static void emit_sprite(tp_sb *sb, int depth, const tp_export_prepared *prep, co
         }
     }
 
-    long fw = s->frame.w;
-    long fh = s->frame.h;
-    long foot_w = rotated ? fh : fw; /* as-drawn footprint on the page */
-    long foot_h = rotated ? fw : fh;
-
     long sx = s->spriteSourceSize.x; /* trim offset inside the untrimmed image */
     long sy = s->spriteSourceSize.y;
-    long sw = s->spriteSourceSize.w; /* UNROTATED trim dims */
+    long sw = s->spriteSourceSize.w; /* UNROTATED trim dims (hull-min assumed 0,0) */
     long sh = s->spriteSourceSize.h;
+
+    /* Polygon vs quad is decided up front: for a real hull the ACTUAL vertex
+     * bounding box -- not spriteSourceSize -- drives corner_offset/source_rect/
+     * frame_rect, so it must be known before those fields are emitted. */
+    bool poly = (s->vert_count > 0 && !is_rect_quad(s));
+    if (poly && !caps->polygons) {
+        if (notices) {
+            (void)tp_export_notice_addf(notices, "polygon flattened to rect for '%s' (target stores quads only)",
+                                        es->final_name);
+        }
+        poly = false;
+    }
+
+    /* Effective UNROTATED trim rect in untrimmed source space.
+     *
+     * tp_pack_read recovers spriteSourceSize assuming the hull's minimum local
+     * coordinate is (0,0). That holds for a RECT sprite, but clipper2 inflates a
+     * convex/concave hull OUTWARD, so its true minimum X is negative (the Y
+     * minimum is already normalized to 0 by the y-down flip in tp_pack_read).
+     * Emitting corner_offset = spriteSourceSize.xy then leaves the hull's real
+     * left edge unaccounted for, and because the extension positions each hull
+     * vertex at `frame_rect.x + (vertex.x - corner_offset.x)` (Atlas.getTriangles,
+     * extension-texturepacker 2.7.0), the drawn hull lands |min_x| px too far left
+     * -- an asymmetric offset on near-symmetric shapes, a stretch on strongly
+     * asymmetric ones. Recovering the true vertex bbox makes corner_offset /
+     * source_rect / frame_rect hug the geometry and restores TexturePacker's own
+     * invariant that source_rect == the hull's vertex bbox (see
+     * examples/basic/basic.tpinfo and docs/formats/defold-tpinfo.md). */
+    long eff_x = sx, eff_y = sy, eff_w = sw, eff_h = sh;
+    if (poly) {
+        long vminx = s->verts[0].x, vmaxx = s->verts[0].x;
+        long vminy = s->verts[0].y, vmaxy = s->verts[0].y;
+        for (int i = 1; i < s->vert_count; i++) {
+            long vx = s->verts[i].x;
+            long vy = s->verts[i].y;
+            if (vx < vminx) { vminx = vx; }
+            if (vx > vmaxx) { vmaxx = vx; }
+            if (vy < vminy) { vminy = vy; }
+            if (vy > vmaxy) { vmaxy = vy; }
+        }
+        eff_x = sx + vminx; /* untrimmed-space left of the actual hull bbox     */
+        eff_y = sy + vminy; /* (vminy is 0 in practice, but keep this general)  */
+        eff_w = vmaxx - vminx;
+        eff_h = vmaxy - vminy;
+    }
+
+    long foot_w = rotated ? eff_h : eff_w; /* as-drawn footprint on the page */
+    long foot_h = rotated ? eff_w : eff_h;
 
     bool solid = false;
     if (s->page >= 0 && s->page < r->page_count) {
@@ -275,8 +387,8 @@ static void emit_sprite(tp_sb *sb, int depth, const tp_export_prepared *prep, co
     kv_bool(sb, depth + 1, "trimmed", s->trimmed);
     kv_bool(sb, depth + 1, "rotated", rotated);
     kv_bool(sb, depth + 1, "is_solid", solid);
-    emit_point_i(sb, depth + 1, "corner_offset", sx, sy);
-    emit_rect(sb, depth + 1, "source_rect", sx, sy, sw, sh);
+    emit_point_i(sb, depth + 1, "corner_offset", eff_x, eff_y);
+    emit_rect(sb, depth + 1, "source_rect", eff_x, eff_y, eff_w, eff_h);
 
     if (caps->pivot) {
         /* px from the untrimmed top-left, y-down (pivot is normalized over the
@@ -299,17 +411,11 @@ static void emit_sprite(tp_sb *sb, int depth, const tp_export_prepared *prep, co
                                     es->final_name);
     }
 
-    bool poly = (s->vert_count > 0 && !is_rect_quad(s));
-    if (poly && !caps->polygons) {
-        if (notices) {
-            (void)tp_export_notice_addf(notices, "polygon flattened to rect for '%s' (target stores quads only)",
-                                        es->final_name);
-        }
-        poly = false;
-    }
     if (poly) {
-        /* Our hull, trim-local -> untrimmed source space, y-down, UNROTATED (the
-         * rotated flag + swapped frame_rect carry the rotation; verts do not). */
+        /* Hull, trim-local -> untrimmed source space (add the ORIGINAL trim
+         * offset sx,sy so the leftmost/topmost vertex lands exactly on
+         * eff_x/eff_y == source_rect.xy), y-down, UNROTATED (the rotated flag +
+         * swapped frame_rect carry the rotation; verts do not). */
         tp_sb_indent(sb, depth + 1);
         tp_sb_str(sb, "indices: [");
         for (int i = 0; i < s->index_count; i++) {
@@ -325,10 +431,10 @@ static void emit_sprite(tp_sb *sb, int depth, const tp_export_prepared *prep, co
          * (the reference exporter's convention, verified against basic.tpinfo). */
         tp_sb_indent(sb, depth + 1);
         tp_sb_str(sb, "indices: [1, 2, 3, 0, 1, 3]\n");
-        emit_point_i(sb, depth + 1, "vertices", sx + sw, sy);      /* TR */
-        emit_point_i(sb, depth + 1, "vertices", sx, sy);           /* TL */
-        emit_point_i(sb, depth + 1, "vertices", sx, sy + sh);      /* BL */
-        emit_point_i(sb, depth + 1, "vertices", sx + sw, sy + sh); /* BR */
+        emit_point_i(sb, depth + 1, "vertices", eff_x + eff_w, eff_y);          /* TR */
+        emit_point_i(sb, depth + 1, "vertices", eff_x, eff_y);                  /* TL */
+        emit_point_i(sb, depth + 1, "vertices", eff_x, eff_y + eff_h);          /* BL */
+        emit_point_i(sb, depth + 1, "vertices", eff_x + eff_w, eff_y + eff_h);  /* BR */
     }
 
     tp_sb_indent(sb, depth);
@@ -370,11 +476,12 @@ static void emit_tpinfo(tp_sb *sb, const tp_export_prepared *prep, const tp_expo
 /* .tpatlas                                                           */
 /* ------------------------------------------------------------------ */
 
-static void emit_tpatlas(tp_sb *sb, const tp_export_prepared *prep, const char *tpinfo_name,
+static void emit_tpatlas(tp_sb *sb, const tp_export_prepared *prep, const char *tpinfo_ref,
                          tp_export_notices *notices) {
-    /* file: relative basename -- bob/editor resolve it next to the .tpatlas, and
-     * we co-locate both files (same out_path_base). */
-    kv_str(sb, 0, "file", tpinfo_name);
+    /* file: project-absolute Defold resource path ("/dir/base.tpinfo") when a
+     * game.project was located, else the bare co-located basename (resolved by
+     * resolve_tpatlas_file_ref in the writer). */
+    kv_str(sb, 0, "file", tpinfo_ref);
     kv_str(sb, 0, "rename_patterns", "");
 
     for (int i = 0; i < prep->animation_count; i++) {
@@ -457,13 +564,16 @@ tp_status tp_export_defold_write(const tp_export_prepared *prep, const tp_export
         return st;
     }
 
-    char tpinfo_name[TP_DEFOLD_PATH_MAX];
-    int nn = snprintf(tpinfo_name, sizeof tpinfo_name, "%s.tpinfo", base);
-    if (nn < 0 || (size_t)nn >= sizeof tpinfo_name) {
-        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "defold: tpinfo name too long");
+    char tpinfo_ref[TP_DEFOLD_PATH_MAX];
+    if (!resolve_tpatlas_file_ref(out_path_base, base, tpinfo_ref, sizeof tpinfo_ref) && notices) {
+        (void)tp_export_notice_addf(
+            notices,
+            "could not locate game.project above '%s' -- .tpatlas 'file' reference '%s' may not resolve in Defold "
+            "(expected a project-absolute \"/path/%s\")",
+            out_path_base, tpinfo_ref, tpinfo_ref);
     }
     tp_sb atlas = {0};
-    emit_tpatlas(&atlas, prep, tpinfo_name, notices);
+    emit_tpatlas(&atlas, prep, tpinfo_ref, notices);
     st = write_text(out_path_base, ".tpatlas", &atlas, err);
     free(atlas.buf);
     return st;

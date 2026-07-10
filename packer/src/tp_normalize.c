@@ -1,6 +1,5 @@
 #include "tp_core/tp_export.h"
 
-#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -18,7 +17,6 @@ void tp_normalize_opts_defaults(tp_normalize_opts *out) {
     out->strip_extension = true;
     out->strip_folders = false;
     out->scale = 1.0F;
-    out->auto_group_animations = true;
 }
 
 static const char *override_for(const tp_normalize_opts *o, const char *raw) {
@@ -71,56 +69,13 @@ static int cmp_sprite_final(const void *a, const void *b) {
 }
 
 /* ======================================================================== */
-/* numeric-suffix animation auto-grouping                                   */
+/* animation assembly (EXPLICIT project animations only)                    */
 /* ======================================================================== */
 
-typedef struct {
-    char *base;    /* arena-owned group id */
-    long num;      /* numeric suffix value (ordering key) */
-    int sprite_ix; /* index into prepared sprites (its final_name is the frame) */
-} auto_match;
-
-/* Splits `name` into (base, trailing-number). Returns false when there is no
- * trailing digit run or the base would be empty. `base` is arena-owned. */
-static bool split_suffix(const char *name, tp_arena *arena, char **out_base, long *out_num) {
-    size_t len = strlen(name);
-    size_t i = len;
-    while (i > 0 && isdigit((unsigned char)name[i - 1])) {
-        i--;
-    }
-    if (i == len) {
-        return false; /* no trailing digits */
-    }
-    size_t base_end = i;
-    if (base_end > 0 && (name[base_end - 1] == '_' || name[base_end - 1] == '-')) {
-        base_end--; /* strip one optional separator */
-    }
-    if (base_end == 0) {
-        return false; /* base empty (e.g. "01", "_01") */
-    }
-    char *base = (char *)tp_arena_alloc(arena, base_end + 1U);
-    if (!base) {
-        return false;
-    }
-    memcpy(base, name, base_end);
-    base[base_end] = '\0';
-    *out_base = base;
-    *out_num = strtol(name + i, NULL, 10);
-    return true;
-}
-
-static int cmp_auto(const void *a, const void *b) {
-    const auto_match *ma = (const auto_match *)a;
-    const auto_match *mb = (const auto_match *)b;
-    int c = strcmp(ma->base, mb->base);
-    if (c != 0) {
-        return c;
-    }
-    if (ma->num != mb->num) {
-        return ma->num < mb->num ? -1 : 1;
-    }
-    return 0; /* equal base+num cannot happen: distinct final names */
-}
+/* Owner's standing ruling (docs/design/ux.md 3.7b): animations are assembled
+ * EXPLICITLY from the project -- there is NO numeric-suffix auto-grouping. bob
+ * still auto-promotes every atlas sprite to a 1-frame animation on the engine
+ * side; that is independent of this list. */
 
 static int cmp_anim_id(const void *a, const void *b) {
     const tp_export_anim *aa = (const tp_export_anim *)a;
@@ -128,56 +83,14 @@ static int cmp_anim_id(const void *a, const void *b) {
     return strcmp(aa->id, ab->id);
 }
 
-static bool id_is_explicit(const tp_normalize_opts *o, const char *id) {
-    for (int i = 0; i < o->animation_count; i++) {
-        if (o->animations[i].id && strcmp(o->animations[i].id, id) == 0) {
-            return true;
-        }
-    }
-    return false;
-}
-
-/* Builds the merged animation list: explicit (from opts) + numeric-suffix auto
- * groups whose id is not already explicit. Sorted ascending by id. */
+/* Copies the explicit animations from opts into arena-owned prepared anims,
+ * sorted ascending by id (determinism). Frames are used verbatim as final
+ * export names. */
 static tp_status build_animations(const tp_export_prepared *prep, const tp_normalize_opts *o, tp_arena *arena,
                                   tp_export_anim **out_anims, int *out_count, tp_error *err) {
-    int n = prep->sprite_count;
+    (void)prep; /* frames reference final names directly; no sprite scan needed. */
 
-    /* auto matches */
-    auto_match *matches = NULL;
-    int match_count = 0;
-    if (o->auto_group_animations && n > 0) {
-        matches = (auto_match *)tp_arena_alloc(arena, (size_t)n * sizeof(auto_match));
-        if (!matches) {
-            return tp_error_set(err, TP_STATUS_OOM, "tp_normalize: OOM (auto matches)");
-        }
-        for (int i = 0; i < n; i++) {
-            char *base = NULL;
-            long num = 0;
-            if (split_suffix(prep->sprites[i].final_name, arena, &base, &num)) {
-                matches[match_count].base = base;
-                matches[match_count].num = num;
-                matches[match_count].sprite_ix = i;
-                match_count++;
-            }
-        }
-        qsort(matches, (size_t)match_count, sizeof(auto_match), cmp_auto);
-    }
-
-    /* Count auto groups (runs of equal base with >= 2 frames, id not explicit). */
-    int auto_groups = 0;
-    for (int i = 0; i < match_count;) {
-        int j = i + 1;
-        while (j < match_count && strcmp(matches[j].base, matches[i].base) == 0) {
-            j++;
-        }
-        if (j - i >= 2 && !id_is_explicit(o, matches[i].base)) {
-            auto_groups++;
-        }
-        i = j;
-    }
-
-    int total = o->animation_count + auto_groups;
+    int total = o->animation_count;
     tp_export_anim *anims = NULL;
     if (total > 0) {
         anims = (tp_export_anim *)tp_arena_alloc(arena, (size_t)total * sizeof(tp_export_anim));
@@ -185,12 +98,10 @@ static tp_status build_animations(const tp_export_prepared *prep, const tp_norma
             return tp_error_set(err, TP_STATUS_OOM, "tp_normalize: OOM (animations)");
         }
     }
-    int w = 0;
 
-    /* explicit animations (frames used verbatim as final names) */
     for (int i = 0; i < o->animation_count; i++) {
         const tp_export_anim_in *in = &o->animations[i];
-        tp_export_anim *a = &anims[w++];
+        tp_export_anim *a = &anims[i];
         a->id = tp_arena_strdup(arena, in->id ? in->id : "");
         a->fps = in->fps;
         a->playback = in->playback;
@@ -212,32 +123,6 @@ static tp_status build_animations(const tp_export_prepared *prep, const tp_norma
         } else if (!a->id) {
             return tp_error_set(err, TP_STATUS_OOM, "tp_normalize: OOM (explicit anim id)");
         }
-    }
-
-    /* auto groups */
-    for (int i = 0; i < match_count;) {
-        int j = i + 1;
-        while (j < match_count && strcmp(matches[j].base, matches[i].base) == 0) {
-            j++;
-        }
-        int frames = j - i;
-        if (frames >= 2 && !id_is_explicit(o, matches[i].base)) {
-            tp_export_anim *a = &anims[w++];
-            a->id = matches[i].base; /* arena-owned */
-            a->fps = 30.0F;          /* TP_PROJECT_ANIM_FPS_DEFAULT */
-            a->playback = 0;
-            a->flip_h = false;
-            a->flip_v = false;
-            a->frame_count = frames;
-            a->frames = (const char **)tp_arena_alloc(arena, (size_t)frames * sizeof(char *));
-            if (!a->frames) {
-                return tp_error_set(err, TP_STATUS_OOM, "tp_normalize: OOM (auto frames)");
-            }
-            for (int f = 0; f < frames; f++) {
-                a->frames[f] = prep->sprites[matches[i + f].sprite_ix].final_name;
-            }
-        }
-        i = j;
     }
 
     if (total > 1) {

@@ -25,16 +25,20 @@ Coordinates are **pixels, y-down, origin top-left** — identical to our canonic
 
 ## Files & resolution
 
-bob resolves the `.tpatlas` `file` field and each page's `name` **relative to
-their own file's directory** (verified against `AtlasBuilder.java` 2.7.0:
-`input.getResource(...)`, `infoResource.getResource(page.getName())`). This
-exporter co-locates all three artifacts under one `out_path` base, so:
+The `.tpatlas` `file` field and each page's `name` are resolved differently:
 
-- the `.tpatlas` `file` is the **relative basename** `"<base>.tpinfo"`;
-- each page `name` is the **relative basename** `"<base>-<N>.png"` — the same
-  uniform, always-suffixed naming as `json-neotolis` (single page still gets
-  `-0`). The `.tpinfo` proto accepts any page name; the shared page writer
-  dictates the `-<N>.png` form.
+- The `.tpatlas` `file` field is a Defold **resource** (`tpatlas.proto` marks it
+  `[(resource)=true]`), resolved from the **project root** — so it must be a
+  project-absolute `"/dir/<base>.tpinfo"`. A bare basename resolves to
+  `/<base>.tpinfo` (project root) and the build fails. The exporter locates the
+  project root by walking **up** from the `.tpinfo`'s own directory (bounded to 10
+  levels) for a `game.project` file, then emits `"/" + relpath`. If none is found
+  it falls back to the bare basename and raises a metadata notice. Zero config for
+  the standard layout (`examples/defold-demo/game.project`).
+- Each page `name` is resolved **next to the `.tpinfo`** (verified against
+  `AtlasBuilder.java` 2.7.0: `infoResource.getResource(page.getName())`), so it
+  stays the **relative basename** `"<base>-<N>.png"` — the same uniform,
+  always-suffixed naming as `json-neotolis` (single page still gets `-0`).
 
 Pages are **straight-alpha** (RGB not premultiplied); Defold's texture profiles
 premultiply at build time (`premultiply_alpha: true`).
@@ -101,21 +105,33 @@ mirrors the reference 2.0 exporter (`examples/basic/basic.tpinfo`):
 | `trimmed` | `trimmed` | informational (bob ignores it, but `required`). |
 | `rotated` | `transform == 5` | see rotation encoding above; else `false`. |
 | `is_solid` | scanned from page pixels | `true` iff no transparent texel in the placed footprint. Informational. |
-| `corner_offset {x,y}` | `spriteSourceSize.{x,y}` | untrimmed top-left → trimmed rect. |
-| `source_rect {x,y,w,h}` | `spriteSourceSize` | trimmed rect inside the original image, **unrotated** dims. |
+| `corner_offset {x,y}` | hull **vertex-bbox** origin (else `spriteSourceSize.{x,y}`) | untrimmed top-left → trimmed rect; drives where the extension anchors the hull. |
+| `source_rect {x,y,w,h}` | hull **vertex bbox** (else `spriteSourceSize`) | trimmed rect inside the original image, **unrotated** dims; equals the `vertices` bounding box (TP invariant). |
 | `pivot {x,y}` | `pivot × sourceSize` | px from the untrimmed top-left, y-down. Centered default → `dim/2`. |
-| `frame_rect {x,y,w,h}` | `frame.{x,y}` + footprint | placement on the page; `w,h` are the **as-drawn** dims (swapped when `rotated`). |
+| `frame_rect {x,y,w,h}` | `frame.{x,y}` + hull footprint | placement on the page; `w,h` are the **as-drawn** footprint of the hull bbox (swapped when `rotated`). |
 | `untrimmed_size {w,h}` | `sourceSize` | original image size. |
 | `indices` | canonical `[1,2,3,0,1,3]` or hull | flat triangle list. |
-| `vertices {x,y}` | source-space quad or hull | **untrimmed source space**, y-down, **never rotated**; hull verts are `trim-local + corner_offset`. |
+| `vertices {x,y}` | source-space quad or hull | **untrimmed source space**, y-down, **never rotated**; hull verts are `trim-local + spriteSourceSize.{x,y}`. |
 
 - **Quad fallback** (plain rects, or no hull): `vertices` are the `source_rect`
   corners in order **TR, TL, BL, BR** with `indices: [1, 2, 3, 0, 1, 3]` — the
   reference exporter's convention.
 - **Polygon** (concave/convex hull): our `vertices` (trim-local → source space)
-  and `indices` verbatim. Non-RECT hulls are inflated ~1px by the builder
-  (clipper2), so `source_rect`/`vertices` may marginally exceed the untrimmed
-  bounds — a known engine behavior (exact tests use RECT sprites only).
+  and `indices` verbatim. The builder's clipper2 pass inflates a non-RECT hull
+  OUTWARD, and `tp_pack_read` recovers `spriteSourceSize` assuming the hull's
+  minimum local coordinate is `(0,0)` — true only for RECT sprites. For a real
+  hull the minimum X is negative (Y is already normalized by the y-down flip), so
+  the exporter derives `corner_offset` / `source_rect` / `frame_rect` from the
+  **actual `vertices` bounding box**, not from `spriteSourceSize`. This preserves
+  TexturePacker's own invariant that **`source_rect` == the vertices bbox** (see
+  `examples/basic/basic.tpinfo`) and keeps the residual inflation **symmetric**.
+  Emitting `corner_offset = spriteSourceSize.xy` instead left the hull's true left
+  edge unaccounted for: the extension positions each vertex at
+  `frame_rect.x + (vertex.x − corner_offset.x)` (`Atlas.getTriangles`,
+  extension-texturepacker 2.7.0), so the hull was drawn `|min_x|` px too far left
+  — an asymmetric offset on near-symmetric shapes (circle) and a stretch on
+  strongly asymmetric ones (a trimmed triangle). Fixed in `tp_export_defold.c`;
+  regression: `test_hull_untrimmed_space` + the `basic.tpinfo` bbox parity check.
 
 ---
 
@@ -125,7 +141,7 @@ A starter wrapper the user points a Defold sprite/GUI at. `AtlasDesc`:
 
 | Field | Value |
 |---|---|
-| `file` | relative `"<base>.tpinfo"` (co-located; bob resolves it next to the `.tpatlas`). |
+| `file` | project-absolute `"/dir/<base>.tpinfo"` (a Defold resource, resolved from the project root found by walking up for `game.project`; bare basename + notice if none). |
 | `rename_patterns` | `""` — renames are baked into names by `tp_normalize`. |
 | `animations[]` | one block per explicit animation (see below). |
 | `is_paged_atlas` | `false` — `>1` page always builds as a paged (2D-array) texture regardless, matching the upstream 2-page `basic.tpatlas`. |
@@ -174,3 +190,6 @@ out-of-range id falls back to `PLAYBACK_ONCE_FORWARD` **with a notice**.
 - `transform N dropped for '<name>' …` — a non-representable transform reached the
   writer (guard; the clamp prevents this in the supported pipeline).
 - `animation '<id>' has unknown playback id N …` — out-of-range playback fallback.
+- `could not locate game.project above '<path>' …` — no `game.project` ancestor
+  found; the `.tpatlas` `file` field fell back to a bare basename (the Defold
+  build may not resolve it). Put the export under a Defold project tree.

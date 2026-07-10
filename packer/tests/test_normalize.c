@@ -1,7 +1,7 @@
 /* Normalization pass unit tests (ROADMAP Phase 2): ext/folder strip, per-sprite
- * export-name override (rename), numeric-suffix animation auto-grouping +
- * explicit override/merge, munge collision, alias entries, final-name sort,
- * scale. Pure tp_core -- synthetic tp_results, NO builder. */
+ * export-name override (rename), EXPLICIT animation assembly (no auto-grouping,
+ * ux.md 3.7b), munge collision, alias entries, final-name sort, scale. Pure
+ * tp_core -- synthetic tp_results, NO builder. */
 
 #define _CRT_SECURE_NO_WARNINGS
 
@@ -187,27 +187,10 @@ void test_scale_stored(void) {
     tp_arena_destroy(ar);
 }
 
-void test_auto_group_numeric_order(void) {
-    tp_arena *ar = tp_arena_create(0);
-    /* walk_1/2/10 auto-group "walk"; jump_1 is lone (min 2 -> no group). */
-    tp_sprite s[4] = {mk("walk_10", -1), mk("walk_1", -1), mk("walk_2", -1), mk("jump_1", -1)};
-    tp_result r = mk_result(s, 4);
-    tp_export_prepared prep;
-    tp_error e = {{0}};
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_normalize(&r, NULL, ar, &prep, &e));
-    const tp_export_anim *walk = find_anim(&prep, "walk");
-    TEST_ASSERT_NOT_NULL(walk);
-    TEST_ASSERT_EQUAL_INT(3, walk->frame_count);
-    /* numeric order, not lexical: 1, 2, 10 */
-    TEST_ASSERT_EQUAL_STRING("walk_1", walk->frames[0]);
-    TEST_ASSERT_EQUAL_STRING("walk_2", walk->frames[1]);
-    TEST_ASSERT_EQUAL_STRING("walk_10", walk->frames[2]);
-    TEST_ASSERT_TRUE(fabsf(walk->fps - 30.0F) < 1e-6F);
-    TEST_ASSERT_NULL(find_anim(&prep, "jump"));
-    tp_arena_destroy(ar);
-}
-
-void test_explicit_overrides_auto(void) {
+void test_explicit_animation(void) {
+    /* Explicit animation assembled verbatim (order + fps preserved). Numeric
+     * suffixes are NOT auto-grouped -- only the explicit "walk" appears, and the
+     * lone-looking walk_01/walk_02 sprites never form a group of their own. */
     tp_arena *ar = tp_arena_create(0);
     tp_sprite s[2] = {mk("walk_01", -1), mk("walk_02", -1)};
     tp_result r = mk_result(s, 2);
@@ -225,7 +208,7 @@ void test_explicit_overrides_auto(void) {
     tp_export_prepared prep;
     tp_error e = {{0}};
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_normalize(&r, &o, ar, &prep, &e));
-    /* exactly one "walk" -- the explicit one wins (auto suppressed). */
+    /* exactly one animation -- the explicit one; no auto group is added. */
     TEST_ASSERT_EQUAL_INT(1, prep.animation_count);
     const tp_export_anim *walk = find_anim(&prep, "walk");
     TEST_ASSERT_NOT_NULL(walk);
@@ -235,28 +218,18 @@ void test_explicit_overrides_auto(void) {
     tp_arena_destroy(ar);
 }
 
-void test_override_breaks_group(void) {
+void test_no_auto_grouping(void) {
+    /* Numeric-suffix sprites with NO explicit animation produce ZERO animations
+     * (auto-grouping was removed, ux.md 3.7b -- bob still auto-promotes each
+     * sprite to a 1-frame anim on the engine side, independent of this list). */
     tp_arena *ar = tp_arena_create(0);
-    /* walk_01/02/03 would group; rename walk_03 -> idle breaks it to 2 frames
-     * (still a group) -- and rename a lone sprite INTO a new group. */
-    tp_sprite s[4] = {mk("walk_01", -1), mk("walk_02", -1), mk("walk_03", -1), mk("misc", -1)};
-    tp_result r = mk_result(s, 4);
-    tp_export_name_override ov[2] = {
-        {.raw_name = "walk_03", .final_name = "idle"},   /* leaves walk with 2 */
-        {.raw_name = "misc", .final_name = "run_09"},    /* alone -> no run group */
-    };
-    tp_normalize_opts o;
-    tp_normalize_opts_defaults(&o);
-    o.overrides = ov;
-    o.override_count = 2;
+    tp_sprite s[3] = {mk("walk_10", -1), mk("walk_1", -1), mk("walk_2", -1)};
+    tp_result r = mk_result(s, 3);
     tp_export_prepared prep;
     tp_error e = {{0}};
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_normalize(&r, &o, ar, &prep, &e));
-    const tp_export_anim *walk = find_anim(&prep, "walk");
-    TEST_ASSERT_NOT_NULL(walk);
-    TEST_ASSERT_EQUAL_INT(2, walk->frame_count); /* walk_01, walk_02 */
-    TEST_ASSERT_NULL(find_anim(&prep, "run"));   /* run_09 is lone */
-    TEST_ASSERT_NOT_NULL(find_final(&prep, "idle"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_normalize(&r, NULL, ar, &prep, &e));
+    TEST_ASSERT_EQUAL_INT(0, prep.animation_count);
+    TEST_ASSERT_NULL(find_anim(&prep, "walk"));
     tp_arena_destroy(ar);
 }
 // #endregion
@@ -271,8 +244,7 @@ int main(void) {
     RUN_TEST(test_alias_entries);
     RUN_TEST(test_final_name_sort);
     RUN_TEST(test_scale_stored);
-    RUN_TEST(test_auto_group_numeric_order);
-    RUN_TEST(test_explicit_overrides_auto);
-    RUN_TEST(test_override_breaks_group);
+    RUN_TEST(test_explicit_animation);
+    RUN_TEST(test_no_auto_grouping);
     return UNITY_END();
 }
