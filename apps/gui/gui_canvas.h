@@ -52,7 +52,8 @@ typedef struct gui_canvas {
     bool pages_dirty;        /* result set but textures not yet uploaded (GL deferred to the pass) */
     int sel_sprite;          /* accent-outlined region index, -1 none */
     int hover_sprite;        /* subtle-outline region index, -1 none (set by the handler each frame) */
-    bool show_outline, show_trim, show_pivot; /* overlay toggles */
+    bool show_outline, show_trim, show_pivot, show_frame; /* overlay toggles (frame = placed AABB) */
+    float overlay_scale;     /* DPI/UI scale for overlay line widths (set by the host each frame) */
 
     /* --- ATLAS view: scale (screen px per page px; 1.0 == 100%) + pan of page centre from canvas
      * centre (layout px). fit_pending refits on the next draw. --- */
@@ -67,11 +68,17 @@ typedef struct gui_canvas {
     /* --- shared draw resources --- */
     nt_pipeline_t pipe;
     bool pipe_ready;
-    nt_buffer_t vbo; /* dynamic, 4 verts */
+    nt_buffer_t vbo; /* dynamic, 4 verts (source / atlas page) */
     nt_buffer_t ibo; /* static, 6 indices */
     nt_sampler_t sampler;
     bool buffers_ready;
     nt_buffer_t frame_ubo; /* view_proj (Globals) */
+    /* checkerboard behind atlas transparency: 2x2 texture + REPEAT sampler + its own vbo (avoids
+     * aliasing the page vbo with two updates/frame) */
+    nt_buffer_t vbo_checker;
+    nt_texture_t checker_tex;
+    nt_sampler_t checker_sampler;
+    bool checker_valid;
 } gui_canvas;
 
 void gui_canvas_init(gui_canvas *c);
@@ -79,6 +86,8 @@ void gui_canvas_shutdown(gui_canvas *c);
 void gui_canvas_restore_gpu(gui_canvas *c);
 void gui_canvas_ensure_pipeline(gui_canvas *c, const nt_material_info_t *sprite_info);
 void gui_canvas_set_frame_ubo(gui_canvas *c, nt_buffer_t ubo);
+/* Host UI scale (drives overlay line widths so outlines read on high-DPI). */
+void gui_canvas_set_ui_scale(gui_canvas *c, float scale);
 
 /* --- SOURCE mode --- */
 bool gui_canvas_set_image(gui_canvas *c, const char *abs_path, char *err_out, size_t err_cap);

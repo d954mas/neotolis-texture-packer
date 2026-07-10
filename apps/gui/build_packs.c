@@ -23,8 +23,17 @@
 #define MKDIR(p) mkdir(p, 0755)
 #endif
 
-/* Latin-only: the shell shows English chrome; no Cyrillic/rich family needed. */
-#define FONT_PATH "examples/ui_showcase/raw/font.ttf"
+/* DejaVu Sans regular: full Cyrillic + symbol coverage (font.ttf lacks 8 UI symbols). GUI chrome,
+ * sprite names, and rename fields render real UTF-8 (Cyrillic filenames, and the UI symbol set). */
+#define FONT_PATH "examples/ui_showcase/raw/font_dejavu_r.ttf"
+
+/* Baked charset = printable ASCII + Latin-1 supplement (U+00A1-U+00FF incl. B1 D7 AB BB) + full
+ * Russian Cyrillic incl. Yo + the UI symbol set. All glyphs verified present in DejaVu Sans;
+ * the four blocks are disjoint (no duplicate codepoints). */
+#define CHARSET_LATIN1 "¡¢£¤¥¦§¨©ª«¬­®¯°±²³´µ¶·¸¹º»¼½¾¿ÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖ×ØÙÚÛÜÝÞßàáâãäåæçèéêëìíîïðñòóôõö÷øùúûüýþÿ"
+#define CHARSET_CYRILLIC "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдеёжзийклмнопрстуфхцчшщъыьэюя"
+/* warning check ellipsis, black/white circle, rotate x2, left/right triangle, true-minus, en/em dash */
+#define CHARSET_SYMBOLS "⚠✓…●○↻⟳◀▶−–—"
 
 static char s_path_buf[512];
 
@@ -96,13 +105,13 @@ int main(int argc, char *argv[]) {
     nt_builder_end_atlas(ctx);
     // #endregion
 
-    // #region font: ASCII Latin
+    // #region font: ASCII + Latin-1 + Cyrillic + UI symbols (DejaVu Sans)
     nt_builder_add_font(ctx, FONT_PATH,
                         &(nt_font_opts_t){
-                            .charset = NT_CHARSET_ASCII,
+                            .charset = NT_CHARSET_ASCII CHARSET_LATIN1 CHARSET_CYRILLIC CHARSET_SYMBOLS,
                             .resource_name = "ntpacker_ui/font",
                         });
-    (void)printf("  Font (ASCII) added: ntpacker_ui/font\n");
+    (void)printf("  Font (ASCII+Latin1+Cyrillic+symbols) added: ntpacker_ui/font\n");
     // #endregion
 
     // #region finish + codegen

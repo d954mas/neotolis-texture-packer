@@ -76,6 +76,33 @@ void gui_canvas_restore_gpu(gui_canvas *c) {
         .wrap_v = NT_WRAP_CLAMP_TO_EDGE,
         .label = "canvas_sampler",
     });
+    /* checkerboard: 2x2 two-tone (opaque -> premultiplied blend draws solid), REPEAT-sampled + tiled */
+    c->vbo_checker = nt_gfx_make_buffer(&(nt_buffer_desc_t){
+        .type = NT_BUFFER_VERTEX,
+        .usage = NT_USAGE_DYNAMIC,
+        .size = 4U * sizeof(canvas_vert),
+        .label = "canvas_checker_vbo",
+    });
+    static const uint8_t checker_px[16] = {44, 44, 50, 255, 58, 58, 66, 255, 58, 58, 66, 255, 44, 44, 50, 255};
+    c->checker_tex = nt_gfx_make_texture(&(nt_texture_desc_t){
+        .width = 2,
+        .height = 2,
+        .data = checker_px,
+        .format = NT_PIXEL_RGBA8,
+        .min_filter = NT_FILTER_NEAREST,
+        .mag_filter = NT_FILTER_NEAREST,
+        .wrap_u = NT_WRAP_REPEAT,
+        .wrap_v = NT_WRAP_REPEAT,
+        .label = "canvas_checker_tex",
+    });
+    c->checker_sampler = nt_gfx_make_sampler(&(nt_sampler_desc_t){
+        .min_filter = NT_FILTER_NEAREST,
+        .mag_filter = NT_FILTER_NEAREST,
+        .wrap_u = NT_WRAP_REPEAT,
+        .wrap_v = NT_WRAP_REPEAT,
+        .label = "canvas_checker_sampler",
+    });
+    c->checker_valid = (c->checker_tex.id != 0U);
     c->buffers_ready = true;
     /* pipeline + textures are GPU-side: force a rebuild/redecode after a loss */
     c->pipe_ready = false;
@@ -95,6 +122,7 @@ void gui_canvas_init(gui_canvas *c) {
     c->sel_sprite = -1;
     c->hover_sprite = -1;
     c->show_outline = true;
+    c->overlay_scale = 1.0F;
     c->scale = 1.0F;
     c->fit_pending = true;
     gui_canvas_restore_gpu(c);
@@ -104,6 +132,10 @@ void gui_canvas_shutdown(gui_canvas *c) {
     if (c->has_tex) {
         nt_gfx_destroy_texture(c->tex);
         c->has_tex = false;
+    }
+    if (c->checker_valid) {
+        nt_gfx_destroy_texture(c->checker_tex);
+        c->checker_valid = false;
     }
     for (int i = 0; i < GUI_CANVAS_MAX_PAGES; i++) {
         if (c->page_valid[i]) {
@@ -141,6 +173,7 @@ void gui_canvas_ensure_pipeline(gui_canvas *c, const nt_material_info_t *sprite_
 }
 
 void gui_canvas_set_frame_ubo(gui_canvas *c, nt_buffer_t ubo) { c->frame_ubo = ubo; }
+void gui_canvas_set_ui_scale(gui_canvas *c, float scale) { c->overlay_scale = (scale > 0.1F) ? scale : 1.0F; }
 // #endregion
 
 // #region source image
@@ -455,19 +488,24 @@ static void quad_to_world(const float world[16], float x0, float y0, float x1, f
     }
 }
 
-static void draw_tex_quad(gui_canvas *c, const float world[16], nt_texture_t tex, float x0, float y0, float x1,
-                          float y1, float alpha) {
-    const float uv[4] = {0.0F, 0.0F, 1.0F, 1.0F};
+static void draw_quad(gui_canvas *c, const float world[16], nt_buffer_t vbo, nt_texture_t tex, nt_sampler_t samp,
+                      float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1, float alpha) {
+    const float uv[4] = {u0, v0, u1, v1};
     canvas_vert v[4];
     quad_to_world(world, x0, y0, x1, y1, uv, alpha, v);
-    nt_gfx_update_buffer(c->vbo, v, sizeof v);
+    nt_gfx_update_buffer(vbo, v, sizeof v);
     nt_gfx_bind_pipeline(c->pipe);
     nt_gfx_bind_uniform_buffer(c->frame_ubo, 0);
-    nt_gfx_bind_vertex_buffer(c->vbo);
+    nt_gfx_bind_vertex_buffer(vbo);
     nt_gfx_bind_index_buffer(c->ibo);
     nt_gfx_bind_texture(tex, 0);
-    nt_gfx_bind_sampler(c->sampler, 0);
+    nt_gfx_bind_sampler(samp, 0);
     nt_gfx_draw_indexed(0, 6, 4);
+}
+
+static void draw_tex_quad(gui_canvas *c, const float world[16], nt_texture_t tex, float x0, float y0, float x1,
+                          float y1, float alpha) {
+    draw_quad(c, world, c->vbo, tex, c->sampler, x0, y0, x1, y1, 0.0F, 0.0F, 1.0F, 1.0F, alpha);
 }
 
 /* layout (x,y) -> world 3-vec for the shape renderer. */
@@ -480,8 +518,13 @@ static void layout_to_world(const float world[16], float lx, float ly, float out
     out[2] = o[2];
 }
 
-/* Region placement polygon in page px -> up to 32 points; returns count. Hull for polygon sprites,
- * placed AABB for rects. */
+/* Max hull vertices we render. Engine per-region cap is 8 (hard 16), so 256 is comfortably generous;
+ * a hull larger than this is SKIPPED (return 0), never silently truncated + closed across the sprite. */
+#define GUI_CANVAS_MAX_HULL 256
+
+/* Region placement polygon in page px -> `pts` (cap points); returns the point count, or 0 if the
+ * hull exceeds `cap` (caller skips it rather than drawing a wrong closed boundary). Hull for polygon
+ * sprites, placed AABB for rects. */
 static int region_polygon(const tp_sprite *s, float ox, float oy, float scale, float pts[][2], int cap) {
     const int32_t fx = s->frame.x;
     const int32_t fy = s->frame.y;
@@ -489,7 +532,10 @@ static int region_polygon(const tp_sprite *s, float ox, float oy, float scale, f
     const int32_t th = s->frame.h;
     int n = 0;
     if (s->vert_count >= 3 && s->verts) {
-        for (int i = 0; i < s->vert_count && n < cap; i++) {
+        if (s->vert_count > cap) {
+            return 0; /* never close a truncated polygon */
+        }
+        for (int i = 0; i < s->vert_count; i++) {
             int32_t px = 0;
             int32_t py = 0;
             d4_decode(s->verts[i].x, s->verts[i].y, s->transform, tw, th, &px, &py);
@@ -503,13 +549,29 @@ static int region_polygon(const tp_sprite *s, float ox, float oy, float scale, f
         d4_out_dims(s->transform, tw, th, &ow, &oh);
         const int32_t cx[4] = {fx, fx + ow, fx + ow, fx};
         const int32_t cy[4] = {fy, fy, fy + oh, fy + oh};
-        for (int i = 0; i < 4 && n < cap; i++) {
+        for (int i = 0; i < 4; i++) {
             pts[n][0] = ox + (float)cx[i] * scale;
             pts[n][1] = oy + (float)cy[i] * scale;
             n++;
         }
     }
     return n;
+}
+
+/* Placed AABB (from d4_out_dims) in page-layout coords -- the rectangular bounds incl. the
+ * padding gap between regions. Always 4 points. */
+static void region_aabb(const tp_sprite *s, float ox, float oy, float scale, float pts[4][2]) {
+    int32_t ow = 0;
+    int32_t oh = 0;
+    d4_out_dims(s->transform, s->frame.w, s->frame.h, &ow, &oh);
+    const int32_t fx = s->frame.x;
+    const int32_t fy = s->frame.y;
+    const int32_t cx[4] = {fx, fx + ow, fx + ow, fx};
+    const int32_t cy[4] = {fy, fy, fy + oh, fy + oh};
+    for (int i = 0; i < 4; i++) {
+        pts[i][0] = ox + (float)cx[i] * scale;
+        pts[i][1] = oy + (float)cy[i] * scale;
+    }
 }
 
 static void stroke_polygon(const float world[16], const float pts[][2], int n, const float color[4]) {
@@ -520,6 +582,73 @@ static void stroke_polygon(const float world[16], const float pts[][2], int n, c
         layout_to_world(world, pts[(i + 1) % n][0], pts[(i + 1) % n][1], b);
         nt_shape_renderer_line(a, b, color);
     }
+}
+
+/* Float D4 decode (pivot is fractional). Affine, so it extrapolates outside [0..tw]x[0..th]. */
+static void d4_decode_f(float x, float y, uint8_t flags, float tw, float th, float *ox, float *oy) {
+    float rx = x;
+    float ry = y;
+    if (flags & 4u) {
+        float t = rx;
+        rx = ry;
+        ry = t;
+    }
+    const float w = (flags & 4u) ? th : tw;
+    const float h = (flags & 4u) ? tw : th;
+    if (flags & 1u) {
+        rx = w - rx;
+    }
+    if (flags & 2u) {
+        ry = h - ry;
+    }
+    *ox = rx;
+    *oy = ry;
+}
+
+/* Original (untrimmed) source bounds in page-layout coords: the trim box is [0..tw]x[0..th] in
+ * trim-local space; the source box is [-ssx..-ssx+srcW] x [-ssy..-ssy+srcH], mapped through the same
+ * (affine) D4 transform + frame offset. Shows how much was trimmed away vs the packed content. */
+static void region_source_rect(const tp_sprite *s, float ox, float oy, float scale, float pts[4][2]) {
+    const int32_t tw = s->frame.w;
+    const int32_t th = s->frame.h;
+    const int32_t fx = s->frame.x;
+    const int32_t fy = s->frame.y;
+    const int32_t sx0 = -s->spriteSourceSize.x;
+    const int32_t sy0 = -s->spriteSourceSize.y;
+    const int32_t sx1 = sx0 + s->sourceSize.w;
+    const int32_t sy1 = sy0 + s->sourceSize.h;
+    const int32_t cx[4] = {sx0, sx1, sx1, sx0};
+    const int32_t cy[4] = {sy0, sy0, sy1, sy1};
+    for (int i = 0; i < 4; i++) {
+        int32_t px = 0;
+        int32_t py = 0;
+        d4_decode(cx[i], cy[i], s->transform, tw, th, &px, &py);
+        pts[i][0] = ox + (float)(fx + px) * scale;
+        pts[i][1] = oy + (float)(fy + py) * scale;
+    }
+}
+
+/* Pivot in page-layout coords: pivot is normalized over sourceSize (y-down) -> source px -> trim-local
+ * -> D4 -> page. May sit outside the frame. */
+static void pivot_point(const tp_sprite *s, float ox, float oy, float scale, float out[2]) {
+    const float pvx = s->pivot.x * (float)s->sourceSize.w - (float)s->spriteSourceSize.x;
+    const float pvy = s->pivot.y * (float)s->sourceSize.h - (float)s->spriteSourceSize.y;
+    float dx = 0.0F;
+    float dy = 0.0F;
+    d4_decode_f(pvx, pvy, s->transform, (float)s->frame.w, (float)s->frame.h, &dx, &dy);
+    out[0] = ox + ((float)s->frame.x + dx) * scale;
+    out[1] = oy + ((float)s->frame.y + dy) * scale;
+}
+
+static void stroke_crosshair(const float world[16], float cx, float cy, float hl, const float color[4]) {
+    float a[3];
+    float b[3];
+    layout_to_world(world, cx - hl, cy, a);
+    layout_to_world(world, cx + hl, cy, b);
+    nt_shape_renderer_line(a, b, color);
+    layout_to_world(world, cx, cy - hl, a);
+    layout_to_world(world, cx, cy + hl, b);
+    nt_shape_renderer_line(a, b, color);
 }
 // #endregion
 
@@ -557,36 +686,67 @@ void gui_canvas_handler(const nt_ui_custom_frame_t *frame, void *userdata) {
         c->last_ox = ox;
         c->last_oy = oy;
 
-        /* the packed page */
+        /* checkerboard behind transparency (tiled ~16px screen cells), then the packed page */
+        if (c->checker_valid) {
+            const float cell = 16.0F;
+            draw_quad(c, world, c->vbo_checker, c->checker_tex, c->checker_sampler, ox, oy, ox + pw, oy + ph, 0.0F,
+                      0.0F, pw / cell, ph / cell, alpha);
+        }
         draw_tex_quad(c, world, c->pages[c->cur_page], ox, oy, ox + pw, oy + ph, alpha);
 
-        /* overlays: region outlines / hull + hover + selection (shape renderer, world-space lines) */
-        if (c->show_outline && c->result) {
-            const float col_out[4] = {0.35F, 0.75F, 1.0F, 0.55F * alpha};
-            const float col_hov[4] = {0.85F, 0.9F, 1.0F, 0.85F * alpha};
-            const float col_sel[4] = {1.0F, 0.78F, 0.28F, 0.95F * alpha};
-            nt_shape_renderer_set_line_width(1.5F);
+        /* overlays (shape renderer, world-space lines). Line widths scale with the host UI scale so
+         * outlines read on high-DPI. Draw order: trim ghost, frame AABB, hull outline, pivot; the
+         * hovered/selected hull last so it sits on top. */
+        if ((c->show_outline || c->show_trim || c->show_pivot || c->show_frame) && c->result) {
+            const float w = c->overlay_scale;
+            const float col_out[4] = {0.30F, 0.72F, 1.0F, 0.80F * alpha};
+            const float col_hov[4] = {0.95F, 0.97F, 1.0F, 0.95F * alpha};
+            const float col_sel[4] = {1.0F, 0.72F, 0.20F, 1.0F * alpha};
+            const float col_trim[4] = {0.45F, 0.9F, 0.5F, 0.5F * alpha};
+            const float col_frame[4] = {0.55F, 0.58F, 0.66F, 0.55F * alpha};
+            const float col_piv[4] = {1.0F, 0.4F, 0.85F, 0.95F * alpha};
             for (int i = 0; i < c->result->sprite_count; i++) {
                 const tp_sprite *s = &c->result->sprites[i];
-                if (s->page != c->cur_page || i == c->sel_sprite || i == c->hover_sprite) {
-                    continue; /* draw selected/hover last, on top */
+                if (s->page != c->cur_page) {
+                    continue;
                 }
-                float pts[32][2];
-                const int np = region_polygon(s, ox, oy, c->scale, pts, 32);
-                stroke_polygon(world, pts, np, col_out);
+                if (c->show_trim && s->trimmed) {
+                    float sp[4][2];
+                    region_source_rect(s, ox, oy, c->scale, sp);
+                    nt_shape_renderer_set_line_width(1.0F * w);
+                    stroke_polygon(world, sp, 4, col_trim);
+                }
+                if (c->show_frame) {
+                    float fr[4][2];
+                    region_aabb(s, ox, oy, c->scale, fr);
+                    nt_shape_renderer_set_line_width(1.0F * w);
+                    stroke_polygon(world, fr, 4, col_frame);
+                }
+                if (c->show_outline && i != c->sel_sprite && i != c->hover_sprite) {
+                    float pts[GUI_CANVAS_MAX_HULL][2];
+                    const int np = region_polygon(s, ox, oy, c->scale, pts, GUI_CANVAS_MAX_HULL);
+                    nt_shape_renderer_set_line_width(2.0F * w);
+                    stroke_polygon(world, pts, np, col_out);
+                }
+                if (c->show_pivot) {
+                    float pv[2];
+                    pivot_point(s, ox, oy, c->scale, pv);
+                    nt_shape_renderer_set_line_width(1.5F * w);
+                    stroke_crosshair(world, pv[0], pv[1], 6.0F * w, col_piv);
+                }
             }
-            if (c->hover_sprite >= 0 && c->hover_sprite < c->result->sprite_count &&
+            if (c->show_outline && c->hover_sprite >= 0 && c->hover_sprite < c->result->sprite_count &&
                 c->result->sprites[c->hover_sprite].page == c->cur_page) {
-                float pts[32][2];
-                const int np = region_polygon(&c->result->sprites[c->hover_sprite], ox, oy, c->scale, pts, 32);
-                nt_shape_renderer_set_line_width(2.0F);
+                float pts[GUI_CANVAS_MAX_HULL][2];
+                const int np = region_polygon(&c->result->sprites[c->hover_sprite], ox, oy, c->scale, pts, GUI_CANVAS_MAX_HULL);
+                nt_shape_renderer_set_line_width(2.5F * w);
                 stroke_polygon(world, pts, np, col_hov);
             }
-            if (c->sel_sprite >= 0 && c->sel_sprite < c->result->sprite_count &&
+            if (c->show_outline && c->sel_sprite >= 0 && c->sel_sprite < c->result->sprite_count &&
                 c->result->sprites[c->sel_sprite].page == c->cur_page) {
-                float pts[32][2];
-                const int np = region_polygon(&c->result->sprites[c->sel_sprite], ox, oy, c->scale, pts, 32);
-                nt_shape_renderer_set_line_width(2.5F);
+                float pts[GUI_CANVAS_MAX_HULL][2];
+                const int np = region_polygon(&c->result->sprites[c->sel_sprite], ox, oy, c->scale, pts, GUI_CANVAS_MAX_HULL);
+                nt_shape_renderer_set_line_width(3.0F * w);
                 stroke_polygon(world, pts, np, col_sel);
             }
             nt_shape_renderer_flush();

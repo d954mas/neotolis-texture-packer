@@ -322,6 +322,46 @@ turf):
 Context-menu entries trigger the SAME code paths as menus/hotkeys (inline
 rename editor, etc.) — no parallel behaviors.
 
+### 3.3f Invalid / unsupported setting combinations (owner question 2026-07-10)
+
+The engine builder ABORTS (`NT_BUILD_ASSERT`) on bad input and has no error-text
+API, so the tool enforces safety in layers — a crash is never an acceptable
+outcome, at any layer:
+
+1. **Core (`tp_pack`) validates everything** before the builder runs and returns
+   a status + human-readable message (`tp_pack.c validate_settings`). This is
+   the safety net for hand-edited project files and the CLI. Known constraints
+   (from `nt_builder.h`):
+   - `extrude > 0` requires `shape == RECT` — the packer reserves space for the
+     silhouette envelope, not an extrude band around the trim rect. Non-RECT
+     shapes must use `padding` instead.
+   - `max_vertices` ∈ [1..16] (engine hard cap; default 8).
+   - `max_size` ∈ [1..4096] (`NT_BUILD_MAX_TEXTURE_SIZE`).
+   - `alpha_threshold` ∈ [0..255]; `padding/margin/extrude` ≥ 0;
+     `pixels_per_unit` > 0 and finite.
+   - Sprite names unique and non-empty; files must exist.
+   - Slice-9 is NOT an error case: the engine auto-forces that sprite to
+     RECT + no-rotate (documented in `nt_builder.h`); the GUI surfaces this as
+     an info line in the region params, never a warning.
+2. **GUI makes invalid states unreachable.** The settings panel (region F)
+   never offers a combination the core would reject:
+   - Numeric fields clamp to their valid range at input time (spinner/slider
+     bounds = the ranges above).
+   - **Dependent controls disable, values persist**: with `shape != RECT` the
+     Extrude control is greyed out with inline text "Extrude requires Rect
+     shape — use Padding for polygon modes". The project KEEPS the stored
+     extrude value (switching shape back restores it); the GUI passes
+     `extrude = 0` to `tp_pack` while the control is disabled. Same pattern for
+     any future dependent knob.
+   - A disabled-with-reason control is the standard pattern; hiding controls or
+     silently zeroing stored values is forbidden (owner must see what exists
+     and why it's off).
+3. **If the core still rejects** (hand-edited project, future skew between GUI
+   and core): Pack fails softly — status-bar error with the core's message,
+   preview keeps the last good atlas, stale badge stays on. Never a dialog loop,
+   never a crash.
+4. **CLI**: same core message on stderr, non-zero exit (§4.4).
+
 ### 3.4 Configure export targets
 1. In Export Targets (region G), toggle a target on/off (`nt_ui_checkbox`), pick
    its exporter id (`nt_ui_dropdown`: `json-neotolis` / `defold`), set its output
