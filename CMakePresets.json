@@ -1,0 +1,34 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "native-debug",
+      "displayName": "Native Debug",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/_cmake/native-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_C_STANDARD": "17",
+        "CMAKE_C_STANDARD_REQUIRED": "ON",
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "NT_UI_DEBUG_TOOLS": "ON"
+      }
+    },
+    {
+      "name": "native-release",
+      "displayName": "Native Release",
+      "inherits": "native-debug",
+      "binaryDir": "${sourceDir}/build/_cmake/native-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "NT_UI_DEBUG_TOOLS": "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "native-debug", "configurePreset": "native-debug" },
+    { "name": "native-release", "configurePreset": "native-release" }
+  ]
+}
