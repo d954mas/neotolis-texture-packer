@@ -143,8 +143,9 @@ Rationale: the repo layout (`apps/cli`, `apps/gui`) and AGENTS.md "two equal fro
 two artifacts; two binaries avoid the Windows console/GUI-subsystem `AttachConsole` hack, give clean
 release artifacts, and keep each frontend trivial. The invariant that matters (AGENTS.md tool-parity)
 holds regardless: **all state and capability live in `tp_core`; frontends do argv/UI + disk I/O only**,
-`tp_core` returns data (`files[{name,buffer}]`-style), never touches opinions about I/O. Single-binary
-is the documented fallback if we later want one shippable exe. *(Owner call — §7; low cost to reverse.)*
+`tp_core` returns data (`files[{name,buffer}]`-style), never touches opinions about I/O.
+**Resolved by owner (2026-07-10): two Windows exes from one codebase (`ntp.exe` console subsystem +
+`ntp-gui.exe` windows subsystem, java/javaw pattern); Linux/macOS ship one binary per frontend as-is.**
 
 ### (d) Canonical sprite data model
 **Decision: one `tp_result` model, produced from the engine export snapshot (§5g), consumed by every exporter.**
@@ -298,18 +299,22 @@ what is available there", not error out.
 
 ## 6. Open questions for the product owner
 
-1. **CLI+GUI packaging** (§5c): two binaries (recommended) vs one dual-mode exe?
-2. **Project scope** (§5a): `atlases[]` array (recommended) vs one-atlas-per-file?
+1. ~~CLI+GUI packaging~~ — resolved (owner, 2026-07-10): two Windows exes from one codebase (§5c).
+2. ~~Project scope~~ — resolved (owner, 2026-07-10): one project file holds `atlases[]` — all the
+   game's atlases with per-atlas inputs/settings/targets (§5a).
 3. **v1 format set — resolved (owner)**: `json-neotolis` + Defold `.tpinfo` + `.ntpack` only.
    TexturePacker-compatible JSON dropped (TP was researched as the Defold-integration reference,
    not a compatibility target). Others (libGDX, Godot, Phaser3) later as Phase 7 templates if
    demanded.
-4. **Transform policy** (§4/§5g): OK to ship foreign atlases identity-only for v1 and add the
-   optional rotation-only engine PR later? Or invest in that second PR up front?
-5. **Own-engine story**: is `.ntpack` (via `nt_builder`) the canonical own-engine output, with the
-   tool's added value being foreign exporters + project file + GUI? Or do we also want a generic
-   text/JSON descriptor for our runtime?
-6. **Font-atlas packing** (rTP does it; `nt_builder` has fonts): in scope for this tool or out?
-7. **Naming/branding**: tool name/CLI verb (`ntp`?), project extension (`.ntpp`?), license.
+4. ~~Transform policy~~ — resolved by §5g/§5h decisions: v1 packs foreign targets identity-only
+   (no engine change); the `ROT90` transform-policy engine PR is a post-v1 density improvement.
+5. ~~Own-engine story~~ — resolved (owner, 2026-07-10): `.ntpack` is the always-produced engine
+   artifact (also the tool's internal interchange, §5g); `json-neotolis` is the universal
+   descriptor any engine can adopt. Two user-facing exporters: `json-neotolis` and `defold`.
+6. ~~Font-atlas packing~~ — resolved (owner, 2026-07-10): out of v1 scope; sprites only. Fonts stay
+   in the engine's `build_packs` flow; possible post-v1 phase.
+7. ~~Naming/branding~~ — resolved (owner, 2026-07-10): binaries `ntpacker` (console) +
+   `ntpacker-gui` (windowed); project file `<name>.ntpacker_project` (self-describing,
+   Defold-style, unconfusable with `.ntpack`); license MIT (matches engine).
 8. ~~Engine PR sequencing~~ — resolved: owner chose the `.ntpack` parse-back path (§5g); no engine
    change gates v1.
