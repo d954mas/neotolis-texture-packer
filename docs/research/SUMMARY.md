@@ -21,25 +21,25 @@ Columns: **NT** = our `nt_builder` baseline · **TP** = CodeAndWeb TexturePacker
 
 | Feature | NT | TP | GDX | U | rTP | FTP | DF | Note |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|---|
-| Pack algorithm | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ✅ | ⚠️ | NT = NFP/Minkowski **concave, sub-pixel** vector packer; others MaxRects/skyline/rect |
+| Pack algorithm | ✅ | ✅ | ✅ | ⚠️ | ⚠️ | ✅ | ⚠️ | NT = NFP/Minkowski **concave, sub-pixel** vector packer; others MaxRects/skyline/rect; rTP: skyline via stb_rect_pack, no rotation |
 | 90° rotation | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ | DF native no; DF via `.tpinfo` extension yes |
 | Full D4 (rot+flip) | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | **NT unique**; but no foreign format can encode a flip (see §4) |
 | Trim / whitespace strip | ✅ | ✅ | ✅ | ⚠️ | ✅ | ✅ | ✅ | NT reports offset+source size (Trim model) |
 | Trim **modes** (Trim/Crop) | ⚠️ | ✅ | ⚠️ | ❌ | ⚠️ | ✅ | ⚠️ | NT trim only; Crop is an export-time rewrite tp_core adds |
 | Polygon / mesh packing | ✅ | ✅ | ⚠️ | ⚠️ | ❌ | ❌ | ✅ | NT concave-contour, vertex budget; GDX polygon = Spine only |
-| Multipack (N pages) | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | NT `ATLAS_MAX_PAGES=64`; needs `{n}` output naming (tp_core) |
+| Multipack (N pages) | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | NT multi-page ✅; needs `{n}` output naming (tp_core) |
 | Extrude / padding / margin | ✅ | ✅ | ✅ | ✅ | ⚠️ | ✅ | ✅ | rTP padding only (no extrude) |
 | Pivots | ✅ | ✅ | ❌ | ✅ | ✅ | ⚠️ | ✅ | NT per-sprite normalized, off-frame allowed; GDX atlas can't store; U on sprite not atlas |
-| 9-slice | ✅ | ✅ | ✅ | ✅ | ❌ | ⚠️ | ❌ | NT per-sprite slice9 borders |
-| Alias / dedup | ✅ | ✅ | ✅ | ⚠️ | ❌ | ✅ | ⚠️ | NT dedup stage (hash+pixel) |
-| Animation / name grouping | ❌ | ✅ | ✅ | ❌ | ⚠️ | ⚠️ | ✅ | NT is an ID/region model; grouping is tp_core/exporter work |
+| 9-slice | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | NT per-sprite slice9 borders |
+| Alias / dedup | ✅ | ✅ | ✅ | ⚠️ | ❌ | ✅ | ⚠️ | NT dedup stage (hash+pixel); U alias/dedup: not established in research |
+| Animation / name grouping | ❌ | ✅ | ✅ | ❌ | ⚠️ | ❌ | ✅ | NT is an ID/region model; grouping is tp_core/exporter work |
 | Scaling variants (@2x cook) | ⚠️ | ✅ | ✅ | ✅ | ❌ | ⚠️ | ❌ | NT `pixels_per_unit` (one scale/pack); no in-tool multi-scale cook |
 | Secondary textures (normal etc.) | ❌ | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ | U supports N named; TP one |
-| GPU compression output | ✅ | ✅ | ⚠️ | ✅ | ❌ | ⚠️ | ✅ | NT Basis ETC1S/UASTC vendored; TP the widest |
+| GPU compression output | ✅ | ✅ | ⚠️ | ✅ | ❌ | ❌ | ✅ | NT Basis ETC1S/UASTC vendored; TP the widest; FTP: only TinyPNG lossy compression, not block/GPU compression |
 | Watch / live repack | ❌ | ⚠️ | ❌ | ✅ | ❌ | ✅ | ✅ | NT has content-hash cache, not a watcher; **no CLI OSS tool ships watch** |
 | CLI | ⚠️ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | NT builder is a lib; `main.c` is a stub |
 | Project file | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | .tps / pack.json / .spriteatlas / .rtp / .ftpp / .atlas |
-| Data-driven custom exporters | ❌ | ✅ | ❌ | ❌ | ⚠️ | ✅ | ❌ | TP Grantlee, FTP mustache |
+| Data-driven custom exporters | ❌ | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | TP Grantlee, FTP mustache; rTP fixed built-in formats only |
 
 ---
 
@@ -63,13 +63,17 @@ Strengths that are ours today and beat the field — lean on these as the produc
 
 ## 3. Table-stakes we lack (must build in `tp_core` + frontends)
 
-None of these need engine changes beyond the single export API in §5g — they are tool work:
+These need no engine change at all — §5g's parse-back covers it; they are tool work:
 
 - **CLI arg parsing** and **project file** (nothing exists).
-- **PNG page export** + **JSON-hash / JSON-array** exporters (the ecosystem lingua franca).
+- **PNG page export** (still required). **JSON-hash / JSON-array** exporters (the ecosystem
+  lingua franca) were **dropped from v1** by owner decision (§6 Q3). Risk: v1 cannot feed
+  Phaser/Pixi/cocos2d out of the box; mitigation — cheap Phase 7 mustache templates if demanded.
 - **Foreign-format exporters**: Defold `.tpinfo`, libGDX `.atlas`, then Godot/Phaser.
 - **Trim `crop` mode** (export-time rewrite of offsets/source size).
-- **Animation / numeric-suffix name grouping** (`walk_01…` → animation), needed by Defold/GDX/Phaser.
+- **Animation / numeric-suffix name grouping** (`walk_01…` → animation), needed by
+  Defold/GDX/Phaser (project schema `animations[]` in Phase 3; numeric-suffix auto-grouping in
+  Phase 2 normalization; consumed by the Defold exporter in Phase 5).
 - **Scaling-variant cook** (`@2x`/`@1x` from one placement) and **multipack `{n}` output naming**.
 - **Folder inputs with live rescan** + ignore globs (the workflow users actually want).
 - **GUI** (toolbar/canvas/panels over `nt_ui`).
@@ -111,6 +115,10 @@ scriptable; every good tool uses text. Concretely, adopting the `oss-and-archite
   `slice9`, `trim` on/off, `shape` override, `tag`/animation. Never store defaults.
 - **`atlases[]` array** (multi-atlas project, gdx-tpgui model) — required for per-atlas settings,
   secondary channels and variants without N project files. *(Confirm with owner — §7.)*
+- **Animation model**: per-atlas `animations[]` array: `{ id, frames: [sprite names, explicit
+  order], playback, fps, flip_h, flip_v }` — flipbook metadata over sprite names, orthogonal to
+  placement (`tp_result` stays animation-free); zero-config path = numeric-suffix auto-grouping
+  (`walk_01, walk_02` → `walk`, fps 30, once-forward) with explicit entries overriding.
 - **Stable identifiers, not display strings** (`"json-hash"`, never `"JSON (hash)"` — FTP's CLI
   mapping-table smell). Deterministic output: sorted keys, 2-space, LF, trailing newline.
 
@@ -144,8 +152,8 @@ two artifacts; two binaries avoid the Windows console/GUI-subsystem `AttachConso
 release artifacts, and keep each frontend trivial. The invariant that matters (AGENTS.md tool-parity)
 holds regardless: **all state and capability live in `tp_core`; frontends do argv/UI + disk I/O only**,
 `tp_core` returns data (`files[{name,buffer}]`-style), never touches opinions about I/O.
-**Resolved by owner (2026-07-10): two Windows exes from one codebase (`ntp.exe` console subsystem +
-`ntp-gui.exe` windows subsystem, java/javaw pattern); Linux/macOS ship one binary per frontend as-is.**
+**Resolved by owner (2026-07-10): two Windows exes from one codebase (`ntpacker.exe` console subsystem +
+`ntpacker-gui.exe` windows subsystem, java/javaw pattern); Linux/macOS ship one binary per frontend as-is.**
 
 ### (d) Canonical sprite data model
 **Decision: one `tp_result` model, produced from the engine export snapshot (§5g), consumed by every exporter.**
@@ -305,7 +313,8 @@ what is available there", not error out.
 3. **v1 format set — resolved (owner)**: `json-neotolis` + Defold `.tpinfo` + `.ntpack` only.
    TexturePacker-compatible JSON dropped (TP was researched as the Defold-integration reference,
    not a compatibility target). Others (libGDX, Godot, Phaser3) later as Phase 7 templates if
-   demanded.
+   demanded. Phase 7 (template exporters) is explicitly post-v1 stretch; v1 user-facing set is
+   exactly {json-neotolis, defold}.
 4. ~~Transform policy~~ — resolved by §5g/§5h decisions: v1 packs foreign targets identity-only
    (no engine change); the `ROT90` transform-policy engine PR is a post-v1 density improvement.
 5. ~~Own-engine story~~ — resolved (owner, 2026-07-10): `.ntpack` is the always-produced engine
@@ -318,3 +327,6 @@ what is available there", not error out.
    Defold-style, unconfusable with `.ntpack`); license MIT (matches engine).
 8. ~~Engine PR sequencing~~ — resolved: owner chose the `.ntpack` parse-back path (§5g); no engine
    change gates v1.
+9. GUI language — resolved (owner, 2026-07-10): English only, no localization planned.
+10. Distribution — resolved (owner, 2026-07-10): public GitHub repo from day one
+    (github.com/d954mas/neotolis-texture-packer), MIT.

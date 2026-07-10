@@ -118,14 +118,20 @@ every offset** and return `tp_status` errors, never assert on file contents).
   `format_version`(u16), `asset_type`(u8 = `nt_asset_type_t`), `meta_offset`(u32).
 - Asset payload for an entry = `blob[entry.offset .. entry.offset+entry.size)`. Validate
   `offset+size <= total_size` (`:64`).
-- We need `NT_ASSET_ATLAS = 6` and `NT_ASSET_TEXTURE = 2` (`:44,41`). Ignore other types.
+- We need `NT_ASSET_ATLAS = 6` (`nt_pack_format.h:45`) and `NT_ASSET_TEXTURE = 2` (`:41`). Ignore
+  other types.
 - Checksum (`:65`, CRC32 of data after header) — **do not verify** on read; it is not needed for a
   file we just wrote and adds a dependency. (Optional later.)
 - `pixels_per_unit` is stored as a **meta** blob, not in the atlas header. Its meta `kind ==
   nt_hash64_str("pixels_per_unit")` and payload is a 4-byte float
   (`nt_builder_atlas.c:1864-1883`). To read it: walk `NtMetaEntryHeader` records
-  (`nt_pack_format.h:93-100`, 20-byte header + payload) at `meta_offset`, matching
-  `resource_id == atlas entry.resource_id` and `kind`. If absent, default `1.0f`.
+  (`nt_pack_format.h:93-100`, 20-byte header + payload), starting from the **atlas asset entry's
+  own `meta_offset`** field — prefer this over the pack header's top-level `meta_offset`
+  (`nt_builder.c:884-890` shows the writer sets each entry's `meta_offset` to where that specific
+  asset's meta records begin) — matching `resource_id == atlas entry.resource_id` and `kind`. The
+  walk stride is **not** a fixed 20 bytes: the writer pads each record's payload to
+  `NT_PACK_ASSET_ALIGN` (4) between records (`nt_builder.c:898-902`), so advance by
+  `20 + align4(payload_size)` per record. If absent, default `1.0f`.
 
 ### 2.2 Atlas blob (`nt_atlas_format.h`, v6)
 
@@ -193,8 +199,10 @@ For the entry matched by `texture_resource_ids[page]`:
   `mip_count=1` at `:206`). If the reader sees BASIS (1), return an error telling the caller to use
   the export-friendly settings profile — do not attempt transcode in Phase 1.
 - Straight vs premultiplied: check `flags & NT_TEXTURE_FLAG_PREMULTIPLIED` (bit0, line 41). The
-  export profile packs `premultiplied=false`, so the bit is clear → straight-alpha RGBA8. Surface
-  the flag on `tp_page` so exporters know.
+  **reader only surfaces this bit** on `tp_page.premultiplied` — it never asserts or rejects on its
+  value, because `tp_pack_read` must be able to parse a premultiplied pack too (a premultiplied
+  smoke pack is part of task 4's Done criteria, §4). Only the **export-profile test** (§3.4/task 10)
+  asserts the flag is clear, and only for packs produced via the §5 profile (`premultiplied=false`).
 - `tp_page.rgba` points into (or is copied from) `blob[entry.offset+28 ..]`, `w=header.width`,
   `h=header.height`. Page pixels are y-down (top row first), matching `atlas_v`.
 
@@ -315,6 +323,12 @@ Vendored **Unity** (`external/neotolis-engine/deps/unity`, target `unity`) wired
 > `TEST_ASSERT_TRUE(fabsf(a-b) < 1e-5f)`. Do **not** add a private float-enabled unity copy — the
 > exclude exists to dodge a Windows/Clang `_fdclass` link error.
 
+> **Unity link is unverified (flagged):** nothing in this repo currently links the vendored `unity`
+> target — `apps/smoke` does **not** link it either. The target is `EXCLUDE_FROM_ALL` in the engine's
+> CMake (§1.2 link-dep facts) but is defined and reachable in our submodule-consumer mode. We are the
+> **first** consumer to link it, so verify it actually links (no missing symbols/config surprises) on
+> the first build — this falls under task 1 (§4), now that the CMake skeleton lives there.
+
 `packer/tests/CMakeLists.txt` per test:
 ```cmake
 add_executable(tp_test_pack_read test_pack_read.c tp_fixtures.c)
@@ -341,15 +355,29 @@ Generate RGBA8 in memory and add via `nt_builder_atlas_add_raw` (`nt_builder.h:4
 - **alias**: two names, identical pixels → one dedups to the other (`alias_of`).
 - **multipage**: enough/large sprites with a small `max_size` (e.g. 128) to force ≥2 pages
   (`page_index` varies; per-page texture lookup).
+- **1×1 sprite**: smallest possible source size — exercises degenerate trim/AABB math at the floor.
+- **sprite exactly == page size**: on-page UV reaches the `u=65535` edge end-to-end (both min and
+  max edges of the page), pinning the §2.5 encode/decode round-trip at its extreme.
+- **non-POT page, end-to-end**: a fixture packed with `power_of_two=false` so the page dimensions
+  themselves are non-power-of-two, exercising the §2.5 UV math against a non-POT `W/H` (not just
+  non-POT `px`).
 
 ### 3.2 Golden round-trip assertions (`test_pack_read.c`)
 
 Per fixture: the generator records the **expected** canonical values it fed in (name, source size,
-trim rect, pivot, slice9, expected vertex count, alias). Build → `nt_builder_finish_pack` to a temp
-`.ntpack` → `tp_pack_read` → assert exact match on: frame rect (x,y,w,h), `transform`-consistency
-invariants (§2.6), `sourceSize`, `spriteSourceSize`, `pivot`, `slice9_lrtb`, `trimmed`, polygon
-vertex positions (as a set, winding-agnostic), `alias_of`, page count, and each page's `w/h` +
-straight-alpha flag. Sample a few known page pixels (e.g. a disc centre) to confirm pixel plumbing.
+trim offsets, trim size, pivot, slice9, expected vertex count, alias). Build →
+`nt_builder_finish_pack` to a temp `.ntpack` → `tp_pack_read` → assert exact match on: **frame
+`w,h`** (trim size — the generator knows this), `sourceSize`, `spriteSourceSize` trim offsets,
+`transform`-consistency invariants (§2.6), `pivot`, `slice9_lrtb`, `trimmed`, polygon vertex
+positions (as a set, winding-agnostic), `alias_of`, page count, and each page's `w/h` +
+straight-alpha flag. **`frame.x,y` (and page/transform) are packer-chosen** — the generator has no
+oracle for them, and re-deriving them from the UVs to check against the UV-derived value would be
+circular — so they are **not** asserted for exact value; instead they are validated indirectly by
+the pixel-sampling assertion below. **Required per fixture (not optional):** sample page pixels at
+the recovered frame rect and match known sprite content (e.g. corner/centre pixels of the source
+image, accounting for `transform`). This is the only independent check of the frame origin
+(`frame.x,y`) and of `atlas_v`'s y-orientation — do not treat it as a soft/spot-check; every fixture
+must include it.
 
 ### 3.3 UV recovery property test
 
@@ -357,6 +385,13 @@ Pure function test (no builder): for `W,H ∈ {2,3,7,16,100,127,128,255,256,1000
 every (or random dense) `px ∈ [0,W]`, assert `uv_to_px(px_to_uv(px,W),W) == px` using the exact
 encode (`floor(px*65535/W+0.5)`) and decode (`lround(u*W/65535)`) from §2.5. This pins the
 "exact for all page sizes ≤ 4096" acceptance criterion independent of a full pack.
+
+**Caveat:** this property test validates the **idealized** encode `floor(px*65535/W+0.5)` using
+exact (double) arithmetic; the margin analysis in §2.5 covers why float32 rounding doesn't break the
+round-trip in principle, but the **real builder encodes via `float32`**
+(`nt_builder_atlas.c:1762-1780`), not the idealized formula. Only the golden tests (§3.2), which
+build through the actual `nt_builder` and its float32 path, exercise the real encode. Do not treat
+§3.3 alone as sufficient coverage of the UV round-trip — it is a necessary but not sufficient check.
 
 ### 3.4 Phase 1b test (`test_pack.c`)
 
@@ -369,6 +404,22 @@ Pack the **smoke** sprite set (reuse `apps/smoke` disc generator) through `tp_pa
 Runs in existing `ctest --preset native-release|native-debug` (AGENTS.md) on all 3 OSes via
 `ci.yml`. No new CI wiring — new `add_test`s are picked up automatically.
 
+### 3.6 Transform decode coverage
+
+Synthetic unit test (no builder, no `.ntpack`): construct an `NtAtlasRegion` **in memory** for each
+known non-identity `transform` mask (§2.4) — flip-H, flip-V, flip-H+flip-V, and especially the
+**diagonal** (dim-swap) mask and its flip-H/flip-V combinations — and assert the reference decode
+(§2.4) produces the expected on-page corner mapping and `w/h` dim-swap for each. This is independent
+of whatever the packer actually chooses to emit, so it is the only place the diagonal/dim-swap
+decode path is guaranteed to be exercised deterministically.
+
+Additionally, add a **guard assertion** over the packed fixture set (§3.1/§3.2): after building all
+fixtures, assert that **at least one** recovered region has a diagonal transform bit set (`transform
+& 4`). If none do, fail loudly with a message telling the implementer to adjust the fixtures (e.g.
+tweak sizes in the rotated/flipped fixture, §3.1) until the packer actually picks a diagonal
+transform. Without this guard, the dim-swap path can go green **vacuously** in the golden test —
+because the packer, not the test, chooses transforms.
+
 ---
 
 ## 4. Task breakdown (ordered, sized for delegation)
@@ -376,8 +427,11 @@ Runs in existing `ctest --preset native-release|native-debug` (AGENTS.md) on all
 Legend: **[fast]** mechanical, **[deep]** design/tricky-correctness.
 
 **Phase 1a**
-1. **[fast]** `tp_error.h` (`tp_status` enum, error buffer) + `tp_arena.{h,c}` (bump alloc/free).
-   Done: compiles standalone; a unit smoke of arena alloc/reset passes.
+1. **[fast]** `tp_error.h` (`tp_status` enum, error buffer) + `tp_arena.{h,c}` (bump alloc/free) +
+   the **CMake skeleton** — `packer/CMakeLists.txt` (§1.2), a stub `packer/tests/CMakeLists.txt`,
+   and the root `add_subdirectory(packer)` (§1.1). Moved here from task 8 so tasks 2-7 compile
+   incrementally instead of only at the very end. Done: `tp_core` compiles and links standalone via
+   `cmake --build`; a unit smoke of arena alloc/reset passes.
 2. **[fast]** `tp_model.h` — adapt SUMMARY §5d verbatim (add `tp_page.premultiplied` bool + a
    `tp_transform` bit enum + `tp_result.pixels_per_unit`). Done: header compiles; documents y-down.
 3. **[fast]** `tp_name_map.{h,c}` — hash→name via `nt_hash64_str`, collision detection. Done: unit
@@ -385,11 +439,17 @@ Legend: **[fast]** mechanical, **[deep]** design/tricky-correctness.
 4. **[deep]** `tp_pack_read.c` container+atlas+texture parse (§2.1-2.3) with full bounds-checking;
    emits `tp_result`. Done: parses the smoke `.ntpack`, page count/dims correct.
 5. **[deep]** Recovery math in `tp_pack_read.c` — frame rect, D4-consistency, y-conversions,
-   aliases (§2.4-2.7). Done: §2.6 invariants hold on fixtures.
-6. **[fast]** `tp_fixtures.{h,c}` generators (§3.1). Done: each case builds a valid `.ntpack`.
+   aliases (§2.4-2.7). Done: §2.6 invariants hold when run against the **smoke pack** (task 4) plus
+   the **synthetic transform-decode test** (§3.6) — the `tp_fixtures` set (§3.1) doesn't land until
+   task 6, so this task's Done criterion cannot yet depend on it.
+6. **[deep]** `tp_fixtures.{h,c}` generators (§3.1). Re-tagged from [fast]: reliably triggering
+   dedup/multipage/rotation (and the diagonal-transform guard, §3.6) in procedural fixtures is
+   correctness-sensitive, not mechanical. Done: each case builds a valid `.ntpack`.
 7. **[deep]** `test_pack_read.c` golden round-trip (§3.2) + `tp_fixtures` glue. Done: all cases green.
-8. **[fast]** UV property test (§3.3) + tests `CMakeLists.txt` + root `add_subdirectory(packer)`.
-   Done: `ctest` shows `tp_pack_read` + `tp_uv_property` passing.
+8. **[fast]** Remaining test wiring + UV property test (§3.3) — the CMake skeleton itself now lands
+   in task 1, so this is just adding the `tp_uv_property` test target/`add_test` and any leftover
+   `packer/tests/CMakeLists.txt` entries. Done: `ctest` shows `tp_pack_read` + `tp_uv_property`
+   passing.
 
 **Phase 1b** (depends on 1a)
 9. **[deep]** `tp_pack.c` — drive `nt_builder` begin/add/end from a minimal settings input, write
@@ -408,10 +468,17 @@ not depend on `tp_pack`.
 
 Start from `nt_atlas_opts_defaults()` (`nt_builder.h:293`) and override so the parse-back reads
 straight-alpha uncompressed mip0:
-- `premultiplied = false` (straight alpha; the reader asserts the flag is clear).
+- `premultiplied = false` (straight alpha; the export-profile test, §3.4/task 10, asserts the flag
+  is clear for packs produced via this profile — the reader itself only surfaces the flag, §2.3).
 - `compress = NULL` (RAW RGBA8 — reader requires it, §2.3).
 - `gen_mipmaps = false` and `format = NT_TEXTURE_FORMAT_RGBA8`.
 - `debug_png = false`.
+- **Atlas names passed to `tp_pack` must be normalization-invariant**: no `\\`, no `./`, no `..`, no
+  `//`, no trailing `/`. `texture_resource_ids[]` in the atlas blob hashes the **raw**
+  `"<atlas>/tex<N>"` string (`nt_builder_atlas.c:1679`), while the entry table hashes the
+  **normalized** path (`nt_builder.c:74-77`). If the atlas name needs normalization, the two hashes
+  diverge and **every page lookup misses** (R2, §6). This is a caller obligation, not something the
+  reader can fix.
 Everything else (shape, `allow_transform`, padding, `max_size`, `power_of_two`) is caller-driven per
 target — Phase 2 per-target packing (SUMMARY §5h) sets these; Phase 1 just plumbs them through.
 
@@ -422,9 +489,17 @@ target — Phase 2 per-target packing (SUMMARY §5h) sets these; Phase 1 just pl
 - **R1 — hull AABB vs trim rect (medium).** `trim_w/trim_h` are recovered as `max(local_x/y)`
   assuming the (possibly RDP-simplified) concave hull touches all four trim edges. For RECT/CONVEX
   this is exact; for `CONCAVE_CONTOUR` a near-flat edge could theoretically drop the extreme vertex.
-  **Verify first** with the polygon fixture (§3.1) in the golden test; the on-page-AABB-dims
-  invariant (§2.6) cross-checks it. If it ever fails, fall back to the UV-derived AABB (same info) or
-  restrict polygon frame recovery to the AABB and flag upstream.
+  The on-page-AABB-dims invariant (§2.6) does **not** cross-check this — both sides derive from the
+  same hull vertices, so it is circular and cannot catch a hull that fails to reach the true trim
+  edges. The real oracle is the fixture generator's **known trim rect** (golden assertion, §3.2) plus
+  the **required** pixel sampling at the recovered frame rect (§3.2/P1-2), since both are derived
+  independently from the source pixels, not from the hull. Add a fixture whose alpha bbox is provably
+  hull-touching (e.g. a plus/cross shape whose extreme pixels sit at all four trim edges and are
+  guaranteed to survive RDP simplification). **Circles/discs are the worst case for this recovery
+  path**: a simplified 8-vertex hull of a disc may not reach the trim bbox edges at all four extremes,
+  under-reporting `trim_w/h` — do not rely on a disc fixture alone to validate hull-extent trim
+  recovery. If it ever fails, fall back to the UV-derived AABB (same info) or restrict polygon frame
+  recovery to the AABB and flag upstream.
 - **R2 — texture entry id vs atlas blob id.** The atlas blob stores `nt_hash64_str("<atlas>/texN")`
   (un-normalized, `:1679`) while the texture entry id is normalized (`:74-77,1920`). Identical for
   our slash-free tool names, but **verify by matching succeeds** in the first multipage test; the

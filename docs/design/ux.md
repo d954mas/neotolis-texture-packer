@@ -431,15 +431,21 @@ parentheses.
 
 ## Open UX questions for the owner
 
-1. **CLI verb**: `pack` (this doc, ROADMAP) vs `export` (task packet)? Recommend
-   `pack` canonical, `export` alias.
-2. **Atlas switcher**: left **list** (recommended — per-row controls, scales) vs
-   top **tab strip** (closer to TexturePacker but `nt_ui_tabbar` can't carry a
-   per-tab close/reorder)?
-3. **stdout contract**: reserve stdout for a future machine-readable
-   (`--json`) summary now, or send progress there? (This doc reserves it.)
-4. **OS file-drop**: is drag-drop onto the window a v1 target, or is the
-   Add-folder dialog sufficient for MVP? (Depends on whether the engine surfaces
-   the GLFW drop callback — needs verification.)
-5. **Panel resize**: fixed proportions for v1 (recommended) or invest in a
-   draggable splitter early?
+1. **CLI verb** — resolved (owner, 2026-07-10): `pack` (this doc, ROADMAP) vs
+   `export` (task packet)? **`pack` is canonical; `export` ships as a supported
+   alias.**
+2. **Atlas switcher** — resolved (owner, 2026-07-10): left **list** (per-row
+   controls, scales) vs top **tab strip** (closer to TexturePacker but
+   `nt_ui_tabbar` can't carry a per-tab close/reorder)? **Left vlist confirmed.**
+3. **stdout contract** — resolved (owner, 2026-07-10): reserve stdout for a
+   future machine-readable (`--json`) summary now, or send progress there?
+   **Confirmed: stdout stays reserved for the future `--json` summary; progress
+   goes to stderr (§4.3).**
+4. **OS file-drop** — resolved (owner, 2026-07-10): is drag-drop onto the
+   window a v1 target, or is the Add-folder dialog sufficient for MVP?
+   **Deferred post-v1 — the Add-folder dialog suffices for v1; whether the
+   engine surfaces the GLFW drop callback still needs verification before any
+   post-v1 drop-support work starts.**
+5. **Panel resize** — resolved (owner, 2026-07-10): fixed proportions for v1
+   (recommended) or invest in a draggable splitter early? **Fixed proportions
+   ship in v1; a draggable splitter is deferred to later.**

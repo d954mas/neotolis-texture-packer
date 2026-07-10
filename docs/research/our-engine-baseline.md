@@ -59,11 +59,13 @@ tool but shows the pack model).
 - `.ntpack` (custom flat binary, `shared/include/nt_pack_format.h`) +
   generated `.h` ID header. The ONLY real output.
 - Debug page PNGs (unpadded naming, debug purpose).
-- **Gap**: composed page pixels + placement table (`AtlasPlacement`,
+- **Gap** *(superseded 2026-07-10: tool parses back its own `.ntpack` —
+  SUMMARY §5g; optional engine callback remains a future optimization)*:
+  composed page pixels + placement table (`AtlasPlacement`,
   `page_pixels[]`) are internal statics in `nt_builder_atlas.c` with no
-  public getter → an export API must be added (engine issue/PR) or the
-  exporter feeds off a placement callback. This is THE key engine change the
-  tool needs.
+  public getter. Historically this looked like an export API that must be
+  added (engine issue/PR) or a placement callback the exporter feeds off —
+  but no engine change gates v1 anymore.
 
 ## Runtime atlas (`engine/atlas`)
 
@@ -88,7 +90,7 @@ verification, not for packing.
 
 | Need | Status | Plan |
 |---|---|---|
-| Placement/page-pixels export API | ❌ internal statics | engine issue/PR |
+| Placement/page-pixels export API | ❌ internal statics | (superseded 2026-07-10: tool parses back its own `.ntpack` — SUMMARY §5g; optional engine callback remains a future optimization) |
 | Exporters (Defold, JSON, PNG page export) | ❌ | `tp_core` exporter layer |
 | Project file (save/load settings) | ❌ | `tp_core` (cJSON is vendored) |
 | CLI arg parsing | ❌ (builder `main.c` is a stub) | `apps/cli` |

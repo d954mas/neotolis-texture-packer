@@ -21,22 +21,24 @@ Phase 0 (done)
    │                                         ▼
    └─────────────────────────────►  Phase 1b  tp_core skeleton + canonical model
                                           │
-                                          ▼
-                                     Phase 2  PNG + JSON exporters
-                                          │
                         ┌─────────────────┼─────────────────┐
-                        ▼                 ▼                  ▼
-                   Phase 3  project   (feeds 4/6)      Phase 7  mustache exporters  [parallel]
+                        ▼                 ▼                 ▼
+                   Phase 2  PNG      Phase 3  project   Phase 7  mustache
+                   + JSON exporters  file [parallel      exporters  [parallel]
+                        │            with 2; feeds 4/6]
+                        └────────┬────────┘
+                                 ▼
+                            Phase 4  CLI
+                                 │
+                        ┌────────┴────────────────┐
+                        ▼                          ▼
+                  Phase 5  Defold+demo      Phase 8  watch/incremental
+                  [parallel]                [parallel after 4]
+
+              Phase 6  GUI MVP  (fed by 2 + 3 directly, NOT 4)  [parallel with 5/7]
                         │
-                        ▼
-                   Phase 4  CLI
-                        │
-              ┌─────────┼───────────────────────────┐
-              ▼         ▼                            ▼
-        Phase 5      Phase 6  GUI MVP           Phase 8  watch/incremental  [parallel after 4]
-        Defold+demo  [parallel with 5/7]
-        [parallel]
                         └───────────────► Phase 9  variants + secondaries + release polish
+                                          (needs 2, 4, 6 +7 if built)
 ```
 
 **Parallelizable once prerequisites land:** 5, 6, 7 (all after 2, with 4/3 as noted); 8 after 4.
@@ -130,13 +132,23 @@ skipping the serialize→parse round-trip). No upstream dependency remains.
   `SUMMARY.md §6 Q3`; possible later as Phase 7 templates.)
 - Exporter **registry** + capability-flag struct (even for hardcoded ones) so
   Phase 7 templates and the GUI/CLI reuse one interface.
+- Test-only capability-restricted exporter descriptor (e.g. rot90-only,
+  no-flip) registered in the test suite — proves per-target packing (§5h)
+  without waiting for Phase 5's Defold target.
 - Per-target packing (`SUMMARY.md §5h`): each export target packs with
   `project settings ∩ target capabilities` (unsupported features silently not
   used for that target); targets with identical effective settings share one
   pack run. Informational notices only for genuine metadata loss (dropped
   pivot/polygon/slice9); hard error only for impossibilities.
+- Alias semantics: exporters emit EVERY aliased name as its own entry pointing
+  at the shared frame (json-neotolis lists all names; matches .tpinfo alias
+  behavior).
 - Core normalization pass (`prepareData` equivalent): trim-`crop` rewrite, name
-  munging (ext strip / folder prefix), scale multiply — done before any exporter.
+  munging (ext strip / folder prefix), scale multiply, numeric-suffix
+  animation auto-grouping (feeds Phase 5 `.tpatlas`; explicit `animations[]`
+  from the Phase 3 project schema overrides) — done before any exporter.
+- Determinism: canonical sprite sort key is the FINAL munged export name (not
+  the raw builder name).
 
 **Acceptance**
 - Golden-file test: exported `json-neotolis` matches its documented schema for
@@ -149,6 +161,12 @@ skipping the serialize→parse round-trip). No upstream dependency remains.
 
 **Depends on:** 1b.
 
+**Non-goals (out of v1 scope):**
+- Common-divisor / align-to-grid / `multipleOf4` size constraint.
+- Alpha-bleed / dilation post-process (straight-alpha PNG halos under linear
+  filtering — revisit if reported).
+- Pack-effort knob (Fast/Good/Best).
+
 ---
 
 ## Phase 3 — Project file (`tp_project` load/save)
@@ -159,6 +177,8 @@ skipping the serialize→parse round-trip). No upstream dependency remains.
 - Schema v1 per `SUMMARY.md §5a` (cJSON at `deps/cjson`): `version` integer,
   `app` info, `sources` (folders/files/ignore), `atlases[]`, sparse `sprites`
   overrides. Relative paths, stable identifiers, sorted deterministic output.
+- Per-atlas `animations[]` schema per `SUMMARY.md §5a` (id, ordered frames,
+  playback, fps, flip_h/v).
 - Load with newer-version refusal + a migration hook (`v1→…`) even if empty.
 - Folder rescan on load; absolute-path-on-load → relativize-on-save.
 
@@ -173,7 +193,7 @@ skipping the serialize→parse round-trip). No upstream dependency remains.
 
 ## Phase 4 — CLI (`apps/cli` over `tp_core`)
 
-**Goal:** headless, CI-friendly `ntp pack project.ntpp`.
+**Goal:** headless, CI-friendly `ntpacker pack game.ntpacker_project`.
 
 **Deliverables**
 - Arg parser; `pack <project>` loads project → `tp_pack` → writes exporter files.
@@ -199,11 +219,16 @@ skipping the serialize→parse round-trip). No upstream dependency remains.
 - Hardcoded `.tpinfo` exporter (protobuf-text) per `defold.md §(b)` checklist
   (rotation corner rule, quad fallback, pivot, vertices, all `required` fields);
   optional `.tpatlas` starter; `.atlas`+loose-PNG **fallback** preset.
+- `.tpatlas` generation from the project's `animations[]` + auto-grouped
+  animations (`SUMMARY.md §5a`, Phase 2 normalization).
 - `examples/defold-demo/`: `game.project` (dependency pinned to a matching
   extension tag), generated `.tpinfo` + page PNG, `.tpatlas`, one collection
   with a sprite (incl. a rotated + trimmed sprite and one flipbook animation).
 - CI job: install JDK, download `bob.jar` (version-matched), `bob resolve` +
   `bob build --variant headless`; assert green.
+- Version pinning: demo + CI pin the newest extension-texturepacker release
+  and the MATCHING bob.jar/Defold version (lock-step requirement); floating
+  "latest" is not used in CI — bumping the pin is a deliberate small PR.
 
 **Acceptance**
 - CI bob build is green (parse + compile prove `.tpinfo` correctness).
@@ -237,7 +262,7 @@ skipping the serialize→parse round-trip). No upstream dependency remains.
 
 ---
 
-## Phase 7 — Mustache template exporters + descriptors  [parallel]
+## Phase 7 — Mustache template exporters + descriptors  [parallel] [post-v1 stretch]
 
 **Goal:** data-driven long-tail formats without recompiling.
 
@@ -302,13 +327,13 @@ skipping the serialize→parse round-trip). No upstream dependency remains.
 - `release.yml` produces all-3-OS archives containing both binaries; unpacker
   round-trips a packed atlas back to per-sprite images.
 
-**Depends on:** 2, 4, 6/7 (for GUI/exporter surfaces). Final integration phase.
+**Depends on:** 2, 4, 6 (+7 if built) (for GUI/exporter surfaces). Final integration phase.
 
 ---
 
 ## Sequencing summary
 
-1. **1a (engine PR)** — unblock everything; open the issue immediately.
+1. **1a (.ntpack parse-back reader)** — in-repo, no upstream dependency.
 2. **1b → 2** — core + real outputs (serial spine).
 3. **3** — project file (parallel with 2).
 4. **4** — CLI (needs 2+3).
