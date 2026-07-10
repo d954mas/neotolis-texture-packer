@@ -365,25 +365,25 @@ always reference an animation id — upstream `basic.collection` uses both
   one opens its editor: id (inline rename), ordered frame list (add frames
   from the atlas's sprites via multi-select picker, reorder ↑/↓, remove),
   fps (numeric), playback (dropdown of the Defold modes), flip_h/flip_v.
-- **Numeric-suffix auto-grouping is a SUGGESTION ONLY — never exported
-  implicitly** (owner ruling 2026-07-10, the `icon_1`/`icon_2` case: numeric
-  suffixes often aren't animations). Export emits ONLY explicit `animations[]`
-  from the project. The GUI shows unaccepted suffix groups as a non-modal
-  suggestion row in the ANIMATIONS block ("Create \"walk\" (3 frames)?") —
-  accepting converts it into a regular explicit animation; ignoring does
-  nothing; suggestions can be disabled per atlas. tp_normalize's grouping
-  runs in compute-suggestions mode for the GUI and is OFF in the export path
-  (Phase 2 shipped it export-on; the animations packet flips this).
-  Validated + refined by `docs/research/animation-grouping.md` (2026-07-10):
-  (a) heuristic requires shared prefix + consistent separator + consistent
-  zero-pad + contiguous range of ≥3 frames, shown as a range
-  ("walk_01..walk_12, 12 frames"); (b) PRIMARY manual gesture = select
-  frames → "Create animation from selection" (id from common prefix) — the
-  fast path every explicit-assembly tool has (Godot/Unity/TexturePacker);
-  (c) suggestions accept/ignore individually (finer than TexturePacker's
-  global toggle); (d) invariant: exported region names NEVER strip numeric
-  suffixes — keeps the libGDX/Phaser runtime-convention path working
-  alongside explicit animations.
+- **NO auto-grouping, NO suggestions — FINAL owner ruling 2026-07-10**
+  (supersedes the interim suggestion-row idea from earlier the same day).
+  Rationale: the `icon_1`/`icon_2` false-positive case, plus
+  `docs/research/animation-grouping.md` — every explicit-assembly tool
+  (Defold, Godot, Unity, Aseprite) ships ZERO name-based detection; the one
+  default-on auto-grouper (TexturePacker) maintains a KB article on turning
+  it off. Export emits ONLY explicit `animations[]` from the project.
+  tp_normalize's numeric-suffix grouping is REMOVED from the export path
+  (animations packet deletes it; a common-prefix/natural-sort helper
+  survives only to power the selection gesture below).
+  Instead, ASSEMBLY IS MADE FAST:
+  (a) multi-select frames in the sprite list (Ctrl/Shift-click) →
+  **"Create animation from selection"** — id derived from the common
+  prefix, frames ordered by natural numeric sort (walk_2 before walk_10);
+  (b) animation editor's "Add frames…" multi-select picker appends in
+  natural order; reorder ↑/↓; remove;
+  (c) invariant: exported region names NEVER strip numeric suffixes — the
+  libGDX/Phaser runtime-convention path keeps working alongside explicit
+  animations.
 - **Playback enum pinned to Defold's set** (tp_core enum + GUI dropdown +
   Phase 5 .tpatlas mapping): once_forward (default 0), loop_forward,
   once_backward, loop_backward, once_pingpong, loop_pingpong, none.
