@@ -76,6 +76,14 @@ over real assets.
 `AGENTS.md` documents the repository invariants and the agent workflow used to
 develop this project.
 
+## Feedback & issues
+
+Found a bug, a wrong export, or missing behavior? Please
+[open an issue](https://github.com/d954mas/neotolis-texture-packer/issues) —
+I read every report and fix them. Attach the `.ntpacker_project` (and a couple
+of source images if the problem is packing/export related): projects are
+small, portable, and make reports instantly reproducible.
+
 ## License
 
 MIT. Bundled third-party bits keep their own licenses
