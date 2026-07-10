@@ -20,3 +20,5 @@ add_subdirectory(external/neotolis-engine/tools/builder nt_builder)
 enable_testing()
 add_subdirectory(apps/smoke)
 add_subdirectory(packer)
+# apps/gui links tp_core (packer/), so add it after.
+add_subdirectory(apps/gui)

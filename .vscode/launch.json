@@ -1,12 +1,12 @@
 {
-    // Owner workflow target: F5 -> ntpacker-gui, open a .ntpacker_project,
-    // see the packed atlas, export. The GUI binary lands in Phase 6 (needs
-    // 1b tp_pack -> 2 exporters -> 3 project file first); until then run
-    // tests via the "test (native-debug)" task (Ctrl+Shift+P -> Run Task).
+    // Owner workflow target: F5 -> ntpacker-gui. Today this launches the GUI
+    // SHELL skeleton (toolbar / sprite panel / preview canvas / status bar); the
+    // arg is shown in the status bar but not loaded yet. Project-file editing,
+    // live atlas preview, and export grow this app in roadmap Phase 6.
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "ntpacker-gui (Phase 6 - binary does not exist yet)",
+            "name": "ntpacker-gui",
             "type": "cppvsdbg",
             "request": "launch",
             "program": "${workspaceFolder}/build/apps/gui/native-debug/ntpacker-gui.exe",
