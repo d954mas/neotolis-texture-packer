@@ -1,18 +1,17 @@
-/* ntpacker-gui -- native GUI shell for the Neotolis Texture Packer.
+/* ntpacker-gui -- native GUI for the Neotolis Texture Packer.
  *
- * SKELETON (roadmap Phase 6 grows this file): a resizable window with the
- * ntpacker UI shell -- top toolbar, left sprite panel, center preview canvas,
- * status bar -- approximating docs/design/ux.md §2. No project editing, no
- * export: the buttons post a "wired in a later phase" status line, and no packing
- * logic lives here (AGENTS tool-parity: the GUI is a thin client over tp_core).
+ * PROJECT EDITOR (this iteration): create/open/save .ntpacker_project files, manage
+ * atlases, add image files/folders as sources, browse+select sprites, and preview the
+ * selected SOURCE image on the center canvas. The single source of truth is the linked
+ * tp_project (tp_core) -- the GUI is a thin editor (AGENTS tool-parity). In-process PACKING
+ * is still blocked by engine issue #282, so the live atlas preview is deferred; the Pack
+ * button surfaces the "preview stale" state per ux.md §3.3b.
  *
- * The live atlas preview (packing via tp_core, drawing the page) is Phase 6: it
- * can't link tp_core/nt_builder in-process with the render runtime today (the
- * builder's basisu encoder duplicates the runtime transcoder + forces a clashing
- * CRT) -- resolve upstream or pack out-of-process via the CLI. See CMakeLists.txt.
+ * Module split: gui_project (state + dirty bits + load/save), gui_scan (display-only folder
+ * enumeration), gui_canvas (the source-image preview via a custom nt_ui element). main.c is
+ * init/frame/shutdown + layout + the OS file dialogs (tinyfiledialogs).
  *
- * Wiring template: external/neotolis-engine/examples/ui_showcase/main.c
- * (minimal init/frame/shutdown subset; demo tabs/widgets dropped). */
+ * Wiring template: external/neotolis-engine/examples/ui_showcase/main.c. */
 
 // #region includes
 #include "app/nt_app.h"
@@ -29,7 +28,7 @@
 #include "material/nt_material.h"
 #include "math/nt_math.h"
 #include "memory/nt_mem_scratch.h"
-#include "nt_pack_format.h" /* NT_ASSET_* kinds */
+#include "nt_pack_format.h"
 #include "render/nt_render_defs.h"
 #include "renderers/nt_sprite_renderer.h"
 #include "renderers/nt_text_renderer.h"
@@ -38,78 +37,126 @@
 #include "ui/nt_ui_button.h"
 #include "ui/nt_ui_label.h"
 #include "ui/nt_ui_menu.h"
+#include "ui/nt_ui_modal.h"
 #include "ui/nt_ui_scale.h"
+#include "ui/nt_ui_tooltip.h"
+#include "ui/nt_ui_vlist.h"
 #include "window/nt_window.h"
 
 #include "ntpacker_ui_assets.h"
 
 #include "clay.h"
 
+#include "gui_canvas.h"
+#include "gui_project.h"
+#include "gui_scan.h"
+#include "tinyfiledialogs.h"
+
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
 #ifdef _WIN32
-#include <windows.h> /* GetModuleFileNameA: resolve asset paths from the exe dir, not cwd */
+#include <windows.h>
 #endif
 // #endregion
 
-// #region layout constants + render layers
-/* Walker sort key within a Clay zIndex: backgrounds (0) < images (1) < text (2). */
+// #region layout constants + render layers + global UI scale
 #define LAYER_IMG 1
 #define LAYER_TEXT 2
 
-/* Fixed pixel sizes -- constant across window size (desktop 1:1 layout, no UI zoom). */
-#define MENUBAR_H 28
-#define TOOLBAR_H 44
-#define STATUSBAR_H 30
-#define LEFT_PANEL_W 260
+/* Global UI scale (owner: "too small -- make it bigger"). Every layout metric and font size
+ * flows through S()/Su(), so one knob resizes the whole chrome. Seeded from the system DPI at
+ * startup (a high-DPI Windows display inflates the framebuffer to physical pixels, which makes
+ * fixed 1:1 metrics physically tiny -- the scale compensates) and overridable from View > UI
+ * Scale. BASE_* sizes are already bumped ~15-20% over the old shell for desktop-tool density. */
+static float g_ui_scale = 1.0F;
+static inline float S(float px) { return px * g_ui_scale; }
+static inline uint16_t Su(float px) { return (uint16_t)((px * g_ui_scale) + 0.5F); }
+
+#define BASE_MENUBAR_H 32.0F
+#define BASE_TOOLBAR_H 48.0F
+#define BASE_STATUSBAR_H 34.0F
+#define BASE_LEFT_PANEL_W 300.0F
+#define BASE_ROW_H 27.0F
+
+/* Base font px (scaled per frame into the g_* styles below). */
+#define FS_TITLE 17.0F
+#define FS_BODY 17.0F
+#define FS_ROW 16.0F
+#define FS_CAPTION 15.0F
+#define FS_HINT 19.0F
+#define FS_TAG 15.0F
 // #endregion
 
-// #region palette (single dark theme; Clay_Color channels are 0..255)
+// #region palette
 static const Clay_Color C_BG = {18.0F, 18.0F, 22.0F, 255.0F};
 static const Clay_Color C_PANEL = {30.0F, 34.0F, 42.0F, 255.0F};
 static const Clay_Color C_CANVAS = {12.0F, 13.0F, 16.0F, 255.0F};
 static const Clay_Color C_BORDER = {58.0F, 64.0F, 78.0F, 255.0F};
 static const Clay_Color C_STATUS = {24.0F, 26.0F, 34.0F, 255.0F};
+static const Clay_Color C_SEL = {52.0F, 78.0F, 120.0F, 255.0F};       /* selected-row accent fill */
+static const Clay_Color C_HOVER = {42.0F, 48.0F, 60.0F, 255.0F};      /* row hover */
+static const Clay_Color C_TAG = {158.0F, 98.0F, 70.0F, 235.0F};       /* stale/outdated amber */
+static const Clay_Color C_TRANSPARENT = {0.0F, 0.0F, 0.0F, 0.0F};
 
-static const nt_ui_label_style_t g_title = {.font_id = 0, .font_size = 22, .color = {235.0F, 238.0F, 245.0F, 255.0F}};
-static const nt_ui_label_style_t g_body = {.font_id = 0, .font_size = 17, .color = {210.0F, 214.0F, 222.0F, 255.0F}};
-static const nt_ui_label_style_t g_caption = {.font_id = 0, .font_size = 14, .color = {150.0F, 156.0F, 168.0F, 255.0F}};
-static const nt_ui_label_style_t g_canvas_hint = {.font_id = 0, .font_size = 18, .color = {120.0F, 126.0F, 140.0F, 255.0F}, .align = CLAY_TEXT_ALIGN_CENTER};
+/* Base label styles (font_size = base px); rescale_styles() copies these into the g_* below
+ * with font_size *= g_ui_scale every frame, so scaled text stays crisp (Slug vector font). */
+static const nt_ui_label_style_t g_title_base = {.font_id = 0, .font_size = FS_TITLE, .color = {170.0F, 180.0F, 196.0F, 255.0F}};
+static const nt_ui_label_style_t g_body_base = {.font_id = 0, .font_size = FS_BODY, .color = {214.0F, 220.0F, 230.0F, 255.0F}};
+static const nt_ui_label_style_t g_row_base = {.font_id = 0, .font_size = FS_ROW, .color = {206.0F, 212.0F, 222.0F, 255.0F}};
+static const nt_ui_label_style_t g_caption_base = {.font_id = 0, .font_size = FS_CAPTION, .color = {150.0F, 156.0F, 168.0F, 255.0F}};
+static const nt_ui_label_style_t g_canvas_hint_base = {.font_id = 0, .font_size = FS_HINT, .color = {120.0F, 126.0F, 140.0F, 255.0F}, .align = CLAY_TEXT_ALIGN_CENTER};
+static const nt_ui_label_style_t g_tag_base = {.font_id = 0, .font_size = FS_TAG, .color = {245.0F, 238.0F, 232.0F, 255.0F}};
+static nt_ui_label_style_t g_title, g_body, g_row, g_caption, g_canvas_hint, g_tag; /* scaled each frame */
 
-/* Muted flat toolbar button (reads as "not yet wired" but still clickable). */
 static nt_ui_button_style_t g_btn = {
     .idle = {.bg_tint = 0xFF4A4238U, .scale = 1.0F, .opacity = 1.0F},
     .hover = {.bg_tint = 0xFF5A5040U, .scale = 1.02F, .opacity = 1.0F},
     .pressed = {.bg_tint = 0xFF3A342CU, .scale = 0.97F, .offset_y = 1.0F, .opacity = 1.0F},
-    .disabled = {.bg_tint = 0xFF4A4238U, .scale = 1.0F, .opacity = 0.4F},
+    .disabled = {.bg_tint = 0xFF4A4238U, .scale = 1.0F, .opacity = 0.35F},
     .transition_speed = 12.0F,
     .hit_padding_lrtb = {4, 4, 4, 4},
     .slice9_scale = 1.0F,
 };
-
-/* Menu-bar trigger (0xAABBGGRR). Idle tint == the bar's own color (C_STATUS) so the item
- * reads as flat until hovered -- the button always draws a bg rect, so an alpha-0 tint is
- * rejected by the engine; blend into the bar instead. */
+/* Accent button (stale Pack): amber fill so it reads as "action needed". */
+static nt_ui_button_style_t g_btn_accent = {
+    .idle = {.bg_tint = 0xFF4662A0U, .scale = 1.0F, .opacity = 1.0F},
+    .hover = {.bg_tint = 0xFF5878B8U, .scale = 1.02F, .opacity = 1.0F},
+    .pressed = {.bg_tint = 0xFF3A5088U, .scale = 0.97F, .offset_y = 1.0F, .opacity = 1.0F},
+    .disabled = {.bg_tint = 0xFF4662A0U, .scale = 1.0F, .opacity = 0.35F},
+    .transition_speed = 12.0F,
+    .hit_padding_lrtb = {4, 4, 4, 4},
+    .slice9_scale = 1.0F,
+};
+static nt_ui_button_style_t g_btn_ghost = {
+    .idle = {.bg_tint = 0xFF2A2E38U, .scale = 1.0F, .opacity = 1.0F},
+    .hover = {.bg_tint = 0xFF3C4250U, .scale = 1.02F, .opacity = 1.0F},
+    .pressed = {.bg_tint = 0xFF242832U, .scale = 0.97F, .opacity = 1.0F},
+    .disabled = {.bg_tint = 0xFF2A2E38U, .scale = 1.0F, .opacity = 0.35F},
+    .transition_speed = 14.0F,
+    .hit_padding_lrtb = {2, 2, 2, 2},
+    .slice9_scale = 1.0F,
+};
 static nt_ui_button_style_t g_menubtn = {
-    .idle = {.bg_tint = 0xFF221A18U, .scale = 1.0F, .opacity = 1.0F},    /* == C_STATUS */
-    .hover = {.bg_tint = 0xFF403430U, .scale = 1.0F, .opacity = 1.0F},   /* lighter slate */
-    .pressed = {.bg_tint = 0xFF9E6246U, .scale = 1.0F, .opacity = 1.0F}, /* accent */
+    .idle = {.bg_tint = 0xFF221A18U, .scale = 1.0F, .opacity = 1.0F},
+    .hover = {.bg_tint = 0xFF403430U, .scale = 1.0F, .opacity = 1.0F},
+    .pressed = {.bg_tint = 0xFF9E6246U, .scale = 1.0F, .opacity = 1.0F},
     .disabled = {.bg_tint = 0xFF221A18U, .scale = 1.0F, .opacity = 0.4F},
     .transition_speed = 16.0F,
     .hit_padding_lrtb = {0, 0, 0, 0},
     .slice9_scale = 1.0F,
 };
-
-/* Filled once (flat bg + text fallbacks, so no extra atlas art beyond the white pixel). */
 static nt_ui_menu_style_t s_menu_style;
+static nt_ui_modal_style_t s_modal_style;
+static nt_ui_tooltip_style_t s_tip_style;
 // #endregion
 
 // #region engine state
-#define UI_MAX_ELEMENTS ((uint32_t)1024U)
-#define UI_ARENA_SIZE ((size_t)8U * 1024U * 1024U)
-#define SCRATCH_ARENA_SIZE ((size_t)1U * 1024U * 1024U)
+#define UI_MAX_ELEMENTS ((uint32_t)4096U)
+#define UI_ARENA_SIZE ((size_t)16U * 1024U * 1024U)
+#define SCRATCH_ARENA_SIZE ((size_t)4U * 1024U * 1024U)
 
 static NT_UI_DECLARE_ARENA(s_ui_arena, UI_ARENA_SIZE);
 static nt_ui_context_t *s_ctx;
@@ -130,30 +177,359 @@ static nt_font_t s_font;
 static bool s_atlas_bound;
 static bool s_font_bound;
 
-/* Shell UI state. */
-static const char *s_project_path; /* argv[1] or NULL */
 static char s_status[256];
-static uint32_t s_id_btn_pack, s_id_btn_export;
-static bool s_ids_ready;
-
-/* Menu bar: one nt_ui_menu per top-level menu. State (open + anchor) is game-owned and
- * persists; the ctx is per-frame scratch reused every frame (frame_record must survive). */
-static uint32_t s_id_mb_file, s_id_mb_view, s_id_mb_help;       /* trigger-button ids (for bbox anchor) */
-static uint32_t s_id_menu_file, s_id_menu_view, s_id_menu_help; /* menu ids */
-static nt_ui_menu_state_t s_file_state, s_view_state, s_help_state;
-static nt_ui_menu_ctx_t s_file_menu, s_view_menu, s_help_menu;
-/* Item keys: unique among siblings within one menu (mixed with the menu scope id). */
-enum { MK_NEW = 1, MK_OPEN, MK_SAVE, MK_SAVEAS, MK_EXIT, MK_ZIN, MK_ZOUT, MK_FIT, MK_ABOUT };
-
-/* Directory of the running executable; asset paths resolve against it so the app
- * finds its pack regardless of cwd (launch.json runs with cwd=workspaceFolder,
- * while nt_fs_native fopen()s relative to cwd). */
 static char s_exe_dir[1024];
 // #endregion
 
+// #region ui ids + menu state
+static uint32_t s_id_btn_pack, s_id_btn_export, s_id_vlist, s_id_modal;
+static bool s_ids_ready;
+
+static uint32_t s_id_mb_file, s_id_mb_view, s_id_mb_help;
+static uint32_t s_id_menu_file, s_id_menu_view, s_id_menu_help;
+static nt_ui_menu_state_t s_file_state, s_view_state, s_help_state;
+static nt_ui_menu_ctx_t s_file_menu, s_view_menu, s_help_menu;
+enum { MK_NEW = 1, MK_OPEN, MK_SAVE, MK_SAVEAS, MK_EXIT, MK_ZIN, MK_ZOUT, MK_FIT, MK_ABOUT, MK_S100, MK_S125, MK_S150, MK_S200 };
+// #endregion
+
+// #region editor state
+static gui_canvas s_canvas;
+
+static int s_sel_atlas;      /* selected atlas index */
+static int s_sel_src = -1;   /* selected source index within the atlas */
+static int s_sel_child = -1; /* selected folder-child index (-1 = the source row / a file) */
+static char s_sel_abs[512];  /* resolved absolute image path of the selection ("" = none/folder) */
+
+/* deferred side effects (dialogs + model mutations), applied at the top of the next frame */
+static bool s_pending_open, s_pending_save, s_pending_save_as, s_pending_add_files, s_pending_add_folder, s_pending_add_atlas;
+static int s_pending_remove_atlas = -1;
+static int s_pending_remove_source = -1;
+enum { AFTER_NONE = 0, AFTER_NEW, AFTER_EXIT };
+static int s_after_confirm;
+static bool s_confirm_open;
+enum { MODAL_NONE = 0, MODAL_SAVE, MODAL_DISCARD, MODAL_CANCEL };
+static int s_modal_action;
+
+/* Pack-button state cached for the tooltip pass (declared at root). */
+static bool s_pack_has_sources, s_pack_stale;
+
+/* Flattened sprite rows for the current atlas, rebuilt each frame. */
+#define MAX_ROWS 4096
+typedef struct sprite_row {
+    int src;
+    int child;
+    int indent;
+    bool is_source;
+    bool is_folder;
+    char label[160];
+    char abs[512];
+} sprite_row;
+static sprite_row s_rows[MAX_ROWS];
+static int s_row_count;
+// #endregion
+
+// #region small helpers
+#if defined(__GNUC__) || defined(__clang__)
+#define GUI_PRINTF(fmt_idx, args_idx) __attribute__((format(printf, fmt_idx, args_idx)))
+#else
+#define GUI_PRINTF(fmt_idx, args_idx)
+#endif
+
+static void set_status(const char *msg) { (void)snprintf(s_status, sizeof s_status, "%s", msg); }
+static void set_statusf(const char *fmt, ...) GUI_PRINTF(1, 2);
+static void set_statusf(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    (void)vsnprintf(s_status, sizeof s_status, fmt, ap);
+    va_end(ap);
+}
+
+static void normalize_slashes(char *s) {
+    for (; *s; s++) {
+        if (*s == '\\') {
+            *s = '/';
+        }
+    }
+}
+
+static const char *path_last(const char *p) {
+    const char *b = p;
+    for (const char *q = p; *q; q++) {
+        if (*q == '/' || *q == '\\') {
+            b = q + 1;
+        }
+    }
+    return b;
+}
+
+static void path_stem(const char *p, char *buf, size_t cap) {
+    (void)snprintf(buf, cap, "%s", path_last(p));
+    char *dot = strrchr(buf, '.');
+    if (dot && dot != buf) {
+        *dot = '\0';
+    }
+}
+
+static void reset_selection(void) {
+    s_sel_src = -1;
+    s_sel_child = -1;
+    s_sel_abs[0] = '\0';
+}
+
+static void clamp_selection(void) {
+    tp_project *p = gui_project_get();
+    if (!p || p->atlas_count == 0) {
+        s_sel_atlas = 0;
+        reset_selection();
+        return;
+    }
+    if (s_sel_atlas >= p->atlas_count) {
+        s_sel_atlas = p->atlas_count - 1;
+    }
+    if (s_sel_atlas < 0) {
+        s_sel_atlas = 0;
+    }
+}
+// #endregion
+
+// #region file dialogs (tinyfiledialogs)
+static void ensure_project_ext(const char *in, char *out, size_t cap) {
+    (void)snprintf(out, cap, "%s", in);
+    const char *base = path_last(out);
+    if (strrchr(base, '.') == NULL) {
+        size_t len = strlen(out);
+        (void)snprintf(out + len, cap - len, ".ntpacker_project");
+    }
+}
+
+static void do_open(void) {
+    static const char *filt[] = {"*.ntpacker_project"};
+    const char *path = tinyfd_openFileDialog("Open Project", "", 1, filt, "ntpacker project", 0);
+    if (!path) {
+        return;
+    }
+    char err[256];
+    if (gui_project_open(path, err, sizeof err) == TP_STATUS_OK) {
+        clamp_selection();
+        reset_selection();
+        set_statusf("Opened %s", gui_project_display_name());
+    } else {
+        set_statusf("Open failed: %s", err);
+    }
+}
+
+static void do_save_as(void) {
+    static const char *filt[] = {"*.ntpacker_project"};
+    const char *def = gui_project_has_path() ? gui_project_path() : "untitled.ntpacker_project";
+    const char *path = tinyfd_saveFileDialog("Save Project As", def, 1, filt, "ntpacker project");
+    if (!path) {
+        return;
+    }
+    char full[600];
+    ensure_project_ext(path, full, sizeof full);
+    char err[256];
+    if (gui_project_save_as(full, err, sizeof err) == TP_STATUS_OK) {
+        set_statusf("Saved %s", gui_project_display_name());
+    } else {
+        set_statusf("Save failed: %s", err);
+    }
+}
+
+static void do_save(void) {
+    if (!gui_project_has_path()) {
+        do_save_as();
+        return;
+    }
+    char err[256];
+    if (gui_project_save(err, sizeof err) == TP_STATUS_OK) {
+        set_statusf("Saved %s", gui_project_display_name());
+    } else {
+        set_statusf("Save failed: %s", err);
+    }
+}
+
+static void do_add_files(void) {
+    static const char *filt[] = {"*.png", "*.jpg", "*.jpeg", "*.bmp", "*.tga"};
+    const char *res = tinyfd_openFileDialog("Add Image Files", "", 5, filt, "image files", 1);
+    if (!res) {
+        return;
+    }
+    char buf[8192];
+    (void)snprintf(buf, sizeof buf, "%s", res);
+    int added = 0;
+    char *start = buf;
+    for (;;) {
+        char *bar = strchr(start, '|');
+        if (bar) {
+            *bar = '\0';
+        }
+        if (start[0] != '\0') {
+            normalize_slashes(start);
+            if (gui_project_add_source(s_sel_atlas, start)) {
+                added++;
+            }
+        }
+        if (!bar) {
+            break;
+        }
+        start = bar + 1;
+    }
+    set_statusf("Added %d file source(s) to %s", added, "the atlas");
+}
+
+static void do_add_folder(void) {
+    const char *dir = tinyfd_selectFolderDialog("Add Folder", "");
+    if (!dir) {
+        return;
+    }
+    char norm[600];
+    (void)snprintf(norm, sizeof norm, "%s", dir);
+    normalize_slashes(norm);
+    if (gui_project_add_source(s_sel_atlas, norm)) {
+        set_statusf("Added folder %s", path_last(norm));
+    } else {
+        set_status("Add folder failed.");
+    }
+}
+// #endregion
+
+// #region new/exit confirm flow
+static void request_new(void) {
+    if (gui_project_is_dirty()) {
+        s_after_confirm = AFTER_NEW;
+        s_confirm_open = true;
+    } else {
+        gui_project_new();
+        clamp_selection();
+        reset_selection();
+        set_status("New project.");
+    }
+}
+static void request_exit(void) {
+    if (gui_project_is_dirty()) {
+        s_after_confirm = AFTER_EXIT;
+        s_confirm_open = true;
+    } else {
+        nt_app_quit();
+    }
+}
+static void confirm_perform(void) {
+    if (s_after_confirm == AFTER_NEW) {
+        gui_project_new();
+        clamp_selection();
+        reset_selection();
+        set_status("New project.");
+    } else if (s_after_confirm == AFTER_EXIT) {
+        nt_app_quit();
+    }
+    s_after_confirm = AFTER_NONE;
+}
+// #endregion
+
+// #region deferred side-effects (run at the top of the frame, between frames)
+static void apply_pending(void) {
+    if (s_modal_action == MODAL_SAVE) {
+        do_save();
+        s_confirm_open = false;
+        if (!gui_project_is_dirty()) {
+            confirm_perform();
+        } else {
+            s_after_confirm = AFTER_NONE; /* save cancelled -> abort the pending action */
+        }
+    } else if (s_modal_action == MODAL_DISCARD) {
+        s_confirm_open = false;
+        confirm_perform();
+    } else if (s_modal_action == MODAL_CANCEL) {
+        s_confirm_open = false;
+        s_after_confirm = AFTER_NONE;
+    }
+    s_modal_action = MODAL_NONE;
+
+    if (s_pending_open) {
+        do_open();
+    }
+    if (s_pending_save) {
+        do_save();
+    }
+    if (s_pending_save_as) {
+        do_save_as();
+    }
+    if (s_pending_add_files) {
+        do_add_files();
+    }
+    if (s_pending_add_folder) {
+        do_add_folder();
+    }
+    if (s_pending_add_atlas) {
+        int idx = gui_project_add_atlas();
+        if (idx >= 0) {
+            s_sel_atlas = idx;
+            reset_selection();
+            set_statusf("Added atlas '%s'", tp_project_get_atlas(gui_project_get(), idx)->name);
+        }
+    }
+    if (s_pending_remove_source >= 0) {
+        gui_project_remove_source(s_sel_atlas, s_pending_remove_source);
+        reset_selection();
+        set_status("Removed source (no undo -- v1).");
+    }
+    if (s_pending_remove_atlas >= 0) {
+        gui_project_remove_atlas(s_pending_remove_atlas);
+        clamp_selection();
+        reset_selection();
+        set_status("Removed atlas (no undo -- v1).");
+    }
+
+    s_pending_open = s_pending_save = s_pending_save_as = false;
+    s_pending_add_files = s_pending_add_folder = s_pending_add_atlas = false;
+    s_pending_remove_source = -1;
+    s_pending_remove_atlas = -1;
+}
+// #endregion
+
+// #region row model
+static void build_rows(tp_project *proj, tp_project_atlas *a) {
+    s_row_count = 0;
+    if (!a) {
+        return;
+    }
+    for (int si = 0; si < a->source_count && s_row_count < MAX_ROWS; si++) {
+        const char *sp = a->sources[si];
+        char abs[512];
+        if (tp_project_resolve_path(proj, sp, abs, sizeof abs) != TP_STATUS_OK) {
+            abs[0] = '\0';
+        }
+        const bool is_dir = gui_scan_is_dir(abs);
+        sprite_row *r = &s_rows[s_row_count++];
+        memset(r, 0, sizeof *r);
+        r->src = si;
+        r->child = -1;
+        r->is_source = true;
+        r->is_folder = is_dir;
+        r->indent = 0;
+        if (is_dir) {
+            (void)snprintf(r->label, sizeof r->label, "%s/", path_last(sp));
+            r->abs[0] = '\0';
+            const gui_scan_result *sc = gui_scan_get(abs);
+            for (int ci = 0; ci < sc->count && s_row_count < MAX_ROWS; ci++) {
+                sprite_row *cr = &s_rows[s_row_count++];
+                memset(cr, 0, sizeof *cr);
+                cr->src = si;
+                cr->child = ci;
+                cr->is_source = false;
+                cr->indent = 1;
+                (void)snprintf(cr->label, sizeof cr->label, "%s", sc->entries[ci].rel);
+                (void)snprintf(cr->abs, sizeof cr->abs, "%s", sc->entries[ci].abs);
+            }
+        } else {
+            path_stem(sp, r->label, sizeof r->label);
+            (void)snprintf(r->abs, sizeof r->abs, "%s", abs);
+        }
+    }
+}
+// #endregion
+
 // #region init helpers
-/* Fills s_exe_dir with the executable's directory (no trailing slash). Falls back
- * to "." (cwd) off-Windows or if the query fails -- the skeleton is Windows-first. */
 static void resolve_exe_dir(void) {
 #ifdef _WIN32
     char exe[1024];
@@ -170,12 +546,33 @@ static void resolve_exe_dir(void) {
     (void)snprintf(s_exe_dir, sizeof s_exe_dir, ".");
 }
 
+/* Seed the global UI scale from the system DPI (96 dpi = 100%). GLFW makes the process
+ * per-monitor DPI aware, so the framebuffer is physical pixels -- without this the fixed
+ * metrics render physically tiny on a high-DPI display. Overridable via View > UI Scale. */
+static float detect_dpi_scale(void) {
+#ifdef _WIN32
+    const UINT dpi = GetDpiForSystem();
+    float s = (dpi >= 96U) ? ((float)dpi / 96.0F) : 1.0F;
+    if (s < 1.0F) {
+        s = 1.0F;
+    }
+    if (s > 3.0F) {
+        s = 3.0F;
+    }
+    return s;
+#else
+    return 1.0F; /* POSIX: engine exposes no GLFW window handle for glfwGetWindowContentScale */
+#endif
+}
+
 static void ensure_ids(void) {
     if (s_ids_ready) {
         return;
     }
     s_id_btn_pack = nt_ui_id("ntpacker/btn_pack");
     s_id_btn_export = nt_ui_id("ntpacker/btn_export");
+    s_id_vlist = nt_ui_id("ntpacker/sprite_vlist");
+    s_id_modal = nt_ui_id("ntpacker/confirm_modal");
     s_id_mb_file = nt_ui_id("ntpacker/mb_file");
     s_id_mb_view = nt_ui_id("ntpacker/mb_view");
     s_id_mb_help = nt_ui_id("ntpacker/mb_help");
@@ -183,20 +580,38 @@ static void ensure_ids(void) {
     s_id_menu_view = nt_ui_id("ntpacker/menu_view");
     s_id_menu_help = nt_ui_id("ntpacker/menu_help");
 
-    /* Flat panel (no slice9 art) + text fallbacks for arrow/checkmark -> needs only the
-     * white pixel + font already bound. Text-only rows (icon_size 0). */
     s_menu_style = nt_ui_menu_style_defaults();
-    s_menu_style.font_size = 15.0F;
-    s_menu_style.item_height = 26U;
-    s_menu_style.min_width = 168U;
     s_menu_style.icon_size = 0U;
-
+    s_modal_style = nt_ui_modal_style_defaults();
+    s_tip_style = nt_ui_tooltip_style_defaults();
     s_ids_ready = true;
 }
 
-static void set_status(const char *msg) { (void)snprintf(s_status, sizeof s_status, "%s", msg); }
+/* Multiplies every style's scale-dependent field by g_ui_scale. Runs each frame so a
+ * runtime UI-scale change (View > UI Scale) takes effect immediately; text stays crisp
+ * because the font is Slug vector text (resolution-independent -- no atlas re-bake needed). */
+static void apply_ui_scale(void) {
+    g_title = g_title_base;
+    g_title.font_size = S(FS_TITLE);
+    g_body = g_body_base;
+    g_body.font_size = S(FS_BODY);
+    g_row = g_row_base;
+    g_row.font_size = S(FS_ROW);
+    g_caption = g_caption_base;
+    g_caption.font_size = S(FS_CAPTION);
+    g_canvas_hint = g_canvas_hint_base;
+    g_canvas_hint.font_size = S(FS_HINT);
+    g_tag = g_tag_base;
+    g_tag.font_size = S(FS_TAG);
 
-/* Late-bind the atlas white region + font as their pack resources become ready. */
+    s_menu_style.font_size = S(15.0F);
+    s_menu_style.item_height = Su(28.0F);
+    s_menu_style.min_width = Su(180.0F);
+    s_tip_style.font_size = S(14.0F);
+    s_tip_style.max_width = Su(360.0F);
+    s_tip_style.pad = Su(8.0F);
+}
+
 static void try_bind_resources(void) {
     if (s_atlas_bound && s_font_bound) {
         return;
@@ -217,89 +632,83 @@ static void try_bind_resources(void) {
 }
 // #endregion
 
-// #region shell widgets
-static bool toolbar_button(nt_ui_context_t *ctx, uint32_t id, const char *text) {
-    nt_ui_button_begin(ctx, NT_UI_DATA_LAYER(LAYER_IMG), id, &g_btn,
-                       &(Clay_ElementDeclaration){.layout = {.sizing = {CLAY_SIZING_FIXED(88), CLAY_SIZING_FIXED(34)},
-                                                             .padding = CLAY_PADDING_ALL(6),
+// #region generic widgets
+static bool ui_btn(nt_ui_context_t *ctx, uint32_t id, const char *text, nt_ui_button_style_t *style, bool enabled,
+                   float w, float h, const nt_ui_label_style_t *lbl) {
+    Clay_SizingAxis wx = (w > 0.0F) ? CLAY_SIZING_FIXED(S(w)) : CLAY_SIZING_FIT(0);
+    nt_ui_button_begin(ctx, NT_UI_DATA_LAYER(LAYER_IMG), id, style,
+                       &(Clay_ElementDeclaration){.layout = {.sizing = {wx, CLAY_SIZING_FIXED(S(h))},
+                                                             .padding = {Su(10), Su(10), Su(4), Su(4)},
                                                              .childAlignment = {CLAY_ALIGN_X_CENTER, CLAY_ALIGN_Y_CENTER}},
-                                                  .cornerRadius = CLAY_CORNER_RADIUS(6)},
-                       true, NULL);
-    nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), text, &g_body);
-    return nt_ui_button_end(ctx);
+                                                  .cornerRadius = CLAY_CORNER_RADIUS(S(6))},
+                       enabled, NULL);
+    nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), text, lbl);
+    return nt_ui_button_end(ctx) && enabled;
 }
+// #endregion
 
-/* Toolbar keeps the primary action buttons only; app name lives in the OS title bar, and
- * File ops live in the menu bar -- no in-window title label, no duplication. */
-static void declare_toolbar(nt_ui_context_t *ctx) {
-    CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(TOOLBAR_H)},
-                     .padding = {10, 10, 6, 6},
-                     .childGap = 10,
-                     .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}},
-          .backgroundColor = C_PANEL,
-          .cornerRadius = CLAY_CORNER_RADIUS(8),
-          .border = {.color = C_BORDER, .width = {1, 1, 1, 1, 0}}}) {
-        if (toolbar_button(ctx, s_id_btn_pack, "Pack")) {
-            set_status("Pack: wired in Phase 6.");
-        }
-        if (toolbar_button(ctx, s_id_btn_export, "Export")) {
-            set_status("Export: wired in Phase 6.");
-        }
-    }
-}
-
-// #region menu bar (nt_ui_menu driven; click a top item to open its dropdown)
+// #region menu bar
 static void close_all_menus(void) {
     s_file_state.open = false;
     s_view_state.open = false;
     s_help_state.open = false;
 }
-
 static void file_items(nt_ui_menu_ctx_t *m) {
     if (nt_ui_menu_item(m, MK_NEW, "New")) {
-        set_status("New project -- lands in Phase 3.");
+        request_new();
     }
     if (nt_ui_menu_item(m, MK_OPEN, "Open...")) {
-        set_status("Open project -- lands in Phase 3.");
+        s_pending_open = true;
     }
     if (nt_ui_menu_item(m, MK_SAVE, "Save")) {
-        set_status("Save project -- lands in Phase 3.");
+        s_pending_save = true;
     }
     if (nt_ui_menu_item(m, MK_SAVEAS, "Save As...")) {
-        set_status("Save As -- lands in Phase 3.");
+        s_pending_save_as = true;
     }
     nt_ui_menu_separator(m);
     if (nt_ui_menu_item(m, MK_EXIT, "Exit")) {
-        nt_app_quit(); /* same clean path as the window close button */
+        request_exit();
     }
 }
-
+/* Radio-style UI-scale item. The ASCII font has no check glyph, so the active one is marked
+ * with an ASCII "(on)" rather than the menu's built-in checkmark. */
+static void scale_item(nt_ui_menu_ctx_t *m, uint32_t key, const char *pct, float value) {
+    const bool active = (g_ui_scale > (value - 0.01F)) && (g_ui_scale < (value + 0.01F));
+    char buf[28];
+    (void)snprintf(buf, sizeof buf, active ? "%s  (on)" : "%s", pct);
+    if (nt_ui_menu_item(m, key, buf)) {
+        g_ui_scale = value; /* TODO: persist in an app-settings file (not the project) later */
+        set_statusf("UI scale %s", pct);
+    }
+}
 static void view_items(nt_ui_menu_ctx_t *m) {
     if (nt_ui_menu_item(m, MK_ZIN, "Zoom In")) {
-        set_status("Zoom In -- preview canvas lands in Phase 6.");
+        set_status("Zoom -- lands with the atlas-page canvas.");
     }
     if (nt_ui_menu_item(m, MK_ZOUT, "Zoom Out")) {
-        set_status("Zoom Out -- preview canvas lands in Phase 6.");
+        set_status("Zoom -- lands with the atlas-page canvas.");
     }
     if (nt_ui_menu_item(m, MK_FIT, "Fit")) {
-        set_status("Fit -- preview canvas lands in Phase 6.");
+        set_status("Fit -- source preview already fits to canvas.");
     }
+    nt_ui_menu_separator(m);
+    scale_item(m, MK_S100, "UI Scale 100%", 1.0F);
+    scale_item(m, MK_S125, "UI Scale 125%", 1.25F);
+    scale_item(m, MK_S150, "UI Scale 150%", 1.5F);
+    scale_item(m, MK_S200, "UI Scale 200%", 2.0F);
 }
-
 static void help_items(nt_ui_menu_ctx_t *m) {
     if (nt_ui_menu_item(m, MK_ABOUT, "About")) {
-        set_status("ntpacker -- Neotolis Texture Packer (skeleton). About dialog lands in Phase 6.");
+        set_status("ntpacker -- Neotolis Texture Packer. Project editor; packing blocked by engine #282.");
     }
 }
-
-/* Trigger button in the bar. On click, toggle this menu open at its bottom-left (bbox from
- * last frame) and close the others -- classic click-driven menu bar over the context widget. */
 static void menubar_entry(nt_ui_context_t *ctx, uint32_t btn_id, const char *label, nt_ui_menu_state_t *st) {
     nt_ui_button_begin(ctx, NT_UI_DATA_LAYER(LAYER_IMG), btn_id, &g_menubtn,
                        &(Clay_ElementDeclaration){.layout = {.sizing = {CLAY_SIZING_FIT(0), CLAY_SIZING_GROW(0)},
-                                                             .padding = {10, 10, 2, 2},
+                                                             .padding = {Su(10), Su(10), Su(2), Su(2)},
                                                              .childAlignment = {CLAY_ALIGN_X_CENTER, CLAY_ALIGN_Y_CENTER}},
-                                                  .cornerRadius = CLAY_CORNER_RADIUS(4)},
+                                                  .cornerRadius = CLAY_CORNER_RADIUS(S(4))},
                        true, NULL);
     nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), label, &g_body);
     if (nt_ui_button_end(ctx)) {
@@ -308,82 +717,345 @@ static void menubar_entry(nt_ui_context_t *ctx, uint32_t btn_id, const char *lab
         if (!was_open) {
             const nt_ui_bbox_t bb = nt_ui_get_bbox(ctx, btn_id);
             st->anchor_x = bb.x;
-            st->anchor_y = bb.y + bb.height; /* drop the menu just below the bar item */
+            st->anchor_y = bb.y + bb.height;
             st->open = true;
         }
     }
 }
-
 static void declare_menubar(nt_ui_context_t *ctx) {
-    CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(MENUBAR_H)},
-                     .padding = {4, 4, 0, 0},
-                     .childGap = 2,
+    CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_MENUBAR_H))},
+                     .padding = {Su(4), Su(8), 0, 0},
+                     .childGap = Su(2),
                      .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}},
           .backgroundColor = C_STATUS,
-          .cornerRadius = CLAY_CORNER_RADIUS(6)}) {
+          .cornerRadius = CLAY_CORNER_RADIUS(S(6))}) {
         menubar_entry(ctx, s_id_mb_file, "File", &s_file_state);
         menubar_entry(ctx, s_id_mb_view, "View", &s_view_state);
         menubar_entry(ctx, s_id_mb_help, "Help", &s_help_state);
+        /* right side: project name + dirty dot */
+        CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}}) {}
+        if (gui_project_is_dirty()) {
+            nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "*", &g_tag);
+        }
+        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), gui_project_display_name(), &g_body);
+    }
+}
+// #endregion
+
+// #region toolbar (Pack / Export)
+static void declare_toolbar(nt_ui_context_t *ctx) {
+    tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
+    s_pack_has_sources = a && a->source_count > 0;
+    s_pack_stale = gui_project_is_stale();
+    const bool accent = s_pack_has_sources && s_pack_stale;
+
+    CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_TOOLBAR_H))},
+                     .padding = {Su(10), Su(10), Su(6), Su(6)},
+                     .childGap = Su(10),
+                     .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}},
+          .backgroundColor = C_PANEL,
+          .cornerRadius = CLAY_CORNER_RADIUS(S(8)),
+          .border = {.color = C_BORDER, .width = {Su(1), Su(1), Su(1), Su(1), 0}}}) {
+        if (ui_btn(ctx, s_id_btn_pack, accent ? "Pack  (stale)" : "Pack", accent ? &g_btn_accent : &g_btn,
+                   s_pack_has_sources, 132.0F, 36.0F, &g_body)) {
+            set_status("In-process packing blocked by neotolis-engine#282 -- see README.");
+        }
+        if (ui_btn(ctx, s_id_btn_export, "Export All", &g_btn, s_pack_has_sources, 122.0F, 36.0F, &g_body)) {
+            set_status("Exporters land in Phase 2.");
+        }
+    }
+}
+// #endregion
+
+// #region left panel (atlases + sprites)
+static void declare_atlas_list(nt_ui_context_t *ctx, tp_project *proj) {
+    nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "ATLASES", &g_title);
+    for (int i = 0; i < proj->atlas_count; i++) {
+        char idbuf[64];
+        (void)snprintf(idbuf, sizeof idbuf, "ntpacker/atlas_row_%d", i);
+        const uint32_t row_id = nt_ui_id(idbuf);
+        const uint32_t x_id = nt_ui_child_id(row_id, "x");
+        const bool selected = (i == s_sel_atlas);
+        const nt_ui_events_t ev = nt_ui_events(ctx, row_id, NULL);
+        const nt_ui_events_t xev = nt_ui_events(ctx, x_id, NULL);
+        if (xev.clicked) {
+            s_pending_remove_atlas = i;
+        } else if (ev.clicked && i != s_sel_atlas) {
+            s_sel_atlas = i;
+            reset_selection();
+        }
+        const Clay_Color bg = selected ? C_SEL : (ev.hovered ? C_HOVER : C_TRANSPARENT);
+        CLAY({.id = {.id = row_id},
+              .layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H))},
+                         .padding = {Su(8), Su(4), 0, 0},
+                         .childGap = Su(4),
+                         .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}},
+              .backgroundColor = bg,
+              .cornerRadius = CLAY_CORNER_RADIUS(S(4))}) {
+            CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+                nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), proj->atlases[i].name, &g_row);
+            }
+            if (proj->atlas_count > 1) {
+                (void)ui_btn(ctx, x_id, "x", &g_btn_ghost, true, 24.0F, 22.0F, &g_caption);
+            }
+        }
+    }
+    if (ui_btn(ctx, nt_ui_id("ntpacker/add_atlas"), "+ Atlas", &g_btn_ghost, true, 0.0F, 26.0F, &g_caption)) {
+        s_pending_add_atlas = true;
     }
 }
 
-/* Declared at root (after the layout tree, before nt_ui_end): the dropdown popups are
- * screen-anchored floatings and must escape any panel scissor. Call every frame open or
- * closed -- the item calls no-op when the menu is closed (keeps the keyboard-nav record). */
+static void declare_sprite_list(nt_ui_context_t *ctx) {
+    CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(28))}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "SPRITES", &g_title);
+        CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}}) {}
+        if (ui_btn(ctx, nt_ui_id("ntpacker/add_files"), "+ Files", &g_btn_ghost, true, 0.0F, 24.0F, &g_caption)) {
+            s_pending_add_files = true;
+        }
+        if (ui_btn(ctx, nt_ui_id("ntpacker/add_folder"), "+ Folder", &g_btn_ghost, true, 0.0F, 24.0F, &g_caption)) {
+            s_pending_add_folder = true;
+        }
+    }
+
+    if (s_row_count == 0) {
+        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "No sources. Use + Files / + Folder.", &g_caption);
+        CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}}) {}
+        return;
+    }
+
+    nt_ui_vlist_style_t vs = nt_ui_vlist_style_defaults();
+    vs.overscan = 3;
+    const nt_ui_vlist_range_t r = nt_ui_vlist_begin(
+        ctx, NULL, s_id_vlist, (uint32_t)s_row_count, S(BASE_ROW_H), NT_UI_AXIS_Y, &vs,
+        &(Clay_ElementDeclaration){.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}});
+    if (r.first <= r.last) {
+        for (uint32_t i = r.first; i <= r.last; i++) {
+            const sprite_row *row = &s_rows[i];
+            const uint32_t row_id = nt_ui_vlist_item_id(ctx, i);
+            const uint32_t hit_id = nt_ui_child_id(row_id, "hit");
+            const uint32_t x_id = nt_ui_child_id(row_id, "x");
+            const bool selected = (row->is_source ? (s_sel_src == row->src && s_sel_child == -1)
+                                                  : (s_sel_src == row->src && s_sel_child == row->child));
+            const nt_ui_events_t ev = nt_ui_events(ctx, hit_id, NULL);
+            bool x_clicked = false;
+            if (row->is_source) {
+                const nt_ui_events_t xev = nt_ui_events(ctx, x_id, NULL);
+                x_clicked = xev.clicked;
+                if (x_clicked) {
+                    s_pending_remove_source = row->src;
+                }
+            }
+            if (ev.clicked && !x_clicked) {
+                s_sel_src = row->src;
+                s_sel_child = row->child;
+                (void)snprintf(s_sel_abs, sizeof s_sel_abs, "%s", row->abs);
+            }
+            const Clay_Color bg = selected ? C_SEL : (ev.hovered ? C_HOVER : C_TRANSPARENT);
+            const uint16_t indent = Su(8.0F + ((float)row->indent * 16.0F));
+            CLAY({.id = {.id = row_id},
+                  .layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H))},
+                             .padding = {indent, Su(4), 0, 0},
+                             .childGap = Su(4),
+                             .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}},
+                  .backgroundColor = bg,
+                  .cornerRadius = CLAY_CORNER_RADIUS(S(4))}) {
+                CLAY({.id = {.id = hit_id},
+                      .layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+                    nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), row->label, row->is_folder ? &g_body : &g_row);
+                }
+                if (row->is_source) {
+                    (void)ui_btn(ctx, x_id, "x", &g_btn_ghost, true, 24.0F, 22.0F, &g_caption);
+                }
+            }
+        }
+    }
+    nt_ui_vlist_end(ctx);
+}
+
+static void declare_left_panel(nt_ui_context_t *ctx) {
+    tp_project *proj = gui_project_get();
+    CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(S(BASE_LEFT_PANEL_W)), CLAY_SIZING_GROW(0)},
+                     .padding = {Su(12), Su(12), Su(12), Su(12)},
+                     .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                     .childGap = Su(6),
+                     .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_TOP}},
+          .backgroundColor = C_PANEL,
+          .cornerRadius = CLAY_CORNER_RADIUS(S(8)),
+          .border = {.color = C_BORDER, .width = {Su(1), Su(1), Su(1), Su(1), 0}}}) {
+        declare_atlas_list(ctx, proj);
+        CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(1))}}, .backgroundColor = C_BORDER}) {}
+        declare_sprite_list(ctx);
+    }
+}
+// #endregion
+
+// #region canvas
+static void declare_canvas(nt_ui_context_t *ctx) {
+    const bool has_img = gui_canvas_has_image(&s_canvas);
+    char label[256];
+    if (has_img) {
+        (void)snprintf(label, sizeof label, "%s  --  %d x %d", path_last(s_sel_abs), gui_canvas_img_w(&s_canvas),
+                       gui_canvas_img_h(&s_canvas));
+    } else {
+        (void)snprintf(label, sizeof label, "No image selected");
+    }
+
+    CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)},
+                     .padding = {Su(10), Su(10), Su(10), Su(10)},
+                     .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                     .childGap = Su(8),
+                     .childAlignment = {CLAY_ALIGN_X_CENTER, CLAY_ALIGN_Y_CENTER}},
+          .backgroundColor = C_CANVAS,
+          .cornerRadius = CLAY_CORNER_RADIUS(S(8)),
+          .border = {.color = C_BORDER, .width = {Su(1), Su(1), Su(1), Su(1), 0}}}) {
+        /* view area: the custom-drawn source image, OR placeholder + the stale tag */
+        CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)},
+                         .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                         .childGap = Su(8),
+                         .childAlignment = {CLAY_ALIGN_X_CENTER, CLAY_ALIGN_Y_CENTER}}}) {
+            if (has_img) {
+                nt_ui_custom(ctx, NT_UI_DATA_LAYER(LAYER_IMG), &s_canvas);
+            } else {
+                /* atlas-preview placeholder -> the "outdated" tag lives here (not over a source view) */
+                if (s_pack_stale && s_pack_has_sources) {
+                    CLAY({.layout = {.padding = {Su(8), Su(8), Su(3), Su(3)}}, .backgroundColor = C_TAG, .cornerRadius = CLAY_CORNER_RADIUS(S(4))}) {
+                        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "outdated -- press Pack", &g_tag);
+                    }
+                }
+                nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "No atlas preview yet -- packing is blocked by engine #282.", &g_canvas_hint);
+                nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Select a sprite on the left to preview its source image.", &g_caption);
+            }
+        }
+        CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(22))}, .childAlignment = {CLAY_ALIGN_X_CENTER, CLAY_ALIGN_Y_CENTER}}}) {
+            nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), label, &g_caption);
+        }
+    }
+}
+// #endregion
+
+// #region status bar + menus + tooltips
+static void declare_statusbar(nt_ui_context_t *ctx) {
+    CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_STATUSBAR_H))},
+                     .padding = {Su(12), Su(12), Su(4), Su(4)},
+                     .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}},
+          .backgroundColor = C_STATUS,
+          .cornerRadius = CLAY_CORNER_RADIUS(S(6))}) {
+        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), s_status, &g_caption);
+    }
+}
+
 static void declare_menus(nt_ui_context_t *ctx) {
     nt_ui_menu_begin(&s_file_menu, ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, s_id_menu_file, &s_file_state, &s_menu_style);
     file_items(&s_file_menu);
     nt_ui_menu_end(&s_file_menu);
-
     nt_ui_menu_begin(&s_view_menu, ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, s_id_menu_view, &s_view_state, &s_menu_style);
     view_items(&s_view_menu);
     nt_ui_menu_end(&s_view_menu);
-
     nt_ui_menu_begin(&s_help_menu, ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, s_id_menu_help, &s_help_state, &s_menu_style);
     help_items(&s_help_menu);
     nt_ui_menu_end(&s_help_menu);
 }
+
+static void declare_tooltips(nt_ui_context_t *ctx) {
+    const char *pack_tip = s_pack_stale
+        ? "Pack: repack now with current settings and refresh the preview. Sources or settings changed -- press to repack. (Packing is blocked until engine fix #282 -- coming soon.)"
+        : "Pack: repack now with current settings (session preview only, no files exported). (Packing is blocked until engine fix #282 -- coming soon.)";
+    (void)nt_ui_tooltip(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, s_id_btn_pack, pack_tip, &s_tip_style);
+    (void)nt_ui_tooltip(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, s_id_btn_export,
+                        "Export All: pack per enabled target and write each target's files to its output path. Exporters land in Phase 2.",
+                        &s_tip_style);
+}
+
+static void declare_confirm_modal(nt_ui_context_t *ctx) {
+    if (nt_ui_modal_visible(ctx, s_id_modal, &s_modal_style, &s_confirm_open)) {
+        CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(S(460)), CLAY_SIZING_FIT(0)},
+                         .padding = {Su(22), Su(22), Su(22), Su(22)},
+                         .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                         .childGap = Su(16)},
+              .backgroundColor = C_PANEL,
+              .cornerRadius = CLAY_CORNER_RADIUS(S(8)),
+              .border = {.color = C_BORDER, .width = {Su(1), Su(1), Su(1), Su(1), 0}}}) {
+            nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Unsaved changes", &g_body);
+            nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Save changes before continuing?", &g_caption);
+            CLAY({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = Su(12), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+                if (ui_btn(ctx, nt_ui_id("ntpacker/modal_save"), "Save", &g_btn_accent, true, 100.0F, 34.0F, &g_body)) {
+                    s_modal_action = MODAL_SAVE;
+                }
+                if (ui_btn(ctx, nt_ui_id("ntpacker/modal_discard"), "Discard", &g_btn, true, 100.0F, 34.0F, &g_body)) {
+                    s_modal_action = MODAL_DISCARD;
+                }
+                if (ui_btn(ctx, nt_ui_id("ntpacker/modal_cancel"), "Cancel", &g_btn, true, 100.0F, 34.0F, &g_body)) {
+                    s_modal_action = MODAL_CANCEL;
+                }
+            }
+        }
+        nt_ui_modal_end(ctx);
+    }
+}
 // #endregion
 
-static void declare_left_panel(nt_ui_context_t *ctx) {
-    CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(LEFT_PANEL_W), CLAY_SIZING_GROW(0)},
-                     .padding = CLAY_PADDING_ALL(12),
-                     .layoutDirection = CLAY_TOP_TO_BOTTOM,
-                     .childGap = 8,
-                     .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_TOP}},
-          .backgroundColor = C_PANEL,
-          .cornerRadius = CLAY_CORNER_RADIUS(8),
-          .border = {.color = C_BORDER, .width = {1, 1, 1, 1, 0}}}) {
-        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Sprites", &g_title);
-        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "No sprites yet.", &g_caption);
-        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Add-folder input lands in", &g_caption);
-        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Phase 6 (see ux.md §2).", &g_caption);
+// #region self-test (headless smoke of the project ops; OFF by default)
+#ifdef NTPACKER_GUI_SELFTEST
+static void to_abs(const char *rel, char *out, size_t cap) {
+#ifdef _WIN32
+    if (GetFullPathNameA(rel, (DWORD)cap, out, NULL) == 0) {
+        (void)snprintf(out, cap, "%s", rel);
     }
+    normalize_slashes(out);
+#else
+    (void)snprintf(out, cap, "%s", rel);
+#endif
 }
 
-static void declare_canvas(nt_ui_context_t *ctx) {
-    CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)},
-                     .padding = CLAY_PADDING_ALL(16),
-                     .childAlignment = {CLAY_ALIGN_X_CENTER, CLAY_ALIGN_Y_CENTER}},
-          .backgroundColor = C_CANVAS,
-          .cornerRadius = CLAY_CORNER_RADIUS(8),
-          .border = {.color = C_BORDER, .width = {1, 1, 1, 1, 0}}}) {
-        CLAY({.layout = {.sizing = {CLAY_SIZING_FIT(0), CLAY_SIZING_FIT(0)}, .layoutDirection = CLAY_TOP_TO_BOTTOM, .childGap = 8, .childAlignment = {CLAY_ALIGN_X_CENTER, CLAY_ALIGN_Y_CENTER}}}) {
-            nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "No atlas loaded -- pack preview lands here.", &g_canvas_hint);
-            nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Live atlas preview lands in Phase 6 (see ux.md region E).", &g_caption);
+static void run_selftest(void) {
+    nt_log_info("SELFTEST: begin");
+    gui_project_init();
+    tp_project *p = gui_project_get();
+    NT_ASSERT(p && p->atlas_count == 1);
+
+    /* Absolute paths (from cwd=workspace) so they survive relativize-on-save + resolve-on-load. */
+    char folder[512];
+    char file[512];
+    to_abs("examples/defold-demo/examples/anim_trim/anims", folder, sizeof folder);
+    to_abs("examples/defold-demo/examples/anim_trim/anims/sq1.png", file, sizeof file);
+
+    bool ok = gui_project_add_source(0, folder);
+    nt_log_info("SELFTEST: add folder source -> %d (dirty=%d stale=%d)", ok, gui_project_is_dirty(), gui_project_is_stale());
+    ok = gui_project_add_source(0, file);
+    nt_log_info("SELFTEST: add file source -> %d", ok);
+
+    const gui_scan_result *sc = gui_scan_get(folder);
+    nt_log_info("SELFTEST: folder scan found %d image(s)", sc->count);
+
+    char err[256] = {0};
+    const bool dec = gui_canvas_set_image(&s_canvas, file, err, sizeof err);
+    nt_log_info("SELFTEST: decode+upload -> %d (%dx%d) %s", dec, gui_canvas_img_w(&s_canvas), gui_canvas_img_h(&s_canvas), dec ? "" : err);
+
+    char save_path[1200];
+    (void)snprintf(save_path, sizeof save_path, "%s/selftest.ntpacker_project", s_exe_dir);
+    tp_status st = gui_project_save_as(save_path, err, sizeof err);
+    nt_log_info("SELFTEST: save '%s' -> %s (dirty=%d)", save_path, tp_status_str(st), gui_project_is_dirty());
+
+    st = gui_project_open(save_path, err, sizeof err);
+    tp_project *rp = gui_project_get();
+    const int nsrc = rp ? rp->atlases[0].source_count : -1;
+    nt_log_info("SELFTEST: reload -> %s, atlas0 sources=%d", tp_status_str(st), nsrc);
+
+    /* Leave a live selection so the auto-quit frames actually draw the decoded image (Task 5). */
+    if (rp && nsrc > 0) {
+        char resolved[512];
+        if (tp_project_resolve_path(rp, rp->atlases[0].sources[nsrc - 1], resolved, sizeof resolved) == TP_STATUS_OK) {
+            (void)snprintf(s_sel_abs, sizeof s_sel_abs, "%s", resolved);
+            s_sel_atlas = 0;
+            s_sel_src = nsrc - 1;
+            s_sel_child = -1;
         }
     }
+    /* Exercise the scaled layout during the auto-quit frames (verifies no element/arena overflow). */
+    g_ui_scale = 1.5F;
+    nt_log_info("SELFTEST: end (canvas selection '%s'; forced UI scale 1.5 for render)", s_sel_abs);
 }
-
-static void declare_statusbar(nt_ui_context_t *ctx) {
-    CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(STATUSBAR_H)},
-                     .padding = {12, 12, 4, 4},
-                     .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}},
-          .backgroundColor = C_STATUS,
-          .cornerRadius = CLAY_CORNER_RADIUS(6)}) {
-        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), s_status, &g_caption);
-    }
-}
+#endif
 // #endregion
 
 // #region frame
@@ -392,26 +1064,35 @@ static void frame(void) {
     nt_input_poll();
     nt_mem_scratch_reset();
 
-    /* Esc closes an open menu (desktop convention) -- it does NOT quit. Quit paths are the
-     * window close button and File > Exit. */
+#ifdef NTPACKER_GUI_SELFTEST
+    /* Verification build: render a few real frames (proves the canvas draw + walk), then quit
+     * cleanly so the process returns 0 without interaction. */
+    static float s_selftest_elapsed = 0.0F;
+    s_selftest_elapsed += g_nt_app.dt;
+    if (s_selftest_elapsed > 2.5F) {
+        nt_app_quit();
+    }
+#endif
+
+    /* dialogs + model mutations queued last frame run here, cleanly between frames */
+    apply_pending();
+
     if (nt_input_key_is_pressed(NT_KEY_ESCAPE)) {
-        close_all_menus();
+        if (s_confirm_open) {
+            s_confirm_open = false;
+            s_after_confirm = AFTER_NONE;
+        } else {
+            close_all_menus();
+        }
     }
 
     nt_resource_step();
     nt_material_step();
     try_bind_resources();
 
-    /* Real framebuffer size every frame (never a cached startup size); the >0 guard keeps a
-     * minimized/zero-size window from feeding Clay a 0 extent. */
     const float fb_w = (float)(g_nt_window.fb_width > 0 ? g_nt_window.fb_width : 800);
     const float fb_h = (float)(g_nt_window.fb_height > 0 ? g_nt_window.fb_height : 600);
 
-    /* Desktop 1:1 scaling: logical UI space == framebuffer pixels, so menubar/toolbar/panels
-     * and fonts keep a CONSTANT pixel size and only the center canvas grows with the window --
-     * NOT ui_showcase's reference-resolution EXPAND (which zooms the whole UI). STRETCH with
-     * ref == fb yields scale_x=scale_y=1, offset 0. No DPI/content scale is applied: nt_window
-     * exposes none; wire it here when the engine surfaces monitor content scale. */
     nt_ui_scale_desc_t scale_desc = {.ref_w = fb_w, .ref_h = fb_h, .mode = NT_UI_SCALE_STRETCH};
     nt_ui_scale_t scale = nt_ui_compute_scale(&scale_desc, fb_w, fb_h);
     nt_ui_scale_ortho_t ortho = nt_ui_scale_ortho(&scale);
@@ -449,6 +1130,7 @@ static void frame(void) {
         });
         nt_sprite_renderer_restore_gpu();
         nt_text_renderer_restore_gpu();
+        gui_canvas_restore_gpu(&s_canvas);
         s_atlas_bound = false;
         s_font_bound = false;
     }
@@ -469,31 +1151,48 @@ static void frame(void) {
         nt_gfx_bind_uniform_buffer(s_frame_ubo, 0);
 
         ensure_ids();
+        apply_ui_scale();
+        gui_canvas_ensure_pipeline(&s_canvas, sprite_info);
+        gui_canvas_set_frame_ubo(&s_canvas, s_frame_ubo);
+
+        clamp_selection();
+        build_rows(gui_project_get(), tp_project_get_atlas(gui_project_get(), s_sel_atlas));
 
         nt_ui_begin(s_ctx, scale.logical_w, scale.logical_h, g_nt_app.dt, &g_nt_input.pointers[0], 1);
         nt_ui_set_viewport(s_ctx, nt_ui_viewport_from_scale(&scale));
 
         CLAY({.id = CLAY_ID("root"),
               .layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)},
-                         .padding = CLAY_PADDING_ALL(10),
+                         .padding = {Su(10), Su(10), Su(10), Su(10)},
                          .layoutDirection = CLAY_TOP_TO_BOTTOM,
-                         .childGap = 8,
+                         .childGap = Su(8),
                          .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_TOP}},
               .backgroundColor = C_BG}) {
             declare_menubar(s_ctx);
             declare_toolbar(s_ctx);
-            /* Middle row: left sprite panel | center canvas (grows to fill). */
-            CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = 8, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_TOP}}}) {
+            CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = Su(8), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_TOP}}}) {
                 declare_left_panel(s_ctx);
                 declare_canvas(s_ctx);
             }
             declare_statusbar(s_ctx);
         }
 
-        /* Dropdown popups at root so they escape panel scissors (mirrors a root-declared modal). */
         declare_menus(s_ctx);
+        declare_tooltips(s_ctx);
+        declare_confirm_modal(s_ctx);
 
         nt_ui_end(s_ctx);
+
+        /* selection captured this frame -> refresh the canvas texture before the walk draws it */
+        if (s_sel_abs[0] != '\0') {
+            char err[256];
+            if (!gui_canvas_set_image(&s_canvas, s_sel_abs, err, sizeof err)) {
+                set_statusf("Decode failed: %s", err);
+                s_sel_abs[0] = '\0';
+            }
+        } else {
+            gui_canvas_clear(&s_canvas);
+        }
 
         nt_ui_target_t target = nt_ui_scale_make_target(&scale);
         nt_ui_walk(s_ctx, &target);
@@ -509,15 +1208,6 @@ static void frame(void) {
 
 // #region main + init/shutdown
 int main(int argc, char *argv[]) {
-    /* argv[1] (if any) is the project file. The skeleton does not load it (Phase 3);
-     * it tolerates an unknown/missing path and just reports it in the status bar. */
-    s_project_path = (argc > 1) ? argv[1] : NULL;
-    if (s_project_path != NULL) {
-        (void)snprintf(s_status, sizeof s_status, "project: %s -- loading lands in Phase 3", s_project_path);
-    } else {
-        set_status("no project");
-    }
-
     nt_engine_config_t config = {0};
     config.app_name = "ntpacker-gui";
     config.version = 1;
@@ -545,7 +1235,7 @@ int main(int argc, char *argv[]) {
     nt_resource_set_activator(NT_ASSET_SHADER_CODE, nt_gfx_activate_shader, nt_gfx_deactivate_shader);
     nt_atlas_init();
 
-    nt_material_init(&(nt_material_desc_t){.max_materials = 2}); /* sprite + text */
+    nt_material_init(&(nt_material_desc_t){.max_materials = 2});
     nt_font_init(&(nt_font_desc_t){.max_fonts = 1});
 
     nt_sprite_renderer_desc_t sr_desc = nt_sprite_renderer_desc_defaults();
@@ -555,7 +1245,7 @@ int main(int argc, char *argv[]) {
     nt_ui_module_init();
     nt_ui_create_desc_t ui_desc = nt_ui_create_desc_defaults();
     ui_desc.max_elements = UI_MAX_ELEMENTS;
-    ui_desc.state_slots = 128U;
+    ui_desc.state_slots = 512U;
     s_ctx = nt_ui_create_context(s_ui_arena, sizeof s_ui_arena, &ui_desc);
     NT_ASSERT(s_ctx != NULL && "ntpacker-gui: failed to create UI context");
 
@@ -619,10 +1309,38 @@ int main(int argc, char *argv[]) {
 
     nt_resource_set_activate_time_budget(0);
 
-    nt_log_info("ntpacker-gui: starting (menu bar: File/View/Help; Esc closes menus)");
+    g_ui_scale = detect_dpi_scale();
+    nt_log_info("ntpacker-gui: UI scale %.2f (from system DPI)", (double)g_ui_scale);
+
+    /* editor state + the canvas custom-draw handler (registered outside begin/end) */
+    gui_canvas_init(&s_canvas);
+    nt_ui_set_custom_handler(s_ctx, gui_canvas_handler, &s_canvas);
+    gui_project_init();
+
+    /* open a project passed on the command line (errors go to the status bar) */
+    if (argc > 1) {
+        char err[256];
+        if (gui_project_open(argv[1], err, sizeof err) == TP_STATUS_OK) {
+            set_statusf("Opened %s", gui_project_display_name());
+        } else {
+            set_statusf("Open '%s' failed: %s", argv[1], err);
+        }
+    } else {
+        set_status("Ready. New project -- add files or a folder to start.");
+    }
+
+#ifdef NTPACKER_GUI_SELFTEST
+    run_selftest();
+#endif
+
+    clamp_selection();
+    nt_log_info("ntpacker-gui: starting (project editor; packing blocked by engine #282)");
 
     nt_app_run(frame);
 
+    gui_canvas_shutdown(&s_canvas);
+    gui_scan_shutdown();
+    gui_project_shutdown();
     nt_ui_destroy_context(s_ctx);
     nt_ui_module_shutdown();
     nt_text_renderer_shutdown();

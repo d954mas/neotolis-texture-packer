@@ -20,7 +20,7 @@ add_test(NAME tp_transform_decode COMMAND tp_test_transform_decode)
 # nt_builder (transitive through tp_core) then parses it back. Needs a scratch
 # dir for the temp .ntpack files.
 add_executable(tp_test_pack_read test_pack_read.c tp_fixtures.c)
-target_link_libraries(tp_test_pack_read PRIVATE tp_core unity)
+target_link_libraries(tp_test_pack_read PRIVATE tp_build unity)  # tp_build: fixtures pack via nt_builder
 target_compile_options(tp_test_pack_read PRIVATE -U_DLL)
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_test")
 add_test(NAME tp_pack_read COMMAND tp_test_pack_read "${CMAKE_BINARY_DIR}/tp_test")
@@ -37,7 +37,7 @@ add_test(NAME tp_uv_property COMMAND tp_test_uv_property)
 # (transitive through tp_core) then parses back. Needs a scratch dir for the
 # session .ntpack files.
 add_executable(tp_test_pack test_pack.c)
-target_link_libraries(tp_test_pack PRIVATE tp_core unity)
+target_link_libraries(tp_test_pack PRIVATE tp_build unity)  # tp_build: drives nt_builder
 target_compile_options(tp_test_pack PRIVATE -U_DLL)
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_pack_test")
 add_test(NAME tp_pack COMMAND tp_test_pack "${CMAKE_BINARY_DIR}/tp_pack_test")

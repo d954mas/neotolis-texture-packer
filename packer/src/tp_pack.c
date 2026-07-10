@@ -128,24 +128,8 @@ static tp_status validate_settings(const tp_pack_settings *s, tp_error *err) {
 }
 // #endregion
 
-tp_status tp_pack_settings_defaults(tp_pack_settings *out) {
-    if (!out) {
-        return TP_STATUS_INVALID_ARGUMENT;
-    }
-    nt_atlas_opts_t d = nt_atlas_opts_defaults();
-    memset(out, 0, sizeof *out);
-    out->max_size = (int)d.max_size;
-    out->padding = (int)d.padding;
-    out->margin = (int)d.margin;
-    out->extrude = (int)d.extrude;
-    out->alpha_threshold = (int)d.alpha_threshold;
-    out->max_vertices = (int)d.max_vertices;
-    out->shape = (int)d.shape;
-    out->allow_transform = d.allow_transform;
-    out->power_of_two = d.power_of_two;
-    out->pixels_per_unit = d.pixels_per_unit;
-    return TP_STATUS_OK;
-}
+/* tp_pack_settings_defaults() moved to tp_core (src/tp_pack_settings.c): the project
+ * model needs it and the GUI links tp_core without the builder (#282). */
 
 /* Build the reverse map the reader needs to resolve region name_hash -> name
  * (plan §2.8): atlas display name + every sprite name. Distinct names that hash

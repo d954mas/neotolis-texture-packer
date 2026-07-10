@@ -12,24 +12,36 @@ set(GUI_GENERATED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/generated")
 # from the engine root (keeps generated macro names identical to the engine examples).
 set(GUI_ENGINE_ROOT "${CMAKE_SOURCE_DIR}/external/neotolis-engine")
 
-add_executable(ntpacker-gui main.c)
+# tinyfiledialogs (vendored in-repo, apps/gui/deps, zlib licence) -- OS-native open/save/
+# folder dialogs (ux.md gap 3). Its own small static lib compiled -w so our -Werror never
+# applies to third-party code; default CRT (matches the GUI). Windows needs comdlg32/ole32/
+# shell32 for the native dialogs.
+add_library(tinyfiledialogs STATIC deps/tinyfiledialogs/tinyfiledialogs.c)
+target_include_directories(tinyfiledialogs PUBLIC deps/tinyfiledialogs)
+target_compile_definitions(tinyfiledialogs PRIVATE _CRT_SECURE_NO_WARNINGS)
+target_compile_options(tinyfiledialogs PRIVATE -w)   # vendored: exempt from our -Werror
+if(WIN32)
+    target_link_libraries(tinyfiledialogs PUBLIC comdlg32 ole32 shell32 user32)
+endif()
+
+add_executable(ntpacker-gui main.c gui_project.c gui_scan.c gui_canvas.c)
 # Lean link set derived from examples/ui_showcase: dropped nt_shape_renderer (no 3D/
 # shape draws), nt_debug_overlay + nt_metrics (no HUD), nt_platform (no mem probe).
 # Kept the concrete impls the engine's *_interface deps require at final link:
 # nt_gfx (font/ui), nt_fs + nt_http_stub (resource), nt_clipboard (ui).
 #
-# NOTE: tp_core is intentionally NOT linked. It pulls nt_builder -> nt_basisu_encoder,
-# which (a) re-defines basisu_transcoder.cpp symbols already in the runtime's
-# nt_basisu_transcoder (duplicate-symbol link error) and (b) forces a static MT CRT that
-# clashes with the runtime's dynamic CRT. Running tp_pack in-process with the render
-# runtime is a Phase 6 problem to resolve upstream (engine PR to share one transcoder TU
-# + reconcile CRT, or run the packer out-of-process via the ntpacker CLI). See the report.
+# tp_core is now linked (issue #282 resolved for the GUI by the packer/ split): tp_core is
+# the read/model/edit core WITHOUT nt_builder, so it carries no nt_basisu_encoder and no
+# static-CRT pin -- it links cleanly alongside nt_gfx. tp_build (the pack orchestrator that
+# DOES pull nt_builder) is deliberately NOT linked; in-process packing still waits on #282.
+# stb_image decodes the selected source image for the canvas preview (Task 5).
 target_link_libraries(ntpacker-gui PRIVATE
     nt_core nt_app nt_input nt_window nt_math nt_log nt_time nt_resource
     nt_material nt_shared nt_atlas
     nt_sprite_renderer nt_text_renderer nt_font nt_ui
     nt_render nt_hash nt_mem_scratch
     nt_gfx nt_http_stub nt_fs nt_clipboard
+    tp_core stb_image tinyfiledialogs
 )
 # Generated asset header from the pack builder (ntpacker_ui_assets.h).
 target_include_directories(ntpacker-gui PRIVATE "${GUI_GENERATED_DIR}")
@@ -41,6 +53,13 @@ target_compile_definitions(ntpacker-gui PRIVATE
     NT_INTROSPECT_ENABLED=$<BOOL:${NT_INTROSPECT_ENABLED}>
     NT_INTROSPECT_WRITE_ENABLED=$<BOOL:${NT_INTROSPECT_WRITE_ENABLED}>
 )
+
+# Headless smoke of the project ops (create/add/decode+upload/save/reload) + a timed
+# auto-quit, for CI/verification only. OFF by default -- the shipped app is interactive.
+option(NTPACKER_GUI_SELFTEST "Run the startup project-ops self-test then auto-quit" OFF)
+if(NTPACKER_GUI_SELFTEST)
+    target_compile_definitions(ntpacker-gui PRIVATE NTPACKER_GUI_SELFTEST=1)
+endif()
 
 nt_set_warning_flags(ntpacker-gui)
 nt_set_sanitizer_flags(ntpacker-gui)
