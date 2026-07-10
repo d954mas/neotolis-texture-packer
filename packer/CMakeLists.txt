@@ -51,7 +51,12 @@ nt_set_sanitizer_flags(tp_core)
 # Isolated so ONLY pack-time consumers (CLI, smoke, pack tests) pull nt_builder ->
 # nt_basisu_encoder. The GUI links tp_core only and never sees basisu (#282).
 add_library(tp_build STATIC src/tp_pack.c src/tp_export_run.c)
-target_link_libraries(tp_build PUBLIC tp_core nt_builder)
+# nt_builder BEFORE tp_core: GNU ld resolves static archives left-to-right and
+# nt_builder needs nt_log_write from tp_core's PUBLIC nt_log; the old order
+# flattened to ...libnt_log.a...libnt_builder.a and the Linux release link
+# failed (lld/ld64 don't care about order). nt_log repeated after nt_builder
+# as belt-and-suspenders against future reordering.
+target_link_libraries(tp_build PUBLIC nt_builder tp_core nt_log)
 target_compile_definitions(tp_build PRIVATE _CRT_SECURE_NO_WARNINGS)
 target_compile_options(tp_build PRIVATE -U_DLL)   # static CRT: match nt_builder (see apps/smoke)
 nt_set_warning_flags(tp_build)
