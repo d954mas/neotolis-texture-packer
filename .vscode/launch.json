@@ -1,65 +1,16 @@
 {
-    // Debug configs for the native-debug preset (clang emits PDB -> cppvsdbg).
-    // ntpacker CLI (Phase 4) and ntpacker-gui (Phase 6) entries get added when
-    // those binaries exist.
+    // Owner workflow target: F5 -> ntpacker-gui, open a .ntpacker_project,
+    // see the packed atlas, export. The GUI binary lands in Phase 6 (needs
+    // 1b tp_pack -> 2 exporters -> 3 project file first); until then run
+    // tests via the "test (native-debug)" task (Ctrl+Shift+P -> Run Task).
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "tp_test_pack_read (golden round-trip)",
+            "name": "ntpacker-gui (Phase 6 - binary does not exist yet)",
             "type": "cppvsdbg",
             "request": "launch",
-            "program": "${workspaceFolder}/build/_cmake/native-debug/packer/tests/tp_test_pack_read.exe",
-            "args": ["${workspaceFolder}/build/_cmake/native-debug/tp_test"],
-            "cwd": "${workspaceFolder}",
-            "console": "integratedTerminal",
-            "preLaunchTask": "build (native-debug)"
-        },
-        {
-            "name": "tp_test_transform_decode",
-            "type": "cppvsdbg",
-            "request": "launch",
-            "program": "${workspaceFolder}/build/_cmake/native-debug/packer/tests/tp_test_transform_decode.exe",
-            "args": [],
-            "cwd": "${workspaceFolder}",
-            "console": "integratedTerminal",
-            "preLaunchTask": "build (native-debug)"
-        },
-        {
-            "name": "tp_test_uv_property",
-            "type": "cppvsdbg",
-            "request": "launch",
-            "program": "${workspaceFolder}/build/_cmake/native-debug/packer/tests/tp_test_uv_property.exe",
-            "args": [],
-            "cwd": "${workspaceFolder}",
-            "console": "integratedTerminal",
-            "preLaunchTask": "build (native-debug)"
-        },
-        {
-            "name": "tp_test_arena",
-            "type": "cppvsdbg",
-            "request": "launch",
-            "program": "${workspaceFolder}/build/_cmake/native-debug/packer/tests/tp_test_arena.exe",
-            "args": [],
-            "cwd": "${workspaceFolder}",
-            "console": "integratedTerminal",
-            "preLaunchTask": "build (native-debug)"
-        },
-        {
-            "name": "tp_test_name_map",
-            "type": "cppvsdbg",
-            "request": "launch",
-            "program": "${workspaceFolder}/build/_cmake/native-debug/packer/tests/tp_test_name_map.exe",
-            "args": [],
-            "cwd": "${workspaceFolder}",
-            "console": "integratedTerminal",
-            "preLaunchTask": "build (native-debug)"
-        },
-        {
-            "name": "tp_smoke (pack 3 discs)",
-            "type": "cppvsdbg",
-            "request": "launch",
-            "program": "${workspaceFolder}/build/apps/smoke/native-debug/tp_smoke.exe",
-            "args": ["${workspaceFolder}/build/_cmake/native-debug/smoke_test/smoke.ntpack"],
+            "program": "${workspaceFolder}/build/apps/gui/native-debug/ntpacker-gui.exe",
+            "args": ["${workspaceFolder}/examples/demo.ntpacker_project"],
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
             "preLaunchTask": "build (native-debug)"
