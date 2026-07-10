@@ -32,8 +32,9 @@
  * the four blocks are disjoint (no duplicate codepoints). */
 #define CHARSET_LATIN1 "¡¢£¤¥¦§¨©ª«¬­®¯°±²³´µ¶·¸¹º»¼½¾¿ÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖ×ØÙÚÛÜÝÞßàáâãäåæçèéêëìíîïðñòóôõö÷øùúûüýþÿ"
 #define CHARSET_CYRILLIC "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдеёжзийклмнопрстуфхцчшщъыьэюя"
-/* warning check ellipsis, black/white circle, rotate x2, left/right triangle, true-minus, en/em dash */
-#define CHARSET_SYMBOLS "⚠✓…●○↻⟳◀▶−–—"
+/* warning check ellipsis, black/white circle, rotate x2, left/right triangle, small right/down triangle
+ * (disclosure chevrons), right arrow, true-minus, en/em dash */
+#define CHARSET_SYMBOLS "⚠✓…●○↻⟳◀▶▸▾→−–—"
 
 static char s_path_buf[512];
 

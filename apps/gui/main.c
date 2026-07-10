@@ -98,6 +98,12 @@ static inline uint16_t Su(float px) { return (uint16_t)((px * g_ui_scale) + 0.5F
 #define BASE_RIGHT_PANEL_W 300.0F /* settings panel (regions F/G), fixed width, own scroll */
 #define BASE_ROW_H 27.0F
 #define PANEL_LABEL_W 116.0F /* settings-row label column (base; runtime-clamped in compute_panel_widths) */
+/* Canvas-column budget (design px, pre-S()). MIN_CANVAS_W is reserved for the canvas so the strip never
+ * forces the middle row wider than the window; it is >= the compact two-row strip's min-content. Below
+ * STRIP_FULL_MIN_W the strip drops to the compact two-row layout instead of a single overflowing row. */
+#define MIN_CANVAS_W 285.0F
+#define MIN_PANEL_W 100.0F
+#define STRIP_FULL_MIN_W 545.0F
 
 /* Pack an sRGB triple into the engine's 0xAABBGGRR (opaque) -- clearer than hand-swizzling. */
 #define RGBA8(r, g, b) ((uint32_t)0xFF000000u | ((uint32_t)(b) << 16) | ((uint32_t)(g) << 8) | (uint32_t)(r))
@@ -261,6 +267,10 @@ static uint32_t s_id_btn_pack, s_id_btn_export, s_id_btn_refresh, s_id_vlist, s_
 static uint32_t s_id_canvas;      /* the atlas-page custom element (bbox drives zoom/pan/hit input) */
 static uint32_t s_id_rename;      /* the single inline rename input (one edit active at a time) */
 static uint32_t s_id_right_panel; /* settings-panel container (bbox: press-outside blurs focused inputs) */
+static uint32_t s_id_left_panel;  /* left panel container (bbox: overflow regression check) */
+static uint32_t s_id_strip;       /* canvas action strip (bbox: the overflow-prone middle-row term) */
+static uint32_t s_id_statusbar;   /* status bar (bbox: overflow regression check) */
+static uint32_t s_id_right_content; /* right-panel scroll content (bbox: detect rows wider than the panel) */
 static uint32_t s_id_export_modal; /* the Export dialog */
 static bool s_ids_ready;
 
@@ -368,6 +378,7 @@ static float s_content_w = 1280.0F; /* logical content width, for caption/status
  * a minimal canvas, so the panels never get pushed off-screen (recomputed each frame). */
 static float s_left_panel_w = 300.0F;
 static float s_right_panel_w = 300.0F;
+static float s_canvas_w = 680.0F; /* logical width the canvas column actually gets (drives the strip's compact mode) */
 static float s_panel_label_w = 116.0F; /* settings-row label column; shrinks so the widget cell never hits 0 */
 
 /* --- right settings panel: session-remembered disclosure state + dropdown open bits --- */
@@ -688,8 +699,10 @@ static float right_panel_text_w(float reserved_px) {
 static void compute_panel_widths(float logical_w) {
     const float base_l = S(BASE_LEFT_PANEL_W);
     const float base_r = S(BASE_RIGHT_PANEL_W);
-    const float min_canvas = S(120.0F);
-    const float min_panel = S(120.0F);
+    /* Reserve the compact strip's real min-content for the canvas (S(120) knew nothing about the strip,
+     * so at 16:9 sizes the strip forced the middle row wider than the window -> right panel off-screen). */
+    const float min_canvas = S(MIN_CANVAS_W);
+    const float min_panel = S(MIN_PANEL_W);
     const float overhead = S(20.0F) + (S(8.0F) * 2.0F); /* root L/R padding + two inter-column gaps */
     const float base_sum = base_l + base_r;
     const float avail = logical_w - min_canvas - overhead;
@@ -704,6 +717,7 @@ static void compute_panel_widths(float logical_w) {
         s_left_panel_w = base_l;
         s_right_panel_w = base_r;
     }
+    s_canvas_w = logical_w - s_left_panel_w - s_right_panel_w - overhead; /* what the canvas GROW actually gets */
     /* Label column caps at ~45% of the right-panel content so the widget/input cell always keeps a
      * positive width -- a fixed 116px label on a narrow-clamped panel would squeeze inputs to 0 width,
      * which collapses their floating text/caret clip and trips the engine's empty-scissor assert. */
@@ -1672,6 +1686,10 @@ static void ensure_ids(void) {
     s_id_about = nt_ui_id("ntpacker/about_modal");
     s_id_rename = nt_ui_id("ntpacker/rename_input");
     s_id_right_panel = nt_ui_id("ntpacker/right_panel");
+    s_id_left_panel = nt_ui_id("ntpacker/left_panel");
+    s_id_strip = nt_ui_id("ntpacker/canvas_strip");
+    s_id_statusbar = nt_ui_id("ntpacker/statusbar");
+    s_id_right_content = nt_ui_id("ntpacker/right_content");
     s_id_export_modal = nt_ui_id("ntpacker/export_modal");
     s_id_mb_file = nt_ui_id("ntpacker/mb_file");
     s_id_mb_edit = nt_ui_id("ntpacker/mb_edit");
@@ -2341,13 +2359,18 @@ static void declare_left_panel(nt_ui_context_t *ctx) {
     tp_project *proj = gui_project_get();
     tp_project_atlas *a = tp_project_get_atlas(proj, s_sel_atlas);
     s_row_tip_count = 0; /* per-frame; filled by ui_label_fit when a row truncates */
-    CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(s_left_panel_w), CLAY_SIZING_GROW(0)},
+    CLAY({.id = {.id = s_id_left_panel},
+          .layout = {.sizing = {CLAY_SIZING_FIXED(s_left_panel_w), CLAY_SIZING_GROW(0)},
                      .padding = {Su(12), Su(12), Su(12), Su(12)},
                      .layoutDirection = CLAY_TOP_TO_BOTTOM,
                      .childGap = Su(6),
                      .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_TOP}},
           .backgroundColor = C_PANEL,
           .cornerRadius = CLAY_CORNER_RADIUS(S(8)),
+          /* Vertical clip only (X-clip is forbidden -- it makes children X-scrollable/unbounded): at short
+           * window heights the animations hint wraps tall and would otherwise draw past the panel bottom
+           * over the status bar. The sprite vlist keeps its own inner scroll. */
+          .clip = {.vertical = true},
           .border = {.color = C_BORDER, .width = {Su(1), Su(1), Su(1), Su(1), 0}}}) {
         declare_atlas_list(ctx, proj);
         CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(1))}}, .backgroundColor = C_BORDER}) {}
@@ -2501,9 +2524,55 @@ static const char *transform_decode_str(uint8_t t) {
     }
 }
 
-/* Canvas action strip (E', replaces the old toolbar row): [Pack][Export][refresh] | page nav |
- * zoom controls | stale chip. Semi-transparent bar at the TOP of the canvas so the atlas gets the
- * freed vertical space. Every control is also reachable from the menus / context menu (§3.3e). */
+/* --- Canvas strip control groups (shared by the single-row full strip and the compact two-row strip). --- */
+static void strip_group_actions(nt_ui_context_t *ctx, bool accent) {
+    if (ui_btn(ctx, s_id_btn_pack, accent ? "Pack \xE2\x9A\xA0" : "Pack", accent ? &g_btn_accent : &g_btn,
+               s_pack_has_sources, 78.0F, 26.0F, &g_body)) {
+        s_pending_pack = true;
+    }
+    if (ui_btn(ctx, s_id_btn_export, "Export", &g_btn, s_pack_has_sources, 78.0F, 26.0F, &g_body)) {
+        s_export_open = true;
+    }
+    if (ui_btn(ctx, s_id_btn_refresh, "\xE2\x9F\xB3", &g_btn_ghost, true, 34.0F, 26.0F, &g_body)) { /* U+27F3 */
+        s_pending_refresh = true;
+    }
+}
+
+static void strip_group_pages(nt_ui_context_t *ctx, int pc, int cur, bool compact) {
+    const float bw = compact ? 26.0F : 28.0F;
+    if (ui_btn(ctx, nt_ui_id("ntpacker/pg_prev"), "\xE2\x97\x80", &g_btn_ghost, cur > 0, bw, 24.0F, &g_caption)) { /* U+25C0 */
+        gui_canvas_set_page(&s_canvas, cur - 1);
+    }
+    char pl[32];
+    (void)snprintf(pl, sizeof pl, compact ? "%d/%d" : "page %d/%d", cur + 1, pc); /* short "N/M" when compact */
+    nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), pl, &g_caption);
+    if (ui_btn(ctx, nt_ui_id("ntpacker/pg_next"), "\xE2\x96\xB6", &g_btn_ghost, cur < pc - 1, bw, 24.0F, &g_caption)) { /* U+25B6 */
+        gui_canvas_set_page(&s_canvas, cur + 1);
+    }
+}
+
+static void strip_group_zoom(nt_ui_context_t *ctx, bool compact) {
+    const float bw = compact ? 26.0F : 28.0F;
+    if (ui_btn(ctx, nt_ui_id("ntpacker/zoom_out"), "\xE2\x88\x92", &g_btn_ghost, true, bw, 24.0F, &g_caption)) { /* U+2212 minus */
+        gui_canvas_set_zoom_pct(&s_canvas, s_canvas.last_bb, gui_canvas_zoom_pct(&s_canvas) * 0.8F);
+    }
+    char zl[16];
+    (void)snprintf(zl, sizeof zl, "%.0f%%", (double)gui_canvas_zoom_pct(&s_canvas));
+    if (ui_btn(ctx, nt_ui_id("ntpacker/zoom_100"), zl, &g_btn_ghost, true, compact ? 56.0F : 60.0F, 24.0F, &g_caption)) {
+        gui_canvas_set_zoom_pct(&s_canvas, s_canvas.last_bb, 100.0F);
+    }
+    if (ui_btn(ctx, nt_ui_id("ntpacker/zoom_in"), "+", &g_btn_ghost, true, bw, 24.0F, &g_caption)) {
+        gui_canvas_set_zoom_pct(&s_canvas, s_canvas.last_bb, gui_canvas_zoom_pct(&s_canvas) * 1.25F);
+    }
+    if (ui_btn(ctx, nt_ui_id("ntpacker/zoom_fit"), "Fit", &g_btn_ghost, true, compact ? 36.0F : 40.0F, 24.0F, &g_caption)) {
+        gui_canvas_fit(&s_canvas);
+    }
+}
+
+/* Canvas action strip (E'): [Pack][Export][refresh] | page nav | zoom | stale chip. Semi-transparent bar
+ * at the TOP of the canvas. When the canvas column is too narrow for a single row (s_canvas_w below the
+ * threshold) it drops to a deliberate TWO-ROW layout with shorter labels rather than forcing the middle
+ * row wider than the window (or wrapping a label mid-control). Every control is also in the menus (§3.3e). */
 static void declare_canvas_strip(nt_ui_context_t *ctx, bool atlas) {
     tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
     s_pack_has_sources = a && a->source_count > 0;
@@ -2512,54 +2581,49 @@ static void declare_canvas_strip(nt_ui_context_t *ctx, bool atlas) {
     const int pc = gui_canvas_page_count(&s_canvas);
     const int cur = gui_canvas_cur_page(&s_canvas);
     const Clay_Color strip_bg = {30.0F, 34.0F, 42.0F, 205.0F}; /* semi-transparent */
+    const bool compact = s_canvas_w < S(STRIP_FULL_MIN_W);
 
-    CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(34))},
+    if (compact) {
+        /* Two rows: [Pack Export refresh] over [page nav | zoom]. The Pack accent+glyph carries the stale
+         * state -- the wide "outdated" chip is dropped so neither row can exceed the narrow canvas width. */
+        CLAY({.id = {.id = s_id_strip},
+              .layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(62))},
+                         .padding = {Su(8), Su(8), Su(4), Su(4)},
+                         .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                         .childGap = Su(4)},
+              .backgroundColor = strip_bg,
+              .cornerRadius = CLAY_CORNER_RADIUS(S(6))}) {
+            CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(26))}, .childGap = Su(4), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+                strip_group_actions(ctx, accent);
+                CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}}) {}
+            }
+            CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(24))}, .childGap = Su(4), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+                if (atlas && pc > 1) {
+                    strip_group_pages(ctx, pc, cur, true);
+                }
+                if (atlas) {
+                    strip_group_zoom(ctx, true);
+                }
+                CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}}) {}
+            }
+        }
+        return;
+    }
+
+    CLAY({.id = {.id = s_id_strip},
+          .layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(34))},
                      .padding = {Su(8), Su(8), Su(4), Su(4)},
                      .childGap = Su(6),
                      .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}},
           .backgroundColor = strip_bg,
           .cornerRadius = CLAY_CORNER_RADIUS(S(6))}) {
-        /* Pack (accent + warning glyph when stale) / Export / Refresh */
-        if (ui_btn(ctx, s_id_btn_pack, accent ? "Pack \xE2\x9A\xA0" : "Pack", accent ? &g_btn_accent : &g_btn,
-                   s_pack_has_sources, 78.0F, 26.0F, &g_body)) {
-            s_pending_pack = true;
-        }
-        if (ui_btn(ctx, s_id_btn_export, "Export", &g_btn, s_pack_has_sources, 78.0F, 26.0F, &g_body)) {
-            s_export_open = true;
-        }
-        if (ui_btn(ctx, s_id_btn_refresh, "\xE2\x9F\xB3", &g_btn_ghost, true, 34.0F, 26.0F, &g_body)) { /* U+27F3 */
-            s_pending_refresh = true;
-        }
+        strip_group_actions(ctx, accent);
         CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(S(1)), CLAY_SIZING_FIXED(S(20))}}, .backgroundColor = C_BORDER}) {}
         if (atlas && pc > 1) {
-            if (ui_btn(ctx, nt_ui_id("ntpacker/pg_prev"), "\xE2\x97\x80", &g_btn_ghost, cur > 0, 28.0F, 24.0F,
-                       &g_caption)) { /* U+25C0 */
-                gui_canvas_set_page(&s_canvas, cur - 1);
-            }
-            char pl[32];
-            (void)snprintf(pl, sizeof pl, "page %d/%d", cur + 1, pc);
-            nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), pl, &g_caption);
-            if (ui_btn(ctx, nt_ui_id("ntpacker/pg_next"), "\xE2\x96\xB6", &g_btn_ghost, cur < pc - 1, 28.0F, 24.0F,
-                       &g_caption)) { /* U+25B6 */
-                gui_canvas_set_page(&s_canvas, cur + 1);
-            }
+            strip_group_pages(ctx, pc, cur, false);
         }
         if (atlas) {
-            if (ui_btn(ctx, nt_ui_id("ntpacker/zoom_out"), "\xE2\x88\x92", &g_btn_ghost, true, 28.0F, 24.0F,
-                       &g_caption)) { /* U+2212 minus */
-                gui_canvas_set_zoom_pct(&s_canvas, s_canvas.last_bb, gui_canvas_zoom_pct(&s_canvas) * 0.8F);
-            }
-            char zl[16];
-            (void)snprintf(zl, sizeof zl, "%.0f%%", (double)gui_canvas_zoom_pct(&s_canvas));
-            if (ui_btn(ctx, nt_ui_id("ntpacker/zoom_100"), zl, &g_btn_ghost, true, 60.0F, 24.0F, &g_caption)) {
-                gui_canvas_set_zoom_pct(&s_canvas, s_canvas.last_bb, 100.0F);
-            }
-            if (ui_btn(ctx, nt_ui_id("ntpacker/zoom_in"), "+", &g_btn_ghost, true, 28.0F, 24.0F, &g_caption)) {
-                gui_canvas_set_zoom_pct(&s_canvas, s_canvas.last_bb, gui_canvas_zoom_pct(&s_canvas) * 1.25F);
-            }
-            if (ui_btn(ctx, nt_ui_id("ntpacker/zoom_fit"), "Fit", &g_btn_ghost, true, 40.0F, 24.0F, &g_caption)) {
-                gui_canvas_fit(&s_canvas);
-            }
+            strip_group_zoom(ctx, false);
         }
         CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}}) {}
         /* Clickable stale chip -> Pack (owner rule: actionable hints are buttons, not labels). */
@@ -2750,7 +2814,8 @@ static void declare_canvas(nt_ui_context_t *ctx) {
 
 // #region status bar + menus + tooltips
 static void declare_statusbar(nt_ui_context_t *ctx) {
-    CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_STATUSBAR_H))},
+    CLAY({.id = {.id = s_id_statusbar},
+          .layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_STATUSBAR_H))},
                      .padding = {Su(12), Su(12), Su(4), Su(4)},
                      .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}},
           .backgroundColor = C_STATUS,
@@ -3130,13 +3195,18 @@ static void panel_header(nt_ui_context_t *ctx, uint32_t id, const char *title, b
           .backgroundColor = bg,
           .cornerRadius = CLAY_CORNER_RADIUS(S(4))}) {
         nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), *open ? "\xE2\x96\xBE" : "\xE2\x96\xB8", &g_caption); /* U+25BE / U+25B8 */
-        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), title, lbl);
+        /* Ellipsize: an untruncated title word (e.g. "Animation" at the title size) alone exceeded a narrow
+         * panel and forced the GROW scroll wider than the panel at 2x scale. */
+        ui_label_fit(ctx, title, lbl, fmaxf(s_right_panel_w - S(72.0F), S(30.0F)), 0U);
     }
 }
 
-/* A small full-width note line (info, never a warning) -- wraps within the panel. */
+/* A small note line (info, never a warning) -- wraps within the panel. FIXED width (not GROW) so a long
+ * word's min-content can't balloon the GROW scroll wider than the fixed panel (Clay word-wrap min-content
+ * == longest word; at 2x scale on a narrow panel that alone exceeded the panel and pushed content off). */
 static void panel_note(nt_ui_context_t *ctx, const char *text) {
-    CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)}, .padding = {Su(4), Su(4), Su(2), Su(2)}}}) {
+    const float w = fmaxf(s_right_panel_w - S(24.0F), S(60.0F)); /* panel content inner (padding + border) */
+    CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(w), CLAY_SIZING_FIT(0)}, .padding = {Su(4), Su(4), Su(2), Su(2)}}}) {
         nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), text, &g_dim);
     }
 }
@@ -3156,15 +3226,27 @@ static void panel_note(nt_ui_context_t *ctx, const char *text) {
                          .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}})
 #define PANEL_ROW_END }
 
+/* Ellipsize a combo preview so the engine's FIT trigger (min = s_dd_style.min_width, which the right panel
+ * pins to the widget cell) can't grow past that cell on a long value like "Concave contour" and drag the
+ * whole content wider than the panel. Reserves the trigger's real overhead: L/R padding + childGap + chevron. */
+static const char *combo_preview_fit(const char *preview, char *buf, size_t cap) {
+    const float overhead = 3.0F * (float)Su(8) + (float)s_dd_style.chevron_size; /* pad L + pad R + childGap + chevron */
+    const float max_w = fmaxf((float)s_dd_style.min_width - overhead, S(8.0F));
+    (void)truncate_to_width(preview ? preview : "", s_dd_style.font_size, max_w, buf, cap);
+    return buf;
+}
+
 /* A labeled string-option dropdown. Returns the newly-picked index, or -1 if unchanged.
  * When !enabled it renders the preview as a static dimmed label (disabled-with-reason). */
 static int row_combo(nt_ui_context_t *ctx, const char *label, uint32_t id, bool *open, const char *preview, int cur,
                      const char *const *options, int count, bool enabled) {
     int sel = -1;
+    char pv[96];
+    combo_preview_fit(preview, pv, sizeof pv);
     PANEL_ROW_BEGIN(label, enabled ? &g_row : &g_dim) {
         if (!enabled) {
-            nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), preview ? preview : "", &g_dim);
-        } else if (nt_ui_combo_begin(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, id, preview, &s_dd_style, open)) {
+            nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), pv, &g_dim);
+        } else if (nt_ui_combo_begin(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, id, pv, &s_dd_style, open)) {
             for (int i = 0; i < count; i++) {
                 if (nt_ui_combo_selectable(ctx, (uint32_t)i, options[i], i == cur)) {
                     sel = i;
@@ -3364,6 +3446,34 @@ static int row_override_combo(nt_ui_context_t *ctx, const char *label, uint32_t 
     return (pick == 0) ? TP_PROJECT_OV_INHERIT : (explicit_base + pick - 1);
 }
 
+/* A "<value> [Rename]" row that never overruns the panel. Wide panel: value ellipsizes with the Rename
+ * button's width reserved beside it. Narrow panel (< S(210)): the value takes its own row and Rename drops
+ * to a right-aligned row below -- label + value + button can't share one line at that width. Returns clicked. */
+static bool right_panel_rename_row(nt_ui_context_t *ctx, const char *label, const char *value, uint32_t btn_id) {
+    bool clicked = false;
+    if (s_right_panel_w >= S(210.0F)) {
+        PANEL_ROW_BEGIN(label, &g_row) {
+            ui_label_fit(ctx, value, &g_body, right_panel_text_w(s_panel_label_w + S(96.0F)), 0U); /* reserve Rename + gaps */
+            if (ui_btn(ctx, btn_id, "Rename", &g_btn_ghost, true, 0.0F, 24.0F, &g_caption)) {
+                clicked = true;
+            }
+        }
+        PANEL_ROW_END;
+    } else {
+        PANEL_ROW_BEGIN(label, &g_row) {
+            ui_label_fit(ctx, value, &g_body, right_panel_text_w(s_panel_label_w + S(14.0F)), 0U);
+        }
+        PANEL_ROW_END;
+        CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H))},
+                         .childAlignment = {CLAY_ALIGN_X_RIGHT, CLAY_ALIGN_Y_CENTER}}}) {
+            if (ui_btn(ctx, btn_id, "Rename", &g_btn_ghost, true, 0.0F, 24.0F, &g_caption)) {
+                clicked = true;
+            }
+        }
+    }
+    return clicked;
+}
+
 /* --- Region (selected sprite) + per-region packing overrides --- */
 static void declare_region_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
     const sprite_row *row = selected_leaf_row();
@@ -3383,13 +3493,9 @@ static void declare_region_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
     /* Final name + Rename (reuse the existing inline rename path). */
     char fname[224];
     (void)snprintf(fname, sizeof fname, "%s", (ov && ov->rename) ? ov->rename : sprite);
-    PANEL_ROW_BEGIN("Final name", &g_row) {
-        ui_label_fit(ctx, fname, &g_body, right_panel_text_w(s_panel_label_w + S(14.0F)), 0U);
-        if (ui_btn(ctx, nt_ui_id("reg/rename"), "Rename", &g_btn_ghost, true, 0.0F, 24.0F, &g_caption)) {
-            start_sprite_edit_named(sprite);
-        }
+    if (right_panel_rename_row(ctx, "Final name", fname, nt_ui_id("reg/rename"))) {
+        start_sprite_edit_named(sprite);
     }
-    PANEL_ROW_END;
 
     /* Source file + size (from the last pack result when available). */
     char src[256];
@@ -3540,6 +3646,26 @@ static void declare_region_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
     }
 }
 
+/* The exporter dropdown cell for one target row (its own element so it can sit inline on a wide panel or
+ * drop to a dedicated row when narrow). `preview` must already be width-fit (combo_preview_fit). */
+static void declare_target_exporter_combo(nt_ui_context_t *ctx, uint32_t row_id, int ti, tp_project_target *t,
+                                          const char *const *exp_labels, int nlabels, int cur_exp, const char *preview) {
+    CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+        if (nt_ui_combo_begin(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, nt_ui_child_id(row_id, "exp"), preview,
+                              &s_dd_style, &s_dd_target_open[ti])) {
+            for (int i = 0; i < nlabels; i++) {
+                if (nt_ui_combo_selectable(ctx, (uint32_t)i, exp_labels[i], i == cur_exp)) {
+                    const tp_exporter *e = tp_exporter_at(i);
+                    if (e) {
+                        gui_project_set_target(s_sel_atlas, ti, e->id, t->out_path, t->enabled);
+                    }
+                }
+            }
+            nt_ui_combo_end(ctx);
+        }
+    }
+}
+
 /* --- Export targets (region G, audit I1) --- */
 static void declare_export_targets(nt_ui_context_t *ctx, tp_project_atlas *a) {
     const int ne = tp_exporter_count();
@@ -3579,28 +3705,27 @@ static void declare_export_targets(nt_ui_context_t *ctx, tp_project_atlas *a) {
                          .childGap = Su(4)},
               .backgroundColor = C_BG,
               .cornerRadius = CLAY_CORNER_RADIUS(S(4))}) {
-            /* row 1: enabled checkbox + exporter dropdown */
+            /* row 1: enabled checkbox + exporter dropdown + remove. The dropdown value is width-fit, and on a
+             * narrow panel it drops to its own row below (checkbox + combo + x can't share a narrow line). */
+            char pvbuf[96];
+            combo_preview_fit((cur_exp >= 0) ? exp_labels[cur_exp] : t->exporter_id, pvbuf, sizeof pvbuf);
+            const bool tgt_narrow = s_right_panel_w < S(210.0F);
             CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H))}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
                 if (tp_checkbox(ctx, nt_ui_child_id(row_id, "en"), t->enabled, true)) {
                     gui_project_set_target(s_sel_atlas, ti, t->exporter_id, t->out_path, !t->enabled);
                 }
-                CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
-                    const char *pv = (cur_exp >= 0) ? exp_labels[cur_exp] : t->exporter_id;
-                    if (nt_ui_combo_begin(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, nt_ui_child_id(row_id, "exp"), pv,
-                                          &s_dd_style, &s_dd_target_open[ti])) {
-                        for (int i = 0; i < nlabels; i++) {
-                            if (nt_ui_combo_selectable(ctx, (uint32_t)i, exp_labels[i], i == cur_exp)) {
-                                const tp_exporter *e = tp_exporter_at(i);
-                                if (e) {
-                                    gui_project_set_target(s_sel_atlas, ti, e->id, t->out_path, t->enabled);
-                                }
-                            }
-                        }
-                        nt_ui_combo_end(ctx);
-                    }
+                if (!tgt_narrow) {
+                    declare_target_exporter_combo(ctx, row_id, ti, t, exp_labels, nlabels, cur_exp, pvbuf);
+                } else {
+                    CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}}) {} /* push x to the right */
                 }
                 if (ui_btn(ctx, nt_ui_child_id(row_id, "rm"), "x", &g_btn_ghost, true, 24.0F, 22.0F, &g_caption)) {
                     s_pending_remove_target = ti;
+                }
+            }
+            if (tgt_narrow) {
+                CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H))}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+                    declare_target_exporter_combo(ctx, row_id, ti, t, exp_labels, nlabels, cur_exp, pvbuf);
                 }
             }
             /* row 2: out path + browse */
@@ -3631,19 +3756,16 @@ static void declare_animation_editor(nt_ui_context_t *ctx, tp_project_atlas *a) 
     tp_project_anim *an = &a->animations[s_sel_anim];
     const bool editing_id = (s_edit_kind == EDIT_ANIM && s_edit_anim == s_sel_anim);
 
-    PANEL_ROW_BEGIN("Id", &g_row) {
-        if (editing_id) {
+    if (editing_id) {
+        PANEL_ROW_BEGIN("Id", &g_row) {
             if (render_rename_field(ctx)) {
                 commit_anim_rename();
             }
-        } else {
-            ui_label_fit(ctx, an->id, &g_body, right_panel_text_w(s_panel_label_w + S(14.0F)), 0U);
-            if (ui_btn(ctx, nt_ui_id("anim/rename"), "Rename", &g_btn_ghost, true, 0.0F, 24.0F, &g_caption)) {
-                start_anim_edit(s_sel_anim);
-            }
         }
+        PANEL_ROW_END;
+    } else if (right_panel_rename_row(ctx, "Id", an->id, nt_ui_id("anim/rename"))) {
+        start_anim_edit(s_sel_anim);
     }
-    PANEL_ROW_END;
 
     PANEL_ROW_BEGIN("Preview", &g_row) {
         if (ui_btn(ctx, nt_ui_id("anim/play"), s_preview_active ? "Playing\xE2\x80\xA6" : "Play", &g_btn, true, 0.0F, 24.0F,
@@ -3743,6 +3865,11 @@ static void declare_animation_editor(nt_ui_context_t *ctx, tp_project_atlas *a) 
 
 static void declare_right_panel(nt_ui_context_t *ctx) {
     tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
+    /* Pin the combo trigger min-width to the widget cell so a FIT combo can't grow past the panel (Su(110)
+     * scales up at 1.5/2.0 and would otherwise bleed on a narrow panel). Restored after the sections so the
+     * wider export-modal combos keep their own default. */
+    const uint16_t saved_dd_mw = s_dd_style.min_width;
+    s_dd_style.min_width = (uint16_t)right_panel_text_w(s_panel_label_w); /* == widget cell (already floored >= S(24)) */
     CLAY({.id = {.id = s_id_right_panel},
           .layout = {.sizing = {CLAY_SIZING_FIXED(s_right_panel_w), CLAY_SIZING_GROW(0)},
                      .layoutDirection = CLAY_TOP_TO_BOTTOM},
@@ -3751,7 +3878,8 @@ static void declare_right_panel(nt_ui_context_t *ctx) {
           .border = {.color = C_BORDER, .width = {Su(1), Su(1), Su(1), Su(1), 0}}}) {
         nt_ui_scroll_begin(ctx, NULL, nt_ui_id("panel/scroll"), &s_panel_scroll,
                            &(Clay_ElementDeclaration){.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}});
-        CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)},
+        CLAY({.id = {.id = s_id_right_content},
+              .layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)},
                          .padding = {Su(10), Su(10), Su(10), Su(12)},
                          .layoutDirection = CLAY_TOP_TO_BOTTOM,
                          .childGap = Su(4)}}) {
@@ -3783,6 +3911,7 @@ static void declare_right_panel(nt_ui_context_t *ctx) {
         }
         nt_ui_scroll_end(ctx);
     }
+    s_dd_style.min_width = saved_dd_mw;
 }
 // #endregion
 
@@ -4355,6 +4484,32 @@ static int selftest_probe_cyan(void) {
     return cyan;
 }
 
+/* Overflow regression: the key containers must sit inside the window and the right-panel content must not
+ * be wider than the panel (rows fit). Reads the PREVIOUS frame's committed layout, so the caller must have
+ * held the target size for >= 2 frames. Fails (NT_ASSERT) before the layout fix, passes after. */
+static void selftest_assert_no_overflow(float win_w, float win_h) {
+    const struct {
+        const char *name;
+        uint32_t id;
+    } items[5] = {{"left", s_id_left_panel}, {"strip", s_id_strip}, {"canvas", s_id_canvas},
+                  {"right", s_id_right_panel}, {"status", s_id_statusbar}};
+    for (int i = 0; i < 5; i++) {
+        const nt_ui_bbox_t b = nt_ui_get_bbox(s_ctx, items[i].id);
+        nt_log_info("SELFTEST-BOUNDS %-6s found=%d x=%.1f y=%.1f w=%.1f h=%.1f right=%.1f/%.0f bottom=%.1f/%.0f",
+                    items[i].name, (int)b.found, (double)b.x, (double)b.y, (double)b.width, (double)b.height,
+                    (double)(b.x + b.width), (double)win_w, (double)(b.y + b.height), (double)win_h);
+        NT_ASSERT(b.found && "SELFTEST overflow: key container was not laid out");
+        NT_ASSERT(b.x >= -1.0F && (b.x + b.width) <= win_w + 1.0F &&
+                  "SELFTEST overflow: container spills past the window horizontally");
+        NT_ASSERT(b.y >= -1.0F && (b.y + b.height) <= win_h + 1.0F &&
+                  "SELFTEST overflow: container spills past the window vertically");
+    }
+    const nt_ui_bbox_t rp = nt_ui_get_bbox(s_ctx, s_id_right_panel);
+    const nt_ui_bbox_t rc = nt_ui_get_bbox(s_ctx, s_id_right_content);
+    NT_ASSERT(rp.found && rc.found && (rc.x + rc.width) <= (rp.x + rp.width) + 2.0F &&
+              "SELFTEST overflow: right-panel rows bleed past the panel");
+}
+
 /* Top-of-frame phase driver: sets up each phase's scene BEFORE the layout/walk. */
 static void selftest_pre_frame(void) {
     s_st_pf++;
@@ -4442,9 +4597,34 @@ static void selftest_pre_frame(void) {
             g_nt_window.fb_height = 800;
             nt_log_info("SELFTEST: tiny-window sweep OK (no empty-scissor assert)");
             s_st_phase = 5;
+            s_st_pf = 0;
         } else {
             g_nt_window.fb_width = (uint32_t)sizes[idx][0];
             g_nt_window.fb_height = (uint32_t)sizes[idx][1];
+        }
+    } else if (s_st_phase == 5) {
+        /* Scaled 16:9 overflow regression (owner's case): at 1366x768 @ g_ui_scale 1.5 no key container may
+         * leave the window and the right-panel rows must fit the panel. Pre-fix the strip forced the middle
+         * row wider than the window -> the right panel was pushed off-screen (asserts fire here). */
+        g_nt_window.fb_width = 1366;
+        g_nt_window.fb_height = 768;
+        if (s_st_pf == 1) { /* enter: exercise the normal atlas strip + a populated Region panel */
+            preview_stop();
+            s_sel_anim = -1;
+            s_sel_anim_frame = -1;
+            s_canvas.mode = GUI_CANVAS_ATLAS;
+            const tp_result *pr = gui_pack_result(s_sel_atlas);
+            if (pr && pr->sprite_count > 0) {
+                gui_canvas_select(&s_canvas, 0);
+                select_row_for_region(0);
+            }
+            s_sec_atlas_open = s_sec_region_open = s_sec_anim_open = s_sec_export_open = true;
+            s_atlas_adv_open = false;
+        }
+        if (s_st_pf >= 3) { /* size held >= 2 frames -> the 1-frame-lagged bbox now reflects 1366x768 */
+            selftest_assert_no_overflow(1366.0F, 768.0F);
+            nt_log_info("SELFTEST: 16:9 @1.5 overflow check OK (1366x768, no container/right-panel spill)");
+            s_st_phase = 6;
         }
     } else {
         nt_app_quit();
@@ -4522,6 +4702,23 @@ static void shot_tick(void) {
     }
 }
 
+/* DEV: log the key container bboxes vs the window; flags any that spill past the edges. bbox comes from
+ * the previous completed layout (stable by the capture frame). Mirrors the selftest overflow assert. */
+static void shot_log_bounds(float win_w, float win_h) {
+    const struct { const char *name; uint32_t id; } items[] = {
+        {"left", s_id_left_panel}, {"strip", s_id_strip}, {"canvas", s_id_canvas},
+        {"right", s_id_right_panel}, {"rcontent", s_id_right_content}, {"status", s_id_statusbar}};
+    for (size_t i = 0; i < sizeof items / sizeof items[0]; i++) {
+        const nt_ui_bbox_t b = nt_ui_get_bbox(s_ctx, items[i].id);
+        const float over_r = (b.x + b.width) - win_w;
+        const float over_b = (b.y + b.height) - win_h;
+        nt_log_info("SHOT-BOUNDS %-9s found=%d x=%.1f y=%.1f w=%.1f h=%.1f  right=%.1f/%.1f%s bottom=%.1f/%.1f%s",
+                    items[i].name, (int)b.found, (double)b.x, (double)b.y, (double)b.width, (double)b.height,
+                    (double)(b.x + b.width), (double)win_w, (over_r > 0.5F) ? " OVERFLOW-R" : "",
+                    (double)(b.y + b.height), (double)win_h, (over_b > 0.5F) ? " OVERFLOW-B" : "");
+    }
+}
+
 /* Pre-swap capture (same GL-valid point as selftest_post_draw). */
 static void shot_post_draw(void) {
     if (!s_shot_active || s_shot_frame < 16) {
@@ -4536,6 +4733,9 @@ static void shot_post_draw(void) {
     const uint32_t h = g_nt_window.fb_height;
     if (w == 0 || h == 0) {
         return;
+    }
+    if (!s_shot_written) {
+        shot_log_bounds((float)w, (float)h);
     }
     const uint32_t rgba_n = w * h * 4u;
     uint8_t *rgba = (uint8_t *)malloc(rgba_n);
