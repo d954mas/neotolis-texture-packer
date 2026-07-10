@@ -234,6 +234,45 @@ void test_all_cases_recovered(void) {
     }
 }
 
+/* Decode-level guarantee (the single-point hull fix): every recovered hull is
+ * normalized so its vertex bounding box has min corner (0,0) and max corner
+ * (frame.w, frame.h) == spriteSourceSize.{w,h}. This is the invariant every
+ * consumer (GUI canvas hull overlay, json-neotolis, Defold .tpinfo) relies on;
+ * before the fix the min corner could be negative (clipper2 inflation), which
+ * shifted drawn hulls off their sprites. */
+void test_hull_normalized_to_origin(void) {
+    int checked = 0;
+    for (int i = 0; i < g_ncc; i++) {
+        const tp_result *res = g_cc[i].res;
+        for (int j = 0; j < res->sprite_count; j++) {
+            const tp_sprite *s = &res->sprites[j];
+            if (s->vert_count <= 0 || !s->verts) {
+                continue;
+            }
+            int32_t minx = s->verts[0].x, maxx = s->verts[0].x;
+            int32_t miny = s->verts[0].y, maxy = s->verts[0].y;
+            for (int v = 1; v < s->vert_count; v++) {
+                if (s->verts[v].x < minx) { minx = s->verts[v].x; }
+                if (s->verts[v].x > maxx) { maxx = s->verts[v].x; }
+                if (s->verts[v].y < miny) { miny = s->verts[v].y; }
+                if (s->verts[v].y > maxy) { maxy = s->verts[v].y; }
+            }
+            char m[160];
+            (void)snprintf(m, sizeof m, "case '%s' sprite '%s' hull bbox [%d,%d..%d,%d] vs frame(%d,%d)",
+                           g_cc[i].cs->name, s->name, minx, miny, maxx, maxy, s->frame.w, s->frame.h);
+            TEST_ASSERT_EQUAL_INT_MESSAGE(0, minx, m);
+            TEST_ASSERT_EQUAL_INT_MESSAGE(0, miny, m);
+            TEST_ASSERT_EQUAL_INT_MESSAGE(s->frame.w, maxx, m);
+            TEST_ASSERT_EQUAL_INT_MESSAGE(s->frame.h, maxy, m);
+            /* spriteSourceSize IS the vertex bbox (source_rect == bbox). */
+            TEST_ASSERT_EQUAL_INT_MESSAGE(maxx, s->spriteSourceSize.w, m);
+            TEST_ASSERT_EQUAL_INT_MESSAGE(maxy, s->spriteSourceSize.h, m);
+            checked++;
+        }
+    }
+    TEST_ASSERT_TRUE_MESSAGE(checked > 0, "expected at least one hull sprite across the fixtures");
+}
+
 void test_page_expectations(void) {
     for (int i = 0; i < g_ncc; i++) {
         const case_ctx *cc = &g_cc[i];
@@ -456,6 +495,7 @@ int main(int argc, char **argv) {
 
     UNITY_BEGIN();
     RUN_TEST(test_all_cases_recovered);
+    RUN_TEST(test_hull_normalized_to_origin);
     RUN_TEST(test_page_expectations);
     RUN_TEST(test_alias_relationship);
     RUN_TEST(test_multipage_pages);

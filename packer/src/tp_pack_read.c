@@ -257,13 +257,31 @@ static tp_status parse_region(const NtAtlasRegion *reg, const uint8_t *blob, con
         verts[v].y = ly;
     }
 
-    /* trim_w/h from local coords, assuming the hull touches min=0 edges
-     * (plan §2.5 step 1; hull-extent caveat = risk R1, checked by fixtures). */
-    int32_t trim_w = max_lx;
-    int32_t trim_h = max_ly;
+    /* Recover the trim rect from the hull's LOCAL bounding box. The hull's min
+     * corner is NOT necessarily (0,0): clipper2 inflates a convex/concave hull
+     * OUTWARD, so min_lx (and min_ly) go negative past the un-inflated trim edge.
+     * Normalize so the hull's bbox min corner IS the trim-local origin (0,0):
+     *   - trim_w/h = the local SPAN (max - min) = the true as-drawn footprint;
+     *   - verts.x  = lx - min_lx  (shift the hull's left edge to x = 0);
+     *   - verts.y  = max_ly - ly  (y-up -> y-down; the hull TOP maps to y = 0);
+     *   - ssx      = trim_offset_x + min_lx  (untrimmed-x of the hull left edge);
+     *   - ssy      = src_h - trim_offset_y - max_ly  (untrimmed-y of hull top).
+     * This preserves every vertex's ON-PAGE position (frame.xy + verts through the
+     * D4 texel transform) and its UNTRIMMED-SOURCE position (spriteSourceSize.xy +
+     * verts) EXACTLY, while making spriteSourceSize (== source_rect) equal the
+     * vertices' bounding box -- the invariant every consumer relies on (the GUI
+     * canvas hull overlay, json-neotolis, the Defold .tpinfo). Previously trim_w/h
+     * assumed min == 0, leaving the trim origin |min_lx| px right of the real hull:
+     * the drawn hull shifted left, and once a region's D4 mask rotated the verts,
+     * in mask-dependent screen directions. Only RECT sprites recover the exact
+     * un-inflated trim (min == 0); non-RECT keep the clipper2 inflation symmetric
+     * about the sprite. */
+    int32_t trim_w = max_lx - min_lx;
+    int32_t trim_h = max_ly - min_ly;
 
     for (uint32_t v = 0; v < vc; v++) {
-        verts[v].y = trim_h - verts[v].y; /* trim-local y-down */
+        verts[v].x = verts[v].x - min_lx; /* hull left edge -> x = 0        */
+        verts[v].y = max_ly - verts[v].y; /* y-up local -> y-down, top -> 0 */
     }
 
     uint16_t *indices = NULL;
@@ -277,8 +295,8 @@ static tp_status parse_region(const NtAtlasRegion *reg, const uint8_t *blob, con
 
     int32_t src_w = (int32_t)reg->source_w;
     int32_t src_h = (int32_t)reg->source_h;
-    int32_t ssx = (int32_t)reg->trim_offset_x;
-    int32_t ssy = src_h - (int32_t)reg->trim_offset_y - trim_h; /* y-up bottom strip -> y-down top strip */
+    int32_t ssx = (int32_t)reg->trim_offset_x + min_lx;         /* left edge of the recovered hull bbox */
+    int32_t ssy = src_h - (int32_t)reg->trim_offset_y - max_ly; /* top edge (verts.y == 0 anchor)       */
 
     bool trimmed = !(ssx == 0 && ssy == 0 && trim_w == src_w && trim_h == src_h);
 
@@ -315,11 +333,11 @@ static tp_status parse_region(const NtAtlasRegion *reg, const uint8_t *blob, con
     out->first_v = first_v;
 
     /* Invariants (plan §2.6): a violation means a corrupt pack or reader bug.
-     * NOTE: trim_w/h come from the hull's max local coord, which for CONVEX /
-     * CONCAVE shapes is the clipper2-INFLATED envelope (~1px past the true trim
-     * rect), so trim_w may legitimately exceed source_w. Do NOT bounds-check the
-     * trim rect against the source -- only RECT-shaped sprites recover the exact
-     * trim rect (nt_builder_atlas.c:1161-1168 vs the inflate path). */
+     * NOTE: trim_w/h are the hull's local SPAN (max - min), which for CONVEX /
+     * CONCAVE shapes is the clipper2-INFLATED envelope (~1-2px/side past the true
+     * trim rect), so trim_w may legitimately exceed source_w. Do NOT bounds-check
+     * the trim rect against the source -- only RECT-shaped sprites recover the
+     * exact trim rect (nt_builder_atlas.c:1161-1168 vs the inflate path). */
     if (!trimmed && !(ssx == 0 && ssy == 0 && trim_w == src_w && trim_h == src_h)) {
         return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
                             "atlas '%s' sprite '%s': untrimmed but spriteSourceSize != full source", atlas_dbg, nm_a);

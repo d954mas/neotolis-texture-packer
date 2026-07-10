@@ -323,14 +323,30 @@ static void emit_sprite(tp_sb *sb, int depth, const tp_export_prepared *prep, co
         }
     }
 
-    long sx = s->spriteSourceSize.x; /* trim offset inside the untrimmed image */
+    /* corner_offset / source_rect ARE spriteSourceSize verbatim. tp_pack_read now
+     * normalizes the hull so its vertex bounding box has min corner (0,0) and max
+     * (trim_w, trim_h) == spriteSourceSize.{w,h}, so `verts + spriteSourceSize.xy`
+     * lands with its leftmost/topmost vertex exactly on source_rect.xy -- i.e.
+     * source_rect == the emitted vertices' bbox, TexturePacker's own invariant
+     * (examples/basic/basic.tpinfo). The earlier per-sprite AABB re-derivation here
+     * was a compensation for a decode bug (hull min could be negative); that bug is
+     * now fixed at the source, so this reads spriteSourceSize directly. GUARD: the
+     * invariant is proven by test_hull_normalized_to_origin (decode level) and the
+     * basic.tpinfo bbox parity check (exporter level) -- a regression that
+     * un-normalized the hull would fail both. */
+    long sx = s->spriteSourceSize.x; /* trim offset inside the untrimmed image   */
     long sy = s->spriteSourceSize.y;
-    long sw = s->spriteSourceSize.w; /* UNROTATED trim dims (hull-min assumed 0,0) */
+    long sw = s->spriteSourceSize.w; /* UNROTATED trim dims (== hull vertex span) */
     long sh = s->spriteSourceSize.h;
 
-    /* Polygon vs quad is decided up front: for a real hull the ACTUAL vertex
-     * bounding box -- not spriteSourceSize -- drives corner_offset/source_rect/
-     * frame_rect, so it must be known before those fields are emitted. */
+    long foot_w = rotated ? sh : sw; /* as-drawn footprint on the page */
+    long foot_h = rotated ? sw : sh;
+
+    bool solid = false;
+    if (s->page >= 0 && s->page < r->page_count) {
+        solid = region_is_solid(&r->pages[s->page], s->frame.x, s->frame.y, foot_w, foot_h);
+    }
+
     bool poly = (s->vert_count > 0 && !is_rect_quad(s));
     if (poly && !caps->polygons) {
         if (notices) {
@@ -340,55 +356,14 @@ static void emit_sprite(tp_sb *sb, int depth, const tp_export_prepared *prep, co
         poly = false;
     }
 
-    /* Effective UNROTATED trim rect in untrimmed source space.
-     *
-     * tp_pack_read recovers spriteSourceSize assuming the hull's minimum local
-     * coordinate is (0,0). That holds for a RECT sprite, but clipper2 inflates a
-     * convex/concave hull OUTWARD, so its true minimum X is negative (the Y
-     * minimum is already normalized to 0 by the y-down flip in tp_pack_read).
-     * Emitting corner_offset = spriteSourceSize.xy then leaves the hull's real
-     * left edge unaccounted for, and because the extension positions each hull
-     * vertex at `frame_rect.x + (vertex.x - corner_offset.x)` (Atlas.getTriangles,
-     * extension-texturepacker 2.7.0), the drawn hull lands |min_x| px too far left
-     * -- an asymmetric offset on near-symmetric shapes, a stretch on strongly
-     * asymmetric ones. Recovering the true vertex bbox makes corner_offset /
-     * source_rect / frame_rect hug the geometry and restores TexturePacker's own
-     * invariant that source_rect == the hull's vertex bbox (see
-     * examples/basic/basic.tpinfo and docs/formats/defold-tpinfo.md). */
-    long eff_x = sx, eff_y = sy, eff_w = sw, eff_h = sh;
-    if (poly) {
-        long vminx = s->verts[0].x, vmaxx = s->verts[0].x;
-        long vminy = s->verts[0].y, vmaxy = s->verts[0].y;
-        for (int i = 1; i < s->vert_count; i++) {
-            long vx = s->verts[i].x;
-            long vy = s->verts[i].y;
-            if (vx < vminx) { vminx = vx; }
-            if (vx > vmaxx) { vmaxx = vx; }
-            if (vy < vminy) { vminy = vy; }
-            if (vy > vmaxy) { vmaxy = vy; }
-        }
-        eff_x = sx + vminx; /* untrimmed-space left of the actual hull bbox     */
-        eff_y = sy + vminy; /* (vminy is 0 in practice, but keep this general)  */
-        eff_w = vmaxx - vminx;
-        eff_h = vmaxy - vminy;
-    }
-
-    long foot_w = rotated ? eff_h : eff_w; /* as-drawn footprint on the page */
-    long foot_h = rotated ? eff_w : eff_h;
-
-    bool solid = false;
-    if (s->page >= 0 && s->page < r->page_count) {
-        solid = region_is_solid(&r->pages[s->page], s->frame.x, s->frame.y, foot_w, foot_h);
-    }
-
     tp_sb_indent(sb, depth);
     tp_sb_str(sb, "sprites {\n");
     kv_str(sb, depth + 1, "name", es->final_name);
     kv_bool(sb, depth + 1, "trimmed", s->trimmed);
     kv_bool(sb, depth + 1, "rotated", rotated);
     kv_bool(sb, depth + 1, "is_solid", solid);
-    emit_point_i(sb, depth + 1, "corner_offset", eff_x, eff_y);
-    emit_rect(sb, depth + 1, "source_rect", eff_x, eff_y, eff_w, eff_h);
+    emit_point_i(sb, depth + 1, "corner_offset", sx, sy);
+    emit_rect(sb, depth + 1, "source_rect", sx, sy, sw, sh);
 
     if (caps->pivot) {
         /* px from the untrimmed top-left, y-down (pivot is normalized over the
@@ -412,10 +387,10 @@ static void emit_sprite(tp_sb *sb, int depth, const tp_export_prepared *prep, co
     }
 
     if (poly) {
-        /* Hull, trim-local -> untrimmed source space (add the ORIGINAL trim
-         * offset sx,sy so the leftmost/topmost vertex lands exactly on
-         * eff_x/eff_y == source_rect.xy), y-down, UNROTATED (the rotated flag +
-         * swapped frame_rect carry the rotation; verts do not). */
+        /* Hull, trim-local -> untrimmed source space (add the trim offset sx,sy;
+         * the hull is normalized so its leftmost/topmost vertex lands exactly on
+         * source_rect.xy), y-down, UNROTATED (the rotated flag + swapped frame_rect
+         * carry the rotation; verts do not). */
         tp_sb_indent(sb, depth + 1);
         tp_sb_str(sb, "indices: [");
         for (int i = 0; i < s->index_count; i++) {
@@ -431,10 +406,10 @@ static void emit_sprite(tp_sb *sb, int depth, const tp_export_prepared *prep, co
          * (the reference exporter's convention, verified against basic.tpinfo). */
         tp_sb_indent(sb, depth + 1);
         tp_sb_str(sb, "indices: [1, 2, 3, 0, 1, 3]\n");
-        emit_point_i(sb, depth + 1, "vertices", eff_x + eff_w, eff_y);          /* TR */
-        emit_point_i(sb, depth + 1, "vertices", eff_x, eff_y);                  /* TL */
-        emit_point_i(sb, depth + 1, "vertices", eff_x, eff_y + eff_h);          /* BL */
-        emit_point_i(sb, depth + 1, "vertices", eff_x + eff_w, eff_y + eff_h);  /* BR */
+        emit_point_i(sb, depth + 1, "vertices", sx + sw, sy);      /* TR */
+        emit_point_i(sb, depth + 1, "vertices", sx, sy);           /* TL */
+        emit_point_i(sb, depth + 1, "vertices", sx, sy + sh);      /* BL */
+        emit_point_i(sb, depth + 1, "vertices", sx + sw, sy + sh); /* BR */
     }
 
     tp_sb_indent(sb, depth);

@@ -544,12 +544,11 @@ void test_rotated_geometry(void) {
 // #endregion
 
 // #region (b2) hull untrimmed-space geometry --------------------------------
-/* Asymmetric trimmed hull whose clipper2-inflated envelope reaches a NEGATIVE
- * minimum local X (as tp_pack_read hands us). The exporter must place every
- * `vertices` entry at its true untrimmed-source position AND emit corner_offset/
- * source_rect/frame_rect from the ACTUAL vertex bbox -- otherwise the extension
- * draws the hull |min_x| px too far left (owner repro: circle offset, sq9 spike).
- * Every expected value below is derived by hand from the source geometry. */
+/* Asymmetric trimmed hull as tp_pack_read now hands it over: NORMALIZED so the
+ * hull's vertex bbox min corner is (0,0). The exporter must place every
+ * `vertices` entry at its true untrimmed-source position, and source_rect must
+ * equal the emitted vertices' bbox (TexturePacker's invariant). Every expected
+ * value below is derived by hand from the source geometry. */
 void test_hull_untrimmed_space(void) {
     tp_arena *ar = tp_arena_create(0);
     TEST_ASSERT_NOT_NULL(ar);
@@ -563,11 +562,11 @@ void test_hull_untrimmed_space(void) {
     page.h = 128;
     page.rgba = px;
 
-    /* Untrimmed source 32x32. tp_pack_read reports the trim rect as the hull's
-     * max local coord assuming its min is (0,0): spriteSourceSize = (10,5,12,18).
-     * The real hull (clipper2-inflated) reaches x=-3 on the left -- a left-pointing
-     * triangle. verts are trim-local, y-down (post-decode; y-min already 0). */
-    static tp_point verts[3] = {{-3, 0}, {12, 0}, {5, 18}};
+    /* Untrimmed source 32x32; a left-pointing triangle trimmed to a 15x18 hull.
+     * tp_pack_read normalizes the hull to the trim-local origin, so verts have
+     * min corner (0,0) / max (15,18) and spriteSourceSize = (7,5,15,18) -- the
+     * hull's clipper2-inflated bbox anchored at untrimmed (7,5). y-down. */
+    static tp_point verts[3] = {{0, 0}, {15, 0}, {8, 18}};
     static uint16_t idx[3] = {0, 1, 2};
     tp_sprite s;
     memset(&s, 0, sizeof s);
@@ -575,12 +574,12 @@ void test_hull_untrimmed_space(void) {
     s.page = 0;
     s.frame.x = 100;
     s.frame.y = 50;
-    s.frame.w = 12; /* decode-style: trim_w = max local x */
+    s.frame.w = 15; /* normalized: trim_w = hull span (max - min) */
     s.frame.h = 18;
     s.trimmed = true;
-    s.spriteSourceSize.x = 10;
+    s.spriteSourceSize.x = 7;
     s.spriteSourceSize.y = 5;
-    s.spriteSourceSize.w = 12;
+    s.spriteSourceSize.w = 15;
     s.spriteSourceSize.h = 18;
     s.sourceSize.w = 32;
     s.sourceSize.h = 32;
@@ -617,19 +616,15 @@ void test_hull_untrimmed_space(void) {
     TEST_ASSERT_NOT_NULL(got);
 
     /* Independently derived expected UNTRIMMED-SOURCE positions:
-     *   trim origin (spriteSourceSize.xy) = (10,5).
-     *   hull spans trim-local x[-3,12], y[0,18] -> true bbox in source space:
-     *     left  = 10 + (-3) = 7    right  = 10 + 12 = 22
-     *     top   =  5 +   0  = 5    bottom =  5 + 18 = 23
-     *   corner_offset = source_rect.xy = (7,5); size = (22-7, 23-5) = (15,18).
-     *   frame_rect footprint = same size (15,18) at the page origin (100,50).
-     *   vertices = trim-local + trim origin (10,5):
-     *     (-3,0)->(7,5)   (12,0)->(22,5)   (5,18)->(15,23)
+     *   trim origin (spriteSourceSize.xy) = (7,5); hull span (15,18).
+     *   vertices = normalized trim-local + trim origin (7,5):
+     *     (0,0) ->(7,5)    (15,0)->(22,5)    (8,18)->(15,23)
+     *   corner_offset = source_rect.xy = (7,5); source_rect size = (15,18);
+     *   frame_rect footprint = same (15,18) at the page origin (100,50).
      *   Leftmost vertex x (7) == source_rect.x, so the extension's
      *   `frame_rect.x + (vertex.x - corner_offset.x)` draws the hull FLUSH with
-     *   the sprite. The pre-fix code emitted corner_offset=(10,5),
-     *   source_rect=(10,5,12,18): its x-min (10) != the vertex x-min (7), the
-     *   |min_x|=3 px left shift this test guards against. */
+     *   the sprite. The decode normalizes the hull to this origin; the exporter
+     *   then emits spriteSourceSize verbatim and vertices' bbox == source_rect. */
     TEST_ASSERT_TRUE_MESSAGE(strstr(got, "corner_offset {\n      x: 7\n      y: 5\n    }") != NULL,
                              "corner_offset = hull bbox origin");
     TEST_ASSERT_TRUE_MESSAGE(strstr(got, "source_rect {\n      x: 7\n      y: 5\n      width: 15\n      height: 18\n    }") != NULL,

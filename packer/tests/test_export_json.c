@@ -201,6 +201,30 @@ void test_polygon_fidelity(void) {
             cJSON *idx = cJSON_GetObjectItemCaseSensitive(poly, "indices");
             TEST_ASSERT_TRUE(cJSON_IsArray(verts) && cJSON_GetArraySize(verts) >= 3);
             TEST_ASSERT_TRUE(cJSON_IsArray(idx) && cJSON_GetArraySize(idx) >= 3);
+
+            /* Parity with the decode/Defold invariant: the hull's trim-local
+             * vertex bbox has its min corner at (0,0) and its max corner at the
+             * trim footprint (spriteSourceSize.w/h == frame.w/h). This is what
+             * makes the GUI canvas hull overlay hug the sprite -- before the
+             * tp_pack_read normalization it did not. */
+            cJSON *v0 = cJSON_GetArrayItem(verts, 0);
+            double minx = cJSON_GetArrayItem(v0, 0)->valuedouble, maxx = minx;
+            double miny = cJSON_GetArrayItem(v0, 1)->valuedouble, maxy = miny;
+            cJSON *vv = NULL;
+            cJSON_ArrayForEach(vv, verts) {
+                double x = cJSON_GetArrayItem(vv, 0)->valuedouble;
+                double y = cJSON_GetArrayItem(vv, 1)->valuedouble;
+                if (x < minx) { minx = x; }
+                if (x > maxx) { maxx = x; }
+                if (y < miny) { miny = y; }
+                if (y > maxy) { maxy = y; }
+            }
+            cJSON *ss = cJSON_GetObjectItemCaseSensitive(sp, "spriteSourceSize");
+            double ssw = cJSON_GetObjectItemCaseSensitive(ss, "w")->valuedouble;
+            double ssh = cJSON_GetObjectItemCaseSensitive(ss, "h")->valuedouble;
+            TEST_ASSERT_TRUE_MESSAGE(minx == 0.0 && miny == 0.0, "hull verts bbox min corner must be (0,0)");
+            TEST_ASSERT_TRUE_MESSAGE(maxx == ssw && maxy == ssh,
+                                     "hull verts bbox max corner must equal spriteSourceSize (footprint)");
             with_poly++;
         }
     }

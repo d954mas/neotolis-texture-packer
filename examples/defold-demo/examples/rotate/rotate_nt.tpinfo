@@ -38,22 +38,22 @@ pages {
       width: 170
       height: 256
     }
-    indices: [1, 0, 2, 3, 2, 0]
+    indices: [1, 2, 3, 0, 1, 3]
     vertices {
       x: 171
-      y: 257
-    }
-    vertices {
-      x: -1
-      y: 257
+      y: -1
     }
     vertices {
       x: -1
       y: -1
     }
     vertices {
+      x: -1
+      y: 257
+    }
+    vertices {
       x: 171
-      y: -1
+      y: 257
     }
   }
   sprites {
@@ -85,22 +85,22 @@ pages {
       width: 126
       height: 80
     }
-    indices: [1, 0, 2, 3, 2, 0]
+    indices: [1, 2, 3, 0, 1, 3]
     vertices {
       x: 127
-      y: 81
-    }
-    vertices {
-      x: -1
-      y: 81
+      y: -1
     }
     vertices {
       x: -1
       y: -1
     }
     vertices {
+      x: -1
+      y: 81
+    }
+    vertices {
       x: 127
-      y: -1
+      y: 81
     }
   }
   sprites {
@@ -132,22 +132,22 @@ pages {
       width: 130
       height: 80
     }
-    indices: [1, 0, 2, 3, 2, 0]
+    indices: [1, 2, 3, 0, 1, 3]
     vertices {
       x: 131
-      y: 81
-    }
-    vertices {
-      x: -1
-      y: 81
+      y: -1
     }
     vertices {
       x: -1
       y: -1
     }
     vertices {
+      x: -1
+      y: 81
+    }
+    vertices {
       x: 131
-      y: -1
+      y: 81
     }
   }
 }
