@@ -28,6 +28,25 @@ extern "C" {
 struct tp_arena;
 struct tp_result;
 
+/* tp_pack_sprite_desc.ov_mask bits: which atlas packing knobs a sprite overrides.
+ * A zero ov_mask = inherit everything (zero-init safe -- existing desc builders and
+ * other agents' desc arrays keep working with no per-sprite overrides). */
+#define TP_PACK_OV_SHAPE ((uint8_t)(1u << 0))
+#define TP_PACK_OV_ROTATE ((uint8_t)(1u << 1))
+#define TP_PACK_OV_MAXVERT ((uint8_t)(1u << 2))
+#define TP_PACK_OV_MARGIN ((uint8_t)(1u << 3))
+#define TP_PACK_OV_EXTRUDE ((uint8_t)(1u << 4))
+
+/* Desc per-sprite override VALUES mirror the engine nt_atlas_sprite_opts_t encoding
+ * (tp_pack.c static-asserts they match). shape/allow_rotate carry explicit non-zero
+ * constants; margin/extrude/max_vertices carry the raw value (an explicit 0 is
+ * rejected by validate_settings -- the engine's 0-means-inherit makes it
+ * unrepresentable downstream). */
+#define TP_PACK_SPRITE_SHAPE_RECT 1
+#define TP_PACK_SPRITE_SHAPE_CONVEX 2
+#define TP_PACK_SPRITE_SHAPE_CONCAVE 3
+#define TP_PACK_SPRITE_ROTATE_NO 1
+
 /* One sprite. Either `path` (file input, stb-decoded by the builder) OR raw
  * pixels (`rgba` + `w` + `h`) when `path == NULL`. */
 typedef struct tp_pack_sprite_desc {
@@ -44,6 +63,16 @@ typedef struct tp_pack_sprite_desc {
     float origin_y;
 
     uint16_t slice9_lrtb[4]; /* [left,right,top,bottom] px; all-zero = none */
+
+    /* Per-sprite packing overrides (owner scope 2026-07-10). Present only when the
+     * matching ov_mask bit is set; value uses the engine encoding (see the TP_PACK_*
+     * macros above). run_builder maps these onto nt_atlas_sprite_opts_t. */
+    uint8_t ov_mask;
+    uint8_t ov_shape;        /* TP_PACK_SPRITE_SHAPE_* when TP_PACK_OV_SHAPE */
+    uint8_t ov_allow_rotate; /* TP_PACK_SPRITE_ROTATE_NO when TP_PACK_OV_ROTATE */
+    uint8_t ov_max_vertices; /* [1..16] when TP_PACK_OV_MAXVERT */
+    uint8_t ov_margin;       /* [1..255] when TP_PACK_OV_MARGIN */
+    uint8_t ov_extrude;      /* [1..255] when TP_PACK_OV_EXTRUDE, effective RECT only */
 } tp_pack_sprite_desc;
 
 /* Minimal pack settings. `atlas_name` must be normalization-invariant (no `\\`,

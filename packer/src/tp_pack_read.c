@@ -66,7 +66,8 @@ uint16_t tp_px_to_uv(int32_t px, int32_t page_dim) {
     return (uint16_t)u; /* truncation == floor for u >= 0 */
 }
 
-/* Exact inverse for page_dim <= 4096 (plan §2.5 proof). */
+/* Exact inverse while the §2.5 recovery error 0.5*page_dim/65535 stays < 0.5px, i.e.
+ * for page_dim up to ~32768 (0.125px at the raised 16384 max). lround absorbs it. */
 int32_t tp_uv_to_px(uint16_t u, int32_t page_dim) {
     return (int32_t)lround(((double)u * (double)page_dim) / 65535.0);
 }

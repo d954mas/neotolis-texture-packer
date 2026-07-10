@@ -122,6 +122,32 @@ static bool desc_add(desc_vec *dv, tp_project_atlas *a, const char *raw_name, co
         for (int k = 0; k < 4; k++) {
             d->slice9_lrtb[k] = ov->slice9_lrtb[k];
         }
+        /* Per-sprite packing overrides -> desc (engine encoding). Effective shape:
+         * slice9 forces RECT (0), else sprite override, else atlas shape. The extrude
+         * override is passed only when the effective shape is RECT (§3.3f effective
+         * rule -- the stored value persists in the model regardless). */
+        const bool slice9 = d->slice9_lrtb[0] || d->slice9_lrtb[1] || d->slice9_lrtb[2] || d->slice9_lrtb[3];
+        const int eff_shape = slice9 ? 0 : (ov->ov_shape != TP_PROJECT_OV_INHERIT ? ov->ov_shape : a->shape);
+        if (ov->ov_shape != TP_PROJECT_OV_INHERIT) {
+            d->ov_mask |= TP_PACK_OV_SHAPE;
+            d->ov_shape = (uint8_t)(ov->ov_shape + 1); /* atlas 0/1/2 -> engine RECT/CONVEX/CONCAVE 1/2/3 */
+        }
+        if (ov->ov_allow_rotate != TP_PROJECT_OV_INHERIT) {
+            d->ov_mask |= TP_PACK_OV_ROTATE;
+            d->ov_allow_rotate = TP_PACK_SPRITE_ROTATE_NO;
+        }
+        if (ov->ov_max_vertices != TP_PROJECT_OV_INHERIT) {
+            d->ov_mask |= TP_PACK_OV_MAXVERT;
+            d->ov_max_vertices = (uint8_t)ov->ov_max_vertices;
+        }
+        if (ov->ov_margin != TP_PROJECT_OV_INHERIT) {
+            d->ov_mask |= TP_PACK_OV_MARGIN;
+            d->ov_margin = (uint8_t)ov->ov_margin;
+        }
+        if (ov->ov_extrude != TP_PROJECT_OV_INHERIT && eff_shape == 0 /* RECT */) {
+            d->ov_mask |= TP_PACK_OV_EXTRUDE;
+            d->ov_extrude = (uint8_t)ov->ov_extrude;
+        }
     }
     dv->n++;
     return true;
@@ -302,6 +328,12 @@ bool gui_pack_atlas(int atlas_index, double *out_ms, char *err, size_t err_cap, 
             (void)snprintf(err, err_cap, "%s", e.msg);
         }
         return false;
+    }
+    /* §3.3f effective rule: extrude is only valid for RECT. The project KEEPS the
+     * stored extrude value; the preview pack passes 0 while shape != RECT (core
+     * tp_pack stays strict as the safety net). */
+    if (settings.shape != 0 /* not RECT */) {
+        settings.extrude = 0;
     }
     settings.work_dir = s_work_dir;
     settings.sprites = dv.v;

@@ -98,6 +98,27 @@ static void recompute_dirty(void) {
     s_project_dirty = !(s_last_buf && s_saved_buf && s_last_len == s_saved_len &&
                         memcmp(s_last_buf, s_saved_buf, s_last_len) == 0);
 }
+
+/* An override entry that would serialize to just its name (safe to drop -> sparse). */
+static bool sprite_all_default(const tp_project_sprite *s) {
+    return s->origin_x == TP_PROJECT_ORIGIN_DEFAULT && s->origin_y == TP_PROJECT_ORIGIN_DEFAULT &&
+           s->slice9_lrtb[0] == 0 && s->slice9_lrtb[1] == 0 && s->slice9_lrtb[2] == 0 && s->slice9_lrtb[3] == 0 &&
+           s->rename == NULL && s->ov_shape == TP_PROJECT_OV_INHERIT && s->ov_allow_rotate == TP_PROJECT_OV_INHERIT &&
+           s->ov_max_vertices == TP_PROJECT_OV_INHERIT && s->ov_margin == TP_PROJECT_OV_INHERIT &&
+           s->ov_extrude == TP_PROJECT_OV_INHERIT;
+}
+
+/* Seeds a fresh atlas with one default json-neotolis target whose out-path BASE is
+ * "out/<name>" (the exporter appends .json / -N.png) so a pure-GUI project exports
+ * something (audit I1). No touch (callers snapshot around it). */
+static void seed_default_target(tp_project_atlas *a) {
+    if (!a || a->target_count > 0) {
+        return;
+    }
+    char path[512];
+    (void)snprintf(path, sizeof path, "out/%s", a->name);
+    (void)tp_project_atlas_add_target(a, "json-neotolis", path, NULL);
+}
 // #endregion
 
 // #region lifecycle
@@ -106,6 +127,7 @@ void gui_project_init(void) {
         return;
     }
     s_proj = tp_project_create();
+    seed_default_target(tp_project_get_atlas(s_proj, 0)); /* clean baseline includes it (I1) */
     set_path("");
     s_project_dirty = false;
     s_preview_stale = false;
@@ -175,6 +197,7 @@ int gui_project_add_atlas(void) {
     if (tp_project_add_atlas(s_proj, name, &idx) != TP_STATUS_OK) {
         return -1;
     }
+    seed_default_target(tp_project_get_atlas(s_proj, idx)); /* fresh atlas exports something (I1) */
     gui_project_touch(GUI_ACT_ADD_ATLAS);
     return idx;
 }
@@ -243,6 +266,97 @@ bool gui_project_set_sprite_rename(int atlas_index, const char *sprite_name, con
     gui_project_touch(GUI_ACT_RENAME_SPRITE); /* touch dedups a no-op rename */
     return true;
 }
+
+void gui_project_touch_setting(void) { gui_project_touch(GUI_ACT_SET_SETTING); }
+
+/* Ensures the override entry for `sprite_name`, hands it to `set`, then drops it if
+ * it became all-default (sparse) and funnels through the touch choke point. */
+static bool sprite_override_edit(int atlas_index, const char *sprite_name,
+                                 void (*set)(tp_project_sprite *, int, int), int arg0, int arg1) {
+    tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
+    if (!a || !sprite_name || sprite_name[0] == '\0') {
+        return false;
+    }
+    tp_project_sprite *s = NULL;
+    if (tp_project_atlas_add_sprite(a, sprite_name, &s) != TP_STATUS_OK) {
+        return false;
+    }
+    set(s, arg0, arg1);
+    if (sprite_all_default(s)) {
+        (void)tp_project_atlas_remove_sprite(a, sprite_name);
+    }
+    gui_project_touch(GUI_ACT_SET_SETTING);
+    return true;
+}
+
+static void apply_origin(tp_project_sprite *s, int ox_bits, int oy_bits) {
+    float ox;
+    float oy;
+    memcpy(&ox, &ox_bits, sizeof ox);
+    memcpy(&oy, &oy_bits, sizeof oy);
+    s->origin_x = ox;
+    s->origin_y = oy;
+}
+bool gui_project_set_sprite_origin(int atlas_index, const char *sprite_name, float ox, float oy) {
+    int ox_bits;
+    int oy_bits;
+    memcpy(&ox_bits, &ox, sizeof ox_bits);
+    memcpy(&oy_bits, &oy, sizeof oy_bits);
+    return sprite_override_edit(atlas_index, sprite_name, apply_origin, ox_bits, oy_bits);
+}
+
+static void apply_slice9(tp_project_sprite *s, int idx, int value) {
+    if (idx >= 0 && idx < 4) {
+        s->slice9_lrtb[idx] = (uint16_t)(value < 0 ? 0 : value);
+    }
+}
+bool gui_project_set_sprite_slice9(int atlas_index, const char *sprite_name, int lrtb_index, int value) {
+    return sprite_override_edit(atlas_index, sprite_name, apply_slice9, lrtb_index, value);
+}
+
+static void apply_override(tp_project_sprite *s, int which, int value) {
+    const int16_t v = (int16_t)value;
+    switch ((gui_sprite_ov)which) {
+        case GUI_SPRITE_OV_SHAPE: s->ov_shape = v; break;
+        case GUI_SPRITE_OV_ROTATE: s->ov_allow_rotate = v; break;
+        case GUI_SPRITE_OV_MAXVERT: s->ov_max_vertices = v; break;
+        case GUI_SPRITE_OV_MARGIN: s->ov_margin = v; break;
+        case GUI_SPRITE_OV_EXTRUDE: s->ov_extrude = v; break;
+    }
+}
+bool gui_project_set_sprite_override(int atlas_index, const char *sprite_name, gui_sprite_ov which, int value) {
+    return sprite_override_edit(atlas_index, sprite_name, apply_override, (int)which, value);
+}
+
+int gui_project_add_target(int atlas_index) {
+    tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
+    if (!a) {
+        return -1;
+    }
+    char path[512];
+    (void)snprintf(path, sizeof path, "out/%s", a->name);
+    if (tp_project_atlas_add_target(a, "json-neotolis", path, NULL) != TP_STATUS_OK) {
+        return -1;
+    }
+    gui_project_touch(GUI_ACT_ADD_TARGET);
+    return a->target_count - 1;
+}
+
+void gui_project_remove_target(int atlas_index, int index) {
+    tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
+    if (a && tp_project_atlas_remove_target(a, index) == TP_STATUS_OK) {
+        gui_project_touch(GUI_ACT_REMOVE_TARGET);
+    }
+}
+
+bool gui_project_set_target(int atlas_index, int index, const char *exporter_id, const char *out_path, bool enabled) {
+    tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
+    if (!a || tp_project_atlas_set_target(a, index, exporter_id, out_path, enabled) != TP_STATUS_OK) {
+        return false;
+    }
+    gui_project_touch(GUI_ACT_SET_TARGET);
+    return true;
+}
 // #endregion
 
 // #region undo / redo
@@ -306,6 +420,7 @@ void gui_project_new(void) {
     if (!fresh) {
         return;
     }
+    seed_default_target(tp_project_get_atlas(fresh, 0)); /* fresh GUI project exports something (I1) */
     tp_project_destroy(s_proj);
     s_proj = fresh;
     set_path("");

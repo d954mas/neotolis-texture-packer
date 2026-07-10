@@ -37,14 +37,20 @@
 #include "resource/nt_resource.h"
 #include "ui/nt_ui.h"
 #include "ui/nt_ui_button.h"
+#include "ui/nt_ui_checkbox.h"
+#include "ui/nt_ui_dropdown.h"
 #include "ui/nt_ui_input.h"
 #include "ui/nt_ui_label.h"
 #include "ui/nt_ui_menu.h"
 #include "ui/nt_ui_modal.h"
 #include "ui/nt_ui_scale.h"
+#include "ui/nt_ui_scroll.h"
+#include "ui/nt_ui_slider.h"
 #include "ui/nt_ui_tooltip.h"
 #include "ui/nt_ui_vlist.h"
 #include "window/nt_window.h"
+
+#include "tp_core/tp_export.h" /* exporter registry -> target dropdown */
 
 #include "ntpacker_ui_assets.h"
 
@@ -58,6 +64,7 @@
 #include "gui_version.h"
 #include "tinyfiledialogs.h"
 
+#include <limits.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -87,7 +94,11 @@ static inline uint16_t Su(float px) { return (uint16_t)((px * g_ui_scale) + 0.5F
 #define BASE_TOOLBAR_H 48.0F
 #define BASE_STATUSBAR_H 34.0F
 #define BASE_LEFT_PANEL_W 300.0F
+#define BASE_RIGHT_PANEL_W 300.0F /* settings panel (regions F/G), fixed width, own scroll */
 #define BASE_ROW_H 27.0F
+
+/* Pack an sRGB triple into the engine's 0xAABBGGRR (opaque) -- clearer than hand-swizzling. */
+#define RGBA8(r, g, b) ((uint32_t)0xFF000000u | ((uint32_t)(b) << 16) | ((uint32_t)(g) << 8) | (uint32_t)(r))
 
 /* Base font px (scaled per frame into the g_* styles below). */
 #define FS_TITLE 17.0F
@@ -187,6 +198,16 @@ static nt_ui_menu_style_t s_menu_style;
 static nt_ui_modal_style_t s_modal_style;
 static nt_ui_tooltip_style_t s_tip_style;
 static nt_ui_input_style_t s_rename_input; /* inline rename field (atlas + sprite) */
+
+/* Right settings panel widgets (regions F/G). All draw with the app's single baked
+ * WHITE region (s_white_ref) tinted per state -- checkbox/slider need art, dropdown
+ * is flat-color. Sizes are rescaled each frame in apply_ui_scale. */
+static nt_atlas_region_ref_t s_white_ref;
+static nt_ui_dropdown_style_t s_dd_style;
+static nt_ui_checkbox_style_t s_check_style;
+static nt_ui_slider_style_t s_slider_style;
+static nt_ui_input_style_t s_num_input;   /* numeric + short text fields */
+static nt_ui_scroll_style_t s_panel_scroll;
 // #endregion
 
 // #region engine state
@@ -248,7 +269,7 @@ enum {
     MK_UNDO, MK_REDO,
     MK_ZIN, MK_ZOUT, MK_FIT, MK_ABOUT, MK_S100, MK_S125, MK_S150, MK_S200,
     MK_OV_OUTLINE, MK_OV_FRAME, MK_OV_TRIM, MK_OV_PIVOT, MK_CTX_FIT, MK_CTX_100,
-    MK_CTX_RENAME, MK_CTX_REMOVE
+    MK_CTX_RENAME, MK_CTX_REMOVE, MK_CTX_TOGGLE
 };
 
 /* Right-click context menu: one cursor-anchored menu whose items depend on the row a
@@ -257,9 +278,10 @@ enum {
 static uint32_t s_id_ctx_menu;
 static nt_ui_menu_state_t s_ctx_state;
 static nt_ui_menu_ctx_t s_ctx_menu;
-enum { CTX_NONE = 0, CTX_ATLAS, CTX_SPRITE, CTX_CANVAS };
+enum { CTX_NONE = 0, CTX_ATLAS, CTX_SPRITE, CTX_CANVAS, CTX_TARGET };
 static int s_ctx_kind;
 static int s_ctx_atlas;         /* CTX_ATLAS target index */
+static int s_ctx_target = -1;   /* CTX_TARGET target index (enable/disable, remove) */
 static int s_ctx_src = -1;      /* CTX_SPRITE source index (for Remove) */
 static char s_ctx_sprite[192];  /* CTX_SPRITE override key (for Rename) */
 static bool s_ctx_leaf;         /* a renamable leaf sprite (file source or folder child) */
@@ -310,6 +332,24 @@ static bool s_pack_has_sources, s_pack_stale;
 static double s_last_pack_ms;      /* wall-clock ms of the last successful pack (for the stats line) */
 static int s_last_pack_atlas = -1; /* which atlas that timing belongs to */
 static float s_content_w = 1280.0F; /* logical content width, for caption/status truncation */
+
+/* --- right settings panel: session-remembered disclosure state + dropdown open bits --- */
+#define GUI_MAX_TARGETS 16
+static bool s_sec_atlas_open = true, s_sec_region_open = true, s_sec_export_open = true;
+static bool s_atlas_adv_open = false;   /* Basic/Advanced disclosure (region F) */
+static bool s_region_ov_open = false;   /* Region "Packing overrides" disclosure */
+static bool s_dd_shape_open, s_dd_size_open;           /* atlas shape / max-size combos */
+static bool s_dd_ov_shape_open, s_dd_ov_rot_open, s_dd_ov_mv_open; /* per-region override combos */
+static bool s_dd_target_open[GUI_MAX_TARGETS];         /* per-target exporter combos */
+static bool s_pending_add_target;
+static int s_pending_remove_target = -1;
+static int s_pending_browse_target = -1; /* target whose out-path "..." dialog is queued */
+/* Numeric/text field edit buffers (game-owned; nt_ui_input edits in place). Synced from
+ * the model each frame while unfocused, parsed+clamped into the model on edit. */
+static char s_nb_pad[16], s_nb_margin[16], s_nb_extrude[16], s_nb_maxv[16], s_nb_ppu[24];
+static char s_nb_ox[24], s_nb_oy[24], s_nb_s9[4][16];
+static char s_nb_ov_margin[16], s_nb_ov_extrude[16];
+static char s_nb_target_path[GUI_MAX_TARGETS][256];
 
 /* Flattened sprite rows for the current atlas, rebuilt each frame. */
 #define MAX_ROWS 4096
@@ -609,6 +649,41 @@ static void do_add_files(void) {
         set_statusf("Added %d file source(s); %d already added", added, dup);
     } else {
         set_statusf("Added %d file source(s)", added);
+    }
+}
+
+/* Best-effort relativize `abs` against the project dir (targets travel like sources).
+ * Absolute paths outside the project dir are kept as-is (usable, save leaves them). */
+static void relativize_to_project(const char *abs, char *out, size_t cap) {
+    tp_project *p = gui_project_get();
+    const char *dir = p ? p->project_dir : NULL;
+    if (dir && dir[0] != '\0') {
+        const size_t dl = strlen(dir);
+        if (strncmp(abs, dir, dl) == 0 && (abs[dl] == '/' || abs[dl] == '\\')) {
+            (void)snprintf(out, cap, "%s", abs + dl + 1);
+            normalize_slashes(out);
+            return;
+        }
+    }
+    (void)snprintf(out, cap, "%s", abs);
+    normalize_slashes(out);
+}
+
+/* Save dialog for a target's output path, relativized to the project like sources. */
+static void do_browse_target(int ti) {
+    tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
+    if (!a || ti < 0 || ti >= a->target_count) {
+        return;
+    }
+    const tp_project_target *t = &a->targets[ti];
+    const char *path = tinyfd_saveFileDialog("Export output path", t->out_path, 0, NULL, NULL);
+    if (!path) {
+        return;
+    }
+    char rel[600];
+    relativize_to_project(path, rel, sizeof rel);
+    if (gui_project_set_target(s_sel_atlas, ti, t->exporter_id, rel, t->enabled)) {
+        set_statusf("Output path: %s", rel);
     }
 }
 
@@ -997,6 +1072,19 @@ static void apply_pending(void) {
         reset_selection();
         set_status("Removed atlas (Ctrl+Z to undo).");
     }
+    if (s_pending_add_target) {
+        const int ti = gui_project_add_target(s_sel_atlas);
+        if (ti >= 0) {
+            set_status("Added export target (Ctrl+Z to undo).");
+        }
+    }
+    if (s_pending_remove_target >= 0) {
+        gui_project_remove_target(s_sel_atlas, s_pending_remove_target);
+        set_status("Removed export target (Ctrl+Z to undo).");
+    }
+    if (s_pending_browse_target >= 0) {
+        do_browse_target(s_pending_browse_target);
+    }
     if (s_pending_refresh) {
         do_refresh();
     }
@@ -1010,8 +1098,11 @@ static void apply_pending(void) {
     s_pending_open = s_pending_save = s_pending_save_as = false;
     s_pending_add_files = s_pending_add_folder = s_pending_add_atlas = false;
     s_pending_refresh = s_pending_pack = s_pending_export = false;
+    s_pending_add_target = false;
     s_pending_remove_source = -1;
     s_pending_remove_atlas = -1;
+    s_pending_remove_target = -1;
+    s_pending_browse_target = -1;
 }
 // #endregion
 
@@ -1159,6 +1250,64 @@ static void ensure_ids(void) {
     s_rename_input.skin[NT_UI_INPUT_IDLE].bg_color = 0xFF2A2E38U;
     s_rename_input.skin[NT_UI_INPUT_FOCUSED].bg_color = 0xFF343A46U;
     s_rename_input.skin[NT_UI_INPUT_FOCUSED].border_color = 0xFFA0764AU;
+
+    /* Settings-panel widget styles. The atlas WHITE region (s_white_ref, bound by now
+     * since can_render gates ensure_ids) is the art for checkbox/slider parts, tinted
+     * per state; the dropdown is flat-color. */
+    s_dd_style = nt_ui_dropdown_style_defaults();
+    s_dd_style.font_id = 0;
+    s_dd_style.trigger_text = RGBA8(214, 220, 230);
+    s_dd_style.row_text = RGBA8(214, 220, 230);
+    s_dd_style.trigger_idle.fill = RGBA8(42, 46, 56);
+    s_dd_style.trigger_hover.fill = RGBA8(54, 60, 74);
+    s_dd_style.trigger_pressed.fill = RGBA8(36, 40, 50);
+    s_dd_style.panel_fill = RGBA8(30, 33, 41);
+    s_dd_style.row_idle.fill = 0U;
+    s_dd_style.row_hover.fill = RGBA8(54, 60, 74);
+    s_dd_style.row_pressed.fill = RGBA8(36, 40, 50);
+    s_dd_style.row_selected.fill = RGBA8(52, 78, 120);
+    s_dd_style.panel_corner_radius = 4U;
+    s_dd_style.max_visible_rows = 8U;
+
+    s_check_style = nt_ui_checkbox_style_defaults();
+    s_check_style.text_base = (nt_ui_label_style_t){.font_id = 0, .font_size = 16.0F, .color = {206.0F, 212.0F, 222.0F, 255.0F}};
+    s_check_style.unchecked[NT_UI_CB_IDLE].box = s_white_ref;
+    s_check_style.unchecked[NT_UI_CB_IDLE].box_tint = RGBA8(74, 78, 88);
+    s_check_style.checked[NT_UI_CB_IDLE].box = s_white_ref;
+    s_check_style.checked[NT_UI_CB_IDLE].box_tint = RGBA8(78, 126, 192);
+    s_check_style.checked[NT_UI_CB_IDLE].check = s_white_ref;
+    s_check_style.checked[NT_UI_CB_IDLE].check_tint = RGBA8(240, 244, 250);
+    s_check_style.unchecked[NT_UI_CB_DISABLED].opacity = 0.4F;
+    s_check_style.checked[NT_UI_CB_DISABLED].opacity = 0.4F;
+
+    s_slider_style = nt_ui_slider_style_defaults();
+    s_slider_style.states[NT_UI_SLIDER_IDLE].track = s_white_ref;
+    s_slider_style.states[NT_UI_SLIDER_IDLE].track_tint = RGBA8(46, 50, 60);
+    s_slider_style.states[NT_UI_SLIDER_IDLE].fill = s_white_ref;
+    s_slider_style.states[NT_UI_SLIDER_IDLE].fill_tint = RGBA8(78, 126, 192);
+    s_slider_style.states[NT_UI_SLIDER_IDLE].thumb = s_white_ref;
+    s_slider_style.states[NT_UI_SLIDER_IDLE].thumb_tint = RGBA8(220, 228, 238);
+
+    s_num_input = nt_ui_input_style_defaults();
+    s_num_input.text.font_id = 0;
+    s_num_input.text.color = (Clay_Color){225.0F, 228.0F, 235.0F, 255.0F};
+    s_num_input.placeholder.font_id = 0;
+    s_num_input.placeholder.color = (Clay_Color){120.0F, 126.0F, 138.0F, 255.0F};
+    s_num_input.skin[NT_UI_INPUT_IDLE].bg_color = RGBA8(42, 46, 56);
+    s_num_input.skin[NT_UI_INPUT_FOCUSED].bg_color = RGBA8(52, 58, 70);
+    s_num_input.skin[NT_UI_INPUT_FOCUSED].border_color = RGBA8(160, 118, 74);
+    s_num_input.skin[NT_UI_INPUT_DISABLED].bg_color = RGBA8(34, 36, 42);
+    s_num_input.border_width = 1.0F;
+
+    s_panel_scroll = nt_ui_scroll_style_defaults();
+    s_panel_scroll.scroll_x = false;
+    s_panel_scroll.scroll_y = true;
+    s_panel_scroll.bar_visibility = NT_UI_SCROLLBAR_AUTO_HIDE;
+    s_panel_scroll.track_ref = s_white_ref;
+    s_panel_scroll.track_tint = RGBA8(30, 33, 41);
+    s_panel_scroll.thumb_ref = s_white_ref;
+    s_panel_scroll.thumb_tint = RGBA8(80, 86, 100);
+
     s_ids_ready = true;
 }
 
@@ -1195,6 +1344,26 @@ static void apply_ui_scale(void) {
     s_tip_style.font_size = S(14.0F);
     s_tip_style.max_width = Su(360.0F);
     s_tip_style.pad = Su(8.0F);
+
+    /* Settings-panel widgets scale with the global UI scale (their sizes are style px). */
+    s_num_input.text.font_size = S(FS_ROW);
+    s_num_input.placeholder.font_size = S(FS_ROW);
+    s_num_input.pad_x = S(6.0F);
+    s_dd_style.font_size = S(14.0F);
+    s_dd_style.row_height = Su(26.0F);
+    s_dd_style.min_width = Su(110.0F);
+    s_dd_style.pad = Su(8.0F);
+    s_check_style.box_w = S(20.0F);
+    s_check_style.box_h = S(20.0F);
+    s_check_style.overlay_w = S(12.0F);
+    s_check_style.overlay_h = S(12.0F);
+    s_check_style.gap = S(8.0F);
+    s_check_style.text_base.font_size = S(FS_ROW);
+    s_slider_style.track_w = S(120.0F);
+    s_slider_style.track_h = S(8.0F);
+    s_slider_style.thumb_w = S(16.0F);
+    s_slider_style.thumb_h = S(16.0F);
+    s_panel_scroll.bar_thickness = S(8.0F);
 }
 
 static void try_bind_resources(void) {
@@ -1205,6 +1374,7 @@ static void try_bind_resources(void) {
         const uint32_t white = nt_atlas_find_region(s_atlas_handle, ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS__WHITE.value);
         NT_ASSERT(white != NT_ATLAS_INVALID_REGION);
         nt_ui_set_atlas_white_region(s_ctx, s_atlas_handle, white);
+        s_white_ref = nt_atlas_ref_idx(s_atlas_handle, ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS__WHITE.value, white);
         s_atlas_bound = true;
         nt_log_info("ntpacker-gui: atlas white region bound");
     }
@@ -1807,7 +1977,7 @@ static void declare_canvas_strip(nt_ui_context_t *ctx, bool atlas) {
 static void declare_canvas(nt_ui_context_t *ctx) {
     const bool atlas = gui_canvas_get_mode(&s_canvas) == GUI_CANVAS_ATLAS && gui_canvas_has_atlas(&s_canvas);
     const bool has_img = gui_canvas_has_image(&s_canvas);
-    const float cap_w = s_content_w - S(BASE_LEFT_PANEL_W) - S(60.0F);
+    const float cap_w = s_content_w - S(BASE_LEFT_PANEL_W) - S(BASE_RIGHT_PANEL_W) - S(70.0F);
 
     /* caption / hover readout */
     char label[256];
@@ -1949,6 +2119,17 @@ static void declare_context_menu(nt_ui_context_t *ctx) {
                 s_pending_remove_source = s_ctx_src;
             }
         }
+    } else if (s_ctx_kind == CTX_TARGET) {
+        tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
+        if (a && s_ctx_target >= 0 && s_ctx_target < a->target_count) {
+            tp_project_target *t = &a->targets[s_ctx_target];
+            if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_TOGGLE, t->enabled ? "Disable" : "Enable")) {
+                gui_project_set_target(s_sel_atlas, s_ctx_target, t->exporter_id, t->out_path, !t->enabled);
+            }
+            if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_REMOVE, "Remove")) {
+                s_pending_remove_target = s_ctx_target;
+            }
+        }
     } else if (s_ctx_kind == CTX_CANVAS) {
         overlay_item(&s_ctx_menu, MK_OV_OUTLINE, "Region outlines (hull)", &s_canvas.show_outline);
         overlay_item(&s_ctx_menu, MK_OV_FRAME, "Frame rects", &s_canvas.show_frame);
@@ -2034,6 +2215,618 @@ static void declare_about_modal(nt_ui_context_t *ctx) {
             }
         }
         nt_ui_modal_end(ctx);
+    }
+}
+// #endregion
+
+// #region right settings panel (regions F/G + per-region packing overrides)
+#define PANEL_LABEL_W 116.0F
+static const char *const k_shape_names[3] = {"Rect", "Convex hull", "Concave contour"};
+static const int k_size_presets[7] = {256, 512, 1024, 2048, 4096, 8192, 16384};
+
+/* Numeric field: shows *cur while unfocused, edits `buf` in place; on edit parses +
+ * clamps into *out (the model stays valid every keystroke; the buffer reformats on
+ * blur). Returns true the frame the value changed. */
+static bool ui_int_field(nt_ui_context_t *ctx, uint32_t id, char *buf, size_t cap, int cur, int mn, int mx,
+                         bool enabled, int *out) {
+    if (!nt_ui_input_focused(ctx, id)) {
+        (void)snprintf(buf, cap, "%d", cur);
+    }
+    static const nt_ui_input_props_t np = {
+        .placeholder = NULL, .allow = nt_ui_filter_numeric, .max_length = 0U, .keyboard = NT_UI_KB_NUMERIC, .password = false};
+    const Clay_ElementDeclaration decl = {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H - 4.0F))}}};
+    bool submitted = false;
+    const bool changed = nt_ui_input_text(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, id, buf, cap, &np, &s_num_input,
+                                          &decl, enabled, &submitted);
+    if ((changed || submitted) && enabled) {
+        long v = strtol(buf, NULL, 10);
+        if (v < mn) {
+            v = mn;
+        }
+        if (v > mx) {
+            v = mx;
+        }
+        *out = (int)v;
+        return true;
+    }
+    return false;
+}
+
+static bool ui_float_field(nt_ui_context_t *ctx, uint32_t id, char *buf, size_t cap, float cur, float mn, float mx,
+                           bool enabled, float *out) {
+    if (!nt_ui_input_focused(ctx, id)) {
+        (void)snprintf(buf, cap, "%g", (double)cur);
+    }
+    static const nt_ui_input_props_t np = {
+        .placeholder = NULL, .allow = nt_ui_filter_numeric, .max_length = 0U, .keyboard = NT_UI_KB_NUMERIC, .password = false};
+    const Clay_ElementDeclaration decl = {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H - 4.0F))}}};
+    bool submitted = false;
+    const bool changed = nt_ui_input_text(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, id, buf, cap, &np, &s_num_input,
+                                          &decl, enabled, &submitted);
+    if ((changed || submitted) && enabled) {
+        double v = strtod(buf, NULL);
+        if (!(v > (double)mn)) {
+            v = (double)mn;
+        }
+        if (v > (double)mx) {
+            v = (double)mx;
+        }
+        *out = (float)v;
+        return true;
+    }
+    return false;
+}
+
+/* Short free-text field (target out path). Returns true on edit; caller reads `buf`. */
+static bool ui_text_field(nt_ui_context_t *ctx, uint32_t id, char *buf, size_t cap, const char *cur, bool enabled,
+                          const char *placeholder) {
+    if (!nt_ui_input_focused(ctx, id)) {
+        (void)snprintf(buf, cap, "%s", cur ? cur : "");
+    }
+    const nt_ui_input_props_t tp = {
+        .placeholder = placeholder, .allow = NULL, .max_length = 0U, .keyboard = NT_UI_KB_TEXT, .password = false};
+    const Clay_ElementDeclaration decl = {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H - 4.0F))}}};
+    bool submitted = false;
+    const bool changed = nt_ui_input_text(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, id, buf, cap, &tp, &s_num_input,
+                                          &decl, enabled, &submitted);
+    return (changed || submitted) && enabled;
+}
+
+/* A collapsible section/disclosure header: full-width clickable row + chevron. */
+static void panel_header(nt_ui_context_t *ctx, uint32_t id, const char *title, bool *open, const nt_ui_label_style_t *lbl,
+                         const Clay_Color bg_col) {
+    const nt_ui_events_t ev = nt_ui_events(ctx, id, NULL);
+    if (ev.clicked) {
+        *open = !*open;
+    }
+    const Clay_Color bg = ev.hovered ? C_HOVER : bg_col;
+    CLAY({.id = {.id = id},
+          .layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(26.0F))},
+                     .padding = {Su(8), Su(8), 0, 0},
+                     .childGap = Su(6),
+                     .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}},
+          .backgroundColor = bg,
+          .cornerRadius = CLAY_CORNER_RADIUS(S(4))}) {
+        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), *open ? "\xE2\x96\xBE" : "\xE2\x96\xB8", &g_caption); /* U+25BE / U+25B8 */
+        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), title, lbl);
+    }
+}
+
+/* A small full-width note line (info, never a warning) -- wraps within the panel. */
+static void panel_note(nt_ui_context_t *ctx, const char *text) {
+    CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)}, .padding = {Su(4), Su(4), Su(2), Su(2)}}}) {
+        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), text, &g_dim);
+    }
+}
+
+/* Row scaffolding: a fixed label cell + a growable widget cell. The BEGIN macro opens
+ * both; the caller emits the widget then closes with ROW_END. */
+#define PANEL_ROW_BEGIN(lbl_text, lbl_style)                                                                            \
+    CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H))},                                 \
+                     .childGap = Su(8),                                                                                 \
+                     .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {                                    \
+        CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(S(PANEL_LABEL_W)), CLAY_SIZING_GROW(0)},                          \
+                         .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {                                \
+            nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), (lbl_text), (lbl_style));                                    \
+        }                                                                                                              \
+        CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)},                                         \
+                         .childGap = Su(6),                                                                            \
+                         .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}})
+#define PANEL_ROW_END }
+
+/* A labeled string-option dropdown. Returns the newly-picked index, or -1 if unchanged.
+ * When !enabled it renders the preview as a static dimmed label (disabled-with-reason). */
+static int row_combo(nt_ui_context_t *ctx, const char *label, uint32_t id, bool *open, const char *preview, int cur,
+                     const char *const *options, int count, bool enabled) {
+    int sel = -1;
+    PANEL_ROW_BEGIN(label, enabled ? &g_row : &g_dim) {
+        if (!enabled) {
+            nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), preview ? preview : "", &g_dim);
+        } else if (nt_ui_combo_begin(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, id, preview, &s_dd_style, open)) {
+            for (int i = 0; i < count; i++) {
+                if (nt_ui_combo_selectable(ctx, (uint32_t)i, options[i], i == cur)) {
+                    sel = i;
+                }
+            }
+            nt_ui_combo_end(ctx);
+        }
+    }
+    PANEL_ROW_END;
+    return sel;
+}
+
+/* A labeled slider + numeric readout. Returns true (writes *out) on change. */
+static bool row_slider(nt_ui_context_t *ctx, const char *label, uint32_t id, int cur, int mn, int mx, bool enabled,
+                       int *out) {
+    int v = cur;
+    bool changed = false;
+    PANEL_ROW_BEGIN(label, enabled ? &g_row : &g_dim) {
+        const Clay_ElementDeclaration sd = {
+            .layout = {.sizing = {CLAY_SIZING_FIT(0), CLAY_SIZING_FIXED(S(20.0F))}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}};
+        if (nt_ui_slider_int(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, id, NULL, &v, mn, mx, 1, &s_slider_style, &sd, enabled)) {
+            *out = v;
+            changed = true;
+        }
+        char vb[16];
+        (void)snprintf(vb, sizeof vb, "%d", v);
+        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), vb, &g_caption);
+    }
+    PANEL_ROW_END;
+    return changed;
+}
+
+/* A labeled checkbox (indicator only; the text lives in the label cell). Returns true
+ * (writes the flipped value to *out) on change. */
+static bool row_check(nt_ui_context_t *ctx, const char *label, uint32_t id, bool cur, bool enabled, bool *out) {
+    bool v = cur;
+    bool changed = false;
+    PANEL_ROW_BEGIN(label, enabled ? &g_row : &g_dim) {
+        const Clay_ElementDeclaration cd = {.layout = {.sizing = {CLAY_SIZING_FIT(0), CLAY_SIZING_FIXED(S(22.0F))}}};
+        if (nt_ui_checkbox(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, id, NULL, &v, &s_check_style, &cd, enabled)) {
+            *out = v;
+            changed = true;
+        }
+    }
+    PANEL_ROW_END;
+    return changed;
+}
+
+/* A labeled int field row. Returns true (writes *out) on edit. */
+static bool row_int(nt_ui_context_t *ctx, const char *label, uint32_t id, char *buf, size_t cap, int cur, int mn,
+                    int mx, bool enabled, int *out) {
+    bool changed = false;
+    PANEL_ROW_BEGIN(label, enabled ? &g_row : &g_dim) {
+        changed = ui_int_field(ctx, id, buf, cap, cur, mn, mx, enabled, out);
+    }
+    PANEL_ROW_END;
+    return changed;
+}
+
+static bool row_float(nt_ui_context_t *ctx, const char *label, uint32_t id, char *buf, size_t cap, float cur, float mn,
+                      float mx, bool enabled, float *out) {
+    bool changed = false;
+    PANEL_ROW_BEGIN(label, enabled ? &g_row : &g_dim) {
+        changed = ui_float_field(ctx, id, buf, cap, cur, mn, mx, enabled, out);
+    }
+    PANEL_ROW_END;
+    return changed;
+}
+
+static int size_preset_index(int v) {
+    for (int i = 0; i < 7; i++) {
+        if (k_size_presets[i] == v) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/* --- Atlas settings (region F) --- */
+static void declare_atlas_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
+    /* Basic: shape, max size, padding, allow transform. */
+    const int ns = row_combo(ctx, "Shape", nt_ui_id("set/shape"), &s_dd_shape_open,
+                             (a->shape >= 0 && a->shape < 3) ? k_shape_names[a->shape] : "?", a->shape, k_shape_names, 3, true);
+    if (ns >= 0 && ns != a->shape) {
+        a->shape = ns;
+        gui_project_touch_setting();
+    }
+    char szpv[16];
+    (void)snprintf(szpv, sizeof szpv, "%d", a->max_size);
+    static const char *const size_labels[7] = {"256", "512", "1024", "2048", "4096", "8192", "16384"};
+    const int nsz = row_combo(ctx, "Max page size", nt_ui_id("set/size"), &s_dd_size_open, szpv, size_preset_index(a->max_size),
+                              size_labels, 7, true);
+    if (nsz >= 0 && k_size_presets[nsz] != a->max_size) {
+        a->max_size = k_size_presets[nsz];
+        gui_project_touch_setting();
+    }
+    if (a->max_size > 4096) {
+        panel_note(ctx, "Pages over 4096 may not load on mobile GPUs / stock engine runtime.");
+    }
+    int iv = 0;
+    if (row_int(ctx, "Padding", nt_ui_id("set/pad"), s_nb_pad, sizeof s_nb_pad, a->padding, 0, 16384, true, &iv) &&
+        iv != a->padding) {
+        a->padding = iv;
+        gui_project_touch_setting();
+    }
+    bool bv = false;
+    if (row_check(ctx, "Allow transform", nt_ui_id("set/xform"), a->allow_transform, true, &bv)) {
+        a->allow_transform = bv;
+        gui_project_touch_setting();
+    }
+
+    /* Advanced disclosure. */
+    panel_header(ctx, nt_ui_id("set/adv"), "Advanced", &s_atlas_adv_open, &g_body, C_BG);
+    if (!s_atlas_adv_open) {
+        return;
+    }
+    if (row_int(ctx, "Margin", nt_ui_id("set/margin"), s_nb_margin, sizeof s_nb_margin, a->margin, 0, 16384, true, &iv) &&
+        iv != a->margin) {
+        a->margin = iv;
+        gui_project_touch_setting();
+    }
+    const bool extrude_ok = (a->shape == 0 /* RECT */);
+    if (row_int(ctx, "Extrude", nt_ui_id("set/extrude"), s_nb_extrude, sizeof s_nb_extrude, a->extrude, 0, 255, extrude_ok,
+                &iv) &&
+        iv != a->extrude) {
+        a->extrude = iv;
+        gui_project_touch_setting();
+    }
+    if (!extrude_ok) {
+        panel_note(ctx, "Extrude requires Rect shape \xE2\x80\x94 use Padding for polygon modes.");
+    }
+    if (row_slider(ctx, "Alpha threshold", nt_ui_id("set/alpha"), a->alpha_threshold, 0, 255, true, &iv) &&
+        iv != a->alpha_threshold) {
+        a->alpha_threshold = iv;
+        gui_project_touch_setting();
+    }
+    if (row_int(ctx, "Max vertices", nt_ui_id("set/maxv"), s_nb_maxv, sizeof s_nb_maxv, a->max_vertices, 1, 16, true, &iv) &&
+        iv != a->max_vertices) {
+        a->max_vertices = iv;
+        gui_project_touch_setting();
+    }
+    if (row_check(ctx, "Power of two", nt_ui_id("set/pot"), a->power_of_two, true, &bv)) {
+        a->power_of_two = bv;
+        gui_project_touch_setting();
+    }
+    float fv = 0.0F;
+    if (row_float(ctx, "Pixels/unit", nt_ui_id("set/ppu"), s_nb_ppu, sizeof s_nb_ppu, a->pixels_per_unit, 0.0001F,
+                  100000.0F, true, &fv) &&
+        fv != a->pixels_per_unit) {
+        a->pixels_per_unit = fv;
+        gui_project_touch_setting();
+    }
+}
+
+/* Currently-selected leaf sprite row (a file source or a folder child), or NULL. */
+static const sprite_row *selected_leaf_row(void) {
+    for (int i = 0; i < s_row_count; i++) {
+        const sprite_row *r = &s_rows[i];
+        const bool sel = r->is_source ? (s_sel_src == r->src && s_sel_child == -1)
+                                      : (s_sel_src == r->src && s_sel_child == r->child);
+        if (sel && !r->is_folder && !r->missing && r->sprite_name[0] != '\0') {
+            return r;
+        }
+    }
+    return NULL;
+}
+
+/* Per-sprite "Default (inherited: ..) then explicit values" override combo. `cur_ov`
+ * is TP_PROJECT_OV_INHERIT or an explicit index; row 0 is Default. Returns the new
+ * override value (or TP_PROJECT_OV_INHERIT), or INT_MIN if unchanged. */
+#define OV_UNCHANGED INT_MIN
+static int row_override_combo(nt_ui_context_t *ctx, const char *label, uint32_t id, bool *open, int cur_ov,
+                              int explicit_base, const char *const *values, int value_count, const char *default_label,
+                              bool enabled) {
+    /* Build the option list: [default_label, values...] in a small stack array. */
+    const char *opts[20];
+    int n = 0;
+    opts[n++] = default_label;
+    for (int i = 0; i < value_count && n < 20; i++) {
+        opts[n++] = values[i];
+    }
+    const int cur_row = (cur_ov == TP_PROJECT_OV_INHERIT) ? 0 : (cur_ov - explicit_base + 1);
+    const char *preview = (cur_row >= 0 && cur_row < n) ? opts[cur_row] : default_label;
+    const int pick = row_combo(ctx, label, id, open, preview, cur_row, opts, n, enabled);
+    if (pick < 0) {
+        return OV_UNCHANGED;
+    }
+    return (pick == 0) ? TP_PROJECT_OV_INHERIT : (explicit_base + pick - 1);
+}
+
+/* --- Region (selected sprite) + per-region packing overrides --- */
+static void declare_region_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
+    const sprite_row *row = selected_leaf_row();
+    if (!row) {
+        if (s_sel_missing) {
+            panel_note(ctx, "Selected file is missing \xE2\x80\x94 restore it and press Refresh (F5).");
+        } else {
+            panel_note(ctx, "Select a sprite (list or canvas) to edit its region.");
+        }
+        return;
+    }
+    const char *sprite = row->sprite_name;
+    const tp_project_sprite *ov = tp_project_atlas_find_sprite(a, sprite);
+    const tp_result *pr = gui_pack_result(s_sel_atlas);
+    const int ri = pr ? gui_pack_find_sprite(s_sel_atlas, sprite) : -1;
+
+    /* Final name + Rename (reuse the existing inline rename path). */
+    char fname[224];
+    (void)snprintf(fname, sizeof fname, "%s", (ov && ov->rename) ? ov->rename : sprite);
+    PANEL_ROW_BEGIN("Final name", &g_row) {
+        ui_label_fit(ctx, fname, &g_body, S(PANEL_LABEL_W + 30.0F), 0U);
+        if (ui_btn(ctx, nt_ui_id("reg/rename"), "Rename", &g_btn_ghost, true, 0.0F, 24.0F, &g_caption)) {
+            start_sprite_edit_named(sprite);
+        }
+    }
+    PANEL_ROW_END;
+
+    /* Source file + size (from the last pack result when available). */
+    char src[256];
+    if (pr && ri >= 0) {
+        (void)snprintf(src, sizeof src, "%s  \xC2\xB7  %d x %d", path_last(row->abs), pr->sprites[ri].sourceSize.w,
+                       pr->sprites[ri].sourceSize.h);
+    } else {
+        (void)snprintf(src, sizeof src, "%s  (pack to measure)", path_last(row->abs));
+    }
+    PANEL_ROW_BEGIN("Source", &g_caption) {
+        ui_label_fit(ctx, src, &g_caption, S(150.0F), 0U);
+    }
+    PANEL_ROW_END;
+
+    const float ox = ov ? ov->origin_x : TP_PROJECT_ORIGIN_DEFAULT;
+    const float oy = ov ? ov->origin_y : TP_PROJECT_ORIGIN_DEFAULT;
+    float fv = 0.0F;
+    if (row_float(ctx, "Pivot X", nt_ui_id("reg/ox"), s_nb_ox, sizeof s_nb_ox, ox, -100.0F, 100.0F, true, &fv)) {
+        gui_project_set_sprite_origin(s_sel_atlas, sprite, fv, oy);
+    }
+    if (row_float(ctx, "Pivot Y", nt_ui_id("reg/oy"), s_nb_oy, sizeof s_nb_oy, oy, -100.0F, 100.0F, true, &fv)) {
+        gui_project_set_sprite_origin(s_sel_atlas, sprite, ox, fv);
+    }
+
+    static const char *const s9_labels[4] = {"Slice9 L", "Slice9 R", "Slice9 T", "Slice9 B"};
+    static const char *const s9_ids[4] = {"reg/s9l", "reg/s9r", "reg/s9t", "reg/s9b"};
+    bool any_s9 = false;
+    for (int k = 0; k < 4; k++) {
+        const int cur = ov ? ov->slice9_lrtb[k] : 0;
+        if (cur != 0) {
+            any_s9 = true;
+        }
+        int iv = 0;
+        if (row_int(ctx, s9_labels[k], nt_ui_id(s9_ids[k]), s_nb_s9[k], sizeof s_nb_s9[k], cur, 0, 4096, true, &iv) &&
+            iv != cur) {
+            gui_project_set_sprite_slice9(s_sel_atlas, sprite, k, iv);
+        }
+    }
+    if (any_s9) {
+        panel_note(ctx, "Slice-9 forces Rect shape and no rotation for this sprite.");
+    }
+
+    /* Read-only packed readout. */
+    if (pr && ri >= 0) {
+        const tp_sprite *s = &pr->sprites[ri];
+        char geom[24];
+        if (s->vert_count > 4) {
+            (void)snprintf(geom, sizeof geom, "%d verts", s->vert_count);
+        } else {
+            (void)snprintf(geom, sizeof geom, "rect");
+        }
+        char rd[192];
+        (void)snprintf(rd, sizeof rd, "frame %dx%d @ %d,%d  \xC2\xB7  %s  \xC2\xB7  %s", s->frame.w, s->frame.h,
+                       s->frame.x, s->frame.y, transform_decode_str(s->transform), geom);
+        PANEL_ROW_BEGIN("Packed", &g_caption) {
+            ui_label_fit(ctx, rd, &g_caption, S(150.0F), 0U);
+        }
+        PANEL_ROW_END;
+    }
+
+    /* Per-region packing overrides (owner scope 2026-07-10). */
+    panel_header(ctx, nt_ui_id("reg/ov"), "Packing overrides", &s_region_ov_open, &g_body, C_BG);
+    if (!s_region_ov_open) {
+        return;
+    }
+    const int ov_shape = ov ? ov->ov_shape : TP_PROJECT_OV_INHERIT;
+    const int ov_rot = ov ? ov->ov_allow_rotate : TP_PROJECT_OV_INHERIT;
+    const int ov_mv = ov ? ov->ov_max_vertices : TP_PROJECT_OV_INHERIT;
+    const int ov_margin = ov ? ov->ov_margin : TP_PROJECT_OV_INHERIT;
+    const int ov_extrude = ov ? ov->ov_extrude : TP_PROJECT_OV_INHERIT;
+
+    /* Slice9 auto-forces RECT + no-rotate: show the shape/rotate overrides disabled. */
+    if (any_s9) {
+        panel_note(ctx, "Shape & rotation overrides are set by slice-9 (Rect, no rotation).");
+    }
+    char shape_def[48];
+    (void)snprintf(shape_def, sizeof shape_def, "Default (%s)", (a->shape >= 0 && a->shape < 3) ? k_shape_names[a->shape] : "?");
+    const int ps = row_override_combo(ctx, "Shape", nt_ui_id("reg/ov_shape"), &s_dd_ov_shape_open, ov_shape, 0,
+                                      k_shape_names, 3, shape_def, !any_s9);
+    if (ps != OV_UNCHANGED && ps != ov_shape) {
+        gui_project_set_sprite_override(s_sel_atlas, sprite, GUI_SPRITE_OV_SHAPE, ps);
+    }
+    static const char *const rot_values[1] = {"No rotation"};
+    const char *rot_def = a->allow_transform ? "Default (rotate/flip)" : "Default (no transform)";
+    const int prv = row_override_combo(ctx, "Rotation", nt_ui_id("reg/ov_rot"), &s_dd_ov_rot_open, ov_rot, 0, rot_values,
+                                       1, rot_def, !any_s9);
+    if (prv != OV_UNCHANGED && prv != ov_rot) {
+        gui_project_set_sprite_override(s_sel_atlas, sprite, GUI_SPRITE_OV_ROTATE, prv);
+    }
+    static const char *const mv_values[16] = {"1", "2",  "3",  "4",  "5",  "6",  "7",  "8",
+                                              "9", "10", "11", "12", "13", "14", "15", "16"};
+    char mv_def[40];
+    (void)snprintf(mv_def, sizeof mv_def, "Default (%d)", a->max_vertices);
+    const int pmv = row_override_combo(ctx, "Max vertices", nt_ui_id("reg/ov_mv"), &s_dd_ov_mv_open, ov_mv, 1, mv_values,
+                                       16, mv_def, true);
+    if (pmv != OV_UNCHANGED && pmv != ov_mv) {
+        gui_project_set_sprite_override(s_sel_atlas, sprite, GUI_SPRITE_OV_MAXVERT, pmv);
+    }
+
+    /* margin / extrude overrides: a "override?" checkbox + numeric (1..255). extrude is
+     * disabled unless the sprite's effective shape is RECT (§3.3f, per sprite). */
+    const int eff_shape = any_s9 ? 0 : (ov_shape != TP_PROJECT_OV_INHERIT ? ov_shape : a->shape);
+    {
+        bool on = (ov_margin != TP_PROJECT_OV_INHERIT);
+        PANEL_ROW_BEGIN("Margin ovr", &g_row) {
+            const Clay_ElementDeclaration cd = {.layout = {.sizing = {CLAY_SIZING_FIT(0), CLAY_SIZING_FIXED(S(22.0F))}}};
+            const bool cbc = nt_ui_checkbox(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, nt_ui_id("reg/ov_mcb"), NULL, &on,
+                                            &s_check_style, &cd, true);
+            const int seed = (a->margin >= 1) ? (a->margin > 255 ? 255 : a->margin) : 1;
+            if (cbc) {
+                gui_project_set_sprite_override(s_sel_atlas, sprite, GUI_SPRITE_OV_MARGIN, on ? seed : TP_PROJECT_OV_INHERIT);
+            }
+            const int disp = (ov_margin != TP_PROJECT_OV_INHERIT) ? ov_margin : seed;
+            int iv = 0;
+            if (ui_int_field(ctx, nt_ui_id("reg/ov_mf"), s_nb_ov_margin, sizeof s_nb_ov_margin, disp, 1, 255,
+                             on && !cbc, &iv) &&
+                on && iv != ov_margin) {
+                gui_project_set_sprite_override(s_sel_atlas, sprite, GUI_SPRITE_OV_MARGIN, iv);
+            }
+        }
+        PANEL_ROW_END;
+    }
+    {
+        const bool ex_enabled = (eff_shape == 0 /* RECT */);
+        bool on = (ov_extrude != TP_PROJECT_OV_INHERIT);
+        PANEL_ROW_BEGIN("Extrude ovr", ex_enabled ? &g_row : &g_dim) {
+            const Clay_ElementDeclaration cd = {.layout = {.sizing = {CLAY_SIZING_FIT(0), CLAY_SIZING_FIXED(S(22.0F))}}};
+            const bool cbc = nt_ui_checkbox(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, nt_ui_id("reg/ov_ecb"), NULL, &on,
+                                            &s_check_style, &cd, ex_enabled);
+            const int seed = (a->extrude >= 1) ? (a->extrude > 255 ? 255 : a->extrude) : 1;
+            if (cbc && ex_enabled) {
+                gui_project_set_sprite_override(s_sel_atlas, sprite, GUI_SPRITE_OV_EXTRUDE, on ? seed : TP_PROJECT_OV_INHERIT);
+            }
+            const int disp = (ov_extrude != TP_PROJECT_OV_INHERIT) ? ov_extrude : seed;
+            int iv = 0;
+            if (ui_int_field(ctx, nt_ui_id("reg/ov_ef"), s_nb_ov_extrude, sizeof s_nb_ov_extrude, disp, 1, 255,
+                             ex_enabled && on && !cbc, &iv) &&
+                on && iv != ov_extrude) {
+                gui_project_set_sprite_override(s_sel_atlas, sprite, GUI_SPRITE_OV_EXTRUDE, iv);
+            }
+        }
+        PANEL_ROW_END;
+        if (!ex_enabled) {
+            panel_note(ctx, "Extrude override needs the sprite's effective shape to be Rect.");
+        }
+    }
+}
+
+/* --- Export targets (region G, audit I1) --- */
+static void declare_export_targets(nt_ui_context_t *ctx, tp_project_atlas *a) {
+    const int ne = tp_exporter_count();
+    const char *exp_labels[24];
+    int nlabels = 0;
+    for (int i = 0; i < ne && nlabels < 24; i++) {
+        const tp_exporter *e = tp_exporter_at(i);
+        exp_labels[nlabels++] = (e && e->display_name) ? e->display_name : (e ? e->id : "?");
+    }
+    if (a->target_count == 0) {
+        panel_note(ctx, "No export targets. Add one so this atlas exports files.");
+    }
+    const int shown = (a->target_count < GUI_MAX_TARGETS) ? a->target_count : GUI_MAX_TARGETS;
+    for (int ti = 0; ti < shown; ti++) {
+        tp_project_target *t = &a->targets[ti];
+        char idbuf[48];
+        (void)snprintf(idbuf, sizeof idbuf, "tgt/row_%d", ti);
+        const uint32_t row_id = nt_ui_id(idbuf);
+        if (nt_ui_menu_open_trigger(ctx, s_id_ctx_menu, row_id, false, &s_ctx_state)) {
+            close_menubar_menus();
+            s_ctx_kind = CTX_TARGET;
+            s_ctx_target = ti;
+        }
+        /* find current exporter index for the combo selection */
+        int cur_exp = -1;
+        for (int i = 0; i < nlabels; i++) {
+            const tp_exporter *e = tp_exporter_at(i);
+            if (e && strcmp(e->id, t->exporter_id) == 0) {
+                cur_exp = i;
+                break;
+            }
+        }
+        CLAY({.id = {.id = row_id},
+              .layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)},
+                         .padding = {Su(4), Su(4), Su(4), Su(4)},
+                         .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                         .childGap = Su(4)},
+              .backgroundColor = C_BG,
+              .cornerRadius = CLAY_CORNER_RADIUS(S(4))}) {
+            /* row 1: enabled checkbox + exporter dropdown */
+            CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H))}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+                bool en = t->enabled;
+                const Clay_ElementDeclaration cd = {.layout = {.sizing = {CLAY_SIZING_FIT(0), CLAY_SIZING_FIXED(S(22.0F))}}};
+                if (nt_ui_checkbox(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, nt_ui_child_id(row_id, "en"), NULL, &en,
+                                   &s_check_style, &cd, true)) {
+                    gui_project_set_target(s_sel_atlas, ti, t->exporter_id, t->out_path, en);
+                }
+                CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+                    const char *pv = (cur_exp >= 0) ? exp_labels[cur_exp] : t->exporter_id;
+                    if (nt_ui_combo_begin(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, nt_ui_child_id(row_id, "exp"), pv,
+                                          &s_dd_style, &s_dd_target_open[ti])) {
+                        for (int i = 0; i < nlabels; i++) {
+                            if (nt_ui_combo_selectable(ctx, (uint32_t)i, exp_labels[i], i == cur_exp)) {
+                                const tp_exporter *e = tp_exporter_at(i);
+                                if (e) {
+                                    gui_project_set_target(s_sel_atlas, ti, e->id, t->out_path, t->enabled);
+                                }
+                            }
+                        }
+                        nt_ui_combo_end(ctx);
+                    }
+                }
+                if (ui_btn(ctx, nt_ui_child_id(row_id, "rm"), "x", &g_btn_ghost, true, 24.0F, 22.0F, &g_caption)) {
+                    s_pending_remove_target = ti;
+                }
+            }
+            /* row 2: out path + browse */
+            CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H))}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+                CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+                    if (ui_text_field(ctx, nt_ui_child_id(row_id, "path"), s_nb_target_path[ti], sizeof s_nb_target_path[ti],
+                                      t->out_path, true, "out/atlas.json")) {
+                        gui_project_set_target(s_sel_atlas, ti, t->exporter_id, s_nb_target_path[ti], t->enabled);
+                    }
+                }
+                if (ui_btn(ctx, nt_ui_child_id(row_id, "browse"), "\xE2\x80\xA6", &g_btn_ghost, true, 28.0F, 22.0F, &g_caption)) { /* U+2026 */
+                    s_pending_browse_target = ti;
+                }
+            }
+        }
+    }
+    if (ui_btn(ctx, nt_ui_id("tgt/add"), "+ Target", &g_btn_ghost, true, 0.0F, 26.0F, &g_caption)) {
+        s_pending_add_target = true;
+    }
+}
+
+static void declare_right_panel(nt_ui_context_t *ctx) {
+    tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
+    CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(S(BASE_RIGHT_PANEL_W)), CLAY_SIZING_GROW(0)},
+                     .layoutDirection = CLAY_TOP_TO_BOTTOM},
+          .backgroundColor = C_PANEL,
+          .cornerRadius = CLAY_CORNER_RADIUS(S(8)),
+          .border = {.color = C_BORDER, .width = {Su(1), Su(1), Su(1), Su(1), 0}}}) {
+        nt_ui_scroll_begin(ctx, NULL, nt_ui_id("panel/scroll"), &s_panel_scroll,
+                           &(Clay_ElementDeclaration){.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}});
+        CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)},
+                         .padding = {Su(10), Su(10), Su(10), Su(12)},
+                         .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                         .childGap = Su(4)}}) {
+            if (!a) {
+                nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "No atlas selected.", &g_caption);
+            } else {
+                char title[96];
+                (void)snprintf(title, sizeof title, "Atlas settings \xC2\xB7 %s", a->name);
+                panel_header(ctx, nt_ui_id("sec/atlas"), title, &s_sec_atlas_open, &g_title, C_STATUS);
+                if (s_sec_atlas_open) {
+                    declare_atlas_settings(ctx, a);
+                }
+                CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(6))}}}) {}
+                panel_header(ctx, nt_ui_id("sec/region"), "Region", &s_sec_region_open, &g_title, C_STATUS);
+                if (s_sec_region_open) {
+                    declare_region_settings(ctx, a);
+                }
+                CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(6))}}}) {}
+                panel_header(ctx, nt_ui_id("sec/export"), "Export targets", &s_sec_export_open, &g_title, C_STATUS);
+                if (s_sec_export_open) {
+                    declare_export_targets(ctx, a);
+                }
+            }
+        }
+        nt_ui_scroll_end(ctx);
     }
 }
 // #endregion
@@ -2318,6 +3111,103 @@ static void run_selftest(void) {
 #endif
     }
 
+    /* --- settings panel: stale-on-change, effective-extrude, per-region RECT override,
+     *     and a fresh-project seeded-target export (regions F/G, §3.3f, owner overrides) --- */
+    {
+        gui_project_new();
+        gui_pack_clear(-1);
+        tp_project *fp = gui_project_get();
+        NT_ASSERT(fp && fp->atlas_count == 1 && fp->atlases[0].target_count >= 1 && "fresh project seeds a target (I1)");
+        nt_log_info("SELFTEST: fresh target[0]=%s base=%s", fp->atlases[0].targets[0].exporter_id,
+                    fp->atlases[0].targets[0].out_path);
+
+        char afolder[512];
+        to_abs("examples/defold-demo/examples/anim_trim/anims", afolder, sizeof afolder);
+        (void)gui_project_add_source(0, afolder);
+        gui_scan_invalidate_all();
+
+        tp_project_atlas *a0 = tp_project_get_atlas(gui_project_get(), 0);
+        gui_project_mark_packed(); /* pretend current, then a setting change must set stale */
+        a0->padding = 7;
+        gui_project_touch_setting();
+        nt_log_info("SELFTEST: setting change stale=%d (expect 1)", gui_project_is_stale());
+        NT_ASSERT(gui_project_is_stale() && "a setting change sets preview stale");
+
+        /* shape=concave + extrude=3 -> preview pack succeeds via the effective-extrude-0 rule */
+        a0->shape = 2; /* CONCAVE_CONTOUR */
+        a0->extrude = 3;
+        gui_project_touch_setting();
+        double pms = 0.0;
+        char perr[256] = {0};
+        char pnote[128] = {0};
+        const bool okc = gui_pack_atlas(0, &pms, perr, sizeof perr, pnote, sizeof pnote);
+        nt_log_info("SELFTEST: concave+extrude3 pack -> %d in %.1fms (%s)", okc, pms, okc ? "effective extrude 0" : perr);
+        NT_ASSERT(okc && "concave+extrude=3 packs (effective extrude 0)");
+
+        /* per-sprite shape=RECT override -> that region packs as an exact 4-vert rect */
+        char afabs[512];
+        if (tp_project_resolve_path(gui_project_get(), gui_project_get()->atlases[0].sources[0], afabs, sizeof afabs) ==
+            TP_STATUS_OK) {
+            const gui_scan_result *sc = gui_scan_get(afabs);
+            if (sc->count > 0) {
+                char spn[192];
+                (void)snprintf(spn, sizeof spn, "%s", sc->entries[0].rel);
+                char *dot = strrchr(spn, '.');
+                if (dot) {
+                    *dot = '\0';
+                }
+                gui_project_set_sprite_override(0, spn, GUI_SPRITE_OV_SHAPE, 0 /* RECT */);
+                (void)gui_pack_atlas(0, &pms, perr, sizeof perr, pnote, sizeof pnote);
+                const int rri = gui_pack_find_sprite(0, spn);
+                const tp_result *rr = gui_pack_result(0);
+                const int vc = (rr && rri >= 0) ? rr->sprites[rri].vert_count : -1;
+                nt_log_info("SELFTEST: sprite '%s' RECT override -> vert_count=%d (expect 4)", spn, vc);
+                NT_ASSERT(vc == 4 && "RECT per-sprite override packs a 4-vert rect");
+            }
+        }
+
+        /* Restore a valid export state: the EXPORT path (tp_export_run) does not yet
+         * apply the effective-extrude-0 rule (point-7 follow-up in the parallel exporter
+         * agent's file), so concave+extrude>0 would be rejected at core validation. */
+        a0->extrude = 0;
+        gui_project_touch_setting();
+
+        /* save + export a fresh GUI project -> the seeded target writes files (audit I1) */
+        char fpath[1200];
+        (void)snprintf(fpath, sizeof fpath, "%s/selftest_fresh.ntpacker_project", s_exe_dir);
+        char serr[256] = {0};
+        (void)gui_project_save_as(fpath, serr, sizeof serr);
+        int etg = 0;
+        int enc = 0;
+        char eerr[256] = {0};
+        char enote[128] = {0};
+        const bool oke = gui_pack_export(0, &etg, &enc, eerr, sizeof eerr, enote, sizeof enote);
+        char jbase[600] = {0};
+        char jpath[640] = {0};
+        char ppath[640] = {0};
+        bool jok = false;
+        bool pok = false;
+        if (tp_project_resolve_path(gui_project_get(), "out/atlas1", jbase, sizeof jbase) == TP_STATUS_OK) {
+            (void)snprintf(jpath, sizeof jpath, "%s.json", jbase);
+            (void)snprintf(ppath, sizeof ppath, "%s-0.png", jbase);
+            FILE *jf = fopen(jpath, "rb");
+            if (jf) {
+                jok = (fgetc(jf) == '{');
+                (void)fclose(jf);
+            }
+            FILE *pf = fopen(ppath, "rb");
+            if (pf) {
+                pok = true;
+                (void)fclose(pf);
+            }
+        }
+        nt_log_info("SELFTEST: fresh export ok=%d targets=%d json{=%d png0=%d %s", oke, etg, jok, pok, oke ? "" : eerr);
+        NT_ASSERT(oke && jok && pok && "fresh GUI project exports its seeded target");
+        (void)remove(jpath);
+        (void)remove(ppath);
+        (void)remove(fpath);
+    }
+
     /* --- About modal: open it so the auto-quit frames render it (OK/Esc close it interactively) --- */
     s_about_open = true;
     nt_log_info("SELFTEST: About modal opened=%d", s_about_open);
@@ -2531,6 +3421,7 @@ static void frame(void) {
             CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = Su(8), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_TOP}}}) {
                 declare_left_panel(s_ctx);
                 declare_canvas(s_ctx);
+                declare_right_panel(s_ctx);
             }
             declare_statusbar(s_ctx);
         }
@@ -2561,6 +3452,9 @@ static void frame(void) {
         }
 
         gui_canvas_upload_pages(&s_canvas);          /* GL upload of packed pages (deferred from pack) */
+        if (s_canvas.upload_failed) {
+            set_status("Page too large for this GPU \xE2\x80\x94 lower Max page size to preview it.");
+        }
         nt_shape_renderer_set_vp((const float *)vp); /* overlays share the sprite view_proj */
         nt_shape_renderer_set_depth(false);
 

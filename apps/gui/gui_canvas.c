@@ -297,6 +297,11 @@ void gui_canvas_upload_pages(gui_canvas *c) {
         return;
     }
     drop_pages(c);
+    c->upload_failed = false;
+    /* GPU cap guard: an oversize page (up to 16384 now) that exceeds the GPU's
+     * max_texture_size ASSERTS in nt_gfx_make_texture under debug -- pre-check and
+     * skip instead so the tool degrades to "page not shown" + a notice, never a crash. */
+    const uint32_t gpu_max = g_nt_gfx.gpu_caps.max_texture_size;
     int n = c->result->page_count;
     if (n > GUI_CANVAS_MAX_PAGES) {
         n = GUI_CANVAS_MAX_PAGES;
@@ -304,6 +309,12 @@ void gui_canvas_upload_pages(gui_canvas *c) {
     for (int i = 0; i < n; i++) {
         const tp_page *pg = &c->result->pages[i];
         if (!pg->rgba || pg->w <= 0 || pg->h <= 0) {
+            continue;
+        }
+        if ((uint32_t)pg->w > gpu_max || (uint32_t)pg->h > gpu_max) {
+            c->upload_failed = true; /* too big for this GPU -> leave page invalid */
+            c->page_w[i] = pg->w;
+            c->page_h[i] = pg->h;
             continue;
         }
         char label[32];
@@ -323,6 +334,10 @@ void gui_canvas_upload_pages(gui_canvas *c) {
                                         : upload_rgba_premul(pg->rgba, pg->w, pg->h, label);
         c->page_w[i] = pg->w;
         c->page_h[i] = pg->h;
+        if (c->pages[i].id == 0) {
+            c->upload_failed = true; /* OOM / driver refusal on a huge page -> skip, no assert */
+            continue;
+        }
         c->page_valid[i] = true;
     }
     c->page_count = n;

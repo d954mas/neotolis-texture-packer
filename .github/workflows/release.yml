@@ -62,11 +62,11 @@ jobs:
           version="${GITHUB_REF_NAME}"
           stage="neotolis-texture-packer-${version}-${{ matrix.slug }}"
           mkdir -p "dist/${stage}"
-          # Ship every app built for this preset (cli/gui as they land; smoke for now).
-          find build/apps -type d -name native-release | while read -r dir; do
-            cp -r "$dir"/. "dist/${stage}/"
-          done
-          cp README.md LICENSE* "dist/${stage}/" 2>/dev/null || true
+          # Ship user-facing apps only (gui now, cli when it lands) — no build
+          # helpers, no smoke/test executables.
+          cp -r build/apps/gui/native-release/. "dist/${stage}/"
+          rm -f "dist/${stage}"/build_ntpacker_gui_packs*
+          cp README.md LICENSE "dist/${stage}/"
           cd dist
           if [[ "${{ runner.os }}" == "Windows" ]]; then
             7z a "${stage}.zip" "${stage}"

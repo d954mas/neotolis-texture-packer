@@ -313,6 +313,92 @@ void test_neg_duplicate_sprite_name(void) {
     TEST_ASSERT_NULL(r);
     tp_arena_destroy(ar);
 }
+
+/* Per-sprite packing overrides (owner scope 2026-07-10): a RECT override in a
+ * CONCAVE atlas packs that sprite as an exact 4-vert rect; a NO-rotate override
+ * yields an identity/flip-only transform (no diagonal bit). The default disc stays
+ * a many-vert concave hull -> proves the override actually changed the shape. */
+void test_sprite_override_rect_and_rotate(void) {
+    tp_arena *ar = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(ar);
+    tp_pack_sprite_desc sp[2];
+    sp[0] = g_sprites[1]; /* disc_green 96x48 -> RECT + no-rotate override */
+    sp[0].name = "green_rect";
+    sp[0].ov_mask |= TP_PACK_OV_SHAPE | TP_PACK_OV_ROTATE;
+    sp[0].ov_shape = TP_PACK_SPRITE_SHAPE_RECT;
+    sp[0].ov_allow_rotate = TP_PACK_SPRITE_ROTATE_NO;
+    sp[1] = g_sprites[0]; /* disc_red 64x64 -> inherits concave atlas shape */
+    sp[1].name = "red_concave";
+
+    tp_pack_settings s;
+    tp_pack_settings_defaults(&s); /* shape = CONCAVE_CONTOUR */
+    s.atlas_name = "ov_shape_test";
+    s.work_dir = g_dir;
+    s.sprites = sp;
+    s.sprite_count = 2;
+    s.pixels_per_unit = 1.0f;
+    tp_result *r = NULL;
+    tp_error e;
+    e.msg[0] = '\0';
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, tp_pack(&s, ar, &r, &e), e.msg);
+
+    const tp_sprite *rect = find_sprite(r, "green_rect");
+    TEST_ASSERT_NOT_NULL(rect);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(4, rect->vert_count, "RECT override must pack as a 4-vert rect");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, rect->transform & TP_TRANSFORM_DIAGONAL, "no-rotate override forbids diagonal");
+    /* no-rotate -> unrotated frame equals the trimmed source bounds exactly */
+    TEST_ASSERT_EQUAL_INT(rect->spriteSourceSize.w, rect->frame.w);
+    TEST_ASSERT_EQUAL_INT(rect->spriteSourceSize.h, rect->frame.h);
+
+    const tp_sprite *concave = find_sprite(r, "red_concave");
+    TEST_ASSERT_NOT_NULL(concave);
+    TEST_ASSERT_TRUE_MESSAGE(concave->vert_count > 4, "inherited concave disc keeps a many-vert hull");
+    tp_arena_destroy(ar);
+}
+
+/* Per-sprite override validation: an extrude override on a sprite whose effective
+ * shape is non-RECT, and an out-of-range max_vertices override, both return
+ * TP_STATUS_INVALID_ARGUMENT with the sprite named. */
+void test_sprite_override_validation(void) {
+    tp_arena *ar = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(ar);
+    tp_pack_settings s;
+    tp_result *r = NULL;
+    tp_error e;
+
+    /* extrude override on a concave-shaped sprite */
+    tp_pack_sprite_desc bad_ex = g_sprites[0];
+    bad_ex.name = "bad_extrude";
+    bad_ex.ov_mask |= TP_PACK_OV_EXTRUDE;
+    bad_ex.ov_extrude = 3; /* effective shape CONCAVE -> invalid */
+    tp_pack_settings_defaults(&s);
+    s.atlas_name = "ov_bad_ex";
+    s.work_dir = g_dir;
+    s.sprites = &bad_ex;
+    s.sprite_count = 1;
+    s.pixels_per_unit = 1.0f;
+    e.msg[0] = '\0';
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT, tp_pack(&s, ar, &r, &e));
+    TEST_ASSERT_NULL(r);
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(e.msg, "bad_extrude"), "extrude error must name the sprite");
+
+    /* max_vertices override out of range */
+    tp_pack_sprite_desc bad_mv = g_sprites[0];
+    bad_mv.name = "bad_maxv";
+    bad_mv.ov_mask |= TP_PACK_OV_MAXVERT;
+    bad_mv.ov_max_vertices = 99;
+    tp_pack_settings_defaults(&s);
+    s.atlas_name = "ov_bad_mv";
+    s.work_dir = g_dir;
+    s.sprites = &bad_mv;
+    s.sprite_count = 1;
+    s.pixels_per_unit = 1.0f;
+    r = NULL;
+    e.msg[0] = '\0';
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT, tp_pack(&s, ar, &r, &e));
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(e.msg, "bad_maxv"), "max_vertices error must name the sprite");
+    tp_arena_destroy(ar);
+}
 // #endregion
 
 static bool setup_all(const char *dir) {
@@ -354,6 +440,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_determinism);
     RUN_TEST(test_neg_invalid_atlas_name);
     RUN_TEST(test_neg_duplicate_sprite_name);
+    RUN_TEST(test_sprite_override_rect_and_rotate);
+    RUN_TEST(test_sprite_override_validation);
     int rc = UNITY_END();
 
     tp_arena_destroy(g_arena);

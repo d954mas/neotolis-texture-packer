@@ -50,6 +50,7 @@ typedef struct gui_canvas {
     int cur_page;
     const tp_result *result; /* borrowed (arena-owned by gui_pack); NULL = no atlas */
     bool pages_dirty;        /* result set but textures not yet uploaded (GL deferred to the pass) */
+    bool upload_failed;      /* a page exceeded the GPU max texture size / OOM'd -> skipped (16K pages) */
     int sel_sprite;          /* accent-outlined region index, -1 none */
     int hover_sprite;        /* subtle-outline region index, -1 none (set by the handler each frame) */
     bool show_outline, show_trim, show_pivot, show_frame; /* overlay toggles (frame = placed AABB) */

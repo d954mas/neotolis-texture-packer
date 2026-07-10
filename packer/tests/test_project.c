@@ -90,6 +90,12 @@ static tp_project *build_rich(void) {
     sp->slice9_lrtb[2] = 8;
     sp->slice9_lrtb[3] = 8;
     sp->rename = dupstr("player_walk_01"); /* export-name override */
+    /* per-sprite packing overrides (exercise the sparse override round-trip) */
+    sp->ov_shape = 0; /* RECT */
+    sp->ov_allow_rotate = 0;
+    sp->ov_max_vertices = 6;
+    sp->ov_margin = 3;
+    sp->ov_extrude = 5;
 
     tp_project_anim *an = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_animation(hero, "walk", &an));
@@ -153,6 +159,11 @@ static void assert_atlas_equal(const tp_project_atlas *a, const tp_project_atlas
             TEST_ASSERT_NOT_NULL(b->sprites[i].rename);
             TEST_ASSERT_EQUAL_STRING(a->sprites[i].rename, b->sprites[i].rename);
         }
+        TEST_ASSERT_EQUAL_INT(a->sprites[i].ov_shape, b->sprites[i].ov_shape);
+        TEST_ASSERT_EQUAL_INT(a->sprites[i].ov_allow_rotate, b->sprites[i].ov_allow_rotate);
+        TEST_ASSERT_EQUAL_INT(a->sprites[i].ov_max_vertices, b->sprites[i].ov_max_vertices);
+        TEST_ASSERT_EQUAL_INT(a->sprites[i].ov_margin, b->sprites[i].ov_margin);
+        TEST_ASSERT_EQUAL_INT(a->sprites[i].ov_extrude, b->sprites[i].ov_extrude);
     }
     TEST_ASSERT_EQUAL_INT(a->animation_count, b->animation_count);
     for (int i = 0; i < a->animation_count; i++) {
@@ -554,6 +565,74 @@ void test_sprite_rename_override(void) {
     tp_project_destroy(p);
 }
 
+/* 11. set_target replaces fields + is deterministic; sparse enabled default holds. */
+void test_set_target(void) {
+    tp_project *p = tp_project_create();
+    tp_project_atlas *a = tp_project_get_atlas(p, 0);
+    tp_project_target *t = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(a, "json-neotolis", "out/a.json", &t));
+    TEST_ASSERT_TRUE(t->enabled);
+
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_set_target(a, 0, "defold", "out/a.tpinfo", false));
+    TEST_ASSERT_EQUAL_STRING("defold", a->targets[0].exporter_id);
+    TEST_ASSERT_EQUAL_STRING("out/a.tpinfo", a->targets[0].out_path);
+    TEST_ASSERT_FALSE(a->targets[0].enabled);
+
+    /* bounds + arg validation */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS, tp_project_atlas_set_target(a, 3, "defold", "x", true));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT, tp_project_atlas_set_target(a, 0, "", "x", true));
+    tp_project_destroy(p);
+}
+
+/* 12. per-sprite packing overrides: absent stays absent (sparse), present round-trips
+ * and re-saves byte-identical. */
+void test_sprite_override_sparse(void) {
+    char path[512];
+    char path2[512];
+    join(path, sizeof path, "ov1.ntpacker_project");
+    join(path2, sizeof path2, "ov2.ntpacker_project");
+
+    tp_project *p = tp_project_create();
+    tp_project_atlas *a = tp_project_get_atlas(p, 0);
+    tp_project_sprite *sp = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_sprite(a, "s1", &sp));
+    /* defaults inherit -> all override keys absent */
+    TEST_ASSERT_EQUAL_INT(TP_PROJECT_OV_INHERIT, sp->ov_shape);
+    TEST_ASSERT_EQUAL_INT(TP_PROJECT_OV_INHERIT, sp->ov_extrude);
+    sp->ov_shape = 0;        /* RECT */
+    sp->ov_max_vertices = 4; /* explicit */
+
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_save(p, path, &err));
+    size_t n = 0;
+    char *buf = read_all(path, &n);
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"shape\""));        /* present override */
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"max_vertices\"")); /* present override */
+    TEST_ASSERT_NULL(strstr(buf, "\"margin\""));           /* inherited -> absent */
+    TEST_ASSERT_NULL(strstr(buf, "\"allow_rotate\""));     /* inherited -> absent */
+    free(buf);
+
+    tp_project *loaded = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_load(path, &loaded, &err));
+    tp_project_sprite *ls = tp_project_atlas_find_sprite(tp_project_get_atlas(loaded, 0), "s1");
+    TEST_ASSERT_NOT_NULL(ls);
+    TEST_ASSERT_EQUAL_INT(0, ls->ov_shape);
+    TEST_ASSERT_EQUAL_INT(4, ls->ov_max_vertices);
+    TEST_ASSERT_EQUAL_INT(TP_PROJECT_OV_INHERIT, ls->ov_margin);
+
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_save(loaded, path2, &err));
+    size_t n1 = 0;
+    size_t n2 = 0;
+    char *b1 = read_all(path, &n1);
+    char *b2 = read_all(path2, &n2);
+    TEST_ASSERT_EQUAL_size_t(n1, n2);
+    TEST_ASSERT_EQUAL_INT(0, memcmp(b1, b2, n1));
+    free(b1);
+    free(b2);
+    tp_project_destroy(loaded);
+    tp_project_destroy(p);
+}
+
 int main(int argc, char **argv) {
     g_dir = (argc > 1) ? argv[1] : ".";
     UNITY_BEGIN();
@@ -571,5 +650,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_buffer_roundtrip);
     RUN_TEST(test_add_source_dedupe);
     RUN_TEST(test_sprite_rename_override);
+    RUN_TEST(test_set_target);
+    RUN_TEST(test_sprite_override_sparse);
     return UNITY_END();
 }

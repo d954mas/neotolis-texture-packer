@@ -42,8 +42,21 @@ typedef enum {
     GUI_ACT_ADD_ATLAS,
     GUI_ACT_REMOVE_ATLAS,
     GUI_ACT_RENAME_ATLAS,
-    GUI_ACT_RENAME_SPRITE
+    GUI_ACT_RENAME_SPRITE,
+    GUI_ACT_SET_SETTING, /* atlas knob or per-sprite override edit (coalesces a gesture) */
+    GUI_ACT_SET_TARGET,
+    GUI_ACT_ADD_TARGET,
+    GUI_ACT_REMOVE_TARGET
 } gui_action;
+
+/* Per-sprite packing-override field selector (region-panel "Packing overrides"). */
+typedef enum {
+    GUI_SPRITE_OV_SHAPE = 0,
+    GUI_SPRITE_OV_ROTATE,
+    GUI_SPRITE_OV_MAXVERT,
+    GUI_SPRITE_OV_MARGIN,
+    GUI_SPRITE_OV_EXTRUDE
+} gui_sprite_ov;
 
 /* Creates the initial in-memory project (one default atlas, no path, clean). */
 void gui_project_init(void);
@@ -80,6 +93,23 @@ void gui_project_remove_source(int atlas_index, int source_index);
 bool gui_project_set_atlas_name(int atlas_index, const char *name);
 /* Sets/clears a sprite's rename export-name override (empty/NULL clears it). */
 bool gui_project_set_sprite_rename(int atlas_index, const char *sprite_name, const char *rename);
+
+/* Records an atlas-knob edit that the caller made in place on the tp_project_atlas:
+ * funnels through the touch choke point (dirty + preview stale + coalesced undo). */
+void gui_project_touch_setting(void);
+
+/* --- region-panel per-sprite overrides (sparse: a clear that leaves only defaults
+ * drops the override entry, keeping byte-identical saves) --- */
+bool gui_project_set_sprite_origin(int atlas_index, const char *sprite_name, float ox, float oy);
+bool gui_project_set_sprite_slice9(int atlas_index, const char *sprite_name, int lrtb_index, int value);
+/* Per-sprite packing override; `value` == TP_PROJECT_OV_INHERIT clears it. */
+bool gui_project_set_sprite_override(int atlas_index, const char *sprite_name, gui_sprite_ov which, int value);
+
+/* --- export targets (region G, audit I1) --- */
+/* Appends a default json-neotolis target "out/<atlas>.<ext>"; returns its index or -1. */
+int gui_project_add_target(int atlas_index);
+void gui_project_remove_target(int atlas_index, int index);
+bool gui_project_set_target(int atlas_index, int index, const char *exporter_id, const char *out_path, bool enabled);
 
 /* --- undo / redo (ux.md §3.3c) --- */
 bool gui_project_can_undo(void);

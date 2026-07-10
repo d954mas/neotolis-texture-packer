@@ -400,6 +400,11 @@ tp_status tp_project_atlas_add_sprite(tp_project_atlas *a, const char *name, tp_
     }
     s->origin_x = TP_PROJECT_ORIGIN_DEFAULT;
     s->origin_y = TP_PROJECT_ORIGIN_DEFAULT;
+    s->ov_shape = TP_PROJECT_OV_INHERIT;
+    s->ov_allow_rotate = TP_PROJECT_OV_INHERIT;
+    s->ov_max_vertices = TP_PROJECT_OV_INHERIT;
+    s->ov_margin = TP_PROJECT_OV_INHERIT;
+    s->ov_extrude = TP_PROJECT_OV_INHERIT;
     a->sprite_count++;
     if (out) {
         *out = s;
@@ -429,7 +434,9 @@ tp_status tp_project_atlas_remove_sprite(tp_project_atlas *a, const char *name) 
 static bool tp_sprite_is_default(const tp_project_sprite *s) {
     return s->origin_x == TP_PROJECT_ORIGIN_DEFAULT && s->origin_y == TP_PROJECT_ORIGIN_DEFAULT &&
            s->slice9_lrtb[0] == 0 && s->slice9_lrtb[1] == 0 && s->slice9_lrtb[2] == 0 && s->slice9_lrtb[3] == 0 &&
-           s->rename == NULL;
+           s->rename == NULL && s->ov_shape == TP_PROJECT_OV_INHERIT && s->ov_allow_rotate == TP_PROJECT_OV_INHERIT &&
+           s->ov_max_vertices == TP_PROJECT_OV_INHERIT && s->ov_margin == TP_PROJECT_OV_INHERIT &&
+           s->ov_extrude == TP_PROJECT_OV_INHERIT;
 }
 
 tp_status tp_project_atlas_set_sprite_rename(tp_project_atlas *a, const char *sprite_name, const char *rename) {
@@ -557,6 +564,30 @@ tp_status tp_project_atlas_remove_target(tp_project_atlas *a, int index) {
     return TP_STATUS_OK;
 }
 
+tp_status tp_project_atlas_set_target(tp_project_atlas *a, int index, const char *exporter_id, const char *out_path,
+                                      bool enabled) {
+    if (!a || !exporter_id || exporter_id[0] == '\0' || !out_path || out_path[0] == '\0') {
+        return TP_STATUS_INVALID_ARGUMENT;
+    }
+    if (index < 0 || index >= a->target_count) {
+        return TP_STATUS_OUT_OF_BOUNDS;
+    }
+    char *eid = tp_strdup(exporter_id);
+    char *op = tp_strdup(out_path);
+    if (!eid || !op) {
+        free(eid);
+        free(op);
+        return TP_STATUS_OOM;
+    }
+    tp_project_target *t = &a->targets[index];
+    free(t->exporter_id);
+    free(t->out_path);
+    t->exporter_id = eid;
+    t->out_path = op;
+    t->enabled = enabled;
+    return TP_STATUS_OK;
+}
+
 /* ======================================================================== */
 /* deterministic writer (ux.md principle 7)                                 */
 /* ======================================================================== */
@@ -672,6 +703,24 @@ static void tp_emit_string_array(tp_sb *sb, int depth, char *const *arr, int cou
 static void tp_emit_sprite(tp_sb *sb, int depth, const tp_project_sprite *s) {
     tp_sb_char(sb, '{');
     bool first = true;
+    /* Keys ASCII-ascending: allow_rotate < extrude < margin < max_vertices < name
+     * < origin < rename < shape < slice9. Overrides are sparse (INHERIT skipped). */
+    if (s->ov_allow_rotate != TP_PROJECT_OV_INHERIT) {
+        tp_obj_key(sb, depth + 1, &first, "allow_rotate");
+        tp_sb_int(sb, (long)s->ov_allow_rotate);
+    }
+    if (s->ov_extrude != TP_PROJECT_OV_INHERIT) {
+        tp_obj_key(sb, depth + 1, &first, "extrude");
+        tp_sb_int(sb, (long)s->ov_extrude);
+    }
+    if (s->ov_margin != TP_PROJECT_OV_INHERIT) {
+        tp_obj_key(sb, depth + 1, &first, "margin");
+        tp_sb_int(sb, (long)s->ov_margin);
+    }
+    if (s->ov_max_vertices != TP_PROJECT_OV_INHERIT) {
+        tp_obj_key(sb, depth + 1, &first, "max_vertices");
+        tp_sb_int(sb, (long)s->ov_max_vertices);
+    }
     tp_obj_key(sb, depth + 1, &first, "name");
     tp_sb_json_string(sb, s->name);
     if (s->origin_x != TP_PROJECT_ORIGIN_DEFAULT || s->origin_y != TP_PROJECT_ORIGIN_DEFAULT) {
@@ -682,9 +731,13 @@ static void tp_emit_sprite(tp_sb *sb, int depth, const tp_project_sprite *s) {
         tp_sb_num(sb, (double)s->origin_y);
         tp_sb_char(sb, ']');
     }
-    if (s->rename) { /* ASCII-sorted position: name < origin < rename < slice9 */
+    if (s->rename) {
         tp_obj_key(sb, depth + 1, &first, "rename");
         tp_sb_json_string(sb, s->rename);
+    }
+    if (s->ov_shape != TP_PROJECT_OV_INHERIT) {
+        tp_obj_key(sb, depth + 1, &first, "shape");
+        tp_sb_int(sb, (long)s->ov_shape);
     }
     if (s->slice9_lrtb[0] || s->slice9_lrtb[1] || s->slice9_lrtb[2] || s->slice9_lrtb[3]) {
         tp_obj_key(sb, depth + 1, &first, "slice9");
@@ -1034,6 +1087,28 @@ static tp_status tp_load_sprite(tp_project_atlas *a, const cJSON *js, tp_error *
         }
         for (int k = 0; k < 4; k++) {
             s->slice9_lrtb[k] = (uint16_t)cJSON_GetArrayItem(slice9, k)->valuedouble;
+        }
+    }
+    /* Per-sprite packing overrides (absent = inherit, already seeded to -1). Values
+     * are read verbatim; tp_pack validates the ranges (kept lenient here). */
+    static const struct {
+        const char *key;
+        size_t offset;
+    } ov_fields[] = {
+        {"shape", offsetof(tp_project_sprite, ov_shape)},
+        {"allow_rotate", offsetof(tp_project_sprite, ov_allow_rotate)},
+        {"max_vertices", offsetof(tp_project_sprite, ov_max_vertices)},
+        {"margin", offsetof(tp_project_sprite, ov_margin)},
+        {"extrude", offsetof(tp_project_sprite, ov_extrude)},
+    };
+    for (size_t i = 0; i < sizeof ov_fields / sizeof ov_fields[0]; i++) {
+        const cJSON *jv = cJSON_GetObjectItemCaseSensitive(js, ov_fields[i].key);
+        if (jv) {
+            if (!cJSON_IsNumber(jv)) {
+                return tp_error_set(err, TP_STATUS_BAD_PROJECT, "sprite override '%s' must be a number",
+                                    ov_fields[i].key);
+            }
+            *(int16_t *)((char *)s + ov_fields[i].offset) = (int16_t)jv->valuedouble;
         }
     }
     return TP_STATUS_OK;

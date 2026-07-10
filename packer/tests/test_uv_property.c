@@ -5,7 +5,12 @@
  * encode, §2.5). Additionally the REAL builder encodes in float32
  * (nt_builder_atlas.c:1765-1780); replicate that math and assert decode still
  * recovers px exactly -- this closes the §3.3 caveat that §2.5's proof is over
- * idealized arithmetic while the builder uses float. */
+ * idealized arithmetic while the builder uses float.
+ *
+ * Sweep extended to 16384 (owner 2026-07-10, universal-packer max page size). The
+ * §2.5 recovery error 0.5*W/65535 is 0.125px at 16384 (exact: lround absorbs the
+ * <0.25px half-step), and the float32 encode's ULP slop (~64 in px*65535 near 1e9)
+ * shifts u by at most 1, i.e. <=0.25px after decode -- still within the margin. */
 
 #include "tp_pack_read_internal.h"
 #include "unity.h"
@@ -16,7 +21,8 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-static const int32_t g_dims[] = {2, 3, 7, 16, 100, 127, 128, 255, 256, 1000, 2048, 4095, 4096};
+static const int32_t g_dims[] = {2,    3,    7,    16,   100,  127,   128,   255,  256,
+                                 1000, 2048, 4095, 4096, 5000, 8192, 16383, 16384};
 #define NDIMS ((int)(sizeof g_dims / sizeof g_dims[0]))
 
 /* Builder's actual float32 encode + clamp (nt_builder_atlas.c:1765-1780). */

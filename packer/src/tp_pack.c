@@ -17,6 +17,12 @@
  * that is also the builder's own texture-size cap (nt_builder.h:43). */
 #define TP_PACK_MAX_PAGE_DIM NT_BUILD_MAX_TEXTURE_SIZE
 
+/* The desc override values (tp_pack.h) mirror the engine encoding 1:1. */
+_Static_assert(TP_PACK_SPRITE_SHAPE_RECT == NT_ATLAS_SPRITE_SHAPE_RECT, "sprite shape RECT encoding");
+_Static_assert(TP_PACK_SPRITE_SHAPE_CONVEX == NT_ATLAS_SPRITE_SHAPE_CONVEX, "sprite shape CONVEX encoding");
+_Static_assert(TP_PACK_SPRITE_SHAPE_CONCAVE == NT_ATLAS_SPRITE_SHAPE_CONCAVE, "sprite shape CONCAVE encoding");
+_Static_assert(TP_PACK_SPRITE_ROTATE_NO == NT_ATLAS_SPRITE_ROTATE_NO, "sprite allow_rotate NO encoding");
+
 // #region validation
 /* Normalization-invariant per plan §5: reject anything nt_builder_normalize_path
  * would rewrite, since that would desync the atlas blob's raw "<atlas>/texN"
@@ -97,6 +103,52 @@ static tp_status validate_settings(const tp_pack_settings *s, tp_error *err) {
         if (!isfinite(sp->origin_x) || !isfinite(sp->origin_y)) {
             return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_pack: sprite '%s' pivot must be finite", sp->name);
         }
+        /* Per-sprite override validation (owner scope 2026-07-10). Every check here
+         * prevents a downstream NT_BUILD_ASSERT and names the sprite. Effective
+         * shape = slice9 forces RECT, else the sprite shape override, else the atlas
+         * shape; effective extrude = sprite override else the atlas extrude. */
+        if ((sp->ov_mask & TP_PACK_OV_SHAPE) &&
+            (sp->ov_shape < TP_PACK_SPRITE_SHAPE_RECT || sp->ov_shape > TP_PACK_SPRITE_SHAPE_CONCAVE)) {
+            return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_pack: sprite '%s' shape override %d invalid",
+                                sp->name, (int)sp->ov_shape);
+        }
+        if ((sp->ov_mask & TP_PACK_OV_ROTATE) && sp->ov_allow_rotate != TP_PACK_SPRITE_ROTATE_NO) {
+            return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                                "tp_pack: sprite '%s' allow_rotate override %d invalid (only no-rotate)", sp->name,
+                                (int)sp->ov_allow_rotate);
+        }
+        if ((sp->ov_mask & TP_PACK_OV_MAXVERT) && (sp->ov_max_vertices < 1 || sp->ov_max_vertices > 16)) {
+            return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                                "tp_pack: sprite '%s' max_vertices override %d out of range [1..16]", sp->name,
+                                (int)sp->ov_max_vertices);
+        }
+        if ((sp->ov_mask & TP_PACK_OV_MARGIN) && sp->ov_margin == 0) {
+            return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                                "tp_pack: sprite '%s' margin override 0 unrepresentable (omit to inherit, or use >= 1)",
+                                sp->name);
+        }
+        if ((sp->ov_mask & TP_PACK_OV_EXTRUDE) && sp->ov_extrude == 0) {
+            return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                                "tp_pack: sprite '%s' extrude override 0 unrepresentable (omit to inherit, or use >= 1)",
+                                sp->name);
+        }
+        {
+            const bool slice9 = sp->slice9_lrtb[0] || sp->slice9_lrtb[1] || sp->slice9_lrtb[2] || sp->slice9_lrtb[3];
+            bool eff_rect;
+            if (slice9) {
+                eff_rect = true; /* engine auto-forces RECT for slice9 sprites */
+            } else if (sp->ov_mask & TP_PACK_OV_SHAPE) {
+                eff_rect = (sp->ov_shape == TP_PACK_SPRITE_SHAPE_RECT);
+            } else {
+                eff_rect = (s->shape == NT_ATLAS_SHAPE_RECT);
+            }
+            const int eff_extrude = (sp->ov_mask & TP_PACK_OV_EXTRUDE) ? (int)sp->ov_extrude : s->extrude;
+            if (eff_extrude > 0 && !eff_rect) {
+                return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                                    "tp_pack: sprite '%s' effective extrude %d requires effective RECT shape",
+                                    sp->name, eff_extrude);
+            }
+        }
         if (sp->path) {
             /* Builder asserts on a missing/unreadable file -- pre-check instead. */
             FILE *f = fopen(sp->path, "rb");
@@ -156,13 +208,16 @@ static tp_status build_name_map(const tp_pack_settings *s, tp_name_map **out_map
     return TP_STATUS_OK;
 }
 
-/* Drive nt_builder for one atlas into `path`. Single-threaded (determinism). */
+/* Drive nt_builder for one atlas into `path`. Threaded encode, sequential assembly
+ * (nt_builder_set_threads_auto): determinism is covered by the engine's own threaded
+ * tests plus our byte-identical determinism suite (test_pack / test_export_*). */
 static tp_status run_builder(const tp_pack_settings *s, const char *path, tp_error *err) {
     NtBuilderContext *ctx = nt_builder_start_pack(path);
     if (!ctx) {
         return tp_error_set(err, TP_STATUS_BUILDER_FAILED,
                             "tp_pack: nt_builder_start_pack('%s') failed (bad work_dir?)", path);
     }
+    nt_builder_set_threads_auto(ctx); /* parallel encode; assembly stays sequential */
 
     /* §5 export-friendly profile + caller knobs. */
     nt_atlas_opts_t o = nt_atlas_opts_defaults();
@@ -193,6 +248,23 @@ static tp_status run_builder(const tp_pack_settings *s, const char *path, tp_err
         so.slice9_right = sp->slice9_lrtb[1];
         so.slice9_top = sp->slice9_lrtb[2];
         so.slice9_bottom = sp->slice9_lrtb[3];
+        /* Per-sprite overrides: 0 stays "inherit atlas" (engine encoding); we only
+         * write a field when its mask bit is set (validated above). */
+        if (sp->ov_mask & TP_PACK_OV_SHAPE) {
+            so.shape = sp->ov_shape;
+        }
+        if (sp->ov_mask & TP_PACK_OV_ROTATE) {
+            so.allow_rotate = sp->ov_allow_rotate;
+        }
+        if (sp->ov_mask & TP_PACK_OV_MAXVERT) {
+            so.max_vertices = sp->ov_max_vertices;
+        }
+        if (sp->ov_mask & TP_PACK_OV_MARGIN) {
+            so.margin = sp->ov_margin;
+        }
+        if (sp->ov_mask & TP_PACK_OV_EXTRUDE) {
+            so.extrude = sp->ov_extrude;
+        }
         if (sp->path) {
             nt_builder_atlas_add(ctx, sp->path, &so);
         } else {

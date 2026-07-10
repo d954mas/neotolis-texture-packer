@@ -49,9 +49,22 @@ typedef struct tp_project_sprite {
     float origin_y;
     uint16_t slice9_lrtb[4]; /* [left,right,top,bottom] px; all-zero = none */
     char *rename;            /* final export name override (NULL = file-derived); consumed by tp_normalize overrides */
+
+    /* Optional per-sprite packing overrides (owner scope 2026-07-10). Sparse:
+     * TP_PROJECT_OV_INHERIT (-1) = inherit the atlas value (never serialized).
+     * shape uses atlas-shape semantics (0=RECT,1=CONVEX_HULL,2=CONCAVE_CONTOUR);
+     * allow_rotate 0 = force no-rotate (the engine has no force-rotate). margin/
+     * extrude/max_vertices carry the raw value; an explicit 0 is unrepresentable
+     * engine-side and is rejected by tp_pack (documented follow-up). */
+    int16_t ov_shape;
+    int16_t ov_allow_rotate;
+    int16_t ov_max_vertices;
+    int16_t ov_margin;
+    int16_t ov_extrude;
 } tp_project_sprite;
 
 #define TP_PROJECT_ORIGIN_DEFAULT 0.5F
+#define TP_PROJECT_OV_INHERIT (-1)
 
 /* Flipbook metadata over sprite names, orthogonal to placement (SUMMARY.md §5a).
  * `frames` are atlas-relative sprite names in explicit playback order. */
@@ -195,6 +208,12 @@ tp_status tp_project_atlas_add_target(tp_project_atlas *a, const char *exporter_
 
 /* Removes target `index`. Out-of-range -> OUT_OF_BOUNDS. */
 tp_status tp_project_atlas_remove_target(tp_project_atlas *a, int index);
+
+/* Replaces target `index`'s fields (exporter_id + out_path duped, enabled set).
+ * Both strings required + non-empty. Out-of-range -> OUT_OF_BOUNDS; OOM leaves the
+ * target unchanged. Deterministic save is preserved (sparse `enabled` rule holds). */
+tp_status tp_project_atlas_set_target(tp_project_atlas *a, int index, const char *exporter_id, const char *out_path,
+                                      bool enabled);
 
 /* --- load / save --- */
 
