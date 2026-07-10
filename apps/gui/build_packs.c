@@ -3,9 +3,11 @@
  *   fill), and one Latin font. This is the minimal set nt_ui needs to draw the
  *   skeleton shell (panels/labels/buttons). The live atlas preview is a SEPARATE
  *   session pack written by tp_core at runtime, not baked here.
- * Usage: build_ntpacker_gui_packs <pack_dir> <header_dir>
+ * Usage: build_ntpacker_gui_packs <pack_dir> <header_dir> <icons_dir>
  * Run from the engine root (WORKING_DIRECTORY) so shader/font paths stay short
- * and the generated macro names match the engine examples. */
+ * and the generated macro names match the engine examples. <icons_dir> is the
+ * ntpacker GUI icon dir; CMake passes it absolute (its WORKING_DIRECTORY is the
+ * engine root, not apps/gui), so we join it verbatim. */
 
 /* clang-format off */
 #include "nt_builder.h"
@@ -33,8 +35,9 @@
 #define CHARSET_LATIN1 "¡¢£¤¥¦§¨©ª«¬­®¯°±²³´µ¶·¸¹º»¼½¾¿ÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖ×ØÙÚÛÜÝÞßàáâãäåæçèéêëìíîïðñòóôõö÷øùúûüýþÿ"
 #define CHARSET_CYRILLIC "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдеёжзийклмнопрстуфхцчшщъыьэюя"
 /* warning check ellipsis, black/white circle, rotate x2, left/right triangle, small right/down triangle
- * (disclosure chevrons), right arrow, true-minus, en/em dash */
-#define CHARSET_SYMBOLS "⚠✓…●○↻⟳◀▶▸▾→−–—"
+ * (disclosure chevrons), right arrow, true-minus, en/em dash, up/down arrow (anim frame reorder),
+ * medium vertical bar (preview pause -- rendered doubled "❚❚"; DejaVu Sans covers U+275A). */
+#define CHARSET_SYMBOLS "⚠✓…●○↻⟳◀▶▸▾→−–—↑↓❚"
 
 static char s_path_buf[512];
 
@@ -44,12 +47,13 @@ static const char *pack_path(const char *dir, const char *name) {
 }
 
 int main(int argc, char *argv[]) {
-    if (argc < 3) {
-        (void)fprintf(stderr, "Usage: build_ntpacker_gui_packs <pack_dir> <header_dir>\n");
+    if (argc < 4) {
+        (void)fprintf(stderr, "Usage: build_ntpacker_gui_packs <pack_dir> <header_dir> <icons_dir>\n");
         return 1;
     }
     const char *out_dir = argv[1];
     const char *header_dir = argv[2];
+    const char *icons_dir = argv[3]; /* absolute (CMake joins CMAKE_CURRENT_SOURCE_DIR/assets/icons) */
 
     (void)printf("=== Build ntpacker-gui UI pack -> %s ===\n\n", out_dir);
 
@@ -102,6 +106,31 @@ int main(int argc, char *argv[]) {
     white_opts.name = "_white";
     nt_builder_atlas_add_raw(ctx, white_pixel, 1, 1, &white_opts);
     (void)printf("  Atlas 'ntpacker_ui_atlas' region '_white': 1x1\n");
+
+    /* Lucide icon masks (48px white-on-alpha; the hero is 96px). Explicit list, not a glob: it
+     * documents the region contract (each name -> ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_<NAME>) and a
+     * glob would derive names from basenames INCLUDING strays. opts.name = basename (no extension)
+     * gives clean macros; sources are straight-alpha and the atlas premultiplies at bake so the UI
+     * shader's color_packed tint composites correctly (same path as _white). The hero is baked here
+     * (used by the Packet C empty state) so no pack change is needed later. */
+    static const char *const icon_names[] = {
+        "check",        "chevron-down", "chevron-left",   "chevron-right",   "circle-check",
+        "crop",         "crosshair",    "download",       "external-link",   "file-plus",
+        "film",         "folder",       "folder-open",    "folder-plus",     "folder-plus-hero",
+        "image",        "info",         "layers",         "layout-grid",     "link",
+        "maximize-2",   "minus",        "octagon-alert",  "plus",            "redo-2",
+        "refresh-cw",   "save",         "scan",           "search",          "square-dashed",
+        "triangle-alert", "undo-2",     "x",
+    };
+    char icon_path[512];
+    for (size_t i = 0; i < sizeof icon_names / sizeof icon_names[0]; i++) {
+        (void)snprintf(icon_path, sizeof icon_path, "%s/%s.png", icons_dir, icon_names[i]);
+        nt_atlas_sprite_opts_t iopts = nt_atlas_sprite_opts_defaults();
+        iopts.name = icon_names[i];
+        nt_builder_atlas_add(ctx, icon_path, &iopts);
+    }
+    (void)printf("  Atlas 'ntpacker_ui_atlas' icons added: %zu (from %s)\n",
+                 sizeof icon_names / sizeof icon_names[0], icons_dir);
 
     nt_builder_end_atlas(ctx);
     // #endregion

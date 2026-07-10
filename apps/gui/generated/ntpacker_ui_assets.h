@@ -22,6 +22,39 @@
 
 /* --- ATLAS_REGION --- */
 #define ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS__WHITE ((nt_hash64_t){0x27424DEE40744BBBULL}) /* ntpacker_ui_atlas/_white */
+#define ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_CHECK ((nt_hash64_t){0x0D88852E073BAB16ULL}) /* ntpacker_ui_atlas/check */
+#define ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_CHEVRON_DOWN ((nt_hash64_t){0x2B21EB657B8E61A6ULL}) /* ntpacker_ui_atlas/chevron-down */
+#define ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_CHEVRON_LEFT ((nt_hash64_t){0x7DDBA0FECF11E0D3ULL}) /* ntpacker_ui_atlas/chevron-left */
+#define ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_CHEVRON_RIGHT ((nt_hash64_t){0x10470B593F1D857DULL}) /* ntpacker_ui_atlas/chevron-right */
+#define ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_CIRCLE_CHECK ((nt_hash64_t){0xD4CC1CD9CF9D1CABULL}) /* ntpacker_ui_atlas/circle-check */
+#define ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_CROP ((nt_hash64_t){0xFF767FF2524D138EULL}) /* ntpacker_ui_atlas/crop */
+#define ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_CROSSHAIR ((nt_hash64_t){0x622D7EFA56E45553ULL}) /* ntpacker_ui_atlas/crosshair */
+#define ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_DOWNLOAD ((nt_hash64_t){0x8D85EF2CF4DEA81BULL}) /* ntpacker_ui_atlas/download */
+#define ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_EXTERNAL_LINK ((nt_hash64_t){0x400B87ABEB2D89C7ULL}) /* ntpacker_ui_atlas/external-link */
+#define ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_FILE_PLUS ((nt_hash64_t){0x119DF200BC544EB0ULL}) /* ntpacker_ui_atlas/file-plus */
+#define ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_FILM ((nt_hash64_t){0xA9958EDE55FA8093ULL}) /* ntpacker_ui_atlas/film */
+#define ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_FOLDER ((nt_hash64_t){0x93F94C8BFAB4C2B0ULL}) /* ntpacker_ui_atlas/folder */
+#define ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_FOLDER_OPEN ((nt_hash64_t){0x839823CEDF162F87ULL}) /* ntpacker_ui_atlas/folder-open */
+#define ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_FOLDER_PLUS ((nt_hash64_t){0xC566EF14248ED1F4ULL}) /* ntpacker_ui_atlas/folder-plus */
+#define ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_FOLDER_PLUS_HERO ((nt_hash64_t){0xFDB53B71EABADF8BULL}) /* ntpacker_ui_atlas/folder-plus-hero */
+#define ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_IMAGE ((nt_hash64_t){0x050D4627045D5F07ULL}) /* ntpacker_ui_atlas/image */
+#define ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_INFO ((nt_hash64_t){0x01EEE4706C85519BULL}) /* ntpacker_ui_atlas/info */
+#define ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_LAYERS ((nt_hash64_t){0x42F3BD1F5E3F9B5EULL}) /* ntpacker_ui_atlas/layers */
+#define ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_LAYOUT_GRID ((nt_hash64_t){0x78EBDB704C7E2FF0ULL}) /* ntpacker_ui_atlas/layout-grid */
+#define ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_LINK ((nt_hash64_t){0xF7980AE0CDA7951EULL}) /* ntpacker_ui_atlas/link */
+#define ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_MAXIMIZE_2 ((nt_hash64_t){0x24B9094CB9E0C533ULL}) /* ntpacker_ui_atlas/maximize-2 */
+#define ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_MINUS ((nt_hash64_t){0x5562BD04916910ADULL}) /* ntpacker_ui_atlas/minus */
+#define ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_OCTAGON_ALERT ((nt_hash64_t){0xECF6018E6EB7B5D9ULL}) /* ntpacker_ui_atlas/octagon-alert */
+#define ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_PLUS ((nt_hash64_t){0x6765A83408C0A820ULL}) /* ntpacker_ui_atlas/plus */
+#define ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_REDO_2 ((nt_hash64_t){0xE89699FCBA7354D7ULL}) /* ntpacker_ui_atlas/redo-2 */
+#define ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_REFRESH_CW ((nt_hash64_t){0xDDC14867F2C246DEULL}) /* ntpacker_ui_atlas/refresh-cw */
+#define ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_SAVE ((nt_hash64_t){0xD795D67F2E9E6996ULL}) /* ntpacker_ui_atlas/save */
+#define ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_SCAN ((nt_hash64_t){0x79AC4750A1651931ULL}) /* ntpacker_ui_atlas/scan */
+#define ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_SEARCH ((nt_hash64_t){0x71E6F6D1E157DBFEULL}) /* ntpacker_ui_atlas/search */
+#define ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_SQUARE_DASHED ((nt_hash64_t){0x114420E3A3FFE4EBULL}) /* ntpacker_ui_atlas/square-dashed */
+#define ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_TRIANGLE_ALERT ((nt_hash64_t){0x01719388A22E3C88ULL}) /* ntpacker_ui_atlas/triangle-alert */
+#define ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_UNDO_2 ((nt_hash64_t){0x6A922025AE523AB3ULL}) /* ntpacker_ui_atlas/undo-2 */
+#define ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_X ((nt_hash64_t){0x5C80C09683041123ULL}) /* ntpacker_ui_atlas/x */
 
 #if NT_HASH_LABELS
 static inline void ntpacker_ui_assets_register_labels(void) {
@@ -32,7 +65,40 @@ static inline void ntpacker_ui_assets_register_labels(void) {
     (void)nt_hash64_str("ntpacker_ui/font");
     (void)nt_hash64_str("ntpacker_ui_atlas");
     (void)nt_hash64_str("ntpacker_ui_atlas/_white");
+    (void)nt_hash64_str("ntpacker_ui_atlas/check");
+    (void)nt_hash64_str("ntpacker_ui_atlas/chevron-down");
+    (void)nt_hash64_str("ntpacker_ui_atlas/chevron-left");
+    (void)nt_hash64_str("ntpacker_ui_atlas/chevron-right");
+    (void)nt_hash64_str("ntpacker_ui_atlas/circle-check");
+    (void)nt_hash64_str("ntpacker_ui_atlas/crop");
+    (void)nt_hash64_str("ntpacker_ui_atlas/crosshair");
+    (void)nt_hash64_str("ntpacker_ui_atlas/download");
+    (void)nt_hash64_str("ntpacker_ui_atlas/external-link");
+    (void)nt_hash64_str("ntpacker_ui_atlas/file-plus");
+    (void)nt_hash64_str("ntpacker_ui_atlas/film");
+    (void)nt_hash64_str("ntpacker_ui_atlas/folder");
+    (void)nt_hash64_str("ntpacker_ui_atlas/folder-open");
+    (void)nt_hash64_str("ntpacker_ui_atlas/folder-plus");
+    (void)nt_hash64_str("ntpacker_ui_atlas/folder-plus-hero");
+    (void)nt_hash64_str("ntpacker_ui_atlas/image");
+    (void)nt_hash64_str("ntpacker_ui_atlas/info");
+    (void)nt_hash64_str("ntpacker_ui_atlas/layers");
+    (void)nt_hash64_str("ntpacker_ui_atlas/layout-grid");
+    (void)nt_hash64_str("ntpacker_ui_atlas/link");
+    (void)nt_hash64_str("ntpacker_ui_atlas/maximize-2");
+    (void)nt_hash64_str("ntpacker_ui_atlas/minus");
+    (void)nt_hash64_str("ntpacker_ui_atlas/octagon-alert");
+    (void)nt_hash64_str("ntpacker_ui_atlas/plus");
+    (void)nt_hash64_str("ntpacker_ui_atlas/redo-2");
+    (void)nt_hash64_str("ntpacker_ui_atlas/refresh-cw");
+    (void)nt_hash64_str("ntpacker_ui_atlas/save");
+    (void)nt_hash64_str("ntpacker_ui_atlas/scan");
+    (void)nt_hash64_str("ntpacker_ui_atlas/search");
+    (void)nt_hash64_str("ntpacker_ui_atlas/square-dashed");
     (void)nt_hash64_str("ntpacker_ui_atlas/tex0");
+    (void)nt_hash64_str("ntpacker_ui_atlas/triangle-alert");
+    (void)nt_hash64_str("ntpacker_ui_atlas/undo-2");
+    (void)nt_hash64_str("ntpacker_ui_atlas/x");
 }
 #endif
 

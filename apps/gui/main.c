@@ -40,6 +40,7 @@
 #include "ui/nt_ui_button.h"
 #include "ui/nt_ui_checkbox.h"
 #include "ui/nt_ui_dropdown.h"
+#include "ui/nt_ui_image.h"
 #include "ui/nt_ui_input.h"
 #include "ui/nt_ui_label.h"
 #include "ui/nt_ui_menu.h"
@@ -100,10 +101,22 @@ static inline uint16_t Su(float px) { return (uint16_t)((px * g_ui_scale) + 0.5F
 #define PANEL_LABEL_W 116.0F /* settings-row label column (base; runtime-clamped in compute_panel_widths) */
 /* Canvas-column budget (design px, pre-S()). MIN_CANVAS_W is reserved for the canvas so the strip never
  * forces the middle row wider than the window; it is >= the compact two-row strip's min-content. Below
- * STRIP_FULL_MIN_W the strip drops to the compact two-row layout instead of a single overflowing row. */
+ * STRIP_SINGLE_MIN_W the strip drops to the compact two-row layout instead of a single overflowing row. */
 #define MIN_CANVAS_W 285.0F
 #define MIN_PANEL_W 100.0F
-#define STRIP_FULL_MIN_W 545.0F
+/* Canvas-strip responsive stops, in design px of the canvas COLUMN width (compared as
+ * s_canvas_w < S(stop): both sides scale by g_ui_scale, so the compare is in design px). Icons make
+ * the buttons much narrower than the old text blobs, so the single-row floor drops well below the
+ * old 545. Ladder (§4): >= LABELS Pack/Export show text; >= CHIP the stale chip shows too; below
+ * SINGLE the strip falls to the overflow-safe two-row compact (icon-only).
+ * CHIP must clear the FULL labeled+chip strip min-content (measured ~649 design px, max across
+ * scales 1.0/1.5/2.0) PLUS the canvas card's L/R padding (S(20)) that the strip sits inside -- the
+ * strip's real budget is s_canvas_w - S(20), not s_canvas_w. Below CHIP the amber Pack carries the
+ * stale signal (§4) and the chip is dropped, so a trailing chip can never push the row (a GROW child
+ * can't shrink below min-content) past the canvas and shove the right panel off-screen. */
+#define STRIP_SINGLE_MIN_W 440.0F
+#define STRIP_LABELS_MIN_W 560.0F
+#define STRIP_CHIP_MIN_W 680.0F
 
 /* Pack an sRGB triple into the engine's 0xAABBGGRR (opaque) -- clearer than hand-swizzling. */
 #define RGBA8(r, g, b) ((uint32_t)0xFF000000u | ((uint32_t)(b) << 16) | ((uint32_t)(g) << 8) | (uint32_t)(r))
@@ -118,87 +131,115 @@ static inline uint16_t Su(float px) { return (uint16_t)((px * g_ui_scale) + 0.5F
 // #endregion
 
 // #region palette
-static const Clay_Color C_BG = {18.0F, 18.0F, 22.0F, 255.0F};
-static const Clay_Color C_PANEL = {30.0F, 34.0F, 42.0F, 255.0F};
-static const Clay_Color C_CANVAS = {12.0F, 13.0F, 16.0F, 255.0F};
-static const Clay_Color C_BORDER = {58.0F, 64.0F, 78.0F, 255.0F};
-static const Clay_Color C_STATUS = {24.0F, 26.0F, 34.0F, 255.0F};
-static const Clay_Color C_SEL = {52.0F, 78.0F, 120.0F, 255.0F};       /* selected-row accent fill */
-static const Clay_Color C_HOVER = {42.0F, 48.0F, 60.0F, 255.0F};      /* row hover */
+/* Redesign §2.1: widen the value gaps between surfaces so structure reads. bg darkest, canvas
+ * darkest surface, panel mid; borders/hover/selection nudged for contrast. Section-header + input +
+ * severity tokens (header/input/success/danger) are Packet B/C -- deferred so this packet does not
+ * restyle headers, wells, or the status bar; only surfaces + selection + hover move here. */
+static const Clay_Color C_BG = {17.0F, 18.0F, 23.0F, 255.0F};
+static const Clay_Color C_PANEL = {28.0F, 31.0F, 40.0F, 255.0F};
+static const Clay_Color C_CANVAS = {11.0F, 12.0F, 15.0F, 255.0F};
+static const Clay_Color C_BORDER = {52.0F, 58.0F, 72.0F, 255.0F};
+static const Clay_Color C_STATUS = {24.0F, 26.0F, 34.0F, 255.0F};     /* status/header fill: Packet B/C re-tints to `header` */
+static const Clay_Color C_SEL = {48.0F, 74.0F, 120.0F, 255.0F};       /* selected-row desaturated blue FILL */
+static const Clay_Color C_HOVER = {46.0F, 52.0F, 66.0F, 255.0F};      /* row/btn hover */
 static const Clay_Color C_TRANSPARENT = {0.0F, 0.0F, 0.0F, 0.0F};
 
 /* Base label styles (font_size = base px); rescale_styles() copies these into the g_* below
  * with font_size *= g_ui_scale every frame, so scaled text stays crisp (Slug vector font). */
-static const nt_ui_label_style_t g_title_base = {.font_id = 0, .font_size = FS_TITLE, .color = {170.0F, 180.0F, 196.0F, 255.0F}};
-static const nt_ui_label_style_t g_body_base = {.font_id = 0, .font_size = FS_BODY, .color = {214.0F, 220.0F, 230.0F, 255.0F}};
-static const nt_ui_label_style_t g_row_base = {.font_id = 0, .font_size = FS_ROW, .color = {206.0F, 212.0F, 222.0F, 255.0F}};
-static const nt_ui_label_style_t g_caption_base = {.font_id = 0, .font_size = FS_CAPTION, .color = {150.0F, 156.0F, 168.0F, 255.0F}};
-static const nt_ui_label_style_t g_canvas_hint_base = {.font_id = 0, .font_size = FS_HINT, .color = {120.0F, 126.0F, 140.0F, 255.0F}, .align = CLAY_TEXT_ALIGN_CENTER};
-static const nt_ui_label_style_t g_tag_base = {.font_id = 0, .font_size = FS_TAG, .color = {245.0F, 238.0F, 232.0F, 255.0F}};
-/* Missing-file rows / placeholder (ux.md §3.7): amber warning accent. */
-static const nt_ui_label_style_t g_warn_base = {.font_id = 0, .font_size = FS_ROW, .color = {224.0F, 158.0F, 96.0F, 255.0F}};
+/* Colors are §2.1 text tiers (text-strong/text/text-dim/text-faint); sizes stay on the current
+ * scale (the §2.3 type-scale re-assignment is Packet B). The old dim title (recessed) is retired --
+ * titles now take text-strong. */
+static const nt_ui_label_style_t g_title_base = {.font_id = 0, .font_size = FS_TITLE, .color = {230.0F, 234.0F, 242.0F, 255.0F}};
+static const nt_ui_label_style_t g_body_base = {.font_id = 0, .font_size = FS_BODY, .color = {196.0F, 204.0F, 216.0F, 255.0F}};
+static const nt_ui_label_style_t g_row_base = {.font_id = 0, .font_size = FS_ROW, .color = {196.0F, 204.0F, 216.0F, 255.0F}};
+static const nt_ui_label_style_t g_caption_base = {.font_id = 0, .font_size = FS_CAPTION, .color = {140.0F, 148.0F, 164.0F, 255.0F}};
+static const nt_ui_label_style_t g_canvas_hint_base = {.font_id = 0, .font_size = FS_HINT, .color = {98.0F, 104.0F, 120.0F, 255.0F}, .align = CLAY_TEXT_ALIGN_CENTER};
+static const nt_ui_label_style_t g_tag_base = {.font_id = 0, .font_size = FS_TAG, .color = {245.0F, 244.0F, 243.0F, 255.0F}};
+/* Missing-file rows / placeholder (ux.md §3.7): amber warning accent (§2.1 warn). */
+static const nt_ui_label_style_t g_warn_base = {.font_id = 0, .font_size = FS_ROW, .color = {228.0F, 158.0F, 92.0F, 255.0F}};
 /* Hyperlink label (About repo link): link-blue so it reads as clickable; hover tint on the button
  * behind it is the extra affordance (no cursor-shape API). */
 static const nt_ui_label_style_t g_link_base = {.font_id = 0, .font_size = FS_CAPTION, .color = {110.0F, 170.0F, 245.0F, 255.0F}};
-/* Dimmed caption for stale stats (they describe the LAST pack, not current settings). */
-static const nt_ui_label_style_t g_dim_base = {.font_id = 0, .font_size = FS_CAPTION, .color = {110.0F, 114.0F, 124.0F, 200.0F}};
+/* Dimmed caption for stale stats (they describe the LAST pack, not current settings): text-faint. */
+static const nt_ui_label_style_t g_dim_base = {.font_id = 0, .font_size = FS_CAPTION, .color = {98.0F, 104.0F, 120.0F, 255.0F}};
+/* Content tiers for the colored button fills: bright on the blue accent (primary), dark on the amber
+ * warn (stale). Icon tint on those buttons derives from these (ui_icon_btn packs the label color). */
+static const nt_ui_label_style_t g_onaccent_base = {.font_id = 0, .font_size = FS_BODY, .color = {234.0F, 240.0F, 248.0F, 255.0F}};
+static const nt_ui_label_style_t g_onwarn_base = {.font_id = 0, .font_size = FS_BODY, .color = {40.0F, 28.0F, 12.0F, 255.0F}};
 static nt_ui_label_style_t g_title, g_body, g_row, g_caption, g_canvas_hint, g_tag, g_warn, g_link, g_dim; /* scaled each frame */
+static nt_ui_label_style_t g_onaccent, g_onwarn;                                                           /* colored-button content (scaled each frame) */
 static nt_ui_label_style_t g_check;                                                                        /* checkbox tick glyph (scaled each frame) */
 
+/* Button tiers (§2.5). Every tint is authored through RGBA8(r,g,b) -- never a hand-packed 0xAABBGGRR
+ * literal (the byte-order footgun that swapped amber/blue before). Secondary = quiet grey (panel+8). */
 static nt_ui_button_style_t g_btn = {
-    .idle = {.bg_tint = 0xFF4A4238U, .scale = 1.0F, .opacity = 1.0F},
-    .hover = {.bg_tint = 0xFF5A5040U, .scale = 1.02F, .opacity = 1.0F},
-    .pressed = {.bg_tint = 0xFF3A342CU, .scale = 0.97F, .offset_y = 1.0F, .opacity = 1.0F},
-    .disabled = {.bg_tint = 0xFF4A4238U, .scale = 1.0F, .opacity = 0.35F},
+    .idle = {.bg_tint = RGBA8(38, 42, 52), .scale = 1.0F, .opacity = 1.0F},
+    .hover = {.bg_tint = RGBA8(50, 55, 68), .scale = 1.02F, .opacity = 1.0F},
+    .pressed = {.bg_tint = RGBA8(30, 34, 43), .scale = 0.97F, .offset_y = 1.0F, .opacity = 1.0F},
+    .disabled = {.bg_tint = RGBA8(38, 42, 52), .scale = 1.0F, .opacity = 0.35F},
     .transition_speed = 12.0F,
     .hit_padding_lrtb = {4, 4, 4, 4},
     .slice9_scale = 1.0F,
 };
-/* Accent button (stale Pack): amber fill so it reads as "action needed". */
+/* Primary (NEW): the one bright saturated-blue accent -- the hero affirmative in a region (Pack when
+ * ready; Export-dialog run; modal Save; About OK). Exactly one visible per region. */
+static nt_ui_button_style_t g_btn_primary = {
+    .idle = {.bg_tint = RGBA8(64, 140, 214), .scale = 1.0F, .opacity = 1.0F},
+    .hover = {.bg_tint = RGBA8(84, 158, 228), .scale = 1.02F, .opacity = 1.0F},
+    .pressed = {.bg_tint = RGBA8(48, 112, 182), .scale = 0.97F, .offset_y = 1.0F, .opacity = 1.0F},
+    .disabled = {.bg_tint = RGBA8(64, 140, 214), .scale = 1.0F, .opacity = 0.35F},
+    .transition_speed = 12.0F,
+    .hit_padding_lrtb = {4, 4, 4, 4},
+    .slice9_scale = 1.0F,
+};
+/* Stale/action (RE-TINTED to warn amber): Pack when the preview is stale (§3.3b). Amber is distinct
+ * from primary-blue AND selection-blue -- fixes the audit's blue-on-blue. */
 static nt_ui_button_style_t g_btn_accent = {
-    .idle = {.bg_tint = 0xFF4662A0U, .scale = 1.0F, .opacity = 1.0F},
-    .hover = {.bg_tint = 0xFF5878B8U, .scale = 1.02F, .opacity = 1.0F},
-    .pressed = {.bg_tint = 0xFF3A5088U, .scale = 0.97F, .offset_y = 1.0F, .opacity = 1.0F},
-    .disabled = {.bg_tint = 0xFF4662A0U, .scale = 1.0F, .opacity = 0.35F},
+    .idle = {.bg_tint = RGBA8(228, 158, 92), .scale = 1.0F, .opacity = 1.0F},
+    .hover = {.bg_tint = RGBA8(238, 172, 110), .scale = 1.02F, .opacity = 1.0F},
+    .pressed = {.bg_tint = RGBA8(198, 134, 74), .scale = 0.97F, .offset_y = 1.0F, .opacity = 1.0F},
+    .disabled = {.bg_tint = RGBA8(228, 158, 92), .scale = 1.0F, .opacity = 0.35F},
     .transition_speed = 12.0F,
     .hit_padding_lrtb = {4, 4, 4, 4},
     .slice9_scale = 1.0F,
 };
-/* Stale/outdated chip: amber so it reads as "action needed"; clickable -> Pack. */
+/* Stale/outdated chip (RE-TINTED to warn amber): clickable -> Pack. */
 static nt_ui_button_style_t g_btn_stale = {
-    .idle = {.bg_tint = 0xFF46629EU, .scale = 1.0F, .opacity = 1.0F},
-    .hover = {.bg_tint = 0xFF5A78B4U, .scale = 1.02F, .opacity = 1.0F},
-    .pressed = {.bg_tint = 0xFF3A5088U, .scale = 0.97F, .offset_y = 1.0F, .opacity = 1.0F},
-    .disabled = {.bg_tint = 0xFF46629EU, .scale = 1.0F, .opacity = 0.5F},
+    .idle = {.bg_tint = RGBA8(228, 158, 92), .scale = 1.0F, .opacity = 1.0F},
+    .hover = {.bg_tint = RGBA8(238, 172, 110), .scale = 1.02F, .opacity = 1.0F},
+    .pressed = {.bg_tint = RGBA8(198, 134, 74), .scale = 0.97F, .offset_y = 1.0F, .opacity = 1.0F},
+    .disabled = {.bg_tint = RGBA8(228, 158, 92), .scale = 1.0F, .opacity = 0.5F},
     .transition_speed = 12.0F,
     .hit_padding_lrtb = {4, 4, 4, 4},
     .slice9_scale = 1.0F,
 };
+/* Ghost / icon-only: near-invisible idle (blends the semi-transparent strip), `hover` fill on hover.
+ * Icon-only ghosts REQUIRE a tooltip. bg_tint alpha must be non-zero (engine hides alpha=0). */
 static nt_ui_button_style_t g_btn_ghost = {
-    .idle = {.bg_tint = 0xFF2A2E38U, .scale = 1.0F, .opacity = 1.0F},
-    .hover = {.bg_tint = 0xFF3C4250U, .scale = 1.02F, .opacity = 1.0F},
-    .pressed = {.bg_tint = 0xFF242832U, .scale = 0.97F, .opacity = 1.0F},
-    .disabled = {.bg_tint = 0xFF2A2E38U, .scale = 1.0F, .opacity = 0.35F},
+    .idle = {.bg_tint = RGBA8(28, 32, 40), .scale = 1.0F, .opacity = 1.0F},
+    .hover = {.bg_tint = RGBA8(46, 52, 66), .scale = 1.02F, .opacity = 1.0F},
+    .pressed = {.bg_tint = RGBA8(24, 27, 34), .scale = 0.97F, .opacity = 1.0F},
+    .disabled = {.bg_tint = RGBA8(28, 32, 40), .scale = 1.0F, .opacity = 0.35F},
     .transition_speed = 14.0F,
     .hit_padding_lrtb = {2, 2, 2, 2},
     .slice9_scale = 1.0F,
 };
 /* Link button: idle tint matches the panel (invisible box), faint lighten on hover/press so the
- * link-blue label reads as a hyperlink. bg_tint alpha must be non-zero (engine hides alpha=0). */
+ * link-blue label reads as a hyperlink. */
 static nt_ui_button_style_t g_btn_link = {
-    .idle = {.bg_tint = 0xFF2A221EU, .scale = 1.0F, .opacity = 1.0F},
-    .hover = {.bg_tint = 0xFF3A322AU, .scale = 1.0F, .opacity = 1.0F},
-    .pressed = {.bg_tint = 0xFF241E1AU, .scale = 0.99F, .opacity = 1.0F},
-    .disabled = {.bg_tint = 0xFF2A221EU, .scale = 1.0F, .opacity = 0.4F},
+    .idle = {.bg_tint = RGBA8(28, 31, 40), .scale = 1.0F, .opacity = 1.0F},
+    .hover = {.bg_tint = RGBA8(40, 45, 55), .scale = 1.0F, .opacity = 1.0F},
+    .pressed = {.bg_tint = RGBA8(24, 27, 34), .scale = 0.99F, .opacity = 1.0F},
+    .disabled = {.bg_tint = RGBA8(28, 31, 40), .scale = 1.0F, .opacity = 0.4F},
     .transition_speed = 16.0F,
     .hit_padding_lrtb = {2, 2, 2, 2},
     .slice9_scale = 1.0F,
 };
 static nt_ui_button_style_t g_menubtn = {
-    .idle = {.bg_tint = 0xFF221A18U, .scale = 1.0F, .opacity = 1.0F},
-    .hover = {.bg_tint = 0xFF403430U, .scale = 1.0F, .opacity = 1.0F},
-    .pressed = {.bg_tint = 0xFF9E6246U, .scale = 1.0F, .opacity = 1.0F},
-    .disabled = {.bg_tint = 0xFF221A18U, .scale = 1.0F, .opacity = 0.4F},
+    .idle = {.bg_tint = RGBA8(22, 24, 30), .scale = 1.0F, .opacity = 1.0F},
+    .hover = {.bg_tint = RGBA8(44, 49, 61), .scale = 1.0F, .opacity = 1.0F},
+    .pressed = {.bg_tint = RGBA8(64, 140, 214), .scale = 1.0F, .opacity = 1.0F},
+    .disabled = {.bg_tint = RGBA8(22, 24, 30), .scale = 1.0F, .opacity = 0.4F},
     .transition_speed = 16.0F,
     .hit_padding_lrtb = {0, 0, 0, 0},
     .slice9_scale = 1.0F,
@@ -212,6 +253,11 @@ static nt_ui_input_style_t s_rename_input; /* inline rename field (atlas + sprit
  * WHITE region (s_white_ref) tinted per state -- checkbox/slider need art, dropdown
  * is flat-color. Sizes are rescaled each frame in apply_ui_scale. */
 static nt_atlas_region_ref_t s_white_ref;
+/* Baked Lucide icon masks (white-on-alpha), tinted per state via nt_ui_image color_packed. Resolved
+ * once in try_bind_resources (like s_white_ref). Packet A wires the canvas-strip set; the rest of the
+ * baked atlas (layers/folder/film/... hero) is for Packets B/C. */
+static nt_atlas_region_ref_t s_ic_layout_grid, s_ic_triangle_alert, s_ic_download, s_ic_refresh;
+static nt_atlas_region_ref_t s_ic_chevron_left, s_ic_chevron_right, s_ic_minus, s_ic_plus, s_ic_scan, s_ic_maximize;
 static nt_ui_dropdown_style_t s_dd_style;
 static nt_ui_slider_style_t s_slider_style;
 static nt_ui_input_style_t s_num_input;   /* numeric + short text fields */
@@ -1780,6 +1826,10 @@ static void apply_ui_scale(void) {
     g_canvas_hint.font_size = S(FS_HINT);
     g_tag = g_tag_base;
     g_tag.font_size = S(FS_TAG);
+    g_onaccent = g_onaccent_base;
+    g_onaccent.font_size = S(FS_BODY);
+    g_onwarn = g_onwarn_base;
+    g_onwarn.font_size = S(FS_BODY);
     g_warn = g_warn_base;
     g_warn.font_size = S(FS_ROW);
     g_link = g_link_base;
@@ -1816,6 +1866,14 @@ static void apply_ui_scale(void) {
     s_panel_scroll.bar_thickness = S(8.0F);
 }
 
+/* Resolve one baked icon region into a memoized ref, exactly like the white region. The icon MUST be
+ * present (build_packs bakes it) -- a miss is a bake/codegen mismatch, so crash early. */
+static nt_atlas_region_ref_t bind_icon_ref(nt_hash64_t region_id) {
+    const uint32_t idx = nt_atlas_find_region(s_atlas_handle, region_id.value);
+    NT_ASSERT(idx != NT_ATLAS_INVALID_REGION && "ntpacker-gui: baked UI icon region missing");
+    return nt_atlas_ref_idx(s_atlas_handle, region_id.value, idx);
+}
+
 static void try_bind_resources(void) {
     if (s_atlas_bound && s_font_bound) {
         return;
@@ -1825,8 +1883,18 @@ static void try_bind_resources(void) {
         NT_ASSERT(white != NT_ATLAS_INVALID_REGION);
         nt_ui_set_atlas_white_region(s_ctx, s_atlas_handle, white);
         s_white_ref = nt_atlas_ref_idx(s_atlas_handle, ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS__WHITE.value, white);
+        s_ic_layout_grid = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_LAYOUT_GRID);
+        s_ic_triangle_alert = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_TRIANGLE_ALERT);
+        s_ic_download = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_DOWNLOAD);
+        s_ic_refresh = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_REFRESH_CW);
+        s_ic_chevron_left = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_CHEVRON_LEFT);
+        s_ic_chevron_right = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_CHEVRON_RIGHT);
+        s_ic_minus = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_MINUS);
+        s_ic_plus = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_PLUS);
+        s_ic_scan = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_SCAN);
+        s_ic_maximize = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_MAXIMIZE_2);
         s_atlas_bound = true;
-        nt_log_info("ntpacker-gui: atlas white region bound");
+        nt_log_info("ntpacker-gui: atlas white + icon regions bound");
     }
     if (!s_font_bound && nt_resource_is_ready(s_font_resource)) {
         nt_font_add(s_font, s_font_resource);
@@ -1848,6 +1916,43 @@ static bool ui_btn(nt_ui_context_t *ctx, uint32_t id, const char *text, nt_ui_bu
                                                   .cornerRadius = CLAY_CORNER_RADIUS(S(6))},
                        enabled, NULL);
     nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), text, lbl);
+    return nt_ui_button_end(ctx) && enabled;
+}
+
+/* Pack a label tier's color into the image widget's 0xAABBGGRR tint. */
+static uint32_t label_tint(const nt_ui_label_style_t *lbl) {
+    return ((uint32_t)(uint8_t)lbl->color.a << 24) | ((uint32_t)(uint8_t)lbl->color.b << 16) |
+           ((uint32_t)(uint8_t)lbl->color.g << 8) | (uint32_t)(uint8_t)lbl->color.r;
+}
+
+/* Icon button (extends ui_btn): a baked icon mask tinted to `lbl`'s color tier, with an optional
+ * trailing label. text == NULL -> icon-only (caller MUST attach a tooltip -- mouse-complete rule).
+ * icon_box is the logical icon square (S(16) strip actions, S(12) chevrons). w<=0 -> FIT (button
+ * hugs its content, so icon-only buttons are square and never overflow a fixed cell). The button's
+ * per-state opacity inherits to the icon, so disabled dims icon + label together (0.35, like text). */
+static bool ui_icon_btn(nt_ui_context_t *ctx, uint32_t id, nt_atlas_region_ref_t *icon, float icon_box,
+                        const char *text, nt_ui_button_style_t *style, bool enabled, float w, float h,
+                        const nt_ui_label_style_t *lbl) {
+    const bool icon_only = (text == NULL);
+    const Clay_SizingAxis wx = (w > 0.0F) ? CLAY_SIZING_FIXED(S(w)) : CLAY_SIZING_FIT(0);
+    const uint16_t px = icon_only ? Su(6) : Su(10); /* icon-only: tight symmetric pad -> square */
+    nt_ui_image_style_t istyle = nt_ui_image_style_defaults();
+    istyle.color_packed = label_tint(lbl);
+    nt_ui_button_begin(ctx, NT_UI_DATA_LAYER(LAYER_IMG), id, style,
+                       &(Clay_ElementDeclaration){.layout = {.sizing = {wx, CLAY_SIZING_FIXED(S(h))},
+                                                             .padding = {px, px, Su(4), Su(4)},
+                                                             .childGap = Su(6), /* SP_SM icon<->label */
+                                                             .childAlignment = {CLAY_ALIGN_X_CENTER, CLAY_ALIGN_Y_CENTER}},
+                                                  .cornerRadius = CLAY_CORNER_RADIUS(S(6))},
+                       enabled, NULL);
+    if (icon && icon->atlas.id != 0U) {
+        CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(S(icon_box)), CLAY_SIZING_FIXED(S(icon_box))}}}) {
+            nt_ui_image(ctx, NT_UI_DATA_LAYER(LAYER_IMG), icon, &istyle, NULL);
+        }
+    }
+    if (!icon_only) {
+        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), text, lbl);
+    }
     return nt_ui_button_end(ctx) && enabled;
 }
 
@@ -2524,55 +2629,66 @@ static const char *transform_decode_str(uint8_t t) {
     }
 }
 
-/* --- Canvas strip control groups (shared by the single-row full strip and the compact two-row strip). --- */
-static void strip_group_actions(nt_ui_context_t *ctx, bool accent) {
-    if (ui_btn(ctx, s_id_btn_pack, accent ? "Pack \xE2\x9A\xA0" : "Pack", accent ? &g_btn_accent : &g_btn,
-               s_pack_has_sources, 78.0F, 26.0F, &g_body)) {
+/* --- Canvas strip control groups (icons; shared by the single-row strip and the two-row compact). Every
+ * icon-only button gets a tooltip in declare_tooltips (mouse-complete). `h` = the row height. --- */
+static void strip_group_actions(nt_ui_context_t *ctx, bool accent, bool labels, float h) {
+    /* Pack: PRIMARY blue + layout-grid when up to date; amber + alert-triangle when stale (§2.9). Icon +
+     * label tier switch together so the amber button carries dark content, the blue one bright. */
+    nt_atlas_region_ref_t *pack_ic = accent ? &s_ic_triangle_alert : &s_ic_layout_grid;
+    nt_ui_button_style_t *pack_st = accent ? &g_btn_accent : &g_btn_primary;
+    const nt_ui_label_style_t *pack_lbl = accent ? &g_onwarn : &g_onaccent;
+    if (ui_icon_btn(ctx, s_id_btn_pack, pack_ic, 16.0F, labels ? "Pack" : NULL, pack_st, s_pack_has_sources,
+                    0.0F, h, pack_lbl)) {
         s_pending_pack = true;
     }
-    if (ui_btn(ctx, s_id_btn_export, "Export", &g_btn, s_pack_has_sources, 78.0F, 26.0F, &g_body)) {
+    if (ui_icon_btn(ctx, s_id_btn_export, &s_ic_download, 16.0F, labels ? "Export" : NULL, &g_btn,
+                    s_pack_has_sources, 0.0F, h, &g_body)) {
         s_export_open = true;
     }
-    if (ui_btn(ctx, s_id_btn_refresh, "\xE2\x9F\xB3", &g_btn_ghost, true, 34.0F, 26.0F, &g_body)) { /* U+27F3 */
+    if (ui_icon_btn(ctx, s_id_btn_refresh, &s_ic_refresh, 16.0F, NULL, &g_btn_ghost, true, 0.0F, h, &g_caption)) {
         s_pending_refresh = true;
     }
 }
 
-static void strip_group_pages(nt_ui_context_t *ctx, int pc, int cur, bool compact) {
-    const float bw = compact ? 26.0F : 28.0F;
-    if (ui_btn(ctx, nt_ui_id("ntpacker/pg_prev"), "\xE2\x97\x80", &g_btn_ghost, cur > 0, bw, 24.0F, &g_caption)) { /* U+25C0 */
+static void strip_group_pages(nt_ui_context_t *ctx, int pc, int cur, float h) {
+    if (ui_icon_btn(ctx, nt_ui_id("ntpacker/pg_prev"), &s_ic_chevron_left, 12.0F, NULL, &g_btn_ghost, cur > 0,
+                    0.0F, h, &g_caption)) {
         gui_canvas_set_page(&s_canvas, cur - 1);
     }
-    char pl[32];
-    (void)snprintf(pl, sizeof pl, compact ? "%d/%d" : "page %d/%d", cur + 1, pc); /* short "N/M" when compact */
+    char pl[24];
+    (void)snprintf(pl, sizeof pl, "%d/%d", cur + 1, pc);
     nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), pl, &g_caption);
-    if (ui_btn(ctx, nt_ui_id("ntpacker/pg_next"), "\xE2\x96\xB6", &g_btn_ghost, cur < pc - 1, bw, 24.0F, &g_caption)) { /* U+25B6 */
+    if (ui_icon_btn(ctx, nt_ui_id("ntpacker/pg_next"), &s_ic_chevron_right, 12.0F, NULL, &g_btn_ghost,
+                    cur < pc - 1, 0.0F, h, &g_caption)) {
         gui_canvas_set_page(&s_canvas, cur + 1);
     }
 }
 
-static void strip_group_zoom(nt_ui_context_t *ctx, bool compact) {
-    const float bw = compact ? 26.0F : 28.0F;
-    if (ui_btn(ctx, nt_ui_id("ntpacker/zoom_out"), "\xE2\x88\x92", &g_btn_ghost, true, bw, 24.0F, &g_caption)) { /* U+2212 minus */
+static void strip_group_zoom(nt_ui_context_t *ctx, float h, bool scan) {
+    if (ui_icon_btn(ctx, nt_ui_id("ntpacker/zoom_out"), &s_ic_minus, 16.0F, NULL, &g_btn_ghost, true, 0.0F, h, &g_caption)) {
         gui_canvas_set_zoom_pct(&s_canvas, s_canvas.last_bb, gui_canvas_zoom_pct(&s_canvas) * 0.8F);
     }
     char zl[16];
     (void)snprintf(zl, sizeof zl, "%.0f%%", (double)gui_canvas_zoom_pct(&s_canvas));
-    if (ui_btn(ctx, nt_ui_id("ntpacker/zoom_100"), zl, &g_btn_ghost, true, compact ? 56.0F : 60.0F, 24.0F, &g_caption)) {
+    /* scan icon wraps the % readout (§3): one button = zoom-to-100% + the current zoom. The two-row
+     * compact fallback drops the icon (scan == false) to keep its min-content within MIN_CANVAS_W. */
+    if (ui_icon_btn(ctx, nt_ui_id("ntpacker/zoom_100"), scan ? &s_ic_scan : NULL, 16.0F, zl, &g_btn_ghost, true, 0.0F, h, &g_caption)) {
         gui_canvas_set_zoom_pct(&s_canvas, s_canvas.last_bb, 100.0F);
     }
-    if (ui_btn(ctx, nt_ui_id("ntpacker/zoom_in"), "+", &g_btn_ghost, true, bw, 24.0F, &g_caption)) {
+    if (ui_icon_btn(ctx, nt_ui_id("ntpacker/zoom_in"), &s_ic_plus, 16.0F, NULL, &g_btn_ghost, true, 0.0F, h, &g_caption)) {
         gui_canvas_set_zoom_pct(&s_canvas, s_canvas.last_bb, gui_canvas_zoom_pct(&s_canvas) * 1.25F);
     }
-    if (ui_btn(ctx, nt_ui_id("ntpacker/zoom_fit"), "Fit", &g_btn_ghost, true, compact ? 36.0F : 40.0F, 24.0F, &g_caption)) {
+    if (ui_icon_btn(ctx, nt_ui_id("ntpacker/zoom_fit"), &s_ic_maximize, 16.0F, NULL, &g_btn_ghost, true, 0.0F, h, &g_caption)) {
         gui_canvas_fit(&s_canvas);
     }
 }
 
-/* Canvas action strip (E'): [Pack][Export][refresh] | page nav | zoom | stale chip. Semi-transparent bar
- * at the TOP of the canvas. When the canvas column is too narrow for a single row (s_canvas_w below the
- * threshold) it drops to a deliberate TWO-ROW layout with shorter labels rather than forcing the middle
- * row wider than the window (or wrapping a label mid-control). Every control is also in the menus (§3.3e). */
+/* Canvas action strip (E'): [Pack][Export][Refresh] | pages | zoom | stale chip. Semi-transparent bar with
+ * a bottom rule (§2.2) at the TOP of the canvas. Single row that DROPS LABELS as it narrows (§4): Pack/
+ * Export icon+label >= LABELS, icon-only below; the stale chip shows only >= CHIP so a trailing chip can
+ * never push the row past the canvas. When even the icon-only single row can't fit (s_canvas_w < SINGLE)
+ * it falls to the overflow-safe two-row compact rather than wrapping a control. Every control is also in
+ * the menus (§3.3e); every icon-only button has a tooltip. */
 static void declare_canvas_strip(nt_ui_context_t *ctx, bool atlas) {
     tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
     s_pack_has_sources = a && a->source_count > 0;
@@ -2581,28 +2697,31 @@ static void declare_canvas_strip(nt_ui_context_t *ctx, bool atlas) {
     const int pc = gui_canvas_page_count(&s_canvas);
     const int cur = gui_canvas_cur_page(&s_canvas);
     const Clay_Color strip_bg = {30.0F, 34.0F, 42.0F, 205.0F}; /* semi-transparent */
-    const bool compact = s_canvas_w < S(STRIP_FULL_MIN_W);
+    const bool compact = s_canvas_w < S(STRIP_SINGLE_MIN_W);
+    const bool labels = s_canvas_w >= S(STRIP_LABELS_MIN_W);
 
     if (compact) {
-        /* Two rows: [Pack Export refresh] over [page nav | zoom]. The Pack accent+glyph carries the stale
-         * state -- the wide "outdated" chip is dropped so neither row can exceed the narrow canvas width. */
+        /* Two rows: [Pack Export Refresh] over [pages | zoom], all icon-only. The canvas reservation
+         * (MIN_CANVAS_W) is >= this layout's min-content, so neither row forces the column past the window.
+         * The amber Pack + alert-triangle carries the stale state; the wide chip is dropped. */
         CLAY({.id = {.id = s_id_strip},
               .layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(62))},
                          .padding = {Su(8), Su(8), Su(4), Su(4)},
                          .layoutDirection = CLAY_TOP_TO_BOTTOM,
                          .childGap = Su(4)},
               .backgroundColor = strip_bg,
-              .cornerRadius = CLAY_CORNER_RADIUS(S(6))}) {
+              .cornerRadius = CLAY_CORNER_RADIUS(S(6)),
+              .border = {.color = C_BORDER, .width = {0, 0, 0, Su(1), 0}}}) {
             CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(26))}, .childGap = Su(4), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
-                strip_group_actions(ctx, accent);
+                strip_group_actions(ctx, accent, false, 26.0F);
                 CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}}) {}
             }
             CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(24))}, .childGap = Su(4), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
                 if (atlas && pc > 1) {
-                    strip_group_pages(ctx, pc, cur, true);
+                    strip_group_pages(ctx, pc, cur, 24.0F);
                 }
                 if (atlas) {
-                    strip_group_zoom(ctx, true);
+                    strip_group_zoom(ctx, 24.0F, false); /* compact: plain % (no scan icon) keeps min-content small */
                 }
                 CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}}) {}
             }
@@ -2616,20 +2735,22 @@ static void declare_canvas_strip(nt_ui_context_t *ctx, bool atlas) {
                      .childGap = Su(6),
                      .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}},
           .backgroundColor = strip_bg,
-          .cornerRadius = CLAY_CORNER_RADIUS(S(6))}) {
-        strip_group_actions(ctx, accent);
+          .cornerRadius = CLAY_CORNER_RADIUS(S(6)),
+          .border = {.color = C_BORDER, .width = {0, 0, 0, Su(1), 0}}}) {
+        strip_group_actions(ctx, accent, labels, 26.0F);
         CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(S(1)), CLAY_SIZING_FIXED(S(20))}}, .backgroundColor = C_BORDER}) {}
         if (atlas && pc > 1) {
-            strip_group_pages(ctx, pc, cur, false);
+            strip_group_pages(ctx, pc, cur, 26.0F);
         }
         if (atlas) {
-            strip_group_zoom(ctx, false);
+            strip_group_zoom(ctx, 26.0F, true);
         }
         CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}}) {}
-        /* Clickable stale chip -> Pack (owner rule: actionable hints are buttons, not labels). */
-        if (s_pack_stale && s_pack_has_sources) {
-            if (ui_btn(ctx, nt_ui_id("ntpacker/stale_chip"), "outdated \xE2\x80\x94 press Pack", &g_btn_stale, true, 0.0F,
-                       24.0F, &g_tag)) { /* U+2014 em dash */
+        /* Clickable stale chip -> Pack (§2.9; owner rule: actionable hints are buttons). Gated on a width
+         * stop so the trailing chip never pushes the row off the canvas; below it the amber Pack carries it. */
+        if (accent && s_canvas_w >= S(STRIP_CHIP_MIN_W)) {
+            if (ui_icon_btn(ctx, nt_ui_id("ntpacker/stale_chip"), &s_ic_triangle_alert, 14.0F, "outdated",
+                            &g_btn_stale, true, 0.0F, 24.0F, &g_onwarn)) {
                 s_pending_pack = true;
             }
         }
@@ -2919,6 +3040,14 @@ static void declare_tooltips(nt_ui_context_t *ctx) {
     (void)nt_ui_tooltip(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, s_id_btn_refresh,
                         "Refresh (F5): rescan all source folders/files from disk; updates the sprite list and marks the preview stale.",
                         &s_tip_style);
+    /* Icon-only strip ghosts (mouse-complete). A tooltip for a control not laid out this frame (single
+     * page, non-atlas mode) is a safe no-op -- it only opens on hover of an existing target. */
+    (void)nt_ui_tooltip(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, nt_ui_id("ntpacker/pg_prev"), "Previous page", &s_tip_style);
+    (void)nt_ui_tooltip(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, nt_ui_id("ntpacker/pg_next"), "Next page", &s_tip_style);
+    (void)nt_ui_tooltip(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, nt_ui_id("ntpacker/zoom_out"), "Zoom out", &s_tip_style);
+    (void)nt_ui_tooltip(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, nt_ui_id("ntpacker/zoom_100"), "Zoom to 100% (actual size)", &s_tip_style);
+    (void)nt_ui_tooltip(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, nt_ui_id("ntpacker/zoom_in"), "Zoom in", &s_tip_style);
+    (void)nt_ui_tooltip(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, nt_ui_id("ntpacker/zoom_fit"), "Fit atlas to view", &s_tip_style);
 }
 
 /* Export dialog (mouse-complete): every atlas's targets, toggle/browse per target, then Export runs the
@@ -2954,7 +3083,7 @@ static void declare_export_modal(nt_ui_context_t *ctx) {
         if (total_targets == 0) {
             nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "This project has no export targets yet.", &g_caption);
             CLAY({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = Su(12), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
-                if (ui_btn(ctx, nt_ui_id("export/goto"), "Add targets in the panel", &g_btn_accent, true, 0.0F, 34.0F, &g_body)) {
+                if (ui_btn(ctx, nt_ui_id("export/goto"), "Add targets in the panel", &g_btn_primary, true, 0.0F, 34.0F, &g_onaccent)) {
                     s_export_open = false;
                     s_sec_export_open = true;
                 }
@@ -3029,7 +3158,7 @@ static void declare_export_modal(nt_ui_context_t *ctx) {
                        atlases_with == 1 ? "" : "es");
         nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), summary, &g_caption);
         CLAY({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = Su(12), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
-            if (ui_btn(ctx, nt_ui_id("export/run"), "Export", &g_btn_accent, enabled_targets > 0, 120.0F, 34.0F, &g_body)) {
+            if (ui_btn(ctx, nt_ui_id("export/run"), "Export", &g_btn_primary, enabled_targets > 0, 120.0F, 34.0F, &g_onaccent)) {
                 s_pending_export = true;
                 s_export_open = false;
             }
@@ -3053,7 +3182,7 @@ static void declare_confirm_modal(nt_ui_context_t *ctx) {
             nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Unsaved changes", &g_body);
             nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Save changes before continuing?", &g_caption);
             CLAY({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = Su(12), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
-                if (ui_btn(ctx, nt_ui_id("ntpacker/modal_save"), "Save", &g_btn_accent, true, 100.0F, 34.0F, &g_body)) {
+                if (ui_btn(ctx, nt_ui_id("ntpacker/modal_save"), "Save", &g_btn_primary, true, 100.0F, 34.0F, &g_onaccent)) {
                     s_modal_action = MODAL_SAVE;
                 }
                 if (ui_btn(ctx, nt_ui_id("ntpacker/modal_discard"), "Discard", &g_btn, true, 100.0F, 34.0F, &g_body)) {
@@ -3091,7 +3220,7 @@ static void declare_about_modal(nt_ui_context_t *ctx) {
             }
             CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(4))}}}) {}
             CLAY({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
-                if (ui_btn(ctx, nt_ui_id("ntpacker/about_ok"), "OK", &g_btn_accent, true, 100.0F, 34.0F, &g_body)) {
+                if (ui_btn(ctx, nt_ui_id("ntpacker/about_ok"), "OK", &g_btn_primary, true, 100.0F, 34.0F, &g_onaccent)) {
                     s_about_open = false;
                 }
             }
@@ -4625,8 +4754,76 @@ static void selftest_pre_frame(void) {
             selftest_assert_no_overflow(1366.0F, 768.0F);
             nt_log_info("SELFTEST: 16:9 @1.5 overflow check OK (1366x768, no container/right-panel spill)");
             s_st_phase = 6;
+            s_st_pf = 0;
+        }
+    } else if (s_st_phase == 6 || s_st_phase == 7 || s_st_phase == 8) {
+        /* Stale-state overflow regression (owner's icon-strip case): a packed-but-stale atlas shows the amber
+         * Pack + the "outdated" chip. The chip gate must keep the labeled+chip strip min-content inside the
+         * strip's real budget (s_canvas_w - the canvas card's S(20) padding); pre-fix STRIP_CHIP_MIN_W ignored
+         * the chip's own width, so at 1920x1080@1.5 the chip forced the middle row wider -> right panel off the
+         * screen. Three stops, all @1.5 (page count varies with the project, so the chip visible/dropped assert
+         * -- which depends only on the gate, not on the strip's pixel width -- is the deterministic fail-before):
+         *  6) 1920x1080 -- chip does NOT fit; must be DROPPED (fail-before: chip shown -> overflow assert).
+         *  7) 1366x768  -- compact two-row stale strip (chip already dropped); must still stay in-window.
+         *  8) 2000x1080 -- wide enough that the chip DOES fit; must be SHOWN and still not overflow. */
+        const float win_w = (s_st_phase == 6) ? 1920.0F : (s_st_phase == 7) ? 1366.0F : 2000.0F;
+        const float win_h = (s_st_phase == 7) ? 768.0F : 1080.0F;
+        g_ui_scale = 1.5F;
+        g_nt_window.fb_width = (uint32_t)win_w;
+        g_nt_window.fb_height = (uint32_t)win_h;
+        if (s_st_pf == 1) {
+            /* Phase 1's handoff (selftest_post_draw) left a truly-fresh, source-less project, so build the
+             * stale scene here: a MULTI-PAGE atlas (small max_size -> page buttons, matching the owner's
+             * full-tier strip at 1920x1080) that is packed, then re-marked stale so the strip shows the amber
+             * Pack + the "outdated" chip. mark_stale must run AFTER the pack (a successful pack clears stale). */
+            preview_stop();
+            s_sel_anim = -1;
+            s_sel_anim_frame = -1;
+            s_sel_atlas = 0;
+            tp_project_atlas *sa = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
+            if (sa && sa->source_count == 0) {
+                char afolder[512];
+                to_abs("examples/defold-demo/examples/anim_trim/anims", afolder, sizeof afolder);
+                (void)gui_project_add_source(s_sel_atlas, afolder);
+                sa->max_size = 256; /* 128px sprites -> several pages -> pc>1 -> page buttons in the strip */
+                gui_scan_invalidate_all();
+            }
+            double pms = 0.0;
+            char perr[256] = {0};
+            char pnote[128] = {0};
+            (void)gui_pack_atlas(s_sel_atlas, &pms, perr, sizeof perr, pnote, sizeof pnote);
+            s_canvas.mode = GUI_CANVAS_ATLAS;
+            const tp_result *pr = gui_pack_result(s_sel_atlas);
+            if (pr && pr->sprite_count > 0) {
+                gui_canvas_select(&s_canvas, 0);
+                select_row_for_region(0);
+            }
+            s_sec_atlas_open = s_sec_region_open = s_sec_anim_open = s_sec_export_open = true;
+            s_atlas_adv_open = false;
+            gui_project_mark_stale();
+        }
+        if (s_st_pf >= 3) { /* size + stale held >= 2 frames -> the lagged bbox reflects the stale strip here */
+            const tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
+            NT_ASSERT(a && a->source_count > 0 && gui_project_is_stale() &&
+                      "SELFTEST: stale precondition (sources present + preview stale -> amber Pack + chip)");
+            selftest_assert_no_overflow(win_w, win_h);
+            /* The chip visible/dropped decision depends ONLY on the gate (accent && width), not on the strip's
+             * pixel width, so it is the deterministic fail-before signal even where the page count would let the
+             * bounds check pass: at 1920x1080@1.5 the chip must be DROPPED, at the wide 2000 it must be SHOWN. */
+            const bool chip = nt_ui_get_bbox(s_ctx, nt_ui_id("ntpacker/stale_chip")).found;
+            if (s_st_phase == 6) {
+                NT_ASSERT(!chip && "SELFTEST: stale chip must be dropped where it would overflow the canvas budget");
+            } else if (s_st_phase == 8) {
+                NT_ASSERT(chip && "SELFTEST: stale chip must be shown when the canvas is wide enough to hold it");
+            }
+            nt_log_info("SELFTEST: stale-state overflow check OK (%.0fx%.0f@1.5, chip=%d)", (double)win_w,
+                        (double)win_h, (int)chip);
+            s_st_phase++;
+            s_st_pf = 0;
         }
     } else {
+        g_nt_window.fb_width = 1280;
+        g_nt_window.fb_height = 800;
         nt_app_quit();
     }
 }
@@ -4678,6 +4875,7 @@ static int s_shot_h = 800;
 static float s_shot_scale;  /* 0 = keep the DPI-detected scale */
 static int s_shot_frame;    /* counts only frames the UI actually rendered (can_render) */
 static bool s_shot_written; /* capture happened; quit on the next frame boundary */
+static bool s_shot_stale;   /* --shot-stale: pack, then re-mark stale so the shot shows the amber Pack + chip */
 
 /* Runs inside the can_render block, after build_rows (selection needs the row model). */
 static void shot_tick(void) {
@@ -4698,6 +4896,9 @@ static void shot_tick(void) {
             s_canvas.mode = GUI_CANVAS_ATLAS;
             gui_canvas_select(&s_canvas, 0);
             select_row_for_region(0);
+        }
+        if (s_shot_stale) { /* dev: keep the packed preview but re-mark stale so the amber Pack + chip show */
+            gui_project_mark_stale();
         }
     }
 }
@@ -5093,6 +5294,8 @@ int main(int argc, char *argv[]) {
             if (f >= 0.5 && f <= 4.0) {
                 s_shot_scale = (float)f;
             }
+        } else if (strcmp(argv[i], "--shot-stale") == 0) {
+            s_shot_stale = true; /* dev: capture the amber stale state (Pack + chip) */
         } else if (proj_arg == NULL) {
             proj_arg = argv[i];
         }

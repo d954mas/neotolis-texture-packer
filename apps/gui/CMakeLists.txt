@@ -90,12 +90,17 @@ set_target_properties(build_ntpacker_gui_packs PROPERTIES RUNTIME_OUTPUT_DIRECTO
 foreach(PACK ${GUI_PACK_NAMES})
     list(APPEND GUI_PACK_FILES "${GUI_PACK_DIR}/${PACK}")
 endforeach()
+# Icon masks baked into ntpacker_ui_atlas; passed absolute (builder's WORKING_DIRECTORY is the engine
+# root, not apps/gui). Globbed only for the DEPENDS list so editing/adding an icon repacks; the bake
+# itself uses an explicit list in build_packs.c (the contract), not this glob.
+set(GUI_ICONS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/assets/icons")
+file(GLOB GUI_ICON_FILES "${GUI_ICONS_DIR}/*.png")
 add_custom_command(
     OUTPUT ${GUI_PACK_FILES}
     COMMAND ${CMAKE_COMMAND} -E make_directory "${GUI_PACK_DIR}"
     COMMAND ${CMAKE_COMMAND} -E make_directory "${GUI_GENERATED_DIR}"
-    COMMAND "$<TARGET_FILE:build_ntpacker_gui_packs>" "${GUI_PACK_DIR}" "${GUI_GENERATED_DIR}"
-    DEPENDS build_ntpacker_gui_packs
+    COMMAND "$<TARGET_FILE:build_ntpacker_gui_packs>" "${GUI_PACK_DIR}" "${GUI_GENERATED_DIR}" "${GUI_ICONS_DIR}"
+    DEPENDS build_ntpacker_gui_packs ${GUI_ICON_FILES}
     WORKING_DIRECTORY "${GUI_ENGINE_ROOT}"
     COMMENT "Building ntpacker-gui pack(s)"
 )
