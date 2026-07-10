@@ -486,7 +486,13 @@ target — Phase 2 per-target packing (SUMMARY §5h) sets these; Phase 1 just pl
 
 ## 6. Risks / unknowns — verify early
 
-- **R1 — hull AABB vs trim rect (medium).** `trim_w/trim_h` are recovered as `max(local_x/y)`
+- **R1 — hull AABB vs trim rect (medium).** *(VERIFIED 2026-07-10, task 5: worse than stated — the
+  builder INFLATES non-RECT hulls via clipper2 (`nt_builder_atlas.c:1288-1315`, `inflate_amt =
+  max_outside + 1.0`), so `max(local_x/y)` systematically OVER-reports trim by ~1px for every
+  `CONVEX_HULL`/`CONCAVE_CONTOUR` sprite; only `NT_ATLAS_SHAPE_RECT` writes hull corners exactly at
+  the trim rect. Exact trim/frame golden assertions are therefore only valid for RECT fixtures;
+  polygon fixtures must assert consistency invariants + pixel sampling, not exact trim equality.)*
+  `trim_w/trim_h` are recovered as `max(local_x/y)`
   assuming the (possibly RDP-simplified) concave hull touches all four trim edges. For RECT/CONVEX
   this is exact; for `CONCAVE_CONTOUR` a near-flat edge could theoretically drop the extreme vertex.
   The on-page-AABB-dims invariant (§2.6) does **not** cross-check this — both sides derive from the
