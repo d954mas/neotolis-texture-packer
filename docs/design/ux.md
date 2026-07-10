@@ -306,6 +306,22 @@ Ctrl+Shift+S Save As…, Ctrl+Z Undo, Ctrl+Y / Ctrl+Shift+Z Redo, F5 Refresh
 (already live). Shortcuts shown next to their menu items. Text-input focus
 swallows keys first (no accidental global actions while typing).
 
+### 3.3e Mouse-complete access (owner rule 2026-07-10)
+
+**No keyboard-only actions, ever.** Every hotkey is an accelerator for an
+action that also exists as a menu item, toolbar button, or context-menu
+entry. Right-click opens a context menu wherever a row/object has actions
+(the engine's `nt_ui_menu` is natively cursor-anchored — this is its home
+turf):
+
+- Atlas row: Rename, Remove (later: Duplicate).
+- Sprite/source row: Rename, Remove; multi-selection adds
+  "Create animation from selection" (§3.7b).
+- Animation row: Rename, Remove (later: Duplicate).
+- Canvas (later phases): overlay toggles, zoom fit/100%.
+Context-menu entries trigger the SAME code paths as menus/hotkeys (inline
+rename editor, etc.) — no parallel behaviors.
+
 ### 3.4 Configure export targets
 1. In Export Targets (region G), toggle a target on/off (`nt_ui_checkbox`), pick
    its exporter id (`nt_ui_dropdown`: `json-neotolis` / `defold`), set its output
