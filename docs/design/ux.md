@@ -365,10 +365,15 @@ always reference an animation id — upstream `basic.collection` uses both
   one opens its editor: id (inline rename), ordered frame list (add frames
   from the atlas's sprites via multi-select picker, reorder ↑/↓, remove),
   fps (numeric), playback (dropdown of the Defold modes), flip_h/flip_v.
-- **Numeric-suffix auto-grouping is only a convenience default** (walk_01,
-  walk_02 → suggested group "walk", the TexturePacker/libGDX convention):
-  suggestions appear as regular editable animations; explicit ones always
-  win (already implemented in tp_normalize, Phase 2).
+- **Numeric-suffix auto-grouping is a SUGGESTION ONLY — never exported
+  implicitly** (owner ruling 2026-07-10, the `icon_1`/`icon_2` case: numeric
+  suffixes often aren't animations). Export emits ONLY explicit `animations[]`
+  from the project. The GUI shows unaccepted suffix groups as a non-modal
+  suggestion row in the ANIMATIONS block ("Create \"walk\" (3 frames)?") —
+  accepting converts it into a regular explicit animation; ignoring does
+  nothing; suggestions can be disabled per atlas. tp_normalize's grouping
+  runs in compute-suggestions mode for the GUI and is OFF in the export path
+  (Phase 2 shipped it export-on; the animations packet flips this).
 - **Playback enum pinned to Defold's set** (tp_core enum + GUI dropdown +
   Phase 5 .tpatlas mapping): once_forward (default 0), loop_forward,
   once_backward, loop_backward, once_pingpong, loop_pingpong, none.
