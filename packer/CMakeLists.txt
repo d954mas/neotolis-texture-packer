@@ -7,7 +7,8 @@
 # smoke app, and the pack tests that actually pack.
 add_library(tp_core STATIC
     src/tp_arena.c src/tp_name_map.c src/tp_pack_read.c src/tp_project.c
-    src/tp_pack_settings.c)
+    src/tp_pack_settings.c
+    src/tp_export.c src/tp_normalize.c src/tp_export_png.c src/tp_export_json_neotolis.c)
 target_include_directories(tp_core PUBLIC include)
 # tp_pack_settings.c includes nt_builder.h for the header-only nt_atlas_opts_defaults()
 # inline (the single source of the packing defaults). HEADERS ONLY: this adds the builder
@@ -16,6 +17,10 @@ target_include_directories(tp_core PUBLIC include)
 # headers) are already on tp_core's include path via the PUBLIC links below.
 target_include_directories(tp_core PRIVATE
     $<TARGET_PROPERTY:nt_builder,INTERFACE_INCLUDE_DIRECTORIES>)
+# stb_image_write.h for the PNG page writer (src/tp_export_png.c). Header path
+# only; the library itself is linked PRIVATE below.
+target_include_directories(tp_core PRIVATE
+    $<TARGET_PROPERTY:stb_image_write,INTERFACE_INCLUDE_DIRECTORIES>)
 # No nt_builder in tp_core's link closure: nt_shared is INTERFACE headers only
 # (nt_pack_format.h / nt_atlas_format.h / nt_texture_format.h), nt_hash is the small
 # hash lib (hash/nt_hash.h), nt_log is logging. None pull basisu, so tp_core is safe
@@ -23,7 +28,13 @@ target_include_directories(tp_core PRIVATE
 target_link_libraries(tp_core PUBLIC nt_shared nt_hash nt_log)
 # cJSON (engine-vendored, MIT) parses .ntpacker_project. PRIVATE: tp_project.h never
 # exposes cJSON; Save uses a hand-rolled deterministic writer.
-target_link_libraries(tp_core PRIVATE cjson)
+# stb_image_write (engine-vendored, public domain) is the PNG page writer. Linked
+# DIRECTLY here (NOT via nt_builder): it is a standalone single-header impl with no
+# basisu / no static-CRT-duplicate concern, so it is safe in tp_core's closure and
+# the GUI (which links tp_core) picks it up transitively -- same PRIVATE static-lib
+# propagation cjson already relies on. Its own -U_DLL objects mix with tp_core's
+# default-CRT objects exactly like the GUI's existing stb_image dependency.
+target_link_libraries(tp_core PRIVATE cjson stb_image_write)
 target_compile_definitions(tp_core PRIVATE _CRT_SECURE_NO_WARNINGS)
 # CRT: tp_core no longer links the static-CRT builder, so it DROPS -U_DLL and uses the
 # engine runtime's default CRT -- matching its own deps (nt_hash/nt_log/cjson) and the
@@ -38,7 +49,7 @@ nt_set_sanitizer_flags(tp_core)
 # --- tp_build: pack orchestration (drives nt_builder) ---------------------------
 # Isolated so ONLY pack-time consumers (CLI, smoke, pack tests) pull nt_builder ->
 # nt_basisu_encoder. The GUI links tp_core only and never sees basisu (#282).
-add_library(tp_build STATIC src/tp_pack.c)
+add_library(tp_build STATIC src/tp_pack.c src/tp_export_run.c)
 target_link_libraries(tp_build PUBLIC tp_core nt_builder)
 target_compile_definitions(tp_build PRIVATE _CRT_SECURE_NO_WARNINGS)
 target_compile_options(tp_build PRIVATE -U_DLL)   # static CRT: match nt_builder (see apps/smoke)

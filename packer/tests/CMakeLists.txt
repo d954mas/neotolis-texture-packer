@@ -49,3 +49,35 @@ target_link_libraries(tp_test_project PRIVATE tp_core unity)
 target_compile_options(tp_test_project PRIVATE -U_DLL)
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_project_test")
 add_test(NAME tp_project COMMAND tp_test_project "${CMAKE_BINARY_DIR}/tp_project_test")
+
+# Phase 2 normalization unit tests: ext/folder strip, rename override, animation
+# auto-group + explicit merge, collision, alias, final-name sort, scale. Pure
+# tp_core (synthetic tp_results, no builder).
+add_executable(tp_test_normalize test_normalize.c)
+target_link_libraries(tp_test_normalize PRIVATE tp_core unity)
+target_compile_options(tp_test_normalize PRIVATE -U_DLL)
+add_test(NAME tp_normalize COMMAND tp_test_normalize)
+
+# Phase 2 json-neotolis golden fidelity + determinism: builds every fixture via
+# nt_builder (tp_build), exports json-neotolis, parses back with cJSON.
+add_executable(tp_test_export_json test_export_json.c tp_fixtures.c)
+target_link_libraries(tp_test_export_json PRIVATE tp_build unity cjson)
+target_compile_options(tp_test_export_json PRIVATE -U_DLL)
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_export_json_test")
+add_test(NAME tp_export_json COMMAND tp_test_export_json "${CMAKE_BINARY_DIR}/tp_export_json_test")
+
+# Phase 2 PNG page export: pack -> write pages -> decode with stb_image, probe a
+# pixel, prove straight-alpha default + premultiply toggle.
+add_executable(tp_test_export_png test_export_png.c)
+target_link_libraries(tp_test_export_png PRIVATE tp_build unity stb_image)
+target_compile_options(tp_test_export_png PRIVATE -U_DLL)
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_export_png_test")
+add_test(NAME tp_export_png COMMAND tp_test_export_png "${CMAKE_BINARY_DIR}/tp_export_png_test")
+
+# Phase 2 per-target packing: test-only capability-restricted descriptors prove
+# effective-settings repack, shared runs, and metadata-loss notices.
+add_executable(tp_test_export_run test_export_run.c)
+target_link_libraries(tp_test_export_run PRIVATE tp_build unity cjson)
+target_compile_options(tp_test_export_run PRIVATE -U_DLL)
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_export_run_test")
+add_test(NAME tp_export_run COMMAND tp_test_export_run "${CMAKE_BINARY_DIR}/tp_export_run_test")
