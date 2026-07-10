@@ -17,8 +17,8 @@ issue + PR.
 ```
 Phase 0 (done)
    │
-   ├─► Phase 1a  engine export-API PR  ──┐   (BLOCKS everything downstream)
-   │                                     ▼
+   ├─► Phase 1a  .ntpack parse-back reader ──┐
+   │                                         ▼
    └─────────────────────────────►  Phase 1b  tp_core skeleton + canonical model
                                           │
                                           ▼
@@ -40,7 +40,8 @@ Phase 0 (done)
 ```
 
 **Parallelizable once prerequisites land:** 5, 6, 7 (all after 2, with 4/3 as noted); 8 after 4.
-The single serial bottleneck is **1a → 1b → 2**.
+The single serial bottleneck is **1a → 1b → 2** — all in-repo, nothing waits on upstream engine
+review (owner decision, `SUMMARY.md §5g`).
 
 ---
 
@@ -58,26 +59,34 @@ Already in the repo. Recorded here as the baseline.
 
 ---
 
-## Phase 1a — Engine placement-export API  (upstream issue + PR)  ★ critical path
+## Phase 1a — `.ntpack` parse-back reader (`tp_pack_read`)  ★ critical path
 
-**Goal:** `nt_builder` exposes packed placements + raw page pixels to an external exporter.
+**Goal:** `tp_core` reads placements, geometry and page pixels back from a
+freshly built `.ntpack` — the engine stays untouched (`SUMMARY.md §5g`).
 
 **Deliverables**
-- Engine **issue** describing the need, then a **PR** adding the read-only export
-  callback per `SUMMARY.md §5g`: `nt_atlas_export_t` / `nt_atlas_export_sprite_t`
-  structs + `nt_builder_set_atlas_export_cb()`, fired in `nt_builder_end_atlas`
-  after `pipeline_serialize`, before `pipeline_register`.
-- A builder unit test in the engine PR exercising the callback (hit + miss paths).
+- `tp_pack_read` module: parse the pack container
+  (`shared/include/nt_pack_format.h`), the atlas blob (`nt_atlas_format.h` v6)
+  and texture-asset mip0 → pages (dims + straight-alpha RGBA8) and regions
+  (frame rect from u16 UVs, D4 transform, trim, pivot, slice9, polygon
+  verts/indices, aliases).
+- Name reverse-map: xxh64(input sprite name) → name string (tool knows all
+  inputs; hash collision reported as error).
+- Export-friendly pack settings profile used for export/preview passes:
+  `premultiplied=false`, `compress=NULL`, `gen_mipmaps=false`.
 
 **Acceptance**
-- Callback fires exactly once per `end_atlas`, on both cache-hit and cache-miss.
-- Reported `frame`/`transform`/`trim`/`origin`/`slice9`/`alias_of`/`vertices`
-  reconstruct a sprite bit-exactly (assert against a known packing).
-- **Zero** diff to `.ntpack` bytes, cache format, or existing signatures.
+- Golden round-trip test: pack a fixture set covering rotated, flipped,
+  trimmed, polygon, slice9, alias and multi-page sprites → parse back →
+  frame rects, transforms, trim, pivots, slice9 and polygons match the
+  expected placement exactly.
+- UV→pixel rect recovery is exact for all page sizes up to 4096 (property
+  test over sizes and offsets).
+- Zero modifications under `external/neotolis-engine`.
 
-**Notes / risk:** this is the whole project's gate. Open the issue on day one; the
-PR is ~40 additive LOC. If upstream review lags, `SUMMARY.md §6 Q8` — decide whether
-`tp_core` builds against a temporary submodule branch to unblock Phase 1b in parallel.
+**Notes:** replaces the previously planned engine export-callback PR (kept in
+`SUMMARY.md §5g` as an optional later optimization once profiling justifies
+skipping the serialize→parse round-trip). No upstream dependency remains.
 
 ---
 
@@ -109,16 +118,19 @@ PR is ~40 additive LOC. If upstream review lags, `SUMMARY.md §6 Q8` — decide 
 **Deliverables**
 - PNG page writer (vendored `stb_image_write` / `fpng`), straight-alpha default
   with an optional premultiply toggle.
-- Hardcoded C exporters over the canonical model: `json-hash` (TexturePacker-
-  compatible) and `json-array`.
+- Hardcoded C exporters over the canonical model: **`json-neotolis`** (own
+  full-fidelity schema: D4 transform mask, polygons, pivot, slice9 — the
+  reference target that supports everything), `json-hash` (TexturePacker-
+  compatible, rot90-only) and `json-array`.
 - Exporter **registry** + capability-flag struct (even for hardcoded ones) so
   Phase 7 templates and the GUI/CLI reuse one interface.
+- Per-target packing (`SUMMARY.md §5h`): each export target packs with
+  `project settings ∩ target capabilities` (unsupported features silently not
+  used for that target); targets with identical effective settings share one
+  pack run. Informational notices only for genuine metadata loss (dropped
+  pivot/polygon/slice9); hard error only for impossibilities.
 - Core normalization pass (`prepareData` equivalent): trim-`crop` rewrite, name
   munging (ext strip / folder prefix), scale multiply — done before any exporter.
-- Export validation pass (`SUMMARY.md §5h`): placement result checked against
-  the target's capability flags; per-sprite errors (unrepresentable D4
-  transform, page constraints) and warnings (dropped pivot/polygon/slice9);
-  errors fail the export by default.
 
 **Acceptance**
 - Golden-file test: exported `json-hash` matches the documented TexturePacker

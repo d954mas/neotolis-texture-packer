@@ -118,8 +118,10 @@ scriptable; every good tool uses text. Concretely, adopting the `oss-and-archite
 **Decision: confirm the `oss-and-architecture.md` hybrid — hardcoded C core exporters + mustache-template exporters with JSON descriptors.**
 Rationale: binary/fiddly formats need C; the long tail is cheaply data-driven; matches TP/FTP proof.
 
-- **Hardcode in C**: our `.ntpack` (already `nt_builder`'s job), `json-hash`, `json-array`, and
-  **Defold `.tpinfo`** (its rotation-corner and vertex/index rules are error-prone — hardcode, don't template).
+- **Hardcode in C**: our `.ntpack` (already `nt_builder`'s job), **`json-neotolis`** (own
+  full-fidelity schema — the only JSON that can express D4 flips/polygons/slice9, see §5h),
+  `json-hash`, `json-array`, and **Defold `.tpinfo`** (its rotation-corner and vertex/index rules
+  are error-prone — hardcode, don't template).
 - **Mustache engine** (<1k LOC, vendor or implement) + FTP's **formatter extension**
   (`add/subtract/multiply/divide/offsetLeft/offsetRight/mirror/escapeName`) for coordinate conventions.
   Long-tail formats (libGDX `.atlas`, Godot, Phaser3, CSS) ship as templates.
@@ -199,17 +201,35 @@ all `required` fields written; pivot px from untrimmed TL). Validate by diffing 
 - Cache **decoded+trimmed source images keyed by file hash** (the actual slow part); don't attempt
   partial-layout incrementality — MaxRects/NFP on 1–2k sprites is ms-scale and layout is global.
 
-### (g) Required engine change — the placement/page-pixels export API
-**Decision: one purely-additive read-only export callback on `NtBuilderContext`, fired inside `nt_builder_end_atlas` after `pipeline_serialize` and before `pipeline_register`.**
+### (g) Getting the packed result out of `nt_builder` — parse back our own `.ntpack` (no engine change for v1)
+**Decision (owner): v1 obtains placements, geometry and page pixels by parsing the `.ntpack` the
+builder just wrote. The formats are public flat binary (`shared/include/nt_pack_format.h`,
+`nt_atlas_format.h` v6) and we own them. No engine change gates the project.**
 
-All data the exporter needs already lives in the `AtlasPipeline` struct at that point (verified in
-`external/neotolis-engine/tools/builder/nt_builder_atlas.c`): `page_w/page_h/page_count`, `page_pixels[]`
-(raw **straight-alpha** RGBA — premultiply happens later in the texture encoder, so PNG export gets
-straight alpha for free), `AtlasPlacement[]` (`nt_builder_atlas_vpack.h`: sprite_index, page, x, y,
-trimmed_w/h, trim_x/y, D4 transform), plus per-sprite `hull_vertices`/`vertex_counts`, `dedup_map`
-(→ `alias_of`), and sprite input (name, source w/h, `origin_x/y`, slice9). Geometry, trim and dedup
-stages run *unconditionally* before the cache-hit branch, so the hook fires correctly on **both cache
-hit and miss**. Proposed public shape (add to `nt_builder.h`):
+Verified against `nt_atlas_format.h` v6 — the atlas asset stores everything the canonical model
+needs: per-region D4 `transform` (flipH/flipV/diagonal), polygon `vertices[]`+`indices[]`
+(trim-local corner coords + per-vertex u16 UVs), `source_w/h`, `trim_offset_x/y`, `origin_x/y`
+(pivot), `slice9_lrtb`, `page_index`; page pixels live in the pack's texture assets. Aliases dedup
+to the same region. Caveats and how they're handled:
+
+1. **Names are xxh64 hashes** (`name_hash`) — the tool knows every input sprite name and builds
+   the reverse map (hash collisions would already be a build error).
+2. **Placement rect is not stored explicitly** — recovered from the u16-normalized UVs
+   (`px = round(uv * dim / 65535)`); pixel-exact for page sizes ≤ 4096. Pinned by a golden
+   round-trip test in Phase 1a.
+3. **Pixels are premultiplied/compressed by default** — the per-target export pass (§5h) already
+   packs with its own effective settings: `premultiplied=false`, `compress=NULL`,
+   `gen_mipmaps=false` → texture asset holds straight-alpha RGBA8 mip0.
+4. **GUI preview needs no separate path**: the session `.ntpack` (written to the tool's cache dir;
+   a few-MB stdio write is negligible next to packing) is loaded through the normal engine
+   pipeline — `nt_resource` → `nt_atlas` → GPU pages — and drawn with the sprite renderer. The
+   preview shows literally the artifact being shipped.
+
+*Optional future engine PRs (additive, neither gates v1):* (1) an in-builder export callback that
+hands the exporter `AtlasPlacement[]` + straight-alpha `page_pixels[]` directly, skipping the
+serialize→parse round-trip and UV quantization (draft API below, keep for when profiling justifies
+it); (2) a transform-**policy** enum (`NONE`/`ROT90`/`D4`) replacing the `allow_transform` bool so
+foreign targets can pack rotation-only instead of identity-only. Draft callback shape:
 
 ```c
 typedef struct { int32_t x, y; } nt_atlas_export_point_t;
@@ -238,33 +258,41 @@ typedef void (*nt_builder_atlas_export_fn)(const nt_atlas_export_t *atlas, void 
 void nt_builder_set_atlas_export_cb(NtBuilderContext *ctx, nt_builder_atlas_export_fn cb, void *user);
 ```
 
-**How minimal:** ~1 struct + 1 setter + ~15 lines populating a stack snapshot from `AtlasPipeline`
-and firing the callback. **Zero change** to `.ntpack` output, the cache format, or any existing
-signature — a pure addition. Ships as an engine issue + PR (never a submodule edit). *Optional
-follow-up PR (§7, Phase 7-adjacent):* a transform-**policy** enum (`NONE`/`ROT90`/`D4`) replacing the
-`allow_transform` bool, so foreign exporters can request rotation-only packing (representable) instead
-of falling back to identity-only. Not needed for v1.
+If/when implemented: ~1 struct + 1 setter + ~15 lines populating a stack snapshot from
+`AtlasPipeline` (all fields already live there at `end_atlas` time, verified in
+`nt_builder_atlas.c`), zero change to `.ntpack`/cache/signatures. Ships as an engine issue + PR
+(never a submodule edit).
 
 ---
 
-### (h) Export-time validation & warnings (owner requirement)
-**Decision: every export runs a validation pass of the placement result against the target's
-capability flags; anything unrepresentable is reported per sprite — never silently-wrong output.**
-Rationale: our packer bakes 8 D4 orientations (rotations + flips) into page pixels; Defold native
-supports NO placement rotation at all, and `.tpinfo` encodes only a single 90° `rotated` bool — a
-baked flip/180°/270° would silently render wrong in the target engine.
+### (h) Per-target capability-driven packing (owner requirement)
+**Decision: the project stores the full desired feature set (e.g. D4 flips+rotations); each export
+target packs with `project settings ∩ target capability flags` — automatically using the best the
+format can represent. Unsupported features are silently not used for that target, never a failure
+the user must fix by hand.**
+Rationale: our packer bakes 8 D4 orientations into page pixels; Defold native supports no placement
+rotation and `.tpinfo` only a 90° `rotated` bool. The owner's call: exporting to Defold must "use
+what is available there", not error out.
 
-- Two severities. **Error** (output would render incorrectly): baked flip/180°/270° for a target
-  without D4 support; page-size mismatch for `.tpinfo`; page count > 1 for single-page-only
-  formats. Export fails (non-zero exit) by default; `--force` downgrades to warnings.
-  **Warning** (metadata degrades): pivot dropped for pivot-less formats, polygon flattened to
-  rect, slice9 not representable.
-- Prevention over cure: when a project has export targets configured, pack constraints are the
-  **intersection of all enabled targets' capability flags** (v1: any foreign target →
-  `allow_transform=false`; after the engine transform-policy PR (§5g follow-up) → rotation-only),
-  so validation normally reports nothing.
-- One report format in `tp_core`, surfaced by both frontends: CLI → stderr + exit code,
-  GUI → warnings panel listing affected sprites.
+- The project may therefore use EVERY packer feature, because full-fidelity targets always exist:
+  `.ntpack` and our own **full-fidelity JSON** (`json-neotolis`: D4 transform mask, polygon
+  verts, pivot, slice9, pages). Note TP-compatible `json-hash` is itself a *limited* target — its
+  schema has only a 90° `rotated` bool, no flips — so the full-everything base JSON must be our
+  own schema, not json-hash.
+- Example: project enables full D4. `.ntpack`/`json-neotolis` export packs with all 8
+  orientations; Defold `.tpinfo` export packs identity-only (v1; rotation-only once the §5g
+  transform-policy engine PR lands) — same project, zero user action, every output correct for
+  its consumer.
+- Consequence for `tp_core`: pack orchestration runs per **effective settings** (project ∩
+  target), not once per project. Targets whose effective settings coincide share one pack run;
+  runs are cached by effective-settings + content hash (the builder's cache already keys on
+  inputs+opts), so the common case stays one pack.
+- Format quirks are absorbed the same way: `.tpinfo` page-size uniformity → pad pages
+  automatically; single-page formats → max_size acts as the constraint.
+- Warnings shrink to genuine **metadata loss only** (pivot dropped by a pivot-less format, polygon
+  flattened to rect, slice9 unrepresentable) — informational, never blocking. Hard errors remain
+  only for true impossibilities (sprite larger than the target's max page size). One report from
+  `tp_core`; CLI prints to stderr, GUI shows a notices panel.
 
 ## 6. Open questions for the product owner
 
@@ -279,5 +307,5 @@ baked flip/180°/270° would silently render wrong in the target engine.
    text/JSON descriptor for our runtime?
 6. **Font-atlas packing** (rTP does it; `nt_builder` has fonts): in scope for this tool or out?
 7. **Naming/branding**: tool name/CLI verb (`ntp`?), project extension (`.ntpp`?), license.
-8. **Engine PR sequencing**: require the export-API PR merged upstream before `tp_core` consumes it,
-   or is a temporary submodule branch acceptable to unblock parallel work? (Critical-path item.)
+8. ~~Engine PR sequencing~~ — resolved: owner chose the `.ntpack` parse-back path (§5g); no engine
+   change gates v1.
