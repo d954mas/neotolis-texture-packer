@@ -7,6 +7,12 @@ two equal frontends — a CLI and a native GUI app (engine `nt_ui`). Exports to
 multiple engine formats (Defold, generic JSON + PNG, own `.ntpack`, ...) via a
 pluggable exporter layer. A project file format persists all settings.
 
+The tool is operated by humans AND machines/AI agents as equal first-class
+users, designed so from the core up (owner ruling 2026-07-11, see
+`docs/design/ai-first.md`): every capability is scriptable headlessly, all
+CLI output has a machine-readable mode, errors and notices are structured
+data, and bad input yields a graceful structured error — never a crash.
+
 ## Communication
 
 Minimize optional commentary. During execution, send only required notices,
@@ -44,6 +50,11 @@ work itself. Create a new role only when the catalog has no fitting role.
   PR in the engine repo, never a direct edit.
 - Tool parity: one op layer (`tp_core`), two equal clients (CLI and GUI).
   Features land in the core first; frontends only wire them up.
+- Human + AI operators: any capability must be reachable headlessly (CLI),
+  every CLI command supports `--json` with a stable versioned schema, exit
+  codes are a contract, errors/notices are structured data (id + context, not
+  only prose), and destructive/lossy outcomes are predictable via dry-run.
+  Invalid user input must produce a structured error, never an abort/crash.
 - C17, engine warning flags (`nt_set_warning_flags`) on all our targets.
 - Exporters are data-driven plugins over one canonical placement model; adding
   a format must not require touching pack orchestration.
