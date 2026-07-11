@@ -63,6 +63,23 @@ if(NTPACKER_GUI_SELFTEST)
     target_compile_definitions(ntpacker-gui PRIVATE NTPACKER_GUI_SELFTEST=1)
 endif()
 
+# Optional: register the GUI self-test exe as a ctest. It needs NTPACKER_GUI_SELFTEST=ON (the exe then
+# runs the headless self-test + auto-quits) AND a live GL context/display -- so it is OFF by default and
+# GL-less CI runners stay green. Enable locally with:
+#   cmake --preset native-debug -DNTPACKER_GUI_SELFTEST=ON -DNTPACKER_GUI_CTEST=ON
+#   cmake --build --preset native-debug --target ntpacker-gui
+#   ctest --preset native-debug -R ntpacker_gui_selftest
+option(NTPACKER_GUI_CTEST "Register the GUI self-test exe as a ctest (requires NTPACKER_GUI_SELFTEST=ON + a GL context)" OFF)
+if(NTPACKER_GUI_SELFTEST AND NTPACKER_GUI_CTEST)
+    # The self-test resolves example assets relative to the repo root (examples/defold-demo/...); a failed
+    # NT_ASSERT aborts with a non-zero exit, which ctest reports as a test failure.
+    add_test(NAME ntpacker_gui_selftest COMMAND ntpacker-gui)
+    set_tests_properties(ntpacker_gui_selftest PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        TIMEOUT 180
+        LABELS "gui;gl")
+endif()
+
 nt_set_warning_flags(ntpacker-gui)
 nt_set_sanitizer_flags(ntpacker-gui)
 set_target_properties(ntpacker-gui PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${GUI_OUTPUT_DIR}")

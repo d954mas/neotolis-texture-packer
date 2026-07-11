@@ -107,6 +107,10 @@ ability to inspect/edit part of a correct atlas.
 truncation loud, not silent.
 
 ### P2 — stale flag can be wrongly cleared by a Refresh during an in-flight pack
+**CONFIRMED — FIXED (decomposition step 8 / packet P-8).** `do_refresh` (gui_actions.c) bumps a
+`s_refresh_epoch` latch; `do_pack` snapshots it when the async pack starts; `poll_async`'s PACK_OK
+branch now clears stale only when the model is unchanged AND the epoch is unchanged, so a Refresh that
+lands mid-pack keeps the preview honestly stale.
 **CONFIRMED (edge case).** `model_changed_since` (gui_pack.c:381) compares only the
 *serialized model* to `snap0`. `do_refresh` marks stale on **disk** change without touching
 the model (main.c:1391; by design — sources are paths). If a Refresh lands while an async
@@ -119,6 +123,10 @@ disk. Preview reads "up to date" while actually stale.
 started.
 
 ### P2 — undo/redo not guarded against async-busy (inconsistent with new/open/exit)
+**CONFIRMED — FIXED (decomposition step 8 / packet P-8).** A `busy_block()` helper (gui_actions.c) now
+carries the "async-busy refuses destructive ops" rule; the three `request_*` fns share it and
+`do_undo`/`do_redo` route through it too, so undo/redo refuse while a pack/export runs — consistent with
+new/open/exit.
 **CONFIRMED safe, but inconsistent.** `request_new/open/exit` refuse while
 `gui_pack_async_busy()` (main.c:1206/1223/1237). `do_undo`/`do_redo` (1266/1278) do not —
 they run inline in `handle_shortcuts` and call `gui_pack_clear(-1)`. This is *not* a race:
@@ -129,6 +137,10 @@ which `model_changed_since` then flags stale. *Fix:* either guard undo/redo the 
 document the intent (and accept the transient).
 
 ### P2 — `s_shown_result` holds an indeterminate pointer after `gui_pack_clear`
+**CONFIRMED — FIXED (decomposition step 8 / packet P-8).** `gui_shell_reset_shown_result()`
+(gui_shell.h; main.c sets `s_shown_result = NULL`) is now called right after every destructive
+`gui_pack_clear(-1)` (open/new/undo/redo in gui_actions.c), so next frame's `want != s_shown_result`
+bind never reads a freed pointer.
 **CONFIRMED (theoretical UB, practically safe).** After `gui_pack_clear(-1)` frees an
 arena (undo/redo/new/open), `s_shown_result` (main.c:384) still holds the freed address.
 The next line that touches it, `if (want != s_shown_result)` (5579), *reads that
@@ -140,6 +152,11 @@ handler derefs are NULL-guarded. *Fix:* reset `s_shown_result = NULL` alongside 
 and non-UB. Cheap insurance against a future reorder of the frame body.
 
 ### P2 — X-button close during a long pack blocks process exit
+**CONFIRMED — FIXED (UI-freeze window closed; decomposition step 8 / packet P-8).** tp_pack stays
+non-interruptible (engine limit, still true), but main() now drains a real in-flight worker
+(`gui_pack_worker_active()`) with the OS message pump alive (`nt_window_poll` + `gui_pack_poll`) after
+the frame loop exits, so the closing window is no longer a frozen "not responding" ghost while the
+worker finishes; `gui_pack_shutdown`'s join is then instant. Bounded by the pack's remaining time.
 **CONFIRMED (documented tradeoff).** `gui_pack_shutdown` (gui_pack.c:773) joins the
 non-interruptible worker. If a large concave pack is running when the window closes, the
 window is already gone but the process lingers until the pack finishes. Acknowledged in the
@@ -147,6 +164,11 @@ code comment. *Fix (optional):* a cooperative cancel check inside `tp_pack` woul
 engine change (out of scope) — for now, note it in the release limitations.
 
 ### P2 — `>16` export targets export but are invisible/uneditable
+**CONFIRMED — FIXED (made visible; cap NOT lifted; decomposition step 8 / packet P-8).** Both the
+settings panel (`declare_export_targets`, gui_view_settings.c) and the Export modal
+(`declare_export_modal`, gui_view_chrome.c) now render a "+N more target(s) … (still exported)" note
+when `target_count > GUI_MAX_TARGETS`, so the hidden-but-exported tail is no longer silent. Not shown on
+the showcase (2 targets) → gate hashes unchanged.
 **CONFIRMED.** `gui_project_add_target` has no cap; the settings panel (main.c:4103,
 `shown = min(count, GUI_MAX_TARGETS=16)`) and the Export dialog (3398, `ti < GUI_MAX_TARGETS`)
 only render the first 16, but `gui_pack_export_async_start` iterates **all**
@@ -156,12 +178,21 @@ disable it. No OOB (the `s_dd_target_open[16]`/`s_nb_target_path[16]` arrays are
 those UI arrays dynamic.
 
 ### P2 — `do_add_files` 8 KB buffer truncates very large multi-selects
+**CONFIRMED — FIXED (decomposition step 8 / packet P-8).** `do_add_files` (gui_actions.c) now parses the
+tinyfd result IN PLACE, one `|`-segment at a time into a 1024-byte single-path buffer (tinyfd's real cap
+is `MAX_MULTIPLE_FILES=32 × MAX_PATH_OR_CMD=1024`), so the whole multi-select is handled with no
+truncation; a pathological per-path overflow is dropped LOUDLY with a count. The `char buf[8192]` is gone.
 **CONFIRMED.** main.c:1117 copies the `|`-joined dialog result into `char buf[8192]`; a
 selection whose joined paths exceed 8191 bytes truncates mid-path, and the final partial
 path resolves to a missing file (shown as a missing row, non-fatal — no crash). *Fix:*
 size from the returned string length, or parse the tinyfd result in place.
 
 ### P2 — `gui_scan` 32-directory cache thrashes for many-folder projects
+**CONFIRMED — NO CHANGE NEEDED (documented; decomposition step 8 / packet P-8).** Re-derived as benign:
+the cache is per-directory scan-result memoization, not a watched-folder registry — the folder SET lives
+in the tp_project model, and every caller copies strings out before the next `gui_scan_get` can evict, so
+eviction only costs a re-scan (perf), never a lost/dangling folder. A region comment in gui_scan.c now
+states this explicitly. Raising the cap stays a future perf option, not a correctness fix.
 **CONFIRMED (perf).** `GUI_SCAN_CACHE_CAP = 32` (gui_scan.c:17), round-robin eviction. A
 project referencing >32 folders re-runs full recursive directory walks every frame in
 `build_rows`/`fp_collect` for evicted dirs → per-frame disk I/O jank. No correctness bug
@@ -288,6 +319,16 @@ overflow via `gui_pack_debug_force_busy` (phase 10).
 gate it on CI runners that have one, or add a `--headless` no-render mode that still drives
 `gui_pack_*` directly), extend phase 9/10 to cover async export + cancel + shutdown-while-busy
 + a mutate-then-land stale check, and run at least one self-test configuration under TSan.
+
+**Addressed in decomposition step 9 / packet P-8:** gaps 1–4 above are now covered by new self-test
+phases — **12** async export (worker + `save_buffer` clone + `mkdirs` + on-disk file check), **13**
+cancel-mid-pack (poll returns `*_CANCELLED`, arena discarded, no slot swap, stale honest), **15**
+shutdown-while-busy (`gui_pack_shutdown` join+reset, no hang), **14** mutate-then-land (model edited
+after async start → `model_changed_since` keeps stale). The self-test is registered as an OPTIONAL ctest
+(`ntpacker_gui_selftest`, gated `NTPACKER_GUI_SELFTEST=ON` + `NTPACKER_GUI_CTEST=ON`, both default OFF so
+GL-less CI stays green). The manual TSan procedure (gap 7) is documented in
+`docs/plans/gui-decomposition.md` §9. Gaps 5–6 (non-selected-atlas landing, `thrd_create` failure) remain
+untested.
 
 ---
 

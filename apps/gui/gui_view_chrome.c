@@ -420,6 +420,14 @@ void declare_export_modal(nt_ui_context_t *ctx) {
                         }
                     }
                 }
+                /* Targets past GUI_MAX_TARGETS aren't listed (the per-target UI arrays are fixed), but they
+                 * DO export -- surface the hidden tail rather than dropping it silently (P2). */
+                if (a->target_count > GUI_MAX_TARGETS) {
+                    char more[80];
+                    (void)snprintf(more, sizeof more, "+%d more target(s) not shown (still exported).",
+                                   a->target_count - GUI_MAX_TARGETS);
+                    nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), more, &g_dim);
+                }
             }
         }
         nt_ui_scroll_end(ctx);

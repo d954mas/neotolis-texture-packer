@@ -14,6 +14,14 @@
 #endif
 
 // #region cache
+/* Per-directory scan-result memoization, NOT a watched-folder registry: the folder SET lives in the
+ * tp_project model (sources), never here. This cache only avoids re-walking a directory that was
+ * scanned recently. Eviction is therefore benign -- a dropped entry costs one re-scan on next access,
+ * never a lost folder. When full, the oldest slot is round-robin evicted (s_evict_cursor); every caller
+ * (assemble/build_rows/fp_collect) fully consumes a gui_scan_result before the next gui_scan_get can
+ * evict it (strings are copied out immediately -- no pointer survives an eviction), so eviction can
+ * never dangle a live result either. A many-folder project (>32 dirs) only pays repeated re-scans
+ * (perf), with no correctness or silent-drop risk. */
 #define GUI_SCAN_CACHE_CAP 32
 
 typedef struct gui_scan_cache_entry {
@@ -23,7 +31,7 @@ typedef struct gui_scan_cache_entry {
 } gui_scan_cache_entry;
 
 static gui_scan_cache_entry s_cache[GUI_SCAN_CACHE_CAP];
-static uint32_t s_evict_cursor; /* round-robin eviction when the cache is full */
+static uint32_t s_evict_cursor; /* round-robin eviction when the cache is full (benign -- see the region note) */
 // #endregion
 
 // #region growable entry vector (scan-local)

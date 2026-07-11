@@ -773,6 +773,8 @@ gui_pack_done gui_pack_poll(gui_pack_result_info *out) {
 
 bool gui_pack_async_busy(void) { return s_job_active || s_debug_busy != GUI_PACK_ASYNC_NONE; }
 
+bool gui_pack_worker_active(void) { return s_job_active; } /* real worker only (no --shot debug busy) */
+
 gui_pack_async_kind gui_pack_async_active_kind(void) {
     if (s_debug_busy != GUI_PACK_ASYNC_NONE) {
         return s_debug_busy;

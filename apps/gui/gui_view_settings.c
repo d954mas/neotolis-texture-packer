@@ -703,6 +703,15 @@ static void declare_export_targets(nt_ui_context_t *ctx, tp_project_atlas *a) {
             }
         }
     }
+    /* The UI arrays (s_dd_target_open / s_nb_target_path) are fixed at GUI_MAX_TARGETS, so targets past
+     * that are not editable here -- but export still writes ALL of them, so surface the hidden tail
+     * instead of dropping it silently (P2). */
+    if (a->target_count > GUI_MAX_TARGETS) {
+        char more[80];
+        (void)snprintf(more, sizeof more, "+%d more target(s) not editable here (still exported).",
+                       a->target_count - GUI_MAX_TARGETS);
+        panel_note(ctx, more);
+    }
     if (ui_icon_btn(ctx, nt_ui_id("tgt/add"), &s_ic_plus, 16.0F, "Target", &g_btn_ghost, true, 0.0F, 26.0F, &g_caption)) {
         s_pending_add_target = true;
     }

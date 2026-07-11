@@ -136,6 +136,10 @@ bool gui_pack_export_async_start(char *err, size_t err_cap);
  * returns the completion (else GUI_PACK_DONE_NONE). Fills *out. */
 gui_pack_done gui_pack_poll(gui_pack_result_info *out);
 bool gui_pack_async_busy(void);
+/* True only when a REAL worker thread is in flight (excludes the --shot-packing debug-forced busy that
+ * gui_pack_async_busy also reports). The shutdown drain (window X-close) waits on this so it never spins
+ * on the fake shot busy, which has no thread to join. */
+bool gui_pack_worker_active(void);
 gui_pack_async_kind gui_pack_async_active_kind(void);
 double gui_pack_async_elapsed_sec(void);
 void gui_pack_export_progress(int *cur, int *total); /* export "atlas cur/total" for the strip */

@@ -12,6 +12,7 @@
 #include "gui_canvas.h"
 #include "gui_pack.h"
 #include "gui_history.h"
+#include "gui_shell.h" /* gui_shell_reset_shown_result: kill the freed-pointer bind after a clear (P2) */
 #include "tinyfiledialogs.h"
 
 #include "tp_core/tp_export.h" /* tp_exporter_at -> the preview selector's exporter list */
@@ -48,6 +49,25 @@ bool s_confirm_open;
 int s_modal_action;
 double s_last_pack_ms;      /* wall-clock ms of the last successful pack (for the stats line) */
 int s_last_pack_atlas = -1; /* which atlas that timing belongs to */
+
+/* Refresh-vs-pack honesty latch (P2): a Refresh dirties the sources on DISK without touching the model,
+ * so model_changed_since (which only diffs the serialized model) can't see it. If a Refresh lands while
+ * an async pack is in flight, the just-landed result reflects the PRE-refresh disk -- so it must NOT
+ * clear stale. do_refresh bumps s_refresh_epoch; do_pack snapshots it at start; poll_async clears stale
+ * only when the model is unchanged AND no Refresh happened since the pack started. */
+static unsigned s_refresh_epoch;
+static unsigned s_pack_start_refresh_epoch;
+
+/* True (and raises a status) when an async pack/export is running: the destructive ops (new/open/exit/
+ * undo/redo) refuse while busy. Centralizes the guard the request_* fns had copy-pasted, and closes the
+ * gap where undo/redo skipped it (P2 -- undo mid-pack then a pre-undo result landing was confusing). */
+static bool busy_block(void) {
+    if (gui_pack_async_busy()) {
+        set_status_ex(STATUS_WARNING, "Wait for the pack/export to finish (or Cancel) first.");
+        return true;
+    }
+    return false;
+}
 
 // #region selection / edit helpers
 /* Stops the animation preview player and restores the canvas to its atlas/source view. */
@@ -394,6 +414,7 @@ static void do_open(void) {
     char err[256];
     if (gui_project_open(path, err, sizeof err) == TP_STATUS_OK) {
         gui_pack_clear(-1);
+        gui_shell_reset_shown_result();
         cancel_edit();
         clamp_selection();
         reset_selection();
@@ -439,23 +460,32 @@ static void do_add_files(void) {
     if (!res) {
         return;
     }
-    char buf[8192];
-    (void)snprintf(buf, sizeof buf, "%s", res);
+    /* tinyfd returns a '|'-joined path list in its OWN fixed static buffer, capped at 32 paths of
+     * <= 1024 bytes each (MAX_MULTIPLE_FILES x MAX_PATH_OR_CMD). Parse it IN PLACE, one segment at a
+     * time into a single-path buffer, so nothing truncates: the old `char buf[8192]` silently dropped
+     * the tail of a large multi-select mid-path (P2). Any per-path overflow (a path longer than the OS
+     * max -- pathological) is dropped LOUDLY with a count. */
     int added = 0;
     int dup = 0;
-    char *start = buf;
+    int dropped = 0;
+    const char *start = res;
     for (;;) {
-        char *bar = strchr(start, '|');
-        if (bar) {
-            *bar = '\0';
-        }
-        if (start[0] != '\0') {
-            normalize_slashes(start);
-            const gui_add_status r = gui_project_add_source(s_sel_atlas, start);
-            if (r == GUI_ADD_ADDED) {
-                added++;
-            } else if (r == GUI_ADD_DUPLICATE) {
-                dup++;
+        const char *bar = strchr(start, '|');
+        const size_t seg = bar ? (size_t)(bar - start) : strlen(start);
+        if (seg > 0) {
+            char path[1024]; /* MAX_PATH_OR_CMD: one tinyfd path never exceeds this */
+            if (seg < sizeof path) {
+                memcpy(path, start, seg);
+                path[seg] = '\0';
+                normalize_slashes(path);
+                const gui_add_status r = gui_project_add_source(s_sel_atlas, path);
+                if (r == GUI_ADD_ADDED) {
+                    added++;
+                } else if (r == GUI_ADD_DUPLICATE) {
+                    dup++;
+                }
+            } else {
+                dropped++;
             }
         }
         if (!bar) {
@@ -463,7 +493,10 @@ static void do_add_files(void) {
         }
         start = bar + 1;
     }
-    if (dup > 0) {
+    if (dropped > 0) {
+        set_statusf_ex(STATUS_WARNING, "Added %d file source(s); %d dropped (path too long), %d already added", added,
+                       dropped, dup);
+    } else if (dup > 0) {
         set_statusf("Added %d file source(s); %d already added", added, dup);
     } else {
         set_statusf("Added %d file source(s)", added);
@@ -528,8 +561,7 @@ static void do_add_folder(void) {
 
 // #region new/exit confirm flow
 void request_new(void) {
-    if (gui_pack_async_busy()) {
-        set_status_ex(STATUS_WARNING, "Wait for the pack/export to finish (or Cancel) first.");
+    if (busy_block()) {
         return;
     }
     if (gui_project_is_dirty()) {
@@ -538,6 +570,7 @@ void request_new(void) {
     } else {
         gui_project_new();
         gui_pack_clear(-1);
+        gui_shell_reset_shown_result();
         cancel_edit();
         clamp_selection();
         reset_selection();
@@ -545,8 +578,7 @@ void request_new(void) {
     }
 }
 void request_exit(void) {
-    if (gui_pack_async_busy()) {
-        set_status_ex(STATUS_WARNING, "Wait for the pack/export to finish (or Cancel) first.");
+    if (busy_block()) {
         return;
     }
     if (gui_project_is_dirty()) {
@@ -559,8 +591,7 @@ void request_exit(void) {
 /* Open routes through the same unsaved-changes confirm as New/Exit (no silent discard). The actual
  * OS open dialog runs via s_pending_open, either now (clean) or after the modal resolves. */
 void request_open(void) {
-    if (gui_pack_async_busy()) {
-        set_status_ex(STATUS_WARNING, "Wait for the pack/export to finish (or Cancel) first.");
+    if (busy_block()) {
         return;
     }
     if (gui_project_is_dirty()) {
@@ -574,6 +605,7 @@ static void confirm_perform(void) {
     if (s_after_confirm == AFTER_NEW) {
         gui_project_new();
         gui_pack_clear(-1);
+        gui_shell_reset_shown_result();
         cancel_edit();
         clamp_selection();
         reset_selection();
@@ -589,8 +621,12 @@ static void confirm_perform(void) {
 
 // #region undo/redo + refresh actions
 void do_undo(void) {
+    if (busy_block()) {
+        return; /* same async-busy guard as new/open/exit -- undo mid-pack then a pre-undo land is confusing */
+    }
     if (gui_project_undo()) {
         gui_pack_clear(-1);
+        gui_shell_reset_shown_result();
         cancel_edit();
         clamp_selection();
         reset_selection();
@@ -601,8 +637,12 @@ void do_undo(void) {
     }
 }
 void do_redo(void) {
+    if (busy_block()) {
+        return;
+    }
     if (gui_project_redo()) {
         gui_pack_clear(-1);
+        gui_shell_reset_shown_result();
         cancel_edit();
         clamp_selection();
         reset_selection();
@@ -714,6 +754,7 @@ static void do_refresh(void) {
 
     gui_canvas_invalidate(&s_canvas); /* force the shown image to reload (or show missing) */
     gui_project_mark_stale();         /* disk changed -> preview stale, project NOT dirtied */
+    s_refresh_epoch++;                /* an in-flight pack landing later must NOT clear this stale (P2) */
     set_statusf("Refresh: +%d new, %d removed, %d changed", added, removed, changed);
 }
 
@@ -762,7 +803,8 @@ void do_pack(void) {
     }
     char err[256] = {0};
     if (gui_pack_async_start(s_sel_atlas, err, sizeof err)) {
-        set_status_ex(STATUS_INFO, "Packing\xE2\x80\xA6"); /* result lands via poll_async */
+        s_pack_start_refresh_epoch = s_refresh_epoch; /* a Refresh after this must keep stale when it lands (P2) */
+        set_status_ex(STATUS_INFO, "Packing\xE2\x80\xA6");   /* result lands via poll_async */
     } else {
         set_statusf_ex(STATUS_ERROR, "Pack failed: %s", err);
     }
@@ -856,8 +898,11 @@ static void poll_async(void) {
     gui_pack_result_info info;
     switch (gui_pack_poll(&info)) {
         case GUI_PACK_DONE_PACK_OK: {
-            if (!info.model_changed) {
-                gui_project_mark_packed(); /* model unchanged since the packed snapshot -> up to date */
+            /* Clear stale only when the model is unchanged since the packed snapshot AND no Refresh
+             * dirtied the sources on disk since the pack started (model_changed_since can't see a
+             * disk-only Refresh -- P2). Otherwise the just-landed result is honestly stale. */
+            if (!info.model_changed && s_refresh_epoch == s_pack_start_refresh_epoch) {
+                gui_project_mark_packed();
             }
             s_last_pack_ms = info.ms;
             s_last_pack_atlas = info.atlas_index;

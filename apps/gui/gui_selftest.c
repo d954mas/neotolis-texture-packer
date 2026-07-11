@@ -775,11 +775,9 @@ void selftest_pre_frame(void) {
         s_st_pf = 0;
     } else if (s_st_phase == 1) {
         s_canvas.mode = GUI_CANVAS_ATLAS; /* hold ATLAS mode through the probe frames */
-        if (s_st_pf == 3) {
-            s_canvas.show_outline = false; /* OFF frame (diff baseline) */
-        } else if (s_st_pf == 6) {
-            s_canvas.show_outline = true; /* ON frame */
-        }
+        /* OFF for the first frames (settled diff baseline captured at pf 5), then ON for the whole retry
+         * window. The readback + retry logic lives in selftest_post_draw (see the mechanism note there). */
+        s_canvas.show_outline = (s_st_pf > 5);
     } else if (s_st_phase == 2) {
         if (s_st_pf > 10) {
             const bool dirty = gui_project_is_dirty();
@@ -1072,6 +1070,147 @@ void selftest_pre_frame(void) {
             s_st_phase = 12;
             s_st_pf = 0;
         }
+    } else if (s_st_phase == 12) {
+        /* Async EXPORT (req 4a): mirror phase 9's async==blocking pattern for the export path. Start an
+         * async export of a fresh single-atlas project whose seeded target points at an isolated tmp base
+         * under the build dir, spin until it lands (poll_async in apply_pending reads the report + frees the
+         * job), then assert the on-disk json + page png exist -- the export_worker / save_buffer clone /
+         * mkdirs path is otherwise untested (only the blocking gui_pack_export was exercised). */
+        g_ui_scale = 1.0F;
+        g_nt_window.fb_width = 1280;
+        g_nt_window.fb_height = 800;
+        if (s_st_pf == 1) {
+            gui_project_new();
+            gui_pack_clear(-1);
+            s_sel_atlas = 0;
+            reset_selection();
+            char afolder[512];
+            to_abs("examples/defold-demo/examples/anim_trim/anims", afolder, sizeof afolder);
+            (void)gui_project_add_source(0, afolder);
+            gui_scan_invalidate_all();
+            char base[600];
+            (void)snprintf(base, sizeof base, "%s/selftest_async_export/at0", s_exe_dir); /* ABSOLUTE -> resolves w/o a saved dir */
+            gui_project_set_target(0, 0, "json-neotolis", base, true);
+            char aerr[256] = {0};
+            const bool started = gui_pack_export_async_start(aerr, sizeof aerr);
+            nt_log_info("SELFTEST: async export start -> %d (%s)", (int)started, started ? "ok" : aerr);
+            NT_ASSERT(started && "SELFTEST: async export must start");
+        } else if (gui_pack_async_busy()) {
+            NT_ASSERT(s_st_pf < 3000 && "SELFTEST: async export did not finish within the frame cap");
+        } else {
+            char base[600];
+            char jpath[640] = {0};
+            char ppath[640] = {0};
+            (void)snprintf(base, sizeof base, "%s/selftest_async_export/at0", s_exe_dir);
+            (void)snprintf(jpath, sizeof jpath, "%s.json", base);
+            (void)snprintf(ppath, sizeof ppath, "%s-0.png", base);
+            bool jok = false;
+            bool pok = false;
+            FILE *jf = fopen(jpath, "rb");
+            if (jf) {
+                jok = (fgetc(jf) == '{'); /* lightweight parse check (full parse is in the packer ctest) */
+                (void)fclose(jf);
+            }
+            FILE *pf = fopen(ppath, "rb");
+            if (pf) {
+                pok = (fgetc(pf) != EOF); /* exists AND non-empty */
+                (void)fclose(pf);
+            }
+            nt_log_info("SELFTEST: async export landed json{=%d png0=%d", (int)jok, (int)pok);
+            NT_ASSERT(jok && pok && "SELFTEST: async export must write the json + page png");
+            (void)remove(jpath);
+            (void)remove(ppath);
+            s_st_phase = 13;
+            s_st_pf = 0;
+        }
+    } else if (s_st_phase == 13) {
+        /* Cancel mid-pack (req 4b): start an async pack over a CLEARED slot with stale set, cancel it
+         * immediately, spin until it lands. gui_pack_poll must DISCARD the worker's result (no slot swap)
+         * and poll_async must NOT clear stale -- the cancel-discard path (gui_pack.c) is otherwise never
+         * hit (phase 9 waits for !busy first). */
+        g_ui_scale = 1.0F;
+        g_nt_window.fb_width = 1280;
+        g_nt_window.fb_height = 800;
+        if (s_st_pf == 1) {
+            gui_project_new();
+            gui_pack_clear(-1);
+            s_sel_atlas = 0;
+            reset_selection();
+            char afolder[512];
+            to_abs("examples/defold-demo/examples/anim_trim/anims", afolder, sizeof afolder);
+            (void)gui_project_add_source(0, afolder);
+            gui_scan_invalidate_all();
+            gui_project_mark_stale();
+            char aerr[256] = {0};
+            const bool started = gui_pack_async_start(0, aerr, sizeof aerr);
+            NT_ASSERT(started && "SELFTEST: cancel-phase pack must start");
+            gui_pack_async_cancel(); /* cancel before it can land -> result discarded on landing */
+        } else if (gui_pack_async_busy()) {
+            NT_ASSERT(s_st_pf < 3000 && "SELFTEST: cancelled pack did not land");
+        } else {
+            NT_ASSERT(gui_pack_result(0) == NULL && "SELFTEST: cancelled pack must not swap a result in");
+            NT_ASSERT(gui_project_is_stale() && "SELFTEST: cancelled pack must leave stale honest (not cleared)");
+            nt_log_info("SELFTEST: cancel-mid-pack discarded cleanly (no swap, stale kept)");
+            s_st_phase = 14;
+            s_st_pf = 0;
+        }
+    } else if (s_st_phase == 14) {
+        /* Mutate-then-land (req 4d): start an async pack, edit the model WHILE it flies, spin until it
+         * lands. model_changed_since sees the edit, so poll_async must NOT clear stale (the just-landed
+         * result reflects the PRE-edit model). Proves the memcmp-gated mark_packed. */
+        g_ui_scale = 1.0F;
+        g_nt_window.fb_width = 1280;
+        g_nt_window.fb_height = 800;
+        if (s_st_pf == 1) {
+            gui_project_new();
+            gui_pack_clear(-1);
+            s_sel_atlas = 0;
+            reset_selection();
+            char afolder[512];
+            to_abs("examples/defold-demo/examples/anim_trim/anims", afolder, sizeof afolder);
+            (void)gui_project_add_source(0, afolder);
+            gui_scan_invalidate_all();
+            char aerr[256] = {0};
+            const bool started = gui_pack_async_start(0, aerr, sizeof aerr);
+            NT_ASSERT(started && "SELFTEST: mutate-phase pack must start");
+            tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), 0);
+            if (a) {
+                a->padding = (a->padding >= 8) ? 1 : (a->padding + 1); /* real model edit -> serialized bytes differ */
+                gui_project_touch_setting();
+            }
+        } else if (gui_pack_async_busy()) {
+            NT_ASSERT(s_st_pf < 3000 && "SELFTEST: mutate-phase pack did not land");
+        } else {
+            NT_ASSERT(gui_project_is_stale() && "SELFTEST: mutate-then-land must keep stale (model changed since pack)");
+            nt_log_info("SELFTEST: mutate-then-land kept stale (model_changed honored)");
+            s_st_phase = 15;
+            s_st_pf = 0;
+        }
+    } else if (s_st_phase == 15) {
+        /* Shutdown-while-busy (req 4c): start an async pack, then gui_pack_shutdown() must cancel + JOIN the
+         * worker + free + reset without hanging (the window X-close path). Runs to completion in one frame --
+         * gui_pack_shutdown joins synchronously, so afterward the job is idle. main() calls it AGAIN at exit
+         * (idempotent -- the second call sees !busy). Kept LAST because it tears the pack session down. */
+        g_ui_scale = 1.0F;
+        g_nt_window.fb_width = 1280;
+        g_nt_window.fb_height = 800;
+        gui_project_new();
+        gui_pack_clear(-1);
+        s_sel_atlas = 0;
+        reset_selection();
+        char afolder[512];
+        to_abs("examples/defold-demo/examples/anim_trim/anims", afolder, sizeof afolder);
+        (void)gui_project_add_source(0, afolder);
+        gui_scan_invalidate_all();
+        char aerr[256] = {0};
+        const bool started = gui_pack_async_start(0, aerr, sizeof aerr);
+        NT_ASSERT(started && gui_pack_async_busy() && "SELFTEST: shutdown-phase pack must start busy");
+        gui_pack_shutdown(); /* busy branch: cancel + join + free + reset */
+        NT_ASSERT(!gui_pack_async_busy() && "SELFTEST: shutdown-while-busy must join + reset (no hang)");
+        gui_shell_reset_shown_result(); /* gui_pack_shutdown cleared the slots -> drop the shell's freed bind ptr */
+        nt_log_info("SELFTEST: shutdown-while-busy joined cleanly");
+        s_st_phase = 16;
+        s_st_pf = 0;
     } else {
         g_nt_window.fb_width = 1280;
         g_nt_window.fb_height = 800;
@@ -1084,31 +1223,50 @@ void selftest_post_draw(void) {
     if (s_st_phase != 1) {
         return;
     }
-    if (s_st_pf == 3) {
-        s_st_cyan0 = selftest_probe_cyan();
-    } else if (s_st_pf == 6) {
-        const int c1 = selftest_probe_cyan();
-        nt_log_info("SELFTEST: outline pixel probe cyan off=%d on=%d delta=%d", s_st_cyan0, c1, c1 - s_st_cyan0);
-        NT_ASSERT(s_st_cyan0 >= 0 && c1 >= 0);
-        NT_ASSERT(c1 - s_st_cyan0 >= 8); /* the hull outline MUST add cyan pixels (regression: cam on-plane -> 0-width) */
-        /* Hand off to the touch-on-render guard: a truly fresh project, no input, all sections expanded. */
-        gui_project_new();
-        s_sel_atlas = 0;
-        reset_selection();
-        s_about_open = false;
-        s_sec_atlas_open = true;
-        s_atlas_adv_open = true;
-        s_sec_region_open = true;
-        s_sec_anim_open = true;
-        s_sec_export_open = true;
-        free(s_st_baseline);
-        s_st_baseline = NULL;
-        s_st_baseline_n = 0;
-        tp_error e = {0};
-        (void)tp_project_save_buffer(gui_project_get(), &s_st_baseline, &s_st_baseline_n, &e);
-        s_st_phase = 2;
-        s_st_pf = 0;
+    /* Overlay pixel probe, HARDENED against transient GPU-readback stalls under load (a single-shot read
+     * at one fixed frame flaked repeatedly under load today):
+     *   (1) SETTLE  -- capture the OFF baseline only at a settled frame (pf 5, several frames after the
+     *                  scene + page uploads land), and give the ON outline 2 frames to rasterize before
+     *                  the first ON readback (pf 8).
+     *   (2) RETRY   -- once outlines are ON, take the readback every frame across a wide window (pf 8..48)
+     *                  and PASS the instant one frame clears the cyan-delta threshold. A lone stalled
+     *                  readback (delta transiently low) just retries next frame instead of failing the run.
+     * The test still FAILS on a real regression: if outlines never rasterize (e.g. the cam-on-plane
+     * zero-width-line bug), EVERY frame in the window stays below threshold, the window expires at pf 48,
+     * and the assert fires. Observed retries with this scheme: ~0 (passes at pf 8) even under load. */
+    if (s_st_pf == 5) {
+        s_st_cyan0 = selftest_probe_cyan(); /* settled OFF baseline */
+        return;
     }
+    if (s_st_pf < 8) {
+        return; /* ON settle */
+    }
+    const int c1 = selftest_probe_cyan();
+    const bool ok = (s_st_cyan0 >= 0 && c1 >= 0 && (c1 - s_st_cyan0) >= 8);
+    if (!ok && s_st_pf < 48) {
+        return; /* transient stall -> retry the readback next frame (outline is still ON) */
+    }
+    nt_log_info("SELFTEST: outline pixel probe cyan off=%d on=%d delta=%d (settled pf=%d, retries=%d)", s_st_cyan0, c1,
+                c1 - s_st_cyan0, (int)s_st_pf, (int)(s_st_pf - 8));
+    NT_ASSERT(s_st_cyan0 >= 0 && c1 >= 0);
+    NT_ASSERT(ok && "hull outline must add cyan pixels (retry window expired -> outlines never rendered)");
+    /* Hand off to the touch-on-render guard: a truly fresh project, no input, all sections expanded. */
+    gui_project_new();
+    s_sel_atlas = 0;
+    reset_selection();
+    s_about_open = false;
+    s_sec_atlas_open = true;
+    s_atlas_adv_open = true;
+    s_sec_region_open = true;
+    s_sec_anim_open = true;
+    s_sec_export_open = true;
+    free(s_st_baseline);
+    s_st_baseline = NULL;
+    s_st_baseline_n = 0;
+    tp_error e = {0};
+    (void)tp_project_save_buffer(gui_project_get(), &s_st_baseline, &s_st_baseline_n, &e);
+    s_st_phase = 2;
+    s_st_pf = 0;
 }
 
 #else

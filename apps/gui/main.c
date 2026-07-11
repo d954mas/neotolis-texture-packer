@@ -168,6 +168,11 @@ static float s_pan_last_x, s_pan_last_y;
 /* gui_open_url (opens a URL in the OS default browser -- the About link) moved to
  * gui_view_chrome.c (GUI decomposition step 6b) as a pure move: it is chrome-only, the About modal
  * is its sole caller. */
+
+/* Shell-owned reset of the canvas-bound-result cache (gui_shell.h): the destructive flows call this
+ * right after gui_pack_clear(-1) so s_shown_result never holds a freed slot pointer at the next
+ * frame's `want != s_shown_result` compare (P2 hardening). */
+void gui_shell_reset_shown_result(void) { s_shown_result = NULL; }
 // #endregion
 
 // #region init helpers
@@ -1004,6 +1009,19 @@ int main(int argc, char *argv[]) {
     nt_log_info("ntpacker-gui: starting (live in-process packing + atlas-page canvas)");
 
     nt_app_run(frame);
+
+    /* The window closed (X / Alt+F4) while a pack/export was still on the worker thread. tp_pack is
+     * non-interruptible (engine limitation), so we cannot abort it -- but instead of blocking the UI
+     * thread in gui_pack_shutdown's bare join (a frozen "not responding" ghost window), keep the OS
+     * message pump alive and poll until the worker lands. Cancel first (export stops between atlases);
+     * the wait is bounded by the pack's remaining time, and gui_pack_shutdown below is then instant. */
+    if (gui_pack_worker_active()) {
+        gui_pack_async_cancel();
+        while (gui_pack_worker_active()) {
+            nt_window_poll();
+            (void)gui_pack_poll(NULL); /* joins + frees the job the frame it signals done */
+        }
+    }
 
     gui_canvas_shutdown(&s_canvas);
     gui_pack_shutdown();

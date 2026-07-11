@@ -25,7 +25,6 @@ static inline float S(float px) { return px * g_ui_scale; }
 static inline uint16_t Su(float px) { return (uint16_t)((px * g_ui_scale) + 0.5F); }
 
 #define BASE_MENUBAR_H 32.0F
-#define BASE_TOOLBAR_H 48.0F
 #define BASE_LEFT_PANEL_W 300.0F
 #define BASE_RIGHT_PANEL_W 300.0F /* settings panel (regions F/G), fixed width, own scroll */
 #define BASE_ROW_H 27.0F

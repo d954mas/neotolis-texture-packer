@@ -132,13 +132,51 @@ the current tree as packet task #1):
   project is too heavy for CI) and a real 600-sprite pack for the >512 preview path.
   Pool math holds: the large-N path is model/row-level only (no vlist render), so
   UI_STATE_SLOTS is untouched at large N. 5 gate shots byte-identical (delta 0).
-- **Step 8 — shell cleanup + P2 hardenings** (one-liners, in final locations):
-  busy_block() incl. undo/redo; gui_pack_reset_shown(); refresh-during-pack keeps
-  stale; dead BASE_TOOLBAR_H; MK_*/CTX_* orphan audit; >16-targets + 8KB add-files
-  visible notices.
-- **Step 9 — test net:** selftest phases for async-export / cancel /
-  shutdown-while-busy / mutate-then-land-stays-stale; register selftest as ctest
-  where GL allows (local preset at minimum); document manual TSan run.
+- **Step 8 — shell cleanup + P2 hardenings** (one-liners, in final locations).
+  **[DONE, P-8]** Per P2 item (current post-decomposition locations):
+  - *refresh-during-pack keeps stale* — `s_refresh_epoch` latch in gui_actions.c:
+    `do_refresh` bumps it, `do_pack` snapshots it at async start, `poll_async` clears
+    stale only when the model is unchanged AND the epoch is unchanged.
+  - *busy_block() incl. undo/redo* — `busy_block()` helper in gui_actions.c; the three
+    `request_*` fns now share it and `do_undo`/`do_redo` gained the same async-busy guard.
+  - *shown-result reset* — `gui_shell_reset_shown_result()` (gui_shell.h / main.c sets
+    `s_shown_result=NULL`) called after every destructive `gui_pack_clear(-1)`
+    (open/new/undo/redo) so the canvas bind never compares a freed pointer.
+  - *X-close no UI freeze* — main() drains a real in-flight worker with the OS pump
+    alive (`gui_pack_worker_active()` + `nt_window_poll`/`gui_pack_poll`) before the
+    join, so the window isn't a frozen "not responding" ghost. tp_pack stays
+    non-interruptible (engine limit); the wait is bounded by its remaining time.
+  - *>16 export targets visible* — a "+N more … (still exported)" note row in both the
+    settings panel (gui_view_settings.c) and the Export modal (gui_view_chrome.c). Cap
+    NOT lifted. Hidden on the showcase (2 targets) → gate hashes unchanged.
+  - *do_add_files truncation* — parse-in-place per `|`-segment into a 1024-byte path
+    buffer (tinyfd caps at 32×1024); the old `char buf[8192]` truncation is gone, any
+    per-path overflow is dropped LOUDLY with a count.
+  - *gui_scan 32-dir cache* — no change needed: benign round-robin memoization (the
+    folder SET lives in the model, results are copied out before eviction). Documented
+    in a gui_scan.c region comment.
+  - *dead code* — `BASE_TOOLBAR_H` removed (gui_defs.h). MK_*/CTX_* audit: all 29 MK_
+    values reachable, all CTX_* kinds reachable (CTX_NONE is the 0 default). No orphans.
+- **Step 9 — test net.** **[DONE, P-8]**
+  - New selftest phases (gui_selftest.c, mirroring the phase-9 async pattern): **12**
+    async export lands correct json+png; **13** cancel-mid-pack lands as discard (no
+    slot swap, stale honest); **14** mutate-then-land keeps stale (memcmp-gated
+    mark_packed); **15** shutdown-while-busy `gui_pack_shutdown()` joins+resets cleanly
+    (LAST test phase — it tears the pack session down; main() re-calls it idempotently).
+  - Probe hardened (phase 1): settle (OFF baseline at pf 5, ON 2-frame settle) + retry
+    the readback across pf 8..48, PASS on the first frame whose cyan delta ≥ 8; only an
+    all-frames-below-threshold window (outlines never rasterize) fails. Observed retries
+    under 4-way CPU load: 0 across 7 runs (always settles at pf 8, delta 428).
+  - GUI selftest registered as an OPTIONAL ctest (`ntpacker_gui_selftest`), gated
+    `NTPACKER_GUI_SELFTEST=ON` **and** `NTPACKER_GUI_CTEST=ON` (both default OFF → GL-less
+    CI stays green). Invocation:
+    ```
+    cmake --preset native-debug -DNTPACKER_GUI_SELFTEST=ON -DNTPACKER_GUI_CTEST=ON
+    cmake --build --preset native-debug --target ntpacker-gui
+    ctest --preset native-debug -R ntpacker_gui_selftest      # WORKING_DIRECTORY = repo root
+    ```
+    Default config: 13 tests (no GUI test). With both options: 14 tests, GUI test passes.
+  - Manual TSan run — see "§9. Manual TSan run for the async layer" at the end.
 
 Every packet includes: update `add_executable` in apps/gui/CMakeLists.txt (explicit
 sub-step — the only place TUs get compiled), and headers for the new TU.
@@ -189,3 +227,31 @@ P-6a/P-6b: steps 6a/6b [fast-worker] · P-7: step 7 [deep-reasoner] · P-8: step
   inside `build_rows` (gui_rows), field declared in gui_view_lists.
 - Keyboard list navigation (I2): focus index in gui_state, key handling in the
   shell input pre-pass, highlight in view TUs.
+
+## 9. Manual TSan run for the async layer (gui_pack.c worker thread)
+
+`nt_set_sanitizer_flags` hard-wires `-fsanitize=address,undefined` on **Debug** builds
+(non-Windows) and disables sanitizers entirely on Windows+Clang (UCRT interception).
+ASan and TSan are mutually exclusive, so a ThreadSanitizer pass on the async worker is a
+**manual, Linux-only** step that swaps the sanitizer via a non-Debug config (avoids the
+built-in ASan) plus explicit `-fsanitize=thread` on compile and link:
+
+```
+cmake -S . -B build-tsan -G Ninja \
+  -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DCMAKE_C_COMPILER=clang \
+  -DNTPACKER_GUI_SELFTEST=ON \
+  -DCMAKE_C_FLAGS="-fsanitize=thread -fno-omit-frame-pointer -g" \
+  -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
+cmake --build build-tsan --target ntpacker-gui
+./build/apps/gui/*/ntpacker-gui   # run from the repo root; needs a GL context/display; auto-quits
+```
+
+The self-test exercises the worker↔main handoff repeatedly: phase 9 (async==blocking),
+12 (async export), 13 (cancel), 14 (mutate-then-land), 15 (shutdown-while-busy).
+**What to look for:** a clean exit with **no `WARNING: ThreadSanitizer: data race`** report.
+Watch for a race flagged on `s_job.state` (the release/acquire handoff), the `_Atomic`
+fields (`cancelled`/`exp_cur`/`exp_total`), or `s_slots[]`/`s_preview` (must be touched only
+on the main thread). A race there would contradict the review's finding that the worker
+writes every output field *before* the release-store on `s_job.state` and the main thread
+reads them only *after* the acquire-load returns "done".
