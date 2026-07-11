@@ -148,7 +148,12 @@ static const Clay_Color C_HEADER = {40.0F, 45.0F, 57.0F, 255.0F};     /* section
 static const Clay_Color C_INPUT = {21.0F, 23.0F, 30.0F, 255.0F};      /* field well: recessed, darker than panel (§2.1) */
 static const Clay_Color C_BORDER_STRONG = {86.0F, 132.0F, 204.0F, 255.0F}; /* focus ring / active input (§2.1) */
 static const Clay_Color C_ACCENT = {64.0F, 140.0F, 214.0F, 255.0F};   /* primary accent: section left-rule (§2.1) */
-/* danger red (§2.1) lives as the g_danger LABEL tier (remove-x hover tint); no Clay_Color needed. */
+/* Severity + stale hues (§2.1/§2.8/§2.9) as Clay_Colors: status-bar tint, the amber "outdated" canvas
+ * tag fill, and the semi-transparent dim laid over a stale packed page. */
+static const Clay_Color C_WARN = {228.0F, 158.0F, 92.0F, 255.0F};     /* amber: warning + stale */
+static const Clay_Color C_SUCCESS = {104.0F, 186.0F, 124.0F, 255.0F}; /* green: pack/export success */
+static const Clay_Color C_DANGER = {214.0F, 96.0F, 96.0F, 255.0F};    /* red: errors + destructive */
+static const Clay_Color C_STALE_DIM = {0.0F, 0.0F, 0.0F, 31.0F};      /* ~12% black over a stale page (§2.9) */
 static const Clay_Color C_SEL = {48.0F, 74.0F, 120.0F, 255.0F};       /* selected-row desaturated blue FILL */
 static const Clay_Color C_HOVER = {46.0F, 52.0F, 66.0F, 255.0F};      /* row/btn hover */
 static const Clay_Color C_TRANSPARENT = {0.0F, 0.0F, 0.0F, 0.0F};
@@ -277,6 +282,8 @@ static nt_atlas_region_ref_t s_ic_chevron_left, s_ic_chevron_right, s_ic_minus, 
 /* Packet B row/section icons (bound in try_bind_resources alongside the strip set). */
 static nt_atlas_region_ref_t s_ic_chevron_down, s_ic_layers, s_ic_folder, s_ic_image, s_ic_film;
 static nt_atlas_region_ref_t s_ic_file_plus, s_ic_folder_plus, s_ic_x;
+/* Packet C: status-bar severity icons + the 96px empty-state hero (bound alongside the rest). */
+static nt_atlas_region_ref_t s_ic_info, s_ic_circle_check, s_ic_octagon_alert, s_ic_folder_plus_hero;
 static nt_ui_dropdown_style_t s_dd_style;
 static nt_ui_slider_style_t s_slider_style;
 static nt_ui_input_style_t s_num_input;   /* numeric + short text fields */
@@ -323,7 +330,11 @@ static nt_font_t s_font;
 static bool s_atlas_bound;
 static bool s_font_bound;
 
+/* Status-line severity (§2.8): leading icon + text tint. Info default; errors keep their tint until
+ * the next status write (no timed behavior). */
+typedef enum { STATUS_INFO, STATUS_SUCCESS, STATUS_WARNING, STATUS_ERROR } status_sev_t;
 static char s_status[256];
+static status_sev_t s_status_sev = STATUS_INFO;
 static char s_exe_dir[1024];
 // #endregion
 
@@ -509,13 +520,29 @@ static int s_row_tip_count;
 #define GUI_PRINTF(fmt_idx, args_idx)
 #endif
 
-static void set_status(const char *msg) { (void)snprintf(s_status, sizeof s_status, "%s", msg); }
+static void set_status(const char *msg) {
+    s_status_sev = STATUS_INFO;
+    (void)snprintf(s_status, sizeof s_status, "%s", msg);
+}
+static void set_status_ex(status_sev_t sev, const char *msg) {
+    s_status_sev = sev;
+    (void)snprintf(s_status, sizeof s_status, "%s", msg);
+}
 static void set_statusf(const char *fmt, ...) GUI_PRINTF(1, 2);
 static void set_statusf(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     (void)vsnprintf(s_status, sizeof s_status, fmt, ap);
     va_end(ap);
+    s_status_sev = STATUS_INFO;
+}
+static void set_statusf_ex(status_sev_t sev, const char *fmt, ...) GUI_PRINTF(2, 3);
+static void set_statusf_ex(status_sev_t sev, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    (void)vsnprintf(s_status, sizeof s_status, fmt, ap);
+    va_end(ap);
+    s_status_sev = sev;
 }
 
 static void normalize_slashes(char *s) {
@@ -1036,7 +1063,7 @@ static void do_open(void) {
         return;
     }
     if (!gui_scan_exists(path)) {
-        set_statusf("project not found: %s", path); /* never fatal (F6b) */
+        set_statusf_ex(STATUS_WARNING, "project not found: %s", path); /* never fatal (F6b) */
         return;
     }
     char err[256];
@@ -1047,7 +1074,7 @@ static void do_open(void) {
         reset_selection();
         set_statusf("Opened %s", gui_project_display_name());
     } else {
-        set_statusf("Open failed: %s", err);
+        set_statusf_ex(STATUS_ERROR, "Open failed: %s", err);
     }
 }
 
@@ -1064,7 +1091,7 @@ static void do_save_as(void) {
     if (gui_project_save_as(full, err, sizeof err) == TP_STATUS_OK) {
         set_statusf("Saved %s", gui_project_display_name());
     } else {
-        set_statusf("Save failed: %s", err);
+        set_statusf_ex(STATUS_ERROR, "Save failed: %s", err);
     }
 }
 
@@ -1077,7 +1104,7 @@ static void do_save(void) {
     if (gui_project_save(err, sizeof err) == TP_STATUS_OK) {
         set_statusf("Saved %s", gui_project_display_name());
     } else {
-        set_statusf("Save failed: %s", err);
+        set_statusf_ex(STATUS_ERROR, "Save failed: %s", err);
     }
 }
 
@@ -1167,9 +1194,9 @@ static void do_add_folder(void) {
     if (r == GUI_ADD_ADDED) {
         set_statusf("Added folder %s", path_last(norm));
     } else if (r == GUI_ADD_DUPLICATE) {
-        set_statusf("already added: %s", path_last(norm));
+        set_statusf_ex(STATUS_WARNING, "already added: %s", path_last(norm));
     } else {
-        set_status("Add folder failed.");
+        set_status_ex(STATUS_ERROR, "Add folder failed.");
     }
 }
 // #endregion
@@ -1359,7 +1386,7 @@ static void do_refresh(void) {
 static void do_pack(void) {
     tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
     if (!a || a->source_count == 0) {
-        set_status("No sources to pack -- add files or a folder first.");
+        set_status_ex(STATUS_WARNING, "No sources to pack -- add files or a folder first.");
         return;
     }
     char err[256] = {0};
@@ -1372,12 +1399,12 @@ static void do_pack(void) {
         /* the per-frame canvas<->atlas sync (frame()) picks up the new result pointer and uploads. */
         const tp_result *r = gui_pack_result(s_sel_atlas);
         if (note[0] != '\0') {
-            set_statusf("Packed %d sprites, %d page(s) in %.0f ms (%s)", r->sprite_count, r->page_count, ms, note);
+            set_statusf_ex(STATUS_SUCCESS, "Packed %d sprites, %d page(s) in %.0f ms (%s)", r->sprite_count, r->page_count, ms, note);
         } else {
-            set_statusf("Packed %d sprites, %d page(s) in %.0f ms", r->sprite_count, r->page_count, ms);
+            set_statusf_ex(STATUS_SUCCESS, "Packed %d sprites, %d page(s) in %.0f ms", r->sprite_count, r->page_count, ms);
         }
     } else {
-        set_statusf("Pack failed: %s", err);
+        set_statusf_ex(STATUS_ERROR, "Pack failed: %s", err);
     }
 }
 
@@ -1421,12 +1448,12 @@ static void do_export(void) {
         }
     }
     if (atlases_fail > 0) {
-        set_statusf("Exported %d target(s); %d atlas(es) failed -- %s", total_targets, atlases_fail, first_err);
+        set_statusf_ex(STATUS_ERROR, "Exported %d target(s); %d atlas(es) failed -- %s", total_targets, atlases_fail, first_err);
     } else if (atlases_ok == 0) {
-        set_status("Nothing to export -- enable a target and add sources.");
+        set_status_ex(STATUS_WARNING, "Nothing to export -- enable a target and add sources.");
     } else {
-        set_statusf("Exported %d target(s)%s", total_targets,
-                    total_notices > 0 ? " (metadata notices raised)" : "");
+        set_statusf_ex(total_notices > 0 ? STATUS_WARNING : STATUS_SUCCESS, "Exported %d target(s)%s", total_targets,
+                       total_notices > 0 ? " (metadata notices raised)" : "");
     }
 }
 // #endregion
@@ -1435,7 +1462,7 @@ static void do_export(void) {
 static void commit_atlas_rename(void) {
     char err[128];
     if (!atlas_name_valid(s_edit_buf, s_edit_atlas, err, sizeof err)) {
-        set_status(err); /* keep editing on invalid input */
+        set_status_ex(STATUS_WARNING, err); /* keep editing on invalid input */
         return;
     }
     if (gui_project_set_atlas_name(s_edit_atlas, s_edit_buf)) {
@@ -1456,14 +1483,14 @@ static void commit_sprite_rename(void) {
 }
 static void commit_anim_rename(void) {
     if (s_edit_buf[0] == '\0') {
-        set_status("Animation name cannot be empty.");
+        set_status_ex(STATUS_WARNING, "Animation name cannot be empty.");
         return; /* keep editing */
     }
     if (gui_project_set_anim_id(s_sel_atlas, s_edit_anim, s_edit_buf)) {
         set_statusf("Renamed animation to '%s'", s_edit_buf);
         cancel_edit();
     } else {
-        set_statusf("Animation '%s' already exists.", s_edit_buf); /* keep editing */
+        set_statusf_ex(STATUS_WARNING, "Animation '%s' already exists.", s_edit_buf); /* keep editing */
     }
 }
 
@@ -1475,7 +1502,7 @@ static void commit_active_edit(bool force) {
     if (s_edit_kind == EDIT_ATLAS) {
         char err[128];
         if (!atlas_name_valid(s_edit_buf, s_edit_atlas, err, sizeof err)) {
-            set_status(err);
+            set_status_ex(STATUS_WARNING, err);
             if (force) {
                 cancel_edit();
             }
@@ -1489,7 +1516,7 @@ static void commit_active_edit(bool force) {
         commit_sprite_rename();
     } else if (s_edit_kind == EDIT_ANIM) {
         if (s_edit_buf[0] == '\0' || !gui_project_set_anim_id(s_sel_atlas, s_edit_anim, s_edit_buf)) {
-            set_status(s_edit_buf[0] == '\0' ? "Animation name cannot be empty." : "Animation name must be unique.");
+            set_status_ex(STATUS_WARNING, s_edit_buf[0] == '\0' ? "Animation name cannot be empty." : "Animation name must be unique.");
             if (force) {
                 cancel_edit();
             }
@@ -1939,6 +1966,10 @@ static void try_bind_resources(void) {
         s_ic_file_plus = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_FILE_PLUS);
         s_ic_folder_plus = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_FOLDER_PLUS);
         s_ic_x = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_X);
+        s_ic_info = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_INFO);
+        s_ic_circle_check = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_CIRCLE_CHECK);
+        s_ic_octagon_alert = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_OCTAGON_ALERT);
+        s_ic_folder_plus_hero = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_FOLDER_PLUS_HERO);
         s_atlas_bound = true;
         nt_log_info("ntpacker-gui: atlas white + icon regions bound");
     }
@@ -3002,14 +3033,67 @@ static void declare_canvas(nt_ui_context_t *ctx) {
                 ui_label_fit(ctx, label, &g_warn, cap_w, 0U);
                 nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Restore the file and press Refresh (F5) to bring it back.", &g_caption);
             } else {
-                /* Bounded, centered column so long hints WRAP within the canvas instead of clipping both edges. */
-                const float hint_w = fmaxf(S(80.0F), fminf(cap_w, S(460.0F)));
-                CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(hint_w), CLAY_SIZING_FIT(0)},
-                                 .layoutDirection = CLAY_TOP_TO_BOTTOM,
-                                 .childGap = Su(6),
-                                 .childAlignment = {CLAY_ALIGN_X_CENTER, CLAY_ALIGN_Y_CENTER}}}) {
-                    nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "No atlas preview yet -- press Pack (Ctrl+P) to build it.", &g_canvas_hint);
-                    nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Or select a sprite on the left to preview its source image.", &g_canvas_hint);
+                const tp_project_atlas *ea = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
+                const bool no_sources = (ea == NULL || ea->source_count == 0);
+                if (no_sources) {
+                    /* Empty state (§2.7): hero folder-plus + "Add a folder to start" + a PRIMARY Add-folder
+                     * button wired to the SAME pending action as the +Folder button (no duplicated logic). */
+                    CLAY({.layout = {.sizing = {CLAY_SIZING_FIT(0), CLAY_SIZING_FIT(0)},
+                                     .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                                     .childGap = Su(12),
+                                     .childAlignment = {CLAY_ALIGN_X_CENTER, CLAY_ALIGN_Y_CENTER}}}) {
+                        nt_ui_image_style_t hero = nt_ui_image_style_defaults();
+                        hero.color_packed = label_tint(&g_canvas_hint); /* text-faint (region baked at 96px) */
+                        CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(S(48.0F)), CLAY_SIZING_FIXED(S(48.0F))}}}) {
+                            nt_ui_image(ctx, NT_UI_DATA_LAYER(LAYER_IMG), &s_ic_folder_plus_hero, &hero, NULL);
+                        }
+                        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Add a folder to start", &g_canvas_hint);
+                        if (ui_icon_btn(ctx, nt_ui_id("ntpacker/empty_add_folder"), &s_ic_folder_plus, 16.0F,
+                                        "Add folder", &g_btn_primary, true, 0.0F, 28.0F, &g_onaccent)) {
+                            s_pending_add_folder = true;
+                        }
+                    }
+                } else {
+                    /* Sources present but not packed yet: keep the "press Pack" hint. Bounded, centered
+                     * column so long hints WRAP within the canvas instead of clipping both edges. */
+                    const float hint_w = fmaxf(S(80.0F), fminf(cap_w, S(460.0F)));
+                    CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(hint_w), CLAY_SIZING_FIT(0)},
+                                     .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                                     .childGap = Su(6),
+                                     .childAlignment = {CLAY_ALIGN_X_CENTER, CLAY_ALIGN_Y_CENTER}}}) {
+                        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "No atlas preview yet -- press Pack (Ctrl+P) to build it.", &g_canvas_hint);
+                        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Or select a sprite on the left to preview its source image.", &g_canvas_hint);
+                    }
+                }
+            }
+            /* Stale visuals (§2.9): a floating overlay OVER the custom-drawn page -- ~12% dim + a corner
+             * amber "outdated" tag. Floating -> higher zIndex -> the walker draws it in a later segment,
+             * above the CUSTOM page (zIndex 0); PASSTHROUGH keeps canvas pan/zoom/right-click live (canvas
+             * input reads the raw pointer vs last_bb, not Clay hover). Pure draw (no widget state). */
+            if (atlas && s_pack_stale) {
+                nt_ui_label_style_t tag_lbl = g_tag; /* tag size, dark-on-amber like the strip chip */
+                tag_lbl.color = g_onwarn.color;
+                nt_ui_image_style_t tagi = nt_ui_image_style_defaults();
+                tagi.color_packed = label_tint(&tag_lbl);
+                CLAY({.id = {.id = nt_ui_id("ntpacker/stale_overlay")},
+                      .layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)},
+                                 .padding = {Su(8), Su(8), Su(8), Su(8)},
+                                 .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_TOP}},
+                      .backgroundColor = C_STALE_DIM,
+                      .floating = {.attachTo = CLAY_ATTACH_TO_PARENT,
+                                   .zIndex = 8,
+                                   .pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_PASSTHROUGH}}) {
+                    CLAY({.layout = {.sizing = {CLAY_SIZING_FIT(0), CLAY_SIZING_FIT(0)},
+                                     .padding = {Su(6), Su(6), Su(3), Su(3)},
+                                     .childGap = Su(4),
+                                     .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}},
+                          .backgroundColor = C_WARN,
+                          .cornerRadius = CLAY_CORNER_RADIUS(S(4))}) {
+                        CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(S(12.0F)), CLAY_SIZING_FIXED(S(12.0F))}}}) {
+                            nt_ui_image(ctx, NT_UI_DATA_LAYER(LAYER_IMG), &s_ic_triangle_alert, &tagi, NULL);
+                        }
+                        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "outdated", &tag_lbl);
+                    }
                 }
             }
         }
@@ -3029,14 +3113,50 @@ static void declare_canvas(nt_ui_context_t *ctx) {
 // #endregion
 
 // #region status bar + menus + tooltips
+/* Severity language (§2.8): leading icon + text tint. Info = text-dim (g_caption), success green,
+ * warning amber, error red. One baked white icon tinted to the tier -> icon + text speak one color. */
+static Clay_Color status_sev_color(status_sev_t sev) {
+    switch (sev) {
+    case STATUS_SUCCESS:
+        return C_SUCCESS;
+    case STATUS_WARNING:
+        return C_WARN;
+    case STATUS_ERROR:
+        return C_DANGER;
+    case STATUS_INFO:
+    default:
+        return g_caption.color; /* text-dim */
+    }
+}
+static nt_atlas_region_ref_t *status_sev_icon(status_sev_t sev) {
+    switch (sev) {
+    case STATUS_SUCCESS:
+        return &s_ic_circle_check;
+    case STATUS_WARNING:
+        return &s_ic_triangle_alert;
+    case STATUS_ERROR:
+        return &s_ic_octagon_alert;
+    case STATUS_INFO:
+    default:
+        return &s_ic_info;
+    }
+}
 static void declare_statusbar(nt_ui_context_t *ctx) {
+    nt_ui_label_style_t st = g_caption; /* caption size; recolor per severity (already scaled this frame) */
+    st.color = status_sev_color(s_status_sev);
+    nt_ui_image_style_t sicon = nt_ui_image_style_defaults();
+    sicon.color_packed = label_tint(&st);
     CLAY({.id = {.id = s_id_statusbar},
           .layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_STATUSBAR_H))},
                      .padding = {Su(12), Su(12), Su(4), Su(4)},
+                     .childGap = Su(6),
                      .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}},
           .backgroundColor = C_STATUS,
           .cornerRadius = CLAY_CORNER_RADIUS(S(6))}) {
-        ui_label_fit(ctx, s_status, &g_caption, s_content_w - S(40.0F), 0U); /* clip, never wrap/overflow */
+        CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(S(14.0F)), CLAY_SIZING_FIXED(S(14.0F))}}}) {
+            nt_ui_image(ctx, NT_UI_DATA_LAYER(LAYER_IMG), status_sev_icon(s_status_sev), &sicon, NULL);
+        }
+        ui_label_fit(ctx, s_status, &st, s_content_w - S(60.0F), 0U); /* clip, never wrap/overflow */
     }
 }
 
@@ -3310,7 +3430,7 @@ static void declare_about_modal(nt_ui_context_t *ctx) {
                 if (gui_open_url(NTPACKER_REPO_URL)) {
                     set_statusf("Opening %s", NTPACKER_REPO_URL);
                 } else {
-                    set_status("Could not open browser -- " NTPACKER_REPO_URL);
+                    set_status_ex(STATUS_WARNING, "Could not open browser -- " NTPACKER_REPO_URL);
                 }
             }
             CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(4))}}}) {}
@@ -5339,7 +5459,7 @@ static void frame(void) {
             } else if (s_sel_abs[0] != '\0') {
                 char err[256];
                 if (!gui_canvas_set_image(&s_canvas, s_sel_abs, err, sizeof err)) {
-                    set_statusf("Decode failed: %s", err);
+                    set_statusf_ex(STATUS_ERROR, "Decode failed: %s", err);
                     s_sel_missing = true; /* show the missing placeholder instead of a blank canvas */
                 }
             } else {
@@ -5349,7 +5469,7 @@ static void frame(void) {
 
         gui_canvas_upload_pages(&s_canvas);          /* GL upload of packed pages (deferred from pack) */
         if (s_canvas.upload_failed) {
-            set_status("Page too large for this GPU \xE2\x80\x94 lower Max page size to preview it.");
+            set_status_ex(STATUS_WARNING, "Page too large for this GPU \xE2\x80\x94 lower Max page size to preview it.");
         }
         nt_shape_renderer_set_vp((const float *)vp); /* overlays share the sprite view_proj */
         nt_shape_renderer_set_depth(false);
@@ -5525,11 +5645,11 @@ int main(int argc, char *argv[]) {
     if (proj_arg != NULL) {
         char err[256];
         if (!gui_scan_exists(proj_arg)) {
-            set_statusf("project not found: %s", proj_arg); /* stale argv -> continue with untitled (F6b) */
+            set_statusf_ex(STATUS_WARNING, "project not found: %s", proj_arg); /* stale argv -> continue with untitled (F6b) */
         } else if (gui_project_open(proj_arg, err, sizeof err) == TP_STATUS_OK) {
             set_statusf("Opened %s", gui_project_display_name());
         } else {
-            set_statusf("Open '%s' failed: %s", proj_arg, err);
+            set_statusf_ex(STATUS_ERROR, "Open '%s' failed: %s", proj_arg, err);
         }
     } else {
         set_status("Ready. New project -- add files or a folder to start.");
