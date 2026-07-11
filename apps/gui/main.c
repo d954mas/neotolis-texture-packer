@@ -110,8 +110,9 @@ static inline uint16_t Su(float px) { return (uint16_t)((px * g_ui_scale) + 0.5F
  * old 545. Ladder (§4): >= LABELS Pack/Export show text; >= CHIP the stale chip shows too; below
  * SINGLE the strip falls to the overflow-safe two-row compact (icon-only).
  * CHIP must clear the FULL labeled+chip strip min-content (measured ~649 design px, max across
- * scales 1.0/1.5/2.0) PLUS the canvas card's L/R padding (S(20)) that the strip sits inside -- the
- * strip's real budget is s_canvas_w - S(20), not s_canvas_w. Below CHIP the amber Pack carries the
+ * scales 1.0/1.5/2.0) PLUS the canvas card's L/R padding (S(12) since the dense-chrome pass; the
+ * 680 stop was derived against the older S(20) padding and is kept -- strictly conservative, the
+ * chip just drops a few px earlier than the true fit limit). Below CHIP the amber Pack carries the
  * stale signal (§4) and the chip is dropped, so a trailing chip can never push the row (a GROW child
  * can't shrink below min-content) past the canvas and shove the right panel off-screen. */
 #define STRIP_SINGLE_MIN_W 440.0F
@@ -768,7 +769,7 @@ static void compute_panel_widths(float logical_w) {
      * so at 16:9 sizes the strip forced the middle row wider than the window -> right panel off-screen). */
     const float min_canvas = S(MIN_CANVAS_W);
     const float min_panel = S(MIN_PANEL_W);
-    const float overhead = S(20.0F) + (S(8.0F) * 2.0F); /* root L/R padding + two inter-column gaps */
+    const float overhead = S(8.0F) + (S(4.0F) * 2.0F); /* root L/R padding + two inter-column gaps (mirrors the root/middle-row declaration) */
     const float base_sum = base_l + base_r;
     const float avail = logical_w - min_canvas - overhead;
     if (avail < base_sum && base_sum > 1.0F) {
@@ -2867,9 +2868,9 @@ static void declare_canvas_preview(nt_ui_context_t *ctx) {
     }
 
     CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)},
-                     .padding = {Su(10), Su(10), Su(10), Su(10)},
+                     .padding = {Su(6), Su(6), Su(6), Su(6)},
                      .layoutDirection = CLAY_TOP_TO_BOTTOM,
-                     .childGap = Su(8),
+                     .childGap = Su(6),
                      .childAlignment = {CLAY_ALIGN_X_CENTER, CLAY_ALIGN_Y_CENTER}},
           .backgroundColor = C_CANVAS,
           .cornerRadius = CLAY_CORNER_RADIUS(S(8)),
@@ -2978,9 +2979,9 @@ static void declare_canvas(nt_ui_context_t *ctx) {
     }
 
     CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)},
-                     .padding = {Su(10), Su(10), Su(10), Su(10)},
+                     .padding = {Su(6), Su(6), Su(6), Su(6)},
                      .layoutDirection = CLAY_TOP_TO_BOTTOM,
-                     .childGap = Su(8),
+                     .childGap = Su(6),
                      .childAlignment = {CLAY_ALIGN_X_CENTER, CLAY_ALIGN_Y_CENTER}},
           .backgroundColor = C_CANVAS,
           .cornerRadius = CLAY_CORNER_RADIUS(S(8)),
@@ -5295,18 +5296,20 @@ static void frame(void) {
         nt_ui_begin(s_ctx, scale.logical_w, scale.logical_h, g_nt_app.dt, &g_nt_input.pointers[0], 1);
         nt_ui_set_viewport(s_ctx, nt_ui_viewport_from_scale(&scale));
 
+        /* Dense chrome (owner 2026-07-11): thin outer margin + thin inter-panel gaps — the panels,
+         * canvas and lists get the space. compute_panel_widths' overhead term mirrors these values. */
         CLAY({.id = CLAY_ID("root"),
               .layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)},
-                         .padding = {Su(10), Su(10), Su(10), Su(10)},
+                         .padding = {Su(4), Su(4), Su(4), Su(4)},
                          .layoutDirection = CLAY_TOP_TO_BOTTOM,
-                         .childGap = Su(8),
+                         .childGap = Su(4),
                          .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_TOP}},
               .backgroundColor = C_BG}) {
             declare_menubar(s_ctx);
             /* Below this the columns can't lay out without collapsing a clip/input box to 0 (empty-scissor
              * assert); skip the whole middle row rather than declare a degenerate subtree. */
             const bool have_room = scale.logical_w >= S(280.0F) && scale.logical_h >= S(200.0F);
-            CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = Su(8), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_TOP}}}) {
+            CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = Su(4), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_TOP}}}) {
                 if (have_room) {
                     declare_left_panel(s_ctx);
                     declare_canvas(s_ctx);
