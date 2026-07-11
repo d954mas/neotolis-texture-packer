@@ -94,7 +94,6 @@ static inline uint16_t Su(float px) { return (uint16_t)((px * g_ui_scale) + 0.5F
 
 #define BASE_MENUBAR_H 32.0F
 #define BASE_TOOLBAR_H 48.0F
-#define BASE_STATUSBAR_H 34.0F
 #define BASE_LEFT_PANEL_W 300.0F
 #define BASE_RIGHT_PANEL_W 300.0F /* settings panel (regions F/G), fixed width, own scroll */
 #define BASE_ROW_H 27.0F
@@ -110,11 +109,15 @@ static inline uint16_t Su(float px) { return (uint16_t)((px * g_ui_scale) + 0.5F
  * old 545. Ladder (§4): >= LABELS Pack/Export show text; >= CHIP the stale chip shows too; below
  * SINGLE the strip falls to the overflow-safe two-row compact (icon-only).
  * CHIP must clear the FULL labeled+chip strip min-content (measured ~649 design px, max across
- * scales 1.0/1.5/2.0) PLUS the canvas card's L/R padding (S(12) since the dense-chrome pass; the
- * 680 stop was derived against the older S(20) padding and is kept -- strictly conservative, the
- * chip just drops a few px earlier than the true fit limit). Below CHIP the amber Pack carries the
- * stale signal (§4) and the chip is dropped, so a trailing chip can never push the row (a GROW child
- * can't shrink below min-content) past the canvas and shove the right panel off-screen. */
+ * scales 1.0/1.5/2.0) PLUS the canvas card's L/R padding (S(12) = Su(6) each side; unchanged by the
+ * docked pass 2 -- only the root outer padding/inter-panel gaps shrank, which is the compute_panel_widths
+ * OVERHEAD term, not this card padding). True fit limit ~661; the 680 stop stays >= that (strictly
+ * conservative -- the chip just drops a few px earlier). Pass 2 note: dropping the root overhead from
+ * S(16) to S(4) widened s_canvas_w by ~12px, so the chip appears at slightly narrower windows -- but the
+ * drop-vs-show classification is unchanged (selftest phases 6/8 still assert chip DROPPED at 1920x1080@1.5,
+ * SHOWN at 2000x1080@1.5). Below CHIP the amber Pack carries the stale signal (§4) and the chip is
+ * dropped, so a trailing chip can never push the row (a GROW child can't shrink below min-content) past
+ * the canvas and shove the right panel off-screen. */
 #define STRIP_SINGLE_MIN_W 440.0F
 #define STRIP_LABELS_MIN_W 560.0F
 #define STRIP_CHIP_MIN_W 680.0F
@@ -335,6 +338,7 @@ static bool s_font_bound;
 typedef enum { STATUS_INFO, STATUS_SUCCESS, STATUS_WARNING, STATUS_ERROR } status_sev_t;
 static char s_status[256];
 static status_sev_t s_status_sev = STATUS_INFO;
+static bool s_status_dismissed; /* the floating message pill was clicked away; cleared by the next set_status* */
 static char s_exe_dir[1024];
 // #endregion
 
@@ -345,7 +349,7 @@ static uint32_t s_id_rename;      /* the single inline rename input (one edit ac
 static uint32_t s_id_right_panel; /* settings-panel container (bbox: press-outside blurs focused inputs) */
 static uint32_t s_id_left_panel;  /* left panel container (bbox: overflow regression check) */
 static uint32_t s_id_strip;       /* canvas action strip (bbox: the overflow-prone middle-row term) */
-static uint32_t s_id_statusbar;   /* status bar (bbox: overflow regression check) */
+static uint32_t s_id_status_pill;  /* floating message pill over the canvas (replaces the status bar row) */
 static uint32_t s_id_right_content; /* right-panel scroll content (bbox: detect rows wider than the panel) */
 static uint32_t s_id_export_modal; /* the Export dialog */
 static bool s_ids_ready;
@@ -522,10 +526,12 @@ static int s_row_tip_count;
 
 static void set_status(const char *msg) {
     s_status_sev = STATUS_INFO;
+    s_status_dismissed = false; /* a new message re-shows the pill (replaces any prior one) */
     (void)snprintf(s_status, sizeof s_status, "%s", msg);
 }
 static void set_status_ex(status_sev_t sev, const char *msg) {
     s_status_sev = sev;
+    s_status_dismissed = false;
     (void)snprintf(s_status, sizeof s_status, "%s", msg);
 }
 static void set_statusf(const char *fmt, ...) GUI_PRINTF(1, 2);
@@ -535,6 +541,7 @@ static void set_statusf(const char *fmt, ...) {
     (void)vsnprintf(s_status, sizeof s_status, fmt, ap);
     va_end(ap);
     s_status_sev = STATUS_INFO;
+    s_status_dismissed = false;
 }
 static void set_statusf_ex(status_sev_t sev, const char *fmt, ...) GUI_PRINTF(2, 3);
 static void set_statusf_ex(status_sev_t sev, const char *fmt, ...) {
@@ -543,6 +550,7 @@ static void set_statusf_ex(status_sev_t sev, const char *fmt, ...) {
     (void)vsnprintf(s_status, sizeof s_status, fmt, ap);
     va_end(ap);
     s_status_sev = sev;
+    s_status_dismissed = false;
 }
 
 static void normalize_slashes(char *s) {
@@ -796,7 +804,7 @@ static void compute_panel_widths(float logical_w) {
      * so at 16:9 sizes the strip forced the middle row wider than the window -> right panel off-screen). */
     const float min_canvas = S(MIN_CANVAS_W);
     const float min_panel = S(MIN_PANEL_W);
-    const float overhead = S(8.0F) + (S(4.0F) * 2.0F); /* root L/R padding + two inter-column gaps (mirrors the root/middle-row declaration) */
+    const float overhead = S(2.0F) * 2.0F; /* root L/R padding is 0 + two inter-column gaps of Su(2) (mirrors the root/middle-row declaration) */
     const float base_sum = base_l + base_r;
     const float avail = logical_w - min_canvas - overhead;
     if (avail < base_sum && base_sum > 1.0F) {
@@ -1400,7 +1408,7 @@ static void do_refresh(void) {
 static void do_pack_blocking(void) {
     tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
     if (!a || a->source_count == 0) {
-        set_status_ex(STATUS_WARNING, "No sources to pack -- add files or a folder first.");
+        set_status_ex(STATUS_WARNING, "No sources to pack -- add a smart folder or files first.");
         return;
     }
     char err[256] = {0};
@@ -1427,7 +1435,7 @@ static void do_pack_blocking(void) {
 static void do_pack(void) {
     tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
     if (!a || a->source_count == 0) {
-        set_status_ex(STATUS_WARNING, "No sources to pack -- add files or a folder first.");
+        set_status_ex(STATUS_WARNING, "No sources to pack -- add a smart folder or files first.");
         return;
     }
     if (gui_pack_async_busy()) {
@@ -1750,9 +1758,11 @@ static void build_rows(tp_project *proj, tp_project_atlas *a) {
             (void)snprintf(r->label, sizeof r->label, "\xE2\x9A\xA0 %s", path_last(sp)); /* U+26A0 warning */
             (void)snprintf(r->abs, sizeof r->abs, "%s", abs);
         } else if (is_dir) {
-            (void)snprintf(r->label, sizeof r->label, "%s/", path_last(sp));
-            r->abs[0] = '\0';
             const gui_scan_result *sc = gui_scan_get(abs);
+            /* Smart-folder row: name + a child-count suffix (TexturePacker convention -- "animals/ · 60")
+             * so the count of packed assets is visible at a glance without expanding. */
+            (void)snprintf(r->label, sizeof r->label, "%s/  \xC2\xB7  %d", path_last(sp), sc->count);
+            r->abs[0] = '\0';
             for (int ci = 0; ci < sc->count && s_row_count < MAX_ROWS; ci++) {
                 sprite_row *cr = &s_rows[s_row_count++];
                 memset(cr, 0, sizeof *cr);
@@ -1826,7 +1836,7 @@ static void ensure_ids(void) {
     s_id_right_panel = nt_ui_id("ntpacker/right_panel");
     s_id_left_panel = nt_ui_id("ntpacker/left_panel");
     s_id_strip = nt_ui_id("ntpacker/canvas_strip");
-    s_id_statusbar = nt_ui_id("ntpacker/statusbar");
+    s_id_status_pill = nt_ui_id("ntpacker/status_pill");
     s_id_right_content = nt_ui_id("ntpacker/right_content");
     s_id_export_modal = nt_ui_id("ntpacker/export_modal");
     s_id_mb_file = nt_ui_id("ntpacker/mb_file");
@@ -2270,8 +2280,7 @@ static void declare_menubar(nt_ui_context_t *ctx) {
                      .padding = {Su(4), Su(8), 0, 0},
                      .childGap = Su(2),
                      .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}},
-          .backgroundColor = C_STATUS,
-          .cornerRadius = CLAY_CORNER_RADIUS(S(6))}) {
+          .backgroundColor = C_STATUS}) { /* docked: flush to the top edge, no rounded corners */
         menubar_entry(ctx, s_id_mb_file, "File", &s_file_state);
         menubar_entry(ctx, s_id_mb_edit, "Edit", &s_edit_state);
         menubar_entry(ctx, s_id_mb_view, "View", &s_view_state);
@@ -2456,16 +2465,24 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
     CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(28))}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
         section_rule_label(ctx, "SPRITES");
         CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}}) {}
-        if (ui_icon_btn(ctx, nt_ui_id("ntpacker/add_files"), &s_ic_file_plus, 16.0F, "Files", &g_btn_ghost, true, 0.0F, 24.0F, &g_caption)) {
+        /* Smart folder is the primary input (ux.md principle 3: folders, not files); it keeps its label so
+         * the live-linked behaviour is explicit (owner 2026-07-11). Per-file adds are "the exception", so the
+         * Files button is icon-only (tooltip in declare_tooltips) -- this also keeps the header on one line at
+         * the owner's 450px panel where two labelled buttons overran and wrapped "Smart folder". */
+        if (ui_icon_btn(ctx, nt_ui_id("ntpacker/add_files"), &s_ic_file_plus, 16.0F, NULL, &g_btn_ghost, true, 0.0F, 24.0F, &g_caption)) {
             s_pending_add_files = true;
         }
-        if (ui_icon_btn(ctx, nt_ui_id("ntpacker/add_folder"), &s_ic_folder_plus, 16.0F, "Folder", &g_btn_ghost, true, 0.0F, 24.0F, &g_caption)) {
+        /* Drop the label to icon-only on a heavily-clamped panel (narrow window / high DPI) so it never
+         * wraps or bleeds; the tooltip carries the meaning either way (mouse-complete). >= 240 design px keeps
+         * the label at the owner's 1920/1366 @1.5 (450px panels) and every unclamped base-300 panel. */
+        const char *folder_lbl = (s_left_panel_w >= S(240.0F)) ? "Smart folder" : NULL;
+        if (ui_icon_btn(ctx, nt_ui_id("ntpacker/add_folder"), &s_ic_folder_plus, 16.0F, folder_lbl, &g_btn_ghost, true, 0.0F, 24.0F, &g_caption)) {
             s_pending_add_folder = true;
         }
     }
 
     if (s_row_count == 0) {
-        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "No sources. Use + Files / + Folder.", &g_caption);
+        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "No sources. Add a smart folder or files.", &g_caption);
         CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}}) {}
         return;
     }
@@ -2526,10 +2543,12 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
             const Clay_Color bg = selected ? C_SEL : (ev.hovered ? C_HOVER : C_TRANSPARENT);
             const uint16_t indent = Su(8.0F + ((float)row->indent * 16.0F));
             /* Leading type icon: folder for a directory source, image for a sprite leaf (folder child or
-             * file source); missing files reuse the image mask tinted warn. Label brightens on selection. */
+             * file source); missing files reuse the image mask tinted warn. Label brightens on selection.
+             * Smart-folder distinction (TexturePacker convention): the folder icon is AMBER (warn) vs the
+             * neutral file icons, so a live-linked folder reads as a special input at a glance. */
             const nt_ui_label_style_t *lbl = row->missing ? &g_warn : (selected ? &g_row_strong : &g_row);
             nt_atlas_region_ref_t *ic = row->is_folder ? &s_ic_folder : &s_ic_image;
-            const nt_ui_label_style_t *ic_tint = row->missing ? &g_warn : (selected ? &g_row_strong : &g_caption);
+            const nt_ui_label_style_t *ic_tint = (row->missing || row->is_folder) ? &g_warn : (selected ? &g_row_strong : &g_caption);
             CLAY({.id = {.id = row_id},
                   .layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H))},
                              .padding = {indent, Su(4), 0, 0},
@@ -2545,12 +2564,19 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
                             commit_sprite_rename();
                         }
                     } else {
+                        /* Folder rows carry a fixed smart-folder tooltip on the whole row (below), so skip the
+                         * truncation tip here (one tip per id); leaf/file rows keep the full-text truncation tip. */
                         ui_label_fit(ctx, row->label, lbl,
-                                     fmaxf(left_row_text_w(S(8.0F + (float)row->indent * 16.0F), row->is_source) - S(ROW_ICON_RESERVE), S(16.0F)), hit_id);
+                                     fmaxf(left_row_text_w(S(8.0F + (float)row->indent * 16.0F), row->is_source) - S(ROW_ICON_RESERVE), S(16.0F)),
+                                     row->is_folder ? 0U : hit_id);
+                    }
+                    if (row->is_folder) {
+                        record_row_tip(hit_id, "Smart folder: every image inside is packed automatically, "
+                                               "including files added later. Press F5 to rescan.");
                     }
                 }
                 if (row->is_source) {
-                    record_row_tip(x_id, "Remove source");
+                    record_row_tip(x_id, row->is_folder ? "Remove this smart folder and all its sprites" : "Remove source");
                     (void)ui_icon_btn(ctx, x_id, &s_ic_x, 12.0F, NULL, &g_btn_ghost, true, 24.0F, 22.0F,
                                       xev.hovered ? &g_danger : &g_caption);
                 }
@@ -2637,17 +2663,16 @@ static void declare_left_panel(nt_ui_context_t *ctx) {
     s_row_tip_count = 0; /* per-frame; filled by ui_label_fit when a row truncates */
     CLAY({.id = {.id = s_id_left_panel},
           .layout = {.sizing = {CLAY_SIZING_FIXED(s_left_panel_w), CLAY_SIZING_GROW(0)},
-                     .padding = {Su(12), Su(12), Su(12), Su(12)},
+                     .padding = {Su(8), Su(8), Su(8), Su(8)},
                      .layoutDirection = CLAY_TOP_TO_BOTTOM,
                      .childGap = Su(6),
                      .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_TOP}},
           .backgroundColor = C_PANEL,
-          .cornerRadius = CLAY_CORNER_RADIUS(S(8)),
-          /* Vertical clip only (X-clip is forbidden -- it makes children X-scrollable/unbounded): at short
-           * window heights the animations hint wraps tall and would otherwise draw past the panel bottom
-           * over the status bar. The sprite vlist keeps its own inner scroll. */
-          .clip = {.vertical = true},
-          .border = {.color = C_BORDER, .width = {Su(1), Su(1), Su(1), Su(1), 0}}}) {
+          /* Docked region (pass 2): no card corner/border -- the 2px C_BG seam to the canvas is the divider.
+           * Vertical clip only (X-clip is forbidden -- it makes children X-scrollable/unbounded): at short
+           * window heights the animations hint wraps tall and would otherwise draw past the panel bottom.
+           * The sprite vlist keeps its own inner scroll. */
+          .clip = {.vertical = true}}) {
         declare_atlas_list(ctx, proj);
         CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(1))}}, .backgroundColor = C_BORDER}) {}
         declare_sprite_list(ctx);
@@ -2707,7 +2732,16 @@ static void handle_canvas_input(void) {
         return;
     }
     const nt_pointer_t *p = &g_nt_input.pointers[0];
-    const bool inside = p->x >= box[0] && p->x < (box[0] + box[2]) && p->y >= box[1] && p->y < (box[1] + box[3]);
+    /* The floating message pill sits INSIDE the canvas box; a click on it (its × dismiss especially) must
+     * not also click-select/pan the atlas. Exclude last frame's pill bbox from the canvas hit region. */
+    bool over_pill = false;
+    if (s_status[0] != '\0' && !s_status_dismissed) {
+        const nt_ui_bbox_t pb = nt_ui_get_bbox(s_ctx, s_id_status_pill);
+        over_pill = pb.found && pb.width > 0.0F && p->x >= pb.x && p->x < (pb.x + pb.width) &&
+                    p->y >= pb.y && p->y < (pb.y + pb.height);
+    }
+    const bool inside = !over_pill && p->x >= box[0] && p->x < (box[0] + box[2]) && p->y >= box[1] &&
+                        p->y < (box[1] + box[3]);
 
     /* wheel: always zoom around the cursor, regardless of selection/hover/what was clicked */
     if (inside && p->wheel_dy != 0.0F) {
@@ -2886,6 +2920,8 @@ static void strip_group_zoom(nt_ui_context_t *ctx, float h, bool scan) {
  * never push the row past the canvas. When even the icon-only single row can't fit (s_canvas_w < SINGLE)
  * it falls to the overflow-safe two-row compact rather than wrapping a control. Every control is also in
  * the menus (§3.3e); every icon-only button has a tooltip. */
+static void declare_status_pill(nt_ui_context_t *ctx); /* floating message pill, defined below (canvas child) */
+
 static void declare_canvas_strip(nt_ui_context_t *ctx, bool atlas) {
     tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
     s_pack_has_sources = a && a->source_count > 0;
@@ -2975,7 +3011,7 @@ static void declare_canvas_preview(nt_ui_context_t *ctx) {
                      .childGap = Su(6),
                      .childAlignment = {CLAY_ALIGN_X_CENTER, CLAY_ALIGN_Y_CENTER}},
           .backgroundColor = C_CANVAS,
-          .cornerRadius = CLAY_CORNER_RADIUS(S(8)),
+          /* Docked (pass 2): square corners; keep the 1px border for canvas-vs-panel contrast. */
           .border = {.color = C_BORDER, .width = {Su(1), Su(1), Su(1), Su(1), 0}}}) {
         const Clay_Color strip_bg = {30.0F, 34.0F, 42.0F, 205.0F};
         CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(34))},
@@ -3017,6 +3053,7 @@ static void declare_canvas_preview(nt_ui_context_t *ctx) {
             } else {
                 nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "No frames resolve to packed regions \xE2\x80\x94 repack (Ctrl+P).", &g_canvas_hint);
             }
+            declare_status_pill(ctx); /* floating message pill (bottom-left of the canvas) */
         }
         CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(22))}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
             ui_label_fit(ctx, caption, &g_caption, cap_w, 0U);
@@ -3086,7 +3123,8 @@ static void declare_canvas(nt_ui_context_t *ctx) {
                      .childGap = Su(6),
                      .childAlignment = {CLAY_ALIGN_X_CENTER, CLAY_ALIGN_Y_CENTER}},
           .backgroundColor = C_CANVAS,
-          .cornerRadius = CLAY_CORNER_RADIUS(S(8)),
+          /* Docked (pass 2): square corners like the panels; keep the 1px border -- it is the one place a
+           * border earns its keep (the dark canvas well vs the mid panels). */
           .border = {.color = C_BORDER, .width = {Su(1), Su(1), Su(1), Su(1), 0}}}) {
         declare_canvas_strip(ctx, atlas); /* action strip at the top of the canvas */
         CLAY({.id = {.id = s_id_canvas},
@@ -3118,9 +3156,9 @@ static void declare_canvas(nt_ui_context_t *ctx) {
                         CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(S(48.0F)), CLAY_SIZING_FIXED(S(48.0F))}}}) {
                             nt_ui_image(ctx, NT_UI_DATA_LAYER(LAYER_IMG), &s_ic_folder_plus_hero, &hero, NULL);
                         }
-                        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Add a folder to start", &g_canvas_hint);
+                        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Add a smart folder to start", &g_canvas_hint);
                         if (ui_icon_btn(ctx, nt_ui_id("ntpacker/empty_add_folder"), &s_ic_folder_plus, 16.0F,
-                                        "Add folder", &g_btn_primary, true, 0.0F, 28.0F, &g_onaccent)) {
+                                        "Add smart folder", &g_btn_primary, true, 0.0F, 28.0F, &g_onaccent)) {
                             s_pending_add_folder = true;
                         }
                     }
@@ -3167,6 +3205,7 @@ static void declare_canvas(nt_ui_context_t *ctx) {
                     }
                 }
             }
+            declare_status_pill(ctx); /* floating message pill (bottom-left of the canvas) */
         }
         /* stats/readout line; dimmed when stale (it describes the LAST pack, not current settings) */
         CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(22))}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
@@ -3212,22 +3251,45 @@ static nt_atlas_region_ref_t *status_sev_icon(status_sev_t sev) {
         return &s_ic_info;
     }
 }
-static void declare_statusbar(nt_ui_context_t *ctx) {
+/* The single-message feedback surface (owner 2026-07-11 pass 2): a compact pill FLOATING over the
+ * bottom-left of the canvas, replacing the permanent status-bar row. A new message replaces the old
+ * (set_status* clears the dismiss bit); the pill exists only while there is a message and it has not been
+ * clicked away. No timers -- errors/warnings and success/info alike persist until replaced or dismissed
+ * (render-pure; immediate mode). Keeps declare_statusbar's severity language (icon + text tint). ux.md
+ * region H (the future notices PANEL) is not built here -- this is the interim single-message surface.
+ * Declared as a child of the canvas clip box (s_id_canvas); floating -> escapes the clip and does not
+ * disturb sibling layout. */
+static void declare_status_pill(nt_ui_context_t *ctx) {
+    if (s_status[0] == '\0' || s_status_dismissed) {
+        return;
+    }
     nt_ui_label_style_t st = g_caption; /* caption size; recolor per severity (already scaled this frame) */
     st.color = status_sev_color(s_status_sev);
     nt_ui_image_style_t sicon = nt_ui_image_style_defaults();
     sicon.color_packed = label_tint(&st);
-    CLAY({.id = {.id = s_id_statusbar},
-          .layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_STATUSBAR_H))},
-                     .padding = {Su(12), Su(12), Su(4), Su(4)},
+    const uint32_t x_id = nt_ui_child_id(s_id_status_pill, "x");
+    /* Cap the text so a long message can never grow the pill past the canvas right edge. */
+    const float max_txt = fmaxf(s_canvas_w - S(96.0F), S(80.0F));
+    CLAY({.id = {.id = s_id_status_pill},
+          .layout = {.sizing = {CLAY_SIZING_FIT(0), CLAY_SIZING_FIT(0)},
+                     .padding = {Su(10), Su(4), Su(5), Su(5)},
                      .childGap = Su(6),
                      .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}},
           .backgroundColor = C_STATUS,
-          .cornerRadius = CLAY_CORNER_RADIUS(S(6))}) {
+          .cornerRadius = CLAY_CORNER_RADIUS(S(6)),
+          .border = {.color = C_BORDER, .width = {Su(1), Su(1), Su(1), Su(1), 0}},
+          .floating = {.attachTo = CLAY_ATTACH_TO_PARENT,
+                       .attachPoints = {.element = CLAY_ATTACH_POINT_LEFT_BOTTOM, .parent = CLAY_ATTACH_POINT_LEFT_BOTTOM},
+                       .offset = {S(8.0F), -S(8.0F)},
+                       .zIndex = 12}}) {
         CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(S(14.0F)), CLAY_SIZING_FIXED(S(14.0F))}}}) {
             nt_ui_image(ctx, NT_UI_DATA_LAYER(LAYER_IMG), status_sev_icon(s_status_sev), &sicon, NULL);
         }
-        ui_label_fit(ctx, s_status, &st, s_content_w - S(60.0F), 0U); /* clip, never wrap/overflow */
+        ui_label_fit(ctx, s_status, &st, max_txt, 0U); /* clip, never wrap/overflow */
+        record_row_tip(x_id, "Dismiss");
+        if (ui_icon_btn(ctx, x_id, &s_ic_x, 12.0F, NULL, &g_btn_ghost, true, 22.0F, 20.0F, &g_caption)) {
+            s_status_dismissed = true;
+        }
     }
 }
 
@@ -3325,6 +3387,13 @@ static void declare_tooltips(nt_ui_context_t *ctx) {
                         &s_tip_style);
     (void)nt_ui_tooltip(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, s_id_btn_refresh,
                         "Refresh (F5): rescan all source folders/files from disk; updates the sprite list and marks the preview stale.",
+                        &s_tip_style);
+    /* Smart-folder + Files add buttons (make the live-linked-folder behaviour explicit -- owner 2026-07-11). */
+    (void)nt_ui_tooltip(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, nt_ui_id("ntpacker/add_folder"),
+                        "Add a smart folder: every image inside it is packed -- including files added later. Press F5 to rescan.",
+                        &s_tip_style);
+    (void)nt_ui_tooltip(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, nt_ui_id("ntpacker/add_files"),
+                        "Add individual image files (the exception -- prefer a smart folder so new art is picked up automatically).",
                         &s_tip_style);
     /* Icon-only strip ghosts (mouse-complete). A tooltip for a control not laid out this frame (single
      * page, non-atlas mode) is a safe no-op -- it only opens on hover of an existing target. */
@@ -3931,6 +4000,13 @@ static void declare_region_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
         ui_label_fit(ctx, src, &g_caption, right_panel_text_w(s_panel_label_w + S(14.0F)), 0U);
     }
     PANEL_ROW_END;
+    /* Smart-folder provenance (owner 2026-07-11): a folder child (!is_source) came in via its parent
+     * smart folder -- name it. The row model already carries src (index into a->sources), so this is free. */
+    if (!row->is_source && row->src >= 0 && row->src < a->source_count) {
+        char via[224];
+        (void)snprintf(via, sizeof via, "via smart folder %s/", path_last(a->sources[row->src]));
+        panel_note(ctx, via);
+    }
 
     const float ox = ov ? ov->origin_x : TP_PROJECT_ORIGIN_DEFAULT;
     const float oy = ov ? ov->origin_y : TP_PROJECT_ORIGIN_DEFAULT;
@@ -4301,14 +4377,12 @@ static void declare_right_panel(nt_ui_context_t *ctx) {
     CLAY({.id = {.id = s_id_right_panel},
           .layout = {.sizing = {CLAY_SIZING_FIXED(s_right_panel_w), CLAY_SIZING_GROW(0)},
                      .layoutDirection = CLAY_TOP_TO_BOTTOM},
-          .backgroundColor = C_PANEL,
-          .cornerRadius = CLAY_CORNER_RADIUS(S(8)),
-          .border = {.color = C_BORDER, .width = {Su(1), Su(1), Su(1), Su(1), 0}}}) {
+          .backgroundColor = C_PANEL}) { /* docked region (pass 2): no card corner/border; 2px C_BG seam divides */
         nt_ui_scroll_begin(ctx, NULL, nt_ui_id("panel/scroll"), &s_panel_scroll,
                            &(Clay_ElementDeclaration){.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}});
         CLAY({.id = {.id = s_id_right_content},
               .layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)},
-                         .padding = {Su(10), Su(10), Su(10), Su(12)},
+                         .padding = {Su(8), Su(8), Su(8), Su(10)},
                          .layoutDirection = CLAY_TOP_TO_BOTTOM,
                          .childGap = Su(4)}}) {
             if (!a) {
@@ -4919,9 +4993,9 @@ static void selftest_assert_no_overflow(float win_w, float win_h) {
     const struct {
         const char *name;
         uint32_t id;
-    } items[5] = {{"left", s_id_left_panel}, {"strip", s_id_strip}, {"canvas", s_id_canvas},
-                  {"right", s_id_right_panel}, {"status", s_id_statusbar}};
-    for (int i = 0; i < 5; i++) {
+    } items[4] = {{"left", s_id_left_panel}, {"strip", s_id_strip}, {"canvas", s_id_canvas},
+                  {"right", s_id_right_panel}}; /* status bar removed (pass 2): messages float as a pill */
+    for (int i = 0; i < 4; i++) {
         const nt_ui_bbox_t b = nt_ui_get_bbox(s_ctx, items[i].id);
         nt_log_info("SELFTEST-BOUNDS %-6s found=%d x=%.1f y=%.1f w=%.1f h=%.1f right=%.1f/%.0f bottom=%.1f/%.0f",
                     items[i].name, (int)b.found, (double)b.x, (double)b.y, (double)b.width, (double)b.height,
@@ -5268,7 +5342,7 @@ static void shot_tick(void) {
 static void shot_log_bounds(float win_w, float win_h) {
     const struct { const char *name; uint32_t id; } items[] = {
         {"left", s_id_left_panel}, {"strip", s_id_strip}, {"canvas", s_id_canvas},
-        {"right", s_id_right_panel}, {"rcontent", s_id_right_content}, {"status", s_id_statusbar}};
+        {"right", s_id_right_panel}, {"rcontent", s_id_right_content}, {"pill", s_id_status_pill}};
     for (size_t i = 0; i < sizeof items / sizeof items[0]; i++) {
         const nt_ui_bbox_t b = nt_ui_get_bbox(s_ctx, items[i].id);
         const float over_r = (b.x + b.width) - win_w;
@@ -5586,20 +5660,23 @@ static void frame(void) {
         nt_ui_begin(s_ctx, scale.logical_w, scale.logical_h, g_nt_app.dt, &g_nt_input.pointers[0], 1);
         nt_ui_set_viewport(s_ctx, nt_ui_viewport_from_scale(&scale));
 
-        /* Dense chrome (owner 2026-07-11): thin outer margin + thin inter-panel gaps — the panels,
-         * canvas and lists get the space. compute_panel_widths' overhead term mirrors these values. */
+        /* Docked chrome (owner 2026-07-11 pass 2): NO outer margin (root padding 0 -> the menubar fuses
+         * flush to the top edge and the middle row fills to the window edges) + a thin 2px C_BG seam between
+         * regions so panels read as docked, not floating cards. compute_panel_widths' overhead term mirrors
+         * these values (root L/R padding 0 + two inter-column gaps of Su(2)). The permanent status bar row is
+         * gone (owner: "странная панель"); messages now float as a pill over the canvas (declare_status_pill). */
         CLAY({.id = CLAY_ID("root"),
               .layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)},
-                         .padding = {Su(4), Su(4), Su(4), Su(4)},
+                         .padding = {0, 0, 0, 0},
                          .layoutDirection = CLAY_TOP_TO_BOTTOM,
-                         .childGap = Su(4),
+                         .childGap = Su(2),
                          .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_TOP}},
               .backgroundColor = C_BG}) {
             declare_menubar(s_ctx);
             /* Below this the columns can't lay out without collapsing a clip/input box to 0 (empty-scissor
              * assert); skip the whole middle row rather than declare a degenerate subtree. */
             const bool have_room = scale.logical_w >= S(280.0F) && scale.logical_h >= S(200.0F);
-            CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = Su(4), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_TOP}}}) {
+            CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = Su(2), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_TOP}}}) {
                 if (have_room) {
                     declare_left_panel(s_ctx);
                     declare_canvas(s_ctx);
@@ -5608,7 +5685,6 @@ static void frame(void) {
                     nt_ui_label(s_ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Window too small.", &g_caption);
                 }
             }
-            declare_statusbar(s_ctx);
         }
 
         declare_row_tooltips(s_ctx);
