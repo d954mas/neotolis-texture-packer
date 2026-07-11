@@ -1,0 +1,71 @@
+#ifndef NTPACKER_GUI_ROWS_H
+#define NTPACKER_GUI_ROWS_H
+
+/* Row model + selection-set helpers for the ntpacker GUI: the flattened per-atlas sprite rows
+ * (rebuilt each frame), the multi-select set over leaf sprite NAMES, natural-order sorting +
+ * the sort scratch, the common-name-prefix helper, the canvas region -> row selection sync, and
+ * the shared path/name string helpers. Split out of main.c (GUI decomposition step 2) as a pure
+ * move -- no behavior change. Include discipline: rows -> gui_state + model headers only; it must
+ * never include a sibling view/actions/widgets header. */
+
+#include <stdbool.h>
+#include <stddef.h>
+
+#include "tp_core/tp_project.h" /* tp_project / tp_project_atlas (build_rows signature) */
+
+#include "gui_state.h" /* MAX_MULTI_SEL (sort scratch dimensions) */
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* --- shared path/name string helpers --- */
+/* Rewrites backslashes to forward slashes in place (path normalization). */
+void normalize_slashes(char *s);
+/* Returns the basename (past the last / or \) of `p`. */
+const char *path_last(const char *p);
+/* Strip only a trailing extension on the basename, keeping any folder prefix. */
+void strip_ext(const char *in, char *out, size_t cap);
+
+/* --- multi-select set over leaf sprite NAMES (ux.md §3.7b selection gesture) --- */
+bool multi_sel_contains(const char *name);
+void multi_sel_clear(void);
+void multi_sel_add(const char *name);
+void multi_sel_remove(const char *name);
+void multi_sel_set_single(const char *name);
+
+/* qsort adapter for natural order (digit runs compare numerically). */
+int nat_cmp_qsort(const void *a, const void *b);
+/* Longest common prefix of `names`, trimmed of trailing digits/separators (walk_01/walk_02 -> "walk"). */
+void names_common_prefix(char names[][192], int count, char *out, size_t cap);
+/* Shared scratch for the selection-gesture sort (filled by the animation ops in gui_actions). */
+extern char s_sel_sort_buf[MAX_MULTI_SEL][192];
+extern const char *s_sel_sort_ptr[MAX_MULTI_SEL];
+
+/* --- flattened sprite rows for the current atlas, rebuilt each frame --- */
+#define MAX_ROWS 4096
+typedef struct sprite_row {
+    int src;
+    int child;
+    int indent;
+    bool is_source;
+    bool is_folder;
+    bool missing;             /* source path gone from disk (§3.7) */
+    char label[224];          /* display label (rename-aware: "final (file.png)") */
+    char sprite_name[192];    /* atlas-relative override key ("" for folders / missing) */
+    char abs[512];
+} sprite_row;
+extern sprite_row s_rows[MAX_ROWS];
+extern int s_row_count;
+
+/* Rebuilds s_rows/s_row_count for atlas `a` of project `proj` (folders expand to their children). */
+void build_rows(tp_project *proj, tp_project_atlas *a);
+
+/* Selects the sprite-tree row matching a packed-atlas region (region -> row selection sync). */
+void select_row_for_region(int region_idx);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* NTPACKER_GUI_ROWS_H */

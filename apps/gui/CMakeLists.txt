@@ -24,7 +24,7 @@ if(WIN32)
     target_link_libraries(tinyfiledialogs PUBLIC comdlg32 ole32 shell32 user32)
 endif()
 
-add_executable(ntpacker-gui main.c gui_state.c gui_widgets.c gui_project.c gui_scan.c gui_canvas.c gui_pack.c gui_history.c)
+add_executable(ntpacker-gui main.c gui_state.c gui_widgets.c gui_actions.c gui_rows.c gui_project.c gui_scan.c gui_canvas.c gui_pack.c gui_history.c)
 # Link set derived from examples/ui_showcase; nt_shape_renderer is re-added for the atlas-page
 # canvas overlays (region outlines / hull polygons / pivot markers). Kept the concrete impls the
 # engine's *_interface deps require at final link: nt_gfx (font/ui), nt_fs + nt_http_stub

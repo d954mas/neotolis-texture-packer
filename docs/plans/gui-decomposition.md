@@ -53,12 +53,16 @@ New files:
 - `gui_actions.h/.c` — `apply_pending`, `do_*` (pack/pack_blocking/export/undo/redo/
   refresh), file dialogs + add files/folder, new/open/save/exit confirm flow,
   `commit_active_edit`/renames, animation ops, `reset_selection`/`clamp_selection`/
-  `cancel_edit`/`preview_stop`/`atlas_name_valid`, `handle_canvas_input` + the
-  canvas-mouse statics (`s_lmb_*`, `s_mmb_panning`, `s_press_*`, `s_pan_last_*`) —
-  it is Clay-free (reads `g_nt_input` + `gui_canvas_*`) and is an input CONTROLLER,
-  not a declare. **Carve-out (stays in shell):** the click-outside-commit bbox check
-  and the blur-inputs detection in `frame()` (`nt_ui_get_bbox`/`nt_ui_input_any_focused`)
-  — they set `s_pending_commit_edit`/`s_blur_inputs`; actions only consume the flags.
+  `cancel_edit`/`preview_stop`/`atlas_name_valid`. **Carve-out (stays in shell):** the
+  click-outside-commit bbox check and the blur-inputs detection in `frame()`
+  (`nt_ui_get_bbox`/`nt_ui_input_any_focused`) — they set
+  `s_pending_commit_edit`/`s_blur_inputs`; actions only consume the flags.
+  **P-2 lead ruling (2026-07-11): `handle_canvas_input` + its mouse statics
+  (`s_lmb_*`, `s_mmb_panning`, `s_press_*`, `s_pan_last_*`) stay in the SHELL
+  permanently.** The step-0 status pill made it read `nt_ui_get_bbox(s_id_status_pill)`
+  (click-on-pill must not drive canvas select/pan), so it is no longer nt_ui-free;
+  bbox-reading input detection is shell territory by the same precedent as the
+  carve-out above. Step 6a must NOT move it into the view TU.
 - `gui_rows.h/.c` — `build_rows` + row storage, `multi_sel_*`, `nat_cmp`/
   `names_common_prefix` (+ sort scratch), `select_row_for_region`, `strip_ext`/
   `normalize_slashes`. (nat-sort is GUI-side policy sanctioned by ux.md §3.7b; parity
@@ -91,7 +95,7 @@ the current tree as packet task #1):
 | reset_selection, cancel_edit, clamp_selection, preview_stop, atlas_name_valid | small helpers | actions |
 | truncate_to_width, left/right_panel_text_w, compute_panel_widths, record_row_tip | small helpers | widgets (compute_panel_widths: state ok) |
 | select_row_for_region | canvas | rows |
-| handle_canvas_input + mouse statics | canvas | actions |
+| handle_canvas_input + mouse statics | canvas | SHELL (P-2 ruling: reads pill bbox via nt_ui) |
 | render_rename_field | left panel | widgets |
 | close_menubar_menus | menu bar | chrome |
 | s_row_tips storage / record_row_tip / declare_row_tooltips | mixed | state / widgets / chrome |
