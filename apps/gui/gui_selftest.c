@@ -1,0 +1,918 @@
+/* ntpacker-gui dev seam: the headless self-test + auto-quit render/verify phase driver.
+ * The whole TU compiles to nothing unless NTPACKER_GUI_SELFTEST is defined (a placeholder typedef
+ * keeps it a legal ISO C translation unit). Moved verbatim out of main.c (GUI decomposition step 3);
+ * only run_selftest/selftest_pre_frame/selftest_post_draw gained external linkage (the header hooks).
+ * See gui_selftest.h. */
+
+#include "gui_selftest.h"
+
+#ifdef NTPACKER_GUI_SELFTEST
+
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+#include "app/nt_app.h"         /* nt_app_quit */
+#include "core/nt_assert.h"     /* NT_ASSERT */
+#include "graphics/nt_gfx.h"    /* nt_gfx_read_pixels (overlay pixel probe) */
+#include "log/nt_log.h"         /* nt_log_info (SELFTEST-* logging) */
+#include "ui/nt_ui.h"           /* nt_ui_get_bbox / nt_ui_id / nt_ui_bbox_t */
+#include "window/nt_window.h"   /* g_nt_window (phase-driven framebuffer dims) */
+
+#include "tp_core/tp_error.h"   /* tp_status_str / tp_error */
+#include "tp_core/tp_model.h"   /* tp_result */
+#include "tp_core/tp_project.h" /* tp_project* accessors */
+
+#include "gui_actions.h"  /* do_pack_blocking / reset_selection / preview_stop / anim ops */
+#include "gui_canvas.h"   /* s_canvas ops + GUI_CANVAS_ATLAS */
+#include "gui_history.h"  /* gui_history_* (end-of-run depth log) */
+#include "gui_pack.h"     /* gui_pack_* + GUI_PACK_ASYNC_* */
+#include "gui_project.h"  /* gui_project_* + GUI_SPRITE_OV_SHAPE / GUI_ADD_DUPLICATE */
+#include "gui_rows.h"     /* build_rows / multi_sel_* / select_row_for_region / strip_ext */
+#include "gui_scan.h"     /* gui_scan_* */
+#include "gui_shell.h"    /* UI_STATE_SLOTS / UI_STATE_PROBE_MAX / UI_ROW_ID_RING */
+#include "gui_state.h"    /* s_canvas / s_sel_* / s_sec_* / s_about_open / s_export_open / s_ctx / s_id_* */
+
+static void to_abs(const char *rel, char *out, size_t cap) {
+#ifdef _WIN32
+    if (GetFullPathNameA(rel, (DWORD)cap, out, NULL) == 0) {
+        (void)snprintf(out, cap, "%s", rel);
+    }
+    normalize_slashes(out);
+#else
+    (void)snprintf(out, cap, "%s", rel);
+#endif
+}
+
+/* Writes a tiny valid 2x2 32-bit uncompressed TGA (stb decodes it) -- cheap procedural sprite. */
+static void write_tga_2x2(const char *path) {
+    const unsigned char hdr[18] = {0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 2, 0, 32, 0x28};
+    unsigned char px[2 * 2 * 4];
+    for (int i = 0; i < 4; i++) {
+        px[i * 4 + 0] = 200; /* B */
+        px[i * 4 + 1] = 180; /* G */
+        px[i * 4 + 2] = 160; /* R */
+        px[i * 4 + 3] = 255; /* A */
+    }
+    FILE *f = fopen(path, "wb");
+    if (f) {
+        (void)fwrite(hdr, 1, sizeof hdr, f);
+        (void)fwrite(px, 1, sizeof px, f);
+        (void)fclose(f);
+    }
+}
+
+/* UTF-8 "тест_спрайт" (a Cyrillic sprite name) -- exercises multi-byte names end-to-end. */
+#define CYR_STEM "\xD1\x82\xD0\xB5\xD1\x81\xD1\x82_\xD1\x81\xD0\xBF\xD1\x80\xD0\xB0\xD0\xB9\xD1\x82"
+
+void run_selftest(void) {
+    nt_log_info("SELFTEST: begin");
+    gui_project_init();
+    tp_project *p = gui_project_get();
+    NT_ASSERT(p && p->atlas_count == 1);
+    (void)p;
+
+    /* Absolute paths (from cwd=workspace) so they survive relativize-on-save + resolve-on-load. */
+    char folder[512];
+    char file[512];
+    to_abs("examples/defold-demo/examples/anim_trim/anims", folder, sizeof folder);
+    to_abs("examples/defold-demo/examples/anim_trim/anims/sq1.png", file, sizeof file);
+
+    const gui_add_status a1 = gui_project_add_source(0, folder);
+    nt_log_info("SELFTEST: add folder -> %d (dirty=%d stale=%d)", (int)a1, gui_project_is_dirty(), gui_project_is_stale());
+    const gui_add_status a2 = gui_project_add_source(0, file);
+    nt_log_info("SELFTEST: add file -> %d", (int)a2);
+    const gui_add_status a3 = gui_project_add_source(0, folder); /* dedupe (F6c): expect DUPLICATE(2) */
+    nt_log_info("SELFTEST: dedupe add folder again -> %d (expect %d)", (int)a3, (int)GUI_ADD_DUPLICATE);
+
+    char err[256] = {0};
+    const bool dec = gui_canvas_set_image(&s_canvas, file, err, sizeof err);
+    nt_log_info("SELFTEST: decode+upload -> %d (%dx%d) %s", dec, gui_canvas_img_w(&s_canvas), gui_canvas_img_h(&s_canvas), dec ? "" : err);
+
+    char save_path[1200];
+    (void)snprintf(save_path, sizeof save_path, "%s/selftest.ntpacker_project", s_exe_dir);
+    tp_status st = gui_project_save_as(save_path, err, sizeof err);
+    nt_log_info("SELFTEST: save '%s' -> %s (dirty=%d)", save_path, tp_status_str(st), gui_project_is_dirty());
+
+    st = gui_project_open(save_path, err, sizeof err);
+    const int nsrc = gui_project_get() ? gui_project_get()->atlases[0].source_count : -1;
+    nt_log_info("SELFTEST: reload -> %s, atlas0 sources=%d (dirty=%d)", tp_status_str(st), nsrc, gui_project_is_dirty());
+
+    /* --- rename atlas + undo/redo (verify model reverts and dirty recomputes) --- */
+    char name0[64];
+    (void)snprintf(name0, sizeof name0, "%s", gui_project_get()->atlases[0].name);
+    gui_project_set_atlas_name(0, "hero_atlas");
+    nt_log_info("SELFTEST: rename atlas '%s' -> '%s' (dirty=%d)", name0, gui_project_get()->atlases[0].name, gui_project_is_dirty());
+    const bool undone = gui_project_undo();
+    nt_log_info("SELFTEST: undo -> %d name='%s' (dirty=%d) [expect name reverted, dirty=0]", undone, gui_project_get()->atlases[0].name, gui_project_is_dirty());
+    const bool redone = gui_project_redo();
+    nt_log_info("SELFTEST: redo -> %d name='%s' (dirty=%d)", redone, gui_project_get()->atlases[0].name, gui_project_is_dirty());
+
+    /* --- rename a region (sprite override), verify it is stored on the model --- */
+    char folder_abs[512];
+    if (tp_project_resolve_path(gui_project_get(), gui_project_get()->atlases[0].sources[0], folder_abs, sizeof folder_abs) == TP_STATUS_OK) {
+        const gui_scan_result *sc = gui_scan_get(folder_abs);
+        nt_log_info("SELFTEST: folder scan found %d image(s)", sc->count);
+        if (sc->count > 0) {
+            char sprite[192];
+            (void)snprintf(sprite, sizeof sprite, "%s", sc->entries[0].rel);
+            char *dot = strrchr(sprite, '.');
+            if (dot) {
+                *dot = '\0';
+            }
+            gui_project_set_sprite_rename(0, sprite, "renamed_region");
+            tp_project_atlas *a0 = tp_project_get_atlas(gui_project_get(), 0);
+            const tp_project_sprite *ov = tp_project_atlas_find_sprite(a0, sprite);
+            nt_log_info("SELFTEST: rename region '%s' -> override='%s'", sprite, (ov && ov->rename) ? ov->rename : "(none)");
+        }
+    }
+
+    /* --- save_buffer / load_buffer round-trip in-app --- */
+    char *bb = NULL;
+    size_t bl = 0;
+    tp_error be = {0};
+    const tp_status bst = tp_project_save_buffer(gui_project_get(), &bb, &bl, &be);
+    tp_project *lp = NULL;
+    tp_error le = {0};
+    const tp_status lst = (bst == TP_STATUS_OK) ? tp_project_load_buffer(bb, bl, &lp, &le) : bst;
+    nt_log_info("SELFTEST: save_buffer(%zuB)->%s; load_buffer->%s atlas0='%s'", bl, tp_status_str(bst), tp_status_str(lst),
+                (lp && lp->atlas_count > 0) ? lp->atlases[0].name : "(none)");
+    tp_project_destroy(lp);
+    free(bb);
+
+    /* --- refresh cycle: create + delete a temp png, observe the scan change --- */
+    char rdir[600];
+    char rfile[700];
+    (void)snprintf(rdir, sizeof rdir, "%s/selftest_refresh", s_exe_dir);
+#ifdef _WIN32
+    (void)CreateDirectoryA(rdir, NULL);
+#endif
+    (void)snprintf(rfile, sizeof rfile, "%s/temp.png", rdir);
+    FILE *tf = fopen(rfile, "wb");
+    if (tf) {
+        (void)fputs("PNGDATA", tf);
+        (void)fclose(tf);
+    }
+    gui_scan_invalidate_all();
+    const int before_n = gui_scan_get(rdir)->count;
+    (void)remove(rfile);
+    gui_scan_invalidate_all();
+    const int after_n = gui_scan_get(rdir)->count;
+    nt_log_info("SELFTEST: refresh cycle temp png before=%d after=%d (removed=%d)", before_n, after_n, before_n - after_n);
+#ifdef _WIN32
+    (void)RemoveDirectoryA(rdir);
+#endif
+
+    /* --- in-process pack of the demo atlases: real tp_pack via gui_pack (timing + assertions) --- */
+    {
+        char proj[600];
+        to_abs("examples/defold-demo/defold-demo.ntpacker_project", proj, sizeof proj);
+        char perr[256] = {0};
+        if (gui_project_open(proj, perr, sizeof perr) == TP_STATUS_OK) {
+            tp_project *dp = gui_project_get();
+            int i_rotate = -1;
+            int i_basic = -1;
+            for (int i = 0; i < dp->atlas_count; i++) {
+                if (strcmp(dp->atlases[i].name, "rotate") == 0) {
+                    i_rotate = i;
+                } else if (strcmp(dp->atlases[i].name, "basic") == 0) {
+                    i_basic = i;
+                }
+            }
+            gui_scan_invalidate_all();
+            double ms_r = 0.0;
+            double ms_b = 0.0;
+            char pe[256] = {0};
+            char note[128] = {0};
+            const bool okr = (i_rotate >= 0) && gui_pack_atlas(i_rotate, &ms_r, pe, sizeof pe, note, sizeof note);
+            const tp_result *rr = gui_pack_result(i_rotate);
+            nt_log_info("SELFTEST: pack 'rotate' -> %d in %.1f ms sprites=%d pages=%d (find 'a'=%d) %s", okr, ms_r,
+                        rr ? rr->sprite_count : -1, rr ? rr->page_count : -1, gui_pack_find_sprite(i_rotate, "a"),
+                        okr ? "" : pe);
+            NT_ASSERT(okr && rr && rr->sprite_count == 3 && rr->page_count >= 1 && "pack rotate");
+            NT_ASSERT(gui_pack_find_sprite(i_rotate, "a") >= 0 && "region lookup 'a'");
+            char pe2[256] = {0};
+            const bool okb = (i_basic >= 0) && gui_pack_atlas(i_basic, &ms_b, pe2, sizeof pe2, note, sizeof note);
+            const tp_result *rb = gui_pack_result(i_basic);
+            nt_log_info("SELFTEST: pack 'basic' -> %d in %.1f ms sprites=%d pages=%d %s", okb, ms_b,
+                        rb ? rb->sprite_count : -1, rb ? rb->page_count : -1, okb ? "" : pe2);
+
+            /* export 'rotate' via gui_pack_export, ISOLATED to a throwaway base under the build dir so
+             * the demo's committed exports (owned by another agent) are never touched: disable the
+             * atlas's other targets, point json-neotolis at the temp base, then assert the files exist.
+             * tp_export_run uses the target out_path as the exporter BASE and appends .json / -N.png. */
+            tp_project_atlas *rot_a = tp_project_get_atlas(dp, i_rotate);
+            int jtarget = -1;
+            for (int k = 0; rot_a && k < rot_a->target_count; k++) {
+                if (strcmp(rot_a->targets[k].exporter_id, "json-neotolis") == 0) {
+                    jtarget = k;
+                } else {
+                    gui_project_set_target(i_rotate, k, rot_a->targets[k].exporter_id, rot_a->targets[k].out_path, false);
+                }
+            }
+            char tbase[700] = {0};
+            (void)snprintf(tbase, sizeof tbase, "%s/selftest_rotate_export", s_exe_dir);
+            if (jtarget >= 0) {
+                gui_project_set_target(i_rotate, jtarget, "json-neotolis", tbase, true);
+            }
+            int etg = 0;
+            int enc = 0;
+            char eerr[256] = {0};
+            char enote[128] = {0};
+            const bool oke = (i_rotate >= 0 && jtarget >= 0) &&
+                             gui_pack_export(i_rotate, &etg, &enc, eerr, sizeof eerr, enote, sizeof enote);
+            char jpath[720] = {0};
+            char ppath[720] = {0};
+            (void)snprintf(jpath, sizeof jpath, "%s.json", tbase);
+            (void)snprintf(ppath, sizeof ppath, "%s-0.png", tbase);
+            bool jok = false;
+            bool pok = false;
+            {
+                FILE *jf = fopen(jpath, "rb");
+                if (jf) {
+                    jok = (fgetc(jf) == '{'); /* lightweight parse check; full parse is in ctest test_export_json */
+                    (void)fclose(jf);
+                }
+                FILE *pf = fopen(ppath, "rb");
+                if (pf) {
+                    pok = (fgetc(pf) != EOF); /* exists AND non-empty */
+                    (void)fclose(pf);
+                }
+            }
+            nt_log_info("SELFTEST: export 'rotate' -> ok=%d targets=%d notices=%d json{=%d png0=%d %s", oke, etg, enc,
+                        jok, pok, oke ? "" : eerr);
+            NT_ASSERT(oke && jok && pok && "export rotate: json + page png must exist");
+            (void)remove(jpath); /* throwaway under the build dir */
+            (void)remove(ppath);
+        } else {
+            nt_log_info("SELFTEST: demo project open failed: %s", perr);
+        }
+    }
+
+    /* --- stress: 520 procedural sprites incl. a Cyrillic name -> pack + row model + Cyrillic RT --- */
+    {
+        char sdir[700];
+        (void)snprintf(sdir, sizeof sdir, "%s/selftest_stress", s_exe_dir);
+#ifdef _WIN32
+        (void)CreateDirectoryA(sdir, NULL);
+#endif
+        const int N = 520;
+        for (int i = 0; i < N; i++) {
+            char fp[820];
+            (void)snprintf(fp, sizeof fp, "%s/spr_%03d.tga", sdir, i);
+            write_tga_2x2(fp);
+        }
+        char cfp[840];
+        (void)snprintf(cfp, sizeof cfp, "%s/%s.tga", sdir, CYR_STEM);
+        write_tga_2x2(cfp);
+
+        const int sidx = gui_project_add_atlas();
+        if (sidx >= 0) {
+            (void)gui_project_add_source(sidx, sdir);
+            gui_scan_invalidate_all();
+            double sms = 0.0;
+            char serr[256] = {0};
+            char snote[128] = {0};
+            const bool oks = gui_pack_atlas(sidx, &sms, serr, sizeof serr, snote, sizeof snote);
+            const tp_result *sr = gui_pack_result(sidx);
+            const int cyr_idx = gui_pack_find_sprite(sidx, CYR_STEM);
+            nt_log_info("SELFTEST: stress pack -> %d in %.1f ms sprites=%d pages=%d cyr_idx=%d %s", oks, sms,
+                        sr ? sr->sprite_count : -1, sr ? sr->page_count : -1, cyr_idx, oks ? "" : serr);
+            NT_ASSERT(oks && sr && sr->sprite_count >= N + 1 && "stress pack 520+ sprites");
+            NT_ASSERT(cyr_idx >= 0 && "Cyrillic-named region lookup");
+
+            /* Cyrillic rename + save/load round-trip (multi-byte name survives serialization). */
+            gui_project_set_sprite_rename(sidx, CYR_STEM, "\xD0\xB8\xD0\xBC\xD1\x8F"); /* "имя" */
+            char *sbuf = NULL;
+            size_t slen = 0;
+            tp_error sbe = {0};
+            tp_project *slp = NULL;
+            tp_error sle = {0};
+            const tp_status sbst = tp_project_save_buffer(gui_project_get(), &sbuf, &slen, &sbe);
+            const tp_status slst = (sbst == TP_STATUS_OK) ? tp_project_load_buffer(sbuf, slen, &slp, &sle) : sbst;
+            const tp_project_sprite *ov =
+                (slp && slp->atlas_count > sidx) ? tp_project_atlas_find_sprite(&slp->atlases[sidx], CYR_STEM) : NULL;
+            nt_log_info("SELFTEST: Cyrillic rename RT save=%s load=%s override='%s'", tp_status_str(sbst),
+                        tp_status_str(slst), (ov && ov->rename) ? ov->rename : "(none)");
+            NT_ASSERT(ov && ov->rename && strcmp(ov->rename, "\xD0\xB8\xD0\xBC\xD1\x8F") == 0 &&
+                      "Cyrillic name survives save/load");
+            tp_project_destroy(slp);
+            free(sbuf);
+
+            /* Row model materializes 520+ rows (incl. the Cyrillic label) without overflow. */
+            s_sel_atlas = sidx;
+            build_rows(gui_project_get(), tp_project_get_atlas(gui_project_get(), sidx));
+            bool cyr_row = false;
+            for (int i = 0; i < s_row_count; i++) {
+                if (strcmp(s_rows[i].sprite_name, CYR_STEM) == 0) {
+                    cyr_row = true;
+                    break;
+                }
+            }
+            nt_log_info("SELFTEST: stress rows=%d cyr_row=%d | state pool slots=%u probe=%u ring=%u (bounded, no overflow)",
+                        s_row_count, cyr_row, (unsigned)UI_STATE_SLOTS, (unsigned)UI_STATE_PROBE_MAX,
+                        (unsigned)UI_ROW_ID_RING);
+            NT_ASSERT(s_row_count >= N + 1 && cyr_row && "stress row model incl. Cyrillic");
+        }
+        /* cleanup scratch sprites (keep the tree clean). The no-overflow guarantee is id_ring x
+         * state_slots capacity, verified above + interactively. */
+        for (int i = 0; i < N; i++) {
+            char fp[820];
+            (void)snprintf(fp, sizeof fp, "%s/spr_%03d.tga", sdir, i);
+            (void)remove(fp);
+        }
+        (void)remove(cfp);
+#ifdef _WIN32
+        (void)RemoveDirectoryA(sdir);
+#endif
+    }
+
+    /* --- settings panel: stale-on-change, effective-extrude, per-region RECT override,
+     *     and a fresh-project seeded-target export (regions F/G, §3.3f, owner overrides) --- */
+    {
+        gui_project_new();
+        gui_pack_clear(-1);
+        tp_project *fp = gui_project_get();
+        NT_ASSERT(fp && fp->atlas_count == 1 && fp->atlases[0].target_count >= 1 && "fresh project seeds a target (I1)");
+        nt_log_info("SELFTEST: fresh target[0]=%s base=%s", fp->atlases[0].targets[0].exporter_id,
+                    fp->atlases[0].targets[0].out_path);
+
+        char afolder[512];
+        to_abs("examples/defold-demo/examples/anim_trim/anims", afolder, sizeof afolder);
+        (void)gui_project_add_source(0, afolder);
+        gui_scan_invalidate_all();
+
+        tp_project_atlas *a0 = tp_project_get_atlas(gui_project_get(), 0);
+        gui_project_mark_packed(); /* pretend current, then a setting change must set stale */
+        a0->padding = 7;
+        gui_project_touch_setting();
+        nt_log_info("SELFTEST: setting change stale=%d (expect 1)", gui_project_is_stale());
+        NT_ASSERT(gui_project_is_stale() && "a setting change sets preview stale");
+
+        /* shape=concave + extrude=3 -> preview pack succeeds via the effective-extrude-0 rule */
+        a0->shape = 2; /* CONCAVE_CONTOUR */
+        a0->extrude = 3;
+        gui_project_touch_setting();
+        double pms = 0.0;
+        char perr[256] = {0};
+        char pnote[128] = {0};
+        const bool okc = gui_pack_atlas(0, &pms, perr, sizeof perr, pnote, sizeof pnote);
+        nt_log_info("SELFTEST: concave+extrude3 pack -> %d in %.1fms (%s)", okc, pms, okc ? "effective extrude 0" : perr);
+        NT_ASSERT(okc && "concave+extrude=3 packs (effective extrude 0)");
+
+        /* per-sprite shape=RECT override -> that region packs as an exact 4-vert rect */
+        char afabs[512];
+        if (tp_project_resolve_path(gui_project_get(), gui_project_get()->atlases[0].sources[0], afabs, sizeof afabs) ==
+            TP_STATUS_OK) {
+            const gui_scan_result *sc = gui_scan_get(afabs);
+            if (sc->count > 0) {
+                char spn[192];
+                (void)snprintf(spn, sizeof spn, "%s", sc->entries[0].rel);
+                char *dot = strrchr(spn, '.');
+                if (dot) {
+                    *dot = '\0';
+                }
+                gui_project_set_sprite_override(0, spn, GUI_SPRITE_OV_SHAPE, 0 /* RECT */);
+                (void)gui_pack_atlas(0, &pms, perr, sizeof perr, pnote, sizeof pnote);
+                const int rri = gui_pack_find_sprite(0, spn);
+                const tp_result *rr = gui_pack_result(0);
+                const int vc = (rr && rri >= 0) ? rr->sprites[rri].vert_count : -1;
+                nt_log_info("SELFTEST: sprite '%s' RECT override -> vert_count=%d (expect 4)", spn, vc);
+                NT_ASSERT(vc == 4 && "RECT per-sprite override packs a 4-vert rect");
+            }
+        }
+
+        /* Restore a valid export state: the EXPORT path (tp_export_run) does not yet
+         * apply the effective-extrude-0 rule (point-7 follow-up in the parallel exporter
+         * agent's file), so concave+extrude>0 would be rejected at core validation. */
+        a0->extrude = 0;
+        gui_project_touch_setting();
+
+        /* save + export a fresh GUI project -> the seeded target writes files (audit I1) */
+        char fpath[1200];
+        (void)snprintf(fpath, sizeof fpath, "%s/selftest_fresh.ntpacker_project", s_exe_dir);
+        char serr[256] = {0};
+        (void)gui_project_save_as(fpath, serr, sizeof serr);
+        int etg = 0;
+        int enc = 0;
+        char eerr[256] = {0};
+        char enote[128] = {0};
+        const bool oke = gui_pack_export(0, &etg, &enc, eerr, sizeof eerr, enote, sizeof enote);
+        char jbase[600] = {0};
+        char jpath[640] = {0};
+        char ppath[640] = {0};
+        bool jok = false;
+        bool pok = false;
+        if (tp_project_resolve_path(gui_project_get(), "out/atlas1", jbase, sizeof jbase) == TP_STATUS_OK) {
+            (void)snprintf(jpath, sizeof jpath, "%s.json", jbase);
+            (void)snprintf(ppath, sizeof ppath, "%s-0.png", jbase);
+            FILE *jf = fopen(jpath, "rb");
+            if (jf) {
+                jok = (fgetc(jf) == '{');
+                (void)fclose(jf);
+            }
+            FILE *pf = fopen(ppath, "rb");
+            if (pf) {
+                pok = true;
+                (void)fclose(pf);
+            }
+        }
+        nt_log_info("SELFTEST: fresh export ok=%d targets=%d json{=%d png0=%d %s", oke, etg, jok, pok, oke ? "" : eerr);
+        NT_ASSERT(oke && jok && pok && "fresh GUI project exports its seeded target");
+        (void)remove(jpath);
+        (void)remove(ppath);
+        (void)remove(fpath);
+    }
+
+    /* --- animations (ux.md §3.7b): pure playback map, create-from-selection natural sort, reorder,
+     *     round-trip preserves frames order + playback + flips, remove-frame path --- */
+    {
+        bool fin = false;
+        NT_ASSERT(gui_canvas_anim_frame_at(0.0, 10.0F, 2, 4, &fin) == 3 && !fin && "once_backward step0");
+        NT_ASSERT(gui_canvas_anim_frame_at(0.35, 10.0F, 2, 4, &fin) == 0 && fin && "once_backward finishes at 0");
+        NT_ASSERT(gui_canvas_anim_frame_at(0.45, 10.0F, 3, 4, &fin) == 3 && "loop_backward wraps");
+        NT_ASSERT(gui_canvas_anim_frame_at(0.35, 10.0F, 4, 3, &fin) == 1 && "once_pingpong return leg");
+        NT_ASSERT(gui_canvas_anim_frame_at(0.45, 10.0F, 4, 3, &fin) == 0 && fin && "once_pingpong finishes at 0");
+        NT_ASSERT(gui_canvas_anim_frame_at(0.55, 10.0F, 5, 3, &fin) == 1 && "loop_pingpong wraps");
+
+        const int aidx = gui_project_add_atlas();
+        s_sel_atlas = aidx;
+        multi_sel_clear();
+        multi_sel_add("walk_10"); /* deliberately out of natural order */
+        multi_sel_add("walk_2");
+        multi_sel_add("walk_1");
+        const int ai = create_animation_from_selection();
+        tp_project_atlas *aa = tp_project_get_atlas(gui_project_get(), aidx);
+        NT_ASSERT(ai == 0 && aa && aa->animation_count == 1 && "create animation from selection");
+        tp_project_anim *an = &aa->animations[0];
+        nt_log_info("SELFTEST: anim '%s' frames [%s,%s,%s]", an->id, an->frames[0], an->frames[1], an->frames[2]);
+        NT_ASSERT(an->frame_count == 3 && strcmp(an->frames[0], "walk_1") == 0 && strcmp(an->frames[1], "walk_2") == 0 &&
+                  strcmp(an->frames[2], "walk_10") == 0 && "frames natural-sorted (walk_2 before walk_10)");
+
+        gui_project_set_anim_playback(aidx, 0, 5); /* loop pingpong */
+        gui_project_set_anim_flip(aidx, 0, true, false);
+        gui_project_set_anim_fps(aidx, 0, 12.0F);
+        gui_project_anim_move_frame(aidx, 0, 0, 2); /* walk_1 rides to the end */
+        aa = tp_project_get_atlas(gui_project_get(), aidx);
+        an = &aa->animations[0];
+        NT_ASSERT(strcmp(an->frames[0], "walk_2") == 0 && strcmp(an->frames[2], "walk_1") == 0 && "reorder a frame");
+
+        char *abuf = NULL;
+        size_t alen = 0;
+        tp_error abe = {0};
+        tp_project *alp = NULL;
+        tp_error ale = {0};
+        const tp_status abs_st = tp_project_save_buffer(gui_project_get(), &abuf, &alen, &abe);
+        const tp_status als_st = (abs_st == TP_STATUS_OK) ? tp_project_load_buffer(abuf, alen, &alp, &ale) : abs_st;
+        const tp_project_anim *rl = (alp && alp->atlas_count > aidx && alp->atlases[aidx].animation_count > 0)
+                                        ? &alp->atlases[aidx].animations[0]
+                                        : NULL;
+        nt_log_info("SELFTEST: anim RT save=%s load=%s playback=%d flip_h=%d fps=%g", tp_status_str(abs_st),
+                    tp_status_str(als_st), rl ? rl->playback : -1, rl ? rl->flip_h : -1, rl ? (double)rl->fps : 0.0);
+        NT_ASSERT(rl && rl->frame_count == 3 && rl->playback == 5 && rl->flip_h && !rl->flip_v && rl->fps == 12.0F &&
+                  strcmp(rl->frames[0], "walk_2") == 0 && strcmp(rl->frames[2], "walk_1") == 0 &&
+                  "round-trip preserves frame order + playback + flips");
+        tp_project_destroy(alp);
+        free(abuf);
+
+        NT_ASSERT(gui_project_anim_remove_frame(aidx, 0, 1) && aa->animations[0].frame_count == 2 && "remove a frame");
+        nt_log_info("SELFTEST: animation create/reorder/round-trip OK");
+
+        multi_sel_clear();
+        s_sel_anim = -1;
+        s_sel_anim_frame = -1;
+        s_sel_atlas = 0;
+    }
+
+    /* --- About modal: open it so the auto-quit frames render it (OK/Esc close it interactively) --- */
+    s_about_open = true;
+    nt_log_info("SELFTEST: About modal opened=%d", s_about_open);
+
+    /* --- Export dialog: exercise its data path (toggle a target the way the dialog checkbox does) and
+     * leave it open so the warmup frames render the modal (a Clay layout bug there would crash them). --- */
+    {
+        tp_project *ep = gui_project_get();
+        int e_atlas = -1;
+        for (int i = 0; ep && i < ep->atlas_count; i++) {
+            if (ep->atlases[i].target_count > 0) {
+                e_atlas = i;
+                break;
+            }
+        }
+        if (e_atlas >= 0) {
+            const tp_project_target *t0 = &gui_project_get()->atlases[e_atlas].targets[0];
+            const bool was = t0->enabled;
+            gui_project_set_target(e_atlas, 0, t0->exporter_id, t0->out_path, !was); /* dialog toggle path */
+            const bool now = gui_project_get()->atlases[e_atlas].targets[0].enabled;
+            gui_project_set_target(e_atlas, 0, gui_project_get()->atlases[e_atlas].targets[0].exporter_id,
+                                   gui_project_get()->atlases[e_atlas].targets[0].out_path, was); /* restore */
+            nt_log_info("SELFTEST: export-dialog toggle atlas=%d target0 %d->%d (restored=%d)", e_atlas, was, now, was);
+        }
+        s_export_open = true;
+    }
+
+    /* Leave a live selection so the auto-quit frames draw the decoded image. */
+    tp_project *cur = gui_project_get();
+    const int ns = cur ? cur->atlases[0].source_count : 0;
+    if (cur && ns > 0) {
+        char resolved[512];
+        if (tp_project_resolve_path(cur, cur->atlases[0].sources[ns - 1], resolved, sizeof resolved) == TP_STATUS_OK) {
+            (void)snprintf(s_sel_abs, sizeof s_sel_abs, "%s", resolved);
+            s_sel_atlas = 0;
+            s_sel_src = ns - 1;
+            s_sel_child = -1;
+            s_sel_missing = false;
+        }
+    }
+    /* Render coverage: leave a real animation selected + previewing so the auto-quit frames exercise the
+     * left-panel animations rows, the right-panel editor, and the canvas preview (draw_anim_frame on the
+     * packed regions) -- a Clay layout bug in the new UI would crash these frames. */
+    {
+        s_sel_atlas = 0;
+        tp_project_atlas *pa = tp_project_get_atlas(gui_project_get(), 0);
+        const tp_result *pr = gui_pack_result(0);
+        if (pa && pr && pr->sprite_count > 0) {
+            multi_sel_clear();
+            for (int i = 0; i < pr->sprite_count && i < 4; i++) {
+                char key[192];
+                strip_ext(pr->sprites[i].name, key, sizeof key);
+                multi_sel_add(key);
+            }
+            const int pai = create_animation_from_selection();
+            if (pai >= 0) {
+                open_preview(pai);
+                nt_log_info("SELFTEST: preview anim '%s' active=%d frames=%d", pa->animations[pai].id, s_preview_active,
+                            pa->animations[pai].frame_count);
+            }
+            multi_sel_clear();
+        }
+    }
+    g_ui_scale = 1.5F; /* exercise the scaled layout during the auto-quit frames */
+    nt_log_info("SELFTEST: end (undo:%d redo:%d history:%zuB; selection '%s')", gui_history_undo_depth(),
+                gui_history_redo_depth(), gui_history_bytes(), s_sel_abs);
+}
+
+/* --- Overlay pixel probe (F) + touch-on-render guard, driven across the auto-quit frames --- */
+static int s_st_phase;      /* 0 warmup, 1 outline pixel probe, 2 touch-on-render guard, 3 done */
+static int s_st_pf;         /* frames spent in the current phase */
+static int s_st_cyan0;      /* outline-OFF cyan count (baseline of the diff test) */
+static char *s_st_baseline; /* fresh-project bytes captured with zero input */
+static size_t s_st_baseline_n;
+
+/* Count blue/cyan overlay pixels in the current canvas box (framebuffer read, top-left origin). The
+ * region-outline colour is (0.30,0.72,1.0): B high, B>>R, G>R -- distinct from grey checker + sprites. */
+static int selftest_probe_cyan(void) {
+    if (gui_canvas_get_mode(&s_canvas) != GUI_CANVAS_ATLAS || !gui_canvas_has_atlas(&s_canvas)) {
+        return -1;
+    }
+    const float *bb = s_canvas.last_bb;
+    int x = (int)bb[0];
+    int y = (int)bb[1];
+    int w = (int)bb[2];
+    int h = (int)bb[3];
+    if (w < 8 || h < 8) {
+        return -1;
+    }
+    if (w > 900) {
+        w = 900;
+    }
+    if (h > 900) {
+        h = 900;
+    }
+    const uint32_t capn = (uint32_t)w * (uint32_t)h * 4u;
+    uint8_t *px = (uint8_t *)malloc(capn);
+    if (!px) {
+        return -1;
+    }
+    int cyan = -1;
+    if (nt_gfx_read_pixels(x, y, w, h, px, capn)) {
+        cyan = 0;
+        for (uint32_t i = 0; i + 3u < capn; i += 4u) {
+            const int r = px[i];
+            const int g = px[i + 1];
+            const int b = px[i + 2];
+            if (b > 150 && b > r + 40 && g > r + 25 && g > 110) {
+                cyan++;
+            }
+        }
+    }
+    free(px);
+    return cyan;
+}
+
+/* Overflow regression: the key containers must sit inside the window and the right-panel content must not
+ * be wider than the panel (rows fit). Reads the PREVIOUS frame's committed layout, so the caller must have
+ * held the target size for >= 2 frames. Fails (NT_ASSERT) before the layout fix, passes after. */
+static void selftest_assert_no_overflow(float win_w, float win_h) {
+    const struct {
+        const char *name;
+        uint32_t id;
+    } items[4] = {{"left", s_id_left_panel}, {"strip", s_id_strip}, {"canvas", s_id_canvas},
+                  {"right", s_id_right_panel}}; /* status bar removed (pass 2): messages float as a pill */
+    for (int i = 0; i < 4; i++) {
+        const nt_ui_bbox_t b = nt_ui_get_bbox(s_ctx, items[i].id);
+        nt_log_info("SELFTEST-BOUNDS %-6s found=%d x=%.1f y=%.1f w=%.1f h=%.1f right=%.1f/%.0f bottom=%.1f/%.0f",
+                    items[i].name, (int)b.found, (double)b.x, (double)b.y, (double)b.width, (double)b.height,
+                    (double)(b.x + b.width), (double)win_w, (double)(b.y + b.height), (double)win_h);
+        NT_ASSERT(b.found && "SELFTEST overflow: key container was not laid out");
+        NT_ASSERT(b.x >= -1.0F && (b.x + b.width) <= win_w + 1.0F &&
+                  "SELFTEST overflow: container spills past the window horizontally");
+        NT_ASSERT(b.y >= -1.0F && (b.y + b.height) <= win_h + 1.0F &&
+                  "SELFTEST overflow: container spills past the window vertically");
+    }
+    const nt_ui_bbox_t rp = nt_ui_get_bbox(s_ctx, s_id_right_panel);
+    const nt_ui_bbox_t rc = nt_ui_get_bbox(s_ctx, s_id_right_content);
+    NT_ASSERT(rp.found && rc.found && (rc.x + rc.width) <= (rp.x + rp.width) + 2.0F &&
+              "SELFTEST overflow: right-panel rows bleed past the panel");
+}
+
+/* Top-of-frame phase driver: sets up each phase's scene BEFORE the layout/walk. */
+void selftest_pre_frame(void) {
+    s_st_pf++;
+    if (s_st_phase == 0) {
+        if (s_st_pf < 12) {
+            return; /* warm up: first scene + GL page uploads settle */
+        }
+        s_about_open = false;
+        s_export_open = false; /* close the Export dialog exercised during warmup before the pixel probe */
+        preview_stop();
+        int found = -1;
+        tp_project *p = gui_project_get();
+        for (int i = 0; p && i < p->atlas_count; i++) {
+            const tp_result *r = gui_pack_result(i);
+            if (r && r->sprite_count > 0 && r->page_count > 0) {
+                found = i;
+                break;
+            }
+        }
+        if (found < 0) {
+            s_sel_atlas = 0;
+            do_pack_blocking();
+            found = (gui_pack_result(0) && gui_pack_result(0)->sprite_count > 0) ? 0 : -1;
+        }
+        s_sel_atlas = (found >= 0) ? found : 0;
+        gui_canvas_select(&s_canvas, -1); /* no selection -> plain hull outlines */
+        s_canvas.mode = GUI_CANVAS_ATLAS;
+        s_canvas.show_outline = true;
+        s_canvas.show_trim = false;
+        s_canvas.show_frame = false;
+        s_canvas.show_pivot = false;
+        s_st_phase = 1;
+        s_st_pf = 0;
+    } else if (s_st_phase == 1) {
+        s_canvas.mode = GUI_CANVAS_ATLAS; /* hold ATLAS mode through the probe frames */
+        if (s_st_pf == 3) {
+            s_canvas.show_outline = false; /* OFF frame (diff baseline) */
+        } else if (s_st_pf == 6) {
+            s_canvas.show_outline = true; /* ON frame */
+        }
+    } else if (s_st_phase == 2) {
+        if (s_st_pf > 10) {
+            const bool dirty = gui_project_is_dirty();
+            char *nb = NULL;
+            size_t nn = 0;
+            tp_error e = {0};
+            const bool saved = tp_project_save_buffer(gui_project_get(), &nb, &nn, &e) == TP_STATUS_OK;
+            const bool same = saved && s_st_baseline && nn == s_st_baseline_n && memcmp(nb, s_st_baseline, nn) == 0;
+            nt_log_info("SELFTEST: touch-on-render guard dirty=%d bytes_match=%d (%zu vs %zu)", dirty, same, nn, s_st_baseline_n);
+            NT_ASSERT(!dirty); /* a control that writes its widget value on first render flips this */
+            NT_ASSERT(same);
+            free(nb);
+            free(s_st_baseline);
+            s_st_baseline = NULL;
+            s_st_phase = 3;
+            s_st_pf = 0;
+        }
+    } else if (s_st_phase == 3) {
+        /* Section-toggle sweep at a CLAMPED panel width: collapsed/expanded + empty sections (the fresh
+         * project has no sprites/anims) under the clipped scroll must never yield a degenerate float. */
+        g_nt_window.fb_width = 520;
+        g_nt_window.fb_height = 440;
+        s_sec_atlas_open = (s_st_pf / 2) % 2 == 0;
+        s_atlas_adv_open = (s_st_pf / 3) % 2 == 0;
+        s_sec_region_open = (s_st_pf / 2) % 2 != 0;
+        s_sec_anim_open = (s_st_pf / 4) % 2 == 0;
+        s_sec_export_open = (s_st_pf / 3) % 2 != 0;
+        if (s_st_pf > 16) {
+            g_nt_window.fb_width = 1280;
+            g_nt_window.fb_height = 800;
+            s_sec_atlas_open = s_atlas_adv_open = s_sec_region_open = s_sec_anim_open = s_sec_export_open = true;
+            nt_log_info("SELFTEST: section-toggle sweep OK (no empty-scissor assert)");
+            s_st_phase = 4;
+            s_st_pf = 0;
+        }
+    } else if (s_st_phase == 4) {
+        /* Tiny-window sweep: the layout solve must not assert (empty scissor) at any size. Override the
+         * framebuffer dims for two frames each (restored at the end) -- nt_window_poll re-reads them next
+         * frame, so this only affects the current frame's scale. Covers panels-declared-and-clamped down
+         * to the have_room skip threshold. */
+        static const int sizes[8][2] = {{700, 500}, {560, 420}, {480, 360}, {420, 320}, {360, 280}, {240, 180}, {120, 120}, {64, 64}};
+        const int idx = s_st_pf / 2;
+        if (idx >= 8) {
+            g_nt_window.fb_width = 1280;
+            g_nt_window.fb_height = 800;
+            nt_log_info("SELFTEST: tiny-window sweep OK (no empty-scissor assert)");
+            s_st_phase = 5;
+            s_st_pf = 0;
+        } else {
+            g_nt_window.fb_width = (uint32_t)sizes[idx][0];
+            g_nt_window.fb_height = (uint32_t)sizes[idx][1];
+        }
+    } else if (s_st_phase == 5) {
+        /* Scaled 16:9 overflow regression (owner's case): at 1366x768 @ g_ui_scale 1.5 no key container may
+         * leave the window and the right-panel rows must fit the panel. Pre-fix the strip forced the middle
+         * row wider than the window -> the right panel was pushed off-screen (asserts fire here). */
+        g_nt_window.fb_width = 1366;
+        g_nt_window.fb_height = 768;
+        if (s_st_pf == 1) { /* enter: exercise the normal atlas strip + a populated Region panel */
+            preview_stop();
+            s_sel_anim = -1;
+            s_sel_anim_frame = -1;
+            s_canvas.mode = GUI_CANVAS_ATLAS;
+            const tp_result *pr = gui_pack_result(s_sel_atlas);
+            if (pr && pr->sprite_count > 0) {
+                gui_canvas_select(&s_canvas, 0);
+                select_row_for_region(0);
+            }
+            s_sec_atlas_open = s_sec_region_open = s_sec_anim_open = s_sec_export_open = true;
+            s_atlas_adv_open = false;
+        }
+        if (s_st_pf >= 3) { /* size held >= 2 frames -> the 1-frame-lagged bbox now reflects 1366x768 */
+            selftest_assert_no_overflow(1366.0F, 768.0F);
+            nt_log_info("SELFTEST: 16:9 @1.5 overflow check OK (1366x768, no container/right-panel spill)");
+            s_st_phase = 6;
+            s_st_pf = 0;
+        }
+    } else if (s_st_phase == 6 || s_st_phase == 7 || s_st_phase == 8) {
+        /* Stale-state overflow regression (owner's icon-strip case): a packed-but-stale atlas shows the amber
+         * Pack + the "outdated" chip. The chip gate must keep the labeled+chip strip min-content inside the
+         * strip's real budget (s_canvas_w - the canvas card's S(20) padding); pre-fix STRIP_CHIP_MIN_W ignored
+         * the chip's own width, so at 1920x1080@1.5 the chip forced the middle row wider -> right panel off the
+         * screen. Three stops, all @1.5 (page count varies with the project, so the chip visible/dropped assert
+         * -- which depends only on the gate, not on the strip's pixel width -- is the deterministic fail-before):
+         *  6) 1920x1080 -- chip does NOT fit; must be DROPPED (fail-before: chip shown -> overflow assert).
+         *  7) 1366x768  -- compact two-row stale strip (chip already dropped); must still stay in-window.
+         *  8) 2000x1080 -- wide enough that the chip DOES fit; must be SHOWN and still not overflow. */
+        const float win_w = (s_st_phase == 6) ? 1920.0F : (s_st_phase == 7) ? 1366.0F : 2000.0F;
+        const float win_h = (s_st_phase == 7) ? 768.0F : 1080.0F;
+        g_ui_scale = 1.5F;
+        g_nt_window.fb_width = (uint32_t)win_w;
+        g_nt_window.fb_height = (uint32_t)win_h;
+        if (s_st_pf == 1) {
+            /* Phase 1's handoff (selftest_post_draw) left a truly-fresh, source-less project, so build the
+             * stale scene here: a MULTI-PAGE atlas (small max_size -> page buttons, matching the owner's
+             * full-tier strip at 1920x1080) that is packed, then re-marked stale so the strip shows the amber
+             * Pack + the "outdated" chip. mark_stale must run AFTER the pack (a successful pack clears stale). */
+            preview_stop();
+            s_sel_anim = -1;
+            s_sel_anim_frame = -1;
+            s_sel_atlas = 0;
+            tp_project_atlas *sa = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
+            if (sa && sa->source_count == 0) {
+                char afolder[512];
+                to_abs("examples/defold-demo/examples/anim_trim/anims", afolder, sizeof afolder);
+                (void)gui_project_add_source(s_sel_atlas, afolder);
+                sa->max_size = 256; /* 128px sprites -> several pages -> pc>1 -> page buttons in the strip */
+                gui_scan_invalidate_all();
+            }
+            double pms = 0.0;
+            char perr[256] = {0};
+            char pnote[128] = {0};
+            (void)gui_pack_atlas(s_sel_atlas, &pms, perr, sizeof perr, pnote, sizeof pnote);
+            s_canvas.mode = GUI_CANVAS_ATLAS;
+            const tp_result *pr = gui_pack_result(s_sel_atlas);
+            if (pr && pr->sprite_count > 0) {
+                gui_canvas_select(&s_canvas, 0);
+                select_row_for_region(0);
+            }
+            s_sec_atlas_open = s_sec_region_open = s_sec_anim_open = s_sec_export_open = true;
+            s_atlas_adv_open = false;
+            gui_project_mark_stale();
+        }
+        if (s_st_pf >= 3) { /* size + stale held >= 2 frames -> the lagged bbox reflects the stale strip here */
+            const tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
+            NT_ASSERT(a && a->source_count > 0 && gui_project_is_stale() &&
+                      "SELFTEST: stale precondition (sources present + preview stale -> amber Pack + chip)");
+            selftest_assert_no_overflow(win_w, win_h);
+            /* The chip visible/dropped decision depends ONLY on the gate (accent && width), not on the strip's
+             * pixel width, so it is the deterministic fail-before signal even where the page count would let the
+             * bounds check pass: at 1920x1080@1.5 the chip must be DROPPED, at the wide 2000 it must be SHOWN. */
+            const bool chip = nt_ui_get_bbox(s_ctx, nt_ui_id("ntpacker/stale_chip")).found;
+            if (s_st_phase == 6) {
+                NT_ASSERT(!chip && "SELFTEST: stale chip must be dropped where it would overflow the canvas budget");
+            } else if (s_st_phase == 8) {
+                NT_ASSERT(chip && "SELFTEST: stale chip must be shown when the canvas is wide enough to hold it");
+            }
+            nt_log_info("SELFTEST: stale-state overflow check OK (%.0fx%.0f@1.5, chip=%d)", (double)win_w,
+                        (double)win_h, (int)chip);
+            s_st_phase++;
+            s_st_pf = 0;
+        }
+    } else if (s_st_phase == 9) {
+        /* Async-path equivalence (req 4): start an async pack, spin until it lands (poll_async in
+         * apply_pending swaps it in), then a blocking reference pack of the same project must match --
+         * determinism holds because only WHERE the pack ran changed. */
+        g_ui_scale = 1.0F;
+        g_nt_window.fb_width = 1280;
+        g_nt_window.fb_height = 800;
+        if (s_st_pf == 1) {
+            s_sel_atlas = 0;
+            char aerr[256] = {0};
+            const bool started = gui_pack_async_start(0, aerr, sizeof aerr);
+            nt_log_info("SELFTEST: async pack start -> %d (%s)", (int)started, started ? "ok" : aerr);
+            NT_ASSERT(started && "SELFTEST: async pack must start");
+        } else if (gui_pack_async_busy()) {
+            NT_ASSERT(s_st_pf < 3000 && "SELFTEST: async pack did not finish within the frame cap");
+        } else {
+            const tp_result *ra = gui_pack_result(0);
+            NT_ASSERT(ra && ra->sprite_count > 0 && ra->page_count > 0 && "SELFTEST: async pack produced no result");
+            const int sc_a = ra->sprite_count;
+            const int pc_a = ra->page_count;
+            const int pw_a = ra->pages[0].w;
+            const int ph_a = ra->pages[0].h;
+            double bms = 0.0;
+            char berr[256] = {0};
+            char bnote[128] = {0};
+            const bool okb = gui_pack_atlas(0, &bms, berr, sizeof berr, bnote, sizeof bnote);
+            NT_ASSERT(okb && "SELFTEST: blocking reference pack failed");
+            const tp_result *rb = gui_pack_result(0);
+            NT_ASSERT(rb && rb->sprite_count == sc_a && rb->page_count == pc_a && rb->pages[0].w == pw_a &&
+                      rb->pages[0].h == ph_a && "SELFTEST: async vs blocking result mismatch (non-deterministic)");
+            nt_log_info("SELFTEST: async==blocking OK (sprites=%d pages=%d page0=%dx%d)", sc_a, pc_a, pw_a, ph_a);
+            s_st_phase = 10;
+            s_st_pf = 0;
+        }
+    } else if (s_st_phase == 10) {
+        /* Busy-strip overflow (req 6): the Packing.../Cancel strip must fit at the owner matrix. Forced
+         * busy (no real worker) so the strip renders its busy tier deterministically. */
+        const bool first = s_st_pf < 8;
+        const float win_w = first ? 1366.0F : 1024.0F;
+        const float win_h = 768.0F;
+        g_ui_scale = first ? 1.5F : 2.0F;
+        g_nt_window.fb_width = (uint32_t)win_w;
+        g_nt_window.fb_height = (uint32_t)win_h;
+        gui_pack_debug_force_busy(GUI_PACK_ASYNC_PACK);
+        if (s_st_pf == 6 || s_st_pf == 13) { /* size held >= 2 frames -> the lagged bbox reflects the busy strip */
+            selftest_assert_no_overflow(win_w, win_h);
+            nt_log_info("SELFTEST: busy-strip overflow OK (%.0fx%.0f@%.1f)", (double)win_w, (double)win_h,
+                        (double)g_ui_scale);
+        }
+        if (s_st_pf >= 14) {
+            gui_pack_debug_force_busy(GUI_PACK_ASYNC_NONE);
+            g_ui_scale = 1.0F;
+            g_nt_window.fb_width = 1280;
+            g_nt_window.fb_height = 800;
+            s_st_phase = 11;
+            s_st_pf = 0;
+        }
+    } else {
+        g_nt_window.fb_width = 1280;
+        g_nt_window.fb_height = 800;
+        nt_app_quit();
+    }
+}
+
+/* Post-walk hook: pixel readbacks happen after nt_ui_walk has drawn the overlay. */
+void selftest_post_draw(void) {
+    if (s_st_phase != 1) {
+        return;
+    }
+    if (s_st_pf == 3) {
+        s_st_cyan0 = selftest_probe_cyan();
+    } else if (s_st_pf == 6) {
+        const int c1 = selftest_probe_cyan();
+        nt_log_info("SELFTEST: outline pixel probe cyan off=%d on=%d delta=%d", s_st_cyan0, c1, c1 - s_st_cyan0);
+        NT_ASSERT(s_st_cyan0 >= 0 && c1 >= 0);
+        NT_ASSERT(c1 - s_st_cyan0 >= 8); /* the hull outline MUST add cyan pixels (regression: cam on-plane -> 0-width) */
+        /* Hand off to the touch-on-render guard: a truly fresh project, no input, all sections expanded. */
+        gui_project_new();
+        s_sel_atlas = 0;
+        reset_selection();
+        s_about_open = false;
+        s_sec_atlas_open = true;
+        s_atlas_adv_open = true;
+        s_sec_region_open = true;
+        s_sec_anim_open = true;
+        s_sec_export_open = true;
+        free(s_st_baseline);
+        s_st_baseline = NULL;
+        s_st_baseline_n = 0;
+        tp_error e = {0};
+        (void)tp_project_save_buffer(gui_project_get(), &s_st_baseline, &s_st_baseline_n, &e);
+        s_st_phase = 2;
+        s_st_pf = 0;
+    }
+}
+
+#else
+
+/* NTPACKER_GUI_SELFTEST off: this TU intentionally compiles to nothing. A file-scope typedef keeps it
+ * a legal (non-empty) ISO C translation unit under -Wpedantic. */
+typedef int gui_selftest_empty_translation_unit;
+
+#endif /* NTPACKER_GUI_SELFTEST */

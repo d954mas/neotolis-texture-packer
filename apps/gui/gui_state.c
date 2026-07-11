@@ -109,6 +109,10 @@ bool s_sec_atlas_open = true, s_sec_region_open = true, s_sec_export_open = true
 bool s_atlas_adv_open = false;
 bool s_sec_anim_open = true;
 
+/* --- modal open flags (moved from the shell in step 3; shared with the selftest) --- */
+bool s_about_open;
+bool s_export_open;
+
 /* --- per-frame row tooltips --- */
 row_tip s_row_tips[MAX_ROW_TIPS];
 int s_row_tip_count;

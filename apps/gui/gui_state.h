@@ -128,6 +128,12 @@ extern bool s_sec_atlas_open, s_sec_region_open, s_sec_export_open;
 extern bool s_atlas_adv_open; /* Basic/Advanced disclosure (region F) */
 extern bool s_sec_anim_open;  /* the "Animation" section disclosure */
 
+/* Modal open flags: the About box + the Export dialog. Shared with the selftest (it opens both so the
+ * auto-quit frames render them, and closes them before the pixel probe), so they can never be
+ * view-local. Moved out of the shell in step 3; the chrome view TU takes over their declares in 6b. */
+extern bool s_about_open;
+extern bool s_export_open;
+
 /* Per-frame collected row tooltips: TRUNCATED-label full text AND icon-only remove-x "Remove" hints.
  * Bounded by visible (virtualized) rows + the right panel's target/frame lists, not project size. */
 #define MAX_ROW_TIPS 192
