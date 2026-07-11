@@ -121,13 +121,16 @@ static inline uint16_t Su(float px) { return (uint16_t)((px * g_ui_scale) + 0.5F
 /* Pack an sRGB triple into the engine's 0xAABBGGRR (opaque) -- clearer than hand-swizzling. */
 #define RGBA8(r, g, b) ((uint32_t)0xFF000000u | ((uint32_t)(b) << 16) | ((uint32_t)(g) << 8) | (uint32_t)(r))
 
-/* Base font px (scaled per frame into the g_* styles below). */
-#define FS_TITLE 17.0F
-#define FS_BODY 17.0F
-#define FS_ROW 16.0F
-#define FS_CAPTION 15.0F
-#define FS_HINT 19.0F
-#define FS_TAG 15.0F
+/* Base font px (scaled per frame into the g_* styles below). Redesign §2.3: widen the ladder so
+ * hierarchy reads from size+color+case (one vector font). title 16 strong / section 13 dim UPPERCASE /
+ * body+row 15 / caption 13 dim / hint 20 faint / tag 13. The old bunched 15-19 set gave no tiers. */
+#define FS_TITLE 16.0F
+#define FS_SECTION 13.0F
+#define FS_BODY 15.0F
+#define FS_ROW 15.0F
+#define FS_CAPTION 13.0F
+#define FS_HINT 20.0F
+#define FS_TAG 13.0F
 // #endregion
 
 // #region palette
@@ -139,7 +142,12 @@ static const Clay_Color C_BG = {17.0F, 18.0F, 23.0F, 255.0F};
 static const Clay_Color C_PANEL = {28.0F, 31.0F, 40.0F, 255.0F};
 static const Clay_Color C_CANVAS = {11.0F, 12.0F, 15.0F, 255.0F};
 static const Clay_Color C_BORDER = {52.0F, 58.0F, 72.0F, 255.0F};
-static const Clay_Color C_STATUS = {24.0F, 26.0F, 34.0F, 255.0F};     /* status/header fill: Packet B/C re-tints to `header` */
+static const Clay_Color C_STATUS = {24.0F, 26.0F, 34.0F, 255.0F};     /* status-bar fill (Packet C owns severity) */
+static const Clay_Color C_HEADER = {40.0F, 45.0F, 57.0F, 255.0F};     /* section-header fill: LIGHTER than panel so headers advance (§2.1) */
+static const Clay_Color C_INPUT = {21.0F, 23.0F, 30.0F, 255.0F};      /* field well: recessed, darker than panel (§2.1) */
+static const Clay_Color C_BORDER_STRONG = {86.0F, 132.0F, 204.0F, 255.0F}; /* focus ring / active input (§2.1) */
+static const Clay_Color C_ACCENT = {64.0F, 140.0F, 214.0F, 255.0F};   /* primary accent: section left-rule (§2.1) */
+/* danger red (§2.1) lives as the g_danger LABEL tier (remove-x hover tint); no Clay_Color needed. */
 static const Clay_Color C_SEL = {48.0F, 74.0F, 120.0F, 255.0F};       /* selected-row desaturated blue FILL */
 static const Clay_Color C_HOVER = {46.0F, 52.0F, 66.0F, 255.0F};      /* row/btn hover */
 static const Clay_Color C_TRANSPARENT = {0.0F, 0.0F, 0.0F, 0.0F};
@@ -150,8 +158,15 @@ static const Clay_Color C_TRANSPARENT = {0.0F, 0.0F, 0.0F, 0.0F};
  * scale (the §2.3 type-scale re-assignment is Packet B). The old dim title (recessed) is retired --
  * titles now take text-strong. */
 static const nt_ui_label_style_t g_title_base = {.font_id = 0, .font_size = FS_TITLE, .color = {230.0F, 234.0F, 242.0F, 255.0F}};
+/* Section caption (§2.3/§2.4): 13px text-dim, UPPERCASE (caller feeds uppercase strings) + slight tracking.
+ * The accent left-rule (not size/weight) is the "you are in a section" signal, so this stays quiet. */
+static const nt_ui_label_style_t g_section_base = {.font_id = 0, .font_size = FS_SECTION, .color = {140.0F, 148.0F, 164.0F, 255.0F}, .letter_tracking = 1};
 static const nt_ui_label_style_t g_body_base = {.font_id = 0, .font_size = FS_BODY, .color = {196.0F, 204.0F, 216.0F, 255.0F}};
 static const nt_ui_label_style_t g_row_base = {.font_id = 0, .font_size = FS_ROW, .color = {196.0F, 204.0F, 216.0F, 255.0F}};
+/* Selected-row label: text-strong (the selection fill carries the highlight; the label brightens too). */
+static const nt_ui_label_style_t g_row_strong_base = {.font_id = 0, .font_size = FS_ROW, .color = {230.0F, 234.0F, 242.0F, 255.0F}};
+/* Destructive affordance (remove-x hover tint): danger red (§2.1). */
+static const nt_ui_label_style_t g_danger_base = {.font_id = 0, .font_size = FS_CAPTION, .color = {214.0F, 96.0F, 96.0F, 255.0F}};
 static const nt_ui_label_style_t g_caption_base = {.font_id = 0, .font_size = FS_CAPTION, .color = {140.0F, 148.0F, 164.0F, 255.0F}};
 static const nt_ui_label_style_t g_canvas_hint_base = {.font_id = 0, .font_size = FS_HINT, .color = {98.0F, 104.0F, 120.0F, 255.0F}, .align = CLAY_TEXT_ALIGN_CENTER};
 static const nt_ui_label_style_t g_tag_base = {.font_id = 0, .font_size = FS_TAG, .color = {245.0F, 244.0F, 243.0F, 255.0F}};
@@ -166,7 +181,7 @@ static const nt_ui_label_style_t g_dim_base = {.font_id = 0, .font_size = FS_CAP
  * warn (stale). Icon tint on those buttons derives from these (ui_icon_btn packs the label color). */
 static const nt_ui_label_style_t g_onaccent_base = {.font_id = 0, .font_size = FS_BODY, .color = {234.0F, 240.0F, 248.0F, 255.0F}};
 static const nt_ui_label_style_t g_onwarn_base = {.font_id = 0, .font_size = FS_BODY, .color = {40.0F, 28.0F, 12.0F, 255.0F}};
-static nt_ui_label_style_t g_title, g_body, g_row, g_caption, g_canvas_hint, g_tag, g_warn, g_link, g_dim; /* scaled each frame */
+static nt_ui_label_style_t g_title, g_section, g_body, g_row, g_row_strong, g_caption, g_canvas_hint, g_tag, g_warn, g_link, g_dim, g_danger; /* scaled each frame */
 static nt_ui_label_style_t g_onaccent, g_onwarn;                                                           /* colored-button content (scaled each frame) */
 static nt_ui_label_style_t g_check;                                                                        /* checkbox tick glyph (scaled each frame) */
 
@@ -258,6 +273,9 @@ static nt_atlas_region_ref_t s_white_ref;
  * baked atlas (layers/folder/film/... hero) is for Packets B/C. */
 static nt_atlas_region_ref_t s_ic_layout_grid, s_ic_triangle_alert, s_ic_download, s_ic_refresh;
 static nt_atlas_region_ref_t s_ic_chevron_left, s_ic_chevron_right, s_ic_minus, s_ic_plus, s_ic_scan, s_ic_maximize;
+/* Packet B row/section icons (bound in try_bind_resources alongside the strip set). */
+static nt_atlas_region_ref_t s_ic_chevron_down, s_ic_layers, s_ic_folder, s_ic_image, s_ic_film;
+static nt_atlas_region_ref_t s_ic_file_plus, s_ic_folder_plus, s_ic_x;
 static nt_ui_dropdown_style_t s_dd_style;
 static nt_ui_slider_style_t s_slider_style;
 static nt_ui_input_style_t s_num_input;   /* numeric + short text fields */
@@ -472,8 +490,9 @@ typedef struct sprite_row {
 static sprite_row s_rows[MAX_ROWS];
 static int s_row_count;
 
-/* Per-frame collected row tooltips for TRUNCATED labels (full text on hover). */
-#define MAX_ROW_TIPS 96
+/* Per-frame collected row tooltips: TRUNCATED-label full text AND icon-only remove-x "Remove" hints.
+ * Bounded by visible (virtualized) rows + the right panel's target/frame lists, not project size. */
+#define MAX_ROW_TIPS 192
 typedef struct row_tip {
     uint32_t id;
     char full[224];
@@ -1757,9 +1776,12 @@ static void ensure_ids(void) {
     s_rename_input.text.color = (Clay_Color){225.0F, 228.0F, 235.0F, 255.0F};
     s_rename_input.placeholder.font_id = 0;
     s_rename_input.placeholder.color = (Clay_Color){120.0F, 126.0F, 138.0F, 255.0F};
-    s_rename_input.skin[NT_UI_INPUT_IDLE].bg_color = 0xFF2A2E38U;
-    s_rename_input.skin[NT_UI_INPUT_FOCUSED].bg_color = 0xFF343A46U;
-    s_rename_input.skin[NT_UI_INPUT_FOCUSED].border_color = 0xFFA0764AU;
+    /* Field well (§2.7 item 7): recessed `input` fill + `border`; focus ring = `border-strong` blue. */
+    s_rename_input.skin[NT_UI_INPUT_IDLE].bg_color = RGBA8(21, 23, 30);
+    s_rename_input.skin[NT_UI_INPUT_IDLE].border_color = RGBA8(52, 58, 72);
+    s_rename_input.skin[NT_UI_INPUT_FOCUSED].bg_color = RGBA8(21, 23, 30);
+    s_rename_input.skin[NT_UI_INPUT_FOCUSED].border_color = RGBA8(86, 132, 204);
+    s_rename_input.border_width = 1.0F;
 
     /* Settings-panel widget styles. The atlas WHITE region (s_white_ref, bound by now
      * since can_render gates ensure_ids) is the art for checkbox/slider parts, tinted
@@ -1768,9 +1790,12 @@ static void ensure_ids(void) {
     s_dd_style.font_id = 0;
     s_dd_style.trigger_text = RGBA8(214, 220, 230);
     s_dd_style.row_text = RGBA8(214, 220, 230);
-    s_dd_style.trigger_idle.fill = RGBA8(42, 46, 56);
-    s_dd_style.trigger_hover.fill = RGBA8(54, 60, 74);
-    s_dd_style.trigger_pressed.fill = RGBA8(36, 40, 50);
+    /* Well look (§2.7 item 7): recessed `input` fill so combos read as fields, not buttons. The engine
+     * dropdown trigger has no border field, so the recessed fill (darker than panel) carries the well
+     * read; the open state uses the lighter `pressed` tint as its active signal. */
+    s_dd_style.trigger_idle.fill = RGBA8(21, 23, 30);
+    s_dd_style.trigger_hover.fill = RGBA8(30, 34, 44);
+    s_dd_style.trigger_pressed.fill = RGBA8(40, 46, 58);
     s_dd_style.panel_fill = RGBA8(30, 33, 41);
     s_dd_style.row_idle.fill = 0U;
     s_dd_style.row_hover.fill = RGBA8(54, 60, 74);
@@ -1792,10 +1817,15 @@ static void ensure_ids(void) {
     s_num_input.text.color = (Clay_Color){225.0F, 228.0F, 235.0F, 255.0F};
     s_num_input.placeholder.font_id = 0;
     s_num_input.placeholder.color = (Clay_Color){120.0F, 126.0F, 138.0F, 255.0F};
-    s_num_input.skin[NT_UI_INPUT_IDLE].bg_color = RGBA8(42, 46, 56);
-    s_num_input.skin[NT_UI_INPUT_FOCUSED].bg_color = RGBA8(52, 58, 70);
-    s_num_input.skin[NT_UI_INPUT_FOCUSED].border_color = RGBA8(160, 118, 74);
-    s_num_input.skin[NT_UI_INPUT_DISABLED].bg_color = RGBA8(34, 36, 42);
+    /* Field well (§2.7 item 7): recessed `input` fill + always-on `border`; focus/active = `border-strong`. */
+    s_num_input.skin[NT_UI_INPUT_IDLE].bg_color = RGBA8(21, 23, 30);
+    s_num_input.skin[NT_UI_INPUT_IDLE].border_color = RGBA8(52, 58, 72);
+    s_num_input.skin[NT_UI_INPUT_HOVER].bg_color = RGBA8(21, 23, 30);
+    s_num_input.skin[NT_UI_INPUT_HOVER].border_color = RGBA8(70, 78, 96);
+    s_num_input.skin[NT_UI_INPUT_FOCUSED].bg_color = RGBA8(21, 23, 30);
+    s_num_input.skin[NT_UI_INPUT_FOCUSED].border_color = RGBA8(86, 132, 204);
+    s_num_input.skin[NT_UI_INPUT_DISABLED].bg_color = RGBA8(26, 28, 36);
+    s_num_input.skin[NT_UI_INPUT_DISABLED].border_color = RGBA8(40, 44, 54);
     s_num_input.border_width = 1.0F;
 
     s_panel_scroll = nt_ui_scroll_style_defaults();
@@ -1816,10 +1846,17 @@ static void ensure_ids(void) {
 static void apply_ui_scale(void) {
     g_title = g_title_base;
     g_title.font_size = S(FS_TITLE);
+    g_section = g_section_base;
+    g_section.font_size = S(FS_SECTION);
+    g_section.letter_tracking = (uint16_t)(S(1.0F) + 0.5F);
     g_body = g_body_base;
     g_body.font_size = S(FS_BODY);
     g_row = g_row_base;
     g_row.font_size = S(FS_ROW);
+    g_row_strong = g_row_strong_base;
+    g_row_strong.font_size = S(FS_ROW);
+    g_danger = g_danger_base;
+    g_danger.font_size = S(FS_CAPTION);
     g_caption = g_caption_base;
     g_caption.font_size = S(FS_CAPTION);
     g_canvas_hint = g_canvas_hint_base;
@@ -1893,6 +1930,14 @@ static void try_bind_resources(void) {
         s_ic_plus = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_PLUS);
         s_ic_scan = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_SCAN);
         s_ic_maximize = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_MAXIMIZE_2);
+        s_ic_chevron_down = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_CHEVRON_DOWN);
+        s_ic_layers = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_LAYERS);
+        s_ic_folder = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_FOLDER);
+        s_ic_image = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_IMAGE);
+        s_ic_film = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_FILM);
+        s_ic_file_plus = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_FILE_PLUS);
+        s_ic_folder_plus = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_FOLDER_PLUS);
+        s_ic_x = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_X);
         s_atlas_bound = true;
         nt_log_info("ntpacker-gui: atlas white + icon regions bound");
     }
@@ -1956,6 +2001,31 @@ static bool ui_icon_btn(nt_ui_context_t *ctx, uint32_t id, nt_atlas_region_ref_t
     return nt_ui_button_end(ctx) && enabled;
 }
 
+/* Standalone leading type-icon for a list row (§3 grid: S(14) box). Pure draw (no events) -- keeps the
+ * virtualized rows render-pure for the touch-on-render guard. `tint` is a label tier; the mask tints to
+ * its color so one baked white icon serves dim/text/strong/selected. */
+static void ui_row_icon(nt_ui_context_t *ctx, nt_atlas_region_ref_t *icon, const nt_ui_label_style_t *tint) {
+    if (!icon || icon->atlas.id == 0U) {
+        return;
+    }
+    nt_ui_image_style_t istyle = nt_ui_image_style_defaults();
+    istyle.color_packed = label_tint(tint);
+    CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(S(14.0F)), CLAY_SIZING_FIXED(S(14.0F))}}}) {
+        nt_ui_image(ctx, NT_UI_DATA_LAYER(LAYER_IMG), icon, &istyle, NULL);
+    }
+}
+#define ROW_ICON_RESERVE 20.0F /* icon box S(14) + childGap S(6): subtract from a row's text width */
+
+/* Section caption: a 3px `accent` left-rule + an UPPERCASE `section`-style label. Emitted as two children
+ * of a horizontal row (the caller supplies the row + childGap). The rule is the "you are in a section"
+ * signal (§2.4); used on the left panel's ATLASES/SPRITES/ANIMATIONS zones. */
+static void section_rule_label(nt_ui_context_t *ctx, const char *text) {
+    CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(S(3.0F)), CLAY_SIZING_FIXED(S(14.0F))}},
+          .backgroundColor = C_ACCENT,
+          .cornerRadius = CLAY_CORNER_RADIUS(S(1.5F))}) {}
+    nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), text, &g_section);
+}
+
 /* Ellipsis-truncated label so text never draws past `max_w`; records a hover tooltip
  * (full text) against `tip_id` when it truncated (tip_id 0 = no tooltip). */
 static void ui_label_fit(nt_ui_context_t *ctx, const char *text, const nt_ui_label_style_t *lbl, float max_w, uint32_t tip_id) {
@@ -1976,15 +2046,20 @@ static bool tp_checkbox(nt_ui_context_t *ctx, uint32_t id, bool cur, bool enable
     if (enabled) {
         ev = nt_ui_events(ctx, id, NULL);
     }
-    Clay_Color bg = (Clay_Color){42.0F, 46.0F, 56.0F, 255.0F};
+    /* Field well (§2.7 item 7): recessed `input` fill; the BORDER carries state -- `border` idle,
+     * `border-strong` when checked/active, dim when disabled. */
+    Clay_Color bg = C_INPUT;
     if (!enabled) {
-        bg = (Clay_Color){32.0F, 34.0F, 40.0F, 255.0F};
+        bg = (Clay_Color){26.0F, 28.0F, 36.0F, 255.0F};
     } else if (ev.pressed) {
-        bg = (Clay_Color){36.0F, 40.0F, 50.0F, 255.0F};
-    } else if (ev.hovered) {
-        bg = (Clay_Color){54.0F, 60.0F, 74.0F, 255.0F};
+        bg = (Clay_Color){28.0F, 31.0F, 40.0F, 255.0F};
     }
-    const Clay_Color border = cur ? (Clay_Color){78.0F, 126.0F, 192.0F, 255.0F} : (Clay_Color){96.0F, 102.0F, 116.0F, 255.0F};
+    Clay_Color border = cur ? C_BORDER_STRONG : C_BORDER;
+    if (!enabled) {
+        border = (Clay_Color){40.0F, 44.0F, 54.0F, 255.0F};
+    } else if (ev.hovered || ev.pressed) {
+        border = C_BORDER_STRONG;
+    }
     nt_ui_label_style_t glyph = g_check;
     if (!enabled) {
         glyph.color = (Clay_Color){120.0F, 126.0F, 138.0F, 255.0F};
@@ -2196,7 +2271,9 @@ static bool render_rename_field(nt_ui_context_t *ctx) {
 }
 
 static void declare_atlas_list(nt_ui_context_t *ctx, tp_project *proj) {
-    nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "ATLASES", &g_title);
+    CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(20.0F))}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+        section_rule_label(ctx, "ATLASES");
+    }
     for (int i = 0; i < proj->atlas_count; i++) {
         char idbuf[64];
         (void)snprintf(idbuf, sizeof idbuf, "ntpacker/atlas_row_%d", i);
@@ -2232,21 +2309,25 @@ static void declare_atlas_list(nt_ui_context_t *ctx, tp_project *proj) {
                          .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}},
               .backgroundColor = bg,
               .cornerRadius = CLAY_CORNER_RADIUS(S(4))}) {
-            CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+            CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+                ui_row_icon(ctx, &s_ic_layers, selected ? &g_row_strong : &g_caption);
                 if (editing) {
                     if (render_rename_field(ctx)) {
                         commit_atlas_rename();
                     }
                 } else {
-                    ui_label_fit(ctx, proj->atlases[i].name, &g_row, left_row_text_w(S(8.0F), has_x), row_id);
+                    ui_label_fit(ctx, proj->atlases[i].name, selected ? &g_row_strong : &g_row,
+                                 fmaxf(left_row_text_w(S(8.0F), has_x) - S(ROW_ICON_RESERVE), S(16.0F)), row_id);
                 }
             }
             if (has_x) {
-                (void)ui_btn(ctx, x_id, "x", &g_btn_ghost, true, 24.0F, 22.0F, &g_caption);
+                record_row_tip(x_id, "Remove atlas");
+                (void)ui_icon_btn(ctx, x_id, &s_ic_x, 12.0F, NULL, &g_btn_ghost, true, 24.0F, 22.0F,
+                                  xev.hovered ? &g_danger : &g_caption);
             }
         }
     }
-    if (ui_btn(ctx, nt_ui_id("ntpacker/add_atlas"), "+ Atlas", &g_btn_ghost, true, 0.0F, 26.0F, &g_caption)) {
+    if (ui_icon_btn(ctx, nt_ui_id("ntpacker/add_atlas"), &s_ic_plus, 16.0F, "Atlas", &g_btn_ghost, true, 0.0F, 26.0F, &g_caption)) {
         s_pending_add_atlas = true;
     }
 }
@@ -2296,12 +2377,12 @@ static void select_sprite_row(int i, bool ctrl, bool shift) {
 
 static void declare_sprite_list(nt_ui_context_t *ctx) {
     CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(28))}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
-        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "SPRITES", &g_title);
+        section_rule_label(ctx, "SPRITES");
         CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}}) {}
-        if (ui_btn(ctx, nt_ui_id("ntpacker/add_files"), "+ Files", &g_btn_ghost, true, 0.0F, 24.0F, &g_caption)) {
+        if (ui_icon_btn(ctx, nt_ui_id("ntpacker/add_files"), &s_ic_file_plus, 16.0F, "Files", &g_btn_ghost, true, 0.0F, 24.0F, &g_caption)) {
             s_pending_add_files = true;
         }
-        if (ui_btn(ctx, nt_ui_id("ntpacker/add_folder"), "+ Folder", &g_btn_ghost, true, 0.0F, 24.0F, &g_caption)) {
+        if (ui_icon_btn(ctx, nt_ui_id("ntpacker/add_folder"), &s_ic_folder_plus, 16.0F, "Folder", &g_btn_ghost, true, 0.0F, 24.0F, &g_caption)) {
             s_pending_add_folder = true;
         }
     }
@@ -2332,8 +2413,9 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
             const bool selected = primary || (leaf_row && multi_sel_contains(row->sprite_name));
             const nt_ui_events_t ev = nt_ui_events(ctx, hit_id, &s_dbl_cfg);
             bool x_clicked = false;
+            nt_ui_events_t xev = {0}; /* hoisted: the render below reads xev.hovered for the danger tint */
             if (row->is_source) {
-                const nt_ui_events_t xev = nt_ui_events(ctx, x_id, NULL);
+                xev = nt_ui_events(ctx, x_id, NULL);
                 x_clicked = xev.clicked;
                 if (x_clicked) {
                     s_pending_remove_source = row->src;
@@ -2366,7 +2448,11 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
             }
             const Clay_Color bg = selected ? C_SEL : (ev.hovered ? C_HOVER : C_TRANSPARENT);
             const uint16_t indent = Su(8.0F + ((float)row->indent * 16.0F));
-            const nt_ui_label_style_t *lbl = row->missing ? &g_warn : (row->is_folder ? &g_body : &g_row);
+            /* Leading type icon: folder for a directory source, image for a sprite leaf (folder child or
+             * file source); missing files reuse the image mask tinted warn. Label brightens on selection. */
+            const nt_ui_label_style_t *lbl = row->missing ? &g_warn : (selected ? &g_row_strong : &g_row);
+            nt_atlas_region_ref_t *ic = row->is_folder ? &s_ic_folder : &s_ic_image;
+            const nt_ui_label_style_t *ic_tint = row->missing ? &g_warn : (selected ? &g_row_strong : &g_caption);
             CLAY({.id = {.id = row_id},
                   .layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H))},
                              .padding = {indent, Su(4), 0, 0},
@@ -2375,17 +2461,21 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
                   .backgroundColor = bg,
                   .cornerRadius = CLAY_CORNER_RADIUS(S(4))}) {
                 CLAY({.id = {.id = hit_id},
-                      .layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+                      .layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+                    ui_row_icon(ctx, ic, ic_tint);
                     if (editing) {
                         if (render_rename_field(ctx)) {
                             commit_sprite_rename();
                         }
                     } else {
-                        ui_label_fit(ctx, row->label, lbl, left_row_text_w(S(8.0F + (float)row->indent * 16.0F), row->is_source), hit_id);
+                        ui_label_fit(ctx, row->label, lbl,
+                                     fmaxf(left_row_text_w(S(8.0F + (float)row->indent * 16.0F), row->is_source) - S(ROW_ICON_RESERVE), S(16.0F)), hit_id);
                     }
                 }
                 if (row->is_source) {
-                    (void)ui_btn(ctx, x_id, "x", &g_btn_ghost, true, 24.0F, 22.0F, &g_caption);
+                    record_row_tip(x_id, "Remove source");
+                    (void)ui_icon_btn(ctx, x_id, &s_ic_x, 12.0F, NULL, &g_btn_ghost, true, 24.0F, 22.0F,
+                                      xev.hovered ? &g_danger : &g_caption);
                 }
             }
         }
@@ -2397,9 +2487,9 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
  * [x] remove + right-click Rename/Remove/Preview, "+ Animation" to add. Double-click a row = preview. */
 static void declare_animations_list(nt_ui_context_t *ctx, tp_project_atlas *a) {
     CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(28))}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
-        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "ANIMATIONS", &g_title);
+        section_rule_label(ctx, "ANIMATIONS");
         CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}}) {}
-        if (ui_btn(ctx, nt_ui_id("ntpacker/add_anim"), "+ Animation", &g_btn_ghost, true, 0.0F, 24.0F, &g_caption)) {
+        if (ui_icon_btn(ctx, nt_ui_id("ntpacker/add_anim"), &s_ic_plus, 16.0F, "Animation", &g_btn_ghost, true, 0.0F, 24.0F, &g_caption)) {
             s_pending_add_anim = true;
         }
     }
@@ -2443,19 +2533,23 @@ static void declare_animations_list(nt_ui_context_t *ctx, tp_project_atlas *a) {
                          .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}},
               .backgroundColor = bg,
               .cornerRadius = CLAY_CORNER_RADIUS(S(4))}) {
-            CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+            CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+                ui_row_icon(ctx, &s_ic_film, selected ? &g_row_strong : &g_caption);
                 if (editing) {
                     if (render_rename_field(ctx)) {
                         commit_anim_rename();
                     }
                 } else {
-                    ui_label_fit(ctx, a->animations[i].id, &g_row, left_row_text_w(S(8.0F), true) - S(28.0F), row_id);
+                    ui_label_fit(ctx, a->animations[i].id, selected ? &g_row_strong : &g_row,
+                                 fmaxf(left_row_text_w(S(8.0F), true) - S(28.0F) - S(ROW_ICON_RESERVE), S(16.0F)), row_id);
                 }
             }
             char fc[16];
             (void)snprintf(fc, sizeof fc, "%df", a->animations[i].frame_count);
             nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), fc, &g_caption);
-            (void)ui_btn(ctx, x_id, "x", &g_btn_ghost, true, 24.0F, 22.0F, &g_caption);
+            record_row_tip(x_id, "Remove animation");
+            (void)ui_icon_btn(ctx, x_id, &s_ic_x, 12.0F, NULL, &g_btn_ghost, true, 24.0F, 22.0F,
+                              xev.hovered ? &g_danger : &g_caption);
         }
     }
 }
@@ -3308,25 +3402,37 @@ static bool ui_text_field(nt_ui_context_t *ctx, uint32_t id, char *buf, size_t c
     return (changed || submitted) && enabled;
 }
 
-/* A collapsible section/disclosure header: full-width clickable row + chevron. */
+/* A collapsible section/disclosure header (§2.4): `header` fill (lighter than panel -> advances),
+ * a 3px `accent` left-rule (main sections only), a chevron ICON, and a `section`/`title` label. Pass
+ * accent_rule=true + C_HEADER for a top-level section, false + a recessed fill for a nested disclosure. */
 static void panel_header(nt_ui_context_t *ctx, uint32_t id, const char *title, bool *open, const nt_ui_label_style_t *lbl,
-                         const Clay_Color bg_col) {
+                         const Clay_Color bg_col, bool accent_rule) {
     const nt_ui_events_t ev = nt_ui_events(ctx, id, NULL);
     if (ev.clicked) {
         *open = !*open;
     }
     const Clay_Color bg = ev.hovered ? C_HOVER : bg_col;
+    const uint16_t padL = accent_rule ? 0U : Su(8); /* the flush rule + childGap provide the left inset */
+    nt_ui_image_style_t chev = nt_ui_image_style_defaults();
+    chev.color_packed = label_tint(lbl);
     CLAY({.id = {.id = id},
           .layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(26.0F))},
-                     .padding = {Su(8), Su(8), 0, 0},
+                     .padding = {padL, Su(8), 0, 0},
                      .childGap = Su(6),
                      .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}},
           .backgroundColor = bg,
           .cornerRadius = CLAY_CORNER_RADIUS(S(4))}) {
-        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), *open ? "\xE2\x96\xBE" : "\xE2\x96\xB8", &g_caption); /* U+25BE / U+25B8 */
+        if (accent_rule) {
+            CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(S(3.0F)), CLAY_SIZING_GROW(0)}},
+                  .backgroundColor = C_ACCENT,
+                  .cornerRadius = CLAY_CORNER_RADIUS(S(1.5F))}) {}
+        }
+        CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(S(12.0F)), CLAY_SIZING_FIXED(S(12.0F))}}}) {
+            nt_ui_image(ctx, NT_UI_DATA_LAYER(LAYER_IMG), *open ? &s_ic_chevron_down : &s_ic_chevron_right, &chev, NULL);
+        }
         /* Ellipsize: an untruncated title word (e.g. "Animation" at the title size) alone exceeded a narrow
          * panel and forced the GROW scroll wider than the panel at 2x scale. */
-        ui_label_fit(ctx, title, lbl, fmaxf(s_right_panel_w - S(72.0F), S(30.0F)), 0U);
+        ui_label_fit(ctx, title, lbl, fmaxf(s_right_panel_w - S(86.0F), S(30.0F)), 0U);
     }
 }
 
@@ -3496,7 +3602,7 @@ static void declare_atlas_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
     }
 
     /* Advanced disclosure. */
-    panel_header(ctx, nt_ui_id("set/adv"), "Advanced", &s_atlas_adv_open, &g_body, C_BG);
+    panel_header(ctx, nt_ui_id("set/adv"), "ADVANCED", &s_atlas_adv_open, &g_section, C_BG, false);
     if (!s_atlas_adv_open) {
         return;
     }
@@ -3575,29 +3681,23 @@ static int row_override_combo(nt_ui_context_t *ctx, const char *label, uint32_t 
     return (pick == 0) ? TP_PROJECT_OV_INHERIT : (explicit_base + pick - 1);
 }
 
-/* A "<value> [Rename]" row that never overruns the panel. Wide panel: value ellipsizes with the Rename
- * button's width reserved beside it. Narrow panel (< S(210)): the value takes its own row and Rename drops
- * to a right-aligned row below -- label + value + button can't share one line at that width. Returns clicked. */
+/* A "<value> [Rename]" row that never overruns the panel and shows the value at its ACTUAL free width.
+ * Two rows: the value on its own line (aligned to the label column, using nearly the whole widget cell --
+ * ~207px at 1920x1080@1.5, so a 14-char export name shows un-truncated), then a right-aligned Rename below.
+ * The old single-line layout parked the value behind the fixed 174px label cell AND over-reserved a fat
+ * S(96) guess for the button, cramming it to ~84px ("roun..."); but measurement proves label(123) +
+ * value(172) + Rename(110) = 405 > the 402px panel content, so all three CANNOT share one line at 300px --
+ * the value must own its row. Returns clicked. */
 static bool right_panel_rename_row(nt_ui_context_t *ctx, const char *label, const char *value, uint32_t btn_id) {
     bool clicked = false;
-    if (s_right_panel_w >= S(210.0F)) {
-        PANEL_ROW_BEGIN(label, &g_row) {
-            ui_label_fit(ctx, value, &g_body, right_panel_text_w(s_panel_label_w + S(96.0F)), 0U); /* reserve Rename + gaps */
-            if (ui_btn(ctx, btn_id, "Rename", &g_btn_ghost, true, 0.0F, 24.0F, &g_caption)) {
-                clicked = true;
-            }
-        }
-        PANEL_ROW_END;
-    } else {
-        PANEL_ROW_BEGIN(label, &g_row) {
-            ui_label_fit(ctx, value, &g_body, right_panel_text_w(s_panel_label_w + S(14.0F)), 0U);
-        }
-        PANEL_ROW_END;
-        CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H))},
-                         .childAlignment = {CLAY_ALIGN_X_RIGHT, CLAY_ALIGN_Y_CENTER}}}) {
-            if (ui_btn(ctx, btn_id, "Rename", &g_btn_ghost, true, 0.0F, 24.0F, &g_caption)) {
-                clicked = true;
-            }
+    PANEL_ROW_BEGIN(label, &g_row) {
+        ui_label_fit(ctx, value, &g_body, right_panel_text_w(s_panel_label_w + S(14.0F)), 0U);
+    }
+    PANEL_ROW_END;
+    CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H))},
+                     .childAlignment = {CLAY_ALIGN_X_RIGHT, CLAY_ALIGN_Y_CENTER}}}) {
+        if (ui_btn(ctx, btn_id, "Rename", &g_btn_ghost, true, 0.0F, 24.0F, &g_caption)) {
+            clicked = true;
         }
     }
     return clicked;
@@ -3686,7 +3786,7 @@ static void declare_region_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
     }
 
     /* Per-region packing overrides (owner scope 2026-07-10). */
-    panel_header(ctx, nt_ui_id("reg/ov"), "Packing overrides", &s_region_ov_open, &g_body, C_BG);
+    panel_header(ctx, nt_ui_id("reg/ov"), "PACKING OVERRIDES", &s_region_ov_open, &g_section, C_BG, false);
     if (!s_region_ov_open) {
         return;
     }
@@ -3848,7 +3948,10 @@ static void declare_export_targets(nt_ui_context_t *ctx, tp_project_atlas *a) {
                 } else {
                     CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}}) {} /* push x to the right */
                 }
-                if (ui_btn(ctx, nt_ui_child_id(row_id, "rm"), "x", &g_btn_ghost, true, 24.0F, 22.0F, &g_caption)) {
+                const uint32_t rm_id = nt_ui_child_id(row_id, "rm");
+                record_row_tip(rm_id, "Remove target");
+                if (ui_icon_btn(ctx, rm_id, &s_ic_x, 12.0F, NULL, &g_btn_ghost, true, 24.0F, 22.0F,
+                                nt_ui_query_events(ctx, rm_id).hovered ? &g_danger : &g_caption)) {
                     s_pending_remove_target = ti;
                 }
             }
@@ -3871,7 +3974,7 @@ static void declare_export_targets(nt_ui_context_t *ctx, tp_project_atlas *a) {
             }
         }
     }
-    if (ui_btn(ctx, nt_ui_id("tgt/add"), "+ Target", &g_btn_ghost, true, 0.0F, 26.0F, &g_caption)) {
+    if (ui_icon_btn(ctx, nt_ui_id("tgt/add"), &s_ic_plus, 16.0F, "Target", &g_btn_ghost, true, 0.0F, 26.0F, &g_caption)) {
         s_pending_add_target = true;
     }
 }
@@ -3974,7 +4077,10 @@ static void declare_animation_editor(nt_ui_context_t *ctx, tp_project_atlas *a) 
                 fact = 3;
                 fidx = fi;
             }
-            if (ui_btn(ctx, nt_ui_child_id(row_id, "x"), "x", &g_btn_ghost, true, 24.0F, 22.0F, &g_caption)) {
+            const uint32_t frm_x_id = nt_ui_child_id(row_id, "x");
+            record_row_tip(frm_x_id, "Remove frame");
+            if (ui_icon_btn(ctx, frm_x_id, &s_ic_x, 12.0F, NULL, &g_btn_ghost, true, 24.0F, 22.0F,
+                            nt_ui_query_events(ctx, frm_x_id).hovered ? &g_danger : &g_caption)) {
                 fact = 1;
                 fidx = fi;
             }
@@ -4017,22 +4123,22 @@ static void declare_right_panel(nt_ui_context_t *ctx) {
             } else {
                 char title[96];
                 (void)snprintf(title, sizeof title, "Atlas settings \xC2\xB7 %s", a->name);
-                panel_header(ctx, nt_ui_id("sec/atlas"), title, &s_sec_atlas_open, &g_title, C_STATUS);
+                panel_header(ctx, nt_ui_id("sec/atlas"), title, &s_sec_atlas_open, &g_title, C_HEADER, true);
                 if (s_sec_atlas_open) {
                     declare_atlas_settings(ctx, a);
                 }
                 CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(6))}}}) {}
-                panel_header(ctx, nt_ui_id("sec/region"), "Region", &s_sec_region_open, &g_title, C_STATUS);
+                panel_header(ctx, nt_ui_id("sec/region"), "REGION", &s_sec_region_open, &g_section, C_HEADER, true);
                 if (s_sec_region_open) {
                     declare_region_settings(ctx, a);
                 }
                 CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(6))}}}) {}
-                panel_header(ctx, nt_ui_id("sec/anim"), "Animation", &s_sec_anim_open, &g_title, C_STATUS);
+                panel_header(ctx, nt_ui_id("sec/anim"), "ANIMATION", &s_sec_anim_open, &g_section, C_HEADER, true);
                 if (s_sec_anim_open) {
                     declare_animation_editor(ctx, a);
                 }
                 CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(6))}}}) {}
-                panel_header(ctx, nt_ui_id("sec/export"), "Export targets", &s_sec_export_open, &g_title, C_STATUS);
+                panel_header(ctx, nt_ui_id("sec/export"), "EXPORT TARGETS", &s_sec_export_open, &g_section, C_HEADER, true);
                 if (s_sec_export_open) {
                     declare_export_targets(ctx, a);
                 }
