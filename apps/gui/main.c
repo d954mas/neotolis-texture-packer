@@ -524,6 +524,11 @@ static int s_row_tip_count;
 #define GUI_PRINTF(fmt_idx, args_idx)
 #endif
 
+/* DEV (--shot): wall-clock values in status text (pack ms) vary run-to-run and break the
+ * byte-identical screenshot comparison used as a refactor gate; the shot seam sets this so
+ * timed status messages print a fixed 0 instead. */
+static bool s_status_fixed_time;
+
 static void set_status(const char *msg) {
     s_status_sev = STATUS_INFO;
     s_status_dismissed = false; /* a new message re-shows the pill (replaces any prior one) */
@@ -1420,10 +1425,11 @@ static void do_pack_blocking(void) {
         s_last_pack_atlas = s_sel_atlas;
         /* the per-frame canvas<->atlas sync (frame()) picks up the new result pointer and uploads. */
         const tp_result *r = gui_pack_result(s_sel_atlas);
+        const double shown_ms = s_status_fixed_time ? 0.0 : ms;
         if (note[0] != '\0') {
-            set_statusf_ex(STATUS_SUCCESS, "Packed %d sprites, %d page(s) in %.0f ms (%s)", r->sprite_count, r->page_count, ms, note);
+            set_statusf_ex(STATUS_SUCCESS, "Packed %d sprites, %d page(s) in %.0f ms (%s)", r->sprite_count, r->page_count, shown_ms, note);
         } else {
-            set_statusf_ex(STATUS_SUCCESS, "Packed %d sprites, %d page(s) in %.0f ms", r->sprite_count, r->page_count, ms);
+            set_statusf_ex(STATUS_SUCCESS, "Packed %d sprites, %d page(s) in %.0f ms", r->sprite_count, r->page_count, shown_ms);
         }
     } else {
         set_statusf_ex(STATUS_ERROR, "Pack failed: %s", err);
@@ -5757,6 +5763,7 @@ int main(int argc, char *argv[]) {
         if (strncmp(argv[i], "--shot=", 7) == 0) {
             (void)snprintf(s_shot_path, sizeof s_shot_path, "%s", argv[i] + 7);
             s_shot_active = s_shot_path[0] != '\0';
+            s_status_fixed_time = s_shot_active; /* shots must be byte-reproducible (refactor gate) */
         } else if (strncmp(argv[i], "--size=", 7) == 0) {
             int w = 0;
             int h = 0;
