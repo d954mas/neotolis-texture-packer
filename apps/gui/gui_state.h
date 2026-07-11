@@ -57,6 +57,13 @@ void set_status_ex(status_sev_t sev, const char *msg);
 void set_statusf(const char *fmt, ...) GUI_PRINTF(1, 2);
 void set_statusf_ex(status_sev_t sev, const char *fmt, ...) GUI_PRINTF(2, 3);
 
+/* Pack-button state cached for the tooltip pass. Written each frame by the canvas strip
+ * (gui_view_canvas's declare_canvas_strip); s_pack_stale is also read by the shell's
+ * declare_tooltips (chrome, moves to gui_view_chrome in step 6b) to word the Pack tooltip, so it
+ * can never be canvas-view-local -- same class of shared UI state as the disclosure/modal flags
+ * above (moved out of main.c in step 6a). */
+extern bool s_pack_has_sources, s_pack_stale;
+
 /* --- executable directory (resolved once at startup; selftest + pack-session paths hang off it) --- */
 extern char s_exe_dir[1024];
 

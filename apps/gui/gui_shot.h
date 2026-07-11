@@ -25,8 +25,13 @@ void gui_shot_apply_window_size(void);
 /* main(), after the DPI scale is detected: pin g_ui_scale to --scale for reproducible captures. */
 void gui_shot_apply_scale(void);
 
+/* True while a --shot capture is in progress. The shell gates the global hotkeys on it (the user
+ * may be typing/clicking elsewhere while a headless capture runs -- real input must not leak in). */
+bool gui_shot_active(void);
+
 /* frame(), inside can_render after build_rows: pack + select the first region, then (on the capture
- * frame) drive the PNG dump. No-op unless --shot is active. */
+ * frame) drive the PNG dump. No-op unless --shot is active. Also dead-sticks the mouse pointers
+ * each frame so the live cursor can't add hover/wheel state to the capture. */
 void gui_shot_tick(void);
 
 /* frame(), at the pre-swap point: full-frame PNG capture + SHOT-BOUNDS logging, then quit. */

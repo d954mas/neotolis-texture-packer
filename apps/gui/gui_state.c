@@ -44,6 +44,10 @@ void set_statusf_ex(status_sev_t sev, const char *fmt, ...) {
     s_status_dismissed = false;
 }
 
+/* --- pack-button state cached for the tooltip pass (moved from the shell in step 6a; shared with
+ * declare_tooltips, which stays in main.c until chrome, step 6b) --- */
+bool s_pack_has_sources, s_pack_stale;
+
 /* --- executable directory --- */
 char s_exe_dir[1024];
 

@@ -14,6 +14,7 @@
 #include "app/nt_app.h"       /* nt_app_quit */
 #include "fpng/nt_fpng.h"     /* nt_fpng_encode_rgb (PNG capture) */
 #include "graphics/nt_gfx.h"  /* nt_gfx_read_pixels */
+#include "input/nt_input.h"   /* g_nt_input (neutralized each shot frame) */
 #include "log/nt_log.h"       /* nt_log_info / nt_log_error */
 #include "ui/nt_ui.h"         /* nt_ui_get_bbox / nt_ui_bbox_t */
 #include "window/nt_window.h" /* g_nt_window (framebuffer dims) */
@@ -89,10 +90,22 @@ void gui_shot_apply_scale(void) {
     }
 }
 
+/* True while a --shot capture is in progress (the shell gates hotkeys on it). */
+bool gui_shot_active(void) { return s_shot_active; }
+
 /* Runs inside the can_render block, after build_rows (selection needs the row model). */
 void gui_shot_tick(void) {
     if (!s_shot_active) {
         return;
+    }
+    /* Byte-reproducibility: the shot window opens under the user's LIVE cursor, so real mouse
+     * state leaks into the capture (hover outlines, wheel zoom on the canvas -- both observed as
+     * flaky gate hashes while the owner used the machine). Dead-stick the pointers every frame
+     * BEFORE the input pre-pass + nt_ui_begin consume them; the shot drives selection itself. */
+    memset(g_nt_input.pointers, 0, sizeof g_nt_input.pointers);
+    for (size_t i = 0; i < NT_INPUT_MAX_POINTERS; i++) {
+        g_nt_input.pointers[i].x = -100000.0F;
+        g_nt_input.pointers[i].y = -100000.0F;
     }
     s_shot_frame++;
     if (s_shot_frame == 6) { /* resources are bound; pack the selected atlas like Ctrl+P would (blocking) */
