@@ -123,6 +123,7 @@ void gui_canvas_init(gui_canvas *c) {
     c->hover_sprite = -1;
     c->anim_sprite = -1;
     c->show_outline = true;
+    c->show_slice9 = true; /* silent unless the selected region actually has a slice9 inset */
     c->overlay_scale = 1.0F;
     c->scale = 1.0F;
     c->fit_pending = true;
@@ -792,6 +793,23 @@ static void region_source_rect(const tp_sprite *s, float ox, float oy, float sca
     }
 }
 
+/* One slice9 guide segment: trim-local endpoints -> D4 -> page -> world line (same mapping as the
+ * trim ghost corners, so guides stay glued to the sprite under any packed transform). */
+static void slice9_line(const float world[16], const tp_sprite *s, float ox, float oy, float scale,
+                        float x0, float y0, float x1, float y1, const float color[4]) {
+    float ax = 0.0F;
+    float ay = 0.0F;
+    float bx = 0.0F;
+    float by = 0.0F;
+    d4_decode_f(x0, y0, s->transform, (float)s->frame.w, (float)s->frame.h, &ax, &ay);
+    d4_decode_f(x1, y1, s->transform, (float)s->frame.w, (float)s->frame.h, &bx, &by);
+    float wa[3];
+    float wb[3];
+    layout_to_world(world, ox + ((float)s->frame.x + ax) * scale, oy + ((float)s->frame.y + ay) * scale, wa);
+    layout_to_world(world, ox + ((float)s->frame.x + bx) * scale, oy + ((float)s->frame.y + by) * scale, wb);
+    nt_shape_renderer_line(wa, wb, color);
+}
+
 /* Pivot in page-layout coords: pivot is normalized over sourceSize (y-down) -> source px -> trim-local
  * -> D4 -> page. May sit outside the frame. */
 static void pivot_point(const tp_sprite *s, float ox, float oy, float scale, float out[2]) {
@@ -867,7 +885,7 @@ void gui_canvas_handler(const nt_ui_custom_frame_t *frame, void *userdata) {
         /* overlays (shape renderer, world-space lines). Line widths scale with the host UI scale so
          * outlines read on high-DPI. Draw order: trim ghost, frame AABB, hull outline, pivot; the
          * hovered/selected hull last so it sits on top. */
-        if ((c->show_outline || c->show_trim || c->show_pivot || c->show_frame) && c->result) {
+        if ((c->show_outline || c->show_trim || c->show_pivot || c->show_frame || c->show_slice9) && c->result) {
             const float w = c->overlay_scale;
             const float col_out[4] = {0.30F, 0.72F, 1.0F, 0.80F * alpha};
             const float col_hov[4] = {0.95F, 0.97F, 1.0F, 0.95F * alpha};
@@ -918,6 +936,39 @@ void gui_canvas_handler(const nt_ui_custom_frame_t *frame, void *userdata) {
                 const int np = region_polygon(&c->result->sprites[c->sel_sprite], ox, oy, c->scale, pts, GUI_CANVAS_MAX_HULL);
                 nt_shape_renderer_set_line_width(3.0F * w);
                 stroke_polygon(world, pts, np, col_sel);
+            }
+            /* Slice9 guides (selected region only, ux: make the 9-patch cuts visible on the sprite):
+             * two vertical + two horizontal cut lines in untrimmed source space, mapped through the
+             * same D4 path as the trim ghost. Values come from the packed result (like pivots), so
+             * they reflect the LAST pack; silent for regions without a slice9 inset. */
+            if (c->show_slice9 && c->sel_sprite >= 0 && c->sel_sprite < c->result->sprite_count &&
+                c->result->sprites[c->sel_sprite].page == c->cur_page) {
+                const tp_sprite *s = &c->result->sprites[c->sel_sprite];
+                if (s->slice9_lrtb[0] || s->slice9_lrtb[1] || s->slice9_lrtb[2] || s->slice9_lrtb[3]) {
+                    const float col_s9[4] = {0.25F, 0.92F, 0.95F, 0.95F * alpha};
+                    const float sw = (float)s->sourceSize.w;
+                    const float sh = (float)s->sourceSize.h;
+                    /* source-image (0,0) sits at (-spriteSourceSize.x, -spriteSourceSize.y) trim-local */
+                    const float sx0 = -(float)s->spriteSourceSize.x;
+                    const float sy0 = -(float)s->spriteSourceSize.y;
+                    nt_shape_renderer_set_line_width(1.5F * w);
+                    if (s->slice9_lrtb[0]) {
+                        const float x = sx0 + (float)s->slice9_lrtb[0];
+                        slice9_line(world, s, ox, oy, c->scale, x, sy0, x, sy0 + sh, col_s9);
+                    }
+                    if (s->slice9_lrtb[1]) {
+                        const float x = sx0 + sw - (float)s->slice9_lrtb[1];
+                        slice9_line(world, s, ox, oy, c->scale, x, sy0, x, sy0 + sh, col_s9);
+                    }
+                    if (s->slice9_lrtb[2]) {
+                        const float y = sy0 + (float)s->slice9_lrtb[2];
+                        slice9_line(world, s, ox, oy, c->scale, sx0, y, sx0 + sw, y, col_s9);
+                    }
+                    if (s->slice9_lrtb[3]) {
+                        const float y = sy0 + sh - (float)s->slice9_lrtb[3];
+                        slice9_line(world, s, ox, oy, c->scale, sx0, y, sx0 + sw, y, col_s9);
+                    }
+                }
             }
             nt_shape_renderer_flush();
         }

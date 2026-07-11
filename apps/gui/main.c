@@ -236,6 +236,13 @@ static void ensure_ids(void) {
 
     s_menu_style = nt_ui_menu_style_defaults();
     s_menu_style.icon_size = 0U;
+    /* Floating surfaces must SEPARATE from the panels (owner: open menus blended in). The engine
+     * default is a semi-transparent near-panel gray + a warm hover foreign to the palette. Elevated
+     * surface = opaque header tone (lighter than panel, same as section headers, §2.1); hover = the
+     * app's selection blue; separators = the border tone. */
+    s_menu_style.bg_color = RGBA8(40, 45, 57);         /* C_HEADER: opaque elevated surface */
+    s_menu_style.item_hover_color = RGBA8(48, 74, 120); /* C_SEL: selection blue, not the default amber */
+    s_menu_style.separator_color = RGBA8(52, 58, 72);   /* C_BORDER */
     s_modal_style = nt_ui_modal_style_defaults();
     s_tip_style = nt_ui_tooltip_style_defaults();
 
@@ -264,7 +271,9 @@ static void ensure_ids(void) {
     s_dd_style.trigger_idle.fill = RGBA8(21, 23, 30);
     s_dd_style.trigger_hover.fill = RGBA8(30, 34, 44);
     s_dd_style.trigger_pressed.fill = RGBA8(40, 46, 58);
-    s_dd_style.panel_fill = RGBA8(30, 33, 41);
+    /* The OPEN list is a floating surface, not a well: elevated header tone (was RGBA8(30,33,41),
+     * 2 units off the panel fill -- it blended in; owner report). Matches s_menu_style.bg_color. */
+    s_dd_style.panel_fill = RGBA8(40, 45, 57);
     s_dd_style.row_idle.fill = 0U;
     s_dd_style.row_hover.fill = RGBA8(54, 60, 74);
     s_dd_style.row_pressed.fill = RGBA8(36, 40, 50);

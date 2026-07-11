@@ -37,7 +37,7 @@ enum {
     MK_NEW = 1, MK_OPEN, MK_SAVE, MK_SAVEAS, MK_EXPORT, MK_REFRESH, MK_EXIT,
     MK_UNDO, MK_REDO,
     MK_ZIN, MK_ZOUT, MK_FIT, MK_ABOUT, MK_S100, MK_S125, MK_S150, MK_S200,
-    MK_OV_OUTLINE, MK_OV_FRAME, MK_OV_TRIM, MK_OV_PIVOT, MK_CTX_FIT, MK_CTX_100,
+    MK_OV_OUTLINE, MK_OV_FRAME, MK_OV_TRIM, MK_OV_PIVOT, MK_OV_SLICE9, MK_CTX_FIT, MK_CTX_100,
     MK_CTX_RENAME, MK_CTX_REMOVE, MK_CTX_TOGGLE, MK_CTX_CREATE_ANIM, MK_CTX_PREVIEW
 };
 
@@ -150,6 +150,7 @@ static void view_items(nt_ui_menu_ctx_t *m) {
     overlay_item(m, MK_OV_FRAME, "Frame rects", &s_canvas.show_frame);
     overlay_item(m, MK_OV_TRIM, "Trim bounds", &s_canvas.show_trim);
     overlay_item(m, MK_OV_PIVOT, "Pivots", &s_canvas.show_pivot);
+    overlay_item(m, MK_OV_SLICE9, "Slice9 guides", &s_canvas.show_slice9);
     nt_ui_menu_separator(m);
     scale_item(m, MK_S100, "UI Scale 100%", 1.0F);
     scale_item(m, MK_S125, "UI Scale 125%", 1.25F);
@@ -279,6 +280,7 @@ void declare_context_menu(nt_ui_context_t *ctx) {
         overlay_item(&s_ctx_menu, MK_OV_FRAME, "Frame rects", &s_canvas.show_frame);
         overlay_item(&s_ctx_menu, MK_OV_TRIM, "Trim bounds", &s_canvas.show_trim);
         overlay_item(&s_ctx_menu, MK_OV_PIVOT, "Pivots", &s_canvas.show_pivot);
+        overlay_item(&s_ctx_menu, MK_OV_SLICE9, "Slice9 guides", &s_canvas.show_slice9);
         nt_ui_menu_separator(&s_ctx_menu);
         if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_100, "Zoom 100%")) {
             gui_canvas_set_zoom_pct(&s_canvas, s_canvas.last_bb, 100.0F);

@@ -56,6 +56,8 @@ typedef struct gui_canvas {
     int sel_sprite;          /* accent-outlined region index, -1 none */
     int hover_sprite;        /* subtle-outline region index, -1 none (set by the handler each frame) */
     bool show_outline, show_trim, show_pivot, show_frame; /* overlay toggles (frame = placed AABB) */
+    bool show_slice9;        /* slice9 guide lines over the SELECTED region (silent unless its result
+                                slice9 is nonzero; values come from the packed result, like pivots) */
     float overlay_scale;     /* DPI/UI scale for overlay line widths (set by the host each frame) */
 
     /* --- ANIM preview (host sets these each frame; the handler draws one region) --- */
