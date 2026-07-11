@@ -1,5 +1,6 @@
 #include "gui_pack.h"
 
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -9,6 +10,8 @@
 #include <sys/stat.h>
 #include <time.h>
 #endif
+
+#include "tinycthread.h" /* C11 threads (vendored via nt_builder); interactive worker thread */
 
 #include "log/nt_log.h"
 
@@ -263,7 +266,535 @@ void gui_pack_clear(int atlas_index) {
     }
 }
 
-void gui_pack_shutdown(void) { gui_pack_clear(-1); }
+// #region async worker (one in-flight op max: pack OR export)
+typedef enum { JOB_NONE = 0, JOB_PACK, JOB_EXPORT } job_kind;
+
+typedef struct {
+    int atlas_index;
+    desc_vec dv; /* assembled sprite descs (job-owned; abs paths) */
+    int enabled; /* enabled target count (for the export report) */
+} export_atlas;
+
+typedef struct {
+    job_kind kind;
+
+    /* pack input (job-owned; worker reads, all set before thrd_create) */
+    int atlas_index;
+    tp_pack_settings settings; /* .sprites -> dv.v, .atlas_name -> name_owned, .work_dir -> s_work_dir */
+    char *name_owned;          /* dup of the live atlas name (settings.atlas_name aliased the model) */
+    desc_vec dv;               /* owns names/paths + v; freed at completion */
+    tp_arena *arena;           /* worker allocates the result here */
+    int missing;
+    char *snap0; /* model snapshot at start (honest stale compare) */
+    size_t snap0_len;
+
+    /* export input (job-owned) */
+    tp_project *clone;
+    export_atlas *eatlas;
+    int eatlas_count;
+
+    /* output (worker writes; main reads only after acquiring `state`) */
+    tp_result *result;
+    tp_status status;
+    tp_error err;
+    double elapsed_ms;
+    int exp_targets, exp_notices, exp_atlases_ok, exp_atlases_fail;
+    char exp_first_err[256];
+
+    /* control */
+    _Atomic int state; /* 0 = running, 1 = done */
+    _Atomic bool cancelled;
+    _Atomic int exp_cur; /* export progress (1-based) */
+    _Atomic int exp_total;
+    double start_ms;
+    thrd_t thread;
+} pack_job;
+
+static pack_job s_job;
+static bool s_job_active;                /* main-thread view: worker started, not yet joined */
+static gui_pack_async_kind s_debug_busy; /* --shot-packing override */
+
+static int pack_worker(void *arg) {
+    pack_job *j = (pack_job *)arg;
+    const double t0 = now_ms();
+    tp_result *result = NULL;
+    tp_error e = {{0}};
+    const tp_status st = tp_pack(&j->settings, j->arena, &result, &e);
+    j->elapsed_ms = now_ms() - t0;
+    j->result = result;
+    j->status = st;
+    j->err = e;
+    atomic_store_explicit(&j->state, 1, memory_order_release);
+    return 0;
+}
+
+static int export_worker(void *arg) {
+    pack_job *j = (pack_job *)arg;
+    const double t0 = now_ms();
+    int targets = 0;
+    int notices = 0;
+    int ok = 0;
+    int fail = 0;
+    char first_err[256] = {0};
+    for (int i = 0; i < j->eatlas_count; i++) {
+        if (atomic_load_explicit(&j->cancelled, memory_order_relaxed)) {
+            break; /* already-written atlases stay; no further atlases started */
+        }
+        atomic_store_explicit(&j->exp_cur, i + 1, memory_order_relaxed);
+        export_atlas *ea = &j->eatlas[i];
+        tp_arena *ar = tp_arena_create(0);
+        if (!ar) {
+            fail++;
+            continue;
+        }
+        tp_export_notices nts;
+        tp_export_notices_init(&nts);
+        tp_error e = {{0}};
+        int runs = 0;
+        const tp_status st =
+            tp_export_run(j->clone, ea->atlas_index, ea->dv.v, ea->dv.n, s_work_dir, ar, &nts, &runs, &e);
+        if (st == TP_STATUS_OK) {
+            targets += ea->enabled;
+            notices += nts.count;
+            ok++;
+        } else {
+            fail++;
+            if (first_err[0] == '\0') {
+                const tp_project_atlas *ca = tp_project_get_atlas(j->clone, ea->atlas_index);
+                (void)snprintf(first_err, sizeof first_err, "%s: %s", ca ? ca->name : "?",
+                               e.msg[0] ? e.msg : tp_status_str(st));
+            }
+        }
+        tp_export_notices_free(&nts);
+        tp_arena_destroy(ar);
+    }
+    j->exp_targets = targets;
+    j->exp_notices = notices;
+    j->exp_atlases_ok = ok;
+    j->exp_atlases_fail = fail;
+    memcpy(j->exp_first_err, first_err, sizeof first_err);
+    j->elapsed_ms = now_ms() - t0;
+    atomic_store_explicit(&j->state, 1, memory_order_release);
+    return 0;
+}
+
+static bool model_changed_since(const char *snap, size_t len) {
+    if (!snap) {
+        return true; /* couldn't snapshot at start -> assume changed (safe: shows stale) */
+    }
+    char *cur = NULL;
+    size_t cl = 0;
+    tp_error e = {{0}};
+    if (tp_project_save_buffer(gui_project_get(), &cur, &cl, &e) != TP_STATUS_OK || !cur) {
+        return true;
+    }
+    const bool diff = (cl != len) || memcmp(cur, snap, len) != 0;
+    free(cur);
+    return diff;
+}
+
+bool gui_pack_async_start(int atlas_index, char *err, size_t err_cap) {
+    if (s_job_active) {
+        if (err) {
+            (void)snprintf(err, err_cap, "busy -- a pack or export is already running");
+        }
+        return false;
+    }
+    if (atlas_index < 0 || atlas_index >= GUI_PACK_MAX_ATLASES) {
+        if (err) {
+            (void)snprintf(err, err_cap, "atlas index out of range");
+        }
+        return false;
+    }
+    tp_project *p = gui_project_get();
+    tp_project_atlas *a = tp_project_get_atlas(p, atlas_index);
+    if (!a) {
+        if (err) {
+            (void)snprintf(err, err_cap, "no such atlas");
+        }
+        return false;
+    }
+
+    desc_vec dv = {0};
+    int missing = 0;
+    if (!assemble(atlas_index, &dv, &missing, err, err_cap)) {
+        desc_free(&dv);
+        return false;
+    }
+    if (dv.n == 0) {
+        desc_free(&dv);
+        if (err) {
+            (void)snprintf(err, err_cap, "atlas '%s' has no usable images%s", a->name,
+                           missing > 0 ? " (all sources missing)" : "");
+        }
+        return false;
+    }
+
+    tp_pack_settings settings;
+    tp_error e = {{0}};
+    if (tp_project_atlas_to_settings(p, atlas_index, &settings, &e) != TP_STATUS_OK) {
+        desc_free(&dv);
+        if (err) {
+            (void)snprintf(err, err_cap, "%s", e.msg);
+        }
+        return false;
+    }
+    if (settings.shape != 0 /* not RECT */) {
+        settings.extrude = 0;
+    }
+    char *name_owned = dup_str(a->name); /* settings.atlas_name aliases the live model -- own a copy */
+    tp_arena *arena = tp_arena_create(0);
+    if (!name_owned || !arena) {
+        desc_free(&dv);
+        free(name_owned);
+        if (arena) {
+            tp_arena_destroy(arena);
+        }
+        if (err) {
+            (void)snprintf(err, err_cap, "out of memory");
+        }
+        return false;
+    }
+    settings.work_dir = s_work_dir; /* stable static; never mutated after init */
+    settings.atlas_name = name_owned;
+    settings.sprites = dv.v;
+    settings.sprite_count = dv.n;
+
+    char *snap = NULL;
+    size_t snap_len = 0;
+    (void)tp_project_save_buffer(p, &snap, &snap_len, &e); /* best-effort; NULL -> treated as changed */
+
+    memset(&s_job, 0, sizeof s_job);
+    s_job.kind = JOB_PACK;
+    s_job.atlas_index = atlas_index;
+    s_job.settings = settings;
+    s_job.name_owned = name_owned;
+    s_job.dv = dv;
+    s_job.arena = arena;
+    s_job.missing = missing;
+    s_job.snap0 = snap;
+    s_job.snap0_len = snap_len;
+    s_job.start_ms = now_ms();
+    atomic_store_explicit(&s_job.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&s_job.cancelled, false, memory_order_relaxed);
+    if (thrd_create(&s_job.thread, pack_worker, &s_job) != thrd_success) {
+        desc_free(&s_job.dv);
+        free(s_job.name_owned);
+        free(s_job.snap0);
+        tp_arena_destroy(s_job.arena);
+        memset(&s_job, 0, sizeof s_job);
+        if (err) {
+            (void)snprintf(err, err_cap, "could not start worker thread");
+        }
+        return false;
+    }
+    s_job_active = true;
+    return true;
+}
+
+bool gui_pack_export_async_start(char *err, size_t err_cap) {
+    if (s_job_active) {
+        if (err) {
+            (void)snprintf(err, err_cap, "busy -- a pack or export is already running");
+        }
+        return false;
+    }
+    tp_project *p = gui_project_get();
+    if (!p) {
+        if (err) {
+            (void)snprintf(err, err_cap, "no project");
+        }
+        return false;
+    }
+
+    export_atlas tmp[GUI_PACK_MAX_ATLASES];
+    int n = 0;
+    for (int ai = 0; ai < p->atlas_count && ai < GUI_PACK_MAX_ATLASES; ai++) {
+        tp_project_atlas *a = &p->atlases[ai];
+        int enabled = 0;
+        for (int t = 0; t < a->target_count; t++) {
+            if (a->targets[t].enabled) {
+                enabled++;
+            }
+        }
+        if (enabled == 0 || a->source_count == 0) {
+            continue;
+        }
+        bool relerr = false;
+        for (int t = 0; t < a->target_count; t++) {
+            if (!a->targets[t].enabled) {
+                continue;
+            }
+            char out_abs[600];
+            if (tp_project_resolve_path(p, a->targets[t].out_path, out_abs, sizeof out_abs) != TP_STATUS_OK) {
+                relerr = true;
+                break;
+            }
+            mkdirs_parent(out_abs);
+        }
+        if (relerr) {
+            for (int k = 0; k < n; k++) {
+                desc_free(&tmp[k].dv);
+            }
+            if (err) {
+                (void)snprintf(err, err_cap, "save the project first (relative output paths need a project dir)");
+            }
+            return false;
+        }
+        desc_vec dv = {0};
+        int missing = 0;
+        if (!assemble(ai, &dv, &missing, err, err_cap)) {
+            desc_free(&dv);
+            for (int k = 0; k < n; k++) {
+                desc_free(&tmp[k].dv);
+            }
+            return false;
+        }
+        if (dv.n == 0) {
+            desc_free(&dv);
+            continue; /* no usable images: skip this atlas (mirrors do_export) */
+        }
+        tmp[n].atlas_index = ai;
+        tmp[n].dv = dv;
+        tmp[n].enabled = enabled;
+        n++;
+    }
+    if (n == 0) {
+        if (err) {
+            (void)snprintf(err, err_cap, "Nothing to export -- enable a target and add sources.");
+        }
+        return false;
+    }
+
+    /* Snapshot the whole project so the worker never reads live-editable memory. */
+    char *buf = NULL;
+    size_t blen = 0;
+    tp_error e = {{0}};
+    if (tp_project_save_buffer(p, &buf, &blen, &e) != TP_STATUS_OK || !buf) {
+        for (int k = 0; k < n; k++) {
+            desc_free(&tmp[k].dv);
+        }
+        if (err) {
+            (void)snprintf(err, err_cap, "snapshot failed: %s", e.msg);
+        }
+        return false;
+    }
+    tp_project *clone = NULL;
+    const tp_status st = tp_project_load_buffer(buf, blen, &clone, &e);
+    free(buf);
+    if (st != TP_STATUS_OK || !clone) {
+        for (int k = 0; k < n; k++) {
+            desc_free(&tmp[k].dv);
+        }
+        if (err) {
+            (void)snprintf(err, err_cap, "snapshot parse failed: %s", e.msg);
+        }
+        return false;
+    }
+    /* load_buffer leaves project_dir NULL; out-path resolution in the worker needs it. */
+    clone->project_dir = p->project_dir ? dup_str(p->project_dir) : NULL;
+
+    export_atlas *eatlas = (export_atlas *)malloc((size_t)n * sizeof *eatlas);
+    if (!eatlas) {
+        for (int k = 0; k < n; k++) {
+            desc_free(&tmp[k].dv);
+        }
+        tp_project_destroy(clone);
+        if (err) {
+            (void)snprintf(err, err_cap, "out of memory");
+        }
+        return false;
+    }
+    memcpy(eatlas, tmp, (size_t)n * sizeof *eatlas);
+
+    memset(&s_job, 0, sizeof s_job);
+    s_job.kind = JOB_EXPORT;
+    s_job.clone = clone;
+    s_job.eatlas = eatlas;
+    s_job.eatlas_count = n;
+    s_job.start_ms = now_ms();
+    atomic_store_explicit(&s_job.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&s_job.cancelled, false, memory_order_relaxed);
+    atomic_store_explicit(&s_job.exp_cur, 0, memory_order_relaxed);
+    atomic_store_explicit(&s_job.exp_total, n, memory_order_relaxed);
+    if (thrd_create(&s_job.thread, export_worker, &s_job) != thrd_success) {
+        for (int k = 0; k < s_job.eatlas_count; k++) {
+            desc_free(&s_job.eatlas[k].dv);
+        }
+        free(s_job.eatlas);
+        tp_project_destroy(s_job.clone);
+        memset(&s_job, 0, sizeof s_job);
+        if (err) {
+            (void)snprintf(err, err_cap, "could not start worker thread");
+        }
+        return false;
+    }
+    s_job_active = true;
+    return true;
+}
+
+gui_pack_done gui_pack_poll(gui_pack_result_info *out) {
+    if (out) {
+        memset(out, 0, sizeof *out);
+    }
+    if (!s_job_active) {
+        return GUI_PACK_DONE_NONE;
+    }
+    if (atomic_load_explicit(&s_job.state, memory_order_acquire) == 0) {
+        return GUI_PACK_DONE_NONE; /* worker still running */
+    }
+    (void)thrd_join(s_job.thread, NULL);
+    const bool cancelled = atomic_load_explicit(&s_job.cancelled, memory_order_relaxed);
+    gui_pack_done rc = GUI_PACK_DONE_NONE;
+
+    if (s_job.kind == JOB_PACK) {
+        if (s_job.status == TP_STATUS_OK && s_job.result) {
+            if (cancelled) {
+                tp_arena_destroy(s_job.arena); /* discard: abandoned result */
+                rc = GUI_PACK_DONE_PACK_CANCELLED;
+            } else {
+                if (s_slots[s_job.atlas_index].arena) {
+                    tp_arena_destroy(s_slots[s_job.atlas_index].arena);
+                }
+                s_slots[s_job.atlas_index].arena = s_job.arena;
+                s_slots[s_job.atlas_index].result = s_job.result;
+                s_slots[s_job.atlas_index].valid = true;
+                if (out) {
+                    out->atlas_index = s_job.atlas_index;
+                    out->ms = s_job.elapsed_ms;
+                    out->missing = s_job.missing;
+                    out->model_changed = model_changed_since(s_job.snap0, s_job.snap0_len);
+                    if (s_job.missing > 0) {
+                        (void)snprintf(out->note, sizeof out->note, "%d missing file(s) skipped", s_job.missing);
+                    }
+                }
+                nt_log_info("gui_pack(async): atlas '%s' packed %d sprite(s), %d page(s) in %.1f ms",
+                            s_job.result->atlas_name, s_job.result->sprite_count, s_job.result->page_count,
+                            s_job.elapsed_ms);
+                rc = GUI_PACK_DONE_PACK_OK;
+            }
+        } else {
+            tp_arena_destroy(s_job.arena); /* failure: keep the previous slot (canvas stays) */
+            if (cancelled) {
+                rc = GUI_PACK_DONE_PACK_CANCELLED;
+            } else {
+                if (out) {
+                    (void)snprintf(out->err, sizeof out->err, "%s",
+                                   s_job.err.msg[0] ? s_job.err.msg : tp_status_str(s_job.status));
+                }
+                rc = GUI_PACK_DONE_PACK_FAIL;
+            }
+        }
+        desc_free(&s_job.dv);
+        free(s_job.name_owned);
+        free(s_job.snap0);
+    } else { /* JOB_EXPORT */
+        if (out) {
+            out->targets = s_job.exp_targets;
+            out->notices = s_job.exp_notices;
+            out->atlases_ok = s_job.exp_atlases_ok;
+            out->atlases_fail = s_job.exp_atlases_fail;
+            (void)snprintf(out->err, sizeof out->err, "%s", s_job.exp_first_err);
+        }
+        if (cancelled) {
+            rc = GUI_PACK_DONE_EXPORT_CANCELLED;
+        } else if (s_job.exp_atlases_fail > 0) {
+            rc = GUI_PACK_DONE_EXPORT_FAIL;
+        } else {
+            rc = GUI_PACK_DONE_EXPORT_OK;
+        }
+        nt_log_info("gui_pack(async): export %d target(s), %d ok, %d fail, %d notice(s) in %.1f ms", s_job.exp_targets,
+                    s_job.exp_atlases_ok, s_job.exp_atlases_fail, s_job.exp_notices, s_job.elapsed_ms);
+        for (int i = 0; i < s_job.eatlas_count; i++) {
+            desc_free(&s_job.eatlas[i].dv);
+        }
+        free(s_job.eatlas);
+        tp_project_destroy(s_job.clone);
+    }
+
+    memset(&s_job, 0, sizeof s_job);
+    s_job_active = false;
+    if (out) {
+        out->kind = rc;
+    }
+    return rc;
+}
+
+bool gui_pack_async_busy(void) { return s_job_active || s_debug_busy != GUI_PACK_ASYNC_NONE; }
+
+gui_pack_async_kind gui_pack_async_active_kind(void) {
+    if (s_debug_busy != GUI_PACK_ASYNC_NONE) {
+        return s_debug_busy;
+    }
+    if (!s_job_active) {
+        return GUI_PACK_ASYNC_NONE;
+    }
+    return s_job.kind == JOB_EXPORT ? GUI_PACK_ASYNC_EXPORT : GUI_PACK_ASYNC_PACK;
+}
+
+double gui_pack_async_elapsed_sec(void) {
+    if (s_debug_busy != GUI_PACK_ASYNC_NONE) {
+        return 3.2; /* fixed for reproducible --shot-packing captures */
+    }
+    return s_job_active ? (now_ms() - s_job.start_ms) / 1000.0 : 0.0;
+}
+
+void gui_pack_export_progress(int *cur, int *total) {
+    if (s_debug_busy == GUI_PACK_ASYNC_EXPORT) {
+        if (cur) {
+            *cur = 2;
+        }
+        if (total) {
+            *total = 3;
+        }
+        return;
+    }
+    if (cur) {
+        *cur = s_job_active ? atomic_load_explicit(&s_job.exp_cur, memory_order_relaxed) : 0;
+    }
+    if (total) {
+        *total = s_job_active ? atomic_load_explicit(&s_job.exp_total, memory_order_relaxed) : 0;
+    }
+}
+
+void gui_pack_async_cancel(void) {
+    if (s_job_active) {
+        atomic_store_explicit(&s_job.cancelled, true, memory_order_relaxed);
+    }
+}
+
+bool gui_pack_async_cancelling(void) {
+    return s_job_active && atomic_load_explicit(&s_job.cancelled, memory_order_relaxed);
+}
+
+void gui_pack_debug_force_busy(gui_pack_async_kind kind) { s_debug_busy = kind; }
+// #endregion
+
+void gui_pack_shutdown(void) {
+    if (s_job_active) {
+        /* Non-interruptible pack + no thrd_detach in this tinycthread -> join (covers the window
+         * X-button close path, which bypasses the interactive running-op guard). Result discarded. */
+        atomic_store_explicit(&s_job.cancelled, true, memory_order_relaxed);
+        (void)thrd_join(s_job.thread, NULL);
+        if (s_job.kind == JOB_PACK) {
+            if (s_job.arena) {
+                tp_arena_destroy(s_job.arena);
+            }
+            desc_free(&s_job.dv);
+            free(s_job.name_owned);
+            free(s_job.snap0);
+        } else if (s_job.kind == JOB_EXPORT) {
+            for (int i = 0; i < s_job.eatlas_count; i++) {
+                desc_free(&s_job.eatlas[i].dv);
+            }
+            free(s_job.eatlas);
+            tp_project_destroy(s_job.clone);
+        }
+        memset(&s_job, 0, sizeof s_job);
+        s_job_active = false;
+    }
+    gui_pack_clear(-1);
+}
 
 const tp_result *gui_pack_result(int atlas_index) {
     if (atlas_index < 0 || atlas_index >= GUI_PACK_MAX_ATLASES || !s_slots[atlas_index].valid) {

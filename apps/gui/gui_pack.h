@@ -12,9 +12,10 @@
  * export/preview naming, so the STRIPPED raw name == the sprite-tree override key ("anim/test-0"),
  * which is how selection sync maps a canvas region back to a list row.
  *
- * Packing is SYNCHRONOUS: a demo-scale pack (<100 sprites) measures well under the 150 ms bar
- * (see gui_pack_atlas out_ms), so no worker thread this round. Missing files are SKIPPED with a
- * notice (never fatal, ux.md §3.7). */
+ * gui_pack_atlas/gui_pack_export are the BLOCKING core (the selftest + --shot use them for
+ * determinism). Interactive use runs them on a worker thread via the async API below, so a slow
+ * concave pack never freezes the window. Missing files are SKIPPED with a notice (never fatal,
+ * ux.md §3.7). */
 
 #include <stddef.h>
 #include <stdbool.h>
@@ -56,6 +57,60 @@ bool gui_pack_export(int atlas_index, int *out_targets, int *out_notices, char *
 /* Drops the stored result for one atlas (or all with index < 0). Frees its arena. Call on
  * project new/open and before a repack. */
 void gui_pack_clear(int atlas_index);
+
+/* --- async packing (interactive; ux.md §3 worker thread) --------------------------------------
+ * One in-flight op MAX (pack OR export). The heavy tp_pack/tp_export_run runs on a worker thread
+ * over a self-contained snapshot; the UI stays interactive. Poll each frame and swap the result in
+ * at a frame boundary (gui_pack_poll). The blocking gui_pack_atlas/gui_pack_export above stay the
+ * deterministic path used by the selftest and --shot. */
+typedef enum {
+    GUI_PACK_ASYNC_NONE = 0,
+    GUI_PACK_ASYNC_PACK,
+    GUI_PACK_ASYNC_EXPORT
+} gui_pack_async_kind;
+
+typedef enum {
+    GUI_PACK_DONE_NONE = 0, /* nothing landed this frame */
+    GUI_PACK_DONE_PACK_OK,
+    GUI_PACK_DONE_PACK_FAIL,
+    GUI_PACK_DONE_PACK_CANCELLED,
+    GUI_PACK_DONE_EXPORT_OK,
+    GUI_PACK_DONE_EXPORT_FAIL,
+    GUI_PACK_DONE_EXPORT_CANCELLED
+} gui_pack_done;
+
+typedef struct {
+    gui_pack_done kind;
+    int atlas_index;    /* pack: which atlas landed */
+    double ms;          /* pack: wall-clock pack time */
+    bool model_changed; /* pack: model differs from the packed snapshot -> keep preview stale */
+    int missing;        /* pack: skipped-missing-source count */
+    int targets;        /* export: enabled targets written */
+    int notices;        /* export: metadata-loss notices */
+    int atlases_ok;     /* export: atlases exported OK */
+    int atlases_fail;   /* export: atlases that failed */
+    char err[256];      /* failure / first-error text */
+    char note[128];     /* pack: notice text */
+} gui_pack_result_info;
+
+/* Starts an async pack of `atlas_index`. false (fills err) if busy or the input can't assemble. */
+bool gui_pack_async_start(int atlas_index, char *err, size_t err_cap);
+/* Starts an async export of every exporting atlas. false (fills err) if busy / nothing to export /
+ * relative out-paths need a saved project. */
+bool gui_pack_export_async_start(char *err, size_t err_cap);
+/* Call once per frame. If a worker finished, joins it, applies the pack slot swap (pack), and
+ * returns the completion (else GUI_PACK_DONE_NONE). Fills *out. */
+gui_pack_done gui_pack_poll(gui_pack_result_info *out);
+bool gui_pack_async_busy(void);
+gui_pack_async_kind gui_pack_async_active_kind(void);
+double gui_pack_async_elapsed_sec(void);
+void gui_pack_export_progress(int *cur, int *total); /* export "atlas cur/total" for the strip */
+/* Requests cancel: the non-interruptible worker runs to completion, but its result is discarded when
+ * it lands (pack) / no further atlases are started (export). */
+void gui_pack_async_cancel(void);
+bool gui_pack_async_cancelling(void);
+/* DEV (--shot-packing): force the busy strip state without a real worker, for screenshots. */
+void gui_pack_debug_force_busy(gui_pack_async_kind kind);
 
 void gui_pack_shutdown(void);
 

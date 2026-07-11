@@ -43,6 +43,7 @@ target_link_libraries(ntpacker-gui PRIVATE
     nt_gfx nt_http_stub nt_fs nt_clipboard
     nt_fpng # dev screenshot mode (--shot): PNG-encode the framebuffer readback
     tp_build stb_image tinyfiledialogs
+    tinycthread # interactive async pack/export worker thread (gui_pack.c); already in-closure via nt_builder
 )
 # Generated asset header from the pack builder (ntpacker_ui_assets.h).
 target_include_directories(ntpacker-gui PRIVATE "${GUI_GENERATED_DIR}")

@@ -1203,6 +1203,10 @@ static void do_add_folder(void) {
 
 // #region new/exit confirm flow
 static void request_new(void) {
+    if (gui_pack_async_busy()) {
+        set_status_ex(STATUS_WARNING, "Wait for the pack/export to finish (or Cancel) first.");
+        return;
+    }
     if (gui_project_is_dirty()) {
         s_after_confirm = AFTER_NEW;
         s_confirm_open = true;
@@ -1216,6 +1220,10 @@ static void request_new(void) {
     }
 }
 static void request_exit(void) {
+    if (gui_pack_async_busy()) {
+        set_status_ex(STATUS_WARNING, "Wait for the pack/export to finish (or Cancel) first.");
+        return;
+    }
     if (gui_project_is_dirty()) {
         s_after_confirm = AFTER_EXIT;
         s_confirm_open = true;
@@ -1226,6 +1234,10 @@ static void request_exit(void) {
 /* Open routes through the same unsaved-changes confirm as New/Exit (no silent discard). The actual
  * OS open dialog runs via s_pending_open, either now (clean) or after the modal resolves. */
 static void request_open(void) {
+    if (gui_pack_async_busy()) {
+        set_status_ex(STATUS_WARNING, "Wait for the pack/export to finish (or Cancel) first.");
+        return;
+    }
     if (gui_project_is_dirty()) {
         s_after_confirm = AFTER_OPEN;
         s_confirm_open = true;
@@ -1383,7 +1395,9 @@ static void do_refresh(void) {
 /* Ctrl+P / Pack: pack the selected atlas in-process (gui_pack -> tp_pack). On success clear the
  * preview-stale bit and upload the packed pages to the canvas (atlas-page view); on failure the
  * previous result + the "outdated" tag stay (ux.md §3.3b). */
-static void do_pack(void) {
+/* Blocking pack of the selected atlas (deterministic path for the selftest + --shot). Interactive
+ * Pack (do_pack) runs this on a worker thread; the result lands via poll_async. */
+static void do_pack_blocking(void) {
     tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
     if (!a || a->source_count == 0) {
         set_status_ex(STATUS_WARNING, "No sources to pack -- add files or a folder first.");
@@ -1408,52 +1422,81 @@ static void do_pack(void) {
     }
 }
 
-/* Ctrl+E / Export All: for every atlas with sources + >=1 enabled target, tp_export_run packs per
- * target (project INTERSECT target caps) and writes its files. Per-atlas failures are non-fatal
- * (ux.md §3.5); notices + counts summarize in the status bar. */
-static void do_export(void) {
-    tp_project *p = gui_project_get();
-    if (!p) {
+/* Interactive Pack (Ctrl+P / strip / stale chip): starts the pack on a worker thread so the window
+ * never freezes. Completion is applied at a frame boundary by poll_async (apply_pending). */
+static void do_pack(void) {
+    tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
+    if (!a || a->source_count == 0) {
+        set_status_ex(STATUS_WARNING, "No sources to pack -- add files or a folder first.");
         return;
     }
-    int total_targets = 0;
-    int total_notices = 0;
-    int atlases_ok = 0;
-    int atlases_fail = 0;
-    char first_err[256] = {0};
-    for (int ai = 0; ai < p->atlas_count; ai++) {
-        tp_project_atlas *a = &p->atlases[ai];
-        bool any_enabled = false;
-        for (int t = 0; t < a->target_count; t++) {
-            if (a->targets[t].enabled) {
-                any_enabled = true;
-            }
-        }
-        if (!any_enabled || a->source_count == 0) {
-            continue;
-        }
-        int tg = 0;
-        int nc = 0;
-        char err[256] = {0};
-        char note[128] = {0};
-        if (gui_pack_export(ai, &tg, &nc, err, sizeof err, note, sizeof note)) {
-            total_targets += tg;
-            total_notices += nc;
-            atlases_ok++;
-        } else {
-            atlases_fail++;
-            if (first_err[0] == '\0') {
-                (void)snprintf(first_err, sizeof first_err, "%s: %s", a->name, err);
-            }
-        }
+    if (gui_pack_async_busy()) {
+        set_status_ex(STATUS_WARNING, "Busy -- a pack or export is already running.");
+        return;
     }
-    if (atlases_fail > 0) {
-        set_statusf_ex(STATUS_ERROR, "Exported %d target(s); %d atlas(es) failed -- %s", total_targets, atlases_fail, first_err);
-    } else if (atlases_ok == 0) {
-        set_status_ex(STATUS_WARNING, "Nothing to export -- enable a target and add sources.");
+    char err[256] = {0};
+    if (gui_pack_async_start(s_sel_atlas, err, sizeof err)) {
+        set_status_ex(STATUS_INFO, "Packing\xE2\x80\xA6"); /* result lands via poll_async */
     } else {
-        set_statusf_ex(total_notices > 0 ? STATUS_WARNING : STATUS_SUCCESS, "Exported %d target(s)%s", total_targets,
-                       total_notices > 0 ? " (metadata notices raised)" : "");
+        set_statusf_ex(STATUS_ERROR, "Pack failed: %s", err);
+    }
+}
+
+/* Ctrl+E / Export: starts an async export of every atlas with sources + >=1 enabled target on a
+ * worker thread (per-atlas failures non-fatal, ux.md §3.5). Completion reported via poll_async. */
+static void do_export(void) {
+    if (gui_pack_async_busy()) {
+        set_status_ex(STATUS_WARNING, "Busy -- a pack or export is already running.");
+        return;
+    }
+    char err[256] = {0};
+    if (gui_pack_export_async_start(err, sizeof err)) {
+        set_status_ex(STATUS_INFO, "Exporting\xE2\x80\xA6"); /* progress + result via poll_async */
+    } else {
+        set_status_ex(STATUS_WARNING, err);
+    }
+}
+
+/* Lands a finished async pack/export at a frame boundary: the pack slot swap is done inside
+ * gui_pack_poll; here we recompute stale honestly (mark_packed only when the model still matches
+ * the packed snapshot) and route the outcome through the severity status. Called from apply_pending. */
+static void poll_async(void) {
+    gui_pack_result_info info;
+    switch (gui_pack_poll(&info)) {
+        case GUI_PACK_DONE_PACK_OK: {
+            if (!info.model_changed) {
+                gui_project_mark_packed(); /* model unchanged since the packed snapshot -> up to date */
+            }
+            s_last_pack_ms = info.ms;
+            s_last_pack_atlas = info.atlas_index;
+            const tp_result *r = gui_pack_result(info.atlas_index);
+            const char *stale = info.model_changed ? " -- model changed, stale" : "";
+            if (r && info.note[0] != '\0') {
+                set_statusf_ex(STATUS_SUCCESS, "Packed %d sprites, %d page(s) in %.0f ms (%s)%s", r->sprite_count, r->page_count, info.ms, info.note, stale);
+            } else if (r) {
+                set_statusf_ex(STATUS_SUCCESS, "Packed %d sprites, %d page(s) in %.0f ms%s", r->sprite_count, r->page_count, info.ms, stale);
+            }
+            break;
+        }
+        case GUI_PACK_DONE_PACK_FAIL:
+            set_statusf_ex(STATUS_ERROR, "Pack failed: %s", info.err);
+            break;
+        case GUI_PACK_DONE_PACK_CANCELLED:
+            set_status_ex(STATUS_INFO, "Pack cancelled.");
+            break;
+        case GUI_PACK_DONE_EXPORT_OK:
+            set_statusf_ex(info.notices > 0 ? STATUS_WARNING : STATUS_SUCCESS, "Exported %d target(s)%s", info.targets,
+                           info.notices > 0 ? " (metadata notices raised)" : "");
+            break;
+        case GUI_PACK_DONE_EXPORT_FAIL:
+            set_statusf_ex(STATUS_ERROR, "Exported %d target(s); %d atlas(es) failed -- %s", info.targets, info.atlases_fail, info.err);
+            break;
+        case GUI_PACK_DONE_EXPORT_CANCELLED:
+            set_status_ex(STATUS_INFO, "Export cancelled.");
+            break;
+        case GUI_PACK_DONE_NONE:
+        default:
+            break;
     }
 }
 // #endregion
@@ -1530,6 +1573,8 @@ static void commit_active_edit(bool force) {
 
 // #region deferred side-effects (run at the top of the frame, between frames)
 static void apply_pending(void) {
+    poll_async(); /* land any finished async pack/export before this frame's canvas pickup (frame():5408) */
+
     /* A press landed outside the active inline editor last frame -> commit it (desktop rename UX).
      * Also fires before any pending model change (remove/refresh/open/new) so no orphaned editor
      * survives a mutation. */
@@ -2758,6 +2803,32 @@ static const char *transform_decode_str(uint8_t t) {
 /* --- Canvas strip control groups (icons; shared by the single-row strip and the two-row compact). Every
  * icon-only button gets a tooltip in declare_tooltips (mouse-complete). `h` = the row height. --- */
 static void strip_group_actions(nt_ui_context_t *ctx, bool accent, bool labels, float h) {
+    if (gui_pack_async_busy()) {
+        /* Busy: a disabled elapsed/progress label + a Cancel affordance (ux.md §3 worker thread). The
+         * status label always carries text (even in the icon-only tier) so it stays honest. */
+        char busy[48];
+        if (gui_pack_async_active_kind() == GUI_PACK_ASYNC_EXPORT) {
+            int cur = 0;
+            int total = 0;
+            gui_pack_export_progress(&cur, &total);
+            (void)snprintf(busy, sizeof busy, "Exporting %d/%d\xE2\x80\xA6", cur > 0 ? cur : 1, total > 0 ? total : 1);
+        } else if (gui_pack_async_cancelling()) {
+            (void)snprintf(busy, sizeof busy, "Cancelling\xE2\x80\xA6");
+        } else if (labels) {
+            (void)snprintf(busy, sizeof busy, "Packing\xE2\x80\xA6 %.1fs", gui_pack_async_elapsed_sec());
+        } else {
+            (void)snprintf(busy, sizeof busy, "Packing\xE2\x80\xA6"); /* narrow tier: drop the seconds */
+        }
+        (void)ui_icon_btn(ctx, s_id_btn_pack, &s_ic_refresh, 16.0F, busy, &g_btn_primary, false, 0.0F, h, &g_onaccent);
+        if (ui_icon_btn(ctx, s_id_btn_export, &s_ic_x, 16.0F, labels ? "Cancel" : NULL, &g_btn,
+                        !gui_pack_async_cancelling(), 0.0F, h, &g_body)) {
+            gui_pack_async_cancel();
+        }
+        if (ui_icon_btn(ctx, s_id_btn_refresh, &s_ic_refresh, 16.0F, NULL, &g_btn_ghost, true, 0.0F, h, &g_caption)) {
+            s_pending_refresh = true;
+        }
+        return;
+    }
     /* Pack: PRIMARY blue + layout-grid when up to date; amber + alert-triangle when stale (§2.9). Icon +
      * label tier switch together so the amber button carries dark content, the blue one bright. */
     nt_atlas_region_ref_t *pack_ic = accent ? &s_ic_triangle_alert : &s_ic_layout_grid;
@@ -3373,7 +3444,8 @@ static void declare_export_modal(nt_ui_context_t *ctx) {
                        atlases_with == 1 ? "" : "es");
         nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), summary, &g_caption);
         CLAY({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = Su(12), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
-            if (ui_btn(ctx, nt_ui_id("export/run"), "Export", &g_btn_primary, enabled_targets > 0, 120.0F, 34.0F, &g_onaccent)) {
+            if (ui_btn(ctx, nt_ui_id("export/run"), gui_pack_async_busy() ? "Exporting\xE2\x80\xA6" : "Export", &g_btn_primary,
+                       enabled_targets > 0 && !gui_pack_async_busy(), 120.0F, 34.0F, &g_onaccent)) {
                 s_pending_export = true;
                 s_export_open = false;
             }
@@ -4887,7 +4959,7 @@ static void selftest_pre_frame(void) {
         }
         if (found < 0) {
             s_sel_atlas = 0;
-            do_pack();
+            do_pack_blocking();
             found = (gui_pack_result(0) && gui_pack_result(0)->sprite_count > 0) ? 0 : -1;
         }
         s_sel_atlas = (found >= 0) ? found : 0;
@@ -5048,6 +5120,63 @@ static void selftest_pre_frame(void) {
             s_st_phase++;
             s_st_pf = 0;
         }
+    } else if (s_st_phase == 9) {
+        /* Async-path equivalence (req 4): start an async pack, spin until it lands (poll_async in
+         * apply_pending swaps it in), then a blocking reference pack of the same project must match --
+         * determinism holds because only WHERE the pack ran changed. */
+        g_ui_scale = 1.0F;
+        g_nt_window.fb_width = 1280;
+        g_nt_window.fb_height = 800;
+        if (s_st_pf == 1) {
+            s_sel_atlas = 0;
+            char aerr[256] = {0};
+            const bool started = gui_pack_async_start(0, aerr, sizeof aerr);
+            nt_log_info("SELFTEST: async pack start -> %d (%s)", (int)started, started ? "ok" : aerr);
+            NT_ASSERT(started && "SELFTEST: async pack must start");
+        } else if (gui_pack_async_busy()) {
+            NT_ASSERT(s_st_pf < 3000 && "SELFTEST: async pack did not finish within the frame cap");
+        } else {
+            const tp_result *ra = gui_pack_result(0);
+            NT_ASSERT(ra && ra->sprite_count > 0 && ra->page_count > 0 && "SELFTEST: async pack produced no result");
+            const int sc_a = ra->sprite_count;
+            const int pc_a = ra->page_count;
+            const int pw_a = ra->pages[0].w;
+            const int ph_a = ra->pages[0].h;
+            double bms = 0.0;
+            char berr[256] = {0};
+            char bnote[128] = {0};
+            const bool okb = gui_pack_atlas(0, &bms, berr, sizeof berr, bnote, sizeof bnote);
+            NT_ASSERT(okb && "SELFTEST: blocking reference pack failed");
+            const tp_result *rb = gui_pack_result(0);
+            NT_ASSERT(rb && rb->sprite_count == sc_a && rb->page_count == pc_a && rb->pages[0].w == pw_a &&
+                      rb->pages[0].h == ph_a && "SELFTEST: async vs blocking result mismatch (non-deterministic)");
+            nt_log_info("SELFTEST: async==blocking OK (sprites=%d pages=%d page0=%dx%d)", sc_a, pc_a, pw_a, ph_a);
+            s_st_phase = 10;
+            s_st_pf = 0;
+        }
+    } else if (s_st_phase == 10) {
+        /* Busy-strip overflow (req 6): the Packing.../Cancel strip must fit at the owner matrix. Forced
+         * busy (no real worker) so the strip renders its busy tier deterministically. */
+        const bool first = s_st_pf < 8;
+        const float win_w = first ? 1366.0F : 1024.0F;
+        const float win_h = 768.0F;
+        g_ui_scale = first ? 1.5F : 2.0F;
+        g_nt_window.fb_width = (uint32_t)win_w;
+        g_nt_window.fb_height = (uint32_t)win_h;
+        gui_pack_debug_force_busy(GUI_PACK_ASYNC_PACK);
+        if (s_st_pf == 6 || s_st_pf == 13) { /* size held >= 2 frames -> the lagged bbox reflects the busy strip */
+            selftest_assert_no_overflow(win_w, win_h);
+            nt_log_info("SELFTEST: busy-strip overflow OK (%.0fx%.0f@%.1f)", (double)win_w, (double)win_h,
+                        (double)g_ui_scale);
+        }
+        if (s_st_pf >= 14) {
+            gui_pack_debug_force_busy(GUI_PACK_ASYNC_NONE);
+            g_ui_scale = 1.0F;
+            g_nt_window.fb_width = 1280;
+            g_nt_window.fb_height = 800;
+            s_st_phase = 11;
+            s_st_pf = 0;
+        }
     } else {
         g_nt_window.fb_width = 1280;
         g_nt_window.fb_height = 800;
@@ -5103,6 +5232,7 @@ static float s_shot_scale;  /* 0 = keep the DPI-detected scale */
 static int s_shot_frame;    /* counts only frames the UI actually rendered (can_render) */
 static bool s_shot_written; /* capture happened; quit on the next frame boundary */
 static bool s_shot_stale;   /* --shot-stale: pack, then re-mark stale so the shot shows the amber Pack + chip */
+static bool s_shot_packing; /* --shot-packing: pack (blocking), then force the busy strip for the shot */
 
 /* Runs inside the can_render block, after build_rows (selection needs the row model). */
 static void shot_tick(void) {
@@ -5110,12 +5240,12 @@ static void shot_tick(void) {
         return;
     }
     s_shot_frame++;
-    if (s_shot_frame == 6) { /* resources are bound; pack the selected atlas like Ctrl+P would */
+    if (s_shot_frame == 6) { /* resources are bound; pack the selected atlas like Ctrl+P would (blocking) */
         if (s_sel_atlas < 0) {
             s_sel_atlas = 0;
         }
         if (!gui_pack_result(s_sel_atlas)) {
-            do_pack();
+            do_pack_blocking();
         }
     } else if (s_shot_frame == 10) { /* pages uploaded; mimic a canvas click on region 0 */
         const tp_result *r = gui_pack_result(s_sel_atlas);
@@ -5126,6 +5256,9 @@ static void shot_tick(void) {
         }
         if (s_shot_stale) { /* dev: keep the packed preview but re-mark stale so the amber Pack + chip show */
             gui_project_mark_stale();
+        }
+        if (s_shot_packing) { /* dev: force the busy strip (Packing... + Cancel) for the screenshot */
+            gui_pack_debug_force_busy(GUI_PACK_ASYNC_PACK);
         }
     }
 }
@@ -5248,6 +5381,26 @@ static void handle_shortcuts(void) {
 // #endregion
 
 // #region frame
+/* DEV (--auto-pack): after resources bind, start ONE async pack of atlas 0 and quit when it lands.
+ * Headless driver for the heartbeat proof (an interactive Pack is otherwise human-driven). */
+static bool s_auto_pack;
+static int s_auto_pack_frame;
+static bool s_auto_pack_started;
+static void auto_pack_tick(void) {
+    if (!s_auto_pack) {
+        return;
+    }
+    s_auto_pack_frame++;
+    if (!s_auto_pack_started && s_auto_pack_frame == 8) {
+        s_sel_atlas = 0;
+        do_pack(); /* async */
+        s_auto_pack_started = true;
+    } else if (s_auto_pack_started && s_auto_pack_frame > 8 && !gui_pack_async_busy()) {
+        nt_log_info("AUTO-PACK: async pack landed, quitting");
+        nt_app_quit();
+    }
+}
+
 static void frame(void) {
     nt_window_poll();
     nt_input_poll();
@@ -5262,6 +5415,23 @@ static void frame(void) {
 
     /* dialogs + model mutations queued last frame run here, cleanly between frames */
     apply_pending();
+
+    /* Heartbeat: the frame loop keeps ticking while a pack/export runs on the worker thread, so a slow
+     * concave pack never freezes the window. Throttled to ~2 Hz; the frames-since count shows the rate. */
+    if (gui_pack_async_busy()) {
+        static double s_hb_last;
+        static int s_hb_frames;
+        s_hb_frames++;
+        if (g_nt_app.time - s_hb_last >= 0.5) {
+            nt_log_info("HEARTBEAT: async %s %.1fs -- %d frames in %.2fs (dt=%.1fms), UI live",
+                        gui_pack_async_active_kind() == GUI_PACK_ASYNC_EXPORT ? "export" : "pack",
+                        gui_pack_async_elapsed_sec(), s_hb_frames, g_nt_app.time - s_hb_last,
+                        (double)g_nt_app.dt * 1000.0);
+            s_hb_last = g_nt_app.time;
+            s_hb_frames = 0;
+        }
+    }
+    auto_pack_tick(); /* dev (--auto-pack): drive a headless async pack for the heartbeat proof */
 
     if (nt_input_key_is_pressed(NT_KEY_ESCAPE)) {
         if (s_edit_kind != EDIT_NONE) {
@@ -5525,6 +5695,10 @@ int main(int argc, char *argv[]) {
             }
         } else if (strcmp(argv[i], "--shot-stale") == 0) {
             s_shot_stale = true; /* dev: capture the amber stale state (Pack + chip) */
+        } else if (strcmp(argv[i], "--shot-packing") == 0) {
+            s_shot_packing = true; /* dev: capture the busy Packing... strip state */
+        } else if (strcmp(argv[i], "--auto-pack") == 0) {
+            s_auto_pack = true; /* dev: headless async pack of atlas 0 for the heartbeat proof */
         } else if (proj_arg == NULL) {
             proj_arg = argv[i];
         }
