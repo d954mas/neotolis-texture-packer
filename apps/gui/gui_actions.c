@@ -396,7 +396,7 @@ void update_preview(void) {
 static void ensure_project_ext(const char *in, char *out, size_t cap) {
     (void)snprintf(out, cap, "%s", in);
     const char *base = path_last(out);
-    if (strrchr(base, '.') == NULL) {
+    if (strrchr(base, '.') == NULL) { /* boundary-ok: project FILENAME ext, not a sprite key */
         size_t len = strlen(out);
         (void)snprintf(out + len, cap - len, ".ntpacker_project");
     }

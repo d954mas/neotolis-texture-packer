@@ -1,10 +1,10 @@
 # --- tp_core: read/model/edit core (NO packing, NO nt_builder) ------------------
-# Split rationale (engine issue #282): tp_pack.c is the ONLY TU that needs
-# nt_builder, and nt_builder pulls nt_basisu_encoder -- a static-CRT-pinned basisu
-# TU that duplicates the render runtime's nt_basisu_transcoder and cannot coexist
-# with nt_gfx in one image. Keeping the builder out of tp_core lets the GUI link the
-# project model in-process. tp_build (below) isolates the builder for the CLI, the
-# smoke app, and the pack tests that actually pack.
+# Split rationale: tp_pack.c/tp_export_run.c are the only TUs that need nt_builder.
+# Historically the split ALSO firewalled basisu away from the GUI (engine issue
+# #282); #283 fixed that upstream and the GUI links tp_build directly now (see
+# apps/gui/CMakeLists.txt). The split stays for layering (model-only consumers:
+# most tests, inspect-only tools) and CRT hygiene (tp_build pins -U_DLL to match
+# the static-CRT builder; tp_core stays default-CRT for the render runtime).
 add_library(tp_core STATIC
     src/tp_arena.c src/tp_names.c src/tp_name_map.c src/tp_pack_read.c src/tp_project.c
     src/tp_pack_settings.c src/tp_scan.c src/tp_input.c
@@ -14,7 +14,7 @@ target_include_directories(tp_core PUBLIC include)
 # tp_pack_settings.c includes nt_builder.h for the header-only nt_atlas_opts_defaults()
 # inline (the single source of the packing defaults). HEADERS ONLY: this adds the builder
 # include dir but does NOT link nt_builder, so no nt_basisu_encoder / static-CRT pin leaks
-# into tp_core or the GUI (#282). nt_builder.h's other includes (nt_hash, nt_shared format
+# into tp_core's own closure. nt_builder.h's other includes (nt_hash, nt_shared format
 # headers) are already on tp_core's include path via the PUBLIC links below.
 target_include_directories(tp_core PRIVATE
     $<TARGET_PROPERTY:nt_builder,INTERFACE_INCLUDE_DIRECTORIES>)
@@ -48,8 +48,8 @@ nt_set_warning_flags(tp_core)      # AGENTS.md invariant
 nt_set_sanitizer_flags(tp_core)
 
 # --- tp_build: pack orchestration (drives nt_builder) ---------------------------
-# Isolated so ONLY pack-time consumers (CLI, smoke, pack tests) pull nt_builder ->
-# nt_basisu_encoder. The GUI links tp_core only and never sees basisu (#282).
+# Isolated so ONLY pack-time consumers (GUI, CLI, smoke, pack tests) pull
+# nt_builder -> nt_basisu_encoder. Since #283 the GUI links tp_build directly.
 add_library(tp_build STATIC src/tp_pack.c src/tp_export_run.c)
 # nt_builder BEFORE tp_core: GNU ld resolves static archives left-to-right and
 # nt_builder needs nt_log_write from tp_core's PUBLIC nt_log; the old order

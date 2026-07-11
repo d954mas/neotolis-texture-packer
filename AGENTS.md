@@ -34,8 +34,9 @@ work itself. Create a new role only when the catalog has no fitting role.
 - `external/neotolis-engine/` — engine submodule. **Read-only for agents.**
 - `packer/` — the packing/export core library (`tp_core`): project model,
   pack orchestration, exporters. No UI, no CLI parsing here.
-- `apps/cli/` — CLI frontend. `apps/gui/` — GUI frontend. Thin clients over
-  `tp_core`; any capability must be reachable from both.
+- `apps/cli/` — CLI frontend (in progress — plan `docs/plans/op-layer-and-cli.md`).
+  `apps/gui/` — GUI frontend. Thin clients over `tp_core`; any capability must
+  be reachable from both.
 - `apps/smoke/` — minimal environment smoke test (packs a generated sprite
   set through `nt_builder`).
 - `docs/research/` — competitor/format research. `docs/` — specs, decisions.
