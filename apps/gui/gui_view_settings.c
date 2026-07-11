@@ -555,7 +555,7 @@ static void declare_region_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
 
     /* margin / extrude overrides: a "override?" checkbox + numeric (1..255). extrude is
      * disabled unless the sprite's effective shape is RECT (§3.3f, per sprite). */
-    const int eff_shape = any_s9 ? 0 : (ov_shape != TP_PROJECT_OV_INHERIT ? ov_shape : a->shape);
+    const int eff_shape = tp_project_sprite_effective_shape(a->shape, any_s9, ov_shape);
     {
         bool on = (ov_margin != TP_PROJECT_OV_INHERIT);
         PANEL_ROW_BEGIN("Margin ovr", &g_row) {

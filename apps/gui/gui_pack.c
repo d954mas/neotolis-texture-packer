@@ -19,6 +19,7 @@
 #include "tp_core/tp_error.h"
 #include "tp_core/tp_export.h"
 #include "tp_core/tp_export_run.h"
+#include "tp_core/tp_input.h"
 #include "tp_core/tp_names.h"
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_project.h"
@@ -79,84 +80,11 @@ static char *dup_str(const char *s) {
     return p;
 }
 
-static const char *base_name(const char *p) {
-    const char *b = p;
-    for (const char *q = p; *q; q++) {
-        if (*q == '/' || *q == '\\') {
-            b = q + 1;
-        }
-    }
-    return b;
-}
-
 typedef struct {
     tp_pack_sprite_desc *v;
     int n;
     int cap;
 } desc_vec;
-
-/* Appends one sprite: raw name (ext kept), decode path, and per-sprite origin/slice9 overrides
- * mapped from the project by the STRIPPED key. Returns false on OOM. */
-static bool desc_add(desc_vec *dv, tp_project_atlas *a, const char *raw_name, const char *abs_path) {
-    if (dv->n == dv->cap) {
-        int nc = dv->cap ? dv->cap * 2 : 32;
-        tp_pack_sprite_desc *nv = (tp_pack_sprite_desc *)realloc(dv->v, (size_t)nc * sizeof *nv);
-        if (!nv) {
-            return false;
-        }
-        dv->v = nv;
-        dv->cap = nc;
-    }
-    tp_pack_sprite_desc *d = &dv->v[dv->n];
-    memset(d, 0, sizeof *d);
-    d->name = dup_str(raw_name);
-    d->path = dup_str(abs_path);
-    d->origin_x = TP_PROJECT_ORIGIN_DEFAULT;
-    d->origin_y = TP_PROJECT_ORIGIN_DEFAULT;
-    if (!d->name || !d->path) {
-        free((void *)d->name);
-        free((void *)d->path);
-        return false;
-    }
-    char key[256];
-    tp_sprite_export_key(raw_name, key, sizeof key);
-    const tp_project_sprite *ov = tp_project_atlas_find_sprite(a, key);
-    if (ov) {
-        d->origin_x = ov->origin_x;
-        d->origin_y = ov->origin_y;
-        for (int k = 0; k < 4; k++) {
-            d->slice9_lrtb[k] = ov->slice9_lrtb[k];
-        }
-        /* Per-sprite packing overrides -> desc (engine encoding). Effective shape:
-         * slice9 forces RECT (0), else sprite override, else atlas shape. The extrude
-         * override is passed only when the effective shape is RECT (§3.3f effective
-         * rule -- the stored value persists in the model regardless). */
-        const bool slice9 = d->slice9_lrtb[0] || d->slice9_lrtb[1] || d->slice9_lrtb[2] || d->slice9_lrtb[3];
-        const int eff_shape = slice9 ? 0 : (ov->ov_shape != TP_PROJECT_OV_INHERIT ? ov->ov_shape : a->shape);
-        if (ov->ov_shape != TP_PROJECT_OV_INHERIT) {
-            d->ov_mask |= TP_PACK_OV_SHAPE;
-            d->ov_shape = (uint8_t)(ov->ov_shape + 1); /* atlas 0/1/2 -> engine RECT/CONVEX/CONCAVE 1/2/3 */
-        }
-        if (ov->ov_allow_rotate != TP_PROJECT_OV_INHERIT) {
-            d->ov_mask |= TP_PACK_OV_ROTATE;
-            d->ov_allow_rotate = TP_PACK_SPRITE_ROTATE_NO;
-        }
-        if (ov->ov_max_vertices != TP_PROJECT_OV_INHERIT) {
-            d->ov_mask |= TP_PACK_OV_MAXVERT;
-            d->ov_max_vertices = (uint8_t)ov->ov_max_vertices;
-        }
-        if (ov->ov_margin != TP_PROJECT_OV_INHERIT) {
-            d->ov_mask |= TP_PACK_OV_MARGIN;
-            d->ov_margin = (uint8_t)ov->ov_margin;
-        }
-        if (ov->ov_extrude != TP_PROJECT_OV_INHERIT && eff_shape == 0 /* RECT */) {
-            d->ov_mask |= TP_PACK_OV_EXTRUDE;
-            d->ov_extrude = (uint8_t)ov->ov_extrude;
-        }
-    }
-    dv->n++;
-    return true;
-}
 
 static void desc_free(desc_vec *dv) {
     for (int i = 0; i < dv->n; i++) {
@@ -169,45 +97,26 @@ static void desc_free(desc_vec *dv) {
     dv->cap = 0;
 }
 
-/* Assembles sprite descs from atlas `ai`'s sources (files as-is, folders expanded via gui_scan).
- * *missing gets the count of missing sources skipped (ux.md §3.7). Returns false on OOM (fills err).
- * `dv` must be desc_free'd by the caller regardless. */
+/* Assembles sprite descs for atlas `ai` via the core bridge (tp_pack_input_build owns
+ * the name/override/encoding policy). Thin adapter: moves the malloc-owned descs into
+ * the job's desc_vec (desc_free stays valid). tp_input walks the DISK fresh -- the
+ * smart-folder promise is "packs current contents" -- so the row cache is invalidated
+ * to let the list catch up next frame. Returns false on error (fills err). */
 static bool assemble(int ai, desc_vec *dv, int *missing, char *err, size_t err_cap) {
-    tp_project *p = gui_project_get();
-    tp_project_atlas *a = tp_project_get_atlas(p, ai);
+    tp_pack_input in;
+    tp_error e = {{0}};
     *missing = 0;
-    if (!a) {
+    if (tp_pack_input_build(gui_project_get(), ai, &in, &e) != TP_STATUS_OK) {
         if (err) {
-            (void)snprintf(err, err_cap, "no such atlas");
+            (void)snprintf(err, err_cap, "%s", e.msg[0] ? e.msg : "could not assemble sprites");
         }
         return false;
     }
-    for (int si = 0; si < a->source_count; si++) {
-        char abs[512];
-        if (tp_project_resolve_path(p, a->sources[si], abs, sizeof abs) != TP_STATUS_OK) {
-            continue;
-        }
-        if (!gui_scan_exists(abs)) {
-            (*missing)++;
-            continue;
-        }
-        if (gui_scan_is_dir(abs)) {
-            const gui_scan_result *sc = gui_scan_get(abs);
-            for (int ci = 0; ci < sc->count; ci++) {
-                if (!desc_add(dv, a, sc->entries[ci].rel, sc->entries[ci].abs)) {
-                    if (err) {
-                        (void)snprintf(err, err_cap, "out of memory assembling sprites");
-                    }
-                    return false;
-                }
-            }
-        } else if (!desc_add(dv, a, base_name(a->sources[si]), abs)) {
-            if (err) {
-                (void)snprintf(err, err_cap, "out of memory assembling sprites");
-            }
-            return false;
-        }
-    }
+    dv->v = in.descs;
+    dv->n = in.count;
+    dv->cap = in.count;
+    *missing = in.missing_sources;
+    gui_scan_invalidate_all();
     return true;
 }
 
@@ -446,9 +355,6 @@ bool gui_pack_async_start(int atlas_index, char *err, size_t err_cap) {
             (void)snprintf(err, err_cap, "%s", e.msg);
         }
         return false;
-    }
-    if (settings.shape != 0 /* not RECT */) {
-        settings.extrude = 0;
     }
     char *name_owned = dup_str(a->name); /* settings.atlas_name aliases the live model -- own a copy */
     tp_arena *arena = tp_arena_create(0);
@@ -861,18 +767,12 @@ static bool preview_prepare(int atlas_index, const char *exporter_id, desc_vec *
         }
         return false;
     }
-    if (native.shape != 0 /* not RECT */) {
-        native.extrude = 0; /* session effective-extrude rule (§3.3f); the diff baseline matches the native pack */
-    }
     tp_pack_settings eff;
     if (tp_export_effective_settings(&native, &e->caps, &eff) != TP_STATUS_OK) {
         if (err) {
             (void)snprintf(err, err_cap, "could not clamp settings for '%s'", exporter_id);
         }
         return false;
-    }
-    if (eff.shape != 0 /* not RECT */) {
-        eff.extrude = 0; /* keep tp_pack's RECT-only-extrude invariant after the clamp */
     }
     char *name = dup_str(a->name); /* eff.atlas_name would alias the live model -- own a copy */
     if (!name) {
@@ -1041,9 +941,6 @@ int gui_pack_preview_diff(int atlas_index, const char *exporter_id, char *chip, 
     if (tp_project_atlas_to_settings(p, atlas_index, &native, &te) != TP_STATUS_OK) {
         return 0;
     }
-    if (native.shape != 0) {
-        native.extrude = 0;
-    }
     tp_pack_settings eff;
     if (tp_export_effective_settings(&native, &e->caps, &eff) != TP_STATUS_OK) {
         return 0;
@@ -1177,12 +1074,6 @@ bool gui_pack_atlas(int atlas_index, double *out_ms, char *err, size_t err_cap, 
             (void)snprintf(err, err_cap, "%s", e.msg);
         }
         return false;
-    }
-    /* §3.3f effective rule: extrude is only valid for RECT. The project KEEPS the
-     * stored extrude value; the preview pack passes 0 while shape != RECT (core
-     * tp_pack stays strict as the safety net). */
-    if (settings.shape != 0 /* not RECT */) {
-        settings.extrude = 0;
     }
     settings.work_dir = s_work_dir;
     settings.sprites = dv.v;

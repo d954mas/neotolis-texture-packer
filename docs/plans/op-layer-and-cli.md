@@ -203,9 +203,15 @@ per packet; engine submodule read-only.
   sources, override mapping incl. dotfile, effective matrix, missing count,
   OOM, per-source order preservation on a 2-source fixture). No GUI changes.
 - **A3b — GUI flip.** `assemble`/`desc_add` + five clamp sites
-  (`gui_pack.c:461,875,885,1055,1195`) + `gui_view_settings.c:558` routed;
-  `tp_demo_export.c` routed through tp_input. Gate: battery + hash 5/5
-  identical + full ctest.
+  (`gui_pack.c:461,875,885,1055,1195`) + `gui_view_settings.c:558` routed.
+  `assemble` adapter invalidates the scan cache after building (tp_input walks
+  disk fresh — matches the smart-folder "packs current contents" promise; the
+  row list catches up next frame). Gate: battery + hash 5/5 identical + full
+  ctest. AMENDED at execution: `tp_demo_export.c` routing MOVED to B3b — the
+  driver deliberately deviates from the product path (pre-decoded pixels,
+  forced 0.5 pivots, global sort, ext-less names); routing it changes
+  committed demo exports and belongs with the B3b parity fixture work, done
+  deliberately with a regen+verify pass.
 - **A4 — renames + anim frame contract (output-changing bugfix, L-3/L-4).**
   `build_norm_opts` populates overrides from `sprites[].rename` (key→raw map
   via tp_names); frames resolved key→final via the same index; dangling frame
