@@ -36,6 +36,19 @@ typedef struct {
 
 static pack_slot s_slots[GUI_PACK_MAX_ATLASES];
 static char s_work_dir[1024];
+
+/* Export-target preview (EXP-PREVIEW): ONE arena-owned result, separate from the session slots. Keyed
+ * by atlas_index so a stale preview from another atlas never binds (gui_pack_preview_result checks it).
+ * Only one preview is live at a time (the GUI drops it on atlas switch / edit), so a single slot is
+ * sufficient and its lifetime mirrors a session slot: destroy the arena to free the result. */
+typedef struct {
+    tp_arena *arena;
+    tp_result *result;
+    bool valid;
+    int atlas_index; /* atlas this preview belongs to (-1 = none) */
+    char exporter_id[64];
+} preview_slot;
+static preview_slot s_preview = {.atlas_index = -1};
 // #endregion
 
 // #region small helpers
@@ -264,10 +277,15 @@ void gui_pack_clear(int atlas_index) {
         s_slots[i].result = NULL;
         s_slots[i].valid = false;
     }
+    /* The preview is a derived view of the session pack -- clearing the session slot(s) it mirrors
+     * invalidates it too (open/new/undo/redo/repack all pass -1 or the preview's atlas). */
+    if (atlas_index < 0 || atlas_index == s_preview.atlas_index) {
+        gui_pack_preview_clear();
+    }
 }
 
 // #region async worker (one in-flight op max: pack OR export)
-typedef enum { JOB_NONE = 0, JOB_PACK, JOB_EXPORT } job_kind;
+typedef enum { JOB_NONE = 0, JOB_PACK, JOB_EXPORT, JOB_PREVIEW } job_kind;
 
 typedef struct {
     int atlas_index;
@@ -287,6 +305,7 @@ typedef struct {
     int missing;
     char *snap0; /* model snapshot at start (honest stale compare) */
     size_t snap0_len;
+    char preview_exporter[64]; /* JOB_PREVIEW: which exporter this preview was clamped for */
 
     /* export input (job-owned) */
     tp_project *clone;
@@ -688,6 +707,38 @@ gui_pack_done gui_pack_poll(gui_pack_result_info *out) {
         desc_free(&s_job.dv);
         free(s_job.name_owned);
         free(s_job.snap0);
+    } else if (s_job.kind == JOB_PREVIEW) {
+        if (s_job.status == TP_STATUS_OK && s_job.result && !cancelled) {
+            if (s_preview.arena) {
+                tp_arena_destroy(s_preview.arena); /* free any prior preview */
+            }
+            s_preview.arena = s_job.arena;
+            s_preview.result = s_job.result;
+            s_preview.valid = true;
+            s_preview.atlas_index = s_job.atlas_index;
+            (void)snprintf(s_preview.exporter_id, sizeof s_preview.exporter_id, "%s", s_job.preview_exporter);
+            if (out) {
+                out->atlas_index = s_job.atlas_index;
+                out->ms = s_job.elapsed_ms;
+            }
+            nt_log_info("gui_pack(async): preview '%s' via %s packed %d sprite(s), %d page(s) in %.1f ms",
+                        s_job.result->atlas_name, s_job.preview_exporter, s_job.result->sprite_count,
+                        s_job.result->page_count, s_job.elapsed_ms);
+            rc = GUI_PACK_DONE_PREVIEW_OK;
+        } else {
+            tp_arena_destroy(s_job.arena); /* discard: cancelled or failed -- the session slot is untouched */
+            if (cancelled) {
+                rc = GUI_PACK_DONE_PREVIEW_CANCELLED;
+            } else {
+                if (out) {
+                    (void)snprintf(out->err, sizeof out->err, "%s",
+                                   s_job.err.msg[0] ? s_job.err.msg : tp_status_str(s_job.status));
+                }
+                rc = GUI_PACK_DONE_PREVIEW_FAIL;
+            }
+        }
+        desc_free(&s_job.dv);
+        free(s_job.name_owned);
     } else { /* JOB_EXPORT */
         if (out) {
             out->targets = s_job.exp_targets;
@@ -770,13 +821,288 @@ bool gui_pack_async_cancelling(void) {
 void gui_pack_debug_force_busy(gui_pack_async_kind kind) { s_debug_busy = kind; }
 // #endregion
 
+// #region export-target preview (EXP-PREVIEW)
+/* Assembles descs for `atlas_index` and computes the caps-clamped effective settings for `exporter_id`.
+ * On success fills `dv` (caller desc_free's it regardless), *out_name (malloc'd atlas name; caller frees
+ * on success, this frees it on its own later failure) and *out (effective settings with .sprites/.name/
+ * .work_dir wired). false fills err. Mirrors the session assembly in gui_pack_atlas + the §3.3f
+ * effective-extrude rule, then clamps through the exporter caps. */
+static bool preview_prepare(int atlas_index, const char *exporter_id, desc_vec *dv, char **out_name,
+                            tp_pack_settings *out, char *err, size_t err_cap) {
+    *out_name = NULL;
+    if (atlas_index < 0 || atlas_index >= GUI_PACK_MAX_ATLASES) {
+        if (err) {
+            (void)snprintf(err, err_cap, "atlas index out of range");
+        }
+        return false;
+    }
+    const tp_exporter *e = tp_exporter_find(exporter_id);
+    if (!e) {
+        if (err) {
+            (void)snprintf(err, err_cap, "unknown exporter '%s'", exporter_id ? exporter_id : "(null)");
+        }
+        return false;
+    }
+    tp_project *p = gui_project_get();
+    tp_project_atlas *a = tp_project_get_atlas(p, atlas_index);
+    if (!a) {
+        if (err) {
+            (void)snprintf(err, err_cap, "no such atlas");
+        }
+        return false;
+    }
+    int missing = 0;
+    if (!assemble(atlas_index, dv, &missing, err, err_cap)) {
+        return false;
+    }
+    if (dv->n == 0) {
+        if (err) {
+            (void)snprintf(err, err_cap, "atlas '%s' has no usable images%s", a->name,
+                           missing > 0 ? " (all sources missing)" : "");
+        }
+        return false;
+    }
+    tp_pack_settings native;
+    tp_error te = {{0}};
+    if (tp_project_atlas_to_settings(p, atlas_index, &native, &te) != TP_STATUS_OK) {
+        if (err) {
+            (void)snprintf(err, err_cap, "%s", te.msg);
+        }
+        return false;
+    }
+    if (native.shape != 0 /* not RECT */) {
+        native.extrude = 0; /* session effective-extrude rule (§3.3f); the diff baseline matches the native pack */
+    }
+    tp_pack_settings eff;
+    if (tp_export_effective_settings(&native, &e->caps, &eff) != TP_STATUS_OK) {
+        if (err) {
+            (void)snprintf(err, err_cap, "could not clamp settings for '%s'", exporter_id);
+        }
+        return false;
+    }
+    if (eff.shape != 0 /* not RECT */) {
+        eff.extrude = 0; /* keep tp_pack's RECT-only-extrude invariant after the clamp */
+    }
+    char *name = dup_str(a->name); /* eff.atlas_name would alias the live model -- own a copy */
+    if (!name) {
+        if (err) {
+            (void)snprintf(err, err_cap, "out of memory");
+        }
+        return false;
+    }
+    eff.work_dir = s_work_dir;
+    eff.atlas_name = name;
+    eff.sprites = dv->v;
+    eff.sprite_count = dv->n;
+    *out_name = name;
+    *out = eff;
+    return true;
+}
+
+bool gui_pack_preview_blocking(int atlas_index, const char *exporter_id, char *err, size_t err_cap) {
+    desc_vec dv = {0};
+    char *name = NULL;
+    tp_pack_settings settings;
+    if (!preview_prepare(atlas_index, exporter_id, &dv, &name, &settings, err, err_cap)) {
+        desc_free(&dv);
+        free(name);
+        return false;
+    }
+    tp_arena *arena = tp_arena_create(0);
+    if (!arena) {
+        desc_free(&dv);
+        free(name);
+        if (err) {
+            (void)snprintf(err, err_cap, "out of memory (arena)");
+        }
+        return false;
+    }
+    tp_result *result = NULL;
+    tp_error e = {{0}};
+    const tp_status st = tp_pack(&settings, arena, &result, &e);
+    desc_free(&dv); /* names/paths consumed by tp_pack */
+    free(name);
+    if (st != TP_STATUS_OK || !result) {
+        tp_arena_destroy(arena);
+        if (err) {
+            (void)snprintf(err, err_cap, "%s", e.msg[0] ? e.msg : tp_status_str(st));
+        }
+        return false;
+    }
+    if (s_preview.arena) {
+        tp_arena_destroy(s_preview.arena);
+    }
+    s_preview.arena = arena;
+    s_preview.result = result;
+    s_preview.valid = true;
+    s_preview.atlas_index = atlas_index;
+    (void)snprintf(s_preview.exporter_id, sizeof s_preview.exporter_id, "%s", exporter_id);
+    nt_log_info("gui_pack: preview '%s' via %s -> %d sprite(s), %d page(s)", result->atlas_name, exporter_id,
+                result->sprite_count, result->page_count);
+    return true;
+}
+
+bool gui_pack_preview_async_start(int atlas_index, const char *exporter_id, char *err, size_t err_cap) {
+    if (s_job_active) {
+        if (err) {
+            (void)snprintf(err, err_cap, "busy -- a pack or export is already running");
+        }
+        return false;
+    }
+    desc_vec dv = {0};
+    char *name = NULL;
+    tp_pack_settings settings;
+    if (!preview_prepare(atlas_index, exporter_id, &dv, &name, &settings, err, err_cap)) {
+        desc_free(&dv);
+        free(name);
+        return false;
+    }
+    tp_arena *arena = tp_arena_create(0);
+    if (!arena) {
+        desc_free(&dv);
+        free(name);
+        if (err) {
+            (void)snprintf(err, err_cap, "out of memory");
+        }
+        return false;
+    }
+    memset(&s_job, 0, sizeof s_job);
+    s_job.kind = JOB_PREVIEW;
+    s_job.atlas_index = atlas_index;
+    s_job.settings = settings;
+    s_job.name_owned = name;
+    s_job.dv = dv;
+    s_job.arena = arena;
+    (void)snprintf(s_job.preview_exporter, sizeof s_job.preview_exporter, "%s", exporter_id);
+    s_job.start_ms = now_ms();
+    atomic_store_explicit(&s_job.state, 0, memory_order_relaxed);
+    atomic_store_explicit(&s_job.cancelled, false, memory_order_relaxed);
+    if (thrd_create(&s_job.thread, pack_worker, &s_job) != thrd_success) {
+        desc_free(&s_job.dv);
+        free(s_job.name_owned);
+        tp_arena_destroy(s_job.arena);
+        memset(&s_job, 0, sizeof s_job);
+        if (err) {
+            (void)snprintf(err, err_cap, "could not start worker thread");
+        }
+        return false;
+    }
+    s_job_active = true;
+    return true;
+}
+
+const tp_result *gui_pack_preview_result(int atlas_index) {
+    if (!s_preview.valid || s_preview.atlas_index != atlas_index) {
+        return NULL;
+    }
+    return s_preview.result;
+}
+
+void gui_pack_preview_clear(void) {
+    if (s_preview.arena) {
+        tp_arena_destroy(s_preview.arena);
+    }
+    s_preview.arena = NULL;
+    s_preview.result = NULL;
+    s_preview.valid = false;
+    s_preview.atlas_index = -1;
+    s_preview.exporter_id[0] = '\0';
+}
+
+/* True if any sprite override in the atlas carries a non-zero slice9 border. */
+static bool atlas_uses_slice9(const tp_project_atlas *a) {
+    for (int i = 0; a && i < a->sprite_count; i++) {
+        const tp_project_sprite *s = &a->sprites[i];
+        if (s->slice9_lrtb[0] || s->slice9_lrtb[1] || s->slice9_lrtb[2] || s->slice9_lrtb[3]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* True if any sprite override carries a non-default pivot. */
+static bool atlas_uses_pivot(const tp_project_atlas *a) {
+    for (int i = 0; a && i < a->sprite_count; i++) {
+        const tp_project_sprite *s = &a->sprites[i];
+        if (s->origin_x != TP_PROJECT_ORIGIN_DEFAULT || s->origin_y != TP_PROJECT_ORIGIN_DEFAULT) {
+            return true;
+        }
+    }
+    return false;
+}
+
+int gui_pack_preview_diff(int atlas_index, const char *exporter_id, char *chip, size_t chip_cap, char *tip,
+                          size_t tip_cap) {
+    if (chip && chip_cap) {
+        chip[0] = '\0';
+    }
+    if (tip && tip_cap) {
+        tip[0] = '\0';
+    }
+    const tp_exporter *e = tp_exporter_find(exporter_id);
+    tp_project *p = gui_project_get();
+    tp_project_atlas *a = tp_project_get_atlas(p, atlas_index);
+    if (!e || !a) {
+        return 0;
+    }
+    tp_pack_settings native;
+    tp_error te = {{0}};
+    if (tp_project_atlas_to_settings(p, atlas_index, &native, &te) != TP_STATUS_OK) {
+        return 0;
+    }
+    if (native.shape != 0) {
+        native.extrude = 0;
+    }
+    tp_pack_settings eff;
+    if (tp_export_effective_settings(&native, &e->caps, &eff) != TP_STATUS_OK) {
+        return 0;
+    }
+    int n = 0;
+    /* One collector: a short token for the chip ("a, b, c"), a longer line for the tooltip. Guarded so the
+     * write pointer never forms past-end and a truncating snprintf can't advance the cursor out of range. */
+    size_t clen = 0;
+    size_t tlen = 0;
+#define PREVIEW_ADD(short_tok, long_line)                                                                      \
+    do {                                                                                                       \
+        if (chip && clen < chip_cap) {                                                                         \
+            const int w_ = snprintf(chip + clen, chip_cap - clen, "%s%s", n > 0 ? ", " : "", (short_tok));     \
+            if (w_ > 0) {                                                                                      \
+                clen += (size_t)w_;                                                                            \
+            }                                                                                                  \
+        }                                                                                                      \
+        if (tip && tlen < tip_cap) {                                                                           \
+            const int w2_ = snprintf(tip + tlen, tip_cap - tlen, "%s%s", n > 0 ? "\n" : "", (long_line));      \
+            if (w2_ > 0) {                                                                                     \
+                tlen += (size_t)w2_;                                                                           \
+            }                                                                                                  \
+        }                                                                                                      \
+        n++;                                                                                                   \
+    } while (0)
+
+    if (native.allow_transform && !eff.allow_transform) {
+        PREVIEW_ADD("no rotate/flip", "Rotations/flips off -- this format can't encode the full D4 orientation set");
+    }
+    if (native.shape != eff.shape) {
+        PREVIEW_ADD("polygons \xE2\x86\x92 rect", "Polygon hulls flattened to rectangles -- this format stores quads only");
+    }
+    if (!e->caps.slice9 && atlas_uses_slice9(a)) {
+        PREVIEW_ADD("slice9 dropped", "9-slice borders dropped -- this format does not store them");
+    }
+    if (!e->caps.pivot && atlas_uses_pivot(a)) {
+        PREVIEW_ADD("pivot dropped", "Per-sprite pivots dropped -- this format does not store them");
+    }
+#undef PREVIEW_ADD
+    return n;
+}
+// #endregion
+
 void gui_pack_shutdown(void) {
     if (s_job_active) {
         /* Non-interruptible pack + no thrd_detach in this tinycthread -> join (covers the window
          * X-button close path, which bypasses the interactive running-op guard). Result discarded. */
         atomic_store_explicit(&s_job.cancelled, true, memory_order_relaxed);
         (void)thrd_join(s_job.thread, NULL);
-        if (s_job.kind == JOB_PACK) {
+        if (s_job.kind == JOB_PACK || s_job.kind == JOB_PREVIEW) {
             if (s_job.arena) {
                 tp_arena_destroy(s_job.arena);
             }
@@ -794,6 +1120,7 @@ void gui_pack_shutdown(void) {
         s_job_active = false;
     }
     gui_pack_clear(-1);
+    gui_pack_preview_clear();
 }
 
 const tp_result *gui_pack_result(int atlas_index) {

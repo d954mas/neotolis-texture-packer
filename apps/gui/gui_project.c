@@ -12,6 +12,7 @@ static tp_project *s_proj;
 static char s_path[1024]; /* absolute file path; "" while unsaved */
 static bool s_project_dirty;
 static bool s_preview_stale;
+static unsigned s_model_ver; /* bumped per real mutation (gui_project_model_version) */
 static char s_name[256]; /* cached basename for the menu bar */
 
 /* Snapshots (serialized project bytes) for undo/dirty recompute (ux.md §3.3c). */
@@ -178,12 +179,14 @@ void gui_project_touch(gui_action act) {
     free(s_last_buf);
     s_last_buf = nb;
     s_last_len = nl;
+    s_model_ver++; /* a real change committed -> a view watching this drops its stale derived state */
     recompute_dirty();
 }
 
 void gui_project_mark_packed(void) { s_preview_stale = false; }
 void gui_project_mark_stale(void) { s_preview_stale = true; }
 void gui_project_tick(double now_seconds) { s_now = now_seconds; }
+unsigned gui_project_model_version(void) { return s_model_ver; }
 // #endregion
 
 // #region mutation wrappers

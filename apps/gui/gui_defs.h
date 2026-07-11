@@ -40,19 +40,28 @@ static inline uint16_t Su(float px) { return (uint16_t)((px * g_ui_scale) + 0.5F
  * the buttons much narrower than the old text blobs, so the single-row floor drops well below the
  * old 545. Ladder (§4): >= LABELS Pack/Export show text; >= CHIP the stale chip shows too; below
  * SINGLE the strip falls to the overflow-safe two-row compact (icon-only).
- * CHIP must clear the FULL labeled+chip strip min-content (measured ~649 design px, max across
- * scales 1.0/1.5/2.0) PLUS the canvas card's L/R padding (S(12) = Su(6) each side; unchanged by the
- * docked pass 2 -- only the root outer padding/inter-panel gaps shrank, which is the compute_panel_widths
- * OVERHEAD term, not this card padding). True fit limit ~661; the 680 stop stays >= that (strictly
- * conservative -- the chip just drops a few px earlier). Pass 2 note: dropping the root overhead from
- * S(16) to S(4) widened s_canvas_w by ~12px, so the chip appears at slightly narrower windows -- but the
- * drop-vs-show classification is unchanged (selftest phases 6/8 still assert chip DROPPED at 1920x1080@1.5,
- * SHOWN at 2000x1080@1.5). Below CHIP the amber Pack carries the stale signal (§4) and the chip is
- * dropped, so a trailing chip can never push the row (a GROW child can't shrink below min-content) past
- * the canvas and shove the right panel off-screen. */
+ * CHIP must clear the FULL labeled strip min-content PLUS the preview selector (added by packet
+ * EXP-PREVIEW: a fixed-width combo now always sits in the single-row strip once STRIP_PREVIEW_MIN_W is
+ * met) PLUS the trailing chip PLUS the canvas card's L/R padding. Measured selector + labeled actions +
+ * pages + zoom + chip min-content ~715 design px (max across the stale "outdated" chip and the bounded
+ * degradation chip). The stale chip and the degradation chip share this stop and never coexist (the stale
+ * chip is suppressed while a preview target is active), and the degradation chip's text is width-bounded
+ * (truncate_to_width) so a multi-degradation project can't grow the row past it. Below CHIP the amber Pack
+ * carries the stale signal (§4) and the chip is dropped, so a trailing chip can never push the row (a GROW
+ * child can't shrink below min-content) past the canvas and shove the right panel off-screen. The selftest
+ * phases 6/8 assert chip DROPPED at 1920x1080@1.5 and SHOWN at 2200x1080@1.5 (the wide stop the selector
+ * pushed the "roomy" threshold up to). */
 #define STRIP_SINGLE_MIN_W 440.0F
 #define STRIP_LABELS_MIN_W 560.0F
-#define STRIP_CHIP_MIN_W 680.0F
+/* Export-target preview selector (packet EXP-PREVIEW): the selector is a fixed-width combo added to the
+ * single-row strip, so it raises that row's min-content. STRIP_SINGLE_MIN_W was calibrated WITHOUT it, so
+ * a bare selector overflows the narrow single-row band just above that stop (measured: the labeled
+ * single-row + selector min-content is ~560 design px). Gate the selector on its own higher stop -- below
+ * it the selector folds away exactly like the compact strip drops controls, and the canvas binds the
+ * native session pack (preview_target_result mirrors this stop). 620 clears the ~560 min-content with
+ * margin and sits below STRIP_CHIP_MIN_W so the degradation chip only ever adds width where there is room. */
+#define STRIP_PREVIEW_MIN_W 620.0F
+#define STRIP_CHIP_MIN_W 760.0F
 
 /* Cap on export targets shown per atlas (settings panel target rows + the Export dialog loop). */
 #define GUI_MAX_TARGETS 16

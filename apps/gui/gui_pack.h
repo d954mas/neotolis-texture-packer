@@ -58,6 +58,35 @@ bool gui_pack_export(int atlas_index, int *out_targets, int *out_notices, char *
  * project new/open and before a repack. */
 void gui_pack_clear(int atlas_index);
 
+/* --- export-target preview (packet EXP-PREVIEW) --------------------------------------------------
+ * A view-only "what would exporter <id> produce from the CURRENT settings" pack, kept in ONE arena-
+ * owned preview slot SEPARATE from the session slots (the native result is never clobbered). The
+ * effective settings are tp_project_atlas_to_settings clamped through the exporter's caps
+ * (tp_export_effective_settings). Only one preview is live at a time (dropped on atlas switch / edit),
+ * so a single slot keyed by atlas_index guarantees coherent binding. */
+
+/* Blocking preview pack of `atlas_index` for exporter `exporter_id` (deterministic path for the
+ * selftest + --shot-preview). Mirrors gui_pack_atlas but lands in the preview slot. false fills err. */
+bool gui_pack_preview_blocking(int atlas_index, const char *exporter_id, char *err, size_t err_cap);
+
+/* Async preview pack (interactive): reuses the worker thread; result lands in the preview slot at a
+ * frame boundary (gui_pack_poll -> GUI_PACK_DONE_PREVIEW_*). false (fills err) if busy / can't assemble. */
+bool gui_pack_preview_async_start(int atlas_index, const char *exporter_id, char *err, size_t err_cap);
+
+/* The stored preview result IF it belongs to `atlas_index`, else NULL (coherent binding: a stale slot
+ * from another atlas never shows). */
+const tp_result *gui_pack_preview_result(int atlas_index);
+
+/* Drops the preview slot (frees its arena). Call on back-to-Native / atlas switch / model edit. */
+void gui_pack_preview_clear(void);
+
+/* Degradation summary for `exporter_id` on `atlas_index`: diffs the native (session) tp_pack_settings
+ * against the caps-clamped effective settings, plus the caps-vs-usage metadata drops (slice9/pivot).
+ * Writes a SHORT chip caption to `chip` (empty when the format expresses everything) and a longer
+ * field-by-field breakdown to `tip` (nullable). Returns the number of degradations found. */
+int gui_pack_preview_diff(int atlas_index, const char *exporter_id, char *chip, size_t chip_cap, char *tip,
+                          size_t tip_cap);
+
 /* --- async packing (interactive; ux.md §3 worker thread) --------------------------------------
  * One in-flight op MAX (pack OR export). The heavy tp_pack/tp_export_run runs on a worker thread
  * over a self-contained snapshot; the UI stays interactive. Poll each frame and swap the result in
@@ -76,7 +105,12 @@ typedef enum {
     GUI_PACK_DONE_PACK_CANCELLED,
     GUI_PACK_DONE_EXPORT_OK,
     GUI_PACK_DONE_EXPORT_FAIL,
-    GUI_PACK_DONE_EXPORT_CANCELLED
+    GUI_PACK_DONE_EXPORT_CANCELLED,
+    /* Export-target PREVIEW pack (EXP-PREVIEW): lands in the SEPARATE preview slot, never the session
+     * slot; the native pack/export/stale state is untouched. */
+    GUI_PACK_DONE_PREVIEW_OK,
+    GUI_PACK_DONE_PREVIEW_FAIL,
+    GUI_PACK_DONE_PREVIEW_CANCELLED
 } gui_pack_done;
 
 typedef struct {

@@ -4,6 +4,7 @@
 
 #include "gui_actions.h"
 
+#include "gui_defs.h" /* S() -- the compact-strip stop that folds the preview selector away */
 #include "gui_state.h"
 #include "gui_rows.h"
 #include "gui_project.h"
@@ -12,6 +13,8 @@
 #include "gui_pack.h"
 #include "gui_history.h"
 #include "tinyfiledialogs.h"
+
+#include "tp_core/tp_export.h" /* tp_exporter_at -> the preview selector's exporter list */
 
 #include "app/nt_app.h"
 
@@ -39,6 +42,7 @@ int s_pending_remove_target = -1;
 int s_pending_browse_target = -1;        /* target whose out-path "..." dialog is queued */
 int s_pending_export_browse_atlas = -1;  /* Export dialog: atlas of the queued out-path browse */
 int s_pending_export_browse_target = -1; /* Export dialog: target index of the queued browse */
+int s_pending_preview_target = -1;       /* strip preview-selector pick (-1 none; 0 Native; k = exporter k-1) */
 int s_after_confirm;
 bool s_confirm_open;
 int s_modal_action;
@@ -68,6 +72,7 @@ void reset_selection(void) {
     s_sel_anim = -1;
     s_sel_anim_frame = -1;
     preview_stop();
+    preview_target_reset(); /* export-target preview is bound to the selection/atlas -> drop it on any reset */
 }
 
 void cancel_edit(void) {
@@ -245,6 +250,7 @@ void open_preview(int anim_index) {
         return;
     }
     cancel_edit();
+    preview_target_reset(); /* the anim player owns the canvas -> never leave an export preview bound under it */
     s_sel_anim = anim_index;
     s_preview_active = true;
     s_preview_playing = true;
@@ -777,6 +783,72 @@ static void do_export(void) {
     }
 }
 
+// #region export-target preview (packet EXP-PREVIEW)
+/* Back to Native: drop the preview state + free gui_pack's preview slot. Idempotent. */
+void preview_target_reset(void) {
+    s_preview_target = 0;
+    s_preview_ver = 0;
+    gui_pack_preview_clear();
+}
+
+/* The result the canvas should BIND this frame: the export preview when one is selected, has landed, and
+ * the strip selector is actually visible (single-row tier); otherwise the native session pack. The anim
+ * player owns the canvas in its own mode, so it always falls back to native (its frame indices are into
+ * the native result). Single source of truth -- used by main.c's canvas bind AND the canvas stats line. */
+const tp_result *preview_target_result(void) {
+    const tp_result *native = gui_pack_result(s_sel_atlas);
+    if (s_preview_target == 0 || s_preview_active) {
+        return native;
+    }
+    if (s_canvas_w < S(STRIP_PREVIEW_MIN_W)) {
+        return native; /* the selector folded away (compact / narrow single-row) -> show the honest session pack */
+    }
+    const tp_result *pv = gui_pack_preview_result(s_sel_atlas);
+    return pv ? pv : native; /* preview not landed yet (async) -> native until it does */
+}
+
+/* Starts the preview pack for a strip-selector pick. combo 0 (or a bad index) -> Native. */
+static void preview_target_start(int combo_index) {
+    if (combo_index <= 0) {
+        preview_target_reset();
+        return;
+    }
+    const tp_exporter *e = tp_exporter_at(combo_index - 1);
+    if (!e) {
+        preview_target_reset();
+        return;
+    }
+    tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
+    if (!a || a->source_count == 0) {
+        set_status_ex(STATUS_WARNING, "Add sources first to preview an export target.");
+        preview_target_reset();
+        return;
+    }
+    if (gui_pack_async_busy()) {
+        set_status_ex(STATUS_WARNING, "Busy -- wait for the current pack or export to finish.");
+        preview_target_reset();
+        return;
+    }
+    char err[256] = {0};
+    if (gui_pack_preview_async_start(s_sel_atlas, e->id, err, sizeof err)) {
+        s_preview_target = combo_index;
+        s_preview_ver = gui_project_model_version();
+        set_statusf_ex(STATUS_INFO, "Preview: %s\xE2\x80\xA6", e->display_name ? e->display_name : e->id);
+    } else {
+        preview_target_reset();
+        set_statusf_ex(STATUS_ERROR, "Preview failed: %s", err);
+    }
+}
+
+/* Per-frame reconciliation: a model edit since the preview packed makes it stale -> drop to Native (never
+ * show a silently-wrong preview). Atlas switch / undo / redo / open / new drop it via reset_selection. */
+static void preview_target_sync(void) {
+    if (s_preview_target != 0 && gui_project_model_version() != s_preview_ver) {
+        preview_target_reset();
+    }
+}
+// #endregion
+
 /* Lands a finished async pack/export at a frame boundary: the pack slot swap is done inside
  * gui_pack_poll; here we recompute stale honestly (mark_packed only when the model still matches
  * the packed snapshot) and route the outcome through the severity status. Called from apply_pending. */
@@ -813,6 +885,34 @@ static void poll_async(void) {
             break;
         case GUI_PACK_DONE_EXPORT_CANCELLED:
             set_status_ex(STATUS_INFO, "Export cancelled.");
+            break;
+        case GUI_PACK_DONE_PREVIEW_OK:
+            if (s_preview_target == 0) {
+                gui_pack_preview_clear(); /* selection reset/changed while packing -> drop the orphan slot */
+            } else {
+                /* The degradation chip is width-gated (STRIP_CHIP_MIN_W) and drops on common window
+                 * sizes, so the pill also carries the summary -- it is width-independent. */
+                const tp_exporter *pe = tp_exporter_at(s_preview_target - 1);
+                if (pe) {
+                    char chip[96] = {0};
+                    char tip[256] = {0};
+                    const int nd = gui_pack_preview_diff(s_sel_atlas, pe->id, chip, sizeof chip, tip, sizeof tip);
+                    if (nd > 0) {
+                        set_statusf_ex(STATUS_WARNING, "Previewing %s export: %s", pe->display_name ? pe->display_name : pe->id, chip);
+                    } else {
+                        set_statusf_ex(STATUS_SUCCESS, "Previewing %s export: same layout rules as native.",
+                                       pe->display_name ? pe->display_name : pe->id);
+                    }
+                }
+            }
+            break;
+        case GUI_PACK_DONE_PREVIEW_FAIL:
+            preview_target_reset();
+            set_statusf_ex(STATUS_ERROR, "Preview failed: %s", info.err);
+            break;
+        case GUI_PACK_DONE_PREVIEW_CANCELLED:
+            preview_target_reset();
+            set_status_ex(STATUS_INFO, "Preview cancelled.");
             break;
         case GUI_PACK_DONE_NONE:
         default:
@@ -893,7 +993,8 @@ static void commit_active_edit(bool force) {
 
 // #region deferred side-effects (run at the top of the frame, between frames)
 void apply_pending(void) {
-    poll_async(); /* land any finished async pack/export before this frame's canvas pickup */
+    poll_async(); /* land any finished async pack/export/preview before this frame's canvas pickup */
+    preview_target_sync(); /* drop a preview the model has since outrun (after poll: an in-flight one lands first) */
 
     /* A press landed outside the active inline editor last frame -> commit it (desktop rename UX).
      * Also fires before any pending model change (remove/refresh/open/new) so no orphaned editor
@@ -1006,6 +1107,9 @@ void apply_pending(void) {
     if (s_pending_export) {
         do_export();
     }
+    if (s_pending_preview_target >= 0) {
+        preview_target_start(s_pending_preview_target);
+    }
 
     s_pending_open = s_pending_save = s_pending_save_as = false;
     s_pending_add_files = s_pending_add_folder = s_pending_add_atlas = false;
@@ -1019,5 +1123,6 @@ void apply_pending(void) {
     s_pending_export_browse_target = -1;
     s_pending_remove_anim = -1;
     s_pending_browse_target = -1;
+    s_pending_preview_target = -1;
 }
 // #endregion

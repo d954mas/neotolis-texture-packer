@@ -16,6 +16,7 @@
 #include <stdbool.h>
 
 #include "tp_core/tp_project.h" /* tp_project_anim (current_anim return type) */
+#include "tp_core/tp_model.h"   /* tp_result (preview_target_result return type) */
 
 #include "gui_rows.h" /* sprite_row (start_sprite_edit parameter) */
 
@@ -38,6 +39,7 @@ extern int s_pending_remove_target;
 extern int s_pending_browse_target;        /* target whose out-path "..." dialog is queued */
 extern int s_pending_export_browse_atlas;  /* Export dialog: atlas of the queued out-path browse */
 extern int s_pending_export_browse_target; /* Export dialog: target index of the queued browse */
+extern int s_pending_preview_target;       /* strip preview-selector pick (-1 none; 0 Native; k = exporter k-1) */
 
 /* --- new/open/exit unsaved-changes confirm flow --- */
 enum { AFTER_NONE = 0, AFTER_NEW, AFTER_EXIT, AFTER_OPEN };
@@ -69,6 +71,10 @@ void reset_selection(void);
 void clamp_selection(void);
 void cancel_edit(void);
 void preview_stop(void);
+
+/* --- export-target preview (packet EXP-PREVIEW) --- */
+void preview_target_reset(void);              /* back to Native: drop preview state + free the preview slot */
+const tp_result *preview_target_result(void); /* the result the canvas binds this frame (preview or native) */
 
 /* --- start-edit entry points (pair with the inline-rename commits below) --- */
 void start_atlas_edit(int i);

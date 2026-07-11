@@ -611,6 +611,9 @@ static void frame(void) {
         } else if (s_preview_active && !s_ctx_state.open) {
             preview_stop();
             set_status("Closed animation preview.");
+        } else if (s_preview_target != 0) {
+            preview_target_reset(); /* export-target preview escape hatch (also works when the selector folded away) */
+            set_status("Preview: back to Native.");
         } else {
             close_all_menus();
         }
@@ -738,8 +741,9 @@ static void frame(void) {
             }
         }
 
-        /* Bind the selected atlas's pack result to the canvas (repack / atlas switch / clear). */
-        const tp_result *want = gui_pack_result(s_sel_atlas);
+        /* Bind the result the canvas shows (repack / atlas switch / clear): the export-target preview
+         * while one is active + visible, else the native session pack (preview_target_result). */
+        const tp_result *want = preview_target_result();
         if (want != s_shown_result) {
             gui_canvas_set_result(&s_canvas, want);
             s_shown_result = want;

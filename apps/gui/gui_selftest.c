@@ -25,6 +25,7 @@
 #include "window/nt_window.h"   /* g_nt_window (phase-driven framebuffer dims) */
 
 #include "tp_core/tp_error.h"   /* tp_status_str / tp_error */
+#include "tp_core/tp_export.h"  /* tp_exporter_count/at (preview-target selector index) */
 #include "tp_core/tp_model.h"   /* tp_result */
 #include "tp_core/tp_project.h" /* tp_project* accessors */
 
@@ -865,8 +866,10 @@ void selftest_pre_frame(void) {
          * -- which depends only on the gate, not on the strip's pixel width -- is the deterministic fail-before):
          *  6) 1920x1080 -- chip does NOT fit; must be DROPPED (fail-before: chip shown -> overflow assert).
          *  7) 1366x768  -- compact two-row stale strip (chip already dropped); must still stay in-window.
-         *  8) 2000x1080 -- wide enough that the chip DOES fit; must be SHOWN and still not overflow. */
-        const float win_w = (s_st_phase == 6) ? 1920.0F : (s_st_phase == 7) ? 1366.0F : 2000.0F;
+         *  8) 2200x1080 -- wide enough that the chip DOES fit; must be SHOWN and still not overflow. (2200,
+         *     not 2000: packet EXP-PREVIEW's fixed-width preview selector now also sits in this row, so the
+         *     "roomy enough for the chip" stop -- STRIP_CHIP_MIN_W -- rose above the 2000@1.5 canvas width.) */
+        const float win_w = (s_st_phase == 6) ? 1920.0F : (s_st_phase == 7) ? 1366.0F : 2200.0F;
         const float win_h = (s_st_phase == 7) ? 768.0F : 1080.0F;
         g_ui_scale = 1.5F;
         g_nt_window.fb_width = (uint32_t)win_w;
@@ -909,7 +912,7 @@ void selftest_pre_frame(void) {
             selftest_assert_no_overflow(win_w, win_h);
             /* The chip visible/dropped decision depends ONLY on the gate (accent && width), not on the strip's
              * pixel width, so it is the deterministic fail-before signal even where the page count would let the
-             * bounds check pass: at 1920x1080@1.5 the chip must be DROPPED, at the wide 2000 it must be SHOWN. */
+             * bounds check pass: at 1920x1080@1.5 the chip must be DROPPED, at the wide 2200 it must be SHOWN. */
             const bool chip = nt_ui_get_bbox(s_ctx, nt_ui_id("ntpacker/stale_chip")).found;
             if (s_st_phase == 6) {
                 NT_ASSERT(!chip && "SELFTEST: stale chip must be dropped where it would overflow the canvas budget");
@@ -976,6 +979,97 @@ void selftest_pre_frame(void) {
             g_nt_window.fb_width = 1280;
             g_nt_window.fb_height = 800;
             s_st_phase = 11;
+            s_st_pf = 0;
+        }
+    } else if (s_st_phase == 11) {
+        /* Export-target PREVIEW (packet EXP-PREVIEW): a defold preview must (a) exist with identity-only
+         * placements (defold caps.flips=false -> the clamp turns allow_transform off -> tp_pack bakes no
+         * rotated/flipped regions), (b) leave the native session result untouched (pointer + content),
+         * (c) re-bind the native result WITHOUT a repack when switched back to Native, and (d) yield a
+         * non-empty degradation summary. Blocking path (the dev seam), mirroring do_pack_blocking. */
+        g_ui_scale = 1.0F;
+        g_nt_window.fb_width = 1280;
+        g_nt_window.fb_height = 800;
+        if (s_st_pf == 1) {
+            gui_project_new();
+            gui_pack_clear(-1);
+            preview_target_reset();
+            s_sel_atlas = 0;
+            reset_selection();
+            tp_project_atlas *a0 = tp_project_get_atlas(gui_project_get(), 0);
+            if (a0 && a0->source_count == 0) {
+                char afolder[512];
+                to_abs("examples/defold-demo/examples/anim_trim/anims", afolder, sizeof afolder);
+                (void)gui_project_add_source(0, afolder);
+                a0->allow_transform = true; /* guarantee a rotate/flip for the defold clamp to strip (non-empty diff) */
+                gui_scan_invalidate_all();
+            }
+            double nms = 0.0;
+            char nerr[256] = {0};
+            char nnote[128] = {0};
+            const bool okn = gui_pack_atlas(0, &nms, nerr, sizeof nerr, nnote, sizeof nnote);
+            const tp_result *native = gui_pack_result(0);
+            nt_log_info("SELFTEST: preview native pack -> %d sprites=%d %s", (int)okn, native ? native->sprite_count : -1,
+                        okn ? "" : nerr);
+            NT_ASSERT(okn && native && native->sprite_count > 0 && "SELFTEST preview: native session pack");
+            const void *native_ptr = (const void *)native;
+            const int native_sc = native->sprite_count;
+            const int native_pc = native->page_count;
+
+            int defold_idx = -1;
+            for (int i = 0; i < tp_exporter_count(); i++) {
+                const tp_exporter *e = tp_exporter_at(i);
+                if (e && strcmp(e->id, "defold") == 0) {
+                    defold_idx = i;
+                    break;
+                }
+            }
+            NT_ASSERT(defold_idx >= 0 && "SELFTEST preview: defold exporter registered");
+
+            char pverr[256] = {0};
+            const bool okp = gui_pack_preview_blocking(0, "defold", pverr, sizeof pverr);
+            const tp_result *pv = gui_pack_preview_result(0);
+            nt_log_info("SELFTEST: preview defold pack -> %d sprites=%d %s", (int)okp, pv ? pv->sprite_count : -1,
+                        okp ? "" : pverr);
+            NT_ASSERT(okp && pv && pv->sprite_count > 0 && "SELFTEST preview: defold preview result present");
+
+            /* (a) identity-only placements */
+            int nonidentity = 0;
+            for (int i = 0; i < pv->sprite_count; i++) {
+                if (pv->sprites[i].transform != 0) {
+                    nonidentity++;
+                }
+            }
+            nt_log_info("SELFTEST: preview defold non-identity placements=%d (expect 0)", nonidentity);
+            NT_ASSERT(nonidentity == 0 && "SELFTEST preview: defold packs identity-only (no flip/rotate)");
+
+            /* (b) native session result untouched */
+            const tp_result *native2 = gui_pack_result(0);
+            NT_ASSERT((const void *)native2 == native_ptr && native2->sprite_count == native_sc &&
+                      native2->page_count == native_pc && "SELFTEST preview: native session result untouched");
+
+            /* (c) preview binds while active; back to Native re-binds the session result with no repack */
+            s_preview_target = defold_idx + 1;
+            s_preview_ver = gui_project_model_version();
+            s_canvas_w = 700.0F; /* single-row tier (>= STRIP_SINGLE_MIN_W) so the preview binds, not compact */
+            const tp_result *shown_pv = preview_target_result();
+            NT_ASSERT((const void *)shown_pv == (const void *)pv && "SELFTEST preview: preview bound while active");
+            preview_target_reset();
+            const tp_result *shown_native = preview_target_result();
+            NT_ASSERT((const void *)shown_native == native_ptr &&
+                      "SELFTEST preview: back to Native re-binds the session result (no repack)");
+
+            /* (d) degradation summary non-empty for defold */
+            char chip[96] = {0};
+            char tip[224] = {0};
+            const int nd = gui_pack_preview_diff(0, "defold", chip, sizeof chip, tip, sizeof tip);
+            nt_log_info("SELFTEST: preview defold degradation nd=%d chip='%s'", nd, chip);
+            NT_ASSERT(nd > 0 && chip[0] != '\0' && "SELFTEST preview: defold degradation summary non-empty");
+
+            gui_pack_preview_clear();
+            preview_target_reset();
+            nt_log_info("SELFTEST: export-target preview OK");
+            s_st_phase = 12;
             s_st_pf = 0;
         }
     } else {

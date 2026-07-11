@@ -89,6 +89,10 @@ int s_sel_anchor_row = -1;
 int s_sel_anim = -1;
 int s_sel_anim_frame = -1;
 
+/* --- export-target preview (EXP-PREVIEW): 0 = Native (default) --- */
+int s_preview_target;
+unsigned s_preview_ver;
+
 /* --- animation preview player --- */
 bool s_preview_active;
 bool s_preview_playing;

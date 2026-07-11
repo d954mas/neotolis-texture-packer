@@ -88,6 +88,11 @@ void gui_project_mark_stale(void);
 /* Advances the history clock (seconds) each frame -- drives undo coalescing windows. */
 void gui_project_tick(double now_seconds);
 
+/* Monotonic model-edit counter: bumped once per REAL model mutation (the touch choke point, after the
+ * memcmp dedup). Lets a view cheaply detect "the project changed since I snapshotted it" without
+ * re-serializing every frame -- the export-target preview uses it to drop a stale preview on an edit. */
+unsigned gui_project_model_version(void);
+
 /* --- mutation wrappers (all funnel through gui_project_touch) --- */
 int gui_project_add_atlas(void);                          /* returns new atlas index, or -1 */
 void gui_project_remove_atlas(int index);

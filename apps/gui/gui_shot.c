@@ -19,12 +19,14 @@
 #include "ui/nt_ui.h"         /* nt_ui_get_bbox / nt_ui_bbox_t */
 #include "window/nt_window.h" /* g_nt_window (framebuffer dims) */
 
+#include "tp_core/tp_export.h" /* tp_exporter_count/at -> map --shot-preview id to a selector index */
+
 #include "gui_actions.h" /* do_pack_blocking */
 #include "gui_canvas.h"  /* s_canvas ops + GUI_CANVAS_ATLAS */
-#include "gui_pack.h"    /* gui_pack_result / gui_pack_debug_force_busy */
-#include "gui_project.h" /* gui_project_mark_stale */
+#include "gui_pack.h"    /* gui_pack_result / gui_pack_debug_force_busy / gui_pack_preview_blocking */
+#include "gui_project.h" /* gui_project_mark_stale / gui_project_model_version */
 #include "gui_rows.h"    /* select_row_for_region */
-#include "gui_state.h"   /* s_ctx / s_id_* / s_sel_atlas / g_ui_scale / s_status_fixed_time */
+#include "gui_state.h"   /* s_ctx / s_id_* / s_sel_atlas / g_ui_scale / s_status_fixed_time / s_preview_* */
 
 /* `--shot=out.png [--size=WxH] [--scale=F] [project]` renders the real UI at the requested window
  * size, packs the selected atlas, selects the first packed region (so the Region panel populates),
@@ -40,6 +42,7 @@ static int s_shot_frame;    /* counts only frames the UI actually rendered (can_
 static bool s_shot_written; /* capture happened; quit on the next frame boundary */
 static bool s_shot_stale;   /* --shot-stale: pack, then re-mark stale so the shot shows the amber Pack + chip */
 static bool s_shot_packing; /* --shot-packing: pack (blocking), then force the busy strip for the shot */
+static char s_shot_preview[64]; /* --shot-preview=<exporter_id>: bind that export-target preview for the shot */
 
 /* main() arg loop: handle one dev screenshot flag; returns true if `arg` was consumed. Mirrors the
  * original inline parsing (order + validation unchanged) -- lifted out of main() in step 3. */
@@ -72,6 +75,10 @@ bool gui_shot_parse_arg(const char *arg) {
     }
     if (strcmp(arg, "--shot-packing") == 0) {
         s_shot_packing = true; /* dev: capture the busy Packing... strip state */
+        return true;
+    }
+    if (strncmp(arg, "--shot-preview=", 15) == 0) {
+        (void)snprintf(s_shot_preview, sizeof s_shot_preview, "%s", arg + 15); /* dev: bind an export-target preview */
         return true;
     }
     return false;
@@ -127,6 +134,25 @@ void gui_shot_tick(void) {
         }
         if (s_shot_packing) { /* dev: force the busy strip (Packing... + Cancel) for the screenshot */
             gui_pack_debug_force_busy(GUI_PACK_ASYNC_PACK);
+        }
+        if (s_shot_preview[0] != '\0') { /* dev: bind the named export-target preview (selector + degradation chip) */
+            char perr[256] = {0};
+            if (gui_pack_preview_blocking(s_sel_atlas, s_shot_preview, perr, sizeof perr)) {
+                int idx = -1;
+                for (int i = 0; i < tp_exporter_count(); i++) {
+                    const tp_exporter *e = tp_exporter_at(i);
+                    if (e && strcmp(e->id, s_shot_preview) == 0) {
+                        idx = i;
+                        break;
+                    }
+                }
+                if (idx >= 0) {
+                    s_preview_target = idx + 1; /* 0 = Native; k = exporter k-1 */
+                    s_preview_ver = gui_project_model_version();
+                }
+            } else {
+                nt_log_error("SHOT: preview '%s' failed: %s", s_shot_preview, perr);
+            }
         }
     }
 }

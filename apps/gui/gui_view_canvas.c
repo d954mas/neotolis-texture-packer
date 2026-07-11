@@ -6,8 +6,11 @@
 
 #include "clay.h"
 #include "ui/nt_ui_button.h"
+#include "ui/nt_ui_dropdown.h"
 #include "ui/nt_ui_image.h"
 #include "ui/nt_ui_menu.h"
+
+#include "tp_core/tp_export.h" /* exporter registry -> the preview-target selector list */
 
 #include "gui_defs.h"
 #include "gui_state.h"
@@ -22,6 +25,7 @@
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h> /* strstr/memcpy/strlen -- preview-target short label */
 
 /* Approximate page fill: sum of placed AABB areas (transform-swapped where diagonal) over sum of
  * page areas. Labeled "filled" -- an approximation (ignores padding/margin), good enough for the E'
@@ -127,6 +131,109 @@ static void strip_group_zoom(nt_ui_context_t *ctx, float h, bool scan) {
     }
 }
 
+/* --- export-target preview selector + degradation chip (packet EXP-PREVIEW) ------------------------
+ * The selector lives in the single-row strip only; the compact two-row strip folds it away (the canvas
+ * then binds the native session pack -- preview_target_result -- so a folded selector never strands a
+ * wrong preview). The chip sits right after the selector and speaks the amber degradation language. */
+static bool s_dd_preview_open; /* the strip preview-target combo open bit */
+
+/* Short trigger label for the strip combo: "Native", or an exporter's display_name up to its first
+ * " (" note (so "Defold (.tpinfo + .tpatlas)" -> "Defold", "JSON (neotolis, ...)" -> "JSON"). */
+static void preview_target_short(int combo_index, char *out, size_t cap) {
+    if (combo_index <= 0) {
+        (void)snprintf(out, cap, "Native");
+        return;
+    }
+    const tp_exporter *e = tp_exporter_at(combo_index - 1);
+    const char *dn = (e && e->display_name) ? e->display_name : (e ? e->id : "?");
+    const char *paren = strstr(dn, " (");
+    size_t len = paren ? (size_t)(paren - dn) : strlen(dn);
+    if (len >= cap) {
+        len = cap - 1U;
+    }
+    memcpy(out, dn, len);
+    out[len] = '\0';
+}
+
+/* The [Native | <exporters...>] combo. Trigger shows the short label; the open list shows Native + each
+ * exporter's full display_name. A pick queues s_pending_preview_target (applied next frame). Disabled to a
+ * static label while a pack/export/preview is in flight (only one worker op at a time). */
+static void strip_preview_selector(nt_ui_context_t *ctx, float h) {
+    const int ne = tp_exporter_count();
+    char trig[48];
+    preview_target_short(s_preview_target, trig, sizeof trig);
+    const bool busy = gui_pack_async_busy();
+    CLAY({.layout = {.sizing = {CLAY_SIZING_FIT(0), CLAY_SIZING_FIXED(S(h))},
+                     .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+        if (busy) {
+            /* one worker op at a time -> render the current target as a static dimmed label, not a live combo
+             * (must NOT `return` here: that would escape the CLAY element scope unbalanced) */
+            nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), trig, &g_dim);
+        } else {
+            const uint16_t saved_mw = s_dd_style.min_width;
+            s_dd_style.min_width = (uint16_t)S(88.0F); /* fits the short labels; a longer one FITs wider */
+            if (nt_ui_combo_begin(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, nt_ui_id("ntpacker/strip_preview"),
+                                  trig, &s_dd_style, &s_dd_preview_open)) {
+                if (nt_ui_combo_selectable(ctx, 0U, "Native", s_preview_target == 0)) {
+                    s_pending_preview_target = 0;
+                }
+                for (int i = 0; i < ne; i++) {
+                    const tp_exporter *e = tp_exporter_at(i);
+                    const char *lbl = (e && e->display_name) ? e->display_name : (e ? e->id : "?");
+                    if (nt_ui_combo_selectable(ctx, (uint32_t)(i + 1), lbl, s_preview_target == i + 1)) {
+                        s_pending_preview_target = i + 1;
+                    }
+                }
+                nt_ui_combo_end(ctx);
+            }
+            s_dd_style.min_width = saved_mw;
+        }
+    }
+}
+
+/* Amber degradation chip next to the selector: what the active preview format drops vs the native
+ * settings (gui_pack_preview_diff). icon + short text; the full field breakdown is a tooltip. Returns
+ * true if it drew (a degradation exists). No chip when the format expresses everything ("same as native").
+ * The CALLER gates visibility on the STRIP_CHIP_MIN_W width headroom (identical to the stale chip) so the
+ * chip can never push the strip past the canvas budget -- below that stop the selector alone signals the
+ * active target and the degradation detail waits for room. */
+static bool strip_preview_chip(nt_ui_context_t *ctx, float h) {
+    const tp_exporter *e = (s_preview_target > 0) ? tp_exporter_at(s_preview_target - 1) : NULL;
+    if (!e) {
+        return false;
+    }
+    char chip[96];
+    char tip[224];
+    const int nd = gui_pack_preview_diff(s_sel_atlas, e->id, chip, sizeof chip, tip, sizeof tip);
+    if (nd <= 0) {
+        return false; /* format holds everything -> no degradation chip (canvas simply shows the preview) */
+    }
+    const uint32_t chip_id = nt_ui_id("ntpacker/preview_degrade_chip");
+    record_row_tip(chip_id, tip); /* full field-by-field breakdown on hover */
+    nt_ui_label_style_t chip_lbl = g_tag; /* dark-on-amber like the stale chip */
+    chip_lbl.color = g_onwarn.color;
+    nt_ui_image_style_t chip_ic = nt_ui_image_style_defaults();
+    chip_ic.color_packed = label_tint(&chip_lbl);
+    /* Width-bound the visible text: a many-degradation project (e.g. "no rotate/flip, slice9 dropped, ...")
+     * would otherwise grow the chip -- and the strip min-content -- without limit. Truncate to a fixed cap;
+     * the tooltip carries the whole list. This is what lets STRIP_CHIP_MIN_W stay a fixed, safe stop. */
+    char chip_fit[64];
+    (void)truncate_to_width(chip, chip_lbl.font_size, S(104.0F), chip_fit, sizeof chip_fit);
+    CLAY({.id = {.id = chip_id},
+          .layout = {.sizing = {CLAY_SIZING_FIT(0), CLAY_SIZING_FIXED(S(h))},
+                     .padding = {Su(6), Su(6), Su(3), Su(3)},
+                     .childGap = Su(4),
+                     .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}},
+          .backgroundColor = C_WARN,
+          .cornerRadius = CLAY_CORNER_RADIUS(S(4))}) {
+        CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(S(12.0F)), CLAY_SIZING_FIXED(S(12.0F))}}}) {
+            nt_ui_image(ctx, NT_UI_DATA_LAYER(LAYER_IMG), &s_ic_triangle_alert, &chip_ic, NULL);
+        }
+        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), chip_fit, &chip_lbl);
+    }
+    return true;
+}
+
 /* Canvas action strip (E'): [Pack][Export][Refresh] | pages | zoom | stale chip. Semi-transparent bar with
  * a bottom rule (§2.2) at the TOP of the canvas. Single row that DROPS LABELS as it narrows (§4): Pack/
  * Export icon+label >= LABELS, icon-only below; the stale chip shows only >= CHIP so a trailing chip can
@@ -184,6 +291,17 @@ static void declare_canvas_strip(nt_ui_context_t *ctx, bool atlas) {
           .cornerRadius = CLAY_CORNER_RADIUS(S(6)),
           .border = {.color = C_BORDER, .width = {0, 0, 0, Su(1), 0}}}) {
         strip_group_actions(ctx, accent, labels, 26.0F);
+        /* Export-target preview selector, gated on STRIP_PREVIEW_MIN_W so its fixed width never forces the
+         * row past the canvas budget (below it the selector folds away like the compact strip, and the
+         * canvas binds the native pack -- preview_target_result mirrors this stop). Shown once the atlas has
+         * sources -- an empty atlas has nothing to preview. The amber degradation chip needs the extra
+         * STRIP_CHIP_MIN_W headroom on top (same stop as the stale chip). */
+        if (s_pack_has_sources && s_canvas_w >= S(STRIP_PREVIEW_MIN_W)) {
+            strip_preview_selector(ctx, 26.0F);
+            if (s_preview_target != 0 && s_canvas_w >= S(STRIP_CHIP_MIN_W)) {
+                strip_preview_chip(ctx, 24.0F);
+            }
+        }
         CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(S(1)), CLAY_SIZING_FIXED(S(20))}}, .backgroundColor = C_BORDER}) {}
         if (atlas && pc > 1) {
             strip_group_pages(ctx, pc, cur, 26.0F);
@@ -193,8 +311,10 @@ static void declare_canvas_strip(nt_ui_context_t *ctx, bool atlas) {
         }
         CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}}) {}
         /* Clickable stale chip -> Pack (§2.9; owner rule: actionable hints are buttons). Gated on a width
-         * stop so the trailing chip never pushes the row off the canvas; below it the amber Pack carries it. */
-        if (accent && s_canvas_w >= S(STRIP_CHIP_MIN_W)) {
+         * stop so the trailing chip never pushes the row off the canvas; below it the amber Pack carries it.
+         * Suppressed while a preview target is active (the preview is fresh from current settings; the amber
+         * degradation chip near the selector speaks instead, and the native stale state is not on screen). */
+        if (accent && s_preview_target == 0 && s_canvas_w >= S(STRIP_CHIP_MIN_W)) {
             if (ui_icon_btn(ctx, nt_ui_id("ntpacker/stale_chip"), &s_ic_triangle_alert, 14.0F, "outdated",
                             &g_btn_stale, true, 0.0F, 24.0F, &g_onwarn)) {
                 s_pending_pack = true;
@@ -286,7 +406,7 @@ void declare_canvas(nt_ui_context_t *ctx) {
     /* caption / hover readout */
     char label[256];
     if (atlas) {
-        const tp_result *r = gui_pack_result(s_sel_atlas);
+        const tp_result *r = preview_target_result(); /* stats/hover follow whatever the canvas binds (preview or native) */
         const int h = (s_canvas.hover_sprite >= 0) ? s_canvas.hover_sprite : gui_canvas_selected(&s_canvas);
         if (r && h >= 0 && h < r->sprite_count) {
             const tp_sprite *s = &r->sprites[h];
