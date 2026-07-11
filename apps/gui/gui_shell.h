@@ -1,16 +1,18 @@
 #ifndef NTPACKER_GUI_SHELL_H
 #define NTPACKER_GUI_SHELL_H
 
-/* Shell-owned symbols other TUs read. main.c OWNS these symbols; this header exists only so the
- * handful of other TUs that touch them can see the declarations. It is NOT a god-header -- keep it
- * minimal, and each entry stays only as long as its owner does (several are interim: they move out
- * when the TU that will own them permanently exists). Split out of main.c as part of the GUI
+/* Shell-owned symbols other TUs read, PLUS the one sanctioned chrome-owned/view-consumed surface
+ * (close_menubar_menus). main.c owns the pool capacities below; gui_view_chrome.c owns
+ * close_menubar_menus. This header exists only so the handful of other TUs that touch them can see
+ * the declarations -- it is NOT a god-header, keep it minimal. Split out of main.c as part of the GUI
  * decomposition (step 3).
  *
  * Today that surface is: the nt_ui retained-state pool capacities (main() provisions the UI context
  * with them and the selftest logs them to prove the row model stays bounded), and
- * close_menubar_menus (interim, step 4 -- gui_view_settings' target-row context-menu trigger needs
- * to close the File/Edit/View/Help menus like every other right-click trigger does). */
+ * close_menubar_menus (chrome-owned, view-consumed -- gui_view_lists/gui_view_settings/gui_view_canvas
+ * each call it on their row/canvas right-click trigger, closing the File/Edit/View/Help menus like
+ * every other right-click trigger does; view<->view includes stay banned, so those three views keep
+ * reading the prototype from here rather than from gui_view_chrome.h). */
 
 #include <stdint.h>
 
@@ -32,9 +34,11 @@ extern "C" {
 #define UI_ROW_ID_RING ((uint32_t)128U)
 
 /* Closes the File/Edit/View/Help menubar menus. Every right-click context-menu trigger calls this
- * first (a right-click while a menubar menu is open should close it, not stack menus). Definition
- * stays in main.c: its body mutates s_file/edit/view/help_state, which remain shell-owned until the
- * menu bar itself moves in step 6b (gui_view_chrome) -- interim: moves there then. */
+ * first (a right-click while a menubar menu is open should close it, not stack menus). Chrome-owned,
+ * view-consumed: defined in gui_view_chrome.c (GUI decomposition step 6b) alongside the menu bar
+ * itself; gui_view_chrome.h re-declares it too (for main.c's frame()) -- this is the sanctioned
+ * cross-view surface so gui_view_lists.c/gui_view_settings.c/gui_view_canvas.c don't need to include
+ * a sibling view header. */
 void close_menubar_menus(void);
 
 #ifdef __cplusplus

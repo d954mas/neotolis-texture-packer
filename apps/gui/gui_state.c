@@ -69,6 +69,8 @@ uint32_t s_id_strip;
 uint32_t s_id_status_pill;
 uint32_t s_id_right_content;
 uint32_t s_id_export_modal;
+uint32_t s_id_mb_file, s_id_mb_edit, s_id_mb_view, s_id_mb_help;
+uint32_t s_id_menu_file, s_id_menu_edit, s_id_menu_view, s_id_menu_help;
 
 /* --- primary selection --- */
 int s_sel_atlas;
@@ -118,7 +120,7 @@ bool s_about_open;
 bool s_export_open;
 
 /* --- context-menu shared state (moved from the shell in step 4; written by left panel/canvas/settings,
- * read by the declare machinery that stays in main.c until chrome, step 6b) --- */
+ * read by the declare machinery in gui_view_chrome.c since step 6b) --- */
 uint32_t s_id_ctx_menu;
 nt_ui_menu_state_t s_ctx_state;
 int s_ctx_kind;

@@ -58,10 +58,9 @@ void set_statusf(const char *fmt, ...) GUI_PRINTF(1, 2);
 void set_statusf_ex(status_sev_t sev, const char *fmt, ...) GUI_PRINTF(2, 3);
 
 /* Pack-button state cached for the tooltip pass. Written each frame by the canvas strip
- * (gui_view_canvas's declare_canvas_strip); s_pack_stale is also read by the shell's
- * declare_tooltips (chrome, moves to gui_view_chrome in step 6b) to word the Pack tooltip, so it
- * can never be canvas-view-local -- same class of shared UI state as the disclosure/modal flags
- * above (moved out of main.c in step 6a). */
+ * (gui_view_canvas's declare_canvas_strip); s_pack_stale is also read by gui_view_chrome's
+ * declare_tooltips (step 6b) to word the Pack tooltip, so it can never be canvas-view-local -- same
+ * class of shared UI state as the disclosure/modal flags above (moved out of main.c in step 6a). */
 extern bool s_pack_has_sources, s_pack_stale;
 
 /* --- executable directory (resolved once at startup; selftest + pack-session paths hang off it) --- */
@@ -85,6 +84,11 @@ extern uint32_t s_id_strip;       /* canvas action strip (bbox: the overflow-pro
 extern uint32_t s_id_status_pill;  /* floating message pill over the canvas (replaces the status bar row) */
 extern uint32_t s_id_right_content; /* right-panel scroll content (bbox: detect rows wider than the panel) */
 extern uint32_t s_id_export_modal; /* the Export dialog */
+/* Menubar buttons + their drop-down panels. Same class as s_id_ctx_menu below (an id seeded once in
+ * ensure_ids / the shell, read only by the declare machinery that moved to gui_view_chrome.c in step
+ * 6b) -- moved here alongside it rather than left main.c-local, so it can never be view-local either. */
+extern uint32_t s_id_mb_file, s_id_mb_edit, s_id_mb_view, s_id_mb_help;
+extern uint32_t s_id_menu_file, s_id_menu_edit, s_id_menu_view, s_id_menu_help;
 
 /* --- primary selection (s_sel_src/child stays the last-clicked selection for the region panel + canvas sync) --- */
 extern int s_sel_atlas;      /* selected atlas index */
@@ -137,15 +141,15 @@ extern bool s_sec_anim_open;  /* the "Animation" section disclosure */
 
 /* Modal open flags: the About box + the Export dialog. Shared with the selftest (it opens both so the
  * auto-quit frames render them, and closes them before the pixel probe), so they can never be
- * view-local. Moved out of the shell in step 3; the chrome view TU takes over their declares in 6b. */
+ * view-local. Moved out of the shell in step 3; gui_view_chrome owns their declares since step 6b. */
 extern bool s_about_open;
 extern bool s_export_open;
 
 /* Right-click context menu: one cursor-anchored menu whose items depend on the row a right-click armed
  * it over (§3.3e mouse-complete access). This is the shared TRIGGER/PAYLOAD state written by three
- * different views (left panel / canvas / settings) and read by the DECLARE machinery (main.c's
- * declare_context_menu, moving to gui_view_chrome in step 6b) -- "menu/modal open flags", same class
- * as s_about_open/s_export_open, so it can never be view-local. s_id_ctx_menu is seeded once in
+ * different views (left panel / canvas / settings) and read by the DECLARE machinery (gui_view_chrome's
+ * declare_context_menu, since step 6b) -- "menu/modal open flags", same class as
+ * s_about_open/s_export_open, so it can never be view-local. s_id_ctx_menu is seeded once in
  * ensure_ids (shell); only the storage moved here (step 4). */
 extern uint32_t s_id_ctx_menu;
 extern nt_ui_menu_state_t s_ctx_state;
