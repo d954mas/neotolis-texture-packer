@@ -254,6 +254,17 @@ tp_status tp_project_load_buffer(const char *buf, size_t len, tp_project **out, 
  * TP_STATUS_OUT_OF_BOUNDS if the result would not fit. */
 tp_status tp_project_resolve_path(const tp_project *p, const char *rel, char *out_abs, size_t cap);
 
+/* --- per-sprite effective rules --- */
+
+/* Effective shape for one sprite in ATLAS-shape semantics (0=RECT, 1=CONVEX_HULL,
+ * 2=CONCAVE_CONTOUR): a non-zero slice9 border forces RECT, else the sprite's
+ * shape override (`ov_shape`, or TP_PROJECT_OV_INHERIT to inherit), else the atlas
+ * shape. The single home for the rule the desc builder (tp_input) and the settings
+ * view share (arch review §3.1); tp_pack keeps its own equivalent check as a
+ * validation safety net. RECT is the only shape that may extrude, so callers gate
+ * an extrude override on a RECT result. */
+int tp_project_sprite_effective_shape(int atlas_shape, bool has_slice9, int ov_shape);
+
 /* --- bridge to packing --- */
 
 /* Maps atlas[atlas_index]'s knobs + name onto `out` (a tp_pack_settings). NOTE:

@@ -1493,6 +1493,16 @@ tp_status tp_project_resolve_path(const tp_project *p, const char *rel, char *ou
     return TP_STATUS_OK;
 }
 
+int tp_project_sprite_effective_shape(int atlas_shape, bool has_slice9, int ov_shape) {
+    if (has_slice9) {
+        return 0; /* RECT: the engine auto-forces it for slice9 sprites */
+    }
+    if (ov_shape != TP_PROJECT_OV_INHERIT) {
+        return ov_shape;
+    }
+    return atlas_shape;
+}
+
 tp_status tp_project_atlas_to_settings(const tp_project *p, int atlas_index, struct tp_pack_settings *out,
                                        tp_error *err) {
     if (!p || !out) {
@@ -1515,5 +1525,11 @@ tp_status tp_project_atlas_to_settings(const tp_project *p, int atlas_index, str
     out->allow_transform = a->allow_transform;
     out->power_of_two = a->power_of_two;
     out->pixels_per_unit = a->pixels_per_unit;
+    /* Non-RECT shapes cannot extrude (engine + tp_pack invariant). Clamp here so
+     * pack, preview, AND export (tp_export_run) all see settings tp_pack accepts;
+     * a saved CONCAVE+extrude project no longer hard-rejects on the export path. */
+    if (out->shape != 0 /* RECT */) {
+        out->extrude = 0;
+    }
     return TP_STATUS_OK;
 }

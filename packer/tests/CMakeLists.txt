@@ -23,6 +23,17 @@ target_compile_options(tp_test_scan PRIVATE -U_DLL)
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_scan_test")
 add_test(NAME tp_scan COMMAND tp_test_scan "${CMAKE_BINARY_DIR}/tp_scan_test")
 
+# A3a op-layer: tp_input project->pack-input build (assemble/desc_add moved out of
+# the GUI), the per-sprite effective-shape rule, and the non-RECT extrude clamp in
+# tp_project_atlas_to_settings. Links tp_build so the CONCAVE+extrude clamp
+# regression can pack + export (tp_pack/tp_export_run); the pure input-build asserts
+# only need tp_core. Builds a fixture tree under a scratch dir at runtime (argv[1]).
+add_executable(tp_test_input test_input.c)
+target_link_libraries(tp_test_input PRIVATE tp_build unity)
+target_compile_options(tp_test_input PRIVATE -U_DLL)
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_input_test")
+add_test(NAME tp_input COMMAND tp_test_input "${CMAKE_BINARY_DIR}/tp_input_test")
+
 # Synthetic D4 transform-decode test (plan §3.6). Includes the private helper
 # header from src/ directly -- no public API pollution.
 add_executable(tp_test_transform_decode test_transform_decode.c)

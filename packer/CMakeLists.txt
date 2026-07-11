@@ -7,7 +7,7 @@
 # smoke app, and the pack tests that actually pack.
 add_library(tp_core STATIC
     src/tp_arena.c src/tp_names.c src/tp_name_map.c src/tp_pack_read.c src/tp_project.c
-    src/tp_pack_settings.c src/tp_scan.c
+    src/tp_pack_settings.c src/tp_scan.c src/tp_input.c
     src/tp_export.c src/tp_normalize.c src/tp_export_png.c src/tp_export_json_neotolis.c
     src/tp_export_defold.c)
 target_include_directories(tp_core PUBLIC include)
