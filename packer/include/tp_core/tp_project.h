@@ -223,6 +223,14 @@ tp_status tp_project_atlas_remove_target(tp_project_atlas *a, int index);
 tp_status tp_project_atlas_set_target(tp_project_atlas *a, int index, const char *exporter_id, const char *out_path,
                                       bool enabled);
 
+/* Appends the default export target -- the full-fidelity json-neotolis exporter
+ * (TP_EXPORTER_ID_JSON_NEOTOLIS) with out path "out/<atlas_name>" -- so a
+ * freshly created project exports something. The single home for default-target
+ * seeding both frontends call (review §3.1; L-5 keeps tp_project_create itself
+ * target-free). Adds unconditionally; callers that only want to seed an EMPTY
+ * atlas guard on target_count first. Out-of-range atlas_index -> OUT_OF_BOUNDS. */
+tp_status tp_project_atlas_seed_default_target(tp_project *p, int atlas_index);
+
 /* --- load / save --- */
 
 /* Parses `path` into a new project (*out). project_dir is set to path's absolute

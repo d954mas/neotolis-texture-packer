@@ -162,8 +162,10 @@ static tp_status emit_sprite(tp_sb *sb, int depth, const tp_export_prepared *pre
             tp_sb_str(sb, "null");
         }
     } else if (es->alias_of >= 0 && notices) {
-        (void)tp_export_notice_addf(notices, "alias link dropped for '%s' (target has no alias support)",
-                                    es->final_name);
+        /* target unknown to the writer (id lives on the descriptor); the run/predict layer fills it. */
+        (void)tp_export_notice_add_ex(notices, TP_NOTICE_FIELD_ALIAS, TP_NOTICE_REASON_CAPS_UNSUPPORTED,
+                                      es->final_name, NULL, "alias link dropped for '%s' (target has no alias support)",
+                                      es->final_name);
     }
 
     tp_obj_key(sb, depth + 1, &first, "frame");
@@ -185,8 +187,9 @@ static tp_status emit_sprite(tp_sb *sb, int depth, const tp_export_prepared *pre
             tp_sb_num(sb, (double)s->pivot.y);
             tp_sb_char(sb, ']');
         } else if (notices) {
-            (void)tp_export_notice_addf(notices, "pivot dropped for '%s' (target has no pivot support)",
-                                        es->final_name);
+            (void)tp_export_notice_add_ex(notices, TP_NOTICE_FIELD_PIVOT, TP_NOTICE_REASON_CAPS_UNSUPPORTED,
+                                          es->final_name, NULL, "pivot dropped for '%s' (target has no pivot support)",
+                                          es->final_name);
         }
     }
 
@@ -196,8 +199,10 @@ static tp_status emit_sprite(tp_sb *sb, int depth, const tp_export_prepared *pre
             tp_obj_key(sb, depth + 1, &first, "polygon");
             emit_polygon(sb, depth + 1, s, scale);
         } else if (notices) {
-            (void)tp_export_notice_addf(notices, "polygon flattened to rect for '%s' (target stores quads only)",
-                                        es->final_name);
+            (void)tp_export_notice_add_ex(notices, TP_NOTICE_FIELD_POLYGON, TP_NOTICE_REASON_CAPS_UNSUPPORTED,
+                                          es->final_name, NULL,
+                                          "polygon flattened to rect for '%s' (target stores quads only)",
+                                          es->final_name);
         }
     }
 
@@ -212,8 +217,9 @@ static tp_status emit_sprite(tp_sb *sb, int depth, const tp_export_prepared *pre
             }
             tp_sb_char(sb, ']');
         } else if (notices) {
-            (void)tp_export_notice_addf(notices, "slice9 dropped for '%s' (target has no 9-slice support)",
-                                        es->final_name);
+            (void)tp_export_notice_add_ex(notices, TP_NOTICE_FIELD_SLICE9, TP_NOTICE_REASON_CAPS_UNSUPPORTED,
+                                          es->final_name, NULL, "slice9 dropped for '%s' (target has no 9-slice support)",
+                                          es->final_name);
         }
     }
 
@@ -243,8 +249,9 @@ static tp_status emit_sprite(tp_sb *sb, int depth, const tp_export_prepared *pre
             tp_obj_key(sb, depth + 1, &first, "transformStr");
             tp_sb_json_string(sb, tbuf);
         } else if (notices) {
-            (void)tp_export_notice_addf(notices, "transform dropped for '%s' (target cannot rotate/flip)",
-                                        es->final_name);
+            (void)tp_export_notice_add_ex(notices, TP_NOTICE_FIELD_TRANSFORM, TP_NOTICE_REASON_CAPS_UNSUPPORTED,
+                                          es->final_name, NULL, "transform dropped for '%s' (target cannot rotate/flip)",
+                                          es->final_name);
         }
     }
 
@@ -338,8 +345,9 @@ static tp_status emit_root(tp_sb *sb, const tp_export_prepared *prep, const tp_e
         tp_sb_char(sb, ']');
     }
     if (r->page_count > 1 && !caps->multipage && notices) {
-        (void)tp_export_notice_addf(notices, "atlas '%s' has %d pages but the target is single-page",
-                                    r->atlas_name ? r->atlas_name : "", r->page_count);
+        (void)tp_export_notice_add_ex(notices, TP_NOTICE_FIELD_MULTIPAGE, TP_NOTICE_REASON_CAPS_UNSUPPORTED, NULL, NULL,
+                                      "atlas '%s' has %d pages but the target is single-page",
+                                      r->atlas_name ? r->atlas_name : "", r->page_count);
     }
 
     tp_obj_key(sb, 1, &first, "pixels_per_unit");

@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "tp_core/tp_export.h" /* TP_EXPORTER_ID_JSON_NEOTOLIS */
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_project.h"
 #include "unity.h"
@@ -673,9 +674,30 @@ void test_sprite_override_sparse(void) {
     tp_project_destroy(p);
 }
 
+/* 13. default-target seed helper (A5): seeds one json-neotolis target at
+ * "out/<name>"; tp_project_create itself stays target-free (L-5). */
+void test_seed_default_target(void) {
+    tp_project *p = tp_project_create();
+    tp_project_atlas *a = tp_project_get_atlas(p, 0);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, a->target_count, "tp_project_create must stay target-free (L-5)");
+
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_seed_default_target(p, 0));
+    TEST_ASSERT_EQUAL_INT(1, a->target_count);
+    TEST_ASSERT_EQUAL_STRING(TP_EXPORTER_ID_JSON_NEOTOLIS, a->targets[0].exporter_id);
+    char want[128];
+    (void)snprintf(want, sizeof want, "out/%s", a->name);
+    TEST_ASSERT_EQUAL_STRING(want, a->targets[0].out_path);
+    TEST_ASSERT_TRUE(a->targets[0].enabled);
+
+    /* out-of-range atlas -> OUT_OF_BOUNDS, never a crash. */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS, tp_project_atlas_seed_default_target(p, 5));
+    tp_project_destroy(p);
+}
+
 int main(int argc, char **argv) {
     g_dir = (argc > 1) ? argv[1] : ".";
     UNITY_BEGIN();
+    RUN_TEST(test_seed_default_target);
     RUN_TEST(test_roundtrip_and_byte_identical);
     RUN_TEST(test_sparse_defaults_absent);
     RUN_TEST(test_determinism);

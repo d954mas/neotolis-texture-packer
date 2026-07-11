@@ -15,6 +15,7 @@
 
 #include "cJSON.h"
 
+#include "tp_core/tp_export.h" /* TP_EXPORTER_ID_JSON_NEOTOLIS (default-target seeding) */
 #include "tp_core/tp_pack.h"
 
 #define TP_PATH_MAX 4096
@@ -592,6 +593,16 @@ tp_status tp_project_atlas_add_target(tp_project_atlas *a, const char *exporter_
         *out = t;
     }
     return TP_STATUS_OK;
+}
+
+tp_status tp_project_atlas_seed_default_target(tp_project *p, int atlas_index) {
+    tp_project_atlas *a = tp_project_get_atlas(p, atlas_index);
+    if (!a) {
+        return TP_STATUS_OUT_OF_BOUNDS;
+    }
+    char path[512];
+    (void)snprintf(path, sizeof path, "out/%s", a->name);
+    return tp_project_atlas_add_target(a, TP_EXPORTER_ID_JSON_NEOTOLIS, path, NULL);
 }
 
 tp_status tp_project_atlas_remove_target(tp_project_atlas *a, int index) {

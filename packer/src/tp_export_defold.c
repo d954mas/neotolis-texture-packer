@@ -317,9 +317,10 @@ static void emit_sprite(tp_sb *sb, int depth, const tp_export_prepared *prep, co
         if (caps->rotate90 && s->transform == TP_DEFOLD_ROTATED_MASK) {
             rotated = true;
         } else if (notices) {
-            (void)tp_export_notice_addf(
-                notices, "transform %d dropped for '%s' (.tpinfo encodes only a 90-degree rotation)",
-                (int)s->transform, es->final_name);
+            (void)tp_export_notice_add_ex(
+                notices, TP_NOTICE_FIELD_TRANSFORM, TP_NOTICE_REASON_CAPS_UNSUPPORTED, es->final_name, NULL,
+                "transform %d dropped for '%s' (.tpinfo encodes only a 90-degree rotation)", (int)s->transform,
+                es->final_name);
         }
     }
 
@@ -350,8 +351,10 @@ static void emit_sprite(tp_sb *sb, int depth, const tp_export_prepared *prep, co
     bool poly = (s->vert_count > 0 && !is_rect_quad(s));
     if (poly && !caps->polygons) {
         if (notices) {
-            (void)tp_export_notice_addf(notices, "polygon flattened to rect for '%s' (target stores quads only)",
-                                        es->final_name);
+            (void)tp_export_notice_add_ex(notices, TP_NOTICE_FIELD_POLYGON, TP_NOTICE_REASON_CAPS_UNSUPPORTED,
+                                          es->final_name, NULL,
+                                          "polygon flattened to rect for '%s' (target stores quads only)",
+                                          es->final_name);
         }
         poly = false;
     }
@@ -371,7 +374,8 @@ static void emit_sprite(tp_sb *sb, int depth, const tp_export_prepared *prep, co
         emit_point_f(sb, depth + 1, "pivot", (double)s->pivot.x * (double)s->sourceSize.w,
                      (double)s->pivot.y * (double)s->sourceSize.h);
     } else if ((s->pivot.x != 0.5F || s->pivot.y != 0.5F) && notices) {
-        (void)tp_export_notice_addf(notices, "pivot dropped for '%s' (target has no pivot support)", es->final_name);
+        (void)tp_export_notice_add_ex(notices, TP_NOTICE_FIELD_PIVOT, TP_NOTICE_REASON_CAPS_UNSUPPORTED, es->final_name,
+                                      NULL, "pivot dropped for '%s' (target has no pivot support)", es->final_name);
     }
 
     emit_rect(sb, depth + 1, "frame_rect", s->frame.x, s->frame.y, foot_w, foot_h);
@@ -382,8 +386,9 @@ static void emit_sprite(tp_sb *sb, int depth, const tp_export_prepared *prep, co
      * future-proof if a slice9-carrying variant is ever added). */
     if (!caps->slice9 && (s->slice9_lrtb[0] || s->slice9_lrtb[1] || s->slice9_lrtb[2] || s->slice9_lrtb[3]) &&
         notices) {
-        (void)tp_export_notice_addf(notices, "slice9 dropped for '%s' (target has no 9-slice support)",
-                                    es->final_name);
+        (void)tp_export_notice_add_ex(notices, TP_NOTICE_FIELD_SLICE9, TP_NOTICE_REASON_CAPS_UNSUPPORTED,
+                                      es->final_name, NULL, "slice9 dropped for '%s' (target has no 9-slice support)",
+                                      es->final_name);
     }
 
     if (poly) {
@@ -442,8 +447,9 @@ static void emit_tpinfo(tp_sb *sb, const tp_export_prepared *prep, const tp_expo
     }
 
     if (r->page_count > 1 && !caps->multipage && notices) {
-        (void)tp_export_notice_addf(notices, "atlas '%s' has %d pages but the target is single-page",
-                                    r->atlas_name ? r->atlas_name : "", r->page_count);
+        (void)tp_export_notice_add_ex(notices, TP_NOTICE_FIELD_MULTIPAGE, TP_NOTICE_REASON_CAPS_UNSUPPORTED, NULL, NULL,
+                                      "atlas '%s' has %d pages but the target is single-page",
+                                      r->atlas_name ? r->atlas_name : "", r->page_count);
     }
 }
 

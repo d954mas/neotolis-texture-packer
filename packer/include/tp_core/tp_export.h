@@ -27,6 +27,12 @@ extern "C" {
 #endif
 
 struct tp_arena;
+struct tp_project;
+
+/* Stable exporter id for the full-fidelity reference target. Frontends seed and
+ * reference targets through this constant, never a bare string literal (review
+ * §4 boundary gate: no exporter-id literals in apps/). */
+#define TP_EXPORTER_ID_JSON_NEOTOLIS "json-neotolis"
 
 /* ------------------------------------------------------------------ */
 /* Capability flags: what a target FORMAT can hold (SUMMARY.md §5b).    */
@@ -54,8 +60,31 @@ tp_export_caps tp_export_caps_full(void);
 /* Metadata-loss notices (SUMMARY.md §5h): informational, never fatal.  */
 /* ------------------------------------------------------------------ */
 
+/* Structured notice classification (ai-first.md item 4, review §3.4): a notice
+ * carries WHICH axis degraded and WHY, so consumers (CLI --json, GUI chip)
+ * render from data, not by re-parsing prose. Append-only: never reorder or
+ * renumber an existing value. */
+typedef enum tp_notice_field {
+    TP_NOTICE_FIELD_NONE = 0,
+    TP_NOTICE_FIELD_TRANSFORM, /* rotate/flip dropped (format can't hold the full D4) */
+    TP_NOTICE_FIELD_POLYGON,   /* polygon hull flattened to a rect */
+    TP_NOTICE_FIELD_SLICE9,    /* 9-slice borders dropped */
+    TP_NOTICE_FIELD_PIVOT,     /* per-sprite pivot dropped */
+    TP_NOTICE_FIELD_ALIAS,     /* alias link dropped */
+    TP_NOTICE_FIELD_MULTIPAGE, /* multi-page atlas against a single-page target */
+} tp_notice_field;
+
+typedef enum tp_notice_reason {
+    TP_NOTICE_REASON_NONE = 0,
+    TP_NOTICE_REASON_CAPS_UNSUPPORTED, /* the target FORMAT cannot represent this */
+} tp_notice_reason;
+
 typedef struct tp_export_notice {
-    char msg[256];
+    const char *sprite; /* affected sprite (borrowed); NULL for an atlas-wide notice */
+    const char *target; /* exporter id (borrowed); NULL when the producer does not know it */
+    int field_id;       /* tp_notice_field */
+    int reason_id;      /* tp_notice_reason */
+    char msg[256];      /* human prose (derived from the structured fields) */
 } tp_export_notice;
 
 /* malloc-owned growable list; aggregated across every target of a run. */
@@ -66,8 +95,12 @@ typedef struct tp_export_notices {
 } tp_export_notices;
 
 void tp_export_notices_init(tp_export_notices *n);
-/* Appends a formatted notice. Returns TP_STATUS_OOM if the list cannot grow. */
+/* Appends a prose-only notice (structured fields zeroed). TP_STATUS_OOM if it cannot grow. */
 tp_status tp_export_notice_addf(tp_export_notices *n, const char *fmt, ...) TP_PRINTF_ATTR(2, 3);
+/* Appends a structured notice: the degraded axis + reason + affected sprite/target
+ * (both nullable, borrowed) alongside the prose. TP_STATUS_OOM if it cannot grow. */
+tp_status tp_export_notice_add_ex(tp_export_notices *n, int field_id, int reason_id, const char *sprite,
+                                  const char *target, const char *fmt, ...) TP_PRINTF_ATTR(6, 7);
 void tp_export_notices_free(tp_export_notices *n);
 
 /* ------------------------------------------------------------------ */
@@ -171,6 +204,28 @@ tp_status tp_export_effective_settings(const tp_pack_settings *in, const tp_expo
 
 /* True when two settings would produce the same pack (so the run is shared). */
 bool tp_export_settings_equal(const tp_pack_settings *a, const tp_pack_settings *b);
+
+/* ------------------------------------------------------------------ */
+/* Degradation prediction (review §3.4; the flagship "what will this   */
+/* format cost you" feedback the CLI dry-run and GUI chip both need).  */
+/* ------------------------------------------------------------------ */
+
+/* Enumerates every metadata/pack degradation exporting atlas[atlas_index] to a
+ * target with `caps` would cause, appending a structured notice per axis to
+ * `out` (init'd by the caller). This is the ONE enumeration both frontends read
+ * (kills the GUI-side copy in review §3.1).
+ *
+ * PROJECT-KNOWABLE axes are computed from the project alone (no pack needed):
+ *   - TRANSFORM: allow_transform on, but caps can't hold the full D4;
+ *   - POLYGON:   a polygon atlas shape a non-polygon target flattens to rect;
+ *   - SLICE9 / PIVOT: the atlas carries a 9-slice / pivot a target can't store.
+ * `opt_prep` (nullable) adds PACK-DEPENDENT axes that only exist once packed --
+ *   ALIAS and MULTIPAGE. The GUI chip passes NULL (project-only preview); the
+ *   CLI dry-run passes the packed prep for the full picture. `target_id` (nullable)
+ *   is recorded on each emitted notice. */
+tp_status tp_export_predict_loss(const struct tp_project *project, int atlas_index, const tp_export_caps *caps,
+                                 const char *target_id, const tp_export_prepared *opt_prep, tp_export_notices *out,
+                                 tp_error *err);
 
 /* ------------------------------------------------------------------ */
 /* Page PNG writer (shared helper used by every exporter).              */

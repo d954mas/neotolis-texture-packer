@@ -467,7 +467,8 @@ void run_selftest(void) {
         gui_project_new();
         gui_pack_clear(-1);
         tp_project *fp = gui_project_get();
-        NT_ASSERT(fp && fp->atlas_count == 1 && fp->atlases[0].target_count >= 1 && "fresh project seeds a target (I1)");
+        NT_ASSERT(fp && fp->atlas_count == 1 && fp->atlases[0].target_count == 1 &&
+                  "fresh project seeds exactly one target (I1, single-seed invariant)");
         nt_log_info("SELFTEST: fresh target[0]=%s base=%s", fp->atlases[0].targets[0].exporter_id,
                     fp->atlases[0].targets[0].out_path);
 

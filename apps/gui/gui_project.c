@@ -109,16 +109,15 @@ static bool sprite_all_default(const tp_project_sprite *s) {
            s->ov_extrude == TP_PROJECT_OV_INHERIT;
 }
 
-/* Seeds a fresh atlas with one default json-neotolis target whose out-path BASE is
- * "out/<name>" (the exporter appends .json / -N.png) so a pure-GUI project exports
- * something (audit I1). No touch (callers snapshot around it). */
-static void seed_default_target(tp_project_atlas *a) {
+/* Seeds a fresh atlas with the default target (core helper owns the exporter id +
+ * "out/<name>" path -- review §3.1). Only a target-free atlas is seeded; no touch
+ * (callers snapshot around it). */
+static void seed_default_target(tp_project *p, int atlas_index) {
+    tp_project_atlas *a = tp_project_get_atlas(p, atlas_index);
     if (!a || a->target_count > 0) {
         return;
     }
-    char path[512];
-    (void)snprintf(path, sizeof path, "out/%s", a->name);
-    (void)tp_project_atlas_add_target(a, "json-neotolis", path, NULL);
+    (void)tp_project_atlas_seed_default_target(p, atlas_index);
 }
 // #endregion
 
@@ -128,7 +127,7 @@ void gui_project_init(void) {
         return;
     }
     s_proj = tp_project_create();
-    seed_default_target(tp_project_get_atlas(s_proj, 0)); /* clean baseline includes it (I1) */
+    seed_default_target(s_proj, 0); /* clean baseline includes it (I1) */
     set_path("");
     s_project_dirty = false;
     s_preview_stale = false;
@@ -200,7 +199,7 @@ int gui_project_add_atlas(void) {
     if (tp_project_add_atlas(s_proj, name, &idx) != TP_STATUS_OK) {
         return -1;
     }
-    seed_default_target(tp_project_get_atlas(s_proj, idx)); /* fresh atlas exports something (I1) */
+    seed_default_target(s_proj, idx); /* fresh atlas exports something (I1) */
     gui_project_touch(GUI_ACT_ADD_ATLAS);
     return idx;
 }
@@ -332,17 +331,13 @@ bool gui_project_set_sprite_override(int atlas_index, const char *sprite_name, g
 }
 
 int gui_project_add_target(int atlas_index) {
-    tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
-    if (!a) {
-        return -1;
-    }
-    char path[512];
-    (void)snprintf(path, sizeof path, "out/%s", a->name);
-    if (tp_project_atlas_add_target(a, "json-neotolis", path, NULL) != TP_STATUS_OK) {
+    /* Same default-target op as fresh-atlas seeding (core owns id + path). */
+    if (tp_project_atlas_seed_default_target(s_proj, atlas_index) != TP_STATUS_OK) {
         return -1;
     }
     gui_project_touch(GUI_ACT_ADD_TARGET);
-    return a->target_count - 1;
+    tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
+    return a ? a->target_count - 1 : -1;
 }
 
 void gui_project_remove_target(int atlas_index, int index) {
@@ -595,7 +590,7 @@ void gui_project_new(void) {
     if (!fresh) {
         return;
     }
-    seed_default_target(tp_project_get_atlas(fresh, 0)); /* fresh GUI project exports something (I1) */
+    seed_default_target(fresh, 0); /* fresh GUI project exports something (I1) */
     tp_project_destroy(s_proj);
     s_proj = fresh;
     set_path("");

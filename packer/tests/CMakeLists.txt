@@ -108,6 +108,16 @@ target_compile_options(tp_test_export_run PRIVATE -U_DLL)
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_export_run_test")
 add_test(NAME tp_export_run COMMAND tp_test_export_run "${CMAKE_BINARY_DIR}/tp_export_run_test")
 
+# A5 op-layer: tp_export_predict_loss consistency -- project-knowable axes from a
+# NULL prep, pack-dependent axes (alias/multipage) with a prep, and every
+# writer-emitted project-knowable notice field_id covered by predict. Links tp_build
+# to pack + export the fixture through the real path (tp_export_run).
+add_executable(tp_test_predict test_predict.c)
+target_link_libraries(tp_test_predict PRIVATE tp_build unity)
+target_compile_options(tp_test_predict PRIVATE -U_DLL)
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_predict_test")
+add_test(NAME tp_predict COMMAND tp_test_predict "${CMAKE_BINARY_DIR}/tp_predict_test")
+
 # Phase 5 Defold exporter: golden .tpinfo/.tpatlas bytes, rotated-geometry,
 # determinism over real fixtures, per-target identity repack + 9-slice notice,
 # playback enum mapping, and a clean run over the real defold-demo atlases

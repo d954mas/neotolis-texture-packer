@@ -4,6 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "tp_core/tp_project.h"
+
 /* nt_atlas_shape_t: 0 = RECT (see tp_pack.h shape). Kept as a literal so this
  * TU pulls in no builder header (tp_core stays builder-free, #282). */
 #define TP_SHAPE_RECT 0
@@ -36,20 +38,53 @@ void tp_export_notices_init(tp_export_notices *n) {
     }
 }
 
-tp_status tp_export_notice_addf(tp_export_notices *n, const char *fmt, ...) {
-    if (!n) {
-        return TP_STATUS_INVALID_ARGUMENT;
-    }
+/* Grows the list if needed and returns the next zeroed slot (NOT yet counted),
+ * or NULL on OOM. realloc does NOT zero -- memset here so the structured fields
+ * (sprite/target/field_id/reason_id) default cleanly for the prose adder. */
+static tp_export_notice *notice_reserve(tp_export_notices *n) {
     if (n->count + 1 > n->cap) {
         int new_cap = (n->cap == 0) ? 8 : n->cap * 2;
         tp_export_notice *items = (tp_export_notice *)realloc(n->items, (size_t)new_cap * sizeof(tp_export_notice));
         if (!items) {
-            return TP_STATUS_OOM;
+            return NULL;
         }
         n->items = items;
         n->cap = new_cap;
     }
     tp_export_notice *slot = &n->items[n->count];
+    memset(slot, 0, sizeof *slot);
+    return slot;
+}
+
+tp_status tp_export_notice_addf(tp_export_notices *n, const char *fmt, ...) {
+    if (!n) {
+        return TP_STATUS_INVALID_ARGUMENT;
+    }
+    tp_export_notice *slot = notice_reserve(n);
+    if (!slot) {
+        return TP_STATUS_OOM;
+    }
+    va_list args;
+    va_start(args, fmt);
+    (void)vsnprintf(slot->msg, sizeof slot->msg, fmt, args);
+    va_end(args);
+    n->count++;
+    return TP_STATUS_OK;
+}
+
+tp_status tp_export_notice_add_ex(tp_export_notices *n, int field_id, int reason_id, const char *sprite,
+                                  const char *target, const char *fmt, ...) {
+    if (!n) {
+        return TP_STATUS_INVALID_ARGUMENT;
+    }
+    tp_export_notice *slot = notice_reserve(n);
+    if (!slot) {
+        return TP_STATUS_OOM;
+    }
+    slot->field_id = field_id;
+    slot->reason_id = reason_id;
+    slot->sprite = sprite;
+    slot->target = target;
     va_list args;
     va_start(args, fmt);
     (void)vsnprintf(slot->msg, sizeof slot->msg, fmt, args);
@@ -110,7 +145,7 @@ bool tp_export_settings_equal(const tp_pack_settings *a, const tp_pack_settings 
 /* ======================================================================== */
 
 static const tp_exporter g_json_neotolis = {
-    .id = "json-neotolis",
+    .id = TP_EXPORTER_ID_JSON_NEOTOLIS,
     .display_name = "JSON (neotolis, full fidelity)",
     .extension = "json",
     .caps = {.rotate90 = true,
@@ -193,5 +228,101 @@ tp_status tp_exporter_register(const tp_exporter *e) {
         return TP_STATUS_OUT_OF_BOUNDS;
     }
     g_registered[g_registered_count++] = e;
+    return TP_STATUS_OK;
+}
+
+/* ======================================================================== */
+/* degradation prediction (review §3.4)                                     */
+/* ======================================================================== */
+
+/* True if any sprite override in the atlas carries a non-zero 9-slice border. */
+static bool atlas_uses_slice9(const tp_project_atlas *a) {
+    for (int i = 0; i < a->sprite_count; i++) {
+        const tp_project_sprite *s = &a->sprites[i];
+        if (s->slice9_lrtb[0] || s->slice9_lrtb[1] || s->slice9_lrtb[2] || s->slice9_lrtb[3]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* True if any sprite override carries a non-default pivot. */
+static bool atlas_uses_pivot(const tp_project_atlas *a) {
+    for (int i = 0; i < a->sprite_count; i++) {
+        const tp_project_sprite *s = &a->sprites[i];
+        if (s->origin_x != TP_PROJECT_ORIGIN_DEFAULT || s->origin_y != TP_PROJECT_ORIGIN_DEFAULT) {
+            return true;
+        }
+    }
+    return false;
+}
+
+tp_status tp_export_predict_loss(const struct tp_project *project, int atlas_index, const tp_export_caps *caps,
+                                 const char *target_id, const tp_export_prepared *opt_prep, tp_export_notices *out,
+                                 tp_error *err) {
+    if (!project || !caps || !out) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_export_predict_loss: NULL project/caps/out");
+    }
+    if (atlas_index < 0 || atlas_index >= project->atlas_count) {
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "tp_export_predict_loss: atlas index %d out of range",
+                            atlas_index);
+    }
+    const tp_project_atlas *a = &project->atlases[atlas_index];
+
+    /* Project-knowable axes: native vs capability-clamped pack settings -- the
+     * exact enumeration the GUI chip used to own (review §3.1). */
+    tp_pack_settings native;
+    tp_status st = tp_project_atlas_to_settings(project, atlas_index, &native, err);
+    if (st != TP_STATUS_OK) {
+        return st;
+    }
+    tp_pack_settings eff;
+    st = tp_export_effective_settings(&native, caps, &eff);
+    if (st != TP_STATUS_OK) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_export_predict_loss: effective-settings failed");
+    }
+
+#define PREDICT_ADD(field, sprite_name, ...)                                                                       \
+    do {                                                                                                           \
+        if (tp_export_notice_add_ex(out, (field), TP_NOTICE_REASON_CAPS_UNSUPPORTED, (sprite_name), target_id,    \
+                                    __VA_ARGS__) != TP_STATUS_OK) {                                               \
+            return tp_error_set(err, TP_STATUS_OOM, "tp_export_predict_loss: OOM appending notice");              \
+        }                                                                                                          \
+    } while (0)
+
+    if (native.allow_transform && !eff.allow_transform) {
+        PREDICT_ADD(TP_NOTICE_FIELD_TRANSFORM, NULL,
+                    "rotations/flips off -- this format cannot encode the full D4 orientation set");
+    }
+    if (native.shape != eff.shape) {
+        PREDICT_ADD(TP_NOTICE_FIELD_POLYGON, NULL,
+                    "polygon hulls flattened to rectangles -- this format stores quads only");
+    }
+    if (!caps->slice9 && atlas_uses_slice9(a)) {
+        PREDICT_ADD(TP_NOTICE_FIELD_SLICE9, NULL, "9-slice borders dropped -- this format does not store them");
+    }
+    if (!caps->pivot && atlas_uses_pivot(a)) {
+        PREDICT_ADD(TP_NOTICE_FIELD_PIVOT, NULL, "per-sprite pivots dropped -- this format does not store them");
+    }
+
+    /* Pack-dependent axes exist only once packed -- the CLI dry-run supplies the
+     * prep; the GUI chip passes NULL (project-only preview). */
+    if (opt_prep) {
+        const tp_result *r = opt_prep->result;
+        if (!caps->multipage && r && r->page_count > 1) {
+            PREDICT_ADD(TP_NOTICE_FIELD_MULTIPAGE, NULL, "atlas has %d pages but the target is single-page",
+                        r->page_count);
+        }
+        if (!caps->aliases) {
+            for (int i = 0; i < opt_prep->sprite_count; i++) {
+                if (opt_prep->sprites[i].alias_of >= 0) {
+                    PREDICT_ADD(TP_NOTICE_FIELD_ALIAS, opt_prep->sprites[i].final_name,
+                                "alias link dropped for '%s' (target has no alias support)",
+                                opt_prep->sprites[i].final_name);
+                }
+            }
+        }
+    }
+#undef PREDICT_ADD
     return TP_STATUS_OK;
 }

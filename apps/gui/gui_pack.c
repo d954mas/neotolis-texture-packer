@@ -900,26 +900,32 @@ void gui_pack_preview_clear(void) {
     s_preview.exporter_id[0] = '\0';
 }
 
-/* True if any sprite override in the atlas carries a non-zero slice9 border. */
-static bool atlas_uses_slice9(const tp_project_atlas *a) {
-    for (int i = 0; a && i < a->sprite_count; i++) {
-        const tp_project_sprite *s = &a->sprites[i];
-        if (s->slice9_lrtb[0] || s->slice9_lrtb[1] || s->slice9_lrtb[2] || s->slice9_lrtb[3]) {
+/* Maps one predicted-loss axis (core field_id) to the chip's short token + the
+ * tooltip's long line. These strings are GUI presentation, byte-pinned by selftest
+ * phase 11; the core predict pass supplies only the structured field_id. Returns
+ * false for an axis the chip does not surface (alias/multipage never reach it --
+ * the chip passes a NULL prep, so predict never emits those). */
+static bool preview_field_phrases(int field_id, const char **short_tok, const char **long_line) {
+    switch (field_id) {
+        case TP_NOTICE_FIELD_TRANSFORM:
+            *short_tok = "no rotate/flip";
+            *long_line = "Rotations/flips off -- this format can't encode the full D4 orientation set";
             return true;
-        }
-    }
-    return false;
-}
-
-/* True if any sprite override carries a non-default pivot. */
-static bool atlas_uses_pivot(const tp_project_atlas *a) {
-    for (int i = 0; a && i < a->sprite_count; i++) {
-        const tp_project_sprite *s = &a->sprites[i];
-        if (s->origin_x != TP_PROJECT_ORIGIN_DEFAULT || s->origin_y != TP_PROJECT_ORIGIN_DEFAULT) {
+        case TP_NOTICE_FIELD_POLYGON:
+            *short_tok = "polygons \xE2\x86\x92 rect";
+            *long_line = "Polygon hulls flattened to rectangles -- this format stores quads only";
             return true;
-        }
+        case TP_NOTICE_FIELD_SLICE9:
+            *short_tok = "slice9 dropped";
+            *long_line = "9-slice borders dropped -- this format does not store them";
+            return true;
+        case TP_NOTICE_FIELD_PIVOT:
+            *short_tok = "pivot dropped";
+            *long_line = "Per-sprite pivots dropped -- this format does not store them";
+            return true;
+        default:
+            return false;
     }
-    return false;
 }
 
 int gui_pack_preview_diff(int atlas_index, const char *exporter_id, char *chip, size_t chip_cap, char *tip,
@@ -932,54 +938,45 @@ int gui_pack_preview_diff(int atlas_index, const char *exporter_id, char *chip, 
     }
     const tp_exporter *e = tp_exporter_find(exporter_id);
     tp_project *p = gui_project_get();
-    tp_project_atlas *a = tp_project_get_atlas(p, atlas_index);
-    if (!e || !a) {
+    if (!e) {
         return 0;
     }
-    tp_pack_settings native;
+    /* One core enumeration for both frontends (review §3.1); NULL prep = project-only
+     * preview (no alias/multipage axes -- those need the packed result). */
+    tp_export_notices nz;
+    tp_export_notices_init(&nz);
     tp_error te = {{0}};
-    if (tp_project_atlas_to_settings(p, atlas_index, &native, &te) != TP_STATUS_OK) {
+    if (tp_export_predict_loss(p, atlas_index, &e->caps, exporter_id, NULL, &nz, &te) != TP_STATUS_OK) {
+        tp_export_notices_free(&nz);
         return 0;
     }
-    tp_pack_settings eff;
-    if (tp_export_effective_settings(&native, &e->caps, &eff) != TP_STATUS_OK) {
-        return 0;
-    }
+
     int n = 0;
-    /* One collector: a short token for the chip ("a, b, c"), a longer line for the tooltip. Guarded so the
-     * write pointer never forms past-end and a truncating snprintf can't advance the cursor out of range. */
+    /* Rebuild the exact chip/tooltip strings from the structured notices. Guarded so the
+     * write pointer never forms past-end and a truncating snprintf can't advance out of range. */
     size_t clen = 0;
     size_t tlen = 0;
-#define PREVIEW_ADD(short_tok, long_line)                                                                      \
-    do {                                                                                                       \
-        if (chip && clen < chip_cap) {                                                                         \
-            const int w_ = snprintf(chip + clen, chip_cap - clen, "%s%s", n > 0 ? ", " : "", (short_tok));     \
-            if (w_ > 0) {                                                                                      \
-                clen += (size_t)w_;                                                                            \
-            }                                                                                                  \
-        }                                                                                                      \
-        if (tip && tlen < tip_cap) {                                                                           \
-            const int w2_ = snprintf(tip + tlen, tip_cap - tlen, "%s%s", n > 0 ? "\n" : "", (long_line));      \
-            if (w2_ > 0) {                                                                                     \
-                tlen += (size_t)w2_;                                                                           \
-            }                                                                                                  \
-        }                                                                                                      \
-        n++;                                                                                                   \
-    } while (0)
-
-    if (native.allow_transform && !eff.allow_transform) {
-        PREVIEW_ADD("no rotate/flip", "Rotations/flips off -- this format can't encode the full D4 orientation set");
+    for (int i = 0; i < nz.count; i++) {
+        const char *short_tok = NULL;
+        const char *long_line = NULL;
+        if (!preview_field_phrases(nz.items[i].field_id, &short_tok, &long_line)) {
+            continue;
+        }
+        if (chip && clen < chip_cap) {
+            const int w_ = snprintf(chip + clen, chip_cap - clen, "%s%s", n > 0 ? ", " : "", short_tok);
+            if (w_ > 0) {
+                clen += (size_t)w_;
+            }
+        }
+        if (tip && tlen < tip_cap) {
+            const int w2_ = snprintf(tip + tlen, tip_cap - tlen, "%s%s", n > 0 ? "\n" : "", long_line);
+            if (w2_ > 0) {
+                tlen += (size_t)w2_;
+            }
+        }
+        n++;
     }
-    if (native.shape != eff.shape) {
-        PREVIEW_ADD("polygons \xE2\x86\x92 rect", "Polygon hulls flattened to rectangles -- this format stores quads only");
-    }
-    if (!e->caps.slice9 && atlas_uses_slice9(a)) {
-        PREVIEW_ADD("slice9 dropped", "9-slice borders dropped -- this format does not store them");
-    }
-    if (!e->caps.pivot && atlas_uses_pivot(a)) {
-        PREVIEW_ADD("pivot dropped", "Per-sprite pivots dropped -- this format does not store them");
-    }
-#undef PREVIEW_ADD
+    tp_export_notices_free(&nz);
     return n;
 }
 // #endregion
