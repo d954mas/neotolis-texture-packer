@@ -15,6 +15,14 @@ target_link_libraries(tp_test_names PRIVATE tp_core unity)
 target_compile_options(tp_test_names PRIVATE -U_DLL)
 add_test(NAME tp_names COMMAND tp_test_names)
 
+# A2 op-layer: tp_scan directory recursion + image-ext whitelist, moved out of the
+# GUI. Builds a fixture tree under a scratch dir at runtime (argv[1]).
+add_executable(tp_test_scan test_scan.c)
+target_link_libraries(tp_test_scan PRIVATE tp_core unity)
+target_compile_options(tp_test_scan PRIVATE -U_DLL)
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_scan_test")
+add_test(NAME tp_scan COMMAND tp_test_scan "${CMAKE_BINARY_DIR}/tp_scan_test")
+
 # Synthetic D4 transform-decode test (plan §3.6). Includes the private helper
 # header from src/ directly -- no public API pollution.
 add_executable(tp_test_transform_decode test_transform_decode.c)
