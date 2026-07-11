@@ -69,6 +69,25 @@ static void write_tga_2x2(const char *path) {
     }
 }
 
+/* Reads a whole file into a malloc'd NUL-terminated buffer (caller frees; NULL on miss). */
+static char *selftest_slurp(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        return NULL;
+    }
+    (void)fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    rewind(f);
+    char *buf = (sz >= 0) ? (char *)malloc((size_t)sz + 1) : NULL;
+    size_t rd = buf ? fread(buf, 1, (size_t)sz, f) : 0;
+    (void)fclose(f);
+    if (!buf) {
+        return NULL;
+    }
+    buf[rd] = '\0';
+    return buf;
+}
+
 /* UTF-8 "тест_спрайт" (a Cyrillic sprite name) -- exercises multi-byte names end-to-end. */
 #define CYR_STEM "\xD1\x82\xD0\xB5\xD1\x81\xD1\x82_\xD1\x81\xD0\xBF\xD1\x80\xD0\xB0\xD0\xB9\xD1\x82"
 
@@ -1188,6 +1207,69 @@ void selftest_pre_frame(void) {
             s_st_pf = 0;
         }
     } else if (s_st_phase == 15) {
+        /* Rename-through-export (A4): a sprite an animation references is renamed; the export must carry the
+         * rename into BOTH the sprite name and the animation frame. Mirrors phase 12's async-export driver
+         * (isolated tmp base under the build dir). Kept before the teardown phase (16). */
+        g_ui_scale = 1.0F;
+        g_nt_window.fb_width = 1280;
+        g_nt_window.fb_height = 800;
+        if (s_st_pf == 1) {
+            gui_project_new();
+            gui_pack_clear(-1);
+            s_sel_atlas = 0;
+            reset_selection();
+            char afolder[512];
+            to_abs("examples/defold-demo/examples/anim_trim/anims", afolder, sizeof afolder);
+            (void)gui_project_add_source(0, afolder);
+            gui_scan_invalidate_all();
+            double pms = 0.0;
+            char perr[256] = {0};
+            char pnote[128] = {0};
+            const bool okp = gui_pack_atlas(0, &pms, perr, sizeof perr, pnote, sizeof pnote);
+            const tp_result *pr = gui_pack_result(0);
+            NT_ASSERT(okp && pr && pr->sprite_count >= 2 && "SELFTEST A4: pack produced >=2 sprites");
+            char k0[192];
+            char k1[192];
+            tp_sprite_export_key(pr->sprites[0].name, k0, sizeof k0); /* frame keys = packed-name export keys */
+            tp_sprite_export_key(pr->sprites[1].name, k1, sizeof k1);
+            multi_sel_clear();
+            multi_sel_add(k0);
+            multi_sel_add(k1);
+            const int ai = create_animation_from_selection();
+            NT_ASSERT(ai >= 0 && "SELFTEST A4: animation from two frames");
+            gui_project_set_sprite_rename(0, k0, "a4_renamed"); /* rename one frame's sprite */
+            multi_sel_clear();
+            char base[600];
+            (void)snprintf(base, sizeof base, "%s/selftest_a4_export/at0", s_exe_dir); /* ABSOLUTE -> resolves w/o a saved dir */
+            gui_project_set_target(0, 0, "json-neotolis", base, true);
+            char aerr[256] = {0};
+            const bool started = gui_pack_export_async_start(aerr, sizeof aerr);
+            nt_log_info("SELFTEST: A4 rename export start -> %d k0='%s' (%s)", (int)started, k0, started ? "ok" : aerr);
+            NT_ASSERT(started && "SELFTEST A4: async export must start");
+        } else if (gui_pack_async_busy()) {
+            NT_ASSERT(s_st_pf < 3000 && "SELFTEST A4: rename export did not finish within the frame cap");
+        } else {
+            char base[600];
+            char jpath[640] = {0};
+            char ppath[640] = {0};
+            (void)snprintf(base, sizeof base, "%s/selftest_a4_export/at0", s_exe_dir);
+            (void)snprintf(jpath, sizeof jpath, "%s.json", base);
+            (void)snprintf(ppath, sizeof ppath, "%s-0.png", base);
+            char *js = selftest_slurp(jpath);
+            NT_ASSERT(js && "SELFTEST A4: exported json must exist");
+            int hits = 0;
+            for (const char *p = js; (p = strstr(p, "a4_renamed")) != NULL; p += 10) {
+                hits++; /* expect 2: once as the sprite name, once as the animation frame */
+            }
+            nt_log_info("SELFTEST: A4 rename export landed 'a4_renamed' hits=%d (expect >=2: sprite name + anim frame)", hits);
+            NT_ASSERT(hits >= 2 && "SELFTEST A4: rename must appear as the sprite name AND the animation frame it follows");
+            free(js);
+            (void)remove(jpath);
+            (void)remove(ppath);
+            s_st_phase = 16;
+            s_st_pf = 0;
+        }
+    } else if (s_st_phase == 16) {
         /* Shutdown-while-busy (req 4c): start an async pack, then gui_pack_shutdown() must cancel + JOIN the
          * worker + free + reset without hanging (the window X-close path). Runs to completion in one frame --
          * gui_pack_shutdown joins synchronously, so afterward the job is idle. main() calls it AGAIN at exit
@@ -1210,7 +1292,7 @@ void selftest_pre_frame(void) {
         NT_ASSERT(!gui_pack_async_busy() && "SELFTEST: shutdown-while-busy must join + reset (no hang)");
         gui_shell_reset_shown_result(); /* gui_pack_shutdown cleared the slots -> drop the shell's freed bind ptr */
         nt_log_info("SELFTEST: shutdown-while-busy joined cleanly");
-        s_st_phase = 16;
+        s_st_phase = 17;
         s_st_pf = 0;
     } else {
         g_nt_window.fb_width = 1280;

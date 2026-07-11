@@ -101,6 +101,36 @@ static cJSON *sprite_by_name(cJSON *root, const char *name) {
     return NULL;
 }
 
+static cJSON *anim_by_id(cJSON *root, const char *id) {
+    cJSON *anims = cJSON_GetObjectItemCaseSensitive(root, "animations");
+    cJSON *a = NULL;
+    cJSON_ArrayForEach(a, anims) {
+        cJSON *n = cJSON_GetObjectItemCaseSensitive(a, "id");
+        if (cJSON_IsString(n) && strcmp(n->valuestring, id) == 0) {
+            return a;
+        }
+    }
+    return NULL;
+}
+
+static char *read_text_file(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        return NULL;
+    }
+    (void)fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    rewind(f);
+    char *buf = (sz >= 0) ? (char *)malloc((size_t)sz + 1) : NULL;
+    size_t rd = buf ? fread(buf, 1, (size_t)sz, f) : 0;
+    (void)fclose(f);
+    if (!buf) {
+        return NULL;
+    }
+    buf[rd] = '\0';
+    return buf;
+}
+
 // #region tests
 void test_shared_run_count(void) {
     /* json-neotolis and test-nopivot have identical effective settings (both
@@ -149,6 +179,127 @@ void test_nopivot_drops_pivot_with_notice(void) {
         }
     }
     TEST_ASSERT_TRUE_MESSAGE(found, "dropping a non-default pivot must raise a notice");
+}
+
+void test_rename_and_anim_through_run(void) {
+    /* A4 end-to-end through tp_export_run (L-3/L-4): a renamed sprite that an
+     * animation references. Both json and defold outputs must carry the rename
+     * into the sprite name AND the animation frame (frames follow the rename). */
+    static uint8_t hero[32 * 32 * 4];
+    static uint8_t gem[24 * 24 * 4];
+    fill(hero, 32 * 32, 10, 20, 30);
+    fill(gem, 24 * 24, 200, 150, 100);
+
+    tp_project *proj = tp_project_create();
+    TEST_ASSERT_NOT_NULL(proj);
+    tp_project_atlas *a = tp_project_get_atlas(proj, 0);
+    a->shape = 0; /* RECT */
+    a->allow_transform = false;
+    a->power_of_two = false;
+    a->padding = 0;
+    a->margin = 0;
+    a->alpha_threshold = 1;
+    a->max_size = 1024;
+    a->pixels_per_unit = 1.0F;
+
+    /* rename the sprite whose KEY is "hero" (raw desc "hero.png") */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_set_sprite_rename(a, "hero", "champion"));
+    /* an animation whose frames are stored in KEY space (ext stripped) */
+    tp_project_anim *an = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_animation(a, "run", &an));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "hero"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "gem"));
+
+    char jbase[1024];
+    char dbase[1024];
+    (void)snprintf(jbase, sizeof jbase, "%s/rn_json", g_dir);
+    (void)snprintf(dbase, sizeof dbase, "%s/rn_defold", g_dir);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(a, "json-neotolis", jbase, NULL));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(a, "defold", dbase, NULL));
+
+    tp_pack_sprite_desc sprites[2];
+    memset(sprites, 0, sizeof sprites);
+    sprites[0] = (tp_pack_sprite_desc){.name = "hero.png", .rgba = hero, .w = 32, .h = 32, .origin_x = 0.5F, .origin_y = 0.5F};
+    sprites[1] = (tp_pack_sprite_desc){.name = "gem.png", .rgba = gem, .w = 24, .h = 24, .origin_x = 0.5F, .origin_y = 0.5F};
+
+    tp_arena *ar = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(ar);
+    tp_export_notices nts;
+    tp_export_notices_init(&nts);
+    tp_error e = {{0}};
+    tp_status st = tp_export_run(proj, 0, sprites, 2, g_dir, ar, &nts, NULL, &e);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, st, e.msg);
+    tp_export_notices_free(&nts);
+
+    /* --- json: sprite renamed + frame follows --- */
+    cJSON *root = load_json(jbase);
+    TEST_ASSERT_NOT_NULL(root);
+    TEST_ASSERT_NOT_NULL_MESSAGE(sprite_by_name(root, "champion"), "renamed sprite present as 'champion'");
+    TEST_ASSERT_NULL_MESSAGE(sprite_by_name(root, "hero"), "old name must be gone from sprites");
+    TEST_ASSERT_NOT_NULL(sprite_by_name(root, "gem"));
+    cJSON *run = anim_by_id(root, "run");
+    TEST_ASSERT_NOT_NULL(run);
+    cJSON *frames = cJSON_GetObjectItemCaseSensitive(run, "frames");
+    TEST_ASSERT_TRUE(cJSON_IsArray(frames) && cJSON_GetArraySize(frames) == 2);
+    TEST_ASSERT_EQUAL_STRING("champion", cJSON_GetArrayItem(frames, 0)->valuestring); /* follows rename */
+    TEST_ASSERT_EQUAL_STRING("gem", cJSON_GetArrayItem(frames, 1)->valuestring);
+    cJSON_Delete(root);
+
+    /* --- defold: rename lands in the sprite (.tpinfo) and the frame (.tpatlas) --- */
+    char path[1088];
+    (void)snprintf(path, sizeof path, "%s.tpinfo", dbase);
+    char *tpi = read_text_file(path);
+    TEST_ASSERT_NOT_NULL(tpi);
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(tpi, "name: \"champion\""), "defold .tpinfo carries the rename");
+    TEST_ASSERT_NULL_MESSAGE(strstr(tpi, "name: \"hero\""), "old name gone from .tpinfo");
+    free(tpi);
+    (void)snprintf(path, sizeof path, "%s.tpatlas", dbase);
+    char *tpa = read_text_file(path);
+    TEST_ASSERT_NOT_NULL(tpa);
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(tpa, "images: \"champion\""), "defold anim frame follows the rename");
+    free(tpa);
+
+    tp_arena_destroy(ar);
+    tp_project_destroy(proj);
+}
+
+void test_dangling_frame_through_run(void) {
+    /* A4 (L-4): tp_export_run surfaces the dangling-frame error (naming anim +
+     * frame) so the CLI/GUI can report it. */
+    static uint8_t px[16 * 16 * 4];
+    fill(px, 16 * 16, 90, 90, 90);
+    tp_project *proj = tp_project_create();
+    TEST_ASSERT_NOT_NULL(proj);
+    tp_project_atlas *a = tp_project_get_atlas(proj, 0);
+    a->shape = 0;
+    a->allow_transform = false;
+    a->power_of_two = false;
+    a->padding = 0;
+    a->margin = 0;
+    a->alpha_threshold = 1;
+    a->max_size = 256;
+    a->pixels_per_unit = 1.0F;
+    tp_project_anim *an = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_animation(a, "run", &an));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "ghost")); /* never packed */
+    char jbase[1024];
+    (void)snprintf(jbase, sizeof jbase, "%s/rn_dangling", g_dir);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(a, "json-neotolis", jbase, NULL));
+    tp_pack_sprite_desc sprites[1];
+    memset(sprites, 0, sizeof sprites);
+    sprites[0] = (tp_pack_sprite_desc){.name = "hero.png", .rgba = px, .w = 16, .h = 16, .origin_x = 0.5F, .origin_y = 0.5F};
+    tp_arena *ar = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(ar);
+    tp_export_notices nts;
+    tp_export_notices_init(&nts);
+    tp_error e = {{0}};
+    tp_status st = tp_export_run(proj, 0, sprites, 1, g_dir, ar, &nts, NULL, &e);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_INVALID_ARGUMENT, st, "dangling frame must fail the export");
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(e.msg, "run"), e.msg);   /* names the animation */
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(e.msg, "ghost"), e.msg); /* names the frame */
+    tp_export_notices_free(&nts);
+    tp_arena_destroy(ar);
+    tp_project_destroy(proj);
 }
 // #endregion
 
@@ -238,6 +389,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_full_target_has_diagonal);
     RUN_TEST(test_norot_target_is_identity);
     RUN_TEST(test_nopivot_drops_pivot_with_notice);
+    RUN_TEST(test_rename_and_anim_through_run);
+    RUN_TEST(test_dangling_frame_through_run);
     int rc = UNITY_END();
     tp_export_notices_free(&g_notices);
     tp_project_destroy(g_proj);

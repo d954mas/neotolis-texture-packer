@@ -6,6 +6,7 @@
 #include "tp_core/tp_arena.h"
 #include "tp_core/tp_export.h"
 #include "tp_core/tp_model.h"
+#include "tp_core/tp_names.h"
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_project.h"
 
@@ -20,8 +21,20 @@ typedef struct {
 } run_group;
 
 /* Builds the normalize options for an atlas (target-independent). Explicit
- * animations are borrowed from the project; tp_normalize copies what it keeps. */
-static void build_norm_opts(const tp_project_atlas *a, tp_export_anim_in *anims, tp_normalize_opts *out) {
+ * animations and rename overrides are borrowed from the project; tp_normalize
+ * copies what it keeps. `anims`/`ovs` are caller-provided arena buffers sized to
+ * a->animation_count / a->sprite_count (either may be NULL when its count is 0).
+ *
+ * Renames: a project sprite's `name` is its export KEY (ext-stripped, folder-
+ * kept), but tp_normalize keys overrides on the RAW packer name -- so map
+ * key -> raw via the shared export-key policy (tp_sprite_export_key) over the
+ * packed descs. A stale rename whose key matches no packed sprite is simply
+ * skipped (nothing to rename; not an error -- L-4: renames do not dangle). The
+ * emitted entries borrow: raw_name points into `sprites` (the caller's desc
+ * array) and final_name into ps->rename; both outlive every tp_normalize call in
+ * this run, and final_name is duped by tp_normalize. */
+static void build_norm_opts(const tp_project_atlas *a, const tp_pack_sprite_desc *sprites, int sprite_count,
+                            tp_export_anim_in *anims, tp_export_name_override *ovs, tp_normalize_opts *out) {
     tp_normalize_opts_defaults(out);
     for (int i = 0; i < a->animation_count; i++) {
         const tp_project_anim *pa = &a->animations[i];
@@ -35,6 +48,26 @@ static void build_norm_opts(const tp_project_atlas *a, tp_export_anim_in *anims,
     }
     out->animations = anims;
     out->animation_count = a->animation_count;
+
+    int oc = 0;
+    for (int i = 0; i < a->sprite_count; i++) {
+        const tp_project_sprite *ps = &a->sprites[i];
+        if (!ps->rename || ps->rename[0] == '\0') {
+            continue;
+        }
+        for (int d = 0; d < sprite_count; d++) {
+            char key[TP_RUN_PATH_MAX];
+            tp_sprite_export_key(sprites[d].name, key, sizeof key);
+            if (strcmp(key, ps->name) == 0) {
+                ovs[oc].raw_name = sprites[d].name;
+                ovs[oc].final_name = ps->rename;
+                oc++;
+                break;
+            }
+        }
+    }
+    out->overrides = ovs;
+    out->override_count = oc;
 }
 
 static tp_status unknown_exporter(const char *id, tp_error *err) {
@@ -83,8 +116,15 @@ tp_status tp_export_run(const tp_project *project, int atlas_index, const tp_pac
             return tp_error_set(err, TP_STATUS_OOM, "tp_export_run: OOM (anim opts)");
         }
     }
+    tp_export_name_override *ovs = NULL;
+    if (a->sprite_count > 0) {
+        ovs = (tp_export_name_override *)tp_arena_alloc(arena, (size_t)a->sprite_count * sizeof(tp_export_name_override));
+        if (!ovs) {
+            return tp_error_set(err, TP_STATUS_OOM, "tp_export_run: OOM (rename opts)");
+        }
+    }
     tp_normalize_opts nopts;
-    build_norm_opts(a, anims, &nopts);
+    build_norm_opts(a, sprites, sprite_count, anims, ovs, &nopts);
 
     if (a->target_count == 0) {
         return TP_STATUS_OK; /* nothing enabled to export */

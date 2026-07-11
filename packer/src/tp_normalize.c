@@ -83,18 +83,42 @@ static int cmp_anim_id(const void *a, const void *b) {
 }
 
 /* Copies the explicit animations from opts into arena-owned prepared anims,
- * sorted ascending by id (determinism). Frames are used verbatim as final
- * export names. */
+ * sorted ascending by id (determinism). Frames are stored in override-KEY space
+ * (ext-stripped, folder-kept -- the GUI-row identity); each is resolved to its
+ * FINAL export name through the packed sprite set, so a rename flows into the
+ * frames automatically (the prepared sprite's final_name already reflects it).
+ * A frame that matches no packed sprite is a dangling frame -> hard error naming
+ * the animation + frame (arch review 3.2 / plan L-4). */
 static tp_status build_animations(const tp_export_prepared *prep, const tp_normalize_opts *o, tp_arena *arena,
                                   tp_export_anim **out_anims, int *out_count, tp_error *err) {
-    (void)prep; /* frames reference final names directly; no sprite scan needed. */
-
     int total = o->animation_count;
     tp_export_anim *anims = NULL;
     if (total > 0) {
         anims = (tp_export_anim *)tp_arena_alloc(arena, (size_t)total * sizeof(tp_export_anim));
         if (!anims) {
             return tp_error_set(err, TP_STATUS_OOM, "tp_normalize: OOM (animations)");
+        }
+    }
+
+    /* Precompute each packed sprite's export KEY once (frame space is this key
+     * space); the final name it resolves to sits at the same index. Only needed
+     * when there are animations to resolve frames for. */
+    int n = prep->sprite_count;
+    const char **keys = NULL;
+    if (total > 0 && n > 0) {
+        keys = (const char **)tp_arena_alloc(arena, (size_t)n * sizeof(char *));
+        if (!keys) {
+            return tp_error_set(err, TP_STATUS_OOM, "tp_normalize: OOM (frame keys)");
+        }
+        for (int i = 0; i < n; i++) {
+            const char *raw = prep->sprites[i].src ? prep->sprites[i].src->name : "";
+            size_t cap = strlen(raw ? raw : "") + 1;
+            char *k = (char *)tp_arena_alloc(arena, cap);
+            if (!k) {
+                return tp_error_set(err, TP_STATUS_OOM, "tp_normalize: OOM (frame key)");
+            }
+            tp_sprite_export_key(raw, k, cap);
+            keys[i] = k;
         }
     }
 
@@ -108,19 +132,34 @@ static tp_status build_animations(const tp_export_prepared *prep, const tp_norma
         a->flip_v = in->flip_v;
         a->frame_count = in->frame_count;
         a->frames = NULL;
+        if (!a->id) {
+            return tp_error_set(err, TP_STATUS_OOM, "tp_normalize: OOM (explicit anim id)");
+        }
         if (in->frame_count > 0) {
             a->frames = (const char **)tp_arena_alloc(arena, (size_t)in->frame_count * sizeof(char *));
-            if (!a->id || !a->frames) {
+            if (!a->frames) {
                 return tp_error_set(err, TP_STATUS_OOM, "tp_normalize: OOM (explicit anim)");
             }
             for (int f = 0; f < in->frame_count; f++) {
-                a->frames[f] = tp_arena_strdup(arena, in->frames[f] ? in->frames[f] : "");
+                const char *fkey = in->frames[f] ? in->frames[f] : "";
+                const char *fin = NULL;
+                for (int s = 0; s < n; s++) {
+                    if (strcmp(keys[s], fkey) == 0) {
+                        fin = prep->sprites[s].final_name;
+                        break;
+                    }
+                }
+                if (!fin) {
+                    return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                                        "tp_normalize: animation '%s' references frame '%s' which matches no "
+                                        "packed sprite (dangling frame -- the sprite was removed or never packed)",
+                                        in->id ? in->id : "", fkey);
+                }
+                a->frames[f] = tp_arena_strdup(arena, fin);
                 if (!a->frames[f]) {
                     return tp_error_set(err, TP_STATUS_OOM, "tp_normalize: OOM (explicit frame)");
                 }
             }
-        } else if (!a->id) {
-            return tp_error_set(err, TP_STATUS_OOM, "tp_normalize: OOM (explicit anim id)");
         }
     }
 
