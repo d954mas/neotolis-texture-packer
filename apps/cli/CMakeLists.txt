@@ -5,7 +5,7 @@
 # as apps/smoke and the builder-linking tests).
 set(CLI_OUTPUT_DIR "${CMAKE_SOURCE_DIR}/build/apps/cli/${NT_PRESET_NAME}")
 
-add_executable(ntpacker main.c cli_out.c)
+add_executable(ntpacker main.c cli_out.c cli_project.c cli_inspect.c cli_validate.c)
 target_link_libraries(ntpacker PRIVATE tp_build)
 target_include_directories(ntpacker PRIVATE "${CMAKE_SOURCE_DIR}/apps/common") # shared ntpacker_version.h
 target_compile_definitions(ntpacker PRIVATE _CRT_SECURE_NO_WARNINGS)
@@ -49,3 +49,42 @@ add_test(NAME cli_version_json COMMAND ${CMAKE_COMMAND}
     -DCHECKER=$<TARGET_FILE:cli_json_check>
     -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_version_manifest.json
     -P "${_run}")
+
+# --- B2 read verbs: inspect + validate over checked-in fixtures (no GL/pack). ---
+# The fixtures live in the source tree; project_dir resolves sources against them.
+set(_td "${CMAKE_CURRENT_SOURCE_DIR}/testdata")
+
+# (e) inspect --json on the clean fixture -> exit 0, parses, atlas[0] has 2 sprites.
+add_test(NAME cli_inspect_json COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0 "-DARGS=inspect ${_td}/clean.ntpacker_project --json"
+    -DCHECKER=$<TARGET_FILE:cli_json_check> "-DCHECK_ARGS=inspect sprites=2"
+    -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_inspect.json
+    -P "${_run}")
+
+# (f) inspect on a missing file -> project load error, exit 3.
+add_test(NAME cli_inspect_missing COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=3 "-DARGS=inspect ${_td}/no_such.ntpacker_project" -P "${_run}")
+
+# (g) validate --json on the clean fixture -> exit 0, counts 0/0.
+add_test(NAME cli_validate_clean COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0 "-DARGS=validate ${_td}/clean.ntpacker_project --json"
+    -DCHECKER=$<TARGET_FILE:cli_json_check> "-DCHECK_ARGS=validate error=0 warning=0"
+    -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_validate_clean.json
+    -P "${_run}")
+
+# (h) validate --json on the problems fixture (no --strict) -> exit 0, findings
+# contain BOTH the missing-source and dangling-frame codes.
+add_test(NAME cli_validate_problems COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0 "-DARGS=validate ${_td}/problems.ntpacker_project --json"
+    -DCHECKER=$<TARGET_FILE:cli_json_check>
+    "-DCHECK_ARGS=validate code=missing_source code=dangling_anim_frame"
+    -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_validate_problems.json
+    -P "${_run}")
+
+# (i) same fixture WITH --strict -> exit 7 (error-severity findings present).
+add_test(NAME cli_validate_strict COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=7 "-DARGS=validate ${_td}/problems.ntpacker_project --strict" -P "${_run}")
+
+# (j) validate on an unloadable file -> exit 3.
+add_test(NAME cli_validate_unloadable COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=3 "-DARGS=validate ${_td}/bad.ntpacker_project" -P "${_run}")

@@ -1,0 +1,3 @@
+# Fixture PNGs are binary: never let autocrlf mangle the bytes (the PNG signature
+# contains a literal CR-LF). Keeps the checked-in fixtures byte-stable on 3 OS.
+*.png binary

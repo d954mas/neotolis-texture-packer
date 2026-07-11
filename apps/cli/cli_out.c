@@ -66,6 +66,12 @@ void cli_sb_num(cli_sb *sb, double v) {
     }
 }
 
+void cli_sb_indent(cli_sb *sb, int depth) {
+    for (int i = 0; i < depth; i++) {
+        sb_write(sb, "  ", 2U);
+    }
+}
+
 void cli_sb_json_str(cli_sb *sb, const char *s) {
     cli_sb_putc(sb, '"');
     for (const unsigned char *c = (const unsigned char *)s; *c; c++) {

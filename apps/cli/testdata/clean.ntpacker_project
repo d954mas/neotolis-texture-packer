@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "atlases": [
+    {
+      "name": "clean",
+      "sources": [
+        "sprites"
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "out_path": "out/clean.json"
+        }
+      ]
+    }
+  ]
+}

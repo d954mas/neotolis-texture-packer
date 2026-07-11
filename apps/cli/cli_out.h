@@ -21,6 +21,7 @@ void cli_sb_str(cli_sb *sb, const char *s);
 void cli_sb_int(cli_sb *sb, long v);
 void cli_sb_num(cli_sb *sb, double v);           /* %.9g; relies on LC_NUMERIC="C" (main) */
 void cli_sb_json_str(cli_sb *sb, const char *s); /* quoted + JSON-escaped */
+void cli_sb_indent(cli_sb *sb, int depth);       /* 2 spaces per depth level */
 
 /* Writes sb's bytes to stdout followed by one trailing newline. */
 void cli_out_stdout(const cli_sb *sb);

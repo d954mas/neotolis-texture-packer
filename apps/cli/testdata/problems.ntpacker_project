@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "atlases": [
+    {
+      "name": "problems",
+      "animations": [
+        {
+          "frames": [
+            "hero",
+            "ghost"
+          ],
+          "id": "run"
+        }
+      ],
+      "sources": [
+        "sprites",
+        "does_not_exist"
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "out_path": "out/problems.json"
+        }
+      ]
+    }
+  ]
+}

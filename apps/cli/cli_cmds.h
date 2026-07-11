@@ -1,0 +1,29 @@
+#ifndef NTPACKER_CLI_CMDS_H
+#define NTPACKER_CLI_CMDS_H
+
+/* B2 read-verb entry points + the shared project loader. Each verb owns its
+ * --json payload (versioned schema) and human summary; the loader centralizes the
+ * exit-3 structured error so inspect/validate report a load failure identically
+ * (plan "CLI v1 contract", ai-first.md items 2/4/7). */
+
+#include <stdbool.h>
+
+struct tp_project;
+
+/* Loads `path` into *out. On failure emits a structured error (id = tp_status_id,
+ * message = tp_error prose) honoring --json/--quiet, and returns the CLI exit code
+ * (CLI_EXIT_PROJECT for a load/parse error, CLI_EXIT_INTERNAL for OOM). On success
+ * returns CLI_EXIT_OK and the caller owns *out (tp_project_destroy). */
+int cli_load_project(const char *path, bool json, bool quiet, struct tp_project **out);
+
+/* inspect <project> [--json]: dump project state. Human output is cosmetic; the
+ * --json payload (schema 1) is the contract. Returns CLI_EXIT_OK / _PROJECT / _INTERNAL. */
+int cmd_inspect(const char *path, bool json, bool quiet);
+
+/* validate <project> [--json] [--strict]: report every finding in one run. Exit 0
+ * when the file parses and validation runs (findings live in the payload); exit 7
+ * only when --strict AND at least one error-severity finding; exit 3 on load
+ * failure (plan L-1). */
+int cmd_validate(const char *path, bool json, bool quiet, bool strict);
+
+#endif /* NTPACKER_CLI_CMDS_H */

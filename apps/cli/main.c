@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "cli_cmds.h"
 #include "cli_exit.h"
 #include "cli_out.h"
 #include "ntpacker_version.h"
@@ -64,10 +65,16 @@ static void build_manifest(cli_sb *sb) {
     cli_sb_str(sb, ",\n");
 
     /* verbs: each verb that emits a --json payload -> its payload schema version.
-     * Only `version` in B1; grows as inspect/validate/pack land. */
+     * inspect/validate landed in B2; grows as pack lands. */
     indent(sb, 1);
     cli_sb_json_str(sb, "verbs");
     cli_sb_str(sb, ": {\n");
+    indent(sb, 2);
+    cli_sb_json_str(sb, "inspect");
+    cli_sb_str(sb, ": 1,\n");
+    indent(sb, 2);
+    cli_sb_json_str(sb, "validate");
+    cli_sb_str(sb, ": 1,\n");
     indent(sb, 2);
     cli_sb_json_str(sb, "version");
     cli_sb_str(sb, ": 1\n");
@@ -156,18 +163,19 @@ static void print_usage(FILE *out) {
                   "  ntpacker <command> [options]\n"
                   "\n"
                   "Commands:\n"
+                  "  inspect <project>  Dump project state (--json is the contract; text is a summary)\n"
+                  "  validate <project> Report every project problem in one pass\n"
                   "  version            Print the version; --json emits the schema manifest\n"
                   "  help               Show this help\n"
                   "\n"
                   "Planned (not in this build; calling one is a usage error for now):\n"
                   "  pack | export      Pack + export the enabled targets\n"
-                  "  inspect            Dump project state\n"
-                  "  validate           Report every project problem in one pass\n"
                   "  new                Create a new project\n"
                   "\n"
                   "Global options:\n"
                   "  --json             Machine-readable JSON output (stable per-verb schema)\n"
                   "  --quiet            Suppress progress diagnostics on stderr\n"
+                  "  --strict           validate: exit 7 if any error-severity finding\n"
                   "  --help             Show this help\n"
                   "  --version          Print the version\n"
                   "\n"
@@ -196,12 +204,18 @@ int main(int argc, char **argv) {
 
     bool want_help = false;
     bool want_version = false;
-    const char *verb = NULL;
+    bool strict = false;
+    const char *positionals[8]; /* verb + its operands; plenty for v1 verbs */
+    int npos = 0;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         if (strcmp(a, "--json") == 0 || strcmp(a, "--quiet") == 0) {
             continue; /* consumed in the pre-scan */
+        }
+        if (strcmp(a, "--strict") == 0) {
+            strict = true; /* validate-only; rejected for other verbs below */
+            continue;
         }
         if (strcmp(a, "--help") == 0) {
             want_help = true;
@@ -215,12 +229,12 @@ int main(int argc, char **argv) {
             cli_emit_error(json, quiet, "usage", "unknown option '%s'; try 'ntpacker help'", a);
             return CLI_EXIT_USAGE;
         }
-        if (!verb) {
-            verb = a;
-            continue;
+        if (npos < (int)(sizeof positionals / sizeof positionals[0])) {
+            positionals[npos++] = a;
+        } else {
+            cli_emit_error(json, quiet, "usage", "too many arguments; try 'ntpacker help'");
+            return CLI_EXIT_USAGE;
         }
-        /* Extra positionals are ignored in B1 -- version/help take none; the B2+
-         * verbs that consume positionals parse their own tails. */
     }
 
     /* --version / --help short-circuit any verb (standard CLI behavior). */
@@ -231,19 +245,34 @@ int main(int argc, char **argv) {
         print_usage(stdout);
         return CLI_EXIT_OK;
     }
-    if (!verb) {
+    if (npos == 0) {
         /* No command is a usage error (stderr, exit 2) -- NOT the help payload;
          * explicit `help`/--help is the exit-0 stdout path. Keeps stdout clean
          * for pipelines and matches the pinned exit-code contract. */
         cli_emit_error(json, quiet, "usage", "no command given; try 'ntpacker help'");
         return CLI_EXIT_USAGE;
     }
+    const char *verb = positionals[0];
     if (strcmp(verb, "version") == 0) {
         return cmd_version(json);
     }
     if (strcmp(verb, "help") == 0) {
         print_usage(stdout);
         return CLI_EXIT_OK;
+    }
+    if (strcmp(verb, "inspect") == 0 || strcmp(verb, "validate") == 0) {
+        if (npos != 2) {
+            cli_emit_error(json, quiet, "usage", "%s needs exactly one <project> path; try 'ntpacker help'", verb);
+            return CLI_EXIT_USAGE;
+        }
+        if (strcmp(verb, "inspect") == 0) {
+            if (strict) {
+                cli_emit_error(json, quiet, "usage", "--strict is only valid for validate");
+                return CLI_EXIT_USAGE;
+            }
+            return cmd_inspect(positionals[1], json, quiet);
+        }
+        return cmd_validate(positionals[1], json, quiet, strict);
     }
     cli_emit_error(json, quiet, "usage", "unknown command '%s'; try 'ntpacker help'", verb);
     return CLI_EXIT_USAGE;

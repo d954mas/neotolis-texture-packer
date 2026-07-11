@@ -24,8 +24,13 @@ endif()
 
 if(DEFINED CHECKER)
     file(WRITE "${OUTFILE}" "${_out}")
+    # Optional CHECK_ARGS (space-separated) select the checker mode + assertions.
+    if(NOT DEFINED CHECK_ARGS)
+        set(CHECK_ARGS "")
+    endif()
+    separate_arguments(_cargs NATIVE_COMMAND "${CHECK_ARGS}")
     execute_process(
-        COMMAND "${CHECKER}" "${OUTFILE}"
+        COMMAND "${CHECKER}" "${OUTFILE}" ${_cargs}
         RESULT_VARIABLE _cc
         OUTPUT_VARIABLE _co
         ERROR_VARIABLE _ce)
