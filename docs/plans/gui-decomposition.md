@@ -123,6 +123,15 @@ the current tree as packet task #1):
   frame — no per-frame malloc). Verified by a NEW large-N selftest phase (>4096
   sources, >512 frames), not by pixel-diff. Confirmed no ripple into
   UI_STATE_SLOTS/arena (vlist virtualizes; 520-sprite phase proves the pool math).
+  **[DONE, P-7]** All three fixed-caps removed (4096 rows, 4096 multi-select, 512
+  preview frames); `names_common_prefix`'s `char[][192]` parameter accepts the
+  growable `char(*)[192]` unchanged (no signature change needed). OOM policy:
+  keep old capacity + raise STATUS_ERROR (loud, never silent/crash). New selftest
+  phase asserts EXACT counts (rows==4200, multi-select==4200, sort→anim
+  frames==4200, preview frames==600) via an in-memory route for >4096 (a >4096-file
+  project is too heavy for CI) and a real 600-sprite pack for the >512 preview path.
+  Pool math holds: the large-N path is model/row-level only (no vlist render), so
+  UI_STATE_SLOTS is untouched at large N. 5 gate shots byte-identical (delta 0).
 - **Step 8 — shell cleanup + P2 hardenings** (one-liners, in final locations):
   busy_block() incl. undo/redo; gui_pack_reset_shown(); refresh-during-pack keeps
   stale; dead BASE_TOOLBAR_H; MK_*/CTX_* orphan audit; >16-targets + 8KB add-files

@@ -79,9 +79,10 @@ int s_sel_child = -1;
 char s_sel_abs[512];
 bool s_sel_missing;
 
-/* --- multi-select set --- */
-char s_multi_sel[MAX_MULTI_SEL][192];
+/* --- multi-select set (growable; grown by multi_sel_add in gui_rows.c -- P1 fix, step 7) --- */
+char (*s_multi_sel)[192];
 int s_multi_sel_count;
+int s_multi_sel_cap;
 int s_sel_anchor_row = -1;
 
 /* --- animation selection --- */

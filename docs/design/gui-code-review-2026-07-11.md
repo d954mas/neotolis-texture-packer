@@ -87,6 +87,12 @@ between worker and main except the atomics + the release-guarded output block.**
 ## 2. Findings (ranked)
 
 ### P1 — silent list/selection/preview truncation caps
+**CONFIRMED — FIXED (decomposition step 7 / packet P-7).** The three fixed caps are now
+growable (realloc-keep-capacity, geometric, never per-frame malloc; OOM keeps the old
+capacity and raises STATUS_ERROR so truncation is loud, never silent): `s_rows`/`MAX_ROWS`
++ its sort/select companions (gui_rows.c), `s_multi_sel`/`MAX_MULTI_SEL` (gui_state), and
+`update_preview`'s `idxs[512]` (gui_actions.c). Proven by a new large-N selftest phase
+asserting exact counts (>4096 rows/multi-select, >512 preview frames).
 **CONFIRMED.** main.c:1733 & 1756 (`build_rows` caps at `MAX_ROWS = 4096`), 1003/1007
 (`update_preview` static `idxs[512]`), 404 (`MAX_MULTI_SEL = 4096`).
 The **pack/export path has no such cap** — `assemble()`/`desc_vec` (gui_pack.c:98,173) grow

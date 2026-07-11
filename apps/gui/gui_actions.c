@@ -21,6 +21,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Initial capacity of the preview resolved-frame scratch (update_preview); grows past it (P1 fix). */
+#define PREVIEW_IDXS_INIT_CAP 512
+
 /* deferred side effects (dialogs + model mutations), applied at the top of the next frame */
 bool s_pending_open, s_pending_save, s_pending_save_as, s_pending_add_files, s_pending_add_folder, s_pending_add_atlas, s_pending_refresh;
 bool s_pending_pack, s_pending_export;
@@ -180,9 +183,14 @@ tp_project_anim *current_anim(void) {
     return &a->animations[s_sel_anim];
 }
 
-/* Copies the multi-selection into the shared buffers, natural-sorted; returns the count. */
+/* Copies the multi-selection into the shared buffers, natural-sorted; returns the count (0 on OOM,
+ * with a status set -- the caller then does nothing, never truncates). */
 static int build_sorted_selection(void) {
     const int n = s_multi_sel_count;
+    if (!sel_sort_reserve(n)) { /* grow the sort scratch WITH the selection (P1 fix, step 7) */
+        set_status_ex(STATUS_ERROR, "Out of memory: could not sort the selection.");
+        return 0;
+    }
     for (int i = 0; i < n; i++) {
         (void)snprintf(s_sel_sort_buf[i], sizeof s_sel_sort_buf[0], "%s", s_multi_sel[i]);
     }
@@ -200,6 +208,9 @@ int create_animation_from_selection(void) {
         return -1;
     }
     const int n = build_sorted_selection();
+    if (n <= 0) {
+        return -1; /* OOM in the sort scratch (status already set) -- do nothing rather than truncate */
+    }
     char base[192];
     names_common_prefix(s_sel_sort_buf, n, base, sizeof base);
     const int idx = gui_project_create_animation(s_sel_atlas, base[0] ? base : NULL, s_sel_sort_ptr, n);
@@ -218,6 +229,9 @@ void add_selection_frames_to_anim(int anim_index) {
         return;
     }
     const int n = build_sorted_selection();
+    if (n <= 0) {
+        return; /* OOM in the sort scratch (status already set) -- do nothing rather than truncate */
+    }
     if (gui_project_anim_add_frames(s_sel_atlas, anim_index, s_sel_sort_ptr, n)) {
         set_statusf("Added %d frame(s) to the animation (Ctrl+Z to undo).", n);
     }
@@ -288,11 +302,28 @@ void update_preview(void) {
     if (!an || !pr) {
         return; /* declare_canvas draws the "Pack to preview" hint */
     }
-    static int idxs[512];
+    /* Resolved-frame scratch: grows to hold every frame (realloc-keep-capacity; runs each frame while
+     * previewing, so it never mallocs once large enough). The old fixed idxs[512] silently dropped
+     * frames past 512 (P1 fix, step 7). On OOM we keep the old capacity and the loop truncates loudly. */
+    static int *idxs;
+    static int idxs_cap;
+    if (an->frame_count > idxs_cap) {
+        int newcap = idxs_cap ? idxs_cap : PREVIEW_IDXS_INIT_CAP;
+        while (newcap < an->frame_count) {
+            newcap *= 2;
+        }
+        int *grown = realloc(idxs, (size_t)newcap * sizeof *idxs);
+        if (grown) {
+            idxs = grown;
+            idxs_cap = newcap;
+        } else {
+            set_status_ex(STATUS_ERROR, "Out of memory: preview frames truncated.");
+        }
+    }
     int n = 0;
     int rw = 1;
     int rh = 1;
-    for (int i = 0; i < an->frame_count && n < 512; i++) {
+    for (int i = 0; i < an->frame_count && n < idxs_cap; i++) {
         const int si = gui_pack_find_sprite(s_sel_atlas, an->frames[i]);
         if (si >= 0 && si < pr->sprite_count) {
             idxs[n++] = si;

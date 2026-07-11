@@ -98,10 +98,12 @@ extern char s_sel_abs[512];  /* resolved absolute image path of the selection ("
 extern bool s_sel_missing;   /* selection is a missing file -> canvas shows a placeholder (§3.7) */
 
 /* Multi-select set over leaf sprite NAMES (stable identity; rows rebuild each frame). Drives
- * "Create animation from selection" + the editor's "Add frames" (ux.md §3.7b). */
-#define MAX_MULTI_SEL 4096
-extern char s_multi_sel[MAX_MULTI_SEL][192];
+ * "Create animation from selection" + the editor's "Add frames" (ux.md §3.7b). Growable storage
+ * (P1 fix, decomposition step 7): the old fixed 4096 cap silently ignored selections past it. Grows
+ * geometrically in multi_sel_add (gui_rows.c); see the growth-policy note there. */
+extern char (*s_multi_sel)[192];
 extern int s_multi_sel_count;
+extern int s_multi_sel_cap;  /* allocated slots in s_multi_sel (grow-only; 0 == unallocated) */
 extern int s_sel_anchor_row; /* row index anchor for Shift-range selection */
 
 /* Animation selection + editor state (ux.md §3.7b). */

@@ -332,6 +332,114 @@ void run_selftest(void) {
 #endif
     }
 
+    /* --- large-N caps (P1 fix, decomposition step 7): the row / multi-select / preview-frame arrays
+     *     used to silently DROP entries past fixed caps (4096 rows, 4096 multi-select, 512 preview
+     *     frames) -- sprites packed fine but VANISHED from the UI. They are growable now; prove it with
+     *     EXACT counts so a reintroduced fixed cap fails HERE. Two routes: (A) an in-memory synthetic
+     *     project exceeds the 4096 row/multi-select caps without writing >4096 files (too heavy for CI);
+     *     (B) a >512-frame animation over REAL packed sprites, which the preview idxs[] path must
+     *     resolve end-to-end (a fake result cannot exercise gui_pack_find_sprite). --- */
+    {
+        const int BIG_N = 4200; /* > the old 4096 row / multi-select cap */
+
+        /* (A1) rows: >4096 (missing) sources materialize >4096 rows -- build_rows grows s_rows.
+         *      Sources added straight through tp_core (no per-add project touch/serialize). */
+        gui_project_new();
+        gui_pack_clear(-1);
+        tp_project_atlas *ca = tp_project_get_atlas(gui_project_get(), 0);
+        for (int i = 0; i < BIG_N; i++) {
+            char sp[24];
+            (void)snprintf(sp, sizeof sp, "cap/s%05d.png", i); /* distinct + missing -> exactly 1 row each */
+            (void)tp_project_atlas_add_source(ca, sp);
+        }
+        s_sel_atlas = 0;
+        build_rows(gui_project_get(), tp_project_get_atlas(gui_project_get(), 0));
+        nt_log_info("SELFTEST: caps rows=%d (want %d; old cap 4096)", s_row_count, BIG_N);
+        NT_ASSERT(s_row_count == BIG_N && "sprite rows grow past the old 4096 cap");
+
+        /* (A2) multi-select: >4096 distinct names -- multi_sel_add grows s_multi_sel. */
+        multi_sel_clear();
+        for (int i = 0; i < BIG_N; i++) {
+            char nm[24];
+            (void)snprintf(nm, sizeof nm, "cap_%05d", i);
+            multi_sel_add(nm);
+        }
+        nt_log_info("SELFTEST: caps multi_sel=%d (want %d; old cap 4096)", s_multi_sel_count, BIG_N);
+        NT_ASSERT(s_multi_sel_count == BIG_N && "multi-select grows past the old 4096 cap");
+
+        /* (A3) sort companions: create-animation natural-sorts the WHOLE selection through
+         *      s_sel_sort_buf/ptr; if those did not grow with the set the sort path would re-truncate.
+         *      The stored frame count must equal the selection exactly. */
+        const int ca_anim = create_animation_from_selection();
+        tp_project_atlas *caa = tp_project_get_atlas(gui_project_get(), 0);
+        const int ca_frames =
+            (caa && ca_anim >= 0 && ca_anim < caa->animation_count) ? caa->animations[ca_anim].frame_count : -1;
+        nt_log_info("SELFTEST: caps sort->anim frames=%d (want %d)", ca_frames, BIG_N);
+        NT_ASSERT(ca_frames == BIG_N && "sort companions hold the whole selection (no truncation via sort)");
+        multi_sel_clear();
+
+        /* (B) preview idxs[]: a >512-frame animation over REAL packed sprites resolves EVERY frame.
+         *     Identical 2x2 sprites are NOT deduped (see the 520-sprite stress above), so M files pack
+         *     to M regions. */
+        gui_project_new();
+        gui_pack_clear(-1);
+        const int M = 600; /* > the old 512 preview-frame cap */
+        char pdir[700];
+        (void)snprintf(pdir, sizeof pdir, "%s/selftest_caps", s_exe_dir);
+#ifdef _WIN32
+        (void)CreateDirectoryA(pdir, NULL);
+#endif
+        for (int i = 0; i < M; i++) {
+            char fp[820];
+            (void)snprintf(fp, sizeof fp, "%s/f_%04d.tga", pdir, i);
+            write_tga_2x2(fp);
+        }
+        (void)gui_project_add_source(0, pdir);
+        gui_scan_invalidate_all();
+        double cms = 0.0;
+        char cerr[256] = {0};
+        char cnote[128] = {0};
+        const bool okc = gui_pack_atlas(0, &cms, cerr, sizeof cerr, cnote, sizeof cnote);
+        const tp_result *cr = gui_pack_result(0);
+        nt_log_info("SELFTEST: caps pack -> %d sprites=%d (want >= %d) %s", okc, cr ? cr->sprite_count : -1, M,
+                    okc ? "" : cerr);
+        NT_ASSERT(okc && cr && cr->sprite_count >= M && "caps: pack >512 real sprites");
+
+        s_sel_atlas = 0;
+        build_rows(gui_project_get(), tp_project_get_atlas(gui_project_get(), 0));
+        multi_sel_clear();
+        for (int i = 0; i < s_row_count; i++) { /* select-all the leaf sprites (the real UI gesture) */
+            if (!s_rows[i].is_folder && !s_rows[i].missing && s_rows[i].sprite_name[0] != '\0') {
+                multi_sel_add(s_rows[i].sprite_name);
+            }
+        }
+        nt_log_info("SELFTEST: caps preview select-all=%d (want %d)", s_multi_sel_count, M);
+        NT_ASSERT(s_multi_sel_count == M && "caps: select-all resolves M leaf rows");
+        const int panim = create_animation_from_selection();
+        NT_ASSERT(panim >= 0 && "caps: animation from M frames");
+        open_preview(panim);
+        update_preview();
+        nt_log_info("SELFTEST: caps preview frames resolved=%d (want %d; old cap 512)", s_preview_frame_count, M);
+        NT_ASSERT(s_preview_frame_count == M && "preview resolves all >512 frames (idxs[] grows)");
+        preview_stop();
+        multi_sel_clear();
+
+        for (int i = 0; i < M; i++) {
+            char fp[820];
+            (void)snprintf(fp, sizeof fp, "%s/f_%04d.tga", pdir, i);
+            (void)remove(fp);
+        }
+#ifdef _WIN32
+        (void)RemoveDirectoryA(pdir);
+#endif
+        /* leave a clean fresh project for the phases below */
+        gui_project_new();
+        gui_pack_clear(-1);
+        s_sel_atlas = 0;
+        s_sel_anim = -1;
+        s_sel_anim_frame = -1;
+    }
+
     /* --- settings panel: stale-on-change, effective-extrude, per-region RECT override,
      *     and a fresh-project seeded-target export (regions F/G, §3.3f, owner overrides) --- */
     {

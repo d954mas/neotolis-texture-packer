@@ -10,7 +10,21 @@
 
 #include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+/* Growable-storage policy (P1 fix, decomposition step 7) shared by the multi-select set, the
+ * selection-sort companions, and the sprite-row array. These used to be fixed 4096/512-cap arrays
+ * that silently DROPPED entries past the cap (sprites packed fine but vanished from the UI). Now:
+ * realloc-keep-capacity -- grow geometrically (x2) on a new high-water mark, NEVER shrink, so the
+ * per-frame producers (build_rows, the preview loop) never malloc in the steady state. Failure
+ * policy: on realloc OOM we KEEP the old capacity and raise a STATUS_ERROR ("... truncated") -- the
+ * truncation becomes LOUD, never silent, and never a crash/out-of-bounds write. The buffers are
+ * process-lifetime singletons (grow-only, always reachable from these globals -- no leak; matches
+ * the old BSS arrays, which were likewise never freed). */
+#define MULTI_SEL_INIT_CAP 64
+#define SEL_SORT_INIT_CAP 64
+#define ROWS_INIT_CAP 256
 
 // #region shared path/name string helpers
 void normalize_slashes(char *s) {
@@ -65,8 +79,18 @@ bool multi_sel_contains(const char *name) {
 }
 void multi_sel_clear(void) { s_multi_sel_count = 0; }
 void multi_sel_add(const char *name) {
-    if (!name || !name[0] || multi_sel_contains(name) || s_multi_sel_count >= MAX_MULTI_SEL) {
+    if (!name || !name[0] || multi_sel_contains(name)) {
         return;
+    }
+    if (s_multi_sel_count >= s_multi_sel_cap) {
+        const int newcap = s_multi_sel_cap ? s_multi_sel_cap * 2 : MULTI_SEL_INIT_CAP;
+        char (*grown)[192] = realloc(s_multi_sel, (size_t)newcap * sizeof *s_multi_sel);
+        if (!grown) {
+            set_status_ex(STATUS_ERROR, "Out of memory: selection not fully updated.");
+            return; /* keep old capacity + the entries already in it; loud, never silent */
+        }
+        s_multi_sel = grown;
+        s_multi_sel_cap = newcap;
     }
     (void)snprintf(s_multi_sel[s_multi_sel_count], sizeof s_multi_sel[0], "%s", name);
     s_multi_sel_count++;
@@ -163,9 +187,33 @@ void names_common_prefix(char names[][192], int count, char *out, size_t cap) {
     out[pfx] = '\0';
 }
 
-/* Shared scratch for the selection-gesture sort (frame lists are small; static avoids stack blow-up). */
-char s_sel_sort_buf[MAX_MULTI_SEL][192];
-const char *s_sel_sort_ptr[MAX_MULTI_SEL];
+/* Shared scratch for the selection-gesture sort (heap; grows WITH the multi-select set so the sort
+ * path can never truncate the selection -- P1 fix, step 7). */
+char (*s_sel_sort_buf)[192];
+const char **s_sel_sort_ptr;
+static int s_sel_sort_cap;
+
+bool sel_sort_reserve(int n) {
+    if (n <= s_sel_sort_cap) {
+        return true;
+    }
+    int newcap = s_sel_sort_cap ? s_sel_sort_cap : SEL_SORT_INIT_CAP;
+    while (newcap < n) {
+        newcap *= 2;
+    }
+    char (*gb)[192] = realloc(s_sel_sort_buf, (size_t)newcap * sizeof *s_sel_sort_buf);
+    if (!gb) {
+        return false; /* keep old capacity (s_sel_sort_cap unchanged) */
+    }
+    s_sel_sort_buf = gb;
+    const char **gp = realloc(s_sel_sort_ptr, (size_t)newcap * sizeof *s_sel_sort_ptr);
+    if (!gp) {
+        return false; /* buf physically grew but cap not bumped -- next call retries both, stays consistent */
+    }
+    s_sel_sort_ptr = gp;
+    s_sel_sort_cap = newcap;
+    return true;
+}
 // #endregion
 
 // #region row model
@@ -180,15 +228,33 @@ static void row_display(tp_project_atlas *a, const char *sprite_name, const char
     }
 }
 
-sprite_row s_rows[MAX_ROWS];
+sprite_row *s_rows;
 int s_row_count;
+static int s_rows_cap;
+
+/* Appends one zero-uninitialized row slot and returns it (caller memsets), growing s_rows on a new
+ * high-water mark. Returns NULL on OOM (old capacity kept) -- build_rows then stops + raises status.
+ * NOTE on realloc-move: a prior `sprite_row *` into s_rows is invalidated by a growth here, so
+ * build_rows finishes writing the parent folder row BEFORE pushing any child (see below). */
+static sprite_row *rows_push(void) {
+    if (s_row_count >= s_rows_cap) {
+        const int newcap = s_rows_cap ? s_rows_cap * 2 : ROWS_INIT_CAP;
+        sprite_row *grown = realloc(s_rows, (size_t)newcap * sizeof *s_rows);
+        if (!grown) {
+            return NULL;
+        }
+        s_rows = grown;
+        s_rows_cap = newcap;
+    }
+    return &s_rows[s_row_count++];
+}
 
 void build_rows(tp_project *proj, tp_project_atlas *a) {
     s_row_count = 0;
     if (!a) {
         return;
     }
-    for (int si = 0; si < a->source_count && s_row_count < MAX_ROWS; si++) {
+    for (int si = 0; si < a->source_count; si++) {
         const char *sp = a->sources[si];
         char abs[512];
         if (tp_project_resolve_path(proj, sp, abs, sizeof abs) != TP_STATUS_OK) {
@@ -196,7 +262,11 @@ void build_rows(tp_project *proj, tp_project_atlas *a) {
         }
         const bool exists = gui_scan_exists(abs);
         const bool is_dir = exists && gui_scan_is_dir(abs);
-        sprite_row *r = &s_rows[s_row_count++];
+        sprite_row *r = rows_push();
+        if (!r) {
+            set_status_ex(STATUS_ERROR, "Out of memory: sprite list truncated.");
+            return;
+        }
         memset(r, 0, sizeof *r);
         r->src = si;
         r->child = -1;
@@ -210,11 +280,17 @@ void build_rows(tp_project *proj, tp_project_atlas *a) {
         } else if (is_dir) {
             const gui_scan_result *sc = gui_scan_get(abs);
             /* Smart-folder row: name + a child-count suffix (TexturePacker convention -- "animals/ · 60")
-             * so the count of packed assets is visible at a glance without expanding. */
+             * so the count of packed assets is visible at a glance without expanding. `r` is fully
+             * written HERE, before the child loop -- a rows_push() below may realloc-move s_rows and
+             * invalidate `r`, but it is never dereferenced again. */
             (void)snprintf(r->label, sizeof r->label, "%s/  \xC2\xB7  %d", path_last(sp), sc->count);
             r->abs[0] = '\0';
-            for (int ci = 0; ci < sc->count && s_row_count < MAX_ROWS; ci++) {
-                sprite_row *cr = &s_rows[s_row_count++];
+            for (int ci = 0; ci < sc->count; ci++) {
+                sprite_row *cr = rows_push();
+                if (!cr) {
+                    set_status_ex(STATUS_ERROR, "Out of memory: sprite list truncated.");
+                    return;
+                }
                 memset(cr, 0, sizeof *cr);
                 cr->src = si;
                 cr->child = ci;

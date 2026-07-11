@@ -13,7 +13,7 @@
 
 #include "tp_core/tp_project.h" /* tp_project / tp_project_atlas (build_rows signature) */
 
-#include "gui_state.h" /* MAX_MULTI_SEL (sort scratch dimensions) */
+#include "gui_state.h" /* shared editor state the row/selection helpers read + grow */
 
 #ifdef __cplusplus
 extern "C" {
@@ -36,14 +36,18 @@ void multi_sel_set_single(const char *name);
 
 /* qsort adapter for natural order (digit runs compare numerically). */
 int nat_cmp_qsort(const void *a, const void *b);
-/* Longest common prefix of `names`, trimmed of trailing digits/separators (walk_01/walk_02 -> "walk"). */
+/* Longest common prefix of `names`, trimmed of trailing digits/separators (walk_01/walk_02 -> "walk").
+ * The `char names[][192]` parameter accepts the growable `char (*)[192]` buffer below unchanged. */
 void names_common_prefix(char names[][192], int count, char *out, size_t cap);
-/* Shared scratch for the selection-gesture sort (filled by the animation ops in gui_actions). */
-extern char s_sel_sort_buf[MAX_MULTI_SEL][192];
-extern const char *s_sel_sort_ptr[MAX_MULTI_SEL];
+/* Shared scratch for the selection-gesture sort (filled by the animation ops in gui_actions). Growable
+ * companions to the multi-select set (P1 fix, step 7): they MUST hold the whole selection or the sort
+ * path would re-introduce the old truncation. sel_sort_reserve grows both to >= n (false == OOM, old
+ * capacity kept); callers must reserve before writing. */
+extern char (*s_sel_sort_buf)[192];
+extern const char **s_sel_sort_ptr;
+bool sel_sort_reserve(int n);
 
-/* --- flattened sprite rows for the current atlas, rebuilt each frame --- */
-#define MAX_ROWS 4096
+/* --- flattened sprite rows for the current atlas, rebuilt each frame (growable; P1 fix, step 7) --- */
 typedef struct sprite_row {
     int src;
     int child;
@@ -55,7 +59,7 @@ typedef struct sprite_row {
     char sprite_name[192];    /* atlas-relative override key ("" for folders / missing) */
     char abs[512];
 } sprite_row;
-extern sprite_row s_rows[MAX_ROWS];
+extern sprite_row *s_rows;
 extern int s_row_count;
 
 /* Rebuilds s_rows/s_row_count for atlas `a` of project `proj` (folders expand to their children). */
