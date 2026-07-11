@@ -8,6 +8,13 @@ target_link_libraries(tp_test_name_map PRIVATE tp_core unity)
 target_compile_options(tp_test_name_map PRIVATE -U_DLL)
 add_test(NAME tp_name_map COMMAND tp_test_name_map)
 
+# B1: tp_status_id() stable machine tokens (--json error-id contract), pinned per
+# enum value so a rename can't slip through without failing here.
+add_executable(tp_test_status_id test_status_id.c)
+target_link_libraries(tp_test_status_id PRIVATE tp_core unity)
+target_compile_options(tp_test_status_id PRIVATE -U_DLL)
+add_test(NAME tp_status_id COMMAND tp_test_status_id)
+
 # A1 op-layer: canonical sprite-name key + natural order + common prefix.
 # Pins the dot-basename key fix that the showcase draw-hash gate cannot see.
 add_executable(tp_test_names test_names.c)

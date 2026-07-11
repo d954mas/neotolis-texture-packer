@@ -27,7 +27,8 @@
  * by tests and is ready for the future rotation-only engine policy. */
 
 #define TP_DEFOLD_PATH_MAX 1024
-#define TP_DEFOLD_TPINFO_VERSION "2.0"
+/* TP_DEFOLD_TPINFO_VERSION now lives in tp_core/tp_export.h (shared with the CLI
+ * version manifest). */
 #define TP_DEFOLD_DESCRIPTION "Exported using neotolis-texture-packer"
 
 /* The single D4 orientation the .tpinfo `rotated` bool can represent: a 90-degree

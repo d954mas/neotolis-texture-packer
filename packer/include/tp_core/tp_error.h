@@ -76,6 +76,30 @@ static inline const char *tp_status_str(tp_status status) {
     return "unknown status";
 }
 
+/* Stable lowercase machine token per status (enum-name style, minus the
+ * TP_STATUS_ prefix) for --json error payloads. Distinct from tp_status_str's
+ * human prose: this token is a contract an agent matches on and is test-pinned.
+ * No `default` inside the switch on purpose -- a new enum value then trips
+ * -Wswitch here too, keeping token + prose in lockstep. */
+static inline const char *tp_status_id(tp_status status) {
+    switch (status) {
+        case TP_STATUS_OK: return "ok";
+        case TP_STATUS_UNIMPLEMENTED: return "unimplemented";
+        case TP_STATUS_INVALID_ARGUMENT: return "invalid_argument";
+        case TP_STATUS_BAD_MAGIC: return "bad_magic";
+        case TP_STATUS_BAD_VERSION: return "bad_version";
+        case TP_STATUS_OUT_OF_BOUNDS: return "out_of_bounds";
+        case TP_STATUS_HASH_COLLISION: return "hash_collision";
+        case TP_STATUS_UNKNOWN_REGION: return "unknown_region";
+        case TP_STATUS_PAGE_NOT_FOUND: return "page_not_found";
+        case TP_STATUS_UNSUPPORTED_TEXTURE: return "unsupported_texture";
+        case TP_STATUS_OOM: return "oom";
+        case TP_STATUS_BUILDER_FAILED: return "builder_failed";
+        case TP_STATUS_BAD_PROJECT: return "bad_project";
+    }
+    return "unknown_status";
+}
+
 #ifdef __cplusplus
 }
 #endif

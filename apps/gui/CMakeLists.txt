@@ -47,6 +47,8 @@ target_link_libraries(ntpacker-gui PRIVATE
 )
 # Generated asset header from the pack builder (ntpacker_ui_assets.h).
 target_include_directories(ntpacker-gui PRIVATE "${GUI_GENERATED_DIR}")
+# Shared product version header (apps/common/ntpacker_version.h), also used by the CLI.
+target_include_directories(ntpacker-gui PRIVATE "${CMAKE_SOURCE_DIR}/apps/common")
 # The engine sets these build-wide via add_compile_definitions in its OWN directory scope;
 # a submodule consumer doesn't inherit that, yet engine public headers (nt_resource.h) test
 # them under our -Wundef/-Werror. Mirror the engine's resolved values so we agree with its libs.
