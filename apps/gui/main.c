@@ -744,6 +744,23 @@ static void frame(void) {
             gui_canvas_set_result(&s_canvas, want);
             s_shown_result = want;
         }
+        /* Feed the selected region's LIVE slice9 override to the canvas guides: the project is the
+         * source of truth, so typing in the Region panel moves the lines this same frame (no repack;
+         * owner: "добавил и не вижу"). Result names are the original atlas-relative key + ext. */
+        s_canvas.sel_slice9[0] = s_canvas.sel_slice9[1] = s_canvas.sel_slice9[2] = s_canvas.sel_slice9[3] = 0;
+        if (want && s_canvas.sel_sprite >= 0 && s_canvas.sel_sprite < want->sprite_count) {
+            tp_project_atlas *sel_a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
+            if (sel_a) {
+                char s9key[192];
+                strip_ext(want->sprites[s_canvas.sel_sprite].name, s9key, sizeof s9key);
+                const tp_project_sprite *s9ov = tp_project_atlas_find_sprite(sel_a, s9key);
+                if (s9ov) {
+                    for (int k = 0; k < 4; k++) {
+                        s_canvas.sel_slice9[k] = (int)s9ov->slice9_lrtb[k];
+                    }
+                }
+            }
+        }
         update_preview();      /* resolve the current preview frame + set ANIM mode before input/handler */
         handle_canvas_input(); /* wheel/pan/click over the atlas page (uses last frame's draw box) */
 

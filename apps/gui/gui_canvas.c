@@ -939,35 +939,35 @@ void gui_canvas_handler(const nt_ui_custom_frame_t *frame, void *userdata) {
             }
             /* Slice9 guides (selected region only, ux: make the 9-patch cuts visible on the sprite):
              * two vertical + two horizontal cut lines in untrimmed source space, mapped through the
-             * same D4 path as the trim ghost. Values come from the packed result (like pivots), so
-             * they reflect the LAST pack; silent for regions without a slice9 inset. */
+             * same D4 path as the trim ghost -- correct over hull shapes and packed transforms alike.
+             * Insets are LIVE (host feeds the project override each frame), so typing in the Region
+             * panel moves the lines immediately; the region geometry itself is from the last pack. */
             if (c->show_slice9 && c->sel_sprite >= 0 && c->sel_sprite < c->result->sprite_count &&
-                c->result->sprites[c->sel_sprite].page == c->cur_page) {
+                c->result->sprites[c->sel_sprite].page == c->cur_page &&
+                (c->sel_slice9[0] || c->sel_slice9[1] || c->sel_slice9[2] || c->sel_slice9[3])) {
                 const tp_sprite *s = &c->result->sprites[c->sel_sprite];
-                if (s->slice9_lrtb[0] || s->slice9_lrtb[1] || s->slice9_lrtb[2] || s->slice9_lrtb[3]) {
-                    const float col_s9[4] = {0.25F, 0.92F, 0.95F, 0.95F * alpha};
-                    const float sw = (float)s->sourceSize.w;
-                    const float sh = (float)s->sourceSize.h;
-                    /* source-image (0,0) sits at (-spriteSourceSize.x, -spriteSourceSize.y) trim-local */
-                    const float sx0 = -(float)s->spriteSourceSize.x;
-                    const float sy0 = -(float)s->spriteSourceSize.y;
-                    nt_shape_renderer_set_line_width(1.5F * w);
-                    if (s->slice9_lrtb[0]) {
-                        const float x = sx0 + (float)s->slice9_lrtb[0];
-                        slice9_line(world, s, ox, oy, c->scale, x, sy0, x, sy0 + sh, col_s9);
-                    }
-                    if (s->slice9_lrtb[1]) {
-                        const float x = sx0 + sw - (float)s->slice9_lrtb[1];
-                        slice9_line(world, s, ox, oy, c->scale, x, sy0, x, sy0 + sh, col_s9);
-                    }
-                    if (s->slice9_lrtb[2]) {
-                        const float y = sy0 + (float)s->slice9_lrtb[2];
-                        slice9_line(world, s, ox, oy, c->scale, sx0, y, sx0 + sw, y, col_s9);
-                    }
-                    if (s->slice9_lrtb[3]) {
-                        const float y = sy0 + sh - (float)s->slice9_lrtb[3];
-                        slice9_line(world, s, ox, oy, c->scale, sx0, y, sx0 + sw, y, col_s9);
-                    }
+                const float col_s9[4] = {0.25F, 0.92F, 0.95F, 0.95F * alpha};
+                const float sw = (float)s->sourceSize.w;
+                const float sh = (float)s->sourceSize.h;
+                /* source-image (0,0) sits at (-spriteSourceSize.x, -spriteSourceSize.y) trim-local */
+                const float sx0 = -(float)s->spriteSourceSize.x;
+                const float sy0 = -(float)s->spriteSourceSize.y;
+                nt_shape_renderer_set_line_width(1.5F * w);
+                if (c->sel_slice9[0] > 0) {
+                    const float x = sx0 + (float)c->sel_slice9[0];
+                    slice9_line(world, s, ox, oy, c->scale, x, sy0, x, sy0 + sh, col_s9);
+                }
+                if (c->sel_slice9[1] > 0) {
+                    const float x = sx0 + sw - (float)c->sel_slice9[1];
+                    slice9_line(world, s, ox, oy, c->scale, x, sy0, x, sy0 + sh, col_s9);
+                }
+                if (c->sel_slice9[2] > 0) {
+                    const float y = sy0 + (float)c->sel_slice9[2];
+                    slice9_line(world, s, ox, oy, c->scale, sx0, y, sx0 + sw, y, col_s9);
+                }
+                if (c->sel_slice9[3] > 0) {
+                    const float y = sy0 + sh - (float)c->sel_slice9[3];
+                    slice9_line(world, s, ox, oy, c->scale, sx0, y, sx0 + sw, y, col_s9);
                 }
             }
             nt_shape_renderer_flush();
