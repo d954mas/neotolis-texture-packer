@@ -134,6 +134,30 @@ extern bool s_sec_anim_open;  /* the "Animation" section disclosure */
 extern bool s_about_open;
 extern bool s_export_open;
 
+/* Right-click context menu: one cursor-anchored menu whose items depend on the row a right-click armed
+ * it over (§3.3e mouse-complete access). This is the shared TRIGGER/PAYLOAD state written by three
+ * different views (left panel / canvas / settings) and read by the DECLARE machinery (main.c's
+ * declare_context_menu, moving to gui_view_chrome in step 6b) -- "menu/modal open flags", same class
+ * as s_about_open/s_export_open, so it can never be view-local. s_id_ctx_menu is seeded once in
+ * ensure_ids (shell); only the storage moved here (step 4). */
+extern uint32_t s_id_ctx_menu;
+extern nt_ui_menu_state_t s_ctx_state;
+enum { CTX_NONE = 0, CTX_ATLAS, CTX_SPRITE, CTX_CANVAS, CTX_TARGET, CTX_ANIM };
+extern int s_ctx_kind;
+extern int s_ctx_atlas;        /* CTX_ATLAS target index */
+extern int s_ctx_anim;         /* CTX_ANIM animation index */
+extern int s_ctx_target;       /* CTX_TARGET target index (enable/disable, remove) */
+extern int s_ctx_src;          /* CTX_SPRITE source index (for Remove) */
+extern char s_ctx_sprite[192]; /* CTX_SPRITE override key (for Rename) */
+extern bool s_ctx_leaf;        /* a renamable leaf sprite (file source or folder child) */
+extern bool s_ctx_removable;   /* a removable source row (has an [x] today) */
+
+/* One frame: a press landed outside the panels -> declare the settings-panel numeric/text fields
+ * disabled so the engine drops keyboard focus (the engine exposes no programmatic blur). Set by the
+ * shell input pre-pass (frame()), read by view field widgets (gui_view_settings' ui_int/float/
+ * text_field). Same family as the published pending flags (step 2) -- a shell-set, view-read bit. */
+extern bool s_blur_inputs;
+
 /* Per-frame collected row tooltips: TRUNCATED-label full text AND icon-only remove-x "Remove" hints.
  * Bounded by visible (virtualized) rows + the right panel's target/frame lists, not project size. */
 #define MAX_ROW_TIPS 192

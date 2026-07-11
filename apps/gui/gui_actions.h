@@ -3,16 +3,21 @@
 
 /* Model/state mutation layer for the ntpacker GUI: the deferred side-effect queue (s_pending_*) +
  * its pump (apply_pending), the pack/export/undo/redo/refresh actions, file dialogs + add-files/
- * folder, the new/open/save/exit unsaved-changes confirm flow, inline-rename commits, the animation
- * ops + preview player, and the small selection/edit helpers. Split out of main.c (GUI decomposition
- * step 2) as a pure move -- no behavior change. This layer is Clay-free AND nt_ui-free: views set the
- * s_pending_* flags; apply_pending consumes them at the top of the next frame. Include discipline:
- * actions -> gui_state + gui_rows + model headers (gui_project/gui_scan/gui_canvas/gui_pack/
- * gui_history) + tinyfiledialogs; it must never include widgets or any view header. */
+ * folder, the new/open/save/exit unsaved-changes confirm flow, inline-rename commits + the start-edit
+ * entry points (start_atlas_edit/start_anim_edit/start_sprite_edit_named/start_sprite_edit -- the
+ * entry side of the same edit lifecycle, moved here in step 4 so every view that starts an inline
+ * edit shares one home), the animation ops + preview player, and the small selection/edit helpers.
+ * Split out of main.c (GUI decomposition step 2) as a pure move -- no behavior change. This layer is
+ * Clay-free AND nt_ui-free: views set the s_pending_* flags; apply_pending consumes them at the top
+ * of the next frame. Include discipline: actions -> gui_state + gui_rows + model headers
+ * (gui_project/gui_scan/gui_canvas/gui_pack/gui_history) + tinyfiledialogs; it must never include
+ * widgets or any view header. */
 
 #include <stdbool.h>
 
 #include "tp_core/tp_project.h" /* tp_project_anim (current_anim return type) */
+
+#include "gui_rows.h" /* sprite_row (start_sprite_edit parameter) */
 
 #ifdef __cplusplus
 extern "C" {
@@ -64,6 +69,12 @@ void reset_selection(void);
 void clamp_selection(void);
 void cancel_edit(void);
 void preview_stop(void);
+
+/* --- start-edit entry points (pair with the inline-rename commits below) --- */
+void start_atlas_edit(int i);
+void start_anim_edit(int i);
+void start_sprite_edit_named(const char *sprite_name);
+void start_sprite_edit(const sprite_row *row);
 
 /* --- inline rename commits --- */
 void commit_atlas_rename(void);

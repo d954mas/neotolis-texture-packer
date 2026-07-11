@@ -2,10 +2,17 @@
 #define NTPACKER_GUI_WIDGETS_H
 
 /* Shared render kit for the ntpacker GUI: the per-frame style rescale (apply_ui_scale), the generic
- * button/icon/label/checkbox widgets, the inline rename field, the panel-width layout math, and the
- * text-measure/truncation + per-frame row-tooltip helpers. Split out of main.c (GUI decomposition
- * step 1) as a pure move -- no behavior change. Include discipline: widgets -> gui_defs + gui_state
- * (+ engine ui headers); it must never include a sibling view/actions/rows header. */
+ * button/icon/label/checkbox widgets, the inline rename field, the panel-width layout math, the
+ * text-measure/truncation + per-frame row-tooltip helpers, the baked icon-atlas region refs, and the
+ * D4-transform-to-string formatter shared by the canvas readout and the settings "Packed" row. Split
+ * out of main.c (GUI decomposition step 1) as a pure move -- no behavior change. Include discipline:
+ * widgets -> gui_defs + gui_state (+ engine ui headers); it must never include a sibling view/actions/
+ * rows header.
+ *
+ * Icon refs (step 4): the ref VALUES are resolved once by main.c's bind_icon_ref/try_bind_resources
+ * (they read init-only engine resource handles, so binding stays shell territory), but the refs
+ * themselves are read by every view TU, so the refs live here per the plan's original §2 assignment
+ * (step 1 deferred this "for now"; step 4 completes it). */
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -72,6 +79,20 @@ bool tp_checkbox(nt_ui_context_t *ctx, uint32_t id, bool cur, bool enabled);
 
 /* The single inline rename field, sized to fill its (bounded) parent so it clips to the row. */
 bool render_rename_field(nt_ui_context_t *ctx);
+
+/* Compact D4 transform decode for the hover/selection readout (ux.md §2.4). */
+const char *transform_decode_str(uint8_t t);
+
+/* --- baked icon-atlas region refs (resolved once by main.c's bind_icon_ref/try_bind_resources at
+ * startup; read by every view). The single baked WHITE region (s_white_ref) is the art for
+ * checkbox/slider parts (tinted per state); the rest are Lucide icon masks (white-on-alpha), tinted
+ * per state via nt_ui_image color_packed. --- */
+extern nt_atlas_region_ref_t s_white_ref;
+extern nt_atlas_region_ref_t s_ic_layout_grid, s_ic_triangle_alert, s_ic_download, s_ic_refresh;
+extern nt_atlas_region_ref_t s_ic_chevron_left, s_ic_chevron_right, s_ic_minus, s_ic_plus, s_ic_scan, s_ic_maximize;
+extern nt_atlas_region_ref_t s_ic_chevron_down, s_ic_layers, s_ic_folder, s_ic_image, s_ic_film;
+extern nt_atlas_region_ref_t s_ic_file_plus, s_ic_folder_plus, s_ic_x;
+extern nt_atlas_region_ref_t s_ic_info, s_ic_circle_check, s_ic_octagon_alert, s_ic_folder_plus_hero;
 
 #ifdef __cplusplus
 }

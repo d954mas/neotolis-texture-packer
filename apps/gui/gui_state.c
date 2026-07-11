@@ -113,6 +113,22 @@ bool s_sec_anim_open = true;
 bool s_about_open;
 bool s_export_open;
 
+/* --- context-menu shared state (moved from the shell in step 4; written by left panel/canvas/settings,
+ * read by the declare machinery that stays in main.c until chrome, step 6b) --- */
+uint32_t s_id_ctx_menu;
+nt_ui_menu_state_t s_ctx_state;
+int s_ctx_kind;
+int s_ctx_atlas;
+int s_ctx_anim = -1;
+int s_ctx_target = -1;
+int s_ctx_src = -1;
+char s_ctx_sprite[192];
+bool s_ctx_leaf;
+bool s_ctx_removable;
+
+/* --- shell-set, view-read input-blur flag (moved from the shell in step 4) --- */
+bool s_blur_inputs;
+
 /* --- per-frame row tooltips --- */
 row_tip s_row_tips[MAX_ROW_TIPS];
 int s_row_tip_count;

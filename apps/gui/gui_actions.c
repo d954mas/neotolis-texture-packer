@@ -74,6 +74,55 @@ void cancel_edit(void) {
     s_edit_buf[0] = '\0';
 }
 
+/* --- start-edit entry points: the entry side of the same edit lifecycle as the inline-rename
+ * commits below (commit_atlas_rename/commit_sprite_rename/commit_anim_rename). Moved here in step 4
+ * (they are Clay-free) so gui_view_lists and gui_view_settings -- both of which start edits -- share
+ * one home instead of step 5 re-deciding. --- */
+void start_atlas_edit(int i) {
+    tp_project *p = gui_project_get();
+    if (!p || i < 0 || i >= p->atlas_count) {
+        return;
+    }
+    cancel_edit();
+    s_edit_kind = EDIT_ATLAS;
+    s_edit_atlas = i;
+    (void)snprintf(s_edit_buf, sizeof s_edit_buf, "%s", p->atlases[i].name);
+    set_status("Rename atlas: type, Enter to commit, Esc to cancel.");
+}
+void start_anim_edit(int i) {
+    tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
+    if (!a || i < 0 || i >= a->animation_count) {
+        return;
+    }
+    cancel_edit();
+    s_edit_kind = EDIT_ANIM;
+    s_edit_anim = i;
+    (void)snprintf(s_edit_buf, sizeof s_edit_buf, "%s", a->animations[i].id);
+    set_status("Rename animation: type, Enter to commit, Esc to cancel.");
+}
+void start_sprite_edit_named(const char *sprite_name) {
+    if (!sprite_name || sprite_name[0] == '\0') {
+        return;
+    }
+    tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
+    cancel_edit();
+    s_edit_kind = EDIT_SPRITE;
+    (void)snprintf(s_edit_sprite, sizeof s_edit_sprite, "%s", sprite_name);
+    const tp_project_sprite *ov = a ? tp_project_atlas_find_sprite(a, sprite_name) : NULL;
+    /* Seed with the CURRENT name: the rename override if set, else the file-derived final name
+     * (sprite_name is the ext-stripped atlas-relative key = the default export name). The input
+     * string is game-owned (nt_ui_input edits s_edit_buf in place), so seeding it here is the fix
+     * for the "field opens empty" bug -- previously it seeded the (empty) override. */
+    (void)snprintf(s_edit_buf, sizeof s_edit_buf, "%s", (ov && ov->rename) ? ov->rename : sprite_name);
+    set_status("Rename region: type, Enter to commit, Esc clears/cancels.");
+}
+void start_sprite_edit(const sprite_row *row) {
+    if (!row || row->is_folder || row->missing || row->sprite_name[0] == '\0') {
+        return;
+    }
+    start_sprite_edit_named(row->sprite_name);
+}
+
 /* Atlas-name validation (F1): non-empty, unique among atlases, and normalization-safe
  * (no path separators, not dots-only). Fills `err` on failure. */
 static bool atlas_name_valid(const char *name, int self_idx, char *err, size_t cap) {

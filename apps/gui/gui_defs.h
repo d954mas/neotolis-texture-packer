@@ -54,6 +54,14 @@ static inline uint16_t Su(float px) { return (uint16_t)((px * g_ui_scale) + 0.5F
 #define STRIP_LABELS_MIN_W 560.0F
 #define STRIP_CHIP_MIN_W 680.0F
 
+/* Cap on export targets shown per atlas (settings panel target rows + the Export dialog loop). */
+#define GUI_MAX_TARGETS 16
+
+/* Playback mode labels, order == the Defold-pinned enum (0 once_forward .. 6 none). Printed by the
+ * animation editor (settings panel) and the canvas preview caption. */
+static const char *const k_playback_names[7] = {"Once forward",  "Loop forward",  "Once backward", "Loop backward",
+                                                "Once pingpong", "Loop pingpong", "None"};
+
 /* Pack an sRGB triple into the engine's 0xAABBGGRR (opaque) -- clearer than hand-swizzling. */
 #define RGBA8(r, g, b) ((uint32_t)0xFF000000u | ((uint32_t)(b) << 16) | ((uint32_t)(g) << 8) | (uint32_t)(r))
 

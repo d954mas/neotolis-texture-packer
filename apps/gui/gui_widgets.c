@@ -12,6 +12,35 @@
 #include <stdio.h>
 #include <string.h>
 
+/* Right settings panel widgets (regions F/G). All draw with the app's single baked
+ * WHITE region (s_white_ref) tinted per state -- checkbox/slider need art, dropdown
+ * is flat-color. Sizes are rescaled each frame in apply_ui_scale. */
+nt_atlas_region_ref_t s_white_ref;
+/* Baked Lucide icon masks (white-on-alpha), tinted per state via nt_ui_image color_packed. Resolved
+ * once in try_bind_resources (like s_white_ref). Packet A wires the canvas-strip set; the rest of the
+ * baked atlas (layers/folder/film/... hero) is for Packets B/C. */
+nt_atlas_region_ref_t s_ic_layout_grid, s_ic_triangle_alert, s_ic_download, s_ic_refresh;
+nt_atlas_region_ref_t s_ic_chevron_left, s_ic_chevron_right, s_ic_minus, s_ic_plus, s_ic_scan, s_ic_maximize;
+/* Packet B row/section icons (bound in try_bind_resources alongside the strip set). */
+nt_atlas_region_ref_t s_ic_chevron_down, s_ic_layers, s_ic_folder, s_ic_image, s_ic_film;
+nt_atlas_region_ref_t s_ic_file_plus, s_ic_folder_plus, s_ic_x;
+/* Packet C: status-bar severity icons + the 96px empty-state hero (bound alongside the rest). */
+nt_atlas_region_ref_t s_ic_info, s_ic_circle_check, s_ic_octagon_alert, s_ic_folder_plus_hero;
+
+/* Compact D4 transform decode for the hover/selection readout (ux.md §2.4). */
+const char *transform_decode_str(uint8_t t) {
+    switch (t & 7u) {
+        case 0: return "--";
+        case 1: return "flip H";
+        case 2: return "flip V";
+        case 3: return "rot 180";
+        case 4: return "transpose";
+        case 5: return "rot 90";
+        case 6: return "rot 270";
+        default: return "anti-transpose";
+    }
+}
+
 /* Truncate `src` with a trailing "..." so its rendered width at `size` fits `max_w` px.
  * Uniform font per row (no per-row shrink); returns true when it truncated. Font must be
  * bound (only called on the render path). */
