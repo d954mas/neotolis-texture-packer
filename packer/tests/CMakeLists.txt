@@ -8,6 +8,13 @@ target_link_libraries(tp_test_name_map PRIVATE tp_core unity)
 target_compile_options(tp_test_name_map PRIVATE -U_DLL)
 add_test(NAME tp_name_map COMMAND tp_test_name_map)
 
+# A1 op-layer: canonical sprite-name key + natural order + common prefix.
+# Pins the dot-basename key fix that the showcase draw-hash gate cannot see.
+add_executable(tp_test_names test_names.c)
+target_link_libraries(tp_test_names PRIVATE tp_core unity)
+target_compile_options(tp_test_names PRIVATE -U_DLL)
+add_test(NAME tp_names COMMAND tp_test_names)
+
 # Synthetic D4 transform-decode test (plan §3.6). Includes the private helper
 # header from src/ directly -- no public API pollution.
 add_executable(tp_test_transform_decode test_transform_decode.c)

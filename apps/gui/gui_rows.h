@@ -24,8 +24,6 @@ extern "C" {
 void normalize_slashes(char *s);
 /* Returns the basename (past the last / or \) of `p`. */
 const char *path_last(const char *p);
-/* Strip only a trailing extension on the basename, keeping any folder prefix. */
-void strip_ext(const char *in, char *out, size_t cap);
 
 /* --- multi-select set over leaf sprite NAMES (ux.md §3.7b selection gesture) --- */
 bool multi_sel_contains(const char *name);
@@ -34,11 +32,8 @@ void multi_sel_add(const char *name);
 void multi_sel_remove(const char *name);
 void multi_sel_set_single(const char *name);
 
-/* qsort adapter for natural order (digit runs compare numerically). */
+/* qsort adapter for natural order (wraps tp_nat_cmp; digit runs compare numerically). */
 int nat_cmp_qsort(const void *a, const void *b);
-/* Longest common prefix of `names`, trimmed of trailing digits/separators (walk_01/walk_02 -> "walk").
- * The `char names[][192]` parameter accepts the growable `char (*)[192]` buffer below unchanged. */
-void names_common_prefix(char names[][192], int count, char *out, size_t cap);
 /* Shared scratch for the selection-gesture sort (filled by the animation ops in gui_actions). Growable
  * companions to the multi-select set (P1 fix, step 7): they MUST hold the whole selection or the sort
  * path would re-introduce the old truncation. sel_sort_reserve grows both to >= n (false == OOM, old

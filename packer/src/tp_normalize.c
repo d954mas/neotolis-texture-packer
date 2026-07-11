@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "tp_core/tp_arena.h"
+#include "tp_core/tp_names.h"
 
 /* ======================================================================== */
 /* options + final-name munging                                             */
@@ -43,17 +44,15 @@ static char *final_name(const char *raw, const tp_normalize_opts *o, tp_arena *a
             start = slash + 1;
         }
     }
-    char *out = tp_arena_strdup(arena, start);
+    size_t cap = strlen(start) + 1;
+    char *out = (char *)tp_arena_alloc(arena, cap);
     if (!out) {
         return NULL;
     }
     if (o->strip_extension) {
-        char *slash = strrchr(out, '/');
-        char *base = slash ? slash + 1 : out;
-        char *dot = strrchr(base, '.');
-        if (dot && dot != base) { /* keep dotfiles like ".gitkeep" intact */
-            *dot = '\0';
-        }
+        tp_sprite_export_key(start, out, cap); /* shared name policy (single source) */
+    } else {
+        memcpy(out, start, cap);
     }
     return out;
 }

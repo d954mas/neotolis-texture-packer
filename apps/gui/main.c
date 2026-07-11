@@ -56,6 +56,8 @@
 
 #include "clay.h"
 
+#include "tp_core/tp_names.h" /* tp_sprite_export_key (slice9 frame-sync key) */
+
 #include "gui_canvas.h"
 #include "gui_defs.h"
 #include "gui_state.h"
@@ -761,7 +763,7 @@ static void frame(void) {
             tp_project_atlas *sel_a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
             if (sel_a) {
                 char s9key[192];
-                strip_ext(want->sprites[s_canvas.sel_sprite].name, s9key, sizeof s9key);
+                tp_sprite_export_key(want->sprites[s_canvas.sel_sprite].name, s9key, sizeof s9key);
                 const tp_project_sprite *s9ov = tp_project_atlas_find_sprite(sel_a, s9key);
                 if (s9ov) {
                     for (int k = 0; k < 4; k++) {

@@ -27,6 +27,7 @@
 #include "tp_core/tp_error.h"   /* tp_status_str / tp_error */
 #include "tp_core/tp_export.h"  /* tp_exporter_count/at (preview-target selector index) */
 #include "tp_core/tp_model.h"   /* tp_result */
+#include "tp_core/tp_names.h"   /* tp_sprite_export_key (region -> override key) */
 #include "tp_core/tp_project.h" /* tp_project* accessors */
 
 #include "gui_actions.h"  /* do_pack_blocking / reset_selection / preview_stop / anim ops */
@@ -34,7 +35,7 @@
 #include "gui_history.h"  /* gui_history_* (end-of-run depth log) */
 #include "gui_pack.h"     /* gui_pack_* + GUI_PACK_ASYNC_* */
 #include "gui_project.h"  /* gui_project_* + GUI_SPRITE_OV_SHAPE / GUI_ADD_DUPLICATE */
-#include "gui_rows.h"     /* build_rows / multi_sel_* / select_row_for_region / strip_ext */
+#include "gui_rows.h"     /* build_rows / multi_sel_* / select_row_for_region */
 #include "gui_scan.h"     /* gui_scan_* */
 #include "gui_shell.h"    /* UI_STATE_SLOTS / UI_STATE_PROBE_MAX / UI_ROW_ID_RING */
 #include "gui_state.h"    /* s_canvas / s_sel_* / s_sec_* / s_about_open / s_export_open / s_ctx / s_id_* */
@@ -649,7 +650,7 @@ void run_selftest(void) {
             multi_sel_clear();
             for (int i = 0; i < pr->sprite_count && i < 4; i++) {
                 char key[192];
-                strip_ext(pr->sprites[i].name, key, sizeof key);
+                tp_sprite_export_key(pr->sprites[i].name, key, sizeof key);
                 multi_sel_add(key);
             }
             const int pai = create_animation_from_selection();

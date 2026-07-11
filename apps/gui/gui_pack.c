@@ -19,6 +19,7 @@
 #include "tp_core/tp_error.h"
 #include "tp_core/tp_export.h"
 #include "tp_core/tp_export_run.h"
+#include "tp_core/tp_names.h"
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_project.h"
 
@@ -78,18 +79,6 @@ static char *dup_str(const char *s) {
     return p;
 }
 
-/* Strip a trailing extension on the basename, keeping any folder prefix -- so the result matches
- * the sprite-tree override key (e.g. "anim/test-0.png" -> "anim/test-0"). */
-static void strip_ext_keep_folder(const char *in, char *out, size_t cap) {
-    (void)snprintf(out, cap, "%s", in);
-    char *slash = strrchr(out, '/');
-    char *base = slash ? slash + 1 : out;
-    char *dot = strrchr(base, '.');
-    if (dot && dot != base) {
-        *dot = '\0';
-    }
-}
-
 static const char *base_name(const char *p) {
     const char *b = p;
     for (const char *q = p; *q; q++) {
@@ -130,7 +119,7 @@ static bool desc_add(desc_vec *dv, tp_project_atlas *a, const char *raw_name, co
         return false;
     }
     char key[256];
-    strip_ext_keep_folder(raw_name, key, sizeof key);
+    tp_sprite_export_key(raw_name, key, sizeof key);
     const tp_project_sprite *ov = tp_project_atlas_find_sprite(a, key);
     if (ov) {
         d->origin_x = ov->origin_x;
@@ -1139,7 +1128,7 @@ int gui_pack_find_sprite(int atlas_index, const char *key) {
     }
     for (int i = 0; i < r->sprite_count; i++) {
         char sk[256];
-        strip_ext_keep_folder(r->sprites[i].name, sk, sizeof sk);
+        tp_sprite_export_key(r->sprites[i].name, sk, sizeof sk);
         if (strcmp(sk, key) == 0) {
             return i;
         }

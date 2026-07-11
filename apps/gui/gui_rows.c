@@ -8,6 +8,8 @@
 #include "gui_scan.h"
 #include "gui_pack.h"
 
+#include "tp_core/tp_names.h" /* canonical key / natural order / common prefix (op layer) */
+
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -45,24 +47,6 @@ const char *path_last(const char *p) {
     return b;
 }
 
-static void path_stem(const char *p, char *buf, size_t cap) {
-    (void)snprintf(buf, cap, "%s", path_last(p));
-    char *dot = strrchr(buf, '.');
-    if (dot && dot != buf) {
-        *dot = '\0';
-    }
-}
-
-/* Strip only a trailing extension on the basename, keeping any folder prefix (so a
- * folder child's override key is atlas-relative, e.g. "tank/walk_01"). */
-void strip_ext(const char *in, char *out, size_t cap) {
-    (void)snprintf(out, cap, "%s", in);
-    char *dot = strrchr(out, '.');
-    char *slash = strrchr(out, '/');
-    if (dot && dot != out && (!slash || dot > slash)) {
-        *dot = '\0';
-    }
-}
 // #endregion
 
 // #region multi-select + natural sort (ux.md §3.7b selection gesture)
@@ -111,81 +95,8 @@ void multi_sel_set_single(const char *name) {
     multi_sel_add(name);
 }
 
-/* Natural order: digit runs compare numerically (walk_2 before walk_10), the rest byte-wise. */
-static int nat_cmp(const char *a, const char *b) {
-    while (*a && *b) {
-        const bool da = (*a >= '0' && *a <= '9');
-        const bool db = (*b >= '0' && *b <= '9');
-        if (da && db) {
-            while (*a == '0') {
-                a++;
-            }
-            while (*b == '0') {
-                b++;
-            }
-            const char *sa = a;
-            const char *sb = b;
-            while (*a >= '0' && *a <= '9') {
-                a++;
-            }
-            while (*b >= '0' && *b <= '9') {
-                b++;
-            }
-            const size_t la = (size_t)(a - sa);
-            const size_t lb = (size_t)(b - sb);
-            if (la != lb) {
-                return (la < lb) ? -1 : 1;
-            }
-            const int c = strncmp(sa, sb, la);
-            if (c != 0) {
-                return c;
-            }
-        } else {
-            if (*a != *b) {
-                return ((unsigned char)*a < (unsigned char)*b) ? -1 : 1;
-            }
-            a++;
-            b++;
-        }
-    }
-    if (*a) {
-        return 1;
-    }
-    if (*b) {
-        return -1;
-    }
-    return 0;
-}
-int nat_cmp_qsort(const void *a, const void *b) { return nat_cmp((const char *)a, (const char *)b); }
-
-/* Longest common prefix of `names`, trimmed of trailing digits/separators so walk_01/walk_02 -> "walk". */
-void names_common_prefix(char names[][192], int count, char *out, size_t cap) {
-    out[0] = '\0';
-    if (count <= 0 || cap == 0) {
-        return;
-    }
-    size_t pfx = strlen(names[0]);
-    for (int i = 1; i < count; i++) {
-        size_t k = 0;
-        while (k < pfx && names[i][k] && names[0][k] == names[i][k]) {
-            k++;
-        }
-        pfx = k;
-    }
-    while (pfx > 0) {
-        const char c = names[0][pfx - 1];
-        if ((c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.' || c == ' ' || c == '/') {
-            pfx--;
-        } else {
-            break;
-        }
-    }
-    if (pfx >= cap) {
-        pfx = cap - 1;
-    }
-    memcpy(out, names[0], pfx);
-    out[pfx] = '\0';
-}
+/* qsort adapter over the core natural-order comparator (tp_names). */
+int nat_cmp_qsort(const void *a, const void *b) { return tp_nat_cmp((const char *)a, (const char *)b); }
 
 /* Shared scratch for the selection-gesture sort (heap; grows WITH the multi-select set so the sort
  * path can never truncate the selection -- P1 fix, step 7). */
@@ -296,15 +207,13 @@ void build_rows(tp_project *proj, tp_project_atlas *a) {
                 cr->child = ci;
                 cr->is_source = false;
                 cr->indent = 1;
-                strip_ext(sc->entries[ci].rel, cr->sprite_name, sizeof cr->sprite_name);
+                tp_sprite_export_key(sc->entries[ci].rel, cr->sprite_name, sizeof cr->sprite_name);
                 row_display(a, cr->sprite_name, sc->entries[ci].rel, path_last(sc->entries[ci].rel), cr->label, sizeof cr->label);
                 (void)snprintf(cr->abs, sizeof cr->abs, "%s", sc->entries[ci].abs);
             }
-        } else { /* file source: a leaf sprite */
-            char stem[192];
-            path_stem(sp, stem, sizeof stem);
-            (void)snprintf(r->sprite_name, sizeof r->sprite_name, "%s", stem);
-            row_display(a, r->sprite_name, stem, path_last(sp), r->label, sizeof r->label);
+        } else { /* file source: a leaf sprite -- strip the folder (path_last) THEN key */
+            tp_sprite_export_key(path_last(sp), r->sprite_name, sizeof r->sprite_name);
+            row_display(a, r->sprite_name, r->sprite_name, path_last(sp), r->label, sizeof r->label);
             (void)snprintf(r->abs, sizeof r->abs, "%s", abs);
         }
     }
@@ -320,7 +229,7 @@ void select_row_for_region(int region_idx) {
         return;
     }
     char key[192];
-    strip_ext(r->sprites[region_idx].name, key, sizeof key);
+    tp_sprite_export_key(r->sprites[region_idx].name, key, sizeof key);
     for (int i = 0; i < s_row_count; i++) {
         if (!s_rows[i].is_folder && s_rows[i].sprite_name[0] != '\0' && strcmp(s_rows[i].sprite_name, key) == 0) {
             s_sel_src = s_rows[i].src;

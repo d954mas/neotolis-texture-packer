@@ -16,6 +16,7 @@
 #include "tinyfiledialogs.h"
 
 #include "tp_core/tp_export.h" /* tp_exporter_at -> the preview selector's exporter list */
+#include "tp_core/tp_names.h"  /* tp_names_common_prefix (anim id from selection) */
 
 #include "app/nt_app.h"
 
@@ -237,7 +238,7 @@ int create_animation_from_selection(void) {
         return -1; /* OOM in the sort scratch (status already set) -- do nothing rather than truncate */
     }
     char base[192];
-    names_common_prefix(s_sel_sort_buf, n, base, sizeof base);
+    tp_names_common_prefix(s_sel_sort_buf, n, base, sizeof base);
     const int idx = gui_project_create_animation(s_sel_atlas, base[0] ? base : NULL, s_sel_sort_ptr, n);
     if (idx >= 0) {
         s_sel_anim = idx;
