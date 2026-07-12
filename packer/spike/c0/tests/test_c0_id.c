@@ -4,21 +4,13 @@
  * FNV-1a/128 reference. */
 
 #include "tp_c0/tp_c0_id.h"
+#include "tp_c0_test_util.h"
 #include "unity.h"
 
 #include <string.h>
 
 void setUp(void) {}
 void tearDown(void) {}
-
-static void id_hex(tp_c0_id128 id, char out[33]) {
-    static const char *h = "0123456789abcdef";
-    for (int i = 0; i < 16; i++) {
-        out[2 * i] = h[id.bytes[i] >> 4];
-        out[2 * i + 1] = h[id.bytes[i] & 0x0F];
-    }
-    out[32] = '\0';
-}
 
 /* --- RNG seams --- */
 static int fixed_fill(void *ctx, uint8_t *out, size_t len) {

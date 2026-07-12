@@ -4,6 +4,7 @@
  * salt-sweep disambiguation is itself deterministic and can report exhaustion. */
 
 #include "tp_c0/tp_c0_legacy.h"
+#include "tp_c0_test_util.h"
 #include "unity.h"
 
 #include <stdio.h>
@@ -11,15 +12,6 @@
 
 void setUp(void) {}
 void tearDown(void) {}
-
-static void id_hex(tp_c0_id128 id, char out[33]) {
-    static const char *h = "0123456789abcdef";
-    for (int i = 0; i < 16; i++) {
-        out[2 * i] = h[id.bytes[i] >> 4];
-        out[2 * i + 1] = h[id.bytes[i] & 0x0F];
-    }
-    out[32] = '\0';
-}
 
 void test_default_hash_golden(void) {
     char hex[33];

@@ -247,21 +247,21 @@ tp_c0_detail tp_c0_id_parse(const char *text, tp_c0_id_kind *out_kind, tp_c0_id1
         return tp_c0_fail(err, TP_C0_ERR_EMPTY, "empty shape ID");
     }
 
-    static const struct {
-        const char *p;
-        tp_c0_id_kind k;
-    } kinds[] = {
-        {"atlas_", TP_C0_ID_KIND_ATLAS},
-        {"source_", TP_C0_ID_KIND_SOURCE},
-        {"anim_", TP_C0_ID_KIND_ANIM},
-        {"target_", TP_C0_ID_KIND_TARGET},
+    /* Reuse tp_c0_id_kind_prefix() as the single source of the prefix strings
+     * (INVALID has none, so it is not a candidate). */
+    static const tp_c0_id_kind kinds[] = {
+        TP_C0_ID_KIND_ATLAS,
+        TP_C0_ID_KIND_SOURCE,
+        TP_C0_ID_KIND_ANIM,
+        TP_C0_ID_KIND_TARGET,
     };
     tp_c0_id_kind kind = TP_C0_ID_KIND_INVALID;
     const char *body = NULL;
     for (size_t i = 0; i < sizeof kinds / sizeof kinds[0]; i++) {
-        size_t plen = strlen(kinds[i].p);
-        if (strncmp(text, kinds[i].p, plen) == 0) {
-            kind = kinds[i].k;
+        const char *prefix = tp_c0_id_kind_prefix(kinds[i]);
+        size_t plen = strlen(prefix);
+        if (strncmp(text, prefix, plen) == 0) {
+            kind = kinds[i];
             body = text + plen;
             break;
         }
