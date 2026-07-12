@@ -35,11 +35,17 @@ animation, target** — все три уже struct-сущности. **Source I
    rename) сохранён рабочим — F1-03 мигрирует селекторы на ID.
 
 4. **Promotion policy: legacy synthesis (read-only) + fill-nil promote (writable).**
-   - Load v1 (или v2 с отсутствующим `id`): loader синтезирует **детерминированный**
-     ID из (kind + стабильный legacy tuple: atlas index; `"idx|name"`;
+   - Load **v1** (id-less файл): loader синтезирует **детерминированный** ID из
+     (kind + стабильный legacy tuple: atlas index; `"idx|name"`;
      `"idx|exporter|path"`). Повторные read-only load дают идентичные ID
      (master spec §5.5). Read-only консьюмеры (inspect/validate/pack) видят
      стабильные ID.
+   - Load **v2**: синтеза НЕТ. Корректно сохранённый v2 всегда несёт non-nil ID
+     (promote это гарантирует), поэтому nil или **отсутствующий** структурный `id`
+     в v2 — настоящая аномалия «забыл promote / порча файла», а не legacy-случай:
+     loader НЕ чинит её молча, а отвергает `TP_STATUS_ID_MALFORMED` (nil-value
+     ловится ещё при парсе shape-ID, отсутствующий ключ — на
+     `tp_project_validate_ids`). Синтез гейтится флагом `v2` в `tp_project_load`.
    - Writable-сессия зовёт `tp_project_promote_ids(rng)` до первой mutation
      (CLI `commit()`, GUI init/new/open/save + каждый `gui_project_touch`
      snapshot). Promote заполняет **только nil** ID свежими random ID через

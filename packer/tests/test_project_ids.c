@@ -240,6 +240,19 @@ void test_malformed_id_rejected(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_ID_MALFORMED, tp_project_load(path, &loaded, &err));
 }
 
+/* 5d (F6). a v2 file with an ABSENT structural id is NOT synthesized (only v1 files
+ *    are): the nil reaches validate and is rejected TP_STATUS_ID_MALFORMED. A saved v2
+ *    always promotes to non-nil ids, so a missing id is a genuine anomaly (ADR 0007 pt 4). */
+void test_v2_missing_id_rejected(void) {
+    char path[512];
+    join(path, sizeof path, "v2_missing_id.ntpacker_project");
+    write_text(path, "{\n  \"version\": 2,\n  \"atlases\": [ { \"name\": \"a\" } ]\n}\n");
+    tp_project *loaded = NULL;
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_ID_MALFORMED, tp_project_load(path, &loaded, &err));
+    TEST_ASSERT_NULL(loaded);
+}
+
 /* 5c. a v2 animation missing "name" -> BAD_PROJECT (the logical name is required). */
 void test_v2_anim_missing_name_rejected(void) {
     char path[512];
@@ -416,6 +429,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_rng_failure_structured_and_atomic);
     RUN_TEST(test_duplicate_id_rejected);
     RUN_TEST(test_malformed_id_rejected);
+    RUN_TEST(test_v2_missing_id_rejected);
     RUN_TEST(test_v2_anim_missing_name_rejected);
     RUN_TEST(test_id_survives_rename_reorder_remove);
     RUN_TEST(test_migration_golden_v1_to_v2);

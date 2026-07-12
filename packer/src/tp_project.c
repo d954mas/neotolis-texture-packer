@@ -1149,10 +1149,12 @@ static tp_status tp_opt_bool(const cJSON *o, const char *k, bool *dst, tp_error 
     return TP_STATUS_OK;
 }
 
-/* Parse a v2 structural shape-ID at `key` into *out, kind-checked. An ABSENT key
- * leaves *out nil (the post-parse legacy-synthesis pass fills it). A PRESENT key
- * must be a string holding a valid "<expect>_<32hex>" that is non-nil -- a wrong
- * type -> BAD_PROJECT, a bad shape / wrong kind / nil value -> ID_MALFORMED. */
+/* Parse a v2 structural shape-ID at `key` into *out, kind-checked (called ONLY for
+ * v2 files). An ABSENT key leaves *out nil; since v2 files are NOT legacy-synthesized,
+ * that nil reaches tp_project_validate_ids and is rejected ID_MALFORMED (a saved v2
+ * always promotes to non-nil IDs). A PRESENT key must be a string holding a valid
+ * "<expect>_<32hex>" that is non-nil -- a wrong type -> BAD_PROJECT, a bad shape /
+ * wrong kind / nil value -> ID_MALFORMED. */
 static tp_status tp_load_id(const cJSON *o, const char *key, tp_id_kind expect_kind, tp_id128 *out, tp_error *err) {
     *out = tp_id128_nil();
     const cJSON *it = cJSON_GetObjectItemCaseSensitive(o, key);
@@ -1522,14 +1524,19 @@ static tp_status tp_project_parse(const char *text, size_t len, tp_project **out
         }
     }
 
-    /* Resolve structural IDs: synthesize a deterministic ID for any entity that
-     * carried none (a v1 file, or a v2 file missing an id key), then reject
-     * duplicates. Read-only loads therefore see stable IDs (master spec §5.5);
-     * a writable session later replaces nils via tp_project_promote_ids (a
-     * no-op once every ID is non-nil, so it never re-changes a loaded ID). */
-    status = tp_project_assign_legacy_ids(p, err);
-    if (status != TP_STATUS_OK) {
-        goto done;
+    /* Resolve structural IDs. ONLY a v1 (id-less) file gets deterministic legacy
+     * synthesis: repeated read-only loads then see stable IDs (master spec §5.5),
+     * and a writable session later replaces nils via tp_project_promote_ids (a
+     * no-op once every ID is non-nil, so it never re-changes a loaded ID). A v2
+     * file is NOT synthesized: a properly-saved v2 always carries non-nil IDs
+     * (promote guarantees it), so a nil/missing structural id is a genuine anomaly
+     * that must fail loud -- it reaches tp_project_validate_ids and is rejected
+     * TP_STATUS_ID_MALFORMED (ADR 0007 point 4), never silently repaired. */
+    if (!v2) {
+        status = tp_project_assign_legacy_ids(p, err);
+        if (status != TP_STATUS_OK) {
+            goto done;
+        }
     }
     status = tp_project_validate_ids(p, err);
     if (status != TP_STATUS_OK) {
