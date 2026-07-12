@@ -17,7 +17,9 @@
 
 #include "tp_core/tp_export.h" /* TP_EXPORTER_ID_JSON_NEOTOLIS (default-target seeding) */
 #include "tp_core/tp_id.h"     /* shape-ID parse/format for schema-v2 structural ids */
+#include "tp_core/tp_names.h"  /* tp_sprite_export_key (v4 name-bridge derivation) */
 #include "tp_core/tp_pack.h"
+#include "tp_core/tp_srckey.h" /* TP_SRCKEY_MAX (v4 sprite key buffer) */
 #include "tp_core/tp_project_migrate.h" /* legacy synthesis + duplicate validation on load */
 
 #define TP_PATH_MAX 4096
@@ -277,6 +279,7 @@ static void tp_free_atlas(tp_project_atlas *a) {
     free(a->sources);
     for (int i = 0; i < a->sprite_count; i++) {
         free(a->sprites[i].name);
+        free(a->sprites[i].src_key);
         free(a->sprites[i].rename);
     }
     free(a->sprites);
@@ -494,6 +497,7 @@ tp_status tp_project_atlas_remove_sprite(tp_project_atlas *a, const char *name) 
     for (int i = 0; i < a->sprite_count; i++) {
         if (strcmp(a->sprites[i].name, name) == 0) {
             free(a->sprites[i].name);
+            free(a->sprites[i].src_key);
             free(a->sprites[i].rename);
             for (int j = i; j < a->sprite_count - 1; j++) {
                 a->sprites[j] = a->sprites[j + 1];
@@ -855,10 +859,16 @@ static void tp_emit_id(tp_sb *sb, tp_id_kind kind, tp_id128 id) {
 }
 
 static void tp_emit_sprite(tp_sb *sb, int depth, const tp_project_sprite *s) {
+    /* v4 identity: a MIGRATED record persists its canonical {key, source}; a PENDING
+     * record (v3 legacy / added-by-name-before-scan) persists its `name` bridge. On
+     * load a migrated record re-derives `name` = strip_ext(key) with no scan, so the
+     * name-based pack/export path is unaffected (decision 0009). */
+    const bool migrated = !tp_id128_is_nil(s->source_ref) && s->src_key != NULL;
     tp_sb_char(sb, '{');
     bool first = true;
-    /* Keys ASCII-ascending: allow_rotate < extrude < margin < max_vertices < name
-     * < origin < rename < shape < slice9. Overrides are sparse (INHERIT skipped). */
+    /* Keys ASCII-ascending: allow_rotate < extrude < key < margin < max_vertices <
+     * name < origin < rename < shape < slice9 < source. Overrides are sparse
+     * (INHERIT skipped); `key`/`source` XOR `name` per the record state. */
     if (s->ov_allow_rotate != TP_PROJECT_OV_INHERIT) {
         tp_obj_key(sb, depth + 1, &first, "allow_rotate");
         tp_sb_int(sb, (long)s->ov_allow_rotate);
@@ -866,6 +876,10 @@ static void tp_emit_sprite(tp_sb *sb, int depth, const tp_project_sprite *s) {
     if (s->ov_extrude != TP_PROJECT_OV_INHERIT) {
         tp_obj_key(sb, depth + 1, &first, "extrude");
         tp_sb_int(sb, (long)s->ov_extrude);
+    }
+    if (migrated) {
+        tp_obj_key(sb, depth + 1, &first, "key"); /* source-local key (ext kept) */
+        tp_sb_json_string(sb, s->src_key);
     }
     if (s->ov_margin != TP_PROJECT_OV_INHERIT) {
         tp_obj_key(sb, depth + 1, &first, "margin");
@@ -875,8 +889,10 @@ static void tp_emit_sprite(tp_sb *sb, int depth, const tp_project_sprite *s) {
         tp_obj_key(sb, depth + 1, &first, "max_vertices");
         tp_sb_int(sb, (long)s->ov_max_vertices);
     }
-    tp_obj_key(sb, depth + 1, &first, "name");
-    tp_sb_json_string(sb, s->name);
+    if (!migrated) {
+        tp_obj_key(sb, depth + 1, &first, "name");
+        tp_sb_json_string(sb, s->name);
+    }
     if (s->origin_x != TP_PROJECT_ORIGIN_DEFAULT || s->origin_y != TP_PROJECT_ORIGIN_DEFAULT) {
         tp_obj_key(sb, depth + 1, &first, "origin");
         tp_sb_char(sb, '[');
@@ -903,6 +919,10 @@ static void tp_emit_sprite(tp_sb *sb, int depth, const tp_project_sprite *s) {
             tp_sb_uint(sb, (unsigned long)s->slice9_lrtb[k]);
         }
         tp_sb_char(sb, ']');
+    }
+    if (migrated) {
+        tp_obj_key(sb, depth + 1, &first, "source"); /* owning source's structural shape-ID */
+        tp_emit_id(sb, TP_ID_KIND_SOURCE, s->source_ref);
     }
     tp_sb_str(sb, "\n");
     tp_sb_indent(sb, depth);
@@ -1278,18 +1298,71 @@ static tp_status tp_load_id(const cJSON *o, const char *key, tp_id_kind expect_k
     return TP_STATUS_OK;
 }
 
+/* Appends a fresh all-default sprite record (NO name-dedupe) and returns it, or NULL
+ * on OOM. The v4 migrated-record path uses this because identity is (source, key), so
+ * two records must never collapse just because their export-key bridges collide. */
+static tp_project_sprite *sprite_push_default(tp_project_atlas *a) {
+    if (!tp_grow((void **)&a->sprites, &a->sprite_cap, a->sprite_count + 1, sizeof(tp_project_sprite))) {
+        return NULL;
+    }
+    tp_project_sprite *s = &a->sprites[a->sprite_count];
+    memset(s, 0, sizeof *s);
+    s->origin_x = TP_PROJECT_ORIGIN_DEFAULT;
+    s->origin_y = TP_PROJECT_ORIGIN_DEFAULT;
+    s->ov_shape = TP_PROJECT_OV_INHERIT;
+    s->ov_allow_rotate = TP_PROJECT_OV_INHERIT;
+    s->ov_max_vertices = TP_PROJECT_OV_INHERIT;
+    s->ov_margin = TP_PROJECT_OV_INHERIT;
+    s->ov_extrude = TP_PROJECT_OV_INHERIT;
+    a->sprite_count++;
+    return s;
+}
+
 static tp_status tp_load_sprite(tp_project_atlas *a, const cJSON *js, tp_error *err) {
     if (!cJSON_IsObject(js)) {
         return tp_error_set(err, TP_STATUS_BAD_PROJECT, "sprite override must be an object");
     }
-    const cJSON *name = cJSON_GetObjectItemCaseSensitive(js, "name");
-    if (!cJSON_IsString(name) || !name->valuestring) {
-        return tp_error_set(err, TP_STATUS_BAD_PROJECT, "sprite override missing string 'name'");
-    }
-    tp_project_sprite *s = NULL;
-    tp_status st = tp_project_atlas_add_sprite(a, name->valuestring, &s);
+    /* Identity: a v4 MIGRATED record carries {source, key}; a PENDING record (v3
+     * legacy / added-by-name-before-scan) carries {name}. Accept either -- the v3->v4
+     * bridge is lazy (decision 0009), so a v4 file may still hold pending records. */
+    tp_id128 source_ref = tp_id128_nil();
+    tp_status st = tp_load_id(js, "source", TP_ID_KIND_SOURCE, &source_ref, err);
     if (st != TP_STATUS_OK) {
-        return tp_error_set(err, st, "out of memory adding sprite override");
+        return st;
+    }
+    const cJSON *keyj = cJSON_GetObjectItemCaseSensitive(js, "key");
+    if (keyj && (!cJSON_IsString(keyj) || !keyj->valuestring)) {
+        return tp_error_set(err, TP_STATUS_BAD_PROJECT, "sprite 'key' must be a string");
+    }
+    const cJSON *name = cJSON_GetObjectItemCaseSensitive(js, "name");
+    if (name && (!cJSON_IsString(name) || !name->valuestring)) {
+        return tp_error_set(err, TP_STATUS_BAD_PROJECT, "sprite 'name' must be a string");
+    }
+    const bool migrated = !tp_id128_is_nil(source_ref) && keyj != NULL;
+    tp_project_sprite *s = NULL;
+    if (migrated) {
+        /* Canonical (source, key). The `name` bridge is derived = strip_ext(key), so
+         * the name-based pack/export path resolves it with no disk scan. */
+        char bridge[TP_SRCKEY_MAX];
+        tp_sprite_export_key(keyj->valuestring, bridge, sizeof bridge);
+        s = sprite_push_default(a);
+        if (!s) {
+            return tp_error_set(err, TP_STATUS_OOM, "out of memory adding sprite override");
+        }
+        s->source_ref = source_ref;
+        s->src_key = tp_strdup(keyj->valuestring);
+        s->name = tp_strdup(bridge);
+        if (!s->src_key || !s->name) {
+            return tp_error_set(err, TP_STATUS_OOM, "out of memory adding sprite override");
+        }
+    } else {
+        if (!name) {
+            return tp_error_set(err, TP_STATUS_BAD_PROJECT, "sprite override needs 'name' or 'source'+'key'");
+        }
+        st = tp_project_atlas_add_sprite(a, name->valuestring, &s);
+        if (st != TP_STATUS_OK) {
+            return tp_error_set(err, st, "out of memory adding sprite override");
+        }
     }
     const cJSON *origin = cJSON_GetObjectItemCaseSensitive(js, "origin");
     if (origin) {
@@ -1599,6 +1672,18 @@ static tp_status tp_migrate(int from_version, tp_error *err) {
                  * deterministic SOURCE ids only (atlas/anim/target keep their v2
                  * ids). Nothing to rewrite in the parsed cJSON tree here. */
                 v = 3;
+                break;
+            case 3:
+                /* v3 -> v4: sparse sprite overrides + animation frame refs move off
+                 * the mutable atlas-relative `name` onto {source, key}. That re-key
+                 * needs a disk scan (a v3 name has no extension; the source-local key
+                 * does), and load MUST NOT scan -- so the v3 name-keyed records load
+                 * verbatim as PENDING records (the model-level loader accepts both the
+                 * {name} and {source,key} shapes) and are rewritten to {source,key}
+                 * LAZILY at first successful resolution (tp_project_resolve_atlas_sprites),
+                 * with the next save persisting the v4 form. Nothing to rewrite in the
+                 * parsed cJSON tree here (decision 0009). */
+                v = 4;
                 break;
             /* case N: migrate N -> N+1 in the parsed tree; v = N+1; break; */
             default:

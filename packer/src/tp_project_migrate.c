@@ -4,6 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "tp_core/tp_sprite_index.h" /* lazy v3->v4 sprite re-keying uses the resolved index */
+
 /* ======================================================================== */
 /* deterministic legacy assigner (promoted from C0-01 tp_c0_legacy)          */
 /* ======================================================================== */
@@ -355,6 +357,53 @@ tp_status tp_project_promote_ids(tp_project *p, const tp_rng *rng, tp_error *err
 
 /* Duplicate detection over the FLAT list of structural IDs. Project sizes are
  * small; an O(n^2) sweep is fine and the flat array keeps the logic legible. */
+/* Local strdup (no cross-CRT / POSIX strdup dependency). NULL on OOM or NULL input. */
+static char *mig_strdup(const char *s) {
+    if (!s) {
+        return NULL;
+    }
+    size_t n = strlen(s) + 1U;
+    char *p = (char *)malloc(n);
+    if (p) {
+        memcpy(p, s, n);
+    }
+    return p;
+}
+
+tp_status tp_project_resolve_atlas_sprites(tp_project *p, int atlas_index, const struct tp_sprite_index *idx,
+                                           tp_error *err) {
+    if (!p || !idx) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_project_resolve_atlas_sprites: NULL project or index");
+    }
+    if (atlas_index < 0 || atlas_index >= p->atlas_count) {
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "tp_project_resolve_atlas_sprites: atlas index %d out of range",
+                            atlas_index);
+    }
+    tp_project_atlas *a = &p->atlases[atlas_index];
+    for (int i = 0; i < a->sprite_count; i++) {
+        tp_project_sprite *s = &a->sprites[i];
+        const bool pending = tp_id128_is_nil(s->source_ref) || s->src_key == NULL;
+        if (!pending || !s->name) {
+            continue; /* already migrated (or a stored orphan) -- leave its identity intact */
+        }
+        int matches = 0;
+        const tp_sprite_ref *r = tp_sprite_index_by_export_key(idx, s->name, &matches);
+        if (matches != 1 || !r) {
+            continue; /* 0 = soft orphan (keeps applying by name); >1 = ambiguous, never guessed */
+        }
+        char *k = mig_strdup(r->source_key);
+        if (!k) {
+            return tp_error_set(err, TP_STATUS_OOM, "tp_project_resolve_atlas_sprites: out of memory");
+        }
+        free(s->src_key);
+        s->src_key = k;
+        s->source_ref = r->source_id;
+        /* `name` stays the export-key bridge -- it already equals r->export_key (that
+         * is how the record matched), so the name-based apply path is unchanged. */
+    }
+    return TP_STATUS_OK;
+}
+
 tp_status tp_project_validate_ids(const tp_project *p, tp_error *err) {
     if (!p) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_project_validate_ids: NULL project");

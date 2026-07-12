@@ -32,6 +32,8 @@
 extern "C" {
 #endif
 
+struct tp_sprite_index;
+
 /* ----- low-level deterministic legacy assigner (promoted from C0-01) ------ *
  * One legacy entity to receive a synthetic ID. `tuple` is the caller-built
  * canonical discriminator derived from the v1 file (e.g. atlas index, or
@@ -87,6 +89,27 @@ tp_status tp_project_promote_ids(tp_project *p, const tp_rng *rng, tp_error *err
  * / TP_STATUS_ID_MALFORMED with context, else TP_STATUS_OK. Run by the loader
  * after IDs are resolved; also usable by validate tooling. */
 tp_status tp_project_validate_ids(const tp_project *p, tp_error *err);
+
+/* ----- lazy v3->v4 sprite re-keying (F1-03, master spec §5.2, decision 0009) ---- *
+ * Rewrite PENDING sprite overrides (a v3 name-keyed record, or one added by name
+ * before a scan: source_ref nil / src_key NULL) onto their canonical {source_ref,
+ * src_key} using the CURRENT resolved sprite index `idx` (which the caller built by
+ * scanning). Load can NOT do this (the export-key name has no extension; the
+ * source-local key does), so it happens here at first successful resolution and the
+ * next save persists the v4 form.
+ *
+ * Per pending record, matched by its export-key bridge against the index:
+ *   - exactly one match  -> filled in (record becomes migrated); the derived
+ *     sprite_id is tp_sprite_id(source_id, src_key);
+ *   - zero matches       -> left pending (a soft orphan: it applies to nothing now
+ *     and re-keys automatically if the file returns);
+ *   - more than one match -> left pending, NEVER guessed (an ambiguous legacy
+ *     reference across sources; validate surfaces it -- §5.6).
+ * A record that is ALREADY migrated is untouched (so a stored orphan keeps its
+ * identity and reactivates purely through the name-based apply path). Mutates `p`;
+ * returns TP_STATUS_OK, or TP_STATUS_OOM (every record left unchanged on the OOM). */
+tp_status tp_project_resolve_atlas_sprites(tp_project *p, int atlas_index, const struct tp_sprite_index *idx,
+                                           tp_error *err);
 
 #ifdef __cplusplus
 }

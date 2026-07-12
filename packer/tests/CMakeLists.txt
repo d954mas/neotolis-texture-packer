@@ -55,6 +55,14 @@ target_compile_options(tp_test_selector PRIVATE -U_DLL)
 nt_set_warning_flags(tp_test_selector)   # AGENTS.md invariant: our test TUs too
 add_test(NAME tp_selector COMMAND tp_test_selector "${CMAKE_BINARY_DIR}/tp_selector_test")
 
+# F1-03: v4 sprite-record identity lifecycle -- lazy v3->v4 re-key, pending soft-orphan,
+# stored-orphan reactivation, and v4 {source,key} save/reload round-trip.
+add_executable(tp_test_sprite_migrate test_sprite_migrate.c)
+target_link_libraries(tp_test_sprite_migrate PRIVATE tp_core unity)
+target_compile_options(tp_test_sprite_migrate PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_sprite_migrate)   # AGENTS.md invariant: our test TUs too
+add_test(NAME tp_sprite_migrate COMMAND tp_test_sprite_migrate "${CMAKE_BINARY_DIR}/tp_sprite_migrate_test")
+
 # F1-01 Part C (low-level): deterministic legacy synthetic-ID assigner +
 # collision-fallback determinism/exhaustion goldens.
 add_executable(tp_test_migrate test_migrate.c)

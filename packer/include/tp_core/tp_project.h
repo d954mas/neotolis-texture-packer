@@ -43,14 +43,40 @@ struct tp_pack_settings;
  * animation's old string `id` became its logical `name` (id/name split).
  * v3 (F1-02): the bare `sources` string array becomes an array of tagged source
  * OBJECTS {id, kind, path}; each source carries a persistent tp_id128 `id`.
- * A v2 bare-string source migrates to kind=folder (decision 0008). */
-#define TP_PROJECT_SCHEMA_VERSION 3
+ * A v2 bare-string source migrates to kind=folder (decision 0008).
+ * v4 (F1-03): a sparse sprite override is keyed by its owning source + source-local
+ * KEY ({source, key}) instead of the mutable atlas-relative `name`, and an animation
+ * frame reference likewise carries {source, key} -- so a logical/export rename never
+ * moves an override or a frame, and the derived sprite_id survives reorder/reload
+ * (decision 0009). The re-key needs a disk scan (name has no extension; the key does)
+ * and load MUST NOT scan, so a v3 name-keyed record loads as a "pending" record and
+ * is rewritten to {source, key} lazily at first successful resolution; a record whose
+ * key never resolves stays orphaned and reactivates when the key returns. A record
+ * still in pending form is a valid v4 state (serialized with `name`). */
+#define TP_PROJECT_SCHEMA_VERSION 4
 
 /* Per-sprite override. Sparse: an entry exists only when at least one field is
  * non-default. Defaults: origin (0.5,0.5), slice9 all-zero, rename NULL (see the
- * *_DEFAULT constants below). */
+ * *_DEFAULT constants below).
+ *
+ * Identity (schema v4, F1-03): the CANONICAL key is the owning source + source-local
+ * key, from which sprite_id derives (tp_sprite_id(source_id, src_key)); this survives
+ * a logical/export rename and source reorder.
+ *   - `source_ref` / `src_key`: the persisted v4 identity. source_ref is nil and
+ *     src_key NULL while the record is PENDING (loaded from a v3 file, or added by
+ *     name before any scan) -- it cannot be keyed to (source, key) without a disk
+ *     scan, which load never does. Lazy resolution fills them (tp_project_migrate).
+ *   - `name`: the export-KEY bridge (ext-stripped, folder-kept). ALWAYS populated for
+ *     an active record and the key the name-based pack/export path still matches on,
+ *     so re-keying does NOT change which override applies to which packed sprite. For
+ *     a migrated (v4) record it is derived on load = strip_ext(src_key) -- no scan.
+ * A migrated record whose (source_ref, src_key) resolves to no current sprite is an
+ * ORPHAN: stored verbatim, inactive (the name bridge naturally matches nothing), and
+ * reactivating when the key returns. */
 typedef struct tp_project_sprite {
-    char *name; /* atlas-relative sprite name; the override key */
+    char *name;          /* export-key bridge (ext-stripped, folder-kept); the name-based apply key */
+    tp_id128 source_ref; /* owning source's structural id; nil = pending (unresolved) */
+    char *src_key;       /* normalized source-local key (NFC, ext KEPT); NULL = pending */
     float origin_x;
     float origin_y;
     uint16_t slice9_lrtb[4]; /* [left,right,top,bottom] px; all-zero = none */

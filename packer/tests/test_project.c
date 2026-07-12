@@ -284,7 +284,7 @@ void test_sparse_defaults_absent(void) {
     TEST_ASSERT_NULL(strstr(buf, "flip_h"));
     TEST_ASSERT_NULL(strstr(buf, "enabled")); /* target enabled default true */
     /* present, non-default */
-    TEST_ASSERT_NOT_NULL(strstr(buf, "\"version\": 3"));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"version\": 4"));
     TEST_ASSERT_NULL(strstr(buf, "\"kind\"")); /* source kept the folder default -> kind omitted (sparse) */
     TEST_ASSERT_NOT_NULL(strstr(buf, "origin"));
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"frames\""));
@@ -318,11 +318,11 @@ void test_determinism(void) {
     tp_project_destroy(p);
 }
 
-/* 4a. newer schema version is refused (schema v3 is current -> use a future v4) */
+/* 4a. newer schema version is refused (schema v4 is current -> use a future v5) */
 void test_version_newer_refused(void) {
     char path[512];
-    join(path, sizeof path, "v4.ntpacker_project");
-    write_text(path, "{\n  \"version\": 4,\n  \"atlases\": []\n}\n");
+    join(path, sizeof path, "v5.ntpacker_project");
+    write_text(path, "{\n  \"version\": 5,\n  \"atlases\": []\n}\n");
 
     tp_project *loaded = NULL;
     tp_error err = {0};

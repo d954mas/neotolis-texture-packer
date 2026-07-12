@@ -316,11 +316,13 @@ void test_id_survives_rename_reorder_remove(void) {
 }
 
 /* 7. migration byte-golden: a checked-in-shape v1 file migrates all the way to an
- *    exact v3 layout (v1->v2->v3 chained) whose IDs are the deterministic legacy
+ *    exact v4 layout (v1->v2->v3->v4 chained) whose IDs are the deterministic legacy
  *    synthesis of stable tuples (tied to the golden hash pinned in test_migrate),
- *    and re-saves identically. V1_MIN has no sources, so the ONLY delta from the
- *    old v2 golden is the version number (2 -> 3). */
-void test_migration_golden_v1_to_v3(void) {
+ *    and re-saves identically. V1_MIN has no sources and no sprite records, and its
+ *    animation frames stay in PENDING name form (the v3->v4 sprite/frame re-key is
+ *    lazy and needs a scan), so the ONLY delta from the old v3 golden is the version
+ *    number (3 -> 4). */
+void test_migration_golden_v1_to_v4(void) {
     char path[512];
     join(path, sizeof path, "mig_v1.ntpacker_project");
     write_text(path, V1_MIN);
@@ -349,7 +351,7 @@ void test_migration_golden_v1_to_v3(void) {
     char expect[2048];
     (void)snprintf(expect, sizeof expect,
                    "{\n"
-                   "  \"version\": 3,\n"
+                   "  \"version\": 4,\n"
                    "  \"atlases\": [\n"
                    "    {\n"
                    "      \"animations\": [\n"
@@ -402,8 +404,9 @@ void test_migration_golden_v1_to_v3(void) {
  *    target ids but bare-STRING sources (no source ids). Loading migrates the
  *    sources to tagged objects, synthesizing ONLY the source id from the stable
  *    tuple "<atlasIdx>|<path>" (kind=folder, omitted) while the atlas id is
- *    preserved verbatim. Re-save is byte-identical. */
-void test_migration_golden_v2_to_v3_sources(void) {
+ *    preserved verbatim. Re-save is byte-identical (now at v4: no sprite records, so
+ *    the only delta from the old v3 golden is the version number). */
+void test_migration_golden_v2_to_v4_sources(void) {
     const char *atlas_id = "atlas_0000000000000000000000000000abcd";
     char v2[512];
     (void)snprintf(v2, sizeof v2,
@@ -419,7 +422,7 @@ void test_migration_golden_v2_to_v3_sources(void) {
     tp_error err = {0};
     TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, tp_project_load(path, &p, &err), err.msg);
     /* atlas id preserved; source id synthesized (non-nil), kind defaults folder. */
-    TEST_ASSERT_EQUAL_INT(3, p->schema_version);
+    TEST_ASSERT_EQUAL_INT(4, p->schema_version);
     TEST_ASSERT_EQUAL_INT(1, p->atlases[0].source_count);
     TEST_ASSERT_FALSE(tp_id128_is_nil(p->atlases[0].sources[0].id));
     TEST_ASSERT_EQUAL_INT((int)TP_SOURCE_KIND_FOLDER, (int)p->atlases[0].sources[0].kind);
@@ -436,7 +439,7 @@ void test_migration_golden_v2_to_v3_sources(void) {
     char expect[1024];
     (void)snprintf(expect, sizeof expect,
                    "{\n"
-                   "  \"version\": 3,\n"
+                   "  \"version\": 4,\n"
                    "  \"atlases\": [\n"
                    "    {\n"
                    "      \"id\": \"%s\",\n"
@@ -510,8 +513,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_v2_missing_id_rejected);
     RUN_TEST(test_v2_anim_missing_name_rejected);
     RUN_TEST(test_id_survives_rename_reorder_remove);
-    RUN_TEST(test_migration_golden_v1_to_v3);
-    RUN_TEST(test_migration_golden_v2_to_v3_sources);
+    RUN_TEST(test_migration_golden_v1_to_v4);
+    RUN_TEST(test_migration_golden_v2_to_v4_sources);
     RUN_TEST(test_checked_in_v1_fixtures_still_load);
     return UNITY_END();
 }
