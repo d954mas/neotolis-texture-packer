@@ -10,13 +10,44 @@
 
 #include "tp_c0/tp_c0_stb.h"
 
+#include <stddef.h>
+
+/* Shared null-arg check: every entry in ptrs must be non-NULL (caller passes
+ * one entry per required out/in pointer). One canonical null-arg error,
+ * tagged with `who` so the two wrappers stay distinguishable. */
+static tp_c0_detail stb_check_args(const void *const *ptrs, size_t n, const char *who, tp_error *err) {
+    for (size_t i = 0; i < n; i++) {
+        if (!ptrs[i]) {
+            return tp_c0_fail(err, TP_C0_ERR_NULL_ARG, "%s: null arg", who);
+        }
+    }
+    return TP_C0_OK;
+}
+
+/* Shared length guard: stb takes a plain int length, so len must be non-zero
+ * and fit in a positive int. */
+static tp_c0_detail stb_check_len(size_t len, const char *who, tp_error *err) {
+    if (len == 0 || len > (size_t)0x7fffffff) {
+        return tp_c0_fail(err, TP_C0_ERR_DECODE_FAILED, "%s: bad length", who);
+    }
+    return TP_C0_OK;
+}
+
+/* Shared stb-failure -> tp_c0_detail mapping. */
+static tp_c0_detail stb_decode_failed(const char *who, tp_error *err) {
+    return tp_c0_fail(err, TP_C0_ERR_DECODE_FAILED, "%s: %s", who, stbi_failure_reason() ? stbi_failure_reason() : "decode failed");
+}
+
 tp_c0_detail tp_c0_stb_decode_rgba8(const uint8_t *data, size_t len, uint32_t *out_w, uint32_t *out_h, uint8_t **out_rgba, tp_error *err) {
-    if (!data || !out_w || !out_h || !out_rgba) {
-        return tp_c0_fail(err, TP_C0_ERR_NULL_ARG, "stb_decode_rgba8: null arg");
+    const void *args[] = {data, out_w, out_h, out_rgba};
+    tp_c0_detail rc = stb_check_args(args, sizeof args / sizeof args[0], "stb_decode_rgba8", err);
+    if (rc != TP_C0_OK) {
+        return rc;
     }
     *out_rgba = NULL;
-    if (len == 0 || len > (size_t)0x7fffffff) {
-        return tp_c0_fail(err, TP_C0_ERR_DECODE_FAILED, "stb_decode_rgba8: bad length");
+    rc = stb_check_len(len, "stb_decode_rgba8", err);
+    if (rc != TP_C0_OK) {
+        return rc;
     }
     int w = 0;
     int h = 0;
@@ -24,7 +55,7 @@ tp_c0_detail tp_c0_stb_decode_rgba8(const uint8_t *data, size_t len, uint32_t *o
     stbi_uc *px = stbi_load_from_memory(data, (int)len, &w, &h, &ch, 4);
     if (!px || w <= 0 || h <= 0) {
         stbi_image_free(px);
-        return tp_c0_fail(err, TP_C0_ERR_DECODE_FAILED, "stb_decode_rgba8: %s", stbi_failure_reason() ? stbi_failure_reason() : "decode failed");
+        return stb_decode_failed("stb_decode_rgba8", err);
     }
     *out_w = (uint32_t)w;
     *out_h = (uint32_t)h;
@@ -33,12 +64,15 @@ tp_c0_detail tp_c0_stb_decode_rgba8(const uint8_t *data, size_t len, uint32_t *o
 }
 
 tp_c0_detail tp_c0_stb_decode_u16(const uint8_t *data, size_t len, uint32_t *out_w, uint32_t *out_h, int *out_channels, uint16_t **out_samples, tp_error *err) {
-    if (!data || !out_w || !out_h || !out_channels || !out_samples) {
-        return tp_c0_fail(err, TP_C0_ERR_NULL_ARG, "stb_decode_u16: null arg");
+    const void *args[] = {data, out_w, out_h, out_channels, out_samples};
+    tp_c0_detail rc = stb_check_args(args, sizeof args / sizeof args[0], "stb_decode_u16", err);
+    if (rc != TP_C0_OK) {
+        return rc;
     }
     *out_samples = NULL;
-    if (len == 0 || len > (size_t)0x7fffffff) {
-        return tp_c0_fail(err, TP_C0_ERR_DECODE_FAILED, "stb_decode_u16: bad length");
+    rc = stb_check_len(len, "stb_decode_u16", err);
+    if (rc != TP_C0_OK) {
+        return rc;
     }
     int w = 0;
     int h = 0;
@@ -46,7 +80,7 @@ tp_c0_detail tp_c0_stb_decode_u16(const uint8_t *data, size_t len, uint32_t *out
     stbi_us *px = stbi_load_16_from_memory(data, (int)len, &w, &h, &ch, 0);
     if (!px || w <= 0 || h <= 0 || ch < 1 || ch > 4) {
         stbi_image_free(px);
-        return tp_c0_fail(err, TP_C0_ERR_DECODE_FAILED, "stb_decode_u16: %s", stbi_failure_reason() ? stbi_failure_reason() : "decode failed");
+        return stb_decode_failed("stb_decode_u16", err);
     }
     *out_w = (uint32_t)w;
     *out_h = (uint32_t)h;
