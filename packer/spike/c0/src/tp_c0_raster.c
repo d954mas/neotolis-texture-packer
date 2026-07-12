@@ -102,15 +102,26 @@ static bool layout_valid(tp_c0_raster_layout layout) {
     return layout == TP_C0_RASTER_GRAY8 || layout == TP_C0_RASTER_GRAYA8 || layout == TP_C0_RASTER_RGB8 || layout == TP_C0_RASTER_RGBA8;
 }
 
-tp_c0_detail tp_c0_raster_expand8(const uint8_t *samples, uint32_t width, uint32_t height, tp_c0_raster_layout layout, uint8_t *out_rgba, tp_error *err) {
+/* Shared null/layout/zero-dimension validation prologue for expand8/expand16.
+ * `samples` is untyped here since the two callers pass different sample
+ * widths (uint8_t* / uint16_t*); only null-ness is checked. */
+static tp_c0_detail expand_validate(const void *samples, uint32_t width, uint32_t height, tp_c0_raster_layout layout, const uint8_t *out_rgba, tp_error *err) {
     if (!samples || !out_rgba) {
-        return tp_c0_fail(err, TP_C0_ERR_NULL_ARG, "expand8: null buffer");
+        return tp_c0_fail(err, TP_C0_ERR_NULL_ARG, "expand: null buffer");
     }
     if (!layout_valid(layout)) {
-        return tp_c0_fail(err, TP_C0_ERR_TXN_BAD_TYPE, "expand8: bad layout %d", (int)layout);
+        return tp_c0_fail(err, TP_C0_ERR_TXN_BAD_TYPE, "expand: bad layout %d", (int)layout);
     }
     if (width == 0 || height == 0) {
-        return tp_c0_fail(err, TP_C0_ERR_EMPTY, "expand8: zero dimension");
+        return tp_c0_fail(err, TP_C0_ERR_EMPTY, "expand: zero dimension");
+    }
+    return TP_C0_OK;
+}
+
+tp_c0_detail tp_c0_raster_expand8(const uint8_t *samples, uint32_t width, uint32_t height, tp_c0_raster_layout layout, uint8_t *out_rgba, tp_error *err) {
+    tp_c0_detail rc = expand_validate(samples, width, height, layout, out_rgba, err);
+    if (rc != TP_C0_OK) {
+        return rc;
     }
     size_t nch = (size_t)layout;
     size_t count = (size_t)width * (size_t)height;
@@ -121,14 +132,9 @@ tp_c0_detail tp_c0_raster_expand8(const uint8_t *samples, uint32_t width, uint32
 }
 
 tp_c0_detail tp_c0_raster_expand16(const uint16_t *samples, uint32_t width, uint32_t height, tp_c0_raster_layout layout, uint8_t *out_rgba, tp_error *err) {
-    if (!samples || !out_rgba) {
-        return tp_c0_fail(err, TP_C0_ERR_NULL_ARG, "expand16: null buffer");
-    }
-    if (!layout_valid(layout)) {
-        return tp_c0_fail(err, TP_C0_ERR_TXN_BAD_TYPE, "expand16: bad layout %d", (int)layout);
-    }
-    if (width == 0 || height == 0) {
-        return tp_c0_fail(err, TP_C0_ERR_EMPTY, "expand16: zero dimension");
+    tp_c0_detail rc = expand_validate(samples, width, height, layout, out_rgba, err);
+    if (rc != TP_C0_OK) {
+        return rc;
     }
     size_t nch = (size_t)layout;
     size_t count = (size_t)width * (size_t)height;
