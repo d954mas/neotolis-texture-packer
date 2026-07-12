@@ -119,9 +119,10 @@ void test_select_miss_marks_stale_no_autopack(void) {
     TEST_ASSERT_FALSE(tp_c0_pack_super_is_fresh(&s, h(7)));                    /* stale vs current h(7) */
 }
 
-/* Ownership transfer cancels ONLY the running Pack; preview, cache, and the
- * pending intent survive (§59 item 24). */
-void test_transfer_cancels_only_running(void) {
+/* Ownership transfer drops the session pack INTENT: it cancels the running Pack
+ * AND the never-run pending intent; only preview + cache survive (§59 item 24,
+ * F3). A stale pending must not resurrect as an unrequested Pack. */
+void test_transfer_drops_running_and_pending(void) {
     tp_c0_pack_super s;
     tp_c0_pack_super_init(&s);
     tp_c0_pack_super_request(&s, h(1));
@@ -130,13 +131,47 @@ void test_transfer_cancels_only_running(void) {
     tp_c0_pack_super_request(&s, h(3)); /* pending C */
     TEST_ASSERT_EQUAL_INT(TP_C0_PACK_CANCELLED, tp_c0_pack_super_transfer(&s));
     TEST_ASSERT_FALSE(s.has_running);                      /* running B cancelled */
+    TEST_ASSERT_FALSE(s.has_pending);                      /* pending C dropped (F3) */
     TEST_ASSERT_TRUE(tp_c0_id128_eq(s.preview_hash, h(1))); /* preview A preserved */
     TEST_ASSERT_TRUE(tp_c0_pack_super_in_cache(&s, h(1))); /* cache preserved */
-    TEST_ASSERT_TRUE(s.has_pending);                       /* pending intent preserved */
-    TEST_ASSERT_TRUE(tp_c0_id128_eq(s.pending_hash, h(3)));
+
+    /* After transfer, a fresh request D starts a NEW job and completes as the
+     * preview -- the dropped pending C must NOT reappear as a SUPERSEDED straggler. */
+    TEST_ASSERT_EQUAL_INT(TP_C0_PACK_STARTED, tp_c0_pack_super_request(&s, h(4)));
+    TEST_ASSERT_TRUE(tp_c0_id128_eq(s.running_hash, h(4)));
+    TEST_ASSERT_EQUAL_INT(TP_C0_PACK_BECAME_PREVIEW, tp_c0_pack_super_complete(&s));
+    TEST_ASSERT_TRUE(tp_c0_id128_eq(s.preview_hash, h(4)));
+    TEST_ASSERT_FALSE(s.has_running);                        /* no straggler promoted */
+    TEST_ASSERT_EQUAL_INT(TP_C0_PACK_NOOP, tp_c0_pack_super_complete(&s)); /* nothing left */
+    TEST_ASSERT_FALSE(tp_c0_pack_super_in_cache(&s, h(3)));  /* C never ran, never cached */
+
     /* Transfer with nothing running is a no-op. */
     tp_c0_pack_super_init(&s);
     TEST_ASSERT_EQUAL_INT(TP_C0_PACK_NOOP, tp_c0_pack_super_transfer(&s));
+}
+
+/* An explicit user selection is STICKY: a job that completes while the preview is
+ * user-pinned enters the cache but does NOT become the preview; a NEW request
+ * clears the pin so its result IS adopted (F4, refinement of decision 0004). */
+void test_explicit_selection_is_sticky(void) {
+    tp_c0_pack_super s;
+    tp_c0_pack_super_init(&s);
+    tp_c0_pack_super_request(&s, h(1)); /* running A */
+    tp_c0_pack_super_complete(&s);      /* preview A */
+    tp_c0_pack_super_request(&s, h(2)); /* running B (freshest intent) */
+    /* User explicitly selects the older cached A while B still runs. */
+    TEST_ASSERT_EQUAL_INT(TP_C0_PACK_SELECTED, tp_c0_pack_super_select(&s, h(1)));
+    TEST_ASSERT_TRUE(s.preview_is_explicit);
+    /* B completes: it IS the freshest intent, but the preview is user-pinned ->
+     * cached only, preview stays A. */
+    TEST_ASSERT_EQUAL_INT(TP_C0_PACK_SUPERSEDED, tp_c0_pack_super_complete(&s));
+    TEST_ASSERT_TRUE(tp_c0_id128_eq(s.preview_hash, h(1))); /* still A */
+    TEST_ASSERT_TRUE(tp_c0_pack_super_in_cache(&s, h(2)));  /* B cached, not preview */
+    /* A NEW request clears the pin; its result is wanted -> becomes the preview. */
+    tp_c0_pack_super_request(&s, h(3)); /* running C */
+    TEST_ASSERT_FALSE(s.preview_is_explicit);
+    TEST_ASSERT_EQUAL_INT(TP_C0_PACK_BECAME_PREVIEW, tp_c0_pack_super_complete(&s));
+    TEST_ASSERT_TRUE(tp_c0_id128_eq(s.preview_hash, h(3))); /* preview := C */
 }
 
 /* Freshness derivation (§10.1): preview current iff preview_hash == current. */
@@ -166,7 +201,8 @@ int main(void) {
     RUN_TEST(test_late_superseded_does_not_overwrite_preview);
     RUN_TEST(test_selection_by_hash_not_timing);
     RUN_TEST(test_select_miss_marks_stale_no_autopack);
-    RUN_TEST(test_transfer_cancels_only_running);
+    RUN_TEST(test_transfer_drops_running_and_pending);
+    RUN_TEST(test_explicit_selection_is_sticky);
     RUN_TEST(test_freshness);
     RUN_TEST(test_complete_noop_when_idle);
     return UNITY_END();

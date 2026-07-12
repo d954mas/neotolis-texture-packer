@@ -164,19 +164,31 @@ machine. The struct is transparent so fixtures can construct exact scenarios.
   one, so a replaced intent never runs and never enters the cache.
 - **Supersession by request seq, not by timing:** on `complete`, the finished job
   enters the cache and becomes the authoritative preview **only if it is still the
-  freshest intent** (`running_seq == latest_seq`); otherwise `superseded` (cached
-  only, preview untouched). A late-finishing / earlier job therefore **never
-  overwrites a newer authoritative preview** (§10.3) — pinned directly with a
-  constructed "straggler" whose request seq is older than the latest.
+  freshest intent** (`running_seq == latest_seq`) **and the preview is not
+  user-pinned** (see the explicit-selection refinement below); otherwise
+  `superseded` (cached only, preview untouched). A late-finishing / earlier job
+  therefore **never overwrites a newer authoritative preview** (§10.3) — pinned
+  directly with a constructed "straggler" whose request seq is older than the latest.
+- **Explicit selection is sticky (F4 — refinement of decision 0004, for owner
+  review):** an explicit `select` marks the preview `preview_is_explicit`; a job
+  `complete` becomes the preview only when the preview is NOT explicitly selected,
+  so a completing in-flight job cannot silently discard a user's explicit choice
+  (§10.3 makes explicit selection a first-class action). A NEW `request` clears the
+  flag (the user asked for a fresh pack, so its result is wanted). The completing
+  job still enters the cache regardless.
 - **Every successful result enters the cache** (`in_cache` by hash), superseded
   or not.
 - **Selection is by hash:** `select` (explicit selection and Undo cache-hit) picks
   the preview by `pack_input_hash`; a hit → `selected`, a miss → `miss` (preview
   unchanged / out of date; no Pack auto-started, §10.4). Freshness (§10.1) is
   `preview_hash == current_pack_input_hash`.
-- **Ownership transfer cancels only the running Pack** (§59 item 24): `transfer`
-  clears the running job and preserves the preview, cache membership, and the
-  pending intent.
+- **Ownership transfer drops the session pack intent (F3 — refinement of decision
+  0004, for owner review):** `transfer` cancels the running Pack (§59 item 24) AND
+  drops the never-run pending intent; only the preview + cache membership survive.
+  Leaving the pending set would let a later `request`+`complete` resurrect the
+  stale pre-transfer pending as a running job (an unrequested Pack). Decision 0004
+  said transfer cancels "only the running Pack"; a never-run pending intent is part
+  of the same session intent and must not outlive the transfer.
 
 ## 6. Raw-RGBA ownership (task 6) — `packer/tests/test_raw_ownership.c`
 
@@ -232,8 +244,11 @@ contract.
 6. **Cache interface:** keyed by `pack_input_hash`; byte budget is a parameter;
    unpinned byte-budget LRU with a pinnable active result; fixed spike entry cap
    (`TP_C0_CACHE_MAX_ENTRIES`).
-7. **Pack supersession:** authoritative preview chosen by request seq on complete,
-   by hash on explicit/Undo selection; transfer cancels only the running Pack.
+7. **Pack supersession:** authoritative preview chosen by request seq on complete
+   (and only when the preview is not user-pinned — F4), by hash on explicit/Undo
+   selection; an explicit selection is sticky until the next request (F4); transfer
+   drops BOTH the running Pack and the never-run pending intent (F3). F3 and F4 are
+   refinements of decision 0004 flagged for owner review (no new decisions entry).
 8. **New `tp_c0_detail` tokens** (append-only): `journal_short`,
    `journal_bad_magic`, `journal_bad_version`, `journal_bad_kind`,
    `journal_bad_checksum`, `journal_too_large` (F1: framed size exceeds the u32

@@ -49,6 +49,8 @@ typedef struct tp_c0_pack_super {
 
     bool has_preview; /* authoritative preview selected for display */
     tp_c0_id128 preview_hash;
+    bool preview_is_explicit; /* preview was user-pinned by select(); a completing
+                               * job must not overwrite it until a NEW request */
 
     tp_c0_id128 done[TP_C0_PACK_SUPER_MAX_DONE]; /* successful results in the cache, by hash */
     int done_count;
@@ -75,23 +77,26 @@ void tp_c0_pack_super_init(tp_c0_pack_super *s);
  * Always advances latest_seq (request ordering). */
 tp_c0_pack_outcome tp_c0_pack_super_request(tp_c0_pack_super *s, tp_c0_id128 input_hash);
 
-/* The running job finishes successfully. Its hash enters the cache. It becomes
- * the authoritative preview ONLY if it is still the freshest intent
- * (running_seq == latest_seq); otherwise SUPERSEDED (cached only, preview
- * untouched -- pins that a late/earlier job never overwrites a newer preview).
- * If a pending intent exists it is promoted to the running job. NOOP if no job
- * is running. */
+/* The running job finishes successfully. Its hash ALWAYS enters the cache. It
+ * becomes the authoritative preview ONLY if it is still the freshest intent
+ * (running_seq == latest_seq) AND the preview is not user-pinned by an explicit
+ * select (F4); otherwise SUPERSEDED (cached only, preview untouched -- pins that a
+ * late/earlier job never overwrites a newer preview, and that an explicit user
+ * selection is sticky). If a pending intent exists it is promoted to the running
+ * job. NOOP if no job is running. */
 tp_c0_pack_outcome tp_c0_pack_super_complete(tp_c0_pack_super *s);
 
 /* Explicit selection or Undo cache-hit: choose the preview BY hash. Cache hit ->
- * SELECTED (preview := hash). Cache miss -> MISS (preview unchanged; caller shows
- * "out of date"; no Pack is auto-started). Selection is by hash, NOT by
- * completion time. */
+ * SELECTED (preview := hash, marked user-pinned so a completing job won't
+ * overwrite it until the next request). Cache miss -> MISS (preview unchanged;
+ * caller shows "out of date"; no Pack is auto-started). Selection is by hash, NOT
+ * by completion time. */
 tp_c0_pack_outcome tp_c0_pack_super_select(tp_c0_pack_super *s, tp_c0_id128 hash);
 
-/* Ownership transfer: cancel ONLY the running Pack (§59 item 24). Preview, cache
- * membership, and the pending intent are preserved. CANCELLED if a job was
- * running, else NOOP. */
+/* Ownership transfer: drop the session pack INTENT -- cancel the running Pack AND
+ * the never-run pending intent (§59 item 24, F3). Only the preview + cache
+ * membership survive; a stale pending must not outlive the transfer and resurrect
+ * as an unrequested Pack. CANCELLED if a job was running, else NOOP. */
 tp_c0_pack_outcome tp_c0_pack_super_transfer(tp_c0_pack_super *s);
 
 /* Freshness (§10.1): the preview is current iff it exists and its hash equals the

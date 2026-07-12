@@ -51,6 +51,9 @@ tp_c0_pack_outcome tp_c0_pack_super_request(tp_c0_pack_super *s, tp_c0_id128 inp
     if (!s) {
         return TP_C0_PACK_NOOP;
     }
+    /* A new request means the user wants a fresh pack result -> release any
+     * explicit preview pin so the eventual completion is adopted (F4). */
+    s->preview_is_explicit = false;
     s->latest_seq++;
     if (!s->has_running) {
         s->has_running = true;
@@ -75,12 +78,14 @@ tp_c0_pack_outcome tp_c0_pack_super_complete(tp_c0_pack_super *s) {
     /* Every successful result enters the cache, superseded or not. */
     done_add(s, finished_hash);
 
-    /* Authoritative ONLY if still the freshest intent. A superseded job (its
-     * request seq is older than the latest request) never becomes the preview and
-     * never overwrites an existing newer preview. */
+    /* Authoritative ONLY if still the freshest intent AND the preview is not
+     * user-pinned. A superseded job (older request seq) never overwrites a newer
+     * preview (§10.3); an explicit user selection is sticky until a new request
+     * clears it (F4). Either way the result is cached, just not shown -> SUPERSEDED
+     * (cached only, preview untouched). */
     bool superseded = finished_seq < s->latest_seq;
     tp_c0_pack_outcome outcome;
-    if (!superseded) {
+    if (!superseded && !s->preview_is_explicit) {
         s->has_preview = true;
         s->preview_hash = finished_hash;
         outcome = TP_C0_PACK_BECAME_PREVIEW;
@@ -108,7 +113,8 @@ tp_c0_pack_outcome tp_c0_pack_super_select(tp_c0_pack_super *s, tp_c0_id128 hash
         return TP_C0_PACK_MISS;
     }
     s->has_preview = true;
-    s->preview_hash = hash; /* chosen by hash, independent of completion time */
+    s->preview_hash = hash;         /* chosen by hash, independent of completion time */
+    s->preview_is_explicit = true;  /* user-pinned: a completing job won't overwrite it (F4) */
     return TP_C0_PACK_SELECTED;
 }
 
@@ -116,8 +122,13 @@ tp_c0_pack_outcome tp_c0_pack_super_transfer(tp_c0_pack_super *s) {
     if (!s || !s->has_running) {
         return TP_C0_PACK_NOOP;
     }
-    /* Cancel ONLY the running Pack; preview, cache, and pending intent survive. */
+    /* An ownership transfer drops the whole session pack INTENT: cancel the running
+     * Pack and drop the never-run pending intent (F3). Only the preview + cache
+     * survive (decision 0004). Leaving has_pending set would let a later
+     * request+complete resurrect the stale pre-transfer pending as a running job,
+     * executing an unrequested Pack. */
     s->has_running = false;
+    s->has_pending = false;
     return TP_C0_PACK_CANCELLED;
 }
 
