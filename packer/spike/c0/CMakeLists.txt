@@ -24,9 +24,15 @@ add_library(tp_c0 STATIC
     src/tp_c0_txn_validate.c
     src/tp_c0_txn_encode.c
     src/tp_c0_txn_result.c
-    # C0-03 task 1: recovery-journal record framing + recovery (no engine, no IO).
+    # C0-03 journal / ownership / cache policy spikes (no engine, no OS claim, no
+    # journal IO): record framing + recovery, commit-ack state machine, authority
+    # vocabulary, memory cache interface, Pack supersession state machine.
     src/tp_c0_journal_frame.c
-    src/tp_c0_journal_recover.c)
+    src/tp_c0_journal_recover.c
+    src/tp_c0_ack.c
+    src/tp_c0_authority.c
+    src/tp_c0_cache_mem.c
+    src/tp_c0_pack_super.c)
 target_include_directories(tp_c0 PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     $<TARGET_PROPERTY:tp_core,INTERFACE_INCLUDE_DIRECTORIES>)
@@ -59,3 +65,7 @@ tp_c0_add_test(test_c0_legacy)
 tp_c0_add_test(test_c0_op)   # C0-02 catalog, verb mapping, selectors, semantic fields
 tp_c0_add_test(test_c0_txn)  # C0-02 txn decode/encode round-trip, faults, diffs
 tp_c0_add_test(test_c0_journal)     # C0-03 journal framing golden vectors + recovery faults
+tp_c0_add_test(test_c0_ack)         # C0-03 commit ack ordering + rollback-on-append-fail
+tp_c0_add_test(test_c0_authority)   # C0-03 authority vocabulary + permission table
+tp_c0_add_test(test_c0_cache)       # C0-03 memory cache interface + budget LRU
+tp_c0_add_test(test_c0_pack_super)  # C0-03 Pack supersession / preview selection (decision 0004)
