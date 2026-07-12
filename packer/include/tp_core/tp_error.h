@@ -56,7 +56,16 @@ typedef enum tp_status {
      * inputs still reuse INVALID_ARGUMENT and an overflowing buffer OUT_OF_BOUNDS. */
     TP_STATUS_INVALID_UTF8,        /* text is not well-formed UTF-8 (tp_srckey) */
     TP_STATUS_KEY_ABSOLUTE,        /* source key/path must be source-root-relative, not absolute (tp_srckey) */
-    TP_STATUS_KEY_TRAVERSAL        /* a '..' component would escape the source root (tp_srckey) */
+    TP_STATUS_KEY_TRAVERSAL,       /* a '..' component would escape the source root (tp_srckey) */
+
+    /* --- selector resolution faults (F1-03, master spec §5.4) ---
+     * Append-only: new values go at the END. A human selector must resolve to
+     * EXACTLY ONE id before it is used; zero and >1 matches are distinct faults a
+     * client acts on differently (NOT_FOUND surfaces "no such entity", AMBIGUOUS
+     * hands back a candidate list the caller disambiguates). Generic NULL/empty
+     * selector text still reuses INVALID_ARGUMENT. */
+    TP_STATUS_NOT_FOUND,           /* a selector matched no entity (tp_selector) */
+    TP_STATUS_AMBIGUOUS_SELECTOR   /* a selector matched more than one entity; a candidate list is returned */
 } tp_status;
 
 /* Fixed-size message buffer -- no heap, safe to embed by value on the stack. */
@@ -116,6 +125,8 @@ static inline const char *tp_status_str(tp_status status) {
         case TP_STATUS_INVALID_UTF8: return "invalid UTF-8";
         case TP_STATUS_KEY_ABSOLUTE: return "source key is not relative";
         case TP_STATUS_KEY_TRAVERSAL: return "source key escapes its root";
+        case TP_STATUS_NOT_FOUND: return "selector matched no entity";
+        case TP_STATUS_AMBIGUOUS_SELECTOR: return "selector is ambiguous";
     }
     return "unknown status";
 }
@@ -153,6 +164,8 @@ static inline const char *tp_status_id(tp_status status) {
         case TP_STATUS_INVALID_UTF8: return "invalid_utf8";
         case TP_STATUS_KEY_ABSOLUTE: return "key_absolute";
         case TP_STATUS_KEY_TRAVERSAL: return "key_traversal";
+        case TP_STATUS_NOT_FOUND: return "not_found";
+        case TP_STATUS_AMBIGUOUS_SELECTOR: return "ambiguous_selector";
     }
     return "unknown_status";
 }

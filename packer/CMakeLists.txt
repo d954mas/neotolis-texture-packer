@@ -25,7 +25,11 @@ add_library(tp_core STATIC
     src/tp_project_migrate.c
     # F1-02 tagged sources: source-key normalization / case-fold collision /
     # portability validation, promoted from the C0-01 srckey spike (uses utf8proc).
-    src/tp_srckey.c)
+    src/tp_srckey.c
+    # F1-03 deterministic sprite ids + canonical selectors: the resolved sprite
+    # index (scan -> source-local key -> sprite_id) and the human-selector resolver
+    # (id/name/path/compound -> exactly one id, ambiguity -> candidate list).
+    src/tp_sprite_index.c src/tp_selector.c)
 target_include_directories(tp_core PUBLIC include)
 # tp_pack_settings.c includes nt_builder.h for the header-only nt_atlas_opts_defaults()
 # inline (the single source of the packing defaults). HEADERS ONLY: this adds the builder

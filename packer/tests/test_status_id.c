@@ -40,11 +40,14 @@ void test_status_id_tokens(void) {
     TEST_ASSERT_EQUAL_STRING("invalid_utf8", tp_status_id(TP_STATUS_INVALID_UTF8));
     TEST_ASSERT_EQUAL_STRING("key_absolute", tp_status_id(TP_STATUS_KEY_ABSOLUTE));
     TEST_ASSERT_EQUAL_STRING("key_traversal", tp_status_id(TP_STATUS_KEY_TRAVERSAL));
+    /* F1-03 selector-resolution faults (master spec §5.4). */
+    TEST_ASSERT_EQUAL_STRING("not_found", tp_status_id(TP_STATUS_NOT_FOUND));
+    TEST_ASSERT_EQUAL_STRING("ambiguous_selector", tp_status_id(TP_STATUS_AMBIGUOUS_SELECTOR));
 }
 
 /* Tokens are machine ids: lowercase, no spaces (unlike tp_status_str prose). */
 void test_status_id_is_machine_token(void) {
-    for (int s = TP_STATUS_OK; s <= TP_STATUS_KEY_TRAVERSAL; s++) {
+    for (int s = TP_STATUS_OK; s <= TP_STATUS_AMBIGUOUS_SELECTOR; s++) {
         const char *id = tp_status_id((tp_status)s);
         for (const char *c = id; *c; c++) {
             TEST_ASSERT_TRUE_MESSAGE(*c != ' ', id);

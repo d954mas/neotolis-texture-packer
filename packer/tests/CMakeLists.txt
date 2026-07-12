@@ -40,6 +40,21 @@ target_compile_options(tp_test_srckey PRIVATE -U_DLL)
 nt_set_warning_flags(tp_test_srckey)   # AGENTS.md invariant: our test TUs too
 add_test(NAME tp_srckey COMMAND tp_test_srckey)
 
+# F1-03: resolved sprite index (scan -> source-local key -> sprite_id) + lookups.
+# Needs a scratch dir (argv[1]) for the on-disk scan fixtures.
+add_executable(tp_test_sprite_index test_sprite_index.c)
+target_link_libraries(tp_test_sprite_index PRIVATE tp_core unity)
+target_compile_options(tp_test_sprite_index PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_sprite_index)   # AGENTS.md invariant: our test TUs too
+add_test(NAME tp_sprite_index COMMAND tp_test_sprite_index "${CMAKE_BINARY_DIR}/tp_sprite_index_test")
+
+# F1-03: canonical selector resolver (id/name/path/compound -> exactly one id).
+add_executable(tp_test_selector test_selector.c)
+target_link_libraries(tp_test_selector PRIVATE tp_core unity)
+target_compile_options(tp_test_selector PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_selector)   # AGENTS.md invariant: our test TUs too
+add_test(NAME tp_selector COMMAND tp_test_selector "${CMAKE_BINARY_DIR}/tp_selector_test")
+
 # F1-01 Part C (low-level): deterministic legacy synthetic-ID assigner +
 # collision-fallback determinism/exhaustion goldens.
 add_executable(tp_test_migrate test_migrate.c)
