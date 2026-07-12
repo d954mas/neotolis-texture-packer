@@ -8,6 +8,7 @@
 #define _CRT_SECURE_NO_WARNINGS /* fopen()/_mkdir() without the MSVC deprecation error */
 
 #include "tp_core/tp_identity.h"
+#include "tp_hex.h" /* shared lowercase-hex encoder -- same code production uses (drift guard) */
 
 #include <stdio.h>
 #include <string.h>
@@ -84,7 +85,13 @@ void test_init_unsaved_and_key(void) {
 
     char key[TP_IDENTITY_PATH_MAX];
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_identity_key(&id, key, sizeof key, &err));
-    /* "session:" + 32 lowercase hex of the seed. */
+    /* "session:" + 32 lowercase hex of the seed, built via the SHARED encoder so
+     * this drift-guard and production cannot diverge (the raw literal is pinned in
+     * test_identity_id.c against a known seed). */
+    char expect[64];
+    memcpy(expect, "session:", 8);
+    tp_hex_encode_lower(seed, 16U, expect + 8);
+    TEST_ASSERT_EQUAL_STRING(expect, key);
     TEST_ASSERT_EQUAL_STRING("session:a0a1a2a3a4a5a6a7a8a9aaabacadaeaf", key);
 }
 

@@ -3,6 +3,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "tp_hex.h" /* shared lowercase-hex encoder (same code the drift-guard tests call) */
+
 /* ======================================================================== */
 /* Session identity DTO + Save-As transition (F1-00 tasks 3, 4).             */
 /*                                                                          */
@@ -97,18 +99,13 @@ tp_status tp_session_identity_key(const tp_session_identity *id, char *out, size
     }
     /* UNSAVED -> "session:" + 32 lowercase hex of the runtime session ID. A plain
      * hex form (NOT the F1-01 "atlas_/source_/..." shape-ID format, which F1-01
-     * owns); kept minimal and local so the two packets do not duplicate. */
-    static const char hexd[16] = {'0', '1', '2', '3', '4', '5', '6', '7',
-                                  '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
+     * owns); shares tp_hex_encode_lower with the drift-guard tests so the encoding
+     * cannot silently diverge between production and the vectors that pin it. */
     enum { PREFIX_LEN = 8, HEX_LEN = 32 }; /* strlen("session:") + 16*2 */
     if (cap < PREFIX_LEN + HEX_LEN + 1U) {
         return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "session key needs %d bytes", PREFIX_LEN + HEX_LEN + 1);
     }
     memcpy(out, "session:", PREFIX_LEN);
-    for (size_t i = 0; i < 16U; i++) {
-        out[PREFIX_LEN + 2U * i] = hexd[id->session_id.bytes[i] >> 4];
-        out[PREFIX_LEN + 2U * i + 1U] = hexd[id->session_id.bytes[i] & 0x0FU];
-    }
-    out[PREFIX_LEN + HEX_LEN] = '\0';
+    tp_hex_encode_lower(id->session_id.bytes, 16U, out + PREFIX_LEN);
     return TP_STATUS_OK;
 }

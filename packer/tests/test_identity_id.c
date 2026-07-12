@@ -3,22 +3,13 @@
  * promoted from the accepted C0-01 tp_c0_id contract. Deterministic. */
 
 #include "tp_core/tp_id.h"
+#include "tp_hex.h" /* shared lowercase-hex encoder -- same code production uses (drift guard) */
 #include "unity.h"
 
 #include <string.h>
 
 void setUp(void) {}
 void tearDown(void) {}
-
-static void id_hex(tp_id128 id, char out[33]) {
-    static const char h[16] = {'0', '1', '2', '3', '4', '5', '6', '7',
-                               '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
-    for (int i = 0; i < 16; i++) {
-        out[2 * i] = h[id.bytes[i] >> 4];
-        out[2 * i + 1] = h[id.bytes[i] & 0x0F];
-    }
-    out[32] = '\0';
-}
 
 /* --- injected RNG seams --- */
 static int fixed_fill(void *ctx, uint8_t *out, size_t len) {
@@ -48,7 +39,7 @@ void test_generate_fixed_bytes(void) {
     tp_error err;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_id128_generate(&rng, &id, &err));
     char hex[33];
-    id_hex(id, hex);
+    tp_hex_encode_lower(id.bytes, 16U, hex);
     TEST_ASSERT_EQUAL_STRING("101112131415161718191a1b1c1d1e1f", hex);
     TEST_ASSERT_FALSE(tp_id128_is_nil(id));
 }
