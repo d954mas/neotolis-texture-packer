@@ -32,11 +32,15 @@ void test_status_id_tokens(void) {
     TEST_ASSERT_EQUAL_STRING("path_resolve_failed", tp_status_id(TP_STATUS_PATH_RESOLVE_FAILED));
     TEST_ASSERT_EQUAL_STRING("rng_failed", tp_status_id(TP_STATUS_RNG_FAILED));
     TEST_ASSERT_EQUAL_STRING("identity_collision", tp_status_id(TP_STATUS_IDENTITY_COLLISION));
+    /* F1-01 structural-ID faults (promoted from the C0-01 id/legacy spike). */
+    TEST_ASSERT_EQUAL_STRING("id_malformed", tp_status_id(TP_STATUS_ID_MALFORMED));
+    TEST_ASSERT_EQUAL_STRING("duplicate_id", tp_status_id(TP_STATUS_DUPLICATE_ID));
+    TEST_ASSERT_EQUAL_STRING("id_collision_exhausted", tp_status_id(TP_STATUS_ID_COLLISION_EXHAUSTED));
 }
 
 /* Tokens are machine ids: lowercase, no spaces (unlike tp_status_str prose). */
 void test_status_id_is_machine_token(void) {
-    for (int s = TP_STATUS_OK; s <= TP_STATUS_IDENTITY_COLLISION; s++) {
+    for (int s = TP_STATUS_OK; s <= TP_STATUS_ID_COLLISION_EXHAUSTED; s++) {
         const char *id = tp_status_id((tp_status)s);
         for (const char *c = id; *c; c++) {
             TEST_ASSERT_TRUE_MESSAGE(*c != ' ', id);

@@ -63,6 +63,66 @@ bool tp_id128_is_nil(tp_id128 id);
  * TP_STATUS_INVALID_ARGUMENT. A healthy RNG never yields the reserved nil. */
 tp_status tp_id128_generate(const tp_rng *rng, tp_id128 *out, tp_error *err);
 
+/* 64-bit bucket hash for in-memory maps/sets (NOT the persistent ID). */
+uint64_t tp_id128_bucket(tp_id128 id);
+
+/* ----- shape ID (F1-01, promoted from C0-01 tp_c0_id) -------------------- *
+ * The entity kind carried by the textual prefix. Binary IDs do not embed the
+ * kind -- the storing field decides it -- so the prefix is a presentation and
+ * validation affordance; the persistent binary ID is the 16 bytes. SOURCE is
+ * kept in the enum (append-only) for F1-02 even though F1-01 attaches no source
+ * id field yet. */
+typedef enum tp_id_kind {
+    TP_ID_KIND_INVALID = 0,
+    TP_ID_KIND_ATLAS,
+    TP_ID_KIND_SOURCE,
+    TP_ID_KIND_ANIM,
+    TP_ID_KIND_TARGET
+} tp_id_kind;
+
+/* Longest text: "source_"/"target_" (7) + 32 hex + NUL = 40. Fixed via #define
+ * (never a const size_t: macos -Wgnu-folding-constant rejects that as a VLA). */
+#define TP_ID_TEXT_CAP 40
+
+/* "atlas_"/"source_"/"anim_"/"target_", or "" for INVALID. */
+const char *tp_id_kind_prefix(tp_id_kind kind);
+
+/* Canonical text: <prefix> + 32 LOWERCASE hex. `cap` must be >= TP_ID_TEXT_CAP.
+ * Rejects TP_ID_KIND_INVALID -> TP_STATUS_ID_MALFORMED; a too-small buffer ->
+ * TP_STATUS_OUT_OF_BOUNDS; NULL out -> TP_STATUS_INVALID_ARGUMENT. Formats the
+ * nil ID as "<prefix>0...0" (callers that require a real ID reject nil first). */
+tp_status tp_id_format(tp_id_kind kind, tp_id128 id, char *out, size_t cap, tp_error *err);
+
+/* Parse a shape ID. Prefix is case-SENSITIVE lowercase; hex digits accept both
+ * cases and re-emit lowercase. The nil (all-zero) value parses OK -- callers
+ * that require a real ID reject it via tp_id128_is_nil. out_kind/out_id may be
+ * NULL. Any bad prefix/hex/length/trailing/empty input -> TP_STATUS_ID_MALFORMED
+ * (prose carries the specific reason); NULL text -> TP_STATUS_INVALID_ARGUMENT. */
+tp_status tp_id_parse(const char *text, tp_id_kind *out_kind, tp_id128 *out_id, tp_error *err);
+
+/* ----- versioned stable hash (FNV-1a/128; endian-stable, no __int128) ----- *
+ * Deterministic, platform-independent 128-bit hash: same input => same output on
+ * every OS (byte-at-a-time mixing, big-endian output packing -- no reinterpret).
+ * This is the primitive under sprite/legacy IDs. */
+tp_id128 tp_hash128(const void *data, size_t len);
+
+/* Streaming form of the same hash, for composing a hash from several pieces
+ * without concatenating them into one buffer (used by sprite/legacy IDs). */
+typedef struct tp_hasher {
+    uint64_t hi, lo;
+} tp_hasher;
+
+tp_hasher tp_hasher_init(void);
+void tp_hasher_update(tp_hasher *h, const void *data, size_t len);
+tp_id128 tp_hasher_final(tp_hasher h);
+
+/* sprite_id = stable_hash("sid1" tag + source_id bytes + 0x00 + normalized_key).
+ * The "sid1" algorithm tag is versioned: changing the mix is a visible change. A
+ * logical/export rename does not change this; a source-local key change does.
+ * PROMOTED-BUT-UNUSED in F1-01: it needs a real source_id, introduced in F1-02
+ * (tagged sources) and wired into sprite resolution in F1-03. */
+tp_id128 tp_sprite_id(tp_id128 source_id, const char *normalized_key);
+
 #ifdef __cplusplus
 }
 #endif

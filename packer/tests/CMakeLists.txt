@@ -23,6 +23,15 @@ target_compile_options(tp_test_identity_id PRIVATE -U_DLL)
 nt_set_warning_flags(tp_test_identity_id)   # AGENTS.md invariant: our test TUs too
 add_test(NAME tp_identity_id COMMAND tp_test_identity_id)
 
+# F1-01 Part A: promoted structural-ID primitive surface (shape-ID parse/format,
+# versioned stable hash + sprite_id byte-goldens, production tp_status mapping).
+add_executable(tp_test_id test_id.c)
+target_link_libraries(tp_test_id PRIVATE tp_core unity)
+target_include_directories(tp_test_id PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)  # tp_hex.h (shared drift-guard encoder)
+target_compile_options(tp_test_id PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_id)   # AGENTS.md invariant: our test TUs too
+add_test(NAME tp_id COMMAND tp_test_id)
+
 # F1-00 project identity: LEXICAL canonical-path fixtures (C0-01 corpus ported).
 # Includes the src-only internal header so BOTH host rule sets run on every CI OS.
 add_executable(tp_test_identity_path test_identity_path.c)

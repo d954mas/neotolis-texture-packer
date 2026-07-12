@@ -38,7 +38,17 @@ typedef enum tp_status {
     TP_STATUS_PATH_RESOLVE_FAILED, /* realpath/GetFinalPathNameByHandle failed: missing parent dir,
                                     * permission, symlink loop, ... prose carries the specifics (tp_identity) */
     TP_STATUS_RNG_FAILED,         /* the injected RNG did not deliver the requested bytes (tp_id) */
-    TP_STATUS_IDENTITY_COLLISION  /* Save-As destination canonicalizes to an already-claimed key (tp_identity) */
+    TP_STATUS_IDENTITY_COLLISION, /* Save-As destination canonicalizes to an already-claimed key (tp_identity) */
+
+    /* --- structural-ID faults (F1-01, promoted from the C0-01 id/legacy spike) ---
+     * Append-only: new values go at the END. Distinct id faults a client acts on
+     * differently; generic NULL/too-small inputs still reuse INVALID_ARGUMENT /
+     * OUT_OF_BOUNDS (a format buffer too small is OUT_OF_BOUNDS). */
+    TP_STATUS_ID_MALFORMED,        /* shape-ID text is malformed (bad prefix/hex/length/trailing/empty),
+                                    * or a nil ID appears where a real structural ID is required (tp_id) */
+    TP_STATUS_DUPLICATE_ID,        /* two structural entities share one persistent ID on load/validate (tp_project) */
+    TP_STATUS_ID_COLLISION_EXHAUSTED /* deterministic legacy salt sweep could not disambiguate synthetic IDs
+                                      * (unreachable with the default hash; only a degenerate injected hash hits it) */
 } tp_status;
 
 /* Fixed-size message buffer -- no heap, safe to embed by value on the stack. */
@@ -92,6 +102,9 @@ static inline const char *tp_status_str(tp_status status) {
         case TP_STATUS_PATH_RESOLVE_FAILED: return "could not resolve path";
         case TP_STATUS_RNG_FAILED: return "random generator failed";
         case TP_STATUS_IDENTITY_COLLISION: return "identity collision";
+        case TP_STATUS_ID_MALFORMED: return "malformed structural id";
+        case TP_STATUS_DUPLICATE_ID: return "duplicate structural id";
+        case TP_STATUS_ID_COLLISION_EXHAUSTED: return "legacy id collision sweep exhausted";
     }
     return "unknown status";
 }
@@ -123,6 +136,9 @@ static inline const char *tp_status_id(tp_status status) {
         case TP_STATUS_PATH_RESOLVE_FAILED: return "path_resolve_failed";
         case TP_STATUS_RNG_FAILED: return "rng_failed";
         case TP_STATUS_IDENTITY_COLLISION: return "identity_collision";
+        case TP_STATUS_ID_MALFORMED: return "id_malformed";
+        case TP_STATUS_DUPLICATE_ID: return "duplicate_id";
+        case TP_STATUS_ID_COLLISION_EXHAUSTED: return "id_collision_exhausted";
     }
     return "unknown_status";
 }
