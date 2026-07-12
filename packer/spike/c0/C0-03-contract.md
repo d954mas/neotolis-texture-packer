@@ -185,7 +185,11 @@ machine. The struct is transparent so fixtures can construct exact scenarios.
   flag (the user asked for a fresh pack, so its result is wanted). The completing
   job still enters the cache regardless.
 - **Every successful result enters the cache** (`in_cache` by hash), superseded
-  or not.
+  or not. The spike `done[]` set is a fixed-size RING that evicts the OLDEST hash
+  when full (F6) — never the newest — and the current `preview_hash` is always
+  reported present by `in_cache`/`select`, so the displayed result stays selectable
+  even after many later packs. This maps to the real LRU cache (task 4), which
+  evicts by recency/budget rather than dropping the newest.
 - **Selection is by hash:** `select` (explicit selection and Undo cache-hit) picks
   the preview by `pack_input_hash`; a hit → `selected`, a miss → `miss` (preview
   unchanged / out of date; no Pack auto-started, §10.4). Freshness (§10.1) is

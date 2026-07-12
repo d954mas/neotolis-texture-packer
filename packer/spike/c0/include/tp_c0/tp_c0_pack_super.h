@@ -33,7 +33,9 @@
 extern "C" {
 #endif
 
-/* Spike cap on remembered completed-result hashes (maps to the memory cache). */
+/* Spike cap on remembered completed-result hashes (maps to the memory cache). The
+ * done[] set is a RING: once full it evicts the OLDEST hash, never the newest, so
+ * the current preview is always a member (F6). */
 #define TP_C0_PACK_SUPER_MAX_DONE 64
 
 typedef struct tp_c0_pack_super {
@@ -52,8 +54,9 @@ typedef struct tp_c0_pack_super {
     bool preview_is_explicit; /* preview was user-pinned by select(); a completing
                                * job must not overwrite it until a NEW request */
 
-    tp_c0_id128 done[TP_C0_PACK_SUPER_MAX_DONE]; /* successful results in the cache, by hash */
-    int done_count;
+    tp_c0_id128 done[TP_C0_PACK_SUPER_MAX_DONE]; /* successful results in the cache, by hash (ring) */
+    int done_count;                              /* filled slots, saturates at MAX_DONE */
+    int done_head;                               /* ring write cursor: evicts the OLDEST when full */
 } tp_c0_pack_super;
 
 typedef enum tp_c0_pack_outcome {
@@ -103,6 +106,9 @@ tp_c0_pack_outcome tp_c0_pack_super_transfer(tp_c0_pack_super *s);
  * current pack input hash. */
 bool tp_c0_pack_super_is_fresh(const tp_c0_pack_super *s, tp_c0_id128 current_hash);
 
+/* Membership in the completed-result set. The current preview_hash is ALWAYS
+ * reported present even if the done ring has since evicted it, so the displayed
+ * result stays selectable (F6). */
 bool tp_c0_pack_super_in_cache(const tp_c0_pack_super *s, tp_c0_id128 hash);
 
 #ifdef __cplusplus

@@ -18,6 +18,15 @@ static tp_c0_id128 h(int i) {
     return id;
 }
 
+/* Distinct 128-bit hash for large sweeps (two-byte counter, always non-nil). */
+static tp_c0_id128 hn(int i) {
+    tp_c0_id128 id = tp_c0_id128_nil();
+    id.bytes[0] = (uint8_t)(i & 0xFF);
+    id.bytes[1] = (uint8_t)((i >> 8) & 0xFF);
+    id.bytes[15] = 0x5A;
+    return id;
+}
+
 void test_outcome_tokens_pinned(void) {
     TEST_ASSERT_EQUAL_STRING("started", tp_c0_pack_outcome_id(TP_C0_PACK_STARTED));
     TEST_ASSERT_EQUAL_STRING("queued", tp_c0_pack_outcome_id(TP_C0_PACK_QUEUED));
@@ -185,6 +194,24 @@ void test_freshness(void) {
     TEST_ASSERT_FALSE(tp_c0_pack_super_is_fresh(&s, h(2))); /* current input changed */
 }
 
+/* F6: after more distinct packs than the done ring holds, the newest (current)
+ * preview is still a cache member and selectable -- the ring evicts the OLDEST,
+ * and the current preview is always reported present. */
+void test_done_ring_keeps_newest_preview(void) {
+    tp_c0_pack_super s;
+    tp_c0_pack_super_init(&s);
+    int total = TP_C0_PACK_SUPER_MAX_DONE + 1; /* one more than the ring holds */
+    for (int i = 0; i < total; i++) {
+        TEST_ASSERT_EQUAL_INT(TP_C0_PACK_STARTED, tp_c0_pack_super_request(&s, hn(i)));
+        TEST_ASSERT_EQUAL_INT(TP_C0_PACK_BECAME_PREVIEW, tp_c0_pack_super_complete(&s));
+    }
+    tp_c0_id128 newest = hn(total - 1);
+    TEST_ASSERT_TRUE(tp_c0_id128_eq(s.preview_hash, newest));
+    TEST_ASSERT_TRUE(tp_c0_pack_super_in_cache(&s, newest));                 /* still a member */
+    TEST_ASSERT_EQUAL_INT(TP_C0_PACK_SELECTED, tp_c0_pack_super_select(&s, newest)); /* selectable */
+    TEST_ASSERT_FALSE(tp_c0_pack_super_in_cache(&s, hn(0)));                 /* oldest fell out */
+}
+
 /* complete() with no running job is a no-op, not an abort. */
 void test_complete_noop_when_idle(void) {
     tp_c0_pack_super s;
@@ -204,6 +231,7 @@ int main(void) {
     RUN_TEST(test_transfer_drops_running_and_pending);
     RUN_TEST(test_explicit_selection_is_sticky);
     RUN_TEST(test_freshness);
+    RUN_TEST(test_done_ring_keeps_newest_preview);
     RUN_TEST(test_complete_noop_when_idle);
     return UNITY_END();
 }

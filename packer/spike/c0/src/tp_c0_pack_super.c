@@ -36,15 +36,28 @@ static bool done_has(const tp_c0_pack_super *s, tp_c0_id128 hash) {
     return false;
 }
 
+/* The current preview is ALWAYS an available cache member, even if the fixed done
+ * ring has since evicted its hash -- the displayed result must stay selectable. */
+static bool cache_has(const tp_c0_pack_super *s, tp_c0_id128 hash) {
+    if (s->has_preview && tp_c0_id128_eq(s->preview_hash, hash)) {
+        return true;
+    }
+    return done_has(s, hash);
+}
+
 static void done_add(tp_c0_pack_super *s, tp_c0_id128 hash) {
     if (done_has(s, hash)) {
         return; /* content-addressed: identical result is one cache entry */
     }
     if (s->done_count < TP_C0_PACK_SUPER_MAX_DONE) {
         s->done[s->done_count++] = hash;
+        return;
     }
-    /* Overflow silently drops from the membership view (spike cap); the real
-     * cache (task 4) evicts by LRU/budget instead. */
+    /* Full: overwrite the OLDEST entry (ring), so the newest result -- the current
+     * preview -- is always a member. Maps to the real LRU/budget cache (task 4)
+     * which evicts oldest/coldest rather than dropping the newest (spike cap). */
+    s->done[s->done_head] = hash;
+    s->done_head = (s->done_head + 1) % TP_C0_PACK_SUPER_MAX_DONE;
 }
 
 tp_c0_pack_outcome tp_c0_pack_super_request(tp_c0_pack_super *s, tp_c0_id128 input_hash) {
@@ -108,7 +121,7 @@ tp_c0_pack_outcome tp_c0_pack_super_select(tp_c0_pack_super *s, tp_c0_id128 hash
     if (!s) {
         return TP_C0_PACK_NOOP;
     }
-    if (!done_has(s, hash)) {
+    if (!cache_has(s, hash)) {
         /* Cache miss: preview left unchanged (out of date); no auto-pack. */
         return TP_C0_PACK_MISS;
     }
@@ -136,4 +149,4 @@ bool tp_c0_pack_super_is_fresh(const tp_c0_pack_super *s, tp_c0_id128 current_ha
     return s && s->has_preview && tp_c0_id128_eq(s->preview_hash, current_hash);
 }
 
-bool tp_c0_pack_super_in_cache(const tp_c0_pack_super *s, tp_c0_id128 hash) { return s && done_has(s, hash); }
+bool tp_c0_pack_super_in_cache(const tp_c0_pack_super *s, tp_c0_id128 hash) { return s && cache_has(s, hash); }
