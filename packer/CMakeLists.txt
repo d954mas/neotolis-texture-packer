@@ -62,5 +62,12 @@ target_compile_options(tp_build PRIVATE -U_DLL)   # static CRT: match nt_builder
 nt_set_warning_flags(tp_build)
 nt_set_sanitizer_flags(tp_build)
 
+# Vendored utf8proc (Unicode NFC + case-fold) and the C0-01 contract-spike
+# primitives (tp_c0). tp_c0 depends on tp_core's interface includes + utf8proc,
+# so both are added after the tp_core target above. Spike-only: not linked into
+# tp_core/tp_build/apps, no on-disk schema change.
+add_subdirectory(deps/utf8proc)
+add_subdirectory(spike/c0)
+
 enable_testing()
 add_subdirectory(tests)
