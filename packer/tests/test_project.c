@@ -636,6 +636,72 @@ void test_source_kind_roundtrip(void) {
     tp_project_destroy(p);
 }
 
+/* 9c (F1-02 Fix A). A hand-written/corrupt v3 file that lists the same path twice
+ * (two source objects with distinct valid ids) loads with the duplicate collapsed
+ * to the FIRST object -- else `pack` (which does NOT run validate) would scan the
+ * folder twice and double every sprite. The later object's id is dropped. */
+void test_v3_source_dup_collapse(void) {
+    /* 32-hex ids written as 4x8 concatenated literals so the length is self-evident. */
+    static const char v3_dup[] =
+        "{\n"
+        "  \"version\": 3,\n"
+        "  \"atlases\": [\n"
+        "    {\n"
+        "      \"name\": \"a1\",\n"
+        "      \"id\": \"atlas_"
+        "00000000"
+        "00000000"
+        "00000000"
+        "00000abc"
+        "\",\n"
+        "      \"sources\": [\n"
+        "        { \"id\": \"source_"
+        "00000000"
+        "00000000"
+        "00000000"
+        "00000001"
+        "\", \"path\": \"dup/path\" },\n"
+        "        { \"id\": \"source_"
+        "00000000"
+        "00000000"
+        "00000000"
+        "00000002"
+        "\", \"path\": \"dup/path\" }\n"
+        "      ]\n"
+        "    }\n"
+        "  ]\n"
+        "}\n";
+    tp_project *p = NULL;
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, tp_project_load_buffer(v3_dup, sizeof v3_dup - 1U, &p, &err), err.msg);
+    tp_project_atlas *a = tp_project_get_atlas(p, 0);
+    TEST_ASSERT_EQUAL_INT(1, a->source_count); /* duplicate path collapsed */
+    TEST_ASSERT_EQUAL_STRING("dup/path", a->sources[0].path);
+
+    /* The FIRST object survives; the later object's id is dropped. */
+    tp_id_kind k = TP_ID_KIND_INVALID;
+    tp_id128 id1;
+    tp_id128 id2;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_id_parse("source_"
+                                      "00000000"
+                                      "00000000"
+                                      "00000000"
+                                      "00000001",
+                                      &k, &id1, NULL));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_id_parse("source_"
+                                      "00000000"
+                                      "00000000"
+                                      "00000000"
+                                      "00000002",
+                                      &k, &id2, NULL));
+    TEST_ASSERT_TRUE(tp_id128_eq(a->sources[0].id, id1));
+    TEST_ASSERT_FALSE(tp_id128_eq(a->sources[0].id, id2));
+
+    tp_project_destroy(p);
+}
+
 /* 10. sprite rename override: set creates the sparse entry; clear removes it when
  * the entry would then hold only defaults, else keeps it. */
 void test_sprite_rename_override(void) {
@@ -812,6 +878,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_buffer_roundtrip);
     RUN_TEST(test_add_source_dedupe);
     RUN_TEST(test_source_kind_roundtrip);
+    RUN_TEST(test_v3_source_dup_collapse);
     RUN_TEST(test_sprite_rename_override);
     RUN_TEST(test_set_target);
     RUN_TEST(test_sprite_override_sparse);

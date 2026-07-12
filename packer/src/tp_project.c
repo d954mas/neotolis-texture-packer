@@ -338,11 +338,11 @@ void tp_project_destroy(tp_project *p) {
     free(p);
 }
 
-/* Raw append of a fully-formed source record (NO dedupe): the loader uses this to
- * materialize a v3 source object verbatim (its persisted id/kind attach to the new
- * record). `path` is duped. Returns the new index in *out_index (if non-NULL). */
-static tp_status atlas_push_source(tp_project_atlas *a, const char *path, tp_source_kind kind, tp_id128 id,
-                                   int *out_index) {
+/* Raw append of a fully-formed source record (NO dedupe): materializes a source
+ * with its persisted id/kind attached. `path` is duped. Callers that must uphold
+ * the per-atlas "no two identical source paths" invariant dedupe via
+ * atlas_has_source_path FIRST (every add path and the v3 loader do). */
+static tp_status atlas_push_source(tp_project_atlas *a, const char *path, tp_source_kind kind, tp_id128 id) {
     if (!tp_grow((void **)&a->sources, &a->source_cap, a->source_count + 1, sizeof(tp_project_source))) {
         return TP_STATUS_OOM;
     }
@@ -354,22 +354,20 @@ static tp_status atlas_push_source(tp_project_atlas *a, const char *path, tp_sou
     s->id = id;
     s->kind = kind;
     s->path = copy;
-    if (out_index) {
-        *out_index = a->source_count;
-    }
     a->source_count++;
     return TP_STATUS_OK;
 }
 
-tp_status tp_project_atlas_add_source_kind(tp_project_atlas *a, const char *path, tp_source_kind kind) {
-    if (!a || !path) {
-        return TP_STATUS_INVALID_ARGUMENT;
-    }
-    /* Dedupe: skip the append when the same '/'-normalized path already exists.
-     * An existing duplicate keeps its kind (add is a no-op). */
+/* True when the atlas already holds a source whose '/'-normalized path equals
+ * `path`'s -- the "an atlas never holds two identical source paths" invariant that
+ * both the mutation API and the v3 loader enforce. A path that overflows the
+ * TP_PATH_MAX compare buffer cannot equal a stored (also-capped) path, so it is
+ * treated as absent (the caller then pushes it -- an anomalous over-long path is
+ * never silently merged). */
+static bool atlas_has_source_path(const tp_project_atlas *a, const char *path) {
     char norm[TP_PATH_MAX];
     if ((size_t)snprintf(norm, sizeof norm, "%s", path) >= sizeof norm) {
-        return TP_STATUS_OUT_OF_BOUNDS;
+        return false;
     }
     tp_normalize_slashes(norm);
     for (int i = 0; i < a->source_count; i++) {
@@ -377,10 +375,27 @@ tp_status tp_project_atlas_add_source_kind(tp_project_atlas *a, const char *path
         (void)snprintf(existing, sizeof existing, "%s", a->sources[i].path);
         tp_normalize_slashes(existing);
         if (strcmp(existing, norm) == 0) {
-            return TP_STATUS_OK; /* already added -- no-op */
+            return true;
         }
     }
-    return atlas_push_source(a, path, kind, tp_id128_nil(), NULL);
+    return false;
+}
+
+tp_status tp_project_atlas_add_source_kind(tp_project_atlas *a, const char *path, tp_source_kind kind) {
+    if (!a || !path) {
+        return TP_STATUS_INVALID_ARGUMENT;
+    }
+    /* The mutation API rejects a path that cannot round-trip the dedupe buffer
+     * (stricter than the loader, which tolerates an anomalous file). */
+    char norm[TP_PATH_MAX];
+    if ((size_t)snprintf(norm, sizeof norm, "%s", path) >= sizeof norm) {
+        return TP_STATUS_OUT_OF_BOUNDS;
+    }
+    /* Dedupe: an exact ('/'-normalized) duplicate is an OK no-op (keeps its kind). */
+    if (atlas_has_source_path(a, path)) {
+        return TP_STATUS_OK;
+    }
+    return atlas_push_source(a, path, kind, tp_id128_nil());
 }
 
 tp_status tp_project_atlas_add_source(tp_project_atlas *a, const char *path) {
@@ -1424,9 +1439,18 @@ static tp_status tp_load_source_kind(const cJSON *jsrc, tp_source_kind *out, tp_
     return TP_STATUS_OK;
 }
 
-/* Load one v3 source object {id, kind?, path} verbatim (no dedupe -- each object is
- * a distinct entity carrying its own id). An absent/nil id reaches
- * tp_project_validate_ids and is rejected (a saved v3 always promotes to non-nil). */
+/* Load one v3 source object {id, kind?, path}. An absent/nil id reaches
+ * tp_project_validate_ids and is rejected (a saved v3 always promotes to non-nil).
+ *
+ * Re-establishes the per-atlas "no two identical source paths" invariant that every
+ * v1/v2 load (via tp_project_atlas_add_source) and the mutation API enforce: a
+ * hand-written or corrupt v3 file could list one folder twice as two objects with
+ * distinct ids, and `pack` -- which does NOT run validate -- would then scan that
+ * folder twice and DOUBLE every sprite. On a duplicate path we collapse to the
+ * first object and DROP the later one (its id and kind included); this restores the
+ * historical self-healing collapse. A migrated v3 file never has duplicate paths
+ * (the v1/v2 load already collapsed them before the v3 save), so only an anomalous
+ * file exercises this. */
 static tp_status tp_load_source_obj(tp_project_atlas *a, const cJSON *jsrc, tp_error *err) {
     if (!cJSON_IsObject(jsrc)) {
         return tp_error_set(err, TP_STATUS_BAD_PROJECT, "source must be an object");
@@ -1444,8 +1468,10 @@ static tp_status tp_load_source_obj(tp_project_atlas *a, const cJSON *jsrc, tp_e
     if ((st = tp_load_id(jsrc, "id", TP_ID_KIND_SOURCE, &id, err)) != TP_STATUS_OK) {
         return st;
     }
-    int idx = 0;
-    st = atlas_push_source(a, jpath->valuestring, kind, id, &idx);
+    if (atlas_has_source_path(a, jpath->valuestring)) {
+        return TP_STATUS_OK; /* duplicate path -- collapse to the first, drop this object */
+    }
+    st = atlas_push_source(a, jpath->valuestring, kind, id);
     if (st != TP_STATUS_OK) {
         return tp_error_set(err, st, "out of memory adding source");
     }
