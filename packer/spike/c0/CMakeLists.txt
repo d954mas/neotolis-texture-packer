@@ -27,6 +27,7 @@ function(tp_c0_add_test name)
     add_executable(${name} tests/${name}.c)
     target_link_libraries(${name} PRIVATE tp_c0 unity)
     target_compile_options(${name} PRIVATE -U_DLL)
+    nt_set_warning_flags(${name})   # AGENTS.md invariant: our test TUs too
     add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
