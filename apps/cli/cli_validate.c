@@ -194,13 +194,14 @@ static void validate_atlas(cli_findings *fs, tp_project *p, int ai) {
 
     /* (a) missing sources -- walk per-source so the finding names the offender. */
     for (int s = 0; s < a->source_count; s++) {
+        const char *sp = a->sources[s].path;
         char abs[512];
-        if (tp_project_resolve_path(p, a->sources[s], abs, sizeof abs) != TP_STATUS_OK) {
+        if (tp_project_resolve_path(p, sp, abs, sizeof abs) != TP_STATUS_OK) {
             add_finding(fs, SEV_ERR, "missing_source", a->name, NULL, NULL, NULL, NULL,
-                        "source '%s' cannot be resolved to an absolute path", a->sources[s]);
+                        "source '%s' cannot be resolved to an absolute path", sp);
         } else if (!tp_scan_exists(abs)) {
             add_finding(fs, SEV_ERR, "missing_source", a->name, NULL, NULL, NULL, NULL,
-                        "source '%s' does not exist on disk", a->sources[s]);
+                        "source '%s' does not exist on disk", sp);
         }
     }
 

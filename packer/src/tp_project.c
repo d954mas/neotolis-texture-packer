@@ -272,7 +272,7 @@ static void tp_free_anim(tp_project_anim *an) {
 
 static void tp_free_atlas(tp_project_atlas *a) {
     for (int i = 0; i < a->source_count; i++) {
-        free(a->sources[i]);
+        free(a->sources[i].path);
     }
     free(a->sources);
     for (int i = 0; i < a->sprite_count; i++) {
@@ -338,11 +338,35 @@ void tp_project_destroy(tp_project *p) {
     free(p);
 }
 
-tp_status tp_project_atlas_add_source(tp_project_atlas *a, const char *path) {
+/* Raw append of a fully-formed source record (NO dedupe): the loader uses this to
+ * materialize a v3 source object verbatim (its persisted id/kind attach to the new
+ * record). `path` is duped. Returns the new index in *out_index (if non-NULL). */
+static tp_status atlas_push_source(tp_project_atlas *a, const char *path, tp_source_kind kind, tp_id128 id,
+                                   int *out_index) {
+    if (!tp_grow((void **)&a->sources, &a->source_cap, a->source_count + 1, sizeof(tp_project_source))) {
+        return TP_STATUS_OOM;
+    }
+    char *copy = tp_strdup(path);
+    if (!copy) {
+        return TP_STATUS_OOM;
+    }
+    tp_project_source *s = &a->sources[a->source_count];
+    s->id = id;
+    s->kind = kind;
+    s->path = copy;
+    if (out_index) {
+        *out_index = a->source_count;
+    }
+    a->source_count++;
+    return TP_STATUS_OK;
+}
+
+tp_status tp_project_atlas_add_source_kind(tp_project_atlas *a, const char *path, tp_source_kind kind) {
     if (!a || !path) {
         return TP_STATUS_INVALID_ARGUMENT;
     }
-    /* Dedupe: skip the append when the same '/'-normalized path already exists. */
+    /* Dedupe: skip the append when the same '/'-normalized path already exists.
+     * An existing duplicate keeps its kind (add is a no-op). */
     char norm[TP_PATH_MAX];
     if ((size_t)snprintf(norm, sizeof norm, "%s", path) >= sizeof norm) {
         return TP_STATUS_OUT_OF_BOUNDS;
@@ -350,21 +374,17 @@ tp_status tp_project_atlas_add_source(tp_project_atlas *a, const char *path) {
     tp_normalize_slashes(norm);
     for (int i = 0; i < a->source_count; i++) {
         char existing[TP_PATH_MAX];
-        (void)snprintf(existing, sizeof existing, "%s", a->sources[i]);
+        (void)snprintf(existing, sizeof existing, "%s", a->sources[i].path);
         tp_normalize_slashes(existing);
         if (strcmp(existing, norm) == 0) {
             return TP_STATUS_OK; /* already added -- no-op */
         }
     }
-    if (!tp_grow((void **)&a->sources, &a->source_cap, a->source_count + 1, sizeof(char *))) {
-        return TP_STATUS_OOM;
-    }
-    char *copy = tp_strdup(path);
-    if (!copy) {
-        return TP_STATUS_OOM;
-    }
-    a->sources[a->source_count++] = copy;
-    return TP_STATUS_OK;
+    return atlas_push_source(a, path, kind, tp_id128_nil(), NULL);
+}
+
+tp_status tp_project_atlas_add_source(tp_project_atlas *a, const char *path) {
+    return tp_project_atlas_add_source_kind(a, path, TP_SOURCE_KIND_FOLDER);
 }
 
 tp_status tp_project_atlas_remove_source(tp_project_atlas *a, int index) {
@@ -374,12 +394,36 @@ tp_status tp_project_atlas_remove_source(tp_project_atlas *a, int index) {
     if (index < 0 || index >= a->source_count) {
         return TP_STATUS_OUT_OF_BOUNDS;
     }
-    free(a->sources[index]);
+    free(a->sources[index].path);
     for (int i = index; i < a->source_count - 1; i++) {
         a->sources[i] = a->sources[i + 1];
     }
     a->source_count--;
     return TP_STATUS_OK;
+}
+
+tp_project_source *tp_project_atlas_find_source_by_id(tp_project_atlas *a, tp_id128 id) {
+    if (!a || tp_id128_is_nil(id)) {
+        return NULL;
+    }
+    for (int i = 0; i < a->source_count; i++) {
+        if (tp_id128_eq(a->sources[i].id, id)) {
+            return &a->sources[i];
+        }
+    }
+    return NULL;
+}
+
+tp_status tp_project_atlas_remove_source_by_id(tp_project_atlas *a, tp_id128 id) {
+    if (!a || tp_id128_is_nil(id)) {
+        return TP_STATUS_OUT_OF_BOUNDS;
+    }
+    for (int i = 0; i < a->source_count; i++) {
+        if (tp_id128_eq(a->sources[i].id, id)) {
+            return tp_project_atlas_remove_source(a, i);
+        }
+    }
+    return TP_STATUS_OUT_OF_BOUNDS;
 }
 
 tp_project_sprite *tp_project_atlas_find_sprite(tp_project_atlas *a, const char *name) {
@@ -898,6 +942,35 @@ static void tp_emit_target(tp_sb *sb, int depth, const tp_project_target *t) {
     tp_sb_char(sb, '}');
 }
 
+/* Stable machine token per source kind (schema v3). "folder" is the omitted sparse
+ * default; only "file" is written. APPEND-ONLY -- a new kind adds a token, never
+ * renames one (the token is an on-disk contract, pinned by the round-trip tests). */
+static const char *tp_source_kind_token(tp_source_kind kind) {
+    switch (kind) {
+        case TP_SOURCE_KIND_FOLDER: return "folder";
+        case TP_SOURCE_KIND_FILE: return "file";
+    }
+    return "folder"; /* defensive: an unknown value serializes as the default */
+}
+
+/* One tagged source object: keys ascending ASCII (id, [kind], path). `id` is always
+ * written (same discipline as atlas/anim/target); `kind` is sparse (folder omitted). */
+static void tp_emit_source(tp_sb *sb, int depth, const tp_project_source *s) {
+    tp_sb_char(sb, '{');
+    bool first = true;
+    tp_obj_key(sb, depth + 1, &first, "id"); /* structural shape-ID (persistent, always written) */
+    tp_emit_id(sb, TP_ID_KIND_SOURCE, s->id);
+    if (s->kind != TP_SOURCE_KIND_FOLDER) { /* sparse: folder is the default */
+        tp_obj_key(sb, depth + 1, &first, "kind");
+        tp_sb_json_string(sb, tp_source_kind_token(s->kind));
+    }
+    tp_obj_key(sb, depth + 1, &first, "path");
+    tp_sb_json_string(sb, s->path);
+    tp_sb_str(sb, "\n");
+    tp_sb_indent(sb, depth);
+    tp_sb_char(sb, '}');
+}
+
 static void tp_emit_atlas(tp_sb *sb, int depth, const tp_project_atlas *a, const tp_pack_settings *d) {
     tp_sb_char(sb, '{');
     bool first = true;
@@ -959,7 +1032,15 @@ static void tp_emit_atlas(tp_sb *sb, int depth, const tp_project_atlas *a, const
     }
     if (a->source_count > 0) {
         tp_obj_key(sb, depth + 1, &first, "sources");
-        tp_emit_string_array(sb, depth + 1, a->sources, a->source_count);
+        tp_sb_char(sb, '[');
+        for (int i = 0; i < a->source_count; i++) {
+            tp_sb_str(sb, i == 0 ? "\n" : ",\n");
+            tp_sb_indent(sb, depth + 2);
+            tp_emit_source(sb, depth + 2, &a->sources[i]);
+        }
+        tp_sb_str(sb, "\n");
+        tp_sb_indent(sb, depth + 1);
+        tp_sb_char(sb, ']');
     }
     if (a->sprite_count > 0) {
         tp_obj_key(sb, depth + 1, &first, "sprites");
@@ -1057,7 +1138,7 @@ tp_status tp_project_save(tp_project *p, const char *path, tp_error *err) {
         tp_project_atlas *a = &p->atlases[ai];
         for (int si = 0; si < a->source_count; si++) {
             char norm[TP_PATH_MAX];
-            if ((size_t)snprintf(norm, sizeof norm, "%s", a->sources[si]) >= sizeof norm) {
+            if ((size_t)snprintf(norm, sizeof norm, "%s", a->sources[si].path) >= sizeof norm) {
                 return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "tp_project_save: source path too long");
             }
             tp_normalize_slashes(norm);
@@ -1074,8 +1155,8 @@ tp_status tp_project_save(tp_project *p, const char *path, tp_error *err) {
             if (!copy) {
                 return tp_error_set(err, TP_STATUS_OOM, "tp_project_save: out of memory");
             }
-            free(a->sources[si]);
-            a->sources[si] = copy;
+            free(a->sources[si].path);
+            a->sources[si].path = copy;
         }
     }
 
@@ -1320,7 +1401,57 @@ static tp_status tp_load_target(tp_project_atlas *a, const cJSON *jt, bool v2, t
     return tp_opt_bool(jt, "enabled", &t->enabled, err);
 }
 
-static tp_status tp_load_atlas(tp_project *p, const cJSON *jatlas, bool v2, tp_error *err) {
+/* Parse a source "kind" string token (schema v3) into *out. Absent -> folder (the
+ * default). An unknown token is BAD_PROJECT: within a v3 file only folder/file are
+ * valid (a future kind arrives with a schema bump, rejected by version gate). */
+static tp_status tp_load_source_kind(const cJSON *jsrc, tp_source_kind *out, tp_error *err) {
+    *out = TP_SOURCE_KIND_FOLDER;
+    const cJSON *k = cJSON_GetObjectItemCaseSensitive(jsrc, "kind");
+    if (!k) {
+        return TP_STATUS_OK; /* absent -> folder default */
+    }
+    if (!cJSON_IsString(k) || !k->valuestring) {
+        return tp_error_set(err, TP_STATUS_BAD_PROJECT, "source 'kind' must be a string");
+    }
+    if (strcmp(k->valuestring, "folder") == 0) {
+        *out = TP_SOURCE_KIND_FOLDER;
+    } else if (strcmp(k->valuestring, "file") == 0) {
+        *out = TP_SOURCE_KIND_FILE;
+    } else {
+        return tp_error_set(err, TP_STATUS_BAD_PROJECT, "unknown source kind '%s'", k->valuestring);
+    }
+    return TP_STATUS_OK;
+}
+
+/* Load one v3 source object {id, kind?, path} verbatim (no dedupe -- each object is
+ * a distinct entity carrying its own id). An absent/nil id reaches
+ * tp_project_validate_ids and is rejected (a saved v3 always promotes to non-nil). */
+static tp_status tp_load_source_obj(tp_project_atlas *a, const cJSON *jsrc, tp_error *err) {
+    if (!cJSON_IsObject(jsrc)) {
+        return tp_error_set(err, TP_STATUS_BAD_PROJECT, "source must be an object");
+    }
+    const cJSON *jpath = cJSON_GetObjectItemCaseSensitive(jsrc, "path");
+    if (!cJSON_IsString(jpath) || !jpath->valuestring) {
+        return tp_error_set(err, TP_STATUS_BAD_PROJECT, "source missing string 'path'");
+    }
+    tp_source_kind kind = TP_SOURCE_KIND_FOLDER;
+    tp_status st = tp_load_source_kind(jsrc, &kind, err);
+    if (st != TP_STATUS_OK) {
+        return st;
+    }
+    tp_id128 id = tp_id128_nil();
+    if ((st = tp_load_id(jsrc, "id", TP_ID_KIND_SOURCE, &id, err)) != TP_STATUS_OK) {
+        return st;
+    }
+    int idx = 0;
+    st = atlas_push_source(a, jpath->valuestring, kind, id, &idx);
+    if (st != TP_STATUS_OK) {
+        return tp_error_set(err, st, "out of memory adding source");
+    }
+    return TP_STATUS_OK;
+}
+
+static tp_status tp_load_atlas(tp_project *p, const cJSON *jatlas, bool v2, bool v3, tp_error *err) {
     if (!cJSON_IsObject(jatlas)) {
         return tp_error_set(err, TP_STATUS_BAD_PROJECT, "atlas must be an object");
     }
@@ -1358,12 +1489,21 @@ static tp_status tp_load_atlas(tp_project *p, const cJSON *jatlas, bool v2, tp_e
         }
         const cJSON *src = NULL;
         cJSON_ArrayForEach(src, sources) {
-            if (!cJSON_IsString(src) || !src->valuestring) {
-                return tp_error_set(err, TP_STATUS_BAD_PROJECT, "source path must be a string");
-            }
-            st = tp_project_atlas_add_source(a, src->valuestring);
-            if (st != TP_STATUS_OK) {
-                return tp_error_set(err, st, "out of memory adding source");
+            if (v3) {
+                /* v3: each source is a tagged object {id, kind?, path}. */
+                if ((st = tp_load_source_obj(a, src, err)) != TP_STATUS_OK) {
+                    return st;
+                }
+            } else {
+                /* v1/v2: a bare path string -> tagged record, kind=folder (decision
+                 * 0008), id nil (synthesized post-parse by legacy migration). */
+                if (!cJSON_IsString(src) || !src->valuestring) {
+                    return tp_error_set(err, TP_STATUS_BAD_PROJECT, "source path must be a string");
+                }
+                st = tp_project_atlas_add_source(a, src->valuestring);
+                if (st != TP_STATUS_OK) {
+                    return tp_error_set(err, st, "out of memory adding source");
+                }
             }
         }
     }
@@ -1423,6 +1563,15 @@ static tp_status tp_migrate(int from_version, tp_error *err) {
                  * post-parse legacy-synthesis pass assigns deterministic IDs.
                  * Nothing to rewrite in the parsed cJSON tree here. */
                 v = 2;
+                break;
+            case 2:
+                /* v2 -> v3: `sources` becomes an array of tagged objects {id, kind,
+                 * path}. A v2 file stores bare path strings; the model-level loader
+                 * reads that shape (via the v3==false path) as kind=folder records
+                 * with nil ids, and the post-parse legacy-synthesis pass assigns
+                 * deterministic SOURCE ids only (atlas/anim/target keep their v2
+                 * ids). Nothing to rewrite in the parsed cJSON tree here. */
+                v = 3;
                 break;
             /* case N: migrate N -> N+1 in the parsed tree; v = N+1; break; */
             default:
@@ -1506,8 +1655,10 @@ static tp_status tp_project_parse(const char *text, size_t len, tp_project **out
     }
 
     /* v2+ entities carry shape-IDs (atlas/anim `id` = structural id, `name` =
-     * logical). A v1 file has none and stores the anim's logical name under "id". */
+     * logical). A v1 file has none and stores the anim's logical name under "id".
+     * v3+ stores `sources` as tagged objects; v1/v2 store bare path strings. */
     const bool v2 = (file_version >= 2);
+    const bool v3 = (file_version >= 3);
 
     const cJSON *atlases = cJSON_GetObjectItemCaseSensitive(root, "atlases");
     if (atlases) {
@@ -1517,23 +1668,32 @@ static tp_status tp_project_parse(const char *text, size_t len, tp_project **out
         }
         const cJSON *ja = NULL;
         cJSON_ArrayForEach(ja, atlases) {
-            status = tp_load_atlas(p, ja, v2, err);
+            status = tp_load_atlas(p, ja, v2, v3, err);
             if (status != TP_STATUS_OK) {
                 goto done;
             }
         }
     }
 
-    /* Resolve structural IDs. ONLY a v1 (id-less) file gets deterministic legacy
-     * synthesis: repeated read-only loads then see stable IDs (master spec §5.5),
-     * and a writable session later replaces nils via tp_project_promote_ids (a
-     * no-op once every ID is non-nil, so it never re-changes a loaded ID). A v2
-     * file is NOT synthesized: a properly-saved v2 always carries non-nil IDs
-     * (promote guarantees it), so a nil/missing structural id is a genuine anomaly
-     * that must fail loud -- it reaches tp_project_validate_ids and is rejected
-     * TP_STATUS_ID_MALFORMED (ADR 0007 point 4), never silently repaired. */
+    /* Resolve structural IDs. Deterministic legacy synthesis fills the ids that a
+     * given schema version genuinely lacks; repeated read-only loads then see
+     * stable IDs (master spec §5.5), and a writable session later replaces nils via
+     * tp_project_promote_ids (a no-op once every ID is non-nil, so it never
+     * re-changes a loaded ID). A nil id that is NOT a legacy gap is a genuine
+     * anomaly that must fail loud -- it reaches tp_project_validate_ids and is
+     * rejected TP_STATUS_ID_MALFORMED (ADR 0007 point 4 / decision 0008), never
+     * silently repaired.
+     *   - v1: NO ids at all -> synthesize atlas/anim/target/source.
+     *   - v2: only SOURCES lack ids (v2 had no source ids) -> synthesize sources
+     *     ONLY; a nil atlas/anim/target id stays an anomaly and fails validate.
+     *   - v3: everything carries ids -> synthesize nothing. */
     if (!v2) {
         status = tp_project_assign_legacy_ids(p, err);
+        if (status != TP_STATUS_OK) {
+            goto done;
+        }
+    } else if (!v3) {
+        status = tp_project_assign_legacy_source_ids(p, err);
         if (status != TP_STATUS_OK) {
             goto done;
         }

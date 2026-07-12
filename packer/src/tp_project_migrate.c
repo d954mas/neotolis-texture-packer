@@ -160,15 +160,25 @@ tp_status tp_legacy_assign(tp_legacy_entry *entries, size_t n, tp_legacy_hash_fn
 /* project-level identity migration / promotion                             */
 /* ======================================================================== */
 
-/* Count the structural IDs (atlas + animation + target) whose value is nil.
- * The nested iteration order (atlas, then its anims, then its targets) is the
- * SINGLE canonical order every pass below reuses. */
-static size_t count_nil_ids(const tp_project *p) {
+/* Count nil structural IDs. The nested iteration order (atlas, then its SOURCES,
+ * then its anims, then its targets) is the SINGLE canonical order every pass below
+ * reuses. `sources_only` restricts the count (and, in the assigner, the synthesis)
+ * to source ids -- the v2->v3 migration path, where atlas/anim/target already carry
+ * ids and a nil among them must stay an anomaly (decision 0008). */
+static size_t count_nil_ids(const tp_project *p, bool sources_only) {
     size_t n = 0;
     for (int ai = 0; ai < p->atlas_count; ai++) {
         const tp_project_atlas *a = &p->atlases[ai];
-        if (tp_id128_is_nil(a->id)) {
+        if (!sources_only && tp_id128_is_nil(a->id)) {
             n++;
+        }
+        for (int i = 0; i < a->source_count; i++) {
+            if (tp_id128_is_nil(a->sources[i].id)) {
+                n++;
+            }
+        }
+        if (sources_only) {
+            continue;
         }
         for (int i = 0; i < a->animation_count; i++) {
             if (tp_id128_is_nil(a->animations[i].id)) {
@@ -204,34 +214,45 @@ static char *tuple_fmt(const char *fmt, ...) {
     return s;
 }
 
-tp_status tp_project_assign_legacy_ids(tp_project *p, tp_error *err) {
-    if (!p) {
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_project_assign_legacy_ids: NULL project");
-    }
-    size_t n = count_nil_ids(p);
+/* Shared implementation for the v1 (all-kinds) and v2->v3 (sources-only) legacy
+ * synthesis. Builds discriminator tuples in the canonical order (atlas, sources,
+ * anims, targets), assigns deterministic unique ids, and commits them. Tuples must
+ * be stable across loads of the same file (position + stable fields). */
+static tp_status assign_legacy_scoped(tp_project *p, bool sources_only, const char *who, tp_error *err) {
+    size_t n = count_nil_ids(p, sources_only);
     if (n == 0) {
-        return TP_STATUS_OK; /* every entity already carries an ID */
+        return TP_STATUS_OK; /* every entity in scope already carries an ID */
     }
     tp_legacy_entry *entries = (tp_legacy_entry *)calloc(n, sizeof *entries);
     tp_id128 **slots = (tp_id128 **)calloc(n, sizeof *slots); /* where each synthetic ID lands */
     if (!entries || !slots) {
         free(entries);
         free(slots);
-        return tp_error_set(err, TP_STATUS_OOM, "tp_project_assign_legacy_ids: out of memory");
+        return tp_error_set(err, TP_STATUS_OOM, "%s: out of memory", who);
     }
 
-    /* Build the legacy discriminator tuples in canonical order. Tuples must be
-     * stable across loads of the same file (position + stable fields). */
     size_t k = 0;
     bool oom = false;
     for (int ai = 0; ai < p->atlas_count && !oom; ai++) {
         tp_project_atlas *a = &p->atlases[ai];
-        if (tp_id128_is_nil(a->id)) {
+        if (!sources_only && tp_id128_is_nil(a->id)) {
             entries[k].kind = TP_ID_KIND_ATLAS;
             entries[k].tuple = tuple_fmt("%d", ai);
             slots[k] = &a->id;
             oom = (entries[k].tuple == NULL);
             k++;
+        }
+        for (int i = 0; i < a->source_count && !oom; i++) {
+            if (tp_id128_is_nil(a->sources[i].id)) {
+                entries[k].kind = TP_ID_KIND_SOURCE;
+                entries[k].tuple = tuple_fmt("%d|%s", ai, a->sources[i].path ? a->sources[i].path : "");
+                slots[k] = &a->sources[i].id;
+                oom = (entries[k].tuple == NULL);
+                k++;
+            }
+        }
+        if (sources_only) {
+            continue;
         }
         for (int i = 0; i < a->animation_count && !oom; i++) {
             if (tp_id128_is_nil(a->animations[i].id)) {
@@ -254,7 +275,7 @@ tp_status tp_project_assign_legacy_ids(tp_project *p, tp_error *err) {
         }
     }
 
-    tp_status st = oom ? tp_error_set(err, TP_STATUS_OOM, "tp_project_assign_legacy_ids: out of memory")
+    tp_status st = oom ? tp_error_set(err, TP_STATUS_OOM, "%s: out of memory", who)
                        : tp_legacy_assign(entries, n, NULL, NULL, err);
     if (st == TP_STATUS_OK) {
         for (size_t i = 0; i < n; i++) {
@@ -269,11 +290,25 @@ tp_status tp_project_assign_legacy_ids(tp_project *p, tp_error *err) {
     return st;
 }
 
+tp_status tp_project_assign_legacy_ids(tp_project *p, tp_error *err) {
+    if (!p) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_project_assign_legacy_ids: NULL project");
+    }
+    return assign_legacy_scoped(p, false, "tp_project_assign_legacy_ids", err);
+}
+
+tp_status tp_project_assign_legacy_source_ids(tp_project *p, tp_error *err) {
+    if (!p) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_project_assign_legacy_source_ids: NULL project");
+    }
+    return assign_legacy_scoped(p, true, "tp_project_assign_legacy_source_ids", err);
+}
+
 tp_status tp_project_promote_ids(tp_project *p, const tp_rng *rng, tp_error *err) {
     if (!p) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_project_promote_ids: NULL project");
     }
-    size_t n = count_nil_ids(p);
+    size_t n = count_nil_ids(p, false);
     if (n == 0) {
         return TP_STATUS_OK; /* idempotent: nothing to promote -> never re-change an ID */
     }
@@ -290,12 +325,18 @@ tp_status tp_project_promote_ids(tp_project *p, const tp_rng *rng, tp_error *err
             return st; /* every model ID unchanged */
         }
     }
-    /* Commit in the same canonical order count_nil_ids walked. */
+    /* Commit in the same canonical order count_nil_ids walked (atlas, sources,
+     * anims, targets). */
     size_t k = 0;
     for (int ai = 0; ai < p->atlas_count; ai++) {
         tp_project_atlas *a = &p->atlases[ai];
         if (tp_id128_is_nil(a->id)) {
             a->id = staged[k++];
+        }
+        for (int i = 0; i < a->source_count; i++) {
+            if (tp_id128_is_nil(a->sources[i].id)) {
+                a->sources[i].id = staged[k++];
+            }
         }
         for (int i = 0; i < a->animation_count; i++) {
             if (tp_id128_is_nil(a->animations[i].id)) {
@@ -327,7 +368,8 @@ tp_status tp_project_validate_ids(const tp_project *p, tp_error *err) {
 
     size_t total = 0;
     for (int ai = 0; ai < p->atlas_count; ai++) {
-        total += 1U + (size_t)p->atlases[ai].animation_count + (size_t)p->atlases[ai].target_count;
+        total += 1U + (size_t)p->atlases[ai].source_count + (size_t)p->atlases[ai].animation_count +
+                 (size_t)p->atlases[ai].target_count;
     }
     if (total == 0) {
         return TP_STATUS_OK;
@@ -349,6 +391,19 @@ tp_status tp_project_validate_ids(const tp_project *p, tp_error *err) {
         refs[n].id = a->id;
         refs[n].label = a->name ? a->name : "atlas";
         n++;
+        for (int i = 0; i < a->source_count; i++) {
+            if (tp_id128_is_nil(a->sources[i].id)) {
+                st = tp_error_set(err, TP_STATUS_ID_MALFORMED, "source '%s' has a nil structural id",
+                                  a->sources[i].path ? a->sources[i].path : "");
+                break;
+            }
+            refs[n].id = a->sources[i].id;
+            refs[n].label = a->sources[i].path ? a->sources[i].path : "source";
+            n++;
+        }
+        if (st != TP_STATUS_OK) {
+            break;
+        }
         for (int i = 0; i < a->animation_count; i++) {
             if (tp_id128_is_nil(a->animations[i].id)) {
                 st = tp_error_set(err, TP_STATUS_ID_MALFORMED, "animation '%s' has a nil structural id",

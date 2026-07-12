@@ -68,6 +68,13 @@ tp_status tp_legacy_assign(tp_legacy_entry *entries, size_t n, tp_legacy_hash_fn
  * the default hash. */
 tp_status tp_project_assign_legacy_ids(tp_project *p, tp_error *err);
 
+/* Sources-only variant (F1-02): synthesize deterministic ids for NIL source ids
+ * ONLY, leaving atlas/animation/target ids untouched. Used by the v2->v3 migration
+ * path -- a v2 file already carries atlas/anim/target ids but no source ids, so a
+ * nil atlas/anim/target id there stays a genuine anomaly for validate to reject
+ * (decision 0008). Source tuple = "<atlasIdx>|<path>". Idempotent. */
+tp_status tp_project_assign_legacy_source_ids(tp_project *p, tp_error *err);
+
 /* Writable promotion: fill every NIL structural ID with a fresh RANDOM ID via
  * `rng`, then freeze. ATOMIC -- an RNG fault (TP_STATUS_RNG_FAILED) leaves every
  * ID unchanged. IDEMPOTENT -- once no ID is nil this is a no-op, so a writable

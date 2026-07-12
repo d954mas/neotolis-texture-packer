@@ -414,7 +414,7 @@ static bool source_matches(tp_project *p, const tp_project_atlas *a, const char 
     path_canon(in_abs, in_canon, sizeof in_canon);
     for (int i = 0; i < a->source_count; i++) {
         char stored[CLI_PATH_MAX];
-        (void)snprintf(stored, sizeof stored, "%s", a->sources[i]);
+        (void)snprintf(stored, sizeof stored, "%s", a->sources[i].path);
         norm_slashes(stored);
         if (path_eq(stored, in_norm)) { /* exact stored-string match (pasted inspect path) */
             if (out_index) {
@@ -423,7 +423,7 @@ static bool source_matches(tp_project *p, const tp_project_atlas *a, const char 
             return true;
         }
         char abs[CLI_PATH_MAX];
-        if (tp_project_resolve_path(p, a->sources[i], abs, sizeof abs) == TP_STATUS_OK) {
+        if (tp_project_resolve_path(p, a->sources[i].path, abs, sizeof abs) == TP_STATUS_OK) {
             char canon[CLI_PATH_MAX];
             path_canon(abs, canon, sizeof canon); /* collapse project_dir + "../.." to a clean abs */
             if (path_eq(canon, in_canon)) {       /* same on-disk target */

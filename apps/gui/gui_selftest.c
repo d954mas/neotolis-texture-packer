@@ -136,7 +136,7 @@ void run_selftest(void) {
 
     /* --- rename a region (sprite override), verify it is stored on the model --- */
     char folder_abs[512];
-    if (tp_project_resolve_path(gui_project_get(), gui_project_get()->atlases[0].sources[0], folder_abs, sizeof folder_abs) == TP_STATUS_OK) {
+    if (tp_project_resolve_path(gui_project_get(), gui_project_get()->atlases[0].sources[0].path, folder_abs, sizeof folder_abs) == TP_STATUS_OK) {
         const gui_scan_result *sc = gui_scan_get(folder_abs);
         nt_log_info("SELFTEST: folder scan found %d image(s)", sc->count);
         if (sc->count > 0) {
@@ -497,7 +497,7 @@ void run_selftest(void) {
 
         /* per-sprite shape=RECT override -> that region packs as an exact 4-vert rect */
         char afabs[512];
-        if (tp_project_resolve_path(gui_project_get(), gui_project_get()->atlases[0].sources[0], afabs, sizeof afabs) ==
+        if (tp_project_resolve_path(gui_project_get(), gui_project_get()->atlases[0].sources[0].path, afabs, sizeof afabs) ==
             TP_STATUS_OK) {
             const gui_scan_result *sc = gui_scan_get(afabs);
             if (sc->count > 0) {
@@ -651,7 +651,7 @@ void run_selftest(void) {
     const int ns = cur ? cur->atlases[0].source_count : 0;
     if (cur && ns > 0) {
         char resolved[512];
-        if (tp_project_resolve_path(cur, cur->atlases[0].sources[ns - 1], resolved, sizeof resolved) == TP_STATUS_OK) {
+        if (tp_project_resolve_path(cur, cur->atlases[0].sources[ns - 1].path, resolved, sizeof resolved) == TP_STATUS_OK) {
             (void)snprintf(s_sel_abs, sizeof s_sel_abs, "%s", resolved);
             s_sel_atlas = 0;
             s_sel_src = ns - 1;

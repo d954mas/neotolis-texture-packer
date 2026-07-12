@@ -464,7 +464,7 @@ static void declare_region_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
      * smart folder -- name it. The row model already carries src (index into a->sources), so this is free. */
     if (!row->is_source && row->src >= 0 && row->src < a->source_count) {
         char via[224];
-        (void)snprintf(via, sizeof via, "via smart folder %s/", path_last(a->sources[row->src]));
+        (void)snprintf(via, sizeof via, "via smart folder %s/", path_last(a->sources[row->src].path));
         panel_note(ctx, via);
     }
 

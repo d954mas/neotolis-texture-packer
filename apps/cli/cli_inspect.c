@@ -63,11 +63,14 @@ static void emit_settings(cli_sb *sb, int depth, const tp_project_atlas *a) {
     cli_sb_putc(sb, '}');
 }
 
-/* Resolves a source to its abs path + kind (file/dir/missing) for the dump. */
-static void emit_source(cli_sb *sb, int depth, const tp_project *p, const char *src) {
+/* Dumps a tagged source (schema v3): its structural id, project-relative path,
+ * resolved abs path, and the RUNTIME kind (file/dir/missing -- what a scan sees on
+ * disk right now, which may differ from the stored classification for a missing
+ * source). `stored_kind` reports the persisted folder/file classification. */
+static void emit_source(cli_sb *sb, int depth, const tp_project *p, const tp_project_source *s) {
     char abs[512];
     const char *kind;
-    if (tp_project_resolve_path(p, src, abs, sizeof abs) != TP_STATUS_OK) {
+    if (tp_project_resolve_path(p, s->path, abs, sizeof abs) != TP_STATUS_OK) {
         abs[0] = '\0';
         kind = "missing";
     } else if (!tp_scan_exists(abs)) {
@@ -77,13 +80,19 @@ static void emit_source(cli_sb *sb, int depth, const tp_project *p, const char *
     } else {
         kind = "file";
     }
+    char idtext[TP_ID_TEXT_CAP];
+    ntpacker_fmt_shape_id(idtext, sizeof idtext, TP_ID_KIND_SOURCE, s->id);
     bool first = true;
     cli_sb_putc(sb, '{');
+    key(sb, depth + 1, &first, "id"); /* structural shape-ID (persistent) */
+    cli_sb_json_str(sb, idtext);
     key(sb, depth + 1, &first, "path");
-    cli_sb_json_str(sb, src);
+    cli_sb_json_str(sb, s->path);
     key(sb, depth + 1, &first, "abs");
     cli_sb_json_str(sb, abs);
-    key(sb, depth + 1, &first, "kind");
+    key(sb, depth + 1, &first, "stored_kind"); /* persisted folder/file classification */
+    cli_sb_json_str(sb, s->kind == TP_SOURCE_KIND_FILE ? "file" : "folder");
+    key(sb, depth + 1, &first, "kind"); /* runtime disk state: file/dir/missing */
     cli_sb_json_str(sb, kind);
     cli_sb_str(sb, "\n");
     cli_sb_indent(sb, depth);
@@ -231,7 +240,7 @@ static void emit_atlas(cli_sb *sb, int depth, tp_project *p, int ai) {
         for (int i = 0; i < a->source_count; i++) {
             cli_sb_str(sb, i == 0 ? "\n" : ",\n");
             cli_sb_indent(sb, depth + 2);
-            emit_source(sb, depth + 2, p, a->sources[i]);
+            emit_source(sb, depth + 2, p, &a->sources[i]);
         }
         cli_sb_str(sb, "\n");
         cli_sb_indent(sb, depth + 1);

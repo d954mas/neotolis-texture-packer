@@ -40,8 +40,11 @@ struct tp_pack_settings;
 
 /* Bump when the on-disk schema changes; add a migration case in the loader.
  * v2 (F1-01): atlas/animation/target carry a persistent tp_id128 `id`; the
- * animation's old string `id` became its logical `name` (id/name split). */
-#define TP_PROJECT_SCHEMA_VERSION 2
+ * animation's old string `id` became its logical `name` (id/name split).
+ * v3 (F1-02): the bare `sources` string array becomes an array of tagged source
+ * OBJECTS {id, kind, path}; each source carries a persistent tp_id128 `id`.
+ * A v2 bare-string source migrates to kind=folder (decision 0008). */
+#define TP_PROJECT_SCHEMA_VERSION 3
 
 /* Per-sprite override. Sparse: an entry exists only when at least one field is
  * non-default. Defaults: origin (0.5,0.5), slice9 all-zero, rename NULL (see the
@@ -100,6 +103,32 @@ typedef struct tp_project_target {
     bool enabled;
 } tp_project_target;
 
+/* Source kind (schema v3, F1-02). Master spec §11 models a source as
+ * `kind: path | atlas`, where a "path" source is either a scanned folder or a
+ * single image file; this enum makes that file-vs-folder sub-distinction explicit.
+ * APPEND-ONLY (the value is the stored classification): TP_SOURCE_KIND_ATLAS
+ * (foreign atlas descriptor) is reserved for Epic B1. `folder` is the zero/default
+ * value -- a migrated v2 bare-string source and any add_source without a kind
+ * become `folder` (decision 0008). Serialized as a string token ("folder" is the
+ * omitted sparse default; "file" is written). */
+typedef enum tp_source_kind {
+    TP_SOURCE_KIND_FOLDER = 0, /* recursively scanned folder (default) */
+    TP_SOURCE_KIND_FILE = 1    /* single image file */
+    /* TP_SOURCE_KIND_ATLAS = 2  -- reserved for Epic B1; do NOT use before then */
+} tp_source_kind;
+
+/* One tagged source (schema v3): a persistent structural id + its kind + the
+ * folder/file path (project-relative, '/'-normalized; stored verbatim, save
+ * relativizes absolute forms). `id` starts nil until assigned/promoted. Scan
+ * classifies file-vs-folder at runtime by stat, so a stored kind that disagrees
+ * with disk still packs correctly; kind is authoritative only where disk cannot
+ * be consulted (a missing source, for F1-03 sprite-id derivation). */
+typedef struct tp_project_source {
+    tp_id128 id;         /* persistent structural ID (schema v3); nil until assigned/promoted */
+    tp_source_kind kind; /* folder (default) / file */
+    char *path;          /* folder/file path, project-relative, '/'-normalized */
+} tp_project_source;
+
 /* One atlas: packing knobs (mirror tp_pack_settings) + live-linked sources +
  * sparse per-sprite overrides + animations + export targets. All arrays are
  * malloc-owned dynamic vectors; use the helpers below to mutate them. */
@@ -120,7 +149,7 @@ typedef struct tp_project_atlas {
     bool power_of_two;
     float pixels_per_unit;
 
-    char **sources; /* folder/file paths, project-relative, '/'-normalized */
+    tp_project_source *sources; /* tagged source records (schema v3) */
     int source_count;
     int source_cap;
 
@@ -180,14 +209,30 @@ tp_status tp_project_set_atlas_name(tp_project_atlas *a, const char *name);
 
 /* --- source mutation --- */
 
-/* Appends a source path (stored verbatim; save normalizes/relativizes it).
- * Dedupe: a no-op returning TP_STATUS_OK when the same '/'-normalized path is
- * already present in this atlas (source_count is unchanged -- the caller detects
- * the no-op by comparing the count). */
+/* Appends a source path with an explicit `kind` (stored verbatim; save
+ * normalizes/relativizes it; `id` starts nil -- a writable session assigns it via
+ * tp_project_promote_ids). Dedupe: a no-op returning TP_STATUS_OK when the same
+ * '/'-normalized path is already present in this atlas (source_count is unchanged
+ * -- the caller detects the no-op by comparing the count). The kind of an existing
+ * duplicate is NOT changed. Frontends that know the kind (a folder- vs file-picker
+ * dialog) call this; migration and kind-agnostic callers use add_source (folder). */
+tp_status tp_project_atlas_add_source_kind(tp_project_atlas *a, const char *path, tp_source_kind kind);
+
+/* add_source_kind(a, path, TP_SOURCE_KIND_FOLDER): the kind-agnostic default (the
+ * migration default and the safe classification when the caller does not know). */
 tp_status tp_project_atlas_add_source(tp_project_atlas *a, const char *path);
 
 /* Removes source `index`. Out-of-range -> OUT_OF_BOUNDS. */
 tp_status tp_project_atlas_remove_source(tp_project_atlas *a, int index);
+
+/* --- source id addressing (schema v3) --- persistent references target the id,
+ * not the array index (which reorder/remove invalidates; master spec §5.4). */
+
+/* Returns the source whose structural id equals `id`, or NULL if none / nil id. */
+tp_project_source *tp_project_atlas_find_source_by_id(tp_project_atlas *a, tp_id128 id);
+
+/* Removes the source whose structural id equals `id`. Absent / nil -> OUT_OF_BOUNDS. */
+tp_status tp_project_atlas_remove_source_by_id(tp_project_atlas *a, tp_id128 id);
 
 /* --- sprite-override mutation --- */
 

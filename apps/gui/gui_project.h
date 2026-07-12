@@ -96,7 +96,9 @@ unsigned gui_project_model_version(void);
 /* --- mutation wrappers (all funnel through gui_project_touch) --- */
 int gui_project_add_atlas(void);                          /* returns new atlas index, or -1 */
 void gui_project_remove_atlas(int index);
-gui_add_status gui_project_add_source(int atlas_index, const char *path); /* stored verbatim; relativized on save */
+gui_add_status gui_project_add_source(int atlas_index, const char *path); /* stored verbatim; relativized on save; kind=folder */
+/* Kind-aware variant (schema v3): the "Add Files" dialog records TP_SOURCE_KIND_FILE. */
+gui_add_status gui_project_add_source_kind(int atlas_index, const char *path, tp_source_kind kind);
 void gui_project_remove_source(int atlas_index, int source_index);
 
 /* Renames atlas `index` (caller validates non-empty/unique/normalization-safe). */

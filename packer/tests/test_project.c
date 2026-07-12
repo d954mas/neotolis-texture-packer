@@ -156,7 +156,9 @@ static void assert_atlas_equal(const tp_project_atlas *a, const tp_project_atlas
 
     TEST_ASSERT_EQUAL_INT(a->source_count, b->source_count);
     for (int i = 0; i < a->source_count; i++) {
-        TEST_ASSERT_EQUAL_STRING(a->sources[i], b->sources[i]);
+        TEST_ASSERT_EQUAL_STRING(a->sources[i].path, b->sources[i].path);
+        TEST_ASSERT_TRUE(tp_id128_eq(a->sources[i].id, b->sources[i].id)); /* source id survives save/reload */
+        TEST_ASSERT_EQUAL_INT((int)a->sources[i].kind, (int)b->sources[i].kind);
     }
     TEST_ASSERT_EQUAL_INT(a->sprite_count, b->sprite_count);
     for (int i = 0; i < a->sprite_count; i++) {
@@ -282,7 +284,8 @@ void test_sparse_defaults_absent(void) {
     TEST_ASSERT_NULL(strstr(buf, "flip_h"));
     TEST_ASSERT_NULL(strstr(buf, "enabled")); /* target enabled default true */
     /* present, non-default */
-    TEST_ASSERT_NOT_NULL(strstr(buf, "\"version\": 2"));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"version\": 3"));
+    TEST_ASSERT_NULL(strstr(buf, "\"kind\"")); /* source kept the folder default -> kind omitted (sparse) */
     TEST_ASSERT_NOT_NULL(strstr(buf, "origin"));
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"frames\""));
     /* "version" must be the first key */
@@ -315,11 +318,11 @@ void test_determinism(void) {
     tp_project_destroy(p);
 }
 
-/* 4a. newer schema version is refused (schema v2 is current -> use a future v3) */
+/* 4a. newer schema version is refused (schema v3 is current -> use a future v4) */
 void test_version_newer_refused(void) {
     char path[512];
-    join(path, sizeof path, "v3.ntpacker_project");
-    write_text(path, "{\n  \"version\": 3,\n  \"atlases\": []\n}\n");
+    join(path, sizeof path, "v4.ntpacker_project");
+    write_text(path, "{\n  \"version\": 4,\n  \"atlases\": []\n}\n");
 
     tp_project *loaded = NULL;
     tp_error err = {0};
@@ -413,7 +416,7 @@ void test_absolute_path_relativized(void) {
     free(buf);
 
     /* model source is now the relative form */
-    TEST_ASSERT_EQUAL_STRING("art/hero", loaded->atlases[0].sources[0]);
+    TEST_ASSERT_EQUAL_STRING("art/hero", loaded->atlases[0].sources[0].path);
     tp_project_destroy(loaded);
 }
 
@@ -594,6 +597,45 @@ void test_add_source_dedupe(void) {
     tp_project_destroy(p);
 }
 
+/* 9b (F1-02). tagged source round-trip: a folder source (default kind, omitted) and
+ * a file source (kind=file, written) survive save/reload with id + kind intact. */
+void test_source_kind_roundtrip(void) {
+    char path[512];
+    join(path, sizeof path, "srckind.ntpacker_project");
+
+    tp_project *p = tp_project_create();
+    tp_project_atlas *a = tp_project_get_atlas(p, 0);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_source(a, "art/folder"));            /* folder (default) */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_source_kind(a, "art/one.png", TP_SOURCE_KIND_FILE)); /* file */
+    TEST_ASSERT_EQUAL_INT(2, a->source_count);
+    promote(p); /* assign real ids to the fresh sources */
+    TEST_ASSERT_FALSE(tp_id128_is_nil(a->sources[0].id));
+    TEST_ASSERT_FALSE(tp_id128_is_nil(a->sources[1].id));
+
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_save(p, path, &err));
+
+    /* on disk: the file source writes "kind": "file"; the folder source omits kind. */
+    size_t n = 0;
+    char *buf = read_all(path, &n);
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"kind\": \"file\""));
+    TEST_ASSERT_NULL(strstr(buf, "\"kind\": \"folder\"")); /* folder default is sparse */
+    free(buf);
+
+    tp_project *loaded = NULL;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, tp_project_load(path, &loaded, &err), err.msg);
+    tp_project_atlas *la = tp_project_get_atlas(loaded, 0);
+    TEST_ASSERT_EQUAL_INT(2, la->source_count);
+    TEST_ASSERT_EQUAL_INT((int)TP_SOURCE_KIND_FOLDER, (int)la->sources[0].kind);
+    TEST_ASSERT_EQUAL_INT((int)TP_SOURCE_KIND_FILE, (int)la->sources[1].kind);
+    TEST_ASSERT_TRUE(tp_id128_eq(a->sources[0].id, la->sources[0].id)); /* id persisted */
+    TEST_ASSERT_TRUE(tp_id128_eq(a->sources[1].id, la->sources[1].id));
+
+    tp_project_destroy(loaded);
+    tp_project_destroy(p);
+}
+
 /* 10. sprite rename override: set creates the sparse entry; clear removes it when
  * the entry would then hold only defaults, else keeps it. */
 void test_sprite_rename_override(void) {
@@ -769,6 +811,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_anim_frame_edit);
     RUN_TEST(test_buffer_roundtrip);
     RUN_TEST(test_add_source_dedupe);
+    RUN_TEST(test_source_kind_roundtrip);
     RUN_TEST(test_sprite_rename_override);
     RUN_TEST(test_set_target);
     RUN_TEST(test_sprite_override_sparse);

@@ -479,7 +479,8 @@ static void do_add_files(void) {
                 memcpy(path, start, seg);
                 path[seg] = '\0';
                 normalize_slashes(path);
-                const gui_add_status r = gui_project_add_source(s_sel_atlas, path);
+                /* These come from the file-picker dialog: record the true kind. */
+                const gui_add_status r = gui_project_add_source_kind(s_sel_atlas, path, TP_SOURCE_KIND_FILE);
                 if (r == GUI_ADD_ADDED) {
                     added++;
                 } else if (r == GUI_ADD_DUPLICATE) {
@@ -669,7 +670,7 @@ static void fp_collect(fp_entry **arr, int *count, int *cap) {
         const tp_project_atlas *a = &p->atlases[ai];
         for (int si = 0; si < a->source_count; si++) {
             char abs[512];
-            if (tp_project_resolve_path(p, a->sources[si], abs, sizeof abs) != TP_STATUS_OK) {
+            if (tp_project_resolve_path(p, a->sources[si].path, abs, sizeof abs) != TP_STATUS_OK) {
                 continue;
             }
             if (gui_scan_is_dir(abs)) {

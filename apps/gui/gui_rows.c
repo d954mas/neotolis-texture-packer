@@ -166,7 +166,7 @@ void build_rows(tp_project *proj, tp_project_atlas *a) {
         return;
     }
     for (int si = 0; si < a->source_count; si++) {
-        const char *sp = a->sources[si];
+        const char *sp = a->sources[si].path;
         char abs[512];
         if (tp_project_resolve_path(proj, sp, abs, sizeof abs) != TP_STATUS_OK) {
             abs[0] = '\0';

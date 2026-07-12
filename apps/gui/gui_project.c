@@ -267,13 +267,13 @@ void gui_project_remove_atlas(int index) {
     }
 }
 
-gui_add_status gui_project_add_source(int atlas_index, const char *path) {
+gui_add_status gui_project_add_source_kind(int atlas_index, const char *path, tp_source_kind kind) {
     tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
     if (!a || !path || path[0] == '\0') {
         return GUI_ADD_FAILED;
     }
     const int before = a->source_count;
-    if (tp_project_atlas_add_source(a, path) != TP_STATUS_OK) {
+    if (tp_project_atlas_add_source_kind(a, path, kind) != TP_STATUS_OK) {
         return GUI_ADD_FAILED;
     }
     if (a->source_count == before) {
@@ -282,6 +282,12 @@ gui_add_status gui_project_add_source(int atlas_index, const char *path) {
     gui_scan_invalidate_all();
     gui_project_touch(GUI_ACT_ADD_SOURCE);
     return GUI_ADD_ADDED;
+}
+
+gui_add_status gui_project_add_source(int atlas_index, const char *path) {
+    /* Folder default: the "Add Folder" dialog and other kind-agnostic callers. The
+     * "Add Files" dialog records TP_SOURCE_KIND_FILE via add_source_kind directly. */
+    return gui_project_add_source_kind(atlas_index, path, TP_SOURCE_KIND_FOLDER);
 }
 
 void gui_project_remove_source(int atlas_index, int source_index) {

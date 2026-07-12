@@ -315,10 +315,12 @@ void test_id_survives_rename_reorder_remove(void) {
     tp_project_destroy(p);
 }
 
-/* 7. migration byte-golden: a checked-in-shape v1 file migrates to an exact v2
- *    layout whose IDs are the deterministic legacy synthesis of stable tuples
- *    (tied to the golden hash pinned in test_migrate), and re-saves identically. */
-void test_migration_golden_v1_to_v2(void) {
+/* 7. migration byte-golden: a checked-in-shape v1 file migrates all the way to an
+ *    exact v3 layout (v1->v2->v3 chained) whose IDs are the deterministic legacy
+ *    synthesis of stable tuples (tied to the golden hash pinned in test_migrate),
+ *    and re-saves identically. V1_MIN has no sources, so the ONLY delta from the
+ *    old v2 golden is the version number (2 -> 3). */
+void test_migration_golden_v1_to_v3(void) {
     char path[512];
     join(path, sizeof path, "mig_v1.ntpacker_project");
     write_text(path, V1_MIN);
@@ -347,7 +349,7 @@ void test_migration_golden_v1_to_v2(void) {
     char expect[2048];
     (void)snprintf(expect, sizeof expect,
                    "{\n"
-                   "  \"version\": 2,\n"
+                   "  \"version\": 3,\n"
                    "  \"atlases\": [\n"
                    "    {\n"
                    "      \"animations\": [\n"
@@ -396,8 +398,84 @@ void test_migration_golden_v1_to_v2(void) {
     tp_project_destroy(p2);
 }
 
-/* 8. every checked-in v1 fixture still loads under schema v2 (forward-compat);
- *    the intentionally-malformed one still fails cleanly (structured error). */
+/* 7b (F1-02). v2 -> v3 source migration byte-golden: a v2 file carries atlas/anim/
+ *    target ids but bare-STRING sources (no source ids). Loading migrates the
+ *    sources to tagged objects, synthesizing ONLY the source id from the stable
+ *    tuple "<atlasIdx>|<path>" (kind=folder, omitted) while the atlas id is
+ *    preserved verbatim. Re-save is byte-identical. */
+void test_migration_golden_v2_to_v3_sources(void) {
+    const char *atlas_id = "atlas_0000000000000000000000000000abcd";
+    char v2[512];
+    (void)snprintf(v2, sizeof v2,
+                   "{\n  \"version\": 2,\n  \"atlases\": [\n"
+                   "    { \"name\": \"hero\", \"id\": \"%s\", \"sources\": [ \"sprites\" ] }\n"
+                   "  ]\n}\n",
+                   atlas_id);
+    char path[512];
+    join(path, sizeof path, "mig_v2_src.ntpacker_project");
+    write_text(path, v2);
+
+    tp_project *p = NULL;
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, tp_project_load(path, &p, &err), err.msg);
+    /* atlas id preserved; source id synthesized (non-nil), kind defaults folder. */
+    TEST_ASSERT_EQUAL_INT(3, p->schema_version);
+    TEST_ASSERT_EQUAL_INT(1, p->atlases[0].source_count);
+    TEST_ASSERT_FALSE(tp_id128_is_nil(p->atlases[0].sources[0].id));
+    TEST_ASSERT_EQUAL_INT((int)TP_SOURCE_KIND_FOLDER, (int)p->atlases[0].sources[0].kind);
+
+    char saved[512];
+    join(saved, sizeof saved, "mig_v3_src.ntpacker_project");
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_save(p, saved, &err));
+
+    char src_txt[TP_ID_TEXT_CAP];
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_id_format(TP_ID_KIND_SOURCE,
+                          tp_legacy_hash_default(NULL, TP_ID_KIND_SOURCE, "0|sprites", 0), src_txt, sizeof src_txt,
+                          NULL));
+
+    char expect[1024];
+    (void)snprintf(expect, sizeof expect,
+                   "{\n"
+                   "  \"version\": 3,\n"
+                   "  \"atlases\": [\n"
+                   "    {\n"
+                   "      \"id\": \"%s\",\n"
+                   "      \"name\": \"hero\",\n"
+                   "      \"sources\": [\n"
+                   "        {\n"
+                   "          \"id\": \"%s\",\n"
+                   "          \"path\": \"sprites\"\n"
+                   "        }\n"
+                   "      ]\n"
+                   "    }\n"
+                   "  ]\n"
+                   "}\n",
+                   atlas_id, src_txt);
+
+    size_t sn = 0;
+    char *sbytes = read_all(saved, &sn);
+    TEST_ASSERT_EQUAL_size_t(strlen(expect), sn);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, memcmp(expect, sbytes, sn), sbytes);
+
+    /* second migration of the same v2 file is byte-identical */
+    char saved2[512];
+    join(saved2, sizeof saved2, "mig_v3_src_b.ntpacker_project");
+    tp_project *p2 = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_load(path, &p2, &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_save(p2, saved2, &err));
+    size_t sn2 = 0;
+    char *sbytes2 = read_all(saved2, &sn2);
+    TEST_ASSERT_EQUAL_size_t(sn, sn2);
+    TEST_ASSERT_EQUAL_INT(0, memcmp(sbytes, sbytes2, sn));
+
+    free(sbytes);
+    free(sbytes2);
+    tp_project_destroy(p);
+    tp_project_destroy(p2);
+}
+
+/* 8. every checked-in v1 fixture still loads under the current schema (forward-
+ *    compat); the intentionally-malformed one still fails cleanly (structured error). */
 void test_checked_in_v1_fixtures_still_load(void) {
     const char *ok_fixtures[] = {"clean.ntpacker_project", "parity.ntpacker_project", "problems.ntpacker_project"};
     tp_error err = {0};
@@ -432,7 +510,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_v2_missing_id_rejected);
     RUN_TEST(test_v2_anim_missing_name_rejected);
     RUN_TEST(test_id_survives_rename_reorder_remove);
-    RUN_TEST(test_migration_golden_v1_to_v2);
+    RUN_TEST(test_migration_golden_v1_to_v3);
+    RUN_TEST(test_migration_golden_v2_to_v3_sources);
     RUN_TEST(test_checked_in_v1_fixtures_still_load);
     return UNITY_END();
 }

@@ -133,8 +133,9 @@ tp_status tp_pack_input_build(const tp_project *p, int atlas_index, tp_pack_inpu
     int missing = 0;
     bool oom = false;
     for (int si = 0; si < a->source_count && !oom; si++) {
+        const char *src_path = a->sources[si].path;
         char abs[512];
-        if (tp_project_resolve_path(p, a->sources[si], abs, sizeof abs) != TP_STATUS_OK) {
+        if (tp_project_resolve_path(p, src_path, abs, sizeof abs) != TP_STATUS_OK) {
             continue; /* unresolvable (relative source, unsaved project) -- skip, not missing */
         }
         if (!tp_scan_exists(abs)) {
@@ -153,7 +154,7 @@ tp_status tp_pack_input_build(const tp_project *p, int atlas_index, tp_pack_inpu
                 }
             }
             tp_scan_free(&sc);
-        } else if (!desc_add(&dv, a, base_name(a->sources[si]), abs)) {
+        } else if (!desc_add(&dv, a, base_name(src_path), abs)) {
             oom = true;
         }
     }
