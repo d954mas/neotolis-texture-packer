@@ -114,6 +114,17 @@ void test_windows_rejects(void) {
     expect_err("//server/", TP_C0_HOST_WINDOWS, TP_C0_ERR_PATH_BAD_UNC);
 }
 
+void test_dotdot_pop_in_place(void) {
+    /* F10: the in-place '..' pop (scan back to the previous '/', clamp at root)
+     * must match the old component-array assembly across roots and depths. */
+    expect_ok("/a/b/c/../../d", TP_C0_HOST_POSIX, "/a/d");       /* double pop */
+    expect_ok("/a/../../b", TP_C0_HOST_POSIX, "/b");             /* pop then clamp */
+    expect_ok("C:/a/b/../../c", TP_C0_HOST_WINDOWS, "C:/c");     /* pop to drive root */
+    expect_ok("C:/a/../..", TP_C0_HOST_WINDOWS, "C:/");          /* pop then clamp at drive */
+    expect_ok("//s/sh/a/b/../..", TP_C0_HOST_WINDOWS, "//s/sh"); /* pop back to UNC root */
+    expect_ok("//s/sh/a/../b", TP_C0_HOST_WINDOWS, "//s/sh/b");
+}
+
 void test_case_equality_policy(void) {
     /* POSIX identity is byte-exact; Windows folds ASCII case. */
     TEST_ASSERT_FALSE(tp_c0_project_path_equal("/A/b", "/a/b", TP_C0_HOST_POSIX));
@@ -133,6 +144,7 @@ int main(void) {
     RUN_TEST(test_windows_unc_separator_collapse);
     RUN_TEST(test_windows_device_paths);
     RUN_TEST(test_windows_rejects);
+    RUN_TEST(test_dotdot_pop_in_place);
     RUN_TEST(test_case_equality_policy);
     return UNITY_END();
 }

@@ -49,8 +49,11 @@ tp_c0_detail tp_c0_project_path_canonical(const char *input, tp_c0_host host, ch
         }
     }
 
-    /* ----- root detection ------------------------------------------------ */
-    char rootbuf[TP_C0_PATH_MAX];
+    /* ----- root detection + in-place canonical assembly ------------------- */
+    /* Components are emitted straight into `out`; '..' pops by scanning `out`
+     * back to the previous '/', clamped at `rootlen`. No component arrays and no
+     * separate rootbuf -- keeps the stack frame to ~work[] instead of ~40KB. */
+    size_t pos = 0;
     size_t rootlen = 0;
     const char *rest = NULL;
 
@@ -58,8 +61,9 @@ tp_c0_detail tp_c0_project_path_canonical(const char *input, tp_c0_host host, ch
         if (work[0] != '/') {
             return tp_c0_fail(err, TP_C0_ERR_PATH_NOT_ABSOLUTE, "POSIX identity path must start with '/'");
         }
-        rootbuf[0] = '/';
-        rootlen = 1;
+        if (!append(out, cap, &pos, "/", 1U)) {
+            return tp_c0_fail(err, TP_C0_ERR_BUFFER_TOO_SMALL, "canonical path exceeds out buffer");
+        }
         rest = work + 1;
     } else {
         /* Windows device / verbatim namespace: "\\?\..." and "\\.\..." (already
@@ -117,41 +121,31 @@ tp_c0_detail tp_c0_project_path_canonical(const char *input, tp_c0_host host, ch
             if (shlen == 0) {
                 return tp_c0_fail(err, TP_C0_ERR_PATH_BAD_UNC, "UNC path needs a share name");
             }
-            rootbuf[0] = '/';
-            rootbuf[1] = '/';
-            memcpy(rootbuf + 2, server, slen);
-            rootbuf[2 + slen] = '/';
-            memcpy(rootbuf + 3 + slen, share, shlen);
-            rootlen = 3 + slen + shlen; /* "//" + server + "/" + share */
+            if (!append(out, cap, &pos, "//", 2U) || !append(out, cap, &pos, server, slen) ||
+                !append(out, cap, &pos, "/", 1U) || !append(out, cap, &pos, share, shlen)) {
+                return tp_c0_fail(err, TP_C0_ERR_BUFFER_TOO_SMALL, "canonical path exceeds out buffer");
+            }
             rest = (*p == '/') ? p + 1 : p;
         } else if (tp_c0_is_alpha(work[0]) && work[1] == ':') {
             if (work[2] == '/') {
-                rootbuf[0] = tp_c0_ascii_upper(work[0]);
-                rootbuf[1] = ':';
-                rootbuf[2] = '/';
-                rootlen = 3;
                 rest = work + 3;
             } else if (work[2] == '\0') {
-                rootbuf[0] = tp_c0_ascii_upper(work[0]);
-                rootbuf[1] = ':';
-                rootbuf[2] = '/';
-                rootlen = 3;
                 rest = work + 2; /* "" -> drive root */
             } else {
                 return tp_c0_fail(err, TP_C0_ERR_PATH_DRIVE_REL, "drive-relative 'X:foo' is not a canonical identity");
+            }
+            char root[3] = {tp_c0_ascii_upper(work[0]), ':', '/'};
+            if (!append(out, cap, &pos, root, sizeof root)) {
+                return tp_c0_fail(err, TP_C0_ERR_BUFFER_TOO_SMALL, "canonical path exceeds out buffer");
             }
         } else {
             return tp_c0_fail(err, TP_C0_ERR_PATH_NOT_ABSOLUTE,
                               "Windows identity path must be 'X:/...' or UNC '//server/share/...'");
         }
     }
+    rootlen = pos; /* the '..'-pop clamp boundary */
 
-    /* ----- tokenize `rest`, resolving '.'/'..'/empty ---------------------- */
-    /* Bounded by path length; each kept component is a (start,len) into work. */
-    const char *comp_ptr[TP_C0_PATH_MAX / 2 + 1];
-    size_t comp_len[TP_C0_PATH_MAX / 2 + 1];
-    size_t ncomp = 0;
-
+    /* ----- tokenize `rest`, emitting '.'/'..'/plain components into `out` -- */
     tp_c0_lex it = tp_c0_lex_begin(rest, false); /* '\' already rewritten to '/' */
     const char *start;
     size_t len;
@@ -160,28 +154,23 @@ tp_c0_detail tp_c0_project_path_canonical(const char *input, tp_c0_host host, ch
             continue; /* current dir */
         }
         if (len == 2 && start[0] == '.' && start[1] == '.') {
-            if (ncomp > 0) {
-                ncomp--; /* pop */
+            /* Pop the last emitted component together with its leading '/', by
+             * scanning back to the previous separator -- clamped at the root. */
+            if (pos > rootlen) {
+                size_t q = pos;
+                while (q > rootlen && out[q - 1] != '/') {
+                    q--;
+                }
+                pos = (q > rootlen) ? q - 1U : rootlen;
             }
             continue; /* clamp at root */
         }
-        comp_ptr[ncomp] = start;
-        comp_len[ncomp] = len;
-        ncomp++;
-    }
-
-    /* ----- assemble ------------------------------------------------------ */
-    size_t pos = 0;
-    if (!append(out, cap, &pos, rootbuf, rootlen)) {
-        return tp_c0_fail(err, TP_C0_ERR_BUFFER_TOO_SMALL, "canonical path exceeds out buffer");
-    }
-    for (size_t i = 0; i < ncomp; i++) {
         if (pos > 0 && out[pos - 1] != '/') {
             if (!append(out, cap, &pos, "/", 1U)) {
                 return tp_c0_fail(err, TP_C0_ERR_BUFFER_TOO_SMALL, "canonical path exceeds out buffer");
             }
         }
-        if (!append(out, cap, &pos, comp_ptr[i], comp_len[i])) {
+        if (!append(out, cap, &pos, start, len)) {
             return tp_c0_fail(err, TP_C0_ERR_BUFFER_TOO_SMALL, "canonical path exceeds out buffer");
         }
     }
