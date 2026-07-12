@@ -23,7 +23,10 @@ add_library(tp_c0 STATIC
     src/tp_c0_txn_parse.c
     src/tp_c0_txn_validate.c
     src/tp_c0_txn_encode.c
-    src/tp_c0_txn_result.c)
+    src/tp_c0_txn_result.c
+    # C0-03 task 1: recovery-journal record framing + recovery (no engine, no IO).
+    src/tp_c0_journal_frame.c
+    src/tp_c0_journal_recover.c)
 target_include_directories(tp_c0 PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     $<TARGET_PROPERTY:tp_core,INTERFACE_INCLUDE_DIRECTORIES>)
@@ -55,3 +58,4 @@ tp_c0_add_test(test_c0_srckey)
 tp_c0_add_test(test_c0_legacy)
 tp_c0_add_test(test_c0_op)   # C0-02 catalog, verb mapping, selectors, semantic fields
 tp_c0_add_test(test_c0_txn)  # C0-02 txn decode/encode round-trip, faults, diffs
+tp_c0_add_test(test_c0_journal)     # C0-03 journal framing golden vectors + recovery faults

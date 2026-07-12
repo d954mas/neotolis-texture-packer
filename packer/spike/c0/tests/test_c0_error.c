@@ -44,10 +44,16 @@ void test_all_tokens_pinned(void) {
     TEST_ASSERT_EQUAL_STRING("selector_unresolved", tp_c0_detail_id(TP_C0_ERR_SELECTOR_UNRESOLVED));
     TEST_ASSERT_EQUAL_STRING("revision_conflict", tp_c0_detail_id(TP_C0_ERR_REVISION_CONFLICT));
     TEST_ASSERT_EQUAL_STRING("invalid_revision", tp_c0_detail_id(TP_C0_ERR_INVALID_REVISION));
+    /* C0-03 recovery-journal tokens (append-only). */
+    TEST_ASSERT_EQUAL_STRING("journal_short", tp_c0_detail_id(TP_C0_ERR_JOURNAL_SHORT));
+    TEST_ASSERT_EQUAL_STRING("journal_bad_magic", tp_c0_detail_id(TP_C0_ERR_JOURNAL_BAD_MAGIC));
+    TEST_ASSERT_EQUAL_STRING("journal_bad_version", tp_c0_detail_id(TP_C0_ERR_JOURNAL_BAD_VERSION));
+    TEST_ASSERT_EQUAL_STRING("journal_bad_kind", tp_c0_detail_id(TP_C0_ERR_JOURNAL_BAD_KIND));
+    TEST_ASSERT_EQUAL_STRING("journal_bad_checksum", tp_c0_detail_id(TP_C0_ERR_JOURNAL_BAD_CHECKSUM));
 }
 
 void test_tokens_are_machine_ids(void) {
-    for (int s = TP_C0_OK; s <= TP_C0_ERR_INVALID_REVISION; s++) {
+    for (int s = TP_C0_OK; s <= TP_C0_ERR_JOURNAL_BAD_CHECKSUM; s++) {
         const char *id = tp_c0_detail_id((tp_c0_detail)s);
         for (const char *c = id; *c; c++) {
             bool ok = (*c >= 'a' && *c <= 'z') || (*c >= '0' && *c <= '9') || *c == '_';
@@ -65,8 +71,8 @@ void test_detail_count_sentinel(void) {
      * append-only token still round-trips on version skew rather than being
      * dropped as "unknown error code". Pin that COUNT sits past the last real
      * code and is not itself a decodable token (it maps to ""). */
-    TEST_ASSERT_TRUE(TP_C0_DETAIL_COUNT > TP_C0_ERR_INVALID_REVISION);
-    TEST_ASSERT_EQUAL_STRING("invalid_revision", tp_c0_detail_id((tp_c0_detail)(TP_C0_DETAIL_COUNT - 1)));
+    TEST_ASSERT_TRUE(TP_C0_DETAIL_COUNT > TP_C0_ERR_JOURNAL_BAD_CHECKSUM);
+    TEST_ASSERT_EQUAL_STRING("journal_bad_checksum", tp_c0_detail_id((tp_c0_detail)(TP_C0_DETAIL_COUNT - 1)));
     TEST_ASSERT_EQUAL_STRING("", tp_c0_detail_id(TP_C0_DETAIL_COUNT));
 }
 

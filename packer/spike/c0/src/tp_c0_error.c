@@ -40,6 +40,11 @@ const char *tp_c0_detail_id(tp_c0_detail d) {
         case TP_C0_ERR_SELECTOR_UNRESOLVED: return "selector_unresolved";
         case TP_C0_ERR_REVISION_CONFLICT: return "revision_conflict";
         case TP_C0_ERR_INVALID_REVISION: return "invalid_revision";
+        case TP_C0_ERR_JOURNAL_SHORT: return "journal_short";
+        case TP_C0_ERR_JOURNAL_BAD_MAGIC: return "journal_bad_magic";
+        case TP_C0_ERR_JOURNAL_BAD_VERSION: return "journal_bad_version";
+        case TP_C0_ERR_JOURNAL_BAD_KIND: return "journal_bad_kind";
+        case TP_C0_ERR_JOURNAL_BAD_CHECKSUM: return "journal_bad_checksum";
         case TP_C0_DETAIL_COUNT: return ""; /* sentinel, not a real code; keeps -Wswitch happy */
     }
     return "unknown";

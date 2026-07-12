@@ -79,6 +79,14 @@ typedef enum tp_c0_detail {
     TP_C0_ERR_REVISION_CONFLICT, /* expected_revision < current: stale base, rebuild+retry */
     TP_C0_ERR_INVALID_REVISION,  /* expected_revision > current: impossible future base */
 
+    /* ---- C0-03 recovery-journal framing / recovery (append-only) ---- */
+
+    TP_C0_ERR_JOURNAL_SHORT,        /* record truncated: bytes ran out mid header/payload (short write / torn tail) */
+    TP_C0_ERR_JOURNAL_BAD_MAGIC,    /* record magic mismatch: corruption or not a journal stream */
+    TP_C0_ERR_JOURNAL_BAD_VERSION,  /* record framing version is not a supported journal format version */
+    TP_C0_ERR_JOURNAL_BAD_KIND,     /* record kind is not a known journal record kind */
+    TP_C0_ERR_JOURNAL_BAD_CHECKSUM, /* payload checksum (FNV-1a/128) mismatch: corrupt record body */
+
     /* Count sentinel: MUST stay last (append new codes before it). Lets decoders
      * iterate the FULL token space [0, TP_C0_DETAIL_COUNT) so a newly appended
      * token still round-trips on version skew instead of hardcoding the current
