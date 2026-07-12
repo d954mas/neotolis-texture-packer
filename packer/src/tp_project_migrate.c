@@ -63,22 +63,28 @@ static void legacy_set_insert(tp_id128 *slots, size_t mask, tp_id128 id) {
     slots[idx] = id;
 }
 
-/* Salt-sweep body shared by both paths, differing only in how a clash with an
- * already-assigned entry is detected. Returns TP_STATUS_OK or exhaustion. */
-static tp_status legacy_assign_hashed(tp_legacy_entry *entries, size_t n, tp_legacy_hash_fn hash, void *ctx,
-                                      tp_id128 *slots, size_t mask, tp_error *err) {
+/* Salt-sweep body shared by the hashed path and its O(n^2) fallback, so the sweep
+ * policy (nil-skip, salt bound, exhaustion token, array order) lives in ONE place
+ * and the two paths can never silently diverge. They differ ONLY in how a clash
+ * with an already-assigned id is detected (`clashes`) and how a freshly assigned id
+ * is recorded (`note`). Returns TP_STATUS_OK or exhaustion. */
+typedef bool (*legacy_clash_fn)(void *ctx, size_t assigned, tp_id128 cand);
+typedef void (*legacy_note_fn)(void *ctx, tp_id128 cand);
+
+static tp_status legacy_salt_sweep(tp_legacy_entry *entries, size_t n, tp_legacy_hash_fn hash, void *hctx,
+                                   legacy_clash_fn clashes, legacy_note_fn note, void *cctx, tp_error *err) {
     for (size_t i = 0; i < n; i++) {
         bool assigned = false;
         for (uint32_t salt = 0; salt <= (uint32_t)TP_LEGACY_MAX_SALT; salt++) {
-            tp_id128 cand = hash(ctx, entries[i].kind, entries[i].tuple, salt);
+            tp_id128 cand = hash(hctx, entries[i].kind, entries[i].tuple, salt);
             if (tp_id128_is_nil(cand)) {
                 continue; /* nil is reserved -- bump salt */
             }
-            if (legacy_set_contains(slots, mask, cand)) {
+            if (clashes(cctx, i, cand)) {
                 continue; /* clash with an already-assigned entry -- bump salt */
             }
             entries[i].id = cand;
-            legacy_set_insert(slots, mask, cand);
+            note(cctx, cand);
             assigned = true;
             break;
         }
@@ -89,36 +95,38 @@ static tp_status legacy_assign_hashed(tp_legacy_entry *entries, size_t n, tp_leg
     return TP_STATUS_OK;
 }
 
-/* O(n^2) fallback used only if the set allocation fails, so a memory-pressure
- * load never aborts and never changes the result (byte-identical to the hashed
- * path: same array order, same salt-bump sequence, same collision bound). */
-static tp_status legacy_assign_linear(tp_legacy_entry *entries, size_t n, tp_legacy_hash_fn hash, void *ctx,
-                                      tp_error *err) {
-    for (size_t i = 0; i < n; i++) {
-        bool assigned = false;
-        for (uint32_t salt = 0; salt <= (uint32_t)TP_LEGACY_MAX_SALT; salt++) {
-            tp_id128 cand = hash(ctx, entries[i].kind, entries[i].tuple, salt);
-            if (tp_id128_is_nil(cand)) {
-                continue;
-            }
-            bool clash = false;
-            for (size_t j = 0; j < i; j++) {
-                if (tp_id128_eq(entries[j].id, cand)) {
-                    clash = true;
-                    break;
-                }
-            }
-            if (!clash) {
-                entries[i].id = cand;
-                assigned = true;
-                break;
-            }
-        }
-        if (!assigned) {
-            return tp_error_set(err, TP_STATUS_ID_COLLISION_EXHAUSTED, "legacy salt sweep exhausted for entry %zu", i);
+/* Hashed path (O(n) total): probe + update the open-addressed set. */
+typedef struct {
+    tp_id128 *slots;
+    size_t mask;
+} legacy_hashed_ctx;
+static bool legacy_clash_hashed(void *ctx, size_t assigned, tp_id128 cand) {
+    (void)assigned;
+    const legacy_hashed_ctx *h = (const legacy_hashed_ctx *)ctx;
+    return legacy_set_contains(h->slots, h->mask, cand);
+}
+static void legacy_note_hashed(void *ctx, tp_id128 cand) {
+    legacy_hashed_ctx *h = (legacy_hashed_ctx *)ctx;
+    legacy_set_insert(h->slots, h->mask, cand);
+}
+
+/* O(n^2) fallback used only if the set allocation fails, so a memory-pressure load
+ * never aborts and never changes the result (byte-identical to the hashed path:
+ * same array order, same salt-bump sequence, same collision bound). Scans the
+ * already-assigned prefix entries[0..assigned) and records nothing -- the entries
+ * array the sweep just wrote is its own source of truth. */
+static bool legacy_clash_linear(void *ctx, size_t assigned, tp_id128 cand) {
+    const tp_legacy_entry *entries = (const tp_legacy_entry *)ctx;
+    for (size_t j = 0; j < assigned; j++) {
+        if (tp_id128_eq(entries[j].id, cand)) {
+            return true;
         }
     }
-    return TP_STATUS_OK;
+    return false;
+}
+static void legacy_note_linear(void *ctx, tp_id128 cand) {
+    (void)ctx;
+    (void)cand;
 }
 
 tp_status tp_legacy_assign(tp_legacy_entry *entries, size_t n, tp_legacy_hash_fn hash, void *ctx, tp_error *err) {
@@ -140,9 +148,10 @@ tp_status tp_legacy_assign(tp_legacy_entry *entries, size_t n, tp_legacy_hash_fn
     }
     tp_id128 *slots = calloc(cap, sizeof *slots); /* zeroed == all-nil == empty */
     if (!slots) {
-        return legacy_assign_linear(entries, n, hash, ctx, err);
+        return legacy_salt_sweep(entries, n, hash, ctx, legacy_clash_linear, legacy_note_linear, entries, err);
     }
-    tp_status st = legacy_assign_hashed(entries, n, hash, ctx, slots, cap - 1U, err);
+    legacy_hashed_ctx hc = {slots, cap - 1U};
+    tp_status st = legacy_salt_sweep(entries, n, hash, ctx, legacy_clash_hashed, legacy_note_hashed, &hc, err);
     free(slots);
     return st;
 }
