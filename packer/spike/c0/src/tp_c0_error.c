@@ -47,6 +47,11 @@ const char *tp_c0_detail_id(tp_c0_detail d) {
         case TP_C0_ERR_JOURNAL_BAD_CHECKSUM: return "journal_bad_checksum";
         case TP_C0_ERR_JOURNAL_TOO_LARGE: return "journal_too_large";
         case TP_C0_ERR_JOURNAL_RETENTION_FULL: return "journal_retention_full";
+        case TP_C0_ERR_DECODE_FAILED: return "decode_failed";
+        case TP_C0_ERR_FORMAT_UNSUPPORTED: return "format_unsupported";
+        case TP_C0_NOTE_ICC_IGNORED: return "icc_ignored";
+        case TP_C0_NOTE_ICC_PROFILE_BAD: return "icc_profile_bad";
+        case TP_C0_NOTE_EXIF_ORIENTATION_UNKNOWN: return "exif_orientation_unknown";
         case TP_C0_DETAIL_COUNT: return ""; /* sentinel, not a real code; keeps -Wswitch happy */
     }
     return "unknown";

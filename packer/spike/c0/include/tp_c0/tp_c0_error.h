@@ -89,6 +89,29 @@ typedef enum tp_c0_detail {
     TP_C0_ERR_JOURNAL_TOO_LARGE,    /* record's framed size would overflow the u32 on-disk length / size_t byte math */
     TP_C0_ERR_JOURNAL_RETENTION_FULL, /* recovery retention set hit the spike cap: NOT corruption, set is partial */
 
+    /* ---- C0-04 raster color/orientation policy (append-only) ---- */
+
+    /* Decode failure (structured error, never a crash): the decoder returned no
+     * image for a truncated / garbage / internally-corrupt raster stream. */
+    TP_C0_ERR_DECODE_FAILED,
+    /* Recognized container whose codec is not vendored in this spike (WebP: stb
+     * cannot decode it; the file decoder is selected/vendored in B1-01). */
+    TP_C0_ERR_FORMAT_UNSUPPORTED,
+
+    /* Notices below are NON-fatal: they never become a function's return code on
+     * a successful decode. They ride an out `tp_c0_raster_notices` list and reuse
+     * this token space only so a client matches one stable id table. */
+
+    /* An ICC profile is present but deliberately not applied (decision 0005:
+     * byte-preserving sRGB, no ICC transforms). Pixels unchanged. */
+    TP_C0_NOTE_ICC_IGNORED,
+    /* An ICC profile is present but malformed/undecodable. Still not applied;
+     * pixels unchanged (a corrupt profile must not alter the result). */
+    TP_C0_NOTE_ICC_PROFILE_BAD,
+    /* EXIF orientation tag held a value outside 1..8. Pinned policy: treat as
+     * identity (orientation 1) so decode stays deterministic and never fails. */
+    TP_C0_NOTE_EXIF_ORIENTATION_UNKNOWN,
+
     /* Count sentinel: MUST stay last (append new codes before it). Lets decoders
      * iterate the FULL token space [0, TP_C0_DETAIL_COUNT) so a newly appended
      * token still round-trips on version skew instead of hardcoding the current
