@@ -27,6 +27,7 @@ void test_all_tokens_pinned(void) {
     TEST_ASSERT_EQUAL_STRING("path_not_absolute", tp_c0_detail_id(TP_C0_ERR_PATH_NOT_ABSOLUTE));
     TEST_ASSERT_EQUAL_STRING("path_drive_relative", tp_c0_detail_id(TP_C0_ERR_PATH_DRIVE_REL));
     TEST_ASSERT_EQUAL_STRING("path_bad_unc", tp_c0_detail_id(TP_C0_ERR_PATH_BAD_UNC));
+    TEST_ASSERT_EQUAL_STRING("path_device", tp_c0_detail_id(TP_C0_ERR_PATH_DEVICE));
     TEST_ASSERT_EQUAL_STRING("key_absolute", tp_c0_detail_id(TP_C0_ERR_KEY_ABSOLUTE));
     TEST_ASSERT_EQUAL_STRING("key_traversal", tp_c0_detail_id(TP_C0_ERR_KEY_TRAVERSAL));
     TEST_ASSERT_EQUAL_STRING("collision_exhausted", tp_c0_detail_id(TP_C0_ERR_COLLISION_EXHAUSTED));

@@ -34,12 +34,24 @@ Project identity (§5.1) is the canonical normalized path of the
   a literal filename byte. Output always uses `/`.
 - **Accepted absolute forms.** POSIX `"/..."`; Windows `"X:/..."`, bare drive
   `"X:"` (→ `"X:/"`), and UNC `"//server/share/..."`.
+- **Windows device / verbatim namespace.** After the `\`→`/` rewrite,
+  `\\?\X:\...` (`//?/X:/...`) and `\\?\UNC\server\share\...` (`//?/UNC/...`, the
+  `UNC` component matched ASCII case-insensitively) are **transparent lexical
+  aliases**: the `\\?\` prefix is stripped and the remainder canonicalized as the
+  drive or UNC form, so `\\?\C:\work\p` ≡ `C:\work\p`. Every **other** `\\?\...`
+  form and **all** `\\.\...` device paths are rejected (`path_device`) — a device
+  path is never a project file, and one file must have one identity (decision
+  `docs/decisions/0006-windows-device-paths.md`). POSIX host is unchanged.
 - **Rejected.** Non-absolute / relative (`path_not_absolute`), Windows
   drive-relative `"X:foo"` (`path_drive_relative`), malformed UNC without a share
-  (`path_bad_unc`), over-length (`buffer_too_small`), empty (`empty`).
-- **Normalization.** `.` dropped; `//` collapsed (UNC leading `//` preserved);
-  `..` resolved **lexically** and **clamped at the root** (`/..` → `/`); trailing
-  `/` stripped.
+  (`path_bad_unc`), Windows device/verbatim paths outside the two alias forms
+  (`path_device`), over-length (`buffer_too_small`), empty (`empty`).
+- **Normalization.** `.` dropped; repeated separators collapsed — **including
+  doubled separators inside the UNC head** (`//server//share` → `//server/share`,
+  `///server/share` → `//server/share`), with the UNC leading `//` preserved; a
+  genuinely missing share (`//server`, `//server/`, `//server//`) is still
+  `path_bad_unc`. `..` resolved **lexically** and **clamped at the root** (`/..`
+  → `/`); trailing `/` stripped.
 - **Case.** The canonical *string* preserves case except the Windows **drive
   letter is upper-cased**. Identity *equality* (`tp_c0_project_path_equal`):
   POSIX is byte-exact (case-sensitive); WINDOWS folds ASCII case (its filesystem

@@ -72,18 +72,53 @@ tp_c0_detail tp_c0_project_path_canonical(const char *input, tp_c0_host host, ch
         rootlen = 1;
         rest = work + 1;
     } else {
+        /* Windows device / verbatim namespace: "\\?\..." and "\\.\..." (already
+         * '/'-rewritten to "//?/..." / "//./..."). Decided policy
+         * (docs/decisions/0006-windows-device-paths.md): "\\?\" is a transparent
+         * lexical alias for the drive form ("//?/X:...") and the UNC form
+         * ("//?/UNC/server/share..."); every OTHER "//?/..." form and ALL "//./..."
+         * device paths are rejected -- a device path is never a project file, and
+         * one file must have one identity. Rewrites `work` in place, then falls
+         * through to the normal drive/UNC detection below. */
+        if (work[0] == '/' && work[1] == '/' && (work[2] == '?' || work[2] == '.') && work[3] == '/') {
+            if (work[2] == '.') {
+                return tp_c0_fail(err, TP_C0_ERR_PATH_DEVICE,
+                                  "Windows device path '\\\\.\\...' is not a project identity");
+            }
+            const char *after = work + 4; /* past "//?/" */
+            if (is_alpha(after[0]) && after[1] == ':') {
+                /* "//?/X:..." -> "X:..." (canonicalize as a drive path). */
+                memmove(work, after, strlen(after) + 1U);
+            } else if (ascii_upper(after[0]) == 'U' && ascii_upper(after[1]) == 'N' &&
+                       ascii_upper(after[2]) == 'C' && after[3] == '/') {
+                /* "//?/UNC/server/share..." -> "//server/share..." (UNC). work+7
+                 * is the '/' before the server, so prefixing one '/' yields "//". */
+                memmove(work + 1, work + 7, strlen(work + 7) + 1U);
+                work[0] = '/';
+            } else {
+                return tp_c0_fail(err, TP_C0_ERR_PATH_DEVICE,
+                                  "unsupported Windows verbatim path '\\\\?\\...'");
+            }
+        }
+
         if (work[0] == '/' && work[1] == '/') {
-            /* UNC //server/share */
+            /* UNC //server/share -- runs of separators inside the head collapse
+             * (extra leading '/', and doubled '/' between server and share). */
             const char *p = work + 2;
+            while (*p == '/') {
+                p++; /* collapse extra separators before the server */
+            }
             const char *server = p;
             while (*p && *p != '/') {
                 p++;
             }
             size_t slen = (size_t)(p - server);
-            if (slen == 0 || *p != '/') {
+            if (slen == 0) {
                 return tp_c0_fail(err, TP_C0_ERR_PATH_BAD_UNC, "UNC path needs //server/share");
             }
-            p++;
+            while (*p == '/') {
+                p++; /* collapse separators between server and share */
+            }
             const char *share = p;
             while (*p && *p != '/') {
                 p++;

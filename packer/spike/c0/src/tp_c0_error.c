@@ -24,6 +24,7 @@ const char *tp_c0_detail_id(tp_c0_detail d) {
         case TP_C0_ERR_PATH_NOT_ABSOLUTE: return "path_not_absolute";
         case TP_C0_ERR_PATH_DRIVE_REL: return "path_drive_relative";
         case TP_C0_ERR_PATH_BAD_UNC: return "path_bad_unc";
+        case TP_C0_ERR_PATH_DEVICE: return "path_device";
         case TP_C0_ERR_KEY_ABSOLUTE: return "key_absolute";
         case TP_C0_ERR_KEY_TRAVERSAL: return "key_traversal";
         case TP_C0_ERR_COLLISION_EXHAUSTED: return "collision_exhausted";

@@ -70,6 +70,42 @@ void test_windows_unc(void) {
     expect_ok("//server/share/a/../b", TP_C0_HOST_WINDOWS, "//server/share/b");
 }
 
+void test_windows_unc_separator_collapse(void) {
+    /* F3: runs of separators inside the UNC head collapse; leading "//" preserved. */
+    expect_ok("//server//share/x", TP_C0_HOST_WINDOWS, "//server/share/x");
+    expect_ok("\\\\nas\\\\\\\\assets\\proj", TP_C0_HOST_WINDOWS, "//nas/assets/proj");
+    expect_ok("///server/share", TP_C0_HOST_WINDOWS, "//server/share");
+    /* a genuinely missing share is still path_bad_unc */
+    expect_err("//server//", TP_C0_HOST_WINDOWS, TP_C0_ERR_PATH_BAD_UNC);
+}
+
+void test_windows_device_paths(void) {
+    /* F2: "\\?\" is a transparent alias for the drive and UNC forms; every other
+     * "\\?\..." and all "\\.\..." device paths are rejected with path_device. */
+    expect_ok("\\\\?\\C:\\work\\p", TP_C0_HOST_WINDOWS, "C:/work/p");
+    expect_ok("\\\\?\\c:", TP_C0_HOST_WINDOWS, "C:/"); /* verbatim bare drive */
+    expect_ok("\\\\?\\UNC\\server\\share\\a\\b", TP_C0_HOST_WINDOWS, "//server/share/a/b");
+    expect_ok("\\\\?\\unc\\server\\share", TP_C0_HOST_WINDOWS, "//server/share"); /* UNC case-insensitive */
+    expect_err("\\\\?\\GLOBALROOT\\Device\\X", TP_C0_HOST_WINDOWS, TP_C0_ERR_PATH_DEVICE);
+    expect_err("\\\\?\\Volume{abc}\\x", TP_C0_HOST_WINDOWS, TP_C0_ERR_PATH_DEVICE);
+    expect_err("\\\\.\\PhysicalDrive0", TP_C0_HOST_WINDOWS, TP_C0_ERR_PATH_DEVICE);
+    expect_err("\\\\.\\C:\\x", TP_C0_HOST_WINDOWS, TP_C0_ERR_PATH_DEVICE); /* device ns, not aliased */
+
+    /* the verbatim spelling is the SAME identity as the unprefixed spelling */
+    char a[TP_C0_PATH_MAX];
+    char b[TP_C0_PATH_MAX];
+    TEST_ASSERT_EQUAL_INT(TP_C0_OK, tp_c0_project_path_canonical("\\\\?\\C:\\work\\p", TP_C0_HOST_WINDOWS, a,
+                                                                 sizeof a, NULL));
+    TEST_ASSERT_EQUAL_INT(TP_C0_OK,
+                          tp_c0_project_path_canonical("C:\\work\\p", TP_C0_HOST_WINDOWS, b, sizeof b, NULL));
+    TEST_ASSERT_TRUE(tp_c0_project_path_equal(a, b, TP_C0_HOST_WINDOWS));
+    TEST_ASSERT_EQUAL_INT(TP_C0_OK, tp_c0_project_path_canonical("\\\\?\\UNC\\srv\\shr\\p", TP_C0_HOST_WINDOWS,
+                                                                 a, sizeof a, NULL));
+    TEST_ASSERT_EQUAL_INT(TP_C0_OK, tp_c0_project_path_canonical("\\\\srv\\shr\\p", TP_C0_HOST_WINDOWS, b,
+                                                                 sizeof b, NULL));
+    TEST_ASSERT_TRUE(tp_c0_project_path_equal(a, b, TP_C0_HOST_WINDOWS));
+}
+
 void test_windows_rejects(void) {
     expect_err("C:foo", TP_C0_HOST_WINDOWS, TP_C0_ERR_PATH_DRIVE_REL);
     expect_err("/foo", TP_C0_HOST_WINDOWS, TP_C0_ERR_PATH_NOT_ABSOLUTE); /* drive missing */
@@ -94,6 +130,8 @@ int main(void) {
     RUN_TEST(test_posix_rejects);
     RUN_TEST(test_windows_canonical);
     RUN_TEST(test_windows_unc);
+    RUN_TEST(test_windows_unc_separator_collapse);
+    RUN_TEST(test_windows_device_paths);
     RUN_TEST(test_windows_rejects);
     RUN_TEST(test_case_equality_policy);
     return UNITY_END();

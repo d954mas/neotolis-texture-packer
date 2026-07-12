@@ -48,6 +48,7 @@ typedef enum tp_c0_detail {
     TP_C0_ERR_PATH_NOT_ABSOLUTE, /* identity path must be absolute */
     TP_C0_ERR_PATH_DRIVE_REL,    /* Windows "C:foo" drive-relative form */
     TP_C0_ERR_PATH_BAD_UNC,      /* malformed UNC (//server without share) */
+    TP_C0_ERR_PATH_DEVICE,       /* Windows \\?\ or \\.\ device/verbatim path */
 
     /* source-key normalization */
     TP_C0_ERR_KEY_ABSOLUTE,      /* source key must be source-root-relative */
