@@ -1230,10 +1230,11 @@ static tp_status tp_opt_bool(const cJSON *o, const char *k, bool *dst, tp_error 
     return TP_STATUS_OK;
 }
 
-/* Parse a v2 structural shape-ID at `key` into *out, kind-checked (called ONLY for
- * v2 files). An ABSENT key leaves *out nil; since v2 files are NOT legacy-synthesized,
- * that nil reaches tp_project_validate_ids and is rejected ID_MALFORMED (a saved v2
- * always promotes to non-nil IDs). A PRESENT key must be a string holding a valid
+/* Parse a structural shape-ID at `key` into *out, kind-checked (called for entities
+ * whose schema carries ids: v2+ atlas/anim/target, v3+ sources). An ABSENT key
+ * leaves *out nil; that nil reaches tp_project_validate_ids and is rejected
+ * ID_MALFORMED (a saved v2/v3 always promotes to non-nil IDs -- a missing id is a
+ * genuine anomaly, never synthesized in this path). A PRESENT key must be a string holding a valid
  * "<expect>_<32hex>" that is non-nil -- a wrong type -> BAD_PROJECT, a bad shape /
  * wrong kind / nil value -> ID_MALFORMED. */
 static tp_status tp_load_id(const cJSON *o, const char *key, tp_id_kind expect_kind, tp_id128 *out, tp_error *err) {
