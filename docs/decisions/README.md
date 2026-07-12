@@ -18,3 +18,4 @@ implementation-policy выборы). Формат: контекст, решен�
 | [0004](0004-pack-supersession.md) | Один running Pack + latest intent | initial-policy (C0-03) |
 | [0005](0005-raster-color-policy.md) | sRGB byte-preserving decode, без ICC transforms | initial-policy (C0-04) |
 | [0006](0006-windows-device-paths.md) | `\\?\` — прозрачный алиас (drive/UNC), прочие `\\?\`/`\\.\` → `path_device` | accepted |
+| [0007](0007-f1-01-id-scope.md) | F1-01: ID на atlas/anim/target (source → F1-02), anim id/name split, fill-nil promote | accepted |
