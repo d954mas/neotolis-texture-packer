@@ -14,7 +14,10 @@ add_library(tp_core STATIC
     # canonical saved-project path (lexical + realpath), Save-As transition DTO.
     # Promoted from the accepted C0-01 spike; no engine API, no new link deps
     # (POSIX realpath in libc / Win32 kernel32 auto-linked).
-    src/tp_id.c src/tp_identity.c src/tp_identity_session.c)
+    src/tp_id.c src/tp_identity.c src/tp_identity_session.c
+    # F1-01 schema-v2 identity migration: deterministic legacy synthesis +
+    # atomic writable promotion (kept out of tp_project.c's loader/serializer).
+    src/tp_project_migrate.c)
 target_include_directories(tp_core PUBLIC include)
 # tp_pack_settings.c includes nt_builder.h for the header-only nt_atlas_opts_defaults()
 # inline (the single source of the packing defaults). HEADERS ONLY: this adds the builder
