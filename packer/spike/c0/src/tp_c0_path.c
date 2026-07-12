@@ -2,24 +2,14 @@
 
 #include <string.h>
 
+#include "tp_c0_lex.h"
+
 tp_c0_host tp_c0_host_native(void) {
 #if defined(_WIN32)
     return TP_C0_HOST_WINDOWS;
 #else
     return TP_C0_HOST_POSIX;
 #endif
-}
-
-static bool is_alpha(char c) {
-    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
-}
-
-static char ascii_upper(char c) {
-    return (c >= 'a' && c <= 'z') ? (char)(c - 'a' + 'A') : c;
-}
-
-static char ascii_lower(char c) {
-    return (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
 }
 
 /* Append n bytes of `s` to out at *pos, guarding cap (leaves room for a later
@@ -86,11 +76,11 @@ tp_c0_detail tp_c0_project_path_canonical(const char *input, tp_c0_host host, ch
                                   "Windows device path '\\\\.\\...' is not a project identity");
             }
             const char *after = work + 4; /* past "//?/" */
-            if (is_alpha(after[0]) && after[1] == ':') {
+            if (tp_c0_is_alpha(after[0]) && after[1] == ':') {
                 /* "//?/X:..." -> "X:..." (canonicalize as a drive path). */
                 memmove(work, after, strlen(after) + 1U);
-            } else if (ascii_upper(after[0]) == 'U' && ascii_upper(after[1]) == 'N' &&
-                       ascii_upper(after[2]) == 'C' && after[3] == '/') {
+            } else if (tp_c0_ascii_upper(after[0]) == 'U' && tp_c0_ascii_upper(after[1]) == 'N' &&
+                       tp_c0_ascii_upper(after[2]) == 'C' && after[3] == '/') {
                 /* "//?/UNC/server/share..." -> "//server/share..." (UNC). work+7
                  * is the '/' before the server, so prefixing one '/' yields "//". */
                 memmove(work + 1, work + 7, strlen(work + 7) + 1U);
@@ -134,15 +124,15 @@ tp_c0_detail tp_c0_project_path_canonical(const char *input, tp_c0_host host, ch
             memcpy(rootbuf + 3 + slen, share, shlen);
             rootlen = 3 + slen + shlen; /* "//" + server + "/" + share */
             rest = (*p == '/') ? p + 1 : p;
-        } else if (is_alpha(work[0]) && work[1] == ':') {
+        } else if (tp_c0_is_alpha(work[0]) && work[1] == ':') {
             if (work[2] == '/') {
-                rootbuf[0] = ascii_upper(work[0]);
+                rootbuf[0] = tp_c0_ascii_upper(work[0]);
                 rootbuf[1] = ':';
                 rootbuf[2] = '/';
                 rootlen = 3;
                 rest = work + 3;
             } else if (work[2] == '\0') {
-                rootbuf[0] = ascii_upper(work[0]);
+                rootbuf[0] = tp_c0_ascii_upper(work[0]);
                 rootbuf[1] = ':';
                 rootbuf[2] = '/';
                 rootlen = 3;
@@ -162,19 +152,10 @@ tp_c0_detail tp_c0_project_path_canonical(const char *input, tp_c0_host host, ch
     size_t comp_len[TP_C0_PATH_MAX / 2 + 1];
     size_t ncomp = 0;
 
-    const char *p = rest;
-    while (*p) {
-        const char *start = p;
-        while (*p && *p != '/') {
-            p++;
-        }
-        size_t len = (size_t)(p - start);
-        if (*p == '/') {
-            p++;
-        }
-        if (len == 0) {
-            continue; /* repeated or trailing separator */
-        }
+    tp_c0_lex it = tp_c0_lex_begin(rest, false); /* '\' already rewritten to '/' */
+    const char *start;
+    size_t len;
+    while (tp_c0_lex_next(&it, &start, &len)) {
         if (len == 1 && start[0] == '.') {
             continue; /* current dir */
         }
@@ -216,8 +197,8 @@ bool tp_c0_project_path_equal(const char *canon_a, const char *canon_b, tp_c0_ho
         return strcmp(canon_a, canon_b) == 0;
     }
     for (;;) {
-        char ca = ascii_lower(*canon_a);
-        char cb = ascii_lower(*canon_b);
+        char ca = tp_c0_ascii_lower(*canon_a);
+        char cb = tp_c0_ascii_lower(*canon_b);
         if (ca != cb) {
             return false;
         }

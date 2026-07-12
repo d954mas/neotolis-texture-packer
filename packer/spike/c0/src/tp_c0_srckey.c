@@ -3,15 +3,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "tp_c0_lex.h"
 #include "utf8proc.h"
-
-static bool is_alpha(char c) {
-    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
-}
-
-static char ascii_upper(char c) {
-    return (c >= 'a' && c <= 'z') ? (char)(c - 'a' + 'A') : c;
-}
 
 /* Structure-normalize (byte level) `input` into `joined`: split on '/' and '\\',
  * drop empty/'.' components, reject '..'/absolute. Result is a '/'-joined key
@@ -20,25 +13,16 @@ static tp_c0_detail structure_normalize(const char *input, char *joined, size_t 
     if (input[0] == '/' || input[0] == '\\') {
         return tp_c0_fail(err, TP_C0_ERR_KEY_ABSOLUTE, "source key must be relative (leading separator)");
     }
-    if (is_alpha(input[0]) && input[1] == ':') {
+    if (tp_c0_is_alpha(input[0]) && input[1] == ':') {
         return tp_c0_fail(err, TP_C0_ERR_KEY_ABSOLUTE, "source key must be relative (drive prefix)");
     }
 
     size_t pos = 0;
     bool any = false;
-    const char *p = input;
-    while (*p) {
-        const char *start = p;
-        while (*p && *p != '/' && *p != '\\') {
-            p++;
-        }
-        size_t len = (size_t)(p - start);
-        if (*p) {
-            p++; /* consume separator */
-        }
-        if (len == 0) {
-            continue; /* repeated or trailing separator */
-        }
+    tp_c0_lex it = tp_c0_lex_begin(input, true); /* '\\' is a separator too */
+    const char *start;
+    size_t len;
+    while (tp_c0_lex_next(&it, &start, &len)) {
         if (len == 1 && start[0] == '.') {
             continue;
         }
@@ -50,7 +34,7 @@ static tp_c0_detail structure_normalize(const char *input, char *joined, size_t 
                 return tp_c0_fail(err, TP_C0_ERR_BUFFER_TOO_SMALL, "source key exceeds %zu bytes", cap);
             }
             joined[pos++] = '/';
-        } else if (len >= 2 && is_alpha(start[0]) && start[1] == ':') {
+        } else if (len >= 2 && tp_c0_is_alpha(start[0]) && start[1] == ':') {
             /* Drive prefix revealed only after '.'-stripping: the normalized key
              * would begin "X:", an absolute path. Reject so normalize is
              * idempotent (e.g. "./C:/x" must not become the accepted "C:/x"). A
@@ -174,7 +158,7 @@ static bool is_reserved_component(const char *comp, size_t len) {
     }
     char up[5];
     for (size_t i = 0; i < base; i++) {
-        up[i] = ascii_upper(comp[i]);
+        up[i] = tp_c0_ascii_upper(comp[i]);
     }
     up[base] = '\0';
     if (base == 3) {
@@ -191,19 +175,10 @@ tp_c0_detail tp_c0_srckey_portability(const char *normalized_key, unsigned *out_
         return tp_c0_fail(err, TP_C0_ERR_NULL_ARG, "input or out is NULL");
     }
     unsigned flags = TP_C0_PORT_OK;
-    const char *p = normalized_key;
-    while (*p) {
-        const char *start = p;
-        while (*p && *p != '/') {
-            p++;
-        }
-        size_t len = (size_t)(p - start);
-        if (*p == '/') {
-            p++;
-        }
-        if (len == 0) {
-            continue;
-        }
+    tp_c0_lex it = tp_c0_lex_begin(normalized_key, false);
+    const char *start;
+    size_t len;
+    while (tp_c0_lex_next(&it, &start, &len)) {
         if (is_reserved_component(start, len)) {
             flags |= TP_C0_PORT_RESERVED_NAME;
         }
