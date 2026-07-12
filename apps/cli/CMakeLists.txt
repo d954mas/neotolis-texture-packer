@@ -5,7 +5,7 @@
 # as apps/smoke and the builder-linking tests).
 set(CLI_OUTPUT_DIR "${CMAKE_SOURCE_DIR}/build/apps/cli/${NT_PRESET_NAME}")
 
-add_executable(ntpacker main.c cli_out.c cli_project.c cli_inspect.c cli_validate.c)
+add_executable(ntpacker main.c cli_out.c cli_project.c cli_inspect.c cli_validate.c cli_pack.c)
 target_link_libraries(ntpacker PRIVATE tp_build)
 target_include_directories(ntpacker PRIVATE "${CMAKE_SOURCE_DIR}/apps/common") # shared ntpacker_version.h
 target_compile_definitions(ntpacker PRIVATE _CRT_SECURE_NO_WARNINGS)
@@ -88,3 +88,31 @@ add_test(NAME cli_validate_strict COMMAND ${CMAKE_COMMAND}
 # (j) validate on an unloadable file -> exit 3.
 add_test(NAME cli_validate_unloadable COMMAND ${CMAKE_COMMAND}
     -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=3 "-DARGS=validate ${_td}/bad.ntpacker_project" -P "${_run}")
+
+# (k) pack the clean fixture: exit 0, report parses (timings masked), files land
+# under --out-dir (never in the source tree).
+add_test(NAME cli_pack_clean COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0
+    "-DARGS=pack ${_td}/clean.ntpacker_project --json --out-dir ${CMAKE_CURRENT_BINARY_DIR}/cli_pack_out"
+    -DCHECKER=$<TARGET_FILE:cli_json_check>
+    "-DCHECK_ARGS=pack targets_ok=1 targets_failed=0"
+    -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_pack_clean.json
+    "-DEXIST_FILES=${CMAKE_CURRENT_BINARY_DIR}/cli_pack_out/out/clean.json.json;${CMAKE_CURRENT_BINARY_DIR}/cli_pack_out/out/clean.json-0.png"
+    -P "${_run}")
+
+# (l) --target filtering every target away -> ok-with-warning (agents must not
+# hard-fail on a preview-only project), zero targets in the report.
+add_test(NAME cli_pack_target_none COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0
+    "-DARGS=pack ${_td}/clean.ntpacker_project --json --target defold --out-dir ${CMAKE_CURRENT_BINARY_DIR}/cli_pack_out2"
+    -DCHECKER=$<TARGET_FILE:cli_json_check>
+    "-DCHECK_ARGS=pack targets_ok=0 targets_failed=0"
+    -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_pack_none.json
+    -P "${_run}")
+
+# (m) dangling anim frame aborts the atlas before any target writes (plan L-4
+# through the CLI): pack failure, exit 4.
+add_test(NAME cli_pack_problems COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=4
+    "-DARGS=pack ${_td}/problems.ntpacker_project --out-dir ${CMAKE_CURRENT_BINARY_DIR}/cli_pack_out3"
+    -P "${_run}")

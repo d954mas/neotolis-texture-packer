@@ -379,6 +379,66 @@ static bool setup_all(const char *dir) {
     return true;
 }
 
+/* B3a: the structured report — shape, file existence, and determinism across
+ * two runs (pages/occupancy are pack-derived; timings live outside the report). */
+static void test_report_ex(void) {
+    tp_pack_sprite_desc sprites[3];
+    memset(sprites, 0, sizeof sprites);
+    sprites[0] = (tp_pack_sprite_desc){.name = "wide", .rgba = g_wide, .w = 120, .h = 24, .origin_x = 0.5F, .origin_y = 0.5F};
+    sprites[1] = (tp_pack_sprite_desc){.name = "tall", .rgba = g_tall, .w = 24, .h = 100, .origin_x = 0.5F, .origin_y = 0.5F};
+    sprites[2] = (tp_pack_sprite_desc){.name = "piv", .rgba = g_piv, .w = 30, .h = 20, .origin_x = 1.5F, .origin_y = -0.25F};
+
+    tp_export_report rep[2];
+    double occ0 = 0.0;
+    for (int pass = 0; pass < 2; pass++) {
+        tp_arena *ar = tp_arena_create(0);
+        TEST_ASSERT_NOT_NULL(ar);
+        tp_export_notices nts;
+        tp_export_notices_init(&nts);
+        tp_error e = {{0}};
+        memset(&rep[pass], 0, sizeof rep[pass]);
+        tp_status st = tp_export_run_ex(g_proj, 0, sprites, 3, g_dir, ar, &nts, NULL, &rep[pass], &e);
+        TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, st);
+        TEST_ASSERT_FALSE(rep[pass].pack_failed);
+        TEST_ASSERT_EQUAL_INT(2, rep[pass].run_count); /* json+nopivot share, norot repacks */
+        TEST_ASSERT_EQUAL_INT(3, rep[pass].target_count);
+        for (int r = 0; r < rep[pass].run_count; r++) {
+            const tp_export_report_run *run = &rep[pass].runs[r];
+            TEST_ASSERT_TRUE(run->page_count >= 1);
+            TEST_ASSERT_EQUAL_INT(3, run->sprite_count);
+            for (int g = 0; g < run->page_count; g++) {
+                TEST_ASSERT_TRUE(run->pages[g].w > 0 && run->pages[g].h > 0);
+                TEST_ASSERT_TRUE(run->pages[g].occupancy_pct > 0.0 && run->pages[g].occupancy_pct <= 100.0);
+            }
+        }
+        for (int t = 0; t < rep[pass].target_count; t++) {
+            const tp_export_report_target *tg = &rep[pass].targets[t];
+            TEST_ASSERT_TRUE(tg->ok);
+            TEST_ASSERT_NULL(tg->error);
+            TEST_ASSERT_TRUE(tg->pack_run >= 0 && tg->pack_run < rep[pass].run_count);
+            TEST_ASSERT_TRUE(tg->written_file_count >= 1);
+            TEST_ASSERT_TRUE(tg->notice_begin <= tg->notice_end);
+            for (int f = 0; f < tg->written_file_count; f++) {
+                FILE *fp = fopen(tg->written_files[f], "rb");
+                TEST_ASSERT_NOT_NULL_MESSAGE(fp, tg->written_files[f]);
+                (void)fclose(fp);
+            }
+        }
+        if (pass == 0) {
+            occ0 = rep[0].runs[0].pages[0].occupancy_pct;
+            /* rep[0]'s arena strings die with the arena; only scalars compare below. */
+            tp_export_notices_free(&nts);
+            tp_arena_destroy(ar);
+        } else {
+            TEST_ASSERT_EQUAL_INT(rep[0].run_count, rep[1].run_count);
+            const double d = occ0 - rep[1].runs[0].pages[0].occupancy_pct;
+            TEST_ASSERT_TRUE_MESSAGE(d > -1e-9 && d < 1e-9, "occupancy not deterministic");
+            tp_export_notices_free(&nts);
+            tp_arena_destroy(ar);
+        }
+    }
+}
+
 int main(int argc, char **argv) {
     const char *dir = (argc > 1) ? argv[1] : ".";
     if (!setup_all(dir)) {
@@ -391,6 +451,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_nopivot_drops_pivot_with_notice);
     RUN_TEST(test_rename_and_anim_through_run);
     RUN_TEST(test_dangling_frame_through_run);
+    RUN_TEST(test_report_ex);
     int rc = UNITY_END();
     tp_export_notices_free(&g_notices);
     tp_project_destroy(g_proj);

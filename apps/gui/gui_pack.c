@@ -23,6 +23,7 @@
 #include "tp_core/tp_names.h"
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_project.h"
+#include "tp_core/tp_scan.h"
 
 #include "gui_project.h"
 #include "gui_scan.h"
@@ -120,37 +121,8 @@ static bool assemble(int ai, desc_vec *dv, int *missing, char *err, size_t err_c
     return true;
 }
 
-/* Creates every parent directory of the file path `file_abs` (mkdir -p of its dirname). */
-static void mkdirs_parent(const char *file_abs) {
-    char tmp[700];
-    (void)snprintf(tmp, sizeof tmp, "%s", file_abs);
-    char *last = strrchr(tmp, '/');
-    char *lb = strrchr(tmp, '\\');
-    if (lb && (!last || lb > last)) {
-        last = lb;
-    }
-    if (!last) {
-        return;
-    }
-    *last = '\0';
-    for (char *q = tmp; *q != '\0'; q++) {
-        if ((*q == '/' || *q == '\\') && q != tmp) {
-            const char sep = *q;
-            *q = '\0';
-#ifdef _WIN32
-            (void)CreateDirectoryA(tmp, NULL);
-#else
-            (void)mkdir(tmp, 0755);
-#endif
-            *q = sep;
-        }
-    }
-#ifdef _WIN32
-    (void)CreateDirectoryA(tmp, NULL);
-#else
-    (void)mkdir(tmp, 0755);
-#endif
-}
+/* Target output-dir creation now lives in tp_core (tp_mkdirs_parent, tp_scan.h) --
+ * the single home both frontends share (was copy-pasted here as mkdirs_parent). */
 // #endregion
 
 // #region public
@@ -444,7 +416,7 @@ bool gui_pack_export_async_start(char *err, size_t err_cap) {
                 relerr = true;
                 break;
             }
-            mkdirs_parent(out_abs);
+            tp_mkdirs_parent(out_abs);
         }
         if (relerr) {
             for (int k = 0; k < n; k++) {
@@ -1146,7 +1118,7 @@ bool gui_pack_export(int atlas_index, int *out_targets, int *out_notices, char *
             }
             return false;
         }
-        mkdirs_parent(out_abs);
+        tp_mkdirs_parent(out_abs);
         enabled++;
     }
     if (enabled == 0) {

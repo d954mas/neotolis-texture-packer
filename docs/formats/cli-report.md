@@ -1,0 +1,73 @@
+# ntpacker CLI — machine payloads (`--json`)
+
+Conventions (docs/design/ai-first.md items 2/5): every payload is a single JSON
+object on **stdout** (stderr carries diagnostics only), field names are
+**snake_case**, and every payload carries a per-verb `"schema": N` (independent
+of the project-file and export-format schema versions — those are reported by
+`version --json`). Field additions are non-breaking; removals/renames bump the
+verb's schema. Floats are dot-decimal always (`LC_NUMERIC` pinned to `C`).
+Errors with `--json` are also stdout payloads:
+`{"schema":1,"error":{"id":"<tp_status_id>","message":"..."}}`; the exit code
+is the authoritative machine signal (see `cli_exit.h`: 0 ok · 1 internal ·
+2 usage · 3 project load/parse · 4 pack failure · 5 export failure · 6 partial ·
+7 validate --strict findings · 8+ reserved).
+
+## `pack` report (schema 1)
+
+```json
+{
+  "schema": 1,
+  "atlases": [{
+    "name": "animals",
+    "sprite_count": 60,
+    "missing_sources": 0,
+    "pack_runs": 1,
+    "pages": [{"index": 0, "w": 1024, "h": 512, "occupancy_pct": 87.3}],
+    "targets": [{
+      "exporter_id": "json-neotolis",
+      "out_path": "C:/.../out/animals",
+      "status": "ok",
+      "written_files": ["C:/.../out/animals.json", "C:/.../out/animals-0.png"],
+      "notices": [{"field": "pivot", "reason": "caps_unsupported",
+                   "sprite": "round/elephant", "message": "..."}]
+    }]
+  }],
+  "totals": {"targets_ok": 1, "targets_failed": 0, "files_written": 2},
+  "timings_ms": {"total": 812.4}
+}
+```
+
+- `occupancy_pct` — sum of placed ORIGINAL frame areas (aliases share their
+  original's pixels, not double-counted) / page area × 100; deterministic,
+  in (0,100] for a non-empty page.
+- `pages` are grouped per shared pack run; targets whose effective settings
+  coincide reuse one run (`pack_runs`).
+- A failed target reports `"status": "failed"` + `"error"`; the run continues
+  to remaining targets (exit 6 when some succeeded, 5 when none did). A pack/
+  normalize failure aborts the atlas before any target writes (exit 4).
+- `timings_ms` values are environment-dependent and are **masked in golden
+  tests** — never assert them; everything else in the report is deterministic.
+- `out_path` is the resolved absolute output **base**: each exporter appends
+  its own extension(s) (`<base>.json`, `<base>-<page>.png`, Defold
+  `<base>.tpinfo` + sibling `.tpatlas`).
+
+## `pack` flags
+
+- `--atlas <name>` — only that atlas (unknown name = usage error, exit 2).
+- `--target <id>` — only targets with that exporter id; filtering everything
+  away is OK-with-warning (exit 0, empty targets) so preview-only projects
+  don't fail agent pipelines.
+- `--out-dir <dir>` — RELATIVE target out_paths are re-rooted under `<dir>`
+  (resolved against the CWD) instead of the project dir; absolute out_paths
+  are untouched. Parent directories are created.
+- `--dry-run` (B3b) — same report, no files written, predicted degradations
+  included.
+
+## `inspect` (schema 1) / `validate` (schema 1)
+
+See `apps/cli/cli_inspect.c` / `cli_validate.c` headers; `validate` findings:
+`{severity: error|warning, code: <stable token>, message, atlas?, sprite?,
+anim?, frame?, target?}` with `counts:{error,warning}`. Stable finding codes:
+`missing_source, empty_atlas, dangling_anim_frame, duplicate_export_key,
+export_name_collision, unknown_exporter, setting_out_of_range,
+input_build_failed`.

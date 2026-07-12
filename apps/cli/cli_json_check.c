@@ -201,6 +201,58 @@ static int check_validate(const cJSON *root, int argc, char **argv) {
     return 0;
 }
 
+/* --- pack --json --- */
+static int check_pack(const cJSON *root, int argc, char **argv) {
+    if (!cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(root, "schema"))) {
+        return fail("pack: missing/!number: schema");
+    }
+    const cJSON *atlases = cJSON_GetObjectItemCaseSensitive(root, "atlases");
+    if (!cJSON_IsArray(atlases) || cJSON_GetArraySize(atlases) == 0) {
+        return fail("pack: missing/empty: atlases");
+    }
+    const cJSON *a = cJSON_GetArrayItem(atlases, 0);
+    if (!cJSON_IsString(cJSON_GetObjectItemCaseSensitive(a, "name")) ||
+        !cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(a, "sprite_count")) ||
+        !cJSON_IsArray(cJSON_GetObjectItemCaseSensitive(a, "targets"))) {
+        return fail("pack: atlas[0] missing name/sprite_count/targets");
+    }
+    const cJSON *pages = cJSON_GetObjectItemCaseSensitive(a, "pages");
+    if (!cJSON_IsArray(pages)) {
+        return fail("pack: atlas[0] missing pages");
+    }
+    const cJSON *pg = NULL;
+    cJSON_ArrayForEach(pg, pages) {
+        const cJSON *occ = cJSON_GetObjectItemCaseSensitive(pg, "occupancy_pct");
+        if (!cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(pg, "w")) ||
+            !cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(pg, "h")) || !cJSON_IsNumber(occ) ||
+            occ->valuedouble <= 0.0 || occ->valuedouble > 100.0) {
+            return fail("pack: a page is missing w/h or occupancy_pct out of (0,100]");
+        }
+    }
+    const cJSON *totals = cJSON_GetObjectItemCaseSensitive(root, "totals");
+    const cJSON *tok = cJSON_GetObjectItemCaseSensitive(totals, "targets_ok");
+    const cJSON *tfail = cJSON_GetObjectItemCaseSensitive(totals, "targets_failed");
+    if (!cJSON_IsObject(totals) || !cJSON_IsNumber(tok) || !cJSON_IsNumber(tfail) ||
+        !cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(totals, "files_written"))) {
+        return fail("pack: totals missing targets_ok/targets_failed/files_written");
+    }
+    /* timings_ms must exist but its VALUES are never asserted (mask policy). */
+    if (!cJSON_IsObject(cJSON_GetObjectItemCaseSensitive(root, "timings_ms"))) {
+        return fail("pack: missing timings_ms object");
+    }
+    const char *eok = arg_val(argc, argv, "targets_ok");
+    if (eok && tok->valueint != atoi(eok)) {
+        (void)fprintf(stderr, "cli_json_check: pack targets_ok %d != expected %s\n", tok->valueint, eok);
+        return 1;
+    }
+    const char *efail = arg_val(argc, argv, "targets_failed");
+    if (efail && tfail->valueint != atoi(efail)) {
+        (void)fprintf(stderr, "cli_json_check: pack targets_failed %d != expected %s\n", tfail->valueint, efail);
+        return 1;
+    }
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         return fail("usage: cli_json_check <json-file> [mode] [k=v ...]");
@@ -226,6 +278,8 @@ int main(int argc, char **argv) {
         rc = check_inspect(root, argc, argv);
     } else if (strcmp(mode, "validate") == 0) {
         rc = check_validate(root, argc, argv);
+    } else if (strcmp(mode, "pack") == 0) {
+        rc = check_pack(root, argc, argv);
     } else {
         rc = check_manifest(root);
     }

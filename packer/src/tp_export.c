@@ -1,6 +1,7 @@
 #include "tp_core/tp_export.h"
 
 #include <stdarg.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -103,6 +104,23 @@ void tp_export_notices_free(tp_export_notices *n) {
 }
 
 /* ======================================================================== */
+/* output-file enumeration (structured report)                              */
+/* ======================================================================== */
+
+void tp_export_list_page_files(const tp_result *result, const char *out_path_base, tp_export_path_sink sink, void *ud) {
+    if (!result || !out_path_base || !sink) {
+        return;
+    }
+    for (int p = 0; p < result->page_count; p++) {
+        char path[1024];
+        int n = snprintf(path, sizeof path, "%s-%d.png", out_path_base, p);
+        if (n > 0 && (size_t)n < sizeof path) {
+            sink(ud, path);
+        }
+    }
+}
+
+/* ======================================================================== */
 /* capability -> pack-settings clamp (SUMMARY.md §5h)                        */
 /* ======================================================================== */
 
@@ -177,6 +195,7 @@ static const tp_exporter g_defold = {
              .multipage = true,
              .aliases = true},
     .write = tp_export_defold_write,
+    .list_outputs = tp_export_defold_list_outputs, /* also lists the .tpatlas sibling */
 };
 
 /* Built-in table: the v1 user-facing exporters (SUMMARY.md §6 Q5). */

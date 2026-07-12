@@ -196,4 +196,52 @@ bool tp_scan_exists(const char *abs) {
     return stat(abs, &st) == 0;
 #endif
 }
+
+#ifdef _WIN32
+#define TP_MKDIR_ONE(p) (void)CreateDirectoryA((p), NULL)
+#else
+#define TP_MKDIR_ONE(p) (void)mkdir((p), 0755)
+#endif
+
+void tp_mkdirs(const char *dir) {
+    if (!dir || dir[0] == '\0') {
+        return;
+    }
+    char tmp[1024];
+    (void)snprintf(tmp, sizeof tmp, "%s", dir);
+    /* strip trailing separators (but keep a lone leading '/'). */
+    size_t len = strlen(tmp);
+    while (len > 1 && (tmp[len - 1] == '/' || tmp[len - 1] == '\\')) {
+        tmp[--len] = '\0';
+    }
+    /* create each intermediate directory, then the leaf. `q != tmp` skips a
+     * leading '/' (POSIX absolute) and never mkdir's the empty string. */
+    for (char *q = tmp; *q != '\0'; q++) {
+        if ((*q == '/' || *q == '\\') && q != tmp) {
+            const char sep = *q;
+            *q = '\0';
+            TP_MKDIR_ONE(tmp);
+            *q = sep;
+        }
+    }
+    TP_MKDIR_ONE(tmp);
+}
+
+void tp_mkdirs_parent(const char *file_path) {
+    if (!file_path) {
+        return;
+    }
+    char tmp[1024];
+    (void)snprintf(tmp, sizeof tmp, "%s", file_path);
+    char *last = strrchr(tmp, '/');
+    char *lb = strrchr(tmp, '\\');
+    if (lb && (!last || lb > last)) {
+        last = lb;
+    }
+    if (!last) {
+        return; /* no directory component */
+    }
+    *last = '\0';
+    tp_mkdirs(tmp);
+}
 // #endregion

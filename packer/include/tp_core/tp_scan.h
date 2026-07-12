@@ -42,6 +42,18 @@ bool tp_scan_is_dir(const char *abs);
 /* True if `abs` exists on disk (file OR directory). */
 bool tp_scan_exists(const char *abs);
 
+/* mkdir -p of `dir` (every missing ancestor + `dir` itself). Best-effort: an
+ * already-existing path or a permission error is ignored (the caller surfaces the
+ * real error at the subsequent open/write). NULL/empty -> no-op. Accepts '/' or
+ * '\\' separators. The single home for the dir-creation both frontends need before
+ * writing target outputs (was copy-pasted GUI-side: gui_pack.c mkdirs_parent). */
+void tp_mkdirs(const char *dir);
+
+/* mkdir -p of the PARENT directory of the file path `file_path` (its dirname), so
+ * a writer can create `file_path` itself. A path with no separator has no parent
+ * -> no-op. */
+void tp_mkdirs_parent(const char *file_path);
+
 #ifdef __cplusplus
 }
 #endif

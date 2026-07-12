@@ -560,3 +560,20 @@ tp_status tp_export_defold_write(const tp_export_prepared *prep, const tp_export
     free(atlas.buf);
     return st;
 }
+
+void tp_export_defold_list_outputs(const tp_export_prepared *prep, const char *out_path_base, tp_export_path_sink sink,
+                                   void *ud) {
+    if (!prep || !out_path_base || !sink) {
+        return;
+    }
+    char path[TP_DEFOLD_PATH_MAX];
+    int n = snprintf(path, sizeof path, "%s.tpinfo", out_path_base);
+    if (n > 0 && (size_t)n < sizeof path) {
+        sink(ud, path);
+    }
+    n = snprintf(path, sizeof path, "%s.tpatlas", out_path_base);
+    if (n > 0 && (size_t)n < sizeof path) {
+        sink(ud, path);
+    }
+    tp_export_list_page_files(prep->result, out_path_base, sink, ud);
+}

@@ -7,6 +7,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "log/nt_log.h"
+
 #include "cli_cmds.h"
 #include "cli_exit.h"
 #include "cli_out.h"
@@ -74,6 +76,9 @@ static void build_manifest(cli_sb *sb) {
     cli_sb_str(sb, ": 1,\n");
     indent(sb, 2);
     cli_sb_json_str(sb, "validate");
+    cli_sb_str(sb, ": 1,\n");
+    indent(sb, 2);
+    cli_sb_json_str(sb, "pack");
     cli_sb_str(sb, ": 1,\n");
     indent(sb, 2);
     cli_sb_json_str(sb, "version");
@@ -163,14 +168,19 @@ static void print_usage(FILE *out) {
                   "  ntpacker <command> [options]\n"
                   "\n"
                   "Commands:\n"
+                  "  pack | export <p>  Pack + export every enabled target (== GUI \"Export All\")\n"
                   "  inspect <project>  Dump project state (--json is the contract; text is a summary)\n"
                   "  validate <project> Report every project problem in one pass\n"
                   "  version            Print the version; --json emits the schema manifest\n"
                   "  help               Show this help\n"
                   "\n"
                   "Planned (not in this build; calling one is a usage error for now):\n"
-                  "  pack | export      Pack + export the enabled targets\n"
                   "  new                Create a new project\n"
+                  "\n"
+                  "pack options:\n"
+                  "  --atlas <name>     Only pack this atlas (unknown name -> usage error)\n"
+                  "  --target <id>      Only export targets with this exporter id\n"
+                  "  --out-dir <dir>    Re-root RELATIVE target out_paths under <dir> (vs the project dir)\n"
                   "\n"
                   "Global options:\n"
                   "  --json             Machine-readable JSON output (stable per-verb schema)\n"
@@ -202,9 +212,17 @@ int main(int argc, char **argv) {
         }
     }
 
+    /* Engine logging: the default nt_log writer sends INFO to STDOUT (the builder
+     * is chatty), which would corrupt the machine payload. WARN+ERROR already go
+     * to stderr, so capping at WARN keeps stdout = payload only; --quiet gags all. */
+    nt_log_set_level(quiet ? NT_LOG_LEVEL_NONE : NT_LOG_LEVEL_WARN);
+
     bool want_help = false;
     bool want_version = false;
     bool strict = false;
+    const char *opt_atlas = NULL;   /* pack-only value flags (rejected elsewhere below) */
+    const char *opt_target = NULL;
+    const char *opt_out_dir = NULL;
     const char *positionals[8]; /* verb + its operands; plenty for v1 verbs */
     int npos = 0;
 
@@ -215,6 +233,22 @@ int main(int argc, char **argv) {
         }
         if (strcmp(a, "--strict") == 0) {
             strict = true; /* validate-only; rejected for other verbs below */
+            continue;
+        }
+        if (strcmp(a, "--atlas") == 0 || strcmp(a, "--target") == 0 || strcmp(a, "--out-dir") == 0) {
+            /* value flags: consume the next token (pack-only; rejected elsewhere below). */
+            if (i + 1 >= argc) {
+                cli_emit_error(json, quiet, "usage", "option '%s' needs a value; try 'ntpacker help'", a);
+                return CLI_EXIT_USAGE;
+            }
+            const char *val = argv[++i];
+            if (strcmp(a, "--atlas") == 0) {
+                opt_atlas = val;
+            } else if (strcmp(a, "--target") == 0) {
+                opt_target = val;
+            } else {
+                opt_out_dir = val;
+            }
             continue;
         }
         if (strcmp(a, "--help") == 0) {
@@ -253,12 +287,29 @@ int main(int argc, char **argv) {
         return CLI_EXIT_USAGE;
     }
     const char *verb = positionals[0];
+    const bool is_pack = (strcmp(verb, "pack") == 0 || strcmp(verb, "export") == 0);
+    /* pack-only value flags are a usage error on any other verb (mirrors --strict). */
+    if (!is_pack && (opt_atlas || opt_target || opt_out_dir)) {
+        cli_emit_error(json, quiet, "usage", "--atlas/--target/--out-dir are only valid for pack");
+        return CLI_EXIT_USAGE;
+    }
     if (strcmp(verb, "version") == 0) {
         return cmd_version(json);
     }
     if (strcmp(verb, "help") == 0) {
         print_usage(stdout);
         return CLI_EXIT_OK;
+    }
+    if (is_pack) {
+        if (strict) {
+            cli_emit_error(json, quiet, "usage", "--strict is only valid for validate");
+            return CLI_EXIT_USAGE;
+        }
+        if (npos != 2) {
+            cli_emit_error(json, quiet, "usage", "%s needs exactly one <project> path; try 'ntpacker help'", verb);
+            return CLI_EXIT_USAGE;
+        }
+        return cmd_pack(positionals[1], opt_atlas, opt_target, opt_out_dir, json, quiet);
     }
     if (strcmp(verb, "inspect") == 0 || strcmp(verb, "validate") == 0) {
         if (npos != 2) {

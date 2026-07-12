@@ -237,6 +237,16 @@ tp_status tp_export_predict_loss(const struct tp_project *project, int atlas_ind
  * (tp_core has no dir-creation opinion). Deterministic. */
 tp_status tp_export_write_pages(const tp_result *result, const char *out_path_base, bool premultiply, tp_error *err);
 
+/* Sink for enumerating an exporter's output files (for the structured export
+ * report / introspection). Each call receives one output path; `ud` is the
+ * caller's context. */
+typedef void (*tp_export_path_sink)(void *ud, const char *path);
+
+/* Appends every page-PNG path ("<out_path_base>-<N>.png", N in [0,page_count)) to
+ * `sink`. Single source of the page-file naming tp_export_write_pages uses, so an
+ * exporter's list_outputs and the actual writer never drift. NULL-safe args. */
+void tp_export_list_page_files(const tp_result *result, const char *out_path_base, tp_export_path_sink sink, void *ud);
+
 /* ------------------------------------------------------------------ */
 /* Exporter registry (data + one write fn over the canonical model).    */
 /* ------------------------------------------------------------------ */
@@ -248,12 +258,21 @@ tp_status tp_export_write_pages(const tp_result *result, const char *out_path_ba
 typedef tp_status (*tp_export_write_fn)(const tp_export_prepared *prep, const tp_export_caps *caps,
                                         const char *out_path_base, tp_export_notices *notices, tp_error *err);
 
+/* Optional: enumerate the files write() produces for `prep` rooted at
+ * out_path_base, via `sink`. Lets the run layer report every written file honestly
+ * without re-encoding each writer's naming. NULL => the run layer assumes the
+ * common shape "<base>.<extension>" + the page PNGs. Defold sets it because it also
+ * writes a .tpatlas sibling the single primary `extension` cannot express. */
+typedef void (*tp_export_list_outputs_fn)(const tp_export_prepared *prep, const char *out_path_base,
+                                          tp_export_path_sink sink, void *ud);
+
 typedef struct tp_exporter {
     const char *id;           /* stable id, e.g. "json-neotolis" */
     const char *display_name; /* human label for GUI dropdowns */
     const char *extension;    /* primary output extension, no dot, e.g. "json" */
     tp_export_caps caps;
     tp_export_write_fn write;
+    tp_export_list_outputs_fn list_outputs; /* nullable; NULL => "<base>.<ext>" + page PNGs */
 } tp_exporter;
 
 /* Lookup by id across built-in + runtime-registered exporters. NULL on miss. */
@@ -287,6 +306,12 @@ tp_status tp_export_json_neotolis_write(const tp_export_prepared *prep, const tp
  * docs/formats/defold-tpinfo.md. */
 tp_status tp_export_defold_write(const tp_export_prepared *prep, const tp_export_caps *caps, const char *out_path_base,
                                  tp_export_notices *notices, tp_error *err);
+
+/* Enumerates the Defold writer's outputs ("<base>.tpinfo", "<base>.tpatlas", and
+ * the page PNGs). Wired into the Defold exporter descriptor's list_outputs so the
+ * run layer's report lists the .tpatlas sibling the primary extension omits. */
+void tp_export_defold_list_outputs(const tp_export_prepared *prep, const char *out_path_base,
+                                   tp_export_path_sink sink, void *ud);
 
 #ifdef __cplusplus
 }

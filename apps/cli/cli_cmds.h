@@ -26,4 +26,12 @@ int cmd_inspect(const char *path, bool json, bool quiet);
  * failure (plan L-1). */
 int cmd_validate(const char *path, bool json, bool quiet, bool strict);
 
+/* pack <project> [--atlas <name>] [--target <id>] [--out-dir <dir>] [--json] [--quiet]
+ * (alias: export). Packs + exports every enabled target of every atlas via the
+ * shared op layer and writes a structured report. Exit codes: 0 ok, 2 usage
+ * (unknown --atlas), 3 project load, 4 pack failure, 5 export failure, 6 partial.
+ * `opt_atlas`/`opt_target`/`opt_out_dir` are NULL when the flag was not given. */
+int cmd_pack(const char *path, const char *opt_atlas, const char *opt_target, const char *opt_out_dir, bool json,
+             bool quiet);
+
 #endif /* NTPACKER_CLI_CMDS_H */

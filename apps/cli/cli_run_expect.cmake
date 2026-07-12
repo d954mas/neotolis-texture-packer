@@ -22,6 +22,14 @@ if(DEFINED MATCH AND NOT "${_out}" MATCHES "${MATCH}")
     message(FATAL_ERROR "stdout did not match /${MATCH}/\n--stdout--\n${_out}")
 endif()
 
+if(DEFINED EXIST_FILES)
+    foreach(_f IN LISTS EXIST_FILES)
+        if(NOT EXISTS "${_f}")
+            message(FATAL_ERROR "expected output file missing: ${_f}\n--stderr--\n${_err}")
+        endif()
+    endforeach()
+endif()
+
 if(DEFINED CHECKER)
     file(WRITE "${OUTFILE}" "${_out}")
     # Optional CHECK_ARGS (space-separated) select the checker mode + assertions.
