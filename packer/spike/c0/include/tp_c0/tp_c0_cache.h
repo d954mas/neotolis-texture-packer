@@ -55,9 +55,14 @@ void tp_c0_cache_destroy(tp_c0_cache *c);
  * oom (blob copy failed), buffer_too_small (entry table full, all pinned). */
 tp_c0_detail tp_c0_cache_put(tp_c0_cache *c, tp_c0_id128 key, const void *blob, size_t len, tp_error *err);
 
-/* Look up by hash. Returns the cache-owned blob pointer (and *out_len if
- * non-NULL) or NULL on miss. A hit refreshes LRU recency. Selection is BY HASH,
- * independent of insertion/completion order. */
+/* Look up by hash. On a hit, PINS the entry and returns the cache-owned blob
+ * pointer (and *out_len if non-NULL); on a miss returns NULL and pins nothing.
+ * Auto-pinning makes the returned pointer safe to hold across a later put that
+ * would otherwise evict+free it (§10.4: the active result is pinned) -- so the
+ * caller MUST tp_c0_cache_unpin(key) when finished reading (else the entry is held
+ * out of the budget forever). Selection is BY HASH, independent of insertion/
+ * completion order. Use tp_c0_cache_contains for a membership check that does not
+ * pin. */
 const void *tp_c0_cache_get(tp_c0_cache *c, tp_c0_id128 key, size_t *out_len);
 
 bool tp_c0_cache_contains(const tp_c0_cache *c, tp_c0_id128 key);

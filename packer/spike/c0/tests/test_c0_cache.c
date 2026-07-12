@@ -76,8 +76,10 @@ void test_lru_eviction_by_budget(void) {
     TEST_ASSERT_EQUAL_INT(TP_C0_OK, put_bytes(c, 1, 8));
     TEST_ASSERT_EQUAL_INT(TP_C0_OK, put_bytes(c, 2, 8)); /* 16 <= 20 */
     TEST_ASSERT_EQUAL_INT(2, tp_c0_cache_count(c));
-    /* Touch K1 so K2 becomes least-recently-used. */
+    /* Touch K1 so K2 becomes least-recently-used. get() pins the entry, so unpin
+     * right after to keep it a pure recency touch that stays in the budget. */
     TEST_ASSERT_NOT_NULL(tp_c0_cache_get(c, keyi(1), NULL));
+    TEST_ASSERT_TRUE(tp_c0_cache_unpin(c, keyi(1)));
     TEST_ASSERT_EQUAL_INT(TP_C0_OK, put_bytes(c, 3, 8)); /* 24 > 20 -> evict LRU (K2) */
     TEST_ASSERT_TRUE(tp_c0_cache_contains(c, keyi(1)));
     TEST_ASSERT_FALSE(tp_c0_cache_contains(c, keyi(2)));
@@ -134,6 +136,29 @@ void test_selection_by_hash_not_order(void) {
     tp_c0_cache_destroy(c);
 }
 
+/* F5: get() returns a pointer that stays valid across a later budget-busting put.
+ * Auto-pinning makes the contract safe by construction -- reading the pointer
+ * after the eviction pressure must not touch freed memory (UBSan/ASan clean). */
+void test_get_pointer_survives_budget_busting_put(void) {
+    tp_c0_cache *c = tp_c0_cache_mem_create(16);
+    put_bytes(c, 1, 8); /* pattern byte = 2 */
+    size_t len = 0;
+    const void *p = tp_c0_cache_get(c, keyi(1), &len); /* auto-pins K1 */
+    TEST_ASSERT_NOT_NULL(p);
+    TEST_ASSERT_EQUAL_UINT(8, len);
+    TEST_ASSERT_TRUE(tp_c0_cache_is_pinned(c, keyi(1))); /* get pinned it */
+    /* Budget-busting puts would evict the LRU unpinned entry -- but K1 is pinned. */
+    put_bytes(c, 2, 200);
+    put_bytes(c, 3, 200);
+    TEST_ASSERT_TRUE(tp_c0_cache_contains(c, keyi(1))); /* survived, not freed */
+    const uint8_t *bytes = (const uint8_t *)p;
+    for (int i = 0; i < 8; i++) {
+        TEST_ASSERT_EQUAL_UINT8(2, bytes[i]); /* original blob intact, no UAF */
+    }
+    TEST_ASSERT_TRUE(tp_c0_cache_unpin(c, keyi(1))); /* caller releases when done */
+    tp_c0_cache_destroy(c);
+}
+
 /* Entry table full and all pinned -> buffer_too_small, never an abort. */
 void test_entry_table_full_all_pinned(void) {
     tp_c0_cache *c = tp_c0_cache_mem_create(1u << 20);
@@ -158,6 +183,7 @@ int main(void) {
     RUN_TEST(test_pinned_active_never_evicted);
     RUN_TEST(test_explicit_evict);
     RUN_TEST(test_selection_by_hash_not_order);
+    RUN_TEST(test_get_pointer_survives_budget_busting_put);
     RUN_TEST(test_entry_table_full_all_pinned);
     return UNITY_END();
 }

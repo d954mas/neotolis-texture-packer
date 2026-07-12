@@ -144,6 +144,14 @@ budgets, compressed representation, and GPU thresholds open).
   insertion/completion order (the property task 5 relies on). Put copies the blob
   in and frees it internally (no cross-CRT handoff); a returned pointer is
   cache-owned.
+- **Get lifetime is safe by construction (F5):** `get` **auto-pins** the returned
+  entry, so the cache-owned pointer stays valid across a later budget-busting `put`
+  (which could otherwise evict+free the LRU unpinned entry — a use-after-free). The
+  caller **must `unpin`** when finished (else the entry is held out of the budget
+  forever). `enforce_budget` and the table-full eviction path only ever remove
+  UNPINNED entries, so a pinned pointer is never dangled. Use `contains` for a
+  membership check that does not pin. This maps to §10.4's "the active result is
+  pinned"; a `get` result is treated as the active result until released.
 - **Budget LRU over UNPINNED entries:** after a put, unpinned LRU entries are
   evicted while unpinned bytes exceed the budget and more than one unpinned entry
   remains (a single over-budget item is retained — soft cap). The **active result

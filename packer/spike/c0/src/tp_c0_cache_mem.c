@@ -179,6 +179,12 @@ const void *tp_c0_cache_get(tp_c0_cache *c, tp_c0_id128 key, size_t *out_len) {
     if (!e) {
         return NULL;
     }
+    /* Auto-PIN the returned entry so the caller's pointer stays valid across a
+     * later budget-busting put that would otherwise evict+free it (F5, §10.4: the
+     * active result is pinned). The caller MUST tp_c0_cache_unpin(key) when done.
+     * enforce_budget / the table-full path only ever evict UNPINNED entries, so a
+     * pinned pointer is never dangled. */
+    e->pinned = true;
     e->last_use = c->next_tick++;
     if (out_len) {
         *out_len = e->len;
