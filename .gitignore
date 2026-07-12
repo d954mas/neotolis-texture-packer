@@ -4,6 +4,10 @@ compile_commands.json
 *.ntpack
 tmp/
 
+# Local working area of the lead agent (draw-hash baselines, verification
+# screenshots, one-off probe scripts) — machine-local, never committed.
+/scratchpad/
+
 # Defold editor artifacts in the demo project
 examples/defold-demo/.internal/
 examples/defold-demo/.editor_settings
