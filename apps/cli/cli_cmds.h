@@ -18,8 +18,12 @@ struct tp_project;
  * Bumped 1 -> 2 in F1-01: the animation object changed field semantics -- `.id` is now
  * an opaque structural shape-ID and the human/selector name moved to a new `.name`
  * field. Mutation verbs still select an animation BY NAME (`anim <name>`); id-based
- * selectors arrive in F1-03. An AI operator branches on this number to detect the break. */
-#define CLI_INSPECT_SCHEMA 2
+ * selectors arrive in F1-03. An AI operator branches on this number to detect the break.
+ *
+ * Bumped 2 -> 3 in F1-02: the inspect `sources[]` object gained `id` (structural
+ * source shape-ID) and `stored_kind` (persisted folder/file classification) keys --
+ * a versioned-contract change, same reason the anim reshape bumped the number. */
+#define CLI_INSPECT_SCHEMA 3
 
 /* Loads `path` into *out. On failure emits a structured error (id = tp_status_id,
  * message = tp_error prose) honoring --json/--quiet, and returns the CLI exit code

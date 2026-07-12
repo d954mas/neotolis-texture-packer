@@ -229,7 +229,7 @@ static int check_anim(const cJSON *root, int argc, char **argv) {
     }
     const cJSON *an = NULL;
     cJSON_ArrayForEach(an, anims) {
-        /* schema 2: `id` is an opaque shape-ID, `name` is the human/selector key -- both mandatory. */
+        /* schema 3: `id` is an opaque shape-ID, `name` is the human/selector key -- both mandatory. */
         if (!cJSON_IsString(cJSON_GetObjectItemCaseSensitive(an, "id")) ||
             !cJSON_IsString(cJSON_GetObjectItemCaseSensitive(an, "name")) ||
             !cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(an, "fps")) ||
