@@ -30,8 +30,12 @@ static tp_c0_op_class class_from_str(const char *s, bool *ok) {
     return TP_C0_OP_CLASS_SET;
 }
 
+/* Iterate the FULL token space [0, TP_C0_DETAIL_COUNT), not a hardcoded last
+ * enumerator: a token appended by a later packet (e.g. C0-03) then still decodes
+ * on version skew instead of dropping a machine client's structured error report
+ * as "unknown error code". Append-only-safe (F6). */
 static tp_c0_detail code_from_str(const char *s, tp_c0_detail *out) {
-    for (int d = TP_C0_OK; d <= TP_C0_ERR_INVALID_REVISION; d++) {
+    for (int d = 0; d < TP_C0_DETAIL_COUNT; d++) {
         if (strcmp(tp_c0_detail_id((tp_c0_detail)d), s) == 0) {
             *out = (tp_c0_detail)d;
             return TP_C0_OK;

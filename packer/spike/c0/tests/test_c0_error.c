@@ -60,10 +60,21 @@ void test_unknown_detail(void) {
     TEST_ASSERT_EQUAL_STRING("unknown", tp_c0_detail_id((tp_c0_detail)9999));
 }
 
+void test_detail_count_sentinel(void) {
+    /* tp_c0_txn_result.c's code_from_str iterates [0, TP_C0_DETAIL_COUNT), so an
+     * append-only token still round-trips on version skew rather than being
+     * dropped as "unknown error code". Pin that COUNT sits past the last real
+     * code and is not itself a decodable token (it maps to ""). */
+    TEST_ASSERT_TRUE(TP_C0_DETAIL_COUNT > TP_C0_ERR_INVALID_REVISION);
+    TEST_ASSERT_EQUAL_STRING("invalid_revision", tp_c0_detail_id((tp_c0_detail)(TP_C0_DETAIL_COUNT - 1)));
+    TEST_ASSERT_EQUAL_STRING("", tp_c0_detail_id(TP_C0_DETAIL_COUNT));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_all_tokens_pinned);
     RUN_TEST(test_tokens_are_machine_ids);
     RUN_TEST(test_unknown_detail);
+    RUN_TEST(test_detail_count_sentinel);
     return UNITY_END();
 }

@@ -512,6 +512,23 @@ void test_duplicate_field_rejected(void) {
                                            "\"atlas_id\":\"" ATLAS2 "\",\"name\":\"a\",\"name\":\"b\"}]}}"));
 }
 
+/* ---- result decode tolerates the whole append-only token space (F6) ------- */
+
+void test_result_decodes_last_error_token(void) {
+    /* The LAST real token (currently invalid_revision) must decode: code_from_str
+     * iterates [0, TP_C0_DETAIL_COUNT), not a hardcoded last enumerator, so a
+     * client's structured error report survives version skew. */
+    const char *json = "{\"schema\":1,\"result\":{\"errors\":[{\"code\":\"invalid_revision\","
+                       "\"message\":\"x\",\"op_index\":-1}],\"revision\":8,\"status\":\"rejected\","
+                       "\"transaction_id\":\"" TID "\"}}";
+    tp_c0_detail d = TP_C0_OK;
+    tp_error err = {0};
+    tp_c0_txn_result *res = tp_c0_txn_result_decode(json, &d, &err);
+    TEST_ASSERT_NOT_NULL(res);
+    TEST_ASSERT_EQUAL_INT(TP_C0_ERR_INVALID_REVISION, res->errors[0].code);
+    tp_c0_txn_result_free(res);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_request_roundtrip);
@@ -534,5 +551,6 @@ int main(void) {
     RUN_TEST(test_label_author_strict);
     RUN_TEST(test_errors_truncated_marker);
     RUN_TEST(test_duplicate_field_rejected);
+    RUN_TEST(test_result_decodes_last_error_token);
     return UNITY_END();
 }

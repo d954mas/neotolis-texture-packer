@@ -77,7 +77,13 @@ typedef enum tp_c0_detail {
 
     /* revision precondition (validate whole batch before any apply) */
     TP_C0_ERR_REVISION_CONFLICT, /* expected_revision < current: stale base, rebuild+retry */
-    TP_C0_ERR_INVALID_REVISION   /* expected_revision > current: impossible future base */
+    TP_C0_ERR_INVALID_REVISION,  /* expected_revision > current: impossible future base */
+
+    /* Count sentinel: MUST stay last (append new codes before it). Lets decoders
+     * iterate the FULL token space [0, TP_C0_DETAIL_COUNT) so a newly appended
+     * token still round-trips on version skew instead of hardcoding the current
+     * last enumerator. Shifts no existing value -- append-only-safe. */
+    TP_C0_DETAIL_COUNT
 } tp_c0_detail;
 
 /* Stable lowercase machine token per reason (test-pinned contract). */
