@@ -72,7 +72,7 @@ Project identity (§5.1) is the canonical normalized path of the
 
 ## 3. Text encoding + Unicode NFC boundary (task 3)
 
-- Vendored **utf8proc 2.9.0** (MIT, Unicode 15.1.0), pinned with source URL and
+- Vendored **utf8proc 2.11.1** (MIT, Unicode 17.0.0), pinned with source URL and
   SHA-256 in `packer/deps/utf8proc/VENDOR.md`. Engine submodule untouched
   (decision `docs/decisions/0002-utf8proc-nfc.md`).
 - **NFC** = `utf8proc_map(UTF8PROC_NULLTERM | UTF8PROC_STABLE | UTF8PROC_COMPOSE)`.

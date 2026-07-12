@@ -8,13 +8,13 @@ canonicalization (master spec §5.3; decision `docs/decisions/0002-utf8proc-nfc.
 | Field | Value |
 |-------|-------|
 | Library | utf8proc |
-| Version | **2.9.0** (`UTF8PROC_VERSION_MAJOR.MINOR.PATCH` = 2.9.0) |
+| Version | **2.11.1** (`UTF8PROC_VERSION_MAJOR.MINOR.PATCH` = 2.11.1) |
 | Upstream | https://github.com/JuliaStrings/utf8proc |
-| Unicode data | Unicode 15.1.0 (shipped in the 2.9.0 release) |
+| Unicode data | Unicode 17.0.0 (shipped in the 2.11.1 release) |
 | Licence | MIT "expat" (see `LICENSE.md`) |
-| Source artifact | `utf8proc-2.9.0.tar.gz` (maintainer release asset) |
-| Download URL | https://github.com/JuliaStrings/utf8proc/releases/download/v2.9.0/utf8proc-2.9.0.tar.gz |
-| Release tarball SHA-256 | `bd215d04313b5bc42c1abedbcb0a6574667e31acee1085543a232204e36384c4` |
+| Source artifact | `utf8proc-2.11.1.tar.gz` (maintainer release asset) |
+| Download URL | https://github.com/JuliaStrings/utf8proc/releases/download/v2.11.1/utf8proc-2.11.1.tar.gz |
+| Release tarball SHA-256 | `0aa41260917df1ef4724f34f314babbd48ba18963e4d5a14a1752f14ee765010` |
 
 The maintainer-uploaded release **asset** is pinned (byte-stable), not the
 GitHub auto-generated `archive/refs/tags` tarball (whose bytes are not
@@ -26,9 +26,9 @@ Only the amalgamation needed to link the library is vendored:
 
 | File | SHA-256 | Purpose |
 |------|---------|---------|
-| `utf8proc.h` | `29a3a51647270444a84b10a5fe182f3469ccd205907998baf8370a4cbbdb2103` | Public API |
-| `utf8proc.c` | `fe5255fb4f05b1d9f063ef104f3e0935097f298564b9b77d904e19b14a75d3bb` | Implementation (`#include`s `utf8proc_data.c`) |
-| `utf8proc_data.c` | `f5538036d1cf17b9ef81647c9c7277c52f0106964582a8102ab9a4901c23c039` | Generated Unicode property/composition tables |
+| `utf8proc.h` | `8b2ec05d2486d49f46d1a4e824f471efd3390bed7c38b999a5cf7de152003914` | Public API |
+| `utf8proc.c` | `dfcfee948bb0a817b60ebf722fad00f0580f330a55a7b50793162ef4f0ef453b` | Implementation (`#include`s `utf8proc_data.c`) |
+| `utf8proc_data.c` | `950e549dbfc853c4304425f3af1875e72fa9fc9697c273c763400c2da4e380a7` | Generated Unicode property/composition tables |
 | `LICENSE.md` | — | Upstream licence text (MIT expat + Unicode data terms) |
 | `CMakeLists.txt` | — | Our thin static-lib target (not upstream's build) |
 
