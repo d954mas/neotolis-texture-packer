@@ -101,8 +101,14 @@ static const char *arg_val(int argc, char **argv, const char *key) {
 
 /* --- inspect --json --- */
 static int check_inspect(const cJSON *root, int argc, char **argv) {
-    if (!cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(root, "schema"))) {
+    const cJSON *schema = cJSON_GetObjectItemCaseSensitive(root, "schema");
+    if (!cJSON_IsNumber(schema)) {
         return fail("inspect: missing/!number: schema");
+    }
+    const char *eschema = arg_val(argc, argv, "schema");
+    if (eschema && schema->valueint != atoi(eschema)) {
+        (void)fprintf(stderr, "cli_json_check: inspect schema %d != expected %s\n", schema->valueint, eschema);
+        return 1;
     }
     const cJSON *proj = cJSON_GetObjectItemCaseSensitive(root, "project");
     if (!cJSON_IsObject(proj)) {
@@ -208,8 +214,14 @@ static int check_validate(const cJSON *root, int argc, char **argv) {
 
 /* --- anim list --json --- */
 static int check_anim(const cJSON *root, int argc, char **argv) {
-    if (!cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(root, "schema"))) {
+    const cJSON *schema = cJSON_GetObjectItemCaseSensitive(root, "schema");
+    if (!cJSON_IsNumber(schema)) {
         return fail("anim: missing/!number: schema");
+    }
+    const char *eschema = arg_val(argc, argv, "schema");
+    if (eschema && schema->valueint != atoi(eschema)) {
+        (void)fprintf(stderr, "cli_json_check: anim schema %d != expected %s\n", schema->valueint, eschema);
+        return 1;
     }
     const cJSON *anims = cJSON_GetObjectItemCaseSensitive(root, "animations");
     if (!cJSON_IsArray(anims)) {
@@ -217,13 +229,15 @@ static int check_anim(const cJSON *root, int argc, char **argv) {
     }
     const cJSON *an = NULL;
     cJSON_ArrayForEach(an, anims) {
+        /* schema 2: `id` is an opaque shape-ID, `name` is the human/selector key -- both mandatory. */
         if (!cJSON_IsString(cJSON_GetObjectItemCaseSensitive(an, "id")) ||
+            !cJSON_IsString(cJSON_GetObjectItemCaseSensitive(an, "name")) ||
             !cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(an, "fps")) ||
             !cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(an, "playback")) ||
             !cJSON_IsBool(cJSON_GetObjectItemCaseSensitive(an, "flip_h")) ||
             !cJSON_IsBool(cJSON_GetObjectItemCaseSensitive(an, "flip_v")) ||
             !cJSON_IsArray(cJSON_GetObjectItemCaseSensitive(an, "frames"))) {
-            return fail("anim: an entry is missing id/fps/playback/flip_h/flip_v/frames");
+            return fail("anim: an entry is missing id/name/fps/playback/flip_h/flip_v/frames");
         }
     }
     const char *want = arg_val(argc, argv, "count");

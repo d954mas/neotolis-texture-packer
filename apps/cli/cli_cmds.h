@@ -10,6 +10,17 @@
 
 struct tp_project;
 
+/* Shared query-payload schema for `inspect --json` AND the `anim list --json` query
+ * (its animation shape mirrors inspect's). SINGLE source of truth -- cli_inspect.c,
+ * cli_mutate.c's anim_list, and main.c's `version --json` manifest all read this so
+ * the number can never drift between the payloads and their advertised version.
+ *
+ * Bumped 1 -> 2 in F1-01: the animation object changed field semantics -- `.id` is now
+ * an opaque structural shape-ID and the human/selector name moved to a new `.name`
+ * field. Mutation verbs still select an animation BY NAME (`anim <name>`); id-based
+ * selectors arrive in F1-03. An AI operator branches on this number to detect the break. */
+#define CLI_INSPECT_SCHEMA 2
+
 /* Loads `path` into *out. On failure emits a structured error (id = tp_status_id,
  * message = tp_error prose) honoring --json/--quiet, and returns the CLI exit code
  * (CLI_EXIT_PROJECT for a load/parse error, CLI_EXIT_INTERNAL for OOM). On success
@@ -17,7 +28,7 @@ struct tp_project;
 int cli_load_project(const char *path, bool json, bool quiet, struct tp_project **out);
 
 /* inspect <project> [--json]: dump project state. Human output is cosmetic; the
- * --json payload (schema 1) is the contract. Returns CLI_EXIT_OK / _PROJECT / _INTERNAL. */
+ * --json payload (CLI_INSPECT_SCHEMA) is the contract. Returns CLI_EXIT_OK / _PROJECT / _INTERNAL. */
 int cmd_inspect(const char *path, bool json, bool quiet);
 
 /* validate <project> [--json] [--strict]: report every finding in one run. Exit 0

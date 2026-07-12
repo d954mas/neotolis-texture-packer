@@ -868,7 +868,8 @@ static int do_sprite_unset(const char *const *pos, int npos, bool json, bool qui
 /* anim                                                               */
 /* ------------------------------------------------------------------ */
 
-/* anim list is a QUERY: {"schema":1,"animations":[...]} (mirrors inspect's anim shape). */
+/* anim list is a QUERY: {"schema":CLI_INSPECT_SCHEMA,"animations":[...]} -- its animation
+ * shape mirrors inspect's, so it shares inspect's query schema (id + name split). */
 static int anim_list(tp_project_atlas *a, const char *atlas_name, bool json, bool quiet) {
     (void)quiet;
     if (!json) {
@@ -883,7 +884,9 @@ static int anim_list(tp_project_atlas *a, const char *atlas_name, bool json, boo
     cli_sb sb = {0};
     bool first = true;
     cli_sb_putc(&sb, '{');
-    cli_sb_str(&sb, "\n  \"schema\": 1,\n  \"animations\": ");
+    cli_sb_str(&sb, "\n  \"schema\": ");
+    cli_sb_int(&sb, CLI_INSPECT_SCHEMA);
+    cli_sb_str(&sb, ",\n  \"animations\": ");
     if (a->animation_count == 0) {
         cli_sb_str(&sb, "[]");
     } else {

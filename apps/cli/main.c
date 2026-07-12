@@ -73,15 +73,19 @@ static void build_manifest(cli_sb *sb) {
     cli_sb_str(sb, ": {\n");
     indent(sb, 2);
     cli_sb_json_str(sb, "inspect");
-    cli_sb_str(sb, ": 1,\n");
+    cli_sb_str(sb, ": ");
+    cli_sb_int(sb, CLI_INSPECT_SCHEMA); /* query-payload schema (single source of truth) */
+    cli_sb_str(sb, ",\n");
     indent(sb, 2);
     cli_sb_json_str(sb, "validate");
     cli_sb_str(sb, ": 1,\n");
     indent(sb, 2);
     cli_sb_json_str(sb, "pack");
     cli_sb_str(sb, ": 1,\n");
-    /* B4 mutation verbs: each emits the shared {ok,verb,count} payload (schema 1);
-     * `anim list` emits a schema-1 query payload. */
+    /* B4 mutation verbs: each emits the shared {ok,verb,count} payload (schema 1).
+     * The `anim` VALUE here is that mutation-payload schema; `anim list` is a QUERY
+     * whose payload shares inspect's query schema (CLI_INSPECT_SCHEMA), carried in
+     * its own `schema` field. */
     static const char *const mut_verbs[] = {"new", "add", "remove", "set", "sprite", "anim", "target", "atlas"};
     for (int i = 0; i < (int)(sizeof mut_verbs / sizeof mut_verbs[0]); i++) {
         indent(sb, 2);

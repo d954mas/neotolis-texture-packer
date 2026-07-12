@@ -1,9 +1,9 @@
 /* `ntpacker inspect <project> [--json]` (plan B2). Dumps project state: settings,
  * sources (with resolved abs path + kind), sprites RESOLVED via a tp_pack_input_build
  * DRY pass (no packing -- descs only, disk-touching for folder sources is intended),
- * animations, and targets. The --json payload (schema 1) is the contract; the human
- * summary is explicitly cosmetic (tested only as non-empty, exit 0). */
-#include "cli_cmds.h"
+ * animations, and targets. The --json payload (CLI_INSPECT_SCHEMA) is the contract; the
+ * human summary is explicitly cosmetic (tested only as non-empty, exit 0). */
+#include "cli_cmds.h" /* CLI_INSPECT_SCHEMA */
 
 #include <stdio.h>
 
@@ -14,8 +14,6 @@
 #include "tp_core/tp_names.h"
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_scan.h"
-
-#define CLI_INSPECT_SCHEMA 1
 
 /* Emits `,\n` (or `\n` for the first entry) + indent + "key": -- the same
  * first-tracking pattern tp_project.c's writer uses, so nesting stays balanced. */

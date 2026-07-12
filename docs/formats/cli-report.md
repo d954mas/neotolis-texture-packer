@@ -88,7 +88,12 @@ is the authoritative machine signal (see `cli_exit.h`: 0 ok · 1 internal ·
 - `--dry-run` (B3b) — same report, no files written, predicted degradations
   included.
 
-## `inspect` (schema 1) / `validate` (schema 1)
+## `inspect` (schema 2) / `validate` (schema 1)
+
+Schema 2 (F1-01): each animation object carries an opaque structural `id` (shape-ID)
+plus a human `name`; `name` is the selector every mutation verb uses (`anim <name>`,
+id-based selectors arrive in F1-03). The `anim list --json` query shares this schema
+(same animation shape). An operator branches on the `schema` number to detect the change.
 
 See `apps/cli/cli_inspect.c` / `cli_validate.c` headers; `validate` findings:
 `{severity: error|warning, code: <stable token>, message, atlas?, sprite?,
