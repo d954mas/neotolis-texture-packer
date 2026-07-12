@@ -181,6 +181,8 @@ static void print_usage(FILE *out) {
                   "  --atlas <name>     Only pack this atlas (unknown name -> usage error)\n"
                   "  --target <id>      Only export targets with this exporter id\n"
                   "  --out-dir <dir>    Re-root RELATIVE target out_paths under <dir> (vs the project dir)\n"
+                  "  --dry-run          Report what pack WOULD do (pages, would_write, predicted\n"
+                  "                     losses) and write NO files\n"
                   "\n"
                   "Global options:\n"
                   "  --json             Machine-readable JSON output (stable per-verb schema)\n"
@@ -220,6 +222,7 @@ int main(int argc, char **argv) {
     bool want_help = false;
     bool want_version = false;
     bool strict = false;
+    bool dry_run = false;           /* pack-only; rejected for other verbs below */
     const char *opt_atlas = NULL;   /* pack-only value flags (rejected elsewhere below) */
     const char *opt_target = NULL;
     const char *opt_out_dir = NULL;
@@ -233,6 +236,10 @@ int main(int argc, char **argv) {
         }
         if (strcmp(a, "--strict") == 0) {
             strict = true; /* validate-only; rejected for other verbs below */
+            continue;
+        }
+        if (strcmp(a, "--dry-run") == 0) {
+            dry_run = true; /* pack-only; rejected for other verbs below */
             continue;
         }
         if (strcmp(a, "--atlas") == 0 || strcmp(a, "--target") == 0 || strcmp(a, "--out-dir") == 0) {
@@ -288,9 +295,9 @@ int main(int argc, char **argv) {
     }
     const char *verb = positionals[0];
     const bool is_pack = (strcmp(verb, "pack") == 0 || strcmp(verb, "export") == 0);
-    /* pack-only value flags are a usage error on any other verb (mirrors --strict). */
-    if (!is_pack && (opt_atlas || opt_target || opt_out_dir)) {
-        cli_emit_error(json, quiet, "usage", "--atlas/--target/--out-dir are only valid for pack");
+    /* pack-only flags are a usage error on any other verb (mirrors --strict). */
+    if (!is_pack && (opt_atlas || opt_target || opt_out_dir || dry_run)) {
+        cli_emit_error(json, quiet, "usage", "--atlas/--target/--out-dir/--dry-run are only valid for pack");
         return CLI_EXIT_USAGE;
     }
     if (strcmp(verb, "version") == 0) {
@@ -309,7 +316,7 @@ int main(int argc, char **argv) {
             cli_emit_error(json, quiet, "usage", "%s needs exactly one <project> path; try 'ntpacker help'", verb);
             return CLI_EXIT_USAGE;
         }
-        return cmd_pack(positionals[1], opt_atlas, opt_target, opt_out_dir, json, quiet);
+        return cmd_pack(positionals[1], opt_atlas, opt_target, opt_out_dir, dry_run, json, quiet);
     }
     if (strcmp(verb, "inspect") == 0 || strcmp(verb, "validate") == 0) {
         if (npos != 2) {

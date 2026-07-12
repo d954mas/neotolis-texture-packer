@@ -11,6 +11,8 @@
  *   --target <id>   only targets with that exporter id run (others disabled).
  *   --out-dir <dir> RELATIVE target out_paths are re-rooted under <dir> (resolved
  *                   against the CWD); absolute out_paths are left untouched.
+ *   --dry-run       Pack + predict, write NO files (no mkdirs either). Each target
+ *                   reports would_write + predicted-loss notices; report.dry_run=true.
  *
  * Exit codes (cli_exit.h): 0 all ok; 3 project load; 4 pack failure (nothing
  * produced); 5 export/writer failure (nothing produced); 6 partial (some targets
@@ -219,7 +221,8 @@ static void emit_str_array(cli_sb *sb, int depth, const char *const *items, int 
     cli_sb_putc(sb, ']');
 }
 
-static void emit_target(cli_sb *sb, int depth, const tp_export_report_target *rt, const tp_export_notices *notices) {
+static void emit_target(cli_sb *sb, int depth, const tp_export_report_target *rt, const tp_export_notices *notices,
+                        bool dry_run) {
     bool tf = true;
     cli_sb_putc(sb, '{');
     key(sb, depth + 1, &tf, "exporter_id");
@@ -234,8 +237,14 @@ static void emit_target(cli_sb *sb, int depth, const tp_export_report_target *rt
         key(sb, depth + 1, &tf, "error");
         cli_sb_json_str(sb, rt->error);
     }
+    /* written_files is always present (empty on a dry run); would_write is added
+     * only on a dry run -- the paths that WOULD be produced (docs/formats/cli-report.md). */
     key(sb, depth + 1, &tf, "written_files");
     emit_str_array(sb, depth + 1, rt->written_files, rt->written_file_count);
+    if (dry_run) {
+        key(sb, depth + 1, &tf, "would_write");
+        emit_str_array(sb, depth + 1, rt->would_write, rt->would_write_count);
+    }
 
     key(sb, depth + 1, &tf, "notices");
     int nb = rt->notice_begin;
@@ -262,7 +271,8 @@ static void emit_target(cli_sb *sb, int depth, const tp_export_report_target *rt
  * records why it was skipped. `pages` uses the PRIMARY pack run (runs[0]); a target
  * on a different run is flagged by its own `pack_run` index. */
 static void emit_atlas(cli_sb *sb, int depth, const char *name, int sprite_count, int missing_sources,
-                       const tp_export_report *report, const tp_export_notices *notices, const char *note) {
+                       const tp_export_report *report, const tp_export_notices *notices, const char *note,
+                       bool dry_run) {
     bool af = true;
     cli_sb_putc(sb, '{');
     key(sb, depth + 1, &af, "name");
@@ -290,7 +300,7 @@ static void emit_atlas(cli_sb *sb, int depth, const char *name, int sprite_count
         for (int i = 0; i < report->target_count; i++) {
             cli_sb_str(sb, i == 0 ? "\n" : ",\n");
             cli_sb_indent(sb, depth + 2);
-            emit_target(sb, depth + 2, &report->targets[i], notices);
+            emit_target(sb, depth + 2, &report->targets[i], notices, dry_run);
         }
         cli_sb_str(sb, "\n");
         cli_sb_indent(sb, depth + 1);
@@ -339,9 +349,14 @@ static void report_progress(const char *name, const tp_export_report *report, co
     if (!report) {
         return;
     }
+    const bool dry = report->dry_run;
     for (int i = 0; i < report->target_count; i++) {
         const tp_export_report_target *rt = &report->targets[i];
-        if (rt->ok) {
+        if (rt->ok && dry) {
+            (void)fprintf(stderr, "ntpacker: %s / %s: would write %d file%s (dry-run)\n", name,
+                          rt->exporter_id ? rt->exporter_id : "?", rt->would_write_count,
+                          rt->would_write_count == 1 ? "" : "s");
+        } else if (rt->ok) {
             (void)fprintf(stderr, "ntpacker: %s / %s: ok (%d file%s)\n", name, rt->exporter_id ? rt->exporter_id : "?",
                           rt->written_file_count, rt->written_file_count == 1 ? "" : "s");
         } else {
@@ -358,9 +373,10 @@ static void report_progress(const char *name, const tp_export_report *report, co
     }
 }
 
-/* Human summary lines for one atlas (stdout). */
+/* Human summary lines for one atlas (stdout). On a dry run each ok target reports
+ * the count it WOULD write instead of a written count. */
 static void print_atlas_human(const char *name, int sprite_count, int missing_sources,
-                              const tp_export_report *report, const char *note) {
+                              const tp_export_report *report, const char *note, bool dry_run) {
     if (note) {
         (void)printf("atlas '%s': %s\n", name, note);
         return;
@@ -373,7 +389,11 @@ static void print_atlas_human(const char *name, int sprite_count, int missing_so
     }
     for (int i = 0; i < report->target_count; i++) {
         const tp_export_report_target *rt = &report->targets[i];
-        if (rt->ok) {
+        if (rt->ok && dry_run) {
+            (void)printf("  %-16s -> %s  would write %d file%s\n", rt->exporter_id ? rt->exporter_id : "?",
+                         rt->out_path ? rt->out_path : "", rt->would_write_count,
+                         rt->would_write_count == 1 ? "" : "s");
+        } else if (rt->ok) {
             (void)printf("  %-16s -> %s  ok (%d file%s)\n", rt->exporter_id ? rt->exporter_id : "?",
                          rt->out_path ? rt->out_path : "", rt->written_file_count,
                          rt->written_file_count == 1 ? "" : "s");
@@ -385,7 +405,7 @@ static void print_atlas_human(const char *name, int sprite_count, int missing_so
 }
 
 int cmd_pack(const char *project_path, const char *opt_atlas, const char *opt_target, const char *opt_out_dir,
-             bool json, bool quiet) {
+             bool dry_run, bool json, bool quiet) {
     tp_project *p = NULL;
     int rc = cli_load_project(project_path, json, quiet, &p);
     if (rc != CLI_EXIT_OK) {
@@ -441,6 +461,8 @@ int cmd_pack(const char *project_path, const char *opt_atlas, const char *opt_ta
         cli_sb_putc(&sb, '{');
         key(&sb, 1, &rf, "schema");
         cli_sb_int(&sb, CLI_PACK_SCHEMA);
+        key(&sb, 1, &rf, "dry_run");
+        cli_sb_str(&sb, dry_run ? "true" : "false");
         key(&sb, 1, &rf, "atlases");
         cli_sb_putc(&sb, '[');
     }
@@ -480,14 +502,18 @@ int cmd_pack(const char *project_path, const char *opt_atlas, const char *opt_ta
         } else if (enabled == 0) {
             note = "no enabled targets (skipped)";
         } else {
-            /* Create each enabled target's output parent dir (tp_export_run needs it). */
-            for (int t = 0; t < a->target_count; t++) {
-                if (!a->targets[t].enabled) {
-                    continue;
-                }
-                char out_abs[700];
-                if (tp_project_resolve_path(p, a->targets[t].out_path, out_abs, sizeof out_abs) == TP_STATUS_OK) {
-                    tp_mkdirs_parent(out_abs);
+            /* Create each enabled target's output parent dir (tp_export_run needs it).
+             * SKIPPED on a dry run -- ai-first.md item 6: predict without touching the
+             * filesystem (no mkdirs, no writes). */
+            if (!dry_run) {
+                for (int t = 0; t < a->target_count; t++) {
+                    if (!a->targets[t].enabled) {
+                        continue;
+                    }
+                    char out_abs[700];
+                    if (tp_project_resolve_path(p, a->targets[t].out_path, out_abs, sizeof out_abs) == TP_STATUS_OK) {
+                        tp_mkdirs_parent(out_abs);
+                    }
                 }
             }
             arena = tp_arena_create(0);
@@ -496,7 +522,8 @@ int cmd_pack(const char *project_path, const char *opt_atlas, const char *opt_ta
                 had_pack_fail = true;
             } else {
                 tp_error re = {0};
-                (void)tp_export_run_ex(p, ai, input.descs, input.count, work_dir, arena, &notices, NULL, &report, &re);
+                tp_export_run_opts opts = {.report = &report, .dry_run = dry_run};
+                (void)tp_export_run_ex(p, ai, input.descs, input.count, work_dir, arena, &notices, NULL, &opts, &re);
                 ran = true;
                 if (report.pack_failed) {
                     had_pack_fail = true;
@@ -518,9 +545,9 @@ int cmd_pack(const char *project_path, const char *opt_atlas, const char *opt_ta
             cli_sb_str(&sb, any_atlas_emitted ? ",\n" : "\n");
             cli_sb_indent(&sb, 2);
             emit_atlas(&sb, 2, a->name ? a->name : "", sprite_count, missing, ran ? &report : NULL, ran ? &notices : NULL,
-                       note);
+                       note, dry_run);
         } else {
-            print_atlas_human(a->name ? a->name : "", sprite_count, missing, ran ? &report : NULL, note);
+            print_atlas_human(a->name ? a->name : "", sprite_count, missing, ran ? &report : NULL, note, dry_run);
         }
         any_atlas_emitted = true;
 
@@ -594,7 +621,10 @@ int cmd_pack(const char *project_path, const char *opt_atlas, const char *opt_ta
         cli_out_stdout(&sb);
         cli_sb_free(&sb);
     } else {
-        if (exit_code == CLI_EXIT_OK) {
+        if (exit_code == CLI_EXIT_OK && dry_run) {
+            (void)printf("OK dry-run (%d target%s, no files written)\n", total_targets_ok,
+                         total_targets_ok == 1 ? "" : "s");
+        } else if (exit_code == CLI_EXIT_OK) {
             (void)printf("OK (%d target%s, %d file%s)\n", total_targets_ok, total_targets_ok == 1 ? "" : "s",
                          total_files, total_files == 1 ? "" : "s");
         } else {

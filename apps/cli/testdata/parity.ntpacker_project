@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "atlases": [
+    {
+      "name": "parity",
+      "max_size": 256,
+      "padding": 1,
+      "margin": 0,
+      "shape": 0,
+      "allow_transform": false,
+      "power_of_two": false,
+      "alpha_threshold": 1,
+      "sources": [
+        "parity_sprites"
+      ],
+      "sprites": [
+        {
+          "name": "hero",
+          "rename": "champion"
+        },
+        {
+          "name": "frac",
+          "origin": [0.5, 0.25]
+        },
+        {
+          "name": ".mask",
+          "origin": [0.75, 0.25]
+        }
+      ],
+      "animations": [
+        {
+          "fps": 8,
+          "frames": [
+            "hero",
+            "gem"
+          ],
+          "id": "walk",
+          "playback": 1
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "out_path": "out/parity_json"
+        },
+        {
+          "exporter_id": "json-neotolis",
+          "out_path": "out/nested/deep_json"
+        },
+        {
+          "exporter_id": "defold",
+          "out_path": "out/parity_def"
+        }
+      ]
+    }
+  ]
+}

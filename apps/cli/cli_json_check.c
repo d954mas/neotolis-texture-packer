@@ -4,10 +4,13 @@
  * stdout straight into a JSON parser.
  *
  *   cli_json_check <file> [mode] [k=v ...]
- *     mode = manifest (default) | inspect | validate
+ *     mode = manifest (default) | inspect | validate | pack
  *     inspect : sprites=N  -> atlases[0].sprites has exactly N entries
  *     validate: error=N warning=N  -> counts assertions
  *               code=NAME (repeatable) -> a finding with that code exists
+ *     pack    : targets_ok=N targets_failed=N -> totals assertions
+ *               dry_run=1 -> report.dry_run true, every ok target carries a
+ *                            would_write array + empty written_files, 0 files written
  *
  * No exporter-id literals here -> boundary gate R2 stays clean. */
 #include <stdbool.h>
@@ -239,6 +242,42 @@ static int check_pack(const cJSON *root, int argc, char **argv) {
     /* timings_ms must exist but its VALUES are never asserted (mask policy). */
     if (!cJSON_IsObject(cJSON_GetObjectItemCaseSensitive(root, "timings_ms"))) {
         return fail("pack: missing timings_ms object");
+    }
+    /* dry_run is a mandatory bool on the root (B3b schema addition). */
+    const cJSON *dry = cJSON_GetObjectItemCaseSensitive(root, "dry_run");
+    if (!cJSON_IsBool(dry)) {
+        return fail("pack: missing/!bool: dry_run");
+    }
+    const char *edry = arg_val(argc, argv, "dry_run");
+    if (edry && atoi(edry) != 0) {
+        if (!cJSON_IsTrue(dry)) {
+            return fail("pack: expected dry_run true");
+        }
+        const cJSON *fw = cJSON_GetObjectItemCaseSensitive(root, "totals");
+        fw = cJSON_GetObjectItemCaseSensitive(fw, "files_written");
+        if (!cJSON_IsNumber(fw) || fw->valueint != 0) {
+            return fail("pack: dry run must report files_written == 0");
+        }
+        /* every ok target: would_write array present + written_files empty. */
+        const cJSON *at = NULL;
+        cJSON_ArrayForEach(at, atlases) {
+            const cJSON *tgts = cJSON_GetObjectItemCaseSensitive(at, "targets");
+            const cJSON *tg = NULL;
+            cJSON_ArrayForEach(tg, tgts) {
+                const cJSON *stt = cJSON_GetObjectItemCaseSensitive(tg, "status");
+                if (!cJSON_IsString(stt) || strcmp(stt->valuestring, "ok") != 0) {
+                    continue;
+                }
+                const cJSON *ww = cJSON_GetObjectItemCaseSensitive(tg, "would_write");
+                const cJSON *wf = cJSON_GetObjectItemCaseSensitive(tg, "written_files");
+                if (!cJSON_IsArray(ww) || cJSON_GetArraySize(ww) < 1) {
+                    return fail("pack: dry run ok target missing a non-empty would_write");
+                }
+                if (!cJSON_IsArray(wf) || cJSON_GetArraySize(wf) != 0) {
+                    return fail("pack: dry run must leave written_files empty");
+                }
+            }
+        }
     }
     const char *eok = arg_val(argc, argv, "targets_ok");
     if (eok && tok->valueint != atoi(eok)) {

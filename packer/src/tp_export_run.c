@@ -134,16 +134,18 @@ static void list_target_outputs(const tp_exporter *exp, const tp_export_prepared
     tp_export_list_page_files(prep->result, out_base, sink, ud);
 }
 
-/* Fills rt->written_files from the target's writer output (two passes: count then
- * fill). Returns TP_STATUS_OOM on allocation failure. */
-static tp_status collect_written_files(const tp_exporter *exp, const tp_export_prepared *prep, const char *out_base,
-                                       tp_arena *arena, tp_export_report_target *rt) {
+/* Enumerates the target's output paths (two passes: count then fill) into an
+ * arena-owned array, writing out_files + out_count. Used for both the wet-path
+ * written_files and the dry-path would_write (identical list; dry just never
+ * writes). Returns TP_STATUS_OOM on allocation failure. */
+static tp_status collect_output_files(const tp_exporter *exp, const tp_export_prepared *prep, const char *out_base,
+                                      tp_arena *arena, const char *const **out_files, int *out_count) {
     file_collect c = {.arena = arena};
     list_target_outputs(exp, prep, out_base, file_count_sink, &c);
     int n = c.count;
     if (n <= 0) {
-        rt->written_files = NULL;
-        rt->written_file_count = 0;
+        *out_files = NULL;
+        *out_count = 0;
         return TP_STATUS_OK;
     }
     const char **arr = (const char **)tp_arena_alloc(arena, (size_t)n * sizeof(char *));
@@ -155,8 +157,8 @@ static tp_status collect_written_files(const tp_exporter *exp, const tp_export_p
     if (f.oom) {
         return TP_STATUS_OOM;
     }
-    rt->written_files = arr;
-    rt->written_file_count = (f.count < n) ? f.count : n;
+    *out_files = arr;
+    *out_count = (f.count < n) ? f.count : n;
     return TP_STATUS_OK;
 }
 
@@ -202,9 +204,12 @@ static tp_status fill_run_report(tp_export_report_run *run, const tp_result *r, 
 
 tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_pack_sprite_desc *sprites,
                            int sprite_count, const char *work_dir, tp_arena *arena, tp_export_notices *notices,
-                           int *out_pack_runs, tp_export_report *report, tp_error *err) {
+                           int *out_pack_runs, const tp_export_run_opts *opts, tp_error *err) {
+    tp_export_report *report = opts ? opts->report : NULL;
+    const bool dry_run = opts && opts->dry_run;
     if (report) {
         memset(report, 0, sizeof *report);
+        report->dry_run = dry_run;
     }
     if (out_pack_runs) {
         *out_pack_runs = 0;
@@ -381,11 +386,46 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
         const tp_exporter *exp = tp_exporter_find(tg->exporter_id);
         tp_export_report_target *rt = (report && rtidx[t] >= 0) ? &report->targets[rtidx[t]] : NULL;
 
+        const tp_export_prepared *prep = &groups[target_group[t]].prep;
         int nbefore = notices ? notices->count : 0;
         if (rt) {
             rt->notice_begin = nbefore;
         }
-        st = exp->write(&groups[target_group[t]].prep, &exp->caps, out_bases[t], notices, err);
+
+        if (dry_run) {
+            /* No writes. The wet path's notices come from the writers, which do not
+             * run here -- so predict every degradation instead (full axes: the packed
+             * prep supplies the alias/multipage axes on top of the project-knowable
+             * ones). ai-first.md item 6: dry-run reports the predicted losses. */
+            st = tp_export_predict_loss(project, atlas_index, &exp->caps, exp->id, prep, notices, err);
+            if (rt) {
+                rt->notice_end = notices ? notices->count : nbefore;
+            }
+            if (st != TP_STATUS_OK) {
+                if (!report) {
+                    return st;
+                }
+                if (rt) {
+                    rt->ok = false;
+                    rt->error = tp_arena_strdup(arena, err && err->msg[0] ? err->msg : "predict-loss failed");
+                }
+                if (first_fail == TP_STATUS_OK) {
+                    first_fail = st;
+                }
+                continue;
+            }
+            if (rt) {
+                rt->ok = true;
+                tp_status cst = collect_output_files(exp, prep, out_bases[t], arena, &rt->would_write,
+                                                     &rt->would_write_count);
+                if (cst != TP_STATUS_OK) {
+                    return tp_error_set(err, cst, "tp_export_run: OOM (would-write report)");
+                }
+            }
+            continue;
+        }
+
+        st = exp->write(prep, &exp->caps, out_bases[t], notices, err);
         if (rt) {
             rt->notice_end = notices ? notices->count : nbefore;
         }
@@ -404,7 +444,8 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
         }
         if (rt) {
             rt->ok = true;
-            tp_status cst = collect_written_files(exp, &groups[target_group[t]].prep, out_bases[t], arena, rt);
+            tp_status cst =
+                collect_output_files(exp, prep, out_bases[t], arena, &rt->written_files, &rt->written_file_count);
             if (cst != TP_STATUS_OK) {
                 return tp_error_set(err, cst, "tp_export_run: OOM (written-files report)");
             }

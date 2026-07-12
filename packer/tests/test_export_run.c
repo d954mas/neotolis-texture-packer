@@ -397,9 +397,11 @@ static void test_report_ex(void) {
         tp_export_notices_init(&nts);
         tp_error e = {{0}};
         memset(&rep[pass], 0, sizeof rep[pass]);
-        tp_status st = tp_export_run_ex(g_proj, 0, sprites, 3, g_dir, ar, &nts, NULL, &rep[pass], &e);
+        tp_export_run_opts opts = {.report = &rep[pass]};
+        tp_status st = tp_export_run_ex(g_proj, 0, sprites, 3, g_dir, ar, &nts, NULL, &opts, &e);
         TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, st);
         TEST_ASSERT_FALSE(rep[pass].pack_failed);
+        TEST_ASSERT_FALSE(rep[pass].dry_run);
         TEST_ASSERT_EQUAL_INT(2, rep[pass].run_count); /* json+nopivot share, norot repacks */
         TEST_ASSERT_EQUAL_INT(3, rep[pass].target_count);
         for (int r = 0; r < rep[pass].run_count; r++) {
@@ -439,6 +441,105 @@ static void test_report_ex(void) {
     }
 }
 
+/* B3b: dry-run packs + predicts but writes NO files. Strategy that stays clean on
+ * a reused ctest build dir: WET-run first to a base (files land), capture the wet
+ * report scalars + file list, DELETE those files, then DRY-run the SAME project to
+ * the SAME base and assert (a) report.dry_run set, (b) identical pages/occupancy +
+ * run count, (c) would_write == the wet written set, (d) written_files empty, and
+ * (e) NONE of the would_write paths exist on disk (dry wrote nothing back). */
+static void test_dry_run(void) {
+    tp_pack_sprite_desc sprites[3];
+    memset(sprites, 0, sizeof sprites);
+    sprites[0] = (tp_pack_sprite_desc){.name = "wide", .rgba = g_wide, .w = 120, .h = 24, .origin_x = 0.5F, .origin_y = 0.5F};
+    sprites[1] = (tp_pack_sprite_desc){.name = "tall", .rgba = g_tall, .w = 24, .h = 100, .origin_x = 0.5F, .origin_y = 0.5F};
+    sprites[2] = (tp_pack_sprite_desc){.name = "piv", .rgba = g_piv, .w = 30, .h = 20, .origin_x = 1.5F, .origin_y = -0.25F};
+
+    tp_project *proj = tp_project_create();
+    TEST_ASSERT_NOT_NULL(proj);
+    tp_project_atlas *a = tp_project_get_atlas(proj, 0);
+    a->shape = 0;
+    a->allow_transform = true;
+    a->power_of_two = false;
+    a->padding = 0;
+    a->margin = 0;
+    a->alpha_threshold = 1;
+    a->max_size = 1024;
+    a->pixels_per_unit = 1.0F;
+    char dbase[1024];
+    (void)snprintf(dbase, sizeof dbase, "%s/dryrun_base", g_dir);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(a, "json-neotolis", dbase, NULL));
+
+    /* --- wet run: files land; capture the report scalars + the file list --- */
+    tp_arena *arw = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arw);
+    tp_export_notices nw;
+    tp_export_notices_init(&nw);
+    tp_export_report rw;
+    memset(&rw, 0, sizeof rw);
+    tp_export_run_opts wopts = {.report = &rw};
+    tp_error e = {{0}};
+    tp_status st = tp_export_run_ex(proj, 0, sprites, 3, g_dir, arw, &nw, NULL, &wopts, &e);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, st, e.msg);
+    TEST_ASSERT_FALSE(rw.dry_run);
+    const int wet_run_count = rw.run_count;
+    const double wet_occ = rw.runs[0].pages[0].occupancy_pct;
+    const tp_export_report_target *wt = &rw.targets[0];
+    TEST_ASSERT_TRUE(wt->ok);
+    TEST_ASSERT_TRUE_MESSAGE(wt->written_file_count >= 1, "wet run writes >=1 file");
+    const int wet_written = wt->written_file_count;
+    /* copy the paths out of the arena so we can delete them after freeing arw. */
+    char paths[16][1088];
+    int npaths = wt->written_file_count < 16 ? wt->written_file_count : 16;
+    for (int f = 0; f < npaths; f++) {
+        FILE *fp = fopen(wt->written_files[f], "rb");
+        TEST_ASSERT_NOT_NULL_MESSAGE(fp, wt->written_files[f]);
+        if (fp) {
+            (void)fclose(fp);
+        }
+        (void)snprintf(paths[f], sizeof paths[f], "%s", wt->written_files[f]);
+    }
+    tp_export_notices_free(&nw);
+    tp_arena_destroy(arw);
+
+    /* delete the wet outputs so "absent after dry-run" is unambiguous. */
+    for (int f = 0; f < npaths; f++) {
+        (void)remove(paths[f]);
+    }
+
+    /* --- dry run of the SAME project: no writes, identical pages, would_write set --- */
+    tp_arena *ard = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(ard);
+    tp_export_notices nd;
+    tp_export_notices_init(&nd);
+    tp_export_report rd;
+    memset(&rd, 0, sizeof rd);
+    tp_export_run_opts dopts = {.report = &rd, .dry_run = true};
+    st = tp_export_run_ex(proj, 0, sprites, 3, g_dir, ard, &nd, NULL, &dopts, &e);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, st, e.msg);
+    TEST_ASSERT_TRUE_MESSAGE(rd.dry_run, "report must record dry_run");
+    TEST_ASSERT_FALSE(rd.pack_failed);
+    TEST_ASSERT_EQUAL_INT(1, rd.target_count);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(wet_run_count, rd.run_count, "dry and wet must pack the same runs");
+    const double d = wet_occ - rd.runs[0].pages[0].occupancy_pct;
+    TEST_ASSERT_TRUE_MESSAGE(d > -1e-9 && d < 1e-9, "dry-run occupancy must match the wet run");
+    const tp_export_report_target *dt = &rd.targets[0];
+    TEST_ASSERT_TRUE_MESSAGE(dt->ok, "dry-run target is ok (nothing can fail to write)");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, dt->written_file_count, "dry-run writes nothing");
+    TEST_ASSERT_NULL(dt->written_files);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(wet_written, dt->would_write_count,
+                                  "would_write must match what the wet run actually wrote");
+    for (int f = 0; f < dt->would_write_count; f++) {
+        FILE *fp = fopen(dt->would_write[f], "rb");
+        TEST_ASSERT_NULL_MESSAGE(fp, "dry-run must not create any output file");
+        if (fp) {
+            (void)fclose(fp);
+        }
+    }
+    tp_export_notices_free(&nd);
+    tp_arena_destroy(ard);
+    tp_project_destroy(proj);
+}
+
 int main(int argc, char **argv) {
     const char *dir = (argc > 1) ? argv[1] : ".";
     if (!setup_all(dir)) {
@@ -452,6 +553,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_rename_and_anim_through_run);
     RUN_TEST(test_dangling_frame_through_run);
     RUN_TEST(test_report_ex);
+    RUN_TEST(test_dry_run);
     int rc = UNITY_END();
     tp_export_notices_free(&g_notices);
     tp_project_destroy(g_proj);

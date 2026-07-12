@@ -30,6 +30,16 @@ if(DEFINED EXIST_FILES)
     endforeach()
 endif()
 
+# NOT_EXIST_FILES: assert each path is ABSENT after the run (dry-run coverage --
+# ntpacker pack --dry-run must not create any target file or directory).
+if(DEFINED NOT_EXIST_FILES)
+    foreach(_f IN LISTS NOT_EXIST_FILES)
+        if(EXISTS "${_f}")
+            message(FATAL_ERROR "path must NOT exist after a dry run: ${_f}\n--stderr--\n${_err}")
+        endif()
+    endforeach()
+endif()
+
 if(DEFINED CHECKER)
     file(WRITE "${OUTFILE}" "${_out}")
     # Optional CHECK_ARGS (space-separated) select the checker mode + assertions.

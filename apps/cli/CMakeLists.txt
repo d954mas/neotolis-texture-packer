@@ -116,3 +116,29 @@ add_test(NAME cli_pack_problems COMMAND ${CMAKE_COMMAND}
     -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=4
     "-DARGS=pack ${_td}/problems.ntpacker_project --out-dir ${CMAKE_CURRENT_BINARY_DIR}/cli_pack_out3"
     -P "${_run}")
+
+# (n) B3b dry-run: exit 0, report parses with dry_run true + would_write per target,
+# and NO output file lands on disk (the out dir stays absent -- NOT_EXIST_FILES).
+add_test(NAME cli_pack_dry_run COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0
+    "-DARGS=pack ${_td}/clean.ntpacker_project --dry-run --json --out-dir ${CMAKE_CURRENT_BINARY_DIR}/cli_pack_dry"
+    -DCHECKER=$<TARGET_FILE:cli_json_check>
+    "-DCHECK_ARGS=pack dry_run=1 targets_ok=1 targets_failed=0"
+    -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_pack_dry.json
+    "-DNOT_EXIST_FILES=${CMAKE_CURRENT_BINARY_DIR}/cli_pack_dry/out/clean.json.json;${CMAKE_CURRENT_BINARY_DIR}/cli_pack_dry/out/clean.json-0.png;${CMAKE_CURRENT_BINARY_DIR}/cli_pack_dry/out"
+    -P "${_run}")
+
+# (o) B3b parity: `ntpacker pack` == direct-core (tp_demo_export) BYTE-FOR-BYTE on a
+# fixture exercising a nested relative out_path, a rename feeding an anim, a dotfile
+# override, and a fractional pivot (float/locale canary). tp_demo_export lives in
+# packer/tests; both targets are built by the top-level build. No GL -> runs on 3 OS.
+add_test(NAME cli_parity COMMAND ${CMAKE_COMMAND}
+    -DNTPACKER=$<TARGET_FILE:ntpacker>
+    -DDEMO=$<TARGET_FILE:tp_demo_export>
+    -DSRCPROJ=${_td}/parity.ntpacker_project
+    -DSRCDIR=${_td}
+    -DA=${CMAKE_CURRENT_BINARY_DIR}/cli_parity_A
+    -DB=${CMAKE_CURRENT_BINARY_DIR}/cli_parity_B
+    -DWORK=${CMAKE_CURRENT_BINARY_DIR}/cli_parity_work
+    "-DFILES=out/parity_json.json;out/parity_json-0.png;out/nested/deep_json.json;out/nested/deep_json-0.png;out/parity_def.tpinfo;out/parity_def.tpatlas;out/parity_def-0.png"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/cli_parity.cmake")

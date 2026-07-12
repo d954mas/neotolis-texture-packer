@@ -17,6 +17,7 @@ is the authoritative machine signal (see `cli_exit.h`: 0 ok · 1 internal ·
 ```json
 {
   "schema": 1,
+  "dry_run": false,
   "atlases": [{
     "name": "animals",
     "sprite_count": 60,
@@ -35,6 +36,24 @@ is the authoritative machine signal (see `cli_exit.h`: 0 ok · 1 internal ·
   "totals": {"targets_ok": 1, "targets_failed": 0, "files_written": 2},
   "timings_ms": {"total": 812.4}
 }
+```
+
+- `dry_run` — `true` when the report came from `pack --dry-run`; then NO files were
+  written (`written_files` is empty on every target and `files_written` is 0), each
+  ok target instead carries a `would_write` array (the paths it WOULD produce), and
+  its `notices` are the PREDICTED degradations (`tp_export_predict_loss` with the
+  packed prep — full axes incl. alias/multipage) rather than writer-emitted ones.
+  A dry run creates no directories either.
+
+```json
+    "targets": [{
+      "exporter_id": "json-neotolis",
+      "out_path": "C:/.../out/animals",
+      "status": "ok",
+      "written_files": [],
+      "would_write": ["C:/.../out/animals.json", "C:/.../out/animals-0.png"],
+      "notices": [ ... predicted losses ... ]
+    }]
 ```
 
 - `occupancy_pct` — sum of placed ORIGINAL frame areas (aliases share their
