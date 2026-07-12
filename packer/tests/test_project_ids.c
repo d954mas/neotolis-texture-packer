@@ -477,6 +477,73 @@ void test_migration_golden_v2_to_v4_sources(void) {
     tp_project_destroy(p2);
 }
 
+/* 7c (F1-03). v3 -> v4 migration byte-golden: a v3 file with a NAME-keyed sprite
+ *    override loads as a PENDING v4 record (load never scans, so it cannot re-key to
+ *    {source, key}), and re-saves at version 4 with the override STILL in {name} form.
+ *    Proves the chained v3->v4 hook + that a pending record is a valid, byte-stable v4
+ *    state until a resolution scan migrates it. Ids are preserved verbatim (v3 has them). */
+void test_migration_golden_v3_to_v4(void) {
+    const char *atlas_id = "atlas_0000000000000000000000000000a001";
+    const char *src_id = "source_0000000000000000000000000000b001";
+    char v3[768];
+    (void)snprintf(v3, sizeof v3,
+                   "{\n  \"version\": 3,\n  \"atlases\": [\n"
+                   "    { \"name\": \"hero\", \"id\": \"%s\",\n"
+                   "      \"sources\": [ { \"id\": \"%s\", \"path\": \"sprites\" } ],\n"
+                   "      \"sprites\": [ { \"name\": \"hero\", \"origin\": [0.25, 0.75] } ] }\n"
+                   "  ]\n}\n",
+                   atlas_id, src_id);
+    char path[512];
+    join(path, sizeof path, "mig_v3_sprite.ntpacker_project");
+    write_text(path, v3);
+
+    tp_project *p = NULL;
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, tp_project_load(path, &p, &err), err.msg);
+    TEST_ASSERT_EQUAL_INT(4, p->schema_version);
+    /* the override loaded PENDING (name bridge set, canonical identity unresolved) */
+    TEST_ASSERT_EQUAL_INT(1, p->atlases[0].sprite_count);
+    TEST_ASSERT_EQUAL_STRING("hero", p->atlases[0].sprites[0].name);
+    TEST_ASSERT_TRUE(tp_id128_is_nil(p->atlases[0].sprites[0].source_ref));
+    TEST_ASSERT_NULL(p->atlases[0].sprites[0].src_key);
+
+    char saved[512];
+    join(saved, sizeof saved, "mig_v4_sprite.ntpacker_project");
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_save(p, saved, &err));
+
+    char expect[1024];
+    (void)snprintf(expect, sizeof expect,
+                   "{\n"
+                   "  \"version\": 4,\n"
+                   "  \"atlases\": [\n"
+                   "    {\n"
+                   "      \"id\": \"%s\",\n"
+                   "      \"name\": \"hero\",\n"
+                   "      \"sources\": [\n"
+                   "        {\n"
+                   "          \"id\": \"%s\",\n"
+                   "          \"path\": \"sprites\"\n"
+                   "        }\n"
+                   "      ],\n"
+                   "      \"sprites\": [\n"
+                   "        {\n"
+                   "          \"name\": \"hero\",\n"
+                   "          \"origin\": [0.25, 0.75]\n"
+                   "        }\n"
+                   "      ]\n"
+                   "    }\n"
+                   "  ]\n"
+                   "}\n",
+                   atlas_id, src_id);
+
+    size_t sn = 0;
+    char *sbytes = read_all(saved, &sn);
+    TEST_ASSERT_EQUAL_size_t(strlen(expect), sn);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, memcmp(expect, sbytes, sn), sbytes);
+    free(sbytes);
+    tp_project_destroy(p);
+}
+
 /* 8. every checked-in v1 fixture still loads under the current schema (forward-
  *    compat); the intentionally-malformed one still fails cleanly (structured error). */
 void test_checked_in_v1_fixtures_still_load(void) {
@@ -515,6 +582,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_id_survives_rename_reorder_remove);
     RUN_TEST(test_migration_golden_v1_to_v4);
     RUN_TEST(test_migration_golden_v2_to_v4_sources);
+    RUN_TEST(test_migration_golden_v3_to_v4);
     RUN_TEST(test_checked_in_v1_fixtures_still_load);
     return UNITY_END();
 }

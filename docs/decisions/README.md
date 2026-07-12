@@ -19,3 +19,5 @@ implementation-policy выборы). Формат: контекст, решен�
 | [0005](0005-raster-color-policy.md) | sRGB byte-preserving decode, без ICC transforms | initial-policy (C0-04) |
 | [0006](0006-windows-device-paths.md) | `\\?\` — прозрачный алиас (drive/UNC), прочие `\\?\`/`\\.\` → `path_device` | accepted |
 | [0007](0007-f1-01-id-scope.md) | F1-01: ID на atlas/anim/target (source → F1-02), anim id/name split, fill-nil promote | accepted |
+| [0008](0008-f1-02-source-kind-migration.md) | F1-02: tagged source schema v3 + `kind` при миграции v2 bare-string | accepted |
+| [0009](0009-f1-03-sprite-id-selectors.md) | F1-03: derived sprite_id, `{source,key}`-keyed records + frames, lazy v3→v4 re-key, canonical selectors | accepted |
