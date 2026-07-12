@@ -1,0 +1,192 @@
+#include "tp_c0/tp_c0_txn.h"
+
+#include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
+
+/* Full-batch validation: revision precondition first (short-circuit), then per-op
+ * semantic checks collected in stable order (op_index asc, then field order),
+ * before any application. No model mutation -- committed results are stubs. */
+
+static void add_err(tp_c0_txn_result *out, int op_index, tp_c0_detail code, const char *fmt, ...) TP_PRINTF_ATTR(4, 5);
+
+static void add_err(tp_c0_txn_result *out, int op_index, tp_c0_detail code, const char *fmt, ...) {
+    if (out->error_count >= TP_C0_MAX_ERRORS) {
+        return;
+    }
+    tp_c0_txn_error *e = &out->errors[out->error_count];
+    e->op_index = op_index;
+    e->code = code;
+    if (fmt) {
+        va_list ap;
+        va_start(ap, fmt);
+        (void)vsnprintf(e->message, sizeof e->message, fmt, ap);
+        va_end(ap);
+    } else {
+        e->message[0] = '\0';
+    }
+    out->error_count++;
+}
+
+/* Map an "*_id" addressing key to the shape-ID kind it must carry. sprite_id is
+ * bare 32-hex (no shape prefix, §5.2) -> returns INVALID (checked separately). */
+static tp_c0_id_kind key_shape_kind(const char *key) {
+    if (strcmp(key, "atlas_id") == 0) {
+        return TP_C0_ID_KIND_ATLAS;
+    }
+    if (strcmp(key, "source_id") == 0) {
+        return TP_C0_ID_KIND_SOURCE;
+    }
+    if (strcmp(key, "anim_id") == 0) {
+        return TP_C0_ID_KIND_ANIM;
+    }
+    if (strcmp(key, "target_id") == 0) {
+        return TP_C0_ID_KIND_TARGET;
+    }
+    return TP_C0_ID_KIND_INVALID;
+}
+
+static const char *kind_id_key(tp_c0_id_kind k) {
+    switch (k) {
+        case TP_C0_ID_KIND_ATLAS: return "atlas_id";
+        case TP_C0_ID_KIND_SOURCE: return "source_id";
+        case TP_C0_ID_KIND_ANIM: return "anim_id";
+        case TP_C0_ID_KIND_TARGET: return "target_id";
+        case TP_C0_ID_KIND_INVALID: return "";
+    }
+    return "";
+}
+
+static bool is_hex32(const char *s) {
+    int n = 0;
+    for (; s[n]; n++) {
+        char c = s[n];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+            return false;
+        }
+    }
+    return n == 32;
+}
+
+static bool entity_exists(const tp_c0_entity_ref *entities, int n, tp_c0_id_kind kind, tp_c0_id128 id) {
+    for (int i = 0; i < n; i++) {
+        if (entities[i].kind == kind && tp_c0_id128_eq(entities[i].id, id)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Validate one addressing/id field; collect at most one error for it. */
+static void check_id_field(tp_c0_txn_result *out, int idx, const tp_c0_op *op, const tp_c0_op_info *info,
+                           const tp_c0_field *f, const tp_c0_entity_ref *entities, int entity_count) {
+    if (f->val.kind != TP_C0_VAL_STR) {
+        add_err(out, idx, TP_C0_ERR_TXN_BAD_TYPE, "field '%s' must be a string id", f->key);
+        return;
+    }
+    tp_c0_id_kind expected = key_shape_kind(f->key);
+    if (expected == TP_C0_ID_KIND_INVALID) { /* sprite_id: bare 32-hex */
+        if (!is_hex32(f->val.sval)) {
+            add_err(out, idx, TP_C0_ERR_ID_BAD_LENGTH, "sprite id '%s' must be 32 lowercase hex", f->key);
+        }
+        return;
+    }
+    tp_c0_id_kind got = TP_C0_ID_KIND_INVALID;
+    tp_c0_id128 id;
+    tp_error e = {0};
+    tp_c0_detail d = tp_c0_id_parse(f->val.sval, &got, &id, &e);
+    if (d != TP_C0_OK) {
+        add_err(out, idx, d, "field '%s': %s", f->key, e.msg[0] ? e.msg : "malformed id");
+        return;
+    }
+    if (got != expected) {
+        add_err(out, idx, TP_C0_ERR_ID_BAD_PREFIX, "field '%s' has the wrong id kind", f->key);
+        return;
+    }
+    /* Reference existence (skip the create op's own freshly-minted primary id). */
+    bool own_new = info->effect == TP_C0_OP_CLASS_CREATE && strcmp(f->key, kind_id_key(info->target_kind)) == 0;
+    if (entity_count > 0 && !own_new && !entity_exists(entities, entity_count, expected, id)) {
+        add_err(out, idx, TP_C0_ERR_SELECTOR_UNRESOLVED, "field '%s' references an unknown id", f->key);
+    }
+}
+
+static void validate_op(tp_c0_txn_result *out, int idx, const tp_c0_op *op, const tp_c0_entity_ref *entities,
+                        int entity_count) {
+    if (op->kind == TP_C0_OP_INVALID) {
+        add_err(out, idx, TP_C0_ERR_OP_UNKNOWN, "unknown operation '%s'", op->wire);
+        return; /* unknown vocabulary: cannot check fields */
+    }
+    if (op->has_selector) {
+        add_err(out, idx, TP_C0_ERR_SELECTOR_UNRESOLVED, "operation carries an unresolved selector (canonical is id-only)");
+    }
+    const tp_c0_op_info *info = tp_c0_op_info_by_kind(op->kind);
+    for (int i = 0; i < op->field_count; i++) {
+        const tp_c0_field *f = &op->fields[i];
+        if (!tp_c0_op_field_allowed(op->kind, f->key)) {
+            add_err(out, idx, TP_C0_ERR_UNKNOWN_FIELD, "unknown field '%s' for '%s'", f->key, op->wire);
+            continue;
+        }
+        size_t klen = strlen(f->key);
+        if (klen >= 3 && strcmp(f->key + klen - 3, "_id") == 0) {
+            check_id_field(out, idx, op, info, f, entities, entity_count);
+        }
+    }
+}
+
+tp_c0_detail tp_c0_txn_validate(const tp_c0_txn_request *req, long current_revision, const tp_c0_entity_ref *entities,
+                                int entity_count, tp_c0_txn_result *out, tp_error *err) {
+    if (!req || !out) {
+        return tp_c0_fail(err, TP_C0_ERR_NULL_ARG, "null request/out");
+    }
+    memset(out, 0, sizeof *out);
+    out->schema = TP_C0_TXN_SCHEMA;
+    (void)snprintf(out->txn_id_hex, sizeof out->txn_id_hex, "%s", req->id_hex);
+
+    /* 1. Revision precondition against the WHOLE batch, before any apply. */
+    tp_error re = {0};
+    tp_c0_detail rd = tp_c0_revision_check(req->expected_revision, current_revision, &re);
+    if (rd != TP_C0_OK) {
+        out->committed = false;
+        out->revision = current_revision;
+        add_err(out, -1, rd, "%s", re.msg);
+        if (err) {
+            *err = re;
+        }
+        return rd;
+    }
+
+    /* 2. Per-op semantic validation, collected in stable order. */
+    for (int i = 0; i < req->op_count; i++) {
+        validate_op(out, i, &req->ops[i], entities, entity_count);
+    }
+
+    if (out->error_count > 0) {
+        out->committed = false;
+        out->revision = current_revision;
+        return out->errors[0].code;
+    }
+
+    /* 3. Committed stub: one new revision; addressing echoed; diffs are engine work. */
+    out->committed = true;
+    out->revision = current_revision + 1;
+    out->op_count = req->op_count;
+    for (int i = 0; i < req->op_count; i++) {
+        const tp_c0_op *op = &req->ops[i];
+        const tp_c0_op_info *info = tp_c0_op_info_by_kind(op->kind);
+        tp_c0_result_op *ro = &out->ops[i];
+        (void)snprintf(ro->wire, sizeof ro->wire, "%s", op->wire);
+        ro->diff.cls = info ? info->effect : TP_C0_OP_CLASS_SET;
+        ro->addr_count = 0;
+        for (int f = 0; f < op->field_count && ro->addr_count < 6; f++) {
+            size_t klen = strlen(op->fields[f].key);
+            if (klen >= 3 && strcmp(op->fields[f].key + klen - 3, "_id") == 0) {
+                ro->addr[ro->addr_count] = op->fields[f];
+                ro->addr[ro->addr_count].val.items = NULL; /* addr echoes are scalar ids, never arrays */
+                ro->addr[ro->addr_count].val.item_count = 0;
+                ro->addr_count++;
+            }
+        }
+    }
+    (void)err;
+    return TP_C0_OK;
+}

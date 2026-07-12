@@ -16,11 +16,21 @@ add_library(tp_c0 STATIC
     # C0-02 operation contract spike: catalog, selectors, semantic-state table.
     src/tp_c0_op_catalog.c
     src/tp_c0_selector.c
-    src/tp_c0_semantic.c)
+    src/tp_c0_semantic.c
+    # C0-02 transaction contract spike: parse, validate, encode, result (no engine).
+    src/tp_c0_txn_parse.c
+    src/tp_c0_txn_validate.c
+    src/tp_c0_txn_encode.c
+    src/tp_c0_txn_result.c)
 target_include_directories(tp_c0 PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     $<TARGET_PROPERTY:tp_core,INTERFACE_INCLUDE_DIRECTORIES>)
-target_link_libraries(tp_c0 PRIVATE utf8proc)
+# utf8proc (C0-01 srckey) + cJSON (C0-02 txn parse) are PRIVATE deps: neither
+# leaks onto tp_c0's public headers (txn structs are hand-typed; cJSON stays in
+# the .c files). cjson is the engine-vendored MIT target tp_core already uses.
+target_include_directories(tp_c0 PRIVATE
+    $<TARGET_PROPERTY:cjson,INTERFACE_INCLUDE_DIRECTORIES>)
+target_link_libraries(tp_c0 PRIVATE utf8proc cjson)
 target_compile_definitions(tp_c0 PRIVATE _CRT_SECURE_NO_WARNINGS)
 nt_set_warning_flags(tp_c0)   # AGENTS.md invariant
 nt_set_sanitizer_flags(tp_c0)
@@ -42,3 +52,4 @@ tp_c0_add_test(test_c0_path)
 tp_c0_add_test(test_c0_srckey)
 tp_c0_add_test(test_c0_legacy)
 tp_c0_add_test(test_c0_op)   # C0-02 catalog, verb mapping, selectors, semantic fields
+tp_c0_add_test(test_c0_txn)  # C0-02 txn decode/encode round-trip, faults, diffs

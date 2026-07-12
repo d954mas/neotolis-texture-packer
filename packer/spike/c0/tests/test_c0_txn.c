@@ -1,0 +1,379 @@
+/* C0-02 tasks 3/5/6: versioned transaction request/result JSON round-trip
+ * (decode -> encode byte comparison), the fault vocabulary with distinct tokens,
+ * full-batch validation ordering, and the before/after diff shapes. Executable
+ * form of C0-02-contract.md §3, §5, §6. */
+
+/* System headers BEFORE unity.h: unity pulls <stdnoreturn.h>, which #defines
+ * `noreturn` and then collides with ucrt <stdlib.h>'s __declspec(noreturn). */
+#include <stdlib.h>
+#include <string.h>
+
+#include "tp_c0/tp_c0_txn.h"
+#include "unity.h"
+
+void setUp(void) {}
+void tearDown(void) {}
+
+/* 32-hex bodies built in 10-char chunks so the lengths are auditable. */
+#define Z30 "0000000000" "0000000000" "0000000000"
+#define TID "0123456789abcdef" "0123456789abcdef"
+#define ATLAS2 "atlas_" Z30 "02"
+#define ANIM1 "anim_" Z30 "01"
+#define ANIMAA "anim_" Z30 "aa"
+#define BADATLAS "atlas_zz" Z30
+#define FRAME_A "aaaaaaaaaa" "aaaaaaaaaa" "aaaaaaaaaa" "aa"
+#define FRAME_B "bbbbbbbbbb" "bbbbbbbbbb" "bbbbbbbbbb" "bb"
+
+/* ---- canonical golden fixtures ------------------------------------------- */
+
+static const char *REQ_CREATE =
+    "{\n"
+    "  \"schema\": 1,\n"
+    "  \"transaction\": {\n"
+    "    \"author\": \"cli\",\n"
+    "    \"expected_revision\": 7,\n"
+    "    \"id\": \"" TID "\",\n"
+    "    \"label\": \"make idle\",\n"
+    "    \"operations\": [\n"
+    "      {\n"
+    "        \"op\": \"animation.create\",\n"
+    "        \"anim_id\": \"" ANIM1 "\",\n"
+    "        \"atlas_id\": \"" ATLAS2 "\",\n"
+    "        \"fps\": 12,\n"
+    "        \"frames\": [\n"
+    "          \"" FRAME_A "\",\n"
+    "          \"" FRAME_B "\"\n"
+    "        ],\n"
+    "        \"id\": \"enemy_idle\",\n"
+    "        \"playback\": 1\n"
+    "      }\n"
+    "    ]\n"
+    "  }\n"
+    "}\n";
+
+/* Same operation, object keys shuffled + compact: must canonicalize to REQ_CREATE.
+ * Array element ORDER is preserved (frame order is semantic). */
+static const char *REQ_CREATE_MESSY =
+    "{ \"transaction\": { \"operations\": [ { \"op\": \"animation.create\","
+    " \"playback\": 1, \"id\": \"enemy_idle\", \"frames\": [\"" FRAME_A "\",\"" FRAME_B "\"],"
+    " \"fps\": 12, \"atlas_id\": \"" ATLAS2 "\", \"anim_id\": \"" ANIM1 "\" } ],"
+    " \"label\": \"make idle\", \"id\": \"" TID "\", \"expected_revision\": 7,"
+    " \"author\": \"cli\" }, \"schema\": 1 }";
+
+static const char *REQ_MOVE =
+    "{\n"
+    "  \"schema\": 1,\n"
+    "  \"transaction\": {\n"
+    "    \"expected_revision\": 3,\n"
+    "    \"id\": \"" TID "\",\n"
+    "    \"operations\": [\n"
+    "      {\n"
+    "        \"op\": \"animation.frame.move\",\n"
+    "        \"anim_id\": \"" ANIMAA "\",\n"
+    "        \"from_index\": 0,\n"
+    "        \"to_index\": 2\n"
+    "      }\n"
+    "    ]\n"
+    "  }\n"
+    "}\n";
+
+/* Committed result: a create diff (after + position) and a move diff (indices). */
+static const char *RES_OK =
+    "{\n"
+    "  \"schema\": 1,\n"
+    "  \"result\": {\n"
+    "    \"operations\": [\n"
+    "      {\n"
+    "        \"op\": \"atlas.create\",\n"
+    "        \"atlas_id\": \"" ATLAS2 "\",\n"
+    "        \"diff\": {\n"
+    "          \"after\": {\n"
+    "            \"atlas_id\": \"" ATLAS2 "\",\n"
+    "            \"name\": \"hud\"\n"
+    "          },\n"
+    "          \"class\": \"create\",\n"
+    "          \"position\": 1\n"
+    "        }\n"
+    "      },\n"
+    "      {\n"
+    "        \"op\": \"animation.frame.move\",\n"
+    "        \"anim_id\": \"" ANIMAA "\",\n"
+    "        \"diff\": {\n"
+    "          \"after_index\": 2,\n"
+    "          \"before_index\": 0,\n"
+    "          \"class\": \"move\"\n"
+    "        }\n"
+    "      }\n"
+    "    ],\n"
+    "    \"revision\": 8,\n"
+    "    \"status\": \"committed\",\n"
+    "    \"transaction_id\": \"" TID "\"\n"
+    "  }\n"
+    "}\n";
+
+/* Rejected result: one envelope-level revision error. */
+static const char *RES_REJ =
+    "{\n"
+    "  \"schema\": 1,\n"
+    "  \"result\": {\n"
+    "    \"errors\": [\n"
+    "      {\n"
+    "        \"code\": \"revision_conflict\",\n"
+    "        \"message\": \"stale base\",\n"
+    "        \"op_index\": -1\n"
+    "      }\n"
+    "    ],\n"
+    "    \"revision\": 8,\n"
+    "    \"status\": \"rejected\",\n"
+    "    \"transaction_id\": \"" TID "\"\n"
+    "  }\n"
+    "}\n";
+
+/* ---- round-trip helpers -------------------------------------------------- */
+
+static void rt_request(const char *golden, const char *input) {
+    tp_c0_detail d = TP_C0_OK;
+    tp_error err = {0};
+    tp_c0_txn_request *req = tp_c0_txn_request_decode(input, &d, &err);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_C0_OK, d, err.msg);
+    TEST_ASSERT_NOT_NULL(req);
+    char *out = tp_c0_txn_request_encode(req, &d);
+    TEST_ASSERT_EQUAL_INT(TP_C0_OK, d);
+    TEST_ASSERT_NOT_NULL(out);
+    TEST_ASSERT_EQUAL_STRING(golden, out);
+    free(out);
+    tp_c0_txn_request_free(req);
+}
+
+static void rt_result(const char *golden) {
+    tp_c0_detail d = TP_C0_OK;
+    tp_error err = {0};
+    tp_c0_txn_result *res = tp_c0_txn_result_decode(golden, &d, &err);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_C0_OK, d, err.msg);
+    TEST_ASSERT_NOT_NULL(res);
+    char *out = tp_c0_txn_result_encode(res, &d);
+    TEST_ASSERT_EQUAL_INT(TP_C0_OK, d);
+    TEST_ASSERT_NOT_NULL(out);
+    TEST_ASSERT_EQUAL_STRING(golden, out);
+    free(out);
+    tp_c0_txn_result_free(res);
+}
+
+void test_request_roundtrip(void) {
+    rt_request(REQ_CREATE, REQ_CREATE);
+    rt_request(REQ_MOVE, REQ_MOVE);
+}
+
+void test_request_canonicalizes(void) { rt_request(REQ_CREATE, REQ_CREATE_MESSY); }
+
+void test_result_roundtrip(void) {
+    rt_result(RES_OK);
+    rt_result(RES_REJ);
+}
+
+/* ---- structural decode faults -------------------------------------------- */
+
+static tp_c0_detail decode_req_fault(const char *json) {
+    tp_c0_detail d = TP_C0_OK;
+    tp_error err = {0};
+    tp_c0_txn_request *req = tp_c0_txn_request_decode(json, &d, &err);
+    TEST_ASSERT_NULL(req);
+    return d;
+}
+
+void test_decode_faults(void) {
+    TEST_ASSERT_EQUAL_INT(TP_C0_ERR_BAD_JSON, decode_req_fault("{ not json"));
+    TEST_ASSERT_EQUAL_INT(TP_C0_ERR_TXN_BAD_VERSION,
+                          decode_req_fault("{\"schema\":2,\"transaction\":{\"id\":\"" TID
+                                           "\",\"expected_revision\":0,\"operations\":[]}}"));
+    TEST_ASSERT_EQUAL_INT(TP_C0_ERR_TXN_MISSING_FIELD, decode_req_fault("{\"transaction\":{}}"));
+    TEST_ASSERT_EQUAL_INT(TP_C0_ERR_TXN_BAD_ID,
+                          decode_req_fault("{\"schema\":1,\"transaction\":{\"id\":\"XYZ\","
+                                           "\"expected_revision\":0,\"operations\":[]}}"));
+    /* unknown-field policy is REJECT, demonstrated at the envelope level */
+    TEST_ASSERT_EQUAL_INT(TP_C0_ERR_UNKNOWN_FIELD,
+                          decode_req_fault("{\"schema\":1,\"priority\":5,\"transaction\":{\"id\":\"" TID
+                                           "\",\"expected_revision\":0,\"operations\":[]}}"));
+}
+
+/* ---- per-op validation faults (collected in stable order) ---------------- */
+
+static tp_c0_txn_request *decode_ok(const char *json) {
+    tp_c0_detail d = TP_C0_OK;
+    tp_error err = {0};
+    tp_c0_txn_request *req = tp_c0_txn_request_decode(json, &d, &err);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_C0_OK, d, err.msg);
+    TEST_ASSERT_NOT_NULL(req);
+    return req;
+}
+
+void test_unknown_operation(void) {
+    tp_c0_txn_request *req = decode_ok("{\"schema\":1,\"transaction\":{\"id\":\"" TID
+                                       "\",\"expected_revision\":0,\"operations\":[{\"op\":\"atlas.explode\","
+                                       "\"atlas_id\":\"" ATLAS2 "\"}]}}");
+    static tp_c0_txn_result res;
+    tp_error err = {0};
+    tp_c0_detail d = tp_c0_txn_validate(req, 0, NULL, 0, &res, &err);
+    TEST_ASSERT_EQUAL_INT(TP_C0_ERR_OP_UNKNOWN, d);
+    TEST_ASSERT_FALSE(res.committed);
+    TEST_ASSERT_EQUAL_INT(1, res.error_count);
+    TEST_ASSERT_EQUAL_INT(0, res.errors[0].op_index);
+    TEST_ASSERT_EQUAL_INT(TP_C0_ERR_OP_UNKNOWN, res.errors[0].code);
+    tp_c0_txn_request_free(req);
+}
+
+void test_op_unknown_field(void) {
+    tp_c0_txn_request *req = decode_ok("{\"schema\":1,\"transaction\":{\"id\":\"" TID
+                                       "\",\"expected_revision\":0,\"operations\":[{\"op\":\"atlas.remove\","
+                                       "\"atlas_id\":\"" ATLAS2 "\",\"bogus\":true}]}}");
+    static tp_c0_txn_result res;
+    tp_error err = {0};
+    tp_c0_detail d = tp_c0_txn_validate(req, 0, NULL, 0, &res, &err);
+    TEST_ASSERT_EQUAL_INT(TP_C0_ERR_UNKNOWN_FIELD, d);
+    TEST_ASSERT_EQUAL_INT(1, res.error_count);
+    TEST_ASSERT_EQUAL_INT(TP_C0_ERR_UNKNOWN_FIELD, res.errors[0].code);
+    tp_c0_txn_request_free(req);
+}
+
+void test_malformed_id(void) {
+    tp_c0_txn_request *req = decode_ok("{\"schema\":1,\"transaction\":{\"id\":\"" TID
+                                       "\",\"expected_revision\":0,\"operations\":[{\"op\":\"atlas.remove\","
+                                       "\"atlas_id\":\"" BADATLAS "\"}]}}");
+    static tp_c0_txn_result res;
+    tp_error err = {0};
+    tp_c0_detail d = tp_c0_txn_validate(req, 0, NULL, 0, &res, &err);
+    TEST_ASSERT_EQUAL_INT(TP_C0_ERR_ID_BAD_HEX, d);
+    tp_c0_txn_request_free(req);
+}
+
+void test_selector_is_not_canonical(void) {
+    tp_c0_txn_request *req = decode_ok("{\"schema\":1,\"transaction\":{\"id\":\"" TID
+                                       "\",\"expected_revision\":0,\"operations\":[{\"op\":\"atlas.remove\","
+                                       "\"selector\":{\"by\":\"name\",\"value\":\"hud\"}}]}}");
+    /* validate flags it; canonical encode refuses it -- both selector_unresolved */
+    static tp_c0_txn_result res;
+    tp_error err = {0};
+    tp_c0_detail d = tp_c0_txn_validate(req, 0, NULL, 0, &res, &err);
+    TEST_ASSERT_EQUAL_INT(TP_C0_ERR_SELECTOR_UNRESOLVED, d);
+    tp_c0_detail ed = TP_C0_OK;
+    char *out = tp_c0_txn_request_encode(req, &ed);
+    TEST_ASSERT_NULL(out);
+    TEST_ASSERT_EQUAL_INT(TP_C0_ERR_SELECTOR_UNRESOLVED, ed);
+    tp_c0_txn_request_free(req);
+}
+
+/* ---- revision precondition ----------------------------------------------- */
+
+void test_revision_conflict_and_invalid(void) {
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT(TP_C0_OK, tp_c0_revision_check(8, 8, &err));
+    TEST_ASSERT_EQUAL_INT(TP_C0_ERR_REVISION_CONFLICT, tp_c0_revision_check(5, 8, &err));
+    TEST_ASSERT_EQUAL_INT(TP_C0_ERR_INVALID_REVISION, tp_c0_revision_check(9, 8, &err));
+
+    /* whole-batch: a revision mismatch rejects alone, before per-op checks. Even
+     * with a bad op present, only the revision error is reported. */
+    tp_c0_txn_request *req = decode_ok("{\"schema\":1,\"transaction\":{\"id\":\"" TID
+                                       "\",\"expected_revision\":5,\"operations\":[{\"op\":\"atlas.explode\"}]}}");
+    static tp_c0_txn_result res;
+    tp_c0_detail d = tp_c0_txn_validate(req, 8, NULL, 0, &res, &err);
+    TEST_ASSERT_EQUAL_INT(TP_C0_ERR_REVISION_CONFLICT, d);
+    TEST_ASSERT_EQUAL_INT(1, res.error_count);
+    TEST_ASSERT_EQUAL_INT(-1, res.errors[0].op_index);
+    TEST_ASSERT_EQUAL_INT(8, res.revision); /* unchanged */
+    tp_c0_txn_request_free(req);
+}
+
+/* ---- idempotency retention set ------------------------------------------- */
+
+void test_duplicate_transaction_id(void) {
+    tp_c0_txn_idset set = {0};
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT(TP_C0_OK, tp_c0_txn_idset_add(&set, TID, &err));
+    TEST_ASSERT_EQUAL_INT(TP_C0_ERR_TXN_DUPLICATE_ID, tp_c0_txn_idset_add(&set, TID, &err));
+    TEST_ASSERT_EQUAL_INT(TP_C0_ERR_TXN_BAD_ID, tp_c0_txn_idset_add(&set, "nothex", &err));
+    /* a different id is fine */
+    TEST_ASSERT_EQUAL_INT(TP_C0_OK, tp_c0_txn_idset_add(&set, "ffffffffffffffffffffffffffffffff", &err));
+}
+
+/* ---- stable error ordering across a multi-error request ------------------ */
+
+void test_stable_error_ordering(void) {
+    /* op0: unknown field; op1: malformed id; op2: unknown operation. */
+    tp_c0_txn_request *req =
+        decode_ok("{\"schema\":1,\"transaction\":{\"id\":\"" TID "\",\"expected_revision\":0,\"operations\":["
+                  "{\"op\":\"atlas.remove\",\"atlas_id\":\"" ATLAS2 "\",\"bogus\":true},"
+                  "{\"op\":\"atlas.remove\",\"atlas_id\":\"" BADATLAS "\"},"
+                  "{\"op\":\"atlas.explode\"}]}}");
+    static tp_c0_txn_result res;
+    tp_error err = {0};
+    tp_c0_detail d = tp_c0_txn_validate(req, 0, NULL, 0, &res, &err);
+    TEST_ASSERT_FALSE(res.committed);
+    TEST_ASSERT_EQUAL_INT(3, res.error_count);
+    TEST_ASSERT_EQUAL_INT(0, res.errors[0].op_index);
+    TEST_ASSERT_EQUAL_INT(TP_C0_ERR_UNKNOWN_FIELD, res.errors[0].code);
+    TEST_ASSERT_EQUAL_INT(1, res.errors[1].op_index);
+    TEST_ASSERT_EQUAL_INT(TP_C0_ERR_ID_BAD_HEX, res.errors[1].code);
+    TEST_ASSERT_EQUAL_INT(2, res.errors[2].op_index);
+    TEST_ASSERT_EQUAL_INT(TP_C0_ERR_OP_UNKNOWN, res.errors[2].code);
+    TEST_ASSERT_EQUAL_INT(res.errors[0].code, d); /* returns the first error's code */
+
+    /* the rejected result encodes deterministically */
+    tp_c0_detail ed = TP_C0_OK;
+    char *out = tp_c0_txn_result_encode(&res, &ed);
+    TEST_ASSERT_NOT_NULL(out);
+    TEST_ASSERT_TRUE(strstr(out, "\"status\": \"rejected\"") != NULL);
+    free(out);
+    tp_c0_txn_request_free(req);
+}
+
+/* ---- committed stub + id-reference existence ----------------------------- */
+
+void test_validate_commits(void) {
+    tp_c0_txn_request *req = decode_ok(REQ_CREATE);
+    static tp_c0_txn_result res;
+    tp_error err = {0};
+    /* atlas.create mints its own atlas_id; the parent id needs no table here. */
+    tp_c0_detail d = tp_c0_txn_validate(req, 7, NULL, 0, &res, &err);
+    TEST_ASSERT_EQUAL_INT(TP_C0_OK, d);
+    TEST_ASSERT_TRUE(res.committed);
+    TEST_ASSERT_EQUAL_INT(8, res.revision); /* one new revision */
+    TEST_ASSERT_EQUAL_INT(1, res.op_count);
+    tp_c0_txn_request_free(req);
+}
+
+void test_unknown_id_reference(void) {
+    /* atlas.remove targets an existing id; an empty-but-provided table makes the
+     * reference dangle -> selector_unresolved (spec §5.6). */
+    tp_c0_txn_request *req = decode_ok("{\"schema\":1,\"transaction\":{\"id\":\"" TID
+                                       "\",\"expected_revision\":0,\"operations\":[{\"op\":\"atlas.remove\","
+                                       "\"atlas_id\":\"" ATLAS2 "\"}]}}");
+    tp_c0_entity_ref other[1];
+    other[0].kind = TP_C0_ID_KIND_ATLAS;
+    other[0].id = tp_c0_id128_nil();
+    other[0].id.bytes[15] = 0x77; /* some other atlas, not ATLAS2 */
+    other[0].name = "world";
+    other[0].index = 0;
+    static tp_c0_txn_result res;
+    tp_error err = {0};
+    tp_c0_detail d = tp_c0_txn_validate(req, 0, other, 1, &res, &err);
+    TEST_ASSERT_EQUAL_INT(TP_C0_ERR_SELECTOR_UNRESOLVED, d);
+    tp_c0_txn_request_free(req);
+}
+
+int main(void) {
+    UNITY_BEGIN();
+    RUN_TEST(test_request_roundtrip);
+    RUN_TEST(test_request_canonicalizes);
+    RUN_TEST(test_result_roundtrip);
+    RUN_TEST(test_decode_faults);
+    RUN_TEST(test_unknown_operation);
+    RUN_TEST(test_op_unknown_field);
+    RUN_TEST(test_malformed_id);
+    RUN_TEST(test_selector_is_not_canonical);
+    RUN_TEST(test_revision_conflict_and_invalid);
+    RUN_TEST(test_duplicate_transaction_id);
+    RUN_TEST(test_stable_error_ordering);
+    RUN_TEST(test_validate_commits);
+    RUN_TEST(test_unknown_id_reference);
+    return UNITY_END();
+}
