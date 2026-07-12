@@ -208,7 +208,7 @@ void test_exif_orientation_skips_fill_bytes_before_marker(void) {
      * the marker byte and silently failed to find orientation=6 here). */
     uint8_t app1[TP_C0_EXIF_APP1_LE_LEN];
     tp_c0_exif_app1_le_build(app1, 6);
-    const size_t fill = 3; /* a run of several fill bytes, not just one */
+    enum { fill = 3 }; /* a run of several fill bytes, not just one */
     uint8_t jpeg[2 + fill + TP_C0_EXIF_APP1_LE_LEN + 2];
     jpeg[0] = 0xFF;
     jpeg[1] = 0xD8; /* SOI */
