@@ -49,6 +49,11 @@ tp_status tp_sprite_id_parse(const char *text, tp_id128 *out_id, tp_error *err) 
         return tp_error_set(err, TP_STATUS_ID_MALFORMED, "sprite id must start with \"" TP_SPRITE_ID_PREFIX "\"");
     }
     const char *hex = text + plen;
+    /* Length gate FIRST (before any hex[2*i+1] read) so a short tail never reads past
+     * the NUL -- exactly 32 hex chars then end-of-string. */
+    if (strlen(hex) != 32U) {
+        return tp_error_set(err, TP_STATUS_ID_MALFORMED, "sprite id must be exactly 32 hex digits after the prefix");
+    }
     tp_id128 id = tp_id128_nil();
     for (int i = 0; i < 16; i++) {
         const int hi = hex_nibble(hex[2 * i]);
@@ -57,9 +62,6 @@ tp_status tp_sprite_id_parse(const char *text, tp_id128 *out_id, tp_error *err) 
             return tp_error_set(err, TP_STATUS_ID_MALFORMED, "sprite id has a non-hex digit");
         }
         id.bytes[i] = (uint8_t)((hi << 4) | lo);
-    }
-    if (hex[32] != '\0') {
-        return tp_error_set(err, TP_STATUS_ID_MALFORMED, "sprite id has trailing characters after 32 hex digits");
     }
     if (out_id) {
         *out_id = id;
