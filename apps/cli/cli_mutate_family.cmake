@@ -64,7 +64,7 @@ if(FAMILY STREQUAL "new")
     assert_contains("json-neotolis")           # seeded default target
     assert_contains("\"name\": \"atlas1\"")     # default atlas
     run(3 new "${PROJ}")                        # refuse to overwrite -> exit 3
-    run_json(0 "inspect;sprites=0;schema=3" inspect "${PROJ}" --json)  # F1-02: schema-3 contract pinned
+    run_json(0 "inspect;sprites=0;schema=4" inspect "${PROJ}" --json)  # F1-03: schema-4 contract pinned (sprites gained sprite_id + source)
 
 elseif(FAMILY STREQUAL "source")
     run(0 new "${PROJ}")
@@ -112,7 +112,7 @@ elseif(FAMILY STREQUAL "sprite")
 elseif(FAMILY STREQUAL "anim")
     run(0 new "${PROJ}")
     run_json(0 "mutation;count=3" anim create "${PROJ}" atlas1 walk f1 f2 f3 --json)
-    run_json(0 "anim;count=1;schema=3" anim list "${PROJ}" atlas1 --json)  # F1-02: shared query schema 3
+    run_json(0 "anim;count=1;schema=4" anim list "${PROJ}" atlas1 --json)  # F1-03: shared query schema 4
     run(0 anim add-frame "${PROJ}" atlas1 walk f_at --at 1)     # insert at index 1
     run(0 anim move-frame "${PROJ}" atlas1 walk 0 3)           # move first to last
     run(0 anim remove-frame "${PROJ}" atlas1 walk f2)          # by key

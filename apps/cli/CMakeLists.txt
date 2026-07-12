@@ -116,6 +116,16 @@ add_test(NAME cli_validate_long_paths COMMAND ${CMAKE_COMMAND}
     -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_validate_long_paths.json
     -P "${_run}")
 
+# (i5) F1-03 §5.6 sprite-record integrity: a v4 fixture with a migrated override whose
+# stored source id is absent from the atlas (sprite_bad_source, error) and another whose
+# (source,key) resolves to no scanned sprite (orphan_sprite, warning). No --strict -> exit 0.
+add_test(NAME cli_validate_sprite_records COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0 "-DARGS=validate ${_td}/v4_orphan.ntpacker_project --json"
+    -DCHECKER=$<TARGET_FILE:cli_json_check>
+    "-DCHECK_ARGS=validate code=sprite_bad_source code=orphan_sprite"
+    -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_validate_sprite_records.json
+    -P "${_run}")
+
 # (j) validate on an unloadable file -> exit 3.
 add_test(NAME cli_validate_unloadable COMMAND ${CMAKE_COMMAND}
     -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=3 "-DARGS=validate ${_td}/bad.ntpacker_project" -P "${_run}")

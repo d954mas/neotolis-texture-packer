@@ -22,8 +22,10 @@ struct tp_project;
  *
  * Bumped 2 -> 3 in F1-02: the inspect `sources[]` object gained `id` (structural
  * source shape-ID) and `stored_kind` (persisted folder/file classification) keys --
- * a versioned-contract change, same reason the anim reshape bumped the number. */
-#define CLI_INSPECT_SCHEMA 3
+ * a versioned-contract change, same reason the anim reshape bumped the number.
+ * Bumped 3 -> 4 in F1-03: each resolved `sprites[]` entry gained `sprite_id` (the
+ * derived deterministic id) and `source` (owning source shape-ID) keys. */
+#define CLI_INSPECT_SCHEMA 4
 
 /* Loads `path` into *out. On failure emits a structured error (id = tp_status_id,
  * message = tp_error prose) honoring --json/--quiet, and returns the CLI exit code

@@ -13,6 +13,10 @@
  *   export_name_collision [error]   two sprites -> one final name (tp_normalize collision)
  *   unknown_exporter      [error]   target exporter_id tp_exporter_find cannot resolve
  *   setting_out_of_range  [error]   a knob outside tp_pack's accepted range
+ *   sprite_bad_source     [error]   a v4 sprite record's source id is absent from the atlas (§5.6)
+ *   frame_bad_source      [error]   a v4 frame ref's source id is absent from the atlas (§5.6)
+ *   orphan_sprite         [warning] a v4 record resolves to no current sprite (stored orphan, §5.2/§5.6)
+ *   duplicate_sprite_key  [warning] two v4 sprite records share one (source, key) (§5.6)
  *
  * Exit (plan L-1): parse+run OK -> 0 (findings in the payload); load failure -> 3;
  * --strict AND any error-severity finding -> 7. */
@@ -34,7 +38,8 @@
 #include "tp_core/tp_pack.h" /* tp_pack_settings + tp_project_atlas_to_settings */
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_scan.h"
-#include "tp_core/tp_srckey.h" /* source-path collision + portability validation (F1-02) */
+#include "tp_core/tp_sprite_index.h" /* resolved index: §5.6 sprite-record findings (F1-03) */
+#include "tp_core/tp_srckey.h"       /* source-path collision + portability validation (F1-02) */
 
 #define CLI_VALIDATE_SCHEMA 1
 
@@ -289,6 +294,75 @@ static void validate_sources(cli_findings *fs, const tp_project_atlas *a) {
     free(k);
 }
 
+static bool source_id_in_atlas(const tp_project_atlas *a, tp_id128 sid) {
+    for (int i = 0; i < a->source_count; i++) {
+        if (tp_id128_eq(a->sources[i].id, sid)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* (h) §5.6 sprite-record integrity, over MIGRATED v4 records only (a pending record
+ * is covered by the name-based checks above). `idx` is the resolved sprite index:
+ *   sprite_bad_source / frame_bad_source [error]   a stored source id absent from the
+ *       atlas -- the record cannot reproduce its sprite_id / targets an unknown id;
+ *   orphan_sprite                        [warning] a valid (source,key) that resolves
+ *       to no current sprite (stored orphan; reactivates when the key returns);
+ *   duplicate_sprite_key                 [warning] two records sharing one (source,key). */
+static void validate_sprite_records(cli_findings *fs, const tp_project_atlas *a, const tp_sprite_index *idx) {
+    for (int i = 0; i < a->sprite_count; i++) {
+        const tp_project_sprite *s = &a->sprites[i];
+        if (tp_id128_is_nil(s->source_ref) || !s->src_key) {
+            continue; /* pending -- name-based checks apply */
+        }
+        if (!source_id_in_atlas(a, s->source_ref)) {
+            add_finding(fs, SEV_ERR, "sprite_bad_source", a->name, s->name, NULL, NULL, NULL,
+                        "sprite override '%s' references a source id not in this atlas "
+                        "(its stored key cannot reproduce its sprite_id)",
+                        s->name ? s->name : "");
+            continue;
+        }
+        if (!tp_sprite_index_by_source_key(idx, s->source_ref, s->src_key)) {
+            add_finding(fs, SEV_WARN, "orphan_sprite", a->name, s->name, NULL, NULL, NULL,
+                        "sprite override '%s' (key '%s') resolves to no current sprite "
+                        "(orphaned; reactivates if the source key returns)",
+                        s->name ? s->name : "", s->src_key);
+        }
+    }
+    for (int i = 0; i < a->sprite_count; i++) {
+        const tp_project_sprite *si = &a->sprites[i];
+        if (tp_id128_is_nil(si->source_ref) || !si->src_key) {
+            continue;
+        }
+        for (int j = 0; j < i; j++) {
+            const tp_project_sprite *sj = &a->sprites[j];
+            if (tp_id128_is_nil(sj->source_ref) || !sj->src_key) {
+                continue;
+            }
+            if (tp_id128_eq(si->source_ref, sj->source_ref) && strcmp(si->src_key, sj->src_key) == 0) {
+                add_finding(fs, SEV_WARN, "duplicate_sprite_key", a->name, si->src_key, NULL, NULL, NULL,
+                            "two sprite overrides share the same (source, key) '%s'", si->src_key);
+                break;
+            }
+        }
+    }
+    for (int an = 0; an < a->animation_count; an++) {
+        const tp_project_anim *pa = &a->animations[an];
+        for (int f = 0; f < pa->frame_count; f++) {
+            const tp_project_frame *fr = &pa->frames[f];
+            if (tp_id128_is_nil(fr->source_ref) || !fr->src_key) {
+                continue;
+            }
+            if (!source_id_in_atlas(a, fr->source_ref)) {
+                add_finding(fs, SEV_ERR, "frame_bad_source", a->name, NULL, pa->name, fr->name, NULL,
+                            "animation '%s' frame '%s' references a source id not in this atlas",
+                            pa->name ? pa->name : "", fr->name ? fr->name : "");
+            }
+        }
+    }
+}
+
 static void validate_atlas(cli_findings *fs, tp_project *p, int ai) {
     tp_project_atlas *a = &p->atlases[ai];
 
@@ -381,6 +455,14 @@ static void validate_atlas(cli_findings *fs, tp_project *p, int ai) {
         free_strv(finals, n);
     }
     tp_pack_input_free(&input);
+
+    /* (h) §5.6 sprite-record integrity over the resolved index (migrated v4 records). */
+    tp_sprite_index sidx;
+    tp_error ierr = {0};
+    if (tp_sprite_index_build(p, ai, &sidx, &ierr) == TP_STATUS_OK) {
+        validate_sprite_records(fs, a, &sidx);
+    }
+    tp_sprite_index_free(&sidx);
 
     /* (f) unknown exporter -- reported for every target (enabled or not): the id is
      * broken data regardless of enable state. */

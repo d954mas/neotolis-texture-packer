@@ -15,6 +15,7 @@
 #include "tp_core/tp_names.h"
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_scan.h"
+#include "tp_core/tp_sprite_index.h" /* resolved sprite index: sprite_id + owning source (F1-03) */
 
 /* Emits `,\n` (or `\n` for the first entry) + indent + "key": -- the same
  * first-tracking pattern tp_project.c's writer uses, so nesting stays balanced. */
@@ -99,20 +100,28 @@ static void emit_source(cli_sb *sb, int depth, const tp_project *p, const tp_pro
     cli_sb_putc(sb, '}');
 }
 
-/* One resolved sprite: raw name (ext kept), export key, abs decode path, and any
- * per-sprite overrides SET on the project sprite (read from the project model, not
- * the encoded desc -- keeps the frontend clear of the pack-desc encoding, R3 gate). */
-static void emit_sprite(cli_sb *sb, int depth, tp_project_atlas *a, const char *raw, const char *abs) {
-    char keybuf[256];
-    tp_sprite_export_key(raw, keybuf, sizeof keybuf);
+/* One resolved sprite: its derived identity (sprite_id, owning source) + raw name
+ * (ext kept), export key, abs decode path, and any per-sprite overrides SET on the
+ * project sprite (read from the project model, not the encoded desc -- keeps the
+ * frontend clear of the pack-desc encoding, R3 gate). */
+static void emit_sprite(cli_sb *sb, int depth, tp_project_atlas *a, const tp_sprite_ref *r) {
+    const char *keybuf = r->export_key;
+    char spid[TP_ID_TEXT_CAP];
+    char srcid[TP_ID_TEXT_CAP];
+    tp_sprite_id_format(r->sprite_id, spid, sizeof spid);
+    ntpacker_fmt_shape_id(srcid, sizeof srcid, TP_ID_KIND_SOURCE, r->source_id);
     bool first = true;
     cli_sb_putc(sb, '{');
-    key(sb, depth + 1, &first, "name");
-    cli_sb_json_str(sb, raw);
+    key(sb, depth + 1, &first, "abs");
+    cli_sb_json_str(sb, r->abs_path ? r->abs_path : "");
     key(sb, depth + 1, &first, "key");
     cli_sb_json_str(sb, keybuf);
-    key(sb, depth + 1, &first, "abs");
-    cli_sb_json_str(sb, abs ? abs : "");
+    key(sb, depth + 1, &first, "name");
+    cli_sb_json_str(sb, r->raw_name);
+    key(sb, depth + 1, &first, "source"); /* owning source structural shape-ID */
+    cli_sb_json_str(sb, srcid);
+    key(sb, depth + 1, &first, "sprite_id"); /* derived deterministic id (source + key) */
+    cli_sb_json_str(sb, spid);
     const tp_project_sprite *ov = tp_project_atlas_find_sprite(a, keybuf);
     if (ov) {
         if (ov->rename) {
@@ -247,25 +256,26 @@ static void emit_atlas(cli_sb *sb, int depth, tp_project *p, int ai) {
         cli_sb_putc(sb, ']');
     }
 
-    /* Sprites: DRY pass through the shared bridge (same descs a pack would use). */
+    /* Sprites: resolved index (same iteration a pack uses) carries each sprite's
+     * derived identity (sprite_id + owning source) alongside its keys/paths. */
     key(sb, depth + 1, &first, "sprites");
-    tp_pack_input input;
+    tp_sprite_index idx;
     tp_error err = {0};
-    tp_status bst = tp_pack_input_build(p, ai, &input, &err);
-    if (bst != TP_STATUS_OK || input.count == 0) {
+    tp_status bst = tp_sprite_index_build(p, ai, &idx, &err);
+    if (bst != TP_STATUS_OK || idx.count == 0) {
         cli_sb_str(sb, "[]");
     } else {
         cli_sb_putc(sb, '[');
-        for (int i = 0; i < input.count; i++) {
+        for (int i = 0; i < idx.count; i++) {
             cli_sb_str(sb, i == 0 ? "\n" : ",\n");
             cli_sb_indent(sb, depth + 2);
-            emit_sprite(sb, depth + 2, a, input.descs[i].name, input.descs[i].path);
+            emit_sprite(sb, depth + 2, a, &idx.refs[i]);
         }
         cli_sb_str(sb, "\n");
         cli_sb_indent(sb, depth + 1);
         cli_sb_putc(sb, ']');
     }
-    tp_pack_input_free(&input);
+    tp_sprite_index_free(&idx);
 
     key(sb, depth + 1, &first, "animations");
     if (a->animation_count == 0) {
