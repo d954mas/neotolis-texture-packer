@@ -191,21 +191,49 @@ skipping the serialize→parse round-trip). No upstream dependency remains.
 
 ---
 
-## Phase 4 — CLI (`apps/cli` over `tp_core`)
+## Phase 4 — CLI (`apps/cli` over `tp_core`) (DONE)
 
 **Goal:** headless, CI-friendly `ntpacker pack game.ntpacker_project`.
 
-**Deliverables**
-- Arg parser; `pack <project>` loads project → `tp_pack` → writes exporter files.
-- Flags mirror project fields with **CLI-overrides-project** semantics; `--save`
-  rewrites the project (TP pattern). `--force`, `--quiet`, `--version`.
-- Exit codes: 0 success / non-zero on failure (missing sprites, doesn't fit,
-  bad exporter). Errors to stderr.
+**Status:** LANDED — scope grew beyond the original sketch during execution
+(plan `docs/plans/op-layer-and-cli.md`; ai-first.md owner ruling 2026-07-11
+promoted the CLI to a human+AI-agent contract). Beyond `pack`, the CLI ships
+`inspect`/`validate` for machine-readable project inspection and a full set
+of project-mutation verbs (`new`/`add`/`remove`/`set`, `sprite
+set`/`unset`, `anim create/remove/list/add-frame/remove-frame/move-frame/set`,
+`target add/remove/set`, `atlas add/remove/rename`) — a script or an AI agent
+can build and edit a project from nothing, not just pack an existing one.
 
-**Acceptance**
-- CLI packs the smoke project headless and writes PNG + JSON; exit-code contract holds.
-- A CLI flag override changes output vs the project's stored value.
-- CLI output byte-matches the `tp_core` library test for the same input.
+**Deliverables**
+- Arg parser (`apps/cli/main.c`); `pack`/`export <project>` loads the project
+  → `tp_pack_input_build` → `tp_export_run_ex` → writes exporter files,
+  byte-identical to the GUI's "Export All" path (same core entry points).
+- Flags mirror project fields with **CLI-overrides-project** semantics:
+  `--atlas`, `--target`, `--out-dir`, `--dry-run`, `--json`, `--quiet`.
+  `--save` (flag-override-then-save) was **superseded** by the mutation verbs
+  (plan ruling L-1) — `set`/`sprite set` and friends are a better fit for
+  scripted edits than an override+save round trip, so `--save` was dropped
+  rather than shipped. `--force` (content-hash cache bypass) is **deferred to
+  Phase 8** — no cache exists yet, so every `pack` today is already a full
+  pack.
+- Exit codes: the full 8-code contract (`apps/cli/cli_exit.h`), not the
+  original 2-code sketch — 0 ok, 1 internal, 2 usage, 3 project load/parse,
+  4 pack failure, 5 export failure, 6 partial success, 7 `validate --strict`
+  findings, 8+ reserved. Errors go to stderr; `--json` errors are stdout
+  payloads carrying a stable `tp_status_id`.
+- `--json` on every verb with a versioned `"schema": N` payload
+  (`docs/formats/cli-report.md`); `version --json` publishes the full schema
+  manifest.
+
+**Acceptance** — all three met:
+- CLI packs the smoke project headless and writes PNG + JSON; the full
+  exit-code contract holds (ctest exit-code matrix).
+- A CLI flag override (`--atlas`/`--target`/`--out-dir`) changes output vs
+  the project's stored value.
+- CLI output byte-matches the `tp_core` library test for the same input —
+  now enforced by a real ctest (CLI==core byte-parity,
+  `apps/cli/cli_parity.cmake`), not just a manual claim; see also the Phase 6
+  acceptance note below, which the same ctest covers.
 
 **Depends on:** 2, 3.
 
@@ -272,7 +300,9 @@ validation) — a later phase, out of scope for the exporter packet.
 **Acceptance**
 - Manual smoke: open tool → add folder → Pack → see page preview with region
   outlines → save project.
-- The saved project, packed via the CLI, produces byte-identical output (parity).
+- The saved project, packed via the CLI, produces byte-identical output
+  (parity) — enforced by the CLI==core byte-parity ctest
+  (`apps/cli/cli_parity.cmake`, landed with Phase 4), not just a manual check.
 
 **Depends on:** 2, 3. Parallel with 5, 7.
 
@@ -352,7 +382,7 @@ validation) — a later phase, out of scope for the exporter packet.
 1. **1a (.ntpack parse-back reader)** — in-repo, no upstream dependency.
 2. **1b → 2** — core + real outputs (serial spine).
 3. **3** — project file (parallel with 2).
-4. **4** — CLI (needs 2+3).
+4. **4** — CLI (needs 2+3). DONE.
 5. **5 / 6 / 7** — Defold+demo, GUI MVP, template exporters — run in parallel.
 6. **8** — watch/incremental (parallel after 4).
 7. **9** — variants, secondaries, release polish — closes v1.

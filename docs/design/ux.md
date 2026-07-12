@@ -434,8 +434,8 @@ free-tex-packer, whose absolute paths silently break on another machine).
 3. **Override referencing an absent sprite name**: kept sparse in `sprites[]`, shown
    as an orphaned-override warning; never auto-purged.
 4. **Empty atlas** (all inputs gone): the atlas packs to nothing → a warning, not a
-   crash. CLI: warnings to stderr, still exit 0 if anything packed; non-zero only if
-   a *requested* atlas has zero usable input and produces no output.
+   crash. CLI: a report note + stderr line; the atlas is skipped, which is **not**
+   by itself a failure — exit stays whatever the rest of the run earned (§4.4).
 
 ### 3.7b Animations — assemble, edit, preview (owner requirement 2026-07-10)
 
@@ -498,12 +498,19 @@ preview and notices update. CLI: `--watch` reuses the same watcher and pack job.
 
 ---
 
-## 4. CLI UX (`ntpacker`)
+## 4. CLI UX (`ntpacker`) — as built
 
 Headless, CI-first. One console binary `ntpacker`; the windowed sibling is
 `ntpacker-gui` (`SUMMARY.md §6 Q7`). All persistent state is the project file; the
 CLI does argv + disk I/O only and calls the same `tp_core` the GUI does — so CLI
-output byte-matches the library test and the GUI (ROADMAP Phase 4 acceptance).
+output byte-matches the library test and the GUI (ROADMAP Phase 4 acceptance —
+now a real ctest, CLI==core byte-parity, `apps/cli/cli_parity.cmake`).
+
+This section is the SHIPPED contract, not the original design — the plan
+(`docs/plans/op-layer-and-cli.md`, lead ruling L-1) states the implemented CLI
+supersedes the pre-implementation design this section used to describe. Source
+of truth for exact verb/flag text: `apps/cli/main.c` (`print_usage`); for JSON
+payload shapes: `docs/formats/cli-report.md`.
 
 > **Naming note (resolved, 2026-07-10).** **`pack`** is the canonical verb
 > (ecosystem norm — rTexPacker/gdx/texpack; ROADMAP deliverable); **`export`**
@@ -512,83 +519,155 @@ output byte-matches the library test and the GUI (ROADMAP Phase 4 acceptance).
 ### 4.1 Verbs
 
 ```
-ntpacker pack <project.ntpacker_project> [<project2> …] [flags]   # primary (alias: export)
-ntpacker watch <project.ntpacker_project> [flags]                # = pack --watch
-ntpacker info  <project.ntpacker_project>                        # list atlases + targets, no output
-ntpacker --version | --help
+ntpacker pack <project> [--atlas <name>] [--target <id>] [--out-dir <dir>] [--dry-run] [--json] [--quiet]   # alias: export
+ntpacker inspect <project> [--json] [--quiet]                          # dump project state
+ntpacker validate <project> [--json] [--quiet] [--strict]              # every problem, one pass
+ntpacker new <path>                                                    # create a project (seeded default target)
+
+ntpacker add <project> <atlas> <path>...                               # add image/folder source(s)
+ntpacker remove <project> <atlas> <source>                             # remove a source
+ntpacker set <project> <atlas> <key>=<value>...                        # atlas knobs
+ntpacker sprite set <project> <atlas> <name> <field>=<value>...        # per-sprite override (field=inherit clears)
+ntpacker sprite unset <project> <atlas> <name>                         # clear a sprite's whole override
+ntpacker anim create|remove|list|add-frame|remove-frame|move-frame|set <project> <atlas> ...
+ntpacker target add|remove|set <project> <atlas> ...                   # export targets
+ntpacker atlas add|remove|rename <project> ...                         # atlases, by name
+
+ntpacker version [--json] | --version | --help | help
 ```
 
 `pack` with no flags packs every atlas to every enabled target — the whole CI
-story is one line. Multiple project files batch (gdx-tpgui `--batch`,
-TexturePacker multi-`.tps`).
+story is one line. `--atlas`/`--target` each take a single value (not
+repeatable — see §4.2).
+
+`info` (the read verb in the pre-implementation design) was **superseded by
+`inspect`** before it shipped — same job, a name that doesn't read like an
+"info level" and sits better next to `validate`.
+
+`watch` is **NOT implemented**. It stays on the roadmap for **Phase 8**
+(`docs/ROADMAP.md`), landing together with the content-hash cache it depends
+on — there is no "did anything change" signal to watch against yet.
+
+Every mutation verb (`add` through `atlas`) maps 1:1 to an existing
+`tp_project_*` mutator (plan "CLI v1 contract") — load, mutate, save.
 
 ### 4.2 Flags (mirror project fields; CLI overrides project)
 
 | Flag | Effect |
 |------|--------|
-| `--atlas <name>` (repeatable) | Pack only these atlases (default: all). |
-| `--target <id>` (repeatable) | Export only these targets: `json-neotolis`, `defold`, `ntpack` (default: all enabled). |
-| `--out-dir <dir>` | Override the output root; per-target paths resolve under it (default: per-target paths in the project, relative to the project file). |
-| `--watch` | Watch live folders; repack on change (debounced, coalesced). `Ctrl-C` exits 0. |
-| `--force` | Ignore the content-hash cache; always repack + rewrite (crunch model / TexturePacker `--force-publish`). |
-| `--save [<path>]` | Write the effective (project + CLI overrides) settings back to the project (TexturePacker `--save`). Enables scripted project edits. |
-| `--verbose` / `-v` | Per-atlas, per-target, and metadata-loss detail. |
-| `--quiet` / `-q` | Errors only; suppress progress + notices. |
-| `--version`, `--help` | Standard. |
+| `--atlas <name>` | Pack only this atlas. Single value, **not repeatable** (last one given wins); unknown name is a usage error. `pack`-only. |
+| `--target <id>` | Export only targets with this exporter id. Single value, **not repeatable**; default: all enabled. `pack`-only. |
+| `--out-dir <dir>` | Re-root RELATIVE target out_paths under `<dir>` (resolved against the CWD) instead of the project dir; absolute out_paths are untouched. `pack`-only. |
+| `--dry-run` | Report what `pack` WOULD do — pages, would-write paths, every predicted degradation — and write NO files (no directories created either). `pack`-only. |
+| `--at <N>` | Insert at index N. `anim add-frame`-only (default without it: append). |
+| `--json` | Machine-readable output; every verb's payload carries `"schema": N` (`docs/formats/cli-report.md`). |
+| `--quiet` / `-q` | Suppress stderr progress/notice lines; errors still report. |
+| `--strict` | `validate`-only: exit 7 if any error-severity finding exists. |
+| `--version`, `--help` | Standard; short-circuit any verb. |
 
-Stable identifiers everywhere (`json-neotolis`, never `"JSON (Neotolis)"`) — 
+A flag scoped to one verb is a **usage error, exit 2** on any other verb (e.g.
+`--dry-run` on `inspect`, `--strict` on `pack`).
+
+Stable identifiers everywhere (`json-neotolis`, never `"JSON (Neotolis)"`) —
 free-tex-packer's display-string-as-id was a documented CLI wart
 (`oss-and-architecture.md`).
 
+**Superseded / deferred — not implemented, listed so nobody assumes otherwise:**
+- **`--save [<path>]`** (write CLI overrides back to the project) was
+  **superseded by the mutation verbs** before it shipped (plan ruling L-1):
+  `set`/`sprite set` and friends name the field being changed directly —
+  strictly better for scripted edits than an override-then-save round trip
+  that replays a `pack` invocation's flags.
+- **`--force`** (bypass a content-hash cache) is **Phase 8** work. No cache
+  exists yet, so today every `pack` is already a full pack — there is
+  nothing to force past.
+- **`--watch`** is **Phase 8** work, same dependency as `--force`.
+- **`--verbose` / `-v`** is **deferred**. The engine's default log writer
+  sends INFO-level lines to stdout, which would corrupt a `--json` payload;
+  a verbose mode needs an engine log-writer opt-out before it can coexist
+  with `--json`. `--json` payloads are already complete today — a verbose
+  mode wouldn't add fields, only more human-readable progress detail, which
+  is stderr-only text for now.
+
 ### 4.3 Output conventions
 
-- **Streams:** human progress + notices → **stderr**; stdout reserved (kept clean
-  for future machine-readable summary / redirection). Errors → stderr.
-- **Progress** (default, not `--quiet`): one line per atlas → target, e.g.
-  `hero → defold: 3 pages, 128 sprites (34ms)`; `--verbose` adds per-sprite /
-  effective-settings detail.
-- **Notices** carry a severity prefix and never, by themselves, change the exit
-  code:
-  - `notice:` genuine metadata loss under a target (dropped pivot, polygon → rect)
-    — the §5h informational case.
-  - `warning:` missing input, near-limit page usage, name collision resolved,
-    absolute path relativized.
-  - `error:` hard failure (below).
-- **"Up to date"**: with the content-hash cache and no `--force`, an unchanged
-  input set prints `hero: up to date` and does no work — safe to call every build.
+- **Streams:** stdout carries the requested payload **only** — human-readable
+  summary text by default, or the JSON payload with `--json`. stderr carries
+  diagnostics: progress lines, human-readable notice echoes, and errors. An
+  agent pipes stdout straight into a parser without filtering anything out.
+- **Progress** (default, not `--quiet`): one line per atlas/target pair, e.g.
+  `ntpacker: hero / defold: ok (3 files)`, `ntpacker: hero / defold: FAILED:
+  <message>`, or on a dry run `ntpacker: hero / defold: would write 3 files
+  (dry-run)`.
+- **Notices are structured data, not severity-prefixed lines.** Each notice is
+  `{field, reason, sprite?, message}` inside the pack report's per-target
+  `notices[]` array (`docs/formats/cli-report.md`) — genuine metadata loss
+  (dropped pivot, polygon → rect, …) on a real run, or predicted losses on
+  `--dry-run`. In human mode the same notices are also echoed to stderr as
+  `ntpacker: notice: <message>` lines; there is no `warning:`/`error:` prefix
+  tier for pack notices — severity as a concept lives in `validate`'s
+  findings instead (next bullet).
+- **`validate` findings** are the other structured-data surface: each is
+  `{severity: error|warning, code, message, atlas?, sprite?, anim?, frame?,
+  target?}` with a `counts:{error,warning}` summary — one run reports every
+  problem, not one per invocation (ai-first.md item 7).
+- **No "up to date" cache behavior today.** There is no content-hash cache
+  (§4.2), so every `pack` does full work; the "unchanged inputs → no-op, safe
+  to call every build" behavior is **Phase 8** (roadmap note under §4.5).
 
 ### 4.4 Exit codes
 
+The full 8-code contract (`apps/cli/cli_exit.h`; plan ruling L-1 — this table
+supersedes the 3-code sketch this section used to describe):
+
 | Code | Meaning |
 |------|---------|
-| `0` | Success, including "up to date" and packs that emitted only notices/warnings. |
-| `1` | Usage / argument error (unknown flag, missing project, unknown atlas/target id). |
-| `2` | Pack/export failure: a sprite exceeds the target's max page, missing exporter/template, project schema newer than the tool, or all requested input missing / I/O error. |
+| `0` | Success — the requested work completed. Includes a pack that only emitted notices, and `validate` findings when `--strict` is not set. |
+| `1` | Internal error — an unexpected failure (a `tp_core` call failed where it should not). |
+| `2` | Usage error — unknown verb/flag, missing or malformed arguments, no command. Note: usage error is **2**, not 1. |
+| `3` | Project file load/parse error (bad JSON, schema newer than the tool). |
+| `4` | Pack failure (`tp_pack` / the builder returned an error) — nothing produced for that atlas. |
+| `5` | Export failure (writing an enabled target's output failed) — nothing produced for that target/run. |
+| `6` | Partial success — some atlases/targets succeeded, others failed. |
+| `7` | `validate` found problems **and** `--strict` was passed (otherwise findings live in the payload at exit 0). |
+| `8+` | Reserved — a future distinct failure gets a new code, never an overload of an existing one. |
 
-Standard make/CI contract (TexturePacker, gdx-tpgui). Errors are actionable and
-name the atlas + sprite.
+An atlas with no usable sprites or no enabled targets is **not** a failure by
+itself (§3.7 point 4) — it is skipped with a report note and a stderr line,
+and the run's exit code stays whatever the other atlases/targets earned (an
+agent should not have to hard-fail a preview-only atlas); only an actual
+pack/export failure (codes 4/5/6) makes the run non-zero. Errors are
+actionable and name the atlas + sprite/target via the structured
+`error`/finding fields (§4.3).
 
 ### 4.5 CI recipes
 
 ```bash
-# Build step — safe to run unconditionally (content-hash no-op when unchanged):
+# Build step — packs every atlas, every enabled target:
 ntpacker pack game.ntpacker_project
-
-# Clean rebuild job — bypass the cache:
-ntpacker pack game.ntpacker_project --force
 
 # Only the Defold target, into a build output tree:
 ntpacker pack game.ntpacker_project --target defold --out-dir build/atlases
 
-# Fail the build if packing fails (exit code gates the pipeline):
-ntpacker pack game.ntpacker_project || exit 1
+# Validate as a CI gate — non-zero exit on any error-severity finding:
+ntpacker validate game.ntpacker_project --strict
 
-# Dev loop — repack on save, like a dev server:
-ntpacker watch game.ntpacker_project           # or: ntpacker pack … --watch
+# Inspect project state for a downstream script:
+ntpacker inspect game.ntpacker_project --json | jq '.atlases[].name'
+
+# Agent dry-run — see what would be written and what would degrade, no I/O:
+ntpacker pack game.ntpacker_project --dry-run --json
 ```
 
 Free, no license/EULA/floating-seat friction to script around — a deliberate
 advantage over TexturePacker's CI licensing pain (`texturepacker.md` Lessons #10).
+
+**Phase 8 (not yet shipped):** a content-hash cache (`--force` to bypass it;
+otherwise an unchanged input set prints "up to date" and does no work — safe
+to call every build) and `--watch` (repack on source-file change, debounced +
+coalesced, `Ctrl-C` exits 0). The two recipes that depended on them — a
+`--force` clean-rebuild job, and a `ntpacker watch game.ntpacker_project`
+dev-loop line — return once Phase 8 lands.
 
 ---
 

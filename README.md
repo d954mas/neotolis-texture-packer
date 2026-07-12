@@ -6,9 +6,11 @@ formats. The packer is the engine's NFP/Minkowski **concave** vector packer —
 it nests true silhouettes (not just rectangles), tries all 8 D4 orientations
 (4 rotations × 2 flips), trims, deduplicates, and packs deterministically.
 
-**Status: first test release (v0.1.0).** The GUI is a working atlas tool:
-live packing, settings, animations, and two export formats. The CLI (Phase 4)
-is next. See `docs/ROADMAP.md` for the full plan.
+**Status: v0.1.0 was the first test release (GUI only).** Since then, the
+`ntpacker` CLI has landed on `main` and ships with the next release: headless
+pack/export, project inspection/validation, and full project editing from the
+command line, alongside the GUI's live packing, settings, and animations. See
+`docs/ROADMAP.md` for the full plan.
 
 ## Download
 
@@ -49,10 +51,21 @@ Defold comparison demo below.
 - **`.ntpack`** — the engine's native runtime pack is always produced (it is
   also the GUI preview artifact: what you see is literally the atlas that
   ships).
+- **CLI (`ntpacker`)** — headless `pack`/`export`, byte-identical to the
+  GUI's export output (pinned by a CLI==core byte-parity ctest);
+  `inspect`/`validate` for machine-readable project inspection; full project
+  editing from the command line (`new`/`add`/`remove`/`set`, `sprite
+  set`/`unset`, `anim create`/`add-frame`/`move-frame`/…, `target`/`atlas`
+  add/remove/set) so a script or an AI agent can build and edit a project
+  from nothing; `--json` on every verb with a stable, versioned per-verb
+  schema; a frozen exit-code contract (0 ok … 6 partial success … 7 validate
+  `--strict` findings); `--dry-run` reports what a pack would write and every
+  predicted metadata loss without touching disk. Built for humans and AI
+  agents alike — the CLI contract *is* the AI interface
+  (`docs/design/ai-first.md`).
 
-## Known limitations (v0.1.0)
+## Known limitations
 
-- No CLI yet (next phase) — exports run from the GUI.
 - Packing runs synchronously: the window can stall for a few seconds on very
   large atlases (worker-thread + progress is planned).
 - The Defold target packs without rotations until the engine grows a
@@ -62,7 +75,7 @@ Defold comparison demo below.
 - Duplicate frames are only merged when the source files are identical;
   identical-after-trim dedup is engine work in progress
   ([engine#286](https://github.com/d954mas/neotolis-engine/issues/286)).
-- A sprite that cannot fit the page size aborts the app
+- A sprite that cannot fit the page size aborts the process — GUI or CLI
   ([engine#287](https://github.com/d954mas/neotolis-engine/issues/287)) —
   keep `max page size` comfortably larger than your biggest sprite.
 - Polygon hulls on anti-aliased edges can be noisy — raise the alpha
@@ -70,11 +83,13 @@ Defold comparison demo below.
   ([engine#288](https://github.com/d954mas/neotolis-engine/issues/288)).
 - The window's X button bypasses the unsaved-changes prompt (engine gap);
   window size / recent projects are not remembered yet.
+- CLI: no `--verbose` and no machine-readable progress stream yet (needs an
+  engine log-writer opt-out so live progress can coexist cleanly with
+  `--json`); `--json` payloads themselves are complete — only in-flight
+  progress is stderr-only text for now.
 
 ## Planned (roadmap order)
 
-- `ntpacker` CLI: `ntpacker pack project.ntpacker_project` — byte-identical
-  to GUI export (tool-parity invariant).
 - Defold demo built headless by bob in CI; native `.atlas` export preset.
 - Async packing with progress; notices panel; list search/filter.
 - Watch mode (auto-repack on source changes).
@@ -100,11 +115,25 @@ press **F5** (`.vscode/launch.json` is checked in). Open
 `examples/defold-demo/defold-demo.ntpacker_project` for a ready-made project
 over real assets.
 
+### Running the CLI
+
+The exe lands at `build/apps/cli/<preset>/ntpacker(.exe)`. One-liner:
+
+```bash
+ntpacker pack examples/showcase/showcase.ntpacker_project --dry-run --json
+```
+
+Run `ntpacker help` for the full verb list, or see
+`docs/design/ux.md` §4 / `docs/formats/cli-report.md` for the complete
+flag/schema reference.
+
 ## Repository layout
 
 | Path | What |
 |---|---|
 | `packer/` | `tp_core` (model, project IO, `.ntpack` parse-back, normalization, exporters) + `tp_build` (drives the engine builder) + tests |
+| `apps/cli/` | `ntpacker` — headless CLI frontend over `tp_core` |
+| `apps/common/` | shared version header (`ntpacker_version.h`) used by both frontends |
 | `apps/gui/` | `ntpacker-gui` (engine `nt_ui` frontend) |
 | `apps/smoke/` | toolchain smoke test |
 | `examples/defold-demo/` | Defold project with real assets (from [extension-texturepacker](https://github.com/defold/extension-texturepacker), MIT) for the three-way atlas comparison: Defold native / TexturePacker / ntpacker |
