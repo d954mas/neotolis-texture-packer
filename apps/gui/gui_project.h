@@ -157,8 +157,14 @@ void gui_project_new(void);
 tp_status gui_project_open(const char *path, char *err_out, size_t err_cap);
 /* Saves to the current path (must exist). Clears project_dirty. */
 tp_status gui_project_save(char *err_out, size_t err_cap);
-/* Saves to `path`, remembers it, clears project_dirty. */
+/* Saves to `path`, remembers it, clears project_dirty. Promotes structural ids FIRST
+ * and, on RNG failure, returns the error WITHOUT writing (never persists a nil-id file). */
 tp_status gui_project_save_as(const char *path, char *err_out, size_t err_cap);
+
+/* Drains a pending id-promotion failure recorded by a void-context snapshot/touch
+ * (an OS-RNG fault): returns true once and copies the message into `out` (then clears
+ * it), false when none is pending. The UI polls this each frame to surface it. */
+bool gui_project_take_id_error(char *out, size_t cap);
 
 #ifdef __cplusplus
 }

@@ -24,6 +24,13 @@ static size_t s_last_len;
 static char *s_saved_buf;  /* the last-SAVED model, serialized (dirty baseline) */
 static size_t s_saved_len;
 static double s_now;       /* history clock (seconds), fed each frame */
+
+/* Pending id-promotion failure from a void-context ensure_ids() (a snapshot/touch):
+ * OS-RNG failure would leave nil structural ids, which must never be silently
+ * swallowed. Drained + surfaced once by the UI (gui_project_take_id_error). The
+ * save path fails closed on its own, so it does NOT set this. */
+static bool s_id_error;
+static char s_id_error_msg[256];
 // #endregion
 
 // #region helpers
@@ -83,20 +90,44 @@ static void serialize_current(char **buf, size_t *len) {
 }
 
 /* Assign a random persistent ID to any structural entity still lacking one (a
- * freshly created project/atlas/anim/target). Idempotent + best-effort: a loaded
- * project already has non-nil IDs so this is a no-op, and it never re-changes an
- * existing ID. Called before every snapshot so undo/redo bytes -- and the saved
- * file -- always carry stable, non-nil structural IDs (a writable session gets
- * its final IDs before the first mutation, master spec §5.5). */
-static void ensure_ids(void) {
-    if (s_proj) {
-        tp_rng rng = tp_rng_os();
-        (void)tp_project_promote_ids(s_proj, &rng, NULL);
+ * freshly created project/atlas/anim/target). Idempotent: a loaded project already
+ * has non-nil IDs so this is a no-op, and it never re-changes an existing ID. Called
+ * before every snapshot so undo/redo bytes -- and the saved file -- always carry
+ * stable, non-nil structural IDs (a writable session gets its final IDs before the
+ * first mutation, master spec §5.5). Returns the promote status (RNG failure ->
+ * TP_STATUS_RNG_FAILED, ids left untouched/nil); `err` (may be NULL) carries prose. */
+static tp_status ensure_ids(tp_error *err) {
+    if (!s_proj) {
+        return TP_STATUS_OK;
     }
+    tp_rng rng = tp_rng_os();
+    return tp_project_promote_ids(s_proj, &rng, err);
+}
+
+/* Record a void-context id-promotion failure so the UI can surface it (never silently
+ * swallowed): a nil-id model would serialize nil ids that fail on reload/save. */
+static void note_id_error(tp_status st, const tp_error *err) {
+    s_id_error = true;
+    (void)snprintf(s_id_error_msg, sizeof s_id_error_msg, "%s", (err && err->msg[0]) ? err->msg : tp_status_str(st));
+}
+
+bool gui_project_take_id_error(char *out, size_t cap) {
+    if (!s_id_error) {
+        return false;
+    }
+    if (out && cap) {
+        (void)snprintf(out, cap, "%s", s_id_error_msg);
+    }
+    s_id_error = false;
+    return true;
 }
 
 static void set_last_from_current(void) {
-    ensure_ids();
+    tp_error err = {0};
+    tp_status st = ensure_ids(&err);
+    if (st != TP_STATUS_OK) {
+        note_id_error(st, &err); /* keep snapshotting: surfaces the fault, never crashes */
+    }
     free(s_last_buf);
     serialize_current(&s_last_buf, &s_last_len);
 }
@@ -178,7 +209,11 @@ bool gui_project_is_stale(void) { return s_preview_stale; }
 // #region dirty/stale choke point
 void gui_project_touch(gui_action act) {
     s_preview_stale = true;
-    ensure_ids(); /* a just-added atlas/anim/target gets its ID before this snapshot */
+    tp_error id_err = {0};
+    tp_status id_st = ensure_ids(&id_err); /* a just-added atlas/anim/target gets its ID before this snapshot */
+    if (id_st != TP_STATUS_OK) {
+        note_id_error(id_st, &id_err); /* do not swallow an RNG failure */
+    }
     char *nb = NULL;
     size_t nl = 0;
     serialize_current(&nb, &nl);
@@ -654,6 +689,16 @@ tp_status gui_project_save(char *err_out, size_t err_cap) {
 
 tp_status gui_project_save_as(const char *path, char *err_out, size_t err_cap) {
     tp_error err = {0};
+    /* Promote to final random ids BEFORE writing: on OS-RNG failure promote returns
+     * RNG_FAILED with every id left nil, so persisting now would write a nil-id file
+     * that fails on reload. Fail closed -- report and return WITHOUT saving. */
+    tp_status ids = ensure_ids(&err);
+    if (ids != TP_STATUS_OK) {
+        if (err_out && err_cap) {
+            (void)snprintf(err_out, err_cap, "%s", err.msg[0] ? err.msg : tp_status_str(ids));
+        }
+        return ids;
+    }
     tp_status st = tp_project_save(s_proj, path, &err);
     if (st != TP_STATUS_OK) {
         if (err_out && err_cap) {

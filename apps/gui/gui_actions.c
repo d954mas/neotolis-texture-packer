@@ -964,6 +964,12 @@ static void poll_async(void) {
         default:
             break;
     }
+    /* Surface a pending id-promotion fault recorded by a snapshot/touch (OS-RNG
+     * failure): the model kept its nil ids, so warn loudly instead of swallowing it. */
+    char id_err[256];
+    if (gui_project_take_id_error(id_err, sizeof id_err)) {
+        set_statusf_ex(STATUS_ERROR, "Structural id assignment failed: %s", id_err);
+    }
 }
 // #endregion
 
