@@ -3,6 +3,6 @@
 
 /* Single source of the product version string, shared by every ntpacker
  * frontend (GUI About box, CLI `version` verb + --json manifest). */
-#define NTPACKER_VERSION "0.1.0"
+#define NTPACKER_VERSION "0.2.0"
 
 #endif /* NTPACKER_COMMON_VERSION_H */
