@@ -4,6 +4,7 @@
  * policy, container probe, and EXIF-orientation parsing. */
 
 #include "tp_c0/tp_c0_raster.h"
+#include "tp_c0_exif_fixture.h"
 #include "unity.h"
 
 #include <string.h>
@@ -184,16 +185,40 @@ void test_container_probe(void) {
 /* ---- EXIF orientation parsing (both TIFF byte orders) ---- */
 
 void test_exif_orientation_little_endian(void) {
-    /* SOI + APP1(Exif, II TIFF, orientation=6) + EOI */
-    const uint8_t jpeg[] = {
-        0xFF, 0xD8,                               /* SOI */
-        0xFF, 0xE1, 0x00, 0x22,                   /* APP1, len = 0x22 = 34 */
-        'E', 'x', 'i', 'f', 0x00, 0x00,           /* Exif\0\0 */
-        'I', 'I', 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00, /* TIFF LE, IFD0 @ 8 */
-        0x01, 0x00,                               /* entry count = 1 */
-        0x12, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, /* tag 0x0112 SHORT =6 */
-        0x00, 0x00, 0x00, 0x00,                   /* next IFD = 0 */
-        0xFF, 0xD9};                              /* EOI */
+    /* SOI + APP1(Exif, II TIFF, orientation=6) + EOI, no fill bytes: proves
+     * the ordinary (single 0xFF-before-marker) path still works. */
+    uint8_t app1[TP_C0_EXIF_APP1_LE_LEN];
+    tp_c0_exif_app1_le_build(app1, 6);
+    uint8_t jpeg[2 + TP_C0_EXIF_APP1_LE_LEN + 2];
+    jpeg[0] = 0xFF;
+    jpeg[1] = 0xD8; /* SOI */
+    memcpy(jpeg + 2, app1, TP_C0_EXIF_APP1_LE_LEN);
+    jpeg[2 + TP_C0_EXIF_APP1_LE_LEN] = 0xFF;
+    jpeg[3 + TP_C0_EXIF_APP1_LE_LEN] = 0xD9; /* EOI */
+
+    uint32_t o = 0;
+    TEST_ASSERT_TRUE(tp_c0_raster_exif_orientation(jpeg, sizeof jpeg, &o));
+    TEST_ASSERT_EQUAL_UINT32(6, o);
+}
+
+void test_exif_orientation_skips_fill_bytes_before_marker(void) {
+    /* JPEG allows any number of 0xFF fill bytes before a marker. A fill byte
+     * right before APP1 (SOI, FF FF E1 ...) must not desync the walk or hide
+     * the orientation tag (F1: the un-fixed walk misread the second 0xFF as
+     * the marker byte and silently failed to find orientation=6 here). */
+    uint8_t app1[TP_C0_EXIF_APP1_LE_LEN];
+    tp_c0_exif_app1_le_build(app1, 6);
+    const size_t fill = 3; /* a run of several fill bytes, not just one */
+    uint8_t jpeg[2 + fill + TP_C0_EXIF_APP1_LE_LEN + 2];
+    jpeg[0] = 0xFF;
+    jpeg[1] = 0xD8; /* SOI */
+    for (size_t i = 0; i < fill; i++) {
+        jpeg[2 + i] = 0xFF; /* fill bytes before the APP1 marker */
+    }
+    memcpy(jpeg + 2 + fill, app1, TP_C0_EXIF_APP1_LE_LEN);
+    jpeg[2 + fill + TP_C0_EXIF_APP1_LE_LEN] = 0xFF;
+    jpeg[3 + fill + TP_C0_EXIF_APP1_LE_LEN] = 0xD9; /* EOI */
+
     uint32_t o = 0;
     TEST_ASSERT_TRUE(tp_c0_raster_exif_orientation(jpeg, sizeof jpeg, &o));
     TEST_ASSERT_EQUAL_UINT32(6, o);
@@ -241,6 +266,7 @@ int main(void) {
     RUN_TEST(test_icc_notice_policy);
     RUN_TEST(test_container_probe);
     RUN_TEST(test_exif_orientation_little_endian);
+    RUN_TEST(test_exif_orientation_skips_fill_bytes_before_marker);
     RUN_TEST(test_exif_orientation_big_endian);
     RUN_TEST(test_exif_orientation_absent);
     RUN_TEST(test_exif_orientation_truncated_no_crash);
