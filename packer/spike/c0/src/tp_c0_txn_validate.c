@@ -190,3 +190,37 @@ tp_c0_detail tp_c0_txn_validate(const tp_c0_txn_request *req, long current_revis
     (void)err;
     return TP_C0_OK;
 }
+
+/* ---- revision precondition + idempotency retention set ------------------- */
+
+tp_c0_detail tp_c0_revision_check(long expected_revision, long current_revision, tp_error *err) {
+    if (expected_revision == current_revision) {
+        return TP_C0_OK;
+    }
+    if (expected_revision < current_revision) {
+        return tp_c0_fail(err, TP_C0_ERR_REVISION_CONFLICT, "expected_revision %ld < current %ld", expected_revision,
+                          current_revision);
+    }
+    return tp_c0_fail(err, TP_C0_ERR_INVALID_REVISION, "expected_revision %ld > current %ld", expected_revision,
+                      current_revision);
+}
+
+tp_c0_detail tp_c0_txn_idset_add(tp_c0_txn_idset *set, const char *id_hex, tp_error *err) {
+    if (!set || !id_hex) {
+        return tp_c0_fail(err, TP_C0_ERR_NULL_ARG, "null idset/id");
+    }
+    if (!is_hex32(id_hex)) {
+        return tp_c0_fail(err, TP_C0_ERR_TXN_BAD_ID, "transaction id must be 32 lowercase hex");
+    }
+    for (int i = 0; i < set->count; i++) {
+        if (strcmp(set->ids[i], id_hex) == 0) {
+            return tp_c0_fail(err, TP_C0_ERR_TXN_DUPLICATE_ID, "transaction id already applied");
+        }
+    }
+    if (set->count >= TP_C0_IDSET_CAP) {
+        return tp_c0_fail(err, TP_C0_ERR_BUFFER_TOO_SMALL, "idempotency set full");
+    }
+    (void)snprintf(set->ids[set->count], sizeof set->ids[0], "%s", id_hex);
+    set->count++;
+    return TP_C0_OK;
+}

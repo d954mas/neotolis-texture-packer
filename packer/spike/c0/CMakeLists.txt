@@ -17,7 +17,9 @@ add_library(tp_c0 STATIC
     src/tp_c0_op_catalog.c
     src/tp_c0_selector.c
     src/tp_c0_semantic.c
-    # C0-02 transaction contract spike: parse, validate, encode, result (no engine).
+    # C0-02 transaction contract spike (no engine): shared decode util, request
+    # parse, validate, encode (request+result), result decode.
+    src/tp_c0_txn_util.c
     src/tp_c0_txn_parse.c
     src/tp_c0_txn_validate.c
     src/tp_c0_txn_encode.c

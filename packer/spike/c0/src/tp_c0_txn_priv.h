@@ -14,6 +14,7 @@
 #include "tp_c0/tp_c0_txn.h"
 
 bool tpc0_is_hex32_lower(const char *s);
+bool tpc0_in_skip(const char *key, const char *const *skip, int skip_n);
 void tpc0_free_val(tp_c0_val *v);
 void tpc0_free_fields(tp_c0_field *f, int n);
 
