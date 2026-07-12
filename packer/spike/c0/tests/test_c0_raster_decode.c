@@ -10,30 +10,15 @@
 
 #include "tp_c0/tp_c0_raster.h"
 #include "tp_c0/tp_c0_stb.h"
+#include "tp_c0_exif_fixture.h"
 #include "tp_c0_jpeg_fixture.h"
 #include "tp_c0_png_write.h"
 #include "unity.h"
 
-#include <stdio.h>
 #include <string.h>
 
 void setUp(void) {}
 void tearDown(void) {}
-
-/* Set to 1 after pasting captured JPEG goldens; 0 prints actual bytes. */
-#define TP_C0_GOLD_READY 1
-
-static void dump_rgba(const char *name, const uint8_t *px, uint32_t w, uint32_t h) {
-    printf("/* %s (%ux%u) */\n", name, w, h);
-    size_t n = (size_t)w * h * 4;
-    for (size_t i = 0; i < n; i++) {
-        printf("0x%02x,", px[i]);
-        if ((i % 16) == 15) {
-            printf("\n");
-        }
-    }
-    printf("\n");
-}
 
 /* ---- PNG grayscale-8 -> RGBA (stb expands, A=255) ---- */
 
@@ -220,7 +205,6 @@ void test_webp_policy_deferred(void) {
 
 /* ---- real JPEG: no-alpha -> A=255, byte-exact golden ---- */
 
-#if TP_C0_GOLD_READY
 static const uint8_t k_gold_jpeg_noalpha[256] = {
     0xbd, 0x24, 0x1c, 0xff, 0xcf, 0x1a, 0x1f, 0xff, 0xc4, 0x1c, 0x19, 0xff, 0xca, 0x20, 0x20, 0xff,
     0x1b, 0xc5, 0x1e, 0xff, 0x23, 0xca, 0x25, 0xff, 0x16, 0xcb, 0x1e, 0xff, 0x27, 0xc1, 0x21, 0xff,
@@ -239,7 +223,6 @@ static const uint8_t k_gold_jpeg_noalpha[256] = {
     0x27, 0x17, 0xcf, 0xff, 0x1b, 0x20, 0xc2, 0xff, 0x20, 0x21, 0xc9, 0xff, 0x1a, 0x1b, 0xcb, 0xff,
     0xdf, 0xe0, 0x1a, 0xff, 0xd9, 0xda, 0x1d, 0xff, 0xdf, 0xdb, 0x22, 0xff, 0xd4, 0xe3, 0x18, 0xff,
 };
-#endif
 
 void test_jpeg_no_alpha(void) {
     uint32_t w = 0;
@@ -248,12 +231,7 @@ void test_jpeg_no_alpha(void) {
     TEST_ASSERT_EQUAL_INT(TP_C0_OK, tp_c0_stb_decode_rgba8(k_jpeg_quad8, sizeof k_jpeg_quad8, &w, &h, &rgba, NULL));
     TEST_ASSERT_EQUAL_UINT32(8, w);
     TEST_ASSERT_EQUAL_UINT32(8, h);
-    if (!TP_C0_GOLD_READY) {
-        dump_rgba("k_gold_jpeg_noalpha", rgba, w, h);
-    }
-#if TP_C0_GOLD_READY
     TEST_ASSERT_EQUAL_HEX8_ARRAY(k_gold_jpeg_noalpha, rgba, 256);
-#endif
     tp_c0_stb_free(rgba);
 }
 
@@ -261,27 +239,17 @@ void test_jpeg_no_alpha(void) {
 
 /* Splice an APP1/Exif orientation=N segment (little-endian TIFF) after SOI. */
 static uint8_t *splice_exif(const uint8_t *jpg, size_t n, uint8_t orient, size_t *out_len) {
-    uint8_t app1[36];
-    const uint8_t tpl[36] = {
-        0xFF, 0xE1, 0x00, 0x22,                         /* APP1, len 34 */
-        'E',  'x',  'i',  'f',  0x00, 0x00,             /* Exif\0\0 */
-        'I',  'I',  0x2A, 0x00, 0x08, 0x00, 0x00, 0x00, /* TIFF LE, IFD0 @ 8 */
-        0x01, 0x00,                                     /* count 1 */
-        0x12, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, /* tag 0x0112 SHORT count 1 */
-        0x00, 0x00, 0x00, 0x00,                         /* value (patched below) */
-        0x00, 0x00, 0x00, 0x00};                        /* next IFD */
-    memcpy(app1, tpl, 36);
-    app1[28] = orient; /* low byte of the SHORT value field (LE TIFF) */
-    uint8_t *buf = (uint8_t *)malloc(n + 36);
+    uint8_t app1[TP_C0_EXIF_APP1_LE_LEN];
+    tp_c0_exif_app1_le_build(app1, orient);
+    uint8_t *buf = (uint8_t *)malloc(n + TP_C0_EXIF_APP1_LE_LEN);
     buf[0] = 0xFF;
     buf[1] = 0xD8;
-    memcpy(buf + 2, app1, 36);
-    memcpy(buf + 38, jpg + 2, n - 2);
-    *out_len = n + 36;
+    memcpy(buf + 2, app1, TP_C0_EXIF_APP1_LE_LEN);
+    memcpy(buf + 2 + TP_C0_EXIF_APP1_LE_LEN, jpg + 2, n - 2);
+    *out_len = n + TP_C0_EXIF_APP1_LE_LEN;
     return buf;
 }
 
-#if TP_C0_GOLD_READY
 static const uint8_t k_gold_jpeg_orient6[256] = {
     0x27, 0x17, 0xcf, 0xff, 0x1a, 0x23, 0xca, 0xff, 0x1a, 0x1c, 0xc7, 0xff, 0x21, 0x1e, 0xd1, 0xff,
     0xc4, 0x1f, 0x1b, 0xff, 0xca, 0x20, 0x23, 0xff, 0xcc, 0x19, 0x1f, 0xff, 0xbd, 0x24, 0x1c, 0xff,
@@ -300,7 +268,6 @@ static const uint8_t k_gold_jpeg_orient6[256] = {
     0xd4, 0xe3, 0x18, 0xff, 0xdc, 0xd6, 0x1c, 0xff, 0xdd, 0xdf, 0x1c, 0xff, 0xdd, 0xd9, 0x18, 0xff,
     0x1e, 0xcb, 0x21, 0xff, 0x1e, 0xc5, 0x1d, 0xff, 0x1f, 0xcd, 0x1c, 0xff, 0x27, 0xc1, 0x21, 0xff,
 };
-#endif
 
 void test_jpeg_exif_orientation_applied(void) {
     size_t sn = 0;
@@ -329,12 +296,7 @@ void test_jpeg_exif_orientation_applied(void) {
     TEST_ASSERT_EQUAL_INT(TP_C0_OK, tp_c0_raster_apply_orientation(spx, ws, hs, orient, &img, &notices, NULL));
     TEST_ASSERT_EQUAL_UINT32(8, img.width);
     TEST_ASSERT_EQUAL_UINT32(8, img.height);
-    if (!TP_C0_GOLD_READY) {
-        dump_rgba("k_gold_jpeg_orient6", img.rgba, img.width, img.height);
-    }
-#if TP_C0_GOLD_READY
     TEST_ASSERT_EQUAL_HEX8_ARRAY(k_gold_jpeg_orient6, img.rgba, 256);
-#endif
 
     tp_c0_image_free(&img);
     tp_c0_stb_free(plain);
