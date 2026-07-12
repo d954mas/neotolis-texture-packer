@@ -36,4 +36,12 @@ int cmd_validate(const char *path, bool json, bool quiet, bool strict);
 int cmd_pack(const char *path, const char *opt_atlas, const char *opt_target, const char *opt_out_dir, bool dry_run,
              bool json, bool quiet);
 
+/* B4 wave-2 mutation verbs (new/add/remove/set/sprite/anim/target/atlas). `positionals`
+ * is the whole operand vector (positionals[0] == the verb); `npos` its length; `opt_at`
+ * is the `anim add-frame --at N` value (NULL when absent). Each verb loads the project,
+ * mutates via a tp_project_* mutator, and re-saves (byte-stable). Exit codes: 0 ok, 2
+ * usage (bad grammar/vocabulary/value), 3 project (load error, `new`-on-existing, or a
+ * selector/state mutator failure), 1 internal (OOM). `anim list` is a read-only query. */
+int cmd_mutate(int npos, const char *const *positionals, const char *opt_at, bool json, bool quiet);
+
 #endif /* NTPACKER_CLI_CMDS_H */

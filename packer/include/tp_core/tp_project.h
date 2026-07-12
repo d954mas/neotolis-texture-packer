@@ -160,6 +160,13 @@ tp_project_atlas *tp_project_get_atlas(tp_project *p, int index);
  * The name and lists are left untouched. */
 void tp_project_atlas_set_defaults(tp_project_atlas *a);
 
+/* Renames atlas `a` in place: frees the old name and dups `name` (must be non-NULL
+ * and non-empty -> TP_STATUS_INVALID_ARGUMENT otherwise). OOM leaves the old name
+ * intact. The single home for the atlas-name write both frontends need -- the GUI
+ * did this inline (gui_project.c set_atlas_name) and the CLI `atlas rename` verb
+ * calls it; uniqueness is a frontend policy, not enforced here (mirrors add_atlas). */
+tp_status tp_project_set_atlas_name(tp_project_atlas *a, const char *name);
+
 /* --- source mutation --- */
 
 /* Appends a source path (stored verbatim; save normalizes/relativizes it).
@@ -182,6 +189,14 @@ tp_status tp_project_atlas_add_sprite(tp_project_atlas *a, const char *name, tp_
 
 /* Removes the override for `name`. Absent -> OUT_OF_BOUNDS. */
 tp_status tp_project_atlas_remove_sprite(tp_project_atlas *a, const char *name);
+
+/* Drops the override entry for `name` IF it now holds only defaults (keeps storage
+ * sparse -- the invariant tp_project_sprite documents). A no-op TP_STATUS_OK when the
+ * entry is absent or still carries a non-default field. The single home for the
+ * sparse-prune both frontends do after clearing a field back to inherit (the CLI
+ * `sprite set <field>=inherit` path; the GUI does the same inline after an override
+ * edit). Composes existing find + remove -- no new sparse rule. */
+tp_status tp_project_atlas_prune_sprite(tp_project_atlas *a, const char *name);
 
 /* Sets (or clears) a sprite's `rename` export-name override. A non-empty `rename`
  * ensures the override entry and stores it verbatim; NULL or "" clears it and

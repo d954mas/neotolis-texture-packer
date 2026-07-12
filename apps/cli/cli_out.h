@@ -38,4 +38,10 @@ void cli_out_stdout(const cli_sb *sb);
  * writes both streams. `id` is a stable machine token (usage/tp_status_id/...). */
 void cli_emit_error(bool json, bool quiet, const char *id, const char *fmt, ...) CLI_PRINTF_ATTR(4, 5);
 
+/* Minimal, shared success payload for the B4 mutation verbs, emitted to STDOUT:
+ * {"schema":1,"ok":true,"verb":"<verb>","count":<count>}. Defined once, kept tiny
+ * (plan B4 item 8). `count` = the number of primary items affected (sources added,
+ * frames added, ...); a scalar edit passes 1. */
+void cli_emit_mutation(const char *verb, int count);
+
 #endif /* NTPACKER_CLI_OUT_H */

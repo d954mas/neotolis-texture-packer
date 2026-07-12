@@ -694,6 +694,46 @@ void test_seed_default_target(void) {
     tp_project_destroy(p);
 }
 
+/* 14. B4 trivial mutator: rename an atlas in place; reject empty/NULL. */
+void test_set_atlas_name(void) {
+    tp_project *p = tp_project_create();
+    tp_project_atlas *a = tp_project_get_atlas(p, 0);
+    TEST_ASSERT_EQUAL_STRING("atlas1", a->name);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_set_atlas_name(a, "renamed"));
+    TEST_ASSERT_EQUAL_STRING("renamed", a->name);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT, tp_project_set_atlas_name(a, ""));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT, tp_project_set_atlas_name(a, NULL));
+    TEST_ASSERT_EQUAL_STRING("renamed", a->name); /* unchanged on rejection */
+    tp_project_destroy(p);
+}
+
+/* 15. B4 trivial mutator: prune drops an all-default override, keeps a non-default
+ * one, and no-ops on an absent entry (the `sprite set <field>=inherit` sparse path). */
+void test_prune_sprite(void) {
+    tp_project *p = tp_project_create();
+    tp_project_atlas *a = tp_project_get_atlas(p, 0);
+    tp_project_sprite *s = NULL;
+
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_sprite(a, "s1", &s));
+    TEST_ASSERT_EQUAL_INT(1, a->sprite_count);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_prune_sprite(a, "s1")); /* all-default -> dropped */
+    TEST_ASSERT_EQUAL_INT(0, a->sprite_count);
+    TEST_ASSERT_NULL(tp_project_atlas_find_sprite(a, "s1"));
+
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_prune_sprite(a, "absent")); /* no-op OK */
+
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_sprite(a, "s2", &s));
+    s->slice9_lrtb[0] = 4; /* non-default -> survives prune */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_prune_sprite(a, "s2"));
+    TEST_ASSERT_EQUAL_INT(1, a->sprite_count);
+    s = tp_project_atlas_find_sprite(a, "s2");
+    TEST_ASSERT_NOT_NULL(s);
+    s->slice9_lrtb[0] = 0; /* cleared back to default -> now prunes */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_prune_sprite(a, "s2"));
+    TEST_ASSERT_EQUAL_INT(0, a->sprite_count);
+    tp_project_destroy(p);
+}
+
 int main(int argc, char **argv) {
     g_dir = (argc > 1) ? argv[1] : ".";
     UNITY_BEGIN();
@@ -715,5 +755,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_sprite_rename_override);
     RUN_TEST(test_set_target);
     RUN_TEST(test_sprite_override_sparse);
+    RUN_TEST(test_set_atlas_name);
+    RUN_TEST(test_prune_sprite);
     return UNITY_END();
 }

@@ -5,7 +5,7 @@
 # as apps/smoke and the builder-linking tests).
 set(CLI_OUTPUT_DIR "${CMAKE_SOURCE_DIR}/build/apps/cli/${NT_PRESET_NAME}")
 
-add_executable(ntpacker main.c cli_out.c cli_project.c cli_inspect.c cli_validate.c cli_pack.c)
+add_executable(ntpacker main.c cli_out.c cli_project.c cli_inspect.c cli_validate.c cli_pack.c cli_mutate.c)
 target_link_libraries(ntpacker PRIVATE tp_build)
 target_include_directories(ntpacker PRIVATE "${CMAKE_SOURCE_DIR}/apps/common") # shared ntpacker_version.h
 target_compile_definitions(ntpacker PRIVATE _CRT_SECURE_NO_WARNINGS)
@@ -142,3 +142,18 @@ add_test(NAME cli_parity COMMAND ${CMAKE_COMMAND}
     -DWORK=${CMAKE_CURRENT_BINARY_DIR}/cli_parity_work
     "-DFILES=out/parity_json.json;out/parity_json-0.png;out/nested/deep_json.json;out/nested/deep_json-0.png;out/parity_def.tpinfo;out/parity_def.tpatlas;out/parity_def-0.png"
     -P "${CMAKE_CURRENT_SOURCE_DIR}/cli_parity.cmake")
+
+# --- B4 mutation verbs: one e2e test per verb FAMILY. Each drives a sequence of
+# ntpacker commands against a FRESH project in an isolated scratch dir (mutations
+# never touch the checked-in testdata) and asserts exit codes + resulting file state.
+# No GL/pack -> runs on 3 OS. See cli_mutate_family.cmake for the per-family script.
+set(_mut "${CMAKE_CURRENT_SOURCE_DIR}/cli_mutate_family.cmake")
+foreach(_fam new source set sprite anim target atlas stable)
+    add_test(NAME cli_mutate_${_fam} COMMAND ${CMAKE_COMMAND}
+        -DEXE=$<TARGET_FILE:ntpacker>
+        -DCHECKER=$<TARGET_FILE:cli_json_check>
+        -DTD=${_td}
+        -DWORK=${CMAKE_CURRENT_BINARY_DIR}/cli_mut_${_fam}
+        -DFAMILY=${_fam}
+        -P "${_mut}")
+endforeach()

@@ -126,3 +126,19 @@ void cli_emit_error(bool json, bool quiet, const char *id, const char *fmt, ...)
         (void)fprintf(stderr, "ntpacker: error [%s]: %s\n", id, msg);
     }
 }
+
+void cli_emit_mutation(const char *verb, int count) {
+    cli_sb sb = {0};
+    cli_sb_str(&sb, "{\"schema\":1,\"ok\":true,\"verb\":");
+    cli_sb_json_str(&sb, verb);
+    cli_sb_str(&sb, ",\"count\":");
+    cli_sb_int(&sb, count);
+    cli_sb_putc(&sb, '}');
+    if (sb.oom) { /* the payload is tiny; OOM here is near-impossible, but never crash */
+        cli_sb_free(&sb);
+        (void)fputs("{\"schema\":1,\"ok\":true}\n", stdout);
+        return;
+    }
+    cli_out_stdout(&sb);
+    cli_sb_free(&sb);
+}

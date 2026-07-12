@@ -4,13 +4,15 @@
  * stdout straight into a JSON parser.
  *
  *   cli_json_check <file> [mode] [k=v ...]
- *     mode = manifest (default) | inspect | validate | pack
+ *     mode = manifest (default) | inspect | validate | pack | anim | mutation
  *     inspect : sprites=N  -> atlases[0].sprites has exactly N entries
  *     validate: error=N warning=N  -> counts assertions
  *               code=NAME (repeatable) -> a finding with that code exists
  *     pack    : targets_ok=N targets_failed=N -> totals assertions
  *               dry_run=1 -> report.dry_run true, every ok target carries a
  *                            would_write array + empty written_files, 0 files written
+ *     anim    : animations[] well-formed; count=N -> exact animation count
+ *     mutation: {schema,ok:true,verb,count}; count=N -> exact count
  *
  * No exporter-id literals here -> boundary gate R2 stays clean. */
 #include <stdbool.h>
@@ -204,6 +206,58 @@ static int check_validate(const cJSON *root, int argc, char **argv) {
     return 0;
 }
 
+/* --- anim list --json --- */
+static int check_anim(const cJSON *root, int argc, char **argv) {
+    if (!cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(root, "schema"))) {
+        return fail("anim: missing/!number: schema");
+    }
+    const cJSON *anims = cJSON_GetObjectItemCaseSensitive(root, "animations");
+    if (!cJSON_IsArray(anims)) {
+        return fail("anim: missing/!array: animations");
+    }
+    const cJSON *an = NULL;
+    cJSON_ArrayForEach(an, anims) {
+        if (!cJSON_IsString(cJSON_GetObjectItemCaseSensitive(an, "id")) ||
+            !cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(an, "fps")) ||
+            !cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(an, "playback")) ||
+            !cJSON_IsBool(cJSON_GetObjectItemCaseSensitive(an, "flip_h")) ||
+            !cJSON_IsBool(cJSON_GetObjectItemCaseSensitive(an, "flip_v")) ||
+            !cJSON_IsArray(cJSON_GetObjectItemCaseSensitive(an, "frames"))) {
+            return fail("anim: an entry is missing id/fps/playback/flip_h/flip_v/frames");
+        }
+    }
+    const char *want = arg_val(argc, argv, "count");
+    if (want && cJSON_GetArraySize(anims) != atoi(want)) {
+        (void)fprintf(stderr, "cli_json_check: anim count %d != expected %s\n", cJSON_GetArraySize(anims), want);
+        return 1;
+    }
+    return 0;
+}
+
+/* --- mutation success payload ({"schema":1,"ok":true,"verb":..,"count":..}) --- */
+static int check_mutation(const cJSON *root, int argc, char **argv) {
+    if (!cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(root, "schema"))) {
+        return fail("mutation: missing/!number: schema");
+    }
+    const cJSON *ok = cJSON_GetObjectItemCaseSensitive(root, "ok");
+    if (!cJSON_IsBool(ok) || !cJSON_IsTrue(ok)) {
+        return fail("mutation: ok must be true");
+    }
+    if (!cJSON_IsString(cJSON_GetObjectItemCaseSensitive(root, "verb")) ||
+        !cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(root, "count"))) {
+        return fail("mutation: missing verb/count");
+    }
+    const char *want = arg_val(argc, argv, "count");
+    if (want) {
+        const cJSON *c = cJSON_GetObjectItemCaseSensitive(root, "count");
+        if (c->valueint != atoi(want)) {
+            (void)fprintf(stderr, "cli_json_check: mutation count %d != expected %s\n", c->valueint, want);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /* --- pack --json --- */
 static int check_pack(const cJSON *root, int argc, char **argv) {
     if (!cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(root, "schema"))) {
@@ -319,6 +373,10 @@ int main(int argc, char **argv) {
         rc = check_validate(root, argc, argv);
     } else if (strcmp(mode, "pack") == 0) {
         rc = check_pack(root, argc, argv);
+    } else if (strcmp(mode, "anim") == 0) {
+        rc = check_anim(root, argc, argv);
+    } else if (strcmp(mode, "mutation") == 0) {
+        rc = check_mutation(root, argc, argv);
     } else {
         rc = check_manifest(root);
     }

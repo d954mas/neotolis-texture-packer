@@ -80,6 +80,14 @@ static void build_manifest(cli_sb *sb) {
     indent(sb, 2);
     cli_sb_json_str(sb, "pack");
     cli_sb_str(sb, ": 1,\n");
+    /* B4 mutation verbs: each emits the shared {ok,verb,count} payload (schema 1);
+     * `anim list` emits a schema-1 query payload. */
+    static const char *const mut_verbs[] = {"new", "add", "remove", "set", "sprite", "anim", "target", "atlas"};
+    for (int i = 0; i < (int)(sizeof mut_verbs / sizeof mut_verbs[0]); i++) {
+        indent(sb, 2);
+        cli_sb_json_str(sb, mut_verbs[i]);
+        cli_sb_str(sb, ": 1,\n");
+    }
     indent(sb, 2);
     cli_sb_json_str(sb, "version");
     cli_sb_str(sb, ": 1\n");
@@ -171,11 +179,19 @@ static void print_usage(FILE *out) {
                   "  pack | export <p>  Pack + export every enabled target (== GUI \"Export All\")\n"
                   "  inspect <project>  Dump project state (--json is the contract; text is a summary)\n"
                   "  validate <project> Report every project problem in one pass\n"
+                  "  new <path>         Create a new project (seeded default target); refuses to overwrite\n"
                   "  version            Print the version; --json emits the schema manifest\n"
                   "  help               Show this help\n"
                   "\n"
-                  "Planned (not in this build; calling one is a usage error for now):\n"
-                  "  new                Create a new project\n"
+                  "Editing (wave 2 -- load -> mutate -> save; --json emits {ok,verb,count}):\n"
+                  "  add <p> <atlas> <path>...            Add image/folder source(s)\n"
+                  "  remove <p> <atlas> <source>          Remove a source\n"
+                  "  set <p> <atlas> <key>=<value>...     Set atlas knobs (max_size, padding, ...)\n"
+                  "  sprite set <p> <atlas> <key> <field>=<value>...   Per-sprite override (field=inherit clears)\n"
+                  "  sprite unset <p> <atlas> <key>       Clear a sprite's whole override\n"
+                  "  anim create|remove|list|add-frame|remove-frame|move-frame|set <p> <atlas> ...\n"
+                  "  target add|remove|set <p> <atlas> ...            Export targets\n"
+                  "  atlas add|remove|rename <p> ...                  Atlases (by name)\n"
                   "\n"
                   "pack options:\n"
                   "  --atlas <name>     Only pack this atlas (unknown name -> usage error)\n"
@@ -183,6 +199,9 @@ static void print_usage(FILE *out) {
                   "  --out-dir <dir>    Re-root RELATIVE target out_paths under <dir> (vs the project dir)\n"
                   "  --dry-run          Report what pack WOULD do (pages, would_write, predicted\n"
                   "                     losses) and write NO files\n"
+                  "\n"
+                  "anim add-frame option:\n"
+                  "  --at <N>           Insert the frame at index N (default: append)\n"
                   "\n"
                   "Global options:\n"
                   "  --json             Machine-readable JSON output (stable per-verb schema)\n"
@@ -226,7 +245,8 @@ int main(int argc, char **argv) {
     const char *opt_atlas = NULL;   /* pack-only value flags (rejected elsewhere below) */
     const char *opt_target = NULL;
     const char *opt_out_dir = NULL;
-    const char *positionals[8]; /* verb + its operands; plenty for v1 verbs */
+    const char *opt_at = NULL;    /* anim add-frame only (rejected elsewhere below) */
+    const char *positionals[128]; /* verb + its operands; large enough for many sources/frames/keys */
     int npos = 0;
 
     for (int i = 1; i < argc; i++) {
@@ -242,8 +262,9 @@ int main(int argc, char **argv) {
             dry_run = true; /* pack-only; rejected for other verbs below */
             continue;
         }
-        if (strcmp(a, "--atlas") == 0 || strcmp(a, "--target") == 0 || strcmp(a, "--out-dir") == 0) {
-            /* value flags: consume the next token (pack-only; rejected elsewhere below). */
+        if (strcmp(a, "--atlas") == 0 || strcmp(a, "--target") == 0 || strcmp(a, "--out-dir") == 0 ||
+            strcmp(a, "--at") == 0) {
+            /* value flags: consume the next token (each rejected for the wrong verb below). */
             if (i + 1 >= argc) {
                 cli_emit_error(json, quiet, "usage", "option '%s' needs a value; try 'ntpacker help'", a);
                 return CLI_EXIT_USAGE;
@@ -253,8 +274,10 @@ int main(int argc, char **argv) {
                 opt_atlas = val;
             } else if (strcmp(a, "--target") == 0) {
                 opt_target = val;
-            } else {
+            } else if (strcmp(a, "--out-dir") == 0) {
                 opt_out_dir = val;
+            } else {
+                opt_at = val;
             }
             continue;
         }
@@ -300,6 +323,11 @@ int main(int argc, char **argv) {
         cli_emit_error(json, quiet, "usage", "--atlas/--target/--out-dir/--dry-run are only valid for pack");
         return CLI_EXIT_USAGE;
     }
+    /* --at is anim-add-frame-only on any verb. */
+    if (opt_at && strcmp(verb, "anim") != 0) {
+        cli_emit_error(json, quiet, "usage", "--at is only valid for 'anim add-frame'");
+        return CLI_EXIT_USAGE;
+    }
     if (strcmp(verb, "version") == 0) {
         return cmd_version(json);
     }
@@ -331,6 +359,17 @@ int main(int argc, char **argv) {
             return cmd_inspect(positionals[1], json, quiet);
         }
         return cmd_validate(positionals[1], json, quiet, strict);
+    }
+    /* Wave-2 mutation verbs (B4). --strict is validate-only; --at is anim-only. Other
+     * pack-only flags were already rejected above (the !is_pack guard). */
+    if (strcmp(verb, "new") == 0 || strcmp(verb, "add") == 0 || strcmp(verb, "remove") == 0 ||
+        strcmp(verb, "set") == 0 || strcmp(verb, "sprite") == 0 || strcmp(verb, "anim") == 0 ||
+        strcmp(verb, "target") == 0 || strcmp(verb, "atlas") == 0) {
+        if (strict) {
+            cli_emit_error(json, quiet, "usage", "--strict is only valid for validate");
+            return CLI_EXIT_USAGE;
+        }
+        return cmd_mutate(npos, positionals, opt_at, json, quiet);
     }
     cli_emit_error(json, quiet, "usage", "unknown command '%s'; try 'ntpacker help'", verb);
     return CLI_EXIT_USAGE;

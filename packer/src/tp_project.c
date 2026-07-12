@@ -247,6 +247,19 @@ tp_status tp_project_add_atlas(tp_project *p, const char *name, int *out_index) 
     return TP_STATUS_OK;
 }
 
+tp_status tp_project_set_atlas_name(tp_project_atlas *a, const char *name) {
+    if (!a || !name || name[0] == '\0') {
+        return TP_STATUS_INVALID_ARGUMENT;
+    }
+    char *copy = tp_strdup(name);
+    if (!copy) {
+        return TP_STATUS_OOM;
+    }
+    free(a->name);
+    a->name = copy;
+    return TP_STATUS_OK;
+}
+
 static void tp_free_anim(tp_project_anim *an) {
     for (int i = 0; i < an->frame_count; i++) {
         free(an->frames[i]);
@@ -467,6 +480,17 @@ tp_status tp_project_atlas_set_sprite_rename(tp_project_atlas *a, const char *sp
     }
     free(s->rename);
     s->rename = copy;
+    return TP_STATUS_OK;
+}
+
+tp_status tp_project_atlas_prune_sprite(tp_project_atlas *a, const char *name) {
+    if (!a || !name) {
+        return TP_STATUS_INVALID_ARGUMENT;
+    }
+    tp_project_sprite *s = tp_project_atlas_find_sprite(a, name);
+    if (s && tp_sprite_is_default(s)) {
+        return tp_project_atlas_remove_sprite(a, name);
+    }
     return TP_STATUS_OK;
 }
 
