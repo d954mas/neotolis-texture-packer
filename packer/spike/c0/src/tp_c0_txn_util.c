@@ -141,9 +141,9 @@ tp_c0_detail tpc0_decode_field_list(const void *obj_v, const char *const *skip, 
                 return tp_c0_fail(err, TP_C0_ERR_TXN_BAD_TYPE, "duplicate field '%s'", c->string);
             }
         }
-        if (*count >= cap) {
+        if (*count >= cap) { /* fixed cap can't hold it -- not a wrong-type fault */
             tpc0_free_fields(out, *count);
-            return tp_c0_fail(err, TP_C0_ERR_TXN_BAD_TYPE, "too many fields (>%d)", cap);
+            return tp_c0_fail(err, TP_C0_ERR_BUFFER_TOO_SMALL, "too many fields (>%d)", cap);
         }
         if (strlen(c->string) >= sizeof out[0].key) {
             tpc0_free_fields(out, *count);

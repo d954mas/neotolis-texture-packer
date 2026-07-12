@@ -162,9 +162,9 @@ tp_c0_txn_request *tp_c0_txn_request_decode(const char *json, tp_c0_detail *deta
         return NULL;
     }
     int nops = cJSON_GetArraySize(ops);
-    if (nops > TP_C0_MAX_OPS) {
-        (void)tp_c0_fail(err, TP_C0_ERR_TXN_BAD_TYPE, "too many operations (>%d)", TP_C0_MAX_OPS);
-        (void)fail_req(req, root, detail, TP_C0_ERR_TXN_BAD_TYPE);
+    if (nops > TP_C0_MAX_OPS) { /* fixed cap can't hold it -- not a wrong-type fault */
+        (void)tp_c0_fail(err, TP_C0_ERR_BUFFER_TOO_SMALL, "too many operations (>%d)", TP_C0_MAX_OPS);
+        (void)fail_req(req, root, detail, TP_C0_ERR_BUFFER_TOO_SMALL);
         return NULL;
     }
     static const char *const op_skip[] = {"op", "selector"};

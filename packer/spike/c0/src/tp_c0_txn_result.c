@@ -12,24 +12,6 @@
 
 /* ---- decode -------------------------------------------------------------- */
 
-static tp_c0_op_class class_from_str(const char *s, bool *ok) {
-    *ok = true;
-    if (strcmp(s, "create") == 0) {
-        return TP_C0_OP_CLASS_CREATE;
-    }
-    if (strcmp(s, "remove") == 0) {
-        return TP_C0_OP_CLASS_REMOVE;
-    }
-    if (strcmp(s, "move") == 0) {
-        return TP_C0_OP_CLASS_MOVE;
-    }
-    if (strcmp(s, "set") == 0) {
-        return TP_C0_OP_CLASS_SET;
-    }
-    *ok = false;
-    return TP_C0_OP_CLASS_SET;
-}
-
 /* Iterate the FULL token space [0, TP_C0_DETAIL_COUNT), not a hardcoded last
  * enumerator: a token appended by a later packet (e.g. C0-03) then still decodes
  * on version skew instead of dropping a machine client's structured error report
@@ -51,7 +33,7 @@ static tp_c0_detail decode_diff(const cJSON *dj, tp_c0_diff *diff, tp_error *err
         return tp_c0_fail(err, TP_C0_ERR_TXN_MISSING_FIELD, "diff missing \"class\"");
     }
     bool ok = false;
-    diff->cls = class_from_str(cls->valuestring, &ok);
+    diff->cls = tp_c0_op_class_from_name(cls->valuestring, &ok);
     if (!ok) {
         return tp_c0_fail(err, TP_C0_ERR_TXN_BAD_TYPE, "unknown diff class '%s'", cls->valuestring);
     }
@@ -196,9 +178,9 @@ tp_c0_txn_result *tp_c0_txn_result_decode(const char *json, tp_c0_detail *detail
             return (fail_res(res, root, detail, TP_C0_ERR_TXN_MISSING_FIELD), NULL);
         }
         int n = cJSON_GetArraySize(ops);
-        if (n > TP_C0_MAX_OPS) {
-            (void)tp_c0_fail(err, TP_C0_ERR_TXN_BAD_TYPE, "too many operations");
-            return (fail_res(res, root, detail, TP_C0_ERR_TXN_BAD_TYPE), NULL);
+        if (n > TP_C0_MAX_OPS) { /* fixed cap can't hold it -- not a wrong-type fault */
+            (void)tp_c0_fail(err, TP_C0_ERR_BUFFER_TOO_SMALL, "too many operations");
+            return (fail_res(res, root, detail, TP_C0_ERR_BUFFER_TOO_SMALL), NULL);
         }
         static const char *const skip[] = {"op", "diff"};
         for (int i = 0; i < n; i++) {
@@ -229,9 +211,9 @@ tp_c0_txn_result *tp_c0_txn_result_decode(const char *json, tp_c0_detail *detail
             return (fail_res(res, root, detail, TP_C0_ERR_TXN_MISSING_FIELD), NULL);
         }
         int n = cJSON_GetArraySize(errs);
-        if (n > TP_C0_MAX_ERRORS) {
-            (void)tp_c0_fail(err, TP_C0_ERR_TXN_BAD_TYPE, "too many errors");
-            return (fail_res(res, root, detail, TP_C0_ERR_TXN_BAD_TYPE), NULL);
+        if (n > TP_C0_MAX_ERRORS) { /* fixed cap can't hold it -- not a wrong-type fault */
+            (void)tp_c0_fail(err, TP_C0_ERR_BUFFER_TOO_SMALL, "too many errors");
+            return (fail_res(res, root, detail, TP_C0_ERR_BUFFER_TOO_SMALL), NULL);
         }
         for (int i = 0; i < n; i++) {
             const cJSON *ej = cJSON_GetArrayItem(errs, i);

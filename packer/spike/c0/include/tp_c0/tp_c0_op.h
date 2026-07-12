@@ -94,6 +94,15 @@ tp_c0_op_kind tp_c0_op_kind_from_wire(const char *wire);
 const char *tp_c0_op_wire(tp_c0_op_kind kind);      /* "" for INVALID/out-of-range */
 const char *tp_c0_op_class_name(tp_c0_op_class cls); /* "create"/"remove"/"move"/"set" */
 
+/* Inverse of tp_c0_op_class_name (single source of truth): maps a class name back
+ * to its enum. *ok is false (and SET returned) for an unknown/NULL name. */
+tp_c0_op_class tp_c0_op_class_from_name(const char *name, bool *ok);
+
+/* Self-check: every catalog row (k_ops and k_fields) sits at its own kind index,
+ * so a reorder can't silently mis-map a kind to the wrong wire/field vocabulary.
+ * Returns true when the tables are consistent. Pinned by test_c0_op. */
+bool tp_c0_op_catalog_selfcheck(void);
+
 /* The CLOSED canonical field vocabulary of an op (addressing `*_id` keys plus
  * typed payload keys; excludes the "op" discriminator itself). This is what makes
  * "no raw field patch" (spec §6.2) executable: a key outside this set is an

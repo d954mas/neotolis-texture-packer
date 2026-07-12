@@ -77,6 +77,30 @@ void test_reserved_ops_have_no_verb(void) {
     TEST_ASSERT_NULL(tp_c0_op_info_by_kind(TP_C0_OP_ANIMATION_FRAMES_SET)->cli_verb);
 }
 
+/* ---- catalog tables self-check + class-name inverse (Q2, Q3) -------------- */
+
+void test_catalog_tables_selfcheck(void) {
+    /* k_ops AND k_fields each sit at their own kind index; a reorder that
+     * mis-mapped a kind to the wrong field vocabulary would flip this to false. */
+    TEST_ASSERT_TRUE(tp_c0_op_catalog_selfcheck());
+}
+
+void test_op_class_name_roundtrip(void) {
+    /* tp_c0_op_class_from_name is the single-source-of-truth inverse of
+     * tp_c0_op_class_name (result decode no longer hardcodes the 4 literals). */
+    for (int c = TP_C0_OP_CLASS_CREATE; c <= TP_C0_OP_CLASS_SET; c++) {
+        bool ok = false;
+        tp_c0_op_class got = tp_c0_op_class_from_name(tp_c0_op_class_name((tp_c0_op_class)c), &ok);
+        TEST_ASSERT_TRUE(ok);
+        TEST_ASSERT_EQUAL_INT(c, got);
+    }
+    bool ok = true;
+    (void)tp_c0_op_class_from_name("nope", &ok);
+    TEST_ASSERT_FALSE(ok);
+    (void)tp_c0_op_class_from_name(NULL, &ok);
+    TEST_ASSERT_FALSE(ok);
+}
+
 /* ---- effect classes ------------------------------------------------------ */
 
 void test_effect_classes(void) {
@@ -243,6 +267,8 @@ int main(void) {
     RUN_TEST(test_unknown_wire_is_invalid);
     RUN_TEST(test_every_cli_verb_maps);
     RUN_TEST(test_reserved_ops_have_no_verb);
+    RUN_TEST(test_catalog_tables_selfcheck);
+    RUN_TEST(test_op_class_name_roundtrip);
     RUN_TEST(test_effect_classes);
     RUN_TEST(test_field_vocabulary);
     RUN_TEST(test_selector_resolves_unique_name);

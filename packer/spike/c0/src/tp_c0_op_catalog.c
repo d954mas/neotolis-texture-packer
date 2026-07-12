@@ -77,6 +77,23 @@ const char *tp_c0_op_class_name(tp_c0_op_class cls) {
     return "unknown";
 }
 
+tp_c0_op_class tp_c0_op_class_from_name(const char *name, bool *ok) {
+    if (name) {
+        for (int c = TP_C0_OP_CLASS_CREATE; c <= TP_C0_OP_CLASS_SET; c++) {
+            if (strcmp(tp_c0_op_class_name((tp_c0_op_class)c), name) == 0) {
+                if (ok) {
+                    *ok = true;
+                }
+                return (tp_c0_op_class)c;
+            }
+        }
+    }
+    if (ok) {
+        *ok = false;
+    }
+    return TP_C0_OP_CLASS_SET;
+}
+
 /* Closed per-op canonical field vocabulary (task 2). Addressing `*_id` keys plus
  * typed payload keys. Fixed-arity tuples are scalar fields (origin_x/origin_y,
  * slice9_l..b) -- only genuinely variable-length lists (frames, clear `fields`)
@@ -109,19 +126,47 @@ static const char *const f_target_create[] = {"atlas_id", "target_id", "exporter
 static const char *const f_target_remove[] = {"target_id"};
 static const char *const f_target_set[] = {"target_id", "exporter_id", "out_path", "enabled"};
 
+/* The `kind` column pins each row to its enum slot so a reorder is caught by
+ * tp_c0_op_catalog_selfcheck instead of silently mis-mapping a kind to the wrong
+ * field vocabulary (row order still must match the enum: index == kind). */
 #define FV(arr) (arr), (int)(sizeof(arr) / sizeof((arr)[0]))
 static const struct {
+    tp_c0_op_kind kind;
     const char *const *keys;
     int count;
 } k_fields[TP_C0_OP_KIND_COUNT] = {
-    {NULL, 0}, /* INVALID */
-    {FV(f_atlas_create)},   {FV(f_atlas_remove)},     {FV(f_atlas_rename)},       {FV(f_atlas_settings)},
-    {FV(f_source_add)},     {FV(f_source_remove)},    {FV(f_source_replace)},     {FV(f_sprite_ov_set)},
-    {FV(f_sprite_ov_clear)},{FV(f_sprite_name)},      {FV(f_anim_create)},        {FV(f_anim_remove)},
-    {FV(f_anim_settings)},  {FV(f_anim_frames_set)},  {FV(f_anim_frame_add)},     {FV(f_anim_frame_remove)},
-    {FV(f_anim_frame_move)},{FV(f_target_create)},    {FV(f_target_remove)},      {FV(f_target_set)},
+    {TP_C0_OP_INVALID, NULL, 0},
+    {TP_C0_OP_ATLAS_CREATE, FV(f_atlas_create)},
+    {TP_C0_OP_ATLAS_REMOVE, FV(f_atlas_remove)},
+    {TP_C0_OP_ATLAS_RENAME, FV(f_atlas_rename)},
+    {TP_C0_OP_ATLAS_SETTINGS_SET, FV(f_atlas_settings)},
+    {TP_C0_OP_SOURCE_ADD, FV(f_source_add)},
+    {TP_C0_OP_SOURCE_REMOVE, FV(f_source_remove)},
+    {TP_C0_OP_SOURCE_REPLACE, FV(f_source_replace)},
+    {TP_C0_OP_SPRITE_OVERRIDE_SET, FV(f_sprite_ov_set)},
+    {TP_C0_OP_SPRITE_OVERRIDE_CLEAR, FV(f_sprite_ov_clear)},
+    {TP_C0_OP_SPRITE_NAME_SET, FV(f_sprite_name)},
+    {TP_C0_OP_ANIMATION_CREATE, FV(f_anim_create)},
+    {TP_C0_OP_ANIMATION_REMOVE, FV(f_anim_remove)},
+    {TP_C0_OP_ANIMATION_SETTINGS_SET, FV(f_anim_settings)},
+    {TP_C0_OP_ANIMATION_FRAMES_SET, FV(f_anim_frames_set)},
+    {TP_C0_OP_ANIMATION_FRAME_ADD, FV(f_anim_frame_add)},
+    {TP_C0_OP_ANIMATION_FRAME_REMOVE, FV(f_anim_frame_remove)},
+    {TP_C0_OP_ANIMATION_FRAME_MOVE, FV(f_anim_frame_move)},
+    {TP_C0_OP_TARGET_CREATE, FV(f_target_create)},
+    {TP_C0_OP_TARGET_REMOVE, FV(f_target_remove)},
+    {TP_C0_OP_TARGET_SET, FV(f_target_set)},
 };
 #undef FV
+
+bool tp_c0_op_catalog_selfcheck(void) {
+    for (int k = 0; k < TP_C0_OP_KIND_COUNT; k++) {
+        if (k_ops[k].kind != (tp_c0_op_kind)k || k_fields[k].kind != (tp_c0_op_kind)k) {
+            return false;
+        }
+    }
+    return true;
+}
 
 const char *const *tp_c0_op_fields(tp_c0_op_kind kind, int *count) {
     if (kind <= TP_C0_OP_INVALID || kind >= TP_C0_OP_KIND_COUNT) {

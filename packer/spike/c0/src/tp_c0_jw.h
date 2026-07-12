@@ -3,11 +3,15 @@
 
 /*
  * C0-02 internal deterministic JSON writer -- NOT installed (src/, not include/).
- * Mirrors the byte-stable conventions proven in packer/src/tp_sb.h (2-space
- * indent, LF, integral numbers without a decimal point, "%.9g" for fractional,
- * ascending-key object order enforced by the caller). The spike cannot include
- * tp_core's private tp_sb.h from its public-only include path, so this small
- * writer restates the same rules for the txn request/result encoders.
+ * This is a DELIBERATE spike-local copy of tp_core's private packer/src/tp_sb.h
+ * writer (2-space indent, LF, integral numbers without a decimal point, "%.9g"
+ * for fractional, ascending-key object order enforced by the caller). tp_sb.h is
+ * a tp_core-private header the spike cannot include from its public-only path,
+ * and the spike is a throwaway that must not create a cross-module dependency, so
+ * the writer is restated here rather than shared. The initial buffer capacity is
+ * intentionally reconciled to tp_sb.h's 1024 (a txn document is comfortably
+ * larger than a handful of bytes, so a 1 KB first alloc avoids the early
+ * doublings); everything else matches tp_sb.h byte-for-byte.
  */
 
 #include <inttypes.h>
@@ -29,7 +33,7 @@ static inline void tp_c0_jw_raw(tp_c0_jw *w, const char *s, size_t n) {
         return;
     }
     if (w->len + n + 1U > w->cap) {
-        size_t nc = (w->cap == 0) ? 512U : w->cap;
+        size_t nc = (w->cap == 0) ? 1024U : w->cap; /* matches tp_sb.h's initial cap */
         while (w->len + n + 1U > nc) {
             nc *= 2U;
         }
