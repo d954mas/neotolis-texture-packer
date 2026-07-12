@@ -95,6 +95,27 @@ add_test(NAME cli_validate_source_keys COMMAND ${CMAKE_COMMAND}
     -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_validate_source_keys.json
     -P "${_run}")
 
+# (i3) F1-02 Fix B: './' , '//' and trailing-slash spellings of ONE folder canonicalize
+# to the same key -> flagged duplicate_source (the old fixed-1024 slash-only key missed
+# these). No --strict -> exit 0 (findings in the payload).
+add_test(NAME cli_validate_dup_spelling COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0 "-DARGS=validate ${_td}/dupspell.ntpacker_project --json"
+    -DCHECKER=$<TARGET_FILE:cli_json_check>
+    "-DCHECK_ARGS=validate code=duplicate_source"
+    -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_validate_dup_spelling.json
+    -P "${_run}")
+
+# (i4) F1-02 Fix B: two DISTINCT >1024-byte source paths sharing a 1023-byte prefix must
+# NOT be mistaken for a duplicate (the old fixed-1024 buffer truncated both into a spurious
+# match). Canonicalized in a TP_SRCKEY_MAX buffer they stay distinct: the only warning is
+# empty_atlas (both paths missing -> 2 errors); a spurious duplicate would push warning to 2.
+add_test(NAME cli_validate_long_paths COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0 "-DARGS=validate ${_td}/longpaths.ntpacker_project --json"
+    -DCHECKER=$<TARGET_FILE:cli_json_check>
+    "-DCHECK_ARGS=validate error=2 warning=1"
+    -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_validate_long_paths.json
+    -P "${_run}")
+
 # (j) validate on an unloadable file -> exit 3.
 add_test(NAME cli_validate_unloadable COMMAND ${CMAKE_COMMAND}
     -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=3 "-DARGS=validate ${_td}/bad.ntpacker_project" -P "${_run}")

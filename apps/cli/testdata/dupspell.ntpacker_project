@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "atlases": [
+    {
+      "name": "dup",
+      "sources": [
+        "assets/x",
+        "assets//x",
+        "./assets/x",
+        "assets/x/"
+      ]
+    }
+  ]
+}

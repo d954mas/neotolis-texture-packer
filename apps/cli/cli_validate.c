@@ -3,9 +3,10 @@
  * them in one edit cycle. Each check mirrors a real export-time failure or
  * ambiguity WITHOUT packing:
  *   missing_source        [error]   a source path that does not exist on disk
- *   duplicate_source      [warning] two sources with the same normalized path (§5.6)
+ *   duplicate_source      [warning] two sources with the same canonical path (§5.6)
  *   source_collision      [warning] two source paths that case-fold-collide (§5.3)
  *   source_portability    [warning] reserved-name/invalid-char/trailing-dot-space (§5.6)
+ *   source_escapes_root   [warning] source is absolute or '..'-escapes the project dir
  *   empty_atlas           [warning] no usable sprites resolved from the sources
  *   dangling_anim_frame   [error]   frame key matching no sprite (tp_normalize L-4)
  *   duplicate_export_key  [warning] two descs -> one key (per-sprite override ambiguity)
@@ -193,10 +194,21 @@ static void free_strv(char **v, int n) {
     free(v);
 }
 
-/* Copy `src` into `out` replacing '\\' with '/' so exact-duplicate + case-fold
- * comparison see one separator convention (saved sources are '/'-normalized, but a
- * hand-edited file may not be). Truncation is harmless for a comparison key. */
-static void norm_src(const char *src, char *out, size_t cap) {
+/* One source path's precomputed comparison keys (Fix B: canonicalize + case-fold
+ * ONCE per source, not per pair). `canon` is the tp_srckey canonical NFC key; for a
+ * source tp_srckey_normalize rejects (a legitimately absolute or '..'-escaping
+ * external source) it falls back to a slash-normalized copy so the pairwise compare
+ * still runs without aborting or false-positiving. `fold` is the case-fold of canon
+ * (or a copy of canon when the fold would not fit -- degrades to an exact compare). */
+typedef struct {
+    char canon[TP_SRCKEY_MAX];
+    char fold[TP_SRCKEY_MAX];
+} src_key;
+
+/* Tolerant fallback canonical: copy `src` into `out` (properly sized: TP_SRCKEY_MAX,
+ * never a fixed 1024) replacing '\\' with '/'. Used when tp_srckey_normalize rejects
+ * a path so exact-duplicate detection still works on it. */
+static void slash_norm(const char *src, char *out, size_t cap) {
     size_t i = 0;
     for (; src[i] != '\0' && i + 1U < cap; i++) {
         out[i] = (src[i] == '\\') ? '/' : src[i];
@@ -205,36 +217,76 @@ static void norm_src(const char *src, char *out, size_t cap) {
 }
 
 /* (a2) §5.3/§5.6 source-path validation (all WARNINGS -- never flips the --strict
- * exit): duplicate path, cross-platform case-fold collision, and portability, via
- * the promoted tp_srckey primitives. O(n^2) over an atlas's sources (small). */
+ * exit): exact duplicate, cross-platform case-fold collision, portability, and a
+ * non-portable absolute/escaping source, via the promoted tp_srckey primitives.
+ * Each path is canonicalized + case-folded ONCE into a properly-sized buffer, then
+ * compared pairwise on the precomputed forms (O(n) normalize + O(n) casefold +
+ * O(n^2) memcmp, no per-pair allocation). This catches the './' / '//' / trailing-
+ * slash / NFC spellings of one folder that the old fixed-1024 slash-only key missed,
+ * and never mistakes two distinct >1024-byte paths for a duplicate. */
 static void validate_sources(cli_findings *fs, const tp_project_atlas *a) {
-    for (int i = 0; i < a->source_count; i++) {
-        char ni[1024];
-        norm_src(a->sources[i].path, ni, sizeof ni);
-        unsigned flags = TP_SRCKEY_PORT_OK;
-        if (tp_srckey_portability(ni, &flags, NULL) == TP_STATUS_OK && flags != TP_SRCKEY_PORT_OK) {
-            add_finding(fs, SEV_WARN, "source_portability", a->name, NULL, NULL, NULL, NULL,
-                        "source '%s' has non-portable path parts:%s%s%s", a->sources[i].path,
-                        (flags & TP_SRCKEY_PORT_RESERVED_NAME) ? " reserved-name" : "",
-                        (flags & TP_SRCKEY_PORT_INVALID_CHAR) ? " invalid-char" : "",
-                        (flags & TP_SRCKEY_PORT_TRAILING_DOT_SPACE) ? " trailing-dot-space" : "");
+    int n = a->source_count;
+    if (n <= 0) {
+        return;
+    }
+    src_key *k = (src_key *)calloc((size_t)n, sizeof *k);
+    if (!k) {
+        fs->oom = true;
+        return;
+    }
+    for (int i = 0; i < n; i++) {
+        const char *path = a->sources[i].path;
+        tp_error err = {0};
+        tp_status st = tp_srckey_normalize(path, k[i].canon, sizeof k[i].canon, &err);
+        if (st == TP_STATUS_OK) {
+            unsigned flags = TP_SRCKEY_PORT_OK;
+            if (tp_srckey_portability(k[i].canon, &flags, NULL) == TP_STATUS_OK && flags != TP_SRCKEY_PORT_OK) {
+                add_finding(fs, SEV_WARN, "source_portability", a->name, NULL, NULL, NULL, NULL,
+                            "source '%s' has non-portable path parts:%s%s%s", path,
+                            (flags & TP_SRCKEY_PORT_RESERVED_NAME) ? " reserved-name" : "",
+                            (flags & TP_SRCKEY_PORT_INVALID_CHAR) ? " invalid-char" : "",
+                            (flags & TP_SRCKEY_PORT_TRAILING_DOT_SPACE) ? " trailing-dot-space" : "");
+            }
+        } else {
+            /* A source path is project-relative but MAY legitimately be absolute or
+             * escape the project dir (a shared art folder): tp_srckey_normalize
+             * rejects those. Surface it as a WARNING and fall back to a tolerant
+             * slash-normalized key -- never abort validate, never false-positive a
+             * duplicate. Invalid-UTF-8 / over-long paths land in the else branch. */
+            if (st == TP_STATUS_KEY_ABSOLUTE || st == TP_STATUS_KEY_TRAVERSAL) {
+                add_finding(fs, SEV_WARN, "source_escapes_root", a->name, NULL, NULL, NULL, NULL,
+                            "source '%s' is absolute or escapes the project directory (not portable across machines)",
+                            path);
+            } else {
+                add_finding(fs, SEV_WARN, "source_portability", a->name, NULL, NULL, NULL, NULL,
+                            "source '%s' could not be canonicalized (%s)", path, err.msg);
+            }
+            slash_norm(path, k[i].canon, sizeof k[i].canon);
         }
+        /* Case-fold the canonical form once (for the O(n^2) collision compare). If it
+         * will not fit (a near-limit non-ASCII key whose fold expands ~3x) degrade to
+         * an exact compare for this entry -- never false-positive. */
+        if (tp_srckey_casefold(k[i].canon, k[i].fold, sizeof k[i].fold, NULL) != TP_STATUS_OK) {
+            (void)snprintf(k[i].fold, sizeof k[i].fold, "%s", k[i].canon);
+        }
+    }
+    /* Pairwise on the precomputed keys: an exact duplicate (never also a collision),
+     * else a case-fold collision. Mirrors the prior control flow, no per-pair alloc. */
+    for (int i = 0; i < n; i++) {
         for (int j = 0; j < i; j++) {
-            char nj[1024];
-            norm_src(a->sources[j].path, nj, sizeof nj);
-            if (strcmp(ni, nj) == 0) {
+            if (strcmp(k[i].canon, k[j].canon) == 0) {
                 add_finding(fs, SEV_WARN, "duplicate_source", a->name, NULL, NULL, NULL, NULL,
                             "source '%s' is listed more than once", a->sources[i].path);
                 continue;
             }
-            bool collides = false;
-            if (tp_srckey_collides(ni, nj, &collides, NULL) == TP_STATUS_OK && collides) {
+            if (strcmp(k[i].fold, k[j].fold) == 0) {
                 add_finding(fs, SEV_WARN, "source_collision", a->name, NULL, NULL, NULL, NULL,
                             "sources '%s' and '%s' collide case-insensitively (cross-platform name clash)",
                             a->sources[j].path, a->sources[i].path);
             }
         }
     }
+    free(k);
 }
 
 static void validate_atlas(cli_findings *fs, tp_project *p, int ai) {
