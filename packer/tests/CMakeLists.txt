@@ -147,6 +147,7 @@ add_test(NAME tp_export_defold
 add_executable(tp_test_raw_ownership test_raw_ownership.c)
 target_link_libraries(tp_test_raw_ownership PRIVATE tp_build unity)
 target_compile_options(tp_test_raw_ownership PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_raw_ownership)   # AGENTS.md invariant: our test TUs too
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_raw_ownership_test")
 add_test(NAME tp_raw_ownership COMMAND tp_test_raw_ownership "${CMAKE_BINARY_DIR}/tp_raw_ownership_test")
 

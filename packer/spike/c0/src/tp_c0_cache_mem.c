@@ -45,15 +45,8 @@ void tp_c0_cache_destroy(tp_c0_cache *c) {
     free(c);
 }
 
-static cache_entry *find(tp_c0_cache *c, tp_c0_id128 key) {
-    for (int i = 0; i < TP_C0_CACHE_MAX_ENTRIES; i++) {
-        if (c->entries[i].used && tp_c0_id128_eq(c->entries[i].key, key)) {
-            return &c->entries[i];
-        }
-    }
-    return NULL;
-}
-
+/* Single owner of the entry scan; the non-const find casts through it so the two
+ * read paths can never diverge (casting away const is safe -- `c` is non-const). */
 static const cache_entry *find_const(const tp_c0_cache *c, tp_c0_id128 key) {
     for (int i = 0; i < TP_C0_CACHE_MAX_ENTRIES; i++) {
         if (c->entries[i].used && tp_c0_id128_eq(c->entries[i].key, key)) {
@@ -62,6 +55,8 @@ static const cache_entry *find_const(const tp_c0_cache *c, tp_c0_id128 key) {
     }
     return NULL;
 }
+
+static cache_entry *find(tp_c0_cache *c, tp_c0_id128 key) { return (cache_entry *)find_const(c, key); }
 
 static void entry_clear(cache_entry *e) {
     free(e->blob);
