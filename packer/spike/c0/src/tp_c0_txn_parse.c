@@ -107,7 +107,11 @@ tp_c0_txn_request *tp_c0_txn_request_decode(const char *json, tp_c0_detail *deta
         (void)fail_req(req, root, detail, TP_C0_ERR_TXN_MISSING_FIELD);
         return NULL;
     }
-    req->expected_revision = (long)rev->valuedouble;
+    tp_c0_detail rvd = tpc0_json_to_i64(rev, &req->expected_revision, err);
+    if (rvd != TP_C0_OK) {
+        (void)fail_req(req, root, detail, rvd);
+        return NULL;
+    }
 
     const cJSON *label = cJSON_GetObjectItemCaseSensitive(tx, "label");
     if (label && cJSON_IsString(label)) {

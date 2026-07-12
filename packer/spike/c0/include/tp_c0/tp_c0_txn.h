@@ -19,6 +19,7 @@
  */
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #include "tp_c0/tp_c0_error.h"
 #include "tp_c0/tp_c0_op.h"
@@ -42,8 +43,10 @@ extern "C" {
 /* ---- typed field value (closed value vocabulary) ------------------------- */
 
 /* An `*_id`/`key`/`name`/`exporter_id`/`out_path` value decodes as STR; validate
- * checks id-ness by key name. Integral JSON numbers decode as INT, fractional as
- * NUM (so canonical re-encode is byte-stable). `frames`/`fields` are STR_ARRAY. */
+ * checks id-ness by key name. A JSON number decodes as INT only when it is
+ * integral AND within the exactly-representable range +/-2^53 (9007199254740992);
+ * outside that (or fractional/inf/NaN) it is NUM, so classification is UB-free and
+ * byte-identical across OS. `frames`/`fields` are STR_ARRAY. */
 typedef enum tp_c0_val_kind {
     TP_C0_VAL_INT = 0,
     TP_C0_VAL_NUM,
@@ -54,7 +57,7 @@ typedef enum tp_c0_val_kind {
 
 typedef struct tp_c0_val {
     tp_c0_val_kind kind;
-    long ival;
+    int64_t ival; /* INT: integral value in +/-2^53, width-stable across OS */
     double nval;
     bool bval;
     char sval[TP_C0_STR_CAP];
@@ -82,7 +85,7 @@ typedef struct tp_c0_op {
 typedef struct tp_c0_txn_request {
     int schema;
     char id_hex[33];        /* 32 lowercase hex + NUL (128-bit idempotency token) */
-    long expected_revision;
+    int64_t expected_revision;
     char label[TP_C0_STR_CAP];
     char author[TP_C0_STR_CAP];
     tp_c0_op ops[TP_C0_MAX_OPS];
@@ -137,8 +140,8 @@ typedef struct tp_c0_result_op {
 typedef struct tp_c0_txn_result {
     int schema;
     char txn_id_hex[33];
-    bool committed;   /* true: committed (ops+diffs); false: rejected (errors) */
-    long revision;    /* new revision if committed; unchanged if rejected */
+    bool committed;    /* true: committed (ops+diffs); false: rejected (errors) */
+    int64_t revision;  /* new revision if committed; unchanged if rejected */
     tp_c0_result_op ops[TP_C0_MAX_OPS];
     int op_count;
     tp_c0_txn_error errors[TP_C0_MAX_ERRORS];
@@ -154,7 +157,7 @@ void tp_c0_txn_result_free(tp_c0_txn_result *res);
 /* expected == current -> OK; expected < current -> revision_conflict;
  * expected > current -> invalid_revision. Checked against the WHOLE batch before
  * any application; a mismatch rejects the batch on its own (spec §8). */
-tp_c0_detail tp_c0_revision_check(long expected_revision, long current_revision, tp_error *err);
+tp_c0_detail tp_c0_revision_check(int64_t expected_revision, int64_t current_revision, tp_error *err);
 
 /* ---- idempotency retention set (task 3 / §7.2) --------------------------- */
 
@@ -179,7 +182,7 @@ tp_c0_detail tp_c0_txn_idset_add(tp_c0_txn_idset *set, const char *id_hex, tp_er
  *      then the op's field order) before any apply.
  * On success `*out` is a committed stub (revision incremented, no diffs computed:
  * diffs are engine work). Never aborts. */
-tp_c0_detail tp_c0_txn_validate(const tp_c0_txn_request *req, long current_revision,
+tp_c0_detail tp_c0_txn_validate(const tp_c0_txn_request *req, int64_t current_revision,
                                 const tp_c0_entity_ref *entities, int entity_count, tp_c0_txn_result *out,
                                 tp_error *err);
 

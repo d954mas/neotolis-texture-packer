@@ -138,6 +138,18 @@ Versioned envelope; `schema` is the only accepted version (`TP_C0_TXN_SCHEMA` =
   `tp_project.c` writer. `label`/`author` are omitted when empty (sparse). Array
   **element order is preserved** (it is data). `test_c0_txn` pins decode→encode
   byte equality and canonicalization of a shuffled/compact input.
+- **Number classification is UB-free and OS-independent.** A JSON number decodes
+  as the INT kind only when it is integral **and** within the exactly-representable
+  range ±2^53 (`9007199254740992`); anything outside that, or fractional/inf/NaN,
+  decodes as NUM (`%.9g`). INT storage is `int64_t` and integral output is emitted
+  with `PRId64`, so a value like `5000000000` is `"5000000000"` on every OS rather
+  than overflowing 32-bit `long` on Windows into `"5e+09"`. Every decode of an
+  attacker-supplied number (op-field values, `expected_revision`, `revision`,
+  diff `before_index`/`after_index`/`position`, `op_index`) routes through a
+  shared range-checked converter that returns `txn_bad_type` ("number out of
+  range") instead of an out-of-range `double`→integer cast (a UBSan abort in
+  Debug CI). `test_c0_txn` pins the `5000000000` round-trip and the `1e300`
+  fallback.
 - **Result** is committed or rejected; keys ascend (`operations`/`errors`,
   `revision`, `status`, `transaction_id`):
 

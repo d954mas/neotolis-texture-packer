@@ -1,5 +1,6 @@
 #include "tp_c0/tp_c0_txn.h"
 
+#include <inttypes.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -132,7 +133,7 @@ static void validate_op(tp_c0_txn_result *out, int idx, const tp_c0_op *op, cons
     }
 }
 
-tp_c0_detail tp_c0_txn_validate(const tp_c0_txn_request *req, long current_revision, const tp_c0_entity_ref *entities,
+tp_c0_detail tp_c0_txn_validate(const tp_c0_txn_request *req, int64_t current_revision, const tp_c0_entity_ref *entities,
                                 int entity_count, tp_c0_txn_result *out, tp_error *err) {
     if (!req || !out) {
         return tp_c0_fail(err, TP_C0_ERR_NULL_ARG, "null request/out");
@@ -191,16 +192,16 @@ tp_c0_detail tp_c0_txn_validate(const tp_c0_txn_request *req, long current_revis
 
 /* ---- revision precondition + idempotency retention set ------------------- */
 
-tp_c0_detail tp_c0_revision_check(long expected_revision, long current_revision, tp_error *err) {
+tp_c0_detail tp_c0_revision_check(int64_t expected_revision, int64_t current_revision, tp_error *err) {
     if (expected_revision == current_revision) {
         return TP_C0_OK;
     }
     if (expected_revision < current_revision) {
-        return tp_c0_fail(err, TP_C0_ERR_REVISION_CONFLICT, "expected_revision %ld < current %ld", expected_revision,
-                          current_revision);
+        return tp_c0_fail(err, TP_C0_ERR_REVISION_CONFLICT, "expected_revision %" PRId64 " < current %" PRId64,
+                          expected_revision, current_revision);
     }
-    return tp_c0_fail(err, TP_C0_ERR_INVALID_REVISION, "expected_revision %ld > current %ld", expected_revision,
-                      current_revision);
+    return tp_c0_fail(err, TP_C0_ERR_INVALID_REVISION, "expected_revision %" PRId64 " > current %" PRId64,
+                      expected_revision, current_revision);
 }
 
 tp_c0_detail tp_c0_txn_idset_add(tp_c0_txn_idset *set, const char *id_hex, tp_error *err) {

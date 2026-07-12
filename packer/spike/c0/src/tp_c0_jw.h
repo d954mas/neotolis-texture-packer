@@ -10,7 +10,9 @@
  * writer restates the same rules for the txn request/result encoders.
  */
 
+#include <inttypes.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -53,9 +55,11 @@ static inline void tp_c0_jw_indent(tp_c0_jw *w, int depth) {
     }
 }
 
-static inline void tp_c0_jw_int(tp_c0_jw *w, long v) {
+/* PRId64 (not "%ld") so integral output is byte-identical on 32-bit-long Windows
+ * and 64-bit-long Linux/macOS -- the cross-OS determinism pin (contract §3). */
+static inline void tp_c0_jw_int(tp_c0_jw *w, int64_t v) {
     char tmp[32];
-    (void)snprintf(tmp, sizeof tmp, "%ld", v);
+    (void)snprintf(tmp, sizeof tmp, "%" PRId64, v);
     tp_c0_jw_str(w, tmp);
 }
 

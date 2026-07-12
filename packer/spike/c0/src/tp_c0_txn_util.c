@@ -1,10 +1,16 @@
 #include "tp_c0/tp_c0_txn.h"
 
+#include <limits.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "cJSON.h"
 #include "tp_c0_txn_priv.h"
+
+/* Largest double that represents consecutive integers exactly (2^53). Beyond it a
+ * double->int64 cast is UB and integral round-trips are not width-safe. */
+#define TPC0_INT_SAFE 9007199254740992.0
 
 /* Shared decode primitives for the request and result parsers (declared in
  * tp_c0_txn_priv.h). cJSON is a PRIVATE dep, kept inside these .c files. */
@@ -71,9 +77,12 @@ tp_c0_detail tpc0_decode_val(const void *item_v, tp_c0_val *out, tp_error *err) 
     }
     if (cJSON_IsNumber(item)) {
         double d = item->valuedouble;
-        if (d == (double)(long)d) {
+        /* INT only when integral AND exactly representable (within +/-2^53); the
+         * range test excludes inf/NaN, so the cast below is never UB. Otherwise
+         * NUM, re-encoded via "%.9g". */
+        if (d >= -TPC0_INT_SAFE && d <= TPC0_INT_SAFE && d == floor(d)) {
             out->kind = TP_C0_VAL_INT;
-            out->ival = (long)d;
+            out->ival = (int64_t)d;
         } else {
             out->kind = TP_C0_VAL_NUM;
             out->nval = d;
@@ -140,5 +149,33 @@ tp_c0_detail tpc0_decode_field_list(const void *obj_v, const char *const *skip, 
         }
         (*count)++;
     }
+    return TP_C0_OK;
+}
+
+tp_c0_detail tpc0_json_to_i64(const void *item_v, int64_t *out, tp_error *err) {
+    const cJSON *item = (const cJSON *)item_v;
+    if (!cJSON_IsNumber(item)) {
+        return tp_c0_fail(err, TP_C0_ERR_TXN_BAD_TYPE, "expected an integer number");
+    }
+    double d = item->valuedouble;
+    /* The range test is false for inf/NaN, so floor() and the cast never see them
+     * and the (int64_t) cast is always in range -- no UB, no UBSan abort. */
+    if (!(d >= -TPC0_INT_SAFE && d <= TPC0_INT_SAFE) || d != floor(d)) {
+        return tp_c0_fail(err, TP_C0_ERR_TXN_BAD_TYPE, "number out of range (must be an integer within +/-2^53)");
+    }
+    *out = (int64_t)d;
+    return TP_C0_OK;
+}
+
+tp_c0_detail tpc0_json_to_int(const void *item_v, int *out, tp_error *err) {
+    int64_t v = 0;
+    tp_c0_detail d = tpc0_json_to_i64(item_v, &v, err);
+    if (d != TP_C0_OK) {
+        return d;
+    }
+    if (v < INT_MIN || v > INT_MAX) {
+        return tp_c0_fail(err, TP_C0_ERR_TXN_BAD_TYPE, "number out of int range");
+    }
+    *out = (int)v;
     return TP_C0_OK;
 }

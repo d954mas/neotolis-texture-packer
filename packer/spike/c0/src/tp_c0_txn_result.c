@@ -71,13 +71,25 @@ static tp_c0_detail decode_diff(const cJSON *dj, tp_c0_diff *diff, tp_error *err
     const cJSON *bi = cJSON_GetObjectItemCaseSensitive(dj, "before_index");
     const cJSON *ai = cJSON_GetObjectItemCaseSensitive(dj, "after_index");
     if (cJSON_IsNumber(bi) && cJSON_IsNumber(ai)) {
-        diff->before_index = (int)bi->valuedouble;
-        diff->after_index = (int)ai->valuedouble;
+        tp_c0_detail id = tpc0_json_to_int(bi, &diff->before_index, err);
+        if (id == TP_C0_OK) {
+            id = tpc0_json_to_int(ai, &diff->after_index, err);
+        }
+        if (id != TP_C0_OK) {
+            tpc0_free_fields(diff->before, diff->before_count);
+            tpc0_free_fields(diff->after, diff->after_count);
+            return id;
+        }
         diff->has_indices = true;
     }
     const cJSON *pos = cJSON_GetObjectItemCaseSensitive(dj, "position");
     if (cJSON_IsNumber(pos)) {
-        diff->position = (int)pos->valuedouble;
+        tp_c0_detail pd = tpc0_json_to_int(pos, &diff->position, err);
+        if (pd != TP_C0_OK) {
+            tpc0_free_fields(diff->before, diff->before_count);
+            tpc0_free_fields(diff->after, diff->after_count);
+            return pd;
+        }
         diff->has_position = true;
     }
     return TP_C0_OK;
@@ -149,7 +161,10 @@ tp_c0_txn_result *tp_c0_txn_result_decode(const char *json, tp_c0_detail *detail
         return (fail_res(res, root, detail, TP_C0_ERR_TXN_BAD_ID), NULL);
     }
     (void)snprintf(res->txn_id_hex, sizeof res->txn_id_hex, "%s", tid->valuestring);
-    res->revision = (long)rev->valuedouble;
+    tp_c0_detail rvd = tpc0_json_to_i64(rev, &res->revision, err);
+    if (rvd != TP_C0_OK) {
+        return (fail_res(res, root, detail, rvd), NULL);
+    }
     res->committed = strcmp(status->valuestring, "committed") == 0;
 
     if (res->committed) {
@@ -211,7 +226,10 @@ tp_c0_txn_result *tp_c0_txn_result_decode(const char *json, tp_c0_detail *detail
                 (void)tp_c0_fail(err, cd, "unknown error code '%s'", code->valuestring);
                 return (fail_res(res, root, detail, cd), NULL);
             }
-            e->op_index = (int)oi->valuedouble;
+            tp_c0_detail oid = tpc0_json_to_int(oi, &e->op_index, err);
+            if (oid != TP_C0_OK) {
+                return (fail_res(res, root, detail, oid), NULL);
+            }
             if (cJSON_IsString(msg)) {
                 (void)snprintf(e->message, sizeof e->message, "%s", msg->valuestring);
             }

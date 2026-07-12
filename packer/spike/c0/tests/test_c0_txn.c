@@ -409,6 +409,43 @@ void test_target_set_commits_with_exporter_id(void) {
     tp_c0_txn_request_free(req);
 }
 
+/* ---- number classification: UB-free + cross-OS byte-stable (F2) ----------- */
+
+void test_number_classification_cross_os(void) {
+    /* A large integral value stays INT and emits width-stable digits (not "5e+09"
+     * as 32-bit-long Windows would): the cross-OS determinism pin (contract §3). */
+    tp_c0_txn_request *req = decode_ok("{\"schema\":1,\"transaction\":{\"id\":\"" TID
+                                       "\",\"expected_revision\":0,\"operations\":[{\"op\":\"animation.settings.set\","
+                                       "\"anim_id\":\"" ANIM1 "\",\"fps\":5000000000}]}}");
+    tp_c0_detail d = TP_C0_OK;
+    char *out = tp_c0_txn_request_encode(req, &d);
+    TEST_ASSERT_EQUAL_INT(TP_C0_OK, d);
+    TEST_ASSERT_NOT_NULL(out);
+    TEST_ASSERT_TRUE_MESSAGE(strstr(out, "\"fps\": 5000000000") != NULL, out);
+    free(out);
+    tp_c0_txn_request_free(req);
+
+    /* A value beyond 2^53 (here inf-scale) falls back to NUM and is emitted via
+     * %.9g -- never a UB double->int cast (an UBSan abort in Debug CI). */
+    tp_c0_txn_request *req2 = decode_ok("{\"schema\":1,\"transaction\":{\"id\":\"" TID
+                                        "\",\"expected_revision\":0,\"operations\":[{\"op\":\"animation.settings.set\","
+                                        "\"anim_id\":\"" ANIM1 "\",\"fps\":1e300}]}}");
+    char *out2 = tp_c0_txn_request_encode(req2, &d);
+    TEST_ASSERT_EQUAL_INT(TP_C0_OK, d);
+    TEST_ASSERT_NOT_NULL(out2);
+    TEST_ASSERT_TRUE_MESSAGE(strstr(out2, "1e+300") != NULL, out2); /* NUM path, no abort */
+    free(out2);
+    tp_c0_txn_request_free(req2);
+}
+
+void test_expected_revision_out_of_range(void) {
+    /* An out-of-range expected_revision is a structured txn_bad_type, never a UB
+     * double->int64 cast. */
+    TEST_ASSERT_EQUAL_INT(TP_C0_ERR_TXN_BAD_TYPE,
+                          decode_req_fault("{\"schema\":1,\"transaction\":{\"id\":\"" TID
+                                           "\",\"expected_revision\":1e300,\"operations\":[]}}"));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_request_roundtrip);
@@ -426,5 +463,7 @@ int main(void) {
     RUN_TEST(test_unknown_id_reference);
     RUN_TEST(test_target_create_commits_with_exporter_id);
     RUN_TEST(test_target_set_commits_with_exporter_id);
+    RUN_TEST(test_number_classification_cross_os);
+    RUN_TEST(test_expected_revision_out_of_range);
     return UNITY_END();
 }

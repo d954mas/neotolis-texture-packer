@@ -10,6 +10,7 @@
  */
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #include "tp_c0/tp_c0_txn.h"
 
@@ -23,5 +24,13 @@ void tpc0_free_fields(tp_c0_field *f, int n);
 tp_c0_detail tpc0_decode_val(const void *item, tp_c0_val *out, tp_error *err);
 tp_c0_detail tpc0_decode_field_list(const void *obj, const char *const *skip, int skip_n, tp_c0_field *out, int *count,
                                     int cap, tp_error *err);
+
+/* `item` is a cJSON node. Convert attacker JSON to an integer WITHOUT UB: a
+ * non-number, a non-integral value, +/-inf, NaN, or a magnitude outside +/-2^53
+ * yields txn_bad_type ("number out of range"), never a double->int cast overflow
+ * (an UBSan abort in Debug CI). tpc0_json_to_int adds an INT_MIN..INT_MAX range
+ * check for fields narrowed into `int`. */
+tp_c0_detail tpc0_json_to_i64(const void *item, int64_t *out, tp_error *err);
+tp_c0_detail tpc0_json_to_int(const void *item, int *out, tp_error *err);
 
 #endif /* TP_C0_TXN_PRIV_H */
