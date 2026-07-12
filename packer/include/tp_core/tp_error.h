@@ -47,8 +47,16 @@ typedef enum tp_status {
     TP_STATUS_ID_MALFORMED,        /* shape-ID text is malformed (bad prefix/hex/length/trailing/empty),
                                     * or a nil ID appears where a real structural ID is required (tp_id) */
     TP_STATUS_DUPLICATE_ID,        /* two structural entities share one persistent ID on load/validate (tp_project) */
-    TP_STATUS_ID_COLLISION_EXHAUSTED /* deterministic legacy salt sweep could not disambiguate synthetic IDs
-                                      * (unreachable with the default hash; only a degenerate injected hash hits it) */
+    TP_STATUS_ID_COLLISION_EXHAUSTED, /* deterministic legacy salt sweep could not disambiguate synthetic IDs
+                                       * (unreachable with the default hash; only a degenerate injected hash hits it) */
+
+    /* --- source-key normalization faults (F1-02, promoted from the C0-01 srckey spike) ---
+     * Append-only: new values go at the END. A source-local key that is invalid
+     * UTF-8, absolute, or contains a '..' traversal component; generic empty/NULL
+     * inputs still reuse INVALID_ARGUMENT and an overflowing buffer OUT_OF_BOUNDS. */
+    TP_STATUS_INVALID_UTF8,        /* text is not well-formed UTF-8 (tp_srckey) */
+    TP_STATUS_KEY_ABSOLUTE,        /* source key/path must be source-root-relative, not absolute (tp_srckey) */
+    TP_STATUS_KEY_TRAVERSAL        /* a '..' component would escape the source root (tp_srckey) */
 } tp_status;
 
 /* Fixed-size message buffer -- no heap, safe to embed by value on the stack. */
@@ -105,6 +113,9 @@ static inline const char *tp_status_str(tp_status status) {
         case TP_STATUS_ID_MALFORMED: return "malformed structural id";
         case TP_STATUS_DUPLICATE_ID: return "duplicate structural id";
         case TP_STATUS_ID_COLLISION_EXHAUSTED: return "legacy id collision sweep exhausted";
+        case TP_STATUS_INVALID_UTF8: return "invalid UTF-8";
+        case TP_STATUS_KEY_ABSOLUTE: return "source key is not relative";
+        case TP_STATUS_KEY_TRAVERSAL: return "source key escapes its root";
     }
     return "unknown status";
 }
@@ -139,6 +150,9 @@ static inline const char *tp_status_id(tp_status status) {
         case TP_STATUS_ID_MALFORMED: return "id_malformed";
         case TP_STATUS_DUPLICATE_ID: return "duplicate_id";
         case TP_STATUS_ID_COLLISION_EXHAUSTED: return "id_collision_exhausted";
+        case TP_STATUS_INVALID_UTF8: return "invalid_utf8";
+        case TP_STATUS_KEY_ABSOLUTE: return "key_absolute";
+        case TP_STATUS_KEY_TRAVERSAL: return "key_traversal";
     }
     return "unknown_status";
 }

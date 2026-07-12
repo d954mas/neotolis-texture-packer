@@ -5,6 +5,11 @@
 # apps/gui/CMakeLists.txt). The split stays for layering (model-only consumers:
 # most tests, inspect-only tools) and CRT hygiene (tp_build pins -U_DLL to match
 # the static-CRT builder; tp_core stays default-CRT for the render runtime).
+# Vendored utf8proc (Unicode NFC + case-fold): added BEFORE tp_core so the source-
+# key normalizer (src/tp_srckey.c) can PRIVATE-link it. Was spike-only until F1-02
+# promoted tp_srckey into production. -w vendored; no on-disk schema of its own.
+add_subdirectory(deps/utf8proc)
+
 add_library(tp_core STATIC
     src/tp_arena.c src/tp_names.c src/tp_name_map.c src/tp_pack_read.c src/tp_project.c
     src/tp_pack_settings.c src/tp_scan.c src/tp_input.c
@@ -17,7 +22,10 @@ add_library(tp_core STATIC
     src/tp_id.c src/tp_identity.c src/tp_identity_session.c
     # F1-01 schema-v2 identity migration: deterministic legacy synthesis +
     # atomic writable promotion (kept out of tp_project.c's loader/serializer).
-    src/tp_project_migrate.c)
+    src/tp_project_migrate.c
+    # F1-02 tagged sources: source-key normalization / case-fold collision /
+    # portability validation, promoted from the C0-01 srckey spike (uses utf8proc).
+    src/tp_srckey.c)
 target_include_directories(tp_core PUBLIC include)
 # tp_pack_settings.c includes nt_builder.h for the header-only nt_atlas_opts_defaults()
 # inline (the single source of the packing defaults). HEADERS ONLY: this adds the builder
@@ -43,7 +51,9 @@ target_link_libraries(tp_core PUBLIC nt_shared nt_hash nt_log)
 # the GUI (which links tp_core) picks it up transitively -- same PRIVATE static-lib
 # propagation cjson already relies on. Its own -U_DLL objects mix with tp_core's
 # default-CRT objects exactly like the GUI's existing stb_image dependency.
-target_link_libraries(tp_core PRIVATE cjson stb_image_write)
+# utf8proc (vendored, MIT) powers src/tp_srckey.c's NFC + case-fold. PRIVATE:
+# tp_srckey.h never exposes utf8proc types; its allocations are freed in-TU.
+target_link_libraries(tp_core PRIVATE cjson stb_image_write utf8proc)
 target_compile_definitions(tp_core PRIVATE _CRT_SECURE_NO_WARNINGS)
 # CRT: tp_core no longer links the static-CRT builder, so it DROPS -U_DLL and uses the
 # engine runtime's default CRT -- matching its own deps (nt_hash/nt_log/cjson) and the
@@ -70,11 +80,9 @@ target_compile_options(tp_build PRIVATE -U_DLL)   # static CRT: match nt_builder
 nt_set_warning_flags(tp_build)
 nt_set_sanitizer_flags(tp_build)
 
-# Vendored utf8proc (Unicode NFC + case-fold) and the C0-01 contract-spike
-# primitives (tp_c0). tp_c0 depends on tp_core's interface includes + utf8proc,
-# so both are added after the tp_core target above. Spike-only: not linked into
-# tp_core/tp_build/apps, no on-disk schema change.
-add_subdirectory(deps/utf8proc)
+# The C0-01 contract-spike primitives (tp_c0). Depends on tp_core's interface
+# includes + utf8proc (added above). Spike-only: not linked into apps, no on-disk
+# schema change.
 add_subdirectory(spike/c0)
 
 enable_testing()

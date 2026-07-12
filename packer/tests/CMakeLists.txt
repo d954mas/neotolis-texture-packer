@@ -32,6 +32,14 @@ target_compile_options(tp_test_id PRIVATE -U_DLL)
 nt_set_warning_flags(tp_test_id)   # AGENTS.md invariant: our test TUs too
 add_test(NAME tp_id COMMAND tp_test_id)
 
+# F1-02: source-key normalization / case-fold collision / portability validation,
+# promoted from the C0-01 srckey spike onto the production tp_status model.
+add_executable(tp_test_srckey test_srckey.c)
+target_link_libraries(tp_test_srckey PRIVATE tp_core unity)
+target_compile_options(tp_test_srckey PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_srckey)   # AGENTS.md invariant: our test TUs too
+add_test(NAME tp_srckey COMMAND tp_test_srckey)
+
 # F1-01 Part C (low-level): deterministic legacy synthetic-ID assigner +
 # collision-fallback determinism/exhaustion goldens.
 add_executable(tp_test_migrate test_migrate.c)
