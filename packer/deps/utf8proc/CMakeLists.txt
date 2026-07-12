@@ -1,6 +1,6 @@
 # utf8proc (vendored in-repo, packer/deps, MIT "expat" licence) -- Unicode NFC
 # normalization + case-folding for source-key canonicalization (master spec §5.3,
-# decision docs/decisions/0002-utf8proc-nfc.md). Pinned release v2.9.0; see VENDOR.md
+# decision docs/decisions/0002-utf8proc-nfc.md). Pinned release v2.11.1; see VENDOR.md
 # for source URL and checksum. Engine submodule is untouched (hard invariant).
 #
 # Static lib compiled -w so our -Werror never applies to third-party code (same
