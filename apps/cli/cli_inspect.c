@@ -9,6 +9,7 @@
 
 #include "cli_exit.h"
 #include "cli_out.h"
+#include "ntpacker_id_fmt.h" /* ntpacker_fmt_shape_id (shared with cli_mutate) */
 #include "tp_core/tp_error.h"
 #include "tp_core/tp_input.h"
 #include "tp_core/tp_names.h"
@@ -152,18 +153,11 @@ static void emit_sprite(cli_sb *sb, int depth, tp_project_atlas *a, const char *
     cli_sb_putc(sb, '}');
 }
 
-/* Format a structural shape-ID into `out` (>= TP_ID_TEXT_CAP); empty on failure. */
-static void fmt_id(char *out, size_t cap, tp_id_kind kind, tp_id128 id) {
-    if (tp_id_format(kind, id, out, cap, NULL) != TP_STATUS_OK) {
-        out[0] = '\0';
-    }
-}
-
 static void emit_anim(cli_sb *sb, int depth, const tp_project_anim *an) {
     bool first = true;
     cli_sb_putc(sb, '{');
     char idtext[TP_ID_TEXT_CAP];
-    fmt_id(idtext, sizeof idtext, TP_ID_KIND_ANIM, an->id);
+    ntpacker_fmt_shape_id(idtext, sizeof idtext, TP_ID_KIND_ANIM, an->id);
     key(sb, depth + 1, &first, "id"); /* structural shape-ID */
     cli_sb_json_str(sb, idtext);
     key(sb, depth + 1, &first, "name"); /* logical/display name (name-keyed) */
@@ -199,7 +193,7 @@ static void emit_target(cli_sb *sb, int depth, const tp_project_target *t) {
     bool first = true;
     cli_sb_putc(sb, '{');
     char idtext[TP_ID_TEXT_CAP];
-    fmt_id(idtext, sizeof idtext, TP_ID_KIND_TARGET, t->id);
+    ntpacker_fmt_shape_id(idtext, sizeof idtext, TP_ID_KIND_TARGET, t->id);
     key(sb, depth + 1, &first, "id"); /* structural shape-ID */
     cli_sb_json_str(sb, idtext);
     key(sb, depth + 1, &first, "exporter_id");
@@ -219,7 +213,7 @@ static void emit_atlas(cli_sb *sb, int depth, tp_project *p, int ai) {
     cli_sb_putc(sb, '{');
 
     char idtext[TP_ID_TEXT_CAP];
-    fmt_id(idtext, sizeof idtext, TP_ID_KIND_ATLAS, a->id);
+    ntpacker_fmt_shape_id(idtext, sizeof idtext, TP_ID_KIND_ATLAS, a->id);
     key(sb, depth + 1, &first, "id"); /* structural shape-ID */
     cli_sb_json_str(sb, idtext);
 

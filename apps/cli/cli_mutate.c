@@ -42,6 +42,7 @@
 
 #include "cli_exit.h"
 #include "cli_out.h"
+#include "ntpacker_id_fmt.h" /* ntpacker_fmt_shape_id (shared with cli_inspect) */
 #include "tp_core/tp_error.h"
 #include "tp_core/tp_export.h" /* tp_exporter_find (target-id validation) */
 #include "tp_core/tp_id.h"     /* tp_rng_os + shape-ID format for anim list */
@@ -900,9 +901,7 @@ static int anim_list(tp_project_atlas *a, const char *atlas_name, bool json, boo
             cli_sb_str(&sb, "\n");
             cli_sb_indent(&sb, 3);
             char idtext[TP_ID_TEXT_CAP];
-            if (tp_id_format(TP_ID_KIND_ANIM, an->id, idtext, sizeof idtext, NULL) != TP_STATUS_OK) {
-                idtext[0] = '\0';
-            }
+            ntpacker_fmt_shape_id(idtext, sizeof idtext, TP_ID_KIND_ANIM, an->id);
             cli_sb_str(&sb, "\"id\": "); /* structural shape-ID */
             cli_sb_json_str(&sb, idtext);
             cli_sb_str(&sb, ",\n");
