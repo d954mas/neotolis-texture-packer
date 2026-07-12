@@ -87,6 +87,7 @@ typedef enum tp_c0_detail {
     TP_C0_ERR_JOURNAL_BAD_KIND,     /* record kind is not a known journal record kind */
     TP_C0_ERR_JOURNAL_BAD_CHECKSUM, /* payload checksum (FNV-1a/128) mismatch: corrupt record body */
     TP_C0_ERR_JOURNAL_TOO_LARGE,    /* record's framed size would overflow the u32 on-disk length / size_t byte math */
+    TP_C0_ERR_JOURNAL_RETENTION_FULL, /* recovery retention set hit the spike cap: NOT corruption, set is partial */
 
     /* Count sentinel: MUST stay last (append new codes before it). Lets decoders
      * iterate the FULL token space [0, TP_C0_DETAIL_COUNT) so a newly appended

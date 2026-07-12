@@ -120,12 +120,18 @@ tp_c0_detail tp_c0_journal_decode(const uint8_t *buf, size_t len, tp_c0_journal_
 /* ---- recovery scan + idempotency retention set -------------------------- */
 
 /* Spike cap on recovered transaction ids (fixed for determinism; a production
- * journal uses a bounded retention window, §60 item 1). */
+ * journal uses dynamic storage so the retained set is ALWAYS complete, §60 item
+ * 1). Hitting this cap is a spike artifact, reported as the distinct
+ * journal_retention_full outcome (NOT corruption, NOT a torn tail). */
 #define TP_C0_JOURNAL_MAX_TXNS 64
 
 /* Result of scanning a journal byte buffer from the start. Records before the
- * first torn/corrupt record are recovered; the scan then stops (spike policy:
- * stop at first bad record rather than resync past a gap). */
+ * first torn/corrupt record (or the retention cap) are recovered; the scan then
+ * stops (spike policy: stop at first bad record rather than resync past a gap).
+ *
+ * `stop_reason` is the SINGLE SOURCE OF TRUTH for why the scan stopped; the
+ * truncated / corrupt / capped predicates below are derived from it, so there are
+ * no hand-synced bool fields that can drift out of agreement with the reason. */
 typedef struct tp_c0_journal_recovery {
     tp_c0_id128 txns[TP_C0_JOURNAL_MAX_TXNS]; /* committed txn ids, in journal order */
     int64_t txn_revisions[TP_C0_JOURNAL_MAX_TXNS];
@@ -133,18 +139,51 @@ typedef struct tp_c0_journal_recovery {
     int64_t last_revision;      /* highest revision seen (txn or checkpoint); -1 if none */
     int64_t checkpoint_revision;/* revision of the last checkpoint; -1 if none */
     size_t valid_bytes;         /* bytes consumed by cleanly recovered records */
-    bool truncated_tail;        /* stopped on a torn/short FINAL record (expected crash case) */
-    bool corrupt;               /* stopped on bad magic/version/kind/checksum (data loss) */
-    tp_c0_detail stop_reason;   /* TP_C0_OK if clean EOF, else the fault that stopped the scan */
+    tp_c0_detail stop_reason;   /* TP_C0_OK if clean EOF, else the fault/cap that stopped the scan */
 } tp_c0_journal_recovery;
 
-/* Scan [buf, buf+len) from the start, recovering every clean record until EOF or
- * the first bad record. Always returns TP_C0_OK (a torn tail is EXPECTED after a
- * crash, not a caller error); inspect the fields for what happened. A NULL buf
- * with len 0 is an empty (clean) journal. txn_count is capped at
- * TP_C0_JOURNAL_MAX_TXNS; overflow stops the scan cleanly (buffer_too_small in
- * stop_reason). */
+/* Scan [buf, buf+len) from the start, recovering every clean record until EOF, the
+ * first bad record, or the retention cap. Always returns TP_C0_OK (a torn tail is
+ * EXPECTED after a crash, not a caller error); inspect stop_reason / the predicates
+ * for what happened. A NULL buf with len 0 is an empty (clean) journal. If more
+ * than TP_C0_JOURNAL_MAX_TXNS clean txns are present the scan stops with
+ * stop_reason == journal_retention_full and the recovered id set is PARTIAL --
+ * callers MUST treat tp_c0_journal_recovery_capped() as "cannot safely dedup"
+ * (production uses dynamic storage and never caps). */
 tp_c0_detail tp_c0_journal_recover(const uint8_t *buf, size_t len, tp_c0_journal_recovery *out, tp_error *err);
+
+/* ---- derived recovery predicates (over stop_reason, the single source of truth) */
+
+/* Stopped on a torn/short FINAL record -- the EXPECTED crash case; the clean
+ * prefix is fully recovered and this is not data loss. */
+static inline bool tp_c0_journal_recovery_truncated(const tp_c0_journal_recovery *rec) {
+    return rec && rec->stop_reason == TP_C0_ERR_JOURNAL_SHORT;
+}
+
+/* Stopped on bad magic/version/kind/checksum -- unexpected corruption (records
+ * after the clean prefix are lost). */
+static inline bool tp_c0_journal_recovery_corrupt(const tp_c0_journal_recovery *rec) {
+    if (!rec) {
+        return false;
+    }
+    switch (rec->stop_reason) {
+        case TP_C0_ERR_JOURNAL_BAD_MAGIC:
+        case TP_C0_ERR_JOURNAL_BAD_VERSION:
+        case TP_C0_ERR_JOURNAL_BAD_KIND:
+        case TP_C0_ERR_JOURNAL_BAD_CHECKSUM:
+            return true;
+        default:
+            return false;
+    }
+}
+
+/* Stopped because the fixed spike retention set filled -- a spike CAP, NOT
+ * corruption and NOT a torn tail. The recovered id set is PARTIAL: a retried txn
+ * beyond the cap would not be seen as a duplicate, so the caller cannot safely
+ * dedup and must fail safe. Production uses dynamic storage and never caps. */
+static inline bool tp_c0_journal_recovery_capped(const tp_c0_journal_recovery *rec) {
+    return rec && rec->stop_reason == TP_C0_ERR_JOURNAL_RETENTION_FULL;
+}
 
 /* Idempotency retention seam (§7.2): true iff `txn_id` was already committed in
  * the recovered set -- a duplicate append after restart is a no-op, not a second

@@ -262,8 +262,9 @@ void test_recover_clean_stream(void) {
     TEST_ASSERT_EQUAL_INT64(2, r.last_revision);
     TEST_ASSERT_EQUAL_INT64(2, r.checkpoint_revision);
     TEST_ASSERT_EQUAL_UINT(off, r.valid_bytes);
-    TEST_ASSERT_FALSE(r.truncated_tail);
-    TEST_ASSERT_FALSE(r.corrupt);
+    TEST_ASSERT_FALSE(tp_c0_journal_recovery_truncated(&r));
+    TEST_ASSERT_FALSE(tp_c0_journal_recovery_corrupt(&r));
+    TEST_ASSERT_FALSE(tp_c0_journal_recovery_capped(&r));
     TEST_ASSERT_EQUAL_INT(TP_C0_OK, r.stop_reason);
 }
 
@@ -281,8 +282,9 @@ void test_recover_torn_final_record(void) {
     TEST_ASSERT_EQUAL_INT(TP_C0_OK, tp_c0_journal_recover(buf, torn_len, &r, NULL));
     TEST_ASSERT_EQUAL_INT(2, r.txn_count); /* torn tail dropped; prefix recovered */
     TEST_ASSERT_EQUAL_UINT(good, r.valid_bytes);
-    TEST_ASSERT_TRUE(r.truncated_tail);
-    TEST_ASSERT_FALSE(r.corrupt);
+    TEST_ASSERT_TRUE(tp_c0_journal_recovery_truncated(&r));
+    TEST_ASSERT_FALSE(tp_c0_journal_recovery_corrupt(&r));
+    TEST_ASSERT_FALSE(tp_c0_journal_recovery_capped(&r));
     TEST_ASSERT_EQUAL_INT(TP_C0_ERR_JOURNAL_SHORT, r.stop_reason);
 }
 
@@ -298,9 +300,30 @@ void test_recover_bad_checksum_midstream(void) {
     TEST_ASSERT_EQUAL_INT(TP_C0_OK, tp_c0_journal_recover(buf, off, &r, NULL));
     TEST_ASSERT_EQUAL_INT(1, r.txn_count); /* only the clean first record */
     TEST_ASSERT_EQUAL_UINT(first, r.valid_bytes);
-    TEST_ASSERT_FALSE(r.truncated_tail);
-    TEST_ASSERT_TRUE(r.corrupt);
+    TEST_ASSERT_FALSE(tp_c0_journal_recovery_truncated(&r));
+    TEST_ASSERT_TRUE(tp_c0_journal_recovery_corrupt(&r));
+    TEST_ASSERT_FALSE(tp_c0_journal_recovery_capped(&r));
     TEST_ASSERT_EQUAL_INT(TP_C0_ERR_JOURNAL_BAD_CHECKSUM, r.stop_reason);
+}
+
+/* Retention cap (F2/F9): a CLEAN journal with more than TP_C0_JOURNAL_MAX_TXNS
+ * txns is NOT corrupt and NOT a torn tail -- it stops with the distinct
+ * journal_retention_full outcome, and the partial-set condition is detectable via
+ * the capped() predicate so the caller knows it cannot safely dedup. */
+void test_recover_retention_cap_is_not_corrupt(void) {
+    uint8_t buf[4096];
+    size_t off = 0;
+    int total = TP_C0_JOURNAL_MAX_TXNS + 3; /* more clean txns than the spike cap */
+    for (int i = 0; i < total; i++) {
+        append_txn(buf, &off, sizeof buf, id_seq((uint8_t)(0x10 + i)), i + 1);
+    }
+    tp_c0_journal_recovery r;
+    TEST_ASSERT_EQUAL_INT(TP_C0_OK, tp_c0_journal_recover(buf, off, &r, NULL));
+    TEST_ASSERT_EQUAL_INT(TP_C0_JOURNAL_MAX_TXNS, r.txn_count); /* filled to the cap */
+    TEST_ASSERT_EQUAL_INT(TP_C0_ERR_JOURNAL_RETENTION_FULL, r.stop_reason);
+    TEST_ASSERT_TRUE(tp_c0_journal_recovery_capped(&r));      /* LOUD: set is partial */
+    TEST_ASSERT_FALSE(tp_c0_journal_recovery_corrupt(&r));    /* NOT corruption */
+    TEST_ASSERT_FALSE(tp_c0_journal_recovery_truncated(&r));  /* NOT a torn tail */
 }
 
 void test_recover_empty_is_clean(void) {
@@ -349,6 +372,7 @@ int main(void) {
     RUN_TEST(test_recover_clean_stream);
     RUN_TEST(test_recover_torn_final_record);
     RUN_TEST(test_recover_bad_checksum_midstream);
+    RUN_TEST(test_recover_retention_cap_is_not_corrupt);
     RUN_TEST(test_recover_empty_is_clean);
     RUN_TEST(test_recover_idempotency_duplicate_after_restart);
     return UNITY_END();

@@ -51,10 +51,11 @@ void test_all_tokens_pinned(void) {
     TEST_ASSERT_EQUAL_STRING("journal_bad_kind", tp_c0_detail_id(TP_C0_ERR_JOURNAL_BAD_KIND));
     TEST_ASSERT_EQUAL_STRING("journal_bad_checksum", tp_c0_detail_id(TP_C0_ERR_JOURNAL_BAD_CHECKSUM));
     TEST_ASSERT_EQUAL_STRING("journal_too_large", tp_c0_detail_id(TP_C0_ERR_JOURNAL_TOO_LARGE));
+    TEST_ASSERT_EQUAL_STRING("journal_retention_full", tp_c0_detail_id(TP_C0_ERR_JOURNAL_RETENTION_FULL));
 }
 
 void test_tokens_are_machine_ids(void) {
-    for (int s = TP_C0_OK; s <= TP_C0_ERR_JOURNAL_TOO_LARGE; s++) {
+    for (int s = TP_C0_OK; s <= TP_C0_ERR_JOURNAL_RETENTION_FULL; s++) {
         const char *id = tp_c0_detail_id((tp_c0_detail)s);
         for (const char *c = id; *c; c++) {
             bool ok = (*c >= 'a' && *c <= 'z') || (*c >= '0' && *c <= '9') || *c == '_';
@@ -72,8 +73,8 @@ void test_detail_count_sentinel(void) {
      * append-only token still round-trips on version skew rather than being
      * dropped as "unknown error code". Pin that COUNT sits past the last real
      * code and is not itself a decodable token (it maps to ""). */
-    TEST_ASSERT_TRUE(TP_C0_DETAIL_COUNT > TP_C0_ERR_JOURNAL_TOO_LARGE);
-    TEST_ASSERT_EQUAL_STRING("journal_too_large", tp_c0_detail_id((tp_c0_detail)(TP_C0_DETAIL_COUNT - 1)));
+    TEST_ASSERT_TRUE(TP_C0_DETAIL_COUNT > TP_C0_ERR_JOURNAL_RETENTION_FULL);
+    TEST_ASSERT_EQUAL_STRING("journal_retention_full", tp_c0_detail_id((tp_c0_detail)(TP_C0_DETAIL_COUNT - 1)));
     TEST_ASSERT_EQUAL_STRING("", tp_c0_detail_id(TP_C0_DETAIL_COUNT));
 }
 

@@ -46,6 +46,7 @@ const char *tp_c0_detail_id(tp_c0_detail d) {
         case TP_C0_ERR_JOURNAL_BAD_KIND: return "journal_bad_kind";
         case TP_C0_ERR_JOURNAL_BAD_CHECKSUM: return "journal_bad_checksum";
         case TP_C0_ERR_JOURNAL_TOO_LARGE: return "journal_too_large";
+        case TP_C0_ERR_JOURNAL_RETENTION_FULL: return "journal_retention_full";
         case TP_C0_DETAIL_COUNT: return ""; /* sentinel, not a real code; keeps -Wswitch happy */
     }
     return "unknown";

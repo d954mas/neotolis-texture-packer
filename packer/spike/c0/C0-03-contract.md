@@ -59,13 +59,23 @@ byte vector is byte-identical on Linux/macOS/Windows.
   `k_ckp_golden`) pin the exact bytes; a test recomputes the embedded checksum
   from the golden's own payload to prove it is a real FNV, not a transcription.
 - **Recovery** (`tp_c0_journal_recover`) scans from the start, recovering every
-  clean record until EOF or the first bad record, then stops (spike policy: stop
-  at first bad record rather than resync past a gap). A **torn/short final
-  record** (`journal_short`) is the EXPECTED crash case → `truncated_tail=true`,
-  the clean prefix is recovered, no error. A **bad magic/version/kind/checksum**
-  is unexpected corruption → `corrupt=true`, prefix still recovered, `stop_reason`
-  set. Recovery itself always returns `TP_C0_OK` (a torn tail is not a caller
-  error); the caller inspects the fields.
+  clean record until EOF, the first bad record, or the retention cap, then stops
+  (spike policy: stop at first bad record rather than resync past a gap).
+  `stop_reason` is the **single source of truth** (F9) and the outcome predicates
+  derive from it — no hand-synced bool fields that can drift:
+  - clean EOF → `stop_reason == TP_C0_OK`;
+  - **torn/short final record** (`journal_short`) is the EXPECTED crash case →
+    `tp_c0_journal_recovery_truncated()`; the clean prefix is recovered, no error;
+  - **bad magic/version/kind/checksum** is unexpected corruption →
+    `tp_c0_journal_recovery_corrupt()`; prefix still recovered;
+  - **retention set full** (`journal_retention_full`) is a SPIKE CAP, NOT
+    corruption and NOT a torn tail → `tp_c0_journal_recovery_capped()` (F2). The
+    recovered id set is then **partial**: the caller must treat `capped()` as
+    "cannot safely dedup" (a retried txn beyond the cap would not be seen as a
+    duplicate). The fixed `TP_C0_JOURNAL_MAX_TXNS` cap is a spike artifact for
+    determinism; **production uses dynamic storage so the set is always complete**.
+  Recovery itself always returns `TP_C0_OK` (a torn tail / cap is not a caller
+  error); the caller inspects `stop_reason` / the predicates.
 - **Idempotency retention seam** (§7.2): recovery rebuilds the committed
   transaction-id set (`txns[]` + `tp_c0_journal_recovery_has_txn`). A retried
   (already-committed) transaction id is a known id → duplicate, not re-applied;
@@ -205,8 +215,13 @@ contract.
    in §1. This is the seam byte format the real journal writer/reader will agree
    on; it is not the whole journal.
 2. **Recovery policy:** stop at the first torn/corrupt record (no resync past a
-   gap); a torn final record is tolerated (`truncated_tail`), other corruption is
-   flagged (`corrupt`); recovery never returns an error for a torn tail.
+   gap); `stop_reason` is the single source of truth and `truncated()` /
+   `corrupt()` / `capped()` are derived predicates (F9, no hand-synced bools). A
+   torn final record is tolerated (`truncated()`), other corruption is flagged
+   (`corrupt()`), and the fixed spike retention cap is a distinct honest outcome
+   (`capped()` / `journal_retention_full`) that is NEITHER corruption nor a torn
+   tail and signals a partial (cannot-dedup) id set (F2). Recovery never returns
+   an error for a torn tail or the cap.
 3. **Idempotency seam:** the committed txn-id set is rebuilt from the journal and
    a duplicate reuses the C0-02 `txn_duplicate_id`.
 4. **Ack ordering:** phases received/validated/applied/journaled/published +
@@ -229,8 +244,10 @@ contract.
 
 - **§60 item 1 / §52.5 — Journal internals beyond the seam framing:** checkpoint
   cadence, compaction, the dedup **retention window** size (the spike uses a
-  fixed `TP_C0_JOURNAL_MAX_TXNS` cap for determinism), corruption/resync policy
-  beyond torn-tail + bad-checksum detection, and optional `fsync` modes.
+  fixed `TP_C0_JOURNAL_MAX_TXNS` cap for determinism and reports overflow as the
+  honest `journal_retention_full` outcome; production uses dynamic storage so the
+  recovered id set is always complete), corruption/resync policy beyond
+  torn-tail + bad-checksum detection, and optional `fsync` modes.
 - **§60 item 2 / §52.5 — Ownership state machine:** the process-claim mechanism,
   proof a host is dead, and the singular **authority-cutover** protocol (only the
   vocabulary + permission table are fixed; no transition machine).

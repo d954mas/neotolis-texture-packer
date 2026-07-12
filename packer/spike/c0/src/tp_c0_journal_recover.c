@@ -39,23 +39,22 @@ tp_c0_detail tp_c0_journal_recover(const uint8_t *buf, size_t len, tp_c0_journal
         tp_c0_journal_record rec;
         tp_c0_detail d = tp_c0_journal_decode(buf + off, len - off, &rec, NULL);
         if (d != TP_C0_OK) {
-            /* Torn/short FINAL record is the EXPECTED crash case: recover the clean
-             * prefix. Bad magic/version/kind/checksum is unexpected corruption; the
-             * prefix is still recovered but the data loss is flagged. */
+            /* stop_reason is the single source of truth: journal_short -> the
+             * truncated() predicate (expected crash case), bad magic/version/kind/
+             * checksum -> the corrupt() predicate (data loss). The clean prefix is
+             * recovered either way. */
             out->stop_reason = d;
-            if (d == TP_C0_ERR_JOURNAL_SHORT) {
-                out->truncated_tail = true;
-            } else {
-                out->corrupt = true;
-            }
             return TP_C0_OK;
         }
         if (rec.kind == TP_C0_JREC_TXN) {
             if (out->txn_count >= TP_C0_JOURNAL_MAX_TXNS) {
-                /* Retention cap reached -- stop cleanly (a production journal uses a
-                 * bounded window, §60 item 1). Records so far stay recovered. */
-                out->stop_reason = TP_C0_ERR_BUFFER_TOO_SMALL;
-                out->corrupt = true;
+                /* Retention cap reached: a SPIKE artifact, NOT corruption. The
+                 * recovered id set is now partial -> reported via the distinct
+                 * journal_retention_full outcome (the capped() predicate) so the
+                 * caller knows it cannot safely dedup. Production uses dynamic
+                 * storage and never caps (§60 item 1). Records so far stay
+                 * recovered. */
+                out->stop_reason = TP_C0_ERR_JOURNAL_RETENTION_FULL;
                 return TP_C0_OK;
             }
             out->txns[out->txn_count] = rec.txn_id;
