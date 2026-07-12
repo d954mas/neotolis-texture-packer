@@ -24,11 +24,19 @@ void test_status_id_tokens(void) {
     TEST_ASSERT_EQUAL_STRING("oom", tp_status_id(TP_STATUS_OOM));
     TEST_ASSERT_EQUAL_STRING("builder_failed", tp_status_id(TP_STATUS_BUILDER_FAILED));
     TEST_ASSERT_EQUAL_STRING("bad_project", tp_status_id(TP_STATUS_BAD_PROJECT));
+    /* F1-00 project-identity faults (promoted from the C0-01 spike vocabulary). */
+    TEST_ASSERT_EQUAL_STRING("path_not_absolute", tp_status_id(TP_STATUS_PATH_NOT_ABSOLUTE));
+    TEST_ASSERT_EQUAL_STRING("path_drive_relative", tp_status_id(TP_STATUS_PATH_DRIVE_RELATIVE));
+    TEST_ASSERT_EQUAL_STRING("path_bad_unc", tp_status_id(TP_STATUS_PATH_BAD_UNC));
+    TEST_ASSERT_EQUAL_STRING("path_device", tp_status_id(TP_STATUS_PATH_DEVICE));
+    TEST_ASSERT_EQUAL_STRING("path_resolve_failed", tp_status_id(TP_STATUS_PATH_RESOLVE_FAILED));
+    TEST_ASSERT_EQUAL_STRING("rng_failed", tp_status_id(TP_STATUS_RNG_FAILED));
+    TEST_ASSERT_EQUAL_STRING("identity_collision", tp_status_id(TP_STATUS_IDENTITY_COLLISION));
 }
 
 /* Tokens are machine ids: lowercase, no spaces (unlike tp_status_str prose). */
 void test_status_id_is_machine_token(void) {
-    for (int s = TP_STATUS_OK; s <= TP_STATUS_BAD_PROJECT; s++) {
+    for (int s = TP_STATUS_OK; s <= TP_STATUS_IDENTITY_COLLISION; s++) {
         const char *id = tp_status_id((tp_status)s);
         for (const char *c = id; *c; c++) {
             TEST_ASSERT_TRUE_MESSAGE(*c != ' ', id);

@@ -25,7 +25,20 @@ typedef enum tp_status {
     TP_STATUS_UNSUPPORTED_TEXTURE,
     TP_STATUS_OOM,
     TP_STATUS_BUILDER_FAILED, /* nt_builder start/finish returned an error (tp_pack) */
-    TP_STATUS_BAD_PROJECT     /* malformed/invalid .ntpacker_project JSON (tp_project) */
+    TP_STATUS_BAD_PROJECT,    /* malformed/invalid .ntpacker_project JSON (tp_project) */
+
+    /* --- project identity faults (F1-00, promoted from the C0-01 spike) ---
+     * Append-only: new values go at the END so existing tokens never shift.
+     * Distinct identity faults that a client acts on differently; generic
+     * empty/NULL/too-small inputs still reuse INVALID_ARGUMENT / OUT_OF_BOUNDS. */
+    TP_STATUS_PATH_NOT_ABSOLUTE,  /* identity path is not absolute (tp_identity) */
+    TP_STATUS_PATH_DRIVE_RELATIVE, /* Windows "C:foo" drive-relative form (tp_identity) */
+    TP_STATUS_PATH_BAD_UNC,       /* malformed UNC (//server without share) (tp_identity) */
+    TP_STATUS_PATH_DEVICE,        /* Windows \\?\ / \\.\ device path is not an identity (tp_identity) */
+    TP_STATUS_PATH_RESOLVE_FAILED, /* realpath/GetFinalPathNameByHandle failed: missing parent dir,
+                                    * permission, symlink loop, ... prose carries the specifics (tp_identity) */
+    TP_STATUS_RNG_FAILED,         /* the injected RNG did not deliver the requested bytes (tp_id) */
+    TP_STATUS_IDENTITY_COLLISION  /* Save-As destination canonicalizes to an already-claimed key (tp_identity) */
 } tp_status;
 
 /* Fixed-size message buffer -- no heap, safe to embed by value on the stack. */
@@ -72,6 +85,13 @@ static inline const char *tp_status_str(tp_status status) {
         case TP_STATUS_OOM: return "out of memory";
         case TP_STATUS_BUILDER_FAILED: return "builder failed";
         case TP_STATUS_BAD_PROJECT: return "bad project file";
+        case TP_STATUS_PATH_NOT_ABSOLUTE: return "path is not absolute";
+        case TP_STATUS_PATH_DRIVE_RELATIVE: return "path is drive-relative";
+        case TP_STATUS_PATH_BAD_UNC: return "malformed UNC path";
+        case TP_STATUS_PATH_DEVICE: return "device path is not a project identity";
+        case TP_STATUS_PATH_RESOLVE_FAILED: return "could not resolve path";
+        case TP_STATUS_RNG_FAILED: return "random generator failed";
+        case TP_STATUS_IDENTITY_COLLISION: return "identity collision";
     }
     return "unknown status";
 }
@@ -96,6 +116,13 @@ static inline const char *tp_status_id(tp_status status) {
         case TP_STATUS_OOM: return "oom";
         case TP_STATUS_BUILDER_FAILED: return "builder_failed";
         case TP_STATUS_BAD_PROJECT: return "bad_project";
+        case TP_STATUS_PATH_NOT_ABSOLUTE: return "path_not_absolute";
+        case TP_STATUS_PATH_DRIVE_RELATIVE: return "path_drive_relative";
+        case TP_STATUS_PATH_BAD_UNC: return "path_bad_unc";
+        case TP_STATUS_PATH_DEVICE: return "path_device";
+        case TP_STATUS_PATH_RESOLVE_FAILED: return "path_resolve_failed";
+        case TP_STATUS_RNG_FAILED: return "rng_failed";
+        case TP_STATUS_IDENTITY_COLLISION: return "identity_collision";
     }
     return "unknown_status";
 }
