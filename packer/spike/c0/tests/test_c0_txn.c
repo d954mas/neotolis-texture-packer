@@ -446,6 +446,25 @@ void test_expected_revision_out_of_range(void) {
                                            "\",\"expected_revision\":1e300,\"operations\":[]}}"));
 }
 
+/* ---- label/author are strictly typed + bounded, never silently dropped (F3) - */
+
+void test_label_author_strict(void) {
+    /* present-but-wrong-type is REJECT, not a silent drop */
+    TEST_ASSERT_EQUAL_INT(TP_C0_ERR_TXN_BAD_TYPE,
+                          decode_req_fault("{\"schema\":1,\"transaction\":{\"id\":\"" TID
+                                           "\",\"expected_revision\":0,\"label\":42,\"operations\":[]}}"));
+    /* an over-long label is buffer_too_small, not a silent truncation */
+    char big[220];
+    memset(big, 'x', 200);
+    big[200] = '\0';
+    char json[512];
+    (void)snprintf(json, sizeof json,
+                   "{\"schema\":1,\"transaction\":{\"id\":\"" TID
+                   "\",\"expected_revision\":0,\"label\":\"%s\",\"operations\":[]}}",
+                   big);
+    TEST_ASSERT_EQUAL_INT(TP_C0_ERR_BUFFER_TOO_SMALL, decode_req_fault(json));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_request_roundtrip);
@@ -465,5 +484,6 @@ int main(void) {
     RUN_TEST(test_target_set_commits_with_exporter_id);
     RUN_TEST(test_number_classification_cross_os);
     RUN_TEST(test_expected_revision_out_of_range);
+    RUN_TEST(test_label_author_strict);
     return UNITY_END();
 }

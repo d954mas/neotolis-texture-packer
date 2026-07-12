@@ -113,12 +113,35 @@ tp_c0_txn_request *tp_c0_txn_request_decode(const char *json, tp_c0_detail *deta
         return NULL;
     }
 
+    /* label/author are optional, but PRESENT means strictly typed and bounded:
+     * silently truncating or dropping a field could make a client believe an
+     * effect occurred that did not (note §2, strict REJECT). */
     const cJSON *label = cJSON_GetObjectItemCaseSensitive(tx, "label");
-    if (label && cJSON_IsString(label)) {
+    if (label) {
+        if (!cJSON_IsString(label)) {
+            (void)tp_c0_fail(err, TP_C0_ERR_TXN_BAD_TYPE, "\"label\" must be a string");
+            (void)fail_req(req, root, detail, TP_C0_ERR_TXN_BAD_TYPE);
+            return NULL;
+        }
+        if (strlen(label->valuestring) >= TP_C0_STR_CAP) {
+            (void)tp_c0_fail(err, TP_C0_ERR_BUFFER_TOO_SMALL, "\"label\" exceeds %d bytes", TP_C0_STR_CAP - 1);
+            (void)fail_req(req, root, detail, TP_C0_ERR_BUFFER_TOO_SMALL);
+            return NULL;
+        }
         (void)snprintf(req->label, sizeof req->label, "%s", label->valuestring);
     }
     const cJSON *author = cJSON_GetObjectItemCaseSensitive(tx, "author");
-    if (author && cJSON_IsString(author)) {
+    if (author) {
+        if (!cJSON_IsString(author)) {
+            (void)tp_c0_fail(err, TP_C0_ERR_TXN_BAD_TYPE, "\"author\" must be a string");
+            (void)fail_req(req, root, detail, TP_C0_ERR_TXN_BAD_TYPE);
+            return NULL;
+        }
+        if (strlen(author->valuestring) >= TP_C0_STR_CAP) {
+            (void)tp_c0_fail(err, TP_C0_ERR_BUFFER_TOO_SMALL, "\"author\" exceeds %d bytes", TP_C0_STR_CAP - 1);
+            (void)fail_req(req, root, detail, TP_C0_ERR_BUFFER_TOO_SMALL);
+            return NULL;
+        }
         (void)snprintf(req->author, sizeof req->author, "%s", author->valuestring);
     }
 
