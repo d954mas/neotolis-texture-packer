@@ -15,6 +15,31 @@ target_link_libraries(tp_test_status_id PRIVATE tp_core unity)
 target_compile_options(tp_test_status_id PRIVATE -U_DLL)
 add_test(NAME tp_status_id COMMAND tp_test_status_id)
 
+# F1-00 project identity: 128-bit runtime ID + injectable RNG seam (deterministic).
+add_executable(tp_test_identity_id test_identity_id.c)
+target_link_libraries(tp_test_identity_id PRIVATE tp_core unity)
+target_compile_options(tp_test_identity_id PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_identity_id)   # AGENTS.md invariant: our test TUs too
+add_test(NAME tp_identity_id COMMAND tp_test_identity_id)
+
+# F1-00 project identity: LEXICAL canonical-path fixtures (C0-01 corpus ported).
+# Includes the src-only internal header so BOTH host rule sets run on every CI OS.
+add_executable(tp_test_identity_path test_identity_path.c)
+target_link_libraries(tp_test_identity_path PRIVATE tp_core unity)
+target_include_directories(tp_test_identity_path PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_options(tp_test_identity_path PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_identity_path)   # AGENTS.md invariant: our test TUs too
+add_test(NAME tp_identity_path COMMAND tp_test_identity_path)
+
+# F1-00 project identity: FILESYSTEM realpath/symlink resolution + atomic Save-As
+# transition. Uses a created scratch dir (argv[1]); no baked absolute paths.
+add_executable(tp_test_identity_session test_identity_session.c)
+target_link_libraries(tp_test_identity_session PRIVATE tp_core unity)
+target_compile_options(tp_test_identity_session PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_identity_session)   # AGENTS.md invariant: our test TUs too
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_identity_test")
+add_test(NAME tp_identity_session COMMAND tp_test_identity_session "${CMAKE_BINARY_DIR}/tp_identity_test")
+
 # A1 op-layer: canonical sprite-name key + natural order + common prefix.
 # Pins the dot-basename key fix that the showcase draw-hash gate cannot see.
 add_executable(tp_test_names test_names.c)

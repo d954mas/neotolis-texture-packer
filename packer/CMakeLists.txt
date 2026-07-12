@@ -9,7 +9,12 @@ add_library(tp_core STATIC
     src/tp_arena.c src/tp_names.c src/tp_name_map.c src/tp_pack_read.c src/tp_project.c
     src/tp_pack_settings.c src/tp_scan.c src/tp_input.c
     src/tp_export.c src/tp_normalize.c src/tp_export_png.c src/tp_export_json_neotolis.c
-    src/tp_export_defold.c)
+    src/tp_export_defold.c
+    # F1-00 production project-identity boundary: 128-bit runtime ID + RNG seam,
+    # canonical saved-project path (lexical + realpath), Save-As transition DTO.
+    # Promoted from the accepted C0-01 spike; no engine API, no new link deps
+    # (POSIX realpath in libc / Win32 kernel32 auto-linked).
+    src/tp_id.c src/tp_identity.c src/tp_identity_session.c)
 target_include_directories(tp_core PUBLIC include)
 # tp_pack_settings.c includes nt_builder.h for the header-only nt_atlas_opts_defaults()
 # inline (the single source of the packing defaults). HEADERS ONLY: this adds the builder
