@@ -266,7 +266,8 @@ tp_status tp_project_set_atlas_name(tp_project_atlas *a, const char *name) {
 
 static void tp_free_anim(tp_project_anim *an) {
     for (int i = 0; i < an->frame_count; i++) {
-        free(an->frames[i]);
+        free(an->frames[i].name);
+        free(an->frames[i].src_key);
     }
     free(an->frames);
     free(an->name); /* `id` is a value (tp_id128), only `name` is owned */
@@ -602,14 +603,18 @@ tp_status tp_project_anim_add_frame(tp_project_anim *anim, const char *frame_nam
     if (!anim || !frame_name) {
         return TP_STATUS_INVALID_ARGUMENT;
     }
-    if (!tp_grow((void **)&anim->frames, &anim->frame_cap, anim->frame_count + 1, sizeof(char *))) {
+    if (!tp_grow((void **)&anim->frames, &anim->frame_cap, anim->frame_count + 1, sizeof(tp_project_frame))) {
         return TP_STATUS_OOM;
     }
     char *copy = tp_strdup(frame_name);
     if (!copy) {
         return TP_STATUS_OOM;
     }
-    anim->frames[anim->frame_count++] = copy;
+    tp_project_frame *fr = &anim->frames[anim->frame_count];
+    fr->name = copy;             /* PENDING: keyed by name until first resolution */
+    fr->source_ref = tp_id128_nil();
+    fr->src_key = NULL;
+    anim->frame_count++;
     return TP_STATUS_OK;
 }
 
@@ -620,7 +625,8 @@ tp_status tp_project_anim_remove_frame(tp_project_anim *anim, int index) {
     if (index < 0 || index >= anim->frame_count) {
         return TP_STATUS_OUT_OF_BOUNDS;
     }
-    free(anim->frames[index]);
+    free(anim->frames[index].name);
+    free(anim->frames[index].src_key);
     for (int j = index; j < anim->frame_count - 1; j++) {
         anim->frames[j] = anim->frames[j + 1];
     }
@@ -645,7 +651,7 @@ tp_status tp_project_anim_move_frame(tp_project_anim *anim, int index, int delta
     if (dst == index) {
         return TP_STATUS_OK; /* no-op */
     }
-    char *moved = anim->frames[index];
+    tp_project_frame moved = anim->frames[index];
     if (dst > index) {
         for (int j = index; j < dst; j++) {
             anim->frames[j] = anim->frames[j + 1];
@@ -830,16 +836,35 @@ static void tp_obj_key(tp_sb *sb, int keydepth, bool *first, const char *key) {
     tp_sb_str(sb, ": ");
 }
 
-static void tp_emit_string_array(tp_sb *sb, int depth, char *const *arr, int count) {
+static void tp_emit_id(tp_sb *sb, tp_id_kind kind, tp_id128 id); /* defined below */
+
+/* Animation frames (schema v4): a MIGRATED frame is an object {key, source}; a
+ * PENDING frame is a bare string (its `name` bridge), v3-compatible. The loader
+ * accepts either. Keys ASCII-ascending inside the object (key < source). */
+static void tp_emit_frames(tp_sb *sb, int depth, const tp_project_frame *frames, int count) {
     if (count == 0) {
         tp_sb_str(sb, "[]");
         return;
     }
     tp_sb_char(sb, '[');
     for (int i = 0; i < count; i++) {
+        const tp_project_frame *fr = &frames[i];
+        const bool migrated = !tp_id128_is_nil(fr->source_ref) && fr->src_key != NULL;
         tp_sb_str(sb, i == 0 ? "\n" : ",\n");
         tp_sb_indent(sb, depth + 1);
-        tp_sb_json_string(sb, arr[i]);
+        if (!migrated) {
+            tp_sb_json_string(sb, fr->name);
+            continue;
+        }
+        tp_sb_char(sb, '{');
+        bool first = true;
+        tp_obj_key(sb, depth + 2, &first, "key");
+        tp_sb_json_string(sb, fr->src_key);
+        tp_obj_key(sb, depth + 2, &first, "source");
+        tp_emit_id(sb, TP_ID_KIND_SOURCE, fr->source_ref);
+        tp_sb_str(sb, "\n");
+        tp_sb_indent(sb, depth + 1);
+        tp_sb_char(sb, '}');
     }
     tp_sb_str(sb, "\n");
     tp_sb_indent(sb, depth);
@@ -945,7 +970,7 @@ static void tp_emit_anim(tp_sb *sb, int depth, const tp_project_anim *an) {
         tp_sb_num(sb, (double)an->fps);
     }
     tp_obj_key(sb, depth + 1, &first, "frames");
-    tp_emit_string_array(sb, depth + 1, an->frames, an->frame_count);
+    tp_emit_frames(sb, depth + 1, an->frames, an->frame_count);
     tp_obj_key(sb, depth + 1, &first, "id"); /* structural shape-ID (persistent) */
     tp_emit_id(sb, TP_ID_KIND_ANIM, an->id);
     tp_obj_key(sb, depth + 1, &first, "name"); /* logical/display name (was v1 `id`) */
@@ -1443,12 +1468,41 @@ static tp_status tp_load_anim(tp_project_atlas *a, const cJSON *ja, bool v2, tp_
         }
         const cJSON *fr = NULL;
         cJSON_ArrayForEach(fr, frames) {
-            if (!cJSON_IsString(fr) || !fr->valuestring) {
-                return tp_error_set(err, TP_STATUS_BAD_PROJECT, "animation frame must be a string");
-            }
-            st = tp_project_anim_add_frame(an, fr->valuestring);
-            if (st != TP_STATUS_OK) {
-                return tp_error_set(err, st, "out of memory adding animation frame");
+            if (cJSON_IsString(fr) && fr->valuestring) {
+                /* PENDING frame (v3 legacy / v4 not-yet-resolved): keyed by name. */
+                st = tp_project_anim_add_frame(an, fr->valuestring);
+                if (st != TP_STATUS_OK) {
+                    return tp_error_set(err, st, "out of memory adding animation frame");
+                }
+            } else if (cJSON_IsObject(fr)) {
+                /* MIGRATED frame {source, key}: the `name` bridge is derived from key. */
+                tp_id128 sref = tp_id128_nil();
+                st = tp_load_id(fr, "source", TP_ID_KIND_SOURCE, &sref, err);
+                if (st != TP_STATUS_OK) {
+                    return st;
+                }
+                const cJSON *kj = cJSON_GetObjectItemCaseSensitive(fr, "key");
+                if (!cJSON_IsString(kj) || !kj->valuestring) {
+                    return tp_error_set(err, TP_STATUS_BAD_PROJECT, "animation frame object needs a string 'key'");
+                }
+                if (tp_id128_is_nil(sref)) {
+                    return tp_error_set(err, TP_STATUS_BAD_PROJECT, "animation frame object needs a 'source'");
+                }
+                char bridge[TP_SRCKEY_MAX];
+                tp_sprite_export_key(kj->valuestring, bridge, sizeof bridge);
+                st = tp_project_anim_add_frame(an, bridge);
+                if (st != TP_STATUS_OK) {
+                    return tp_error_set(err, st, "out of memory adding animation frame");
+                }
+                tp_project_frame *last = &an->frames[an->frame_count - 1];
+                last->source_ref = sref;
+                last->src_key = tp_strdup(kj->valuestring);
+                if (!last->src_key) {
+                    return tp_error_set(err, TP_STATUS_OOM, "out of memory adding animation frame key");
+                }
+            } else {
+                return tp_error_set(err, TP_STATUS_BAD_PROJECT,
+                                    "animation frame must be a string or a {source, key} object");
             }
         }
     }

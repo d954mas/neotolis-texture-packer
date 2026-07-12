@@ -368,7 +368,7 @@ static void validate_atlas(cli_findings *fs, tp_project *p, int ai) {
             for (int an = 0; an < a->animation_count; an++) {
                 const tp_project_anim *pa = &a->animations[an];
                 for (int f = 0; f < pa->frame_count; f++) {
-                    const char *fr = pa->frames[f] ? pa->frames[f] : "";
+                    const char *fr = pa->frames[f].name ? pa->frames[f].name : "";
                     if (!key_in_set(keys, n, fr)) {
                         add_finding(fs, SEV_ERR, "dangling_anim_frame", a->name, NULL, pa->name, fr, NULL,
                                     "animation '%s' references frame '%s' which matches no sprite export key",

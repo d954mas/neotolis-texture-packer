@@ -401,6 +401,29 @@ tp_status tp_project_resolve_atlas_sprites(tp_project *p, int atlas_index, const
         /* `name` stays the export-key bridge -- it already equals r->export_key (that
          * is how the record matched), so the name-based apply path is unchanged. */
     }
+    /* Animation frame references re-key identically (a frame IS a sprite reference). */
+    for (int ai = 0; ai < a->animation_count; ai++) {
+        tp_project_anim *an = &a->animations[ai];
+        for (int f = 0; f < an->frame_count; f++) {
+            tp_project_frame *fr = &an->frames[f];
+            const bool fpending = tp_id128_is_nil(fr->source_ref) || fr->src_key == NULL;
+            if (!fpending || !fr->name) {
+                continue;
+            }
+            int fmatches = 0;
+            const tp_sprite_ref *r = tp_sprite_index_by_export_key(idx, fr->name, &fmatches);
+            if (fmatches != 1 || !r) {
+                continue;
+            }
+            char *k = mig_strdup(r->source_key);
+            if (!k) {
+                return tp_error_set(err, TP_STATUS_OOM, "tp_project_resolve_atlas_sprites: out of memory");
+            }
+            free(fr->src_key);
+            fr->src_key = k;
+            fr->source_ref = r->source_id;
+        }
+    }
     return TP_STATUS_OK;
 }
 

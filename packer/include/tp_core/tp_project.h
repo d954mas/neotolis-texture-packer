@@ -98,17 +98,33 @@ typedef struct tp_project_sprite {
 #define TP_PROJECT_ORIGIN_DEFAULT 0.5F
 #define TP_PROJECT_OV_INHERIT (-1)
 
-/* Flipbook metadata over sprite names, orthogonal to placement (SUMMARY.md §5a).
- * `frames` are atlas-relative sprite names in explicit playback order.
+/* One animation frame reference: a sprite in the same atlas, in playback order.
+ * Schema v4 (F1-03): keyed by its owning source + source-local key, exactly like a
+ * sprite override, so a frame reference targets the derived sprite_id and survives
+ * reorder/reload/logical-rename (decision 0009). Mirror of tp_project_sprite's
+ * identity fields:
+ *   - `source_ref` / `src_key`: the canonical v4 identity; nil / NULL while PENDING
+ *     (a v3 name-keyed frame, or one added by name before a scan) -- re-keyed lazily.
+ *   - `name`: the export-key bridge (the frame's human/display reference); ALWAYS set
+ *     for an active frame and what the name-based export path (tp_normalize) resolves
+ *     against, so re-keying does not change which sprite a frame resolves to. */
+typedef struct tp_project_frame {
+    char *name;          /* export-key bridge (display reference); the name-based resolve key */
+    tp_id128 source_ref; /* owning source's structural id; nil = pending */
+    char *src_key;       /* normalized source-local key (NFC, ext KEPT); NULL = pending */
+} tp_project_frame;
+
+/* Flipbook metadata over sprite references, orthogonal to placement (SUMMARY.md §5a).
+ * `frames` are frame references in explicit playback order (schema v4: {source, key},
+ * see tp_project_frame).
  *
  * id/name split (F1-01, schema v2): `id` is the persistent structural ID (survives
  * rename/reorder/save/reload); `name` is the logical/display name and the human
- * reference key. The v1 string `id` migrated into `name`. Frame references remain
- * BY NAME until F1-03 migrates them to sprite IDs. */
+ * reference key. The v1 string `id` migrated into `name`. */
 typedef struct tp_project_anim {
     tp_id128 id;   /* persistent structural ID (schema v2); nil until assigned/promoted */
     char *name;    /* logical/display name; the name-keyed reference (was v1 `id`) */
-    char **frames;
+    tp_project_frame *frames;
     int frame_count;
     int frame_cap; /* internal: allocation capacity of `frames` */
     float fps;     /* default 30 */

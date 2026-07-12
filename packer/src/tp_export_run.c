@@ -33,13 +33,27 @@ typedef struct {
  * emitted entries borrow: raw_name points into `sprites` (the caller's desc
  * array) and final_name into ps->rename; both outlive every tp_normalize call in
  * this run, and final_name is duped by tp_normalize. */
-static void build_norm_opts(const tp_project_atlas *a, const tp_pack_sprite_desc *sprites, int sprite_count,
-                            tp_export_anim_in *anims, tp_export_name_override *ovs, tp_normalize_opts *out) {
+static tp_status build_norm_opts(const tp_project_atlas *a, const tp_pack_sprite_desc *sprites, int sprite_count,
+                                 tp_export_anim_in *anims, tp_export_name_override *ovs, tp_arena *arena,
+                                 tp_normalize_opts *out, tp_error *err) {
     tp_normalize_opts_defaults(out);
     for (int i = 0; i < a->animation_count; i++) {
         const tp_project_anim *pa = &a->animations[i];
         anims[i].id = pa->name; /* export "id" is the animation's logical name (id/name split) */
-        anims[i].frames = (const char *const *)pa->frames;
+        /* Frames feed tp_normalize as the export-KEY name space (schema v4: frames are
+         * {source, key} records, so project the `name` bridge -- byte-identical to the
+         * old string frames). tp_normalize dups what it keeps; this array borrows. */
+        const char **fnames = NULL;
+        if (pa->frame_count > 0) {
+            fnames = (const char **)tp_arena_alloc(arena, (size_t)pa->frame_count * sizeof(char *));
+            if (!fnames) {
+                return tp_error_set(err, TP_STATUS_OOM, "tp_export_run: OOM (frame names)");
+            }
+            for (int f = 0; f < pa->frame_count; f++) {
+                fnames[f] = pa->frames[f].name;
+            }
+        }
+        anims[i].frames = fnames;
         anims[i].frame_count = pa->frame_count;
         anims[i].fps = pa->fps;
         anims[i].playback = pa->playback;
@@ -68,6 +82,7 @@ static void build_norm_opts(const tp_project_atlas *a, const tp_pack_sprite_desc
     }
     out->overrides = ovs;
     out->override_count = oc;
+    return TP_STATUS_OK;
 }
 
 static tp_status unknown_exporter(const char *id, tp_error *err) {
@@ -247,7 +262,10 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
         }
     }
     tp_normalize_opts nopts;
-    build_norm_opts(a, sprites, sprite_count, anims, ovs, &nopts);
+    st = build_norm_opts(a, sprites, sprite_count, anims, ovs, arena, &nopts, err);
+    if (st != TP_STATUS_OK) {
+        return st;
+    }
 
     if (a->target_count == 0) {
         return TP_STATUS_OK; /* nothing enabled to export */

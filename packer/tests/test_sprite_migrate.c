@@ -216,6 +216,78 @@ void test_orphan_reactivates_on_key_return(void) {
     tp_project_destroy(p);
 }
 
+/* Animation frame references re-key to {source, key} at resolution, persist in v4
+ * form, and survive a source reorder + save/reload (the reference targets the derived
+ * sprite id, not an array position or the mutable display name). */
+void test_frames_resolve_persist_and_survive_reorder(void) {
+    char root[600];
+    (void)snprintf(root, sizeof root, "%s/mig_frames", g_dir);
+    mkdir_p(root);
+    char f[800];
+    (void)snprintf(f, sizeof f, "%s/hero.png", root);
+    write_file(f, "H");
+    (void)snprintf(f, sizeof f, "%s/gem.png", root);
+    write_file(f, "G");
+
+    tp_project *p = tp_project_create();
+    tp_project_atlas *a = tp_project_get_atlas(p, 0);
+    a->id = seeded_id(0x0BU);
+    /* two sources so a reorder is meaningful; the frames' source is the second one */
+    char other[600];
+    (void)snprintf(other, sizeof other, "%s/mig_frames_other", g_dir);
+    mkdir_p(other);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_source(a, other));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_source(a, root));
+    a->sources[0].id = seeded_id(0x41U);
+    a->sources[1].id = seeded_id(0x52U);
+    tp_id128 root_sid = a->sources[1].id;
+
+    tp_project_anim *an = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_animation(a, "walk", &an));
+    an->id = seeded_id(0x0CU); /* real anim id so the saved file re-loads (validate) */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "gem"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "hero"));
+    TEST_ASSERT_TRUE(tp_id128_is_nil(an->frames[0].source_ref)); /* pending */
+
+    tp_sprite_index idx;
+    tp_error e = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_sprite_index_build(p, 0, &idx, &e));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_resolve_atlas_sprites(p, 0, &idx, &e));
+    tp_sprite_index_free(&idx);
+
+    /* frames re-keyed to the root source + their source-local key */
+    TEST_ASSERT_TRUE(tp_id128_eq(an->frames[0].source_ref, root_sid));
+    TEST_ASSERT_EQUAL_STRING("gem.png", an->frames[0].src_key);
+    TEST_ASSERT_EQUAL_STRING("hero.png", an->frames[1].src_key);
+    TEST_ASSERT_EQUAL_STRING("gem", an->frames[0].name); /* order + name bridge preserved */
+
+    char proj[700];
+    (void)snprintf(proj, sizeof proj, "%s/frames_v4.ntpacker_project", root);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_save(p, proj, &e));
+    size_t n = 0;
+    char *bytes = read_all(proj, &n);
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(bytes, "\"key\": \"gem.png\""), "frame persists its source key");
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(bytes, "\"key\": \"hero.png\""), "frame persists its source key");
+    free(bytes);
+    tp_project_destroy(p);
+
+    /* reload, then REORDER sources (swap): the frame still resolves by (source, key). */
+    tp_project *p2 = NULL;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, tp_project_load(proj, &p2, &e), e.msg);
+    tp_project_atlas *a2 = tp_project_get_atlas(p2, 0);
+    TEST_ASSERT_EQUAL_INT(2, a2->animations[0].frame_count);
+    TEST_ASSERT_EQUAL_STRING("gem", a2->animations[0].frames[0].name);   /* order preserved */
+    TEST_ASSERT_EQUAL_STRING("hero", a2->animations[0].frames[1].name);
+    TEST_ASSERT_TRUE(tp_id128_eq(a2->animations[0].frames[0].source_ref, root_sid));
+    /* swap the two sources; the frame's source_ref is unchanged (id, not index) */
+    tp_project_source tmp = a2->sources[0];
+    a2->sources[0] = a2->sources[1];
+    a2->sources[1] = tmp;
+    TEST_ASSERT_TRUE_MESSAGE(tp_id128_eq(a2->animations[0].frames[0].source_ref, root_sid),
+                             "frame reference survives a source reorder");
+    tp_project_destroy(p2);
+}
+
 int main(int argc, char **argv) {
     g_dir = (argc > 1) ? argv[1] : ".";
     mkdir_p(g_dir);
@@ -223,5 +295,6 @@ int main(int argc, char **argv) {
     RUN_TEST(test_pending_resolves_and_persists_v4);
     RUN_TEST(test_unresolved_stays_pending);
     RUN_TEST(test_orphan_reactivates_on_key_return);
+    RUN_TEST(test_frames_resolve_persist_and_survive_reorder);
     return UNITY_END();
 }

@@ -802,7 +802,7 @@ static void declare_animation_editor(nt_ui_context_t *ctx, tp_project_atlas *a) 
               .backgroundColor = bg,
               .cornerRadius = CLAY_CORNER_RADIUS(S(4))}) {
             char lab[224];
-            (void)snprintf(lab, sizeof lab, "%02d  %s", fi + 1, an->frames[fi]);
+            (void)snprintf(lab, sizeof lab, "%02d  %s", fi + 1, an->frames[fi].name);
             CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
                 ui_label_fit(ctx, lab, &g_row, right_panel_text_w(S(98.0F)), row_id); /* reserve: up/down/x + gaps */
             }

@@ -351,7 +351,7 @@ void update_preview(void) {
     int rw = 1;
     int rh = 1;
     for (int i = 0; i < an->frame_count && n < idxs_cap; i++) {
-        const int si = gui_pack_find_sprite(s_sel_atlas, an->frames[i]);
+        const int si = gui_pack_find_sprite(s_sel_atlas, an->frames[i].name);
         if (si >= 0 && si < pr->sprite_count) {
             idxs[n++] = si;
             if (pr->sprites[si].sourceSize.w > rw) {

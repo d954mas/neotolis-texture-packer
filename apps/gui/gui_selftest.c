@@ -580,9 +580,11 @@ void run_selftest(void) {
         tp_project_atlas *aa = tp_project_get_atlas(gui_project_get(), aidx);
         NT_ASSERT(ai == 0 && aa && aa->animation_count == 1 && "create animation from selection");
         tp_project_anim *an = &aa->animations[0];
-        nt_log_info("SELFTEST: anim '%s' frames [%s,%s,%s]", an->name, an->frames[0], an->frames[1], an->frames[2]);
-        NT_ASSERT(an->frame_count == 3 && strcmp(an->frames[0], "walk_1") == 0 && strcmp(an->frames[1], "walk_2") == 0 &&
-                  strcmp(an->frames[2], "walk_10") == 0 && "frames natural-sorted (walk_2 before walk_10)");
+        nt_log_info("SELFTEST: anim '%s' frames [%s,%s,%s]", an->name, an->frames[0].name, an->frames[1].name,
+                    an->frames[2].name);
+        NT_ASSERT(an->frame_count == 3 && strcmp(an->frames[0].name, "walk_1") == 0 &&
+                  strcmp(an->frames[1].name, "walk_2") == 0 && strcmp(an->frames[2].name, "walk_10") == 0 &&
+                  "frames natural-sorted (walk_2 before walk_10)");
 
         gui_project_set_anim_playback(aidx, 0, 5); /* loop pingpong */
         gui_project_set_anim_flip(aidx, 0, true, false);
@@ -590,7 +592,8 @@ void run_selftest(void) {
         gui_project_anim_move_frame(aidx, 0, 0, 2); /* walk_1 rides to the end */
         aa = tp_project_get_atlas(gui_project_get(), aidx);
         an = &aa->animations[0];
-        NT_ASSERT(strcmp(an->frames[0], "walk_2") == 0 && strcmp(an->frames[2], "walk_1") == 0 && "reorder a frame");
+        NT_ASSERT(strcmp(an->frames[0].name, "walk_2") == 0 && strcmp(an->frames[2].name, "walk_1") == 0 &&
+                  "reorder a frame");
 
         char *abuf = NULL;
         size_t alen = 0;
@@ -605,7 +608,7 @@ void run_selftest(void) {
         nt_log_info("SELFTEST: anim RT save=%s load=%s playback=%d flip_h=%d fps=%g", tp_status_str(abs_st),
                     tp_status_str(als_st), rl ? rl->playback : -1, rl ? rl->flip_h : -1, rl ? (double)rl->fps : 0.0);
         NT_ASSERT(rl && rl->frame_count == 3 && rl->playback == 5 && rl->flip_h && !rl->flip_v && rl->fps == 12.0F &&
-                  strcmp(rl->frames[0], "walk_2") == 0 && strcmp(rl->frames[2], "walk_1") == 0 &&
+                  strcmp(rl->frames[0].name, "walk_2") == 0 && strcmp(rl->frames[2].name, "walk_1") == 0 &&
                   "round-trip preserves frame order + playback + flips");
         tp_project_destroy(alp);
         free(abuf);

@@ -187,7 +187,7 @@ static void emit_anim(cli_sb *sb, int depth, const tp_project_anim *an) {
         for (int i = 0; i < an->frame_count; i++) {
             cli_sb_str(sb, i == 0 ? "\n" : ",\n");
             cli_sb_indent(sb, depth + 2);
-            cli_sb_json_str(sb, an->frames[i]);
+            cli_sb_json_str(sb, an->frames[i].name);
         }
         cli_sb_str(sb, "\n");
         cli_sb_indent(sb, depth + 1);

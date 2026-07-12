@@ -940,7 +940,7 @@ static int anim_list(tp_project_atlas *a, const char *atlas_name, bool json, boo
                 for (int f = 0; f < an->frame_count; f++) {
                     cli_sb_str(&sb, f == 0 ? "\n" : ",\n");
                     cli_sb_indent(&sb, 4);
-                    cli_sb_json_str(&sb, an->frames[f]);
+                    cli_sb_json_str(&sb, an->frames[f].name);
                 }
                 cli_sb_str(&sb, "\n");
                 cli_sb_indent(&sb, 3);
@@ -975,7 +975,7 @@ static int resolve_frame(const tp_project_anim *an, const char *sel) {
         return -1;
     }
     for (int i = 0; i < an->frame_count; i++) {
-        if (an->frames[i] && strcmp(an->frames[i], sel) == 0) {
+        if (an->frames[i].name && strcmp(an->frames[i].name, sel) == 0) {
             return i;
         }
     }

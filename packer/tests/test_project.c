@@ -190,7 +190,7 @@ static void assert_atlas_equal(const tp_project_atlas *a, const tp_project_atlas
         TEST_ASSERT_EQUAL_INT(a->animations[i].flip_v ? 1 : 0, b->animations[i].flip_v ? 1 : 0);
         TEST_ASSERT_EQUAL_INT(a->animations[i].frame_count, b->animations[i].frame_count);
         for (int k = 0; k < a->animations[i].frame_count; k++) {
-            TEST_ASSERT_EQUAL_STRING(a->animations[i].frames[k], b->animations[i].frames[k]);
+            TEST_ASSERT_EQUAL_STRING(a->animations[i].frames[k].name, b->animations[i].frames[k].name);
         }
     }
     TEST_ASSERT_EQUAL_INT(a->target_count, b->target_count);
@@ -522,21 +522,21 @@ void test_anim_frame_edit(void) {
 
     /* move first frame down by 2 -> f1,f2,f0,f3 */
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_move_frame(an, 0, 2));
-    TEST_ASSERT_EQUAL_STRING("f1", an->frames[0]);
-    TEST_ASSERT_EQUAL_STRING("f2", an->frames[1]);
-    TEST_ASSERT_EQUAL_STRING("f0", an->frames[2]);
-    TEST_ASSERT_EQUAL_STRING("f3", an->frames[3]);
+    TEST_ASSERT_EQUAL_STRING("f1", an->frames[0].name);
+    TEST_ASSERT_EQUAL_STRING("f2", an->frames[1].name);
+    TEST_ASSERT_EQUAL_STRING("f0", an->frames[2].name);
+    TEST_ASSERT_EQUAL_STRING("f3", an->frames[3].name);
 
     /* move last frame up by 1 -> f1,f2,f3,f0 */
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_move_frame(an, 3, -1));
-    TEST_ASSERT_EQUAL_STRING("f3", an->frames[2]);
-    TEST_ASSERT_EQUAL_STRING("f0", an->frames[3]);
+    TEST_ASSERT_EQUAL_STRING("f3", an->frames[2].name);
+    TEST_ASSERT_EQUAL_STRING("f0", an->frames[3].name);
 
     /* over-clamp: moving index 0 up stays put (no-op), moving down past the end clamps to last */
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_move_frame(an, 0, -5));
-    TEST_ASSERT_EQUAL_STRING("f1", an->frames[0]);
+    TEST_ASSERT_EQUAL_STRING("f1", an->frames[0].name);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_move_frame(an, 0, 99));
-    TEST_ASSERT_EQUAL_STRING("f1", an->frames[3]); /* f1 rode to the end */
+    TEST_ASSERT_EQUAL_STRING("f1", an->frames[3].name); /* f1 rode to the end */
 
     /* remove the middle -> shifts the tail down */
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_remove_frame(an, 1));
