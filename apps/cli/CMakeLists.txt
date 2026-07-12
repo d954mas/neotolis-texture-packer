@@ -85,6 +85,16 @@ add_test(NAME cli_validate_problems COMMAND ${CMAKE_COMMAND}
 add_test(NAME cli_validate_strict COMMAND ${CMAKE_COMMAND}
     -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=7 "-DARGS=validate ${_td}/problems.ntpacker_project --strict" -P "${_run}")
 
+# (i2) F1-02 source-key validation: a fixture with case-folding source paths
+# ("Art/hero" vs "art/hero") and a reserved-name path ("con.png") -> exit 0
+# (warnings only) AND both source_collision + source_portability findings present.
+add_test(NAME cli_validate_source_keys COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0 "-DARGS=validate ${_td}/collision.ntpacker_project --json"
+    -DCHECKER=$<TARGET_FILE:cli_json_check>
+    "-DCHECK_ARGS=validate code=source_collision code=source_portability"
+    -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_validate_source_keys.json
+    -P "${_run}")
+
 # (j) validate on an unloadable file -> exit 3.
 add_test(NAME cli_validate_unloadable COMMAND ${CMAKE_COMMAND}
     -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=3 "-DARGS=validate ${_td}/bad.ntpacker_project" -P "${_run}")

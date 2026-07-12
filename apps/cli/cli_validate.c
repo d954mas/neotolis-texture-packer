@@ -3,6 +3,9 @@
  * them in one edit cycle. Each check mirrors a real export-time failure or
  * ambiguity WITHOUT packing:
  *   missing_source        [error]   a source path that does not exist on disk
+ *   duplicate_source      [warning] two sources with the same normalized path (§5.6)
+ *   source_collision      [warning] two source paths that case-fold-collide (§5.3)
+ *   source_portability    [warning] reserved-name/invalid-char/trailing-dot-space (§5.6)
  *   empty_atlas           [warning] no usable sprites resolved from the sources
  *   dangling_anim_frame   [error]   frame key matching no sprite (tp_normalize L-4)
  *   duplicate_export_key  [warning] two descs -> one key (per-sprite override ambiguity)
@@ -30,6 +33,7 @@
 #include "tp_core/tp_pack.h" /* tp_pack_settings + tp_project_atlas_to_settings */
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_scan.h"
+#include "tp_core/tp_srckey.h" /* source-path collision + portability validation (F1-02) */
 
 #define CLI_VALIDATE_SCHEMA 1
 
@@ -189,6 +193,50 @@ static void free_strv(char **v, int n) {
     free(v);
 }
 
+/* Copy `src` into `out` replacing '\\' with '/' so exact-duplicate + case-fold
+ * comparison see one separator convention (saved sources are '/'-normalized, but a
+ * hand-edited file may not be). Truncation is harmless for a comparison key. */
+static void norm_src(const char *src, char *out, size_t cap) {
+    size_t i = 0;
+    for (; src[i] != '\0' && i + 1U < cap; i++) {
+        out[i] = (src[i] == '\\') ? '/' : src[i];
+    }
+    out[i] = '\0';
+}
+
+/* (a2) §5.3/§5.6 source-path validation (all WARNINGS -- never flips the --strict
+ * exit): duplicate path, cross-platform case-fold collision, and portability, via
+ * the promoted tp_srckey primitives. O(n^2) over an atlas's sources (small). */
+static void validate_sources(cli_findings *fs, const tp_project_atlas *a) {
+    for (int i = 0; i < a->source_count; i++) {
+        char ni[1024];
+        norm_src(a->sources[i].path, ni, sizeof ni);
+        unsigned flags = TP_SRCKEY_PORT_OK;
+        if (tp_srckey_portability(ni, &flags, NULL) == TP_STATUS_OK && flags != TP_SRCKEY_PORT_OK) {
+            add_finding(fs, SEV_WARN, "source_portability", a->name, NULL, NULL, NULL, NULL,
+                        "source '%s' has non-portable path parts:%s%s%s", a->sources[i].path,
+                        (flags & TP_SRCKEY_PORT_RESERVED_NAME) ? " reserved-name" : "",
+                        (flags & TP_SRCKEY_PORT_INVALID_CHAR) ? " invalid-char" : "",
+                        (flags & TP_SRCKEY_PORT_TRAILING_DOT_SPACE) ? " trailing-dot-space" : "");
+        }
+        for (int j = 0; j < i; j++) {
+            char nj[1024];
+            norm_src(a->sources[j].path, nj, sizeof nj);
+            if (strcmp(ni, nj) == 0) {
+                add_finding(fs, SEV_WARN, "duplicate_source", a->name, NULL, NULL, NULL, NULL,
+                            "source '%s' is listed more than once", a->sources[i].path);
+                continue;
+            }
+            bool collides = false;
+            if (tp_srckey_collides(ni, nj, &collides, NULL) == TP_STATUS_OK && collides) {
+                add_finding(fs, SEV_WARN, "source_collision", a->name, NULL, NULL, NULL, NULL,
+                            "sources '%s' and '%s' collide case-insensitively (cross-platform name clash)",
+                            a->sources[j].path, a->sources[i].path);
+            }
+        }
+    }
+}
+
 static void validate_atlas(cli_findings *fs, tp_project *p, int ai) {
     tp_project_atlas *a = &p->atlases[ai];
 
@@ -204,6 +252,7 @@ static void validate_atlas(cli_findings *fs, tp_project *p, int ai) {
                         "source '%s' does not exist on disk", sp);
         }
     }
+    validate_sources(fs, a); /* (a2) duplicate / case-fold collision / portability */
 
     /* Assemble the descs a pack would use (DRY: no packing, disk-touching only). */
     tp_pack_input input;

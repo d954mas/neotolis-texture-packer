@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "atlases": [
+    {
+      "name": "coll",
+      "sources": [
+        "Art/hero",
+        "art/hero",
+        "con.png"
+      ]
+    }
+  ]
+}
