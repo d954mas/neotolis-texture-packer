@@ -39,7 +39,9 @@ extern "C" {
 tp_c0_detail tp_c0_srckey_normalize(const char *input, char *out, size_t cap, tp_error *err);
 
 /* Case-fold (Unicode casefold + NFC) a NORMALIZED key into `out`, for use as a
- * collision-map key. */
+ * collision-map key. Full case-fold can expand the input up to ~3x (one codepoint
+ * may fold to three), so size `out` accordingly or expect buffer_too_small.
+ * (tp_c0_srckey_collides folds internally and is NOT limited by this.) */
 tp_c0_detail tp_c0_srckey_casefold(const char *normalized_key, char *out, size_t cap, tp_error *err);
 
 /* Cross-platform collision: two normalized keys whose case-folds are equal but

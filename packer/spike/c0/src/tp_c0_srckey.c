@@ -50,6 +50,13 @@ static tp_c0_detail structure_normalize(const char *input, char *joined, size_t 
                 return tp_c0_fail(err, TP_C0_ERR_BUFFER_TOO_SMALL, "source key exceeds %zu bytes", cap);
             }
             joined[pos++] = '/';
+        } else if (len >= 2 && is_alpha(start[0]) && start[1] == ':') {
+            /* Drive prefix revealed only after '.'-stripping: the normalized key
+             * would begin "X:", an absolute path. Reject so normalize is
+             * idempotent (e.g. "./C:/x" must not become the accepted "C:/x"). A
+             * drive-looking spelling in a LATER component is not absolute -- the
+             * portability scan flags its ':' instead. */
+            return tp_c0_fail(err, TP_C0_ERR_KEY_ABSOLUTE, "source key must be relative (drive prefix)");
         }
         if (pos + len >= cap) {
             return tp_c0_fail(err, TP_C0_ERR_BUFFER_TOO_SMALL, "source key exceeds %zu bytes", cap);
@@ -65,9 +72,12 @@ static tp_c0_detail structure_normalize(const char *input, char *joined, size_t 
     return TP_C0_OK;
 }
 
-/* Run utf8proc_map with `options` over `in`, copy the NUL-terminated result into
- * `out`, and free utf8proc's buffer here (same TU/CRT as the malloc). */
-static tp_c0_detail utf8_map_into(const char *in, utf8proc_option_t options, char *out, size_t cap, tp_error *err) {
+/* Run utf8proc_map with `options` over `in`, returning utf8proc's freshly
+ * malloc'd NUL-terminated result in *out_buf (the CALLER frees it, inside this
+ * TU/CRT) and its byte length in *out_len. Classifies failure as OOM /
+ * invalid_utf8. */
+static tp_c0_detail utf8_map_alloc(const char *in, utf8proc_option_t options, utf8proc_uint8_t **out_buf,
+                                   size_t *out_len, tp_error *err) {
     utf8proc_uint8_t *buf = NULL;
     utf8proc_ssize_t n = utf8proc_map((const utf8proc_uint8_t *)in, -1, &buf,
                                       (utf8proc_option_t)(UTF8PROC_NULLTERM | UTF8PROC_STABLE | options));
@@ -77,7 +87,21 @@ static tp_c0_detail utf8_map_into(const char *in, utf8proc_option_t options, cha
         }
         return tp_c0_fail(err, TP_C0_ERR_INVALID_UTF8, "not well-formed UTF-8 (%s)", utf8proc_errmsg(n));
     }
-    size_t outlen = (size_t)n;
+    *out_buf = buf;
+    *out_len = (size_t)n;
+    return TP_C0_OK;
+}
+
+/* Map `in` and copy the NUL-terminated result into caller buffer `out`, freeing
+ * utf8proc's buffer here. buffer_too_small if it will not fit (case-fold can
+ * expand up to ~3x, so callers must size `out` accordingly). */
+static tp_c0_detail utf8_map_into(const char *in, utf8proc_option_t options, char *out, size_t cap, tp_error *err) {
+    utf8proc_uint8_t *buf = NULL;
+    size_t outlen = 0;
+    tp_c0_detail d = utf8_map_alloc(in, options, &buf, &outlen, err);
+    if (d != TP_C0_OK) {
+        return d;
+    }
     if (outlen + 1U > cap) {
         free(buf);
         return tp_c0_fail(err, TP_C0_ERR_BUFFER_TOO_SMALL, "normalized key exceeds %zu bytes", cap);
@@ -117,17 +141,26 @@ tp_c0_detail tp_c0_srckey_collides(const char *key_a, const char *key_b, bool *o
     if (strcmp(key_a, key_b) == 0) {
         return TP_C0_OK; /* identical keys are not a collision */
     }
-    char fold_a[TP_C0_SRCKEY_MAX];
-    char fold_b[TP_C0_SRCKEY_MAX];
-    tp_c0_detail d = tp_c0_srckey_casefold(key_a, fold_a, sizeof fold_a, err);
+    /* Fold both keys via utf8proc directly and compare the malloc'd results, so a
+     * near-limit key whose case-fold expands (up to ~3x) is never rejected by a
+     * fixed-size buffer. Both allocations are consumed and freed inside this TU. */
+    const utf8proc_option_t fold = (utf8proc_option_t)(UTF8PROC_CASEFOLD | UTF8PROC_COMPOSE);
+    utf8proc_uint8_t *fold_a = NULL;
+    size_t la = 0;
+    tp_c0_detail d = utf8_map_alloc(key_a, fold, &fold_a, &la, err);
     if (d != TP_C0_OK) {
         return d;
     }
-    d = tp_c0_srckey_casefold(key_b, fold_b, sizeof fold_b, err);
+    utf8proc_uint8_t *fold_b = NULL;
+    size_t lb = 0;
+    d = utf8_map_alloc(key_b, fold, &fold_b, &lb, err);
     if (d != TP_C0_OK) {
+        free(fold_a);
         return d;
     }
-    *out_collides = (strcmp(fold_a, fold_b) == 0);
+    *out_collides = (la == lb) && memcmp(fold_a, fold_b, la) == 0;
+    free(fold_a);
+    free(fold_b);
     return TP_C0_OK;
 }
 

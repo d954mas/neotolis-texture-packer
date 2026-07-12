@@ -130,13 +130,21 @@ Canonical persistent source-local key (§5.3, §59 item 8):
   its root (stricter than the project-path `..` resolution, which is a distinct
   policy).
 - **Absolute rejected** (`key_absolute`): a leading `/` or `\` (including
-  `"///"`) or a Windows `X:` drive prefix.
+  `"///"`), a Windows `X:` drive prefix, **or a drive prefix revealed only after
+  `.`-component stripping** — the **first emitted component** beginning `X:` is
+  rejected (so `./C:/x` → `key_absolute`, not the accepted `C:/x`). This
+  guarantees **idempotence**: `normalize(normalize(x)) == normalize(x)` for every
+  accepted `x`. A drive-looking spelling in a *later* component (`a/C:/b`) is not
+  absolute — the portability scan flags its `:` as an invalid char instead.
 - Empty result (e.g. `"."`, `"./"`) → `empty`. Invalid UTF-8 → `invalid_utf8`.
 - **Case-fold is used ONLY for portability collision detection**
   (`tp_c0_srckey_collides`): `Button.png` and `button.png` are distinct keys but
   a reported cross-platform collision; `STRASSE.png` and `straße.png` collide via
   full folding. NFC-equivalent inputs normalize to the **same** key and are not a
-  collision.
+  collision. `tp_c0_srckey_collides` folds via utf8proc directly (allocations
+  freed in-TU per §3), so it is **not** limited by the key length — a near-limit
+  key whose full case-fold expands up to ~3x still yields a correct verdict. The
+  caller-buffer `tp_c0_srckey_casefold` must itself budget for that ~3x expansion.
 - **Portability validation** (`tp_c0_srckey_portability`, a warning bitmask, not
   a normalization error): Windows reserved names (`CON`/`PRN`/`AUX`/`NUL`/
   `COM1-9`/`LPT1-9`, extension-insensitive), invalid characters

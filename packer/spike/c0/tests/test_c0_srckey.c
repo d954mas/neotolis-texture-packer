@@ -71,6 +71,36 @@ void test_invalid_utf8(void) {
     norm_err("bad\xff\xfe.png", TP_C0_ERR_INVALID_UTF8);
 }
 
+void test_drive_prefix_after_dotstrip(void) {
+    /* F1: a drive prefix revealed only after '.'-component stripping must still be
+     * rejected as absolute -- otherwise "./C:/x" would normalize to the accepted
+     * "C:/x" and re-normalizing the stored key would fail (non-idempotent). */
+    norm_err("./C:/x.png", TP_C0_ERR_KEY_ABSOLUTE);
+    norm_err(".\\C:\\x.png", TP_C0_ERR_KEY_ABSOLUTE);
+    /* a drive-looking spelling in a LATER component is not absolute; the
+     * portability scan flags the ':' instead of rejecting the key. */
+    TEST_ASSERT_EQUAL_STRING("a/C:/b", norm("a/C:/b"));
+    unsigned flags = 0;
+    TEST_ASSERT_EQUAL_INT(TP_C0_OK, tp_c0_srckey_portability("a/C:/b", &flags, NULL));
+    TEST_ASSERT_TRUE((flags & TP_C0_PORT_INVALID_CHAR) != 0);
+}
+
+void test_normalize_idempotent(void) {
+    /* Guarantee: normalize(normalize(x)) == normalize(x) for every accepted x. */
+    static const char *accepted[] = {
+        "sub/button.png", "sub\\btn.png", "a//b/./c.png",     "./a/b/c.png",
+        "x.png",          "Button.PNG",   "a/C:/b",           "caf\xc3\xa9/x.png",
+    };
+    for (size_t i = 0; i < sizeof accepted / sizeof accepted[0]; i++) {
+        char k1[TP_C0_SRCKEY_MAX];
+        char k2[TP_C0_SRCKEY_MAX];
+        TEST_ASSERT_EQUAL_INT_MESSAGE(TP_C0_OK, tp_c0_srckey_normalize(accepted[i], k1, sizeof k1, NULL),
+                                      accepted[i]);
+        TEST_ASSERT_EQUAL_INT_MESSAGE(TP_C0_OK, tp_c0_srckey_normalize(k1, k2, sizeof k2, NULL), accepted[i]);
+        TEST_ASSERT_EQUAL_STRING_MESSAGE(k1, k2, accepted[i]);
+    }
+}
+
 void test_portability_reserved_names(void) {
     unsigned flags = 0;
     TEST_ASSERT_EQUAL_INT(TP_C0_OK, tp_c0_srckey_portability("con/x.png", &flags, NULL));
@@ -119,6 +149,68 @@ void test_casefold_collisions(void) {
     TEST_ASSERT_FALSE(collide_norm("caf\xc3\xa9.png", "cafe\xcc\x81.png"));
 }
 
+void test_collides_near_limit(void) {
+    /* F4: collides must handle keys whose case-fold expands past the length limit.
+     * U+0130 (İ, C4 B0) case-folds to "i" + U+0307 (2 bytes -> 3), so ~1000 İ plus
+     * an ASCII tail folds well past TP_C0_SRCKEY_MAX. The old fixed-size fold
+     * buffers returned buffer_too_small here. (Static buffers keep the frame small.) */
+    static char x_in[TP_C0_SRCKEY_MAX];
+    static char y_in[TP_C0_SRCKEY_MAX];
+    size_t p = 0;
+    for (int i = 0; i < 1000; i++) {
+        x_in[p++] = (char)0xC4;
+        x_in[p++] = (char)0xB0;
+    }
+    for (int i = 0; i < 1400; i++) {
+        x_in[p++] = 'A';
+    }
+    x_in[p] = '\0';
+    p = 0;
+    for (int i = 0; i < 1000; i++) {
+        y_in[p++] = (char)0xC4;
+        y_in[p++] = (char)0xB0;
+    }
+    for (int i = 0; i < 1400; i++) {
+        y_in[p++] = 'a';
+    }
+    y_in[p] = '\0';
+
+    static char x[TP_C0_SRCKEY_MAX];
+    static char y[TP_C0_SRCKEY_MAX];
+    TEST_ASSERT_EQUAL_INT(TP_C0_OK, tp_c0_srckey_normalize(x_in, x, sizeof x, NULL));
+    TEST_ASSERT_EQUAL_INT(TP_C0_OK, tp_c0_srckey_normalize(y_in, y, sizeof y, NULL));
+
+    bool c = true;
+    /* colliding pair (differ only by ASCII case), fold ~4400 bytes > 4096 */
+    TEST_ASSERT_EQUAL_INT(TP_C0_OK, tp_c0_srckey_collides(x, y, &c, NULL));
+    TEST_ASSERT_TRUE(c);
+    /* non-colliding pair, still no buffer_too_small */
+    TEST_ASSERT_EQUAL_INT(TP_C0_OK, tp_c0_srckey_collides(x, "plain.png", &c, NULL));
+    TEST_ASSERT_FALSE(c);
+
+    /* ß-heavy near-limit colliding pair: "ß"xN folds to "ss"xN, matching "SS"xN. */
+    static char lo[TP_C0_SRCKEY_MAX];
+    static char up[TP_C0_SRCKEY_MAX];
+    p = 0;
+    for (int i = 0; i < 1500; i++) {
+        lo[p++] = (char)0xC3;
+        lo[p++] = (char)0x9F;
+    }
+    lo[p] = '\0';
+    p = 0;
+    for (int i = 0; i < 1500; i++) {
+        up[p++] = 'S';
+        up[p++] = 'S';
+    }
+    up[p] = '\0';
+    static char lon[TP_C0_SRCKEY_MAX];
+    static char upn[TP_C0_SRCKEY_MAX];
+    TEST_ASSERT_EQUAL_INT(TP_C0_OK, tp_c0_srckey_normalize(lo, lon, sizeof lon, NULL));
+    TEST_ASSERT_EQUAL_INT(TP_C0_OK, tp_c0_srckey_normalize(up, upn, sizeof upn, NULL));
+    TEST_ASSERT_EQUAL_INT(TP_C0_OK, tp_c0_srckey_collides(lon, upn, &c, NULL));
+    TEST_ASSERT_TRUE(c);
+}
+
 void test_detail_tokens_stable(void) {
     TEST_ASSERT_EQUAL_STRING("key_absolute", tp_c0_detail_id(TP_C0_ERR_KEY_ABSOLUTE));
     TEST_ASSERT_EQUAL_STRING("key_traversal", tp_c0_detail_id(TP_C0_ERR_KEY_TRAVERSAL));
@@ -132,9 +224,12 @@ int main(void) {
     RUN_TEST(test_nfc_compose);
     RUN_TEST(test_rejects);
     RUN_TEST(test_invalid_utf8);
+    RUN_TEST(test_drive_prefix_after_dotstrip);
+    RUN_TEST(test_normalize_idempotent);
     RUN_TEST(test_portability_reserved_names);
     RUN_TEST(test_portability_invalid_char_and_trailing);
     RUN_TEST(test_casefold_collisions);
+    RUN_TEST(test_collides_near_limit);
     RUN_TEST(test_detail_tokens_stable);
     return UNITY_END();
 }
