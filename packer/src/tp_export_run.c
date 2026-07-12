@@ -38,7 +38,7 @@ static void build_norm_opts(const tp_project_atlas *a, const tp_pack_sprite_desc
     tp_normalize_opts_defaults(out);
     for (int i = 0; i < a->animation_count; i++) {
         const tp_project_anim *pa = &a->animations[i];
-        anims[i].id = pa->id;
+        anims[i].id = pa->name; /* export "id" is the animation's logical name (id/name split) */
         anims[i].frames = (const char *const *)pa->frames;
         anims[i].frame_count = pa->frame_count;
         anims[i].fps = pa->fps;

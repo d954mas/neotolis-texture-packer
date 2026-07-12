@@ -733,7 +733,7 @@ static void declare_animation_editor(nt_ui_context_t *ctx, tp_project_atlas *a) 
             }
         }
         PANEL_ROW_END;
-    } else if (right_panel_rename_row(ctx, "Id", an->id, nt_ui_id("anim/rename"))) {
+    } else if (right_panel_rename_row(ctx, "Id", an->name, nt_ui_id("anim/rename"))) {
         start_anim_edit(s_sel_anim);
     }
 

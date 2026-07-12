@@ -332,7 +332,7 @@ static void declare_canvas_preview(nt_ui_context_t *ctx) {
     char caption[192];
     if (an) {
         const char *pb = (an->playback >= 0 && an->playback < 7) ? k_playback_names[an->playback] : "?";
-        (void)snprintf(caption, sizeof caption, "%s  \xC2\xB7  %s  \xC2\xB7  %g fps%s%s", an->id, pb, (double)an->fps,
+        (void)snprintf(caption, sizeof caption, "%s  \xC2\xB7  %s  \xC2\xB7  %g fps%s%s", an->name, pb, (double)an->fps,
                        an->flip_h ? "  \xC2\xB7  flip H" : "", an->flip_v ? "  \xC2\xB7  flip V" : "");
     } else {
         (void)snprintf(caption, sizeof caption, "No animation");

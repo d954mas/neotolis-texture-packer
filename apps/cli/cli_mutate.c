@@ -44,7 +44,9 @@
 #include "cli_out.h"
 #include "tp_core/tp_error.h"
 #include "tp_core/tp_export.h" /* tp_exporter_find (target-id validation) */
+#include "tp_core/tp_id.h"     /* tp_rng_os + shape-ID format for anim list */
 #include "tp_core/tp_project.h"
+#include "tp_core/tp_project_migrate.h" /* tp_project_promote_ids (writable id assignment) */
 #include "tp_core/tp_scan.h" /* tp_scan_exists (new-on-existing guard) */
 
 /* DUPLICATES cli_validate.c's CLI_MAX_PAGE_DIM (== tp_pack's TP_PACK_MAX_PAGE_DIM ==
@@ -310,9 +312,9 @@ static int resolve_atlas(tp_project *p, const char *name) {
     return -1;
 }
 
-static tp_project_anim *find_anim(tp_project_atlas *a, const char *id) {
+static tp_project_anim *find_anim(tp_project_atlas *a, const char *name) {
     for (int i = 0; i < a->animation_count; i++) {
-        if (a->animations[i].id && strcmp(a->animations[i].id, id) == 0) {
+        if (a->animations[i].name && strcmp(a->animations[i].name, name) == 0) {
             return &a->animations[i];
         }
     }
@@ -342,6 +344,16 @@ static int fail_usage(tp_project *p, bool json, bool quiet, const char *id, cons
 static int commit(tp_project *p, const char *path, const char *verb, int count, const char *human, bool json,
                   bool quiet) {
     tp_error err = {0};
+    /* Writable session: assign final random IDs to any freshly created structural
+     * entity before persisting (master spec §5.5). Idempotent -- already-assigned
+     * IDs are preserved, so re-saving is byte-stable. */
+    tp_rng rng = tp_rng_os();
+    tp_status pst = tp_project_promote_ids(p, &rng, &err);
+    if (pst != TP_STATUS_OK) {
+        cli_emit_error(json, quiet, tp_status_id(pst), "%s", err.msg[0] ? err.msg : tp_status_str(pst));
+        tp_project_destroy(p);
+        return (pst == TP_STATUS_OOM) ? CLI_EXIT_INTERNAL : CLI_EXIT_PROJECT;
+    }
     tp_status st = tp_project_save(p, path, &err);
     if (st != TP_STATUS_OK) {
         cli_emit_error(json, quiet, tp_status_id(st), "%s", err.msg[0] ? err.msg : tp_status_str(st));
@@ -863,7 +875,7 @@ static int anim_list(tp_project_atlas *a, const char *atlas_name, bool json, boo
         (void)printf("atlas '%s': %d animation(s)\n", atlas_name, a->animation_count);
         for (int i = 0; i < a->animation_count; i++) {
             const tp_project_anim *an = &a->animations[i];
-            (void)printf("  %s: %d frame(s), fps %.9g, playback %d%s%s\n", an->id, an->frame_count, (double)an->fps,
+            (void)printf("  %s: %d frame(s), fps %.9g, playback %d%s%s\n", an->name, an->frame_count, (double)an->fps,
                          an->playback, an->flip_h ? ", flip_h" : "", an->flip_v ? ", flip_v" : "");
         }
         return CLI_EXIT_OK;
@@ -884,8 +896,16 @@ static int anim_list(tp_project_atlas *a, const char *atlas_name, bool json, boo
             first = true;
             cli_sb_str(&sb, "\n");
             cli_sb_indent(&sb, 3);
-            cli_sb_str(&sb, "\"id\": ");
-            cli_sb_json_str(&sb, an->id);
+            char idtext[TP_ID_TEXT_CAP];
+            if (tp_id_format(TP_ID_KIND_ANIM, an->id, idtext, sizeof idtext, NULL) != TP_STATUS_OK) {
+                idtext[0] = '\0';
+            }
+            cli_sb_str(&sb, "\"id\": "); /* structural shape-ID */
+            cli_sb_json_str(&sb, idtext);
+            cli_sb_str(&sb, ",\n");
+            cli_sb_indent(&sb, 3);
+            cli_sb_str(&sb, "\"name\": "); /* logical/display name (name-keyed) */
+            cli_sb_json_str(&sb, an->name);
             cli_sb_str(&sb, ",\n");
             cli_sb_indent(&sb, 3);
             cli_sb_str(&sb, "\"fps\": ");

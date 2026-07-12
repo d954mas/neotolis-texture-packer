@@ -126,7 +126,7 @@ void start_anim_edit(int i) {
     cancel_edit();
     s_edit_kind = EDIT_ANIM;
     s_edit_anim = i;
-    (void)snprintf(s_edit_buf, sizeof s_edit_buf, "%s", a->animations[i].id);
+    (void)snprintf(s_edit_buf, sizeof s_edit_buf, "%s", a->animations[i].name);
     set_status("Rename animation: type, Enter to commit, Esc to cancel.");
 }
 void start_sprite_edit_named(const char *sprite_name) {
@@ -244,7 +244,7 @@ int create_animation_from_selection(void) {
         s_sel_anim = idx;
         s_sel_anim_frame = -1;
         tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
-        set_statusf("Created animation '%s' with %d frame(s) (Ctrl+Z to undo).", a->animations[idx].id, n);
+        set_statusf("Created animation '%s' with %d frame(s) (Ctrl+Z to undo).", a->animations[idx].name, n);
     }
     return idx;
 }
@@ -280,7 +280,7 @@ void open_preview(int anim_index) {
     if (!gui_pack_result(s_sel_atlas)) {
         set_status("Pack (Ctrl+P) to preview the animation on packed regions.");
     } else {
-        set_statusf("Previewing '%s' \xE2\x80\x94 Space play/pause.", a->animations[anim_index].id);
+        set_statusf("Previewing '%s' \xE2\x80\x94 Space play/pause.", a->animations[anim_index].name);
     }
 }
 
@@ -1123,7 +1123,7 @@ void apply_pending(void) {
             s_sel_anim = idx;
             s_sel_anim_frame = -1;
             set_statusf("Added animation '%s' (Ctrl+Z to undo).",
-                        tp_project_get_atlas(gui_project_get(), s_sel_atlas)->animations[idx].id);
+                        tp_project_get_atlas(gui_project_get(), s_sel_atlas)->animations[idx].name);
         }
     }
     if (s_pending_create_anim) {
@@ -1135,7 +1135,7 @@ void apply_pending(void) {
             if (s_preview_active && s_sel_anim == s_pending_remove_anim) {
                 preview_stop();
             }
-            gui_project_remove_animation(s_sel_atlas, a->animations[s_pending_remove_anim].id);
+            gui_project_remove_animation(s_sel_atlas, a->animations[s_pending_remove_anim].name);
             s_sel_anim = -1;
             s_sel_anim_frame = -1;
             set_status("Removed animation (Ctrl+Z to undo).");

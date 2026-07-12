@@ -18,14 +18,24 @@
 #include <string.h>
 
 #include "tp_core/tp_export.h" /* TP_EXPORTER_ID_JSON_NEOTOLIS */
+#include "tp_core/tp_id.h"
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_project.h"
+#include "tp_core/tp_project_migrate.h"
 #include "unity.h"
 
 void setUp(void) {}
 void tearDown(void) {}
 
 static const char *g_dir;
+
+/* A writable session assigns final IDs before saving (master spec §5.5). Tests
+ * that build a project programmatically and save it promote first, so the saved
+ * file carries non-nil structural IDs and round-trips. */
+static void promote(tp_project *p) {
+    tp_rng rng = tp_rng_os();
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_promote_ids(p, &rng, NULL));
+}
 
 #define EPS 1e-6F
 
@@ -126,11 +136,13 @@ static tp_project *build_rich(void) {
     ui->power_of_two = false;
     ui->pixels_per_unit = 2.0F;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_source(ui, "art/ui"));
+    promote(p); /* assign final structural IDs before any save (writable session) */
     return p;
 }
 
 static void assert_atlas_equal(const tp_project_atlas *a, const tp_project_atlas *b) {
     TEST_ASSERT_EQUAL_STRING(a->name, b->name);
+    TEST_ASSERT_TRUE(tp_id128_eq(a->id, b->id)); /* structural id survives save/reload */
     TEST_ASSERT_EQUAL_INT(a->max_size, b->max_size);
     TEST_ASSERT_EQUAL_INT(a->padding, b->padding);
     TEST_ASSERT_EQUAL_INT(a->margin, b->margin);
@@ -168,7 +180,8 @@ static void assert_atlas_equal(const tp_project_atlas *a, const tp_project_atlas
     }
     TEST_ASSERT_EQUAL_INT(a->animation_count, b->animation_count);
     for (int i = 0; i < a->animation_count; i++) {
-        TEST_ASSERT_EQUAL_STRING(a->animations[i].id, b->animations[i].id);
+        TEST_ASSERT_EQUAL_STRING(a->animations[i].name, b->animations[i].name);
+        TEST_ASSERT_TRUE(tp_id128_eq(a->animations[i].id, b->animations[i].id));
         feq(a->animations[i].fps, b->animations[i].fps);
         TEST_ASSERT_EQUAL_INT(a->animations[i].playback, b->animations[i].playback);
         TEST_ASSERT_EQUAL_INT(a->animations[i].flip_h ? 1 : 0, b->animations[i].flip_h ? 1 : 0);
@@ -180,6 +193,7 @@ static void assert_atlas_equal(const tp_project_atlas *a, const tp_project_atlas
     }
     TEST_ASSERT_EQUAL_INT(a->target_count, b->target_count);
     for (int i = 0; i < a->target_count; i++) {
+        TEST_ASSERT_TRUE(tp_id128_eq(a->targets[i].id, b->targets[i].id));
         TEST_ASSERT_EQUAL_STRING(a->targets[i].exporter_id, b->targets[i].exporter_id);
         TEST_ASSERT_EQUAL_STRING(a->targets[i].out_path, b->targets[i].out_path);
         TEST_ASSERT_EQUAL_INT(a->targets[i].enabled ? 1 : 0, b->targets[i].enabled ? 1 : 0);
@@ -247,6 +261,7 @@ void test_sparse_defaults_absent(void) {
 
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(a, "json-neotolis", "out.json", NULL));
 
+    promote(p);
     tp_error err = {0};
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_save(p, path, &err));
 
@@ -267,7 +282,7 @@ void test_sparse_defaults_absent(void) {
     TEST_ASSERT_NULL(strstr(buf, "flip_h"));
     TEST_ASSERT_NULL(strstr(buf, "enabled")); /* target enabled default true */
     /* present, non-default */
-    TEST_ASSERT_NOT_NULL(strstr(buf, "\"version\": 1"));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"version\": 2"));
     TEST_ASSERT_NOT_NULL(strstr(buf, "origin"));
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"frames\""));
     /* "version" must be the first key */
@@ -300,11 +315,11 @@ void test_determinism(void) {
     tp_project_destroy(p);
 }
 
-/* 4a. newer schema version is refused */
+/* 4a. newer schema version is refused (schema v2 is current -> use a future v3) */
 void test_version_newer_refused(void) {
     char path[512];
-    join(path, sizeof path, "v2.ntpacker_project");
-    write_text(path, "{\n  \"version\": 2,\n  \"atlases\": []\n}\n");
+    join(path, sizeof path, "v3.ntpacker_project");
+    write_text(path, "{\n  \"version\": 3,\n  \"atlases\": []\n}\n");
 
     tp_project *loaded = NULL;
     tp_error err = {0};
@@ -408,6 +423,7 @@ void test_resolve_path(void) {
     join(path, sizeof path, "resolve.ntpacker_project");
 
     tp_project *p = tp_project_create();
+    promote(p);
     tp_error err = {0};
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_save(p, path, &err)); /* sets project_dir */
     TEST_ASSERT_NOT_NULL(p->project_dir);
@@ -643,6 +659,7 @@ void test_sprite_override_sparse(void) {
     sp->ov_shape = 0;        /* RECT */
     sp->ov_max_vertices = 4; /* explicit */
 
+    promote(p);
     tp_error err = {0};
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_save(p, path, &err));
     size_t n = 0;

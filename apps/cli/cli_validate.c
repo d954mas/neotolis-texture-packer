@@ -268,9 +268,9 @@ static void validate_atlas(cli_findings *fs, tp_project *p, int ai) {
                 for (int f = 0; f < pa->frame_count; f++) {
                     const char *fr = pa->frames[f] ? pa->frames[f] : "";
                     if (!key_in_set(keys, n, fr)) {
-                        add_finding(fs, SEV_ERR, "dangling_anim_frame", a->name, NULL, pa->id, fr, NULL,
-                                    "animation '%s' references frame '%s' which matches no sprite export key", pa->id,
-                                    fr);
+                        add_finding(fs, SEV_ERR, "dangling_anim_frame", a->name, NULL, pa->name, fr, NULL,
+                                    "animation '%s' references frame '%s' which matches no sprite export key",
+                                    pa->name, fr);
                     }
                 }
             }

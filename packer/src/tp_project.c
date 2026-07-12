@@ -16,7 +16,9 @@
 #include "cJSON.h"
 
 #include "tp_core/tp_export.h" /* TP_EXPORTER_ID_JSON_NEOTOLIS (default-target seeding) */
+#include "tp_core/tp_id.h"     /* shape-ID parse/format for schema-v2 structural ids */
 #include "tp_core/tp_pack.h"
+#include "tp_core/tp_project_migrate.h" /* legacy synthesis + duplicate validation on load */
 
 #define TP_PATH_MAX 4096
 
@@ -265,7 +267,7 @@ static void tp_free_anim(tp_project_anim *an) {
         free(an->frames[i]);
     }
     free(an->frames);
-    free(an->id);
+    free(an->name); /* `id` is a value (tp_id128), only `name` is owned */
 }
 
 static void tp_free_atlas(tp_project_atlas *a) {
@@ -494,17 +496,17 @@ tp_status tp_project_atlas_prune_sprite(tp_project_atlas *a, const char *name) {
     return TP_STATUS_OK;
 }
 
-tp_status tp_project_atlas_add_animation(tp_project_atlas *a, const char *id, tp_project_anim **out) {
-    if (!a || !id) {
+tp_status tp_project_atlas_add_animation(tp_project_atlas *a, const char *name, tp_project_anim **out) {
+    if (!a || !name) {
         return TP_STATUS_INVALID_ARGUMENT;
     }
     if (!tp_grow((void **)&a->animations, &a->animation_cap, a->animation_count + 1, sizeof(tp_project_anim))) {
         return TP_STATUS_OOM;
     }
     tp_project_anim *an = &a->animations[a->animation_count];
-    memset(an, 0, sizeof *an);
-    an->id = tp_strdup(id);
-    if (!an->id) {
+    memset(an, 0, sizeof *an); /* id starts nil (a writable session promotes it) */
+    an->name = tp_strdup(name);
+    if (!an->name) {
         return TP_STATUS_OOM;
     }
     an->fps = TP_PROJECT_ANIM_FPS_DEFAULT;
@@ -516,12 +518,12 @@ tp_status tp_project_atlas_add_animation(tp_project_atlas *a, const char *id, tp
     return TP_STATUS_OK;
 }
 
-tp_status tp_project_atlas_remove_animation(tp_project_atlas *a, const char *id) {
-    if (!a || !id) {
+tp_status tp_project_atlas_remove_animation(tp_project_atlas *a, const char *name) {
+    if (!a || !name) {
         return TP_STATUS_INVALID_ARGUMENT;
     }
     for (int i = 0; i < a->animation_count; i++) {
-        if (strcmp(a->animations[i].id, id) == 0) {
+        if (a->animations[i].name && strcmp(a->animations[i].name, name) == 0) {
             tp_free_anim(&a->animations[i]);
             for (int j = i; j < a->animation_count - 1; j++) {
                 a->animations[j] = a->animations[j + 1];
@@ -781,6 +783,18 @@ static void tp_emit_string_array(tp_sb *sb, int depth, char *const *arr, int cou
     tp_sb_char(sb, ']');
 }
 
+/* Emit a structural shape-ID ("<kind>_<32hex>") as a JSON string value. Always
+ * written for a v2 entity (structural, not sparse) and deterministic. A caller
+ * that has not promoted a fresh entity would emit a nil id here -- such a file is
+ * rejected on reload (nil id), surfacing the missing promote as a loud error. */
+static void tp_emit_id(tp_sb *sb, tp_id_kind kind, tp_id128 id) {
+    char text[TP_ID_TEXT_CAP];
+    if (tp_id_format(kind, id, text, sizeof text, NULL) != TP_STATUS_OK) {
+        text[0] = '\0'; /* unreachable: kind is valid and the buffer is TP_ID_TEXT_CAP */
+    }
+    tp_sb_json_string(sb, text);
+}
+
 static void tp_emit_sprite(tp_sb *sb, int depth, const tp_project_sprite *s) {
     tp_sb_char(sb, '{');
     bool first = true;
@@ -853,8 +867,10 @@ static void tp_emit_anim(tp_sb *sb, int depth, const tp_project_anim *an) {
     }
     tp_obj_key(sb, depth + 1, &first, "frames");
     tp_emit_string_array(sb, depth + 1, an->frames, an->frame_count);
-    tp_obj_key(sb, depth + 1, &first, "id");
-    tp_sb_json_string(sb, an->id);
+    tp_obj_key(sb, depth + 1, &first, "id"); /* structural shape-ID (persistent) */
+    tp_emit_id(sb, TP_ID_KIND_ANIM, an->id);
+    tp_obj_key(sb, depth + 1, &first, "name"); /* logical/display name (was v1 `id`) */
+    tp_sb_json_string(sb, an->name);
     if (an->playback != TP_PROJECT_ANIM_PLAYBACK_DEFAULT) {
         tp_obj_key(sb, depth + 1, &first, "playback");
         tp_sb_int(sb, (long)an->playback);
@@ -873,6 +889,8 @@ static void tp_emit_target(tp_sb *sb, int depth, const tp_project_target *t) {
     }
     tp_obj_key(sb, depth + 1, &first, "exporter_id");
     tp_sb_json_string(sb, t->exporter_id);
+    tp_obj_key(sb, depth + 1, &first, "id"); /* structural shape-ID (persistent) */
+    tp_emit_id(sb, TP_ID_KIND_TARGET, t->id);
     tp_obj_key(sb, depth + 1, &first, "out_path");
     tp_sb_json_string(sb, t->out_path);
     tp_sb_str(sb, "\n");
@@ -907,6 +925,8 @@ static void tp_emit_atlas(tp_sb *sb, int depth, const tp_project_atlas *a, const
         tp_obj_key(sb, depth + 1, &first, "extrude");
         tp_sb_int(sb, (long)a->extrude);
     }
+    tp_obj_key(sb, depth + 1, &first, "id"); /* structural shape-ID (persistent, always written) */
+    tp_emit_id(sb, TP_ID_KIND_ATLAS, a->id);
     if (a->margin != d->margin) {
         tp_obj_key(sb, depth + 1, &first, "margin");
         tp_sb_int(sb, (long)a->margin);
@@ -1129,6 +1149,36 @@ static tp_status tp_opt_bool(const cJSON *o, const char *k, bool *dst, tp_error 
     return TP_STATUS_OK;
 }
 
+/* Parse a v2 structural shape-ID at `key` into *out, kind-checked. An ABSENT key
+ * leaves *out nil (the post-parse legacy-synthesis pass fills it). A PRESENT key
+ * must be a string holding a valid "<expect>_<32hex>" that is non-nil -- a wrong
+ * type -> BAD_PROJECT, a bad shape / wrong kind / nil value -> ID_MALFORMED. */
+static tp_status tp_load_id(const cJSON *o, const char *key, tp_id_kind expect_kind, tp_id128 *out, tp_error *err) {
+    *out = tp_id128_nil();
+    const cJSON *it = cJSON_GetObjectItemCaseSensitive(o, key);
+    if (!it) {
+        return TP_STATUS_OK; /* absent -> synthesize later */
+    }
+    if (!cJSON_IsString(it) || !it->valuestring) {
+        return tp_error_set(err, TP_STATUS_BAD_PROJECT, "'%s' must be a shape-ID string", key);
+    }
+    tp_id_kind k = TP_ID_KIND_INVALID;
+    tp_id128 id;
+    tp_status st = tp_id_parse(it->valuestring, &k, &id, err);
+    if (st != TP_STATUS_OK) {
+        return st; /* TP_STATUS_ID_MALFORMED with a specific reason in err */
+    }
+    if (k != expect_kind) {
+        return tp_error_set(err, TP_STATUS_ID_MALFORMED, "'%s' = '%s' has the wrong kind prefix", key,
+                            it->valuestring);
+    }
+    if (tp_id128_is_nil(id)) {
+        return tp_error_set(err, TP_STATUS_ID_MALFORMED, "'%s' is a nil structural id", key);
+    }
+    *out = id;
+    return TP_STATUS_OK;
+}
+
 static tp_status tp_load_sprite(tp_project_atlas *a, const cJSON *js, tp_error *err) {
     if (!cJSON_IsObject(js)) {
         return tp_error_set(err, TP_STATUS_BAD_PROJECT, "sprite override must be an object");
@@ -1195,18 +1245,24 @@ static tp_status tp_load_sprite(tp_project_atlas *a, const cJSON *js, tp_error *
     return TP_STATUS_OK;
 }
 
-static tp_status tp_load_anim(tp_project_atlas *a, const cJSON *ja, tp_error *err) {
+static tp_status tp_load_anim(tp_project_atlas *a, const cJSON *ja, bool v2, tp_error *err) {
     if (!cJSON_IsObject(ja)) {
         return tp_error_set(err, TP_STATUS_BAD_PROJECT, "animation must be an object");
     }
-    const cJSON *id = cJSON_GetObjectItemCaseSensitive(ja, "id");
-    if (!cJSON_IsString(id) || !id->valuestring) {
-        return tp_error_set(err, TP_STATUS_BAD_PROJECT, "animation missing string 'id'");
+    /* id/name split: v2 stores the logical name under "name" and a shape-ID under
+     * "id"; v1 stored the logical name under "id" (which migrates into `name`). */
+    const char *name_key = v2 ? "name" : "id";
+    const cJSON *nm = cJSON_GetObjectItemCaseSensitive(ja, name_key);
+    if (!cJSON_IsString(nm) || !nm->valuestring) {
+        return tp_error_set(err, TP_STATUS_BAD_PROJECT, "animation missing string '%s'", name_key);
     }
     tp_project_anim *an = NULL;
-    tp_status st = tp_project_atlas_add_animation(a, id->valuestring, &an);
+    tp_status st = tp_project_atlas_add_animation(a, nm->valuestring, &an);
     if (st != TP_STATUS_OK) {
         return tp_error_set(err, st, "out of memory adding animation");
+    }
+    if (v2 && (st = tp_load_id(ja, "id", TP_ID_KIND_ANIM, &an->id, err)) != TP_STATUS_OK) {
+        return st;
     }
     const cJSON *frames = cJSON_GetObjectItemCaseSensitive(ja, "frames");
     if (frames) {
@@ -1239,7 +1295,7 @@ static tp_status tp_load_anim(tp_project_atlas *a, const cJSON *ja, tp_error *er
     return TP_STATUS_OK;
 }
 
-static tp_status tp_load_target(tp_project_atlas *a, const cJSON *jt, tp_error *err) {
+static tp_status tp_load_target(tp_project_atlas *a, const cJSON *jt, bool v2, tp_error *err) {
     if (!cJSON_IsObject(jt)) {
         return tp_error_set(err, TP_STATUS_BAD_PROJECT, "target must be an object");
     }
@@ -1256,10 +1312,13 @@ static tp_status tp_load_target(tp_project_atlas *a, const cJSON *jt, tp_error *
     if (st != TP_STATUS_OK) {
         return tp_error_set(err, st, "out of memory adding target");
     }
+    if (v2 && (st = tp_load_id(jt, "id", TP_ID_KIND_TARGET, &t->id, err)) != TP_STATUS_OK) {
+        return st;
+    }
     return tp_opt_bool(jt, "enabled", &t->enabled, err);
 }
 
-static tp_status tp_load_atlas(tp_project *p, const cJSON *jatlas, tp_error *err) {
+static tp_status tp_load_atlas(tp_project *p, const cJSON *jatlas, bool v2, tp_error *err) {
     if (!cJSON_IsObject(jatlas)) {
         return tp_error_set(err, TP_STATUS_BAD_PROJECT, "atlas must be an object");
     }
@@ -1273,6 +1332,9 @@ static tp_status tp_load_atlas(tp_project *p, const cJSON *jatlas, tp_error *err
         return tp_error_set(err, st, "out of memory adding atlas");
     }
     tp_project_atlas *a = &p->atlases[idx];
+    if (v2 && (st = tp_load_id(jatlas, "id", TP_ID_KIND_ATLAS, &a->id, err)) != TP_STATUS_OK) {
+        return st;
+    }
 
     if ((st = tp_opt_int(jatlas, "max_size", &a->max_size, err)) != TP_STATUS_OK ||
         (st = tp_opt_int(jatlas, "padding", &a->padding, err)) != TP_STATUS_OK ||
@@ -1324,7 +1386,7 @@ static tp_status tp_load_atlas(tp_project *p, const cJSON *jatlas, tp_error *err
         }
         const cJSON *ja = NULL;
         cJSON_ArrayForEach(ja, anims) {
-            if ((st = tp_load_anim(a, ja, err)) != TP_STATUS_OK) {
+            if ((st = tp_load_anim(a, ja, v2, err)) != TP_STATUS_OK) {
                 return st;
             }
         }
@@ -1337,7 +1399,7 @@ static tp_status tp_load_atlas(tp_project *p, const cJSON *jatlas, tp_error *err
         }
         const cJSON *jt = NULL;
         cJSON_ArrayForEach(jt, targets) {
-            if ((st = tp_load_target(a, jt, err)) != TP_STATUS_OK) {
+            if ((st = tp_load_target(a, jt, v2, err)) != TP_STATUS_OK) {
                 return st;
             }
         }
@@ -1351,6 +1413,15 @@ static tp_status tp_migrate(int from_version, tp_error *err) {
     int v = from_version;
     while (v < TP_PROJECT_SCHEMA_VERSION) {
         switch (v) {
+            case 1:
+                /* v1 -> v2: persistent structural IDs (atlas/animation/target) +
+                 * the animation id/name split. The v1 tree carries no IDs and
+                 * stores the animation's logical name under "id"; the model-level
+                 * loader reads that shape (via the v2==false path) and the
+                 * post-parse legacy-synthesis pass assigns deterministic IDs.
+                 * Nothing to rewrite in the parsed cJSON tree here. */
+                v = 2;
+                break;
             /* case N: migrate N -> N+1 in the parsed tree; v = N+1; break; */
             default:
                 return tp_error_set(err, TP_STATUS_BAD_PROJECT,
@@ -1432,6 +1503,10 @@ static tp_status tp_project_parse(const char *text, size_t len, tp_project **out
         goto done;
     }
 
+    /* v2+ entities carry shape-IDs (atlas/anim `id` = structural id, `name` =
+     * logical). A v1 file has none and stores the anim's logical name under "id". */
+    const bool v2 = (file_version >= 2);
+
     const cJSON *atlases = cJSON_GetObjectItemCaseSensitive(root, "atlases");
     if (atlases) {
         if (!cJSON_IsArray(atlases)) {
@@ -1440,11 +1515,25 @@ static tp_status tp_project_parse(const char *text, size_t len, tp_project **out
         }
         const cJSON *ja = NULL;
         cJSON_ArrayForEach(ja, atlases) {
-            status = tp_load_atlas(p, ja, err);
+            status = tp_load_atlas(p, ja, v2, err);
             if (status != TP_STATUS_OK) {
                 goto done;
             }
         }
+    }
+
+    /* Resolve structural IDs: synthesize a deterministic ID for any entity that
+     * carried none (a v1 file, or a v2 file missing an id key), then reject
+     * duplicates. Read-only loads therefore see stable IDs (master spec §5.5);
+     * a writable session later replaces nils via tp_project_promote_ids (a
+     * no-op once every ID is non-nil, so it never re-changes a loaded ID). */
+    status = tp_project_assign_legacy_ids(p, err);
+    if (status != TP_STATUS_OK) {
+        goto done;
+    }
+    status = tp_project_validate_ids(p, err);
+    if (status != TP_STATUS_OK) {
+        goto done;
     }
 
 done:

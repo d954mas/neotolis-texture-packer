@@ -7,6 +7,9 @@
 #include "gui_history.h"
 #include "gui_scan.h"
 
+#include "tp_core/tp_id.h"             /* tp_rng_os for id promotion */
+#include "tp_core/tp_project_migrate.h" /* tp_project_promote_ids */
+
 // #region state
 static tp_project *s_proj;
 static char s_path[1024]; /* absolute file path; "" while unsaved */
@@ -79,7 +82,21 @@ static void serialize_current(char **buf, size_t *len) {
     }
 }
 
+/* Assign a random persistent ID to any structural entity still lacking one (a
+ * freshly created project/atlas/anim/target). Idempotent + best-effort: a loaded
+ * project already has non-nil IDs so this is a no-op, and it never re-changes an
+ * existing ID. Called before every snapshot so undo/redo bytes -- and the saved
+ * file -- always carry stable, non-nil structural IDs (a writable session gets
+ * its final IDs before the first mutation, master spec §5.5). */
+static void ensure_ids(void) {
+    if (s_proj) {
+        tp_rng rng = tp_rng_os();
+        (void)tp_project_promote_ids(s_proj, &rng, NULL);
+    }
+}
+
 static void set_last_from_current(void) {
+    ensure_ids();
     free(s_last_buf);
     serialize_current(&s_last_buf, &s_last_len);
 }
@@ -161,6 +178,7 @@ bool gui_project_is_stale(void) { return s_preview_stale; }
 // #region dirty/stale choke point
 void gui_project_touch(gui_action act) {
     s_preview_stale = true;
+    ensure_ids(); /* a just-added atlas/anim/target gets its ID before this snapshot */
     char *nb = NULL;
     size_t nl = 0;
     serialize_current(&nb, &nl);
@@ -372,7 +390,7 @@ bool gui_project_anim_id_exists(int atlas_index, const char *id) {
         return false;
     }
     for (int i = 0; i < a->animation_count; i++) {
-        if (strcmp(a->animations[i].id, id) == 0) {
+        if (a->animations[i].name && strcmp(a->animations[i].name, id) == 0) {
             return true;
         }
     }
@@ -424,12 +442,12 @@ bool gui_project_set_anim_id(int atlas_index, int anim_index, const char *new_id
     if (!an || !new_id || new_id[0] == '\0') {
         return false;
     }
-    if (strcmp(an->id, new_id) == 0) {
+    if (an->name && strcmp(an->name, new_id) == 0) {
         return true; /* no-op */
     }
     tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
     for (int i = 0; a && i < a->animation_count; i++) {
-        if (i != anim_index && strcmp(a->animations[i].id, new_id) == 0) {
+        if (i != anim_index && a->animations[i].name && strcmp(a->animations[i].name, new_id) == 0) {
             return false; /* clashes with another animation */
         }
     }
@@ -437,8 +455,8 @@ bool gui_project_set_anim_id(int atlas_index, int anim_index, const char *new_id
     if (!copy) {
         return false;
     }
-    free(an->id);
-    an->id = copy;
+    free(an->name); /* rename edits the logical name; the structural id is unchanged */
+    an->name = copy;
     gui_project_touch(GUI_ACT_RENAME_ANIM);
     return true;
 }

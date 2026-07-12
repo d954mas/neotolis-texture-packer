@@ -580,7 +580,7 @@ void run_selftest(void) {
         tp_project_atlas *aa = tp_project_get_atlas(gui_project_get(), aidx);
         NT_ASSERT(ai == 0 && aa && aa->animation_count == 1 && "create animation from selection");
         tp_project_anim *an = &aa->animations[0];
-        nt_log_info("SELFTEST: anim '%s' frames [%s,%s,%s]", an->id, an->frames[0], an->frames[1], an->frames[2]);
+        nt_log_info("SELFTEST: anim '%s' frames [%s,%s,%s]", an->name, an->frames[0], an->frames[1], an->frames[2]);
         NT_ASSERT(an->frame_count == 3 && strcmp(an->frames[0], "walk_1") == 0 && strcmp(an->frames[1], "walk_2") == 0 &&
                   strcmp(an->frames[2], "walk_10") == 0 && "frames natural-sorted (walk_2 before walk_10)");
 
@@ -676,7 +676,7 @@ void run_selftest(void) {
             const int pai = create_animation_from_selection();
             if (pai >= 0) {
                 open_preview(pai);
-                nt_log_info("SELFTEST: preview anim '%s' active=%d frames=%d", pa->animations[pai].id, s_preview_active,
+                nt_log_info("SELFTEST: preview anim '%s' active=%d frames=%d", pa->animations[pai].name, s_preview_active,
                             pa->animations[pai].frame_count);
             }
             multi_sel_clear();

@@ -154,11 +154,22 @@ static void emit_sprite(cli_sb *sb, int depth, tp_project_atlas *a, const char *
     cli_sb_putc(sb, '}');
 }
 
+/* Format a structural shape-ID into `out` (>= TP_ID_TEXT_CAP); empty on failure. */
+static void fmt_id(char *out, size_t cap, tp_id_kind kind, tp_id128 id) {
+    if (tp_id_format(kind, id, out, cap, NULL) != TP_STATUS_OK) {
+        out[0] = '\0';
+    }
+}
+
 static void emit_anim(cli_sb *sb, int depth, const tp_project_anim *an) {
     bool first = true;
     cli_sb_putc(sb, '{');
-    key(sb, depth + 1, &first, "id");
-    cli_sb_json_str(sb, an->id);
+    char idtext[TP_ID_TEXT_CAP];
+    fmt_id(idtext, sizeof idtext, TP_ID_KIND_ANIM, an->id);
+    key(sb, depth + 1, &first, "id"); /* structural shape-ID */
+    cli_sb_json_str(sb, idtext);
+    key(sb, depth + 1, &first, "name"); /* logical/display name (name-keyed) */
+    cli_sb_json_str(sb, an->name);
     key(sb, depth + 1, &first, "fps");
     cli_sb_num(sb, (double)an->fps);
     key(sb, depth + 1, &first, "playback");
@@ -189,6 +200,10 @@ static void emit_anim(cli_sb *sb, int depth, const tp_project_anim *an) {
 static void emit_target(cli_sb *sb, int depth, const tp_project_target *t) {
     bool first = true;
     cli_sb_putc(sb, '{');
+    char idtext[TP_ID_TEXT_CAP];
+    fmt_id(idtext, sizeof idtext, TP_ID_KIND_TARGET, t->id);
+    key(sb, depth + 1, &first, "id"); /* structural shape-ID */
+    cli_sb_json_str(sb, idtext);
     key(sb, depth + 1, &first, "exporter_id");
     cli_sb_json_str(sb, t->exporter_id);
     key(sb, depth + 1, &first, "out_path");
@@ -204,6 +219,11 @@ static void emit_atlas(cli_sb *sb, int depth, tp_project *p, int ai) {
     tp_project_atlas *a = &p->atlases[ai];
     bool first = true;
     cli_sb_putc(sb, '{');
+
+    char idtext[TP_ID_TEXT_CAP];
+    fmt_id(idtext, sizeof idtext, TP_ID_KIND_ATLAS, a->id);
+    key(sb, depth + 1, &first, "id"); /* structural shape-ID */
+    cli_sb_json_str(sb, idtext);
 
     key(sb, depth + 1, &first, "name");
     cli_sb_json_str(sb, a->name);

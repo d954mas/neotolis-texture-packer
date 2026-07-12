@@ -316,7 +316,7 @@ static void declare_animations_list(nt_ui_context_t *ctx, tp_project_atlas *a) {
                         commit_anim_rename();
                     }
                 } else {
-                    ui_label_fit(ctx, a->animations[i].id, selected ? &g_row_strong : &g_row,
+                    ui_label_fit(ctx, a->animations[i].name, selected ? &g_row_strong : &g_row,
                                  fmaxf(left_row_text_w(S(8.0F), true) - S(28.0F) - S(ROW_ICON_RESERVE), S(16.0F)), row_id);
                 }
             }

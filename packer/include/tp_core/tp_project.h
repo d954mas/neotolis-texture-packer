@@ -30,6 +30,7 @@
 #include <stdint.h>
 
 #include "tp_core/tp_error.h"
+#include "tp_core/tp_id.h" /* tp_id128: persistent structural IDs (schema v2) */
 
 #ifdef __cplusplus
 extern "C" {
@@ -37,8 +38,10 @@ extern "C" {
 
 struct tp_pack_settings;
 
-/* Bump when the on-disk schema changes; add a migration case in the loader. */
-#define TP_PROJECT_SCHEMA_VERSION 1
+/* Bump when the on-disk schema changes; add a migration case in the loader.
+ * v2 (F1-01): atlas/animation/target carry a persistent tp_id128 `id`; the
+ * animation's old string `id` became its logical `name` (id/name split). */
+#define TP_PROJECT_SCHEMA_VERSION 2
 
 /* Per-sprite override. Sparse: an entry exists only when at least one field is
  * non-default. Defaults: origin (0.5,0.5), slice9 all-zero, rename NULL (see the
@@ -67,9 +70,15 @@ typedef struct tp_project_sprite {
 #define TP_PROJECT_OV_INHERIT (-1)
 
 /* Flipbook metadata over sprite names, orthogonal to placement (SUMMARY.md §5a).
- * `frames` are atlas-relative sprite names in explicit playback order. */
+ * `frames` are atlas-relative sprite names in explicit playback order.
+ *
+ * id/name split (F1-01, schema v2): `id` is the persistent structural ID (survives
+ * rename/reorder/save/reload); `name` is the logical/display name and the human
+ * reference key. The v1 string `id` migrated into `name`. Frame references remain
+ * BY NAME until F1-03 migrates them to sprite IDs. */
 typedef struct tp_project_anim {
-    char *id;
+    tp_id128 id;   /* persistent structural ID (schema v2); nil until assigned/promoted */
+    char *name;    /* logical/display name; the name-keyed reference (was v1 `id`) */
     char **frames;
     int frame_count;
     int frame_cap; /* internal: allocation capacity of `frames` */
@@ -85,7 +94,8 @@ typedef struct tp_project_anim {
 /* One export target: a pluggable exporter id + its output path. `enabled`
  * defaults true (sparse: only written when false). */
 typedef struct tp_project_target {
-    char *exporter_id; /* stable id, e.g. "json-neotolis", "defold" */
+    tp_id128 id;       /* persistent structural ID (schema v2); nil until assigned/promoted */
+    char *exporter_id; /* exporter kind, e.g. "json-neotolis", "defold" (NOT the structural id) */
     char *out_path;    /* project-relative output path/prefix */
     bool enabled;
 } tp_project_target;
@@ -94,6 +104,7 @@ typedef struct tp_project_target {
  * sparse per-sprite overrides + animations + export targets. All arrays are
  * malloc-owned dynamic vectors; use the helpers below to mutate them. */
 typedef struct tp_project_atlas {
+    tp_id128 id; /* persistent structural ID (schema v2); nil until assigned/promoted */
     char *name;
 
     /* Packing knobs -- mirror tp_pack_settings; seeded by tp_pack_settings
@@ -205,12 +216,14 @@ tp_status tp_project_atlas_set_sprite_rename(tp_project_atlas *a, const char *sp
 
 /* --- animation mutation --- */
 
-/* Appends an animation (default fps/playback/flips, no frames). Written to *out
- * (if non-NULL). Use tp_project_anim_add_frame to populate frames in order. */
-tp_status tp_project_atlas_add_animation(tp_project_atlas *a, const char *id, tp_project_anim **out);
+/* Appends an animation with logical `name` (default fps/playback/flips, no frames;
+ * `id` starts nil -- a writable session assigns it via tp_project_promote_ids).
+ * Written to *out (if non-NULL). Use tp_project_anim_add_frame to populate frames
+ * in order. The name-keyed API is retained for F1-03 to migrate to id selectors. */
+tp_status tp_project_atlas_add_animation(tp_project_atlas *a, const char *name, tp_project_anim **out);
 
-/* Removes the animation with `id`. Absent -> OUT_OF_BOUNDS. */
-tp_status tp_project_atlas_remove_animation(tp_project_atlas *a, const char *id);
+/* Removes the animation whose logical `name` matches. Absent -> OUT_OF_BOUNDS. */
+tp_status tp_project_atlas_remove_animation(tp_project_atlas *a, const char *name);
 
 /* Appends a frame (sprite name) to an animation, preserving order. */
 tp_status tp_project_anim_add_frame(tp_project_anim *anim, const char *frame_name);

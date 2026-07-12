@@ -26,6 +26,7 @@
 
 #include "tp_core/tp_error.h"
 #include "tp_core/tp_id.h"
+#include "tp_core/tp_project.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -56,6 +57,29 @@ tp_id128 tp_legacy_hash_default(void *ctx, tp_id_kind kind, const char *tuple, u
  * tp_legacy_hash_default. TP_STATUS_ID_COLLISION_EXHAUSTED only if the bounded
  * salt sweep cannot disambiguate (unreachable with the default hash). */
 tp_status tp_legacy_assign(tp_legacy_entry *entries, size_t n, tp_legacy_hash_fn hash, void *ctx, tp_error *err);
+
+/* ----- project-level identity migration / promotion ---------------------- *
+ * Fill every NIL structural ID (atlas/animation/target) with a DETERMINISTIC
+ * synthetic ID derived from entity kind + stable legacy structure (atlas: index;
+ * animation: "atlasIdx|name"; target: "atlasIdx|exporter_id|out_path"). Entities
+ * that already carry an ID are left untouched. Repeated calls on the same model
+ * produce identical IDs (master spec §5.5). The loader applies this so a read-only
+ * consumer sees stable IDs; TP_STATUS_ID_COLLISION_EXHAUSTED is unreachable with
+ * the default hash. */
+tp_status tp_project_assign_legacy_ids(tp_project *p, tp_error *err);
+
+/* Writable promotion: fill every NIL structural ID with a fresh RANDOM ID via
+ * `rng`, then freeze. ATOMIC -- an RNG fault (TP_STATUS_RNG_FAILED) leaves every
+ * ID unchanged. IDEMPOTENT -- once no ID is nil this is a no-op, so a writable
+ * session that promotes before its first mutation never re-changes an ID.
+ * Non-nil IDs (a loaded v2 file, or legacy-synthesized IDs) are preserved. */
+tp_status tp_project_promote_ids(tp_project *p, const tp_rng *rng, tp_error *err);
+
+/* Validate structural-ID integrity: no two atlas/animation/target entities may
+ * share a persistent ID, and no required ID may be nil. -> TP_STATUS_DUPLICATE_ID
+ * / TP_STATUS_ID_MALFORMED with context, else TP_STATUS_OK. Run by the loader
+ * after IDs are resolved; also usable by validate tooling. */
+tp_status tp_project_validate_ids(const tp_project *p, tp_error *err);
 
 #ifdef __cplusplus
 }
