@@ -132,6 +132,15 @@ tp_c0_detail tpc0_decode_field_list(const void *obj_v, const char *const *skip, 
         if (!c->string || tpc0_in_skip(c->string, skip, skip_n)) {
             continue;
         }
+        /* Reject a duplicate key: cJSON keeps both children, so a canonical record
+         * with two `name` keys is read first-wins by cJSON but last-wins by
+         * Python/JS/Go -- divergent project state from one journaled record. */
+        for (int j = 0; j < *count; j++) {
+            if (strcmp(out[j].key, c->string) == 0) {
+                tpc0_free_fields(out, *count);
+                return tp_c0_fail(err, TP_C0_ERR_TXN_BAD_TYPE, "duplicate field '%s'", c->string);
+            }
+        }
         if (*count >= cap) {
             tpc0_free_fields(out, *count);
             return tp_c0_fail(err, TP_C0_ERR_TXN_BAD_TYPE, "too many fields (>%d)", cap);

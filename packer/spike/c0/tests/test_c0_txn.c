@@ -500,6 +500,18 @@ void test_errors_truncated_marker(void) {
     tp_c0_txn_request_free(req);
 }
 
+/* ---- duplicate object keys are rejected, not both accepted (F5) ----------- */
+
+void test_duplicate_field_rejected(void) {
+    /* {"name":"a","name":"b"}: cJSON keeps both; without a dedup check both pass
+     * validation and the encoder emits a record cross-language consumers disagree
+     * on (first- vs last-wins). */
+    TEST_ASSERT_EQUAL_INT(TP_C0_ERR_TXN_BAD_TYPE,
+                          decode_req_fault("{\"schema\":1,\"transaction\":{\"id\":\"" TID
+                                           "\",\"expected_revision\":0,\"operations\":[{\"op\":\"atlas.rename\","
+                                           "\"atlas_id\":\"" ATLAS2 "\",\"name\":\"a\",\"name\":\"b\"}]}}"));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_request_roundtrip);
@@ -521,5 +533,6 @@ int main(void) {
     RUN_TEST(test_expected_revision_out_of_range);
     RUN_TEST(test_label_author_strict);
     RUN_TEST(test_errors_truncated_marker);
+    RUN_TEST(test_duplicate_field_rejected);
     return UNITY_END();
 }
