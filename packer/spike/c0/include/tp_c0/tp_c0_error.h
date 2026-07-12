@@ -55,7 +55,29 @@ typedef enum tp_c0_detail {
     TP_C0_ERR_KEY_TRAVERSAL,     /* ".." component -- would escape source root */
 
     /* legacy-ID synthesis */
-    TP_C0_ERR_COLLISION_EXHAUSTED /* salt sweep could not disambiguate */
+    TP_C0_ERR_COLLISION_EXHAUSTED, /* salt sweep could not disambiguate */
+
+    /* ---- C0-02 operation / transaction contract (append-only) ---- */
+
+    /* operation catalog */
+    TP_C0_ERR_OP_UNKNOWN,        /* op wire name is not in the append-only catalog */
+
+    /* transaction envelope / JSON schema */
+    TP_C0_ERR_BAD_JSON,          /* input is not well-formed JSON (cJSON parse failed) */
+    TP_C0_ERR_TXN_BAD_VERSION,   /* "schema" is absent/not-1 -- unknown protocol version */
+    TP_C0_ERR_TXN_BAD_ID,        /* transaction id is not 32 lowercase hex (128-bit token) */
+    TP_C0_ERR_TXN_DUPLICATE_ID,  /* txn id already seen in the idempotency retention set */
+    TP_C0_ERR_TXN_MISSING_FIELD, /* a required envelope/operation field is absent */
+    TP_C0_ERR_TXN_BAD_TYPE,      /* a field is present but has the wrong JSON type */
+    TP_C0_ERR_UNKNOWN_FIELD,     /* unknown key in an op/envelope -- policy is REJECT (note §2) */
+
+    /* selector resolution (request edge -> canonical ID) */
+    TP_C0_ERR_SELECTOR_AMBIGUOUS,  /* selector matched more than one entity */
+    TP_C0_ERR_SELECTOR_UNRESOLVED, /* selector matched no entity / left unresolved in canonical form */
+
+    /* revision precondition (validate whole batch before any apply) */
+    TP_C0_ERR_REVISION_CONFLICT, /* expected_revision < current: stale base, rebuild+retry */
+    TP_C0_ERR_INVALID_REVISION   /* expected_revision > current: impossible future base */
 } tp_c0_detail;
 
 /* Stable lowercase machine token per reason (test-pinned contract). */

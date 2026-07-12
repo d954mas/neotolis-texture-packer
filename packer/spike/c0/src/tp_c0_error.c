@@ -28,6 +28,18 @@ const char *tp_c0_detail_id(tp_c0_detail d) {
         case TP_C0_ERR_KEY_ABSOLUTE: return "key_absolute";
         case TP_C0_ERR_KEY_TRAVERSAL: return "key_traversal";
         case TP_C0_ERR_COLLISION_EXHAUSTED: return "collision_exhausted";
+        case TP_C0_ERR_OP_UNKNOWN: return "op_unknown";
+        case TP_C0_ERR_BAD_JSON: return "bad_json";
+        case TP_C0_ERR_TXN_BAD_VERSION: return "txn_bad_version";
+        case TP_C0_ERR_TXN_BAD_ID: return "txn_bad_id";
+        case TP_C0_ERR_TXN_DUPLICATE_ID: return "txn_duplicate_id";
+        case TP_C0_ERR_TXN_MISSING_FIELD: return "txn_missing_field";
+        case TP_C0_ERR_TXN_BAD_TYPE: return "txn_bad_type";
+        case TP_C0_ERR_UNKNOWN_FIELD: return "unknown_field";
+        case TP_C0_ERR_SELECTOR_AMBIGUOUS: return "selector_ambiguous";
+        case TP_C0_ERR_SELECTOR_UNRESOLVED: return "selector_unresolved";
+        case TP_C0_ERR_REVISION_CONFLICT: return "revision_conflict";
+        case TP_C0_ERR_INVALID_REVISION: return "invalid_revision";
     }
     return "unknown";
 }

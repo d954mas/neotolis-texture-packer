@@ -31,10 +31,23 @@ void test_all_tokens_pinned(void) {
     TEST_ASSERT_EQUAL_STRING("key_absolute", tp_c0_detail_id(TP_C0_ERR_KEY_ABSOLUTE));
     TEST_ASSERT_EQUAL_STRING("key_traversal", tp_c0_detail_id(TP_C0_ERR_KEY_TRAVERSAL));
     TEST_ASSERT_EQUAL_STRING("collision_exhausted", tp_c0_detail_id(TP_C0_ERR_COLLISION_EXHAUSTED));
+    /* C0-02 operation / transaction tokens (append-only). */
+    TEST_ASSERT_EQUAL_STRING("op_unknown", tp_c0_detail_id(TP_C0_ERR_OP_UNKNOWN));
+    TEST_ASSERT_EQUAL_STRING("bad_json", tp_c0_detail_id(TP_C0_ERR_BAD_JSON));
+    TEST_ASSERT_EQUAL_STRING("txn_bad_version", tp_c0_detail_id(TP_C0_ERR_TXN_BAD_VERSION));
+    TEST_ASSERT_EQUAL_STRING("txn_bad_id", tp_c0_detail_id(TP_C0_ERR_TXN_BAD_ID));
+    TEST_ASSERT_EQUAL_STRING("txn_duplicate_id", tp_c0_detail_id(TP_C0_ERR_TXN_DUPLICATE_ID));
+    TEST_ASSERT_EQUAL_STRING("txn_missing_field", tp_c0_detail_id(TP_C0_ERR_TXN_MISSING_FIELD));
+    TEST_ASSERT_EQUAL_STRING("txn_bad_type", tp_c0_detail_id(TP_C0_ERR_TXN_BAD_TYPE));
+    TEST_ASSERT_EQUAL_STRING("unknown_field", tp_c0_detail_id(TP_C0_ERR_UNKNOWN_FIELD));
+    TEST_ASSERT_EQUAL_STRING("selector_ambiguous", tp_c0_detail_id(TP_C0_ERR_SELECTOR_AMBIGUOUS));
+    TEST_ASSERT_EQUAL_STRING("selector_unresolved", tp_c0_detail_id(TP_C0_ERR_SELECTOR_UNRESOLVED));
+    TEST_ASSERT_EQUAL_STRING("revision_conflict", tp_c0_detail_id(TP_C0_ERR_REVISION_CONFLICT));
+    TEST_ASSERT_EQUAL_STRING("invalid_revision", tp_c0_detail_id(TP_C0_ERR_INVALID_REVISION));
 }
 
 void test_tokens_are_machine_ids(void) {
-    for (int s = TP_C0_OK; s <= TP_C0_ERR_COLLISION_EXHAUSTED; s++) {
+    for (int s = TP_C0_OK; s <= TP_C0_ERR_INVALID_REVISION; s++) {
         const char *id = tp_c0_detail_id((tp_c0_detail)s);
         for (const char *c = id; *c; c++) {
             bool ok = (*c >= 'a' && *c <= 'z') || (*c >= '0' && *c <= '9') || *c == '_';
