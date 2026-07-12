@@ -139,6 +139,17 @@ file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_export_defold_test")
 add_test(NAME tp_export_defold
     COMMAND tp_test_export_defold "${CMAKE_BINARY_DIR}/tp_export_defold_test" "${CMAKE_SOURCE_DIR}/examples/defold-demo")
 
+# C0-03 task 6: raw-RGBA ownership regression. Drives nt_builder_atlas_add_raw
+# directly (links tp_build), mutates+frees the caller buffer immediately after the
+# add, packs, and asserts the packed page is unaffected -> the builder deep-copies
+# (nt_builder_atlas.c:771-775). Pins a lifetime the public header does not promise
+# (see packer/spike/c0/upstream-issue-raw-lifetime.md). Needs a scratch dir.
+add_executable(tp_test_raw_ownership test_raw_ownership.c)
+target_link_libraries(tp_test_raw_ownership PRIVATE tp_build unity)
+target_compile_options(tp_test_raw_ownership PRIVATE -U_DLL)
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_raw_ownership_test")
+add_test(NAME tp_raw_ownership COMMAND tp_test_raw_ownership "${CMAKE_BINARY_DIR}/tp_raw_ownership_test")
+
 # Dev driver / smoke tool (NOT a ctest): load a `.ntpacker_project`, assemble each
 # atlas's sprites through the shared op layer (tp_pack_input_build), and run every
 # enabled target -> the project's out_paths. Regenerates the Defold demo's ntpacker
