@@ -16,7 +16,8 @@
  *               tp_project_* mutator returned a non-OOM failure. (Distinct from pack's
  *               --atlas FILTER flag, which is a usage error: these are positional state
  *               selectors, so "not found" is a project-state class, not a grammar one.)
- *   1 internal: OOM from a mutator or the save.
+ *   1 internal: OOM from a mutator or the save, or an environmental/internal id-promote
+ *               fault (OS-RNG failure, id-collision-sweep exhaustion) -- never project-content.
  *   0 ok.
  *
  * `set`/`sprite set` value vocabularies = the project-file JSON keys (tp_emit_atlas /
@@ -353,7 +354,12 @@ static int commit(tp_project *p, const char *path, const char *verb, int count, 
     if (pst != TP_STATUS_OK) {
         cli_emit_error(json, quiet, tp_status_id(pst), "%s", err.msg[0] ? err.msg : tp_status_str(pst));
         tp_project_destroy(p);
-        return (pst == TP_STATUS_OOM) ? CLI_EXIT_INTERNAL : CLI_EXIT_PROJECT;
+        /* Promote faults are internal/environmental, NOT project-content faults: OS-RNG
+         * failure and the (unreachable-with-random-ids) collision sweep exhaustion, plus
+         * OOM, map to exit 1 internal -- never exit 3 project. */
+        return (pst == TP_STATUS_OOM || pst == TP_STATUS_RNG_FAILED || pst == TP_STATUS_ID_COLLISION_EXHAUSTED)
+                   ? CLI_EXIT_INTERNAL
+                   : CLI_EXIT_PROJECT;
     }
     tp_status st = tp_project_save(p, path, &err);
     if (st != TP_STATUS_OK) {
