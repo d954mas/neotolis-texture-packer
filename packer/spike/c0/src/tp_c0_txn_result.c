@@ -55,8 +55,13 @@ static tp_c0_detail decode_diff(const cJSON *dj, tp_c0_diff *diff, tp_error *err
     if (!ok) {
         return tp_c0_fail(err, TP_C0_ERR_TXN_BAD_TYPE, "unknown diff class '%s'", cls->valuestring);
     }
+    /* before/after are optional, but PRESENT-but-not-an-object is a fault, not a
+     * silent skip (a "before":"oops" must not be ignored). */
     const cJSON *before = cJSON_GetObjectItemCaseSensitive(dj, "before");
-    if (cJSON_IsObject(before)) {
+    if (before) {
+        if (!cJSON_IsObject(before)) {
+            return tp_c0_fail(err, TP_C0_ERR_TXN_BAD_TYPE, "diff \"before\" must be an object");
+        }
         tp_c0_detail d = tpc0_decode_field_list(before, NULL, 0, diff->before, &diff->before_count, TP_C0_MAX_FIELDS, err);
         if (d != TP_C0_OK) {
             return d;
@@ -64,7 +69,11 @@ static tp_c0_detail decode_diff(const cJSON *dj, tp_c0_diff *diff, tp_error *err
         diff->has_before = true;
     }
     const cJSON *after = cJSON_GetObjectItemCaseSensitive(dj, "after");
-    if (cJSON_IsObject(after)) {
+    if (after) {
+        if (!cJSON_IsObject(after)) {
+            tpc0_free_fields(diff->before, diff->before_count);
+            return tp_c0_fail(err, TP_C0_ERR_TXN_BAD_TYPE, "diff \"after\" must be an object");
+        }
         tp_c0_detail d = tpc0_decode_field_list(after, NULL, 0, diff->after, &diff->after_count, TP_C0_MAX_FIELDS, err);
         if (d != TP_C0_OK) {
             tpc0_free_fields(diff->before, diff->before_count);
@@ -169,7 +178,16 @@ tp_c0_txn_result *tp_c0_txn_result_decode(const char *json, tp_c0_detail *detail
     if (rvd != TP_C0_OK) {
         return (fail_res(res, root, detail, rvd), NULL);
     }
-    res->committed = strcmp(status->valuestring, "committed") == 0;
+    /* status must be exactly "committed" or "rejected"; a typo ("comitted") must
+     * not silently read as rejected (an equality-only test took that branch). */
+    if (strcmp(status->valuestring, "committed") == 0) {
+        res->committed = true;
+    } else if (strcmp(status->valuestring, "rejected") == 0) {
+        res->committed = false;
+    } else {
+        (void)tp_c0_fail(err, TP_C0_ERR_TXN_BAD_TYPE, "unknown result status '%s'", status->valuestring);
+        return (fail_res(res, root, detail, TP_C0_ERR_TXN_BAD_TYPE), NULL);
+    }
 
     if (res->committed) {
         const cJSON *ops = cJSON_GetObjectItemCaseSensitive(r, "operations");

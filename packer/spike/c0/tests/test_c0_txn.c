@@ -529,6 +529,31 @@ void test_result_decodes_last_error_token(void) {
     tp_c0_txn_result_free(res);
 }
 
+/* ---- result status + diff shapes are strictly typed (F7, F8) -------------- */
+
+void test_result_bad_status(void) {
+    /* a status typo must not silently read as rejected */
+    const char *json = "{\"schema\":1,\"result\":{\"errors\":[],\"revision\":8,\"status\":\"comitted\","
+                       "\"transaction_id\":\"" TID "\"}}";
+    tp_c0_detail d = TP_C0_OK;
+    tp_error err = {0};
+    tp_c0_txn_result *res = tp_c0_txn_result_decode(json, &d, &err);
+    TEST_ASSERT_NULL(res);
+    TEST_ASSERT_EQUAL_INT(TP_C0_ERR_TXN_BAD_TYPE, d);
+}
+
+void test_result_diff_before_wrong_type(void) {
+    /* a present-but-non-object "before" must fault, not be silently skipped */
+    const char *json = "{\"schema\":1,\"result\":{\"operations\":[{\"op\":\"atlas.create\",\"atlas_id\":\"" ATLAS2
+                       "\",\"diff\":{\"before\":\"oops\",\"class\":\"create\"}}],\"revision\":8,"
+                       "\"status\":\"committed\",\"transaction_id\":\"" TID "\"}}";
+    tp_c0_detail d = TP_C0_OK;
+    tp_error err = {0};
+    tp_c0_txn_result *res = tp_c0_txn_result_decode(json, &d, &err);
+    TEST_ASSERT_NULL(res);
+    TEST_ASSERT_EQUAL_INT(TP_C0_ERR_TXN_BAD_TYPE, d);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_request_roundtrip);
@@ -552,5 +577,7 @@ int main(void) {
     RUN_TEST(test_errors_truncated_marker);
     RUN_TEST(test_duplicate_field_rejected);
     RUN_TEST(test_result_decodes_last_error_token);
+    RUN_TEST(test_result_bad_status);
+    RUN_TEST(test_result_diff_before_wrong_type);
     return UNITY_END();
 }
