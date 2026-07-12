@@ -6,6 +6,7 @@
 #include "tp_c0/tp_c0_legacy.h"
 #include "unity.h"
 
+#include <stdio.h>
 #include <string.h>
 
 void setUp(void) {}
@@ -102,6 +103,34 @@ static tp_c0_id128 constant_hash(void *ctx, tp_c0_id_kind kind, const char *tupl
     return id;
 }
 
+/* F6: the hash-set assigner must stay unique and deterministic at scale. */
+void test_assign_1000_unique_and_deterministic(void) {
+    enum { N = 1000 };
+    static tp_c0_legacy_entry a[N];
+    static tp_c0_legacy_entry b[N];
+    static char tuples[N][16];
+    for (int i = 0; i < N; i++) {
+        snprintf(tuples[i], sizeof tuples[i], "e%d", i);
+        a[i].kind = TP_C0_ID_KIND_SOURCE;
+        a[i].tuple = tuples[i];
+        a[i].id = tp_c0_id128_nil();
+        b[i].kind = TP_C0_ID_KIND_SOURCE;
+        b[i].tuple = tuples[i];
+        b[i].id = tp_c0_id128_nil();
+    }
+    TEST_ASSERT_EQUAL_INT(TP_C0_OK, tp_c0_legacy_assign(a, N, NULL, NULL, NULL));
+    TEST_ASSERT_EQUAL_INT(TP_C0_OK, tp_c0_legacy_assign(b, N, NULL, NULL, NULL));
+    for (int i = 0; i < N; i++) {
+        TEST_ASSERT_FALSE(tp_c0_id128_is_nil(a[i].id));
+        TEST_ASSERT_TRUE(tp_c0_id128_eq(a[i].id, b[i].id)); /* deterministic across loads */
+    }
+    for (int i = 0; i < N; i++) {
+        for (int j = i + 1; j < N; j++) {
+            TEST_ASSERT_FALSE(tp_c0_id128_eq(a[i].id, a[j].id)); /* all unique */
+        }
+    }
+}
+
 void test_collision_exhaustion_is_structured(void) {
     tp_c0_legacy_entry e[2] = {
         {TP_C0_ID_KIND_ATLAS, "a", {{0}}},
@@ -118,6 +147,7 @@ int main(void) {
     RUN_TEST(test_assign_is_deterministic_across_loads);
     RUN_TEST(test_kind_changes_id);
     RUN_TEST(test_forced_collision_disambiguates_deterministically);
+    RUN_TEST(test_assign_1000_unique_and_deterministic);
     RUN_TEST(test_collision_exhaustion_is_structured);
     return UNITY_END();
 }

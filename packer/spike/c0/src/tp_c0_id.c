@@ -7,6 +7,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(__linux__) || defined(__APPLE__)
+#include <sys/random.h> /* getentropy: Linux glibc >= 2.25, macOS >= 10.12 */
+#endif
+
 /* ======================================================================== */
 /* RNG seam                                                                  */
 /* ======================================================================== */
@@ -25,6 +29,22 @@ static int rng_os_fill(void *ctx, uint8_t *out, size_t len) {
             n = sizeof r;
         }
         memcpy(out + done, &r, n);
+        done += n;
+    }
+    return (int)len;
+#elif defined(__linux__) || defined(__APPLE__)
+    /* getentropy is all-or-nothing per call and caps at 256 bytes; loop in
+     * chunks. No per-ID fopen of /dev/urandom. A failure is surfaced as rng_fail
+     * (return -1) upstream -- getentropy never short-reads. */
+    size_t done = 0;
+    while (done < len) {
+        size_t n = len - done;
+        if (n > 256U) {
+            n = 256U;
+        }
+        if (getentropy(out + done, n) != 0) {
+            return -1;
+        }
         done += n;
     }
     return (int)len;
