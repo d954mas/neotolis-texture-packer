@@ -211,7 +211,7 @@ tp_c0_detail tp_c0_id_format(tp_c0_id_kind kind, tp_c0_id128 id, char *out, size
         return tp_c0_fail(err, TP_C0_ERR_BUFFER_TOO_SMALL, "need %zu bytes, have %zu", need, cap);
     }
     memcpy(out, prefix, plen);
-    static const char hexd[16] = "0123456789abcdef";
+    static const char hexd[16] = {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
     for (size_t i = 0; i < 16U; i++) {
         out[plen + 2U * i] = hexd[id.bytes[i] >> 4];
         out[plen + 2U * i + 1U] = hexd[id.bytes[i] & 0x0FU];

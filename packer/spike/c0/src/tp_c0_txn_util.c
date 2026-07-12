@@ -1,7 +1,6 @@
 #include "tp_c0/tp_c0_txn.h"
 
 #include <limits.h>
-#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -80,7 +79,7 @@ tp_c0_detail tpc0_decode_val(const void *item_v, tp_c0_val *out, tp_error *err) 
         /* INT only when integral AND exactly representable (within +/-2^53); the
          * range test excludes inf/NaN, so the cast below is never UB. Otherwise
          * NUM, re-encoded via "%.9g". */
-        if (d >= -TPC0_INT_SAFE && d <= TPC0_INT_SAFE && d == floor(d)) {
+        if (d >= -TPC0_INT_SAFE && d <= TPC0_INT_SAFE && d == (double)(int64_t)d) {
             out->kind = TP_C0_VAL_INT;
             out->ival = (int64_t)d;
         } else {
@@ -167,9 +166,9 @@ tp_c0_detail tpc0_json_to_i64(const void *item_v, int64_t *out, tp_error *err) {
         return tp_c0_fail(err, TP_C0_ERR_TXN_BAD_TYPE, "expected an integer number");
     }
     double d = item->valuedouble;
-    /* The range test is false for inf/NaN, so floor() and the cast never see them
+    /* The range test is false for inf/NaN, so the integrality cast never sees them
      * and the (int64_t) cast is always in range -- no UB, no UBSan abort. */
-    if (!(d >= -TPC0_INT_SAFE && d <= TPC0_INT_SAFE) || d != floor(d)) {
+    if (!(d >= -TPC0_INT_SAFE && d <= TPC0_INT_SAFE) || d != (double)(int64_t)d) {
         return tp_c0_fail(err, TP_C0_ERR_TXN_BAD_TYPE, "number out of range (must be an integer within +/-2^53)");
     }
     *out = (int64_t)d;
