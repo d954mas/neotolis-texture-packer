@@ -15,7 +15,8 @@
 #include <windows.h>
 #else
 #include <errno.h>
-#include <stdlib.h> /* realpath */
+#include <stdlib.h>   /* realpath */
+#include <sys/stat.h> /* lstat: tell a dangling symlink apart from an absent node */
 #endif
 
 /* ======================================================================== */
@@ -254,12 +255,28 @@ static tp_status fs_resolve_posix(const char *lex, char *out, size_t cap, tp_err
         free(res);
         return st;
     }
-    if (errno != ENOENT) {
-        return tp_error_set(err, TP_STATUS_PATH_RESOLVE_FAILED, "cannot resolve '%s': %s", lex, strerror(errno));
+    int rp_errno = errno;
+    if (rp_errno != ENOENT) {
+        return tp_error_set(err, TP_STATUS_PATH_RESOLVE_FAILED, "cannot resolve '%s': %s", lex, strerror(rp_errno));
     }
-    /* Not-yet-created destination: resolve the existing PARENT and append the
-     * final component lexically (its final component need not exist). `lex` is
-     * canonical + absolute, so a '/' is always present and never trailing. */
+    /* realpath failed with ENOENT. Distinguish a genuinely-absent final component
+     * (a legitimate not-yet-created Save-As destination) from a path that EXISTS as
+     * an unresolvable node -- classically a dangling symlink whose target is
+     * missing. lstat() does NOT follow the final symlink, so it succeeds on the
+     * link itself; that node must NOT get the phantom <parent>/<linkname> identity,
+     * because once the target is created realpath would follow the link and the
+     * SAME file would canonicalize to a DIFFERENT identity (two identities / life). */
+    struct stat lst;
+    if (lstat(lex, &lst) == 0) {
+        return tp_error_set(err, TP_STATUS_PATH_RESOLVE_FAILED,
+                            "'%s' exists but cannot be canonically resolved (dangling symlink?)", lex);
+    }
+    if (errno != ENOENT) {
+        return tp_error_set(err, TP_STATUS_PATH_RESOLVE_FAILED, "cannot stat '%s': %s", lex, strerror(errno));
+    }
+    /* Genuinely not-yet-created: resolve the existing PARENT and append the final
+     * component lexically (it need not exist). `lex` is canonical + absolute, so a
+     * '/' is always present and never trailing. */
     const char *slash = strrchr(lex, '/');
     if (!slash) {
         /* Unreachable: a canonical POSIX path always has a leading '/'. Guarded so
@@ -313,14 +330,14 @@ static tp_status fs_narrow(const wchar_t *w, char *out, size_t cap, tp_error *er
  * FILE_FLAG_OPEN_REPARSE_POINT means symlinks/junctions are FOLLOWED to their
  * target -- which is exactly the identity we want). */
 static HANDLE fs_open_query(const char *path_slash) {
-    char win[TP_IDENTITY_PATH_MAX];
-    size_t i = 0;
-    for (; path_slash[i] != '\0' && i + 1U < sizeof win; i++) {
-        win[i] = (path_slash[i] == '/') ? '\\' : path_slash[i];
-    }
-    win[i] = '\0';
+    /* `path_slash` is ALWAYS a canonical '/'-form path (drive "X:/..." or UNC
+     * "//server/share/..."), NEVER a "\\?\" verbatim path -- the lexical
+     * canonicalizer strips that prefix before we get here. CreateFileW normalizes
+     * forward slashes in ordinary (non-verbatim) paths, so we widen the '/'-form
+     * directly; the old copy into a '\'-rewritten buffer was dead work (it would
+     * only ever matter for a verbatim path, which never reaches this function). */
     wchar_t wpath[TP_IDENTITY_PATH_MAX];
-    if (fs_widen(win, wpath, (int)(sizeof wpath / sizeof wpath[0]), NULL) != TP_STATUS_OK) {
+    if (fs_widen(path_slash, wpath, (int)(sizeof wpath / sizeof wpath[0]), NULL) != TP_STATUS_OK) {
         return INVALID_HANDLE_VALUE;
     }
     return CreateFileW(wpath, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
@@ -344,6 +361,25 @@ static tp_status fs_final_path(HANDLE h, char *raw, size_t cap, tp_error *err) {
     return fs_narrow(wbuf, raw, cap, err);
 }
 
+/* True iff the final component of `path_slash` genuinely does NOT exist (a real
+ * "name not found"). GetFileAttributesW does NOT follow the final reparse point,
+ * so a dangling symlink/junction (target missing) reports its OWN attributes and
+ * is correctly seen as EXISTING -- it must not be mistaken for a not-yet-created
+ * destination (which would hand it the phantom <parent>/<linkname> identity that
+ * flips once the target appears). Fails closed (reports the node present) when the
+ * name can't be widened. */
+static bool fs_path_is_absent(const char *path_slash) {
+    wchar_t wpath[TP_IDENTITY_PATH_MAX];
+    if (fs_widen(path_slash, wpath, (int)(sizeof wpath / sizeof wpath[0]), NULL) != TP_STATUS_OK) {
+        return false;
+    }
+    if (GetFileAttributesW(wpath) != INVALID_FILE_ATTRIBUTES) {
+        return false; /* node exists (possibly a dangling reparse point) */
+    }
+    DWORD e = GetLastError();
+    return e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND;
+}
+
 static tp_status fs_resolve_windows(const char *lex, char *out, size_t cap, tp_error *err) {
     HANDLE h = fs_open_query(lex);
     if (h != INVALID_HANDLE_VALUE) {
@@ -359,6 +395,16 @@ static tp_status fs_resolve_windows(const char *lex, char *out, size_t cap, tp_e
     if (e != ERROR_FILE_NOT_FOUND && e != ERROR_PATH_NOT_FOUND) {
         return tp_error_set(err, TP_STATUS_PATH_RESOLVE_FAILED, "cannot open '%s' (%lu)", lex, (unsigned long)e);
     }
+    /* CreateFileW FOLLOWS reparse points, so a dangling symlink/junction (target
+     * missing) also reports the name as not-found here. Only a genuinely-absent
+     * final component is a legitimate not-yet-created destination; a node that
+     * EXISTS but cannot be resolved is a real failure -- never the phantom
+     * <parent>/<linkname> identity that would flip once the target appears (this is
+     * the exact distinction the POSIX lstat() branch above makes). */
+    if (!fs_path_is_absent(lex)) {
+        return tp_error_set(err, TP_STATUS_PATH_RESOLVE_FAILED,
+                            "'%s' exists but cannot be canonically resolved (dangling reparse point?)", lex);
+    }
     /* Not-yet-created destination: resolve the existing PARENT directory. */
     const char *slash = strrchr(lex, '/');
     if (!slash) {
@@ -373,8 +419,9 @@ static tp_status fs_resolve_windows(const char *lex, char *out, size_t cap, tp_e
     }
     memcpy(parent, lex, plen);
     parent[plen] = '\0';
-    if (plen == 0 || (plen > 0 && parent[plen - 1U] == ':')) {
-        /* root parent: drive root "C:" -> "C:/", or a bare "/" head */
+    if (plen == 0 || parent[plen - 1U] == ':') {
+        /* root parent: drive root "C:" -> "C:/", or a bare "/" head. The '||'
+         * short-circuits, so parent[plen - 1U] is read only when plen != 0. */
         parent[plen] = '/';
         parent[plen + 1U] = '\0';
     }
@@ -382,18 +429,18 @@ static tp_status fs_resolve_windows(const char *lex, char *out, size_t cap, tp_e
     if (ph == INVALID_HANDLE_VALUE) {
         return tp_error_set(err, TP_STATUS_PATH_RESOLVE_FAILED, "destination parent '%s' does not exist", parent);
     }
+    /* Symmetric with the POSIX sibling (which feeds realpath's resolved parent
+     * straight into fs_join_and_canon): pass the raw "\\?\" parent directly. The
+     * lexical canonicalizer strips the "\\?\" alias and is idempotent, so the extra
+     * intermediate buffer + second canon pass were redundant -- output is
+     * byte-identical to canonicalizing praw first. */
     char praw[TP_IDENTITY_PATH_MAX];
     tp_status st = fs_final_path(ph, praw, sizeof praw, err);
     CloseHandle(ph);
     if (st != TP_STATUS_OK) {
         return st;
     }
-    char pdir[TP_IDENTITY_PATH_MAX];
-    st = tp_path_canonical_lexical(praw, TP_HOST_WINDOWS, pdir, sizeof pdir, err);
-    if (st != TP_STATUS_OK) {
-        return st;
-    }
-    return fs_join_and_canon(pdir, final_comp, TP_HOST_WINDOWS, out, cap, err);
+    return fs_join_and_canon(praw, final_comp, TP_HOST_WINDOWS, out, cap, err);
 }
 
 #endif /* _WIN32 */

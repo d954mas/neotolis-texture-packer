@@ -321,6 +321,43 @@ void test_symlink_equivalence(void) {
     TEST_ASSERT_TRUE_MESSAGE(tp_identity_path_equal(ct, cl), cl);
 }
 
+/* A DANGLING symlink (the link exists, its target does not) must resolve to
+ * path_resolve_failed -- NOT the phantom <parent>/<linkname> identity. Otherwise
+ * the SAME file would acquire a second, different canonical identity the moment
+ * its target is created (realpath would then follow the link to the target),
+ * splitting one project into two in the journal/session registry keyed on this
+ * string. Created where the platform allows; skipped-with-note where a symlink
+ * needs privilege (Windows), exactly like test_symlink_equivalence. */
+void test_dangling_symlink_is_resolve_failed(void) {
+    char link[TP_IDENTITY_PATH_MAX];
+    char missing[TP_IDENTITY_PATH_MAX];
+    joinp(link, sizeof link, g_dir, "dangling_link.ntpacker_project");
+    joinp(missing, sizeof missing, g_dir, "no_such_target.ntpacker_project"); /* never created */
+
+#if defined(_WIN32)
+    wchar_t wlink[TP_IDENTITY_PATH_MAX];
+    wchar_t wtarget[TP_IDENTITY_PATH_MAX];
+    MultiByteToWideChar(CP_UTF8, 0, link, -1, wlink, (int)(sizeof wlink / sizeof wlink[0]));
+    MultiByteToWideChar(CP_UTF8, 0, missing, -1, wtarget, (int)(sizeof wtarget / sizeof wtarget[0]));
+    if (!CreateSymbolicLinkW(wlink, wtarget, 0)) {
+        DWORD e = GetLastError();
+        if (e == ERROR_PRIVILEGE_NOT_HELD) {
+            TEST_IGNORE_MESSAGE("SKIP: Windows symlink creation needs privilege/Developer Mode");
+        }
+        TEST_ASSERT_EQUAL_INT_MESSAGE(0, (int)e, "CreateSymbolicLinkW failed for another reason");
+    }
+#else
+    if (symlink(missing, link) != 0) {
+        TEST_IGNORE_MESSAGE("SKIP: symlink() failed on this platform/filesystem");
+    }
+#endif
+
+    char canon[TP_IDENTITY_PATH_MAX];
+    tp_error err;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_PATH_RESOLVE_FAILED,
+                                  tp_identity_path_canonical(link, canon, sizeof canon, &err), link);
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr, "usage: %s <scratch-dir>\n", argv[0]);
@@ -341,5 +378,6 @@ int main(int argc, char **argv) {
     RUN_TEST(test_destination_collision);
     RUN_TEST(test_equivalent_path_vectors);
     RUN_TEST(test_symlink_equivalence);
+    RUN_TEST(test_dangling_symlink_is_resolve_failed);
     return UNITY_END();
 }
