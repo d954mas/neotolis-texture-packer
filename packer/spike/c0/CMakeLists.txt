@@ -12,7 +12,11 @@ add_library(tp_c0 STATIC
     src/tp_c0_id.c
     src/tp_c0_path.c
     src/tp_c0_srckey.c
-    src/tp_c0_legacy.c)
+    src/tp_c0_legacy.c
+    # C0-02 operation contract spike: catalog, selectors, semantic-state table.
+    src/tp_c0_op_catalog.c
+    src/tp_c0_selector.c
+    src/tp_c0_semantic.c)
 target_include_directories(tp_c0 PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     $<TARGET_PROPERTY:tp_core,INTERFACE_INCLUDE_DIRECTORIES>)
@@ -37,3 +41,4 @@ tp_c0_add_test(test_c0_shape_id)
 tp_c0_add_test(test_c0_path)
 tp_c0_add_test(test_c0_srckey)
 tp_c0_add_test(test_c0_legacy)
+tp_c0_add_test(test_c0_op)   # C0-02 catalog, verb mapping, selectors, semantic fields
