@@ -93,7 +93,9 @@ typedef struct tp_c0_journal_record {
 /* Encode a committed-transaction record. `body`/`body_len` is the opaque tail
  * (may be NULL/0). Writes the full record to `out`; sets *written. A buffer that
  * cannot hold the record returns buffer_too_small (drives the ack APPEND_FAIL
- * path). nil txn_id is rejected (id_nil). */
+ * path). nil txn_id is rejected (id_nil). A body whose framed size would overflow
+ * the u32 on-disk length field or the size_t byte math is rejected with
+ * journal_too_large BEFORE any copy (no truncated length, no memcpy past cap). */
 tp_c0_detail tp_c0_journal_encode_txn(tp_c0_id128 txn_id, int64_t revision_after, const void *body, size_t body_len,
                                       uint8_t *out, size_t cap, size_t *written, tp_error *err);
 

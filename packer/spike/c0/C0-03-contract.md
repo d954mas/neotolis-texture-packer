@@ -74,6 +74,14 @@ byte vector is byte-identical on Linux/macOS/Windows.
 - **Encode faults:** a buffer too small returns `buffer_too_small` with
   `written=0` (this is the "append fail" that drives the ack rollback path); a nil
   txn id returns `id_nil`.
+- **Max frame size guard (F1):** the on-disk `payload_len` is a `u32`, so before any
+  cap check or copy both encoders reject a body whose framed size cannot be
+  represented: `payload_len = prefix + body_len` must fit in `UINT32_MAX` and
+  `HEADER_SIZE + payload_len` must not wrap `size_t`. A violation returns the new
+  append-only token `journal_too_large` with `written=0` — never a truncated
+  stamped length (which would make recovery hash fewer bytes than the checksum
+  covers → a lost committed txn) and never a `memcpy` past `cap`. The stamped
+  length and the checksum-hashed length are therefore always identical.
 
 ## 2. Acknowledgement boundary (task 2) — `tp_c0_ack`
 
@@ -213,7 +221,9 @@ contract.
    by hash on explicit/Undo selection; transfer cancels only the running Pack.
 8. **New `tp_c0_detail` tokens** (append-only): `journal_short`,
    `journal_bad_magic`, `journal_bad_version`, `journal_bad_kind`,
-   `journal_bad_checksum`.
+   `journal_bad_checksum`, `journal_too_large` (F1: framed size exceeds the u32
+   on-disk length / size_t byte math), `journal_retention_full` (F2: recovery
+   retention set full — a spike cap, NOT corruption).
 
 ## Open per §60 (deliberately NOT fixed here)
 

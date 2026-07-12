@@ -57,6 +57,24 @@ static void finish_header(uint8_t *out, tp_c0_journal_kind kind, size_t payload_
     memcpy(out + 12, sum.bytes, sizeof sum.bytes);
 }
 
+/* Reject a body whose FRAMED size cannot be represented BEFORE any cap check or
+ * copy: the on-disk length is a u32, so payload_len (prefix+body_len) must fit in
+ * UINT32_MAX, and HEADER_SIZE+payload_len must not wrap size_t. Guarantees the
+ * stamped length equals the checksum-hashed length and no memcpy runs past `cap`
+ * (F1). On success sets *payload_len and *need. */
+static bool frame_size_ok(size_t prefix, size_t body_len, size_t *payload_len, size_t *need) {
+    if (body_len > (size_t)UINT32_MAX - prefix) {
+        return false; /* payload_len would exceed the u32 on-disk length field */
+    }
+    size_t pl = prefix + body_len; /* <= UINT32_MAX: fits the u32 field, no truncation */
+    if (pl > SIZE_MAX - (size_t)TP_C0_JOURNAL_HEADER_SIZE) {
+        return false; /* HEADER_SIZE + payload_len would wrap size_t */
+    }
+    *payload_len = pl;
+    *need = (size_t)TP_C0_JOURNAL_HEADER_SIZE + pl;
+    return true;
+}
+
 static tp_c0_detail check_out(const uint8_t *out, size_t cap, size_t need, size_t *written, tp_error *err) {
     if (written) {
         *written = 0;
@@ -83,8 +101,11 @@ tp_c0_detail tp_c0_journal_encode_txn(tp_c0_id128 txn_id, int64_t revision_after
     if (body_len > 0 && !body) {
         return tp_c0_fail(err, TP_C0_ERR_NULL_ARG, "journal txn: body is NULL but body_len > 0");
     }
-    size_t payload_len = (size_t)TP_C0_JOURNAL_TXN_PREFIX + body_len;
-    size_t need = (size_t)TP_C0_JOURNAL_HEADER_SIZE + payload_len;
+    size_t payload_len = 0;
+    size_t need = 0;
+    if (!frame_size_ok(TP_C0_JOURNAL_TXN_PREFIX, body_len, &payload_len, &need)) {
+        return tp_c0_fail(err, TP_C0_ERR_JOURNAL_TOO_LARGE, "journal txn: record exceeds max frame size");
+    }
     tp_c0_detail d = check_out(out, cap, need, written, err);
     if (d != TP_C0_OK) {
         return d;
@@ -110,8 +131,11 @@ tp_c0_detail tp_c0_journal_encode_checkpoint(int64_t revision, tp_c0_id128 state
     if (body_len > 0 && !body) {
         return tp_c0_fail(err, TP_C0_ERR_NULL_ARG, "journal checkpoint: body is NULL but body_len > 0");
     }
-    size_t payload_len = (size_t)TP_C0_JOURNAL_CHECKPOINT_PREFIX + body_len;
-    size_t need = (size_t)TP_C0_JOURNAL_HEADER_SIZE + payload_len;
+    size_t payload_len = 0;
+    size_t need = 0;
+    if (!frame_size_ok(TP_C0_JOURNAL_CHECKPOINT_PREFIX, body_len, &payload_len, &need)) {
+        return tp_c0_fail(err, TP_C0_ERR_JOURNAL_TOO_LARGE, "journal checkpoint: record exceeds max frame size");
+    }
     tp_c0_detail d = check_out(out, cap, need, written, err);
     if (d != TP_C0_OK) {
         return d;

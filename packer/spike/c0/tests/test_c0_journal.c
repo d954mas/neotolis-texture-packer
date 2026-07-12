@@ -141,6 +141,30 @@ void test_encode_nil_txn_id_rejected(void) {
     TEST_ASSERT_EQUAL_INT(TP_C0_ERR_ID_NIL, d);
 }
 
+/* A body whose framed size would overflow the u32 on-disk length is rejected with
+ * journal_too_large BEFORE any cap check or memcpy -- so the stamped length can
+ * never be a truncated view of a longer checksum-hashed payload, and no copy runs
+ * past the out buffer. The guard trips on the LENGTH value alone: `body` is a real
+ * 1-byte object that is never read (the guard returns first), so this exercises the
+ * branch without a 4 GiB allocation and without any out-of-bounds access. */
+void test_encode_rejects_oversize_body(void) {
+    uint8_t out[64];
+    uint8_t body = 0; /* real 1-byte object; never dereferenced (guard rejects first) */
+    size_t written = 99;
+    tp_error err;
+    /* Smallest body_len that makes payload_len (prefix + body_len) exceed UINT32_MAX. */
+    size_t oversize = (size_t)UINT32_MAX - (size_t)TP_C0_JOURNAL_TXN_PREFIX + 1u;
+    tp_c0_detail d = tp_c0_journal_encode_txn(id_seq(0x00), 1, &body, oversize, out, sizeof out, &written, &err);
+    TEST_ASSERT_EQUAL_INT(TP_C0_ERR_JOURNAL_TOO_LARGE, d);
+    TEST_ASSERT_EQUAL_UINT(0, written);
+
+    /* Checkpoint encoder guards the same way. */
+    size_t ck_oversize = (size_t)UINT32_MAX - (size_t)TP_C0_JOURNAL_CHECKPOINT_PREFIX + 1u;
+    d = tp_c0_journal_encode_checkpoint(1, id_seq(0xa0), &body, ck_oversize, out, sizeof out, &written, &err);
+    TEST_ASSERT_EQUAL_INT(TP_C0_ERR_JOURNAL_TOO_LARGE, d);
+    TEST_ASSERT_EQUAL_UINT(0, written);
+}
+
 /* ---- decode faults (fault injection) ------------------------------------- */
 
 void test_decode_short_header(void) {
@@ -314,6 +338,7 @@ int main(void) {
     RUN_TEST(test_txn_roundtrip_with_body);
     RUN_TEST(test_encode_buffer_too_small_is_append_fail);
     RUN_TEST(test_encode_nil_txn_id_rejected);
+    RUN_TEST(test_encode_rejects_oversize_body);
     RUN_TEST(test_decode_short_header);
     RUN_TEST(test_decode_truncated_payload_short_write);
     RUN_TEST(test_decode_bad_magic);
