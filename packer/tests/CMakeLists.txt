@@ -128,6 +128,19 @@ target_compile_options(tp_test_project PRIVATE -U_DLL)
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_project_test")
 add_test(NAME tp_project COMMAND tp_test_project "${CMAKE_BINARY_DIR}/tp_project_test")
 
+# F1-01 identity migration/promotion battery: v1->v2 migration byte-golden, stable
+# read-only synthesis, writable promote (once/atomic/idempotent), save-failure +
+# RNG-failure invariants, duplicate/malformed/nil id rejection, id survival across
+# rename/reorder/remove, and forward-compat over the checked-in v1 CLI fixtures.
+add_executable(tp_test_project_ids test_project_ids.c)
+target_link_libraries(tp_test_project_ids PRIVATE tp_core unity)
+target_compile_options(tp_test_project_ids PRIVATE -U_DLL)
+target_compile_definitions(tp_test_project_ids PRIVATE
+    TP_CLI_TESTDATA_DIR="${CMAKE_SOURCE_DIR}/apps/cli/testdata")
+nt_set_warning_flags(tp_test_project_ids)   # AGENTS.md invariant: our test TUs too
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_project_ids_test")
+add_test(NAME tp_project_ids COMMAND tp_test_project_ids "${CMAKE_BINARY_DIR}/tp_project_ids_test")
+
 # Phase 2 normalization unit tests: ext/folder strip, rename override, animation
 # auto-group + explicit merge, collision, alias, final-name sort, scale. Pure
 # tp_core (synthetic tp_results, no builder).
