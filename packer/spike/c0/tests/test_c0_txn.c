@@ -465,6 +465,41 @@ void test_label_author_strict(void) {
     TEST_ASSERT_EQUAL_INT(TP_C0_ERR_BUFFER_TOO_SMALL, decode_req_fault(json));
 }
 
+/* ---- collect-all overflow is marked, not silently truncated (F4) ---------- */
+
+void test_errors_truncated_marker(void) {
+    /* 32 ops * 2 unknown fields = 64 faults > TP_C0_MAX_ERRORS (32). The dropped
+     * faults must be flagged so a client does not resubmit into a hidden reject. */
+    char json[8192];
+    int off = snprintf(json, sizeof json,
+                       "{\"schema\":1,\"transaction\":{\"id\":\"" TID "\",\"expected_revision\":0,\"operations\":[");
+    for (int i = 0; i < TP_C0_MAX_OPS; i++) {
+        off += snprintf(json + off, sizeof json - (size_t)off, "%s{\"op\":\"atlas.remove\",\"b1\":true,\"b2\":true}",
+                        i ? "," : "");
+    }
+    (void)snprintf(json + off, sizeof json - (size_t)off, "]}}");
+
+    tp_c0_txn_request *req = decode_ok(json);
+    static tp_c0_txn_result res;
+    tp_error err = {0};
+    (void)tp_c0_txn_validate(req, 0, NULL, 0, &res, &err);
+    TEST_ASSERT_FALSE(res.committed);
+    TEST_ASSERT_EQUAL_INT(TP_C0_MAX_ERRORS, res.error_count); /* capped */
+    TEST_ASSERT_TRUE(res.errors_truncated);
+
+    /* the marker is emitted and round-trips through decode */
+    tp_c0_detail ed = TP_C0_OK;
+    char *out = tp_c0_txn_result_encode(&res, &ed);
+    TEST_ASSERT_NOT_NULL(out);
+    TEST_ASSERT_TRUE_MESSAGE(strstr(out, "\"errors_truncated\": true") != NULL, out);
+    tp_c0_txn_result *rd = tp_c0_txn_result_decode(out, &ed, &err);
+    TEST_ASSERT_NOT_NULL(rd);
+    TEST_ASSERT_TRUE(rd->errors_truncated);
+    tp_c0_txn_result_free(rd);
+    free(out);
+    tp_c0_txn_request_free(req);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_request_roundtrip);
@@ -485,5 +520,6 @@ int main(void) {
     RUN_TEST(test_number_classification_cross_os);
     RUN_TEST(test_expected_revision_out_of_range);
     RUN_TEST(test_label_author_strict);
+    RUN_TEST(test_errors_truncated_marker);
     return UNITY_END();
 }

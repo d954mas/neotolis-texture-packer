@@ -235,6 +235,13 @@ tp_c0_txn_result *tp_c0_txn_result_decode(const char *json, tp_c0_detail *detail
             }
             res->error_count++;
         }
+        /* Sparse collect-all-overflow marker (note §5): absent => false. */
+        const cJSON *trunc = cJSON_GetObjectItemCaseSensitive(r, "errors_truncated");
+        if (trunc && !cJSON_IsBool(trunc)) {
+            (void)tp_c0_fail(err, TP_C0_ERR_TXN_BAD_TYPE, "\"errors_truncated\" must be a boolean");
+            return (fail_res(res, root, detail, TP_C0_ERR_TXN_BAD_TYPE), NULL);
+        }
+        res->errors_truncated = cJSON_IsTrue(trunc);
     }
 
     cJSON_Delete(root);

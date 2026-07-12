@@ -15,6 +15,7 @@ static void add_err(tp_c0_txn_result *out, int op_index, tp_c0_detail code, cons
 
 static void add_err(tp_c0_txn_result *out, int op_index, tp_c0_detail code, const char *fmt, ...) {
     if (out->error_count >= TP_C0_MAX_ERRORS) {
+        out->errors_truncated = true; /* collect-all overflowed: mark, don't silently drop */
         return;
     }
     tp_c0_txn_error *e = &out->errors[out->error_count];

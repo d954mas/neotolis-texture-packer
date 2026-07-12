@@ -204,6 +204,14 @@ before any application":
    order. `test_c0_txn` pins a three-op request whose errors emit as
    `[op0 unknown_field, op1 id_bad_hex, op2 op_unknown]`.
 
+**Collect-all overflow marker.** The fault list is a fixed `TP_C0_MAX_ERRORS`
+(32) spike cap. When a batch produces more faults than the cap holds, the result
+sets `errors_truncated` and the rejected-result JSON emits `"errors_truncated":
+true` (sparse — omitted when false, key sorts between `errors` and `revision`).
+Without it a client could fix the first 32 faults, resubmit, and be rejected
+again by the hidden remainder as if the batch were clean. `test_c0_txn` overflows
+the cap and pins the flag plus the JSON key.
+
 Idempotency (§7.2): `tp_c0_txn_idset` is the retention set; re-adding a seen id →
 `txn_duplicate_id`; a non-hex id → `txn_bad_id`.
 

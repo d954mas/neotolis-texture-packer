@@ -237,6 +237,10 @@ char *tp_c0_txn_result_encode(const tp_c0_txn_result *res, tp_c0_detail *detail)
             tp_c0_jw_indent(&w, 2);
             tp_c0_jw_char(&w, ']');
         }
+        if (res->errors_truncated) { /* sparse: only when the collect-all cap dropped faults */
+            tp_c0_jw_key(&w, 2, &rf, "errors_truncated");
+            tp_c0_jw_bool(&w, true);
+        }
     }
     tp_c0_jw_key(&w, 2, &rf, "revision");
     tp_c0_jw_int(&w, res->revision);

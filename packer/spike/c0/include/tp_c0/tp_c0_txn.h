@@ -146,6 +146,7 @@ typedef struct tp_c0_txn_result {
     int op_count;
     tp_c0_txn_error errors[TP_C0_MAX_ERRORS];
     int error_count;
+    bool errors_truncated; /* true if faults were dropped at the TP_C0_MAX_ERRORS cap */
 } tp_c0_txn_result;
 
 tp_c0_txn_result *tp_c0_txn_result_decode(const char *json, tp_c0_detail *detail, tp_error *err);
