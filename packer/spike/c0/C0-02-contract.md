@@ -16,11 +16,13 @@ Reference implementation and golden tests:
   the operation catalog, closed field vocabulary, and selector resolver.
 - `include/tp_c0/tp_c0_semantic.h` + `src/tp_c0_semantic.c` — the semantic-state
   field partition.
-- `include/tp_c0/tp_c0_txn.h` + `src/tp_c0_txn_parse.c`, `tp_c0_txn_validate.c`,
-  `tp_c0_txn_encode.c`, `tp_c0_txn_result.c` — the transaction request/result
-  parser, canonical byte-stable encoder, revision precondition, idempotency set,
-  and full-batch validation. cJSON (engine-vendored, MIT) is a PRIVATE dep; it
-  never appears on a `tp_c0` public header.
+- `include/tp_c0/tp_c0_txn.h` + `src/tp_c0_txn_util.c` (shared decode
+  primitives), `tp_c0_txn_parse.c` (request decode), `tp_c0_txn_validate.c`
+  (revision precondition, idempotency set, full-batch validation),
+  `tp_c0_txn_encode.c` (canonical byte-stable request + result encoder), and
+  `tp_c0_txn_result.c` (result decode) — the transaction request/result contract.
+  cJSON (engine-vendored, MIT) is a PRIVATE dep; it never appears on a `tp_c0`
+  public header.
 - `tests/test_c0_op.c`, `tests/test_c0_txn.c` — table-driven Unity suites wired
   into ctest as `test_c0_op`, `test_c0_txn`. The tests are the executable form of
   this note: every pinned rule below has a matching test.
