@@ -37,6 +37,7 @@ extern "C" {
 #define TP_C0_MAX_FIELDS 16
 #define TP_C0_MAX_OPS 32
 #define TP_C0_MAX_ERRORS 32
+#define TP_C0_MAX_ADDR 6 /* max echoed `*_id` addressing fields on a result op */
 
 /* ---- typed field value (closed value vocabulary) ------------------------- */
 
@@ -128,7 +129,7 @@ typedef struct tp_c0_txn_error {
 
 typedef struct tp_c0_result_op {
     char wire[64];
-    tp_c0_field addr[6]; /* echoed `*_id` addressing fields */
+    tp_c0_field addr[TP_C0_MAX_ADDR]; /* echoed `*_id` addressing fields */
     int addr_count;
     tp_c0_diff diff;
 } tp_c0_result_op;

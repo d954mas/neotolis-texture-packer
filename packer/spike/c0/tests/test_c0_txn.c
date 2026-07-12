@@ -18,6 +18,7 @@ void tearDown(void) {}
 #define Z30 "0000000000" "0000000000" "0000000000"
 #define TID "0123456789abcdef" "0123456789abcdef"
 #define ATLAS2 "atlas_" Z30 "02"
+#define TARGET1 "target_" Z30 "01"
 #define ANIM1 "anim_" Z30 "01"
 #define ANIMAA "anim_" Z30 "aa"
 #define BADATLAS "atlas_zz" Z30
@@ -360,6 +361,54 @@ void test_unknown_id_reference(void) {
     tp_c0_txn_request_free(req);
 }
 
+/* ---- target ops carry a string exporter_id, not an id token (F1) ---------- */
+
+static bool addr_has(const tp_c0_result_op *ro, const char *key) {
+    for (int i = 0; i < ro->addr_count; i++) {
+        if (strcmp(ro->addr[i].key, key) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void test_target_create_commits_with_exporter_id(void) {
+    /* exporter_id is a registry NAME ("defold"), not a 32-hex id. It must not be
+     * routed through the id validator, or target.create can never commit. */
+    tp_c0_txn_request *req = decode_ok("{\"schema\":1,\"transaction\":{\"id\":\"" TID
+                                       "\",\"expected_revision\":0,\"operations\":[{\"op\":\"target.create\","
+                                       "\"atlas_id\":\"" ATLAS2 "\",\"target_id\":\"" TARGET1 "\","
+                                       "\"exporter_id\":\"defold\",\"out_path\":\"hud.json\",\"enabled\":true}]}}");
+    static tp_c0_txn_result res;
+    tp_error err = {0};
+    tp_c0_detail d = tp_c0_txn_validate(req, 0, NULL, 0, &res, &err);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_C0_OK, d, err.msg);
+    TEST_ASSERT_TRUE(res.committed);
+    TEST_ASSERT_EQUAL_INT(1, res.op_count);
+    /* only the real addressing ids echo; exporter_id/out_path do not */
+    TEST_ASSERT_EQUAL_INT(2, res.ops[0].addr_count);
+    TEST_ASSERT_TRUE(addr_has(&res.ops[0], "atlas_id"));
+    TEST_ASSERT_TRUE(addr_has(&res.ops[0], "target_id"));
+    TEST_ASSERT_FALSE(addr_has(&res.ops[0], "exporter_id"));
+    tp_c0_txn_request_free(req);
+}
+
+void test_target_set_commits_with_exporter_id(void) {
+    tp_c0_txn_request *req = decode_ok("{\"schema\":1,\"transaction\":{\"id\":\"" TID
+                                       "\",\"expected_revision\":0,\"operations\":[{\"op\":\"target.set\","
+                                       "\"target_id\":\"" TARGET1 "\",\"exporter_id\":\"json-neotolis\","
+                                       "\"out_path\":\"hud.json\",\"enabled\":false}]}}");
+    static tp_c0_txn_result res;
+    tp_error err = {0};
+    tp_c0_detail d = tp_c0_txn_validate(req, 0, NULL, 0, &res, &err);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_C0_OK, d, err.msg);
+    TEST_ASSERT_TRUE(res.committed);
+    TEST_ASSERT_EQUAL_INT(1, res.ops[0].addr_count);
+    TEST_ASSERT_TRUE(addr_has(&res.ops[0], "target_id"));
+    TEST_ASSERT_FALSE(addr_has(&res.ops[0], "exporter_id"));
+    tp_c0_txn_request_free(req);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_request_roundtrip);
@@ -375,5 +424,7 @@ int main(void) {
     RUN_TEST(test_stable_error_ordering);
     RUN_TEST(test_validate_commits);
     RUN_TEST(test_unknown_id_reference);
+    RUN_TEST(test_target_create_commits_with_exporter_id);
+    RUN_TEST(test_target_set_commits_with_exporter_id);
     return UNITY_END();
 }

@@ -174,7 +174,7 @@ tp_c0_txn_result *tp_c0_txn_result_decode(const char *json, tp_c0_detail *detail
             }
             tp_c0_result_op *ro = &res->ops[res->op_count];
             (void)snprintf(ro->wire, sizeof ro->wire, "%s", wire->valuestring);
-            tp_c0_detail fd = tpc0_decode_field_list(oj, skip, 2, ro->addr, &ro->addr_count, 6, err);
+            tp_c0_detail fd = tpc0_decode_field_list(oj, skip, 2, ro->addr, &ro->addr_count, TP_C0_MAX_ADDR, err);
             if (fd != TP_C0_OK) {
                 return (fail_res(res, root, detail, fd), NULL);
             }

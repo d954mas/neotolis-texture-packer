@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "tp_c0_txn_priv.h" /* tpc0_is_hex32_lower (shared with the parsers) */
+
 /* Full-batch validation: revision precondition first (short-circuit), then per-op
  * semantic checks collected in stable order (op_index asc, then field order),
  * before any application. No model mutation -- committed results are stubs. */
@@ -57,15 +59,13 @@ static const char *kind_id_key(tp_c0_id_kind k) {
     return "";
 }
 
-static bool is_hex32(const char *s) {
-    int n = 0;
-    for (; s[n]; n++) {
-        char c = s[n];
-        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
-            return false;
-        }
-    }
-    return n == 32;
+/* An addressing/ID field is EXACTLY one of the real id keys -- the shape-prefixed
+ * `*_id` (atlas/source/anim/target) or the bare 32-hex sprite_id -- NOT any key
+ * that merely ends in "_id". `exporter_id` is a registry name (e.g. "defold"),
+ * and `out_path`/`name`/`key`/`id` are plain strings; none is an id token. */
+static bool is_id_addressing_key(const char *key) {
+    return strcmp(key, "atlas_id") == 0 || strcmp(key, "source_id") == 0 || strcmp(key, "anim_id") == 0 ||
+           strcmp(key, "target_id") == 0 || strcmp(key, "sprite_id") == 0;
 }
 
 static bool entity_exists(const tp_c0_entity_ref *entities, int n, tp_c0_id_kind kind, tp_c0_id128 id) {
@@ -78,15 +78,15 @@ static bool entity_exists(const tp_c0_entity_ref *entities, int n, tp_c0_id_kind
 }
 
 /* Validate one addressing/id field; collect at most one error for it. */
-static void check_id_field(tp_c0_txn_result *out, int idx, const tp_c0_op *op, const tp_c0_op_info *info,
-                           const tp_c0_field *f, const tp_c0_entity_ref *entities, int entity_count) {
+static void check_id_field(tp_c0_txn_result *out, int idx, const tp_c0_op_info *info, const tp_c0_field *f,
+                           const tp_c0_entity_ref *entities, int entity_count) {
     if (f->val.kind != TP_C0_VAL_STR) {
         add_err(out, idx, TP_C0_ERR_TXN_BAD_TYPE, "field '%s' must be a string id", f->key);
         return;
     }
     tp_c0_id_kind expected = key_shape_kind(f->key);
     if (expected == TP_C0_ID_KIND_INVALID) { /* sprite_id: bare 32-hex */
-        if (!is_hex32(f->val.sval)) {
+        if (!tpc0_is_hex32_lower(f->val.sval)) {
             add_err(out, idx, TP_C0_ERR_ID_BAD_LENGTH, "sprite id '%s' must be 32 lowercase hex", f->key);
         }
         return;
@@ -126,9 +126,8 @@ static void validate_op(tp_c0_txn_result *out, int idx, const tp_c0_op *op, cons
             add_err(out, idx, TP_C0_ERR_UNKNOWN_FIELD, "unknown field '%s' for '%s'", f->key, op->wire);
             continue;
         }
-        size_t klen = strlen(f->key);
-        if (klen >= 3 && strcmp(f->key + klen - 3, "_id") == 0) {
-            check_id_field(out, idx, op, info, f, entities, entity_count);
+        if (is_id_addressing_key(f->key)) {
+            check_id_field(out, idx, info, f, entities, entity_count);
         }
     }
 }
@@ -177,9 +176,8 @@ tp_c0_detail tp_c0_txn_validate(const tp_c0_txn_request *req, long current_revis
         (void)snprintf(ro->wire, sizeof ro->wire, "%s", op->wire);
         ro->diff.cls = info ? info->effect : TP_C0_OP_CLASS_SET;
         ro->addr_count = 0;
-        for (int f = 0; f < op->field_count && ro->addr_count < 6; f++) {
-            size_t klen = strlen(op->fields[f].key);
-            if (klen >= 3 && strcmp(op->fields[f].key + klen - 3, "_id") == 0) {
+        for (int f = 0; f < op->field_count && ro->addr_count < TP_C0_MAX_ADDR; f++) {
+            if (is_id_addressing_key(op->fields[f].key)) {
                 ro->addr[ro->addr_count] = op->fields[f];
                 ro->addr[ro->addr_count].val.items = NULL; /* addr echoes are scalar ids, never arrays */
                 ro->addr[ro->addr_count].val.item_count = 0;
@@ -209,7 +207,7 @@ tp_c0_detail tp_c0_txn_idset_add(tp_c0_txn_idset *set, const char *id_hex, tp_er
     if (!set || !id_hex) {
         return tp_c0_fail(err, TP_C0_ERR_NULL_ARG, "null idset/id");
     }
-    if (!is_hex32(id_hex)) {
+    if (!tpc0_is_hex32_lower(id_hex)) {
         return tp_c0_fail(err, TP_C0_ERR_TXN_BAD_ID, "transaction id must be 32 lowercase hex");
     }
     for (int i = 0; i < set->count; i++) {
