@@ -1,5 +1,9 @@
 # ntpacker GUI — full code review (2026-07-11)
 
+> **Status: point-in-time historical review.** Do not treat unresolved-looking
+> findings as an active backlog without checking current code. Current product
+> direction is defined by [`../ntpacker-master-spec.md`](../ntpacker-master-spec.md).
+
 Scope: `apps/gui/` (main.c 5867 L, gui_pack.c/h, gui_canvas.c/h, gui_project.c/h,
 gui_history.c/h, gui_scan.c/h, build_packs.c, CMakeLists.txt). Reviewed against the
 `packer/` contracts (tp_pack / tp_project / tp_export_run / tp_model). Engine read-only.

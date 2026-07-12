@@ -1,5 +1,11 @@
 # UI/UX Redesign — ntpacker-gui (2026-07-11)
 
+> **Status: historical visual implementation record.** Color, spacing, and icon
+> evidence may still be useful, but its architecture, packets, and snapshot
+> assumptions are not an active plan. See
+> [`../ntpacker-master-spec.md`](../ntpacker-master-spec.md) and
+> [`ux.md`](ux.md).
+
 Visual-language spec for the native GUI (`ntpacker-gui`, engine `nt_ui`/Clay). Owner
 verdict: the current UI/UX is "very awkward" — wants it clearer, more responsive,
 image-icons allowed. This doc defines ONE coherent dark-tool visual language, an

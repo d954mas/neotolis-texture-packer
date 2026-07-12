@@ -1,6 +1,6 @@
 # Defold demo — three-way atlas comparison
 
-In-repo Defold project (ROADMAP Phase 5) that proves atlases exported by
+In-repo Defold fixture project that proves atlases exported by
 **ntpacker** load and render correctly in a stock Defold build, side by side
 with the two other atlas pipelines Defold supports, over the **same source
 images** so the results are directly diffable.

@@ -1,5 +1,10 @@
 # AI-First Operation — owner ruling 2026-07-11
 
+> **Status: historical consolidation input.** The principle remains, but the
+> CLI-only/MCP-later architecture in this document is superseded by Part II of
+> [`../ntpacker-master-spec.md`](../ntpacker-master-spec.md). Ordinary CLI is
+> file-oriented; live shared human/AI editing is a session/Dev API/MCP concern.
+
 Owner: *"CLI ships out of the box. From the very core we design the tool to be
 operated by both humans and AI. Human and AI are equal first-class users."*
 

@@ -1,5 +1,9 @@
 # Baseline: what neotolis-engine already gives us
 
+> **Status: non-normative point-in-time engine snapshot.** Revalidate claims
+> against the current submodule before implementation; product decisions come
+> from [`../ntpacker-master-spec.md`](../ntpacker-master-spec.md).
+
 Inventory of existing engine capability relevant to the texture packer, from
 `external/neotolis-engine`. This is the "what we have" column for the
 competitor comparison.

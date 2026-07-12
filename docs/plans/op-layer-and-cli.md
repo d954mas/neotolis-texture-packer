@@ -1,5 +1,11 @@
 # Plan: Op-Layer Consolidation + AI-First CLI
 
+> **Status: completed historical plan.** The baseline CLI/op-layer packet has
+> landed. This file remains implementation evidence, not future architecture.
+> The normative target is [`../ntpacker-master-spec.md`](../ntpacker-master-spec.md)
+> and the current backlog is
+> [`master-spec-implementation-plan.md`](master-spec-implementation-plan.md).
+
 Status: rev 2 — APPROVED (lead + 2 adversarial reviews incorporated; both reviewers
 returned APPROVE-WITH-CHANGES, all BLOCKER/MAJOR amendments folded in below).
 Inputs: `docs/design/architecture-review-2026-07-11.md` (packet A), `docs/design/ai-first.md`

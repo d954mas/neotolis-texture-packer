@@ -1,751 +1,196 @@
-# UX Design — Neotolis Texture Packer
+# GUI UX contract
 
-Design doc for the tool's user experience: the GUI (`ntpacker-gui`), the CLI
-(`ntpacker`), and the project file (`<name>.ntpacker_project`) that binds them.
-Recommendation-first; decisions and rationale trace to `docs/research/SUMMARY.md`
-(esp. §5a/§5c/§5h) and the competitor studies in `docs/research/`. Widget
-mappings are checked against the real `external/neotolis-engine/engine/ui/*.h`
-headers and `examples/ui_showcase/main.c`.
+**Status:** active implementation supplement
 
-Guiding invariant (AGENTS.md): **one op layer (`tp_core`), two equal clients**.
-Nothing in this doc may put a capability in one frontend that the other can't
-reach — every capability is a project field, edited by the GUI and executed by
-the CLI. The GUI is an editor of `.ntpacker_project`; the CLI runs it.
+**Normative source:** [`../ntpacker-master-spec.md`](../ntpacker-master-spec.md)
 
----
+**Scope:** human-facing interaction and presentation only
 
-## 1. Product principles
+This document does not define project schema, operation semantics, CLI/MCP
+shapes, format capabilities, or roadmap order. Those belong to the master spec,
+the executable format/CLI contracts, and the derived roadmap. If this document
+conflicts with the master spec, the master spec wins.
 
-Seven principles. Every screen, flag, and default below is derived from these.
+## 1. Product interaction principles
 
-1. **The project file is the single source of truth.** The GUI is a visual
-   editor for `<name>.ntpacker_project`; the CLI executes that same file. There
-   is no hidden GUI-only or CLI-only state. Saving the GUI and running the CLI on
-   the saved file produce **byte-identical output** (ROADMAP Phase 6 acceptance).
-   This is TexturePacker's "GUI = project editor, CLI = project runner" model
-   (`texturepacker.md` Lessons #1), and the AGENTS tool-parity invariant.
+1. **Explicit state.** The UI distinguishes project dirty state, preview
+   freshness, source health, running work, and export loss. These are separate
+   facts and must not be collapsed into one “changed” indicator.
+2. **Explicit Pack.** Project edits and source watcher events mark the current
+   preview stale; they do not start Pack automatically. The last completed
+   preview remains visible until the user explicitly runs Pack.
+3. **Predictable side effects.** Export, Extract Sprites, overwrite, install,
+   and other file-writing actions show a preflight summary. Destructive or lossy
+   actions have an explicit choice and a machine-equivalent dry-run path.
+4. **Structured failure.** Bad input produces a visible structured error and
+   leaves the application usable. A missing or corrupt source is never silently
+   replaced with stale full-resolution pixels for Pack or Export.
+5. **Capability parity, interface freedom.** GUI, CLI, MCP, and Dev API expose
+   the same product capability through interface-appropriate shapes. There is
+   no requirement that every GUI control map to one CLI flag.
+6. **Mouse complete, keyboard efficient.** Every action is reachable by mouse.
+   Common actions also have shortcuts, but shortcuts never hide the only route.
 
-2. **The live preview is the real artifact, not an approximation.** The center
-   canvas renders the session `.ntpack` (written to the tool cache) through the
-   normal engine pipeline — `nt_resource → nt_atlas → GPU pages`, drawn with the
-   sprite renderer (`SUMMARY.md §5g.4`). What the user sees on screen is literally
-   the atlas that ships. No second "preview packer" to drift out of sync.
+## 2. Workspace
 
-3. **Folder-driven inputs, live-linked.** You add **folders**, not files. Folders
-   are stored as relative paths, rescanned on open, and (Phase 8) watched.
-   Sub-folder names become sprite-name prefixes. Per-file adds are the exception,
-   not the rule. This is the load-bearing workflow across TexturePacker "smart
-   folders", Unity "packables", and gdx-tpgui directory inputs
-   (`unity-raylib.md`: removing folder support caused user backlash).
+The primary workspace remains a three-region desktop layout:
 
-4. **Never silently wrong — pack per target, down to what each format can hold.**
-   The project stores the full desired feature set; each export target packs with
-   `project ∩ target capabilities` (`SUMMARY.md §5h`). Exporting to a format that
-   can't represent a flip or a polygon is **not an error the user must fix** — the
-   target automatically uses the best it can, and only genuine metadata loss
-   (dropped pivot, flattened polygon) raises a **non-blocking notice**. Hard errors
-   are reserved for true impossibilities (a sprite larger than the target's max
-   page).
-
-5. **Feedback is non-modal and always visible.** Notices, warnings, and packing
-   stats live in a persistent panel, never a dialog that interrupts work. A dialog
-   appears only for a genuine decision (unsaved-changes, relink a missing folder).
-   Export is blocked **only** on hard errors. This is TexturePacker's
-   warnings-not-modals contract (`texturepacker.md` UI walkthrough, Lessons #9).
-
-6. **CLI ≡ GUI, field for field.** Every GUI control is one project field with one
-   CLI override flag (CLI-overrides-project semantics). If the GUI can compute it,
-   the CLI can too — anything else is a layering bug (`oss-and-architecture.md`).
-   This is enforced structurally by keeping all state in `tp_core`.
-
-7. **Portable, diffable, deterministic — safe to commit and to run on every
-   build.** Relative paths normalized to `/`; an integer schema `version` separate
-   from app version, with chained migrations; sparse storage (never write
-   defaults); sorted keys, LF, trailing newline. Outputs are byte-identical on
-   re-run, so a content-hash no-op ("up to date") is reliable and the packer is
-   safe to wire unconditionally into a build (`SUMMARY.md §5a`, §5f; against
-   free-tex-packer's absolute-path / no-migration defects).
-
----
-
-## 2. GUI layout
-
-Single fixed-layout window (no docking, no floating panels over the canvas —
-rTexPacker's lesson: floating panels occluding the canvas is a known weakness,
-`unity-raylib.md` Anti-lessons). Three regions around a hero canvas, with a menu
-bar on top and a notices strip at the bottom. Built with the engine's Clay-based
-`nt_ui` over `nt_app_run` (same shell as `examples/ui_showcase/main.c`).
-
-### 2.1 Text wireframe — a multi-atlas project open
-
-```
-┌──────────────────────────────────────────────────────────────────────────────────────┐
-│ File   Edit   View   Help                              game.ntpacker_project  ●unsaved │  (A) menu bar
-├──────────────────────────────────────────────────────────────────────────────────────┤
-│ [New] [Open] [Save]   │  [+ Folder] [+ Files]   │  [Pack]  [Export All]   ⟳ auto-pack☑ │  (B) toolbar
-├───────────────┬──────────────────────────────────────────────────────┬─────────────────┤
-│ ATLASES       │  ATLAS PAGE — "hero"                    page 1 / 3     │ SETTINGS · hero │  (C)(D)(F)
-│ ┌───────────┐ │ ┌──────────────────────────────────────────────────┐ │ ▾ Basic         │
-│ │ hero    ◀ │ │ │                                                  │ │ Algorithm [MaxR▼]│
-│ │ ui        │ │ │        (page texture @ zoom, checkerboard)       │ │ Max size  [2048]│
-│ │ fx        │ │ │        selected sprite highlighted               │ │ Padding   [ 2 ] │
-│ └───────────┘ │ │                                                  │ │ Trim      [Trim▼]│
-│ [+ Atlas] [⋯] │ │                                                  │ │ ▾ Advanced      │
-│               │ └──────────────────────────────────────────────────┘ │ Extrude   [ 0 ] │
-│ SPRITES  🔍   │  Overlays: ☑outline ☐trim ☐pivot   Zoom [-][100%][+][fit] Rotation  [☑] │
-│ ┌───────────┐ │  128 sprites · 3 pages · 2048² · 71% filled · packed 34ms  Multipack [☑] │
-│ │▾📁 enemies│ │                                                      │ ...             │
-│ │ ▾📁 tank  │ │                                                      ├─────────────────┤
-│ │   walk_01 │ │                                                      │ EXPORT TARGETS  │  (G)
-│ │   walk_02⚠│ │                                                      │ ☑ json-neotolis │
-│ │ ▸📁 slime │ │                                                      │ ☑ defold        │
-│ │▸📁 ui     │ │                                                      │ ☑ .ntpack (auto)│
-│ └───────────┘ │                                                      │ [+ Target] [⋯]  │
-├───────────────┴──────────────────────────────────────────────────────┴─────────────────┤
-│ NOTICES (2)   ⚠ defold · hero: pivot dropped on 3 sprites (format has no pivot)  ⓘ …  ▾ │  (H)
-└──────────────────────────────────────────────────────────────────────────────────────┘
+```text
+project/atlas/source tree | pack or source canvas | contextual inspector
+--------------------------------------------------------------------------
+status, notices, job progress, connection and freshness
 ```
 
-### 2.2 Regions and widget mapping
+- The left region answers “what am I editing?”
+- The center answers “what does the selected source/result look like?”
+- The inspector answers “what can I change or run here?”
+- The status/history surfaces answer “what happened, who changed it, and is the
+  visible result current?”
 
-| # | Region | Purpose | `nt_ui` widget(s) | Notes / gaps |
-|---|--------|---------|-------------------|--------------|
-| A | Menu bar | File/Edit/View/Help | Row of `nt_ui_button` triggers + `nt_ui_menu` (`nt_ui_menu_begin`/`item`/`submenu`) per menu; dirty marker via `nt_ui_label` | **Minor gap:** `nt_ui_menu` is cursor/right-click-anchored (context menu). A click-driven top menu bar works by setting the menu's `st.open=true` + `anchor_x/y` from the button's bbox — buildable, slightly against the grain. |
-| B | Toolbar | New/Open/Save, Add folder/files, Pack, Export All, auto-pack toggle | `nt_ui_button` (icon+label via `_begin`/`_end` content), `nt_ui_toggle` for auto-pack | Icons come from the app's own baked UI atlas. |
-| C | Atlas list | Select / add / remove / rename atlases in the project | `nt_ui_vlist` (one row per atlas) inside `nt_ui_scroll`; active row = accent fill; per-row `nt_ui_menu` for rename/duplicate/delete; `nt_ui_button` "+ Atlas" | Recommended over a top **tab strip**: `nt_ui_tabbar` tabs are single-click ids with no per-tab close/reorder affordance (see §2.3 gap 6). A left list carries per-row controls cleanly and scales to many atlases (gdx-tpgui "packs" model, `spine-libgdx.md`). |
-| D | Sprite tree | Folders + sprites of the **selected** atlas, live-linked | Flattened indented `nt_ui_vlist`; per-row chevron `nt_ui_button` toggles game-owned expand/collapse; folder/sprite icon via `nt_ui_image`; filter box via `nt_ui_input` | **PRIMARY GAP:** there is **no tree widget** — `nt_ui_vlist` is a flat fixed-extent virtualized list. Model the tree game-side: keep expansion state, compute the visible flat row set each frame, feed it to the vlist with per-row indent. Standard immediate-mode tree; see §2.3 gap 1. |
-| E | Preview canvas | Render the current atlas page at zoom/pan with overlays | `nt_ui_custom` (CUSTOM element) whose handler draws the page texture (sprite renderer) + overlays (shape renderer) at a game-owned zoom/pan; selection via `nt_ui_events` hit-test on the canvas | **PRIMARY GAP:** no built-in pan/zoom canvas. Assemble it: the CUSTOM handler already gets a `world_mat4`; multiply in game-owned zoom+pan. Overlays (region outlines / trim rects / pivot markers) are shape-renderer draws in the same handler. `ui_showcase` proves CUSTOM handlers (radial widgets). See §2.3 gap 2. |
-| E' | Page bar | Page switcher, zoom, overlay toggles, live stats | `nt_ui_tabbar` HORIZONTAL or prev/next `nt_ui_button` + `nt_ui_label` for pages; `nt_ui_button` ± / fit for zoom; `nt_ui_checkbox` per overlay; `nt_ui_label` for stats | Multipack pages as tabs above/below the canvas mirrors TexturePacker. |
-| F | Settings panel | Per-atlas settings, grouped Basic / Advanced | `nt_ui_scroll` column of: `nt_ui_dropdown` (algorithm, trim mode, size constraint), `nt_ui_input` numeric or `nt_ui_slider_int` (max size, padding, extrude), `nt_ui_checkbox`/`nt_ui_toggle` (rotation, multipack, force-square); section headers via `nt_ui_button` toggling a game-owned `bool` that gates the block; `nt_ui_tooltip` on every control | **Minor gap:** no accordion/collapsible-group widget — build "Basic"/"Advanced" disclosure from a header button + conditional block. Progressive disclosure per TexturePacker. |
-| G | Export targets | Enable/configure per-target exporters + output paths | `nt_ui_vlist`/rows of `nt_ui_checkbox` (enable) + `nt_ui_dropdown` (exporter id) + `nt_ui_input` (out path/prefix); capability-driven greying via `enabled=false`; add/remove `nt_ui_button` | Two user-facing targets `json-neotolis`, `defold`; `.ntpack` always produced (`SUMMARY.md §6 Q5`). Greying = TexturePacker capability-flag gating. |
-| H | Notices panel | Non-blocking notices/warnings/errors, collapsible | `nt_ui_scroll`/`nt_ui_vlist` of rows (`nt_ui_image` severity icon + `nt_ui_label`); header toggles expand/collapse; click a row → focus the offending sprite/target | Never a modal (principle 5). Severity color: notice/warning/error. |
+Responsive contraction may collapse secondary panels, but it must not remove
+the current project/atlas identity, primary action, error state, or freshness.
 
-Cross-cutting widgets: `nt_ui_modal` for unsaved-changes confirm / relink-missing
-/ About; `nt_ui_progress` during an async pack; `nt_ui_tooltip` throughout.
+## 3. Project and session state
 
-### 2.3 Engine-widget gaps (GUI-phase risks)
+### 3.1 Dirty and saved
 
-Ordered by risk. "Primary" items are real build work Phase 6 must budget; the rest
-are minor glue.
+Dirty state compares current semantic project state with the saved baseline.
+Save does not create an Undoable model operation and does not change revision.
+The History surface may show a non-Undoable Save checkpoint.
 
-1. **Tree view — no widget (PRIMARY).** Sprite folders need an expandable tree;
-   `nt_ui_vlist` is flat. Mitigation: game owns a folder model + per-node expanded
-   bit; each frame flatten visible nodes → feed `nt_ui_vlist` with an indent level
-   per row and a chevron `nt_ui_button`. Well-trodden immediate-mode pattern, but
-   it is code we write, not a widget we call.
+The title/status area shows at least:
 
-2. **Zoom/pan preview canvas — no widget (PRIMARY).** Center preview must be a
-   `nt_ui_custom` element with game-managed zoom/pan and shape-renderer overlays.
-   The CUSTOM path exists and is proven (`ui_showcase` radials), but the
-   pan/zoom/selection math and overlay drawing are ours to build.
+- project path or `Unsaved project`;
+- saved/modified;
+- live integration connected/disconnected when Epic A is present;
+- source errors count;
+- Pack running/current/stale/not yet run.
 
-3. **OS-native file/folder dialogs — none in engine (PRIMARY, external dep).**
-   "Add folder" is the load-bearing input flow and there is no engine dialog. Must
-   vendor `tinyfiledialogs` (or Win32/GTK/Cocoa) as ROADMAP Phase 6 already flags.
-   Do **not** hand-roll an in-canvas file browser (rTexPacker's explicit lesson).
+### 3.2 History
 
-4. **OS file-drop onto the window — verify.** Drag-and-drop of folders onto the
-   window is the nicest add-input affordance (TexturePacker, gdx-tpgui). Confirm
-   whether the engine window/input layer surfaces a GLFW drop callback; if not,
-   the Add-folder dialog is the fallback and drop is a post-v1 nicety.
+Undo/Redo labels describe one semantic transaction, for example:
 
-5. **Menu bar — minor.** `nt_ui_menu` is context-menu-first; a top menu bar needs
-   the open+anchor glue in gap-note (A).
-
-6. **Closable / reorderable atlas tabs — minor.** `nt_ui_tabbar` tabs are single
-   click ids: no per-tab close "×" or drag-reorder. Resolution: use the left atlas
-   **list** (region C) with a per-row `⋯` menu instead of top tabs; if tabs are
-   still wanted for atlas switching, keep add/remove out of the tab and in a
-   separate control.
-
-7. **Collapsible sections / accordion — minor.** No group-disclosure widget; build
-   Basic/Advanced from a header button + conditional block (region F).
-
-8. **Draggable split-pane dividers — minor / nice-to-have.** No splitter widget;
-   panel widths are fixed Clay proportions. A resizable divider = a thin element +
-   `nt_ui_events` drag → game-owned width. Ship fixed proportions for v1.
-
-9. **Numeric stepper / color picker — minor.** No spinner or color widget. Numeric
-   fields = `nt_ui_input` (numeric filter) or `nt_ui_slider_int`; background/preview
-   color = preset swatch `nt_ui_button`s. Compose from what exists.
-
-10. **Docking — intentionally absent.** Not a gap: single fixed window is the
-    correct model (rTexPacker existence proof, `unity-raylib.md` Lessons #1). Noted
-    so no one tries to add it.
-
-### 2.4 Canvas rendering — exactly what is drawn (owner Q&A 2026-07-10)
-
-The canvas draws the **real packed page texture** (principle 2), so baked
-transforms are inherently visible: a rotated/flipped sprite *is* rotated/flipped
-in the page pixels. On top of the pixels, overlay draws (shape renderer, all
-data straight from `tp_result`):
-
-- **☑ outline** — each region's true placement silhouette in page space. For
-  RECT shapes that's the frame rect; for CONVEX/CONCAVE shapes it is the **actual
-  hull polygon** (`tp_sprite.verts` mapped through the D4 `transform` to page
-  coords) — the user sees exactly the concave outline the packer nested, not a
-  bounding box.
-- **☐ trim** — trimmed rect vs. original source bounds.
-- **☐ pivot** — pivot markers (may sit outside the frame).
-- **Transform indication** — hover/selection readout shows the sprite name +
-  size + explicit transform decode ("rot 90°", "flip H", "rot 90° + flip V", or
-  "—"); sprite-tree rows carry a compact badge (↻ / ⇋) for any non-identity
-  transform so rotated/flipped sprites are findable without hovering the canvas.
-- **Selection sync** — click a region on the canvas ⇄ selects the row in the
-  sprite tree, and vice versa; selected region gets an accent outline.
-
-Multiple atlases: one atlas at a time on the canvas — the selected row in the
-atlas list (region C) drives the sprite tree, canvas pages, settings, and stats.
-Each atlas is an independent object in the project (own sources, settings,
-animations); pages within the selected atlas switch via the page bar (E').
-
----
-
-## 3. Key flows
-
-Each flow names the frontend actions and the `tp_core` call behind them.
-`tp_pack(settings, arena) -> tp_result` runs on a **worker thread** in the GUI
-(ROADMAP Phase 6); `nt_ui_progress` shows during; the preview swaps when it
-returns. Repacks are **debounced** (~150–300 ms) and **committed on release** for
-sliders (the `nt_ui_slider_*` header documents the `released_now` commit pattern)
-so a drag does not repack every frame.
-
-### 3.1 First run / new project
-1. Launch `ntpacker-gui` with no file → empty state: toolbar + an empty-project
-   hint in the canvas ("Add a folder to start"), one default atlas `atlas1`.
-2. `File → New` (or the hint's Add-folder button) → asks for a save location only
-   at first save (project stays in-memory until then; paths relativize once a save
-   path exists).
-3. Result: an in-memory `.ntpacker_project` (schema `version:1`) with one empty
-   atlas and no sources.
-
-### 3.2 Add folder → auto pack → preview
-1. Toolbar `+ Folder` → OS-native folder dialog (gap 3) → the chosen path is
-   stored **relative to the project file**, added to the selected atlas's
-   `sources`.
-2. `tp_core` scans the folder (recursive, honoring `ignore` globs), builds the
-   sprite tree; sub-folder names become name prefixes.
-3. If **auto-pack** is on (default), a pack job kicks off immediately; else the
-   user presses **Pack**. `tp_pack` runs → writes session `.ntpack` → the canvas
-   loads and renders page 1.
-4. The sprite tree (region D) fills; the stats line shows sprite/page/size/fill.
-
-### 3.3 Tweak a setting → live repack
-1. Change a control in Settings (e.g. Padding via `nt_ui_slider_int`, or Algorithm
-   via `nt_ui_dropdown`). The change writes the atlas's project field.
-2. On **release** (sliders) or immediately (dropdown/checkbox), a debounced pack
-   job runs for the affected atlas only. Cached source decode/trim is reused
-   (`SUMMARY.md §5f` — decoded+trimmed images cached by file hash), so only layout
-   re-runs.
-3. Canvas + stats + notices refresh. Project is marked dirty (● in the menu bar).
-
-### 3.3b Pack/Export button state & staleness (owner feedback 2026-07-10)
-
-Two independent dirty bits, surfaced differently:
-
-- **Project dirty** (unsaved to disk): ● next to the project name in the menu
-  bar (§2.1 A). Cleared by Save.
-- **Preview stale** (sources/settings changed since the last successful pack):
-  any model mutation — add/remove image or folder, any setting change — sets it.
-  Cleared only by a successful `tp_pack` run.
-
-Surfacing the stale bit:
-1. **Pack button state**: normal when preview is current; **accent/highlighted
-   with a "stale" badge** when a repack is needed; a spinner/progress state while
-   packing. Tooltip (`nt_ui_tooltip`) always explains: current → "Atlas is up to
-   date (packed 34 ms ago)"; stale → "Sources or settings changed — press to
-   repack"; packing → "Packing…".
-2. **Canvas watermark**: while stale, the canvas dims slightly and shows a
-   corner tag "outdated — press Pack" so the on-screen atlas is never mistaken
-   for the current settings' result. (With auto-pack ON the stale window is a
-   debounce tick, so the tag barely flashes.)
-3. **Export honors staleness**: Export All on a stale preview first repacks
-   (per-target anyway, §3.5) — it never writes files from a stale layout; its
-   tooltip says what it will write and where.
-4. Semantics recap (tooltips carry this): **Pack** = repack now with current
-   project settings and refresh the preview (session `.ntpack` only, no files
-   exported). **Export All** = pack per enabled target (∩ capabilities) and
-   write that target's files to its output path.
-
-### 3.3c Undo/redo (owner decision 2026-07-10: required)
-
-Snapshot-based history, not command objects. The deterministic project
-serializer (tp_project save-to-buffer) makes snapshots trivially correct and
-cheap (projects are KBs):
-
-- Every model mutation already funnels through one choke point (the GUI's
-  `touch` wrapper) — it pushes the PRE-mutation serialized snapshot onto the
-  undo stack and clears the redo stack. Undo = deserialize snapshot back into
-  the live model (GUI selection re-clamped); redo = mirror stack.
-- **Coalescing:** continuous gestures (slider drags, text typing) snapshot once
-  per gesture (on begin/commit), not per frame/keystroke.
-- Depth ~100 entries (ring); Ctrl+Z / Ctrl+Y (+ Ctrl+Shift+Z alias), Edit menu
-  Undo/Redo with greyed state and action names later (v1: plain Undo/Redo).
-- **Scale guard (owner challenge: 10 atlases × 1000 objects).** First, the
-  model keeps SOURCES + sparse overrides, not per-object entries — folder-fed
-  atlases stay tiny regardless of sprite count. The pathological case
-  (thousands of per-file sources and overrides) is ~1-2 MB of JSON. Guards,
-  in order of adoption: (1) skip-if-identical (byte-stable serialization →
-  memcmp dedup); (2) snapshots stored compressed (miniz is already in the
-  engine deps; JSON compresses 10-20×, so worst case ≈ 50-150 KB/step);
-  (3) history budget counted in BYTES (e.g. 32 MB ring), not steps — small
-  projects get deep history, huge ones shallower. Escalation only if real
-  projects still hurt: per-atlas snapshots (mutations are atlas-local; full
-  snapshot only for cross-atlas ops). Not built until measurements demand it.
-- Scope: undo covers the PROJECT MODEL only — never disk files, never the
-  packed preview directly (a restored model recomputes `preview_stale`;
-  `project_dirty` recomputes by comparing the restored snapshot to the
-  last-saved snapshot, so undoing back to the saved state clears the ● marker).
-
-### 3.3d Keyboard shortcuts (v1 set, owner-requested)
-
-Standard desktop bindings, all routed through the same actions as the menus
-(no hidden key-only behavior): Ctrl+N New, Ctrl+O Open…, **Ctrl+S Save**,
-Ctrl+Shift+S Save As…, Ctrl+Z Undo, Ctrl+Y / Ctrl+Shift+Z Redo, F5 Refresh
-(rescan sources), Ctrl+P Pack, Ctrl+E Export All, Esc closes open menus/modals
-(already live). Shortcuts shown next to their menu items. Text-input focus
-swallows keys first (no accidental global actions while typing).
-
-### 3.3e Mouse-complete access (owner rule 2026-07-10)
-
-**No keyboard-only actions, ever.** Every hotkey is an accelerator for an
-action that also exists as a menu item, toolbar button, or context-menu
-entry. Right-click opens a context menu wherever a row/object has actions
-(the engine's `nt_ui_menu` is natively cursor-anchored — this is its home
-turf):
-
-- Atlas row: Rename, Remove (later: Duplicate).
-- Sprite/source row: Rename, Remove; multi-selection adds
-  "Create animation from selection" (§3.7b).
-- Animation row: Rename, Remove (later: Duplicate).
-- Canvas (later phases): overlay toggles, zoom fit/100%.
-Context-menu entries trigger the SAME code paths as menus/hotkeys (inline
-rename editor, etc.) — no parallel behaviors.
-
-### 3.3f Invalid / unsupported setting combinations (owner question 2026-07-10)
-
-The engine builder ABORTS (`NT_BUILD_ASSERT`) on bad input and has no error-text
-API, so the tool enforces safety in layers — a crash is never an acceptable
-outcome, at any layer:
-
-1. **Core (`tp_pack`) validates everything** before the builder runs and returns
-   a status + human-readable message (`tp_pack.c validate_settings`). This is
-   the safety net for hand-edited project files and the CLI. Known constraints
-   (from `nt_builder.h`):
-   - `extrude > 0` requires `shape == RECT` — the packer reserves space for the
-     silhouette envelope, not an extrude band around the trim rect. Non-RECT
-     shapes must use `padding` instead.
-   - `max_vertices` ∈ [1..16] (engine hard cap; default 8).
-   - `max_size` ∈ [1..16384] (`NT_BUILD_MAX_TEXTURE_SIZE`, raised from the
-     engine's mobile-safe 4096 via a build-wide define — owner ruling
-     2026-07-10; format-exact per plan §2.5 up to ~32K, memory is the real
-     ceiling: an RGBA 16384² page is 1 GiB). Default stays 2048; values over
-     4096 get an inline info line "may not load on mobile GPUs / stock engine
-     runtime".
-   - `alpha_threshold` ∈ [0..255]; `padding/margin/extrude` ≥ 0;
-     `pixels_per_unit` > 0 and finite.
-   - Sprite names unique and non-empty; files must exist.
-   - Slice-9 is NOT an error case: the engine auto-forces that sprite to
-     RECT + no-rotate (documented in `nt_builder.h`); the GUI surfaces this as
-     an info line in the region params, never a warning.
-2. **GUI makes invalid states unreachable.** The settings panel (region F)
-   never offers a combination the core would reject:
-   - Numeric fields clamp to their valid range at input time (spinner/slider
-     bounds = the ranges above).
-   - **Dependent controls disable, values persist**: with `shape != RECT` the
-     Extrude control is greyed out with inline text "Extrude requires Rect
-     shape — use Padding for polygon modes". The project KEEPS the stored
-     extrude value (switching shape back restores it); the GUI passes
-     `extrude = 0` to `tp_pack` while the control is disabled. Same pattern for
-     any future dependent knob.
-   - A disabled-with-reason control is the standard pattern; hiding controls or
-     silently zeroing stored values is forbidden (owner must see what exists
-     and why it's off).
-3. **If the core still rejects** (hand-edited project, future skew between GUI
-   and core): Pack fails softly — status-bar error with the core's message,
-   preview keeps the last good atlas, stale badge stays on. Never a dialog loop,
-   never a crash.
-4. **CLI**: same core message on stderr, non-zero exit (§4.4).
-
-### 3.3g Per-region packing overrides (owner ruling 2026-07-10)
-
-The settings model is two-level, mirroring the engine: **atlas settings +
-optional per-region overrides** (`nt_atlas_sprite_opts_t`: shape, allow_rotate,
-max_vertices, margin, extrude — engine encodes 0 = inherit). The Region panel
-carries a "Packing overrides" subsection where every control follows the
-Default/override pattern: first entry "Default (inherited: <atlas value>)",
-then explicit values. §3.3f applies per sprite (extrude override requires that
-sprite's EFFECTIVE shape = Rect). Slice-9 shows shape/rotate as
-overridden-by-slice9 (disabled, info). Project schema stores overrides
-sparsely (absent = inherit). Engine limitation, backlog candidate: an explicit
-override to 0 for margin/extrude/max_vertices is unrepresentable (0 means
-inherit in the builder API).
-
-### 3.4 Configure export targets
-1. In Export Targets (region G), toggle a target on/off (`nt_ui_checkbox`), pick
-   its exporter id (`nt_ui_dropdown`: `json-neotolis` / `defold`), set its output
-   path/prefix (`nt_ui_input`).
-2. Controls the target's format **cannot represent** are greyed
-   (`enabled=false`) — e.g. selecting `defold` greys D4-flip-only options; this is
-   informational, the pack still down-packs automatically (principle 4).
-3. `.ntpack` is always present as an auto target (can't be removed; it is the
-   interchange used for preview and the always-shipped engine artifact).
-
-### 3.5 Export all
-
-**Amendment (owner ruling 2026-07-10): Export ALWAYS opens an Export dialog
-first** — never silently writes to configured paths. The dialog is a front-end
-over the same target model (region G): per atlas, one row per target with
-enabled checkbox, exporter id, and an editable out path (browse via save
-dialog, relativized to the project); edits write back through the touch choke
-point (dirty + undo). Footer: "N targets enabled across M atlases", [Export] /
-[Cancel] (Esc). Empty state links to adding a target in region G. Triggers:
-strip button, File > Export…, Ctrl+E.
-
-1. Toolbar **Export All** → (after dialog confirm) for each enabled target, `tp_core` packs with
-   `project ∩ target capabilities` (targets with identical effective settings
-   share one pack run) and writes the target's files under its output path.
-2. Progress via `nt_ui_progress`; per-target results and metadata-loss notices
-   land in the notices panel. **Output-overlaps-input safety check**: refuse to
-   write into a directory that contains source files, with a clear error
-   (gdx-tpgui's safeguard, `spine-libgdx.md`).
-3. On success: a transient "Exported N targets" notice; on hard error (doesn't
-   fit, missing exporter/template): a red notice and that target is skipped, others
-   still export.
-
-### 3.6 Reopen a project
-1. `File → Open` a `.ntpacker_project`. Loader refuses a **newer** schema with a
-   clear message; runs chained migrations for older (`SUMMARY.md §5a`).
-2. All source folders are **rescanned** on open (never trust a stale file list);
-   new art added on disk since last save appears automatically (live-linked
-   folders).
-3. Absolute paths (if any snuck in) are accepted on load, **relativized on next
-   save**, with a one-line notice.
-
-### 3.7 Missing-files handling
-Principle: missing inputs are **visible but never fatal** to the pack (contrast
-free-tex-packer, whose absolute paths silently break on another machine).
-1. **Missing folder source** (path gone): a warning notice + the folder row offers
-   **Relink** (folder dialog → repoint) or **Remove**. Packing continues with the
-   remaining sources.
-2. **Missing pinned file**: warning notice; the sprite row shows a "missing" badge
-   (⚠ in the wireframe); its per-sprite overrides are **kept**, not deleted (so a
-   restored file re-binds — TexturePacker keeps `individualSpriteSettings`).
-3. **Override referencing an absent sprite name**: kept sparse in `sprites[]`, shown
-   as an orphaned-override warning; never auto-purged.
-4. **Empty atlas** (all inputs gone): the atlas packs to nothing → a warning, not a
-   crash. CLI: a report note + stderr line; the atlas is skipped, which is **not**
-   by itself a failure — exit stays whatever the rest of the run earned (§4.4).
-
-### 3.7b Animations — assemble, edit, preview (owner requirement 2026-07-10)
-
-Model follows Defold's atlas exactly: an atlas holds named flipbook animations;
-every single image is implicitly also a 1-frame animation (Defold sprites
-always reference an animation id — upstream `basic.collection` uses both
-`"box_small_128"` (single frame) and `"BoxFlip"` (flipbook) as
-`default_animation`).
-
-- **Manual assembly is the primary UX** (owner: "как в Defold"): an
-  ANIMATIONS block for the selected atlas — list + "+ Animation"; selecting
-  one opens its editor: id (inline rename), ordered frame list (add frames
-  from the atlas's sprites via multi-select picker, reorder ↑/↓, remove),
-  fps (numeric), playback (dropdown of the Defold modes), flip_h/flip_v.
-- **NO auto-grouping, NO suggestions — FINAL owner ruling 2026-07-10**
-  (supersedes the interim suggestion-row idea from earlier the same day).
-  Rationale: the `icon_1`/`icon_2` false-positive case, plus
-  `docs/research/animation-grouping.md` — every explicit-assembly tool
-  (Defold, Godot, Unity, Aseprite) ships ZERO name-based detection; the one
-  default-on auto-grouper (TexturePacker) maintains a KB article on turning
-  it off. Export emits ONLY explicit `animations[]` from the project.
-  tp_normalize's numeric-suffix grouping is REMOVED from the export path
-  (animations packet deletes it; a common-prefix/natural-sort helper
-  survives only to power the selection gesture below).
-  Instead, ASSEMBLY IS MADE FAST:
-  (a) multi-select frames in the sprite list (Ctrl/Shift-click) →
-  **"Create animation from selection"** — id derived from the common
-  prefix, frames ordered by natural numeric sort (walk_2 before walk_10);
-  (b) animation editor's "Add frames…" multi-select picker appends in
-  natural order; reorder ↑/↓; remove;
-  (c) invariant: exported region names NEVER strip numeric suffixes — the
-  libGDX/Phaser runtime-convention path keeps working alongside explicit
-  animations.
-- **Playback enum pinned to Defold's set** (tp_core enum + GUI dropdown +
-  Phase 5 .tpatlas mapping): once_forward (default 0), loop_forward,
-  once_backward, loop_backward, once_pingpong, loop_pingpong, none.
-- **Animation preview player** in the canvas: selecting an animation plays
-  it at its fps with its playback mode — play/pause, frame step, current
-  frame indicator ("3/10"), honors flip_h/v. Pre-pack it plays from source
-  images (decode cache); post-#282 the same player runs on packed regions,
-  which also visually validates trims/pivots in motion.
-- Defold verification: upstream extension examples already play `.tpatlas`
-  animations in stock Defold (see above); OUR generated `.tpatlas` is proven
-  the same way in the Phase 5 demo (bob-built in CI; acceptance: "walk
-  animation plays").
-
-### 3.8 Later phases
-
-**Pivot editing (post-v1).** Select a sprite in the canvas (`nt_ui_events`
-hit-test) → toggle **Edit pivot** → drag a pivot marker on the canvas
-(custom-draw handler reads/writes a game-owned normalized pivot, off-frame allowed
-per the model in `SUMMARY.md §5d`); numeric X/Y via `nt_ui_input` (numeric). On
-release, write into the sparse `sprites[]` override. **Make the edit mode
-explicit** — a visible "Editing pivot · Esc to finish" banner — rather than a
-hidden key-state (rTexPacker's modal-key-state is the "mixed" lesson, §5).
-
-**Watch mode (Phase 8).** GUI: the toolbar **auto-pack** toggle, when combined
-with the FS watcher, repacks on any change to a live folder (debounce + coalesce);
-preview and notices update. CLI: `--watch` reuses the same watcher and pack job.
-
----
-
-## 4. CLI UX (`ntpacker`) — as built
-
-Headless, CI-first. One console binary `ntpacker`; the windowed sibling is
-`ntpacker-gui` (`SUMMARY.md §6 Q7`). All persistent state is the project file; the
-CLI does argv + disk I/O only and calls the same `tp_core` the GUI does — so CLI
-output byte-matches the library test and the GUI (ROADMAP Phase 4 acceptance —
-now a real ctest, CLI==core byte-parity, `apps/cli/cli_parity.cmake`).
-
-This section is the SHIPPED contract, not the original design — the plan
-(`docs/plans/op-layer-and-cli.md`, lead ruling L-1) states the implemented CLI
-supersedes the pre-implementation design this section used to describe. Source
-of truth for exact verb/flag text: `apps/cli/main.c` (`print_usage`); for JSON
-payload shapes: `docs/formats/cli-report.md`.
-
-> **Naming note (resolved, 2026-07-10).** **`pack`** is the canonical verb
-> (ecosystem norm — rTexPacker/gdx/texpack; ROADMAP deliverable); **`export`**
-> is accepted as an alias.
-
-### 4.1 Verbs
-
-```
-ntpacker pack <project> [--atlas <name>] [--target <id>] [--out-dir <dir>] [--dry-run] [--json] [--quiet]   # alias: export
-ntpacker inspect <project> [--json] [--quiet]                          # dump project state
-ntpacker validate <project> [--json] [--quiet] [--strict]              # every problem, one pass
-ntpacker new <path>                                                    # create a project (seeded default target)
-
-ntpacker add <project> <atlas> <path>...                               # add image/folder source(s)
-ntpacker remove <project> <atlas> <source>                             # remove a source
-ntpacker set <project> <atlas> <key>=<value>...                        # atlas knobs
-ntpacker sprite set <project> <atlas> <name> <field>=<value>...        # per-sprite override (field=inherit clears)
-ntpacker sprite unset <project> <atlas> <name>                         # clear a sprite's whole override
-ntpacker anim create|remove|list|add-frame|remove-frame|move-frame|set <project> <atlas> ...
-ntpacker target add|remove|set <project> <atlas> ...                   # export targets
-ntpacker atlas add|remove|rename <project> ...                         # atlases, by name
-
-ntpacker version [--json] | --version | --help | help
+```text
+Create enemy animations
+Replace linked atlas with extracted folder
+Set max page size
 ```
 
-`pack` with no flags packs every atlas to every enabled target — the whole CI
-story is one line. `--atlas`/`--target` each take a single value (not
-repeatable — see §4.2).
+One external multi-operation transaction appears as one History entry and is
+undone once. Snapshot-based history is only a migration oracle for the current
+implementation; it is not the target UX contract.
 
-`info` (the read verb in the pre-implementation design) was **superseded by
-`inspect`** before it shipped — same job, a name that doesn't read like an
-"info level" and sits better next to `validate`.
+### 3.3 Pack freshness
 
-`watch` is **NOT implemented**. It stays on the roadmap for **Phase 8**
-(`docs/ROADMAP.md`), landing together with the content-hash cache it depends
-on — there is no "did anything change" signal to watch against yet.
+The canvas keeps the last completed result visible when it becomes stale.
+Staleness is prominent but non-modal:
 
-Every mutation verb (`add` through `atlas`) maps 1:1 to an existing
-`tp_project_*` mutator (plan "CLI v1 contract") — load, mutate, save.
+- `Current` — preview hash matches current Pack inputs;
+- `Stale` — project/source inputs changed after this result;
+- `Running` — a Pack job is computing from an immutable snapshot;
+- `No result` — no usable completed result exists;
+- `Failed` — latest Pack failed; the last older result may remain viewable and
+  must retain its own stale/current identity.
 
-### 4.2 Flags (mirror project fields; CLI overrides project)
+Running Pack results never silently replace a newer user-selected result.
 
-| Flag | Effect |
-|------|--------|
-| `--atlas <name>` | Pack only this atlas. Single value, **not repeatable** (last one given wins); unknown name is a usage error. `pack`-only. |
-| `--target <id>` | Export only targets with this exporter id. Single value, **not repeatable**; default: all enabled. `pack`-only. |
-| `--out-dir <dir>` | Re-root RELATIVE target out_paths under `<dir>` (resolved against the CWD) instead of the project dir; absolute out_paths are untouched. `pack`-only. |
-| `--dry-run` | Report what `pack` WOULD do — pages, would-write paths, every predicted degradation — and write NO files (no directories created either). `pack`-only. |
-| `--at <N>` | Insert at index N. `anim add-frame`-only (default without it: append). |
-| `--json` | Machine-readable output; every verb's payload carries `"schema": N` (`docs/formats/cli-report.md`). |
-| `--quiet` / `-q` | Suppress stderr progress/notice lines; errors still report. |
-| `--strict` | `validate`-only: exit 7 if any error-severity finding exists. |
-| `--version`, `--help` | Standard; short-circuit any verb. |
+## 4. Sources
 
-A flag scoped to one verb is a **usage error, exit 2** on any other verb (e.g.
-`--dry-run` on `inspect`, `--strict` on `pack`).
+Source rows show type, display name/path, runtime health, and whether the source
+is read-only. The target source model includes path files, path folders, and
+linked atlases.
 
-Stable identifiers everywhere (`json-neotolis`, never `"JSON (Neotolis)"`) —
-free-tex-packer's display-string-as-id was a documented CLI wart
-(`oss-and-architecture.md`).
+Watcher events refresh runtime status and thumbnails automatically. They do not
+change revision, dirty state, or Undo history and do not start Pack. Manual
+Refresh remains available and forces verification.
 
-**Superseded / deferred — not implemented, listed so nobody assumes otherwise:**
-- **`--save [<path>]`** (write CLI overrides back to the project) was
-  **superseded by the mutation verbs** before it shipped (plan ruling L-1):
-  `set`/`sprite set` and friends name the field being changed directly —
-  strictly better for scripted edits than an override-then-save round trip
-  that replays a `pack` invocation's flags.
-- **`--force`** (bypass a content-hash cache) is **Phase 8** work. No cache
-  exists yet, so today every `pack` is already a full pack — there is
-  nothing to force past.
-- **`--watch`** is **Phase 8** work, same dependency as `--force`.
-- **`--verbose` / `-v`** is **deferred**. The engine's default log writer
-  sends INFO-level lines to stdout, which would corrupt a `--json` payload;
-  a verbose mode needs an engine log-writer opt-out before it can coexist
-  with `--json`. `--json` payloads are already complete today — a verbose
-  mode wouldn't add fields, only more human-readable progress detail, which
-  is stderr-only text for now.
+For a missing or corrupt source:
 
-### 4.3 Output conventions
+- keep persisted project metadata;
+- show the error on the source and affected sprites;
+- a last-good thumbnail may remain visible with a stale/error badge;
+- Pack, Export, and Extract retry the current files and fail clearly if the
+  source is still unavailable.
 
-- **Streams:** stdout carries the requested payload **only** — human-readable
-  summary text by default, or the JSON payload with `--json`. stderr carries
-  diagnostics: progress lines, human-readable notice echoes, and errors. An
-  agent pipes stdout straight into a parser without filtering anything out.
-- **Progress** (default, not `--quiet`): one line per atlas/target pair, e.g.
-  `ntpacker: hero / defold: ok (3 files)`, `ntpacker: hero / defold: FAILED:
-  <message>`, or on a dry run `ntpacker: hero / defold: would write 3 files
-  (dry-run)`.
-- **Notices are structured data, not severity-prefixed lines.** Each notice is
-  `{field, reason, sprite?, message}` inside the pack report's per-target
-  `notices[]` array (`docs/formats/cli-report.md`) — genuine metadata loss
-  (dropped pivot, polygon → rect, …) on a real run, or predicted losses on
-  `--dry-run`. In human mode the same notices are also echoed to stderr as
-  `ntpacker: notice: <message>` lines; there is no `warning:`/`error:` prefix
-  tier for pack notices — severity as a concept lives in `validate`'s
-  findings instead (next bullet).
-- **`validate` findings** are the other structured-data surface: each is
-  `{severity: error|warning, code, message, atlas?, sprite?, anim?, frame?,
-  target?}` with a `counts:{error,warning}` summary — one run reports every
-  problem, not one per invocation (ai-first.md item 7).
-- **No "up to date" cache behavior today.** There is no content-hash cache
-  (§4.2), so every `pack` does full work; the "unchanged inputs → no-op, safe
-  to call every build" behavior is **Phase 8** (roadmap note under §4.5).
+Linked-atlas regions are visibly read-only. Users may change source-level import
+settings and format selection, but not edit a derived region in place.
 
-### 4.4 Exit codes
+## 5. Pack and export
 
-The full 8-code contract (`apps/cli/cli_exit.h`; plan ruling L-1 — this table
-supersedes the 3-code sketch this section used to describe):
+The main Pack action is always explicit. Target preview and Export show the
+selected format, data version/profile, adaptation notices, metadata losses, and
+affected sprites before files are written.
 
-| Code | Meaning |
-|------|---------|
-| `0` | Success — the requested work completed. Includes a pack that only emitted notices, and `validate` findings when `--strict` is not set. |
-| `1` | Internal error — an unexpected failure (a `tp_core` call failed where it should not). |
-| `2` | Usage error — unknown verb/flag, missing or malformed arguments, no command. Note: usage error is **2**, not 1. |
-| `3` | Project file load/parse error (bad JSON, schema newer than the tool). |
-| `4` | Pack failure (`tp_pack` / the builder returned an error) — nothing produced for that atlas. |
-| `5` | Export failure (writing an enabled target's output failed) — nothing produced for that target/run. |
-| `6` | Partial success — some atlases/targets succeeded, others failed. |
-| `7` | `validate` found problems **and** `--strict` was passed (otherwise findings live in the payload at exit 0). |
-| `8+` | Reserved — a future distinct failure gets a new code, never an overload of an existing one. |
+Severity language:
 
-An atlas with no usable sprites or no enabled targets is **not** a failure by
-itself (§3.7 point 4) — it is skipped with a report note and a stderr line,
-and the run's exit code stays whatever the other atlases/targets earned (an
-agent should not have to hard-fail a preview-only atlas); only an actual
-pack/export failure (codes 4/5/6) makes the run non-zero. Errors are
-actionable and name the atlas + sprite/target via the structured
-`error`/finding fields (§4.3).
+- **Notice:** compatible adaptation, such as disabling unsupported transforms;
+- **Warning/loss:** valid output is possible but runtime meaning or metadata is
+  reduced;
+- **Error:** no valid artifact can be produced.
 
-### 4.5 CI recipes
+Warnings do not disable Export by themselves. A blocking error does.
 
-```bash
-# Build step — packs every atlas, every enabled target:
-ntpacker pack game.ntpacker_project
+## 6. Import and Extract Sprites
 
-# Only the Defold target, into a build output tree:
-ntpacker pack game.ntpacker_project --target defold --out-dir build/atlases
+Import format selection is visible. Exact unique detection may preselect a
+format, but the user can change it. Ambiguous input presents candidates and
+never guesses.
 
-# Validate as a CI gate — non-zero exit on any error-severity finding:
-ntpacker validate game.ntpacker_project --strict
+`Extract Sprites` asks the user only for the output folder in its primary flow.
+Before commit it presents:
 
-# Inspect project state for a downstream script:
-ntpacker inspect game.ntpacker_project --json | jq '.atlases[].name'
+- current linked atlas and selected format;
+- output file count and paths;
+- collisions, traversal or invalid-name errors;
+- overwrite policy (default: fail);
+- the project change that will replace the linked source with a folder source.
 
-# Agent dry-run — see what would be written and what would degrade, no I/O:
-ntpacker pack game.ntpacker_project --dry-run --json
-```
+All files are staged before publication. The model changes only after output is
+ready. Undo restores the linked source and metadata but does not delete published
+files; the UI says this before commit.
 
-Free, no license/EULA/floating-seat friction to script around — a deliberate
-advantage over TexturePacker's CI licensing pain (`texturepacker.md` Lessons #10).
+## 7. Live AI integration
 
-**Phase 8 (not yet shipped):** a content-hash cache (`--force` to bypass it;
-otherwise an unchanged input set prints "up to date" and does no work — safe
-to call every build) and `--watch` (repack on source-file change, debounced +
-coalesced, `Ctrl-C` exits 0). The two recipes that depended on them — a
-`--force` clean-rebuild job, and a `ntpacker watch game.ntpacker_project`
-dev-loop line — return once Phase 8 lands.
+When Epic A is present, the GUI exposes:
 
----
+- connection/authorization status;
+- the external controller identity;
+- Ask/Allow/Deny and explicit Replace Controller actions;
+- Disconnect/Revoke;
+- transaction author in History;
+- ownership handoff/recovery progress without a second writable copy.
 
-## 5. What makes packers pleasant vs painful
+The GUI and AI edit the same live unsaved project. A hidden file copy or later
+merge is not an acceptable implementation.
 
-Distilled from the research into concrete do/don't rules for us. Sources in
-parentheses.
+## 8. Current baseline and migration
 
-### Do (adopt)
+The shipped GUI already provides project editing, worker-based Pack, canvas
+inspection, settings, animations, export, manual Refresh, and snapshot Undo.
+The following target behaviors are not implied to be implemented merely because
+they are specified here:
 
-- **Live-linked smart folders + rescan-on-open** — folders are the input, not
-  files; new art is auto-picked-up (TexturePacker, Unity packables, gdx-tpgui).
-- **Live preview that is the real artifact** — instant repack in the GUI, preview =
-  the session `.ntpack` (TexturePacker live repack; `SUMMARY.md §5g`).
-- **Non-modal notices; block only on hard errors** — warnings persist in a panel;
-  export blocked only by true impossibilities (TexturePacker warnings-not-modals).
-- **Pack per target down to capability, never error on "unsupported"** — our §5h
-  twist on TexturePacker/free-tex-packer capability flags: gate/grey controls
-  **and** auto-down-pack, so exporting to a limited format is zero user action and
-  always correct.
-- **Relative, versioned, migrated, sparse project file** — portable across
-  machines/VCS; schema `version` separate from app version; never store defaults
-  (TexturePacker `.tps` relativized paths; against free-tex-packer).
-- **Settings ≡ CLI flags ≡ project fields, 1:1** — one mental model, provable
-  parity (rTexPacker settings-map-to-flags; AGENTS parity invariant).
-- **Content-hash no-op with `--force` escape hatch** — makes "run on every build"
-  free (TexturePacker `smartUpdate`, crunch).
-- **Input↔region cross-highlight + hover shows region size** — hovering a sprite in
-  the tree highlights its rect on the page and vice-versa (gdx-tpgui).
-- **Output-overlaps-input safety check** — refuse to clobber source folders
-  (gdx-tpgui).
-- **OS-native file dialogs; don't hand-roll browsing** (rTexPacker).
-- **Single-key overlay toggles** for outlines/trim/pivot — inspection without an
-  inspector (rTexPacker).
+- semantic transaction History and shared revision;
+- watcher-backed runtime source state;
+- canonical Pack hashes and result LRU;
+- linked atlas sources and Extract Sprites;
+- format selection/package diagnostics;
+- live Dev API/MCP ownership and authorization.
 
-### Don't (avoid)
+Implementation status belongs in [`../ROADMAP.md`](../ROADMAP.md), not here.
 
-- **Absolute paths in the project** — free-tex-packer's worst defect; projects
-  die on another checkout path. Relative always; accept absolute on load, warn,
-  relativize on save.
-- **Store display strings as identifiers** — free-tex-packer forced a
-  display-name→id mapping table in its CLI. Store stable ids; render labels only
-  in the UI.
-- **Conflate app version with schema version / skip migrations** — free-tex-packer
-  silently reset renamed options. Integer schema version + chained migrations.
-- **Duplicate pack/export logic between GUI and CLI** — free-tex-packer's GUI
-  didn't depend on its core, so they drifted. One `tp_core`; frontends are thin
-  (AGENTS invariant).
-- **Hidden modal key-states for editing** — rTexPacker's "mixed" verdict: edit
-  modes are fine, but make the active mode explicit (banner + Esc), not an
-  invisible global key-state.
-- **Floating panels over the canvas** — rTexPacker occlusion complaint; use fixed
-  docked panels.
-- **CLI that can't use a custom exporter because the template isn't in the
-  project** — free-tex-packer's gap. Store user-template paths project-relative so
-  they travel (relevant when Phase 7 mustache templates land).
-- **Ship without a watch mode** — every surveyed OSS packer lacks it; it's our
-  cheapest differentiator (`spine-libgdx.md`, `oss-and-architecture.md`).
+## 9. Verification
 
----
+Every UX packet must include:
 
-## Open UX questions for the owner
+- a core/contract test for behavior, not only a screenshot;
+- GUI self-test or deterministic interaction coverage for the visible state;
+- mouse-only and shortcut paths for primary actions;
+- structured error/loss examples;
+- confirmation that frontend code does not reimplement operation or capability
+  rules;
+- visual regression evidence when layout or drawing changes.
 
-1. **CLI verb** — resolved (owner, 2026-07-10): `pack` (this doc, ROADMAP) vs
-   `export` (task packet)? **`pack` is canonical; `export` ships as a supported
-   alias.**
-2. **Atlas switcher** — resolved (owner, 2026-07-10): left **list** (per-row
-   controls, scales) vs top **tab strip** (closer to TexturePacker but
-   `nt_ui_tabbar` can't carry a per-tab close/reorder)? **Left vlist confirmed.**
-3. **stdout contract** — resolved (owner, 2026-07-10): reserve stdout for a
-   future machine-readable (`--json`) summary now, or send progress there?
-   **Confirmed: stdout stays reserved for the future `--json` summary; progress
-   goes to stderr (§4.3).**
-4. **OS file-drop** — resolved (owner, 2026-07-10): is drag-drop onto the
-   window a v1 target, or is the Add-folder dialog sufficient for MVP?
-   **Deferred post-v1 — the Add-folder dialog suffices for v1; whether the
-   engine surfaces the GLFW drop callback still needs verification before any
-   post-v1 drop-support work starts.**
-5. **Panel resize** — resolved (owner, 2026-07-10): fixed proportions for v1
-   (recommended) or invest in a draggable splitter early? **Fixed proportions
-   ship in v1; a draggable splitter is deferred to later.**
+Historical audits and visual proposals under `docs/design/` remain evidence,
+not active requirements, unless revalidated against this document, the master
+spec, and current code.

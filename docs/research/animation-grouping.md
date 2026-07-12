@@ -1,5 +1,9 @@
 # Animation Grouping from Image Sequences — Competitive Study
 
+> **Status: non-normative historical research.** The settled product behavior is
+> explicit animation assembly only: no automatic grouping and no suggestion
+> rows. Earlier recommendations below remain evidence, not active requirements.
+
 Research date: 2026-07-10. Focused companion to `texturepacker.md`, `spine-libgdx.md`,
 `unity-raylib.md`, and `defold.md`. Scope: how texture packers and game tools turn image
 sequences (`walk_01.png`, `walk_02.png`, …) into animations — *where* that grouping happens

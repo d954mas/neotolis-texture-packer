@@ -1,5 +1,8 @@
 # `defold` export format (`.tpinfo` + `.tpatlas`)
 
+**Status:** active as-built builtin export contract. It documents current output,
+not the future format-package manifest or importer contract.
+
 The Defold target emits the input files of the official
 [extension-texturepacker](https://github.com/defold/extension-texturepacker)
 (pinned research: `docs/research/defold.md`, extension **2.7.0** ↔ Defold

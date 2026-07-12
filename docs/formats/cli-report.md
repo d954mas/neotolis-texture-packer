@@ -1,6 +1,12 @@
 # ntpacker CLI — machine payloads (`--json`)
 
-Conventions (docs/design/ai-first.md items 2/5): every payload is a single JSON
+**Status:** active as-built CLI schema contract. Exact future operation, Dev API,
+MCP, Import/Export IR, and format-manifest schemas remain open contracts in
+[`../ntpacker-master-spec.md`](../ntpacker-master-spec.md) §60. Existing fields
+must not be renamed before the matching code, schema version, and golden tests
+migrate together.
+
+Conventions (master spec §4 and the historical ai-first ruling): every payload is a single JSON
 object on **stdout** (stderr carries diagnostics only), field names are
 **snake_case**, and every payload carries a per-verb `"schema": N` (independent
 of the project-file and export-format schema versions — those are reported by

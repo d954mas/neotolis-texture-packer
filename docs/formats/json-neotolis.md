@@ -1,5 +1,9 @@
 # `json-neotolis` export format
 
+**Status:** active as-built builtin data-format contract, schema version 1.
+Future format-package manifests and version vocabulary are governed by the
+master spec and must not silently change this wire format.
+
 The **full-fidelity** JSON descriptor for a packed atlas. It is the reference
 target: the only JSON schema that can express everything the packer produces —
 the D4 transform mask (rotations *and* flips), concave polygons, per-sprite

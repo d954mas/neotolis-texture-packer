@@ -1,5 +1,9 @@
 # Unity Sprite Atlas & raylib rTexPacker — Research Reference
 
+> **Status: non-normative point-in-time research.** Recommendations below are
+> evidence, not current architecture; see
+> [`../ntpacker-master-spec.md`](../ntpacker-master-spec.md).
+
 Research date: 2026-07-10. Companion to `texturepacker.md`. Two very different reference points for our standalone texture/atlas packer (C engine-based, CLI + GUI): Unity's engine-integrated, asset-driven atlas pipeline, and rTexPacker's tiny immediate-mode (raygui) standalone tool.
 
 ## Summary

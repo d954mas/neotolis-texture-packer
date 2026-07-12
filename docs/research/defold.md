@@ -1,5 +1,9 @@
 # Defold Atlas Pipeline & extension-texturepacker — Research
 
+> **Status: non-normative point-in-time research.** Use as format evidence and
+> fixture input; current product decisions come from
+> [`../ntpacker-master-spec.md`](../ntpacker-master-spec.md).
+
 ## Summary
 
 Defold's native `.atlas` is a **protobuf text file** (schema: `atlas_ddf.proto`) listing source PNGs + flipbook animations; bob/the editor packs it into a binary `.texturesetc` (`TextureSet`, schema `texture_set_ddf.proto`) + `.texturec` texture, with compression driven by `.texture_profiles`. The native packer supports margin/extrude/inner-padding, trimming (4–8 verts or polygons), per-image pivots (since Defold 1.9.5), multipage atlases — but **no rotation** and no pre-packed input. The official [extension-texturepacker](https://github.com/defold/extension-texturepacker) adds exactly that: it consumes a **`.tpinfo`** file (protobuf **text** format, `tpinfo.proto`) describing already-packed pages + a `.tpatlas` wrapper for animations, and compiles them to the same engine `TextureSet`, including 90° rotation, trim and polygon geometry. For a third-party packer the cheapest, most robust integration is **emitting `.tpinfo` (+ page PNGs, optionally a `.tpatlas`)** and letting users add the official extension — the format is small, documented below field-by-field, and requires no plugin maintenance from us. A fallback "unpacked" export of `.atlas` + individual PNGs covers users who refuse the extension dependency. A ~7-file demo project built headless with `bob.jar` proves the pipeline.

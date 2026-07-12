@@ -1,5 +1,9 @@
 # OSS Texture Packers & Tool-Architecture Patterns
 
+> **Status: non-normative point-in-time research.** Recommendations below are
+> evidence, not current architecture; see
+> [`../ntpacker-master-spec.md`](../ntpacker-master-spec.md).
+
 Research for a standalone C texture/atlas packer (immediate-mode UI engine, CLI + GUI in one tool, project file format, pluggable exporters). Researched 2026-07-10 from primary sources (repos, raw source files, official docs).
 
 ---

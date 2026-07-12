@@ -1,5 +1,10 @@
 # Phase 1 Implementation Plan — `tp_core` skeleton + `.ntpack` parse-back reader
 
+> **Status: completed historical plan.** This document records the original
+> Phase 1 implementation and is not an active backlog. Product and architecture
+> decisions are superseded by [`../ntpacker-master-spec.md`](../ntpacker-master-spec.md);
+> current execution order lives in [`../ROADMAP.md`](../ROADMAP.md).
+
 Executable plan for **Phase 1a** (`tp_pack_read`) and **Phase 1b** (`tp_core` skeleton +
 canonical model + `tp_pack`). All §5 decisions in `docs/research/SUMMARY.md` are owner-resolved;
 this plan does not re-open them. Every binary claim below is cited against the engine headers/source

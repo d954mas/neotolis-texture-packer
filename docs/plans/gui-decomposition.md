@@ -1,5 +1,10 @@
 # GUI decomposition plan — main.c → systems, logic/view split (2026-07-11, rev 2)
 
+> **Status: completed historical plan.** Its GUI-local queue and snapshot
+> boundaries are not the target operation/session architecture. New work follows
+> [`../ntpacker-master-spec.md`](../ntpacker-master-spec.md) and
+> [`master-spec-implementation-plan.md`](master-spec-implementation-plan.md).
+
 Owner directive: main.c (~5900 L, 354 statics) is too big — decompose into systems,
 separate logic from visuals. Grounded in `docs/design/gui-code-review-2026-07-11.md`
 (0 P0 / 1 P1 / 7 P2; async layer sound). Rev 2 incorporates two adversarial plan

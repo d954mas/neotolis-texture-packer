@@ -1,7 +1,9 @@
 # Research Synthesis — Standalone Texture Packer
 
-Synthesis of the six research docs in this folder. Read those for detail; this
-file is the decision layer. Recommendation-first.
+Historical synthesis of the six research docs in this folder as of 2026-07-10.
+Read those for evidence; this file is **non-normative** and is no longer the
+decision layer. Product and architecture decisions are superseded by
+[`../ntpacker-master-spec.md`](../ntpacker-master-spec.md).
 
 - `our-engine-baseline.md` — what `nt_builder` already gives us
 - `texturepacker.md` — CodeAndWeb TexturePacker (the commercial reference)

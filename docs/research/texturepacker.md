@@ -1,5 +1,9 @@
 # CodeAndWeb TexturePacker — Research Reference
 
+> **Status: non-normative point-in-time research.** Use as format evidence and
+> fixture input; current product decisions come from
+> [`../ntpacker-master-spec.md`](../ntpacker-master-spec.md).
+
 Research date: 2026-07-10. Primary reference for our standalone texture/atlas packer (C engine-based, CLI + GUI).
 
 ## Summary

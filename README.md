@@ -6,11 +6,15 @@ formats. The packer is the engine's NFP/Minkowski **concave** vector packer —
 it nests true silhouettes (not just rectangles), tries all 8 D4 orientations
 (4 rotations × 2 flips), trims, deduplicates, and packs deterministically.
 
-**Status: v0.1.0 was the first test release (GUI only).** Since then, the
-`ntpacker` CLI has landed on `main` and ships with the next release: headless
+**Status: v0.2.0.** The native GUI and the `ntpacker` CLI both ship: headless
 pack/export, project inspection/validation, and full project editing from the
-command line, alongside the GUI's live packing, settings, and animations. See
-`docs/ROADMAP.md` for the full plan.
+command line sit alongside the GUI's packing, settings, and animations.
+
+[`docs/ntpacker-master-spec.md`](docs/ntpacker-master-spec.md) is the normative
+product and architecture specification. [`docs/ROADMAP.md`](docs/ROADMAP.md)
+is its derived execution tracker, and
+[`docs/plans/master-spec-implementation-plan.md`](docs/plans/master-spec-implementation-plan.md)
+is the task-level handoff for implementation.
 
 ## Download
 
@@ -60,14 +64,16 @@ Defold comparison demo below.
   from nothing; `--json` on every verb with a stable, versioned per-verb
   schema; a frozen exit-code contract (0 ok … 6 partial success … 7 validate
   `--strict` findings); `--dry-run` reports what a pack would write and every
-  predicted metadata loss without touching disk. Built for humans and AI
-  agents alike — the CLI contract *is* the AI interface
-  (`docs/design/ai-first.md`).
+  predicted metadata loss without touching disk. This is the saved-file
+  automation interface for humans and agents. Live editing of the same unsaved
+  GUI session belongs to the planned Dev API/MCP surface (master spec Part II).
 
 ## Known limitations
 
-- Packing runs synchronously: the window can stall for a few seconds on very
-  large atlases (worker-thread + progress is planned).
+- Packing already runs on a GUI worker, but the current session model has no
+  canonical pack-input hash, multi-result memory LRU, or semantic history. A
+  completed preview therefore does not yet implement the full stale/current
+  behavior specified by the master spec.
 - The Defold target packs without rotations until the engine grows a
   rotation-only transform mode
   ([engine#285](https://github.com/d954mas/neotolis-engine/issues/285));
@@ -88,11 +94,20 @@ Defold comparison demo below.
   `--json`); `--json` payloads themselves are complete — only in-flight
   progress is stderr-only text for now.
 
-## Planned (roadmap order)
+## Next development sequence
 
-- Defold demo built headless by bob in CI; native `.atlas` export preset.
-- Async packing with progress; notices panel; list search/filter.
-- Watch mode (auto-repack on source changes).
+1. Persistent structural IDs, deterministic sprite IDs, tagged sources, and
+   selector contracts.
+2. Typed operations, atomic transactions, semantic Undo/Redo, revision/dirty
+   semantics, and the minimum recovery journal required by the commit contract.
+3. Native Neotolis atlas import, inspection, materialization, Extract Sprites,
+   and linked read-only atlas sources.
+4. Session/Pack semantics, format packages, sandboxed Lua/templates, then live
+   Dev API/MCP collaboration.
+
+Watchers update runtime source state and mark previews stale; they do **not**
+auto-pack in the current target design. See the roadmap for dependencies and
+acceptance gates.
 
 ## Build
 
@@ -123,9 +138,8 @@ The exe lands at `build/apps/cli/<preset>/ntpacker(.exe)`. One-liner:
 ntpacker pack examples/showcase/showcase.ntpacker_project --dry-run --json
 ```
 
-Run `ntpacker help` for the full verb list, or see
-`docs/design/ux.md` §4 / `docs/formats/cli-report.md` for the complete
-flag/schema reference.
+Run `ntpacker help` for the full verb/flag list, or see
+`docs/formats/cli-report.md` for the machine payload schemas.
 
 ## Repository layout
 
@@ -138,7 +152,7 @@ flag/schema reference.
 | `apps/smoke/` | toolchain smoke test |
 | `examples/defold-demo/` | Defold project with real assets (from [extension-texturepacker](https://github.com/defold/extension-texturepacker), MIT) for the three-way atlas comparison: Defold native / TexturePacker / ntpacker |
 | `examples/showcase/` | ready-made project over 60 CC0 animal sprites ([Kenney](https://kenney.nl)) — open it and press Pack |
-| `docs/` | roadmap, UX design, format specs, competitor research |
+| `docs/` | master specification, derived roadmap, implementation plan, format contracts, and research history |
 | `external/neotolis-engine` | the engine (submodule, read-only here — changes go upstream) |
 
 `AGENTS.md` documents the repository invariants and the agent workflow used to

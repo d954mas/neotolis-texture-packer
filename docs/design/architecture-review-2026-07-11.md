@@ -1,5 +1,10 @@
 # Architecture Review — 2026-07-11 (full technical audit)
 
+> **Status: point-in-time historical review.** Findings require revalidation
+> against current code before becoming work. Product decisions and sequencing
+> are superseded by [`../ntpacker-master-spec.md`](../ntpacker-master-spec.md)
+> and [`../ROADMAP.md`](../ROADMAP.md).
+
 Owner's brief: *"We are building a texture packer we will maintain for years, at the
 cutting edge. Lay a clear, flexible, easily extensible base. The whole packer is a set
 of features, tools, visuals. Explicit decomposition, no hidden or non-obvious

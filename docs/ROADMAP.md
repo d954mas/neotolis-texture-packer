@@ -1,388 +1,301 @@
-# Roadmap — Standalone Texture Packer toward v1
+# Дорожная карта реализации master spec
 
-Draft, recommendation-first. Decisions and rationale live in
-`docs/research/SUMMARY.md`; this file is the phased build plan. Each phase is
-small and independently shippable. "Parallel" tags mark phases with no ordering
-dependency once their prerequisites are met.
+**Статус:** производный execution tracker
+**Источник истины:** [`ntpacker-master-spec.md`](ntpacker-master-spec.md)
+**Детальная декомпозиция:** [`plans/master-spec-implementation-plan.md`](plans/master-spec-implementation-plan.md)
 
-Guiding invariants (AGENTS.md): capability lands in `tp_core` first, CLI + GUI
-are thin over it; exporters are data-driven plugins over one canonical placement
-model; the engine tree is read-only — every engine change ships as an upstream
-issue + PR.
+Этот документ отвечает только на вопросы «в каком порядке реализовывать» и
+«каким проверяемым результатом заканчивается этап». Он не вводит продуктовых или
+архитектурных решений. При любом расхождении действует master spec; открытые
+контракты закрываются по §60 до публикации соответствующего API.
 
----
+## Легенда статусов
 
-## Dependency order (critical path in bold)
+| Статус | Значение |
+|---|---|
+| `BASELINE` | Возможность перечислена в текущем baseline master spec; это не оценка качества реализации |
+| `PLANNED` | Этап ещё не принят |
+| `IN PROGRESS` | Есть активный пакет реализации, но gate этапа не пройден |
+| `BLOCKED` | Нельзя продолжить без явно указанного внешнего решения или prerequisite |
+| `DONE` | Все задачи и gate этапа подтверждены кодом, fixtures и executable tests |
 
+Статус этапа меняется на `DONE` только после проверки текущего репозитория. Само
+наличие старого плана, частичной реализации или похожего API завершением не
+считается.
+
+## Текущий baseline
+
+Master spec §2 фиксирует уже имеющуюся продуктовую основу: packing core, GUI и
+CLI, project files, multi-atlas, file/folder sources и refresh, settings и
+overrides, animations, Neotolis JSON и Defold export, capability-aware repack,
+deterministic output, machine-readable CLI, project editing, dry-run,
+inspect/validate, runtime exporter registration и raw RGBA inputs.
+
+Этот baseline необходимо сохранять на каждом этапе. Новая работа начинается не
+с повторной реализации этих возможностей, а с миграции их на целевые identity,
+operation, source, session и format-package contracts.
+
+## Outcomes эпиков
+
+- **Epic A — Live automation and AI.** Пользователь открывает проект в GUI,
+  подключает одного AI-контроллера, наблюдает его атомарное многошаговое
+  изменение в той же live session и одним Undo возвращает точное предыдущее
+  состояние и preview (master spec §57).
+- **Epic B — Format ecosystem and atlas interoperability.** Пользователь
+  импортирует TexturePacker/Pixi или Neotolis atlas, использует его как
+  read-only source, безопасно извлекает full-size PNG, перепаковывает их и
+  экспортирует в другой поддерживаемый формат (master spec §57).
+
+Shared foundation — не третий пользовательский эпик. Это обязательная общая
+основа для A и B (master spec §3).
+
+## Граф зависимостей
+
+```text
+BASELINE
+   |
+   v
+  F0  contracts, fixtures, migration boundaries
+   |
+   v
+  F1  persistent identities + tagged project schema
+   |\
+   | +-----------> B0  native import foundation
+   v                  |
+  F2  typed ops -------+
+   |                   |
+   +------> B1  linked atlas sources + Extract Sprites
+               |
+               v
+              F3  session/history/Pack
+              |
+              v
+              B2  package registry
+               |
+               v
+              B3  sandboxed Lua + templates
+               |
+               v
+               A  live automation and AI
+               |
+     B1 -------+----------------> Breadth
 ```
-Phase 0 (done)
-   │
-   ├─► Phase 1a  .ntpack parse-back reader ──┐
-   │                                         ▼
-   └─────────────────────────────►  Phase 1b  tp_core skeleton + canonical model
-                                          │
-                        ┌─────────────────┼─────────────────┐
-                        ▼                 ▼                 ▼
-                   Phase 2  PNG      Phase 3  project   Phase 7  mustache
-                   + JSON exporters  file [parallel      exporters  [parallel]
-                        │            with 2; feeds 4/6]
-                        └────────┬────────┘
-                                 ▼
-                            Phase 4  CLI
-                                 │
-                        ┌────────┴────────────────┐
-                        ▼                          ▼
-                  Phase 5  Defold+demo      Phase 8  watch/incremental
-                  [parallel]                [parallel after 4]
-
-              Phase 6  GUI MVP  (fed by 2 + 3 directly, NOT 4)  [parallel with 5/7]
-                        │
-                        └───────────────► Phase 9  variants + secondaries + release polish
-                                          (needs 2, 4, 6 +7 if built)
-```
-
-**Parallelizable once prerequisites land:** 5, 6, 7 (all after 2, with 4/3 as noted); 8 after 4.
-The single serial bottleneck is **1a → 1b → 2** — all in-repo, nothing waits on upstream engine
-review (owner decision, `SUMMARY.md §5g`).
-
----
-
-## Phase 0 — Environment & CI (DONE)
-
-Already in the repo. Recorded here as the baseline.
-
-- Engine submodule wired (`external/neotolis-engine`), `nt_builder` pulled in
-  natively (`CMakeLists.txt`), WASM builds hard-errored out.
-- CMake presets `native-debug` / `native-release` (Ninja + Clang, C17).
-- CI `ci.yml`: build + `ctest` on Linux/Windows/macOS, ccache, LFS pull.
-- `release.yml`: tag-driven (`v*`) 3-OS archive attach to a GitHub Release.
-- `apps/smoke` — packs generated RGBA discs through `nt_builder` into an
-  `.ntpack` with debug PNGs; proves toolchain + submodule + builder pipeline.
-
----
-
-## Phase 1a — `.ntpack` parse-back reader (`tp_pack_read`)  ★ critical path
-
-**Goal:** `tp_core` reads placements, geometry and page pixels back from a
-freshly built `.ntpack` — the engine stays untouched (`SUMMARY.md §5g`).
-
-**Deliverables**
-- `tp_pack_read` module: parse the pack container
-  (`shared/include/nt_pack_format.h`), the atlas blob (`nt_atlas_format.h` v6)
-  and texture-asset mip0 → pages (dims + straight-alpha RGBA8) and regions
-  (frame rect from u16 UVs, D4 transform, trim, pivot, slice9, polygon
-  verts/indices, aliases).
-- Name reverse-map: engine `nt_hash64_str(raw sprite name)` → name string (the
-  atlas blob hashes the RAW name, not the normalized resource id — see
-  `docs/plans/phase-1.md §2`; tool knows all inputs; collision = error).
-- Export-friendly pack settings profile used for export/preview passes:
-  `premultiplied=false`, `compress=NULL`, `gen_mipmaps=false`.
-
-**Acceptance**
-- Golden round-trip test: pack a fixture set covering rotated, flipped,
-  trimmed, polygon, slice9, alias and multi-page sprites → parse back →
-  frame rects, transforms, trim, pivots, slice9 and polygons match the
-  expected placement exactly.
-- UV→pixel rect recovery is exact for all page sizes up to 4096 (property
-  test over sizes and offsets).
-- Zero modifications under `external/neotolis-engine`.
-
-**Notes:** replaces the previously planned engine export-callback PR (kept in
-`SUMMARY.md §5g` as an optional later optimization once profiling justifies
-skipping the serialize→parse round-trip). No upstream dependency remains.
-
----
-
-## Phase 1b — `tp_core` skeleton + canonical model
-
-**Goal:** a `packer/` static lib that runs a pack and returns the canonical `tp_result`.
-
-**Deliverables**
-- `packer/` (`tp_core`) target: `add_subdirectory(packer)` in root CMake; C17,
-  engine warning flags (`nt_set_warning_flags`).
-- Canonical `tp_result` / `tp_sprite` / `tp_page` model (`SUMMARY.md §5d`).
-- `tp_pack(settings*, arena*) -> tp_result*`: takes a MINIMAL settings struct
-  (the full `.ntpacker_project` loader is Phase 3, not a 1b dependency); drives
-  `nt_builder` begin/add/end, writes the session `.ntpack`, parses it back via
-  `tp_pack_read` into an owned `tp_result` (sorted by name). `arena` is a
-  `tp_core`-local bump allocator (`tp_arena` — the engine exposes none).
-- No I/O opinions in core: it returns data; frontends write files.
-
-**Acceptance**
-- Unit test packs the smoke sprite set, asserts every `tp_result` invariant
-  (`SUMMARY.md §5d`), stable sprite ordering, correct `alias_of` on a duplicate.
-- Runs green in `ctest` on all 3 OSes.
-
-**Depends on:** 1a.
-
----
-
-## Phase 2 — PNG page export + JSON exporters
-
-**Goal:** produce real files from a pack: page PNGs + the ecosystem JSON formats.
-
-**Deliverables**
-- PNG page writer (vendored `stb_image_write` / `fpng`), straight-alpha default
-  with an optional premultiply toggle.
-- Hardcoded C exporter over the canonical model: **`json-neotolis`** (own
-  full-fidelity schema: D4 transform mask, polygons, pivot, slice9, pages —
-  the reference target that supports everything). Schema documented in
-  `docs/formats/json-neotolis.md` as part of this phase.
-  (TexturePacker-compatible `json-hash`/`json-array` dropped from scope —
-  `SUMMARY.md §6 Q3`; possible later as Phase 7 templates.)
-- Exporter **registry** + capability-flag struct (even for hardcoded ones) so
-  Phase 7 templates and the GUI/CLI reuse one interface.
-- Test-only capability-restricted exporter descriptor (e.g. rot90-only,
-  no-flip) registered in the test suite — proves per-target packing (§5h)
-  without waiting for Phase 5's Defold target.
-- Per-target packing (`SUMMARY.md §5h`): each export target packs with
-  `project settings ∩ target capabilities` (unsupported features silently not
-  used for that target); targets with identical effective settings share one
-  pack run. Informational notices only for genuine metadata loss (dropped
-  pivot/polygon/slice9); hard error only for impossibilities.
-- Alias semantics: exporters emit EVERY aliased name as its own entry pointing
-  at the shared frame (json-neotolis lists all names; matches .tpinfo alias
-  behavior).
-- Core normalization pass (`prepareData` equivalent): trim-`crop` rewrite, name
-  munging (ext strip / folder prefix), scale multiply, numeric-suffix
-  animation auto-grouping (feeds Phase 5 `.tpatlas`; explicit `animations[]`
-  from the Phase 3 project schema overrides) — done before any exporter.
-- Determinism: canonical sprite sort key is the FINAL munged export name (not
-  the raw builder name).
-
-**Acceptance**
-- Golden-file test: exported `json-neotolis` matches its documented schema for
-  a fixture set covering rotated, flipped, trimmed, polygon, slice9, alias and
-  multi-page sprites (full fidelity — nothing dropped).
-- Per-target packing proven: same project exported to `json-neotolis` (full D4)
-  and to a rotation-less target produces different, correct layouts.
-- Exported PNG decodes to expected page dims; a parse-back reconstructs frames.
-- Byte-identical output on re-run (determinism).
-
-**Depends on:** 1b.
-
-**Non-goals (out of v1 scope):**
-- Common-divisor / align-to-grid / `multipleOf4` size constraint.
-- Alpha-bleed / dilation post-process (straight-alpha PNG halos under linear
-  filtering — revisit if reported).
-- Pack-effort knob (Fast/Good/Best).
-
----
-
-## Phase 3 — Project file (`tp_project` load/save)
-
-**Goal:** persist all settings + inputs in a versioned, portable JSON project.
-
-**Deliverables**
-- Schema v1 per `SUMMARY.md §5a` (cJSON at `deps/cjson`): `version` integer,
-  `app` info, `sources` (folders/files/ignore), `atlases[]`, sparse `sprites`
-  overrides. Relative paths, stable identifiers, sorted deterministic output.
-- Per-atlas `animations[]` schema per `SUMMARY.md §5a` (id, ordered frames,
-  playback, fps, flip_h/v).
-- Load with newer-version refusal + a migration hook (`v1→…`) even if empty.
-- Folder rescan on load; absolute-path-on-load → relativize-on-save.
-
-**Acceptance**
-- save → load → save is byte-identical; relative paths resolve from the project dir.
-- Newer schema version is refused with a clear message.
-- A folder source picks up a newly added file on reload.
-
-**Depends on:** 1b (model). Parallel with 2.
-
----
-
-## Phase 4 — CLI (`apps/cli` over `tp_core`) (DONE)
-
-**Goal:** headless, CI-friendly `ntpacker pack game.ntpacker_project`.
-
-**Status:** LANDED — scope grew beyond the original sketch during execution
-(plan `docs/plans/op-layer-and-cli.md`; ai-first.md owner ruling 2026-07-11
-promoted the CLI to a human+AI-agent contract). Beyond `pack`, the CLI ships
-`inspect`/`validate` for machine-readable project inspection and a full set
-of project-mutation verbs (`new`/`add`/`remove`/`set`, `sprite
-set`/`unset`, `anim create/remove/list/add-frame/remove-frame/move-frame/set`,
-`target add/remove/set`, `atlas add/remove/rename`) — a script or an AI agent
-can build and edit a project from nothing, not just pack an existing one.
-
-**Deliverables**
-- Arg parser (`apps/cli/main.c`); `pack`/`export <project>` loads the project
-  → `tp_pack_input_build` → `tp_export_run_ex` → writes exporter files,
-  byte-identical to the GUI's "Export All" path (same core entry points).
-- Flags mirror project fields with **CLI-overrides-project** semantics:
-  `--atlas`, `--target`, `--out-dir`, `--dry-run`, `--json`, `--quiet`.
-  `--save` (flag-override-then-save) was **superseded** by the mutation verbs
-  (plan ruling L-1) — `set`/`sprite set` and friends are a better fit for
-  scripted edits than an override+save round trip, so `--save` was dropped
-  rather than shipped. `--force` (content-hash cache bypass) is **deferred to
-  Phase 8** — no cache exists yet, so every `pack` today is already a full
-  pack.
-- Exit codes: the full 8-code contract (`apps/cli/cli_exit.h`), not the
-  original 2-code sketch — 0 ok, 1 internal, 2 usage, 3 project load/parse,
-  4 pack failure, 5 export failure, 6 partial success, 7 `validate --strict`
-  findings, 8+ reserved. Errors go to stderr; `--json` errors are stdout
-  payloads carrying a stable `tp_status_id`.
-- `--json` on every verb with a versioned `"schema": N` payload
-  (`docs/formats/cli-report.md`); `version --json` publishes the full schema
-  manifest.
-
-**Acceptance** — all three met:
-- CLI packs the smoke project headless and writes PNG + JSON; the full
-  exit-code contract holds (ctest exit-code matrix).
-- A CLI flag override (`--atlas`/`--target`/`--out-dir`) changes output vs
-  the project's stored value.
-- CLI output byte-matches the `tp_core` library test for the same input —
-  now enforced by a real ctest (CLI==core byte-parity,
-  `apps/cli/cli_parity.cmake`), not just a manual claim; see also the Phase 6
-  acceptance note below, which the same ctest covers.
-
-**Depends on:** 2, 3.
-
----
-
-## Phase 5 — Defold exporter + in-repo demo (bob.jar in CI)  [parallel]
-
-**Goal:** prove a `.tpinfo` from our packer renders in a stock Defold build.
-
-**Status:** exporter + `.tpatlas` + tests LANDED. `packer/src/tp_export_defold.c`
-(registered `defold` built-in) emits `.tpinfo` + `.tpatlas` + page PNGs; contract
-in `docs/formats/defold-tpinfo.md`. Tests `tp_export_defold` (golden bytes,
-rotated-geometry, determinism over real fixtures, per-target identity repack +
-9-slice notice, playback enum table, and a clean run over the three real
-`examples/defold-demo` atlases) green in both presets; the demo's `defold` targets
-are enabled. **Still open:** the bob.jar CI job below (build/parse/compile
-validation) — a later phase, out of scope for the exporter packet.
-
-**Deliverables**
-- Hardcoded `.tpinfo` exporter (protobuf-text) per `defold.md §(b)` checklist
-  (rotation corner rule, quad fallback, pivot, vertices, all `required` fields);
-  optional `.tpatlas` starter; `.atlas`+loose-PNG **fallback** preset. *(`.tpinfo`
-  + `.tpatlas` DONE; `.atlas`+loose-PNG fallback preset not yet started.)*
-- `.tpatlas` generation from the project's `animations[]` + auto-grouped
-  animations (`SUMMARY.md §5a`, Phase 2 normalization). *(DONE — explicit
-  `animations[]`; per ux.md §3.7b export uses explicit animations only.)*
-- `examples/defold-demo/`: base LANDED 2026-07-10 (owner decision) — real-asset
-  examples copied from extension-texturepacker (MIT, `UPSTREAM-LICENSE`;
-  basic/rotate/anim_trim/skins incl. source PNGs, TexturePacker `.tps`/
-  `.tpinfo`/`.tpatlas` outputs and the native `rotate_d.atlas`), `game.project`
-  pinned to extension 2.7.0 ↔ Defold 1.12.4 + dirtylarry@6f2070e909a9.
-  Phase 5 adds OUR generated `.tpinfo` + page PNGs + `.tpatlas` over the same
-  source images → direct three-way diff (Defold native / TexturePacker / ours)
-  incl. a rotated + trimmed sprite and one flipbook animation.
-- CI job: install JDK, download `bob.jar` (version-matched), `bob resolve` +
-  `bob build --variant headless`; assert green.
-- Version pinning: demo + CI pin the newest extension-texturepacker release
-  and the MATCHING bob.jar/Defold version (lock-step requirement); floating
-  "latest" is not used in CI — bumping the pin is a deliberate small PR.
-
-**Acceptance**
-- CI bob build is green (parse + compile prove `.tpinfo` correctness).
-- Our `.tpinfo` diffs cleanly against the extension's `examples/rotate` +
-  `examples/anim_trim` field conventions.
-- Rotated/trimmed/animated sprites all present in the demo.
-
-**Depends on:** 2 (page pixels + model), 4 (invoke path). Parallel with 6, 7.
-
----
-
-## Phase 6 — GUI MVP on `nt_ui`  [parallel]
-
-**Goal:** a usable single-window packer GUI; thin over `tp_core`.
-
-**Deliverables**
-- `apps/gui`: GLFW+GL window via `nt_app_run`; toolbar / central canvas / two
-  toggleable panels layout (reference `external/neotolis-engine/examples/ui_showcase/main.c`).
-- Open/save project; add folders/files via OS-native dialog (vendor
-  tinyfiledialogs or Win32/GTK/Cocoa — none is in the engine deps yet).
-- Live page preview (source & page images via `stb_image` → `nt_gfx` texture);
-  settings panel 1:1 with project fields; **Pack** runs `tp_core` on a worker
-  thread; region-outline overlay toggle.
-
-**Acceptance**
-- Manual smoke: open tool → add folder → Pack → see page preview with region
-  outlines → save project.
-- The saved project, packed via the CLI, produces byte-identical output
-  (parity) — enforced by the CLI==core byte-parity ctest
-  (`apps/cli/cli_parity.cmake`, landed with Phase 4), not just a manual check.
-
-**Depends on:** 2, 3. Parallel with 5, 7.
-
----
-
-## Phase 7 — Mustache template exporters + descriptors  [parallel] [post-v1 stretch]
-
-**Goal:** data-driven long-tail formats without recompiling.
-
-**Deliverables**
-- Small embedded mustache engine + FTP formatter extension
-  (`add/subtract/multiply/divide/offsetLeft/offsetRight/mirror/escapeName`).
-- JSON exporter descriptors (id, ext, template, capability flags); flags gate
-  GUI/CLI controls and **constrain the pack** (drive the D4→rotation/identity
-  restriction from `SUMMARY.md §4`).
-- Built-in templates: libGDX `.atlas` (new + legacy dialects), Godot, Phaser3, CSS.
-- User-exporter discovery: config dir + project-relative `exporters/`.
-- *(Optional, if owner approves `SUMMARY.md §6 Q4)`:* second engine PR adding a
-  transform-**policy** enum so rotation-capable foreign formats can use 90°.
-
-**Acceptance**
-- Golden-file libGDX `.atlas` matches the `spine-libgdx.md` spec in both dialects
-  (top-left `bounds` vs bottom-based `offsets`, rotate/split/pad rules).
-- A `supportsRotation:false` descriptor greys out rotation and forces identity packing.
-- A user-supplied `.mst` + descriptor renders through both CLI and GUI.
-
-**Depends on:** 2. Parallel with 5, 6.
-
----
-
-## Phase 8 — Watch mode + incremental  [parallel after 4]
-
-**Goal:** cheap repack; make the packer safe to wire into every build.
-
-**Deliverables**
-- Content-hash sidecar (inputs + effective options + template text + tool
-  version); no-op when unchanged, `--force` override. Embed the key in JSON
-  `meta.smartupdate` too.
-- FS watcher (`ReadDirectoryChangesW` / inotify / kqueue), debounce + coalesce,
-  feeding the same async pack job; `--watch` in CLI, auto-repack in GUI.
-- Decoded+trimmed source-image cache keyed by file hash.
-
-**Acceptance**
-- Re-pack with unchanged inputs prints "up to date" and exits 0 without work.
-- Touching one source file triggers exactly one repack; add/remove/rename detected.
-- Watch loop stable over a burst of edits (no duplicate/dropped repacks).
-
-**Depends on:** 4. Parallel with 5/6/7.
-
----
-
-## Phase 9 — Scaling variants + secondary channels + release polish
-
-**Goal:** the two "single placement, N outputs" features + a shippable v1.
-
-**Deliverables**
-- Scaling-variant cook (`{v}`, per-variant max size, identical-layout from one
-  placement result); multipack `{n}` output-name placeholders with validation.
-- N named secondary channels (normal/emission/AO) rendered from the same
-  placement, per-channel output settings (color space, compression).
-- Round-trip **unpacker** (also the exporter test oracle).
-- Docs + per-format loader snippets; release archives (GUI + CLI, 3 OSes) via
-  `release.yml`; first `v0.x` tag.
-
-**Acceptance**
-- Variant and secondary outputs share layout byte-for-byte; only scale/pixels differ.
-- `{n}`/`{v}` presence validated; missing placeholder errors early.
-- `release.yml` produces all-3-OS archives containing both binaries; unpacker
-  round-trips a packed atlas back to per-sprite images.
-
-**Depends on:** 2, 4, 6 (+7 if built) (for GUI/exporter surfaces). Final integration phase.
-
----
-
-## Sequencing summary
-
-1. **1a (.ntpack parse-back reader)** — in-repo, no upstream dependency.
-2. **1b → 2** — core + real outputs (serial spine).
-3. **3** — project file (parallel with 2).
-4. **4** — CLI (needs 2+3). DONE.
-5. **5 / 6 / 7** — Defold+demo, GUI MVP, template exporters — run in parallel.
-6. **8** — watch/incremental (parallel after 4).
-7. **9** — variants, secondaries, release polish — closes v1.
+
+Допустимый параллелизм: `B0` может идти параллельно `F2` после `F1`. `B1` требует и import materializer, и
+typed transaction foundation: Extract Sprites не должен сначала закрепить
+временную mutation-модель. Полный Epic A следует после package runtime (`B3`),
+как требует master spec §54. `Breadth` следует после Epic A и доказанных
+import/source (`B1`) и package (`B3`) путей.
+
+## Этапы и задачи
+
+### F0 — Контрактная рамка и исполнимые оракулы
+
+**Статус:** `PLANNED`
+**Основание:** master spec §4, §52, §58–§60.
+
+| ID | Результат |
+|---|---|
+| `F0.1` | Зафиксировать vocabulary и version boundaries только в объёме, нужном следующему этапу |
+| `F0.2` | Подготовить golden fixtures для project migration, deterministic save и текущих format/CLI contracts |
+| `F0.3` | Зафиксировать structured error/notice и selector ambiguity test oracles |
+| `F0.4` | Отделить as-built compatibility tests от target-architecture acceptance tests |
+| `F0.5` | Решить legacy-ID promotion, canonical-path identity, semantic-state identity, Pack supersession и минимальный journal record через executable spikes |
+
+**Gate:** fixtures воспроизводят текущий baseline; неизвестные решения из §60 не
+замаскированы implementation defaults; native build/tests зелёные.
+
+### F1 — Persistent identities и tagged project schema
+
+**Статус:** `PLANNED`
+**Prerequisite:** `F0`.
+**Основание:** master spec §5, §11, §54 Phase 0.
+
+| ID | Результат |
+|---|---|
+| `F1.1` | Canonical project-path identity; временный runtime ID для unsaved session; без persistent `project_id` |
+| `F1.2` | Random persistent IDs для atlas/source/animation/target и deterministic derived `sprite_id` |
+| `F1.3` | Нормализация source-local keys, collision/traversal validation и однозначные selectors |
+| `F1.4` | Tagged source schema с path-source migration и sparse sprite records |
+| `F1.5` | Реализовать выбранный в `F0.5` atomic legacy-ID promotion без изменения ссылок внутри writable session |
+
+**Gate:** migration повторяема; rename/reorder/save/reload не меняют structural
+IDs; одинаковый source key воспроизводит `sprite_id`; malformed/duplicate IDs и
+portability collisions возвращаются как structured findings.
+
+### F2 — Typed operations, transactions и revisions
+
+**Статус:** `PLANNED`
+**Prerequisite:** `F1`.
+**Основание:** master spec §6–§8, §27 A0.
+
+| ID | Результат |
+|---|---|
+| `F2.1` | Разделить model operations, session commands, derived jobs и external side effects |
+| `F2.2` | Все persistent mutations выражаются typed operations по stable IDs |
+| `F2.3` | Atomic transaction: prevalidation, expected revision, rollback, один commit event |
+| `F2.4` | Monotonic revision, semantic saved baseline и независимый dirty state |
+| `F2.5` | Idempotent external transaction IDs в рамках определённого retention contract |
+| `F2.6` | Минимальные semantic inverse data и append-only journal до переключения GUI/Undo/Redo на live commit path; ordinary CLI остаётся file-oriented |
+
+**Gate:** batch либо применяется полностью, либо не меняет состояние; один batch
+создаёт одну semantic history unit; journal append failure не публикует state,
+revision или event; revision conflict/invalid revision и retry idempotency
+test-pinned; GUI и CLI не содержат параллельных mutation rules.
+
+### B0 — Native import foundation
+
+**Статус:** `PLANNED`
+**Prerequisite:** `F1`.
+**Основание:** master spec §35, §38–§41, §43, §50 B0.
+
+| ID | Результат |
+|---|---|
+| `B0.1` | Versioned Import IR и native Neotolis importer |
+| `B0.2` | Deterministic rectangular/polygon/D4 materializer в canonical RGBA8 |
+| `B0.3` | `atlas detect`, `atlas inspect`, `atlas extract` на одном core пути |
+| `B0.4` | Exact/ambiguous/unknown detection fixtures без silent importer choice |
+
+**Gate:** multi-page, trim, aliases, animations, все D4 transforms и polygon
+regions проверены fixtures; ambiguous detection требует явного выбора; bad input
+завершается structured error, а не crash.
+
+### B1 — Linked atlas sources и Extract Sprites
+
+**Статус:** `PLANNED`
+**Prerequisites:** `F1`, `F2`, `B0`.
+**Основание:** master spec §11, §42–§44, §50 B1.
+
+| ID | Результат |
+|---|---|
+| `B1.1` | Read-only linked atlas source хранит format choice и importer region keys; `Change Format` коммитится только после успешной current-read validation |
+| `B1.2` | Watch/Refresh/open/Pack/Export проверяют descriptor и companion files без project mutation |
+| `B1.3` | Runtime source status/generation, lazy thumbnails и current-read error policy |
+| `B1.4` | Extract Sprites: complete preflight, staging, conflict policy и publication |
+| `B1.5` | Materialized files добавляются в текущий atlas одной model transaction; Undo не удаляет опубликованные файлы |
+
+**Gate:** linked source остаётся read-only; watcher не меняет revision/dirty и не
+запускает Pack; overwrite только explicit; ошибка до commit не оставляет partial
+project mutation или опубликованный неполный набор.
+
+### F3 — Semantic history и Pack session behavior
+
+**Статус:** `PLANNED`
+**Prerequisites:** `F2`, `B1`.
+**Основание:** master spec §7.1, §9–§10, §27 A1, §54 Phase 2.
+
+| ID | Результат |
+|---|---|
+| `F3.1` | Одна serialized session queue для GUI, future MCP, Undo/Redo и Refresh |
+| `F3.2` | Semantic forward/reverse diffs; snapshot implementation используется как migration oracle |
+| `F3.3` | Shared visible History с non-Undoable Save checkpoints |
+| `F3.4` | Immutable asynchronous Pack jobs и ordered result selection |
+| `F3.5` | `pack_input_hash`, stale-preview UX и memory-only byte-budget result LRU |
+| `F3.6` | Расширить минимальный journal до checkpoint/compaction/recovery policy, не меняя commit acknowledgement |
+
+**Gate:** forward + reverse даёт byte-identical исходное состояние; Undo/Redo
+создают новые revisions; save не меняет revision; stale result остаётся видимым;
+watch/edit/Undo не запускают Pack; journal failure откатывает transaction до
+публикации commit event.
+
+### B2 — Format-package registry
+
+**Статус:** `PLANNED`
+**Prerequisites:** `F3`, `B0`.
+**Основание:** master spec §29–§37, §40, §50 B2.
+
+| ID | Результат |
+|---|---|
+| `B2.1` | Manifest разделяет manifest/package/API/data-format versions и profile |
+| `B2.2` | Built-in manifests и directory discovery для global/project-local packages |
+| `B2.3` | Deterministic duplicate-ID detection/error reporting со всеми origins и `.ntformat` distribution; no silent shadowing |
+| `B2.4` | Versioned Export IR, capability vocabulary и target-specific diagnostics |
+| `B2.5` | Declarative signatures и explicit Change Format flow |
+
+**Gate:** builtins проходят тот же package contract, что и внешние handlers;
+project target хранит только spec-defined format/data/profile/options; duplicate
+IDs и unsupported API versions fail loudly; capabilities проверены golden tests.
+
+### B3 — Sandboxed Lua и constrained templates
+
+**Статус:** `PLANNED`
+**Prerequisite:** `B2`.
+**Основание:** master spec §32, §45–§48, §50 B3.
+
+| ID | Результат |
+|---|---|
+| `B3.1` | Sandbox: immutable inputs, staged outputs, protected calls, deterministic host services |
+| `B3.2` | Memory/instruction/output limits и cooperative cancellation |
+| `B3.3` | Lua exporter/importer/probe bindings через canonical IRs |
+| `B3.4` | Constrained export-only template runtime; complex transformation остаётся в Lua/core |
+| `B3.5` | Package conformance runner и malformed/adversarial corpus |
+
+**Gate:** handler не получает произвольный OS/filesystem/network access; timeout,
+OOM, bad output и cancellation изолированы; staged files публикуются только после
+полной проверки; builtin/Lua/template fixtures дают deterministic reports.
+
+### A — Live automation and AI
+
+**Статус:** `PLANNED`
+**Prerequisites:** `F3`, `B3`.
+**Основание:** master spec Part II, §27, §54 Phase 4.
+
+| ID | Результат |
+|---|---|
+| `A.1` | In-process session abstraction и любое число GUI views одной session |
+| `A.2` | Private local Dev API: discovery, snapshot/resync, transaction apply и ordered events |
+| `A.3` | `ntpacker mcp`: unbound discovery, explicit one-project binding, compact tools/resources |
+| `A.4` | Один external controller, authorization по canonical project path, revoke/reconnect |
+| `A.5` | GUI/MCP ownership handoff, recovery mirror, journal/checkpoints и stale-host cutover |
+| `A.6` | Ordinary CLI остаётся one-shot/file-oriented и не редактирует скрытую копию live project |
+
+**Gate:** все acceptance criteria master spec §26; end-to-end Epic A outcome из
+§57; mutation видима только после journal acknowledgement; concurrent second
+controller и ambiguous project selection fail explicitly.
+
+### Breadth — Reference formats и расширение ecosystem
+
+**Статус:** `PLANNED`
+**Prerequisites:** `B1`, `B3`, `A`.
+**Основание:** master spec §47–§50 B4, §54 Phase 5.
+
+| ID | Результат |
+|---|---|
+| `BR.1` | Дополнительные TexturePacker/Pixi/Phaser data versions и profiles после base reference package `B3` |
+| `BR.2` | Defold importer поверх существующего export contract |
+| `BR.3` | Следующий формат выбирается по fixtures/user value; текущие кандидаты — libGDX и manual grid sheet |
+| `BR.4` | Дополнительные data versions/profiles без обхода package contract |
+| `BR.5` | GUI refinements только после подтверждённых workflow needs |
+
+**Gate:** Epic B outcome и acceptance criteria master spec §49/§57; каждый новый
+формат имеет package fixtures, round-trip/loss expectations и одинаково доступен
+через core, CLI и GUI surfaces, где capability применима.
+
+## Общие gates для каждого landing
+
+1. Engine submodule остаётся read-only; доказанная engine-проблема уходит отдельным
+   issue/PR в engine repository.
+2. Native debug/release build и релевантные ctests проходят без новых warnings.
+3. Invalid input возвращает structured error/notice и не приводит к abort/crash.
+4. Deterministic fixtures и текущие format/CLI contracts не меняются без явного
+   versioned migration.
+5. Новая capability сначала реализована в core operation/source/import/export
+   слое; frontend не дублирует validation, naming, capability или Undo rules.
+6. Изменение public contract закрывает соответствующий open item §60 через
+   prototype, fixture и golden acceptance test.
+
+Полные task packets, acceptance tests и предлагаемая нарезка commits находятся в
+[`plans/master-spec-implementation-plan.md`](plans/master-spec-implementation-plan.md).
+
+## Вне scope этой дорожной карты
+
+Roadmap не добавляет цели поверх master spec. В частности, текущими целями не
+являются distributed/multi-writer collaboration, CRDT/automatic merge,
+distributed Undo, arbitrary native plugins, trust prompts для sandboxed packages,
+disk-persistent Pack cache, автоматическое переименование физических source
+files, автоматический Pack от watcher events и GUI polish как самостоятельный
+приоритет. Полный normative список — master spec §25 и §56.
+
+Exact journal format, ownership cutover, cache budgets, template syntax, public
+schema field names, extraction publication recovery и color-management profile
+остаются открытыми контрактами §60. Они не считаются решёнными этим документом.

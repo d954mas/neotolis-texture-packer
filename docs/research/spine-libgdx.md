@@ -1,5 +1,9 @@
 # libGDX TexturePacker & Spine Atlas Packing — Research
 
+> **Status: non-normative point-in-time research.** Use as format evidence and
+> fixture input; current product decisions come from
+> [`../ntpacker-master-spec.md`](../ntpacker-master-spec.md).
+
 Research date: 2026-07-10. Sources: libGDX wiki, libGDX `master` source (verified line-by-line against
 `TexturePacker.java`, `TextureAtlas.java`, `ImageProcessor.java`, `MaxRectsPacker.java`,
 `TexturePackerFileProcessor.java`), Esoteric Software (Spine) docs, and the
