@@ -32,7 +32,11 @@ add_library(tp_c0 STATIC
     src/tp_c0_ack.c
     src/tp_c0_authority.c
     src/tp_c0_cache_mem.c
-    src/tp_c0_pack_super.c)
+    src/tp_c0_pack_super.c
+    # C0-04 raster color/orientation policy: decoder-independent canonical
+    # normalization (channel expansion, A=255, pinned 16->8 rounding, EXIF
+    # orientation transform, ICC-notice policy, EXIF-tag parse). Pure integer.
+    src/tp_c0_raster.c)
 target_include_directories(tp_c0 PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     $<TARGET_PROPERTY:tp_core,INTERFACE_INCLUDE_DIRECTORIES>)
@@ -45,6 +49,19 @@ target_link_libraries(tp_c0 PRIVATE utf8proc cjson)
 target_compile_definitions(tp_c0 PRIVATE _CRT_SECURE_NO_WARNINGS)
 nt_set_warning_flags(tp_c0)   # AGENTS.md invariant
 nt_set_sanitizer_flags(tp_c0)
+
+# C0-04 decoder glue: the ONLY stb_image TU in the spike. Built like a vendored
+# dep (no warning/sanitizer flags, -w) so stb internals never trip -Werror or
+# CI's UBSan; STBI_NO_SIMD forces the deterministic scalar integer decode path
+# (its own impl, so it must NOT be linked alongside the engine's stb_image
+# target in one exe). Only test_c0_raster_decode links it.
+add_library(tp_c0_stb STATIC src/tp_c0_stb_impl.c)
+target_include_directories(tp_c0_stb PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_include_directories(tp_c0_stb PRIVATE
+    $<TARGET_PROPERTY:stb_image,INTERFACE_INCLUDE_DIRECTORIES>
+    $<TARGET_PROPERTY:tp_core,INTERFACE_INCLUDE_DIRECTORIES>)
+target_compile_options(tp_c0_stb PRIVATE -w)
+nt_set_static_crt(tp_c0_stb)
 
 # Table-driven pure tests, wired into ctest (packer/tests convention: raw
 # add_executable + unity + -U_DLL, add_test registration).
@@ -69,3 +86,13 @@ tp_c0_add_test(test_c0_ack)         # C0-03 commit ack ordering + rollback-on-ap
 tp_c0_add_test(test_c0_authority)   # C0-03 authority vocabulary + permission table
 tp_c0_add_test(test_c0_cache)       # C0-03 memory cache interface + budget LRU
 tp_c0_add_test(test_c0_pack_super)  # C0-03 Pack supersession / preview selection (decision 0004)
+tp_c0_add_test(test_c0_raster)      # C0-04 reference pipeline: expansion, 16->8, orientation x8, ICC/EXIF policy
+
+# C0-04 real end-to-end decode vectors: links the isolated STBI_NO_SIMD stb TU.
+# Fixtures are built in-repo (minimal PNG encoder + one fixed JPEG blob), so the
+# test is hermetic; goldens are byte-identical across CI OS.
+add_executable(test_c0_raster_decode tests/test_c0_raster_decode.c)
+target_link_libraries(test_c0_raster_decode PRIVATE tp_c0 tp_c0_stb unity)
+target_compile_options(test_c0_raster_decode PRIVATE -U_DLL)
+nt_set_warning_flags(test_c0_raster_decode)   # AGENTS.md invariant: our test TU keeps full -Werror
+add_test(NAME test_c0_raster_decode COMMAND test_c0_raster_decode)
