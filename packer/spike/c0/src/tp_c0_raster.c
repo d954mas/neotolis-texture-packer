@@ -295,24 +295,36 @@ bool tp_c0_raster_exif_orientation(const uint8_t *jpeg, size_t len, uint32_t *ou
         return false; /* not a JPEG SOI */
     }
     size_t p = 2;
-    while (p + 4 <= len) {
+    while (p < len) {
         if (jpeg[p] != 0xFF) {
             return false; /* desync: not at a marker */
         }
-        uint8_t marker = jpeg[p + 1];
+        /* JPEG allows any number of 0xFF fill bytes before a marker byte; skip
+         * the run to find the real marker (stb's own parser does the same). */
+        size_t m = p;
+        while (m < len && jpeg[m] == 0xFF) {
+            m++;
+        }
+        if (m >= len) {
+            return false; /* ran off the end while skipping fill bytes */
+        }
+        uint8_t marker = jpeg[m];
         if (marker == 0xD9 || marker == 0xDA) {
             return false; /* EOI or start of scan: no more headers */
         }
-        uint16_t seg_len = (uint16_t)(((uint16_t)jpeg[p + 2] << 8) | jpeg[p + 3]);
-        if (seg_len < 2 || p + 2 + seg_len > len) {
+        if (m + 2 >= len) {
+            return false; /* not enough bytes left for the 2-byte length field */
+        }
+        size_t seg_len = ((size_t)jpeg[m + 1] << 8) | jpeg[m + 2];
+        if (seg_len < 2 || m + 1 + seg_len > len) {
             return false;
         }
-        const uint8_t *payload = jpeg + p + 4;
-        size_t payload_len = (size_t)seg_len - 2;
+        const uint8_t *payload = jpeg + m + 3;
+        size_t payload_len = seg_len - 2;
         if (marker == 0xE1 && payload_len >= 6 && memcmp(payload, "Exif\0\0", 6) == 0) {
             return exif_tiff_orientation(payload + 6, payload_len - 6, out_orientation);
         }
-        p += (size_t)2 + seg_len;
+        p = m + 1 + seg_len;
     }
     return false;
 }
