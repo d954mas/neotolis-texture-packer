@@ -77,7 +77,19 @@ typedef enum tp_status {
      * entity that does not exist reuses NOT_FOUND (dangling id or unresolved
      * selector -- the message distinguishes). */
     TP_STATUS_UNKNOWN_OP,          /* the operation kind/wire is not in the append-only catalog (tp_operation) */
-    TP_STATUS_OUT_OF_RANGE         /* a payload value is outside its allowed range (tp_op_validate) */
+    TP_STATUS_OUT_OF_RANGE,        /* a payload value is outside its allowed range (tp_op_validate) */
+
+    /* --- transaction concurrency faults (F2-02, master spec §8) ---
+     * Append-only: new values go at the END. A transaction carries an
+     * expected_revision optimistic-concurrency precondition; the two mismatch
+     * directions are distinct faults a client acts on differently. CONFLICT (stale:
+     * expected < current) -> the caller rebuilds against the new state and retries;
+     * INVALID (expected > current, a revision that never existed) -> a client bug,
+     * not a retry. No CRDT / auto-merge in v1 (§8, plan §420). Idempotency reuses
+     * the existing DUPLICATE_ID token ("duplicate_id"): a re-submitted transaction
+     * id is a duplicate the message distinguishes from a structural-id collision. */
+    TP_STATUS_REVISION_CONFLICT,   /* expected_revision < current: stale; rebuild and retry (tp_transaction) */
+    TP_STATUS_INVALID_REVISION     /* expected_revision > current: a revision that never existed (tp_transaction) */
 } tp_status;
 
 /* Fixed-size message buffer -- no heap, safe to embed by value on the stack. */
@@ -141,6 +153,8 @@ static inline const char *tp_status_str(tp_status status) {
         case TP_STATUS_AMBIGUOUS_SELECTOR: return "selector is ambiguous";
         case TP_STATUS_UNKNOWN_OP: return "unknown operation";
         case TP_STATUS_OUT_OF_RANGE: return "value out of range";
+        case TP_STATUS_REVISION_CONFLICT: return "revision conflict";
+        case TP_STATUS_INVALID_REVISION: return "invalid revision";
     }
     return "unknown status";
 }
@@ -182,6 +196,8 @@ static inline const char *tp_status_id(tp_status status) {
         case TP_STATUS_AMBIGUOUS_SELECTOR: return "ambiguous_selector";
         case TP_STATUS_UNKNOWN_OP: return "unknown_op";
         case TP_STATUS_OUT_OF_RANGE: return "out_of_range";
+        case TP_STATUS_REVISION_CONFLICT: return "revision_conflict";
+        case TP_STATUS_INVALID_REVISION: return "invalid_revision";
     }
     return "unknown_status";
 }

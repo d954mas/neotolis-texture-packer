@@ -35,7 +35,16 @@ add_library(tp_core STATIC
     # selector->operation builders, and the canonical byte-stable op/result encoder.
     # Promoted from the accepted C0-02 spike. CORE-TESTED groundwork -- the CLI/GUI
     # frontend cutover is F2-05 (this does not route the shipping mutators).
-    src/tp_op_catalog.c src/tp_op_validate.c src/tp_op_apply.c src/tp_op_encode.c src/tp_op_build.c)
+    src/tp_op_catalog.c src/tp_op_validate.c src/tp_op_apply.c src/tp_op_encode.c src/tp_op_build.c
+    # F2-02 atomic transactions, revision & semantic dirty: an OOM-safe project
+    # deep-clone (the atomicity primitive), the semantic-state identity hash + dirty
+    # model, the pluggable transaction-id idempotency store, the atomic clone/apply/
+    # swap core over the F2-01 op engine, and the versioned transaction request/result
+    # JSON contract (decode/lower/encode; cJSON stays a PRIVATE dep in the .c files).
+    # Promoted from the accepted C0-02 spike. CORE-TESTED groundwork -- the CLI/GUI
+    # frontend cutover is F2-05 (this does not route the shipping mutators).
+    src/tp_project_clone.c src/tp_semantic.c src/tp_txn_idset.c src/tp_txn_apply.c
+    src/tp_txn_parse.c src/tp_txn_lower.c src/tp_txn_encode.c)
 target_include_directories(tp_core PUBLIC include)
 # tp_pack_settings.c includes nt_builder.h for the header-only nt_atlas_opts_defaults()
 # inline (the single source of the packing defaults). HEADERS ONLY: this adds the builder

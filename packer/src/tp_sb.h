@@ -6,6 +6,8 @@
  * (static inline) so the exporter reuses them without a separate TU; kept out
  * of tp_project.c on purpose (that writer stays untouched, byte-identical). */
 
+#include <inttypes.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -59,6 +61,15 @@ static inline void tp_sb_int(tp_sb *sb, long v) {
 static inline void tp_sb_uint(tp_sb *sb, unsigned long v) {
     char tmp[32];
     (void)snprintf(tmp, sizeof tmp, "%lu", v);
+    tp_sb_str(sb, tmp);
+}
+
+/* 64-bit integral emit via PRId64 (not "%ld") so a value like 5000000000 is
+ * byte-identical on 32-bit-long Windows and 64-bit-long Linux/macOS -- the
+ * cross-OS determinism pin the transaction contract needs (C0-02 §3). */
+static inline void tp_sb_i64(tp_sb *sb, int64_t v) {
+    char tmp[32];
+    (void)snprintf(tmp, sizeof tmp, "%" PRId64, v);
     tp_sb_str(sb, tmp);
 }
 

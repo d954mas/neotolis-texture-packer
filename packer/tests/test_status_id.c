@@ -46,11 +46,14 @@ void test_status_id_tokens(void) {
     /* F2-01 typed operation-engine faults (master spec §6-6.2, §7). */
     TEST_ASSERT_EQUAL_STRING("unknown_op", tp_status_id(TP_STATUS_UNKNOWN_OP));
     TEST_ASSERT_EQUAL_STRING("out_of_range", tp_status_id(TP_STATUS_OUT_OF_RANGE));
+    /* F2-02 transaction concurrency faults (master spec §8). */
+    TEST_ASSERT_EQUAL_STRING("revision_conflict", tp_status_id(TP_STATUS_REVISION_CONFLICT));
+    TEST_ASSERT_EQUAL_STRING("invalid_revision", tp_status_id(TP_STATUS_INVALID_REVISION));
 }
 
 /* Tokens are machine ids: lowercase, no spaces (unlike tp_status_str prose). */
 void test_status_id_is_machine_token(void) {
-    for (int s = TP_STATUS_OK; s <= TP_STATUS_OUT_OF_RANGE; s++) {
+    for (int s = TP_STATUS_OK; s <= TP_STATUS_INVALID_REVISION; s++) {
         const char *id = tp_status_id((tp_status)s);
         for (const char *c = id; *c; c++) {
             TEST_ASSERT_TRUE_MESSAGE(*c != ' ', id);

@@ -235,6 +235,15 @@ tp_project *tp_project_create(void);
 /* Frees the project and everything it owns. NULL-safe. */
 void tp_project_destroy(tp_project *p);
 
+/* Deep-clones `src` into a fresh independent project (every malloc-owned field
+ * duplicated: project_dir, atlas name/knobs/ids, sources, sparse sprite overrides,
+ * animations + frames, targets). OOM-SAFE: on any allocation failure returns NULL
+ * and frees the partial clone (no leak). The clone is byte-identical under
+ * tp_project_save_buffer (test-pinned). This is the atomicity primitive the F2-02
+ * transaction engine clones the model with before applying a batch (§7). NULL src
+ * -> NULL. */
+tp_project *tp_project_clone(const tp_project *src);
+
 /* --- atlas mutation --- */
 
 /* Appends an atlas with default knobs. On success writes its index to
