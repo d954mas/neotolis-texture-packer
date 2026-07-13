@@ -531,6 +531,26 @@ hardening packet (needs a core diff/identity probe); a MAINTENANCE warning now s
 so the coupling is not silent. (A `main.c` slice9 copy-loop duplication candidate was REFUTED — both
 branches are correct and identical in effect.)
 
+### Third-round re-review (fix²-diff `ae82edc..36ca2db`): the sibling sink `gui_project_remove_animation`
+
+The completeness angle ("did the sink-local `set_target` fix leave any SIBLING flush-first setter
+exposed?") surfaced one more instance of the SAME class. `gui_project_remove_animation` flushes pending
+first, then reads its caller-supplied `id` via `find_anim_by_name`; its production caller (the
+do-remove-animation handler) passes `a->animations[i].name` — a pointer INTO the live project. If a
+coalescable gesture is buffered (e.g. the user edits an animation's FPS/playback/flip, then clicks Remove
+within the window without an intervening gesture-commit), the setter's flush clone-swaps and frees that
+project, dangling `id` before the lookup. **Fix:** dup `id` into a local BEFORE the flush (single `free`
+at the end; `an->id` used to build the op is re-resolved from the post-flush project). Regression `#10`
+reproduces the ordering (buffer a real slice9 op, then remove an animation by a project-owned name).
+
+An exhaustive audit of EVERY flush-first string-taking wrapper against EVERY call site (production +
+selftest) confirms these two — `set_target` and `remove_animation` — are the ONLY sinks reachable with a
+project-owned pointer today: `create_animation` receives `snprintf` copies in `s_sel_sort_buf`;
+`set_atlas_name` / `set_sprite_rename` / `set_anim_id` receive the static UI buffers `s_edit_*`;
+`add_source` receives path locals; the coalescable setters and `anim_add_frames` receive drain-queue
+copies (`e->s0` / `e->keys`). A CONVENTION comment atop the mutation-wrappers region now records the
+dup-before-flush rule so a future wrapper cannot silently reintroduce the class.
+
 ### Carried-forward limitation
 
 Animation rename is still NOT undoable (`gui_project_set_anim_id`'s direct `an->name =` write; the F2-01
@@ -544,7 +564,8 @@ revert-to-committed commits nothing / revert-to-new commits the final value; #2 
 edit survives both; #3 net-zero gesture = no phantom undo step AND redo branch intact + still restores;
 #4 flush-before-read commits the target with no dangling exporter read; #5 the peek returns the buffered
 slice9 while buffered and false after flush; #9 browse-target UAF — `set_target` dups the caller's
-`exporter_id` before its flush so the value survives the intervening clone-swap/free. `check_boundaries.sh`
-= boundaries OK. `--parity` output is
+`exporter_id` before its flush so the value survives the intervening clone-swap/free; #10 sibling-sink
+UAF — `remove_animation` dups its `id` before its flush so the animation is removed with no dangling
+lookup. `check_boundaries.sh` = boundaries OK. `--parity` output is
 byte-identical (id-normalized) to the pre-fix baseline — no saved bytes changed. No file under
 `packer/src` / `external` / `packer/spike` changed; journal / append-fail / recovery / D2 untouched.

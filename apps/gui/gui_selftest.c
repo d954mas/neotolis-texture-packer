@@ -935,6 +935,28 @@ void run_selftest(void) {
         NT_ASSERT(strcmp(g9c->targets[0].exporter_id, g9_want) == 0 && strcmp(g9c->targets[0].out_path, "out/g9") == 0 &&
                   "#9: set_target dups caller strings before its flush -> no dangling exporter read (browse-target UAF fix)");
 
+        /* (#10) SIBLING-SINK UAF (gui_project_remove_animation, same class as #9): the setter flushes
+         *       BEFORE reading its caller-supplied `id`, whose production caller passes
+         *       a->animations[i].name (a pointer INTO the live project). A buffered gesture's flush
+         *       clone-swaps + frees that project -> `id` dangles at find_anim_by_name. Fixed by
+         *       dup-before-flush. Under CI ASan the pre-fix order faults; the count assertion guards
+         *       a botched (garbage-matched or skipped) removal locally. */
+        gui_project_new();
+        gui_pack_clear(-1);
+        s_sel_atlas = 0;
+        const int g10i = gui_project_create_animation(0, "g10anim", NULL, 0);
+        NT_ASSERT(g10i >= 0 && "#10: created an animation to remove");
+        tp_project_atlas *g10a = tp_project_get_atlas(gui_project_get(), 0);
+        const int g10n0 = g10a->animation_count;
+        const char *g10name = g10a->animations[g10i].name; /* project-owned ptr, as the remove handler passes */
+        (void)gui_project_set_sprite_slice9(0, "g10sprite", 0 /* L */, 3); /* buffer a real (non-noop) op, UNFLUSHED */
+        gui_project_remove_animation(0, g10name); /* its flush frees the project g10name points into */
+        tp_project_atlas *g10c = tp_project_get_atlas(gui_project_get(), 0);
+        nt_log_info("SELFTEST: #10 sibling-sink remove-anim count %d->%d (want %d)", g10n0, g10c->animation_count,
+                    g10n0 - 1);
+        NT_ASSERT(g10c->animation_count == g10n0 - 1 &&
+                  "#10: remove_animation dups `id` before its flush -> the animation is removed with no dangling read");
+
         /* Restore a packable atlas-0 project for the render frames below (the pixel probe packs
          * atlas 0 and probes its region outlines) -- gui_project_new left it source-less. */
         gui_project_new();

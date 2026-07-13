@@ -572,6 +572,12 @@ unsigned gui_project_model_version(void) { return s_model_ver; }
 // #endregion
 
 // #region mutation wrappers (each builds typed op(s) + commits through the model)
+/* CONVENTION (UAF class, ADR 0015): these wrappers call gui_project_flush_pending() first, which may
+ * commit a buffered gesture whose clone-swap FREES the current project. Any wrapper that then reads a
+ * caller-supplied `const char *` which a caller might source FROM the live project (a->name,
+ * target.exporter_id, animation.name, ...) MUST dup that string into a local BEFORE the flush -- see
+ * gui_project_set_target / gui_project_remove_animation. Callers passing UI buffers, drain-queue copies,
+ * or literals are already safe; the sink-side dup makes it not matter which. */
 int gui_project_add_atlas(void) {
     gui_project_flush_pending(); /* structural: commit any buffered gesture as its own step first */
     if (!s_proj) {
@@ -1007,23 +1013,28 @@ int gui_project_create_animation(int atlas_index, const char *base, const char *
 }
 
 void gui_project_remove_animation(int atlas_index, const char *id) {
+    /* F2-05b-ii-A fix (sibling-sink UAF, same class as gui_project_set_target): dup `id` BEFORE the
+     * flush. The production caller (the do-remove-animation handler) passes a->animations[i].name -- a
+     * pointer INTO the live project; gui_project_flush_pending() can commit a buffered gesture whose
+     * clone-swap frees that project, dangling `id` before find_anim_by_name reads it. `an->id` (used to
+     * build the op) is re-resolved from the post-flush project, so only the incoming `id` needs saving. */
+    char *idc = dupstr(id);
     gui_project_flush_pending();
     tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
-    if (!a || !id) {
-        return;
+    if (a && idc) {
+        tp_project_anim *an = find_anim_by_name(a, idc);
+        if (an) {
+            tp_operation op;
+            memset(&op, 0, sizeof op);
+            op.kind = TP_OP_ANIMATION_REMOVE;
+            op.atlas_id = a->id;
+            op.u.anim_ref.anim_id = an->id;
+            if (commit_txn_now(&op, 1)) {
+                gui_project_touch(GUI_ACT_REMOVE_ANIM);
+            }
+        }
     }
-    tp_project_anim *an = find_anim_by_name(a, id);
-    if (!an) {
-        return;
-    }
-    tp_operation op;
-    memset(&op, 0, sizeof op);
-    op.kind = TP_OP_ANIMATION_REMOVE;
-    op.atlas_id = a->id;
-    op.u.anim_ref.anim_id = an->id;
-    if (commit_txn_now(&op, 1)) {
-        gui_project_touch(GUI_ACT_REMOVE_ANIM);
-    }
+    free(idc);
 }
 
 bool gui_project_set_anim_id(int atlas_index, int anim_index, const char *new_id) {
