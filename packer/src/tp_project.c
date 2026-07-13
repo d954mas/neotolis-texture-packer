@@ -408,6 +408,10 @@ tp_status tp_project_atlas_add_source(tp_project_atlas *a, const char *path) {
     return tp_project_atlas_add_source_kind(a, path, TP_SOURCE_KIND_FOLDER);
 }
 
+bool tp_project_atlas_has_source_path(const tp_project_atlas *a, const char *path) {
+    return a && path && atlas_has_source_path(a, path);
+}
+
 tp_status tp_project_atlas_remove_source(tp_project_atlas *a, int index) {
     if (!a) {
         return TP_STATUS_INVALID_ARGUMENT;

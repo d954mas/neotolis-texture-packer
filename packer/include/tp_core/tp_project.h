@@ -278,6 +278,11 @@ tp_status tp_project_atlas_add_source_kind(tp_project_atlas *a, const char *path
  * migration default and the safe classification when the caller does not know). */
 tp_status tp_project_atlas_add_source(tp_project_atlas *a, const char *path);
 
+/* True when the atlas already holds a source whose '/'-normalized path equals `path`'s
+ * -- the exact predicate add_source_kind uses to dedupe. Lets a caller (the op-engine
+ * validator) reject a would-be-deduped add BEFORE it strands a new source's id. */
+bool tp_project_atlas_has_source_path(const tp_project_atlas *a, const char *path);
+
 /* Removes source `index`. Out-of-range -> OUT_OF_BOUNDS. */
 tp_status tp_project_atlas_remove_source(tp_project_atlas *a, int index);
 
