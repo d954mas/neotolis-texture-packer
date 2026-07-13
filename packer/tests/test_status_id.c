@@ -49,11 +49,13 @@ void test_status_id_tokens(void) {
     /* F2-02 transaction concurrency faults (master spec §8). */
     TEST_ASSERT_EQUAL_STRING("revision_conflict", tp_status_id(TP_STATUS_REVISION_CONFLICT));
     TEST_ASSERT_EQUAL_STRING("invalid_revision", tp_status_id(TP_STATUS_INVALID_REVISION));
+    /* F2-04 recovery-journal durability fault (master spec §7.1, §22.3). */
+    TEST_ASSERT_EQUAL_STRING("journal_failed", tp_status_id(TP_STATUS_JOURNAL_FAILED));
 }
 
 /* Tokens are machine ids: lowercase, no spaces (unlike tp_status_str prose). */
 void test_status_id_is_machine_token(void) {
-    for (int s = TP_STATUS_OK; s <= TP_STATUS_INVALID_REVISION; s++) {
+    for (int s = TP_STATUS_OK; s <= TP_STATUS_JOURNAL_FAILED; s++) {
         const char *id = tp_status_id((tp_status)s);
         for (const char *c = id; *c; c++) {
             TEST_ASSERT_TRUE_MESSAGE(*c != ' ', id);

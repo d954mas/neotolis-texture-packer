@@ -55,7 +55,15 @@ add_library(tp_core STATIC
     # (stage-then-commit via the F2-02 clone/swap), and the history stack. Extends the
     # F2-02 commit to capture a diff without breaking its atomicity. CORE-TESTED
     # groundwork -- the GUI Undo cutover is F3-02, frontend routing F2-05, journal F2-04.
-    src/tp_diff_entity.c src/tp_diff_capture.c src/tp_diff_apply.c src/tp_history.c)
+    src/tp_diff_entity.c src/tp_diff_capture.c src/tp_diff_apply.c src/tp_history.c
+    # F2-04 minimum recovery journal: a versioned, length-prefixed, CRC-checksummed
+    # durable log over an injectable I/O seam (in-memory for the fault suite, real file
+    # for production). A commit is not acknowledged until its record is durably appended
+    # (§7.1); the retained transaction-id set + committed state are recoverable from
+    # checkpoint + journal replay (§7.2), which is UB-clean on arbitrary/corrupt/torn
+    # bytes. Sidecar: does NOT change project serialization. Model glue + the commit
+    # acknowledgement gate live in tp_txn_apply.c; the coordinator interface in tp_transaction.h.
+    src/tp_journal.c src/tp_journal_io.c)
 target_include_directories(tp_core PUBLIC include)
 # tp_pack_settings.c includes nt_builder.h for the header-only nt_atlas_opts_defaults()
 # inline (the single source of the packing defaults). HEADERS ONLY: this adds the builder

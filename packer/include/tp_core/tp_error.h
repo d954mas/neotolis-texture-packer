@@ -89,7 +89,16 @@ typedef enum tp_status {
      * the existing DUPLICATE_ID token ("duplicate_id"): a re-submitted transaction
      * id is a duplicate the message distinguishes from a structural-id collision. */
     TP_STATUS_REVISION_CONFLICT,   /* expected_revision < current: stale; rebuild and retry (tp_transaction) */
-    TP_STATUS_INVALID_REVISION     /* expected_revision > current: a revision that never existed (tp_transaction) */
+    TP_STATUS_INVALID_REVISION,    /* expected_revision > current: a revision that never existed (tp_transaction) */
+
+    /* --- recovery-journal durability fault (F2-04, master spec §7.1, §22.3) ---
+     * Append-only: new value at the END. A committed transaction is not acknowledged
+     * until its recovery record is durably appended (§7.1); when that durable append
+     * fails the transaction is rolled back (live model byte-unchanged, no committed
+     * event) and this distinct status tells the caller to retry the SAME transaction
+     * id -- it is a durability failure, not OOM and not a validation reject. An
+     * OOM-class journal fault (index/buffer allocation) still reuses OOM. */
+    TP_STATUS_JOURNAL_FAILED       /* recovery-journal durable append failed (tp_journal) */
 } tp_status;
 
 /* Fixed-size message buffer -- no heap, safe to embed by value on the stack. */
@@ -155,6 +164,7 @@ static inline const char *tp_status_str(tp_status status) {
         case TP_STATUS_OUT_OF_RANGE: return "value out of range";
         case TP_STATUS_REVISION_CONFLICT: return "revision conflict";
         case TP_STATUS_INVALID_REVISION: return "invalid revision";
+        case TP_STATUS_JOURNAL_FAILED: return "recovery journal append failed";
     }
     return "unknown status";
 }
@@ -198,6 +208,7 @@ static inline const char *tp_status_id(tp_status status) {
         case TP_STATUS_OUT_OF_RANGE: return "out_of_range";
         case TP_STATUS_REVISION_CONFLICT: return "revision_conflict";
         case TP_STATUS_INVALID_REVISION: return "invalid_revision";
+        case TP_STATUS_JOURNAL_FAILED: return "journal_failed";
     }
     return "unknown_status";
 }
