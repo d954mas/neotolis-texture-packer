@@ -389,3 +389,130 @@ undo step; two distinct knobs = TWO steps; flush-before-is_dirty preserves a buf
 component RMW loses neither); `check_boundaries.sh` = boundaries OK; GUI `--parity` deterministic on a
 fixed-id project AND byte-identical to the CLI for the same logical edits. Journal / append-fail /
 recovery / D2 remain UNTOUCHED (b-ii-B).
+
+## F2-05b-ii-A FIX pass (adversarial-review corrections, 2026-07-13)
+
+A 21-agent adversarial review of the coalescing cutover (battery-green) found 8 verified defects —
+several SILENT DATA LOSS. All are fixed GUI-LAYER ONLY (`apps/gui/**`); `packer/src`, `external`, and
+`packer/spike` were untouched (the tp_model/tp_diff/tp_operation core contracts are correct). Journal /
+append-fail / recovery / D2 stay untouched (that is b-ii-B).
+
+### The shared root cause — buffered gestures freeze the committed model
+
+The coalescing buffer DEFERS the model write to the gesture boundary (`pending_offer` only stores
+`s_pending_op` + sets `s_preview_stale`; it does NOT touch the model). So during a buffered gesture,
+`gui_project_get()` / `a->field` / an override record read the **pre-gesture COMMITTED** value, frozen.
+Every view that read the committed model expecting the in-flight edit was wrong. The **effective-value
+reading discipline** is: a view/guide must use *pending-if-buffered-for-this-key else committed*. Fixes
+#1/#2/#5 restore that; #3 restores the pre-cutover no-op suppression the read-only core can't do.
+
+### #1 — stale committed-value no-op guards committed the WRONG value (mechanism: guard removal + #3)
+
+`gui_view_settings.c` compared each widget value against the **committed** model
+(`iv != a->padding`, `fv != a->pixels_per_unit`, slice9 `iv != cur`, and the two per-sprite override
+numeric fields `iv != ov_margin` / `iv != ov_extrude`). During a buffered gesture the model is frozen,
+so returning a control to its committed value SKIPPED the correcting enqueue while the pending buffer
+kept the stale intermediate — the flush then committed the wrong value (e.g. type "40", correct to "4",
+Enter → committed 40). **Fix: mechanism (a) — REMOVE the committed-value guards** so every changed
+frame enqueues (coalesced, latest wins), paired with the #3 flush-time no-op suppression that drops a
+gesture netting back to committed. Chosen over (b) effective-value peeks because (a) unifies #1 and #3
+(one no-op check at the single flush choke point beats a peek at every guard site) and matches the
+already-correct anim-setter pattern (`if (!s_pending_valid && an->fps == fps) return true;` — which only
+skips when NOTHING is buffered, so it never froze anything and was left as-is). The margin/extrude
+override numeric fields share the identical bug class and were fixed with the enumerated seven (their
+`on` gate is kept; only the committed-value compare was dropped).
+
+### #2 — Pivot X/Y shared a coalesce key + a stale view read-modify-write (component-keyed, mirror slice9)
+
+`gui_project_set_sprite_origin` keyed both axes `field=-1`, and the view built each edit by re-reading
+the OTHER component from the frozen committed model. X buffered, then Y (same key → no flush) replaced
+`{x=new,y=old}` with `{x=old,y=new}` → X silently lost. **Fix: mirror slice9 exactly** — the origin
+setter is now COMPONENT-keyed (`axis` 0/1 = a different key) and the read-modify-write moved INSIDE the
+setter: editing Y flushes the buffered X first (X committed), then Y seeds the committed X and buffers
+`{x=committedX,y=new}` — both survive. The public setter signature became
+`gui_project_set_sprite_origin(atlas, sprite, int axis, float value)`; `gui_edit_sprite_origin` and the
+view carry the axis; the `--parity` seam sets X then Y (was one both-axes call). **Byte-identity:** the
+final override record is unchanged (`origin=(0.25,0.75)`), so the saved file is byte-identical (proven
+by a stash-baseline `--parity` diff — the pre-fix and post-fix outputs differ only in random ids).
+
+### #3 — no-op commit pushed a phantom undo step + dropped the redo branch (flush-time suppression)
+
+The pre-cutover `gui_project_touch` memcmp-dedup that suppressed no-op commits is gone, and the
+read-only core commit path pushes an undo record + discards the redo branch UNCONDITIONALLY. So a
+net-zero gesture (drag anim FPS 24→30→24 and release with a redo branch present) dropped the redo
+branch AND left a phantom undo step. **Fix (GUI-side): `pending_is_noop()` before `commit_txn_now`
+inside `gui_project_flush_pending`** — when the buffered op would not change the committed model,
+DISCARD it (no history push, no redo drop, no dirty flip). Covers the coalescable op kinds:
+`TP_OP_ATLAS_SETTINGS_SET` (each masked knob vs the atlas field), `TP_OP_ANIMATION_SETTINGS_SET`
+(masked fields vs the anim), and `TP_OP_SPRITE_OVERRIDE_SET` (masked fields vs the current override
+record; an ABSENT record == all-default/inherit, the same seed the setters use). Only the MASKED fields
+are compared (an unmasked field is untouched by the op, so it can't differ). Structural ops never
+buffer, so they always commit — a rename-to-same-name phantom stays a pre-existing minor edge (not
+expanded here). This unifies #1: the guard removal enqueues the corrected value, and a net-zero gesture
+is dropped here.
+
+### #4 — `--parity` read a freed target pointer across a flush (flush-before-read + copy)
+
+`main.c` bound `a = tp_project_get_atlas(gui_project_get(), 0)` while a slice9 edit was still buffered,
+then `gui_project_set_target(.., a->targets[0].exporter_id, ..)` — set_target's first act
+(`gui_project_flush_pending`) committed the slice9, clone-swapped `m->project`, freed the old project,
+and `a->targets[0].exporter_id` DANGLED before `dupstr` read it. **Fix:** flush the pending buffer
+FIRST, re-get `a` from the now-stable project, COPY `exporter_id` into a local buffer, THEN call
+set_target (whose internal flush is now a no-op). **Audit:** every production view edit routes through
+the deferred `gui_edit_*` queue, which copies the atlas INDEX + heap strings and re-fetches by
+index/name in the setter — no production path passes a project-owned pointer across a flush. The direct
+`--parity`/selftest call sequences are the only exceptions; both are now flush-before-read.
+
+### #5 — canvas slice9 guides lagged during typing (effective-value peek)
+
+`main.c` fed the canvas slice9 guide lines from the COMMITTED record, which freezes mid-gesture, so the
+documented "typing in the Region panel moves the lines this same frame" regressed. **Fix:** a read-only
+`gui_project_peek_pending_slice9(atlas, sprite_key, out_lrtb[4])` returns the BUFFERED slice9 (the
+pending op already seeds all four components from the record, so it is the full effective value) when a
+slice9 gesture is buffered for this atlas+sprite; the guide feed prefers it, else reads the committed
+record. **On-canvas PIVOT marker:** it is drawn from the LAST PACK result (`s->pivot`), NOT a live
+project feed (there is no `sel_origin` equivalent to `sel_slice9`), so buffered origin edits do not
+regress it — it already only updates on repack, unchanged by the cutover. No fix needed there.
+
+### #7 — `is_dirty` hashed the whole project every frame (cached bool)
+
+`gui_project_is_dirty` called `tp_model_dirty`, which walks the whole project (`tp_semantic_identity`)
+per call; the menu-bar dot polls it ~60x/s. **Fix:** a cached `s_dirty_cache` recomputed ONLY at the
+identity-change choke points — `gui_project_touch` (every committed mutation + the direct anim rename),
+undo, redo, and `mark_saved` (`promote_and_baseline` for init/new/open, and `save_as`). `is_dirty`
+returns the bool. A buffered (uncommitted) gesture is not in the identity, so buffering never touches
+the cache. The existing dirty/clean/undo-to-saved selftest asserts still hold.
+
+### #8 — TARGET_CREATE default-target build triplicated + buffer-size mismatch (shared helper)
+
+`add_atlas` and `add_target` each hand-built the default json-neotolis target op with an `out_path[576]`
+buffer (vs the core seed's `path[512]`). **Fix:** one GUI-local `fill_default_target_op(op, atlas_id,
+name)` helper (single 576-byte buffer, mints the id, fills exporter/out_path/enabled) used by both.
+Saved bytes stay byte-identical (same fields, same size; the core seed for init/new is unchanged and
+only sees short auto-names well under 512). The atlas name has no length cap in the GUI, but "out/"+name
+overflowing 576 was already unreachable in practice — consolidating removes the divergence hazard.
+
+### #6 — unbounded undo history: KNOWN LIMITATION + follow-up (NOT fixed here)
+
+`wrap_model` enables the F2-03 diff history, and the core `tp_history` **never evicts** — undo memory is
+unbounded over a marathon session (the old 32 MB snapshot ring is gone). The stored records are SEMANTIC
+DIFFS (far smaller than the retired snapshots), so practical growth is modest, but it is unbounded.
+Bounding it needs a CORE `tp_history` budget/oldest-eviction API — out of this GUI-only packet's scope
+AND the core is read-only here. **Follow-up packet:** add a core `tp_history` memory-budget +
+oldest-eviction API, then the GUI opts in at `wrap_model`. Do not touch core until then.
+
+### Carried-forward limitation
+
+Animation rename is still NOT undoable (`gui_project_set_anim_id`'s direct `an->name =` write; the F2-01
+catalog has no `ANIMATION_RENAME` op). Unchanged by this fix pass — documented above under the cutover.
+
+### Verified (both presets)
+
+0 warnings (native-debug + native-release, cgltf filtered); `ctest` 79/79 (debug) + 78/78 (release);
+`ntpacker_gui_selftest` PASS — extended with one regression assert per correctness fix: #1
+revert-to-committed commits nothing / revert-to-new commits the final value; #2 origin two-component
+edit survives both; #3 net-zero gesture = no phantom undo step AND redo branch intact + still restores;
+#4 flush-before-read commits the target with no dangling exporter read; #5 the peek returns the buffered
+slice9 while buffered and false after flush. `check_boundaries.sh` = boundaries OK. `--parity` output is
+byte-identical (id-normalized) to the pre-fix baseline — no saved bytes changed. No file under
+`packer/src` / `external` / `packer/spike` changed; journal / append-fail / recovery / D2 untouched.

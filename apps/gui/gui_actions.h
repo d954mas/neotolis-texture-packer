@@ -67,7 +67,7 @@ extern int s_last_pack_atlas;   /* which atlas that timing belongs to */
 void gui_edit_atlas_int(int atlas, gui_atlas_field field, int value);
 void gui_edit_atlas_bool(int atlas, gui_atlas_field field, bool value);
 void gui_edit_atlas_float(int atlas, gui_atlas_field field, float value);
-void gui_edit_sprite_origin(int atlas, const char *sprite_name, float ox, float oy);
+void gui_edit_sprite_origin(int atlas, const char *sprite_name, int axis, float value); /* axis 0=X, 1=Y (#2) */
 void gui_edit_sprite_slice9(int atlas, const char *sprite_name, int lrtb_index, int value);
 void gui_edit_sprite_override(int atlas, const char *sprite_name, gui_sprite_ov which, int value);
 void gui_edit_anim_fps(int atlas, int anim_index, float fps);

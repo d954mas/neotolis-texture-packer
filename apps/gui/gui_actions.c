@@ -165,12 +165,12 @@ void gui_edit_atlas_float(int atlas, gui_atlas_field field, float value) {
     e.f0 = value;
     (void)edit_push(&e);
 }
-void gui_edit_sprite_origin(int atlas, const char *sprite_name, float ox, float oy) {
+void gui_edit_sprite_origin(int atlas, const char *sprite_name, int axis, float value) {
     gui_edit e = {0};
     e.kind = GEDIT_SPRITE_ORIGIN;
     e.atlas = atlas;
-    e.f0 = ox;
-    e.f1 = oy;
+    e.i0 = axis; /* 0 = Pivot X, 1 = Pivot Y -- component-keyed (F2-05b-ii-A #2) */
+    e.f0 = value;
     (void)snprintf(e.s0, sizeof e.s0, "%s", sprite_name ? sprite_name : "");
     (void)edit_push(&e);
 }
@@ -303,7 +303,7 @@ static void drain_edits(void) {
                 (void)gui_project_set_atlas_setting(e->atlas, (gui_atlas_field)e->i0, e->i1, e->f0);
                 break;
             case GEDIT_SPRITE_ORIGIN:
-                (void)gui_project_set_sprite_origin(e->atlas, e->s0, e->f0, e->f1);
+                (void)gui_project_set_sprite_origin(e->atlas, e->s0, e->i0, e->f0);
                 break;
             case GEDIT_SPRITE_SLICE9:
                 (void)gui_project_set_sprite_slice9(e->atlas, e->s0, e->i0, e->i1);

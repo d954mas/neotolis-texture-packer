@@ -332,8 +332,13 @@ static void declare_atlas_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
         panel_note(ctx, "Pages over 4096 may not load on mobile GPUs / stock engine runtime.");
     }
     int iv = 0;
-    if (row_int(ctx, "Padding", nt_ui_id("set/pad"), s_nb_pad, sizeof s_nb_pad, a->padding, 0, 16384, true, &iv) &&
-        iv != a->padding) {
+    /* No committed-value guard (`iv != a->padding`) here or on the other coalescable knobs below
+     * (F2-05b-ii-A #1): during a buffered gesture the committed model is FROZEN, so a control returned
+     * to its committed value would SKIP the correcting enqueue while the pending buffer kept the stale
+     * intermediate -> the flush then committed the WRONG value (data loss). Every changed frame now
+     * enqueues (coalesced, latest wins); a gesture that nets back to committed is dropped by the flush-
+     * time no-op suppression (#3), so no phantom commit results. */
+    if (row_int(ctx, "Padding", nt_ui_id("set/pad"), s_nb_pad, sizeof s_nb_pad, a->padding, 0, 16384, true, &iv)) {
         gui_edit_atlas_int(s_sel_atlas, GUI_ATLAS_PADDING, iv);
     }
     bool bv = false;
@@ -346,26 +351,22 @@ static void declare_atlas_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
     if (!s_atlas_adv_open) {
         return;
     }
-    if (row_int(ctx, "Margin", nt_ui_id("set/margin"), s_nb_margin, sizeof s_nb_margin, a->margin, 0, 16384, true, &iv) &&
-        iv != a->margin) {
+    if (row_int(ctx, "Margin", nt_ui_id("set/margin"), s_nb_margin, sizeof s_nb_margin, a->margin, 0, 16384, true, &iv)) {
         gui_edit_atlas_int(s_sel_atlas, GUI_ATLAS_MARGIN, iv);
     }
     const bool extrude_ok = (a->shape == 0 /* RECT */);
     if (row_int(ctx, "Extrude", nt_ui_id("set/extrude"), s_nb_extrude, sizeof s_nb_extrude, a->extrude, 0, 255, extrude_ok,
-                &iv) &&
-        iv != a->extrude) {
+                &iv)) {
         gui_edit_atlas_int(s_sel_atlas, GUI_ATLAS_EXTRUDE, iv);
     }
     if (!extrude_ok) {
         panel_note(ctx, "Extrude requires Rect shape \xE2\x80\x94 use Padding for polygon modes.");
     }
     if (row_slider(ctx, "Alpha threshold", nt_ui_id("set/alpha"), s_nb_alpha, sizeof s_nb_alpha, a->alpha_threshold, 0,
-                   255, true, &iv) &&
-        iv != a->alpha_threshold) {
+                   255, true, &iv)) {
         gui_edit_atlas_int(s_sel_atlas, GUI_ATLAS_ALPHA_THRESHOLD, iv);
     }
-    if (row_int(ctx, "Max vertices", nt_ui_id("set/maxv"), s_nb_maxv, sizeof s_nb_maxv, a->max_vertices, 1, 16, true, &iv) &&
-        iv != a->max_vertices) {
+    if (row_int(ctx, "Max vertices", nt_ui_id("set/maxv"), s_nb_maxv, sizeof s_nb_maxv, a->max_vertices, 1, 16, true, &iv)) {
         gui_edit_atlas_int(s_sel_atlas, GUI_ATLAS_MAX_VERTICES, iv);
     }
     if (row_check(ctx, "Power of two", nt_ui_id("set/pot"), a->power_of_two, true, &bv)) {
@@ -373,8 +374,7 @@ static void declare_atlas_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
     }
     float fv = 0.0F;
     if (row_float(ctx, "Pixels/unit", nt_ui_id("set/ppu"), s_nb_ppu, sizeof s_nb_ppu, a->pixels_per_unit, 0.0001F,
-                  100000.0F, true, &fv) &&
-        fv != a->pixels_per_unit) {
+                  100000.0F, true, &fv)) {
         gui_edit_atlas_float(s_sel_atlas, GUI_ATLAS_PIXELS_PER_UNIT, fv);
     }
 }
@@ -483,11 +483,14 @@ static void declare_region_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
     const float ox = ov ? ov->origin_x : TP_PROJECT_ORIGIN_DEFAULT;
     const float oy = ov ? ov->origin_y : TP_PROJECT_ORIGIN_DEFAULT;
     float fv = 0.0F;
+    /* Pivot X/Y edit ONE component each (axis 0/1): the setter seeds the OTHER component from the
+     * committed record after flushing the buffered axis, so editing X then Y never loses X (#2). The
+     * view no longer does the stale read-modify-write that dropped a buffered X. */
     if (row_float(ctx, "Pivot X", nt_ui_id("reg/ox"), s_nb_ox, sizeof s_nb_ox, ox, -100.0F, 100.0F, true, &fv)) {
-        gui_edit_sprite_origin(s_sel_atlas, sprite, fv, oy);
+        gui_edit_sprite_origin(s_sel_atlas, sprite, 0, fv);
     }
     if (row_float(ctx, "Pivot Y", nt_ui_id("reg/oy"), s_nb_oy, sizeof s_nb_oy, oy, -100.0F, 100.0F, true, &fv)) {
-        gui_edit_sprite_origin(s_sel_atlas, sprite, ox, fv);
+        gui_edit_sprite_origin(s_sel_atlas, sprite, 1, fv);
     }
 
     static const char *const s9_labels[4] = {"Slice9 L", "Slice9 R", "Slice9 T", "Slice9 B"};
@@ -499,8 +502,10 @@ static void declare_region_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
             any_s9 = true;
         }
         int iv = 0;
-        if (row_int(ctx, s9_labels[k], nt_ui_id(s9_ids[k]), s_nb_s9[k], sizeof s_nb_s9[k], cur, 0, 4096, true, &iv) &&
-            iv != cur) {
+        /* No committed-value guard (`iv != cur`): the committed record is frozen mid-gesture (#1), so
+         * a slice9 component returned to its committed value must still enqueue the correction. A net-
+         * zero gesture is dropped by the flush-time no-op suppression (#3). */
+        if (row_int(ctx, s9_labels[k], nt_ui_id(s9_ids[k]), s_nb_s9[k], sizeof s_nb_s9[k], cur, 0, 4096, true, &iv)) {
             gui_edit_sprite_slice9(s_sel_atlas, sprite, k, iv);
         }
     }
@@ -582,9 +587,12 @@ static void declare_region_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
             }
             const int disp = (ov_margin != TP_PROJECT_OV_INHERIT) ? ov_margin : seed;
             int iv = 0;
+            /* Drop the committed-value guard (`iv != ov_margin`) -- same stale-committed-value lost-edit
+             * class as #1 (this override field is coalescable; the flush-time no-op suppression #3 drops a
+             * net-zero gesture). Keep the `on` gate (only enqueue while the override is active). */
             if (ui_int_field(ctx, nt_ui_id("reg/ov_mf"), s_nb_ov_margin, sizeof s_nb_ov_margin, disp, 1, 255,
                              on && !cbc, &iv) &&
-                on && iv != ov_margin) {
+                on) {
                 gui_edit_sprite_override(s_sel_atlas, sprite, GUI_SPRITE_OV_MARGIN, iv);
             }
         }
@@ -605,9 +613,10 @@ static void declare_region_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
             }
             const int disp = (ov_extrude != TP_PROJECT_OV_INHERIT) ? ov_extrude : seed;
             int iv = 0;
+            /* Drop the committed-value guard (`iv != ov_extrude`) -- same #1 class; #3 drops a net-zero. */
             if (ui_int_field(ctx, nt_ui_id("reg/ov_ef"), s_nb_ov_extrude, sizeof s_nb_ov_extrude, disp, 1, 255,
                              ex_enabled && on && !cbc, &iv) &&
-                on && iv != ov_extrude) {
+                on) {
                 gui_edit_sprite_override(s_sel_atlas, sprite, GUI_SPRITE_OV_EXTRUDE, iv);
             }
         }

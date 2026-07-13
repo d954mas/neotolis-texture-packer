@@ -802,6 +802,117 @@ void run_selftest(void) {
         NT_ASSERT(strcmp(f2a->targets[0].out_path, longp) == 0 && f2a->targets[0].enabled == !en_was &&
                   "a target toggle preserves the full >255 out_path (F2 no truncation)");
 
+        /* --- F2-05b-ii-A FIX pass (adversarial-review corrections) regressions --- */
+
+        /* (#1) STALE-GUARD lost-edit: the view no longer guards `iv != committed`, so a control
+         *      returned to its COMMITTED value still enqueues that value (latest wins). A gesture that
+         *      nets back to committed commits NOTHING (the #3 flush-time no-op drop); a gesture that
+         *      ends at a NEW final value commits EXACTLY that value -- never the stale intermediate.
+         *      (Pre-fix: the guard skipped the correcting enqueue, so the buffer kept the intermediate
+         *      and the flush committed the WRONG value = data loss.) */
+        gui_project_new();
+        gui_pack_clear(-1);
+        s_sel_atlas = 0;
+        const int g1_pad = tp_project_get_atlas(gui_project_get(), 0)->padding; /* committed */
+        const int g1_u0 = gui_project_undo_depth();
+        (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, g1_pad + 36, 0.0F); /* typed "40" (buffered) */
+        (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, g1_pad, 0.0F);      /* corrected back to committed */
+        gui_project_flush_pending();                                                 /* Enter / boundary */
+        const int g1_u1 = gui_project_undo_depth();
+        const int g1_pad1 = tp_project_get_atlas(gui_project_get(), 0)->padding;
+        nt_log_info("SELFTEST: #1 revert-to-committed undo delta=%d padding=%d (want 0, %d)", g1_u1 - g1_u0, g1_pad1, g1_pad);
+        NT_ASSERT(g1_u1 == g1_u0 && g1_pad1 == g1_pad &&
+                  "#1: a gesture netting back to the committed value commits NOTHING (no phantom step / no wrong value)");
+        (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, g1_pad + 36, 0.0F); /* "40" */
+        (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, g1_pad + 3, 0.0F);  /* corrected to a real new value */
+        gui_project_flush_pending();
+        const int g1_pad2 = tp_project_get_atlas(gui_project_get(), 0)->padding;
+        nt_log_info("SELFTEST: #1 revert-to-new final padding=%d undo delta=%d (want %d, 1)", g1_pad2, gui_project_undo_depth() - g1_u0,
+                    g1_pad + 3);
+        NT_ASSERT(gui_project_undo_depth() - g1_u0 == 1 && g1_pad2 == g1_pad + 3 &&
+                  "#1: the final value the user leaves the control at is what commits (not the stale intermediate)");
+
+        /* (#2) ORIGIN two-component RMW lost-edit: origin is now COMPONENT-keyed like slice9. Editing X
+         *      then Y back-to-back (no flush between) -> the Y edit's different key flushes the buffered X
+         *      first, then seeds the committed X -> BOTH survive. (Pre-fix: X and Y shared one key + a
+         *      stale view read-modify-write, so Y replaced {x=new,y=old} with {x=old,y=new} and dropped X.) */
+        gui_project_new();
+        gui_pack_clear(-1);
+        s_sel_atlas = 0;
+        (void)gui_project_set_sprite_origin(0, "osprite", 0 /* X */, 0.25F); /* buffered */
+        (void)gui_project_set_sprite_origin(0, "osprite", 1 /* Y */, 0.75F); /* different key -> flush X, seed committed */
+        gui_project_flush_pending();                                         /* commit Y */
+        const tp_project_sprite *oov = tp_project_atlas_find_sprite(tp_project_get_atlas(gui_project_get(), 0), "osprite");
+        const float g2_ox = oov ? oov->origin_x : -1.0F;
+        const float g2_oy = oov ? oov->origin_y : -1.0F;
+        nt_log_info("SELFTEST: #2 origin X=%g Y=%g (want 0.25,0.75 -- neither lost)", (double)g2_ox, (double)g2_oy);
+        NT_ASSERT(g2_ox == 0.25F && g2_oy == 0.75F &&
+                  "#2: origin two-component edit -- the component-precise key prevents the RMW lost-edit (both survive)");
+
+        /* (#3) NET-ZERO gesture drops NO redo branch + pushes NO phantom undo step. Make an edit, undo it
+         *      (a redo branch is now present), then run a gesture that nets back to the committed value:
+         *      the flush must DISCARD the no-op, leaving the redo branch intact + undo depth unchanged.
+         *      (Pre-fix: the unconditional commit pushed a phantom step AND dropped the redo branch.) */
+        gui_project_new();
+        gui_pack_clear(-1);
+        s_sel_atlas = 0;
+        const int g3_pad = tp_project_get_atlas(gui_project_get(), 0)->padding;
+        (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, g3_pad + 11, 0.0F);
+        gui_project_flush_pending(); /* commit an edit (padding = +11) */
+        NT_ASSERT(gui_project_undo() && "#3 setup: undo the committed edit");
+        NT_ASSERT(gui_project_can_redo() && "#3 setup: a redo branch is present after the undo");
+        const int g3_u = gui_project_undo_depth();
+        (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, g3_pad + 30, 0.0F); /* drag out */
+        (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, g3_pad, 0.0F);      /* back to committed */
+        gui_project_flush_pending();                                                 /* release: must DISCARD the no-op */
+        nt_log_info("SELFTEST: #3 net-zero gesture undo delta=%d can_redo=%d (want 0, 1)", gui_project_undo_depth() - g3_u,
+                    gui_project_can_redo());
+        NT_ASSERT(gui_project_undo_depth() == g3_u && "#3: a net-zero gesture pushes NO phantom undo step");
+        NT_ASSERT(gui_project_can_redo() && "#3: a net-zero gesture preserves the redo branch (no unconditional commit)");
+        NT_ASSERT(gui_project_redo() && tp_project_get_atlas(gui_project_get(), 0)->padding == g3_pad + 11 &&
+                  "#3: the preserved redo branch still restores the edit");
+
+        /* (#4) FLUSH-BEFORE-READ (the --parity UAF): mirror the fixed --parity target step. A buffered
+         *      slice9 edit is still in flight; FLUSH first (the commit clone-swaps + frees the current
+         *      project), re-get the atlas from the stable project, COPY exporter_id into a local, THEN
+         *      set_target (its own internal flush is now a no-op). The pre-fix order read the target's
+         *      exporter_id AFTER set_target's flush had freed the project it pointed into (UAF). */
+        gui_project_new();
+        gui_pack_clear(-1);
+        s_sel_atlas = 0;
+        tp_project_atlas *g4a = tp_project_get_atlas(gui_project_get(), 0);
+        NT_ASSERT(g4a && g4a->target_count > 0 && "#4: fresh project seeds a default target");
+        (void)gui_project_set_sprite_slice9(0, "p4sprite", 0 /* L */, 5); /* buffered across the flush boundary */
+        gui_project_flush_pending();                                      /* commit -> clone-swap + free the old project */
+        tp_project_atlas *g4b = tp_project_get_atlas(gui_project_get(), 0); /* re-get from the now-stable project */
+        char g4_exp[64];
+        (void)snprintf(g4_exp, sizeof g4_exp, "%s", g4b->targets[0].exporter_id); /* COPY before set_target's flush */
+        (void)gui_project_set_target(0, 0, g4_exp, "out/p4", true);
+        tp_project_atlas *g4c = tp_project_get_atlas(gui_project_get(), 0);
+        nt_log_info("SELFTEST: #4 flush-before-read target path='%s' exporter='%s'", g4c->targets[0].out_path,
+                    g4c->targets[0].exporter_id);
+        NT_ASSERT(strcmp(g4c->targets[0].out_path, "out/p4") == 0 && strcmp(g4c->targets[0].exporter_id, g4_exp) == 0 &&
+                  "#4: flush-before-read commits the target with no dangling exporter read (parity UAF fix)");
+
+        /* (#5) EFFECTIVE slice9 peek for the canvas guides: the peek returns the BUFFERED slice9 while a
+         *      slice9 gesture is buffered (so the on-canvas guides move THIS frame), and false once the
+         *      gesture flushes (the caller then reads the committed record). */
+        gui_project_new();
+        gui_pack_clear(-1);
+        s_sel_atlas = 0;
+        int g5[4] = {-1, -1, -1, -1};
+        NT_ASSERT(!gui_project_peek_pending_slice9(0, "p5sprite", g5) && "#5: no buffered slice9 -> peek returns false");
+        (void)gui_project_set_sprite_slice9(0, "p5sprite", 2 /* T */, 9); /* buffered */
+        const bool g5_hit = gui_project_peek_pending_slice9(0, "p5sprite", g5);
+        nt_log_info("SELFTEST: #5 slice9 peek hit=%d L,R,T,B=%d,%d,%d,%d (want 1 and 0,0,9,0)", g5_hit, g5[0], g5[1], g5[2],
+                    g5[3]);
+        NT_ASSERT(g5_hit && g5[0] == 0 && g5[1] == 0 && g5[2] == 9 && g5[3] == 0 &&
+                  "#5: peek returns the buffered slice9 (edited component + seeded others) while buffered");
+        NT_ASSERT(!gui_project_peek_pending_slice9(0, "other", g5) && "#5: the peek is keyed on the sprite (a different key misses)");
+        gui_project_flush_pending();
+        NT_ASSERT(!gui_project_peek_pending_slice9(0, "p5sprite", g5) &&
+                  "#5: after the gesture flush the peek returns false (read the committed record)");
+
         /* Restore a packable atlas-0 project for the render frames below (the pixel probe packs
          * atlas 0 and probes its region outlines) -- gui_project_new left it source-less. */
         gui_project_new();

@@ -42,6 +42,14 @@ static unsigned s_model_ver; /* bumped per real committed mutation (gui_project_
 static char s_name[256]; /* cached basename for the menu bar */
 static double s_now;     /* coalescing clock (seconds), fed each frame by gui_project_tick */
 
+/* F2-05b-ii-A #7: cached identity-derived dirty. tp_model_dirty walks the WHOLE project
+ * (tp_semantic_identity) on every call; the menu-bar dot polls it ~60x/s, so re-hashing the whole
+ * project each frame scaled O(project) per frame. The result changes ONLY when the model identity
+ * changes -- a committed mutation (gui_project_touch), an undo/redo, or a mark_saved re-baseline
+ * (promote_and_baseline / save) -- so cache it there and return the bool in the hot path. A buffered
+ * (uncommitted) gesture is NOT yet in the identity, so buffering never needs to touch the cache. */
+static bool s_dirty_cache;
+
 /* Pending id-promotion failure from a void-context ensure_ids() (init/new/open). OS-RNG failure
  * would leave nil structural ids, which must never be silently swallowed. Drained + surfaced
  * once by the UI (gui_project_take_id_error). The save path fails closed on its own. */
@@ -212,6 +220,10 @@ static bool wrap_model(tp_project *p) {
     return true;
 }
 
+/* F2-05b-ii-A #7: refresh the cached dirty bool from the (possibly whole-project) identity walk.
+ * Called ONLY at the identity-change choke points (commit/undo/redo/mark_saved), never per-frame. */
+static void recompute_dirty(void) { s_dirty_cache = tp_model_dirty(s_model); }
+
 /* Generates a fresh non-nil structural id via the OS RNG; false on an RNG fault. */
 static bool gen_id(tp_id128 *out) {
     tp_rng rng = tp_rng_os();
@@ -223,6 +235,30 @@ static void ops_free(tp_operation *ops, int n) {
     for (int i = 0; i < n; i++) {
         tp_operation_free(&ops[i]);
     }
+}
+
+/* F2-05b-ii-A #8: fill `op` as the ONE default json-neotolis target.create for a GUI-added atlas/
+ * target (exporter = TP_EXPORTER_ID_JSON_NEOTOLIS, out_path = "out/<name>", enabled). Extracted
+ * from the two hand-written op sites (add_atlas + add_target) that had diverged buffer sizes
+ * (out_path[576] each here vs the core seed's path[512]); one helper = one consistent size, no
+ * divergence. `op` is zeroed first, so a false return (RNG/OOM) leaves it safe for ops_free /
+ * tp_operation_free. Saved bytes stay byte-identical to the prior inline form (same fields, 576-byte
+ * out_path -- unreachable overflow either way for a normal-length atlas name). */
+static bool fill_default_target_op(tp_operation *op, tp_id128 atlas_id, const char *name) {
+    memset(op, 0, sizeof *op);
+    tp_id128 tgt_id;
+    if (!gen_id(&tgt_id)) {
+        return false;
+    }
+    char out_path[576];
+    (void)snprintf(out_path, sizeof out_path, "out/%s", name ? name : "");
+    op->kind = TP_OP_TARGET_CREATE;
+    op->atlas_id = atlas_id;
+    op->u.target_create.target_id = tgt_id;
+    op->u.target_create.exporter_id = dupstr(TP_EXPORTER_ID_JSON_NEOTOLIS);
+    op->u.target_create.out_path = dupstr(out_path);
+    op->u.target_create.enabled = true;
+    return op->u.target_create.exporter_id != NULL && op->u.target_create.out_path != NULL;
 }
 
 /* Commit `ops` as ONE atomic transaction on the persistent journal-less model NOW. On success
@@ -279,6 +315,7 @@ static void promote_and_baseline(void) {
         note_id_error(st, &e); /* surface the RNG fault; never crash */
     }
     tp_model_mark_saved(s_model); /* clean baseline == the promoted identity */
+    recompute_dirty();            /* #7: fresh baseline -> clean (cache the O(project) walk once) */
 }
 // #endregion
 
@@ -308,8 +345,100 @@ static void pending_discard(void) {
     }
 }
 
+/* The committed atlas addressed by the buffered op, or NULL. */
+static tp_project_atlas *atlas_of_pending(void) {
+    int ai = tp_project_find_atlas_by_id(s_proj, s_pending_op.atlas_id);
+    return ai < 0 ? NULL : tp_project_get_atlas(s_proj, ai);
+}
+
+/* F2-05b-ii-A #3: TRUE when committing the buffered op would not change the committed model (a
+ * semantic no-op). The pre-cutover gui_project_touch memcmp-dedup suppressed no-op commits; the
+ * read-only core commit path pushes an undo record + drops the redo branch UNCONDITIONALLY, so a
+ * net-zero gesture (e.g. drag a knob out and back) would otherwise leave a phantom undo step AND
+ * discard a live redo branch. We restore that parity GUI-side for the COALESCABLE op kinds only:
+ * atlas.settings.set, animation.settings.set, and sprite.override.set (absent sprite record ==
+ * all-default/inherit, the same seed the setters use). Structural ops never buffer, so they always
+ * commit (a rename-to-same-name phantom stays a pre-existing minor edge -- documented in ADR 0015).
+ * Compares only the MASKED fields; an unmasked field is untouched by the op so it can't differ. */
+static bool pending_is_noop(void) {
+    if (!s_pending_valid || !s_proj) {
+        return false;
+    }
+    const tp_operation *op = &s_pending_op;
+    switch (op->kind) {
+        case TP_OP_ATLAS_SETTINGS_SET: {
+            const tp_project_atlas *a = atlas_of_pending();
+            if (!a) {
+                return false;
+            }
+            const tp_op_atlas_settings *s = &op->u.atlas_settings;
+            const uint32_t m = s->mask;
+            if ((m & TP_AF_MAX_SIZE) && a->max_size != s->max_size) return false;
+            if ((m & TP_AF_PADDING) && a->padding != s->padding) return false;
+            if ((m & TP_AF_MARGIN) && a->margin != s->margin) return false;
+            if ((m & TP_AF_EXTRUDE) && a->extrude != s->extrude) return false;
+            if ((m & TP_AF_ALPHA_THRESHOLD) && a->alpha_threshold != s->alpha_threshold) return false;
+            if ((m & TP_AF_MAX_VERTICES) && a->max_vertices != s->max_vertices) return false;
+            if ((m & TP_AF_SHAPE) && a->shape != s->shape) return false;
+            if ((m & TP_AF_ALLOW_TRANSFORM) && a->allow_transform != s->allow_transform) return false;
+            if ((m & TP_AF_POWER_OF_TWO) && a->power_of_two != s->power_of_two) return false;
+            if ((m & TP_AF_PIXELS_PER_UNIT) && a->pixels_per_unit != s->pixels_per_unit) return false;
+            return true;
+        }
+        case TP_OP_ANIMATION_SETTINGS_SET: {
+            tp_project_atlas *a = atlas_of_pending();
+            const tp_project_anim *an = a ? tp_project_atlas_find_animation_by_id(a, op->u.anim_settings.anim_id) : NULL;
+            if (!an) {
+                return false;
+            }
+            const tp_op_anim_settings *s = &op->u.anim_settings;
+            const uint32_t m = s->mask;
+            if ((m & TP_ANF_FPS) && an->fps != s->fps) return false;
+            if ((m & TP_ANF_PLAYBACK) && an->playback != s->playback) return false;
+            if ((m & TP_ANF_FLIP_H) && an->flip_h != s->flip_h) return false;
+            if ((m & TP_ANF_FLIP_V) && an->flip_v != s->flip_v) return false;
+            return true;
+        }
+        case TP_OP_SPRITE_OVERRIDE_SET: {
+            tp_project_atlas *a = atlas_of_pending();
+            if (!a) {
+                return false;
+            }
+            const tp_op_sprite_set *s = &op->u.sprite_set;
+            /* nil source_id -> the bridge record key IS the verbatim src_key (the export-key bridge). */
+            const tp_project_sprite *ov = tp_project_atlas_find_sprite(a, s->src_key ? s->src_key : "");
+            const uint32_t m = s->mask;
+            if (m & TP_SPF_ORIGIN) {
+                const float ox = ov ? ov->origin_x : TP_PROJECT_ORIGIN_DEFAULT;
+                const float oy = ov ? ov->origin_y : TP_PROJECT_ORIGIN_DEFAULT;
+                if (ox != s->origin_x || oy != s->origin_y) return false;
+            }
+            if (m & TP_SPF_SLICE9) {
+                for (int k = 0; k < 4; k++) {
+                    const uint16_t cur = ov ? ov->slice9_lrtb[k] : 0;
+                    if (cur != s->slice9[k]) return false;
+                }
+            }
+            if ((m & TP_SPF_SHAPE) && (ov ? ov->ov_shape : TP_PROJECT_OV_INHERIT) != s->ov_shape) return false;
+            if ((m & TP_SPF_ALLOW_ROTATE) && (ov ? ov->ov_allow_rotate : TP_PROJECT_OV_INHERIT) != s->ov_allow_rotate) return false;
+            if ((m & TP_SPF_MAX_VERTICES) && (ov ? ov->ov_max_vertices : TP_PROJECT_OV_INHERIT) != s->ov_max_vertices) return false;
+            if ((m & TP_SPF_MARGIN) && (ov ? ov->ov_margin : TP_PROJECT_OV_INHERIT) != s->ov_margin) return false;
+            if ((m & TP_SPF_EXTRUDE) && (ov ? ov->ov_extrude : TP_PROJECT_OV_INHERIT) != s->ov_extrude) return false;
+            return true;
+        }
+        default:
+            return false; /* not a coalescable value edit -> always commit */
+    }
+}
+
 void gui_project_flush_pending(void) {
     if (!s_pending_valid) {
+        return;
+    }
+    if (pending_is_noop()) {
+        /* #3: a gesture that nets back to the committed value commits NOTHING -- no phantom undo
+         * step, no dropped redo branch, no dirty flip. pending_discard frees the arms + clears. */
+        pending_discard();
         return;
     }
     tp_operation op = s_pending_op; /* move: ownership of the arms transfers to the local */
@@ -360,6 +489,25 @@ void gui_project_flush_elapsed(void) {
         gui_project_flush_pending();
     }
 }
+
+/* F2-05b-ii-A #5: EFFECTIVE slice9 peek for the on-canvas guide lines. slice9 edits now BUFFER until
+ * the gesture boundary, so the committed record is FROZEN mid-typing -- the guides would freeze with
+ * it (regressing "typing in the Region panel moves the lines this same frame"). Returns true + fills
+ * out_lrtb[4] with the BUFFERED slice9 when a slice9 gesture is buffered for this atlas+sprite (the
+ * pending op already seeds all four components from the committed record, so it is the full effective
+ * value); false otherwise, so the caller falls back to the committed record. No commit, read-only. */
+bool gui_project_peek_pending_slice9(int atlas_index, const char *sprite_key, int out_lrtb[4]) {
+    if (!s_pending_valid || s_pending_key.kind != CK_SPRITE_SLICE9 || s_pending_key.atlas != atlas_index) {
+        return false;
+    }
+    if (strcmp(s_pending_key.sprite, sprite_key ? sprite_key : "") != 0) {
+        return false;
+    }
+    for (int k = 0; k < 4; k++) {
+        out_lrtb[k] = (int)s_pending_op.u.sprite_set.slice9[k];
+    }
+    return true;
+}
 // #endregion
 
 // #region lifecycle
@@ -389,10 +537,12 @@ tp_project *gui_project_get(void) { return s_proj; }
 const char *gui_project_path(void) { return s_path; }
 const char *gui_project_display_name(void) { return s_name; }
 bool gui_project_has_path(void) { return s_path[0] != '\0'; }
-/* Identity-derived dirty (tp_model_dirty). A buffered-but-uncommitted edit is NOT yet in the
- * model identity; the destructive gates (new/open/exit) flush the pending buffer BEFORE calling
- * this (see gui_actions.c) so a pending edit can never be silently discarded. */
-bool gui_project_is_dirty(void) { return tp_model_dirty(s_model); }
+/* Identity-derived dirty, CACHED (#7). tp_model_dirty walks the whole project; this returns the
+ * bool recomputed at the identity-change choke points instead of re-hashing every frame. A
+ * buffered-but-uncommitted edit is NOT yet in the model identity; the destructive gates
+ * (new/open/exit) flush the pending buffer BEFORE calling this (see gui_actions.c) so a pending
+ * edit can never be silently discarded (and the flush's commit refreshes the cache). */
+bool gui_project_is_dirty(void) { return s_dirty_cache; }
 bool gui_project_is_stale(void) { return s_preview_stale; }
 // #endregion
 
@@ -405,6 +555,7 @@ void gui_project_touch(gui_action act) {
     (void)act;
     s_preview_stale = true;
     s_model_ver++;
+    recompute_dirty(); /* #7: a real committed mutation is the only thing that can flip dirty here */
 }
 
 void gui_project_touch_setting(void) { gui_project_touch(GUI_ACT_SET_SETTING); }
@@ -424,27 +575,19 @@ int gui_project_add_atlas(void) {
     char name[64];
     (void)snprintf(name, sizeof name, "atlas%d", s_proj->atlas_count + 1);
     tp_id128 new_id;
-    tp_id128 tgt_id;
-    if (!gen_id(&new_id) || !gen_id(&tgt_id)) {
+    if (!gen_id(&new_id)) {
         return -1;
     }
-    char out_path[576];
-    (void)snprintf(out_path, sizeof out_path, "out/%s", name);
     /* ONE transaction: create the atlas AND seed its default json-neotolis target (I1). Both ops go
      * through the diff history so undo removes the whole atlas and redo restores its target too -- the
-     * old direct seed_default_target (a non-op mutation) would be LOST on redo (decision 0015). */
+     * old direct seed_default_target (a non-op mutation) would be LOST on redo (decision 0015). The
+     * target op is built by the shared fill_default_target_op helper (#8). */
     tp_operation ops[2];
     memset(ops, 0, sizeof ops);
     ops[0].kind = TP_OP_ATLAS_CREATE;
     ops[0].atlas_id = new_id;
     ops[0].u.atlas_create.name = dupstr(name);
-    ops[1].kind = TP_OP_TARGET_CREATE;
-    ops[1].atlas_id = new_id;
-    ops[1].u.target_create.target_id = tgt_id;
-    ops[1].u.target_create.exporter_id = dupstr(TP_EXPORTER_ID_JSON_NEOTOLIS);
-    ops[1].u.target_create.out_path = dupstr(out_path);
-    ops[1].u.target_create.enabled = true;
-    if (!ops[0].u.atlas_create.name || !ops[1].u.target_create.exporter_id || !ops[1].u.target_create.out_path) {
+    if (!ops[0].u.atlas_create.name || !fill_default_target_op(&ops[1], new_id, name)) {
         ops_free(ops, 2);
         return -1;
     }
@@ -628,14 +771,24 @@ static bool sprite_override_offer(int atlas_index, const char *sprite_name, tp_o
     return pending_offer(k, &op, GUI_ACT_SET_SETTING);
 }
 
-bool gui_project_set_sprite_origin(int atlas_index, const char *sprite_name, float ox, float oy) {
-    coalesce_key ck = make_key(CK_SPRITE_ORIGIN, atlas_index, -1, -1, sprite_name);
+bool gui_project_set_sprite_origin(int atlas_index, const char *sprite_name, int axis, float value) {
+    if (axis < 0 || axis > 1) {
+        return false; /* 0 = Pivot X, 1 = Pivot Y */
+    }
+    /* Component-precise key (mirror slice9): X and Y are DIFFERENT keys, so editing the OTHER axis
+     * flushes the buffered one FIRST -- then the read-modify-write seed below reads the COMMITTED
+     * value of the non-edited component and the two components can never merge against a stale model.
+     * (The pre-fix code keyed both axes the same AND seeded from a view-side committed read, so a
+     * back-to-back X then Y replaced {x=new,y=old} with {x=old,y=new} and silently lost the X edit.) */
+    coalesce_key ck = make_key(CK_SPRITE_ORIGIN, atlas_index, axis, -1, sprite_name);
     pending_route(&ck);
+    tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
+    const tp_project_sprite *ov = a ? tp_project_atlas_find_sprite(a, sprite_name) : NULL;
     tp_op_sprite_set p;
     memset(&p, 0, sizeof p);
     p.mask = TP_SPF_ORIGIN;
-    p.origin_x = ox;
-    p.origin_y = oy;
+    p.origin_x = (axis == 0) ? value : (ov ? ov->origin_x : TP_PROJECT_ORIGIN_DEFAULT);
+    p.origin_y = (axis == 1) ? value : (ov ? ov->origin_y : TP_PROJECT_ORIGIN_DEFAULT);
     return sprite_override_offer(atlas_index, sprite_name, p, &ck);
 }
 
@@ -688,21 +841,8 @@ int gui_project_add_target(int atlas_index) {
     if (!a) {
         return -1;
     }
-    tp_id128 tgt_id;
-    if (!gen_id(&tgt_id)) {
-        return -1;
-    }
-    char out_path[576];
-    (void)snprintf(out_path, sizeof out_path, "out/%s", a->name);
     tp_operation op;
-    memset(&op, 0, sizeof op);
-    op.kind = TP_OP_TARGET_CREATE;
-    op.atlas_id = a->id;
-    op.u.target_create.target_id = tgt_id;
-    op.u.target_create.exporter_id = dupstr(TP_EXPORTER_ID_JSON_NEOTOLIS);
-    op.u.target_create.out_path = dupstr(out_path);
-    op.u.target_create.enabled = true;
-    if (!op.u.target_create.exporter_id || !op.u.target_create.out_path) {
+    if (!fill_default_target_op(&op, a->id, a->name)) { /* shared default-target builder (#8) */
         tp_operation_free(&op);
         return -1;
     }
@@ -1091,6 +1231,7 @@ bool gui_project_undo(void) {
     }
     s_proj = tp_model_project(s_model); /* the model swapped its project on undo */
     s_preview_stale = true;             /* restored model != last-packed; packing is blocked -> always stale */
+    recompute_dirty();                  /* #7: undo back to the saved baseline reads clean by identity */
     gui_scan_invalidate_all();
     return true;
 }
@@ -1103,6 +1244,7 @@ bool gui_project_redo(void) {
     }
     s_proj = tp_model_project(s_model);
     s_preview_stale = true;
+    recompute_dirty(); /* #7: identity moved -> refresh the cached dirty */
     gui_scan_invalidate_all();
     return true;
 }
@@ -1185,6 +1327,7 @@ tp_status gui_project_save_as(const char *path, char *err_out, size_t err_cap) {
      * Save may relativize absolute sources in place -> that identity IS the clean baseline; the
      * revision + undo history are preserved (§8/§420). */
     tp_model_mark_saved(s_model);
+    recompute_dirty(); /* #7: the just-saved identity is the new clean baseline */
     return TP_STATUS_OK;
 }
 // #endregion

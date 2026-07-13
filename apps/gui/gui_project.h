@@ -101,6 +101,12 @@ void gui_project_flush_pending(void);
  * live drag or a mid-typing field. */
 void gui_project_flush_elapsed(void);
 
+/* EFFECTIVE slice9 peek for the on-canvas guides (#5): true + fills out_lrtb[4] with the buffered
+ * slice9 when a slice9 gesture is buffered for this atlas+sprite (else false -> read the committed
+ * record). Lets the guides track typing this frame instead of freezing at the committed value while
+ * the gesture buffers. Read-only (no commit). */
+bool gui_project_peek_pending_slice9(int atlas_index, const char *sprite_key, int out_lrtb[4]);
+
 /* Monotonic model-edit counter: bumped once per REAL model mutation (the touch choke point, after the
  * memcmp dedup). Lets a view cheaply detect "the project changed since I snapshotted it" without
  * re-serializing every frame -- the export-target preview uses it to drop a stale preview on an edit. */
@@ -150,7 +156,11 @@ bool gui_project_set_atlas_setting(int atlas_index, gui_atlas_field field, int i
 
 /* --- region-panel per-sprite overrides (sparse: a clear that leaves only defaults
  * drops the override entry, keeping byte-identical saves) --- */
-bool gui_project_set_sprite_origin(int atlas_index, const char *sprite_name, float ox, float oy);
+/* Sets ONE origin/pivot component (axis 0 = Pivot X, 1 = Pivot Y) via a coalescable
+ * sprite.override.set. Component-keyed + read-modify-write INSIDE the setter (mirrors slice9): the
+ * non-edited component is seeded from the current record AFTER the other axis's buffered edit flushes,
+ * so editing X then Y never merges against a stale model (no lost edit). */
+bool gui_project_set_sprite_origin(int atlas_index, const char *sprite_name, int axis, float value);
 bool gui_project_set_sprite_slice9(int atlas_index, const char *sprite_name, int lrtb_index, int value);
 /* Per-sprite packing override; `value` == TP_PROJECT_OV_INHERIT clears it. */
 bool gui_project_set_sprite_override(int atlas_index, const char *sprite_name, gui_sprite_ov which, int value);

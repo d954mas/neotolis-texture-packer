@@ -777,10 +777,20 @@ static void frame(void) {
             if (sel_a) {
                 char s9key[192];
                 tp_sprite_export_key(want->sprites[s_canvas.sel_sprite].name, s9key, sizeof s9key);
-                const tp_project_sprite *s9ov = tp_project_atlas_find_sprite(sel_a, s9key);
-                if (s9ov) {
+                /* EFFECTIVE value (#5): a slice9 edit BUFFERS until the gesture boundary, so the committed
+                 * record freezes mid-typing. Prefer the buffered slice9 (peek) when one is in flight for
+                 * this atlas+sprite, so the guides move THIS frame; else read the committed record. */
+                int eff[4];
+                if (gui_project_peek_pending_slice9(s_sel_atlas, s9key, eff)) {
                     for (int k = 0; k < 4; k++) {
-                        s_canvas.sel_slice9[k] = (int)s9ov->slice9_lrtb[k];
+                        s_canvas.sel_slice9[k] = eff[k];
+                    }
+                } else {
+                    const tp_project_sprite *s9ov = tp_project_atlas_find_sprite(sel_a, s9key);
+                    if (s9ov) {
+                        for (int k = 0; k < 4; k++) {
+                            s_canvas.sel_slice9[k] = (int)s9ov->slice9_lrtb[k];
+                        }
                     }
                 }
             }
@@ -903,13 +913,23 @@ static int gui_run_parity(const char *in, const char *out) {
      * (matches the CLI `sprite set <atlas> psp shape=0 origin=0.25,0.75 rename=psp_final`). */
     (void)gui_project_set_sprite_rename(0, "psp", "psp_final");
     (void)gui_project_set_sprite_override(0, "psp", GUI_SPRITE_OV_SHAPE, 0);
-    (void)gui_project_set_sprite_origin(0, "psp", 0.25F, 0.75F);
+    /* origin is now COMPONENT-keyed (#2): set X then Y (matches the CLI `origin=0.25,0.75`). The final
+     * override record is byte-identical -- editing Y flushes the buffered X (X committed), then Y seeds
+     * the committed X, so the saved sprite carries origin=(0.25,0.75) exactly as the single-op form did. */
+    (void)gui_project_set_sprite_origin(0, "psp", 0 /* X */, 0.25F);
+    (void)gui_project_set_sprite_origin(0, "psp", 1 /* Y */, 0.75F);
     (void)gui_project_set_sprite_slice9(0, "psp", 0, 4);
-    /* target 0: keep its exporter (read from the model -- no exporter-id literal), set path. */
+    /* target 0: keep its exporter (read from the model -- no exporter-id literal), set path. #4 UAF fix:
+     * FLUSH the buffered slice9 FIRST (it clone-swaps + frees the current project), THEN re-get `a` from
+     * the now-stable project and COPY exporter_id into a local before set_target (whose own flush is now a
+     * no-op) -- the pre-fix code read a->targets[0].exporter_id AFTER set_target's flush had freed it. */
     {
+        gui_project_flush_pending();
         tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), 0);
         if (a && a->target_count > 0) {
-            (void)gui_project_set_target(0, 0, a->targets[0].exporter_id, "out/hero", true);
+            char exporter[64];
+            (void)snprintf(exporter, sizeof exporter, "%s", a->targets[0].exporter_id);
+            (void)gui_project_set_target(0, 0, exporter, "out/hero", true);
         }
     }
     if (gui_project_save_as(out, err, sizeof err) != TP_STATUS_OK) {
