@@ -943,10 +943,21 @@ calls `flush_failed()` FIRST (before the kind switch) — on a journal-failed fl
 error and aborts (keeping the editor open unless `force`). After a successful flush, the anim branch is
 the simple pre-fix3 `if (!set_anim_id) { "Animation name must be unique."; if (force) cancel_edit; return; }`
 — `set_anim_id` is a DIRECT write (never a journal append), so post-flush its only false is a genuine
-collision, the warning is correct again and never silent. The `anim_id_exists` heuristic is GONE from the
-rename path. The same entry flush-first covers the atlas + sprite branches (their rename ops DO journal; on
-that op's own append failure they return false → no success message + the op-error surfaces via
-`poll_async` — no false success, no wrong message).
+collision, the warning is correct again and never silent. The same entry flush-first covers the atlas +
+sprite branches (their rename ops DO journal; on that op's own append failure they return false → no
+success message + the op-error surfaces via `poll_async` — no false success, no wrong message).
+
+**fix5 refinement (closure-review nit — pre-existing, low-severity):** the fix4 claim "post-flush the
+only false is a genuine collision" was not airtight — `gui_project_set_anim_id` also returns false on two
+NON-collision paths that survive the entry flush: a `dupstr` OOM on the new name, and a stale/out-of-range
+edit index (`anim_at() == NULL`). Both showed the misleading "Animation name must be unique." (and neither
+sets an op-error, so on `force`/blur the failure was silent). This mislabel pre-dates the whole journal
+work. **Fix:** post-flush, `gui_project_anim_id_exists()` is now a VALID discriminator (the own-name
+confound that broke it in fix3 is gone — own-name returns `true` from `set_anim_id` (a no-op) and never
+reaches this branch), so the anim branch reports `anim_id_exists` → "Animation name must be unique."
+(genuine collision, keep editing) else → "Could not rename the animation." (the rare OOM / stale-index
+error). The OOM and stale-index paths are not headlessly triggerable, so no new selftest case; J10/J11
+cover the collision + own-name behaviour. This is the terminal state of the anim-rename path.
 
 ### [2] do_undo / do_redo — flush-first
 

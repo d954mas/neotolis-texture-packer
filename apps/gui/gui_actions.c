@@ -1391,8 +1391,18 @@ static void commit_active_edit(bool force) {
             return;
         }
         if (!gui_project_set_anim_id(s_sel_atlas, s_edit_anim, s_edit_buf)) {
-            /* post-flush: set_anim_id (a direct write) can only fail on a genuine name collision. */
-            set_status_ex(STATUS_WARNING, "Animation name must be unique.");
+            /* Post-flush, set_anim_id's false is a genuine name collision (the typed name is held by
+             * ANOTHER animation), OR a rare non-collision failure (OOM on the name dup, or a stale
+             * out-of-range edit index). gui_project_anim_id_exists() distinguishes them cleanly HERE:
+             * the own-name case returns true from set_anim_id (a no-op) so it never reaches this branch,
+             * and the flush-fail confound that made this heuristic wrong in fix3 is gone (the entry
+             * flush_failed() above handles the journal case). So report the collision as such, else a
+             * real error rather than a misleading "must be unique". */
+            if (gui_project_anim_id_exists(s_sel_atlas, s_edit_buf)) {
+                set_status_ex(STATUS_WARNING, "Animation name must be unique.");
+            } else {
+                set_status_ex(STATUS_ERROR, "Could not rename the animation.");
+            }
             if (force) {
                 cancel_edit();
             }
