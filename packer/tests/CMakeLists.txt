@@ -83,6 +83,19 @@ target_compile_options(tp_test_transaction PRIVATE -U_DLL)
 nt_set_warning_flags(tp_test_transaction)   # AGENTS.md invariant: our test TUs too
 add_test(NAME tp_transaction COMMAND tp_test_transaction)
 
+# F2-03: semantic diff / exact inverse (Undo) + redo replay + in-memory history.
+# The ORACLE suite: A->forward->B->inverse->A' byte-identical for EVERY op kind (and
+# == the legacy full-snapshot restore), reference cascade, a 100-anim batch as one
+# inverse, inverse-apply alloc-failure rollback (sweep), capture-alloc atomicity,
+# redo + redo-branch discard, and corrupted-diff structured errors. Includes the
+# private src/ internal header for the diff alloc seam + record/history internals.
+add_executable(tp_test_diff test_diff.c)
+target_link_libraries(tp_test_diff PRIVATE tp_core unity)
+target_include_directories(tp_test_diff PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_options(tp_test_diff PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_diff)   # AGENTS.md invariant: our test TUs too
+add_test(NAME tp_diff COMMAND tp_test_diff)
+
 # F1-03: canonical selector resolver (id/name/path/compound -> exactly one id).
 add_executable(tp_test_selector test_selector.c)
 target_link_libraries(tp_test_selector PRIVATE tp_core unity)
