@@ -192,6 +192,10 @@ char *tp_txn_result_encode(const tp_txn_result *res) {
                 bool ef = true;
                 tp_obj_key(&sb, 4, &ef, "code");
                 tp_sb_json_string(&sb, tp_status_id(res->errors[i].code));
+                if (res->errors[i].field[0]) { /* sparse: omit when "" -- matches F2-01 tp_op_result_encode */
+                    tp_obj_key(&sb, 4, &ef, "field");
+                    tp_sb_json_string(&sb, res->errors[i].field);
+                }
                 tp_obj_key(&sb, 4, &ef, "message");
                 tp_sb_json_string(&sb, res->errors[i].message);
                 tp_obj_key(&sb, 4, &ef, "op_index");
