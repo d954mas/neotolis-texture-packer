@@ -54,6 +54,24 @@ function(assert_absent NEEDLE)
     endif()
 endfunction()
 
+# assert_order(FIRST SECOND): both substrings present AND FIRST occurs before SECOND in
+# the saved file. Used to pin sprite-array ORDER (a record must stay in place, not get
+# dropped and re-appended at the end).
+function(assert_order FIRST SECOND)
+    file(READ "${PROJ}" _content)
+    string(FIND "${_content}" "${FIRST}" _p1)
+    string(FIND "${_content}" "${SECOND}" _p2)
+    if(_p1 EQUAL -1)
+        message(FATAL_ERROR "[${FAMILY}] ordering check: substring absent: ${FIRST}\n--file--\n${_content}")
+    endif()
+    if(_p2 EQUAL -1)
+        message(FATAL_ERROR "[${FAMILY}] ordering check: substring absent: ${SECOND}\n--file--\n${_content}")
+    endif()
+    if(NOT _p1 LESS _p2)
+        message(FATAL_ERROR "[${FAMILY}] wrong order: '${FIRST}' (@${_p1}) must precede '${SECOND}' (@${_p2})\n--file--\n${_content}")
+    endif()
+endfunction()
+
 # ---------------------------------------------------------------------------
 
 if(FAMILY STREQUAL "new")
@@ -106,6 +124,26 @@ elseif(FAMILY STREQUAL "sprite")
     run(0 sprite unset "${PROJ}" atlas1 foo)
     assert_absent("\"name\": \"foo\"")
     run(0 sprite unset "${PROJ}" atlas1 never_existed)         # idempotent clear -> ok
+    # F1: renaming a MID-array sprite while clearing its LAST override must NOT reorder the
+    # sprites array (the pre-cutover inline path edited in place). Build three retained
+    # records s0/s1/s2, then in ONE command clear s1's only override AND rename it: s1 must
+    # STAY between s0 and s2. The pre-fix op order (override.set then name.set) pruned the
+    # now-default s1 record and re-appended it at the END on the rename -> array reorder ->
+    # different saved bytes. Emitting name.set FIRST keeps it in place.
+    run(0 sprite set "${PROJ}" atlas1 s0 margin=5)
+    run(0 sprite set "${PROJ}" atlas1 s1 extrude=7)
+    run(0 sprite set "${PROJ}" atlas1 s2 margin=9)
+    run(0 sprite set "${PROJ}" atlas1 s1 extrude=inherit rename=mid1)  # clear last override + rename
+    assert_contains("\"rename\": \"mid1\"")
+    assert_order("\"name\": \"s0\"" "\"name\": \"s1\"")        # s1 did not jump ahead of s0
+    assert_order("\"name\": \"s1\"" "\"name\": \"s2\"")        # s1 stayed in place, before s2
+    # F2: an override key that carries an extension is stored + cleared VERBATIM (the
+    # pre-cutover bytes), NOT stripped to the export bridge. `sprite set img.png` stores
+    # "img.png" (not "img"); `sprite unset img.png` finds+removes that verbatim record.
+    run(0 sprite set "${PROJ}" atlas1 img.png origin=0.1,0.2)
+    assert_contains("\"name\": \"img.png\"")                   # verbatim -- a bridged store would write "img"
+    run(0 sprite unset "${PROJ}" atlas1 img.png)               # keys on the verbatim record, not "img"
+    assert_absent("\"name\": \"img.png\"")                     # cleared (would silently no-op if it keyed on "img")
     run(2 sprite set "${PROJ}" atlas1 x origin=1)              # origin needs 2 comps -> usage
     run(2 sprite set "${PROJ}" atlas1 x bogus=1)               # unknown field -> usage
 

@@ -280,6 +280,45 @@ void test_apply_sprite_pending_no_source(void) {
     tp_project_destroy(p);
 }
 
+/* F2 (byte-identity): a PENDING (nil source_id) override stores + clears under the
+ * VERBATIM key the CLI passed -- NOT the ext-stripped export bridge. This reproduces the
+ * pre-cutover inline CLI (which did add_sprite/remove_sprite on the raw key). It keeps
+ * `sprite set hero.png` byte-identical AND lets `sprite unset hero.png` clear a
+ * pre-existing verbatim "hero.png" record instead of keying on "hero" and missing it.
+ * (A source-ATTACHED override -- non-nil source_id, test_apply_sprite_ops -- still keys
+ * under the export bridge so the pack path resolves it.) */
+void test_apply_sprite_pending_verbatim_ext_key(void) {
+    tp_project *p = tp_project_create();
+    TEST_ASSERT_NOT_NULL(p);
+    tp_id128 aid = id_of(0x31);
+    p->atlases[0].id = aid;
+    p->atlases[0].id_synthetic = false;
+    tp_op_reject rej;
+    tp_operation op;
+
+    memset(&op, 0, sizeof op); /* set, nil source, ext-carrying key -> stored VERBATIM */
+    op.kind = TP_OP_SPRITE_OVERRIDE_SET;
+    op.atlas_id = aid;
+    op.u.sprite_set.source_id = tp_id128_nil();
+    op.u.sprite_set.src_key = (char *)"hero.png";
+    op.u.sprite_set.mask = TP_SPF_ORIGIN;
+    op.u.sprite_set.origin_x = 0.25F;
+    op.u.sprite_set.origin_y = 0.75F;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_operation_apply(p, &op, &rej));
+    TEST_ASSERT_NOT_NULL(tp_project_atlas_find_sprite(&p->atlases[0], "hero.png")); /* verbatim */
+    TEST_ASSERT_NULL(tp_project_atlas_find_sprite(&p->atlases[0], "hero"));         /* NOT bridged */
+
+    memset(&op, 0, sizeof op); /* unset (clear ALL), nil source, ext key -> removes the verbatim record */
+    op.kind = TP_OP_SPRITE_OVERRIDE_CLEAR;
+    op.atlas_id = aid;
+    op.u.sprite_clear.source_id = tp_id128_nil();
+    op.u.sprite_clear.src_key = (char *)"hero.png";
+    op.u.sprite_clear.mask = TP_SPF_ALL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_operation_apply(p, &op, &rej));
+    TEST_ASSERT_NULL(tp_project_atlas_find_sprite(&p->atlases[0], "hero.png")); /* cleared, not a silent no-op */
+    tp_project_destroy(p);
+}
+
 /* ---- forward + error per kind: animation --------------------------------- */
 
 void test_apply_anim_ops(void) {
@@ -767,6 +806,7 @@ int main(void) {
     RUN_TEST(test_apply_source_ops);
     RUN_TEST(test_apply_sprite_ops);
     RUN_TEST(test_apply_sprite_pending_no_source);
+    RUN_TEST(test_apply_sprite_pending_verbatim_ext_key);
     RUN_TEST(test_apply_anim_ops);
     RUN_TEST(test_apply_target_ops);
     RUN_TEST(test_alloc_fail_before_commit);

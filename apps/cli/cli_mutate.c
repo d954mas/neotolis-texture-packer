@@ -350,16 +350,6 @@ static bool cli_gen_id(tp_id128 *out) {
     return tp_id128_generate(&rng, out, &err) == TP_STATUS_OK;
 }
 
-/* 16 raw bytes -> 32 lowercase hex + NUL (the transaction idempotency token). */
-static void hex32(tp_id128 id, char out[33]) {
-    static const char hx[] = "0123456789abcdef";
-    for (int i = 0; i < 16; i++) {
-        out[2 * i] = hx[(id.bytes[i] >> 4) & 0xF];
-        out[2 * i + 1] = hx[id.bytes[i] & 0xF];
-    }
-    out[32] = '\0';
-}
-
 /* ------------------------------------------------------------------ */
 /* selector resolution (stays in the CLI: name/index -> entity)       */
 /* ------------------------------------------------------------------ */
@@ -474,14 +464,13 @@ static int commit_ops(tp_project *p, const char *path, tp_operation *ops, int no
     tp_txn_request req;
     memset(&req, 0, sizeof req);
     req.schema = TP_TXN_SCHEMA;
-    tp_id128 tid;
-    if (!cli_gen_id(&tid)) {
-        cli_emit_error(json, quiet, "rng_failed", "could not generate a transaction id");
-        free_ops(ops, nops);
-        tp_model_destroy(m);
-        return CLI_EXIT_INTERNAL;
-    }
-    hex32(tid, req.id_hex);
+    /* The one-shot CLI is FILE-oriented: a fresh journal-LESS model + a fresh in-memory
+     * idstore per process, exactly ONE transaction per invocation. Idempotency is moot,
+     * so the transaction id is a FIXED 32-lowercase-hex constant rather than an OS-RNG
+     * draw -- this removes an RNG failure mode from every verb (the id is never
+     * serialized, so output stays byte-identical). Must be 32 lowercase hex
+     * (tp_txn__preflight rejects anything else). */
+    (void)snprintf(req.id_hex, sizeof req.id_hex, "%s", "00000000000000000000000000000000");
     req.expected_revision = 0; /* freshly wrapped model is at revision 0 */
     req.ops = ops;
     req.op_count = nops;
@@ -538,10 +527,8 @@ static int do_new(const char *path, bool json, bool quiet) {
 
 /* True when input abs path matches an existing source resolved to abs (cross-form
  * dedupe: existing sources are project-relative post-save, the input is CWD-absolute). */
-static bool source_matches(tp_project *p, const tp_project_atlas *a, const char *in_abs, const char *in_norm,
+static bool source_matches(tp_project *p, const tp_project_atlas *a, const char *in_norm, const char *in_canon,
                            int *out_index) {
-    char in_canon[CLI_PATH_MAX];
-    path_canon(in_abs, in_canon, sizeof in_canon);
     for (int i = 0; i < a->source_count; i++) {
         char stored[CLI_PATH_MAX];
         (void)snprintf(stored, sizeof stored, "%s", a->sources[i].path);
@@ -602,6 +589,7 @@ static int do_add(const char *const *pos, int npos, bool json, bool quiet) {
     int added = 0;
     int dup = 0;
     bool oom = false;
+    bool rngfail = false;
     for (int i = 3; i < npos; i++) {
         char in_abs[CLI_PATH_MAX];
         char in_norm[CLI_PATH_MAX];
@@ -610,7 +598,7 @@ static int do_add(const char *const *pos, int npos, bool json, bool quiet) {
         (void)snprintf(in_norm, sizeof in_norm, "%s", pos[i]);
         norm_slashes(in_norm);
         path_canon(in_abs, in_canon, sizeof in_canon);
-        bool is_dup = source_matches(p, a, in_abs, in_norm, NULL); /* against stored sources */
+        bool is_dup = source_matches(p, a, in_norm, in_canon, NULL); /* against stored sources (canon reused) */
         for (int q = 0; q < added && !is_dup; q++) {               /* against sources queued this call */
             if (path_eq(qcanon[q], in_canon)) {
                 is_dup = true;
@@ -626,19 +614,27 @@ static int do_add(const char *const *pos, int npos, bool json, bool quiet) {
         op->atlas_id = aid;
         op->u.source_add.kind = TP_SOURCE_KIND_FOLDER; /* kind-agnostic default (matches add_source) */
         op->u.source_add.key = cli_strdup(in_abs);     /* stored abs; save relativizes */
-        if (!op->u.source_add.key || !cli_gen_id(&op->u.source_add.source_id)) {
+        if (!op->u.source_add.key) {
             oom = true;
+            break;
+        }
+        if (!cli_gen_id(&op->u.source_add.source_id)) { /* OS-RNG fault, not OOM (F4) */
+            rngfail = true;
             break;
         }
         (void)snprintf(qcanon[added], CLI_PATH_MAX, "%s", in_canon);
         added++;
     }
 
-    if (oom) {
+    if (oom || rngfail) {
         free_ops(ops, added + 1); /* +1: free the partially-built op the loop broke on */
         free(ops);
         free(qcanon);
-        cli_emit_error(json, quiet, "oom", "out of memory building sources");
+        if (rngfail) {
+            cli_emit_error(json, quiet, "rng_failed", "could not generate a source id");
+        } else {
+            cli_emit_error(json, quiet, "oom", "out of memory building sources");
+        }
         tp_project_destroy(p);
         return CLI_EXIT_INTERNAL;
     }
@@ -674,11 +670,13 @@ static int do_remove_source(const char *const *pos, int npos, bool json, bool qu
     tp_project_atlas *a = &p->atlases[ai];
     char in_abs[CLI_PATH_MAX];
     char in_norm[CLI_PATH_MAX];
+    char in_canon[CLI_PATH_MAX];
     abspath_cwd(src, in_abs, sizeof in_abs);
     (void)snprintf(in_norm, sizeof in_norm, "%s", src);
     norm_slashes(in_norm);
+    path_canon(in_abs, in_canon, sizeof in_canon);
     int idx = -1;
-    if (!source_matches(p, a, in_abs, in_norm, &idx)) {
+    if (!source_matches(p, a, in_norm, in_canon, &idx)) {
         cli_emit_error(json, quiet, "source_not_found", "atlas '%s' has no source matching '%s'", atlas, src);
         tp_project_destroy(p);
         return CLI_EXIT_PROJECT;
@@ -987,15 +985,37 @@ static int do_sprite_set(const char *const *pos, int npos, bool json, bool quiet
         }
     }
 
-    /* Build up to two ops: the override-field set (if any field was named) THEN the
-     * rename (a distinct SPRITE_NAME_SET op) -- the same "fields first, rename last"
-     * order the pre-cutover inline path applied. Sprite ops are keyed by the export
-     * bridge with a NIL source_id (a pending, name-keyed override -- the CLI adds by
-     * name before any source scan). */
+    /* Build up to two ops. Emit the rename (SPRITE_NAME_SET) BEFORE the override
+     * SET/CLEAR, NOT after. When the override clears the last field to INHERIT, the
+     * record becomes all-default and apply's post-set prune drops it; a following
+     * rename would then re-add it at the END of the array -> reorder -> different saved
+     * bytes than the pre-cutover single in-place edit. Doing the rename FIRST leaves the
+     * record non-default (its rename is set) when the override is cleared, so the prune
+     * keeps it IN PLACE. A pure clear (no rename) still prunes to default -> record
+     * dropped, matching the old path; a rename creates the record if absent, exactly as
+     * the old add_sprite did. Sprite ops carry a NIL source_id (a pending, name-keyed
+     * override the CLI adds by name before any source scan) and store under the VERBATIM
+     * key (byte-identical to the pre-cutover inline add_sprite/rename/remove). */
     tp_operation ops[2];
     int n = 0;
     bool any_override = e.set_origin || e.set_slice9 || e.set_shape || e.set_rot || e.set_maxv || e.set_margin ||
                         e.set_extrude;
+    if (e.set_rename) {
+        tp_operation *op = &ops[n];
+        memset(op, 0, sizeof *op);
+        op->kind = TP_OP_SPRITE_NAME_SET;
+        op->atlas_id = aid;
+        op->u.sprite_name.source_id = tp_id128_nil();
+        op->u.sprite_name.src_key = cli_strdup(key);
+        op->u.sprite_name.name = e.rename_inherit ? NULL : cli_strdup(e.rename);
+        if (!op->u.sprite_name.src_key || (!e.rename_inherit && !op->u.sprite_name.name)) {
+            free_ops(ops, n + 1);
+            cli_emit_error(json, quiet, "oom", "out of memory building sprite op");
+            tp_project_destroy(p);
+            return CLI_EXIT_INTERNAL;
+        }
+        n++;
+    }
     if (any_override) {
         tp_operation *op = &ops[n];
         memset(op, 0, sizeof *op);
@@ -1004,6 +1024,7 @@ static int do_sprite_set(const char *const *pos, int npos, bool json, bool quiet
         op->u.sprite_set.source_id = tp_id128_nil();
         op->u.sprite_set.src_key = cli_strdup(key);
         if (!op->u.sprite_set.src_key) {
+            free_ops(ops, n + 1); /* also frees the rename op already built at ops[0] */
             cli_emit_error(json, quiet, "oom", "out of memory building sprite op");
             tp_project_destroy(p);
             return CLI_EXIT_INTERNAL;
@@ -1041,22 +1062,6 @@ static int do_sprite_set(const char *const *pos, int npos, bool json, bool quiet
             op->u.sprite_set.ov_extrude = e.extrude_inherit ? TP_PROJECT_OV_INHERIT : (int16_t)e.extrude;
         }
         op->u.sprite_set.mask = mask;
-        n++;
-    }
-    if (e.set_rename) {
-        tp_operation *op = &ops[n];
-        memset(op, 0, sizeof *op);
-        op->kind = TP_OP_SPRITE_NAME_SET;
-        op->atlas_id = aid;
-        op->u.sprite_name.source_id = tp_id128_nil();
-        op->u.sprite_name.src_key = cli_strdup(key);
-        op->u.sprite_name.name = e.rename_inherit ? NULL : cli_strdup(e.rename);
-        if (!op->u.sprite_name.src_key || (!e.rename_inherit && !op->u.sprite_name.name)) {
-            free_ops(ops, n + 1);
-            cli_emit_error(json, quiet, "oom", "out of memory building sprite op");
-            tp_project_destroy(p);
-            return CLI_EXIT_INTERNAL;
-        }
         n++;
     }
 
@@ -1327,11 +1332,20 @@ static int do_anim(const char *const *pos, int npos, const char *opt_at, bool js
         op.u.anim_create.flip_h = false;
         op.u.anim_create.flip_v = false;
         op.u.anim_create.frame_count = nframes;
-        bool bad = (op.u.anim_create.name == NULL);
-        if (!bad && !cli_gen_id(&op.u.anim_create.anim_id)) {
-            bad = true;
+        if (op.u.anim_create.name == NULL) {
+            tp_operation_free(&op);
+            cli_emit_error(json, quiet, "oom", "out of memory building animation");
+            tp_project_destroy(p);
+            return CLI_EXIT_INTERNAL;
         }
-        if (!bad && nframes > 0) {
+        if (!cli_gen_id(&op.u.anim_create.anim_id)) { /* OS-RNG fault, not OOM (F4) */
+            tp_operation_free(&op);
+            cli_emit_error(json, quiet, "rng_failed", "could not generate an animation id");
+            tp_project_destroy(p);
+            return CLI_EXIT_INTERNAL;
+        }
+        bool bad = false;
+        if (nframes > 0) {
             op.u.anim_create.frames = (char **)calloc((size_t)nframes, sizeof(char *));
             if (!op.u.anim_create.frames) {
                 bad = true;
@@ -1448,12 +1462,24 @@ static int do_anim(const char *const *pos, int npos, const char *opt_at, bool js
         if (!to_int(pos[5], &from) || !to_int(pos[6], &to)) {
             return fail_usage(p, json, quiet, "usage", "move-frame <from> and <to> must be integers");
         }
+        /* F3: preserve the pre-cutover out-of-range diagnostic. The old inline path let
+         * tp_project_anim_move_frame reject an out-of-range `from` with the CLI's own
+         * `frame_not_found` id + "no frame at index N" message (exit 3). Routing straight
+         * through core would instead surface core's `out_of_bounds` id + "from_index N out
+         * of [0..M)" -- a changed structured-error contract for a NORMAL input. Pre-check
+         * `from` here so the emitted bytes match the old path exactly. (`to` stays clamped
+         * by apply, exactly as before.) */
+        if (from < 0 || from >= an->frame_count) {
+            cli_emit_error(json, quiet, "frame_not_found", "animation '%s' has no frame at index %d", id, from);
+            tp_project_destroy(p);
+            return CLI_EXIT_PROJECT;
+        }
         tp_operation op;
         memset(&op, 0, sizeof op);
         op.kind = TP_OP_ANIMATION_FRAME_MOVE;
         op.atlas_id = aid;
         op.u.anim_frame_move.anim_id = anim_id;
-        op.u.anim_frame_move.from_index = from; /* out-of-range from -> core OUT_OF_BOUNDS -> exit 3 */
+        op.u.anim_frame_move.from_index = from; /* pre-checked in range above (F3) */
         op.u.anim_frame_move.to_index = to;     /* to is clamped by apply (CLI parity) */
         char human[128];
         (void)snprintf(human, sizeof human, "Moved frame %d -> %d in animation '%s'", from, to, id);
@@ -1529,9 +1555,15 @@ static int do_target(const char *const *pos, int npos, bool json, bool quiet) {
         op.u.target_create.exporter_id = cli_strdup(eid);
         op.u.target_create.out_path = cli_strdup(out);
         op.u.target_create.enabled = true;
-        if (!op.u.target_create.exporter_id || !op.u.target_create.out_path || !cli_gen_id(&op.u.target_create.target_id)) {
+        if (!op.u.target_create.exporter_id || !op.u.target_create.out_path) {
             tp_operation_free(&op);
             cli_emit_error(json, quiet, "oom", "out of memory building target");
+            tp_project_destroy(p);
+            return CLI_EXIT_INTERNAL;
+        }
+        if (!cli_gen_id(&op.u.target_create.target_id)) { /* OS-RNG fault, not OOM (F4) */
+            tp_operation_free(&op);
+            cli_emit_error(json, quiet, "rng_failed", "could not generate a target id");
             tp_project_destroy(p);
             return CLI_EXIT_INTERNAL;
         }
@@ -1678,9 +1710,15 @@ static int do_atlas(const char *const *pos, int npos, bool json, bool quiet) {
         memset(&op, 0, sizeof op);
         op.kind = TP_OP_ATLAS_CREATE;
         op.u.atlas_create.name = cli_strdup(name);
-        if (!op.u.atlas_create.name || !cli_gen_id(&op.atlas_id)) {
+        if (!op.u.atlas_create.name) {
             tp_operation_free(&op);
             cli_emit_error(json, quiet, "oom", "out of memory building atlas");
+            tp_project_destroy(p);
+            return CLI_EXIT_INTERNAL;
+        }
+        if (!cli_gen_id(&op.atlas_id)) { /* OS-RNG fault, not OOM (F4) */
+            tp_operation_free(&op);
+            cli_emit_error(json, quiet, "rng_failed", "could not generate an atlas id");
             tp_project_destroy(p);
             return CLI_EXIT_INTERNAL;
         }

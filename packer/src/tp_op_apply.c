@@ -18,6 +18,7 @@
 
 #include "tp_core/tp_operation.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -57,10 +58,27 @@ static tp_project_atlas *atlas_by_id(tp_project *p, tp_id128 id) {
     return ai < 0 ? NULL : &p->atlases[ai];
 }
 
-/* Derive the export-key bridge (== the sprite-override record's name field, the
- * key the model storage and the pack/export path both match on) from the canonical
- * source-local key. tp_sprite_export_key is the single owner of ext-stripping. */
-static void bridge_of(const char *src_key, char *out, size_t cap) { tp_sprite_export_key(src_key, out, cap); }
+/* The sprite-override RECORD key (the stored `name` field that the tp_project sprite
+ * lookups match on). Two record shapes:
+ *   - PENDING (nil source_id): a name-keyed override added BEFORE any source scan --
+ *     what the file-oriented CLI `sprite set`/`unset` builds. It stores under the key
+ *     the user typed VERBATIM (no dir/ext stripping), byte-identical to the pre-cutover
+ *     inline CLI (which did add_sprite/remove_sprite/set_sprite_rename on the raw key).
+ *     Verbatim storage is also what lets `sprite unset hero.png` clear a pre-existing
+ *     verbatim "hero.png" record instead of keying on the stripped "hero" and silently
+ *     missing it. (Pre-cutover parity; the pack/export match of an ext-carrying pending
+ *     key is a separate, unchanged question -- see the report / ADR 0014.)
+ *   - SOURCE-ATTACHED (real source_id): the src_key is a source-local path, so the
+ *     record keys under the export bridge (strip dir+ext) that the pack/export path
+ *     (tp_input.c: find_sprite(export_key(scanned_name))) resolves against.
+ * tp_sprite_export_key stays the single owner of ext-stripping (boundary R1). */
+static void sprite_store_key(tp_id128 source_id, const char *src_key, char *out, size_t cap) {
+    if (tp_id128_is_nil(source_id)) {
+        (void)snprintf(out, cap, "%s", src_key ? src_key : "");
+    } else {
+        tp_sprite_export_key(src_key, out, cap);
+    }
+}
 
 /* ---- override field set / clear ----------------------------------------- */
 static void sprite_apply_set(tp_project_sprite *s, const tp_op_sprite_set *o) {
@@ -293,7 +311,7 @@ tp_status tp_operation_apply(tp_project *p, const tp_operation *op, tp_op_reject
         case TP_OP_SPRITE_OVERRIDE_SET: {
             tp_project_atlas *a = atlas_by_id(p, op->atlas_id);
             char bridge[TP_SRCKEY_MAX];
-            bridge_of(op->u.sprite_set.src_key, bridge, sizeof bridge);
+            sprite_store_key(op->u.sprite_set.source_id, op->u.sprite_set.src_key, bridge, sizeof bridge);
             tp_project_sprite *s = NULL;
             st = tp_project_atlas_add_sprite(a, bridge, &s);
             if (st == TP_STATUS_OK) {
@@ -305,7 +323,7 @@ tp_status tp_operation_apply(tp_project *p, const tp_operation *op, tp_op_reject
         case TP_OP_SPRITE_OVERRIDE_CLEAR: {
             tp_project_atlas *a = atlas_by_id(p, op->atlas_id);
             char bridge[TP_SRCKEY_MAX];
-            bridge_of(op->u.sprite_clear.src_key, bridge, sizeof bridge);
+            sprite_store_key(op->u.sprite_clear.source_id, op->u.sprite_clear.src_key, bridge, sizeof bridge);
             if (op->u.sprite_clear.mask == TP_SPF_ALL) { /* sprite unset: drop the whole record (idempotent) */
                 st = tp_project_atlas_remove_sprite(a, bridge);
                 if (st == TP_STATUS_OUT_OF_BOUNDS) {
@@ -324,7 +342,7 @@ tp_status tp_operation_apply(tp_project *p, const tp_operation *op, tp_op_reject
         case TP_OP_SPRITE_NAME_SET: {
             tp_project_atlas *a = atlas_by_id(p, op->atlas_id);
             char bridge[TP_SRCKEY_MAX];
-            bridge_of(op->u.sprite_name.src_key, bridge, sizeof bridge);
+            sprite_store_key(op->u.sprite_name.source_id, op->u.sprite_name.src_key, bridge, sizeof bridge);
             st = tp_project_atlas_set_sprite_rename(a, bridge, op->u.sprite_name.name);
             break;
         }

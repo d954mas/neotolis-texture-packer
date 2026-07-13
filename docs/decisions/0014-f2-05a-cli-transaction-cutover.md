@@ -7,6 +7,10 @@
 `packer/src/tp_op_validate.c`, coverage in `packer/tests/test_op_apply.c` +
 `scripts/check_boundaries.sh` (rule R6). Master spec §4.1–4.2, §7.1, §14.2, §59
 items 9–19. Plan §7 F2-05 tasks 1,2 + CLI side of 4,5.
+**Amended by the F2-05a FIX pass (2026-07-13):** `apps/cli/cli_mutate.c` (F1/F3/F4/F6/F7),
+`packer/src/tp_op_apply.c` (F2 storage-key), `scripts/check_boundaries.sh` (R6c),
+`apps/cli/cli_mutate_family.cmake` + `packer/tests/test_op_apply.c` (F1/F2 coverage). See
+the "F2-05a FIX pass" section below.
 
 ## Scope: lead split F2-05 into two reviewable halves
 
@@ -133,10 +137,12 @@ This was unmodeled. **Core change:** `tp_operation_validate` now treats a **nil
 `source_id` as a PENDING (name-keyed) override** for `sprite.override.set/.clear` and
 `sprite.name.set` — skip `find_source` when the id is nil; a non-nil unknown source still
 rejects `NOT_FOUND`. This is exactly the "PENDING record" state decision 0010 §2 already
-documents (apply keys by the export bridge, leaves `source_ref` nil). The CLI passes
+documents (leaves `source_ref` nil). The CLI passes
 `source_id = nil`, `src_key = <the raw key>`. Locked by
 `test_op_apply.c::test_apply_sprite_pending_no_source`; the existing non-nil rejection
-tests still pass.
+tests still pass. **(Storage-key form: the F2-05a FIX pass below keys a PENDING record by
+the VERBATIM `src_key` for byte-identity with the pre-cutover inline CLI; a source-attached
+record keys by the export bridge. See F2.)**
 
 ## Diagnostics: preserved where pinned, re-derived where not
 
@@ -155,17 +161,29 @@ authority all clients share):
 Everything else (parse failures, unknown keys/fields, name collisions, exporter
 vocabulary, selector-miss) keeps its **exact** pre-cutover id + message.
 
-**Benign edge-input tightenings** (not golden-pinned; core behaviour is the more-correct
-one — called out for honesty):
-- sprite `origin=inf,0` / `nan`: the CLI had **no** finite check on origin; core rejects
-  non-finite origin (`out_of_range`, exit 2). Was silently accepted before.
-- a knob value **> INT_MAX** (e.g. `padding=5000000000`): the old inline path parsed to
-  `long` and **silently wrapped** on the narrowing cast; `to_int` now rejects it as usage
-  (exit 2) instead of persisting a wrapped value.
-- a sprite override key **with an extension** (`sprite set … hero.png …`): the old path
-  stored the record under the verbatim key; the op keys under the export bridge
-  (ext-stripped `hero`), which is decision 0010 §2's intended canonical behaviour. For
-  all ext-less keys (every golden + normal usage) the two are identical.
+**Benign edge-input tightenings that are KEPT** (not golden-pinned; core behaviour is the
+more-correct one, and one removes a determinism-invariant violation — enumerated in FULL
+for honesty. The F2-05a FIX pass below re-audited these and KEEPS all three):
+- **T1 — non-finite sprite `origin`** (`origin=inf,0` / `nan`): the CLI had **no** finite
+  check on origin; core now rejects it (`out_of_range`, message "origin must be finite",
+  exit 2). Was silently accepted + saved (an unroundtrippable `inf`) before. Left as core's
+  `out_of_range` and deliberately NOT given a CLI-side finite guard, so it stays CONSISTENT
+  with its siblings `pixels_per_unit` / `fps` (both parsed by the CLI, finite/range-rejected
+  by core under the same `out_of_range` id). **KEEP.**
+- **T2 — a padding/margin/extrude knob value > INT_MAX** (e.g. `padding=5000000000`): the
+  old inline `to_long` path **silently wrapped** on the narrowing long→int cast and PERSISTED
+  a value that was **non-deterministic across OS** (LLP64 Windows `long`==32-bit vs LP64
+  Linux/mac `long`==64-bit). `to_int` (strtoll + fits-int) now rejects it as usage (exit 2).
+  Reverting would reintroduce a determinism-invariant violation, so keeping the reject is
+  **REQUIRED. KEEP.**
+- **T3 — move-frame index > INT_MAX** (`anim move-frame … 9999999999 0`): the old path did a
+  garbage `long→int` cast and fell into a nonsense out-of-bounds (exit 3) that varied by OS
+  `int`/`long` width; `to_int` now rejects the absurd index as usage (exit 2) before the op
+  is built. **KEEP.**
+
+(The originally-flagged third tightening — a sprite override key *with an extension* being
+stored under the ext-stripped export bridge — was in fact a byte-identity REGRESSION vs the
+pre-cutover verbatim storage and is REVERTED by the fix pass; see **F2** below.)
 
 ## Batch semantics
 
@@ -199,6 +217,87 @@ tripping core's dup-path reject.
 - `bash scripts/check_boundaries.sh` → **boundaries OK**.
 - Byte-identity goldens green: `cli_parity`, `cli_mutate_stable`, `cli_pack_*`,
   `tp_export_defold`, `tp_export_json`.
+
+## F2-05a FIX pass (byte-identity + parity corrections, 2026-07-13)
+
+A 20-agent adversarial review of the cutover found byte-identity / diagnostic-parity
+regressions the goldens missed (they did not exercise these edges). This pass FIXES them and
+ADDS the missing coverage. It does NOT revert the cutover shape; every change preserves or
+RESTORES pre-cutover observable behaviour.
+
+**F1 — `sprite set … <override>=inherit rename=X` no longer reorders the sprites array.**
+`do_sprite_set` now emits `SPRITE_NAME_SET` (the rename) **BEFORE** `SPRITE_OVERRIDE_SET`.
+The transaction applies ops in order to the clone (op N sees ops 1..N-1), so the rename makes
+the record non-default first; when the override then clears its last field to `INHERIT`, the
+post-set prune keeps the still-renamed record **in place** instead of dropping it and letting
+the rename re-append it at the array END. Matches the pre-cutover single in-place edit
+(add_sprite → set fields → set_rename → one prune). A pure clear (no rename) still prunes to
+default → record dropped, as before. Proof: `cli_mutate_sprite` builds three retained records
+`s0`/`s1`/`s2` and clears+renames the MIDDLE one, asserting `s1` stays between `s0` and `s2`
+(the bug moved it after `s2`).
+
+**F2 — CLI-added sprite overrides store/clear under the VERBATIM key (byte-identical), not
+the ext-stripped export bridge.** Root cause: `tp_op_apply.c` applied the
+`tp_sprite_export_key` bridge at STORAGE time for ALL sprite ops. Fix (apply layer,
+`sprite_store_key`): a PENDING override (nil `source_id` — every CLI `sprite set`/`unset`,
+which key by name before any source scan) stores under the raw `src_key` VERBATIM; a
+SOURCE-ATTACHED override (non-nil `source_id`, whose `src_key` is a source-local path) still
+bridges so the pack/export path resolves it. This restores the pre-cutover bytes
+(`sprite set hero.png` → record `"hero.png"`, not `"hero"`) AND fixes `sprite unset hero.png`
+silently missing a pre-existing verbatim `"hero.png"` record. Scope proof: the change is gated
+on nil `source_id`, so the non-nil bridge tests (`test_apply_sprite_ops`,
+`test_parity_sprite_override`, `test_json_ov_int16_range`) and the F1-03
+sprite-index/selector tests are unaffected (they use non-nil sources, or ext-less keys where
+verbatim == bridge). Locked by `test_apply_sprite_pending_verbatim_ext_key` +
+`cli_mutate_sprite`'s `img.png` round-trip. **`tp_op_validate.c`'s nil-source PENDING logic
+was NOT touched** — it never dictated the storage-key form.
+
+> **FLAGGED ambiguity (owner decision).** The verbatim-vs-bridged choice affects PACK-TIME
+> override matching. The pack path looks up overrides by the export key computed from the
+> scanned source file (`tp_input.c`: `find_sprite(a, export_key(scanned_name))`), so a pending
+> override whose key carries an extension (`"hero.png"`) is stored verbatim but the scanned
+> `hero.png` bridges to `"hero"` at pack time → it will NOT match. **This is EXACTLY the
+> pre-cutover behaviour** (the old CLI also stored `"hero.png"` verbatim and also would not
+> match at pack). Per the fix brief, byte-identity wins and pre-cutover bytes are reproduced;
+> the "should an ext-carrying PENDING key ALSO be matchable at pack time" question is left OPEN
+> for the owner (it would be a separate, behaviour-changing decision, not a byte-identity fix).
+> For all ext-LESS keys (every golden + normal usage) verbatim == the export key, so pack
+> matching is unaffected.
+
+**F3 — move-frame out-of-range `from` keeps the pre-cutover diagnostic.** A CLI pre-check in
+`do_anim` move-frame emits `frame_not_found` / "animation '…' has no frame at index N"
+(exit 3) instead of letting core surface `out_of_bounds` / "from_index N out of [0..M)". `to`
+stays clamped by apply, as before. (Exit code 3 was already parity; this restores the
+structured `error.id` + message.)
+
+**F4 — an OS-RNG fault while minting a created entity's id now surfaces as `rng_failed`, not
+`oom`.** `do_add` / `target add` / `atlas add` / `anim create` split the `cli_gen_id` failure
+(RNG fault → `rng_failed`) from the strdup/calloc failure (→ `oom`). Pre-cutover this fault
+surfaced only at promote time as `rng_failed`; the cutover minted ids at op-build and had
+folded it into `oom`.
+
+**F5 — the boundary guard now catches ALIASED in-place writes (R6c).** `check_boundaries.sh`
+adds a detector banning assignment through the loaded-project alias names cli_mutate holds
+(`a`/`an`/`t`, e.g. `a->max_size = 512;`) which R6b's literal `p->atlases[…]` match missed.
+Its self-test fires on a seeded aliased write and passes the legitimate op-payload /
+alias-READ forms.
+
+**F6 — the moot transaction id is a fixed 32-hex constant, no longer an OS-RNG draw.** The
+one-shot CLI runs exactly one transaction per process on a fresh journal-less model +
+in-memory idstore, so idempotency is moot and the id is never serialized. A constant removes
+an RNG failure mode from every verb with zero observable-output change (`hex32` was removed as
+its only caller).
+
+**F7 — `do_add` no longer double-canonicalizes each path.** `source_matches` takes the
+already-computed canonical path instead of recomputing it (`do_remove_source` computes it once
+at the call site).
+
+**F8 — atlas.create builder: LEFT hand-rolled (noted).** `tp_op_build_atlas_create` is an
+identical payload construction, but adopting it for only atlas.create would make ONE of the 16
+hand-rolled CLI ops special (the others mint ids + fill payloads inline and deliberately do NOT
+use the selector-resolving `tp_op_build_*` family, to keep the CLI's exact by-name-resolution
+diagnostics). The id-mint + F4 RNG handling stay in the CLI regardless, so the builder gains
+nothing here; left uniform for maintainability — zero byte/diagnostic change either way.
 
 ## Owner confirmation points
 

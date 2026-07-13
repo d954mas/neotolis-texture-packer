@@ -47,8 +47,9 @@ fi
 # 6. CLI mutation cutover (F2-05a): apps/cli/cli_mutate.c routes every mutating verb
 #    through the typed operation/transaction engine (tp_operation + tp_model_apply). It
 #    must NOT hand-mutate the loaded project -- neither by calling the inline tp_project_*
-#    mutators the ops replaced (R6a) nor by assigning into the loaded project's arrays
-#    (R6b). do_new's tp_project_create + tp_project_atlas_seed_default_target (project
+#    mutators the ops replaced (R6a), nor by assigning into the loaded project's arrays
+#    directly (R6b), nor through an alias into it (R6c). do_new's tp_project_create +
+#    tp_project_atlas_seed_default_target (project
 #    lifecycle, not a mutation op) are deliberately NOT in the banned set. A legit
 #    exception carries a "boundary-ok:" note on the same line.
 _cutover="apps/cli/cli_mutate.c"
@@ -57,12 +58,22 @@ _cutover="apps/cli/cli_mutate.c"
 # of the cutover is that NONE of these mutators are called + a write into p->atlases[]).
 _muts='tp_project_(add_atlas|remove_atlas|set_atlas_name|atlas_add_source|atlas_add_source_kind|atlas_remove_source|atlas_add_sprite|atlas_remove_sprite|atlas_prune_sprite|atlas_set_sprite_rename|atlas_add_animation|atlas_remove_animation|anim_add_frame|anim_remove_frame|anim_move_frame|atlas_add_target|atlas_remove_target|atlas_set_target)\('
 _projwrite='p->atlases\[[^]]*\]\.[A-Za-z_]+[[:space:]]*=[^=]'
+# R6c bans the SAME in-place write reached through an ALIAS into the loaded project.
+# cli_mutate holds `tp_project_atlas *a = &p->atlases[ai]` (and the `t` target / `an`
+# animation sub-entity aliases); a reintroduced in-place `a->max_size = 512;` would slip
+# past R6b's literal `p->atlases[...]` match, defeating the guard. Ban assignment through
+# those alias names. Op-building writes all go through differently-named locals (`op`,
+# `s`, `e`), and alias READS (`tp_id128 aid = a->id;`) have no `=` after the field, so
+# this does not false-positive.
+_aliaswrite='(^|[^A-Za-z0-9_])(a|an|t)->[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=[^=]'
 
 if [ -f "$_cutover" ]; then
     r6a=$(grep -nE "$_muts" "$_cutover" 2>/dev/null | grep -v 'boundary-ok:')
     [ -n "$r6a" ] && hit "R6a inline project mutator in cli_mutate (use a tp_operation)" "$r6a"
     r6b=$(grep -nE "$_projwrite" "$_cutover" 2>/dev/null | grep -v 'boundary-ok:')
     [ -n "$r6b" ] && hit "R6b direct write into the loaded project in cli_mutate (build an op)" "$r6b"
+    r6c=$(grep -nE "$_aliaswrite" "$_cutover" 2>/dev/null | grep -v 'boundary-ok:')
+    [ -n "$r6c" ] && hit "R6c write through a loaded-project alias in cli_mutate (build an op)" "$r6c"
 
     # Self-test: prove the R6 detectors actually FIRE on a seeded violation (fail closed if
     # a future edit breaks the regex -- so "a seeded boundary violation is caught" is
@@ -73,9 +84,12 @@ if [ -f "$_cutover" ]; then
     if ! printf '    p->atlases[0].max_size = 512;\n' | grep -qE "$_projwrite"; then
         hit "R6-selftest" "R6b detector failed to catch a seeded project-write violation"
     fi
-    # ...and does NOT fire on the legitimate op-payload / lifecycle forms it must allow.
-    if printf '    op.u.atlas_settings.max_size = iv;\n    tp_project_create();\n' | grep -qE "$_muts|$_projwrite"; then
-        hit "R6-selftest" "R6 detector false-positives on a legitimate op-payload / lifecycle line"
+    if ! printf '    a->max_size = 512;\n' | grep -qE "$_aliaswrite"; then
+        hit "R6-selftest" "R6c detector failed to catch a seeded aliased-write violation"
+    fi
+    # ...and does NOT fire on the legitimate op-payload / lifecycle / alias-READ forms.
+    if printf '    op.u.atlas_settings.max_size = iv;\n    tp_project_create();\n    tp_id128 aid = a->id;\n' | grep -qE "$_muts|$_projwrite|$_aliaswrite"; then
+        hit "R6-selftest" "R6 detector false-positives on a legitimate op-payload / lifecycle / alias-read line"
     fi
 fi
 
