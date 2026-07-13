@@ -117,13 +117,22 @@ add_test(NAME cli_validate_long_paths COMMAND ${CMAKE_COMMAND}
     -P "${_run}")
 
 # (i5) F1-03 §5.6 sprite-record integrity: a v4 fixture with a migrated override whose
-# stored source id is absent from the atlas (sprite_bad_source, error) and another whose
-# (source,key) resolves to no scanned sprite (orphan_sprite, warning). No --strict -> exit 0.
+# stored source id is absent from the atlas (sprite_bad_source) and another whose
+# (source,key) resolves to no scanned sprite (orphan_sprite). Both are WARNINGS -- a
+# removed source / gone key orphans the override, it does not corrupt data (fix [5]).
+# So error=0 warning=2 and, without --strict, exit 0.
 add_test(NAME cli_validate_sprite_records COMMAND ${CMAKE_COMMAND}
     -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0 "-DARGS=validate ${_td}/v4_orphan.ntpacker_project --json"
     -DCHECKER=$<TARGET_FILE:cli_json_check>
-    "-DCHECK_ARGS=validate code=sprite_bad_source code=orphan_sprite"
+    "-DCHECK_ARGS=validate error=0 warning=2 code=sprite_bad_source code=orphan_sprite"
     -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_validate_sprite_records.json
+    -P "${_run}")
+
+# (i5b) fix [5] regression: the SAME fixture WITH --strict must still exit 0. A migrated
+# override whose source was removed is an orphan [warning], not an error -- a routine
+# source-removal edit must not flip validate --strict to exit 7.
+add_test(NAME cli_validate_sprite_records_strict COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0 "-DARGS=validate ${_td}/v4_orphan.ntpacker_project --strict"
     -P "${_run}")
 
 # (j) validate on an unloadable file -> exit 3.

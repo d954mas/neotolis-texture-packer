@@ -13,8 +13,10 @@
  *   export_name_collision [error]   two sprites -> one final name (tp_normalize collision)
  *   unknown_exporter      [error]   target exporter_id tp_exporter_find cannot resolve
  *   setting_out_of_range  [error]   a knob outside tp_pack's accepted range
- *   sprite_bad_source     [error]   a v4 sprite record's source id is absent from the atlas (§5.6)
- *   frame_bad_source      [error]   a v4 frame ref's source id is absent from the atlas (§5.6)
+ *   sprite_bad_source     [warning] a v4 override's source id is absent from the atlas -- the
+ *                                   source was removed; orphaned, reactivates by name (§5.2/§5.6)
+ *   frame_bad_source      [error]   a v4 frame ref's source id is absent from the atlas -- the
+ *                                   animation breaks at export (also flagged dangling_anim_frame) (§5.6)
  *   orphan_sprite         [warning] a v4 record resolves to no current sprite (stored orphan, §5.2/§5.6)
  *   duplicate_sprite_key  [warning] two v4 sprite records share one (source, key) (§5.6)
  *
@@ -303,23 +305,46 @@ static bool source_id_in_atlas(const tp_project_atlas *a, tp_id128 sid) {
     return false;
 }
 
-/* (h) §5.6 sprite-record integrity, over MIGRATED v4 records only (a pending record
- * is covered by the name-based checks above). `idx` is the resolved sprite index:
- *   sprite_bad_source / frame_bad_source [error]   a stored source id absent from the
- *       atlas -- the record cannot reproduce its sprite_id / targets an unknown id;
- *   orphan_sprite                        [warning] a valid (source,key) that resolves
- *       to no current sprite (stored orphan; reactivates when the key returns);
- *   duplicate_sprite_key                 [warning] two records sharing one (source,key). */
+/* (h) §5.6 sprite-record integrity, over the resolved index `idx`:
+ *   MIGRATED records (stored {source,key}) are id-checked:
+ *     sprite_bad_source / frame_bad_source            a stored source id absent from the
+ *         atlas; a per-sprite override -> orphan [warning] (its source was removed on a
+ *         routine edit; reactivates by the name bridge if the source returns, §5.2/§5.6);
+ *         a frame -> [error] (a frame targeting a gone source breaks the animation, and
+ *         tp_normalize hard-errors on it -- also flagged as dangling_anim_frame);
+ *     orphan_sprite                        [warning] a valid (source,key) that resolves
+ *         to no current sprite (stored orphan; reactivates when the key returns);
+ *     duplicate_sprite_key                 [warning] two records sharing one (source,key).
+ *   PENDING records have no stored {source,key} to id-check, so they are checked HERE by
+ *   their name bridge (never silently skipped: a dangling pending override is an
+ *   orphan_sprite [warning] just like a migrated one, and re-keys to {source,key} in F2). */
 static void validate_sprite_records(cli_findings *fs, const tp_project_atlas *a, const tp_sprite_index *idx) {
     for (int i = 0; i < a->sprite_count; i++) {
         const tp_project_sprite *s = &a->sprites[i];
         if (tp_id128_is_nil(s->source_ref) || !s->src_key) {
-            continue; /* pending -- name-based checks apply */
+            /* PENDING: no id to check, but it still applies by the name bridge. Verify the
+             * bridge resolves to a live sprite so validate does not imply it id-checked a
+             * record it could not -- a dangling pending override is an orphan too. */
+            int matches = 0;
+            if (s->name) {
+                (void)tp_sprite_index_by_export_key(idx, s->name, &matches);
+            }
+            if (matches == 0) {
+                add_finding(fs, SEV_WARN, "orphan_sprite", a->name, s->name, NULL, NULL, NULL,
+                            "sprite override '%s' matches no current sprite "
+                            "(orphaned by name; not yet id-validated, re-keys to {source, key} in F2)",
+                            s->name ? s->name : "");
+            }
+            continue;
         }
         if (!source_id_in_atlas(a, s->source_ref)) {
-            add_finding(fs, SEV_ERR, "sprite_bad_source", a->name, s->name, NULL, NULL, NULL,
+            /* The owning source was removed from the atlas (a routine edit). This is an
+             * ORPHAN, not a hard error: the override applies to nothing now and reactivates
+             * by its name bridge if the source returns (§5.2/§5.6). WARNING, so a plain
+             * source-removal does not flip `validate --strict` (exit 7). */
+            add_finding(fs, SEV_WARN, "sprite_bad_source", a->name, s->name, NULL, NULL, NULL,
                         "sprite override '%s' references a source id not in this atlas "
-                        "(its stored key cannot reproduce its sprite_id)",
+                        "(source removed; orphaned, reactivates by name if the source returns)",
                         s->name ? s->name : "");
             continue;
         }
