@@ -8,6 +8,10 @@ tmp/
 # screenshots, one-off probe scripts) — machine-local, never committed.
 /scratchpad/
 
+# Lead agent's local orchestrator configs (subagent role/model definitions) —
+# machine-local tooling, never committed.
+/.codex/
+
 # Defold editor artifacts in the demo project
 examples/defold-demo/.internal/
 examples/defold-demo/.editor_settings
