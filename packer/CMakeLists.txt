@@ -29,7 +29,13 @@ add_library(tp_core STATIC
     # F1-03 deterministic sprite ids + canonical selectors: the resolved sprite
     # index (scan -> source-local key -> sprite_id) and the human-selector resolver
     # (id/name/path/compound -> exactly one id, ambiguity -> candidate list).
-    src/tp_sprite_index.c src/tp_selector.c)
+    src/tp_sprite_index.c src/tp_selector.c
+    # F2-01 typed operation engine: the append-only op catalog + closed field
+    # vocabulary, payload/reference validation, id-only stage-then-commit apply,
+    # selector->operation builders, and the canonical byte-stable op/result encoder.
+    # Promoted from the accepted C0-02 spike. CORE-TESTED groundwork -- the CLI/GUI
+    # frontend cutover is F2-05 (this does not route the shipping mutators).
+    src/tp_op_catalog.c src/tp_op_validate.c src/tp_op_apply.c src/tp_op_encode.c src/tp_op_build.c)
 target_include_directories(tp_core PUBLIC include)
 # tp_pack_settings.c includes nt_builder.h for the header-only nt_atlas_opts_defaults()
 # inline (the single source of the packing defaults). HEADERS ONLY: this adds the builder

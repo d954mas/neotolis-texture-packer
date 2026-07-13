@@ -48,6 +48,26 @@ target_compile_options(tp_test_sprite_index PRIVATE -U_DLL)
 nt_set_warning_flags(tp_test_sprite_index)   # AGENTS.md invariant: our test TUs too
 add_test(NAME tp_sprite_index COMMAND tp_test_sprite_index "${CMAKE_BINARY_DIR}/tp_sprite_index_test")
 
+# F2-01: typed operation engine -- catalog + closed field vocabulary, canonical
+# byte-stable encoder goldens, and payload/reference validation (invalid id/type/
+# range/reference each -> the right structured status).
+add_executable(tp_test_operation test_operation.c)
+target_link_libraries(tp_test_operation PRIVATE tp_core unity)
+target_compile_options(tp_test_operation PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_operation)   # AGENTS.md invariant: our test TUs too
+add_test(NAME tp_operation COMMAND tp_test_operation)
+
+# F2-01: id-only apply (forward + error per op kind), stage-then-commit allocator-
+# fault safety, selector->operation builders, and the parity proof (op apply ==
+# existing mutator, byte-identical). Includes the private src/ internal header for
+# the staging-alloc fault seam (same pattern as test_id.c including tp_hex.h).
+add_executable(tp_test_op_apply test_op_apply.c)
+target_link_libraries(tp_test_op_apply PRIVATE tp_core unity)
+target_include_directories(tp_test_op_apply PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_options(tp_test_op_apply PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_op_apply)   # AGENTS.md invariant: our test TUs too
+add_test(NAME tp_op_apply COMMAND tp_test_op_apply)
+
 # F1-03: canonical selector resolver (id/name/path/compound -> exactly one id).
 add_executable(tp_test_selector test_selector.c)
 target_link_libraries(tp_test_selector PRIVATE tp_core unity)
