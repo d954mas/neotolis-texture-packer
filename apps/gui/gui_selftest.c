@@ -913,6 +913,28 @@ void run_selftest(void) {
         NT_ASSERT(!gui_project_peek_pending_slice9(0, "p5sprite", g5) &&
                   "#5: after the gesture flush the peek returns false (read the committed record)");
 
+        /* (#9) BROWSE-TARGET UAF (the REAL UI path do_browse_target_at, not just --parity): a coalescable
+         *      edit is buffered but UNFLUSHED, then set_target is called with exporter_id pointing INTO the
+         *      live project (as do_browse_target_at passes t->exporter_id). set_target's internal flush
+         *      commits the buffered edit -> the clone-swap frees that project -> the pre-fix dupstr(exporter_id)
+         *      read FREED memory. The sink now dups the caller strings BEFORE its flush, so this is clean.
+         *      Under CI ASan the pre-fix order faults here; the value assertion also guards a garbage read. */
+        gui_project_new();
+        gui_pack_clear(-1);
+        s_sel_atlas = 0;
+        tp_project_atlas *g9a = tp_project_get_atlas(gui_project_get(), 0);
+        NT_ASSERT(g9a && g9a->target_count > 0 && "#9: fresh project seeds a default target");
+        char g9_want[64];
+        (void)snprintf(g9_want, sizeof g9_want, "%s", g9a->targets[0].exporter_id); /* expected value (copied now) */
+        const char *g9_exp = g9a->targets[0].exporter_id; /* project-owned pointer, as do_browse_target_at holds t->exporter_id */
+        (void)gui_project_set_sprite_slice9(0, "g9sprite", 0 /* L */, 7); /* buffer a real (non-noop) pending op, UNFLUSHED */
+        (void)gui_project_set_target(0, 0, g9_exp, "out/g9", true); /* its flush frees the project g9_exp points into */
+        tp_project_atlas *g9c = tp_project_get_atlas(gui_project_get(), 0);
+        nt_log_info("SELFTEST: #9 browse-target UAF exporter='%s' path='%s' (want '%s','out/g9')",
+                    g9c->targets[0].exporter_id, g9c->targets[0].out_path, g9_want);
+        NT_ASSERT(strcmp(g9c->targets[0].exporter_id, g9_want) == 0 && strcmp(g9c->targets[0].out_path, "out/g9") == 0 &&
+                  "#9: set_target dups caller strings before its flush -> no dangling exporter read (browse-target UAF fix)");
+
         /* Restore a packable atlas-0 project for the render frames below (the pixel probe packs
          * atlas 0 and probes its region outlines) -- gui_project_new left it source-less. */
         gui_project_new();

@@ -359,7 +359,12 @@ static tp_project_atlas *atlas_of_pending(void) {
  * atlas.settings.set, animation.settings.set, and sprite.override.set (absent sprite record ==
  * all-default/inherit, the same seed the setters use). Structural ops never buffer, so they always
  * commit (a rename-to-same-name phantom stays a pre-existing minor edge -- documented in ADR 0015).
- * Compares only the MASKED fields; an unmasked field is untouched by the op so it can't differ. */
+ * Compares only the MASKED fields; an unmasked field is untouched by the op so it can't differ.
+ * MAINTENANCE (review finding, ADR 0015 follow-up): this hand-mirrors each op's masked fields, so
+ * adding a NEW masked field to a handled op kind REQUIRES extending the matching case below -- else a
+ * gesture that changes ONLY that field is misclassified as a no-op and SILENTLY DISCARDED (data loss).
+ * The robust fix is to derive the no-op verdict from the core semantic diff instead of re-listing
+ * fields GUI-side; tracked as a separate hardening packet. */
 static bool pending_is_noop(void) {
     if (!s_pending_valid || !s_proj) {
         return false;
@@ -871,9 +876,18 @@ void gui_project_remove_target(int atlas_index, int index) {
 }
 
 bool gui_project_set_target(int atlas_index, int index, const char *exporter_id, const char *out_path, bool enabled) {
+    /* F2-05b-ii-A fix (browse-target UAF): dup the caller's strings BEFORE flushing. exporter_id/out_path
+     * may point INTO the live project (do_browse_target_at passes t->exporter_id, the export-dialog toggle
+     * passes t0->exporter_id/out_path); gui_project_flush_pending() can commit a buffered gesture whose
+     * clone-swap frees that project, dangling the pointers before dupstr would read them. Capturing at the
+     * sink first inoculates EVERY caller, not just the one path the reviewer flagged. */
+    char *exp = dupstr(exporter_id);
+    char *outp = dupstr(out_path);
     gui_project_flush_pending();
     tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
-    if (!a || index < 0 || index >= a->target_count) {
+    if (!a || index < 0 || index >= a->target_count || !exp || !outp) {
+        free(exp);
+        free(outp);
         return false;
     }
     tp_operation op;
@@ -882,12 +896,8 @@ bool gui_project_set_target(int atlas_index, int index, const char *exporter_id,
     op.atlas_id = a->id;
     op.u.target_set.target_id = a->targets[index].id;
     op.u.target_set.enabled = enabled;
-    op.u.target_set.exporter_id = dupstr(exporter_id);
-    op.u.target_set.out_path = dupstr(out_path);
-    if (!op.u.target_set.exporter_id || !op.u.target_set.out_path) {
-        tp_operation_free(&op);
-        return false;
-    }
+    op.u.target_set.exporter_id = exp;  /* ownership transfers to op -> commit_txn_now frees it */
+    op.u.target_set.out_path = outp;
     if (!commit_txn_now(&op, 1)) {
         return false;
     }

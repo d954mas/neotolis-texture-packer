@@ -501,6 +501,36 @@ Bounding it needs a CORE `tp_history` budget/oldest-eviction API — out of this
 AND the core is read-only here. **Follow-up packet:** add a core `tp_history` memory-budget +
 oldest-eviction API, then the GUI opts in at `wrap_model`. Do not touch core until then.
 
+### Second-round re-review (fix-diff `5d0bb8a..ae82edc`): one more correctness fix + one follow-up
+
+A focused re-review of the fix diff surfaced one CONFIRMED correctness defect and one PLAUSIBLE
+cleanup/fragility finding.
+
+**Browse-target UAF (`do_browse_target_at`) — FIXED (`gui_project_set_target` sink-defensive).**
+`do_browse_target_at` (and the Export-dialog toggle path) reads `t->exporter_id` — a pointer INTO the
+live project — and passes it into `gui_project_set_target`, whose FIRST act is
+`gui_project_flush_pending()`. If a coalescable gesture is buffered (e.g. a Padding/Slice9/Pivot field
+edited then defocused by clicking a panel button, so no gesture-commit fired), that flush commits it and
+the clone-swap **frees the very project the pointer addressed** before `dupstr(exporter_id)` reads it — a
+use-after-free that corrupts the saved `exporter_id` and breaks GUI/CLI byte-parity. This is a
+base-cutover defect (the setter's flush-first ordering is what makes the caller's pointer stale); the #4
+pass fixed only the `--parity` harness, leaving the real UI path exposed. **Fix:** dup `exporter_id` /
+`out_path` into locals at the TOP of `gui_project_set_target`, BEFORE the flush, then transfer ownership
+to the op (`commit_txn_now` frees the arms on every path). Fixing at the sink inoculates EVERY caller
+(the two production paths plus four selftest sites that also pass project-owned pointers), not just the
+one the reviewer flagged. Regression `#9` in `ntpacker_gui_selftest` reproduces the exact ordering
+(buffer a real slice9 op, then `set_target` with a project-owned `exporter_id`) — clean under CI ASan and
+asserts the exporter value survives the intervening free.
+
+**`pending_is_noop` lockstep-mirror hazard — FOLLOW-UP (not a present bug).** `pending_is_noop`
+hand-mirrors each masked field of the three coalescable op kinds; it is COMPLETE today, but adding a new
+masked field to a handled op kind without extending this function would misclassify a single-field edit
+as a no-op and SILENTLY DISCARD it (data loss). The robust fix is to derive the no-op verdict from the
+core semantic diff (an empty diff == no-op) instead of re-listing fields GUI-side. Deferred to a separate
+hardening packet (needs a core diff/identity probe); a MAINTENANCE warning now sits atop `pending_is_noop`
+so the coupling is not silent. (A `main.c` slice9 copy-loop duplication candidate was REFUTED — both
+branches are correct and identical in effect.)
+
 ### Carried-forward limitation
 
 Animation rename is still NOT undoable (`gui_project_set_anim_id`'s direct `an->name =` write; the F2-01
@@ -513,6 +543,8 @@ catalog has no `ANIMATION_RENAME` op). Unchanged by this fix pass — documented
 revert-to-committed commits nothing / revert-to-new commits the final value; #2 origin two-component
 edit survives both; #3 net-zero gesture = no phantom undo step AND redo branch intact + still restores;
 #4 flush-before-read commits the target with no dangling exporter read; #5 the peek returns the buffered
-slice9 while buffered and false after flush. `check_boundaries.sh` = boundaries OK. `--parity` output is
+slice9 while buffered and false after flush; #9 browse-target UAF — `set_target` dups the caller's
+`exporter_id` before its flush so the value survives the intervening clone-swap/free. `check_boundaries.sh`
+= boundaries OK. `--parity` output is
 byte-identical (id-normalized) to the pre-fix baseline — no saved bytes changed. No file under
 `packer/src` / `external` / `packer/spike` changed; journal / append-fail / recovery / D2 untouched.
