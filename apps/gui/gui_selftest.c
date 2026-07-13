@@ -30,9 +30,8 @@
 #include "tp_core/tp_names.h"   /* tp_sprite_export_key (region -> override key) */
 #include "tp_core/tp_project.h" /* tp_project* accessors */
 
-#include "gui_actions.h"  /* do_pack_blocking / reset_selection / preview_stop / anim ops */
+#include "gui_actions.h"  /* do_pack_blocking / reset_selection / preview_stop / anim ops + gui_request_gesture_commit */
 #include "gui_canvas.h"   /* s_canvas ops + GUI_CANVAS_ATLAS */
-#include "gui_history.h"  /* gui_history_* (end-of-run depth log) */
 #include "gui_pack.h"     /* gui_pack_* + GUI_PACK_ASYNC_* */
 #include "gui_project.h"  /* gui_project_* + GUI_SPRITE_OV_SHAPE / GUI_ADD_DUPLICATE */
 #include "gui_rows.h"     /* build_rows / multi_sel_* / select_row_for_region */
@@ -124,15 +123,27 @@ void run_selftest(void) {
     const int nsrc = gui_project_get() ? gui_project_get()->atlases[0].source_count : -1;
     nt_log_info("SELFTEST: reload -> %s, atlas0 sources=%d (dirty=%d)", tp_status_str(st), nsrc, gui_project_is_dirty());
 
-    /* --- rename atlas + undo/redo (verify model reverts and dirty recomputes) --- */
+    /* --- rename atlas + undo/redo THROUGH THE F2-03 DIFF HISTORY (b-ii-A): the model swaps its
+     *     project on undo/redo; verify the name reverts/replays exactly and identity-dirty tracks
+     *     (undo back to the saved baseline reads CLEAN even though the revision is higher). --- */
     char name0[64];
     (void)snprintf(name0, sizeof name0, "%s", gui_project_get()->atlases[0].name);
-    gui_project_set_atlas_name(0, "hero_atlas");
-    nt_log_info("SELFTEST: rename atlas '%s' -> '%s' (dirty=%d)", name0, gui_project_get()->atlases[0].name, gui_project_is_dirty());
+    NT_ASSERT(!gui_project_is_dirty() && "reloaded project is clean at its saved baseline");
+    gui_project_set_atlas_name(0, "hero_atlas"); /* structural: commits immediately -> one history step */
+    nt_log_info("SELFTEST: rename atlas '%s' -> '%s' (dirty=%d undo_depth=%d)", name0,
+                gui_project_get()->atlases[0].name, gui_project_is_dirty(), gui_project_undo_depth());
+    NT_ASSERT(gui_project_is_dirty() && strcmp(gui_project_get()->atlases[0].name, "hero_atlas") == 0 &&
+              "rename dirties + applies");
     const bool undone = gui_project_undo();
-    nt_log_info("SELFTEST: undo -> %d name='%s' (dirty=%d) [expect name reverted, dirty=0]", undone, gui_project_get()->atlases[0].name, gui_project_is_dirty());
+    nt_log_info("SELFTEST: undo -> %d name='%s' (dirty=%d) [expect name reverted, dirty=0]", undone,
+                gui_project_get()->atlases[0].name, gui_project_is_dirty());
+    NT_ASSERT(undone && strcmp(gui_project_get()->atlases[0].name, name0) == 0 && !gui_project_is_dirty() &&
+              "undo through F2-03 history restores the pre-rename name AND reads clean at the saved baseline");
     const bool redone = gui_project_redo();
-    nt_log_info("SELFTEST: redo -> %d name='%s' (dirty=%d)", redone, gui_project_get()->atlases[0].name, gui_project_is_dirty());
+    nt_log_info("SELFTEST: redo -> %d name='%s' (dirty=%d)", redone, gui_project_get()->atlases[0].name,
+                gui_project_is_dirty());
+    NT_ASSERT(redone && strcmp(gui_project_get()->atlases[0].name, "hero_atlas") == 0 && gui_project_is_dirty() &&
+              "redo re-applies the rename + re-dirties");
 
     /* --- rename a region (sprite override), verify it is stored on the model --- */
     char folder_abs[512];
@@ -514,7 +525,8 @@ void run_selftest(void) {
                 if (dot) {
                     *dot = '\0';
                 }
-                gui_project_set_sprite_override(0, spn, GUI_SPRITE_OV_SHAPE, 0 /* RECT */);
+                gui_project_set_sprite_override(0, spn, GUI_SPRITE_OV_SHAPE, 0 /* RECT */); /* coalescable: buffers */
+                gui_project_flush_pending(); /* commit the buffered override before the raw pack reads the model */
                 (void)gui_pack_atlas(0, &pms, perr, sizeof perr, pnote, sizeof pnote);
                 const int rri = gui_pack_find_sprite(0, spn);
                 const tp_result *rr = gui_pack_result(0);
@@ -632,48 +644,105 @@ void run_selftest(void) {
         s_sel_atlas = 0;
     }
 
-    /* --- F2-05b-i: deferred model-edit queue + drag COALESCING (decision 0015) ---
-     * (1) An edit ENQUEUED by a declare fn (gui_edit_*) lands only when apply_pending drains it
-     *     at frame top -- proves the deferral that collapses the pointer-invalidation UAF class.
-     * (2) A slider "drag" (many single-knob transactions within the 0.30s coalesce window, same
-     *     action tag) maps to exactly ONE undo step -- proves undo depth for a drag stays 1 even
-     *     though each tick commits its own transaction through the journal-less model. */
+    /* --- F2-05b-ii-A: deferred edit queue + GESTURE-SCOPED transaction coalescing (decision 0015) ---
+     * The F2-03 diff history has no built-in coalescing (one commit = one undo step). A field-precise
+     * pending-transaction buffer coalesces a gesture; the gesture BOUNDARY (a widget's release/blur/
+     * discrete pick -- modelled here by gui_request_gesture_commit + apply_pending, or a direct
+     * gui_project_flush_pending) commits it as ONE transaction = ONE undo step. */
     {
+        /* (1) A gui_edit_* enqueue does not touch the model synchronously; the drained coalescable
+         *     setter BUFFERS it (uncommitted); the model changes only when the gesture boundary flushes. */
         gui_project_new();
         gui_pack_clear(-1);
         s_sel_atlas = 0;
         reset_selection();
-        /* (1) deferred edit lands via apply_pending (the enqueue -> drain -> commit path). */
         const int pad0 = tp_project_get_atlas(gui_project_get(), 0)->padding;
         gui_edit_atlas_int(0, GUI_ATLAS_PADDING, pad0 + 5);
-        const int pad_mid = tp_project_get_atlas(gui_project_get(), 0)->padding; /* NOT yet applied */
-        apply_pending();                                                          /* drains the queued edit */
-        const int pad1 = tp_project_get_atlas(gui_project_get(), 0)->padding;
-        nt_log_info("SELFTEST: deferred edit pad %d ->(queued) %d ->(drained) %d", pad0, pad_mid, pad1);
-        NT_ASSERT(pad_mid == pad0 && pad1 == pad0 + 5 && "a gui_edit_* enqueue lands only on apply_pending drain");
+        const int pad_enq = tp_project_get_atlas(gui_project_get(), 0)->padding; /* enqueue: not applied */
+        apply_pending();                                                          /* drains -> BUFFERS (no commit) */
+        const int pad_buf = tp_project_get_atlas(gui_project_get(), 0)->padding; /* buffered, still uncommitted */
+        gui_request_gesture_commit();                                             /* gesture end (e.g. slider release) */
+        apply_pending();                                                          /* flush -> commit */
+        const int pad_done = tp_project_get_atlas(gui_project_get(), 0)->padding;
+        nt_log_info("SELFTEST: gesture pad %d ->(enqueue) %d ->(drain/buffer) %d ->(gesture-commit) %d", pad0, pad_enq,
+                    pad_buf, pad_done);
+        NT_ASSERT(pad_enq == pad0 && pad_buf == pad0 && pad_done == pad0 + 5 &&
+                  "a coalescable edit buffers on drain and commits only at the gesture boundary");
 
-        /* (2) coalesced drag = one undo step. Each set_atlas_setting is one committed transaction
-         *     through the model; consecutive same-tag commits within 0.30s fold to one undo entry. */
+        /* (2) ONE-control drag = ONE undo step. 8 same-key ticks buffer (latest wins, no commit); the
+         *     gesture flush at release commits exactly ONE transaction; one undo reverts the WHOLE drag. */
         gui_project_new();
         gui_pack_clear(-1);
         s_sel_atlas = 0;
-        const int pad_pre = tp_project_get_atlas(gui_project_get(), 0)->padding; /* fresh default */
-        const int undo0 = gui_history_undo_depth();
-        double t = 100.0;
-        for (int v = 1; v <= 8; v++) {           /* 8 "frames" of a slider drag, ~16ms apart */
-            gui_project_tick(t);
-            (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, v, 0.0F);
-            t += 0.016;
+        const int pad_pre = tp_project_get_atlas(gui_project_get(), 0)->padding;
+        const int undo0 = gui_project_undo_depth();
+        for (int v = 1; v <= 8; v++) {
+            (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, v, 0.0F); /* same key -> coalesce, no commit */
         }
-        const int undo1 = gui_history_undo_depth();
+        const int undo_mid = gui_project_undo_depth();                          /* still undo0: buffered */
+        const int pad_mid2 = tp_project_get_atlas(gui_project_get(), 0)->padding; /* still pad_pre */
+        gui_project_flush_pending();                                            /* the release boundary */
+        const int undo1 = gui_project_undo_depth();
         const int pad_drag = tp_project_get_atlas(gui_project_get(), 0)->padding;
-        nt_log_info("SELFTEST: coalesced drag: 8 txns, undo depth %d -> %d (delta %d), final padding=%d", undo0, undo1,
-                    undo1 - undo0, pad_drag);
+        nt_log_info("SELFTEST: one-control drag: 8 ticks undo %d ->(buffered) %d ->(release) %d, final padding=%d", undo0,
+                    undo_mid, undo1, pad_drag);
+        NT_ASSERT(undo_mid == undo0 && pad_mid2 == pad_pre &&
+                  "an in-flight drag stays buffered (uncommitted) until its gesture boundary");
         NT_ASSERT(undo1 - undo0 == 1 && pad_drag == 8 &&
-                  "a coalesced slider drag = one undo step (undo depth for a drag stays 1)");
-        /* one undo reverts the WHOLE drag to the pre-drag value (not one tick). */
+                  "one control drag = ONE committed transaction = ONE undo step (final value wins)");
         NT_ASSERT(gui_project_undo() && tp_project_get_atlas(gui_project_get(), 0)->padding == pad_pre &&
-                  "undo reverts the entire coalesced drag in one step");
+                  "one undo reverts the ENTIRE coalesced drag (not one tick)");
+
+        /* (2b) DIVERGENCE from b-i (decision 0015): b-i's tag-only key merged DISTINCT knobs edited
+         *      within the window into one undo step; A's FIELD-PRECISE key makes each distinct field its
+         *      own step. Two distinct knobs -> the second (different key) FLUSHES the first -> TWO steps. */
+        gui_project_new();
+        gui_pack_clear(-1);
+        s_sel_atlas = 0;
+        const int undo_b0 = gui_project_undo_depth();
+        (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, 3, 0.0F); /* key = PADDING (buffered) */
+        (void)gui_project_set_atlas_setting(0, GUI_ATLAS_MARGIN, 4, 0.0F);  /* key = MARGIN: different -> flush PADDING */
+        gui_project_flush_pending();                                        /* commit MARGIN */
+        const int undo_b1 = gui_project_undo_depth();
+        tp_project_atlas *dka = tp_project_get_atlas(gui_project_get(), 0);
+        nt_log_info("SELFTEST: two distinct knobs padding=%d margin=%d undo delta=%d (want 2)", dka->padding, dka->margin,
+                    undo_b1 - undo_b0);
+        NT_ASSERT(undo_b1 - undo_b0 == 2 && dka->padding == 3 && dka->margin == 4 &&
+                  "two distinct knobs back-to-back = TWO undo steps (field-precise divergence)");
+
+        /* (2c) FLUSH-BEFORE-IS_DIRTY (the lost-edit trap New/Open/Exit must avoid): a buffered edit is
+         *      not yet in the identity, so is_dirty reads CLEAN; the destructive gates flush FIRST, so the
+         *      edit is committed (dirty) instead of silently discarded on a New/Open/Exit confirm. */
+        gui_project_new();
+        gui_pack_clear(-1);
+        s_sel_atlas = 0;
+        NT_ASSERT(!gui_project_is_dirty() && "fresh project is clean");
+        (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, 9, 0.0F); /* buffered, uncommitted */
+        const bool dirty_buffered = gui_project_is_dirty();
+        gui_project_flush_pending();                                        /* what request_new/open/exit do first */
+        const bool dirty_flushed = gui_project_is_dirty();
+        nt_log_info("SELFTEST: flush-before-is_dirty: buffered dirty=%d, after pre-gate flush dirty=%d", dirty_buffered,
+                    dirty_flushed);
+        NT_ASSERT(!dirty_buffered && dirty_flushed &&
+                  "the pre-gate flush commits a buffered edit so New/Open/Exit confirm instead of discarding it");
+
+        /* (2d) SLICE9 RMW lost-edit is IMPOSSIBLE: slice9 is a read-modify-write (seeds all 4 components
+         *      from the record). Two DIFFERENT components edited back-to-back must NOT drop the first --
+         *      the component-precise key makes the second a different key, flushing the first BEFORE the
+         *      second's RMW read, so the second seeds from the COMMITTED value. Both components survive. */
+        gui_project_new();
+        gui_pack_clear(-1);
+        s_sel_atlas = 0;
+        (void)gui_project_set_sprite_slice9(0, "s9sprite", 0 /* L */, 11); /* buffered */
+        (void)gui_project_set_sprite_slice9(0, "s9sprite", 1 /* R */, 22); /* different component -> flush L, seed committed */
+        gui_project_flush_pending();                                       /* commit R */
+        tp_project_atlas *s9a = tp_project_get_atlas(gui_project_get(), 0);
+        const tp_project_sprite *s9ov = tp_project_atlas_find_sprite(s9a, "s9sprite");
+        const int s9l = s9ov ? s9ov->slice9_lrtb[0] : -1;
+        const int s9r = s9ov ? s9ov->slice9_lrtb[1] : -1;
+        nt_log_info("SELFTEST: slice9 RMW L=%d R=%d (want 11,22 -- neither lost)", s9l, s9r);
+        NT_ASSERT(s9l == 11 && s9r == 22 &&
+                  "slice9 two-component edit: the field-precise key prevents the RMW lost-edit (both survive)");
 
         /* (3) F1: "Add frames" is DEFERRED (was a synchronous commit -> UAF while declare_animation_editor
          *     held a live `an` it kept dereferencing). The enqueue captures COPIED keys, so the frames land
@@ -810,8 +879,8 @@ void run_selftest(void) {
         }
     }
     g_ui_scale = 1.5F; /* exercise the scaled layout during the auto-quit frames */
-    nt_log_info("SELFTEST: end (undo:%d redo:%d history:%zuB; selection '%s')", gui_history_undo_depth(),
-                gui_history_redo_depth(), gui_history_bytes(), s_sel_abs);
+    nt_log_info("SELFTEST: end (undo:%d redo:%d; selection '%s')", gui_project_undo_depth(),
+                gui_project_redo_depth(), s_sel_abs);
 }
 
 /* --- Overlay pixel probe (F) + touch-on-render guard, driven across the auto-quit frames --- */

@@ -1,23 +1,26 @@
 #ifndef NTPACKER_GUI_PROJECT_H
 #define NTPACKER_GUI_PROJECT_H
 
-/* GUI-owned project state (ux.md §3.3b/§3.3c, Task 2): exactly ONE tp_project + its
- * absolute file path (empty while unsaved) + two independent dirty bits:
- *   - project_dirty : unsaved changes on disk. RECOMPUTED by comparing the current
- *                     model snapshot to the last-SAVED snapshot (so undoing back to the
- *                     saved state clears it). Cleared by Save/Open/New. Menu-bar dot.
- *   - preview_stale : model changed since the last successful pack. Since in-process
- *                     packing is blocked (engine #282), nothing clears it this round --
- *                     once set it stays set, driving the Pack button's stale state.
+/* GUI-owned project state (ux.md §3.3b/§3.3c): exactly ONE tp_project OWNED by a journal-less
+ * tp_model (F2-05b-i) with the F2-03 diff history enabled (F2-05b-ii-A) + its absolute file path
+ * (empty while unsaved) + two independent dirty bits:
+ *   - dirty        : unsaved changes on disk. IDENTITY-derived (tp_model_dirty): the semantic
+ *                    identity vs the last-SAVED baseline (tp_model_mark_saved), so undoing back
+ *                    to the saved state clears it. Cleared by Save; re-baselined by Open/New.
+ *                    Menu-bar dot. (A buffered-but-uncommitted gesture is NOT yet in the identity;
+ *                    the destructive gates flush the pending buffer BEFORE checking dirty.)
+ *   - preview_stale : model changed since the last successful pack. Since in-process packing is
+ *                    blocked (engine #282), nothing clears it this round.
  *
- * Every model mutation goes through a wrapper here that funnels through one choke point
- * (gui_project_touch): it serializes the model, memcmp-dedups against the previous
- * snapshot, pushes the PRE-mutation snapshot onto the undo history (gui_history), and
- * recomputes project_dirty. Undo/redo swap a snapshot back into the live model.
+ * Every model mutation BUILDS typed tp_operation(s) and commits them atomically through the model
+ * (tp_model_apply, F2-01/F2-02 clone-swap); the commit captures one semantic diff = one undo step.
+ * Undo/Redo run tp_model_undo/redo (the model swaps m->project; s_proj + cached pointers refresh).
+ * Value edits (slider/field/etc.) coalesce through gui_project's ONE pending transaction and commit
+ * per GESTURE (gui_project_flush_pending), so one interaction == one undo step (decision 0015).
  *
- * Refresh (F4) is deliberately NOT a model mutation: rescanning disk sources changes what
- * is DISPLAYED/packed, not the PROJECT MODEL (sources are paths). So Refresh calls
- * gui_project_mark_stale (preview_stale only) and never touches project_dirty.
+ * Refresh (F4) is deliberately NOT a model mutation: rescanning disk sources changes what is
+ * DISPLAYED/packed, not the PROJECT MODEL (sources are paths). So Refresh calls
+ * gui_project_mark_stale (preview_stale only) and never dirties the project.
  *
  * File operations take explicit paths (the OS dialogs live in the UI layer) so they can be
  * driven headless by the startup self-test. */
@@ -85,8 +88,18 @@ void gui_project_mark_packed(void);
 /* Marks the preview stale WITHOUT dirtying the project (Refresh: disk changed, model
  * did not). */
 void gui_project_mark_stale(void);
-/* Advances the history clock (seconds) each frame -- drives undo coalescing windows. */
+/* Advances the coalescing clock (seconds) each frame -- feeds the gated fallback flush only. */
 void gui_project_tick(double now_seconds);
+
+/* Commit the ONE buffered coalescable gesture NOW (no-op when nothing is buffered): the gesture-end
+ * flush called at every commit boundary (save/save-as/new/open/exit/undo/redo/pack/export and before
+ * each dirty gate) and by the view layer at a widget's gesture boundary. Committing folds the whole
+ * gesture into ONE undo step. */
+void gui_project_flush_pending(void);
+/* FALLBACK ONLY: commit a buffered gesture that never got a release/blur/discrete boundary, once the
+ * 0.30 s window has elapsed. The caller MUST gate this on no active gesture so it can never split a
+ * live drag or a mid-typing field. */
+void gui_project_flush_elapsed(void);
 
 /* Monotonic model-edit counter: bumped once per REAL model mutation (the touch choke point, after the
  * memcmp dedup). Lets a view cheaply detect "the project changed since I snapshotted it" without
@@ -167,12 +180,15 @@ int gui_project_add_target(int atlas_index);
 void gui_project_remove_target(int atlas_index, int index);
 bool gui_project_set_target(int atlas_index, int index, const char *exporter_id, const char *out_path, bool enabled);
 
-/* --- undo / redo (ux.md §3.3c) --- */
-bool gui_project_can_undo(void);
+/* --- undo / redo (F2-03 diff history) --- */
+bool gui_project_can_undo(void); /* true if a committed step OR a buffered gesture can be reverted */
 bool gui_project_can_redo(void);
-/* Swap a history snapshot into the live model; recomputes dirty, sets stale, drops the
- * display caches. Selection re-clamp is the caller's job. Returns false when the stack
- * is empty (or on a restore error). */
+int gui_project_undo_depth(void); /* committed undoable steps (tp_model_undo_depth) */
+int gui_project_redo_depth(void);
+/* Reverse/replay the most recent committed transaction via tp_model_undo/redo (the model swaps its
+ * project; s_proj + cached pointers refresh). A buffered gesture is flushed to its own step first, so
+ * Ctrl+Z reverts an in-flight edit. Sets stale, drops the display caches; selection re-clamp is the
+ * caller's job. Returns false when there is nothing to undo/redo (or on a structured restore error). */
 bool gui_project_undo(void);
 bool gui_project_redo(void);
 

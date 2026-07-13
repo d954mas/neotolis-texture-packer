@@ -286,3 +286,106 @@ drag to ONE commit at drag-end — is deferred to b-ii, where the LIVE journal m
 (else the journal floods with one full-snapshot record per drag frame). b-ii owns this: it is not a
 b-i correctness issue, only a b-ii durability/volume one. The per-edit full-project clone on the
 interactive path (review finding, PLAUSIBLE) is likewise a b-ii arena-perf pass, not a b-i defect.
+
+## F2-05b-ii-A — GUI Undo/Redo → F2-03 diff history + gesture-scoped coalescing (2026-07-13)
+
+The lead split b-ii into **A (this)** and **B**. A cuts GUI Undo/Redo over to the F2-03 diff history,
+adds transaction-level coalescing, retires the 32 MB snapshot stack, and moves dirty to identity —
+**with the journal still NULL** (B adds the live journal + append-fail + recovery + D2, all UNTOUCHED
+here). Implemented in `apps/gui/gui_project.c` (undo/redo + pending buffer + dirty), `.h`,
+`apps/gui/gui_actions.c`/`.h` (gesture-commit flag + boundary flushes), `apps/gui/gui_view_settings.c`
+(per-widget gesture-end wiring), `apps/gui/main.c` (gated fallback + blur flush), `apps/gui/gui_selftest.c`;
+`apps/gui/gui_history.c`/`.h` **deleted**.
+
+### Undo/Redo through the F2-03 diff history
+
+`tp_model_enable_history` is called in `wrap_model` (every installed model). Each committed
+transaction captures one semantic diff = one undoable step. `gui_project_undo/redo` call
+`tp_model_undo/redo`; because those clone-swap `m->project`, the GUI refreshes `s_proj =
+tp_model_project(m)` (and callers re-resolve by index/name) exactly as `commit_txn_now` does. Redo-
+branch-drop on a new edit is `tp_history_push_reserved`'s job. The **32 MB snapshot stack
+(`gui_history.c`) and the per-touch full serialize are RETIRED**; `gui_project_touch` now only sets
+preview-stale + bumps the model-version counter. Dirty is **identity-derived** (`tp_model_dirty`);
+`gui_project_save_as` calls `tp_model_mark_saved` after a successful write (post-relativization
+baseline), and `init/new/open` promote §5.5 ids then `mark_saved` (a fresh/opened project is clean).
+Undo back to the saved revision reads clean by identity even at a higher revision. Never two live
+histories.
+
+### Transaction-level coalescing (the crux) — field-precise key
+
+The F2-03 history has NO built-in coalescing (one commit = one undo step), so a raw drag would revert
+one tick at a time. A **single pending-transaction buffer** holds ONE coalescable edit keyed by
+`(edit kind + atlas index + EXACT target: field / component / sprite-key / anim)`. A same-key edit
+replaces the pending value (latest wins); a **different-key** edit FLUSHES the pending first, then
+buffers the new one. Structural ops (add/remove/rename/frames/target) are non-coalescable: they flush
+pending, then commit immediately. **Field-precise keying is REQUIRED for correctness** — slice9 is a
+read-modify-write (it seeds all four components from the record), so keying it BY COMPONENT makes a
+different-component edit flush the prior component BEFORE the second RMW read, so the second seeds from
+the committed value and neither component is lost. (Selftest proves L=11,R=22 both survive; a tag-only
+key would commit `[0,22,0,0]` and drop L.)
+
+### Flush trigger = GESTURE-SCOPED, not a timer (owner decision)
+
+The buffer commits on the WIDGET's gesture boundary, decided by nt_ui, not by guessing with a clock:
+
+| widget kind | commit trigger (raises `gui_request_gesture_commit`) |
+|---|---|
+| slider (pointer drag) | `nt_ui_query_interaction(ctx,id).released_now` — buffer the live value each frame, commit on release |
+| text / numeric field | Enter (`nt_ui_input_text` `out_submitted`); out-of-panel blur via the existing `s_blur_inputs` synthesis (main.c) — keystrokes BUFFER (coalesce), never commit per-keystroke |
+| dropdown / checkbox / preset | the discrete pick/toggle is one edit — commit immediately |
+
+`apply_pending` flushes the pending buffer AFTER `drain_edits` folds in the frame's final value, so one
+interaction = one committed transaction = one undo step. The 0.30 s time window survives ONLY as a
+**gated fallback** (`gui_project_flush_elapsed`, called from main.c only when no pointer is held and no
+input is focused) for a value stream that never gets a gesture edge; it can never split a live gesture.
+An intra-panel field→field switch (no Enter, no out-of-panel blur) is committed by the next different-
+key edit's flush or a boundary — the value is always safe in the buffer (never in only the widget's
+text buffer), so it is never lost; only the just-blurred field's on-screen value may lag one commit.
+
+### The complete flush-boundary set (a missed flush = a lost edit)
+
+`gui_project_flush_pending` runs before EACH of: **save / save-as** (in `gui_project_save_as`),
+**new / open** (`pending_discard` — the buffered edit belongs to the outgoing project),
+**undo / redo** (in `gui_project_undo/redo`), **pack / export** (`do_pack` / `do_pack_blocking` /
+`do_export`), and **before every dirty GATE** — `request_new` / `request_open` / `request_exit` flush
+BEFORE `gui_project_is_dirty()`, else a buffered edit leaves `tp_model_dirty` false and would be
+silently discarded on the confirm. (The `MODAL_SAVE` re-check is covered because `do_save` flushes; the
+cosmetic menu-bar dirty dot and the selftest read is_dirty read-only and are deliberately NOT flushed —
+flushing every render frame would defeat coalescing.)
+
+### Documented DIVERGENCE from b-i (intentional, correctness-driven)
+
+b-i's coalescing key was the **action tag** (`GUI_ACT_SET_SETTING`), so two DISTINCT knobs edited within
+0.30 s (e.g. padding then margin) merged into ONE undo step. A's **field-precise key** makes each
+distinct field its OWN undo step (padding then margin = TWO steps — selftest proves `undo delta == 2`).
+This is a refinement REQUIRED to prevent the RMW lost-edit above. The tested guarantee **dragging ONE
+control = ONE undo step is preserved** (selftest: 8 same-key ticks → `undo delta == 1`, final value
+wins, one undo reverts the whole drag).
+
+### Direct (non-op) mutations vs the diff history
+
+The diff history captures OPS only; a direct mutation is invisible to it. Two were surfaced by the
+cutover (b-i's snapshot undo masked them) and FIXED here by routing through ops:
+- **add_atlas** now commits `ATLAS_CREATE` + `TARGET_CREATE` as ONE transaction (was: create op +
+  direct `seed_default_target`) — so undo removes the whole atlas and redo restores its seeded target,
+  and the target's id is minted non-nil (the old nil-until-save id broke a raw `save_buffer`).
+- **add_target** now commits a `TARGET_CREATE` op (was: direct `seed_default_target`) — so Undo removes
+  exactly that target instead of reverting the WRONG prior edit.
+  Both mirror the CLI's `target add` op; saved bytes stay byte-identical (random ids, same fields).
+  `seed_default_target` remains the sanctioned direct lifecycle seed for `init/new` (fresh history, ids
+  promoted by `promote_and_baseline`).
+
+**Remaining honest gap — animation rename is NOT undoable.** `gui_project_set_anim_id` stays a direct
+`an->name =` write because the F2-01 catalog has NO `ANIMATION_RENAME` op (a remove+recreate would
+reorder the array and break byte-identity). With the diff history this rename produces no undo step, so
+Ctrl+Z after it reverts the prior edit. This is a pre-existing catalog gap (not introduced here);
+restoring undo needs a core `ANIMATION_RENAME` op (F2-01 scope).
+
+### Verified (both presets)
+
+0 warnings (native-debug + native-release, cgltf filtered); `ctest` 78/78 both presets; `gui_selftest`
+PASS (extended: undo/redo-through-history restore + clean-at-saved-baseline; one-control drag = ONE
+undo step; two distinct knobs = TWO steps; flush-before-is_dirty preserves a buffered edit; slice9 two-
+component RMW loses neither); `check_boundaries.sh` = boundaries OK; GUI `--parity` deterministic on a
+fixed-id project AND byte-identical to the CLI for the same logical edits. Journal / append-fail /
+recovery / D2 remain UNTOUCHED (b-ii-B).

@@ -11,7 +11,6 @@
 #include "gui_scan.h"
 #include "gui_canvas.h"
 #include "gui_pack.h"
-#include "gui_history.h"
 #include "gui_shell.h" /* gui_shell_reset_shown_result: kill the freed-pointer bind after a clear (P2) */
 #include "tinyfiledialogs.h"
 
@@ -338,6 +337,14 @@ static void drain_edits(void) {
     }
     s_edit_count = 0;
 }
+
+/* Set by a view widget the frame its edit GESTURE ENDS (slider release / field Enter+blur / a
+ * discrete dropdown/checkbox pick). apply_pending flushes gui_project's pending transaction AFTER
+ * drain_edits buffers this frame's value, so the whole gesture commits as ONE undo step
+ * (F2-05b-ii-A, decision 0015). One shared flag suffices: pending_route already flushes a prior
+ * gesture when a different-key edit arrives, so the flag always targets the latest buffered edit. */
+static bool s_gesture_commit;
+void gui_request_gesture_commit(void) { s_gesture_commit = true; }
 // #endregion
 
 /* Refresh-vs-pack honesty latch (P2): a Refresh dirties the sources on DISK without touching the model,
@@ -860,6 +867,7 @@ void request_new(void) {
     if (busy_block()) {
         return;
     }
+    gui_project_flush_pending(); /* commit any buffered gesture BEFORE the dirty gate, else it reads clean and the edit is silently discarded */
     if (gui_project_is_dirty()) {
         s_after_confirm = AFTER_NEW;
         s_confirm_open = true;
@@ -878,6 +886,7 @@ void request_exit(void) {
     if (busy_block()) {
         return;
     }
+    gui_project_flush_pending(); /* flush before the dirty gate (a buffered edit must not vanish on quit) */
     if (gui_project_is_dirty()) {
         s_after_confirm = AFTER_EXIT;
         s_confirm_open = true;
@@ -891,6 +900,7 @@ void request_open(void) {
     if (busy_block()) {
         return;
     }
+    gui_project_flush_pending(); /* flush before the dirty gate (a buffered edit must not vanish on open) */
     if (gui_project_is_dirty()) {
         s_after_confirm = AFTER_OPEN;
         s_confirm_open = true;
@@ -931,7 +941,7 @@ void do_undo(void) {
         clamp_selection();
         reset_selection();
         gui_canvas_invalidate(&s_canvas);
-        set_statusf("Undo (undo:%d redo:%d)", gui_history_undo_depth(), gui_history_redo_depth());
+        set_statusf("Undo (undo:%d redo:%d)", gui_project_undo_depth(), gui_project_redo_depth());
     } else {
         set_status("Nothing to undo.");
     }
@@ -947,7 +957,7 @@ void do_redo(void) {
         clamp_selection();
         reset_selection();
         gui_canvas_invalidate(&s_canvas);
-        set_statusf("Redo (undo:%d redo:%d)", gui_history_undo_depth(), gui_history_redo_depth());
+        set_statusf("Redo (undo:%d redo:%d)", gui_project_undo_depth(), gui_project_redo_depth());
     } else {
         set_status("Nothing to redo.");
     }
@@ -1064,6 +1074,7 @@ static void do_refresh(void) {
 /* Blocking pack of the selected atlas (deterministic path for the selftest + --shot). Interactive
  * Pack (do_pack) runs this on a worker thread; the result lands via poll_async. */
 void do_pack_blocking(void) {
+    gui_project_flush_pending(); /* pack the committed model, never a stale one missing a buffered edit */
     tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
     if (!a || a->source_count == 0) {
         set_status_ex(STATUS_WARNING, "No sources to pack -- add a smart folder or files first.");
@@ -1092,6 +1103,7 @@ void do_pack_blocking(void) {
 /* Interactive Pack (Ctrl+P / strip / stale chip): starts the pack on a worker thread so the window
  * never freezes. Completion is applied at a frame boundary by poll_async (apply_pending). */
 void do_pack(void) {
+    gui_project_flush_pending(); /* pack the committed model, never a stale one missing a buffered edit */
     tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
     if (!a || a->source_count == 0) {
         set_status_ex(STATUS_WARNING, "No sources to pack -- add a smart folder or files first.");
@@ -1113,6 +1125,7 @@ void do_pack(void) {
 /* Ctrl+E / Export: starts an async export of every atlas with sources + >=1 enabled target on a
  * worker thread (per-atlas failures non-fatal, ux.md §3.5). Completion reported via poll_async. */
 static void do_export(void) {
+    gui_project_flush_pending(); /* export the committed model, never a stale one missing a buffered edit */
     if (gui_pack_async_busy()) {
         set_status_ex(STATUS_WARNING, "Busy -- a pack or export is already running.");
         return;
@@ -1375,6 +1388,14 @@ void apply_pending(void) {
      * held -- so the per-edit clone-swap can never dangle a panel's cached atlas/sprite/anim/target
      * pointer (decision 0015). */
     drain_edits();
+
+    /* A gesture ended last frame (slider release / field Enter+blur / discrete pick): commit the
+     * buffered transaction NOW that drain_edits has folded in this frame's final value, so one
+     * interaction == one undo step (F2-05b-ii-A, decision 0015). */
+    if (s_gesture_commit) {
+        gui_project_flush_pending();
+        s_gesture_commit = false;
+    }
 
     if (s_modal_action == MODAL_SAVE) {
         do_save();

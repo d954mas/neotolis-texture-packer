@@ -10,7 +10,7 @@
  * Split out of main.c (GUI decomposition step 2) as a pure move -- no behavior change. This layer is
  * Clay-free AND nt_ui-free: views set the s_pending_* flags; apply_pending consumes them at the top
  * of the next frame. Include discipline: actions -> gui_state + gui_rows + model headers
- * (gui_project/gui_scan/gui_canvas/gui_pack/gui_history) + tinyfiledialogs; it must never include
+ * (gui_project/gui_scan/gui_canvas/gui_pack) + tinyfiledialogs; it must never include
  * widgets or any view header. */
 
 #include <stdbool.h>
@@ -60,8 +60,10 @@ extern int s_last_pack_atlas;   /* which atlas that timing belongs to */
  * pointer-invalidation UAF class). Instead the declare fns ENQUEUE the edit here (capturing
  * the atlas INDEX + typed args + copied strings -- never a pointer); apply_pending drains
  * the queue at frame top, where no live declare-fn pointer is held, by calling the
- * self-contained gui_project_* setters. One drain per frame = one commit per frame = undo
- * depth 1 for a drag (gui_history coalescing is unchanged). */
+ * self-contained gui_project_* setters. Coalescable setters BUFFER into gui_project's pending
+ * transaction (they do not commit on drain); a gesture boundary raises
+ * gui_request_gesture_commit(), which apply_pending honours by flushing the buffer -- so one
+ * interaction = one committed transaction = one undo step (F2-05b-ii-A, decision 0015). */
 void gui_edit_atlas_int(int atlas, gui_atlas_field field, int value);
 void gui_edit_atlas_bool(int atlas, gui_atlas_field field, bool value);
 void gui_edit_atlas_float(int atlas, gui_atlas_field field, float value);
@@ -80,6 +82,11 @@ void gui_edit_target(int atlas, int index, const char *exporter_id, const char *
 
 /* --- deferred side-effect pump: lands async pack/export, commits blur edits, drains the queue --- */
 void apply_pending(void);
+
+/* Raised by a view widget when an EDIT GESTURE ENDS (slider release / field Enter+blur / a discrete
+ * dropdown/checkbox pick): apply_pending flushes gui_project's pending transaction AFTER the queue
+ * drains, committing the whole gesture as ONE undo step (F2-05b-ii-A, decision 0015). */
+void gui_request_gesture_commit(void);
 
 /* --- pack / export / undo / redo / refresh --- */
 void do_pack(void);          /* interactive async pack of the selected atlas */

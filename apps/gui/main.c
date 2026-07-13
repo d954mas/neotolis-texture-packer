@@ -64,7 +64,6 @@
 #include "gui_widgets.h"
 #include "gui_actions.h"
 #include "gui_rows.h"
-#include "gui_history.h"
 #include "gui_pack.h"
 #include "gui_project.h"
 #include "gui_scan.h"
@@ -587,6 +586,14 @@ static void frame(void) {
     /* dialogs + model mutations queued last frame run here, cleanly between frames */
     apply_pending();
 
+    /* Fallback commit for a buffered gesture that never got a release/blur/discrete boundary
+     * (F2-05b-ii-A, decision 0015). GATED on no active gesture -- no held pointer and no focused
+     * input -- so it can never split a live drag or a mid-typing field; the 0.30 s window inside
+     * only fires when the edit has truly gone idle. Primary commits are gesture-scoped. */
+    if (!g_nt_input.pointers[0].buttons[NT_BUTTON_LEFT].is_down && !nt_ui_input_any_focused(s_ctx)) {
+        gui_project_flush_elapsed();
+    }
+
     /* Heartbeat: the frame loop keeps ticking while a pack/export runs on the worker thread, so a slow
      * concave pack never freezes the window. Throttled to ~2 Hz; the frames-since count shows the rate. */
     if (gui_pack_async_busy()) {
@@ -746,6 +753,12 @@ static void frame(void) {
                                       bp->y >= rb.y && bp->y < (rb.y + rb.height);
                 s_blur_inputs = !in_panel;
             }
+        }
+        /* A blur (press outside the panel while a field held focus) is a field's gesture boundary:
+         * flush its buffered edit as ONE undo step (F2-05b-ii-A, decision 0015). The value is already
+         * in gui_project's pending buffer from the last keystroke; apply_pending commits it next frame. */
+        if (s_blur_inputs) {
+            gui_request_gesture_commit();
         }
 
         /* Bind the result the canvas shows (repack / atlas switch / clear): the export-target preview

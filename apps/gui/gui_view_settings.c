@@ -75,6 +75,11 @@ static bool ui_int_field(nt_ui_context_t *ctx, uint32_t id, char *buf, size_t ca
             v = mx;
         }
         *out = (int)v;
+        /* Keystrokes BUFFER (coalesce, no commit); Enter is the gesture boundary that flushes the whole
+         * field edit as ONE undo step (out-of-panel blur flushes via s_blur_inputs in main.c). Decision 0015. */
+        if (submitted) {
+            gui_request_gesture_commit();
+        }
         return true;
     }
     return false;
@@ -102,6 +107,9 @@ static bool ui_float_field(nt_ui_context_t *ctx, uint32_t id, char *buf, size_t 
             v = (double)mx;
         }
         *out = (float)v;
+        if (submitted) {
+            gui_request_gesture_commit(); /* Enter = the field's gesture boundary (decision 0015) */
+        }
         return true;
     }
     return false;
@@ -121,6 +129,9 @@ static bool ui_text_field(nt_ui_context_t *ctx, uint32_t id, char *buf, size_t c
     bool submitted = false;
     const bool changed = nt_ui_input_text(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, id, buf, cap, &tp, &s_num_input,
                                           &decl, enabled && !s_blur_inputs, &submitted);
+    if (submitted && enabled) {
+        gui_request_gesture_commit(); /* Enter = the field's gesture boundary (decision 0015) */
+    }
     return (changed || submitted) && enabled;
 }
 
@@ -213,6 +224,9 @@ static int row_combo(nt_ui_context_t *ctx, const char *label, uint32_t id, bool 
         }
     }
     PANEL_ROW_END;
+    if (sel >= 0) {
+        gui_request_gesture_commit(); /* a dropdown pick is ONE discrete edit -> commit it now (decision 0015) */
+    }
     return sel;
 }
 
@@ -230,7 +244,12 @@ static bool row_slider(nt_ui_context_t *ctx, const char *label, uint32_t id, cha
             const Clay_ElementDeclaration sd = {
                 .layout = {.sizing = {CLAY_SIZING_FIT(0), CLAY_SIZING_FIXED(S(20.0F))}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}};
             if (nt_ui_slider_int(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, id, NULL, &v, mn, mx, 1, &s_slider_style, &sd, enabled)) {
-                changed = true;
+                changed = true; /* buffer the live drag value each frame; the COMMIT is the release edge below */
+            }
+            /* Gesture-scoped commit (decision 0015): a live drag buffers per frame; committing the whole
+             * drag as ONE undo step happens on the release edge, not the live return. */
+            if (enabled && nt_ui_query_interaction(ctx, id).released_now) {
+                gui_request_gesture_commit();
             }
         }
         int iv = 0;
@@ -257,6 +276,9 @@ static bool row_check(nt_ui_context_t *ctx, const char *label, uint32_t id, bool
         }
     }
     PANEL_ROW_END;
+    if (changed) {
+        gui_request_gesture_commit(); /* a checkbox toggle is ONE discrete edit -> commit it now (decision 0015) */
+    }
     return changed;
 }
 
@@ -556,6 +578,7 @@ static void declare_region_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
             const int seed = (a->margin >= 1) ? (a->margin > 255 ? 255 : a->margin) : 1;
             if (cbc) {
                 gui_edit_sprite_override(s_sel_atlas, sprite, GUI_SPRITE_OV_MARGIN, on ? seed : TP_PROJECT_OV_INHERIT);
+                gui_request_gesture_commit(); /* discrete toggle -> commit now (coalescable override, decision 0015) */
             }
             const int disp = (ov_margin != TP_PROJECT_OV_INHERIT) ? ov_margin : seed;
             int iv = 0;
@@ -578,6 +601,7 @@ static void declare_region_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
             const int seed = (a->extrude >= 1) ? (a->extrude > 255 ? 255 : a->extrude) : 1;
             if (cbc && ex_enabled) {
                 gui_edit_sprite_override(s_sel_atlas, sprite, GUI_SPRITE_OV_EXTRUDE, on ? seed : TP_PROJECT_OV_INHERIT);
+                gui_request_gesture_commit(); /* discrete toggle -> commit now (coalescable override, decision 0015) */
             }
             const int disp = (ov_extrude != TP_PROJECT_OV_INHERIT) ? ov_extrude : seed;
             int iv = 0;
