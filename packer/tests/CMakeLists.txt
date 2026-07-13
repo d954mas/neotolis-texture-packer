@@ -297,3 +297,13 @@ add_test(NAME tp_raw_ownership COMMAND tp_test_raw_ownership "${CMAKE_BINARY_DIR
 add_executable(tp_demo_export tp_demo_export.c)
 target_link_libraries(tp_demo_export PRIVATE tp_build)
 target_compile_options(tp_demo_export PRIVATE -U_DLL)
+
+# P-01 (plan §17): clone benchmark -- malloc tp_project_clone vs the arena-backed
+# tp_project_clone_into_arena, on a normal + a huge project. Dev tool, NOT a ctest
+# (plain exe, no nt_set_warning_flags), same pattern as tp_demo_export. Includes the
+# src/ internal header for the arena clone under test.
+#   tp_bench_clone [iters_normal] [iters_huge]
+add_executable(tp_bench_clone tp_bench_clone.c)
+target_link_libraries(tp_bench_clone PRIVATE tp_core)
+target_include_directories(tp_bench_clone PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_options(tp_bench_clone PRIVATE -U_DLL)
