@@ -494,6 +494,35 @@ void test_batch_100_animations_one_inverse(void) {
     tp_model_destroy(m);
 }
 
+/* A single transaction whose later ops depend on an entity an earlier op created
+ * (create the atlas, then add a source/animation into it, then rename it): capture
+ * addresses the freshly-created atlas by id against the progressively-applied clone,
+ * and the reverse-order inverse unwinds the whole batch back to A byte-identical. */
+void test_batch_mixed_intrabatch(void) {
+    tp_model *m = fresh();
+    tp_id128 newa = id_of(0x51);
+    tp_operation ops[4];
+    memset(ops, 0, sizeof ops);
+    ops[0].kind = TP_OP_ATLAS_CREATE;
+    ops[0].atlas_id = newa;
+    ops[0].u.atlas_create.name = (char *)"born";
+    ops[1].kind = TP_OP_SOURCE_ADD;
+    ops[1].atlas_id = newa;
+    ops[1].u.source_add.source_id = id_of(0x52);
+    ops[1].u.source_add.kind = TP_SOURCE_KIND_FOLDER;
+    ops[1].u.source_add.key = (char *)"born/sprites";
+    ops[2].kind = TP_OP_ANIMATION_CREATE;
+    ops[2].atlas_id = newa;
+    ops[2].u.anim_create.anim_id = id_of(0x53);
+    ops[2].u.anim_create.name = (char *)"idle";
+    ops[2].u.anim_create.fps = 12.0F;
+    ops[3].kind = TP_OP_ATLAS_RENAME;
+    ops[3].atlas_id = newa;
+    ops[3].u.atlas_rename.name = (char *)"reborn";
+    run_oracle(m, ops, 4);
+    tp_model_destroy(m);
+}
+
 /* ---- inverse-apply allocation-failure rollback (sweep every staging depth) - */
 
 void test_inverse_alloc_failure_rolls_back(void) {
@@ -874,6 +903,7 @@ int main(void) {
     RUN_TEST(test_cascade_atlas_remove_full_subtree);
     RUN_TEST(test_cascade_source_remove_with_references);
     RUN_TEST(test_batch_100_animations_one_inverse);
+    RUN_TEST(test_batch_mixed_intrabatch);
     RUN_TEST(test_inverse_alloc_failure_rolls_back);
     RUN_TEST(test_capture_alloc_failure_fails_commit_atomically);
     RUN_TEST(test_corrupted_diff_unknown_atlas);
