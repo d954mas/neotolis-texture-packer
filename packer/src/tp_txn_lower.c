@@ -135,6 +135,24 @@ static tp_status lower_atlas_settings(const cJSON *oj, tp_op_atlas_settings *s, 
     return TP_STATUS_OK;
 }
 
+/* Optional int16 override field: range-checked int (j_opt_int) THEN bounded to the
+ * int16 storage range BEFORE the narrowing cast. Without this bound a client value
+ * like ov_margin:65535 wraps to -1 (== TP_PROJECT_OV_INHERIT), validate skips it, and
+ * apply COMMITS with the override silently dropped (65536->0, 65537->1). absent ->
+ * present=false, *out untouched. */
+static tp_status opt_i16(const cJSON *oj, const char *key, int16_t *out, bool *present, tp_error *err) {
+    int v = 0;
+    tp_status st = j_opt_int(oj, key, &v, present, err);
+    if (st != TP_STATUS_OK || !*present) {
+        return st;
+    }
+    if (v < INT16_MIN || v > INT16_MAX) {
+        return tp_error_set(err, TP_STATUS_OUT_OF_RANGE, "%s = %d must be in [%d..%d]", key, v, INT16_MIN, INT16_MAX);
+    }
+    *out = (int16_t)v;
+    return TP_STATUS_OK;
+}
+
 static tp_status lower_sprite_set(const cJSON *oj, tp_op_sprite_set *s, tp_error *err) {
     tp_status st;
     bool pr = false;
@@ -156,17 +174,16 @@ static tp_status lower_sprite_set(const cJSON *oj, tp_op_sprite_set *s, tp_error
         s->slice9[i] = (uint16_t)v;
     }
     if (any9) s->mask |= TP_SPF_SLICE9;
-    int iv = 0;
-    if ((st = j_opt_int(oj, "ov_shape", &iv, &pr, err)) != TP_STATUS_OK) return st;
-    if (pr) { s->ov_shape = (int16_t)iv; s->mask |= TP_SPF_SHAPE; }
-    if ((st = j_opt_int(oj, "ov_allow_rotate", &iv, &pr, err)) != TP_STATUS_OK) return st;
-    if (pr) { s->ov_allow_rotate = (int16_t)iv; s->mask |= TP_SPF_ALLOW_ROTATE; }
-    if ((st = j_opt_int(oj, "ov_max_vertices", &iv, &pr, err)) != TP_STATUS_OK) return st;
-    if (pr) { s->ov_max_vertices = (int16_t)iv; s->mask |= TP_SPF_MAX_VERTICES; }
-    if ((st = j_opt_int(oj, "ov_margin", &iv, &pr, err)) != TP_STATUS_OK) return st;
-    if (pr) { s->ov_margin = (int16_t)iv; s->mask |= TP_SPF_MARGIN; }
-    if ((st = j_opt_int(oj, "ov_extrude", &iv, &pr, err)) != TP_STATUS_OK) return st;
-    if (pr) { s->ov_extrude = (int16_t)iv; s->mask |= TP_SPF_EXTRUDE; }
+    if ((st = opt_i16(oj, "ov_shape", &s->ov_shape, &pr, err)) != TP_STATUS_OK) return st;
+    if (pr) s->mask |= TP_SPF_SHAPE;
+    if ((st = opt_i16(oj, "ov_allow_rotate", &s->ov_allow_rotate, &pr, err)) != TP_STATUS_OK) return st;
+    if (pr) s->mask |= TP_SPF_ALLOW_ROTATE;
+    if ((st = opt_i16(oj, "ov_max_vertices", &s->ov_max_vertices, &pr, err)) != TP_STATUS_OK) return st;
+    if (pr) s->mask |= TP_SPF_MAX_VERTICES;
+    if ((st = opt_i16(oj, "ov_margin", &s->ov_margin, &pr, err)) != TP_STATUS_OK) return st;
+    if (pr) s->mask |= TP_SPF_MARGIN;
+    if ((st = opt_i16(oj, "ov_extrude", &s->ov_extrude, &pr, err)) != TP_STATUS_OK) return st;
+    if (pr) s->mask |= TP_SPF_EXTRUDE;
     return TP_STATUS_OK;
 }
 
