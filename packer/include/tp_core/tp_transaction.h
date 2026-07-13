@@ -65,6 +65,10 @@ typedef struct tp_txn_idstore {
  * tp_model_destroy when embedded in a model). NULL on OOM. */
 tp_txn_idstore *tp_txn_idstore_memory_create(void);
 
+/* Forward: the F2-03 in-memory undo/redo history (opaque here; tp_diff.h +
+ * tp_history.c own it). NULL unless tp_model_enable_history is called. */
+struct tp_history;
+
 /* ---- the model-state wrapper --------------------------------------------- *
  * project + canonical revision + saved-baseline identity + idempotency store. The
  * revision is RUNTIME: it is never serialized to the project file (§414) and starts
@@ -75,6 +79,9 @@ typedef struct tp_model {
     tp_id128 saved_identity;  /* semantic identity of the saved baseline (dirty anchor) */
     tp_txn_idstore *idstore;  /* idempotency retention (owned unless borrowed) */
     bool owns_idstore;
+    struct tp_history *history; /* F2-03 undo/redo (NULL unless enabled); owned. When
+                                 * set, each committed transaction captures a semantic
+                                 * diff (tp_diff.h). NULL => exactly the F2-02 behavior. */
 } tp_model;
 
 /* Wrap an existing project (TAKES OWNERSHIP) in a model at revision 0 with a fresh

@@ -44,7 +44,14 @@ add_library(tp_core STATIC
     # Promoted from the accepted C0-02 spike. CORE-TESTED groundwork -- the CLI/GUI
     # frontend cutover is F2-05 (this does not route the shipping mutators).
     src/tp_project_clone.c src/tp_semantic.c src/tp_txn_idset.c src/tp_txn_apply.c
-    src/tp_txn_parse.c src/tp_txn_lower.c src/tp_txn_encode.c)
+    src/tp_txn_parse.c src/tp_txn_lower.c src/tp_txn_encode.c
+    # F2-03 semantic diff / exact inverse (Undo) + redo replay + a minimal in-memory
+    # undo/redo history: per-op state-capture diff (before/after entity data + position),
+    # element deep-copy + positional collection primitives, inverse/redo apply
+    # (stage-then-commit via the F2-02 clone/swap), and the history stack. Extends the
+    # F2-02 commit to capture a diff without breaking its atomicity. CORE-TESTED
+    # groundwork -- the GUI Undo cutover is F3-02, frontend routing F2-05, journal F2-04.
+    src/tp_diff_entity.c src/tp_diff_capture.c src/tp_diff_apply.c src/tp_history.c)
 target_include_directories(tp_core PUBLIC include)
 # tp_pack_settings.c includes nt_builder.h for the header-only nt_atlas_opts_defaults()
 # inline (the single source of the packing defaults). HEADERS ONLY: this adds the builder
