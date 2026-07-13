@@ -1088,6 +1088,8 @@ int main(int argc, char *argv[]) {
         char rnotice[256];
         if (gui_project_take_recovery_notice(rnotice, sizeof rnotice)) {
             set_status_ex(STATUS_WARNING, rnotice); /* "Recovered unsaved changes ... Save to keep them." */
+        } else if (gui_project_take_recovery_busy_notice(rnotice, sizeof rnotice)) {
+            set_status_ex(STATUS_WARNING, rnotice); /* fix [1]: "Another window open -- crash recovery off." */
         }
     }
 #endif

@@ -113,6 +113,7 @@ static void bench_appends(const char *label, const tp_project *p, tp_journal_io 
 
     int64_t len_before = io.length(io.ctx);
     double t = 0.0;
+    size_t last_sl = 0; /* fix [6]: the snapshot size, taken from the loop's own serialize (no extra) */
     for (int i = 0; i < iters; i++) {
         char id[33];
         (void)snprintf(id, sizeof id, "%032llx", (unsigned long long)i); /* unique -> no idempotent skip */
@@ -121,6 +122,7 @@ static void bench_appends(const char *label, const tp_project *p, tp_journal_io 
         size_t sl = 0;
         if (tp_project_save_buffer(p, &s, &sl, &err) == TP_STATUS_OK) {
             (void)tp_journal_append_txn(j, id, i + 1, (const uint8_t *)s, sl, &err);
+            last_sl = sl;
         }
         double b = now_ms();
         free(s);
@@ -129,27 +131,15 @@ static void bench_appends(const char *label, const tp_project *p, tp_journal_io 
     int64_t len_after = io.length(io.ctx);
     double ms_commit = t / (double)iters;
     double bytes_commit = (double)(len_after - len_before) / (double)iters;
-    (void)printf("   %-14s %8.4f ms/commit   %9.0f bytes/commit   growth %.2f MB over %d edits\n", label, ms_commit,
-                 bytes_commit, (double)(len_after - len_before) / 1048576.0, iters);
+    (void)printf("   %-14s snapshot=%.3f MB (%zu B)  %8.4f ms/commit   %9.0f bytes/commit   growth %.2f MB over %d edits\n",
+                 label, (double)last_sl / 1048576.0, last_sl, ms_commit, bytes_commit,
+                 (double)(len_after - len_before) / 1048576.0, iters);
     tp_journal_destroy(j); /* frees j + its owned io (the file io closes/keeps the temp file) */
 }
 
-static size_t serialized_len(const tp_project *p) {
-    char *buf = NULL;
-    size_t len = 0;
-    tp_error err = {{0}};
-    if (tp_project_save_buffer(p, &buf, &len, &err) != TP_STATUS_OK) {
-        return 0;
-    }
-    free(buf);
-    return len;
-}
-
 static void bench(const char *label, const tp_project *p, int iters, const char *file_slot) {
-    size_t ser = serialized_len(p);
     (void)printf("\n== %s ==\n", label);
-    (void)printf("   atlases=%d  serialized snapshot=%.3f MB (%zu B)  iters=%d\n", p->atlas_count,
-                 (double)ser / 1048576.0, ser, iters);
+    (void)printf("   atlases=%d  iters=%d\n", p->atlas_count, iters);
     bench_appends("memory-io", p, tp_journal_io_memory(), iters);
     if (file_slot) {
         (void)remove(file_slot);

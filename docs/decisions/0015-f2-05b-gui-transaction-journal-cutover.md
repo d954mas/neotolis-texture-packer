@@ -700,3 +700,88 @@ the `packer/src` include is scoped to the selftest build only, so the shipped GU
 the f6a5225 baseline — the journal is a sidecar and no serialization path changed. Goldens green in
 `ctest` (the sidecar never enters `.ntpacker_project`). No file under `packer/src` / `external` /
 `packer/spike` changed; no core seam was needed or added.
+
+## F2-05b-ii-B FIX pass (adversarial-review corrections, 2026-07-14)
+
+A high-effort adversarial review of `190b06c` found 4 CONFIRMED correctness bugs (2 made crash-recovery
+UNUSABLE, 1 was silent data loss) + 3 cleanups. All fixed GUI-layer only (`apps/gui/**`) + the D2 bench;
+no `packer/src` / `external` / `packer/spike` file touched; no core seam needed. Saved bytes stay
+byte-identical (id-normalized; same 3237 B).
+
+### [0]+[2] — recovered model was uneditable → recover the STATE, rebuild a FRESH model + FRESH journal
+
+Two bugs made a recovered project **uneditable**: [0] `s_txn_seq` (the `%032llx` txn-id counter) restarts
+at 0 each launch, but the recovered journal's retained-id index already held the crashed session's ids
+`0..K-1`, so the first post-recovery commits collided as `DUPLICATE_ID`; [2] `tp_model_recover` can hand
+back a usable model whose journal is **POISONED** (mid-stream corruption, F2-04 C2/C3), so every append
+failed with the misleading "disk full" message. The prior `try_adopt_recovered` adopted that recovered
+journal directly.
+
+**Fix (one redesign closes both):** `try_adopt_recovered` now recovers only the **STATE** — it
+`tp_project_clone`s the recovered project off `rm`, `tp_model_destroy`s `rm` (dropping the old/poisoned
+journal + closing the slot handle), then `wrap_model`s the clone so a **FRESH journal** is attached at the
+reset slot. A fresh journal has an **empty, non-poisoned** retained-id index → [0] can't collide (even
+with `s_txn_seq==0`) and [2]'s poison is gone. The clone is on the PUBLIC surface (`tp_project_clone` +
+`tp_model_project`), so **no core seam** was needed. The recovered content is unsaved work ahead of any
+file, so it is flagged dirty via the model's own `recovered_unsaved` field (F2-04 C5, the designed
+"dirty vs the project file" mechanism) — `is_dirty()` reads true with no spurious extra commit, and a Save
+re-baselines + clears it. **The regression that hid [0]: J3 now EDITS after recovery and asserts the edit
+COMMITS** (`edited_after_recovery`), and **J4 builds a real mid-stream-corrupt slot** (ckpt + 3 txns,
+corrupt the middle txn via a byte-exact frame-walk), recovers the last good record (`poison_v1`), and
+asserts a post-recovery edit COMMITS — proving the adopted journal is fresh, not the poisoned one.
+
+### [3] — Save dropped the last gesture on a journal failure (SILENT DATA LOSS) → flush reports + Save aborts
+
+`gui_project_save_as` flushed the pending gesture, but if that flush's commit failed with
+`TP_STATUS_JOURNAL_FAILED` the buffered op was discarded, yet save proceeded to `tp_project_save` +
+`tp_model_mark_saved` → a file WITHOUT the edit + a false "saved"/clean title. **Fix:**
+`gui_project_flush_pending` now returns `bool` (false iff a buffered gesture existed and its commit
+FAILED). `gui_project_save`/`save_as` **ABORT** on a false flush (no `tp_project_save`, no `mark_saved`;
+surface the reason; the model stays dirty) so a journal-failed flush is never a false "saved". Audited the
+other flush-before-action callers: **undo/redo** also abort on a false flush (they must not revert a
+DIFFERENT/older step after losing the in-flight edit); **new/open/exit-confirm** discard the outgoing
+project anyway and surface the op-error via the status bar; **pack/export** write atlas outputs, not the
+`.ntpacker_project`, so there is no false-clean-project there. **Regression J2:** buffer a gesture, arm
+append-fail, Save → Save returns non-OK, the model is NOT marked clean, and NO file is written.
+
+### [1] — a 2nd instance adopted the 1st's LIVE session / could truncate its journal → single-instance LOCK
+
+The fixed key + one deterministic slot meant a 2nd concurrent editor's `try_adopt_recovered` opened the
+1st's VALID same-key **live** journal, presented the 1st's in-progress project as "Recovered unsaved
+changes", and its New/Open `remove()`+reopen could truncate the 1st's live journal. **No `.ntpacker_
+project` data loss** (confirmed: the sidecar is never inside the project file and the project file is
+never touched by any recovery path), but wrong/confusing recovery + a clobbered live recovery journal —
+the earlier ADR's "garbled sidecar → fresh fallback" **understated** this.
+
+**Fix (implemented, not deferred): a single-instance advisory LOCK on `<slot>.lock`** (GUI-layer, not
+core; Windows exclusive-share `CreateFile` + `DELETE_ON_CLOSE`, POSIX `flock(LOCK_EX|LOCK_NB)`; both
+auto-release on process death, so a crash never leaves the slot locked). `gui_project_enable_recovery`
+acquires it; recovery is ACTIVE only when the slot is configured AND the lock is held (`recovery_active()`
+gates BOTH the recover-adopt and the attach). A 2nd instance that cannot acquire the lock runs
+**journal-less** and **never touches the slot** (no adopt, no attach, no `remove`), and raises a one-shot
+"Another window is open — crash recovery is off for this one" notice. The lock is released at
+`gui_project_shutdown` (after the clean-exit slot delete). **Regression J5:** a foreign lock simulates the
+1st instance; enabling recovery here leaves recovery INACTIVE, raises the busy notice, and the 2nd
+instance never creates the slot journal. Residual: the lock is a companion `.lock` file (advisory,
+single-host); it does not coordinate across network filesystems — acceptable for a desktop editor and
+noted as such.
+
+### Cleanups
+
+- **[4]** `attach_journal_io(m, io, err)` is now the ONE owner of the journal create → null-check →
+  attach → destroy-on-fail ownership dance, called by both `attach_recovery_journal` and the append-fail
+  test seam (a future contract change can't leak/double-free one copy).
+- **[5]** `s_recovery_path` is now `GUI_RECOVERY_PATH_MAX` (1200) ≥ every caller buffer (main.c 1152,
+  selftest 1200) — no silent slot-path truncation for a long exe path.
+- **[6]** `tp_bench_journal` no longer double-serializes to print the snapshot size — it derives it from
+  the append loop's own buffer (was a throwaway ~17 MB serialize on HUGE).
+
+### Verified (both presets)
+
+0 warnings (native-debug + native-release, cgltf filtered); `ctest` 79/79 (debug) + 78/78 (release);
+`ntpacker_gui_selftest` PASS — extended with **J2** (save aborts on a journal-failed flush; not marked
+clean; no file written), **J3 edit-after-recovery** (the gap that hid [0]: a post-recovery edit commits),
+**J4** (recover from a mid-stream-corrupt slot → last good state + a post-recovery edit commits), **J5**
+(a 2nd instance without the lock skips recovery + never touches the slot). `check_boundaries.sh` =
+boundaries OK. `--parity` id-normalized byte-identical (same 3237 B) to the f6a5225 baseline — no saved
+bytes changed. No file under `packer/src` / `external` / `packer/spike` changed; no core seam.

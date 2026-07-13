@@ -90,6 +90,56 @@ static char *selftest_slurp(const char *path) {
     return buf;
 }
 
+/* True iff the file at `path` exists (and can be opened). */
+static bool selftest_file_exists(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (f) {
+        (void)fclose(f);
+        return true;
+    }
+    return false;
+}
+
+/* F2-05b-ii-B fix [2] test helper: flip one payload byte of the (0-based) `rec_index`-th record in a
+ * journal file so replay reports CORRUPT at that record. If a LATER record follows it, the corruption
+ * is MID-STREAM (F2-04 C2 -> tp_model_recover returns a usable model with a POISONED journal). Walks
+ * the byte-exact frame layout (28-byte header, then [len u32 BE | payload | crc u32 BE] records) so it
+ * is robust to snapshot size. Returns true if the record was found + corrupted. */
+static bool selftest_corrupt_journal_record(const char *path, int rec_index) {
+    FILE *f = fopen(path, "r+b");
+    if (!f) {
+        return false;
+    }
+    (void)fseek(f, 0, SEEK_END);
+    long lsz = ftell(f);
+    (void)fseek(f, 0, SEEK_SET);
+    bool ok = false;
+    if (lsz > 28) {
+        size_t sz = (size_t)lsz;
+        unsigned char *buf = (unsigned char *)malloc(sz);
+        if (buf && fread(buf, 1, sz, f) == sz) {
+            size_t off = 28; /* skip the header */
+            for (int i = 0; off + 4U <= sz; i++) {
+                uint32_t plen = ((uint32_t)buf[off] << 24) | ((uint32_t)buf[off + 1] << 16) |
+                                ((uint32_t)buf[off + 2] << 8) | (uint32_t)buf[off + 3];
+                size_t payload = off + 4U;
+                if (i == rec_index) {
+                    if (payload + 5U < sz) {
+                        buf[payload + 5U] ^= 0xFFU; /* flip a payload byte -> crc mismatch at this record */
+                        (void)fseek(f, 0, SEEK_SET);
+                        ok = (fwrite(buf, 1, sz, f) == sz);
+                    }
+                    break;
+                }
+                off = payload + plen + 4U; /* skip payload + crc */
+            }
+        }
+        free(buf);
+    }
+    (void)fclose(f);
+    return ok;
+}
+
 /* UTF-8 "тест_спрайт" (a Cyrillic sprite name) -- exercises multi-byte names end-to-end. */
 #define CYR_STEM "\xD1\x82\xD0\xB5\xD1\x81\xD1\x82_\xD1\x81\xD0\xBF\xD1\x80\xD0\xB0\xD0\xB9\xD1\x82"
 
@@ -1009,14 +1059,48 @@ void run_selftest(void) {
                   "J1: the editor keeps working once the append failure clears");
         (void)gui_project_take_op_error(NULL, 0); /* the recovered edit raised no error; clear defensively */
 
+        /* (J2) fix [3] SAVE MUST ABORT ON A JOURNAL-FAILED FLUSH (no silent data loss / no false clean).
+         *      A buffered gesture whose flush-commit fails during Save must NOT be silently dropped while
+         *      the file is written + the title shows "saved". Buffer a coalescable edit, arm append-fail,
+         *      Save -> assert Save FAILS, the model is NOT marked clean, and NO file is written. */
+        gui_project_new();
+        gui_pack_clear(-1);
+        s_sel_atlas = 0;
+        (void)gui_project_take_op_error(NULL, 0);
+        tp_journal_io s2io = gui_project__test_attach_memory_journal();
+        NT_ASSERT(s2io.ctx && "J2: memory recovery journal attached");
+        NT_ASSERT(gui_project_set_atlas_name(0, "before_save") && "J2: a committed edit lands (journal healthy)");
+        NT_ASSERT(gui_project_is_dirty() && "J2: the committed edit dirties the model");
+        const int j2pad = tp_project_get_atlas(gui_project_get(), 0)->padding;
+        (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, j2pad + 5, 0.0F); /* BUFFERED (uncommitted) gesture */
+        tp_journal_io_memory__fail_next_writes(s2io, 1); /* the flush's journal append will fail */
+        char s2path[1200];
+        (void)snprintf(s2path, sizeof s2path, "%s/selftest_savefail.ntpacker_project", s_exe_dir);
+        (void)remove(s2path);
+        char s2err[256] = {0};
+        const tp_status s2st = gui_project_save_as(s2path, s2err, sizeof s2err);
+        const bool s2_written = selftest_file_exists(s2path);
+        nt_log_info("SELFTEST: J2 save-with-append-fail st=%s dirty=%d file_written=%d err='%s' (want !OK,1,0)",
+                    tp_status_str(s2st), (int)gui_project_is_dirty(), (int)s2_written, s2err);
+        NT_ASSERT(s2st != TP_STATUS_OK && "J2/[3]: Save FAILS when the buffered edit cannot be journaled");
+        NT_ASSERT(gui_project_is_dirty() && "J2/[3]: the model is NOT marked clean on a failed save (no false 'saved')");
+        NT_ASSERT(!s2_written && "J2/[3]: no .ntpacker_project is written when the flush commit failed");
+        NT_ASSERT(strcmp(tp_project_get_atlas(gui_project_get(), 0)->name, "before_save") == 0 &&
+                  "J2/[3]: the committed model is intact (the failed save did not corrupt it)");
+        (void)remove(s2path);
+        (void)gui_project_take_op_error(NULL, 0);
+
         /* (J3) CRASH-RECOVERY round-trip, BOTH ways, through the real GUI wiring (gui_project_enable_
          *      recovery + the adopt-at-init path + the clean-exit slot reset). ISOLATED slot under the
          *      build dir (never touches the production recovery path). A "crash" is simulated by tearing
          *      the model down with recovery DISABLED (shutdown leaves the slot on disk); a "clean exit"
          *      tears it down with recovery ENABLED (shutdown deletes the slot). */
         char jslot[1200];
+        char jlock[1210];
         (void)snprintf(jslot, sizeof jslot, "%s/selftest_recovery.ntpjournal", s_exe_dir);
-        (void)remove(jslot); /* start from a clean slot */
+        (void)snprintf(jlock, sizeof jlock, "%s.lock", jslot);
+        (void)remove(jslot);
+        (void)remove(jlock); /* start from a clean slot + lock */
 
         /* Session 1: enable recovery + re-init -> fresh project + a live journal at the slot. */
         gui_project_enable_recovery("");   /* disable first so this teardown never deletes a slot */
@@ -1039,17 +1123,31 @@ void run_selftest(void) {
         const bool got_notice = gui_project_take_recovery_notice(rnote, sizeof rnote);
         const bool recov_dirty = gui_project_is_dirty();
         const char *recov_name = gui_project_get() ? tp_project_get_atlas(gui_project_get(), 0)->name : "(none)";
-        nt_log_info("SELFTEST: J3 recover-after-crash notice=%d dirty=%d name='%s' (want 1,1,'recovered_atlas')",
-                    (int)got_notice, (int)recov_dirty, recov_name);
+        nt_log_info("SELFTEST: J3 recover-after-crash notice=%d dirty=%d name='%s' undo_depth=%d (want 1,1,'recovered_atlas',0)",
+                    (int)got_notice, (int)recov_dirty, recov_name, gui_project_undo_depth());
         NT_ASSERT(got_notice && "J3: a recovered session raises the one-shot recovery notice");
         NT_ASSERT(recov_dirty && "J3: the recovered model is DIRTY (unsaved recovered work -> prompt Save)");
         NT_ASSERT(gui_project_get() && strcmp(recov_name, "recovered_atlas") == 0 &&
                   "J3: recovery rebuilds the last committed state (the edit survived the crash)");
+        /* fix [0]/[2] REGRESSION (the gap that hid [0]): an EDIT after recovery must COMMIT. The adopted
+         * journal is FRESH (redesign) -> empty retained-id index (no DUPLICATE_ID vs the reset s_txn_seq)
+         * and not poisoned, so the recovered project is fully editable. */
+        NT_ASSERT(gui_project_undo_depth() == 0 && "J3/[0]: the recovered model starts with a fresh (empty) undo history");
+        (void)gui_project_take_op_error(NULL, 0);
+        const bool post_edit = gui_project_set_atlas_name(0, "edited_after_recovery");
+        char pe_err[256] = {0};
+        (void)gui_project_take_op_error(pe_err, sizeof pe_err);
+        nt_log_info("SELFTEST: J3 edit-after-recovery committed=%d name='%s' err='%s' (want 1,'edited_after_recovery',)",
+                    (int)post_edit, tp_project_get_atlas(gui_project_get(), 0)->name, pe_err);
+        NT_ASSERT(post_edit && strcmp(tp_project_get_atlas(gui_project_get(), 0)->name, "edited_after_recovery") == 0 &&
+                  "J3/[0]: a post-recovery edit COMMITS (fresh journal id-index -> no DUPLICATE_ID; not poisoned)");
 
-        /* CLEAN EXIT: tear down WITH recovery enabled -> shutdown deletes the slot. */
+        /* CLEAN EXIT: tear down WITH recovery enabled -> shutdown deletes the slot + releases the lock. */
         gui_project_shutdown();
 
-        /* Session 3 (relaunch after a clean exit): init -> NO recovery (slot gone) -> fresh + clean. */
+        /* Session 3 (relaunch after a clean exit): re-enable (re-lock) + init -> the slot is GONE, so a
+         * fresh clean project, no recovery. Proves the clean-exit slot deletion. */
+        gui_project_enable_recovery(jslot);
         gui_project_init();
         const bool spurious = gui_project_take_recovery_notice(rnote, sizeof rnote);
         nt_log_info("SELFTEST: J3 after-clean-exit dirty=%d atlases=%d spurious_notice=%d (want 0,1,0)",
@@ -1057,11 +1155,87 @@ void run_selftest(void) {
         NT_ASSERT(!spurious && "J3: NO spurious recovery notice after a clean exit");
         NT_ASSERT(gui_project_get() && gui_project_get()->atlas_count == 1 && !gui_project_is_dirty() &&
                   "J3: a clean exit leaves nothing to recover -> the next launch is a fresh clean project");
+        gui_project_enable_recovery("");   /* disable + release the lock */
+        gui_project_shutdown();
+        (void)remove(jslot);
+        (void)remove(jlock);
 
-        /* Done: disable recovery + restore a journal-LESS packable project for the render phases. */
+        /* (J4) fix [2] POISONED-SLOT recovery: build a real 4-record journal (ckpt + 3 txns) via a GUI
+         *      session, corrupt the MIDDLE txn so replay reports mid-stream corruption (tp_model_recover
+         *      returns a usable model with a POISONED journal), then recover. The redesign clones the last
+         *      GOOD STATE + attaches a FRESH journal, so the recovered project is fully editable (NOT the
+         *      "disk full" dead-end the poisoned journal would otherwise cause). */
+        char pslot[1200];
+        char plock[1210];
+        (void)snprintf(pslot, sizeof pslot, "%s/selftest_poison.ntpjournal", s_exe_dir);
+        (void)snprintf(plock, sizeof plock, "%s.lock", pslot);
+        (void)remove(pslot);
+        (void)remove(plock);
+        gui_project_enable_recovery(pslot);
+        gui_project_init();                                            /* ckpt (fresh) */
+        NT_ASSERT(gui_project_set_atlas_name(0, "poison_v1") && "J4: build txn1");
+        NT_ASSERT(gui_project_set_atlas_name(0, "poison_v2") && "J4: build txn2");
+        NT_ASSERT(gui_project_set_atlas_name(0, "poison_v3") && "J4: build txn3");
+        gui_project_enable_recovery("");   /* crash-sim: keep the slot */
+        gui_project_shutdown();
+        /* record 0 = ckpt, 1 = txn1(poison_v1), 2 = txn2, 3 = txn3. Corrupt record 2 -> mid-stream (txn3
+         * still follows), so recovery keeps up to txn1 ("poison_v1") and poisons the journal. */
+        NT_ASSERT(selftest_corrupt_journal_record(pslot, 2) && "J4: corrupted the mid-stream (txn2) record");
+        gui_project_enable_recovery(pslot);
+        gui_project_init();
+        const bool p_notice = gui_project_take_recovery_notice(rnote, sizeof rnote);
+        char p_name[64] = {0}; /* COPY the recovered name BEFORE the post-recovery edit clone-swaps + frees it */
+        if (gui_project_get()) {
+            (void)snprintf(p_name, sizeof p_name, "%s", tp_project_get_atlas(gui_project_get(), 0)->name);
+        }
+        (void)gui_project_take_op_error(NULL, 0);
+        const bool p_edit = gui_project_set_atlas_name(0, "poison_edit_ok");
+        char p_err[256] = {0};
+        (void)gui_project_take_op_error(p_err, sizeof p_err);
+        nt_log_info("SELFTEST: J4 poisoned-slot recovered name='%s' notice=%d post_edit=%d err='%s' (want 'poison_v1',1,1,)",
+                    p_name, (int)p_notice, (int)p_edit, p_err);
+        NT_ASSERT(p_notice && strcmp(p_name, "poison_v1") == 0 &&
+                  "J4/[2]: recovery from a mid-stream-corrupt slot restores the last GOOD record (txn1)");
+        NT_ASSERT(p_edit && strcmp(tp_project_get_atlas(gui_project_get(), 0)->name, "poison_edit_ok") == 0 &&
+                  "J4/[2]: a post-recovery edit COMMITS -- the adopted journal is FRESH, not the poisoned one");
         gui_project_enable_recovery("");
         gui_project_shutdown();
-        (void)remove(jslot); /* belt-and-suspenders: leave no stray sidecar in the build dir */
+        (void)remove(pslot);
+        (void)remove(plock);
+
+        /* (J5) fix [1] SINGLE-INSTANCE LOCK: a 2nd instance that cannot acquire the slot lock must SKIP
+         *      recovery (run journal-less) and NEVER touch the slot -- so it neither adopts the 1st's LIVE
+         *      session as "recovered" nor truncates its live journal. Simulate the 1st instance by holding
+         *      a foreign lock, then enable recovery here and assert recovery is INACTIVE + the slot journal
+         *      is never created. */
+        char lslot[1200];
+        char llock[1210];
+        (void)snprintf(lslot, sizeof lslot, "%s/selftest_lock.ntpjournal", s_exe_dir);
+        (void)snprintf(llock, sizeof llock, "%s.lock", lslot);
+        (void)remove(lslot);
+        (void)remove(llock);
+        NT_ASSERT(gui_project__test_hold_foreign_lock(lslot) && "J5: a foreign instance holds the slot lock");
+        gui_project_enable_recovery("");
+        gui_project_shutdown();
+        gui_project_enable_recovery(lslot); /* our acquire must FAIL (foreign holds it) */
+        char busy[256] = {0};
+        const bool busy_notice = gui_project_take_recovery_busy_notice(busy, sizeof busy);
+        const bool active = gui_project__test_recovery_active();
+        gui_project_init();                 /* journal-less (recovery inactive) */
+        NT_ASSERT(gui_project_set_atlas_name(0, "instance2_edit") && "J5: the 2nd instance still edits (journal-less)");
+        const bool slot_touched = selftest_file_exists(lslot);
+        nt_log_info("SELFTEST: J5 2nd-instance active=%d busy_notice=%d slot_created=%d (want 0,1,0)", (int)active,
+                    (int)busy_notice, (int)slot_touched);
+        NT_ASSERT(!active && "J5/[1]: a 2nd instance cannot acquire the lock -> recovery INACTIVE");
+        NT_ASSERT(busy_notice && busy[0] && "J5/[1]: the 'another instance' notice is raised");
+        NT_ASSERT(!slot_touched && "J5/[1]: the 2nd instance never created/touched the slot journal (no truncation)");
+        gui_project__test_release_foreign_lock();
+        (void)remove(llock);
+
+        /* Done: disable recovery + release any lock + restore a journal-LESS packable project for the
+         * render phases. */
+        gui_project_enable_recovery("");
+        gui_project_shutdown();
         gui_project_init();
         gui_pack_clear(-1);
         s_sel_atlas = 0;

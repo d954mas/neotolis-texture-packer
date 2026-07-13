@@ -84,6 +84,9 @@ void gui_project_enable_recovery(const char *slot_path);
 /* Drains the one-shot "recovered unsaved changes from a previous session" notice (true once after a
  * crash-recovery adopt at init). The UI polls this to surface the recovery to the user. */
 bool gui_project_take_recovery_notice(char *out, size_t cap);
+/* Drains the one-shot "another instance is running -> crash recovery is off for this window" notice
+ * (true once when a 2nd concurrent instance could not acquire the recovery slot lock). */
+bool gui_project_take_recovery_busy_notice(char *out, size_t cap);
 
 /* --- accessors --- */
 tp_project *gui_project_get(void);
@@ -109,8 +112,12 @@ void gui_project_tick(double now_seconds);
 /* Commit the ONE buffered coalescable gesture NOW (no-op when nothing is buffered): the gesture-end
  * flush called at every commit boundary (save/save-as/new/open/exit/undo/redo/pack/export and before
  * each dirty gate) and by the view layer at a widget's gesture boundary. Committing folds the whole
- * gesture into ONE undo step. */
-void gui_project_flush_pending(void);
+ * gesture into ONE undo step. Returns FALSE iff a buffered gesture existed and its commit FAILED (a
+ * journal append failure) -- i.e. an edit could not be made durable; callers that then persist or
+ * discard (save/save-as, undo/redo) MUST abort on false so a journal-failed flush is never mistaken
+ * for a clean state (no false "saved"). Returns true when nothing was pending / it was a no-op /
+ * it committed OK. */
+bool gui_project_flush_pending(void);
 /* FALLBACK ONLY: commit a buffered gesture that never got a release/blur/discrete boundary, once the
  * 0.30 s window has elapsed. The caller MUST gate this on no active gesture so it can never split a
  * live drag or a mid-typing field. */
@@ -248,6 +255,12 @@ bool gui_project_take_op_error(char *out, size_t cap);
  * its io handle so the fault suite can arm a deterministic write failure and exercise the append-fail
  * commit path. NULL-ctx io on failure. Never linked/called in production. */
 tp_journal_io gui_project__test_attach_memory_journal(void);
+/* Dev seam (selftest only, fix [1]): hold / release a FOREIGN single-instance lock on `slot` from a
+ * separate handle (simulates another live editor), and query whether recovery is ACTIVE (slot owned).
+ * Lets the selftest prove a 2nd instance that cannot lock skips recovery + never touches the slot. */
+bool gui_project__test_hold_foreign_lock(const char *slot);
+void gui_project__test_release_foreign_lock(void);
+bool gui_project__test_recovery_active(void);
 #endif
 
 #ifdef __cplusplus

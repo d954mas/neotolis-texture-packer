@@ -4,6 +4,17 @@
 #include <stdio.h>
 #include <string.h>
 
+/* F2-05b-ii-B fix [1]: single-instance advisory lock on the recovery slot (GUI-layer, not core), so
+ * a 2nd concurrent editor cannot adopt the 1st's LIVE session as "recovered" nor truncate its live
+ * journal. Windows: an exclusive (share-mode 0) CreateFile handle; POSIX: flock(LOCK_EX|LOCK_NB). */
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <sys/file.h>
+#include <unistd.h>
+#endif
+
 #include "gui_scan.h"
 
 #include "tp_core/tp_export.h"         /* TP_EXPORTER_ID_JSON_NEOTOLIS (default target exporter id) */
@@ -68,10 +79,24 @@ static char s_op_error_msg[256];
  * the slot is deleted on a CLEAN shutdown (only a crash -- shutdown never reached -- leaves it to
  * recover). Empty == journal DISABLED (the default; the headless selftest keeps it empty so it stays
  * deterministic + file-free). The journal is a SIDECAR -- it NEVER changes saved .ntpacker_project
- * bytes (the byte-parity goldens depend on this). See ADR 0015 for the keying/recovery-slot design. */
-static char s_recovery_path[1024];
+ * bytes (the byte-parity goldens depend on this). See ADR 0015 for the keying/recovery-slot design.
+ * fix [5]: sized >= every caller buffer (main.c 1152, selftest 1200) so a long exe path never
+ * silently truncates the slot location. */
+#define GUI_RECOVERY_PATH_MAX 1200
+static char s_recovery_path[GUI_RECOVERY_PATH_MAX];
+/* fix [1]: the single-instance lock handle + "do we OWN the slot" state. Recovery is ACTIVE for this
+ * instance only when the slot is configured AND we hold the lock (recovery_active()); a 2nd instance
+ * that cannot lock runs journal-less and never touches the slot. */
+#ifdef _WIN32
+static void *s_recovery_lock = NULL; /* HANDLE; NULL == not held (INVALID_HANDLE_VALUE also normalized to NULL) */
+#else
+static int s_recovery_lock = -1; /* fd; -1 == not held */
+#endif
+static bool s_recovery_locked;     /* true == this instance holds the slot lock (owns recovery) */
 /* A one-shot notice that a crashed prior session's work was recovered at init (drained by the UI). */
 static bool s_recovery_notice;
+/* A one-shot notice that recovery is OFF because another instance holds the slot (drained by the UI). */
+static bool s_recovery_busy_notice;
 // #endregion
 
 // #region transaction-level coalescing buffer (b-ii-A crux, decision 0015)
@@ -229,15 +254,80 @@ static void note_recovery_degraded(const char *msg) {
                    msg ? msg : "unknown");
 }
 
+/* fix [1]: single-instance advisory lock on `<slot>.lock`. acquire returns true iff THIS process now
+ * holds it (no other live instance does); it auto-releases on process death (crash-safe: a dead
+ * instance never keeps the slot locked). release is idempotent. The lock file is a companion to the
+ * journal slot -- never the journal file itself -- so it never interferes with journal I/O. */
+static bool recovery_lock_acquire(const char *slot) {
+    char lockpath[GUI_RECOVERY_PATH_MAX + 8];
+    (void)snprintf(lockpath, sizeof lockpath, "%s.lock", slot);
+#ifdef _WIN32
+    HANDLE h = CreateFileA(lockpath, GENERIC_READ | GENERIC_WRITE, 0 /* exclusive: no sharing */, NULL, OPEN_ALWAYS,
+                           FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        return false; /* another live instance holds it (ERROR_SHARING_VIOLATION) or the path is unwritable */
+    }
+    s_recovery_lock = (void *)h;
+    return true;
+#else
+    int fd = open(lockpath, O_CREAT | O_RDWR, 0644);
+    if (fd < 0) {
+        return false;
+    }
+    if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        (void)close(fd); /* another live instance holds the exclusive lock */
+        return false;
+    }
+    s_recovery_lock = fd;
+    return true;
+#endif
+}
+static void recovery_lock_release(void) {
+#ifdef _WIN32
+    if (s_recovery_lock != NULL) {
+        (void)CloseHandle((HANDLE)s_recovery_lock); /* DELETE_ON_CLOSE removes the .lock file */
+        s_recovery_lock = NULL;
+    }
+#else
+    if (s_recovery_lock >= 0) {
+        (void)flock(s_recovery_lock, LOCK_UN);
+        (void)close(s_recovery_lock);
+        s_recovery_lock = -1;
+    }
+#endif
+    s_recovery_locked = false;
+}
+
+/* Recovery is ACTIVE for this instance only when a slot is configured AND we own the single-instance
+ * lock. A 2nd concurrent instance (lock not held) is journal-less and must never touch the slot. */
+static bool recovery_active(void) { return s_recovery_path[0] != '\0' && s_recovery_locked; }
+
+/* fix [4]: the ONE owner of the create -> null-check -> attach -> destroy-on-fail ownership dance.
+ * Creates a journal over `io` (TAKES OWNERSHIP of io, keyed with recovery_key) and attaches it to
+ * `m`. On success `m` owns the journal. On ANY failure `io`/`j` are destroyed (never leaked) and a
+ * non-OK status is returned. Shared by attach_recovery_journal and the append-fail test seam. */
+static tp_status attach_journal_io(tp_model *m, tp_journal_io io, tp_error *err) {
+    tp_journal *j = tp_journal_create(io, recovery_key()); /* TAKES OWNERSHIP of io; NULL destroys io */
+    if (!j) {
+        return TP_STATUS_OOM; /* io already destroyed by create */
+    }
+    tp_status st = tp_model_attach_journal(m, j, err);
+    if (st != TP_STATUS_OK) {
+        tp_journal_destroy(j); /* attach failed (checkpoint write) -> we still own j (and its io) */
+    }
+    return st;
+}
+
 /* Attach a FRESH file-backed recovery journal to `m` at the recovery slot, resetting the slot to
  * empty first so it reflects ONLY this model's project (one slot, always the current project -- no
  * accumulation across New/Open). No-op (leaves `m` journal-LESS, exactly the pre-B path) when
- * recovery is disabled. PRECONDITION: any PREVIOUS model (and thus the previous slot file handle) is
- * already destroyed, so remove()+reopen never races a live handle. On ANY failure the editor still
- * runs journal-less and a degraded-durability notice is raised (never a crash / blocked editor). */
+ * recovery is not ACTIVE (disabled, or a 2nd instance without the lock). PRECONDITION: any PREVIOUS
+ * model (and thus the previous slot file handle) is already destroyed, so remove()+reopen never races
+ * a live handle. On ANY failure the editor still runs journal-less and a degraded-durability notice
+ * is raised (never a crash / blocked editor). */
 static void attach_recovery_journal(tp_model *m) {
-    if (!m || s_recovery_path[0] == '\0') {
-        return; /* recovery disabled -> journal-less (exactly the F2-05b-ii-A behavior) */
+    if (!m || !recovery_active()) {
+        return; /* recovery disabled / not owned -> journal-less (exactly the F2-05b-ii-A behavior) */
     }
     (void)remove(s_recovery_path); /* start a fresh slot: the old model's handle is already closed */
     tp_journal_io io = tp_journal_io_file(s_recovery_path);
@@ -245,14 +335,8 @@ static void attach_recovery_journal(tp_model *m) {
         note_recovery_degraded("could not open the recovery journal file");
         return;
     }
-    tp_journal *j = tp_journal_create(io, recovery_key()); /* TAKES OWNERSHIP of io; NULL frees io */
-    if (!j) {
-        note_recovery_degraded("out of memory creating the recovery journal");
-        return;
-    }
     tp_error err = {0};
-    if (tp_model_attach_journal(m, j, &err) != TP_STATUS_OK) {
-        tp_journal_destroy(j); /* attach failed (checkpoint write) -> we still own j */
+    if (attach_journal_io(m, io, &err) != TP_STATUS_OK) {
         note_recovery_degraded(err.msg[0] ? err.msg : "could not checkpoint the recovery journal");
     }
 }
@@ -506,15 +590,20 @@ static bool pending_is_noop(void) {
     }
 }
 
-void gui_project_flush_pending(void) {
+/* fix [3]: returns FALSE iff a buffered gesture existed and its commit FAILED (e.g. a journal append
+ * failure) -- i.e. an edit could NOT be made durable. Returns TRUE when nothing was pending, the
+ * pending was a net-zero no-op, or it committed OK. Callers that persist or discard on the strength of
+ * "no pending left" (save/save-as, undo/redo) MUST check this and ABORT on false so a journal-failed
+ * flush is never mistaken for a clean state (no false "saved", no wrong undo target). */
+bool gui_project_flush_pending(void) {
     if (!s_pending_valid) {
-        return;
+        return true;
     }
     if (pending_is_noop()) {
         /* #3: a gesture that nets back to the committed value commits NOTHING -- no phantom undo
          * step, no dropped redo branch, no dirty flip. pending_discard frees the arms + clears. */
         pending_discard();
-        return;
+        return true;
     }
     tp_operation op = s_pending_op; /* move: ownership of the arms transfers to the local */
     gui_action act = s_pending_act;
@@ -522,8 +611,10 @@ void gui_project_flush_pending(void) {
     s_pending_valid = false;
     if (commit_txn_now(&op, 1)) { /* frees op's arms; refreshes s_proj + pushes one undo step */
         gui_project_touch(act);
+        return true;
     }
-    /* on reject commit_txn_now still freed the arms + set the op-error; the edit is dropped */
+    /* on reject commit_txn_now freed the arms + set the op-error; the edit could not be committed. */
+    return false;
 }
 
 /* Called AT THE TOP of a coalescable mutator with its key, BEFORE the mutator reads the model:
@@ -586,16 +677,23 @@ bool gui_project_peek_pending_slice9(int atlas_index, const char *sprite_key, in
 // #endregion
 
 // #region lifecycle
-/* F2-05b-ii-B crash recovery (F2-04 §7.1/§22.3). If recovery is enabled and the slot holds a usable
- * journal from a CRASHED prior session, rebuild + install its last committed state as the live model,
- * kept DIRTY (F2-04 C5 recovered_unsaved) so the user is prompted to Save the recovered work. Returns
- * true when a model was adopted. A stale / empty / foreign / corrupt / torn-first slot returns false
- * -> the caller does a normal fresh init. tp_model_recover reads the slot UB-cleanly (never crashes
- * on a bad slot) and TAKES OWNERSHIP of the io on every path (recovered model owns it, else it is
- * destroyed) -- so the io is never leaked. */
+/* F2-05b-ii-B crash recovery (F2-04 §7.1/§22.3). If recovery is ACTIVE (slot owned) and the slot
+ * holds a usable journal from a CRASHED prior session, rebuild + install its last committed STATE,
+ * kept DIRTY so the user is prompted to Save the recovered work. Returns true when a model was
+ * adopted; a stale / empty / foreign / corrupt / torn-first slot returns false -> normal fresh init.
+ *
+ * fix [0]+[2] REDESIGN: recover only the STATE, then rebuild a FRESH model + FRESH journal around it.
+ * The recovered journal returned by tp_model_recover cannot be adopted directly because: [0] its
+ * retained-id index already holds the crashed session's ids 0..K-1, and s_txn_seq restarts at 0 each
+ * launch, so the first post-recovery commits would collide as DUPLICATE_ID -> the project would look
+ * frozen; [2] it may be POISONED (mid-stream corruption, F2-04 C2/C3) -> every append fails. So we
+ * tp_project_clone the recovered project OFF rm, tp_model_destroy(rm) (drops the old/poisoned journal
+ * + closes the slot handle), then wrap_model the clone -> a FRESH journal with an EMPTY, non-poisoned
+ * retained-id index at the reset slot. tp_model_recover TAKES OWNERSHIP of the io on every path
+ * (recovered model owns it, else destroyed), so the io is never leaked. */
 static bool try_adopt_recovered(void) {
-    if (s_recovery_path[0] == '\0') {
-        return false; /* recovery disabled */
+    if (!recovery_active()) {
+        return false; /* recovery disabled, or a 2nd instance without the slot lock -> fresh init */
     }
     tp_journal_io io = tp_journal_io_file(s_recovery_path);
     if (!io.ctx) {
@@ -610,10 +708,23 @@ static bool try_adopt_recovered(void) {
     if (st != TP_STATUS_OK || !rm) {
         return false; /* nothing recoverable (empty/bad-header/stale-key/torn-first) -> fresh init */
     }
-    drop_idstore(rm);                  /* GUI carries no idstore; the attached journal is the idempotency authority */
-    (void)tp_model_enable_history(rm); /* fresh undo history starting AT the recovered state */
-    s_model = rm;                      /* rm already OWNS a journal over the slot -> keeps recording */
-    s_proj = tp_model_project(s_model);
+    /* Clone the recovered STATE, then discard rm (its journal may be poisoned + its index stale). */
+    tp_project *recovered = tp_project_clone(tp_model_project(rm));
+    tp_model_destroy(rm); /* drops the recovered journal (poisoned or not) + closes the slot handle */
+    if (!recovered) {
+        return false; /* clone OOM -> fall back to a fresh init (never crash on recovery) */
+    }
+    if (!wrap_model(recovered)) {
+        return false; /* wrap OOM -> recovered freed by wrap_model; fall back to a fresh init */
+    }
+    /* wrap_model attached a FRESH journal at the reset slot (empty id-index, not poisoned) with a
+     * checkpoint of the recovered project, and left the model CLEAN (saved_identity == identity). The
+     * recovered content is UNSAVED work ahead of any on-disk file -> flag it dirty via the F2-04 C5
+     * recovered_unsaved field (the model's own "dirty vs the project file" mechanism, tp_transaction.h):
+     * gui_project_is_dirty() reads true WITHOUT a spurious extra commit, and a later Save re-baselines +
+     * clears it. (This writes a tp_model runtime field, not the project -- outside the R7 project-write
+     * boundary rules.) */
+    s_model->recovered_unsaved = true;
     set_path("");        /* recovered work is untitled -> a deliberate Save As is required */
     s_preview_stale = true;
     recompute_dirty();   /* recovered_unsaved == true -> dirty (independent of identity) */
@@ -644,18 +755,33 @@ void gui_project_shutdown(void) {
     s_proj = NULL;
     /* F2-05b-ii-B clean-exit reset: a cleanly-exited session leaves NO journal to recover, so the next
      * launch starts fresh (no spurious "recovered" prompt). Only a CRASH -- which never reaches this
-     * shutdown -- leaves the slot on disk for the next launch to recover. */
-    if (s_recovery_path[0] != '\0') {
+     * shutdown -- leaves the slot on disk. Delete the slot ONLY while we own it (recovery_active), then
+     * release the single-instance lock so a relaunch can re-acquire it. */
+    if (recovery_active()) {
         (void)remove(s_recovery_path);
     }
+    recovery_lock_release();
 }
 
 /* F2-05b-ii-B: enable/configure crash recovery. `slot_path` is a DETERMINISTIC sidecar journal path
  * (a stable temp/app-data location the next launch reconstructs WITHOUT a random session id, per the
  * owner's requirement); NULL/"" DISABLES recovery (journal-less, the default). Call ONCE before the
- * first gui_project_init in the interactive app. */
+ * first gui_project_init in the interactive app.
+ *
+ * fix [1]: acquires a single-instance advisory lock on the slot. If another live instance already
+ * holds it, THIS instance runs journal-less (recovery INACTIVE) and never touches the slot -- so it
+ * neither adopts the other instance's LIVE session as "recovered" nor truncates its live journal --
+ * and raises a one-shot "another instance" notice. Re-enabling always releases any prior lock first. */
 void gui_project_enable_recovery(const char *slot_path) {
+    recovery_lock_release(); /* drop any prior lock so a re-enable (or disable) is clean */
     (void)snprintf(s_recovery_path, sizeof s_recovery_path, "%s", slot_path ? slot_path : "");
+    if (s_recovery_path[0] == '\0') {
+        return; /* disabled */
+    }
+    s_recovery_locked = recovery_lock_acquire(s_recovery_path);
+    if (!s_recovery_locked) {
+        s_recovery_busy_notice = true; /* another instance owns the slot -> crash recovery off this window */
+    }
 }
 
 /* Drains the one-shot "recovered unsaved changes" notice (true once after a crash-recovery adopt at
@@ -671,6 +797,19 @@ bool gui_project_take_recovery_notice(char *out, size_t cap) {
     return true;
 }
 
+/* Drains the one-shot "another instance is running -> crash recovery is off for this window" notice
+ * (fix [1]). Returns true once when a 2nd instance could not acquire the slot lock. */
+bool gui_project_take_recovery_busy_notice(char *out, size_t cap) {
+    if (!s_recovery_busy_notice) {
+        return false;
+    }
+    if (out && cap) {
+        (void)snprintf(out, cap, "Another ntpacker window is open -- crash recovery is off for this one.");
+    }
+    s_recovery_busy_notice = false;
+    return true;
+}
+
 #ifdef NTPACKER_GUI_SELFTEST
 /* Dev seam (selftest only): attach a FRESH in-memory recovery journal to the CURRENT model and return
  * its io handle (BORROWED -- the model owns the real io) so the fault suite can arm a deterministic
@@ -681,19 +820,61 @@ tp_journal_io gui_project__test_attach_memory_journal(void) {
     if (!io.ctx) {
         return io; /* OOM -> NULL-ctx io */
     }
-    tp_journal *j = tp_journal_create(io, recovery_key()); /* TAKES OWNERSHIP of io */
-    tp_journal_io none;
-    memset(&none, 0, sizeof none);
-    if (!j) {
-        return none; /* create destroyed io on OOM */
-    }
     tp_error err = {0};
-    if (tp_model_attach_journal(s_model, j, &err) != TP_STATUS_OK) {
-        tp_journal_destroy(j); /* attach failed -> we still own j (and its io) */
-        return none;
+    if (attach_journal_io(s_model, io, &err) != TP_STATUS_OK) { /* fix [4]: the shared ownership dance */
+        tp_journal_io none;
+        memset(&none, 0, sizeof none);
+        return none; /* io/j already destroyed by attach_journal_io */
     }
     return io; /* borrowed handle: arming faults via io.ctx drives the model's owned journal */
 }
+
+/* Dev seam (selftest only, fix [1] regression): hold a FOREIGN single-instance lock on `slot` from a
+ * SEPARATE handle, simulating another live editor, so a following gui_project_enable_recovery(slot)
+ * sees the slot busy and runs journal-less. Returns true if the foreign lock was taken. */
+#ifdef _WIN32
+static void *s_test_foreign_lock = NULL;
+#else
+static int s_test_foreign_lock = -1;
+#endif
+bool gui_project__test_hold_foreign_lock(const char *slot) {
+    char lockpath[GUI_RECOVERY_PATH_MAX + 8];
+    (void)snprintf(lockpath, sizeof lockpath, "%s.lock", slot);
+#ifdef _WIN32
+    HANDLE h = CreateFileA(lockpath, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_TEMPORARY, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    s_test_foreign_lock = (void *)h;
+    return true;
+#else
+    int fd = open(lockpath, O_CREAT | O_RDWR, 0644);
+    if (fd < 0 || flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        if (fd >= 0) {
+            (void)close(fd);
+        }
+        return false;
+    }
+    s_test_foreign_lock = fd;
+    return true;
+#endif
+}
+void gui_project__test_release_foreign_lock(void) {
+#ifdef _WIN32
+    if (s_test_foreign_lock != NULL) {
+        (void)CloseHandle((HANDLE)s_test_foreign_lock);
+        s_test_foreign_lock = NULL;
+    }
+#else
+    if (s_test_foreign_lock >= 0) {
+        (void)flock(s_test_foreign_lock, LOCK_UN);
+        (void)close(s_test_foreign_lock);
+        s_test_foreign_lock = -1;
+    }
+#endif
+}
+/* True iff recovery is ACTIVE (slot configured AND this instance owns the lock). */
+bool gui_project__test_recovery_active(void) { return recovery_active(); }
 #endif
 // #endregion
 
@@ -1405,7 +1586,10 @@ int gui_project_redo_depth(void) { return tp_model_redo_depth(s_model); }
  * A buffered gesture is committed FIRST (its own step) so Ctrl+Z reverts the in-flight drag.
  * Dirty is identity-derived, so an undo back to the saved baseline reads clean. */
 bool gui_project_undo(void) {
-    gui_project_flush_pending(); /* flush boundary: the drag becomes one step, then we revert it */
+    if (!gui_project_flush_pending()) {
+        return false; /* fix [3]: the buffered gesture could not commit (journal failed) -- do NOT
+                       * then undo a DIFFERENT (older) step; the op-error is already surfaced. */
+    }
     tp_error e = {0};
     if (tp_model_undo(s_model, &e) != TP_STATUS_OK) {
         return false;
@@ -1418,7 +1602,9 @@ bool gui_project_undo(void) {
 }
 
 bool gui_project_redo(void) {
-    gui_project_flush_pending(); /* a buffered new edit drops the redo branch on commit, as expected */
+    if (!gui_project_flush_pending()) {
+        return false; /* fix [3]: a journal-failed flush must not silently proceed into a redo */
+    }
     tp_error e = {0};
     if (tp_model_redo(s_model, &e) != TP_STATUS_OK) {
         return false;
@@ -1484,7 +1670,20 @@ tp_status gui_project_save(char *err_out, size_t err_cap) {
 }
 
 tp_status gui_project_save_as(const char *path, char *err_out, size_t err_cap) {
-    gui_project_flush_pending(); /* flush boundary: persist the buffered edit, never a stale model */
+    /* fix [3]: the buffered gesture must be DURABLY committed before we persist. If its commit fails
+     * (e.g. a journal append failure -- full disk), the edit is NOT in the model, so writing the file
+     * + mark_saved would produce a file missing the edit AND a false "saved"/clean state (silent data
+     * loss). ABORT: do not save, do not mark_saved; surface the reason. The model stays dirty. */
+    if (!gui_project_flush_pending()) {
+        if (err_out && err_cap) {
+            char m[256] = {0};
+            if (!gui_project_take_op_error(m, sizeof m)) {
+                (void)snprintf(m, sizeof m, "the last edit could not be committed; not saved");
+            }
+            (void)snprintf(err_out, err_cap, "%s", m);
+        }
+        return TP_STATUS_JOURNAL_FAILED;
+    }
     tp_error err = {0};
     /* Promote to final random ids BEFORE writing (§5.5); on OS-RNG failure promote returns
      * RNG_FAILED with every id left nil, so persisting now would write a nil-id file that
