@@ -6,6 +6,7 @@
 #include "tp_core/tp_names.h"
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_scan.h"
+#include "tp_strutil.h" /* shared tp_strdup / tp_path_basename (fix [8]) */
 
 /* Growable desc vector, local to a build; handed off to tp_pack_input on success. */
 typedef struct {
@@ -13,29 +14,6 @@ typedef struct {
     int n;
     int cap;
 } desc_vec;
-
-static char *dup_str(const char *s) {
-    if (!s) {
-        return NULL;
-    }
-    size_t n = strlen(s) + 1U;
-    char *p = (char *)malloc(n);
-    if (p) {
-        memcpy(p, s, n);
-    }
-    return p;
-}
-
-/* Last path component of a '/'- or '\\'-separated path (file-source raw name). */
-static const char *base_name(const char *p) {
-    const char *b = p;
-    for (const char *q = p; *q; q++) {
-        if (*q == '/' || *q == '\\') {
-            b = q + 1;
-        }
-    }
-    return b;
-}
 
 /* Appends one sprite: raw name (ext kept) + decode path, with per-sprite overrides
  * mapped from the atlas by the STRIPPED export key and encoded onto the desc
@@ -53,8 +31,8 @@ static bool desc_add(desc_vec *dv, const tp_project_atlas *a, const char *raw_na
     }
     tp_pack_sprite_desc *d = &dv->v[dv->n];
     memset(d, 0, sizeof *d);
-    d->name = dup_str(raw_name);
-    d->path = dup_str(abs_path);
+    d->name = tp_strdup(raw_name);
+    d->path = tp_strdup(abs_path);
     d->origin_x = TP_PROJECT_ORIGIN_DEFAULT;
     d->origin_y = TP_PROJECT_ORIGIN_DEFAULT;
     if (!d->name || !d->path) {
@@ -154,7 +132,7 @@ tp_status tp_pack_input_build(const tp_project *p, int atlas_index, tp_pack_inpu
                 }
             }
             tp_scan_free(&sc);
-        } else if (!desc_add(&dv, a, base_name(src_path), abs)) {
+        } else if (!desc_add(&dv, a, tp_path_basename(src_path), abs)) {
             oom = true;
         }
     }

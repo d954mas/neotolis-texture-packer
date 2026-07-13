@@ -8,6 +8,7 @@
 #include "tp_core/tp_scan.h"    /* tp_scan_dir / _exists / _is_dir */
 #include "tp_core/tp_srckey.h"  /* tp_srckey_normalize */
 #include "tp_hex.h"             /* tp_hex_encode_lower (shared drift-guard encoder) */
+#include "tp_strutil.h"         /* shared tp_strdup / tp_path_basename / tp_slash_norm (fix [8]) */
 
 /* ------------------------------------------------------------------ */
 /* sprite-id text (sprite_<32hex>): no tp_id_kind entry exists for a   */
@@ -73,40 +74,6 @@ tp_status tp_sprite_id_parse(const char *text, tp_id128 *out_id, tp_error *err) 
 /* build                                                              */
 /* ------------------------------------------------------------------ */
 
-static char *dup_str(const char *s) {
-    if (!s) {
-        return NULL;
-    }
-    size_t n = strlen(s) + 1U;
-    char *p = (char *)malloc(n);
-    if (p) {
-        memcpy(p, s, n);
-    }
-    return p;
-}
-
-/* Last path component of a '/'- or '\\'-separated path (file-source raw name). */
-static const char *base_name(const char *p) {
-    const char *b = p;
-    for (const char *q = p; *q; q++) {
-        if (*q == '/' || *q == '\\') {
-            b = q + 1;
-        }
-    }
-    return b;
-}
-
-/* Tolerant fallback: copy `src` into `out` (capacity `cap`) replacing '\\' with '/'.
- * Used only if tp_srckey_normalize rejects a scanned path, so the sprite still lands
- * in the index rather than vanishing (never aborts). */
-static void slash_norm(const char *src, char *out, size_t cap) {
-    size_t i = 0;
-    for (; src[i] != '\0' && i + 1U < cap; i++) {
-        out[i] = (src[i] == '\\') ? '/' : src[i];
-    }
-    out[i] = '\0';
-}
-
 static bool index_push(tp_sprite_index *idx, tp_id128 source_id, int source_index, const char *raw, const char *abs) {
     if (idx->count == idx->cap) {
         int nc = idx->cap ? idx->cap * 2 : 32;
@@ -119,7 +86,7 @@ static bool index_push(tp_sprite_index *idx, tp_id128 source_id, int source_inde
     }
     char keybuf[TP_SRCKEY_MAX];
     if (tp_srckey_normalize(raw, keybuf, sizeof keybuf, NULL) != TP_STATUS_OK) {
-        slash_norm(raw, keybuf, sizeof keybuf);
+        tp_slash_norm(raw, keybuf, sizeof keybuf);
     }
     char ekey[TP_SRCKEY_MAX];
     tp_sprite_export_key(raw, ekey, sizeof ekey);
@@ -128,10 +95,10 @@ static bool index_push(tp_sprite_index *idx, tp_id128 source_id, int source_inde
     memset(r, 0, sizeof *r);
     r->source_id = source_id;
     r->source_index = source_index;
-    r->source_key = dup_str(keybuf);
-    r->export_key = dup_str(ekey);
-    r->raw_name = dup_str(raw);
-    r->abs_path = dup_str(abs ? abs : "");
+    r->source_key = tp_strdup(keybuf);
+    r->export_key = tp_strdup(ekey);
+    r->raw_name = tp_strdup(raw);
+    r->abs_path = tp_strdup(abs ? abs : "");
     if (!r->source_key || !r->export_key || !r->raw_name || !r->abs_path) {
         free(r->source_key);
         free(r->export_key);
@@ -179,7 +146,7 @@ tp_status tp_sprite_index_build(const struct tp_project *p, int atlas_index, tp_
                 }
             }
             tp_scan_free(&sc);
-        } else if (!index_push(out, src->id, si, base_name(src->path), abs)) {
+        } else if (!index_push(out, src->id, si, tp_path_basename(src->path), abs)) {
             oom = true;
         }
     }

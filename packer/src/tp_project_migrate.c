@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "tp_core/tp_sprite_index.h" /* lazy v3->v4 sprite re-keying uses the resolved index */
+#include "tp_strutil.h"              /* shared tp_strdup (one core definition, fix [8]) */
 
 /* ======================================================================== */
 /* deterministic legacy assigner (promoted from C0-01 tp_c0_legacy)          */
@@ -355,21 +356,6 @@ tp_status tp_project_promote_ids(tp_project *p, const tp_rng *rng, tp_error *err
     return TP_STATUS_OK;
 }
 
-/* Duplicate detection over the FLAT list of structural IDs. Project sizes are
- * small; an O(n^2) sweep is fine and the flat array keeps the logic legible. */
-/* Local strdup (no cross-CRT / POSIX strdup dependency). NULL on OOM or NULL input. */
-static char *mig_strdup(const char *s) {
-    if (!s) {
-        return NULL;
-    }
-    size_t n = strlen(s) + 1U;
-    char *p = (char *)malloc(n);
-    if (p) {
-        memcpy(p, s, n);
-    }
-    return p;
-}
-
 /* F2 ENTRY POINT (groundwork; decision 0009 "Область"). This lazy v3->v4 re-key is
  * currently exercised ONLY by tests, `inspect`, and `validate` -- it has NO production
  * caller yet, so real GUI/CLI projects keep their sprite/frame records in PENDING {name}
@@ -425,7 +411,7 @@ tp_status tp_project_resolve_atlas_sprites(tp_project *p, int atlas_index, const
         if (matches != 1 || !r) {
             continue; /* 0 = soft orphan (keeps applying by name); >1 = ambiguous, never guessed */
         }
-        char *k = mig_strdup(r->source_key);
+        char *k = tp_strdup(r->source_key);
         if (!k) {
             oom = true;
             break;
@@ -449,7 +435,7 @@ tp_status tp_project_resolve_atlas_sprites(tp_project *p, int atlas_index, const
             if (fmatches != 1 || !r) {
                 continue;
             }
-            char *k = mig_strdup(r->source_key);
+            char *k = tp_strdup(r->source_key);
             if (!k) {
                 oom = true;
                 break;

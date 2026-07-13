@@ -21,24 +21,13 @@
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_srckey.h" /* TP_SRCKEY_MAX (v4 sprite key buffer) */
 #include "tp_core/tp_project_migrate.h" /* legacy synthesis + duplicate validation on load */
+#include "tp_strutil.h"                 /* shared tp_strdup (one core definition, fix [8]) */
 
 #define TP_PATH_MAX 4096
 
 /* ======================================================================== */
-/* small owned-string + dynamic-array primitives                            */
+/* small dynamic-array primitives (owned-string helpers live in tp_strutil.h) */
 /* ======================================================================== */
-
-static char *tp_strdup(const char *s) {
-    if (!s) {
-        return NULL;
-    }
-    const size_t len = strlen(s) + 1U;
-    char *copy = (char *)malloc(len);
-    if (copy) {
-        memcpy(copy, s, len);
-    }
-    return copy;
-}
 
 /* Grows *arr to hold at least `needed` elements of `elem` bytes (doubling).
  * New tail slots are uninitialised -- the caller inits the appended element. */
