@@ -346,9 +346,11 @@ static int fail_usage(tp_project *p, bool json, bool quiet, const char *id, cons
 static int commit(tp_project *p, const char *path, const char *verb, int count, const char *human, bool json,
                   bool quiet) {
     tp_error err = {0};
-    /* Writable session: assign final random IDs to any freshly created structural
-     * entity before persisting (master spec §5.5). Idempotent -- already-assigned
-     * IDs are preserved, so re-saving is byte-stable. */
+    /* Writable session: assign final random IDs before persisting (master spec §5.5)
+     * to any structural entity that is nil (freshly created) OR loader-synthesized for
+     * a migrated legacy file -- so the first save of a migrated project persists fresh
+     * random IDs, not the stable synthetic ones. Real loaded IDs (v3/v4) are preserved,
+     * and after this first promote re-saving is byte-stable (idempotent). */
     tp_rng rng = tp_rng_os();
     tp_status pst = tp_project_promote_ids(p, &rng, &err);
     if (pst != TP_STATUS_OK) {

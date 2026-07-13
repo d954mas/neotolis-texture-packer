@@ -345,6 +345,7 @@ static tp_status atlas_push_source(tp_project_atlas *a, const char *path, tp_sou
     }
     tp_project_source *s = &a->sources[a->source_count];
     s->id = id;
+    s->id_synthetic = false; /* real/loaded or nil id; legacy synthesis sets this true when it fills a gap */
     s->kind = kind;
     s->path = copy;
     a->source_count++;

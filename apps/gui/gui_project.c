@@ -89,13 +89,15 @@ static void serialize_current(char **buf, size_t *len) {
     }
 }
 
-/* Assign a random persistent ID to any structural entity still lacking one (a
- * freshly created project/atlas/anim/target). Idempotent: a loaded project already
- * has non-nil IDs so this is a no-op, and it never re-changes an existing ID. Called
- * before every snapshot so undo/redo bytes -- and the saved file -- always carry
- * stable, non-nil structural IDs (a writable session gets its final IDs before the
- * first mutation, master spec §5.5). Returns the promote status (RNG failure ->
- * TP_STATUS_RNG_FAILED, ids left untouched/nil); `err` (may be NULL) carries prose. */
+/* Assign a random persistent ID to any structural entity that lacks one -- nil (a
+ * freshly created project/atlas/anim/target) OR loader-synthesized for a migrated
+ * legacy file (§5.5: the first writable save persists fresh random IDs, not the
+ * stable synthetic ones). A real loaded ID (v3/v4) is preserved. Idempotent after the
+ * first call: once no ID is nil or synthetic this is a no-op and never re-changes an
+ * ID. Called before every snapshot so undo/redo bytes -- and the saved file -- always
+ * carry stable, non-nil structural IDs (a writable session gets its final IDs before
+ * the first mutation). Returns the promote status (RNG failure -> TP_STATUS_RNG_FAILED,
+ * ids left untouched); `err` (may be NULL) carries prose. */
 static tp_status ensure_ids(tp_error *err) {
     if (!s_proj) {
         return TP_STATUS_OK;

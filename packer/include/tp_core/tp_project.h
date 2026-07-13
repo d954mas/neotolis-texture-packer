@@ -122,7 +122,9 @@ typedef struct tp_project_frame {
  * rename/reorder/save/reload); `name` is the logical/display name and the human
  * reference key. The v1 string `id` migrated into `name`. */
 typedef struct tp_project_anim {
-    tp_id128 id;   /* persistent structural ID (schema v2); nil until assigned/promoted */
+    tp_id128 id;       /* persistent structural ID (schema v2); nil until assigned/promoted */
+    bool id_synthetic; /* TRANSIENT (never serialized): the loader synthesized this id for a
+                        * legacy gap -- the first writable promote re-randomizes it (§5.5, decision 0007) */
     char *name;    /* logical/display name; the name-keyed reference (was v1 `id`) */
     tp_project_frame *frames;
     int frame_count;
@@ -140,6 +142,8 @@ typedef struct tp_project_anim {
  * defaults true (sparse: only written when false). */
 typedef struct tp_project_target {
     tp_id128 id;       /* persistent structural ID (schema v2); nil until assigned/promoted */
+    bool id_synthetic; /* TRANSIENT (never serialized): the loader synthesized this id for a
+                        * legacy gap -- the first writable promote re-randomizes it (§5.5, decision 0007) */
     char *exporter_id; /* exporter kind, e.g. "json-neotolis", "defold" (NOT the structural id) */
     char *out_path;    /* project-relative output path/prefix */
     bool enabled;
@@ -167,6 +171,9 @@ typedef enum tp_source_kind {
  * be consulted (a missing source, for F1-03 sprite-id derivation). */
 typedef struct tp_project_source {
     tp_id128 id;         /* persistent structural ID (schema v3); nil until assigned/promoted */
+    bool id_synthetic;   /* TRANSIENT (never serialized): the loader synthesized this id for a legacy
+                          * gap (a v2 file's bare-string source) -- the first writable promote
+                          * re-randomizes it, while a real v3/v4 loaded source id is left untouched */
     tp_source_kind kind; /* folder (default) / file */
     char *path;          /* folder/file path, project-relative, '/'-normalized */
 } tp_project_source;
@@ -175,7 +182,9 @@ typedef struct tp_project_source {
  * sparse per-sprite overrides + animations + export targets. All arrays are
  * malloc-owned dynamic vectors; use the helpers below to mutate them. */
 typedef struct tp_project_atlas {
-    tp_id128 id; /* persistent structural ID (schema v2); nil until assigned/promoted */
+    tp_id128 id;       /* persistent structural ID (schema v2); nil until assigned/promoted */
+    bool id_synthetic; /* TRANSIENT (never serialized): the loader synthesized this id for a
+                        * legacy gap -- the first writable promote re-randomizes it (§5.5, decision 0007) */
     char *name;
 
     /* Packing knobs -- mirror tp_pack_settings; seeded by tp_pack_settings

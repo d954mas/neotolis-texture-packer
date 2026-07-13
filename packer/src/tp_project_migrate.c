@@ -228,9 +228,11 @@ static tp_status assign_legacy_scoped(tp_project *p, bool sources_only, const ch
     }
     tp_legacy_entry *entries = (tp_legacy_entry *)calloc(n, sizeof *entries);
     tp_id128 **slots = (tp_id128 **)calloc(n, sizeof *slots); /* where each synthetic ID lands */
-    if (!entries || !slots) {
+    bool **synth = (bool **)calloc(n, sizeof *synth);         /* the id_synthetic flag beside each slot */
+    if (!entries || !slots || !synth) {
         free(entries);
         free(slots);
+        free(synth);
         return tp_error_set(err, TP_STATUS_OOM, "%s: out of memory", who);
     }
 
@@ -242,6 +244,7 @@ static tp_status assign_legacy_scoped(tp_project *p, bool sources_only, const ch
             entries[k].kind = TP_ID_KIND_ATLAS;
             entries[k].tuple = tuple_fmt("%d", ai);
             slots[k] = &a->id;
+            synth[k] = &a->id_synthetic;
             oom = (entries[k].tuple == NULL);
             k++;
         }
@@ -250,6 +253,7 @@ static tp_status assign_legacy_scoped(tp_project *p, bool sources_only, const ch
                 entries[k].kind = TP_ID_KIND_SOURCE;
                 entries[k].tuple = tuple_fmt("%d|%s", ai, a->sources[i].path ? a->sources[i].path : "");
                 slots[k] = &a->sources[i].id;
+                synth[k] = &a->sources[i].id_synthetic;
                 oom = (entries[k].tuple == NULL);
                 k++;
             }
@@ -262,6 +266,7 @@ static tp_status assign_legacy_scoped(tp_project *p, bool sources_only, const ch
                 entries[k].kind = TP_ID_KIND_ANIM;
                 entries[k].tuple = tuple_fmt("%d|%s", ai, a->animations[i].name ? a->animations[i].name : "");
                 slots[k] = &a->animations[i].id;
+                synth[k] = &a->animations[i].id_synthetic;
                 oom = (entries[k].tuple == NULL);
                 k++;
             }
@@ -272,6 +277,7 @@ static tp_status assign_legacy_scoped(tp_project *p, bool sources_only, const ch
                 entries[k].tuple = tuple_fmt("%d|%s|%s", ai, a->targets[i].exporter_id ? a->targets[i].exporter_id : "",
                                              a->targets[i].out_path ? a->targets[i].out_path : "");
                 slots[k] = &a->targets[i].id;
+                synth[k] = &a->targets[i].id_synthetic;
                 oom = (entries[k].tuple == NULL);
                 k++;
             }
@@ -283,6 +289,7 @@ static tp_status assign_legacy_scoped(tp_project *p, bool sources_only, const ch
     if (st == TP_STATUS_OK) {
         for (size_t i = 0; i < n; i++) {
             *slots[i] = entries[i].id; /* commit synthetic IDs into the model */
+            *synth[i] = true;          /* mark synthesized: the first writable promote re-randomizes it (§5.5) */
         }
     }
     for (size_t i = 0; i < n; i++) {
@@ -290,6 +297,7 @@ static tp_status assign_legacy_scoped(tp_project *p, bool sources_only, const ch
     }
     free(entries);
     free(slots);
+    free(synth);
     return st;
 }
 
@@ -307,13 +315,49 @@ tp_status tp_project_assign_legacy_source_ids(tp_project *p, tp_error *err) {
     return assign_legacy_scoped(p, true, "tp_project_assign_legacy_source_ids", err);
 }
 
+/* A structural entity gets a fresh random id at writable promote when its id is NIL
+ * (a freshly-created entity) OR was SYNTHESIZED by the loader for a legacy gap. §5.5:
+ * a migrated project's first writable save persists fresh RANDOM ids, not the stable
+ * synthetic ones. A REAL loaded id (v3/v4, or a v2 file's atlas/anim/target id) has
+ * id_synthetic == false and is left UNTOUCHED -- per-entity granularity is why a v2
+ * file re-randomizes only its synthesized SOURCE ids while keeping its real ids. */
+static bool id_needs_promote(tp_id128 id, bool synthetic) { return tp_id128_is_nil(id) || synthetic; }
+
+/* Count the entities a writable promote must (re)assign, in the SAME canonical order
+ * count_nil_ids walks (atlas, its sources, its anims, its targets). */
+static size_t count_promote_ids(const tp_project *p) {
+    size_t n = 0;
+    for (int ai = 0; ai < p->atlas_count; ai++) {
+        const tp_project_atlas *a = &p->atlases[ai];
+        if (id_needs_promote(a->id, a->id_synthetic)) {
+            n++;
+        }
+        for (int i = 0; i < a->source_count; i++) {
+            if (id_needs_promote(a->sources[i].id, a->sources[i].id_synthetic)) {
+                n++;
+            }
+        }
+        for (int i = 0; i < a->animation_count; i++) {
+            if (id_needs_promote(a->animations[i].id, a->animations[i].id_synthetic)) {
+                n++;
+            }
+        }
+        for (int i = 0; i < a->target_count; i++) {
+            if (id_needs_promote(a->targets[i].id, a->targets[i].id_synthetic)) {
+                n++;
+            }
+        }
+    }
+    return n;
+}
+
 tp_status tp_project_promote_ids(tp_project *p, const tp_rng *rng, tp_error *err) {
     if (!p) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_project_promote_ids: NULL project");
     }
-    size_t n = count_nil_ids(p, false);
+    size_t n = count_promote_ids(p);
     if (n == 0) {
-        return TP_STATUS_OK; /* idempotent: nothing to promote -> never re-change an ID */
+        return TP_STATUS_OK; /* idempotent: nothing nil or synthetic remains -> never re-change an ID */
     }
     /* Stage all random IDs FIRST so an RNG fault leaves the model untouched
      * (atomicity: a save failure / partial promotion never remaps some IDs). */
@@ -328,27 +372,31 @@ tp_status tp_project_promote_ids(tp_project *p, const tp_rng *rng, tp_error *err
             return st; /* every model ID unchanged */
         }
     }
-    /* Commit in the same canonical order count_nil_ids walked (atlas, sources,
-     * anims, targets). */
+    /* Commit in the same canonical order count_promote_ids walked (atlas, sources,
+     * anims, targets). Clearing id_synthetic makes a second promote a no-op. */
     size_t k = 0;
     for (int ai = 0; ai < p->atlas_count; ai++) {
         tp_project_atlas *a = &p->atlases[ai];
-        if (tp_id128_is_nil(a->id)) {
+        if (id_needs_promote(a->id, a->id_synthetic)) {
             a->id = staged[k++];
+            a->id_synthetic = false;
         }
         for (int i = 0; i < a->source_count; i++) {
-            if (tp_id128_is_nil(a->sources[i].id)) {
+            if (id_needs_promote(a->sources[i].id, a->sources[i].id_synthetic)) {
                 a->sources[i].id = staged[k++];
+                a->sources[i].id_synthetic = false;
             }
         }
         for (int i = 0; i < a->animation_count; i++) {
-            if (tp_id128_is_nil(a->animations[i].id)) {
+            if (id_needs_promote(a->animations[i].id, a->animations[i].id_synthetic)) {
                 a->animations[i].id = staged[k++];
+                a->animations[i].id_synthetic = false;
             }
         }
         for (int i = 0; i < a->target_count; i++) {
-            if (tp_id128_is_nil(a->targets[i].id)) {
+            if (id_needs_promote(a->targets[i].id, a->targets[i].id_synthetic)) {
                 a->targets[i].id = staged[k++];
+                a->targets[i].id_synthetic = false;
             }
         }
     }

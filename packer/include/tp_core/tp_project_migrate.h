@@ -14,8 +14,12 @@
  *   2. Writable PROMOTION: a writable session assigns FINAL random IDs before the
  *      first mutation and never re-changes them (master spec §5.5: "the next
  *      successful save persists normal random IDs"). tp_project_promote_ids fills
- *      any nil structural ID via the injected RNG; it is idempotent (a second
- *      call is a no-op) and atomic (an RNG fault leaves every ID unchanged).
+ *      every NIL id AND re-randomizes every loader-SYNTHESIZED id (id_synthetic) via
+ *      the injected RNG -- so a migrated legacy project persists fresh random ids on
+ *      its first writable save, while a real loaded id (v3/v4, or a v2 file's
+ *      atlas/anim/target id) is preserved. Idempotent (once nothing is nil or
+ *      synthetic, a second call is a no-op) and atomic (an RNG fault leaves every ID
+ *      unchanged).
  *
  * The low-level deterministic assigner (tp_legacy_*) is exposed for reuse and for
  * the collision-fallback tests; project code calls the tp_project_* wrappers.
@@ -77,11 +81,16 @@ tp_status tp_project_assign_legacy_ids(tp_project *p, tp_error *err);
  * (decision 0008). Source tuple = "<atlasIdx>|<path>". Idempotent. */
 tp_status tp_project_assign_legacy_source_ids(tp_project *p, tp_error *err);
 
-/* Writable promotion: fill every NIL structural ID with a fresh RANDOM ID via
- * `rng`, then freeze. ATOMIC -- an RNG fault (TP_STATUS_RNG_FAILED) leaves every
- * ID unchanged. IDEMPOTENT -- once no ID is nil this is a no-op, so a writable
- * session that promotes before its first mutation never re-changes an ID.
- * Non-nil IDs (a loaded v2 file, or legacy-synthesized IDs) are preserved. */
+/* Writable promotion: give a fresh RANDOM ID (via `rng`) to every structural entity
+ * whose id is NIL (freshly created) OR was SYNTHESIZED by the loader for a legacy gap
+ * (id_synthetic), then clear the flag and freeze. So a migrated legacy project's first
+ * writable save persists fresh random ids, not the loader's stable synthetic ones
+ * (master spec §5.5). A REAL loaded id -- a v3/v4 id, or a v2 file's atlas/anim/target
+ * id -- has id_synthetic == false and is PRESERVED (per-entity granularity: a v2 file
+ * re-randomizes only its synthesized source ids). ATOMIC -- an RNG fault
+ * (TP_STATUS_RNG_FAILED) leaves every ID and flag unchanged. IDEMPOTENT -- once no id
+ * is nil or synthetic this is a no-op, so a writable session that promotes before its
+ * first mutation never re-changes an ID. */
 tp_status tp_project_promote_ids(tp_project *p, const tp_rng *rng, tp_error *err);
 
 /* Validate structural-ID integrity: no two atlas/animation/target entities may
