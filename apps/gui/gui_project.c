@@ -187,22 +187,47 @@ static void seed_default_target(tp_project *p, int atlas_index) {
     (void)tp_project_atlas_seed_default_target(p, atlas_index);
 }
 
-/* Wrap `p` (TAKES OWNERSHIP) in a fresh journal-less model, replacing any current one,
- * and refresh the s_proj view. On OOM the old model is freed, `p` is freed (never
- * leaked), and s_proj/s_model become NULL. */
-static void wrap_model(tp_project *p) {
-    tp_model_destroy(s_model); /* frees the previous model + its owned project */
-    s_model = NULL;
-    s_proj = NULL;
+/* Drop a model's idempotency retention store (F2-05b-i F6). Idempotency is MOOT for the
+ * single-threaded interactive GUI (unique monotonic ids, no retries), and the long-lived
+ * journal-less model would otherwise accumulate one 33-byte id per commit FOREVER (never
+ * evicted) with an O(n) contains-scan each commit -> unbounded memory + O(n^2) CPU over a
+ * long session (esp. one-commit-per-drag-frame). The commit path already NULL-guards the
+ * idstore (`if (m->idstore && m->idstore->record)`), so a NULL idstore simply skips id
+ * recording. Mirrors tp_model_destroy's idstore cleanup exactly. */
+static void drop_idstore(tp_model *m) {
+    if (!m || !m->idstore) {
+        return;
+    }
+    if (m->owns_idstore && m->idstore->destroy) {
+        m->idstore->destroy(m->idstore->ctx);
+    }
+    free(m->idstore);
+    m->idstore = NULL;
+    m->owns_idstore = false;
+}
+
+/* Wrap `p` (TAKES OWNERSHIP on success) in a fresh journal-less, idstore-less model and
+ * make it the live model, refreshing the s_proj view. COMMIT-THEN-REPLACE (F2-05b-i F3,
+ * mirrors the F1-00 Save-As rollback): the replacement is wrapped into a TEMP first and the
+ * OLD model is destroyed only AFTER the wrap succeeds -- so an OOM in the wrap can never
+ * lose the open project or leave s_proj NULL for the next frame to deref. Returns true when
+ * `p` is installed; on failure `p` is freed (never leaked) and the CURRENT model+project are
+ * kept intact. A NULL `p` (an upstream create/load OOM) leaves the current model untouched
+ * and returns false. */
+static bool wrap_model(tp_project *p) {
     if (!p) {
-        return;
+        return false; /* nothing to install -> keep the current model (an upstream OOM must not clear it) */
     }
-    s_model = tp_model_wrap(p);
-    if (!s_model) {
+    tp_model *nm = tp_model_wrap(p);
+    if (!nm) {
         tp_project_destroy(p); /* wrap did not take ownership on failure */
-        return;
+        return false;          /* keep the current model+project intact (F3) */
     }
+    drop_idstore(nm);          /* GUI carries NO idstore (F6) */
+    tp_model_destroy(s_model); /* success: only now free the previous model + its owned project */
+    s_model = nm;
     s_proj = tp_model_project(s_model);
+    return true;
 }
 
 /* Generates a fresh non-nil structural id via the OS RNG; false on an RNG fault. */
@@ -269,7 +294,7 @@ void gui_project_init(void) {
     }
     tp_project *p = tp_project_create();
     seed_default_target(p, 0); /* clean baseline includes it (I1) -- lifecycle, direct */
-    wrap_model(p);
+    (void)wrap_model(p);       /* first model: on OOM s_model/s_proj stay NULL (serialize is NULL-safe) */
     set_path("");
     s_project_dirty = false;
     s_preview_stale = false;
@@ -648,17 +673,22 @@ static tp_project_anim *anim_at(int atlas_index, int anim_index) {
     return &a->animations[anim_index];
 }
 
-bool gui_project_anim_id_exists(int atlas_index, const char *id) {
-    tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
-    if (!a || !id) {
-        return false;
+/* The atlas's animation named `name` (exact), or NULL. One home for the by-name scan the
+ * exists-check / remove / rename-clash paths each open-coded (F2-05b-i F8). */
+static tp_project_anim *find_anim_by_name(tp_project_atlas *a, const char *name) {
+    if (!a || !name) {
+        return NULL;
     }
     for (int i = 0; i < a->animation_count; i++) {
-        if (a->animations[i].name && strcmp(a->animations[i].name, id) == 0) {
-            return true;
+        if (a->animations[i].name && strcmp(a->animations[i].name, name) == 0) {
+            return &a->animations[i];
         }
     }
-    return false;
+    return NULL;
+}
+
+bool gui_project_anim_id_exists(int atlas_index, const char *id) {
+    return find_anim_by_name(tp_project_get_atlas(s_proj, atlas_index), id) != NULL;
 }
 
 int gui_project_create_animation(int atlas_index, const char *base, const char *const *frames, int frame_count) {
@@ -739,13 +769,7 @@ void gui_project_remove_animation(int atlas_index, const char *id) {
     if (!a || !id) {
         return;
     }
-    tp_project_anim *an = NULL;
-    for (int i = 0; i < a->animation_count; i++) {
-        if (a->animations[i].name && strcmp(a->animations[i].name, id) == 0) {
-            an = &a->animations[i];
-            break;
-        }
-    }
+    tp_project_anim *an = find_anim_by_name(a, id);
     if (!an) {
         return;
     }
@@ -768,10 +792,9 @@ bool gui_project_set_anim_id(int atlas_index, int anim_index, const char *new_id
         return true; /* no-op */
     }
     tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
-    for (int i = 0; a && i < a->animation_count; i++) {
-        if (i != anim_index && a->animations[i].name && strcmp(a->animations[i].name, new_id) == 0) {
-            return false; /* CLIENT policy: clashes with another animation (core has no anim-rename) */
-        }
+    tp_project_anim *clash = find_anim_by_name(a, new_id);
+    if (clash && clash != an) {
+        return false; /* CLIENT policy: clashes with ANOTHER animation (core has no anim-rename) */
     }
     /* The F2-01 operation catalog has NO animation-rename op (the CLI has no anim rename
      * verb either -- animations are name-keyed; the structural id is stable). This is the
@@ -964,9 +987,8 @@ static bool restore_from_buffer(char *buf, size_t len) {
         return false;
     }
     np->project_dir = (s_proj && s_proj->project_dir) ? dupstr(s_proj->project_dir) : NULL;
-    wrap_model(np); /* frees the old model+project, wraps np, refreshes s_proj */
-    if (!s_proj) {
-        return false; /* OOM re-wrapping: np already freed by wrap_model */
+    if (!wrap_model(np)) {
+        return false; /* OOM re-wrapping: np freed + the CURRENT model kept intact (F3); undo aborts cleanly */
     }
 
     free(s_last_buf);
@@ -1007,15 +1029,14 @@ bool gui_project_redo(void) {
 // #endregion
 
 // #region file operations
-void gui_project_new(void) {
+bool gui_project_new(void) {
     tp_project *fresh = tp_project_create();
     if (!fresh) {
-        return;
+        return false;
     }
     seed_default_target(fresh, 0); /* fresh GUI project exports something (I1) -- lifecycle, direct */
-    wrap_model(fresh);
-    if (!s_proj) {
-        return; /* OOM: wrap_model freed fresh; keep the (now-destroyed) prior model NULL */
+    if (!wrap_model(fresh)) {
+        return false; /* OOM: wrap_model freed fresh + kept the CURRENT project intact (F3) -- no data loss */
     }
     set_path("");
     s_project_dirty = false;
@@ -1024,6 +1045,7 @@ void gui_project_new(void) {
     gui_history_reset();
     set_last_from_current();
     set_saved_baseline();
+    return true;
 }
 
 tp_status gui_project_open(const char *path, char *err_out, size_t err_cap) {
@@ -1036,8 +1058,7 @@ tp_status gui_project_open(const char *path, char *err_out, size_t err_cap) {
         }
         return st;
     }
-    wrap_model(loaded);
-    if (!s_proj) {
+    if (!wrap_model(loaded)) {
         if (err_out && err_cap) {
             (void)snprintf(err_out, err_cap, "out of memory wrapping the loaded project");
         }

@@ -170,3 +170,119 @@ proves each detector fires on a seeded violation and does not false-positive on 
 CLI tests) stays excluded, as it already is for R1–R3. `tp_project_atlas_seed_default_target`,
 `tp_project_promote_ids`, and the annotated animation-rename are the sanctioned lifecycle/gap
 exceptions.
+
+## F2-05b-i FIX pass (adversarial-review corrections, 2026-07-13)
+
+An 18-agent adversarial review of the cutover (battery-green) found 9 defects — 4 real
+correctness regressions. The "approach B structurally closes the UAF class" claim above was
+INCOMPLETE: one edit site still committed mid-declare. All are fixed on top of the cutover
+commit; no gate regressed.
+
+### F1 — the LAST synchronous commit (a real UAF on "Add frames")
+
+The migration deferred every declare-fn edit EXCEPT `add_selection_frames_to_anim` →
+`gui_project_anim_add_frames`, which still committed SYNCHRONOUSLY from inside
+`declare_animation_editor`. That declare invocation holds `an = &a->animations[s_sel_anim]` and
+keeps dereferencing it AFTER the call (`an->frame_count`, the frame-row loop `an->frames[fi].name`)
+— the commit clone-swaps + frees the project under `an`, so a plain "Add frames" click read freed
+memory. Hazard-1 table row 3 was wrong: the anim editor was NOT enqueue-only.
+
+**Fix:** route "Add frames" through the SAME deferred queue as every other panel edit. A new
+`GEDIT_ANIM_ADD_FRAMES` enqueuer (`gui_edit_anim_add_frames`) captures the atlas index + anim
+selector + a HEAP-COPIED array of the selected sprite keys; `apply_pending` drains it next frame
+(no live pointer held) via `gui_project_anim_add_frames`. `add_selection_frames_to_anim` now builds
+the sorted selection (read-only) and enqueues instead of committing. Re-audited: a project-wide grep
+of the `gui_view_*.c` declare/render fns confirms this was the ONLY remaining synchronous commit —
+every other mutation already routes through `gui_edit_*` or an `s_pending_*` flag. **Proof:** a new
+`gui_selftest.c` case enqueues, asserts the frame_count is still 0 BEFORE the drain (a synchronous
+commit would make it 2 → the assert fails), clears the live multi-selection, then drains and asserts
+the 2 copied frames landed natural-sorted — so the UAF cannot regress silently.
+
+### F2 — a target toggle truncated a long out_path to 255
+
+`gui_edit_target` copied `t->out_path` into a fixed 256-byte queue slot (`e.s1[256]`, `snprintf`),
+but `out_path` is stored as a heap `char*` up to `TP_PATH_MAX` (4096) and is reachable from a
+loaded/CLI-authored project or the Browse dialog. A mere enable/disable / exporter-change click
+silently truncated + persisted a corrupted export path. **Fix:** the queued `out_path` is now a
+HEAP `edit_strdup` copy (freed after the drain via `edit_dispose`), carrying the full string with no
+cap. **Audit of every `gui_edit_*` string arg:** `exporter_id` comes from the exporter registry
+(short constant — safe); the sprite-name slot matches the GUI-wide 256-byte key assumption used
+throughout the panels (`char[224]`/`char[256]`) and the setter re-fetches by key (a truncated key
+no-ops, never corrupts) — only `out_path` could exceed its slot, and only it was heap-lifted.
+**Proof:** a new selftest builds a 464-char out_path, toggles `enabled` through the deferred
+`gui_edit_target`, drains, and asserts the stored path is byte-identical.
+
+### F3 — `wrap_model` freed the open project BEFORE wrapping the replacement
+
+`wrap_model` called `tp_model_destroy(s_model)` (freeing the current model+project) and nulled
+`s_proj` BEFORE `tp_model_wrap(p)`, so an OOM in the wrap left `s_proj`/`s_model` NULL — the open
+project lost and the next frame NULL-derefs (`declare_atlas_list` reads `proj->atlas_count`
+unguarded). **Fix:** COMMIT-THEN-REPLACE (mirrors the F1-00 Save-As rollback) — wrap the replacement
+into a TEMP first; only on success destroy the old model and swap it in; on wrap failure free `p`
+and keep the CURRENT model+project intact. `wrap_model` now returns `bool`; `restore_from_buffer`
+(undo/redo), `gui_project_new` (now returns `bool`), and `gui_project_open` check that return
+instead of `!s_proj`. New/open surface a structured OOM error ("current project kept"); undo/redo
+abort cleanly with the project intact. Covers open, new, and undo/redo restore.
+
+### F4 — GUI max_size presets 8192/16384 silently failed (op validator capped at 4096)
+
+The 'Max page size' dropdown offers 8192/16384 (with a "may not load on mobile" note treating them
+as valid), but `tp_operation_validate` capped `max_size` at `TP_OP_MAX_PAGE_DIM` = a HARDCODED
+4096, so those presets snapped back. **Investigation:** the root CMake
+`add_compile_definitions(NT_BUILD_MAX_TEXTURE_SIZE=16384)` (a deliberate "universal packer" lift of
+the engine's mobile-safe 4096 default) makes `TP_PACK_MAX_PAGE_DIM == NT_BUILD_MAX_TEXTURE_SIZE ==
+16384` — the packer, the `.ntpack` format (source dims u16 ≤ 65535; UVs normalized u16), and the
+engine builder ALL accept 16384 in this build. The op validator's hardcoded 4096 was the STALE
+outlier (its own comment even claims to "mirror … the engine `NT_BUILD_MAX_TEXTURE_SIZE`"); 4096 is
+only the engine-*load* mobile caveat the GUI already warns about, not a packer limit. **Fix:**
+`TP_OP_MAX_PAGE_DIM` now DERIVES from `NT_BUILD_MAX_TEXTURE_SIZE` (`#ifndef` fallback 4096), so it
+can never drift from the packer again. `cli_validate.c`'s `CLI_MAX_PAGE_DIM` (same stale hardcode,
+same "== engine constant" claim) is aligned identically.
+
+**CLI implication (F2-05a routed `set max_size` through the op validator):** the CLI `set` now
+accepts 4097..16384 again — this RESTORES pre-cutover CLI behavior (the pre-cutover `set` wrote the
+field directly with no 4096 cap and the packer accepted ≤16384), while `max_size=99999` stays
+rejected (> 16384). **No golden changes** (goldens use ≤2048; no golden pins the range text). One
+unit test that had encoded the bug (`test_operation.c::test_validate_knob_bounds_match_cli` asserted
+`max_size=8000` rejected) was corrected to the reconciled behavior (8192 accepted, 99999 rejected);
+`cli_mutate_family`'s `max_size=99999 → exit 2` is unaffected.
+
+### F5 — a queue-OOM silently dropped an edit
+
+On queue-realloc failure `edit_push` dropped the just-made edit with no signal, though the widget
+already returned "committed" → the value visibly reverts next frame with no explanation. **Fix:**
+`edit_push` returns `bool` and, on OOM, frees the edit's heap payload (no leak) and raises a
+status-bar error (the same soft-error channel a core reject uses) so the drop is visible.
+
+### F6 — unbounded idstore growth + O(n²) per-commit scan → REMOVED
+
+The long-lived journal-less model stamped a unique txn id into `m->idstore` every commit (grows via
+realloc, never evicted, O(n) `contains` scan per commit) → climbing memory + O(n²) CPU over a long
+session (esp. one-commit-per-drag-frame). Idempotency is MOOT for the single-threaded interactive
+GUI (unique monotonic ids, no retries — `contains` always missed). **Fix:** the GUI model now
+carries NO idstore. `wrap_model` calls a new `drop_idstore` (mirrors `tp_model_destroy`'s idstore
+cleanup) immediately after `tp_model_wrap`; the commit path already NULL-guards
+`if (m->idstore && m->idstore->record)` (and the `contains` pre-check), so a NULL idstore simply
+skips id recording. Confirmed nothing on the GUI path needs it: the GUI never attaches a journal
+(the migration-on-attach `tp_txn_idstore_mem_view` is the only other reader and is unreachable). This
+supersedes the "idempotency retention grows one 33-byte id per commit" line above — it now grows by
+zero. Saved bytes are unaffected (the idstore is runtime-only, never serialized).
+
+### F7 / F8 — cleanups
+
+- **F7:** the three `GEDIT_ATLAS_INT/BOOL/FLOAT` kinds/drain-cases collapsed to one `GEDIT_ATLAS`
+  (field in `i0`, ivalue in `i1`, fvalue in `f0`; bool == ivalue 0/1) — the tri-branch drift hazard
+  is gone; the three typed `gui_edit_atlas_*` enqueuers stay for call-site clarity.
+- **F8:** the three copies of the by-name animation scan (`anim_id_exists`, `remove_animation`,
+  `set_anim_id`'s rename-clash) now share one `find_anim_by_name(atlas, name)` helper.
+
+### DEFERRED to b-ii — transaction-level drag coalescing (documented carry)
+
+A slider drag commits ONE journal-less transaction PER FRAME. Undo coalesces these to a single step
+(Hazard 2, unchanged), but the TRANSACTIONS themselves do not coalesce. For b-i this is fully
+acceptable: F6 removed the only per-commit cost that scaled (the idstore), and each commit's project
+clone is bounded (the arena is a later perf pass). **Transaction-level coalescing — debouncing a
+drag to ONE commit at drag-end — is deferred to b-ii, where the LIVE journal makes it NECESSARY**
+(else the journal floods with one full-snapshot record per drag frame). b-ii owns this: it is not a
+b-i correctness issue, only a b-ii durability/volume one. The per-edit full-project clone on the
+interactive path (review finding, PLAUSIBLE) is likewise a b-ii arena-perf pass, not a b-i defect.

@@ -128,7 +128,7 @@ void test_encode_result_rejected(void) {
     tp_op_reject rej;
     rej.status = TP_STATUS_OUT_OF_RANGE;
     (void)snprintf(rej.field, sizeof rej.field, "%s", "max_size");
-    (void)snprintf(rej.message, sizeof rej.message, "%s", "max_size = 99999 must be in [1..4096]");
+    (void)snprintf(rej.message, sizeof rej.message, "%s", "max_size = 99999 must be in [1..16384]");
     char *j = tp_op_result_encode(&op, &rej);
     TEST_ASSERT_NOT_NULL(j);
     /* structured status id + offending field + prose, keys ascending */
@@ -202,7 +202,7 @@ void test_validate_out_of_range(void) {
     op.kind = TP_OP_ATLAS_SETTINGS_SET;
     op.atlas_id = aid;
     op.u.atlas_settings.mask = TP_AF_MAX_SIZE;
-    op.u.atlas_settings.max_size = 99999; /* > 4096 */
+    op.u.atlas_settings.max_size = 99999; /* > the 16384 build cap */
     tp_op_reject rej;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_RANGE, tp_operation_validate(p, &op, &rej));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_RANGE, rej.status);
@@ -335,7 +335,10 @@ void test_validate_source_add_dup_path(void) {
     tp_project_destroy(p);
 }
 
-/* [7] padding/margin/extrude accept any >= 0 (CLI parity); max_size keeps its 4096 cap. */
+/* [7] padding/margin/extrude accept any >= 0 (CLI parity); max_size tracks the build-wide
+ * texture cap (this build lifts NT_BUILD_MAX_TEXTURE_SIZE to 16384), so the 8192/16384 GUI
+ * presets + CLI `set max_size` validate while a genuinely oversized page is still rejected
+ * (F2-05b-i F4, decision 0015 -- the old hardcoded 4096 diverged from the packer). */
 void test_validate_knob_bounds_match_cli(void) {
     tp_id128 aid;
     tp_project *p = promoted_project(&aid);
@@ -353,8 +356,10 @@ void test_validate_knob_bounds_match_cli(void) {
     op.u.atlas_settings.padding = -1;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_RANGE, tp_operation_validate(p, &op, &rej));
     TEST_ASSERT_EQUAL_STRING("padding", rej.field);
-    op.u.atlas_settings.mask = TP_AF_MAX_SIZE; /* max_size DID keep its [1..4096] cap */
-    op.u.atlas_settings.max_size = 8000;
+    op.u.atlas_settings.mask = TP_AF_MAX_SIZE;
+    op.u.atlas_settings.max_size = 8192; /* a shipped GUI preset, <= the build cap: now accepted (F4) */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_operation_validate(p, &op, &rej));
+    op.u.atlas_settings.max_size = 99999; /* far over any page cap: still rejected */
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_RANGE, tp_operation_validate(p, &op, &rej));
     TEST_ASSERT_EQUAL_STRING("max_size", rej.field);
     tp_project_destroy(p);

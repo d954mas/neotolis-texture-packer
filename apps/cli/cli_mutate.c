@@ -215,8 +215,8 @@ static bool to_long(const char *s, long *out) {
 }
 
 /* Parses `s` into an int, rejecting a value that does not FIT int (marshalling into
- * the op's plain-int knob field). The SEMANTIC range ([1..4096], >=0, ...) is core's
- * (tp_operation_validate). A too-big value is a usage error here, never a silent wrap.
+ * the op's plain-int knob field). The SEMANTIC range (max_size [1..build texture cap],
+ * >=0, ...) is core's (tp_operation_validate). A too-big value is a usage error here, never a silent wrap.
  * Uses strtoll so the fit check is meaningful where long == int (Windows LLP64). */
 static bool to_int(const char *s, int *out) {
     if (!s || !*s) {

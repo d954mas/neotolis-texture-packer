@@ -177,8 +177,10 @@ bool gui_project_undo(void);
 bool gui_project_redo(void);
 
 /* --- file operations (paths explicit; dialogs live in the UI layer) --- */
-/* Fresh empty project: replaces the current one, clears path + both bits. */
-void gui_project_new(void);
+/* Fresh empty project: replaces the current one, clears path + both bits. Returns false
+ * (KEEPING the current project intact) only when creating/wrapping the fresh project OOMs
+ * (F2-05b-i F3: never lose the open project on an allocation failure). */
+bool gui_project_new(void);
 /* Loads `path`; on failure fills err_out (from tp_error) and leaves the current project
  * intact. On success replaces it, sets path, clears dirty, marks preview stale. */
 tp_status gui_project_open(const char *path, char *err_out, size_t err_cap);

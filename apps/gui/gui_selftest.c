@@ -674,6 +674,65 @@ void run_selftest(void) {
         /* one undo reverts the WHOLE drag to the pre-drag value (not one tick). */
         NT_ASSERT(gui_project_undo() && tp_project_get_atlas(gui_project_get(), 0)->padding == pad_pre &&
                   "undo reverts the entire coalesced drag in one step");
+
+        /* (3) F1: "Add frames" is DEFERRED (was a synchronous commit -> UAF while declare_animation_editor
+         *     held a live `an` it kept dereferencing). The enqueue captures COPIED keys, so the frames land
+         *     only on the apply_pending drain AND clearing the live selection between enqueue and drain does
+         *     NOT change what lands. If someone reverts to a synchronous commit, fc_mid becomes 2 and this
+         *     assertion fails HERE -- the UAF cannot regress silently. */
+        gui_project_new();
+        gui_pack_clear(-1);
+        s_sel_atlas = 0;
+        const int f1anim = gui_project_create_animation(0, "addf", NULL, 0); /* empty animation */
+        s_sel_anim = f1anim;
+        multi_sel_clear();
+        multi_sel_add("f_2"); /* deliberately out of natural order */
+        multi_sel_add("f_1");
+        add_selection_frames_to_anim(f1anim); /* ENQUEUE ONLY -- must not commit synchronously */
+        tp_project_atlas *f1a = tp_project_get_atlas(gui_project_get(), 0);
+        const int fc_mid = (f1anim >= 0 && f1a) ? f1a->animations[f1anim].frame_count : -1;
+        multi_sel_clear();                    /* mutate the selection AFTER the enqueue: copied keys stand */
+        apply_pending();                      /* drains -> gui_project_anim_add_frames replays the copies */
+        f1a = tp_project_get_atlas(gui_project_get(), 0);
+        const int fc_after = (f1anim >= 0 && f1a) ? f1a->animations[f1anim].frame_count : -1;
+        const char *ff0 = (fc_after == 2) ? f1a->animations[f1anim].frames[0].name : "";
+        nt_log_info("SELFTEST: F1 add-frames deferred: mid=%d after=%d frame0='%s' (want mid=0 after=2 f_1)",
+                    fc_mid, fc_after, ff0);
+        NT_ASSERT(fc_mid == 0 && fc_after == 2 && strcmp(ff0, "f_1") == 0 &&
+                  "Add frames is deferred + captures copied keys (F1 UAF fix)");
+
+        /* (4) F2: a target toggle must carry the FULL out_path (heap), not truncate at 255. Set a >255-char
+         *     path, then toggle `enabled` through the SAME deferred gui_edit_target the checkbox uses; after
+         *     the drain the stored path must be byte-identical (the old fixed 256-byte queue slot corrupted
+         *     any out_path > 255 on a mere enable/disable). */
+        gui_project_new();
+        gui_pack_clear(-1);
+        s_sel_atlas = 0;
+        char longp[600];
+        {
+            size_t w = 0;
+            w += (size_t)snprintf(longp + w, sizeof longp - w, "out/");
+            for (int k = 0; k < 30 && w + 20 < sizeof longp; k++) { /* 30 * ~17 chars -> well over 255 */
+                w += (size_t)snprintf(longp + w, sizeof longp - w, "deep_subdir_%02d/", k);
+            }
+            (void)snprintf(longp + w, sizeof longp - w, "atlas.json");
+        }
+        NT_ASSERT(strlen(longp) > 255 && "F2 test path must exceed the old 255-byte slot");
+        tp_project_atlas *f2a = tp_project_get_atlas(gui_project_get(), 0);
+        NT_ASSERT(f2a && f2a->target_count >= 1 && "fresh project seeds a target for the F2 toggle test");
+        /* seed the long path via the setter (stored as a heap char*, up to TP_PATH_MAX) */
+        (void)gui_project_set_target(0, 0, f2a->targets[0].exporter_id, longp, f2a->targets[0].enabled);
+        f2a = tp_project_get_atlas(gui_project_get(), 0);
+        const bool en_was = f2a->targets[0].enabled;
+        /* the checkbox path: enqueue a toggle reading t->out_path (the full stored path) */
+        gui_edit_target(0, 0, f2a->targets[0].exporter_id, f2a->targets[0].out_path, !en_was);
+        apply_pending(); /* drains -> gui_project_set_target with the FULL path (no 255 truncation) */
+        f2a = tp_project_get_atlas(gui_project_get(), 0);
+        nt_log_info("SELFTEST: F2 out_path len=%zu after toggle enabled %d->%d (match=%d)", strlen(f2a->targets[0].out_path),
+                    en_was, f2a->targets[0].enabled, strcmp(f2a->targets[0].out_path, longp) == 0);
+        NT_ASSERT(strcmp(f2a->targets[0].out_path, longp) == 0 && f2a->targets[0].enabled == !en_was &&
+                  "a target toggle preserves the full >255 out_path (F2 no truncation)");
+
         /* Restore a packable atlas-0 project for the render frames below (the pixel probe packs
          * atlas 0 and probes its region outlines) -- gui_project_new left it source-less. */
         gui_project_new();

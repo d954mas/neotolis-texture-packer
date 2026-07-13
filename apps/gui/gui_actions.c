@@ -57,11 +57,15 @@ int s_last_pack_atlas = -1; /* which atlas that timing belongs to */
  * commit while holding a live atlas/sprite/anim/target pointer. They ENQUEUE the edit here;
  * drain_edits() (run at frame top from apply_pending, no live pointer held) replays each via
  * the self-contained gui_project_* setters. The queue grows (never a fixed slot) so no edit is
- * ever dropped if two land in one frame; typically it holds 0 or 1. */
+ * ever dropped if two land in one frame; typically it holds 0 or 1.
+ *
+ * String args that can be LONG carry a HEAP copy, not a fixed slot: out_path is up to
+ * TP_PATH_MAX (4096) so a 256-byte slot silently truncated + persisted a corrupted export
+ * path on a mere target toggle (F2); add-frames carries a variable-length list of COPIED
+ * sprite keys so "Add frames" can defer instead of committing synchronously mid-declare (F1).
+ * edit_dispose frees that heap payload after the edit drains (or if a queue-OOM drops it). */
 typedef enum {
-    GEDIT_ATLAS_INT = 0,
-    GEDIT_ATLAS_BOOL,
-    GEDIT_ATLAS_FLOAT,
+    GEDIT_ATLAS = 0, /* one atlas.settings.set knob: field in i0, ivalue in i1, fvalue in f0 (F7) */
     GEDIT_SPRITE_ORIGIN,
     GEDIT_SPRITE_SLICE9,
     GEDIT_SPRITE_OVERRIDE,
@@ -70,61 +74,97 @@ typedef enum {
     GEDIT_ANIM_FLIP,
     GEDIT_ANIM_FRAME_REMOVE,
     GEDIT_ANIM_FRAME_MOVE,
+    GEDIT_ANIM_ADD_FRAMES, /* append COPIED selection keys to anim i0 (F1: was a sync commit -> UAF) */
     GEDIT_TARGET
 } gui_edit_kind;
 
 typedef struct {
     gui_edit_kind kind;
     int atlas;
-    int i0, i1, i2; /* field/which/anim_index/target_index; value/frame_index/playback; delta */
+    int i0, i1, i2; /* field/which/anim_index/target_index; ivalue/frame_index/playback; delta */
     float f0, f1;
     bool b0, b1;
-    char s0[256]; /* sprite name / exporter id */
-    char s1[256]; /* out path */
+    char s0[256];   /* sprite name / exporter id -- short + bounded (registry id / GUI-wide 256 key) */
+    char *out_path; /* HEAP: target out_path (up to TP_PATH_MAX); freed after drain -- F2 (no 255 cap) */
+    char **keys;    /* HEAP: add-frames sprite keys, copied at enqueue; freed after drain -- F1 */
+    int key_count;
 } gui_edit;
 
 static gui_edit *s_edits;
 static int s_edit_count;
 static int s_edit_cap;
 
-/* Appends a copy of `e` to the queue; on OOM the edit is dropped (best-effort, like the
- * history push) rather than crashing. */
-static void edit_push(const gui_edit *e) {
+/* Local heap strdup (POSIX strdup is not ISO C17). NULL treated as ""; NULL on OOM. */
+static char *edit_strdup(const char *s) {
+    if (!s) {
+        s = "";
+    }
+    size_t n = strlen(s) + 1U;
+    char *c = (char *)malloc(n);
+    if (c) {
+        memcpy(c, s, n);
+    }
+    return c;
+}
+
+/* Frees an edit's heap payload (out_path + copied keys). Safe on a zeroed/partially-built edit. */
+static void edit_dispose(gui_edit *e) {
+    free(e->out_path);
+    e->out_path = NULL;
+    if (e->keys) {
+        for (int i = 0; i < e->key_count; i++) {
+            free(e->keys[i]);
+        }
+        free(e->keys);
+        e->keys = NULL;
+    }
+    e->key_count = 0;
+}
+
+/* Appends `e` to the queue (shallow copy -> the queue TAKES OWNERSHIP of e's heap out_path/keys;
+ * the caller must not free them afterward, on success OR failure). On queue-realloc OOM the edit
+ * is DROPPED: its heap payload is freed (no leak) and a status-bar error is raised so the drop is
+ * visible -- the widget already returned "committed", so without this the value silently reverts
+ * next frame with no explanation (F5). Returns true iff queued. */
+static bool edit_push(gui_edit *e) {
     if (s_edit_count == s_edit_cap) {
         int nc = s_edit_cap ? s_edit_cap * 2 : 8;
         gui_edit *ne = (gui_edit *)realloc(s_edits, (size_t)nc * sizeof *ne);
         if (!ne) {
-            return;
+            edit_dispose(e);
+            set_status_ex(STATUS_ERROR, "Out of memory: this edit could not be queued (change not applied).");
+            return false;
         }
         s_edits = ne;
         s_edit_cap = nc;
     }
     s_edits[s_edit_count++] = *e;
+    return true;
 }
 
 void gui_edit_atlas_int(int atlas, gui_atlas_field field, int value) {
     gui_edit e = {0};
-    e.kind = GEDIT_ATLAS_INT;
+    e.kind = GEDIT_ATLAS;
     e.atlas = atlas;
     e.i0 = (int)field;
     e.i1 = value;
-    edit_push(&e);
+    (void)edit_push(&e);
 }
 void gui_edit_atlas_bool(int atlas, gui_atlas_field field, bool value) {
     gui_edit e = {0};
-    e.kind = GEDIT_ATLAS_BOOL;
+    e.kind = GEDIT_ATLAS;
     e.atlas = atlas;
     e.i0 = (int)field;
-    e.b0 = value;
-    edit_push(&e);
+    e.i1 = value ? 1 : 0; /* bool == ivalue 0/1 (F7) */
+    (void)edit_push(&e);
 }
 void gui_edit_atlas_float(int atlas, gui_atlas_field field, float value) {
     gui_edit e = {0};
-    e.kind = GEDIT_ATLAS_FLOAT;
+    e.kind = GEDIT_ATLAS;
     e.atlas = atlas;
     e.i0 = (int)field;
     e.f0 = value;
-    edit_push(&e);
+    (void)edit_push(&e);
 }
 void gui_edit_sprite_origin(int atlas, const char *sprite_name, float ox, float oy) {
     gui_edit e = {0};
@@ -133,7 +173,7 @@ void gui_edit_sprite_origin(int atlas, const char *sprite_name, float ox, float 
     e.f0 = ox;
     e.f1 = oy;
     (void)snprintf(e.s0, sizeof e.s0, "%s", sprite_name ? sprite_name : "");
-    edit_push(&e);
+    (void)edit_push(&e);
 }
 void gui_edit_sprite_slice9(int atlas, const char *sprite_name, int lrtb_index, int value) {
     gui_edit e = {0};
@@ -142,7 +182,7 @@ void gui_edit_sprite_slice9(int atlas, const char *sprite_name, int lrtb_index, 
     e.i0 = lrtb_index;
     e.i1 = value;
     (void)snprintf(e.s0, sizeof e.s0, "%s", sprite_name ? sprite_name : "");
-    edit_push(&e);
+    (void)edit_push(&e);
 }
 void gui_edit_sprite_override(int atlas, const char *sprite_name, gui_sprite_ov which, int value) {
     gui_edit e = {0};
@@ -151,7 +191,7 @@ void gui_edit_sprite_override(int atlas, const char *sprite_name, gui_sprite_ov 
     e.i0 = (int)which;
     e.i1 = value;
     (void)snprintf(e.s0, sizeof e.s0, "%s", sprite_name ? sprite_name : "");
-    edit_push(&e);
+    (void)edit_push(&e);
 }
 void gui_edit_anim_fps(int atlas, int anim_index, float fps) {
     gui_edit e = {0};
@@ -159,7 +199,7 @@ void gui_edit_anim_fps(int atlas, int anim_index, float fps) {
     e.atlas = atlas;
     e.i0 = anim_index;
     e.f0 = fps;
-    edit_push(&e);
+    (void)edit_push(&e);
 }
 void gui_edit_anim_playback(int atlas, int anim_index, int playback) {
     gui_edit e = {0};
@@ -167,7 +207,7 @@ void gui_edit_anim_playback(int atlas, int anim_index, int playback) {
     e.atlas = atlas;
     e.i0 = anim_index;
     e.i1 = playback;
-    edit_push(&e);
+    (void)edit_push(&e);
 }
 void gui_edit_anim_flip(int atlas, int anim_index, bool flip_h, bool flip_v) {
     gui_edit e = {0};
@@ -176,7 +216,7 @@ void gui_edit_anim_flip(int atlas, int anim_index, bool flip_h, bool flip_v) {
     e.i0 = anim_index;
     e.b0 = flip_h;
     e.b1 = flip_v;
-    edit_push(&e);
+    (void)edit_push(&e);
 }
 void gui_edit_anim_frame_remove(int atlas, int anim_index, int frame_index) {
     gui_edit e = {0};
@@ -184,7 +224,7 @@ void gui_edit_anim_frame_remove(int atlas, int anim_index, int frame_index) {
     e.atlas = atlas;
     e.i0 = anim_index;
     e.i1 = frame_index;
-    edit_push(&e);
+    (void)edit_push(&e);
 }
 void gui_edit_anim_frame_move(int atlas, int anim_index, int frame_index, int delta) {
     gui_edit e = {0};
@@ -193,7 +233,7 @@ void gui_edit_anim_frame_move(int atlas, int anim_index, int frame_index, int de
     e.i0 = anim_index;
     e.i1 = frame_index;
     e.i2 = delta;
-    edit_push(&e);
+    (void)edit_push(&e);
 }
 void gui_edit_target(int atlas, int index, const char *exporter_id, const char *out_path, bool enabled) {
     gui_edit e = {0};
@@ -202,8 +242,55 @@ void gui_edit_target(int atlas, int index, const char *exporter_id, const char *
     e.i0 = index;
     e.b0 = enabled;
     (void)snprintf(e.s0, sizeof e.s0, "%s", exporter_id ? exporter_id : "");
-    (void)snprintf(e.s1, sizeof e.s1, "%s", out_path ? out_path : "");
-    edit_push(&e);
+    e.out_path = edit_strdup(out_path); /* HEAP full path -- a >255 out_path must not truncate (F2) */
+    if (!e.out_path) {
+        set_status_ex(STATUS_ERROR, "Out of memory: export target edit not applied.");
+        return;
+    }
+    (void)edit_push(&e);
+}
+
+/* Enqueue an "add frames" edit carrying a COPY of the selection keys (F1). "Add frames" used to
+ * commit synchronously from inside declare_animation_editor, which clone-swaps + frees the project
+ * under the live `an`/`a` the same declare invocation keeps dereferencing (frame_count, frames[].
+ * name) -> a use-after-free on an ordinary click. Deferring it (drain replays via
+ * gui_project_anim_add_frames at frame top, no live pointer held) closes that last synchronous
+ * commit; the keys are copied NOW so a selection change before the drain cannot alter what lands. */
+void gui_edit_anim_add_frames(int atlas, int anim_index, const char *const *keys, int count) {
+    if (count <= 0) {
+        return;
+    }
+    gui_edit e = {0};
+    e.kind = GEDIT_ANIM_ADD_FRAMES;
+    e.atlas = atlas;
+    e.i0 = anim_index;
+    e.keys = (char **)calloc((size_t)count, sizeof *e.keys);
+    if (!e.keys) {
+        set_status_ex(STATUS_ERROR, "Out of memory: add-frames not applied.");
+        return;
+    }
+    int w = 0;
+    bool oom = false;
+    for (int i = 0; i < count; i++) {
+        if (!keys[i] || keys[i][0] == '\0') {
+            continue; /* skip empties (the setter would too) */
+        }
+        e.keys[w] = edit_strdup(keys[i]);
+        if (!e.keys[w]) {
+            oom = true;
+            break;
+        }
+        w++;
+    }
+    e.key_count = w;
+    if (oom || w == 0) {
+        edit_dispose(&e);
+        if (oom) {
+            set_status_ex(STATUS_ERROR, "Out of memory: add-frames not applied.");
+        }
+        return;
+    }
+    (void)edit_push(&e);
 }
 
 /* Replays every queued edit through the committing setters, then clears the queue. Runs at
@@ -211,16 +298,10 @@ void gui_edit_target(int atlas, int index, const char *exporter_id, const char *
  * is safe. Each setter re-fetches by index/name internally. */
 static void drain_edits(void) {
     for (int i = 0; i < s_edit_count; i++) {
-        const gui_edit *e = &s_edits[i];
+        gui_edit *e = &s_edits[i];
         switch (e->kind) {
-            case GEDIT_ATLAS_INT:
-                (void)gui_project_set_atlas_setting(e->atlas, (gui_atlas_field)e->i0, e->i1, 0.0F);
-                break;
-            case GEDIT_ATLAS_BOOL:
-                (void)gui_project_set_atlas_setting(e->atlas, (gui_atlas_field)e->i0, e->b0 ? 1 : 0, 0.0F);
-                break;
-            case GEDIT_ATLAS_FLOAT:
-                (void)gui_project_set_atlas_setting(e->atlas, (gui_atlas_field)e->i0, 0, e->f0);
+            case GEDIT_ATLAS: /* int/bool -> ivalue (i1); float -> fvalue (f0); the other is 0 (F7) */
+                (void)gui_project_set_atlas_setting(e->atlas, (gui_atlas_field)e->i0, e->i1, e->f0);
                 break;
             case GEDIT_SPRITE_ORIGIN:
                 (void)gui_project_set_sprite_origin(e->atlas, e->s0, e->f0, e->f1);
@@ -246,10 +327,14 @@ static void drain_edits(void) {
             case GEDIT_ANIM_FRAME_MOVE:
                 (void)gui_project_anim_move_frame(e->atlas, e->i0, e->i1, e->i2);
                 break;
+            case GEDIT_ANIM_ADD_FRAMES:
+                (void)gui_project_anim_add_frames(e->atlas, e->i0, (const char *const *)e->keys, e->key_count);
+                break;
             case GEDIT_TARGET:
-                (void)gui_project_set_target(e->atlas, e->i0, e->s0, e->s1, e->b0);
+                (void)gui_project_set_target(e->atlas, e->i0, e->s0, e->out_path ? e->out_path : "", e->b0);
                 break;
         }
+        edit_dispose(e); /* free this edit's heap payload (out_path / copied keys) after it replays */
     }
     s_edit_count = 0;
 }
@@ -453,7 +538,13 @@ int create_animation_from_selection(void) {
     return idx;
 }
 
-/* Appends the current multi-selection (natural-sorted) as frames of animation `anim_index`. */
+/* Appends the current multi-selection (natural-sorted) as frames of animation `anim_index`.
+ * DEFERRED (F2-05b-i F1): this is called from declare_animation_editor, which holds live
+ * `a`/`an` pointers it keeps dereferencing AFTER this returns. A synchronous commit here would
+ * clone-swap + free the project under those pointers -> use-after-free on a plain "Add frames"
+ * click. So it builds the sorted selection (read-only) and ENQUEUES an add-frames edit carrying
+ * COPIED keys; apply_pending drains it next frame with no live pointer held (benign one-frame
+ * lag, consistent with every other panel edit). */
 void add_selection_frames_to_anim(int anim_index) {
     if (s_multi_sel_count <= 0) {
         return;
@@ -462,9 +553,8 @@ void add_selection_frames_to_anim(int anim_index) {
     if (n <= 0) {
         return; /* OOM in the sort scratch (status already set) -- do nothing rather than truncate */
     }
-    if (gui_project_anim_add_frames(s_sel_atlas, anim_index, s_sel_sort_ptr, n)) {
-        set_statusf("Added %d frame(s) to the animation (Ctrl+Z to undo).", n);
-    }
+    gui_edit_anim_add_frames(s_sel_atlas, anim_index, s_sel_sort_ptr, n);
+    set_statusf("Adding %d frame(s) to the animation (Ctrl+Z to undo).", n); /* lands on the next drain */
 }
 
 /* Opens the preview player on animation `anim_index` (plays from the packed regions; if the atlas is
@@ -773,14 +863,15 @@ void request_new(void) {
     if (gui_project_is_dirty()) {
         s_after_confirm = AFTER_NEW;
         s_confirm_open = true;
-    } else {
-        gui_project_new();
+    } else if (gui_project_new()) {
         gui_pack_clear(-1);
         gui_shell_reset_shown_result();
         cancel_edit();
         clamp_selection();
         reset_selection();
         set_status("New project.");
+    } else {
+        set_status_ex(STATUS_ERROR, "Out of memory: could not create a new project (current project kept)."); /* F3 */
     }
 }
 void request_exit(void) {
@@ -809,13 +900,16 @@ void request_open(void) {
 }
 static void confirm_perform(void) {
     if (s_after_confirm == AFTER_NEW) {
-        gui_project_new();
-        gui_pack_clear(-1);
-        gui_shell_reset_shown_result();
-        cancel_edit();
-        clamp_selection();
-        reset_selection();
-        set_status("New project.");
+        if (gui_project_new()) {
+            gui_pack_clear(-1);
+            gui_shell_reset_shown_result();
+            cancel_edit();
+            clamp_selection();
+            reset_selection();
+            set_status("New project.");
+        } else {
+            set_status_ex(STATUS_ERROR, "Out of memory: could not create a new project (current project kept)."); /* F3 */
+        }
     } else if (s_after_confirm == AFTER_EXIT) {
         nt_app_quit();
     } else if (s_after_confirm == AFTER_OPEN) {

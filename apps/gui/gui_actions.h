@@ -73,6 +73,9 @@ void gui_edit_anim_playback(int atlas, int anim_index, int playback);
 void gui_edit_anim_flip(int atlas, int anim_index, bool flip_h, bool flip_v);
 void gui_edit_anim_frame_remove(int atlas, int anim_index, int frame_index);
 void gui_edit_anim_frame_move(int atlas, int anim_index, int frame_index, int delta);
+/* Enqueue "Add frames": COPIES `keys` (count) into the edit so the drain can replay them next
+ * frame -- "Add frames" must NOT commit synchronously from the anim editor's declare fn (F1 UAF). */
+void gui_edit_anim_add_frames(int atlas, int anim_index, const char *const *keys, int count);
 void gui_edit_target(int atlas, int index, const char *exporter_id, const char *out_path, bool enabled);
 
 /* --- deferred side-effect pump: lands async pack/export, commits blur edits, drains the queue --- */

@@ -46,8 +46,14 @@
 /* Max page dim: DUPLICATES tp_pack.c's TP_PACK_MAX_PAGE_DIM (== engine
  * NT_BUILD_MAX_TEXTURE_SIZE). validate_settings() is private and inseparable from
  * packing, so the range is re-stated here as a data-driven check (plan B2 (g));
- * packet B's X-macro settings schema is earmarked to absorb this duplication. */
+ * packet B's X-macro settings schema is earmarked to absorb this duplication.
+ * TRACK the build constant (this build overrides it to 16384) rather than hardcode
+ * 4096, so `validate` does not flag a page size `set`/`pack` accept (F2-05b-i F4). */
+#ifndef NT_BUILD_MAX_TEXTURE_SIZE
 #define CLI_MAX_PAGE_DIM 4096
+#else
+#define CLI_MAX_PAGE_DIM NT_BUILD_MAX_TEXTURE_SIZE
+#endif
 
 #define SEV_WARN 0
 #define SEV_ERR 1
