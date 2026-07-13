@@ -149,15 +149,30 @@ void tp_txn__result_reset(tp_txn_result *out, const char *id_hex) {
     out->error_count = 0;
 }
 
-/* Append one error (grows the dynamic error array). A grow failure drops the error
- * (the caller is already on a reject path); the reject still returns its status. */
-void tp_txn__result_add_error(tp_txn_result *out, int op_index, tp_status code, const char *field, const char *msg) {
+/* Test-only fault seam for the add_error grow: -1 = off; N = the (N+1)th call's
+ * grow fails once (then re-arms to off). Lets a test prove a dropped shape-error
+ * record still forces a reject. */
+static int s_add_error_fail = -1;
+void tp_txn__test_set_add_error_fail(int nth) { s_add_error_fail = nth; }
+
+/* Append one error (grows the dynamic error array). Returns true when stored; false
+ * when the grow failed (OOM). A collect-all caller must treat a false as a forced
+ * reject -- a shape-faulted batch must never falsely commit just because its error
+ * record could not be stored. */
+bool tp_txn__result_add_error(tp_txn_result *out, int op_index, tp_status code, const char *field, const char *msg) {
     if (!out) {
-        return;
+        return false;
+    }
+    if (s_add_error_fail >= 0) { /* fault seam: fail this grow once */
+        if (s_add_error_fail == 0) {
+            s_add_error_fail = -1;
+            return false;
+        }
+        s_add_error_fail--;
     }
     tp_txn_error *n = (tp_txn_error *)realloc(out->errors, (size_t)(out->error_count + 1) * sizeof *n);
     if (!n) {
-        return;
+        return false;
     }
     out->errors = n;
     tp_txn_error *e = &out->errors[out->error_count];
@@ -166,6 +181,7 @@ void tp_txn__result_add_error(tp_txn_result *out, int op_index, tp_status code, 
     (void)snprintf(e->field, sizeof e->field, "%s", field ? field : "");
     (void)snprintf(e->message, sizeof e->message, "%s", msg ? msg : "");
     out->error_count++;
+    return true;
 }
 
 /* Add one id addressing echo to a committed result op. */
@@ -300,33 +316,68 @@ tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_tx
     return TP_STATUS_OK;
 }
 
+/* ---- shared preflight gate (typed + JSON entry points) ------------------- */
+
+bool tp_txn__is_hex32_lower(const char *s) {
+    if (!s) {
+        return false;
+    }
+    int n = 0;
+    for (; s[n]; n++) {
+        char c = s[n];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+            return false;
+        }
+    }
+    return n == 32;
+}
+
+tp_status tp_txn__preflight(tp_model *m, const char *id_hex, int64_t expected_revision, tp_txn_result *out,
+                            tp_error *err) {
+    tp_txn__result_reset(out, id_hex); /* NULL-safe */
+
+    /* (a) transaction id must be 32 lowercase hex (the typed path never validated
+     * this before -- an empty/garbage id would commit and then collide). */
+    if (!tp_txn__is_hex32_lower(id_hex)) {
+        if (out) {
+            out->revision = m->revision;
+        }
+        tp_txn__result_add_error(out, -1, TP_STATUS_ID_MALFORMED, "id", "transaction id must be 32 lowercase hex");
+        return tp_error_set(err, TP_STATUS_ID_MALFORMED, "transaction id must be 32 lowercase hex");
+    }
+
+    /* (b) idempotency: a re-submitted committed id rejects (model unchanged). */
+    if (m->idstore && m->idstore->contains && m->idstore->contains(m->idstore->ctx, id_hex)) {
+        if (out) {
+            out->revision = m->revision;
+        }
+        tp_txn__result_add_error(out, -1, TP_STATUS_DUPLICATE_ID, "id", "transaction id already applied");
+        return tp_error_set(err, TP_STATUS_DUPLICATE_ID, "transaction id already applied");
+    }
+
+    /* (c) revision precondition: a mismatch rejects ALONE (op_index -1). */
+    tp_status rv = tp_revision_check(expected_revision, m->revision, err);
+    if (rv != TP_STATUS_OK) {
+        if (out) {
+            out->revision = m->revision;
+        }
+        tp_txn__result_add_error(out, -1, rv, "expected_revision", err ? err->msg : "");
+        return rv;
+    }
+    return TP_STATUS_OK;
+}
+
 /* ---- typed entry point --------------------------------------------------- */
 
 tp_status tp_model_apply(tp_model *m, const tp_txn_request *req, tp_txn_result *out, tp_error *err) {
     if (!m || !req) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "null model or request");
     }
-    tp_txn__result_reset(out, req->id_hex);
-
-    /* 1. Idempotency: a re-submitted committed id rejects (model unchanged). */
-    if (m->idstore && m->idstore->contains && m->idstore->contains(m->idstore->ctx, req->id_hex)) {
-        if (out) {
-            out->revision = m->revision;
-            tp_txn__result_add_error(out, -1, TP_STATUS_DUPLICATE_ID, "id", "transaction id already applied");
-        }
-        return tp_error_set(err, TP_STATUS_DUPLICATE_ID, "transaction id already applied");
+    /* Shared preflight: id format + idempotency + revision precondition. */
+    tp_status pf = tp_txn__preflight(m, req->id_hex, req->expected_revision, out, err);
+    if (pf != TP_STATUS_OK) {
+        return pf;
     }
-
-    /* 2. Revision precondition: a mismatch rejects ALONE (op_index -1). */
-    tp_status rv = tp_revision_check(req->expected_revision, m->revision, err);
-    if (rv != TP_STATUS_OK) {
-        if (out) {
-            out->revision = m->revision;
-            tp_txn__result_add_error(out, -1, rv, "expected_revision", err ? err->msg : "");
-        }
-        return rv;
-    }
-
-    /* 3. Clone + apply atomically. */
+    /* Clone + apply atomically. */
     return tp_txn__commit_validated(m, req, out, err);
 }
