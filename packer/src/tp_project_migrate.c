@@ -370,6 +370,13 @@ static char *mig_strdup(const char *s) {
     return p;
 }
 
+/* F2 ENTRY POINT (groundwork; decision 0009 "Область"). This lazy v3->v4 re-key is
+ * currently exercised ONLY by tests, `inspect`, and `validate` -- it has NO production
+ * caller yet, so real GUI/CLI projects keep their sprite/frame records in PENDING {name}
+ * form and pack/export apply them by the name bridge exactly as before F1-03. The
+ * production trigger (a writable session that scans, re-keys, then saves) and the switch
+ * to id-based override APPLICATION both land in F2's op-layer (plan F2-01). Until then
+ * this is dormant groundwork: correct, atomic, but not wired into any save path. */
 tp_status tp_project_resolve_atlas_sprites(tp_project *p, int atlas_index, const struct tp_sprite_index *idx,
                                            tp_error *err) {
     if (!p || !idx) {
