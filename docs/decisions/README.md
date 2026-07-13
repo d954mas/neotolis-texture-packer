@@ -23,3 +23,5 @@ implementation-policy выборы). Формат: контекст, решен�
 | [0009](0009-f1-03-sprite-id-selectors.md) | F1-03: derived sprite_id, `{source,key}`-keyed records + frames, lazy v3→v4 re-key, canonical selectors | accepted |
 | [0010](0010-f2-01-typed-operation-engine.md) | F2-01: типизированный operation engine (catalog / apply / validate / encode / builders) | accepted |
 | [0011](0011-f2-02-transactions-revision-dirty.md) | F2-02: атомарные транзакции (clone), revision, semantic dirty, idempotency, transaction JSON contract | accepted |
+| [0012](0012-f2-03-semantic-diff-inverse.md) | F2-03: semantic diff / точный inverse (Undo) + redo + snapshot oracle | accepted |
+| [0013](0013-f2-04-recovery-journal.md) | F2-04: minimum recovery journal (versioned checksummed log, append-gated commit, checkpoint+replay recovery, corruption fallback, side-effect coordinator) | accepted |

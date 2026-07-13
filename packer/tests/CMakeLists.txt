@@ -96,6 +96,23 @@ target_compile_options(tp_test_diff PRIVATE -U_DLL)
 nt_set_warning_flags(tp_test_diff)   # AGENTS.md invariant: our test TUs too
 add_test(NAME tp_diff COMMAND tp_test_diff)
 
+# F2-04: recovery-journal fault suite. Proves the §7.1/§7.2 contract -- acknowledged
+# (durably appended) transactions recover and never duplicate after restart; torn/failed
+# transactions are invisible; the reader is UB-clean on arbitrary/corrupt/short bytes
+# (short write at every byte boundary, torn tail, checksum flip, absurd length prefix);
+# append failure rolls back exactly; checkpoint+replay restores state + retained id set;
+# duplicate retry after restart de-duplicates; a moved-project (stale-key) journal is not
+# applied; the coordinator prepare/publish/abort fire at the right commit points; and a
+# real on-disk file journal round-trips. Includes the private src/ internal header for the
+# format constants + memory-io fault seams. argv[1] is a scratch dir for the file test.
+add_executable(tp_test_journal test_journal.c)
+target_link_libraries(tp_test_journal PRIVATE tp_core unity)
+target_include_directories(tp_test_journal PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_options(tp_test_journal PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_journal)   # AGENTS.md invariant: our test TUs too
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_journal_test")
+add_test(NAME tp_journal COMMAND tp_test_journal "${CMAKE_BINARY_DIR}/tp_journal_test")
+
 # F1-03: canonical selector resolver (id/name/path/compound -> exactly one id).
 add_executable(tp_test_selector test_selector.c)
 target_link_libraries(tp_test_selector PRIVATE tp_core unity)
