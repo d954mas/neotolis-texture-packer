@@ -387,7 +387,34 @@ tp_status tp_project_resolve_atlas_sprites(tp_project *p, int atlas_index, const
                             atlas_index);
     }
     tp_project_atlas *a = &p->atlases[atlas_index];
-    for (int i = 0; i < a->sprite_count; i++) {
+
+    /* ATOMICITY (fix [4]): stage every new {source_ref, src_key} into scratch -- doing
+     * all strdups up front -- and mutate the model only after EVERY allocation has
+     * succeeded. So an OOM on record k does not leave records 0..k-1 already re-keyed;
+     * the model stays byte-unchanged (the header's all-or-nothing contract). Upper bound
+     * = every override + every frame (a record re-keys at most once). key_slot/ref_slot
+     * point INTO the records (the arrays are not resized during the scan, so stable). */
+    size_t total = (size_t)a->sprite_count;
+    for (int ai = 0; ai < a->animation_count; ai++) {
+        total += (size_t)a->animations[ai].frame_count;
+    }
+    if (total == 0) {
+        return TP_STATUS_OK;
+    }
+    typedef struct {
+        char **key_slot;    /* &record.src_key */
+        tp_id128 *ref_slot; /* &record.source_ref */
+        char *new_key;      /* freshly strdup'd; owned by scratch until commit */
+        tp_id128 new_ref;
+    } rekey_stage;
+    rekey_stage *stage = (rekey_stage *)calloc(total, sizeof *stage);
+    if (!stage) {
+        return tp_error_set(err, TP_STATUS_OOM, "tp_project_resolve_atlas_sprites: out of memory");
+    }
+    size_t staged = 0;
+    bool oom = false;
+
+    for (int i = 0; i < a->sprite_count && !oom; i++) {
         tp_project_sprite *s = &a->sprites[i];
         const bool pending = tp_id128_is_nil(s->source_ref) || s->src_key == NULL;
         if (!pending || !s->name) {
@@ -400,18 +427,18 @@ tp_status tp_project_resolve_atlas_sprites(tp_project *p, int atlas_index, const
         }
         char *k = mig_strdup(r->source_key);
         if (!k) {
-            return tp_error_set(err, TP_STATUS_OOM, "tp_project_resolve_atlas_sprites: out of memory");
+            oom = true;
+            break;
         }
-        free(s->src_key);
-        s->src_key = k;
-        s->source_ref = r->source_id;
+        stage[staged] = (rekey_stage){&s->src_key, &s->source_ref, k, r->source_id};
+        staged++;
         /* `name` stays the export-key bridge -- it already equals r->export_key (that
          * is how the record matched), so the name-based apply path is unchanged. */
     }
     /* Animation frame references re-key identically (a frame IS a sprite reference). */
-    for (int ai = 0; ai < a->animation_count; ai++) {
+    for (int ai = 0; ai < a->animation_count && !oom; ai++) {
         tp_project_anim *an = &a->animations[ai];
-        for (int f = 0; f < an->frame_count; f++) {
+        for (int f = 0; f < an->frame_count && !oom; f++) {
             tp_project_frame *fr = &an->frames[f];
             const bool fpending = tp_id128_is_nil(fr->source_ref) || fr->src_key == NULL;
             if (!fpending || !fr->name) {
@@ -424,13 +451,28 @@ tp_status tp_project_resolve_atlas_sprites(tp_project *p, int atlas_index, const
             }
             char *k = mig_strdup(r->source_key);
             if (!k) {
-                return tp_error_set(err, TP_STATUS_OOM, "tp_project_resolve_atlas_sprites: out of memory");
+                oom = true;
+                break;
             }
-            free(fr->src_key);
-            fr->src_key = k;
-            fr->source_ref = r->source_id;
+            stage[staged] = (rekey_stage){&fr->src_key, &fr->source_ref, k, r->source_id};
+            staged++;
         }
     }
+
+    if (oom) {
+        for (size_t j = 0; j < staged; j++) {
+            free(stage[j].new_key); /* nothing committed to the model yet -- model unchanged */
+        }
+        free(stage);
+        return tp_error_set(err, TP_STATUS_OOM, "tp_project_resolve_atlas_sprites: out of memory");
+    }
+    /* Commit: every strdup succeeded, so re-key the staged records in one sweep. */
+    for (size_t j = 0; j < staged; j++) {
+        free(*stage[j].key_slot); /* old src_key (NULL for a pending record) */
+        *stage[j].key_slot = stage[j].new_key;
+        *stage[j].ref_slot = stage[j].new_ref;
+    }
+    free(stage);
     return TP_STATUS_OK;
 }
 
