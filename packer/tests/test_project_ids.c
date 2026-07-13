@@ -544,6 +544,134 @@ void test_migration_golden_v3_to_v4(void) {
     tp_project_destroy(p);
 }
 
+/* 9 (§5.5, decision 0007 RESOLVED). A migrated v1 project attached WRITABLE persists
+ *    fresh RANDOM ids on its first save, NOT the loader's stable synthetic ids. Read-only
+ *    stability is unchanged (test 1); the writable promote re-randomizes every
+ *    loader-synthesized id. The injected RNG makes "random" reproducible. */
+void test_migrated_v1_writable_promote_random(void) {
+    char path[512];
+    join(path, sizeof path, "v1_prom.ntpacker_project");
+    write_text(path, V1_MIN);
+
+    tp_project *ro = NULL; /* read-only snapshot: keeps the synthetic ids for compare */
+    tp_project *w = NULL;  /* the writable copy we promote */
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, tp_project_load(path, &ro, &err), err.msg);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, tp_project_load(path, &w, &err), err.msg);
+
+    tp_id128 syn_atlas = atlas0_id(ro);
+    tp_id128 syn_anim = anim0_id(ro);
+    tp_id128 syn_target = target0_id(ro);
+    TEST_ASSERT_FALSE(tp_id128_is_nil(syn_atlas)); /* synthesized, non-nil */
+
+    uint8_t ctr = 0;
+    tp_rng rng = {det_fill, &ctr};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_promote_ids(w, &rng, &err));
+
+    /* every synthesized id was RE-RANDOMIZED (differs from the synthetic value) */
+    TEST_ASSERT_FALSE(tp_id128_eq(syn_atlas, atlas0_id(w)));
+    TEST_ASSERT_FALSE(tp_id128_eq(syn_anim, anim0_id(w)));
+    TEST_ASSERT_FALSE(tp_id128_eq(syn_target, target0_id(w)));
+    TEST_ASSERT_FALSE(tp_id128_is_nil(atlas0_id(w)));
+
+    /* reproducible: an identical seeded RNG on a fresh load yields identical ids */
+    tp_project *w2 = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_load(path, &w2, &err));
+    uint8_t ctr2 = 0;
+    tp_rng rng2 = {det_fill, &ctr2};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_promote_ids(w2, &rng2, &err));
+    TEST_ASSERT_TRUE(tp_id128_eq(atlas0_id(w), atlas0_id(w2)));
+    TEST_ASSERT_TRUE(tp_id128_eq(anim0_id(w), anim0_id(w2)));
+    TEST_ASSERT_TRUE(tp_id128_eq(target0_id(w), target0_id(w2)));
+
+    /* second promote is a no-op (nothing nil or synthetic remains) */
+    tp_id128 a_after = atlas0_id(w);
+    uint8_t ctr3 = 123;
+    tp_rng rng3 = {det_fill, &ctr3};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_promote_ids(w, &rng3, &err));
+    TEST_ASSERT_TRUE(tp_id128_eq(a_after, atlas0_id(w)));
+
+    /* first save persists the RANDOM ids; a second save is byte-identical */
+    char s1[512];
+    char s2[512];
+    join(s1, sizeof s1, "v1_prom_a.ntpacker_project");
+    join(s2, sizeof s2, "v1_prom_b.ntpacker_project");
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_save(w, s1, &err));
+    tp_project *rl = NULL;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, tp_project_load(s1, &rl, &err), err.msg);
+    TEST_ASSERT_TRUE(tp_id128_eq(a_after, atlas0_id(rl))); /* persisted the random id, not synthetic */
+    TEST_ASSERT_FALSE(tp_id128_eq(syn_atlas, atlas0_id(rl)));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_save(rl, s2, &err));
+    size_t n1 = 0;
+    size_t n2 = 0;
+    char *b1 = read_all(s1, &n1);
+    char *b2 = read_all(s2, &n2);
+    TEST_ASSERT_EQUAL_size_t(n1, n2);
+    TEST_ASSERT_EQUAL_INT(0, memcmp(b1, b2, n1));
+    free(b1);
+    free(b2);
+
+    tp_project_destroy(ro);
+    tp_project_destroy(w);
+    tp_project_destroy(w2);
+    tp_project_destroy(rl);
+}
+
+/* 10 (§5.5, v2 partial-synthesis correctness). A v2 file has REAL atlas/anim/target
+ *    ids but a synthesized SOURCE id (bare-string source). A writable promote must
+ *    re-randomize ONLY the source id; the real atlas/anim/target ids stay untouched.
+ *    This pins PER-ENTITY synthetic tracking -- a project-level "was migrated" flag
+ *    would wrongly re-randomize the real ids too. */
+void test_migrated_v2_partial_promote_sources_only(void) {
+    const char *atlas_id = "atlas_0000000000000000000000000000abcd";
+    const char *anim_id = "anim_00000000000000000000000000000009";
+    const char *target_id = "target_00000000000000000000000000000001";
+    char v2[768];
+    (void)snprintf(v2, sizeof v2,
+                   "{\n  \"version\": 2,\n  \"atlases\": [\n"
+                   "    { \"name\": \"hero\", \"id\": \"%s\",\n"
+                   "      \"sources\": [ \"sprites\" ],\n"
+                   "      \"animations\": [ { \"id\": \"%s\", \"name\": \"walk\", \"frames\": [\"a\"] } ],\n"
+                   "      \"targets\": [ { \"id\": \"%s\", \"exporter_id\": \"json-neotolis\", \"out_path\": \"out/hero\" } ] }\n"
+                   "  ]\n}\n",
+                   atlas_id, anim_id, target_id);
+    char path[512];
+    join(path, sizeof path, "v2_partial.ntpacker_project");
+    write_text(path, v2);
+
+    tp_project *p = NULL;
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, tp_project_load(path, &p, &err), err.msg);
+
+    tp_id128 real_atlas = atlas0_id(p);
+    tp_id128 real_anim = anim0_id(p);
+    tp_id128 real_target = target0_id(p);
+    TEST_ASSERT_EQUAL_INT(1, p->atlases[0].source_count);
+    tp_id128 syn_source = p->atlases[0].sources[0].id;
+    TEST_ASSERT_FALSE(tp_id128_is_nil(syn_source)); /* source id synthesized on load */
+
+    uint8_t ctr = 0;
+    tp_rng rng = {det_fill, &ctr};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_promote_ids(p, &rng, &err));
+
+    /* ONLY the source id re-randomized; the real atlas/anim/target ids are UNTOUCHED */
+    tp_id128 new_source = p->atlases[0].sources[0].id;
+    TEST_ASSERT_FALSE(tp_id128_eq(syn_source, new_source));
+    TEST_ASSERT_FALSE(tp_id128_is_nil(new_source));
+    TEST_ASSERT_TRUE(tp_id128_eq(real_atlas, atlas0_id(p)));
+    TEST_ASSERT_TRUE(tp_id128_eq(real_anim, anim0_id(p)));
+    TEST_ASSERT_TRUE(tp_id128_eq(real_target, target0_id(p)));
+
+    /* idempotent: a second promote changes nothing (source now non-synthetic) */
+    uint8_t ctr2 = 55;
+    tp_rng rng2 = {det_fill, &ctr2};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_promote_ids(p, &rng2, &err));
+    TEST_ASSERT_TRUE(tp_id128_eq(new_source, p->atlases[0].sources[0].id));
+    TEST_ASSERT_TRUE(tp_id128_eq(real_atlas, atlas0_id(p)));
+
+    tp_project_destroy(p);
+}
+
 /* 8. every checked-in v1 fixture still loads under the current schema (forward-
  *    compat); the intentionally-malformed one still fails cleanly (structured error). */
 void test_checked_in_v1_fixtures_still_load(void) {
@@ -583,6 +711,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_migration_golden_v1_to_v4);
     RUN_TEST(test_migration_golden_v2_to_v4_sources);
     RUN_TEST(test_migration_golden_v3_to_v4);
+    RUN_TEST(test_migrated_v1_writable_promote_random);
+    RUN_TEST(test_migrated_v2_partial_promote_sources_only);
     RUN_TEST(test_checked_in_v1_fixtures_still_load);
     return UNITY_END();
 }
