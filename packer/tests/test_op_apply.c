@@ -220,6 +220,66 @@ void test_apply_sprite_ops(void) {
     tp_project_destroy(p);
 }
 
+/* F2-05a: a sprite op with a NIL source_id is a PENDING (name-keyed) override -- what
+ * the CLI `sprite set`/`unset` builds on a SOURCE-LESS atlas (an override added by
+ * export-key before any source scan). Apply keys it by the export bridge and leaves
+ * the record pending; a NON-nil unknown source still rejects. */
+void test_apply_sprite_pending_no_source(void) {
+    tp_project *p = tp_project_create();
+    TEST_ASSERT_NOT_NULL(p);
+    tp_id128 aid = id_of(0x21);
+    p->atlases[0].id = aid; /* address the source-less default atlas by a real id */
+    p->atlases[0].id_synthetic = false;
+    TEST_ASSERT_EQUAL_INT(0, p->atlases[0].source_count); /* no sources at all */
+    tp_op_reject rej;
+    tp_operation op;
+
+    memset(&op, 0, sizeof op); /* sprite.override.set, NIL source -> pending override */
+    op.kind = TP_OP_SPRITE_OVERRIDE_SET;
+    op.atlas_id = aid;
+    op.u.sprite_set.source_id = tp_id128_nil();
+    op.u.sprite_set.src_key = (char *)"hero";
+    op.u.sprite_set.mask = TP_SPF_ORIGIN;
+    op.u.sprite_set.origin_x = 0.25F;
+    op.u.sprite_set.origin_y = 0.75F;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_operation_apply(p, &op, &rej));
+    tp_project_sprite *s = tp_project_atlas_find_sprite(&p->atlases[0], "hero");
+    TEST_ASSERT_NOT_NULL(s);
+    TEST_ASSERT_TRUE(s->origin_x == 0.25F);
+    TEST_ASSERT_TRUE(tp_id128_is_nil(s->source_ref)); /* stays pending (name-keyed) */
+
+    memset(&op, 0, sizeof op); /* sprite.name.set, NIL source */
+    op.kind = TP_OP_SPRITE_NAME_SET;
+    op.atlas_id = aid;
+    op.u.sprite_name.source_id = tp_id128_nil();
+    op.u.sprite_name.src_key = (char *)"hero";
+    op.u.sprite_name.name = (char *)"HERO";
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_operation_apply(p, &op, &rej));
+    s = tp_project_atlas_find_sprite(&p->atlases[0], "hero");
+    TEST_ASSERT_NOT_NULL(s);
+    TEST_ASSERT_EQUAL_STRING("HERO", s->rename);
+
+    memset(&op, 0, sizeof op); /* sprite.override.clear ALL, NIL source -> drop record */
+    op.kind = TP_OP_SPRITE_OVERRIDE_CLEAR;
+    op.atlas_id = aid;
+    op.u.sprite_clear.source_id = tp_id128_nil();
+    op.u.sprite_clear.src_key = (char *)"hero";
+    op.u.sprite_clear.mask = TP_SPF_ALL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_operation_apply(p, &op, &rej));
+    TEST_ASSERT_NULL(tp_project_atlas_find_sprite(&p->atlases[0], "hero"));
+    /* clear on an absent record is an idempotent OK no-op. */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_operation_apply(p, &op, &rej));
+
+    memset(&op, 0, sizeof op); /* a NON-nil unknown source still rejects (regression guard) */
+    op.kind = TP_OP_SPRITE_OVERRIDE_SET;
+    op.atlas_id = aid;
+    op.u.sprite_set.source_id = id_of(0x66);
+    op.u.sprite_set.src_key = (char *)"hero";
+    op.u.sprite_set.mask = TP_SPF_ORIGIN;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_NOT_FOUND, tp_operation_apply(p, &op, &rej));
+    tp_project_destroy(p);
+}
+
 /* ---- forward + error per kind: animation --------------------------------- */
 
 void test_apply_anim_ops(void) {
@@ -706,6 +766,7 @@ int main(void) {
     RUN_TEST(test_apply_atlas_ops);
     RUN_TEST(test_apply_source_ops);
     RUN_TEST(test_apply_sprite_ops);
+    RUN_TEST(test_apply_sprite_pending_no_source);
     RUN_TEST(test_apply_anim_ops);
     RUN_TEST(test_apply_target_ops);
     RUN_TEST(test_alloc_fail_before_commit);

@@ -240,7 +240,12 @@ tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_
             return TP_STATUS_OK;
 
         case TP_OP_SPRITE_OVERRIDE_SET:
-            if (!find_source(a, op->u.sprite_set.source_id)) {
+            /* A NIL source_id is a PENDING (name-keyed) override -- an override added by
+             * export-key before any source scan (tp_project_sprite's documented pending
+             * state, decision 0010 §2). The CLI `sprite set` adds overrides this way on a
+             * source-less atlas; apply keys by the export-key bridge and leaves the record
+             * pending. A NON-nil source_id must still resolve to a real source. */
+            if (!tp_id128_is_nil(op->u.sprite_set.source_id) && !find_source(a, op->u.sprite_set.source_id)) {
                 return tp_op__reject(rej, TP_STATUS_NOT_FOUND, "source_id", "no source with that id in the atlas");
             }
             if (!op->u.sprite_set.src_key || op->u.sprite_set.src_key[0] == '\0') {
@@ -248,7 +253,8 @@ tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_
             }
             return validate_sprite_set(&op->u.sprite_set, rej);
         case TP_OP_SPRITE_OVERRIDE_CLEAR:
-            if (!find_source(a, op->u.sprite_clear.source_id)) {
+            /* NIL source_id = pending (name-keyed) override (see .SET above). */
+            if (!tp_id128_is_nil(op->u.sprite_clear.source_id) && !find_source(a, op->u.sprite_clear.source_id)) {
                 return tp_op__reject(rej, TP_STATUS_NOT_FOUND, "source_id", "no source with that id in the atlas");
             }
             if (!op->u.sprite_clear.src_key || op->u.sprite_clear.src_key[0] == '\0') {
@@ -259,7 +265,8 @@ tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_
             }
             return TP_STATUS_OK;
         case TP_OP_SPRITE_NAME_SET:
-            if (!find_source(a, op->u.sprite_name.source_id)) {
+            /* NIL source_id = pending (name-keyed) override (see .SET above). */
+            if (!tp_id128_is_nil(op->u.sprite_name.source_id) && !find_source(a, op->u.sprite_name.source_id)) {
                 return tp_op__reject(rej, TP_STATUS_NOT_FOUND, "source_id", "no source with that id in the atlas");
             }
             if (!op->u.sprite_name.src_key || op->u.sprite_name.src_key[0] == '\0') {
