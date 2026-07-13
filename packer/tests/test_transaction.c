@@ -25,6 +25,8 @@
 #include "tp_core/tp_transaction.h"
 #include "tp_txn_internal.h"            /* clone fault seam */
 #include "tp_op_internal.h"             /* tp_op__test_set_alloc_fail */
+#include "tp_project_clone_arena.h"     /* P-01: arena-backed clone under test */
+#include "tp_core/tp_arena.h"
 #include "unity.h"
 
 void setUp(void) {}
@@ -128,6 +130,120 @@ void test_clone_alloc_fault_sweep(void) {
     tp_project *c2 = tp_project_clone(p);
     TEST_ASSERT_NOT_NULL(c2);
     tp_project_destroy(c2);
+    tp_project_destroy(p);
+}
+
+/* ---- P-01 arena-backed clone: byte-identity pin --------------------------- */
+
+static char *t_dup(const char *s) {
+    size_t n = strlen(s) + 1U;
+    char *p = (char *)malloc(n);
+    TEST_ASSERT_NOT_NULL(p);
+    memcpy(p, s, n);
+    return p;
+}
+
+/* A MAXIMAL project: every persistent field non-default -- the strongest possible
+ * byte-identity pin for the clone fork (mirrors test_diff.c make_maximal). */
+static tp_project *build_maximal(void) {
+    tp_project *p = tp_project_create();
+    TEST_ASSERT_NOT_NULL(p);
+    tp_project_atlas *a = &p->atlases[0];
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_set_atlas_name(a, "maxatlas"));
+    a->max_size = 4096;
+    a->padding = 9;
+    a->margin = 3;
+    a->extrude = 5;
+    a->alpha_threshold = 123;
+    a->max_vertices = 7;
+    a->shape = 2;
+    a->allow_transform = false; /* default true  */
+    a->power_of_two = true;     /* default false */
+    a->pixels_per_unit = 3.5F;
+
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_source_kind(a, "art/hero", TP_SOURCE_KIND_FOLDER));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_source_kind(a, "art/tiles.png", TP_SOURCE_KIND_FILE));
+
+    /* sprite A: pending name-bridge, every other field non-default (set FULLY before
+     * the next add_sprite, which may realloc the sprites array and dangle `sp`). */
+    tp_project_sprite *sp = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_sprite(a, "hero/walk_01", &sp));
+    sp->origin_x = 0.25F;
+    sp->origin_y = 0.75F;
+    sp->slice9_lrtb[0] = 4;
+    sp->slice9_lrtb[1] = 5;
+    sp->slice9_lrtb[2] = 8;
+    sp->slice9_lrtb[3] = 9;
+    sp->rename = t_dup("player_walk_01");
+    sp->ov_shape = 0;
+    sp->ov_allow_rotate = 0;
+    sp->ov_max_vertices = 6;
+    sp->ov_margin = 3;
+    sp->ov_extrude = 5;
+    /* sprite B: RESOLVED {source, key} -- exercises the src_key dup. */
+    tp_project_sprite *sp2 = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_sprite(a, "grass", &sp2));
+    sp2->origin_x = 0.1F;
+
+    tp_project_anim *an = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_animation(a, "walk", &an));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "hero/walk_01"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "hero/walk_02"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "grass")); /* -> resolved below */
+    an->fps = 24.0F;
+    an->playback = 2;
+    an->flip_h = true;
+    an->flip_v = true;
+
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(a, "json-neotolis", "out/hero.json", NULL));
+    tp_project_target *t2 = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(a, "defold", "out/hero.tpinfo", &t2));
+    t2->enabled = false; /* default true */
+
+    uint8_t ctr = 7;
+    tp_rng rng = {det_fill, &ctr};
+    tp_error err;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_promote_ids(p, &rng, &err));
+    tp_id128 src_file = a->sources[1].id;
+    sp2->source_ref = src_file;
+    sp2->src_key = t_dup("grass.png");
+    an->frames[2].source_ref = src_file;
+    an->frames[2].src_key = t_dup("grass.png");
+    return p;
+}
+
+/* The arena clone serializes BYTE-IDENTICAL to the source AND to the malloc clone,
+ * on a maximal project; and is independent of later source mutation. No-leak is
+ * structural: the whole clone is freed by one tp_arena_destroy (ASan/LSan in CI). */
+void test_clone_arena_byte_identity(void) {
+    tp_project *p = build_maximal();
+    tp_project *mc = tp_project_clone(p); /* production malloc clone, cross-check */
+    TEST_ASSERT_NOT_NULL(mc);
+
+    size_t fp = tp_project_clone_arena_footprint(p);
+    TEST_ASSERT_TRUE(fp > 0U);
+    tp_arena *ar = tp_arena_create(fp);
+    TEST_ASSERT_NOT_NULL(ar);
+    tp_project *ac = tp_project_clone_into_arena(p, ar);
+    TEST_ASSERT_NOT_NULL(ac);
+
+    char *bp = serialize(p);
+    char *bm = serialize(mc);
+    char *ba = serialize(ac);
+    TEST_ASSERT_EQUAL_STRING(bp, ba); /* arena clone == source: byte-identity is sacred */
+    TEST_ASSERT_EQUAL_STRING(bm, ba); /* arena clone == malloc clone */
+
+    /* independence: mutating the source does not perturb the arena clone's bytes. */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_set_atlas_name(&p->atlases[0], "poked"));
+    char *ba2 = serialize(ac);
+    TEST_ASSERT_EQUAL_STRING(ba, ba2);
+
+    free(bp);
+    free(bm);
+    free(ba);
+    free(ba2);
+    tp_arena_destroy(ar); /* one-shot free of the entire clone: no per-field leak */
+    tp_project_destroy(mc);
     tp_project_destroy(p);
 }
 
@@ -1017,6 +1133,7 @@ int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_clone_byte_identity);
     RUN_TEST(test_clone_alloc_fault_sweep);
+    RUN_TEST(test_clone_arena_byte_identity);
     RUN_TEST(test_revision_check);
     RUN_TEST(test_commit_and_revision);
     RUN_TEST(test_batch_equals_one_by_one);
