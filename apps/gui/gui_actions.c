@@ -33,6 +33,7 @@
 bool s_pending_open, s_pending_save, s_pending_save_as, s_pending_add_files, s_pending_add_folder, s_pending_add_atlas, s_pending_refresh;
 bool s_pending_pack, s_pending_export;
 bool s_pending_commit_edit; /* a press landed outside the active inline-edit field -> commit it */
+bool s_pending_commit_edit_enter; /* Enter in the inline editor -> commit it (deferred, non-force) */
 bool s_pending_add_anim;    /* "+ Animation" -> append empty animation, select it */
 bool s_pending_create_anim; /* "Create animation from selection" */
 bool s_pending_open_preview;/* open the anim preview player on s_ctx_anim / s_sel_anim */
@@ -50,6 +51,209 @@ bool s_confirm_open;
 int s_modal_action;
 double s_last_pack_ms;      /* wall-clock ms of the last successful pack (for the stats line) */
 int s_last_pack_atlas = -1; /* which atlas that timing belongs to */
+
+// #region deferred model-edit queue (F2-05b-i, decision 0015)
+/* A commit clone-swaps the model + frees the old project, so declare_* render fns must not
+ * commit while holding a live atlas/sprite/anim/target pointer. They ENQUEUE the edit here;
+ * drain_edits() (run at frame top from apply_pending, no live pointer held) replays each via
+ * the self-contained gui_project_* setters. The queue grows (never a fixed slot) so no edit is
+ * ever dropped if two land in one frame; typically it holds 0 or 1. */
+typedef enum {
+    GEDIT_ATLAS_INT = 0,
+    GEDIT_ATLAS_BOOL,
+    GEDIT_ATLAS_FLOAT,
+    GEDIT_SPRITE_ORIGIN,
+    GEDIT_SPRITE_SLICE9,
+    GEDIT_SPRITE_OVERRIDE,
+    GEDIT_ANIM_FPS,
+    GEDIT_ANIM_PLAYBACK,
+    GEDIT_ANIM_FLIP,
+    GEDIT_ANIM_FRAME_REMOVE,
+    GEDIT_ANIM_FRAME_MOVE,
+    GEDIT_TARGET
+} gui_edit_kind;
+
+typedef struct {
+    gui_edit_kind kind;
+    int atlas;
+    int i0, i1, i2; /* field/which/anim_index/target_index; value/frame_index/playback; delta */
+    float f0, f1;
+    bool b0, b1;
+    char s0[256]; /* sprite name / exporter id */
+    char s1[256]; /* out path */
+} gui_edit;
+
+static gui_edit *s_edits;
+static int s_edit_count;
+static int s_edit_cap;
+
+/* Appends a copy of `e` to the queue; on OOM the edit is dropped (best-effort, like the
+ * history push) rather than crashing. */
+static void edit_push(const gui_edit *e) {
+    if (s_edit_count == s_edit_cap) {
+        int nc = s_edit_cap ? s_edit_cap * 2 : 8;
+        gui_edit *ne = (gui_edit *)realloc(s_edits, (size_t)nc * sizeof *ne);
+        if (!ne) {
+            return;
+        }
+        s_edits = ne;
+        s_edit_cap = nc;
+    }
+    s_edits[s_edit_count++] = *e;
+}
+
+void gui_edit_atlas_int(int atlas, gui_atlas_field field, int value) {
+    gui_edit e = {0};
+    e.kind = GEDIT_ATLAS_INT;
+    e.atlas = atlas;
+    e.i0 = (int)field;
+    e.i1 = value;
+    edit_push(&e);
+}
+void gui_edit_atlas_bool(int atlas, gui_atlas_field field, bool value) {
+    gui_edit e = {0};
+    e.kind = GEDIT_ATLAS_BOOL;
+    e.atlas = atlas;
+    e.i0 = (int)field;
+    e.b0 = value;
+    edit_push(&e);
+}
+void gui_edit_atlas_float(int atlas, gui_atlas_field field, float value) {
+    gui_edit e = {0};
+    e.kind = GEDIT_ATLAS_FLOAT;
+    e.atlas = atlas;
+    e.i0 = (int)field;
+    e.f0 = value;
+    edit_push(&e);
+}
+void gui_edit_sprite_origin(int atlas, const char *sprite_name, float ox, float oy) {
+    gui_edit e = {0};
+    e.kind = GEDIT_SPRITE_ORIGIN;
+    e.atlas = atlas;
+    e.f0 = ox;
+    e.f1 = oy;
+    (void)snprintf(e.s0, sizeof e.s0, "%s", sprite_name ? sprite_name : "");
+    edit_push(&e);
+}
+void gui_edit_sprite_slice9(int atlas, const char *sprite_name, int lrtb_index, int value) {
+    gui_edit e = {0};
+    e.kind = GEDIT_SPRITE_SLICE9;
+    e.atlas = atlas;
+    e.i0 = lrtb_index;
+    e.i1 = value;
+    (void)snprintf(e.s0, sizeof e.s0, "%s", sprite_name ? sprite_name : "");
+    edit_push(&e);
+}
+void gui_edit_sprite_override(int atlas, const char *sprite_name, gui_sprite_ov which, int value) {
+    gui_edit e = {0};
+    e.kind = GEDIT_SPRITE_OVERRIDE;
+    e.atlas = atlas;
+    e.i0 = (int)which;
+    e.i1 = value;
+    (void)snprintf(e.s0, sizeof e.s0, "%s", sprite_name ? sprite_name : "");
+    edit_push(&e);
+}
+void gui_edit_anim_fps(int atlas, int anim_index, float fps) {
+    gui_edit e = {0};
+    e.kind = GEDIT_ANIM_FPS;
+    e.atlas = atlas;
+    e.i0 = anim_index;
+    e.f0 = fps;
+    edit_push(&e);
+}
+void gui_edit_anim_playback(int atlas, int anim_index, int playback) {
+    gui_edit e = {0};
+    e.kind = GEDIT_ANIM_PLAYBACK;
+    e.atlas = atlas;
+    e.i0 = anim_index;
+    e.i1 = playback;
+    edit_push(&e);
+}
+void gui_edit_anim_flip(int atlas, int anim_index, bool flip_h, bool flip_v) {
+    gui_edit e = {0};
+    e.kind = GEDIT_ANIM_FLIP;
+    e.atlas = atlas;
+    e.i0 = anim_index;
+    e.b0 = flip_h;
+    e.b1 = flip_v;
+    edit_push(&e);
+}
+void gui_edit_anim_frame_remove(int atlas, int anim_index, int frame_index) {
+    gui_edit e = {0};
+    e.kind = GEDIT_ANIM_FRAME_REMOVE;
+    e.atlas = atlas;
+    e.i0 = anim_index;
+    e.i1 = frame_index;
+    edit_push(&e);
+}
+void gui_edit_anim_frame_move(int atlas, int anim_index, int frame_index, int delta) {
+    gui_edit e = {0};
+    e.kind = GEDIT_ANIM_FRAME_MOVE;
+    e.atlas = atlas;
+    e.i0 = anim_index;
+    e.i1 = frame_index;
+    e.i2 = delta;
+    edit_push(&e);
+}
+void gui_edit_target(int atlas, int index, const char *exporter_id, const char *out_path, bool enabled) {
+    gui_edit e = {0};
+    e.kind = GEDIT_TARGET;
+    e.atlas = atlas;
+    e.i0 = index;
+    e.b0 = enabled;
+    (void)snprintf(e.s0, sizeof e.s0, "%s", exporter_id ? exporter_id : "");
+    (void)snprintf(e.s1, sizeof e.s1, "%s", out_path ? out_path : "");
+    edit_push(&e);
+}
+
+/* Replays every queued edit through the committing setters, then clears the queue. Runs at
+ * frame top (apply_pending) with NO live declare-fn pointer held, so the per-edit clone-swap
+ * is safe. Each setter re-fetches by index/name internally. */
+static void drain_edits(void) {
+    for (int i = 0; i < s_edit_count; i++) {
+        const gui_edit *e = &s_edits[i];
+        switch (e->kind) {
+            case GEDIT_ATLAS_INT:
+                (void)gui_project_set_atlas_setting(e->atlas, (gui_atlas_field)e->i0, e->i1, 0.0F);
+                break;
+            case GEDIT_ATLAS_BOOL:
+                (void)gui_project_set_atlas_setting(e->atlas, (gui_atlas_field)e->i0, e->b0 ? 1 : 0, 0.0F);
+                break;
+            case GEDIT_ATLAS_FLOAT:
+                (void)gui_project_set_atlas_setting(e->atlas, (gui_atlas_field)e->i0, 0, e->f0);
+                break;
+            case GEDIT_SPRITE_ORIGIN:
+                (void)gui_project_set_sprite_origin(e->atlas, e->s0, e->f0, e->f1);
+                break;
+            case GEDIT_SPRITE_SLICE9:
+                (void)gui_project_set_sprite_slice9(e->atlas, e->s0, e->i0, e->i1);
+                break;
+            case GEDIT_SPRITE_OVERRIDE:
+                (void)gui_project_set_sprite_override(e->atlas, e->s0, (gui_sprite_ov)e->i0, e->i1);
+                break;
+            case GEDIT_ANIM_FPS:
+                (void)gui_project_set_anim_fps(e->atlas, e->i0, e->f0);
+                break;
+            case GEDIT_ANIM_PLAYBACK:
+                (void)gui_project_set_anim_playback(e->atlas, e->i0, e->i1);
+                break;
+            case GEDIT_ANIM_FLIP:
+                (void)gui_project_set_anim_flip(e->atlas, e->i0, e->b0, e->b1);
+                break;
+            case GEDIT_ANIM_FRAME_REMOVE:
+                (void)gui_project_anim_remove_frame(e->atlas, e->i0, e->i1);
+                break;
+            case GEDIT_ANIM_FRAME_MOVE:
+                (void)gui_project_anim_move_frame(e->atlas, e->i0, e->i1, e->i2);
+                break;
+            case GEDIT_TARGET:
+                (void)gui_project_set_target(e->atlas, e->i0, e->s0, e->s1, e->b0);
+                break;
+        }
+    }
+    s_edit_count = 0;
+}
+// #endregion
 
 /* Refresh-vs-pack honesty latch (P2): a Refresh dirties the sources on DISK without touching the model,
  * so model_changed_since (which only diffs the serialized model) can't see it. If a Refresh lands while
@@ -971,6 +1175,13 @@ static void poll_async(void) {
     if (gui_project_take_id_error(id_err, sizeof id_err)) {
         set_statusf_ex(STATUS_ERROR, "Structural id assignment failed: %s", id_err);
     }
+    /* Surface a pending transaction REJECT (core rejected a mutator's op -- out-of-range value
+     * or bad reference): the model was left byte-unchanged, so report it as a soft error
+     * (F2-05b-i). In practice the widgets clamp valid ranges, so this rarely fires. */
+    char op_err[256];
+    if (gui_project_take_op_error(op_err, sizeof op_err)) {
+        set_statusf_ex(STATUS_WARNING, "Edit rejected: %s", op_err);
+    }
 }
 // #endregion
 
@@ -1056,6 +1267,20 @@ void apply_pending(void) {
         commit_active_edit(true);
     }
     s_pending_commit_edit = false;
+    /* Enter pressed in an inline editor last frame -> commit it here (deferred, non-force: an
+     * invalid atlas/anim name keeps the editor open). Deferring the commit off the declare pass is
+     * what keeps declare_left_panel / the anim editor from committing while holding proj/a/an
+     * (F2-05b-i UAF fix). */
+    if (s_edit_kind != EDIT_NONE && s_pending_commit_edit_enter) {
+        commit_active_edit(false);
+    }
+    s_pending_commit_edit_enter = false;
+
+    /* Drain the deferred model-edit queue (settings / overrides / anim knobs / target edits the
+     * declare fns enqueued last frame). Runs here, at frame top, with no live declare-fn pointer
+     * held -- so the per-edit clone-swap can never dangle a panel's cached atlas/sprite/anim/target
+     * pointer (decision 0015). */
+    drain_edits();
 
     if (s_modal_action == MODAL_SAVE) {
         do_save();

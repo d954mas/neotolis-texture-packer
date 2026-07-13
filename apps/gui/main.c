@@ -859,6 +859,56 @@ static void frame(void) {
 }
 // #endregion
 
+// #region dev seam: --parity (headless saved-bytes byte-parity check)
+/* Applies a FIXED non-creating edit sequence to `in` through the OP-based gui_project_*
+ * setters (the F2-05b-i cutover) and saves it to `out`. Non-creating (rename/settings/
+ * override/target on an already-fixed-id project) => deterministic bytes: no random ids
+ * are minted, so `out` is byte-comparable to the same logical edits applied by the
+ * byte-identity-proven CLI (scripts/gui_parity_check.sh). Runs before any window/GL init
+ * (pure model layer). Returns 0 on success, 2 on open/save failure. */
+static int gui_run_parity(const char *in, const char *out) {
+    char err[256] = {0};
+    gui_project_init();
+    if (gui_project_open(in, err, sizeof err) != TP_STATUS_OK) {
+        (void)fprintf(stderr, "parity: open '%s' failed: %s\n", in, err);
+        return 2;
+    }
+    /* atlas rename + all 10 knobs (each a single-knob atlas.settings.set transaction; the
+     * final atlas is identical to the CLI's one multi-knob `set`). */
+    (void)gui_project_set_atlas_name(0, "hero_atlas");
+    (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, 7, 0.0F);
+    (void)gui_project_set_atlas_setting(0, GUI_ATLAS_MARGIN, 3, 0.0F);
+    (void)gui_project_set_atlas_setting(0, GUI_ATLAS_EXTRUDE, 2, 0.0F);
+    (void)gui_project_set_atlas_setting(0, GUI_ATLAS_SHAPE, 0, 0.0F);
+    (void)gui_project_set_atlas_setting(0, GUI_ATLAS_ALPHA_THRESHOLD, 42, 0.0F);
+    (void)gui_project_set_atlas_setting(0, GUI_ATLAS_MAX_VERTICES, 5, 0.0F);
+    (void)gui_project_set_atlas_setting(0, GUI_ATLAS_MAX_SIZE, 2048, 0.0F);
+    (void)gui_project_set_atlas_setting(0, GUI_ATLAS_ALLOW_TRANSFORM, 0, 0.0F);
+    (void)gui_project_set_atlas_setting(0, GUI_ATLAS_POWER_OF_TWO, 1, 0.0F);
+    (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PIXELS_PER_UNIT, 0, 64.0F);
+    /* a pending (name-keyed) sprite override -- shape + origin + rename on an arbitrary key
+     * (matches the CLI `sprite set <atlas> psp shape=0 origin=0.25,0.75 rename=psp_final`). */
+    (void)gui_project_set_sprite_rename(0, "psp", "psp_final");
+    (void)gui_project_set_sprite_override(0, "psp", GUI_SPRITE_OV_SHAPE, 0);
+    (void)gui_project_set_sprite_origin(0, "psp", 0.25F, 0.75F);
+    (void)gui_project_set_sprite_slice9(0, "psp", 0, 4);
+    /* target 0: keep its exporter (read from the model -- no exporter-id literal), set path. */
+    {
+        tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), 0);
+        if (a && a->target_count > 0) {
+            (void)gui_project_set_target(0, 0, a->targets[0].exporter_id, "out/hero", true);
+        }
+    }
+    if (gui_project_save_as(out, err, sizeof err) != TP_STATUS_OK) {
+        (void)fprintf(stderr, "parity: save '%s' failed: %s\n", out, err);
+        return 2;
+    }
+    (void)fprintf(stdout, "parity: wrote %s\n", out);
+    gui_project_shutdown();
+    return 0;
+}
+// #endregion
+
 // #region main + init/shutdown
 int main(int argc, char *argv[]) {
     nt_engine_config_t config = {0};
@@ -868,6 +918,14 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     nt_log_info("ntpacker-gui: %s build (%s)", nt_engine_build_string(), nt_engine_preset_string());
+
+    /* dev seam: --parity <in> <out> runs the headless saved-bytes byte-parity check and exits
+     * BEFORE any window/GL init (pure model layer). */
+    for (int i = 1; i + 2 < argc; i++) {
+        if (strcmp(argv[i], "--parity") == 0) {
+            return gui_run_parity(argv[i + 1], argv[i + 2]);
+        }
+    }
 
     /* dev screenshot flags + optional project path (first non-flag arg; see gui_shot.c) */
     const char *proj_arg = NULL;

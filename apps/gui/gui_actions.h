@@ -18,7 +18,8 @@
 #include "tp_core/tp_project.h" /* tp_project_anim (current_anim return type) */
 #include "tp_core/tp_model.h"   /* tp_result (preview_target_result return type) */
 
-#include "gui_rows.h" /* sprite_row (start_sprite_edit parameter) */
+#include "gui_project.h" /* gui_atlas_field / gui_sprite_ov (deferred-edit enqueue types) */
+#include "gui_rows.h"    /* sprite_row (start_sprite_edit parameter) */
 
 #ifdef __cplusplus
 extern "C" {
@@ -28,6 +29,7 @@ extern "C" {
 extern bool s_pending_open, s_pending_save, s_pending_save_as, s_pending_add_files, s_pending_add_folder, s_pending_add_atlas, s_pending_refresh;
 extern bool s_pending_pack, s_pending_export;
 extern bool s_pending_commit_edit; /* a press landed outside the active inline-edit field -> commit it */
+extern bool s_pending_commit_edit_enter; /* Enter pressed in the inline editor -> commit it (deferred, non-force) */
 extern bool s_pending_add_anim;    /* "+ Animation" -> append empty animation, select it */
 extern bool s_pending_create_anim; /* "Create animation from selection" */
 extern bool s_pending_open_preview;/* open the anim preview player on s_ctx_anim / s_sel_anim */
@@ -51,6 +53,27 @@ extern int s_modal_action;
 /* --- last successful pack timing (written by the pack actions; read by the canvas stats line) --- */
 extern double s_last_pack_ms;   /* wall-clock ms of the last successful pack (for the stats line) */
 extern int s_last_pack_atlas;   /* which atlas that timing belongs to */
+
+/* --- deferred MODEL-EDIT queue (F2-05b-i, decision 0015) ---
+ * A commit clone-swaps the model and frees the old project, so a declare_* render fn must
+ * NEVER commit while holding a live atlas/sprite/anim/target pointer (the whole
+ * pointer-invalidation UAF class). Instead the declare fns ENQUEUE the edit here (capturing
+ * the atlas INDEX + typed args + copied strings -- never a pointer); apply_pending drains
+ * the queue at frame top, where no live declare-fn pointer is held, by calling the
+ * self-contained gui_project_* setters. One drain per frame = one commit per frame = undo
+ * depth 1 for a drag (gui_history coalescing is unchanged). */
+void gui_edit_atlas_int(int atlas, gui_atlas_field field, int value);
+void gui_edit_atlas_bool(int atlas, gui_atlas_field field, bool value);
+void gui_edit_atlas_float(int atlas, gui_atlas_field field, float value);
+void gui_edit_sprite_origin(int atlas, const char *sprite_name, float ox, float oy);
+void gui_edit_sprite_slice9(int atlas, const char *sprite_name, int lrtb_index, int value);
+void gui_edit_sprite_override(int atlas, const char *sprite_name, gui_sprite_ov which, int value);
+void gui_edit_anim_fps(int atlas, int anim_index, float fps);
+void gui_edit_anim_playback(int atlas, int anim_index, int playback);
+void gui_edit_anim_flip(int atlas, int anim_index, bool flip_h, bool flip_v);
+void gui_edit_anim_frame_remove(int atlas, int anim_index, int frame_index);
+void gui_edit_anim_frame_move(int atlas, int anim_index, int frame_index, int delta);
+void gui_edit_target(int atlas, int index, const char *exporter_id, const char *out_path, bool enabled);
 
 /* --- deferred side-effect pump: lands async pack/export, commits blur edits, drains the queue --- */
 void apply_pending(void);

@@ -107,8 +107,33 @@ bool gui_project_set_atlas_name(int atlas_index, const char *name);
 bool gui_project_set_sprite_rename(int atlas_index, const char *sprite_name, const char *rename);
 
 /* Records an atlas-knob edit that the caller made in place on the tp_project_atlas:
- * funnels through the touch choke point (dirty + preview stale + coalesced undo). */
+ * funnels through the touch choke point (dirty + preview stale + coalesced undo).
+ * NOTE (F2-05b-i): the shipping panels no longer call this -- they build an
+ * atlas.settings.set op via gui_project_set_atlas_setting. It is retained ONLY for the
+ * boundary-excluded dev seam (gui_selftest.c) that pokes atlas knobs in place. */
 void gui_project_touch_setting(void);
+
+/* The 10 atlas packing knobs, as a closed selector for gui_project_set_atlas_setting
+ * (F2-05b-i). Each maps to one tp_atlas_field_mask bit; the panel edits ONE knob per
+ * gesture, so the op carries a single-bit mask (byte-identical to the old in-place write). */
+typedef enum {
+    GUI_ATLAS_MAX_SIZE = 0,
+    GUI_ATLAS_PADDING,
+    GUI_ATLAS_MARGIN,
+    GUI_ATLAS_EXTRUDE,
+    GUI_ATLAS_ALPHA_THRESHOLD,
+    GUI_ATLAS_MAX_VERTICES,
+    GUI_ATLAS_SHAPE,
+    GUI_ATLAS_ALLOW_TRANSFORM,
+    GUI_ATLAS_POWER_OF_TWO,
+    GUI_ATLAS_PIXELS_PER_UNIT
+} gui_atlas_field;
+
+/* Sets ONE atlas knob via an atlas.settings.set transaction (F2-05b-i: replaces the
+ * panels' inline `a->field = v; gui_project_touch_setting()`). The int/bool knobs read
+ * `ivalue` (bool as 0/1); pixels_per_unit reads `fvalue`. Value RANGES are core's now
+ * (the op validates); the widget still parse-clamps. Returns true on commit. */
+bool gui_project_set_atlas_setting(int atlas_index, gui_atlas_field field, int ivalue, float fvalue);
 
 /* --- region-panel per-sprite overrides (sparse: a clear that leaves only defaults
  * drops the override entry, keeping byte-identical saves) --- */
@@ -167,6 +192,12 @@ tp_status gui_project_save_as(const char *path, char *err_out, size_t err_cap);
  * (an OS-RNG fault): returns true once and copies the message into `out` (then clears
  * it), false when none is pending. The UI polls this each frame to surface it. */
 bool gui_project_take_id_error(char *out, size_t cap);
+
+/* Drains a pending transaction REJECT recorded by a mutator whose op(s) core rejected
+ * (out-of-range value / bad reference / OOM). The model is left byte-unchanged on a
+ * reject; this surfaces the structured status to the status-bar soft-error channel.
+ * Returns true once and copies the message into `out` (then clears it). */
+bool gui_project_take_op_error(char *out, size_t cap);
 
 #ifdef __cplusplus
 }

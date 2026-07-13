@@ -269,7 +269,7 @@ void declare_context_menu(nt_ui_context_t *ctx) {
         if (a && s_ctx_target >= 0 && s_ctx_target < a->target_count) {
             tp_project_target *t = &a->targets[s_ctx_target];
             if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_TOGGLE, t->enabled ? "Disable" : "Enable")) {
-                gui_project_set_target(s_sel_atlas, s_ctx_target, t->exporter_id, t->out_path, !t->enabled);
+                gui_edit_target(s_sel_atlas, s_ctx_target, t->exporter_id, t->out_path, !t->enabled);
             }
             if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_REMOVE, "Remove")) {
                 s_pending_remove_target = s_ctx_target;
@@ -321,7 +321,8 @@ void declare_tooltips(nt_ui_context_t *ctx) {
 }
 
 /* Export dialog (mouse-complete): every atlas's targets, toggle/browse per target, then Export runs the
- * same do_export path. All edits go through gui_project_set_target (dirty + undo, no parallel state). */
+ * same do_export path. All edits enqueue via gui_edit_target (committed at frame top; dirty + undo,
+ * no parallel state) -- never commit while holding p/a/t (F2-05b-i UAF fix). */
 void declare_export_modal(nt_ui_context_t *ctx) {
     if (!nt_ui_modal_visible(ctx, s_id_export_modal, &s_modal_style, &s_export_open)) {
         return;
@@ -403,7 +404,7 @@ void declare_export_modal(nt_ui_context_t *ctx) {
                                      .childGap = Su(8),
                                      .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
                         if (tp_checkbox(ctx, nt_ui_child_id(rid, "en"), t->enabled, true)) {
-                            gui_project_set_target(ai, ti, t->exporter_id, t->out_path, !t->enabled);
+                            gui_edit_target(ai, ti, t->exporter_id, t->out_path, !t->enabled);
                         }
                         CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(S(96)), CLAY_SIZING_GROW(0)}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
                             ui_label_fit(ctx, exp_name, &g_caption, S(96), 0U);

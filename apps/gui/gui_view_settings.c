@@ -296,8 +296,7 @@ static void declare_atlas_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
     const int ns = row_combo(ctx, "Shape", nt_ui_id("set/shape"), &s_dd_shape_open,
                              (a->shape >= 0 && a->shape < 3) ? k_shape_names[a->shape] : "?", a->shape, k_shape_names, 3, true);
     if (ns >= 0 && ns != a->shape) {
-        a->shape = ns;
-        gui_project_touch_setting();
+        gui_edit_atlas_int(s_sel_atlas, GUI_ATLAS_SHAPE, ns);
     }
     char szpv[16];
     (void)snprintf(szpv, sizeof szpv, "%d", a->max_size);
@@ -305,8 +304,7 @@ static void declare_atlas_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
     const int nsz = row_combo(ctx, "Max page size", nt_ui_id("set/size"), &s_dd_size_open, szpv, size_preset_index(a->max_size),
                               size_labels, 7, true);
     if (nsz >= 0 && k_size_presets[nsz] != a->max_size) {
-        a->max_size = k_size_presets[nsz];
-        gui_project_touch_setting();
+        gui_edit_atlas_int(s_sel_atlas, GUI_ATLAS_MAX_SIZE, k_size_presets[nsz]);
     }
     if (a->max_size > 4096) {
         panel_note(ctx, "Pages over 4096 may not load on mobile GPUs / stock engine runtime.");
@@ -314,13 +312,11 @@ static void declare_atlas_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
     int iv = 0;
     if (row_int(ctx, "Padding", nt_ui_id("set/pad"), s_nb_pad, sizeof s_nb_pad, a->padding, 0, 16384, true, &iv) &&
         iv != a->padding) {
-        a->padding = iv;
-        gui_project_touch_setting();
+        gui_edit_atlas_int(s_sel_atlas, GUI_ATLAS_PADDING, iv);
     }
     bool bv = false;
     if (row_check(ctx, "Allow transform", nt_ui_id("set/xform"), a->allow_transform, true, &bv)) {
-        a->allow_transform = bv;
-        gui_project_touch_setting();
+        gui_edit_atlas_bool(s_sel_atlas, GUI_ATLAS_ALLOW_TRANSFORM, bv);
     }
 
     /* Advanced disclosure. */
@@ -330,15 +326,13 @@ static void declare_atlas_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
     }
     if (row_int(ctx, "Margin", nt_ui_id("set/margin"), s_nb_margin, sizeof s_nb_margin, a->margin, 0, 16384, true, &iv) &&
         iv != a->margin) {
-        a->margin = iv;
-        gui_project_touch_setting();
+        gui_edit_atlas_int(s_sel_atlas, GUI_ATLAS_MARGIN, iv);
     }
     const bool extrude_ok = (a->shape == 0 /* RECT */);
     if (row_int(ctx, "Extrude", nt_ui_id("set/extrude"), s_nb_extrude, sizeof s_nb_extrude, a->extrude, 0, 255, extrude_ok,
                 &iv) &&
         iv != a->extrude) {
-        a->extrude = iv;
-        gui_project_touch_setting();
+        gui_edit_atlas_int(s_sel_atlas, GUI_ATLAS_EXTRUDE, iv);
     }
     if (!extrude_ok) {
         panel_note(ctx, "Extrude requires Rect shape \xE2\x80\x94 use Padding for polygon modes.");
@@ -346,24 +340,20 @@ static void declare_atlas_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
     if (row_slider(ctx, "Alpha threshold", nt_ui_id("set/alpha"), s_nb_alpha, sizeof s_nb_alpha, a->alpha_threshold, 0,
                    255, true, &iv) &&
         iv != a->alpha_threshold) {
-        a->alpha_threshold = iv;
-        gui_project_touch_setting();
+        gui_edit_atlas_int(s_sel_atlas, GUI_ATLAS_ALPHA_THRESHOLD, iv);
     }
     if (row_int(ctx, "Max vertices", nt_ui_id("set/maxv"), s_nb_maxv, sizeof s_nb_maxv, a->max_vertices, 1, 16, true, &iv) &&
         iv != a->max_vertices) {
-        a->max_vertices = iv;
-        gui_project_touch_setting();
+        gui_edit_atlas_int(s_sel_atlas, GUI_ATLAS_MAX_VERTICES, iv);
     }
     if (row_check(ctx, "Power of two", nt_ui_id("set/pot"), a->power_of_two, true, &bv)) {
-        a->power_of_two = bv;
-        gui_project_touch_setting();
+        gui_edit_atlas_bool(s_sel_atlas, GUI_ATLAS_POWER_OF_TWO, bv);
     }
     float fv = 0.0F;
     if (row_float(ctx, "Pixels/unit", nt_ui_id("set/ppu"), s_nb_ppu, sizeof s_nb_ppu, a->pixels_per_unit, 0.0001F,
                   100000.0F, true, &fv) &&
         fv != a->pixels_per_unit) {
-        a->pixels_per_unit = fv;
-        gui_project_touch_setting();
+        gui_edit_atlas_float(s_sel_atlas, GUI_ATLAS_PIXELS_PER_UNIT, fv);
     }
 }
 
@@ -472,10 +462,10 @@ static void declare_region_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
     const float oy = ov ? ov->origin_y : TP_PROJECT_ORIGIN_DEFAULT;
     float fv = 0.0F;
     if (row_float(ctx, "Pivot X", nt_ui_id("reg/ox"), s_nb_ox, sizeof s_nb_ox, ox, -100.0F, 100.0F, true, &fv)) {
-        gui_project_set_sprite_origin(s_sel_atlas, sprite, fv, oy);
+        gui_edit_sprite_origin(s_sel_atlas, sprite, fv, oy);
     }
     if (row_float(ctx, "Pivot Y", nt_ui_id("reg/oy"), s_nb_oy, sizeof s_nb_oy, oy, -100.0F, 100.0F, true, &fv)) {
-        gui_project_set_sprite_origin(s_sel_atlas, sprite, ox, fv);
+        gui_edit_sprite_origin(s_sel_atlas, sprite, ox, fv);
     }
 
     static const char *const s9_labels[4] = {"Slice9 L", "Slice9 R", "Slice9 T", "Slice9 B"};
@@ -489,7 +479,7 @@ static void declare_region_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
         int iv = 0;
         if (row_int(ctx, s9_labels[k], nt_ui_id(s9_ids[k]), s_nb_s9[k], sizeof s_nb_s9[k], cur, 0, 4096, true, &iv) &&
             iv != cur) {
-            gui_project_set_sprite_slice9(s_sel_atlas, sprite, k, iv);
+            gui_edit_sprite_slice9(s_sel_atlas, sprite, k, iv);
         }
     }
     if (any_s9) {
@@ -534,14 +524,14 @@ static void declare_region_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
     const int ps = row_override_combo(ctx, "Shape", nt_ui_id("reg/ov_shape"), &s_dd_ov_shape_open, ov_shape, 0,
                                       k_shape_names, 3, shape_def, !any_s9);
     if (ps != OV_UNCHANGED && ps != ov_shape) {
-        gui_project_set_sprite_override(s_sel_atlas, sprite, GUI_SPRITE_OV_SHAPE, ps);
+        gui_edit_sprite_override(s_sel_atlas, sprite, GUI_SPRITE_OV_SHAPE, ps);
     }
     static const char *const rot_values[1] = {"No rotation"};
     const char *rot_def = a->allow_transform ? "Default (rotate/flip)" : "Default (no transform)";
     const int prv = row_override_combo(ctx, "Rotation", nt_ui_id("reg/ov_rot"), &s_dd_ov_rot_open, ov_rot, 0, rot_values,
                                        1, rot_def, !any_s9);
     if (prv != OV_UNCHANGED && prv != ov_rot) {
-        gui_project_set_sprite_override(s_sel_atlas, sprite, GUI_SPRITE_OV_ROTATE, prv);
+        gui_edit_sprite_override(s_sel_atlas, sprite, GUI_SPRITE_OV_ROTATE, prv);
     }
     static const char *const mv_values[16] = {"1", "2",  "3",  "4",  "5",  "6",  "7",  "8",
                                               "9", "10", "11", "12", "13", "14", "15", "16"};
@@ -550,7 +540,7 @@ static void declare_region_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
     const int pmv = row_override_combo(ctx, "Max vertices", nt_ui_id("reg/ov_mv"), &s_dd_ov_mv_open, ov_mv, 1, mv_values,
                                        16, mv_def, true);
     if (pmv != OV_UNCHANGED && pmv != ov_mv) {
-        gui_project_set_sprite_override(s_sel_atlas, sprite, GUI_SPRITE_OV_MAXVERT, pmv);
+        gui_edit_sprite_override(s_sel_atlas, sprite, GUI_SPRITE_OV_MAXVERT, pmv);
     }
 
     /* margin / extrude overrides: a "override?" checkbox + numeric (1..255). extrude is
@@ -565,14 +555,14 @@ static void declare_region_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
             }
             const int seed = (a->margin >= 1) ? (a->margin > 255 ? 255 : a->margin) : 1;
             if (cbc) {
-                gui_project_set_sprite_override(s_sel_atlas, sprite, GUI_SPRITE_OV_MARGIN, on ? seed : TP_PROJECT_OV_INHERIT);
+                gui_edit_sprite_override(s_sel_atlas, sprite, GUI_SPRITE_OV_MARGIN, on ? seed : TP_PROJECT_OV_INHERIT);
             }
             const int disp = (ov_margin != TP_PROJECT_OV_INHERIT) ? ov_margin : seed;
             int iv = 0;
             if (ui_int_field(ctx, nt_ui_id("reg/ov_mf"), s_nb_ov_margin, sizeof s_nb_ov_margin, disp, 1, 255,
                              on && !cbc, &iv) &&
                 on && iv != ov_margin) {
-                gui_project_set_sprite_override(s_sel_atlas, sprite, GUI_SPRITE_OV_MARGIN, iv);
+                gui_edit_sprite_override(s_sel_atlas, sprite, GUI_SPRITE_OV_MARGIN, iv);
             }
         }
         PANEL_ROW_END;
@@ -587,14 +577,14 @@ static void declare_region_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
             }
             const int seed = (a->extrude >= 1) ? (a->extrude > 255 ? 255 : a->extrude) : 1;
             if (cbc && ex_enabled) {
-                gui_project_set_sprite_override(s_sel_atlas, sprite, GUI_SPRITE_OV_EXTRUDE, on ? seed : TP_PROJECT_OV_INHERIT);
+                gui_edit_sprite_override(s_sel_atlas, sprite, GUI_SPRITE_OV_EXTRUDE, on ? seed : TP_PROJECT_OV_INHERIT);
             }
             const int disp = (ov_extrude != TP_PROJECT_OV_INHERIT) ? ov_extrude : seed;
             int iv = 0;
             if (ui_int_field(ctx, nt_ui_id("reg/ov_ef"), s_nb_ov_extrude, sizeof s_nb_ov_extrude, disp, 1, 255,
                              ex_enabled && on && !cbc, &iv) &&
                 on && iv != ov_extrude) {
-                gui_project_set_sprite_override(s_sel_atlas, sprite, GUI_SPRITE_OV_EXTRUDE, iv);
+                gui_edit_sprite_override(s_sel_atlas, sprite, GUI_SPRITE_OV_EXTRUDE, iv);
             }
         }
         PANEL_ROW_END;
@@ -615,7 +605,7 @@ static void declare_target_exporter_combo(nt_ui_context_t *ctx, uint32_t row_id,
                 if (nt_ui_combo_selectable(ctx, (uint32_t)i, exp_labels[i], i == cur_exp)) {
                     const tp_exporter *e = tp_exporter_at(i);
                     if (e) {
-                        gui_project_set_target(s_sel_atlas, ti, e->id, t->out_path, t->enabled);
+                        gui_edit_target(s_sel_atlas, ti, e->id, t->out_path, t->enabled);
                     }
                 }
             }
@@ -670,7 +660,7 @@ static void declare_export_targets(nt_ui_context_t *ctx, tp_project_atlas *a) {
             const bool tgt_narrow = s_right_panel_w < S(210.0F);
             CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H))}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
                 if (tp_checkbox(ctx, nt_ui_child_id(row_id, "en"), t->enabled, true)) {
-                    gui_project_set_target(s_sel_atlas, ti, t->exporter_id, t->out_path, !t->enabled);
+                    gui_edit_target(s_sel_atlas, ti, t->exporter_id, t->out_path, !t->enabled);
                 }
                 if (!tgt_narrow) {
                     declare_target_exporter_combo(ctx, row_id, ti, t, exp_labels, nlabels, cur_exp, pvbuf);
@@ -694,7 +684,7 @@ static void declare_export_targets(nt_ui_context_t *ctx, tp_project_atlas *a) {
                 CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
                     if (ui_text_field(ctx, nt_ui_child_id(row_id, "path"), s_nb_target_path[ti], sizeof s_nb_target_path[ti],
                                       t->out_path, true, "out/atlas.json")) {
-                        gui_project_set_target(s_sel_atlas, ti, t->exporter_id, s_nb_target_path[ti], t->enabled);
+                        gui_edit_target(s_sel_atlas, ti, t->exporter_id, s_nb_target_path[ti], t->enabled);
                     }
                 }
                 if (ui_btn(ctx, nt_ui_child_id(row_id, "browse"), "\xE2\x80\xA6", &g_btn_ghost, true, 28.0F, 22.0F, &g_caption)) { /* U+2026 */
@@ -729,7 +719,7 @@ static void declare_animation_editor(nt_ui_context_t *ctx, tp_project_atlas *a) 
     if (editing_id) {
         PANEL_ROW_BEGIN("Id", &g_row) {
             if (render_rename_field(ctx)) {
-                commit_anim_rename();
+                s_pending_commit_edit_enter = true; /* defer: never commit while holding `an` (F2-05b-i) */
             }
         }
         PANEL_ROW_END;
@@ -748,20 +738,20 @@ static void declare_animation_editor(nt_ui_context_t *ctx, tp_project_atlas *a) 
     float fv = 0.0F;
     if (row_float(ctx, "FPS", nt_ui_id("anim/fps"), s_nb_anim_fps, sizeof s_nb_anim_fps, an->fps, 1.0F, 240.0F, true,
                   &fv)) {
-        gui_project_set_anim_fps(s_sel_atlas, s_sel_anim, fv);
+        gui_edit_anim_fps(s_sel_atlas, s_sel_anim, fv);
     }
     const char *pv = (an->playback >= 0 && an->playback < 7) ? k_playback_names[an->playback] : "?";
     const int npb = row_combo(ctx, "Playback", nt_ui_id("anim/pb"), &s_dd_playback_open, pv, an->playback,
                               k_playback_names, 7, true);
     if (npb >= 0 && npb != an->playback) {
-        gui_project_set_anim_playback(s_sel_atlas, s_sel_anim, npb);
+        gui_edit_anim_playback(s_sel_atlas, s_sel_anim, npb);
     }
     bool bv = false;
     if (row_check(ctx, "Flip H", nt_ui_id("anim/fh"), an->flip_h, true, &bv)) {
-        gui_project_set_anim_flip(s_sel_atlas, s_sel_anim, bv, an->flip_v);
+        gui_edit_anim_flip(s_sel_atlas, s_sel_anim, bv, an->flip_v);
     }
     if (row_check(ctx, "Flip V", nt_ui_id("anim/fv"), an->flip_v, true, &bv)) {
-        gui_project_set_anim_flip(s_sel_atlas, s_sel_anim, an->flip_h, bv);
+        gui_edit_anim_flip(s_sel_atlas, s_sel_anim, an->flip_h, bv);
     }
 
     /* Frames header + "Add frames" (from the current sprite multi-selection). */
@@ -825,13 +815,13 @@ static void declare_animation_editor(nt_ui_context_t *ctx, tp_project_atlas *a) 
         }
     }
     if (fact == 1 && fidx >= 0) {
-        gui_project_anim_remove_frame(s_sel_atlas, s_sel_anim, fidx);
+        gui_edit_anim_frame_remove(s_sel_atlas, s_sel_anim, fidx);
         s_sel_anim_frame = -1;
     } else if (fact == 2 && fidx >= 0) {
-        gui_project_anim_move_frame(s_sel_atlas, s_sel_anim, fidx, -1);
+        gui_edit_anim_frame_move(s_sel_atlas, s_sel_anim, fidx, -1);
         s_sel_anim_frame = fidx - 1;
     } else if (fact == 3 && fidx >= 0) {
-        gui_project_anim_move_frame(s_sel_atlas, s_sel_anim, fidx, +1);
+        gui_edit_anim_frame_move(s_sel_atlas, s_sel_anim, fidx, +1);
         s_sel_anim_frame = fidx + 1;
     }
 }

@@ -229,11 +229,18 @@ void run_selftest(void) {
              * tp_export_run uses the target out_path as the exporter BASE and appends .json / -N.png. */
             tp_project_atlas *rot_a = tp_project_get_atlas(dp, i_rotate);
             int jtarget = -1;
-            for (int k = 0; rot_a && k < rot_a->target_count; k++) {
-                if (strcmp(rot_a->targets[k].exporter_id, "json-neotolis") == 0) {
+            const int rtc = rot_a ? rot_a->target_count : 0;
+            for (int k = 0; k < rtc; k++) {
+                /* F2-05b-i: gui_project_set_target now clone-swaps the model, freeing the old
+                 * project -- re-fetch the atlas each iteration (dp/rot_a would dangle). */
+                tp_project_atlas *ra = tp_project_get_atlas(gui_project_get(), i_rotate);
+                if (!ra) {
+                    break;
+                }
+                if (strcmp(ra->targets[k].exporter_id, "json-neotolis") == 0) {
                     jtarget = k;
                 } else {
-                    gui_project_set_target(i_rotate, k, rot_a->targets[k].exporter_id, rot_a->targets[k].out_path, false);
+                    gui_project_set_target(i_rotate, k, ra->targets[k].exporter_id, ra->targets[k].out_path, false);
                 }
             }
             char tbase[700] = {0};
@@ -520,6 +527,7 @@ void run_selftest(void) {
         /* Restore a valid export state: the EXPORT path (tp_export_run) does not yet
          * apply the effective-extrude-0 rule (point-7 follow-up in the parallel exporter
          * agent's file), so concave+extrude>0 would be rejected at core validation. */
+        a0 = tp_project_get_atlas(gui_project_get(), 0); /* F2-05b-i: the sprite-override op above clone-swapped */
         a0->extrude = 0;
         gui_project_touch_setting();
 
@@ -613,13 +621,69 @@ void run_selftest(void) {
         tp_project_destroy(alp);
         free(abuf);
 
-        NT_ASSERT(gui_project_anim_remove_frame(aidx, 0, 1) && aa->animations[0].frame_count == 2 && "remove a frame");
+        NT_ASSERT(gui_project_anim_remove_frame(aidx, 0, 1) && "remove a frame");
+        aa = tp_project_get_atlas(gui_project_get(), aidx); /* F2-05b-i: remove-frame clone-swapped */
+        NT_ASSERT(aa && aa->animations[0].frame_count == 2 && "remove a frame count");
         nt_log_info("SELFTEST: animation create/reorder/round-trip OK");
 
         multi_sel_clear();
         s_sel_anim = -1;
         s_sel_anim_frame = -1;
         s_sel_atlas = 0;
+    }
+
+    /* --- F2-05b-i: deferred model-edit queue + drag COALESCING (decision 0015) ---
+     * (1) An edit ENQUEUED by a declare fn (gui_edit_*) lands only when apply_pending drains it
+     *     at frame top -- proves the deferral that collapses the pointer-invalidation UAF class.
+     * (2) A slider "drag" (many single-knob transactions within the 0.30s coalesce window, same
+     *     action tag) maps to exactly ONE undo step -- proves undo depth for a drag stays 1 even
+     *     though each tick commits its own transaction through the journal-less model. */
+    {
+        gui_project_new();
+        gui_pack_clear(-1);
+        s_sel_atlas = 0;
+        reset_selection();
+        /* (1) deferred edit lands via apply_pending (the enqueue -> drain -> commit path). */
+        const int pad0 = tp_project_get_atlas(gui_project_get(), 0)->padding;
+        gui_edit_atlas_int(0, GUI_ATLAS_PADDING, pad0 + 5);
+        const int pad_mid = tp_project_get_atlas(gui_project_get(), 0)->padding; /* NOT yet applied */
+        apply_pending();                                                          /* drains the queued edit */
+        const int pad1 = tp_project_get_atlas(gui_project_get(), 0)->padding;
+        nt_log_info("SELFTEST: deferred edit pad %d ->(queued) %d ->(drained) %d", pad0, pad_mid, pad1);
+        NT_ASSERT(pad_mid == pad0 && pad1 == pad0 + 5 && "a gui_edit_* enqueue lands only on apply_pending drain");
+
+        /* (2) coalesced drag = one undo step. Each set_atlas_setting is one committed transaction
+         *     through the model; consecutive same-tag commits within 0.30s fold to one undo entry. */
+        gui_project_new();
+        gui_pack_clear(-1);
+        s_sel_atlas = 0;
+        const int pad_pre = tp_project_get_atlas(gui_project_get(), 0)->padding; /* fresh default */
+        const int undo0 = gui_history_undo_depth();
+        double t = 100.0;
+        for (int v = 1; v <= 8; v++) {           /* 8 "frames" of a slider drag, ~16ms apart */
+            gui_project_tick(t);
+            (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, v, 0.0F);
+            t += 0.016;
+        }
+        const int undo1 = gui_history_undo_depth();
+        const int pad_drag = tp_project_get_atlas(gui_project_get(), 0)->padding;
+        nt_log_info("SELFTEST: coalesced drag: 8 txns, undo depth %d -> %d (delta %d), final padding=%d", undo0, undo1,
+                    undo1 - undo0, pad_drag);
+        NT_ASSERT(undo1 - undo0 == 1 && pad_drag == 8 &&
+                  "a coalesced slider drag = one undo step (undo depth for a drag stays 1)");
+        /* one undo reverts the WHOLE drag to the pre-drag value (not one tick). */
+        NT_ASSERT(gui_project_undo() && tp_project_get_atlas(gui_project_get(), 0)->padding == pad_pre &&
+                  "undo reverts the entire coalesced drag in one step");
+        /* Restore a packable atlas-0 project for the render frames below (the pixel probe packs
+         * atlas 0 and probes its region outlines) -- gui_project_new left it source-less. */
+        gui_project_new();
+        gui_pack_clear(-1);
+        s_sel_atlas = 0;
+        reset_selection();
+        char pfolder[512];
+        to_abs("examples/defold-demo/examples/anim_trim/anims", pfolder, sizeof pfolder);
+        (void)gui_project_add_source(0, pfolder);
+        gui_scan_invalidate_all();
     }
 
     /* --- About modal: open it so the auto-quit frames render it (OK/Esc close it interactively) --- */
@@ -677,7 +741,8 @@ void run_selftest(void) {
                 multi_sel_add(key);
             }
             const int pai = create_animation_from_selection();
-            if (pai >= 0) {
+            pa = tp_project_get_atlas(gui_project_get(), 0); /* F2-05b-i: create_animation clone-swapped */
+            if (pai >= 0 && pa) {
                 open_preview(pai);
                 nt_log_info("SELFTEST: preview anim '%s' active=%d frames=%d", pa->animations[pai].name, s_preview_active,
                             pa->animations[pai].frame_count);
@@ -910,6 +975,7 @@ void selftest_pre_frame(void) {
                 char afolder[512];
                 to_abs("examples/defold-demo/examples/anim_trim/anims", afolder, sizeof afolder);
                 (void)gui_project_add_source(s_sel_atlas, afolder);
+                sa = tp_project_get_atlas(gui_project_get(), s_sel_atlas); /* F2-05b-i: add_source clone-swapped */
                 sa->max_size = 256; /* 128px sprites -> several pages -> pc>1 -> page buttons in the strip */
                 gui_scan_invalidate_all();
             }
@@ -1023,6 +1089,7 @@ void selftest_pre_frame(void) {
                 char afolder[512];
                 to_abs("examples/defold-demo/examples/anim_trim/anims", afolder, sizeof afolder);
                 (void)gui_project_add_source(0, afolder);
+                a0 = tp_project_get_atlas(gui_project_get(), 0); /* F2-05b-i: add_source clone-swapped */
                 a0->allow_transform = true; /* guarantee a rotate/flip for the defold clamp to strip (non-empty diff) */
                 gui_scan_invalidate_all();
             }

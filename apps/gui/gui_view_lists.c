@@ -72,7 +72,7 @@ static void declare_atlas_list(nt_ui_context_t *ctx, tp_project *proj) {
                 ui_row_icon(ctx, &s_ic_layers, selected ? &g_row_strong : &g_caption);
                 if (editing) {
                     if (render_rename_field(ctx)) {
-                        commit_atlas_rename();
+                        s_pending_commit_edit_enter = true; /* defer: never commit while holding `proj` (F2-05b-i) */
                     }
                 } else {
                     ui_label_fit(ctx, proj->atlases[i].name, selected ? &g_row_strong : &g_row,
@@ -234,7 +234,7 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
                     ui_row_icon(ctx, ic, ic_tint);
                     if (editing) {
                         if (render_rename_field(ctx)) {
-                            commit_sprite_rename();
+                            s_pending_commit_edit_enter = true; /* defer: never commit while holding row pointers (F2-05b-i) */
                         }
                     } else {
                         /* Folder rows carry a fixed smart-folder tooltip on the whole row (below), so skip the
@@ -313,7 +313,7 @@ static void declare_animations_list(nt_ui_context_t *ctx, tp_project_atlas *a) {
                 ui_row_icon(ctx, &s_ic_film, selected ? &g_row_strong : &g_caption);
                 if (editing) {
                     if (render_rename_field(ctx)) {
-                        commit_anim_rename();
+                        s_pending_commit_edit_enter = true; /* defer: never commit while holding `a` (F2-05b-i) */
                     }
                 } else {
                     ui_label_fit(ctx, a->animations[i].name, selected ? &g_row_strong : &g_row,

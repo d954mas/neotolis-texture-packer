@@ -7,11 +7,25 @@
 #include "gui_history.h"
 #include "gui_scan.h"
 
-#include "tp_core/tp_id.h"             /* tp_rng_os for id promotion */
+#include "tp_core/tp_id.h"             /* tp_rng_os + id128 generate/nil for op ids */
+#include "tp_core/tp_operation.h"      /* the typed op the GUI mutators build */
 #include "tp_core/tp_project_migrate.h" /* tp_project_promote_ids */
+#include "tp_core/tp_transaction.h"    /* tp_model + tp_model_apply (journal-less commit) */
+
+/* F2-05b-i (docs/decisions/0015): every mutator below BUILDS typed tp_operation(s) and
+ * commits them atomically through a journal-LESS tp_model (tp_model_wrap ->
+ * tp_model_apply, the F2-01/F2-02 clone-swap engine) instead of hand-mutating tp_project
+ * fields. The model OWNS the project; s_proj is a read view of tp_model_project(s_model),
+ * refreshed after every committed transaction (a commit frees the old project). The
+ * pre-cutover snapshot undo (gui_history.c) is KEPT unchanged -- because the model is
+ * journal-less, undo just reloads a snapshot and re-wraps the model. Value-range
+ * validation authority is core's now (the ops validate on commit); the GUI keeps only
+ * widget parse/clamp + client naming policy (atlas/anim name uniqueness). */
 
 // #region state
-static tp_project *s_proj;
+static tp_model *s_model;  /* owns s_proj; NULL until gui_project_init */
+static tp_project *s_proj; /* == tp_model_project(s_model); refreshed after every commit */
+static uint64_t s_txn_seq; /* monotonic transaction-id source (unique per commit) */
 static char s_path[1024]; /* absolute file path; "" while unsaved */
 static bool s_project_dirty;
 static bool s_preview_stale;
@@ -31,6 +45,11 @@ static double s_now;       /* history clock (seconds), fed each frame */
  * save path fails closed on its own, so it does NOT set this. */
 static bool s_id_error;
 static char s_id_error_msg[256];
+
+/* Pending transaction REJECT (core rejected the op(s); model left byte-unchanged).
+ * Surfaced once by the UI (gui_project_take_op_error) to the soft-error channel. */
+static bool s_op_error;
+static char s_op_error_msg[256];
 // #endregion
 
 // #region helpers
@@ -91,13 +110,10 @@ static void serialize_current(char **buf, size_t *len) {
 
 /* Assign a random persistent ID to any structural entity that lacks one -- nil (a
  * freshly created project/atlas/anim/target) OR loader-synthesized for a migrated
- * legacy file (§5.5: the first writable save persists fresh random IDs, not the
- * stable synthetic ones). A real loaded ID (v3/v4) is preserved. Idempotent after the
- * first call: once no ID is nil or synthetic this is a no-op and never re-changes an
- * ID. Called before every snapshot so undo/redo bytes -- and the saved file -- always
- * carry stable, non-nil structural IDs (a writable session gets its final IDs before
- * the first mutation). Returns the promote status (RNG failure -> TP_STATUS_RNG_FAILED,
- * ids left untouched); `err` (may be NULL) carries prose. */
+ * legacy file (§5.5). A real loaded ID (v3/v4) is preserved. Idempotent after the first
+ * call. Since the cutover mints created-entity ids at op-build time, this is a no-op
+ * after load-time promotion for a mutated session -- it stays as the load/save-time §5.5
+ * promotion of nil/synthetic ids. Returns the promote status. */
 static tp_status ensure_ids(tp_error *err) {
     if (!s_proj) {
         return TP_STATUS_OK;
@@ -106,8 +122,7 @@ static tp_status ensure_ids(tp_error *err) {
     return tp_project_promote_ids(s_proj, &rng, err);
 }
 
-/* Record a void-context id-promotion failure so the UI can surface it (never silently
- * swallowed): a nil-id model would serialize nil ids that fail on reload/save. */
+/* Record a void-context id-promotion failure so the UI can surface it. */
 static void note_id_error(tp_status st, const tp_error *err) {
     s_id_error = true;
     (void)snprintf(s_id_error_msg, sizeof s_id_error_msg, "%s", (err && err->msg[0]) ? err->msg : tp_status_str(st));
@@ -121,6 +136,17 @@ bool gui_project_take_id_error(char *out, size_t cap) {
         (void)snprintf(out, cap, "%s", s_id_error_msg);
     }
     s_id_error = false;
+    return true;
+}
+
+bool gui_project_take_op_error(char *out, size_t cap) {
+    if (!s_op_error) {
+        return false;
+    }
+    if (out && cap) {
+        (void)snprintf(out, cap, "%s", s_op_error_msg);
+    }
+    s_op_error = false;
     return true;
 }
 
@@ -150,18 +176,9 @@ static void recompute_dirty(void) {
                         memcmp(s_last_buf, s_saved_buf, s_last_len) == 0);
 }
 
-/* An override entry that would serialize to just its name (safe to drop -> sparse). */
-static bool sprite_all_default(const tp_project_sprite *s) {
-    return s->origin_x == TP_PROJECT_ORIGIN_DEFAULT && s->origin_y == TP_PROJECT_ORIGIN_DEFAULT &&
-           s->slice9_lrtb[0] == 0 && s->slice9_lrtb[1] == 0 && s->slice9_lrtb[2] == 0 && s->slice9_lrtb[3] == 0 &&
-           s->rename == NULL && s->ov_shape == TP_PROJECT_OV_INHERIT && s->ov_allow_rotate == TP_PROJECT_OV_INHERIT &&
-           s->ov_max_vertices == TP_PROJECT_OV_INHERIT && s->ov_margin == TP_PROJECT_OV_INHERIT &&
-           s->ov_extrude == TP_PROJECT_OV_INHERIT;
-}
-
 /* Seeds a fresh atlas with the default target (core helper owns the exporter id +
- * "out/<name>" path -- review §3.1). Only a target-free atlas is seeded; no touch
- * (callers snapshot around it). */
+ * "out/<name>" path). LIFECYCLE, not a mutation op (the exporter id is core's, never a
+ * frontend literal); mirrors the CLI do_new. Only a target-free atlas is seeded. */
 static void seed_default_target(tp_project *p, int atlas_index) {
     tp_project_atlas *a = tp_project_get_atlas(p, atlas_index);
     if (!a || a->target_count > 0) {
@@ -169,15 +186,90 @@ static void seed_default_target(tp_project *p, int atlas_index) {
     }
     (void)tp_project_atlas_seed_default_target(p, atlas_index);
 }
+
+/* Wrap `p` (TAKES OWNERSHIP) in a fresh journal-less model, replacing any current one,
+ * and refresh the s_proj view. On OOM the old model is freed, `p` is freed (never
+ * leaked), and s_proj/s_model become NULL. */
+static void wrap_model(tp_project *p) {
+    tp_model_destroy(s_model); /* frees the previous model + its owned project */
+    s_model = NULL;
+    s_proj = NULL;
+    if (!p) {
+        return;
+    }
+    s_model = tp_model_wrap(p);
+    if (!s_model) {
+        tp_project_destroy(p); /* wrap did not take ownership on failure */
+        return;
+    }
+    s_proj = tp_model_project(s_model);
+}
+
+/* Generates a fresh non-nil structural id via the OS RNG; false on an RNG fault. */
+static bool gen_id(tp_id128 *out) {
+    tp_rng rng = tp_rng_os();
+    tp_error err = {0};
+    return tp_id128_generate(&rng, out, &err) == TP_STATUS_OK;
+}
+
+static void ops_free(tp_operation *ops, int n) {
+    for (int i = 0; i < n; i++) {
+        tp_operation_free(&ops[i]);
+    }
+}
+
+/* Commit `ops` as ONE atomic transaction on the persistent journal-less model. On
+ * success refreshes the s_proj view (the clone-swap replaced m->project) and returns
+ * true; the caller then runs any lifecycle follow-up and calls gui_project_touch(act)
+ * to snapshot. On a reject the model is BYTE-UNCHANGED and the structured status is
+ * recorded for the soft-error channel. ALWAYS frees the op arms (tp_operation_free) and
+ * the result. Returns false on reject / no model. */
+static bool commit_txn(tp_operation *ops, int nops) {
+    if (!s_model) {
+        ops_free(ops, nops);
+        return false;
+    }
+    tp_txn_request req;
+    memset(&req, 0, sizeof req);
+    req.schema = TP_TXN_SCHEMA;
+    /* Unique 32-lowercase-hex per commit: the model persists across edits, so a fixed id
+     * would trip idempotency (duplicate_id) on the second commit. A monotonic counter is
+     * unique + never serialized. */
+    (void)snprintf(req.id_hex, sizeof req.id_hex, "%032llx", (unsigned long long)(s_txn_seq++));
+    req.expected_revision = tp_model_revision(s_model); /* single-threaded edits -> always matches */
+    req.ops = ops;
+    req.op_count = nops;
+
+    tp_txn_result res;
+    memset(&res, 0, sizeof res);
+    tp_error err = {0};
+    tp_status st = tp_model_apply(s_model, &req, &res, &err);
+
+    bool ok = (st == TP_STATUS_OK);
+    if (ok) {
+        s_proj = tp_model_project(s_model); /* clone-swapped: old project freed, adopt the new view */
+    } else {
+        const char *msg = (err.msg[0]) ? err.msg : tp_status_str(st);
+        if (res.error_count > 0 && res.errors[0].message[0]) {
+            msg = res.errors[0].message;
+        }
+        s_op_error = true;
+        (void)snprintf(s_op_error_msg, sizeof s_op_error_msg, "%s", msg);
+    }
+    tp_txn_result_free(&res);
+    ops_free(ops, nops);
+    return ok;
+}
 // #endregion
 
 // #region lifecycle
 void gui_project_init(void) {
-    if (s_proj) {
+    if (s_model) {
         return;
     }
-    s_proj = tp_project_create();
-    seed_default_target(s_proj, 0); /* clean baseline includes it (I1) */
+    tp_project *p = tp_project_create();
+    seed_default_target(p, 0); /* clean baseline includes it (I1) -- lifecycle, direct */
+    wrap_model(p);
     set_path("");
     s_project_dirty = false;
     s_preview_stale = false;
@@ -188,7 +280,8 @@ void gui_project_init(void) {
 
 void gui_project_shutdown(void) {
     gui_history_shutdown();
-    tp_project_destroy(s_proj);
+    tp_model_destroy(s_model); /* frees the model + its owned project */
+    s_model = NULL;
     s_proj = NULL;
     free(s_last_buf);
     s_last_buf = NULL;
@@ -212,7 +305,7 @@ bool gui_project_is_stale(void) { return s_preview_stale; }
 void gui_project_touch(gui_action act) {
     s_preview_stale = true;
     tp_error id_err = {0};
-    tp_status id_st = ensure_ids(&id_err); /* a just-added atlas/anim/target gets its ID before this snapshot */
+    tp_status id_st = ensure_ids(&id_err); /* §5.5: promote any nil/synthetic id before this snapshot */
     if (id_st != TP_STATUS_OK) {
         note_id_error(id_st, &id_err); /* do not swallow an RNG failure */
     }
@@ -243,27 +336,47 @@ void gui_project_tick(double now_seconds) { s_now = now_seconds; }
 unsigned gui_project_model_version(void) { return s_model_ver; }
 // #endregion
 
-// #region mutation wrappers
+// #region mutation wrappers (each builds typed op(s) + commits through the model)
 int gui_project_add_atlas(void) {
     if (!s_proj) {
         return -1;
     }
     char name[64];
     (void)snprintf(name, sizeof name, "atlas%d", s_proj->atlas_count + 1);
-    int idx = -1;
-    if (tp_project_add_atlas(s_proj, name, &idx) != TP_STATUS_OK) {
+    tp_id128 new_id;
+    if (!gen_id(&new_id)) {
         return -1;
     }
-    seed_default_target(s_proj, idx); /* fresh atlas exports something (I1) */
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_ATLAS_CREATE;
+    op.atlas_id = new_id;
+    op.u.atlas_create.name = dupstr(name);
+    if (!op.u.atlas_create.name) {
+        tp_operation_free(&op);
+        return -1;
+    }
+    if (!commit_txn(&op, 1)) {
+        return -1;
+    }
+    int idx = tp_project_find_atlas_by_id(s_proj, new_id);
+    if (idx >= 0) {
+        seed_default_target(s_proj, idx); /* fresh atlas exports something (I1) -- lifecycle, direct */
+    }
     gui_project_touch(GUI_ACT_ADD_ATLAS);
     return idx;
 }
 
 void gui_project_remove_atlas(int index) {
-    if (!s_proj) {
+    tp_project_atlas *a = tp_project_get_atlas(s_proj, index);
+    if (!a) {
         return;
     }
-    if (tp_project_remove_atlas(s_proj, index) == TP_STATUS_OK) {
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_ATLAS_REMOVE;
+    op.atlas_id = a->id;
+    if (commit_txn(&op, 1)) {
         gui_scan_invalidate_all();
         gui_project_touch(GUI_ACT_REMOVE_ATLAS);
     }
@@ -274,12 +387,21 @@ gui_add_status gui_project_add_source_kind(int atlas_index, const char *path, tp
     if (!a || !path || path[0] == '\0') {
         return GUI_ADD_FAILED;
     }
-    const int before = a->source_count;
-    if (tp_project_atlas_add_source_kind(a, path, kind) != TP_STATUS_OK) {
+    if (tp_project_atlas_has_source_path(a, path)) {
+        return GUI_ADD_DUPLICATE; /* core rejects a dup path; catch it here (no op) -- no touch, no dirty */
+    }
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_SOURCE_ADD;
+    op.atlas_id = a->id;
+    op.u.source_add.kind = kind;
+    op.u.source_add.key = dupstr(path);
+    if (!op.u.source_add.key || !gen_id(&op.u.source_add.source_id)) {
+        tp_operation_free(&op);
         return GUI_ADD_FAILED;
     }
-    if (a->source_count == before) {
-        return GUI_ADD_DUPLICATE; /* tp_core dedupe no-op -- no touch, no dirty */
+    if (!commit_txn(&op, 1)) {
+        return GUI_ADD_FAILED;
     }
     gui_scan_invalidate_all();
     gui_project_touch(GUI_ACT_ADD_SOURCE);
@@ -294,10 +416,15 @@ gui_add_status gui_project_add_source(int atlas_index, const char *path) {
 
 void gui_project_remove_source(int atlas_index, int source_index) {
     tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
-    if (!a) {
+    if (!a || source_index < 0 || source_index >= a->source_count) {
         return;
     }
-    if (tp_project_atlas_remove_source(a, source_index) == TP_STATUS_OK) {
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_SOURCE_REMOVE;
+    op.atlas_id = a->id;
+    op.u.source_ref.source_id = a->sources[source_index].id;
+    if (commit_txn(&op, 1)) {
         gui_scan_invalidate_all();
         gui_project_touch(GUI_ACT_REMOVE_SOURCE);
     }
@@ -308,12 +435,18 @@ bool gui_project_set_atlas_name(int atlas_index, const char *name) {
     if (!a || !name || name[0] == '\0') {
         return false;
     }
-    char *copy = dupstr(name);
-    if (!copy) {
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_ATLAS_RENAME;
+    op.atlas_id = a->id;
+    op.u.atlas_rename.name = dupstr(name);
+    if (!op.u.atlas_rename.name) {
+        tp_operation_free(&op);
         return false;
     }
-    free(a->name);
-    a->name = copy;
+    if (!commit_txn(&op, 1)) {
+        return false;
+    }
     gui_project_touch(GUI_ACT_RENAME_ATLAS);
     return true;
 }
@@ -323,7 +456,21 @@ bool gui_project_set_sprite_rename(int atlas_index, const char *sprite_name, con
     if (!a || !sprite_name || sprite_name[0] == '\0') {
         return false;
     }
-    if (tp_project_atlas_set_sprite_rename(a, sprite_name, rename) != TP_STATUS_OK) {
+    /* PENDING (name-keyed) override: nil source_id + verbatim key, exactly the CLI's
+     * source-less sprite path (decision 0014 F2). The GUI's sprite_name IS the ext-stripped
+     * export key, so verbatim == the export-key bridge. An empty/NULL rename clears it. */
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_SPRITE_NAME_SET;
+    op.atlas_id = a->id;
+    op.u.sprite_name.source_id = tp_id128_nil();
+    op.u.sprite_name.src_key = dupstr(sprite_name);
+    op.u.sprite_name.name = (rename && rename[0]) ? dupstr(rename) : NULL;
+    if (!op.u.sprite_name.src_key || ((rename && rename[0]) && !op.u.sprite_name.name)) {
+        tp_operation_free(&op);
+        return false;
+    }
+    if (!commit_txn(&op, 1)) {
         return false;
     }
     gui_project_touch(GUI_ACT_RENAME_SPRITE); /* touch dedups a no-op rename */
@@ -332,85 +479,159 @@ bool gui_project_set_sprite_rename(int atlas_index, const char *sprite_name, con
 
 void gui_project_touch_setting(void) { gui_project_touch(GUI_ACT_SET_SETTING); }
 
-/* Ensures the override entry for `sprite_name`, hands it to `set`, then drops it if
- * it became all-default (sparse) and funnels through the touch choke point. */
-static bool sprite_override_edit(int atlas_index, const char *sprite_name,
-                                 void (*set)(tp_project_sprite *, int, int), int arg0, int arg1) {
+/* Maps a gui_atlas_field to its op mask bit + fills the matching payload field. */
+static bool fill_atlas_knob(tp_op_atlas_settings *s, gui_atlas_field f, int iv, float fv) {
+    switch (f) {
+        case GUI_ATLAS_MAX_SIZE: s->max_size = iv; s->mask = TP_AF_MAX_SIZE; return true;
+        case GUI_ATLAS_PADDING: s->padding = iv; s->mask = TP_AF_PADDING; return true;
+        case GUI_ATLAS_MARGIN: s->margin = iv; s->mask = TP_AF_MARGIN; return true;
+        case GUI_ATLAS_EXTRUDE: s->extrude = iv; s->mask = TP_AF_EXTRUDE; return true;
+        case GUI_ATLAS_ALPHA_THRESHOLD: s->alpha_threshold = iv; s->mask = TP_AF_ALPHA_THRESHOLD; return true;
+        case GUI_ATLAS_MAX_VERTICES: s->max_vertices = iv; s->mask = TP_AF_MAX_VERTICES; return true;
+        case GUI_ATLAS_SHAPE: s->shape = iv; s->mask = TP_AF_SHAPE; return true;
+        case GUI_ATLAS_ALLOW_TRANSFORM: s->allow_transform = (iv != 0); s->mask = TP_AF_ALLOW_TRANSFORM; return true;
+        case GUI_ATLAS_POWER_OF_TWO: s->power_of_two = (iv != 0); s->mask = TP_AF_POWER_OF_TWO; return true;
+        case GUI_ATLAS_PIXELS_PER_UNIT: s->pixels_per_unit = fv; s->mask = TP_AF_PIXELS_PER_UNIT; return true;
+    }
+    return false;
+}
+
+bool gui_project_set_atlas_setting(int atlas_index, gui_atlas_field field, int ivalue, float fvalue) {
     tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
-    if (!a || !sprite_name || sprite_name[0] == '\0') {
+    if (!a) {
         return false;
     }
-    tp_project_sprite *s = NULL;
-    if (tp_project_atlas_add_sprite(a, sprite_name, &s) != TP_STATUS_OK) {
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_ATLAS_SETTINGS_SET;
+    op.atlas_id = a->id;
+    if (!fill_atlas_knob(&op.u.atlas_settings, field, ivalue, fvalue)) {
+        tp_operation_free(&op);
         return false;
     }
-    set(s, arg0, arg1);
-    if (sprite_all_default(s)) {
-        (void)tp_project_atlas_remove_sprite(a, sprite_name);
+    if (!commit_txn(&op, 1)) {
+        return false;
     }
     gui_project_touch(GUI_ACT_SET_SETTING);
     return true;
 }
 
-static void apply_origin(tp_project_sprite *s, int ox_bits, int oy_bits) {
-    float ox;
-    float oy;
-    memcpy(&ox, &ox_bits, sizeof ox);
-    memcpy(&oy, &oy_bits, sizeof oy);
-    s->origin_x = ox;
-    s->origin_y = oy;
+/* Commits a sprite.override.set on the PENDING (name-keyed) record for `sprite_name`:
+ * nil source_id + verbatim key (== the export-key bridge, since sprite_name is
+ * ext-stripped). Core applies the masked fields then prunes the record if it becomes
+ * all-default (keeps storage sparse) -- byte-identical to the pre-cutover
+ * add_sprite/set/prune. Touches through GUI_ACT_SET_SETTING (gesture coalescing). */
+static bool sprite_override_commit(int atlas_index, const char *sprite_name, tp_op_sprite_set payload) {
+    tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
+    if (!a || !sprite_name || sprite_name[0] == '\0') {
+        return false;
+    }
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_SPRITE_OVERRIDE_SET;
+    op.atlas_id = a->id;
+    op.u.sprite_set = payload;
+    op.u.sprite_set.source_id = tp_id128_nil();
+    op.u.sprite_set.src_key = dupstr(sprite_name);
+    if (!op.u.sprite_set.src_key) {
+        tp_operation_free(&op);
+        return false;
+    }
+    if (!commit_txn(&op, 1)) {
+        return false;
+    }
+    gui_project_touch(GUI_ACT_SET_SETTING);
+    return true;
 }
+
 bool gui_project_set_sprite_origin(int atlas_index, const char *sprite_name, float ox, float oy) {
-    int ox_bits;
-    int oy_bits;
-    memcpy(&ox_bits, &ox, sizeof ox_bits);
-    memcpy(&oy_bits, &oy, sizeof oy_bits);
-    return sprite_override_edit(atlas_index, sprite_name, apply_origin, ox_bits, oy_bits);
+    tp_op_sprite_set p;
+    memset(&p, 0, sizeof p);
+    p.mask = TP_SPF_ORIGIN;
+    p.origin_x = ox;
+    p.origin_y = oy;
+    return sprite_override_commit(atlas_index, sprite_name, p);
 }
 
-static void apply_slice9(tp_project_sprite *s, int idx, int value) {
-    if (idx >= 0 && idx < 4) {
-        s->slice9_lrtb[idx] = (uint16_t)(value < 0 ? 0 : value);
-    }
-}
 bool gui_project_set_sprite_slice9(int atlas_index, const char *sprite_name, int lrtb_index, int value) {
-    return sprite_override_edit(atlas_index, sprite_name, apply_slice9, lrtb_index, value);
+    if (lrtb_index < 0 || lrtb_index >= 4) {
+        return false;
+    }
+    /* Read-modify-write: the op's SLICE9 mask sets all four components, but the widget
+     * edits one at a time. Seed from the current record (absent -> all-zero). */
+    tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
+    const tp_project_sprite *ov = a ? tp_project_atlas_find_sprite(a, sprite_name) : NULL;
+    tp_op_sprite_set p;
+    memset(&p, 0, sizeof p);
+    p.mask = TP_SPF_SLICE9;
+    for (int k = 0; k < 4; k++) {
+        p.slice9[k] = ov ? ov->slice9_lrtb[k] : 0;
+    }
+    p.slice9[lrtb_index] = (uint16_t)(value < 0 ? 0 : value);
+    return sprite_override_commit(atlas_index, sprite_name, p);
 }
 
-static void apply_override(tp_project_sprite *s, int which, int value) {
-    const int16_t v = (int16_t)value;
-    switch ((gui_sprite_ov)which) {
-        case GUI_SPRITE_OV_SHAPE: s->ov_shape = v; break;
-        case GUI_SPRITE_OV_ROTATE: s->ov_allow_rotate = v; break;
-        case GUI_SPRITE_OV_MAXVERT: s->ov_max_vertices = v; break;
-        case GUI_SPRITE_OV_MARGIN: s->ov_margin = v; break;
-        case GUI_SPRITE_OV_EXTRUDE: s->ov_extrude = v; break;
-    }
-}
 bool gui_project_set_sprite_override(int atlas_index, const char *sprite_name, gui_sprite_ov which, int value) {
-    return sprite_override_edit(atlas_index, sprite_name, apply_override, (int)which, value);
+    tp_op_sprite_set p;
+    memset(&p, 0, sizeof p);
+    const int16_t v = (int16_t)value; /* value may be TP_PROJECT_OV_INHERIT to clear the field */
+    switch (which) {
+        case GUI_SPRITE_OV_SHAPE: p.mask = TP_SPF_SHAPE; p.ov_shape = v; break;
+        case GUI_SPRITE_OV_ROTATE: p.mask = TP_SPF_ALLOW_ROTATE; p.ov_allow_rotate = v; break;
+        case GUI_SPRITE_OV_MAXVERT: p.mask = TP_SPF_MAX_VERTICES; p.ov_max_vertices = v; break;
+        case GUI_SPRITE_OV_MARGIN: p.mask = TP_SPF_MARGIN; p.ov_margin = v; break;
+        case GUI_SPRITE_OV_EXTRUDE: p.mask = TP_SPF_EXTRUDE; p.ov_extrude = v; break;
+        default: return false;
+    }
+    return sprite_override_commit(atlas_index, sprite_name, p);
 }
 
 int gui_project_add_target(int atlas_index) {
-    /* Same default-target op as fresh-atlas seeding (core owns id + path). */
-    if (tp_project_atlas_seed_default_target(s_proj, atlas_index) != TP_STATUS_OK) {
+    /* Seeds the default json-neotolis target (core owns the exporter id + path). LIFECYCLE
+     * seeding, not a mutation op (a frontend must not name an exporter id literal); the
+     * seed's target gets its id at the save/touch §5.5 promotion, exactly as before. */
+    tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
+    if (!a || tp_project_atlas_seed_default_target(s_proj, atlas_index) != TP_STATUS_OK) {
         return -1;
     }
     gui_project_touch(GUI_ACT_ADD_TARGET);
-    tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
+    a = tp_project_get_atlas(s_proj, atlas_index);
     return a ? a->target_count - 1 : -1;
 }
 
 void gui_project_remove_target(int atlas_index, int index) {
     tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
-    if (a && tp_project_atlas_remove_target(a, index) == TP_STATUS_OK) {
+    if (!a || index < 0 || index >= a->target_count) {
+        return;
+    }
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_TARGET_REMOVE;
+    op.atlas_id = a->id;
+    op.u.target_ref.target_id = a->targets[index].id;
+    if (commit_txn(&op, 1)) {
         gui_project_touch(GUI_ACT_REMOVE_TARGET);
     }
 }
 
 bool gui_project_set_target(int atlas_index, int index, const char *exporter_id, const char *out_path, bool enabled) {
     tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
-    if (!a || tp_project_atlas_set_target(a, index, exporter_id, out_path, enabled) != TP_STATUS_OK) {
+    if (!a || index < 0 || index >= a->target_count) {
+        return false;
+    }
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_TARGET_SET;
+    op.atlas_id = a->id;
+    op.u.target_set.target_id = a->targets[index].id;
+    op.u.target_set.enabled = enabled;
+    op.u.target_set.exporter_id = dupstr(exporter_id);
+    op.u.target_set.out_path = dupstr(out_path);
+    if (!op.u.target_set.exporter_id || !op.u.target_set.out_path) {
+        tp_operation_free(&op);
+        return false;
+    }
+    if (!commit_txn(&op, 1)) {
         return false;
     }
     gui_project_touch(GUI_ACT_SET_TARGET);
@@ -445,7 +666,8 @@ int gui_project_create_animation(int atlas_index, const char *base, const char *
     if (!a) {
         return -1;
     }
-    /* unique id: prefer `base` verbatim, else base"2"/"3"...; a NULL/empty base auto-names "animN". */
+    /* unique id (CLIENT naming policy): prefer `base` verbatim, else base"2"/"3"...; a
+     * NULL/empty base auto-names "animN". Core has no dup-name rejection for animations. */
     char id[128];
     if (base && base[0]) {
         (void)snprintf(id, sizeof id, "%s", base);
@@ -460,22 +682,79 @@ int gui_project_create_animation(int atlas_index, const char *base, const char *
             }
         }
     }
-    tp_project_anim *an = NULL;
-    if (tp_project_atlas_add_animation(a, id, &an) != TP_STATUS_OK) {
+    tp_id128 anim_id;
+    if (!gen_id(&anim_id)) {
         return -1;
     }
+    int nframes = 0;
     for (int i = 0; frames && i < frame_count; i++) {
         if (frames[i] && frames[i][0]) {
-            (void)tp_project_anim_add_frame(an, frames[i]);
+            nframes++;
         }
     }
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_ANIMATION_CREATE;
+    op.atlas_id = a->id;
+    op.u.anim_create.anim_id = anim_id;
+    op.u.anim_create.name = dupstr(id);
+    op.u.anim_create.fps = TP_PROJECT_ANIM_FPS_DEFAULT;
+    op.u.anim_create.playback = TP_PROJECT_ANIM_PLAYBACK_DEFAULT;
+    op.u.anim_create.flip_h = false;
+    op.u.anim_create.flip_v = false;
+    op.u.anim_create.frame_count = nframes;
+    bool bad = (op.u.anim_create.name == NULL);
+    if (!bad && nframes > 0) {
+        op.u.anim_create.frames = (char **)calloc((size_t)nframes, sizeof(char *));
+        if (!op.u.anim_create.frames) {
+            bad = true;
+        } else {
+            int w = 0;
+            for (int i = 0; frames && i < frame_count && !bad; i++) {
+                if (frames[i] && frames[i][0]) {
+                    op.u.anim_create.frames[w] = dupstr(frames[i]);
+                    if (!op.u.anim_create.frames[w]) {
+                        bad = true;
+                    }
+                    w++;
+                }
+            }
+        }
+    }
+    if (bad) {
+        tp_operation_free(&op);
+        return -1;
+    }
+    if (!commit_txn(&op, 1)) {
+        return -1;
+    }
     gui_project_touch(GUI_ACT_ADD_ANIM);
-    return a->animation_count - 1;
+    /* Re-fetch the (clone-swapped) atlas to report the appended animation's index. */
+    a = tp_project_get_atlas(s_proj, atlas_index);
+    return (a && tp_project_atlas_find_animation_by_id(a, anim_id)) ? (a->animation_count - 1) : -1;
 }
 
 void gui_project_remove_animation(int atlas_index, const char *id) {
     tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
-    if (a && id && tp_project_atlas_remove_animation(a, id) == TP_STATUS_OK) {
+    if (!a || !id) {
+        return;
+    }
+    tp_project_anim *an = NULL;
+    for (int i = 0; i < a->animation_count; i++) {
+        if (a->animations[i].name && strcmp(a->animations[i].name, id) == 0) {
+            an = &a->animations[i];
+            break;
+        }
+    }
+    if (!an) {
+        return;
+    }
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_ANIMATION_REMOVE;
+    op.atlas_id = a->id;
+    op.u.anim_ref.anim_id = an->id;
+    if (commit_txn(&op, 1)) {
         gui_project_touch(GUI_ACT_REMOVE_ANIM);
     }
 }
@@ -491,16 +770,46 @@ bool gui_project_set_anim_id(int atlas_index, int anim_index, const char *new_id
     tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
     for (int i = 0; a && i < a->animation_count; i++) {
         if (i != anim_index && a->animations[i].name && strcmp(a->animations[i].name, new_id) == 0) {
-            return false; /* clashes with another animation */
+            return false; /* CLIENT policy: clashes with another animation (core has no anim-rename) */
         }
     }
+    /* The F2-01 operation catalog has NO animation-rename op (the CLI has no anim rename
+     * verb either -- animations are name-keyed; the structural id is stable). This is the
+     * ONE mutator that cannot be expressed as an op in b-i; it stays a direct name write.
+     * Coherent because the model is journal-less: the write mutates m->project in place and
+     * touch() snapshots it; the next transaction clones it. Documented in decision 0015. */
     char *copy = dupstr(new_id);
     if (!copy) {
         return false;
     }
-    free(an->name); /* rename edits the logical name; the structural id is unchanged */
-    an->name = copy;
+    free(an->name); /* boundary-ok: no ANIMATION_RENAME op exists (decision 0015) */
+    an->name = copy; /* boundary-ok: no ANIMATION_RENAME op exists (decision 0015) */
     gui_project_touch(GUI_ACT_RENAME_ANIM);
+    return true;
+}
+
+/* One animation.settings.set with `mask`/values; false on OOM / reject / no-op skip. */
+static bool anim_settings_commit(int atlas_index, int anim_index, uint32_t mask, float fps, int playback, bool flip_h,
+                                 bool flip_v) {
+    tp_project_anim *an = anim_at(atlas_index, anim_index);
+    if (!an) {
+        return false;
+    }
+    tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_ANIMATION_SETTINGS_SET;
+    op.atlas_id = a->id;
+    op.u.anim_settings.anim_id = an->id;
+    op.u.anim_settings.mask = mask;
+    op.u.anim_settings.fps = fps;
+    op.u.anim_settings.playback = playback;
+    op.u.anim_settings.flip_h = flip_h;
+    op.u.anim_settings.flip_v = flip_v;
+    if (!commit_txn(&op, 1)) {
+        return false;
+    }
+    gui_project_touch(GUI_ACT_SET_ANIM);
     return true;
 }
 
@@ -510,14 +819,12 @@ bool gui_project_set_anim_fps(int atlas_index, int anim_index, float fps) {
         return false;
     }
     if (!(fps >= 1.0F)) {
-        fps = 1.0F;
+        fps = 1.0F; /* widget parse-clamp (>=1); core also range-checks (>0 finite) on commit */
     }
     if (an->fps == fps) {
-        return true;
+        return true; /* no-op: skip the commit (no history/dirty), exactly as before */
     }
-    an->fps = fps;
-    gui_project_touch(GUI_ACT_SET_ANIM);
-    return true;
+    return anim_settings_commit(atlas_index, anim_index, TP_ANF_FPS, fps, an->playback, an->flip_h, an->flip_v);
 }
 
 bool gui_project_set_anim_playback(int atlas_index, int anim_index, int playback) {
@@ -534,9 +841,7 @@ bool gui_project_set_anim_playback(int atlas_index, int anim_index, int playback
     if (an->playback == playback) {
         return true;
     }
-    an->playback = playback;
-    gui_project_touch(GUI_ACT_SET_ANIM);
-    return true;
+    return anim_settings_commit(atlas_index, anim_index, TP_ANF_PLAYBACK, an->fps, playback, an->flip_h, an->flip_v);
 }
 
 bool gui_project_set_anim_flip(int atlas_index, int anim_index, bool flip_h, bool flip_v) {
@@ -547,10 +852,8 @@ bool gui_project_set_anim_flip(int atlas_index, int anim_index, bool flip_h, boo
     if (an->flip_h == flip_h && an->flip_v == flip_v) {
         return true;
     }
-    an->flip_h = flip_h;
-    an->flip_v = flip_v;
-    gui_project_touch(GUI_ACT_SET_ANIM);
-    return true;
+    return anim_settings_commit(atlas_index, anim_index, TP_ANF_FLIP_H | TP_ANF_FLIP_V, an->fps, an->playback, flip_h,
+                                flip_v);
 }
 
 bool gui_project_anim_add_frames(int atlas_index, int anim_index, const char *const *frames, int count) {
@@ -558,22 +861,57 @@ bool gui_project_anim_add_frames(int atlas_index, int anim_index, const char *co
     if (!an || !frames || count <= 0) {
         return false;
     }
-    int added = 0;
-    for (int i = 0; i < count; i++) {
-        if (frames[i] && frames[i][0] && tp_project_anim_add_frame(an, frames[i]) == TP_STATUS_OK) {
-            added++;
-        }
-    }
-    if (added == 0) {
+    tp_id128 anim_id = an->id;
+    tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
+    tp_id128 aid = a->id;
+    tp_operation *ops = (tp_operation *)calloc((size_t)count, sizeof *ops);
+    if (!ops) {
         return false;
     }
-    gui_project_touch(GUI_ACT_ANIM_FRAMES);
-    return true;
+    int n = 0;
+    bool oom = false;
+    for (int i = 0; i < count && !oom; i++) {
+        if (!(frames[i] && frames[i][0])) {
+            continue;
+        }
+        tp_operation *op = &ops[n];
+        op->kind = TP_OP_ANIMATION_FRAME_ADD;
+        op->atlas_id = aid;
+        op->u.anim_frame_add.anim_id = anim_id;
+        op->u.anim_frame_add.frame = dupstr(frames[i]);
+        op->u.anim_frame_add.index = -1; /* append */
+        if (!op->u.anim_frame_add.frame) {
+            oom = true;
+            break;
+        }
+        n++;
+    }
+    if (oom || n == 0) {
+        ops_free(ops, n);
+        free(ops);
+        return false;
+    }
+    bool ok = commit_txn(ops, n); /* frees the op arms */
+    free(ops);
+    if (ok) {
+        gui_project_touch(GUI_ACT_ANIM_FRAMES);
+    }
+    return ok;
 }
 
 bool gui_project_anim_remove_frame(int atlas_index, int anim_index, int frame_index) {
     tp_project_anim *an = anim_at(atlas_index, anim_index);
-    if (!an || tp_project_anim_remove_frame(an, frame_index) != TP_STATUS_OK) {
+    if (!an || frame_index < 0 || frame_index >= an->frame_count) {
+        return false;
+    }
+    tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_ANIMATION_FRAME_REMOVE;
+    op.atlas_id = a->id;
+    op.u.anim_frame_rm.anim_id = an->id;
+    op.u.anim_frame_rm.index = frame_index;
+    if (!commit_txn(&op, 1)) {
         return false;
     }
     gui_project_touch(GUI_ACT_ANIM_FRAMES);
@@ -582,7 +920,28 @@ bool gui_project_anim_remove_frame(int atlas_index, int anim_index, int frame_in
 
 bool gui_project_anim_move_frame(int atlas_index, int anim_index, int frame_index, int delta) {
     tp_project_anim *an = anim_at(atlas_index, anim_index);
-    if (!an || tp_project_anim_move_frame(an, frame_index, delta) != TP_STATUS_OK) {
+    if (!an || frame_index < 0 || frame_index >= an->frame_count) {
+        return false;
+    }
+    int to = frame_index + delta; /* op addresses (from,to) absolute; core clamps `to` into range */
+    if (to < 0) {
+        to = 0;
+    }
+    if (to >= an->frame_count) {
+        to = an->frame_count - 1;
+    }
+    if (to == frame_index) {
+        return true; /* no-op move (edge button): skip commit, as before */
+    }
+    tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_ANIMATION_FRAME_MOVE;
+    op.atlas_id = a->id;
+    op.u.anim_frame_move.anim_id = an->id;
+    op.u.anim_frame_move.from_index = frame_index;
+    op.u.anim_frame_move.to_index = to;
+    if (!commit_txn(&op, 1)) {
         return false;
     }
     gui_project_touch(GUI_ACT_ANIM_FRAMES);
@@ -594,19 +953,21 @@ bool gui_project_anim_move_frame(int atlas_index, int anim_index, int frame_inde
 bool gui_project_can_undo(void) { return gui_history_can_undo(); }
 bool gui_project_can_redo(void) { return gui_history_can_redo(); }
 
-/* Loads `buf` (owned; adopted as the new last snapshot) into the live model. The file
- * path is invariant across undo/redo, so project_dir is carried over from the old model
- * (tp_project_load_buffer leaves it NULL). */
+/* Loads `buf` (owned; adopted as the new last snapshot) into the live model and re-wraps
+ * the journal-less model around the restored project (snapshot undo stays coherent
+ * because the model is journal-less -- F2-05b-i). The file path is invariant across
+ * undo/redo, so project_dir is carried over from the old model. */
 static bool restore_from_buffer(char *buf, size_t len) {
     tp_project *np = NULL;
     tp_error e = {0};
     if (tp_project_load_buffer(buf, len, &np, &e) != TP_STATUS_OK) {
         return false;
     }
-    char *dir = (s_proj && s_proj->project_dir) ? dupstr(s_proj->project_dir) : NULL;
-    tp_project_destroy(s_proj);
-    np->project_dir = dir;
-    s_proj = np;
+    np->project_dir = (s_proj && s_proj->project_dir) ? dupstr(s_proj->project_dir) : NULL;
+    wrap_model(np); /* frees the old model+project, wraps np, refreshes s_proj */
+    if (!s_proj) {
+        return false; /* OOM re-wrapping: np already freed by wrap_model */
+    }
 
     free(s_last_buf);
     s_last_buf = buf; /* the restored bytes ARE the current serialization */
@@ -651,9 +1012,11 @@ void gui_project_new(void) {
     if (!fresh) {
         return;
     }
-    seed_default_target(fresh, 0); /* fresh GUI project exports something (I1) */
-    tp_project_destroy(s_proj);
-    s_proj = fresh;
+    seed_default_target(fresh, 0); /* fresh GUI project exports something (I1) -- lifecycle, direct */
+    wrap_model(fresh);
+    if (!s_proj) {
+        return; /* OOM: wrap_model freed fresh; keep the (now-destroyed) prior model NULL */
+    }
     set_path("");
     s_project_dirty = false;
     s_preview_stale = false;
@@ -673,8 +1036,13 @@ tp_status gui_project_open(const char *path, char *err_out, size_t err_cap) {
         }
         return st;
     }
-    tp_project_destroy(s_proj);
-    s_proj = loaded;
+    wrap_model(loaded);
+    if (!s_proj) {
+        if (err_out && err_cap) {
+            (void)snprintf(err_out, err_cap, "out of memory wrapping the loaded project");
+        }
+        return TP_STATUS_OOM;
+    }
     set_path(path);
     s_project_dirty = false;
     s_preview_stale = true; /* nothing packed this session yet */
@@ -697,9 +1065,9 @@ tp_status gui_project_save(char *err_out, size_t err_cap) {
 
 tp_status gui_project_save_as(const char *path, char *err_out, size_t err_cap) {
     tp_error err = {0};
-    /* Promote to final random ids BEFORE writing: on OS-RNG failure promote returns
-     * RNG_FAILED with every id left nil, so persisting now would write a nil-id file
-     * that fails on reload. Fail closed -- report and return WITHOUT saving. */
+    /* Promote to final random ids BEFORE writing (§5.5); on OS-RNG failure promote returns
+     * RNG_FAILED with every id left nil, so persisting now would write a nil-id file that
+     * fails on reload. Fail closed -- report and return WITHOUT saving. */
     tp_status ids = ensure_ids(&err);
     if (ids != TP_STATUS_OK) {
         if (err_out && err_cap) {
