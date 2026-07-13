@@ -4,10 +4,18 @@
  * it needs to copy one source/sprite/animation/target/frame/atlas-subtree out of the
  * live model and, on inverse/redo, splice a deep copy back in at an exact index.
  *
- * These mirror tp_project_clone.c's element copies but are kept SEPARATE on purpose:
- * routing them through the diff fault-seam (not the clone seam) keeps F2-02's
- * clone alloc-count goldens byte-stable, and the diff owns its captured data with
- * its own single-free discipline.
+ * These mirror tp_project_clone.c's element copies (fill_atlas/anim/source/target/
+ * frame/copy_sprite_fields <-> clone_atlas/clone_frames) but are kept SEPARATE on
+ * purpose: routing them through the diff fault-seam (tp_diff__alloc), not the clone
+ * seam (cl_alloc), keeps F2-02's clone alloc-count goldens byte-stable, and the diff
+ * owns its captured data with its own single-free discipline (decision 0012 §6).
+ *
+ * !! FORK-SYNC WARNING (review [5]) !! A persistent field added to tp_project_clone.c
+ * MUST be added here too, or Undo/Redo silently restores a non-byte-identical project.
+ * The safety net is the completeness oracle test_completeness_oracle_* in test_diff.c:
+ * it sets EVERY persistent field of EVERY entity kind non-default and asserts
+ * remove->inverse is byte-identical, so a missed field fails there loudly. When you add
+ * a field, update BOTH copies AND make_maximal() in test_diff.c.
  *
  * OOM-safety invariant (same as tp_project_clone): every owned pointer in a growing
  * copy is ALWAYS a valid malloc or NULL, and a collection count only ever covers
@@ -444,13 +452,18 @@ tp_status tp_diff__insert_atlas(tp_project *p, int index, const tp_project_atlas
     }
     return fill_atlas((tp_project_atlas *)slot, src);
 }
+/* The positional REMOVE direction delegates to the canonical public remover (fix [6]:
+ * the bounds-check + element free-discipline + down-shift lives in ONE place, killing
+ * the drift risk of a second free-list). Only re-zero the vacated tail slot afterward so
+ * the diff's array invariant holds ([count,cap) carry only NULL owned pointers; the
+ * public remover leaves a stale alias there). The positional INSERT direction is the
+ * genuinely new capability the diff owns, so it stays local. */
 tp_status tp_diff__remove_atlas(tp_project *p, int index) {
-    if (index < 0 || index >= p->atlas_count) {
-        return TP_STATUS_OUT_OF_BOUNDS;
+    tp_status st = tp_project_remove_atlas(p, index);
+    if (st == TP_STATUS_OK) {
+        memset(&p->atlases[p->atlas_count], 0, sizeof *p->atlases);
     }
-    free_atlas(&p->atlases[index]);
-    arr_remove(p->atlases, &p->atlas_count, sizeof(tp_project_atlas), index);
-    return TP_STATUS_OK;
+    return st;
 }
 
 tp_status tp_diff__insert_source(tp_project_atlas *a, int index, const tp_project_source *src) {
@@ -464,12 +477,11 @@ tp_status tp_diff__insert_source(tp_project_atlas *a, int index, const tp_projec
     return fill_source((tp_project_source *)slot, src);
 }
 tp_status tp_diff__remove_source(tp_project_atlas *a, int index) {
-    if (index < 0 || index >= a->source_count) {
-        return TP_STATUS_OUT_OF_BOUNDS;
+    tp_status st = tp_project_atlas_remove_source(a, index); /* fix [6]: delegate free+shift */
+    if (st == TP_STATUS_OK) {
+        memset(&a->sources[a->source_count], 0, sizeof *a->sources);
     }
-    free_source(&a->sources[index]);
-    arr_remove(a->sources, &a->source_count, sizeof(tp_project_source), index);
-    return TP_STATUS_OK;
+    return st;
 }
 
 tp_status tp_diff__insert_anim(tp_project_atlas *a, int index, const tp_project_anim *src) {
@@ -503,12 +515,11 @@ tp_status tp_diff__insert_target(tp_project_atlas *a, int index, const tp_projec
     return fill_target((tp_project_target *)slot, src);
 }
 tp_status tp_diff__remove_target(tp_project_atlas *a, int index) {
-    if (index < 0 || index >= a->target_count) {
-        return TP_STATUS_OUT_OF_BOUNDS;
+    tp_status st = tp_project_atlas_remove_target(a, index); /* fix [6]: delegate free+shift */
+    if (st == TP_STATUS_OK) {
+        memset(&a->targets[a->target_count], 0, sizeof *a->targets);
     }
-    free_target(&a->targets[index]);
-    arr_remove(a->targets, &a->target_count, sizeof(tp_project_target), index);
-    return TP_STATUS_OK;
+    return st;
 }
 
 tp_status tp_diff__insert_frame(tp_project_anim *an, int index, const tp_project_frame *src) {
@@ -522,13 +533,11 @@ tp_status tp_diff__insert_frame(tp_project_anim *an, int index, const tp_project
     return fill_frame((tp_project_frame *)slot, src);
 }
 tp_status tp_diff__remove_frame_at(tp_project_anim *an, int index) {
-    if (index < 0 || index >= an->frame_count) {
-        return TP_STATUS_OUT_OF_BOUNDS;
+    tp_status st = tp_project_anim_remove_frame(an, index); /* fix [6]: delegate free+shift */
+    if (st == TP_STATUS_OK) {
+        memset(&an->frames[an->frame_count], 0, sizeof *an->frames);
     }
-    free(an->frames[index].name);
-    free(an->frames[index].src_key);
-    arr_remove(an->frames, &an->frame_count, sizeof(tp_project_frame), index);
-    return TP_STATUS_OK;
+    return st;
 }
 
 tp_status tp_diff__insert_sprite(tp_project_atlas *a, int index, const tp_project_sprite *src) {
