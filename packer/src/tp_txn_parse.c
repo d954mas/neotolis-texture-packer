@@ -32,20 +32,6 @@
 #include "tp_txn_json.h"
 #include "tp_txn_parse_priv.h"
 
-static bool is_hex32_lower(const char *s) {
-    if (!s) {
-        return false;
-    }
-    int n = 0;
-    for (; s[n]; n++) {
-        char c = s[n];
-        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
-            return false;
-        }
-    }
-    return n == 32;
-}
-
 /* Map an addressing "*_id" key to the shape-id kind it must carry, or INVALID if
  * the key is not an addressing id. */
 static tp_id_kind addr_kind(const char *key) {
@@ -66,11 +52,15 @@ static tp_status parse_envelope(const cJSON *root, tp_txn_request *req, const cJ
     if (!schema) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "missing \"schema\"");
     }
-    if (!cJSON_IsNumber(schema)) {
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "\"schema\" must be a number");
+    /* Route schema through the range-checked integral converter -- a truncating
+     * schema->valueint would accept a fractional {"schema":1.9} as 1. */
+    int64_t schema_v = 0;
+    tp_status sst = j_i64(schema, &schema_v, err); /* non-integral/inf/NaN -> invalid_argument */
+    if (sst != TP_STATUS_OK) {
+        return sst;
     }
-    if (schema->valueint != TP_TXN_SCHEMA) {
-        return tp_error_set(err, TP_STATUS_BAD_VERSION, "unknown schema version %d (want %d)", schema->valueint,
+    if (schema_v != TP_TXN_SCHEMA) {
+        return tp_error_set(err, TP_STATUS_BAD_VERSION, "unknown schema version %" PRId64 " (want %d)", schema_v,
                             TP_TXN_SCHEMA);
     }
     req->schema = TP_TXN_SCHEMA;
@@ -90,7 +80,7 @@ static tp_status parse_envelope(const cJSON *root, tp_txn_request *req, const cJ
     if (!cJSON_IsString(id)) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "missing transaction \"id\"");
     }
-    if (!is_hex32_lower(id->valuestring)) {
+    if (!tp_txn__is_hex32_lower(id->valuestring)) { /* shared with tp_txn__preflight -- cannot drift */
         return tp_error_set(err, TP_STATUS_ID_MALFORMED, "transaction id must be 32 lowercase hex");
     }
     (void)snprintf(req->id_hex, sizeof req->id_hex, "%s", id->valuestring);
@@ -148,18 +138,23 @@ static tp_status parse_envelope(const cJSON *root, tp_txn_request *req, const cJ
 
 /* Per-op SHAPE checks, collected into `out` in (op_index, field) order: an unknown
  * op wire (op_unknown, then skip field checks), an unknown field (unknown_field), and
- * a malformed/wrong-kind addressing id (id_malformed). Returns the number of errors
- * this op contributed. */
-static int shape_check_op(const cJSON *oj, int idx, tp_txn_result *out) {
-    int before = out->error_count;
+ * a present-but-non-string OR malformed/wrong-kind addressing id (id_malformed).
+ * `out` must be non-NULL. Returns true if this op contributed >= 1 shape fault
+ * (independent of whether every record could be stored). Sets *store_oom if any fault
+ * record could not be stored -- the batch must then reject even though error_count is
+ * short, so a shape-faulted batch never falsely commits under allocation pressure. */
+static bool shape_check_op(const cJSON *oj, int idx, tp_txn_result *out, bool *store_oom) {
     const cJSON *wire = cJSON_GetObjectItemCaseSensitive(oj, "op");
     tp_op_kind kind = tp_op_kind_from_wire(wire->valuestring);
     if (kind == TP_OP_INVALID) {
         char msg[192];
         (void)snprintf(msg, sizeof msg, "unknown operation '%s'", wire->valuestring);
-        tp_txn__result_add_error(out, idx, TP_STATUS_UNKNOWN_OP, "op", msg);
-        return out->error_count - before; /* cannot check fields of an unknown op */
+        if (!tp_txn__result_add_error(out, idx, TP_STATUS_UNKNOWN_OP, "op", msg)) {
+            *store_oom = true;
+        }
+        return true; /* cannot check fields of an unknown op */
     }
+    bool faulted = false;
     for (const cJSON *c = oj->child; c; c = c->next) {
         if (!c->string || strcmp(c->string, "op") == 0) {
             continue;
@@ -167,20 +162,36 @@ static int shape_check_op(const cJSON *oj, int idx, tp_txn_result *out) {
         if (!tp_op_field_allowed(kind, c->string)) {
             char msg[192];
             (void)snprintf(msg, sizeof msg, "unknown field '%s' for '%s'", c->string, wire->valuestring);
-            tp_txn__result_add_error(out, idx, TP_STATUS_INVALID_ARGUMENT, c->string, msg);
+            if (!tp_txn__result_add_error(out, idx, TP_STATUS_INVALID_ARGUMENT, c->string, msg)) {
+                *store_oom = true;
+            }
+            faulted = true;
             continue;
         }
         tp_id_kind ak = addr_kind(c->string);
-        if (ak != TP_ID_KIND_INVALID && cJSON_IsString(c)) {
-            tp_id_kind got = TP_ID_KIND_INVALID;
-            if (tp_id_parse(c->valuestring, &got, NULL, NULL) != TP_STATUS_OK || got != ak) {
-                char msg[192];
-                (void)snprintf(msg, sizeof msg, "field '%s' is not a well-formed id", c->string);
-                tp_txn__result_add_error(out, idx, TP_STATUS_ID_MALFORMED, c->string, msg);
+        if (ak == TP_ID_KIND_INVALID) {
+            continue;
+        }
+        if (!cJSON_IsString(c)) { /* a present-but-non-string addressing id is a shape fault */
+            char msg[192];
+            (void)snprintf(msg, sizeof msg, "field '%s' must be a string id", c->string);
+            if (!tp_txn__result_add_error(out, idx, TP_STATUS_ID_MALFORMED, c->string, msg)) {
+                *store_oom = true;
             }
+            faulted = true;
+            continue;
+        }
+        tp_id_kind got = TP_ID_KIND_INVALID;
+        if (tp_id_parse(c->valuestring, &got, NULL, NULL) != TP_STATUS_OK || got != ak) {
+            char msg[192];
+            (void)snprintf(msg, sizeof msg, "field '%s' is not a well-formed id", c->string);
+            if (!tp_txn__result_add_error(out, idx, TP_STATUS_ID_MALFORMED, c->string, msg)) {
+                *store_oom = true;
+            }
+            faulted = true;
         }
     }
-    return out->error_count - before;
+    return faulted;
 }
 
 /* Lower every op JSON into req->ops (typed). On a lowering fault frees the partial
@@ -233,9 +244,10 @@ tp_status tp_txn_request_decode(const char *json, tp_txn_request **out, tp_error
     for (int i = 0; i < n; i++) {
         tp_txn_result tmp;
         tp_txn__result_reset(&tmp, req->id_hex);
-        if (shape_check_op(cJSON_GetArrayItem(ops, i), i, &tmp) > 0) {
-            tp_status code = tmp.errors[0].code;
-            (void)tp_error_set(err, code, "%s", tmp.errors[0].message);
+        bool store_oom = false;
+        if (shape_check_op(cJSON_GetArrayItem(ops, i), i, &tmp, &store_oom)) {
+            tp_status code = (tmp.error_count > 0) ? tmp.errors[0].code : TP_STATUS_OOM;
+            (void)tp_error_set(err, code, "%s", tmp.error_count > 0 ? tmp.errors[0].message : "out of memory");
             tp_txn_result_free(&tmp);
             tp_txn_request_free(req);
             cJSON_Delete(root);
@@ -259,15 +271,17 @@ tp_status tp_txn_request_decode(const char *json, tp_txn_request **out, tp_error
     return TP_STATUS_OK;
 }
 
-tp_status tp_model_apply_json(tp_model *m, const char *json, tp_txn_result *out, tp_error *err) {
-    if (!m) {
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "null model");
-    }
-    tp_txn__result_reset(out, "");
+/* The JSON apply flow over a GUARANTEED-non-NULL working result `res` (the wrapper
+ * supplies a local when the caller passes out==NULL, so every collect-all path can
+ * store into a real result and no path dereferences a NULL out). Does not free
+ * `res` (its ops/errors belong to the caller, or to the wrapper's local). */
+static tp_status apply_json_into(tp_model *m, const char *json, tp_txn_result *res, tp_error *err) {
+    tp_txn__result_reset(res, "");
 
     cJSON *root = json ? cJSON_Parse(json) : NULL;
     if (!root) {
-        tp_txn__result_add_error(out, -1, TP_STATUS_INVALID_ARGUMENT, "", "malformed JSON");
+        res->revision = m->revision; /* preserve the revision so the client is not told the model reset */
+        tp_txn__result_add_error(res, -1, TP_STATUS_INVALID_ARGUMENT, "", "malformed JSON");
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "malformed JSON");
     }
     tp_txn_request *req = (tp_txn_request *)calloc(1, sizeof *req);
@@ -280,54 +294,52 @@ tp_status tp_model_apply_json(tp_model *m, const char *json, tp_txn_result *out,
     const cJSON *ops = NULL;
     tp_status st = parse_envelope(root, req, &ops, err);
     if (st != TP_STATUS_OK) {
-        tp_txn__result_reset(out, req->id_hex);
-        out->revision = m->revision;
-        tp_txn__result_add_error(out, -1, st, "", err ? err->msg : "");
+        tp_txn__result_reset(res, req->id_hex);
+        res->revision = m->revision;
+        tp_txn__result_add_error(res, -1, st, "", err ? err->msg : "");
         tp_txn_request_free(req);
         cJSON_Delete(root);
         return st;
     }
-    tp_txn__result_reset(out, req->id_hex);
 
-    /* 2. Idempotency (a seen committed id rejects; model unchanged). */
-    if (m->idstore && m->idstore->contains && m->idstore->contains(m->idstore->ctx, req->id_hex)) {
-        out->revision = m->revision;
-        tp_txn__result_add_error(out, -1, TP_STATUS_DUPLICATE_ID, "id", "transaction id already applied");
+    /* 2-3. Shared preflight gate: id format + idempotency + revision precondition
+     * (op_index -1) -- the SAME helper the typed path runs, so the two cannot drift. */
+    tp_status pf = tp_txn__preflight(m, req->id_hex, req->expected_revision, res, err);
+    if (pf != TP_STATUS_OK) {
         tp_txn_request_free(req);
         cJSON_Delete(root);
-        return tp_error_set(err, TP_STATUS_DUPLICATE_ID, "transaction id already applied");
-    }
-
-    /* 3. Revision precondition (short-circuits ALONE, op_index -1). */
-    tp_status rv = tp_revision_check(req->expected_revision, m->revision, err);
-    if (rv != TP_STATUS_OK) {
-        out->revision = m->revision;
-        tp_txn__result_add_error(out, -1, rv, "expected_revision", err ? err->msg : "");
-        tp_txn_request_free(req);
-        cJSON_Delete(root);
-        return rv;
+        return pf;
     }
 
     /* 4. Per-op SHAPE checks, collected in (op_index, field) order. */
     int n = cJSON_GetArraySize(ops);
+    bool any_fault = false;
+    bool store_oom = false;
     for (int i = 0; i < n; i++) {
-        (void)shape_check_op(cJSON_GetArrayItem(ops, i), i, out);
+        if (shape_check_op(cJSON_GetArrayItem(ops, i), i, res, &store_oom)) {
+            any_fault = true;
+        }
     }
-    if (out->error_count > 0) {
-        out->committed = false;
-        out->revision = m->revision;
-        tp_status code = out->errors[0].code;
+    if (any_fault || store_oom) {
+        res->committed = false;
+        res->revision = m->revision;
         tp_txn_request_free(req);
         cJSON_Delete(root);
-        return tp_error_set(err, code, "%d shape fault(s) in the batch", out->error_count);
+        if (store_oom) {
+            /* A shape fault was detected but its record could not be stored: reject
+             * (never commit) even though error_count is short of the real fault count. */
+            return tp_error_set(err, TP_STATUS_OOM, "could not record all shape faults (out of memory)");
+        }
+        tp_status code = (res->error_count > 0) ? res->errors[0].code : TP_STATUS_INVALID_ARGUMENT;
+        return tp_error_set(err, code, "%d shape fault(s) in the batch", res->error_count);
     }
 
     /* 5. Lower to typed ops. A value-type fault rejects (op_index of the bad op). */
     st = lower_all(ops, req, err);
     if (st != TP_STATUS_OK) {
-        out->committed = false;
-        out->revision = m->revision;
-        tp_txn__result_add_error(out, req->op_count, st, "", err ? err->msg : "");
+        res->committed = false;
+        res->revision = m->revision;
+        tp_txn__result_add_error(res, req->op_count, st, "", err ? err->msg : "");
         tp_txn_request_free(req);
         cJSON_Delete(root);
         return st;
@@ -335,7 +347,23 @@ tp_status tp_model_apply_json(tp_model *m, const char *json, tp_txn_result *out,
     cJSON_Delete(root);
 
     /* 6. Atomic commit on the clone (idempotency + revision already passed). */
-    st = tp_txn__commit_validated(m, req, out, err);
+    st = tp_txn__commit_validated(m, req, res, err);
     tp_txn_request_free(req);
+    return st;
+}
+
+tp_status tp_model_apply_json(tp_model *m, const char *json, tp_txn_result *out, tp_error *err) {
+    if (!m) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "null model");
+    }
+    /* The twin tp_model_apply supports out==NULL. The JSON path collects shape faults
+     * into a result, so when the caller passes NULL we collect into a local and free
+     * it here -- no path ever dereferences a NULL out. */
+    tp_txn_result local;
+    tp_txn_result *res = out ? out : &local;
+    tp_status st = apply_json_into(m, json, res, err);
+    if (!out) {
+        tp_txn_result_free(&local);
+    }
     return st;
 }
