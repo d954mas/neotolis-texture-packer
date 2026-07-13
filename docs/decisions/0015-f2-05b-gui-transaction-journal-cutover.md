@@ -844,3 +844,79 @@ no stale result produced), **J8** (`request_new` aborts on a journal-failed flus
 are kept, NOT silently discarded — detected via the retained project path). `check_boundaries.sh` =
 boundaries OK. `--parity` id-normalized byte-identical (same 3237 B) to the f6a5225 baseline — no saved
 bytes changed. No file under `packer/src` / `external` / `packer/spike` changed; no core seam.
+
+## F2-05b-ii-B FIX³ — the abort is now correctly interpreted by every caller (2026-07-14)
+
+fix2's abort-guards were correct, but the re-review found the abort was MISINTERPRETED one level up — the
+same `act-as-clean-despite-failed-flush` class, moved to the callers. Both bugs are narrow (need a
+disk-full journal AND a still-buffered gesture when the action fires) but real. GUI-only; no core; saved
+bytes byte-identical.
+
+### [0] void remove wrappers couldn't signal their abort → false "Removed" + a bad Ctrl+Z
+
+`gui_project_remove_source` / `remove_atlas` / `remove_target` / `remove_animation` were **void**, so
+fix2's `if (!flush_pending()) return;` abort was invisible to the deferred handlers in `apply_pending`
+(gui_actions.c), which ran `reset_selection()` / `clamp_selection()` / `preview_stop()` + a
+"Removed X (Ctrl+Z to undo)" message UNCONDITIONALLY. On a journal-failed flush the item was NOT removed
+but the handler still reset selection and showed "Removed" — a false success, and the offered Ctrl+Z would
+undo an earlier UNRELATED committed edit. **Fix:** the four wrappers now **return bool** (true iff the
+removal actually committed — false on the flush-abort, an invalid index, or a commit reject). Each deferred
+handler runs its side-effects + message **only when the wrapper returned true**; for remove_anim the
+`preview_stop()` + `s_sel_anim`/`s_sel_anim_frame` reset are likewise guarded on the real removal
+(preview_stop only resets flags → safe to run after the removal, no project deref). `remove_animation`
+keeps its dup-before-flush `id` + free-on-abort. Every other caller (gui_selftest.c) compiles unchanged
+(bool ignorable). **Regression J9:** arm append-fail + a buffered gesture → `remove_atlas` returns false
+and the atlas count is unchanged; the healthy-journal path returns true and removes.
+
+### [1] anim rename misreported a journal failure as a name collision + trapped the editor
+
+`gui_project_set_anim_id` returns false for BOTH a name collision AND (since fix2) a journal-failed flush.
+`commit_anim_rename` showed "Animation 'X' already exists." + kept the inline editor open;
+`commit_active_edit`'s anim branch showed "Animation name must be unique.". So a disk-full failure while
+renaming to a valid UNIQUE name was reported as a duplicate and the editor was trapped, the user retrying
+names that all "fail the same way". **Fix:** disambiguate with `gui_project_anim_id_exists(atlas, name)` at
+BOTH sites — a genuine collision (name exists on another animation) keeps the collision message + keep-
+editing behavior; otherwise (not a collision → a journal/other failure) do NOT claim uniqueness: dismiss
+the editor (`cancel_edit`) like the success path and let `poll_async` surface the real op-error
+("...could not be committed (disk full?)..."). **Regression J10:** a genuine duplicate → `set_anim_id`
+false AND `anim_id_exists` true (collision); a journal-failed flush on a unique name → `set_anim_id` false
+but `anim_id_exists` FALSE (not a collision). **Atlas/sprite rename confirmed FINE:** `commit_atlas_rename`
+/ `commit_active_edit` (atlas) pre-check via `atlas_name_valid` and, on a `set_atlas_name` false (flush-
+fail), show no success message and `cancel_edit()` unconditionally → no false success, no wrong-message
+trap; `commit_sprite_rename` guards its success message + `cancel_edit()`s (empty clears the override).
+
+### [2] cleanup — shared neutral flush-failure wording
+
+`flush_failed()` (gui_actions.c) and `gui_project_save_as` (gui_project.c) open-coded "flush failed → drain
+op-error → fallback → surface" with divergent wording, and `flush_failed()`'s fallback said "could not be
+**saved**" though it also gates Pack/Export. **Fix:** one shared `gui_project_flush_error(out, cap)` (fills
+the drained op-error, else a NEUTRAL fallback "Your last edit could not be committed (disk full?) — resolve
+it and try again." that fits save + pack + the gate); both `flush_failed()` and `save_as` call it. (The
+review's other two cleanup candidates were refuted — skipped.)
+
+### Completeness re-scan (every deferred handler + every caller of a now-abortable wrapper)
+
+- **Fixed:** the four void-remove deferred handlers (remove_source/atlas/target/anim) and the two anim-
+  rename sites (above).
+- **Also guarded (minor):** `main.c`'s Delete-key `gui_project_anim_remove_frame` cleared `s_sel_anim_frame`
+  UNCONDITIONALLY — now guarded on the real removal (a benign selection deselect, not a false success, but
+  closed for completeness).
+- **Confirmed SAFE, no change:** the ADD deferred handlers (`add_atlas`/`add_target`/`add_anim`/
+  `create_animation_from_selection`) already guard success + Ctrl+Z on `idx >= 0`; `drain_edits`'s
+  `(void)`-ignored coalescable setters + anim-frame + target edits show no message and run no side-effect
+  after the call (the op-error surfaces via `poll_async`); `commit_atlas_rename` / `commit_sprite_rename` /
+  `commit_active_edit` (atlas) guard their success message + always `cancel_edit()`; `do_browse_target_at`
+  guards its "Output path" message on `set_target` true. **Noted:** `do_add_files` multi-file add — the
+  first file's add can abort on the buffered-gesture flush (the gesture drops, then the flush is clear for
+  the rest); the summary counts only the files that actually added (honest count, op-error surfaced) — no
+  false success, left as-is.
+
+### Verified (both presets)
+
+0 warnings (native-debug + native-release, cgltf filtered); `ctest` 79/79 (debug) + 78/78 (release);
+`ntpacker_gui_selftest` PASS — J1-J8 stay green; **J9** (a bool remove wrapper returns false on a journal-
+failed flush + the item is still present; the success case removes) and **J10** (the `anim_id_exists`
+disambiguation: a real duplicate is a collision, a journal-failed flush on a unique name is NOT) added.
+`check_boundaries.sh` = boundaries OK. `--parity` id-normalized byte-identical (same 3237 B) to the
+f6a5225 baseline — no saved bytes changed. No file under `packer/src` / `external` / `packer/spike`
+changed; no core seam.

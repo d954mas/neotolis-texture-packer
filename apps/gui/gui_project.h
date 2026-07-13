@@ -135,12 +135,15 @@ bool gui_project_peek_pending_slice9(int atlas_index, const char *sprite_key, in
 unsigned gui_project_model_version(void);
 
 /* --- mutation wrappers (all funnel through gui_project_touch) --- */
+/* The remove wrappers return TRUE iff the removal actually committed (fix3 [0]): false on a
+ * journal-failed flush-abort, an invalid index, or a commit reject -- so a deferred handler shows
+ * "Removed X (Ctrl+Z)" + resets selection ONLY on a real removal, never a false success. */
 int gui_project_add_atlas(void);                          /* returns new atlas index, or -1 */
-void gui_project_remove_atlas(int index);
+bool gui_project_remove_atlas(int index);                 /* true iff removed */
 gui_add_status gui_project_add_source(int atlas_index, const char *path); /* stored verbatim; relativized on save; kind=folder */
 /* Kind-aware variant (schema v3): the "Add Files" dialog records TP_SOURCE_KIND_FILE. */
 gui_add_status gui_project_add_source_kind(int atlas_index, const char *path, tp_source_kind kind);
-void gui_project_remove_source(int atlas_index, int source_index);
+bool gui_project_remove_source(int atlas_index, int source_index); /* true iff removed */
 
 /* Renames atlas `index` (caller validates non-empty/unique/normalization-safe). */
 bool gui_project_set_atlas_name(int atlas_index, const char *name);
@@ -192,8 +195,8 @@ bool gui_project_set_sprite_override(int atlas_index, const char *sprite_name, g
  * the first free of {base, base"2", base"3", ...}; a NULL/empty base auto-names "anim1"/"anim2"/...
  * `frames` may be NULL/0 for an empty animation. Returns the new animation index, or -1. */
 int gui_project_create_animation(int atlas_index, const char *base, const char *const *frames, int frame_count);
-/* Removes the animation with `id`. */
-void gui_project_remove_animation(int atlas_index, const char *id);
+/* Removes the animation with `id`. Returns true iff removed (false on flush-abort/not-found). */
+bool gui_project_remove_animation(int atlas_index, const char *id);
 /* True if the atlas already has an animation named `id`. */
 bool gui_project_anim_id_exists(int atlas_index, const char *id);
 /* Renames animation `anim_index`; fails on empty or a name already used by another animation. */
@@ -209,7 +212,7 @@ bool gui_project_anim_move_frame(int atlas_index, int anim_index, int frame_inde
 /* --- export targets (region G, audit I1) --- */
 /* Appends a default json-neotolis target "out/<atlas>.<ext>"; returns its index or -1. */
 int gui_project_add_target(int atlas_index);
-void gui_project_remove_target(int atlas_index, int index);
+bool gui_project_remove_target(int atlas_index, int index); /* true iff removed (fix3 [0]) */
 bool gui_project_set_target(int atlas_index, int index, const char *exporter_id, const char *out_path, bool enabled);
 
 /* --- undo / redo (F2-03 diff history) --- */
@@ -248,6 +251,11 @@ bool gui_project_take_id_error(char *out, size_t cap);
  * reject; this surfaces the structured status to the status-bar soft-error channel.
  * Returns true once and copies the message into `out` (then clears it). */
 bool gui_project_take_op_error(char *out, size_t cap);
+
+/* Fills `out` with the reason the last flush's commit failed (fix3 [2]): the drained op-error, else a
+ * NEUTRAL fallback that fits save + pack + the dirty gate. Consumes the op-error. NULL-safe. Shared by
+ * every flush-failure abort path so they use one wording. */
+void gui_project_flush_error(char *out, size_t cap);
 
 #ifdef NTPACKER_GUI_SELFTEST
 #include "tp_core/tp_journal.h" /* tp_journal_io -- for the append-fail dev seam below */

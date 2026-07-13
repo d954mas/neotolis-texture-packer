@@ -513,8 +513,11 @@ static void handle_shortcuts(void) {
     }
     if (s_edit_kind == EDIT_NONE && s_sel_anim >= 0 && s_sel_anim_frame >= 0 &&
         nt_input_key_is_pressed(NT_KEY_DELETE)) {
-        gui_project_anim_remove_frame(s_sel_atlas, s_sel_anim, s_sel_anim_frame);
-        s_sel_anim_frame = -1;
+        /* fix3 completeness: clear the frame selection ONLY on a real removal -- a journal-failed flush
+         * aborts the remove (frame still present), so don't deselect it (op-error surfaces via poll_async). */
+        if (gui_project_anim_remove_frame(s_sel_atlas, s_sel_anim, s_sel_anim_frame)) {
+            s_sel_anim_frame = -1;
+        }
     }
     if (nt_input_key_is_pressed(NT_KEY_F5)) {
         s_pending_refresh = true;

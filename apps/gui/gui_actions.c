@@ -872,10 +872,8 @@ static bool flush_failed(void) {
     if (gui_project_flush_pending()) {
         return false; /* nothing pending / net-zero no-op / committed OK -> proceed */
     }
-    char m[256] = {0};
-    if (!gui_project_take_op_error(m, sizeof m)) {
-        (void)snprintf(m, sizeof m, "Your last edit could not be saved (disk full?) -- resolve it and try again.");
-    }
+    char m[256];
+    gui_project_flush_error(m, sizeof m); /* fix3 [2]: shared neutral wording (save/pack/gate) */
     set_status_ex(STATUS_ERROR, m);
     return true;
 }
@@ -1352,8 +1350,13 @@ void commit_anim_rename(void) {
     if (gui_project_set_anim_id(s_sel_atlas, s_edit_anim, s_edit_buf)) {
         set_statusf("Renamed animation to '%s'", s_edit_buf);
         cancel_edit();
+    } else if (gui_project_anim_id_exists(s_sel_atlas, s_edit_buf)) {
+        set_statusf_ex(STATUS_WARNING, "Animation '%s' already exists.", s_edit_buf); /* genuine collision -> keep editing */
     } else {
-        set_statusf_ex(STATUS_WARNING, "Animation '%s' already exists.", s_edit_buf); /* keep editing */
+        /* fix3 [1]: NOT a collision -> a journal/other failure. Do NOT misreport it as a duplicate or
+         * trap the editor; dismiss like a successful rename and let poll_async surface the real op-error
+         * ("...could not be committed (disk full?)..."). */
+        cancel_edit();
     }
 }
 
@@ -1378,9 +1381,23 @@ static void commit_active_edit(bool force) {
     } else if (s_edit_kind == EDIT_SPRITE) {
         commit_sprite_rename();
     } else if (s_edit_kind == EDIT_ANIM) {
-        if (s_edit_buf[0] == '\0' || !gui_project_set_anim_id(s_sel_atlas, s_edit_anim, s_edit_buf)) {
-            set_status_ex(STATUS_WARNING, s_edit_buf[0] == '\0' ? "Animation name cannot be empty." : "Animation name must be unique.");
+        if (s_edit_buf[0] == '\0') {
+            set_status_ex(STATUS_WARNING, "Animation name cannot be empty.");
             if (force) {
+                cancel_edit();
+            }
+            return;
+        }
+        if (!gui_project_set_anim_id(s_sel_atlas, s_edit_anim, s_edit_buf)) {
+            /* fix3 [1]: distinguish a genuine name collision (keep the message + keep editing unless
+             * forced) from a journal/other failure (do NOT claim uniqueness -- dismiss + let poll_async
+             * surface the real op-error). */
+            if (gui_project_anim_id_exists(s_sel_atlas, s_edit_buf)) {
+                set_status_ex(STATUS_WARNING, "Animation name must be unique.");
+                if (force) {
+                    cancel_edit();
+                }
+            } else {
                 cancel_edit();
             }
             return;
@@ -1471,15 +1488,19 @@ void apply_pending(void) {
         }
     }
     if (s_pending_remove_source >= 0) {
-        gui_project_remove_source(s_sel_atlas, s_pending_remove_source);
-        reset_selection();
-        set_status("Removed source (Ctrl+Z to undo).");
+        /* fix3 [0]: side-effects + "Removed" run ONLY on a real removal -- a journal-failed flush
+         * aborts the wrapper (returns false), so no false "Removed" / bad Ctrl+Z (op-error surfaced). */
+        if (gui_project_remove_source(s_sel_atlas, s_pending_remove_source)) {
+            reset_selection();
+            set_status("Removed source (Ctrl+Z to undo).");
+        }
     }
     if (s_pending_remove_atlas >= 0) {
-        gui_project_remove_atlas(s_pending_remove_atlas);
-        clamp_selection();
-        reset_selection();
-        set_status("Removed atlas (Ctrl+Z to undo).");
+        if (gui_project_remove_atlas(s_pending_remove_atlas)) {
+            clamp_selection();
+            reset_selection();
+            set_status("Removed atlas (Ctrl+Z to undo).");
+        }
     }
     if (s_pending_add_target) {
         const int ti = gui_project_add_target(s_sel_atlas);
@@ -1488,8 +1509,9 @@ void apply_pending(void) {
         }
     }
     if (s_pending_remove_target >= 0) {
-        gui_project_remove_target(s_sel_atlas, s_pending_remove_target);
-        set_status("Removed export target (Ctrl+Z to undo).");
+        if (gui_project_remove_target(s_sel_atlas, s_pending_remove_target)) {
+            set_status("Removed export target (Ctrl+Z to undo).");
+        }
     }
     if (s_pending_export_browse_atlas >= 0 && s_pending_export_browse_target >= 0) {
         do_browse_target_at(s_pending_export_browse_atlas, s_pending_export_browse_target);
@@ -1512,13 +1534,19 @@ void apply_pending(void) {
     if (s_pending_remove_anim >= 0) {
         tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
         if (a && s_pending_remove_anim < a->animation_count) {
-            if (s_preview_active && s_sel_anim == s_pending_remove_anim) {
-                preview_stop();
+            /* fix3 [0]: preview_stop + the selection reset + "Removed" run ONLY on a real removal. A
+             * journal-failed flush aborts the wrapper (returns false) -> the animation is still there,
+             * so we must NOT stop its preview or clear the selection. (preview_stop only resets flags,
+             * so running it AFTER the removal is safe -- no project deref.) */
+            const bool was_previewing = (s_preview_active && s_sel_anim == s_pending_remove_anim);
+            if (gui_project_remove_animation(s_sel_atlas, a->animations[s_pending_remove_anim].name)) {
+                if (was_previewing) {
+                    preview_stop();
+                }
+                s_sel_anim = -1;
+                s_sel_anim_frame = -1;
+                set_status("Removed animation (Ctrl+Z to undo).");
             }
-            gui_project_remove_animation(s_sel_atlas, a->animations[s_pending_remove_anim].name);
-            s_sel_anim = -1;
-            s_sel_anim_frame = -1;
-            set_status("Removed animation (Ctrl+Z to undo).");
         }
     }
     if (s_pending_open_preview) {

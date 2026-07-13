@@ -206,6 +206,20 @@ bool gui_project_take_op_error(char *out, size_t cap) {
     return true;
 }
 
+/* fix3 [2]: fill `out` with the reason a flush's commit failed -- the drained op-error, else a NEUTRAL
+ * fallback that fits save AND pack AND the dirty gate (the flush-failure abort paths share one wording,
+ * no "saved"-specific verb). Consumes the op-error like gui_project_take_op_error. NULL-safe. */
+void gui_project_flush_error(char *out, size_t cap) {
+    if (!out || !cap) {
+        return;
+    }
+    char m[256] = {0};
+    if (!gui_project_take_op_error(m, sizeof m)) {
+        (void)snprintf(m, sizeof m, "Your last edit could not be committed (disk full?) -- resolve it and try again.");
+    }
+    (void)snprintf(out, cap, "%s", m);
+}
+
 /* Seeds a fresh atlas with the default target (core helper owns the exporter id +
  * "out/<name>" path). LIFECYCLE, not a mutation op (the exporter id is core's, never a
  * frontend literal); mirrors the CLI do_new. Only a target-free atlas is seeded. */
@@ -958,22 +972,27 @@ int gui_project_add_atlas(void) {
     return tp_project_find_atlas_by_id(s_proj, new_id);
 }
 
-void gui_project_remove_atlas(int index) {
+/* fix3 [0]: returns TRUE iff the removal actually committed (false on the flush-fail abort, an
+ * invalid index, or a commit reject) so the deferred handler shows "Removed X (Ctrl+Z)" + resets
+ * selection ONLY on a real removal -- never a false "Removed" over a dropped gesture. */
+bool gui_project_remove_atlas(int index) {
     if (!gui_project_flush_pending()) {
-        return; /* fix2 [3]: journal-failed flush dropped the gesture -> abort (op-error surfaced) */
+        return false; /* fix2 [3]: journal-failed flush dropped the gesture -> abort (op-error surfaced) */
     }
     tp_project_atlas *a = tp_project_get_atlas(s_proj, index);
     if (!a) {
-        return;
+        return false;
     }
     tp_operation op;
     memset(&op, 0, sizeof op);
     op.kind = TP_OP_ATLAS_REMOVE;
     op.atlas_id = a->id;
-    if (commit_txn_now(&op, 1)) {
-        gui_scan_invalidate_all();
-        gui_project_touch(GUI_ACT_REMOVE_ATLAS);
+    if (!commit_txn_now(&op, 1)) {
+        return false;
     }
+    gui_scan_invalidate_all();
+    gui_project_touch(GUI_ACT_REMOVE_ATLAS);
+    return true;
 }
 
 gui_add_status gui_project_add_source_kind(int atlas_index, const char *path, tp_source_kind kind) {
@@ -1011,23 +1030,26 @@ gui_add_status gui_project_add_source(int atlas_index, const char *path) {
     return gui_project_add_source_kind(atlas_index, path, TP_SOURCE_KIND_FOLDER);
 }
 
-void gui_project_remove_source(int atlas_index, int source_index) {
+/* fix3 [0]: bool -- true iff the removal committed (see gui_project_remove_atlas). */
+bool gui_project_remove_source(int atlas_index, int source_index) {
     if (!gui_project_flush_pending()) {
-        return; /* fix2 [3]: journal-failed flush dropped the gesture -> abort (op-error surfaced) */
+        return false; /* fix2 [3]: journal-failed flush dropped the gesture -> abort (op-error surfaced) */
     }
     tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
     if (!a || source_index < 0 || source_index >= a->source_count) {
-        return;
+        return false;
     }
     tp_operation op;
     memset(&op, 0, sizeof op);
     op.kind = TP_OP_SOURCE_REMOVE;
     op.atlas_id = a->id;
     op.u.source_ref.source_id = a->sources[source_index].id;
-    if (commit_txn_now(&op, 1)) {
-        gui_scan_invalidate_all();
-        gui_project_touch(GUI_ACT_REMOVE_SOURCE);
+    if (!commit_txn_now(&op, 1)) {
+        return false;
     }
+    gui_scan_invalidate_all();
+    gui_project_touch(GUI_ACT_REMOVE_SOURCE);
+    return true;
 }
 
 bool gui_project_set_atlas_name(int atlas_index, const char *name) {
@@ -1226,22 +1248,25 @@ int gui_project_add_target(int atlas_index) {
     return a ? a->target_count - 1 : -1;
 }
 
-void gui_project_remove_target(int atlas_index, int index) {
+/* fix3 [0]: bool -- true iff the removal committed (see gui_project_remove_atlas). */
+bool gui_project_remove_target(int atlas_index, int index) {
     if (!gui_project_flush_pending()) {
-        return; /* fix2 [3]: journal-failed flush dropped the gesture -> abort (op-error surfaced) */
+        return false; /* fix2 [3]: journal-failed flush dropped the gesture -> abort (op-error surfaced) */
     }
     tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
     if (!a || index < 0 || index >= a->target_count) {
-        return;
+        return false;
     }
     tp_operation op;
     memset(&op, 0, sizeof op);
     op.kind = TP_OP_TARGET_REMOVE;
     op.atlas_id = a->id;
     op.u.target_ref.target_id = a->targets[index].id;
-    if (commit_txn_now(&op, 1)) {
-        gui_project_touch(GUI_ACT_REMOVE_TARGET);
+    if (!commit_txn_now(&op, 1)) {
+        return false;
     }
+    gui_project_touch(GUI_ACT_REMOVE_TARGET);
+    return true;
 }
 
 bool gui_project_set_target(int atlas_index, int index, const char *exporter_id, const char *out_path, bool enabled) {
@@ -1384,7 +1409,9 @@ int gui_project_create_animation(int atlas_index, const char *base, const char *
     return (a && tp_project_atlas_find_animation_by_id(a, anim_id)) ? (a->animation_count - 1) : -1;
 }
 
-void gui_project_remove_animation(int atlas_index, const char *id) {
+/* fix3 [0]: bool -- true iff the removal committed (see gui_project_remove_atlas). The deferred
+ * handler guards preview_stop + the s_sel_anim reset + "Removed" message on this. */
+bool gui_project_remove_animation(int atlas_index, const char *id) {
     /* F2-05b-ii-A fix (sibling-sink UAF, same class as gui_project_set_target): dup `id` BEFORE the
      * flush. The production caller (the do-remove-animation handler) passes a->animations[i].name -- a
      * pointer INTO the live project; gui_project_flush_pending() can commit a buffered gesture whose
@@ -1393,8 +1420,9 @@ void gui_project_remove_animation(int atlas_index, const char *id) {
     char *idc = dupstr(id);
     if (!gui_project_flush_pending()) {
         free(idc); /* fix2 [3]: journal-failed flush dropped the gesture -> abort (free the pre-dup, op-error surfaced) */
-        return;
+        return false;
     }
+    bool ok = false;
     tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
     if (a && idc) {
         tp_project_anim *an = find_anim_by_name(a, idc);
@@ -1406,10 +1434,12 @@ void gui_project_remove_animation(int atlas_index, const char *id) {
             op.u.anim_ref.anim_id = an->id;
             if (commit_txn_now(&op, 1)) {
                 gui_project_touch(GUI_ACT_REMOVE_ANIM);
+                ok = true;
             }
         }
     }
     free(idc);
+    return ok;
 }
 
 bool gui_project_set_anim_id(int atlas_index, int anim_index, const char *new_id) {
@@ -1717,13 +1747,7 @@ tp_status gui_project_save_as(const char *path, char *err_out, size_t err_cap) {
      * + mark_saved would produce a file missing the edit AND a false "saved"/clean state (silent data
      * loss). ABORT: do not save, do not mark_saved; surface the reason. The model stays dirty. */
     if (!gui_project_flush_pending()) {
-        if (err_out && err_cap) {
-            char m[256] = {0};
-            if (!gui_project_take_op_error(m, sizeof m)) {
-                (void)snprintf(m, sizeof m, "the last edit could not be committed; not saved");
-            }
-            (void)snprintf(err_out, err_cap, "%s", m);
-        }
+        gui_project_flush_error(err_out, err_cap); /* fix3 [2]: shared neutral wording (save/pack/gate) */
         return TP_STATUS_JOURNAL_FAILED;
     }
     tp_error err = {0};

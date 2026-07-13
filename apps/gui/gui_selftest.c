@@ -1315,6 +1315,65 @@ void run_selftest(void) {
         (void)remove(j8path);
         (void)gui_project_take_op_error(NULL, 0);
 
+        /* (J9) fix3 [0]: a now-bool remove wrapper returns FALSE on a journal-failed flush and the item is
+         *      STILL present (so the deferred handler prints NO false "Removed" / bad Ctrl+Z); the healthy
+         *      journal path returns TRUE and removes. */
+        gui_project_new();
+        gui_pack_clear(-1);
+        s_sel_atlas = 0;
+        (void)gui_project_take_op_error(NULL, 0);
+        const int j9added = gui_project_add_atlas(); /* a 2nd atlas to remove (index 1) */
+        NT_ASSERT(j9added >= 1 && "J9: added a 2nd atlas to remove");
+        tp_journal_io j9io = gui_project__test_attach_memory_journal();
+        NT_ASSERT(j9io.ctx && "J9: memory journal attached");
+        const int j9count0 = gui_project_get()->atlas_count;
+        const int j9pad = tp_project_get_atlas(gui_project_get(), 0)->padding;
+        (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, j9pad + 6, 0.0F); /* buffered gesture */
+        tp_journal_io_memory__fail_next_writes(j9io, 1);
+        const bool j9ret_fail = gui_project_remove_atlas(j9added); /* flush fails -> abort */
+        const int j9count1 = gui_project_get()->atlas_count;
+        nt_log_info("SELFTEST: J9 remove-abort ret=%d count %d->%d (want 0, unchanged)", (int)j9ret_fail, j9count0, j9count1);
+        NT_ASSERT(!j9ret_fail && j9count1 == j9count0 &&
+                  "J9/[0]: remove_atlas returns FALSE on a journal-failed flush + the atlas is STILL present");
+        (void)gui_project_take_op_error(NULL, 0);
+        const bool j9ret_ok = gui_project_remove_atlas(j9added); /* healthy journal, no pending -> removes */
+        const int j9count2 = gui_project_get()->atlas_count;
+        nt_log_info("SELFTEST: J9 remove-success ret=%d count %d->%d (want 1, -1)", (int)j9ret_ok, j9count1, j9count2);
+        NT_ASSERT(j9ret_ok && j9count2 == j9count1 - 1 &&
+                  "J9/[0]: a healthy-journal remove returns TRUE + removes (the success case still works)");
+        (void)gui_project_take_op_error(NULL, 0);
+
+        /* (J10) fix3 [1]: set_anim_id returns false for BOTH a name collision AND a journal-failed flush;
+         *       gui_project_anim_id_exists disambiguates them, so a disk-full failure on a unique name is
+         *       NOT misreported as a duplicate (and the editor is not trapped). Prove both arms. */
+        gui_project_new();
+        gui_pack_clear(-1);
+        s_sel_atlas = 0;
+        (void)gui_project_take_op_error(NULL, 0);
+        const int j10a = gui_project_create_animation(0, "anim_a", NULL, 0);
+        const int j10b = gui_project_create_animation(0, "anim_b", NULL, 0);
+        NT_ASSERT(j10a == 0 && j10b == 1 && "J10: created two animations");
+        /* Case A -- genuine collision: rename anim_b to "anim_a" (exists) -> false + exists=true. */
+        const bool j10_collide_ret = gui_project_set_anim_id(0, j10b, "anim_a");
+        const bool j10_collide_exists = gui_project_anim_id_exists(0, "anim_a");
+        nt_log_info("SELFTEST: J10 collision ret=%d exists=%d (want 0,1 -> reported as a collision)",
+                    (int)j10_collide_ret, (int)j10_collide_exists);
+        NT_ASSERT(!j10_collide_ret && j10_collide_exists &&
+                  "J10/[1]: a genuine duplicate -> set_anim_id false AND anim_id_exists true (a real collision)");
+        /* Case B -- journal-failed flush on a UNIQUE name: false + exists=false (NOT a collision). */
+        tp_journal_io j10io = gui_project__test_attach_memory_journal();
+        NT_ASSERT(j10io.ctx && "J10: memory journal attached");
+        const int j10pad = tp_project_get_atlas(gui_project_get(), 0)->padding;
+        (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, j10pad + 2, 0.0F); /* buffered */
+        tp_journal_io_memory__fail_next_writes(j10io, 1);
+        const bool j10_flush_ret = gui_project_set_anim_id(0, j10b, "totally_unique_name");
+        const bool j10_flush_exists = gui_project_anim_id_exists(0, "totally_unique_name");
+        nt_log_info("SELFTEST: J10 journal-fail ret=%d exists=%d (want 0,0 -> NOT a collision)",
+                    (int)j10_flush_ret, (int)j10_flush_exists);
+        NT_ASSERT(!j10_flush_ret && !j10_flush_exists &&
+                  "J10/[1]: a journal-failed flush on a UNIQUE name -> set_anim_id false but anim_id_exists FALSE (not a collision)");
+        (void)gui_project_take_op_error(NULL, 0);
+
         /* Done: disable recovery + release any lock + restore a journal-LESS packable project for the
          * render phases. */
         gui_project_enable_recovery("");
