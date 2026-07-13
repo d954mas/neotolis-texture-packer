@@ -101,11 +101,75 @@ Encoder использует те же правила, что `tp_project` write
 эмитит только поля из presence-mask. `animation.frame.remove` адресуется ИНДЕКСОМ (порядок
 кадров семантичен), не именем — divergence от C0-02 `{anim_id, frame, index}`.
 
+## Ревизия по adversarial-review (wf_b51c2d8f-b99): 9 подтверждённых дефектов
+
+Review подтвердил, что промоут местами разошёлся с ORACLE (`apps/cli/cli_mutate.c` + его
+`tp_project_*` мутаторы). Принцип фикса: op-engine — **точный промоут CLI-мутатора, ни
+строже, ни слабее**. Каждый фикс доказан parity/behavior-тестом (test_operation.c /
+test_op_apply.c), НЕ на веру.
+
+**Корректность/UB:**
+- **[1] Отрицательный `frame_count`.** `validate_frames` теперь отклоняет `n < 0`
+  (`out_of_range`, field `frame_count`) для `animation.create` и `.frames.set` — раньше
+  цикл `for(i=0;i<n;i++)` пропускал, apply писал `frame_cap=-1`, а последующий
+  `frame.add` считал `&frames[-1]` (heap-underflow). Тест: reject + модель байт-неизменна.
+- **[2] `source.add` терял `source_id` на path-dedupe.** Мутатор `add_source_kind`
+  дедупит совпадающий '/'-нормализованный путь (count не растёт), из-за чего id операции
+  НЕ штамповался, но apply возвращал committed — id-контракт нарушался (позже
+  id-адресованная операция → NOT_FOUND). **Решение:** `validate` теперь отклоняет
+  `source.add`, чей нормализованный путь уже есть в атласе (`invalid_argument`, field
+  `key`), через НОВЫЙ публичный предикат `tp_project_atlas_has_source_path` (обёртка над
+  тем же static `atlas_has_source_path`, что дедупит мутатор → семантика dedupe идентична).
+  Обоснование: id-контракт «создать НОВЫЙ source с ЭТИМ id по этому пути» не может
+  honor путь, уже принадлежащий другому source; переприсвоение id существующему source
+  сломало бы уже сохранённую ссылку. apply дополнительно defense-in-depth: dedupe-no-op
+  (недостижим после validate) → `invalid_argument`, НИКОГДА не «committed» с потерянным id.
+  **Parity-нюанс (честно):** CLI `add` молча дедупит (`dup++; continue`), engine
+  КОНФЛИКТ ОТКЛОНЯЕТ. Это осознанная дивергенция ради целостности id; F2-05 CLI-адаптер
+  будет pre-check/skip до построения операции, сохраняя CLI-UX.
+
+**Op-vs-CLI parity:**
+- **[3] `atlas.create` дублирующее ИМЯ.** validate отклоняет create с уже занятым именем
+  (`invalid_argument`, field `name`) — как CLI `atlas add` (exact `strcmp`, case-sensitive,
+  зеркалит `resolve_atlas`).
+- **[4] `atlas.rename` коллизия имени.** validate отклоняет rename на имя ДРУГОГО атласа;
+  rename-в-себя (то же имя) разрешён — как CLI `atlas rename` (`other>=0 && other!=ai`).
+- **[6] `frame.move` большой `to_index`.** validate БОЛЬШЕ не ограничивает `to_index`
+  (CLI `anim move-frame` клампит большой/отрицательный destination к последнему/первому
+  слоту; мутатор клампит `dst`). `from_index` по-прежнему проверяется. apply клампит
+  `to_index` в `[0, frame_count-1]` ДО вычитания `to - from` (произвольный клиентский int
+  иначе переполнил бы `int` — UB); результат байт-идентичен CLI-идиоме.
+- **[7] Верхняя граница `padding/margin/extrude`.** Была `[0..4096]`, CLI `set` принимает
+  любой `>= 0` (авторитетный кламп — в tp_pack). Теперь только `>= 0` (`min_i`); `max_size`
+  сохраняет `[1..4096]`, остальные knob-границы (alpha_threshold/max_vertices/shape/
+  pixels_per_unit) уже совпадали с CLI и не тронуты.
+
+**Builder:**
+- **[5] `target.set`/`anim.remove` резолвили sub-entity ГЛОБАЛЬНО.** Резолв цели шёл
+  project-wide, а `out->atlas_id` брался из отдельно-резолвнутого атласа → уникальная цель
+  в атласе B молча спаривалась с атласом A (validate/apply потом → NOT_FOUND). Добавлен
+  `resolve_in_atlas`: цель резолвится, затем `res.atlas_index` сверяется с резолвнутым
+  атласом; cross-atlas матч → NOT_FOUND. Применено к ОБОИМ multi-resolve builder'ам
+  (`target.set` — дефект из review; `anim.remove` — идентичная форма того же бага, чинится
+  тем же helper'ом, чтобы не оставить известный дефект в соседе).
+
+**DRY:**
+- **[8]** `find_source/find_anim/find_target` в validate теперь тонкие const-адаптеры над
+  публичными `tp_project_atlas_find_*_by_id` (дублирующие циклы удалены; поведение то же).
+- **[9]** `dup_str` в build.c удалён — используется `tp_strdup` из `tp_strutil.h`.
+
+**Status-токены:** новых НЕ добавлено (избегаем инфляции, §4). Коллизии имени/пути и
+underflow переиспользуют `invalid_argument` / `out_of_range`. `test_status_id` не тронут.
+
 ## Что должен подтвердить владелец
 1. **Sprite-addressing** (§2): операция канонична `{source_id, src_key}`, но storage-запись
    остаётся pending name-bridge ради байт-идентичности с CLI. Штамповка v4-идентичности —
    F1-03 lazy re-key, не дублируется. Ок?
-2. **Два новых status-токена** `unknown_op`, `out_of_range` (§4) — append-only.
+2. **Два новых status-токена** `unknown_op`, `out_of_range` (§4) — append-only. Review-фиксы
+   новых токенов НЕ добавили (коллизии → `invalid_argument`).
 3. **Явный `atlas_id`** на всех sub-entity ops (§3) вместо project-wide id-скана.
 4. **Границу F2-01/F2-05** (engine core-tested, НЕ wired во фронтенд; parity доказывает
    эквивалентность) — что она задокументирована честно и это ожидаемо.
+5. **`source.add` осознанно строже CLI** (§[2] выше): при дублирующем пути engine
+   ОТКЛОНЯЕТ (id-контракт), тогда как CLI молча дедупит. F2-05-адаптер восстановит
+   CLI-UX через pre-check/skip. Подтвердить, что дивергенция приемлема на уровне engine.
