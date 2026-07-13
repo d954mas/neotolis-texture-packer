@@ -34,7 +34,8 @@ animation, target** — все три уже struct-сущности. **Source I
    Name-keyed API (`add_animation`/`remove_animation`, CLI `anim <name>`, GUI
    rename) сохранён рабочим — F1-03 мигрирует селекторы на ID.
 
-4. **Promotion policy: legacy synthesis (read-only) + fill-nil promote (writable).**
+4. **Promotion policy: legacy synthesis (read-only) + re-randomize-synthetic promote
+   (writable).** (§5.5-отклонение ниже РАЗРЕШЕНО в пользу spec-literal random, 2026-07-13.)
    - Load **v1** (id-less файл): loader синтезирует **детерминированный** ID из
      (kind + стабильный legacy tuple: atlas index; `"idx|name"`;
      `"idx|exporter|path"`). Повторные read-only load дают идентичные ID
@@ -48,42 +49,40 @@ animation, target** — все три уже struct-сущности. **Source I
      `tp_project_validate_ids`). Синтез гейтится флагом `v2` в `tp_project_load`.
    - Writable-сессия зовёт `tp_project_promote_ids(rng)` до первой mutation
      (CLI `commit()`, GUI init/new/open/save + каждый `gui_project_touch`
-     snapshot). Promote заполняет **только nil** ID свежими random ID через
-     инъектируемый RNG; **атомарно** (RNG-сбой не меняет ни одного ID — staged) и
-     **идемпотентно** (после заполнения — no-op, ID никогда не переприсваивается).
+     snapshot). Promote выдаёт свежий random ID (инъектируемый RNG) каждой сущности,
+     чей ID **nil** (свежесозданная) ИЛИ был **синтезирован loader-ом** (legacy-gap,
+     транзиентный флаг `id_synthetic`), затем сбрасывает флаг. Реальный загруженный ID
+     (v3/v4, или atlas/anim/target из v2-файла) имеет `id_synthetic == false` и **не
+     трогается**. **Атомарно** (RNG-сбой не меняет ни одного ID/флага — staged) и
+     **идемпотентно** (после promote нет ни nil, ни synthetic — второй вызов no-op).
 
-## Контекст и отклонение от §5.5
+## §5.5: RESOLVED — spec-literal random (решение владельца, 2026-07-13)
 
-§5.5 говорит: «next successful save persists normal random IDs». Буквальная
-реализация из brief-а — «promote заполняет любой nil structural ID через
-`tp_id128_generate`». Эти две формулировки расходятся для v1-проекта,
-загруженного writable-сессией: loader уже синтезировал НЕ-nil детерминированные
-ID, поэтому fill-nil-promote для них — no-op, и save сохраняет **синтетические**
-(детерминированные), а не свежие random ID.
+§5.5 говорит: «the next successful save persists normal random IDs». Первоначально
+(F1-01) была выбрана **fill-nil-only** семантика: loader синтезирует НЕ-nil
+детерминированные ID, а fill-nil-promote для них — no-op, поэтому первый writable
+save мигрированного проекта сохранял **синтетические** ID, а не свежие random.
+Владелец выбрал **буквальную §5.5**: первый writable attach мигрированного legacy-
+проекта должен персистить свежие RANDOM ID. Отклонение закрыто.
 
-**Выбрана fill-nil-only семантика** (осознанное отклонение, зафиксировано здесь):
+Реализация (`bool id_synthetic`, транзиентный, НЕ сериализуется):
 
-- Совпадает с конкретной инструкцией brief-а и делает promote простым, атомарным
-  и по-настоящему идемпотентным (второй вызов — гарантированный no-op).
-- Детерминированные синтетические ID валидны и уникальны — они выполняют каждое
-  функциональное требование F1-01 (ID переживает rename/reorder/save/reload;
-  duplicate/malformed отвергаются). Единственное свойство, которое теряется, —
-  «ID именно random, а не производный», и оно важно лишь для избегания
-  cross-project коллизий ID (копирование сущности между проектами), что не
-  является заботой F1-01.
-- Свежесозданные сущности (fresh `new`, `atlas add`, `anim create`) имеют nil ID
-  и получают **random** ID при promote — то есть «random IDs at creation»
-  (master spec §5) для нового контента соблюдается; синтетические ID возникают
-  только у мигрированного legacy-контента.
-- Serializer пишет ID как есть; nil ID (не-промоутнутая сущность) сериализуется в
-  `<kind>_0…0` и **отвергается при reload** (nil where required) — это громкая,
-  отлаживаемая ошибка «забыл promote», а не тихая порча. Поэтому все writable
-  frontends промоутят перед save/snapshot.
-
-Detached from any random-vs-synthetic обязательства, апгрейд до
-«re-randomize synthetic on writable attach» — обратно совместимое уточнение
-(fresh random вместо стабильного synthetic), которое можно внести без смены
-schema или продуктовой модели, если позднее это потребуется.
+- **Read-only load детерминирован**: повторные read-only load legacy-файла дают
+  идентичные синтетические ID (inspect/validate/pack не меняются). Promote на
+  read-only путях не зовётся.
+- **Writable attach ре-рандомизирует synthetic**: `assign_legacy_scoped` (loader)
+  ставит `id_synthetic = true` каждой заполненной сущности; `tp_project_promote_ids`
+  выдаёт свежий random ID каждой сущности с `id nil OR id_synthetic` и сбрасывает
+  флаг. Реальный загруженный ID имеет `id_synthetic == false` и не трогается.
+- **Per-entity granularity (v2-корректность)**: v2-файл несёт реальные
+  atlas/anim/target ID, но синтезированные SOURCE ID. Promote ре-рандомизирует
+  ТОЛЬКО source ID; реальные ID сохраняются. Project-level флаг «был мигрирован»
+  недостаточен — нужна per-entity гранулярность (закреплено тестом
+  `test_migrated_v2_partial_promote_sources_only`).
+- **Атомарность + идемпотентность**: все random ID стейджатся до записи (RNG-сбой →
+  модель байт-в-байт не меняется); второй promote — no-op (нет ни nil, ни synthetic).
+- Свежесозданные сущности (`new`, `atlas add`, `anim create`) имеют nil ID и так же
+  получают random ID при promote — «random IDs at creation» (master spec §5) держится.
 
 ## Валидация (§5.6, подмножество для F1-01)
 
