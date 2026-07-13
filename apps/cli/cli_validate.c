@@ -35,12 +35,10 @@
 #include "cli_out.h"
 #include "tp_core/tp_error.h"
 #include "tp_core/tp_export.h" /* tp_exporter_find */
-#include "tp_core/tp_input.h"
-#include "tp_core/tp_names.h"
-#include "tp_core/tp_pack.h" /* tp_pack_settings + tp_project_atlas_to_settings */
+#include "tp_core/tp_pack.h"   /* tp_pack_settings + tp_project_atlas_to_settings */
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_scan.h"
-#include "tp_core/tp_sprite_index.h" /* resolved index: §5.6 sprite-record findings (F1-03) */
+#include "tp_core/tp_sprite_index.h" /* single resolved index: export-key + §5.6 record checks (F1-03) */
 #include "tp_core/tp_srckey.h"       /* source-path collision + portability validation (F1-02) */
 
 #define CLI_VALIDATE_SCHEMA 1
@@ -72,19 +70,6 @@ typedef struct {
     int cap;
     bool oom; /* sticky: a failed grow stops collection; caller reports oom */
 } cli_findings;
-
-/* Local strdup (portable: no _strdup / POSIX strdup dependency). NULL on OOM. */
-static char *dup_str(const char *s) {
-    if (!s) {
-        return NULL;
-    }
-    size_t n = strlen(s) + 1U;
-    char *p = (char *)malloc(n);
-    if (p) {
-        memcpy(p, s, n);
-    }
-    return p;
-}
 
 static cli_finding *findings_new(cli_findings *fs) {
     if (fs->oom) {
@@ -153,8 +138,9 @@ static void check_min(cli_findings *fs, const char *atlas, const char *knob, lon
     }
 }
 
-/* Count of descs whose export key equals `key` (frame membership + dup detection). */
-static bool key_in_set(char *const *keys, int n, const char *k) {
+/* Count of descs whose export key equals `key` (frame membership + dup detection).
+ * `keys` borrow the resolved index / project strings -- read-only, not owned here. */
+static bool key_in_set(const char *const *keys, int n, const char *k) {
     for (int i = 0; i < n; i++) {
         if (strcmp(keys[i], k) == 0) {
             return true;
@@ -165,7 +151,7 @@ static bool key_in_set(char *const *keys, int n, const char *k) {
 
 /* Reports duplicated values in `vals[0..n)` once per distinct duplicate. `code`/
  * `severity` select which check; the shared field is `sprite` (the key or final name). */
-static void report_duplicates(cli_findings *fs, const char *atlas, char *const *vals, int n, int severity,
+static void report_duplicates(cli_findings *fs, const char *atlas, const char *const *vals, int n, int severity,
                               const char *code, const char *what) {
     for (int i = 0; i < n; i++) {
         bool first_occurrence = true;
@@ -189,16 +175,6 @@ static void report_duplicates(cli_findings *fs, const char *atlas, char *const *
                         vals[i]);
         }
     }
-}
-
-static void free_strv(char **v, int n) {
-    if (!v) {
-        return;
-    }
-    for (int i = 0; i < n; i++) {
-        free(v[i]);
-    }
-    free(v);
 }
 
 /* One source path's precomputed comparison keys (Fix B: canonicalize + case-fold
@@ -405,37 +381,36 @@ static void validate_atlas(cli_findings *fs, tp_project *p, int ai) {
     }
     validate_sources(fs, a); /* (a2) duplicate / case-fold collision / portability */
 
-    /* Assemble the descs a pack would use (DRY: no packing, disk-touching only). */
-    tp_pack_input input;
-    tp_error err = {0};
-    tp_status bst = tp_pack_input_build(p, ai, &input, &err);
-    if (bst != TP_STATUS_OK) {
-        add_finding(fs, SEV_ERR, "input_build_failed", a->name, NULL, NULL, NULL, NULL, "%s", err.msg);
+    /* Build ONE resolved sprite index (single disk scan) and feed BOTH the export-key /
+     * dangling-frame checks AND the §5.6 record checks from it (fix [7]). The index mirrors
+     * tp_pack_input_build's iteration EXACTLY (same sources, same order, same raw names), so
+     * ref[i].export_key equals the export key of pack desc[i] -- the validate output is
+     * identical to the old two-scan version, at one scan instead of two. */
+    tp_sprite_index sidx;
+    tp_error ierr = {0};
+    if (tp_sprite_index_build(p, ai, &sidx, &ierr) != TP_STATUS_OK) {
+        add_finding(fs, SEV_ERR, "input_build_failed", a->name, NULL, NULL, NULL, NULL, "%s", ierr.msg);
     } else {
-        if (input.count == 0) {
+        int n = sidx.count;
+        if (n == 0) {
             /* (b) an atlas that resolves no sprites packs nothing. */
             add_finding(fs, SEV_WARN, "empty_atlas", a->name, NULL, NULL, NULL, NULL,
                         "atlas has no usable sprites (no images resolved from its sources)");
         }
-        int n = input.count;
-        char **keys = NULL;
-        char **finals = NULL;
+        /* keys[]/finals[] BORROW the index's export keys (and any project rename string) --
+         * no per-desc allocation. finals default to the key; a project rename replaces the
+         * FIRST desc whose key matches, exactly as build_norm_opts / export does. */
+        const char **keys = NULL;
+        const char **finals = NULL;
         bool alloc_ok = true;
         if (n > 0) {
-            keys = (char **)calloc((size_t)n, sizeof *keys);
-            finals = (char **)calloc((size_t)n, sizeof *finals);
+            keys = (const char **)calloc((size_t)n, sizeof *keys);
+            finals = (const char **)calloc((size_t)n, sizeof *finals);
             alloc_ok = keys && finals;
             for (int i = 0; alloc_ok && i < n; i++) {
-                char kb[256];
-                tp_sprite_export_key(input.descs[i].name, kb, sizeof kb);
-                keys[i] = dup_str(kb);
-                finals[i] = dup_str(kb); /* default final = key; rename applied below */
-                if (!keys[i] || !finals[i]) {
-                    alloc_ok = false;
-                }
+                keys[i] = sidx.refs[i].export_key;
+                finals[i] = sidx.refs[i].export_key;
             }
-            /* Final names mirror build_norm_opts: a project rename is keyed by the
-             * export key and applied to the FIRST matching desc (same as export). */
             for (int si = 0; alloc_ok && si < a->sprite_count; si++) {
                 const tp_project_sprite *ps = &a->sprites[si];
                 if (!ps->rename || ps->rename[0] == '\0') {
@@ -443,13 +418,7 @@ static void validate_atlas(cli_findings *fs, tp_project *p, int ai) {
                 }
                 for (int d = 0; d < n; d++) {
                     if (strcmp(keys[d], ps->name) == 0) {
-                        char *nf = dup_str(ps->rename);
-                        if (!nf) {
-                            alloc_ok = false;
-                        } else {
-                            free(finals[d]);
-                            finals[d] = nf;
-                        }
+                        finals[d] = ps->rename;
                         break;
                     }
                 }
@@ -475,17 +444,11 @@ static void validate_atlas(cli_findings *fs, tp_project *p, int ai) {
                     }
                 }
             }
+            /* (h) §5.6 sprite-record integrity over the SAME resolved index. */
+            validate_sprite_records(fs, a, &sidx);
         }
-        free_strv(keys, n);
-        free_strv(finals, n);
-    }
-    tp_pack_input_free(&input);
-
-    /* (h) §5.6 sprite-record integrity over the resolved index (migrated v4 records). */
-    tp_sprite_index sidx;
-    tp_error ierr = {0};
-    if (tp_sprite_index_build(p, ai, &sidx, &ierr) == TP_STATUS_OK) {
-        validate_sprite_records(fs, a, &sidx);
+        free((void *)keys);
+        free((void *)finals);
     }
     tp_sprite_index_free(&sidx);
 
@@ -501,7 +464,8 @@ static void validate_atlas(cli_findings *fs, tp_project *p, int ai) {
 
     /* (g) knob ranges over the export-path settings (clamp applied). */
     tp_pack_settings sset;
-    if (tp_project_atlas_to_settings(p, ai, &sset, &err) == TP_STATUS_OK) {
+    tp_error serr = {0};
+    if (tp_project_atlas_to_settings(p, ai, &sset, &serr) == TP_STATUS_OK) {
         check_range(fs, a->name, "max_size", sset.max_size, 1, CLI_MAX_PAGE_DIM);
         check_min(fs, a->name, "padding", sset.padding, 0);
         check_min(fs, a->name, "margin", sset.margin, 0);
