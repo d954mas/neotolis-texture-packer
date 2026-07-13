@@ -271,9 +271,15 @@ tp_status tp_operation_apply(tp_project *p, const tp_operation *op, tp_op_reject
             tp_project_atlas *a = atlas_by_id(p, op->atlas_id);
             int before = a->source_count;
             st = tp_project_atlas_add_source_kind(a, op->u.source_add.key, op->u.source_add.kind);
-            if (st == TP_STATUS_OK && a->source_count > before) { /* a dedupe no-op leaves the id unset */
-                a->sources[a->source_count - 1].id = op->u.source_add.source_id;
-                a->sources[a->source_count - 1].id_synthetic = false;
+            if (st == TP_STATUS_OK) {
+                if (a->source_count > before) {
+                    a->sources[a->source_count - 1].id = op->u.source_add.source_id;
+                    a->sources[a->source_count - 1].id_synthetic = false;
+                } else {
+                    /* validate rejects a duplicate path, so a dedupe no-op is unreachable here;
+                     * refuse to "commit" one -- it would strand the op's source_id (a false id). */
+                    st = TP_STATUS_INVALID_ARGUMENT;
+                }
             }
             break;
         }
@@ -370,9 +376,17 @@ tp_status tp_operation_apply(tp_project *p, const tp_operation *op, tp_op_reject
             break;
         case TP_OP_ANIMATION_FRAME_MOVE: {
             const tp_op_anim_frame_move *m = &op->u.anim_frame_move;
-            st = tp_project_anim_move_frame(
-                tp_project_atlas_find_animation_by_id(atlas_by_id(p, op->atlas_id), m->anim_id), m->from_index,
-                m->to_index - m->from_index);
+            tp_project_anim *an = tp_project_atlas_find_animation_by_id(atlas_by_id(p, op->atlas_id), m->anim_id);
+            /* Clamp to_index into [0, frame_count-1] BEFORE the subtraction: validate leaves it
+             * unbounded (CLI parity), and an arbitrary client int could overflow `to - from`.
+             * from_index is validated in range, so frame_count >= 1 here. move_frame re-clamps. */
+            int to = m->to_index;
+            if (to < 0) {
+                to = 0;
+            } else if (to > an->frame_count - 1) {
+                to = an->frame_count - 1;
+            }
+            st = tp_project_anim_move_frame(an, m->from_index, to - m->from_index);
             break;
         }
 

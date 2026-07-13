@@ -519,6 +519,188 @@ void test_builders(void) {
     tp_project_destroy(p);
 }
 
+/* ---- [1] a negative frame_count is rejected and leaves the model byte-unchanged --- */
+
+void test_apply_negative_frames_unchanged(void) {
+    tp_project *p = base_project();
+    tp_id128 aid = p->atlases[0].id;
+    char *before = serialize(p);
+    tp_op_reject rej;
+    tp_operation op;
+
+    memset(&op, 0, sizeof op); /* animation.create, frame_count = -1 */
+    op.kind = TP_OP_ANIMATION_CREATE;
+    op.atlas_id = aid;
+    op.u.anim_create.anim_id = id_of(0xC1);
+    op.u.anim_create.name = (char *)"walk";
+    op.u.anim_create.fps = 12.0F;
+    op.u.anim_create.frames = NULL;
+    op.u.anim_create.frame_count = -1;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_RANGE, tp_operation_apply(p, &op, &rej));
+    TEST_ASSERT_EQUAL_INT(0, p->atlases[0].animation_count);
+
+    char *after = serialize(p);
+    TEST_ASSERT_EQUAL_STRING(before, after);
+    free(before);
+    free(after);
+    tp_project_destroy(p);
+}
+
+/* ---- [2] source.add of a duplicate path is rejected (byte-unchanged); a real add
+ *          still stamps the caller's source_id -------------------------------------- */
+
+void test_apply_source_add_dup_rejected(void) {
+    tp_project *p = base_project(); /* base has source "sprites" */
+    tp_id128 aid = p->atlases[0].id;
+    char *before = serialize(p);
+    tp_op_reject rej;
+    tp_operation op;
+
+    memset(&op, 0, sizeof op); /* duplicate path -> rejected, model untouched */
+    op.kind = TP_OP_SOURCE_ADD;
+    op.atlas_id = aid;
+    op.u.source_add.source_id = id_of(0xB1);
+    op.u.source_add.kind = TP_SOURCE_KIND_FOLDER;
+    op.u.source_add.key = (char *)"sprites";
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT, tp_operation_apply(p, &op, &rej));
+    TEST_ASSERT_EQUAL_STRING("key", rej.field);
+    TEST_ASSERT_EQUAL_INT(1, p->atlases[0].source_count);
+    char *after = serialize(p);
+    TEST_ASSERT_EQUAL_STRING(before, after);
+
+    memset(&op, 0, sizeof op); /* a genuinely new path commits AND honors the id */
+    op.kind = TP_OP_SOURCE_ADD;
+    op.atlas_id = aid;
+    op.u.source_add.source_id = id_of(0xB2);
+    op.u.source_add.kind = TP_SOURCE_KIND_FILE;
+    op.u.source_add.key = (char *)"more/img.png";
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_operation_apply(p, &op, &rej));
+    TEST_ASSERT_EQUAL_INT(2, p->atlases[0].source_count);
+    TEST_ASSERT_NOT_NULL(tp_project_atlas_find_source_by_id(&p->atlases[0], id_of(0xB2)));
+
+    free(before);
+    free(after);
+    tp_project_destroy(p);
+}
+
+/* ---- [7] PARITY: padding=8000 via op == via the mutator (byte-identical) ---------- */
+
+void test_parity_padding_large(void) {
+    tp_project *seed = base_project();
+    char *buf = serialize(seed);
+    tp_project_destroy(seed);
+
+    tp_project *a = NULL;
+    tp_project *b = NULL;
+    tp_error err;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_load_buffer(buf, strlen(buf), &a, &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_load_buffer(buf, strlen(buf), &b, &err));
+
+    tp_operation op; /* engine path */
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_ATLAS_SETTINGS_SET;
+    op.atlas_id = a->atlases[0].id;
+    op.u.atlas_settings.mask = TP_AF_PADDING;
+    op.u.atlas_settings.padding = 8000; /* above the old artificial 4096 cap */
+    tp_op_reject rej;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_operation_apply(a, &op, &rej));
+
+    b->atlases[0].padding = 8000; /* existing-mutator path (what the CLI `set` does) */
+
+    char *sa = serialize(a);
+    char *sb = serialize(b);
+    TEST_ASSERT_EQUAL_STRING(sb, sa);
+    free(buf);
+    free(sa);
+    free(sb);
+    tp_project_destroy(a);
+    tp_project_destroy(b);
+}
+
+/* ---- [6] PARITY: frame.move {from:0,to:99} == the CLI move-to-end idiom ------------ */
+
+void test_parity_frame_move_to_end(void) {
+    tp_project *seed = tp_project_create();
+    tp_project_anim *an = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_animation(&seed->atlases[0], "walk", &an));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "a"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "b"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "c"));
+    uint8_t ctr = 9;
+    tp_rng rng = {det_fill, &ctr};
+    tp_error err;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_promote_ids(seed, &rng, &err));
+    char *buf = serialize(seed);
+    tp_project_destroy(seed);
+
+    tp_project *a = NULL;
+    tp_project *b = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_load_buffer(buf, strlen(buf), &a, &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_load_buffer(buf, strlen(buf), &b, &err));
+
+    tp_operation op; /* engine op: move 0 -> 99 (large; clamps to end) */
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_ANIMATION_FRAME_MOVE;
+    op.atlas_id = a->atlases[0].id;
+    op.u.anim_frame_move.anim_id = a->atlases[0].animations[0].id;
+    op.u.anim_frame_move.from_index = 0;
+    op.u.anim_frame_move.to_index = 99;
+    tp_op_reject rej;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_operation_apply(a, &op, &rej));
+
+    /* CLI idiom: tp_project_anim_move_frame(an, from, to - from) with a big `to` */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_move_frame(&b->atlases[0].animations[0], 0, 99 - 0));
+
+    char *sa = serialize(a);
+    char *sb = serialize(b);
+    TEST_ASSERT_EQUAL_STRING(sb, sa);
+    TEST_ASSERT_EQUAL_STRING("a", a->atlases[0].animations[0].frames[2].name); /* moved to the end */
+    free(buf);
+    free(sa);
+    free(sb);
+    tp_project_destroy(a);
+    tp_project_destroy(b);
+}
+
+/* ---- [5] builders scope the sub-entity to the RESOLVED atlas (no cross-atlas pair) - */
+
+void test_builder_scopes_to_atlas(void) {
+    tp_project *p = tp_project_create(); /* atlas[0] = "atlas1" */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_target(&p->atlases[0], TP_EXPORTER_ID_JSON_NEOTOLIS, "out/a", NULL));
+    tp_project_anim *an0 = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_animation(&p->atlases[0], "walk", &an0));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_add_atlas(p, "atlas2", NULL));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_target(&p->atlases[1], TP_EXPORTER_ID_JSON_NEOTOLIS, "out/b", NULL));
+    tp_project_anim *an1 = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_animation(&p->atlases[1], "run", &an1));
+    uint8_t ctr = 3;
+    tp_rng rng = {det_fill, &ctr};
+    tp_error err;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_promote_ids(p, &rng, &err));
+
+    tp_operation op;
+    /* target "out/b" lives in atlas2; pairing it with atlas1 must NOT silently succeed */
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_NOT_FOUND,
+        tp_op_build_target_set(p, "atlas1", "out/b", TP_EXPORTER_ID_JSON_NEOTOLIS, "out/b", true, &op, NULL, &err));
+    /* the correct atlas resolves fine and pairs A+A */
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_op_build_target_set(p, "atlas2", "out/b", TP_EXPORTER_ID_JSON_NEOTOLIS, "out/b2", true, &op, NULL, &err));
+    TEST_ASSERT_TRUE(tp_id128_eq(op.atlas_id, p->atlases[1].id));
+    TEST_ASSERT_TRUE(tp_id128_eq(op.u.target_set.target_id, p->atlases[1].targets[0].id));
+    tp_operation_free(&op);
+
+    /* same scoping for animation.remove: anim "run" is in atlas2, not atlas1 */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_NOT_FOUND, tp_op_build_anim_remove(p, "atlas1", "run", &op, NULL, &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_op_build_anim_remove(p, "atlas2", "run", &op, NULL, &err));
+    TEST_ASSERT_TRUE(tp_id128_eq(op.atlas_id, p->atlases[1].id));
+    tp_operation_free(&op);
+    tp_project_destroy(p);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_apply_atlas_ops);
@@ -530,5 +712,10 @@ int main(void) {
     RUN_TEST(test_parity_settings);
     RUN_TEST(test_parity_sprite_override);
     RUN_TEST(test_builders);
+    RUN_TEST(test_apply_negative_frames_unchanged);
+    RUN_TEST(test_apply_source_add_dup_rejected);
+    RUN_TEST(test_parity_padding_large);
+    RUN_TEST(test_parity_frame_move_to_end);
+    RUN_TEST(test_builder_scopes_to_atlas);
     return UNITY_END();
 }

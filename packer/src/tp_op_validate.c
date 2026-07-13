@@ -11,6 +11,7 @@
 #include <float.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <string.h>
 
 #include "tp_core/tp_export.h"  /* tp_exporter_find (exporter-id validation) */
 #include "tp_core/tp_project.h"
@@ -24,44 +25,42 @@ static const tp_project_atlas *find_atlas(const tp_project *p, tp_id128 id) {
     int ai = tp_project_find_atlas_by_id(p, id);
     return ai < 0 ? NULL : &p->atlases[ai];
 }
-static const tp_project_source *find_source(const tp_project_atlas *a, tp_id128 id) {
-    if (tp_id128_is_nil(id)) {
-        return NULL;
-    }
-    for (int i = 0; i < a->source_count; i++) {
-        if (tp_id128_eq(a->sources[i].id, id)) {
-            return &a->sources[i];
+/* Index of the atlas named `name` (exact, case-sensitive), or -1. Mirrors the CLI's
+ * resolve_atlas so name-uniqueness rejections match the CLI oracle byte-for-byte. */
+static int find_atlas_by_name(const tp_project *p, const char *name) {
+    for (int i = 0; i < p->atlas_count; i++) {
+        if (p->atlases[i].name && strcmp(p->atlases[i].name, name) == 0) {
+            return i;
         }
     }
-    return NULL;
+    return -1;
+}
+/* const adapters over the public id-addressed accessors (fix [8]): validate holds a
+ * const project; the accessors take non-const and only READ, so the cast is safe. This
+ * removes the lookup loops that duplicated the tp_project_atlas_find_*_by_id accessors. */
+static const tp_project_source *find_source(const tp_project_atlas *a, tp_id128 id) {
+    return tp_project_atlas_find_source_by_id((tp_project_atlas *)a, id);
 }
 static const tp_project_anim *find_anim(const tp_project_atlas *a, tp_id128 id) {
-    if (tp_id128_is_nil(id)) {
-        return NULL;
-    }
-    for (int i = 0; i < a->animation_count; i++) {
-        if (tp_id128_eq(a->animations[i].id, id)) {
-            return &a->animations[i];
-        }
-    }
-    return NULL;
+    return tp_project_atlas_find_animation_by_id((tp_project_atlas *)a, id);
 }
 static const tp_project_target *find_target(const tp_project_atlas *a, tp_id128 id) {
-    if (tp_id128_is_nil(id)) {
-        return NULL;
-    }
-    for (int i = 0; i < a->target_count; i++) {
-        if (tp_id128_eq(a->targets[i].id, id)) {
-            return &a->targets[i];
-        }
-    }
-    return NULL;
+    return tp_project_atlas_find_target_by_id((tp_project_atlas *)a, id);
 }
 
 /* Range-check one integer knob; returns OK or an OUT_OF_RANGE rejection. */
 static tp_status range_i(tp_op_reject *rej, const char *field, long v, long lo, long hi) {
     if (v < lo || v > hi) {
         return tp_op__reject(rej, TP_STATUS_OUT_OF_RANGE, field, "%s = %ld must be in [%ld..%ld]", field, v, lo, hi);
+    }
+    return TP_STATUS_OK;
+}
+
+/* Lower-bound-only check (no artificial upper cap). Mirrors the CLI `set` for the knobs
+ * whose only constraint is `>= 0` -- the authoritative page-dim clamp lives in tp_pack. */
+static tp_status min_i(tp_op_reject *rej, const char *field, long v, long lo) {
+    if (v < lo) {
+        return tp_op__reject(rej, TP_STATUS_OUT_OF_RANGE, field, "%s = %ld must be >= %ld", field, v, lo);
     }
     return TP_STATUS_OK;
 }
@@ -75,13 +74,15 @@ static tp_status validate_atlas_settings(const tp_op_atlas_settings *s, tp_op_re
     if ((s->mask & TP_AF_MAX_SIZE) && (st = range_i(rej, "max_size", s->max_size, 1, TP_OP_MAX_PAGE_DIM))) {
         return st;
     }
-    if ((s->mask & TP_AF_PADDING) && (st = range_i(rej, "padding", s->padding, 0, TP_OP_MAX_PAGE_DIM))) {
+    /* padding / margin / extrude: CLI `set` accepts any >= 0 (no upper cap here; tp_pack
+     * clamps). Matching that keeps the op engine neither stricter nor looser than the CLI. */
+    if ((s->mask & TP_AF_PADDING) && (st = min_i(rej, "padding", s->padding, 0))) {
         return st;
     }
-    if ((s->mask & TP_AF_MARGIN) && (st = range_i(rej, "margin", s->margin, 0, TP_OP_MAX_PAGE_DIM))) {
+    if ((s->mask & TP_AF_MARGIN) && (st = min_i(rej, "margin", s->margin, 0))) {
         return st;
     }
-    if ((s->mask & TP_AF_EXTRUDE) && (st = range_i(rej, "extrude", s->extrude, 0, TP_OP_MAX_PAGE_DIM))) {
+    if ((s->mask & TP_AF_EXTRUDE) && (st = min_i(rej, "extrude", s->extrude, 0))) {
         return st;
     }
     if ((s->mask & TP_AF_ALPHA_THRESHOLD) &&
@@ -144,6 +145,9 @@ static tp_status validate_anim_knobs(bool check_fps, float fps, bool check_pb, i
 }
 
 static tp_status validate_frames(char *const *frames, int n, tp_op_reject *rej) {
+    if (n < 0) { /* a negative count would loop &frames[-1] in apply -> heap underflow */
+        return tp_op__reject(rej, TP_STATUS_OUT_OF_RANGE, "frame_count", "frame_count %d must be >= 0", n);
+    }
     for (int i = 0; i < n; i++) {
         if (!frames[i] || frames[i][0] == '\0') {
             return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "frames", "frame %d is empty", i);
@@ -173,6 +177,9 @@ tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_
         if (!nm || nm[0] == '\0') {
             return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "name", "atlas name must be non-empty");
         }
+        if (find_atlas_by_name(p, nm) >= 0) { /* CLI `atlas add` rejects a duplicate name */
+            return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "name", "an atlas named '%s' already exists", nm);
+        }
         return TP_STATUS_OK;
     }
 
@@ -184,11 +191,19 @@ tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_
 
     switch (op->kind) {
         case TP_OP_ATLAS_REMOVE: return TP_STATUS_OK;
-        case TP_OP_ATLAS_RENAME:
-            if (!op->u.atlas_rename.name || op->u.atlas_rename.name[0] == '\0') {
+        case TP_OP_ATLAS_RENAME: {
+            const char *nm = op->u.atlas_rename.name;
+            if (!nm || nm[0] == '\0') {
                 return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "name", "atlas name must be non-empty");
             }
+            /* CLI `atlas rename` rejects a collision with ANOTHER atlas; renaming to the
+             * same name (self) is allowed (a no-op). */
+            int other = find_atlas_by_name(p, nm);
+            if (other >= 0 && &p->atlases[other] != a) {
+                return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "name", "an atlas named '%s' already exists", nm);
+            }
             return TP_STATUS_OK;
+        }
         case TP_OP_ATLAS_SETTINGS_SET: return validate_atlas_settings(&op->u.atlas_settings, rej);
 
         case TP_OP_SOURCE_ADD:
@@ -200,6 +215,15 @@ tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_
             }
             if (!op->u.source_add.key || op->u.source_add.key[0] == '\0') {
                 return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "key", "source path must be non-empty");
+            }
+            /* The apply mutator dedupes a matching '/'-normalized path (count unchanged),
+             * which would strand the op's source_id. The id-contract ("create a NEW source
+             * with THIS id at this path") cannot honor a path that already belongs to another
+             * source, so reject the conflict here. (The F2-05 CLI adapter pre-checks/skips to
+             * preserve the CLI's silent-dedupe UX.) */
+            if (tp_project_atlas_has_source_path(a, op->u.source_add.key)) {
+                return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "key",
+                                     "a source with path '%s' already exists in the atlas", op->u.source_add.key);
             }
             return TP_STATUS_OK;
         case TP_OP_SOURCE_REMOVE:
@@ -317,10 +341,8 @@ tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_
                 return tp_op__reject(rej, TP_STATUS_OUT_OF_BOUNDS, "from_index", "from_index %d out of [0..%d)",
                                      s->from_index, an->frame_count);
             }
-            if (s->to_index < 0 || s->to_index >= an->frame_count) {
-                return tp_op__reject(rej, TP_STATUS_OUT_OF_BOUNDS, "to_index", "to_index %d out of [0..%d)", s->to_index,
-                                     an->frame_count);
-            }
+            /* to_index is intentionally UNBOUNDED: the CLI `anim move-frame` clamps a large
+             * (or negative) destination to the last/first slot; apply clamps identically. */
             return TP_STATUS_OK;
         }
 
