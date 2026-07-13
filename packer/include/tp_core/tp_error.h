@@ -65,7 +65,19 @@ typedef enum tp_status {
      * hands back a candidate list the caller disambiguates). Generic NULL/empty
      * selector text still reuses INVALID_ARGUMENT. */
     TP_STATUS_NOT_FOUND,           /* a selector matched no entity (tp_selector) */
-    TP_STATUS_AMBIGUOUS_SELECTOR   /* a selector matched more than one entity; a candidate list is returned */
+    TP_STATUS_AMBIGUOUS_SELECTOR,  /* a selector matched more than one entity; a candidate list is returned */
+
+    /* --- typed operation-engine faults (F2-01, master spec §6-6.2, §7) ---
+     * Append-only: new values go at the END. Distinct faults a client acts on
+     * differently from the generic INVALID_ARGUMENT: UNKNOWN_OP -> the op kind is
+     * not in the catalog (fix the verb/wire); OUT_OF_RANGE -> a payload VALUE is
+     * outside its allowed numeric range (adjust the value, the field name + bound is
+     * in the message). A malformed/missing/wrong-form field still reuses
+     * INVALID_ARGUMENT; a malformed shape ID reuses ID_MALFORMED; an addressed
+     * entity that does not exist reuses NOT_FOUND (dangling id or unresolved
+     * selector -- the message distinguishes). */
+    TP_STATUS_UNKNOWN_OP,          /* the operation kind/wire is not in the append-only catalog (tp_operation) */
+    TP_STATUS_OUT_OF_RANGE         /* a payload value is outside its allowed range (tp_op_validate) */
 } tp_status;
 
 /* Fixed-size message buffer -- no heap, safe to embed by value on the stack. */
@@ -127,6 +139,8 @@ static inline const char *tp_status_str(tp_status status) {
         case TP_STATUS_KEY_TRAVERSAL: return "source key escapes its root";
         case TP_STATUS_NOT_FOUND: return "selector matched no entity";
         case TP_STATUS_AMBIGUOUS_SELECTOR: return "selector is ambiguous";
+        case TP_STATUS_UNKNOWN_OP: return "unknown operation";
+        case TP_STATUS_OUT_OF_RANGE: return "value out of range";
     }
     return "unknown status";
 }
@@ -166,6 +180,8 @@ static inline const char *tp_status_id(tp_status status) {
         case TP_STATUS_KEY_TRAVERSAL: return "key_traversal";
         case TP_STATUS_NOT_FOUND: return "not_found";
         case TP_STATUS_AMBIGUOUS_SELECTOR: return "ambiguous_selector";
+        case TP_STATUS_UNKNOWN_OP: return "unknown_op";
+        case TP_STATUS_OUT_OF_RANGE: return "out_of_range";
     }
     return "unknown_status";
 }

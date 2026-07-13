@@ -247,6 +247,11 @@ tp_status tp_project_remove_atlas(tp_project *p, int index);
 /* Bounds-checked accessor; NULL if index is out of range. */
 tp_project_atlas *tp_project_get_atlas(tp_project *p, int index);
 
+/* Returns the index of the atlas whose structural id equals `id`, or -1 if none /
+ * nil id. Persistent references (and the F2 operation engine) target the id, not
+ * the array index, which reorder/remove invalidates (master spec §5.4). */
+int tp_project_find_atlas_by_id(const tp_project *p, tp_id128 id);
+
 /* Resets `a`'s packing knobs to the shared defaults (tp_pack_settings_defaults).
  * The name and lists are left untouched. */
 void tp_project_atlas_set_defaults(tp_project_atlas *a);
@@ -321,6 +326,16 @@ tp_status tp_project_atlas_add_animation(tp_project_atlas *a, const char *name, 
 /* Removes the animation whose logical `name` matches. Absent -> OUT_OF_BOUNDS. */
 tp_status tp_project_atlas_remove_animation(tp_project_atlas *a, const char *name);
 
+/* --- animation id addressing (schema v2) --- the F2 operation engine addresses
+ * an animation by its structural id, not its mutable name/array index (§5.4). */
+
+/* Returns the animation whose structural id equals `id` within `a`, or NULL if
+ * none / nil id. */
+tp_project_anim *tp_project_atlas_find_animation_by_id(tp_project_atlas *a, tp_id128 id);
+
+/* Removes the animation whose structural id equals `id`. Absent / nil -> OUT_OF_BOUNDS. */
+tp_status tp_project_atlas_remove_animation_by_id(tp_project_atlas *a, tp_id128 id);
+
 /* Appends a frame (sprite name) to an animation, preserving order. */
 tp_status tp_project_anim_add_frame(tp_project_anim *anim, const char *frame_name);
 
@@ -340,6 +355,16 @@ tp_status tp_project_atlas_add_target(tp_project_atlas *a, const char *exporter_
 
 /* Removes target `index`. Out-of-range -> OUT_OF_BOUNDS. */
 tp_status tp_project_atlas_remove_target(tp_project_atlas *a, int index);
+
+/* --- target id addressing (schema v2) --- the F2 operation engine addresses a
+ * target by its structural id, not its array index (§5.4). */
+
+/* Returns the target whose structural id equals `id` within `a`, or NULL if none /
+ * nil id. */
+tp_project_target *tp_project_atlas_find_target_by_id(tp_project_atlas *a, tp_id128 id);
+
+/* Removes the target whose structural id equals `id`. Absent / nil -> OUT_OF_BOUNDS. */
+tp_status tp_project_atlas_remove_target_by_id(tp_project_atlas *a, tp_id128 id);
 
 /* Replaces target `index`'s fields (exporter_id + out_path duped, enabled set).
  * Both strings required + non-empty. Out-of-range -> OUT_OF_BOUNDS; OOM leaves the

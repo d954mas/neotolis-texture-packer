@@ -43,11 +43,14 @@ void test_status_id_tokens(void) {
     /* F1-03 selector-resolution faults (master spec §5.4). */
     TEST_ASSERT_EQUAL_STRING("not_found", tp_status_id(TP_STATUS_NOT_FOUND));
     TEST_ASSERT_EQUAL_STRING("ambiguous_selector", tp_status_id(TP_STATUS_AMBIGUOUS_SELECTOR));
+    /* F2-01 typed operation-engine faults (master spec §6-6.2, §7). */
+    TEST_ASSERT_EQUAL_STRING("unknown_op", tp_status_id(TP_STATUS_UNKNOWN_OP));
+    TEST_ASSERT_EQUAL_STRING("out_of_range", tp_status_id(TP_STATUS_OUT_OF_RANGE));
 }
 
 /* Tokens are machine ids: lowercase, no spaces (unlike tp_status_str prose). */
 void test_status_id_is_machine_token(void) {
-    for (int s = TP_STATUS_OK; s <= TP_STATUS_AMBIGUOUS_SELECTOR; s++) {
+    for (int s = TP_STATUS_OK; s <= TP_STATUS_OUT_OF_RANGE; s++) {
         const char *id = tp_status_id((tp_status)s);
         for (const char *c = id; *c; c++) {
             TEST_ASSERT_TRUE_MESSAGE(*c != ' ', id);
