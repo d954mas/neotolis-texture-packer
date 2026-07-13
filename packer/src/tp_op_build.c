@@ -19,17 +19,23 @@
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_selector.h"
 #include "tp_core/tp_sprite_index.h"
+#include "tp_strutil.h" /* shared tp_strdup (one core definition, fix [9]) */
 
-static char *dup_str(const char *s) {
-    if (!s) {
-        return NULL;
+/* Resolve `selector` to one entity of `want` kind that OWNED BY atlas `atlas_index`. A
+ * project-wide match in a DIFFERENT atlas is treated as not-found -- the atlas scopes the
+ * search, so a builder never pairs atlas A with a sub-entity that actually lives in B
+ * (which validate/apply would then reject as NOT_FOUND). */
+static tp_status resolve_in_atlas(const tp_project *p, int atlas_index, tp_selector_kind want, const char *selector,
+                                  tp_selector_result *out, tp_selector_candidates *cand, tp_error *err) {
+    tp_status st = tp_op_resolve_target(p, NULL, -1, want, selector, out, cand, err);
+    if (st != TP_STATUS_OK) {
+        return st;
     }
-    size_t n = strlen(s) + 1U;
-    char *d = (char *)malloc(n);
-    if (d) {
-        memcpy(d, s, n);
+    if (out->atlas_index != atlas_index) {
+        return tp_error_set(err, TP_STATUS_NOT_FOUND, "selector '%s' resolves to a %s in a different atlas", selector,
+                            tp_selector_kind_token(want));
     }
-    return d;
+    return TP_STATUS_OK;
 }
 
 tp_status tp_op_resolve_target(const tp_project *p, const struct tp_sprite_index *sprites, int sprite_atlas_index,
@@ -58,7 +64,7 @@ tp_status tp_op_build_atlas_create(tp_id128 new_id, const char *name, tp_operati
     memset(out, 0, sizeof *out);
     out->kind = TP_OP_ATLAS_CREATE;
     out->atlas_id = new_id;
-    out->u.atlas_create.name = dup_str(name);
+    out->u.atlas_create.name = tp_strdup(name);
     return out->u.atlas_create.name ? TP_STATUS_OK : TP_STATUS_OOM;
 }
 
@@ -75,7 +81,7 @@ tp_status tp_op_build_atlas_rename(const tp_project *p, const char *atlas_sel, c
     memset(out, 0, sizeof *out);
     out->kind = TP_OP_ATLAS_RENAME;
     out->atlas_id = res.id;
-    out->u.atlas_rename.name = dup_str(new_name);
+    out->u.atlas_rename.name = tp_strdup(new_name);
     return out->u.atlas_rename.name ? TP_STATUS_OK : TP_STATUS_OOM;
 }
 
@@ -106,8 +112,8 @@ tp_status tp_op_build_target_set(const tp_project *p, const char *atlas_sel, con
     if (st != TP_STATUS_OK) {
         return st;
     }
-    tp_selector_result tgt_res;
-    st = tp_op_resolve_target(p, NULL, -1, TP_SEL_TARGET, target_sel, &tgt_res, cand, err);
+    tp_selector_result tgt_res; /* scope the target to the resolved atlas (fix [5]) */
+    st = resolve_in_atlas(p, atlas_res.atlas_index, TP_SEL_TARGET, target_sel, &tgt_res, cand, err);
     if (st != TP_STATUS_OK) {
         return st;
     }
@@ -116,8 +122,8 @@ tp_status tp_op_build_target_set(const tp_project *p, const char *atlas_sel, con
     out->atlas_id = atlas_res.id;
     out->u.target_set.target_id = tgt_res.id;
     out->u.target_set.enabled = enabled;
-    out->u.target_set.exporter_id = dup_str(exporter_id);
-    out->u.target_set.out_path = dup_str(out_path);
+    out->u.target_set.exporter_id = tp_strdup(exporter_id);
+    out->u.target_set.out_path = tp_strdup(out_path);
     if (!out->u.target_set.exporter_id || !out->u.target_set.out_path) {
         tp_operation_free(out);
         return TP_STATUS_OOM;
@@ -135,8 +141,8 @@ tp_status tp_op_build_anim_remove(const tp_project *p, const char *atlas_sel, co
     if (st != TP_STATUS_OK) {
         return st;
     }
-    tp_selector_result anim_res;
-    st = tp_op_resolve_target(p, NULL, -1, TP_SEL_ANIM, anim_sel, &anim_res, cand, err);
+    tp_selector_result anim_res; /* scope the animation to the resolved atlas (fix [5]) */
+    st = resolve_in_atlas(p, atlas_res.atlas_index, TP_SEL_ANIM, anim_sel, &anim_res, cand, err);
     if (st != TP_STATUS_OK) {
         return st;
     }
