@@ -80,6 +80,14 @@ static tp_id128 seeded_id(uint8_t seed) {
     return id;
 }
 
+static char *dupz(const char *s) {
+    size_t n = strlen(s) + 1U;
+    char *p = (char *)malloc(n);
+    TEST_ASSERT_NOT_NULL(p);
+    memcpy(p, s, n);
+    return p;
+}
+
 /* A pending v3 name-keyed override re-keys to {source, key} at first resolution, and
  * the next save persists the v4 form; reload re-derives the name bridge, override
  * intact. */
@@ -346,6 +354,110 @@ void test_v4_sprite_record_load_order_independent(void) {
     assert_two_records_either_order(order_b);
 }
 
+/* fix [6]: byte-golden over the MIGRATED serializer branch. Existing goldens only cover
+ * version deltas / pending {name} form; none pins the migrated {source,key} sprite record
+ * or the {key,source} frame object. Construct both in memory (every override set so the
+ * full key order allow_rotate < extrude < key < margin < max_vertices < origin < rename <
+ * shape < slice9 < source is exercised, and a migrated frame object) and assert the EXACT
+ * serialized bytes -- indentation, key ordering, and frame-object shape. This guards the
+ * branch cli_mutate_stable would not otherwise reach (real files still hold pending
+ * records until the F2 re-key trigger lands). */
+void test_migrated_record_frame_byte_golden(void) {
+    tp_project *p = tp_project_create();
+    tp_project_atlas *a = tp_project_get_atlas(p, 0);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_set_atlas_name(a, "art"));
+    a->id = seeded_id(0x0AU);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_source(a, "art"));
+    a->sources[0].id = seeded_id(0x11U);
+    tp_id128 sid = a->sources[0].id;
+
+    /* migrated sprite override: every optional field non-default */
+    tp_project_sprite *sp = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_sprite(a, "hero", &sp));
+    sp->source_ref = sid;
+    sp->src_key = dupz("hero.png"); /* migrated: {source, key}, name bridge dropped on save */
+    sp->ov_allow_rotate = 0;
+    sp->ov_extrude = 3;
+    sp->ov_margin = 2;
+    sp->ov_max_vertices = 8;
+    sp->origin_x = 0.25F;
+    sp->origin_y = 0.75F;
+    sp->rename = dupz("champion");
+    sp->ov_shape = 1;
+    sp->slice9_lrtb[0] = 1;
+    sp->slice9_lrtb[1] = 2;
+    sp->slice9_lrtb[2] = 3;
+    sp->slice9_lrtb[3] = 4;
+
+    /* migrated animation frame: serializes as a {key, source} object */
+    tp_project_anim *an = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_animation(a, "walk", &an));
+    an->id = seeded_id(0x0CU);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "gem"));
+    an->frames[0].source_ref = sid;
+    an->frames[0].src_key = dupz("gem.png");
+
+    char proj[900];
+    (void)snprintf(proj, sizeof proj, "%s/migrated_golden.ntpacker_project", g_dir);
+    tp_error e = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_save(p, proj, &e));
+
+    const char *ATLAS = "atlas_0a00000000000000000000000000007e";
+    const char *SRC = "source_1100000000000000000000000000007e";
+    const char *ANIM = "anim_0c00000000000000000000000000007e";
+    char expect[2048];
+    (void)snprintf(expect, sizeof expect,
+                   "{\n"
+                   "  \"version\": 4,\n"
+                   "  \"atlases\": [\n"
+                   "    {\n"
+                   "      \"animations\": [\n"
+                   "        {\n"
+                   "          \"frames\": [\n"
+                   "            {\n"
+                   "              \"key\": \"gem.png\",\n"
+                   "              \"source\": \"%s\"\n"
+                   "            }\n"
+                   "          ],\n"
+                   "          \"id\": \"%s\",\n"
+                   "          \"name\": \"walk\"\n"
+                   "        }\n"
+                   "      ],\n"
+                   "      \"id\": \"%s\",\n"
+                   "      \"name\": \"art\",\n"
+                   "      \"sources\": [\n"
+                   "        {\n"
+                   "          \"id\": \"%s\",\n"
+                   "          \"path\": \"art\"\n"
+                   "        }\n"
+                   "      ],\n"
+                   "      \"sprites\": [\n"
+                   "        {\n"
+                   "          \"allow_rotate\": 0,\n"
+                   "          \"extrude\": 3,\n"
+                   "          \"key\": \"hero.png\",\n"
+                   "          \"margin\": 2,\n"
+                   "          \"max_vertices\": 8,\n"
+                   "          \"origin\": [0.25, 0.75],\n"
+                   "          \"rename\": \"champion\",\n"
+                   "          \"shape\": 1,\n"
+                   "          \"slice9\": [1, 2, 3, 4],\n"
+                   "          \"source\": \"%s\"\n"
+                   "        }\n"
+                   "      ]\n"
+                   "    }\n"
+                   "  ]\n"
+                   "}\n",
+                   SRC, ANIM, ATLAS, SRC, SRC);
+
+    size_t n = 0;
+    char *bytes = read_all(proj, &n);
+    TEST_ASSERT_EQUAL_size_t(strlen(expect), n);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, memcmp(expect, bytes, n), bytes); /* exact migrated byte-golden */
+    free(bytes);
+    tp_project_destroy(p);
+}
+
 int main(int argc, char **argv) {
     g_dir = (argc > 1) ? argv[1] : ".";
     mkdir_p(g_dir);
@@ -355,5 +467,6 @@ int main(int argc, char **argv) {
     RUN_TEST(test_orphan_reactivates_on_key_return);
     RUN_TEST(test_frames_resolve_persist_and_survive_reorder);
     RUN_TEST(test_v4_sprite_record_load_order_independent);
+    RUN_TEST(test_migrated_record_frame_byte_golden);
     return UNITY_END();
 }
