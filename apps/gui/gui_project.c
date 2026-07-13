@@ -626,7 +626,11 @@ bool gui_project_flush_pending(void) {
  * After this returns, s_pending_valid is true IFF a same-key pending remains (the replace target). */
 static void pending_route(const coalesce_key *k) {
     if (s_pending_valid && !key_eq(k, &s_pending_key)) {
-        gui_project_flush_pending();
+        /* fix2: the bool is intentionally IGNORED here. On a journal-failed flush the different-key
+         * gesture is dropped WITH the op-error surfaced (commit_txn_now set it); the caller then only
+         * BUFFERS a new (uncommitted) edit -- there is no persist/discard "proceed as clean" decision to
+         * abort. gui_project_flush_elapsed (the timer fallback) is the same case. Audited fix2 [3]. */
+        (void)gui_project_flush_pending();
     }
 }
 
@@ -920,7 +924,11 @@ unsigned gui_project_model_version(void) { return s_model_ver; }
  * gui_project_set_target / gui_project_remove_animation. Callers passing UI buffers, drain-queue copies,
  * or literals are already safe; the sink-side dup makes it not matter which. */
 int gui_project_add_atlas(void) {
-    gui_project_flush_pending(); /* structural: commit any buffered gesture as its own step first */
+    /* fix2 [3]: a journal-failed flush dropped the buffered gesture (op-error already surfaced) -> abort
+     * this structural op too, never pair a silent lost edit with an unrelated committed change. */
+    if (!gui_project_flush_pending()) {
+        return -1;
+    }
     if (!s_proj) {
         return -1;
     }
@@ -951,7 +959,9 @@ int gui_project_add_atlas(void) {
 }
 
 void gui_project_remove_atlas(int index) {
-    gui_project_flush_pending();
+    if (!gui_project_flush_pending()) {
+        return; /* fix2 [3]: journal-failed flush dropped the gesture -> abort (op-error surfaced) */
+    }
     tp_project_atlas *a = tp_project_get_atlas(s_proj, index);
     if (!a) {
         return;
@@ -967,7 +977,9 @@ void gui_project_remove_atlas(int index) {
 }
 
 gui_add_status gui_project_add_source_kind(int atlas_index, const char *path, tp_source_kind kind) {
-    gui_project_flush_pending();
+    if (!gui_project_flush_pending()) {
+        return GUI_ADD_FAILED; /* fix2 [3]: journal-failed flush dropped the gesture -> abort (op-error surfaced) */
+    }
     tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
     if (!a || !path || path[0] == '\0') {
         return GUI_ADD_FAILED;
@@ -1000,7 +1012,9 @@ gui_add_status gui_project_add_source(int atlas_index, const char *path) {
 }
 
 void gui_project_remove_source(int atlas_index, int source_index) {
-    gui_project_flush_pending();
+    if (!gui_project_flush_pending()) {
+        return; /* fix2 [3]: journal-failed flush dropped the gesture -> abort (op-error surfaced) */
+    }
     tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
     if (!a || source_index < 0 || source_index >= a->source_count) {
         return;
@@ -1017,7 +1031,9 @@ void gui_project_remove_source(int atlas_index, int source_index) {
 }
 
 bool gui_project_set_atlas_name(int atlas_index, const char *name) {
-    gui_project_flush_pending();
+    if (!gui_project_flush_pending()) {
+        return false; /* fix2 [3]: journal-failed flush dropped the gesture -> abort (op-error surfaced) */
+    }
     tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
     if (!a || !name || name[0] == '\0') {
         return false;
@@ -1039,7 +1055,9 @@ bool gui_project_set_atlas_name(int atlas_index, const char *name) {
 }
 
 bool gui_project_set_sprite_rename(int atlas_index, const char *sprite_name, const char *rename) {
-    gui_project_flush_pending();
+    if (!gui_project_flush_pending()) {
+        return false; /* fix2 [3]: journal-failed flush dropped the gesture -> abort (op-error surfaced) */
+    }
     tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
     if (!a || !sprite_name || sprite_name[0] == '\0') {
         return false;
@@ -1184,7 +1202,9 @@ bool gui_project_set_sprite_override(int atlas_index, const char *sprite_name, g
 }
 
 int gui_project_add_target(int atlas_index) {
-    gui_project_flush_pending();
+    if (!gui_project_flush_pending()) {
+        return -1; /* fix2 [3]: journal-failed flush dropped the gesture -> abort (op-error surfaced) */
+    }
     /* target.create op for the default json-neotolis target (mirrors seed_default_target's exporter +
      * "out/<name>" path). An OP (not the lifecycle seed) so the added target is captured in the diff
      * history and Undo removes exactly this target -- a direct seed leaves no undo step, so Ctrl+Z would
@@ -1207,7 +1227,9 @@ int gui_project_add_target(int atlas_index) {
 }
 
 void gui_project_remove_target(int atlas_index, int index) {
-    gui_project_flush_pending();
+    if (!gui_project_flush_pending()) {
+        return; /* fix2 [3]: journal-failed flush dropped the gesture -> abort (op-error surfaced) */
+    }
     tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
     if (!a || index < 0 || index >= a->target_count) {
         return;
@@ -1230,7 +1252,14 @@ bool gui_project_set_target(int atlas_index, int index, const char *exporter_id,
      * sink first inoculates EVERY caller, not just the one path the reviewer flagged. */
     char *exp = dupstr(exporter_id);
     char *outp = dupstr(out_path);
-    gui_project_flush_pending();
+    /* fix2 [3]: same class as the other structural wrappers -- a journal-failed flush dropped the
+     * buffered gesture (op-error surfaced), so abort THIS target edit too (freeing the pre-dup'd
+     * strings) instead of pairing a lost edit with an unrelated target change. */
+    if (!gui_project_flush_pending()) {
+        free(exp);
+        free(outp);
+        return false;
+    }
     tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
     if (!a || index < 0 || index >= a->target_count || !exp || !outp) {
         free(exp);
@@ -1280,7 +1309,9 @@ bool gui_project_anim_id_exists(int atlas_index, const char *id) {
 }
 
 int gui_project_create_animation(int atlas_index, const char *base, const char *const *frames, int frame_count) {
-    gui_project_flush_pending();
+    if (!gui_project_flush_pending()) {
+        return -1; /* fix2 [3]: journal-failed flush dropped the gesture -> abort (op-error surfaced) */
+    }
     tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
     if (!a) {
         return -1;
@@ -1360,7 +1391,10 @@ void gui_project_remove_animation(int atlas_index, const char *id) {
      * clone-swap frees that project, dangling `id` before find_anim_by_name reads it. `an->id` (used to
      * build the op) is re-resolved from the post-flush project, so only the incoming `id` needs saving. */
     char *idc = dupstr(id);
-    gui_project_flush_pending();
+    if (!gui_project_flush_pending()) {
+        free(idc); /* fix2 [3]: journal-failed flush dropped the gesture -> abort (free the pre-dup, op-error surfaced) */
+        return;
+    }
     tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
     if (a && idc) {
         tp_project_anim *an = find_anim_by_name(a, idc);
@@ -1379,7 +1413,9 @@ void gui_project_remove_animation(int atlas_index, const char *id) {
 }
 
 bool gui_project_set_anim_id(int atlas_index, int anim_index, const char *new_id) {
-    gui_project_flush_pending();
+    if (!gui_project_flush_pending()) {
+        return false; /* fix2 [3]: journal-failed flush dropped the gesture -> abort (op-error surfaced) */
+    }
     tp_project_anim *an = anim_at(atlas_index, anim_index);
     if (!an || !new_id || new_id[0] == '\0') {
         return false;
@@ -1479,7 +1515,9 @@ bool gui_project_set_anim_flip(int atlas_index, int anim_index, bool flip_h, boo
 }
 
 bool gui_project_anim_add_frames(int atlas_index, int anim_index, const char *const *frames, int count) {
-    gui_project_flush_pending();
+    if (!gui_project_flush_pending()) {
+        return false; /* fix2 [3]: journal-failed flush dropped the gesture -> abort (op-error surfaced) */
+    }
     tp_project_anim *an = anim_at(atlas_index, anim_index);
     if (!an || !frames || count <= 0) {
         return false;
@@ -1523,7 +1561,9 @@ bool gui_project_anim_add_frames(int atlas_index, int anim_index, const char *co
 }
 
 bool gui_project_anim_remove_frame(int atlas_index, int anim_index, int frame_index) {
-    gui_project_flush_pending();
+    if (!gui_project_flush_pending()) {
+        return false; /* fix2 [3]: journal-failed flush dropped the gesture -> abort (op-error surfaced) */
+    }
     tp_project_anim *an = anim_at(atlas_index, anim_index);
     if (!an || frame_index < 0 || frame_index >= an->frame_count) {
         return false;
@@ -1543,7 +1583,9 @@ bool gui_project_anim_remove_frame(int atlas_index, int anim_index, int frame_in
 }
 
 bool gui_project_anim_move_frame(int atlas_index, int anim_index, int frame_index, int delta) {
-    gui_project_flush_pending();
+    if (!gui_project_flush_pending()) {
+        return false; /* fix2 [3]: journal-failed flush dropped the gesture -> abort (op-error surfaced) */
+    }
     tp_project_anim *an = anim_at(atlas_index, anim_index);
     if (!an || frame_index < 0 || frame_index >= an->frame_count) {
         return false;

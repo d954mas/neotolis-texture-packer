@@ -1232,6 +1232,89 @@ void run_selftest(void) {
         gui_project__test_release_foreign_lock();
         (void)remove(llock);
 
+        /* (J6) fix2 [3]: a STRUCTURAL wrapper must ABORT when its pre-flush of a buffered gesture fails to
+         *      journal -- never silently drop the gesture AND land an unrelated structural change. Buffer a
+         *      coalescable gesture, arm append-fail, then call set_atlas_name -> its flush commits the
+         *      gesture, the append fails, and the wrapper aborts (returns false; neither the gesture nor the
+         *      rename lands) with the op-error surfaced. */
+        gui_project_new();
+        gui_pack_clear(-1);
+        s_sel_atlas = 0;
+        (void)gui_project_take_op_error(NULL, 0);
+        tp_journal_io j6io = gui_project__test_attach_memory_journal();
+        NT_ASSERT(j6io.ctx && "J6: memory journal attached");
+        char j6name0[64];
+        (void)snprintf(j6name0, sizeof j6name0, "%s", tp_project_get_atlas(gui_project_get(), 0)->name);
+        const int j6pad = tp_project_get_atlas(gui_project_get(), 0)->padding;
+        (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, j6pad + 7, 0.0F); /* BUFFERED (uncommitted) */
+        tp_journal_io_memory__fail_next_writes(j6io, 1);                            /* the flush's append fails */
+        const bool j6ret = gui_project_set_atlas_name(0, "structural_should_abort");
+        char j6err[256] = {0};
+        const bool j6surfaced = gui_project_take_op_error(j6err, sizeof j6err);
+        const char *j6name1 = tp_project_get_atlas(gui_project_get(), 0)->name;
+        const int j6pad1 = tp_project_get_atlas(gui_project_get(), 0)->padding;
+        nt_log_info("SELFTEST: J6 structural-abort ret=%d surfaced=%d name '%s'->'%s' pad %d->%d (want 0,1,unchanged)",
+                    (int)j6ret, (int)j6surfaced, j6name0, j6name1, j6pad, j6pad1);
+        NT_ASSERT(!j6ret && "J6/[3]: a structural op ABORTS when the pre-flush of a buffered gesture fails to journal");
+        NT_ASSERT(j6surfaced && j6err[0] && "J6/[3]: the journal failure is surfaced to the status-bar channel");
+        NT_ASSERT(strcmp(j6name1, j6name0) == 0 && j6pad1 == j6pad &&
+                  "J6/[3]: neither the dropped gesture NOR the structural op landed (both aborted -- no unrelated change)");
+        (void)gui_project_take_op_error(NULL, 0);
+
+        /* (J7) fix2 [1]: a PACK must ABORT when its pre-flush of a buffered gesture fails to journal --
+         *      never pack a stale model + report success. (do_pack_blocking's flush_failed surfaces the
+         *      op-error to the status bar, so the deterministic assertion is that NO pack result is produced.) */
+        gui_project_new();
+        gui_pack_clear(-1);
+        s_sel_atlas = 0;
+        reset_selection();
+        char j7folder[512];
+        to_abs("examples/defold-demo/examples/anim_trim/anims", j7folder, sizeof j7folder);
+        (void)gui_project_add_source(0, j7folder);
+        gui_scan_invalidate_all();
+        (void)gui_project_take_op_error(NULL, 0);
+        tp_journal_io j7io = gui_project__test_attach_memory_journal();
+        NT_ASSERT(j7io.ctx && "J7: memory journal attached");
+        gui_pack_clear(-1); /* no prior result */
+        const int j7pad = tp_project_get_atlas(gui_project_get(), 0)->padding;
+        (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, j7pad + 3, 0.0F); /* buffered */
+        tp_journal_io_memory__fail_next_writes(j7io, 1);
+        do_pack_blocking(); /* flush_failed -> abort BEFORE packing */
+        const tp_result *j7r = gui_pack_result(0);
+        nt_log_info("SELFTEST: J7 pack-abort result=%s (want NULL -- pack aborted on the journal-failed flush)",
+                    j7r ? "PRESENT" : "NULL");
+        NT_ASSERT(j7r == NULL && "J7/[1]: a journal-failed flush ABORTS the pack (no stale result produced)");
+        (void)gui_project_take_op_error(NULL, 0);
+
+        /* (J8) fix2 [0]: the unsaved-changes GATE. request_new must ABORT on a journal-failed flush, never
+         *      discard the project because is_dirty read clean after the only (buffered) change was dropped.
+         *      Detected via the project PATH: gui_project_new (if it ran) resets the path to ""; an abort
+         *      keeps it. Save to a temp first so the buffered gesture is the ONLY unsaved change. */
+        gui_project_new();
+        gui_pack_clear(-1);
+        s_sel_atlas = 0;
+        char j8path[1200];
+        (void)snprintf(j8path, sizeof j8path, "%s/selftest_gate.ntpacker_project", s_exe_dir);
+        (void)remove(j8path);
+        char j8serr[256] = {0};
+        NT_ASSERT(gui_project_save_as(j8path, j8serr, sizeof j8serr) == TP_STATUS_OK &&
+                  "J8: save to establish a path + a clean baseline");
+        NT_ASSERT(gui_project_has_path() && !gui_project_is_dirty() && "J8: saved -> has a path + clean");
+        (void)gui_project_take_op_error(NULL, 0);
+        tp_journal_io j8io = gui_project__test_attach_memory_journal();
+        NT_ASSERT(j8io.ctx && "J8: memory journal attached");
+        const int j8pad = tp_project_get_atlas(gui_project_get(), 0)->padding;
+        (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, j8pad + 4, 0.0F); /* the ONLY unsaved change (buffered) */
+        tp_journal_io_memory__fail_next_writes(j8io, 1);
+        request_new(); /* WITH the fix: flush_failed -> abort -> the project + its path are KEPT */
+        const bool j8kept = gui_project_has_path();
+        nt_log_info("SELFTEST: J8 dirty-gate abort has_path=%d (want 1: request_new aborted, project NOT discarded)",
+                    (int)j8kept);
+        NT_ASSERT(j8kept &&
+                  "J8/[0]: request_new ABORTS on a journal-failed flush -- the project is NOT silently discarded");
+        (void)remove(j8path);
+        (void)gui_project_take_op_error(NULL, 0);
+
         /* Done: disable recovery + release any lock + restore a journal-LESS packable project for the
          * render phases. */
         gui_project_enable_recovery("");

@@ -863,11 +863,30 @@ static void do_add_folder(void) {
 // #endregion
 
 // #region new/exit confirm flow
+/* fix2 [0]/[1]: a buffered gesture's flush-commit failed (journal append failure) -> the edit is gone
+ * AND the model is NOT what the caller expects (clean-or-current). Surface the reason (the op-error is
+ * already set by the failed commit) and tell the caller to ABORT, so a destructive gate (New/Open/Exit)
+ * never silently discards the project over a lost edit and a pack/export never runs on a stale model.
+ * Returns true when the flush FAILED (the caller must abort); false when it is safe to proceed. */
+static bool flush_failed(void) {
+    if (gui_project_flush_pending()) {
+        return false; /* nothing pending / net-zero no-op / committed OK -> proceed */
+    }
+    char m[256] = {0};
+    if (!gui_project_take_op_error(m, sizeof m)) {
+        (void)snprintf(m, sizeof m, "Your last edit could not be saved (disk full?) -- resolve it and try again.");
+    }
+    set_status_ex(STATUS_ERROR, m);
+    return true;
+}
+
 void request_new(void) {
     if (busy_block()) {
         return;
     }
-    gui_project_flush_pending(); /* commit any buffered gesture BEFORE the dirty gate, else it reads clean and the edit is silently discarded */
+    if (flush_failed()) {
+        return; /* fix2 [0]: journal-failed flush dropped the edit -> abort (never discard over a silent loss) */
+    }
     if (gui_project_is_dirty()) {
         s_after_confirm = AFTER_NEW;
         s_confirm_open = true;
@@ -886,7 +905,9 @@ void request_exit(void) {
     if (busy_block()) {
         return;
     }
-    gui_project_flush_pending(); /* flush before the dirty gate (a buffered edit must not vanish on quit) */
+    if (flush_failed()) {
+        return; /* fix2 [0]: journal-failed flush dropped the edit -> abort the quit (never quit over a silent loss) */
+    }
     if (gui_project_is_dirty()) {
         s_after_confirm = AFTER_EXIT;
         s_confirm_open = true;
@@ -900,7 +921,9 @@ void request_open(void) {
     if (busy_block()) {
         return;
     }
-    gui_project_flush_pending(); /* flush before the dirty gate (a buffered edit must not vanish on open) */
+    if (flush_failed()) {
+        return; /* fix2 [0]: journal-failed flush dropped the edit -> abort the open (never switch over a silent loss) */
+    }
     if (gui_project_is_dirty()) {
         s_after_confirm = AFTER_OPEN;
         s_confirm_open = true;
@@ -1074,7 +1097,9 @@ static void do_refresh(void) {
 /* Blocking pack of the selected atlas (deterministic path for the selftest + --shot). Interactive
  * Pack (do_pack) runs this on a worker thread; the result lands via poll_async. */
 void do_pack_blocking(void) {
-    gui_project_flush_pending(); /* pack the committed model, never a stale one missing a buffered edit */
+    if (flush_failed()) {
+        return; /* fix2 [1]: a journal-failed flush dropped the edit -> abort (never pack a stale model + report success) */
+    }
     tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
     if (!a || a->source_count == 0) {
         set_status_ex(STATUS_WARNING, "No sources to pack -- add a smart folder or files first.");
@@ -1103,7 +1128,9 @@ void do_pack_blocking(void) {
 /* Interactive Pack (Ctrl+P / strip / stale chip): starts the pack on a worker thread so the window
  * never freezes. Completion is applied at a frame boundary by poll_async (apply_pending). */
 void do_pack(void) {
-    gui_project_flush_pending(); /* pack the committed model, never a stale one missing a buffered edit */
+    if (flush_failed()) {
+        return; /* fix2 [1]: a journal-failed flush dropped the edit -> abort (never pack a stale model + report success) */
+    }
     tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
     if (!a || a->source_count == 0) {
         set_status_ex(STATUS_WARNING, "No sources to pack -- add a smart folder or files first.");
@@ -1125,7 +1152,9 @@ void do_pack(void) {
 /* Ctrl+E / Export: starts an async export of every atlas with sources + >=1 enabled target on a
  * worker thread (per-atlas failures non-fatal, ux.md §3.5). Completion reported via poll_async. */
 static void do_export(void) {
-    gui_project_flush_pending(); /* export the committed model, never a stale one missing a buffered edit */
+    if (flush_failed()) {
+        return; /* fix2 [1]: a journal-failed flush dropped the edit -> abort (never export a stale model + report success) */
+    }
     if (gui_pack_async_busy()) {
         set_status_ex(STATUS_WARNING, "Busy -- a pack or export is already running.");
         return;
@@ -1393,7 +1422,11 @@ void apply_pending(void) {
      * buffered transaction NOW that drain_edits has folded in this frame's final value, so one
      * interaction == one undo step (F2-05b-ii-A, decision 0015). */
     if (s_gesture_commit) {
-        gui_project_flush_pending();
+        /* fix2: the bool is intentionally IGNORED -- this is the gesture-BOUNDARY commit (one interaction
+         * = one undo step). A journal-failed flush here drops the gesture WITH the op-error surfaced
+         * (poll_async shows it); there is no persist/discard "proceed as clean" decision after it to
+         * abort (unlike save/new/pack). Audited fix2 [0]/[1]. */
+        (void)gui_project_flush_pending();
         s_gesture_commit = false;
     }
 

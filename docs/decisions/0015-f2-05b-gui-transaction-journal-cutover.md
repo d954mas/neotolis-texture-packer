@@ -785,3 +785,62 @@ clean; no file written), **J3 edit-after-recovery** (the gap that hid [0]: a pos
 (a 2nd instance without the lock skips recovery + never touches the slot). `check_boundaries.sh` =
 boundaries OK. `--parity` id-normalized byte-identical (same 3237 B) to the f6a5225 baseline — no saved
 bytes changed. No file under `packer/src` / `external` / `packer/spike` changed; no core seam.
+
+## F2-05b-ii-B FIX² — propagate the flush-failure contract to ALL callers (2026-07-14)
+
+`e3effef` made `gui_project_flush_pending()` return `bool` and handled save/save_as/undo/redo, but the
+re-review found the SAME root cause open in the OTHER callers: they ignored the false return, so a
+journal-failed flush silently dropped the buffered gesture and the caller proceeded as if the model were
+clean/current. **Uniform rule applied:** `flush_pending()==false` means the buffered gesture existed and
+its commit FAILED (the edit is gone AND the model is not what the caller expects), so every caller that
+then persists / discards / packs / switches MUST surface the (already-set) op-error and ABORT. GUI-only;
+no core. (Preserving the dropped edit across a journal failure is a separate larger change — the op arms
+are already freed by `commit_txn_now` — noted as a possible follow-up, not attempted here.)
+
+- **[0] the unsaved-changes dirty gate (`gui_actions.c` `request_new`/`request_exit`/`request_open`).** Each
+  did `flush_pending(); if (is_dirty()) prompt; else discard/quit/switch;` — a journal-failed flush dropped
+  the only buffered change, `is_dirty` read clean, and the project was **silently discarded / the app quit
+  / the project switched with no prompt**. Fixed via a shared `flush_failed()` helper (drains the op-error
+  → status bar, returns true on failure): `if (flush_failed()) return;` BEFORE the `is_dirty` check in all
+  three, so a failed flush aborts the destructive action and tells the user.
+- **[1] pack / export (`do_pack_blocking`/`do_pack`/`do_export`).** A failed flush dropped the edit, then
+  pack/export ran on the stale model and reported success. Fixed with the same `flush_failed()` guard —
+  abort, no stale pack/export, no false success.
+- **[3] the structural mutation wrappers (`gui_project.c`).** Each flushes a buffered gesture then commits a
+  structural op; on a TRANSIENT journal failure the flush dropped the gesture but the structural op could
+  still journal + commit — pairing a silent loss with an unrelated change. Fixed with a uniform
+  `if (!gui_project_flush_pending()) return <fail>;` guard at the top of **every** structural wrapper:
+  add_atlas / remove_atlas / add_source_kind / remove_source / set_atlas_name / set_sprite_rename /
+  add_target / remove_target / **set_target** / create_animation / remove_animation / set_anim_id /
+  anim_add_frames / anim_remove_frame / anim_move_frame. (`set_target` and `remove_animation` free their
+  pre-flush string dups on the abort path; `set_target` was NOT in the review's enumerated list but is the
+  same class, so it was included for completeness.) The op-error is already surfaced by the failed commit.
+- **Audited FINE as-is (confirmed, no "proceed as clean" decision after them):** `pending_route` and
+  `gui_project_flush_elapsed` (internal coalescing flushes — on failure the different-key/streamed gesture
+  is dropped with the op-error surfaced and the caller only BUFFERS a new uncommitted edit), and the
+  `s_gesture_commit` gesture-boundary flush in `apply_pending` (drops the gesture with the op-error
+  surfaced via `poll_async`; no persist/discard follows). Each carries an explicit `(void)` + a fix2 note.
+
+### [2] recovery redesign — accepted degraded-durability edge (DOCUMENTED, not "fixed")
+
+`try_adopt_recovered` `tp_model_destroy`s `rm` (which `remove()`s the crashed-session journal) and then
+`wrap_model` attaches a FRESH journal; if that fresh create/checkpoint fails (disk pressure exactly at
+recovery time), the recovered work is **in memory only** — no on-disk journal — so a SECOND crash before
+the user Saves would lose it. **Accepted as a degraded-durability edge, not code-changed**, because: the
+old journal was potentially POISONED (the very reason we rebuild), so preserving it is not valuable; the
+recovered state is already **dirty + prompts Save**; and a fresh-journal failure raises the
+degraded-durability notice ("Recovery journal unavailable … editing continues without crash recovery")
+telling the user to Save. So the only loss window is a second consecutive crash-before-Save on a failing
+disk. Implementing "confirm the fresh journal before removing the old" would re-introduce the two-open-
+handles / slot-accumulation hazards the redesign deliberately avoids, risking the [0]/[2] correctness just
+fixed — so it is documented here rather than implemented.
+
+### Verified (both presets)
+
+0 warnings (native-debug + native-release, cgltf filtered); `ctest` 79/79 (debug) + 78/78 (release);
+`ntpacker_gui_selftest` PASS — extended with **J6** (a structural wrapper aborts on a journal-failed flush;
+neither the gesture nor the op lands; op-error surfaced), **J7** (a pack aborts on a journal-failed flush;
+no stale result produced), **J8** (`request_new` aborts on a journal-failed flush; the project + its path
+are kept, NOT silently discarded — detected via the retained project path). `check_boundaries.sh` =
+boundaries OK. `--parity` id-normalized byte-identical (same 3237 B) to the f6a5225 baseline — no saved
+bytes changed. No file under `packer/src` / `external` / `packer/spike` changed; no core seam.
