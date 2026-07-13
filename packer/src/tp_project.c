@@ -1343,6 +1343,26 @@ static tp_project_sprite *sprite_push_default(tp_project_atlas *a) {
     return s;
 }
 
+/* Load-time finder for a record still in PENDING {name} form (no stored {source,key})
+ * whose name bridge matches. v4 record loading dedups a pending record ONLY against
+ * other PENDING records -- it never merges a pending record into a MIGRATED one (or vice
+ * versa). This makes loading ORDER-INDEPENDENT (fix [3]): a migrated {source,key} record
+ * and a pending {name} record that share a name bridge always COEXIST regardless of JSON
+ * array order, instead of merge-or-shadow by element position. (Two legitimately distinct
+ * migrated records -- different source or key -- also always coexist; validate flags a
+ * true (source,key) duplicate. Two pending records with the same name still merge, as in
+ * v3.) tp_project_atlas_add_sprite is unchanged -- it stays the mutate/rename dedup path. */
+static tp_project_sprite *find_pending_sprite_by_name(tp_project_atlas *a, const char *name) {
+    for (int i = 0; i < a->sprite_count; i++) {
+        tp_project_sprite *s = &a->sprites[i];
+        const bool migrated = !tp_id128_is_nil(s->source_ref) && s->src_key != NULL;
+        if (!migrated && s->name && strcmp(s->name, name) == 0) {
+            return s;
+        }
+    }
+    return NULL;
+}
+
 static tp_status tp_load_sprite(tp_project_atlas *a, const cJSON *js, tp_error *err) {
     if (!cJSON_IsObject(js)) {
         return tp_error_set(err, TP_STATUS_BAD_PROJECT, "sprite override must be an object");
@@ -1384,9 +1404,18 @@ static tp_status tp_load_sprite(tp_project_atlas *a, const cJSON *js, tp_error *
         if (!name) {
             return tp_error_set(err, TP_STATUS_BAD_PROJECT, "sprite override needs 'name' or 'source'+'key'");
         }
-        st = tp_project_atlas_add_sprite(a, name->valuestring, &s);
-        if (st != TP_STATUS_OK) {
-            return tp_error_set(err, st, "out of memory adding sprite override");
+        /* Dedup pending-against-pending ONLY (fix [3]); never merge into a migrated record,
+         * so records sharing a name bridge load order-independently. */
+        s = find_pending_sprite_by_name(a, name->valuestring);
+        if (!s) {
+            s = sprite_push_default(a);
+            if (!s) {
+                return tp_error_set(err, TP_STATUS_OOM, "out of memory adding sprite override");
+            }
+            s->name = tp_strdup(name->valuestring);
+            if (!s->name) {
+                return tp_error_set(err, TP_STATUS_OOM, "out of memory adding sprite override");
+            }
         }
     }
     const cJSON *origin = cJSON_GetObjectItemCaseSensitive(js, "origin");

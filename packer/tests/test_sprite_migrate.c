@@ -288,6 +288,64 @@ void test_frames_resolve_persist_and_survive_reorder(void) {
     tp_project_destroy(p2);
 }
 
+/* fix [3]: a MIGRATED {source, key} record and a PENDING {name} record that share a name
+ * bridge must load to the SAME model regardless of JSON array order -- never merge/shadow
+ * by element position. v4 record loading dedups pending-against-pending only and never
+ * merges across forms, so the two always COEXIST (2 records, each field intact) in either
+ * order. Before the fix, [migrated, pending] collapsed to 1 record (the pending merged into
+ * the migrated one) while [pending, migrated] kept 2 -- order-dependent. */
+static void assert_two_records_either_order(const char *sprites_json) {
+    char proj[900];
+    (void)snprintf(proj, sizeof proj, "%s/order_test.ntpacker_project", g_dir);
+    char content[1400];
+    (void)snprintf(content, sizeof content,
+                   "{\n  \"version\": 4,\n  \"atlases\": [\n"
+                   "    { \"id\": \"atlas_0000000000000000000000000000a001\", \"name\": \"art\",\n"
+                   "      \"sources\": [ { \"id\": \"source_0000000000000000000000000000b001\", \"path\": \"art\" } ],\n"
+                   "      \"sprites\": [ %s ] }\n  ]\n}\n",
+                   sprites_json);
+    write_file(proj, content);
+
+    tp_project *p = NULL;
+    tp_error e = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, tp_project_load(proj, &p, &e), e.msg);
+    tp_project_atlas *a = tp_project_get_atlas(p, 0);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, a->sprite_count, "records sharing a name bridge must not merge/shadow");
+
+    const tp_project_sprite *pending = NULL;
+    const tp_project_sprite *migrated = NULL;
+    for (int i = 0; i < a->sprite_count; i++) {
+        const tp_project_sprite *s = &a->sprites[i];
+        if (!tp_id128_is_nil(s->source_ref) && s->src_key != NULL) {
+            migrated = s;
+        } else {
+            pending = s;
+        }
+    }
+    TEST_ASSERT_NOT_NULL_MESSAGE(pending, "the pending {name} record must survive");
+    TEST_ASSERT_NOT_NULL_MESSAGE(migrated, "the migrated {source,key} record must survive");
+    TEST_ASSERT_EQUAL_STRING("hero", pending->name);
+    TEST_ASSERT_NULL(pending->src_key);
+    TEST_ASSERT_TRUE_MESSAGE(pending->origin_x > 0.09F && pending->origin_x < 0.11F, "pending override intact");
+    TEST_ASSERT_NULL_MESSAGE(pending->rename, "pending record must not inherit the migrated record's rename");
+    TEST_ASSERT_EQUAL_STRING("hero", migrated->name);
+    TEST_ASSERT_EQUAL_STRING("hero.png", migrated->src_key);
+    TEST_ASSERT_EQUAL_STRING("champ", migrated->rename);
+    tp_project_destroy(p);
+}
+
+void test_v4_sprite_record_load_order_independent(void) {
+    const char *pending_rec = "{ \"name\": \"hero\", \"origin\": [0.1, 0.2] }";
+    const char *migrated_rec =
+        "{ \"key\": \"hero.png\", \"rename\": \"champ\", \"source\": \"source_0000000000000000000000000000b001\" }";
+    char order_a[600];
+    char order_b[600];
+    (void)snprintf(order_a, sizeof order_a, "%s, %s", pending_rec, migrated_rec); /* pending first */
+    (void)snprintf(order_b, sizeof order_b, "%s, %s", migrated_rec, pending_rec); /* migrated first */
+    assert_two_records_either_order(order_a);
+    assert_two_records_either_order(order_b);
+}
+
 int main(int argc, char **argv) {
     g_dir = (argc > 1) ? argv[1] : ".";
     mkdir_p(g_dir);
@@ -296,5 +354,6 @@ int main(int argc, char **argv) {
     RUN_TEST(test_unresolved_stays_pending);
     RUN_TEST(test_orphan_reactivates_on_key_return);
     RUN_TEST(test_frames_resolve_persist_and_survive_reorder);
+    RUN_TEST(test_v4_sprite_record_load_order_independent);
     return UNITY_END();
 }
