@@ -33,7 +33,7 @@ Master spec §7–8, §9.1, §59 items 12–19. Plan F2-02 (строки 395–4
 1. **Фронтенд-cutover — F2-05.** `apps/cli/cli_mutate.c` и `apps/gui/gui_project.c` НЕ
    маршрутизируются через транзакции; их мутаторы НЕ тронуты. Ни один shipping-путь пока
    не идёт через транзакционный engine. Доказательство engine — atomicity/property-suite +
-   **CLI batch JSON golden** + fault injection (`test_transaction.c`, 20 кейсов), НЕ живой
+   **CLI batch JSON golden** + fault injection (`test_transaction.c`, 29 кейсов), НЕ живой
    фронтенд.
 2. **Semantic diff / inverse / Undo-Redo / snapshot oracle — F2-03.** Committed-RESULT эхает
    addressing + status + новый revision, БЕЗ вычисленного `diff`-объекта. Per-op before/after
@@ -159,11 +159,55 @@ PIN: `test_json_structural_fail_fast`, `test_json_revision_short_circuit_alone`,
 `invalid_revision` (`expected > current`: клиентский баг). Idempotency НЕ добавляет токен —
 переиспользует `duplicate_id` (как назвал brief). Токен-инфляции избегали.
 
+### 9. Review-fix (adversarial review wf_c95eae55): JSON-контракт выровнен с typed-path
+Ревью нашло, что JSON entry point (`tp_model_apply_json`) РАЗОШёлся с typed
+(`tp_model_apply`). Исправлено; НОВЫХ токенов не добавлено (переиспользованы
+`out_of_range`/`id_malformed`/`invalid_argument`/`bad_version`). Изменения контракта:
+
+- **ЕДИНЫЙ preflight** (`tp_txn__preflight` в `tp_txn_apply.c`, вызывается ОБОИМИ путями):
+  (a) валидация transaction-id = 32-lowercase-hex; (b) NULL-safe reset; (c) idempotency;
+  (d) revision precondition. Убирает дрейф между путями. `tp_txn__is_hex32_lower` — один
+  общий чек (и в structural-decode envelope, и в preflight).
+- **[8] Typed path теперь валидирует формат id** ДО idempotency: пустой/garbage/не-32-hex/
+  UPPERCASE id → `id_malformed` (раньше typed-путь принимал любой id, второй garbage-id
+  ложно коллизил `duplicate_id`). Меняет поведение: typed `tp_model_apply` с плохим id
+  теперь reject, не commit.
+- **[schema] Строгий schema** через `j_i64` (не усечённый `->valueint`): `{"schema":1.9}` →
+  `invalid_argument` (не-integer), out-of-range → `out_of_range`, `2` → `bad_version`.
+  Раньше 1.9 усекалось в 1 и молча принималось.
+- **[field] Rejected-result эхает `field`** (sparse — опускается при ""), в каноничном
+  ascending-порядке `code`<`field`<`message`<`op_index`, как F2-01 `tp_op_result_encode`.
+  Байт-goldens расширены; committed-golden не изменился.
+- **[OOM] Shape-фолт НИКОГДА ложно не коммитит под allocation-pressure**: reject-решение
+  больше НЕ зависит от `error_count>0`. `tp_txn__result_add_error` возвращает bool; shape
+  collect-all держит sticky `any_fault`/`store_oom` — дропнутая (OOM) error-запись всё равно
+  форсит reject (`oom`), модель байт-неизменна. Test-only seam
+  `tp_txn__test_set_add_error_fail`.
+- **[6] Present-but-non-string addressing id** (`"atlas_id":123`) теперь фиксируется в
+  collect-all (`id_malformed`), так что весь batch репортит все плохие id за один проход
+  (раньше ловилось fail-fast в lowering — один плохой id за round-trip).
+- **[3] Malformed-JSON reject сохраняет revision** (`out->revision = m->revision`) — клиент
+  больше не думает, что модель сбросилась в 0.
+- **[1] NULL-`out` не крашит** ни на одном пути JSON (twin typed поддерживал `out==NULL`):
+  wrapper собирает в локальный result, если caller передал NULL.
+- **[0] sprite.override.set int16-поля** (`ov_shape/ov_allow_rotate/ov_max_vertices/
+  ov_margin/ov_extrude`) range-check ДО narrowing cast (`opt_i16`, `[INT16_MIN..INT16_MAX]`):
+  `ov_margin:65535` больше не wrap’ится в `-1` (== `OV_INHERIT`) с молчаливым дропом. Sweep
+  `tp_txn_lower.c` подтвердил: единственный оставшийся integer-narrowing cast — slice9,
+  уже range-checked `[0..65535]`.
+- **[tokens]** mask↔token для sprite-clear остаются двумя ручными списками (в `tp_op_encode.c`
+  и `tp_txn_lower.c`), но закреплены round-trip pin-тестом `test_sprite_clear_field_roundtrip`
+  (encode(mask)→decode→mask == identity для всех 7 полей). Общая таблица — follow-up.
+- **DEFERRED (не correctness, honest note):** [9] `fill_result_op` addressing-map всё ещё
+  дублирует op-encoder PUSH_ID switch (байт-идентичен, риск — copy-paste дрейф); [10]
+  `emit_op_embedded` encode-then-reparse не заменён на indented-encode (перф/чистота, не баг).
+  Обе — follow-up, чтобы не рисковать byte-стабильностью goldens.
+
 ## Что core-тестировано СЕЙЧАС vs отложено
 
 | Возможность | Статус F2-02 |
 | --- | --- |
-| Атомарный batch, revision, expected_revision, dirty, idempotency, JSON contract | ✅ core-tested (`test_transaction.c`, 20 кейсов) |
+| Атомарный batch, revision, expected_revision, dirty, idempotency, JSON contract | ✅ core-tested (`test_transaction.c`, 29 кейсов) |
 | deep-clone byte-identity + OOM sweep на каждой глубине | ✅ core-tested |
 | batch == one-by-one F2-01 apply (typed + через JSON round-trip) | ✅ core-tested |
 | per-op inverse diff / Undo-Redo / snapshot oracle | ⛔ F2-03 |

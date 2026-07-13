@@ -31,6 +31,7 @@ void setUp(void) {}
 void tearDown(void) {
     tp_project__test_set_clone_alloc_fail(-1);
     tp_op__test_set_alloc_fail(-1);
+    tp_txn__test_set_add_error_fail(-1);
 }
 
 /* ---- fixtures ------------------------------------------------------------- */
@@ -713,6 +714,305 @@ void test_number_handling(void) {
     tp_model_destroy(m2);
 }
 
+/* ---- review-fix regressions (F2-02 fix) --------------------------------- */
+
+/* [8] the typed path validates the transaction-id format (was: garbage id committed
+ * and a second garbage id then collided on duplicate_id). */
+void test_typed_malformed_id_rejected(void) {
+    tp_project *p = base_project();
+    tp_id128 aid = p->atlases[0].id;
+    tp_model *m = tp_model_wrap(p);
+    tp_operation op;
+    op_atlas_rename(&op, aid, "x");
+    tp_txn_request req = {0};
+    req.schema = TP_TXN_SCHEMA;
+    req.ops = &op;
+    req.op_count = 1;
+    req.expected_revision = 0;
+    tp_txn_result res;
+    tp_error err;
+
+    const char *bad_ids[] = {
+        "",                                  /* empty */
+        "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",   /* non-hex */
+        "abcdef",                            /* too short */
+        "0123456789abcdef0123456789abcde",   /* 31 (wrong length) */
+        "0123456789ABCDEF0123456789ABCDEF",  /* uppercase: not lowercase hex */
+    };
+    for (size_t i = 0; i < sizeof bad_ids / sizeof bad_ids[0]; i++) {
+        (void)snprintf(req.id_hex, sizeof req.id_hex, "%s", bad_ids[i]);
+        TEST_ASSERT_EQUAL_INT(TP_STATUS_ID_MALFORMED, tp_model_apply(m, &req, &res, &err));
+        TEST_ASSERT_FALSE(res.committed);
+        TEST_ASSERT_EQUAL_INT64(0, tp_model_revision(m)); /* nothing recorded, model untouched */
+        tp_txn_result_free(&res);
+    }
+    /* nothing was recorded: a valid, distinct id still commits at revision 0. */
+    (void)snprintf(req.id_hex, sizeof req.id_hex, "%s", "00000000000000000000000000000000");
+    op_atlas_rename(&op, aid, "y");
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_apply(m, &req, &res, &err));
+    TEST_ASSERT_TRUE(res.committed);
+    TEST_ASSERT_EQUAL_INT64(1, tp_model_revision(m));
+    tp_txn_result_free(&res);
+    tp_model_destroy(m);
+}
+
+/* [1] tp_model_apply_json(m, json, NULL, err) never dereferences a NULL out, on any
+ * reject path or the commit path. */
+void test_json_null_out_no_crash(void) {
+    tp_project *p = base_project();
+    tp_id128 aid = p->atlases[0].id;
+    tp_model *m = tp_model_wrap(p);
+    tp_error err;
+    /* rejected: unknown envelope key */
+    const char *envbad = "{\"schema\":1,\"extra\":1,\"transaction\":{"
+                         "\"id\":\"00000000000000000000000000000000\",\"expected_revision\":0,\"operations\":[]}}";
+    TEST_ASSERT_NOT_EQUAL(TP_STATUS_OK, tp_model_apply_json(m, envbad, NULL, &err));
+    /* rejected: per-op shape fault (unknown op) */
+    const char *shapebad = "{\"schema\":1,\"transaction\":{"
+                           "\"id\":\"00000000000000000000000000000000\",\"expected_revision\":0,"
+                           "\"operations\":[{\"op\":\"not.a.real.op\"}]}}";
+    TEST_ASSERT_NOT_EQUAL(TP_STATUS_OK, tp_model_apply_json(m, shapebad, NULL, &err));
+    /* rejected: malformed JSON */
+    TEST_ASSERT_NOT_EQUAL(TP_STATUS_OK, tp_model_apply_json(m, "{not json", NULL, &err));
+    /* committed with NULL out: the model still mutates + the revision still bumps. */
+    char adhex[TP_ID_TEXT_CAP];
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_id_format(TP_ID_KIND_ATLAS, aid, adhex, sizeof adhex, &err));
+    char json[400];
+    (void)snprintf(json, sizeof json,
+                   "{\"schema\":1,\"transaction\":{\"id\":\"00000000000000000000000000000000\","
+                   "\"expected_revision\":0,\"operations\":[{\"op\":\"atlas.rename\",\"atlas_id\":\"%s\","
+                   "\"name\":\"z\"}]}}",
+                   adhex);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_apply_json(m, json, NULL, &err));
+    TEST_ASSERT_EQUAL_INT64(1, tp_model_revision(m));
+    TEST_ASSERT_EQUAL_STRING("z", tp_model_project(m)->atlases[0].name);
+    tp_model_destroy(m);
+}
+
+/* [3] a malformed-JSON reject preserves the current revision (was: result.revision 0,
+ * making the client believe the model reset). */
+void test_json_malformed_preserves_revision(void) {
+    tp_project *p = base_project();
+    tp_id128 aid = p->atlases[0].id;
+    tp_model *m = tp_model_wrap(p);
+    tp_error err;
+    char adhex[TP_ID_TEXT_CAP];
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_id_format(TP_ID_KIND_ATLAS, aid, adhex, sizeof adhex, &err));
+    char json[400];
+    (void)snprintf(json, sizeof json,
+                   "{\"schema\":1,\"transaction\":{\"id\":\"00000000000000000000000000000000\","
+                   "\"expected_revision\":0,\"operations\":[{\"op\":\"atlas.rename\",\"atlas_id\":\"%s\","
+                   "\"name\":\"r1\"}]}}",
+                   adhex);
+    tp_txn_result res;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_apply_json(m, json, &res, &err)); /* revision -> 1 */
+    TEST_ASSERT_EQUAL_INT64(1, res.revision);
+    tp_txn_result_free(&res);
+
+    /* malformed JSON at revision 1: result.revision must echo 1, not reset to 0. */
+    TEST_ASSERT_NOT_EQUAL(TP_STATUS_OK, tp_model_apply_json(m, "{not json", &res, &err));
+    TEST_ASSERT_FALSE(res.committed);
+    TEST_ASSERT_EQUAL_INT64(1, res.revision);
+    tp_txn_result_free(&res);
+    tp_model_destroy(m);
+}
+
+/* [6] present-but-non-string addressing ids are recorded in the collect-all pass, so
+ * a whole batch's bad ids report together (was: only the first caught fail-fast in
+ * lowering, one bad id per round-trip). */
+void test_json_nonstring_id_collect_all(void) {
+    tp_project *p = base_project();
+    tp_model *m = tp_model_wrap(p);
+    const char *json = "{\"schema\":1,\"transaction\":{"
+                       "\"id\":\"00000000000000000000000000000000\",\"expected_revision\":0,\"operations\":["
+                       "{\"op\":\"atlas.remove\",\"atlas_id\":123},"
+                       "{\"op\":\"atlas.remove\",\"atlas_id\":456}"
+                       "]}}";
+    tp_txn_result res;
+    tp_error err;
+    TEST_ASSERT_NOT_EQUAL(TP_STATUS_OK, tp_model_apply_json(m, json, &res, &err));
+    TEST_ASSERT_FALSE(res.committed);
+    TEST_ASSERT_EQUAL_INT(2, res.error_count); /* BOTH bad ids reported in one pass */
+    TEST_ASSERT_EQUAL_INT(0, res.errors[0].op_index);
+    TEST_ASSERT_EQUAL_STRING("atlas_id", res.errors[0].field);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_ID_MALFORMED, res.errors[0].code);
+    TEST_ASSERT_EQUAL_INT(1, res.errors[1].op_index);
+    TEST_ASSERT_EQUAL_STRING("atlas_id", res.errors[1].field);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_ID_MALFORMED, res.errors[1].code);
+    tp_txn_result_free(&res);
+    tp_model_destroy(m);
+}
+
+/* [0] sprite override int16 fields are range-checked BEFORE the narrowing cast, so an
+ * out-of-range value rejects (was: 65535 wrapped to -1 == INHERIT and silently
+ * dropped, apply COMMITTED). A valid value commits. */
+void test_json_ov_int16_range(void) {
+    tp_project *p = base_project();
+    tp_id128 aid = p->atlases[0].id;
+    tp_id128 src0 = p->atlases[0].sources[0].id;
+    tp_model *m = tp_model_wrap(p);
+    tp_error err;
+    char adhex[TP_ID_TEXT_CAP];
+    char sdhex[TP_ID_TEXT_CAP];
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_id_format(TP_ID_KIND_ATLAS, aid, adhex, sizeof adhex, &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_id_format(TP_ID_KIND_SOURCE, src0, sdhex, sizeof sdhex, &err));
+
+    const int bad[] = {65535, 65536, -40000};
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        char json[512];
+        (void)snprintf(json, sizeof json,
+                       "{\"schema\":1,\"transaction\":{\"id\":\"00000000000000000000000000000000\","
+                       "\"expected_revision\":0,\"operations\":[{\"op\":\"sprite.override.set\",\"atlas_id\":\"%s\","
+                       "\"source_id\":\"%s\",\"src_key\":\"hero.png\",\"ov_margin\":%d}]}}",
+                       adhex, sdhex, bad[i]);
+        tp_txn_result res;
+        TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_RANGE, tp_model_apply_json(m, json, &res, &err));
+        TEST_ASSERT_FALSE(res.committed);
+        TEST_ASSERT_EQUAL_INT64(0, tp_model_revision(m)); /* nothing committed */
+        tp_txn_result_free(&res);
+    }
+    /* a valid in-range override commits on the real source. */
+    char okjson[512];
+    (void)snprintf(okjson, sizeof okjson,
+                   "{\"schema\":1,\"transaction\":{\"id\":\"00000000000000000000000000000000\","
+                   "\"expected_revision\":0,\"operations\":[{\"op\":\"sprite.override.set\",\"atlas_id\":\"%s\","
+                   "\"source_id\":\"%s\",\"src_key\":\"hero.png\",\"ov_margin\":4}]}}",
+                   adhex, sdhex);
+    tp_txn_result res;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_apply_json(m, okjson, &res, &err));
+    TEST_ASSERT_TRUE(res.committed);
+    TEST_ASSERT_EQUAL_INT64(1, tp_model_revision(m));
+    tp_txn_result_free(&res);
+    tp_model_destroy(m);
+}
+
+/* [field] the rejected-result JSON emits the offending `field` (sparse: omitted when
+ * ""), matching F2-01 tp_op_result_encode + canonical ascending key order. */
+void test_json_result_error_field_golden(void) {
+    tp_project *p = base_project();
+    tp_id128 aid = p->atlases[0].id;
+    tp_model *m = tp_model_wrap(p);
+    tp_error err;
+    char adhex[TP_ID_TEXT_CAP];
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_id_format(TP_ID_KIND_ATLAS, aid, adhex, sizeof adhex, &err));
+    char json[512];
+    (void)snprintf(json, sizeof json,
+                   "{\"schema\":1,\"transaction\":{\"id\":\"00000000000000000000000000000000\","
+                   "\"expected_revision\":0,\"operations\":[{\"op\":\"atlas.settings.set\",\"atlas_id\":\"%s\","
+                   "\"bogus\":1}]}}",
+                   adhex);
+    tp_txn_result res;
+    TEST_ASSERT_NOT_EQUAL(TP_STATUS_OK, tp_model_apply_json(m, json, &res, &err));
+    TEST_ASSERT_FALSE(res.committed);
+    TEST_ASSERT_EQUAL_INT(1, res.error_count);
+    TEST_ASSERT_EQUAL_STRING("bogus", res.errors[0].field);
+
+    char *j = tp_txn_result_encode(&res);
+    TEST_ASSERT_NOT_NULL(j);
+    TEST_ASSERT_NOT_NULL(strstr(j, "\"field\": \"bogus\""));
+    /* ascending: code < field < message < op_index */
+    TEST_ASSERT_TRUE(strstr(j, "\"code\"") < strstr(j, "\"field\""));
+    TEST_ASSERT_TRUE(strstr(j, "\"field\"") < strstr(j, "\"message\""));
+    TEST_ASSERT_TRUE(strstr(j, "\"message\"") < strstr(j, "\"op_index\""));
+    free(j);
+    tp_txn_result_free(&res);
+
+    /* sparse: an envelope-level error with an empty field omits the "field" key. */
+    TEST_ASSERT_NOT_EQUAL(TP_STATUS_OK, tp_model_apply_json(m, "{not json", &res, &err));
+    char *j2 = tp_txn_result_encode(&res);
+    TEST_ASSERT_NOT_NULL(j2);
+    TEST_ASSERT_NULL(strstr(j2, "\"field\"")); /* no field key when field == "" */
+    free(j2);
+    tp_txn_result_free(&res);
+    tp_model_destroy(m);
+}
+
+/* [schema] a fractional/out-of-range schema is rejected (was: truncating
+ * schema->valueint accepted {"schema":1.9} as 1). */
+void test_json_fractional_schema_rejected(void) {
+    tp_model *m = tp_model_create();
+    tp_txn_result res;
+    tp_error err;
+    const char *frac = "{\"schema\":1.9,\"transaction\":{"
+                       "\"id\":\"00000000000000000000000000000000\",\"expected_revision\":0,\"operations\":[]}}";
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT, tp_model_apply_json(m, frac, &res, &err));
+    TEST_ASSERT_FALSE(res.committed);
+    tp_txn_result_free(&res);
+    /* an integral but unknown version is still bad_version. */
+    const char *two = "{\"schema\":2,\"transaction\":{"
+                      "\"id\":\"00000000000000000000000000000000\",\"expected_revision\":0,\"operations\":[]}}";
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_BAD_VERSION, tp_model_apply_json(m, two, &res, &err));
+    tp_txn_result_free(&res);
+    tp_model_destroy(m);
+}
+
+/* [OOM] a shape-faulted batch whose error record cannot be stored must REJECT, never
+ * commit (was: add_error dropped the error, error_count 0, the batch committed). */
+void test_json_shape_oom_must_not_commit(void) {
+    tp_project *p = base_project();
+    tp_id128 aid = p->atlases[0].id;
+    tp_model *m = tp_model_wrap(p);
+    tp_error err;
+    char adhex[TP_ID_TEXT_CAP];
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_id_format(TP_ID_KIND_ATLAS, aid, adhex, sizeof adhex, &err));
+    char *before = serialize(tp_model_project(m));
+    /* a shape fault (unknown field "bogus") on an OTHERWISE valid+committable op: if
+     * the fault record is dropped and error_count stays 0, the old code would lower
+     * (ignoring the unknown field) and COMMIT. */
+    char json[512];
+    (void)snprintf(json, sizeof json,
+                   "{\"schema\":1,\"transaction\":{\"id\":\"00000000000000000000000000000000\","
+                   "\"expected_revision\":0,\"operations\":[{\"op\":\"atlas.settings.set\",\"atlas_id\":\"%s\","
+                   "\"max_size\":2048,\"bogus\":1}]}}",
+                   adhex);
+    tp_txn__test_set_add_error_fail(0); /* the shape-fault error record alloc fails */
+    tp_txn_result res;
+    tp_status st = tp_model_apply_json(m, json, &res, &err);
+    TEST_ASSERT_NOT_EQUAL(TP_STATUS_OK, st); /* rejected, NOT committed */
+    TEST_ASSERT_FALSE(res.committed);
+    TEST_ASSERT_EQUAL_INT64(0, tp_model_revision(m)); /* revision unchanged */
+    char *after = serialize(tp_model_project(m));
+    TEST_ASSERT_EQUAL_STRING(before, after); /* model byte-unchanged */
+    free(before);
+    free(after);
+    tp_txn_result_free(&res);
+    tp_model_destroy(m);
+}
+
+/* [tokens] pin the sprite-clear field-token vocabulary: encode(mask) -> decode ->
+ * mask is identity for every field, so the two hand-kept mask<->token lists
+ * (tp_op_encode.c and tp_txn_lower.c) cannot silently disagree. */
+void test_sprite_clear_field_roundtrip(void) {
+    const uint32_t bits[] = {TP_SPF_ORIGIN,       TP_SPF_SLICE9, TP_SPF_SHAPE,  TP_SPF_ALLOW_ROTATE,
+                             TP_SPF_MAX_VERTICES, TP_SPF_MARGIN, TP_SPF_EXTRUDE};
+    for (size_t i = 0; i < sizeof bits / sizeof bits[0]; i++) {
+        tp_operation op;
+        memset(&op, 0, sizeof op);
+        op.kind = TP_OP_SPRITE_OVERRIDE_CLEAR;
+        op.atlas_id = id_of(0xA1);
+        op.u.sprite_clear.source_id = id_of(0xB2);
+        op.u.sprite_clear.src_key = (char *)"hero.png";
+        op.u.sprite_clear.mask = bits[i];
+
+        tp_txn_request req = {0};
+        req.schema = TP_TXN_SCHEMA;
+        (void)snprintf(req.id_hex, sizeof req.id_hex, "%s", "0123456789abcdef0123456789abcdef");
+        req.ops = &op;
+        req.op_count = 1;
+
+        char *json = tp_txn_request_encode(&req);
+        TEST_ASSERT_NOT_NULL(json);
+        tp_txn_request *rd = NULL;
+        tp_error err;
+        TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_txn_request_decode(json, &rd, &err));
+        TEST_ASSERT_NOT_NULL(rd);
+        TEST_ASSERT_EQUAL_INT(1, rd->op_count);
+        TEST_ASSERT_EQUAL_UINT32(bits[i], rd->ops[0].u.sprite_clear.mask); /* round-trip identity */
+        free(json);
+        tp_txn_request_free(rd);
+    }
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_clone_byte_identity);
@@ -735,5 +1035,14 @@ int main(void) {
     RUN_TEST(test_json_request_encode_golden);
     RUN_TEST(test_json_batch_equals_one_by_one);
     RUN_TEST(test_number_handling);
+    RUN_TEST(test_typed_malformed_id_rejected);
+    RUN_TEST(test_json_null_out_no_crash);
+    RUN_TEST(test_json_malformed_preserves_revision);
+    RUN_TEST(test_json_nonstring_id_collect_all);
+    RUN_TEST(test_json_ov_int16_range);
+    RUN_TEST(test_json_result_error_field_golden);
+    RUN_TEST(test_json_fractional_schema_rejected);
+    RUN_TEST(test_json_shape_oom_must_not_commit);
+    RUN_TEST(test_sprite_clear_field_roundtrip);
     return UNITY_END();
 }
