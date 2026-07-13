@@ -68,6 +68,21 @@ target_compile_options(tp_test_op_apply PRIVATE -U_DLL)
 nt_set_warning_flags(tp_test_op_apply)   # AGENTS.md invariant: our test TUs too
 add_test(NAME tp_op_apply COMMAND tp_test_op_apply)
 
+# F2-02: atomic transactions, revision, semantic dirty, idempotency, and the
+# versioned transaction request/result JSON contract. Deep-clone byte-identity +
+# OOM-safe fault sweep, atomicity (op N fails / clone-alloc / per-op-alloc leave the
+# model byte-unchanged), expected_revision below/above/equal, idempotent retry,
+# dirty=identity (edit->save->edit->inverse->clean at higher revision), validation
+# ordering, the CLI batch JSON golden + batch==one-by-one property, and UB-free
+# numbers. Includes the private src/ internal headers for the clone + op alloc-fault
+# seams (same pattern as test_op_apply.c).
+add_executable(tp_test_transaction test_transaction.c)
+target_link_libraries(tp_test_transaction PRIVATE tp_core unity)
+target_include_directories(tp_test_transaction PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_options(tp_test_transaction PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_transaction)   # AGENTS.md invariant: our test TUs too
+add_test(NAME tp_transaction COMMAND tp_test_transaction)
+
 # F1-03: canonical selector resolver (id/name/path/compound -> exactly one id).
 add_executable(tp_test_selector test_selector.c)
 target_link_libraries(tp_test_selector PRIVATE tp_core unity)
