@@ -10,6 +10,12 @@
 
 #include "tp_core/tp_transaction.h"
 
+/* F2-04 fix C1: the shared id-set behind a memory idstore (NULL for a foreign store).
+ * tp_model_attach_journal uses it to migrate ids the model committed journal-less into
+ * the fresh journal's retained-id index. Defined in tp_txn_idset.c. */
+struct tp_idset;
+const struct tp_idset *tp_txn_idstore_mem_view(const tp_txn_idstore *store);
+
 /* ---- shared between the JSON path (tp_txn_parse.c) and the apply core
  * (tp_txn_apply.c). NOT public: the JSON path runs the idempotency + revision
  * gates in the contract order (structural -> idempotency -> revision -> per-op

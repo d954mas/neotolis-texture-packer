@@ -42,6 +42,19 @@ void tp_jrn_put_i64(uint8_t *p, int64_t v);
 uint32_t tp_jrn_get_u32(const uint8_t *p);
 int64_t tp_jrn_get_i64(const uint8_t *p);
 
+/* ---- recovery glue seams (shared with tp_txn_apply.c's tp_model_recover) -------- */
+
+/* F2-04 fix C3: mark the journal poisoned so it refuses further appends. Called by the
+ * recovery glue when a torn tail could NOT be truncated away -- a still-present bad
+ * record must never hide a later acknowledged append. NULL-safe. */
+void tp_journal__poison(tp_journal *j);
+
+/* F2-04 fix C1: register an already-durable retained id into the in-memory index
+ * WITHOUT writing a record. tp_model_attach_journal calls it to migrate ids the model
+ * committed journal-less, BEFORE the initial checkpoint (so the checkpoint id-list AND
+ * the live index both carry them). OOM -> non-OK; a bad/NULL arg -> INVALID_ARGUMENT. */
+tp_status tp_journal_seed_retained_id(tp_journal *j, const char *id_hex);
+
 /* ---- memory-io fault seams (test-only; default off) ---------------------- *
  * Operate on an io returned by tp_journal_io_memory. A NULL/foreign io is a no-op. */
 

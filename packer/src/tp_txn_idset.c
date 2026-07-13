@@ -6,62 +6,48 @@
  * apply core. Only COMMITTED ids are ever recorded, so idempotency blocks exactly
  * the retries of applied transactions.
  *
- * `record` is transactional: it grows first and only appends on success, so an OOM
- * leaves the set unchanged and the caller discards the transaction's clone -- the
- * model stays byte-unchanged.
+ * The set itself is the shared tp_idset (tp_idset_internal.h) -- the SAME primitive
+ * the journal's retained-id index uses, so the membership + growth logic lives in one
+ * place. `record` is transactional: tp_idset_add grows first and only appends on
+ * success, so an OOM leaves the set unchanged and the caller discards the transaction's
+ * clone -- the model stays byte-unchanged.
  */
 
 #include "tp_core/tp_transaction.h"
 
 #include <stdlib.h>
-#include <string.h>
 
-typedef struct {
-    char (*ids)[33]; /* growable array of 32-hex + NUL */
-    int count;
-    int cap;
-} mem_idset;
+#include "tp_idset_internal.h"
 
-static bool mem_contains(void *ctx, const char *id_hex) {
-    mem_idset *s = (mem_idset *)ctx;
-    for (int i = 0; i < s->count; i++) {
-        if (strcmp(s->ids[i], id_hex) == 0) {
-            return true;
-        }
-    }
-    return false;
-}
+static bool mem_contains(void *ctx, const char *id_hex) { return tp_idset_contains((const tp_idset *)ctx, id_hex); }
 
 static tp_status mem_record(void *ctx, const char *id_hex, tp_error *err) {
-    mem_idset *s = (mem_idset *)ctx;
-    if (mem_contains(ctx, id_hex)) {
-        return TP_STATUS_OK; /* already recorded: an idempotent no-op */
+    tp_status st = tp_idset_add((tp_idset *)ctx, id_hex);
+    if (st != TP_STATUS_OK) {
+        return tp_error_set(err, st, "idempotency set grow failed");
     }
-    if (s->count >= s->cap) {
-        int new_cap = (s->cap == 0) ? 16 : s->cap * 2;
-        char(*n)[33] = (char(*)[33])realloc(s->ids, (size_t)new_cap * sizeof(*n));
-        if (!n) {
-            return tp_error_set(err, TP_STATUS_OOM, "idempotency set grow failed");
-        }
-        s->ids = n;
-        s->cap = new_cap;
-    }
-    (void)snprintf(s->ids[s->count], sizeof s->ids[s->count], "%s", id_hex);
-    s->count++;
     return TP_STATUS_OK;
 }
 
 static void mem_destroy(void *ctx) {
-    mem_idset *s = (mem_idset *)ctx;
+    tp_idset *s = (tp_idset *)ctx;
     if (s) {
-        free(s->ids);
+        tp_idset_dispose(s);
         free(s);
     }
 }
 
+/* F2-04 fix C1: the internal set behind a memory idstore (or NULL for a foreign
+ * store), so tp_model_attach_journal can migrate ids committed BEFORE a journal was
+ * attached into the fresh journal's retained-id index. Mirrors mem_of() in
+ * tp_journal_io.c: recognized by the `contains` function pointer. */
+const tp_idset *tp_txn_idstore_mem_view(const tp_txn_idstore *store) {
+    return (store && store->contains == mem_contains) ? (const tp_idset *)store->ctx : NULL;
+}
+
 tp_txn_idstore *tp_txn_idstore_memory_create(void) {
     tp_txn_idstore *store = (tp_txn_idstore *)calloc(1, sizeof *store);
-    mem_idset *s = (mem_idset *)calloc(1, sizeof *s);
+    tp_idset *s = (tp_idset *)calloc(1, sizeof *s);
     if (!store || !s) {
         free(store);
         free(s);

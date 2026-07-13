@@ -1,10 +1,13 @@
 # 0013 — F2-04: минимальный recovery journal для side-effect workflows
 
 **Дата:** 2026-07-13
-**Статус:** accepted (нужно подтверждение владельца по: формат записи/версионирование, новый
-commit-ordering + новый status-токен `journal_failed`, per-txn full-snapshot payload vs redo-log,
-scope coordinator’а, compaction cadence)
-**Принял:** deep-reasoner (F2-04, делегированные полномочия), lead review pending
+**Статус:** lead-reviewed; correctness fixes applied (C1–C6 + cleanups Q1/Q2, см. §Fix pass);
+**owner-confirmation pending** по: формат записи/версионирование, новый commit-ordering + новый
+status-токен `journal_failed`, per-txn full-snapshot payload vs redo-log (deferred → F2-05 perf pass,
+§D2), scope coordinator’а (publish crash-window → B1-02, §D1), compaction cadence (deferred → F2-05).
+Не «accepted» — decided-vs-deferred расписано ниже честно.
+**Принял:** deep-reasoner (F2-04, делегированные полномочия); lead review DONE (19-agent adversarial
+review → 6 correctness fixes applied); owner confirmation pending на пунктах §Открытое.
 **Реализуется в:** F2-04 (`tp_journal` в core: `tp_journal.c`, `tp_journal_io.c`; public header
 `tp_core/tp_journal.h`; internal `packer/src/tp_journal_internal.h`; поля `journal`/`coordinator` в
 `tp_model` + acknowledgement-gate в `tp_txn_apply.c`; coordinator-интерфейс + model↔journal glue в
@@ -196,7 +199,9 @@ transaction is rolled back»): это НЕ OOM (durability, а не память
 в конец enum’а (существующие токены не сдвигаются); `test_status_id` пин добавлен, `-Wswitch`
 держит `tp_status_str`/`tp_status_id` в lockstep.
 
-## §8. Что core-тестировано СЕЙЧАС (fault-suite `test_journal.c`, 15 кейсов)
+## §8. Что core-тестировано СЕЙЧАС (fault-suite `test_journal.c`, 21 кейс)
+
+Базовые 15 кейсов ниже; +6 кейсов fix-pass (C1–C5, по одному на correctness-fix) — см. §Fix pass.
 
 | Возможность | Тест |
 | --- | --- |
@@ -215,6 +220,74 @@ transaction is rolled back»): это НЕ OOM (durability, а не память
 | Coordinator prepare/publish/abort ordering (success/append-fail/prepare-fail) | `test_coordinator_ordering` |
 | No-op coordinator | `test_coordinator_noop` |
 | Реальный on-disk file journal round-trip | `test_file_journal_roundtrip` |
+
+## §Fix pass (lead review remediation) — durability/idempotency correctness
+
+A 19-agent adversarial review of the battery-green F2-04 journal found 6 real correctness bugs in the
+durability/idempotency crux. All are now fixed with a genuine test each (`test_journal.c`), battery
+still green on both presets, goldens byte-identical.
+
+- **C1 — attach migrates already-retained ids.** `tp_model_attach_journal` checkpointed a FRESH
+  journal (empty id-index) and never read `m->idstore`; after attach the idempotency authority is
+  `tp_journal_contains`, so any id committed BEFORE attach was dropped → a re-submit double-applied
+  (§7.2 violation). Fix: on attach, migrate every id in the model's in-memory idstore into the journal
+  index BEFORE the initial checkpoint, so both the live index AND the durable checkpoint id-list carry
+  them (recovery sees them too). Test: `test_attach_migrates_retained_ids`.
+- **C2 — mid-stream corruption must not delete trailing acknowledged records.** Recovery truncated the
+  store to `stop_offset` for BOTH torn-tail and mid-stream-corrupt; for a complete-but-bad record with
+  valid records STILL after it, that physically deleted the trailing acknowledged records. Fix:
+  distinguish torn-tail from mid-stream-corrupt. **How they are told apart:** a corrupt COMPLETE record
+  has a known end `corrupt_end = crc_off + CRC_FIELD`; if `corrupt_end < total_len` there is more data
+  after it → **mid-stream** (`mid_stream_corrupt=true`) → DO NOT truncate, preserve the file, poison the
+  journal (no append can hide behind the corruption); if `corrupt_end == total_len` (or the tail is a
+  short/incomplete record → `TRUNCATED`) it is a tail → truncate is safe. Tests:
+  `test_torn_tail_is_truncated` (tail → truncated, re-append works), `test_midstream_corrupt_preserves_trailing`
+  (mid-stream → up-to-last-good recovered, store length UNCHANGED, journal poisoned).
+- **C3 — truncate-failure during tail cleanup poisons.** The recovery tail-clean `io.truncate(...)`
+  discarded its return; on failure the torn tail persisted and later appends would be acknowledged then
+  lost. Fix: check the return; on failure `tp_journal__poison(j)` (same mechanism as `write_record`).
+  Test: `test_truncate_failure_poisons_recovery`.
+- **C4 — torn partial header is re-initializable, not a brick.** A 1–27-byte sidecar (crash mid initial
+  28-byte header write) was permanently un-appendable (`ensure_header` poisoned; recovery reported
+  `BAD_HEADER` forever). Fix: a sub-header-length store is a torn header, not a foreign file —
+  `ensure_header` resets it to empty then writes a fresh header, and recovery classifies it `TRUNCATED`
+  (stop_offset 0) so the glue resets it. A COMPLETE-but-wrong magic/version header (len ≥ 28) is STILL
+  refused (`BAD_HEADER`, never reset). Test: `test_torn_header_reinitializable`.
+- **C5 — recovered model is DIRTY vs the project file.** Recovery marked the model clean, but its
+  committed state is by definition potentially ahead of the `.ntpacker_project` file → a save-on-dirty
+  shutdown skipped the save. Fix: explicit `tp_model.recovered_unsaved` flag OR-ed into `tp_model_dirty`
+  (and cleared by `tp_model_mark_saved`). Test: `test_recovered_model_is_dirty`.
+- **C6 — 64-bit file offsets.** The file backend sized/seeked with 32-bit `long` `ftell`/`fseek`; on
+  Windows a >2 GB sidecar returned −1 → every append AND recovery failed (a hard correctness cliff).
+  Fix: `_fseeki64`/`_ftelli64` (Windows), `fseeko`/`ftello` + `off_t` under `_FILE_OFFSET_BITS=64`
+  (POSIX), `_chsize_s`/`ftruncate(off_t)` truncate; a `_Static_assert` pins the 64-bit offset width. A
+  real 2 GB file cannot be unit-tested (honest limitation) — verified by offset TYPES/paths + the static
+  assert; the small file round-trip stays green.
+
+**Cleanups:** **Q1** — the journal's retained-id index and the idstore now share ONE `tp_idset`
+primitive (`tp_idset.c`/`tp_idset_internal.h`); byte-behavior identical, logic in one place. **Q2** — the
+id scan stays O(n) (recovery O(n²) over the retained set), matching the idstore's existing trait and
+bounded by compaction; commented, no speculative hash-index added (§D2 defers the perf question).
+
+## §D1 (boundary, documented-not-implemented) — coordinator publish() crash-window → B1-02
+
+`coordinator.publish()` runs AFTER the durable append with no durability of its own: a crash between the
+acknowledged append and `publish()` leaves the txn committed+retained while its tied side-effects (B1
+Extract PNGs) are never published, and a resubmit returns `DUPLICATE_ID` so publish never re-runs. The
+coordinator is a **no-op default until B1 wires Extract**, so this is NOT a live bug now. Decision:
+**do NOT build 2-phase crash-durability in F2-04.** Recovery-time re-drive / publish idempotency is
+**B1-02's responsibility** — the recovery path exposes the retained-id set for B1 to reconcile staged
+side-effects. A comment at the `publish()` site (`tp_txn_apply.c`) points here.
+
+## §D2 (boundary, documented-not-implemented) — full-snapshot payload + compaction cadence → F2-05
+
+Every journaled commit re-serializes the whole project (full snapshot); no compaction driver is wired,
+so the journal grows unbounded once live. **Lead decision: KEEP the full-snapshot payload for v1** — it
+is correct and reuses the golden `tp_project_load_buffer` path (no second mutation/replay path, no
+replay-determinism risk). The growth/perf question (full-snapshot vs storing the already-computed F2-03
+semantic diff, and a compaction-driver cadence) is **deferred to the F2-05 cutover / perf pass**, where
+the journal becomes live and the cost can be MEASURED on a real project. C6 already removes the hard
+2 GB cliff, so this is a perf question, not a correctness one.
 
 ## §Открытое / что должен подтвердить владелец
 

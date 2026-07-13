@@ -6,6 +6,13 @@
  * closes its resources (no fd/buffer leak under LSan).
  */
 
+/* C6: 64-bit file offsets. `_FILE_OFFSET_BITS 64` must precede EVERY include so
+ * off_t / fseeko / ftello are 64-bit even on a 32-bit POSIX host (a >2 GB sidecar
+ * must not be a hard correctness cliff). No-op on Windows (uses the _*i64 CRT calls). */
+#if !defined(_WIN32) && !defined(_FILE_OFFSET_BITS)
+#define _FILE_OFFSET_BITS 64
+#endif
+
 #include "tp_core/tp_journal.h"
 
 #include <stdio.h>
@@ -15,9 +22,17 @@
 #include "tp_journal_internal.h"
 
 #if defined(_WIN32)
-#include <io.h> /* _chsize_s, _fileno */
+#include <io.h> /* _chsize_s, _fileno, _fseeki64, _ftelli64 */
+/* Windows `long` is 32-bit: ftell/fseek cap at 2 GB. Use the 64-bit CRT variants. */
+#define TP_FSEEK64(fp, off, whence) _fseeki64((fp), (off), (whence))
+#define TP_FTELL64(fp) _ftelli64((fp))
+_Static_assert(sizeof(long long) == 8, "journal file offsets must be 64-bit");
 #else
 #include <unistd.h> /* ftruncate, fileno */
+/* fseeko/ftello take/return off_t (64-bit under _FILE_OFFSET_BITS=64 above). */
+#define TP_FSEEK64(fp, off, whence) fseeko((fp), (off), (whence))
+#define TP_FTELL64(fp) ftello((fp))
+_Static_assert(sizeof(off_t) >= 8, "journal file offsets must be 64-bit (define _FILE_OFFSET_BITS=64)");
 #endif
 
 /* ---- in-memory backing store --------------------------------------------- */
@@ -181,7 +196,7 @@ typedef struct {
 
 static int64_t file_write(void *ctx, const uint8_t *data, size_t len) {
     journal_file *f = (journal_file *)ctx;
-    if (fseek(f->fp, 0, SEEK_END) != 0) {
+    if (TP_FSEEK64(f->fp, 0, SEEK_END) != 0) {
         return -1;
     }
     size_t n = fwrite(data, 1, len, f->fp);
@@ -193,11 +208,11 @@ static int64_t file_write(void *ctx, const uint8_t *data, size_t len) {
 
 static int64_t file_length(void *ctx) {
     journal_file *f = (journal_file *)ctx;
-    if (fseek(f->fp, 0, SEEK_END) != 0) {
+    if (TP_FSEEK64(f->fp, 0, SEEK_END) != 0) {
         return -1;
     }
-    long pos = ftell(f->fp);
-    return (pos < 0) ? -1 : (int64_t)pos;
+    int64_t pos = (int64_t)TP_FTELL64(f->fp); /* 64-bit: no 2 GB ftell cap on Windows */
+    return (pos < 0) ? -1 : pos;
 }
 
 static int file_truncate(void *ctx, size_t len) {
@@ -206,20 +221,20 @@ static int file_truncate(void *ctx, size_t len) {
         return -1;
     }
 #if defined(_WIN32)
-    int rc = _chsize_s(_fileno(f->fp), (long long)len);
+    int rc = _chsize_s(_fileno(f->fp), (long long)len); /* long long (64-bit): _chsize_s takes __int64 */
 #else
-    int rc = ftruncate(fileno(f->fp), (long)len);
+    int rc = ftruncate(fileno(f->fp), (off_t)len); /* off_t (64-bit): not (long) */
 #endif
-    (void)fseek(f->fp, 0, SEEK_END);
+    (void)TP_FSEEK64(f->fp, 0, SEEK_END);
     return (rc == 0) ? 0 : -1;
 }
 
 static int file_read_all(void *ctx, uint8_t **out, size_t *out_len) {
     journal_file *f = (journal_file *)ctx;
-    if (fseek(f->fp, 0, SEEK_END) != 0) {
+    if (TP_FSEEK64(f->fp, 0, SEEK_END) != 0) {
         return -1;
     }
-    long sz = ftell(f->fp);
+    int64_t sz = (int64_t)TP_FTELL64(f->fp); /* 64-bit size, no long cap */
     if (sz < 0) {
         return -1;
     }
@@ -228,7 +243,7 @@ static int file_read_all(void *ctx, uint8_t **out, size_t *out_len) {
         *out_len = 0;
         return 0;
     }
-    if (fseek(f->fp, 0, SEEK_SET) != 0) {
+    if (TP_FSEEK64(f->fp, 0, SEEK_SET) != 0) {
         return -1;
     }
     uint8_t *buf = (uint8_t *)malloc((size_t)sz);

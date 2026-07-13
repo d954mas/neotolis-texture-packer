@@ -27,6 +27,8 @@
 #include <string.h>
 
 #include "tp_diff_internal.h" /* F2-03: optional per-op diff capture on commit */
+#include "tp_idset_internal.h" /* F2-04 fix C1: migrate retained ids into the journal on attach */
+#include "tp_journal_internal.h" /* F2-04 fix C3: poison the journal from the recovery glue */
 #include "tp_txn_internal.h"
 
 /* ---- model lifecycle ----------------------------------------------------- */
@@ -87,12 +89,18 @@ bool tp_model_dirty(const tp_model *m) {
     if (!m) {
         return false;
     }
+    /* C5: a crash-recovered model is dirty vs the on-disk project file until it is
+     * explicitly saved, even when its identity happens to match the recovered baseline. */
+    if (m->recovered_unsaved) {
+        return true;
+    }
     return !tp_id128_eq(tp_semantic_identity(m->project), m->saved_identity);
 }
 
 void tp_model_mark_saved(tp_model *m) {
     if (m) {
         m->saved_identity = tp_semantic_identity(m->project); /* re-baseline; revision unchanged */
+        m->recovered_unsaved = false;                         /* C5: the save flushed the recovered state */
     }
 }
 
@@ -408,7 +416,14 @@ tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_tx
         tp_history_push_reserved(m->history, rec);
     }
 
-    /* (iii) Publish tied side-effects now that the transaction is durably acknowledged. */
+    /* (iii) Publish tied side-effects now that the transaction is durably acknowledged.
+     * BOUNDARY (ADR 0013 §D1, B1-02): publish() has no durability of its own -- a crash
+     * BETWEEN the acknowledged append and this call leaves the txn committed+retained
+     * while its side-effects are unpublished, and a resubmit returns DUPLICATE_ID so
+     * publish never re-runs. The coordinator is a no-op until B1 wires Extract, so this
+     * is not a live bug now; recovery-time re-drive / publish idempotency is B1-02's
+     * responsibility (recovery exposes the retained set for B1 to reconcile staged
+     * side-effects). We deliberately do NOT build 2-phase crash-durability here. */
     if (m->coordinator && m->coordinator->publish) {
         m->coordinator->publish(m->coordinator->ctx, req);
     }
@@ -525,6 +540,22 @@ tp_status tp_model_attach_journal(tp_model *m, tp_journal *j, tp_error *err) {
     if (m->journal) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "a journal is already attached");
     }
+    /* C1: migrate ids the model already committed journal-less (recorded only in the
+     * in-memory idstore) into the fresh journal's retained-id index BEFORE the initial
+     * checkpoint. Otherwise the post-attach idempotency authority (tp_journal_contains)
+     * would not know those ids and a legitimate re-submit would double-apply (§7.2). The
+     * seed happens pre-checkpoint so the checkpoint's durable id-list carries them too,
+     * and recovery sees them. (A foreign idstore we cannot enumerate -> no migration.) */
+    const tp_idset *pre = tp_txn_idstore_mem_view(m->idstore);
+    if (pre) {
+        int pre_count = tp_idset_count(pre);
+        for (int i = 0; i < pre_count; i++) {
+            tp_status ms = tp_journal_seed_retained_id(j, tp_idset_at(pre, i));
+            if (ms != TP_STATUS_OK) {
+                return tp_error_set(err, ms, "could not migrate retained ids into the journal (out of memory)");
+            }
+        }
+    }
     /* Initial CHECKPOINT of the current committed state so the journal is self-
      * sufficient for recovery (spec §22.3 checkpoint + journal). On failure the model
      * is NOT attached and the caller still owns j. */
@@ -560,10 +591,20 @@ tp_status tp_model_recover(tp_journal_io io, tp_id128 key, tp_model **out, tp_jo
         tp_journal_destroy(j);
         return rc;
     }
-    /* Clean a torn/corrupt tail so continued appends stay recoverable (never guess
-     * past the last good record). Best-effort. */
-    if (rec.status == TP_JOURNAL_RECOVERY_TRUNCATED || rec.status == TP_JOURNAL_RECOVERY_CORRUPT) {
-        (void)io.truncate(io.ctx, rec.stop_offset);
+    /* Clean a torn/incomplete TAIL so continued appends stay recoverable (never guess
+     * past the last good record). C2: a MID-STREAM corruption (a bad record with valid
+     * records STILL after it) is NOT truncated -- that would physically delete those
+     * trailing acknowledged records. Recover up to the last good record and PRESERVE the
+     * file; tp_journal_recover has already poisoned the journal against appends behind
+     * the corruption. A torn tail, or a single trailing corrupt record, is safe to drop.
+     * C3: if the tail-clean truncate itself fails, poison the journal -- a still-present
+     * bad record must never hide a later acknowledged append. */
+    bool clean_tail = (rec.status == TP_JOURNAL_RECOVERY_TRUNCATED) ||
+                      (rec.status == TP_JOURNAL_RECOVERY_CORRUPT && !rec.mid_stream_corrupt);
+    if (clean_tail) {
+        if (io.truncate(io.ctx, rec.stop_offset) != 0) {
+            tp_journal__poison(j);
+        }
     }
     bool keep_info = (info != NULL);
     if (keep_info) {
@@ -584,8 +625,9 @@ tp_status tp_model_recover(tp_journal_io io, tp_id128 key, tp_model **out, tp_jo
                 ret = tp_error_set(err, TP_STATUS_OOM, "could not wrap the recovered project");
             } else {
                 rm->revision = rec.revision;
-                rm->saved_identity = tp_semantic_identity(p); /* recovered committed state = clean baseline */
-                rm->journal = j;                              /* owns j; its index is already seeded by recover */
+                rm->saved_identity = tp_semantic_identity(p);
+                rm->recovered_unsaved = true; /* C5: recovered committed state is ahead of the project file -> DIRTY */
+                rm->journal = j;              /* owns j; its index is already seeded by recover */
                 j_consumed = true;
                 if (out) {
                     *out = rm;

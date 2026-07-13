@@ -17,7 +17,10 @@
  * READING UNTRUSTED BYTES: tp_journal_recover replays arbitrary/corrupt/short/torn
  * input UB-cleanly -- every field is bounds-checked with size_t math BEFORE it is read,
  * and replay STOPS at the first undecodable record (it never guesses corrupt content).
- * The retained-id set + last committed snapshot are recovered up to the last good record.
+ * The retained-id set + last committed snapshot are recovered up to the last good
+ * record. A benign torn TAIL is safe to truncate away; a mid-stream corruption (a bad
+ * record with valid records STILL after it) is NOT -- truncating would delete those
+ * trailing acknowledged records, so recovery preserves the file and poisons the journal.
  */
 
 #include "tp_core/tp_journal.h"
@@ -25,6 +28,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "tp_idset_internal.h"
 #include "tp_journal_internal.h"
 
 const uint8_t tp_jrn_magic[TP_JRN_MAGIC_LEN] = {'N', 'T', 'P', 'K', 'J', 'R', 'N', 'L'};
@@ -73,10 +77,8 @@ int64_t tp_jrn_get_i64(const uint8_t *p) {
 struct tp_journal {
     tp_journal_io io;  /* owned */
     tp_id128 key;
-    bool poisoned;     /* a failed append could not be rolled back: refuse further appends */
-    char (*ids)[33];   /* retained-id index (32 hex + NUL); mirrors the durable records */
-    int id_count;
-    int id_cap;
+    bool poisoned;     /* a failed append/tail-clean: refuse further appends */
+    tp_idset ids;      /* retained-id index (shared set); mirrors the durable records */
 };
 
 tp_journal *tp_journal_create(tp_journal_io io, tp_id128 key) {
@@ -105,7 +107,7 @@ void tp_journal_destroy(tp_journal *j) {
     if (j->io.destroy) {
         j->io.destroy(j->io.ctx);
     }
-    free(j->ids);
+    tp_idset_dispose(&j->ids);
     free(j);
 }
 
@@ -113,57 +115,27 @@ static tp_status journal_fail(tp_error *err, const char *msg) {
     return tp_error_set(err, TP_STATUS_JOURNAL_FAILED, "%s", msg);
 }
 
-/* Retained-id index: dedup + append (grows). OOM is a hard fault. */
-static bool id_index_contains(const tp_journal *j, const char *id_hex) {
-    for (int i = 0; i < j->id_count; i++) {
-        if (memcmp(j->ids[i], id_hex, TP_JRN_IDLEN) == 0 && j->ids[i][TP_JRN_IDLEN] == '\0') {
-            return true;
-        }
+void tp_journal__poison(tp_journal *j) {
+    if (j) {
+        j->poisoned = true;
     }
-    return false;
 }
 
-static tp_status id_index_reserve(tp_journal *j) {
-    if (j->id_count < j->id_cap) {
-        return TP_STATUS_OK;
+tp_status tp_journal_seed_retained_id(tp_journal *j, const char *id_hex) {
+    if (!j || !id_hex) {
+        return TP_STATUS_INVALID_ARGUMENT;
     }
-    int ncap = (j->id_cap == 0) ? 16 : (j->id_cap * 2);
-    char(*n)[33] = (char(*)[33])realloc(j->ids, (size_t)ncap * sizeof(*n));
-    if (!n) {
-        return TP_STATUS_OOM;
-    }
-    j->ids = n;
-    j->id_cap = ncap;
-    return TP_STATUS_OK;
-}
-
-/* Insert into a slot guaranteed present by a prior reserve (alloc-free). */
-static void id_index_put_reserved(tp_journal *j, const char *id_hex) {
-    memcpy(j->ids[j->id_count], id_hex, TP_JRN_IDLEN);
-    j->ids[j->id_count][TP_JRN_IDLEN] = '\0';
-    j->id_count++;
-}
-
-static tp_status id_index_register(tp_journal *j, const char *id_hex) {
-    if (id_index_contains(j, id_hex)) {
-        return TP_STATUS_OK; /* dedup: a checkpoint id also seen as a txn id */
-    }
-    tp_status rs = id_index_reserve(j);
-    if (rs != TP_STATUS_OK) {
-        return rs;
-    }
-    id_index_put_reserved(j, id_hex);
-    return TP_STATUS_OK;
+    return tp_idset_add(&j->ids, id_hex); /* dedup + grow; OOM -> non-OK, no durable write */
 }
 
 bool tp_journal_contains(const tp_journal *j, const char *id_hex) {
     if (!j || !id_hex) {
         return false;
     }
-    return id_index_contains(j, id_hex);
+    return tp_idset_contains(&j->ids, id_hex);
 }
 
-int tp_journal_id_count(const tp_journal *j) { return j ? j->id_count : 0; }
+int tp_journal_id_count(const tp_journal *j) { return j ? tp_idset_count(&j->ids) : 0; }
 
 /* ---- durable writing ----------------------------------------------------- */
 
@@ -177,8 +149,15 @@ static tp_status ensure_header(tp_journal *j, tp_error *err) {
         return TP_STATUS_OK;
     }
     if (len != 0) {
-        j->poisoned = true; /* a torn partial header: never write a second one over it */
-        return journal_fail(err, "journal header is truncated");
+        /* C4: a sub-header-length store is a torn/incomplete header write (a crash
+         * during the initial 28-byte header), never a foreign file. Reset it to empty
+         * and write a fresh header so journaling can re-initialize -- a torn header must
+         * not be a permanent brick. (A COMPLETE but foreign header, len >= 28, is caught
+         * on the recovery path and never reaches an append.) */
+        if (j->io.truncate(j->io.ctx, 0) != 0) {
+            j->poisoned = true; /* could not reset the torn header: refuse appends */
+            return journal_fail(err, "could not reset a torn journal header");
+        }
     }
     uint8_t hdr[TP_JRN_HEADER_LEN];
     memcpy(hdr, tp_jrn_magic, TP_JRN_MAGIC_LEN);
@@ -239,7 +218,8 @@ tp_status tp_journal_init_checkpoint(tp_journal *j, const uint8_t *snapshot, siz
     if (!j) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "null journal");
     }
-    size_t ids_bytes = (size_t)j->id_count * (size_t)TP_JRN_IDLEN;
+    int id_count = tp_idset_count(&j->ids);
+    size_t ids_bytes = (size_t)id_count * (size_t)TP_JRN_IDLEN;
     size_t payload_len = (size_t)TP_JRN_CKPT_FIXED + ids_bytes + len;
     uint8_t *payload = (uint8_t *)malloc(payload_len);
     if (!payload) {
@@ -249,10 +229,10 @@ tp_status tp_journal_init_checkpoint(tp_journal *j, const uint8_t *snapshot, siz
     payload[off++] = (uint8_t)TP_JRN_REC_CKPT;
     tp_jrn_put_i64(payload + off, revision);
     off += 8;
-    tp_jrn_put_u32(payload + off, (uint32_t)j->id_count);
+    tp_jrn_put_u32(payload + off, (uint32_t)id_count);
     off += 4;
-    for (int i = 0; i < j->id_count; i++) {
-        memcpy(payload + off, j->ids[i], TP_JRN_IDLEN);
+    for (int i = 0; i < id_count; i++) {
+        memcpy(payload + off, tp_idset_at(&j->ids, i), TP_JRN_IDLEN);
         off += TP_JRN_IDLEN;
     }
     if (len) {
@@ -273,10 +253,10 @@ tp_status tp_journal_append_txn(tp_journal *j, const char *id_hex, int64_t revis
     }
     /* (1) reserve the retained-id slot BEFORE the durable write so step (3) is
      * allocation-free. An OOM here writes nothing (id stays retryable). */
-    if (id_index_contains(j, id_hex)) {
+    if (tp_idset_contains(&j->ids, id_hex)) {
         return TP_STATUS_OK; /* already retained: an idempotent no-op (never double-appends) */
     }
-    tp_status rs = id_index_reserve(j);
+    tp_status rs = tp_idset_reserve(&j->ids);
     if (rs != TP_STATUS_OK) {
         return tp_error_set(err, rs, "journal retained-id reserve failed (out of memory)");
     }
@@ -301,7 +281,7 @@ tp_status tp_journal_append_txn(tp_journal *j, const char *id_hex, int64_t revis
         return st; /* nothing durable; id NOT registered -> retryable */
     }
     /* (3) infallibly register the id in the reserved slot. */
-    id_index_put_reserved(j, id_hex);
+    tp_idset_put_reserved(&j->ids, id_hex);
     return TP_STATUS_OK;
 }
 
@@ -336,7 +316,7 @@ static tp_status decode_payload(tp_journal *j, const uint8_t *pl, size_t plen, s
         *rev = tp_jrn_get_i64(pl + 1 + TP_JRN_IDLEN);
         *snap_off = (size_t)TP_JRN_TXN_FIXED;
         *snap_len = plen - (size_t)TP_JRN_TXN_FIXED;
-        return id_index_register(j, idhex);
+        return tp_idset_add(&j->ids, idhex);
     }
     if (type == (uint8_t)TP_JRN_REC_CKPT) {
         if (plen < (size_t)TP_JRN_CKPT_FIXED) {
@@ -349,12 +329,12 @@ static tp_status decode_payload(tp_journal *j, const uint8_t *pl, size_t plen, s
             return TP_STATUS_OUT_OF_BOUNDS; /* overflow-safe: id list would exceed the payload */
         }
         size_t ids_bytes = (size_t)idc * (size_t)TP_JRN_IDLEN;
-        j->id_count = 0; /* a checkpoint RESETS the retained set to its captured id list */
+        tp_idset_reset(&j->ids); /* a checkpoint RESETS the retained set to its captured id list */
         for (uint32_t i = 0; i < idc; i++) {
             char idhex[33];
             memcpy(idhex, pl + (size_t)TP_JRN_CKPT_FIXED + (size_t)i * (size_t)TP_JRN_IDLEN, TP_JRN_IDLEN);
             idhex[TP_JRN_IDLEN] = '\0';
-            tp_status r = id_index_register(j, idhex);
+            tp_status r = tp_idset_add(&j->ids, idhex);
             if (r != TP_STATUS_OK) {
                 return r;
             }
@@ -377,15 +357,26 @@ tp_status tp_journal_recover(tp_journal *j, tp_journal_recovery *out, tp_error *
         return journal_fail(err, "journal read failed");
     }
     out->bytes_total = len;
-    j->id_count = 0; /* recovery rebuilds the retained index from scratch */
+    tp_idset_reset(&j->ids); /* recovery rebuilds the retained index from scratch */
 
     if (len == 0) {
         out->status = TP_JOURNAL_RECOVERY_EMPTY;
         free(buf);
         return TP_STATUS_OK;
     }
-    if (len < (size_t)TP_JRN_HEADER_LEN || memcmp(buf, tp_jrn_magic, TP_JRN_MAGIC_LEN) != 0 ||
+    if (len < (size_t)TP_JRN_HEADER_LEN) {
+        /* C4: a sub-header-length store cannot hold a complete 28-byte header -- it is a
+         * torn/incomplete header write, not a foreign file, and carries no committed
+         * record. Classify it as a truncatable tail so the glue resets it to empty
+         * (re-initializable, not a permanent BAD_HEADER brick). */
+        out->status = TP_JOURNAL_RECOVERY_TRUNCATED;
+        out->stop_offset = 0;
+        free(buf);
+        return TP_STATUS_OK;
+    }
+    if (memcmp(buf, tp_jrn_magic, TP_JRN_MAGIC_LEN) != 0 ||
         tp_jrn_get_u32(buf + TP_JRN_MAGIC_LEN) != (uint32_t)TP_JOURNAL_FORMAT_VERSION) {
+        /* A COMPLETE but foreign/incompatible header: refuse, and do NOT reset it. */
         out->status = TP_JOURNAL_RECOVERY_BAD_HEADER;
         free(buf);
         return TP_STATUS_OK;
@@ -401,6 +392,7 @@ tp_status tp_journal_recover(tp_journal *j, tp_journal_recovery *out, tp_error *
     int64_t last_rev = 0;
     bool have_snap = false;
     tp_journal_recovery_status final = TP_JOURNAL_RECOVERY_OK;
+    size_t corrupt_end = 0; /* byte just past a corrupt COMPLETE record (C2 tail-vs-mid check) */
     tp_status hard = TP_STATUS_OK;
 
     while (off < len) {
@@ -422,7 +414,8 @@ tp_status tp_journal_recover(tp_journal *j, tp_journal_recovery *out, tp_error *
         uint32_t want = tp_jrn_get_u32(buf + crc_off);
         uint32_t got = tp_jrn_crc32(0, buf + off, (size_t)TP_JRN_LEN_FIELD + (size_t)plen);
         if (got != want) {
-            final = TP_JOURNAL_RECOVERY_CORRUPT; /* a flipped byte / tampering */
+            final = TP_JOURNAL_RECOVERY_CORRUPT;              /* a flipped byte / tampering */
+            corrupt_end = crc_off + (size_t)TP_JRN_CRC_FIELD; /* the record is complete: end is known */
             break;
         }
         size_t snap_off = 0, snap_len = 0;
@@ -433,7 +426,8 @@ tp_status tp_journal_recover(tp_journal *j, tp_journal_recovery *out, tp_error *
             break;
         }
         if (ds != TP_STATUS_OK) {
-            final = TP_JOURNAL_RECOVERY_CORRUPT; /* malformed payload => corruption boundary */
+            final = TP_JOURNAL_RECOVERY_CORRUPT;              /* malformed payload => corruption boundary */
+            corrupt_end = crc_off + (size_t)TP_JRN_CRC_FIELD; /* crc validated: the record is complete */
             break;
         }
         last_snap_off = after_len + snap_off;
@@ -455,6 +449,16 @@ tp_status tp_journal_recover(tp_journal *j, tp_journal_recovery *out, tp_error *
         out->status = (out->records_recovered > 0) ? TP_JOURNAL_RECOVERY_OK : TP_JOURNAL_RECOVERY_EMPTY;
     } else {
         out->status = final;
+    }
+
+    /* C2: a MID-STREAM corruption -- a complete-but-bad record with MORE bytes after it
+     * -- must never be truncated away (that deletes the trailing acknowledged records).
+     * Flag it so the glue preserves the file, and poison the journal so a continued
+     * append cannot be hidden behind the bad record either. A torn tail, or a single
+     * trailing corrupt record (corrupt_end == len), stays safely truncatable. */
+    if (final == TP_JOURNAL_RECOVERY_CORRUPT && corrupt_end < len) {
+        out->mid_stream_corrupt = true;
+        j->poisoned = true;
     }
 
     if (have_snap && last_snap_len > 0) {

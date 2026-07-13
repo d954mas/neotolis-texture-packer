@@ -43,6 +43,9 @@ add_library(tp_core STATIC
     # JSON contract (decode/lower/encode; cJSON stays a PRIVATE dep in the .c files).
     # Promoted from the accepted C0-02 spike. CORE-TESTED groundwork -- the CLI/GUI
     # frontend cutover is F2-05 (this does not route the shipping mutators).
+    # F2-04 fix: the 32-hex idempotency id-set shared by the idstore + the journal's
+    # retained-id index (one place for the membership + growth logic).
+    src/tp_idset.c
     src/tp_project_clone.c src/tp_semantic.c src/tp_txn_idset.c src/tp_txn_apply.c
     # P-01 (plan §17): arena-backed alternative to the malloc project deep-clone --
     # a memcpy-bound clone off one tp_arena, byte-identical to tp_project_clone,

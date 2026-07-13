@@ -84,6 +84,9 @@ typedef struct tp_model {
     tp_project *project;      /* the authoritative live model (owned) */
     int64_t revision;         /* canonical monotonic counter; runtime, not persisted */
     tp_id128 saved_identity;  /* semantic identity of the saved baseline (dirty anchor) */
+    bool recovered_unsaved;   /* F2-04 fix C5: a crash-recovered model whose committed state is
+                               * ahead of the on-disk project file -> DIRTY until an explicit Save
+                               * (tp_model_mark_saved) re-baselines it, regardless of identity. */
     tp_txn_idstore *idstore;  /* idempotency retention (owned unless borrowed) */
     bool owns_idstore;
     struct tp_history *history; /* F2-03 undo/redo (NULL unless enabled); owned. When

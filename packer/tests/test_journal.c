@@ -133,6 +133,21 @@ static tp_journal_io io_from_bytes(const uint8_t *bytes, size_t len) {
     return io;
 }
 
+/* Byte offset of record #idx (0-based, after the 28-byte header) in a journal store,
+ * or SIZE_MAX if the walk runs past the end. Lets a test corrupt a chosen mid-stream
+ * record precisely (the length-prefix framing makes the walk trivial). */
+static size_t record_offset(const uint8_t *buf, size_t len, int idx) {
+    size_t off = (size_t)TP_JRN_HEADER_LEN;
+    for (int i = 0; i < idx; i++) {
+        if (off + (size_t)TP_JRN_LEN_FIELD > len) {
+            return SIZE_MAX;
+        }
+        uint32_t plen = tp_jrn_get_u32(buf + off);
+        off += (size_t)TP_JRN_LEN_FIELD + (size_t)plen + (size_t)TP_JRN_CRC_FIELD;
+    }
+    return off;
+}
+
 /* ---- byte-identity: the journal is a sidecar ----------------------------- */
 
 void test_journal_is_sidecar_byte_identical(void) {
@@ -660,6 +675,247 @@ void test_file_journal_roundtrip(void) {
     remove(path);
 }
 
+/* ==== F2-04 FIX PASS: one genuine case per correctness fix (C1-C5) ========= */
+
+/* C1: a journal attached AFTER journal-less commits must inherit the model's already-
+ * retained ids, so a re-submit de-duplicates instead of double-applying (§7.2). */
+void test_attach_migrates_retained_ids(void) {
+    tp_id128 key = key_of(0x6A);
+    tp_project *p = base_project();
+    tp_model *m = tp_model_wrap(p);
+    TEST_ASSERT_NOT_NULL(m);
+    /* Commit journal-LESS: the id lands only in the in-memory idstore. */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "1a000000000000000000000000000001", 0, "one"));
+
+    /* Attach a journal AFTER the commit. C1: the pre-attach id migrates into the
+     * journal's retained-id index (else a re-submit double-applies). */
+    tp_journal_io io = tp_journal_io_memory();
+    TEST_ASSERT_NOT_NULL(io.ctx);
+    tp_journal *j = tp_journal_create(io, key);
+    TEST_ASSERT_NOT_NULL(j);
+    tp_error err;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_attach_journal(m, j, &err));
+    TEST_ASSERT_TRUE(tp_journal_contains(m->journal, "1a000000000000000000000000000001"));
+
+    /* Re-submitting the pre-attach id now rejects as a duplicate (model unchanged). */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_DUPLICATE_ID,
+                          commit_rename(m, "1a000000000000000000000000000001", tp_model_revision(m), "one-again"));
+
+    /* Recovery sees the migrated id too (the initial checkpoint carried it durably). */
+    size_t blen = 0;
+    uint8_t *bytes = snapshot_io(io, &blen);
+    tp_model_destroy(m);
+    tp_journal_io io2 = io_from_bytes(bytes, blen);
+    free(bytes);
+    tp_model *m2 = NULL;
+    tp_journal_recovery info;
+    memset(&info, 0, sizeof info);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_recover(io2, key, &m2, &info, &err));
+    TEST_ASSERT_NOT_NULL(m2);
+    TEST_ASSERT_TRUE(tp_journal_contains(m2->journal, "1a000000000000000000000000000001"));
+    tp_journal_recovery_free(&info);
+    tp_model_destroy(m2);
+}
+
+/* C2 (torn tail): an incomplete final record IS truncated back to the last good
+ * record, and continued appends work (the journal stays healthy). */
+void test_torn_tail_is_truncated(void) {
+    tp_id128 key = key_of(0x6D);
+    tp_journal_io io;
+    tp_model *m = model_with_journal(key, &io);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "1d000000000000000000000000000001", 0, "one"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "1d000000000000000000000000000002", 1, "two"));
+    size_t full_len = 0;
+    uint8_t *full = snapshot_io(io, &full_len);
+    tp_model_destroy(m);
+
+    /* Tear 3 bytes off the tail -> the last record is incomplete (TRUNCATED). */
+    tp_journal_io io2 = io_from_bytes(full, full_len - 3);
+    tp_model *m2 = NULL;
+    tp_journal_recovery info;
+    memset(&info, 0, sizeof info);
+    tp_error err;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_recover(io2, key, &m2, &info, &err));
+    TEST_ASSERT_EQUAL_INT(TP_JOURNAL_RECOVERY_TRUNCATED, info.status);
+    TEST_ASSERT_FALSE(info.mid_stream_corrupt);
+    TEST_ASSERT_NOT_NULL(m2);
+
+    /* The torn tail IS truncated away: the store now ends at the last good record. */
+    size_t after_len = 0;
+    uint8_t *after = snapshot_io(io2, &after_len);
+    TEST_ASSERT_EQUAL_INT64((int64_t)info.stop_offset, (int64_t)after_len);
+    free(after);
+
+    /* Re-append the unacknowledged txn -> succeeds (journal not poisoned), no dup. */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          commit_rename(m2, "1d000000000000000000000000000002", tp_model_revision(m2), "two"));
+    TEST_ASSERT_TRUE(tp_journal_contains(m2->journal, "1d000000000000000000000000000002"));
+
+    free(full);
+    tp_journal_recovery_free(&info);
+    tp_model_destroy(m2);
+}
+
+/* C2 (mid-stream): a bad-CRC record with a valid record STILL after it must NOT be
+ * truncated -- that would delete the trailing acknowledged record. Recover up to the
+ * last good record, PRESERVE the file, and poison the journal against appends behind
+ * the corruption. This is the crux fix: torn-tail (truncate) vs mid-stream (preserve). */
+void test_midstream_corrupt_preserves_trailing(void) {
+    tp_id128 key = key_of(0x6E);
+    tp_journal_io io;
+    tp_model *m = model_with_journal(key, &io);
+    /* Store layout: header | checkpoint(#0) | txn01(#1) | txn02(#2). */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "1e000000000000000000000000000001", 0, "one"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "1e000000000000000000000000000002", 1, "two"));
+    size_t full_len = 0;
+    uint8_t *full = snapshot_io(io, &full_len);
+    tp_model_destroy(m);
+
+    /* Corrupt a byte inside txn01 (record #1) -> mid-stream; txn02 (#2) stays intact. */
+    size_t t1 = record_offset(full, full_len, 1);
+    TEST_ASSERT_TRUE(t1 != SIZE_MAX && t1 < full_len);
+    size_t at = t1 + (size_t)TP_JRN_LEN_FIELD + 1; /* a payload byte of txn01 */
+    tp_journal_io io2 = io_from_bytes(full, full_len);
+    tp_journal_io_memory__poke(io2, at, (uint8_t)(full[at] ^ 0xFFu));
+
+    tp_model *m2 = NULL;
+    tp_journal_recovery info;
+    memset(&info, 0, sizeof info);
+    tp_error err;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_recover(io2, key, &m2, &info, &err));
+    /* Reported as CORRUPT + mid-stream; up-to-last-good recovered (the checkpoint, rev 0). */
+    TEST_ASSERT_EQUAL_INT(TP_JOURNAL_RECOVERY_CORRUPT, info.status);
+    TEST_ASSERT_TRUE(info.mid_stream_corrupt);
+    TEST_ASSERT_NOT_NULL(m2);
+    TEST_ASSERT_EQUAL_INT64(0, tp_model_revision(m2));
+
+    /* The trailing acknowledged record was NOT deleted: the store length is unchanged. */
+    size_t after_len = 0;
+    uint8_t *after = snapshot_io(io2, &after_len);
+    TEST_ASSERT_EQUAL_INT64((int64_t)full_len, (int64_t)after_len);
+    free(after);
+
+    /* The recovered journal refuses appends behind the corruption (poisoned). */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED,
+                          commit_rename(m2, "1e000000000000000000000000000003", tp_model_revision(m2), "three"));
+
+    free(full);
+    tp_journal_recovery_free(&info);
+    tp_model_destroy(m2);
+}
+
+/* C3: if the recovery tail-clean truncate itself fails, the journal is poisoned -- a
+ * still-present torn record must never hide a later acknowledged append. */
+void test_truncate_failure_poisons_recovery(void) {
+    tp_id128 key = key_of(0x6F);
+    tp_journal_io io;
+    tp_model *m = model_with_journal(key, &io);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "1f000000000000000000000000000001", 0, "one"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "1f000000000000000000000000000002", 1, "two"));
+    size_t full_len = 0;
+    uint8_t *full = snapshot_io(io, &full_len);
+    tp_model_destroy(m);
+
+    /* Torn tail + the recovery tail-clean truncate is injected to FAIL. */
+    tp_journal_io io2 = io_from_bytes(full, full_len - 3);
+    tp_journal_io_memory__fail_next_truncate(io2);
+    tp_model *m2 = NULL;
+    tp_journal_recovery info;
+    memset(&info, 0, sizeof info);
+    tp_error err;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_recover(io2, key, &m2, &info, &err));
+    TEST_ASSERT_EQUAL_INT(TP_JOURNAL_RECOVERY_TRUNCATED, info.status);
+    TEST_ASSERT_NOT_NULL(m2);
+
+    /* The torn tail could not be cleaned -> the recovered journal is poisoned. */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED,
+                          commit_rename(m2, "1f000000000000000000000000000003", tp_model_revision(m2), "three"));
+
+    free(full);
+    tp_journal_recovery_free(&info);
+    tp_model_destroy(m2);
+}
+
+/* C4: a torn PARTIAL header (crash mid initial 28-byte write) is re-initializable, not
+ * a permanent brick -- while a COMPLETE but foreign header is still refused. */
+void test_torn_header_reinitializable(void) {
+    tp_id128 key = key_of(0x70);
+    tp_error err;
+    /* A crash during the initial header write leaves a sub-header (10-byte) partial. */
+    uint8_t junk[10] = {'N', 'T', 'P', 'K', 0x01, 0x02, 0x03, 0x04, 0x05, 0x06};
+    tp_journal_io io = io_from_bytes(junk, sizeof junk);
+    tp_journal *j = tp_journal_create(io, key);
+    TEST_ASSERT_NOT_NULL(j);
+
+    /* ensure_header resets the torn partial header + writes a fresh one -> append works. */
+    const uint8_t snap[] = {'h', 'i'};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_journal_append_txn(j, "20000000000000000000000000000001", 1, snap, sizeof snap, &err));
+    TEST_ASSERT_TRUE(tp_journal_contains(j, "20000000000000000000000000000001"));
+
+    /* The re-initialized store recovers cleanly. */
+    size_t blen = 0;
+    uint8_t *bytes = snapshot_io(io, &blen);
+    tp_journal_destroy(j);
+    tp_journal_io io2 = io_from_bytes(bytes, blen);
+    free(bytes);
+    tp_journal *j2 = tp_journal_create(io2, key);
+    TEST_ASSERT_NOT_NULL(j2);
+    tp_journal_recovery rec;
+    memset(&rec, 0, sizeof rec);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_recover(j2, &rec, &err));
+    TEST_ASSERT_EQUAL_INT(TP_JOURNAL_RECOVERY_OK, rec.status);
+    TEST_ASSERT_TRUE(tp_journal_contains(j2, "20000000000000000000000000000001"));
+    tp_journal_recovery_free(&rec);
+    tp_journal_destroy(j2);
+
+    /* Preserve the real protection: a COMPLETE but foreign header (wrong magic) is
+     * REFUSED (BAD_HEADER), never reset. */
+    uint8_t foreign[TP_JRN_HEADER_LEN];
+    memset(foreign, 0, sizeof foreign); /* all-zero magic = not "NTPKJRNL" */
+    tp_jrn_put_u32(foreign + TP_JRN_MAGIC_LEN, (uint32_t)TP_JOURNAL_FORMAT_VERSION);
+    memcpy(foreign + TP_JRN_KEY_OFF, key.bytes, 16);
+    tp_journal_io io3 = io_from_bytes(foreign, sizeof foreign);
+    tp_journal *j3 = tp_journal_create(io3, key);
+    TEST_ASSERT_NOT_NULL(j3);
+    tp_journal_recovery rec3;
+    memset(&rec3, 0, sizeof rec3);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_recover(j3, &rec3, &err));
+    TEST_ASSERT_EQUAL_INT(TP_JOURNAL_RECOVERY_BAD_HEADER, rec3.status);
+    tp_journal_recovery_free(&rec3);
+    tp_journal_destroy(j3);
+}
+
+/* C5: a crash-recovered model is ahead of the on-disk project file -> it must report
+ * dirty until an explicit Save re-baselines it (else save-on-dirty-shutdown loses it). */
+void test_recovered_model_is_dirty(void) {
+    tp_id128 key = key_of(0x71);
+    tp_journal_io io;
+    tp_model *m = model_with_journal(key, &io);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "21000000000000000000000000000001", 0, "one"));
+    size_t blen = 0;
+    uint8_t *bytes = snapshot_io(io, &blen);
+    tp_model_destroy(m);
+
+    tp_journal_io io2 = io_from_bytes(bytes, blen);
+    free(bytes);
+    tp_model *m2 = NULL;
+    tp_journal_recovery info;
+    memset(&info, 0, sizeof info);
+    tp_error err;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_recover(io2, key, &m2, &info, &err));
+    TEST_ASSERT_NOT_NULL(m2);
+
+    /* Recovered committed state is ahead of any on-disk project file -> DIRTY. */
+    TEST_ASSERT_TRUE(tp_model_dirty(m2));
+    /* An explicit Save re-baselines it clean. */
+    tp_model_mark_saved(m2);
+    TEST_ASSERT_FALSE(tp_model_dirty(m2));
+
+    tp_journal_recovery_free(&info);
+    tp_model_destroy(m2);
+}
+
 int main(int argc, char **argv) {
     if (argc > 1) {
         g_dir = argv[1];
@@ -680,5 +936,12 @@ int main(int argc, char **argv) {
     RUN_TEST(test_coordinator_ordering);
     RUN_TEST(test_coordinator_noop);
     RUN_TEST(test_file_journal_roundtrip);
+    /* F2-04 fix pass */
+    RUN_TEST(test_attach_migrates_retained_ids);
+    RUN_TEST(test_torn_tail_is_truncated);
+    RUN_TEST(test_midstream_corrupt_preserves_trailing);
+    RUN_TEST(test_truncate_failure_poisons_recovery);
+    RUN_TEST(test_torn_header_reinitializable);
+    RUN_TEST(test_recovered_model_is_dirty);
     return UNITY_END();
 }

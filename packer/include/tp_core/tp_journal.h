@@ -132,6 +132,11 @@ typedef struct tp_journal_recovery {
     tp_journal_recovery_status status;
     size_t bytes_total;    /* total bytes in the backing store */
     size_t stop_offset;    /* byte offset where decoding stopped (end of last good record) */
+    bool mid_stream_corrupt; /* CORRUPT with a decodable/complete record STILL PRESENT after the
+                              * bad one: the corruption is mid-log, NOT a tail. The tail-cleanup
+                              * truncation is UNSAFE here (it would delete the trailing acknowledged
+                              * records); recovery preserves the file and poisons the journal. A
+                              * torn tail or a single trailing corrupt record leaves this false. */
     int records_recovered; /* count of good records applied (checkpoint + txn) */
     int64_t revision;      /* revision of the recovered committed state (0 if none) */
     char *snapshot;        /* owned: recovered project bytes of the LAST good record, NUL-terminated
