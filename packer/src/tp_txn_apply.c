@@ -69,6 +69,7 @@ void tp_model_destroy(tp_model *m) {
         return;
     }
     tp_history_destroy(m->history); /* F2-03: NULL-safe when history was never enabled */
+    tp_journal_destroy(m->journal); /* F2-04: NULL-safe when no journal was attached */
     tp_project_destroy(m->project);
     if (m->idstore) {
         if (m->owns_idstore && m->idstore->destroy) {
@@ -344,16 +345,55 @@ tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_tx
         }
     }
 
-    /* Record the id LAST among the fallible steps -- the invariant "id recorded => commit
-     * cannot fail": everything after this point (swap + revision++ + push) is
-     * allocation-free. A record OOM discards the clone with the live model byte-unchanged. */
-    if (m->idstore && m->idstore->record) {
-        tp_status rst = m->idstore->record(m->idstore->ctx, req->id_hex, err);
-        if (rst != TP_STATUS_OK) {
-            tp_txn__commit_reject(out, clone, rec, NULL, m->revision, -1, rst, "",
-                                  "could not record the transaction id (out of memory)");
-            return rst;
+    /* The commit ACKNOWLEDGEMENT gate (spec §7.1): validate/stage -> apply -> APPEND ->
+     * publish. The LAST fallible step before the allocation-free swap is either the
+     * durable journal append (journal-backed) or the in-memory id record (journal-less,
+     * EXACTLY the F2-02/03 path). Everything after a successful gate -- swap + revision++
+     * + diff push + side-effect publish -- is allocation-free, so "gate passed => commit
+     * cannot fail" holds. Whichever gate is used registers the transaction id ONLY on
+     * success, so a rolled-back txn never poisons the id into a permanent DUPLICATE_ID. */
+    /* (i) Coordinator prepare -- stage tied side-effects (B1 Extract) BEFORE the gate,
+     * once the ops have applied to the clone. A prepare fault rejects with no side-
+     * effects staged (no abort needed). */
+    if (m->coordinator && m->coordinator->prepare) {
+        tp_status ps = m->coordinator->prepare(m->coordinator->ctx, req, err);
+        if (ps != TP_STATUS_OK) {
+            tp_txn__commit_reject(out, clone, rec, NULL, m->revision, -1, ps, "", "side-effect prepare failed");
+            return ps;
         }
+    }
+
+    /* (ii) The gate itself: journal-backed durably appends the POST-apply committed
+     * snapshot (so recovery restores exactly this revision WITHOUT re-running apply);
+     * journal-less records the id in the in-memory idstore (EXACTLY the F2-02/03 path).
+     * Either way the transaction id is registered ONLY on success, so a rolled-back txn
+     * never poisons the id into a permanent DUPLICATE_ID. */
+    tp_status gate = TP_STATUS_OK;
+    const char *gate_msg = "";
+    if (m->journal) {
+        char *snap = NULL;
+        size_t snap_len = 0;
+        gate = tp_project_save_buffer(clone, &snap, &snap_len, err);
+        if (gate == TP_STATUS_OK) {
+            gate = tp_journal_append_txn(m->journal, req->id_hex, m->revision + 1, (const uint8_t *)snap, snap_len,
+                                         err);
+            gate_msg = "recovery journal append failed (transaction rolled back)";
+        } else {
+            gate_msg = "could not serialize the committed state for the journal";
+        }
+        free(snap);
+    } else if (m->idstore && m->idstore->record) {
+        gate = m->idstore->record(m->idstore->ctx, req->id_hex, err);
+        gate_msg = "could not record the transaction id (out of memory)";
+    }
+    if (gate != TP_STATUS_OK) {
+        /* Exact rollback: discard clone, live model byte-unchanged, no acknowledgement,
+         * abort tied side-effects, txn retryable. */
+        if (m->coordinator && m->coordinator->abort) {
+            m->coordinator->abort(m->coordinator->ctx, req);
+        }
+        tp_txn__commit_reject(out, clone, rec, NULL, m->revision, -1, gate, "", gate_msg);
+        return gate;
     }
 
     /* The commit: allocation-free pointer swap + one revision bump. */
@@ -366,6 +406,11 @@ tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_tx
     if (rec) {
         rec->revision = m->revision;
         tp_history_push_reserved(m->history, rec);
+    }
+
+    /* (iii) Publish tied side-effects now that the transaction is durably acknowledged. */
+    if (m->coordinator && m->coordinator->publish) {
+        m->coordinator->publish(m->coordinator->ctx, req);
     }
 
     if (out) {
@@ -416,8 +461,12 @@ tp_status tp_txn__preflight(tp_model *m, const char *id_hex, int64_t expected_re
         return tp_error_set(err, TP_STATUS_ID_MALFORMED, "transaction id must be 32 lowercase hex");
     }
 
-    /* (b) idempotency: a re-submitted committed id rejects (model unchanged). */
-    if (m->idstore && m->idstore->contains && m->idstore->contains(m->idstore->ctx, id_hex)) {
+    /* (b) idempotency: a re-submitted committed id rejects (model unchanged). When a
+     * journal is attached its retained-id index is the idempotency authority (§7.2:
+     * recoverable across restart); otherwise the in-memory idstore answers (F2-02). */
+    bool dup = m->journal ? tp_journal_contains(m->journal, id_hex)
+                          : (m->idstore && m->idstore->contains && m->idstore->contains(m->idstore->ctx, id_hex));
+    if (dup) {
         if (out) {
             out->revision = m->revision;
         }
@@ -450,4 +499,109 @@ tp_status tp_model_apply(tp_model *m, const tp_txn_request *req, tp_txn_result *
     }
     /* Clone + apply atomically. */
     return tp_txn__commit_validated(m, req, out, err);
+}
+
+/* ---- F2-04 side-effect coordinator + model <-> journal glue -------------- */
+
+tp_side_effect_coordinator tp_side_effect_coordinator_noop(void) {
+    tp_side_effect_coordinator c;
+    c.ctx = NULL;
+    c.prepare = NULL;
+    c.publish = NULL;
+    c.abort = NULL;
+    return c;
+}
+
+void tp_model_set_coordinator(tp_model *m, tp_side_effect_coordinator *c) {
+    if (m) {
+        m->coordinator = c;
+    }
+}
+
+tp_status tp_model_attach_journal(tp_model *m, tp_journal *j, tp_error *err) {
+    if (!m || !j) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "null model or journal");
+    }
+    if (m->journal) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "a journal is already attached");
+    }
+    /* Initial CHECKPOINT of the current committed state so the journal is self-
+     * sufficient for recovery (spec §22.3 checkpoint + journal). On failure the model
+     * is NOT attached and the caller still owns j. */
+    char *snap = NULL;
+    size_t snap_len = 0;
+    tp_status ss = tp_project_save_buffer(m->project, &snap, &snap_len, err);
+    if (ss != TP_STATUS_OK) {
+        return ss;
+    }
+    tp_status cs = tp_journal_init_checkpoint(j, (const uint8_t *)snap, snap_len, m->revision, err);
+    free(snap);
+    if (cs != TP_STATUS_OK) {
+        return cs;
+    }
+    m->journal = j; /* ownership transferred */
+    return TP_STATUS_OK;
+}
+
+tp_status tp_model_recover(tp_journal_io io, tp_id128 key, tp_model **out, tp_journal_recovery *info, tp_error *err) {
+    if (out) {
+        *out = NULL;
+    }
+    if (info) {
+        memset(info, 0, sizeof *info); /* always in a freeable state, even on an early hard fault */
+    }
+    tp_journal *j = tp_journal_create(io, key);
+    if (!j) {
+        return tp_error_set(err, TP_STATUS_OOM, "could not create journal for recovery");
+    }
+    tp_journal_recovery rec;
+    tp_status rc = tp_journal_recover(j, &rec, err);
+    if (rc != TP_STATUS_OK) {
+        tp_journal_destroy(j);
+        return rc;
+    }
+    /* Clean a torn/corrupt tail so continued appends stay recoverable (never guess
+     * past the last good record). Best-effort. */
+    if (rec.status == TP_JOURNAL_RECOVERY_TRUNCATED || rec.status == TP_JOURNAL_RECOVERY_CORRUPT) {
+        (void)io.truncate(io.ctx, rec.stop_offset);
+    }
+    bool keep_info = (info != NULL);
+    if (keep_info) {
+        *info = rec; /* transfer the snapshot ownership to the caller */
+    }
+
+    tp_status ret = TP_STATUS_OK;
+    bool j_consumed = false; /* set once a model takes ownership of j */
+    if (rec.records_recovered > 0 && rec.snapshot && rec.snapshot_len > 0) {
+        tp_project *p = NULL;
+        tp_status ls = tp_project_load_buffer(rec.snapshot, rec.snapshot_len, &p, err);
+        if (ls != TP_STATUS_OK) {
+            ret = ls; /* durable snapshot did not load (real corruption despite a valid crc) */
+        } else {
+            tp_model *rm = tp_model_wrap(p);
+            if (!rm) {
+                tp_project_destroy(p);
+                ret = tp_error_set(err, TP_STATUS_OOM, "could not wrap the recovered project");
+            } else {
+                rm->revision = rec.revision;
+                rm->saved_identity = tp_semantic_identity(p); /* recovered committed state = clean baseline */
+                rm->journal = j;                              /* owns j; its index is already seeded by recover */
+                j_consumed = true;
+                if (out) {
+                    *out = rm;
+                } else {
+                    tp_model_destroy(rm); /* also destroys j */
+                }
+            }
+        }
+    }
+    /* Nothing rebuilt (empty / bad-header / stale-key / torn-first / load-fail): destroy
+     * j here so the caller falls back to loading the project file. */
+    if (!j_consumed) {
+        tp_journal_destroy(j);
+    }
+    if (!keep_info) {
+        tp_journal_recovery_free(&rec);
+    }
+    return ret;
 }

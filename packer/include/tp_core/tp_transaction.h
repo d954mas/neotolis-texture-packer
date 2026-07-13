@@ -35,6 +35,7 @@
 
 #include "tp_core/tp_error.h"
 #include "tp_core/tp_id.h"
+#include "tp_core/tp_journal.h"   /* F2-04 recovery journal (io seam + recovery types) */
 #include "tp_core/tp_operation.h" /* the F2-01 typed op the batch carries + applies */
 #include "tp_core/tp_project.h"
 
@@ -69,6 +70,12 @@ tp_txn_idstore *tp_txn_idstore_memory_create(void);
  * tp_history.c own it). NULL unless tp_model_enable_history is called. */
 struct tp_history;
 
+/* Forward: the F2-04 recovery journal (tp_journal.h) and the side-effect
+ * coordinator (defined below). Both are opt-in, NULL by default -> exactly the
+ * F2-02/F2-03 behavior. */
+struct tp_journal;
+struct tp_side_effect_coordinator;
+
 /* ---- the model-state wrapper --------------------------------------------- *
  * project + canonical revision + saved-baseline identity + idempotency store. The
  * revision is RUNTIME: it is never serialized to the project file (§414) and starts
@@ -82,6 +89,13 @@ typedef struct tp_model {
     struct tp_history *history; /* F2-03 undo/redo (NULL unless enabled); owned. When
                                  * set, each committed transaction captures a semantic
                                  * diff (tp_diff.h). NULL => exactly the F2-02 behavior. */
+    struct tp_journal *journal; /* F2-04 recovery journal (NULL unless attached); owned.
+                                 * When set, a commit is not acknowledged until its record
+                                 * is durably appended, and the journal's retained-id index
+                                 * answers idempotency. NULL => exactly the F2-02/03 path. */
+    struct tp_side_effect_coordinator *coordinator; /* F2-04 side-effect coordinator
+                                 * (NULL unless set); BORROWED. Ties published side-effects
+                                 * (B1 Extract) to the journal-gated commit. NULL => none. */
 } tp_model;
 
 /* Wrap an existing project (TAKES OWNERSHIP) in a model at revision 0 with a fresh
@@ -196,6 +210,59 @@ void tp_txn_result_free(tp_txn_result *res);
  * non-NULL) is always filled (committed or rejected) and must be freed with
  * tp_txn_result_free. Never aborts on caller data. */
 tp_status tp_model_apply(tp_model *m, const tp_txn_request *req, tp_txn_result *out, tp_error *err);
+
+/* ---- F2-04 side-effect coordinator (task 5, spec §44.2 Extract) ----------- *
+ * Ties external side-effects (B1 Extract's published PNG files) to a model
+ * transaction so file publication and the model commit succeed/fail together. The
+ * commit path drives it around the acknowledgement gate: prepare() runs after the
+ * ops apply to the clone but BEFORE the gate (the durable journal append when a
+ * journal is attached, else the in-memory id record); on an acknowledged commit
+ * publish() makes staged side-effects live; on ANY rollback (gate failure after a
+ * successful prepare) abort() discards them. This is the INTERFACE + a default
+ * no-op; the full Extract binding is B1. */
+typedef struct tp_side_effect_coordinator {
+    void *ctx;
+    /* Stage side-effects for `req` before the commit. Non-OK aborts the commit
+     * (rollback, no acknowledgement). May be NULL (treated as OK). */
+    tp_status (*prepare)(void *ctx, const tp_txn_request *req, tp_error *err);
+    /* Called AFTER the transaction is durably journaled (acknowledged): make staged
+     * side-effects live. Post-acknowledgement, so it must not fail the commit. May be NULL. */
+    void (*publish)(void *ctx, const tp_txn_request *req);
+    /* Called when the commit rolls back after a successful prepare: discard staged
+     * side-effects. May be NULL. */
+    void (*abort)(void *ctx, const tp_txn_request *req);
+} tp_side_effect_coordinator;
+
+/* The default no-op coordinator (all hooks succeed / do nothing). Useful as an
+ * explicit "no side-effects" binding and as a test baseline. */
+tp_side_effect_coordinator tp_side_effect_coordinator_noop(void);
+
+/* Attach a BORROWED coordinator to the model (NULL clears it). Not owned; the
+ * caller keeps it alive across commits. */
+void tp_model_set_coordinator(tp_model *m, tp_side_effect_coordinator *c);
+
+/* ---- F2-04 model <-> journal glue (tasks 2-4) ---------------------------- *
+ * Attach an OWNED recovery journal to `m` (tp_model_destroy frees it). Writes an
+ * initial CHECKPOINT capturing the current committed project state + revision so the
+ * journal is self-sufficient for recovery. Fails INVALID_ARGUMENT if a journal is
+ * already attached; on a checkpoint-write failure returns the journal status and does
+ * NOT attach (the caller still owns `j`). Once attached, every committed transaction
+ * appends to the journal before it is acknowledged (§7.1) and the journal's retained-id
+ * index answers idempotency (§7.2). */
+tp_status tp_model_attach_journal(tp_model *m, struct tp_journal *j, tp_error *err);
+
+/* Rebuild a model from a journal's backing store after a process restart (§7.1/§7.2,
+ * §22.3). Creates a journal over `io` (TAKES OWNERSHIP of io) keyed by `key`, replays
+ * checkpoint + transaction records, and on a usable recovery returns a model (*out)
+ * whose project is the last good committed snapshot, whose revision is that record's
+ * revision, and which OWNS a journal (over the same `io`, index seeded with the
+ * retained ids) ready to continue appending -- so a post-restart retry of an
+ * acknowledged transaction id de-duplicates. A torn/corrupt tail is truncated away
+ * before continuing (never guessed). *info (may be NULL) reports how replay
+ * classified the store. When nothing is recoverable (empty / bad-header / stale-key /
+ * torn-first-record) *out is NULL and info->status says why -- the caller falls back
+ * to loading the project file. Free the recovery info's snapshot is handled internally. */
+tp_status tp_model_recover(tp_journal_io io, tp_id128 key, tp_model **out, tp_journal_recovery *info, tp_error *err);
 
 /* ---- transaction request/result JSON contract (task 3, C0-02 §3) --------- *
  * Versioned envelope; `schema` = 1 the only accepted version. Byte-stable canonical
