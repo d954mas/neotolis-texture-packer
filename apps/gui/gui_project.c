@@ -10,8 +10,9 @@
 #include "tp_core/tp_id.h"             /* tp_rng_os + id128 generate/nil for op ids */
 #include "tp_core/tp_operation.h"      /* the typed op the GUI mutators build */
 #include "tp_core/tp_project_migrate.h" /* tp_project_promote_ids */
-#include "tp_core/tp_transaction.h"    /* tp_model + tp_model_apply + tp_model_dirty/mark_saved */
+#include "tp_core/tp_transaction.h"    /* tp_model + tp_model_apply + tp_model_dirty/mark_saved + attach/recover */
 #include "tp_core/tp_diff.h"           /* F2-03 undo/redo history (tp_model_enable_history/undo/redo) */
+#include "tp_core/tp_journal.h"        /* F2-05b-ii-B recovery journal (io/create/recover sidecar) */
 
 /* F2-05b-ii-A (docs/decisions/0015): GUI Undo/Redo now runs through the F2-03 diff history
  * (tp_model_enable_history + tp_model_undo/redo), NOT the retired 32 MB snapshot stack. Every
@@ -60,6 +61,17 @@ static char s_id_error_msg[256];
  * Surfaced once by the UI (gui_project_take_op_error) to the soft-error channel. */
 static bool s_op_error;
 static char s_op_error_msg[256];
+
+/* F2-05b-ii-B crash-recovery slot (F2-04 §7.1). When set (gui_project_enable_recovery), EACH
+ * installed model records a full-snapshot recovery journal at this DETERMINISTIC sidecar path: a
+ * fresh checkpoint is written per New/Open (the slot always reflects the currently-open project) and
+ * the slot is deleted on a CLEAN shutdown (only a crash -- shutdown never reached -- leaves it to
+ * recover). Empty == journal DISABLED (the default; the headless selftest keeps it empty so it stays
+ * deterministic + file-free). The journal is a SIDECAR -- it NEVER changes saved .ntpacker_project
+ * bytes (the byte-parity goldens depend on this). See ADR 0015 for the keying/recovery-slot design. */
+static char s_recovery_path[1024];
+/* A one-shot notice that a crashed prior session's work was recovered at init (drained by the UI). */
+static bool s_recovery_notice;
 // #endregion
 
 // #region transaction-level coalescing buffer (b-ii-A crux, decision 0015)
@@ -197,12 +209,62 @@ static void drop_idstore(tp_model *m) {
     m->owns_idstore = false;
 }
 
-/* Wrap `p` (TAKES OWNERSHIP on success) in a fresh journal-less, idstore-less model with the
- * F2-03 undo/redo history enabled, and make it the live model, refreshing the s_proj view.
- * COMMIT-THEN-REPLACE (F2-05b-i F3): the replacement is wrapped into a TEMP first and the OLD
- * model is destroyed only AFTER the wrap succeeds -- so an OOM in the wrap can never lose the
- * open project or leave s_proj NULL. Returns true when `p` is installed; on failure `p` is freed
- * (never leaked) and the CURRENT model+project are kept intact. A NULL `p` returns false. */
+/* F2-05b-ii-B: build/app-stable recovery-journal key. A fixed 128-bit tag identifying THIS app +
+ * journal format, checked on recover so a foreign / old-format sidecar is rejected (in ADDITION to
+ * the journal header's magic + version guard) rather than misapplied. Bump on any journal-format
+ * change so old slots self-invalidate to a clean fresh init. */
+static tp_id128 recovery_key(void) {
+    tp_id128 k;
+    static const uint8_t b[16] = {'n', 't', 'p', 'k', '_', 'r', 'e', 'c', 'o', 'v', 'e', 'r', 'y', '_', '0', '1'};
+    memcpy(k.bytes, b, sizeof b);
+    return k;
+}
+
+/* Raise the soft status-bar channel for a DEGRADED-durability notice (recovery journal could not be
+ * attached). A missing recovery journal is never a crash or a blocked editor -- the model stays fully
+ * usable journal-LESS; only crash-durability is lost until the next New/Open re-tries the slot. */
+static void note_recovery_degraded(const char *msg) {
+    s_op_error = true;
+    (void)snprintf(s_op_error_msg, sizeof s_op_error_msg, "Recovery journal unavailable (%s) -- editing continues without crash recovery.",
+                   msg ? msg : "unknown");
+}
+
+/* Attach a FRESH file-backed recovery journal to `m` at the recovery slot, resetting the slot to
+ * empty first so it reflects ONLY this model's project (one slot, always the current project -- no
+ * accumulation across New/Open). No-op (leaves `m` journal-LESS, exactly the pre-B path) when
+ * recovery is disabled. PRECONDITION: any PREVIOUS model (and thus the previous slot file handle) is
+ * already destroyed, so remove()+reopen never races a live handle. On ANY failure the editor still
+ * runs journal-less and a degraded-durability notice is raised (never a crash / blocked editor). */
+static void attach_recovery_journal(tp_model *m) {
+    if (!m || s_recovery_path[0] == '\0') {
+        return; /* recovery disabled -> journal-less (exactly the F2-05b-ii-A behavior) */
+    }
+    (void)remove(s_recovery_path); /* start a fresh slot: the old model's handle is already closed */
+    tp_journal_io io = tp_journal_io_file(s_recovery_path);
+    if (!io.ctx) {
+        note_recovery_degraded("could not open the recovery journal file");
+        return;
+    }
+    tp_journal *j = tp_journal_create(io, recovery_key()); /* TAKES OWNERSHIP of io; NULL frees io */
+    if (!j) {
+        note_recovery_degraded("out of memory creating the recovery journal");
+        return;
+    }
+    tp_error err = {0};
+    if (tp_model_attach_journal(m, j, &err) != TP_STATUS_OK) {
+        tp_journal_destroy(j); /* attach failed (checkpoint write) -> we still own j */
+        note_recovery_degraded(err.msg[0] ? err.msg : "could not checkpoint the recovery journal");
+    }
+}
+
+/* Wrap `p` (TAKES OWNERSHIP on success) in a fresh idstore-less model with the F2-03 undo/redo
+ * history enabled + (when recovery is enabled) a fresh crash-recovery journal, and make it the live
+ * model, refreshing the s_proj view. COMMIT-THEN-REPLACE (F2-05b-i F3): the replacement is wrapped
+ * into a TEMP first and the OLD model is destroyed only AFTER the wrap succeeds -- so an OOM in the
+ * wrap can never lose the open project or leave s_proj NULL. The journal is attached ONLY after the
+ * old model is destroyed (its slot file handle closed), so the slot is never opened twice at once.
+ * Returns true when `p` is installed; on failure `p` is freed (never leaked) and the CURRENT
+ * model+project are kept intact. A NULL `p` returns false. */
 static bool wrap_model(tp_project *p) {
     if (!p) {
         return false; /* nothing to install -> keep the current model (an upstream OOM must not clear it) */
@@ -212,11 +274,12 @@ static bool wrap_model(tp_project *p) {
         tp_project_destroy(p); /* wrap did not take ownership on failure */
         return false;          /* keep the current model+project intact (F3) */
     }
-    drop_idstore(nm);                  /* GUI carries NO idstore (F6) */
+    drop_idstore(nm);                  /* GUI carries NO idstore (F6); the journal is the idempotency authority */
     (void)tp_model_enable_history(nm); /* F2-05b-ii-A: undo/redo runs through this diff history */
-    tp_model_destroy(s_model);         /* success: only now free the previous model + its owned project */
+    tp_model_destroy(s_model);         /* success: only now free the previous model (closes its slot handle) */
     s_model = nm;
     s_proj = tp_model_project(s_model);
+    attach_recovery_journal(s_model);  /* F2-05b-ii-B: fresh recovery journal at the slot (no-op if disabled) */
     return true;
 }
 
@@ -295,6 +358,13 @@ static bool commit_txn_now(tp_operation *ops, int nops) {
         const char *msg = (err.msg[0]) ? err.msg : tp_status_str(st);
         if (res.error_count > 0 && res.errors[0].message[0]) {
             msg = res.errors[0].message;
+        }
+        /* F2-05b-ii-B append-fail UX: a recovery-journal append failure (full disk) rolls the store
+         * back + rejects the commit inside tp_model_apply (the live model + revision + s_proj are
+         * BYTE-UNCHANGED, the tx id stays retryable), so surface a clear, actionable status instead of
+         * the internal gate prose. Never shows a false "saved"/clean state -- the model did not change. */
+        if (st == TP_STATUS_JOURNAL_FAILED) {
+            msg = "Could not journal the edit -- disk full? Your change was not applied.";
         }
         s_op_error = true;
         (void)snprintf(s_op_error_msg, sizeof s_op_error_msg, "%s", msg);
@@ -516,14 +586,52 @@ bool gui_project_peek_pending_slice9(int atlas_index, const char *sprite_key, in
 // #endregion
 
 // #region lifecycle
+/* F2-05b-ii-B crash recovery (F2-04 §7.1/§22.3). If recovery is enabled and the slot holds a usable
+ * journal from a CRASHED prior session, rebuild + install its last committed state as the live model,
+ * kept DIRTY (F2-04 C5 recovered_unsaved) so the user is prompted to Save the recovered work. Returns
+ * true when a model was adopted. A stale / empty / foreign / corrupt / torn-first slot returns false
+ * -> the caller does a normal fresh init. tp_model_recover reads the slot UB-cleanly (never crashes
+ * on a bad slot) and TAKES OWNERSHIP of the io on every path (recovered model owns it, else it is
+ * destroyed) -- so the io is never leaked. */
+static bool try_adopt_recovered(void) {
+    if (s_recovery_path[0] == '\0') {
+        return false; /* recovery disabled */
+    }
+    tp_journal_io io = tp_journal_io_file(s_recovery_path);
+    if (!io.ctx) {
+        return false; /* cannot open the slot (or none exists) -> fresh init */
+    }
+    tp_model *rm = NULL;
+    tp_journal_recovery info;
+    memset(&info, 0, sizeof info);
+    tp_error err = {0};
+    tp_status st = tp_model_recover(io, recovery_key(), &rm, &info, &err); /* TAKES OWNERSHIP of io */
+    tp_journal_recovery_free(&info);                                       /* frees the recovered snapshot copy */
+    if (st != TP_STATUS_OK || !rm) {
+        return false; /* nothing recoverable (empty/bad-header/stale-key/torn-first) -> fresh init */
+    }
+    drop_idstore(rm);                  /* GUI carries no idstore; the attached journal is the idempotency authority */
+    (void)tp_model_enable_history(rm); /* fresh undo history starting AT the recovered state */
+    s_model = rm;                      /* rm already OWNS a journal over the slot -> keeps recording */
+    s_proj = tp_model_project(s_model);
+    set_path("");        /* recovered work is untitled -> a deliberate Save As is required */
+    s_preview_stale = true;
+    recompute_dirty();   /* recovered_unsaved == true -> dirty (independent of identity) */
+    s_recovery_notice = true; /* surfaced once by the UI (gui_project_take_recovery_notice) */
+    return true;
+}
+
 void gui_project_init(void) {
     if (s_model) {
         return;
     }
     pending_discard();
+    if (try_adopt_recovered()) {
+        return; /* F2-05b-ii-B: adopted a crash-recovered model (dirty) -- do NOT overwrite with a fresh one */
+    }
     tp_project *p = tp_project_create();
     seed_default_target(p, 0); /* clean baseline includes it (I1) -- lifecycle, direct */
-    (void)wrap_model(p);       /* first model: on OOM s_model/s_proj stay NULL */
+    (void)wrap_model(p);       /* first model: on OOM s_model/s_proj stay NULL; attaches a fresh recovery journal */
     set_path("");
     s_preview_stale = false;
     promote_and_baseline();
@@ -531,10 +639,62 @@ void gui_project_init(void) {
 
 void gui_project_shutdown(void) {
     pending_discard();
-    tp_model_destroy(s_model); /* frees the model + its owned project + its history */
+    tp_model_destroy(s_model); /* frees the model + its owned project + history + recovery journal (closes the slot file) */
     s_model = NULL;
     s_proj = NULL;
+    /* F2-05b-ii-B clean-exit reset: a cleanly-exited session leaves NO journal to recover, so the next
+     * launch starts fresh (no spurious "recovered" prompt). Only a CRASH -- which never reaches this
+     * shutdown -- leaves the slot on disk for the next launch to recover. */
+    if (s_recovery_path[0] != '\0') {
+        (void)remove(s_recovery_path);
+    }
 }
+
+/* F2-05b-ii-B: enable/configure crash recovery. `slot_path` is a DETERMINISTIC sidecar journal path
+ * (a stable temp/app-data location the next launch reconstructs WITHOUT a random session id, per the
+ * owner's requirement); NULL/"" DISABLES recovery (journal-less, the default). Call ONCE before the
+ * first gui_project_init in the interactive app. */
+void gui_project_enable_recovery(const char *slot_path) {
+    (void)snprintf(s_recovery_path, sizeof s_recovery_path, "%s", slot_path ? slot_path : "");
+}
+
+/* Drains the one-shot "recovered unsaved changes" notice (true once after a crash-recovery adopt at
+ * init, then cleared). The UI polls this to surface the recovery to the user. */
+bool gui_project_take_recovery_notice(char *out, size_t cap) {
+    if (!s_recovery_notice) {
+        return false;
+    }
+    if (out && cap) {
+        (void)snprintf(out, cap, "Recovered unsaved changes from a previous session. Save to keep them.");
+    }
+    s_recovery_notice = false;
+    return true;
+}
+
+#ifdef NTPACKER_GUI_SELFTEST
+/* Dev seam (selftest only): attach a FRESH in-memory recovery journal to the CURRENT model and return
+ * its io handle (BORROWED -- the model owns the real io) so the fault suite can arm a deterministic
+ * write failure (tp_journal_io_memory__fail_next_writes) and exercise the append-fail commit path.
+ * Returns a NULL-ctx io on failure. Never used in production (production uses tp_journal_io_file). */
+tp_journal_io gui_project__test_attach_memory_journal(void) {
+    tp_journal_io io = tp_journal_io_memory();
+    if (!io.ctx) {
+        return io; /* OOM -> NULL-ctx io */
+    }
+    tp_journal *j = tp_journal_create(io, recovery_key()); /* TAKES OWNERSHIP of io */
+    tp_journal_io none;
+    memset(&none, 0, sizeof none);
+    if (!j) {
+        return none; /* create destroyed io on OOM */
+    }
+    tp_error err = {0};
+    if (tp_model_attach_journal(s_model, j, &err) != TP_STATUS_OK) {
+        tp_journal_destroy(j); /* attach failed -> we still own j (and its io) */
+        return none;
+    }
+    return io; /* borrowed handle: arming faults via io.ctx drives the model's owned journal */
+}
+#endif
 // #endregion
 
 // #region accessors

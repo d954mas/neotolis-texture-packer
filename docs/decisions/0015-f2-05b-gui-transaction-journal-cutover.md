@@ -569,3 +569,134 @@ UAF — `remove_animation` dups its `id` before its flush so the animation is re
 lookup. `check_boundaries.sh` = boundaries OK. `--parity` output is
 byte-identical (id-normalized) to the pre-fix baseline — no saved bytes changed. No file under
 `packer/src` / `external` / `packer/spike` changed; journal / append-fail / recovery / D2 untouched.
+
+## F2-05b-ii-B — GUI LIVE recovery journal + append-fail UX + crash recovery + D2 measurement (2026-07-14)
+
+The FINAL F2 packet flips the GUI model's journal from NULL to **LIVE** (F2-04) and adds the durability
+UX + the owner's D2 numbers. Implemented GUI-layer ONLY — `apps/gui/gui_project.c`/`.h` (attach at the
+clean baseline + append-fail message + crash recovery adopt + clean-exit reset + the enable/notice API +
+a selftest dev seam), `apps/gui/main.c` (enable recovery at the interactive baseline + surface the
+notice), `apps/gui/gui_selftest.c` + `apps/gui/CMakeLists.txt` (append-fail + recovery round-trip
+regressions), and `packer/tests/tp_bench_journal.c` + `packer/tests/CMakeLists.txt` (the D2 bench). **No
+file under `packer/src` / `external` / `packer/spike` was touched** — the F2-04 journal core is used
+exactly as shipped. b-ii-A's tasks (undo→F2-03 history, coalescing, snapshot retirement, identity dirty)
+are DONE and untouched here.
+
+### Attach point + keying/recovery-slot design (the KEY DECISION — implemented, no core change)
+
+There is **no** in-place re-key / detach / swap seam in the core (verified: `m->journal` is attach-once,
+owned, freed at `tp_model_destroy`). So the memory-note "swap `m->journal` on Save-As" is **not
+achievable** in place. Implemented the brief-recommended alternative: a **DETERMINISTIC SESSION-RECOVERY
+SLOT**, not a path-keyed journal.
+
+- **Attach point:** `wrap_model` (the one place every installed model is minted — `init` / `new` /
+  `open`). After `tp_model_enable_history`, the OLD model is destroyed FIRST (closing its slot file
+  handle), then a FRESH file-backed journal is attached to the new model via `attach_recovery_journal`.
+  Attaching *after* the old model is gone is REQUIRED: the file io opens `r+b`, so two live handles to
+  the same slot during the commit-then-replace window would race. The slot is `remove()`d immediately
+  before the fresh open so it never ACCUMULATES across New/Open (the file io's `ensure_header` only
+  writes a header when the store is empty — an un-reset slot would otherwise append a second checkpoint
+  after the old records and grow unbounded). Net: **one slot, always exactly the currently-open
+  project's fresh checkpoint.**
+- **Keying:** a fixed build/app-stable 128-bit key (`recovery_key()`, bytes `"ntpk_recovery_01"`). It is
+  the additional guard (beyond the journal header's magic + format-version) that makes a foreign /
+  old-format sidecar `STALE_KEY`-reject on recover instead of misapply. Bump it on any journal-format
+  change so old slots self-invalidate to a clean fresh init.
+- **Save / Save-As do NOT touch the journal** (no re-key, no reset). `gui_project_save_as` writes the
+  `.ntpacker_project` and `tp_model_mark_saved`s the model; the live model keeps recording to the same
+  slot. A crash after a Save still recovers the correct latest committed state (the user re-saves; the
+  recovered model is `recovered_unsaved` → dirty → prompts Save). This sidesteps the missing detach seam
+  ENTIRELY and needs **zero core change** — so no core seam was escalated.
+- **The slot is a SIDECAR:** it never enters `.ntpacker_project` serialization → saved bytes are
+  byte-identical (proven below). Recovery-enabled ONLY in the interactive `main.c` path; the headless
+  selftest, `--parity`, and the batch/headless main path leave it DISABLED (empty `s_recovery_path` →
+  journal-LESS, exactly the pre-B behavior) so they stay deterministic + file-free.
+- **Degraded durability is never a crash:** on any create/attach failure the editor keeps running
+  journal-less and raises a soft status ("Recovery journal unavailable … editing continues without crash
+  recovery"). The next New/Open re-tries the slot.
+- **KNOWN LIMITATION (documented, accepted, not escalated): concurrent editor instances.** A single
+  deterministic slot is the owner's explicit "deterministic temp path, not random session id"
+  requirement, which inherently trades multi-instance isolation for deterministic recovery. Two GUI
+  instances sharing the slot would garble the SIDECAR only — never the project file, never a crash: the
+  worst case is a corrupt/foreign sidecar, which `tp_model_recover` classifies UB-cleanly
+  (`BAD_HEADER` / `CORRUPT` / `STALE_KEY`) and falls back to a fresh init. Acceptable for the
+  single-instance interactive editor (the real use case). A future hardening could add a slot lock or a
+  per-instance suffix; that needs no core change and is out of this packet's scope.
+
+### Append-fail UX (task 5)
+
+A recovery-journal append failure (full disk) already fails the commit INSIDE `tp_model_apply`: the gate
+`tp_project_save_buffer(clone)` + `tp_journal_append_txn` rolls the store back to its prior length and
+returns `TP_STATUS_JOURNAL_FAILED`, the clone is discarded, and the live model + revision + `s_proj` are
+BYTE-UNCHANGED (the tx id stays retryable). `commit_txn_now` already returns false on that; the only
+GUI change is to surface a clear, actionable status for `TP_STATUS_JOURNAL_FAILED` ("Could not journal
+the edit — disk full? Your change was not applied.") instead of the internal gate prose. No false
+"saved"/clean state is ever shown (the model did not change). **Selftest J1** (`gui_project__test_attach_
+memory_journal` + `tp_journal_io_memory__fail_next_writes(io,1)`): arm the next append to fail, commit a
+real structural edit → commit REJECTED, the soft-error surfaced, the semantic identity + atlas name
+BYTE-UNCHANGED, dirty unchanged, and the very next edit commits normally (editor still live once the
+one-shot fault clears).
+
+### Crash recovery at startup + clean-exit reset (task 6)
+
+`gui_project_init` runs `try_adopt_recovered()` BEFORE creating a fresh model: with recovery enabled it
+opens the slot and calls `tp_model_recover` (takes ownership of the io on every path — never leaked;
+reads the slot UB-cleanly). On a usable recovery it adopts the rebuilt model as `s_model` (drops the
+idstore — the journal is the idempotency authority; enables a fresh F2-03 history starting AT the
+recovered state; sets path="" so the recovered work is untitled and needs a deliberate Save As; keeps it
+DIRTY via F2-04 C5 `recovered_unsaved`) and raises a one-shot "Recovered unsaved changes …" notice
+(`gui_project_take_recovery_notice`, surfaced by `main.c`). Empty / bad-header / stale-key / torn-first
+→ returns false → normal fresh init. **Clean-exit reset:** `gui_project_shutdown` deletes the slot after
+destroying the model (which closes the file handle first). Only a CRASH — which never reaches shutdown —
+leaves the slot on disk. This makes clean quit / X-close / discard-and-exit all leave NOTHING to recover
+(no spurious "recovered" prompt on the next launch); recovery fires ONLY for a real crash / power loss.
+**Selftest J3** (isolated build-dir slot, both ways): a committed edit → simulated crash (tear down with
+recovery disabled so the slot survives) → re-init RECOVERS it (notice raised, dirty, the edited name
+restored); then a clean shutdown (recovery enabled) DELETES the slot → the next init is a fresh CLEAN
+project with NO spurious recovery notice.
+
+### D2 MEASUREMENT (task 7 — measure only; owner's snapshot-vs-diff data)
+
+With the journal live, every commit serializes the WHOLE committed project and appends it as one
+full-SNAPSHOT record (F2-04 v1 payload; payload format UNCHANGED). `packer/tests/tp_bench_journal`
+(a dev exe, NOT a ctest — mirrors `tp_bench_clone`'s fixtures so the numbers are comparable to the P-01
+arena bench) isolates the per-commit append cost = `tp_project_save_buffer` + `tp_journal_append_txn`, on
+both the memory io and the real file io. **native-release numbers:**
+
+| project | serialized snapshot | ms/commit (mem) | ms/commit (file) | bytes/commit | growth (N edits) |
+|---|---|---|---|---|---|
+| NORMAL (3 atlas, ~17 KB) | 17,141 B | 0.151 | 0.162 | 17,190 | 32.8 MB / 2000 |
+| HUGE (100 atlas × 1000 sprites, ~16.5 MB) | 17,356,035 B | 244.68 | 244.70 | 17,356,084 | 827.6 MB / 50 |
+
+`bytes/commit == serialized_len + 49` exactly (49 = TXN framing: 4 len + 1 type + 32 id + 8 rev + 4 crc),
+confirming one full snapshot per commit.
+
+**Snapshot-vs-diff read (for the owner to decide):**
+- **NORMAL is a non-issue.** 0.15 ms and ~17 KB per commit is negligible; with b-ii-A's gesture
+  coalescing (one commit per gesture, not per frame) even a marathon session is trivial. Full-snapshot
+  journaling is fine here and simplest.
+- **HUGE is the cliff.** 245 ms/commit would freeze the UI for a quarter-second on EVERY edit, and 17 MB
+  written per edit → 828 MB over a 50-edit session. **The memory-io and file-io numbers are essentially
+  identical (244.68 vs 244.70 ms)** → the cost is DOMINATED by serialization (`tp_project_save_buffer`),
+  NOT the disk write. So a faster disk / async flush does not help; only reducing WHAT is serialized
+  does. The F2-03 history already computes a compact per-op semantic DIFF per commit — a diff-based
+  journal (append the op's inverse/forward diff instead of a whole-project snapshot, checkpointing the
+  full state only periodically) would cut both ms and bytes per commit by orders of magnitude on large
+  projects while keeping small projects unchanged. **My recommendation:** ship the full-snapshot journal
+  now (correct, simple, sidecar, byte-safe — this packet), and take diff-based journaling as the owner's
+  D2 follow-up gated on a real large-project threshold (it changes the F2-04 payload, so it is a core
+  packet, not a GUI one). Gesture coalescing is what makes even the snapshot form survivable today;
+  without it a HUGE-project drag would append a 17 MB snapshot per frame.
+
+### Verified (both presets)
+
+0 warnings (native-debug + native-release, cgltf filtered); `ctest` 79/79 (debug) + 78/78 (release);
+`ntpacker_gui_selftest` PASS — extended with **J1** (append-fail: commit rejected, identity + name
+byte-unchanged, dirty unchanged, editor recovers) and **J3** (crash-recovery round-trip BOTH ways:
+recover-after-crash restores the edit + dirty + notice; clean-exit deletes the slot → no spurious
+recovery). `check_boundaries.sh` = boundaries OK (`gui_selftest.c` stays the boundary-excluded dev seam;
+the `packer/src` include is scoped to the selftest build only, so the shipped GUI never sees it).
+**Saved-bytes byte-parity:** the GUI `--parity` output is byte-identical (id-normalized; same 3237 B) to
+the f6a5225 baseline — the journal is a sidecar and no serialization path changed. Goldens green in
+`ctest` (the sidecar never enters `.ntpacker_project`). No file under `packer/src` / `external` /
+`packer/spike` changed; no core seam was needed or added.

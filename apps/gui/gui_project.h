@@ -66,9 +66,24 @@ typedef enum {
     GUI_SPRITE_OV_EXTRUDE
 } gui_sprite_ov;
 
-/* Creates the initial in-memory project (one default atlas, no path, clean). */
+/* Creates the initial in-memory project (one default atlas, no path, clean) -- OR, when crash
+ * recovery is enabled and a usable journal from a crashed prior session exists at the slot, adopts
+ * that recovered (DIRTY) state instead (F2-05b-ii-B). */
 void gui_project_init(void);
+/* Tears the model down and, when recovery is enabled, deletes the recovery slot (clean-exit reset:
+ * a cleanly-exited session leaves NO journal to recover). */
 void gui_project_shutdown(void);
+
+/* F2-05b-ii-B crash recovery. `slot_path` is a DETERMINISTIC sidecar journal path (a stable temp/
+ * app-data location the next launch reconstructs without a random session id); NULL/"" DISABLES
+ * recovery (journal-less -- the default, and the headless selftest path). Call ONCE before the first
+ * gui_project_init in the interactive app. When enabled, every installed model records a full-snapshot
+ * recovery journal (a SIDECAR: it never changes saved .ntpacker_project bytes) and a clean shutdown
+ * deletes the slot. */
+void gui_project_enable_recovery(const char *slot_path);
+/* Drains the one-shot "recovered unsaved changes from a previous session" notice (true once after a
+ * crash-recovery adopt at init). The UI polls this to surface the recovery to the user. */
+bool gui_project_take_recovery_notice(char *out, size_t cap);
 
 /* --- accessors --- */
 tp_project *gui_project_get(void);
@@ -226,6 +241,14 @@ bool gui_project_take_id_error(char *out, size_t cap);
  * reject; this surfaces the structured status to the status-bar soft-error channel.
  * Returns true once and copies the message into `out` (then clears it). */
 bool gui_project_take_op_error(char *out, size_t cap);
+
+#ifdef NTPACKER_GUI_SELFTEST
+#include "tp_core/tp_journal.h" /* tp_journal_io -- for the append-fail dev seam below */
+/* Dev seam (selftest only): attach a fresh in-memory recovery journal to the current model and return
+ * its io handle so the fault suite can arm a deterministic write failure and exercise the append-fail
+ * commit path. NULL-ctx io on failure. Never linked/called in production. */
+tp_journal_io gui_project__test_attach_memory_journal(void);
+#endif
 
 #ifdef __cplusplus
 }

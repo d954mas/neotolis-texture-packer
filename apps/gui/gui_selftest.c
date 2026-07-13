@@ -26,9 +26,12 @@
 
 #include "tp_core/tp_error.h"   /* tp_status_str / tp_error */
 #include "tp_core/tp_export.h"  /* tp_exporter_count/at (preview-target selector index) */
+#include "tp_core/tp_id.h"      /* tp_id128_eq (F2-05b-ii-B append-fail identity check) */
 #include "tp_core/tp_model.h"   /* tp_result */
 #include "tp_core/tp_names.h"   /* tp_sprite_export_key (region -> override key) */
 #include "tp_core/tp_project.h" /* tp_project* accessors */
+#include "tp_core/tp_transaction.h" /* tp_semantic_identity (F2-05b-ii-B append-fail identity check) */
+#include "tp_journal_internal.h"    /* F2-05b-ii-B memory-io fault seams (append-fail injection); from packer/src */
 
 #include "gui_actions.h"  /* do_pack_blocking / reset_selection / preview_stop / anim ops + gui_request_gesture_commit */
 #include "gui_canvas.h"   /* s_canvas ops + GUI_CANVAS_ATLAS */
@@ -966,6 +969,106 @@ void run_selftest(void) {
         char pfolder[512];
         to_abs("examples/defold-demo/examples/anim_trim/anims", pfolder, sizeof pfolder);
         (void)gui_project_add_source(0, pfolder);
+        gui_scan_invalidate_all();
+    }
+
+    /* --- F2-05b-ii-B: LIVE recovery journal -- append-fail UX + crash-recovery round-trip (both ways) --- */
+    {
+        /* (J1) APPEND-FAIL UX: a recovery-journal append failure (full disk) must reject the commit
+         *      cleanly -- the live model is BYTE-UNCHANGED, dirty is unchanged, a clear status is
+         *      raised, no half-applied edit -- and the editor must keep working once the failure
+         *      clears. Driven deterministically: attach a memory-io recovery journal to a fresh model,
+         *      arm the NEXT journal write to fail, then commit a real (structural, immediate) edit. */
+        gui_project_new();
+        gui_pack_clear(-1);
+        s_sel_atlas = 0;
+        reset_selection();
+        (void)gui_project_take_op_error(NULL, 0); /* clear any stale soft-error */
+        tp_journal_io fio = gui_project__test_attach_memory_journal();
+        NT_ASSERT(fio.ctx && "J1: memory recovery journal attached to the live model");
+        char nm0[64];
+        (void)snprintf(nm0, sizeof nm0, "%s", tp_project_get_atlas(gui_project_get(), 0)->name);
+        const tp_id128 id_before = tp_semantic_identity(gui_project_get());
+        const bool dirty_before = gui_project_is_dirty();
+        tp_journal_io_memory__fail_next_writes(fio, 1); /* the NEXT journal append fails entirely */
+        const bool committed = gui_project_set_atlas_name(0, "append_should_fail"); /* structural -> immediate commit */
+        char emsg[256] = {0};
+        const bool surfaced = gui_project_take_op_error(emsg, sizeof emsg);
+        const tp_id128 id_after = tp_semantic_identity(gui_project_get());
+        const char *nm1 = tp_project_get_atlas(gui_project_get(), 0)->name;
+        nt_log_info("SELFTEST: J1 append-fail committed=%d surfaced=%d msg='%s' name '%s'->'%s' dirty %d->%d",
+                    (int)committed, (int)surfaced, emsg, nm0, nm1, (int)dirty_before, (int)gui_project_is_dirty());
+        NT_ASSERT(!committed && "J1: a journal append failure REJECTS the commit");
+        NT_ASSERT(surfaced && emsg[0] && "J1: the append failure surfaces a status-bar error");
+        NT_ASSERT(tp_id128_eq(id_before, id_after) && strcmp(nm1, nm0) == 0 &&
+                  "J1: the live model is BYTE-UNCHANGED after the rejected append (no half-applied edit)");
+        NT_ASSERT(gui_project_is_dirty() == dirty_before && "J1: dirty is unchanged after the rejected append");
+        /* the fault was one-shot -> a further edit now commits normally (editor still live) */
+        NT_ASSERT(gui_project_set_atlas_name(0, "works_after") &&
+                  strcmp(tp_project_get_atlas(gui_project_get(), 0)->name, "works_after") == 0 &&
+                  "J1: the editor keeps working once the append failure clears");
+        (void)gui_project_take_op_error(NULL, 0); /* the recovered edit raised no error; clear defensively */
+
+        /* (J3) CRASH-RECOVERY round-trip, BOTH ways, through the real GUI wiring (gui_project_enable_
+         *      recovery + the adopt-at-init path + the clean-exit slot reset). ISOLATED slot under the
+         *      build dir (never touches the production recovery path). A "crash" is simulated by tearing
+         *      the model down with recovery DISABLED (shutdown leaves the slot on disk); a "clean exit"
+         *      tears it down with recovery ENABLED (shutdown deletes the slot). */
+        char jslot[1200];
+        (void)snprintf(jslot, sizeof jslot, "%s/selftest_recovery.ntpjournal", s_exe_dir);
+        (void)remove(jslot); /* start from a clean slot */
+
+        /* Session 1: enable recovery + re-init -> fresh project + a live journal at the slot. */
+        gui_project_enable_recovery("");   /* disable first so this teardown never deletes a slot */
+        gui_project_shutdown();            /* tear down the current (memory-journal) model; no slot op */
+        gui_project_enable_recovery(jslot);
+        gui_project_init();                /* s_model NULL -> fresh + a recovery journal at jslot */
+        NT_ASSERT(gui_project_get() && !gui_project_is_dirty() && "J3: a fresh journaled session starts clean");
+        (void)gui_project_set_atlas_name(0, "recovered_atlas"); /* committed edit -> appended to the journal */
+        NT_ASSERT(gui_project_is_dirty() && "J3: the committed edit dirties the session");
+
+        /* Simulate a CRASH: tear the model down WITHOUT deleting the slot (disable recovery for the
+         * teardown, so the slot file survives on disk exactly as it would after a real crash). */
+        gui_project_enable_recovery("");
+        gui_project_shutdown();            /* closes the journal file handle; the slot file remains */
+
+        /* Session 2 (restart after crash): re-enable recovery + init -> the slot is adopted. */
+        gui_project_enable_recovery(jslot);
+        gui_project_init();                /* s_model NULL -> recovery adopts the slot's last committed state */
+        char rnote[256] = {0};
+        const bool got_notice = gui_project_take_recovery_notice(rnote, sizeof rnote);
+        const bool recov_dirty = gui_project_is_dirty();
+        const char *recov_name = gui_project_get() ? tp_project_get_atlas(gui_project_get(), 0)->name : "(none)";
+        nt_log_info("SELFTEST: J3 recover-after-crash notice=%d dirty=%d name='%s' (want 1,1,'recovered_atlas')",
+                    (int)got_notice, (int)recov_dirty, recov_name);
+        NT_ASSERT(got_notice && "J3: a recovered session raises the one-shot recovery notice");
+        NT_ASSERT(recov_dirty && "J3: the recovered model is DIRTY (unsaved recovered work -> prompt Save)");
+        NT_ASSERT(gui_project_get() && strcmp(recov_name, "recovered_atlas") == 0 &&
+                  "J3: recovery rebuilds the last committed state (the edit survived the crash)");
+
+        /* CLEAN EXIT: tear down WITH recovery enabled -> shutdown deletes the slot. */
+        gui_project_shutdown();
+
+        /* Session 3 (relaunch after a clean exit): init -> NO recovery (slot gone) -> fresh + clean. */
+        gui_project_init();
+        const bool spurious = gui_project_take_recovery_notice(rnote, sizeof rnote);
+        nt_log_info("SELFTEST: J3 after-clean-exit dirty=%d atlases=%d spurious_notice=%d (want 0,1,0)",
+                    (int)gui_project_is_dirty(), gui_project_get() ? gui_project_get()->atlas_count : -1, (int)spurious);
+        NT_ASSERT(!spurious && "J3: NO spurious recovery notice after a clean exit");
+        NT_ASSERT(gui_project_get() && gui_project_get()->atlas_count == 1 && !gui_project_is_dirty() &&
+                  "J3: a clean exit leaves nothing to recover -> the next launch is a fresh clean project");
+
+        /* Done: disable recovery + restore a journal-LESS packable project for the render phases. */
+        gui_project_enable_recovery("");
+        gui_project_shutdown();
+        (void)remove(jslot); /* belt-and-suspenders: leave no stray sidecar in the build dir */
+        gui_project_init();
+        gui_pack_clear(-1);
+        s_sel_atlas = 0;
+        reset_selection();
+        char rfolder[512];
+        to_abs("examples/defold-demo/examples/anim_trim/anims", rfolder, sizeof rfolder);
+        (void)gui_project_add_source(0, rfolder);
         gui_scan_invalidate_all();
     }
 

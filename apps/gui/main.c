@@ -1073,7 +1073,24 @@ int main(int argc, char *argv[]) {
     /* editor state + the canvas custom-draw handler (registered outside begin/end) */
     gui_canvas_init(&s_canvas);
     nt_ui_set_custom_handler(s_ctx, gui_canvas_handler, &s_canvas);
+    /* F2-05b-ii-B: crash recovery. The recovery-journal SIDECAR lives at a DETERMINISTIC path under
+     * the exe dir (stable across launches, like pack_session), so a crashed session is recovered on
+     * the next launch WITHOUT a random session id. Disabled in the headless selftest build (which
+     * drives the journal itself, in isolation, and must stay deterministic + file-free). */
+#ifndef NTPACKER_GUI_SELFTEST
+    char recovery_slot[1152];
+    (void)snprintf(recovery_slot, sizeof recovery_slot, "%s/ntpacker_recovery.ntpjournal", s_exe_dir);
+    gui_project_enable_recovery(recovery_slot);
+#endif
     gui_project_init();
+#ifndef NTPACKER_GUI_SELFTEST
+    {
+        char rnotice[256];
+        if (gui_project_take_recovery_notice(rnotice, sizeof rnotice)) {
+            set_status_ex(STATUS_WARNING, rnotice); /* "Recovered unsaved changes ... Save to keep them." */
+        }
+    }
+#endif
 
     /* in-process packing: session .ntpack goes under the exe dir (existing convention) */
     char pack_session[1152];

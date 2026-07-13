@@ -324,3 +324,12 @@ add_executable(tp_bench_clone tp_bench_clone.c)
 target_link_libraries(tp_bench_clone PRIVATE tp_core)
 target_include_directories(tp_bench_clone PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_compile_options(tp_bench_clone PRIVATE -U_DLL)
+
+# F2-05b-ii-B (D2): live-journal per-commit append cost -- serialize + frame + durable write of the
+# full project SNAPSHOT (F2-04 v1 payload) on a normal + a huge project, memory-io + file-io. Dev
+# tool, NOT a ctest (plain exe, no nt_set_warning_flags), same pattern as tp_bench_clone. Only the
+# public tp_core surface -- no src/ internal header needed.
+#   tp_bench_journal [iters_normal] [iters_huge]
+add_executable(tp_bench_journal tp_bench_journal.c)
+target_link_libraries(tp_bench_journal PRIVATE tp_core)
+target_compile_options(tp_bench_journal PRIVATE -U_DLL)
