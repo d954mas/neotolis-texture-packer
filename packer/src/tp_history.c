@@ -123,9 +123,19 @@ void tp_history_destroy(tp_history *h) {
     free(h);
 }
 
+/* Test-only fault seam (fix [3] pin): force the next history-slot grow to report OOM
+ * once, then re-arm to off. Lets a test prove a reserve OOM happens BEFORE the id is
+ * recorded, so the same transaction id stays retryable (never poisoned to DUPLICATE_ID). */
+static bool s_reserve_fail = false;
+void tp_history__test_fail_next_reserve(void) { s_reserve_fail = true; }
+
 tp_status tp_history_reserve(tp_history *h) {
     if (h->cap >= h->count + 1) {
         return TP_STATUS_OK;
+    }
+    if (s_reserve_fail) {
+        s_reserve_fail = false;
+        return TP_STATUS_OOM;
     }
     int ncap = (h->cap == 0) ? 8 : (h->cap * 2);
     tp_diff_record **n = (tp_diff_record **)tp_diff__alloc((size_t)ncap * sizeof *n);

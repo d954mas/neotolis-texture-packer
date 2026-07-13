@@ -249,6 +249,23 @@ static void fill_result_op(tp_txn_result_op *ro, const tp_operation *op) {
     }
 }
 
+/* Reject the in-flight commit -- the single home for the clone/record cleanup-and-fail
+ * contract (fix [4]; was ~7x near-identical blocks). Frees the partially-captured entry
+ * and the diff record, marks `out` rejected at the UNCHANGED revision with one
+ * structured error, and discards the clone so the LIVE model stays byte-unchanged.
+ * `entry` / `rec` / `clone` may each be NULL (all frees are NULL-safe). */
+static void tp_txn__commit_reject(tp_txn_result *out, tp_project *clone, tp_diff_record *rec, tp_diff_op *entry,
+                                  int64_t revision, int op_index, tp_status code, const char *field, const char *msg) {
+    tp_diff_op_free(entry);   /* NULL-safe: frees a partially-captured before/after entry */
+    tp_diff_record_free(rec); /* NULL-safe */
+    if (out) {
+        out->committed = false;
+        out->revision = revision; /* unchanged: nothing committed */
+        tp_txn__result_add_error(out, op_index, code, field, msg);
+    }
+    tp_project_destroy(clone); /* NULL-safe; discard the clone -- live model untouched */
+}
+
 /* ---- the atomic commit path (shared by the typed and JSON entry points) --- *
  * PRE: idempotency + revision precondition already passed. Clones the model, applies
  * each op to the clone, and on FULL success records the id + swaps + bumps revision.
@@ -257,11 +274,8 @@ static void fill_result_op(tp_txn_result_op *ro, const tp_operation *op) {
 tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_txn_result *out, tp_error *err) {
     tp_project *clone = tp_project_clone(m->project);
     if (!clone) {
-        if (out) {
-            out->committed = false;
-            out->revision = m->revision;
-            tp_txn__result_add_error(out, -1, TP_STATUS_OOM, "", "could not clone the model (out of memory)");
-        }
+        tp_txn__commit_reject(out, NULL, NULL, NULL, m->revision, -1, TP_STATUS_OOM, "",
+                              "could not clone the model (out of memory)");
         return tp_error_set(err, TP_STATUS_OOM, "transaction clone failed");
     }
 
@@ -273,12 +287,8 @@ tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_tx
     if (m->history) {
         rec = tp_diff_record_new(req->label, req->author, req->op_count);
         if (!rec) {
-            if (out) {
-                out->committed = false;
-                out->revision = m->revision;
-                tp_txn__result_add_error(out, -1, TP_STATUS_OOM, "", "could not allocate the diff record (out of memory)");
-            }
-            tp_project_destroy(clone);
+            tp_txn__commit_reject(out, clone, NULL, NULL, m->revision, -1, TP_STATUS_OOM, "",
+                                  "could not allocate the diff record (out of memory)");
             return tp_error_set(err, TP_STATUS_OOM, "diff record allocation failed");
         }
     }
@@ -287,81 +297,62 @@ tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_tx
         tp_diff_op entry;
         memset(&entry, 0, sizeof entry);
         if (rec) {
+            /* Capture runs BEFORE tp_operation_apply validates, so capture itself must
+             * resolve every entity + bounds-check every index before any deref (fix
+             * [1]/[2]) -- a dangling id / out-of-range index yields a structured status,
+             * never a crash. A NOT_FOUND/OUT_OF_BOUNDS is an op-content rejection at op i
+             * (the same status the history-LESS apply path returns for this input); an OOM
+             * is an allocation fault (op_index -1, the F2-02 convention). */
             tp_status cst = tp_diff_capture_before(clone, &req->ops[i], &entry);
             if (cst != TP_STATUS_OK) {
-                tp_diff_op_free(&entry);
-                tp_diff_record_free(rec);
-                if (out) {
-                    out->committed = false;
-                    out->revision = m->revision;
-                    tp_txn__result_add_error(out, -1, cst, "", "diff capture failed (out of memory)");
-                }
-                tp_project_destroy(clone);
+                int op_index = (cst == TP_STATUS_OOM) ? -1 : i;
+                const char *cmsg = (cst == TP_STATUS_OOM)
+                                       ? "diff capture failed (out of memory)"
+                                       : "operation references a missing entity or an out-of-range index";
+                tp_txn__commit_reject(out, clone, rec, &entry, m->revision, op_index, cst, "", cmsg);
                 return tp_error_set(err, cst, "diff capture (before) failed at op %d", i);
             }
         }
         tp_op_reject rej;
         tp_status st = tp_operation_apply(clone, &req->ops[i], &rej);
         if (st != TP_STATUS_OK) {
-            if (rec) {
-                tp_diff_op_free(&entry);
-                tp_diff_record_free(rec);
-            }
-            if (out) {
-                out->committed = false;
-                out->revision = m->revision; /* unchanged: nothing committed */
-                tp_txn__result_add_error(out, i, st, rej.field, rej.message);
-            }
-            tp_project_destroy(clone); /* discard: live model untouched */
+            tp_txn__commit_reject(out, clone, rec, rec ? &entry : NULL, m->revision, i, st, rej.field, rej.message);
             return tp_error_set(err, st, "operation %d rejected: %s", i, rej.message);
         }
         if (rec) {
             tp_status cst = tp_diff_capture_after(clone, &req->ops[i], &entry);
             if (cst != TP_STATUS_OK) {
-                tp_diff_op_free(&entry);
-                tp_diff_record_free(rec);
-                if (out) {
-                    out->committed = false;
-                    out->revision = m->revision;
-                    tp_txn__result_add_error(out, -1, cst, "", "diff capture failed (out of memory)");
-                }
-                tp_project_destroy(clone);
+                tp_txn__commit_reject(out, clone, rec, &entry, m->revision, -1, cst, "",
+                                      "diff capture failed (out of memory)");
                 return tp_error_set(err, cst, "diff capture (after) failed at op %d", i);
             }
             tp_diff_record_push_op(rec, &entry); /* ownership of `entry`'s pointers moves into rec */
         }
     }
 
-    /* Full success. Record the id BEFORE the swap so that a record OOM discards the
-     * clone with the live model still byte-unchanged (the swap after a successful
-     * record is allocation-free and cannot fail). */
-    if (m->idstore && m->idstore->record) {
-        tp_status rst = m->idstore->record(m->idstore->ctx, req->id_hex, err);
-        if (rst != TP_STATUS_OK) {
-            tp_diff_record_free(rec); /* NULL-safe */
-            if (out) {
-                out->committed = false;
-                out->revision = m->revision;
-                tp_txn__result_add_error(out, -1, rst, "", "could not record the transaction id (out of memory)");
-            }
-            tp_project_destroy(clone);
-            return rst;
-        }
-    }
-
-    /* Reserve the history slot PRE-swap so the post-swap push is allocation-free: a
-     * reserve OOM fails the commit cleanly (clone discarded, model byte-unchanged). */
+    /* Reserve the history slot FIRST (fix [3]): ALL fallible work -- clone, capture,
+     * record build, history reserve -- must happen BEFORE idstore->record, so that once
+     * the id is recorded the only remaining steps are the allocation-free swap + revision
+     * bump + push. A reserve OOM fails the commit cleanly (id NOT yet recorded -> the same
+     * transaction id stays retryable, never poisoned into a permanent DUPLICATE_ID). */
     if (rec) {
         tp_status rvst = tp_history_reserve(m->history);
         if (rvst != TP_STATUS_OK) {
-            tp_diff_record_free(rec);
-            if (out) {
-                out->committed = false;
-                out->revision = m->revision;
-                tp_txn__result_add_error(out, -1, rvst, "", "could not reserve a history slot (out of memory)");
-            }
-            tp_project_destroy(clone);
+            tp_txn__commit_reject(out, clone, rec, NULL, m->revision, -1, rvst, "",
+                                  "could not reserve a history slot (out of memory)");
             return tp_error_set(err, rvst, "history reserve failed");
+        }
+    }
+
+    /* Record the id LAST among the fallible steps -- the invariant "id recorded => commit
+     * cannot fail": everything after this point (swap + revision++ + push) is
+     * allocation-free. A record OOM discards the clone with the live model byte-unchanged. */
+    if (m->idstore && m->idstore->record) {
+        tp_status rst = m->idstore->record(m->idstore->ctx, req->id_hex, err);
+        if (rst != TP_STATUS_OK) {
+            tp_txn__commit_reject(out, clone, rec, NULL, m->revision, -1, rst, "",
+                                  "could not record the transaction id (out of memory)");
+            return rst;
         }
     }
 

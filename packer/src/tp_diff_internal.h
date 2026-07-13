@@ -60,10 +60,10 @@ typedef struct tp_diff_anim_settings {
     bool flip_h, flip_v;
 } tp_diff_anim_settings;
 
-/* One committed op's reverse-apply record. */
+/* One committed op's reverse-apply record. The inverse/redo path switches on `shape`
+ * (the effect class), not the op kind -- the op kind + class were dead reference/debug
+ * fields and are dropped (fix [8]). */
 typedef struct tp_diff_op {
-    tp_op_kind kind;   /* the committed op kind (reference/debug) */
-    tp_op_class cls;   /* CREATE/REMOVE/MOVE/SET (from the catalog) */
     tp_diff_shape shape;
 
     tp_id128 atlas_id; /* parent atlas (for atlas.* ops, the atlas itself)  */
@@ -204,6 +204,9 @@ void tp_history_destroy(tp_history *h);
 /* Ensure room for one more push (may grow the records array; through the diff seam).
  * Called PRE-swap in the commit so the post-swap push is allocation-free. */
 tp_status tp_history_reserve(tp_history *h);
+/* Test-only: force the next tp_history_reserve GROW to return TP_STATUS_OOM once (fix
+ * [3] pin -- reserve OOM must leave the transaction id un-recorded / retryable). */
+void tp_history__test_fail_next_reserve(void);
 /* Push a record: discards the redo branch (frees records[pos..count-1]) then stores
  * `r` at the cursor and advances it. Allocation-free (reserve ensured capacity). */
 void tp_history_push_reserved(tp_history *h, tp_diff_record *r);

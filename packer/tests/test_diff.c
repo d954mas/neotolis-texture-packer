@@ -878,6 +878,343 @@ void test_no_history_is_f2_02_behavior(void) {
     tp_model_destroy(m);
 }
 
+/* ---- [1]/[2] defensive capture: enabling history NEVER changes the "invalid input
+ *       => structured error, model byte-unchanged, no crash" behavior --------------- */
+
+static char *dup_cstr(const char *s) {
+    size_t n = strlen(s) + 1U;
+    char *c = (char *)malloc(n);
+    TEST_ASSERT_NOT_NULL(c);
+    memcpy(c, s, n);
+    return c;
+}
+
+/* The observable result of applying one op -- for enabled-vs-disabled equality. */
+typedef struct apply_probe {
+    tp_status st;
+    bool committed;
+    int64_t revision;
+    tp_status err0_code;
+    int err0_op;
+    char *serial; /* the model AFTER the apply (owned) */
+} apply_probe;
+
+static apply_probe apply_one(tp_model *m, tp_operation *op) {
+    tp_error err;
+    tp_txn_request req = {0};
+    req.schema = TP_TXN_SCHEMA;
+    next_txn_id(req.id_hex);
+    req.expected_revision = tp_model_revision(m);
+    req.ops = op;
+    req.op_count = 1;
+    tp_txn_result res;
+    apply_probe pr = {0};
+    pr.st = tp_model_apply(m, &req, &res, &err);
+    pr.committed = res.committed;
+    pr.revision = res.revision;
+    pr.err0_code = res.error_count > 0 ? res.errors[0].code : TP_STATUS_OK;
+    pr.err0_op = res.error_count > 0 ? res.errors[0].op_index : -999;
+    tp_txn_result_free(&res);
+    pr.serial = serialize(tp_model_project(m));
+    return pr;
+}
+
+/* The SAME hostile op applied to a history-ENABLED and a history-DISABLED model (both
+ * a fresh, deterministically-promoted make_base, so entity ids match) must reject with
+ * the SAME machine-contract result -- status, primary error code, offending op index,
+ * committed=false -- and leave EACH model byte-unchanged with no captured history. */
+static void assert_enabled_equals_disabled(tp_operation *op, tp_status want) {
+    tp_model *me = tp_model_wrap(make_base());
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_enable_history(me));
+    tp_model *md = tp_model_wrap(make_base()); /* history off */
+    char *before_e = serialize(tp_model_project(me));
+    char *before_d = serialize(tp_model_project(md));
+
+    apply_probe pe = apply_one(me, op);
+    apply_probe pd = apply_one(md, op);
+
+    TEST_ASSERT_EQUAL_INT(want, pd.st);        /* the F2-02 (history-less) baseline */
+    TEST_ASSERT_EQUAL_INT(want, pe.st);        /* history on: identical status, no crash */
+    TEST_ASSERT_FALSE(pd.committed);
+    TEST_ASSERT_FALSE(pe.committed);
+    TEST_ASSERT_EQUAL_INT(pd.err0_code, pe.err0_code); /* same primary error code */
+    TEST_ASSERT_EQUAL_INT(want, pe.err0_code);
+    TEST_ASSERT_EQUAL_INT(pd.err0_op, pe.err0_op);     /* same offending op index */
+    TEST_ASSERT_EQUAL_STRING(before_d, pd.serial);     /* model byte-unchanged (baseline) */
+    TEST_ASSERT_EQUAL_STRING(before_e, pe.serial);     /* model byte-unchanged (history on) */
+    TEST_ASSERT_EQUAL_INT(0, tp_model_undo_depth(me)); /* nothing captured */
+    TEST_ASSERT_FALSE(tp_model_can_undo(me));
+
+    free(before_e);
+    free(before_d);
+    free(pe.serial);
+    free(pd.serial);
+    tp_model_destroy(me);
+    tp_model_destroy(md);
+}
+
+/* the deterministic base ids (make_base promotes with a fixed rng, so every instance
+ * shares these). */
+static tp_id128 base_atlas0_id(void) {
+    tp_model *ref = tp_model_wrap(make_base());
+    tp_id128 id = tp_model_project(ref)->atlases[0].id;
+    tp_model_destroy(ref);
+    return id;
+}
+static tp_id128 base_anim0_id(void) {
+    tp_model *ref = tp_model_wrap(make_base());
+    tp_id128 id = tp_model_project(ref)->atlases[0].animations[0].id;
+    tp_model_destroy(ref);
+    return id;
+}
+
+void test_capture_dangling_atlas_rename(void) {
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_ATLAS_RENAME;
+    op.atlas_id = id_of(0xEE); /* no such atlas */
+    op.u.atlas_rename.name = (char *)"x";
+    assert_enabled_equals_disabled(&op, TP_STATUS_NOT_FOUND);
+}
+
+void test_capture_dangling_atlas_settings(void) {
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_ATLAS_SETTINGS_SET;
+    op.atlas_id = id_of(0xEE);
+    op.u.atlas_settings.mask = TP_AF_MAX_SIZE;
+    op.u.atlas_settings.max_size = 1234;
+    assert_enabled_equals_disabled(&op, TP_STATUS_NOT_FOUND);
+}
+
+void test_capture_dangling_atlas_remove(void) {
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_ATLAS_REMOVE;
+    op.atlas_id = id_of(0xEE);
+    assert_enabled_equals_disabled(&op, TP_STATUS_NOT_FOUND);
+}
+
+void test_capture_dangling_source_remove(void) {
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_SOURCE_REMOVE;
+    op.atlas_id = base_atlas0_id(); /* valid atlas ... */
+    op.u.source_ref.source_id = id_of(0xEE); /* ... dangling source */
+    assert_enabled_equals_disabled(&op, TP_STATUS_NOT_FOUND);
+}
+
+void test_capture_dangling_sprite_atlas(void) {
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_SPRITE_OVERRIDE_SET;
+    op.atlas_id = id_of(0xEE); /* dangling atlas -> grab_sprite must not deref NULL */
+    op.u.sprite_set.source_id = id_of(0x01);
+    op.u.sprite_set.src_key = (char *)"hero.png";
+    op.u.sprite_set.mask = TP_SPF_ORIGIN;
+    assert_enabled_equals_disabled(&op, TP_STATUS_NOT_FOUND);
+}
+
+void test_capture_dangling_anim_settings(void) {
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_ANIMATION_SETTINGS_SET;
+    op.atlas_id = base_atlas0_id();
+    op.u.anim_settings.anim_id = id_of(0xEE); /* dangling animation */
+    op.u.anim_settings.mask = TP_ANF_FPS;
+    op.u.anim_settings.fps = 12.0F;
+    assert_enabled_equals_disabled(&op, TP_STATUS_NOT_FOUND);
+}
+
+void test_capture_dangling_frame_remove_anim(void) {
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_ANIMATION_FRAME_REMOVE;
+    op.atlas_id = base_atlas0_id();
+    op.u.anim_frame_rm.anim_id = id_of(0xEE); /* dangling animation */
+    op.u.anim_frame_rm.index = 0;
+    assert_enabled_equals_disabled(&op, TP_STATUS_NOT_FOUND);
+}
+
+void test_capture_dangling_target_set(void) {
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_TARGET_SET;
+    op.atlas_id = base_atlas0_id();
+    op.u.target_set.target_id = id_of(0xEE); /* dangling target */
+    op.u.target_set.exporter_id = (char *)"defold";
+    op.u.target_set.out_path = (char *)"out/x";
+    op.u.target_set.enabled = true;
+    assert_enabled_equals_disabled(&op, TP_STATUS_NOT_FOUND);
+}
+
+/* [2] the frame.remove index is read from the op BEFORE apply validates it: an
+ * out-of-range index must yield OUT_OF_BOUNDS (not an OOB read), identical to the
+ * history-less path. */
+void test_capture_oob_frame_remove_index(void) {
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_ANIMATION_FRAME_REMOVE;
+    op.atlas_id = base_atlas0_id();
+    op.u.anim_frame_rm.anim_id = base_anim0_id(); /* walk: 2 frames */
+    op.u.anim_frame_rm.index = 99;                /* out of range */
+    assert_enabled_equals_disabled(&op, TP_STATUS_OUT_OF_BOUNDS);
+}
+
+/* ---- [3] reserve-OOM leaves the transaction id un-recorded / retryable ------------ */
+
+void test_reserve_oom_leaves_id_retryable(void) {
+    tp_model *m = fresh(); /* history enabled */
+    tp_error err;
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_ATLAS_RENAME;
+    op.atlas_id = a0_id(m);
+    op.u.atlas_rename.name = (char *)"renamed";
+
+    tp_txn_request req = {0};
+    req.schema = TP_TXN_SCHEMA;
+    next_txn_id(req.id_hex); /* ONE fixed id, reused on the retry */
+    req.expected_revision = tp_model_revision(m);
+    req.ops = &op;
+    req.op_count = 1;
+    char *before = serialize(tp_model_project(m));
+
+    /* history_reserve OOMs on this commit: it must fail cleanly BEFORE idstore->record. */
+    tp_history__test_fail_next_reserve();
+    tp_txn_result res;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OOM, tp_model_apply(m, &req, &res, &err));
+    TEST_ASSERT_FALSE(res.committed);
+    TEST_ASSERT_EQUAL_INT64(0, tp_model_revision(m)); /* unchanged */
+    TEST_ASSERT_EQUAL_INT(0, tp_model_undo_depth(m)); /* no history entry */
+    char *now = serialize(tp_model_project(m));
+    TEST_ASSERT_EQUAL_STRING(before, now); /* model byte-unchanged */
+    free(now);
+    tp_txn_result_free(&res);
+
+    /* Retry the SAME id at the SAME revision: the id was NOT recorded, so it is not
+     * poisoned to DUPLICATE_ID -- it commits. (With reserve AFTER record this rejects.) */
+    tp_txn_result res2;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_apply(m, &req, &res2, &err));
+    TEST_ASSERT_TRUE(res2.committed);
+    TEST_ASSERT_EQUAL_INT64(1, tp_model_revision(m));
+    TEST_ASSERT_EQUAL_INT(1, tp_model_undo_depth(m));
+    tp_txn_result_free(&res2);
+    free(before);
+    tp_model_destroy(m);
+}
+
+/* ---- [5a] all-fields completeness oracle: the safety net for the deep-copy fork ---- */
+
+/* An atlas whose EVERY persistent field -- and every field of every child entity kind
+ * (source, sparse sprite, animation + frames, target), including a RESOLVED sprite and
+ * frame (source_ref + src_key non-default) -- is non-default. Removing it captures the
+ * whole subtree through fill_atlas + every per-kind fork copy; a field the fork forgets
+ * to copy makes the inverse restore non-byte-identical and FAILS the oracle here. */
+static tp_project *make_maximal(void) {
+    tp_project *p = tp_project_create();
+    TEST_ASSERT_NOT_NULL(p);
+    int keep = -1;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_add_atlas(p, "keep", &keep)); /* realloc BEFORE we cache a */
+    tp_project_atlas *a = &p->atlases[0];
+    free(a->name);
+    a->name = dup_cstr("maxatlas");
+    a->max_size = 4096;
+    a->padding = 9;
+    a->margin = 3;
+    a->extrude = 5;
+    a->alpha_threshold = 123;
+    a->max_vertices = 7;
+    a->shape = 2;
+    a->allow_transform = false; /* default true  */
+    a->power_of_two = true;     /* default false */
+    a->pixels_per_unit = 3.5F;
+
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_source_kind(a, "art/hero", TP_SOURCE_KIND_FOLDER));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_source_kind(a, "art/tiles.png", TP_SOURCE_KIND_FILE));
+
+    /* sprite A: name-bridge (pending) with every other field non-default. */
+    tp_project_sprite *sp = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_sprite(a, "hero/walk_01", &sp));
+    sp->origin_x = 0.25F;
+    sp->origin_y = 0.75F;
+    sp->slice9_lrtb[0] = 4;
+    sp->slice9_lrtb[1] = 5;
+    sp->slice9_lrtb[2] = 8;
+    sp->slice9_lrtb[3] = 9;
+    sp->rename = dup_cstr("player_walk_01");
+    sp->ov_shape = 0;
+    sp->ov_allow_rotate = 0;
+    sp->ov_max_vertices = 6;
+    sp->ov_margin = 3;
+    sp->ov_extrude = 5;
+    /* sprite B: RESOLVED {source, key} -- exercises copy_sprite_fields' src_key dup. */
+    tp_project_sprite *sp2 = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_sprite(a, "grass", &sp2));
+    sp2->origin_x = 0.1F;
+
+    /* animation: every field non-default + two pending frames + one resolved frame. */
+    tp_project_anim *an = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_animation(a, "walk", &an));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "hero/walk_01"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "hero/walk_02"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "grass")); /* -> resolved below */
+    an->fps = 24.0F;
+    an->playback = 2;
+    an->flip_h = true;
+    an->flip_v = true;
+
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(a, "json-neotolis", "out/hero.json", NULL));
+    tp_project_target *t2 = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(a, "defold", "out/hero.tpinfo", &t2));
+    t2->enabled = false; /* default true */
+
+    uint8_t ctr = 7;
+    tp_rng rng = {det_fill, &ctr};
+    tp_error err;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_promote_ids(p, &rng, &err));
+    /* wire the resolved records to a real source id (ids exist only after promote); the
+     * name bridge (strip_ext(key)) already equals each record's name, so it round-trips. */
+    tp_id128 src_file = a->sources[1].id;
+    sp2->source_ref = src_file;
+    sp2->src_key = dup_cstr("grass.png");
+    an->frames[2].source_ref = src_file;
+    an->frames[2].src_key = dup_cstr("grass.png");
+    return p;
+}
+
+static void run_remove_oracle(tp_op_kind kind, tp_id128 anim_id, int frame_or_pos_unused) {
+    (void)frame_or_pos_unused;
+    tp_model *m = tp_model_wrap(make_maximal());
+    TEST_ASSERT_NOT_NULL(m);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_enable_history(m));
+    tp_project_atlas *a = &tp_model_project(m)->atlases[0];
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = kind;
+    op.atlas_id = a->id;
+    switch (kind) {
+        case TP_OP_SOURCE_REMOVE: op.u.source_ref.source_id = a->sources[1].id; break; /* the FILE source */
+        case TP_OP_ANIMATION_REMOVE: op.u.anim_ref.anim_id = anim_id; break;
+        case TP_OP_TARGET_REMOVE: op.u.target_ref.target_id = a->targets[1].id; break; /* the disabled target */
+        default: break; /* atlas.remove: atlas_id only */
+    }
+    run_oracle(m, &op, 1);
+    tp_model_destroy(m);
+}
+
+/* atlas.remove of the maximal atlas: fill_atlas + every per-kind fork copy at once. */
+void test_completeness_oracle_atlas_remove(void) { run_remove_oracle(TP_OP_ATLAS_REMOVE, tp_id128_nil(), 0); }
+/* each kind's STANDALONE copy_elem fork copy, all fields non-default. */
+void test_completeness_oracle_source_remove(void) { run_remove_oracle(TP_OP_SOURCE_REMOVE, tp_id128_nil(), 0); }
+void test_completeness_oracle_target_remove(void) { run_remove_oracle(TP_OP_TARGET_REMOVE, tp_id128_nil(), 0); }
+void test_completeness_oracle_anim_remove(void) {
+    tp_model *ref = tp_model_wrap(make_maximal());
+    tp_id128 anid = tp_model_project(ref)->atlases[0].animations[0].id;
+    tp_model_destroy(ref);
+    run_remove_oracle(TP_OP_ANIMATION_REMOVE, anid, 0);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_oracle_atlas_create);
@@ -912,5 +1249,22 @@ int main(void) {
     RUN_TEST(test_multi_step_undo_redo);
     RUN_TEST(test_dirty_clean_after_undo_to_saved_baseline);
     RUN_TEST(test_no_history_is_f2_02_behavior);
+    /* [1]/[2] defensive capture: history on == history off on hostile input, no crash */
+    RUN_TEST(test_capture_dangling_atlas_rename);
+    RUN_TEST(test_capture_dangling_atlas_settings);
+    RUN_TEST(test_capture_dangling_atlas_remove);
+    RUN_TEST(test_capture_dangling_source_remove);
+    RUN_TEST(test_capture_dangling_sprite_atlas);
+    RUN_TEST(test_capture_dangling_anim_settings);
+    RUN_TEST(test_capture_dangling_frame_remove_anim);
+    RUN_TEST(test_capture_dangling_target_set);
+    RUN_TEST(test_capture_oob_frame_remove_index);
+    /* [3] reserve-OOM keeps the transaction id retryable */
+    RUN_TEST(test_reserve_oom_leaves_id_retryable);
+    /* [5a] all-fields completeness oracle for the deep-copy fork */
+    RUN_TEST(test_completeness_oracle_atlas_remove);
+    RUN_TEST(test_completeness_oracle_source_remove);
+    RUN_TEST(test_completeness_oracle_target_remove);
+    RUN_TEST(test_completeness_oracle_anim_remove);
     return UNITY_END();
 }
