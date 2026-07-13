@@ -880,10 +880,12 @@ editing behavior; otherwise (not a collision → a journal/other failure) do NOT
 the editor (`cancel_edit`) like the success path and let `poll_async` surface the real op-error
 ("...could not be committed (disk full?)..."). **Regression J10:** a genuine duplicate → `set_anim_id`
 false AND `anim_id_exists` true (collision); a journal-failed flush on a unique name → `set_anim_id` false
-but `anim_id_exists` FALSE (not a collision). **Atlas/sprite rename confirmed FINE:** `commit_atlas_rename`
-/ `commit_active_edit` (atlas) pre-check via `atlas_name_valid` and, on a `set_atlas_name` false (flush-
-fail), show no success message and `cancel_edit()` unconditionally → no false success, no wrong-message
-trap; `commit_sprite_rename` guards its success message + `cancel_edit()`s (empty clears the override).
+but `anim_id_exists` FALSE (not a collision). **Atlas/sprite rename confirmed FINE:** `commit_active_edit`'s
+inlined atlas branch pre-checks via `atlas_name_valid` and, on a `set_atlas_name` false (flush-fail), shows
+no success message and `cancel_edit()`s unconditionally → no false success, no wrong-message trap;
+`commit_sprite_rename` guards its success message + `cancel_edit()`s (empty clears the override).
+(fix4 note: the anim disambiguation described here was itself still wrong — see the fix4 section below,
+which replaces the whole per-caller heuristic with flush-first-at-entry.)
 
 ### [2] cleanup — shared neutral flush-failure wording
 
@@ -904,8 +906,8 @@ review's other two cleanup candidates were refuted — skipped.)
 - **Confirmed SAFE, no change:** the ADD deferred handlers (`add_atlas`/`add_target`/`add_anim`/
   `create_animation_from_selection`) already guard success + Ctrl+Z on `idx >= 0`; `drain_edits`'s
   `(void)`-ignored coalescable setters + anim-frame + target edits show no message and run no side-effect
-  after the call (the op-error surfaces via `poll_async`); `commit_atlas_rename` / `commit_sprite_rename` /
-  `commit_active_edit` (atlas) guard their success message + always `cancel_edit()`; `do_browse_target_at`
+  after the call (the op-error surfaces via `poll_async`); `commit_active_edit` (atlas) + `commit_sprite_rename`
+  guard their success message + always `cancel_edit()`; `do_browse_target_at`
   guards its "Output path" message on `set_target` true. **Noted:** `do_add_files` multi-file add — the
   first file's add can abort on the buffered-gesture flush (the gesture drops, then the flush is clear for
   the rest); the summary counts only the files that actually added (honest count, op-error surfaced) — no
@@ -920,3 +922,78 @@ disambiguation: a real duplicate is a collision, a journal-failed flush on a uni
 `check_boundaries.sh` = boundaries OK. `--parity` id-normalized byte-identical (same 3237 B) to the
 f6a5225 baseline — no saved bytes changed. No file under `packer/src` / `external` / `packer/spike`
 changed; no core seam.
+
+## F2-05b-ii-B FIX⁴ — DEFINITIVE closure: flush-first at every interactive entry (2026-07-14)
+
+Each of the last three rounds found ONE more caller that misread the overloaded return of a flush-
+internally operation. **Root cause:** the operations flush the buffered gesture INTERNALLY and collapse
+(flush-failed vs domain-outcome) into ONE overloaded bool, so every caller re-derives — and the heuristics
+keep being wrong. **Terminal fix (the pattern the dirty-gate / pack / save already used):** call
+`flush_failed()` FIRST at the interactive action entry, so the operation's own internal flush is a
+guaranteed no-op and its return is DOMAIN-ONLY (empty-history / name-collision / removed / …). GUI-only;
+no core; saved bytes byte-identical.
+
+### [0]+[1] anim inline rename — flush-first, revert the heuristic
+
+fix3's `gui_project_anim_id_exists()` discriminator was WRONG: it returns true for the anim's OWN
+unchanged name, so pressing Enter without changing the name while the journal fails was misreported
+"Animation name must be unique." + trapped the editor ([0]); and its non-collision else-branch
+`cancel_edit()`d SILENTLY (a regression — pre-fix3 always warned) ([1]). **Fix:** `commit_active_edit`
+calls `flush_failed()` FIRST (before the kind switch) — on a journal-failed flush it surfaces the neutral
+error and aborts (keeping the editor open unless `force`). After a successful flush, the anim branch is
+the simple pre-fix3 `if (!set_anim_id) { "Animation name must be unique."; if (force) cancel_edit; return; }`
+— `set_anim_id` is a DIRECT write (never a journal append), so post-flush its only false is a genuine
+collision, the warning is correct again and never silent. The `anim_id_exists` heuristic is GONE from the
+rename path. The same entry flush-first covers the atlas + sprite branches (their rename ops DO journal; on
+that op's own append failure they return false → no success message + the op-error surfaces via
+`poll_async` — no false success, no wrong message).
+
+### [2] do_undo / do_redo — flush-first
+
+`gui_project_undo()/redo()` return false for BOTH a journal-failed flush AND an empty history, and
+`do_undo`/`do_redo` showed "Nothing to undo/redo." on false. **Fix:** `if (flush_failed()) return;` at the
+top of both. Verified in the core that `tp_model_undo`/`redo` do NOT append to the journal (they clone +
+replay a diff, `tp_history.c`), so after a successful entry flush the only false is `NOT_FOUND` (empty
+history) → "Nothing to undo/redo." is correct again.
+
+### [3]+[4] dead code + ADR reference
+
+`commit_anim_rename` and `commit_atlas_rename` were DEAD (no callers — the live Enter/blur path is
+`commit_active_edit`, which inlines atlas+anim and delegates only sprite). **Deleted both functions + their
+`gui_actions.h` declarations + fixed the stale start-edit comment.** Kept `commit_sprite_rename` (called by
+`commit_active_edit`). The fix3 ADR references to the dead `commit_atlas_rename` as the "safe path" are
+corrected to name `commit_active_edit`'s inlined atlas branch.
+
+### MANDATORY entry-point audit — the class is CLOSED (every entry is (a) flush-first or (b) domain-only)
+
+| entry point | flush-internally op it drives | classification |
+|---|---|---|
+| `request_new` / `request_open` / `request_exit` (dirty gate) | pending flush | **(a)** `flush_failed()` first (fix2) |
+| `do_pack` / `do_pack_blocking` / `do_export` | pending flush | **(a)** `flush_failed()` first (fix2) |
+| `gui_project_save` / `save_as` (via `do_save`/`do_save_as`) | pending flush + save | **(a)** flush-first + ABORT on fail (e3effef); callers check `== OK` |
+| `do_undo` / `do_redo` | pending flush + undo/redo | **(a)** `flush_failed()` first (fix4); post-flush false = empty-history |
+| `commit_active_edit` (atlas / sprite / anim) | pending flush + rename op | **(a)** `flush_failed()` first (fix4); domain-only after |
+| `commit_sprite_rename` (only caller: `commit_active_edit`) | `set_sprite_rename` (rename op) | **(b)** guards success on true; entry already flushed; op-fail → poll_async |
+| `do_browse_target_at` / `do_browse_target` | `set_target` | **(b)** shows "Output path" ONLY on true; no false success (op-error via poll_async) |
+| `do_add_files` / `do_add_folder` | `add_source_kind` (returns status) | **(b)** checks `GUI_ADD_*`; FAILED → error, honest count (multi-file partial noted) |
+| `do_refresh` | — (rescans disk + `mark_stale`; no mutation op) | **N/A** — no journal-fail interpretation |
+| apply_pending: add_atlas / add_target / add_anim / create_anim | add ops (return index) | **(b)** guard success + Ctrl+Z on `idx >= 0` |
+| apply_pending: remove_source / remove_atlas / remove_target / remove_anim | remove ops (return bool) | **(b)** guard side-effects + "Removed"/Ctrl+Z on the bool (fix3) |
+| apply_pending: `drain_edits` coalescable setters / anim-frame / target | setters (buffer) / frame / target ops | **(b)** `(void)`-ignored, no message/side-effect after; op-error via poll_async |
+| apply_pending: `s_pending_commit_edit` → `commit_active_edit` | (see above) | **(a)** (fix4) |
+| apply_pending: `s_gesture_commit` boundary flush | pending flush | **audited** — surfaces op-error, no proceed-as-clean decision after (fix2) |
+| `pending_route` / `gui_project_flush_elapsed` (internal coalescing) | pending flush | **audited** — drop-with-op-error then only BUFFER a new edit; no persist/discard (fix2) |
+| `main.c` handle_shortcuts: Delete-frame | `anim_remove_frame` (bool) | **(b)** clears selection only on true (fix3) |
+| `main.c` handle_shortcuts / `gui_view_chrome` buttons: undo/redo | → `do_undo`/`do_redo` | **(a)** delegate to the guarded entries |
+
+No **(c)** (misinterpreting) entry remains → the journal-failed-flush class is closed.
+
+### Verified (both presets)
+
+0 warnings (native-debug + native-release, cgltf filtered); `ctest` 79/79 (debug) + 78/78 (release);
+`ntpacker_gui_selftest` PASS — J1-J10 stay green; **J11** (anim rename: renaming to the OWN name is a no-op
+SUCCESS though `anim_id_exists` is true → the heuristic was invalid; a journal-failed flush is caught at the
+flush-first entry) and **J12** (`do_undo` after a journal-failed flush surfaces the disk-full error, NOT
+"Nothing to undo.") added. `check_boundaries.sh` = boundaries OK. `--parity` id-normalized byte-identical
+(same 3237 B) to the f6a5225 baseline. No file under `packer/src` / `external` / `packer/spike` changed; no
+core seam.

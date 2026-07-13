@@ -399,10 +399,10 @@ void cancel_edit(void) {
     s_edit_buf[0] = '\0';
 }
 
-/* --- start-edit entry points: the entry side of the same edit lifecycle as the inline-rename
- * commits below (commit_atlas_rename/commit_sprite_rename/commit_anim_rename). Moved here in step 4
- * (they are Clay-free) so gui_view_lists and gui_view_settings -- both of which start edits -- share
- * one home instead of step 5 re-deciding. --- */
+/* --- start-edit entry points: the entry side of the same edit lifecycle as the inline-rename commit
+ * path below (commit_active_edit, which inlines the atlas + animation rename and delegates the sprite
+ * rename to commit_sprite_rename). Moved here in step 4 (they are Clay-free) so gui_view_lists and
+ * gui_view_settings -- both of which start edits -- share one home instead of step 5 re-deciding. --- */
 void start_atlas_edit(int i) {
     tp_project *p = gui_project_get();
     if (!p || i < 0 || i >= p->atlas_count) {
@@ -955,6 +955,11 @@ void do_undo(void) {
     if (busy_block()) {
         return; /* same async-busy guard as new/open/exit -- undo mid-pack then a pre-undo land is confusing */
     }
+    if (flush_failed()) {
+        return; /* fix4 [2]: a buffered gesture could not be journaled -> abort (error surfaced), never
+                 * undo a DIFFERENT step. After this, gui_project_undo()'s false means empty-history only
+                 * (undo does NOT journal), so "Nothing to undo." below is correct again. */
+    }
     if (gui_project_undo()) {
         gui_pack_clear(-1);
         gui_shell_reset_shown_result();
@@ -970,6 +975,9 @@ void do_undo(void) {
 void do_redo(void) {
     if (busy_block()) {
         return;
+    }
+    if (flush_failed()) {
+        return; /* fix4 [2]: a journal-failed flush is not "Nothing to redo" -- abort (error surfaced) */
     }
     if (gui_project_redo()) {
         gui_pack_clear(-1);
@@ -1320,19 +1328,9 @@ static void poll_async(void) {
 // #endregion
 
 // #region inline rename commit
-void commit_atlas_rename(void) {
-    char err[128];
-    if (!atlas_name_valid(s_edit_buf, s_edit_atlas, err, sizeof err)) {
-        set_status_ex(STATUS_WARNING, err); /* keep editing on invalid input */
-        return;
-    }
-    if (gui_project_set_atlas_name(s_edit_atlas, s_edit_buf)) {
-        set_statusf("Renamed atlas to '%s'", s_edit_buf);
-    }
-    cancel_edit();
-}
 void commit_sprite_rename(void) {
-    /* empty input clears the override back to the file-derived name */
+    /* empty input clears the override back to the file-derived name. (Reached only via commit_active_edit,
+     * which flush-firsts, so set_sprite_rename's own flush is a no-op here.) */
     if (gui_project_set_sprite_rename(s_sel_atlas, s_edit_sprite, s_edit_buf)) {
         if (s_edit_buf[0] == '\0') {
             set_statusf("Cleared rename on '%s'", s_edit_sprite);
@@ -1342,29 +1340,33 @@ void commit_sprite_rename(void) {
     }
     cancel_edit();
 }
-void commit_anim_rename(void) {
-    if (s_edit_buf[0] == '\0') {
-        set_status_ex(STATUS_WARNING, "Animation name cannot be empty.");
-        return; /* keep editing */
-    }
-    if (gui_project_set_anim_id(s_sel_atlas, s_edit_anim, s_edit_buf)) {
-        set_statusf("Renamed animation to '%s'", s_edit_buf);
-        cancel_edit();
-    } else if (gui_project_anim_id_exists(s_sel_atlas, s_edit_buf)) {
-        set_statusf_ex(STATUS_WARNING, "Animation '%s' already exists.", s_edit_buf); /* genuine collision -> keep editing */
-    } else {
-        /* fix3 [1]: NOT a collision -> a journal/other failure. Do NOT misreport it as a duplicate or
-         * trap the editor; dismiss like a successful rename and let poll_async surface the real op-error
-         * ("...could not be committed (disk full?)..."). */
-        cancel_edit();
-    }
-}
 
 /* Commit the active inline edit as if Enter was pressed (click-outside / model-change path).
  * `force` = the editor is being dismissed involuntarily: an invalid atlas name CANCELS instead of
  * keeping a zombie editor (the validation message stays in the status bar). Sprite rename never
- * zombies (empty clears the override). No-op when nothing is being edited. */
+ * zombies (empty clears the override). No-op when nothing is being edited.
+ *
+ * fix4 (DEFINITIVE closure of the journal-failed-flush class): FLUSH-FIRST at the entry via
+ * flush_failed(). Any buffered gesture is committed-or-aborted HERE; on a journal-failed flush the
+ * neutral error is surfaced and we abort (keeping the editor open unless forced, so the user can retry
+ * after freeing disk). After a successful flush, each rename op's OWN internal flush is a guaranteed
+ * no-op, so its return is DOMAIN-ONLY: for the anim branch (set_anim_id is a DIRECT write, never a
+ * journal append) a false is a genuine name collision, so the "must be unique" warning is correct again
+ * and never silent -- no anim_id_exists heuristic (fix3's heuristic was wrong: it matched the anim's own
+ * unchanged name). set_atlas_name / set_sprite_rename journal their rename op; on that op's OWN append
+ * failure they return false -> no success message + the op-error surfaces via poll_async (not a false
+ * success, not a wrong "already exists"). */
 static void commit_active_edit(bool force) {
+    if (s_edit_kind == EDIT_NONE) {
+        return; /* nothing being edited */
+    }
+    if (flush_failed()) {
+        /* a buffered gesture could not be journaled -> abort the rename commit (error already surfaced) */
+        if (force) {
+            cancel_edit();
+        }
+        return;
+    }
     if (s_edit_kind == EDIT_ATLAS) {
         char err[128];
         if (!atlas_name_valid(s_edit_buf, s_edit_atlas, err, sizeof err)) {
@@ -1389,15 +1391,9 @@ static void commit_active_edit(bool force) {
             return;
         }
         if (!gui_project_set_anim_id(s_sel_atlas, s_edit_anim, s_edit_buf)) {
-            /* fix3 [1]: distinguish a genuine name collision (keep the message + keep editing unless
-             * forced) from a journal/other failure (do NOT claim uniqueness -- dismiss + let poll_async
-             * surface the real op-error). */
-            if (gui_project_anim_id_exists(s_sel_atlas, s_edit_buf)) {
-                set_status_ex(STATUS_WARNING, "Animation name must be unique.");
-                if (force) {
-                    cancel_edit();
-                }
-            } else {
+            /* post-flush: set_anim_id (a direct write) can only fail on a genuine name collision. */
+            set_status_ex(STATUS_WARNING, "Animation name must be unique.");
+            if (force) {
                 cancel_edit();
             }
             return;

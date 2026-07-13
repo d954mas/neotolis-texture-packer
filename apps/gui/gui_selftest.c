@@ -1374,6 +1374,66 @@ void run_selftest(void) {
                   "J10/[1]: a journal-failed flush on a UNIQUE name -> set_anim_id false but anim_id_exists FALSE (not a collision)");
         (void)gui_project_take_op_error(NULL, 0);
 
+        /* (J11) fix4 [0]/[1]: the anim-rename FLUSH-FIRST pattern. anim_id_exists (fix3's heuristic) is
+         *       NOT a valid collision discriminator: it returns true for the anim's OWN name, yet renaming
+         *       to the own name is a no-op SUCCESS -- so on a journal-fail (which also makes set_anim_id
+         *       false) fix3 misreported the OWN/unchanged name as "must be unique" + trapped the editor.
+         *       fix4 flush-FIRST at the entry catches the journal-fail BEFORE set_anim_id, so post-flush a
+         *       false is a genuine collision only. (commit_active_edit is a static UI fn -- not directly
+         *       callable headless; we exercise its building blocks.) */
+        gui_project_new();
+        gui_pack_clear(-1);
+        s_sel_atlas = 0;
+        (void)gui_project_take_op_error(NULL, 0);
+        const int j11a = gui_project_create_animation(0, "keep_me", NULL, 0);
+        NT_ASSERT(j11a == 0 && "J11: created an animation");
+        /* (C) own/unchanged name -> a no-op SUCCESS (true) EVEN THOUGH anim_id_exists is true: proving the
+         *     heuristic can't discriminate (the name "exists" but the rename succeeds). */
+        const bool j11_own_ret = gui_project_set_anim_id(0, j11a, "keep_me");
+        const bool j11_own_exists = gui_project_anim_id_exists(0, "keep_me");
+        nt_log_info("SELFTEST: J11 own-name ret=%d exists=%d (want 1,1 -> a no-op SUCCESS despite exists=true)",
+                    (int)j11_own_ret, (int)j11_own_exists);
+        NT_ASSERT(j11_own_ret && j11_own_exists &&
+                  "J11/[0]: renaming to the OWN name is a no-op SUCCESS though anim_id_exists is true (heuristic invalid)");
+        /* (flush-first) a journal-failed flush is caught at the ENTRY guard (flush_failed/flush_pending),
+         *     BEFORE set_anim_id -- so a disk-full on the own/unchanged name is never a false collision. */
+        tp_journal_io j11io = gui_project__test_attach_memory_journal();
+        NT_ASSERT(j11io.ctx && "J11: memory journal attached");
+        const int j11pad = tp_project_get_atlas(gui_project_get(), 0)->padding;
+        (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, j11pad + 1, 0.0F); /* buffered gesture */
+        tp_journal_io_memory__fail_next_writes(j11io, 1);
+        const bool j11_entry_flush = gui_project_flush_pending(); /* the entry guard commit_active_edit runs FIRST */
+        char j11_ferr[256] = {0};
+        const bool j11_fsurfaced = gui_project_take_op_error(j11_ferr, sizeof j11_ferr);
+        nt_log_info("SELFTEST: J11 entry-flush ret=%d surfaced=%d (want 0,1 -> journal-fail caught at the entry)",
+                    (int)j11_entry_flush, (int)j11_fsurfaced);
+        NT_ASSERT(!j11_entry_flush && j11_fsurfaced &&
+                  "J11/[0]: a journal-failed flush is caught at the flush-first ENTRY (never reaches set_anim_id)");
+        (void)gui_project_take_op_error(NULL, 0);
+
+        /* (J12) fix4 [2]: do_undo must NOT report a journal-failed flush as "Nothing to undo." It
+         *       flush-firsts (flush_failed) -- a buffered gesture + armed append-fail surfaces the flush
+         *       error and returns BEFORE gui_project_undo (whose false would else be misread as empty). */
+        gui_project_new();
+        gui_pack_clear(-1);
+        s_sel_atlas = 0;
+        (void)gui_project_take_op_error(NULL, 0);
+        NT_ASSERT(gui_project_set_atlas_name(0, "j12_edit") && "J12: a committed edit populates undo history");
+        tp_journal_io j12io = gui_project__test_attach_memory_journal();
+        NT_ASSERT(j12io.ctx && "J12: memory journal attached");
+        const int j12pad = tp_project_get_atlas(gui_project_get(), 0)->padding;
+        (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, j12pad + 5, 0.0F); /* buffered gesture */
+        tp_journal_io_memory__fail_next_writes(j12io, 1);
+        set_status("j12_sentinel"); /* a sentinel so we can tell do_undo replaced the status */
+        do_undo();                  /* flush-first: shows the flush error + returns; must NOT be "Nothing to undo." */
+        nt_log_info("SELFTEST: J12 do_undo-after-journal-fail status='%s' (want the disk-full error, NOT 'Nothing to undo.')",
+                    s_status);
+        NT_ASSERT(strcmp(s_status, "Nothing to undo.") != 0 &&
+                  "J12/[2]: a journal-failed flush is NOT reported as 'Nothing to undo.'");
+        NT_ASSERT(strstr(s_status, "disk full") != NULL &&
+                  "J12/[2]: do_undo surfaces the disk-full flush error on a journal-failed flush");
+        (void)gui_project_take_op_error(NULL, 0);
+
         /* Done: disable recovery + release any lock + restore a journal-LESS packable project for the
          * render phases. */
         gui_project_enable_recovery("");

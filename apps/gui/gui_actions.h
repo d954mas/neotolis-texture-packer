@@ -116,9 +116,10 @@ void start_sprite_edit_named(const char *sprite_name);
 void start_sprite_edit(const sprite_row *row);
 
 /* --- inline rename commits --- */
-void commit_atlas_rename(void);
+/* The live Enter/blur path is commit_active_edit (static, gui_actions.c), which inlines the atlas +
+ * animation rename and delegates the sprite rename to commit_sprite_rename. (fix4 deleted the dead
+ * commit_atlas_rename / commit_anim_rename that had no callers.) */
 void commit_sprite_rename(void);
-void commit_anim_rename(void);
 
 /* --- animation ops + preview player (ux.md §3.7b) --- */
 tp_project_anim *current_anim(void); /* selected animation of the selected atlas, or NULL */
