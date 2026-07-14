@@ -7,6 +7,15 @@ if(NOT NT_PRESET_NAME)
     get_filename_component(NT_PRESET_NAME "${CMAKE_BINARY_DIR}" NAME)
 endif()
 
+# ccache: transparently cache compiles when it's installed (local dev + CI), set BEFORE the
+# engine subdir so both trees inherit it. No-op when ccache isn't on PATH, so a clean-clone
+# build never depends on it; the NOT-already-set guard leaves CI's env-exported launcher alone.
+find_program(CCACHE_PROGRAM ccache)
+if(CCACHE_PROGRAM AND NOT CMAKE_C_COMPILER_LAUNCHER)
+    set(CMAKE_C_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+    set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+endif()
+
 # Universal-packer max page size (owner 2026-07-10): lift the engine's mobile-safe
 # 4096 default to 16384. NT_BUILD_MAX_TEXTURE_SIZE is #ifndef-guarded in nt_builder.h,
 # so defining it here BEFORE any add_subdirectory makes every TU -- engine builder AND
