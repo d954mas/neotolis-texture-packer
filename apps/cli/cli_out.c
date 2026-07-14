@@ -106,12 +106,18 @@ void cli_out_stdout(const cli_sb *sb) {
     (void)fputc('\n', stdout);
 }
 
-void cli_emit_error(bool json, bool quiet, const char *id, const char *fmt, ...) {
+/* Shared body for cli_emit_error / cli_emit_reject: formats the message once, then
+ * emits. JSON mode -> {"schema":1,"error":{"id":...,"message":...[,"field":...,
+ * "op_index":...]}} to STDOUT; text mode -> "ntpacker: error [id]: msg" to STDERR
+ * (suppressed by --quiet). `has_loc` gates the two reject-only fields so the generic
+ * cli_emit_error output stays byte-identical. */
+static void emit_error_v(bool json, bool quiet, const char *id, bool has_loc, const char *field, int op_index,
+                         const char *fmt, va_list ap) CLI_PRINTF_ATTR(7, 0);
+
+static void emit_error_v(bool json, bool quiet, const char *id, bool has_loc, const char *field, int op_index,
+                         const char *fmt, va_list ap) {
     char msg[256];
-    va_list ap;
-    va_start(ap, fmt);
     (void)vsnprintf(msg, sizeof msg, fmt, ap);
-    va_end(ap);
 
     if (json) {
         cli_sb sb = {0};
@@ -119,12 +125,39 @@ void cli_emit_error(bool json, bool quiet, const char *id, const char *fmt, ...)
         cli_sb_json_str(&sb, id);
         cli_sb_str(&sb, ",\"message\":");
         cli_sb_json_str(&sb, msg);
+        if (has_loc) {
+            cli_sb_str(&sb, ",\"field\":");
+            cli_sb_json_str(&sb, field ? field : "");
+            cli_sb_str(&sb, ",\"op_index\":");
+            cli_sb_int(&sb, op_index);
+        }
         cli_sb_str(&sb, "}}");
+        if (sb.oom) { /* a failed grow poisons the builder -> the buffer is TRUNCATED. Never emit a
+                       * partial (unparseable) --json line on the machine contract: fall back to a
+                       * minimal VALID error object, mirroring cli_emit_mutation's OOM guard. */
+            cli_sb_free(&sb);
+            (void)fputs("{\"schema\":1,\"error\":{\"id\":\"internal\"}}\n", stdout);
+            return;
+        }
         cli_out_stdout(&sb);
         cli_sb_free(&sb);
     } else if (!quiet) {
         (void)fprintf(stderr, "ntpacker: error [%s]: %s\n", id, msg);
     }
+}
+
+void cli_emit_error(bool json, bool quiet, const char *id, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    emit_error_v(json, quiet, id, false, "", -1, fmt, ap);
+    va_end(ap);
+}
+
+void cli_emit_reject(bool json, bool quiet, const char *id, const char *field, int op_index, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    emit_error_v(json, quiet, id, true, field, op_index, fmt, ap);
+    va_end(ap);
 }
 
 void cli_emit_mutation(const char *verb, int count) {

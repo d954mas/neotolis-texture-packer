@@ -12,29 +12,41 @@ file(MAKE_DIRECTORY "${WORK}")
 set(PROJ "${WORK}/p.ntpacker_project")
 set(SPRITES "${TD}/sprites")
 
-# run(<expected-exit> <ntpacker args...>): fail loudly on a mismatch.
-function(run EXPECT)
+# _run(<expected-exit> <ntpacker args...>): run EXE with the args, assert the exit code, and
+# expose captured stdout to the CALLER as ${_out}. Single home for the execute_process +
+# exit-check + failure-diagnostics so run/run_json/run_match never drift apart.
+function(_run EXPECT)
     execute_process(COMMAND "${EXE}" ${ARGN}
         RESULT_VARIABLE _c OUTPUT_VARIABLE _o ERROR_VARIABLE _e)
     if(NOT "${_c}" STREQUAL "${EXPECT}")
         message(FATAL_ERROR "[${FAMILY}] '${ARGN}'\n  exit ${_c} != expected ${EXPECT}\n--stdout--\n${_o}\n--stderr--\n${_e}")
     endif()
+    set(_out "${_o}" PARENT_SCOPE)
+endfunction()
+
+# run(<expected-exit> <ntpacker args...>): fail loudly on an exit-code mismatch.
+function(run EXPECT)
+    _run(${EXPECT} ${ARGN})
 endfunction()
 
 # run_json(<expected-exit> <checker-mode+assertions;-list> <ntpacker args...>):
 # runs the command, writes stdout to a temp file, and validates it with cli_json_check.
 function(run_json EXPECT CHECKARGS)
-    execute_process(COMMAND "${EXE}" ${ARGN}
-        RESULT_VARIABLE _c OUTPUT_VARIABLE _o ERROR_VARIABLE _e)
-    if(NOT "${_c}" STREQUAL "${EXPECT}")
-        message(FATAL_ERROR "[${FAMILY}] '${ARGN}'\n  exit ${_c} != expected ${EXPECT}\n--stdout--\n${_o}\n--stderr--\n${_e}")
-    endif()
+    _run(${EXPECT} ${ARGN})
     set(_f "${WORK}/_out.json")
-    file(WRITE "${_f}" "${_o}")
+    file(WRITE "${_f}" "${_out}")
     execute_process(COMMAND "${CHECKER}" "${_f}" ${CHECKARGS}
         RESULT_VARIABLE _cc OUTPUT_VARIABLE _co ERROR_VARIABLE _ce)
     if(NOT _cc EQUAL 0)
-        message(FATAL_ERROR "[${FAMILY}] json check failed on '${ARGN}': ${_co}${_ce}\n--payload--\n${_o}")
+        message(FATAL_ERROR "[${FAMILY}] json check failed on '${ARGN}': ${_co}${_ce}\n--payload--\n${_out}")
+    endif()
+endfunction()
+
+# run_match(<expected-exit> <stdout-regex> <ntpacker args...>): run, assert exit, assert stdout matches.
+function(run_match EXPECT REGEX)
+    _run(${EXPECT} ${ARGN})
+    if(NOT "${_out}" MATCHES "${REGEX}")
+        message(FATAL_ERROR "[${FAMILY}] '${ARGN}'\n  stdout did not match /${REGEX}/\n--stdout--\n${_out}")
     endif()
 endfunction()
 
@@ -102,6 +114,10 @@ elseif(FAMILY STREQUAL "set")
     run(0 set "${PROJ}" atlas1 allow_transform=false power_of_two=true pixels_per_unit=50)
     assert_contains("\"pixels_per_unit\": 50")
     run(2 set "${PROJ}" atlas1 max_size=99999)                 # out of range -> usage
+    # H/P2-12: the --json reject payload must localize the offending op -- carry the core
+    # error's `field` (closed-vocabulary key) + `op_index` (0 = first/only op), not just id+message.
+    # `.*` between the two keys tolerates a future added key without pinning exact adjacency.
+    run_match(2 "\"field\":\"max_size\".*\"op_index\":0" set "${PROJ}" atlas1 max_size=99999 --json)
     run(2 set "${PROJ}" atlas1 bogus=1)                        # unknown key -> usage
     run(2 set "${PROJ}" atlas1 max_size=notanumber)            # malformed value -> usage
     run(2 set "${PROJ}" atlas1 name=x)                         # steer to atlas rename -> usage

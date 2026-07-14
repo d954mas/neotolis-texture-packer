@@ -404,13 +404,19 @@ static int map_reject_exit(tp_status code) {
 static int emit_reject(const tp_txn_result *res, tp_status st, const tp_error *err, bool json, bool quiet) {
     tp_status code = st;
     const char *msg = (err && err->msg[0]) ? err->msg : tp_status_str(st);
+    /* Localization defaults for the no-structured-reject path (res NULL / no errors):
+     * "" field + -1 op_index = "envelope level, no field" -- a stable schema for parsers. */
+    const char *field = "";
+    int op_index = -1;
     if (res && res->error_count > 0) {
         code = res->errors[0].code;
         if (res->errors[0].message[0]) {
             msg = res->errors[0].message;
         }
+        field = res->errors[0].field;       /* char[64], always NUL-terminated ("" if none) */
+        op_index = res->errors[0].op_index; /* >=0 = op position; -1 = envelope/revision level */
     }
-    cli_emit_error(json, quiet, tp_status_id(code), "%s", msg);
+    cli_emit_reject(json, quiet, tp_status_id(code), field, op_index, "%s", msg);
     return map_reject_exit(code);
 }
 

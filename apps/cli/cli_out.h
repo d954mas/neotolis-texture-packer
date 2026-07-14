@@ -38,6 +38,13 @@ void cli_out_stdout(const cli_sb *sb);
  * writes both streams. `id` is a stable machine token (usage/tp_status_id/...). */
 void cli_emit_error(bool json, bool quiet, const char *id, const char *fmt, ...) CLI_PRINTF_ATTR(4, 5);
 
+/* Structured error for a REJECTED transaction: like cli_emit_error but the JSON
+ * payload also carries the offending op's `field` (closed-vocabulary key; "" if
+ * none) and `op_index` (>=0 = op position; -1 = envelope/revision level). Only the
+ * transaction-reject path uses this. Text mode (stderr) is IDENTICAL to cli_emit_error. */
+void cli_emit_reject(bool json, bool quiet, const char *id, const char *field, int op_index, const char *fmt, ...)
+    CLI_PRINTF_ATTR(6, 7);
+
 /* Minimal, shared success payload for the B4 mutation verbs, emitted to STDOUT:
  * {"schema":1,"ok":true,"verb":"<verb>","count":<count>}. Defined once, kept tiny
  * (plan B4 item 8). `count` = the number of primary items affected (sources added,
