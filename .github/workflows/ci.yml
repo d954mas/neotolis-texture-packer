@@ -117,11 +117,8 @@ jobs:
           echo "CMAKE_C_COMPILER_LAUNCHER=ccache" >> $GITHUB_ENV
           echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache" >> $GITHUB_ENV
 
-      # NT_ASSERT_MODE=2 (FULL): asserts print their message before trapping. Default TRAP mode
-      # (no NT_DEBUG) does a silent __builtin_trap() (SIGILL) with no message -- FULL surfaces WHICH
-      # assert fails so a Linux-only failure is diagnosable (it passes locally on Windows).
       - name: Configure
-        run: cmake --preset native-tests-debug -DNT_ASSERT_MODE=2
+        run: cmake --preset native-tests-debug
 
       # Build ONLY the self-test exe. Building everything would also compile the packer/spike
       # test exes, which (unlike the app targets tp_core/tp_build/ntpacker-gui/ntpacker) do not
@@ -134,6 +131,11 @@ jobs:
       # modern GL context with no GPU. LSan (part of ASan) is off for now -- the engine/GL driver
       # never free some allocations on a deliberate process exit, which would fail the job on benign
       # leaks; ASan memory-error detection + UBSan (the UAF class we want) stay on. Leak baseline TODO.
+      # NTPACKER_GUI_HEADLESS=1: this runner has no real GL -- under xvfb+llvmpipe the engine's
+      # materials/shaders/font atlas never reach "ready" (can_render stays false, nothing rasterizes),
+      # so the self-test's render/layout VISUAL phases (outline pixel probe, touch-on-render, overflow
+      # sweeps) are skipped. The full logical selftest (journal/undo/recovery/pack/export/rename) and the
+      # GL-independent async-shutdown phase still run under ASan+UBSan; the visual phases stay hard locally.
       - name: Run GUI self-test (headless, software GL, ASan+UBSan)
         if: runner.os == 'Linux'
         env:
@@ -141,4 +143,5 @@ jobs:
           GALLIUM_DRIVER: llvmpipe
           ASAN_OPTIONS: "detect_leaks=0"
           UBSAN_OPTIONS: "print_stacktrace=1"
+          NTPACKER_GUI_HEADLESS: "1"
         run: xvfb-run -a ctest --preset native-tests-debug -R ntpacker_gui_selftest --output-on-failure
