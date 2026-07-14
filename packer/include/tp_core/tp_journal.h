@@ -17,9 +17,12 @@
  *
  * ON-DISK FORMAT (byte-deterministic, endian-stable, self-describing, checksummed):
  *   header : MAGIC[8] "NTPKJRNL" | format_version u32 BE | key[16]
- *   record : payload_len u32 BE | payload[payload_len] | crc32 u32 BE
- *            crc32 covers (payload_len bytes ++ payload). All multi-byte integers
- *            are written byte-at-a-time big-endian (no host-endian punning).
+ *   record : sync u32 BE (TP_JRN_SYNC_WORD) | payload_len u32 BE | payload[payload_len] | crc32 u32 BE
+ *            crc32 covers (sync ++ payload_len ++ payload). All multi-byte integers are
+ *            written byte-at-a-time big-endian (no host-endian punning). The fixed
+ *            per-record sync-word lets recovery re-synchronise after a corrupt length
+ *            field (plan S18 R / P1-5): a torn TAIL (no valid record follows) is truncated,
+ *            a mid-stream corruption (a valid record still follows) is preserved.
  *   payload: rec_type u8 (1=TXN, 2=CHECKPOINT) then --
  *            TXN        : tx_id[32] hex | revision i64 BE | snapshot[rest]
  *            CHECKPOINT : revision i64 BE | id_count u32 BE | id[32]*id_count | snapshot[rest]
@@ -40,8 +43,10 @@
 extern "C" {
 #endif
 
-/* Current on-disk journal format version -- the only version this build reads. */
-#define TP_JOURNAL_FORMAT_VERSION 1
+/* Current on-disk journal format version -- the only version this build reads. v2 adds
+ * the per-record sync-word (plan S18 R / P1-5 framing robustness); a v1 journal is treated
+ * as an incompatible BAD_HEADER (the sidecar is ephemeral and compacted away on Save). */
+#define TP_JOURNAL_FORMAT_VERSION 2
 
 /* ---- injectable I/O seam ------------------------------------------------- *
  * The journal never calls the filesystem directly: all durability goes through

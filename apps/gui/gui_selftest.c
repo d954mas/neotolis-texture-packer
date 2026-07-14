@@ -127,8 +127,8 @@ static bool selftest_file_exists(const char *path) {
 /* F2-05b-ii-B fix [2] test helper: flip one payload byte of the (0-based) `rec_index`-th record in a
  * journal file so replay reports CORRUPT at that record. If a LATER record follows it, the corruption
  * is MID-STREAM (F2-04 C2 -> tp_model_recover returns a usable model with a POISONED journal). Walks
- * the byte-exact frame layout (28-byte header, then [len u32 BE | payload | crc u32 BE] records) so it
- * is robust to snapshot size. Returns true if the record was found + corrupted. */
+ * the byte-exact frame layout (28-byte header, then [sync u32 BE | len u32 BE | payload | crc u32 BE]
+ * records, v2) so it is robust to snapshot size. Returns true if the record was found + corrupted. */
 static bool selftest_corrupt_journal_record(const char *path, int rec_index) {
     FILE *f = fopen(path, "r+b");
     if (!f) {
@@ -143,10 +143,11 @@ static bool selftest_corrupt_journal_record(const char *path, int rec_index) {
         unsigned char *buf = (unsigned char *)malloc(sz);
         if (buf && fread(buf, 1, sz, f) == sz) {
             size_t off = 28; /* skip the header */
-            for (int i = 0; off + 4U <= sz; i++) {
-                uint32_t plen = ((uint32_t)buf[off] << 24) | ((uint32_t)buf[off + 1] << 16) |
-                                ((uint32_t)buf[off + 2] << 8) | (uint32_t)buf[off + 3];
-                size_t payload = off + 4U;
+            for (int i = 0; off + 8U <= sz; i++) {
+                /* frame = sync u32 | payload_len u32 | payload | crc u32 (v2) -- len follows the sync-word */
+                uint32_t plen = ((uint32_t)buf[off + 4] << 24) | ((uint32_t)buf[off + 5] << 16) |
+                                ((uint32_t)buf[off + 6] << 8) | (uint32_t)buf[off + 7];
+                size_t payload = off + 8U;
                 if (i == rec_index) {
                     if (payload + 5U < sz) {
                         buf[payload + 5U] ^= 0xFFU; /* flip a payload byte -> crc mismatch at this record */

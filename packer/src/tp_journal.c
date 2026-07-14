@@ -190,15 +190,17 @@ static tp_status write_record(tp_journal *j, const uint8_t *payload, size_t payl
     if (prior < 0) {
         return journal_fail(err, "journal length query failed");
     }
-    size_t reclen = (size_t)TP_JRN_LEN_FIELD + payload_len + (size_t)TP_JRN_CRC_FIELD;
+    size_t reclen = (size_t)TP_JRN_SYNC_FIELD + (size_t)TP_JRN_LEN_FIELD + payload_len + (size_t)TP_JRN_CRC_FIELD;
     uint8_t *rec = (uint8_t *)malloc(reclen);
     if (!rec) {
         return tp_error_set(err, TP_STATUS_OOM, "journal record buffer allocation failed");
     }
-    tp_jrn_put_u32(rec, (uint32_t)payload_len);
-    memcpy(rec + TP_JRN_LEN_FIELD, payload, payload_len);
-    uint32_t crc = tp_jrn_crc32(0, rec, (size_t)TP_JRN_LEN_FIELD + payload_len);
-    tp_jrn_put_u32(rec + (size_t)TP_JRN_LEN_FIELD + payload_len, crc);
+    tp_jrn_put_u32(rec, (uint32_t)TP_JRN_SYNC_WORD);
+    tp_jrn_put_u32(rec + TP_JRN_SYNC_FIELD, (uint32_t)payload_len);
+    memcpy(rec + (size_t)TP_JRN_SYNC_FIELD + (size_t)TP_JRN_LEN_FIELD, payload, payload_len);
+    size_t crc_span = (size_t)TP_JRN_SYNC_FIELD + (size_t)TP_JRN_LEN_FIELD + payload_len;
+    uint32_t crc = tp_jrn_crc32(0, rec, crc_span);
+    tp_jrn_put_u32(rec + crc_span, crc);
     int64_t w = j->io.write(j->io.ctx, rec, reclen);
     free(rec);
     if (w != (int64_t)reclen) {
@@ -346,6 +348,68 @@ static tp_status decode_payload(tp_journal *j, const uint8_t *pl, size_t plen, s
     return TP_STATUS_OUT_OF_BOUNDS; /* unknown record type => corruption */
 }
 
+/* One record frame's parse+validate outcome. FRAME_OK => well-formed and CRC-valid;
+ * FRAME_INCOMPLETE => too few bytes (short header, payload overrun, or short crc) -- a torn
+ * tail OR a bloated length field; FRAME_BAD => a present-but-invalid frame (bad sync-word or
+ * a CRC mismatch on a complete record). */
+typedef enum { FRAME_OK, FRAME_INCOMPLETE, FRAME_BAD } tp_frame_status;
+
+/* Parse + CRC-validate the record frame at offset `p` -- the SINGLE source of truth for the
+ * v2 frame geometry [sync u32 | len u32 | payload | crc u32]. On FRAME_OK sets *payload_off
+ * (payload start), *payload_len, and *frame_end (byte just past the crc). Bounds-checked /
+ * UB-clean on arbitrary bytes: no read is issued past `len` and a bloated length never
+ * allocates. Both the recovery walk AND has_valid_record_after go through this so the
+ * truncate-vs-preserve decision can never desync from how records are actually parsed. */
+static tp_frame_status frame_parse_at(const uint8_t *buf, size_t len, size_t p, size_t *payload_off,
+                                      size_t *payload_len, size_t *frame_end) {
+    if (p > len || len - p < (size_t)TP_JRN_SYNC_FIELD + (size_t)TP_JRN_LEN_FIELD) {
+        return FRAME_INCOMPLETE; /* not enough bytes for a frame header (sync + len) */
+    }
+    if (tp_jrn_get_u32(buf + p) != (uint32_t)TP_JRN_SYNC_WORD) {
+        return FRAME_BAD; /* framing lost: this offset is not a record boundary */
+    }
+    size_t len_off = p + (size_t)TP_JRN_SYNC_FIELD;
+    uint32_t plen = tp_jrn_get_u32(buf + len_off);
+    size_t after_len = len_off + (size_t)TP_JRN_LEN_FIELD;
+    if (len - after_len < (size_t)plen) {
+        return FRAME_INCOMPLETE; /* payload short: a torn tail OR a bloated length field */
+    }
+    size_t crc_off = after_len + (size_t)plen;
+    if (len - crc_off < (size_t)TP_JRN_CRC_FIELD) {
+        return FRAME_INCOMPLETE; /* checksum short */
+    }
+    uint32_t want = tp_jrn_get_u32(buf + crc_off);
+    uint32_t got = tp_jrn_crc32(0, buf + p, (size_t)TP_JRN_SYNC_FIELD + (size_t)TP_JRN_LEN_FIELD + (size_t)plen);
+    if (got != want) {
+        return FRAME_BAD; /* a flipped byte / tampering on a complete record */
+    }
+    *payload_off = after_len;
+    *payload_len = (size_t)plen;
+    *frame_end = crc_off + (size_t)TP_JRN_CRC_FIELD;
+    return FRAME_OK;
+}
+
+/* P1-5 (plan S18 R): is there a CRC-valid record starting at any offset >= `from`? Recovery
+ * calls this at a framing/CRC boundary to decide truncate-vs-preserve: a valid record STILL
+ * ahead => mid-stream corruption (a bloated length field, a lost sync-word, or a flipped
+ * byte), so the file must be PRESERVED (truncating would delete the trailing acknowledged
+ * records) and the journal poisoned; none => a torn tail, safe to truncate. A PURE probe --
+ * it never registers ids or applies a payload (recovery never guesses past a corruption). A
+ * sync-word that collides with payload bytes self-rejects on the CRC check, so it is a hint. */
+static bool has_valid_record_after(const uint8_t *buf, size_t len, size_t from) {
+    size_t frame_min = (size_t)TP_JRN_SYNC_FIELD + (size_t)TP_JRN_LEN_FIELD + (size_t)TP_JRN_CRC_FIELD;
+    if (len < frame_min) {
+        return false;
+    }
+    for (size_t p = from; p <= len - frame_min; p++) {
+        size_t payload_off = 0, payload_len = 0, frame_end = 0;
+        if (frame_parse_at(buf, len, p, &payload_off, &payload_len, &frame_end) == FRAME_OK) {
+            return true;
+        }
+    }
+    return false;
+}
+
 tp_status tp_journal_recover(tp_journal *j, tp_journal_recovery *out, tp_error *err) {
     if (!j || !out) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "null journal or recovery out");
@@ -391,51 +455,42 @@ tp_status tp_journal_recover(tp_journal *j, tp_journal_recovery *out, tp_error *
     size_t last_snap_off = 0, last_snap_len = 0;
     int64_t last_rev = 0;
     bool have_snap = false;
-    tp_journal_recovery_status final = TP_JOURNAL_RECOVERY_OK;
-    size_t corrupt_end = 0; /* byte just past a corrupt COMPLETE record (C2 tail-vs-mid check) */
     tp_status hard = TP_STATUS_OK;
+    /* Why the front-to-back walk stopped at `off`: a clean EOF, an INCOMPLETE/short frame
+     * (a torn tail OR a bloated length field), or a definite CORRUPT boundary (bad sync-word,
+     * bad CRC, or an undecodable payload). The truncate-vs-preserve decision is then made
+     * ONCE, below, from whether a valid record still follows the boundary (P1-5 / C2). */
+    enum { STOP_EOF, STOP_INCOMPLETE, STOP_CORRUPT } stop = STOP_EOF;
 
     while (off < len) {
-        if (len - off < (size_t)TP_JRN_LEN_FIELD) {
-            final = TP_JOURNAL_RECOVERY_TRUNCATED;
+        size_t payload_off = 0, payload_len = 0, frame_end = 0;
+        tp_frame_status fs = frame_parse_at(buf, len, off, &payload_off, &payload_len, &frame_end);
+        if (fs == FRAME_INCOMPLETE) {
+            stop = STOP_INCOMPLETE; /* a torn tail OR a bloated length field */
             break;
         }
-        uint32_t plen = tp_jrn_get_u32(buf + off);
-        size_t after_len = off + (size_t)TP_JRN_LEN_FIELD;
-        if (len - after_len < (size_t)plen) {
-            final = TP_JOURNAL_RECOVERY_TRUNCATED; /* payload short */
+        if (fs == FRAME_BAD) {
+            stop = STOP_CORRUPT; /* bad sync-word or a CRC mismatch on a complete record */
             break;
         }
-        size_t crc_off = after_len + (size_t)plen;
-        if (len - crc_off < (size_t)TP_JRN_CRC_FIELD) {
-            final = TP_JOURNAL_RECOVERY_TRUNCATED; /* checksum short */
-            break;
-        }
-        uint32_t want = tp_jrn_get_u32(buf + crc_off);
-        uint32_t got = tp_jrn_crc32(0, buf + off, (size_t)TP_JRN_LEN_FIELD + (size_t)plen);
-        if (got != want) {
-            final = TP_JOURNAL_RECOVERY_CORRUPT;              /* a flipped byte / tampering */
-            corrupt_end = crc_off + (size_t)TP_JRN_CRC_FIELD; /* the record is complete: end is known */
-            break;
-        }
+        /* FRAME_OK: sync + length + crc all check out; decode the payload semantics. */
         size_t snap_off = 0, snap_len = 0;
         int64_t rev = 0;
-        tp_status ds = decode_payload(j, buf + after_len, (size_t)plen, &snap_off, &snap_len, &rev);
+        tp_status ds = decode_payload(j, buf + payload_off, payload_len, &snap_off, &snap_len, &rev);
         if (ds == TP_STATUS_OOM) {
             hard = ds;
             break;
         }
         if (ds != TP_STATUS_OK) {
-            final = TP_JOURNAL_RECOVERY_CORRUPT;              /* malformed payload => corruption boundary */
-            corrupt_end = crc_off + (size_t)TP_JRN_CRC_FIELD; /* crc validated: the record is complete */
+            stop = STOP_CORRUPT; /* CRC-valid but undecodable payload => corruption boundary */
             break;
         }
-        last_snap_off = after_len + snap_off;
+        last_snap_off = payload_off + snap_off;
         last_snap_len = snap_len;
         last_rev = rev;
         have_snap = true;
         out->records_recovered++;
-        off = crc_off + (size_t)TP_JRN_CRC_FIELD;
+        off = frame_end;
     }
 
     if (hard != TP_STATUS_OK) {
@@ -445,18 +500,23 @@ tp_status tp_journal_recover(tp_journal *j, tp_journal_recovery *out, tp_error *
 
     out->stop_offset = off;
     out->revision = have_snap ? last_rev : 0;
-    if (final == TP_JOURNAL_RECOVERY_OK) {
-        out->status = (out->records_recovered > 0) ? TP_JOURNAL_RECOVERY_OK : TP_JOURNAL_RECOVERY_EMPTY;
-    } else {
-        out->status = final;
-    }
 
-    /* C2: a MID-STREAM corruption -- a complete-but-bad record with MORE bytes after it
-     * -- must never be truncated away (that deletes the trailing acknowledged records).
-     * Flag it so the glue preserves the file, and poison the journal so a continued
-     * append cannot be hidden behind the bad record either. A torn tail, or a single
-     * trailing corrupt record (corrupt_end == len), stays safely truncatable. */
-    if (final == TP_JOURNAL_RECOVERY_CORRUPT && corrupt_end < len) {
+    /* P1-5 / C2: the truncate-vs-preserve decision reduces to ONE question -- is there a
+     * CRC-valid record STILL after the boundary? (Scan from off+1 so the corrupt record at
+     * off never self-matches.) If so the break is a MID-STREAM corruption -- a bloated length
+     * field, a lost sync-word, or a flipped byte -- and truncating would delete the trailing
+     * acknowledged records, so preserve the file and poison the journal against appends behind
+     * it. If not, the tail is genuinely torn/corrupt and is safe to truncate away. A bloated
+     * length that used to masquerade as a clean torn tail (TRUNCATED) is now caught here. */
+    bool more_after = (stop != STOP_EOF) && has_valid_record_after(buf, len, off + 1);
+    if (stop == STOP_EOF) {
+        out->status = (out->records_recovered > 0) ? TP_JOURNAL_RECOVERY_OK : TP_JOURNAL_RECOVERY_EMPTY;
+    } else if (stop == STOP_CORRUPT || more_after) {
+        out->status = TP_JOURNAL_RECOVERY_CORRUPT;
+    } else {
+        out->status = TP_JOURNAL_RECOVERY_TRUNCATED;
+    }
+    if (more_after) {
         out->mid_stream_corrupt = true;
         j->poisoned = true;
     }

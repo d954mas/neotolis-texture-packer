@@ -139,11 +139,11 @@ static tp_journal_io io_from_bytes(const uint8_t *bytes, size_t len) {
 static size_t record_offset(const uint8_t *buf, size_t len, int idx) {
     size_t off = (size_t)TP_JRN_HEADER_LEN;
     for (int i = 0; i < idx; i++) {
-        if (off + (size_t)TP_JRN_LEN_FIELD > len) {
+        if (off + (size_t)TP_JRN_SYNC_FIELD + (size_t)TP_JRN_LEN_FIELD > len) {
             return SIZE_MAX;
         }
-        uint32_t plen = tp_jrn_get_u32(buf + off);
-        off += (size_t)TP_JRN_LEN_FIELD + (size_t)plen + (size_t)TP_JRN_CRC_FIELD;
+        uint32_t plen = tp_jrn_get_u32(buf + off + (size_t)TP_JRN_SYNC_FIELD); /* len follows the sync-word */
+        off += (size_t)TP_JRN_SYNC_FIELD + (size_t)TP_JRN_LEN_FIELD + (size_t)plen + (size_t)TP_JRN_CRC_FIELD;
     }
     return off;
 }
@@ -490,13 +490,16 @@ void test_recover_arbitrary_bytes(void) {
         tp_journal_destroy(j);
     }
 
-    /* A valid header followed by a record whose length prefix is absurdly huge: the
-     * reader must bounds-check (TRUNCATED) and NEVER allocate the claimed size. */
-    uint8_t hdr[TP_JRN_HEADER_LEN + TP_JRN_LEN_FIELD];
+    /* A valid header + a valid record sync-word followed by an absurdly huge length prefix:
+     * the reader must bounds-check (TRUNCATED, nothing follows) and NEVER allocate the
+     * claimed size. The sync-word makes this a genuine bloated-length frame (not a partial
+     * header), exercising the P1-5 overrun path with no trailing record. */
+    uint8_t hdr[TP_JRN_HEADER_LEN + TP_JRN_SYNC_FIELD + TP_JRN_LEN_FIELD];
     memcpy(hdr, tp_jrn_magic, TP_JRN_MAGIC_LEN);
     tp_jrn_put_u32(hdr + TP_JRN_MAGIC_LEN, (uint32_t)TP_JOURNAL_FORMAT_VERSION);
     memcpy(hdr + TP_JRN_KEY_OFF, key.bytes, 16);
-    tp_jrn_put_u32(hdr + TP_JRN_HEADER_LEN, 0xFFFFFFF0u); /* claims ~4 GB payload */
+    tp_jrn_put_u32(hdr + TP_JRN_HEADER_LEN, (uint32_t)TP_JRN_SYNC_WORD);        /* valid record sync */
+    tp_jrn_put_u32(hdr + TP_JRN_HEADER_LEN + TP_JRN_SYNC_FIELD, 0xFFFFFFF0u);   /* claims ~4 GB payload */
     tp_journal_io io = io_from_bytes(hdr, sizeof hdr);
     tp_journal *j = tp_journal_create(io, key);
     TEST_ASSERT_NOT_NULL(j);
@@ -774,7 +777,7 @@ void test_midstream_corrupt_preserves_trailing(void) {
     /* Corrupt a byte inside txn01 (record #1) -> mid-stream; txn02 (#2) stays intact. */
     size_t t1 = record_offset(full, full_len, 1);
     TEST_ASSERT_TRUE(t1 != SIZE_MAX && t1 < full_len);
-    size_t at = t1 + (size_t)TP_JRN_LEN_FIELD + 1; /* a payload byte of txn01 */
+    size_t at = t1 + (size_t)TP_JRN_SYNC_FIELD + (size_t)TP_JRN_LEN_FIELD + 1; /* a payload byte of txn01 */
     tp_journal_io io2 = io_from_bytes(full, full_len);
     tp_journal_io_memory__poke(io2, at, (uint8_t)(full[at] ^ 0xFFu));
 
@@ -798,6 +801,58 @@ void test_midstream_corrupt_preserves_trailing(void) {
     /* The recovered journal refuses appends behind the corruption (poisoned). */
     TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED,
                           commit_rename(m2, "1e000000000000000000000000000003", tp_model_revision(m2), "three"));
+
+    free(full);
+    tp_journal_recovery_free(&info);
+    tp_model_destroy(m2);
+}
+
+/* P1-5 (plan S18 R): a mid-stream record whose LENGTH FIELD is corrupted to a bloated value
+ * must NOT masquerade as a torn tail. Under the pre-v2 length-first framing the overrun
+ * classified as TRUNCATED and the tail-clean truncate DELETED the acknowledged records after
+ * it (violating C2 + ADR 0013). The per-record sync-word lets recovery find the valid
+ * trailing record and classify this as CORRUPT + mid-stream: the file is preserved and the
+ * journal poisoned. This is the exact regression the sync-word closes. */
+void test_midstream_bloated_length_preserves_trailing(void) {
+    tp_id128 key = key_of(0x6F);
+    tp_journal_io io;
+    tp_model *m = model_with_journal(key, &io);
+    /* Store layout: header | checkpoint(#0) | txn01(#1) | txn02(#2). */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "1f000000000000000000000000000001", 0, "one"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "1f000000000000000000000000000002", 1, "two"));
+    size_t full_len = 0;
+    uint8_t *full = snapshot_io(io, &full_len);
+    tp_model_destroy(m);
+
+    /* Bloat txn01's length field (the 4 bytes right after its sync-word) to ~4 GB. Under the
+     * old framing this looked like a torn tail; the intact sync-word before txn02 proves an
+     * acknowledged record still follows, so it is a mid-stream corruption, not a tail. */
+    size_t t1 = record_offset(full, full_len, 1);
+    TEST_ASSERT_TRUE(t1 != SIZE_MAX && t1 < full_len);
+    tp_journal_io io2 = io_from_bytes(full, full_len);
+    for (int b = 0; b < TP_JRN_LEN_FIELD; b++) {
+        tp_journal_io_memory__poke(io2, t1 + (size_t)TP_JRN_SYNC_FIELD + (size_t)b, 0xFFu);
+    }
+
+    tp_model *m2 = NULL;
+    tp_journal_recovery info;
+    memset(&info, 0, sizeof info);
+    tp_error err;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_recover(io2, key, &m2, &info, &err));
+    TEST_ASSERT_EQUAL_INT(TP_JOURNAL_RECOVERY_CORRUPT, info.status);
+    TEST_ASSERT_TRUE(info.mid_stream_corrupt);
+    TEST_ASSERT_NOT_NULL(m2);
+    TEST_ASSERT_EQUAL_INT64(0, tp_model_revision(m2)); /* recovered up to the checkpoint (rev 0) */
+
+    /* The trailing acknowledged record was NOT deleted: the store length is unchanged. */
+    size_t after_len = 0;
+    uint8_t *after = snapshot_io(io2, &after_len);
+    TEST_ASSERT_EQUAL_INT64((int64_t)full_len, (int64_t)after_len);
+    free(after);
+
+    /* Poisoned: refuses appends behind the corruption. */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED,
+                          commit_rename(m2, "1f000000000000000000000000000003", tp_model_revision(m2), "three"));
 
     free(full);
     tp_journal_recovery_free(&info);
@@ -940,6 +995,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_attach_migrates_retained_ids);
     RUN_TEST(test_torn_tail_is_truncated);
     RUN_TEST(test_midstream_corrupt_preserves_trailing);
+    RUN_TEST(test_midstream_bloated_length_preserves_trailing);
     RUN_TEST(test_truncate_failure_poisons_recovery);
     RUN_TEST(test_torn_header_reinitializable);
     RUN_TEST(test_recovered_model_is_dirty);

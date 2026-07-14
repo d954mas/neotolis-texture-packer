@@ -20,8 +20,18 @@
 #define TP_JRN_HEADER_LEN 28  /* MAGIC[8] + version u32 + key[16] */
 #define TP_JRN_KEY_OFF 12     /* key[16] starts here in the header */
 #define TP_JRN_IDLEN 32       /* a transaction id is 32 lowercase-hex chars (no NUL on disk) */
+#define TP_JRN_SYNC_FIELD 4   /* record sync-word u32 BE -- first field of every record frame (v2) */
 #define TP_JRN_LEN_FIELD 4    /* payload_len u32 BE */
 #define TP_JRN_CRC_FIELD 4    /* crc32 u32 BE */
+
+/* F2-04 v2 (plan S18 R / P1-5): every RECORD frame begins with this fixed sync-word so
+ * recovery can tell a genuinely torn TAIL from a mid-stream record whose length field was
+ * corrupted to a bloated value -- which would otherwise masquerade as a torn tail and get
+ * the acknowledged records AFTER it deleted. On any framing/CRC break, recovery scans
+ * forward for the next sync-word that begins a CRC-valid record: found => mid-stream
+ * corruption (preserve the file + poison), not found => a truncatable tail. A sync-word
+ * that collides with payload bytes self-rejects on the CRC check, so it is only a hint. */
+#define TP_JRN_SYNC_WORD 0xA5C31E7Bu
 #define TP_JRN_REC_TXN 1      /* payload rec_type: committed transaction */
 #define TP_JRN_REC_CKPT 2     /* payload rec_type: checkpoint (state + retained id set) */
 #define TP_JRN_TXN_FIXED 41   /* TXN payload fixed prefix: type(1) + tx_id(32) + revision(8) */
