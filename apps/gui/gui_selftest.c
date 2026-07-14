@@ -1737,7 +1737,21 @@ void selftest_pre_frame(void) {
         }
         if (found < 0) {
             s_sel_atlas = 0;
+            /* DIAGNOSTIC (CI headless has_atlas=0 triage): what does phase-0's atlas-0 look like? */
+            {
+                tp_project_atlas *da = tp_project_get_atlas(gui_project_get(), 0);
+                char dres[512] = {0};
+                tp_status drs = (da && da->source_count > 0)
+                                    ? tp_project_resolve_path(gui_project_get(), da->sources[0].path, dres, sizeof dres)
+                                    : TP_STATUS_INVALID_ARGUMENT;
+                nt_log_info("SELFTEST-DIAG phase0: src_count=%d src0='%s' resolve=%d abs='%s'",
+                            da ? da->source_count : -1, (da && da->source_count > 0) ? da->sources[0].path : "(none)",
+                            (int)drs, dres);
+            }
             do_pack_blocking();
+            const tp_result *dr = gui_pack_result(0);
+            nt_log_info("SELFTEST-DIAG phase0: after do_pack_blocking result=%p sprites=%d pages=%d", (void *)dr,
+                        dr ? dr->sprite_count : -1, dr ? dr->page_count : -1);
             found = (gui_pack_result(0) && gui_pack_result(0)->sprite_count > 0) ? 0 : -1;
         }
         s_sel_atlas = (found >= 0) ? found : 0;
