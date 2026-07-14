@@ -87,6 +87,8 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <unistd.h> /* getcwd (absolute s_exe_dir on POSIX) */
 #endif
 // #endregion
 
@@ -189,6 +191,13 @@ static void resolve_exe_dir(void) {
             (void)snprintf(s_exe_dir, sizeof s_exe_dir, "%s", exe);
             return;
         }
+    }
+#else
+    /* Absolute CWD, not "." -- a relative base made the self-test write scratch files to the CWD while
+     * source paths resolve against the project dir, so sources looked "missing" on Linux CI (stress/caps
+     * packs found 0 images). Windows keeps the exe dir above; "." stays the last-resort fallback. */
+    if (getcwd(s_exe_dir, sizeof s_exe_dir) != NULL) {
+        return;
     }
 #endif
     (void)snprintf(s_exe_dir, sizeof s_exe_dir, ".");
