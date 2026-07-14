@@ -1165,11 +1165,12 @@ void test_sprite_clear_field_roundtrip(void) {
     }
 }
 
-/* [C1] JSON target.set lowering stays FULL-REPLACE: an object that OMITS "enabled" decodes to
- * mask == TP_TF_ALL with enabled defaulting to true -- the pre-mask contract. (The C1 field mask is an
- * internal mechanism for GUI partial edits built in C; partial-field target.set over JSON is a deliberate
- * future extension, not a silent effect of adding the struct mask.) */
-void test_json_target_set_full_replace(void) {
+/* R2a: JSON target.set is FIELD-PRESENCE (like every other SET op). An object carrying only
+ * exporter_id + out_path (NO "enabled") decodes to mask == EXPORTER|OUT_PATH with the ENABLED bit
+ * UNSET -- so tp_operation_encode -> decode round-trips faithfully and replay never re-adds an unsent
+ * field. (Before R2a this pinned TP_TF_ALL and defaulted enabled=true -- the exact wire-form data loss
+ * the diff-recovery journal replay hits.) A full object still yields TP_TF_ALL (old contract = subset). */
+void test_json_target_set_presence(void) {
     const char *json = "{\"schema\":1,\"transaction\":{"
                        "\"id\":\"00000000000000000000000000000000\",\"expected_revision\":0,\"operations\":["
                        "{\"op\":\"target.set\",\"atlas_id\":\"atlas_11111111111111111111111111111111\","
@@ -1182,9 +1183,126 @@ void test_json_target_set_full_replace(void) {
     TEST_ASSERT_NOT_NULL(rd);
     TEST_ASSERT_EQUAL_INT(1, rd->op_count);
     TEST_ASSERT_EQUAL_INT(TP_OP_TARGET_SET, rd->ops[0].kind);
-    TEST_ASSERT_EQUAL_UINT32((uint32_t)TP_TF_ALL, rd->ops[0].u.target_set.mask); /* full replace, not presence-derived */
-    TEST_ASSERT_TRUE(rd->ops[0].u.target_set.enabled);                           /* omitted enabled -> true default */
+    /* presence-derived: exporter + out_path present, "enabled" absent -> its bit is NOT set */
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)(TP_TF_EXPORTER | TP_TF_OUT_PATH), rd->ops[0].u.target_set.mask);
     tp_txn_request_free(rd);
+}
+
+/* R2a: a single-field target.set ("enabled" only) decodes to mask == ENABLED with exporter/out_path
+ * absent -- proving a lone non-string field survives the JSON round-trip unchanged. */
+void test_json_target_set_enabled_only(void) {
+    const char *json = "{\"schema\":1,\"transaction\":{"
+                       "\"id\":\"00000000000000000000000000000000\",\"expected_revision\":0,\"operations\":["
+                       "{\"op\":\"target.set\",\"atlas_id\":\"atlas_11111111111111111111111111111111\","
+                       "\"target_id\":\"target_22222222222222222222222222222222\","
+                       "\"enabled\":false}"
+                       "]}}";
+    tp_txn_request *rd = NULL;
+    tp_error err;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_txn_request_decode(json, &rd, &err));
+    TEST_ASSERT_NOT_NULL(rd);
+    TEST_ASSERT_EQUAL_INT(1, rd->op_count);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)TP_TF_ENABLED, rd->ops[0].u.target_set.mask);
+    TEST_ASSERT_FALSE(rd->ops[0].u.target_set.enabled);
+    tp_txn_request_free(rd);
+}
+
+/* R2a: the partial mask survives a full encode -> decode round-trip -- the exact fidelity the
+ * diff-recovery journal (R2b) relies on when it re-encodes committed ops and replays them. */
+void test_json_target_set_roundtrip(void) {
+    const char *json = "{\"schema\":1,\"transaction\":{"
+                       "\"id\":\"00000000000000000000000000000000\",\"expected_revision\":0,\"operations\":["
+                       "{\"op\":\"target.set\",\"atlas_id\":\"atlas_11111111111111111111111111111111\","
+                       "\"target_id\":\"target_22222222222222222222222222222222\","
+                       "\"out_path\":\"out/y.json\"}" /* only out_path */
+                       "]}}";
+    tp_txn_request *rd = NULL;
+    tp_error err;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_txn_request_decode(json, &rd, &err));
+    TEST_ASSERT_NOT_NULL(rd);
+    const uint32_t mask0 = rd->ops[0].u.target_set.mask;
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)TP_TF_OUT_PATH, mask0);
+    char *reenc = tp_txn_request_encode(rd);
+    TEST_ASSERT_NOT_NULL(reenc);
+    tp_txn_request *rd2 = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_txn_request_decode(reenc, &rd2, &err));
+    TEST_ASSERT_NOT_NULL(rd2);
+    TEST_ASSERT_EQUAL_UINT32(mask0, rd2->ops[0].u.target_set.mask); /* partial mask preserved across the round-trip */
+    free(reenc);
+    tp_txn_request_free(rd);
+    tp_txn_request_free(rd2);
+}
+
+/* R2a backward-compat: a FULL 3-field target.set JSON still yields TP_TF_ALL, so the pre-R2a
+ * full-replace contract is a strict subset (guards the mask derivation + TP_TF_ALL's value). */
+void test_json_target_set_full_is_all(void) {
+    const char *json = "{\"schema\":1,\"transaction\":{"
+                       "\"id\":\"00000000000000000000000000000000\",\"expected_revision\":0,\"operations\":["
+                       "{\"op\":\"target.set\",\"atlas_id\":\"atlas_11111111111111111111111111111111\","
+                       "\"target_id\":\"target_22222222222222222222222222222222\","
+                       "\"exporter_id\":\"defold\",\"out_path\":\"out/x.json\",\"enabled\":true}"
+                       "]}}";
+    tp_txn_request *rd = NULL;
+    tp_error err;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_txn_request_decode(json, &rd, &err));
+    TEST_ASSERT_NOT_NULL(rd);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)TP_TF_ALL, rd->ops[0].u.target_set.mask);
+    TEST_ASSERT_TRUE(rd->ops[0].u.target_set.enabled);
+    tp_txn_request_free(rd);
+}
+
+/* R2a: the ENABLED bit AND its boolean value survive an encode->decode round-trip -- the exact
+ * fidelity format-B recovery replay depends on for a target enable/disable edit. */
+void test_json_target_set_roundtrip_enabled(void) {
+    const char *json = "{\"schema\":1,\"transaction\":{"
+                       "\"id\":\"00000000000000000000000000000000\",\"expected_revision\":0,\"operations\":["
+                       "{\"op\":\"target.set\",\"atlas_id\":\"atlas_11111111111111111111111111111111\","
+                       "\"target_id\":\"target_22222222222222222222222222222222\","
+                       "\"out_path\":\"out/z.json\",\"enabled\":true}"
+                       "]}}";
+    tp_txn_request *rd = NULL;
+    tp_error err;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_txn_request_decode(json, &rd, &err));
+    TEST_ASSERT_NOT_NULL(rd);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)(TP_TF_OUT_PATH | TP_TF_ENABLED), rd->ops[0].u.target_set.mask);
+    TEST_ASSERT_TRUE(rd->ops[0].u.target_set.enabled);
+    char *reenc = tp_txn_request_encode(rd);
+    TEST_ASSERT_NOT_NULL(reenc);
+    tp_txn_request *rd2 = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_txn_request_decode(reenc, &rd2, &err));
+    TEST_ASSERT_NOT_NULL(rd2);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)(TP_TF_OUT_PATH | TP_TF_ENABLED), rd2->ops[0].u.target_set.mask);
+    TEST_ASSERT_TRUE(rd2->ops[0].u.target_set.enabled); /* the bool value survives, not just the bit */
+    free(reenc);
+    tp_txn_request_free(rd);
+    tp_txn_request_free(rd2);
+}
+
+/* R2a lowering edges: a target.set naming NO mutable field lowers to mask==0 (validate then rejects it
+ * -- see test_operation.c's mask==0 case), and a present-but-empty out_path still SETS the OUT_PATH bit,
+ * so validate rejects the empty value instead of the field being silently dropped. */
+void test_json_target_set_lower_edges(void) {
+    tp_error err;
+    const char *empty = "{\"schema\":1,\"transaction\":{"
+                        "\"id\":\"00000000000000000000000000000000\",\"expected_revision\":0,\"operations\":["
+                        "{\"op\":\"target.set\",\"atlas_id\":\"atlas_11111111111111111111111111111111\","
+                        "\"target_id\":\"target_22222222222222222222222222222222\"}"
+                        "]}}";
+    tp_txn_request *r0 = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_txn_request_decode(empty, &r0, &err));
+    TEST_ASSERT_NOT_NULL(r0);
+    TEST_ASSERT_EQUAL_UINT32(0u, r0->ops[0].u.target_set.mask);
+    tp_txn_request_free(r0);
+    const char *empty_path = "{\"schema\":1,\"transaction\":{"
+                             "\"id\":\"00000000000000000000000000000000\",\"expected_revision\":0,\"operations\":["
+                             "{\"op\":\"target.set\",\"atlas_id\":\"atlas_11111111111111111111111111111111\","
+                             "\"target_id\":\"target_22222222222222222222222222222222\",\"out_path\":\"\"}"
+                             "]}}";
+    tp_txn_request *r1 = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_txn_request_decode(empty_path, &r1, &err));
+    TEST_ASSERT_NOT_NULL(r1);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)TP_TF_OUT_PATH, r1->ops[0].u.target_set.mask);
+    tp_txn_request_free(r1);
 }
 
 int main(void) {
@@ -1220,6 +1338,11 @@ int main(void) {
     RUN_TEST(test_json_fractional_schema_rejected);
     RUN_TEST(test_json_shape_oom_must_not_commit);
     RUN_TEST(test_sprite_clear_field_roundtrip);
-    RUN_TEST(test_json_target_set_full_replace);
+    RUN_TEST(test_json_target_set_presence);
+    RUN_TEST(test_json_target_set_enabled_only);
+    RUN_TEST(test_json_target_set_roundtrip);
+    RUN_TEST(test_json_target_set_full_is_all);
+    RUN_TEST(test_json_target_set_roundtrip_enabled);
+    RUN_TEST(test_json_target_set_lower_edges);
     return UNITY_END();
 }

@@ -354,6 +354,14 @@ target.remove
 target.set
 ```
 
+**Field-presence SET operations.** The mask-carrying `*.set` operations -- `atlas.settings.set`,
+`sprite.override.set`, `animation.settings.set`, and `target.set` -- are *field-presence*: an
+operation changes only the fields it actually carries, and its presence mask is derived from which
+fields are present (including in the JSON form). Omitted fields are left unchanged; an operation that
+names no field is rejected. This keeps a serialized operation a faithful round-trip -- the canonical
+encoder emits only the masked fields and the decoder reconstructs the same mask -- which the recovery
+journal relies on to replay committed operations without re-introducing fields that were never sent.
+
 Operations target stable IDs, not array indexes or mutable names. A frontend may
 accept a human-friendly selector, but it resolves that selector to an ID before
 building the canonical operation.
