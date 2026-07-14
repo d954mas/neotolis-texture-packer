@@ -625,21 +625,22 @@ static bool pending_is_noop(void) {
             return true;
         }
         case TP_OP_TARGET_SET: {
-            /* H/G3: only the out-path text field BUFFERS a TP_OP_TARGET_SET (discrete exporter/enabled/
-             * browse edits commit immediately via gui_project_set_target). That setter RMW-seeds
-             * exporter_id + enabled from the committed record, so a buffered target op can differ ONLY in
-             * out_path -- but the op sets all three unconditionally (no mask), so compare all three: this
-             * stays COMPLETE (never a false no-op -> no silent discard) even if another target field ever
-             * coalesces. Restores the net-zero parity the other coalescable kinds already have. */
+            /* Only the out-path text field BUFFERS a TP_OP_TARGET_SET (masked to TP_TF_OUT_PATH; discrete
+             * enabled/exporter edits commit immediately, never buffer). Compare ONLY the MASKED fields --
+             * mirrors the other masked no-op cases; an unmasked field is untouched by the op so it can't
+             * differ (and the op's unmasked slots are zero/NULL, so an unconditional compare would give a
+             * false "changed" and re-introduce the phantom-undo net-zero step). */
             tp_project_atlas *a = atlas_of_pending();
             const tp_op_target_set *s = &op->u.target_set;
             const tp_project_target *t = a ? tp_project_atlas_find_target_by_id(a, s->target_id) : NULL;
             if (!t) {
                 return false;
             }
-            if (t->enabled != s->enabled) return false;
-            if (strcmp(t->exporter_id ? t->exporter_id : "", s->exporter_id ? s->exporter_id : "") != 0) return false;
-            if (strcmp(t->out_path ? t->out_path : "", s->out_path ? s->out_path : "") != 0) return false;
+            if ((s->mask & TP_TF_ENABLED) && t->enabled != s->enabled) return false;
+            if ((s->mask & TP_TF_EXPORTER) &&
+                strcmp(t->exporter_id ? t->exporter_id : "", s->exporter_id ? s->exporter_id : "") != 0) return false;
+            if ((s->mask & TP_TF_OUT_PATH) &&
+                strcmp(t->out_path ? t->out_path : "", s->out_path ? s->out_path : "") != 0) return false;
             return true;
         }
         default:
@@ -1484,16 +1485,16 @@ bool gui_project_set_target(int atlas_index, int index, const char *exporter_id,
     return true;
 }
 
-/* H/G3: COALESCABLE out-path-only setter for the export-target path text field. Discrete target edits
- * (enabled checkbox / exporter dropdown / browse pick) stay immediate via gui_project_set_target above;
- * the free-text out-path field, however, fired one gui_project_set_target per keystroke -> one committed
- * TP_OP_TARGET_SET per keystroke = undo spam. Buffering it under a per-target key (field = index) makes
+/* H/G3 + C1 mask: COALESCABLE out-path-only setter for the export-target path text field. Discrete target
+ * edits build their own single-field MASKED ops (enabled checkbox -> TP_TF_ENABLED, exporter dropdown ->
+ * TP_TF_EXPORTER, below); browse still uses the full-replace gui_project_set_target. The free-text out-path
+ * field, however, fired one gui_project_set_target per keystroke -> one committed TP_OP_TARGET_SET per
+ * keystroke = undo spam. Buffering it under a per-target key (field = index) makes
  * the field's existing Enter/blur gesture-commit flush the whole edit as ONE undo step -- mirrors the
- * atlas-settings path (gui_project_set_atlas_setting). TP_OP_TARGET_SET replaces exporter_id+out_path+
- * enabled ATOMICALLY, so RMW-seed exporter_id + enabled from the COMMITTED record read AFTER pending_route
- * (post-route -> no UAF; contrast gui_project_set_target, which had to dup CALLER pointers BEFORE its
- * flush). Switching to a different target index is a different key -> pending_route flushes -> a correct
- * one-undo-per-target boundary. */
+ * atlas-settings path (gui_project_set_atlas_setting). The op is MASKED to TP_TF_OUT_PATH: it carries ONLY
+ * out_path, so exporter_id + enabled are left untouched by apply -- no RMW-seed, and no way for this edit to
+ * clobber a concurrently-changed sibling field (C1 mask). Switching to a different target index is a
+ * different key -> pending_route flushes -> a correct one-undo-per-target boundary. */
 bool gui_project_set_target_out_path(int atlas_index, int index, const char *out_path) {
     coalesce_key ck = make_key(CK_TARGET_OUTPATH, atlas_index, index, -1, "");
     pending_route(&ck); /* flush a DIFFERENT key (other target / other knob) BEFORE reading this target */
@@ -1514,11 +1515,8 @@ bool gui_project_set_target_out_path(int atlas_index, int index, const char *out
         return false;
     }
     tp_project_target *t = &a->targets[index];
-    char *exp = dupstr(t->exporter_id);        /* RMW seed: unchanged exporter (dup: commit/replace frees the arms) */
     char *outp = dupstr(out_path);             /* guaranteed non-empty by the guard above */
-    if (!exp || !outp) {
-        free(exp);
-        free(outp);
+    if (!outp) {
         return false;
     }
     tp_operation op;
@@ -1526,33 +1524,39 @@ bool gui_project_set_target_out_path(int atlas_index, int index, const char *out
     op.kind = TP_OP_TARGET_SET;
     op.atlas_id = a->id;
     op.u.target_set.target_id = t->id;
-    op.u.target_set.mask = TP_TF_ALL;          /* RMW-seeded full replace (exporter+enabled kept, out_path new) */
-    op.u.target_set.enabled = t->enabled;      /* RMW seed: unchanged */
-    op.u.target_set.exporter_id = exp;         /* ownership transfers to op */
-    op.u.target_set.out_path = outp;
+    op.u.target_set.mask = TP_TF_OUT_PATH;     /* MASKED: only out_path -- exporter/enabled untouched (no RMW-seed) */
+    op.u.target_set.out_path = outp;           /* ownership transfers to op */
     return pending_offer(&ck, &op, GUI_ACT_SET_TARGET);
 }
 
-/* H/G3: discrete target-field setters (enabled toggle / exporter change). IMMEDIATE (one undo step each).
- * Unlike a raw gui_project_set_target from the view, they do NOT take the un-edited fields from a STALE
- * view snapshot: they FLUSH any buffered out-path gesture FIRST (so the just-typed path is committed), then
- * read the un-edited fields from the NOW-committed record and delegate to gui_project_set_target. This closes
- * the hazard G3 introduced -- a discrete widget re-sending the stale committed out_path would commit the
- * buffered typed value then overwrite it back, silently reverting the user's typed path. gui_project_set_
- * target's own pre-flush dups run against a stable s_proj (nothing is pending after our flush) so it is
- * UAF-safe and its internal flush is a no-op. An empty out_path is never buffered (gui_project_set_target_
- * out_path guards it away), so this flush never rejects on emptiness -- only a genuine journal failure returns
- * false, which correctly aborts the discrete edit too. */
+/* H/G3 + C1 mask: discrete target-field setters (enabled toggle / exporter change). IMMEDIATE (one undo step
+ * each), and MASKED to the single field they edit -- so they never re-send exporter/out_path and can never
+ * revert a concurrently-buffered out-path gesture (the hazard the pre-mask workaround had to RMW-seed around
+ * is now impossible at the op level). They still flush any buffered out-path gesture FIRST: a discrete pick
+ * is a gesture boundary, so the pending out-path commits as its own undo step before this one (clean
+ * sequential history). An empty out_path is never buffered (gui_project_set_target_out_path guards it), so
+ * that flush never rejects on emptiness -- only a genuine journal failure returns false, aborting this edit
+ * too. */
 bool gui_project_set_target_enabled(int atlas_index, int index, bool enabled) {
-    if (!gui_project_flush_pending()) { /* commit any buffered out-path gesture FIRST (fresh committed read) */
+    if (!gui_project_flush_pending()) { /* commit any buffered out-path gesture FIRST (gesture boundary) */
         return false;
     }
     tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
     if (!a || index < 0 || index >= a->target_count) {
         return false;
     }
-    const tp_project_target *t = &a->targets[index]; /* read AFTER flush -> current exporter + out_path */
-    return gui_project_set_target(atlas_index, index, t->exporter_id, t->out_path, enabled);
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_TARGET_SET;
+    op.atlas_id = a->id;
+    op.u.target_set.target_id = a->targets[index].id;
+    op.u.target_set.mask = TP_TF_ENABLED; /* MASKED: only enabled -- exporter/out_path untouched */
+    op.u.target_set.enabled = enabled;
+    if (!commit_txn_now(&op, 1)) {
+        return false;
+    }
+    gui_project_touch(GUI_ACT_SET_TARGET);
+    return true;
 }
 
 bool gui_project_set_target_exporter(int atlas_index, int index, const char *exporter_id) {
@@ -1563,8 +1567,22 @@ bool gui_project_set_target_exporter(int atlas_index, int index, const char *exp
     if (!a || index < 0 || index >= a->target_count) {
         return false;
     }
-    const tp_project_target *t = &a->targets[index]; /* read AFTER flush -> current out_path + enabled */
-    return gui_project_set_target(atlas_index, index, exporter_id, t->out_path, t->enabled);
+    char *exp = dupstr(exporter_id);
+    if (!exp) {
+        return false;
+    }
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_TARGET_SET;
+    op.atlas_id = a->id;
+    op.u.target_set.target_id = a->targets[index].id;
+    op.u.target_set.mask = TP_TF_EXPORTER; /* MASKED: only exporter -- out_path/enabled untouched */
+    op.u.target_set.exporter_id = exp;     /* ownership -> op; commit_txn_now frees the arms */
+    if (!commit_txn_now(&op, 1)) {
+        return false;
+    }
+    gui_project_touch(GUI_ACT_SET_TARGET);
+    return true;
 }
 // #endregion
 

@@ -1078,7 +1078,7 @@ void run_selftest(void) {
         NT_ASSERT(t11_u1 - t11_u0 == 1 && strcmp(t11b->targets[0].out_path, "out/final.json") == 0 &&
                   "#11: N out-path keystrokes = ONE undo step (final typed value wins)");
         NT_ASSERT(strcmp(t11b->targets[0].exporter_id, t11_exp) == 0 && t11b->targets[0].enabled == t11_en &&
-                  "#11: the coalesced out-path edit RMW-seeds exporter_id + enabled (only out_path changed)");
+                  "#11: the coalesced out-path edit leaves exporter_id + enabled UNTOUCHED (mask=TP_TF_OUT_PATH)");
         NT_ASSERT(gui_project_undo() &&
                   strcmp(tp_project_get_atlas(gui_project_get(), 0)->targets[0].out_path, t11_base) == 0 &&
                   "#11: one undo reverts the ENTIRE coalesced out-path edit back to the baseline");
@@ -1097,8 +1097,9 @@ void run_selftest(void) {
         /* #11 interleave (the coalescing hazard G3 introduced + fixed): a discrete enabled toggle made while
          * an out-path edit is still BUFFERED (typed, not yet Enter/blur) must NOT revert the typed path. The
          * old discrete gui_edit_target re-sent the STALE committed out_path, so its internal flush committed
-         * the buffered value then overwrote it back. gui_project_set_target_enabled instead flushes FIRST then
-         * RMW-seeds out_path from the now-committed record. Buffer "out/typed.json", then toggle enabled. */
+         * the buffered value then overwrote it back. gui_project_set_target_enabled now flushes FIRST (commits
+         * the buffered out-path as its own step) then commits a mask=TP_TF_ENABLED-only op -- it never re-sends
+         * out_path, so the typed path cannot be reverted. Buffer "out/typed.json", then toggle enabled. */
         (void)gui_project_set_target_out_path(0, 0, "out/typed.json"); /* buffered, uncommitted */
         tp_project_atlas *t11i = tp_project_get_atlas(gui_project_get(), 0);
         NT_ASSERT(strcmp(t11i->targets[0].out_path, "out/final.json") == 0 &&
@@ -1117,11 +1118,20 @@ void run_selftest(void) {
         NT_ASSERT(strcmp(t11i->targets[0].out_path, "out/typed2.json") == 0 &&
                   strcmp(t11i->targets[0].exporter_id, "defold") == 0 &&
                   "#11: an exporter change mid-typing preserves the buffered out-path (not reverted)");
-        /* #11 empty-path [0]-fix: an EMPTY out-path is NEVER buffered (core forbids "" -- tp_op_validate). So
-         * clearing the field then toggling enabled must NOT break the toggle (the pre-fix flush-first committed
-         * "" -> core reject -> the toggle was silently dropped with a confusing 'out_path must be non-empty'). */
+        /* #11 empty-path [0]-fix: an EMPTY out-path is NEVER buffered (core forbids "" -- tp_op_validate).
+         * BUFFER a value, then CLEAR the field: the pending is DISCARDED (exercises the pending_discard arm),
+         * NOT committed, so the record keeps the last valid path and a following discrete toggle still commits.
+         * (Pre-fix the flush-first committed "" -> core reject -> the toggle was silently dropped with a
+         * confusing 'out_path must be non-empty'.) */
+        (void)gui_project_set_target_out_path(0, 0, "out/willclear"); /* buffered (uncommitted) */
+        t11i = tp_project_get_atlas(gui_project_get(), 0);
+        NT_ASSERT(strcmp(t11i->targets[0].out_path, "out/typed2.json") == 0 &&
+                  "#11: [0] buffered edit not yet committed (record still the last valid path)");
+        (void)gui_project_set_target_out_path(0, 0, ""); /* clear -> pending_discard, NOT buffered/committed */
+        t11i = tp_project_get_atlas(gui_project_get(), 0);
+        NT_ASSERT(strcmp(t11i->targets[0].out_path, "out/typed2.json") == 0 &&
+                  "#11: [0] clearing DISCARDS the buffered edit (last valid path kept, empty never committed)");
         const bool t11_en1 = t11i->targets[0].enabled;
-        (void)gui_project_set_target_out_path(0, 0, ""); /* clear -> discarded, NOT buffered */
         NT_ASSERT(gui_project_set_target_enabled(0, 0, !t11_en1) &&
                   "#11: [0] a discrete toggle after CLEARING the path still commits (empty was never buffered)");
         t11i = tp_project_get_atlas(gui_project_get(), 0);

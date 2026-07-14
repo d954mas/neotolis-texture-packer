@@ -881,14 +881,19 @@ static void relativize_to_project(const char *abs, char *out, size_t cap) {
     normalize_slashes(out);
 }
 
+static bool flush_failed(void); /* defined below; a discrete browse is a flush-first entry point */
+
 /* Save dialog for a target's output path, relativized to the project like sources. Atlas-explicit so
  * the Export dialog (which spans all atlases) can browse any target, not just the selected atlas's. */
 static void do_browse_target_at(int atlas, int ti) {
     /* H/G3: commit any BUFFERED out-path gesture FIRST so the Save dialog seeds from the just-typed path,
      * not a stale committed one (clicking the "..." button is in-panel, so no blur gesture-commit fired).
-     * Re-fetch a/t AFTER the flush -- a committed flush clone-swaps the project. An empty path is never
-     * buffered, so the flush cannot reject here on emptiness. */
-    (void)gui_project_flush_pending();
+     * Route through flush_failed() like every other flush-first entry: a journal-failed flush surfaces the
+     * error and ABORTS -- never pop a Save dialog over a rejected-commit model. Re-fetch a/t AFTER the flush
+     * (a committed flush clone-swaps the project). An empty path is never buffered, so no empty-reject here. */
+    if (flush_failed()) {
+        return;
+    }
     tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), atlas);
     if (!a || ti < 0 || ti >= a->target_count) {
         return;
