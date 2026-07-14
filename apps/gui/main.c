@@ -68,6 +68,8 @@
 #include "gui_project.h"
 #include "gui_scan.h"
 #include "gui_shell.h"    /* shell-owned surface the dev seams read (UI pool caps) */
+#include "gui_paths.h"    /* D1: app-data root + exe-dir resolver (canonical home for s_exe_dir) */
+#include "gui_log_file.h" /* D1: rotating app-side log file (nt_log sink); no-op under headless */
 #include "gui_startup.h"  /* H/P1-8: pure startup open/defer guard (gui_startup_decide) */
 #include "gui_selftest.h" /* dev seam: headless self-test (compiled out unless flag on) */
 #include "gui_shot.h"     /* dev seam: --shot screenshot capture */
@@ -88,7 +90,7 @@
 #ifdef _WIN32
 #include <windows.h>
 #else
-#include <unistd.h> /* getcwd (absolute s_exe_dir on POSIX) */
+#include <unistd.h> /* POSIX shell APIs (exe-dir getcwd now lives in gui_paths_exe_dir) */
 #endif
 // #endregion
 
@@ -180,28 +182,9 @@ void gui_shell_reset_shown_result(void) { s_shown_result = NULL; }
 // #endregion
 
 // #region init helpers
-static void resolve_exe_dir(void) {
-#ifdef _WIN32
-    char exe[1024];
-    DWORD n = GetModuleFileNameA(NULL, exe, (DWORD)sizeof exe);
-    if (n > 0U && n < (DWORD)sizeof exe) {
-        char *slash = strrchr(exe, '\\');
-        if (slash != NULL) {
-            *slash = '\0';
-            (void)snprintf(s_exe_dir, sizeof s_exe_dir, "%s", exe);
-            return;
-        }
-    }
-#else
-    /* Absolute CWD, not "." -- a relative base made the self-test write scratch files to the CWD while
-     * source paths resolve against the project dir, so sources looked "missing" on Linux CI (stress/caps
-     * packs found 0 images). Windows keeps the exe dir above; "." stays the last-resort fallback. */
-    if (getcwd(s_exe_dir, sizeof s_exe_dir) != NULL) {
-        return;
-    }
-#endif
-    (void)snprintf(s_exe_dir, sizeof s_exe_dir, ".");
-}
+/* Canonical resolver now lives in gui_paths (D1 -- reused by the app-data root + the log file). Kept
+ * as a thin wrapper so the call site + the absolute-CWD-on-CI lesson stay put; behavior is identical. */
+static void resolve_exe_dir(void) { gui_paths_exe_dir(s_exe_dir, sizeof s_exe_dir); }
 
 /* Seed the global UI scale from the system DPI (96 dpi = 100%). GLFW makes the process
  * per-monitor DPI aware, so the framebuffer is physical pixels -- without this the fixed
@@ -963,10 +946,10 @@ int main(int argc, char *argv[]) {
     if (nt_engine_init(&config) != NT_OK) {
         return 1;
     }
-    nt_log_info("ntpacker-gui: %s build (%s)", nt_engine_build_string(), nt_engine_preset_string());
 
     /* dev seam: --parity <in> <out> runs the headless saved-bytes byte-parity check and exits
-     * BEFORE any window/GL init (pure model layer). */
+     * BEFORE any window/GL init (pure model layer). Returns before file logging installs -> a
+     * byte-parity run stays side-effect-free (no stray app-data log). */
     for (int i = 1; i + 2 < argc; i++) {
         if (strcmp(argv[i], "--parity") == 0) {
             return gui_run_parity(argv[i + 1], argv[i + 2]);
@@ -984,6 +967,15 @@ int main(int argc, char *argv[]) {
             proj_arg = argv[i];
         }
     }
+
+    /* D1: mirror nt_log to a rotating file, but ONLY for a real windowed run -- the --shot capture
+     * seam (and --parity, already returned) must stay side-effect-free (no stray app-data log/sink/
+     * FILE). Installed before the build line so that line is captured too; also a no-op under
+     * NTPACKER_GUI_HEADLESS and if the app-data dir can't be created. */
+    if (!gui_shot_active()) {
+        gui_log_file_install();
+    }
+    nt_log_info("ntpacker-gui: %s build (%s)", nt_engine_build_string(), nt_engine_preset_string());
 
     gui_shot_apply_window_size(); /* dev (--shot): request the shot window size before window init */
     nt_window_init();
@@ -1214,6 +1206,7 @@ int main(int argc, char *argv[]) {
     nt_gfx_shutdown();
     nt_input_shutdown();
     nt_window_shutdown();
+    gui_log_file_shutdown(); /* D1: unregister the sink + close the file before the engine goes down */
     nt_engine_shutdown();
     return 0;
 }
