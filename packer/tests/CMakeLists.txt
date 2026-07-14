@@ -333,3 +333,13 @@ target_compile_options(tp_bench_clone PRIVATE -U_DLL)
 add_executable(tp_bench_journal tp_bench_journal.c)
 target_link_libraries(tp_bench_journal PRIVATE tp_core)
 target_compile_options(tp_bench_journal PRIVATE -U_DLL)
+
+# S18 "R" SPIKE (throwaway): diff-based recovery journal design bench -- full-snapshot vs diff-record
+# bytes, per-diff durable append, and recovery-replay-vs-N (100/1000/10000 diffs) two ways (semantic
+# diff-apply vs op re-apply), on a normal + a huge project. Dev tool, NOT a ctest. Includes the src/
+# internal diff header (tp_diff_record_apply + history record peek), same pattern as tp_bench_clone.
+#   tp_bench_diff_journal [append_iters]
+add_executable(tp_bench_diff_journal tp_bench_diff_journal.c)
+target_link_libraries(tp_bench_diff_journal PRIVATE tp_core)
+target_include_directories(tp_bench_diff_journal PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_options(tp_bench_diff_journal PRIVATE -U_DLL)
