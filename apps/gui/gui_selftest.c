@@ -1640,7 +1640,12 @@ static size_t s_st_baseline_n;
 /* Count blue/cyan overlay pixels in the current canvas box (framebuffer read, top-left origin). The
  * region-outline colour is (0.30,0.72,1.0): B high, B>>R, G>R -- distinct from grey checker + sprites. */
 static int selftest_probe_cyan(void) {
+    static int s_probe_diag = 0; /* DIAGNOSTIC (CI headless -1 triage): throttle the reason log to a few lines */
     if (gui_canvas_get_mode(&s_canvas) != GUI_CANVAS_ATLAS || !gui_canvas_has_atlas(&s_canvas)) {
+        if (s_probe_diag++ < 4) {
+            nt_log_info("SELFTEST-DIAG probe: -1 mode=%d has_atlas=%d (not ATLAS/no-atlas)",
+                        (int)gui_canvas_get_mode(&s_canvas), (int)gui_canvas_has_atlas(&s_canvas));
+        }
         return -1;
     }
     const float *bb = s_canvas.last_bb;
@@ -1649,6 +1654,9 @@ static int selftest_probe_cyan(void) {
     int w = (int)bb[2];
     int h = (int)bb[3];
     if (w < 8 || h < 8) {
+        if (s_probe_diag++ < 4) {
+            nt_log_info("SELFTEST-DIAG probe: -1 degenerate bbox x=%d y=%d w=%d h=%d", x, y, w, h);
+        }
         return -1;
     }
     if (w > 900) {
@@ -1662,8 +1670,12 @@ static int selftest_probe_cyan(void) {
     if (!px) {
         return -1;
     }
+    const bool rp = nt_gfx_read_pixels(x, y, w, h, px, capn);
+    if (!rp && s_probe_diag++ < 4) {
+        nt_log_info("SELFTEST-DIAG probe: read_pixels FALSE at x=%d y=%d w=%d h=%d (headless GL readback)", x, y, w, h);
+    }
     int cyan = -1;
-    if (nt_gfx_read_pixels(x, y, w, h, px, capn)) {
+    if (rp) {
         cyan = 0;
         for (uint32_t i = 0; i + 3u < capn; i += 4u) {
             const int r = px[i];
