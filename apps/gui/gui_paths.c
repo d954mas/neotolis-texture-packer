@@ -1,7 +1,7 @@
 #include "gui_paths.h"
 
-#include "tp_core/tp_scan.h" /* tp_mkdirs (shared dir-creation) + tp_scan_is_dir (verify) */
-
+/* libc first (before the tp_core/vendored headers) -- matches gui_pack.c; on macOS clang a header
+ * pulling <stdio.h> first otherwise leaves snprintf undeclared here (implicit-decl = hard error). */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,6 +11,8 @@
 #else
 #include <unistd.h>
 #endif
+
+#include "tp_core/tp_scan.h" /* tp_mkdirs (shared dir-creation) + tp_scan_is_dir (verify) */
 
 // #region public API
 void gui_paths_exe_dir(char *out, size_t out_size) {

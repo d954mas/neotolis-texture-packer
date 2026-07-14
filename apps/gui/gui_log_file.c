@@ -1,15 +1,17 @@
 #include "gui_log_file.h"
 
+/* libc first (before the vendored/engine headers) -- matches gui_pack.c; on macOS clang a vendored
+ * header pulling <stdio.h> first otherwise leaves snprintf undeclared here (implicit-decl = hard error). */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
 #include "gui_paths.h"
 
 #include "log/nt_log.h"
 
 #include "tinycthread.h" /* C11 mtx_t (vendored, same as gui_pack.c) -- the sink runs on pack threads */
-
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <time.h>
 
 // #region state
 /* ~2 MB active cap, 3 rotated generations kept (ntpacker.log + .1/.2/.3 = <=4 files, bounded). */
