@@ -351,10 +351,26 @@ static void attach_recovery_journal(tp_model *m) {
     if (!m || !recovery_active()) {
         return; /* recovery disabled / not owned -> journal-less (exactly the F2-05b-ii-A behavior) */
     }
+    /* Reset the one-slot recovery file FIRST -- clear the PREVIOUS project's journal on this New/Open --
+     * so that even if we then run journal-less below (e.g. an RNG fault in ensure_ids), a later crash can
+     * never recover a stale FOREIGN project from the slot. This MUST precede the ensure_ids early-return. */
 #ifdef NTPACKER_GUI_SELFTEST
     if (!skip_reset) /* seam armed: leave the slot as-is so the fail-closed path is reachable */
 #endif
         (void)remove(s_recovery_path); /* start a fresh slot: the old model's handle is already closed */
+    /* R2 (format B): the initial CHECKPOINT this attach writes is the recovery replay BASE, so it must
+     * be an independently LOADABLE snapshot. A freshly created project still carries NIL structural ids
+     * (promotion runs later in promote_and_baseline), and tp_project_load_buffer rejects nil ids -- so
+     * checkpointing it now would persist a base that fails to reload at recovery (the post-checkpoint
+     * ops replay onto it). Promote BEFORE the checkpoint (idempotent -- an already-promoted project is
+     * unchanged, so the later promote_and_baseline no-ops). An RNG fault leaves the ids nil, so skip the
+     * journal (run journal-less with a degraded notice) rather than persist an unloadable checkpoint --
+     * the slot was already reset above, so no stale/foreign journal survives into recovery. */
+    tp_error ide = {0};
+    if (ensure_ids(&ide) != TP_STATUS_OK) {
+        note_recovery_degraded(ide.msg[0] ? ide.msg : "could not assign structural ids for the recovery checkpoint");
+        return;
+    }
     tp_journal_io io = tp_journal_io_file(s_recovery_path);
     if (!io.ctx) {
         note_recovery_degraded("could not open the recovery journal file");

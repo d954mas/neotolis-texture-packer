@@ -98,6 +98,33 @@ static tp_status commit_rename(tp_model *m, const char *id_hex, int64_t expected
     return st;
 }
 
+/* Commit a PARTIAL target.set (only out_path) on atlas[0]'s first target: exercises a mask-carrying op
+ * through the journaled commit path. Format B serializes it via tp_txn_request_encode and replays it on
+ * recovery, so the partial mask must survive that round-trip (R2a) -- not re-expand to full-replace. */
+static tp_status commit_target_out_path(tp_model *m, const char *id_hex, int64_t expected_rev, const char *out_path) {
+    tp_project *p = tp_model_project(m);
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_TARGET_SET;
+    op.atlas_id = p->atlases[0].id;
+    op.u.target_set.target_id = p->atlases[0].targets[0].id;
+    op.u.target_set.mask = TP_TF_OUT_PATH;
+    op.u.target_set.out_path = (char *)out_path;
+    tp_txn_request req;
+    memset(&req, 0, sizeof req);
+    req.schema = TP_TXN_SCHEMA;
+    (void)snprintf(req.id_hex, sizeof req.id_hex, "%s", id_hex);
+    req.expected_revision = expected_rev;
+    req.ops = &op;
+    req.op_count = 1;
+    tp_txn_result res;
+    memset(&res, 0, sizeof res);
+    tp_error err;
+    tp_status st = tp_model_apply(m, &req, &res, &err);
+    tp_txn_result_free(&res);
+    return st;
+}
+
 /* A model over base_project with a fresh in-memory journal keyed by `key`. The io
  * handle (shared ctx) is returned via *io_out so a test can snapshot the durable
  * bytes before destroying the model. */
@@ -204,6 +231,103 @@ void test_checkpoint_and_replay(void) {
     TEST_ASSERT_EQUAL_INT(2, tp_journal_id_count(m2->journal));
     TEST_ASSERT_TRUE(tp_journal_contains(m2->journal, "aa000000000000000000000000000001"));
     TEST_ASSERT_TRUE(tp_journal_contains(m2->journal, "aa000000000000000000000000000002"));
+
+    free(expected);
+    free(got);
+    tp_journal_recovery_free(&info);
+    tp_model_destroy(m2);
+}
+
+/* ---- R2 format-B linchpin: recovery REPLAYS op-payloads onto the checkpoint --- */
+
+/* Format B (plan S18 R / R2): a TXN record stores the SERIALIZED OPERATION, not a snapshot;
+ * recovery loads the last CHECKPOINT as a base and replays the post-checkpoint ops onto it.
+ * Proven three ways: (1) the recovery info carries op_count == the post-checkpoint txns and a
+ * base snapshot that does NOT already hold the final state (so a pass REQUIRES real replay, not
+ * a lucky snapshot); (2) the replayed project reserializes byte-identically to the live committed
+ * model (the same tp_operation_apply, same order, as commit); (3) the recovered revision is the
+ * FINAL one. */
+void test_format_b_replays_ops_onto_checkpoint(void) {
+    tp_id128 key = key_of(0x13);
+    tp_journal_io io;
+    tp_model *m = model_with_journal(key, &io); /* checkpoint captured at rev 0 (atlas "atlas1") */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "ab000000000000000000000000000001", 0, "first"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "ab000000000000000000000000000002", 1, "second"));
+    char *expected = serialize(tp_model_project(m));
+    int64_t exp_rev = tp_model_revision(m);
+    TEST_ASSERT_EQUAL_INT64(2, exp_rev);
+
+    size_t blen = 0;
+    uint8_t *bytes = snapshot_io(io, &blen);
+    tp_model_destroy(m);
+
+    tp_journal_io io2 = io_from_bytes(bytes, blen);
+    free(bytes);
+    tp_model *m2 = NULL;
+    tp_journal_recovery info;
+    memset(&info, 0, sizeof info);
+    tp_error err;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_recover(io2, key, &m2, &info, &err));
+    TEST_ASSERT_NOT_NULL(m2);
+
+    /* (1) format-B shape: a base checkpoint snapshot + exactly two post-checkpoint op-payloads. */
+    TEST_ASSERT_EQUAL_INT(2, (int)info.op_count);
+    TEST_ASSERT_NOT_NULL(info.snapshot);
+    TEST_ASSERT_NOT_NULL(strstr(info.snapshot, "atlas1")); /* the base IS the rev-0 checkpoint */
+    TEST_ASSERT_NULL(strstr(info.snapshot, "second"));     /* the base does NOT hold the final state */
+    TEST_ASSERT_EQUAL_INT64(1, info.ops[0].revision);
+    TEST_ASSERT_EQUAL_INT64(2, info.ops[1].revision);
+
+    /* (2)+(3): replaying the ops onto the base reaches the FINAL committed state, byte-identical. */
+    TEST_ASSERT_EQUAL_INT64(exp_rev, tp_model_revision(m2));
+    char *got = serialize(tp_model_project(m2));
+    TEST_ASSERT_EQUAL_STRING(expected, got);
+    TEST_ASSERT_EQUAL_STRING("second", tp_model_project(m2)->atlases[0].name);
+
+    free(expected);
+    free(got);
+    tp_journal_recovery_free(&info);
+    tp_model_destroy(m2);
+}
+
+/* R2b/#4: a MASK-CARRYING op (partial target.set -- only out_path) survives the full format-B chain
+ * end-to-end: commit -> journal (op-payload) -> recover (replay). The recovered project must be
+ * byte-identical to the committed one -- so the partial mask applied as a PARTIAL edit, not a full
+ * replace that would clobber exporter/enabled. Guards the masked-op round-trip R2a fixed (the rename-
+ * only test above covers a plain op). */
+void test_format_b_recovers_masked_target_set(void) {
+    tp_id128 key = key_of(0x14);
+    tp_journal_io io;
+    tp_model *m = model_with_journal(key, &io);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          commit_target_out_path(m, "cd000000000000000000000000000001", 0, "out/changed.json"));
+    char *expected = serialize(tp_model_project(m));
+    int64_t exp_rev = tp_model_revision(m);
+    TEST_ASSERT_EQUAL_INT64(1, exp_rev);
+
+    size_t blen = 0;
+    uint8_t *bytes = snapshot_io(io, &blen);
+    tp_model_destroy(m);
+
+    tp_journal_io io2 = io_from_bytes(bytes, blen);
+    free(bytes);
+    tp_model *m2 = NULL;
+    tp_journal_recovery info;
+    memset(&info, 0, sizeof info);
+    tp_error err;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_recover(io2, key, &m2, &info, &err));
+    TEST_ASSERT_NOT_NULL(m2);
+
+    /* base checkpoint = the ORIGINAL out_path; the edit lives ONLY in the replayed op-payload */
+    TEST_ASSERT_EQUAL_INT(1, (int)info.op_count);
+    TEST_ASSERT_NOT_NULL(strstr(info.snapshot, "out/a"));
+    TEST_ASSERT_NULL(strstr(info.snapshot, "out/changed.json"));
+
+    /* replaying the masked op onto the base reaches the committed state, byte-identical */
+    char *got = serialize(tp_model_project(m2));
+    TEST_ASSERT_EQUAL_STRING(expected, got);
+    TEST_ASSERT_EQUAL_INT64(exp_rev, tp_model_revision(m2));
+    TEST_ASSERT_EQUAL_STRING("out/changed.json", tp_model_project(m2)->atlases[0].targets[0].out_path);
 
     free(expected);
     free(got);
@@ -978,6 +1102,8 @@ int main(int argc, char **argv) {
     UNITY_BEGIN();
     RUN_TEST(test_journal_is_sidecar_byte_identical);
     RUN_TEST(test_checkpoint_and_replay);
+    RUN_TEST(test_format_b_replays_ops_onto_checkpoint);
+    RUN_TEST(test_format_b_recovers_masked_target_set);
     RUN_TEST(test_duplicate_retry_after_restart);
     RUN_TEST(test_append_failure_rolls_back);
     RUN_TEST(test_append_oom_is_retryable);

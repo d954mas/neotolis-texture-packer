@@ -9,8 +9,9 @@
  * never applied twice (§7.2 idempotency).
  *
  * SCOPE: this is a PURE durable log over an injectable I/O seam -- it deals in
- * opaque project-SNAPSHOT blobs + 32-hex transaction ids and knows nothing about
- * tp_project. The model<->journal glue (attach / commit append / recover-to-model)
+ * opaque record payloads (a CHECKPOINT carries a project snapshot; a committed TXN
+ * carries its serialized operation -- format B) + 32-hex transaction ids and knows
+ * nothing about tp_project. The model<->journal glue (attach / commit append / recover-to-model)
  * lives in tp_transaction.h, which owns tp_model. The journal is a SIDECAR: it is
  * NOT part of `.ntpacker_project` and does not change project serialization (the
  * byte-identity goldens depend on this).
@@ -24,8 +25,14 @@
  *            field (plan S18 R / P1-5): a torn TAIL (no valid record follows) is truncated,
  *            a mid-stream corruption (a valid record still follows) is preserved.
  *   payload: rec_type u8 (1=TXN, 2=CHECKPOINT) then --
- *            TXN        : tx_id[32] hex | revision i64 BE | snapshot[rest]
+ *            TXN        : tx_id[32] hex | revision i64 BE | op_payload[rest]
  *            CHECKPOINT : revision i64 BE | id_count u32 BE | id[32]*id_count | snapshot[rest]
+ *
+ * FORMAT B (plan S18 R / R2): a TXN record's payload is the SERIALIZED OPERATION REQUEST
+ * (a tp_txn_request_encode blob), NOT a full snapshot. Only CHECKPOINT records carry a
+ * project snapshot. Recovery loads the last checkpoint's snapshot as a base and REPLAYS the
+ * post-checkpoint TXN op-payloads onto it in commit order (via the model<->journal glue) --
+ * a diff journal, so a committed transaction costs its op bytes, not a whole re-snapshot.
  *
  * The reader is UB-clean on arbitrary/corrupt/short/torn input: every field is
  * bounds-checked (size_t math) before it is touched, and replay STOPS at the first
@@ -133,6 +140,16 @@ typedef enum tp_journal_recovery_status {
     TP_JOURNAL_RECOVERY_STALE_KEY   /* header valid but key != expected (moved project); NOT applied */
 } tp_journal_recovery_status;
 
+/* Format B (R2): one recovered post-checkpoint committed transaction -- an owned op-payload
+ * to replay onto the base checkpoint. The payload is a tp_txn_request_encode() blob (canonical
+ * NUL-terminated JSON); the model<->journal glue decodes it and re-applies its ops to reach the
+ * committed state, so the journal itself stays payload-agnostic (no tp_project/tp_operation dep). */
+typedef struct tp_journal_recovered_op {
+    char *payload;       /* owned, NUL-terminated: a serialized tp_txn_request to replay */
+    size_t payload_len;  /* payload length in bytes, excludes the NUL */
+    int64_t revision;    /* the committed revision this transaction produced */
+} tp_journal_recovered_op;
+
 typedef struct tp_journal_recovery {
     tp_journal_recovery_status status;
     size_t bytes_total;    /* total bytes in the backing store */
@@ -142,12 +159,20 @@ typedef struct tp_journal_recovery {
                               * truncation is UNSAFE here (it would delete the trailing acknowledged
                               * records); recovery preserves the file and poisons the journal. A
                               * torn tail or a single trailing corrupt record leaves this false. */
-    int records_recovered; /* count of good records applied (checkpoint + txn) */
-    int64_t revision;      /* revision of the recovered committed state (0 if none) */
-    char *snapshot;        /* owned: recovered project bytes of the LAST good record, NUL-terminated
-                            * (*snapshot_len excludes the NUL), or NULL if none. Caller frees via
-                            * tp_journal_recovery_free (or moves it out). */
+    int records_recovered; /* count of good records recovered (checkpoint + txns) */
+    int64_t revision;      /* revision of the FINAL recovered state (last good record's revision; 0 if none) */
+    /* Format B REPLAY BASELINE: `snapshot` is the LAST CHECKPOINT's project bytes -- the base
+     * that recovery loads and then replays `ops` onto. (Under the old format-A journal this was
+     * the last good record's snapshot; format-B checkpoints are the only snapshot-bearing records.)
+     * NUL-terminated (*snapshot_len excludes the NUL), or NULL if no checkpoint was recovered.
+     * Caller frees via tp_journal_recovery_free (or moves it out). */
+    char *snapshot;
     size_t snapshot_len;
+    /* Format B: the post-checkpoint committed transactions, in commit order, each an owned
+     * op-payload to replay onto `snapshot` to reach `revision`. Empty (NULL/0) when no txn
+     * followed the last checkpoint. Freed by tp_journal_recovery_free. */
+    tp_journal_recovered_op *ops;
+    size_t op_count;
 } tp_journal_recovery;
 
 void tp_journal_recovery_free(tp_journal_recovery *r);
@@ -155,10 +180,11 @@ void tp_journal_recovery_free(tp_journal_recovery *r);
 /* Replay the backing store: validate the header (magic/version/key), decode records
  * front-to-back, STOP at the first undecodable record (never guessing corrupt
  * content), populate the journal's retained-id index from the good records, and
- * fill *out (the last good record's snapshot + revision + a structured status).
- * UB-clean on arbitrary/corrupt/short/torn bytes. Returns TP_STATUS_OK whenever
- * replay ran (corruption is reported in out->status); non-OK only on a hard fault
- * (io read failure / OOM building the result). */
+ * fill *out. Format B: *out carries the LAST CHECKPOINT snapshot as `snapshot` (the
+ * replay base) plus the ordered post-checkpoint TXN op-payloads in `ops` (the glue
+ * replays them onto the base to reach `revision`). UB-clean on arbitrary/corrupt/short/
+ * torn bytes. Returns TP_STATUS_OK whenever replay ran (corruption is reported in
+ * out->status); non-OK only on a hard fault (io read failure / OOM building the result). */
 tp_status tp_journal_recover(tp_journal *j, tp_journal_recovery *out, tp_error *err);
 
 #ifdef __cplusplus

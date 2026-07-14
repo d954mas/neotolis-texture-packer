@@ -296,18 +296,27 @@ void tp_journal_recovery_free(tp_journal_recovery *r) {
     free(r->snapshot);
     r->snapshot = NULL;
     r->snapshot_len = 0;
+    for (size_t i = 0; i < r->op_count; i++) { /* format B: free each replay op-payload */
+        free(r->ops[i].payload);
+    }
+    free(r->ops);
+    r->ops = NULL;
+    r->op_count = 0;
 }
 
-/* Decode one payload; register its ids into j; output the snapshot slice offset
- * (relative to payload start) + length + revision. Returns TP_STATUS_OK on a good
- * record, TP_STATUS_OOM on a hard fault (abort recovery), or TP_STATUS_OUT_OF_BOUNDS
- * for a malformed payload (a corruption boundary). All reads bounds-checked. */
-static tp_status decode_payload(tp_journal *j, const uint8_t *pl, size_t plen, size_t *snap_off, size_t *snap_len,
-                                int64_t *rev) {
+/* Decode one payload; register its ids into j; output the record type, the payload
+ * SLICE offset (relative to payload start) + length + revision. For a CHECKPOINT the
+ * slice is the project snapshot; for a TXN (format B) it is the serialized op-payload.
+ * Returns TP_STATUS_OK on a good record, TP_STATUS_OOM on a hard fault (abort recovery),
+ * or TP_STATUS_OUT_OF_BOUNDS for a malformed payload (a corruption boundary). All reads
+ * bounds-checked. */
+static tp_status decode_payload(tp_journal *j, const uint8_t *pl, size_t plen, uint8_t *rec_type, size_t *snap_off,
+                                size_t *snap_len, int64_t *rev) {
     if (plen < 1) {
         return TP_STATUS_OUT_OF_BOUNDS;
     }
     uint8_t type = pl[0];
+    *rec_type = type;
     if (type == (uint8_t)TP_JRN_REC_TXN) {
         if (plen < (size_t)TP_JRN_TXN_FIXED) {
             return TP_STATUS_OUT_OF_BOUNDS;
@@ -410,6 +419,16 @@ static bool has_valid_record_after(const uint8_t *buf, size_t len, size_t from) 
     return false;
 }
 
+/* A post-checkpoint TXN op-payload located in the raw recovery buffer (offset+len+rev).
+ * The walk records these lazily and materializes them into owned tp_journal_recovered_op
+ * copies once framing is fully classified -- a checkpoint mid-walk just resets the count
+ * (a fresh baseline supersedes prior ops) with no owned allocations to unwind (format B). */
+typedef struct {
+    size_t off;
+    size_t len;
+    int64_t rev;
+} tp_recop_ref;
+
 tp_status tp_journal_recover(tp_journal *j, tp_journal_recovery *out, tp_error *err) {
     if (!j || !out) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "null journal or recovery out");
@@ -452,9 +471,15 @@ tp_status tp_journal_recover(tp_journal *j, tp_journal_recovery *out, tp_error *
     }
 
     size_t off = (size_t)TP_JRN_HEADER_LEN;
-    size_t last_snap_off = 0, last_snap_len = 0;
+    /* Format B accumulation: the last CHECKPOINT's snapshot slice is the replay BASE; the TXN
+     * records after it are the op-payloads to replay onto it, in commit order. `last_rev` is the
+     * FINAL recovered revision (last good record's, txn or checkpoint). */
+    size_t base_off = 0, base_len = 0;
+    bool have_base = false;
     int64_t last_rev = 0;
-    bool have_snap = false;
+    bool have_any = false;
+    tp_recop_ref *refs = NULL; /* post-(last-)checkpoint TXN op-payload refs, in commit order */
+    size_t ref_count = 0, ref_cap = 0;
     tp_status hard = TP_STATUS_OK;
     /* Why the front-to-back walk stopped at `off`: a clean EOF, an INCOMPLETE/short frame
      * (a torn tail OR a bloated length field), or a definite CORRUPT boundary (bad sync-word,
@@ -474,9 +499,10 @@ tp_status tp_journal_recover(tp_journal *j, tp_journal_recovery *out, tp_error *
             break;
         }
         /* FRAME_OK: sync + length + crc all check out; decode the payload semantics. */
+        uint8_t rtype = 0;
         size_t snap_off = 0, snap_len = 0;
         int64_t rev = 0;
-        tp_status ds = decode_payload(j, buf + payload_off, payload_len, &snap_off, &snap_len, &rev);
+        tp_status ds = decode_payload(j, buf + payload_off, payload_len, &rtype, &snap_off, &snap_len, &rev);
         if (ds == TP_STATUS_OOM) {
             hard = ds;
             break;
@@ -485,21 +511,43 @@ tp_status tp_journal_recover(tp_journal *j, tp_journal_recovery *out, tp_error *
             stop = STOP_CORRUPT; /* CRC-valid but undecodable payload => corruption boundary */
             break;
         }
-        last_snap_off = payload_off + snap_off;
-        last_snap_len = snap_len;
+        if (rtype == (uint8_t)TP_JRN_REC_CKPT) {
+            /* A checkpoint is a FRESH BASELINE: it supersedes every prior post-checkpoint op. */
+            base_off = payload_off + snap_off;
+            base_len = snap_len;
+            have_base = true;
+            ref_count = 0; /* refs are plain offsets -- no owned allocations to unwind */
+        } else {
+            /* Format B TXN: record its op-payload slice to replay onto the base, in commit order. */
+            if (ref_count == ref_cap) {
+                size_t new_cap = ref_cap ? ref_cap * 2 : 8;
+                tp_recop_ref *grown = (tp_recop_ref *)realloc(refs, new_cap * sizeof *grown);
+                if (!grown) {
+                    hard = TP_STATUS_OOM;
+                    break;
+                }
+                refs = grown;
+                ref_cap = new_cap;
+            }
+            refs[ref_count].off = payload_off + snap_off;
+            refs[ref_count].len = snap_len;
+            refs[ref_count].rev = rev;
+            ref_count++;
+        }
         last_rev = rev;
-        have_snap = true;
+        have_any = true;
         out->records_recovered++;
         off = frame_end;
     }
 
     if (hard != TP_STATUS_OK) {
+        free(refs);
         free(buf);
         return tp_error_set(err, hard, "journal recovery ran out of memory");
     }
 
     out->stop_offset = off;
-    out->revision = have_snap ? last_rev : 0;
+    out->revision = have_any ? last_rev : 0;
 
     /* P1-5 / C2: the truncate-vs-preserve decision reduces to ONE question -- is there a
      * CRC-valid record STILL after the boundary? (Scan from off+1 so the corrupt record at
@@ -521,17 +569,51 @@ tp_status tp_journal_recover(tp_journal *j, tp_journal_recovery *out, tp_error *
         j->poisoned = true;
     }
 
-    if (have_snap && last_snap_len > 0) {
-        char *snap = (char *)malloc(last_snap_len + 1);
+    /* Format B materialization: copy the BASE checkpoint snapshot + the ordered op-payloads out of
+     * `buf` into owned buffers (buf is freed below). Any OOM here frees what was built + returns a
+     * hard fault (tp_journal_recovery_free leaves *out clean for the caller). */
+    if (have_base && base_len > 0) {
+        char *snap = (char *)malloc(base_len + 1);
         if (!snap) {
+            free(refs);
             free(buf);
             return tp_error_set(err, TP_STATUS_OOM, "journal snapshot copy failed (out of memory)");
         }
-        memcpy(snap, buf + last_snap_off, last_snap_len);
-        snap[last_snap_len] = '\0';
+        memcpy(snap, buf + base_off, base_len);
+        snap[base_len] = '\0';
         out->snapshot = snap;
-        out->snapshot_len = last_snap_len;
+        out->snapshot_len = base_len;
     }
+    if (ref_count > 0) {
+        tp_journal_recovered_op *ops = (tp_journal_recovered_op *)calloc(ref_count, sizeof *ops);
+        if (!ops) {
+            free(refs);
+            free(buf);
+            tp_journal_recovery_free(out); /* frees the base snapshot already set */
+            return tp_error_set(err, TP_STATUS_OOM, "journal recovery op-list allocation failed (out of memory)");
+        }
+        for (size_t i = 0; i < ref_count; i++) {
+            char *payload = (char *)malloc(refs[i].len + 1);
+            if (!payload) {
+                for (size_t k = 0; k < i; k++) {
+                    free(ops[k].payload);
+                }
+                free(ops);
+                free(refs);
+                free(buf);
+                tp_journal_recovery_free(out); /* frees the base snapshot already set */
+                return tp_error_set(err, TP_STATUS_OOM, "journal recovery op-payload copy failed (out of memory)");
+            }
+            memcpy(payload, buf + refs[i].off, refs[i].len);
+            payload[refs[i].len] = '\0';
+            ops[i].payload = payload;
+            ops[i].payload_len = refs[i].len;
+            ops[i].revision = refs[i].rev;
+        }
+        out->ops = ops;
+        out->op_count = ref_count;
+    }
+    free(refs);
     free(buf);
     return TP_STATUS_OK;
 }

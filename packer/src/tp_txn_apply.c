@@ -372,25 +372,29 @@ tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_tx
         }
     }
 
-    /* (ii) The gate itself: journal-backed durably appends the POST-apply committed
-     * snapshot (so recovery restores exactly this revision WITHOUT re-running apply);
+    /* (ii) The gate itself: journal-backed durably appends this transaction's SERIALIZED
+     * OPERATION (format B -- a tp_txn_request_encode blob), so recovery re-runs apply from
+     * the last checkpoint (load the checkpoint base, replay the post-checkpoint op-payloads);
      * journal-less records the id in the in-memory idstore (EXACTLY the F2-02/03 path).
      * Either way the transaction id is registered ONLY on success, so a rolled-back txn
-     * never poisons the id into a permanent DUPLICATE_ID. */
+     * never poisons the id into a permanent DUPLICATE_ID. (Checkpoints, written on attach and
+     * on the R3 compaction cadence, remain full snapshots -- the durable replay baseline.) */
     tp_status gate = TP_STATUS_OK;
     const char *gate_msg = "";
     if (m->journal) {
-        char *snap = NULL;
-        size_t snap_len = 0;
-        gate = tp_project_save_buffer(clone, &snap, &snap_len, err);
-        if (gate == TP_STATUS_OK) {
-            gate = tp_journal_append_txn(m->journal, req->id_hex, m->revision + 1, (const uint8_t *)snap, snap_len,
-                                         err);
-            gate_msg = "recovery journal append failed (transaction rolled back)";
+        /* The op request already validated + applied to the clone above, so encode() fails
+         * only on OOM (an INVALID-kind op is impossible here). The journal payload is OPAQUE
+         * bytes to the log -- no journal API change. */
+        char *payload = tp_txn_request_encode(req);
+        if (!payload) {
+            gate = tp_error_set(err, TP_STATUS_OOM, "could not serialize the operation for the recovery journal");
+            gate_msg = "could not serialize the operation for the journal";
         } else {
-            gate_msg = "could not serialize the committed state for the journal";
+            gate = tp_journal_append_txn(m->journal, req->id_hex, m->revision + 1, (const uint8_t *)payload,
+                                         strlen(payload), err);
+            gate_msg = "recovery journal append failed (transaction rolled back)";
         }
-        free(snap);
+        free(payload);
     } else if (m->idstore && m->idstore->record) {
         gate = m->idstore->record(m->idstore->ctx, req->id_hex, err);
         gate_msg = "could not record the transaction id (out of memory)";
@@ -566,6 +570,20 @@ tp_status tp_model_attach_journal(tp_model *m, tp_journal *j, tp_error *err) {
     if (ss != TP_STATUS_OK) {
         return ss;
     }
+    /* R2b: the initial checkpoint is the load-bearing recovery BASE -- format B replays post-checkpoint
+     * ops ONTO it (see tp_model_recover), so it must be independently loadable. A project with nil
+     * structural ids serializes fine but tp_project_load_buffer rejects it, which would make recovery
+     * discard the whole session. Enforce the "checkpoint must round-trip" invariant HERE in core (below
+     * any client's own promotion, e.g. the GUI's ensure_ids) so no caller can persist an unrecoverable
+     * base; the model is NOT attached and the caller keeps ownership of j on failure. */
+    tp_project *probe = NULL;
+    tp_status vs = tp_project_load_buffer(snap, snap_len, &probe, err);
+    if (vs != TP_STATUS_OK) {
+        free(snap);
+        return tp_error_set(err, vs, "cannot attach recovery journal: the checkpoint does not round-trip "
+                                     "(promote structural ids before attaching)");
+    }
+    tp_project_destroy(probe);
     tp_status cs = tp_journal_init_checkpoint(j, (const uint8_t *)snap, snap_len, m->revision, err);
     free(snap);
     if (cs != TP_STATUS_OK) {
@@ -615,25 +633,54 @@ tp_status tp_model_recover(tp_journal_io io, tp_id128 key, tp_model **out, tp_jo
     tp_status ret = TP_STATUS_OK;
     bool j_consumed = false; /* set once a model takes ownership of j */
     if (rec.records_recovered > 0 && rec.snapshot && rec.snapshot_len > 0) {
+        /* Format B: load the last CHECKPOINT snapshot as the base, then REPLAY the post-checkpoint
+         * TXN op-payloads onto it in commit order -- the SAME tp_operation_apply, in the SAME order,
+         * as the commit path (tp_txn__commit_validated), so the replayed project reaches exactly the
+         * committed state. A replay-time decode/apply failure is a HARD fault (the op was already
+         * acknowledged at commit): surface it as a non-OK recover, never silently skip an op. */
         tp_project *p = NULL;
-        tp_status ls = tp_project_load_buffer(rec.snapshot, rec.snapshot_len, &p, err);
+        tp_status ls = tp_project_load_buffer(rec.snapshot, rec.snapshot_len, &p, err); /* base checkpoint */
         if (ls != TP_STATUS_OK) {
-            ret = ls; /* durable snapshot did not load (real corruption despite a valid crc) */
+            ret = ls; /* durable checkpoint snapshot did not load (real corruption despite a valid crc) */
         } else {
-            tp_model *rm = tp_model_wrap(p);
-            if (!rm) {
+            for (size_t k = 0; ls == TP_STATUS_OK && k < rec.op_count; k++) {
+                tp_txn_request *req = NULL;
+                tp_status ds = tp_txn_request_decode(rec.ops[k].payload, &req, err);
+                if (ds != TP_STATUS_OK) {
+                    ls = ds; /* a durable op-payload did not decode */
+                    break;
+                }
+                for (int i = 0; i < req->op_count; i++) {
+                    tp_op_reject rej;
+                    memset(&rej, 0, sizeof rej);
+                    tp_status as = tp_operation_apply(p, &req->ops[i], &rej); /* identical to the commit apply */
+                    if (as != TP_STATUS_OK) {
+                        ls = tp_error_set(err, as, "recovery replay of transaction %zu op %d rejected: %s", k, i,
+                                          rej.message);
+                        break;
+                    }
+                }
+                tp_txn_request_free(req);
+            }
+            if (ls != TP_STATUS_OK) {
                 tp_project_destroy(p);
-                ret = tp_error_set(err, TP_STATUS_OOM, "could not wrap the recovered project");
+                ret = ls;
             } else {
-                rm->revision = rec.revision;
-                rm->saved_identity = tp_semantic_identity(p);
-                rm->recovered_unsaved = true; /* C5: recovered committed state is ahead of the project file -> DIRTY */
-                rm->journal = j;              /* owns j; its index is already seeded by recover */
-                j_consumed = true;
-                if (out) {
-                    *out = rm;
+                tp_model *rm = tp_model_wrap(p);
+                if (!rm) {
+                    tp_project_destroy(p);
+                    ret = tp_error_set(err, TP_STATUS_OOM, "could not wrap the recovered project");
                 } else {
-                    tp_model_destroy(rm); /* also destroys j */
+                    rm->revision = rec.revision; /* the FINAL recovered revision (last record's) */
+                    rm->saved_identity = tp_semantic_identity(p);
+                    rm->recovered_unsaved = true; /* C5: recovered state is ahead of the project file -> DIRTY */
+                    rm->journal = j;              /* owns j; its index is already seeded by recover */
+                    j_consumed = true;
+                    if (out) {
+                        *out = rm;
+                    } else {
+                        tp_model_destroy(rm); /* also destroys j */
+                    }
                 }
             }
         }
