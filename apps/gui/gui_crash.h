@@ -32,6 +32,16 @@ void gui_crash_install(void);
  * previous run actually crashed. Idempotent; a no-op if install was a no-op. */
 void gui_crash_clear_marker(void);
 
+/* D3: if the PREVIOUS run left a `last-run.crashed` marker (i.e. it crashed), show a one-time yes/no
+ * prompt offering to open the <app-data>/crash folder (logs + dump) so the user can send it to the
+ * developer; open the folder in the OS file explorer on YES, and clear the marker on EITHER choice so
+ * it never prompts twice. A clean previous run (no marker) shows nothing. Call ONCE early in main()
+ * AFTER gui_crash_install and only for a real windowed run. Strict no-op when the crash dir never
+ * resolved -- not installed, or headless (gui_crash_install no-ops there, leaving the marker path
+ * empty) -- so the GUI selftest / CI stay silent. Safe to call before window init: the dialog is an
+ * OS-native modal (tinyfiledialogs), independent of our GL window. */
+void gui_crash_report_prompt(void);
+
 /* Deliberately fault (deref a volatile null) to exercise the handler end-to-end. Behind the hidden
  * --selftest-crash dev arg ONLY -- never a shipped/live path. Self-guards to a no-op under
  * NTPACKER_GUI_HEADLESS so it can never fire in CI. */

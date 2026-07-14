@@ -19,15 +19,18 @@
 #include <unistd.h>   /* write, close, _exit */
 #endif
 
-#include "gui_paths.h" /* <app-data> root + ensure-dir (shared with D1) */
+#include "tinyfiledialogs.h" /* D3 next-launch report prompt (yes/no messageBox); vendored, apps/gui/deps */
+#include "gui_paths.h"        /* <app-data> root + ensure-dir (shared with D1) */
 
-#include "log/nt_log.h" /* used ONLY by gui_crash_selftest (post-engine-init); NEVER by the handler */
+#include "log/nt_log.h" /* used by gui_crash_selftest + gui_crash_report_prompt (main thread, after the
+                         * log is up); NEVER by the crash handler (it must stay async-signal-safe). */
 
 // #region state
 /* Everything the handler touches is pre-resolved here at install time (main thread) into static
  * buffers: the handler must not format paths (snprintf/strftime are not async-signal-safe). Empty
  * strings mean "could not resolve" -> the handler degrades to writing nothing. */
 static bool s_installed;
+static char s_crash_dir[GUI_PATHS_MAX];     /* <app-data>/crash (D3 opens this folder in the OS explorer) */
 static char s_marker_path[GUI_PATHS_MAX];   /* <app-data>/crash/last-run.crashed (fixed name; D3 reads it) */
 static char s_marker_prefix[128];           /* pre-rendered marker text (session-start timestamp) */
 static size_t s_marker_prefix_len;
@@ -194,6 +197,9 @@ void gui_crash_install(void) {
                  ? snprintf(crash_dir, sizeof crash_dir, "%s/crash", root)
                  : -1;
     if (nd > 0 && (size_t)nd < sizeof crash_dir && gui_paths_ensure_dir(crash_dir)) {
+        /* Retain the resolved crash dir for D3's "open the crash folder" action (this is the only
+         * place the dir is known; the handler works off the per-file paths built below). */
+        memcpy(s_crash_dir, crash_dir, (size_t)nd + 1);
         int nm = snprintf(s_marker_path, sizeof s_marker_path, "%s/last-run.crashed", crash_dir);
         if (nm <= 0 || (size_t)nm >= sizeof s_marker_path) {
             s_marker_path[0] = '\0';
@@ -251,6 +257,113 @@ void gui_crash_clear_marker(void) {
         return; /* never installed / no crash dir -> nothing to clear */
     }
     (void)remove(s_marker_path); /* clean exit: drop the marker so D3 only fires after a real crash */
+}
+
+/* True iff the marker file is present on disk. D3 runs long after any fault (next launch), so plain
+ * stdio is fine here -- none of the signal-handler async-safety rules apply on this path. */
+static bool crash_marker_exists(void) {
+    FILE *f = fopen(s_marker_path, "rb");
+    if (f == NULL) {
+        return false;
+    }
+    (void)fclose(f);
+    return true;
+}
+
+#ifndef _WIN32
+/* Wrap `in` as ONE POSIX shell word for system(): surround it with single quotes and rewrite every
+ * embedded ' as the '\'' escape. The crash dir is USER-DERIVED (it sits under $HOME), so a home with
+ * an apostrophe -- /home/o'brien/... -- would otherwise break the quoting and let path metacharacters
+ * inject into the shell command. Writes out[out_size]; returns false (caller then skips the open) if it
+ * would not fit. (Windows takes the path as a ShellExecuteA parameter, not a shell string -> no quoting
+ * there. A fork+execlp with argv would avoid the shell entirely; escaping is the smaller change and
+ * keeps this parallel to gui_view_chrome.c's gui_open_url.) */
+static bool crash_shell_squote(const char *in, char *out, size_t out_size) {
+    size_t o = 0;
+    if (out_size < 3) { /* need at least '' + NUL */
+        return false;
+    }
+    out[o++] = '\'';
+    for (const char *p = in; *p != '\0'; p++) {
+        if (*p == '\'') {
+            if (o + 6 > out_size) { /* 4 bytes for '\'' + the eventual closing ' + NUL */
+                return false;
+            }
+            out[o++] = '\'';
+            out[o++] = '\\';
+            out[o++] = '\'';
+            out[o++] = '\'';
+        } else {
+            if (o + 2 >= out_size) { /* this char + closing ' + NUL */
+                return false;
+            }
+            out[o++] = *p;
+        }
+    }
+    out[o++] = '\'';
+    out[o] = '\0';
+    return true;
+}
+#endif
+
+/* Open `dir` in the OS file explorer, best-effort; returns true if the open was dispatched. Mirrors
+ * gui_view_chrome.c's gui_open_url: Windows ShellExecuteA (shell32 -- already linked for
+ * tinyfiledialogs), POSIX open/xdg-open. A failed open is non-fatal (the prompt already showed the
+ * path, so the user can still reach the folder by hand) -- the caller logs the miss. */
+static bool crash_open_folder(const char *dir) {
+#ifdef _WIN32
+    HINSTANCE rc = ShellExecuteA(NULL, "open", dir, NULL, NULL, SW_SHOWNORMAL);
+    return (INT_PTR)rc > 32; /* ShellExecuteA returns > 32 on success (path is a parameter, not shell) */
+#else
+    char quoted[GUI_PATHS_MAX * 4 + 4]; /* worst case: every byte an escaped ' -> 4x, + the two quotes */
+    if (!crash_shell_squote(dir, quoted, sizeof quoted)) {
+        return false;
+    }
+    char cmd[sizeof quoted + 32];
+#if defined(__APPLE__)
+    (void)snprintf(cmd, sizeof cmd, "open %s >/dev/null 2>&1 &", quoted);
+#else
+    (void)snprintf(cmd, sizeof cmd, "xdg-open %s >/dev/null 2>&1 &", quoted);
+#endif
+    /* Backgrounded (&) so startup never blocks on the file manager -> this only catches a failed shell
+     * spawn (system() == -1 or non-zero), not a missing xdg-open; that is fine for a best-effort open. */
+    return system(cmd) == 0;
+#endif
+}
+
+void gui_crash_report_prompt(void) {
+    /* Nothing to do when the crash dir never resolved: not installed, headless (gui_crash_install
+     * no-ops there so s_marker_path stays empty), or the app-data dir could not be created. This
+     * single empty-path guard is what keeps the GUI selftest / CI silent -- no dialog, no marker
+     * churn -- so it must come first. */
+    if (s_marker_path[0] == '\0') {
+        return;
+    }
+    /* A clean previous run had its marker removed by gui_crash_clear_marker; a real crash left it. So
+     * the marker's mere presence is the "the last run crashed" signal. */
+    if (!crash_marker_exists()) {
+        return;
+    }
+    /* Include the folder path in the message so a failed open still tells the user where to look. */
+    char msg[GUI_PATHS_MAX + 256];
+    (void)snprintf(msg, sizeof msg,
+                   "ntpacker closed unexpectedly last time.\n\n"
+                   "Open the crash-report folder (logs + crash dump) so you can send it to the "
+                   "developer?\n\n%s",
+                   s_crash_dir);
+    /* yesno / question, default YES. tinyfd returns 1 for yes, 0 for no. NOTE: with NO graphical dialog
+     * backend (e.g. Linux without zenity/kdialog) tinyfd falls back to a BLOCKING stdin console prompt.
+     * Accepted as a rare edge for a GL desktop app (which normally has a dialog backend); it never bites
+     * CI, which is headless (guarded out above) or the selftest build (guarded out at the call site). */
+    if (tinyfd_messageBox("ntpacker -- crash report", msg, "yesno", "question", 1) == 1) {
+        if (!crash_open_folder(s_crash_dir)) {
+            /* The prompt already showed the path, so this is non-fatal -- just record the miss. Safe to
+             * log here: the report prompt runs on the main thread after the log is up (unlike the handler). */
+            nt_log_error("ntpacker-gui: could not open the crash-report folder '%s'", s_crash_dir);
+        }
+    }
+    /* Clear on EITHER choice: the report offer is a one-shot, not a recurring nag. */
+    gui_crash_clear_marker();
 }
 
 void gui_crash_selftest(void) {

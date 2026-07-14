@@ -983,6 +983,15 @@ int main(int argc, char *argv[]) {
     if (!gui_shot_active()) {
         gui_crash_install();
         gui_log_file_install();
+#ifndef NTPACKER_GUI_SELFTEST
+        /* D3: if the PREVIOUS run crashed it left a marker -> offer to open the crash folder, then
+         * clear it (once). Self-contained startup step: no ordering coupling with the upcoming R
+         * recovery modal. No-op with no marker / headless. Native modal, so before window init is OK.
+         * Disabled in the selftest build (like the recovery journal/notice below): ctest #50 runs THIS
+         * exe NON-headless, so a stale/self-written marker would block ctest on the native modal.
+         * Interactive-only by construction -- the shipped app never sets NTPACKER_GUI_SELFTEST. */
+        gui_crash_report_prompt();
+#endif
     }
     nt_log_info("ntpacker-gui: %s build (%s)", nt_engine_build_string(), nt_engine_preset_string());
 
