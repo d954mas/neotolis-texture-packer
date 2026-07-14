@@ -145,6 +145,10 @@ static bool selftest_corrupt_journal_record(const char *path, int rec_index) {
 #define CYR_STEM "\xD1\x82\xD0\xB5\xD1\x81\xD1\x82_\xD1\x81\xD0\xBF\xD1\x80\xD0\xB0\xD0\xB9\xD1\x82"
 
 void run_selftest(void) {
+    /* CI diagnostics: unbuffered logs so a fatal NT_ASSERT (__builtin_trap, no flush) never loses the
+     * preceding SELFTEST/step line -- essential for diagnosing a headless-CI-only failure. */
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
     nt_log_info("SELFTEST: begin");
     gui_project_init();
     tp_project *p = gui_project_get();
