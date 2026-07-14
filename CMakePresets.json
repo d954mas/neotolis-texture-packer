@@ -25,11 +25,22 @@
         "CMAKE_BUILD_TYPE": "Release",
         "NT_UI_DEBUG_TOOLS": "OFF"
       }
+    },
+    {
+      "name": "native-tests-debug",
+      "displayName": "Native Debug + GUI self-test (registers ctest #50 ntpacker_gui_selftest)",
+      "inherits": "native-debug",
+      "binaryDir": "${sourceDir}/build/_cmake/native-tests-debug",
+      "cacheVariables": {
+        "NTPACKER_GUI_SELFTEST": "ON",
+        "NTPACKER_GUI_CTEST": "ON"
+      }
     }
   ],
   "buildPresets": [
     { "name": "native-debug", "configurePreset": "native-debug" },
-    { "name": "native-release", "configurePreset": "native-release" }
+    { "name": "native-release", "configurePreset": "native-release" },
+    { "name": "native-tests-debug", "configurePreset": "native-tests-debug" }
   ],
   "testPresets": [
     {
@@ -40,6 +51,11 @@
     {
       "name": "native-release",
       "configurePreset": "native-release",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "native-tests-debug",
+      "configurePreset": "native-tests-debug",
       "output": { "outputOnFailure": true }
     }
   ]
