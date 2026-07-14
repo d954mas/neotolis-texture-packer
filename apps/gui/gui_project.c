@@ -1065,6 +1065,19 @@ bool gui_project_remove_atlas(int index) {
     return true;
 }
 
+/* Build one TP_OP_SOURCE_ADD op (zeroes `op` first, so a false return is safe for tp_operation_free).
+ * `path` is stored verbatim -- callers pass a '/'-normalized path (core dedups on the normalized form).
+ * Shared by the single- and batch-add wrappers so the two op-build sites never drift (mirrors
+ * fill_default_target_op; #8). */
+static bool fill_source_add_op(tp_operation *op, tp_id128 atlas_id, const char *path, tp_source_kind kind) {
+    memset(op, 0, sizeof *op);
+    op->kind = TP_OP_SOURCE_ADD;
+    op->atlas_id = atlas_id;
+    op->u.source_add.kind = kind;
+    op->u.source_add.key = dupstr(path);
+    return op->u.source_add.key != NULL && gen_id(&op->u.source_add.source_id);
+}
+
 gui_add_status gui_project_add_source_kind(int atlas_index, const char *path, tp_source_kind kind) {
     if (!gui_project_flush_pending()) {
         return GUI_ADD_FAILED; /* fix2 [3]: journal-failed flush dropped the gesture -> abort (op-error surfaced) */
@@ -1077,12 +1090,7 @@ gui_add_status gui_project_add_source_kind(int atlas_index, const char *path, tp
         return GUI_ADD_DUPLICATE; /* core rejects a dup path; catch it here (no op) -- no touch, no dirty */
     }
     tp_operation op;
-    memset(&op, 0, sizeof op);
-    op.kind = TP_OP_SOURCE_ADD;
-    op.atlas_id = a->id;
-    op.u.source_add.kind = kind;
-    op.u.source_add.key = dupstr(path);
-    if (!op.u.source_add.key || !gen_id(&op.u.source_add.source_id)) {
+    if (!fill_source_add_op(&op, a->id, path, kind)) {
         tp_operation_free(&op);
         return GUI_ADD_FAILED;
     }
@@ -1098,6 +1106,84 @@ gui_add_status gui_project_add_source(int atlas_index, const char *path) {
     /* Folder default: the "Add Folder" dialog and other kind-agnostic callers. The
      * "Add Files" dialog records TP_SOURCE_KIND_FILE via add_source_kind directly. */
     return gui_project_add_source_kind(atlas_index, path, TP_SOURCE_KIND_FOLDER);
+}
+
+/* Batch-add multiple sources as ONE atomic transaction (H/P2-13) -- the "Add Files" multi-select path,
+ * which previously committed one txn PER file (N undo steps + a mid-batch failure left a partial add).
+ * Skips empty paths and any path already in the atlas OR already queued in THIS batch (both counted into
+ * *out_dup), so the committed txn holds only DISTINCT new sources and never self-rejects on a duplicate.
+ * Commits nothing when nothing is new. Returns true iff the txn committed (or was a clean no-op); false
+ * on flush-fail / OOM / a core reject (the model is then byte-unchanged). Both out-counts are always set
+ * (0 on early failure). One commit -> ONE undo step for the whole multi-select. */
+bool gui_project_add_sources(int atlas_index, const char *const *paths, int n_paths, tp_source_kind kind,
+                             int *out_added, int *out_dup) {
+    if (out_added) {
+        *out_added = 0;
+    }
+    if (out_dup) {
+        *out_dup = 0;
+    }
+    if (!gui_project_flush_pending()) {
+        return false; /* fix2 [3]: a journal-failed flush dropped the gesture -> abort (op-error surfaced) */
+    }
+    tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
+    if (!a || n_paths <= 0 || !paths) {
+        return false;
+    }
+    tp_operation *ops = (tp_operation *)calloc((size_t)n_paths, sizeof *ops);
+    if (!ops) {
+        return false;
+    }
+    int m = 0; /* distinct new sources queued */
+    int dup = 0;
+    for (int i = 0; i < n_paths; i++) {
+        const char *path = paths[i];
+        if (!path || path[0] == '\0') {
+            continue;
+        }
+        if (tp_project_atlas_has_source_path(a, path)) {
+            dup++;
+            continue; /* already in the atlas (core would reject the dup) */
+        }
+        bool queued = false; /* de-dup WITHIN the batch: two identical selections must not both add */
+        for (int j = 0; j < m; j++) {
+            if (strcmp(ops[j].u.source_add.key, path) == 0) {
+                queued = true;
+                break;
+            }
+        }
+        if (queued) {
+            dup++;
+            continue;
+        }
+        if (!fill_source_add_op(&ops[m], a->id, path, kind)) {
+            ops_free(ops, m + 1); /* free the fully-built arms + this partial one */
+            free(ops);
+            if (out_dup) {
+                *out_dup = dup; /* preserve the dup tally counted before this OOM/RNG fault */
+            }
+            return false;
+        }
+        m++;
+    }
+    bool ok = true;
+    if (m > 0) {
+        ok = commit_txn_now(ops, m); /* ONE transaction -> ONE undo step; ALWAYS frees the op arms */
+        if (ok) {
+            gui_scan_invalidate_all();
+            gui_project_touch(GUI_ACT_ADD_SOURCE);
+        }
+    } else {
+        ops_free(ops, 0); /* nothing queued (all dup/empty): no commit, no dirty */
+    }
+    free(ops); /* commit_txn_now consumed the arms; the array itself is ours */
+    if (out_added) {
+        *out_added = ok ? m : 0;
+    }
+    if (out_dup) {
+        *out_dup = dup;
+    }
+    return ok;
 }
 
 /* fix3 [0]: bool -- true iff the removal committed (see gui_project_remove_atlas). */

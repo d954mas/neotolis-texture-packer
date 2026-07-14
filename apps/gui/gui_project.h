@@ -147,6 +147,13 @@ bool gui_project_remove_atlas(int index);                 /* true iff removed */
 gui_add_status gui_project_add_source(int atlas_index, const char *path); /* stored verbatim; relativized on save; kind=folder */
 /* Kind-aware variant (schema v3): the "Add Files" dialog records TP_SOURCE_KIND_FILE. */
 gui_add_status gui_project_add_source_kind(int atlas_index, const char *path, tp_source_kind kind);
+/* Batch-add a multi-select as ONE atomic transaction (one undo step). Skips empties + duplicates (in the
+ * atlas or within the batch) into *out_dup; true iff committed or a clean no-op. PRECONDITION: `paths` are
+ * '/'-normalized -- the in-batch dedup is a raw strcmp, while core dedups on the normalized form, so two
+ * paths equal only after normalization would slip the batch dedup and self-reject the whole txn. See
+ * gui_project.c. */
+bool gui_project_add_sources(int atlas_index, const char *const *paths, int n_paths, tp_source_kind kind,
+                             int *out_added, int *out_dup);
 bool gui_project_remove_source(int atlas_index, int source_index); /* true iff removed */
 
 /* Renames atlas `index` (caller validates non-empty/unique/normalization-safe). */

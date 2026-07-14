@@ -1095,6 +1095,49 @@ void run_selftest(void) {
         gui_project_new(); /* leave a clean project for the following phases */
     }
 
+    /* --- H/P2-13: Add Files (multi-select) commits ONE transaction, not one per file -> a 4-file add is
+     *     a SINGLE undo step and is ATOMIC (one undo removes all of them). Also de-dups WITHIN the batch. --- */
+    {
+        gui_project_new();
+        tp_project_atlas *p13a = tp_project_get_atlas(gui_project_get(), 0);
+        const int p13n0 = p13a ? p13a->source_count : -1;
+        const int p13u0 = gui_project_undo_depth();
+        const char *p13paths[4] = {"batch/a.png", "batch/b.png", "batch/c.png", "batch/a.png"}; /* last = in-batch dup */
+        int p13add = -1;
+        int p13dup = -1;
+        const bool p13ok = gui_project_add_sources(0, p13paths, 4, TP_SOURCE_KIND_FILE, &p13add, &p13dup);
+        tp_project_atlas *p13a1 = tp_project_get_atlas(gui_project_get(), 0);
+        const int p13n1 = p13a1 ? p13a1->source_count : -1;
+        const int p13u1 = gui_project_undo_depth();
+        nt_log_info("SELFTEST: P2-13 batch-add ok=%d added=%d dup=%d sources %d->%d undo %d->%d (want ok,3,1,+3,+1)",
+                    (int)p13ok, p13add, p13dup, p13n0, p13n1, p13u0, p13u1);
+        NT_ASSERT(p13ok && p13add == 3 && p13dup == 1 && "P2-13: 3 distinct added, the in-batch duplicate skipped");
+        NT_ASSERT(p13n1 == p13n0 + 3 && "P2-13: all 3 distinct sources landed in one commit");
+        NT_ASSERT(p13u1 == p13u0 + 1 && "P2-13: the whole multi-select is ONE undo step (not one per file)");
+        const bool p13undo = gui_project_undo(); /* atomic: a single undo removes ALL three */
+        tp_project_atlas *p13a2 = tp_project_get_atlas(gui_project_get(), 0);
+        nt_log_info("SELFTEST: P2-13 undo=%d sources->%d undo_depth->%d (want back to %d,%d)",
+                    (int)p13undo, p13a2 ? p13a2->source_count : -1, gui_project_undo_depth(), p13n0, p13u0);
+        NT_ASSERT(p13undo && p13a2 && p13a2->source_count == p13n0 && gui_project_undo_depth() == p13u0 &&
+                  "P2-13: ONE undo atomically removes all three batch sources");
+        const bool p13redo = gui_project_redo(); /* atomic: a single redo restores ALL three */
+        tp_project_atlas *p13a3 = tp_project_get_atlas(gui_project_get(), 0);
+        NT_ASSERT(p13redo && p13a3 && p13a3->source_count == p13n0 + 3 && gui_project_undo_depth() == p13u0 + 1 &&
+                  "P2-13: ONE redo atomically restores all three batch sources");
+        /* a batch whose path is ALREADY in the atlas counts it as a dup, not an add (the in-atlas branch). */
+        const char *p13paths2[2] = {"batch/a.png", "batch/d.png"}; /* a already present (redone), d new */
+        int p13add2 = -1;
+        int p13dup2 = -1;
+        const bool p13ok2 = gui_project_add_sources(0, p13paths2, 2, TP_SOURCE_KIND_FILE, &p13add2, &p13dup2);
+        tp_project_atlas *p13a4 = tp_project_get_atlas(gui_project_get(), 0);
+        nt_log_info("SELFTEST: P2-13 in-atlas-dup ok=%d add=%d dup=%d sources->%d (want ok,1,1,+4)", (int)p13ok2, p13add2,
+                    p13dup2, p13a4 ? p13a4->source_count : -1);
+        NT_ASSERT(p13ok2 && p13add2 == 1 && p13dup2 == 1 &&
+                  "P2-13: a path already in the atlas is a dup; only the genuinely-new one is added");
+        NT_ASSERT(p13a4 && p13a4->source_count == p13n0 + 4 && "P2-13: exactly one new source landed");
+        gui_project_new(); /* leave a clean project for the following phases */
+    }
+
     /* --- F2-05b-ii-B: LIVE recovery journal -- append-fail UX + crash-recovery round-trip (both ways) --- */
     {
         /* (J1) APPEND-FAIL UX: a recovery-journal append failure (full disk) must reject the commit

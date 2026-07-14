@@ -769,26 +769,29 @@ static void do_add_files(void) {
      * max -- pathological) is dropped LOUDLY with a count. */
     int added = 0;
     int dup = 0;
-    int dropped = 0;
+    int too_long = 0; /* a single path longer than the 1024-byte cap */
+    int overflow = 0; /* more paths than the 32-path cap were selected */
+    /* Collect the selected paths, then commit them as ONE transaction (H/P2-13): the old per-path
+     * gui_project_add_source_kind loop made an N-file multi-select N undo steps + non-atomic (a mid-batch
+     * failure left a partial add). tinyfd caps the list at 32 paths of <= 1024 bytes each. */
+    char paths[32][1024];
+    const char *ptrs[32];
+    int n = 0;
     const char *start = res;
     for (;;) {
         const char *bar = strchr(start, '|');
         const size_t seg = bar ? (size_t)(bar - start) : strlen(start);
         if (seg > 0) {
-            char path[1024]; /* MAX_PATH_OR_CMD: one tinyfd path never exceeds this */
-            if (seg < sizeof path) {
-                memcpy(path, start, seg);
-                path[seg] = '\0';
-                normalize_slashes(path);
-                /* These come from the file-picker dialog: record the true kind. */
-                const gui_add_status r = gui_project_add_source_kind(s_sel_atlas, path, TP_SOURCE_KIND_FILE);
-                if (r == GUI_ADD_ADDED) {
-                    added++;
-                } else if (r == GUI_ADD_DUPLICATE) {
-                    dup++;
-                }
+            if (n >= (int)(sizeof paths / sizeof paths[0])) {
+                overflow++; /* > 32 selected -> the tail is dropped (distinct from a too-long path) */
+            } else if (seg >= sizeof paths[0]) {
+                too_long++; /* one pathological over-long path */
             } else {
-                dropped++;
+                memcpy(paths[n], start, seg);
+                paths[n][seg] = '\0';
+                normalize_slashes(paths[n]);
+                ptrs[n] = paths[n];
+                n++;
             }
         }
         if (!bar) {
@@ -796,9 +799,16 @@ static void do_add_files(void) {
         }
         start = bar + 1;
     }
-    if (dropped > 0) {
-        set_statusf_ex(STATUS_WARNING, "Added %d file source(s); %d dropped (path too long), %d already added", added,
-                       dropped, dup);
+    /* These come from the file-picker dialog: record the true kind. One atomic transaction, one undo step. */
+    const bool ok = gui_project_add_sources(s_sel_atlas, ptrs, n, TP_SOURCE_KIND_FILE, &added, &dup);
+    if (!ok) {
+        /* the whole atomic batch was rejected (journal/disk-full, OOM, core) -- the reason is already on
+         * the op-error channel; make THIS line an ERROR too, not a benign info-toned "Added 0". */
+        set_status_ex(STATUS_ERROR, "Could not add the selected files.");
+    } else if (too_long > 0 || overflow > 0) {
+        set_statusf_ex(STATUS_WARNING,
+                       "Added %d file source(s); %d skipped (%d too long, %d over the 32-file limit), %d already added",
+                       added, too_long + overflow, too_long, overflow, dup);
     } else if (dup > 0) {
         set_statusf("Added %d file source(s); %d already added", added, dup);
     } else {
