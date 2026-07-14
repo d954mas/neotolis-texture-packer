@@ -1350,12 +1350,12 @@ void commit_sprite_rename(void) {
  * flush_failed(). Any buffered gesture is committed-or-aborted HERE; on a journal-failed flush the
  * neutral error is surfaced and we abort (keeping the editor open unless forced, so the user can retry
  * after freeing disk). After a successful flush, each rename op's OWN internal flush is a guaranteed
- * no-op, so its return is DOMAIN-ONLY: for the anim branch (set_anim_id is a DIRECT write, never a
- * journal append) a false is a genuine name collision, so the "must be unique" warning is correct again
- * and never silent -- no anim_id_exists heuristic (fix3's heuristic was wrong: it matched the anim's own
- * unchanged name). set_atlas_name / set_sprite_rename journal their rename op; on that op's OWN append
- * failure they return false -> no success message + the op-error surfaces via poll_async (not a false
- * success, not a wrong "already exists"). */
+ * no-op, so its return is DOMAIN-ONLY. As of H/P1-2 the anim branch also routes through an op
+ * (set_anim_id builds TP_OP_ANIMATION_RENAME -> commit_txn_now), so a false there is a core reject whose
+ * structured message rides the op-error channel -- surfaced directly, no anim_id_exists heuristic (fix3's
+ * heuristic was wrong: it matched the anim's own unchanged name). set_atlas_name / set_sprite_rename /
+ * set_anim_id journal their rename op; on that op's OWN append failure they return false -> no success
+ * message + the op-error surfaces (not a false success, not a wrong "already exists"). */
 static void commit_active_edit(bool force) {
     if (s_edit_kind == EDIT_NONE) {
         return; /* nothing being edited */
@@ -1391,15 +1391,15 @@ static void commit_active_edit(bool force) {
             return;
         }
         if (!gui_project_set_anim_id(s_sel_atlas, s_edit_anim, s_edit_buf)) {
-            /* Post-flush, set_anim_id's false is a genuine name collision (the typed name is held by
-             * ANOTHER animation), OR a rare non-collision failure (OOM on the name dup, or a stale
-             * out-of-range edit index). gui_project_anim_id_exists() distinguishes them cleanly HERE:
-             * the own-name case returns true from set_anim_id (a no-op) so it never reaches this branch,
-             * and the flush-fail confound that made this heuristic wrong in fix3 is gone (the entry
-             * flush_failed() above handles the journal case). So report the collision as such, else a
-             * real error rather than a misleading "must be unique". */
-            if (gui_project_anim_id_exists(s_sel_atlas, s_edit_buf)) {
-                set_status_ex(STATUS_WARNING, "Animation name must be unique.");
+            /* H/P1-2: animation rename is a first-class op now (undoable + journaled), so a false is a
+             * core REJECT -- a name collision (validate enforces uniqueness) or a rare OOM/stale-index
+             * failure. The structured reject rides commit_txn_now's op-error channel, so surface it
+             * DIRECTLY instead of re-deriving the reason with the old anim_id_exists heuristic (which
+             * could not tell the anim's own unchanged name from a real clash). The entry flush_failed()
+             * already handled the journal-fail case, so the op-error here is the domain reject. */
+            char anim_err[256];
+            if (gui_project_take_op_error(anim_err, sizeof anim_err)) {
+                set_status_ex(STATUS_WARNING, anim_err);
             } else {
                 set_status_ex(STATUS_ERROR, "Could not rename the animation.");
             }

@@ -11,10 +11,11 @@
  *   3. rendering the result (structured success/error payloads).
  * The VALUE-RANGE validation (atlas knob ranges, animation fps) moved into core
  * (tp_operation_validate); the CLI no longer re-checks those. Reference/existence
- * and (for atlas.create/rename) name-collision validation is core's; the CLI keeps
- * name-uniqueness as a SELECTION policy where core does not enforce it (animations)
- * and where preserving the exact CLI diagnostic matters. See
- * docs/decisions/0014-f2-05a-cli-transaction-cutover.md.
+ * and (for atlas.create/rename and animation.rename) name-collision validation is core's;
+ * the CLI keeps name-uniqueness as a SELECTION policy where core does not enforce it
+ * (animation.create) and where preserving the exact CLI diagnostic matters. See
+ * docs/decisions/0014-f2-05a-cli-transaction-cutover.md (and 0015 for animation.rename,
+ * which became a first-class op in H/P1-2).
  *
  * Journal-LESS one-shot lifecycle (spec: ordinary CLI is FILE-oriented, NOT a live
  * session): load -> wrap in a tp_model with journal==NULL -> apply ONE transaction on
@@ -1402,6 +1403,37 @@ static int do_anim(const char *const *pos, int npos, const char *opt_at, bool js
         return CLI_EXIT_PROJECT;
     }
     tp_id128 anim_id = an->id;
+
+    if (strcmp(sub, "rename") == 0) {
+        if (npos != 6) {
+            return fail_usage(p, json, quiet, "usage", "anim rename needs <id> <new>");
+        }
+        const char *neu = pos[5];
+        if (neu[0] == '\0') {
+            return fail_usage(p, json, quiet, "usage", "animation name must be non-empty");
+        }
+        tp_project_anim *other = find_anim(a, neu);
+        if (other && other != an) { /* CLI policy: rename-to-another-name collision is usage (core also rejects) */
+            char m[128];
+            (void)snprintf(m, sizeof m, "animation '%s' already exists", neu);
+            return fail_usage(p, json, quiet, "usage", m);
+        }
+        tp_operation op;
+        memset(&op, 0, sizeof op);
+        op.kind = TP_OP_ANIMATION_RENAME;
+        op.atlas_id = aid;
+        op.u.anim_rename.anim_id = anim_id;
+        op.u.anim_rename.name = cli_strdup(neu);
+        if (!op.u.anim_rename.name) {
+            tp_operation_free(&op);
+            cli_emit_error(json, quiet, "oom", "out of memory building animation");
+            tp_project_destroy(p);
+            return CLI_EXIT_INTERNAL;
+        }
+        char human[160];
+        (void)snprintf(human, sizeof human, "Renamed animation '%s' -> '%s'", id, neu);
+        return commit_ops(p, path, &op, 1, "anim", 1, human, json, quiet);
+    }
 
     if (strcmp(sub, "add-frame") == 0) {
         if (npos != 6) {

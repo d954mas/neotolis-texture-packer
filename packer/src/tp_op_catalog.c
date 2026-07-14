@@ -43,6 +43,9 @@ static const tp_op_info k_ops[TP_OP_KIND_COUNT] = {
     {TP_OP_TARGET_CREATE, "target.create", TP_OP_CLASS_CREATE, TP_ID_KIND_TARGET, "target add"},
     {TP_OP_TARGET_REMOVE, "target.remove", TP_OP_CLASS_REMOVE, TP_ID_KIND_TARGET, "target remove"},
     {TP_OP_TARGET_SET, "target.set", TP_OP_CLASS_SET, TP_ID_KIND_TARGET, "target set"},
+
+    /* H/P1-2: appended (APPEND-ONLY catalog) -- animation rename is a first-class undoable+journaled op. */
+    {TP_OP_ANIMATION_RENAME, "animation.rename", TP_OP_CLASS_SET, TP_ID_KIND_ANIM, "anim rename"},
 };
 
 const tp_op_info *tp_op_info_by_kind(tp_op_kind kind) {
@@ -115,6 +118,7 @@ static const char *const f_anim_frame_move[] = {"atlas_id", "anim_id", "from_ind
 static const char *const f_target_create[] = {"atlas_id", "target_id", "exporter_id", "out_path", "enabled"};
 static const char *const f_target_remove[] = {"atlas_id", "target_id"};
 static const char *const f_target_set[] = {"atlas_id", "target_id", "exporter_id", "out_path", "enabled"};
+static const char *const f_anim_rename[] = {"atlas_id", "anim_id", "name"};
 
 #define FV(arr) (arr), (int)(sizeof(arr) / sizeof((arr)[0]))
 static const struct {
@@ -143,6 +147,7 @@ static const struct {
     {TP_OP_TARGET_CREATE, FV(f_target_create)},
     {TP_OP_TARGET_REMOVE, FV(f_target_remove)},
     {TP_OP_TARGET_SET, FV(f_target_set)},
+    {TP_OP_ANIMATION_RENAME, FV(f_anim_rename)},
 };
 #undef FV
 
@@ -205,6 +210,7 @@ void tp_operation_free(tp_operation *op) {
     switch (op->kind) {
         case TP_OP_ATLAS_CREATE: free(op->u.atlas_create.name); break;
         case TP_OP_ATLAS_RENAME: free(op->u.atlas_rename.name); break;
+        case TP_OP_ANIMATION_RENAME: free(op->u.anim_rename.name); break;
         case TP_OP_SOURCE_ADD: free(op->u.source_add.key); break;
         case TP_OP_SOURCE_REPLACE:
         case TP_OP_SOURCE_REMOVE: free(op->u.source_ref.key); break;

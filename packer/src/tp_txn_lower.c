@@ -270,6 +270,10 @@ tp_status tp_txn__lower_op(const cJSON *oj, tp_operation *out, tp_error *err) {
         case TP_OP_ANIMATION_REMOVE:
             TRY(j_opt_shape_id(oj, "anim_id", TP_ID_KIND_ANIM, &out->u.anim_ref.anim_id, err));
             break;
+        case TP_OP_ANIMATION_RENAME:
+            TRY(j_opt_shape_id(oj, "anim_id", TP_ID_KIND_ANIM, &out->u.anim_rename.anim_id, err));
+            TRY(j_opt_dup(oj, "name", &out->u.anim_rename.name, err));
+            break;
         case TP_OP_ANIMATION_SETTINGS_SET:
             TRY(j_opt_shape_id(oj, "anim_id", TP_ID_KIND_ANIM, &out->u.anim_settings.anim_id, err));
             TRY(lower_anim_settings(oj, &out->u.anim_settings, err));

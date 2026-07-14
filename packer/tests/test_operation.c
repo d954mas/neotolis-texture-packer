@@ -309,6 +309,48 @@ void test_validate_atlas_rename_collision(void) {
     tp_project_destroy(p);
 }
 
+/* H/P1-2: animation.rename rejects an empty name, an unknown anim_id, and a collision with
+ * ANOTHER animation (INVALID_ARGUMENT); rename-to-self and a fresh name are allowed. */
+void test_validate_anim_rename(void) {
+    tp_project *p = tp_project_create();
+    TEST_ASSERT_NOT_NULL(p);
+    tp_project_anim *a1 = NULL;
+    tp_project_anim *a2 = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_animation(&p->atlases[0], "walk", &a1));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_animation(&p->atlases[0], "run", &a2));
+    uint8_t ctr = 7;
+    tp_rng rng = {det_fill, &ctr};
+    tp_error err;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_promote_ids(p, &rng, &err));
+    tp_id128 aid = p->atlases[0].id;
+    tp_id128 walk_id = p->atlases[0].animations[0].id;
+
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_ANIMATION_RENAME;
+    op.atlas_id = aid;
+    op.u.anim_rename.anim_id = walk_id;
+    tp_op_reject rej;
+
+    op.u.anim_rename.name = (char *)""; /* empty -> invalid_argument */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT, tp_operation_validate(p, &op, &rej));
+    TEST_ASSERT_EQUAL_STRING("name", rej.field);
+
+    op.u.anim_rename.name = (char *)"run"; /* collides with the other animation */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT, tp_operation_validate(p, &op, &rej));
+    TEST_ASSERT_EQUAL_STRING("name", rej.field);
+
+    op.u.anim_rename.name = (char *)"walk"; /* rename to self: allowed (no-op) */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_operation_validate(p, &op, &rej));
+    op.u.anim_rename.name = (char *)"sprint"; /* a fresh name: allowed */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_operation_validate(p, &op, &rej));
+
+    op.u.anim_rename.anim_id = id_of(0x99); /* unknown anim id -> not_found */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_NOT_FOUND, tp_operation_validate(p, &op, &rej));
+    TEST_ASSERT_EQUAL_STRING("anim_id", rej.field);
+    tp_project_destroy(p);
+}
+
 /* [2] source.add rejects a path that already exists (the mutator would silently dedupe
  * and strand the op's source_id). Backslash form normalizes to the same path. */
 void test_validate_source_add_dup_path(void) {
@@ -405,6 +447,7 @@ int main(void) {
     RUN_TEST(test_validate_negative_frame_count);
     RUN_TEST(test_validate_atlas_create_dup_name);
     RUN_TEST(test_validate_atlas_rename_collision);
+    RUN_TEST(test_validate_anim_rename);
     RUN_TEST(test_validate_source_add_dup_path);
     RUN_TEST(test_validate_knob_bounds_match_cli);
     RUN_TEST(test_validate_frame_move_to_index_unbounded);

@@ -73,6 +73,8 @@ typedef enum tp_op_kind {
     TP_OP_TARGET_REMOVE,
     TP_OP_TARGET_SET,
 
+    TP_OP_ANIMATION_RENAME, /* H/P1-2: appended -- animation rename is now a first-class op */
+
     TP_OP_KIND_COUNT
 } tp_op_kind;
 
@@ -218,6 +220,11 @@ typedef struct tp_op_anim_settings {
     bool flip_h, flip_v;
 } tp_op_anim_settings;
 
+typedef struct tp_op_anim_rename { /* atlas_id = parent atlas; anim_id addresses the animation */
+    tp_id128 anim_id;
+    char *name;                    /* new logical/display name (non-empty, unique among the atlas's anims) */
+} tp_op_anim_rename;
+
 typedef struct tp_op_anim_frames_set { /* reserved bulk set: replace the whole list */
     tp_id128 anim_id;
     char **frames;
@@ -274,6 +281,7 @@ typedef struct tp_operation {
         tp_op_anim_create anim_create;
         tp_op_anim_ref anim_ref;
         tp_op_anim_settings anim_settings;
+        tp_op_anim_rename anim_rename;
         tp_op_anim_frames_set anim_frames_set;
         tp_op_anim_frame_add anim_frame_add;
         tp_op_anim_frame_rm anim_frame_rm;

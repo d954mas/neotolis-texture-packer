@@ -1456,25 +1456,25 @@ bool gui_project_set_anim_id(int atlas_index, int anim_index, const char *new_id
         return false;
     }
     if (an->name && strcmp(an->name, new_id) == 0) {
-        return true; /* no-op */
+        return true; /* no-op: avoid a needless undo step (rename-to-own-name) */
     }
+    /* H/P1-2: animation rename is now a first-class op -- undoable + journaled + crash-safe.
+     * Mirrors gui_project_set_atlas_name; the name-uniqueness policy lives in core validate now,
+     * so a collision surfaces through commit_txn_now's op-error channel (no client clash check). */
     tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
-    tp_project_anim *clash = find_anim_by_name(a, new_id);
-    if (clash && clash != an) {
-        return false; /* CLIENT policy: clashes with ANOTHER animation (core has no anim-rename) */
-    }
-    /* The F2-01 operation catalog has NO animation-rename op, so this is the ONE mutator that
-     * cannot be expressed as a typed op and therefore CANNOT be captured by the F2-03 diff
-     * history -- animation rename is NOT undoable in b-ii-A (a documented carry, not a
-     * regression introduced here; adding a core ANIMATION_RENAME op is F2-01 scope). Coherent
-     * because the model is journal-less: the direct write mutates m->project in place and the
-     * next transaction clones it. Documented in decision 0015. */
-    char *copy = dupstr(new_id);
-    if (!copy) {
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_ANIMATION_RENAME;
+    op.atlas_id = a->id;
+    op.u.anim_rename.anim_id = an->id;
+    op.u.anim_rename.name = dupstr(new_id);
+    if (!op.u.anim_rename.name) {
+        tp_operation_free(&op);
         return false;
     }
-    free(an->name); /* boundary-ok: no ANIMATION_RENAME op exists (decision 0015) */
-    an->name = copy; /* boundary-ok: no ANIMATION_RENAME op exists (decision 0015) */
+    if (!commit_txn_now(&op, 1)) {
+        return false;
+    }
     gui_project_touch(GUI_ACT_RENAME_ANIM);
     return true;
 }

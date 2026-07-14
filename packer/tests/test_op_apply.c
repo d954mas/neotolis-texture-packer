@@ -414,6 +414,50 @@ void test_apply_anim_ops(void) {
     tp_project_destroy(p);
 }
 
+/* H/P1-2 animation.rename: rename applies; an OOM on the name dup leaves the live model
+ * BYTE-UNCHANGED (stage-then-commit); an unknown anim id is NOT_FOUND. */
+void test_apply_anim_rename(void) {
+    tp_project *p = base_project();
+    tp_id128 aid = p->atlases[0].id;
+    tp_op_reject rej;
+    tp_operation op;
+
+    memset(&op, 0, sizeof op); /* create an animation to rename */
+    op.kind = TP_OP_ANIMATION_CREATE;
+    op.atlas_id = aid;
+    op.u.anim_create.anim_id = id_of(0xC1);
+    op.u.anim_create.name = (char *)"walk";
+    op.u.anim_create.fps = 12.0F;
+    op.u.anim_create.playback = 0;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_operation_apply(p, &op, &rej));
+
+    memset(&op, 0, sizeof op); /* rename applies */
+    op.kind = TP_OP_ANIMATION_RENAME;
+    op.atlas_id = aid;
+    op.u.anim_rename.anim_id = id_of(0xC1);
+    op.u.anim_rename.name = (char *)"run";
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_operation_apply(p, &op, &rej));
+    tp_project_anim *an = tp_project_atlas_find_animation_by_id(&p->atlases[0], id_of(0xC1));
+    TEST_ASSERT_NOT_NULL(an);
+    TEST_ASSERT_EQUAL_STRING("run", an->name);
+
+    /* OOM on the name dup: the model is left byte-unchanged (name stays "run"). */
+    tp_op__test_set_alloc_fail(0); /* fail the FIRST staging allocation (the name dup) */
+    op.u.anim_rename.name = (char *)"sprint";
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OOM, tp_operation_apply(p, &op, &rej));
+    tp_op__test_set_alloc_fail(-1);
+    an = tp_project_atlas_find_animation_by_id(&p->atlases[0], id_of(0xC1));
+    TEST_ASSERT_EQUAL_STRING("run", an->name); /* live-unchanged on OOM */
+
+    memset(&op, 0, sizeof op); /* error: unknown anim id */
+    op.kind = TP_OP_ANIMATION_RENAME;
+    op.atlas_id = aid;
+    op.u.anim_rename.anim_id = id_of(0x99);
+    op.u.anim_rename.name = (char *)"x";
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_NOT_FOUND, tp_operation_apply(p, &op, &rej));
+    tp_project_destroy(p);
+}
+
 /* ---- forward + error per kind: target ------------------------------------ */
 
 void test_apply_target_ops(void) {
@@ -808,6 +852,7 @@ int main(void) {
     RUN_TEST(test_apply_sprite_pending_no_source);
     RUN_TEST(test_apply_sprite_pending_verbatim_ext_key);
     RUN_TEST(test_apply_anim_ops);
+    RUN_TEST(test_apply_anim_rename);
     RUN_TEST(test_apply_target_ops);
     RUN_TEST(test_alloc_fail_before_commit);
     RUN_TEST(test_parity_settings);

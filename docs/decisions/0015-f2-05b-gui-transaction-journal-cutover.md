@@ -140,7 +140,18 @@ On a core reject the setter surfaces the structured status to the status-bar sof
 model byte-unchanged) — mirroring the F2-05a reject contract. In practice the widgets clamp to valid
 ranges, so a reject never fires on normal input.
 
-## The one mutator without an op (honest gap): animation rename
+## The one mutator without an op (honest gap): animation rename — RESOLVED in H/P1-2
+
+> **RESOLVED (H/P1-2, 2026-07-14).** The catalog now has a first-class append-only
+> `TP_OP_ANIMATION_RENAME` op (wire `animation.rename`, payload `{anim_id, name}`), wired across every
+> layer (catalog/validate/apply/lower/encode/diff capture+inverse/txn echo) and exposed as a CLI verb
+> `anim rename`. `gui_project_set_anim_id` now builds the op and routes through `commit_txn_now` exactly
+> like `gui_project_set_atlas_name`; the direct `an->name =` write, the client-side clash check, and the
+> `boundary-ok:` annotations are gone. Animation rename is now UNDOABLE (Ctrl+Z), journaled
+> (crash-recoverable), headless, and byte-identity-safe. Name-uniqueness moved into `tp_operation_validate`
+> (rejects a collision with ANOTHER animation as `invalid_argument`, allows rename-to-self); the GUI
+> surfaces that structured reject via the op-error channel instead of the old `anim_id_exists` heuristic.
+> The paragraph below is retained as history of the pre-H/P1-2 state.
 
 The F2-01 operation catalog has NO `ANIMATION_RENAME` op (the CLI has no `anim rename` verb either —
 animations are name-keyed; the id/name split keeps the structural id stable). The GUI's animation
@@ -167,9 +178,10 @@ byte-identity-proven CLI oracle for the same logical edits.
 (R7b), and writes through the `a`/`an`/`t`/`ov`/`proj` aliases into it (R7c) — with a self-test that
 proves each detector fires on a seeded violation and does not false-positive on op-payload / alias-read
 / lifecycle forms. `gui_selftest.c` (a dev-seam test harness that drives internal states, like the
-CLI tests) stays excluded, as it already is for R1–R3. `tp_project_atlas_seed_default_target`,
-`tp_project_promote_ids`, and the annotated animation-rename are the sanctioned lifecycle/gap
-exceptions.
+CLI tests) stays excluded, as it already is for R1–R3. `tp_project_atlas_seed_default_target` and
+`tp_project_promote_ids` are the sanctioned lifecycle exceptions. (Before H/P1-2 the annotated
+animation-rename direct write was a third sanctioned exception; it is gone — animation rename now
+routes through `TP_OP_ANIMATION_RENAME` like every other mutator.)
 
 ## F2-05b-i FIX pass (adversarial-review corrections, 2026-07-13)
 
@@ -375,11 +387,14 @@ cutover (b-i's snapshot undo masked them) and FIXED here by routing through ops:
   `seed_default_target` remains the sanctioned direct lifecycle seed for `init/new` (fresh history, ids
   promoted by `promote_and_baseline`).
 
-**Remaining honest gap — animation rename is NOT undoable.** `gui_project_set_anim_id` stays a direct
+**Remaining honest gap — animation rename is NOT undoable.** ~~`gui_project_set_anim_id` stays a direct
 `an->name =` write because the F2-01 catalog has NO `ANIMATION_RENAME` op (a remove+recreate would
 reorder the array and break byte-identity). With the diff history this rename produces no undo step, so
 Ctrl+Z after it reverts the prior edit. This is a pre-existing catalog gap (not introduced here);
-restoring undo needs a core `ANIMATION_RENAME` op (F2-01 scope).
+restoring undo needs a core `ANIMATION_RENAME` op (F2-01 scope).~~ **RESOLVED in H/P1-2** — the core
+`TP_OP_ANIMATION_RENAME` op now exists and `gui_project_set_anim_id` routes through it, so the rename is a
+real undo step (byte-identity is preserved by an in-place name swap, not remove+recreate). See the
+resolved section above.
 
 ### Verified (both presets)
 
@@ -551,10 +566,12 @@ project-owned pointer today: `create_animation` receives `snprintf` copies in `s
 copies (`e->s0` / `e->keys`). A CONVENTION comment atop the mutation-wrappers region now records the
 dup-before-flush rule so a future wrapper cannot silently reintroduce the class.
 
-### Carried-forward limitation
+### Carried-forward limitation — RESOLVED in H/P1-2
 
-Animation rename is still NOT undoable (`gui_project_set_anim_id`'s direct `an->name =` write; the F2-01
-catalog has no `ANIMATION_RENAME` op). Unchanged by this fix pass — documented above under the cutover.
+~~Animation rename is still NOT undoable (`gui_project_set_anim_id`'s direct `an->name =` write; the F2-01
+catalog has no `ANIMATION_RENAME` op). Unchanged by this fix pass — documented above under the cutover.~~
+**RESOLVED in H/P1-2**: `TP_OP_ANIMATION_RENAME` was added and `gui_project_set_anim_id` now routes
+through it (undoable + journaled). See the resolved section above.
 
 ### Verified (both presets)
 

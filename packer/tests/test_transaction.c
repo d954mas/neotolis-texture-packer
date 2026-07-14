@@ -749,6 +749,42 @@ void test_json_request_encode_golden(void) {
     tp_txn_request_free(rd);
 }
 
+/* H/P1-2: the new animation.rename op survives request encode -> decode -> re-encode
+ * byte-identically (journal-safe: it round-trips through the closed wire vocabulary). */
+void test_json_anim_rename_roundtrip(void) {
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_ANIMATION_RENAME;
+    op.atlas_id = id_of(0xA1);
+    op.u.anim_rename.anim_id = id_of(0xC1);
+    op.u.anim_rename.name = (char *)"renamed";
+    tp_txn_request req = {0};
+    req.schema = TP_TXN_SCHEMA;
+    (void)snprintf(req.id_hex, sizeof req.id_hex, "%s", "0123456789abcdef0123456789abcdef");
+    req.expected_revision = 0;
+    req.ops = &op;
+    req.op_count = 1;
+
+    char *json = tp_txn_request_encode(&req);
+    TEST_ASSERT_NOT_NULL(json);
+    TEST_ASSERT_NOT_NULL(strstr(json, "\"op\": \"animation.rename\""));
+    TEST_ASSERT_NOT_NULL(strstr(json, "\"name\": \"renamed\""));
+
+    tp_txn_request *rd = NULL;
+    tp_error err;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_txn_request_decode(json, &rd, &err));
+    TEST_ASSERT_NOT_NULL(rd);
+    TEST_ASSERT_EQUAL_INT(1, rd->op_count);
+    TEST_ASSERT_EQUAL_INT(TP_OP_ANIMATION_RENAME, (int)rd->ops[0].kind);
+    TEST_ASSERT_EQUAL_STRING("renamed", rd->ops[0].u.anim_rename.name);
+    char *json2 = tp_txn_request_encode(rd);
+    TEST_ASSERT_NOT_NULL(json2);
+    TEST_ASSERT_EQUAL_STRING(json, json2); /* byte-identical re-encode */
+    free(json);
+    free(json2);
+    tp_txn_request_free(rd);
+}
+
 /* the batch decoded from JSON applies == the same ops one-by-one via F2-01. */
 void test_json_batch_equals_one_by_one(void) {
     tp_project *p1 = base_project();
@@ -1150,6 +1186,7 @@ int main(void) {
     RUN_TEST(test_json_revision_short_circuit_alone);
     RUN_TEST(test_json_shape_collect_all);
     RUN_TEST(test_json_request_encode_golden);
+    RUN_TEST(test_json_anim_rename_roundtrip);
     RUN_TEST(test_json_batch_equals_one_by_one);
     RUN_TEST(test_number_handling);
     RUN_TEST(test_typed_malformed_id_rejected);

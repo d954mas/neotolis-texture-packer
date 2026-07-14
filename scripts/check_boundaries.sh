@@ -103,8 +103,9 @@ fi
 #    boundary-excluded dev-seam test harness that pokes internals -- like the CLI's tests) and
 #    main.c (app shell + the --parity dev seam) are out of scope, as is the SANCTIONED set:
 #    tp_project_atlas_seed_default_target + tp_project_promote_ids (lifecycle, not a mutation
-#    op) and the annotated animation-rename direct write (no ANIMATION_RENAME op exists;
-#    decision 0015). A legit exception carries a "boundary-ok:" note on the same line.
+#    op). (H/P1-2 retired the former animation-rename direct-write exception: animation rename
+#    now routes through TP_OP_ANIMATION_RENAME.) A legit exception carries a "boundary-ok:" note
+#    on the same line.
 _gui_muts="apps/gui/gui_project.c apps/gui/gui_view_settings.c apps/gui/gui_view_lists.c apps/gui/gui_view_chrome.c apps/gui/gui_actions.c"
 # The inline project mutators the F2-05b-i ops replaced (as R6, seed_default_target +
 # promote_ids are lifecycle, NOT banned).

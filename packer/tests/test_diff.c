@@ -335,6 +335,47 @@ void test_oracle_animation_remove(void) {
     tp_model_destroy(m);
 }
 
+/* H/P1-2: the anim NAME field is set non-default and the oracle proves rename's diff
+ * (fwd + inverse + redo) is byte-complete -- i.e. animation rename is genuinely undoable. */
+void test_oracle_animation_rename(void) {
+    tp_model *m = fresh();
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_ANIMATION_RENAME;
+    op.atlas_id = a0_id(m);
+    op.u.anim_rename.anim_id = anim0_id(m);
+    op.u.anim_rename.name = (char *)"renamed";
+    run_oracle(m, &op, 1);
+    tp_model_destroy(m);
+}
+
+/* H/P1-2 explicit: an anim rename reverts its NAME on undo and re-applies it on redo. */
+void test_anim_rename_undo_redo_name(void) {
+    tp_model *m = fresh();
+    tp_error err;
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_ANIMATION_RENAME;
+    op.atlas_id = a0_id(m);
+    op.u.anim_rename.anim_id = anim0_id(m);
+    op.u.anim_rename.name = (char *)"sprint";
+    tp_txn_request req = {0};
+    req.schema = TP_TXN_SCHEMA;
+    next_txn_id(req.id_hex);
+    req.expected_revision = tp_model_revision(m);
+    req.ops = &op;
+    req.op_count = 1;
+    tp_txn_result res;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_apply(m, &req, &res, &err));
+    tp_txn_result_free(&res);
+    TEST_ASSERT_EQUAL_STRING("sprint", tp_model_project(m)->atlases[0].animations[0].name);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_undo(m, &err));
+    TEST_ASSERT_EQUAL_STRING("walk", tp_model_project(m)->atlases[0].animations[0].name); /* reverted */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_redo(m, &err));
+    TEST_ASSERT_EQUAL_STRING("sprint", tp_model_project(m)->atlases[0].animations[0].name); /* re-applied */
+    tp_model_destroy(m);
+}
+
 void test_oracle_animation_settings_set(void) {
     tp_model *m = fresh();
     tp_operation op;
@@ -1229,6 +1270,8 @@ int main(void) {
     RUN_TEST(test_oracle_sprite_name_set);
     RUN_TEST(test_oracle_animation_create);
     RUN_TEST(test_oracle_animation_remove);
+    RUN_TEST(test_oracle_animation_rename);
+    RUN_TEST(test_anim_rename_undo_redo_name);
     RUN_TEST(test_oracle_animation_settings_set);
     RUN_TEST(test_oracle_animation_frames_set);
     RUN_TEST(test_oracle_animation_frame_add);

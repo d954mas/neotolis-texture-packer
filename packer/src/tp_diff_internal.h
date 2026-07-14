@@ -43,7 +43,8 @@ typedef enum tp_diff_shape {
     TP_DIFF_SHAPE_TARGET_FIELDS, /* SET target.set: before/after fields (entity_id=target_id)    */
     TP_DIFF_SHAPE_ANIM_SETTINGS, /* SET animation.settings.set: before/after knobs (anim_id)     */
     TP_DIFF_SHAPE_SPRITE_RECORD, /* SET sprite.override.set/.clear/.name.set: sparse record      */
-    TP_DIFF_SHAPE_FRAMES_LIST     /* SET animation.frames.set: before/after whole frames list     */
+    TP_DIFF_SHAPE_FRAMES_LIST,   /* SET animation.frames.set: before/after whole frames list     */
+    TP_DIFF_SHAPE_ANIM_NAME      /* SET animation.rename: before/after name (anim_id)            */
 } tp_diff_shape;
 
 /* The 10 atlas packing knobs, captured as a value snapshot for atlas.settings.set. */
@@ -80,7 +81,7 @@ typedef struct tp_diff_op {
     /* FRAME_MOVE: actual endpoints (clamped, as apply moved them). */
     int from_index, to_index;
 
-    /* ATLAS_NAME: */
+    /* ATLAS_NAME + ANIM_NAME (the anim addressed by anim_id): */
     char *name_before, *name_after; /* owned */
 
     /* ATLAS_KNOBS: */

@@ -162,6 +162,16 @@ tp_status tp_diff_capture_before(const tp_project *pre, const tp_operation *op, 
             e->position = (int)(an - a->animations);
             return tp_diff__copy_elem(TP_DIFF_COLL_ANIM, an, &e->elem);
         }
+        case TP_OP_ANIMATION_RENAME: {
+            e->shape = TP_DIFF_SHAPE_ANIM_NAME;
+            e->anim_id = op->u.anim_rename.anim_id;
+            const tp_project_anim *an = find_anim(a, e->anim_id);
+            if (!an) {
+                return TP_STATUS_NOT_FOUND;
+            }
+            e->name_before = tp_diff__dup(an->name, &ok);
+            return ok ? TP_STATUS_OK : TP_STATUS_OOM;
+        }
         case TP_OP_ANIMATION_SETTINGS_SET: {
             e->shape = TP_DIFF_SHAPE_ANIM_SETTINGS;
             e->anim_id = op->u.anim_settings.anim_id;
@@ -311,6 +321,14 @@ tp_status tp_diff_capture_after(const tp_project *post, const tp_operation *op, 
             const tp_project_anim *an = find_anim(a, op->u.anim_create.anim_id);
             e->position = (int)(an - a->animations);
             return tp_diff__copy_elem(TP_DIFF_COLL_ANIM, an, &e->elem);
+        }
+        case TP_OP_ANIMATION_RENAME: {
+            const tp_project_anim *an = find_anim(a, e->anim_id);
+            if (!an) {
+                return TP_STATUS_NOT_FOUND;
+            }
+            e->name_after = tp_diff__dup(an->name, &ok);
+            return ok ? TP_STATUS_OK : TP_STATUS_OOM;
         }
         case TP_OP_ANIMATION_SETTINGS_SET: {
             const tp_project_anim *an = find_anim(a, e->anim_id);

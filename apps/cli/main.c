@@ -193,7 +193,7 @@ static void print_usage(FILE *out) {
                   "  set <p> <atlas> <key>=<value>...     Set atlas knobs (max_size, padding, ...)\n"
                   "  sprite set <p> <atlas> <key> <field>=<value>...   Per-sprite override (field=inherit clears)\n"
                   "  sprite unset <p> <atlas> <key>       Clear a sprite's whole override\n"
-                  "  anim create|remove|list|add-frame|remove-frame|move-frame|set <p> <atlas> ...\n"
+                  "  anim create|remove|rename|list|add-frame|remove-frame|move-frame|set <p> <atlas> ...\n"
                   "  target add|remove|set <p> <atlas> ...            Export targets\n"
                   "  atlas add|remove|rename <p> ...                  Atlases (by name)\n"
                   "\n"

@@ -178,6 +178,24 @@ tp_status tp_diff_op_apply(tp_project *clone, const tp_diff_op *e, bool reverse,
                                                reverse ? e->out_before : e->out_after,
                                                reverse ? e->enabled_before : e->enabled_after);
         }
+        case TP_DIFF_SHAPE_ANIM_NAME: {
+            tp_project_atlas *a = atlas_of(clone, e->atlas_id);
+            if (!a) {
+                return tp_error_set(err, TP_STATUS_NOT_FOUND, "diff: no atlas for anim.rename");
+            }
+            tp_project_anim *an = tp_project_atlas_find_animation_by_id(a, e->anim_id);
+            if (!an) {
+                return tp_error_set(err, TP_STATUS_NOT_FOUND, "diff: no animation for anim.rename");
+            }
+            bool ok = true;
+            char *nn = tp_diff__dup(reverse ? e->name_before : e->name_after, &ok);
+            if (!ok) {
+                return tp_error_set(err, TP_STATUS_OOM, "diff: anim name dup failed");
+            }
+            free(an->name);
+            an->name = nn;
+            return TP_STATUS_OK;
+        }
         case TP_DIFF_SHAPE_ANIM_SETTINGS: {
             tp_project_atlas *a = atlas_of(clone, e->atlas_id);
             if (!a) {

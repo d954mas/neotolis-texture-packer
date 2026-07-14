@@ -209,6 +209,23 @@ static tp_status apply_anim_frames_set(tp_project_anim *an, const tp_op_anim_fra
     return TP_STATUS_OK;
 }
 
+/* animation.rename: dup the new name then swap in (stage-then-commit at field granularity,
+ * so an OOM leaves the old name -- and the whole model -- byte-unchanged). No dedicated
+ * tp_project mutator exists, so the field swap is inline, exactly like apply_source_replace. */
+static tp_status apply_anim_rename(tp_project_atlas *a, const tp_op_anim_rename *o) {
+    tp_project_anim *an = tp_project_atlas_find_animation_by_id(a, o->anim_id);
+    if (!an) {
+        return TP_STATUS_NOT_FOUND;
+    }
+    char *nn = stage_strdup(o->name);
+    if (!nn) {
+        return TP_STATUS_OOM;
+    }
+    free(an->name);
+    an->name = nn;
+    return TP_STATUS_OK;
+}
+
 /* source.replace (reserved): repath a source in place. Own dup so a failure leaves
  * the old path intact (stage-then-commit at field granularity). */
 static tp_status apply_source_replace(tp_project_atlas *a, const tp_op_source_ref *o) {
@@ -352,6 +369,9 @@ tp_status tp_operation_apply(tp_project *p, const tp_operation *op, tp_op_reject
             break;
         case TP_OP_ANIMATION_REMOVE:
             st = tp_project_atlas_remove_animation_by_id(atlas_by_id(p, op->atlas_id), op->u.anim_ref.anim_id);
+            break;
+        case TP_OP_ANIMATION_RENAME:
+            st = apply_anim_rename(atlas_by_id(p, op->atlas_id), &op->u.anim_rename);
             break;
         case TP_OP_ANIMATION_SETTINGS_SET: {
             tp_project_anim *an = tp_project_atlas_find_animation_by_id(atlas_by_id(p, op->atlas_id),

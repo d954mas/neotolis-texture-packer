@@ -207,6 +207,10 @@ char *tp_operation_encode(const tp_operation *op) {
             break;
         }
         case TP_OP_ANIMATION_REMOVE: PUSH_ID("anim_id", TP_ID_KIND_ANIM, op->u.anim_ref.anim_id); break;
+        case TP_OP_ANIMATION_RENAME:
+            PUSH_ID("anim_id", TP_ID_KIND_ANIM, op->u.anim_rename.anim_id);
+            PUSH_STR("name", op->u.anim_rename.name);
+            break;
         case TP_OP_ANIMATION_SETTINGS_SET: {
             const tp_op_anim_settings *s = &op->u.anim_settings;
             PUSH_ID("anim_id", TP_ID_KIND_ANIM, s->anim_id);

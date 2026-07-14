@@ -295,6 +295,28 @@ tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_
             return find_anim(a, op->u.anim_ref.anim_id)
                        ? TP_STATUS_OK
                        : tp_op__reject(rej, TP_STATUS_NOT_FOUND, "anim_id", "no animation with that id in the atlas");
+        case TP_OP_ANIMATION_RENAME: {
+            const tp_op_anim_rename *r = &op->u.anim_rename;
+            const tp_project_anim *an = find_anim(a, r->anim_id);
+            if (!an) {
+                return tp_op__reject(rej, TP_STATUS_NOT_FOUND, "anim_id", "no animation with that id in the atlas");
+            }
+            if (!r->name || r->name[0] == '\0') {
+                return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "name", "animation name must be non-empty");
+            }
+            /* Reject a collision with ANOTHER animation in the atlas; renaming to the same name
+             * (self) is allowed (a no-op) -- mirrors atlas.rename's uniqueness check. This is the
+             * policy the pre-H/P1-2 GUI enforced client-side (decision 0015); it now lives here so
+             * every frontend reuses the one structured reject (invalid_argument + field). */
+            for (int i = 0; i < a->animation_count; i++) {
+                const tp_project_anim *other = &a->animations[i];
+                if (other != an && other->name && strcmp(other->name, r->name) == 0) {
+                    return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "name",
+                                         "an animation named '%s' already exists", r->name);
+                }
+            }
+            return TP_STATUS_OK;
+        }
         case TP_OP_ANIMATION_SETTINGS_SET: {
             const tp_op_anim_settings *s = &op->u.anim_settings;
             if (!find_anim(a, s->anim_id)) {
