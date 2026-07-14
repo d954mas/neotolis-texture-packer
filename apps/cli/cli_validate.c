@@ -12,6 +12,8 @@
  *   duplicate_export_key  [warning] two descs -> one key (per-sprite override ambiguity)
  *   export_name_collision [error]   two sprites -> one final name (tp_normalize collision)
  *   unknown_exporter      [error]   target exporter_id tp_exporter_find cannot resolve
+ *   target_no_out_path    [error]   target out_path is empty/NULL -- it can produce no file
+ *   duplicate_out_path    [warning] two+ targets export to one out_path (they overwrite each other)
  *   setting_out_of_range  [error]   a knob outside tp_pack's accepted range
  *   sprite_bad_source     [warning] a v4 override's source id is absent from the atlas -- the
  *                                   source was removed; orphaned, reactivates by name (§5.2/§5.6)
@@ -458,13 +460,30 @@ static void validate_atlas(cli_findings *fs, tp_project *p, int ai) {
     }
     tp_sprite_index_free(&sidx);
 
-    /* (f) unknown exporter -- reported for every target (enabled or not): the id is
-     * broken data regardless of enable state. */
+    /* (f) target integrity.
+     *   unknown_exporter   [error]   exporter id tp_exporter_find cannot resolve -- a broken id is bad
+     *                                 data regardless of enable state, so reported for EVERY target.
+     *   target_no_out_path [error]   an ENABLED target with an empty/NULL out_path can produce no file.
+     *   duplicate_out_path [warning] an ENABLED target whose out_path is ALSO another ENABLED target's
+     *                                 (they overwrite each other). Project-wide (cross-atlas), slash-
+     *                                 normalized, via the shared core detector; the message names the path.
+     * The out_path checks gate on `enabled`: only enabled targets export, so a DISABLED (parked) target's
+     * empty/duplicate out_path is harmless and must NOT flip `validate --strict` to an error. */
     for (int t = 0; t < a->target_count; t++) {
         const tp_project_target *tg = &a->targets[t];
         if (!tp_exporter_find(tg->exporter_id)) {
             add_finding(fs, SEV_ERR, "unknown_exporter", a->name, NULL, NULL, NULL, tg->exporter_id,
                         "target references unknown exporter '%s'", tg->exporter_id);
+        }
+        if (!tg->enabled) {
+            continue; /* disabled target: it never exports, so out_path emptiness/collision is moot */
+        }
+        if (!tg->out_path || tg->out_path[0] == '\0') {
+            add_finding(fs, SEV_ERR, "target_no_out_path", a->name, NULL, NULL, NULL, tg->exporter_id,
+                        "target has no output path -- it cannot produce a file");
+        } else if (tp_project_out_path_shared(p, tg->out_path, tg)) {
+            add_finding(fs, SEV_WARN, "duplicate_out_path", a->name, NULL, NULL, NULL, tg->exporter_id,
+                        "two or more targets export to '%s' (they overwrite each other)", tg->out_path);
         }
     }
 

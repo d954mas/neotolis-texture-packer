@@ -725,6 +725,20 @@ static void declare_export_targets(nt_ui_context_t *ctx, tp_project_atlas *a) {
                 }
             }
         }
+        /* C3: surface an invalid/duplicate target under its row so the user knows why it won't export --
+         * C2's masked per-field edits no longer validate at edit time, so this is the safety net. Mirrors
+         * the CLI `validate` codes. The empty/duplicate notes gate on `enabled` (only enabled targets
+         * export, so a parked/disabled target is not flagged); the detector excludes `t` by pointer. */
+        if (t->enabled) {
+            if (!t->out_path || t->out_path[0] == '\0') {
+                panel_note(ctx, "This target has no output path -- it won't export.");
+            } else if (tp_project_out_path_shared(gui_project_get(), t->out_path, t)) {
+                panel_note(ctx, "Another target already exports to this path -- they overwrite each other.");
+            }
+        }
+        if (tp_exporter_find(t->exporter_id) == NULL) {
+            panel_note(ctx, "Unknown exporter -- this target won't export.");
+        }
     }
     /* The UI arrays (s_dd_target_open / s_nb_target_path) are fixed at GUI_MAX_TARGETS, so targets past
      * that are not editable here -- but export still writes ALL of them, so surface the hidden tail

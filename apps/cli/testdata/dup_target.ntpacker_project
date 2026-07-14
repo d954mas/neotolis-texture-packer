@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "atlases": [
+    {
+      "name": "a1",
+      "sources": [
+        "sprites"
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "out_path": "out/shared"
+        }
+      ]
+    },
+    {
+      "name": "a2",
+      "sources": [
+        "sprites"
+      ],
+      "targets": [
+        {
+          "exporter_id": "defold",
+          "out_path": "out/shared"
+        }
+      ]
+    }
+  ]
+}

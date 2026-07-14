@@ -394,6 +394,19 @@ tp_status tp_project_atlas_set_target(tp_project_atlas *a, int index, const char
  * atlas guard on target_count first. Out-of-range atlas_index -> OUT_OF_BOUNDS. */
 tp_status tp_project_atlas_seed_default_target(tp_project *p, int atlas_index);
 
+/* True iff SOME target in the project OTHER than `exclude` has this exact (non-empty)
+ * out_path. Scans EVERY atlas's targets (an out_path collision is project-wide: two
+ * atlases exporting to one file silently overwrite each other). Only ENABLED targets
+ * count -- the exporter skips disabled targets, so a disabled target never overwrites.
+ * out_paths are compared SLASH-NORMALIZED (the same tp_normalize_slashes the exporter
+ * applies) so "out\x" and "out/x" resolve to one file and DO collide. An empty/NULL
+ * `out_path` never "collides" (that is the separate empty-out_path check) -> false.
+ * `self` is the caller's own target (excluded by POINTER identity, so this is robust
+ * even when target ids are nil -- unpromoted / RNG-fault sessions); a NULL `self`
+ * excludes nothing. The shared source of truth for the duplicate check both frontends
+ * surface (validate + the GUI target panel). NULL p -> false. */
+bool tp_project_out_path_shared(const tp_project *p, const char *out_path, const tp_project_target *self);
+
 /* --- load / save --- */
 
 /* Parses `path` into a new project (*out). project_dir is set to path's absolute

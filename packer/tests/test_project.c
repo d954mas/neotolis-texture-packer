@@ -749,6 +749,54 @@ void test_set_target(void) {
     tp_project_destroy(p);
 }
 
+/* C3: the shared project-wide duplicate-out_path detector. Two atlases whose targets
+ * export to one out_path silently overwrite each other -- tp_project_out_path_shared is
+ * the single source of truth CLI `validate` and the GUI target panel both surface. */
+void test_out_path_shared(void) {
+    tp_project *p = tp_project_create();
+    /* atlas 0 (default "atlas1"): a target at out/x + one at a unique path. */
+    tp_project_atlas *a0 = tp_project_get_atlas(p, 0);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(a0, "defold", "out/x", NULL));       /* [0] */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(a0, "json-neotolis", "out/uniq", NULL)); /* [1] */
+    /* a SECOND atlas: a target REUSING out/x (cross-atlas collision), a unique out/y, and a target that
+     * ALSO writes out/uniq but is DISABLED below (must NOT make out/uniq collide -- the exporter skips it). */
+    int a1i = -1;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_add_atlas(p, "atlas2", &a1i));
+    tp_project_atlas *a1 = tp_project_get_atlas(p, a1i);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(a1, "defold", "out/x", NULL));       /* [0] */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(a1, "json-neotolis", "out/y", NULL)); /* [1] */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(a1, "defold", "out/uniq", NULL));    /* [2] disabled */
+
+    /* NO promote(): ids stay NIL, proving the detector excludes `self` by POINTER identity (review finding
+     * on the nil-id self-match), not by id. */
+    a0 = tp_project_get_atlas(p, 0);
+    a1 = tp_project_get_atlas(p, a1i);
+    a1->targets[2].enabled = false; /* the 2nd out/uniq writer is OFF -> the exporter skips it */
+    const tp_project_target *x0 = &a0->targets[0];    /* enabled, out/x */
+    const tp_project_target *uniq0 = &a0->targets[1]; /* enabled, out/uniq */
+    const tp_project_target *x1 = &a1->targets[0];    /* enabled, out/x (cross-atlas dup) */
+    const tp_project_target *y1 = &a1->targets[1];    /* enabled, out/y */
+
+    /* out/x is shared by two ENABLED targets across atlases: each sees the OTHER. */
+    TEST_ASSERT_TRUE(tp_project_out_path_shared(p, "out/x", x0));
+    TEST_ASSERT_TRUE(tp_project_out_path_shared(p, "out/x", x1));
+    /* separator normalization: a backslash spelling resolves to the same file the exporter writes. */
+    TEST_ASSERT_TRUE(tp_project_out_path_shared(p, "out\\x", x0));
+    /* out/uniq's only OTHER writer is DISABLED -> no live overwrite. */
+    TEST_ASSERT_FALSE(tp_project_out_path_shared(p, "out/uniq", uniq0));
+    /* a unique path never collides; self excluded by identity. */
+    TEST_ASSERT_FALSE(tp_project_out_path_shared(p, "out/y", y1));
+    /* a path present on NO enabled target is not shared. */
+    TEST_ASSERT_FALSE(tp_project_out_path_shared(p, "out/absent", NULL));
+    /* empty / NULL out_path never collides (that is the separate empty-out_path check). */
+    TEST_ASSERT_FALSE(tp_project_out_path_shared(p, "", NULL));
+    TEST_ASSERT_FALSE(tp_project_out_path_shared(p, NULL, NULL));
+    /* NULL project -> false. */
+    TEST_ASSERT_FALSE(tp_project_out_path_shared(NULL, "out/x", NULL));
+
+    tp_project_destroy(p);
+}
+
 /* 12. per-sprite packing overrides: absent stays absent (sparse), present round-trips
  * and re-saves byte-identical. */
 void test_sprite_override_sparse(void) {
@@ -881,6 +929,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_v3_source_dup_collapse);
     RUN_TEST(test_sprite_rename_override);
     RUN_TEST(test_set_target);
+    RUN_TEST(test_out_path_shared);
     RUN_TEST(test_sprite_override_sparse);
     RUN_TEST(test_set_atlas_name);
     RUN_TEST(test_prune_sprite);

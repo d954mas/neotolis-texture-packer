@@ -805,6 +805,43 @@ tp_status tp_project_atlas_set_target(tp_project_atlas *a, int index, const char
     return TP_STATUS_OK;
 }
 
+bool tp_project_out_path_shared(const tp_project *p, const char *out_path, const tp_project_target *self) {
+    if (!p || !out_path || out_path[0] == '\0') {
+        return false;
+    }
+    /* Compare SLASH-NORMALIZED (matching the exporter's tp_normalize_slashes), so a separator-only
+     * difference ("out\x" vs "out/x") that resolves to ONE file is caught. */
+    char want[TP_PATH_MAX];
+    if ((size_t)snprintf(want, sizeof want, "%s", out_path) >= sizeof want) {
+        return false; /* pathological length -> not a collision we can assert */
+    }
+    tp_normalize_slashes(want);
+    for (int ai = 0; ai < p->atlas_count; ai++) {
+        const tp_project_atlas *a = &p->atlases[ai];
+        for (int t = 0; t < a->target_count; t++) {
+            const tp_project_target *tg = &a->targets[t];
+            if (tg == self) {
+                continue; /* exclude the caller's own target by IDENTITY (robust to nil ids) */
+            }
+            if (!tg->enabled) {
+                continue; /* the exporter skips disabled targets -> they never overwrite */
+            }
+            if (!tg->out_path || tg->out_path[0] == '\0') {
+                continue;
+            }
+            char have[TP_PATH_MAX];
+            if ((size_t)snprintf(have, sizeof have, "%s", tg->out_path) >= sizeof have) {
+                continue;
+            }
+            tp_normalize_slashes(have);
+            if (strcmp(want, have) == 0) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 /* ======================================================================== */
 /* deterministic writer (ux.md principle 7)                                 */
 /* ======================================================================== */
