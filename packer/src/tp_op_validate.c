@@ -410,11 +410,16 @@ tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_
             if (!find_target(a, t->target_id)) {
                 return tp_op__reject(rej, TP_STATUS_NOT_FOUND, "target_id", "no target with that id in the atlas");
             }
-            if (!t->exporter_id || !tp_exporter_find(t->exporter_id)) {
+            /* Masked set (mirrors atlas.settings.set): validate a field ONLY when its mask bit
+             * is set. An all-zero mask names no field -> reject (matches atlas/anim settings). */
+            if (t->mask == 0) {
+                return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "", "target.set names no field");
+            }
+            if ((t->mask & TP_TF_EXPORTER) && (!t->exporter_id || !tp_exporter_find(t->exporter_id))) {
                 return tp_op__reject(rej, TP_STATUS_NOT_FOUND, "exporter_id", "unknown exporter id '%s'",
                                      t->exporter_id ? t->exporter_id : "");
             }
-            if (!t->out_path || t->out_path[0] == '\0') {
+            if ((t->mask & TP_TF_OUT_PATH) && (!t->out_path || t->out_path[0] == '\0')) {
                 return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "out_path", "out_path must be non-empty");
             }
             return TP_STATUS_OK;

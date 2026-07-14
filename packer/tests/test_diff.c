@@ -475,6 +475,7 @@ void test_oracle_target_set(void) {
     op.kind = TP_OP_TARGET_SET;
     op.atlas_id = a0_id(m);
     op.u.target_set.target_id = tgt0_id(m);
+    op.u.target_set.mask = TP_TF_ALL; /* full replace (behavior-preserving) */
     op.u.target_set.exporter_id = (char *)"defold";
     op.u.target_set.out_path = (char *)"out/changed";
     op.u.target_set.enabled = false;
@@ -1083,6 +1084,7 @@ void test_capture_dangling_target_set(void) {
     op.kind = TP_OP_TARGET_SET;
     op.atlas_id = base_atlas0_id();
     op.u.target_set.target_id = id_of(0xEE); /* dangling target */
+    op.u.target_set.mask = TP_TF_ALL;
     op.u.target_set.exporter_id = (char *)"defold";
     op.u.target_set.out_path = (char *)"out/x";
     op.u.target_set.enabled = true;

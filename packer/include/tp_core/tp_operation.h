@@ -148,6 +148,14 @@ enum tp_anim_field_mask {
     TP_ANF_FLIP_V = 1u << 3
 };
 
+/* target.set: which of the target's fields the op sets. */
+enum tp_target_field_mask {
+    TP_TF_EXPORTER = 1u << 0,
+    TP_TF_OUT_PATH = 1u << 1,
+    TP_TF_ENABLED = 1u << 2,
+    TP_TF_ALL = 0x7u /* all three (full replace) */
+};
+
 /* ---- typed payload arms (tagged union) ----------------------------------- *
  * Canonical operations store IDs only (§5.4). A human selector resolves to one ID
  * at the request edge (tp_op_build_*), before validate/apply ever see the op.
@@ -258,6 +266,7 @@ typedef struct tp_op_target_ref { tp_id128 target_id; } tp_op_target_ref; /* tar
 
 typedef struct tp_op_target_set {
     tp_id128 target_id;
+    uint32_t mask;                 /* tp_target_field_mask: which fields to set */
     char *exporter_id;
     char *out_path;
     bool enabled;

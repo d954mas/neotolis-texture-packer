@@ -481,6 +481,7 @@ void test_apply_target_ops(void) {
     op.kind = TP_OP_TARGET_SET;
     op.atlas_id = aid;
     op.u.target_set.target_id = t0;
+    op.u.target_set.mask = TP_TF_ALL; /* full replace (behavior-preserving) */
     op.u.target_set.exporter_id = (char *)TP_EXPORTER_ID_JSON_NEOTOLIS;
     op.u.target_set.out_path = (char *)"out/y";
     op.u.target_set.enabled = false;

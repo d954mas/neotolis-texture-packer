@@ -245,12 +245,14 @@ char *tp_operation_encode(const tp_operation *op) {
             PUSH_BOOL("enabled", op->u.target_create.enabled);
             break;
         case TP_OP_TARGET_REMOVE: PUSH_ID("target_id", TP_ID_KIND_TARGET, op->u.target_ref.target_id); break;
-        case TP_OP_TARGET_SET:
-            PUSH_ID("target_id", TP_ID_KIND_TARGET, op->u.target_set.target_id);
-            PUSH_STR("exporter_id", op->u.target_set.exporter_id);
-            PUSH_STR("out_path", op->u.target_set.out_path);
-            PUSH_BOOL("enabled", op->u.target_set.enabled);
+        case TP_OP_TARGET_SET: {
+            const tp_op_target_set *s = &op->u.target_set;
+            PUSH_ID("target_id", TP_ID_KIND_TARGET, s->target_id);
+            if (s->mask & TP_TF_EXPORTER) PUSH_STR("exporter_id", s->exporter_id);
+            if (s->mask & TP_TF_OUT_PATH) PUSH_STR("out_path", s->out_path);
+            if (s->mask & TP_TF_ENABLED) PUSH_BOOL("enabled", s->enabled);
             break;
+        }
         case TP_OP_INVALID:
         case TP_OP_KIND_COUNT: break;
     }

@@ -121,6 +121,7 @@ tp_status tp_op_build_target_set(const tp_project *p, const char *atlas_sel, con
     out->kind = TP_OP_TARGET_SET;
     out->atlas_id = atlas_res.id;
     out->u.target_set.target_id = tgt_res.id;
+    out->u.target_set.mask = TP_TF_ALL; /* selector builder = full replace (all three fields) */
     out->u.target_set.enabled = enabled;
     out->u.target_set.exporter_id = tp_strdup(exporter_id);
     out->u.target_set.out_path = tp_strdup(out_path);

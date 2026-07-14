@@ -1165,6 +1165,28 @@ void test_sprite_clear_field_roundtrip(void) {
     }
 }
 
+/* [C1] JSON target.set lowering stays FULL-REPLACE: an object that OMITS "enabled" decodes to
+ * mask == TP_TF_ALL with enabled defaulting to true -- the pre-mask contract. (The C1 field mask is an
+ * internal mechanism for GUI partial edits built in C; partial-field target.set over JSON is a deliberate
+ * future extension, not a silent effect of adding the struct mask.) */
+void test_json_target_set_full_replace(void) {
+    const char *json = "{\"schema\":1,\"transaction\":{"
+                       "\"id\":\"00000000000000000000000000000000\",\"expected_revision\":0,\"operations\":["
+                       "{\"op\":\"target.set\",\"atlas_id\":\"atlas_11111111111111111111111111111111\","
+                       "\"target_id\":\"target_22222222222222222222222222222222\","
+                       "\"exporter_id\":\"defold\",\"out_path\":\"out/x.json\"}" /* NO "enabled" key */
+                       "]}}";
+    tp_txn_request *rd = NULL;
+    tp_error err;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_txn_request_decode(json, &rd, &err));
+    TEST_ASSERT_NOT_NULL(rd);
+    TEST_ASSERT_EQUAL_INT(1, rd->op_count);
+    TEST_ASSERT_EQUAL_INT(TP_OP_TARGET_SET, rd->ops[0].kind);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)TP_TF_ALL, rd->ops[0].u.target_set.mask); /* full replace, not presence-derived */
+    TEST_ASSERT_TRUE(rd->ops[0].u.target_set.enabled);                           /* omitted enabled -> true default */
+    tp_txn_request_free(rd);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_clone_byte_identity);
@@ -1198,5 +1220,6 @@ int main(void) {
     RUN_TEST(test_json_fractional_schema_rejected);
     RUN_TEST(test_json_shape_oom_must_not_commit);
     RUN_TEST(test_sprite_clear_field_roundtrip);
+    RUN_TEST(test_json_target_set_full_replace);
     return UNITY_END();
 }

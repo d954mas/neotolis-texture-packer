@@ -435,9 +435,43 @@ tp_status tp_operation_apply(tp_project *p, const tp_operation *op, tp_op_reject
         case TP_OP_TARGET_SET: {
             tp_project_atlas *a = atlas_by_id(p, op->atlas_id);
             tp_project_target *t = tp_project_atlas_find_target_by_id(a, op->u.target_set.target_id);
-            int index = (int)(t - a->targets);
-            st = tp_project_atlas_set_target(a, index, op->u.target_set.exporter_id, op->u.target_set.out_path,
-                                             op->u.target_set.enabled);
+            const tp_op_target_set *s = &op->u.target_set;
+            /* Masked MERGE (mirrors atlas.settings.set's in-place per-field mutation): apply only the
+             * flagged fields; an unmasked field keeps the target's CURRENT value. Stage-then-commit at
+             * field granularity -- dup BOTH masked strings FIRST (through the fault seam), then free the
+             * old + swap, so an OOM leaves the target byte-unchanged AND we never pass t->out_path back
+             * into a self-freeing setter (the use-after-free the old whole-record set_target risked).
+             * validate (run above) guarantees the masked strings are non-NULL, so stage_strdup is safe. */
+            char *new_eid = NULL;
+            char *new_op = NULL;
+            if (s->mask & TP_TF_EXPORTER) {
+                new_eid = stage_strdup(s->exporter_id);
+                if (!new_eid) {
+                    st = TP_STATUS_OOM;
+                    break;
+                }
+            }
+            if (s->mask & TP_TF_OUT_PATH) {
+                new_op = stage_strdup(s->out_path);
+                if (!new_op) {
+                    free(new_eid);
+                    st = TP_STATUS_OOM;
+                    break;
+                }
+            }
+            /* Commit: no more allocations can fail. */
+            if (s->mask & TP_TF_EXPORTER) {
+                free(t->exporter_id);
+                t->exporter_id = new_eid;
+            }
+            if (s->mask & TP_TF_OUT_PATH) {
+                free(t->out_path);
+                t->out_path = new_op;
+            }
+            if (s->mask & TP_TF_ENABLED) {
+                t->enabled = s->enabled;
+            }
+            st = TP_STATUS_OK;
             break;
         }
 

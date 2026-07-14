@@ -317,12 +317,20 @@ tp_status tp_txn__lower_op(const cJSON *oj, tp_operation *out, tp_error *err) {
             TRY(j_opt_shape_id(oj, "target_id", TP_ID_KIND_TARGET, &out->u.target_ref.target_id, err));
             break;
         case TP_OP_TARGET_SET: {
+            /* JSON target.set stays FULL-REPLACE (mask = TP_TF_ALL), preserving the pre-mask contract EXACTLY:
+             * validate requires exporter_id (known) + out_path (non-empty), and an omitted "enabled" defaults
+             * to true. The C1 mask is an INTERNAL mechanism (the GUI builds partial-field ops in C); exposing
+             * partial-field target.set over the JSON/dev-API surface is a DELIBERATE future extension that must
+             * come with a spec + tests -- NOT a silent side effect of adding the mask to the struct. */
+            tp_op_target_set *s = &out->u.target_set;
             bool pr = false;
-            TRY(j_opt_shape_id(oj, "target_id", TP_ID_KIND_TARGET, &out->u.target_set.target_id, err));
-            TRY(j_opt_dup(oj, "exporter_id", &out->u.target_set.exporter_id, err));
-            TRY(j_opt_dup(oj, "out_path", &out->u.target_set.out_path, err));
-            out->u.target_set.enabled = true;
-            TRY(j_opt_bool(oj, "enabled", &out->u.target_set.enabled, &pr, err));
+            TRY(j_opt_shape_id(oj, "target_id", TP_ID_KIND_TARGET, &s->target_id, err));
+            TRY(j_opt_dup(oj, "exporter_id", &s->exporter_id, err));
+            TRY(j_opt_dup(oj, "out_path", &s->out_path, err));
+            s->enabled = true;
+            TRY(j_opt_bool(oj, "enabled", &s->enabled, &pr, err));
+            (void)pr;
+            s->mask = TP_TF_ALL;
             break;
         }
 

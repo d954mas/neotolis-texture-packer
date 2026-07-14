@@ -1697,6 +1697,7 @@ static int do_target(const char *const *pos, int npos, bool json, bool quiet) {
         op.kind = TP_OP_TARGET_SET;
         op.atlas_id = aid;
         op.u.target_set.target_id = tid;
+        op.u.target_set.mask = TP_TF_ALL; /* CLI `target set` replaces all three fields */
         op.u.target_set.enabled = enabled;
         op.u.target_set.exporter_id = cli_strdup(eid);
         op.u.target_set.out_path = cli_strdup(out);

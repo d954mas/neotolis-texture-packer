@@ -1473,6 +1473,7 @@ bool gui_project_set_target(int atlas_index, int index, const char *exporter_id,
     op.kind = TP_OP_TARGET_SET;
     op.atlas_id = a->id;
     op.u.target_set.target_id = a->targets[index].id;
+    op.u.target_set.mask = TP_TF_ALL; /* discrete target edit replaces all three fields (RMW-seeded) */
     op.u.target_set.enabled = enabled;
     op.u.target_set.exporter_id = exp;  /* ownership transfers to op -> commit_txn_now frees it */
     op.u.target_set.out_path = outp;
@@ -1525,6 +1526,7 @@ bool gui_project_set_target_out_path(int atlas_index, int index, const char *out
     op.kind = TP_OP_TARGET_SET;
     op.atlas_id = a->id;
     op.u.target_set.target_id = t->id;
+    op.u.target_set.mask = TP_TF_ALL;          /* RMW-seeded full replace (exporter+enabled kept, out_path new) */
     op.u.target_set.enabled = t->enabled;      /* RMW seed: unchanged */
     op.u.target_set.exporter_id = exp;         /* ownership transfers to op */
     op.u.target_set.out_path = outp;

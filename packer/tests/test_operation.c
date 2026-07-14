@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "tp_core/tp_export.h"          /* TP_EXPORTER_ID_JSON_NEOTOLIS */
 #include "tp_core/tp_operation.h"
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_project_migrate.h" /* tp_project_promote_ids */
@@ -490,6 +491,101 @@ void test_validate_frame_move_to_index_unbounded(void) {
     tp_project_destroy(p);
 }
 
+/* C1: a project whose atlas[0] holds one target {json_neotolis, "out/orig", enabled}, ids
+ * promoted. out_aid and out_tid receive the atlas + target ids. */
+static tp_project *target_project(tp_id128 *out_aid, tp_id128 *out_tid) {
+    tp_project *p = tp_project_create();
+    TEST_ASSERT_NOT_NULL(p);
+    tp_project_target *t = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_target(&p->atlases[0], TP_EXPORTER_ID_JSON_NEOTOLIS, "out/orig", &t));
+    t->enabled = true;
+    uint8_t ctr = 7;
+    tp_rng rng = {det_fill, &ctr};
+    tp_error err;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_promote_ids(p, &rng, &err));
+    if (out_aid) {
+        *out_aid = p->atlases[0].id;
+    }
+    if (out_tid) {
+        *out_tid = p->atlases[0].targets[0].id;
+    }
+    return p;
+}
+
+/* C1: a MASKED target.set applies ONLY the flagged field; unmasked fields keep their
+ * current value. mask = TP_TF_ENABLED changes enabled alone (exporter + out_path kept). */
+void test_target_set_mask_enabled_only(void) {
+    tp_id128 aid;
+    tp_id128 tid;
+    tp_project *p = target_project(&aid, &tid);
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_TARGET_SET;
+    op.atlas_id = aid;
+    op.u.target_set.target_id = tid;
+    op.u.target_set.mask = TP_TF_ENABLED; /* only enabled -- exporter/out_path left unset (NULL) */
+    op.u.target_set.enabled = false;
+    tp_op_reject rej;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_operation_apply(p, &op, &rej));
+    tp_project_target *t = tp_project_atlas_find_target_by_id(&p->atlases[0], tid);
+    TEST_ASSERT_NOT_NULL(t);
+    TEST_ASSERT_FALSE(t->enabled);                                         /* changed */
+    TEST_ASSERT_EQUAL_STRING(TP_EXPORTER_ID_JSON_NEOTOLIS, t->exporter_id); /* preserved */
+    TEST_ASSERT_EQUAL_STRING("out/orig", t->out_path);                     /* preserved */
+    tp_project_destroy(p);
+}
+
+/* C1: mask = TP_TF_OUT_PATH with a valid non-empty path changes out_path alone; exporter
+ * and enabled are preserved even though the op carries junk/opposite values for them. */
+void test_target_set_mask_out_path_only(void) {
+    tp_id128 aid;
+    tp_id128 tid;
+    tp_project *p = target_project(&aid, &tid);
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_TARGET_SET;
+    op.atlas_id = aid;
+    op.u.target_set.target_id = tid;
+    op.u.target_set.mask = TP_TF_OUT_PATH;         /* only out_path */
+    op.u.target_set.out_path = (char *)"out/new";
+    op.u.target_set.exporter_id = NULL;            /* unset: must be ignored (bit not set) */
+    op.u.target_set.enabled = false;               /* unset: must be ignored (bit not set) */
+    tp_op_reject rej;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_operation_apply(p, &op, &rej));
+    tp_project_target *t = tp_project_atlas_find_target_by_id(&p->atlases[0], tid);
+    TEST_ASSERT_NOT_NULL(t);
+    TEST_ASSERT_EQUAL_STRING("out/new", t->out_path);                      /* changed */
+    TEST_ASSERT_EQUAL_STRING(TP_EXPORTER_ID_JSON_NEOTOLIS, t->exporter_id); /* preserved */
+    TEST_ASSERT_TRUE(t->enabled);                                          /* preserved (still initial true) */
+    tp_project_destroy(p);
+}
+
+/* C1: with the OUT_PATH bit UNSET, the non-empty-out_path check is skipped -- a mask =
+ * TP_TF_ENABLED op with a NULL/empty out_path validates OK. An all-zero mask names no
+ * field and is rejected (mirrors atlas/anim settings). */
+void test_target_set_mask_skips_unset_field_checks(void) {
+    tp_id128 aid;
+    tp_id128 tid;
+    tp_project *p = target_project(&aid, &tid);
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_TARGET_SET;
+    op.atlas_id = aid;
+    op.u.target_set.target_id = tid;
+    op.u.target_set.mask = TP_TF_ENABLED;
+    op.u.target_set.enabled = true;
+    op.u.target_set.out_path = NULL;     /* empty out_path: NOT rejected -- OUT_PATH bit unset */
+    op.u.target_set.exporter_id = NULL;  /* unknown exporter: NOT rejected -- EXPORTER bit unset */
+    tp_op_reject rej;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_operation_validate(p, &op, &rej));
+    op.u.target_set.out_path = (char *)""; /* explicitly empty: still fine (bit unset) */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_operation_validate(p, &op, &rej));
+    op.u.target_set.mask = 0; /* names no field -> rejected */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT, tp_operation_validate(p, &op, &rej));
+    tp_project_destroy(p);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_catalog_selfcheck);
@@ -513,5 +609,8 @@ int main(void) {
     RUN_TEST(test_validate_source_add_bad_kind);
     RUN_TEST(test_validate_knob_bounds_match_cli);
     RUN_TEST(test_validate_frame_move_to_index_unbounded);
+    RUN_TEST(test_target_set_mask_enabled_only);
+    RUN_TEST(test_target_set_mask_out_path_only);
+    RUN_TEST(test_target_set_mask_skips_unset_field_checks);
     return UNITY_END();
 }
