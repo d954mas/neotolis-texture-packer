@@ -1,0 +1,267 @@
+#include "gui_crash.h"
+
+/* libc/system headers FIRST (before the gui/engine headers) -- matches gui_pack.c / gui_log_file.c.
+ * On macOS clang a vendored/engine header pulling <stdio.h> first otherwise leaves snprintf & friends
+ * implicitly declared here, which clang treats as a HARD error (this exact bug bit D1 on macOS CI). */
+#include <stdatomic.h> /* POSIX handler's cross-thread reentrancy guard (same header gui_pack.c uses) */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+#ifdef _WIN32
+#include <windows.h> /* must precede dbghelp.h (it uses Win32 types) */
+#include <dbghelp.h> /* MiniDumpWriteDump, MINIDUMP_* */
+#else
+#include <execinfo.h> /* backtrace, backtrace_symbols_fd (both async-signal-safe on glibc/macOS) */
+#include <fcntl.h>    /* open, O_WRONLY/O_CREAT/O_TRUNC */
+#include <signal.h>   /* signal, raise, SIG_DFL, sig_atomic_t */
+#include <unistd.h>   /* write, close, _exit */
+#endif
+
+#include "gui_paths.h" /* <app-data> root + ensure-dir (shared with D1) */
+
+#include "log/nt_log.h" /* used ONLY by gui_crash_selftest (post-engine-init); NEVER by the handler */
+
+// #region state
+/* Everything the handler touches is pre-resolved here at install time (main thread) into static
+ * buffers: the handler must not format paths (snprintf/strftime are not async-signal-safe). Empty
+ * strings mean "could not resolve" -> the handler degrades to writing nothing. */
+static bool s_installed;
+static char s_marker_path[GUI_PATHS_MAX];   /* <app-data>/crash/last-run.crashed (fixed name; D3 reads it) */
+static char s_marker_prefix[128];           /* pre-rendered marker text (session-start timestamp) */
+static size_t s_marker_prefix_len;
+#ifdef _WIN32
+static char s_dump_path[GUI_PATHS_MAX]; /* <app-data>/crash/crash-<ts>.dmp */
+#else
+static char s_backtrace_path[GUI_PATHS_MAX]; /* <app-data>/crash/crash-<ts>.txt */
+#endif
+// #endregion
+
+#ifndef _WIN32
+// #region posix handler (async-signal-safe ONLY)
+/* The reentrancy claim below must be lock-free to be async-signal-safe AND to serialize two encode-
+ * worker threads faulting within microseconds (a plain sig_atomic_t is only same-thread safe). */
+_Static_assert(ATOMIC_INT_LOCK_FREE == 2, "gui_crash: atomic_int must be always-lock-free for the signal-handler claim");
+
+/* Render a small non-negative int to decimal into buf (>= 16 bytes), return the digit count. Pure
+ * arithmetic + array stores -- no libc call, so it is safe to use inside a signal handler. */
+static int crash_utoa(unsigned v, char *buf) {
+    char tmp[16];
+    int i = 0;
+    do {
+        tmp[i++] = (char)('0' + (int)(v % 10U));
+        v /= 10U;
+    } while (v != 0U && i < (int)sizeof tmp);
+    int len = 0;
+    while (i > 0) {
+        buf[len++] = tmp[--i];
+    }
+    return len;
+}
+
+/* Best-effort write() in a fault path: async-signal-safe, and there is nothing to do on a short or
+ * failed write, so the result is consumed and dropped. */
+static void crash_write(int fd, const char *buf, size_t len) {
+    ssize_t r = write(fd, buf, len);
+    (void)r;
+}
+
+/* Fatal-signal handler. EVERY call here must be async-signal-safe (open/write/close/_exit, backtrace/
+ * backtrace_symbols_fd, signal/raise) and it must NOT take D1's log mutex or call nt_log -- a pack
+ * worker may hold that mutex at the crash point, which would deadlock. */
+static void crash_signal_handler(int sig) {
+    /* Claim the handler exactly once, ACROSS THREADS: a lock-free atomic exchange is async-signal-safe
+     * and stops two workers faulting near-simultaneously from both O_TRUNC'ing + interleaving into the
+     * same backtrace file. The first arrival (old value 0) proceeds; any later/nested one bails. */
+    static atomic_int s_in_handler; /* zero-initialized */
+    if (atomic_exchange_explicit(&s_in_handler, 1, memory_order_acq_rel) != 0) {
+        _exit(128 + sig); /* re-faulted / concurrent fault -> bail without recursing or racing the file */
+    }
+
+    /* (1) Marker FIRST, so a fault while writing the backtrace still leaves D3 the crash flag. */
+    if (s_marker_path[0] != '\0') {
+        int fd = open(s_marker_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd >= 0) {
+            if (s_marker_prefix_len > 0) {
+                crash_write(fd, s_marker_prefix, s_marker_prefix_len);
+            }
+            char num[20];
+            int nl = crash_utoa((unsigned)sig, num);
+            num[nl++] = '\n';
+            crash_write(fd, "signal ", 7);
+            crash_write(fd, num, (size_t)nl);
+            (void)close(fd);
+        }
+    }
+
+    /* (2) Backtrace to the pre-resolved per-run file. backtrace_symbols_fd writes straight to the fd
+     * and (unlike backtrace_symbols) does not malloc -> async-signal-safe; backtrace() was warmed up
+     * at install time so it will not hit the dynamic loader here. */
+    if (s_backtrace_path[0] != '\0') {
+        int fd = open(s_backtrace_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd >= 0) {
+            void *frames[64];
+            int n = backtrace(frames, (int)(sizeof frames / sizeof frames[0]));
+            backtrace_symbols_fd(frames, n, fd);
+            (void)close(fd);
+        }
+    }
+
+    /* (3) Restore the default disposition + re-raise: the OS produces its normal core/report exactly
+     * as if we had never intercepted the fault. */
+    (void)signal(sig, SIG_DFL);
+    (void)raise(sig);
+    _exit(128 + sig); /* only reached if raise() unexpectedly returns */
+}
+// #endregion
+#else
+// #region windows handler
+/* Render a 32-bit value as 8 hex digits into buf[8]. Pure arithmetic -- no CRT/heap -- so it is safe
+ * in the exception filter even if the fault corrupted the heap. */
+static void crash_hex32(unsigned long v, char *buf) {
+    static const char digits[] = "0123456789abcdef";
+    for (int i = 7; i >= 0; i--) {
+        buf[i] = digits[v & 0xFUL];
+        v >>= 4;
+    }
+}
+
+/* Top-level exception filter: more latitude than a POSIX signal handler, but still kept minimal +
+ * reentrancy-shy, and it likewise NEVER touches D1's log (a pack worker may hold its mutex here). */
+static LONG WINAPI crash_exception_filter(EXCEPTION_POINTERS *info) {
+    static volatile LONG s_in_filter = 0;
+    if (InterlockedCompareExchange(&s_in_filter, 1, 0) != 0) {
+        return EXCEPTION_CONTINUE_SEARCH; /* nested fault -> don't recurse into dump writing */
+    }
+
+    /* Marker FIRST (even a failed dump still tells the next launch we crashed). */
+    if (s_marker_path[0] != '\0') {
+        HANDLE h = CreateFileA(s_marker_path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (h != INVALID_HANDLE_VALUE) {
+            DWORD wrote = 0;
+            (void)WriteFile(h, s_marker_prefix, (DWORD)s_marker_prefix_len, &wrote, NULL);
+            /* Append the faulting exception code as hex -- mirrors POSIX's "signal N". Built with the
+             * heap-light hex writer (no CRT formatting) since the heap may be corrupt here. */
+            char line[24];
+            memcpy(line, "exception 0x", 12);
+            unsigned long code =
+                (info != NULL && info->ExceptionRecord != NULL) ? (unsigned long)info->ExceptionRecord->ExceptionCode : 0UL;
+            crash_hex32(code, line + 12);
+            line[20] = '\n';
+            (void)WriteFile(h, line, 21, &wrote, NULL);
+            (void)CloseHandle(h);
+        }
+    }
+
+    /* MiniDump: MiniDumpNormal|MiniDumpWithDataSegs = small file that still carries the thread stacks
+     * + global/static data segments (enough to symbolize a crash without a huge full-memory dump). */
+    if (s_dump_path[0] != '\0') {
+        HANDLE h = CreateFileA(s_dump_path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (h != INVALID_HANDLE_VALUE) {
+            MINIDUMP_EXCEPTION_INFORMATION mei;
+            mei.ThreadId = GetCurrentThreadId();
+            mei.ExceptionPointers = info;
+            mei.ClientPointers = FALSE;
+            (void)MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), h,
+                                    (MINIDUMP_TYPE)(MiniDumpNormal | MiniDumpWithDataSegs), &mei, NULL, NULL);
+            (void)CloseHandle(h);
+        }
+    }
+    return EXCEPTION_CONTINUE_SEARCH; /* let the OS default handler (WER / a debugger) still run */
+}
+// #endregion
+#endif
+
+// #region lifecycle
+void gui_crash_install(void) {
+    if (s_installed) {
+        return;
+    }
+    /* Headless CI (GUI selftest #50) runs under ASan+UBSan, which install their OWN SIGSEGV/SIGABRT
+     * handlers to print their reports -- overriding those would mask sanitizer diagnostics. Headless
+     * also must not need a writable app-data dir. So skip entirely, exactly like gui_log_file_install. */
+    if (getenv("NTPACKER_GUI_HEADLESS") != NULL) {
+        return;
+    }
+
+    /* Resolve <app-data>/crash and pre-build every path/string the handler will need. A failure here
+     * leaves the marker/dump paths empty -> the handler degrades to a no-op writer, but we still
+     * install the handler below so a crash re-raises the OS default cleanly. */
+    char root[GUI_PATHS_MAX];
+    char crash_dir[GUI_PATHS_MAX];
+    int nd = gui_paths_app_data_root(root, sizeof root)
+                 ? snprintf(crash_dir, sizeof crash_dir, "%s/crash", root)
+                 : -1;
+    if (nd > 0 && (size_t)nd < sizeof crash_dir && gui_paths_ensure_dir(crash_dir)) {
+        int nm = snprintf(s_marker_path, sizeof s_marker_path, "%s/last-run.crashed", crash_dir);
+        if (nm <= 0 || (size_t)nm >= sizeof s_marker_path) {
+            s_marker_path[0] = '\0';
+        }
+        /* Per-run dump/backtrace path: SESSION-START timestamp + PID (both resolved here, never in the
+         * handler -- strftime/snprintf/getpid are not needed on the signal path). The PID disambiguates
+         * two instances that crash in the SAME second, so a dump never overwrites another run's. */
+        time_t now = time(NULL);
+        struct tm tmv;
+#ifdef _WIN32
+        localtime_s(&tmv, &now);
+#else
+        localtime_r(&now, &tmv);
+#endif
+        char stamp[24];
+        (void)strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", &tmv);
+#ifdef _WIN32
+        int np = snprintf(s_dump_path, sizeof s_dump_path, "%s/crash-%s-%lu.dmp", crash_dir, stamp,
+                          (unsigned long)GetCurrentProcessId());
+        if (np <= 0 || (size_t)np >= sizeof s_dump_path) {
+            s_dump_path[0] = '\0';
+        }
+#else
+        int np = snprintf(s_backtrace_path, sizeof s_backtrace_path, "%s/crash-%s-%ld.txt", crash_dir, stamp,
+                          (long)getpid());
+        if (np <= 0 || (size_t)np >= sizeof s_backtrace_path) {
+            s_backtrace_path[0] = '\0';
+        }
+#endif
+        char human[32];
+        (void)strftime(human, sizeof human, "%Y-%m-%d %H:%M:%S", &tmv);
+        int npr = snprintf(s_marker_prefix, sizeof s_marker_prefix, "ntpacker crashed -- session started %s\n", human);
+        s_marker_prefix_len = (npr > 0 && (size_t)npr < sizeof s_marker_prefix) ? (size_t)npr : 0;
+    }
+
+#ifdef _WIN32
+    (void)SetUnhandledExceptionFilter(crash_exception_filter);
+#else
+    /* Warm up backtrace() so its first call -- which may malloc via the dynamic loader to bring in
+     * libgcc's unwinder -- happens NOW on the main thread, not inside the signal handler. */
+    void *warm[1];
+    (void)backtrace(warm, 1);
+    static const int sigs[] = {SIGSEGV, SIGABRT, SIGBUS, SIGILL, SIGFPE};
+    for (size_t i = 0; i < sizeof sigs / sizeof sigs[0]; i++) {
+        (void)signal(sigs[i], crash_signal_handler);
+    }
+#endif
+    /* Deliberately NO nt_log here: gui_crash_install runs before nt_engine_init, so the log subsystem
+     * may not be up yet. The install is silent. */
+    s_installed = true;
+}
+
+void gui_crash_clear_marker(void) {
+    if (s_marker_path[0] == '\0') {
+        return; /* never installed / no crash dir -> nothing to clear */
+    }
+    (void)remove(s_marker_path); /* clean exit: drop the marker so D3 only fires after a real crash */
+}
+
+void gui_crash_selftest(void) {
+    if (getenv("NTPACKER_GUI_HEADLESS") != NULL) {
+        return; /* never fault under headless/CI, even if the hidden arg leaks in */
+    }
+    nt_log_error("ntpacker-gui: --selftest-crash -- deliberately faulting to exercise the crash handler");
+    /* Deref a volatile null -> SIGSEGV (POSIX) / EXCEPTION_ACCESS_VIOLATION (Windows). volatile so the
+     * optimizer cannot elide the store under -O2. */
+    volatile int *p = NULL;
+    *p = 0xC0FFEE;
+    _Exit(3); /* unreachable in practice; makes the "must fault" intent explicit */
+}
+// #endregion

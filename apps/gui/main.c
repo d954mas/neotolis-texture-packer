@@ -70,6 +70,7 @@
 #include "gui_shell.h"    /* shell-owned surface the dev seams read (UI pool caps) */
 #include "gui_paths.h"    /* D1: app-data root + exe-dir resolver (canonical home for s_exe_dir) */
 #include "gui_log_file.h" /* D1: rotating app-side log file (nt_log sink); no-op under headless */
+#include "gui_crash.h"    /* D2: crash handler + dump + marker (installed first thing in main) */
 #include "gui_startup.h"  /* H/P1-8: pure startup open/defer guard (gui_startup_decide) */
 #include "gui_selftest.h" /* dev seam: headless self-test (compiled out unless flag on) */
 #include "gui_shot.h"     /* dev seam: --shot screenshot capture */
@@ -958,24 +959,39 @@ int main(int argc, char *argv[]) {
 
     /* dev screenshot flags + optional project path (first non-flag arg; see gui_shot.c) */
     const char *proj_arg = NULL;
+    bool selftest_crash = false; /* D2 hidden dev arg: fault after install to exercise the handler */
     for (int i = 1; i < argc; i++) {
         if (gui_shot_parse_arg(argv[i])) {
             /* consumed by the dev screenshot seam (--shot/--size/--scale/--shot-stale/--shot-packing) */
         } else if (strcmp(argv[i], "--auto-pack") == 0) {
             s_auto_pack = true; /* dev: headless async pack of atlas 0 for the heartbeat proof */
+        } else if (strcmp(argv[i], "--selftest-crash") == 0) {
+            selftest_crash = true; /* parse here so it's never mistaken for a project path below */
         } else if (proj_arg == NULL) {
             proj_arg = argv[i];
         }
     }
 
-    /* D1: mirror nt_log to a rotating file, but ONLY for a real windowed run -- the --shot capture
-     * seam (and --parity, already returned) must stay side-effect-free (no stray app-data log/sink/
-     * FILE). Installed before the build line so that line is captured too; also a no-op under
-     * NTPACKER_GUI_HEADLESS and if the app-data dir can't be created. */
+    /* D2 crash handler + D1 file log: install for a real windowed run ONLY -- the --shot capture seam
+     * (and --parity, already returned) stay side-effect-free (no stray <app-data>/crash dir, log/sink/
+     * FILE). Crash handler goes in FIRST (before the log) so it protects the log install + the build
+     * line too. NOT literally main()'s first statement: a fault before this point falls back to the OS
+     * default (identical to not-installed, no ntpacker dump) -- acceptable, since the value is catching
+     * interactive-session crashes, and the dev seams must stay clean. Both no-op under
+     * NTPACKER_GUI_HEADLESS and if the app-data dir can't be created; crash install must NOT call nt_log
+     * (see gui_crash_install). --selftest-crash is not a --shot arg, so install still runs for it. */
     if (!gui_shot_active()) {
+        gui_crash_install();
         gui_log_file_install();
     }
     nt_log_info("ntpacker-gui: %s build (%s)", nt_engine_build_string(), nt_engine_preset_string());
+
+    /* D2 hidden hand-verification hook: fault NOW (the handler is installed + the log sink is live, so
+     * a real run produces a dump/backtrace + marker AND proves the log tail survived). Self-guards to a
+     * no-op under headless, so it can never fire in CI. */
+    if (selftest_crash) {
+        gui_crash_selftest();
+    }
 
     gui_shot_apply_window_size(); /* dev (--shot): request the shot window size before window init */
     nt_window_init();
@@ -1208,6 +1224,11 @@ int main(int argc, char *argv[]) {
     nt_window_shutdown();
     gui_log_file_shutdown(); /* D1: unregister the sink + close the file before the engine goes down */
     nt_engine_shutdown();
+    /* D2: drop the crash marker LAST -- after engine teardown, with nothing left that can fault. Clearing
+     * it earlier would race a teardown fault: the handler is still live during nt_engine_shutdown, so a
+     * crash there would re-create the just-cleared marker -> a false "crashed" next launch. Only a fully
+     * clean run reaches here; remove() on the pre-resolved path is safe post-shutdown. */
+    gui_crash_clear_marker();
     return 0;
 }
 // #endregion

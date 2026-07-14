@@ -24,7 +24,7 @@ if(WIN32)
     target_link_libraries(tinyfiledialogs PUBLIC comdlg32 ole32 shell32 user32)
 endif()
 
-add_executable(ntpacker-gui main.c gui_state.c gui_widgets.c gui_actions.c gui_rows.c gui_selftest.c gui_shot.c gui_startup.c gui_paths.c gui_log_file.c gui_project.c gui_scan.c gui_canvas.c gui_pack.c gui_view_settings.c gui_view_lists.c gui_view_canvas.c gui_view_chrome.c)
+add_executable(ntpacker-gui main.c gui_state.c gui_widgets.c gui_actions.c gui_rows.c gui_selftest.c gui_shot.c gui_startup.c gui_paths.c gui_log_file.c gui_crash.c gui_project.c gui_scan.c gui_canvas.c gui_pack.c gui_view_settings.c gui_view_lists.c gui_view_canvas.c gui_view_chrome.c)
 # Link set derived from examples/ui_showcase; nt_shape_renderer is re-added for the atlas-page
 # canvas overlays (region outlines / hull polygons / pivot markers). Kept the concrete impls the
 # engine's *_interface deps require at final link: nt_gfx (font/ui), nt_fs + nt_http_stub
@@ -45,6 +45,11 @@ target_link_libraries(ntpacker-gui PRIVATE
     tp_build stb_image tinyfiledialogs
     tinycthread # interactive async pack/export worker thread (gui_pack.c); already in-closure via nt_builder
 )
+# D2 crash handler: MiniDumpWriteDump (gui_crash.c) needs DbgHelp on Windows. Target-scoped link
+# addition only (no preset/toolchain change); POSIX uses libc backtrace, no extra lib.
+if(WIN32)
+    target_link_libraries(ntpacker-gui PRIVATE dbghelp)
+endif()
 # Generated asset header from the pack builder (ntpacker_ui_assets.h).
 target_include_directories(ntpacker-gui PRIVATE "${GUI_GENERATED_DIR}")
 # Shared product version header (apps/common/ntpacker_version.h), also used by the CLI.
