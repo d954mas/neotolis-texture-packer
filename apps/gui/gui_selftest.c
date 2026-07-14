@@ -1553,6 +1553,56 @@ void run_selftest(void) {
                   "J14: no arg -> IDLE regardless of arg_exists (not recovered)");
         nt_log_info("SELFTEST: J14 gui_startup_decide truth table OK (8 rows; (1,1,1)->DEFER, (1,1,0)->OPEN, (1,0,1)->DEFER)");
 
+        /* (J15) H/P1-6 FAIL-CLOSED SLOT RESET: a fresh recovery journal must be built ONLY on an EMPTY
+         *      slot. If the reset (remove) could not clear the slot -- a locked file / read-only dir
+         *      leaving stale-or-foreign bytes -- attach must FAIL CLOSED: journal-less + a degraded notice,
+         *      NEVER append this session's edits after content the recovery READ will reject (that would be
+         *      a silent crash-recovery loss). Arm a one-shot skip of the reset so a pre-seeded stale slot
+         *      survives to the fresh attach. */
+        char j15slot[1200];
+        char j15lock[1210];
+        (void)snprintf(j15slot, sizeof j15slot, "%s/selftest_stale.ntpjournal", s_exe_dir);
+        (void)snprintf(j15lock, sizeof j15lock, "%s.lock", j15slot);
+        gui_project_enable_recovery("");
+        gui_project_shutdown();
+        (void)remove(j15slot);
+        (void)remove(j15lock);
+        gui_project_enable_recovery(j15slot); /* acquire the lock -> recovery ACTIVE and owned */
+        NT_ASSERT(gui_project__test_recovery_active() && "J15: recovery is active on a fresh owned slot");
+        FILE *j15sf = fopen(j15slot, "wb"); /* pre-seed 40 stale bytes (> the 28-byte header length) */
+        NT_ASSERT(j15sf && "J15: seeded a stale slot file");
+        unsigned char j15junk[40];
+        memset(j15junk, 0xAB, sizeof j15junk);
+        (void)fwrite(j15junk, 1, sizeof j15junk, j15sf);
+        (void)fclose(j15sf);
+        (void)gui_project_take_op_error(NULL, 0);      /* clear any prior soft-error before the attach */
+        gui_project__test_skip_next_recovery_reset();  /* simulate a remove() that could not clear the slot */
+        /* gui_project_new (NOT _init): goes straight to wrap_model -> attach_recovery_journal, bypassing
+         * try_adopt_recovered so the fail-closed path is exercised directly on the seeded slot. */
+        (void)gui_project_new(); /* attach_recovery_journal: skip reset -> stale slot -> FAIL CLOSED */
+        char j15err[256] = {0};
+        const bool j15_degraded = gui_project_take_op_error(j15err, sizeof j15err);
+        const bool j15_edits_ok = gui_project_set_atlas_name(0, "edit_after_failclosed");
+        /* The stale slot must be left EXACTLY as seeded (40 bytes) -- a mere existence check would pass even
+         * if a regression rebuilt the journal ON TOP of the junk (ensure_header appends after any >=28B store),
+         * which is precisely the P1-6 silent loss. Assert the byte count is unchanged. */
+        long j15_size = -1;
+        FILE *j15chk = fopen(j15slot, "rb");
+        if (j15chk) {
+            (void)fseek(j15chk, 0, SEEK_END);
+            j15_size = ftell(j15chk);
+            (void)fclose(j15chk);
+        }
+        nt_log_info("SELFTEST: J15 fail-closed degraded=%d edits_ok=%d slot_size=%ld msg='%s' (want 1,1,40)",
+                    (int)j15_degraded, (int)j15_edits_ok, j15_size, j15err);
+        NT_ASSERT(j15_degraded && j15err[0] && "J15/P1-6: a stale, unresettable slot fails CLOSED with a degraded notice");
+        NT_ASSERT(j15_edits_ok && "J15/P1-6: editing continues journal-less after the fail-closed attach");
+        NT_ASSERT(j15_size == 40 && "J15/P1-6: the un-clearable stale slot is left byte-for-byte intact (never appended to)");
+        (void)gui_project_take_op_error(NULL, 0);
+        gui_project_enable_recovery(""); /* release the lock + disable */
+        (void)remove(j15slot);
+        (void)remove(j15lock);
+
         /* Done: disable recovery + release any lock + restore a journal-LESS packable project for the
          * render phases. */
         gui_project_enable_recovery("");

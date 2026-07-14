@@ -339,14 +339,36 @@ static tp_status attach_journal_io(tp_model *m, tp_journal_io io, tp_error *err)
  * model (and thus the previous slot file handle) is already destroyed, so remove()+reopen never races
  * a live handle. On ANY failure the editor still runs journal-less and a degraded-durability notice
  * is raised (never a crash / blocked editor). */
+#ifdef NTPACKER_GUI_SELFTEST
+static bool s_test_skip_recovery_reset = false; /* selftest seam: one-shot skip of the slot reset (simulates a remove() that could not clear the slot) */
+#endif
 static void attach_recovery_journal(tp_model *m) {
+#ifdef NTPACKER_GUI_SELFTEST
+    const bool skip_reset = s_test_skip_recovery_reset;
+    s_test_skip_recovery_reset = false; /* consume the one-shot arming ON ENTRY, so it never leaks past an early-return */
+#endif
     if (!m || !recovery_active()) {
         return; /* recovery disabled / not owned -> journal-less (exactly the F2-05b-ii-A behavior) */
     }
-    (void)remove(s_recovery_path); /* start a fresh slot: the old model's handle is already closed */
+#ifdef NTPACKER_GUI_SELFTEST
+    if (!skip_reset) /* seam armed: leave the slot as-is so the fail-closed path is reachable */
+#endif
+        (void)remove(s_recovery_path); /* start a fresh slot: the old model's handle is already closed */
     tp_journal_io io = tp_journal_io_file(s_recovery_path);
     if (!io.ctx) {
         note_recovery_degraded("could not open the recovery journal file");
+        return;
+    }
+    /* Fail closed if the slot is NOT actually empty. A failed remove() above (locked file / permission /
+     * read-only dir) leaves stale-or-foreign bytes, and the journal layer accepts ANY >= header-length
+     * store as a valid header -- magic/key are only checked on the recovery READ, never on this fresh
+     * attach. Appending this session's edits after foreign content would silently lose them at recovery
+     * time, so run journal-less with a degraded notice instead of building on a slot we could not reset. */
+    if (io.length(io.ctx) != 0) {
+        if (io.destroy) {
+            io.destroy(io.ctx);
+        }
+        note_recovery_degraded("could not reset the recovery slot -- a stale journal is present");
         return;
     }
     tp_error err = {0};
@@ -893,6 +915,10 @@ void gui_project__test_release_foreign_lock(void) {
 }
 /* True iff recovery is ACTIVE (slot configured AND this instance owns the lock). */
 bool gui_project__test_recovery_active(void) { return recovery_active(); }
+/* Dev seam (selftest only): arm a one-shot skip of the next slot reset in attach_recovery_journal, so a
+ * pre-seeded stale slot survives to the fresh-attach and the fail-closed empty-check path is reachable
+ * (simulates a remove() the OS could not honor -- locked file / read-only dir). */
+void gui_project__test_skip_next_recovery_reset(void) { s_test_skip_recovery_reset = true; }
 #endif
 // #endregion
 

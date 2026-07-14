@@ -273,6 +273,10 @@ tp_journal_io gui_project__test_attach_memory_journal(void);
 bool gui_project__test_hold_foreign_lock(const char *slot);
 void gui_project__test_release_foreign_lock(void);
 bool gui_project__test_recovery_active(void);
+/* Arm a one-shot skip of the next recovery-slot reset so a pre-seeded stale slot reaches the fresh
+ * attach -- lets the selftest prove attach_recovery_journal fails CLOSED (journal-less + degraded
+ * notice) rather than building a journal on foreign bytes. */
+void gui_project__test_skip_next_recovery_reset(void);
 #endif
 
 #ifdef __cplusplus
