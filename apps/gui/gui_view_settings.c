@@ -638,7 +638,7 @@ static void declare_target_exporter_combo(nt_ui_context_t *ctx, uint32_t row_id,
                 if (nt_ui_combo_selectable(ctx, (uint32_t)i, exp_labels[i], i == cur_exp)) {
                     const tp_exporter *e = tp_exporter_at(i);
                     if (e) {
-                        gui_edit_target(s_sel_atlas, ti, e->id, t->out_path, t->enabled);
+                        gui_edit_target_exporter(s_sel_atlas, ti, e->id); /* H/G3: preserves a buffered out-path edit */
                     }
                 }
             }
@@ -693,7 +693,7 @@ static void declare_export_targets(nt_ui_context_t *ctx, tp_project_atlas *a) {
             const bool tgt_narrow = s_right_panel_w < S(210.0F);
             CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H))}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
                 if (tp_checkbox(ctx, nt_ui_child_id(row_id, "en"), t->enabled, true)) {
-                    gui_edit_target(s_sel_atlas, ti, t->exporter_id, t->out_path, !t->enabled);
+                    gui_edit_target_enabled(s_sel_atlas, ti, !t->enabled); /* H/G3: preserves a buffered out-path edit */
                 }
                 if (!tgt_narrow) {
                     declare_target_exporter_combo(ctx, row_id, ti, t, exp_labels, nlabels, cur_exp, pvbuf);
@@ -717,7 +717,7 @@ static void declare_export_targets(nt_ui_context_t *ctx, tp_project_atlas *a) {
                 CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
                     if (ui_text_field(ctx, nt_ui_child_id(row_id, "path"), s_nb_target_path[ti], sizeof s_nb_target_path[ti],
                                       t->out_path, true, "out/atlas.json")) {
-                        gui_edit_target(s_sel_atlas, ti, t->exporter_id, s_nb_target_path[ti], t->enabled);
+                        gui_edit_target_out_path(s_sel_atlas, ti, s_nb_target_path[ti]); /* H/G3: coalesce -> ONE undo step */
                     }
                 }
                 if (ui_btn(ctx, nt_ui_child_id(row_id, "browse"), "\xE2\x80\xA6", &g_btn_ghost, true, 28.0F, 22.0F, &g_caption)) { /* U+2026 */

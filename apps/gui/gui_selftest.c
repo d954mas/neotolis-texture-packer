@@ -1040,6 +1040,95 @@ void run_selftest(void) {
         NT_ASSERT(g10c->animation_count == g10n0 - 1 &&
                   "#10: remove_animation dups `id` before its flush -> the animation is removed with no dangling read");
 
+        /* (#11 -- H/G3) TARGET OUT-PATH coalescing: the export-target path text field used to fire one
+         *       gui_project_set_target per keystroke -> one committed TP_OP_TARGET_SET each = undo spam.
+         *       The out-path edit is now COALESCABLE, keyed per target (field = index): several distinct
+         *       values typed within one gesture BUFFER (latest wins, no commit); the field's Enter/blur
+         *       gesture boundary flushes the whole edit as EXACTLY ONE undo step; one undo reverts to the
+         *       committed baseline and redo re-applies. RMW-seeds exporter_id + enabled (only out_path
+         *       changes). Mirrors the padding-drag case (2), on the target out-path. */
+        gui_project_new();
+        gui_pack_clear(-1);
+        s_sel_atlas = 0;
+        tp_project_atlas *t11a = tp_project_get_atlas(gui_project_get(), 0);
+        NT_ASSERT(t11a && t11a->target_count > 0 && "#11: fresh project seeds a default target");
+        /* committed baseline out_path (one immediate commit, as the discrete browse/toggle paths do) */
+        (void)gui_project_set_target(0, 0, t11a->targets[0].exporter_id, "out/base.json", t11a->targets[0].enabled);
+        t11a = tp_project_get_atlas(gui_project_get(), 0);
+        const char t11_base[] = "out/base.json";
+        NT_ASSERT(strcmp(t11a->targets[0].out_path, t11_base) == 0 && "#11: baseline out_path committed");
+        const bool t11_en = t11a->targets[0].enabled;
+        char t11_exp[64];
+        (void)snprintf(t11_exp, sizeof t11_exp, "%s", t11a->targets[0].exporter_id); /* remember for the RMW-seed check */
+        const int t11_u0 = gui_project_undo_depth();
+        /* simulate typing "out/f" -> ... -> "out/final.json": several DISTINCT values, SAME key, NO flush between */
+        (void)gui_project_set_target_out_path(0, 0, "out/f");
+        (void)gui_project_set_target_out_path(0, 0, "out/fin");
+        (void)gui_project_set_target_out_path(0, 0, "out/final");
+        (void)gui_project_set_target_out_path(0, 0, "out/final.json");
+        const int t11_umid = gui_project_undo_depth();                                          /* still t11_u0: buffered */
+        const char *t11_mid = tp_project_get_atlas(gui_project_get(), 0)->targets[0].out_path;  /* still the baseline */
+        NT_ASSERT(t11_umid == t11_u0 && strcmp(t11_mid, t11_base) == 0 &&
+                  "#11: in-flight out-path keystrokes stay buffered (uncommitted) until the gesture boundary");
+        gui_project_flush_pending();                                                            /* Enter / blur boundary */
+        const int t11_u1 = gui_project_undo_depth();
+        tp_project_atlas *t11b = tp_project_get_atlas(gui_project_get(), 0);
+        nt_log_info("SELFTEST: #11 out-path coalesce: 4 keystrokes undo %d->%d path='%s' exporter='%s' enabled=%d", t11_u0,
+                    t11_u1, t11b->targets[0].out_path, t11b->targets[0].exporter_id, t11b->targets[0].enabled);
+        NT_ASSERT(t11_u1 - t11_u0 == 1 && strcmp(t11b->targets[0].out_path, "out/final.json") == 0 &&
+                  "#11: N out-path keystrokes = ONE undo step (final typed value wins)");
+        NT_ASSERT(strcmp(t11b->targets[0].exporter_id, t11_exp) == 0 && t11b->targets[0].enabled == t11_en &&
+                  "#11: the coalesced out-path edit RMW-seeds exporter_id + enabled (only out_path changed)");
+        NT_ASSERT(gui_project_undo() &&
+                  strcmp(tp_project_get_atlas(gui_project_get(), 0)->targets[0].out_path, t11_base) == 0 &&
+                  "#11: one undo reverts the ENTIRE coalesced out-path edit back to the baseline");
+        NT_ASSERT(gui_project_redo() &&
+                  strcmp(tp_project_get_atlas(gui_project_get(), 0)->targets[0].out_path, "out/final.json") == 0 &&
+                  "#11: redo re-applies the coalesced out-path edit");
+        /* #11 net-zero parity: a gesture that types then reverts to the COMMITTED out_path must add NO
+         * undo step (pending_is_noop now handles TP_OP_TARGET_SET, matching the other coalescable kinds). */
+        const int t11_unz = gui_project_undo_depth();
+        (void)gui_project_set_target_out_path(0, 0, "out/scratch");
+        (void)gui_project_set_target_out_path(0, 0, "out/final.json"); /* revert to the committed value */
+        gui_project_flush_pending();
+        NT_ASSERT(gui_project_undo_depth() == t11_unz &&
+                  strcmp(tp_project_get_atlas(gui_project_get(), 0)->targets[0].out_path, "out/final.json") == 0 &&
+                  "#11: a net-zero out-path gesture (type then revert) commits NO phantom undo step");
+        /* #11 interleave (the coalescing hazard G3 introduced + fixed): a discrete enabled toggle made while
+         * an out-path edit is still BUFFERED (typed, not yet Enter/blur) must NOT revert the typed path. The
+         * old discrete gui_edit_target re-sent the STALE committed out_path, so its internal flush committed
+         * the buffered value then overwrote it back. gui_project_set_target_enabled instead flushes FIRST then
+         * RMW-seeds out_path from the now-committed record. Buffer "out/typed.json", then toggle enabled. */
+        (void)gui_project_set_target_out_path(0, 0, "out/typed.json"); /* buffered, uncommitted */
+        tp_project_atlas *t11i = tp_project_get_atlas(gui_project_get(), 0);
+        NT_ASSERT(strcmp(t11i->targets[0].out_path, "out/final.json") == 0 &&
+                  "#11: the typed out-path is still buffered (committed record unchanged)");
+        const bool t11_en0 = t11i->targets[0].enabled;
+        NT_ASSERT(gui_project_set_target_enabled(0, 0, !t11_en0) && "#11: discrete enabled toggle commits");
+        t11i = tp_project_get_atlas(gui_project_get(), 0);
+        NT_ASSERT(strcmp(t11i->targets[0].out_path, "out/typed.json") == 0 && t11i->targets[0].enabled == !t11_en0 &&
+                  "#11: a discrete toggle mid-typing commits the buffered out-path FIRST (typed path preserved, not reverted)");
+        /* #11 exporter interleave (same hazard on the EXPORTER path): buffer a new out-path, then change the
+         * exporter -- the typed path must be preserved and the exporter changed. Default target is json-neotolis
+         * (see the coalesce log line above), so switching to "defold" is a real change. */
+        (void)gui_project_set_target_out_path(0, 0, "out/typed2.json"); /* buffered, uncommitted */
+        NT_ASSERT(gui_project_set_target_exporter(0, 0, "defold") && "#11: discrete exporter change commits");
+        t11i = tp_project_get_atlas(gui_project_get(), 0);
+        NT_ASSERT(strcmp(t11i->targets[0].out_path, "out/typed2.json") == 0 &&
+                  strcmp(t11i->targets[0].exporter_id, "defold") == 0 &&
+                  "#11: an exporter change mid-typing preserves the buffered out-path (not reverted)");
+        /* #11 empty-path [0]-fix: an EMPTY out-path is NEVER buffered (core forbids "" -- tp_op_validate). So
+         * clearing the field then toggling enabled must NOT break the toggle (the pre-fix flush-first committed
+         * "" -> core reject -> the toggle was silently dropped with a confusing 'out_path must be non-empty'). */
+        const bool t11_en1 = t11i->targets[0].enabled;
+        (void)gui_project_set_target_out_path(0, 0, ""); /* clear -> discarded, NOT buffered */
+        NT_ASSERT(gui_project_set_target_enabled(0, 0, !t11_en1) &&
+                  "#11: [0] a discrete toggle after CLEARING the path still commits (empty was never buffered)");
+        t11i = tp_project_get_atlas(gui_project_get(), 0);
+        NT_ASSERT(t11i->targets[0].enabled == !t11_en1 && t11i->targets[0].out_path[0] != '\0' &&
+                  strcmp(t11i->targets[0].out_path, "out/typed2.json") == 0 &&
+                  "#11: [0] the toggle applied and kept the last valid (non-empty) out-path");
+
         /* Restore a packable atlas-0 project for the render frames below (the pixel probe packs
          * atlas 0 and probes its region outlines) -- gui_project_new left it source-less. */
         gui_project_new();

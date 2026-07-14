@@ -225,6 +225,16 @@ bool gui_project_anim_move_frame(int atlas_index, int anim_index, int frame_inde
 int gui_project_add_target(int atlas_index);
 bool gui_project_remove_target(int atlas_index, int index); /* true iff removed (fix3 [0]) */
 bool gui_project_set_target(int atlas_index, int index, const char *exporter_id, const char *out_path, bool enabled);
+/* H/G3: COALESCABLE out-path-only setter (the path text field). Buffers under a per-target key so the
+ * field's Enter/blur gesture-commit flushes the whole edit as ONE undo step; RMW-seeds exporter_id +
+ * enabled from the committed record. Discrete target edits keep using gui_project_set_target (immediate). */
+bool gui_project_set_target_out_path(int atlas_index, int index, const char *out_path);
+/* H/G3: discrete target-field setters (IMMEDIATE, one undo step each). They flush any buffered out-path
+ * gesture FIRST, then RMW-seed the un-edited fields from the NOW-committed record -- so a discrete
+ * enabled/exporter edit made mid-typing never reverts the just-typed out_path (the hazard of re-sending a
+ * stale committed out_path). Use these from the checkbox / exporter dropdown instead of gui_project_set_target. */
+bool gui_project_set_target_enabled(int atlas_index, int index, bool enabled);
+bool gui_project_set_target_exporter(int atlas_index, int index, const char *exporter_id);
 
 /* --- undo / redo (F2-03 diff history) --- */
 bool gui_project_can_undo(void); /* true if a committed step OR a buffered gesture can be reverted */

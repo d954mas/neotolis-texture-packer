@@ -116,7 +116,8 @@ typedef enum {
     CK_SPRITE_OVERRIDE,
     CK_ANIM_FPS,
     CK_ANIM_PLAYBACK,
-    CK_ANIM_FLIP
+    CK_ANIM_FLIP,
+    CK_TARGET_OUTPATH   /* keyed by target index (field = index); H/G3 -- out-path text field coalesces */
 } coalesce_kind;
 
 typedef struct {
@@ -546,9 +547,11 @@ static tp_project_atlas *atlas_of_pending(void) {
  * read-only core commit path pushes an undo record + drops the redo branch UNCONDITIONALLY, so a
  * net-zero gesture (e.g. drag a knob out and back) would otherwise leave a phantom undo step AND
  * discard a live redo branch. We restore that parity GUI-side for the COALESCABLE op kinds only:
- * atlas.settings.set, animation.settings.set, and sprite.override.set (absent sprite record ==
- * all-default/inherit, the same seed the setters use). Structural ops never buffer, so they always
- * commit (a rename-to-same-name phantom stays a pre-existing minor edge -- documented in ADR 0015).
+ * atlas.settings.set, animation.settings.set, sprite.override.set (absent sprite record ==
+ * all-default/inherit, the same seed the setters use), and target.set (the out-path text field, H/G3
+ * -- only out_path buffers; exporter/enabled are RMW-seeded, so all three are compared). Other
+ * structural ops never buffer, so they always commit (a rename-to-same-name phantom stays a
+ * pre-existing minor edge -- documented in ADR 0015).
  * Compares only the MASKED fields; an unmasked field is untouched by the op so it can't differ.
  * MAINTENANCE (review finding, ADR 0015 follow-up): this hand-mirrors each op's masked fields, so
  * adding a NEW masked field to a handled op kind REQUIRES extending the matching case below -- else a
@@ -619,6 +622,24 @@ static bool pending_is_noop(void) {
             if ((m & TP_SPF_MAX_VERTICES) && (ov ? ov->ov_max_vertices : TP_PROJECT_OV_INHERIT) != s->ov_max_vertices) return false;
             if ((m & TP_SPF_MARGIN) && (ov ? ov->ov_margin : TP_PROJECT_OV_INHERIT) != s->ov_margin) return false;
             if ((m & TP_SPF_EXTRUDE) && (ov ? ov->ov_extrude : TP_PROJECT_OV_INHERIT) != s->ov_extrude) return false;
+            return true;
+        }
+        case TP_OP_TARGET_SET: {
+            /* H/G3: only the out-path text field BUFFERS a TP_OP_TARGET_SET (discrete exporter/enabled/
+             * browse edits commit immediately via gui_project_set_target). That setter RMW-seeds
+             * exporter_id + enabled from the committed record, so a buffered target op can differ ONLY in
+             * out_path -- but the op sets all three unconditionally (no mask), so compare all three: this
+             * stays COMPLETE (never a false no-op -> no silent discard) even if another target field ever
+             * coalesces. Restores the net-zero parity the other coalescable kinds already have. */
+            tp_project_atlas *a = atlas_of_pending();
+            const tp_op_target_set *s = &op->u.target_set;
+            const tp_project_target *t = a ? tp_project_atlas_find_target_by_id(a, s->target_id) : NULL;
+            if (!t) {
+                return false;
+            }
+            if (t->enabled != s->enabled) return false;
+            if (strcmp(t->exporter_id ? t->exporter_id : "", s->exporter_id ? s->exporter_id : "") != 0) return false;
+            if (strcmp(t->out_path ? t->out_path : "", s->out_path ? s->out_path : "") != 0) return false;
             return true;
         }
         default:
@@ -1460,6 +1481,88 @@ bool gui_project_set_target(int atlas_index, int index, const char *exporter_id,
     }
     gui_project_touch(GUI_ACT_SET_TARGET);
     return true;
+}
+
+/* H/G3: COALESCABLE out-path-only setter for the export-target path text field. Discrete target edits
+ * (enabled checkbox / exporter dropdown / browse pick) stay immediate via gui_project_set_target above;
+ * the free-text out-path field, however, fired one gui_project_set_target per keystroke -> one committed
+ * TP_OP_TARGET_SET per keystroke = undo spam. Buffering it under a per-target key (field = index) makes
+ * the field's existing Enter/blur gesture-commit flush the whole edit as ONE undo step -- mirrors the
+ * atlas-settings path (gui_project_set_atlas_setting). TP_OP_TARGET_SET replaces exporter_id+out_path+
+ * enabled ATOMICALLY, so RMW-seed exporter_id + enabled from the COMMITTED record read AFTER pending_route
+ * (post-route -> no UAF; contrast gui_project_set_target, which had to dup CALLER pointers BEFORE its
+ * flush). Switching to a different target index is a different key -> pending_route flushes -> a correct
+ * one-undo-per-target boundary. */
+bool gui_project_set_target_out_path(int atlas_index, int index, const char *out_path) {
+    coalesce_key ck = make_key(CK_TARGET_OUTPATH, atlas_index, index, -1, "");
+    pending_route(&ck); /* flush a DIFFERENT key (other target / other knob) BEFORE reading this target */
+    /* NEVER buffer an EMPTY out_path: core (tp_op_validate) REJECTS out_path=="" -- buffering it would (a)
+     * flush-reject at the gesture boundary and (b) break a following discrete edit whose flush-first would
+     * then fail. The committed record must stay non-empty, exactly as pre-G3 (every empty keystroke's commit
+     * was rejected). Clearing the field DISCARDS any same-key pending -> the field resyncs to the last
+     * committed path; a discrete edit then always reads a valid record. After pending_route a still-valid
+     * pending is necessarily THIS same key (a different key was just flushed). */
+    if (!out_path || out_path[0] == '\0') {
+        if (s_pending_valid) {
+            pending_discard();
+        }
+        return false;
+    }
+    tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index); /* read AFTER route */
+    if (!a || index < 0 || index >= a->target_count) {
+        return false;
+    }
+    tp_project_target *t = &a->targets[index];
+    char *exp = dupstr(t->exporter_id);        /* RMW seed: unchanged exporter (dup: commit/replace frees the arms) */
+    char *outp = dupstr(out_path);             /* guaranteed non-empty by the guard above */
+    if (!exp || !outp) {
+        free(exp);
+        free(outp);
+        return false;
+    }
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_TARGET_SET;
+    op.atlas_id = a->id;
+    op.u.target_set.target_id = t->id;
+    op.u.target_set.enabled = t->enabled;      /* RMW seed: unchanged */
+    op.u.target_set.exporter_id = exp;         /* ownership transfers to op */
+    op.u.target_set.out_path = outp;
+    return pending_offer(&ck, &op, GUI_ACT_SET_TARGET);
+}
+
+/* H/G3: discrete target-field setters (enabled toggle / exporter change). IMMEDIATE (one undo step each).
+ * Unlike a raw gui_project_set_target from the view, they do NOT take the un-edited fields from a STALE
+ * view snapshot: they FLUSH any buffered out-path gesture FIRST (so the just-typed path is committed), then
+ * read the un-edited fields from the NOW-committed record and delegate to gui_project_set_target. This closes
+ * the hazard G3 introduced -- a discrete widget re-sending the stale committed out_path would commit the
+ * buffered typed value then overwrite it back, silently reverting the user's typed path. gui_project_set_
+ * target's own pre-flush dups run against a stable s_proj (nothing is pending after our flush) so it is
+ * UAF-safe and its internal flush is a no-op. An empty out_path is never buffered (gui_project_set_target_
+ * out_path guards it away), so this flush never rejects on emptiness -- only a genuine journal failure returns
+ * false, which correctly aborts the discrete edit too. */
+bool gui_project_set_target_enabled(int atlas_index, int index, bool enabled) {
+    if (!gui_project_flush_pending()) { /* commit any buffered out-path gesture FIRST (fresh committed read) */
+        return false;
+    }
+    tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
+    if (!a || index < 0 || index >= a->target_count) {
+        return false;
+    }
+    const tp_project_target *t = &a->targets[index]; /* read AFTER flush -> current exporter + out_path */
+    return gui_project_set_target(atlas_index, index, t->exporter_id, t->out_path, enabled);
+}
+
+bool gui_project_set_target_exporter(int atlas_index, int index, const char *exporter_id) {
+    if (!gui_project_flush_pending()) {
+        return false;
+    }
+    tp_project_atlas *a = tp_project_get_atlas(s_proj, atlas_index);
+    if (!a || index < 0 || index >= a->target_count) {
+        return false;
+    }
+    const tp_project_target *t = &a->targets[index]; /* read AFTER flush -> current out_path + enabled */
+    return gui_project_set_target(atlas_index, index, exporter_id, t->out_path, t->enabled);
 }
 // #endregion
 

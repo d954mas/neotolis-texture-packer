@@ -74,7 +74,10 @@ typedef enum {
     GEDIT_ANIM_FRAME_REMOVE,
     GEDIT_ANIM_FRAME_MOVE,
     GEDIT_ANIM_ADD_FRAMES, /* append COPIED selection keys to anim i0 (F1: was a sync commit -> UAF) */
-    GEDIT_TARGET
+    GEDIT_TARGET,
+    GEDIT_TARGET_OUTPATH,  /* H/G3: out-path-only target edit (COALESCABLE) -- heap out_path like GEDIT_TARGET */
+    GEDIT_TARGET_ENABLED,  /* H/G3: enabled-only toggle -- reads exporter+out_path from committed post-flush */
+    GEDIT_TARGET_EXPORTER  /* H/G3: exporter-only change -- reads out_path+enabled from committed post-flush */
 } gui_edit_kind;
 
 typedef struct {
@@ -248,6 +251,42 @@ void gui_edit_target(int atlas, int index, const char *exporter_id, const char *
     }
     (void)edit_push(&e);
 }
+/* H/G3: the out-path text field's per-keystroke enqueue. Same heap out_path as gui_edit_target (up to
+ * TP_PATH_MAX, no 255 slot), but the drain routes to the COALESCABLE gui_project_set_target_out_path so
+ * the field's Enter/blur gesture-commit collapses the whole edit into ONE undo step. */
+void gui_edit_target_out_path(int atlas, int index, const char *out_path) {
+    gui_edit e = {0};
+    e.kind = GEDIT_TARGET_OUTPATH;
+    e.atlas = atlas;
+    e.i0 = index;
+    e.out_path = edit_strdup(out_path); /* HEAP full path -- a >255 out_path must not truncate (F2) */
+    if (!e.out_path) {
+        set_status_ex(STATUS_ERROR, "Out of memory: export target edit not applied.");
+        return;
+    }
+    (void)edit_push(&e);
+}
+/* H/G3: discrete enabled toggle. Carries ONLY the new enabled + the target index; the drain setter reads
+ * exporter_id + out_path from the committed record AFTER flushing any buffered out-path gesture, so a
+ * still-uncommitted typed out-path is preserved (not reverted by a stale re-send). */
+void gui_edit_target_enabled(int atlas, int index, bool enabled) {
+    gui_edit e = {0};
+    e.kind = GEDIT_TARGET_ENABLED;
+    e.atlas = atlas;
+    e.i0 = index;
+    e.b0 = enabled;
+    (void)edit_push(&e);
+}
+/* H/G3: discrete exporter change. Carries ONLY the new exporter_id + the target index; the drain setter
+ * reads out_path + enabled from the committed record post-flush (same anti-stale-revert reason). */
+void gui_edit_target_exporter(int atlas, int index, const char *exporter_id) {
+    gui_edit e = {0};
+    e.kind = GEDIT_TARGET_EXPORTER;
+    e.atlas = atlas;
+    e.i0 = index;
+    (void)snprintf(e.s0, sizeof e.s0, "%s", exporter_id ? exporter_id : "");
+    (void)edit_push(&e);
+}
 
 /* Enqueue an "add frames" edit carrying a COPY of the selection keys (F1). "Add frames" used to
  * commit synchronously from inside declare_animation_editor, which clone-swaps + frees the project
@@ -331,6 +370,15 @@ static void drain_edits(void) {
                 break;
             case GEDIT_TARGET:
                 (void)gui_project_set_target(e->atlas, e->i0, e->s0, e->out_path ? e->out_path : "", e->b0);
+                break;
+            case GEDIT_TARGET_OUTPATH: /* H/G3: coalescable out-path-only edit */
+                (void)gui_project_set_target_out_path(e->atlas, e->i0, e->out_path ? e->out_path : "");
+                break;
+            case GEDIT_TARGET_ENABLED: /* H/G3: discrete enabled toggle (reads exporter+out_path post-flush) */
+                (void)gui_project_set_target_enabled(e->atlas, e->i0, e->b0);
+                break;
+            case GEDIT_TARGET_EXPORTER: /* H/G3: discrete exporter change (reads out_path+enabled post-flush) */
+                (void)gui_project_set_target_exporter(e->atlas, e->i0, e->s0);
                 break;
         }
         edit_dispose(e); /* free this edit's heap payload (out_path / copied keys) after it replays */
@@ -836,6 +884,11 @@ static void relativize_to_project(const char *abs, char *out, size_t cap) {
 /* Save dialog for a target's output path, relativized to the project like sources. Atlas-explicit so
  * the Export dialog (which spans all atlases) can browse any target, not just the selected atlas's. */
 static void do_browse_target_at(int atlas, int ti) {
+    /* H/G3: commit any BUFFERED out-path gesture FIRST so the Save dialog seeds from the just-typed path,
+     * not a stale committed one (clicking the "..." button is in-panel, so no blur gesture-commit fired).
+     * Re-fetch a/t AFTER the flush -- a committed flush clone-swaps the project. An empty path is never
+     * buffered, so the flush cannot reject here on emptiness. */
+    (void)gui_project_flush_pending();
     tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), atlas);
     if (!a || ti < 0 || ti >= a->target_count) {
         return;

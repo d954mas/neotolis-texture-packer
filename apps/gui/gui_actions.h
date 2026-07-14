@@ -79,6 +79,14 @@ void gui_edit_anim_frame_move(int atlas, int anim_index, int frame_index, int de
  * frame -- "Add frames" must NOT commit synchronously from the anim editor's declare fn (F1 UAF). */
 void gui_edit_anim_add_frames(int atlas, int anim_index, const char *const *keys, int count);
 void gui_edit_target(int atlas, int index, const char *exporter_id, const char *out_path, bool enabled);
+/* H/G3: the out-path text field's per-keystroke enqueue -- drains to the COALESCABLE setter so an edit
+ * gesture (typing then Enter/blur) collapses into ONE undo step, unlike the immediate gui_edit_target. */
+void gui_edit_target_out_path(int atlas, int index, const char *out_path);
+/* H/G3: discrete enabled/exporter enqueues -- carry ONLY the changed field; the drain setters read the
+ * un-edited fields from the committed record post-flush, so a discrete edit mid-typing never reverts the
+ * just-typed out_path. Use these instead of gui_edit_target for the enabled checkbox / exporter dropdown. */
+void gui_edit_target_enabled(int atlas, int index, bool enabled);
+void gui_edit_target_exporter(int atlas, int index, const char *exporter_id);
 
 /* --- deferred side-effect pump: lands async pack/export, commits blur edits, drains the queue --- */
 void apply_pending(void);

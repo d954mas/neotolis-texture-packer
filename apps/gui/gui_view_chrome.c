@@ -269,7 +269,7 @@ void declare_context_menu(nt_ui_context_t *ctx) {
         if (a && s_ctx_target >= 0 && s_ctx_target < a->target_count) {
             tp_project_target *t = &a->targets[s_ctx_target];
             if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_TOGGLE, t->enabled ? "Disable" : "Enable")) {
-                gui_edit_target(s_sel_atlas, s_ctx_target, t->exporter_id, t->out_path, !t->enabled);
+                gui_edit_target_enabled(s_sel_atlas, s_ctx_target, !t->enabled); /* H/G3: preserves a buffered out-path edit */
             }
             if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_REMOVE, "Remove")) {
                 s_pending_remove_target = s_ctx_target;
@@ -404,7 +404,7 @@ void declare_export_modal(nt_ui_context_t *ctx) {
                                      .childGap = Su(8),
                                      .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
                         if (tp_checkbox(ctx, nt_ui_child_id(rid, "en"), t->enabled, true)) {
-                            gui_edit_target(ai, ti, t->exporter_id, t->out_path, !t->enabled);
+                            gui_edit_target_enabled(ai, ti, !t->enabled); /* H/G3: preserves a buffered out-path edit */
                         }
                         CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(S(96)), CLAY_SIZING_GROW(0)}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
                             ui_label_fit(ctx, exp_name, &g_caption, S(96), 0U);
