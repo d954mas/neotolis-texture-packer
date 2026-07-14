@@ -1643,8 +1643,9 @@ static int selftest_probe_cyan(void) {
     static int s_probe_diag = 0; /* DIAGNOSTIC (CI headless -1 triage): throttle the reason log to a few lines */
     if (gui_canvas_get_mode(&s_canvas) != GUI_CANVAS_ATLAS || !gui_canvas_has_atlas(&s_canvas)) {
         if (s_probe_diag++ < 4) {
-            nt_log_info("SELFTEST-DIAG probe: -1 mode=%d has_atlas=%d (not ATLAS/no-atlas)",
-                        (int)gui_canvas_get_mode(&s_canvas), (int)gui_canvas_has_atlas(&s_canvas));
+            nt_log_info("SELFTEST-DIAG probe: -1 mode=%d has_atlas=%d page_count=%d (not ATLAS/no-atlas)",
+                        (int)gui_canvas_get_mode(&s_canvas), (int)gui_canvas_has_atlas(&s_canvas),
+                        gui_canvas_page_count(&s_canvas));
         }
         return -1;
     }
@@ -1755,6 +1756,11 @@ void selftest_pre_frame(void) {
             found = (gui_pack_result(0) && gui_pack_result(0)->sprite_count > 0) ? 0 : -1;
         }
         s_sel_atlas = (found >= 0) ? found : 0;
+        /* Bind the packed result to the canvas explicitly (deterministic test setup, mirroring the
+         * manual mode/outline setup below). The app's per-frame bind (main.c: preview_target_result vs
+         * s_shown_result) is order/epoch sensitive here -- headless it left the canvas result NULL, so
+         * the outline probe saw has_atlas=0. Binding here removes that dependency for the probe. */
+        gui_canvas_set_result(&s_canvas, gui_pack_result(s_sel_atlas));
         gui_canvas_select(&s_canvas, -1); /* no selection -> plain hull outlines */
         s_canvas.mode = GUI_CANVAS_ATLAS;
         s_canvas.show_outline = true;
