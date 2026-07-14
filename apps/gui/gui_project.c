@@ -1948,6 +1948,23 @@ bool gui_project_can_redo(void) { return tp_model_can_redo(s_model); }
 int gui_project_undo_depth(void) { return tp_model_undo_depth(s_model); }
 int gui_project_redo_depth(void) { return tp_model_redo_depth(s_model); }
 
+/* R4 (plan S18 R, P1-1): after an undo/redo swaps the live project, checkpoint the resulting
+ * (post-undo) state into the recovery journal so a crash-recovery replay loads the UNDONE state
+ * DIRECTLY, instead of replaying the reverted transaction's still-durable op-payload and
+ * resurrecting the undone edit. Reuses the round-trip-proven R3 compaction (snapshot m->project ->
+ * one fresh checkpoint at the post-undo revision). The undo stack itself is deliberately NOT
+ * persisted -- recovery restores DOCUMENT STATE only (undo applies a tp_diff_record, not a
+ * tp_txn_request, and the inverse of a remove has no forward catalog op, so a reverse-op encoding is
+ * not uniformly possible). NON-FATAL, exactly like the R3 Save hook: the undo already succeeded in
+ * memory, so a compaction failure only forfeits crash-durability for this step -- surface it through
+ * the SAME degraded channel and NEVER fail the undo. */
+static void checkpoint_after_history(void) {
+    tp_error cerr = {0};
+    if (tp_model_compact_journal(s_model, &cerr) != TP_STATUS_OK) {
+        note_recovery_degraded(cerr.msg[0] ? cerr.msg : "compaction failed");
+    }
+}
+
 /* Undo reverses the most recent committed transaction via its captured semantic diff; the model
  * clone-swaps m->project, so refresh s_proj + re-resolve cached pointers exactly as commit does.
  * A buffered gesture is committed FIRST (its own step) so Ctrl+Z reverts the in-flight drag.
@@ -1965,6 +1982,7 @@ bool gui_project_undo(void) {
     s_preview_stale = true;             /* restored model != last-packed; packing is blocked -> always stale */
     recompute_dirty();                  /* #7: undo back to the saved baseline reads clean by identity */
     gui_scan_invalidate_all();
+    checkpoint_after_history(); /* R4/P1-1: persist the undone state so recovery == document state */
     return true;
 }
 
@@ -1980,6 +1998,7 @@ bool gui_project_redo(void) {
     s_preview_stale = true;
     recompute_dirty(); /* #7: identity moved -> refresh the cached dirty */
     gui_scan_invalidate_all();
+    checkpoint_after_history(); /* R4/P1-1: persist the redone state so recovery == document state */
     return true;
 }
 // #endregion

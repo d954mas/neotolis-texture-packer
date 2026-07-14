@@ -22,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "tp_core/tp_diff.h"   /* R4: tp_model_enable_history / tp_model_undo / tp_model_redo */
 #include "tp_core/tp_export.h" /* TP_EXPORTER_ID_JSON_NEOTOLIS */
 #include "tp_core/tp_journal.h"
 #include "tp_core/tp_operation.h"
@@ -1352,6 +1353,96 @@ void test_compaction_broken_store_detaches_to_journal_less(void) {
     tp_model_destroy(m);
 }
 
+/* ==== R4: journal undo/redo via checkpoint-on-undo (P1-1) ================== */
+
+/* R4/P1-1: undo swaps the live project to the UNDONE state but does NOT touch the journal, whose
+ * post-checkpoint op-payloads still describe the reverted transaction. Left unchecked, a crash after
+ * an undo would replay those ops and RESURRECT the undone edit. The fix checkpoints the post-undo
+ * state (tp_model_compact_journal -- the same mechanism the GUI undo hook runs), so recovery loads the
+ * undone state directly. This test proves it: commit two renames ("one"->"two"), UNDO back to "one",
+ * compact, recover -> the recovered atlas is "one", NOT "two". Without the checkpoint-on-undo the
+ * journal would still replay both renames and wrongly recover "two". */
+void test_journal_undo_recovers_undone_state(void) {
+    tp_id128 key = key_of(0x87);
+    tp_journal_io io;
+    tp_model *m = model_with_journal(key, &io);          /* checkpoint at rev 0 (atlas "atlas1") */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_enable_history(m)); /* undo needs the diff history */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "87000000000000000000000000000001", 0, "one"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "87000000000000000000000000000002", 1, "two"));
+    TEST_ASSERT_EQUAL_STRING("two", tp_model_project(m)->atlases[0].name);
+
+    /* UNDO -> back to "one"; the undo bumps the revision forward (a new committed state). */
+    tp_error err;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_undo(m, &err));
+    TEST_ASSERT_EQUAL_STRING("one", tp_model_project(m)->atlases[0].name);
+    int64_t undone_rev = tp_model_revision(m);
+    TEST_ASSERT_EQUAL_INT64(3, undone_rev); /* rev0 -> +1 (one) -> +1 (two) -> +1 (undo) */
+
+    /* The fix: checkpoint the post-undo state into the journal (the GUI hook runs exactly this). */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_compact_journal(m, &err));
+
+    size_t blen = 0;
+    uint8_t *bytes = snapshot_io(io, &blen);
+    tp_model_destroy(m);
+
+    /* Recover: the store is now one checkpoint == the UNDONE state, no ops to replay. */
+    tp_journal_io io2 = io_from_bytes(bytes, blen);
+    free(bytes);
+    tp_model *m2 = NULL;
+    tp_journal_recovery info;
+    memset(&info, 0, sizeof info);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_recover(io2, key, &m2, &info, &err));
+    TEST_ASSERT_NOT_NULL(m2);
+    TEST_ASSERT_EQUAL_INT(1, info.records_recovered); /* one checkpoint (the undone state) */
+    TEST_ASSERT_EQUAL_INT(0, (int)info.op_count);     /* nothing to replay -> cannot resurrect "two" */
+    TEST_ASSERT_EQUAL_INT64(undone_rev, tp_model_revision(m2));
+    TEST_ASSERT_EQUAL_STRING("one", tp_model_project(m2)->atlases[0].name); /* the UNDONE state, NOT "two" */
+
+    tp_journal_recovery_free(&info);
+    tp_model_destroy(m2);
+}
+
+/* R4/P1-1 (redo): the symmetric case -- a redo re-applies the reverted edit and is likewise
+ * checkpointed, so recovery loads the REDONE state. Commit "one"->"two", UNDO (->"one"), REDO
+ * (->"two"), compact, recover -> the recovered atlas is "two" at the post-redo revision. */
+void test_journal_redo_recovers_redone_state(void) {
+    tp_id128 key = key_of(0x88);
+    tp_journal_io io;
+    tp_model *m = model_with_journal(key, &io);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_enable_history(m));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "88000000000000000000000000000001", 0, "one"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "88000000000000000000000000000002", 1, "two"));
+
+    tp_error err;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_undo(m, &err)); /* -> "one" (rev 3) */
+    TEST_ASSERT_EQUAL_STRING("one", tp_model_project(m)->atlases[0].name);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_redo(m, &err)); /* -> "two" (rev 4) */
+    TEST_ASSERT_EQUAL_STRING("two", tp_model_project(m)->atlases[0].name);
+    int64_t redone_rev = tp_model_revision(m);
+    TEST_ASSERT_EQUAL_INT64(4, redone_rev);
+
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_compact_journal(m, &err));
+
+    size_t blen = 0;
+    uint8_t *bytes = snapshot_io(io, &blen);
+    tp_model_destroy(m);
+
+    tp_journal_io io2 = io_from_bytes(bytes, blen);
+    free(bytes);
+    tp_model *m2 = NULL;
+    tp_journal_recovery info;
+    memset(&info, 0, sizeof info);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_recover(io2, key, &m2, &info, &err));
+    TEST_ASSERT_NOT_NULL(m2);
+    TEST_ASSERT_EQUAL_INT(1, info.records_recovered);
+    TEST_ASSERT_EQUAL_INT(0, (int)info.op_count);
+    TEST_ASSERT_EQUAL_INT64(redone_rev, tp_model_revision(m2));
+    TEST_ASSERT_EQUAL_STRING("two", tp_model_project(m2)->atlases[0].name); /* the REDONE state */
+
+    tp_journal_recovery_free(&info);
+    tp_model_destroy(m2);
+}
+
 int main(int argc, char **argv) {
     if (argc > 1) {
         g_dir = argv[1];
@@ -1390,5 +1481,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_compaction_truncate_failure_is_fault);
     RUN_TEST(test_compaction_init_failure_poisons);
     RUN_TEST(test_compaction_broken_store_detaches_to_journal_less);
+    /* R4: journal undo/redo via checkpoint-on-undo (P1-1) */
+    RUN_TEST(test_journal_undo_recovers_undone_state);
+    RUN_TEST(test_journal_redo_recovers_redone_state);
     return UNITY_END();
 }
