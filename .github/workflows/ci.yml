@@ -77,3 +77,57 @@ jobs:
 
       - name: Test
         run: ctest --preset native-release
+
+  # The GUI self-test (#50 ntpacker_gui_selftest, J-series) is the primary GUI regression
+  # harness but needs a real GL context, so it is NOT in the build-test job above. Run it here
+  # under a headless software-GL stack. Linux-first (xvfb + Mesa llvmpipe is reliable); Windows
+  # and macOS headless-GL are added once proven. native-tests-debug bakes the self-test flags.
+  gui-selftest:
+    name: gui-selftest (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Pull submodule LFS files
+        run: git submodule foreach --recursive 'git lfs pull || true'
+
+      - name: Install dependencies (Linux + headless GL)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update && sudo apt-get install -y clang ninja-build \
+            libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
+            libwayland-dev wayland-protocols libxkbcommon-dev libgl-dev \
+            xvfb libgl1-mesa-dri
+
+      - name: Set up ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: gui-selftest-${{ matrix.os }}
+          max-size: "400M"
+
+      - name: Enable ccache compiler launcher
+        shell: bash
+        run: |
+          echo "CMAKE_C_COMPILER_LAUNCHER=ccache" >> $GITHUB_ENV
+          echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache" >> $GITHUB_ENV
+
+      - name: Configure
+        run: cmake --preset native-tests-debug
+
+      - name: Build
+        run: cmake --build --preset native-tests-debug
+
+      # xvfb gives a virtual X display; llvmpipe forces Mesa's software GL so the self-test
+      # gets a modern GL context with no GPU. -R limits the run to the GUI self-test exe.
+      - name: Run GUI self-test (headless, software GL)
+        if: runner.os == 'Linux'
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          GALLIUM_DRIVER: llvmpipe
+        run: xvfb-run -a ctest --preset native-tests-debug -R ntpacker_gui_selftest --output-on-failure
