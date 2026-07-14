@@ -724,6 +724,17 @@ static void frame(void) {
     const nt_material_info_t *text_info = nt_material_get_info(s_text_material);
     const bool can_render = s_atlas_bound && s_font_bound && sprite_info && sprite_info->ready && text_info && text_info->ready;
 
+#ifdef NTPACKER_GUI_SELFTEST
+    { /* DIAGNOSTIC (CI headless has_atlas=0 triage): is the render block ever entered under llvmpipe? */
+        static int s_cr_diag = 0;
+        if (!can_render && s_cr_diag++ < 6) {
+            nt_log_info("SELFTEST-DIAG can_render=0 atlas_bound=%d font_bound=%d sprite_ready=%d text_ready=%d",
+                        (int)s_atlas_bound, (int)s_font_bound, (int)(sprite_info && sprite_info->ready),
+                        (int)(text_info && text_info->ready));
+        }
+    }
+#endif
+
     if (can_render) {
         nt_gfx_update_buffer(s_frame_ubo, &uniforms, sizeof(uniforms));
         nt_gfx_bind_uniform_buffer(s_frame_ubo, 0);
