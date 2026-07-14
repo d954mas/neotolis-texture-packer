@@ -30,6 +30,7 @@
 #include "tp_core/tp_model.h"   /* tp_result */
 #include "tp_core/tp_names.h"   /* tp_sprite_export_key (region -> override key) */
 #include "tp_core/tp_project.h" /* tp_project* accessors */
+#include "tp_core/tp_scan.h"    /* tp_mkdirs (portable temp-dir creation for the CI stress dirs) */
 #include "tp_core/tp_transaction.h" /* tp_semantic_identity (F2-05b-ii-B append-fail identity check) */
 #include "tp_journal_internal.h"    /* F2-05b-ii-B memory-io fault seams (append-fail injection); from packer/src */
 
@@ -239,9 +240,7 @@ void run_selftest(void) {
     char rdir[600];
     char rfile[700];
     (void)snprintf(rdir, sizeof rdir, "%s/selftest_refresh", s_exe_dir);
-#ifdef _WIN32
-    (void)CreateDirectoryA(rdir, NULL);
-#endif
+    tp_mkdirs(rdir); /* portable: was Windows-only CreateDirectoryA, so POSIX CI never created it */
     (void)snprintf(rfile, sizeof rfile, "%s/temp.png", rdir);
     FILE *tf = fopen(rfile, "wb");
     if (tf) {
@@ -363,9 +362,7 @@ void run_selftest(void) {
     {
         char sdir[700];
         (void)snprintf(sdir, sizeof sdir, "%s/selftest_stress", s_exe_dir);
-#ifdef _WIN32
-        (void)CreateDirectoryA(sdir, NULL);
-#endif
+        tp_mkdirs(sdir); /* portable: was Windows-only -> the 520 .tga writes silently failed on POSIX CI */
         const int N = 520;
         for (int i = 0; i < N; i++) {
             char fp[820];
@@ -491,9 +488,7 @@ void run_selftest(void) {
         const int M = 600; /* > the old 512 preview-frame cap */
         char pdir[700];
         (void)snprintf(pdir, sizeof pdir, "%s/selftest_caps", s_exe_dir);
-#ifdef _WIN32
-        (void)CreateDirectoryA(pdir, NULL);
-#endif
+        tp_mkdirs(pdir); /* portable: was Windows-only */
         for (int i = 0; i < M; i++) {
             char fp[820];
             (void)snprintf(fp, sizeof fp, "%s/f_%04d.tga", pdir, i);
