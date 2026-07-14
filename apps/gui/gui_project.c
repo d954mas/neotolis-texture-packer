@@ -908,6 +908,11 @@ bool gui_project_has_path(void) { return s_path[0] != '\0'; }
  * edit can never be silently discarded (and the flush's commit refreshes the cache). */
 bool gui_project_is_dirty(void) { return s_dirty_cache; }
 bool gui_project_is_stale(void) { return s_preview_stale; }
+/* H/P1-8: true while the live model is crash-recovered unsaved work adopted at init (try_adopt_recovered
+ * set recovered_unsaved) and not yet Saved; a Save clears it (tp_model_mark_saved). The queryable form of
+ * the condition the startup arg-open guard keys off -- so a stale CLI file arg defers instead of silently
+ * discarding the recovered work (J13). More precise than gui_project_is_dirty (recovered work only). */
+bool gui_project_has_recovered_unsaved(void) { return s_model && s_model->recovered_unsaved; }
 // #endregion
 
 // #region dirty/stale choke point

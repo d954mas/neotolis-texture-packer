@@ -95,6 +95,10 @@ const char *gui_project_display_name(void); /* file basename, or "untitled" */
 bool gui_project_has_path(void);
 bool gui_project_is_dirty(void);
 bool gui_project_is_stale(void);
+/* H/P1-8: true while the live model is crash-recovered unsaved work (adopted at init, not yet Saved);
+ * a Save clears it. The queryable form of the startup arg-open guard's "recovered unsaved work" condition
+ * (main() itself isn't headless-callable); exercised by the J13 selftest. */
+bool gui_project_has_recovered_unsaved(void);
 
 /* --- dirty/stale choke point --- */
 /* Serializes + snapshots the model, pushes the pre-mutation snapshot to undo history

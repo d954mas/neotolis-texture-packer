@@ -1086,10 +1086,17 @@ int main(int argc, char *argv[]) {
     gui_project_enable_recovery(recovery_slot);
 #endif
     gui_project_init();
+    /* H/P1-8: did crash-recovery adopt unsaved work at init this launch? Captured from the one-shot
+     * recovery notice below. It guards the CLI arg-open (a stale file arg must NEVER silently discard the
+     * recovered work) and keeps the recovery STATUS_WARNING as the shown status. Stays false in the
+     * selftest build (no interactive recovery there; proj_arg is NULL). Same condition, queryable form:
+     * gui_project_has_recovered_unsaved(). */
+    bool recovered = false;
 #ifndef NTPACKER_GUI_SELFTEST
     {
         char rnotice[256];
         if (gui_project_take_recovery_notice(rnotice, sizeof rnotice)) {
+            recovered = true;
             set_status_ex(STATUS_WARNING, rnotice); /* "Recovered unsaved changes ... Save to keep them." */
         } else if (gui_project_take_recovery_busy_notice(rnotice, sizeof rnotice)) {
             set_status_ex(STATUS_WARNING, rnotice); /* fix [1]: "Another window open -- crash recovery off." */
@@ -1107,11 +1114,20 @@ int main(int argc, char *argv[]) {
         char err[256];
         if (!gui_scan_exists(proj_arg)) {
             set_statusf_ex(STATUS_WARNING, "project not found: %s", proj_arg); /* stale argv -> continue with untitled (F6b) */
+        } else if (recovered) {
+            /* H/P1-8: crash-recovery adopted unsaved work at init. Opening the CLI file now would SILENTLY
+             * DISCARD it -- gui_project_open has no dirty prompt (pending_discard + wrap_model + re-checkpoint
+             * of the recovery slot). Defer: keep the recovered model + its slot intact and tell the user to
+             * resolve it first, then open normally via File>Open (which IS dirty-gated). Never destroy it. */
+            set_statusf_ex(STATUS_WARNING, "Recovered unsaved changes -- save or discard before opening %s", proj_arg);
         } else if (gui_project_open(proj_arg, err, sizeof err) == TP_STATUS_OK) {
             set_statusf("Opened %s", gui_project_display_name());
         } else {
             set_statusf_ex(STATUS_ERROR, "Open '%s' failed: %s", proj_arg, err);
         }
+    } else if (recovered) {
+        /* H/P1-8: recovered unsaved work is live -> keep the recovery STATUS_WARNING (set above) as the
+         * shown status; do NOT clobber it with "Ready..." before the first frame is drawn. */
     } else {
         set_status("Ready. New project -- add files or a folder to start.");
     }

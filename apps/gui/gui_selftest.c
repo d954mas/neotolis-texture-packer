@@ -1434,6 +1434,59 @@ void run_selftest(void) {
                   "J12/[2]: do_undo surfaces the disk-full flush error on a journal-failed flush");
         (void)gui_project_take_op_error(NULL, 0);
 
+        /* (J13) H/P1-8: the STARTUP ARG-OPEN GUARD predicate. gui_project_has_recovered_unsaved() is the
+         *       queryable form of the "recovery adopted unsaved work this launch" condition that main()'s
+         *       CLI arg-open guard keys off (main() itself isn't headless-callable). It MUST read TRUE right
+         *       after a crash-recovery adopt -- so a stale file arg DEFERS instead of silently discarding the
+         *       recovered work -- and FALSE once that work is Saved -- so an arg-open is then PERMITTED.
+         *       Drives the same adopt path as J3, on an ISOLATED slot. */
+        char p18slot[1200];
+        char p18lock[1210];
+        (void)snprintf(p18slot, sizeof p18slot, "%s/selftest_p18_recovery.ntpjournal", s_exe_dir);
+        (void)snprintf(p18lock, sizeof p18lock, "%s.lock", p18slot);
+        (void)remove(p18slot);
+        (void)remove(p18lock); /* start from a clean slot + lock */
+
+        /* Session 1: a journaled session with a committed edit, then a simulated crash (the slot survives). */
+        gui_project_enable_recovery("");   /* disable first so this teardown never deletes a slot */
+        gui_project_shutdown();            /* tear down the J12 (memory-journal) model; no slot op */
+        gui_project_enable_recovery(p18slot);
+        gui_project_init();                /* fresh + a recovery journal at the slot */
+        NT_ASSERT(gui_project_get() && !gui_project_has_recovered_unsaved() &&
+                  "J13: a fresh journaled session has NO recovered-unsaved work");
+        NT_ASSERT(gui_project_set_atlas_name(0, "p18_recovered") && "J13: a committed edit for the crash to recover");
+        gui_project_enable_recovery("");   /* crash-sim: keep the slot file on disk */
+        gui_project_shutdown();
+
+        /* Session 2 (restart after the crash): adopt the slot -> the predicate must read TRUE (guard DEFERS). */
+        gui_project_enable_recovery(p18slot);
+        gui_project_init();                /* recovery adopts the slot's last committed state */
+        char p18note[256] = {0};
+        const bool p18_recovered = gui_project_take_recovery_notice(p18note, sizeof p18note); /* what main()'s guard captures */
+        nt_log_info("SELFTEST: J13 adopt recovered=%d has_recovered_unsaved=%d (want 1,1 -> arg-open DEFERS)",
+                    (int)p18_recovered, (int)gui_project_has_recovered_unsaved());
+        NT_ASSERT(p18_recovered && "J13: the adopt raised the one-shot recovery notice (main()'s guard input)");
+        NT_ASSERT(gui_project_has_recovered_unsaved() &&
+                  "J13/P1-8: recovered unsaved work is live -> the guard DEFERS a CLI arg-open (no silent discard)");
+
+        /* A Save flushes the recovered state -> the predicate clears, so the guard would now PERMIT arg-open. */
+        char p18save[1200];
+        (void)snprintf(p18save, sizeof p18save, "%s/selftest_p18.ntpacker_project", s_exe_dir);
+        (void)remove(p18save);
+        char p18err[256] = {0};
+        const tp_status p18st = gui_project_save_as(p18save, p18err, sizeof p18err);
+        nt_log_info("SELFTEST: J13 after-save st=%s has_recovered_unsaved=%d (want OK,0 -> arg-open PERMITTED)",
+                    tp_status_str(p18st), (int)gui_project_has_recovered_unsaved());
+        NT_ASSERT(p18st == TP_STATUS_OK && "J13: the recovered work Saves");
+        NT_ASSERT(!gui_project_has_recovered_unsaved() &&
+                  "J13/P1-8: a Save clears recovered-unsaved -> the guard PERMITS a subsequent arg-open");
+
+        gui_project_enable_recovery("");   /* disable + release the lock */
+        gui_project_shutdown();
+        (void)remove(p18slot);
+        (void)remove(p18lock);
+        (void)remove(p18save);
+
         /* Done: disable recovery + release any lock + restore a journal-LESS packable project for the
          * render phases. */
         gui_project_enable_recovery("");
