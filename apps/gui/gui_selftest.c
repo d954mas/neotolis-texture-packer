@@ -40,6 +40,7 @@
 #include "gui_rows.h"     /* build_rows / multi_sel_* / select_row_for_region */
 #include "gui_scan.h"     /* gui_scan_* */
 #include "gui_shell.h"    /* UI_STATE_SLOTS / UI_STATE_PROBE_MAX / UI_ROW_ID_RING */
+#include "gui_startup.h"  /* H/P1-8: gui_startup_decide + GUI_STARTUP_* (J14 truth table) */
 #include "gui_state.h"    /* s_canvas / s_sel_* / s_sec_* / s_about_open / s_export_open / s_ctx / s_id_* */
 
 static void to_abs(const char *rel, char *out, size_t cap) {
@@ -1486,6 +1487,31 @@ void run_selftest(void) {
         (void)remove(p18slot);
         (void)remove(p18lock);
         (void)remove(p18save);
+
+        /* (J14) H/P1-8 fix: the STARTUP OPEN/DEFER GUARD itself, as a PURE truth table. main()'s data-loss
+         *       guard now routes through gui_startup_decide (single source of truth); J13 above covers only
+         *       the predicate that FEEDS it, leaving the guard branches themselves with no coverage (finding
+         *       3). This asserts every (arg_present, arg_exists, recovered) row -- so a refactor that reverts
+         *       the guard to an unconditional gui_project_open on a CLI arg FAILS here. The load-bearing rows
+         *       are (1,1,1) -> DEFER (never discard recovered work) vs (1,1,0) -> OPEN, plus (1,0,1) -> DEFER
+         *       (recovered wins over a stale arg -- finding 2, not MISSING). Pure -> no model state needed. */
+        NT_ASSERT(gui_startup_decide(true,  true,  true)  == GUI_STARTUP_DEFER &&
+                  "J14: arg present+exists + recovered -> DEFER (the data-loss guard; must NOT open)");
+        NT_ASSERT(gui_startup_decide(true,  false, true)  == GUI_STARTUP_DEFER &&
+                  "J14: recovered wins over a stale arg -> DEFER, not MISSING (finding 2; no clobber)");
+        NT_ASSERT(gui_startup_decide(true,  true,  false) == GUI_STARTUP_OPEN &&
+                  "J14: arg present+exists + NOT recovered -> OPEN");
+        NT_ASSERT(gui_startup_decide(true,  false, false) == GUI_STARTUP_MISSING &&
+                  "J14: arg present but missing + NOT recovered -> MISSING (project not found)");
+        NT_ASSERT(gui_startup_decide(false, false, true)  == GUI_STARTUP_IDLE &&
+                  "J14: no arg + recovered -> IDLE (caller keeps the recovery warning)");
+        NT_ASSERT(gui_startup_decide(false, true,  true)  == GUI_STARTUP_IDLE &&
+                  "J14: no arg -> IDLE regardless of arg_exists (recovered)");
+        NT_ASSERT(gui_startup_decide(false, false, false) == GUI_STARTUP_IDLE &&
+                  "J14: no arg + not recovered -> IDLE (Ready...)");
+        NT_ASSERT(gui_startup_decide(false, true,  false) == GUI_STARTUP_IDLE &&
+                  "J14: no arg -> IDLE regardless of arg_exists (not recovered)");
+        nt_log_info("SELFTEST: J14 gui_startup_decide truth table OK (8 rows; (1,1,1)->DEFER, (1,1,0)->OPEN, (1,0,1)->DEFER)");
 
         /* Done: disable recovery + release any lock + restore a journal-LESS packable project for the
          * render phases. */

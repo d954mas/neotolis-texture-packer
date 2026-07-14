@@ -68,6 +68,7 @@
 #include "gui_project.h"
 #include "gui_scan.h"
 #include "gui_shell.h"    /* shell-owned surface the dev seams read (UI pool caps) */
+#include "gui_startup.h"  /* H/P1-8: pure startup open/defer guard (gui_startup_decide) */
 #include "gui_selftest.h" /* dev seam: headless self-test (compiled out unless flag on) */
 #include "gui_shot.h"     /* dev seam: --shot screenshot capture */
 #include "gui_view_canvas.h"   /* center canvas view (declare_canvas) */
@@ -1086,20 +1087,26 @@ int main(int argc, char *argv[]) {
     gui_project_enable_recovery(recovery_slot);
 #endif
     gui_project_init();
-    /* H/P1-8: did crash-recovery adopt unsaved work at init this launch? Captured from the one-shot
-     * recovery notice below. It guards the CLI arg-open (a stale file arg must NEVER silently discard the
-     * recovered work) and keeps the recovery STATUS_WARNING as the shown status. Stays false in the
-     * selftest build (no interactive recovery there; proj_arg is NULL). Same condition, queryable form:
-     * gui_project_has_recovered_unsaved(). */
-    bool recovered = false;
+    /* H/P1-8 fix: TWO distinct startup facets, no longer conflated in one bool.
+     *  - recovery_warn_shown: did EITHER startup recovery warning get shown this launch -- the
+     *    adopted-unsaved-work notice OR the "another window open -> crash recovery is off for this one"
+     *    BUSY notice? Both are STATUS_WARNING that a later terminal default ("Ready...", "Opened %s",
+     *    "project not found") must NOT clobber before the first frame. The busy notice warns that recovery
+     *    is OFF -- silently losing it (finding 1) means a later crash discards work with no prior warning.
+     *  - the actual DATA-SAFETY deferral keys off the DURABLE model predicate
+     *    gui_project_has_recovered_unsaved() (the single source of truth for the condition), read at the
+     *    decision point below -- NOT this drained one-shot notice. The notice is drained here only to
+     *    obtain the warning TEXT. Both stay quiet in the selftest build (no interactive recovery there). */
+    bool recovery_warn_shown = false;
 #ifndef NTPACKER_GUI_SELFTEST
     {
         char rnotice[256];
         if (gui_project_take_recovery_notice(rnotice, sizeof rnotice)) {
-            recovered = true;
+            recovery_warn_shown = true;
             set_status_ex(STATUS_WARNING, rnotice); /* "Recovered unsaved changes ... Save to keep them." */
         } else if (gui_project_take_recovery_busy_notice(rnotice, sizeof rnotice)) {
-            set_status_ex(STATUS_WARNING, rnotice); /* fix [1]: "Another window open -- crash recovery off." */
+            recovery_warn_shown = true;             /* fix [1] + finding 1: the BUSY notice must survive too */
+            set_status_ex(STATUS_WARNING, rnotice); /* "Another window open -- crash recovery off." */
         }
     }
 #endif
@@ -1109,28 +1116,49 @@ int main(int argc, char *argv[]) {
     (void)snprintf(pack_session, sizeof pack_session, "%s/pack_session", s_exe_dir);
     gui_pack_init(pack_session);
 
-    /* open a project passed on the command line (errors go to the status bar) */
+    /* open a project passed on the command line (errors go to the status bar).
+     * H/P1-8 fix: route the open/defer choice through the PURE gui_startup_decide (single source of truth;
+     * J14 truth-table). `recovered` is the DURABLE model predicate, so a recovered launch DEFERS even when
+     * the arg is stale (DEFER > MISSING -- finding 2). No terminal default status clobbers a recovery
+     * warning that is already up (recovery_warn_shown): "Opened %s" / "project not found" / "Ready..." are
+     * suppressed then. A genuine open ERROR still shows -- see the OPEN case. */
     if (proj_arg != NULL) {
         char err[256];
-        if (!gui_scan_exists(proj_arg)) {
-            set_statusf_ex(STATUS_WARNING, "project not found: %s", proj_arg); /* stale argv -> continue with untitled (F6b) */
-        } else if (recovered) {
-            /* H/P1-8: crash-recovery adopted unsaved work at init. Opening the CLI file now would SILENTLY
-             * DISCARD it -- gui_project_open has no dirty prompt (pending_discard + wrap_model + re-checkpoint
-             * of the recovery slot). Defer: keep the recovered model + its slot intact and tell the user to
-             * resolve it first, then open normally via File>Open (which IS dirty-gated). Never destroy it. */
+        switch (gui_startup_decide(true, gui_scan_exists(proj_arg), gui_project_has_recovered_unsaved())) {
+        case GUI_STARTUP_DEFER:
+            /* Crash-recovery adopted unsaved work at init. Opening the CLI file now would SILENTLY DISCARD it
+             * -- gui_project_open has no dirty prompt (pending_discard + wrap_model + re-checkpoint of the
+             * recovery slot). Defer: keep the recovered model + its slot intact and tell the user to resolve
+             * it first, then open via File>Open (which IS dirty-gated). This arg-specific warning deliberately
+             * replaces the generic recovery notice (both STATUS_WARNING; this one is more actionable). */
             set_statusf_ex(STATUS_WARNING, "Recovered unsaved changes -- save or discard before opening %s", proj_arg);
-        } else if (gui_project_open(proj_arg, err, sizeof err) == TP_STATUS_OK) {
-            set_statusf("Opened %s", gui_project_display_name());
-        } else {
-            set_statusf_ex(STATUS_ERROR, "Open '%s' failed: %s", proj_arg, err);
+            break;
+        case GUI_STARTUP_MISSING:
+            if (!recovery_warn_shown) { /* stale argv -> continue with untitled (F6b); keep any recovery warning */
+                set_statusf_ex(STATUS_WARNING, "project not found: %s", proj_arg);
+            }
+            break;
+        case GUI_STARTUP_OPEN:
+            if (gui_project_open(proj_arg, err, sizeof err) == TP_STATUS_OK) {
+                if (!recovery_warn_shown) { /* routine confirmation -> must not clobber the busy "recovery off" warning */
+                    set_statusf("Opened %s", gui_project_display_name());
+                }
+            } else {
+                /* A genuine open FAILURE is surfaced even over a recovery warning: it is a concrete,
+                 * user-initiated failure the user is actively waiting on (they asked to open THIS file), it
+                 * is higher severity (STATUS_ERROR > STATUS_WARNING), and it is rare. Present actionable
+                 * failure wins over the latent "recovery off" warning. */
+                set_statusf_ex(STATUS_ERROR, "Open '%s' failed: %s", proj_arg, err);
+            }
+            break;
+        case GUI_STARTUP_IDLE:
+            break; /* unreachable with proj_arg != NULL; listed for switch exhaustiveness */
         }
-    } else if (recovered) {
-        /* H/P1-8: recovered unsaved work is live -> keep the recovery STATUS_WARNING (set above) as the
-         * shown status; do NOT clobber it with "Ready..." before the first frame is drawn. */
-    } else {
+    } else if (!recovery_warn_shown) {
         set_status("Ready. New project -- add files or a folder to start.");
     }
+    /* proj_arg == NULL && recovery_warn_shown: keep the recovery STATUS_WARNING as the first-frame status
+     * (do NOT clobber it with "Ready..." before the first frame is drawn). */
 
 #ifdef NTPACKER_GUI_SELFTEST
     run_selftest();
