@@ -1052,6 +1052,49 @@ void run_selftest(void) {
         gui_scan_invalidate_all();
     }
 
+    /* --- H/P2-14: Add Atlas auto-name must SCAN for a free atlasN, not blindly use atlas_count+1 (which
+     *     collides with a surviving atlas after a remove -> core rejects the duplicate name -> the button
+     *     wedges). Build atlas1..atlas3, remove atlas1, then Add: the old code picked "atlas3" (count 2+1)
+     *     and FAILED; the scan picks the freed "atlas1" and succeeds. --- */
+    {
+        gui_project_new(); /* fresh: exactly one atlas (atlas1) */
+        const int p14a2 = gui_project_add_atlas(); /* atlas2 */
+        const int p14a3 = gui_project_add_atlas(); /* atlas3 */
+        NT_ASSERT(p14a2 >= 0 && p14a3 >= 0 && gui_project_get()->atlas_count == 3 && "P2-14: seeded atlas1..atlas3");
+        NT_ASSERT(gui_project_remove_atlas(0) && "P2-14: removed atlas1 (count -> 2)");
+        const int p14add = gui_project_add_atlas(); /* count+1 == "atlas3" WOULD collide; the scan must avoid it */
+        tp_project *p214 = gui_project_get();
+        const char *p14nm = (p14add >= 0 && p14add < p214->atlas_count) ? p214->atlases[p14add].name : "(wedged)";
+        int p14dupes = 0;
+        for (int i = 0; i < p214->atlas_count; i++) {
+            if (p214->atlases[i].name && strcmp(p214->atlases[i].name, p14nm) == 0) {
+                p14dupes++;
+            }
+        }
+        nt_log_info("SELFTEST: P2-14 add-after-remove -> idx=%d name='%s' count=%d dupes=%d (want idx>=0, dupes=1)",
+                    p14add, p14nm, p214->atlas_count, p14dupes);
+        NT_ASSERT(p14add >= 0 && "P2-14: Add Atlas after a remove does NOT wedge on a colliding auto-name");
+        NT_ASSERT(p14dupes == 1 && "P2-14: the auto-name is unique (the scan skipped the surviving atlas3)");
+
+        /* Scenario B (review [0]/[1]): a name-only scan would reclaim a freed NAME whose default out_path
+         * is still live on a RENAMED atlas -> two targets at out/atlasN -> silent export overwrite. Rename
+         * atlas1 -> 'sprites' (its target stays out/atlas1); Add Atlas must SKIP "atlas1" (out/atlas1 taken)
+         * and pick "atlas2". */
+        gui_project_new(); /* fresh atlas1 + default target out/atlas1 */
+        NT_ASSERT(gui_project_set_atlas_name(0, "sprites") && "P2-14/B: rename atlas1 -> 'sprites' (target stays out/atlas1)");
+        const int p14b = gui_project_add_atlas();
+        tp_project *p14bp = gui_project_get();
+        const char *p14bn = (p14b >= 0 && p14b < p14bp->atlas_count) ? p14bp->atlases[p14b].name : "(wedged)";
+        const char *p14bo = (p14b >= 0 && p14b < p14bp->atlas_count && p14bp->atlases[p14b].target_count > 0)
+                                ? p14bp->atlases[p14b].targets[0].out_path : "(none)";
+        nt_log_info("SELFTEST: P2-14/B rename-then-add -> name='%s' out_path='%s' (want atlas2, out/atlas2)", p14bn, p14bo);
+        NT_ASSERT(p14b >= 0 && strcmp(p14bn, "atlas2") == 0 &&
+                  "P2-14/B: the scan skips 'atlas1' (out/atlas1 still held by the renamed atlas) and picks 'atlas2'");
+        NT_ASSERT(p14bo && strcmp(p14bo, "out/atlas1") != 0 &&
+                  "P2-14/B: the new atlas's default target does NOT collide on out/atlas1");
+        gui_project_new(); /* leave a clean project for the following phases */
+    }
+
     /* --- F2-05b-ii-B: LIVE recovery journal -- append-fail UX + crash-recovery round-trip (both ways) --- */
     {
         /* (J1) APPEND-FAIL UX: a recovery-journal append failure (full disk) must reject the commit

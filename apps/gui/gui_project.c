@@ -968,6 +968,31 @@ unsigned gui_project_model_version(void) { return s_model_ver; }
  * target.exporter_id, animation.name, ...) MUST dup that string into a local BEFORE the flush -- see
  * gui_project_set_target / gui_project_remove_animation. Callers passing UI buffers, drain-queue copies,
  * or literals are already safe; the sink-side dup makes it not matter which. */
+/* True iff any atlas in `p` already carries `name` (exact match) -- the auto-name uniqueness scan. */
+static bool atlas_name_in_use(const tp_project *p, const char *name) {
+    for (int i = 0; i < p->atlas_count; i++) {
+        if (p->atlases[i].name && strcmp(p->atlases[i].name, name) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* True iff any target of any atlas in `p` already writes to `out_path` (exact match). The auto-name
+ * scan avoids a NAME whose derived default out_path (out/<name>) is still held by another atlas's
+ * target -- core does not validate out_path uniqueness, so a collision is a SILENT export overwrite. */
+static bool target_out_path_in_use(const tp_project *p, const char *out_path) {
+    for (int i = 0; i < p->atlas_count; i++) {
+        const tp_project_atlas *a = &p->atlases[i];
+        for (int t = 0; t < a->target_count; t++) {
+            if (a->targets[t].out_path && strcmp(a->targets[t].out_path, out_path) == 0) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 int gui_project_add_atlas(void) {
     /* fix2 [3]: a journal-failed flush dropped the buffered gesture (op-error already surfaced) -> abort
      * this structural op too, never pair a silent lost edit with an unrelated committed change. */
@@ -977,8 +1002,22 @@ int gui_project_add_atlas(void) {
     if (!s_proj) {
         return -1;
     }
+    /* Lowest FREE atlasN whose NAME and default out_path (out/atlasN) are BOTH unused. atlas_count+1
+     * alone collides after a remove (atlas1/2/3, remove atlas1 -> count 2 -> "atlas3" still present) and
+     * core rejects the dup name -> Add Atlas would wedge (H/P2-14). But merely reclaiming a freed NAME is
+     * not enough: if that atlasN was RENAMED (name freed, its target still out/atlasN), a new atlasN would
+     * seed a second target at out/atlasN -- core does not validate out_path uniqueness, so both atlases
+     * export to one file (silent overwrite). Scanning both avoids it. Terminates: only finitely many
+     * atlasN names / out/atlasN paths exist (matches gui_project_create_animation's auto-name idiom). */
     char name[64];
-    (void)snprintf(name, sizeof name, "atlas%d", s_proj->atlas_count + 1);
+    for (int n = 1;; n++) {
+        (void)snprintf(name, sizeof name, "atlas%d", n);
+        char probe_out[576];
+        (void)snprintf(probe_out, sizeof probe_out, "out/%s", name);
+        if (!atlas_name_in_use(s_proj, name) && !target_out_path_in_use(s_proj, probe_out)) {
+            break;
+        }
+    }
     tp_id128 new_id;
     if (!gen_id(&new_id)) {
         return -1;
