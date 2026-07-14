@@ -148,6 +148,9 @@ static tp_status validate_frames(char *const *frames, int n, tp_op_reject *rej) 
     if (n < 0) { /* a negative count would loop &frames[-1] in apply -> heap underflow */
         return tp_op__reject(rej, TP_STATUS_OUT_OF_RANGE, "frame_count", "frame_count %d must be >= 0", n);
     }
+    if (n > 0 && frames == NULL) { /* count claims frames but the array ptr is null -> frames[i] derefs NULL */
+        return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "frames", "frame_count %d but the frames array is null", n);
+    }
     for (int i = 0; i < n; i++) {
         if (!frames[i] || frames[i][0] == '\0') {
             return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "frames", "frame %d is empty", i);
@@ -225,7 +228,13 @@ tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_
                 return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "key",
                                      "a source with path '%s' already exists in the atlas", op->u.source_add.key);
             }
-            return TP_STATUS_OK;
+            /* kind must be a currently-valid enum value {FOLDER=0, FILE=1}: apply stores kind verbatim and
+             * it re-serializes by token, so an out-of-range kind (99, or the reserved ATLAS=2) would
+             * validate, live in the model, then reload as "folder" -> live-vs-disk divergence. Epic B1 adds
+             * TP_SOURCE_KIND_ATLAS=2 -- WIDEN the upper bound to 2 when it lands (a loud, testable failure
+             * here beats a silent folder-coercion). range_i keeps kind consistent with every other bounded
+             * knob (shape/playback/alpha) -> OUT_OF_RANGE. */
+            return range_i(rej, "kind", (long)op->u.source_add.kind, 0, 1);
         case TP_OP_SOURCE_REMOVE:
             return find_source(a, op->u.source_ref.source_id)
                        ? TP_STATUS_OK

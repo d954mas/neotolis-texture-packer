@@ -269,6 +269,38 @@ void test_validate_negative_frame_count(void) {
     tp_project_destroy(p);
 }
 
+/* [1b] a positive frame_count with a NULL frames array is rejected (the apply loop would deref
+ * frames[i] on a null pointer), for BOTH animation.create and animation.frames.set. */
+void test_validate_null_frames_array(void) {
+    tp_id128 aid;
+    tp_id128 anid;
+    tp_project *p = anim_project(&aid, &anid, 0);
+    tp_op_reject rej;
+
+    tp_operation op; /* animation.create: valid fps/playback so we REACH the frame check */
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_ANIMATION_CREATE;
+    op.atlas_id = aid;
+    op.u.anim_create.anim_id = id_of(0xC2);
+    op.u.anim_create.name = (char *)"run";
+    op.u.anim_create.fps = 12.0F;
+    op.u.anim_create.playback = 0;
+    op.u.anim_create.frames = NULL;
+    op.u.anim_create.frame_count = 1; /* claims a frame but the array is null */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT, tp_operation_validate(p, &op, &rej));
+    TEST_ASSERT_EQUAL_STRING("frames", rej.field);
+
+    memset(&op, 0, sizeof op); /* animation.frames.set on the existing anim */
+    op.kind = TP_OP_ANIMATION_FRAMES_SET;
+    op.atlas_id = aid;
+    op.u.anim_frames_set.anim_id = anid;
+    op.u.anim_frames_set.frames = NULL;
+    op.u.anim_frames_set.frame_count = 2;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT, tp_operation_validate(p, &op, &rej));
+    TEST_ASSERT_EQUAL_STRING("frames", rej.field);
+    tp_project_destroy(p);
+}
+
 /* [3] atlas.create rejects a duplicate NAME (CLI `atlas add` policy). */
 void test_validate_atlas_create_dup_name(void) {
     tp_id128 aid;
@@ -377,6 +409,34 @@ void test_validate_source_add_dup_path(void) {
     tp_project_destroy(p);
 }
 
+/* [2b] source.add rejects a kind outside the currently-valid set {FOLDER, FILE}: apply stores kind
+ * verbatim and it re-serializes by token, so an out-of-range kind (99, or the reserved ATLAS=2)
+ * would silently coerce to "folder" on reload -> live-vs-disk divergence. FOLDER/FILE still pass. */
+void test_validate_source_add_bad_kind(void) {
+    tp_id128 aid;
+    tp_project *p = promoted_project(&aid);
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_SOURCE_ADD;
+    op.atlas_id = aid;
+    op.u.source_add.source_id = id_of(0xBA);
+    op.u.source_add.key = (char *)"sprites/new";
+    tp_op_reject rej;
+
+    op.u.source_add.kind = (tp_source_kind)2; /* reserved ATLAS -- not valid until Epic B1 */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_RANGE, tp_operation_validate(p, &op, &rej));
+    TEST_ASSERT_EQUAL_STRING("kind", rej.field);
+    op.u.source_add.kind = (tp_source_kind)99; /* garbage from a direct-built op */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_RANGE, tp_operation_validate(p, &op, &rej));
+    TEST_ASSERT_EQUAL_STRING("kind", rej.field);
+
+    op.u.source_add.kind = TP_SOURCE_KIND_FOLDER; /* the two valid kinds still pass */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_operation_validate(p, &op, &rej));
+    op.u.source_add.kind = TP_SOURCE_KIND_FILE;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_operation_validate(p, &op, &rej));
+    tp_project_destroy(p);
+}
+
 /* [7] padding/margin/extrude accept any >= 0 (CLI parity); max_size tracks the build-wide
  * texture cap (this build lifts NT_BUILD_MAX_TEXTURE_SIZE to 16384), so the 8192/16384 GUI
  * presets + CLI `set max_size` validate while a genuinely oversized page is still rejected
@@ -445,10 +505,12 @@ int main(void) {
     RUN_TEST(test_validate_bad_reference);
     RUN_TEST(test_validate_out_of_range);
     RUN_TEST(test_validate_negative_frame_count);
+    RUN_TEST(test_validate_null_frames_array);
     RUN_TEST(test_validate_atlas_create_dup_name);
     RUN_TEST(test_validate_atlas_rename_collision);
     RUN_TEST(test_validate_anim_rename);
     RUN_TEST(test_validate_source_add_dup_path);
+    RUN_TEST(test_validate_source_add_bad_kind);
     RUN_TEST(test_validate_knob_bounds_match_cli);
     RUN_TEST(test_validate_frame_move_to_index_unbounded);
     return UNITY_END();
