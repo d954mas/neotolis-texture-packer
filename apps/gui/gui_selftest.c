@@ -15,6 +15,8 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <unistd.h> /* getcwd -- to_abs() makes a relative path absolute on POSIX too */
 #endif
 
 #include "app/nt_app.h"         /* nt_app_quit */
@@ -51,7 +53,21 @@ static void to_abs(const char *rel, char *out, size_t cap) {
     }
     normalize_slashes(out);
 #else
-    (void)snprintf(out, cap, "%s", rel);
+    /* Mirror the Windows branch: yield a genuine absolute path. A bare snprintf left `rel`
+     * relative on POSIX, which resolves fine when scanned directly from CWD but NOT when it
+     * becomes a source of a fresh (never-saved, project_dir==NULL) project -- tp_project_resolve_path
+     * rejects a relative source with no base, so the pack sees "no usable images" (CI-only bug,
+     * since Windows GetFullPathNameA silently absolutized it). */
+    if (rel[0] == '/') {
+        (void)snprintf(out, cap, "%s", rel); /* already absolute */
+    } else {
+        char cwd[512];
+        if (getcwd(cwd, sizeof cwd) != NULL) {
+            (void)snprintf(out, cap, "%s/%s", cwd, rel);
+        } else {
+            (void)snprintf(out, cap, "%s", rel); /* getcwd failed: fall back to relative */
+        }
+    }
 #endif
 }
 
