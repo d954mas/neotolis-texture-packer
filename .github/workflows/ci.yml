@@ -117,8 +117,11 @@ jobs:
           echo "CMAKE_C_COMPILER_LAUNCHER=ccache" >> $GITHUB_ENV
           echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache" >> $GITHUB_ENV
 
+      # NT_ASSERT_MODE=2 (FULL): asserts print their message before trapping. Default TRAP mode
+      # (no NT_DEBUG) does a silent __builtin_trap() (SIGILL) with no message -- FULL surfaces WHICH
+      # assert fails so a Linux-only failure is diagnosable (it passes locally on Windows).
       - name: Configure
-        run: cmake --preset native-tests-debug
+        run: cmake --preset native-tests-debug -DNT_ASSERT_MODE=2
 
       # Build ONLY the self-test exe. Building everything would also compile the packer/spike
       # test exes, which (unlike the app targets tp_core/tp_build/ntpacker-gui/ntpacker) do not
