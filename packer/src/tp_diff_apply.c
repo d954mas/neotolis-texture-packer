@@ -15,10 +15,21 @@
 #include "tp_core/tp_operation.h"
 #include "tp_core/tp_project.h"
 #include "tp_diff_internal.h"
+#include "tp_strutil.h" /* tp_set_owned_dup (shared OOM-safe string-field swap) */
 
 static tp_project_atlas *atlas_of(tp_project *p, tp_id128 id) {
     int ai = tp_project_find_atlas_by_id(p, id);
     return ai < 0 ? NULL : &p->atlases[ai];
+}
+
+/* Adapt tp_diff__dup (NULL src -> NULL/ok, real alloc fail -> NULL/!ok) to the "NULL only on
+ * failure" dup contract tp_set_owned_dup wants. Every anim name / source path captured in a diff
+ * is non-NULL (both are required non-empty fields), so tp_diff__dup's NULL-src branch is
+ * unreachable here; routing through it keeps this field swap on the diff alloc fault seam. */
+static char *diff_dup_or_null(const char *s) {
+    bool ok = true;
+    char *d = tp_diff__dup(s, &ok);
+    return ok ? d : NULL;
 }
 
 static void set_knobs(tp_project_atlas *a, const tp_diff_knobs *k) {
@@ -155,13 +166,9 @@ tp_status tp_diff_op_apply(tp_project *clone, const tp_diff_op *e, bool reverse,
             if (!s) {
                 return tp_error_set(err, TP_STATUS_NOT_FOUND, "diff: no source for source.replace");
             }
-            bool ok = true;
-            char *np = tp_diff__dup(reverse ? e->path_before : e->path_after, &ok);
-            if (!ok) {
+            if (tp_set_owned_dup(&s->path, reverse ? e->path_before : e->path_after, diff_dup_or_null) != TP_STATUS_OK) {
                 return tp_error_set(err, TP_STATUS_OOM, "diff: source path dup failed");
             }
-            free(s->path);
-            s->path = np;
             return TP_STATUS_OK;
         }
         case TP_DIFF_SHAPE_TARGET_FIELDS: {
@@ -187,13 +194,10 @@ tp_status tp_diff_op_apply(tp_project *clone, const tp_diff_op *e, bool reverse,
             if (!an) {
                 return tp_error_set(err, TP_STATUS_NOT_FOUND, "diff: no animation for anim.rename");
             }
-            bool ok = true;
-            char *nn = tp_diff__dup(reverse ? e->name_before : e->name_after, &ok);
-            if (!ok) {
+            if (tp_set_owned_dup(&an->name, reverse ? e->name_before : e->name_after, diff_dup_or_null) !=
+                TP_STATUS_OK) {
                 return tp_error_set(err, TP_STATUS_OOM, "diff: anim name dup failed");
             }
-            free(an->name);
-            an->name = nn;
             return TP_STATUS_OK;
         }
         case TP_DIFF_SHAPE_ANIM_SETTINGS: {

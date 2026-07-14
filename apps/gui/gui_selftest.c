@@ -1344,9 +1344,12 @@ void run_selftest(void) {
                   "J9/[0]: a healthy-journal remove returns TRUE + removes (the success case still works)");
         (void)gui_project_take_op_error(NULL, 0);
 
-        /* (J10) fix3 [1]: set_anim_id returns false for BOTH a name collision AND a journal-failed flush;
-         *       gui_project_anim_id_exists disambiguates them, so a disk-full failure on a unique name is
-         *       NOT misreported as a duplicate (and the editor is not trapped). Prove both arms. */
+        /* (J10) H/P1-2: animation rename is a first-class op now. set_anim_id returns false for BOTH a
+         *       name collision AND a journal-failed flush, but the LIVE op-error channel
+         *       (gui_project_take_op_error -- the same one commit_active_edit surfaces) discriminates them
+         *       by MESSAGE. The retired gui_project_anim_id_exists heuristic no longer decides; assert the
+         *       real reject text on each arm, so a disk-full on a unique name is never misreported as a
+         *       duplicate (and the editor is not trapped). */
         gui_project_new();
         gui_pack_clear(-1);
         s_sel_atlas = 0;
@@ -1354,33 +1357,40 @@ void run_selftest(void) {
         const int j10a = gui_project_create_animation(0, "anim_a", NULL, 0);
         const int j10b = gui_project_create_animation(0, "anim_b", NULL, 0);
         NT_ASSERT(j10a == 0 && j10b == 1 && "J10: created two animations");
-        /* Case A -- genuine collision: rename anim_b to "anim_a" (exists) -> false + exists=true. */
+        /* Case A -- genuine collision: rename anim_b to "anim_a" (exists) -> false AND the CORE reject
+         *   "an animation named 'anim_a' already exists" rides the op-error channel (no client heuristic). */
         const bool j10_collide_ret = gui_project_set_anim_id(0, j10b, "anim_a");
-        const bool j10_collide_exists = gui_project_anim_id_exists(0, "anim_a");
-        nt_log_info("SELFTEST: J10 collision ret=%d exists=%d (want 0,1 -> reported as a collision)",
-                    (int)j10_collide_ret, (int)j10_collide_exists);
-        NT_ASSERT(!j10_collide_ret && j10_collide_exists &&
-                  "J10/[1]: a genuine duplicate -> set_anim_id false AND anim_id_exists true (a real collision)");
-        /* Case B -- journal-failed flush on a UNIQUE name: false + exists=false (NOT a collision). */
+        char j10_cerr[256] = {0};
+        const bool j10_csurfaced = gui_project_take_op_error(j10_cerr, sizeof j10_cerr);
+        nt_log_info("SELFTEST: J10 collision ret=%d surfaced=%d msg='%s' (want 0,1 -> the core collision message)",
+                    (int)j10_collide_ret, (int)j10_csurfaced, j10_cerr);
+        NT_ASSERT(!j10_collide_ret && j10_csurfaced && strstr(j10_cerr, "an animation named") != NULL &&
+                  strstr(j10_cerr, "already exists") != NULL &&
+                  "J10/live: a genuine duplicate -> set_anim_id false AND the op-error IS the core collision message");
+        /* Case B -- journal-failed flush on a UNIQUE name: false AND the op-error is the JOURNAL-fail
+         *   message, NOT a collision (the flush-first entry catches it before the rename op is built). */
         tp_journal_io j10io = gui_project__test_attach_memory_journal();
         NT_ASSERT(j10io.ctx && "J10: memory journal attached");
         const int j10pad = tp_project_get_atlas(gui_project_get(), 0)->padding;
         (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, j10pad + 2, 0.0F); /* buffered */
         tp_journal_io_memory__fail_next_writes(j10io, 1);
         const bool j10_flush_ret = gui_project_set_anim_id(0, j10b, "totally_unique_name");
-        const bool j10_flush_exists = gui_project_anim_id_exists(0, "totally_unique_name");
-        nt_log_info("SELFTEST: J10 journal-fail ret=%d exists=%d (want 0,0 -> NOT a collision)",
-                    (int)j10_flush_ret, (int)j10_flush_exists);
-        NT_ASSERT(!j10_flush_ret && !j10_flush_exists &&
-                  "J10/[1]: a journal-failed flush on a UNIQUE name -> set_anim_id false but anim_id_exists FALSE (not a collision)");
+        char j10_ferr[256] = {0};
+        const bool j10_fsurfaced = gui_project_take_op_error(j10_ferr, sizeof j10_ferr);
+        nt_log_info("SELFTEST: J10 journal-fail ret=%d surfaced=%d msg='%s' (want 0,1 -> journal msg, NOT a collision)",
+                    (int)j10_flush_ret, (int)j10_fsurfaced, j10_ferr);
+        NT_ASSERT(!j10_flush_ret && j10_fsurfaced && strstr(j10_ferr, "journal") != NULL &&
+                  strstr(j10_ferr, "already exists") == NULL &&
+                  "J10/live: a journal-failed flush on a UNIQUE name -> false with the journal message, never a false collision");
         (void)gui_project_take_op_error(NULL, 0);
 
-        /* (J11) fix4 [0]/[1]: the anim-rename FLUSH-FIRST pattern. anim_id_exists (fix3's heuristic) is
-         *       NOT a valid collision discriminator: it returns true for the anim's OWN name, yet renaming
-         *       to the own name is a no-op SUCCESS -- so on a journal-fail (which also makes set_anim_id
-         *       false) fix3 misreported the OWN/unchanged name as "must be unique" + trapped the editor.
-         *       fix4 flush-FIRST at the entry catches the journal-fail BEFORE set_anim_id, so post-flush a
-         *       false is a genuine collision only. (commit_active_edit is a static UI fn -- not directly
+        /* (J11) H/P1-2: the anim-rename FLUSH-FIRST pattern, asserted through the LIVE op-error channel.
+         *       The retired anim_id_exists heuristic was NOT a valid collision discriminator: it returns
+         *       true for the anim's OWN name, yet renaming to the own name is a no-op SUCCESS -- so on a
+         *       journal-fail (which also makes set_anim_id false) it misreported the OWN/unchanged name as
+         *       "must be unique" + trapped the editor. commit_active_edit now flush-FIRSTs at the entry so
+         *       the journal-fail is caught BEFORE set_anim_id, and post-flush a false carries a genuine
+         *       reject on the op-error channel only. (commit_active_edit is a static UI fn -- not directly
          *       callable headless; we exercise its building blocks.) */
         gui_project_new();
         gui_pack_clear(-1);
@@ -1388,14 +1398,15 @@ void run_selftest(void) {
         (void)gui_project_take_op_error(NULL, 0);
         const int j11a = gui_project_create_animation(0, "keep_me", NULL, 0);
         NT_ASSERT(j11a == 0 && "J11: created an animation");
-        /* (C) own/unchanged name -> a no-op SUCCESS (true) EVEN THOUGH anim_id_exists is true: proving the
-         *     heuristic can't discriminate (the name "exists" but the rename succeeds). */
+        /* (C) own/unchanged name -> a no-op SUCCESS (true) that raises NO op-error. This is exactly the case
+         *     the retired heuristic got wrong (the name "exists", yet the rename succeeds); the live path
+         *     returns true and leaves the op-error channel empty. */
         const bool j11_own_ret = gui_project_set_anim_id(0, j11a, "keep_me");
-        const bool j11_own_exists = gui_project_anim_id_exists(0, "keep_me");
-        nt_log_info("SELFTEST: J11 own-name ret=%d exists=%d (want 1,1 -> a no-op SUCCESS despite exists=true)",
-                    (int)j11_own_ret, (int)j11_own_exists);
-        NT_ASSERT(j11_own_ret && j11_own_exists &&
-                  "J11/[0]: renaming to the OWN name is a no-op SUCCESS though anim_id_exists is true (heuristic invalid)");
+        const bool j11_own_err = gui_project_take_op_error(NULL, 0);
+        nt_log_info("SELFTEST: J11 own-name ret=%d op_error=%d (want 1,0 -> a no-op SUCCESS with no op-error)",
+                    (int)j11_own_ret, (int)j11_own_err);
+        NT_ASSERT(j11_own_ret && !j11_own_err &&
+                  "J11/live: renaming to the OWN name is a no-op SUCCESS that raises no op-error");
         /* (flush-first) a journal-failed flush is caught at the ENTRY guard (flush_failed/flush_pending),
          *     BEFORE set_anim_id -- so a disk-full on the own/unchanged name is never a false collision. */
         tp_journal_io j11io = gui_project__test_attach_memory_journal();

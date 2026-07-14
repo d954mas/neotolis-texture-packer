@@ -163,8 +163,19 @@ elseif(FAMILY STREQUAL "anim")
     run(2 anim set "${PROJ}" atlas1 walk fps=abc)              # malformed -> usage
     run(3 anim remove "${PROJ}" atlas1 ghost)                  # not found -> project
     run(3 anim add-frame "${PROJ}" atlas1 ghost k)             # anim not found -> project
-    run(0 anim remove "${PROJ}" atlas1 walk)
-    assert_absent("\"id\": \"walk\"")
+    # H/P1-2: `anim rename` end-to-end -- SUCCESS (rename applies + persists) plus the SAME
+    # error contracts `atlas rename` uses, mapped through the shared exit-code split:
+    # arg-count/collision -> usage(2), unknown animation id -> project(3).
+    run(0 anim create "${PROJ}" atlas1 idle)                   # a 2nd animation for the collision case
+    run(0 anim rename "${PROJ}" atlas1 walk stroll)            # success: rename applies + saves
+    assert_contains("\"name\": \"stroll\"")                    # new name persisted (deterministic save)
+    assert_absent("\"name\": \"walk\"")                        # old name gone
+    run(2 anim rename "${PROJ}" atlas1 stroll idle)            # collides with another animation -> usage(2)
+    run(3 anim rename "${PROJ}" atlas1 ghost whatever)         # unknown animation id -> project(3)
+    run(2 anim rename "${PROJ}" atlas1 stroll)                 # missing <new> (arg count) -> usage(2)
+    assert_contains("\"name\": \"stroll\"")                    # rejects left the model unchanged
+    run(0 anim remove "${PROJ}" atlas1 stroll)
+    assert_absent("\"name\": \"stroll\"")
 
 elseif(FAMILY STREQUAL "target")
     run(0 new "${PROJ}")                                        # seeds 1 json-neotolis target

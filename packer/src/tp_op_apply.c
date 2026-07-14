@@ -26,6 +26,7 @@
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_srckey.h"  /* TP_SRCKEY_MAX */
 #include "tp_op_internal.h"
+#include "tp_strutil.h"         /* tp_set_owned_dup (shared OOM-safe string-field swap) */
 
 /* ---- staging allocation (with a test-only fault seam) -------------------- */
 static int s_alloc_fail = -1; /* countdown; -1 disabled. Fires exactly once. */
@@ -211,35 +212,24 @@ static tp_status apply_anim_frames_set(tp_project_anim *an, const tp_op_anim_fra
 
 /* animation.rename: dup the new name then swap in (stage-then-commit at field granularity,
  * so an OOM leaves the old name -- and the whole model -- byte-unchanged). No dedicated
- * tp_project mutator exists, so the field swap is inline, exactly like apply_source_replace. */
+ * tp_project mutator exists; the OOM-safe field swap is tp_set_owned_dup, fed stage_strdup so
+ * the fault seam still drives it (exactly like apply_source_replace). */
 static tp_status apply_anim_rename(tp_project_atlas *a, const tp_op_anim_rename *o) {
     tp_project_anim *an = tp_project_atlas_find_animation_by_id(a, o->anim_id);
     if (!an) {
         return TP_STATUS_NOT_FOUND;
     }
-    char *nn = stage_strdup(o->name);
-    if (!nn) {
-        return TP_STATUS_OOM;
-    }
-    free(an->name);
-    an->name = nn;
-    return TP_STATUS_OK;
+    return tp_set_owned_dup(&an->name, o->name, stage_strdup);
 }
 
 /* source.replace (reserved): repath a source in place. Own dup so a failure leaves
- * the old path intact (stage-then-commit at field granularity). */
+ * the old path intact (stage-then-commit at field granularity, shared with anim.rename). */
 static tp_status apply_source_replace(tp_project_atlas *a, const tp_op_source_ref *o) {
     tp_project_source *src = tp_project_atlas_find_source_by_id(a, o->source_id);
     if (!src) {
         return TP_STATUS_NOT_FOUND;
     }
-    char *np = stage_strdup(o->key);
-    if (!np) {
-        return TP_STATUS_OOM;
-    }
-    free(src->path);
-    src->path = np;
-    return TP_STATUS_OK;
+    return tp_set_owned_dup(&src->path, o->key, stage_strdup);
 }
 
 tp_status tp_operation_apply(tp_project *p, const tp_operation *op, tp_op_reject *rej) {

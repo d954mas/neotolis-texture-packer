@@ -17,6 +17,31 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "tp_core/tp_error.h" /* tp_status (tp_set_owned_dup) */
+
+/* OOM-safe owned-string field swap (dup-then-commit at field granularity). Duplicate `src`
+ * through `dup` -- which MUST return NULL only on an allocation failure -- and only once that
+ * succeeds free the old *slot and store the copy, so a failed dup leaves *slot (and the whole
+ * enclosing model) BYTE-UNCHANGED. Returns TP_STATUS_OK, else TP_STATUS_OOM.
+ *
+ * `dup` is a parameter (not a fixed allocator) on purpose: the callers each own a different
+ * test-only allocation fault seam -- tp_op_apply.c's stage_strdup (driven by
+ * tp_op__test_set_alloc_fail) and tp_diff_apply.c's tp_diff__dup (driven by
+ * tp_diff__test_set_alloc_fail). Routing the dup through the caller's seam keeps every existing
+ * OOM / rollback assertion firing on this exact field swap while still collapsing the three
+ * dup->check->free->assign copies onto ONE definition. Error MESSAGE reporting stays at the call
+ * site (op apply returns a bare status; diff apply wraps it in tp_error_set) so the emitted
+ * bytes are unchanged. */
+static inline tp_status tp_set_owned_dup(char **slot, const char *src, char *(*dup)(const char *)) {
+    char *copy = dup(src);
+    if (!copy) {
+        return TP_STATUS_OOM;
+    }
+    free(*slot);
+    *slot = copy;
+    return TP_STATUS_OK;
+}
+
 /* strdup without the _strdup / POSIX strdup portability split. NULL on NULL input or OOM. */
 static inline char *tp_strdup(const char *s) {
     if (!s) {
