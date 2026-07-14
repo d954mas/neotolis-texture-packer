@@ -108,6 +108,18 @@ void tp_journal_destroy(tp_journal *j);
 tp_status tp_journal_init_checkpoint(tp_journal *j, const uint8_t *snapshot, size_t len, int64_t revision,
                                      tp_error *err);
 
+/* R3 (plan S18 R / spec §22.3): COMPACT the store to a single fresh CHECKPOINT -- the
+ * Save-window reset. Truncates the backing store to 0 (dropping the old checkpoint + every
+ * post-checkpoint TXN record + any poisoned/corrupt record) and re-emits header + one
+ * CHECKPOINT capturing `snapshot`/`revision` and the journal's CURRENT retained-id set, so
+ * recovery after a Save replays from exactly the saved state. The compaction PRESERVES the
+ * retained-id set + revision (only the byte store is reset; the in-memory id index is kept so
+ * an already-acknowledged transaction id still de-duplicates after a Save -- §7.2). On a
+ * successful truncate the poison flag is cleared (nothing left to hide behind); if the truncate
+ * FAILS the store + poison are left intact and TP_STATUS_JOURNAL_FAILED is returned (fail-closed
+ * -- nothing partially compacted). NULL journal -> TP_STATUS_INVALID_ARGUMENT. */
+tp_status tp_journal_compact(tp_journal *j, const uint8_t *snapshot, size_t len, int64_t revision, tp_error *err);
+
 /* Append one committed transaction record {id_hex(32 hex), revision, snapshot}.
  * This is the ACKNOWLEDGEMENT gate: a transaction is committed only once this
  * returns OK. It is the LAST fallible step of a commit -- everything after a

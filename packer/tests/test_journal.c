@@ -1095,6 +1095,263 @@ void test_recovered_model_is_dirty(void) {
     tp_model_destroy(m2);
 }
 
+/* ==== R3: compaction on Save (plan S18 R / spec §22.3) ==================== */
+
+/* R3(a,b,d): after N commits, compaction resets the store to ONE checkpoint == the current
+ * committed state. A recover then yields records_recovered==1 + op_count==0 (the store shrank to
+ * a single checkpoint), the FINAL revision, the SAME serialized project, and the full retained-id
+ * set re-persisted from the live index into the fresh checkpoint. */
+void test_compaction_resets_to_one_checkpoint(void) {
+    tp_id128 key = key_of(0x80);
+    tp_journal_io io;
+    tp_model *m = model_with_journal(key, &io); /* checkpoint at rev 0 */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "80000000000000000000000000000001", 0, "alpha"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "80000000000000000000000000000002", 1, "beta"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "80000000000000000000000000000003", 2, "gamma"));
+    char *expected = serialize(tp_model_project(m));
+    int64_t exp_rev = tp_model_revision(m);
+    TEST_ASSERT_EQUAL_INT64(3, exp_rev);
+
+    /* Store before compaction: header + checkpoint + 3 txns. */
+    size_t pre_len = 0;
+    uint8_t *pre = snapshot_io(io, &pre_len);
+    free(pre);
+
+    /* Compact: the store becomes header + exactly one checkpoint == the current state. */
+    tp_error err;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_compact_journal(m, &err));
+    size_t post_len = 0;
+    uint8_t *post = snapshot_io(io, &post_len);
+    TEST_ASSERT_TRUE(post_len < pre_len); /* the 3 txn records were dropped */
+
+    /* In-memory: the retained-id index survived compaction (idempotency authority intact). */
+    TEST_ASSERT_EQUAL_INT(3, tp_journal_id_count(m->journal));
+    tp_model_destroy(m);
+
+    /* Recover from the compacted bytes: exactly one record (the checkpoint), no ops to replay. */
+    tp_journal_io io2 = io_from_bytes(post, post_len);
+    free(post);
+    tp_model *m2 = NULL;
+    tp_journal_recovery info;
+    memset(&info, 0, sizeof info);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_recover(io2, key, &m2, &info, &err));
+    TEST_ASSERT_NOT_NULL(m2);
+    TEST_ASSERT_EQUAL_INT(TP_JOURNAL_RECOVERY_OK, info.status);
+    TEST_ASSERT_EQUAL_INT(1, info.records_recovered); /* (a) one checkpoint */
+    TEST_ASSERT_EQUAL_INT(0, (int)info.op_count);     /* (a) no post-checkpoint ops to replay */
+    TEST_ASSERT_EQUAL_INT64(exp_rev, tp_model_revision(m2)); /* (b) revision preserved */
+
+    char *got = serialize(tp_model_project(m2));
+    TEST_ASSERT_EQUAL_STRING(expected, got); /* (d) recovers exactly the saved state */
+    /* durable id set preserved: all three acknowledged ids recovered from the fresh checkpoint */
+    TEST_ASSERT_EQUAL_INT(3, tp_journal_id_count(m2->journal));
+    TEST_ASSERT_TRUE(tp_journal_contains(m2->journal, "80000000000000000000000000000001"));
+    TEST_ASSERT_TRUE(tp_journal_contains(m2->journal, "80000000000000000000000000000003"));
+
+    free(expected);
+    free(got);
+    tp_journal_recovery_free(&info);
+    tp_model_destroy(m2);
+}
+
+/* R3(c): compaction PRESERVES the retained-id set -- a re-submit of an already-acknowledged id
+ * AFTER compaction is still an idempotent no-op (DUPLICATE_ID), both in-memory and after a
+ * crash-recover. Guards the "only the byte store is truncated, j->ids is kept" invariant: if
+ * compaction reset the id index, an acked id would double-apply after Save (§7.2). */
+void test_compaction_preserves_retained_ids(void) {
+    tp_id128 key = key_of(0x81);
+    tp_journal_io io;
+    tp_model *m = model_with_journal(key, &io);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "81000000000000000000000000000001", 0, "one"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "81000000000000000000000000000002", 1, "two"));
+    tp_error err;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_compact_journal(m, &err));
+
+    /* In-memory: a re-submit of an acked id post-compaction rejects as a duplicate (model unchanged). */
+    char *before = serialize(tp_model_project(m));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_DUPLICATE_ID,
+                          commit_rename(m, "81000000000000000000000000000001", tp_model_revision(m), "one-again"));
+    char *after = serialize(tp_model_project(m));
+    TEST_ASSERT_EQUAL_STRING(before, after);
+
+    size_t blen = 0;
+    uint8_t *bytes = snapshot_io(io, &blen);
+    tp_model_destroy(m);
+
+    /* After a crash-recover from the compacted store the id set is STILL the idempotency authority. */
+    tp_journal_io io2 = io_from_bytes(bytes, blen);
+    free(bytes);
+    tp_model *m2 = NULL;
+    tp_journal_recovery info;
+    memset(&info, 0, sizeof info);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_recover(io2, key, &m2, &info, &err));
+    TEST_ASSERT_NOT_NULL(m2);
+    TEST_ASSERT_EQUAL_INT(2, tp_journal_id_count(m2->journal));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_DUPLICATE_ID,
+                          commit_rename(m2, "81000000000000000000000000000002", tp_model_revision(m2), "two-again"));
+    /* A NEW id still commits + appends onto the compacted journal (it is healthy, not poisoned). */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          commit_rename(m2, "81000000000000000000000000000003", tp_model_revision(m2), "three"));
+
+    free(before);
+    free(after);
+    tp_journal_recovery_free(&info);
+    tp_model_destroy(m2);
+}
+
+/* R3(e): a commit AFTER compaction recovers as the compacted checkpoint + exactly ONE replay op
+ * (the diff journal resumed from the fresh baseline). The base checkpoint holds the compacted
+ * state; the post-compaction edit lives ONLY in the replayed op-payload. */
+void test_compaction_then_commit_recovers_as_ckpt_plus_op(void) {
+    tp_id128 key = key_of(0x82);
+    tp_journal_io io;
+    tp_model *m = model_with_journal(key, &io);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "82000000000000000000000000000001", 0, "one"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "82000000000000000000000000000002", 1, "two"));
+    tp_error err;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_compact_journal(m, &err)); /* checkpoint == rev 2 ("two") */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "82000000000000000000000000000003", 2, "three"));
+    char *expected = serialize(tp_model_project(m));
+    int64_t exp_rev = tp_model_revision(m);
+    TEST_ASSERT_EQUAL_INT64(3, exp_rev);
+
+    size_t blen = 0;
+    uint8_t *bytes = snapshot_io(io, &blen);
+    tp_model_destroy(m);
+
+    tp_journal_io io2 = io_from_bytes(bytes, blen);
+    free(bytes);
+    tp_model *m2 = NULL;
+    tp_journal_recovery info;
+    memset(&info, 0, sizeof info);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_recover(io2, key, &m2, &info, &err));
+    TEST_ASSERT_NOT_NULL(m2);
+    TEST_ASSERT_EQUAL_INT(2, info.records_recovered); /* compacted checkpoint + 1 txn */
+    TEST_ASSERT_EQUAL_INT(1, (int)info.op_count);     /* (e) exactly one post-checkpoint op */
+    TEST_ASSERT_NOT_NULL(strstr(info.snapshot, "two"));   /* base = the compacted "two" state */
+    TEST_ASSERT_NULL(strstr(info.snapshot, "three"));     /* the final edit is NOT in the base */
+    TEST_ASSERT_EQUAL_INT64(exp_rev, tp_model_revision(m2));
+    char *got = serialize(tp_model_project(m2));
+    TEST_ASSERT_EQUAL_STRING(expected, got);
+
+    free(expected);
+    free(got);
+    tp_journal_recovery_free(&info);
+    tp_model_destroy(m2);
+}
+
+/* R3: tp_model_compact_journal is a no-op (returns OK, mutates nothing) when no journal is
+ * attached -- a journal-less model (recovery disabled) Saves without a compaction error. */
+void test_compaction_no_journal_is_noop(void) {
+    tp_project *p = base_project();
+    tp_model *m = tp_model_wrap(p);
+    TEST_ASSERT_NOT_NULL(m);
+    TEST_ASSERT_NULL(m->journal);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "83000000000000000000000000000001", 0, "solo"));
+    char *before = serialize(tp_model_project(m));
+    tp_error err;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_compact_journal(m, &err)); /* no journal -> no-op */
+    char *after = serialize(tp_model_project(m));
+    TEST_ASSERT_EQUAL_STRING(before, after);
+    TEST_ASSERT_NULL(m->journal);
+    free(before);
+    free(after);
+    tp_model_destroy(m);
+}
+
+/* R3: compaction fails CLOSED on a truncate failure -- the store is left INTACT (the old
+ * checkpoint + records survive) and TP_STATUS_JOURNAL_FAILED is returned, so a Save-time
+ * compaction that cannot reset the store never silently loses the existing recovery log. The
+ * journal stays healthy (a FAILED compaction does not poison it): continued appends work. */
+void test_compaction_truncate_failure_is_fault(void) {
+    tp_id128 key = key_of(0x84);
+    tp_journal_io io;
+    tp_model *m = model_with_journal(key, &io);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "84000000000000000000000000000001", 0, "one"));
+    size_t pre_len = 0;
+    uint8_t *pre = snapshot_io(io, &pre_len);
+
+    /* The compaction truncate-to-0 is injected to FAIL -> fault, store byte-for-byte unchanged. */
+    tp_journal_io_memory__fail_next_truncate(io);
+    tp_error err;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED, tp_model_compact_journal(m, &err));
+    size_t post_len = 0;
+    uint8_t *post = snapshot_io(io, &post_len);
+    TEST_ASSERT_EQUAL_INT64((int64_t)pre_len, (int64_t)post_len); /* store intact */
+    TEST_ASSERT_EQUAL_MEMORY(pre, post, pre_len);
+
+    /* Not poisoned by the FAILED compaction -- a normal append still works. */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "84000000000000000000000000000002", 1, "two"));
+    TEST_ASSERT_TRUE(tp_journal_contains(m->journal, "84000000000000000000000000000002"));
+
+    free(pre);
+    free(post);
+    tp_model_destroy(m);
+}
+
+/* R3 fail-closed (core): the truncate-OK / init-fail window. If the compaction truncate SUCCEEDS
+ * (the old checkpoint + records are gone) but the fresh checkpoint then FAILS to write, the store is
+ * left checkpoint-LESS. Appending onto it would recover to NOTHING after a crash -> silent loss. The
+ * primitive MUST fail closed: poison the journal so further appends are refused. */
+void test_compaction_init_failure_poisons(void) {
+    tp_journal_io io = tp_journal_io_memory();
+    TEST_ASSERT_NOT_NULL(io.ctx);
+    tp_journal *j = tp_journal_create(io, key_of(0x85));
+    TEST_ASSERT_NOT_NULL(j);
+    tp_error err;
+    const uint8_t snap[] = {'s', 'n', 'a', 'p'};
+    /* Seed a checkpoint + a txn so the store is non-empty before compaction. */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_init_checkpoint(j, snap, sizeof snap, 0, &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_journal_append_txn(j, "85000000000000000000000000000001", 1, snap, sizeof snap, &err));
+
+    /* Compact: the truncate-to-0 SUCCEEDS, but the fresh checkpoint's header write is injected to FAIL
+     * (fail-next-writes hits only write(), not the preceding truncate). */
+    tp_journal_io_memory__fail_next_writes(io, 1);
+    const uint8_t snap2[] = {'n', 'e', 'w'};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED, tp_journal_compact(j, snap2, sizeof snap2, 2, &err));
+    TEST_ASSERT_TRUE(tp_journal__is_poisoned(j)); /* (a) fail closed */
+
+    /* The store is checkpoint-less: a recover finds nothing (no unrecoverable base to append onto). */
+    tp_journal_recovery rec;
+    memset(&rec, 0, sizeof rec);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_recover(j, &rec, &err));
+    TEST_ASSERT_EQUAL_INT(TP_JOURNAL_RECOVERY_EMPTY, rec.status);
+    TEST_ASSERT_EQUAL_INT(0, rec.records_recovered);
+    TEST_ASSERT_NULL(rec.snapshot);
+    tp_journal_recovery_free(&rec);
+
+    /* Poisoned -> refuses further appends: no TXN is silently written onto the checkpoint-less store. */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED,
+                          tp_journal_append_txn(j, "85000000000000000000000000000002", 3, snap2, sizeof snap2, &err));
+    tp_journal_destroy(j);
+}
+
+/* R3 fail-closed (glue): a broken-store compaction poisons the journal; tp_model_compact_journal must
+ * DETACH it so the session continues JOURNAL-LESS (still editable, recovery disabled) rather than leave
+ * a poisoned journal that would REJECT every subsequent commit. Proves (b) detach + edits continue and
+ * (c) no journal is left accumulating unrecoverable appends. */
+void test_compaction_broken_store_detaches_to_journal_less(void) {
+    tp_id128 key = key_of(0x86);
+    tp_journal_io io;
+    tp_model *m = model_with_journal(key, &io);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "86000000000000000000000000000001", 0, "one"));
+
+    /* Compaction: truncate OK, fresh-checkpoint write FAILS -> the journal poisons itself; the glue must
+     * DETACH it (the journal + its io are destroyed here -- do NOT touch `io` afterward). */
+    tp_journal_io_memory__fail_next_writes(io, 1);
+    tp_error err;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED, tp_model_compact_journal(m, &err));
+    TEST_ASSERT_NULL(m->journal); /* (b) detached -> session runs journal-less */
+
+    /* A subsequent commit still SUCCEEDS journal-less, not rejected by a poisoned journal. */
+    int64_t rev_before = tp_model_revision(m);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "86000000000000000000000000000002", rev_before, "two"));
+    TEST_ASSERT_EQUAL_INT64(rev_before + 1, tp_model_revision(m)); /* (c) edits continue, nothing appended to a dead journal */
+
+    tp_model_destroy(m);
+}
+
 int main(int argc, char **argv) {
     if (argc > 1) {
         g_dir = argv[1];
@@ -1125,5 +1382,13 @@ int main(int argc, char **argv) {
     RUN_TEST(test_truncate_failure_poisons_recovery);
     RUN_TEST(test_torn_header_reinitializable);
     RUN_TEST(test_recovered_model_is_dirty);
+    /* R3: compaction on Save */
+    RUN_TEST(test_compaction_resets_to_one_checkpoint);
+    RUN_TEST(test_compaction_preserves_retained_ids);
+    RUN_TEST(test_compaction_then_commit_recovers_as_ckpt_plus_op);
+    RUN_TEST(test_compaction_no_journal_is_noop);
+    RUN_TEST(test_compaction_truncate_failure_is_fault);
+    RUN_TEST(test_compaction_init_failure_poisons);
+    RUN_TEST(test_compaction_broken_store_detaches_to_journal_less);
     return UNITY_END();
 }

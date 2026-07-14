@@ -254,6 +254,17 @@ void tp_model_set_coordinator(tp_model *m, tp_side_effect_coordinator *c);
  * index answers idempotency (§7.2). */
 tp_status tp_model_attach_journal(tp_model *m, struct tp_journal *j, tp_error *err);
 
+/* R3 (plan S18 R / spec §22.3): compact the attached recovery journal to a single fresh
+ * CHECKPOINT capturing the model's CURRENT committed state + revision + retained-id set -- the
+ * Save-window reset. Call it AFTER a durable Save so the journal's baseline == the just-saved
+ * bytes and the unsaved replay window is zero (a later crash then recovers exactly the saved
+ * state + any edits made after the Save), bounding the replay cost. A no-op (returns OK) when no
+ * journal is attached. The checkpoint is proven to round-trip (the same guarantee as attach), and
+ * the retained-id set is PRESERVED so an already-acknowledged id still de-duplicates post-Save
+ * (§7.2). On failure the journal is left unchanged (it keeps its correct-but-larger log and still
+ * recovers) -- Save callers should treat a failure as NON-fatal (the file is already written). */
+tp_status tp_model_compact_journal(tp_model *m, tp_error *err);
+
 /* Rebuild a model from a journal's backing store after a process restart (§7.1/§7.2,
  * §22.3). Creates a journal over `io` (TAKES OWNERSHIP of io) keyed by `key`, replays
  * checkpoint + transaction records, and on a usable recovery returns a model (*out)

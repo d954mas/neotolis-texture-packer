@@ -121,6 +121,8 @@ void tp_journal__poison(tp_journal *j) {
     }
 }
 
+bool tp_journal__is_poisoned(const tp_journal *j) { return j && j->poisoned; }
+
 tp_status tp_journal_seed_retained_id(tp_journal *j, const char *id_hex) {
     if (!j || !id_hex) {
         return TP_STATUS_INVALID_ARGUMENT;
@@ -243,6 +245,41 @@ tp_status tp_journal_init_checkpoint(tp_journal *j, const uint8_t *snapshot, siz
     tp_status st = write_record(j, payload, payload_len, err);
     free(payload);
     return st;
+}
+
+tp_status tp_journal_compact(tp_journal *j, const uint8_t *snapshot, size_t len, int64_t revision, tp_error *err) {
+    if (!j) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "null journal");
+    }
+    /* R3 (plan S18 R): compact the store to a SINGLE fresh checkpoint (Save-window reset).
+     * Truncate the BYTE STORE to 0 -- this physically removes the old checkpoint, every
+     * post-checkpoint txn record, AND any mid-stream-corrupt record a prior recovery poisoned
+     * against; nothing is left to hide behind, so a successful truncate clears the poison flag.
+     * If the truncate FAILS, keep the store + poison intact and return a fault (fail-closed,
+     * the same pattern as tp_journal__poison / a failed tail-clean): a compaction that cannot
+     * reset the store must not pretend it did. CRITICAL: ONLY the byte store is reset -- the
+     * in-memory retained-id index (j->ids) is left INTACT so tp_journal_init_checkpoint below
+     * re-persists the SAME live id set into the fresh checkpoint; clearing it would let an
+     * already-acknowledged txn id double-apply after Save (§7.2 idempotency). After truncate-to-0
+     * ensure_header re-emits a fresh v2 header, so the compacted store = header + one CHECKPOINT. */
+    if (j->io.truncate(j->io.ctx, 0) != 0) {
+        /* Store byte-intact (nothing removed) + poison state UNCHANGED: the journal is still fully
+         * usable (its old checkpoint + records survive, appends continue). Fail closed on the compaction
+         * itself, but do not brick a healthy journal. */
+        return journal_fail(err, "journal compaction truncate failed (store unchanged, journal preserved)");
+    }
+    j->poisoned = false; /* the truncate-to-0 removed any offending record: appends are safe again */
+    tp_status cs = tp_journal_init_checkpoint(j, snapshot, len, revision, err);
+    if (cs != TP_STATUS_OK) {
+        /* The truncate SUCCEEDED (the old checkpoint + records are gone) but the fresh checkpoint could
+         * NOT be written (OOM / I/O; init_checkpoint rolled its store back to length 0). The store is now
+         * checkpoint-LESS: appending TXN op-payloads onto it would recover to NOTHING (no base snapshot)
+         * after a crash -- silent loss of every post-Save edit. FAIL CLOSED: poison the journal so
+         * write_record refuses further appends; the glue then detaches it and continues journal-less. */
+        j->poisoned = true;
+        return cs;
+    }
+    return TP_STATUS_OK;
 }
 
 tp_status tp_journal_append_txn(tp_journal *j, const char *id_hex, int64_t revision, const uint8_t *snapshot,

@@ -59,6 +59,12 @@ int64_t tp_jrn_get_i64(const uint8_t *p);
  * record must never hide a later acknowledged append. NULL-safe. */
 void tp_journal__poison(tp_journal *j);
 
+/* R3: true iff the journal is poisoned (refuses further appends). The compaction glue reads it to
+ * distinguish a broken-store compaction (truncate OK but the fresh checkpoint could not be written
+ * -> poisoned -> detach + run journal-less) from a benign truncate failure (store intact, journal
+ * healthy -> keep it). NULL-safe (false). */
+bool tp_journal__is_poisoned(const tp_journal *j);
+
 /* F2-04 fix C1: register an already-durable retained id into the in-memory index
  * WITHOUT writing a record. tp_model_attach_journal calls it to migrate ids the model
  * committed journal-less, BEFORE the initial checkpoint (so the checkpoint id-list AND

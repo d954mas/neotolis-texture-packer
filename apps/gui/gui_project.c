@@ -2069,6 +2069,20 @@ tp_status gui_project_save_as(const char *path, char *err_out, size_t err_cap) {
      * revision + undo history are preserved (§8/§420). */
     tp_model_mark_saved(s_model);
     recompute_dirty(); /* #7: the just-saved identity is the new clean baseline */
+    /* R3 (plan S18 R): compact the recovery journal to one fresh checkpoint == the just-saved state
+     * so the crash-recovery replay window resets to zero on every Save. MUST run AFTER ensure_ids
+     * (promotion mutates ids directly -- not journaled -- so the pre-Save journal reflects UN-promoted
+     * ids) + the durable file write, so the new checkpoint captures the promoted/saved bytes and
+     * recovery == the saved file. NON-FATAL: the file is already durably written, so a compaction
+     * failure must NOT fail the Save. On failure the journal is left in a fail-CLOSED state: a benign
+     * truncate failure keeps the store intact + the journal healthy (recovery preserved); a broken-store
+     * failure (truncate OK, fresh checkpoint unwritable) detaches the journal so the session continues
+     * journal-LESS (recovery disabled for the session) rather than append unrecoverable records. Either
+     * way the Save succeeds; surface the degraded-durability notice via the soft channel. */
+    tp_error cerr = {0};
+    if (tp_model_compact_journal(s_model, &cerr) != TP_STATUS_OK) {
+        note_recovery_degraded(cerr.msg[0] ? cerr.msg : "compaction failed");
+    }
     return TP_STATUS_OK;
 }
 // #endregion
