@@ -911,6 +911,53 @@ void test_file_journal_roundtrip(void) {
     remove(path);
 }
 
+/* R5b-2 fix [3]: the READ-ONLY, NO-CREATE opener. A missing path -> ctx == NULL AND creates NO file (the
+ * peek/adopt-source scan contract is strictly read-only; tp_journal_io_file would resurrect a stray empty
+ * journal). An existing journal opens + reads (peek works over it: checkpoint + 1 txn => record_count 2). */
+void test_io_file_read_no_create(void) {
+    if (!g_dir) {
+        TEST_IGNORE_MESSAGE("no scratch dir (argv[1]) provided");
+        return;
+    }
+    char path[1024];
+    (void)snprintf(path, sizeof path, "%s/ro_nocreate.journal", g_dir);
+    remove(path); /* ensure absent */
+
+    /* Missing path: ctx == NULL and NOTHING is created on disk. A re-open (still read-only) ALSO fails,
+     * proving the first call materialized no file -- a "w+b" create fallback would make this second open
+     * succeed. (Avoids a raw fopen(), which -Wdeprecated rejects under the MSVC-clang test build.) */
+    tp_journal_io ro = tp_journal_io_file_read(path);
+    TEST_ASSERT_NULL(ro.ctx);
+    tp_journal_io ro_again = tp_journal_io_file_read(path);
+    TEST_ASSERT_NULL(ro_again.ctx); /* still missing => the read-only opener created no file */
+
+    /* Write a real journal (checkpoint + one txn) with the create-capable opener, then close it. */
+    tp_id128 key = key_of(0x7B);
+    tp_journal_io wio = tp_journal_io_file(path);
+    TEST_ASSERT_NOT_NULL(wio.ctx);
+    tp_journal *j = tp_journal_create(wio, key);
+    TEST_ASSERT_NOT_NULL(j);
+    tp_error err;
+    const uint8_t snap[] = {'r', 'o'};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_init_checkpoint(j, snap, sizeof snap, 0, &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_journal_append_txn(j, "7b000000000000000000000000000001", 1, snap, sizeof snap, &err));
+    tp_journal_destroy(j); /* flush + close */
+
+    /* The read-only opener now opens it, and peek reads it. */
+    tp_journal_io ro2 = tp_journal_io_file_read(path);
+    TEST_ASSERT_NOT_NULL(ro2.ctx);
+    tp_journal_peek_result pk;
+    memset(&pk, 0, sizeof pk);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_peek(ro2, &pk, &err)); /* TAKES OWNERSHIP of ro2 */
+    TEST_ASSERT_EQUAL_INT(TP_JOURNAL_RECOVERY_OK, pk.status);
+    TEST_ASSERT_TRUE(pk.has_checkpoint);
+    TEST_ASSERT_EQUAL_INT(2, pk.record_count);
+    tp_journal_peek_free(&pk);
+
+    remove(path);
+}
+
 /* ==== F2-04 FIX PASS: one genuine case per correctness fix (C1-C5) ========= */
 
 /* C1: a journal attached AFTER journal-less commits must inherit the model's already-
@@ -2104,6 +2151,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_coordinator_ordering);
     RUN_TEST(test_coordinator_noop);
     RUN_TEST(test_file_journal_roundtrip);
+    RUN_TEST(test_io_file_read_no_create); /* R5b-2 fix [3]: read-only, no-create opener */
     /* F2-04 fix pass */
     RUN_TEST(test_attach_migrates_retained_ids);
     RUN_TEST(test_torn_tail_is_truncated);

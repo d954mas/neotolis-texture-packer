@@ -92,6 +92,15 @@ tp_journal_io tp_journal_io_memory(void);
  * on-disk durability for production wiring (F2-05). On open failure ctx == NULL. */
 tp_journal_io tp_journal_io_file(const char *path);
 
+/* R5b-2 fix [3]: READ-ONLY, NO-CREATE file backing store at `path` -- opens "rb" ONLY and NEVER
+ * creates the file. On a missing/unopenable path returns a {0} io (ctx == NULL) so a racing/vanished
+ * candidate is skipped rather than resurrected as a stray zero-byte journal (the peek + adopt-source
+ * scan contract is strictly read-only). read_all/length are real; write/truncate are failing stubs
+ * (they never write), so tp_journal_peek + tp_model_recover -- which only read, plus one best-effort
+ * tail-truncate whose failure is harmless when the recovered model is cloned-off and discarded -- work
+ * over it while any attempt to durably append fails closed. sync is NULL (nothing to flush). */
+tp_journal_io tp_journal_io_file_read(const char *path);
+
 /* ---- the journal object (opaque) ----------------------------------------- */
 typedef struct tp_journal tp_journal;
 

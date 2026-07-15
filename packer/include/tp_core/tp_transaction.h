@@ -275,6 +275,14 @@ tp_status tp_model_compact_journal(tp_model *m, tp_error *err);
 tp_status tp_model_set_recovery_metadata(tp_model *m, int64_t timestamp, const char *path, const char *name,
                                          tp_error *err);
 
+/* R5b-2 fix [0]: true iff `m` currently owns an attached recovery journal (m->journal != NULL). A
+ * journal is attached ONLY after its initial CHECKPOINT durably wrote (tp_model_attach_journal sets
+ * m->journal after tp_journal_init_checkpoint succeeds), so this answers "is the model's committed state
+ * durably backed by a live journal right now?". The GUI adopt path uses it to gate the delete of an
+ * adopted crash-recovery SOURCE: if the fresh live journal failed to attach (journal-less), the source is
+ * the only durable copy of the recovered work and MUST NOT be deleted. NULL model -> false. */
+bool tp_model_has_journal(const tp_model *m);
+
 /* Rebuild a model from a journal's backing store after a process restart (§7.1/§7.2,
  * §22.3). Creates a journal over `io` (TAKES OWNERSHIP of io) keyed by `key`, replays
  * checkpoint + transaction records, and on a usable recovery returns a model (*out)

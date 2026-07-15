@@ -104,6 +104,29 @@ bool gui_project_make_session_slot(const char *folder, char *out, size_t cap);
  * version-mismatch / additional unsaved-work) is LEFT on disk for R6. Fail-closed + non-fatal: any error
  * yields false (fresh init), never a crash/hang. Pass the pick to gui_project_init_adopt. */
 bool gui_project_scan_pick(const char *folder, const char *live_slot, char *out, size_t cap);
+
+/* R5b-2 fix [2]/[6]: adoptable recovery-orphan candidates from ONE folder scan, sorted NEWEST-FIRST by
+ * metadata timestamp. CAPPED at GUI_RECOVERY_MAX_CANDIDATES (fix [6]) -- only the newest N are kept, so a
+ * pathological recovery folder can never blow startup. The caller adopts them in order until one recovers
+ * (gui_project_init_adopt_candidates), so if the newest peeks adoptable but FAILS the real recover an older
+ * genuinely-recoverable orphan is still adopted (peek only validates framing, not that recover succeeds). */
+#define GUI_RECOVERY_MAX_CANDIDATES 16
+#define GUI_RECOVERY_PATH_CAP 1200
+typedef struct gui_recovery_candidates {
+    char paths[GUI_RECOVERY_MAX_CANDIDATES][GUI_RECOVERY_PATH_CAP]; /* full journal paths, newest-first */
+    int count;
+} gui_recovery_candidates;
+
+/* R5b-2 fix [2]: scan the recovery `folder` for adoptable crash-orphans and fill `out` newest-first (same
+ * per-candidate rules as gui_project_scan_pick: liveness-probe the `.lock`, then peek -- has_checkpoint &&
+ * record_count > 1 && status in {OK, TRUNCATED, CORRUPT}). Excludes the live slot (by basename). Returns
+ * the candidate count (0..GUI_RECOVERY_MAX_CANDIDATES). DELETES NOTHING. `out` is always zeroed first. */
+int gui_project_scan_pick_candidates(const char *folder, const char *live_slot, gui_recovery_candidates *out);
+
+/* R5b-2 fix [2]: init, trying each candidate NEWEST-FIRST until one successfully adopts a crash-recovered
+ * (DIRTY) model; else a fresh init. A candidate that fails to recover is LEFT on disk (no delete on
+ * failure); only the successfully-adopted source is deleted (in the adopt path). NULL/empty -> fresh init. */
+void gui_project_init_adopt_candidates(const gui_recovery_candidates *cands);
 /* Drains the one-shot "recovered unsaved changes from a previous session" notice (true once after a
  * crash-recovery adopt at init). The UI polls this to surface the recovery to the user. */
 bool gui_project_take_recovery_notice(char *out, size_t cap);

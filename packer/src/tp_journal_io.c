@@ -303,3 +303,45 @@ tp_journal_io tp_journal_io_file(const char *path) {
     io.destroy = file_destroy;
     return io;
 }
+
+/* R5b-2 fix [3]: read-only io write/truncate stubs -- they NEVER touch the file. tp_journal_create
+ * requires non-NULL write/length/truncate/read_all, so these must exist; they fail closed (a durable
+ * append over a read-only handle is a bug, and tp_model_recover's one best-effort tail-truncate simply
+ * poisons the throwaway recovery journal, which the adopt path clones-off and discards). */
+static int64_t file_write_ro(void *ctx, const uint8_t *data, size_t len) {
+    (void)ctx;
+    (void)data;
+    (void)len;
+    return -1; /* read-only: writes fail (never creates/extends a file) */
+}
+static int file_truncate_ro(void *ctx, size_t len) {
+    (void)ctx;
+    (void)len;
+    return -1; /* read-only: cannot truncate */
+}
+
+tp_journal_io tp_journal_io_file_read(const char *path) {
+    tp_journal_io io;
+    memset(&io, 0, sizeof io);
+    if (!path) {
+        return io;
+    }
+    FILE *fp = fopen(path, "rb"); /* READ-ONLY, NEVER create (no "w+b" fallback) */
+    if (!fp) {
+        return io; /* missing / unopenable -> ctx == NULL (caller skips this candidate) */
+    }
+    journal_file *f = (journal_file *)calloc(1, sizeof *f);
+    if (!f) {
+        (void)fclose(fp);
+        return io;
+    }
+    f->fp = fp;
+    io.ctx = f;
+    io.write = file_write_ro;     /* stub: read-only io never writes */
+    io.length = file_length;      /* real: seek-to-end query (no mutation) */
+    io.truncate = file_truncate_ro; /* stub: read-only io never truncates */
+    io.read_all = file_read_all;  /* real: the whole point of the read-only opener */
+    io.sync = NULL;               /* nothing to flush on a read handle */
+    io.destroy = file_destroy;    /* real: fclose + free */
+    return io;
+}

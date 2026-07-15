@@ -235,7 +235,14 @@ bool tp_scan_list_dir(const char *dir, const char *suffix, tp_str_list *out) {
         if (!name_has_suffix(name, suf)) {
             continue;
         }
-        (void)str_list_push(out, name); /* OOM -> skip this name (best-effort) */
+        if (!str_list_push(out, name)) {
+            /* R5b-2 fix [8]: an OOM appending a name would return a PARTIAL listing that could silently
+             * miss the newest orphan. Fail CLOSED exactly like a dir-open failure: drop the partial list
+             * (no leak) and return false so the recovery scan degrades to "no recovery this launch". */
+            tp_str_list_free(out);
+            FindClose(h);
+            return false;
+        }
     } while (FindNextFileA(h, &fd));
     FindClose(h);
     return true;
@@ -265,7 +272,13 @@ bool tp_scan_list_dir(const char *dir, const char *suffix, tp_str_list *out) {
         if (!name_has_suffix(name, suf)) {
             continue;
         }
-        (void)str_list_push(out, name);
+        if (!str_list_push(out, name)) {
+            /* R5b-2 fix [8]: OOM -> fail CLOSED (see the Win32 branch): drop the partial list + return
+             * false so the caller treats it as "listing failed -> no recovery this launch". */
+            tp_str_list_free(out);
+            closedir(d);
+            return false;
+        }
     }
     closedir(d);
     return true;

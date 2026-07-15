@@ -661,6 +661,14 @@ tp_status tp_model_set_recovery_metadata(tp_model *m, int64_t timestamp, const c
     return tp_journal_set_metadata(m->journal, timestamp, path ? path : "", name ? name : "", err);
 }
 
+bool tp_model_has_journal(const tp_model *m) {
+    /* R5b-2 fix [0]: m->journal is set ONLY after tp_journal_init_checkpoint durably wrote (see
+     * tp_model_attach_journal), so a non-NULL journal means the current committed state is durably
+     * backed. The GUI adopt-delete guard keys off this: never delete the adopted source when this is
+     * false (journal-less attach), because the source is then the sole durable copy. */
+    return m && m->journal != NULL;
+}
+
 tp_status tp_model_recover(tp_journal_io io, tp_id128 key, tp_model **out, tp_journal_recovery *info, tp_error *err) {
     if (out) {
         *out = NULL;

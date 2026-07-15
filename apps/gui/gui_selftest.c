@@ -99,6 +99,55 @@ static void scan_make_noedit_orphan(const char *slot) {
     gui_project_shutdown();
 }
 
+/* R5b-2 fix [1] helper: a crash-ORPHAN with TWO committed edits (record_count == 3: CKPT + TXN1 + TXN2;
+ * the META record is not counted), so that chopping the LAST txn's tail still leaves CKPT + TXN1 (2 good
+ * records) recoverable -- proving the TRUNCATED prefix is adopted. */
+static void scan_make_orphan_2edits(const char *slot, const char *name1, const char *name2, int64_t ts) {
+    gui_project_enable_recovery("");
+    gui_project_shutdown();
+    gui_project__test_set_recovery_now(ts);
+    gui_project_enable_recovery(slot);
+    gui_project_init();
+    (void)gui_project_set_atlas_name(0, name1); /* TXN1 -> the committed prefix that TRUNCATED recovers */
+    (void)gui_project_set_atlas_name(0, name2); /* TXN2 -> the record we tear the tail of */
+    gui_project_enable_recovery("");
+    gui_project_shutdown();
+    gui_project__test_set_recovery_now(-1);
+}
+
+/* R5b-2 fix [1] helper: physically CHOP the last `nbytes` off `path` so its final journal record frame is
+ * torn (its crc/payload go short) -> replay classifies TRUNCATED there and recovers the good prefix before
+ * it. Chopping only the tail (fewer bytes than the last record's size) can only tear the LAST record.
+ * Returns true iff it rewrote a shorter file. */
+static bool selftest_chop_file_tail(const char *path, long nbytes) {
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        return false;
+    }
+    (void)fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    (void)fseek(f, 0, SEEK_SET);
+    bool ok = false;
+    if (sz > nbytes && nbytes > 0) {
+        long keep = sz - nbytes;
+        unsigned char *buf = (unsigned char *)malloc((size_t)keep);
+        if (buf && fread(buf, 1, (size_t)keep, f) == (size_t)keep) {
+            (void)fclose(f);
+            f = NULL;
+            FILE *w = fopen(path, "wb"); /* rewrite truncated */
+            if (w) {
+                ok = (fwrite(buf, 1, (size_t)keep, w) == (size_t)keep);
+                (void)fclose(w);
+            }
+        }
+        free(buf);
+    }
+    if (f) {
+        (void)fclose(f);
+    }
+    return ok;
+}
+
 /* True when the CI job asked us to skip the GL render/layout visual phases: the GitHub Linux runner has
  * no real GL (xvfb+llvmpipe never brings the engine's materials/shaders/font atlas to "ready"), so those
  * phases read back an empty framebuffer / undeclared UI. The logical selftest (run_selftest) is unaffected
@@ -2079,6 +2128,173 @@ void run_selftest(void) {
         (void)remove(j20noedit); (void)remove(j20noedit_lock);
         (void)remove(j20bad);
         (void)remove(j20live); (void)remove(j20live_lock);
+
+        /* (J22) fix [0] DATA-LOSS GUARD: adopt a crash-orphan but make the FRESH live journal FAIL to
+         * attach (reuse the J15 skip-reset seam + a pre-seeded stale live slot). The recovered work then
+         * lives ONLY in the dirty in-memory model + the SOURCE, so deleting the source would open a
+         * data-loss window (a crash before a manual Save loses everything) -- it MUST be LEFT. Assert: the
+         * recovered state WAS adopted, the session is dirty-but-journal-LESS (a degraded notice fired), and
+         * the adopted SOURCE is STILL ON DISK. */
+        char scan22[900];
+        char j22src[1000], j22src_lock[1010], j22live[1000], j22live_lock[1010];
+        (void)snprintf(scan22, sizeof scan22, "%s/selftest_scan_j22", s_exe_dir);
+        tp_mkdirs(scan22);
+        (void)snprintf(j22src, sizeof j22src, "%s/orphan22.ntpjournal", scan22);
+        (void)snprintf(j22live, sizeof j22live, "%s/scan_live22.ntpjournal", scan22);
+        (void)snprintf(j22src_lock, sizeof j22src_lock, "%s.lock", j22src);
+        (void)snprintf(j22live_lock, sizeof j22live_lock, "%s.lock", j22live);
+        (void)remove(j22src); (void)remove(j22src_lock);
+        (void)remove(j22live); (void)remove(j22live_lock);
+        scan_make_orphan(j22src, "guard22_atlas", 4000); /* an adoptable crash-orphan (real GUI key) */
+        gui_project_enable_recovery(""); gui_project_shutdown();
+        gui_project_enable_recovery(j22live); /* own the fresh live slot */
+        NT_ASSERT(gui_project__test_recovery_active() && "J22: recovery active on the fresh live slot");
+        {
+            FILE *sf = fopen(j22live, "wb"); /* pre-seed 40 stale bytes so the fresh attach FAILS closed */
+            NT_ASSERT(sf && "J22: seeded a stale live slot");
+            unsigned char junk[40];
+            memset(junk, 0xC7, sizeof junk);
+            (void)fwrite(junk, 1, sizeof junk, sf);
+            (void)fclose(sf);
+        }
+        (void)gui_project_take_op_error(NULL, 0);     /* clear any prior soft-error */
+        gui_project__test_skip_next_recovery_reset(); /* the fresh attach sees the stale slot -> fail closed */
+        gui_project_init_adopt(j22src);               /* adopt j22src; wrap_model's attach FAILS -> journal-less */
+        char j22err[256] = {0};
+        const bool j22_degraded = gui_project_take_op_error(j22err, sizeof j22err);
+        const char *j22_name = tp_project_get_atlas(gui_project_get(), 0)
+                                   ? tp_project_get_atlas(gui_project_get(), 0)->name : "(none)";
+        nt_log_info("SELFTEST: J22 adopt-attach-fail name='%s' dirty=%d degraded=%d src_exists=%d (want 'guard22_atlas',1,1,1)",
+                    j22_name, (int)gui_project_has_recovered_unsaved(), (int)j22_degraded, (int)tp_scan_exists(j22src));
+        NT_ASSERT(strcmp(j22_name, "guard22_atlas") == 0 && "J22: the recovered state WAS adopted");
+        NT_ASSERT(gui_project_has_recovered_unsaved() && "J22: adopted work is dirty (recovered_unsaved)");
+        NT_ASSERT(j22_degraded && j22err[0] && "J22: the fresh journal failed to attach -> journal-less degraded notice");
+        NT_ASSERT(tp_scan_exists(j22src) && "J22/[0]: journal-less attach -> the adopted SOURCE is NOT deleted (data-loss guard)");
+        (void)gui_project_take_op_error(NULL, 0);
+        gui_project_enable_recovery(""); gui_project_shutdown();
+        (void)remove(j22src); (void)remove(j22src_lock);
+        (void)remove(j22live); (void)remove(j22live_lock);
+
+        /* (J23) fix [1] REGRESSION: a TRUNCATED orphan -- a committed edit then a TORN TAIL (the #1 crash
+         * artifact) -- IS adopted, recovering its COMMITTED PREFIX. Two edits, then chop the last txn's tail
+         * so replay classifies TRUNCATED with CKPT + TXN1 (2 good records) still recoverable. */
+        char scan23[900];
+        char j23src[1000], j23src_lock[1010], j23live[1000], j23live_lock[1010];
+        (void)snprintf(scan23, sizeof scan23, "%s/selftest_scan_j23", s_exe_dir);
+        tp_mkdirs(scan23);
+        (void)snprintf(j23src, sizeof j23src, "%s/orphan23.ntpjournal", scan23);
+        (void)snprintf(j23live, sizeof j23live, "%s/scan_live23.ntpjournal", scan23);
+        (void)snprintf(j23src_lock, sizeof j23src_lock, "%s.lock", j23src);
+        (void)snprintf(j23live_lock, sizeof j23live_lock, "%s.lock", j23live);
+        (void)remove(j23src); (void)remove(j23src_lock);
+        (void)remove(j23live); (void)remove(j23live_lock);
+        scan_make_orphan_2edits(j23src, "trunc23_edit1", "trunc23_edit2", 5000);
+        NT_ASSERT(selftest_chop_file_tail(j23src, 6) && "J23: tore the last txn's tail -> TRUNCATED");
+        gui_project_enable_recovery(""); gui_project_shutdown();
+        gui_project_enable_recovery(j23live); /* fresh empty live slot (fresh journal attaches) */
+        char j23pick[1200] = {0};
+        const bool j23_picked = gui_project_scan_pick(scan23, j23live, j23pick, sizeof j23pick);
+        nt_log_info("SELFTEST: J23 TRUNCATED scan picked=%d pick_is_src=%d (want 1,1)",
+                    (int)j23_picked, (int)(j23_picked && strcmp(j23pick, j23src) == 0));
+        NT_ASSERT(j23_picked && strcmp(j23pick, j23src) == 0 &&
+                  "J23/[1]: a TRUNCATED orphan (committed prefix) IS adoptable");
+        gui_project_init_adopt(j23pick);
+        const char *j23_name = tp_project_get_atlas(gui_project_get(), 0)
+                                   ? tp_project_get_atlas(gui_project_get(), 0)->name : "(none)";
+        nt_log_info("SELFTEST: J23 adopted name='%s' src_exists=%d (want 'trunc23_edit1',0)",
+                    j23_name, (int)tp_scan_exists(j23src));
+        NT_ASSERT(strcmp(j23_name, "trunc23_edit1") == 0 &&
+                  "J23/[1]: recovered the COMMITTED PREFIX (first edit; the torn second is dropped)");
+        NT_ASSERT(!tp_scan_exists(j23src) &&
+                  "J23: the adopted TRUNCATED source is deleted (its work is now in the fresh live journal)");
+        gui_project_enable_recovery(""); gui_project_shutdown();
+        (void)remove(j23src); (void)remove(j23src_lock);
+        (void)remove(j23live); (void)remove(j23live_lock);
+
+        /* (J24) fix [2] FALLBACK: two adoptable orphans where the NEWEST peeks adoptable but FAILS the real
+         * recover -- a FOREIGN-KEY journal (right magic/version so peek walks it, wrong key so
+         * tp_model_recover returns STALE_KEY -> no model). The adopt loop must fall back to the OLDER
+         * genuinely-recoverable orphan: adopt + delete IT, and LEAVE the recover-failed newest (no delete on
+         * failure -- fix [0]). */
+        char scan24[900];
+        char j24old[1000], j24old_lock[1010], j24new[1000], j24new_lock[1010], j24live[1000], j24live_lock[1010];
+        (void)snprintf(scan24, sizeof scan24, "%s/selftest_scan_j24", s_exe_dir);
+        tp_mkdirs(scan24);
+        (void)snprintf(j24old, sizeof j24old, "%s/orphan24_old.ntpjournal", scan24);
+        (void)snprintf(j24new, sizeof j24new, "%s/orphan24_new.ntpjournal", scan24);
+        (void)snprintf(j24live, sizeof j24live, "%s/scan_live24.ntpjournal", scan24);
+        (void)snprintf(j24old_lock, sizeof j24old_lock, "%s.lock", j24old);
+        (void)snprintf(j24new_lock, sizeof j24new_lock, "%s.lock", j24new);
+        (void)snprintf(j24live_lock, sizeof j24live_lock, "%s.lock", j24live);
+        (void)remove(j24old); (void)remove(j24old_lock);
+        (void)remove(j24new); (void)remove(j24new_lock);
+        (void)remove(j24live); (void)remove(j24live_lock);
+        scan_make_orphan(j24old, "fallback24_old", 6000); /* older, genuinely recoverable (real GUI key) */
+        {   /* newer: a foreign-KEY journal (peek-OK, recover STALE_KEY) with a HIGHER metadata timestamp */
+            tp_id128 j24key;
+            memset(j24key.bytes, 0x24, sizeof j24key.bytes);
+            tp_journal_io j24io = tp_journal_io_file(j24new);
+            NT_ASSERT(j24io.ctx && "J24: opened the foreign-key journal for writing");
+            tp_journal *j24j = tp_journal_create(j24io, j24key);
+            NT_ASSERT(j24j && "J24: created the foreign-key journal");
+            tp_error j24e = {0};
+            const uint8_t j24snap[4] = {'j', '2', '4', '!'};
+            NT_ASSERT(tp_journal_init_checkpoint(j24j, j24snap, sizeof j24snap, 0, &j24e) == TP_STATUS_OK &&
+                      "J24: foreign CKPT");
+            NT_ASSERT(tp_journal_append_txn(j24j, "2400000000000000000000000000000f", 1, j24snap, sizeof j24snap,
+                                            &j24e) == TP_STATUS_OK &&
+                      "J24: foreign TXN");
+            NT_ASSERT(tp_journal_set_metadata(j24j, 9000, "", "", &j24e) == TP_STATUS_OK &&
+                      "J24: foreign META ts 9000 (newest)");
+            tp_journal_destroy(j24j);
+        }
+        gui_project_enable_recovery(""); gui_project_shutdown();
+        gui_project_enable_recovery(j24live);
+        gui_recovery_candidates j24c;
+        const int j24n = gui_project_scan_pick_candidates(scan24, j24live, &j24c);
+        nt_log_info("SELFTEST: J24 candidates n=%d [0]_is_new=%d [1]_is_old=%d (want 2,1,1)", j24n,
+                    (int)(j24n >= 1 && strcmp(j24c.paths[0], j24new) == 0),
+                    (int)(j24n >= 2 && strcmp(j24c.paths[1], j24old) == 0));
+        NT_ASSERT(j24n == 2 && "J24: both orphans peek adoptable");
+        NT_ASSERT(strcmp(j24c.paths[0], j24new) == 0 && "J24: newest-first -> the foreign-key (ts 9000) is [0]");
+        NT_ASSERT(strcmp(j24c.paths[1], j24old) == 0 && "J24: the older recoverable (ts 6000) is [1]");
+        gui_project_init_adopt_candidates(&j24c);
+        const char *j24_name = tp_project_get_atlas(gui_project_get(), 0)
+                                   ? tp_project_get_atlas(gui_project_get(), 0)->name : "(none)";
+        nt_log_info("SELFTEST: J24 adopted name='%s' new_exists=%d old_exists=%d (want 'fallback24_old',1,0)",
+                    j24_name, (int)tp_scan_exists(j24new), (int)tp_scan_exists(j24old));
+        NT_ASSERT(strcmp(j24_name, "fallback24_old") == 0 &&
+                  "J24/[2]: the newest FAILED recover -> the OLDER orphan is adopted");
+        NT_ASSERT(tp_scan_exists(j24new) &&
+                  "J24/[2]: the recover-FAILED newest is LEFT on disk (no delete on failure)");
+        NT_ASSERT(!tp_scan_exists(j24old) && "J24/[2]: the successfully-adopted older source IS deleted");
+        gui_project_enable_recovery(""); gui_project_shutdown();
+        (void)remove(j24old); (void)remove(j24old_lock);
+        (void)remove(j24new); (void)remove(j24new_lock);
+        (void)remove(j24live); (void)remove(j24live_lock);
+
+#ifndef _WIN32
+        /* (J25) fix [5] POSIX: a clean enable->shutdown cycle must UNLINK the per-session .lock (POSIX has
+         * no FILE_FLAG_DELETE_ON_CLOSE, so an un-unlinked random .lock accumulates forever). After the cycle
+         * the .lock is gone. POSIX-only (Windows removes its .lock via DELETE_ON_CLOSE). */
+        {
+            char j25slot[1000], j25lock[1010];
+            (void)snprintf(j25slot, sizeof j25slot, "%s/selftest_lock_j25.ntpjournal", s_exe_dir);
+            (void)snprintf(j25lock, sizeof j25lock, "%s.lock", j25slot);
+            gui_project_enable_recovery(""); gui_project_shutdown();
+            (void)remove(j25slot); (void)remove(j25lock);
+            gui_project_enable_recovery(j25slot); /* acquire -> creates j25lock */
+            NT_ASSERT(gui_project__test_recovery_active() && "J25: recovery active (lock acquired)");
+            NT_ASSERT(selftest_file_exists(j25lock) && "J25: the .lock exists while the lock is held");
+            gui_project_init();     /* live journal at the slot */
+            gui_project_shutdown(); /* clean exit: deletes the slot + releases (and UNLINKS on POSIX) the lock */
+            nt_log_info("SELFTEST: J25 post-shutdown slot_exists=%d lock_exists=%d (want 0,0)",
+                        (int)selftest_file_exists(j25slot), (int)selftest_file_exists(j25lock));
+            NT_ASSERT(!selftest_file_exists(j25lock) &&
+                      "J25/[5]: the per-session .lock is UNLINKED on release (no unbounded accumulation)");
+            (void)remove(j25slot); (void)remove(j25lock);
+        }
+#endif
 
         /* Done: disable recovery + release any lock + restore a journal-LESS packable project for the
          * render phases. */

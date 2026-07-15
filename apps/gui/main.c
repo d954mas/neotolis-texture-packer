@@ -1112,9 +1112,13 @@ int main(int argc, char *argv[]) {
      * recovery for this launch (journal-less), never crashing or blocking startup. GATED OUT of the headless
      * selftest build -- that build runs THIS exe non-headless and drives recovery itself on ISOLATED temp
      * folders via test seams (J18-J21), so the production auto-scan must never fire and adopt a test journal. */
-    const char *adopt_src = NULL;
+    /* fix [4] (ACCEPTED, no migration code): crash recovery is UNRELEASED (all on impl/master-spec), so
+     * there is no installed base with a pre-R5b-2 <exe_dir>/ntpacker_recovery.ntpjournal deterministic
+     * slot to migrate -- the old exe-dir slot is intentionally NOT migrated into this per-session folder.
+     * If we ever ship before R5b-2 lands, add a one-time migration here. */
+    gui_recovery_candidates rec_cands;
+    memset(&rec_cands, 0, sizeof rec_cands);
 #ifndef NTPACKER_GUI_SELFTEST
-    char adopt_pick[1200];
     char rec_root[GUI_PATHS_MAX];
     char rec_folder[GUI_PATHS_MAX];
     if (gui_paths_app_data_root(rec_root, sizeof rec_root)) {
@@ -1123,14 +1127,15 @@ int main(int argc, char *argv[]) {
             char live_slot[1200];
             if (gui_project_make_session_slot(rec_folder, live_slot, sizeof live_slot)) {
                 gui_project_enable_recovery(live_slot); /* acquire this session's live-slot lock */
-                if (gui_project_scan_pick(rec_folder, live_slot, adopt_pick, sizeof adopt_pick)) {
-                    adopt_src = adopt_pick; /* adopt the newest crashed-session orphan holding unsaved work */
-                }
+                /* fix [2]: collect ALL adoptable orphans newest-first (capped -- fix [6]); init tries them
+                 * in order so if the newest peeks adoptable but FAILS the real recover an older recoverable
+                 * one is still adopted. */
+                (void)gui_project_scan_pick_candidates(rec_folder, live_slot, &rec_cands);
             }
         }
     }
 #endif
-    gui_project_init_adopt(adopt_src); /* adopt the scan pick, else fresh init (recovery-less on any failure) */
+    gui_project_init_adopt_candidates(&rec_cands); /* adopt newest-recoverable, else fresh (recovery-less on any failure) */
     /* H/P1-8 fix: TWO distinct startup facets, no longer conflated in one bool.
      *  - recovery_warn_shown: did EITHER startup recovery warning get shown this launch -- the
      *    adopted-unsaved-work notice OR the "another window open -> crash recovery is off for this one"
