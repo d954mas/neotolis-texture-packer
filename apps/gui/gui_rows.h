@@ -10,6 +10,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include "tp_core/tp_project.h" /* tp_project / tp_project_atlas (build_rows signature) */
 
@@ -59,6 +60,17 @@ extern int s_row_count;
 
 /* Rebuilds s_rows/s_row_count for atlas `a` of project `proj` (folders expand to their children). */
 void build_rows(tp_project *proj, tp_project_atlas *a);
+
+#if defined(NTPACKER_GUI_BENCH)
+typedef struct gui_rows_bench_counters {
+    uint64_t row_realloc_calls;
+    int row_capacity;
+} gui_rows_bench_counters;
+
+void gui_rows_bench_reset_counters(void);
+gui_rows_bench_counters gui_rows_bench_get_counters(void);
+void gui_rows_bench_shutdown(void);
+#endif
 
 /* Selects the sprite-tree row matching a packed-atlas region (region -> row selection sync). */
 void select_row_for_region(int region_idx);

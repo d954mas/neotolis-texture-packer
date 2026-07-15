@@ -48,8 +48,9 @@ add_library(tp_core STATIC
     src/tp_idset.c
     src/tp_project_clone.c src/tp_semantic.c src/tp_txn_idset.c src/tp_txn_apply.c
     # P-01 (plan §17): arena-backed alternative to the malloc project deep-clone --
-    # a memcpy-bound clone off one tp_arena, byte-identical to tp_project_clone,
-    # benchmarked by tests/tp_bench_clone (integration into the live model deferred).
+    # a memcpy-bound clone off one tp_arena, byte-identical to tp_project_clone.
+    # Integration into the live model stays deferred; M0's authoritative normal
+    # transaction allocation baseline lives in tests/tp_bench_foundation.
     src/tp_project_clone_arena.c
     src/tp_txn_parse.c src/tp_txn_lower.c src/tp_txn_encode.c
     # F2-03 semantic diff / exact inverse (Undo) + redo replay + a minimal in-memory

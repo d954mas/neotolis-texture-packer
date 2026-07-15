@@ -113,6 +113,14 @@ nt_set_warning_flags(tp_test_journal)   # AGENTS.md invariant: our test TUs too
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_journal_test")
 add_test(NAME tp_journal COMMAND tp_test_journal "${CMAKE_BINARY_DIR}/tp_journal_test")
 
+# M0 benchmark measurement contract: deterministic percentile math and the
+# fail-closed rule that a rejected operation is never accepted as a timing sample.
+add_executable(tp_test_bench_support test_bench_support.c)
+target_link_libraries(tp_test_bench_support PRIVATE nt_time unity)
+target_compile_options(tp_test_bench_support PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_bench_support)
+add_test(NAME tp_bench_support COMMAND tp_test_bench_support)
+
 # F1-03: canonical selector resolver (id/name/path/compound -> exactly one id).
 add_executable(tp_test_selector test_selector.c)
 target_link_libraries(tp_test_selector PRIVATE tp_core unity)
@@ -322,31 +330,14 @@ add_executable(tp_demo_export tp_demo_export.c)
 target_link_libraries(tp_demo_export PRIVATE tp_build)
 target_compile_options(tp_demo_export PRIVATE -U_DLL)
 
-# P-01 (plan §17): clone benchmark -- malloc tp_project_clone vs the arena-backed
-# tp_project_clone_into_arena, on a normal + a huge project. Dev tool, NOT a ctest
-# (plain exe, no nt_set_warning_flags), same pattern as tp_demo_export. Includes the
-# src/ internal header for the arena clone under test.
-#   tp_bench_clone [iters_normal] [iters_huge]
-add_executable(tp_bench_clone tp_bench_clone.c)
-target_link_libraries(tp_bench_clone PRIVATE tp_core)
-target_include_directories(tp_bench_clone PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
-target_compile_options(tp_bench_clone PRIVATE -U_DLL)
-
-# F2-05b-ii-B (D2): live-journal per-commit append cost -- serialize + frame + durable write of the
-# full project SNAPSHOT (F2-04 v1 payload) on a normal + a huge project, memory-io + file-io. Dev
-# tool, NOT a ctest (plain exe, no nt_set_warning_flags), same pattern as tp_bench_clone. Only the
-# public tp_core surface -- no src/ internal header needed.
-#   tp_bench_journal [iters_normal] [iters_huge]
-add_executable(tp_bench_journal tp_bench_journal.c)
-target_link_libraries(tp_bench_journal PRIVATE tp_core)
-target_compile_options(tp_bench_journal PRIVATE -U_DLL)
-
-# S18 "R" SPIKE (throwaway): diff-based recovery journal design bench -- full-snapshot vs diff-record
-# bytes, per-diff durable append, and recovery-replay-vs-N (100/1000/10000 diffs) two ways (semantic
-# diff-apply vs op re-apply), on a normal + a huge project. Dev tool, NOT a ctest. Includes the src/
-# internal diff header (tp_diff_record_apply + history record peek), same pattern as tp_bench_clone.
-#   tp_bench_diff_journal [append_iters]
-add_executable(tp_bench_diff_journal tp_bench_diff_journal.c)
-target_link_libraries(tp_bench_diff_journal PRIVATE tp_core)
-target_include_directories(tp_bench_diff_journal PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
-target_compile_options(tp_bench_diff_journal PRIVATE -U_DLL)
+# M0 production-path baseline. The superseded component clone, full-snapshot-as-
+# commit, and throwaway diff-spike executables were removed: this is the single
+# authoritative core measurement path. Timing remains advisory; status, sample,
+# fixture, allocation and byte accounting fail closed.
+#   tp_bench_foundation [scratch_dir] [iterations] [recovery_ops]
+add_executable(tp_bench_foundation tp_bench_foundation.c)
+target_link_libraries(tp_bench_foundation PRIVATE tp_core nt_time)
+target_include_directories(tp_bench_foundation PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_options(tp_bench_foundation PRIVATE -U_DLL)
+target_compile_definitions(tp_bench_foundation PRIVATE _CRT_SECURE_NO_WARNINGS)
+nt_set_warning_flags(tp_bench_foundation)

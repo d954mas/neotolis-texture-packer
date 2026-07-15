@@ -211,6 +211,31 @@ Heavy work may run on workers using immutable inputs. Worker completion is
 published back through the session queue. Worker threads cannot directly change
 revision, history, dirty state, or the authoritative preview selection.
 
+### 4.7 Ownership boundaries
+
+Each mutable responsibility has one owner:
+
+| Owner | Owns | Does not own |
+|---|---|---|
+| `tp_model` | mutable project state, revision, semantic saved identity and dirty state, history, idempotency retention, attached journal acknowledgement gate | project path, exact saved-file fingerprint, dialogs, job scheduling, frontend state |
+| `tp_session` | the sole live `tp_model`, session identity/path, exact saved-file fingerprint, admission and ordering, runtime generations, event sequence, job handles | model validation, recovery codec, filesystem/lock backends, Pack/Export algorithms, GUI or protocol formatting |
+| `tp_session_snapshot` | one immutable owned read view plus revision/model/source/event generations | mutation authority or borrowed aliases into the live model |
+| `tp_recovery_store` | injected recovery root and backend, bounded orphan scan, orphan-slot handles | live model semantics, project Save policy, controller handoff |
+| `tp_recovery_live` | one session's live-slot path, OS liveness handle, metadata attachment, clean-close lifecycle | model semantics, Save policy, orphan resolution |
+| `tp_recovery_claim` | exclusive right to inspect, recover, or discard one orphan slot | canonical project authority |
+| `tp_project_lease` | OS-backed reservation of one canonical project identity while a writer has authority | orphan-journal lifecycle or controller handoff policy |
+| frontend adapter | intent capture, native dialogs, presentation and typed result mapping | business rules, persistence, history, recovery policy, mutable model aliases |
+
+The semantic dirty baseline exists only in `tp_model`. The exact on-disk
+fingerprint exists only in the session persistence state.
+
+`tp_session` is an orchestration boundary, not a service locator or a second
+business-logic layer. Responsibilities with independent invariants or fault
+matrices remain in their owning modules and are invoked through narrow typed
+contracts. A session implementation must not absorb model validation, journal
+encoding/decoding, filesystem or lock backends, Pack/Export algorithms, GUI
+state, dialogs, protocol JSON, or transport error formatting.
+
 ## 5. Stable persistent identities
 
 There is no persistent `project_id`.
@@ -401,6 +426,14 @@ format.install
 format.uninstall
 ```
 
+**Runtime events** update non-project observations without changing project
+revision or semantic dirty state by themselves. Examples include source refresh
+status and diagnostics.
+
+`Pack` and `Export` are not session commands. A session may coordinate their
+ordering, immutable inputs, cancellation, and result publication, while their
+job and side-effect contracts remain distinct from session-command atomicity.
+
 `Save` is not a semantic operation. It does not increment revision and is not
 Undoable.
 
@@ -480,12 +513,19 @@ and therefore does not promise survival of an immediate power loss.
 ### 7.2 Idempotency
 
 External transaction IDs are idempotent within a defined retention window.
-Retrying the same committed transaction returns the existing result rather than
-applying it twice.
+In the v1 contract, retrying a retained committed transaction ID returns the
+structured `duplicate_id` result with the current revision and does not apply the
+payload a second time. Duplicate detection precedes the revision precondition,
+so a retry remains a duplicate even after later commits advanced revision.
 
 The retained transaction-ID set must be recoverable from the journal or current
 checkpoint so that an acknowledged transaction is not duplicated after process
-restart.
+restart. Save-time journal compaction must preserve the retained set.
+
+Durable replay of the original result is an optional additive transport upgrade,
+not a v1 model requirement. A client that needs the exact original response after
+losing it must use a surface that explicitly advertises durable result replay;
+otherwise it rebuilds from the returned current revision and a fresh snapshot.
 
 ## 8. Revisions, history position, and dirty state
 

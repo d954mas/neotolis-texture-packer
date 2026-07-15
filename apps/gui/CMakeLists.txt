@@ -103,6 +103,23 @@ if(WIN32 AND CMAKE_BUILD_TYPE STREQUAL "Release")
     target_link_options(ntpacker-gui PRIVATE "LINKER:/entry:mainCRTStartup")
 endif()
 
+# M0 measurement-only GUI row rebuild benchmark. It compiles the production
+# gui_rows/gui_scan sources with narrow stubs in tp_bench_gui_rows.c; no window,
+# renderer, pack job, or GUI event loop is created. Timing remains advisory and
+# is intentionally not registered with ctest.
+add_executable(tp_bench_gui_rows tp_bench_gui_rows.c gui_rows.c gui_scan.c)
+target_link_libraries(tp_bench_gui_rows PRIVATE tp_core nt_time nt_ui)
+target_include_directories(tp_bench_gui_rows PRIVATE "${CMAKE_SOURCE_DIR}/packer/tests")
+target_compile_definitions(tp_bench_gui_rows PRIVATE
+    NTPACKER_GUI_BENCH=1
+    _CRT_SECURE_NO_WARNINGS
+    NT_INTROSPECT_ENABLED=$<BOOL:${NT_INTROSPECT_ENABLED}>
+    NT_INTROSPECT_WRITE_ENABLED=$<BOOL:${NT_INTROSPECT_WRITE_ENABLED}>
+)
+nt_set_warning_flags(tp_bench_gui_rows)
+nt_set_sanitizer_flags(tp_bench_gui_rows)
+set_target_properties(tp_bench_gui_rows PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${GUI_OUTPUT_DIR}")
+
 set(GUI_PACK_NAMES ntpacker_ui.ntpack)
 
 # Pack builder + copy wiring (mirrors examples/ui_showcase): the builder runs at BUILD

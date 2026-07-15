@@ -709,7 +709,7 @@ recovery state с уже опубликованными файлами и без
 
 ## 10. F3 — live session, semantic history и pack-result behavior
 
-### F3-01 — Serialized `tp_session` queue
+### F3-01 — Serialized `tp_session` admission boundary
 
 **Goal / user outcome.** GUI edits, Undo/Redo, refresh и будущий MCP наблюдают один authoritative ordered commit stream.
 
@@ -721,19 +721,19 @@ recovery state с уже опубликованными файлами и без
 
 **Ordered bounded tasks.**
 
-1. Ввести `tp_session` owner thread/queue и immutable snapshot DTO.
+1. Ввести синхронный serialized `tp_session` admission/ordering boundary и immutable snapshot DTO. Dedicated owner thread/mailbox не вводить без измеримой необходимости.
 2. Разделить model operations, session commands, derived jobs и side effects.
-3. Route GUI mutations/Undo/Redo/save/refresh через queue.
-4. Worker completion публиковать command/event через queue.
+3. Route GUI mutations/Undo/Redo/save/refresh через session admission boundary.
+4. Worker completion публиковать command/event через тот же admission boundary.
 5. Route watcher/runtime-source events через queue без revision/dirty mutation.
 6. Добавить subscribe sequence/revision и full resync snapshot.
 7. Запретить worker/frontends direct authoritative model mutation boundary tests.
 
 **Public/schema impact.** In-process session API и event DTO.
 
-**Exact tests / fault injection.** Concurrent producer ordering, callback reentrancy, queue OOM, worker completion after Undo/save/close, shutdown drain, event subscriber disconnect.
+**Exact tests / fault injection.** Producer ordering, callback reentrancy rejection, admission failure, worker completion after Undo/save/close, close/quiesce semantics, event subscriber disconnect.
 
-**Completion evidence.** Thread sanitizer/synchronization tests где доступны; deterministic event transcript; GUI baseline e2e зелёный.
+**Completion evidence.** Deterministic ordering/reentrancy transcript; synchronization tests where actual cross-thread producers exist; GUI baseline e2e зелёный.
 
 **Non-goals / blockers.** Network transport и ownership handoff входят A.
 

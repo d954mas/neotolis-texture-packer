@@ -142,6 +142,9 @@ static void row_display(tp_project_atlas *a, const char *sprite_name, const char
 sprite_row *s_rows;
 int s_row_count;
 static int s_rows_cap;
+#if defined(NTPACKER_GUI_BENCH)
+static uint64_t s_bench_row_realloc_calls;
+#endif
 
 /* Appends one zero-uninitialized row slot and returns it (caller memsets), growing s_rows on a new
  * high-water mark. Returns NULL on OOM (old capacity kept) -- build_rows then stops + raises status.
@@ -150,6 +153,9 @@ static int s_rows_cap;
 static sprite_row *rows_push(void) {
     if (s_row_count >= s_rows_cap) {
         const int newcap = s_rows_cap ? s_rows_cap * 2 : ROWS_INIT_CAP;
+#if defined(NTPACKER_GUI_BENCH)
+        s_bench_row_realloc_calls++;
+#endif
         sprite_row *grown = realloc(s_rows, (size_t)newcap * sizeof *s_rows);
         if (!grown) {
             return NULL;
@@ -218,6 +224,23 @@ void build_rows(tp_project *proj, tp_project_atlas *a) {
         }
     }
 }
+
+#if defined(NTPACKER_GUI_BENCH)
+void gui_rows_bench_reset_counters(void) { s_bench_row_realloc_calls = 0U; }
+
+gui_rows_bench_counters gui_rows_bench_get_counters(void) {
+    gui_rows_bench_counters out = {s_bench_row_realloc_calls, s_rows_cap};
+    return out;
+}
+
+void gui_rows_bench_shutdown(void) {
+    free(s_rows);
+    s_rows = NULL;
+    s_row_count = 0;
+    s_rows_cap = 0;
+    s_bench_row_realloc_calls = 0U;
+}
+#endif
 // #endregion
 
 // #region canvas region -> row selection sync

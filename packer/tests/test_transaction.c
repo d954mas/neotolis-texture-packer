@@ -503,12 +503,26 @@ void test_idempotent_retry(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_apply(m, &req, &res, &err)); /* rev -> 1 */
     tp_txn_result_free(&res);
 
+    tp_operation later_op;
+    op_atlas_rename(&later_op, aid, "later");
+    tp_txn_request later_req = req;
+    later_req.ops = &later_op;
+    later_req.expected_revision = 1;
+    (void)snprintf(later_req.id_hex, sizeof later_req.id_hex, "%s", "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd");
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_apply(m, &later_req, &res, &err)); /* rev -> 2 */
+    tp_txn_result_free(&res);
+
     char *before = serialize(tp_model_project(m));
-    /* retry the SAME id with the SAME (now stale) expected_revision: idempotency is
-     * checked BEFORE revision, so this is duplicate_id, not revision_conflict. */
+    /* Retry the original id after another commit, with the original stale revision:
+     * duplicate detection precedes revision and returns the CURRENT revision. */
     TEST_ASSERT_EQUAL_INT(TP_STATUS_DUPLICATE_ID, tp_model_apply(m, &req, &res, &err));
     TEST_ASSERT_FALSE(res.committed);
-    TEST_ASSERT_EQUAL_INT64(1, tp_model_revision(m));
+    TEST_ASSERT_EQUAL_INT64(2, res.revision);
+    TEST_ASSERT_EQUAL_INT(1, res.error_count);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_DUPLICATE_ID, res.errors[0].code);
+    TEST_ASSERT_EQUAL_STRING("id", res.errors[0].field);
+    TEST_ASSERT_TRUE(err.msg[0] != '\0');
+    TEST_ASSERT_EQUAL_INT64(2, tp_model_revision(m));
     char *after = serialize(tp_model_project(m));
     TEST_ASSERT_EQUAL_STRING(before, after);
     free(before);
