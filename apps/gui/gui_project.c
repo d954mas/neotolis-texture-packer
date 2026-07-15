@@ -1273,7 +1273,266 @@ bool gui_project_take_recovery_busy_notice(char *out, size_t cap) {
     s_recovery_busy_notice = false;
     return true;
 }
+// #endregion
 
+// #region R6a recovery-resolution decision/action layer (headless-testable; the R6b modal calls this)
+/* R6a: recover the last committed state from `journal_path` into a standalone SAVABLE tp_project (the caller
+ * owns it -> tp_project_destroy). READ-ONLY + NO-CREATE open (fix [3]: a vanished/racing file is never
+ * resurrected as a stray zero-byte journal). This is the recover->clone PREFIX of try_adopt_recovered
+ * (~920-948) but it STOPS at the clone: NO wrap_model, NO set_path, NO recovered_unsaved, and it never
+ * touches the live model / s_recovery_path -- so the resolve layer can save the recovered state WITHOUT
+ * adopting it into the editor. The throwaway model `rm` may end up with a POISONED journal (tp_model_recover's
+ * best-effort tail-truncate over the read-only io fails harmlessly for TRUNCATED/CORRUPT) -- irrelevant: we
+ * clone the STATE off it and destroy it. tp_model_recover TAKES OWNERSHIP of the io on every path, so the io
+ * is never leaked. Returns NULL when nothing is recoverable (missing/racing/empty/bad-header/stale-key/
+ * torn-first) or on a clone OOM. Does NOT require recovery to be active. */
+static tp_project *recover_to_clone(const char *journal_path) {
+    if (!journal_path || journal_path[0] == '\0') {
+        return NULL;
+    }
+    tp_journal_io io = tp_journal_io_file_read(journal_path); /* read-only, never creates */
+    if (!io.ctx) {
+        return NULL; /* missing / unopenable -> nothing to recover */
+    }
+    tp_model *rm = NULL;
+    tp_journal_recovery info;
+    memset(&info, 0, sizeof info);
+    tp_error err = {0};
+    tp_status st = tp_model_recover(io, recovery_key(), &rm, &info, &err); /* TAKES OWNERSHIP of io */
+    tp_journal_recovery_free(&info); /* R6a saves the STATE, not the metadata -> drop the recovery info */
+    if (st != TP_STATUS_OK || !rm) {
+        return NULL; /* empty / bad-header / stale-key / torn-first -> nothing recoverable */
+    }
+    tp_project *clone = tp_project_clone(tp_model_project(rm));
+    tp_model_destroy(rm); /* drops the (possibly poisoned) recovered journal + closes the io handle */
+    return clone;         /* NULL on clone OOM -> caller treats it as "nothing recoverable" */
+}
+
+/* R6a: back up an existing file at `orig` to `<orig>.bak`, THEN save `p` to `orig`. NON-DESTRUCTIVE: when
+ * `orig` exists it is renamed to `<orig>.bak` FIRST -- and the backup rename must SUCCEED before we write over
+ * `orig`; if it FAILS we return a fault WITHOUT touching `orig` (never clobber the user's file without a
+ * backup). Any prior `.bak` is remove()'d first because a Windows rename fails if the destination exists
+ * (mirrors gui_log_file.c rotate_files: remove-dest-then-rename). When `orig` does not exist there is nothing
+ * to back up -> just save. Parent dirs are created before the write (match gui_project_save_as's pre-save
+ * parent handling). */
+static tp_status save_backup_original(tp_project *p, const char *orig, tp_error *err) {
+    if (!p || !orig || orig[0] == '\0') {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "save_backup_original: NULL project or path");
+    }
+    if (tp_scan_exists(orig)) {
+        char bak[GUI_RECOVERY_PATH_MAX + 8];
+        int nb = snprintf(bak, sizeof bak, "%s.bak", orig);
+        if (nb <= 0 || (size_t)nb >= sizeof bak) {
+            return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "save_backup_original: backup path too long");
+        }
+        (void)remove(bak); /* clear any prior `.bak` so the Windows rename over an existing dest succeeds */
+        if (rename(orig, bak) != 0) {
+            /* Could not back up the original -> DO NOT overwrite it. Leave `orig` intact + report the fault so
+             * the caller keeps the journal (data safety: no clobber without a backup). */
+            return tp_error_set(err, TP_STATUS_BAD_PROJECT, "could not back up the original to %s", bak);
+        }
+    }
+    tp_mkdirs_parent(orig); /* ensure the parent dir exists before the write (match gui_project_save_as) */
+    return tp_project_save(p, orig, err);
+}
+
+/* R6a: insert a fully-built entry into `out` NEWEST-FIRST by timestamp, capped at GUI_RECOVERY_MAX_CANDIDATES
+ * -- the metadata-carrying analogue of scan_candidate_insert. VERSION_MISMATCH entries carry timestamp 0
+ * (peek stops at the header, no metadata) so they sort AFTER the dated adoptable ones. Equal timestamps keep
+ * scan order. */
+static void recovery_entry_insert(gui_recovery_list *out, const gui_recovery_entry *e) {
+    int i = 0;
+    while (i < out->count && out->items[i].timestamp >= e->timestamp) {
+        i++; /* skip past every kept entry at least as new as this one */
+    }
+    if (i >= GUI_RECOVERY_MAX_CANDIDATES) {
+        return; /* older than all kept + the list is full -> drop */
+    }
+    int last = (out->count < GUI_RECOVERY_MAX_CANDIDATES) ? out->count : GUI_RECOVERY_MAX_CANDIDATES - 1;
+    for (int k = last; k > i; k--) {
+        out->items[k] = out->items[k - 1]; /* shift down to open a slot at i (evict the oldest when full) */
+    }
+    out->items[i] = *e;
+    if (out->count < GUI_RECOVERY_MAX_CANDIDATES) {
+        out->count++;
+    }
+}
+
+int gui_recovery_collect(const char *folder, const char *live_slot, gui_recovery_list *out) {
+    if (out) {
+        memset(out, 0, sizeof *out);
+    }
+    if (!folder || folder[0] == '\0' || !out) {
+        return 0;
+    }
+    /* the live slot's BASENAME -- excluded so the modal never lists our own live journal. */
+    const char *live_base = live_slot ? live_slot : "";
+    for (const char *p = live_base; *p; p++) {
+        if (*p == '/' || *p == '\\') {
+            live_base = p + 1;
+        }
+    }
+    tp_str_list names = {0};
+    if (!tp_scan_list_dir(folder, ".ntpjournal", &names)) {
+        return 0; /* folder open failure / missing / OOM -> empty list (never a crash) */
+    }
+    for (int i = 0; i < names.count; i++) {
+        const char *name = names.items[i];
+        if (!name || name[0] == '\0') {
+            continue;
+        }
+        if (live_base[0] != '\0' && strcmp(name, live_base) == 0) {
+            continue; /* never list the live slot */
+        }
+        char cand[GUI_RECOVERY_PATH_MAX];
+        int nc = snprintf(cand, sizeof cand, "%s/%s", folder, name);
+        if (nc <= 0 || (size_t)nc >= sizeof cand) {
+            continue; /* truncation -> skip (fail-closed) */
+        }
+        if (!recovery_orphan_unlocked(cand)) {
+            continue; /* a live instance owns it (or unprobeable) -> exclude, leave untouched */
+        }
+        tp_journal_io io = tp_journal_io_file_read(cand); /* read-only, never creates */
+        if (!io.ctx) {
+            continue; /* missing / racing / unopenable -> skip (created nothing) */
+        }
+        tp_journal_peek_result pk;
+        memset(&pk, 0, sizeof pk);
+        tp_error perr = {0};
+        if (tp_journal_peek(io, &pk, &perr) != TP_STATUS_OK) { /* TAKES OWNERSHIP of io */
+            tp_journal_peek_free(&pk);                         /* zeroed on a hard fault -> free-safe */
+            continue;
+        }
+        /* Adoptable: a checkpoint base + >=1 post-checkpoint edit, decoded cleanly OR up to a torn/corrupt
+         * boundary (the committed prefix recovers -- recover_to_clone clones the state off + discards the
+         * poisoned throwaway model). VERSION_MISMATCH: our file in an OLD format -- not recoverable, but
+         * surfaced so the user can Discard it (owner decision R1-review [0]: never lose it silently). */
+        const bool adoptable = pk.has_checkpoint && pk.record_count > 1 &&
+                               (pk.status == TP_JOURNAL_RECOVERY_OK ||
+                                pk.status == TP_JOURNAL_RECOVERY_TRUNCATED ||
+                                pk.status == TP_JOURNAL_RECOVERY_CORRUPT);
+        const bool version_mismatch = (pk.status == TP_JOURNAL_RECOVERY_VERSION_MISMATCH);
+        if (adoptable || version_mismatch) {
+            gui_recovery_entry e;
+            memset(&e, 0, sizeof e);
+            (void)snprintf(e.journal_path, sizeof e.journal_path, "%s", cand);
+            const char *meta_path = (pk.has_meta && pk.meta.path) ? pk.meta.path : "";
+            (void)snprintf(e.orig_path, sizeof e.orig_path, "%s", meta_path);
+            /* display name: meta.name -> basename(orig) -> "untitled". */
+            if (pk.has_meta && pk.meta.name && pk.meta.name[0] != '\0') {
+                (void)snprintf(e.name, sizeof e.name, "%s", pk.meta.name);
+            } else if (meta_path[0] != '\0') {
+                const char *base = meta_path;
+                for (const char *p = meta_path; *p; p++) {
+                    if (*p == '/' || *p == '\\') {
+                        base = p + 1;
+                    }
+                }
+                (void)snprintf(e.name, sizeof e.name, "%s", base);
+            } else {
+                (void)snprintf(e.name, sizeof e.name, "untitled");
+            }
+            e.timestamp = pk.has_meta ? pk.meta.timestamp : 0;
+            e.status = (int)pk.status;
+            e.adoptable = adoptable;
+            recovery_entry_insert(out, &e);
+        }
+        tp_journal_peek_free(&pk);
+    }
+    tp_str_list_free(&names);
+    return out->count;
+}
+
+tp_status gui_recovery_resolve(const char *journal_path, const char *orig_path, gui_recovery_action action,
+                               const char *target_path, char *err_out, size_t err_cap) {
+    if (err_out && err_cap) {
+        err_out[0] = '\0';
+    }
+    if (!journal_path || journal_path[0] == '\0') {
+        if (err_out && err_cap) {
+            (void)snprintf(err_out, err_cap, "no recovery journal to resolve");
+        }
+        return TP_STATUS_INVALID_ARGUMENT;
+    }
+
+    /* Discard: delete the orphan journal + its `.lock` (reuse the R5b-2 adopt-delete helper). Nothing else
+     * is touched, and no recover is needed. */
+    if (action == GUI_RECOVERY_DISCARD) {
+        delete_adopted_source(journal_path);
+        return TP_STATUS_OK;
+    }
+    if (action != GUI_RECOVERY_SAVE_ORIGINAL && action != GUI_RECOVERY_SAVE_AS) {
+        if (err_out && err_cap) {
+            (void)snprintf(err_out, err_cap, "unknown recovery action");
+        }
+        return TP_STATUS_INVALID_ARGUMENT;
+    }
+
+    /* SAVE_ORIGINAL / SAVE_AS: recover the last committed state into a savable clone (NO adopt into the live
+     * editor), save it, and delete the journal ONLY after the save returned OK. A failed save LEAVES the
+     * journal on disk for a retry (data safety). */
+    tp_project *clone = recover_to_clone(journal_path);
+    if (!clone) {
+        if (err_out && err_cap) {
+            (void)snprintf(err_out, err_cap, "could not recover this journal (nothing recoverable)");
+        }
+        return TP_STATUS_BAD_PROJECT; /* journal left intact */
+    }
+
+    /* Promote structural ids BEFORE the write (match gui_project_save_as): tp_project_save serializes nil ids
+     * WITHOUT erroring, and such a file is rejected on RELOAD (nil id) -- so promote to guarantee the saved
+     * file reloads. The recovered checkpoint base was already promoted (attach_recovery_journal promotes
+     * BEFORE the checkpoint), so this is normally a defensive idempotent no-op that preserves the real ids; an
+     * OS-RNG fault fails CLOSED (report, save nothing, journal kept). */
+    tp_error err = {0};
+    tp_rng rng = tp_rng_os();
+    tp_status ids = tp_project_promote_ids(clone, &rng, &err);
+    if (ids != TP_STATUS_OK) {
+        tp_project_destroy(clone);
+        if (err_out && err_cap) {
+            (void)snprintf(err_out, err_cap, "%s", err.msg[0] ? err.msg : tp_status_str(ids));
+        }
+        return ids; /* journal left intact */
+    }
+
+    tp_status st;
+    if (action == GUI_RECOVERY_SAVE_ORIGINAL) {
+        if (!orig_path || orig_path[0] == '\0') {
+            tp_project_destroy(clone);
+            if (err_out && err_cap) {
+                (void)snprintf(err_out, err_cap, "no original file to save over (use Save As)");
+            }
+            return TP_STATUS_INVALID_ARGUMENT; /* journal left intact */
+        }
+        st = save_backup_original(clone, orig_path, &err);
+    } else { /* GUI_RECOVERY_SAVE_AS */
+        if (!target_path || target_path[0] == '\0') {
+            tp_project_destroy(clone);
+            if (err_out && err_cap) {
+                (void)snprintf(err_out, err_cap, "no target path for Save As");
+            }
+            return TP_STATUS_INVALID_ARGUMENT; /* journal left intact */
+        }
+        tp_mkdirs_parent(target_path); /* create the parent dir so a Save-As into a fresh folder works */
+        st = tp_project_save(clone, target_path, &err);
+    }
+    tp_project_destroy(clone); /* always destroy the recovered clone (owned) */
+
+    if (st != TP_STATUS_OK) {
+        if (err_out && err_cap) {
+            (void)snprintf(err_out, err_cap, "%s", err.msg[0] ? err.msg : tp_status_str(st));
+        }
+        return st; /* NON-DESTRUCTIVE: the save failed -> LEAVE the journal on disk for a retry */
+    }
+
+    /* Save succeeded + durable -> the recovered work now lives in the saved file; delete the journal (+ .lock)
+     * so the next launch does not re-offer it. */
+    delete_adopted_source(journal_path);
+    return TP_STATUS_OK;
+}
+// #endregion
+
+// #region lifecycle dev seams (selftest only)
 #ifdef NTPACKER_GUI_SELFTEST
 /* Dev seam (selftest only): attach a FRESH in-memory recovery journal to the CURRENT model and return
  * its io handle (BORROWED -- the model owns the real io) so the fault suite can arm a deterministic

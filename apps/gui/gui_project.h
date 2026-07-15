@@ -134,6 +134,59 @@ bool gui_project_take_recovery_notice(char *out, size_t cap);
  * (true once when a 2nd concurrent instance could not acquire the recovery slot lock). */
 bool gui_project_take_recovery_busy_notice(char *out, size_t cap);
 
+/* ============================ R6a: recovery-resolution decision/action layer ============================
+ * The headless-testable layer the R6b startup modal drives: collect recovered-journal entries WITH metadata
+ * + status (incl. an old-format VERSION_MISMATCH journal surfaced for Discard), then resolve ONE per the
+ * user's choice (Discard / Save-backup-original / Save As). NON-DESTRUCTIVE ON FAILURE: a recovered journal
+ * is deleted ONLY after a SUCCESSFUL save (or an explicit Discard) -- a failed save leaves the journal for a
+ * retry and never clobbers the user's original file without first making a `.bak`. Unlike the R5b-2
+ * auto-adopt, this NEVER adopts the recovered work into the live editor model. NO nt_ui / main.c wiring /
+ * startup behavior change here (that is R6b); exercised HEADLESSLY by selftest J26-J30. */
+typedef enum {
+    GUI_RECOVERY_DISCARD = 0,   /* delete the journal (+ its .lock); resolve nothing else */
+    GUI_RECOVERY_SAVE_ORIGINAL, /* save the recovered state over its ORIGINAL file (old file -> `.bak` first) */
+    GUI_RECOVERY_SAVE_AS        /* save the recovered state to a NEW target file (the original is untouched) */
+} gui_recovery_action;
+
+/* One recovered orphan journal the modal lists: its on-disk journal path + the recovered project's original
+ * file path / display name + when + how peek classified it. `adoptable` is true for a genuinely recoverable
+ * journal (OK/TRUNCATED/CORRUPT + checkpoint + post-checkpoint unsaved work) and false for an old-format
+ * (VERSION_MISMATCH) journal surfaced only so the user can Discard it. */
+typedef struct {
+    char journal_path[GUI_RECOVERY_PATH_CAP]; /* the orphan .ntpjournal on disk */
+    char orig_path[GUI_RECOVERY_PATH_CAP];    /* recovered project's ORIGINAL file path; "" = untitled */
+    char name[256];                           /* display name; "untitled" when no orig path */
+    int64_t timestamp;                        /* unix-seconds (meta.timestamp; 0 if none) */
+    int status;                               /* tp_journal_recovery_status */
+    bool adoptable;                           /* true = recoverable; false = old-format, Discard-only */
+} gui_recovery_entry;
+typedef struct {
+    gui_recovery_entry items[GUI_RECOVERY_MAX_CANDIDATES];
+    int count;
+} gui_recovery_list;
+
+/* Collect recovered-journal entries in `folder`, EXCLUDING the live slot (by basename) + any live-locked
+ * orphan (recovery_orphan_unlocked probe). For each remaining `.ntpjournal`, peek + classify:
+ *  - adoptable (status OK/TRUNCATED/CORRUPT && has_checkpoint && record_count > 1) -> entry, adoptable=true;
+ *  - VERSION_MISMATCH (our file, old format) -> entry, adoptable=false (surfaced for Discard);
+ *  - BAD_MAGIC (foreign) / EMPTY / no-work / STALE_KEY -> SKIP (left untouched, not listed).
+ * Entries NEWEST-FIRST by timestamp, capped at GUI_RECOVERY_MAX_CANDIDATES. Reads only (no-create io);
+ * DELETES NOTHING. `out` is zeroed first; returns out->count. */
+int gui_recovery_collect(const char *folder, const char *live_slot, gui_recovery_list *out);
+
+/* Resolve ONE recovered journal per the user's `action`. NON-DESTRUCTIVE ON FAILURE: the journal (+ .lock)
+ * is deleted ONLY after a successful save, or on an explicit Discard -- a failed save LEAVES the journal for
+ * a retry and never clobbers the user's original without a `.bak` first. Recovers the state into a standalone
+ * clone (NEVER adopted into the live editor model) and always destroys the clone.
+ *  - GUI_RECOVERY_DISCARD       : delete the journal (+ .lock). orig_path / target_path ignored.
+ *  - GUI_RECOVERY_SAVE_ORIGINAL : save the recovered state over `orig_path` (old file -> `<orig>.bak` first);
+ *                                 requires orig_path != "" (a saved project), else INVALID_ARGUMENT.
+ *  - GUI_RECOVERY_SAVE_AS       : save the recovered state to `target_path`.
+ * Returns TP_STATUS_OK on success; on a fault fills err_out (NUL-terminated within err_cap) and the journal
+ * is left intact on disk. */
+tp_status gui_recovery_resolve(const char *journal_path, const char *orig_path, gui_recovery_action action,
+                               const char *target_path, char *err_out, size_t err_cap);
+
 /* --- accessors --- */
 tp_project *gui_project_get(void);
 const char *gui_project_path(void);         /* absolute file path, or "" while unsaved */

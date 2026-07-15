@@ -115,6 +115,32 @@ static void scan_make_orphan_2edits(const char *slot, const char *name1, const c
     gui_project__test_set_recovery_now(-1);
 }
 
+/* R6a J26 helper: craft an ADOPTABLE orphan journal DIRECTLY (CKPT + one TXN -> record_count 2) carrying a
+ * metadata record {ts, meta_path, meta_name}, keyed with an arbitrary `key_byte`. gui_recovery_collect
+ * classifies via tp_journal_peek, which is KEY-AGNOSTIC (it reports the header key, never compares it), so a
+ * synthetic key still peeks adoptable -- letting the test drive the metadata (path/name) directly. Overwrites
+ * `path`. NOTE: only recover_to_clone (J27/J28/J30) needs the REAL GUI recovery key, so those use the real
+ * journaled session (scan_make_orphan), not this. */
+static void craft_meta_orphan(const char *path, unsigned char key_byte, int64_t ts, const char *meta_path,
+                              const char *meta_name) {
+    tp_id128 key;
+    memset(key.bytes, key_byte, sizeof key.bytes);
+    tp_journal_io io = tp_journal_io_file(path);
+    if (!io.ctx) {
+        return;
+    }
+    tp_journal *j = tp_journal_create(io, key);
+    if (!j) {
+        return;
+    }
+    tp_error e = {0};
+    const uint8_t snap[4] = {'r', '6', 'a', '!'};
+    (void)tp_journal_init_checkpoint(j, snap, sizeof snap, 0, &e);                                  /* CKPT */
+    (void)tp_journal_append_txn(j, "6a0000000000000000000000000000ff", 1, snap, sizeof snap, &e);   /* TXN -> record_count 2 */
+    (void)tp_journal_set_metadata(j, ts, meta_path, meta_name, &e);                                 /* META {ts,path,name} */
+    tp_journal_destroy(j);
+}
+
 /* R5b-2 fix [1] helper: physically CHOP the last `nbytes` off `path` so its final journal record frame is
  * torn (its crc/payload go short) -> replay classifies TRUNCATED there and recovers the good prefix before
  * it. Chopping only the tail (fewer bytes than the last record's size) can only tear the LAST record.
@@ -2295,6 +2321,290 @@ void run_selftest(void) {
             (void)remove(j25slot); (void)remove(j25lock);
         }
 #endif
+
+        /* ===================== R6a: recovery-RESOLUTION decision/action layer (J26-J30) =====================
+         * The R6b startup modal is not built yet, so J26-J30 drive the headless decision/action layer DIRECTLY
+         * (exactly as J18-J25 drive the scan functions), on ISOLATED temp folders. They prove: collect
+         * classifies saved-vs-untitled-vs-version-mismatch-vs-foreign + excludes live-locked (J26); Save As
+         * writes the recovered state + deletes the journal (J27); Save (backup original) renames old->.bak +
+         * writes recovered + refuses to clobber without a backup (J28); Discard reaps journal + lock (J29);
+         * and the paramount NON-DESTRUCTIVE-ON-FAILURE invariant -- a FAILED save KEEPS the journal (J30). */
+
+        /* (J26) COLLECT with metadata + status. Five orphans in one folder: a SAVED adoptable (meta path+name,
+         * ts 8000), an UNTITLED adoptable (empty meta, ts 7000), a VERSION_MISMATCH (bumped header -> old
+         * format, surfaced for Discard), a live-LOCKED adoptable (foreign lock -> excluded), and a foreign
+         * BAD_MAGIC file (excluded). collect must return EXACTLY the first three, newest-first, correctly
+         * classified. Uses key-agnostic crafted journals (collect peeks, which ignores the key). */
+        {
+            char scan26[900];
+            char j26saved[1000], j26unt[1000], j26vmis[1000], j26lock[1000], j26lock_lk[1010], j26bad[1000];
+            char j26live[1000];
+            (void)snprintf(scan26, sizeof scan26, "%s/selftest_r6a_j26", s_exe_dir);
+            tp_mkdirs(scan26);
+            (void)snprintf(j26saved, sizeof j26saved, "%s/saved.ntpjournal", scan26);
+            (void)snprintf(j26unt, sizeof j26unt, "%s/untitled.ntpjournal", scan26);
+            (void)snprintf(j26vmis, sizeof j26vmis, "%s/oldfmt.ntpjournal", scan26);
+            (void)snprintf(j26lock, sizeof j26lock, "%s/locked.ntpjournal", scan26);
+            (void)snprintf(j26lock_lk, sizeof j26lock_lk, "%s.lock", j26lock);
+            (void)snprintf(j26bad, sizeof j26bad, "%s/foreign.ntpjournal", scan26);
+            (void)snprintf(j26live, sizeof j26live, "%s/collect_live.ntpjournal", scan26);
+            (void)remove(j26saved); (void)remove(j26unt); (void)remove(j26vmis);
+            (void)remove(j26lock); (void)remove(j26lock_lk); (void)remove(j26bad);
+
+            craft_meta_orphan(j26saved, 0x26, 8000, "/proj/saved26.ntpacker_project", "saved26.ntpacker_project");
+            craft_meta_orphan(j26unt, 0x27, 7000, "", ""); /* untitled: empty meta path+name */
+            craft_meta_orphan(j26lock, 0x28, 6000, "/proj/locked26.ntpacker_project", "locked26.ntpacker_project");
+            /* version-mismatch: a bare 28-byte header with the RIGHT magic but a BUMPED format version. */
+            {
+                uint8_t hdr[TP_JRN_HEADER_LEN];
+                memcpy(hdr, tp_jrn_magic, TP_JRN_MAGIC_LEN);
+                tp_jrn_put_u32(hdr + TP_JRN_MAGIC_LEN, (uint32_t)TP_JOURNAL_FORMAT_VERSION + 1000u); /* old/other format */
+                memset(hdr + TP_JRN_MAGIC_LEN + 4, 0x11, 16);                                        /* arbitrary key */
+                FILE *vf = fopen(j26vmis, "wb");
+                NT_ASSERT(vf && "J26: seeded a VERSION_MISMATCH journal");
+                (void)fwrite(hdr, 1, sizeof hdr, vf);
+                (void)fclose(vf);
+            }
+            { /* foreign BAD_MAGIC file that happens to end .ntpjournal */
+                FILE *bf = fopen(j26bad, "wb");
+                NT_ASSERT(bf && "J26: seeded a BAD_MAGIC file");
+                unsigned char junk[40];
+                memset(junk, 0x5A, sizeof junk);
+                (void)fwrite(junk, 1, sizeof junk, bf);
+                (void)fclose(bf);
+            }
+            NT_ASSERT(gui_project__test_hold_foreign_lock(j26lock) && "J26: a live instance holds the locked orphan");
+
+            gui_recovery_list rl;
+            const int n26 = gui_recovery_collect(scan26, j26live, &rl);
+            nt_log_info("SELFTEST: J26 collect n=%d [0]=%s/%d [1]=%s/%d [2]=%s/%d (want 3; saved,untitled,oldfmt)",
+                        n26, n26 > 0 ? rl.items[0].name : "-", n26 > 0 ? rl.items[0].status : -1,
+                        n26 > 1 ? rl.items[1].name : "-", n26 > 1 ? rl.items[1].status : -1,
+                        n26 > 2 ? rl.items[2].name : "-", n26 > 2 ? rl.items[2].status : -1);
+            NT_ASSERT(n26 == 3 && rl.count == 3 &&
+                      "J26: exactly 3 collected (live-locked + BAD_MAGIC excluded)");
+            /* [0] newest = the SAVED adoptable (ts 8000): meta path+name carried, adoptable, status OK. */
+            NT_ASSERT(rl.items[0].adoptable && rl.items[0].status == (int)TP_JOURNAL_RECOVERY_OK &&
+                      rl.items[0].timestamp == 8000 &&
+                      strcmp(rl.items[0].name, "saved26.ntpacker_project") == 0 &&
+                      strcmp(rl.items[0].orig_path, "/proj/saved26.ntpacker_project") == 0 &&
+                      strcmp(rl.items[0].journal_path, j26saved) == 0 &&
+                      "J26: [0] = saved adoptable with meta name+orig_path (newest)");
+            /* [1] = the UNTITLED adoptable (ts 7000): empty orig_path, name defaults to "untitled". */
+            NT_ASSERT(rl.items[1].adoptable && rl.items[1].status == (int)TP_JOURNAL_RECOVERY_OK &&
+                      rl.items[1].timestamp == 7000 && rl.items[1].orig_path[0] == '\0' &&
+                      strcmp(rl.items[1].name, "untitled") == 0 &&
+                      strcmp(rl.items[1].journal_path, j26unt) == 0 &&
+                      "J26: [1] = untitled adoptable (orig_path \"\", name \"untitled\")");
+            /* [2] = the VERSION_MISMATCH (ts 0): NON-adoptable, surfaced for Discard. */
+            NT_ASSERT(!rl.items[2].adoptable && rl.items[2].status == (int)TP_JOURNAL_RECOVERY_VERSION_MISMATCH &&
+                      strcmp(rl.items[2].journal_path, j26vmis) == 0 &&
+                      "J26: [2] = version-mismatch non-adoptable (surfaced for Discard)");
+            /* none of the three is the live-locked or foreign file. */
+            for (int k = 0; k < rl.count; k++) {
+                NT_ASSERT(strcmp(rl.items[k].journal_path, j26lock) != 0 &&
+                          strcmp(rl.items[k].journal_path, j26bad) != 0 &&
+                          "J26: live-locked + BAD_MAGIC are never listed");
+            }
+            gui_project__test_release_foreign_lock();
+            (void)remove(j26saved); (void)remove(j26unt); (void)remove(j26vmis);
+            (void)remove(j26lock); (void)remove(j26lock_lk); (void)remove(j26bad);
+        }
+
+        /* (J27) SAVE AS: recover an orphan (REAL GUI key, via scan_make_orphan) to a savable clone, save it to
+         * a NEW target, and delete the journal. The target must load back to the recovered state; the journal
+         * + its .lock must be gone. */
+        {
+            char scan27[900];
+            char j27src[1000], j27src_lk[1010], j27target[1000];
+            (void)snprintf(scan27, sizeof scan27, "%s/selftest_r6a_j27", s_exe_dir);
+            tp_mkdirs(scan27);
+            (void)snprintf(j27src, sizeof j27src, "%s/orphan27.ntpjournal", scan27);
+            (void)snprintf(j27src_lk, sizeof j27src_lk, "%s.lock", j27src);
+            (void)snprintf(j27target, sizeof j27target, "%s/saved_as27.ntpacker_project", scan27);
+            (void)remove(j27src); (void)remove(j27src_lk); (void)remove(j27target);
+            scan_make_orphan(j27src, "recovered27", 9000); /* real-key recoverable orphan */
+            /* Simulate a POSIX crash leftover: a `.lock` file the crashed owner never unlinked (created AFTER
+             * scan_make_orphan, whose clean release would otherwise reap it) -- resolve must reap it. */
+            { FILE *lf = fopen(j27src_lk, "wb"); if (lf) { (void)fclose(lf); } }
+            NT_ASSERT(tp_scan_exists(j27src) && selftest_file_exists(j27src_lk) && "J27: the orphan + a stale .lock exist before resolve");
+
+            char e27[256] = {0};
+            const tp_status r27 = gui_recovery_resolve(j27src, "", GUI_RECOVERY_SAVE_AS, j27target, e27, sizeof e27);
+            tp_project *ld27 = NULL;
+            tp_error le27 = {0};
+            const tp_status l27 = tp_project_load(j27target, &ld27, &le27);
+            const char *nm27 = (l27 == TP_STATUS_OK && ld27 && tp_project_get_atlas(ld27, 0))
+                                   ? tp_project_get_atlas(ld27, 0)->name : "(none)";
+            nt_log_info("SELFTEST: J27 SaveAs r=%s target_load=%s name='%s' src_exists=%d lock_exists=%d (want ok,ok,recovered27,0,0)",
+                        tp_status_str(r27), tp_status_str(l27), nm27,
+                        (int)tp_scan_exists(j27src), (int)selftest_file_exists(j27src_lk));
+            NT_ASSERT(r27 == TP_STATUS_OK && "J27: Save As succeeds");
+            NT_ASSERT(l27 == TP_STATUS_OK && strcmp(nm27, "recovered27") == 0 &&
+                      "J27: the target file loads to the RECOVERED state");
+            NT_ASSERT(!tp_scan_exists(j27src) && !selftest_file_exists(j27src_lk) &&
+                      "J27: after a successful Save As the journal + its .lock are DELETED");
+            if (ld27) { tp_project_destroy(ld27); }
+            (void)remove(j27src); (void)remove(j27src_lk); (void)remove(j27target);
+        }
+
+        /* (J28) SAVE (backup original). Three cases: (a) an existing original is renamed to <orig>.bak (OLD
+         * bytes) then overwritten with the RECOVERED state, journal deleted; (b) no original file -> no .bak,
+         * save proceeds; (c) DATA SAFETY: force the backup rename to FAIL (a non-empty directory sits at
+         * <orig>.bak) -> resolve returns non-OK, the original is NOT overwritten, and the journal is NOT
+         * deleted. */
+        {
+            char scan28[900];
+            char j28orig[1000], j28bak[1010], j28src[1000], j28src_lk[1010];
+            (void)snprintf(scan28, sizeof scan28, "%s/selftest_r6a_j28", s_exe_dir);
+            tp_mkdirs(scan28);
+            (void)snprintf(j28orig, sizeof j28orig, "%s/original28.ntpacker_project", scan28);
+            (void)snprintf(j28bak, sizeof j28bak, "%s.bak", j28orig);
+            (void)snprintf(j28src, sizeof j28src, "%s/orphan28.ntpjournal", scan28);
+            (void)snprintf(j28src_lk, sizeof j28src_lk, "%s.lock", j28src);
+            (void)remove(j28bak); (void)remove(j28orig); (void)remove(j28src); (void)remove(j28src_lk);
+
+            /* (a) seed an ORIGINAL project file (OLD content) via the real save path, then an orphan whose
+             *     recovered state DIFFERS. */
+            gui_project_enable_recovery(""); gui_project_shutdown();
+            gui_project_init();
+            (void)gui_project_set_atlas_name(0, "old_original28");
+            char es28[256] = {0};
+            const tp_status ss28 = gui_project_save_as(j28orig, es28, sizeof es28);
+            NT_ASSERT(ss28 == TP_STATUS_OK && tp_scan_exists(j28orig) && "J28: seeded the ORIGINAL file (old content)");
+            gui_project_enable_recovery(""); gui_project_shutdown();
+            scan_make_orphan(j28src, "recovered28", 5000);
+
+            char e28[256] = {0};
+            const tp_status r28 = gui_recovery_resolve(j28src, j28orig, GUI_RECOVERY_SAVE_ORIGINAL, "", e28, sizeof e28);
+            tp_project *bak28 = NULL, *cur28 = NULL;
+            tp_error be28 = {0}, ce28 = {0};
+            const tp_status lb = tp_project_load(j28bak, &bak28, &be28);
+            const tp_status lc = tp_project_load(j28orig, &cur28, &ce28);
+            const char *baknm = (lb == TP_STATUS_OK && bak28 && tp_project_get_atlas(bak28, 0)) ? tp_project_get_atlas(bak28, 0)->name : "(none)";
+            const char *curnm = (lc == TP_STATUS_OK && cur28 && tp_project_get_atlas(cur28, 0)) ? tp_project_get_atlas(cur28, 0)->name : "(none)";
+            nt_log_info("SELFTEST: J28a SaveOriginal r=%s bak='%s' orig='%s' src_exists=%d (want ok,old_original28,recovered28,0)",
+                        tp_status_str(r28), baknm, curnm, (int)tp_scan_exists(j28src));
+            NT_ASSERT(r28 == TP_STATUS_OK && "J28a: Save (backup original) succeeds");
+            NT_ASSERT(lb == TP_STATUS_OK && strcmp(baknm, "old_original28") == 0 &&
+                      "J28a: <orig>.bak holds the OLD original content");
+            NT_ASSERT(lc == TP_STATUS_OK && strcmp(curnm, "recovered28") == 0 &&
+                      "J28a: the original now holds the RECOVERED state");
+            NT_ASSERT(!tp_scan_exists(j28src) && "J28a: the journal is deleted after a successful save");
+            if (bak28) { tp_project_destroy(bak28); }
+            if (cur28) { tp_project_destroy(cur28); }
+            (void)remove(j28bak); (void)remove(j28orig); (void)remove(j28src); (void)remove(j28src_lk);
+
+            /* (b) NO original file -> nothing to back up: save proceeds, no .bak created, journal deleted. */
+            char j28orig_b[1000], j28bak_b[1010], j28src_b[1000];
+            (void)snprintf(j28orig_b, sizeof j28orig_b, "%s/original28b.ntpacker_project", scan28);
+            (void)snprintf(j28bak_b, sizeof j28bak_b, "%s.bak", j28orig_b);
+            (void)snprintf(j28src_b, sizeof j28src_b, "%s/orphan28b.ntpjournal", scan28);
+            (void)remove(j28orig_b); (void)remove(j28bak_b); (void)remove(j28src_b);
+            scan_make_orphan(j28src_b, "recovered28b", 5100);
+            char e28b[256] = {0};
+            const tp_status r28b = gui_recovery_resolve(j28src_b, j28orig_b, GUI_RECOVERY_SAVE_ORIGINAL, "", e28b, sizeof e28b);
+            nt_log_info("SELFTEST: J28b no-orig r=%s orig_exists=%d bak_exists=%d src_exists=%d (want ok,1,0,0)",
+                        tp_status_str(r28b), (int)tp_scan_exists(j28orig_b), (int)selftest_file_exists(j28bak_b),
+                        (int)tp_scan_exists(j28src_b));
+            NT_ASSERT(r28b == TP_STATUS_OK && tp_scan_exists(j28orig_b) && "J28b: no-original -> save proceeds");
+            NT_ASSERT(!selftest_file_exists(j28bak_b) && "J28b: no .bak is created when there was no original");
+            NT_ASSERT(!tp_scan_exists(j28src_b) && "J28b: journal deleted after the successful save");
+            (void)remove(j28orig_b); (void)remove(j28bak_b); (void)remove(j28src_b);
+
+            /* (c) DATA SAFETY: a non-empty DIRECTORY at <orig>.bak makes the backup rename FAIL on both
+             *     platforms (remove() can't drop a non-empty dir; rename() can't clobber a dir). resolve must
+             *     return non-OK, leave the original UNCHANGED (old content), and KEEP the journal. */
+            char j28orig_c[1000], j28bak_c[1010], j28bak_c_file[1030], j28src_c[1000];
+            (void)snprintf(j28orig_c, sizeof j28orig_c, "%s/original28c.ntpacker_project", scan28);
+            (void)snprintf(j28bak_c, sizeof j28bak_c, "%s.bak", j28orig_c);
+            (void)snprintf(j28bak_c_file, sizeof j28bak_c_file, "%s/pin", j28bak_c);
+            (void)snprintf(j28src_c, sizeof j28src_c, "%s/orphan28c.ntpjournal", scan28);
+            (void)remove(j28orig_c); (void)remove(j28src_c);
+            gui_project_enable_recovery(""); gui_project_shutdown();
+            gui_project_init();
+            (void)gui_project_set_atlas_name(0, "keepme28c");
+            char es28c[256] = {0};
+            const tp_status ss28c = gui_project_save_as(j28orig_c, es28c, sizeof es28c);
+            NT_ASSERT(ss28c == TP_STATUS_OK && "J28c: seeded the ORIGINAL (must survive the failed backup)");
+            gui_project_enable_recovery(""); gui_project_shutdown();
+            tp_mkdirs(j28bak_c);                                       /* a directory where the .bak would go */
+            { FILE *pf = fopen(j28bak_c_file, "wb"); if (pf) { (void)fclose(pf); } } /* make it NON-empty */
+            scan_make_orphan(j28src_c, "recovered28c", 5200);
+            char e28c[256] = {0};
+            const tp_status r28c = gui_recovery_resolve(j28src_c, j28orig_c, GUI_RECOVERY_SAVE_ORIGINAL, "", e28c, sizeof e28c);
+            tp_project *cur28c = NULL;
+            tp_error cce = {0};
+            const tp_status lcc = tp_project_load(j28orig_c, &cur28c, &cce);
+            const char *cur28cnm = (lcc == TP_STATUS_OK && cur28c && tp_project_get_atlas(cur28c, 0)) ? tp_project_get_atlas(cur28c, 0)->name : "(none)";
+            nt_log_info("SELFTEST: J28c backup-fail r=%s err='%s' orig_name='%s' src_exists=%d (want !ok,<msg>,keepme28c,1)",
+                        tp_status_str(r28c), e28c, cur28cnm, (int)tp_scan_exists(j28src_c));
+            NT_ASSERT(r28c != TP_STATUS_OK && e28c[0] &&
+                      "J28c: a failed backup rename returns a fault (never clobbers without a backup)");
+            NT_ASSERT(lcc == TP_STATUS_OK && strcmp(cur28cnm, "keepme28c") == 0 &&
+                      "J28c: the original is NOT overwritten when the backup failed");
+            NT_ASSERT(tp_scan_exists(j28src_c) &&
+                      "J28c: the journal is KEPT when the save could not complete (non-destructive)");
+            if (cur28c) { tp_project_destroy(cur28c); }
+            (void)remove(j28src_c); (void)remove(j28orig_c);
+            (void)remove(j28bak_c_file); /* leave the .bak dir (like the other scan dirs) */
+        }
+
+        /* (J29) DISCARD: resolve DISCARD removes the journal + its .lock and touches nothing else (a sentinel
+         * file in the same folder survives). */
+        {
+            char scan29[900];
+            char j29src[1000], j29src_lk[1010], j29keep[1000];
+            (void)snprintf(scan29, sizeof scan29, "%s/selftest_r6a_j29", s_exe_dir);
+            tp_mkdirs(scan29);
+            (void)snprintf(j29src, sizeof j29src, "%s/orphan29.ntpjournal", scan29);
+            (void)snprintf(j29src_lk, sizeof j29src_lk, "%s.lock", j29src);
+            (void)snprintf(j29keep, sizeof j29keep, "%s/keep_me.txt", scan29);
+            (void)remove(j29src); (void)remove(j29src_lk); (void)remove(j29keep);
+            craft_meta_orphan(j29src, 0x29, 4200, "", ""); /* any recoverable-looking journal; Discard never recovers */
+            { FILE *lf = fopen(j29src_lk, "wb"); if (lf) { (void)fclose(lf); } } /* a companion .lock to reap */
+            { FILE *kf = fopen(j29keep, "wb"); if (kf) { (void)fputs("keep", kf); (void)fclose(kf); } }
+            NT_ASSERT(tp_scan_exists(j29src) && selftest_file_exists(j29src_lk) && "J29: orphan + .lock seeded");
+
+            char e29[256] = {0};
+            const tp_status r29 = gui_recovery_resolve(j29src, "", GUI_RECOVERY_DISCARD, "", e29, sizeof e29);
+            nt_log_info("SELFTEST: J29 Discard r=%s src_exists=%d lock_exists=%d keep_exists=%d (want ok,0,0,1)",
+                        tp_status_str(r29), (int)tp_scan_exists(j29src), (int)selftest_file_exists(j29src_lk),
+                        (int)selftest_file_exists(j29keep));
+            NT_ASSERT(r29 == TP_STATUS_OK && "J29: Discard returns OK");
+            NT_ASSERT(!tp_scan_exists(j29src) && !selftest_file_exists(j29src_lk) &&
+                      "J29: Discard deletes the journal + its .lock");
+            NT_ASSERT(selftest_file_exists(j29keep) && "J29: Discard touches nothing else (sentinel survives)");
+            (void)remove(j29keep);
+        }
+
+        /* (J30) NON-DESTRUCTIVE ON FAILURE: a Save As to an UNWRITABLE target (a regular file sits where the
+         * parent directory should be, so the write cannot open) fails -> resolve returns non-OK AND the
+         * journal is STILL on disk (never deleted on a failed save). The paramount data-safety invariant. */
+        {
+            char scan30[900];
+            char j30src[1000], j30src_lk[1010], j30blocker[1000], j30target[1030];
+            (void)snprintf(scan30, sizeof scan30, "%s/selftest_r6a_j30", s_exe_dir);
+            tp_mkdirs(scan30);
+            (void)snprintf(j30src, sizeof j30src, "%s/orphan30.ntpjournal", scan30);
+            (void)snprintf(j30src_lk, sizeof j30src_lk, "%s.lock", j30src);
+            (void)snprintf(j30blocker, sizeof j30blocker, "%s/blocker", scan30);
+            (void)snprintf(j30target, sizeof j30target, "%s/child.ntpacker_project", j30blocker);
+            (void)remove(j30src); (void)remove(j30src_lk); (void)remove(j30blocker);
+            { FILE *bf = fopen(j30blocker, "wb"); if (bf) { (void)fputs("x", bf); (void)fclose(bf); } } /* a FILE where a dir must be */
+            scan_make_orphan(j30src, "recovered30", 3300); /* real-key -> recover_to_clone succeeds, only the SAVE fails */
+            NT_ASSERT(tp_scan_exists(j30src) && "J30: the orphan exists before resolve");
+
+            char e30[256] = {0};
+            const tp_status r30 = gui_recovery_resolve(j30src, "", GUI_RECOVERY_SAVE_AS, j30target, e30, sizeof e30);
+            nt_log_info("SELFTEST: J30 save-fail r=%s err='%s' src_exists=%d target_exists=%d (want !ok,<msg>,1,0)",
+                        tp_status_str(r30), e30, (int)tp_scan_exists(j30src), (int)tp_scan_exists(j30target));
+            NT_ASSERT(r30 != TP_STATUS_OK && e30[0] && "J30: a failed Save returns a fault");
+            NT_ASSERT(tp_scan_exists(j30src) &&
+                      "J30: the journal is KEPT when the save failed (non-destructive on failure)");
+            NT_ASSERT(!tp_scan_exists(j30target) && "J30: the unwritable target was not created");
+            (void)remove(j30src); (void)remove(j30src_lk); (void)remove(j30blocker);
+        }
 
         /* Done: disable recovery + release any lock + restore a journal-LESS packable project for the
          * render phases. */
