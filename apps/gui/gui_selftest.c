@@ -72,6 +72,33 @@ static void to_abs(const char *rel, char *out, size_t cap) {
 #endif
 }
 
+/* R5b-2 J18-J21 helper: fabricate a crash-ORPHAN recovery journal at `slot` holding one committed edit
+ * (atlas 0 renamed to `atlas_name` -> record_count == 2 = UNSAVED WORK) with metadata timestamp `ts`, by
+ * running a real journaled session and "crashing" it: disable recovery + shutdown leaves the slot on disk
+ * (handle closed, lock released). The clock seam pins `ts` so the newest-orphan scan is deterministic.
+ * PRECONDITION: the containing folder exists and any prior slot/lock at `slot` was removed. */
+static void scan_make_orphan(const char *slot, const char *atlas_name, int64_t ts) {
+    gui_project_enable_recovery(""); /* clean prior state; this teardown deletes no slot */
+    gui_project_shutdown();
+    gui_project__test_set_recovery_now(ts);
+    gui_project_enable_recovery(slot);
+    gui_project_init();                              /* fresh + journal at slot; metadata {ts, name "untitled"} */
+    (void)gui_project_set_atlas_name(0, atlas_name); /* one committed txn -> post-checkpoint unsaved work */
+    gui_project_enable_recovery("");                 /* crash-sim: keep the slot on disk, release the lock */
+    gui_project_shutdown();
+    gui_project__test_set_recovery_now(-1);          /* restore the real clock */
+}
+
+/* R5b-2 helper: fabricate a checkpoint-ONLY orphan (init, NO edit -> record_count == 1, NOT adoptable). */
+static void scan_make_noedit_orphan(const char *slot) {
+    gui_project_enable_recovery("");
+    gui_project_shutdown();
+    gui_project_enable_recovery(slot);
+    gui_project_init();              /* CHECKPOINT + METADATA only; no txn */
+    gui_project_enable_recovery(""); /* crash-sim */
+    gui_project_shutdown();
+}
+
 /* True when the CI job asked us to skip the GL render/layout visual phases: the GitHub Linux runner has
  * no real GL (xvfb+llvmpipe never brings the engine's materials/shaders/font atlas to "ready"), so those
  * phases read back an empty framebuffer / undeclared UI. The logical selftest (run_selftest) is unaffected
@@ -1939,6 +1966,119 @@ void run_selftest(void) {
         (void)remove(j17slot);
         (void)remove(j17lock);
         (void)remove(j17save);
+
+        /* ============================ R5b-2: recovery FOLDER startup scan ============================
+         * The production auto-scan is gated out of this build (main.c #ifndef NTPACKER_GUI_SELFTEST), so
+         * J18-J21 drive gui_project_scan_pick directly on ISOLATED temp folders. They prove: the scan picks
+         * the NEWEST unsaved-work orphan and the adopt DELETES it (J18/J21); a live-LOCKED orphan is SKIPPED
+         * and LEFT (J19); and no-work + foreign(BAD_MAGIC) orphans are adopted by NEITHER and deleted by
+         * NEITHER (J20) -- the whole-packet data-safety rule "delete ONLY the adopted source". */
+
+        /* (J18/J21) SCAN PICKS THE NEWEST ORPHAN + DELETES ONLY IT. Two crash-orphans in one folder: A
+         * (older) and B (newer). The scan must pick B (adopt B's state), DELETE the adopted B, and LEAVE A. */
+        char scan18[900];
+        char j18a[1000], j18b[1000], j18live[1000];
+        char j18a_lock[1010], j18b_lock[1010], j18live_lock[1010];
+        (void)snprintf(scan18, sizeof scan18, "%s/selftest_scan_j18", s_exe_dir);
+        tp_mkdirs(scan18); /* isolated temp recovery folder */
+        (void)snprintf(j18a, sizeof j18a, "%s/orphanA.ntpjournal", scan18);
+        (void)snprintf(j18b, sizeof j18b, "%s/orphanB.ntpjournal", scan18);
+        (void)snprintf(j18live, sizeof j18live, "%s/scan_live.ntpjournal", scan18);
+        (void)snprintf(j18a_lock, sizeof j18a_lock, "%s.lock", j18a);
+        (void)snprintf(j18b_lock, sizeof j18b_lock, "%s.lock", j18b);
+        (void)snprintf(j18live_lock, sizeof j18live_lock, "%s.lock", j18live);
+        (void)remove(j18a); (void)remove(j18a_lock);
+        (void)remove(j18b); (void)remove(j18b_lock);
+        (void)remove(j18live); (void)remove(j18live_lock);
+        scan_make_orphan(j18a, "orphanA_atlas", 1000); /* older */
+        scan_make_orphan(j18b, "orphanB_atlas", 2000); /* newer -> must win */
+        NT_ASSERT(tp_scan_exists(j18a) && tp_scan_exists(j18b) && "J18: two crash-orphans fabricated");
+
+        /* Fresh live slot in the SAME folder: the scan must EXCLUDE it (basename) and never adopt it. */
+        gui_project_enable_recovery(""); gui_project_shutdown();
+        gui_project_enable_recovery(j18live); /* acquire this session's live-slot lock */
+        char j18pick[1200] = {0};
+        const bool j18_picked = gui_project_scan_pick(scan18, j18live, j18pick, sizeof j18pick);
+        nt_log_info("SELFTEST: J18 scan picked=%d pick='%s' (want 1, orphanB path)", (int)j18_picked, j18pick);
+        NT_ASSERT(j18_picked && "J18: the scan picked an adoptable orphan");
+        NT_ASSERT(strcmp(j18pick, j18b) == 0 && "J18: the scan picked the NEWEST orphan (B, ts 2000 > A 1000)");
+        gui_project_init_adopt(j18_picked ? j18pick : NULL); /* adopt B; deletes the adopted source */
+        const char *j18_name = tp_project_get_atlas(gui_project_get(), 0)
+                                   ? tp_project_get_atlas(gui_project_get(), 0)->name : "(none)";
+        nt_log_info("SELFTEST: J18 adopted atlas='%s' B_exists=%d A_exists=%d (want 'orphanB_atlas',0,1)",
+                    j18_name, (int)tp_scan_exists(j18b), (int)tp_scan_exists(j18a));
+        NT_ASSERT(strcmp(j18_name, "orphanB_atlas") == 0 && "J18: adopted B's recovered state (its committed edit)");
+        NT_ASSERT(!tp_scan_exists(j18b) && "J21: the ADOPTED source journal is DELETED (its work is in the live journal)");
+        NT_ASSERT(tp_scan_exists(j18a) && "J18: the NON-adopted older orphan is LEFT on disk (for R6)");
+        gui_project_enable_recovery(""); gui_project_shutdown(); /* crash-sim keeps j18live; cleaned below */
+        (void)remove(j18a); (void)remove(j18a_lock);
+        (void)remove(j18b); (void)remove(j18b_lock);
+        (void)remove(j18live); (void)remove(j18live_lock);
+
+        /* (J19) LIVENESS SKIP: a foreign lock held on an orphan makes the scan treat it as owned by a live
+         * instance -> SKIP (never adopt/delete). Reuses the J5 foreign-lock seam. */
+        char scan19[900];
+        char j19c[1000], j19c_lock[1010], j19live[1000], j19live_lock[1010];
+        (void)snprintf(scan19, sizeof scan19, "%s/selftest_scan_j19", s_exe_dir);
+        tp_mkdirs(scan19);
+        (void)snprintf(j19c, sizeof j19c, "%s/orphanC.ntpjournal", scan19);
+        (void)snprintf(j19live, sizeof j19live, "%s/scan_live.ntpjournal", scan19);
+        (void)snprintf(j19c_lock, sizeof j19c_lock, "%s.lock", j19c);
+        (void)snprintf(j19live_lock, sizeof j19live_lock, "%s.lock", j19live);
+        (void)remove(j19c); (void)remove(j19c_lock);
+        (void)remove(j19live); (void)remove(j19live_lock);
+        scan_make_orphan(j19c, "orphanC_atlas", 3000); /* an ADOPTABLE orphan ... */
+        NT_ASSERT(gui_project__test_hold_foreign_lock(j19c) && "J19: a live instance holds C's slot lock");
+        gui_project_enable_recovery(""); gui_project_shutdown();
+        gui_project_enable_recovery(j19live);
+        char j19pick[1200] = {0};
+        const bool j19_picked = gui_project_scan_pick(scan19, j19live, j19pick, sizeof j19pick);
+        nt_log_info("SELFTEST: J19 live-locked scan picked=%d C_exists=%d (want 0,1 -> skipped + left)",
+                    (int)j19_picked, (int)tp_scan_exists(j19c));
+        NT_ASSERT(!j19_picked && "J19: a live-locked orphan is NOT adopted (liveness probe fails -> skipped)");
+        NT_ASSERT(tp_scan_exists(j19c) && "J19: the live-locked orphan is LEFT untouched (never deleted)");
+        gui_project__test_release_foreign_lock();
+        gui_project_enable_recovery(""); gui_project_shutdown();
+        (void)remove(j19c); (void)remove(j19c_lock);
+        (void)remove(j19live); (void)remove(j19live_lock);
+
+        /* (J20) NO-WORK + FOREIGN ORPHANS ARE LEFT, NOT ADOPTED, NOT DELETED. A checkpoint-only journal
+         * (record_count <= 1 -> no unsaved work) and a BAD_MAGIC non-journal file: the scan adopts NEITHER
+         * and deletes NEITHER. Proves "delete only the adopted source". */
+        char scan20[900];
+        char j20noedit[1000], j20noedit_lock[1010], j20bad[1000], j20live[1000], j20live_lock[1010];
+        (void)snprintf(scan20, sizeof scan20, "%s/selftest_scan_j20", s_exe_dir);
+        tp_mkdirs(scan20);
+        (void)snprintf(j20noedit, sizeof j20noedit, "%s/noedit.ntpjournal", scan20);
+        (void)snprintf(j20bad, sizeof j20bad, "%s/foreign.ntpjournal", scan20);
+        (void)snprintf(j20live, sizeof j20live, "%s/scan_live.ntpjournal", scan20);
+        (void)snprintf(j20noedit_lock, sizeof j20noedit_lock, "%s.lock", j20noedit);
+        (void)snprintf(j20live_lock, sizeof j20live_lock, "%s.lock", j20live);
+        (void)remove(j20noedit); (void)remove(j20noedit_lock);
+        (void)remove(j20bad);
+        (void)remove(j20live); (void)remove(j20live_lock);
+        scan_make_noedit_orphan(j20noedit); /* checkpoint-only -> record_count == 1 */
+        {
+            FILE *bf = fopen(j20bad, "wb"); /* a foreign / BAD_MAGIC file that happens to end .ntpjournal */
+            NT_ASSERT(bf && "J20: seeded a BAD_MAGIC non-journal file");
+            unsigned char junk[40];
+            memset(junk, 0x5A, sizeof junk);
+            (void)fwrite(junk, 1, sizeof junk, bf);
+            (void)fclose(bf);
+        }
+        gui_project_enable_recovery(""); gui_project_shutdown();
+        gui_project_enable_recovery(j20live);
+        char j20pick[1200] = {0};
+        const bool j20_picked = gui_project_scan_pick(scan20, j20live, j20pick, sizeof j20pick);
+        nt_log_info("SELFTEST: J20 no-work+foreign scan picked=%d noedit_exists=%d bad_exists=%d (want 0,1,1)",
+                    (int)j20_picked, (int)tp_scan_exists(j20noedit), (int)tp_scan_exists(j20bad));
+        NT_ASSERT(!j20_picked && "J20: neither a no-work nor a BAD_MAGIC orphan is adoptable");
+        NT_ASSERT(tp_scan_exists(j20noedit) && "J20: the checkpoint-only (no unsaved work) orphan is LEFT, not deleted");
+        NT_ASSERT(tp_scan_exists(j20bad) && "J20: the BAD_MAGIC foreign file is LEFT, not deleted");
+        gui_project_enable_recovery(""); gui_project_shutdown();
+        (void)remove(j20noedit); (void)remove(j20noedit_lock);
+        (void)remove(j20bad);
+        (void)remove(j20live); (void)remove(j20live_lock);
 
         /* Done: disable recovery + release any lock + restore a journal-LESS packable project for the
          * render phases. */

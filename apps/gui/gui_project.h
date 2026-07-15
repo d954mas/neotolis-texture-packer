@@ -70,6 +70,12 @@ typedef enum {
  * recovery is enabled and a usable journal from a crashed prior session exists at the slot, adopts
  * that recovered (DIRTY) state instead (F2-05b-ii-B). */
 void gui_project_init(void);
+/* R5b-2: init, optionally ADOPTING a crash-recovery orphan from `source_journal` (a path chosen by the
+ * startup scan, gui_project_scan_pick). NULL/"" means "adopt from the live slot if it holds a journal,
+ * else fresh" (the legacy in-place path; gui_project_init() is exactly this form). On a SUCCESSFUL adopt
+ * of a source OTHER than the live slot the source journal + its `.lock` are deleted (its work is now in
+ * the fresh live journal). */
+void gui_project_init_adopt(const char *source_journal);
 /* Tears the model down and, when recovery is enabled, deletes the recovery slot (clean-exit reset:
  * a cleanly-exited session leaves NO journal to recover). */
 void gui_project_shutdown(void);
@@ -81,6 +87,23 @@ void gui_project_shutdown(void);
  * recovery journal (a SIDECAR: it never changes saved .ntpacker_project bytes) and a clean shutdown
  * deletes the slot. */
 void gui_project_enable_recovery(const char *slot_path);
+
+/* R5b-2: form this launch's LIVE recovery-journal path <folder>/<session-id-hex>.ntpjournal into out[cap]
+ * -- a PER-SESSION RANDOM id (tp_id128_generate, 32 lowercase hex), deliberately NOT a hash of the
+ * project path (path-keyed names collide with a project's own orphan; identity lives in the journal
+ * METADATA instead). Returns true on success; false (out "") on an RNG fault or truncation, so the caller
+ * can disable recovery for this launch without crashing. main.c passes the result to enable_recovery. */
+bool gui_project_make_session_slot(const char *folder, char *out, size_t cap);
+
+/* R5b-2: scan the recovery `folder` for journals orphaned by crashed sessions and pick the NEWEST one
+ * holding UNSAVED WORK to adopt; writes its full path into out[cap] and returns true, else false (out "").
+ * Excludes the live slot (by basename); per candidate it liveness-probes `<name>.lock` (a held lock =>
+ * another live instance => skip), then peeks + classifies -- only a fully-decoded (status OK) journal with
+ * a checkpoint and post-checkpoint edits is adoptable. DELETES NOTHING (the adopt-time delete of the
+ * picked file lives in the adopt path); every non-picked orphan (no-work / corrupt / foreign /
+ * version-mismatch / additional unsaved-work) is LEFT on disk for R6. Fail-closed + non-fatal: any error
+ * yields false (fresh init), never a crash/hang. Pass the pick to gui_project_init_adopt. */
+bool gui_project_scan_pick(const char *folder, const char *live_slot, char *out, size_t cap);
 /* Drains the one-shot "recovered unsaved changes from a previous session" notice (true once after a
  * crash-recovery adopt at init). The UI polls this to surface the recovery to the user. */
 bool gui_project_take_recovery_notice(char *out, size_t cap);
@@ -294,6 +317,9 @@ bool gui_project__test_recovery_active(void);
  * attach -- lets the selftest prove attach_recovery_journal fails CLOSED (journal-less + degraded
  * notice) rather than building a journal on foreign bytes. */
 void gui_project__test_skip_next_recovery_reset(void);
+/* Pin the recovery-metadata clock to `t` (>= 0) so the J18 newest-orphan scan is deterministic despite
+ * time()'s 1-second resolution; pass < 0 to restore the real clock. */
+void gui_project__test_set_recovery_now(int64_t t);
 #endif
 
 #ifdef __cplusplus

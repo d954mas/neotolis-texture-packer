@@ -11,12 +11,15 @@
 #ifdef _WIN32
 #include <windows.h>
 #else
+#include <errno.h> /* R5b-2: ENOENT classification for the orphan liveness probe (libc header FIRST) */
 #include <fcntl.h>
 #include <sys/file.h>
 #include <unistd.h>
 #endif
 
 #include "gui_scan.h"
+
+#include "tp_core/tp_scan.h" /* R5b-2: tp_scan_list_dir + tp_str_list for the recovery-folder startup scan */
 
 #include "tp_core/tp_export.h"         /* TP_EXPORTER_ID_JSON_NEOTOLIS (default target exporter id) */
 #include "tp_core/tp_id.h"             /* tp_rng_os + id128 generate/nil for op ids */
@@ -168,6 +171,23 @@ static void recompute_name(void) {
 static bool recovery_active(void);
 static void note_recovery_degraded(const char *msg);
 
+/* R5b-2: unix-seconds clock for the recovery-journal metadata. Production uses time(NULL). The selftest
+ * overrides it (gui_project__test_set_recovery_now) so the J18 newest-orphan scan is DETERMINISTIC:
+ * time()'s 1-second resolution would otherwise tie two sessions created in the same second, and the scan
+ * picks the newest by metadata timestamp. The override lives ONLY in the selftest build (production
+ * always reads the real clock). */
+#ifdef NTPACKER_GUI_SELFTEST
+static int64_t s_test_recovery_now = -1; /* >= 0 overrides time(NULL) */
+#endif
+static int64_t recovery_now(void) {
+#ifdef NTPACKER_GUI_SELFTEST
+    if (s_test_recovery_now >= 0) {
+        return s_test_recovery_now;
+    }
+#endif
+    return (int64_t)time(NULL);
+}
+
 static void set_path(const char *path) {
     (void)snprintf(s_path, sizeof s_path, "%s", path ? path : "");
     recompute_name();
@@ -186,7 +206,7 @@ static void set_path(const char *path) {
          * crashes BEFORE the Save still carries a scan label; the compaction re-emit is unavoidable
          * without a cache-only entry point that would complicate the single set_path chokepoint. Save is
          * user-initiated (not hot) -> the extra fsync is negligible. */
-        if (tp_model_set_recovery_metadata(s_model, (int64_t)time(NULL), s_path, s_name, &mde) != TP_STATUS_OK) {
+        if (tp_model_set_recovery_metadata(s_model, recovery_now(), s_path, s_name, &mde) != TP_STATUS_OK) {
             note_recovery_degraded(mde.msg[0] ? mde.msg : "could not record recovery metadata");
         }
     }
@@ -341,6 +361,50 @@ static void recovery_lock_release(void) {
 /* Recovery is ACTIVE for this instance only when a slot is configured AND we own the single-instance
  * lock. A 2nd concurrent instance (lock not held) is journal-less and must never touch the slot. */
 static bool recovery_active(void) { return s_recovery_path[0] != '\0' && s_recovery_locked; }
+
+/* R5b-2: NON-BLOCKING liveness probe on `<journal>.lock` using a SEPARATE, TRANSIENT handle -- it NEVER
+ * touches the live session's static s_recovery_lock. Returns true iff the lock is ACQUIRABLE right now
+ * (=> no live instance owns it => the journal is an orphan from a crashed/dead session). Purely
+ * READ-ONLY: it opens the lock WITHOUT creating it (no O_CREAT / OPEN_EXISTING), so a non-adopted orphan
+ * is left byte-untouched (no stray .lock companion is written). A crashed owner's lock is already gone
+ * (Win DELETE_ON_CLOSE) or unlocked (POSIX flock auto-released on death); a live owner still holds it
+ * exclusively so our probe fails. BENIGN TOCTOU (acquire-then-release is a HINT, not a held claim): two
+ * instances racing the SAME orphan at worst both recover the same committed state -- no data loss. We
+ * never hold more than this one transient handle at a time. */
+static bool recovery_orphan_unlocked(const char *journal) {
+    char lockpath[GUI_RECOVERY_PATH_MAX + 8];
+    int n = snprintf(lockpath, sizeof lockpath, "%s.lock", journal);
+    if (n <= 0 || (size_t)n >= sizeof lockpath) {
+        return false; /* truncation -> fail-closed: not an adoptable orphan */
+    }
+#ifdef _WIN32
+    /* OPEN_EXISTING (never create): a live owner holds it share-mode-0 -> sharing violation -> live. A
+     * crashed owner's DELETE_ON_CLOSE lock is gone -> FILE_NOT_FOUND -> orphan. An existing-but-unlocked
+     * .lock opens -> orphan. */
+    HANDLE h = CreateFileA(lockpath, GENERIC_READ | GENERIC_WRITE, 0 /* exclusive */, NULL, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        DWORD e = GetLastError();
+        return e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND; /* absent => orphan; sharing viol => live */
+    }
+    (void)CloseHandle(h);
+    return true; /* existed + acquirable => orphan */
+#else
+    /* No O_CREAT: a live owner holds flock(LOCK_EX) on an existing .lock -> LOCK_NB fails -> live. A
+     * crashed owner left the .lock file but flock auto-released -> LOCK_NB succeeds -> orphan. A missing
+     * .lock (ENOENT) -> no owner -> orphan. Any other open error (permission) -> fail-closed (leave it). */
+    int fd = open(lockpath, O_RDWR);
+    if (fd < 0) {
+        return errno == ENOENT;
+    }
+    bool acquirable = (flock(fd, LOCK_EX | LOCK_NB) == 0);
+    if (acquirable) {
+        (void)flock(fd, LOCK_UN);
+    }
+    (void)close(fd);
+    return acquirable;
+#endif
+}
 
 /* fix [4]: the ONE owner of the create -> null-check -> attach -> destroy-on-fail ownership dance.
  * Creates a journal over `io` (TAKES OWNERSHIP of io, keyed with recovery_key) and attaches it to
@@ -780,10 +844,33 @@ bool gui_project_peek_pending_slice9(int atlas_index, const char *sprite_key, in
 // #endregion
 
 // #region lifecycle
-/* F2-05b-ii-B crash recovery (F2-04 §7.1/§22.3). If recovery is ACTIVE (slot owned) and the slot
- * holds a usable journal from a CRASHED prior session, rebuild + install its last committed STATE,
- * kept DIRTY so the user is prompted to Save the recovered work. Returns true when a model was
- * adopted; a stale / empty / foreign / corrupt / torn-first slot returns false -> normal fresh init.
+/* R5b-2: delete an ADOPTED source orphan (journal + its `.lock`) after its work has been cloned into
+ * the fresh live journal. Called ONLY on a successful adopt of a source OTHER than the live slot -- one
+ * of the packet's TWO deletions (the other is the live slot on clean shutdown). By this point no handle
+ * is held on either file (the liveness probe released; peek/recover closed their io handles), so a
+ * Windows remove() succeeds. Tolerates either order / a missing .lock. */
+static void delete_adopted_source(const char *source) {
+    (void)remove(source);
+    char srclock[GUI_RECOVERY_PATH_MAX + 8];
+    int n = snprintf(srclock, sizeof srclock, "%s.lock", source);
+    if (n > 0 && (size_t)n < sizeof srclock) {
+        (void)remove(srclock);
+    }
+}
+
+/* F2-05b-ii-B crash recovery (F2-04 §7.1/§22.3). If recovery is ACTIVE (slot owned) and `source` holds
+ * a usable journal from a CRASHED prior session, rebuild + install its last committed STATE, kept DIRTY
+ * so the user is prompted to Save the recovered work. Returns true when a model was adopted; a stale /
+ * empty / foreign / corrupt / torn-first source returns false -> normal fresh init.
+ *
+ * R5b-2 SOURCE GENERALIZATION: `source` is the journal to recover FROM. gui_project_init passes the LIVE
+ * slot (s_recovery_path -- the selftest/in-place path where the slot IS the crashed journal); the startup
+ * scan passes a DIFFERENT orphan file it picked from the recovery folder. wrap_model always attaches the
+ * fresh live journal at s_recovery_path (NOT at `source`), so recovering from a scan-picked orphan leaves
+ * the live slot as the new home. On a SUCCESSFUL adopt of an orphan (source != the live slot) the source
+ * journal + its `.lock` are DELETED (its work now lives in the fresh live journal -- leaving it would
+ * re-adopt it next launch); the live slot is NEVER deleted here. A NULL/empty `source` is "no adopt".
+ * On adopt FAILURE the source is LEFT intact (a retry / R6). Empty guards keep the selftest compiling.
  *
  * fix [0]+[2] REDESIGN: recover only the STATE, then rebuild a FRESH model + FRESH journal around it.
  * The recovered journal returned by tp_model_recover cannot be adopted directly because: [0] its
@@ -794,13 +881,16 @@ bool gui_project_peek_pending_slice9(int atlas_index, const char *sprite_key, in
  * + closes the slot handle), then wrap_model the clone -> a FRESH journal with an EMPTY, non-poisoned
  * retained-id index at the reset slot. tp_model_recover TAKES OWNERSHIP of the io on every path
  * (recovered model owns it, else destroyed), so the io is never leaked. */
-static bool try_adopt_recovered(void) {
+static bool try_adopt_recovered(const char *source) {
     if (!recovery_active()) {
         return false; /* recovery disabled, or a 2nd instance without the slot lock -> fresh init */
     }
-    tp_journal_io io = tp_journal_io_file(s_recovery_path);
+    if (!source || source[0] == '\0') {
+        return false; /* no source to adopt -> fresh init */
+    }
+    tp_journal_io io = tp_journal_io_file(source);
     if (!io.ctx) {
-        return false; /* cannot open the slot (or none exists) -> fresh init */
+        return false; /* cannot open the source (or none exists) -> fresh init */
     }
     tp_model *rm = NULL;
     tp_journal_recovery info;
@@ -856,7 +946,7 @@ static bool try_adopt_recovered(void) {
      * genuine poison surfaces via the soft channel. */
     if (had_meta && rec_path[0] != '\0') {
         tp_error rme = {0};
-        if (tp_model_set_recovery_metadata(s_model, (int64_t)time(NULL), rec_path, rec_name, &rme) != TP_STATUS_OK) {
+        if (tp_model_set_recovery_metadata(s_model, recovery_now(), rec_path, rec_name, &rme) != TP_STATUS_OK) {
             note_recovery_degraded(rme.msg[0] ? rme.msg : "could not carry the recovered project identity");
         }
     }
@@ -865,15 +955,30 @@ static bool try_adopt_recovered(void) {
     s_preview_stale = true;
     recompute_dirty();   /* recovered_unsaved == true -> dirty (independent of identity) */
     s_recovery_notice = true; /* surfaced once by the UI (gui_project_take_recovery_notice) */
+    /* R5b-2 DELETION RULE: the adopt SUCCEEDED and the recovered work is now in the fresh live journal at
+     * s_recovery_path. Delete the SOURCE orphan + its .lock so the next launch does not re-adopt it. NEVER
+     * the live slot: when source == s_recovery_path (the in-place/selftest path) this is skipped, so the
+     * just-written live journal is preserved. This + the clean-shutdown live-slot delete are the ONLY
+     * deletions in the whole packet. */
+    if (strcmp(source, s_recovery_path) != 0) {
+        delete_adopted_source(source);
+    }
     return true;
 }
 
-void gui_project_init(void) {
+/* R5b-2: init, optionally ADOPTING a crash-recovery orphan from `source_journal` (a path chosen by the
+ * startup scan, gui_project_scan_pick). NULL/"" means "adopt from the LIVE slot if it holds a journal"
+ * -- the legacy in-place behavior the selftest (J3/J4/J13/J17) drives via enable_recovery(<crashed slot>)
+ * + gui_project_init(). With a per-session random live slot (the production wiring), the live slot is
+ * always fresh/empty, so a NULL source means fresh init; the scan supplies any orphan to adopt. */
+void gui_project_init_adopt(const char *source_journal) {
     if (s_model) {
         return;
     }
     pending_discard();
-    if (try_adopt_recovered()) {
+    /* NULL/"" source -> adopt from the live slot (in-place, the selftest path); else from the scan pick. */
+    const char *source = (source_journal && source_journal[0] != '\0') ? source_journal : s_recovery_path;
+    if (try_adopt_recovered(source)) {
         return; /* F2-05b-ii-B: adopted a crash-recovered model (dirty) -- do NOT overwrite with a fresh one */
     }
     tp_project *p = tp_project_create();
@@ -883,6 +988,8 @@ void gui_project_init(void) {
     s_preview_stale = false;
     promote_and_baseline();
 }
+
+void gui_project_init(void) { gui_project_init_adopt(NULL); }
 
 void gui_project_shutdown(void) {
     pending_discard();
@@ -899,10 +1006,11 @@ void gui_project_shutdown(void) {
     recovery_lock_release();
 }
 
-/* F2-05b-ii-B: enable/configure crash recovery. `slot_path` is a DETERMINISTIC sidecar journal path
- * (a stable temp/app-data location the next launch reconstructs WITHOUT a random session id, per the
- * owner's requirement); NULL/"" DISABLES recovery (journal-less, the default). Call ONCE before the
- * first gui_project_init in the interactive app.
+/* F2-05b-ii-B: enable/configure crash recovery. `slot_path` is this session's LIVE recovery-journal path.
+ * R5b-2: main.c forms it as a PER-SESSION RANDOM filename under <app-data>/recovery/ (see
+ * gui_project_make_session_slot) -- NOT a path hash -- so a reopened crashed project never collides with
+ * its own orphan. NULL/"" DISABLES recovery (journal-less, the default + the headless selftest). Call ONCE
+ * before the first gui_project_init in the interactive app.
  *
  * fix [1]: acquires a single-instance advisory lock on the slot. If another live instance already
  * holds it, THIS instance runs journal-less (recovery INACTIVE) and never touches the slot -- so it
@@ -918,6 +1026,124 @@ void gui_project_enable_recovery(const char *slot_path) {
     if (!s_recovery_locked) {
         s_recovery_busy_notice = true; /* another instance owns the slot -> crash recovery off this window */
     }
+}
+
+/* R5b-2: form this launch's LIVE recovery-journal path <folder>/<session-id-hex>.ntpjournal into
+ * out[cap]. The 128-bit session id is a fresh OS-random value (tp_id128_generate) formatted as 32
+ * lowercase hex -- a UNIQUE per-launch handle, deliberately NOT a hash of the project path: path-keyed
+ * filenames COLLIDE (reopening a crashed project would want hash(path).ntpjournal but its own orphan
+ * already occupies it, and attach's fail-closed empty-slot check would then refuse -> a journal-less
+ * regression). Project identity is carried in the journal METADATA instead, not in the filename. Returns
+ * true on success; false (out set to "") on an RNG fault or snprintf truncation -> the caller disables
+ * recovery for this launch (degraded, never a crash). */
+bool gui_project_make_session_slot(const char *folder, char *out, size_t cap) {
+    if (out && cap) {
+        out[0] = '\0';
+    }
+    if (!folder || folder[0] == '\0' || !out || cap == 0) {
+        return false;
+    }
+    tp_id128 sid;
+    if (!gen_id(&sid)) {
+        return false; /* OS-RNG fault -> no session slot (recovery disabled this launch) */
+    }
+    char hex[33];
+    for (int i = 0; i < 16; i++) {
+        (void)snprintf(hex + (size_t)i * 2U, 3U, "%02x", sid.bytes[i]); /* 32 lowercase hex, matches the codebase */
+    }
+    int n = snprintf(out, cap, "%s/%s.ntpjournal", folder, hex);
+    if (n <= 0 || (size_t)n >= cap) {
+        out[0] = '\0';
+        return false; /* truncation -> fail-closed */
+    }
+    return true;
+}
+
+/* R5b-2: scan the recovery FOLDER for journals orphaned by crashed sessions and pick the NEWEST one that
+ * holds UNSAVED WORK to adopt; writes its full path into out[cap] and returns true, else false (out "").
+ * Per candidate `<folder>/<name>` (name ends ".ntpjournal", != the live slot's basename):
+ *   1) LIVENESS PROBE `<candidate>.lock`: acquirable => a crashed/dead owner (orphan); held => a live
+ *      instance owns it => SKIP + LEAVE (never adopt another live window's journal).
+ *   2) PEEK (tp_journal_peek -- header + metadata, no model rebuild): a candidate is ADOPTABLE only when
+ *      status == OK AND has_checkpoint AND record_count > 1 (there ARE post-checkpoint edits => unsaved
+ *      work). ONLY status==OK is adoptable so a partially-corrupt journal is never mis-counted. Track it
+ *      by metadata timestamp (fall back to 0 without metadata).
+ *   3) EMPTY / checkpoint-only (record_count <= 1) / TRUNCATED / CORRUPT / VERSION_MISMATCH / BAD_MAGIC
+ *      => NOT a candidate => LEFT on disk untouched (R6 lists/Discards them).
+ * Picks the newest-by-timestamp adoptable candidate and returns its path; EVERY other file is left. This
+ * function DELETES NOTHING (the sole adopt-time delete is in try_adopt_recovered, on the picked file
+ * only, after a successful clone). Fail-closed + non-fatal: any error yields false (fresh init), never a
+ * crash/hang on a malformed/huge/empty folder. BENIGN TOCTOU: see recovery_orphan_unlocked. */
+bool gui_project_scan_pick(const char *folder, const char *live_slot, char *out, size_t cap) {
+    if (out && cap) {
+        out[0] = '\0';
+    }
+    if (!folder || folder[0] == '\0' || !out || cap == 0) {
+        return false;
+    }
+    /* the live slot's BASENAME -- excluded so the scan never adopts/deletes our own live journal. */
+    const char *live_base = live_slot ? live_slot : "";
+    for (const char *p = live_base; *p; p++) {
+        if (*p == '/' || *p == '\\') {
+            live_base = p + 1;
+        }
+    }
+    tp_str_list names = {0};
+    if (!tp_scan_list_dir(folder, ".ntpjournal", &names)) {
+        return false; /* folder open failure / missing -> no adopt (fresh init) */
+    }
+    char best_path[GUI_RECOVERY_PATH_MAX];
+    best_path[0] = '\0';
+    int64_t best_ts = 0;
+    bool have_best = false;
+    for (int i = 0; i < names.count; i++) {
+        const char *name = names.items[i];
+        if (!name || name[0] == '\0') {
+            continue;
+        }
+        if (live_base[0] != '\0' && strcmp(name, live_base) == 0) {
+            continue; /* never adopt/delete the live slot */
+        }
+        char cand[GUI_RECOVERY_PATH_MAX];
+        int nc = snprintf(cand, sizeof cand, "%s/%s", folder, name);
+        if (nc <= 0 || (size_t)nc >= sizeof cand) {
+            continue; /* truncation -> skip (fail-closed) */
+        }
+        if (!recovery_orphan_unlocked(cand)) {
+            continue; /* a live instance owns it (or unprobeable) -> LEAVE, skip */
+        }
+        tp_journal_io io = tp_journal_io_file(cand);
+        if (!io.ctx) {
+            continue; /* cannot open -> LEAVE, skip */
+        }
+        tp_journal_peek_result pk;
+        memset(&pk, 0, sizeof pk);
+        tp_error perr = {0};
+        if (tp_journal_peek(io, &pk, &perr) != TP_STATUS_OK) { /* TAKES OWNERSHIP of io */
+            tp_journal_peek_free(&pk);                         /* zeroed on a hard fault -> free-safe */
+            continue;
+        }
+        /* Adoptable == a fully-decoded journal with a checkpoint base AND post-checkpoint edits. Anything
+         * else is LEFT untouched (no delete -- R6 owns listing/Discard of no-work/corrupt/old-format). */
+        if (pk.status == TP_JOURNAL_RECOVERY_OK && pk.has_checkpoint && pk.record_count > 1) {
+            int64_t ts = pk.has_meta ? pk.meta.timestamp : 0;
+            if (!have_best || ts > best_ts) {
+                (void)snprintf(best_path, sizeof best_path, "%s", cand);
+                best_ts = ts;
+                have_best = true;
+            }
+        }
+        tp_journal_peek_free(&pk);
+    }
+    tp_str_list_free(&names);
+    if (have_best) {
+        int nb = snprintf(out, cap, "%s", best_path);
+        if (nb > 0 && (size_t)nb < cap) {
+            return true;
+        }
+        out[0] = '\0'; /* truncation into the caller buffer -> fail-closed */
+    }
+    return false;
 }
 
 /* Drains the one-shot "recovered unsaved changes" notice (true once after a crash-recovery adopt at
@@ -1015,6 +1241,9 @@ bool gui_project__test_recovery_active(void) { return recovery_active(); }
  * pre-seeded stale slot survives to the fresh-attach and the fail-closed empty-check path is reachable
  * (simulates a remove() the OS could not honor -- locked file / read-only dir). */
 void gui_project__test_skip_next_recovery_reset(void) { s_test_skip_recovery_reset = true; }
+/* Dev seam (selftest only, R5b-2): pin the recovery-metadata clock to `t` (>= 0) so the J18 newest-orphan
+ * scan is deterministic despite time()'s 1-second resolution; pass < 0 to restore the real clock. */
+void gui_project__test_set_recovery_now(int64_t t) { s_test_recovery_now = t; }
 #endif
 // #endregion
 

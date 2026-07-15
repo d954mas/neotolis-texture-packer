@@ -115,6 +115,42 @@ static const tp_scan_entry *find_rel(const tp_scan_result *r, const char *rel) {
     }
     return NULL;
 }
+
+/* R5b-2 dir-lister fixture. Under g_root/listdir:
+ *   A.ntpjournal            regular file, matches ".ntpjournal"
+ *   B.ntpjournal            regular file, matches ".ntpjournal"
+ *   A.ntpjournal.lock       regular file, does NOT match ".ntpjournal" (companion lock)
+ *   notes.txt               regular file, non-matching suffix
+ *   sub/                    subdirectory (must be skipped -- regular files only)
+ *   sub/C.ntpjournal        nested match (must NOT appear -- non-recursive)
+ */
+static char g_listdir[700];
+static void build_listdir_fixture(void) {
+    (void)snprintf(g_listdir, sizeof g_listdir, "%s/listdir", g_root);
+    mkdir_p(g_listdir);
+    char p[800];
+    (void)snprintf(p, sizeof p, "%s/A.ntpjournal", g_listdir);
+    write_file(p, "A");
+    (void)snprintf(p, sizeof p, "%s/B.ntpjournal", g_listdir);
+    write_file(p, "B");
+    (void)snprintf(p, sizeof p, "%s/A.ntpjournal.lock", g_listdir);
+    write_file(p, "L");
+    (void)snprintf(p, sizeof p, "%s/notes.txt", g_listdir);
+    write_file(p, "T");
+    (void)snprintf(p, sizeof p, "%s/sub", g_listdir);
+    mkdir_p(p);
+    (void)snprintf(p, sizeof p, "%s/sub/C.ntpjournal", g_listdir);
+    write_file(p, "C");
+}
+
+static int str_cmp(const void *a, const void *b) {
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+static void sort_names(tp_str_list *l) {
+    if (l->count > 1) {
+        qsort(l->items, (size_t)l->count, sizeof *l->items, str_cmp);
+    }
+}
 // #endregion
 
 // #region tests
@@ -216,11 +252,59 @@ void test_is_dir_and_exists(void) {
     TEST_ASSERT_FALSE(tp_scan_exists(NULL));
     TEST_ASSERT_FALSE(tp_scan_exists(""));
 }
+
+/* R5b-2: the non-recursive suffix lister returns exactly the matching regular-file NAMES: the two
+ * ".ntpjournal" files, NOT the ".lock" companion (different suffix), NOT the ".txt" (non-matching),
+ * NOT the subdirectory, and NOT the nested match (non-recursive). */
+void test_list_dir_suffix(void) {
+    tp_str_list l = {0};
+    const bool ok = tp_scan_list_dir(g_listdir, ".ntpjournal", &l);
+    TEST_ASSERT_TRUE(ok);
+    sort_names(&l);
+    TEST_ASSERT_EQUAL_INT(2, l.count);
+    TEST_ASSERT_EQUAL_STRING("A.ntpjournal", l.items[0]);
+    TEST_ASSERT_EQUAL_STRING("B.ntpjournal", l.items[1]);
+    tp_str_list_free(&l);
+    TEST_ASSERT_EQUAL_INT(0, l.count);
+    TEST_ASSERT_NULL(l.items);
+}
+
+/* Empty suffix matches every REGULAR file at the top level (subdir + nested file excluded). */
+void test_list_dir_all_regular_files(void) {
+    tp_str_list l = {0};
+    const bool ok = tp_scan_list_dir(g_listdir, "", &l);
+    TEST_ASSERT_TRUE(ok);
+    sort_names(&l);
+    TEST_ASSERT_EQUAL_INT(4, l.count); /* A.ntpjournal, A.ntpjournal.lock, B.ntpjournal, notes.txt */
+    TEST_ASSERT_EQUAL_STRING("A.ntpjournal", l.items[0]);
+    TEST_ASSERT_EQUAL_STRING("A.ntpjournal.lock", l.items[1]);
+    TEST_ASSERT_EQUAL_STRING("B.ntpjournal", l.items[2]);
+    TEST_ASSERT_EQUAL_STRING("notes.txt", l.items[3]);
+    tp_str_list_free(&l);
+}
+
+/* A dir-open failure returns false and leaves *out untouched (recovery scan degrades to no-adopt). */
+void test_list_dir_missing_returns_false(void) {
+    char missing[800];
+    (void)snprintf(missing, sizeof missing, "%s/does_not_exist", g_listdir);
+    tp_str_list l = {0};
+    const bool ok = tp_scan_list_dir(missing, ".ntpjournal", &l);
+    TEST_ASSERT_FALSE(ok);
+    TEST_ASSERT_EQUAL_INT(0, l.count);
+    TEST_ASSERT_NULL(l.items);
+    /* NULL/empty guards + free-safety */
+    TEST_ASSERT_FALSE(tp_scan_list_dir(NULL, "", &l));
+    TEST_ASSERT_FALSE(tp_scan_list_dir("", "", &l));
+    TEST_ASSERT_FALSE(tp_scan_list_dir(g_listdir, "", NULL));
+    tp_str_list_free(&l);   /* zeroed list */
+    tp_str_list_free(NULL); /* no crash */
+}
 // #endregion
 
 int main(int argc, char **argv) {
     g_dir = (argc > 1) ? argv[1] : ".";
     build_fixture();
+    build_listdir_fixture();
 
     UNITY_BEGIN();
     RUN_TEST(test_missing_dir_is_empty);
@@ -228,5 +312,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_empty_subdir_is_empty);
     RUN_TEST(test_fixture_walk);
     RUN_TEST(test_is_dir_and_exists);
+    RUN_TEST(test_list_dir_suffix);
+    RUN_TEST(test_list_dir_all_regular_files);
+    RUN_TEST(test_list_dir_missing_returns_false);
     return UNITY_END();
 }

@@ -1103,16 +1103,34 @@ int main(int argc, char *argv[]) {
     /* editor state + the canvas custom-draw handler (registered outside begin/end) */
     gui_canvas_init(&s_canvas);
     nt_ui_set_custom_handler(s_ctx, gui_canvas_handler, &s_canvas);
-    /* F2-05b-ii-B: crash recovery. The recovery-journal SIDECAR lives at a DETERMINISTIC path under
-     * the exe dir (stable across launches, like pack_session), so a crashed session is recovered on
-     * the next launch WITHOUT a random session id. Disabled in the headless selftest build (which
-     * drives the journal itself, in isolation, and must stay deterministic + file-free). */
+    /* R5b-2: crash recovery lives in a per-project FOLDER <app-data>/recovery/ with one journal per editing
+     * session -- a PER-SESSION RANDOM filename (gui_project_make_session_slot), NOT a path hash, so reopening
+     * a crashed project never collides with its own orphan (project identity is carried in the journal
+     * METADATA, read by the scan). At startup we SCAN that folder for journals orphaned by crashed sessions
+     * and AUTO-ADOPT the newest one holding unsaved work (no modal -- that is R6; every non-adopted orphan is
+     * LEFT on disk for R6). Every step is fail-closed + NON-FATAL: a folder/RNG/scan failure merely disables
+     * recovery for this launch (journal-less), never crashing or blocking startup. GATED OUT of the headless
+     * selftest build -- that build runs THIS exe non-headless and drives recovery itself on ISOLATED temp
+     * folders via test seams (J18-J21), so the production auto-scan must never fire and adopt a test journal. */
+    const char *adopt_src = NULL;
 #ifndef NTPACKER_GUI_SELFTEST
-    char recovery_slot[1152];
-    (void)snprintf(recovery_slot, sizeof recovery_slot, "%s/ntpacker_recovery.ntpjournal", s_exe_dir);
-    gui_project_enable_recovery(recovery_slot);
+    char adopt_pick[1200];
+    char rec_root[GUI_PATHS_MAX];
+    char rec_folder[GUI_PATHS_MAX];
+    if (gui_paths_app_data_root(rec_root, sizeof rec_root)) {
+        int nf = snprintf(rec_folder, sizeof rec_folder, "%s/recovery", rec_root); /* mirrors gui_crash.c's <root>/crash */
+        if (nf > 0 && (size_t)nf < (int)sizeof rec_folder && gui_paths_ensure_dir(rec_folder)) {
+            char live_slot[1200];
+            if (gui_project_make_session_slot(rec_folder, live_slot, sizeof live_slot)) {
+                gui_project_enable_recovery(live_slot); /* acquire this session's live-slot lock */
+                if (gui_project_scan_pick(rec_folder, live_slot, adopt_pick, sizeof adopt_pick)) {
+                    adopt_src = adopt_pick; /* adopt the newest crashed-session orphan holding unsaved work */
+                }
+            }
+        }
+    }
 #endif
-    gui_project_init();
+    gui_project_init_adopt(adopt_src); /* adopt the scan pick, else fresh init (recovery-less on any failure) */
     /* H/P1-8 fix: TWO distinct startup facets, no longer conflated in one bool.
      *  - recovery_warn_shown: did EITHER startup recovery warning get shown this launch -- the
      *    adopted-unsaved-work notice OR the "another window open -> crash recovery is off for this one"

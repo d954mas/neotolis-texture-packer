@@ -73,6 +73,42 @@ static bool has_image_ext(const char *name) {
 static int entry_cmp(const void *a, const void *b) {
     return strcmp(((const tp_scan_entry *)a)->rel, ((const tp_scan_entry *)b)->rel);
 }
+
+/* R5b-2: append a heap-dup of `name` to the string list, growing the backing array as needed. On any
+ * allocation failure the list is left unchanged (the walk skips that entry -- a best-effort listing,
+ * mirroring scan_vec_push above). */
+static bool str_list_push(tp_str_list *v, const char *name) {
+    if (v->count == v->cap) {
+        int ncap = (v->cap == 0) ? 16 : v->cap * 2;
+        char **nd = (char **)realloc(v->items, (size_t)ncap * sizeof *nd);
+        if (!nd) {
+            return false;
+        }
+        v->items = nd;
+        v->cap = ncap;
+    }
+    size_t n = strlen(name) + 1U;
+    char *copy = (char *)malloc(n);
+    if (!copy) {
+        return false;
+    }
+    memcpy(copy, name, n);
+    v->items[v->count++] = copy;
+    return true;
+}
+
+/* True iff `name` ends with `suffix` (case-sensitive byte compare; "" matches everything). */
+static bool name_has_suffix(const char *name, const char *suffix) {
+    size_t ln = strlen(name);
+    size_t ls = strlen(suffix);
+    if (ls == 0) {
+        return true;
+    }
+    if (ln < ls) {
+        return false;
+    }
+    return memcmp(name + (ln - ls), suffix, ls) == 0;
+}
 // #endregion
 
 // #region platform recursion
@@ -170,6 +206,83 @@ void tp_scan_free(tp_scan_result *out) {
     free(out->entries);
     out->entries = NULL;
     out->count = 0;
+}
+
+bool tp_scan_list_dir(const char *dir, const char *suffix, tp_str_list *out) {
+    if (!out || !dir || dir[0] == '\0') {
+        return false;
+    }
+    const char *suf = suffix ? suffix : "";
+#ifdef _WIN32
+    char pattern[1088]; /* app-data recovery folder (< GUI_PATHS_MAX) + "\\*"; truncation -> open fails -> false */
+    int np = snprintf(pattern, sizeof pattern, "%s\\*", dir);
+    if (np <= 0 || (size_t)np >= sizeof pattern) {
+        return false;
+    }
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) {
+        return false; /* dir-open failure -> out left as-is */
+    }
+    do {
+        const char *name = fd.cFileName;
+        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
+            continue;
+        }
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            continue; /* regular files only */
+        }
+        if (!name_has_suffix(name, suf)) {
+            continue;
+        }
+        (void)str_list_push(out, name); /* OOM -> skip this name (best-effort) */
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+    return true;
+#else
+    DIR *d = opendir(dir);
+    if (!d) {
+        return false; /* dir-open failure -> out left as-is */
+    }
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        const char *name = de->d_name;
+        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
+            continue;
+        }
+        char child_abs[1400]; /* dir (< GUI_PATHS_MAX) + '/' + name (<= NAME_MAX); truncation -> stat fails -> skip */
+        int nc = snprintf(child_abs, sizeof child_abs, "%s/%s", dir, name);
+        if (nc <= 0 || (size_t)nc >= (int)sizeof child_abs) {
+            continue;
+        }
+        struct stat st;
+        if (stat(child_abs, &st) != 0) {
+            continue;
+        }
+        if (S_ISDIR(st.st_mode)) {
+            continue; /* regular files only (skip subdirectories) */
+        }
+        if (!name_has_suffix(name, suf)) {
+            continue;
+        }
+        (void)str_list_push(out, name);
+    }
+    closedir(d);
+    return true;
+#endif
+}
+
+void tp_str_list_free(tp_str_list *out) {
+    if (!out) {
+        return;
+    }
+    for (int i = 0; i < out->count; i++) {
+        free(out->items[i]);
+    }
+    free(out->items);
+    out->items = NULL;
+    out->count = 0;
+    out->cap = 0;
 }
 
 bool tp_scan_is_dir(const char *abs) {
