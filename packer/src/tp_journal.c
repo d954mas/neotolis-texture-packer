@@ -289,10 +289,15 @@ tp_status tp_journal_set_metadata(tp_journal *j, int64_t timestamp, const char *
     if (!j) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "null journal");
     }
-    /* R5a fix [2] (write-first, mirror tp_journal_append_txn): pre-allocate the cache dups, write the
-     * durable record FROM THE ARGS, and commit the cache ONLY on a successful durable write. A failed
-     * durable write leaves j->meta_* + has_meta UNTOUCHED, so the metadata the API reported as failed is
-     * never later re-emitted by compaction (NULL -> "", both may be empty). */
+    /* R5b-1 fix (cache-authoritative + best-effort durable; mirrors tp_journal_compact's re-emit):
+     * metadata is INFORMATIONAL and the in-memory cache is the SOURCE OF TRUTH for what the next
+     * compaction persists; the durable META append is a best-effort bonus for crash-before-compaction.
+     * COMMIT THE CACHE FIRST (only OOM on the dups can fail it), then attempt the durable append and
+     * SWALLOW a healthy-journal failure exactly like tp_journal_compact does -- write_record already
+     * rolled the torn record back, so the store stays fully recoverable and the cache still holds the
+     * truth (the next compaction re-emits it). Return an error ONLY when the journal is genuinely
+     * degraded (write_record could NOT roll back -> self-poisoned) or OOM, so a caller's "recovery
+     * degraded" surfacing fires only on REAL loss, never on a transient meta hiccup. */
     char *pdup = jrn_strdup(path ? path : "");
     if (!pdup) {
         return tp_error_set(err, TP_STATUS_OOM, "journal metadata path allocation failed");
@@ -302,19 +307,19 @@ tp_status tp_journal_set_metadata(tp_journal *j, int64_t timestamp, const char *
         free(pdup);
         return tp_error_set(err, TP_STATUS_OOM, "journal metadata name allocation failed");
     }
-    tp_status st = write_meta_record(j, timestamp, path ? path : "", name ? name : "", err);
-    if (st != TP_STATUS_OK) {
-        free(pdup);
-        free(ndup);
-        return st; /* cache + has_meta UNTOUCHED on failure */
-    }
     free(j->meta_path);
     free(j->meta_name);
     j->meta_path = pdup;
     j->meta_name = ndup;
     j->meta_time = timestamp;
     j->has_meta = true;
-    return TP_STATUS_OK;
+    tp_error mde = {0}; /* LOCAL: a swallowed best-effort failure must not pollute the caller's err */
+    tp_status ms = write_meta_record(j, timestamp, pdup, ndup, &mde);
+    if (ms != TP_STATUS_OK && j->poisoned) {
+        /* rollback failed -> store genuinely corrupt/degraded -> propagate so the caller may surface it */
+        return tp_error_set(err, ms, "%s", mde.msg[0] ? mde.msg : "journal metadata durable write failed");
+    }
+    return TP_STATUS_OK; /* healthy journal: the cache holds the identity; the next compaction persists it */
 }
 
 tp_status tp_journal_init_checkpoint(tp_journal *j, const uint8_t *snapshot, size_t len, int64_t revision,

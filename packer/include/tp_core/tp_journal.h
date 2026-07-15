@@ -138,13 +138,17 @@ tp_status tp_journal_append_txn(tp_journal *j, const char *id_hex, int64_t revis
                                 size_t len, tp_error *err);
 
 /* R5a: record the owning project's metadata {timestamp, path, name} so a startup scan can list
- * this journal's crashed project by path + name + time. Caches the values on the journal (owned
- * strdup'd copies, replacing any prior) and durably APPENDS a metadata record via the normal frame
- * path -- the same fail-closed / poison discipline as tp_journal_append_txn (a poisoned journal or a
- * failed write returns TP_STATUS_JOURNAL_FAILED, nothing partially durable). The cached metadata is
- * re-emitted by tp_journal_compact so it survives a Save/undo compaction. `path`/`name` are UTF-8 and
- * may be empty (untitled project -> path ""); NULL is treated as "". `timestamp` is a caller-supplied
- * unix-seconds value (core stays deterministic -- it never calls time()). NULL journal -> INVALID_ARGUMENT. */
+ * this journal's crashed project by path + name + time. Metadata is INFORMATIONAL and
+ * CACHE-AUTHORITATIVE: this caches the values on the journal (owned strdup'd copies, replacing any
+ * prior) as the source of truth for what the next compaction persists, then makes a BEST-EFFORT
+ * durable append via the normal frame path. It persists immediately if the append succeeds; if a
+ * healthy journal's append fails it is SWALLOWED (write_record rolled the torn record back, the store
+ * stays recoverable) and the cache is re-emitted at the next tp_journal_compact (Save/undo). Returns
+ * an error ONLY on OOM (the dups) or a GENUINELY POISONED journal (a torn append that could not roll
+ * back) -- never on a transient healthy-journal write hiccup -- so a caller's "recovery degraded"
+ * surfacing fires only on real loss. `path`/`name` are UTF-8 and may be empty (untitled project ->
+ * path ""); NULL is treated as "". `timestamp` is a caller-supplied unix-seconds value (core stays
+ * deterministic -- it never calls time()). NULL journal -> INVALID_ARGUMENT. */
 tp_status tp_journal_set_metadata(tp_journal *j, int64_t timestamp, const char *path, const char *name,
                                   tp_error *err);
 

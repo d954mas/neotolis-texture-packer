@@ -1837,22 +1837,26 @@ void test_compact_meta_reemit_failure_keeps_recovery(void) {
     tp_journal_destroy(j2);
 }
 
-/* [2] a failed durable set_metadata must NOT commit the cache (else a later compaction re-emits metadata
- * the API reported as failed). Fail the next durable write, call set_metadata -> JOURNAL_FAILED; then
- * compact + recover -> the failed metadata is NOT present. FAILS pre-fix (cache updated before the write,
- * so has_meta stayed true and compaction re-emitted the "ghost" metadata). */
-void test_set_metadata_write_failure_no_effect(void) {
+/* [2] R5b-1 fix (FLIPPED contract): metadata is CACHE-AUTHORITATIVE + best-effort durable. A HEALTHY
+ * journal whose durable META write transiently fails must SWALLOW the failure -- return TP_STATUS_OK,
+ * stay NOT poisoned, and KEEP the identity in the cache -- so the NEXT compaction persists it (the cache
+ * is the source of truth, the durable append a best-effort bonus). Fail exactly the META write (rollback
+ * is a truncate -> journal not poisoned), assert set_metadata returns OK + not poisoned; then (fault
+ * exhausted) compact + recover -> the metadata IS present. Proves the corrected best-effort contract
+ * (the OLD write-first contract returned JOURNAL_FAILED here and dropped the metadata). */
+void test_set_metadata_write_failure_still_caches(void) {
     tp_id128 key = key_of(0xA1);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io); /* header + initial checkpoint durably written */
     tp_error err;
 
-    tp_journal_io_memory__fail_next_writes(io, 1); /* the META record write fails (header already present) */
+    tp_journal_io_memory__fail_next_writes(io, 1); /* fail ONLY the META durable write (header present) */
     TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_JOURNAL_FAILED,
-        tp_journal_set_metadata(m->journal, 1700000000, "/should/not/persist.ntpacker", "ghost", &err));
+        TP_STATUS_OK, /* healthy-journal swallow: cache committed, durable append best-effort */
+        tp_journal_set_metadata(m->journal, 1700000000, "/still/caches.ntpacker", "cached", &err));
+    TEST_ASSERT_FALSE(tp_journal__is_poisoned(m->journal)); /* torn META rolled back -> journal healthy */
 
-    /* The failed set did not commit -> compaction re-emits NO metadata. */
+    /* Fault exhausted -> compaction re-emits the cached (authoritative) metadata durably. */
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_compact_journal(m, &err));
     size_t blen = 0;
     uint8_t *bytes = snapshot_io(io, &blen);
@@ -1865,7 +1869,10 @@ void test_set_metadata_write_failure_no_effect(void) {
     memset(&info, 0, sizeof info);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_recover(io2, key, &m2, &info, &err));
     TEST_ASSERT_NOT_NULL(m2);
-    TEST_ASSERT_FALSE(info.has_metadata); /* the failed metadata never took effect */
+    TEST_ASSERT_TRUE(info.has_metadata); /* the cache was authoritative -> compaction persisted it */
+    TEST_ASSERT_EQUAL_INT64(1700000000, info.metadata.timestamp);
+    TEST_ASSERT_EQUAL_STRING("/still/caches.ntpacker", info.metadata.path);
+    TEST_ASSERT_EQUAL_STRING("cached", info.metadata.name);
     tp_journal_recovery_free(&info);
     tp_model_destroy(m2);
 }
@@ -2126,7 +2133,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_peek_empty);
     /* R5a fix round: adversarial-review findings [0][1][2][3][5] */
     RUN_TEST(test_compact_meta_reemit_failure_keeps_recovery);
-    RUN_TEST(test_set_metadata_write_failure_no_effect);
+    RUN_TEST(test_set_metadata_write_failure_still_caches);
     RUN_TEST(test_peek_agrees_recover_torn_tail);
     RUN_TEST(test_peek_agrees_recover_midstream_corrupt);
     RUN_TEST(test_recovered_metadata_survives_recompaction);

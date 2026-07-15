@@ -180,6 +180,12 @@ static void set_path(const char *path) {
      * guard + the no-op-on-no-journal glue keep a stray call (recovery off / journal-less) safe. */
     if (s_model && recovery_active()) {
         tp_error mde = {0};
+        /* R5b-1 finding [5] (ACCEPTED): on Save-As this durable META append is immediately followed by
+         * tp_model_compact_journal, which truncates + re-emits it -- one redundant small write+fsync per
+         * Save. DELIBERATE: writing durable metadata at every identity change means unsaved work that
+         * crashes BEFORE the Save still carries a scan label; the compaction re-emit is unavoidable
+         * without a cache-only entry point that would complicate the single set_path chokepoint. Save is
+         * user-initiated (not hot) -> the extra fsync is negligible. */
         if (tp_model_set_recovery_metadata(s_model, (int64_t)time(NULL), s_path, s_name, &mde) != TP_STATUS_OK) {
             note_recovery_degraded(mde.msg[0] ? mde.msg : "could not record recovery metadata");
         }
@@ -801,17 +807,34 @@ static bool try_adopt_recovered(void) {
     memset(&info, 0, sizeof info);
     tp_error err = {0};
     tp_status st = tp_model_recover(io, recovery_key(), &rm, &info, &err); /* TAKES OWNERSHIP of io */
+    /* R5b-1 finding [3]: CAPTURE the crashed project's recovery identity {path, name, time} BEFORE
+     * tp_journal_recovery_free frees info.metadata. The FRESH (adopted) journal must carry the ORIGINAL
+     * path/name so R5b-2's startup scan + R6's "Save (backup original)" see the recovered project's real
+     * identity -- even though the LIVE window stays untitled. strdup the strings (guard NULL as "");
+     * an OOM capturing the label just drops the (informational) carry -- never crash recovery. */
+    bool had_meta = info.has_metadata;
+    char *rec_path = dupstr(info.metadata.path ? info.metadata.path : "");
+    char *rec_name = dupstr(info.metadata.name ? info.metadata.name : "");
+    if (!rec_path || !rec_name) {
+        had_meta = false; /* capture OOM -> skip the carry (still freed below; free(NULL) is safe) */
+    }
     tp_journal_recovery_free(&info);                                       /* frees the recovered snapshot copy */
     if (st != TP_STATUS_OK || !rm) {
+        free(rec_path);
+        free(rec_name);
         return false; /* nothing recoverable (empty/bad-header/stale-key/torn-first) -> fresh init */
     }
     /* Clone the recovered STATE, then discard rm (its journal may be poisoned + its index stale). */
     tp_project *recovered = tp_project_clone(tp_model_project(rm));
     tp_model_destroy(rm); /* drops the recovered journal (poisoned or not) + closes the slot handle */
     if (!recovered) {
+        free(rec_path);
+        free(rec_name);
         return false; /* clone OOM -> fall back to a fresh init (never crash on recovery) */
     }
     if (!wrap_model(recovered)) {
+        free(rec_path);
+        free(rec_name);
         return false; /* wrap OOM -> recovered freed by wrap_model; fall back to a fresh init */
     }
     /* wrap_model attached a FRESH journal at the reset slot (empty id-index, not poisoned) with a
@@ -823,6 +846,22 @@ static bool try_adopt_recovered(void) {
      * boundary rules.) */
     s_model->recovered_unsaved = true;
     set_path("");        /* recovered work is untitled -> a deliberate Save As is required */
+    /* R5b-1 finding [3]: set_path("") just stamped the UNTITLED label into the fresh journal; OVERRIDE
+     * it with the recovered project's ORIGINAL identity so the scan + R6 can find/name the crashed work.
+     * The LIVE window stays untitled (s_path=="" / s_name=="untitled" are untouched -- this writes ONLY
+     * the JOURNAL metadata; that split is intentional: live identity vs recovery-scan identity). Skip when
+     * the recovered project was itself untitled (empty path) -> keep set_path("")'s untitled label. Uses
+     * time(NULL): the scan wants when this recovered session was last touched (NOW), not the crash time.
+     * Non-fatal + informational: with the cache-authoritative fix a healthy journal returns OK; only a
+     * genuine poison surfaces via the soft channel. */
+    if (had_meta && rec_path[0] != '\0') {
+        tp_error rme = {0};
+        if (tp_model_set_recovery_metadata(s_model, (int64_t)time(NULL), rec_path, rec_name, &rme) != TP_STATUS_OK) {
+            note_recovery_degraded(rme.msg[0] ? rme.msg : "could not carry the recovered project identity");
+        }
+    }
+    free(rec_path);
+    free(rec_name);
     s_preview_stale = true;
     recompute_dirty();   /* recovered_unsaved == true -> dirty (independent of identity) */
     s_recovery_notice = true; /* surfaced once by the UI (gui_project_take_recovery_notice) */

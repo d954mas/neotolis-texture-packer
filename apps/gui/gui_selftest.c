@@ -1870,6 +1870,76 @@ void run_selftest(void) {
         (void)remove(j16lock);
         (void)remove(j16save);
 
+        /* (J17) R5b-1 finding [3] ADOPT-CARRY: adopting a metadata-bearing crashed slot must carry the
+         *      ORIGINAL project identity onto the FRESH (adopted) journal -- so R5b-2's scan + R6's "Save
+         *      (backup original)" see the real path/name -- while the LIVE window stays UNTITLED (a
+         *      deliberate Save As still required). Session 1: Save-As to a known path (journal META = that
+         *      identity), then an edit (unsaved recovered work), crash. Session 2: adopt. Assert the live
+         *      window is untitled (has_path false / name "untitled") YET the fresh journal's META (peeked
+         *      on a closed slot -- the R5b-2 scan primitive) carries the ORIGINAL saved path + basename,
+         *      NOT "untitled"/"" (pre-fix the adopt freed info.metadata unread and set_path("") stamped
+         *      untitled into the fresh journal, discarding the crashed project's identity). Isolated slot. */
+        char j17slot[1200];
+        char j17lock[1210];
+        char j17save[1200];
+        (void)snprintf(j17slot, sizeof j17slot, "%s/selftest_adopt_meta.ntpjournal", s_exe_dir);
+        (void)snprintf(j17lock, sizeof j17lock, "%s.lock", j17slot);
+        (void)snprintf(j17save, sizeof j17save, "%s/selftest_adopt_meta_proj.ntpacker_project", s_exe_dir);
+        gui_project_enable_recovery(""); /* disable first so no teardown deletes a slot */
+        gui_project_shutdown();
+        (void)remove(j17slot);
+        (void)remove(j17lock);
+        (void)remove(j17save);
+
+        /* Session 1: journaled session -> Save-As (journal META = saved identity) -> edit (unsaved
+         * recovered work) -> crash (disable + shutdown -> slot survives, handle closed). */
+        gui_project_enable_recovery(j17slot);
+        gui_project_init();
+        char j17err[256] = {0};
+        const tp_status j17sv = gui_project_save_as(j17save, j17err, sizeof j17err);
+        nt_log_info("SELFTEST: J17 session-1 save-as st=%s name='%s' err='%s'", tp_status_str(j17sv),
+                    gui_project_display_name(), j17err);
+        NT_ASSERT(j17sv == TP_STATUS_OK && "J17: session-1 Save-As records the project identity into the journal");
+        NT_ASSERT(gui_project_set_atlas_name(0, "adopt_meta_edit") &&
+                  "J17: an edit after Save -> unsaved recovered work ahead of the file");
+        gui_project_enable_recovery("");
+        gui_project_shutdown();
+
+        /* Session 2 (restart after crash): adopt the slot. The LIVE window must be UNTITLED, but the
+         * FRESH journal must CARRY the original saved identity. */
+        gui_project_enable_recovery(j17slot);
+        gui_project_init();
+        char j17note[256] = {0};
+        const bool j17_notice = gui_project_take_recovery_notice(j17note, sizeof j17note);
+        nt_log_info("SELFTEST: J17 adopt notice=%d live_has_path=%d live_name='%s' (want 1,0,'untitled')",
+                    j17_notice, (int)gui_project_has_path(), gui_project_display_name());
+        NT_ASSERT(j17_notice && "J17: the metadata-bearing slot was adopted (recovery notice raised)");
+        NT_ASSERT(!gui_project_has_path() &&
+                  "J17: the adopted LIVE window stays untitled (no path -> a deliberate Save As is required)");
+        NT_ASSERT(strcmp(gui_project_display_name(), "untitled") == 0 &&
+                  "J17: the adopted LIVE window display name is 'untitled'");
+        gui_project_enable_recovery(""); /* crash-sim again: keep the fresh journal slot so we can peek it */
+        gui_project_shutdown();
+        {
+            tp_journal_peek_result pk;
+            memset(&pk, 0, sizeof pk);
+            tp_error pkerr = {0};
+            const tp_status pst = tp_journal_peek(tp_journal_io_file(j17slot), &pk, &pkerr);
+            nt_log_info("SELFTEST: J17 adopt-carry peek st=%s has_meta=%d name='%s' path='%s' (want OK,1,saved-basename,saved-path)",
+                        tp_status_str(pst), (int)pk.has_meta, pk.meta.name ? pk.meta.name : "(null)",
+                        pk.meta.path ? pk.meta.path : "(null)");
+            NT_ASSERT(pst == TP_STATUS_OK && "J17: peek reads the closed adopted slot");
+            NT_ASSERT(pk.has_meta && "J17: the adopted fresh journal carries a METADATA record");
+            NT_ASSERT(pk.meta.name && strcmp(pk.meta.name, "selftest_adopt_meta_proj.ntpacker_project") == 0 &&
+                      "J17: the fresh journal META name == the ORIGINAL saved basename (carried, NOT 'untitled')");
+            NT_ASSERT(pk.meta.path && strcmp(pk.meta.path, j17save) == 0 &&
+                      "J17: the fresh journal META path == the ORIGINAL saved path (carried, NOT '')");
+            tp_journal_peek_free(&pk);
+        }
+        (void)remove(j17slot);
+        (void)remove(j17lock);
+        (void)remove(j17save);
+
         /* Done: disable recovery + release any lock + restore a journal-LESS packable project for the
          * render phases. */
         gui_project_enable_recovery("");
