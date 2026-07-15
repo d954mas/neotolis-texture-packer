@@ -6,7 +6,7 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "ntpacker-gui",
+            "name": "ntpacker-gui (debug)",
             "type": "cppvsdbg",
             "request": "launch",
             "program": "${workspaceFolder}/build/apps/gui/native-debug/ntpacker-gui.exe",
@@ -14,6 +14,16 @@
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
             "preLaunchTask": "build (native-debug)"
+        },
+        {
+            "name": "ntpacker-gui (release)",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/apps/gui/native-release/ntpacker-gui.exe",
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "preLaunchTask": "build (native-release)"
         }
     ]
 }
