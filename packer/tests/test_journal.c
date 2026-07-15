@@ -638,25 +638,64 @@ void test_recover_arbitrary_bytes(void) {
     tp_journal_destroy(j);
 }
 
-/* ---- bad header (wrong magic / version) ---------------------------------- */
-
-void test_bad_header(void) {
+/* ---- bad header: BAD_MAGIC (foreign) vs VERSION_MISMATCH (our file, wrong format) ------ *
+ * R5a plan item 7: the old conflated BAD_HEADER splits so the R5b scan distinguishes a foreign file
+ * from an out-of-date recovery journal. Both keep the old semantics (nothing recovered, bytes on disk
+ * preserved, return OK) -- only the classification splits. recover AND peek must agree per case. */
+void test_bad_magic_vs_version_mismatch(void) {
     tp_id128 key = key_of(0x67);
-    uint8_t hdr[TP_JRN_HEADER_LEN];
-    memset(hdr, 0, sizeof hdr);
-    memcpy(hdr, tp_jrn_magic, TP_JRN_MAGIC_LEN);
-    tp_jrn_put_u32(hdr + TP_JRN_MAGIC_LEN, 999u); /* unknown version -> never guess */
-    memcpy(hdr + TP_JRN_KEY_OFF, key.bytes, 16);
-    tp_journal_io io = io_from_bytes(hdr, sizeof hdr);
+    tp_error err;
+
+    /* (1) BAD_MAGIC: a complete header whose magic is not "NTPKJRNL" -> not our file. */
+    uint8_t bad_magic[TP_JRN_HEADER_LEN];
+    memset(bad_magic, 0, sizeof bad_magic);
+    memcpy(bad_magic, tp_jrn_magic, TP_JRN_MAGIC_LEN);
+    bad_magic[0] = (uint8_t)(bad_magic[0] ^ 0xFFu); /* corrupt one magic byte */
+    tp_jrn_put_u32(bad_magic + TP_JRN_MAGIC_LEN, (uint32_t)TP_JOURNAL_FORMAT_VERSION);
+    memcpy(bad_magic + TP_JRN_KEY_OFF, key.bytes, 16);
+
+    tp_journal_io io = io_from_bytes(bad_magic, sizeof bad_magic);
     tp_journal *j = tp_journal_create(io, key);
     TEST_ASSERT_NOT_NULL(j);
     tp_journal_recovery rec;
     memset(&rec, 0, sizeof rec);
-    tp_error err;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_recover(j, &rec, &err));
-    TEST_ASSERT_EQUAL_INT(TP_JOURNAL_RECOVERY_BAD_HEADER, rec.status);
+    TEST_ASSERT_EQUAL_INT(TP_JOURNAL_RECOVERY_BAD_MAGIC, rec.status);
+    TEST_ASSERT_EQUAL_INT(0, rec.records_recovered); /* nothing recovered */
+    TEST_ASSERT_EQUAL_INT64((int64_t)sizeof bad_magic, (int64_t)rec.bytes_total); /* bytes preserved */
     tp_journal_recovery_free(&rec);
     tp_journal_destroy(j);
+
+    tp_journal_peek_result pk;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_peek(io_from_bytes(bad_magic, sizeof bad_magic), &pk, &err));
+    TEST_ASSERT_EQUAL_INT(TP_JOURNAL_RECOVERY_BAD_MAGIC, pk.status);
+    TEST_ASSERT_EQUAL_INT(0, pk.record_count);
+    tp_journal_peek_free(&pk);
+
+    /* (2) VERSION_MISMATCH: a valid "NTPKJRNL" header whose format_version is not the current one. */
+    uint8_t bad_ver[TP_JRN_HEADER_LEN];
+    memset(bad_ver, 0, sizeof bad_ver);
+    memcpy(bad_ver, tp_jrn_magic, TP_JRN_MAGIC_LEN);
+    tp_jrn_put_u32(bad_ver + TP_JRN_MAGIC_LEN, 999u); /* unknown version -> never guess */
+    memcpy(bad_ver + TP_JRN_KEY_OFF, key.bytes, 16);
+
+    tp_journal_io io2 = io_from_bytes(bad_ver, sizeof bad_ver);
+    tp_journal *j2 = tp_journal_create(io2, key);
+    TEST_ASSERT_NOT_NULL(j2);
+    tp_journal_recovery rec2;
+    memset(&rec2, 0, sizeof rec2);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_recover(j2, &rec2, &err));
+    TEST_ASSERT_EQUAL_INT(TP_JOURNAL_RECOVERY_VERSION_MISMATCH, rec2.status);
+    TEST_ASSERT_EQUAL_INT(0, rec2.records_recovered); /* nothing recovered */
+    TEST_ASSERT_EQUAL_INT64((int64_t)sizeof bad_ver, (int64_t)rec2.bytes_total); /* bytes preserved */
+    tp_journal_recovery_free(&rec2);
+    tp_journal_destroy(j2);
+
+    tp_journal_peek_result pk2;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_peek(io_from_bytes(bad_ver, sizeof bad_ver), &pk2, &err));
+    TEST_ASSERT_EQUAL_INT(TP_JOURNAL_RECOVERY_VERSION_MISMATCH, pk2.status);
+    TEST_ASSERT_EQUAL_UINT32(999u, pk2.format_version); /* peek reports the header version */
+    tp_journal_peek_free(&pk2);
 }
 
 /* ---- poison on failed rollback: a torn tail that cannot be truncated ----- */
@@ -1050,7 +1089,7 @@ void test_torn_header_reinitializable(void) {
     tp_journal_destroy(j2);
 
     /* Preserve the real protection: a COMPLETE but foreign header (wrong magic) is
-     * REFUSED (BAD_HEADER), never reset. */
+     * REFUSED (BAD_MAGIC -- not our file), never reset. */
     uint8_t foreign[TP_JRN_HEADER_LEN];
     memset(foreign, 0, sizeof foreign); /* all-zero magic = not "NTPKJRNL" */
     tp_jrn_put_u32(foreign + TP_JRN_MAGIC_LEN, (uint32_t)TP_JOURNAL_FORMAT_VERSION);
@@ -1061,7 +1100,7 @@ void test_torn_header_reinitializable(void) {
     tp_journal_recovery rec3;
     memset(&rec3, 0, sizeof rec3);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_recover(j3, &rec3, &err));
-    TEST_ASSERT_EQUAL_INT(TP_JOURNAL_RECOVERY_BAD_HEADER, rec3.status);
+    TEST_ASSERT_EQUAL_INT(TP_JOURNAL_RECOVERY_BAD_MAGIC, rec3.status);
     tp_journal_recovery_free(&rec3);
     tp_journal_destroy(j3);
 }
@@ -1443,6 +1482,244 @@ void test_journal_redo_recovers_redone_state(void) {
     tp_model_destroy(m2);
 }
 
+/* ==== R5a: journal metadata record + peek API ============================== */
+
+/* R5a: a metadata record {timestamp, path, name} round-trips through recovery, and does NOT disturb
+ * replay -- the rename still applies and the revision is right (META is captured-and-skipped). */
+void test_metadata_roundtrip(void) {
+    tp_id128 key = key_of(0x90);
+    tp_journal_io io;
+    tp_model *m = model_with_journal(key, &io);
+    tp_error err;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_journal_set_metadata(m->journal, 1700000000, "/foo/bar.ntpacker", "bar", &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "90000000000000000000000000000001", 0, "renamed"));
+    char *expected = serialize(tp_model_project(m));
+    int64_t exp_rev = tp_model_revision(m);
+    TEST_ASSERT_EQUAL_INT64(1, exp_rev);
+
+    size_t blen = 0;
+    uint8_t *bytes = snapshot_io(io, &blen);
+    tp_model_destroy(m);
+
+    tp_journal_io io2 = io_from_bytes(bytes, blen);
+    free(bytes);
+    tp_model *m2 = NULL;
+    tp_journal_recovery info;
+    memset(&info, 0, sizeof info);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_recover(io2, key, &m2, &info, &err));
+    TEST_ASSERT_NOT_NULL(m2);
+
+    /* metadata recovered exactly */
+    TEST_ASSERT_TRUE(info.has_metadata);
+    TEST_ASSERT_EQUAL_INT64(1700000000, info.metadata.timestamp);
+    TEST_ASSERT_EQUAL_STRING("/foo/bar.ntpacker", info.metadata.path);
+    TEST_ASSERT_EQUAL_STRING("bar", info.metadata.name);
+
+    /* state still recovers correctly (META did not disturb the txn replay) */
+    TEST_ASSERT_EQUAL_INT64(exp_rev, tp_model_revision(m2));
+    char *got = serialize(tp_model_project(m2));
+    TEST_ASSERT_EQUAL_STRING(expected, got);
+    TEST_ASSERT_EQUAL_STRING("renamed", tp_model_project(m2)->atlases[0].name);
+
+    free(expected);
+    free(got);
+    tp_journal_recovery_free(&info);
+    tp_model_destroy(m2);
+}
+
+/* R5a: an untitled project (empty path + name) round-trips as empty strings, not NULL. */
+void test_metadata_empty_path(void) {
+    tp_id128 key = key_of(0x91);
+    tp_journal_io io;
+    tp_model *m = model_with_journal(key, &io);
+    tp_error err;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_set_metadata(m->journal, 42, "", "", &err));
+    size_t blen = 0;
+    uint8_t *bytes = snapshot_io(io, &blen);
+    tp_model_destroy(m);
+
+    tp_journal_io io2 = io_from_bytes(bytes, blen);
+    free(bytes);
+    tp_model *m2 = NULL;
+    tp_journal_recovery info;
+    memset(&info, 0, sizeof info);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_recover(io2, key, &m2, &info, &err));
+    TEST_ASSERT_NOT_NULL(m2);
+    TEST_ASSERT_TRUE(info.has_metadata);
+    TEST_ASSERT_EQUAL_INT64(42, info.metadata.timestamp);
+    TEST_ASSERT_NOT_NULL(info.metadata.path);
+    TEST_ASSERT_NOT_NULL(info.metadata.name);
+    TEST_ASSERT_EQUAL_STRING("", info.metadata.path);
+    TEST_ASSERT_EQUAL_STRING("", info.metadata.name);
+    tp_journal_recovery_free(&info);
+    tp_model_destroy(m2);
+}
+
+/* R5a: two metadata records -> recovery yields the SECOND (last-wins), no leak of the first. */
+void test_metadata_last_wins(void) {
+    tp_id128 key = key_of(0x92);
+    tp_journal_io io;
+    tp_model *m = model_with_journal(key, &io);
+    tp_error err;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_set_metadata(m->journal, 100, "/old/path.ntpacker", "old", &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_set_metadata(m->journal, 200, "/new/path.ntpacker", "new", &err));
+    size_t blen = 0;
+    uint8_t *bytes = snapshot_io(io, &blen);
+    tp_model_destroy(m);
+
+    tp_journal_io io2 = io_from_bytes(bytes, blen);
+    free(bytes);
+    tp_model *m2 = NULL;
+    tp_journal_recovery info;
+    memset(&info, 0, sizeof info);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_recover(io2, key, &m2, &info, &err));
+    TEST_ASSERT_NOT_NULL(m2);
+    TEST_ASSERT_TRUE(info.has_metadata);
+    TEST_ASSERT_EQUAL_INT64(200, info.metadata.timestamp);
+    TEST_ASSERT_EQUAL_STRING("/new/path.ntpacker", info.metadata.path);
+    TEST_ASSERT_EQUAL_STRING("new", info.metadata.name);
+    tp_journal_recovery_free(&info);
+    tp_model_destroy(m2);
+}
+
+/* R5a: metadata survives compaction -- compact re-emits the cached META record, so recovery from the
+ * compacted store still carries it AND recovers the post-compaction state. */
+void test_metadata_survives_compaction(void) {
+    tp_id128 key = key_of(0x93);
+    tp_journal_io io;
+    tp_model *m = model_with_journal(key, &io);
+    tp_error err;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_journal_set_metadata(m->journal, 1700001234, "/proj/p.ntpacker", "p", &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "93000000000000000000000000000001", 0, "one"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "93000000000000000000000000000002", 1, "two"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_compact_journal(m, &err));
+    char *expected = serialize(tp_model_project(m));
+    int64_t exp_rev = tp_model_revision(m);
+
+    size_t blen = 0;
+    uint8_t *bytes = snapshot_io(io, &blen);
+    tp_model_destroy(m);
+
+    tp_journal_io io2 = io_from_bytes(bytes, blen);
+    free(bytes);
+    tp_model *m2 = NULL;
+    tp_journal_recovery info;
+    memset(&info, 0, sizeof info);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_recover(io2, key, &m2, &info, &err));
+    TEST_ASSERT_NOT_NULL(m2);
+    /* compacted store = header + one checkpoint + the re-emitted META (no post-checkpoint ops) */
+    TEST_ASSERT_EQUAL_INT(1, info.records_recovered);
+    TEST_ASSERT_EQUAL_INT(0, (int)info.op_count);
+    /* metadata still present after compaction */
+    TEST_ASSERT_TRUE(info.has_metadata);
+    TEST_ASSERT_EQUAL_INT64(1700001234, info.metadata.timestamp);
+    TEST_ASSERT_EQUAL_STRING("/proj/p.ntpacker", info.metadata.path);
+    TEST_ASSERT_EQUAL_STRING("p", info.metadata.name);
+    /* state == post-compaction state */
+    TEST_ASSERT_EQUAL_INT64(exp_rev, tp_model_revision(m2));
+    char *got = serialize(tp_model_project(m2));
+    TEST_ASSERT_EQUAL_STRING(expected, got);
+
+    free(expected);
+    free(got);
+    tp_journal_recovery_free(&info);
+    tp_model_destroy(m2);
+}
+
+/* R5a: peek reads header + metadata + status WITHOUT building a model. A journal with metadata + a
+ * checkpoint + a txn -> status OK, has_checkpoint true, record_count 2 (META excluded), key matches,
+ * meta exact. */
+void test_peek_metadata(void) {
+    tp_id128 key = key_of(0x94);
+    tp_journal_io io;
+    tp_model *m = model_with_journal(key, &io);
+    tp_error err;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_journal_set_metadata(m->journal, 1700005555, "/scan/proj.ntpacker", "proj", &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "94000000000000000000000000000001", 0, "renamed"));
+    size_t blen = 0;
+    uint8_t *bytes = snapshot_io(io, &blen);
+    tp_model_destroy(m);
+
+    tp_journal_peek_result pk;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_peek(io_from_bytes(bytes, blen), &pk, &err));
+    free(bytes);
+    TEST_ASSERT_EQUAL_INT(TP_JOURNAL_RECOVERY_OK, pk.status);
+    TEST_ASSERT_TRUE(pk.has_checkpoint);
+    TEST_ASSERT_EQUAL_INT(2, pk.record_count); /* checkpoint + txn; META not counted */
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)TP_JOURNAL_FORMAT_VERSION, pk.format_version);
+    TEST_ASSERT_EQUAL_MEMORY(key.bytes, pk.key, 16);
+    TEST_ASSERT_TRUE(pk.has_meta);
+    TEST_ASSERT_EQUAL_INT64(1700005555, pk.meta.timestamp);
+    TEST_ASSERT_EQUAL_STRING("/scan/proj.ntpacker", pk.meta.path);
+    TEST_ASSERT_EQUAL_STRING("proj", pk.meta.name);
+    tp_journal_peek_free(&pk);
+}
+
+/* R5a: peek and recover agree on the same bytes -- same status + same metadata (peek shares recover's
+ * header-validate + frame-walk). */
+void test_peek_and_recover_agree(void) {
+    tp_id128 key = key_of(0x95);
+    tp_journal_io io;
+    tp_model *m = model_with_journal(key, &io);
+    tp_error err;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_journal_set_metadata(m->journal, 1700009999, "/agree/a.ntpacker", "a", &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "95000000000000000000000000000001", 0, "one"));
+    size_t blen = 0;
+    uint8_t *bytes = snapshot_io(io, &blen);
+    tp_model_destroy(m);
+
+    /* recover */
+    tp_journal_io io_r = io_from_bytes(bytes, blen);
+    tp_model *m2 = NULL;
+    tp_journal_recovery info;
+    memset(&info, 0, sizeof info);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_recover(io_r, key, &m2, &info, &err));
+    TEST_ASSERT_NOT_NULL(m2);
+
+    /* peek */
+    tp_journal_peek_result pk;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_peek(io_from_bytes(bytes, blen), &pk, &err));
+    free(bytes);
+
+    /* same status + same metadata */
+    TEST_ASSERT_EQUAL_INT(info.status, pk.status);
+    TEST_ASSERT_EQUAL_INT(TP_JOURNAL_RECOVERY_OK, pk.status);
+    TEST_ASSERT_EQUAL_INT(info.has_metadata ? 1 : 0, pk.has_meta ? 1 : 0);
+    TEST_ASSERT_TRUE(pk.has_meta);
+    TEST_ASSERT_EQUAL_INT64(info.metadata.timestamp, pk.meta.timestamp);
+    TEST_ASSERT_EQUAL_STRING(info.metadata.path, pk.meta.path);
+    TEST_ASSERT_EQUAL_STRING(info.metadata.name, pk.meta.name);
+
+    tp_journal_peek_free(&pk);
+    tp_journal_recovery_free(&info);
+    tp_model_destroy(m2);
+}
+
+/* R5a: peek a header-only journal -> EMPTY, has_checkpoint false, no metadata. */
+void test_peek_empty(void) {
+    tp_id128 key = key_of(0x96);
+    uint8_t hdr[TP_JRN_HEADER_LEN];
+    memset(hdr, 0, sizeof hdr);
+    memcpy(hdr, tp_jrn_magic, TP_JRN_MAGIC_LEN);
+    tp_jrn_put_u32(hdr + TP_JRN_MAGIC_LEN, (uint32_t)TP_JOURNAL_FORMAT_VERSION);
+    memcpy(hdr + TP_JRN_KEY_OFF, key.bytes, 16);
+
+    tp_error err;
+    tp_journal_peek_result pk;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_peek(io_from_bytes(hdr, sizeof hdr), &pk, &err));
+    TEST_ASSERT_EQUAL_INT(TP_JOURNAL_RECOVERY_EMPTY, pk.status);
+    TEST_ASSERT_FALSE(pk.has_checkpoint);
+    TEST_ASSERT_EQUAL_INT(0, pk.record_count);
+    TEST_ASSERT_FALSE(pk.has_meta);
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)TP_JOURNAL_FORMAT_VERSION, pk.format_version);
+    TEST_ASSERT_EQUAL_MEMORY(key.bytes, pk.key, 16);
+    tp_journal_peek_free(&pk);
+}
+
 int main(int argc, char **argv) {
     if (argc > 1) {
         g_dir = argv[1];
@@ -1460,7 +1737,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_checksum_mismatch);
     RUN_TEST(test_stale_key_not_applied);
     RUN_TEST(test_recover_arbitrary_bytes);
-    RUN_TEST(test_bad_header);
+    RUN_TEST(test_bad_magic_vs_version_mismatch);
     RUN_TEST(test_poison_on_truncate_failure);
     RUN_TEST(test_coordinator_ordering);
     RUN_TEST(test_coordinator_noop);
@@ -1484,5 +1761,13 @@ int main(int argc, char **argv) {
     /* R4: journal undo/redo via checkpoint-on-undo (P1-1) */
     RUN_TEST(test_journal_undo_recovers_undone_state);
     RUN_TEST(test_journal_redo_recovers_redone_state);
+    /* R5a: metadata record + peek API + BAD_HEADER split */
+    RUN_TEST(test_metadata_roundtrip);
+    RUN_TEST(test_metadata_empty_path);
+    RUN_TEST(test_metadata_last_wins);
+    RUN_TEST(test_metadata_survives_compaction);
+    RUN_TEST(test_peek_metadata);
+    RUN_TEST(test_peek_and_recover_agree);
+    RUN_TEST(test_peek_empty);
     return UNITY_END();
 }

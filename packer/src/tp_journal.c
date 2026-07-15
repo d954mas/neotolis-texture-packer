@@ -79,6 +79,12 @@ struct tp_journal {
     tp_id128 key;
     bool poisoned;     /* a failed append/tail-clean: refuse further appends */
     tp_idset ids;      /* retained-id index (shared set); mirrors the durable records */
+    /* R5a: cached project metadata (owned copies). Set by tp_journal_set_metadata and re-emitted by
+     * tp_journal_compact so it survives compaction. has_meta stays false until first set. */
+    int64_t meta_time;
+    char *meta_path;   /* owned; NULL until set (then never NULL, may be "") */
+    char *meta_name;   /* owned; NULL until set (then never NULL, may be "") */
+    bool has_meta;
 };
 
 tp_journal *tp_journal_create(tp_journal_io io, tp_id128 key) {
@@ -108,7 +114,33 @@ void tp_journal_destroy(tp_journal *j) {
         j->io.destroy(j->io.ctx);
     }
     tp_idset_dispose(&j->ids);
+    free(j->meta_path);
+    free(j->meta_name);
     free(j);
+}
+
+/* ---- small owned-string helpers (portable strdup; no POSIX strndup dependency) ---- */
+
+static char *jrn_strdup(const char *s) {
+    size_t n = strlen(s);
+    char *d = (char *)malloc(n + 1);
+    if (d) {
+        memcpy(d, s, n + 1);
+    }
+    return d;
+}
+
+/* Copy `n` raw bytes into a fresh NUL-terminated string (n may be 0 -> ""). NULL on OOM. */
+static char *jrn_dup_bytes(const uint8_t *p, size_t n) {
+    char *d = (char *)malloc(n + 1);
+    if (!d) {
+        return NULL;
+    }
+    if (n) {
+        memcpy(d, p, n);
+    }
+    d[n] = '\0';
+    return d;
 }
 
 static tp_status journal_fail(tp_error *err, const char *msg) {
@@ -217,6 +249,63 @@ static tp_status write_record(tp_journal *j, const uint8_t *payload, size_t payl
     return TP_STATUS_OK;
 }
 
+/* R5a: durably append a META record from the journal's cached metadata (payload:
+ * type(1)=3 | timestamp i64 | path_len u32 | path | name_len u32 | name -- all BE, no NUL on wire).
+ * Reuses write_record so it inherits the fail-closed / poison / rollback discipline. Caller ensures
+ * j->has_meta. */
+static tp_status write_meta_record(tp_journal *j, tp_error *err) {
+    size_t plen = j->meta_path ? strlen(j->meta_path) : 0;
+    size_t nlen = j->meta_name ? strlen(j->meta_name) : 0;
+    size_t payload_len = (size_t)TP_JRN_META_FIXED + plen + (size_t)TP_JRN_LEN_FIELD + nlen;
+    uint8_t *payload = (uint8_t *)malloc(payload_len);
+    if (!payload) {
+        return tp_error_set(err, TP_STATUS_OOM, "journal metadata payload allocation failed");
+    }
+    size_t off = 0;
+    payload[off++] = (uint8_t)TP_JRN_REC_META;
+    tp_jrn_put_i64(payload + off, j->meta_time);
+    off += 8;
+    tp_jrn_put_u32(payload + off, (uint32_t)plen);
+    off += 4;
+    if (plen) {
+        memcpy(payload + off, j->meta_path, plen);
+        off += plen;
+    }
+    tp_jrn_put_u32(payload + off, (uint32_t)nlen);
+    off += 4;
+    if (nlen) {
+        memcpy(payload + off, j->meta_name, nlen);
+    }
+    tp_status st = write_record(j, payload, payload_len, err);
+    free(payload);
+    return st;
+}
+
+tp_status tp_journal_set_metadata(tp_journal *j, int64_t timestamp, const char *path, const char *name,
+                                  tp_error *err) {
+    if (!j) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "null journal");
+    }
+    /* strdup into the cache FIRST (NULL -> "", both may be empty), replacing any prior copies, then
+     * append the durable record via the normal frame path (fail-closed exactly like append_txn). */
+    char *pdup = jrn_strdup(path ? path : "");
+    if (!pdup) {
+        return tp_error_set(err, TP_STATUS_OOM, "journal metadata path allocation failed");
+    }
+    char *ndup = jrn_strdup(name ? name : "");
+    if (!ndup) {
+        free(pdup);
+        return tp_error_set(err, TP_STATUS_OOM, "journal metadata name allocation failed");
+    }
+    free(j->meta_path);
+    free(j->meta_name);
+    j->meta_path = pdup;
+    j->meta_name = ndup;
+    j->meta_time = timestamp;
+    j->has_meta = true;
+    return write_meta_record(j, err);
+}
+
 tp_status tp_journal_init_checkpoint(tp_journal *j, const uint8_t *snapshot, size_t len, int64_t revision,
                                      tp_error *err) {
     if (!j) {
@@ -279,6 +368,17 @@ tp_status tp_journal_compact(tp_journal *j, const uint8_t *snapshot, size_t len,
         j->poisoned = true;
         return cs;
     }
+    /* R5a: re-emit the cached metadata so it survives the compaction (the truncate-to-0 dropped the
+     * old META record). Same fail-closed semantics as the checkpoint above: if the re-emit write
+     * fails the store is left checkpoint-only (no metadata) and the journal is poisoned so the glue
+     * detaches it rather than keep a journal that lost its scan metadata. */
+    if (j->has_meta) {
+        tp_status ms = write_meta_record(j, err);
+        if (ms != TP_STATUS_OK) {
+            j->poisoned = true;
+            return ms;
+        }
+    }
     return TP_STATUS_OK;
 }
 
@@ -339,15 +439,64 @@ void tp_journal_recovery_free(tp_journal_recovery *r) {
     free(r->ops);
     r->ops = NULL;
     r->op_count = 0;
+    free(r->metadata.path); /* R5a: owned metadata strings */
+    free(r->metadata.name);
+    r->metadata.path = NULL;
+    r->metadata.name = NULL;
+    r->has_metadata = false;
 }
 
-/* Decode one payload; register its ids into j; output the record type, the payload
- * SLICE offset (relative to payload start) + length + revision. For a CHECKPOINT the
- * slice is the project snapshot; for a TXN (format B) it is the serialized op-payload.
- * Returns TP_STATUS_OK on a good record, TP_STATUS_OOM on a hard fault (abort recovery),
- * or TP_STATUS_OUT_OF_BOUNDS for a malformed payload (a corruption boundary). All reads
+/* R5a: parse a META (type 3) payload -- type(1) | timestamp i64 | path_len u32 | path | name_len u32
+ * | name (all BE) -- into owned NUL-terminated strdup'd `*path`/`*name` copies + `*ts`. Every field
+ * is bounds-checked with size_t math before it is read. Returns TP_STATUS_OK (caller owns the
+ * strings), TP_STATUS_OUT_OF_BOUNDS for a malformed/short payload (a corruption boundary), or
+ * TP_STATUS_OOM. On any non-OK return the out strings are NULL (nothing leaks). Shared by recover + peek. */
+static tp_status parse_meta(const uint8_t *pl, size_t plen, int64_t *ts, char **path, char **name) {
+    *ts = 0;
+    *path = NULL;
+    *name = NULL;
+    if (plen < (size_t)TP_JRN_META_FIXED) {
+        return TP_STATUS_OUT_OF_BOUNDS; /* too short for type + timestamp + path_len */
+    }
+    *ts = tp_jrn_get_i64(pl + 1);
+    uint32_t path_len = tp_jrn_get_u32(pl + 9);
+    size_t off = (size_t)TP_JRN_META_FIXED;
+    if (plen - off < (size_t)path_len) {
+        return TP_STATUS_OUT_OF_BOUNDS; /* path overruns the payload */
+    }
+    char *p = jrn_dup_bytes(pl + off, (size_t)path_len);
+    if (!p) {
+        return TP_STATUS_OOM;
+    }
+    off += (size_t)path_len;
+    if (plen - off < (size_t)TP_JRN_LEN_FIELD) {
+        free(p);
+        return TP_STATUS_OUT_OF_BOUNDS; /* no room for name_len */
+    }
+    uint32_t name_len = tp_jrn_get_u32(pl + off);
+    off += (size_t)TP_JRN_LEN_FIELD;
+    if (plen - off < (size_t)name_len) {
+        free(p);
+        return TP_STATUS_OUT_OF_BOUNDS; /* name overruns the payload */
+    }
+    char *n = jrn_dup_bytes(pl + off, (size_t)name_len);
+    if (!n) {
+        free(p);
+        return TP_STATUS_OOM;
+    }
+    *path = p;
+    *name = n;
+    return TP_STATUS_OK;
+}
+
+/* Decode one payload; when `ids` is non-NULL register its ids into it; output the record type, the
+ * payload SLICE offset (relative to payload start) + length + revision. For a CHECKPOINT the slice is
+ * the project snapshot; for a TXN (format B) it is the serialized op-payload; a META record has no
+ * slice (0/0). `ids` NULL = classify + bounds-check only, no registration (peek shares this decoder,
+ * having no idset). Returns TP_STATUS_OK on a good record, TP_STATUS_OOM on a hard fault (abort), or
+ * TP_STATUS_OUT_OF_BOUNDS for a malformed/unknown payload (a corruption boundary). All reads
  * bounds-checked. */
-static tp_status decode_payload(tp_journal *j, const uint8_t *pl, size_t plen, uint8_t *rec_type, size_t *snap_off,
+static tp_status decode_payload(tp_idset *ids, const uint8_t *pl, size_t plen, uint8_t *rec_type, size_t *snap_off,
                                 size_t *snap_len, int64_t *rev) {
     if (plen < 1) {
         return TP_STATUS_OUT_OF_BOUNDS;
@@ -364,7 +513,7 @@ static tp_status decode_payload(tp_journal *j, const uint8_t *pl, size_t plen, u
         *rev = tp_jrn_get_i64(pl + 1 + TP_JRN_IDLEN);
         *snap_off = (size_t)TP_JRN_TXN_FIXED;
         *snap_len = plen - (size_t)TP_JRN_TXN_FIXED;
-        return tp_idset_add(&j->ids, idhex);
+        return ids ? tp_idset_add(ids, idhex) : TP_STATUS_OK;
     }
     if (type == (uint8_t)TP_JRN_REC_CKPT) {
         if (plen < (size_t)TP_JRN_CKPT_FIXED) {
@@ -377,21 +526,82 @@ static tp_status decode_payload(tp_journal *j, const uint8_t *pl, size_t plen, u
             return TP_STATUS_OUT_OF_BOUNDS; /* overflow-safe: id list would exceed the payload */
         }
         size_t ids_bytes = (size_t)idc * (size_t)TP_JRN_IDLEN;
-        tp_idset_reset(&j->ids); /* a checkpoint RESETS the retained set to its captured id list */
-        for (uint32_t i = 0; i < idc; i++) {
-            char idhex[33];
-            memcpy(idhex, pl + (size_t)TP_JRN_CKPT_FIXED + (size_t)i * (size_t)TP_JRN_IDLEN, TP_JRN_IDLEN);
-            idhex[TP_JRN_IDLEN] = '\0';
-            tp_status r = tp_idset_add(&j->ids, idhex);
-            if (r != TP_STATUS_OK) {
-                return r;
+        if (ids) {
+            tp_idset_reset(ids); /* a checkpoint RESETS the retained set to its captured id list */
+            for (uint32_t i = 0; i < idc; i++) {
+                char idhex[33];
+                memcpy(idhex, pl + (size_t)TP_JRN_CKPT_FIXED + (size_t)i * (size_t)TP_JRN_IDLEN, TP_JRN_IDLEN);
+                idhex[TP_JRN_IDLEN] = '\0';
+                tp_status r = tp_idset_add(ids, idhex);
+                if (r != TP_STATUS_OK) {
+                    return r;
+                }
             }
         }
         *snap_off = (size_t)TP_JRN_CKPT_FIXED + ids_bytes;
         *snap_len = plen - *snap_off;
         return TP_STATUS_OK;
     }
+    if (type == (uint8_t)TP_JRN_REC_META) {
+        /* R5a: a META record has no snapshot slice + registers no id; the walk parses its fields via
+         * parse_meta. Decoding here just accepts it as a well-formed (skippable) record so a CRC-valid
+         * META interleaved with TXNs is not mistaken for corruption. */
+        *snap_off = 0;
+        *snap_len = 0;
+        return TP_STATUS_OK;
+    }
     return TP_STATUS_OUT_OF_BOUNDS; /* unknown record type => corruption */
+}
+
+/* R5a: classify the fixed header (magic + version), SHARED by recover + peek so both split BAD_MAGIC
+ * vs VERSION_MISMATCH identically. Returns true when the header is well-formed (caller may walk
+ * records) and sets *version + *key (a 16-byte pointer into buf). Otherwise sets *status to the
+ * classified failure (EMPTY / TRUNCATED torn-header / BAD_MAGIC / VERSION_MISMATCH) and returns false.
+ * *version is best-effort populated from the header bytes when present (0 otherwise); *key is NULL
+ * unless a complete header is present. */
+static bool header_ok(const uint8_t *buf, size_t len, tp_journal_recovery_status *status, uint32_t *version,
+                      const uint8_t **key) {
+    *version = 0;
+    *key = NULL;
+    if (len == 0) {
+        *status = TP_JOURNAL_RECOVERY_EMPTY;
+        return false;
+    }
+    if (len < (size_t)TP_JRN_HEADER_LEN) {
+        /* C4: a sub-header-length store is a torn/incomplete header write, not a foreign file, and
+         * carries no committed record -- a truncatable tail so the glue resets it to empty. */
+        *status = TP_JOURNAL_RECOVERY_TRUNCATED;
+        return false;
+    }
+    *version = tp_jrn_get_u32(buf + TP_JRN_MAGIC_LEN);
+    if (memcmp(buf, tp_jrn_magic, TP_JRN_MAGIC_LEN) != 0) {
+        *status = TP_JOURNAL_RECOVERY_BAD_MAGIC; /* not our file */
+        return false;
+    }
+    if (*version != (uint32_t)TP_JOURNAL_FORMAT_VERSION) {
+        *status = TP_JOURNAL_RECOVERY_VERSION_MISMATCH; /* our file, wrong format version */
+        return false;
+    }
+    *key = buf + TP_JRN_KEY_OFF;
+    return true;
+}
+
+/* Why a front-to-back frame walk stopped: a clean EOF, an INCOMPLETE/short frame (a torn tail OR a
+ * bloated length field), or a definite CORRUPT boundary (bad sync-word / bad CRC / undecodable
+ * payload). Shared by recover + peek. */
+typedef enum { TP_JRN_STOP_EOF, TP_JRN_STOP_INCOMPLETE, TP_JRN_STOP_CORRUPT } tp_jrn_stop;
+
+/* R5a: map a walk outcome to a recovery status, SHARED by recover + peek so both agree on
+ * OK/EMPTY/TRUNCATED/CORRUPT. `records` counts good CKPT/TXN records (META excluded); `more_after`
+ * is true iff a CRC-valid record still follows the boundary (mid-stream corruption, not a tail). */
+static tp_journal_recovery_status classify_stop(tp_jrn_stop stop, int records, bool more_after) {
+    if (stop == TP_JRN_STOP_EOF) {
+        return records > 0 ? TP_JOURNAL_RECOVERY_OK : TP_JOURNAL_RECOVERY_EMPTY;
+    }
+    if (stop == TP_JRN_STOP_CORRUPT || more_after) {
+        return TP_JOURNAL_RECOVERY_CORRUPT;
+    }
+    return TP_JOURNAL_RECOVERY_TRUNCATED;
 }
 
 /* One record frame's parse+validate outcome. FRAME_OK => well-formed and CRC-valid;
@@ -479,29 +689,18 @@ tp_status tp_journal_recover(tp_journal *j, tp_journal_recovery *out, tp_error *
     out->bytes_total = len;
     tp_idset_reset(&j->ids); /* recovery rebuilds the retained index from scratch */
 
-    if (len == 0) {
-        out->status = TP_JOURNAL_RECOVERY_EMPTY;
+    /* Validate the fixed header via the shared classifier (EMPTY / torn-header TRUNCATED /
+     * BAD_MAGIC foreign / VERSION_MISMATCH). A COMPLETE but foreign/incompatible header is
+     * refused and NOT reset (bytes preserved on disk). */
+    tp_journal_recovery_status hstatus;
+    uint32_t hversion = 0;
+    const uint8_t *hkey = NULL;
+    if (!header_ok(buf, len, &hstatus, &hversion, &hkey)) {
+        out->status = hstatus;
         free(buf);
         return TP_STATUS_OK;
     }
-    if (len < (size_t)TP_JRN_HEADER_LEN) {
-        /* C4: a sub-header-length store cannot hold a complete 28-byte header -- it is a
-         * torn/incomplete header write, not a foreign file, and carries no committed
-         * record. Classify it as a truncatable tail so the glue resets it to empty
-         * (re-initializable, not a permanent BAD_HEADER brick). */
-        out->status = TP_JOURNAL_RECOVERY_TRUNCATED;
-        out->stop_offset = 0;
-        free(buf);
-        return TP_STATUS_OK;
-    }
-    if (memcmp(buf, tp_jrn_magic, TP_JRN_MAGIC_LEN) != 0 ||
-        tp_jrn_get_u32(buf + TP_JRN_MAGIC_LEN) != (uint32_t)TP_JOURNAL_FORMAT_VERSION) {
-        /* A COMPLETE but foreign/incompatible header: refuse, and do NOT reset it. */
-        out->status = TP_JOURNAL_RECOVERY_BAD_HEADER;
-        free(buf);
-        return TP_STATUS_OK;
-    }
-    if (memcmp(buf + TP_JRN_KEY_OFF, j->key.bytes, 16) != 0) {
+    if (memcmp(hkey, j->key.bytes, 16) != 0) {
         out->status = TP_JOURNAL_RECOVERY_STALE_KEY;
         free(buf);
         return TP_STATUS_OK;
@@ -522,31 +721,56 @@ tp_status tp_journal_recover(tp_journal *j, tp_journal_recovery *out, tp_error *
      * (a torn tail OR a bloated length field), or a definite CORRUPT boundary (bad sync-word,
      * bad CRC, or an undecodable payload). The truncate-vs-preserve decision is then made
      * ONCE, below, from whether a valid record still follows the boundary (P1-5 / C2). */
-    enum { STOP_EOF, STOP_INCOMPLETE, STOP_CORRUPT } stop = STOP_EOF;
+    tp_jrn_stop stop = TP_JRN_STOP_EOF;
 
     while (off < len) {
         size_t payload_off = 0, payload_len = 0, frame_end = 0;
         tp_frame_status fs = frame_parse_at(buf, len, off, &payload_off, &payload_len, &frame_end);
         if (fs == FRAME_INCOMPLETE) {
-            stop = STOP_INCOMPLETE; /* a torn tail OR a bloated length field */
+            stop = TP_JRN_STOP_INCOMPLETE; /* a torn tail OR a bloated length field */
             break;
         }
         if (fs == FRAME_BAD) {
-            stop = STOP_CORRUPT; /* bad sync-word or a CRC mismatch on a complete record */
+            stop = TP_JRN_STOP_CORRUPT; /* bad sync-word or a CRC mismatch on a complete record */
             break;
         }
         /* FRAME_OK: sync + length + crc all check out; decode the payload semantics. */
         uint8_t rtype = 0;
         size_t snap_off = 0, snap_len = 0;
         int64_t rev = 0;
-        tp_status ds = decode_payload(j, buf + payload_off, payload_len, &rtype, &snap_off, &snap_len, &rev);
+        tp_status ds = decode_payload(&j->ids, buf + payload_off, payload_len, &rtype, &snap_off, &snap_len, &rev);
         if (ds == TP_STATUS_OOM) {
             hard = ds;
             break;
         }
         if (ds != TP_STATUS_OK) {
-            stop = STOP_CORRUPT; /* CRC-valid but undecodable payload => corruption boundary */
+            stop = TP_JRN_STOP_CORRUPT; /* CRC-valid but undecodable payload => corruption boundary */
             break;
+        }
+        if (rtype == (uint8_t)TP_JRN_REC_META) {
+            /* R5a: a META record is NOT a txn/ckpt -- capture it (last-wins) but do not count it as a
+             * recovered record, register an id, or accumulate a replay op. A CRC-valid META interleaved
+             * with TXNs replays cleanly (skipped). A malformed META (CRC-valid but bad internals) is a
+             * corruption boundary; an OOM strdup is a hard fault. */
+            int64_t mts = 0;
+            char *mpath = NULL, *mname = NULL;
+            tp_status ms = parse_meta(buf + payload_off, payload_len, &mts, &mpath, &mname);
+            if (ms == TP_STATUS_OOM) {
+                hard = ms;
+                break;
+            }
+            if (ms != TP_STATUS_OK) {
+                stop = TP_JRN_STOP_CORRUPT;
+                break;
+            }
+            free(out->metadata.path); /* last-wins: drop any earlier metadata record */
+            free(out->metadata.name);
+            out->metadata.timestamp = mts;
+            out->metadata.path = mpath;
+            out->metadata.name = mname;
+            out->has_metadata = true;
+            off = frame_end;
+            continue;
         }
         if (rtype == (uint8_t)TP_JRN_REC_CKPT) {
             /* A checkpoint is a FRESH BASELINE: it supersedes every prior post-checkpoint op. */
@@ -580,6 +804,7 @@ tp_status tp_journal_recover(tp_journal *j, tp_journal_recovery *out, tp_error *
     if (hard != TP_STATUS_OK) {
         free(refs);
         free(buf);
+        tp_journal_recovery_free(out); /* frees any captured metadata (nothing else set yet) */
         return tp_error_set(err, hard, "journal recovery ran out of memory");
     }
 
@@ -593,14 +818,8 @@ tp_status tp_journal_recover(tp_journal *j, tp_journal_recovery *out, tp_error *
      * acknowledged records, so preserve the file and poison the journal against appends behind
      * it. If not, the tail is genuinely torn/corrupt and is safe to truncate away. A bloated
      * length that used to masquerade as a clean torn tail (TRUNCATED) is now caught here. */
-    bool more_after = (stop != STOP_EOF) && has_valid_record_after(buf, len, off + 1);
-    if (stop == STOP_EOF) {
-        out->status = (out->records_recovered > 0) ? TP_JOURNAL_RECOVERY_OK : TP_JOURNAL_RECOVERY_EMPTY;
-    } else if (stop == STOP_CORRUPT || more_after) {
-        out->status = TP_JOURNAL_RECOVERY_CORRUPT;
-    } else {
-        out->status = TP_JOURNAL_RECOVERY_TRUNCATED;
-    }
+    bool more_after = (stop != TP_JRN_STOP_EOF) && has_valid_record_after(buf, len, off + 1);
+    out->status = classify_stop(stop, out->records_recovered, more_after);
     if (more_after) {
         out->mid_stream_corrupt = true;
         j->poisoned = true;
@@ -614,6 +833,7 @@ tp_status tp_journal_recover(tp_journal *j, tp_journal_recovery *out, tp_error *
         if (!snap) {
             free(refs);
             free(buf);
+            tp_journal_recovery_free(out); /* frees any captured metadata */
             return tp_error_set(err, TP_STATUS_OOM, "journal snapshot copy failed (out of memory)");
         }
         memcpy(snap, buf + base_off, base_len);
@@ -651,6 +871,126 @@ tp_status tp_journal_recover(tp_journal *j, tp_journal_recovery *out, tp_error *
         out->op_count = ref_count;
     }
     free(refs);
+    free(buf);
+    return TP_STATUS_OK;
+}
+
+/* ---- peek (R5a): header + metadata + status, no model reconstruction ------ */
+
+void tp_journal_peek_free(tp_journal_peek_result *r) {
+    if (!r) {
+        return;
+    }
+    free(r->meta.path);
+    free(r->meta.name);
+    r->meta.path = NULL;
+    r->meta.name = NULL;
+    r->has_meta = false;
+}
+
+tp_status tp_journal_peek(tp_journal_io io, tp_journal_peek_result *out, tp_error *err) {
+    if (!out) {
+        if (io.destroy) {
+            io.destroy(io.ctx);
+        }
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "null peek out");
+    }
+    memset(out, 0, sizeof *out);
+    if (!io.ctx || !io.read_all) {
+        if (io.destroy) {
+            io.destroy(io.ctx);
+        }
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "invalid journal io for peek");
+    }
+    uint8_t *buf = NULL;
+    size_t len = 0;
+    int rc = io.read_all(io.ctx, &buf, &len);
+    if (io.destroy) {
+        io.destroy(io.ctx); /* peek TAKES OWNERSHIP of io; the bytes are now in buf */
+    }
+    if (rc != 0) {
+        free(buf);
+        return journal_fail(err, "journal read failed");
+    }
+
+    /* Header: shared classifier (same BAD_MAGIC / VERSION_MISMATCH / EMPTY / torn-header split as
+     * recover). peek has NO key to compare -- it REPORTS the header key instead. */
+    tp_journal_recovery_status hstatus;
+    uint32_t hversion = 0;
+    const uint8_t *hkey = NULL;
+    if (!header_ok(buf, len, &hstatus, &hversion, &hkey)) {
+        out->status = hstatus;
+        out->format_version = hversion;
+        free(buf);
+        return TP_STATUS_OK;
+    }
+    out->format_version = hversion;
+    memcpy(out->key, hkey, 16);
+
+    /* Walk the frames exactly like recover (same frame_parse_at geometry + decode_payload classifier,
+     * with a NULL idset so nothing is registered and no model is built). Count CKPT/TXN records, note a
+     * checkpoint (a recoverable base), and capture metadata (last-wins). Stop on the first torn/corrupt
+     * boundary. */
+    size_t off = (size_t)TP_JRN_HEADER_LEN;
+    tp_jrn_stop stop = TP_JRN_STOP_EOF;
+    tp_status hard = TP_STATUS_OK;
+    while (off < len) {
+        size_t payload_off = 0, payload_len = 0, frame_end = 0;
+        tp_frame_status fs = frame_parse_at(buf, len, off, &payload_off, &payload_len, &frame_end);
+        if (fs == FRAME_INCOMPLETE) {
+            stop = TP_JRN_STOP_INCOMPLETE;
+            break;
+        }
+        if (fs == FRAME_BAD) {
+            stop = TP_JRN_STOP_CORRUPT;
+            break;
+        }
+        uint8_t rtype = 0;
+        size_t snap_off = 0, snap_len = 0;
+        int64_t rev = 0;
+        tp_status ds = decode_payload(NULL, buf + payload_off, payload_len, &rtype, &snap_off, &snap_len, &rev);
+        if (ds == TP_STATUS_OOM) {
+            hard = ds;
+            break;
+        }
+        if (ds != TP_STATUS_OK) {
+            stop = TP_JRN_STOP_CORRUPT;
+            break;
+        }
+        if (rtype == (uint8_t)TP_JRN_REC_META) {
+            int64_t mts = 0;
+            char *mpath = NULL, *mname = NULL;
+            tp_status ms = parse_meta(buf + payload_off, payload_len, &mts, &mpath, &mname);
+            if (ms == TP_STATUS_OOM) {
+                hard = ms;
+                break;
+            }
+            if (ms != TP_STATUS_OK) {
+                stop = TP_JRN_STOP_CORRUPT;
+                break;
+            }
+            free(out->meta.path); /* last-wins */
+            free(out->meta.name);
+            out->meta.timestamp = mts;
+            out->meta.path = mpath;
+            out->meta.name = mname;
+            out->has_meta = true;
+            off = frame_end;
+            continue;
+        }
+        if (rtype == (uint8_t)TP_JRN_REC_CKPT) {
+            out->has_checkpoint = true;
+        }
+        out->record_count++;
+        off = frame_end;
+    }
+    if (hard != TP_STATUS_OK) {
+        free(buf);
+        tp_journal_peek_free(out);
+        return tp_error_set(err, hard, "journal peek ran out of memory");
+    }
+    bool more_after = (stop != TP_JRN_STOP_EOF) && has_valid_record_after(buf, len, off + 1);
+    out->status = classify_stop(stop, out->record_count, more_after);
     free(buf);
     return TP_STATUS_OK;
 }

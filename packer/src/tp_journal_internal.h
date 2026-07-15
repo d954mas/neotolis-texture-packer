@@ -34,8 +34,10 @@
 #define TP_JRN_SYNC_WORD 0xA5C31E7Bu
 #define TP_JRN_REC_TXN 1      /* payload rec_type: committed transaction */
 #define TP_JRN_REC_CKPT 2     /* payload rec_type: checkpoint (state + retained id set) */
+#define TP_JRN_REC_META 3     /* payload rec_type: project metadata {timestamp, path, name} (R5) */
 #define TP_JRN_TXN_FIXED 41   /* TXN payload fixed prefix: type(1) + tx_id(32) + revision(8) */
 #define TP_JRN_CKPT_FIXED 13  /* CKPT payload fixed prefix: type(1) + revision(8) + id_count(4) */
+#define TP_JRN_META_FIXED 13  /* META payload fixed prefix: type(1) + timestamp(8) + path_len(4) */
 
 /* The 8 magic bytes "NTPKJRNL" -- brace-init (NUL-free) so it is exactly 8 bytes. */
 extern const uint8_t tp_jrn_magic[TP_JRN_MAGIC_LEN];

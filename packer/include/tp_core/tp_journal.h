@@ -51,8 +51,9 @@ extern "C" {
 #endif
 
 /* Current on-disk journal format version -- the only version this build reads. v2 adds
- * the per-record sync-word (plan S18 R / P1-5 framing robustness); a v1 journal is treated
- * as an incompatible BAD_HEADER (the sidecar is ephemeral and compacted away on Save). */
+ * the per-record sync-word (plan S18 R / P1-5 framing robustness); a journal written by a
+ * different format version is treated as a VERSION_MISMATCH (our file, wrong format), distinct
+ * from a BAD_MAGIC foreign file (R5a). The sidecar is ephemeral and compacted away on Save. */
 #define TP_JOURNAL_FORMAT_VERSION 2
 
 /* ---- injectable I/O seam ------------------------------------------------- *
@@ -133,6 +134,17 @@ tp_status tp_journal_compact(tp_journal *j, const uint8_t *snapshot, size_t len,
 tp_status tp_journal_append_txn(tp_journal *j, const char *id_hex, int64_t revision, const uint8_t *snapshot,
                                 size_t len, tp_error *err);
 
+/* R5a: record the owning project's metadata {timestamp, path, name} so a startup scan can list
+ * this journal's crashed project by path + name + time. Caches the values on the journal (owned
+ * strdup'd copies, replacing any prior) and durably APPENDS a metadata record via the normal frame
+ * path -- the same fail-closed / poison discipline as tp_journal_append_txn (a poisoned journal or a
+ * failed write returns TP_STATUS_JOURNAL_FAILED, nothing partially durable). The cached metadata is
+ * re-emitted by tp_journal_compact so it survives a Save/undo compaction. `path`/`name` are UTF-8 and
+ * may be empty (untitled project -> path ""); NULL is treated as "". `timestamp` is a caller-supplied
+ * unix-seconds value (core stays deterministic -- it never calls time()). NULL journal -> INVALID_ARGUMENT. */
+tp_status tp_journal_set_metadata(tp_journal *j, int64_t timestamp, const char *path, const char *name,
+                                  tp_error *err);
+
 /* Idempotency query: true iff `id_hex` is in the retained-id index. NULL-safe. */
 bool tp_journal_contains(const tp_journal *j, const char *id_hex);
 
@@ -148,9 +160,21 @@ typedef enum tp_journal_recovery_status {
     TP_JOURNAL_RECOVERY_EMPTY,      /* valid header, zero records (or empty store) */
     TP_JOURNAL_RECOVERY_TRUNCATED,  /* torn/short tail ignored; recovered up to last good record */
     TP_JOURNAL_RECOVERY_CORRUPT,    /* a record failed its checksum mid-stream; stopped, recovered prior */
-    TP_JOURNAL_RECOVERY_BAD_HEADER, /* magic/version invalid; nothing recovered */
+    /* R5a (plan item 7): the old conflated BAD_HEADER split two ways so the R5b startup scan can
+     * distinguish a foreign file from an out-of-date recovery journal (shown, not lost silently). */
+    TP_JOURNAL_RECOVERY_BAD_MAGIC,        /* magic != "NTPKJRNL": not our file; nothing recovered */
+    TP_JOURNAL_RECOVERY_VERSION_MISMATCH, /* magic OK but format_version != current: our file, wrong format */
     TP_JOURNAL_RECOVERY_STALE_KEY   /* header valid but key != expected (moved project); NOT applied */
 } tp_journal_recovery_status;
+
+/* R5a: project metadata a recovery journal carries so a startup scan can list crashed projects by
+ * path + name + time WITHOUT reconstructing the model. `path`/`name` are owned, UTF-8, NUL-terminated
+ * copies (an untitled project has path == ""); both NULL when no metadata record was present. */
+typedef struct tp_journal_meta {
+    int64_t timestamp; /* caller-supplied unix-seconds when the metadata was recorded */
+    char *path;        /* owned; the project's on-disk path ("" if untitled), or NULL when absent */
+    char *name;        /* owned; the project's display name, or NULL when absent */
+} tp_journal_meta;
 
 /* Format B (R2): one recovered post-checkpoint committed transaction -- an owned op-payload
  * to replay onto the base checkpoint. The payload is a tp_txn_request_encode() blob (canonical
@@ -185,6 +209,12 @@ typedef struct tp_journal_recovery {
      * followed the last checkpoint. Freed by tp_journal_recovery_free. */
     tp_journal_recovered_op *ops;
     size_t op_count;
+    /* R5a: the LAST metadata record seen (last-wins), owned. A META record is NOT a txn/ckpt:
+     * it never affects records_recovered / op replay / the retained-id set. `has_metadata` is
+     * false and `metadata` is zeroed when no metadata record was recovered. Strings freed by
+     * tp_journal_recovery_free. */
+    tp_journal_meta metadata;
+    bool has_metadata;
 } tp_journal_recovery;
 
 void tp_journal_recovery_free(tp_journal_recovery *r);
@@ -198,6 +228,32 @@ void tp_journal_recovery_free(tp_journal_recovery *r);
  * torn bytes. Returns TP_STATUS_OK whenever replay ran (corruption is reported in
  * out->status); non-OK only on a hard fault (io read failure / OOM building the result). */
 tp_status tp_journal_recover(tp_journal *j, tp_journal_recovery *out, tp_error *err);
+
+/* ---- peek: header + metadata + status, no model reconstruction (R5a) ------ *
+ * What the R5b startup scan reads per journal file: it classifies the header, reports the header
+ * key + format version + metadata, counts the well-formed records and notes whether a checkpoint
+ * (a recoverable base) is present -- WITHOUT loading a tp_project or replaying any op. It shares the
+ * header-validate + frame-walk with tp_journal_recover (same BAD_MAGIC / VERSION_MISMATCH / TRUNCATED
+ * / CORRUPT classification), differing only in that it builds no model and REPORTS the header key
+ * rather than comparing one (peek has no key to compare against). */
+typedef struct tp_journal_peek_result {
+    tp_journal_recovery_status status; /* OK/EMPTY/TRUNCATED/CORRUPT/BAD_MAGIC/VERSION_MISMATCH */
+    uint32_t format_version;           /* format version read from the header (0 if none present) */
+    uint8_t key[16];                   /* the header's key bytes (zeroed if no complete header) */
+    bool has_checkpoint;               /* a CKPT record was seen -> a recoverable base exists */
+    int record_count;                  /* well-formed CKPT/TXN records before any torn/corrupt tail */
+    tp_journal_meta meta;              /* last metadata record (owned; freed by tp_journal_peek_free) */
+    bool has_meta;
+} tp_journal_peek_result;
+
+/* Free the owned strings in a peek result. NULL-safe; safe to call on a zeroed result. */
+void tp_journal_peek_free(tp_journal_peek_result *r);
+
+/* Read `io`'s header + metadata + status without reconstructing the model. TAKES OWNERSHIP of io
+ * (destroys it before returning), exactly like tp_journal_recover. Returns TP_STATUS_OK whenever
+ * the store was read (classification is in out->status); non-OK only on a hard fault (io read
+ * failure / OOM / invalid io). UB-clean on arbitrary/corrupt/short/torn bytes. */
+tp_status tp_journal_peek(tp_journal_io io, tp_journal_peek_result *out, tp_error *err);
 
 #ifdef __cplusplus
 }
