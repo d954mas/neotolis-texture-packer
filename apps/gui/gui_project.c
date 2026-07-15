@@ -1329,41 +1329,61 @@ static tp_project *recover_to_clone(const char *journal_path) {
     return clone;         /* NULL on clone OOM -> caller treats it as "nothing recoverable" */
 }
 
-/* R6a fix [0]: back up the pre-recovery original at `orig` to `<orig>.bak` EXACTLY ONCE, then save `p` to
- * `orig`. CRITICAL DATA-SAFETY INVARIANT: the `.bak` must capture the PRISTINE original and MUST NEVER be
- * overwritten by a later (possibly partial) `orig`. The clobber this prevents: attempt 1 backs up a pristine
- * orig -> bak, then tp_project_save short-writes (ENOSPC) leaving orig PARTIAL + returns a fault (journal
- * kept -- good); a naive retry that remove()+rename()s AGAIN would DELETE the pristine bak and replace it
- * with the partial orig -> both copies partial -> the user's original is gone forever. So we back up ONLY
- * when no `.bak` exists yet: an already-present `.bak` holds the earlier pristine original from a prior
- * attempt and is left UNTOUCHED (the current orig is a partial from a failed save and gets overwritten by the
- * save below). No remove(bak) at all -- rename only runs when bak is ABSENT, so the Windows rename-dest-exists
- * issue cannot arise. If the (first-time) backup rename FAILS we return a fault WITHOUT touching `orig` (never
- * clobber the user's file without a backup). When `orig` does not exist there is nothing to back up -> just
- * save. Parent dirs are created before the write (match gui_project_save_as's pre-save parent handling). */
+/* R6a fix2 F0: save `p` to `orig` WITHOUT ever leaving `orig` partial and WITHOUT losing the pre-overwrite
+ * original. tp_project_save is a non-atomic in-place write (truncate-then-fwrite: a short write leaves the
+ * target partial), so we (1) write the recovered state to a sibling `<orig>.tmp`, never to `orig`; (2) move the
+ * CURRENT `orig` (the pristine pre-overwrite file) aside to `<orig>.bak`, REFRESHING any stale/older .bak left
+ * by a PRIOR recovery -- the .bak always holds THIS resolve's pre-overwrite original, so it is never a
+ * weeks-old copy; (3) promote the temp into place. `orig` is pristine at step 2 (we wrote to tmp, not orig), so
+ * backing it up loses nothing even on a retry, and a directory/undeletable entry at `<orig>.bak` makes the
+ * rename fail -> we fail CLOSED (never overwrite orig without a backup). On the rare promote failure we restore
+ * the pristine original from .bak so `orig` is never left missing. */
 static tp_status save_backup_original(tp_project *p, const char *orig, tp_error *err) {
     if (!p || !orig || orig[0] == '\0') {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "save_backup_original: NULL project or path");
     }
-    if (tp_scan_exists(orig)) {
-        char bak[GUI_RECOVERY_PATH_MAX + 8];
-        int nb = snprintf(bak, sizeof bak, "%s.bak", orig);
-        if (nb <= 0 || (size_t)nb >= sizeof bak) {
-            return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "save_backup_original: backup path too long");
-        }
-        if (!tp_scan_exists(bak)) { /* only back up the FIRST time; never clobber a good (pristine) .bak */
-            if (rename(orig, bak) != 0) {
-                /* Backup failed -> DO NOT overwrite orig. Leave it intact + report the fault so the caller
-                 * keeps the journal (data safety: no clobber without a backup). */
-                return tp_error_set(err, TP_STATUS_BAD_PROJECT,
-                                    "could not back up the original before saving recovered work");
-            }
-        }
-        /* else: `.bak` already holds the earlier (pristine) original from a prior attempt -> leave it
-         * UNTOUCHED; the current orig is a partial from a failed save and is overwritten by the save below. */
+    char tmp[GUI_RECOVERY_PATH_MAX + 8];
+    char bak[GUI_RECOVERY_PATH_MAX + 8];
+    int nt = snprintf(tmp, sizeof tmp, "%s.tmp", orig);
+    if (nt <= 0 || (size_t)nt >= sizeof tmp) {
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "save_backup_original: temp path too long");
     }
-    tp_mkdirs_parent(orig); /* ensure the parent dir exists before the write (match gui_project_save_as) */
-    return tp_project_save(p, orig, err);
+    int nb = snprintf(bak, sizeof bak, "%s.bak", orig);
+    if (nb <= 0 || (size_t)nb >= sizeof bak) {
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "save_backup_original: backup path too long");
+    }
+
+    /* 1. Recovered state -> FRESH sibling temp (never `orig`). Clear any stale temp from a prior aborted try. */
+    (void)remove(tmp);
+    tp_mkdirs_parent(orig); /* the temp is a sibling of orig -> ensure the parent dir exists first */
+    tp_status st = tp_project_save(p, tmp, err);
+    if (st != TP_STATUS_OK) {
+        (void)remove(tmp); /* orig + any .bak untouched -> caller keeps the journal */
+        return st;
+    }
+
+    /* 2. Move the CURRENT pristine `orig` aside, refreshing any stale .bak. */
+    bool backed_up = false;
+    if (tp_scan_exists(orig)) {
+        (void)remove(bak); /* Windows: rename fails if dest exists. A dir/undeletable entry survives -> the
+                            * rename below fails -> fail closed (never overwrite orig without a backup). */
+        if (rename(orig, bak) != 0) {
+            (void)remove(tmp);
+            return tp_error_set(err, TP_STATUS_BAD_PROJECT,
+                                "could not back up the original before saving recovered work");
+        }
+        backed_up = true;
+    }
+
+    /* 3. Promote the temp. `orig` is absent here (moved to .bak, or never existed) -> rename dest is free. */
+    if (rename(tmp, orig) != 0) {
+        if (backed_up) {
+            (void)rename(bak, orig); /* best-effort: put the pristine original back so orig isn't left missing */
+        }
+        (void)remove(tmp);
+        return tp_error_set(err, TP_STATUS_BAD_PROJECT, "could not finalize saving the recovered work");
+    }
+    return TP_STATUS_OK;
 }
 
 /* R6a fix [1]: rank order for the modal list -- an ADOPTABLE (recoverable) entry ALWAYS outranks a
@@ -1445,6 +1465,14 @@ int gui_recovery_collect(const char *folder, const char *live_slot, gui_recovery
     return out->count;
 }
 
+#ifdef NTPACKER_GUI_SELFTEST
+/* fix2 F3 selftest seam: one-shot arming of a simulated "saved OK but the written file fails to reload" at the
+ * resolve's post-save load-verify, so the verify+keep-journal backstop has a regression test (a real
+ * save-OK-but-reload-fail input is not cleanly constructible -- resolve promotes ids before saving). Consumed
+ * ON USE inside gui_recovery_resolve. The setter lives in the seam region below. Zero production effect. */
+static bool s_test_fail_load_verify = false;
+#endif
+
 tp_status gui_recovery_resolve(const char *journal_path, const char *orig_path, gui_recovery_action action,
                                const char *target_path, char *err_out, size_t err_cap) {
     if (err_out && err_cap) {
@@ -1457,11 +1485,13 @@ tp_status gui_recovery_resolve(const char *journal_path, const char *orig_path, 
         return TP_STATUS_INVALID_ARGUMENT;
     }
 
-    /* fix [5]: NEVER touch the LIVE session slot. resolve is a public API with no live-slot guard of its own;
-     * a caller passing the live journal (or a 2nd instance's live journal) would DELETE a journal still
-     * backing an open session -> that session loses its crash-recovery backing. Refuse before any delete
-     * (this covers DISCARD and the post-save delete). collect already excludes the live slot, so a
-     * collect-fed resolve never hits this; it guards a direct/hostile caller. */
+    /* fix [5]: NEVER touch THIS instance's LIVE session slot. resolve is a public API with no live-slot guard
+     * of its own; a caller passing our own live journal would DELETE a journal still backing this open session
+     * -> it loses its crash-recovery backing. Refuse before any delete (covers DISCARD and the post-save
+     * delete). This guard covers ONLY THIS instance's slot (its path); a SECOND live instance's journal has a
+     * DIFFERENT path and is handled by the per-delete recovery_orphan_unlocked probe below (a held .lock =>
+     * live => spared). collect already excludes the live slot, so a collect-fed resolve never hits this; it
+     * guards a direct/hostile caller. */
     if (recovery_active() && strcmp(journal_path, s_recovery_path) == 0) {
         if (err_out && err_cap) {
             (void)snprintf(err_out, err_cap, "cannot resolve the live recovery journal of an open session");
@@ -1472,6 +1502,15 @@ tp_status gui_recovery_resolve(const char *journal_path, const char *orig_path, 
     /* Discard: delete the orphan journal + its `.lock` (reuse the R5b-2 adopt-delete helper). Nothing else
      * is touched, and no recover is needed. */
     if (action == GUI_RECOVERY_DISCARD) {
+        /* fix2 F1: never delete a journal a SECOND live instance holds (its path differs from our own slot, so
+         * the top guard cannot catch it). A held .lock => live => refuse; a collect-fed orphan has no held lock
+         * (ENOENT/acquirable) => probes TRUE => delete proceeds exactly as before. */
+        if (!recovery_orphan_unlocked(journal_path)) {
+            if (err_out && err_cap) {
+                (void)snprintf(err_out, err_cap, "recovery journal is in use by another session");
+            }
+            return TP_STATUS_INVALID_ARGUMENT;
+        }
         delete_adopted_source(journal_path);
         /* fix [6]: DISCARD's contract is "the file is gone". delete_adopted_source is best-effort (remove
          * can fail on a momentarily-undeletable journal: open handle / AV / perms), so VERIFY it before
@@ -1568,6 +1607,13 @@ tp_status gui_recovery_resolve(const char *journal_path, const char *orig_path, 
     tp_project *chk = NULL;
     tp_error lverr = {0};
     tp_status lst = tp_project_load(write_target, &chk, &lverr);
+#ifdef NTPACKER_GUI_SELFTEST
+    if (s_test_fail_load_verify) {           /* one-shot: simulate a saved-but-unreloadable file */
+        s_test_fail_load_verify = false;
+        if (chk) { tp_project_destroy(chk); chk = NULL; }
+        lst = TP_STATUS_BAD_PROJECT;
+    }
+#endif
     if (lst != TP_STATUS_OK || !chk) {
         if (err_out && err_cap) {
             (void)snprintf(err_out, err_cap, "%s", lverr.msg[0] ? lverr.msg : tp_status_str(lst));
@@ -1577,8 +1623,14 @@ tp_status gui_recovery_resolve(const char *journal_path, const char *orig_path, 
     tp_project_destroy(chk); /* verified reloadable -> drop the check copy (never leaked) */
 
     /* Save succeeded + verified reloadable -> the recovered work now lives in the saved file; delete the
-     * journal (+ .lock) so the next launch does not re-offer it. */
-    delete_adopted_source(journal_path);
+     * journal (+ .lock) so the next launch does not re-offer it. fix2 F1: if a SECOND live instance grabbed
+     * this journal since we started (its path differs from our own slot, so the top guard cannot catch it),
+     * leave it for its owner -- the work is already saved+verified, so a benign re-list is fine; never delete
+     * a live-locked journal out from under another session. A normal collect-fed orphan probes TRUE (no held
+     * lock) -> delete proceeds exactly as before. */
+    if (recovery_orphan_unlocked(journal_path)) {
+        delete_adopted_source(journal_path);
+    }
     return TP_STATUS_OK;
 }
 // #endregion
@@ -1660,6 +1712,16 @@ void gui_project__test_set_recovery_now(int64_t t) { s_test_recovery_now = t; }
  * orphans (a foreign-key journal is excluded), so a test that wants an orphan classified adoptable must craft
  * it with THIS key -- a synthetic repeated byte no longer peeks adoptable. */
 tp_id128 gui_project__test_recovery_key(void) { return recovery_key(); }
+/* Dev seam (selftest only, fix2 F2): drive the (adoptable desc, timestamp desc) cap eviction directly so the
+ * regression guard is DETERMINISTIC -- independent of filesystem enumeration order (readdir on Linux is
+ * unsorted, so a filesystem-crafted cap test passed even with the ordering reverted). */
+void gui_project__test_recovery_insert(gui_recovery_list *out, const gui_recovery_entry *e) {
+    recovery_entry_insert(out, e);
+}
+/* Dev seam (selftest only, fix2 F3): arm a one-shot failure of the resolve's post-save load-verify so the
+ * verify+keep-journal backstop has a regression test (a real save-OK-but-reload-fail input is not cleanly
+ * constructible). Consumed on use inside gui_recovery_resolve. */
+void gui_project__test_fail_next_load_verify(void) { s_test_fail_load_verify = true; }
 #endif
 // #endregion
 

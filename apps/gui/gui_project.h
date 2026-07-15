@@ -399,6 +399,12 @@ void gui_project__test_set_recovery_now(int64_t t);
 /* Dev seam (selftest only, R6a fix [2]): the REAL recovery-journal key, so a test can craft an orphan that
  * gui_recovery_collect / the candidate scan will actually classify adoptable (collect now key-filters). */
 tp_id128 gui_project__test_recovery_key(void);
+/* Dev seam (selftest only, fix2 F2): insert one fully-built entry into `out` through the real (adoptable desc,
+ * timestamp desc) cap eviction, so the cap-regression guard is deterministic (no readdir-order dependence). */
+void gui_project__test_recovery_insert(gui_recovery_list *out, const gui_recovery_entry *e);
+/* Dev seam (selftest only, fix2 F3): arm a one-shot failure of gui_recovery_resolve's post-save load-verify so
+ * the "save OK but the written file fails to reload -> journal KEPT" backstop has a regression test. */
+void gui_project__test_fail_next_load_verify(void);
 #endif
 
 #ifdef __cplusplus

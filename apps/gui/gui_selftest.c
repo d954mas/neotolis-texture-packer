@@ -2457,12 +2457,13 @@ void run_selftest(void) {
             (void)remove(j27src); (void)remove(j27src_lk); (void)remove(j27target);
         }
 
-        /* (J28) SAVE (backup original). Cases: (a) an existing original is renamed to <orig>.bak (OLD bytes)
-         * then overwritten with the RECOVERED state, journal deleted; (b) no original file -> no .bak, save
-         * proceeds; (c) fix [0] CONFIRMED DATA-LOSS: an already-present <orig>.bak (the pristine backup from a
-         * prior failed attempt) is NEVER overwritten on retry -- neither when the retry save SUCCEEDS nor when
-         * it FAILS. This is the paramount guard: the old remove(bak)+rename(orig->bak) would clobber the
-         * pristine backup with a partial orig, destroying the user's original forever. */
+        /* (J28) SAVE (backup original), save-to-temp-then-swap (fix2 F0). Cases: (a) an existing original is
+         * moved aside to <orig>.bak (its OLD bytes) and the RECOVERED state promoted into place, journal
+         * deleted; (b) no original file -> no .bak, save proceeds; (T-A) fix2 F0 REGRESSION GUARD: a STALE
+         * <orig>.bak is REFRESHED with THIS resolve's pre-overwrite original (the old "write-once .bak" guard
+         * honored the stale copy and clobbered the pristine current original -> CONFIRMED data loss); (T-B) the
+         * structural guarantee -- orig is NEVER left partial on a failed save (writes go to <orig>.tmp, so a
+         * blocked tmp fails CLOSED with orig untouched, no .bak, journal kept). */
         {
             char scan28[900];
             char j28orig[1000], j28bak[1010], j28src[1000], j28src_lk[1010];
@@ -2522,77 +2523,105 @@ void run_selftest(void) {
             NT_ASSERT(!tp_scan_exists(j28src_b) && "J28b: journal deleted after the successful save");
             (void)remove(j28orig_b); (void)remove(j28bak_b); (void)remove(j28src_b);
 
-            /* (c) fix [0] NEVER OVERWRITE A PRISTINE .bak ON RETRY. We model the post-attempt-1 filesystem
-             *     directly (attempt 1 had backed up the pristine orig -> <orig>.bak, then its save short-wrote
-             *     leaving orig PARTIAL). The literal "rename succeeds then the SAME-path save fails" single
-             *     sequence is not constructible with filesystem tricks (after rename the orig path is free +
-             *     writable, so a plain save to it succeeds), so we seed that end-state and prove the invariant
-             *     two ways -- a SUCCESSFUL retry and a FAILING retry -- both must leave <orig>.bak PRISTINE.
-             *     OLD buggy code: remove(bak)+rename(partial orig -> bak) => bak becomes the PARTIAL bytes =>
-             *     the user's original is gone. NEW code: bak present => backup skipped => bak untouched. */
-            static const char PRISTINE28[] = "PRISTINE-ORIGINAL-28c-do-not-clobber";
-            static const char PARTIAL28[]  = "PARTIAL-broken-write-28c";
+            /* (T-A) fix2 F0 REGRESSION GUARD -- STALE-.bak REFRESH (the CONFIRMED data-loss the prior
+             *       "write-once .bak" guard caused). A STALE <orig>.bak (junk left by a weeks-old prior
+             *       recovery) must NOT be honored: the new save-to-temp-then-swap ALWAYS refreshes .bak with
+             *       THIS resolve's pre-overwrite original. Seed orig=PRISTINE_V2 (a valid project), a STALE junk
+             *       .bak, and an orphan recovering RECOVERED_R; after SAVE_ORIGINAL the orig holds RECOVERED_R
+             *       (the save happened) AND .bak holds PRISTINE_V2 (the current original preserved, junk
+             *       replaced), and the journal is deleted. OLD buggy code (`if !exists(bak) skip`) would SKIP the
+             *       backup (bak already exists) -> overwrite the pristine V2 while .bak keeps only stale junk =>
+             *       V2 gone forever => load(.bak) would NOT be PRISTINE_V2 => this test fails on the buggy code. */
+            char j28ta_orig[1000], j28ta_bak[1010], j28ta_src[1000], j28ta_src_lk[1010];
+            (void)snprintf(j28ta_orig, sizeof j28ta_orig, "%s/stalebak_ta.ntpacker_project", scan28);
+            (void)snprintf(j28ta_bak, sizeof j28ta_bak, "%s.bak", j28ta_orig);
+            (void)snprintf(j28ta_src, sizeof j28ta_src, "%s/orphan_ta.ntpjournal", scan28);
+            (void)snprintf(j28ta_src_lk, sizeof j28ta_src_lk, "%s.lock", j28ta_src);
+            (void)remove(j28ta_bak); (void)remove(j28ta_orig); (void)remove(j28ta_src); (void)remove(j28ta_src_lk);
 
-            /* (c1) SUCCESSFUL retry: orig=PARTIAL file, bak=PRISTINE file -> resolve SAVE_ORIGINAL succeeds,
-             *      orig becomes the recovered state, but bak STAYS pristine (never remove+rename'd). Fresh
-             *      names (retry28c*) so no stale dir/file from a prior test can shadow the seed. */
-            char j28orig_c[1000], j28bak_c[1010], j28src_c[1000];
-            (void)snprintf(j28orig_c, sizeof j28orig_c, "%s/retry28c.ntpacker_project", scan28);
-            (void)snprintf(j28bak_c, sizeof j28bak_c, "%s.bak", j28orig_c);
-            (void)snprintf(j28src_c, sizeof j28src_c, "%s/orphan28c.ntpjournal", scan28);
-            (void)remove(j28orig_c); (void)remove(j28bak_c); (void)remove(j28src_c);
-            { FILE *pf = fopen(j28orig_c, "wb"); if (pf) { (void)fputs(PARTIAL28, pf); (void)fclose(pf); } }
-            { FILE *bf = fopen(j28bak_c, "wb"); if (bf) { (void)fputs(PRISTINE28, bf); (void)fclose(bf); } }
-            { char *seed = selftest_slurp(j28bak_c); /* sanity: the pristine .bak seed actually landed */
-              NT_ASSERT(seed && strcmp(seed, PRISTINE28) == 0 && "J28c1: seeded a pristine <orig>.bak"); free(seed); }
-            scan_make_orphan(j28src_c, "recovered28c", 5200);
-            char e28c[256] = {0};
-            const tp_status r28c = gui_recovery_resolve(j28src_c, j28orig_c, GUI_RECOVERY_SAVE_ORIGINAL, "", e28c, sizeof e28c);
-            tp_project *cur28c = NULL;
-            tp_error cce = {0};
-            const tp_status lcc = tp_project_load(j28orig_c, &cur28c, &cce);
-            const char *cur28cnm = (lcc == TP_STATUS_OK && cur28c && tp_project_get_atlas(cur28c, 0)) ? tp_project_get_atlas(cur28c, 0)->name : "(none)";
-            char *bak28c = selftest_slurp(j28bak_c);
-            nt_log_info("SELFTEST: J28c1 retry-success r=%s orig='%s' bak_pristine=%d src_exists=%d (want ok,recovered28c,1,0)",
-                        tp_status_str(r28c), cur28cnm, (int)(bak28c && strcmp(bak28c, PRISTINE28) == 0), (int)tp_scan_exists(j28src_c));
-            NT_ASSERT(r28c == TP_STATUS_OK && "J28c1: the retry save succeeds");
-            NT_ASSERT(lcc == TP_STATUS_OK && strcmp(cur28cnm, "recovered28c") == 0 &&
-                      "J28c1: the original now holds the RECOVERED state");
-            NT_ASSERT(bak28c && strcmp(bak28c, PRISTINE28) == 0 &&
-                      "J28c1/[0]: the pre-existing <orig>.bak STILL holds the PRISTINE original (never clobbered)");
-            NT_ASSERT(!tp_scan_exists(j28src_c) && "J28c1: the journal is deleted after the successful (verified) save");
-            free(bak28c);
-            if (cur28c) { tp_project_destroy(cur28c); }
-            (void)remove(j28orig_c); (void)remove(j28bak_c); (void)remove(j28src_c);
+            /* orig = a VALID project recognizable as PRISTINE_V2 (atlas name), via the real save path. */
+            gui_project_enable_recovery(""); gui_project_shutdown();
+            gui_project_init();
+            (void)gui_project_set_atlas_name(0, "pristine_v2_ta");
+            char es_ta[256] = {0};
+            const tp_status ss_ta = gui_project_save_as(j28ta_orig, es_ta, sizeof es_ta);
+            NT_ASSERT(ss_ta == TP_STATUS_OK && tp_scan_exists(j28ta_orig) && "T-A: seeded a VALID PRISTINE_V2 original");
+            gui_project_enable_recovery(""); gui_project_shutdown();
 
-            /* (c2) FAILING retry: bak=PRISTINE file already present; orig is a DIRECTORY, so the save cannot
-             *      open it for writing (fails on both platforms) -> resolve returns non-OK. The pristine bak
-             *      must be UNTOUCHED and the journal KEPT (non-destructive on failure). */
-            char j28orig_d[1000], j28bak_d[1010], j28src_d[1000], j28dirpin[1030];
-            (void)snprintf(j28orig_d, sizeof j28orig_d, "%s/original28d.dir", scan28);
-            (void)snprintf(j28bak_d, sizeof j28bak_d, "%s.bak", j28orig_d);
-            (void)snprintf(j28dirpin, sizeof j28dirpin, "%s/pin", j28orig_d);
-            (void)snprintf(j28src_d, sizeof j28src_d, "%s/orphan28d.ntpjournal", scan28);
-            (void)remove(j28bak_d); (void)remove(j28src_d);
-            { FILE *bf = fopen(j28bak_d, "wb"); if (bf) { (void)fputs(PRISTINE28, bf); (void)fclose(bf); } }
-            { char *seed = selftest_slurp(j28bak_d); /* sanity: the pristine .bak seed actually landed */
-              NT_ASSERT(seed && strcmp(seed, PRISTINE28) == 0 && "J28c2: seeded a pristine <orig>.bak"); free(seed); }
-            tp_mkdirs(j28orig_d);                                                     /* orig is a DIRECTORY -> save-open fails */
-            { FILE *pf = fopen(j28dirpin, "wb"); if (pf) { (void)fclose(pf); } }      /* keep it around */
-            scan_make_orphan(j28src_d, "recovered28d", 5300);
-            char e28d[256] = {0};
-            const tp_status r28d = gui_recovery_resolve(j28src_d, j28orig_d, GUI_RECOVERY_SAVE_ORIGINAL, "", e28d, sizeof e28d);
-            char *bak28d = selftest_slurp(j28bak_d);
-            nt_log_info("SELFTEST: J28c2 retry-fail r=%s err='%s' bak_pristine=%d src_exists=%d (want !ok,<msg>,1,1)",
-                        tp_status_str(r28d), e28d, (int)(bak28d && strcmp(bak28d, PRISTINE28) == 0), (int)tp_scan_exists(j28src_d));
-            NT_ASSERT(r28d != TP_STATUS_OK && e28d[0] &&
-                      "J28c2: a failing retry save returns a fault");
-            NT_ASSERT(bak28d && strcmp(bak28d, PRISTINE28) == 0 &&
-                      "J28c2/[0]: the pre-existing <orig>.bak STILL holds the PRISTINE original even when the retry save fails");
-            NT_ASSERT(tp_scan_exists(j28src_d) &&
-                      "J28c2: the journal is KEPT when the save could not complete (non-destructive on failure)");
-            free(bak28d);
-            (void)remove(j28dirpin); (void)remove(j28bak_d); (void)remove(j28src_d); /* leave the orig28d dir */
+            /* a STALE <orig>.bak = arbitrary junk -- only needs to EXIST (need not be a valid project). */
+            { FILE *sf = fopen(j28ta_bak, "wb"); if (sf) { (void)fputs("STALE_JUNK\n", sf); (void)fclose(sf); } }
+            NT_ASSERT(selftest_file_exists(j28ta_bak) && "T-A: seeded a stale junk <orig>.bak");
+
+            /* an orphan whose recovered state is recognizable as RECOVERED_R (distinct from V2). */
+            scan_make_orphan(j28ta_src, "recovered_r_ta", 5400);
+            char e_ta[256] = {0};
+            const tp_status r_ta = gui_recovery_resolve(j28ta_src, j28ta_orig, GUI_RECOVERY_SAVE_ORIGINAL, "", e_ta, sizeof e_ta);
+            tp_project *ta_orig = NULL, *ta_bak = NULL;
+            tp_error tae1 = {0}, tae2 = {0};
+            const tp_status lta_o = tp_project_load(j28ta_orig, &ta_orig, &tae1);
+            const tp_status lta_b = tp_project_load(j28ta_bak, &ta_bak, &tae2);
+            const char *ta_orignm = (lta_o == TP_STATUS_OK && ta_orig && tp_project_get_atlas(ta_orig, 0)) ? tp_project_get_atlas(ta_orig, 0)->name : "(none)";
+            const char *ta_baknm = (lta_b == TP_STATUS_OK && ta_bak && tp_project_get_atlas(ta_bak, 0)) ? tp_project_get_atlas(ta_bak, 0)->name : "(none)";
+            nt_log_info("SELFTEST: T-A stale-bak refresh r=%s orig='%s' bak='%s' bak_is_pristine_v2=%d src_exists=%d (want ok,recovered_r_ta,pristine_v2_ta,1,0)",
+                        tp_status_str(r_ta), ta_orignm, ta_baknm,
+                        (int)(lta_b == TP_STATUS_OK && strcmp(ta_baknm, "pristine_v2_ta") == 0), (int)tp_scan_exists(j28ta_src));
+            NT_ASSERT(r_ta == TP_STATUS_OK && "T-A: SAVE_ORIGINAL succeeds");
+            NT_ASSERT(lta_o == TP_STATUS_OK && strcmp(ta_orignm, "recovered_r_ta") == 0 &&
+                      "T-A: the original now holds the RECOVERED_R state (the save happened)");
+            NT_ASSERT(lta_b == TP_STATUS_OK && strcmp(ta_baknm, "pristine_v2_ta") == 0 &&
+                      "T-A/F0: <orig>.bak now holds the CURRENT PRISTINE_V2 original (stale junk REFRESHED, V2 preserved)");
+            NT_ASSERT(!tp_scan_exists(j28ta_src) && "T-A: the journal is deleted after the successful save");
+            if (ta_orig) { tp_project_destroy(ta_orig); }
+            if (ta_bak) { tp_project_destroy(ta_bak); }
+            (void)remove(j28ta_bak); (void)remove(j28ta_orig); (void)remove(j28ta_src); (void)remove(j28ta_src_lk);
+
+            /* (T-B) fix2 F0 STRUCTURAL GUARANTEE -- orig is NEVER left partial on a failed save (all writes go
+             *       to <orig>.tmp, never to orig). Inject a NON-EMPTY DIRECTORY at <orig>.tmp so tp_project_save
+             *       cannot open it (fopen a dir fails on Win + POSIX) and remove() cannot rmdir it -> the save
+             *       fails at step 1 with orig + .bak UNTOUCHED. Assert the fault, orig still loads PRISTINE, no
+             *       .bak was made, journal KEPT (non-destructive on failure). */
+            char j28tb_orig[1000], j28tb_tmp[1010], j28tb_bak[1010], j28tb_tmppin[1040], j28tb_src[1000], j28tb_src_lk[1010];
+            (void)snprintf(j28tb_orig, sizeof j28tb_orig, "%s/tmpblock_tb.ntpacker_project", scan28);
+            (void)snprintf(j28tb_tmp, sizeof j28tb_tmp, "%s.tmp", j28tb_orig);
+            (void)snprintf(j28tb_bak, sizeof j28tb_bak, "%s.bak", j28tb_orig);
+            (void)snprintf(j28tb_tmppin, sizeof j28tb_tmppin, "%s/pin", j28tb_tmp);
+            (void)snprintf(j28tb_src, sizeof j28tb_src, "%s/orphan_tb.ntpjournal", scan28);
+            (void)snprintf(j28tb_src_lk, sizeof j28tb_src_lk, "%s.lock", j28tb_src);
+            (void)remove(j28tb_bak); (void)remove(j28tb_src); (void)remove(j28tb_src_lk);
+
+            /* orig = a VALID project recognizable as PRISTINE (atlas name). */
+            gui_project_enable_recovery(""); gui_project_shutdown();
+            gui_project_init();
+            (void)gui_project_set_atlas_name(0, "pristine_tb");
+            char es_tb[256] = {0};
+            const tp_status ss_tb = gui_project_save_as(j28tb_orig, es_tb, sizeof es_tb);
+            NT_ASSERT(ss_tb == TP_STATUS_OK && tp_scan_exists(j28tb_orig) && "T-B: seeded a VALID PRISTINE original");
+            gui_project_enable_recovery(""); gui_project_shutdown();
+
+            /* a NON-EMPTY directory at <orig>.tmp: fopen(tmp,"wb") fails AND remove(tmp) cannot rmdir it. */
+            tp_mkdirs(j28tb_tmp);
+            { FILE *pf = fopen(j28tb_tmppin, "wb"); if (pf) { (void)fputs("pin", pf); (void)fclose(pf); } }
+            NT_ASSERT(selftest_file_exists(j28tb_tmppin) && "T-B: pinned <orig>.tmp as a NON-EMPTY directory");
+
+            scan_make_orphan(j28tb_src, "recovered_tb", 5500);
+            char e_tb[256] = {0};
+            const tp_status r_tb = gui_recovery_resolve(j28tb_src, j28tb_orig, GUI_RECOVERY_SAVE_ORIGINAL, "", e_tb, sizeof e_tb);
+            tp_project *tb_orig = NULL;
+            tp_error tbe = {0};
+            const tp_status ltb = tp_project_load(j28tb_orig, &tb_orig, &tbe);
+            const char *tb_orignm = (ltb == TP_STATUS_OK && tb_orig && tp_project_get_atlas(tb_orig, 0)) ? tp_project_get_atlas(tb_orig, 0)->name : "(none)";
+            nt_log_info("SELFTEST: T-B tmp-blocked r=%s err='%s' orig='%s' orig_pristine=%d bak_exists=%d src_exists=%d (want !ok,<msg>,pristine_tb,1,0,1)",
+                        tp_status_str(r_tb), e_tb, tb_orignm,
+                        (int)(ltb == TP_STATUS_OK && strcmp(tb_orignm, "pristine_tb") == 0),
+                        (int)selftest_file_exists(j28tb_bak), (int)tp_scan_exists(j28tb_src));
+            NT_ASSERT(r_tb != TP_STATUS_OK && e_tb[0] && "T-B: the save FAILS when <orig>.tmp cannot be written");
+            NT_ASSERT(ltb == TP_STATUS_OK && strcmp(tb_orignm, "pristine_tb") == 0 &&
+                      "T-B/F0: orig is UNTOUCHED (still PRISTINE) -- the write went to tmp, never to orig");
+            NT_ASSERT(!selftest_file_exists(j28tb_bak) && "T-B: no .bak was made (orig never moved aside on a step-1 failure)");
+            NT_ASSERT(tp_scan_exists(j28tb_src) && "T-B: the journal is KEPT on the failed save (non-destructive)");
+            if (tb_orig) { tp_project_destroy(tb_orig); }
+            (void)remove(j28tb_tmppin); (void)remove(j28tb_tmp); (void)remove(j28tb_bak); (void)remove(j28tb_orig);
+            (void)remove(j28tb_src); (void)remove(j28tb_src_lk);
         }
 
         /* (J29) DISCARD: resolve DISCARD removes the journal + its .lock and touches nothing else (a sentinel
@@ -2652,51 +2681,46 @@ void run_selftest(void) {
             (void)remove(j30src); (void)remove(j30src_lk); (void)remove(j30blocker);
         }
 
-        /* (J31) fix [1] CAP: a folder crammed with >16 VERSION_MISMATCH orphans (non-adoptable old-format
-         * noise, all ts 0) plus ONE genuinely-adoptable session must STILL surface the adoptable one -- the
-         * (adoptable desc, timestamp desc) ordering evicts the lowest-priority (version-mismatch) entries
-         * FIRST, so an adoptable session is never dropped in favour of old-format noise. The adoptable one is
-         * UNTITLED (ts 0) and named to sort LAST, so the OLD timestamp-only eviction would drop it. */
+        /* (J31) fix [1] CAP eviction, DETERMINISTIC (fix2 F2): a full list of GUI_RECOVERY_MAX_CANDIDATES
+         * NON-adoptable (version-mismatch) entries plus ONE adoptable entry must STILL retain the adoptable one
+         * -- the (adoptable desc, timestamp desc) ordering ranks it above every non-adoptable entry, so it
+         * evicts one of them and SURVIVES the cap. Driven straight through recovery_entry_insert via the F2
+         * seam so it is INDEPENDENT of filesystem enumeration order: the old filesystem-crafted J31 relied on
+         * the adoptable orphan being enumerated LAST, which holds on Windows (NTFS alphabetical) but NOT on the
+         * Linux CI (readdir is unsorted) -- so that test passed on Linux EVEN WITH fix [1] reverted. All entries
+         * share ts 0, so under a reverted timestamp-only insert the full equal-ts list would DROP the last
+         * (adoptable) insert -> the assert below catches the regression on every OS. */
         {
-            char scan31[900];
-            (void)snprintf(scan31, sizeof scan31, "%s/selftest_r6a_j31", s_exe_dir);
-            tp_mkdirs(scan31);
-            const int NOISE31 = GUI_RECOVERY_MAX_CANDIDATES + 4; /* > the cap */
-            char noise31[1000];
-            for (int i = 0; i < NOISE31; i++) {
-                (void)snprintf(noise31, sizeof noise31, "%s/vmis_%02d.ntpjournal", scan31, i);
-                (void)remove(noise31);
-                uint8_t hdr[TP_JRN_HEADER_LEN];
-                memcpy(hdr, tp_jrn_magic, TP_JRN_MAGIC_LEN);
-                tp_jrn_put_u32(hdr + TP_JRN_MAGIC_LEN, (uint32_t)TP_JOURNAL_FORMAT_VERSION + 1000u);
-                memset(hdr + TP_JRN_MAGIC_LEN + 4, 0x31, 16);
-                FILE *vf = fopen(noise31, "wb");
-                if (vf) { (void)fwrite(hdr, 1, sizeof hdr, vf); (void)fclose(vf); }
-            }
-            char j31good[1000], j31live[1000];
-            (void)snprintf(j31good, sizeof j31good, "%s/zzz_good31.ntpjournal", scan31); /* sorts last */
-            (void)snprintf(j31live, sizeof j31live, "%s/live31.ntpjournal", scan31);
-            (void)remove(j31good);
-            craft_meta_orphan(j31good, gui_project__test_recovery_key(), 0, "", ""); /* adoptable, untitled (ts 0) */
-
             gui_recovery_list rl31;
-            const int n31 = gui_recovery_collect(scan31, j31live, &rl31);
-            bool found_good31 = false;
+            memset(&rl31, 0, sizeof rl31);
+            for (int i = 0; i < GUI_RECOVERY_MAX_CANDIDATES; i++) {
+                gui_recovery_entry e31;
+                memset(&e31, 0, sizeof e31);
+                (void)snprintf(e31.journal_path, sizeof e31.journal_path, "noise31_%02d.ntpjournal", i);
+                (void)snprintf(e31.name, sizeof e31.name, "vmis31_%02d", i);
+                e31.timestamp = 0;
+                e31.adoptable = false; /* fill the cap with non-adoptable, equal-ts entries */
+                gui_project__test_recovery_insert(&rl31, &e31);
+            }
+            gui_recovery_entry good31;
+            memset(&good31, 0, sizeof good31);
+            (void)snprintf(good31.journal_path, sizeof good31.journal_path, "zzz_good31.ntpjournal");
+            (void)snprintf(good31.name, sizeof good31.name, "adoptable31");
+            good31.timestamp = 0;   /* same ts as the noise -> a timestamp-only insert would DROP it */
+            good31.adoptable = true;
+            gui_project__test_recovery_insert(&rl31, &good31);
+
+            bool found_adoptable31 = false;
             for (int k = 0; k < rl31.count; k++) {
-                if (rl31.items[k].adoptable && strcmp(rl31.items[k].journal_path, j31good) == 0) {
-                    found_good31 = true;
+                if (rl31.items[k].adoptable) {
+                    found_adoptable31 = true;
                 }
             }
-            nt_log_info("SELFTEST: J31 cap n=%d found_adoptable=%d (want %d,1)",
-                        n31, (int)found_good31, GUI_RECOVERY_MAX_CANDIDATES);
-            NT_ASSERT(n31 == GUI_RECOVERY_MAX_CANDIDATES && "J31: collect caps at GUI_RECOVERY_MAX_CANDIDATES");
-            NT_ASSERT(found_good31 &&
-                      "J31/[1]: the adoptable session survives the cap despite >16 version-mismatch orphans");
-            for (int i = 0; i < NOISE31; i++) {
-                (void)snprintf(noise31, sizeof noise31, "%s/vmis_%02d.ntpjournal", scan31, i);
-                (void)remove(noise31);
-            }
-            (void)remove(j31good);
+            nt_log_info("SELFTEST: J31 cap deterministic count=%d found_adoptable=%d (want %d,1)",
+                        rl31.count, (int)found_adoptable31, GUI_RECOVERY_MAX_CANDIDATES);
+            NT_ASSERT(rl31.count == GUI_RECOVERY_MAX_CANDIDATES && "J31: the list stays capped at GUI_RECOVERY_MAX_CANDIDATES");
+            NT_ASSERT(found_adoptable31 &&
+                      "J31/[1]: the adoptable entry evicts a non-adoptable one and SURVIVES the full cap");
         }
 
         /* (J32) fix [4]/[5] GUARDS: resolve must refuse to (a) save the recovered project OVER its own journal
@@ -2743,6 +2767,39 @@ void run_selftest(void) {
             NT_ASSERT(tp_scan_exists(j32slot) && "J32b/[5]: the LIVE journal is NOT deleted");
             gui_project_enable_recovery(""); gui_project_shutdown();
             (void)remove(j32slot); (void)remove(j32slot_lk);
+        }
+
+        /* (J33) fix2 F3: the load-verify-before-delete backstop (fix [3]). resolve LOAD-VERIFIES the just-saved
+         * file before deleting the journal; if it does not reload, the journal must be KEPT (the recovered work
+         * survives). A real save-OK-but-reload-fail input is not cleanly constructible (resolve promotes ids
+         * before saving), so a one-shot selftest seam simulates it right after the post-save load. Arm it, run a
+         * SAVE_AS into a fresh target, and assert: a fault is returned, the TARGET WAS written (the save itself
+         * succeeded before the simulated verify-fail), and the JOURNAL IS KEPT (the backstop refused to delete
+         * the only other copy of the work). */
+        {
+            char scan33[900];
+            char j33src[1000], j33src_lk[1010], j33target[1000];
+            (void)snprintf(scan33, sizeof scan33, "%s/selftest_r6a_j33", s_exe_dir);
+            tp_mkdirs(scan33);
+            (void)snprintf(j33src, sizeof j33src, "%s/orphan33.ntpjournal", scan33);
+            (void)snprintf(j33src_lk, sizeof j33src_lk, "%s.lock", j33src);
+            (void)snprintf(j33target, sizeof j33target, "%s/recovered33.ntpacker_project", scan33);
+            (void)remove(j33src); (void)remove(j33src_lk); (void)remove(j33target);
+            scan_make_orphan(j33src, "recovered33", 7000); /* real-key adoptable orphan -> recover + save succeed */
+            NT_ASSERT(tp_scan_exists(j33src) && "J33: the adoptable orphan exists before resolve");
+
+            gui_project__test_fail_next_load_verify(); /* one-shot: the NEXT post-save load-verify reports failure */
+            char e33[256] = {0};
+            const tp_status r33 = gui_recovery_resolve(j33src, "", GUI_RECOVERY_SAVE_AS, j33target, e33, sizeof e33);
+            nt_log_info("SELFTEST: J33 verify-fail r=%s err='%s' journal_kept=%d target_written=%d (want !ok,<msg>,1,1)",
+                        tp_status_str(r33), e33, (int)tp_scan_exists(j33src), (int)tp_scan_exists(j33target));
+            NT_ASSERT(r33 != TP_STATUS_OK && e33[0] &&
+                      "J33/[3]: a saved-but-unreloadable file returns a fault");
+            NT_ASSERT(tp_scan_exists(j33src) &&
+                      "J33/[3]: the journal is KEPT when the just-saved file fails the load-verify (never lose the work)");
+            NT_ASSERT(tp_scan_exists(j33target) &&
+                      "J33/[3]: the target WAS written (the save succeeded before the simulated verify-fail)");
+            (void)remove(j33src); (void)remove(j33src_lk); (void)remove(j33target);
         }
 
         /* Done: disable recovery + release any lock + restore a journal-LESS packable project for the
