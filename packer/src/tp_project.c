@@ -1344,7 +1344,15 @@ tp_status tp_project_save(tp_project *p, const char *path, tp_error *err) {
      * then atomically replace `path`. A short write / flush failure / crash mid-write leaves `path` UNTOUCHED:
      * a project file is never left truncated. This protects every save path (Save, Save-As, recovery). NOTE:
      * full power-loss durability (fsync of the containing DIRECTORY after the rename) is a separate follow-up;
-     * this guarantees crash / short-write ATOMICITY, which is what the recovery layer relies on. */
+     * this guarantees crash / short-write ATOMICITY, which is what the recovery layer relies on.
+     *
+     * ATOMIC-SAVE TRADEOFFS (accepted -- these are inherent to any atomic-rename save, as done by editors and
+     * git): replacing the destination via rename/MoveFileEx swaps the inode, so a save does NOT preserve the
+     * previous file's mode/owner/ACLs (a fresh file gets the default 0644 & ~umask / parent-dir ACLs); a `path`
+     * that is a SYMLINK is replaced by a regular file rather than written through; a save into a READ-ONLY
+     * containing directory fails (the sibling temp cannot be created) where an in-place truncate once succeeded;
+     * and the savable path is 8 bytes shorter (the ".savetmp" suffix). For a `.ntpacker_project` JSON file these
+     * are immaterial, and every one fails CLOSED -- an error, never a corrupt/partial file. */
     char tmp[TP_PATH_MAX];
     int nt = snprintf(tmp, sizeof tmp, "%s.savetmp", path);
     if (nt <= 0 || (size_t)nt >= sizeof tmp) {
@@ -1358,15 +1366,18 @@ tp_status tp_project_save(tp_project *p, const char *path, tp_error *err) {
         return tp_error_set(err, TP_STATUS_BAD_PROJECT, "tp_project_save: cannot open %s for writing", tmp);
     }
     const size_t wrote = fwrite(buf, 1U, len, f);
-    if (fflush(f) == 0) {
+    const int flush_rc = fflush(f); /* MUST be checked in the guard below: a failed flush (e.g. ENOSPC) can
+                                     * leave a PARTIAL temp while fclose() still returns 0 on some libcs --
+                                     * gating only on fclose would then promote a truncated temp over `path`. */
+    if (flush_rc == 0) {
 #ifndef _WIN32
         (void)fsync(fileno(f)); /* best-effort: push the temp bytes to disk before the atomic rename */
 #endif
     }
     const int close_rc = fclose(f); /* flushes again + reports any deferred write error (e.g. ENOSPC) */
     free(buf);
-    if (wrote != len || close_rc != 0) {
-        (void)remove(tmp); /* failed write -> discard the temp; `path` was never touched */
+    if (wrote != len || flush_rc != 0 || close_rc != 0) {
+        (void)remove(tmp); /* failed write/flush -> discard the temp; `path` was never touched */
         return tp_error_set(err, TP_STATUS_BAD_PROJECT, "tp_project_save: short write to %s", path);
     }
     /* Atomically move the fully-written temp onto `path`, replacing any existing file. */
