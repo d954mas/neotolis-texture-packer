@@ -845,7 +845,19 @@ tp_status tp_journal_recover(tp_journal *j, tp_journal_recovery *out, tp_error *
         return journal_fail(err, "journal read failed");
     }
     out->bytes_total = len;
-    tp_idset_reset(&j->ids); /* recovery rebuilds the retained index from scratch */
+    /* Recovery rebuilds BOTH in-memory caches from the store so a reused journal reflects ONLY what the
+     * store actually holds: the retained-id index AND (R5a fix [0]) the write-side metadata cache. Clearing
+     * the meta cache here -- symmetric with tp_idset_reset -- means recovering a metadata-LESS store on a
+     * journal that once had set_metadata called drops the stale label instead of re-emitting a ghost label
+     * (that it never stored) on the next compaction. The post-walk seed below repopulates it iff the store
+     * carried a META record. */
+    tp_idset_reset(&j->ids);
+    free(j->meta_path);
+    free(j->meta_name);
+    j->meta_path = NULL;
+    j->meta_name = NULL;
+    j->meta_time = 0;
+    j->has_meta = false;
 
     /* Validate the fixed header via the shared classifier (EMPTY / torn-header TRUNCATED /
      * BAD_MAGIC foreign / VERSION_MISMATCH). A COMPLETE but foreign/incompatible header is
@@ -949,11 +961,14 @@ tp_status tp_journal_recover(tp_journal *j, tp_journal_recovery *out, tp_error *
     }
 
     /* R5a fix [1]: seed the journal's WRITE-side metadata cache from the recovered metadata so a later
-     * compaction (R3 Save / R4 undo) RE-EMITS it -- otherwise tp_journal_compact sees has_meta==false and
-     * the recovered project's scan label is permanently erased on the first post-recovery compaction. Use
-     * INDEPENDENT copies (out->metadata's strings are freed separately) + free any prior cache. Non-fatal
-     * on OOM: the cache is informational, recovery must still succeed (has_meta simply stays false). This
-     * runs only on the SUCCESS path (after materialization), so no double-free on any error path. */
+     * compaction (R3 Save / R4 undo) on THIS journal RE-EMITS it. Use INDEPENDENT copies (out->metadata's
+     * strings are freed separately by tp_journal_recovery_free). The cache was cleared up-front (above), so
+     * the no-metadata case needs no else. Non-fatal on OOM: the cache is informational, recovery must still
+     * succeed (has_meta simply stays false). Runs only on the SUCCESS path, so no double-free on any error path.
+     * NOTE (R5b, review finding [1]): the shipping GUI flow (try_adopt_recovered) CLONES the recovered state
+     * and wraps a FRESH journal, discarding THIS seeded journal -- so R5b must carry out->metadata onto
+     * whatever journal it makes live for the recovered project (reuse this journal, OR call
+     * tp_journal_set_metadata on the fresh one). This seed is the correct core invariant either way. */
     if (out->has_metadata) {
         char *cp = jrn_strdup(out->metadata.path ? out->metadata.path : "");
         char *cn = jrn_strdup(out->metadata.name ? out->metadata.name : "");
