@@ -396,6 +396,9 @@ void gui_project__test_skip_next_recovery_reset(void);
 /* Pin the recovery-metadata clock to `t` (>= 0) so the J18 newest-orphan scan is deterministic despite
  * time()'s 1-second resolution; pass < 0 to restore the real clock. */
 void gui_project__test_set_recovery_now(int64_t t);
+/* Dev seam (selftest only, R6a fix [2]): the REAL recovery-journal key, so a test can craft an orphan that
+ * gui_recovery_collect / the candidate scan will actually classify adoptable (collect now key-filters). */
+tp_id128 gui_project__test_recovery_key(void);
 #endif
 
 #ifdef __cplusplus
