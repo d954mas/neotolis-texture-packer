@@ -2032,6 +2032,49 @@ void test_v2_header_reads_version_mismatch(void) {
     free(bytes);
 }
 
+/* R5b-1: the model-level glue tp_model_set_recovery_metadata forwards {timestamp, path, name} to the
+ * attached journal (the GUI calls it at the set_path identity chokepoint). The metadata round-trips
+ * through recovery, and the no-journal case is a safe no-op success (recovery is optional). */
+void test_model_set_recovery_metadata_glue(void) {
+    tp_id128 key = key_of(0x93);
+    tp_journal_io io;
+    tp_model *m = model_with_journal(key, &io);
+    tp_error err;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "93000000000000000000000000000001", 0, "renamed"));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_model_set_recovery_metadata(m, 1700000000, "/x/proj.ntpacker", "proj.ntpacker", &err));
+
+    size_t blen = 0;
+    uint8_t *bytes = snapshot_io(io, &blen);
+    tp_model_destroy(m);
+
+    tp_journal_io io2 = io_from_bytes(bytes, blen);
+    free(bytes);
+    tp_model *m2 = NULL;
+    tp_journal_recovery info;
+    memset(&info, 0, sizeof info);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_recover(io2, key, &m2, &info, &err));
+    TEST_ASSERT_NOT_NULL(m2);
+    TEST_ASSERT_TRUE(info.has_metadata);
+    TEST_ASSERT_EQUAL_INT64(1700000000, info.metadata.timestamp);
+    TEST_ASSERT_EQUAL_STRING("/x/proj.ntpacker", info.metadata.path);
+    TEST_ASSERT_EQUAL_STRING("proj.ntpacker", info.metadata.name);
+    TEST_ASSERT_EQUAL_INT64(1, tp_model_revision(m2)); /* the committed rename still replayed (META is skipped) */
+    tp_journal_recovery_free(&info);
+    tp_model_destroy(m2);
+
+    /* No-journal (recovery off / journal-less) model: the glue is a no-op success -- no crash, nothing
+     * durable. A NULL model is INVALID_ARGUMENT. */
+    tp_model *bare = tp_model_wrap(base_project());
+    TEST_ASSERT_NOT_NULL(bare);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_model_set_recovery_metadata(bare, 42, "/ignored", "ignored", &err));
+    tp_model_destroy(bare);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_model_set_recovery_metadata(NULL, 0, "", "", &err));
+}
+
 int main(int argc, char **argv) {
     if (argc > 1) {
         g_dir = argv[1];
@@ -2088,5 +2131,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_peek_agrees_recover_midstream_corrupt);
     RUN_TEST(test_recovered_metadata_survives_recompaction);
     RUN_TEST(test_v2_header_reads_version_mismatch);
+    /* R5b-1: model-level metadata glue the GUI calls at the set_path identity chokepoint */
+    RUN_TEST(test_model_set_recovery_metadata_glue);
     return UNITY_END();
 }

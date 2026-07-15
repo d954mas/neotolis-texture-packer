@@ -646,6 +646,21 @@ tp_status tp_model_compact_journal(tp_model *m, tp_error *err) {
     return TP_STATUS_OK;
 }
 
+tp_status tp_model_set_recovery_metadata(tp_model *m, int64_t timestamp, const char *path, const char *name,
+                                         tp_error *err) {
+    if (!m) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "null model");
+    }
+    if (!m->journal) {
+        return TP_STATUS_OK; /* no journal attached (recovery off / journal-less): nothing to record */
+    }
+    /* R5b-1: forward the project identity to the attached journal so a startup scan can list the crashed
+     * project by path + name + time. Same null-journal-tolerant contract as tp_model_compact_journal; NULL
+     * path/name are normalised to "" (never passed as NULL). A write failure is returned to the caller for
+     * the soft channel -- metadata is informational and must never fail an edit or Save. */
+    return tp_journal_set_metadata(m->journal, timestamp, path ? path : "", name ? name : "", err);
+}
+
 tp_status tp_model_recover(tp_journal_io io, tp_id128 key, tp_model **out, tp_journal_recovery *info, tp_error *err) {
     if (out) {
         *out = NULL;

@@ -33,6 +33,7 @@
 #include "tp_core/tp_names.h"   /* tp_sprite_export_key (region -> override key) */
 #include "tp_core/tp_project.h" /* tp_project* accessors */
 #include "tp_core/tp_scan.h"    /* tp_mkdirs (portable temp-dir creation for the CI stress dirs) */
+#include "tp_core/tp_journal.h"     /* R5b-1: tp_journal_peek + tp_journal_io_file (J16 metadata read-back) */
 #include "tp_core/tp_transaction.h" /* tp_semantic_identity (F2-05b-ii-B append-fail identity check) */
 #include "tp_journal_internal.h"    /* F2-05b-ii-B memory-io fault seams (append-fail injection); from packer/src */
 
@@ -1394,9 +1395,10 @@ void run_selftest(void) {
         NT_ASSERT(gui_project_set_atlas_name(0, "poison_v3") && "J4: build txn3");
         gui_project_enable_recovery("");   /* crash-sim: keep the slot */
         gui_project_shutdown();
-        /* record 0 = ckpt, 1 = txn1(poison_v1), 2 = txn2, 3 = txn3. Corrupt record 2 -> mid-stream (txn3
-         * still follows), so recovery keeps up to txn1 ("poison_v1") and poisons the journal. */
-        NT_ASSERT(selftest_corrupt_journal_record(pslot, 2) && "J4: corrupted the mid-stream (txn2) record");
+        /* record 0 = ckpt, 1 = META (R5b-1: set_path("") records untitled metadata right after attach),
+         * 2 = txn1(poison_v1), 3 = txn2, 4 = txn3. Corrupt record 3 (txn2) -> mid-stream (txn3 still
+         * follows), so recovery keeps up to txn1 ("poison_v1") and poisons the journal. */
+        NT_ASSERT(selftest_corrupt_journal_record(pslot, 3) && "J4: corrupted the mid-stream (txn2) record");
         gui_project_enable_recovery(pslot);
         gui_project_init();
         const bool p_notice = gui_project_take_recovery_notice(rnote, sizeof rnote);
@@ -1788,6 +1790,85 @@ void run_selftest(void) {
         gui_project_enable_recovery(""); /* release the lock + disable */
         (void)remove(j15slot);
         (void)remove(j15lock);
+
+        /* (J16) R5b-1 METADATA WIRING: set_path (the New/Open/Save-As/adopt identity chokepoint) records
+         *      the project {path, name, timestamp} into the recovery journal via
+         *      tp_model_set_recovery_metadata, so R5b-2's startup scan can list a crashed project by
+         *      name/path/time. Prove BOTH the untitled-init case (name "untitled", path "") AND that a
+         *      Save-As REFRESHES the metadata to the saved basename/path (the finding: without the set_path
+         *      hook the journal's cached path stays stale and compaction re-emits the OLD/untitled path).
+         *      Read back with tp_journal_peek -- exactly the scan primitive R5b-2 will use -- on a CLOSED
+         *      slot (a simulated crash: shutdown with recovery disabled leaves the slot on disk and closes
+         *      the live handle), so there is never a concurrent handle on the file. Isolated slot. */
+        char j16slot[1200];
+        char j16lock[1210];
+        char j16save[1200];
+        (void)snprintf(j16slot, sizeof j16slot, "%s/selftest_meta.ntpjournal", s_exe_dir);
+        (void)snprintf(j16lock, sizeof j16lock, "%s.lock", j16slot);
+        (void)snprintf(j16save, sizeof j16save, "%s/selftest_meta_proj.ntpacker_project", s_exe_dir);
+        gui_project_enable_recovery(""); /* disable first so no teardown deletes a slot */
+        gui_project_shutdown();
+        (void)remove(j16slot);
+        (void)remove(j16lock);
+        (void)remove(j16save);
+
+        /* Session A: untitled init -> wrap_model attaches the journal, then set_path("") records metadata
+         * {name "untitled", path ""}. Crash (disable + shutdown -> slot survives, handle closed) then peek. */
+        gui_project_enable_recovery(j16slot);
+        gui_project_init();
+        NT_ASSERT(gui_project_get() && "J16: an untitled journaled session initialised");
+        NT_ASSERT(strcmp(gui_project_display_name(), "untitled") == 0 && "J16: untitled display name before any Save");
+        gui_project_enable_recovery("");
+        gui_project_shutdown();
+        {
+            tp_journal_peek_result pk;
+            memset(&pk, 0, sizeof pk);
+            tp_error pkerr = {0};
+            const tp_status pst = tp_journal_peek(tp_journal_io_file(j16slot), &pk, &pkerr);
+            nt_log_info("SELFTEST: J16a untitled peek st=%s has_meta=%d name='%s' path='%s' (want OK,1,'untitled','')",
+                        tp_status_str(pst), (int)pk.has_meta, pk.meta.name ? pk.meta.name : "(null)",
+                        pk.meta.path ? pk.meta.path : "(null)");
+            NT_ASSERT(pst == TP_STATUS_OK && "J16a: peek reads the closed untitled slot");
+            NT_ASSERT(pk.has_meta && "J16a: the untitled init WROTE a METADATA record (attach + set_path wiring live)");
+            NT_ASSERT(pk.meta.name && strcmp(pk.meta.name, "untitled") == 0 && "J16a: metadata name == 'untitled'");
+            NT_ASSERT(pk.meta.path && strcmp(pk.meta.path, "") == 0 && "J16a: metadata path == '' (untitled project)");
+            tp_journal_peek_free(&pk);
+        }
+        (void)remove(j16slot);
+        (void)remove(j16lock);
+
+        /* Session B: init then Save-As -> set_path(path) REFRESHES the metadata to the saved basename +
+         * path (compaction then re-emits the NEW cached values). Peek must show the saved identity, not
+         * "untitled"/"" -- proving the Save-As refresh finding. */
+        gui_project_enable_recovery(j16slot);
+        gui_project_init();
+        char j16err[256] = {0};
+        const tp_status j16sv = gui_project_save_as(j16save, j16err, sizeof j16err);
+        nt_log_info("SELFTEST: J16b save-as st=%s name='%s' err='%s'", tp_status_str(j16sv), gui_project_display_name(), j16err);
+        NT_ASSERT(j16sv == TP_STATUS_OK && "J16b: Save-As succeeds");
+        NT_ASSERT(strcmp(gui_project_display_name(), "selftest_meta_proj.ntpacker_project") == 0 &&
+                  "J16b: display name is the saved basename after Save-As");
+        gui_project_enable_recovery("");
+        gui_project_shutdown();
+        {
+            tp_journal_peek_result pk;
+            memset(&pk, 0, sizeof pk);
+            tp_error pkerr = {0};
+            const tp_status pst = tp_journal_peek(tp_journal_io_file(j16slot), &pk, &pkerr);
+            nt_log_info("SELFTEST: J16b saved peek st=%s has_meta=%d name='%s' path='%s'",
+                        tp_status_str(pst), (int)pk.has_meta, pk.meta.name ? pk.meta.name : "(null)",
+                        pk.meta.path ? pk.meta.path : "(null)");
+            NT_ASSERT(pst == TP_STATUS_OK && "J16b: peek reads the closed saved slot");
+            NT_ASSERT(pk.has_meta && "J16b: Save-As left a METADATA record");
+            NT_ASSERT(pk.meta.name && strcmp(pk.meta.name, "selftest_meta_proj.ntpacker_project") == 0 &&
+                      "J16b: metadata name REFRESHED to the saved basename (set_path chokepoint hook)");
+            NT_ASSERT(pk.meta.path && strcmp(pk.meta.path, j16save) == 0 &&
+                      "J16b: metadata path REFRESHED to the saved path (compaction re-emits the NEW path, not the stale one)");
+            tp_journal_peek_free(&pk);
+        }
+        (void)remove(j16slot);
+        (void)remove(j16lock);
+        (void)remove(j16save);
 
         /* Done: disable recovery + release any lock + restore a journal-LESS packable project for the
          * render phases. */

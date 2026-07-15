@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h> /* R5b-1: time(NULL) for the recovery-journal metadata timestamp (libc header FIRST -- macOS include-order) */
 
 /* F2-05b-ii-B fix [1]: single-instance advisory lock on the recovery slot (GUI-layer, not core), so
  * a 2nd concurrent editor cannot adopt the 1st's LIVE session as "recovered" nor truncate its live
@@ -162,9 +163,27 @@ static void recompute_name(void) {
     (void)snprintf(s_name, sizeof s_name, "%s", base);
 }
 
+/* R5b-1: forward-declared here so set_path (the project-identity chokepoint) can refresh the recovery
+ * journal's metadata; both are defined further down with the rest of the recovery plumbing. */
+static bool recovery_active(void);
+static void note_recovery_degraded(const char *msg);
+
 static void set_path(const char *path) {
     (void)snprintf(s_path, sizeof s_path, "%s", path ? path : "");
     recompute_name();
+    /* R5b-1: keep the recovery journal's metadata in step with the project identity. set_path is the single
+     * identity chokepoint (New/Open/Save-As/adopt), and the journal is already attached by the time it runs
+     * (wrap_model attaches it BEFORE its callers call set_path), so one call here covers every path change --
+     * incl. Save-As (finding: the journal's cached path would otherwise stay stale and compaction would
+     * re-emit the OLD path) and the adopted-recovered fresh journal (R5a finding [1]). Non-fatal: metadata is
+     * informational, so a write failure routes through the soft channel and never fails an edit or Save. The
+     * guard + the no-op-on-no-journal glue keep a stray call (recovery off / journal-less) safe. */
+    if (s_model && recovery_active()) {
+        tp_error mde = {0};
+        if (tp_model_set_recovery_metadata(s_model, (int64_t)time(NULL), s_path, s_name, &mde) != TP_STATUS_OK) {
+            note_recovery_degraded(mde.msg[0] ? mde.msg : "could not record recovery metadata");
+        }
+    }
 }
 
 /* Assign a random persistent ID to any structural entity that lacks one -- nil (a freshly

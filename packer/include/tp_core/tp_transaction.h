@@ -265,6 +265,16 @@ tp_status tp_model_attach_journal(tp_model *m, struct tp_journal *j, tp_error *e
  * recovers) -- Save callers should treat a failure as NON-fatal (the file is already written). */
 tp_status tp_model_compact_journal(tp_model *m, tp_error *err);
 
+/* R5b-1 (plan S18 R): forward recovery metadata {timestamp, path, name} to the attached journal
+ * (tp_journal_set_metadata) so a startup scan can list this journal's crashed project by path + name +
+ * time. `timestamp` is a caller-supplied unix-seconds value (core stays deterministic -- it never calls
+ * time()); `path`/`name` are UTF-8 and may be empty (untitled project -> path ""), NULL is treated as "".
+ * A no-op (returns OK) when no journal is attached (recovery off / journal-less), mirroring
+ * tp_model_compact_journal. Non-fatal to the caller: a write failure returns the status for the soft
+ * channel (metadata is informational -- it must never fail an edit or Save). NULL model -> INVALID_ARGUMENT. */
+tp_status tp_model_set_recovery_metadata(tp_model *m, int64_t timestamp, const char *path, const char *name,
+                                         tp_error *err);
+
 /* Rebuild a model from a journal's backing store after a process restart (§7.1/§7.2,
  * §22.3). Creates a journal over `io` (TAKES OWNERSHIP of io) keyed by `key`, replays
  * checkpoint + transaction records, and on a usable recovery returns a model (*out)
