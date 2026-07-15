@@ -7,9 +7,10 @@
 
 #ifdef _WIN32
 #include <direct.h>
+#include <windows.h> /* MoveFileExA -- atomic replace-on-rename */
 #define tp_getcwd _getcwd
 #else
-#include <unistd.h>
+#include <unistd.h>  /* (already present) fsync, rename via <stdio.h> */
 #define tp_getcwd getcwd
 #endif
 
@@ -1338,16 +1339,46 @@ tp_status tp_project_save(tp_project *p, const char *path, tp_error *err) {
         return bst;
     }
 
-    FILE *f = fopen(path, "wb"); /* binary: keep LF, no CRLF translation */
+    /* Atomic write: serialize to a sibling temp, flush + close (checking for a deferred I/O error -- the
+     * pre-existing `(void)fclose` swallowed disk-full flush failures and could return OK with a PARTIAL file),
+     * then atomically replace `path`. A short write / flush failure / crash mid-write leaves `path` UNTOUCHED:
+     * a project file is never left truncated. This protects every save path (Save, Save-As, recovery). NOTE:
+     * full power-loss durability (fsync of the containing DIRECTORY after the rename) is a separate follow-up;
+     * this guarantees crash / short-write ATOMICITY, which is what the recovery layer relies on. */
+    char tmp[TP_PATH_MAX];
+    int nt = snprintf(tmp, sizeof tmp, "%s.savetmp", path);
+    if (nt <= 0 || (size_t)nt >= sizeof tmp) {
+        free(buf);
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "tp_project_save: path too long: %s", path);
+    }
+    (void)remove(tmp); /* clear any stale temp from a prior aborted save (we own this name) */
+    FILE *f = fopen(tmp, "wb"); /* binary: keep LF, no CRLF translation */
     if (!f) {
         free(buf);
-        return tp_error_set(err, TP_STATUS_BAD_PROJECT, "tp_project_save: cannot open %s for writing", path);
+        return tp_error_set(err, TP_STATUS_BAD_PROJECT, "tp_project_save: cannot open %s for writing", tmp);
     }
     const size_t wrote = fwrite(buf, 1U, len, f);
-    (void)fclose(f);
+    if (fflush(f) == 0) {
+#ifndef _WIN32
+        (void)fsync(fileno(f)); /* best-effort: push the temp bytes to disk before the atomic rename */
+#endif
+    }
+    const int close_rc = fclose(f); /* flushes again + reports any deferred write error (e.g. ENOSPC) */
     free(buf);
-    if (wrote != len) {
+    if (wrote != len || close_rc != 0) {
+        (void)remove(tmp); /* failed write -> discard the temp; `path` was never touched */
         return tp_error_set(err, TP_STATUS_BAD_PROJECT, "tp_project_save: short write to %s", path);
+    }
+    /* Atomically move the fully-written temp onto `path`, replacing any existing file. */
+    int moved;
+#ifdef _WIN32
+    moved = MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) ? 1 : 0;
+#else
+    moved = (rename(tmp, path) == 0) ? 1 : 0; /* POSIX rename atomically replaces an existing dest */
+#endif
+    if (!moved) {
+        (void)remove(tmp);
+        return tp_error_set(err, TP_STATUS_BAD_PROJECT, "tp_project_save: could not finalize save to %s", path);
     }
     return TP_STATUS_OK;
 }

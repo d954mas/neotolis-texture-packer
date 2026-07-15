@@ -17,6 +17,17 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#include <direct.h>
+#define TP_TEST_MKDIR(p) _mkdir(p)
+#define TP_TEST_RMDIR(p) _rmdir(p)
+#else
+#include <sys/stat.h>
+#include <unistd.h>
+#define TP_TEST_MKDIR(p) mkdir((p), 0777)
+#define TP_TEST_RMDIR(p) rmdir(p)
+#endif
+
 #include "tp_core/tp_export.h" /* TP_EXPORTER_ID_JSON_NEOTOLIS */
 #include "tp_core/tp_id.h"
 #include "tp_core/tp_pack.h"
@@ -907,6 +918,60 @@ void test_prune_sprite(void) {
     tp_project_destroy(p);
 }
 
+/* 16. Atomic save: a FAILED tp_project_save leaves the pre-existing target file
+ * byte-identical. We save a valid project, snapshot its bytes, then force the
+ * next save to fail deterministically by pre-creating a NON-EMPTY *directory* at
+ * the sibling `<path>.savetmp`. It must be non-empty: the core does `remove(tmp)`
+ * before `fopen(tmp,"wb")`, and on POSIX remove() would rmdir an EMPTY dir (then
+ * the save would succeed) -- a pinned file inside makes remove() fail (ENOTEMPTY)
+ * AND fopen() fail (EISDIR/directory) on every platform. The save must return
+ * non-OK and the original `path` must be untouched (byte-identical). */
+void test_project_save_atomic_failure_keeps_target(void) {
+    char path[512];
+    char tmpdir[600];
+    char pin[640];
+    join(path, sizeof path, "atomic.ntpacker_project");
+    (void)snprintf(tmpdir, sizeof tmpdir, "%s.savetmp", path);
+    (void)snprintf(pin, sizeof pin, "%s/pin", tmpdir);
+
+    tp_project *p = build_rich();
+    tp_error err = {0};
+
+    /* 1. initial good save */
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, tp_project_save(p, path, &err), err.msg);
+
+    /* 2. snapshot the on-disk bytes */
+    size_t n1 = 0;
+    char *v1 = read_all(path, &n1);
+    TEST_ASSERT_TRUE(n1 > 0);
+
+    /* 3. inject a deterministic failure: a NON-EMPTY directory where the temp file must be created */
+    (void)remove(pin);           /* clear any leftover pin from a prior run */
+    (void)TP_TEST_RMDIR(tmpdir); /* clear any leftover dir from a prior run */
+    (void)remove(tmpdir);        /* or a leftover regular temp file */
+    TEST_ASSERT_EQUAL_INT(0, TP_TEST_MKDIR(tmpdir));
+    write_text(pin, "pin"); /* make it non-empty so remove() cannot rmdir it (POSIX) */
+
+    /* 4. the save must fail (fopen of the temp cannot open a directory; remove() cannot clear it) */
+    tp_error err2 = {0};
+    tp_status st = tp_project_save(p, path, &err2);
+    TEST_ASSERT_NOT_EQUAL(TP_STATUS_OK, st);
+
+    /* 5. the pre-existing target is byte-identical -- never truncated or partially written */
+    size_t n2 = 0;
+    char *v2 = read_all(path, &n2);
+    TEST_ASSERT_EQUAL_size_t(n1, n2);
+    TEST_ASSERT_EQUAL_INT(0, memcmp(v1, v2, n1));
+
+    /* 6. cleanup */
+    (void)remove(pin);
+    (void)TP_TEST_RMDIR(tmpdir);
+    (void)remove(path);
+    free(v1);
+    free(v2);
+    tp_project_destroy(p);
+}
+
 int main(int argc, char **argv) {
     g_dir = (argc > 1) ? argv[1] : ".";
     UNITY_BEGIN();
@@ -933,5 +998,6 @@ int main(int argc, char **argv) {
     RUN_TEST(test_sprite_override_sparse);
     RUN_TEST(test_set_atlas_name);
     RUN_TEST(test_prune_sprite);
+    RUN_TEST(test_project_save_atomic_failure_keeps_target);
     return UNITY_END();
 }

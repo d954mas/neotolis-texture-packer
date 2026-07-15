@@ -1329,63 +1329,6 @@ static tp_project *recover_to_clone(const char *journal_path) {
     return clone;         /* NULL on clone OOM -> caller treats it as "nothing recoverable" */
 }
 
-/* R6a fix2 F0: save `p` to `orig` WITHOUT ever leaving `orig` partial and WITHOUT losing the pre-overwrite
- * original. tp_project_save is a non-atomic in-place write (truncate-then-fwrite: a short write leaves the
- * target partial), so we (1) write the recovered state to a sibling `<orig>.tmp`, never to `orig`; (2) move the
- * CURRENT `orig` (the pristine pre-overwrite file) aside to `<orig>.bak`, REFRESHING any stale/older .bak left
- * by a PRIOR recovery -- the .bak always holds THIS resolve's pre-overwrite original, so it is never a
- * weeks-old copy; (3) promote the temp into place. `orig` is pristine at step 2 (we wrote to tmp, not orig), so
- * backing it up loses nothing even on a retry, and a directory/undeletable entry at `<orig>.bak` makes the
- * rename fail -> we fail CLOSED (never overwrite orig without a backup). On the rare promote failure we restore
- * the pristine original from .bak so `orig` is never left missing. */
-static tp_status save_backup_original(tp_project *p, const char *orig, tp_error *err) {
-    if (!p || !orig || orig[0] == '\0') {
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "save_backup_original: NULL project or path");
-    }
-    char tmp[GUI_RECOVERY_PATH_MAX + 8];
-    char bak[GUI_RECOVERY_PATH_MAX + 8];
-    int nt = snprintf(tmp, sizeof tmp, "%s.tmp", orig);
-    if (nt <= 0 || (size_t)nt >= sizeof tmp) {
-        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "save_backup_original: temp path too long");
-    }
-    int nb = snprintf(bak, sizeof bak, "%s.bak", orig);
-    if (nb <= 0 || (size_t)nb >= sizeof bak) {
-        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "save_backup_original: backup path too long");
-    }
-
-    /* 1. Recovered state -> FRESH sibling temp (never `orig`). Clear any stale temp from a prior aborted try. */
-    (void)remove(tmp);
-    tp_mkdirs_parent(orig); /* the temp is a sibling of orig -> ensure the parent dir exists first */
-    tp_status st = tp_project_save(p, tmp, err);
-    if (st != TP_STATUS_OK) {
-        (void)remove(tmp); /* orig + any .bak untouched -> caller keeps the journal */
-        return st;
-    }
-
-    /* 2. Move the CURRENT pristine `orig` aside, refreshing any stale .bak. */
-    bool backed_up = false;
-    if (tp_scan_exists(orig)) {
-        (void)remove(bak); /* Windows: rename fails if dest exists. A dir/undeletable entry survives -> the
-                            * rename below fails -> fail closed (never overwrite orig without a backup). */
-        if (rename(orig, bak) != 0) {
-            (void)remove(tmp);
-            return tp_error_set(err, TP_STATUS_BAD_PROJECT,
-                                "could not back up the original before saving recovered work");
-        }
-        backed_up = true;
-    }
-
-    /* 3. Promote the temp. `orig` is absent here (moved to .bak, or never existed) -> rename dest is free. */
-    if (rename(tmp, orig) != 0) {
-        if (backed_up) {
-            (void)rename(bak, orig); /* best-effort: put the pristine original back so orig isn't left missing */
-        }
-        (void)remove(tmp);
-        return tp_error_set(err, TP_STATUS_BAD_PROJECT, "could not finalize saving the recovered work");
-    }
-    return TP_STATUS_OK;
-}
-
 /* R6a fix [1]: rank order for the modal list -- an ADOPTABLE (recoverable) entry ALWAYS outranks a
  * non-adoptable (VERSION_MISMATCH) one, and within one class NEWER (higher timestamp) outranks older (equal
  * keeps scan order). Sorting by (adoptable desc, timestamp desc) means a full cap evicts the LOWEST-priority
@@ -1488,10 +1431,11 @@ tp_status gui_recovery_resolve(const char *journal_path, const char *orig_path, 
     /* fix [5]: NEVER touch THIS instance's LIVE session slot. resolve is a public API with no live-slot guard
      * of its own; a caller passing our own live journal would DELETE a journal still backing this open session
      * -> it loses its crash-recovery backing. Refuse before any delete (covers DISCARD and the post-save
-     * delete). This guard covers ONLY THIS instance's slot (its path); a SECOND live instance's journal has a
-     * DIFFERENT path and is handled by the per-delete recovery_orphan_unlocked probe below (a held .lock =>
-     * live => spared). collect already excludes the live slot, so a collect-fed resolve never hits this; it
-     * guards a direct/hostile caller. */
+     * delete). This guard covers ONLY THIS instance's own live slot (s_recovery_path). It does NOT cover a
+     * SECOND live instance's journal: that has a DIFFERENT path and is excluded UPSTREAM by
+     * scan_orphan_journals' per-candidate recovery_orphan_unlocked liveness probe (a held .lock => live =>
+     * never surfaced to collect), so a collect-fed resolve never receives a live journal in the first place.
+     * This guard exists only to stop a direct/hostile caller passing our own live slot path. */
     if (recovery_active() && strcmp(journal_path, s_recovery_path) == 0) {
         if (err_out && err_cap) {
             (void)snprintf(err_out, err_cap, "cannot resolve the live recovery journal of an open session");
@@ -1502,15 +1446,6 @@ tp_status gui_recovery_resolve(const char *journal_path, const char *orig_path, 
     /* Discard: delete the orphan journal + its `.lock` (reuse the R5b-2 adopt-delete helper). Nothing else
      * is touched, and no recover is needed. */
     if (action == GUI_RECOVERY_DISCARD) {
-        /* fix2 F1: never delete a journal a SECOND live instance holds (its path differs from our own slot, so
-         * the top guard cannot catch it). A held .lock => live => refuse; a collect-fed orphan has no held lock
-         * (ENOENT/acquirable) => probes TRUE => delete proceeds exactly as before. */
-        if (!recovery_orphan_unlocked(journal_path)) {
-            if (err_out && err_cap) {
-                (void)snprintf(err_out, err_cap, "recovery journal is in use by another session");
-            }
-            return TP_STATUS_INVALID_ARGUMENT;
-        }
         delete_adopted_source(journal_path);
         /* fix [6]: DISCARD's contract is "the file is gone". delete_adopted_source is best-effort (remove
          * can fail on a momentarily-undeletable journal: open handle / AV / perms), so VERIFY it before
@@ -1577,7 +1512,8 @@ tp_status gui_recovery_resolve(const char *journal_path, const char *orig_path, 
             }
             return TP_STATUS_INVALID_ARGUMENT; /* journal left intact */
         }
-        st = save_backup_original(clone, orig_path, &err);
+        tp_mkdirs_parent(orig_path); /* orig normally exists so parent does too; defensive, mirrors SAVE_AS */
+        st = tp_project_save(clone, orig_path, &err); /* atomic: never corrupts the existing original */
     } else { /* GUI_RECOVERY_SAVE_AS */
         if (!target_path || target_path[0] == '\0') {
             tp_project_destroy(clone);
@@ -1623,14 +1559,11 @@ tp_status gui_recovery_resolve(const char *journal_path, const char *orig_path, 
     tp_project_destroy(chk); /* verified reloadable -> drop the check copy (never leaked) */
 
     /* Save succeeded + verified reloadable -> the recovered work now lives in the saved file; delete the
-     * journal (+ .lock) so the next launch does not re-offer it. fix2 F1: if a SECOND live instance grabbed
-     * this journal since we started (its path differs from our own slot, so the top guard cannot catch it),
-     * leave it for its owner -- the work is already saved+verified, so a benign re-list is fine; never delete
-     * a live-locked journal out from under another session. A normal collect-fed orphan probes TRUE (no held
-     * lock) -> delete proceeds exactly as before. */
-    if (recovery_orphan_unlocked(journal_path)) {
-        delete_adopted_source(journal_path);
-    }
+     * journal (+ .lock) so the next launch does not re-offer it. Unconditional: a collect-fed orphan is
+     * already excluded upstream if a live instance holds it (scan_orphan_journals probes each candidate), so
+     * this delete is not gated on a re-probe -- an un-probeable .lock (AV/indexer/perms) must NOT strand an
+     * already-saved journal to re-list every launch. */
+    delete_adopted_source(journal_path);
     return TP_STATUS_OK;
 }
 // #endregion
