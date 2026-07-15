@@ -118,8 +118,8 @@ void tp_model_destroy(tp_model *m);
  * or the model is destroyed). */
 tp_project *tp_model_project(tp_model *m);
 
-/* The canonical revision. Increments by exactly 1 per committed transaction; Save
- * does NOT change it (§420). */
+/* The canonical revision. Increments by exactly 1 per committed transaction or
+ * acknowledged Undo/Redo history transition; Save does NOT change it (§420). */
 int64_t tp_model_revision(const tp_model *m);
 
 /* dirty = current semantic identity != saved-baseline identity (NOT derived from
@@ -256,7 +256,9 @@ tp_status tp_model_attach_journal(tp_model *m, struct tp_journal *j, tp_error *e
 
 /* R3 (plan S18 R / spec §22.3): compact the attached recovery journal to a single fresh
  * CHECKPOINT capturing the model's CURRENT committed state + revision + retained-id set -- the
- * Save-window reset. Call it AFTER a durable Save so the journal's baseline == the just-saved
+ * Save-window reset. This is a Save-only maintenance operation; Undo/Redo append their candidate
+ * checkpoints atomically inside core and never truncate. Call it AFTER a durable Save so the
+ * journal's baseline == the just-saved
  * bytes and the unsaved replay window is zero (a later crash then recovers exactly the saved
  * state + any edits made after the Save), bounding the replay cost. A no-op (returns OK) when no
  * journal is attached. The checkpoint is proven to round-trip (the same guarantee as attach), and
@@ -270,10 +272,14 @@ tp_status tp_model_compact_journal(tp_model *m, tp_error *err);
  * time. `timestamp` is a caller-supplied unix-seconds value (core stays deterministic -- it never calls
  * time()); `path`/`name` are UTF-8 and may be empty (untitled project -> path ""), NULL is treated as "".
  * A no-op (returns OK) when no journal is attached (recovery off / journal-less), mirroring
- * tp_model_compact_journal. Non-fatal to the caller: a write failure returns the status for the soft
- * channel (metadata is informational -- it must never fail an edit or Save). NULL model -> INVALID_ARGUMENT. */
+ * tp_model_compact_journal. Metadata is recovery authority: every durable write failure is returned so
+ * the host can detach/remove the slot rather than retain stale path/fingerprint data. The caller may keep
+ * an already-completed edit or Save successful while reporting recovery degradation. NULL model ->
+ * INVALID_ARGUMENT. */
 tp_status tp_model_set_recovery_metadata(tp_model *m, int64_t timestamp, const char *path, const char *name,
                                          tp_error *err);
+tp_status tp_model_set_recovery_metadata_ex(tp_model *m, int64_t timestamp, const char *path, const char *name,
+                                            const tp_id128 *file_fingerprint, tp_error *err);
 
 /* R5b-2 fix [0]: true iff `m` currently owns an attached recovery journal (m->journal != NULL). A
  * journal is attached ONLY after its initial CHECKPOINT durably wrote (tp_model_attach_journal sets
@@ -282,6 +288,12 @@ tp_status tp_model_set_recovery_metadata(tp_model *m, int64_t timestamp, const c
  * adopted crash-recovery SOURCE: if the fresh live journal failed to attach (journal-less), the source is
  * the only durable copy of the recovered work and MUST NOT be deleted. NULL model -> false. */
 bool tp_model_has_journal(const tp_model *m);
+
+/* Stop using and destroy the attached recovery journal, if any. The backing store is
+ * not deleted: storage ownership belongs to the caller that created the journal I/O.
+ * Used when recovery authority can no longer be kept current; subsequent edits remain
+ * valid but run without crash recovery. NULL-safe. */
+void tp_model_detach_journal(tp_model *m);
 
 /* Rebuild a model from a journal's backing store after a process restart (§7.1/§7.2,
  * §22.3). Creates a journal over `io` (TAKES OWNERSHIP of io) keyed by `key`, replays

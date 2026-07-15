@@ -6,15 +6,16 @@
  *
  * Undo/Redo reuse the F2-02 clone/swap for STAGE-THEN-COMMIT atomicity: the inverse
  * (or forward) diff is applied to a CLONE and swapped in only on FULL success, so an
- * allocation failure or a corrupted diff rolls back with the live model, revision,
- * and cursor byte-unchanged. A successful Undo/Redo bumps the revision by one (a new
- * committed state); dirty stays identity-derived (an Undo to the saved baseline is
- * clean even at a higher revision).
+ * allocation failure, corrupted diff, checkpoint serialization fault, or durable
+ * journal-append failure rolls back with the live model, revision, and cursor
+ * byte-unchanged. A successful Undo/Redo bumps the revision by one (a new committed
+ * state); dirty stays identity-derived (an Undo to the saved baseline is clean even
+ * at a higher revision).
  *
- * HONEST SCOPE: this is the ENGINE history primitive. It is in-memory session state
- * (not serialized, not crash-durable -- F2-04) and is NOT wired to the GUI Undo/Redo
- * shortcuts / save-checkpoint / ownership (F3-02) nor routed through the shipping
- * frontends (F2-05).
+ * HONEST SCOPE: the undo STACK is in-memory session state and is not restored after
+ * restart. When a recovery journal is attached, the DOCUMENT STATE produced by each
+ * Undo/Redo is crash-durable via an appended checkpoint; recovery starts with a fresh
+ * empty history stack.
  */
 
 #include "tp_core/tp_diff.h"
@@ -25,6 +26,7 @@
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_transaction.h"
 #include "tp_diff_internal.h"
+#include "tp_txn_internal.h"
 
 /* ---- diff record + per-op entry lifecycle -------------------------------- */
 
@@ -211,18 +213,28 @@ tp_status tp_model_undo(tp_model *m, tp_error *err) {
     if (!r) {
         return tp_error_set(err, TP_STATUS_NOT_FOUND, "nothing to undo");
     }
+    int64_t revision = 0;
+    tp_status st = tp_model__next_revision(m->revision, &revision, err);
+    if (st != TP_STATUS_OK) {
+        return st;
+    }
     tp_project *clone = tp_project_clone(m->project);
     if (!clone) {
         return tp_error_set(err, TP_STATUS_OOM, "undo: clone failed");
     }
-    tp_status st = tp_diff_record_apply(clone, r, /*reverse=*/true, err);
+    st = tp_diff_record_apply(clone, r, /*reverse=*/true, err);
     if (st != TP_STATUS_OK) {
         tp_project_destroy(clone); /* rollback: live model byte-unchanged */
         return st;
     }
+    st = tp_model__append_history_checkpoint(m, clone, revision, err);
+    if (st != TP_STATUS_OK) {
+        tp_project_destroy(clone); /* durable gate rejected: model + revision + cursor unchanged */
+        return st;
+    }
     tp_project_destroy(m->project);
     m->project = clone;
-    m->revision += 1;
+    m->revision = revision;
     tp_history_commit_undo(m->history);
     return TP_STATUS_OK;
 }
@@ -235,18 +247,28 @@ tp_status tp_model_redo(tp_model *m, tp_error *err) {
     if (!r) {
         return tp_error_set(err, TP_STATUS_NOT_FOUND, "nothing to redo");
     }
+    int64_t revision = 0;
+    tp_status st = tp_model__next_revision(m->revision, &revision, err);
+    if (st != TP_STATUS_OK) {
+        return st;
+    }
     tp_project *clone = tp_project_clone(m->project);
     if (!clone) {
         return tp_error_set(err, TP_STATUS_OOM, "redo: clone failed");
     }
-    tp_status st = tp_diff_record_apply(clone, r, /*reverse=*/false, err);
+    st = tp_diff_record_apply(clone, r, /*reverse=*/false, err);
+    if (st != TP_STATUS_OK) {
+        tp_project_destroy(clone);
+        return st;
+    }
+    st = tp_model__append_history_checkpoint(m, clone, revision, err);
     if (st != TP_STATUS_OK) {
         tp_project_destroy(clone);
         return st;
     }
     tp_project_destroy(m->project);
     m->project = clone;
-    m->revision += 1;
+    m->revision = revision;
     tp_history_commit_redo(m->history);
     return TP_STATUS_OK;
 }

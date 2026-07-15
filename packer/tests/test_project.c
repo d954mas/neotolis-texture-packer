@@ -30,10 +30,12 @@
 
 #include "tp_core/tp_export.h" /* TP_EXPORTER_ID_JSON_NEOTOLIS */
 #include "tp_core/tp_id.h"
+#include "tp_core/tp_identity.h"
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_project_migrate.h"
 #include "unity.h"
+#include "../src/tp_project_internal.h"
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -918,15 +920,12 @@ void test_prune_sprite(void) {
     tp_project_destroy(p);
 }
 
-/* 16. Atomic save: a FAILED tp_project_save leaves the pre-existing target file
- * byte-identical. We save a valid project, snapshot its bytes, then force the
- * next save to fail deterministically by pre-creating a NON-EMPTY *directory* at
- * the sibling `<path>.savetmp`. It must be non-empty: the core does `remove(tmp)`
- * before `fopen(tmp,"wb")`, and on POSIX remove() would rmdir an EMPTY dir (then
- * the save would succeed) -- a pinned file inside makes remove() fail (ENOTEMPTY)
- * AND fopen() fail (EISDIR/directory) on every platform. The save must return
- * non-OK and the original `path` must be untouched (byte-identical). */
-void test_project_save_atomic_failure_keeps_target(void) {
+/* 16. The historical `<path>.savetmp` name is not owned by this process. A stale
+ * directory (or another writer using that name) must neither block the save nor
+ * be removed. This deterministically pins the multi-writer contract without a
+ * timing-sensitive race: every save must create and clean up only its own unique
+ * sibling temp. */
+void test_project_save_ignores_unowned_fixed_temp_name(void) {
     char path[512];
     char tmpdir[600];
     char pin[640];
@@ -937,39 +936,239 @@ void test_project_save_atomic_failure_keeps_target(void) {
     tp_project *p = build_rich();
     tp_error err = {0};
 
-    /* 1. initial good save */
+    /* 1. Initial good save and snapshot. */
     TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, tp_project_save(p, path, &err), err.msg);
-
-    /* 2. snapshot the on-disk bytes */
     size_t n1 = 0;
     char *v1 = read_all(path, &n1);
     TEST_ASSERT_TRUE(n1 > 0);
 
-    /* 3. inject a deterministic failure: a NON-EMPTY directory where the temp file must be created */
-    (void)remove(pin);           /* clear any leftover pin from a prior run */
-    (void)TP_TEST_RMDIR(tmpdir); /* clear any leftover dir from a prior run */
-    (void)remove(tmpdir);        /* or a leftover regular temp file */
-    TEST_ASSERT_EQUAL_INT(0, TP_TEST_MKDIR(tmpdir));
-    write_text(pin, "pin"); /* make it non-empty so remove() cannot rmdir it (POSIX) */
-
-    /* 4. the save must fail (fopen of the temp cannot open a directory; remove() cannot clear it) */
+    /* 2. A foreign regular file at the old name is neither removed nor reused. */
+    (void)remove(pin);
+    (void)TP_TEST_RMDIR(tmpdir);
+    (void)remove(tmpdir);
+    write_text(tmpdir, "foreign-file");
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_set_atlas_name(tp_project_get_atlas(p, 0), "after-file"));
     tp_error err2 = {0};
-    tp_status st = tp_project_save(p, path, &err2);
-    TEST_ASSERT_NOT_EQUAL(TP_STATUS_OK, st);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, tp_project_save(p, path, &err2), err2.msg);
+    size_t foreign_len = 0;
+    char *foreign_bytes = read_all(tmpdir, &foreign_len);
+    TEST_ASSERT_EQUAL_size_t(strlen("foreign-file"), foreign_len);
+    TEST_ASSERT_EQUAL_STRING("foreign-file", foreign_bytes);
+    free(foreign_bytes);
+    (void)remove(tmpdir);
 
-    /* 5. the pre-existing target is byte-identical -- never truncated or partially written */
+    /* 3. An unremovable foreign directory at the old name does not block save. */
+    TEST_ASSERT_EQUAL_INT(0, TP_TEST_MKDIR(tmpdir));
+    write_text(pin, "foreign");
+
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_set_atlas_name(tp_project_get_atlas(p, 0), "after-dir"));
+    err2 = (tp_error){0};
+    tp_status st = tp_project_save(p, path, &err2);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, st, err2.msg);
+
+    /* 4. The target contains our new bytes, while the foreign directory is untouched. */
     size_t n2 = 0;
     char *v2 = read_all(path, &n2);
-    TEST_ASSERT_EQUAL_size_t(n1, n2);
-    TEST_ASSERT_EQUAL_INT(0, memcmp(v1, v2, n1));
+    TEST_ASSERT_TRUE(n2 > 0);
+    TEST_ASSERT_FALSE(n1 == n2 && memcmp(v1, v2, n1) == 0);
+    size_t pin_len = 0;
+    char *pin_bytes = read_all(pin, &pin_len);
+    TEST_ASSERT_EQUAL_size_t(strlen("foreign"), pin_len);
+    TEST_ASSERT_EQUAL_STRING("foreign", pin_bytes);
 
-    /* 6. cleanup */
+    /* 5. Cleanup. */
     (void)remove(pin);
     (void)TP_TEST_RMDIR(tmpdir);
     (void)remove(path);
     free(v1);
     free(v2);
+    free(pin_bytes);
     tp_project_destroy(p);
+}
+
+void test_project_save_temp_create_failure_keeps_destination(void) {
+    char path[512];
+    join(path, sizeof path, "atomic-fault.ntpacker_project");
+    tp_project *p = build_rich();
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_save(p, path, &err));
+    size_t before_len = 0;
+    char *before = read_all(path, &before_len);
+
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_set_atlas_name(tp_project_get_atlas(p, 0), "must-not-land"));
+    tp_project__test_fail_next_temp_create();
+    TEST_ASSERT_NOT_EQUAL(TP_STATUS_OK, tp_project_save(p, path, &err));
+    size_t after_len = 0;
+    char *after = read_all(path, &after_len);
+    TEST_ASSERT_EQUAL_size_t(before_len, after_len);
+    TEST_ASSERT_EQUAL_MEMORY(before, after, before_len);
+
+    free(before);
+    free(after);
+    (void)remove(path);
+    tp_project_destroy(p);
+}
+
+void test_failed_save_as_keeps_live_project_paths(void) {
+    char first[512];
+    char other[512];
+    join(first, sizeof first, "stage-paths-first.ntpacker_project");
+    (void)snprintf(other, sizeof other, "%s/missing-stage-dir/other.ntpacker_project", g_dir);
+    tp_project *p = build_rich();
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_save(p, first, &err));
+    TEST_ASSERT_NOT_NULL(p->project_dir);
+    char *before_dir = dupstr(p->project_dir);
+    TEST_ASSERT_NOT_NULL(before_dir);
+    const char *before_source = p->atlases[0].sources[0].path;
+    char *source_copy = dupstr(before_source);
+    TEST_ASSERT_NOT_NULL(source_copy);
+
+    tp_project__test_fail_next_temp_create();
+    TEST_ASSERT_NOT_EQUAL(TP_STATUS_OK, tp_project_save(p, other, &err));
+    TEST_ASSERT_EQUAL_STRING(before_dir, p->project_dir);
+    TEST_ASSERT_EQUAL_STRING(source_copy, p->atlases[0].sources[0].path);
+
+    free(before_dir);
+    free(source_copy);
+    (void)remove(first);
+    tp_project_destroy(p);
+}
+
+void test_save_if_unchanged_rechecks_immediately_before_publish(void) {
+    char path[512];
+    join(path, sizeof path, "conditional-save.ntpacker_project");
+    tp_project *p = build_rich();
+    promote(p);
+    tp_id128 baseline = {{0}};
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_save_with_fingerprint(p, path, &baseline, &err));
+    char *before_dir = dupstr(p->project_dir);
+    TEST_ASSERT_NOT_NULL(before_dir);
+    write_text(path, "external-writer-won");
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_set_atlas_name(tp_project_get_atlas(p, 0), "must-not-land"));
+
+    tp_id128 output = {{0xFF}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_FILE_CHANGED_EXTERNALLY,
+                          tp_project_save_if_unchanged(p, path, &baseline, &output, &err));
+    TEST_ASSERT_TRUE(tp_id128_is_nil(output));
+    TEST_ASSERT_EQUAL_STRING(before_dir, p->project_dir);
+    size_t actual_len = 0;
+    char *actual = read_all(path, &actual_len);
+    TEST_ASSERT_EQUAL_size_t(strlen("external-writer-won"), actual_len);
+    TEST_ASSERT_EQUAL_STRING("external-writer-won", actual);
+
+    free(actual);
+    free(before_dir);
+    (void)remove(path);
+    tp_project_destroy(p);
+}
+
+void test_atomic_replace_preserves_existing_posix_mode(void) {
+#ifdef _WIN32
+    TEST_IGNORE_MESSAGE("POSIX mode contract");
+#else
+    char path[512];
+    join(path, sizeof path, "preserve-mode.ntpacker_project");
+    tp_project *p = build_rich();
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_save(p, path, &err));
+    TEST_ASSERT_EQUAL_INT(0, chmod(path, 0664));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_set_atlas_name(tp_project_get_atlas(p, 0), "mode-preserved"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_save(p, path, &err));
+    struct stat actual;
+    TEST_ASSERT_EQUAL_INT(0, stat(path, &actual));
+    TEST_ASSERT_EQUAL_INT(0664, actual.st_mode & 0777);
+    (void)remove(path);
+    tp_project_destroy(p);
+#endif
+}
+
+void test_load_with_fingerprint_returns_exact_consumed_bytes(void) {
+    char path[512];
+    join(path, sizeof path, "load-fingerprint.ntpacker_project");
+    const char json[] = "{\n  \"version\": 4,\n  \"atlases\": []\n}\n";
+    write_text(path, json);
+
+    tp_project *p = NULL;
+    tp_id128 actual = {{0}};
+    tp_id128 expected = {{0}};
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK,
+                                  tp_project_load_with_fingerprint(path, &p, &actual, &err), err.msg);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_identity_bytes_fingerprint(json, sizeof json - 1U, &expected, NULL));
+    TEST_ASSERT_TRUE(tp_id128_eq(expected, actual));
+
+    tp_project_destroy(p);
+    TEST_ASSERT_EQUAL_INT(0, remove(path));
+}
+
+void test_save_with_fingerprint_returns_exact_written_bytes(void) {
+    char path[512];
+    join(path, sizeof path, "save-fingerprint.ntpacker_project");
+    tp_project *p = build_rich();
+    promote(p);
+    tp_id128 actual = {{0}};
+    tp_id128 expected = {{0}};
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK,
+                                  tp_project_save_with_fingerprint(p, path, &actual, &err), err.msg);
+
+    size_t len = 0;
+    char *bytes = read_all(path, &len);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_identity_bytes_fingerprint(bytes, len, &expected, NULL));
+    TEST_ASSERT_TRUE(tp_id128_eq(expected, actual));
+
+    free(bytes);
+    tp_project_destroy(p);
+    TEST_ASSERT_EQUAL_INT(0, remove(path));
+}
+
+void test_save_rejects_bytes_above_reader_limit_before_publish(void) {
+    char path[512];
+    join(path, sizeof path, "save-size-cap.ntpacker_project");
+    (void)remove(path);
+    tp_project *p = build_rich();
+    promote(p);
+    tp_id128 fingerprint = {{0xFF}};
+    tp_error err = {0};
+
+    tp_project__test_set_save_max_bytes(1U);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS,
+                          tp_project_save_with_fingerprint(p, path, &fingerprint, &err));
+    TEST_ASSERT_TRUE(tp_id128_is_nil(fingerprint));
+    TEST_ASSERT_NULL(fopen(path, "rb")); /* no temp was published over the destination */
+
+    tp_project_destroy(p);
+}
+
+void test_fingerprinted_io_clears_output_on_failure(void) {
+    char path[512];
+    join(path, sizeof path, "fingerprint-failure.ntpacker_project");
+    write_text(path, "not json");
+
+    tp_project *loaded = NULL;
+    tp_id128 fingerprint = {{0xFF}};
+    TEST_ASSERT_NOT_EQUAL(TP_STATUS_OK,
+                          tp_project_load_with_fingerprint(path, &loaded, &fingerprint, NULL));
+    TEST_ASSERT_NULL(loaded);
+    TEST_ASSERT_TRUE(tp_id128_is_nil(fingerprint));
+
+    tp_project *p = build_rich();
+    promote(p);
+    fingerprint = (tp_id128){{0xFF}};
+    tp_project__test_fail_next_temp_create();
+    TEST_ASSERT_NOT_EQUAL(TP_STATUS_OK,
+                          tp_project_save_with_fingerprint(p, path, &fingerprint, NULL));
+    TEST_ASSERT_TRUE(tp_id128_is_nil(fingerprint));
+
+    tp_project_destroy(p);
+    TEST_ASSERT_EQUAL_INT(0, remove(path));
 }
 
 int main(int argc, char **argv) {
@@ -998,6 +1197,14 @@ int main(int argc, char **argv) {
     RUN_TEST(test_sprite_override_sparse);
     RUN_TEST(test_set_atlas_name);
     RUN_TEST(test_prune_sprite);
-    RUN_TEST(test_project_save_atomic_failure_keeps_target);
+    RUN_TEST(test_project_save_ignores_unowned_fixed_temp_name);
+    RUN_TEST(test_project_save_temp_create_failure_keeps_destination);
+    RUN_TEST(test_failed_save_as_keeps_live_project_paths);
+    RUN_TEST(test_save_if_unchanged_rechecks_immediately_before_publish);
+    RUN_TEST(test_atomic_replace_preserves_existing_posix_mode);
+    RUN_TEST(test_load_with_fingerprint_returns_exact_consumed_bytes);
+    RUN_TEST(test_save_with_fingerprint_returns_exact_written_bytes);
+    RUN_TEST(test_save_rejects_bytes_above_reader_limit_before_publish);
+    RUN_TEST(test_fingerprinted_io_clears_output_on_failure);
     return UNITY_END();
 }

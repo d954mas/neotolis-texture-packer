@@ -282,6 +282,13 @@ static void tp_txn__commit_reject(tp_txn_result *out, tp_project *clone, tp_diff
  * Fills `out` committed/rejected. The live model is byte-unchanged unless it returns
  * TP_STATUS_OK. */
 tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_txn_result *out, tp_error *err) {
+    int64_t next_revision = 0;
+    tp_status next_st = tp_model__next_revision(m->revision, &next_revision, err);
+    if (next_st != TP_STATUS_OK) {
+        tp_txn__commit_reject(out, NULL, NULL, NULL, m->revision, -1, next_st, "revision",
+                              "the model revision cannot be advanced");
+        return next_st;
+    }
     tp_project *clone = tp_project_clone(m->project);
     if (!clone) {
         tp_txn__commit_reject(out, NULL, NULL, NULL, m->revision, -1, TP_STATUS_OOM, "",
@@ -390,7 +397,7 @@ tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_tx
             gate = tp_error_set(err, TP_STATUS_OOM, "could not serialize the operation for the recovery journal");
             gate_msg = "could not serialize the operation for the journal";
         } else {
-            gate = tp_journal_append_txn(m->journal, req->id_hex, m->revision + 1, (const uint8_t *)payload,
+            gate = tp_journal_append_txn(m->journal, req->id_hex, next_revision, (const uint8_t *)payload,
                                          strlen(payload), err);
             gate_msg = "recovery journal append failed (transaction rolled back)";
         }
@@ -412,7 +419,7 @@ tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_tx
     /* The commit: allocation-free pointer swap + one revision bump. */
     tp_project_destroy(m->project);
     m->project = clone;
-    m->revision += 1;
+    m->revision = next_revision;
 
     /* Push the diff (allocation-free): records the produced revision + discards any
      * redo branch (a new transaction after an Undo drops the redo steps). */
@@ -538,7 +545,7 @@ void tp_model_set_coordinator(tp_model *m, tp_side_effect_coordinator *c) {
     }
 }
 
-/* R2b/R3: serialize the model's live committed project into a fresh malloc'd snapshot
+/* R2b/R3: serialize a candidate project into a fresh malloc'd snapshot
  * (*snap / *snap_len, caller frees) and PROVE it round-trips through tp_project_load_buffer
  * before it is handed to a checkpoint. The checkpoint is the load-bearing recovery BASE --
  * format B replays post-checkpoint ops ONTO it (see tp_model_recover) -- so a base that
@@ -546,13 +553,15 @@ void tp_model_set_coordinator(tp_model *m, tp_side_effect_coordinator *c) {
  * recovered session. Enforcing "the checkpoint must round-trip" HERE in core, below any
  * client's own promotion (e.g. the GUI's ensure_ids), means no caller can persist an
  * unrecoverable base. Shared by tp_model_attach_journal (initial checkpoint) and
- * tp_model_compact_journal (Save-window compaction) so BOTH inherit the guarantee. On any
+ * tp_model_compact_journal (Save-window compaction), and journal-gated Undo/Redo so all
+ * checkpoint paths inherit the guarantee. On any
  * failure *snap is NULL/0 and a wrapped error is returned; the caller leaves the journal
  * untouched. */
-static tp_status model_checkpoint_snapshot(tp_model *m, char **snap, size_t *snap_len, tp_error *err) {
+static tp_status project_checkpoint_snapshot(const tp_project *project, char **snap, size_t *snap_len,
+                                             tp_error *err) {
     *snap = NULL;
     *snap_len = 0;
-    tp_status ss = tp_project_save_buffer(m->project, snap, snap_len, err);
+    tp_status ss = tp_project_save_buffer(project, snap, snap_len, err);
     if (ss != TP_STATUS_OK) {
         return ss;
     }
@@ -597,7 +606,7 @@ tp_status tp_model_attach_journal(tp_model *m, tp_journal *j, tp_error *err) {
      * failure the model is NOT attached and the caller still owns j. */
     char *snap = NULL;
     size_t snap_len = 0;
-    tp_status ss = model_checkpoint_snapshot(m, &snap, &snap_len, err);
+    tp_status ss = project_checkpoint_snapshot(m->project, &snap, &snap_len, err);
     if (ss != TP_STATUS_OK) {
         return ss;
     }
@@ -607,6 +616,42 @@ tp_status tp_model_attach_journal(tp_model *m, tp_journal *j, tp_error *err) {
         return cs;
     }
     m->journal = j; /* ownership transferred */
+    return TP_STATUS_OK;
+}
+
+tp_status tp_model__append_history_checkpoint(tp_model *m, const tp_project *candidate, int64_t revision,
+                                              tp_error *err) {
+    if (!m || !candidate) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "null model or history candidate");
+    }
+    if (!m->journal) {
+        return TP_STATUS_OK;
+    }
+
+    /* Undo/Redo has no uniformly encodable forward operation (notably inverse remove),
+     * so its durable record is a full checkpoint. It is APPENDED, never compacted:
+     * the existing clean checkpoint remains intact until this candidate is durable,
+     * and record_count advances past the startup scan's unsaved-work threshold. */
+    char *snap = NULL;
+    size_t snap_len = 0;
+    tp_status ss = project_checkpoint_snapshot(candidate, &snap, &snap_len, err);
+    if (ss != TP_STATUS_OK) {
+        return ss;
+    }
+    tp_status cs = tp_journal_init_checkpoint(m->journal, (const uint8_t *)snap, snap_len, revision, err);
+    free(snap);
+    return cs;
+}
+
+tp_status tp_model__next_revision(int64_t current, int64_t *next, tp_error *err) {
+    if (!next) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "null next revision output");
+    }
+    if (current < 0 || current == INT64_MAX) {
+        return tp_error_set(err, TP_STATUS_INVALID_REVISION,
+                            "model revision cannot advance from %lld", (long long)current);
+    }
+    *next = current + 1;
     return TP_STATUS_OK;
 }
 
@@ -624,7 +669,7 @@ tp_status tp_model_compact_journal(tp_model *m, tp_error *err) {
      * recovers); the compaction primitive itself fails closed on a truncate failure (poison preserved). */
     char *snap = NULL;
     size_t snap_len = 0;
-    tp_status ss = model_checkpoint_snapshot(m, &snap, &snap_len, err);
+    tp_status ss = project_checkpoint_snapshot(m->project, &snap, &snap_len, err);
     if (ss != TP_STATUS_OK) {
         return ss; /* snapshot/probe failed BEFORE any truncate: journal untouched, keeps recovering */
     }
@@ -648,17 +693,22 @@ tp_status tp_model_compact_journal(tp_model *m, tp_error *err) {
 
 tp_status tp_model_set_recovery_metadata(tp_model *m, int64_t timestamp, const char *path, const char *name,
                                          tp_error *err) {
+    return tp_model_set_recovery_metadata_ex(m, timestamp, path, name, NULL, err);
+}
+
+tp_status tp_model_set_recovery_metadata_ex(tp_model *m, int64_t timestamp, const char *path, const char *name,
+                                            const tp_id128 *file_fingerprint, tp_error *err) {
     if (!m) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "null model");
     }
     if (!m->journal) {
         return TP_STATUS_OK; /* no journal attached (recovery off / journal-less): nothing to record */
     }
-    /* R5b-1: forward the project identity to the attached journal so a startup scan can list the crashed
-     * project by path + name + time. Same null-journal-tolerant contract as tp_model_compact_journal; NULL
-     * path/name are normalised to "" (never passed as NULL). A write failure is returned to the caller for
-     * the soft channel -- metadata is informational and must never fail an edit or Save. */
-    return tp_journal_set_metadata(m->journal, timestamp, path ? path : "", name ? name : "", err);
+    /* Forward the canonical project identity used by recovery Save Original. Same null-journal-tolerant
+     * contract as tp_model_compact_journal; NULL path/name are normalized to "". Every durable write
+     * failure is returned so the host can detach/remove stale recovery authority. */
+    return tp_journal_set_metadata_ex(m->journal, timestamp, path ? path : "", name ? name : "",
+                                      file_fingerprint, err);
 }
 
 bool tp_model_has_journal(const tp_model *m) {
@@ -667,6 +717,14 @@ bool tp_model_has_journal(const tp_model *m) {
      * backed. The GUI adopt-delete guard keys off this: never delete the adopted source when this is
      * false (journal-less attach), because the source is then the sole durable copy. */
     return m && m->journal != NULL;
+}
+
+void tp_model_detach_journal(tp_model *m) {
+    if (!m || !m->journal) {
+        return;
+    }
+    tp_journal_destroy(m->journal);
+    m->journal = NULL;
 }
 
 tp_status tp_model_recover(tp_journal_io io, tp_id128 key, tp_model **out, tp_journal_recovery *info, tp_error *err) {

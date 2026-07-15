@@ -33,7 +33,7 @@ void gui_crash_install(void);
 void gui_crash_clear_marker(void);
 
 /* D3: if the PREVIOUS run left a `last-run.crashed` marker (i.e. it crashed), show a one-time yes/no
- * prompt offering to open the <app-data>/crash folder (logs + dump) so the user can send it to the
+ * prompt offering to open <app-data>, which contains the sibling crash/ and logs/ folders, so the user can send diagnostics to the
  * developer; open the folder in the OS file explorer on YES, and clear the marker on EITHER choice so
  * it never prompts twice. A clean previous run (no marker) shows nothing. Call ONCE early in main()
  * AFTER gui_crash_install and only for a real windowed run. Strict no-op when the crash dir never

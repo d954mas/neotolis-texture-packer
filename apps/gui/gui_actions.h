@@ -57,6 +57,7 @@ extern bool s_recovery_open;                       /* R6b: the startup recovery 
  * and the disk-mutating resolve run outside nt_ui_begin/end, like s_pending_save_as). */
 void gui_actions_open_recovery(const gui_recovery_list *list); /* copy list, set s_recovery_open (main() startup) */
 int  gui_actions_recovery_count(void);
+bool gui_actions_recovery_has_more(void);
 const gui_recovery_entry *gui_actions_recovery_at(int i);      /* NULL if out of range */
 void gui_actions_recovery_request(int row, int action);        /* action = gui_recovery_action; deferred */
 

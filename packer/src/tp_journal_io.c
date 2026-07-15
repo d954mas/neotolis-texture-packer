@@ -243,6 +243,9 @@ static int file_read_all(void *ctx, uint8_t **out, size_t *out_len) {
         *out_len = 0;
         return 0;
     }
+    if ((uint64_t)sz > (uint64_t)TP_JOURNAL_MAX_FILE_BYTES || (uint64_t)sz > (uint64_t)SIZE_MAX) {
+        return -1; /* reject before malloc/read: recovery input is untrusted */
+    }
     if (TP_FSEEK64(f->fp, 0, SEEK_SET) != 0) {
         return -1;
     }

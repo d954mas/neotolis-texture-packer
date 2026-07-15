@@ -59,6 +59,12 @@ extern "C" {
  * did not exist). The sidecar is ephemeral and compacted away on Save. */
 #define TP_JOURNAL_FORMAT_VERSION 3
 
+/* Shared writer/reader bound for one sidecar. Every durable append is rejected before record allocation/write
+ * when its framed result would cross this limit, so an acknowledged operation can never create a journal
+ * that startup recovery refuses. Recovery also rejects foreign/legacy oversized files before allocation.
+ * Normal Save compaction reclaims the append budget. */
+#define TP_JOURNAL_MAX_FILE_BYTES (64U * 1024U * 1024U)
+
 /* ---- injectable I/O seam ------------------------------------------------- *
  * The journal never calls the filesystem directly: all durability goes through
  * this seam, so the fault suite drives an in-memory backing store with a write-
@@ -147,19 +153,22 @@ tp_status tp_journal_append_txn(tp_journal *j, const char *id_hex, int64_t revis
                                 size_t len, tp_error *err);
 
 /* R5a: record the owning project's metadata {timestamp, path, name} so a startup scan can list
- * this journal's crashed project by path + name + time. Metadata is INFORMATIONAL and
- * CACHE-AUTHORITATIVE: this caches the values on the journal (owned strdup'd copies, replacing any
- * prior) as the source of truth for what the next compaction persists, then makes a BEST-EFFORT
- * durable append via the normal frame path. It persists immediately if the append succeeds; if a
- * healthy journal's append fails it is SWALLOWED (write_record rolled the torn record back, the store
- * stays recoverable) and the cache is re-emitted at the next tp_journal_compact (Save/undo). Returns
- * an error ONLY on OOM (the dups) or a GENUINELY POISONED journal (a torn append that could not roll
- * back) -- never on a transient healthy-journal write hiccup -- so a caller's "recovery degraded"
- * surfacing fires only on real loss. `path`/`name` are UTF-8 and may be empty (untitled project ->
+ * this journal's crashed project by path + name + time. The values are cached on the journal for
+ * compaction and appended durably immediately. EVERY append failure is returned, even when the
+ * partially-written record was rolled back and the journal remains healthy: a caller that uses the
+ * metadata as Save-Original authority must detach/disable that recovery slot rather than let a crash
+ * expose an older path/fingerprint. `path`/`name` are UTF-8 and may be empty (untitled project ->
  * path ""); NULL is treated as "". `timestamp` is a caller-supplied unix-seconds value (core stays
  * deterministic -- it never calls time()). NULL journal -> INVALID_ARGUMENT. */
 tp_status tp_journal_set_metadata(tp_journal *j, int64_t timestamp, const char *path, const char *name,
                                   tp_error *err);
+
+/* Extended metadata for recovery conflict detection. `file_fingerprint` is the exact-byte
+ * fingerprint of the original saved project at the time this metadata is recorded; NULL means
+ * no saved-file baseline (untitled or legacy caller). The fingerprint is an optional trailer in
+ * the existing journal format, so older v3 metadata remains readable. */
+tp_status tp_journal_set_metadata_ex(tp_journal *j, int64_t timestamp, const char *path, const char *name,
+                                     const tp_id128 *file_fingerprint, tp_error *err);
 
 /* Idempotency query: true iff `id_hex` is in the retained-id index. NULL-safe. */
 bool tp_journal_contains(const tp_journal *j, const char *id_hex);
@@ -190,6 +199,8 @@ typedef struct tp_journal_meta {
     int64_t timestamp; /* caller-supplied unix-seconds when the metadata was recorded */
     char *path;        /* owned; the project's on-disk path ("" if untitled), or NULL when absent */
     char *name;        /* owned; the project's display name, or NULL when absent */
+    tp_id128 file_fingerprint; /* exact bytes of the saved original when metadata was recorded */
+    bool has_file_fingerprint; /* false for legacy metadata and untitled projects */
 } tp_journal_meta;
 
 /* Format B (R2): one recovered post-checkpoint committed transaction -- an owned op-payload

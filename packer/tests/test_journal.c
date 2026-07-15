@@ -958,6 +958,184 @@ void test_io_file_read_no_create(void) {
     remove(path);
 }
 
+void test_file_journal_rejects_oversize_before_read(void) {
+    if (!g_dir) {
+        TEST_IGNORE_MESSAGE("no scratch dir (argv[1]) provided");
+        return;
+    }
+    char path[1024];
+    (void)snprintf(path, sizeof path, "%s/oversize.journal", g_dir);
+    remove(path);
+    FILE *f = NULL;
+#ifdef _WIN32
+    (void)fopen_s(&f, path, "wb");
+#else
+    f = fopen(path, "wb");
+#endif
+    TEST_ASSERT_NOT_NULL(f);
+    TEST_ASSERT_EQUAL_INT(0, fseek(f, (long)TP_JOURNAL_MAX_FILE_BYTES, SEEK_SET));
+    TEST_ASSERT_NOT_EQUAL(EOF, fputc(0, f));
+    TEST_ASSERT_EQUAL_INT(0, fclose(f));
+
+    tp_journal_peek_result pk;
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED,
+                          tp_journal_peek(tp_journal_io_file_read(path), &pk, &err));
+    TEST_ASSERT_NOT_NULL(strstr(err.msg, "read failed"));
+    remove(path);
+}
+
+/* Writer/reader size contract: every record acknowledged by a file-backed journal must leave the
+ * store readable by the same build. These tests use the public 64 MiB cap rather than a test-only
+ * override so a future reader/writer drift cannot be hidden by separate test configuration. */
+void test_file_journal_initial_checkpoint_cannot_exceed_reader_cap(void) {
+    if (!g_dir) {
+        TEST_IGNORE_MESSAGE("no scratch dir (argv[1]) provided");
+        return;
+    }
+    char path[1024];
+    (void)snprintf(path, sizeof path, "%s/cap-initial.journal", g_dir);
+    remove(path);
+
+    tp_journal_io io = tp_journal_io_file(path);
+    TEST_ASSERT_NOT_NULL(io.ctx);
+    tp_journal *j = tp_journal_create(io, key_of(0xC1));
+    TEST_ASSERT_NOT_NULL(j);
+    const size_t frame_bytes = (size_t)TP_JRN_HEADER_LEN + (size_t)TP_JRN_SYNC_FIELD +
+                               (size_t)TP_JRN_LEN_FIELD + (size_t)TP_JRN_CRC_FIELD +
+                               (size_t)TP_JRN_CKPT_FIXED;
+    const size_t snapshot_len = (size_t)TP_JOURNAL_MAX_FILE_BYTES - frame_bytes + 1U;
+    uint8_t *snapshot = (uint8_t *)malloc(snapshot_len);
+    TEST_ASSERT_NOT_NULL(snapshot);
+
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED,
+                          tp_journal_init_checkpoint(j, snapshot, snapshot_len, 0, &err));
+    TEST_ASSERT_EQUAL_INT64(0, io.length(io.ctx)); /* rejected before even writing the header */
+    free(snapshot);
+    tp_journal_destroy(j);
+    remove(path);
+}
+
+void test_file_journal_transaction_rejected_before_crossing_reader_cap(void) {
+    if (!g_dir) {
+        TEST_IGNORE_MESSAGE("no scratch dir (argv[1]) provided");
+        return;
+    }
+    char path[1024];
+    (void)snprintf(path, sizeof path, "%s/cap-transaction.journal", g_dir);
+    remove(path);
+
+    tp_id128 key = key_of(0xC2);
+    tp_journal_io io = tp_journal_io_file(path);
+    TEST_ASSERT_NOT_NULL(io.ctx);
+    tp_journal *j = tp_journal_create(io, key);
+    TEST_ASSERT_NOT_NULL(j);
+    tp_project *p = base_project();
+    tp_model *m = tp_model_wrap(p);
+    TEST_ASSERT_NOT_NULL(m);
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_attach_journal(m, j, &err));
+    const int64_t valid_len = io.length(io.ctx);
+    TEST_ASSERT_TRUE(valid_len > 0);
+    TEST_ASSERT_EQUAL_INT(0, io.truncate(io.ctx, (size_t)TP_JOURNAL_MAX_FILE_BYTES - 1U));
+    char *before = serialize(tp_model_project(m));
+
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED,
+                          commit_rename(m, "c2000000000000000000000000000001", 0, "must-not-commit"));
+    char *after = serialize(tp_model_project(m));
+    TEST_ASSERT_EQUAL_STRING(before, after);
+    TEST_ASSERT_EQUAL_INT64(0, tp_model_revision(m));
+    TEST_ASSERT_EQUAL_INT64((int64_t)TP_JOURNAL_MAX_FILE_BYTES - 1, io.length(io.ctx));
+
+    free(before);
+    free(after);
+    TEST_ASSERT_EQUAL_INT(0, io.truncate(io.ctx, (size_t)valid_len));
+    /* Limit rejection retained neither bytes nor the id: the exact transaction is retryable. */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          commit_rename(m, "c2000000000000000000000000000001", 0, "must-not-commit"));
+    TEST_ASSERT_EQUAL_STRING("must-not-commit", tp_model_project(m)->atlases[0].name);
+    TEST_ASSERT_EQUAL_INT64(1, tp_model_revision(m));
+    tp_model_destroy(m); /* owns and closes j/io */
+    remove(path);
+}
+
+void test_file_journal_undo_rejected_before_crossing_reader_cap(void) {
+    if (!g_dir) {
+        TEST_IGNORE_MESSAGE("no scratch dir (argv[1]) provided");
+        return;
+    }
+    char path[1024];
+    (void)snprintf(path, sizeof path, "%s/cap-undo.journal", g_dir);
+    remove(path);
+
+    tp_journal_io io = tp_journal_io_file(path);
+    TEST_ASSERT_NOT_NULL(io.ctx);
+    tp_journal *j = tp_journal_create(io, key_of(0xC3));
+    TEST_ASSERT_NOT_NULL(j);
+    tp_model *m = tp_model_wrap(base_project());
+    TEST_ASSERT_NOT_NULL(m);
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_attach_journal(m, j, &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_enable_history(m));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          commit_rename(m, "c3000000000000000000000000000001", 0, "committed"));
+    const int64_t valid_len = io.length(io.ctx);
+    TEST_ASSERT_EQUAL_INT(0, io.truncate(io.ctx, (size_t)TP_JOURNAL_MAX_FILE_BYTES - 1U));
+    const int undo_before = tp_model_undo_depth(m);
+
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED, tp_model_undo(m, &err));
+    TEST_ASSERT_EQUAL_STRING("committed", tp_model_project(m)->atlases[0].name);
+    TEST_ASSERT_EQUAL_INT64(1, tp_model_revision(m));
+    TEST_ASSERT_EQUAL_INT(undo_before, tp_model_undo_depth(m));
+    TEST_ASSERT_EQUAL_INT64((int64_t)TP_JOURNAL_MAX_FILE_BYTES - 1, io.length(io.ctx));
+
+    TEST_ASSERT_EQUAL_INT(0, io.truncate(io.ctx, (size_t)valid_len));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_undo(m, &err)); /* same cursor move remains retryable */
+    TEST_ASSERT_EQUAL_STRING("atlas1", tp_model_project(m)->atlases[0].name);
+    TEST_ASSERT_EQUAL_INT64(2, tp_model_revision(m));
+    tp_model_destroy(m);
+    remove(path);
+}
+
+void test_file_journal_metadata_failure_at_reader_cap_is_reported(void) {
+    if (!g_dir) {
+        TEST_IGNORE_MESSAGE("no scratch dir (argv[1]) provided");
+        return;
+    }
+    char path[1024];
+    (void)snprintf(path, sizeof path, "%s/cap-metadata.journal", g_dir);
+    remove(path);
+
+    tp_journal_io io = tp_journal_io_file(path);
+    TEST_ASSERT_NOT_NULL(io.ctx);
+    tp_journal *j = tp_journal_create(io, key_of(0xC4));
+    TEST_ASSERT_NOT_NULL(j);
+    const uint8_t snapshot[] = {'o', 'k'};
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_init_checkpoint(j, snapshot, sizeof snapshot, 0, &err));
+    const int64_t valid_len = io.length(io.ctx);
+    TEST_ASSERT_EQUAL_INT(0, io.truncate(io.ctx, (size_t)TP_JOURNAL_MAX_FILE_BYTES - 1U));
+
+    TEST_ASSERT_NOT_EQUAL(TP_STATUS_OK,
+                          tp_journal_set_metadata(j, 123, "/cached/project.ntpacker_project", "cached", &err));
+    TEST_ASSERT_EQUAL_INT64((int64_t)TP_JOURNAL_MAX_FILE_BYTES - 1, io.length(io.ctx));
+
+    TEST_ASSERT_EQUAL_INT(0, io.truncate(io.ctx, (size_t)valid_len));
+    /* The failed durable META append is still cache-authoritative; compaction after
+     * space is reclaimed must persist it exactly as other transient META failures do. */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_compact(j, snapshot, sizeof snapshot, 0, &err));
+    tp_journal_destroy(j);
+    tp_journal_peek_result pk;
+    memset(&pk, 0, sizeof pk);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_peek(tp_journal_io_file_read(path), &pk, &err));
+    TEST_ASSERT_TRUE(pk.has_meta);
+    TEST_ASSERT_EQUAL_STRING("/cached/project.ntpacker_project", pk.meta.path);
+    TEST_ASSERT_EQUAL_STRING("cached", pk.meta.name);
+    tp_journal_peek_free(&pk);
+    remove(path);
+}
+
 /* ==== F2-04 FIX PASS: one genuine case per correctness fix (C1-C5) ========= */
 
 /* C1: a journal attached AFTER journal-less commits must inherit the model's already-
@@ -1508,78 +1686,244 @@ void test_compaction_broken_store_detaches_to_journal_less(void) {
     tp_model_destroy(m);
 }
 
-/* ==== R4: journal undo/redo via checkpoint-on-undo (P1-1) ================== */
+/* ==== R4: journal-gated undo/redo checkpoints (P1-1) ====================== */
 
-/* R4/P1-1: undo swaps the live project to the UNDONE state but does NOT touch the journal, whose
- * post-checkpoint op-payloads still describe the reverted transaction. Left unchecked, a crash after
- * an undo would replay those ops and RESURRECT the undone edit. The fix checkpoints the post-undo
- * state (tp_model_compact_journal -- the same mechanism the GUI undo hook runs), so recovery loads the
- * undone state directly. This test proves it: commit two renames ("one"->"two"), UNDO back to "one",
- * compact, recover -> the recovered atlas is "one", NOT "two". Without the checkpoint-on-undo the
- * journal would still replay both renames and wrongly recover "two". */
-void test_journal_undo_recovers_undone_state(void) {
+/* Undo is a commit, so its durable CHECKPOINT append is part of the SAME stage-then-commit gate as
+ * the candidate project swap. A failed append must leave the live document, revision, history cursor,
+ * and durable byte store unchanged; the one-shot failure then remains retryable. */
+void test_journal_undo_append_failure_rolls_back_history_commit(void) {
     tp_id128 key = key_of(0x87);
     tp_journal_io io;
-    tp_model *m = model_with_journal(key, &io);          /* checkpoint at rev 0 (atlas "atlas1") */
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_enable_history(m)); /* undo needs the diff history */
+    tp_model *m = model_with_journal(key, &io);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_enable_history(m));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "87000000000000000000000000000001", 0, "one"));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "87000000000000000000000000000002", 1, "two"));
-    TEST_ASSERT_EQUAL_STRING("two", tp_model_project(m)->atlases[0].name);
 
-    /* UNDO -> back to "one"; the undo bumps the revision forward (a new committed state). */
-    tp_error err;
+    tp_project *project_ptr_before = tp_model_project(m);
+    char *project_before = serialize(project_ptr_before);
+    size_t journal_before_len = 0;
+    uint8_t *journal_before = snapshot_io(io, &journal_before_len);
+    const int64_t revision_before = tp_model_revision(m);
+    const int undo_before = tp_model_undo_depth(m);
+    const int redo_before = tp_model_redo_depth(m);
+
+    tp_journal_io_memory__fail_next_writes(io, 1);
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED, tp_model_undo(m, &err));
+
+    char *project_after = serialize(tp_model_project(m));
+    size_t journal_after_len = 0;
+    uint8_t *journal_after = snapshot_io(io, &journal_after_len);
+    TEST_ASSERT_EQUAL_PTR(project_ptr_before, tp_model_project(m));
+    TEST_ASSERT_EQUAL_STRING(project_before, project_after);
+    TEST_ASSERT_EQUAL_INT64(revision_before, tp_model_revision(m));
+    TEST_ASSERT_EQUAL_INT(undo_before, tp_model_undo_depth(m));
+    TEST_ASSERT_EQUAL_INT(redo_before, tp_model_redo_depth(m));
+    TEST_ASSERT_EQUAL_INT64((int64_t)journal_before_len, (int64_t)journal_after_len);
+    TEST_ASSERT_EQUAL_MEMORY(journal_before, journal_after, journal_before_len);
+
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_undo(m, &err));
-    TEST_ASSERT_EQUAL_STRING("one", tp_model_project(m)->atlases[0].name);
-    int64_t undone_rev = tp_model_revision(m);
-    TEST_ASSERT_EQUAL_INT64(3, undone_rev); /* rev0 -> +1 (one) -> +1 (two) -> +1 (undo) */
+    TEST_ASSERT_EQUAL_STRING("atlas1", tp_model_project(m)->atlases[0].name);
+    TEST_ASSERT_EQUAL_INT64(revision_before + 1, tp_model_revision(m));
+    TEST_ASSERT_EQUAL_INT(undo_before - 1, tp_model_undo_depth(m));
+    TEST_ASSERT_EQUAL_INT(redo_before + 1, tp_model_redo_depth(m));
 
-    /* The fix: checkpoint the post-undo state into the journal (the GUI hook runs exactly this). */
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_compact_journal(m, &err));
-
-    size_t blen = 0;
-    uint8_t *bytes = snapshot_io(io, &blen);
+    free(project_before);
+    free(project_after);
+    free(journal_before);
+    free(journal_after);
     tp_model_destroy(m);
-
-    /* Recover: the store is now one checkpoint == the UNDONE state, no ops to replay. */
-    tp_journal_io io2 = io_from_bytes(bytes, blen);
-    free(bytes);
-    tp_model *m2 = NULL;
-    tp_journal_recovery info;
-    memset(&info, 0, sizeof info);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_recover(io2, key, &m2, &info, &err));
-    TEST_ASSERT_NOT_NULL(m2);
-    TEST_ASSERT_EQUAL_INT(1, info.records_recovered); /* one checkpoint (the undone state) */
-    TEST_ASSERT_EQUAL_INT(0, (int)info.op_count);     /* nothing to replay -> cannot resurrect "two" */
-    TEST_ASSERT_EQUAL_INT64(undone_rev, tp_model_revision(m2));
-    TEST_ASSERT_EQUAL_STRING("one", tp_model_project(m2)->atlases[0].name); /* the UNDONE state, NOT "two" */
-
-    tp_journal_recovery_free(&info);
-    tp_model_destroy(m2);
 }
 
-/* R4/P1-1 (redo): the symmetric case -- a redo re-applies the reverted edit and is likewise
- * checkpointed, so recovery loads the REDONE state. Commit "one"->"two", UNDO (->"one"), REDO
- * (->"two"), compact, recover -> the recovered atlas is "two" at the post-redo revision. */
-void test_journal_redo_recovers_redone_state(void) {
+/* Redo has the identical durable gate: if its checkpoint append fails, the already-undone live
+ * state and cursor stay exactly where they were. */
+void test_journal_redo_append_failure_rolls_back_history_commit(void) {
     tp_id128 key = key_of(0x88);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_enable_history(m));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "88000000000000000000000000000001", 0, "one"));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "88000000000000000000000000000002", 1, "two"));
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_undo(m, &err));
 
-    tp_error err;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_undo(m, &err)); /* -> "one" (rev 3) */
+    tp_project *project_ptr_before = tp_model_project(m);
+    char *project_before = serialize(project_ptr_before);
+    size_t journal_before_len = 0;
+    uint8_t *journal_before = snapshot_io(io, &journal_before_len);
+    const int64_t revision_before = tp_model_revision(m);
+    const int undo_before = tp_model_undo_depth(m);
+    const int redo_before = tp_model_redo_depth(m);
+
+    tp_journal_io_memory__fail_next_writes(io, 1);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED, tp_model_redo(m, &err));
+
+    char *project_after = serialize(tp_model_project(m));
+    size_t journal_after_len = 0;
+    uint8_t *journal_after = snapshot_io(io, &journal_after_len);
+    TEST_ASSERT_EQUAL_PTR(project_ptr_before, tp_model_project(m));
+    TEST_ASSERT_EQUAL_STRING(project_before, project_after);
+    TEST_ASSERT_EQUAL_INT64(revision_before, tp_model_revision(m));
+    TEST_ASSERT_EQUAL_INT(undo_before, tp_model_undo_depth(m));
+    TEST_ASSERT_EQUAL_INT(redo_before, tp_model_redo_depth(m));
+    TEST_ASSERT_EQUAL_INT64((int64_t)journal_before_len, (int64_t)journal_after_len);
+    TEST_ASSERT_EQUAL_MEMORY(journal_before, journal_after, journal_before_len);
+
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_redo(m, &err));
     TEST_ASSERT_EQUAL_STRING("one", tp_model_project(m)->atlases[0].name);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_redo(m, &err)); /* -> "two" (rev 4) */
-    TEST_ASSERT_EQUAL_STRING("two", tp_model_project(m)->atlases[0].name);
-    int64_t redone_rev = tp_model_revision(m);
-    TEST_ASSERT_EQUAL_INT64(4, redone_rev);
+    TEST_ASSERT_EQUAL_INT64(revision_before + 1, tp_model_revision(m));
+    TEST_ASSERT_EQUAL_INT(undo_before + 1, tp_model_undo_depth(m));
+    TEST_ASSERT_EQUAL_INT(redo_before - 1, tp_model_redo_depth(m));
 
+    free(project_before);
+    free(project_after);
+    free(journal_before);
+    free(journal_after);
+    tp_model_destroy(m);
+}
+
+void test_revision_max_rejects_commit_and_history_without_overflow(void) {
+    tp_model *m = tp_model_wrap(base_project());
+    TEST_ASSERT_NOT_NULL(m);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_enable_history(m));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          commit_rename(m, "8f000000000000000000000000000001", 0, "one"));
+    const int undo_before = tp_model_undo_depth(m);
+    const char *name_before = tp_model_project(m)->atlases[0].name;
+    char name_copy[64];
+    (void)snprintf(name_copy, sizeof name_copy, "%s", name_before);
+
+    m->revision = INT64_MAX; /* a CRC-valid hostile recovery record can carry any i64 */
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_REVISION,
+                          commit_rename(m, "8f000000000000000000000000000002", INT64_MAX, "two"));
+    TEST_ASSERT_EQUAL_INT64(INT64_MAX, tp_model_revision(m));
+    TEST_ASSERT_EQUAL_STRING(name_copy, tp_model_project(m)->atlases[0].name);
+    TEST_ASSERT_EQUAL_INT(undo_before, tp_model_undo_depth(m));
+
+    memset(&err, 0, sizeof err);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_REVISION, tp_model_undo(m, &err));
+    TEST_ASSERT_EQUAL_INT64(INT64_MAX, tp_model_revision(m));
+    TEST_ASSERT_EQUAL_STRING(name_copy, tp_model_project(m)->atlases[0].name);
+    TEST_ASSERT_EQUAL_INT(undo_before, tp_model_undo_depth(m));
+    tp_model_destroy(m);
+}
+
+void test_recovery_rejects_invalid_or_nonmonotonic_revisions(void) {
+    tp_error err = {0};
+    const uint8_t snap[] = {'{', '}'};
+
+    tp_journal_io io = tp_journal_io_memory();
+    tp_journal *j = tp_journal_create(io, key_of(0x8E));
+    TEST_ASSERT_NOT_NULL(j);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_init_checkpoint(j, snap, sizeof snap, 0, &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_journal_append_txn(j, "8e000000000000000000000000000001", 0,
+                                                snap, sizeof snap, &err));
+    size_t len = 0;
+    uint8_t *bytes = snapshot_io(io, &len);
+    tp_journal_destroy(j);
+    tp_journal_peek_result peek;
+    memset(&peek, 0, sizeof peek);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_peek(io_from_bytes(bytes, len), &peek, &err));
+    TEST_ASSERT_EQUAL_INT(TP_JOURNAL_RECOVERY_CORRUPT, peek.status);
+    TEST_ASSERT_EQUAL_INT(1, peek.record_count); /* retain only the valid revision-0 checkpoint */
+    tp_journal_peek_free(&peek);
+    free(bytes);
+
+    io = tp_journal_io_memory();
+    j = tp_journal_create(io, key_of(0x8D));
+    TEST_ASSERT_NOT_NULL(j);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_journal_init_checkpoint(j, snap, sizeof snap, INT64_MAX, &err));
+    bytes = snapshot_io(io, &len);
+    tp_journal_destroy(j);
+    memset(&peek, 0, sizeof peek);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_peek(io_from_bytes(bytes, len), &peek, &err));
+    TEST_ASSERT_EQUAL_INT(TP_JOURNAL_RECOVERY_CORRUPT, peek.status);
+    TEST_ASSERT_EQUAL_INT(0, peek.record_count);
+    tp_journal_peek_free(&peek);
+    free(bytes);
+}
+
+/* Undo appends (never truncates) a full checkpoint from the candidate state before publishing it.
+ * Compact first to model a clean Save baseline: one history checkpoint must take record_count 1->2,
+ * which is exactly the startup scan's adoptable-unsaved threshold, and crash recovery must load the
+ * undone state without a GUI post-history hook. */
+void test_journal_undo_recovers_undone_state(void) {
+    tp_id128 key = key_of(0x89);
+    tp_journal_io io;
+    tp_model *m = model_with_journal(key, &io);          /* checkpoint at rev 0 (atlas "atlas1") */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_enable_history(m)); /* undo needs the diff history */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "89000000000000000000000000000001", 0, "one"));
+    TEST_ASSERT_EQUAL_STRING("one", tp_model_project(m)->atlases[0].name);
+
+    tp_error err = {0};
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_compact_journal(m, &err));
+    size_t saved_len = 0;
+    uint8_t *saved_bytes = snapshot_io(io, &saved_len);
+    tp_journal_peek_result saved_peek;
+    memset(&saved_peek, 0, sizeof saved_peek);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_peek(io_from_bytes(saved_bytes, saved_len), &saved_peek, &err));
+    TEST_ASSERT_EQUAL_INT(1, saved_peek.record_count);
+    tp_journal_peek_free(&saved_peek);
+    free(saved_bytes);
+
+    /* UNDO -> back to "atlas1"; the durable append is inside tp_model_undo. */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_undo(m, &err));
+    TEST_ASSERT_EQUAL_STRING("atlas1", tp_model_project(m)->atlases[0].name);
+    int64_t undone_rev = tp_model_revision(m);
+    TEST_ASSERT_EQUAL_INT64(2, undone_rev);
 
     size_t blen = 0;
     uint8_t *bytes = snapshot_io(io, &blen);
+    tp_journal_peek_result peek;
+    memset(&peek, 0, sizeof peek);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_peek(io_from_bytes(bytes, blen), &peek, &err));
+    TEST_ASSERT_EQUAL_INT(2, peek.record_count); /* clean checkpoint + undo checkpoint => scan candidate */
+    tp_journal_peek_free(&peek);
+    tp_model_destroy(m);
+
+    /* Recover: the last checkpoint is the UNDONE state, no ops to replay after it. */
+    tp_journal_io io2 = io_from_bytes(bytes, blen);
+    free(bytes);
+    tp_model *m2 = NULL;
+    tp_journal_recovery info;
+    memset(&info, 0, sizeof info);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_recover(io2, key, &m2, &info, &err));
+    TEST_ASSERT_NOT_NULL(m2);
+    TEST_ASSERT_EQUAL_INT(2, info.records_recovered);
+    TEST_ASSERT_EQUAL_INT(0, (int)info.op_count);     /* nothing to replay -> cannot resurrect "two" */
+    TEST_ASSERT_EQUAL_INT64(undone_rev, tp_model_revision(m2));
+    TEST_ASSERT_EQUAL_STRING("atlas1", tp_model_project(m2)->atlases[0].name);
+
+    tp_journal_recovery_free(&info);
+    tp_model_destroy(m2);
+}
+
+/* Redo is symmetric. Compact the successfully undone state to one clean checkpoint, then redo must
+ * append a second checkpoint (scan candidate) and recover the redone document after a crash. */
+void test_journal_redo_recovers_redone_state(void) {
+    tp_id128 key = key_of(0x8a);
+    tp_journal_io io;
+    tp_model *m = model_with_journal(key, &io);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_enable_history(m));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "8a000000000000000000000000000001", 0, "one"));
+
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_undo(m, &err)); /* -> "atlas1" (rev 2) */
+    TEST_ASSERT_EQUAL_STRING("atlas1", tp_model_project(m)->atlases[0].name);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_compact_journal(m, &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_redo(m, &err)); /* -> "one" (rev 3) */
+    TEST_ASSERT_EQUAL_STRING("one", tp_model_project(m)->atlases[0].name);
+    int64_t redone_rev = tp_model_revision(m);
+    TEST_ASSERT_EQUAL_INT64(3, redone_rev);
+
+    size_t blen = 0;
+    uint8_t *bytes = snapshot_io(io, &blen);
+    tp_journal_peek_result peek;
+    memset(&peek, 0, sizeof peek);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_peek(io_from_bytes(bytes, blen), &peek, &err));
+    TEST_ASSERT_EQUAL_INT(2, peek.record_count); /* clean checkpoint + redo checkpoint => scan candidate */
+    tp_journal_peek_free(&peek);
     tp_model_destroy(m);
 
     tp_journal_io io2 = io_from_bytes(bytes, blen);
@@ -1589,10 +1933,10 @@ void test_journal_redo_recovers_redone_state(void) {
     memset(&info, 0, sizeof info);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_recover(io2, key, &m2, &info, &err));
     TEST_ASSERT_NOT_NULL(m2);
-    TEST_ASSERT_EQUAL_INT(1, info.records_recovered);
+    TEST_ASSERT_EQUAL_INT(2, info.records_recovered);
     TEST_ASSERT_EQUAL_INT(0, (int)info.op_count);
     TEST_ASSERT_EQUAL_INT64(redone_rev, tp_model_revision(m2));
-    TEST_ASSERT_EQUAL_STRING("two", tp_model_project(m2)->atlases[0].name); /* the REDONE state */
+    TEST_ASSERT_EQUAL_STRING("one", tp_model_project(m2)->atlases[0].name); /* the REDONE state */
 
     tp_journal_recovery_free(&info);
     tp_model_destroy(m2);
@@ -1642,6 +1986,87 @@ void test_metadata_roundtrip(void) {
     free(got);
     tp_journal_recovery_free(&info);
     tp_model_destroy(m2);
+}
+
+/* Recovery Save-to-original needs the exact saved-file baseline that existed when the
+ * journal metadata was recorded. The optional v3 metadata trailer carries that fingerprint
+ * without invalidating older v3 records, and compaction must preserve it. */
+void test_metadata_fingerprint_roundtrip_and_compaction(void) {
+    tp_id128 key = key_of(0x9b);
+    tp_id128 fingerprint = key_of(0xc7);
+    tp_journal_io io;
+    tp_model *m = model_with_journal(key, &io);
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_journal_set_metadata_ex(m->journal, 1700012345, "/fingerprint/p.ntpacker_project", "p",
+                                   &fingerprint, &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_compact_journal(m, &err));
+
+    size_t blen = 0;
+    uint8_t *bytes = snapshot_io(io, &blen);
+    tp_model_destroy(m);
+
+    tp_journal_peek_result pk;
+    memset(&pk, 0, sizeof pk);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_peek(io_from_bytes(bytes, blen), &pk, &err));
+    TEST_ASSERT_TRUE(pk.has_meta);
+    TEST_ASSERT_TRUE(pk.meta.has_file_fingerprint);
+    TEST_ASSERT_EQUAL_MEMORY(fingerprint.bytes, pk.meta.file_fingerprint.bytes, 16);
+    tp_journal_peek_free(&pk);
+
+    tp_model *m2 = NULL;
+    tp_journal_recovery info;
+    memset(&info, 0, sizeof info);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_model_recover(io_from_bytes(bytes, blen), key, &m2, &info, &err));
+    free(bytes);
+    TEST_ASSERT_NOT_NULL(m2);
+    TEST_ASSERT_TRUE(info.has_metadata);
+    TEST_ASSERT_TRUE(info.metadata.has_file_fingerprint);
+    TEST_ASSERT_EQUAL_MEMORY(fingerprint.bytes, info.metadata.file_fingerprint.bytes, 16);
+    tp_journal_recovery_free(&info);
+    tp_model_destroy(m2);
+}
+
+void test_corrupt_resync_crc_work_is_linear(void) {
+    tp_id128 key = key_of(0x70);
+    tp_journal_io io;
+    tp_model *m = model_with_journal(key, &io);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "20000000000000000000000000000001", 0, "one"));
+    size_t base_len = 0;
+    uint8_t *base = snapshot_io(io, &base_len);
+    tp_model_destroy(m);
+
+    const size_t bad = record_offset(base, base_len, 1);
+    TEST_ASSERT_NOT_EQUAL(SIZE_MAX, bad);
+    base[bad + (size_t)TP_JRN_SYNC_FIELD + (size_t)TP_JRN_LEN_FIELD + 1U] ^= 0xFFu;
+
+    const size_t dense_len = 1024U * 1024U;
+    uint8_t *dense = (uint8_t *)calloc(1U, dense_len);
+    TEST_ASSERT_NOT_NULL(dense);
+    memcpy(dense, base, base_len);
+    for (size_t p = base_len; p + 65548U <= dense_len; p += 12U) {
+        tp_jrn_put_u32(dense + p, TP_JRN_SYNC_WORD);
+        tp_jrn_put_u32(dense + p + (size_t)TP_JRN_SYNC_FIELD, 65536U);
+        /* CRC stays zero/invalid; embedded sync candidates force repeated probes. */
+    }
+
+    tp_model *recovered = NULL;
+    tp_journal_recovery info;
+    memset(&info, 0, sizeof info);
+    tp_error err = {0};
+    size_t crc_work = 0;
+    TEST_ASSERT_TRUE(tp_journal__test_has_valid_record_after(dense, dense_len, base_len, &crc_work));
+    TEST_ASSERT_LESS_OR_EQUAL_UINT64(dense_len, crc_work);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_model_recover(io_from_bytes(dense, dense_len), key, &recovered, &info, &err));
+    TEST_ASSERT_EQUAL_INT(TP_JOURNAL_RECOVERY_CORRUPT, info.status);
+
+    free(base);
+    free(dense);
+    tp_journal_recovery_free(&info);
+    tp_model_destroy(recovered);
 }
 
 /* R5a: an untitled project (empty path + name) round-trips as empty strings, not NULL. */
@@ -1838,13 +2263,9 @@ void test_peek_empty(void) {
 
 /* ==== R5a FIX ROUND: adversarial-review findings [0][1][2][3][5] ========== */
 
-/* [0] compact must NOT poison a healthy checkpoint on a metadata re-emit failure. Arm the faulty io to
- * fail ONLY the META write inside compact (write #3 after truncate-to-0: header, checkpoint, META);
- * write_record rolls the torn META tail back to the durable checkpoint. Assert compact returns OK (not a
- * hard failure the glue would detach on), the journal is NOT poisoned, and recover yields the
- * post-compaction document (checkpoint recovered, records_recovered==1) -- recovery intact, metadata
- * simply absent. FAILS pre-fix (compact poisoned + returned JOURNAL_FAILED over the lost scan label). */
-void test_compact_meta_reemit_failure_keeps_recovery(void) {
+/* A checkpoint without its canonical path/fingerprint is not complete Save-Original authority. A rolled-
+ * back META re-emit leaves the bytes recoverable but must return failure so the host detaches the slot. */
+void test_compact_meta_reemit_failure_is_reported(void) {
     tp_id128 key = key_of(0xA0);
     tp_journal_io io = faulty_io();
     tp_journal *j = tp_journal_create(io, key);
@@ -1860,7 +2281,7 @@ void test_compact_meta_reemit_failure_keeps_recovery(void) {
     /* Fail the 3rd write of the upcoming compact -- the META re-emit (after header + fresh checkpoint). */
     faulty_io_fail_at(io, 3);
     const uint8_t snap2[] = {'n', 'e', 'w'};
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_compact(j, snap2, sizeof snap2, 2, &err)); /* swallowed */
+    TEST_ASSERT_NOT_EQUAL(TP_STATUS_OK, tp_journal_compact(j, snap2, sizeof snap2, 2, &err));
     TEST_ASSERT_FALSE(tp_journal__is_poisoned(j)); /* healthy checkpoint NOT poisoned over a lost label */
 
     /* Recovery INTACT: the fresh checkpoint recovered; metadata simply absent (re-emit was swallowed). */
@@ -1884,22 +2305,17 @@ void test_compact_meta_reemit_failure_keeps_recovery(void) {
     tp_journal_destroy(j2);
 }
 
-/* [2] R5b-1 fix (FLIPPED contract): metadata is CACHE-AUTHORITATIVE + best-effort durable. A HEALTHY
- * journal whose durable META write transiently fails must SWALLOW the failure -- return TP_STATUS_OK,
- * stay NOT poisoned, and KEEP the identity in the cache -- so the NEXT compaction persists it (the cache
- * is the source of truth, the durable append a best-effort bonus). Fail exactly the META write (rollback
- * is a truncate -> journal not poisoned), assert set_metadata returns OK + not poisoned; then (fault
- * exhausted) compact + recover -> the metadata IS present. Proves the corrected best-effort contract
- * (the OLD write-first contract returned JOURNAL_FAILED here and dropped the metadata). */
-void test_set_metadata_write_failure_still_caches(void) {
+/* A healthy rollback preserves the cache for a possible compaction, but the authority caller still sees
+ * the failed durable META append and can detach the slot before stale metadata becomes destructive. */
+void test_set_metadata_write_failure_is_reported_but_still_caches(void) {
     tp_id128 key = key_of(0xA1);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io); /* header + initial checkpoint durably written */
     tp_error err;
 
     tp_journal_io_memory__fail_next_writes(io, 1); /* fail ONLY the META durable write (header present) */
-    TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_OK, /* healthy-journal swallow: cache committed, durable append best-effort */
+    TEST_ASSERT_NOT_EQUAL(
+        TP_STATUS_OK,
         tp_journal_set_metadata(m->journal, 1700000000, "/still/caches.ntpacker", "cached", &err));
     TEST_ASSERT_FALSE(tp_journal__is_poisoned(m->journal)); /* torn META rolled back -> journal healthy */
 
@@ -2127,6 +2543,38 @@ void test_model_set_recovery_metadata_glue(void) {
     tp_model_destroy(bare);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
                           tp_model_set_recovery_metadata(NULL, 0, "", "", &err));
+
+    tp_journal_io detach_io;
+    tp_model *detached = model_with_journal(key_of(0x94), &detach_io);
+    TEST_ASSERT_TRUE(tp_model_has_journal(detached));
+    tp_model_detach_journal(detached);
+    TEST_ASSERT_FALSE(tp_model_has_journal(detached));
+    tp_model_detach_journal(detached); /* idempotent */
+    tp_model_detach_journal(NULL);     /* NULL-safe */
+    tp_model_destroy(detached);
+}
+
+void test_model_set_recovery_metadata_fingerprint_glue(void) {
+    tp_id128 key = key_of(0xbd);
+    tp_id128 fingerprint = key_of(0x4e);
+    tp_journal_io io;
+    tp_model *m = model_with_journal(key, &io);
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_model_set_recovery_metadata_ex(m, 1700000100, "/x/fp.ntpacker_project", "fp", &fingerprint, &err));
+    size_t blen = 0;
+    uint8_t *bytes = snapshot_io(io, &blen);
+    tp_model_destroy(m);
+
+    tp_journal_peek_result pk;
+    memset(&pk, 0, sizeof pk);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_peek(io_from_bytes(bytes, blen), &pk, &err));
+    free(bytes);
+    TEST_ASSERT_TRUE(pk.has_meta);
+    TEST_ASSERT_TRUE(pk.meta.has_file_fingerprint);
+    TEST_ASSERT_EQUAL_MEMORY(fingerprint.bytes, pk.meta.file_fingerprint.bytes, 16);
+    tp_journal_peek_free(&pk);
 }
 
 int main(int argc, char **argv) {
@@ -2152,11 +2600,17 @@ int main(int argc, char **argv) {
     RUN_TEST(test_coordinator_noop);
     RUN_TEST(test_file_journal_roundtrip);
     RUN_TEST(test_io_file_read_no_create); /* R5b-2 fix [3]: read-only, no-create opener */
+    RUN_TEST(test_file_journal_rejects_oversize_before_read);
+    RUN_TEST(test_file_journal_initial_checkpoint_cannot_exceed_reader_cap);
+    RUN_TEST(test_file_journal_transaction_rejected_before_crossing_reader_cap);
+    RUN_TEST(test_file_journal_undo_rejected_before_crossing_reader_cap);
+    RUN_TEST(test_file_journal_metadata_failure_at_reader_cap_is_reported);
     /* F2-04 fix pass */
     RUN_TEST(test_attach_migrates_retained_ids);
     RUN_TEST(test_torn_tail_is_truncated);
     RUN_TEST(test_midstream_corrupt_preserves_trailing);
     RUN_TEST(test_midstream_bloated_length_preserves_trailing);
+    RUN_TEST(test_corrupt_resync_crc_work_is_linear);
     RUN_TEST(test_truncate_failure_poisons_recovery);
     RUN_TEST(test_torn_header_reinitializable);
     RUN_TEST(test_recovered_model_is_dirty);
@@ -2168,11 +2622,16 @@ int main(int argc, char **argv) {
     RUN_TEST(test_compaction_truncate_failure_is_fault);
     RUN_TEST(test_compaction_init_failure_poisons);
     RUN_TEST(test_compaction_broken_store_detaches_to_journal_less);
-    /* R4: journal undo/redo via checkpoint-on-undo (P1-1) */
+    /* R4: journal-gated undo/redo checkpoint commits (P1-1) */
+    RUN_TEST(test_journal_undo_append_failure_rolls_back_history_commit);
+    RUN_TEST(test_journal_redo_append_failure_rolls_back_history_commit);
+    RUN_TEST(test_revision_max_rejects_commit_and_history_without_overflow);
+    RUN_TEST(test_recovery_rejects_invalid_or_nonmonotonic_revisions);
     RUN_TEST(test_journal_undo_recovers_undone_state);
     RUN_TEST(test_journal_redo_recovers_redone_state);
     /* R5a: metadata record + peek API + BAD_HEADER split */
     RUN_TEST(test_metadata_roundtrip);
+    RUN_TEST(test_metadata_fingerprint_roundtrip_and_compaction);
     RUN_TEST(test_metadata_empty_path);
     RUN_TEST(test_metadata_last_wins);
     RUN_TEST(test_metadata_survives_compaction);
@@ -2180,13 +2639,14 @@ int main(int argc, char **argv) {
     RUN_TEST(test_peek_and_recover_agree);
     RUN_TEST(test_peek_empty);
     /* R5a fix round: adversarial-review findings [0][1][2][3][5] */
-    RUN_TEST(test_compact_meta_reemit_failure_keeps_recovery);
-    RUN_TEST(test_set_metadata_write_failure_still_caches);
+    RUN_TEST(test_compact_meta_reemit_failure_is_reported);
+    RUN_TEST(test_set_metadata_write_failure_is_reported_but_still_caches);
     RUN_TEST(test_peek_agrees_recover_torn_tail);
     RUN_TEST(test_peek_agrees_recover_midstream_corrupt);
     RUN_TEST(test_recovered_metadata_survives_recompaction);
     RUN_TEST(test_v2_header_reads_version_mismatch);
     /* R5b-1: model-level metadata glue the GUI calls at the set_path identity chokepoint */
     RUN_TEST(test_model_set_recovery_metadata_glue);
+    RUN_TEST(test_model_set_recovery_metadata_fingerprint_glue);
     return UNITY_END();
 }

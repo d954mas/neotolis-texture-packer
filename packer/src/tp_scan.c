@@ -74,29 +74,6 @@ static int entry_cmp(const void *a, const void *b) {
     return strcmp(((const tp_scan_entry *)a)->rel, ((const tp_scan_entry *)b)->rel);
 }
 
-/* R5b-2: append a heap-dup of `name` to the string list, growing the backing array as needed. On any
- * allocation failure the list is left unchanged (the walk skips that entry -- a best-effort listing,
- * mirroring scan_vec_push above). */
-static bool str_list_push(tp_str_list *v, const char *name) {
-    if (v->count == v->cap) {
-        int ncap = (v->cap == 0) ? 16 : v->cap * 2;
-        char **nd = (char **)realloc(v->items, (size_t)ncap * sizeof *nd);
-        if (!nd) {
-            return false;
-        }
-        v->items = nd;
-        v->cap = ncap;
-    }
-    size_t n = strlen(name) + 1U;
-    char *copy = (char *)malloc(n);
-    if (!copy) {
-        return false;
-    }
-    memcpy(copy, name, n);
-    v->items[v->count++] = copy;
-    return true;
-}
-
 /* True iff `name` ends with `suffix` (case-sensitive byte compare; "" matches everything). */
 static bool name_has_suffix(const char *name, const char *suffix) {
     size_t ln = strlen(name);
@@ -208,13 +185,13 @@ void tp_scan_free(tp_scan_result *out) {
     out->count = 0;
 }
 
-bool tp_scan_list_dir(const char *dir, const char *suffix, tp_str_list *out) {
-    if (!out || !dir || dir[0] == '\0') {
+bool tp_scan_visit_dir(const char *dir, const char *suffix, tp_scan_name_visitor visit, void *ctx) {
+    if (!dir || dir[0] == '\0' || !visit) {
         return false;
     }
     const char *suf = suffix ? suffix : "";
 #ifdef _WIN32
-    char pattern[1088]; /* app-data recovery folder (< GUI_PATHS_MAX) + "\\*"; truncation -> open fails -> false */
+    char pattern[1088];
     int np = snprintf(pattern, sizeof pattern, "%s\\*", dir);
     if (np <= 0 || (size_t)np >= sizeof pattern) {
         return false;
@@ -222,26 +199,18 @@ bool tp_scan_list_dir(const char *dir, const char *suffix, tp_str_list *out) {
     WIN32_FIND_DATAA fd;
     HANDLE h = FindFirstFileA(pattern, &fd);
     if (h == INVALID_HANDLE_VALUE) {
-        return false; /* dir-open failure -> out left as-is */
+        return false;
     }
     do {
         const char *name = fd.cFileName;
-        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
+        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0 ||
+            (fd.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0 ||
+            !name_has_suffix(name, suf)) {
             continue;
         }
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-            continue; /* regular files only */
-        }
-        if (!name_has_suffix(name, suf)) {
-            continue;
-        }
-        if (!str_list_push(out, name)) {
-            /* R5b-2 fix [8]: an OOM appending a name would return a PARTIAL listing that could silently
-             * miss the newest orphan. Fail CLOSED exactly like a dir-open failure: drop the partial list
-             * (no leak) and return false so the recovery scan degrades to "no recovery this launch". */
-            tp_str_list_free(out);
-            FindClose(h);
-            return false;
+        const uint64_t size = ((uint64_t)fd.nFileSizeHigh << 32) | (uint64_t)fd.nFileSizeLow;
+        if (!visit(ctx, name, size)) {
+            break;
         }
     } while (FindNextFileA(h, &fd));
     FindClose(h);
@@ -249,53 +218,30 @@ bool tp_scan_list_dir(const char *dir, const char *suffix, tp_str_list *out) {
 #else
     DIR *d = opendir(dir);
     if (!d) {
-        return false; /* dir-open failure -> out left as-is */
+        return false;
     }
     struct dirent *de;
     while ((de = readdir(d)) != NULL) {
         const char *name = de->d_name;
-        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
+        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0 || !name_has_suffix(name, suf)) {
             continue;
         }
-        char child_abs[1400]; /* dir (< GUI_PATHS_MAX) + '/' + name (<= NAME_MAX); truncation -> stat fails -> skip */
+        char child_abs[1400];
         int nc = snprintf(child_abs, sizeof child_abs, "%s/%s", dir, name);
-        if (nc <= 0 || (size_t)nc >= (int)sizeof child_abs) {
+        if (nc <= 0 || (size_t)nc >= sizeof child_abs) {
             continue;
         }
         struct stat st;
-        if (stat(child_abs, &st) != 0) {
+        if (lstat(child_abs, &st) != 0 || !S_ISREG(st.st_mode)) {
             continue;
         }
-        if (S_ISDIR(st.st_mode)) {
-            continue; /* regular files only (skip subdirectories) */
-        }
-        if (!name_has_suffix(name, suf)) {
-            continue;
-        }
-        if (!str_list_push(out, name)) {
-            /* R5b-2 fix [8]: OOM -> fail CLOSED (see the Win32 branch): drop the partial list + return
-             * false so the caller treats it as "listing failed -> no recovery this launch". */
-            tp_str_list_free(out);
-            closedir(d);
-            return false;
+        if (!visit(ctx, name, (uint64_t)st.st_size)) {
+            break;
         }
     }
     closedir(d);
     return true;
 #endif
-}
-
-void tp_str_list_free(tp_str_list *out) {
-    if (!out) {
-        return;
-    }
-    for (int i = 0; i < out->count; i++) {
-        free(out->items[i]);
-    }
-    free(out->items);
-    out->items = NULL;
-    out->count = 0;
-    out->cap = 0;
 }
 
 bool tp_scan_is_dir(const char *abs) {

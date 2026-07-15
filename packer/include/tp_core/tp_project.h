@@ -414,12 +414,33 @@ bool tp_project_out_path_shared(const tp_project *p, const char *out_path, const
  * (open/parse/type error). On any error *out is set to NULL and `err` is filled. */
 tp_status tp_project_load(const char *path, tp_project **out, tp_error *err);
 
+/* Like tp_project_load, additionally returning the fingerprint of the exact byte
+ * buffer successfully parsed. `out_fingerprint` is optional and is cleared on
+ * failure. This avoids reopening the path after load (which could hash different
+ * bytes after an external replacement). */
+tp_status tp_project_load_with_fingerprint(const char *path, tp_project **out, tp_id128 *out_fingerprint,
+                                           tp_error *err);
+
 /* Writes `p` deterministically to `path` (see the serialization contract above),
  * updating p->project_dir to path's absolute directory and relativizing absolute
  * source paths against it. `p` is non-const because Save/Save-As updates the
  * in-memory project_dir + path forms (mutation-friendly, GUI live edit).
  * file-save = relativize + tp_project_save_buffer + fwrite. */
 tp_status tp_project_save(tp_project *p, const char *path, tp_error *err);
+
+/* Like tp_project_save, additionally returning the fingerprint of the exact
+ * serialized buffer successfully written and atomically promoted to `path`.
+ * `out_fingerprint` is optional and is cleared on failure. */
+tp_status tp_project_save_with_fingerprint(tp_project *p, const char *path, tp_id128 *out_fingerprint,
+                                           tp_error *err);
+
+/* Staged optimistic save for an already-bound identity. The original project is not path-normalized
+ * unless publish succeeds. After the sibling temp is fully written, the destination's exact bytes are
+ * fingerprinted immediately before atomic replace; a missing/different/unreadable destination returns
+ * TP_STATUS_FILE_CHANGED_EXTERNALLY and leaves both destination and `p` unchanged. */
+tp_status tp_project_save_if_unchanged(tp_project *p, const char *path,
+                                       const tp_id128 *expected_fingerprint,
+                                       tp_id128 *out_fingerprint, tp_error *err);
 
 /* Serializes `p` to a freshly malloc'd buffer (*out, NUL-terminated; *out_len
  * excludes the NUL), byte-identical to what tp_project_save writes for a project

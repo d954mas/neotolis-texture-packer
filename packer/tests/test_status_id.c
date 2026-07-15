@@ -51,11 +51,15 @@ void test_status_id_tokens(void) {
     TEST_ASSERT_EQUAL_STRING("invalid_revision", tp_status_id(TP_STATUS_INVALID_REVISION));
     /* F2-04 recovery-journal durability fault (master spec §7.1, §22.3). */
     TEST_ASSERT_EQUAL_STRING("journal_failed", tp_status_id(TP_STATUS_JOURNAL_FAILED));
+    TEST_ASSERT_EQUAL_STRING("file_changed_externally", tp_status_id(TP_STATUS_FILE_CHANGED_EXTERNALLY));
+    TEST_ASSERT_EQUAL_STRING("recovery_cleanup_failed", tp_status_id(TP_STATUS_RECOVERY_CLEANUP_FAILED));
+    TEST_ASSERT_EQUAL_STRING("recovery_busy", tp_status_id(TP_STATUS_RECOVERY_BUSY));
+    TEST_ASSERT_EQUAL_STRING("recovery_claim_failed", tp_status_id(TP_STATUS_RECOVERY_CLAIM_FAILED));
 }
 
 /* Tokens are machine ids: lowercase, no spaces (unlike tp_status_str prose). */
 void test_status_id_is_machine_token(void) {
-    for (int s = TP_STATUS_OK; s <= TP_STATUS_JOURNAL_FAILED; s++) {
+    for (int s = TP_STATUS_OK; s <= TP_STATUS_RECOVERY_CLAIM_FAILED; s++) {
         const char *id = tp_status_id((tp_status)s);
         for (const char *c = id; *c; c++) {
             TEST_ASSERT_TRUE_MESSAGE(*c != ' ', id);

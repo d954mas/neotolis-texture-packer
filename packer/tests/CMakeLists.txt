@@ -146,6 +146,13 @@ target_compile_options(tp_test_identity_path PRIVATE -U_DLL)
 nt_set_warning_flags(tp_test_identity_path)   # AGENTS.md invariant: our test TUs too
 add_test(NAME tp_identity_path COMMAND tp_test_identity_path)
 
+add_executable(tp_test_file_fingerprint test_file_fingerprint.c)
+target_link_libraries(tp_test_file_fingerprint PRIVATE tp_core unity)
+target_compile_options(tp_test_file_fingerprint PRIVATE -U_DLL)
+target_compile_definitions(tp_test_file_fingerprint PRIVATE _CRT_SECURE_NO_WARNINGS)
+nt_set_warning_flags(tp_test_file_fingerprint)
+add_test(NAME tp_file_fingerprint COMMAND tp_test_file_fingerprint)
+
 # F1-00 project identity: FILESYSTEM realpath/symlink resolution + atomic Save-As
 # transition. Uses a created scratch dir (argv[1]); no baked absolute paths.
 add_executable(tp_test_identity_session test_identity_session.c)

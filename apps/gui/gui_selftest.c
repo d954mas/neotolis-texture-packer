@@ -29,6 +29,7 @@
 #include "tp_core/tp_error.h"   /* tp_status_str / tp_error */
 #include "tp_core/tp_export.h"  /* tp_exporter_count/at (preview-target selector index) */
 #include "tp_core/tp_id.h"      /* tp_id128_eq (F2-05b-ii-B append-fail identity check) */
+#include "tp_core/tp_identity.h" /* canonical recovery metadata path assertions */
 #include "tp_core/tp_model.h"   /* tp_result */
 #include "tp_core/tp_names.h"   /* tp_sprite_export_key (region -> override key) */
 #include "tp_core/tp_project.h" /* tp_project* accessors */
@@ -36,6 +37,7 @@
 #include "tp_core/tp_journal.h"     /* R5b-1: tp_journal_peek + tp_journal_io_file (J16 metadata read-back) */
 #include "tp_core/tp_transaction.h" /* tp_semantic_identity (F2-05b-ii-B append-fail identity check) */
 #include "tp_journal_internal.h"    /* F2-05b-ii-B memory-io fault seams (append-fail injection); from packer/src */
+#include "tp_project_internal.h"    /* deterministic atomic-save temp-create failure */
 
 #include "gui_actions.h"  /* do_pack_blocking / reset_selection / preview_stop / anim ops + gui_request_gesture_commit */
 #include "gui_canvas.h"   /* s_canvas ops + GUI_CANVAS_ATLAS */
@@ -87,6 +89,23 @@ static void scan_make_orphan(const char *slot, const char *atlas_name, int64_t t
     gui_project_enable_recovery("");                 /* crash-sim: keep the slot on disk, release the lock */
     gui_project_shutdown();
     gui_project__test_set_recovery_now(-1);          /* restore the real clock */
+}
+
+/* Saved-project orphan: open `original` while recovery is active so set_path persists the exact
+ * original-file fingerprint, then commit one unsaved edit and simulate a crash. */
+static void scan_make_saved_orphan(const char *slot, const char *original, const char *atlas_name, int64_t ts) {
+    gui_project_enable_recovery("");
+    gui_project_shutdown();
+    gui_project__test_set_recovery_now(ts);
+    gui_project_enable_recovery(slot);
+    gui_project_init();
+    char err[256] = {0};
+    NT_ASSERT(gui_project_open(original, err, sizeof err) == TP_STATUS_OK &&
+              "saved recovery orphan opens its original baseline");
+    NT_ASSERT(gui_project_set_atlas_name(0, atlas_name) && "saved recovery orphan commits one edit");
+    gui_project_enable_recovery("");
+    gui_project_shutdown();
+    gui_project__test_set_recovery_now(-1);
 }
 
 /* R5b-2 helper: fabricate a checkpoint-ONLY orphan (init, NO edit -> record_count == 1, NOT adoptable). */
@@ -225,17 +244,6 @@ static bool selftest_file_exists(const char *path) {
     return false;
 }
 
-/* Portable best-effort directory removal: remove() cannot rmdir on Windows, so bridge to the platform call.
- * Used to clear a test-injected block DIRECTORY at <orig>.savetmp so a stale one never survives to the next
- * run (the atomic core save writes its temp there, so a leftover dir would break a later seeding save). */
-static void selftest_rmdir(const char *path) {
-#ifdef _WIN32
-    (void)RemoveDirectoryA(path);
-#else
-    (void)rmdir(path);
-#endif
-}
-
 /* F2-05b-ii-B fix [2] test helper: flip one payload byte of the (0-based) `rec_index`-th record in a
  * journal file so replay reports CORRUPT at that record. If a LATER record follows it, the corruption
  * is MID-STREAM (F2-04 C2 -> tp_model_recover returns a usable model with a POISONED journal). Walks
@@ -316,6 +324,22 @@ void run_selftest(void) {
     st = gui_project_open(save_path, err, sizeof err);
     const int nsrc = gui_project_get() ? gui_project_get()->atlases[0].source_count : -1;
     nt_log_info("SELFTEST: reload -> %s, atlas0 sources=%d (dirty=%d)", tp_status_str(st), nsrc, gui_project_is_dirty());
+
+    /* Master spec 14.2: live Save must not overwrite an external rewrite after Open. The exact
+     * sentinel remains on disk; a deliberate Save As to another identity is still allowed. */
+    static const char external_sentinel[] = "external-edit-sentinel";
+    { FILE *xf = fopen(save_path, "wb"); NT_ASSERT(xf); (void)fwrite(external_sentinel, 1, sizeof external_sentinel, xf); (void)fclose(xf); }
+    memset(err, 0, sizeof err);
+    const tp_status external_guard = gui_project_save(err, sizeof err);
+    char external_readback[sizeof external_sentinel] = {0};
+    { FILE *xf = fopen(save_path, "rb"); NT_ASSERT(xf); (void)fread(external_readback, 1, sizeof external_readback, xf); (void)fclose(xf); }
+    NT_ASSERT(external_guard == TP_STATUS_FILE_CHANGED_EXTERNALLY &&
+              memcmp(external_readback, external_sentinel, sizeof external_sentinel) == 0 &&
+              "live Save refuses an external rewrite and leaves its bytes intact");
+    char rebound_path[1200];
+    (void)snprintf(rebound_path, sizeof rebound_path, "%s/selftest_rebound.ntpacker_project", s_exe_dir);
+    NT_ASSERT(gui_project_save_as(rebound_path, err, sizeof err) == TP_STATUS_OK &&
+              "Save As to a different project identity remains available after an external conflict");
 
     /* --- rename atlas + undo/redo THROUGH THE F2-03 DIFF HISTORY (b-ii-A): the model swaps its
      *     project on undo/redo; verify the name reverts/replays exactly and identity-dirty tracks
@@ -1418,120 +1442,6 @@ void run_selftest(void) {
         (void)remove(s2path);
         (void)gui_project_take_op_error(NULL, 0);
 
-        /* (J3) CRASH-RECOVERY round-trip, BOTH ways, through the real GUI wiring (gui_project_enable_
-         *      recovery + the adopt-at-init path + the clean-exit slot reset). ISOLATED slot under the
-         *      build dir (never touches the production recovery path). A "crash" is simulated by tearing
-         *      the model down with recovery DISABLED (shutdown leaves the slot on disk); a "clean exit"
-         *      tears it down with recovery ENABLED (shutdown deletes the slot). */
-        char jslot[1200];
-        char jlock[1210];
-        (void)snprintf(jslot, sizeof jslot, "%s/selftest_recovery.ntpjournal", s_exe_dir);
-        (void)snprintf(jlock, sizeof jlock, "%s.lock", jslot);
-        (void)remove(jslot);
-        (void)remove(jlock); /* start from a clean slot + lock */
-
-        /* Session 1: enable recovery + re-init -> fresh project + a live journal at the slot. */
-        gui_project_enable_recovery("");   /* disable first so this teardown never deletes a slot */
-        gui_project_shutdown();            /* tear down the current (memory-journal) model; no slot op */
-        gui_project_enable_recovery(jslot);
-        gui_project_init();                /* s_model NULL -> fresh + a recovery journal at jslot */
-        NT_ASSERT(gui_project_get() && !gui_project_is_dirty() && "J3: a fresh journaled session starts clean");
-        (void)gui_project_set_atlas_name(0, "recovered_atlas"); /* committed edit -> appended to the journal */
-        NT_ASSERT(gui_project_is_dirty() && "J3: the committed edit dirties the session");
-
-        /* Simulate a CRASH: tear the model down WITHOUT deleting the slot (disable recovery for the
-         * teardown, so the slot file survives on disk exactly as it would after a real crash). */
-        gui_project_enable_recovery("");
-        gui_project_shutdown();            /* closes the journal file handle; the slot file remains */
-
-        /* Session 2 (restart after crash): re-enable recovery + init -> the slot is adopted. */
-        gui_project_enable_recovery(jslot);
-        gui_project_init();                /* s_model NULL -> recovery adopts the slot's last committed state */
-        char rnote[256] = {0};
-        const bool got_notice = gui_project_take_recovery_notice(rnote, sizeof rnote);
-        const bool recov_dirty = gui_project_is_dirty();
-        const char *recov_name = gui_project_get() ? tp_project_get_atlas(gui_project_get(), 0)->name : "(none)";
-        nt_log_info("SELFTEST: J3 recover-after-crash notice=%d dirty=%d name='%s' undo_depth=%d (want 1,1,'recovered_atlas',0)",
-                    (int)got_notice, (int)recov_dirty, recov_name, gui_project_undo_depth());
-        NT_ASSERT(got_notice && "J3: a recovered session raises the one-shot recovery notice");
-        NT_ASSERT(recov_dirty && "J3: the recovered model is DIRTY (unsaved recovered work -> prompt Save)");
-        NT_ASSERT(gui_project_get() && strcmp(recov_name, "recovered_atlas") == 0 &&
-                  "J3: recovery rebuilds the last committed state (the edit survived the crash)");
-        /* fix [0]/[2] REGRESSION (the gap that hid [0]): an EDIT after recovery must COMMIT. The adopted
-         * journal is FRESH (redesign) -> empty retained-id index (no DUPLICATE_ID vs the reset s_txn_seq)
-         * and not poisoned, so the recovered project is fully editable. */
-        NT_ASSERT(gui_project_undo_depth() == 0 && "J3/[0]: the recovered model starts with a fresh (empty) undo history");
-        (void)gui_project_take_op_error(NULL, 0);
-        const bool post_edit = gui_project_set_atlas_name(0, "edited_after_recovery");
-        char pe_err[256] = {0};
-        (void)gui_project_take_op_error(pe_err, sizeof pe_err);
-        nt_log_info("SELFTEST: J3 edit-after-recovery committed=%d name='%s' err='%s' (want 1,'edited_after_recovery',)",
-                    (int)post_edit, tp_project_get_atlas(gui_project_get(), 0)->name, pe_err);
-        NT_ASSERT(post_edit && strcmp(tp_project_get_atlas(gui_project_get(), 0)->name, "edited_after_recovery") == 0 &&
-                  "J3/[0]: a post-recovery edit COMMITS (fresh journal id-index -> no DUPLICATE_ID; not poisoned)");
-
-        /* CLEAN EXIT: tear down WITH recovery enabled -> shutdown deletes the slot + releases the lock. */
-        gui_project_shutdown();
-
-        /* Session 3 (relaunch after a clean exit): re-enable (re-lock) + init -> the slot is GONE, so a
-         * fresh clean project, no recovery. Proves the clean-exit slot deletion. */
-        gui_project_enable_recovery(jslot);
-        gui_project_init();
-        const bool spurious = gui_project_take_recovery_notice(rnote, sizeof rnote);
-        nt_log_info("SELFTEST: J3 after-clean-exit dirty=%d atlases=%d spurious_notice=%d (want 0,1,0)",
-                    (int)gui_project_is_dirty(), gui_project_get() ? gui_project_get()->atlas_count : -1, (int)spurious);
-        NT_ASSERT(!spurious && "J3: NO spurious recovery notice after a clean exit");
-        NT_ASSERT(gui_project_get() && gui_project_get()->atlas_count == 1 && !gui_project_is_dirty() &&
-                  "J3: a clean exit leaves nothing to recover -> the next launch is a fresh clean project");
-        gui_project_enable_recovery("");   /* disable + release the lock */
-        gui_project_shutdown();
-        (void)remove(jslot);
-        (void)remove(jlock);
-
-        /* (J4) fix [2] POISONED-SLOT recovery: build a real 4-record journal (ckpt + 3 txns) via a GUI
-         *      session, corrupt the MIDDLE txn so replay reports mid-stream corruption (tp_model_recover
-         *      returns a usable model with a POISONED journal), then recover. The redesign clones the last
-         *      GOOD STATE + attaches a FRESH journal, so the recovered project is fully editable (NOT the
-         *      "disk full" dead-end the poisoned journal would otherwise cause). */
-        char pslot[1200];
-        char plock[1210];
-        (void)snprintf(pslot, sizeof pslot, "%s/selftest_poison.ntpjournal", s_exe_dir);
-        (void)snprintf(plock, sizeof plock, "%s.lock", pslot);
-        (void)remove(pslot);
-        (void)remove(plock);
-        gui_project_enable_recovery(pslot);
-        gui_project_init();                                            /* ckpt (fresh) */
-        NT_ASSERT(gui_project_set_atlas_name(0, "poison_v1") && "J4: build txn1");
-        NT_ASSERT(gui_project_set_atlas_name(0, "poison_v2") && "J4: build txn2");
-        NT_ASSERT(gui_project_set_atlas_name(0, "poison_v3") && "J4: build txn3");
-        gui_project_enable_recovery("");   /* crash-sim: keep the slot */
-        gui_project_shutdown();
-        /* record 0 = ckpt, 1 = META (R5b-1: set_path("") records untitled metadata right after attach),
-         * 2 = txn1(poison_v1), 3 = txn2, 4 = txn3. Corrupt record 3 (txn2) -> mid-stream (txn3 still
-         * follows), so recovery keeps up to txn1 ("poison_v1") and poisons the journal. */
-        NT_ASSERT(selftest_corrupt_journal_record(pslot, 3) && "J4: corrupted the mid-stream (txn2) record");
-        gui_project_enable_recovery(pslot);
-        gui_project_init();
-        const bool p_notice = gui_project_take_recovery_notice(rnote, sizeof rnote);
-        char p_name[64] = {0}; /* COPY the recovered name BEFORE the post-recovery edit clone-swaps + frees it */
-        if (gui_project_get()) {
-            (void)snprintf(p_name, sizeof p_name, "%s", tp_project_get_atlas(gui_project_get(), 0)->name);
-        }
-        (void)gui_project_take_op_error(NULL, 0);
-        const bool p_edit = gui_project_set_atlas_name(0, "poison_edit_ok");
-        char p_err[256] = {0};
-        (void)gui_project_take_op_error(p_err, sizeof p_err);
-        nt_log_info("SELFTEST: J4 poisoned-slot recovered name='%s' notice=%d post_edit=%d err='%s' (want 'poison_v1',1,1,)",
-                    p_name, (int)p_notice, (int)p_edit, p_err);
-        NT_ASSERT(p_notice && strcmp(p_name, "poison_v1") == 0 &&
-                  "J4/[2]: recovery from a mid-stream-corrupt slot restores the last GOOD record (txn1)");
-        NT_ASSERT(p_edit && strcmp(tp_project_get_atlas(gui_project_get(), 0)->name, "poison_edit_ok") == 0 &&
-                  "J4/[2]: a post-recovery edit COMMITS -- the adopted journal is FRESH, not the poisoned one");
-        gui_project_enable_recovery("");
-        gui_project_shutdown();
-        (void)remove(pslot);
-        (void)remove(plock);
-
         /* (J5) fix [1] SINGLE-INSTANCE LOCK: a 2nd instance that cannot acquire the slot lock must SKIP
          *      recovery (run journal-less) and NEVER touch the slot -- so it neither adopts the 1st's LIVE
          *      session as "recovered" nor truncates its live journal. Simulate the 1st instance by holding
@@ -1548,7 +1458,7 @@ void run_selftest(void) {
         gui_project_shutdown();
         gui_project_enable_recovery(lslot); /* our acquire must FAIL (foreign holds it) */
         char busy[256] = {0};
-        const bool busy_notice = gui_project_take_recovery_busy_notice(busy, sizeof busy);
+        const bool busy_notice = gui_project_take_recovery_setup_notice(busy, sizeof busy);
         const bool active = gui_project__test_recovery_active();
         gui_project_init();                 /* journal-less (recovery inactive) */
         NT_ASSERT(gui_project_set_atlas_name(0, "instance2_edit") && "J5: the 2nd instance still edits (journal-less)");
@@ -1774,58 +1684,76 @@ void run_selftest(void) {
                   "J12/[2]: do_undo surfaces the disk-full flush error on a journal-failed flush");
         (void)gui_project_take_op_error(NULL, 0);
 
-        /* (J13) H/P1-8: the STARTUP ARG-OPEN GUARD predicate. gui_project_has_recovered_unsaved() is the
-         *       queryable form of the "recovery adopted unsaved work this launch" condition that main()'s
-         *       CLI arg-open guard keys off (main() itself isn't headless-callable). It MUST read TRUE right
-         *       after a crash-recovery adopt -- so a stale file arg DEFERS instead of silently discarding the
-         *       recovered work -- and FALSE once that work is Saved -- so an arg-open is then PERMITTED.
-         *       Drives the same adopt path as J3, on an ISOLATED slot. */
-        char p18slot[1200];
-        char p18lock[1210];
-        (void)snprintf(p18slot, sizeof p18slot, "%s/selftest_p18_recovery.ntpjournal", s_exe_dir);
-        (void)snprintf(p18lock, sizeof p18lock, "%s.lock", p18slot);
-        (void)remove(p18slot);
-        (void)remove(p18lock); /* start from a clean slot + lock */
+        /* (J12b) P1 history-gate regression: Undo/Redo itself now appends a candidate checkpoint
+         * INSIDE core before publishing the project/cursor move. A failed checkpoint append must
+         * return false, preserve the visible model + depths, and use the existing op-error channel
+         * (never the old post-success degraded-compaction notice). */
+        gui_project_new();
+        gui_pack_clear(-1);
+        s_sel_atlas = 0;
+        (void)gui_project_take_op_error(NULL, 0);
+        tp_journal_io j12bio = gui_project__test_attach_memory_journal();
+        NT_ASSERT(j12bio.ctx && "J12b: memory recovery journal attached");
+        NT_ASSERT(gui_project_set_atlas_name(0, "j12b_edit") && "J12b: committed edit populates history");
+        const int j12b_undo0 = gui_project_undo_depth();
+        const int j12b_redo0 = gui_project_redo_depth();
+        tp_journal_io_memory__fail_next_writes(j12bio, 1);
+        const bool j12b_undo_fail = gui_project_undo();
+        char j12b_uerr[256] = {0};
+        const bool j12b_usurfaced = gui_project_take_op_error(j12b_uerr, sizeof j12b_uerr);
+        NT_ASSERT(!j12b_undo_fail && j12b_usurfaced && strstr(j12b_uerr, "disk full") != NULL &&
+                  strcmp(tp_project_get_atlas(gui_project_get(), 0)->name, "j12b_edit") == 0 &&
+                  gui_project_undo_depth() == j12b_undo0 && gui_project_redo_depth() == j12b_redo0 &&
+                  "J12b: failed Undo is surfaced and publishes no model/cursor change");
 
-        /* Session 1: a journaled session with a committed edit, then a simulated crash (the slot survives). */
-        gui_project_enable_recovery("");   /* disable first so this teardown never deletes a slot */
-        gui_project_shutdown();            /* tear down the J12 (memory-journal) model; no slot op */
-        gui_project_enable_recovery(p18slot);
-        gui_project_init();                /* fresh + a recovery journal at the slot */
-        NT_ASSERT(gui_project_get() && !gui_project_has_recovered_unsaved() &&
-                  "J13: a fresh journaled session has NO recovered-unsaved work");
-        NT_ASSERT(gui_project_set_atlas_name(0, "p18_recovered") && "J13: a committed edit for the crash to recover");
-        gui_project_enable_recovery("");   /* crash-sim: keep the slot file on disk */
-        gui_project_shutdown();
+        NT_ASSERT(gui_project_undo() && "J12b: one-shot fault exhausted; Undo remains retryable");
+        const int j12b_undo1 = gui_project_undo_depth();
+        const int j12b_redo1 = gui_project_redo_depth();
+        tp_journal_io_memory__fail_next_writes(j12bio, 1);
+        const bool j12b_redo_fail = gui_project_redo();
+        char j12b_rerr[256] = {0};
+        const bool j12b_rsurfaced = gui_project_take_op_error(j12b_rerr, sizeof j12b_rerr);
+        NT_ASSERT(!j12b_redo_fail && j12b_rsurfaced && strstr(j12b_rerr, "disk full") != NULL &&
+                  strcmp(tp_project_get_atlas(gui_project_get(), 0)->name, "atlas1") == 0 &&
+                  gui_project_undo_depth() == j12b_undo1 && gui_project_redo_depth() == j12b_redo1 &&
+                  "J12b: failed Redo is surfaced and publishes no model/cursor change");
+        (void)gui_project_take_op_error(NULL, 0);
 
-        /* Session 2 (restart after the crash): adopt the slot -> the predicate must read TRUE (guard DEFERS). */
-        gui_project_enable_recovery(p18slot);
-        gui_project_init();                /* recovery adopts the slot's last committed state */
-        char p18note[256] = {0};
-        const bool p18_recovered = gui_project_take_recovery_notice(p18note, sizeof p18note); /* what main()'s guard captures */
-        nt_log_info("SELFTEST: J13 adopt recovered=%d has_recovered_unsaved=%d (want 1,1 -> arg-open DEFERS)",
-                    (int)p18_recovered, (int)gui_project_has_recovered_unsaved());
-        NT_ASSERT(p18_recovered && "J13: the adopt raised the one-shot recovery notice (main()'s guard input)");
-        NT_ASSERT(gui_project_has_recovered_unsaved() &&
-                  "J13/P1-8: recovered unsaved work is live -> the guard DEFERS a CLI arg-open (no silent discard)");
+        /* (J12c) End-to-end startup-scan contract: Save compacts to one clean checkpoint; Undo
+         * appends (not truncates) the dirty candidate checkpoint. After a simulated crash the normal
+         * folder scan must therefore offer the slot (record_count > 1) without any GUI post-hook. */
+        char j12c_dir[1000];
+        char j12c_slot[1200], j12c_lock[1210], j12c_saved[1200];
+        (void)snprintf(j12c_dir, sizeof j12c_dir, "%s/selftest_history_scan_j12c", s_exe_dir);
+        tp_mkdirs(j12c_dir);
+        (void)snprintf(j12c_slot, sizeof j12c_slot, "%s/history.ntpjournal", j12c_dir);
+        (void)snprintf(j12c_lock, sizeof j12c_lock, "%s.lock", j12c_slot);
+        (void)snprintf(j12c_saved, sizeof j12c_saved, "%s/history.ntpacker_project", j12c_dir);
+        (void)remove(j12c_slot); (void)remove(j12c_lock); (void)remove(j12c_saved);
 
-        /* A Save flushes the recovered state -> the predicate clears, so the guard would now PERMIT arg-open. */
-        char p18save[1200];
-        (void)snprintf(p18save, sizeof p18save, "%s/selftest_p18.ntpacker_project", s_exe_dir);
-        (void)remove(p18save);
-        char p18err[256] = {0};
-        const tp_status p18st = gui_project_save_as(p18save, p18err, sizeof p18err);
-        nt_log_info("SELFTEST: J13 after-save st=%s has_recovered_unsaved=%d (want OK,0 -> arg-open PERMITTED)",
-                    tp_status_str(p18st), (int)gui_project_has_recovered_unsaved());
-        NT_ASSERT(p18st == TP_STATUS_OK && "J13: the recovered work Saves");
-        NT_ASSERT(!gui_project_has_recovered_unsaved() &&
-                  "J13/P1-8: a Save clears recovered-unsaved -> the guard PERMITS a subsequent arg-open");
+        gui_project_enable_recovery(""); gui_project_shutdown();
+        gui_project_enable_recovery(j12c_slot); gui_project_init();
+        NT_ASSERT(gui_project_set_atlas_name(0, "j12c_saved") && "J12c: committed edit before Save");
+        char j12c_err[256] = {0};
+        NT_ASSERT(gui_project_save_as(j12c_saved, j12c_err, sizeof j12c_err) == TP_STATUS_OK &&
+                  "J12c: Save establishes one clean checkpoint");
+        NT_ASSERT(gui_project_undo() && gui_project_is_dirty() &&
+                  "J12c: Undo appends a dirty candidate checkpoint");
+        gui_project_enable_recovery(""); gui_project_shutdown(); /* crash-sim: leave slot on disk */
 
-        gui_project_enable_recovery("");   /* disable + release the lock */
-        gui_project_shutdown();
-        (void)remove(p18slot);
-        (void)remove(p18lock);
-        (void)remove(p18save);
+        gui_recovery_list j12c_list;
+        const int j12c_count = gui_recovery_collect(j12c_dir, "", &j12c_list);
+        bool j12c_offered = false;
+        for (int k = 0; k < j12c_list.count; k++) {
+            if (strcmp(j12c_list.items[k].journal_path, j12c_slot) == 0 && j12c_list.items[k].adoptable) {
+                j12c_offered = true;
+            }
+        }
+        nt_log_info("SELFTEST: J12c R6 collect count=%d offered_slot=%d (want >=1,1)",
+                    j12c_count, (int)j12c_offered);
+        NT_ASSERT(j12c_count > 0 && j12c_offered &&
+                  "J12c: R6 collect offers the dirty Undo checkpoint journal");
+        (void)remove(j12c_slot); (void)remove(j12c_lock); (void)remove(j12c_saved);
 
         /* (J14) H/P1-8 fix: the STARTUP OPEN/DEFER GUARD itself, as a PURE truth table. main()'s data-loss
          *       guard now routes through gui_startup_decide (single source of truth); J13 above covers only
@@ -1877,7 +1805,7 @@ void run_selftest(void) {
         (void)gui_project_take_op_error(NULL, 0);      /* clear any prior soft-error before the attach */
         gui_project__test_skip_next_recovery_reset();  /* simulate a remove() that could not clear the slot */
         /* gui_project_new (NOT _init): goes straight to wrap_model -> attach_recovery_journal, bypassing
-         * try_adopt_recovered so the fail-closed path is exercised directly on the seeded slot. */
+         * fresh journal attach so the fail-closed path is exercised directly on the seeded slot. */
         (void)gui_project_new(); /* attach_recovery_journal: skip reset -> stale slot -> FAIL CLOSED */
         char j15err[256] = {0};
         const bool j15_degraded = gui_project_take_op_error(j15err, sizeof j15err);
@@ -1973,328 +1901,17 @@ void run_selftest(void) {
             NT_ASSERT(pk.has_meta && "J16b: Save-As left a METADATA record");
             NT_ASSERT(pk.meta.name && strcmp(pk.meta.name, "selftest_meta_proj.ntpacker_project") == 0 &&
                       "J16b: metadata name REFRESHED to the saved basename (set_path chokepoint hook)");
-            NT_ASSERT(pk.meta.path && strcmp(pk.meta.path, j16save) == 0 &&
+            char j16canonical[TP_IDENTITY_PATH_MAX];
+            tp_error j16canonical_err = {0};
+            NT_ASSERT(tp_identity_path_canonical(j16save, j16canonical, sizeof j16canonical,
+                                                 &j16canonical_err) == TP_STATUS_OK);
+            NT_ASSERT(pk.meta.path && strcmp(pk.meta.path, j16canonical) == 0 &&
                       "J16b: metadata path REFRESHED to the saved path (compaction re-emits the NEW path, not the stale one)");
             tp_journal_peek_free(&pk);
         }
         (void)remove(j16slot);
         (void)remove(j16lock);
         (void)remove(j16save);
-
-        /* (J17) R5b-1 finding [3] ADOPT-CARRY: adopting a metadata-bearing crashed slot must carry the
-         *      ORIGINAL project identity onto the FRESH (adopted) journal -- so R5b-2's scan + R6's "Save
-         *      (over the original)" see the real path/name -- while the LIVE window stays UNTITLED (a
-         *      deliberate Save As still required). Session 1: Save-As to a known path (journal META = that
-         *      identity), then an edit (unsaved recovered work), crash. Session 2: adopt. Assert the live
-         *      window is untitled (has_path false / name "untitled") YET the fresh journal's META (peeked
-         *      on a closed slot -- the R5b-2 scan primitive) carries the ORIGINAL saved path + basename,
-         *      NOT "untitled"/"" (pre-fix the adopt freed info.metadata unread and set_path("") stamped
-         *      untitled into the fresh journal, discarding the crashed project's identity). Isolated slot. */
-        char j17slot[1200];
-        char j17lock[1210];
-        char j17save[1200];
-        (void)snprintf(j17slot, sizeof j17slot, "%s/selftest_adopt_meta.ntpjournal", s_exe_dir);
-        (void)snprintf(j17lock, sizeof j17lock, "%s.lock", j17slot);
-        (void)snprintf(j17save, sizeof j17save, "%s/selftest_adopt_meta_proj.ntpacker_project", s_exe_dir);
-        gui_project_enable_recovery(""); /* disable first so no teardown deletes a slot */
-        gui_project_shutdown();
-        (void)remove(j17slot);
-        (void)remove(j17lock);
-        (void)remove(j17save);
-
-        /* Session 1: journaled session -> Save-As (journal META = saved identity) -> edit (unsaved
-         * recovered work) -> crash (disable + shutdown -> slot survives, handle closed). */
-        gui_project_enable_recovery(j17slot);
-        gui_project_init();
-        char j17err[256] = {0};
-        const tp_status j17sv = gui_project_save_as(j17save, j17err, sizeof j17err);
-        nt_log_info("SELFTEST: J17 session-1 save-as st=%s name='%s' err='%s'", tp_status_str(j17sv),
-                    gui_project_display_name(), j17err);
-        NT_ASSERT(j17sv == TP_STATUS_OK && "J17: session-1 Save-As records the project identity into the journal");
-        NT_ASSERT(gui_project_set_atlas_name(0, "adopt_meta_edit") &&
-                  "J17: an edit after Save -> unsaved recovered work ahead of the file");
-        gui_project_enable_recovery("");
-        gui_project_shutdown();
-
-        /* Session 2 (restart after crash): adopt the slot. The LIVE window must be UNTITLED, but the
-         * FRESH journal must CARRY the original saved identity. */
-        gui_project_enable_recovery(j17slot);
-        gui_project_init();
-        char j17note[256] = {0};
-        const bool j17_notice = gui_project_take_recovery_notice(j17note, sizeof j17note);
-        nt_log_info("SELFTEST: J17 adopt notice=%d live_has_path=%d live_name='%s' (want 1,0,'untitled')",
-                    j17_notice, (int)gui_project_has_path(), gui_project_display_name());
-        NT_ASSERT(j17_notice && "J17: the metadata-bearing slot was adopted (recovery notice raised)");
-        NT_ASSERT(!gui_project_has_path() &&
-                  "J17: the adopted LIVE window stays untitled (no path -> a deliberate Save As is required)");
-        NT_ASSERT(strcmp(gui_project_display_name(), "untitled") == 0 &&
-                  "J17: the adopted LIVE window display name is 'untitled'");
-        gui_project_enable_recovery(""); /* crash-sim again: keep the fresh journal slot so we can peek it */
-        gui_project_shutdown();
-        {
-            tp_journal_peek_result pk;
-            memset(&pk, 0, sizeof pk);
-            tp_error pkerr = {0};
-            const tp_status pst = tp_journal_peek(tp_journal_io_file(j17slot), &pk, &pkerr);
-            nt_log_info("SELFTEST: J17 adopt-carry peek st=%s has_meta=%d name='%s' path='%s' (want OK,1,saved-basename,saved-path)",
-                        tp_status_str(pst), (int)pk.has_meta, pk.meta.name ? pk.meta.name : "(null)",
-                        pk.meta.path ? pk.meta.path : "(null)");
-            NT_ASSERT(pst == TP_STATUS_OK && "J17: peek reads the closed adopted slot");
-            NT_ASSERT(pk.has_meta && "J17: the adopted fresh journal carries a METADATA record");
-            NT_ASSERT(pk.meta.name && strcmp(pk.meta.name, "selftest_adopt_meta_proj.ntpacker_project") == 0 &&
-                      "J17: the fresh journal META name == the ORIGINAL saved basename (carried, NOT 'untitled')");
-            NT_ASSERT(pk.meta.path && strcmp(pk.meta.path, j17save) == 0 &&
-                      "J17: the fresh journal META path == the ORIGINAL saved path (carried, NOT '')");
-            tp_journal_peek_free(&pk);
-        }
-        (void)remove(j17slot);
-        (void)remove(j17lock);
-        (void)remove(j17save);
-
-        /* ============================ R5b-2: recovery FOLDER startup scan ============================
-         * The production auto-scan is gated out of this build (main.c #ifndef NTPACKER_GUI_SELFTEST), so
-         * J18-J21 drive gui_project_scan_pick directly on ISOLATED temp folders. They prove: the scan picks
-         * the NEWEST unsaved-work orphan and the adopt DELETES it (J18/J21); a live-LOCKED orphan is SKIPPED
-         * and LEFT (J19); and no-work + foreign(BAD_MAGIC) orphans are adopted by NEITHER and deleted by
-         * NEITHER (J20) -- the whole-packet data-safety rule "delete ONLY the adopted source". */
-
-        /* (J18/J21) SCAN PICKS THE NEWEST ORPHAN + DELETES ONLY IT. Two crash-orphans in one folder: A
-         * (older) and B (newer). The scan must pick B (adopt B's state), DELETE the adopted B, and LEAVE A. */
-        char scan18[900];
-        char j18a[1000], j18b[1000], j18live[1000];
-        char j18a_lock[1010], j18b_lock[1010], j18live_lock[1010];
-        (void)snprintf(scan18, sizeof scan18, "%s/selftest_scan_j18", s_exe_dir);
-        tp_mkdirs(scan18); /* isolated temp recovery folder */
-        (void)snprintf(j18a, sizeof j18a, "%s/orphanA.ntpjournal", scan18);
-        (void)snprintf(j18b, sizeof j18b, "%s/orphanB.ntpjournal", scan18);
-        (void)snprintf(j18live, sizeof j18live, "%s/scan_live.ntpjournal", scan18);
-        (void)snprintf(j18a_lock, sizeof j18a_lock, "%s.lock", j18a);
-        (void)snprintf(j18b_lock, sizeof j18b_lock, "%s.lock", j18b);
-        (void)snprintf(j18live_lock, sizeof j18live_lock, "%s.lock", j18live);
-        (void)remove(j18a); (void)remove(j18a_lock);
-        (void)remove(j18b); (void)remove(j18b_lock);
-        (void)remove(j18live); (void)remove(j18live_lock);
-        scan_make_orphan(j18a, "orphanA_atlas", 1000); /* older */
-        scan_make_orphan(j18b, "orphanB_atlas", 2000); /* newer -> must win */
-        NT_ASSERT(tp_scan_exists(j18a) && tp_scan_exists(j18b) && "J18: two crash-orphans fabricated");
-
-        /* Fresh live slot in the SAME folder: the scan must EXCLUDE it (basename) and never adopt it. */
-        gui_project_enable_recovery(""); gui_project_shutdown();
-        gui_project_enable_recovery(j18live); /* acquire this session's live-slot lock */
-        char j18pick[1200] = {0};
-        const bool j18_picked = gui_project_scan_pick(scan18, j18live, j18pick, sizeof j18pick);
-        nt_log_info("SELFTEST: J18 scan picked=%d pick='%s' (want 1, orphanB path)", (int)j18_picked, j18pick);
-        NT_ASSERT(j18_picked && "J18: the scan picked an adoptable orphan");
-        NT_ASSERT(strcmp(j18pick, j18b) == 0 && "J18: the scan picked the NEWEST orphan (B, ts 2000 > A 1000)");
-        gui_project_init_adopt(j18_picked ? j18pick : NULL); /* adopt B; deletes the adopted source */
-        const char *j18_name = tp_project_get_atlas(gui_project_get(), 0)
-                                   ? tp_project_get_atlas(gui_project_get(), 0)->name : "(none)";
-        nt_log_info("SELFTEST: J18 adopted atlas='%s' B_exists=%d A_exists=%d (want 'orphanB_atlas',0,1)",
-                    j18_name, (int)tp_scan_exists(j18b), (int)tp_scan_exists(j18a));
-        NT_ASSERT(strcmp(j18_name, "orphanB_atlas") == 0 && "J18: adopted B's recovered state (its committed edit)");
-        NT_ASSERT(!tp_scan_exists(j18b) && "J21: the ADOPTED source journal is DELETED (its work is in the live journal)");
-        NT_ASSERT(tp_scan_exists(j18a) && "J18: the NON-adopted older orphan is LEFT on disk (for R6)");
-        gui_project_enable_recovery(""); gui_project_shutdown(); /* crash-sim keeps j18live; cleaned below */
-        (void)remove(j18a); (void)remove(j18a_lock);
-        (void)remove(j18b); (void)remove(j18b_lock);
-        (void)remove(j18live); (void)remove(j18live_lock);
-
-        /* (J19) LIVENESS SKIP: a foreign lock held on an orphan makes the scan treat it as owned by a live
-         * instance -> SKIP (never adopt/delete). Reuses the J5 foreign-lock seam. */
-        char scan19[900];
-        char j19c[1000], j19c_lock[1010], j19live[1000], j19live_lock[1010];
-        (void)snprintf(scan19, sizeof scan19, "%s/selftest_scan_j19", s_exe_dir);
-        tp_mkdirs(scan19);
-        (void)snprintf(j19c, sizeof j19c, "%s/orphanC.ntpjournal", scan19);
-        (void)snprintf(j19live, sizeof j19live, "%s/scan_live.ntpjournal", scan19);
-        (void)snprintf(j19c_lock, sizeof j19c_lock, "%s.lock", j19c);
-        (void)snprintf(j19live_lock, sizeof j19live_lock, "%s.lock", j19live);
-        (void)remove(j19c); (void)remove(j19c_lock);
-        (void)remove(j19live); (void)remove(j19live_lock);
-        scan_make_orphan(j19c, "orphanC_atlas", 3000); /* an ADOPTABLE orphan ... */
-        NT_ASSERT(gui_project__test_hold_foreign_lock(j19c) && "J19: a live instance holds C's slot lock");
-        gui_project_enable_recovery(""); gui_project_shutdown();
-        gui_project_enable_recovery(j19live);
-        char j19pick[1200] = {0};
-        const bool j19_picked = gui_project_scan_pick(scan19, j19live, j19pick, sizeof j19pick);
-        nt_log_info("SELFTEST: J19 live-locked scan picked=%d C_exists=%d (want 0,1 -> skipped + left)",
-                    (int)j19_picked, (int)tp_scan_exists(j19c));
-        NT_ASSERT(!j19_picked && "J19: a live-locked orphan is NOT adopted (liveness probe fails -> skipped)");
-        NT_ASSERT(tp_scan_exists(j19c) && "J19: the live-locked orphan is LEFT untouched (never deleted)");
-        gui_project__test_release_foreign_lock();
-        gui_project_enable_recovery(""); gui_project_shutdown();
-        (void)remove(j19c); (void)remove(j19c_lock);
-        (void)remove(j19live); (void)remove(j19live_lock);
-
-        /* (J20) NO-WORK + FOREIGN ORPHANS ARE LEFT, NOT ADOPTED, NOT DELETED. A checkpoint-only journal
-         * (record_count <= 1 -> no unsaved work) and a BAD_MAGIC non-journal file: the scan adopts NEITHER
-         * and deletes NEITHER. Proves "delete only the adopted source". */
-        char scan20[900];
-        char j20noedit[1000], j20noedit_lock[1010], j20bad[1000], j20live[1000], j20live_lock[1010];
-        (void)snprintf(scan20, sizeof scan20, "%s/selftest_scan_j20", s_exe_dir);
-        tp_mkdirs(scan20);
-        (void)snprintf(j20noedit, sizeof j20noedit, "%s/noedit.ntpjournal", scan20);
-        (void)snprintf(j20bad, sizeof j20bad, "%s/foreign.ntpjournal", scan20);
-        (void)snprintf(j20live, sizeof j20live, "%s/scan_live.ntpjournal", scan20);
-        (void)snprintf(j20noedit_lock, sizeof j20noedit_lock, "%s.lock", j20noedit);
-        (void)snprintf(j20live_lock, sizeof j20live_lock, "%s.lock", j20live);
-        (void)remove(j20noedit); (void)remove(j20noedit_lock);
-        (void)remove(j20bad);
-        (void)remove(j20live); (void)remove(j20live_lock);
-        scan_make_noedit_orphan(j20noedit); /* checkpoint-only -> record_count == 1 */
-        {
-            FILE *bf = fopen(j20bad, "wb"); /* a foreign / BAD_MAGIC file that happens to end .ntpjournal */
-            NT_ASSERT(bf && "J20: seeded a BAD_MAGIC non-journal file");
-            unsigned char junk[40];
-            memset(junk, 0x5A, sizeof junk);
-            (void)fwrite(junk, 1, sizeof junk, bf);
-            (void)fclose(bf);
-        }
-        gui_project_enable_recovery(""); gui_project_shutdown();
-        gui_project_enable_recovery(j20live);
-        char j20pick[1200] = {0};
-        const bool j20_picked = gui_project_scan_pick(scan20, j20live, j20pick, sizeof j20pick);
-        nt_log_info("SELFTEST: J20 no-work+foreign scan picked=%d noedit_exists=%d bad_exists=%d (want 0,1,1)",
-                    (int)j20_picked, (int)tp_scan_exists(j20noedit), (int)tp_scan_exists(j20bad));
-        NT_ASSERT(!j20_picked && "J20: neither a no-work nor a BAD_MAGIC orphan is adoptable");
-        NT_ASSERT(tp_scan_exists(j20noedit) && "J20: the checkpoint-only (no unsaved work) orphan is LEFT, not deleted");
-        NT_ASSERT(tp_scan_exists(j20bad) && "J20: the BAD_MAGIC foreign file is LEFT, not deleted");
-        gui_project_enable_recovery(""); gui_project_shutdown();
-        (void)remove(j20noedit); (void)remove(j20noedit_lock);
-        (void)remove(j20bad);
-        (void)remove(j20live); (void)remove(j20live_lock);
-
-        /* (J22) fix [0] DATA-LOSS GUARD: adopt a crash-orphan but make the FRESH live journal FAIL to
-         * attach (reuse the J15 skip-reset seam + a pre-seeded stale live slot). The recovered work then
-         * lives ONLY in the dirty in-memory model + the SOURCE, so deleting the source would open a
-         * data-loss window (a crash before a manual Save loses everything) -- it MUST be LEFT. Assert: the
-         * recovered state WAS adopted, the session is dirty-but-journal-LESS (a degraded notice fired), and
-         * the adopted SOURCE is STILL ON DISK. */
-        char scan22[900];
-        char j22src[1000], j22src_lock[1010], j22live[1000], j22live_lock[1010];
-        (void)snprintf(scan22, sizeof scan22, "%s/selftest_scan_j22", s_exe_dir);
-        tp_mkdirs(scan22);
-        (void)snprintf(j22src, sizeof j22src, "%s/orphan22.ntpjournal", scan22);
-        (void)snprintf(j22live, sizeof j22live, "%s/scan_live22.ntpjournal", scan22);
-        (void)snprintf(j22src_lock, sizeof j22src_lock, "%s.lock", j22src);
-        (void)snprintf(j22live_lock, sizeof j22live_lock, "%s.lock", j22live);
-        (void)remove(j22src); (void)remove(j22src_lock);
-        (void)remove(j22live); (void)remove(j22live_lock);
-        scan_make_orphan(j22src, "guard22_atlas", 4000); /* an adoptable crash-orphan (real GUI key) */
-        gui_project_enable_recovery(""); gui_project_shutdown();
-        gui_project_enable_recovery(j22live); /* own the fresh live slot */
-        NT_ASSERT(gui_project__test_recovery_active() && "J22: recovery active on the fresh live slot");
-        {
-            FILE *sf = fopen(j22live, "wb"); /* pre-seed 40 stale bytes so the fresh attach FAILS closed */
-            NT_ASSERT(sf && "J22: seeded a stale live slot");
-            unsigned char junk[40];
-            memset(junk, 0xC7, sizeof junk);
-            (void)fwrite(junk, 1, sizeof junk, sf);
-            (void)fclose(sf);
-        }
-        (void)gui_project_take_op_error(NULL, 0);     /* clear any prior soft-error */
-        gui_project__test_skip_next_recovery_reset(); /* the fresh attach sees the stale slot -> fail closed */
-        gui_project_init_adopt(j22src);               /* adopt j22src; wrap_model's attach FAILS -> journal-less */
-        char j22err[256] = {0};
-        const bool j22_degraded = gui_project_take_op_error(j22err, sizeof j22err);
-        const char *j22_name = tp_project_get_atlas(gui_project_get(), 0)
-                                   ? tp_project_get_atlas(gui_project_get(), 0)->name : "(none)";
-        nt_log_info("SELFTEST: J22 adopt-attach-fail name='%s' dirty=%d degraded=%d src_exists=%d (want 'guard22_atlas',1,1,1)",
-                    j22_name, (int)gui_project_has_recovered_unsaved(), (int)j22_degraded, (int)tp_scan_exists(j22src));
-        NT_ASSERT(strcmp(j22_name, "guard22_atlas") == 0 && "J22: the recovered state WAS adopted");
-        NT_ASSERT(gui_project_has_recovered_unsaved() && "J22: adopted work is dirty (recovered_unsaved)");
-        NT_ASSERT(j22_degraded && j22err[0] && "J22: the fresh journal failed to attach -> journal-less degraded notice");
-        NT_ASSERT(tp_scan_exists(j22src) && "J22/[0]: journal-less attach -> the adopted SOURCE is NOT deleted (data-loss guard)");
-        (void)gui_project_take_op_error(NULL, 0);
-        gui_project_enable_recovery(""); gui_project_shutdown();
-        (void)remove(j22src); (void)remove(j22src_lock);
-        (void)remove(j22live); (void)remove(j22live_lock);
-
-        /* (J23) fix [1] REGRESSION: a TRUNCATED orphan -- a committed edit then a TORN TAIL (the #1 crash
-         * artifact) -- IS adopted, recovering its COMMITTED PREFIX. Two edits, then chop the last txn's tail
-         * so replay classifies TRUNCATED with CKPT + TXN1 (2 good records) still recoverable. */
-        char scan23[900];
-        char j23src[1000], j23src_lock[1010], j23live[1000], j23live_lock[1010];
-        (void)snprintf(scan23, sizeof scan23, "%s/selftest_scan_j23", s_exe_dir);
-        tp_mkdirs(scan23);
-        (void)snprintf(j23src, sizeof j23src, "%s/orphan23.ntpjournal", scan23);
-        (void)snprintf(j23live, sizeof j23live, "%s/scan_live23.ntpjournal", scan23);
-        (void)snprintf(j23src_lock, sizeof j23src_lock, "%s.lock", j23src);
-        (void)snprintf(j23live_lock, sizeof j23live_lock, "%s.lock", j23live);
-        (void)remove(j23src); (void)remove(j23src_lock);
-        (void)remove(j23live); (void)remove(j23live_lock);
-        scan_make_orphan_2edits(j23src, "trunc23_edit1", "trunc23_edit2", 5000);
-        NT_ASSERT(selftest_chop_file_tail(j23src, 6) && "J23: tore the last txn's tail -> TRUNCATED");
-        gui_project_enable_recovery(""); gui_project_shutdown();
-        gui_project_enable_recovery(j23live); /* fresh empty live slot (fresh journal attaches) */
-        char j23pick[1200] = {0};
-        const bool j23_picked = gui_project_scan_pick(scan23, j23live, j23pick, sizeof j23pick);
-        nt_log_info("SELFTEST: J23 TRUNCATED scan picked=%d pick_is_src=%d (want 1,1)",
-                    (int)j23_picked, (int)(j23_picked && strcmp(j23pick, j23src) == 0));
-        NT_ASSERT(j23_picked && strcmp(j23pick, j23src) == 0 &&
-                  "J23/[1]: a TRUNCATED orphan (committed prefix) IS adoptable");
-        gui_project_init_adopt(j23pick);
-        const char *j23_name = tp_project_get_atlas(gui_project_get(), 0)
-                                   ? tp_project_get_atlas(gui_project_get(), 0)->name : "(none)";
-        nt_log_info("SELFTEST: J23 adopted name='%s' src_exists=%d (want 'trunc23_edit1',0)",
-                    j23_name, (int)tp_scan_exists(j23src));
-        NT_ASSERT(strcmp(j23_name, "trunc23_edit1") == 0 &&
-                  "J23/[1]: recovered the COMMITTED PREFIX (first edit; the torn second is dropped)");
-        NT_ASSERT(!tp_scan_exists(j23src) &&
-                  "J23: the adopted TRUNCATED source is deleted (its work is now in the fresh live journal)");
-        gui_project_enable_recovery(""); gui_project_shutdown();
-        (void)remove(j23src); (void)remove(j23src_lock);
-        (void)remove(j23live); (void)remove(j23live_lock);
-
-        /* (J24) fix [2] FALLBACK: two adoptable orphans where the NEWEST peeks adoptable but FAILS the real
-         * recover. R6a fix [2] made the candidate scan KEY-FILTER (a foreign-key journal is now excluded from
-         * the candidates entirely), so we exercise the recover-fallback with a real-key-but-UNRECOVERABLE
-         * orphan: OUR key + valid framing (peeks adoptable) but an UNLOADABLE checkpoint snapshot, so
-         * tp_model_recover fails to rebuild the base -> no model. The adopt loop must fall back to the OLDER
-         * genuinely-recoverable orphan: adopt + delete IT, and LEAVE the recover-failed newest (no delete on
-         * failure -- fix [0]). */
-        char scan24[900];
-        char j24old[1000], j24old_lock[1010], j24new[1000], j24new_lock[1010], j24live[1000], j24live_lock[1010];
-        (void)snprintf(scan24, sizeof scan24, "%s/selftest_scan_j24", s_exe_dir);
-        tp_mkdirs(scan24);
-        (void)snprintf(j24old, sizeof j24old, "%s/orphan24_old.ntpjournal", scan24);
-        (void)snprintf(j24new, sizeof j24new, "%s/orphan24_new.ntpjournal", scan24);
-        (void)snprintf(j24live, sizeof j24live, "%s/scan_live24.ntpjournal", scan24);
-        (void)snprintf(j24old_lock, sizeof j24old_lock, "%s.lock", j24old);
-        (void)snprintf(j24new_lock, sizeof j24new_lock, "%s.lock", j24new);
-        (void)snprintf(j24live_lock, sizeof j24live_lock, "%s.lock", j24live);
-        (void)remove(j24old); (void)remove(j24old_lock);
-        (void)remove(j24new); (void)remove(j24new_lock);
-        (void)remove(j24live); (void)remove(j24live_lock);
-        scan_make_orphan(j24old, "fallback24_old", 6000); /* older, genuinely recoverable (real GUI key) */
-        /* newer (ts 9000): OUR key + valid framing (peeks adoptable, passes the fix [2] key check) but an
-         * UNLOADABLE checkpoint snapshot ('r6a!' bytes), so the real tp_model_recover fails to load the base
-         * and returns no model -- the adopt loop must then fall back to the older recoverable orphan. */
-        craft_meta_orphan(j24new, gui_project__test_recovery_key(), 9000, "", "");
-        gui_project_enable_recovery(""); gui_project_shutdown();
-        gui_project_enable_recovery(j24live);
-        gui_recovery_candidates j24c;
-        const int j24n = gui_project_scan_pick_candidates(scan24, j24live, &j24c);
-        nt_log_info("SELFTEST: J24 candidates n=%d [0]_is_new=%d [1]_is_old=%d (want 2,1,1)", j24n,
-                    (int)(j24n >= 1 && strcmp(j24c.paths[0], j24new) == 0),
-                    (int)(j24n >= 2 && strcmp(j24c.paths[1], j24old) == 0));
-        NT_ASSERT(j24n == 2 && "J24: both orphans peek adoptable (both carry OUR key now)");
-        NT_ASSERT(strcmp(j24c.paths[0], j24new) == 0 && "J24: newest-first -> the unrecoverable newest (ts 9000) is [0]");
-        NT_ASSERT(strcmp(j24c.paths[1], j24old) == 0 && "J24: the older recoverable (ts 6000) is [1]");
-        gui_project_init_adopt_candidates(&j24c);
-        const char *j24_name = tp_project_get_atlas(gui_project_get(), 0)
-                                   ? tp_project_get_atlas(gui_project_get(), 0)->name : "(none)";
-        nt_log_info("SELFTEST: J24 adopted name='%s' new_exists=%d old_exists=%d (want 'fallback24_old',1,0)",
-                    j24_name, (int)tp_scan_exists(j24new), (int)tp_scan_exists(j24old));
-        NT_ASSERT(strcmp(j24_name, "fallback24_old") == 0 &&
-                  "J24/[2]: the newest FAILED recover -> the OLDER orphan is adopted");
-        NT_ASSERT(tp_scan_exists(j24new) &&
-                  "J24/[2]: the recover-FAILED newest is LEFT on disk (no delete on failure)");
-        NT_ASSERT(!tp_scan_exists(j24old) && "J24/[2]: the successfully-adopted older source IS deleted");
-        gui_project_enable_recovery(""); gui_project_shutdown();
-        (void)remove(j24old); (void)remove(j24old_lock);
-        (void)remove(j24new); (void)remove(j24new_lock);
-        (void)remove(j24live); (void)remove(j24live_lock);
 
 #ifndef _WIN32
         /* (J25) fix [5] POSIX: a clean enable->shutdown cycle must UNLINK the per-session .lock (POSIX has
@@ -2332,11 +1949,12 @@ void run_selftest(void) {
          * ts 8000, REAL key), an UNTITLED adoptable (empty meta, ts 7000, REAL key), a VERSION_MISMATCH
          * (bumped header -> old format, surfaced for Discard), a FOREIGN-KEY otherwise-adoptable journal (fix
          * [2]: our format, valid framing, but NOT our key -> recover would STALE_KEY -> excluded, not listed),
-         * a live-LOCKED adoptable (foreign lock -> excluded), and a foreign BAD_MAGIC file (excluded). collect
-         * must return EXACTLY the first three, newest-first, correctly classified. */
+         * a live-LOCKED adoptable (foreign lock -> excluded), a checkpoint-only no-work journal, and a foreign
+         * BAD_MAGIC file (both excluded). collect must return EXACTLY the first three, newest-first. */
         {
             char scan26[900];
-            char j26saved[1000], j26unt[1000], j26vmis[1000], j26fkey[1000], j26lock[1000], j26lock_lk[1010], j26bad[1000];
+            char j26saved[1000], j26unt[1000], j26vmis[1000], j26fkey[1000], j26lock[1000], j26lock_lk[1010];
+            char j26noedit[1000], j26noedit_lk[1010], j26bad[1000];
             char j26live[1000];
             (void)snprintf(scan26, sizeof scan26, "%s/selftest_r6a_j26", s_exe_dir);
             tp_mkdirs(scan26);
@@ -2346,10 +1964,13 @@ void run_selftest(void) {
             (void)snprintf(j26fkey, sizeof j26fkey, "%s/foreignkey.ntpjournal", scan26);
             (void)snprintf(j26lock, sizeof j26lock, "%s/locked.ntpjournal", scan26);
             (void)snprintf(j26lock_lk, sizeof j26lock_lk, "%s.lock", j26lock);
+            (void)snprintf(j26noedit, sizeof j26noedit, "%s/noedit.ntpjournal", scan26);
+            (void)snprintf(j26noedit_lk, sizeof j26noedit_lk, "%s.lock", j26noedit);
             (void)snprintf(j26bad, sizeof j26bad, "%s/foreign.ntpjournal", scan26);
             (void)snprintf(j26live, sizeof j26live, "%s/collect_live.ntpjournal", scan26);
             (void)remove(j26saved); (void)remove(j26unt); (void)remove(j26vmis); (void)remove(j26fkey);
-            (void)remove(j26lock); (void)remove(j26lock_lk); (void)remove(j26bad);
+            (void)remove(j26lock); (void)remove(j26lock_lk); (void)remove(j26noedit); (void)remove(j26noedit_lk);
+            (void)remove(j26bad);
 
             const tp_id128 rkey26 = gui_project__test_recovery_key(); /* fix [2]: adoptable requires OUR key */
             tp_id128 fkey26; memset(fkey26.bytes, 0xAB, sizeof fkey26.bytes); /* a DIFFERENT key */
@@ -2357,6 +1978,7 @@ void run_selftest(void) {
             craft_meta_orphan(j26unt, rkey26, 7000, "", ""); /* untitled: empty meta path+name */
             craft_meta_orphan(j26fkey, fkey26, 6500, "/proj/foreign26.ntpacker_project", "foreign26.ntpacker_project"); /* fix [2] */
             craft_meta_orphan(j26lock, rkey26, 6000, "/proj/locked26.ntpacker_project", "locked26.ntpacker_project");
+            scan_make_noedit_orphan(j26noedit); /* checkpoint-only: no post-checkpoint work */
             /* version-mismatch: a bare 28-byte header with the RIGHT magic but a BUMPED format version. */
             {
                 uint8_t hdr[TP_JRN_HEADER_LEN];
@@ -2385,7 +2007,7 @@ void run_selftest(void) {
                         n26 > 1 ? rl.items[1].name : "-", n26 > 1 ? rl.items[1].status : -1,
                         n26 > 2 ? rl.items[2].name : "-", n26 > 2 ? rl.items[2].status : -1);
             NT_ASSERT(n26 == 3 && rl.count == 3 &&
-                      "J26: exactly 3 collected (foreign-key + live-locked + BAD_MAGIC excluded)");
+                      "J26: exactly 3 collected (foreign-key + live-locked + checkpoint-only + BAD_MAGIC excluded)");
             /* [0] newest = the SAVED adoptable (ts 8000): meta path+name carried, adoptable, status OK. */
             NT_ASSERT(rl.items[0].adoptable && rl.items[0].status == (int)TP_JOURNAL_RECOVERY_OK &&
                       rl.items[0].timestamp == 8000 &&
@@ -2408,8 +2030,9 @@ void run_selftest(void) {
             for (int k = 0; k < rl.count; k++) {
                 NT_ASSERT(strcmp(rl.items[k].journal_path, j26fkey) != 0 &&
                           strcmp(rl.items[k].journal_path, j26lock) != 0 &&
+                          strcmp(rl.items[k].journal_path, j26noedit) != 0 &&
                           strcmp(rl.items[k].journal_path, j26bad) != 0 &&
-                          "J26/[2]: foreign-key + live-locked + BAD_MAGIC are never listed");
+                          "J26/[2]: foreign-key + live-locked + checkpoint-only + BAD_MAGIC are never listed");
             }
             /* fix [2]: resolve SAVE_AS on the excluded foreign-key journal must FAIL (STALE_KEY -> nothing
              * recoverable) and LEAVE it on disk (never offers what it cannot act on). */
@@ -2429,7 +2052,8 @@ void run_selftest(void) {
             }
             gui_project__test_release_foreign_lock();
             (void)remove(j26saved); (void)remove(j26unt); (void)remove(j26vmis); (void)remove(j26fkey);
-            (void)remove(j26lock); (void)remove(j26lock_lk); (void)remove(j26bad);
+            (void)remove(j26lock); (void)remove(j26lock_lk); (void)remove(j26noedit); (void)remove(j26noedit_lk);
+            (void)remove(j26bad);
         }
 
         /* (J27) SAVE AS: recover an orphan (REAL GUI key, via scan_make_orphan) to a savable clone, save it to
@@ -2496,7 +2120,7 @@ void run_selftest(void) {
             const tp_status ss28 = gui_project_save_as(j28orig, es28, sizeof es28);
             NT_ASSERT(ss28 == TP_STATUS_OK && tp_scan_exists(j28orig) && "J28a: seeded the ORIGINAL file");
             gui_project_enable_recovery(""); gui_project_shutdown();
-            scan_make_orphan(j28src, "recovered_r", 5000);
+            scan_make_saved_orphan(j28src, j28orig, "recovered_r", 5000);
 
             char e28[256] = {0};
             const tp_status r28 = gui_recovery_resolve(j28src, j28orig, GUI_RECOVERY_SAVE_ORIGINAL, "", e28, sizeof e28);
@@ -2538,15 +2162,10 @@ void run_selftest(void) {
              *   so tp_project_save's fopen(tmp,"wb") fails (and remove() cannot rmdir it). SAVE_ORIGINAL must
              *   return non-OK, orig must still load as its ORIGINAL content (untouched -- proves core atomicity
              *   end-to-end), and the journal must be KEPT (non-destructive on failure). */
-            char j28f_orig[1000], j28f_tmp[1030], j28f_tmppin[1060], j28f_src[1000], j28f_src_lk[1010];
+            char j28f_orig[1000], j28f_src[1000], j28f_src_lk[1010];
             (void)snprintf(j28f_orig, sizeof j28f_orig, "%s/failsave28.ntpacker_project", scan28);
-            (void)snprintf(j28f_tmp, sizeof j28f_tmp, "%s.savetmp", j28f_orig);
-            (void)snprintf(j28f_tmppin, sizeof j28f_tmppin, "%s/pin", j28f_tmp);
             (void)snprintf(j28f_src, sizeof j28f_src, "%s/orphan_fail28.ntpjournal", scan28);
             (void)snprintf(j28f_src_lk, sizeof j28f_src_lk, "%s.lock", j28f_src);
-            /* Clear any leftover block DIRECTORY from a prior run BEFORE seeding: the atomic core save writes its
-             * temp to <orig>.savetmp, so a stale block dir there would make the seeding save_as below fail. */
-            (void)remove(j28f_tmppin); selftest_rmdir(j28f_tmp); (void)remove(j28f_tmp);
             (void)remove(j28f_orig); (void)remove(j28f_src); (void)remove(j28f_src_lk);
 
             /* orig = a VALID project recognizable as "orig_intact" (atlas name), via the real save path. */
@@ -2558,12 +2177,8 @@ void run_selftest(void) {
             NT_ASSERT(ss_f == TP_STATUS_OK && tp_scan_exists(j28f_orig) && "Torig_fail: seeded a VALID original");
             gui_project_enable_recovery(""); gui_project_shutdown();
 
-            /* a NON-EMPTY directory at <orig>.savetmp: the core's fopen(tmp,"wb") fails, remove(tmp) can't rmdir it. */
-            tp_mkdirs(j28f_tmp);
-            { FILE *pf = fopen(j28f_tmppin, "wb"); if (pf) { (void)fputs("pin", pf); (void)fclose(pf); } }
-            NT_ASSERT(selftest_file_exists(j28f_tmppin) && "Torig_fail: pinned <orig>.savetmp as a NON-EMPTY directory");
-
-            scan_make_orphan(j28f_src, "recovered_fail28", 5500);
+            scan_make_saved_orphan(j28f_src, j28f_orig, "recovered_fail28", 5500);
+            tp_project__test_fail_next_temp_create();
             char e_f[256] = {0};
             const tp_status r_f = gui_recovery_resolve(j28f_src, j28f_orig, GUI_RECOVERY_SAVE_ORIGINAL, "", e_f, sizeof e_f);
             tp_project *f_orig = NULL;
@@ -2571,14 +2186,65 @@ void run_selftest(void) {
             const tp_status lf = tp_project_load(j28f_orig, &f_orig, &fe);
             const char *f_orignm = (lf == TP_STATUS_OK && f_orig && tp_project_get_atlas(f_orig, 0)) ? tp_project_get_atlas(f_orig, 0)->name : "(none)";
             const int orig_intact = (lf == TP_STATUS_OK && strcmp(f_orignm, "orig_intact") == 0);
-            nt_log_info("SELFTEST: Torig_fail savetmp-blocked r=%s err='%s' orig='%s' orig_intact=%d journal_kept=%d (want !ok,<msg>,orig_intact,1,1)",
+            nt_log_info("SELFTEST: Torig_fail injected-create r=%s err='%s' orig='%s' orig_intact=%d journal_kept=%d (want !ok,<msg>,orig_intact,1,1)",
                         tp_status_str(r_f), e_f, f_orignm, orig_intact, (int)tp_scan_exists(j28f_src));
-            NT_ASSERT(r_f != TP_STATUS_OK && e_f[0] && "Torig_fail: the save FAILS when <orig>.savetmp cannot be written");
+            NT_ASSERT(r_f != TP_STATUS_OK && e_f[0] && "Torig_fail: injected temp creation failure is surfaced");
             NT_ASSERT(orig_intact && "Torig_fail: orig is UNTOUCHED (still its ORIGINAL content) -- core atomicity end-to-end");
             NT_ASSERT(tp_scan_exists(j28f_src) && "Torig_fail: the journal is KEPT on the failed save (non-destructive)");
             if (f_orig) { tp_project_destroy(f_orig); }
-            (void)remove(j28f_tmppin); selftest_rmdir(j28f_tmp); (void)remove(j28f_tmp); (void)remove(j28f_orig);
+            (void)remove(j28f_orig);
             (void)remove(j28f_src); (void)remove(j28f_src_lk);
+        }
+
+        /* (J28c) Save-to-original is optimistic: if another editor rewrites the original after the
+         * crash journal captured its fingerprint, recovery must refuse the overwrite and keep both
+         * the externally changed file and the journal. */
+        {
+            char dir28c[900], orig28c[1000], src28c[1000], err28c[256] = {0};
+            (void)snprintf(dir28c, sizeof dir28c, "%s/selftest_r6a_j28c", s_exe_dir);
+            tp_mkdirs(dir28c);
+            (void)snprintf(orig28c, sizeof orig28c, "%s/original.ntpacker_project", dir28c);
+            (void)snprintf(src28c, sizeof src28c, "%s/orphan.ntpjournal", dir28c);
+            (void)remove(orig28c); (void)remove(src28c);
+
+            gui_project_enable_recovery(""); gui_project_shutdown(); gui_project_init();
+            (void)gui_project_set_atlas_name(0, "baseline28c");
+            NT_ASSERT(gui_project_save_as(orig28c, err28c, sizeof err28c) == TP_STATUS_OK && "J28c baseline saved");
+            gui_project_enable_recovery(""); gui_project_shutdown();
+            scan_make_saved_orphan(src28c, orig28c, "recovered28c", 5600);
+
+            gui_project_init();
+            (void)gui_project_set_atlas_name(0, "external28c");
+            NT_ASSERT(gui_project_save_as(orig28c, err28c, sizeof err28c) == TP_STATUS_OK && "J28c external rewrite saved");
+            gui_project_shutdown();
+
+            const tp_status rst28c = gui_recovery_resolve(src28c, orig28c, GUI_RECOVERY_SAVE_ORIGINAL, "",
+                                                          err28c, sizeof err28c);
+            tp_project *loaded = NULL;
+            tp_error load_err28c = {0};
+            const tp_status load_st28c = tp_project_load(orig28c, &loaded, &load_err28c);
+            const char *name28c = (load_st28c == TP_STATUS_OK && loaded) ? tp_project_get_atlas(loaded, 0)->name : "";
+            NT_ASSERT(rst28c == TP_STATUS_FILE_CHANGED_EXTERNALLY && tp_scan_exists(src28c) &&
+                      load_st28c == TP_STATUS_OK && strcmp(name28c, "external28c") == 0 &&
+                      "J28c external change refuses overwrite and keeps both copies");
+            if (loaded) { tp_project_destroy(loaded); }
+
+            /* Save As means a NEW identity.  Re-entering the recorded original (including a canonical
+             * alias) must not turn the safe Save-Original refusal above into an unguarded overwrite. */
+            char alias28c[1020], alias_err28c[256] = {0};
+            (void)snprintf(alias28c, sizeof alias28c, "%s/./original.ntpacker_project", dir28c);
+            const tp_status alias_st28c = gui_recovery_resolve(src28c, orig28c, GUI_RECOVERY_SAVE_AS,
+                                                               alias28c, alias_err28c, sizeof alias_err28c);
+            loaded = NULL;
+            memset(&load_err28c, 0, sizeof load_err28c);
+            const tp_status alias_load_st28c = tp_project_load(orig28c, &loaded, &load_err28c);
+            name28c = (alias_load_st28c == TP_STATUS_OK && loaded) ? tp_project_get_atlas(loaded, 0)->name : "";
+            NT_ASSERT(alias_st28c == TP_STATUS_FILE_CHANGED_EXTERNALLY && alias_err28c[0] &&
+                      tp_scan_exists(src28c) && alias_load_st28c == TP_STATUS_OK &&
+                      strcmp(name28c, "external28c") == 0 &&
+                      "J28c Save As cannot alias the original and bypass its fingerprint guard");
+            if (loaded) { tp_project_destroy(loaded); }
+            (void)remove(orig28c); (void)remove(src28c);
         }
 
         /* (J29) DISCARD: resolve DISCARD removes the journal + its .lock and touches nothing else (a sentinel
@@ -2592,8 +2258,7 @@ void run_selftest(void) {
             (void)snprintf(j29src_lk, sizeof j29src_lk, "%s.lock", j29src);
             (void)snprintf(j29keep, sizeof j29keep, "%s/keep_me.txt", scan29);
             (void)remove(j29src); (void)remove(j29src_lk); (void)remove(j29keep);
-            tp_id128 key29; memset(key29.bytes, 0x29, sizeof key29.bytes); /* Discard never peeks/recovers -> any key */
-            craft_meta_orphan(j29src, key29, 4200, "", ""); /* any recoverable-looking journal; Discard never recovers */
+            scan_make_orphan(j29src, "discard29", 4200); /* valid app-keyed recovery source */
             { FILE *lf = fopen(j29src_lk, "wb"); if (lf) { (void)fclose(lf); } } /* a companion .lock to reap */
             { FILE *kf = fopen(j29keep, "wb"); if (kf) { (void)fputs("keep", kf); (void)fclose(kf); } }
             NT_ASSERT(tp_scan_exists(j29src) && selftest_file_exists(j29src_lk) && "J29: orphan + .lock seeded");
@@ -2608,6 +2273,34 @@ void run_selftest(void) {
                       "J29: Discard deletes the journal + its .lock");
             NT_ASSERT(selftest_file_exists(j29keep) && "J29: Discard touches nothing else (sentinel survives)");
             (void)remove(j29keep);
+        }
+
+        /* (J29b) A resolver holds the orphan lock for the entire action. A concurrent claim gets a
+         * stable structured busy result and cannot discard the other process's journal. */
+        {
+            char dir29b[900], src29b[1000], err29b[256] = {0};
+            (void)snprintf(dir29b, sizeof dir29b, "%s/selftest_r6a_j29b", s_exe_dir);
+            tp_mkdirs(dir29b);
+            (void)snprintf(src29b, sizeof src29b, "%s/orphan.ntpjournal", dir29b);
+            (void)remove(src29b);
+            scan_make_orphan(src29b, "busy29b", 5700);
+            NT_ASSERT(gui_project__test_hold_foreign_lock(src29b) && "J29b foreign resolver claim held");
+            const tp_status busy29b = gui_recovery_resolve(src29b, "", GUI_RECOVERY_DISCARD, "", err29b, sizeof err29b);
+            NT_ASSERT(busy29b == TP_STATUS_RECOVERY_BUSY && tp_scan_exists(src29b) &&
+                      "J29b concurrent resolve is rejected without deleting the journal");
+            gui_project__test_release_foreign_lock();
+            NT_ASSERT(gui_recovery_resolve(src29b, "", GUI_RECOVERY_DISCARD, "", err29b, sizeof err29b) == TP_STATUS_OK &&
+                      !tp_scan_exists(src29b) && "J29b journal is retryable after the claim releases");
+
+            char blocker29c[1000], src29c[1030], err29c[256] = {0};
+            (void)snprintf(blocker29c, sizeof blocker29c, "%s/blocker", dir29b);
+            (void)snprintf(src29c, sizeof src29c, "%s/orphan.ntpjournal", blocker29c);
+            { FILE *bf = fopen(blocker29c, "wb"); if (bf) { (void)fputs("x", bf); (void)fclose(bf); } }
+            const tp_status invalid29c =
+                gui_recovery_resolve(src29c, "", GUI_RECOVERY_DISCARD, "", err29c, sizeof err29c);
+            NT_ASSERT(invalid29c != TP_STATUS_OK && invalid29c != TP_STATUS_RECOVERY_BUSY &&
+                      "J29c invalid storage/path is rejected before any resolver claim");
+            (void)remove(blocker29c);
         }
 
         /* (J30) NON-DESTRUCTIVE ON FAILURE: a Save As to an UNWRITABLE target (a regular file sits where the
@@ -2676,6 +2369,7 @@ void run_selftest(void) {
             nt_log_info("SELFTEST: J31 cap deterministic count=%d found_adoptable=%d (want %d,1)",
                         rl31.count, (int)found_adoptable31, GUI_RECOVERY_MAX_CANDIDATES);
             NT_ASSERT(rl31.count == GUI_RECOVERY_MAX_CANDIDATES && "J31: the list stays capped at GUI_RECOVERY_MAX_CANDIDATES");
+            NT_ASSERT(rl31.has_more && "J31: the capped list explicitly reports omitted recovery entries");
             NT_ASSERT(found_adoptable31 &&
                       "J31/[1]: the adoptable entry evicts a non-adoptable one and SURVIVES the full cap");
         }
@@ -2747,15 +2441,16 @@ void run_selftest(void) {
             (void)snprintf(scan32, sizeof scan32, "%s/selftest_r6a_j32", s_exe_dir);
             tp_mkdirs(scan32);
             /* (a) self-target: SAVE_AS + SAVE_ORIGINAL where the write target IS the journal -> refuse, keep. */
-            char j32src[1000], j32src_lk[1010];
+            char j32src[1000], j32src_alias[1000], j32src_lk[1010];
             (void)snprintf(j32src, sizeof j32src, "%s/orphan32.ntpjournal", scan32);
+            (void)snprintf(j32src_alias, sizeof j32src_alias, "%s/./orphan32.ntpjournal", scan32);
             (void)snprintf(j32src_lk, sizeof j32src_lk, "%s.lock", j32src);
             (void)remove(j32src); (void)remove(j32src_lk);
             scan_make_orphan(j32src, "recovered32", 3200);
             char e32a[256] = {0};
-            const tp_status r32a = gui_recovery_resolve(j32src, "", GUI_RECOVERY_SAVE_AS, j32src, e32a, sizeof e32a);
+            const tp_status r32a = gui_recovery_resolve(j32src, "", GUI_RECOVERY_SAVE_AS, j32src_alias, e32a, sizeof e32a);
             char e32a2[256] = {0};
-            const tp_status r32a2 = gui_recovery_resolve(j32src, j32src, GUI_RECOVERY_SAVE_ORIGINAL, "", e32a2, sizeof e32a2);
+            const tp_status r32a2 = gui_recovery_resolve(j32src, j32src_alias, GUI_RECOVERY_SAVE_ORIGINAL, "", e32a2, sizeof e32a2);
             nt_log_info("SELFTEST: J32a self-target save_as=%s save_orig=%s src_exists=%d (want invalid,invalid,1)",
                         tp_status_str(r32a), tp_status_str(r32a2), (int)tp_scan_exists(j32src));
             NT_ASSERT(r32a == TP_STATUS_INVALID_ARGUMENT && r32a2 == TP_STATUS_INVALID_ARGUMENT &&
@@ -2815,6 +2510,132 @@ void run_selftest(void) {
             NT_ASSERT(tp_scan_exists(j33target) &&
                       "J33/[3]: the target WAS written (the save succeeded before the simulated verify-fail)");
             (void)remove(j33src); (void)remove(j33src_lk); (void)remove(j33target);
+        }
+
+        /* (J34) R6 TRUNCATED committed-prefix recovery. A torn final transaction remains collectable when
+         * checkpoint + an earlier transaction are intact; SAVE_AS persists that prefix and reaps the orphan. */
+        {
+            char scan34[900], src34[1000], lock34[1010], target34[1000];
+            (void)snprintf(scan34, sizeof scan34, "%s/selftest_r6a_j34", s_exe_dir);
+            tp_mkdirs(scan34);
+            (void)snprintf(src34, sizeof src34, "%s/truncated34.ntpjournal", scan34);
+            (void)snprintf(lock34, sizeof lock34, "%s.lock", src34);
+            (void)snprintf(target34, sizeof target34, "%s/truncated34.ntpacker_project", scan34);
+            (void)remove(src34); (void)remove(lock34); (void)remove(target34);
+            scan_make_orphan_2edits(src34, "truncated34_good", "truncated34_torn", 7100);
+            NT_ASSERT(selftest_chop_file_tail(src34, 6) && "J34: tear the final transaction tail");
+
+            gui_recovery_list list34;
+            const int n34 = gui_recovery_collect(scan34, NULL, &list34);
+            bool offered34 = false;
+            for (int k = 0; k < list34.count; k++) {
+                if (strcmp(list34.items[k].journal_path, src34) == 0 && list34.items[k].adoptable &&
+                    list34.items[k].status == (int)TP_JOURNAL_RECOVERY_TRUNCATED) {
+                    offered34 = true;
+                }
+            }
+            NT_ASSERT(n34 > 0 && offered34 && "J34: R6 collect offers the truncated committed prefix");
+
+            char err34[256] = {0};
+            NT_ASSERT(gui_recovery_resolve(src34, "", GUI_RECOVERY_SAVE_AS, target34, err34, sizeof err34) ==
+                          TP_STATUS_OK &&
+                      "J34: R6 resolves a truncated committed prefix");
+            tp_project *loaded34 = NULL;
+            tp_error load_err34 = {0};
+            NT_ASSERT(tp_project_load(target34, &loaded34, &load_err34) == TP_STATUS_OK && loaded34 &&
+                      strcmp(tp_project_get_atlas(loaded34, 0)->name, "truncated34_good") == 0 &&
+                      "J34: SAVE_AS contains the last intact transaction");
+            NT_ASSERT(!tp_scan_exists(src34) && "J34: successful resolve reaps the orphan");
+            if (loaded34) { tp_project_destroy(loaded34); }
+            (void)remove(src34); (void)remove(lock34); (void)remove(target34);
+        }
+
+        /* (J35) R6 CORRUPT committed-prefix recovery. A mid-stream corrupt transaction with a later valid
+         * frame is classified CORRUPT; resolve clones the intact prefix instead of adopting the poisoned log. */
+        {
+            char scan35[900], src35[1000], lock35[1010], target35[1000];
+            (void)snprintf(scan35, sizeof scan35, "%s/selftest_r6a_j35", s_exe_dir);
+            tp_mkdirs(scan35);
+            (void)snprintf(src35, sizeof src35, "%s/corrupt35.ntpjournal", scan35);
+            (void)snprintf(lock35, sizeof lock35, "%s.lock", src35);
+            (void)snprintf(target35, sizeof target35, "%s/corrupt35.ntpacker_project", scan35);
+            (void)remove(src35); (void)remove(lock35); (void)remove(target35);
+            gui_project_enable_recovery(""); gui_project_shutdown();
+            gui_project__test_set_recovery_now(7200);
+            gui_project_enable_recovery(src35); gui_project_init();
+            NT_ASSERT(gui_project_set_atlas_name(0, "corrupt35_good") &&
+                      gui_project_set_atlas_name(0, "corrupt35_bad") &&
+                      gui_project_set_atlas_name(0, "corrupt35_later") &&
+                      "J35: seed three committed transactions");
+            gui_project_enable_recovery(""); gui_project_shutdown();
+            gui_project__test_set_recovery_now(-1);
+            NT_ASSERT(selftest_corrupt_journal_record(src35, 3) && "J35: corrupt the middle transaction");
+
+            gui_recovery_list list35;
+            const int n35 = gui_recovery_collect(scan35, NULL, &list35);
+            bool offered35 = false;
+            for (int k = 0; k < list35.count; k++) {
+                if (strcmp(list35.items[k].journal_path, src35) == 0 && list35.items[k].adoptable &&
+                    list35.items[k].status == (int)TP_JOURNAL_RECOVERY_CORRUPT) {
+                    offered35 = true;
+                }
+            }
+            NT_ASSERT(n35 > 0 && offered35 && "J35: R6 collect offers the corrupt committed prefix");
+
+            char err35[256] = {0};
+            NT_ASSERT(gui_recovery_resolve(src35, "", GUI_RECOVERY_SAVE_AS, target35, err35, sizeof err35) ==
+                          TP_STATUS_OK &&
+                      "J35: R6 resolves a corrupt committed prefix");
+            tp_project *loaded35 = NULL;
+            tp_error load_err35 = {0};
+            NT_ASSERT(tp_project_load(target35, &loaded35, &load_err35) == TP_STATUS_OK && loaded35 &&
+                      strcmp(tp_project_get_atlas(loaded35, 0)->name, "corrupt35_good") == 0 &&
+                      "J35: SAVE_AS contains the last intact transaction before corruption");
+            NT_ASSERT(!tp_scan_exists(src35) && "J35: successful resolve reaps the orphan");
+            if (loaded35) { tp_project_destroy(loaded35); }
+            (void)remove(src35); (void)remove(lock35); (void)remove(target35);
+        }
+
+        /* (J36) The raw selftest seam has no arbitrary-file delete authority. A matching suffix is not
+         * enough: magic + application key must validate before a claim lock or Discard can mutate it. */
+        {
+            char foreign36[1000];
+            (void)snprintf(foreign36, sizeof foreign36, "%s/foreign36.ntpjournal", s_exe_dir);
+            (void)remove(foreign36);
+            FILE *f36 = fopen(foreign36, "wb");
+            NT_ASSERT(f36);
+            (void)fputs("ordinary user file", f36);
+            (void)fclose(f36);
+            char err36[256] = {0};
+            NT_ASSERT(gui_recovery_resolve(foreign36, "", GUI_RECOVERY_DISCARD, "", err36,
+                                           sizeof err36) != TP_STATUS_OK &&
+                      tp_scan_exists(foreign36) &&
+                      "J36: raw resolver rejects and preserves an arbitrary .ntpjournal-named file");
+            (void)remove(foreign36);
+        }
+
+        /* (J37) A raw window-close reaches the same shutdown path without explicit Exit->Discard.
+         * Dirty work must leave its slot for next-launch recovery; a clean model still reaps its slot. */
+        {
+            char dirty37[1000], clean37[1000], dirty37lock[1010], clean37lock[1010];
+            (void)snprintf(dirty37, sizeof dirty37, "%s/dirty-close37.ntpjournal", s_exe_dir);
+            (void)snprintf(clean37, sizeof clean37, "%s/clean-close37.ntpjournal", s_exe_dir);
+            (void)snprintf(dirty37lock, sizeof dirty37lock, "%s.lock", dirty37);
+            (void)snprintf(clean37lock, sizeof clean37lock, "%s.lock", clean37);
+            (void)remove(dirty37); (void)remove(clean37);
+            (void)remove(dirty37lock); (void)remove(clean37lock);
+
+            gui_project_enable_recovery(""); gui_project_shutdown();
+            gui_project_enable_recovery(dirty37); gui_project_init();
+            NT_ASSERT(gui_project_set_atlas_name(0, "dirty-close-survives"));
+            gui_project_shutdown();
+            NT_ASSERT(tp_scan_exists(dirty37) && "J37: dirty shutdown preserves recovery journal");
+
+            gui_project_enable_recovery(clean37); gui_project_init();
+            gui_project_shutdown();
+            NT_ASSERT(!tp_scan_exists(clean37) && "J37: clean shutdown removes recovery journal");
+            (void)remove(dirty37); (void)remove(dirty37lock);
+            (void)remove(clean37); (void)remove(clean37lock);
         }
 
         /* Done: disable recovery + release any lock + restore a journal-LESS packable project for the

@@ -1,8 +1,8 @@
 #ifndef NTPACKER_GUI_PROJECT_H
 #define NTPACKER_GUI_PROJECT_H
 
-/* GUI-owned project state (ux.md §3.3b/§3.3c): exactly ONE tp_project OWNED by a journal-less
- * tp_model (F2-05b-i) with the F2-03 diff history enabled (F2-05b-ii-A) + its absolute file path
+/* GUI-owned project state (ux.md §3.3b/§3.3c): exactly ONE tp_project OWNED by a tp_model
+ * (journal-backed when crash recovery is active) with F2-03 diff history enabled + its canonical path
  * (empty while unsaved) + two independent dirty bits:
  *   - dirty        : unsaved changes on disk. IDENTITY-derived (tp_model_dirty): the semantic
  *                    identity vs the last-SAVED baseline (tp_model_mark_saved), so undoing back
@@ -66,27 +66,26 @@ typedef enum {
     GUI_SPRITE_OV_EXTRUDE
 } gui_sprite_ov;
 
-/* Creates the initial in-memory project (one default atlas, no path, clean) -- OR, when crash
- * recovery is enabled and a usable journal from a crashed prior session exists at the slot, adopts
- * that recovered (DIRTY) state instead (F2-05b-ii-B). */
+/* Creates the initial fresh in-memory project (one default atlas, no path, clean). Crash recovery is
+ * collected and resolved separately through the R6 APIs below; startup never adopts an orphan live. */
 void gui_project_init(void);
-/* R5b-2: init, optionally ADOPTING a crash-recovery orphan from `source_journal` (a path chosen by the
- * startup scan, gui_project_scan_pick). NULL/"" means "adopt from the live slot if it holds a journal,
- * else fresh" (the legacy in-place path; gui_project_init() is exactly this form). On a SUCCESSFUL adopt
- * of a source OTHER than the live slot the source journal + its `.lock` are deleted (its work is now in
- * the fresh live journal). */
-void gui_project_init_adopt(const char *source_journal);
 /* Tears the model down and, when recovery is enabled, deletes the recovery slot (clean-exit reset:
  * a cleanly-exited session leaves NO journal to recover). */
 void gui_project_shutdown(void);
+/* Called only after the user explicitly confirms Exit -> Discard. Without it, shutdown preserves a
+ * dirty recovery journal so a raw window close remains recoverable. */
+void gui_project_discard_recovery_on_shutdown(void);
 
-/* F2-05b-ii-B crash recovery. `slot_path` is a DETERMINISTIC sidecar journal path (a stable temp/
- * app-data location the next launch reconstructs without a random session id); NULL/"" DISABLES
+/* F2-05b-ii-B crash recovery. `slot_path` is this launch's random sidecar journal path under the
+ * app-data recovery directory; NULL/"" DISABLES
  * recovery (journal-less -- the default, and the headless selftest path). Call ONCE before the first
  * gui_project_init in the interactive app. When enabled, every installed model records a full-snapshot
- * recovery journal (a SIDECAR: it never changes saved .ntpacker_project bytes) and a clean shutdown
- * deletes the slot. */
+ * recovery journal (a SIDECAR: it never changes saved .ntpacker_project bytes). A clean or explicitly
+ * discarded shutdown deletes the slot; an unconfirmed dirty window close preserves it for R6. */
 void gui_project_enable_recovery(const char *slot_path);
+/* Record a non-fatal startup/setup failure that disables crash recovery. The UI drains the resulting
+ * one-shot warning through gui_project_take_recovery_setup_notice(). */
+void gui_project_note_recovery_setup_failure(const char *reason);
 
 /* R5b-2: form this launch's LIVE recovery-journal path <folder>/<session-id-hex>.ntpjournal into out[cap]
  * -- a PER-SESSION RANDOM id (tp_id128_generate, 32 lowercase hex), deliberately NOT a hash of the
@@ -95,44 +94,12 @@ void gui_project_enable_recovery(const char *slot_path);
  * can disable recovery for this launch without crashing. main.c passes the result to enable_recovery. */
 bool gui_project_make_session_slot(const char *folder, char *out, size_t cap);
 
-/* R5b-2: scan the recovery `folder` for journals orphaned by crashed sessions and pick the NEWEST one
- * holding UNSAVED WORK to adopt; writes its full path into out[cap] and returns true, else false (out "").
- * Excludes the live slot (by basename); per candidate it liveness-probes `<name>.lock` (a held lock =>
- * another live instance => skip), then peeks + classifies -- only a fully-decoded (status OK) journal with
- * a checkpoint and post-checkpoint edits is adoptable. DELETES NOTHING (the adopt-time delete of the
- * picked file lives in the adopt path); every non-picked orphan (no-work / corrupt / foreign /
- * version-mismatch / additional unsaved-work) is LEFT on disk for R6. Fail-closed + non-fatal: any error
- * yields false (fresh init), never a crash/hang. Pass the pick to gui_project_init_adopt. */
-bool gui_project_scan_pick(const char *folder, const char *live_slot, char *out, size_t cap);
-
-/* R5b-2 fix [2]/[6]: adoptable recovery-orphan candidates from ONE folder scan, sorted NEWEST-FIRST by
- * metadata timestamp. CAPPED at GUI_RECOVERY_MAX_CANDIDATES (fix [6]) -- only the newest N are kept, so a
- * pathological recovery folder can never blow startup. The caller adopts them in order until one recovers
- * (gui_project_init_adopt_candidates), so if the newest peeks adoptable but FAILS the real recover an older
- * genuinely-recoverable orphan is still adopted (peek only validates framing, not that recover succeeds). */
+/* R6 recovery lists are bounded so a pathological folder cannot grow startup memory without limit. */
 #define GUI_RECOVERY_MAX_CANDIDATES 16
 #define GUI_RECOVERY_PATH_CAP 1200
-typedef struct gui_recovery_candidates {
-    char paths[GUI_RECOVERY_MAX_CANDIDATES][GUI_RECOVERY_PATH_CAP]; /* full journal paths, newest-first */
-    int count;
-} gui_recovery_candidates;
-
-/* R5b-2 fix [2]: scan the recovery `folder` for adoptable crash-orphans and fill `out` newest-first (same
- * per-candidate rules as gui_project_scan_pick: liveness-probe the `.lock`, then peek -- has_checkpoint &&
- * record_count > 1 && status in {OK, TRUNCATED, CORRUPT}). Excludes the live slot (by basename). Returns
- * the candidate count (0..GUI_RECOVERY_MAX_CANDIDATES). DELETES NOTHING. `out` is always zeroed first. */
-int gui_project_scan_pick_candidates(const char *folder, const char *live_slot, gui_recovery_candidates *out);
-
-/* R5b-2 fix [2]: init, trying each candidate NEWEST-FIRST until one successfully adopts a crash-recovered
- * (DIRTY) model; else a fresh init. A candidate that fails to recover is LEFT on disk (no delete on
- * failure); only the successfully-adopted source is deleted (in the adopt path). NULL/empty -> fresh init. */
-void gui_project_init_adopt_candidates(const gui_recovery_candidates *cands);
-/* Drains the one-shot "recovered unsaved changes from a previous session" notice (true once after a
- * crash-recovery adopt at init). The UI polls this to surface the recovery to the user. */
-bool gui_project_take_recovery_notice(char *out, size_t cap);
-/* Drains the one-shot "another instance is running -> crash recovery is off for this window" notice
- * (true once when a 2nd concurrent instance could not acquire the recovery slot lock). */
-bool gui_project_take_recovery_busy_notice(char *out, size_t cap);
+/* Drains the one-shot "crash recovery is unavailable" notice. The text distinguishes another live
+ * owner from path/directory/lock setup failures. */
+bool gui_project_take_recovery_setup_notice(char *out, size_t cap);
 
 /* ============================ R6a: recovery-resolution decision/action layer ============================
  * The headless-testable layer the R6b startup modal drives: collect recovered-journal entries WITH metadata
@@ -140,9 +107,9 @@ bool gui_project_take_recovery_busy_notice(char *out, size_t cap);
  * user's choice (Discard / Save to original / Save As). NON-DESTRUCTIVE ON FAILURE: a recovered journal
  * is deleted ONLY after a SUCCESSFUL save (or an explicit Discard) -- a failed save leaves the journal for a
  * retry and never clobbers the user's original file: a failed save leaves the original untouched (the atomic
- * core save writes a temp then renames). Unlike the R5b-2
- * auto-adopt, this NEVER adopts the recovered work into the live editor model. NO nt_ui / main.c wiring /
- * startup behavior change here (that is R6b); exercised HEADLESSLY by selftest J26-J30. */
+ * core save writes a temp then renames). Unlike the retired R5b-2 auto-adopt, this NEVER adopts the
+ * recovered work into the live editor model. R6b drives it from the startup modal; the protocol is
+ * exercised headlessly by selftests J26-J37. */
 typedef enum {
     GUI_RECOVERY_DISCARD = 0,   /* delete the journal (+ its .lock); resolve nothing else */
     GUI_RECOVERY_SAVE_ORIGINAL, /* atomically save the recovered state over its ORIGINAL file (no backup; atomic replace) */
@@ -160,10 +127,13 @@ typedef struct {
     int64_t timestamp;                        /* unix-seconds (meta.timestamp; 0 if none) */
     int status;                               /* tp_journal_recovery_status */
     bool adoptable;                           /* true = recoverable; false = old-format, Discard-only */
+    tp_id128 file_fingerprint;                 /* saved original baseline, when present */
+    bool has_file_fingerprint;
 } gui_recovery_entry;
 typedef struct {
     gui_recovery_entry items[GUI_RECOVERY_MAX_CANDIDATES];
     int count;
+    bool has_more; /* actionable entries were omitted by the bounded UI list cap */
 } gui_recovery_list;
 
 /* Collect recovered-journal entries in `folder`, EXCLUDING the live slot (by basename) + any live-locked
@@ -186,8 +156,17 @@ int gui_recovery_collect(const char *folder, const char *live_slot, gui_recovery
  *  - GUI_RECOVERY_SAVE_AS       : save the recovered state to `target_path`.
  * Returns TP_STATUS_OK on success; on a fault fills err_out (NUL-terminated within err_cap) and the journal
  * is left intact on disk. */
+#ifdef NTPACKER_GUI_SELFTEST
+/* Raw-path seam for protocol fault tests. Production exposes only the typed entry API below. */
 tp_status gui_recovery_resolve(const char *journal_path, const char *orig_path, gui_recovery_action action,
                                const char *target_path, char *err_out, size_t err_cap);
+#endif
+
+/* Production/modal entry point: keeps the decision tied to the exact typed row collected from disk.
+ * The resolver re-reads metadata under an exclusive claim before mutating anything; the entry is the
+ * stable user-visible identity, not an authority that can bypass the persisted fingerprint. */
+tp_status gui_recovery_resolve_entry(const gui_recovery_entry *entry, gui_recovery_action action,
+                                     const char *target_path, char *err_out, size_t err_cap);
 
 /* --- accessors --- */
 tp_project *gui_project_get(void);
@@ -196,10 +175,6 @@ const char *gui_project_display_name(void); /* file basename, or "untitled" */
 bool gui_project_has_path(void);
 bool gui_project_is_dirty(void);
 bool gui_project_is_stale(void);
-/* H/P1-8: true while the live model is crash-recovered unsaved work (adopted at init, not yet Saved);
- * a Save clears it. The queryable form of the startup arg-open guard's "recovered unsaved work" condition
- * (main() itself isn't headless-callable); exercised by the J13 selftest. */
-bool gui_project_has_recovered_unsaved(void);
 
 /* --- dirty/stale choke point --- */
 /* Serializes + snapshots the model, pushes the pre-mutation snapshot to undo history
@@ -395,7 +370,7 @@ bool gui_project__test_recovery_active(void);
  * attach -- lets the selftest prove attach_recovery_journal fails CLOSED (journal-less + degraded
  * notice) rather than building a journal on foreign bytes. */
 void gui_project__test_skip_next_recovery_reset(void);
-/* Pin the recovery-metadata clock to `t` (>= 0) so the J18 newest-orphan scan is deterministic despite
+/* Pin the recovery-metadata clock to `t` (>= 0) so ordering/classification tests are deterministic despite
  * time()'s 1-second resolution; pass < 0 to restore the real clock. */
 void gui_project__test_set_recovery_now(int64_t t);
 /* Dev seam (selftest only, R6a fix [2]): the REAL recovery-journal key, so a test can craft an orphan that

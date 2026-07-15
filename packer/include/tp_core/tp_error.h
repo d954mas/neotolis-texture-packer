@@ -98,7 +98,11 @@ typedef enum tp_status {
      * event) and this distinct status tells the caller to retry the SAME transaction
      * id -- it is a durability failure, not OOM and not a validation reject. An
      * OOM-class journal fault (index/buffer allocation) still reuses OOM. */
-    TP_STATUS_JOURNAL_FAILED       /* recovery-journal durable append failed (tp_journal) */
+    TP_STATUS_JOURNAL_FAILED,      /* recovery-journal durable append failed (tp_journal) */
+    TP_STATUS_FILE_CHANGED_EXTERNALLY, /* saved project bytes differ from the persisted session fingerprint */
+    TP_STATUS_RECOVERY_CLEANUP_FAILED, /* recovered output is safe, but its orphan journal could not be removed */
+    TP_STATUS_RECOVERY_BUSY,           /* another process claimed this recovery journal */
+    TP_STATUS_RECOVERY_CLAIM_FAILED    /* recovery journal lock could not be created/acquired for a storage reason */
 } tp_status;
 
 /* Fixed-size message buffer -- no heap, safe to embed by value on the stack. */
@@ -165,6 +169,10 @@ static inline const char *tp_status_str(tp_status status) {
         case TP_STATUS_REVISION_CONFLICT: return "revision conflict";
         case TP_STATUS_INVALID_REVISION: return "invalid revision";
         case TP_STATUS_JOURNAL_FAILED: return "recovery journal append failed";
+        case TP_STATUS_FILE_CHANGED_EXTERNALLY: return "project file changed externally";
+        case TP_STATUS_RECOVERY_CLEANUP_FAILED: return "recovery cleanup failed";
+        case TP_STATUS_RECOVERY_BUSY: return "recovery journal is busy";
+        case TP_STATUS_RECOVERY_CLAIM_FAILED: return "recovery journal claim failed";
     }
     return "unknown status";
 }
@@ -209,6 +217,10 @@ static inline const char *tp_status_id(tp_status status) {
         case TP_STATUS_REVISION_CONFLICT: return "revision_conflict";
         case TP_STATUS_INVALID_REVISION: return "invalid_revision";
         case TP_STATUS_JOURNAL_FAILED: return "journal_failed";
+        case TP_STATUS_FILE_CHANGED_EXTERNALLY: return "file_changed_externally";
+        case TP_STATUS_RECOVERY_CLEANUP_FAILED: return "recovery_cleanup_failed";
+        case TP_STATUS_RECOVERY_BUSY: return "recovery_busy";
+        case TP_STATUS_RECOVERY_CLAIM_FAILED: return "recovery_claim_failed";
     }
     return "unknown_status";
 }

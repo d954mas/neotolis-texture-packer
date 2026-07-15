@@ -30,7 +30,8 @@
  * buffers: the handler must not format paths (snprintf/strftime are not async-signal-safe). Empty
  * strings mean "could not resolve" -> the handler degrades to writing nothing. */
 static bool s_installed;
-static char s_crash_dir[GUI_PATHS_MAX];     /* <app-data>/crash (D3 opens this folder in the OS explorer) */
+static char s_report_root[GUI_PATHS_MAX];   /* <app-data> (D3 opens it: contains both crash/ and logs/) */
+static char s_crash_dir[GUI_PATHS_MAX];     /* <app-data>/crash (handler output lives here) */
 static char s_marker_path[GUI_PATHS_MAX];   /* <app-data>/crash/last-run.crashed (fixed name; D3 reads it) */
 static char s_marker_prefix[128];           /* pre-rendered marker text (session-start timestamp) */
 static size_t s_marker_prefix_len;
@@ -197,8 +198,9 @@ void gui_crash_install(void) {
                  ? snprintf(crash_dir, sizeof crash_dir, "%s/crash", root)
                  : -1;
     if (nd > 0 && (size_t)nd < sizeof crash_dir && gui_paths_ensure_dir(crash_dir)) {
-        /* Retain the resolved crash dir for D3's "open the crash folder" action (this is the only
-         * place the dir is known; the handler works off the per-file paths built below). */
+        /* Retain both the report root for D3 and the crash dir for handler-owned paths. Opening the
+         * root is intentional: logs/ is a sibling of crash/, not inside it. */
+        (void)snprintf(s_report_root, sizeof s_report_root, "%s", root);
         memcpy(s_crash_dir, crash_dir, (size_t)nd + 1);
         int nm = snprintf(s_marker_path, sizeof s_marker_path, "%s/last-run.crashed", crash_dir);
         if (nm <= 0 || (size_t)nm >= sizeof s_marker_path) {
@@ -344,22 +346,22 @@ void gui_crash_report_prompt(void) {
     if (!crash_marker_exists()) {
         return;
     }
-    /* Include the folder path in the message so a failed open still tells the user where to look. */
-    char msg[GUI_PATHS_MAX + 256];
+    /* Include every relevant path in the message so a failed open still tells the user where to look. */
+    char msg[GUI_PATHS_MAX * 3 + 320];
     (void)snprintf(msg, sizeof msg,
                    "ntpacker closed unexpectedly last time.\n\n"
-                   "Open the crash-report folder (logs + crash dump) so you can send it to the "
-                   "developer?\n\n%s",
-                   s_crash_dir);
+                   "Open the application-data folder so you can send the diagnostics to the developer?\n\n"
+                   "Crash dump: %s\nLogs: %s/logs",
+                   s_crash_dir, s_report_root);
     /* yesno / question, default YES. tinyfd returns 1 for yes, 0 for no. NOTE: with NO graphical dialog
      * backend (e.g. Linux without zenity/kdialog) tinyfd falls back to a BLOCKING stdin console prompt.
      * Accepted as a rare edge for a GL desktop app (which normally has a dialog backend); it never bites
      * CI, which is headless (guarded out above) or the selftest build (guarded out at the call site). */
     if (tinyfd_messageBox("ntpacker -- crash report", msg, "yesno", "question", 1) == 1) {
-        if (!crash_open_folder(s_crash_dir)) {
+        if (!crash_open_folder(s_report_root)) {
             /* The prompt already showed the path, so this is non-fatal -- just record the miss. Safe to
              * log here: the report prompt runs on the main thread after the log is up (unlike the handler). */
-            nt_log_error("ntpacker-gui: could not open the crash-report folder '%s'", s_crash_dir);
+            nt_log_error("ntpacker-gui: could not open the diagnostics folder '%s'", s_report_root);
         }
     }
     /* Clear on EITHER choice: the report offer is a one-shot, not a recurring nag. */

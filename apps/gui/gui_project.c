@@ -19,7 +19,7 @@
 
 #include "gui_scan.h"
 
-#include "tp_core/tp_scan.h" /* R5b-2: tp_scan_list_dir + tp_str_list for the recovery-folder startup scan */
+#include "tp_core/tp_scan.h" /* bounded streaming recovery-folder scan */
 
 #include "tp_core/tp_export.h"         /* TP_EXPORTER_ID_JSON_NEOTOLIS (default target exporter id) */
 #include "tp_core/tp_id.h"             /* tp_rng_os + id128 generate/nil for op ids */
@@ -28,16 +28,17 @@
 #include "tp_core/tp_transaction.h"    /* tp_model + tp_model_apply + tp_model_dirty/mark_saved + attach/recover */
 #include "tp_core/tp_diff.h"           /* F2-03 undo/redo history (tp_model_enable_history/undo/redo) */
 #include "tp_core/tp_journal.h"        /* F2-05b-ii-B recovery journal (io/create/recover sidecar) */
+#include "tp_core/tp_identity.h"       /* canonical paths + exact saved-file fingerprints */
 
 /* F2-05b-ii-A (docs/decisions/0015): GUI Undo/Redo now runs through the F2-03 diff history
  * (tp_model_enable_history + tp_model_undo/redo), NOT the retired 32 MB snapshot stack. Every
- * mutator BUILDS typed tp_operation(s) and commits them through a journal-LESS tp_model
+ * mutator BUILDS typed tp_operation(s) and commits them through a tp_model
  * (tp_model_wrap -> tp_model_apply, the F2-01/F2-02 clone-swap engine); the model OWNS the
  * project and captures one semantic diff per committed transaction (history is enabled at wrap).
  * s_proj is a read view of tp_model_project(s_model), refreshed after every committed
  * transaction and after every undo/redo (both clone-swap m->project). Dirty is IDENTITY-derived
- * (tp_model_dirty); a Save re-baselines via tp_model_mark_saved. The journal stays NULL (b-ii-B
- * owns the live journal + append-fail + recovery + D2).
+ * (tp_model_dirty); a Save re-baselines via tp_model_mark_saved. Crash recovery optionally attaches
+ * the live journal after wrap, making the same model the acknowledgement gate for edits and history.
  *
  * TRANSACTION-LEVEL COALESCING (b-ii-A crux): the F2-03 history has no built-in coalescing (one
  * commit = one undo step), so a raw slider drag would revert one tick at a time. A field-precise
@@ -52,7 +53,9 @@
 static tp_model *s_model;  /* owns s_proj; NULL until gui_project_init */
 static tp_project *s_proj; /* == tp_model_project(s_model); refreshed after every commit/undo/redo */
 static uint64_t s_txn_seq; /* monotonic transaction-id source (unique per commit) */
-static char s_path[1024]; /* absolute file path; "" while unsaved */
+static char s_path[TP_IDENTITY_PATH_MAX]; /* absolute file path; "" while unsaved */
+static tp_id128 s_path_fingerprint; /* exact bytes loaded or last saved at s_path */
+static bool s_has_path_fingerprint;
 static bool s_preview_stale;
 static unsigned s_model_ver; /* bumped per real committed mutation (gui_project_model_version) */
 static char s_name[256]; /* cached basename for the menu bar */
@@ -65,6 +68,9 @@ static double s_now;     /* coalescing clock (seconds), fed each frame by gui_pr
  * (promote_and_baseline / save) -- so cache it there and return the bool in the hot path. A buffered
  * (uncommitted) gesture is NOT yet in the identity, so buffering never needs to touch the cache. */
 static bool s_dirty_cache;
+/* Set only by the explicit Exit -> Discard confirmation. A raw OS close never sets it, so shutdown
+ * preserves a dirty journal instead of silently treating X/Alt+F4 as confirmed data loss. */
+static bool s_discard_recovery_on_shutdown;
 
 /* Pending id-promotion failure from a void-context ensure_ids() (init/new/open). OS-RNG failure
  * would leave nil structural ids, which must never be silently swallowed. Drained + surfaced
@@ -78,7 +84,7 @@ static bool s_op_error;
 static char s_op_error_msg[256];
 
 /* F2-05b-ii-B crash-recovery slot (F2-04 §7.1). When set (gui_project_enable_recovery), EACH
- * installed model records a full-snapshot recovery journal at this DETERMINISTIC sidecar path: a
+ * installed model records a recovery journal at this per-session random sidecar path: a
  * fresh checkpoint is written per New/Open (the slot always reflects the currently-open project) and
  * the slot is deleted on a CLEAN shutdown (only a crash -- shutdown never reached -- leaves it to
  * recover). Empty == journal DISABLED (the default; the headless selftest keeps it empty so it stays
@@ -87,8 +93,7 @@ static char s_op_error_msg[256];
  * fix [5]: sized >= every caller buffer (main.c 1152, selftest 1200) so a long exe path never
  * silently truncates the slot location. */
 #define GUI_RECOVERY_PATH_MAX 1200
-/* fix [2]: the per-launch candidate array (gui_recovery_candidates) stores paths GUI_RECOVERY_PATH_CAP
- * wide; keep the two path bounds in lock-step so a candidate path can never overflow the scan buffer. */
+/* Recovery entries store GUI_RECOVERY_PATH_CAP-wide paths; keep the live and collected bounds aligned. */
 _Static_assert(GUI_RECOVERY_PATH_MAX == GUI_RECOVERY_PATH_CAP, "recovery path bounds must agree");
 static char s_recovery_path[GUI_RECOVERY_PATH_MAX];
 /* fix [1]: the single-instance lock handle + "do we OWN the slot" state. Recovery is ACTIVE for this
@@ -105,10 +110,11 @@ static int s_recovery_lock = -1; /* fd; -1 == not held */
 static char s_recovery_lock_path[GUI_RECOVERY_PATH_MAX + 8];
 #endif
 static bool s_recovery_locked;     /* true == this instance holds the slot lock (owns recovery) */
-/* A one-shot notice that a crashed prior session's work was recovered at init (drained by the UI). */
-static bool s_recovery_notice;
-/* A one-shot notice that recovery is OFF because another instance holds the slot (drained by the UI). */
-static bool s_recovery_busy_notice;
+/* A one-shot startup notice explaining why recovery is unavailable. This deliberately covers both
+ * contention and setup/storage failures: the editor remains usable, but silently losing crash
+ * durability would be a data-safety bug. */
+static bool s_recovery_setup_notice_pending;
+static char s_recovery_setup_notice[256];
 // #endregion
 
 // #region transaction-level coalescing buffer (b-ii-A crux, decision 0015)
@@ -179,11 +185,19 @@ static void recompute_name(void) {
 static bool recovery_active(void);
 static void note_recovery_degraded(const char *msg);
 
-/* R5b-2: unix-seconds clock for the recovery-journal metadata. Production uses time(NULL). The selftest
- * overrides it (gui_project__test_set_recovery_now) so the J18 newest-orphan scan is DETERMINISTIC:
- * time()'s 1-second resolution would otherwise tie two sessions created in the same second, and the scan
- * picks the newest by metadata timestamp. The override lives ONLY in the selftest build (production
- * always reads the real clock). */
+/* Metadata is recovery authority, not decoration: retaining an attached journal with an old
+ * path/fingerprint after an update failure could later restore B while claiming it belongs to A.
+ * Detach immediately and remove the owned live slot best-effort. Keep the companion lock held until
+ * normal shutdown so a removal failure cannot expose the stale journal to another live instance. */
+static void abandon_stale_recovery_authority(void) {
+    tp_model_detach_journal(s_model);
+    if (recovery_active()) {
+        (void)remove(s_recovery_path);
+    }
+}
+
+/* Unix-seconds clock for recovery metadata. The selftest override makes list ordering and recovery
+ * classification deterministic despite time()'s one-second resolution; production always uses time(). */
 #ifdef NTPACKER_GUI_SELFTEST
 static int64_t s_test_recovery_now = -1; /* >= 0 overrides time(NULL) */
 #endif
@@ -196,28 +210,74 @@ static int64_t recovery_now(void) {
     return (int64_t)time(NULL);
 }
 
-static void set_path(const char *path) {
-    (void)snprintf(s_path, sizeof s_path, "%s", path ? path : "");
+static tp_status project_path_canonical(const char *path, char *out, size_t cap, tp_error *err) {
+    tp_status st = tp_identity_path_canonical(path, out, cap, err);
+    if (st != TP_STATUS_PATH_NOT_ABSOLUTE) {
+        return st;
+    }
+    char absolute[TP_IDENTITY_PATH_MAX];
+#ifdef _WIN32
+    DWORD n = GetFullPathNameA(path, (DWORD)sizeof absolute, absolute, NULL);
+    if (n == 0U || n >= (DWORD)sizeof absolute) {
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "project path cannot be made absolute");
+    }
+#else
+    char cwd[TP_IDENTITY_PATH_MAX];
+    if (!getcwd(cwd, sizeof cwd)) {
+        return tp_error_set(err, TP_STATUS_PATH_RESOLVE_FAILED, "current directory cannot be resolved");
+    }
+    int n = snprintf(absolute, sizeof absolute, "%s/%s", cwd, path);
+    if (n < 0 || (size_t)n >= sizeof absolute) {
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "project path cannot be made absolute");
+    }
+#endif
+    return tp_identity_path_canonical(absolute, out, cap, err);
+}
+
+static tp_status set_path(const char *path, const tp_id128 *file_fingerprint) {
+    char canonical[TP_IDENTITY_PATH_MAX];
+    const char *stored = "";
+    if (path && path[0] != '\0') {
+        tp_error err = {0};
+        tp_status canonical_status = project_path_canonical(path, canonical, sizeof canonical, &err);
+        if (canonical_status != TP_STATUS_OK) {
+            return canonical_status;
+        }
+        stored = canonical;
+    }
+    const int written = snprintf(s_path, sizeof s_path, "%s", stored);
+    if (written < 0 || (size_t)written >= sizeof s_path) {
+        return TP_STATUS_OUT_OF_BOUNDS;
+    }
     recompute_name();
+    s_has_path_fingerprint = s_path[0] != '\0' && file_fingerprint != NULL;
+    memset(&s_path_fingerprint, 0, sizeof s_path_fingerprint);
+    if (s_has_path_fingerprint) {
+        s_path_fingerprint = *file_fingerprint;
+    }
     /* R5b-1: keep the recovery journal's metadata in step with the project identity. set_path is the single
-     * identity chokepoint (New/Open/Save-As/adopt), and the journal is already attached by the time it runs
+     * identity chokepoint (New/Open/Save-As), and the journal is already attached by the time it runs
      * (wrap_model attaches it BEFORE its callers call set_path), so one call here covers every path change --
      * incl. Save-As (finding: the journal's cached path would otherwise stay stale and compaction would
-     * re-emit the OLD path) and the adopted-recovered fresh journal (R5a finding [1]). Non-fatal: metadata is
-     * informational, so a write failure routes through the soft channel and never fails an edit or Save. The
+     * re-emit the OLD path). A write failure routes through the soft channel, detaches the journal, and removes
+     * its stale authority; it never fails an already-completed edit or Save. The
      * guard + the no-op-on-no-journal glue keep a stray call (recovery off / journal-less) safe. */
     if (s_model && recovery_active()) {
         tp_error mde = {0};
+        const tp_id128 *fingerprint_ptr = s_has_path_fingerprint ? &s_path_fingerprint : NULL;
         /* R5b-1 finding [5] (ACCEPTED): on Save-As this durable META append is immediately followed by
          * tp_model_compact_journal, which truncates + re-emits it -- one redundant small write+fsync per
          * Save. DELIBERATE: writing durable metadata at every identity change means unsaved work that
          * crashes BEFORE the Save still carries a scan label; the compaction re-emit is unavoidable
          * without a cache-only entry point that would complicate the single set_path chokepoint. Save is
          * user-initiated (not hot) -> the extra fsync is negligible. */
-        if (tp_model_set_recovery_metadata(s_model, recovery_now(), s_path, s_name, &mde) != TP_STATUS_OK) {
+        if (tp_model_set_recovery_metadata_ex(s_model, recovery_now(), s_path, s_name, fingerprint_ptr, &mde) !=
+            TP_STATUS_OK) {
+            abandon_stale_recovery_authority();
             note_recovery_degraded(mde.msg[0] ? mde.msg : "could not record recovery metadata");
         }
     }
+    return TP_STATUS_OK;
 }
 
 /* Assign a random persistent ID to any structural entity that lacks one -- nil (a freshly
@@ -322,8 +382,8 @@ static void note_recovery_degraded(const char *msg) {
                    msg ? msg : "unknown");
 }
 
-/* fix [1]: single-instance advisory lock on `<slot>.lock`. acquire returns true iff THIS process now
- * holds it (no other live instance does); it auto-releases on process death (crash-safe: a dead
+/* fix [1]: single-instance advisory lock on `<slot>.lock`. acquire distinguishes ownership,
+ * contention, and storage/path failure; an owned lock auto-releases on process death (crash-safe: a dead
  * instance never keeps the slot locked). release is idempotent. The lock file is a companion to the
  * journal slot -- never the journal file itself -- so it never interferes with journal I/O. */
 /* fix [7]: the ONE construction of a slot's companion `<slot>.lock` path. BOTH the held-lock acquire
@@ -334,32 +394,42 @@ static bool recovery_lock_path(const char *slot, char *out, size_t cap) {
     int n = snprintf(out, cap, "%s.lock", slot ? slot : "");
     return n > 0 && (size_t)n < cap;
 }
-static bool recovery_lock_acquire(const char *slot) {
+typedef enum {
+    RECOVERY_LOCK_OK = 0,
+    RECOVERY_LOCK_BUSY,
+    RECOVERY_LOCK_FAILED
+} recovery_lock_result;
+
+static recovery_lock_result recovery_lock_acquire(const char *slot) {
     char lockpath[GUI_RECOVERY_PATH_MAX + 8];
     if (!recovery_lock_path(slot, lockpath, sizeof lockpath)) {
-        return false; /* truncation -> fail-closed (no lock -> journal-less this launch) */
+        return RECOVERY_LOCK_FAILED; /* truncation -> fail-closed (no lock -> journal-less this launch) */
     }
 #ifdef _WIN32
     HANDLE h = CreateFileA(lockpath, GENERIC_READ | GENERIC_WRITE, 0 /* exclusive: no sharing */, NULL, OPEN_ALWAYS,
                            FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, NULL);
     if (h == INVALID_HANDLE_VALUE) {
-        return false; /* another live instance holds it (ERROR_SHARING_VIOLATION) or the path is unwritable */
+        DWORD e = GetLastError();
+        return (e == ERROR_SHARING_VIOLATION || e == ERROR_LOCK_VIOLATION) ? RECOVERY_LOCK_BUSY
+                                                                           : RECOVERY_LOCK_FAILED;
     }
     s_recovery_lock = (void *)h;
-    return true;
+    return RECOVERY_LOCK_OK;
 #else
     int fd = open(lockpath, O_CREAT | O_RDWR, 0644);
     if (fd < 0) {
-        return false;
+        return RECOVERY_LOCK_FAILED;
     }
     if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        int lock_errno = errno;
         (void)close(fd); /* another live instance holds the exclusive lock */
-        return false;
+        return (lock_errno == EWOULDBLOCK || lock_errno == EAGAIN) ? RECOVERY_LOCK_BUSY
+                                                                   : RECOVERY_LOCK_FAILED;
     }
     s_recovery_lock = fd;
     /* fix [5]: remember the exact .lock path WE now hold so release unlinks precisely it (POSIX). */
     (void)snprintf(s_recovery_lock_path, sizeof s_recovery_lock_path, "%s", lockpath);
-    return true;
+    return RECOVERY_LOCK_OK;
 #endif
 }
 static void recovery_lock_release(void) {
@@ -430,6 +500,130 @@ static bool recovery_orphan_unlocked(const char *journal) {
     (void)close(fd);
     return acquirable;
 #endif
+}
+
+/* Claim an orphan for the whole resolve operation. The startup liveness probe is only a
+ * snapshot; holding this lock closes the collect-to-resolve race between app instances. */
+typedef struct recovery_claim {
+#ifdef _WIN32
+    HANDLE handle;
+#else
+    int fd;
+#endif
+} recovery_claim;
+
+static recovery_lock_result recovery_claim_acquire(const char *journal, recovery_claim *claim) {
+    memset(claim, 0, sizeof *claim);
+#ifndef _WIN32
+    claim->fd = -1;
+#endif
+    char lockpath[GUI_RECOVERY_PATH_MAX + 8];
+    if (!recovery_lock_path(journal, lockpath, sizeof lockpath)) {
+        return RECOVERY_LOCK_FAILED;
+    }
+#ifdef _WIN32
+    claim->handle = CreateFileA(lockpath, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_ALWAYS,
+                                FILE_ATTRIBUTE_NORMAL, NULL);
+    if (claim->handle == INVALID_HANDLE_VALUE) {
+        DWORD e = GetLastError();
+        return (e == ERROR_SHARING_VIOLATION || e == ERROR_LOCK_VIOLATION) ? RECOVERY_LOCK_BUSY
+                                                                           : RECOVERY_LOCK_FAILED;
+    }
+    return RECOVERY_LOCK_OK;
+#else
+    claim->fd = open(lockpath, O_CREAT | O_RDWR, 0644);
+    if (claim->fd < 0) {
+        return RECOVERY_LOCK_FAILED;
+    }
+    if (flock(claim->fd, LOCK_EX | LOCK_NB) != 0) {
+        int lock_errno = errno;
+        (void)close(claim->fd);
+        claim->fd = -1;
+        return (lock_errno == EWOULDBLOCK || lock_errno == EAGAIN) ? RECOVERY_LOCK_BUSY
+                                                                   : RECOVERY_LOCK_FAILED;
+    }
+    return RECOVERY_LOCK_OK;
+#endif
+}
+
+static void recovery_claim_release(recovery_claim *claim) {
+#ifdef _WIN32
+    if (claim->handle && claim->handle != INVALID_HANDLE_VALUE) {
+        (void)CloseHandle(claim->handle);
+        claim->handle = NULL;
+    }
+#else
+    if (claim->fd >= 0) {
+        (void)flock(claim->fd, LOCK_UN);
+        (void)close(claim->fd);
+        claim->fd = -1;
+    }
+#endif
+}
+
+static bool recovery_paths_equal(const char *a, const char *b) {
+    if (!a || !b || a[0] == '\0' || b[0] == '\0') {
+        return false;
+    }
+    /* Exact equality is authoritative even for a relative/test spelling. Canonical aliases are accepted
+     * only when both canonicalizations succeed; callers that perform destructive work separately require
+     * canonical source/target paths before reaching this predicate. */
+    if (strcmp(a, b) == 0) {
+        return true;
+    }
+    char ca[TP_IDENTITY_PATH_MAX];
+    char cb[TP_IDENTITY_PATH_MAX];
+    tp_error err = {0};
+    if (tp_identity_path_canonical(a, ca, sizeof ca, &err) != TP_STATUS_OK) {
+        return false;
+    }
+    memset(&err, 0, sizeof err);
+    if (tp_identity_path_canonical(b, cb, sizeof cb, &err) != TP_STATUS_OK) {
+        return false;
+    }
+    return tp_identity_path_equal(ca, cb);
+}
+
+static tp_status validate_recovery_source(const char *journal_path, gui_recovery_action action,
+                                          char *err_out, size_t err_cap) {
+    char canonical[TP_IDENTITY_PATH_MAX];
+    tp_error err = {0};
+    if (!journal_path || tp_identity_path_canonical(journal_path, canonical, sizeof canonical, &err) !=
+                             TP_STATUS_OK) {
+        if (err_out && err_cap) {
+            (void)snprintf(err_out, err_cap, "recovery journal path must be an absolute canonicalizable path");
+        }
+        return TP_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t n = strlen(canonical);
+    static const char suffix[] = ".ntpjournal";
+    if (n < sizeof suffix - 1U || strcmp(canonical + n - (sizeof suffix - 1U), suffix) != 0) {
+        if (err_out && err_cap) {
+            (void)snprintf(err_out, err_cap, "recovery source is not an .ntpjournal file");
+        }
+        return TP_STATUS_INVALID_ARGUMENT;
+    }
+
+    tp_journal_peek_result peek;
+    memset(&peek, 0, sizeof peek);
+    tp_status st = tp_journal_peek(tp_journal_io_file_read(canonical), &peek, &err);
+    if (st != TP_STATUS_OK || memcmp(peek.key, recovery_key().bytes, sizeof peek.key) != 0 ||
+        peek.status == TP_JOURNAL_RECOVERY_BAD_MAGIC || peek.status == TP_JOURNAL_RECOVERY_EMPTY) {
+        tp_journal_peek_free(&peek);
+        if (err_out && err_cap) {
+            (void)snprintf(err_out, err_cap, "recovery source is not a valid ntpacker recovery journal");
+        }
+        return TP_STATUS_BAD_PROJECT;
+    }
+    if (action != GUI_RECOVERY_DISCARD && peek.status == TP_JOURNAL_RECOVERY_VERSION_MISMATCH) {
+        tp_journal_peek_free(&peek);
+        if (err_out && err_cap) {
+            (void)snprintf(err_out, err_cap, "this recovery journal version can only be discarded");
+        }
+        return TP_STATUS_BAD_VERSION;
+    }
+    tp_journal_peek_free(&peek);
+    return TP_STATUS_OK;
 }
 
 /* fix [4]: the ONE owner of the create -> null-check -> attach -> destroy-on-fail ownership dance.
@@ -870,12 +1064,9 @@ bool gui_project_peek_pending_slice9(int atlas_index, const char *sprite_key, in
 // #endregion
 
 // #region lifecycle
-/* R5b-2: delete an ADOPTED source orphan (journal + its `.lock`) after its work has been cloned into
- * the fresh live journal. Called ONLY on a successful adopt of a source OTHER than the live slot -- one
- * of the packet's TWO deletions (the other is the live slot on clean shutdown). By this point no handle
- * is held on either file (the liveness probe released; peek/recover closed their io handles), so a
- * Windows remove() succeeds. Tolerates either order / a missing .lock. */
-static void delete_adopted_source(const char *source) {
+/* Delete a resolved recovery source (journal + companion lock). Callers hold the resolver claim until
+ * the recovered project is durably saved and load-verified, or the user explicitly chose Discard. */
+static void delete_recovery_source(const char *source) {
     (void)remove(source);
     char srclock[GUI_RECOVERY_PATH_MAX + 8];
     if (recovery_lock_path(source, srclock, sizeof srclock)) { /* fix [7]: shared `.lock` construction */
@@ -883,173 +1074,32 @@ static void delete_adopted_source(const char *source) {
     }
 }
 
-/* F2-05b-ii-B crash recovery (F2-04 §7.1/§22.3). If recovery is ACTIVE (slot owned) and `source` holds
- * a usable journal from a CRASHED prior session, rebuild + install its last committed STATE, kept DIRTY
- * so the user is prompted to Save the recovered work. Returns true when a model was adopted; a stale /
- * empty / foreign / corrupt / torn-first source returns false -> normal fresh init.
- *
- * R5b-2 SOURCE GENERALIZATION: `source` is the journal to recover FROM. gui_project_init passes the LIVE
- * slot (s_recovery_path -- the selftest/in-place path where the slot IS the crashed journal); the startup
- * scan passes a DIFFERENT orphan file it picked from the recovery folder. wrap_model always attaches the
- * fresh live journal at s_recovery_path (NOT at `source`), so recovering from a scan-picked orphan leaves
- * the live slot as the new home. On a SUCCESSFUL adopt of an orphan (source != the live slot) the source
- * journal + its `.lock` are DELETED (its work now lives in the fresh live journal -- leaving it would
- * re-adopt it next launch); the live slot is NEVER deleted here. A NULL/empty `source` is "no adopt".
- * On adopt FAILURE the source is LEFT intact (a retry / R6). Empty guards keep the selftest compiling.
- *
- * fix [0]+[2] REDESIGN: recover only the STATE, then rebuild a FRESH model + FRESH journal around it.
- * The recovered journal returned by tp_model_recover cannot be adopted directly because: [0] its
- * retained-id index already holds the crashed session's ids 0..K-1, and s_txn_seq restarts at 0 each
- * launch, so the first post-recovery commits would collide as DUPLICATE_ID -> the project would look
- * frozen; [2] it may be POISONED (mid-stream corruption, F2-04 C2/C3) -> every append fails. So we
- * tp_project_clone the recovered project OFF rm, tp_model_destroy(rm) (drops the old/poisoned journal
- * + closes the slot handle), then wrap_model the clone -> a FRESH journal with an EMPTY, non-poisoned
- * retained-id index at the reset slot. tp_model_recover TAKES OWNERSHIP of the io on every path
- * (recovered model owns it, else destroyed), so the io is never leaked. */
-static bool try_adopt_recovered(const char *source) {
-    if (!recovery_active()) {
-        return false; /* recovery disabled, or a 2nd instance without the slot lock -> fresh init */
-    }
-    if (!source || source[0] == '\0') {
-        return false; /* no source to adopt -> fresh init */
-    }
-    /* fix [3]: READ-ONLY, NO-CREATE open of the source -- a candidate that vanished/raced must NOT be
-     * resurrected as a stray zero-byte journal (tp_journal_io_file's "w+b" fallback would). tp_model_recover
-     * only reads (plus one best-effort tail-truncate whose failure merely poisons the throwaway journal we
-     * clone-off + destroy below). A NULL-ctx io => missing/racing => skip this source. */
-    tp_journal_io io = tp_journal_io_file_read(source);
-    if (!io.ctx) {
-        return false; /* cannot open the source (or none exists) -> fresh init */
-    }
-    tp_model *rm = NULL;
-    tp_journal_recovery info;
-    memset(&info, 0, sizeof info);
-    tp_error err = {0};
-    tp_status st = tp_model_recover(io, recovery_key(), &rm, &info, &err); /* TAKES OWNERSHIP of io */
-    /* R5b-1 finding [3]: CAPTURE the crashed project's recovery identity {path, name, time} BEFORE
-     * tp_journal_recovery_free frees info.metadata. The FRESH (adopted) journal must carry the ORIGINAL
-     * path/name so R5b-2's startup scan + R6's "Save to original" see the recovered project's real
-     * identity -- even though the LIVE window stays untitled. strdup the strings (guard NULL as "");
-     * an OOM capturing the label just drops the (informational) carry -- never crash recovery. */
-    bool had_meta = info.has_metadata;
-    char *rec_path = dupstr(info.metadata.path ? info.metadata.path : "");
-    char *rec_name = dupstr(info.metadata.name ? info.metadata.name : "");
-    if (!rec_path || !rec_name) {
-        had_meta = false; /* capture OOM -> skip the carry (still freed below; free(NULL) is safe) */
-    }
-    tp_journal_recovery_free(&info);                                       /* frees the recovered snapshot copy */
-    if (st != TP_STATUS_OK || !rm) {
-        free(rec_path);
-        free(rec_name);
-        return false; /* nothing recoverable (empty/bad-header/stale-key/torn-first) -> fresh init */
-    }
-    /* Clone the recovered STATE, then discard rm (its journal may be poisoned + its index stale). */
-    tp_project *recovered = tp_project_clone(tp_model_project(rm));
-    tp_model_destroy(rm); /* drops the recovered journal (poisoned or not) + closes the slot handle */
-    if (!recovered) {
-        free(rec_path);
-        free(rec_name);
-        return false; /* clone OOM -> fall back to a fresh init (never crash on recovery) */
-    }
-    if (!wrap_model(recovered)) {
-        free(rec_path);
-        free(rec_name);
-        return false; /* wrap OOM -> recovered freed by wrap_model; fall back to a fresh init */
-    }
-    /* wrap_model attached a FRESH journal at the reset slot (empty id-index, not poisoned) with a
-     * checkpoint of the recovered project, and left the model CLEAN (saved_identity == identity). The
-     * recovered content is UNSAVED work ahead of any on-disk file -> flag it dirty via the F2-04 C5
-     * recovered_unsaved field (the model's own "dirty vs the project file" mechanism, tp_transaction.h):
-     * gui_project_is_dirty() reads true WITHOUT a spurious extra commit, and a later Save re-baselines +
-     * clears it. (This writes a tp_model runtime field, not the project -- outside the R7 project-write
-     * boundary rules.) */
-    s_model->recovered_unsaved = true;
-    set_path("");        /* recovered work is untitled -> a deliberate Save As is required */
-    /* R5b-1 finding [3]: set_path("") just stamped the UNTITLED label into the fresh journal; OVERRIDE
-     * it with the recovered project's ORIGINAL identity so the scan + R6 can find/name the crashed work.
-     * The LIVE window stays untitled (s_path=="" / s_name=="untitled" are untouched -- this writes ONLY
-     * the JOURNAL metadata; that split is intentional: live identity vs recovery-scan identity). Skip when
-     * the recovered project was itself untitled (empty path) -> keep set_path("")'s untitled label. Uses
-     * time(NULL): the scan wants when this recovered session was last touched (NOW), not the crash time.
-     * Non-fatal + informational: with the cache-authoritative fix a healthy journal returns OK; only a
-     * genuine poison surfaces via the soft channel. */
-    if (had_meta && rec_path[0] != '\0') {
-        tp_error rme = {0};
-        if (tp_model_set_recovery_metadata(s_model, recovery_now(), rec_path, rec_name, &rme) != TP_STATUS_OK) {
-            note_recovery_degraded(rme.msg[0] ? rme.msg : "could not carry the recovered project identity");
-        }
-    }
-    free(rec_path);
-    free(rec_name);
-    s_preview_stale = true;
-    recompute_dirty();   /* recovered_unsaved == true -> dirty (independent of identity) */
-    s_recovery_notice = true; /* surfaced once by the UI (gui_project_take_recovery_notice) */
-    /* R5b-2 DELETION RULE (fix [0]): delete the SOURCE orphan + its .lock so the next launch does not
-     * re-adopt it -- but ONLY when the recovered work is now DURABLY backed by the fresh live journal.
-     * tp_model_has_journal(s_model) is the guard: wrap_model's attach is NON-FATAL, so a slot-reset /
-     * disk-full / RNG fault can leave the session journal-LESS, and then the SOURCE is the ONLY durable
-     * copy of the recovered work (memory is volatile) -- deleting it would open a data-loss window (a
-     * crash before a manual Save loses everything). Journal-less => LEAVE the source; next launch re-offers
-     * it. NEVER the live slot: source == s_recovery_path (the in-place/selftest path) is skipped so the
-     * just-written live journal survives. This + the clean-shutdown live-slot delete are the ONLY deletions
-     * in the whole packet; adopt failure or journal-less attach delete NOTHING. */
-    if (source && source[0] && strcmp(source, s_recovery_path) != 0 && tp_model_has_journal(s_model)) {
-        delete_adopted_source(source);
-    }
-    return true;
-}
-
-/* R5b-2: init, optionally ADOPTING a crash-recovery orphan from `source_journal` (a path chosen by the
- * startup scan, gui_project_scan_pick). NULL/"" means "adopt from the LIVE slot if it holds a journal"
- * -- the legacy in-place behavior the selftest (J3/J4/J13/J17) drives via enable_recovery(<crashed slot>)
- * + gui_project_init(). With a per-session random live slot (the production wiring), the live slot is
- * always fresh/empty, so a NULL source means fresh init; the scan supplies any orphan to adopt. */
 /* Install a fresh clean untitled project (the no-adopt init body). Attaches a fresh recovery journal at
  * the live slot (no-op when recovery is off). On OOM s_model/s_proj stay NULL (F3: never a partial init). */
 static void fresh_init(void) {
     tp_project *p = tp_project_create();
     seed_default_target(p, 0); /* clean baseline includes it (I1) -- lifecycle, direct */
     (void)wrap_model(p);       /* first model: on OOM s_model/s_proj stay NULL; attaches a fresh recovery journal */
-    set_path("");
+    (void)set_path("", NULL);
     s_preview_stale = false;
     promote_and_baseline();
 }
 
-void gui_project_init_adopt(const char *source_journal) {
+void gui_project_init(void) {
     if (s_model) {
         return;
     }
     pending_discard();
-    /* NULL/"" source -> adopt from the live slot (in-place, the selftest path); else from the scan pick. */
-    const char *source = (source_journal && source_journal[0] != '\0') ? source_journal : s_recovery_path;
-    if (try_adopt_recovered(source)) {
-        return; /* F2-05b-ii-B: adopted a crash-recovered model (dirty) -- do NOT overwrite with a fresh one */
-    }
     fresh_init();
 }
 
-void gui_project_init_adopt_candidates(const gui_recovery_candidates *cands) {
-    if (s_model) {
-        return;
-    }
-    pending_discard();
-    /* fix [2]: try candidates NEWEST-FIRST until one adopts. peek only proved framing, so the newest may
-     * still FAIL the real recover (stale key / unloadable checkpoint / poison) -- in which case
-     * try_adopt_recovered LEAVES it on disk (fix [0]: no delete on failure) and we fall through to the next
-     * older one. The first success installs the recovered (dirty) model and returns. */
-    if (cands) {
-        for (int i = 0; i < cands->count; i++) {
-            if (try_adopt_recovered(cands->paths[i])) {
-                return; /* adopted a crash-recovered model -- do NOT overwrite with a fresh one */
-            }
-        }
-    }
-    fresh_init(); /* no candidate adopted (none offered, or every one failed to recover) -> fresh */
-}
-
-void gui_project_init(void) { gui_project_init_adopt(NULL); }
-
 void gui_project_shutdown(void) {
+    /* The engine currently gives us no cancellable window-close callback. Flush a last buffered edit,
+     * then keep the owned slot whenever the model is dirty or the flush failed. This turns X/Alt+F4
+     * into a recoverable close. Only an explicit Exit -> Discard confirmation may remove dirty work. */
+    const bool flush_ok = !s_model || gui_project_flush_pending();
+    const bool keep_recovery = recovery_active() && s_model &&
+                               (!flush_ok || (s_dirty_cache && !s_discard_recovery_on_shutdown));
     pending_discard();
     tp_model_destroy(s_model); /* frees the model + its owned project + history + recovery journal (closes the slot file) */
     s_model = NULL;
@@ -1058,11 +1108,14 @@ void gui_project_shutdown(void) {
      * launch starts fresh (no spurious "recovered" prompt). Only a CRASH -- which never reaches this
      * shutdown -- leaves the slot on disk. Delete the slot ONLY while we own it (recovery_active), then
      * release the single-instance lock so a relaunch can re-acquire it. */
-    if (recovery_active()) {
+    if (recovery_active() && !keep_recovery) {
         (void)remove(s_recovery_path);
     }
     recovery_lock_release();
+    s_discard_recovery_on_shutdown = false;
 }
+
+void gui_project_discard_recovery_on_shutdown(void) { s_discard_recovery_on_shutdown = true; }
 
 /* F2-05b-ii-B: enable/configure crash recovery. `slot_path` is this session's LIVE recovery-journal path.
  * R5b-2: main.c forms it as a PER-SESSION RANDOM filename under <app-data>/recovery/ (see
@@ -1073,16 +1126,25 @@ void gui_project_shutdown(void) {
  * fix [1]: acquires a single-instance advisory lock on the slot. If another live instance already
  * holds it, THIS instance runs journal-less (recovery INACTIVE) and never touches the slot -- so it
  * neither adopts the other instance's LIVE session as "recovered" nor truncates its live journal --
- * and raises a one-shot "another instance" notice. Re-enabling always releases any prior lock first. */
+ * and raises a one-shot recovery-unavailable notice with the precise reason. Re-enabling always
+ * releases any prior lock first. */
 void gui_project_enable_recovery(const char *slot_path) {
     recovery_lock_release(); /* drop any prior lock so a re-enable (or disable) is clean */
-    (void)snprintf(s_recovery_path, sizeof s_recovery_path, "%s", slot_path ? slot_path : "");
+    int np = snprintf(s_recovery_path, sizeof s_recovery_path, "%s", slot_path ? slot_path : "");
+    if (np < 0 || (size_t)np >= sizeof s_recovery_path) {
+        s_recovery_path[0] = '\0';
+        gui_project_note_recovery_setup_failure("the recovery path is too long");
+        return;
+    }
     if (s_recovery_path[0] == '\0') {
         return; /* disabled */
     }
-    s_recovery_locked = recovery_lock_acquire(s_recovery_path);
-    if (!s_recovery_locked) {
-        s_recovery_busy_notice = true; /* another instance owns the slot -> crash recovery off this window */
+    recovery_lock_result lock_result = recovery_lock_acquire(s_recovery_path);
+    s_recovery_locked = lock_result == RECOVERY_LOCK_OK;
+    if (lock_result == RECOVERY_LOCK_BUSY) {
+        gui_project_note_recovery_setup_failure("another ntpacker window owns this recovery slot");
+    } else if (lock_result == RECOVERY_LOCK_FAILED) {
+        gui_project_note_recovery_setup_failure("the recovery storage lock could not be acquired");
     }
 }
 
@@ -1117,31 +1179,6 @@ bool gui_project_make_session_slot(const char *folder, char *out, size_t cap) {
     return true;
 }
 
-/* fix [2]: insert (`path`, `ts`) into the NEWEST-FIRST candidate array `c` (with the parallel `ts_arr`),
- * keeping at most GUI_RECOVERY_MAX_CANDIDATES -- the newest by timestamp. A candidate older than every
- * one already kept, when the array is full, is dropped (the [6] bound). Equal timestamps keep scan order
- * (a new equal ts sorts AFTER the existing ones), matching the old strict-">" newest pick. */
-static void scan_candidate_insert(gui_recovery_candidates *c, int64_t *ts_arr, const char *path, int64_t ts) {
-    int i = 0;
-    while (i < c->count && ts_arr[i] >= ts) {
-        i++; /* skip past every kept candidate at least as new as this one */
-    }
-    if (i >= GUI_RECOVERY_MAX_CANDIDATES) {
-        return; /* older than all GUI_RECOVERY_MAX_CANDIDATES kept + array full -> drop (fix [6] bound) */
-    }
-    /* Shift [i .. end) down by one to open a slot at i (evicting the OLDEST when the array is full). */
-    int last = (c->count < GUI_RECOVERY_MAX_CANDIDATES) ? c->count : GUI_RECOVERY_MAX_CANDIDATES - 1;
-    for (int k = last; k > i; k--) {
-        memcpy(c->paths[k], c->paths[k - 1], GUI_RECOVERY_PATH_CAP);
-        ts_arr[k] = ts_arr[k - 1];
-    }
-    (void)snprintf(c->paths[i], GUI_RECOVERY_PATH_CAP, "%s", path);
-    ts_arr[i] = ts;
-    if (c->count < GUI_RECOVERY_MAX_CANDIDATES) {
-        c->count++;
-    }
-}
-
 /* R6a fix [2]+[7]: the ONE adoptable predicate BOTH the candidate scan and the R6a modal collect drive, so
  * "what can we actually recover" is decided in exactly one place. A journal is adoptable iff its header key
  * is OUR recovery_key (fix [2]: a foreign-key journal peeks as valid framing but recover_to_clone rejects it
@@ -1161,8 +1198,8 @@ static bool orphan_peek_adoptable(const tp_journal_peek_result *pk) {
             pk->status == TP_JOURNAL_RECOVERY_CORRUPT);
 }
 
-/* R6a fix [7]: the ONE orphan-scan iterator shared by gui_project_scan_pick_candidates and
- * gui_recovery_collect, so the enumerate + live-slot-basename exclude + liveness probe + READ-ONLY (no-create)
+/* R6a fix [7]: the orphan-scan iterator used by gui_recovery_collect, so the enumerate +
+ * live-slot-basename exclude + liveness probe + READ-ONLY (no-create)
  * peek loop lives in a single place. Per `<folder>/<name>` (name ends ".ntpjournal", != the live slot's
  * basename):
  *   1) LIVENESS PROBE `<candidate>.lock`: acquirable => a crashed/dead owner (orphan); held => a live
@@ -1174,7 +1211,64 @@ static bool orphan_peek_adoptable(const tp_journal_peek_result *pk) {
  * DELETES NOTHING. Fail-closed + non-fatal: a folder-open failure returns false (callers -> empty result),
  * never a crash/hang on a malformed/huge/empty folder. BENIGN TOCTOU: see recovery_orphan_unlocked. */
 typedef void (*orphan_scan_cb)(void *ctx, const char *path, const tp_journal_peek_result *pk);
-static bool scan_orphan_journals(const char *folder, const char *live_slot, orphan_scan_cb cb, void *ctx) {
+#define GUI_RECOVERY_SCAN_MAX_FILES 256U
+#define GUI_RECOVERY_SCAN_MAX_BYTES ((uint64_t)TP_JOURNAL_MAX_FILE_BYTES * 2U)
+
+typedef enum orphan_scan_result {
+    ORPHAN_SCAN_FAILED = 0,
+    ORPHAN_SCAN_COMPLETE,
+    ORPHAN_SCAN_LIMITED
+} orphan_scan_result;
+
+typedef struct orphan_scan_ctx {
+    const char *folder;
+    const char *live_base;
+    orphan_scan_cb cb;
+    void *cb_ctx;
+    uint64_t bytes_examined;
+    unsigned files_examined;
+    bool limit_reached;
+} orphan_scan_ctx;
+
+static bool scan_orphan_name(void *vctx, const char *name, uint64_t size) {
+        orphan_scan_ctx *scan = (orphan_scan_ctx *)vctx;
+        if (!name || name[0] == '\0') {
+            return true;
+        }
+        if (scan->live_base[0] != '\0' && strcmp(name, scan->live_base) == 0) {
+            return true; /* never touch the live slot */
+        }
+        if (scan->files_examined >= GUI_RECOVERY_SCAN_MAX_FILES ||
+            size > GUI_RECOVERY_SCAN_MAX_BYTES - scan->bytes_examined) {
+            scan->limit_reached = true;
+            return false; /* bounded startup: stop successfully and surface a partial-scan warning */
+        }
+        scan->files_examined++;
+        scan->bytes_examined += size;
+        char cand[GUI_RECOVERY_PATH_MAX];
+        int nc = snprintf(cand, sizeof cand, "%s/%s", scan->folder, name);
+        if (nc <= 0 || (size_t)nc >= sizeof cand) {
+            return true; /* truncation -> skip (fail-closed) */
+        }
+        if (!recovery_orphan_unlocked(cand)) {
+            return true; /* a live instance owns it (or unprobeable) -> LEAVE, skip */
+        }
+        tp_journal_io io = tp_journal_io_file_read(cand); /* fix [3]: read-only, never creates */
+        if (!io.ctx) {
+            return true; /* missing/racing/unopenable -> LEAVE, skip (created nothing) */
+        }
+        tp_journal_peek_result pk;
+        memset(&pk, 0, sizeof pk);
+        tp_error perr = {0};
+        if (tp_journal_peek(io, &pk, &perr) == TP_STATUS_OK) { /* TAKES OWNERSHIP of io */
+            scan->cb(scan->cb_ctx, cand, &pk);
+        }
+        tp_journal_peek_free(&pk); /* zeroed on a hard fault -> free-safe */
+        return true;
+}
+
+static orphan_scan_result scan_orphan_journals(const char *folder, const char *live_slot,
+                                               orphan_scan_cb cb, void *ctx) {
     /* the live slot's BASENAME -- excluded so the scan never touches our own live journal. */
     const char *live_base = live_slot ? live_slot : "";
     for (const char *p = live_base; *p; p++) {
@@ -1182,116 +1276,43 @@ static bool scan_orphan_journals(const char *folder, const char *live_slot, orph
             live_base = p + 1;
         }
     }
-    tp_str_list names = {0};
-    if (!tp_scan_list_dir(folder, ".ntpjournal", &names)) {
-        return false; /* folder open failure / missing / OOM -> caller yields an empty result */
+    orphan_scan_ctx scan = {
+        .folder = folder,
+        .live_base = live_base,
+        .cb = cb,
+        .cb_ctx = ctx,
+    };
+    if (!tp_scan_visit_dir(folder, ".ntpjournal", scan_orphan_name, &scan)) {
+        return ORPHAN_SCAN_FAILED;
     }
-    for (int i = 0; i < names.count; i++) {
-        const char *name = names.items[i];
-        if (!name || name[0] == '\0') {
-            continue;
-        }
-        if (live_base[0] != '\0' && strcmp(name, live_base) == 0) {
-            continue; /* never touch the live slot */
-        }
-        char cand[GUI_RECOVERY_PATH_MAX];
-        int nc = snprintf(cand, sizeof cand, "%s/%s", folder, name);
-        if (nc <= 0 || (size_t)nc >= sizeof cand) {
-            continue; /* truncation -> skip (fail-closed) */
-        }
-        if (!recovery_orphan_unlocked(cand)) {
-            continue; /* a live instance owns it (or unprobeable) -> LEAVE, skip */
-        }
-        tp_journal_io io = tp_journal_io_file_read(cand); /* fix [3]: read-only, never creates */
-        if (!io.ctx) {
-            continue; /* missing/racing/unopenable -> LEAVE, skip (created nothing) */
-        }
-        tp_journal_peek_result pk;
-        memset(&pk, 0, sizeof pk);
-        tp_error perr = {0};
-        if (tp_journal_peek(io, &pk, &perr) == TP_STATUS_OK) { /* TAKES OWNERSHIP of io */
-            cb(ctx, cand, &pk);
-        }
-        tp_journal_peek_free(&pk); /* zeroed on a hard fault -> free-safe */
-    }
-    tp_str_list_free(&names);
-    return true;
+    return scan.limit_reached ? ORPHAN_SCAN_LIMITED : ORPHAN_SCAN_COMPLETE;
 }
 
-/* fix [7]: the candidate-scan callback -- keep only adoptable orphans, newest-first by metadata timestamp. */
-typedef struct {
-    gui_recovery_candidates *out;
-    int64_t *ts_arr;
-} scan_pick_ctx;
-static void scan_pick_cb(void *vctx, const char *path, const tp_journal_peek_result *pk) {
-    scan_pick_ctx *c = (scan_pick_ctx *)vctx;
-    if (orphan_peek_adoptable(pk)) {
-        int64_t ts = pk->has_meta ? pk->meta.timestamp : 0;
-        scan_candidate_insert(c->out, c->ts_arr, path, ts);
-    }
+void gui_project_note_recovery_setup_failure(const char *reason) {
+    s_recovery_setup_notice_pending = true;
+    (void)snprintf(s_recovery_setup_notice, sizeof s_recovery_setup_notice,
+                   "Crash recovery is off for this window (%s).",
+                   (reason && reason[0] != '\0') ? reason : "startup setup failed");
 }
 
-/* R5b-2 fix [2]/[6]/[7]: scan the recovery FOLDER for adoptable crash-orphans, newest-first, capped at
- * GUI_RECOVERY_MAX_CANDIDATES. Adoptability (incl. the fix [2] key match) + the enumerate/probe/peek loop
- * live in orphan_peek_adoptable + scan_orphan_journals. DELETES NOTHING (the sole adopt-time delete is in
- * try_adopt_recovered, on the adopted file only, after a successful clone AND a durable fresh journal). */
-int gui_project_scan_pick_candidates(const char *folder, const char *live_slot, gui_recovery_candidates *out) {
-    if (out) {
-        memset(out, 0, sizeof *out);
-    }
-    if (!folder || folder[0] == '\0' || !out) {
-        return 0;
-    }
-    int64_t ts_arr[GUI_RECOVERY_MAX_CANDIDATES]; /* parallel to out->paths; only [0..out->count) are valid */
-    scan_pick_ctx ctx = {out, ts_arr};
-    (void)scan_orphan_journals(folder, live_slot, scan_pick_cb, &ctx);
-    return out->count;
+static void note_recovery_scan_limited(void) {
+    s_recovery_setup_notice_pending = true;
+    (void)snprintf(s_recovery_setup_notice, sizeof s_recovery_setup_notice,
+                   "Some previous recovery sessions were not scanned because the startup safety budget was reached.");
 }
 
-/* R5b-2: single-newest wrapper over gui_project_scan_pick_candidates (kept for callers/tests that want just
- * the pick). Writes the newest adoptable orphan's full path into out[cap] and returns true, else false. */
-bool gui_project_scan_pick(const char *folder, const char *live_slot, char *out, size_t cap) {
-    if (out && cap) {
-        out[0] = '\0';
-    }
-    if (!out || cap == 0) {
-        return false;
-    }
-    gui_recovery_candidates cands;
-    if (gui_project_scan_pick_candidates(folder, live_slot, &cands) <= 0) {
-        return false; /* nothing adoptable -> fresh init */
-    }
-    int nb = snprintf(out, cap, "%s", cands.paths[0]); /* [0] == newest */
-    if (nb > 0 && (size_t)nb < cap) {
-        return true;
-    }
-    out[0] = '\0'; /* truncation into the caller buffer -> fail-closed */
-    return false;
-}
-
-/* Drains the one-shot "recovered unsaved changes" notice (true once after a crash-recovery adopt at
- * init, then cleared). The UI polls this to surface the recovery to the user. */
-bool gui_project_take_recovery_notice(char *out, size_t cap) {
-    if (!s_recovery_notice) {
+/* Drains the one-shot recovery-unavailable notice. */
+bool gui_project_take_recovery_setup_notice(char *out, size_t cap) {
+    if (!s_recovery_setup_notice_pending) {
         return false;
     }
     if (out && cap) {
-        (void)snprintf(out, cap, "Recovered unsaved changes from a previous session. Save to keep them.");
+        (void)snprintf(out, cap, "%s", s_recovery_setup_notice[0] != '\0'
+                                             ? s_recovery_setup_notice
+                                             : "Crash recovery is off for this window.");
     }
-    s_recovery_notice = false;
-    return true;
-}
-
-/* Drains the one-shot "another instance is running -> crash recovery is off for this window" notice
- * (fix [1]). Returns true once when a 2nd instance could not acquire the slot lock. */
-bool gui_project_take_recovery_busy_notice(char *out, size_t cap) {
-    if (!s_recovery_busy_notice) {
-        return false;
-    }
-    if (out && cap) {
-        (void)snprintf(out, cap, "Another ntpacker window is open -- crash recovery is off for this one.");
-    }
-    s_recovery_busy_notice = false;
+    s_recovery_setup_notice_pending = false;
+    s_recovery_setup_notice[0] = '\0';
     return true;
 }
 // #endregion
@@ -1299,34 +1320,60 @@ bool gui_project_take_recovery_busy_notice(char *out, size_t cap) {
 // #region R6a recovery-resolution decision/action layer (headless-testable; the R6b modal calls this)
 /* R6a: recover the last committed state from `journal_path` into a standalone SAVABLE tp_project (the caller
  * owns it -> tp_project_destroy). READ-ONLY + NO-CREATE open (fix [3]: a vanished/racing file is never
- * resurrected as a stray zero-byte journal). This is the recover->clone PREFIX of try_adopt_recovered
- * (~920-948) but it STOPS at the clone: NO wrap_model, NO set_path, NO recovered_unsaved, and it never
+ * resurrected as a stray zero-byte journal). It stops at the clone: NO wrap_model, NO set_path, and it never
  * touches the live model / s_recovery_path -- so the resolve layer can save the recovered state WITHOUT
  * adopting it into the editor. The throwaway model `rm` may end up with a POISONED journal (tp_model_recover's
  * best-effort tail-truncate over the read-only io fails harmlessly for TRUNCATED/CORRUPT) -- irrelevant: we
  * clone the STATE off it and destroy it. tp_model_recover TAKES OWNERSHIP of the io on every path, so the io
  * is never leaked. Returns NULL when nothing is recoverable (missing/racing/empty/bad-header/stale-key/
  * torn-first) or on a clone OOM. Does NOT require recovery to be active. */
-static tp_project *recover_to_clone(const char *journal_path) {
+typedef struct recovered_clone {
+    tp_project *project;
+    tp_journal_meta metadata;
+    bool has_metadata;
+} recovered_clone;
+
+static void recovered_clone_free(recovered_clone *r) {
+    if (r->project) {
+        tp_project_destroy(r->project);
+    }
+    free(r->metadata.path);
+    free(r->metadata.name);
+    memset(r, 0, sizeof *r);
+}
+
+static bool recover_to_clone(const char *journal_path, recovered_clone *out) {
+    memset(out, 0, sizeof *out);
     if (!journal_path || journal_path[0] == '\0') {
-        return NULL;
+        return false;
     }
     tp_journal_io io = tp_journal_io_file_read(journal_path); /* read-only, never creates */
     if (!io.ctx) {
-        return NULL; /* missing / unopenable -> nothing to recover */
+        return false; /* missing / unopenable -> nothing to recover */
     }
     tp_model *rm = NULL;
     tp_journal_recovery info;
     memset(&info, 0, sizeof info);
     tp_error err = {0};
     tp_status st = tp_model_recover(io, recovery_key(), &rm, &info, &err); /* TAKES OWNERSHIP of io */
-    tp_journal_recovery_free(&info); /* R6a saves the STATE, not the metadata -> drop the recovery info */
     if (st != TP_STATUS_OK || !rm) {
-        return NULL; /* empty / bad-header / stale-key / torn-first -> nothing recoverable */
+        tp_journal_recovery_free(&info);
+        return false; /* empty / bad-header / stale-key / torn-first -> nothing recoverable */
     }
-    tp_project *clone = tp_project_clone(tp_model_project(rm));
+    out->project = tp_project_clone(tp_model_project(rm));
+    if (info.has_metadata) {
+        out->metadata = info.metadata; /* move owned strings + optional fingerprint */
+        out->has_metadata = true;
+        memset(&info.metadata, 0, sizeof info.metadata);
+        info.has_metadata = false;
+    }
     tp_model_destroy(rm); /* drops the (possibly poisoned) recovered journal + closes the io handle */
-    return clone;         /* NULL on clone OOM -> caller treats it as "nothing recoverable" */
+    tp_journal_recovery_free(&info);
+    if (!out->project) {
+        recovered_clone_free(out);
+        return false;
+    }
+    return true;
 }
 
 /* R6a fix [1]: rank order for the modal list -- an ADOPTABLE (recoverable) entry ALWAYS outranks a
@@ -1343,11 +1390,14 @@ static bool recovery_entry_outranks(const gui_recovery_entry *kept, const gui_re
 }
 
 /* R6a: insert a fully-built entry into `out` by (adoptable desc, timestamp desc), capped at
- * GUI_RECOVERY_MAX_CANDIDATES -- the metadata-carrying analogue of scan_candidate_insert. */
+ * GUI_RECOVERY_MAX_CANDIDATES. */
 static void recovery_entry_insert(gui_recovery_list *out, const gui_recovery_entry *e) {
     int i = 0;
     while (i < out->count && recovery_entry_outranks(&out->items[i], e)) {
         i++; /* skip past every kept entry that outranks this one */
+    }
+    if (out->count >= GUI_RECOVERY_MAX_CANDIDATES) {
+        out->has_more = true; /* either this entry or the previous lowest-ranked one is omitted */
     }
     if (i >= GUI_RECOVERY_MAX_CANDIDATES) {
         return; /* lowest-ranked of an already-full list -> drop */
@@ -1394,6 +1444,10 @@ static void recovery_collect_cb(void *vctx, const char *path, const tp_journal_p
     e.timestamp = pk->has_meta ? pk->meta.timestamp : 0;
     e.status = (int)pk->status;
     e.adoptable = adoptable;
+    if (pk->has_meta && pk->meta.has_file_fingerprint) {
+        e.file_fingerprint = pk->meta.file_fingerprint;
+        e.has_file_fingerprint = true;
+    }
     recovery_entry_insert(out, &e);
 }
 
@@ -1404,7 +1458,12 @@ int gui_recovery_collect(const char *folder, const char *live_slot, gui_recovery
     if (!folder || folder[0] == '\0' || !out) {
         return 0;
     }
-    (void)scan_orphan_journals(folder, live_slot, recovery_collect_cb, out); /* fix [7]: shared iterator */
+    const orphan_scan_result scan = scan_orphan_journals(folder, live_slot, recovery_collect_cb, out);
+    if (scan == ORPHAN_SCAN_FAILED) { /* fix [7]: shared iterator */
+        gui_project_note_recovery_setup_failure("the recovery directory could not be scanned");
+    } else if (scan == ORPHAN_SCAN_LIMITED) {
+        note_recovery_scan_limited();
+    }
     return out->count;
 }
 
@@ -1416,8 +1475,9 @@ int gui_recovery_collect(const char *folder, const char *live_slot, gui_recovery
 static bool s_test_fail_load_verify = false;
 #endif
 
-tp_status gui_recovery_resolve(const char *journal_path, const char *orig_path, gui_recovery_action action,
-                               const char *target_path, char *err_out, size_t err_cap) {
+static tp_status gui_recovery_resolve_claimed(const char *journal_path, const char *orig_path,
+                                              gui_recovery_action action, const char *target_path,
+                                              char *err_out, size_t err_cap) {
     if (err_out && err_cap) {
         err_out[0] = '\0';
     }
@@ -1436,7 +1496,7 @@ tp_status gui_recovery_resolve(const char *journal_path, const char *orig_path, 
      * scan_orphan_journals' per-candidate recovery_orphan_unlocked liveness probe (a held .lock => live =>
      * never surfaced to collect), so a collect-fed resolve never receives a live journal in the first place.
      * This guard exists only to stop a direct/hostile caller passing our own live slot path. */
-    if (recovery_active() && strcmp(journal_path, s_recovery_path) == 0) {
+    if (recovery_active() && recovery_paths_equal(journal_path, s_recovery_path)) {
         if (err_out && err_cap) {
             (void)snprintf(err_out, err_cap, "cannot resolve the live recovery journal of an open session");
         }
@@ -1446,15 +1506,15 @@ tp_status gui_recovery_resolve(const char *journal_path, const char *orig_path, 
     /* Discard: delete the orphan journal + its `.lock` (reuse the R5b-2 adopt-delete helper). Nothing else
      * is touched, and no recover is needed. */
     if (action == GUI_RECOVERY_DISCARD) {
-        delete_adopted_source(journal_path);
-        /* fix [6]: DISCARD's contract is "the file is gone". delete_adopted_source is best-effort (remove
+        delete_recovery_source(journal_path);
+        /* fix [6]: DISCARD's contract is "the file is gone". delete_recovery_source is best-effort (remove
          * can fail on a momentarily-undeletable journal: open handle / AV / perms), so VERIFY it before
          * reporting success -- otherwise the modal marks it discarded yet it re-lists every launch. */
         if (tp_scan_exists(journal_path)) {
             if (err_out && err_cap) {
                 (void)snprintf(err_out, err_cap, "could not delete the recovery journal");
             }
-            return TP_STATUS_BAD_PROJECT;
+            return TP_STATUS_RECOVERY_CLEANUP_FAILED;
         }
         return TP_STATUS_OK;
     }
@@ -1469,7 +1529,7 @@ tp_status gui_recovery_resolve(const char *journal_path, const char *orig_path, 
      * bytes to the journal file, then the post-save delete would erase the just-written work. Reject a
      * write target (SAVE_AS target_path / SAVE_ORIGINAL orig_path) that IS the journal. */
     const char *write_target = (action == GUI_RECOVERY_SAVE_ORIGINAL) ? orig_path : target_path;
-    if (write_target && write_target[0] != '\0' && strcmp(write_target, journal_path) == 0) {
+    if (write_target && write_target[0] != '\0' && recovery_paths_equal(write_target, journal_path)) {
         if (err_out && err_cap) {
             (void)snprintf(err_out, err_cap, "cannot save the recovered project over its own journal");
         }
@@ -1479,8 +1539,8 @@ tp_status gui_recovery_resolve(const char *journal_path, const char *orig_path, 
     /* SAVE_ORIGINAL / SAVE_AS: recover the last committed state into a savable clone (NO adopt into the live
      * editor), save it, and delete the journal ONLY after the save returned OK AND the saved file re-loads
      * (fix [3]). A failed save LEAVES the journal on disk for a retry (data safety). */
-    tp_project *clone = recover_to_clone(journal_path);
-    if (!clone) {
+    recovered_clone recovered;
+    if (!recover_to_clone(journal_path, &recovered)) {
         if (err_out && err_cap) {
             (void)snprintf(err_out, err_cap, "could not recover this journal (nothing recoverable)");
         }
@@ -1494,9 +1554,9 @@ tp_status gui_recovery_resolve(const char *journal_path, const char *orig_path, 
      * OS-RNG fault fails CLOSED (report, save nothing, journal kept). */
     tp_error err = {0};
     tp_rng rng = tp_rng_os();
-    tp_status ids = tp_project_promote_ids(clone, &rng, &err);
+    tp_status ids = tp_project_promote_ids(recovered.project, &rng, &err);
     if (ids != TP_STATUS_OK) {
-        tp_project_destroy(clone);
+        recovered_clone_free(&recovered);
         if (err_out && err_cap) {
             (void)snprintf(err_out, err_cap, "%s", err.msg[0] ? err.msg : tp_status_str(ids));
         }
@@ -1504,33 +1564,96 @@ tp_status gui_recovery_resolve(const char *journal_path, const char *orig_path, 
     }
 
     tp_status st;
+    bool compare_original_at_publish = false;
+    const char *recorded_orig = (recovered.has_metadata && recovered.metadata.path &&
+                                 recovered.metadata.path[0] != '\0')
+                                    ? recovered.metadata.path : orig_path;
+    char *resolved_target = NULL;
     if (action == GUI_RECOVERY_SAVE_ORIGINAL) {
-        if (!orig_path || orig_path[0] == '\0') {
-            tp_project_destroy(clone);
+        if (!recorded_orig || recorded_orig[0] == '\0') {
+            recovered_clone_free(&recovered);
             if (err_out && err_cap) {
                 (void)snprintf(err_out, err_cap, "no original file to save over (use Save As)");
             }
             return TP_STATUS_INVALID_ARGUMENT; /* journal left intact */
         }
-        tp_mkdirs_parent(orig_path); /* orig normally exists so parent does too; defensive, mirrors SAVE_AS */
-        st = tp_project_save(clone, orig_path, &err); /* atomic: never corrupts the existing original */
+        if (recovery_paths_equal(recorded_orig, journal_path)) {
+            recovered_clone_free(&recovered);
+            if (err_out && err_cap) {
+                (void)snprintf(err_out, err_cap, "cannot save the recovered project over its own journal");
+            }
+            return TP_STATUS_INVALID_ARGUMENT;
+        }
+        if (tp_scan_exists(recorded_orig)) {
+            if (!recovered.metadata.has_file_fingerprint) {
+                recovered_clone_free(&recovered);
+                if (err_out && err_cap) {
+                    (void)snprintf(err_out, err_cap,
+                                   "the recovery journal has no original-file baseline; use Save As");
+                }
+                return TP_STATUS_FILE_CHANGED_EXTERNALLY;
+            }
+            tp_id128 current;
+            tp_status fps = tp_identity_file_fingerprint(recorded_orig, &current, &err);
+            if (fps != TP_STATUS_OK ||
+                memcmp(current.bytes, recovered.metadata.file_fingerprint.bytes, sizeof current.bytes) != 0) {
+                recovered_clone_free(&recovered);
+                if (err_out && err_cap) {
+                    (void)snprintf(err_out, err_cap,
+                                   "the original project changed after this recovery session; use Save As");
+                }
+                return TP_STATUS_FILE_CHANGED_EXTERNALLY;
+            }
+            compare_original_at_publish = true;
+        } else if (recovered.metadata.has_file_fingerprint) {
+            recovered_clone_free(&recovered);
+            if (err_out && err_cap) {
+                (void)snprintf(err_out, err_cap, "the original project was removed; use Save As");
+            }
+            return TP_STATUS_FILE_CHANGED_EXTERNALLY;
+        }
+        resolved_target = dupstr(recorded_orig);
     } else { /* GUI_RECOVERY_SAVE_AS */
         if (!target_path || target_path[0] == '\0') {
-            tp_project_destroy(clone);
+            recovered_clone_free(&recovered);
             if (err_out && err_cap) {
                 (void)snprintf(err_out, err_cap, "no target path for Save As");
             }
             return TP_STATUS_INVALID_ARGUMENT; /* journal left intact */
         }
-        tp_mkdirs_parent(target_path); /* create the parent dir so a Save-As into a fresh folder works */
-        st = tp_project_save(clone, target_path, &err);
+        /* Save As establishes a new identity.  Treating the recorded original (or a canonical alias of it)
+         * as a Save-As target would bypass the optimistic-concurrency guard above and overwrite external
+         * edits after Save Original correctly refused them. */
+        if (recorded_orig && recorded_orig[0] != '\0' && recovery_paths_equal(target_path, recorded_orig)) {
+            recovered_clone_free(&recovered);
+            if (err_out && err_cap) {
+                (void)snprintf(err_out, err_cap,
+                               "Save As must use a different file; the original may have changed externally");
+            }
+            return TP_STATUS_FILE_CHANGED_EXTERNALLY;
+        }
+        resolved_target = dupstr(target_path);
     }
-    tp_project_destroy(clone); /* always destroy the recovered clone (owned) */
+    if (!resolved_target) {
+        recovered_clone_free(&recovered);
+        if (err_out && err_cap) {
+            (void)snprintf(err_out, err_cap, "out of memory preserving the recovery save target");
+        }
+        return TP_STATUS_OOM;
+    }
+    write_target = resolved_target;
+    tp_mkdirs_parent(write_target);
+    st = action == GUI_RECOVERY_SAVE_ORIGINAL && compare_original_at_publish
+             ? tp_project_save_if_unchanged(recovered.project, write_target,
+                                            &recovered.metadata.file_fingerprint, NULL, &err)
+             : tp_project_save(recovered.project, write_target, &err);
+    recovered_clone_free(&recovered); /* always destroy the recovered clone + metadata */
 
     if (st != TP_STATUS_OK) {
         if (err_out && err_cap) {
             (void)snprintf(err_out, err_cap, "%s", err.msg[0] ? err.msg : tp_status_str(st));
         }
+        free(resolved_target);
         return st; /* NON-DESTRUCTIVE: the save failed -> LEAVE the journal on disk for a retry */
     }
 
@@ -1554,6 +1677,7 @@ tp_status gui_recovery_resolve(const char *journal_path, const char *orig_path, 
         if (err_out && err_cap) {
             (void)snprintf(err_out, err_cap, "%s", lverr.msg[0] ? lverr.msg : tp_status_str(lst));
         }
+        free(resolved_target);
         return (lst != TP_STATUS_OK) ? lst : TP_STATUS_BAD_PROJECT; /* saved file unreadable -> journal KEPT */
     }
     tp_project_destroy(chk); /* verified reloadable -> drop the check copy (never leaked) */
@@ -1563,8 +1687,76 @@ tp_status gui_recovery_resolve(const char *journal_path, const char *orig_path, 
      * already excluded upstream if a live instance holds it (scan_orphan_journals probes each candidate), so
      * this delete is not gated on a re-probe -- an un-probeable .lock (AV/indexer/perms) must NOT strand an
      * already-saved journal to re-list every launch. */
-    delete_adopted_source(journal_path);
+    delete_recovery_source(journal_path);
+    if (tp_scan_exists(journal_path)) {
+        if (err_out && err_cap) {
+            (void)snprintf(err_out, err_cap,
+                           "the recovered file was saved, but the recovery journal could not be removed");
+        }
+        free(resolved_target);
+        return TP_STATUS_RECOVERY_CLEANUP_FAILED;
+    }
+    free(resolved_target);
     return TP_STATUS_OK;
+}
+
+#ifdef NTPACKER_GUI_SELFTEST
+tp_status
+#else
+static tp_status
+#endif
+gui_recovery_resolve(const char *journal_path, const char *orig_path, gui_recovery_action action,
+                     const char *target_path, char *err_out, size_t err_cap) {
+    if (err_out && err_cap) {
+        err_out[0] = '\0';
+    }
+    if (!journal_path || journal_path[0] == '\0') {
+        if (err_out && err_cap) {
+            (void)snprintf(err_out, err_cap, "no recovery journal to resolve");
+        }
+        return TP_STATUS_INVALID_ARGUMENT;
+    }
+    tp_status validation = validate_recovery_source(journal_path, action, err_out, err_cap);
+    if (validation != TP_STATUS_OK) {
+        return validation;
+    }
+    if (recovery_active() && recovery_paths_equal(journal_path, s_recovery_path)) {
+        if (err_out && err_cap) {
+            (void)snprintf(err_out, err_cap, "cannot resolve the live recovery journal of an open session");
+        }
+        return TP_STATUS_INVALID_ARGUMENT;
+    }
+
+    recovery_claim claim;
+    recovery_lock_result claim_result = recovery_claim_acquire(journal_path, &claim);
+    if (claim_result != RECOVERY_LOCK_OK) {
+        if (err_out && err_cap) {
+            (void)snprintf(err_out, err_cap, "%s", claim_result == RECOVERY_LOCK_BUSY
+                                                       ? "this recovery journal is being resolved by another process"
+                                                       : "the recovery journal claim lock could not be created");
+        }
+        return claim_result == RECOVERY_LOCK_BUSY ? TP_STATUS_RECOVERY_BUSY : TP_STATUS_RECOVERY_CLAIM_FAILED;
+    }
+    tp_status st = gui_recovery_resolve_claimed(journal_path, orig_path, action, target_path, err_out, err_cap);
+    recovery_claim_release(&claim);
+    if (!tp_scan_exists(journal_path)) {
+        char lockpath[GUI_RECOVERY_PATH_MAX + 8];
+        if (recovery_lock_path(journal_path, lockpath, sizeof lockpath)) {
+            (void)remove(lockpath); /* our claim is released; successful resolution owns cleanup */
+        }
+    }
+    return st;
+}
+
+tp_status gui_recovery_resolve_entry(const gui_recovery_entry *entry, gui_recovery_action action,
+                                     const char *target_path, char *err_out, size_t err_cap) {
+    if (!entry) {
+        if (err_out && err_cap) {
+            (void)snprintf(err_out, err_cap, "no recovery entry to resolve");
+        }
+        return TP_STATUS_INVALID_ARGUMENT;
+    }
+    return gui_recovery_resolve(entry->journal_path, entry->orig_path, action, target_path, err_out, err_cap);
 }
 // #endregion
 
@@ -1638,8 +1830,7 @@ bool gui_project__test_recovery_active(void) { return recovery_active(); }
  * pre-seeded stale slot survives to the fresh-attach and the fail-closed empty-check path is reachable
  * (simulates a remove() the OS could not honor -- locked file / read-only dir). */
 void gui_project__test_skip_next_recovery_reset(void) { s_test_skip_recovery_reset = true; }
-/* Dev seam (selftest only, R5b-2): pin the recovery-metadata clock to `t` (>= 0) so the J18 newest-orphan
- * scan is deterministic despite time()'s 1-second resolution; pass < 0 to restore the real clock. */
+/* Dev seam: pin the recovery-metadata clock for deterministic ordering/classification tests. */
 void gui_project__test_set_recovery_now(int64_t t) { s_test_recovery_now = t; }
 /* Dev seam (selftest only, R6a fix [2]): the REAL recovery-journal key. collect now KEY-FILTERS adoptable
  * orphans (a foreign-key journal is excluded), so a test that wants an orphan classified adoptable must craft
@@ -1670,11 +1861,6 @@ bool gui_project_has_path(void) { return s_path[0] != '\0'; }
  * edit can never be silently discarded (and the flush's commit refreshes the cache). */
 bool gui_project_is_dirty(void) { return s_dirty_cache; }
 bool gui_project_is_stale(void) { return s_preview_stale; }
-/* H/P1-8: true while the live model is crash-recovered unsaved work adopted at init (try_adopt_recovered
- * set recovered_unsaved) and not yet Saved; a Save clears it (tp_model_mark_saved). The queryable form of
- * the condition the startup arg-open guard keys off -- so a stale CLI file arg defers instead of silently
- * discarding the recovered work (J13). More precise than gui_project_is_dirty (recovered work only). */
-bool gui_project_has_recovered_unsaved(void) { return s_model && s_model->recovered_unsaved; }
 // #endregion
 
 // #region dirty/stale choke point
@@ -2646,20 +2832,17 @@ bool gui_project_can_redo(void) { return tp_model_can_redo(s_model); }
 int gui_project_undo_depth(void) { return tp_model_undo_depth(s_model); }
 int gui_project_redo_depth(void) { return tp_model_redo_depth(s_model); }
 
-/* R4 (plan S18 R, P1-1): after an undo/redo swaps the live project, checkpoint the resulting
- * (post-undo) state into the recovery journal so a crash-recovery replay loads the UNDONE state
- * DIRECTLY, instead of replaying the reverted transaction's still-durable op-payload and
- * resurrecting the undone edit. Reuses the round-trip-proven R3 compaction (snapshot m->project ->
- * one fresh checkpoint at the post-undo revision). The undo stack itself is deliberately NOT
- * persisted -- recovery restores DOCUMENT STATE only (undo applies a tp_diff_record, not a
- * tp_txn_request, and the inverse of a remove has no forward catalog op, so a reverse-op encoding is
- * not uniformly possible). NON-FATAL, exactly like the R3 Save hook: the undo already succeeded in
- * memory, so a compaction failure only forfeits crash-durability for this step -- surface it through
- * the SAME degraded channel and NEVER fail the undo. */
-static void checkpoint_after_history(void) {
-    tp_error cerr = {0};
-    if (tp_model_compact_journal(s_model, &cerr) != TP_STATUS_OK) {
-        note_recovery_degraded(cerr.msg[0] ? cerr.msg : "compaction failed");
+/* Undo/Redo is journal-gated inside core. Record a rejected history transition on
+ * the same structured soft-error channel as a rejected transaction; no GUI-side
+ * durability compensation is needed (and no false "success then degrade" is possible). */
+static void note_history_reject(const char *verb, tp_status st, const tp_error *err) {
+    const char *detail = (err && err->msg[0]) ? err->msg : tp_status_str(st);
+    s_op_error = true;
+    if (st == TP_STATUS_JOURNAL_FAILED) {
+        (void)snprintf(s_op_error_msg, sizeof s_op_error_msg,
+                       "Could not journal the %s -- disk full? Nothing was changed.", verb);
+    } else {
+        (void)snprintf(s_op_error_msg, sizeof s_op_error_msg, "%s rejected: %s", verb, detail);
     }
 }
 
@@ -2673,14 +2856,17 @@ bool gui_project_undo(void) {
                        * then undo a DIFFERENT (older) step; the op-error is already surfaced. */
     }
     tp_error e = {0};
-    if (tp_model_undo(s_model, &e) != TP_STATUS_OK) {
+    tp_status st = tp_model_undo(s_model, &e);
+    if (st != TP_STATUS_OK) {
+        if (st != TP_STATUS_NOT_FOUND) {
+            note_history_reject("undo", st, &e);
+        }
         return false;
     }
     s_proj = tp_model_project(s_model); /* the model swapped its project on undo */
     s_preview_stale = true;             /* restored model != last-packed; packing is blocked -> always stale */
     recompute_dirty();                  /* #7: undo back to the saved baseline reads clean by identity */
     gui_scan_invalidate_all();
-    checkpoint_after_history(); /* R4/P1-1: persist the undone state so recovery == document state */
     return true;
 }
 
@@ -2689,14 +2875,17 @@ bool gui_project_redo(void) {
         return false; /* fix [3]: a journal-failed flush must not silently proceed into a redo */
     }
     tp_error e = {0};
-    if (tp_model_redo(s_model, &e) != TP_STATUS_OK) {
+    tp_status st = tp_model_redo(s_model, &e);
+    if (st != TP_STATUS_OK) {
+        if (st != TP_STATUS_NOT_FOUND) {
+            note_history_reject("redo", st, &e);
+        }
         return false;
     }
     s_proj = tp_model_project(s_model);
     s_preview_stale = true;
     recompute_dirty(); /* #7: identity moved -> refresh the cached dirty */
     gui_scan_invalidate_all();
-    checkpoint_after_history(); /* R4/P1-1: persist the redone state so recovery == document state */
     return true;
 }
 // #endregion
@@ -2712,7 +2901,7 @@ bool gui_project_new(void) {
     if (!wrap_model(fresh)) {
         return false; /* OOM: wrap_model freed fresh + kept the CURRENT project intact (F3) -- no data loss */
     }
-    set_path("");
+    (void)set_path("", NULL);
     s_preview_stale = false;
     gui_scan_invalidate_all();
     promote_and_baseline();
@@ -2720,15 +2909,48 @@ bool gui_project_new(void) {
 }
 
 tp_status gui_project_open(const char *path, char *err_out, size_t err_cap) {
-    pending_discard(); /* the buffered edit belongs to the OUTGOING project -> discard */
+    if (!path || strlen(path) >= sizeof s_path) {
+        if (err_out && err_cap) {
+            (void)snprintf(err_out, err_cap, "project path exceeds the supported %zu-byte limit",
+                           sizeof s_path - 1U);
+        }
+        return TP_STATUS_OUT_OF_BOUNDS;
+    }
     tp_error err = {0};
+    char canonical_path[TP_IDENTITY_PATH_MAX];
+    tp_status canonical = project_path_canonical(path, canonical_path, sizeof canonical_path, &err);
+    if (canonical != TP_STATUS_OK) {
+        if (err_out && err_cap) {
+            (void)snprintf(err_out, err_cap, "%s", err.msg[0] ? err.msg : tp_status_str(canonical));
+        }
+        return canonical;
+    }
+    pending_discard(); /* the buffered edit belongs to the OUTGOING project -> discard */
+    /* Match the later save/fingerprint contract: GUI projects bind only to a regular non-link file.
+     * The second exact fingerprint returned by load also detects replacement during Open. */
+    tp_id128 preopen_fingerprint;
+    tp_status preopen = tp_identity_file_fingerprint(canonical_path, &preopen_fingerprint, &err);
+    if (preopen != TP_STATUS_OK) {
+        if (err_out && err_cap) {
+            (void)snprintf(err_out, err_cap, "%s", err.msg[0] ? err.msg : "project is not a regular file");
+        }
+        return preopen;
+    }
     tp_project *loaded = NULL;
-    tp_status st = tp_project_load(path, &loaded, &err);
+    tp_id128 loaded_fingerprint;
+    tp_status st = tp_project_load_with_fingerprint(canonical_path, &loaded, &loaded_fingerprint, &err);
     if (st != TP_STATUS_OK) {
         if (err_out && err_cap) {
             (void)snprintf(err_out, err_cap, "%s", err.msg[0] ? err.msg : tp_status_str(st));
         }
         return st;
+    }
+    if (!tp_id128_eq(preopen_fingerprint, loaded_fingerprint)) {
+        tp_project_destroy(loaded);
+        if (err_out && err_cap) {
+            (void)snprintf(err_out, err_cap, "project file changed while it was being opened");
+        }
+        return TP_STATUS_FILE_CHANGED_EXTERNALLY;
     }
     if (!wrap_model(loaded)) {
         if (err_out && err_cap) {
@@ -2736,7 +2958,12 @@ tp_status gui_project_open(const char *path, char *err_out, size_t err_cap) {
         }
         return TP_STATUS_OOM;
     }
-    set_path(path);
+    if (set_path(canonical_path, &loaded_fingerprint) != TP_STATUS_OK) {
+        if (err_out && err_cap) {
+            (void)snprintf(err_out, err_cap, "project path exceeds the supported path limit");
+        }
+        return TP_STATUS_OUT_OF_BOUNDS;
+    }
     s_preview_stale = true; /* nothing packed this session yet */
     gui_scan_invalidate_all();
     promote_and_baseline();
@@ -2753,7 +2980,56 @@ tp_status gui_project_save(char *err_out, size_t err_cap) {
     return gui_project_save_as(s_path, err_out, err_cap);
 }
 
+/* Master spec 14.2: a live session must never silently overwrite project bytes changed by another
+ * editor since Open/last Save. Save As to a genuinely different identity remains deliberate; Save
+ * and alias-equivalent Save As are guarded by the exact-byte baseline captured in set_path(). */
+static tp_status require_bound_file_unchanged(const char *path, char *err_out, size_t err_cap) {
+    const bool same_identity = s_path[0] != '\0' && path && path[0] != '\0' &&
+                               (strcmp(path, s_path) == 0 || recovery_paths_equal(path, s_path));
+    if (!same_identity) {
+        return TP_STATUS_OK;
+    }
+    if (!s_has_path_fingerprint) {
+        if (err_out && err_cap) {
+            (void)snprintf(err_out, err_cap,
+                           "the saved-file baseline is unavailable; use Save As to avoid overwriting external changes");
+        }
+        return TP_STATUS_FILE_CHANGED_EXTERNALLY;
+    }
+    tp_id128 current;
+    tp_error err = {0};
+    if (tp_identity_file_fingerprint(path, &current, &err) != TP_STATUS_OK ||
+        memcmp(current.bytes, s_path_fingerprint.bytes, sizeof current.bytes) != 0) {
+        if (err_out && err_cap) {
+            (void)snprintf(err_out, err_cap,
+                           "the project file changed externally; reopen it or use Save As");
+        }
+        return TP_STATUS_FILE_CHANGED_EXTERNALLY;
+    }
+    return TP_STATUS_OK;
+}
+
 tp_status gui_project_save_as(const char *path, char *err_out, size_t err_cap) {
+    if (!path || strlen(path) >= sizeof s_path) {
+        if (err_out && err_cap) {
+            (void)snprintf(err_out, err_cap, "project path exceeds the supported %zu-byte limit",
+                           sizeof s_path - 1U);
+        }
+        return TP_STATUS_OUT_OF_BOUNDS;
+    }
+    tp_error err = {0};
+    char canonical_path[TP_IDENTITY_PATH_MAX];
+    tp_status canonical = project_path_canonical(path, canonical_path, sizeof canonical_path, &err);
+    if (canonical != TP_STATUS_OK) {
+        if (err_out && err_cap) {
+            (void)snprintf(err_out, err_cap, "%s", err.msg[0] ? err.msg : tp_status_str(canonical));
+        }
+        return canonical;
+    }
+    tp_status guard = require_bound_file_unchanged(canonical_path, err_out, err_cap);
+    if (guard != TP_STATUS_OK) {
+        return guard;
+    }
     /* fix [3]: the buffered gesture must be DURABLY committed before we persist. If its commit fails
      * (e.g. a journal append failure -- full disk), the edit is NOT in the model, so writing the file
      * + mark_saved would produce a file missing the edit AND a false "saved"/clean state (silent data
@@ -2762,7 +3038,7 @@ tp_status gui_project_save_as(const char *path, char *err_out, size_t err_cap) {
         gui_project_flush_error(err_out, err_cap); /* fix3 [2]: shared neutral wording (save/pack/gate) */
         return TP_STATUS_JOURNAL_FAILED;
     }
-    tp_error err = {0};
+    err = (tp_error){0};
     /* Promote to final random ids BEFORE writing (§5.5); on OS-RNG failure promote returns
      * RNG_FAILED with every id left nil, so persisting now would write a nil-id file that
      * fails on reload. Fail closed -- report and return WITHOUT saving. */
@@ -2773,14 +3049,26 @@ tp_status gui_project_save_as(const char *path, char *err_out, size_t err_cap) {
         }
         return ids;
     }
-    tp_status st = tp_project_save(s_proj, path, &err);
+    const bool same_identity = s_path[0] != '\0' &&
+                               (strcmp(canonical_path, s_path) == 0 ||
+                                recovery_paths_equal(canonical_path, s_path));
+    tp_id128 saved_fingerprint;
+    tp_status st = same_identity
+                       ? tp_project_save_if_unchanged(s_proj, canonical_path, &s_path_fingerprint,
+                                                      &saved_fingerprint, &err)
+                       : tp_project_save_with_fingerprint(s_proj, canonical_path, &saved_fingerprint, &err);
     if (st != TP_STATUS_OK) {
         if (err_out && err_cap) {
             (void)snprintf(err_out, err_cap, "%s", err.msg[0] ? err.msg : tp_status_str(st));
         }
         return st;
     }
-    set_path(path);
+    if (set_path(canonical_path, &saved_fingerprint) != TP_STATUS_OK) {
+        if (err_out && err_cap) {
+            (void)snprintf(err_out, err_cap, "project saved, but its path exceeds the live identity limit");
+        }
+        return TP_STATUS_OUT_OF_BOUNDS;
+    }
     /* Re-baseline the identity anchor to the just-saved (possibly relativized) in-memory form.
      * Save may relativize absolute sources in place -> that identity IS the clean baseline; the
      * revision + undo history are preserved (§8/§420). */
@@ -2798,6 +3086,10 @@ tp_status gui_project_save_as(const char *path, char *err_out, size_t err_cap) {
      * way the Save succeeds; surface the degraded-durability notice via the soft channel. */
     tp_error cerr = {0};
     if (tp_model_compact_journal(s_model, &cerr) != TP_STATUS_OK) {
+        /* Whether the checkpoint reset or its authoritative META re-emit failed, do not leave a
+         * partially-refreshed slot attached after Save. The project file is already durable and clean;
+         * disabling this session's recovery is safer than offering stale/identity-less recovery later. */
+        abandon_stale_recovery_authority();
         note_recovery_degraded(cerr.msg[0] ? cerr.msg : "compaction failed");
     }
     return TP_STATUS_OK;

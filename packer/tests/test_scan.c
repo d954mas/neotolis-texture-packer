@@ -16,6 +16,7 @@
 #define TP_TEST_MKDIR(p) _mkdir(p)
 #else
 #include <sys/stat.h>
+#include <unistd.h>
 #define TP_TEST_MKDIR(p) mkdir((p), 0777)
 #endif
 
@@ -143,14 +144,6 @@ static void build_listdir_fixture(void) {
     write_file(p, "C");
 }
 
-static int str_cmp(const void *a, const void *b) {
-    return strcmp(*(const char *const *)a, *(const char *const *)b);
-}
-static void sort_names(tp_str_list *l) {
-    if (l->count > 1) {
-        qsort(l->items, (size_t)l->count, sizeof *l->items, str_cmp);
-    }
-}
 // #endregion
 
 // #region tests
@@ -253,51 +246,63 @@ void test_is_dir_and_exists(void) {
     TEST_ASSERT_FALSE(tp_scan_exists(""));
 }
 
-/* R5b-2: the non-recursive suffix lister returns exactly the matching regular-file NAMES: the two
- * ".ntpjournal" files, NOT the ".lock" companion (different suffix), NOT the ".txt" (non-matching),
- * NOT the subdirectory, and NOT the nested match (non-recursive). */
-void test_list_dir_suffix(void) {
-    tp_str_list l = {0};
-    const bool ok = tp_scan_list_dir(g_listdir, ".ntpjournal", &l);
-    TEST_ASSERT_TRUE(ok);
-    sort_names(&l);
-    TEST_ASSERT_EQUAL_INT(2, l.count);
-    TEST_ASSERT_EQUAL_STRING("A.ntpjournal", l.items[0]);
-    TEST_ASSERT_EQUAL_STRING("B.ntpjournal", l.items[1]);
-    tp_str_list_free(&l);
-    TEST_ASSERT_EQUAL_INT(0, l.count);
-    TEST_ASSERT_NULL(l.items);
+typedef struct visit_probe {
+    int count;
+    uint64_t bytes;
+    int stop_after;
+} visit_probe;
+
+static bool count_journal_name(void *ctx, const char *name, uint64_t size) {
+    visit_probe *probe = (visit_probe *)ctx;
+    TEST_ASSERT_NOT_NULL(name);
+    probe->count++;
+    probe->bytes += size;
+    return probe->stop_after == 0 || probe->count < probe->stop_after;
 }
 
-/* Empty suffix matches every REGULAR file at the top level (subdir + nested file excluded). */
-void test_list_dir_all_regular_files(void) {
-    tp_str_list l = {0};
-    const bool ok = tp_scan_list_dir(g_listdir, "", &l);
-    TEST_ASSERT_TRUE(ok);
-    sort_names(&l);
-    TEST_ASSERT_EQUAL_INT(4, l.count); /* A.ntpjournal, A.ntpjournal.lock, B.ntpjournal, notes.txt */
-    TEST_ASSERT_EQUAL_STRING("A.ntpjournal", l.items[0]);
-    TEST_ASSERT_EQUAL_STRING("A.ntpjournal.lock", l.items[1]);
-    TEST_ASSERT_EQUAL_STRING("B.ntpjournal", l.items[2]);
-    TEST_ASSERT_EQUAL_STRING("notes.txt", l.items[3]);
-    tp_str_list_free(&l);
+void test_visit_dir_streams_matching_names(void) {
+    visit_probe all = {0};
+    TEST_ASSERT_TRUE(tp_scan_visit_dir(g_listdir, ".ntpjournal", count_journal_name, &all));
+    TEST_ASSERT_EQUAL_INT(2, all.count);
+    TEST_ASSERT_EQUAL_UINT64(2u, all.bytes); /* fixture files contain one byte each */
+
+    visit_probe bounded = {.stop_after = 1};
+    TEST_ASSERT_TRUE(tp_scan_visit_dir(g_listdir, ".ntpjournal", count_journal_name, &bounded));
+    TEST_ASSERT_EQUAL_INT(1, bounded.count);
 }
 
-/* A dir-open failure returns false and leaves *out untouched (recovery scan degrades to no-adopt). */
-void test_list_dir_missing_returns_false(void) {
+#ifndef _WIN32
+/* Recovery discovery must never follow symlinks or return special files. The
+ * caller opens every returned journal path, so returning a FIFO can block GUI
+ * startup indefinitely and following a symlink escapes the recovery directory. */
+void test_visit_dir_excludes_fifo_and_symlink(void) {
+    char fifo_path[800];
+    char link_path[800];
+    (void)snprintf(fifo_path, sizeof fifo_path, "%s/pipe.ntpjournal", g_listdir);
+    (void)snprintf(link_path, sizeof link_path, "%s/link.ntpjournal", g_listdir);
+    (void)unlink(fifo_path);
+    (void)unlink(link_path);
+    TEST_ASSERT_EQUAL_INT(0, mkfifo(fifo_path, 0600));
+    TEST_ASSERT_EQUAL_INT(0, symlink("A.ntpjournal", link_path));
+
+    visit_probe probe = {0};
+    TEST_ASSERT_TRUE(tp_scan_visit_dir(g_listdir, ".ntpjournal", count_journal_name, &probe));
+    TEST_ASSERT_EQUAL_INT(2, probe.count);
+    (void)unlink(link_path);
+    (void)unlink(fifo_path);
+}
+#endif
+
+/* A dir-open or argument failure returns false; startup recovery degrades to an empty collect. */
+void test_visit_dir_missing_and_bad_args_return_false(void) {
     char missing[800];
     (void)snprintf(missing, sizeof missing, "%s/does_not_exist", g_listdir);
-    tp_str_list l = {0};
-    const bool ok = tp_scan_list_dir(missing, ".ntpjournal", &l);
-    TEST_ASSERT_FALSE(ok);
-    TEST_ASSERT_EQUAL_INT(0, l.count);
-    TEST_ASSERT_NULL(l.items);
-    /* NULL/empty guards + free-safety */
-    TEST_ASSERT_FALSE(tp_scan_list_dir(NULL, "", &l));
-    TEST_ASSERT_FALSE(tp_scan_list_dir("", "", &l));
-    TEST_ASSERT_FALSE(tp_scan_list_dir(g_listdir, "", NULL));
-    tp_str_list_free(&l);   /* zeroed list */
-    tp_str_list_free(NULL); /* no crash */
+    visit_probe probe = {0};
+    TEST_ASSERT_FALSE(tp_scan_visit_dir(missing, ".ntpjournal", count_journal_name, &probe));
+    TEST_ASSERT_FALSE(tp_scan_visit_dir(NULL, "", count_journal_name, &probe));
+    TEST_ASSERT_FALSE(tp_scan_visit_dir("", "", count_journal_name, &probe));
+    TEST_ASSERT_FALSE(tp_scan_visit_dir(g_listdir, "", NULL, &probe));
+    TEST_ASSERT_EQUAL_INT(0, probe.count);
 }
 // #endregion
 
@@ -312,8 +317,10 @@ int main(int argc, char **argv) {
     RUN_TEST(test_empty_subdir_is_empty);
     RUN_TEST(test_fixture_walk);
     RUN_TEST(test_is_dir_and_exists);
-    RUN_TEST(test_list_dir_suffix);
-    RUN_TEST(test_list_dir_all_regular_files);
-    RUN_TEST(test_list_dir_missing_returns_false);
+    RUN_TEST(test_visit_dir_streams_matching_names);
+#ifndef _WIN32
+    RUN_TEST(test_visit_dir_excludes_fifo_and_symlink);
+#endif
+    RUN_TEST(test_visit_dir_missing_and_bad_args_return_false);
     return UNITY_END();
 }

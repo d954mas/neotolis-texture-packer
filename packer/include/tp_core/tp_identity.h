@@ -40,6 +40,10 @@ extern "C" {
 /* Longest canonical identity path (matches tp_project's internal TP_PATH_MAX). */
 #define TP_IDENTITY_PATH_MAX 4096
 
+/* A project fingerprint is deliberately bounded: external-change detection must
+ * never stream forever from a growing file or allocate/read an unbounded input. */
+#define TP_IDENTITY_FILE_MAX_BYTES (64U * 1024U * 1024U)
+
 /* ----- canonical saved-project path (task 1) ----------------------------- */
 
 /* Lexically canonicalize an ABSOLUTE `.ntpacker_project` path under the NATIVE
@@ -61,6 +65,21 @@ tp_status tp_identity_path_canonical(const char *input, char *out, size_t cap, t
 /* Identity equality of two ALREADY-canonical paths under the native host case
  * policy (POSIX byte-exact; Windows ASCII case-fold). */
 bool tp_identity_path_equal(const char *canon_a, const char *canon_b);
+
+/* Content fingerprint of an exact byte buffer. `bytes` may be NULL only when
+ * `len == 0`. This is the primitive file load/save paths use before releasing the
+ * exact buffer they consumed/produced, avoiding a racy reopen-and-rehash step. */
+tp_status tp_identity_bytes_fingerprint(const void *bytes, size_t len, tp_id128 *out, tp_error *err);
+
+/* Content fingerprint of a project file for external-change detection. Hashes at
+ * most TP_IDENTITY_FILE_MAX_BYTES exact file bytes (formatting included) through
+ * the shared tp_hasher. The path must name a regular file directly: symlinks,
+ * directories, devices, pipes, and files larger than the bound are rejected.
+ * Reading is limited to the size observed after open, so a concurrently growing
+ * input cannot keep the call alive forever. Before returning, the current pathname
+ * is re-opened and must still identify the same file/inode whose bytes were read;
+ * an atomic concurrent replacement is therefore rejected. On failure `out` is nil. */
+tp_status tp_identity_file_fingerprint(const char *path, tp_id128 *out, tp_error *err);
 
 /* ----- session identity DTO + Save-As transition (tasks 3, 4) ------------- */
 

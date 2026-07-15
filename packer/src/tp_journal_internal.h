@@ -67,6 +67,12 @@ void tp_journal__poison(tp_journal *j);
  * healthy -> keep it). NULL-safe (false). */
 bool tp_journal__is_poisoned(const tp_journal *j);
 
+/* Test-only direct probe for the corruption resync scanner. Returns the same
+ * conservative "valid record or budget exhausted" decision as production and
+ * reports aggregate CRC bytes without shared mutable state. */
+bool tp_journal__test_has_valid_record_after(const uint8_t *buf, size_t len, size_t from,
+                                             size_t *crc_work_out);
+
 /* F2-04 fix C1: register an already-durable retained id into the in-memory index
  * WITHOUT writing a record. tp_model_attach_journal calls it to migrate ids the model
  * committed journal-less, BEFORE the initial checkpoint (so the checkpoint id-list AND

@@ -11,6 +11,7 @@
 #include "ui/nt_ui_tooltip.h"
 
 #include "tp_core/tp_export.h" /* exporter registry -> target dropdown (export modal) */
+#include "tp_core/tp_journal.h" /* recovery status labels */
 
 #include "gui_defs.h"
 #include "gui_state.h"
@@ -25,6 +26,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -488,7 +490,7 @@ void declare_recovery_modal(nt_ui_context_t *ctx) {
         return;
     }
     const int n = gui_actions_recovery_count();
-    float list_h = (float)n * S(44.0F) + S(6.0F);
+    float list_h = (float)n * S(62.0F) + S(6.0F);
     const float list_cap = S(320.0F);
     if (list_h > list_cap) {
         list_h = list_cap;
@@ -503,6 +505,11 @@ void declare_recovery_modal(nt_ui_context_t *ctx) {
         nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Recover unsaved work", &g_body);
         nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT),
                     "A previous session ended with unsaved changes. Choose what to do with each project.", &g_caption);
+        if (gui_actions_recovery_has_more()) {
+            nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT),
+                        "More recovery sessions remain on disk. Resolve these, then restart to see the rest.",
+                        &g_caption);
+        }
         nt_ui_scroll_begin(ctx, NULL, nt_ui_id("recovery/scroll"), &s_panel_scroll,
                            &(Clay_ElementDeclaration){.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(list_h)}}});
         CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)}, .layoutDirection = CLAY_TOP_TO_BOTTOM, .childGap = Su(6), .padding = {0, Su(8), 0, 0}}}) {
@@ -514,18 +521,39 @@ void declare_recovery_modal(nt_ui_context_t *ctx) {
                 char idb[48];
                 (void)snprintf(idb, sizeof idb, "recovery/row%d", i);
                 const uint32_t rid = nt_ui_id(idb);
-                char namebuf[288];
-                if (e->adoptable) {
-                    (void)snprintf(namebuf, sizeof namebuf, "%s", e->name);
-                } else {
+                char namebuf[320];
+                const bool partial = e->status == (int)TP_JOURNAL_RECOVERY_TRUNCATED ||
+                                     e->status == (int)TP_JOURNAL_RECOVERY_CORRUPT;
+                if (!e->adoptable) {
                     (void)snprintf(namebuf, sizeof namebuf, "%s (old format)", e->name);
+                } else if (partial) {
+                    (void)snprintf(namebuf, sizeof namebuf, "%s (partial recovery)", e->name);
+                } else {
+                    (void)snprintf(namebuf, sizeof namebuf, "%s", e->name);
                 }
-                CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(40))},
+                char timebuf[32] = "time unknown";
+                if (e->timestamp > 0) {
+                    time_t when = (time_t)e->timestamp;
+                    struct tm tmv;
+#ifdef _WIN32
+                    if (localtime_s(&tmv, &when) == 0) {
+#else
+                    if (localtime_r(&when, &tmv) != NULL) {
+#endif
+                        (void)strftime(timebuf, sizeof timebuf, "%Y-%m-%d %H:%M", &tmv);
+                    }
+                }
+                char detailbuf[GUI_RECOVERY_PATH_CAP + 48];
+                (void)snprintf(detailbuf, sizeof detailbuf, "%s  |  %s",
+                               e->orig_path[0] ? e->orig_path : "Untitled project", timebuf);
+                CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(58))},
                                  .layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = Su(10),
                                  .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
                     CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)},
+                                     .layoutDirection = CLAY_TOP_TO_BOTTOM, .childGap = Su(2),
                                      .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
                         ui_label_fit(ctx, namebuf, e->adoptable ? &g_body : &g_dim, S(140), 0U);
+                        ui_label_fit(ctx, detailbuf, &g_dim, S(140), 0U);
                     }
                     if (ui_btn(ctx, nt_ui_child_id(rid, "discard"), "Discard", &g_btn, true, 96.0F, 30.0F, &g_body)) {
                         gui_actions_recovery_request(i, GUI_RECOVERY_DISCARD);

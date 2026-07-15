@@ -7,15 +7,14 @@
  * enum out) it is directly headless-testable (main() is not); the selftest drives the full truth table
  * (J14). Truth table:
  *
- *   recovered && arg_present               -> GUI_STARTUP_DEFER    recovered unsaved work is live; opening
- *                                                                  the arg would silently discard it
+ *   recovered && arg_present               -> GUI_STARTUP_DEFER    recovery resolution is pending; opening
+ *                                                                  the arg could expose a stale project
  *   !arg_present                           -> GUI_STARTUP_IDLE     no file arg -> nothing to open
  *   arg_present && !arg_exists (& !rec.)   -> GUI_STARTUP_MISSING  stale/missing file arg
  *   arg_present && arg_exists  (& !rec.)   -> GUI_STARTUP_OPEN     open it
  *
  * DEFER takes precedence over MISSING: a recovered launch with a stale arg still DEFERS (it must never
- * become a "project not found" that clobbers the recovery warning -- finding 2). Recovered unsaved work
- * is never destroyed and never opened over.
+ * become a "project not found" that clobbers the recovery warning. Recovery is resolved before opening.
  */
 #ifndef NTPACKER_GUI_STARTUP_H
 #define NTPACKER_GUI_STARTUP_H
@@ -24,9 +23,8 @@
 
 typedef enum { GUI_STARTUP_OPEN, GUI_STARTUP_DEFER, GUI_STARTUP_MISSING, GUI_STARTUP_IDLE } gui_startup_action;
 
-/* Pure: no set_status / no gui_project_open inside. `recovered` is the DURABLE model predicate
- * (gui_project_has_recovered_unsaved), not the drained one-shot notice -- one source of truth for the
- * condition. See the header comment for the full truth table. */
+/* Pure: no set_status / no gui_project_open inside. `recovered` means R6 recovery resolution is pending.
+ * See the header comment for the full truth table. */
 gui_startup_action gui_startup_decide(bool arg_present, bool arg_exists, bool recovered);
 
 #endif /* NTPACKER_GUI_STARTUP_H */

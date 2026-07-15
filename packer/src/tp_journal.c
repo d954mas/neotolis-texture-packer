@@ -84,6 +84,8 @@ struct tp_journal {
     int64_t meta_time;
     char *meta_path;   /* owned; NULL until set (then never NULL, may be "") */
     char *meta_name;   /* owned; NULL until set (then never NULL, may be "") */
+    tp_id128 meta_file_fingerprint;
+    bool meta_has_file_fingerprint;
     bool has_meta;
 };
 
@@ -145,6 +147,31 @@ static char *jrn_dup_bytes(const uint8_t *p, size_t n) {
 
 static tp_status journal_fail(tp_error *err, const char *msg) {
     return tp_error_set(err, TP_STATUS_JOURNAL_FAILED, "%s", msg);
+}
+
+/* Writer/reader size invariant: a successful append must never create a store that
+ * file_read_all will reject. `store_len < header` models ensure_header's eventual
+ * reset/write of one complete header. This check is deliberately allocation-free so
+ * oversized checkpoint/transaction/metadata payloads fail before building copies. */
+static tp_status record_limit_check_at(int64_t store_len, size_t payload_len, tp_error *err) {
+    if (store_len < 0) {
+        return journal_fail(err, "journal length query failed");
+    }
+    const uint64_t base = (store_len < (int64_t)TP_JRN_HEADER_LEN)
+                              ? (uint64_t)TP_JRN_HEADER_LEN
+                              : (uint64_t)store_len;
+    const uint64_t frame = (uint64_t)TP_JRN_SYNC_FIELD + (uint64_t)TP_JRN_LEN_FIELD +
+                           (uint64_t)payload_len + (uint64_t)TP_JRN_CRC_FIELD;
+    if ((uint64_t)payload_len > UINT32_MAX || frame > SIZE_MAX ||
+        base > (uint64_t)TP_JOURNAL_MAX_FILE_BYTES ||
+        frame > (uint64_t)TP_JOURNAL_MAX_FILE_BYTES - base) {
+        return journal_fail(err, "journal append would exceed the recoverable file-size limit");
+    }
+    return TP_STATUS_OK;
+}
+
+static tp_status record_limit_check(tp_journal *j, size_t payload_len, tp_error *err) {
+    return record_limit_check_at(j->io.length(j->io.ctx), payload_len, err);
 }
 
 void tp_journal__poison(tp_journal *j) {
@@ -213,16 +240,24 @@ static tp_status write_record(tp_journal *j, const uint8_t *payload, size_t payl
     if (j->poisoned) {
         return journal_fail(err, "journal is poisoned: a prior append could not be rolled back");
     }
+    /* First check leaves even an empty/torn-header store byte-unchanged on a limit rejection. */
+    tp_status limit = record_limit_check(j, payload_len, err);
+    if (limit != TP_STATUS_OK) {
+        return limit;
+    }
     tp_status hs = ensure_header(j, err);
     if (hs != TP_STATUS_OK) {
         return hs;
     }
-    if (payload_len > 0xFFFFFFFFu) {
-        return journal_fail(err, "journal record exceeds the maximum record size");
-    }
     int64_t prior = j->io.length(j->io.ctx);
     if (prior < 0) {
         return journal_fail(err, "journal length query failed");
+    }
+    /* Re-check after ensure_header (and against a concurrent external extension) so
+     * the write itself can never cross the reader cap. */
+    limit = record_limit_check_at(prior, payload_len, err);
+    if (limit != TP_STATUS_OK) {
+        return limit;
     }
     size_t reclen = (size_t)TP_JRN_SYNC_FIELD + (size_t)TP_JRN_LEN_FIELD + payload_len + (size_t)TP_JRN_CRC_FIELD;
     uint8_t *rec = (uint8_t *)malloc(reclen);
@@ -256,10 +291,21 @@ static tp_status write_record(tp_journal *j, const uint8_t *payload, size_t payl
  * "" (never NULL from our callers; a NULL is defensively treated as ""). Reuses write_record so it
  * inherits the fail-closed / poison / rollback discipline. */
 static tp_status write_meta_record(tp_journal *j, int64_t timestamp, const char *path, const char *name,
-                                   tp_error *err) {
+                                   const tp_id128 *file_fingerprint, tp_error *err) {
     size_t plen = path ? strlen(path) : 0;
     size_t nlen = name ? strlen(name) : 0;
-    size_t payload_len = (size_t)TP_JRN_META_FIXED + plen + (size_t)TP_JRN_LEN_FIELD + nlen;
+    const size_t fingerprint_len = file_fingerprint ? sizeof file_fingerprint->bytes : 0;
+    const uint64_t payload64 = (uint64_t)TP_JRN_META_FIXED + (uint64_t)plen +
+                               (uint64_t)TP_JRN_LEN_FIELD + (uint64_t)nlen +
+                               (uint64_t)fingerprint_len;
+    if (payload64 > SIZE_MAX) {
+        return journal_fail(err, "journal metadata record size overflow");
+    }
+    size_t payload_len = (size_t)payload64;
+    tp_status limit = record_limit_check(j, payload_len, err);
+    if (limit != TP_STATUS_OK) {
+        return limit;
+    }
     uint8_t *payload = (uint8_t *)malloc(payload_len);
     if (!payload) {
         return tp_error_set(err, TP_STATUS_OOM, "journal metadata payload allocation failed");
@@ -278,6 +324,10 @@ static tp_status write_meta_record(tp_journal *j, int64_t timestamp, const char 
     off += 4;
     if (nlen) {
         memcpy(payload + off, name, nlen);
+        off += nlen;
+    }
+    if (file_fingerprint) {
+        memcpy(payload + off, file_fingerprint->bytes, sizeof file_fingerprint->bytes);
     }
     tp_status st = write_record(j, payload, payload_len, err);
     free(payload);
@@ -286,18 +336,18 @@ static tp_status write_meta_record(tp_journal *j, int64_t timestamp, const char 
 
 tp_status tp_journal_set_metadata(tp_journal *j, int64_t timestamp, const char *path, const char *name,
                                   tp_error *err) {
+    return tp_journal_set_metadata_ex(j, timestamp, path, name, NULL, err);
+}
+
+tp_status tp_journal_set_metadata_ex(tp_journal *j, int64_t timestamp, const char *path, const char *name,
+                                     const tp_id128 *file_fingerprint, tp_error *err) {
     if (!j) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "null journal");
     }
-    /* R5b-1 fix (cache-authoritative + best-effort durable; mirrors tp_journal_compact's re-emit):
-     * metadata is INFORMATIONAL and the in-memory cache is the SOURCE OF TRUTH for what the next
-     * compaction persists; the durable META append is a best-effort bonus for crash-before-compaction.
-     * COMMIT THE CACHE FIRST (only OOM on the dups can fail it), then attempt the durable append and
-     * SWALLOW a healthy-journal failure exactly like tp_journal_compact does -- write_record already
-     * rolled the torn record back, so the store stays fully recoverable and the cache still holds the
-     * truth (the next compaction re-emits it). Return an error ONLY when the journal is genuinely
-     * degraded (write_record could NOT roll back -> self-poisoned) or OOM, so a caller's "recovery
-     * degraded" surfacing fires only on REAL loss, never on a transient meta hiccup. */
+    /* Commit the cache first, then append the authoritative recovery metadata. The cache remains
+     * useful for a later compaction even when the append was rolled back cleanly, but the caller MUST
+     * see every durable-write failure: until a META record reaches the store, a crash may recover the
+     * previous path/fingerprint and offer an unsafe Save Original. */
     char *pdup = jrn_strdup(path ? path : "");
     if (!pdup) {
         return tp_error_set(err, TP_STATUS_OOM, "journal metadata path allocation failed");
@@ -312,14 +362,31 @@ tp_status tp_journal_set_metadata(tp_journal *j, int64_t timestamp, const char *
     j->meta_path = pdup;
     j->meta_name = ndup;
     j->meta_time = timestamp;
+    memset(&j->meta_file_fingerprint, 0, sizeof j->meta_file_fingerprint);
+    if (file_fingerprint) {
+        j->meta_file_fingerprint = *file_fingerprint;
+    }
+    j->meta_has_file_fingerprint = file_fingerprint != NULL;
     j->has_meta = true;
-    tp_error mde = {0}; /* LOCAL: a swallowed best-effort failure must not pollute the caller's err */
-    tp_status ms = write_meta_record(j, timestamp, pdup, ndup, &mde);
-    if (ms != TP_STATUS_OK && j->poisoned) {
-        /* rollback failed -> store genuinely corrupt/degraded -> propagate so the caller may surface it */
+    tp_error mde = {0};
+    tp_status ms = write_meta_record(j, timestamp, pdup, ndup, file_fingerprint, &mde);
+    if (ms != TP_STATUS_OK) {
         return tp_error_set(err, ms, "%s", mde.msg[0] ? mde.msg : "journal metadata durable write failed");
     }
-    return TP_STATUS_OK; /* healthy journal: the cache holds the identity; the next compaction persists it */
+    return TP_STATUS_OK;
+}
+
+static tp_status checkpoint_payload_size(const tp_journal *j, size_t snapshot_len, size_t *out,
+                                         tp_error *err) {
+    int id_count = tp_idset_count(&j->ids);
+    const uint64_t payload64 = (uint64_t)TP_JRN_CKPT_FIXED +
+                               (uint64_t)(unsigned int)id_count * (uint64_t)TP_JRN_IDLEN +
+                               (uint64_t)snapshot_len;
+    if (payload64 > SIZE_MAX) {
+        return journal_fail(err, "journal checkpoint record size overflow");
+    }
+    *out = (size_t)payload64;
+    return TP_STATUS_OK;
 }
 
 tp_status tp_journal_init_checkpoint(tp_journal *j, const uint8_t *snapshot, size_t len, int64_t revision,
@@ -327,9 +394,16 @@ tp_status tp_journal_init_checkpoint(tp_journal *j, const uint8_t *snapshot, siz
     if (!j) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "null journal");
     }
+    size_t payload_len = 0;
+    tp_status ps = checkpoint_payload_size(j, len, &payload_len, err);
+    if (ps != TP_STATUS_OK) {
+        return ps;
+    }
+    tp_status limit = record_limit_check(j, payload_len, err);
+    if (limit != TP_STATUS_OK) {
+        return limit;
+    }
     int id_count = tp_idset_count(&j->ids);
-    size_t ids_bytes = (size_t)id_count * (size_t)TP_JRN_IDLEN;
-    size_t payload_len = (size_t)TP_JRN_CKPT_FIXED + ids_bytes + len;
     uint8_t *payload = (uint8_t *)malloc(payload_len);
     if (!payload) {
         return tp_error_set(err, TP_STATUS_OOM, "journal checkpoint payload allocation failed");
@@ -355,6 +429,18 @@ tp_status tp_journal_init_checkpoint(tp_journal *j, const uint8_t *snapshot, siz
 tp_status tp_journal_compact(tp_journal *j, const uint8_t *snapshot, size_t len, int64_t revision, tp_error *err) {
     if (!j) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "null journal");
+    }
+    /* Reject an intrinsically oversized fresh checkpoint BEFORE truncate. Otherwise
+     * compaction would destroy the current recoverable log and only then discover that
+     * the replacement can never be read under this build's cap. */
+    size_t payload_len = 0;
+    tp_status ps = checkpoint_payload_size(j, len, &payload_len, err);
+    if (ps != TP_STATUS_OK) {
+        return ps;
+    }
+    tp_status limit = record_limit_check_at((int64_t)TP_JRN_HEADER_LEN, payload_len, err);
+    if (limit != TP_STATUS_OK) {
+        return limit;
     }
     /* R3 (plan S18 R): compact the store to a SINGLE fresh checkpoint (Save-window reset).
      * Truncate the BYTE STORE to 0 -- this physically removes the old checkpoint, every
@@ -384,23 +470,18 @@ tp_status tp_journal_compact(tp_journal *j, const uint8_t *snapshot, size_t len,
         j->poisoned = true;
         return cs;
     }
-    /* R5a fix [0]: re-emit the cached metadata BEST-EFFORT. Metadata is INFORMATIONAL (scan list only),
-     * NOT recovery-critical -- write_record already rolled a torn META tail back to the durable
-     * checkpoint, so the store stays fully recoverable; do NOT poison a healthy checkpoint over a lost
-     * scan label (poison here would make the glue detach the journal -> crash recovery silently OFF for
-     * the session even though a valid checkpoint is on disk). Use a LOCAL error so a swallowed best-effort
-     * failure never pollutes the caller's err. ONLY if write_record could not roll back (it self-poisoned,
-     * store genuinely corrupt) do we propagate so the glue detaches. */
+    /* Metadata carries the canonical path/fingerprint used by Save Original, so a fresh checkpoint
+     * without its matching META record is not a complete recovery authority. Propagate every re-emit
+     * failure; the host disables/removes this slot rather than later exposing an identity-less recovery. */
     if (j->has_meta) {
         tp_error meta_err = {0};
-        tp_status ms = write_meta_record(j, j->meta_time, j->meta_path, j->meta_name, &meta_err);
-        if (ms != TP_STATUS_OK && j->poisoned) {
-            /* rollback failed -> store corrupt -> surface via the caller's err and fail the compaction */
+        const tp_id128 *fingerprint = j->meta_has_file_fingerprint ? &j->meta_file_fingerprint : NULL;
+        tp_status ms = write_meta_record(j, j->meta_time, j->meta_path, j->meta_name, fingerprint, &meta_err);
+        if (ms != TP_STATUS_OK) {
             return tp_error_set(err, ms, "%s",
                                 meta_err.msg[0] ? meta_err.msg
                                                 : "journal metadata re-emit failed after compaction");
         }
-        /* else: checkpoint durable + store recoverable -> swallow; metadata simply absent until next compaction */
     }
     return TP_STATUS_OK;
 }
@@ -422,7 +503,15 @@ tp_status tp_journal_append_txn(tp_journal *j, const char *id_hex, int64_t revis
     if (rs != TP_STATUS_OK) {
         return tp_error_set(err, rs, "journal retained-id reserve failed (out of memory)");
     }
-    size_t payload_len = (size_t)TP_JRN_TXN_FIXED + len;
+    const uint64_t payload64 = (uint64_t)TP_JRN_TXN_FIXED + (uint64_t)len;
+    if (payload64 > SIZE_MAX) {
+        return journal_fail(err, "journal transaction record size overflow");
+    }
+    size_t payload_len = (size_t)payload64;
+    tp_status limit = record_limit_check(j, payload_len, err);
+    if (limit != TP_STATUS_OK) {
+        return limit;
+    }
     uint8_t *payload = (uint8_t *)malloc(payload_len);
     if (!payload) {
         return tp_error_set(err, TP_STATUS_OOM, "journal transaction payload allocation failed");
@@ -474,10 +563,13 @@ void tp_journal_recovery_free(tp_journal_recovery *r) {
  * is bounds-checked with size_t math before it is read. Returns TP_STATUS_OK (caller owns the
  * strings), TP_STATUS_OUT_OF_BOUNDS for a malformed/short payload (a corruption boundary), or
  * TP_STATUS_OOM. On any non-OK return the out strings are NULL (nothing leaks). Shared by recover + peek. */
-static tp_status parse_meta(const uint8_t *pl, size_t plen, int64_t *ts, char **path, char **name) {
+static tp_status parse_meta(const uint8_t *pl, size_t plen, int64_t *ts, char **path, char **name,
+                            tp_id128 *file_fingerprint, bool *has_file_fingerprint) {
     *ts = 0;
     *path = NULL;
     *name = NULL;
+    memset(file_fingerprint, 0, sizeof *file_fingerprint);
+    *has_file_fingerprint = false;
     if (plen < (size_t)TP_JRN_META_FIXED) {
         return TP_STATUS_OUT_OF_BOUNDS; /* too short for type + timestamp + path_len */
     }
@@ -507,6 +599,17 @@ static tp_status parse_meta(const uint8_t *pl, size_t plen, int64_t *ts, char **
         free(p);
         return TP_STATUS_OOM;
     }
+    off += (size_t)name_len;
+    const size_t trailing = plen - off;
+    if (trailing != 0 && trailing != sizeof file_fingerprint->bytes) {
+        free(p);
+        free(n);
+        return TP_STATUS_OUT_OF_BOUNDS;
+    }
+    if (trailing == sizeof file_fingerprint->bytes) {
+        memcpy(file_fingerprint->bytes, pl + off, sizeof file_fingerprint->bytes);
+        *has_file_fingerprint = true;
+    }
     *path = p;
     *name = n;
     return TP_STATUS_OK;
@@ -518,7 +621,9 @@ static tp_status parse_meta(const uint8_t *pl, size_t plen, int64_t *ts, char **
 static tp_status capture_meta(const uint8_t *pl, size_t plen, tp_journal_meta *dst, bool *has_dst) {
     int64_t mts = 0;
     char *mpath = NULL, *mname = NULL;
-    tp_status ms = parse_meta(pl, plen, &mts, &mpath, &mname);
+    tp_id128 fingerprint;
+    bool has_fingerprint = false;
+    tp_status ms = parse_meta(pl, plen, &mts, &mpath, &mname, &fingerprint, &has_fingerprint);
     if (ms != TP_STATUS_OK) {
         return ms; /* OOM or OUT_OF_BOUNDS; parse_meta guarantees mpath/mname NULL on non-OK (no leak) */
     }
@@ -527,6 +632,8 @@ static tp_status capture_meta(const uint8_t *pl, size_t plen, tp_journal_meta *d
     dst->timestamp = mts;
     dst->path = mpath;
     dst->name = mname;
+    dst->file_fingerprint = fingerprint;
+    dst->has_file_fingerprint = has_fingerprint;
     *has_dst = true;
     return TP_STATUS_OK;
 }
@@ -695,18 +802,54 @@ static tp_frame_status frame_parse_at(const uint8_t *buf, size_t len, size_t p, 
  * records) and the journal poisoned; none => a torn tail, safe to truncate. A PURE probe --
  * it never registers ids or applies a payload (recovery never guesses past a corruption). A
  * sync-word that collides with payload bytes self-rejects on the CRC check, so it is a hint. */
-static bool has_valid_record_after(const uint8_t *buf, size_t len, size_t from) {
+static bool has_valid_record_after(const uint8_t *buf, size_t len, size_t from, size_t *crc_work_out) {
     size_t frame_min = (size_t)TP_JRN_SYNC_FIELD + (size_t)TP_JRN_LEN_FIELD + (size_t)TP_JRN_CRC_FIELD;
+    size_t crc_work_done = 0;
+    if (crc_work_out) {
+        *crc_work_out = 0;
+    }
     if (len < frame_min) {
         return false;
     }
     for (size_t p = from; p <= len - frame_min; p++) {
+        if (tp_jrn_get_u32(buf + p) != (uint32_t)TP_JRN_SYNC_WORD) {
+            continue;
+        }
+        const size_t len_off = p + (size_t)TP_JRN_SYNC_FIELD;
+        const size_t payload_len_candidate = (size_t)tp_jrn_get_u32(buf + len_off);
+        const size_t after_len = len_off + (size_t)TP_JRN_LEN_FIELD;
+        if (payload_len_candidate > len - after_len ||
+            (size_t)TP_JRN_CRC_FIELD > len - after_len - payload_len_candidate) {
+            continue; /* incomplete candidate: no CRC work */
+        }
+        const size_t crc_work = (size_t)TP_JRN_SYNC_FIELD + (size_t)TP_JRN_LEN_FIELD +
+                                payload_len_candidate;
+        if (crc_work > len - crc_work_done) {
+            /* Adversarial dense sync candidates exhausted the linear work budget. Preserve the
+             * journal as corrupt instead of spending super-linear startup time or truncating it. */
+            if (crc_work_out) {
+                *crc_work_out = crc_work_done;
+            }
+            return true;
+        }
+        crc_work_done += crc_work;
         size_t payload_off = 0, payload_len = 0, frame_end = 0;
         if (frame_parse_at(buf, len, p, &payload_off, &payload_len, &frame_end) == FRAME_OK) {
+            if (crc_work_out) {
+                *crc_work_out = crc_work_done;
+            }
             return true;
         }
     }
+    if (crc_work_out) {
+        *crc_work_out = crc_work_done;
+    }
     return false;
+}
+
+bool tp_journal__test_has_valid_record_after(const uint8_t *buf, size_t len, size_t from,
+                                             size_t *crc_work_out) {
+    return has_valid_record_after(buf, len, from, crc_work_out);
 }
 
 /* R5a fix [5]: per-record callback for the SHARED front-to-back walk. Invoked ONCE per good CKPT/TXN
@@ -773,6 +916,13 @@ static tp_status walk_records(const uint8_t *buf, size_t len, tp_idset *ids, tp_
             }
             off = frame_end;
             continue;
+        }
+        /* A live model can advance only from a non-negative revision below INT64_MAX, and every durable
+         * state record must move strictly forward. CRC-valid hostile bytes that violate this contract are
+         * a corruption boundary, never a formally successful but permanently uneditable recovery. */
+        if (rev < 0 || rev == INT64_MAX || (*have_any && rev <= *last_rev)) {
+            *stop = TP_JRN_STOP_CORRUPT;
+            break;
         }
         /* A good CKPT/TXN record: hand it to the type-specific accumulator (a realloc OOM in the
          * callback is a HARD fault, not a CORRUPT stop). */
@@ -912,7 +1062,7 @@ tp_status tp_journal_recover(tp_journal *j, tp_journal_recovery *out, tp_error *
      * acknowledged records, so preserve the file and poison the journal against appends behind
      * it. If not, the tail is genuinely torn/corrupt and is safe to truncate away. A bloated
      * length that used to masquerade as a clean torn tail (TRUNCATED) is now caught here. */
-    bool more_after = (stop != TP_JRN_STOP_EOF) && has_valid_record_after(buf, len, off + 1);
+    bool more_after = (stop != TP_JRN_STOP_EOF) && has_valid_record_after(buf, len, off + 1, NULL);
     out->status = classify_stop(stop, out->records_recovered, more_after);
     if (more_after) {
         out->mid_stream_corrupt = true;
@@ -970,7 +1120,7 @@ tp_status tp_journal_recover(tp_journal *j, tp_journal_recovery *out, tp_error *
      * strings are freed separately by tp_journal_recovery_free). The cache was cleared up-front (above), so
      * the no-metadata case needs no else. Non-fatal on OOM: the cache is informational, recovery must still
      * succeed (has_meta simply stays false). Runs only on the SUCCESS path, so no double-free on any error path.
-     * NOTE (R5b, review finding [1]): the shipping GUI flow (try_adopt_recovered) CLONES the recovered state
+     * NOTE: recovery consumers clone the recovered state
      * and wraps a FRESH journal, discarding THIS seeded journal -- so R5b must carry out->metadata onto
      * whatever journal it makes live for the recovered project (reuse this journal, OR call
      * tp_journal_set_metadata on the fresh one). This seed is the correct core invariant either way. */
@@ -983,6 +1133,8 @@ tp_status tp_journal_recover(tp_journal *j, tp_journal_recovery *out, tp_error *
             j->meta_path = cp;
             j->meta_name = cn;
             j->meta_time = out->metadata.timestamp;
+            j->meta_file_fingerprint = out->metadata.file_fingerprint;
+            j->meta_has_file_fingerprint = out->metadata.has_file_fingerprint;
             j->has_meta = true;
         } else { /* OOM: leave the cache untouched (has_meta stays false) -- informational only */
             free(cp);
@@ -1086,7 +1238,7 @@ tp_status tp_journal_peek(tp_journal_io io, tp_journal_peek_result *out, tp_erro
     }
     out->has_checkpoint = pc.has_checkpoint;
     out->record_count = records;
-    bool more_after = (stop != TP_JRN_STOP_EOF) && has_valid_record_after(buf, len, off + 1);
+    bool more_after = (stop != TP_JRN_STOP_EOF) && has_valid_record_after(buf, len, off + 1, NULL);
     out->status = classify_stop(stop, out->record_count, more_after);
     free(buf);
     return TP_STATUS_OK;

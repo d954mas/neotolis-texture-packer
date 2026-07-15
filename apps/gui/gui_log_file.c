@@ -154,7 +154,15 @@ static void gui_log_file_sink(nt_log_level_t level, const char *domain, const ch
         mtx_unlock(&s_lock);
         return;
     }
-    (void)fflush(s_file);
+    if (fflush(s_file) != 0) {
+        /* A full/failed filesystem can accept the buffered fwrite and reject the durability flush.
+         * Stop the sink exactly like a short write; console logging remains available. */
+        (void)fclose(s_file);
+        s_file = NULL;
+        s_active = false;
+        mtx_unlock(&s_lock);
+        return;
+    }
     mtx_unlock(&s_lock);
 }
 // #endregion

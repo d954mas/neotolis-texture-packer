@@ -1,15 +1,19 @@
 #include "tp_core/tp_project.h"
 
 #include <ctype.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #ifdef _WIN32
 #include <direct.h>
+#include <fcntl.h>
+#include <io.h>
 #include <windows.h> /* MoveFileExA -- atomic replace-on-rename */
 #define tp_getcwd _getcwd
 #else
+#include <sys/stat.h>
 #include <unistd.h>  /* (already present) fsync, rename via <stdio.h> */
 #define tp_getcwd getcwd
 #endif
@@ -18,10 +22,12 @@
 
 #include "tp_core/tp_export.h" /* TP_EXPORTER_ID_JSON_NEOTOLIS (default-target seeding) */
 #include "tp_core/tp_id.h"     /* shape-ID parse/format for schema-v2 structural ids */
+#include "tp_core/tp_identity.h" /* exact-buffer load/save fingerprints + file-size bound */
 #include "tp_core/tp_names.h"  /* tp_sprite_export_key (v4 name-bridge derivation) */
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_srckey.h" /* TP_SRCKEY_MAX (v4 sprite key buffer) */
 #include "tp_core/tp_project_migrate.h" /* legacy synthesis + duplicate validation on load */
+#include "tp_project_internal.h"         /* deterministic save fault seam for tests */
 #include "tp_strutil.h"                 /* shared tp_strdup (one core definition, fix [8]) */
 
 #define TP_PATH_MAX 4096
@@ -1284,7 +1290,101 @@ tp_status tp_project_save_buffer(const tp_project *p, char **out, size_t *out_le
     return TP_STATUS_OK;
 }
 
-tp_status tp_project_save(tp_project *p, const char *path, tp_error *err) {
+typedef enum tp_temp_open_result {
+    TP_TEMP_OPEN_OK = 0,
+    TP_TEMP_OPEN_PATH_TOO_LONG,
+    TP_TEMP_OPEN_FAILED,
+} tp_temp_open_result;
+
+static bool s_test_fail_next_temp_create;
+static bool s_test_save_max_bytes_armed;
+static size_t s_test_save_max_bytes;
+
+void tp_project__test_fail_next_temp_create(void) { s_test_fail_next_temp_create = true; }
+void tp_project__test_set_save_max_bytes(size_t max_bytes) {
+    s_test_save_max_bytes = max_bytes;
+    s_test_save_max_bytes_armed = true;
+}
+
+/* Create a unique sibling temp atomically and keep that exact file open. There
+ * is deliberately no remove-before-open: an existing name belongs to another
+ * writer (or an interrupted save), so it is skipped rather than followed or
+ * deleted. The returned FILE owns the underlying descriptor/handle. */
+static tp_temp_open_result tp_open_save_temp(const char *path, char *tmp, size_t tmp_cap, FILE **out) {
+    *out = NULL;
+    if (s_test_fail_next_temp_create) {
+        s_test_fail_next_temp_create = false;
+        return TP_TEMP_OPEN_FAILED;
+    }
+#ifdef _WIN32
+    static volatile LONG counter;
+    const DWORD pid = GetCurrentProcessId();
+    for (unsigned int attempt = 0; attempt < 128U; attempt++) {
+        const LONG serial = InterlockedIncrement(&counter);
+        int nt = snprintf(tmp, tmp_cap, "%s.savetmp.%08lx.%08lx", path, (unsigned long)pid,
+                          (unsigned long)serial);
+        if (nt <= 0 || (size_t)nt >= tmp_cap) {
+            return TP_TEMP_OPEN_PATH_TOO_LONG;
+        }
+        HANDLE h = CreateFileA(tmp, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (h == INVALID_HANDLE_VALUE) {
+            const DWORD open_err = GetLastError();
+            if (open_err == ERROR_FILE_EXISTS || open_err == ERROR_ALREADY_EXISTS) {
+                continue;
+            }
+            return TP_TEMP_OPEN_FAILED;
+        }
+        const int fd = _open_osfhandle((intptr_t)h, _O_WRONLY | _O_BINARY);
+        if (fd < 0) {
+            (void)CloseHandle(h);
+            (void)DeleteFileA(tmp);
+            return TP_TEMP_OPEN_FAILED;
+        }
+        FILE *f = _fdopen(fd, "wb");
+        if (!f) {
+            (void)_close(fd); /* also closes h after _open_osfhandle succeeds */
+            (void)DeleteFileA(tmp);
+            return TP_TEMP_OPEN_FAILED;
+        }
+        *out = f;
+        return TP_TEMP_OPEN_OK;
+    }
+    return TP_TEMP_OPEN_FAILED;
+#else
+    int nt = snprintf(tmp, tmp_cap, "%s.savetmp.XXXXXX", path);
+    if (nt <= 0 || (size_t)nt >= tmp_cap) {
+        return TP_TEMP_OPEN_PATH_TOO_LONG;
+    }
+    const int fd = mkstemp(tmp); /* O_CREAT|O_EXCL: never follows an existing symlink */
+    if (fd < 0) {
+        return TP_TEMP_OPEN_FAILED;
+    }
+    /* Replacing an existing collaborative project must not silently collapse its group/other mode to
+     * mkstemp's 0600. Preserve the destination's permission bits when it is a regular file. A brand-new
+     * project deliberately keeps mkstemp's private 0600 default (no process-global umask dance). */
+    struct stat destination;
+    if (stat(path, &destination) == 0 && S_ISREG(destination.st_mode) &&
+        fchmod(fd, destination.st_mode & 0777) != 0) {
+        (void)close(fd);
+        (void)remove(tmp);
+        return TP_TEMP_OPEN_FAILED;
+    }
+    FILE *f = fdopen(fd, "wb");
+    if (!f) {
+        (void)close(fd);
+        (void)remove(tmp);
+        return TP_TEMP_OPEN_FAILED;
+    }
+    *out = f;
+    return TP_TEMP_OPEN_OK;
+#endif
+}
+
+static tp_status tp_project_save_stage(tp_project *p, const char *path, tp_id128 *out_fingerprint,
+                                       const tp_id128 *expected_fingerprint, tp_error *err) {
+    if (out_fingerprint) {
+        memset(out_fingerprint, 0, sizeof *out_fingerprint);
+    }
     if (!p || !path) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_project_save: NULL project or path");
     }
@@ -1338,6 +1438,24 @@ tp_status tp_project_save(tp_project *p, const char *path, tp_error *err) {
     if (bst != TP_STATUS_OK) {
         return bst;
     }
+    size_t save_max_bytes = (size_t)TP_IDENTITY_FILE_MAX_BYTES;
+    if (s_test_save_max_bytes_armed) {
+        save_max_bytes = s_test_save_max_bytes;
+        s_test_save_max_bytes_armed = false;
+    }
+    if (len > save_max_bytes) {
+        free(buf);
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                            "tp_project_save: serialized project exceeds the %zu-byte limit", save_max_bytes);
+    }
+    tp_id128 written_fingerprint = {{0}};
+    if (out_fingerprint) {
+        bst = tp_identity_bytes_fingerprint(buf, len, &written_fingerprint, err);
+        if (bst != TP_STATUS_OK) {
+            free(buf);
+            return bst;
+        }
+    }
 
     /* Atomic write: serialize to a sibling temp, flush + close (checking for a deferred I/O error -- the
      * pre-existing `(void)fclose` swallowed disk-full flush failures and could return OK with a PARTIAL file),
@@ -1347,23 +1465,23 @@ tp_status tp_project_save(tp_project *p, const char *path, tp_error *err) {
      * this guarantees crash / short-write ATOMICITY, which is what the recovery layer relies on.
      *
      * ATOMIC-SAVE TRADEOFFS (accepted -- these are inherent to any atomic-rename save, as done by editors and
-     * git): replacing the destination via rename/MoveFileEx swaps the inode, so a save does NOT preserve the
-     * previous file's mode/owner/ACLs (a fresh file gets the default 0644 & ~umask / parent-dir ACLs); a `path`
+     * git): replacing the destination via rename/MoveFileEx swaps the inode. POSIX preserves an existing
+     * regular destination's permission bits, while a new file keeps private mode 0600; owner and ACLs may
+     * still change. On Windows the new file inherits the parent ACL. A `path`
      * that is a SYMLINK is replaced by a regular file rather than written through; a save into a READ-ONLY
-     * containing directory fails (the sibling temp cannot be created) where an in-place truncate once succeeded;
-     * and the savable path is 8 bytes shorter (the ".savetmp" suffix). For a `.ntpacker_project` JSON file these
-     * are immaterial, and every one fails CLOSED -- an error, never a corrupt/partial file. */
+     * containing directory fails (the sibling temp cannot be created) where an in-place truncate once succeeded.
+     * For a `.ntpacker_project` JSON file these are immaterial, and every one fails CLOSED -- an error, never a
+     * corrupt/partial file. */
     char tmp[TP_PATH_MAX];
-    int nt = snprintf(tmp, sizeof tmp, "%s.savetmp", path);
-    if (nt <= 0 || (size_t)nt >= sizeof tmp) {
+    FILE *f = NULL;
+    const tp_temp_open_result temp_rc = tp_open_save_temp(path, tmp, sizeof tmp, &f);
+    if (temp_rc == TP_TEMP_OPEN_PATH_TOO_LONG) {
         free(buf);
         return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "tp_project_save: path too long: %s", path);
     }
-    (void)remove(tmp); /* clear any stale temp from a prior aborted save (we own this name) */
-    FILE *f = fopen(tmp, "wb"); /* binary: keep LF, no CRLF translation */
-    if (!f) {
+    if (temp_rc != TP_TEMP_OPEN_OK) {
         free(buf);
-        return tp_error_set(err, TP_STATUS_BAD_PROJECT, "tp_project_save: cannot open %s for writing", tmp);
+        return tp_error_set(err, TP_STATUS_BAD_PROJECT, "tp_project_save: cannot create temporary file for %s", path);
     }
     const size_t wrote = fwrite(buf, 1U, len, f);
     const int flush_rc = fflush(f); /* MUST be checked in the guard below: a failed flush (e.g. ENOSPC) can
@@ -1380,6 +1498,19 @@ tp_status tp_project_save(tp_project *p, const char *path, tp_error *err) {
         (void)remove(tmp); /* failed write/flush -> discard the temp; `path` was never touched */
         return tp_error_set(err, TP_STATUS_BAD_PROJECT, "tp_project_save: short write to %s", path);
     }
+    /* Optimistic concurrency is checked as late as portability allows: after the complete replacement
+     * is durable in its sibling temp, immediately before the atomic promotion. This closes the large
+     * serialize/write window left by GUI-only preflight checks. A non-cooperating writer can still race
+     * the final fingerprint->rename instructions; no portable filesystem CAS exists for replacement. */
+    if (expected_fingerprint) {
+        tp_id128 current = {{0}};
+        tp_status fps = tp_identity_file_fingerprint(path, &current, err);
+        if (fps != TP_STATUS_OK || !tp_id128_eq(current, *expected_fingerprint)) {
+            (void)remove(tmp);
+            return tp_error_set(err, TP_STATUS_FILE_CHANGED_EXTERNALLY,
+                                "tp_project_save: destination changed before publish: %s", path);
+        }
+    }
     /* Atomically move the fully-written temp onto `path`, replacing any existing file. */
     int moved;
 #ifdef _WIN32
@@ -1391,7 +1522,68 @@ tp_status tp_project_save(tp_project *p, const char *path, tp_error *err) {
         (void)remove(tmp);
         return tp_error_set(err, TP_STATUS_BAD_PROJECT, "tp_project_save: could not finalize save to %s", path);
     }
+    if (out_fingerprint) {
+        *out_fingerprint = written_fingerprint;
+    }
     return TP_STATUS_OK;
+}
+
+/* A save normalizes only project_dir and source path spellings. Apply those successful staged
+ * mutations without replacing the outer project/atlas arrays, so existing live GUI pointers keep the
+ * same lifetime contract. No allocation can fail here: ownership moves from the already-saved clone. */
+static void tp_project_adopt_saved_paths(tp_project *dst, tp_project *stage) {
+    free(dst->project_dir);
+    dst->project_dir = stage->project_dir;
+    stage->project_dir = NULL;
+    for (int ai = 0; ai < dst->atlas_count; ai++) {
+        for (int si = 0; si < dst->atlases[ai].source_count; si++) {
+            free(dst->atlases[ai].sources[si].path);
+            dst->atlases[ai].sources[si].path = stage->atlases[ai].sources[si].path;
+            stage->atlases[ai].sources[si].path = NULL;
+        }
+    }
+}
+
+static tp_status tp_project_save_staged(tp_project *p, const char *path, tp_id128 *out_fingerprint,
+                                        const tp_id128 *expected_fingerprint, tp_error *err) {
+    if (out_fingerprint) {
+        memset(out_fingerprint, 0, sizeof *out_fingerprint);
+    }
+    if (!p || !path) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_project_save: NULL project or path");
+    }
+    tp_project *stage = tp_project_clone(p);
+    if (!stage) {
+        return tp_error_set(err, TP_STATUS_OOM, "tp_project_save: could not stage project paths");
+    }
+    tp_status st = tp_project_save_stage(stage, path, out_fingerprint, expected_fingerprint, err);
+    if (st == TP_STATUS_OK) {
+        tp_project_adopt_saved_paths(p, stage);
+    }
+    tp_project_destroy(stage);
+    return st;
+}
+
+tp_status tp_project_save_with_fingerprint(tp_project *p, const char *path, tp_id128 *out_fingerprint,
+                                           tp_error *err) {
+    return tp_project_save_staged(p, path, out_fingerprint, NULL, err);
+}
+
+tp_status tp_project_save_if_unchanged(tp_project *p, const char *path,
+                                       const tp_id128 *expected_fingerprint,
+                                       tp_id128 *out_fingerprint, tp_error *err) {
+    if (!expected_fingerprint) {
+        if (out_fingerprint) {
+            memset(out_fingerprint, 0, sizeof *out_fingerprint);
+        }
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "tp_project_save_if_unchanged: NULL expected fingerprint");
+    }
+    return tp_project_save_staged(p, path, out_fingerprint, expected_fingerprint, err);
+}
+
+tp_status tp_project_save(tp_project *p, const char *path, tp_error *err) {
+    return tp_project_save_with_fingerprint(p, path, NULL, err);
 }
 
 /* ======================================================================== */
@@ -1921,30 +2113,43 @@ static tp_status tp_migrate(int from_version, tp_error *err) {
     return TP_STATUS_OK;
 }
 
-static char *tp_read_file(const char *path, size_t *out_len) {
+static tp_status tp_read_file(const char *path, char **out, size_t *out_len, tp_error *err) {
+    *out = NULL;
+    *out_len = 0U;
     FILE *f = fopen(path, "rb");
     if (!f) {
-        return NULL;
+        return tp_error_set(err, TP_STATUS_BAD_PROJECT, "tp_project_load: cannot open %s", path);
     }
     if (fseek(f, 0, SEEK_END) != 0) {
         (void)fclose(f);
-        return NULL;
+        return tp_error_set(err, TP_STATUS_BAD_PROJECT, "tp_project_load: cannot seek %s", path);
     }
     const long size = ftell(f);
     if (size < 0 || fseek(f, 0, SEEK_SET) != 0) {
         (void)fclose(f);
-        return NULL;
+        return tp_error_set(err, TP_STATUS_BAD_PROJECT, "tp_project_load: cannot size %s", path);
+    }
+    if ((uint64_t)size > (uint64_t)TP_IDENTITY_FILE_MAX_BYTES) {
+        (void)fclose(f);
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "tp_project_load: %s exceeds the %u-byte limit", path,
+                            (unsigned int)TP_IDENTITY_FILE_MAX_BYTES);
     }
     char *buf = (char *)malloc((size_t)size + 1U);
     if (!buf) {
         (void)fclose(f);
-        return NULL;
+        return tp_error_set(err, TP_STATUS_OOM, "tp_project_load: out of memory reading %s", path);
     }
     const size_t got = fread(buf, 1U, (size_t)size, f);
-    (void)fclose(f);
+    const int read_failed = ferror(f);
+    const int close_rc = fclose(f);
+    if (read_failed || close_rc != 0 || got != (size_t)size) {
+        free(buf);
+        return tp_error_set(err, TP_STATUS_BAD_PROJECT, "tp_project_load: short read from %s", path);
+    }
     buf[got] = '\0';
+    *out = buf;
     *out_len = got;
-    return buf;
+    return TP_STATUS_OK;
 }
 
 /* Parse core shared by load (from file) + load_buffer (from memory). Borrows
@@ -2052,21 +2257,34 @@ done:
     return TP_STATUS_OK;
 }
 
-tp_status tp_project_load(const char *path, tp_project **out, tp_error *err) {
+tp_status tp_project_load_with_fingerprint(const char *path, tp_project **out, tp_id128 *out_fingerprint,
+                                           tp_error *err) {
     if (out) {
         *out = NULL;
+    }
+    if (out_fingerprint) {
+        memset(out_fingerprint, 0, sizeof *out_fingerprint);
     }
     if (!path || !out) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_project_load: NULL path or out");
     }
 
     size_t len = 0;
-    char *text = tp_read_file(path, &len);
-    if (!text) {
-        return tp_error_set(err, TP_STATUS_BAD_PROJECT, "tp_project_load: cannot open %s", path);
+    char *text = NULL;
+    tp_status status = tp_read_file(path, &text, &len, err);
+    if (status != TP_STATUS_OK) {
+        return status;
     }
 
-    tp_status status = tp_project_parse(text, len, out, err);
+    tp_id128 consumed_fingerprint = {{0}};
+    if (out_fingerprint) {
+        status = tp_identity_bytes_fingerprint(text, len, &consumed_fingerprint, err);
+        if (status != TP_STATUS_OK) {
+            free(text);
+            return status;
+        }
+    }
+    status = tp_project_parse(text, len, out, err);
     free(text);
     if (status != TP_STATUS_OK) {
         return status;
@@ -2085,7 +2303,14 @@ tp_status tp_project_load(const char *path, tp_project **out, tp_error *err) {
         *out = NULL;
         return tp_error_set(err, TP_STATUS_OOM, "tp_project_load: out of memory");
     }
+    if (out_fingerprint) {
+        *out_fingerprint = consumed_fingerprint;
+    }
     return TP_STATUS_OK;
+}
+
+tp_status tp_project_load(const char *path, tp_project **out, tp_error *err) {
+    return tp_project_load_with_fingerprint(path, out, NULL, err);
 }
 
 tp_status tp_project_load_buffer(const char *buf, size_t len, tp_project **out, tp_error *err) {

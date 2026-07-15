@@ -8,6 +8,7 @@
  * parsing here, but plain FS access is fine -- see plan risk R6). */
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -35,25 +36,12 @@ void tp_scan_dir(const char *abs_dir, tp_scan_result *out);
 /* Frees entries and zeroes *out. Safe to call on an already-empty result; safe on NULL. */
 void tp_scan_free(tp_scan_result *out);
 
-/* R5b-2: a growable list of malloc-owned, NUL-terminated strings -- the plain-name result of
- * tp_scan_list_dir (the GUI recovery-folder scan joins each name with the folder). Init to {0}
- * before the first list call; free every string + the backing array via tp_str_list_free. */
-typedef struct tp_str_list {
-    char **items; /* malloc-owned array of malloc-owned names; NULL when count == 0 */
-    int count;
-    int cap;
-} tp_str_list;
-
-/* R5b-2: NON-RECURSIVE listing of the NAMES (not full paths) of REGULAR FILES in `dir` whose name
- * ends with `suffix` (case-SENSITIVE byte compare; "" matches every regular file). Skips "."/".." and
- * subdirectories (regular files only). APPENDS to *out (init to {0} first; the caller joins names with
- * `dir`). Returns false on a dir-OPEN failure (out left as-is -> the recovery scan degrades to no-adopt);
- * true otherwise (possibly zero appended). Deterministic order is NOT guaranteed -- sort before asserting.
- * Reuses the same platform dir-walk (Win32 FindFirstFile / POSIX opendir+stat) as tp_scan_dir. */
-bool tp_scan_list_dir(const char *dir, const char *suffix, tp_str_list *out);
-
-/* Frees every string + the backing array and zeroes *out. NULL-safe; safe on a zeroed list. */
-void tp_str_list_free(tp_str_list *out);
+/* Streaming counterpart for bounded-memory consumers such as startup recovery. Calls `visit`
+ * once per matching regular filename and includes its size so consumers can bound total I/O
+ * before opening it. Owns no per-entry heap memory. Returning false from the callback stops
+ * enumeration successfully. Directory-open/argument failure returns false. */
+typedef bool (*tp_scan_name_visitor)(void *ctx, const char *name, uint64_t size);
+bool tp_scan_visit_dir(const char *dir, const char *suffix, tp_scan_name_visitor visit, void *ctx);
 
 /* True if abs points at an existing directory (distinguishes a folder source from a file
  * source without trusting the extension). False for files, missing paths, and NULL. */

@@ -1017,6 +1017,7 @@ static void confirm_perform(void) {
             set_status_ex(STATUS_ERROR, "Out of memory: could not create a new project (current project kept)."); /* F3 */
         }
     } else if (s_after_confirm == AFTER_EXIT) {
+        gui_project_discard_recovery_on_shutdown();
         nt_app_quit();
     } else if (s_after_confirm == AFTER_OPEN) {
         s_pending_open = true; /* runs the open dialog next frame */
@@ -1500,6 +1501,7 @@ void gui_actions_open_recovery(const gui_recovery_list *list) {
     s_recovery_open = true;
 }
 int gui_actions_recovery_count(void) { return s_recovery_list.count; }
+bool gui_actions_recovery_has_more(void) { return s_recovery_list.has_more; }
 const gui_recovery_entry *gui_actions_recovery_at(int i) {
     if (i < 0 || i >= s_recovery_list.count) {
         return NULL;
@@ -1519,7 +1521,7 @@ static void recovery_remove_row(int row) {
         s_recovery_list.items[i] = s_recovery_list.items[i + 1];
     }
     s_recovery_list.count--;
-    if (s_recovery_list.count <= 0) {
+    if (s_recovery_list.count <= 0 && !s_recovery_list.has_more) {
         s_recovery_open = false;
     }
 }
@@ -1590,18 +1592,36 @@ void apply_pending(void) {
         s_recovery_pending_row = -1;
         const gui_recovery_entry *e = gui_actions_recovery_at(row);
         if (e != NULL) {
-            /* copy the fields we need -- resolve/remove may not invalidate e here, but be defensive */
-            char journal[GUI_RECOVERY_PATH_CAP];
-            char orig[GUI_RECOVERY_PATH_CAP];
+            /* Copy the typed row before the list may compact after resolution. */
+            gui_recovery_entry entry = *e;
             char nm[256];
-            (void)snprintf(journal, sizeof journal, "%s", e->journal_path);
-            (void)snprintf(orig, sizeof orig, "%s", e->orig_path);
             (void)snprintf(nm, sizeof nm, "%s", e->name);
             const char *target = "";
             bool proceed = true;
-            if (action == GUI_RECOVERY_SAVE_AS) {
+            if (action == GUI_RECOVERY_DISCARD) {
+                char prompt[GUI_RECOVERY_PATH_CAP + 320];
+                (void)snprintf(prompt, sizeof prompt,
+                               "Permanently discard recovered unsaved work for '%s'?\n\n%s\n\n"
+                               "This cannot be undone.",
+                               entry.name, entry.orig_path[0] ? entry.orig_path : "Untitled project");
+                proceed = tinyfd_messageBox("Discard recovered work?", prompt, "yesno", "warning", 0) == 1;
+            } else if (action == GUI_RECOVERY_SAVE_AS) {
                 static const char *filt[] = {"*.ntpacker_project"};
-                const char *def = (orig[0] != '\0') ? orig : "recovered.ntpacker_project";
+                char recovered_default[GUI_RECOVERY_PATH_CAP + 32];
+                const char *def = "recovered.ntpacker_project";
+                if (entry.orig_path[0] != '\0') {
+                    static const char suffix[] = ".ntpacker_project";
+                    const size_t path_len = strlen(entry.orig_path);
+                    const size_t suffix_len = sizeof suffix - 1u;
+                    if (path_len >= suffix_len && strcmp(entry.orig_path + path_len - suffix_len, suffix) == 0) {
+                        (void)snprintf(recovered_default, sizeof recovered_default, "%.*s.recovered%s",
+                                       (int)(path_len - suffix_len), entry.orig_path, suffix);
+                    } else {
+                        (void)snprintf(recovered_default, sizeof recovered_default, "%s.recovered%s",
+                                       entry.orig_path, suffix);
+                    }
+                    def = recovered_default;
+                }
                 const char *picked = tinyfd_saveFileDialog("Save Recovered Project As", def, 1, filt, "ntpacker project");
                 if (picked == NULL) {
                     proceed = false; /* cancelled -> keep the row, journal stays on disk */
@@ -1611,7 +1631,7 @@ void apply_pending(void) {
             }
             if (proceed) {
                 char err[256];
-                tp_status st = gui_recovery_resolve(journal, orig, (gui_recovery_action)action, target, err, sizeof err);
+                tp_status st = gui_recovery_resolve_entry(&entry, (gui_recovery_action)action, target, err, sizeof err);
                 if (st == TP_STATUS_OK) {
                     recovery_remove_row(row);
                     if (action == GUI_RECOVERY_DISCARD) {

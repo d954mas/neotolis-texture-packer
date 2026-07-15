@@ -52,6 +52,17 @@ tp_status tp_txn__preflight(tp_model *m, const char *id_hex, int64_t expected_re
  * committed/rejected; the live model is byte-unchanged unless it returns OK. */
 tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_txn_result *out, tp_error *err);
 
+/* Serialize + round-trip-prove `candidate`, then append it as a durable history
+ * CHECKPOINT at `revision` when `m` has a journal. A no-op without a journal.
+ * The live model is never touched; tp_history.c calls this as the LAST fallible
+ * gate before publishing an Undo/Redo candidate + cursor move. */
+tp_status tp_model__append_history_checkpoint(tp_model *m, const tp_project *candidate, int64_t revision,
+                                              tp_error *err);
+
+/* Checked monotonic revision increment shared by transaction commit and Undo/Redo.
+ * Rejects corrupted negative/MAX revisions before any staging or signed overflow. */
+tp_status tp_model__next_revision(int64_t current, int64_t *next, tp_error *err);
+
 /* Test-only allocation fault seam for tp_txn__result_add_error (default off / -1).
  * Set N so the (N+1)th add_error grow returns failure once, proving that a dropped
  * shape-error record still forces a reject (the batch never falsely commits). */

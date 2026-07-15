@@ -988,7 +988,7 @@ int main(int argc, char *argv[]) {
         gui_crash_install();
         gui_log_file_install();
 #ifndef NTPACKER_GUI_SELFTEST
-        /* D3: if the PREVIOUS run crashed it left a marker -> offer to open the crash folder, then
+        /* D3: if the PREVIOUS run crashed it left a marker -> offer to open the diagnostics root, then
          * clear it (once). Self-contained startup step: no ordering coupling with the upcoming R
          * recovery modal. No-op with no marker / headless. Native modal, so before window init is OK.
          * Disabled in the selftest build (like the recovery journal/notice below): ctest #50 runs THIS
@@ -1116,7 +1116,7 @@ int main(int argc, char *argv[]) {
      * non-resolved orphan is LEFT on disk for next launch. Every step is fail-closed + NON-FATAL: a folder/RNG/scan failure merely disables
      * recovery for this launch (journal-less), never crashing or blocking startup. GATED OUT of the headless
      * selftest build -- that build runs THIS exe non-headless and drives recovery itself on ISOLATED temp
-     * folders via test seams (J18-J21), so the production auto-scan must never fire and adopt a test journal. */
+     * folders via R6 test seams, so the production scan must never inspect test journals. */
     /* fix [4] (ACCEPTED, no migration code): crash recovery is UNRELEASED (all on impl/master-spec), so
      * there is no installed base with a pre-R5b-2 <exe_dir>/ntpacker_recovery.ntpjournal deterministic
      * slot to migrate -- the old exe-dir slot is intentionally NOT migrated into this per-session folder.
@@ -1124,11 +1124,19 @@ int main(int argc, char *argv[]) {
 #ifndef NTPACKER_GUI_SELFTEST
     char rec_root[GUI_PATHS_MAX];
     char rec_folder[GUI_PATHS_MAX];
-    if (gui_paths_app_data_root(rec_root, sizeof rec_root)) {
+    if (!gui_paths_app_data_root(rec_root, sizeof rec_root)) {
+        gui_project_note_recovery_setup_failure("the application data folder is unavailable");
+    } else {
         int nf = snprintf(rec_folder, sizeof rec_folder, "%s/recovery", rec_root);
-        if (nf > 0 && (size_t)nf < (int)sizeof rec_folder && gui_paths_ensure_dir(rec_folder)) {
+        if (nf <= 0 || (size_t)nf >= sizeof rec_folder) {
+            gui_project_note_recovery_setup_failure("the recovery directory path is too long");
+        } else if (!gui_paths_ensure_dir(rec_folder)) {
+            gui_project_note_recovery_setup_failure("the recovery directory could not be created");
+        } else {
             char live_slot[1200];
-            if (gui_project_make_session_slot(rec_folder, live_slot, sizeof live_slot)) {
+            if (!gui_project_make_session_slot(rec_folder, live_slot, sizeof live_slot)) {
+                gui_project_note_recovery_setup_failure("a recovery session id could not be created");
+            } else {
                 gui_project_enable_recovery(live_slot); /* acquire this session's live-slot lock */
                 /* R6b: COLLECT orphan journals (incl. old-format VERSION_MISMATCH for Discard) and, if any,
                  * open the startup recovery modal -- resolved interactively in frame() via the R6a layer.
@@ -1144,24 +1152,13 @@ int main(int argc, char *argv[]) {
         }
     }
 #endif
-    gui_project_init_adopt_candidates(NULL); /* fresh untitled model -- no silent auto-adopt (R6b modal owns recovery) */
-    /* H/P1-8 fix: TWO distinct startup facets, no longer conflated in one bool.
-     *  - recovery_warn_shown: did the startup recovery warning get shown this launch -- the "another window
-     *    open -> crash recovery is off for this one" BUSY notice (R6b dropped the adopted-unsaved-work notice,
-     *    since recovery no longer auto-adopts, so only the busy one remains)? It is STATUS_WARNING that a later terminal default ("Ready...", "Opened %s",
-     *    "project not found") must NOT clobber before the first frame. The busy notice warns that recovery
-     *    is OFF -- silently losing it (finding 1) means a later crash discards work with no prior warning.
-     *  - the actual DATA-SAFETY deferral keys off the DURABLE model predicate
-     *    gui_project_has_recovered_unsaved() (the single source of truth for the condition), read at the
-     *    decision point below -- NOT this drained one-shot notice. The notice is drained here only to
-     *    obtain the warning TEXT. Both stay quiet in the selftest build (no interactive recovery there). */
+    gui_project_init(); /* recovery is resolved to disk by the R6 modal; the live editor always starts fresh */
+    /* Preserve a recovery-unavailable warning across later terminal startup statuses. */
     bool recovery_warn_shown = false;
 #ifndef NTPACKER_GUI_SELFTEST
     {
         char rnotice[256];
-        /* R6b: the adopted-unsaved-work notice is gone (recovery now goes through the startup modal, which
-         * never adopts). The BUSY notice remains -- a 2nd concurrent instance runs journal-less and must warn. */
-        if (gui_project_take_recovery_busy_notice(rnotice, sizeof rnotice)) {
+        if (gui_project_take_recovery_setup_notice(rnotice, sizeof rnotice)) {
             recovery_warn_shown = true;
             set_status_ex(STATUS_WARNING, rnotice); /* "Another window open -- crash recovery off." */
         }
@@ -1175,16 +1172,15 @@ int main(int argc, char *argv[]) {
 
     /* open a project passed on the command line (errors go to the status bar).
      * H/P1-8 fix: route the open/defer choice through the PURE gui_startup_decide (single source of truth;
-     * J14 truth-table). The `recovered` predicate DEFERS the CLI open even when the arg is stale
-     * (DEFER > MISSING -- finding 2). Post-R6b it is has_recovered_unsaved() (the durable auto-adopt
-     * predicate, now always false) OR s_recovery_open (the startup recovery modal is up): the modal can
+     * J14 truth-table). A pending R6 modal DEFERS the CLI open even when the arg is stale
+     * (DEFER > MISSING): the modal can
      * Save-to-original the very file named on the CLI, so opening that file into the live editor behind the
      * modal would show the STALE pre-crash copy and risk a later Save clobbering the just-recovered state.
      * Deferring keeps the editor fresh-empty behind the modal (the settled R6b design). No terminal default
      * status clobbers a recovery warning already up (recovery_warn_shown). A genuine open ERROR still shows. */
     if (proj_arg != NULL) {
         char err[256];
-        const bool recovery_pending = gui_project_has_recovered_unsaved() || s_recovery_open;
+        const bool recovery_pending = s_recovery_open;
         switch (gui_startup_decide(true, gui_scan_exists(proj_arg), recovery_pending)) {
         case GUI_STARTUP_DEFER:
             /* The startup recovery modal is up and can Save-to-original the very file named on the CLI.
