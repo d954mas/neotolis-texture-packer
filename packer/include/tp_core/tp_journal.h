@@ -24,9 +24,10 @@
  *            per-record sync-word lets recovery re-synchronise after a corrupt length
  *            field (plan S18 R / P1-5): a torn TAIL (no valid record follows) is truncated,
  *            a mid-stream corruption (a valid record still follows) is preserved.
- *   payload: rec_type u8 (1=TXN, 2=CHECKPOINT) then --
+ *   payload: rec_type u8 (1=TXN, 2=CHECKPOINT, 3=METADATA) then --
  *            TXN        : tx_id[32] hex | revision i64 BE | op_payload[rest]
  *            CHECKPOINT : revision i64 BE | id_count u32 BE | id[32]*id_count | snapshot[rest]
+ *            METADATA   : timestamp i64 BE | path_len u32 BE | path | name_len u32 BE | name (v3, R5a)
  *
  * FORMAT B (plan S18 R / R2): a TXN record's payload is the SERIALIZED OPERATION REQUEST
  * (a tp_txn_request_encode blob), NOT a full snapshot. Only CHECKPOINT records carry a
@@ -50,11 +51,13 @@
 extern "C" {
 #endif
 
-/* Current on-disk journal format version -- the only version this build reads. v2 adds
- * the per-record sync-word (plan S18 R / P1-5 framing robustness); a journal written by a
- * different format version is treated as a VERSION_MISMATCH (our file, wrong format), distinct
- * from a BAD_MAGIC foreign file (R5a). The sidecar is ephemeral and compacted away on Save. */
-#define TP_JOURNAL_FORMAT_VERSION 2
+/* Current on-disk journal format version -- the only version this build reads. v2 added the
+ * per-record sync-word (plan S18 R / P1-5 framing robustness); v3 adds the METADATA record type
+ * (R5a). A journal written by a different format version is treated as a VERSION_MISMATCH (our
+ * file, wrong format), distinct from a BAD_MAGIC foreign file (R5a). NO back-compat: a pre-v3
+ * journal is surfaced as VERSION_MISMATCH (never silently mis-replayed as if the new record type
+ * did not exist). The sidecar is ephemeral and compacted away on Save. */
+#define TP_JOURNAL_FORMAT_VERSION 3
 
 /* ---- injectable I/O seam ------------------------------------------------- *
  * The journal never calls the filesystem directly: all durability goes through

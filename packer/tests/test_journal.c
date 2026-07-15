@@ -176,6 +176,75 @@ static size_t record_offset(const uint8_t *buf, size_t len, int idx) {
     return off;
 }
 
+/* Test-only io wrapper over a memory io that fails EXACTLY the write whose 1-based index == fail_at
+ * (0 = never). The memory-io __fail_next_writes seam is a from-the-next countdown, so it cannot let the
+ * header + checkpoint writes SUCCEED and fail only the LATER metadata write inside tp_journal_compact
+ * (write #3 after the truncate-to-0). This wrapper targets that specific write: an injected write returns
+ * 0 (total failure, store untouched) so write_record's rollback truncate -- delegated to the inner
+ * store -- still succeeds, exactly the [0] scenario (torn META tail rolled back, journal NOT poisoned). */
+typedef struct {
+    tp_journal_io inner; /* owned memory io */
+    int write_count;
+    int fail_at; /* 1-based index of the write to fail; 0 = never */
+} faulty_io_ctx;
+
+static int64_t faulty_write(void *ctx, const uint8_t *data, size_t len) {
+    faulty_io_ctx *f = (faulty_io_ctx *)ctx;
+    f->write_count++;
+    if (f->fail_at != 0 && f->write_count == f->fail_at) {
+        return 0; /* injected total failure of exactly this write (nothing written) */
+    }
+    return f->inner.write(f->inner.ctx, data, len);
+}
+static int64_t faulty_length(void *ctx) {
+    faulty_io_ctx *f = (faulty_io_ctx *)ctx;
+    return f->inner.length(f->inner.ctx);
+}
+static int faulty_truncate(void *ctx, size_t len) {
+    faulty_io_ctx *f = (faulty_io_ctx *)ctx;
+    return f->inner.truncate(f->inner.ctx, len);
+}
+static int faulty_read_all(void *ctx, uint8_t **out, size_t *out_len) {
+    faulty_io_ctx *f = (faulty_io_ctx *)ctx;
+    return f->inner.read_all(f->inner.ctx, out, out_len);
+}
+static int faulty_sync(void *ctx) {
+    faulty_io_ctx *f = (faulty_io_ctx *)ctx;
+    return f->inner.sync ? f->inner.sync(f->inner.ctx) : 0;
+}
+static void faulty_destroy(void *ctx) {
+    faulty_io_ctx *f = (faulty_io_ctx *)ctx;
+    if (f) {
+        if (f->inner.destroy) {
+            f->inner.destroy(f->inner.ctx);
+        }
+        free(f);
+    }
+}
+static tp_journal_io faulty_io(void) {
+    faulty_io_ctx *f = (faulty_io_ctx *)calloc(1, sizeof *f);
+    TEST_ASSERT_NOT_NULL(f);
+    f->inner = tp_journal_io_memory();
+    TEST_ASSERT_NOT_NULL(f->inner.ctx);
+    f->fail_at = 0;
+    tp_journal_io io;
+    io.ctx = f;
+    io.write = faulty_write;
+    io.length = faulty_length;
+    io.truncate = faulty_truncate;
+    io.read_all = faulty_read_all;
+    io.sync = faulty_sync;
+    io.destroy = faulty_destroy;
+    return io;
+}
+/* Arm: fail the n-th write COUNTED FROM NOW (resets the counter), so a test can target a specific write
+ * inside one operation regardless of how many writes preceded the arming. */
+static void faulty_io_fail_at(tp_journal_io io, int n) {
+    faulty_io_ctx *f = (faulty_io_ctx *)io.ctx;
+    f->write_count = 0;
+    f->fail_at = n;
+}
+
 /* ---- byte-identity: the journal is a sidecar ----------------------------- */
 
 void test_journal_is_sidecar_byte_identical(void) {
@@ -1720,6 +1789,249 @@ void test_peek_empty(void) {
     tp_journal_peek_free(&pk);
 }
 
+/* ==== R5a FIX ROUND: adversarial-review findings [0][1][2][3][5] ========== */
+
+/* [0] compact must NOT poison a healthy checkpoint on a metadata re-emit failure. Arm the faulty io to
+ * fail ONLY the META write inside compact (write #3 after truncate-to-0: header, checkpoint, META);
+ * write_record rolls the torn META tail back to the durable checkpoint. Assert compact returns OK (not a
+ * hard failure the glue would detach on), the journal is NOT poisoned, and recover yields the
+ * post-compaction document (checkpoint recovered, records_recovered==1) -- recovery intact, metadata
+ * simply absent. FAILS pre-fix (compact poisoned + returned JOURNAL_FAILED over the lost scan label). */
+void test_compact_meta_reemit_failure_keeps_recovery(void) {
+    tp_id128 key = key_of(0xA0);
+    tp_journal_io io = faulty_io();
+    tp_journal *j = tp_journal_create(io, key);
+    TEST_ASSERT_NOT_NULL(j);
+    tp_error err;
+    const uint8_t snap[] = {'s', 'n', 'a', 'p'};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_init_checkpoint(j, snap, sizeof snap, 0, &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_journal_append_txn(j, "a0000000000000000000000000000001", 1, snap, sizeof snap, &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_journal_set_metadata(j, 1700000000, "/scan/p.ntpacker", "p", &err));
+
+    /* Fail the 3rd write of the upcoming compact -- the META re-emit (after header + fresh checkpoint). */
+    faulty_io_fail_at(io, 3);
+    const uint8_t snap2[] = {'n', 'e', 'w'};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_compact(j, snap2, sizeof snap2, 2, &err)); /* swallowed */
+    TEST_ASSERT_FALSE(tp_journal__is_poisoned(j)); /* healthy checkpoint NOT poisoned over a lost label */
+
+    /* Recovery INTACT: the fresh checkpoint recovered; metadata simply absent (re-emit was swallowed). */
+    size_t blen = 0;
+    uint8_t *bytes = snapshot_io(io, &blen);
+    tp_journal_destroy(j);
+    tp_journal_io io2 = io_from_bytes(bytes, blen);
+    free(bytes);
+    tp_journal *j2 = tp_journal_create(io2, key);
+    TEST_ASSERT_NOT_NULL(j2);
+    tp_journal_recovery rec;
+    memset(&rec, 0, sizeof rec);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_recover(j2, &rec, &err));
+    TEST_ASSERT_EQUAL_INT(TP_JOURNAL_RECOVERY_OK, rec.status);
+    TEST_ASSERT_EQUAL_INT(1, rec.records_recovered); /* the compacted checkpoint */
+    TEST_ASSERT_EQUAL_INT(0, (int)rec.op_count);
+    TEST_ASSERT_NOT_NULL(rec.snapshot);
+    TEST_ASSERT_NOT_NULL(strstr(rec.snapshot, "new")); /* == the post-compaction state */
+    TEST_ASSERT_FALSE(rec.has_metadata);               /* metadata absent, recovery still works */
+    tp_journal_recovery_free(&rec);
+    tp_journal_destroy(j2);
+}
+
+/* [2] a failed durable set_metadata must NOT commit the cache (else a later compaction re-emits metadata
+ * the API reported as failed). Fail the next durable write, call set_metadata -> JOURNAL_FAILED; then
+ * compact + recover -> the failed metadata is NOT present. FAILS pre-fix (cache updated before the write,
+ * so has_meta stayed true and compaction re-emitted the "ghost" metadata). */
+void test_set_metadata_write_failure_no_effect(void) {
+    tp_id128 key = key_of(0xA1);
+    tp_journal_io io;
+    tp_model *m = model_with_journal(key, &io); /* header + initial checkpoint durably written */
+    tp_error err;
+
+    tp_journal_io_memory__fail_next_writes(io, 1); /* the META record write fails (header already present) */
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_JOURNAL_FAILED,
+        tp_journal_set_metadata(m->journal, 1700000000, "/should/not/persist.ntpacker", "ghost", &err));
+
+    /* The failed set did not commit -> compaction re-emits NO metadata. */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_compact_journal(m, &err));
+    size_t blen = 0;
+    uint8_t *bytes = snapshot_io(io, &blen);
+    tp_model_destroy(m);
+
+    tp_journal_io io2 = io_from_bytes(bytes, blen);
+    free(bytes);
+    tp_model *m2 = NULL;
+    tp_journal_recovery info;
+    memset(&info, 0, sizeof info);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_recover(io2, key, &m2, &info, &err));
+    TEST_ASSERT_NOT_NULL(m2);
+    TEST_ASSERT_FALSE(info.has_metadata); /* the failed metadata never took effect */
+    tp_journal_recovery_free(&info);
+    tp_model_destroy(m2);
+}
+
+/* [5]/parity: peek and recover share ONE frame walker, so a TORN TAIL classifies identically (same
+ * status + same CKPT/TXN count). A metadata record is present so both walkers exercise the shared
+ * capture-and-skip too. */
+void test_peek_agrees_recover_torn_tail(void) {
+    tp_id128 key = key_of(0xA4);
+    tp_journal_io io;
+    tp_model *m = model_with_journal(key, &io);
+    tp_error err;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_journal_set_metadata(m->journal, 1700003333, "/parity/torn.ntpacker", "torn", &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "a4000000000000000000000000000001", 0, "one"));
+    size_t full_len = 0;
+    uint8_t *full = snapshot_io(io, &full_len);
+    tp_model_destroy(m);
+    TEST_ASSERT_TRUE(full_len > (size_t)TP_JRN_HEADER_LEN + 3);
+    size_t torn_len = full_len - 3; /* tear the final frame's tail */
+
+    tp_journal_io io_r = io_from_bytes(full, torn_len);
+    tp_journal *jr = tp_journal_create(io_r, key);
+    TEST_ASSERT_NOT_NULL(jr);
+    tp_journal_recovery rec;
+    memset(&rec, 0, sizeof rec);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_recover(jr, &rec, &err));
+
+    tp_journal_peek_result pk;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_peek(io_from_bytes(full, torn_len), &pk, &err));
+
+    TEST_ASSERT_EQUAL_INT(TP_JOURNAL_RECOVERY_TRUNCATED, rec.status);
+    TEST_ASSERT_EQUAL_INT(rec.status, pk.status);                  /* same status */
+    TEST_ASSERT_EQUAL_INT(rec.records_recovered, pk.record_count); /* same CKPT/TXN count (META excluded) */
+
+    free(full);
+    tp_journal_recovery_free(&rec);
+    tp_journal_peek_free(&pk);
+    tp_journal_destroy(jr);
+}
+
+/* [5]/parity: a MID-STREAM corrupt record followed by a valid one classifies as CORRUPT by BOTH peek and
+ * recover (shared walker + shared has_valid_record_after boundary decision). */
+void test_peek_agrees_recover_midstream_corrupt(void) {
+    tp_id128 key = key_of(0xA5);
+    tp_journal_io io;
+    tp_model *m = model_with_journal(key, &io);
+    tp_error err;
+    /* header | ckpt(#0) | txn01(#1) | txn02(#2) */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "a5000000000000000000000000000001", 0, "one"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "a5000000000000000000000000000002", 1, "two"));
+    size_t full_len = 0;
+    uint8_t *full = snapshot_io(io, &full_len);
+    tp_model_destroy(m);
+
+    /* Flip a payload byte inside txn01 (#1); txn02 (#2) stays intact -> a mid-stream corruption. */
+    size_t t1 = record_offset(full, full_len, 1);
+    TEST_ASSERT_TRUE(t1 != SIZE_MAX && t1 < full_len);
+    size_t at = t1 + (size_t)TP_JRN_SYNC_FIELD + (size_t)TP_JRN_LEN_FIELD + 1;
+    full[at] = (uint8_t)(full[at] ^ 0xFFu);
+
+    tp_journal_io io_r = io_from_bytes(full, full_len);
+    tp_journal *jr = tp_journal_create(io_r, key);
+    TEST_ASSERT_NOT_NULL(jr);
+    tp_journal_recovery rec;
+    memset(&rec, 0, sizeof rec);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_recover(jr, &rec, &err));
+
+    tp_journal_peek_result pk;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_peek(io_from_bytes(full, full_len), &pk, &err));
+
+    TEST_ASSERT_EQUAL_INT(TP_JOURNAL_RECOVERY_CORRUPT, rec.status);
+    TEST_ASSERT_EQUAL_INT(rec.status, pk.status);                  /* both CORRUPT */
+    TEST_ASSERT_EQUAL_INT(rec.records_recovered, pk.record_count); /* same recovered count (the ckpt) */
+
+    free(full);
+    tp_journal_recovery_free(&rec);
+    tp_journal_peek_free(&pk);
+    tp_journal_destroy(jr);
+}
+
+/* [1] crash-recover seeds the journal's write-side metadata cache, so a subsequent compaction (Save/undo)
+ * RE-EMITS the metadata instead of erasing the recovered project's scan label. Core crash->reattach->Save
+ * cycle: recover populates j->meta -> compact re-emits -> a second recover still sees it. FAILS pre-fix
+ * (recover never seeded the cache, so has_meta==false and the recompaction dropped the metadata). */
+void test_recovered_metadata_survives_recompaction(void) {
+    tp_id128 key = key_of(0xA3);
+    tp_journal_io io;
+    tp_model *m = model_with_journal(key, &io);
+    tp_error err;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_journal_set_metadata(m->journal, 1700007777, "/recov/keepme.ntpacker", "keepme", &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "a3000000000000000000000000000001", 0, "one"));
+    size_t blen = 0;
+    uint8_t *bytes = snapshot_io(io, &blen);
+    tp_model_destroy(m);
+
+    /* First recover: the recovered journal's write-side cache is seeded from the metadata record. */
+    tp_journal_io io2 = io_from_bytes(bytes, blen);
+    free(bytes);
+    tp_model *m2 = NULL;
+    tp_journal_recovery info;
+    memset(&info, 0, sizeof info);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_recover(io2, key, &m2, &info, &err));
+    TEST_ASSERT_NOT_NULL(m2);
+    TEST_ASSERT_TRUE(info.has_metadata);
+    tp_journal_recovery_free(&info);
+
+    /* Compact the RECOVERED journal (the Save/undo hook). Pre-fix has_meta==false here -> no re-emit. */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_compact_journal(m2, &err));
+    size_t blen2 = 0;
+    uint8_t *bytes2 = snapshot_io(io2, &blen2);
+    tp_model_destroy(m2);
+
+    /* Second recover from the recompacted store: metadata STILL present (path/name/time intact). */
+    tp_journal_io io3 = io_from_bytes(bytes2, blen2);
+    free(bytes2);
+    tp_model *m3 = NULL;
+    tp_journal_recovery info2;
+    memset(&info2, 0, sizeof info2);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_recover(io3, key, &m3, &info2, &err));
+    TEST_ASSERT_NOT_NULL(m3);
+    TEST_ASSERT_TRUE(info2.has_metadata); /* survived the recovered-journal recompaction */
+    TEST_ASSERT_EQUAL_INT64(1700007777, info2.metadata.timestamp);
+    TEST_ASSERT_EQUAL_STRING("/recov/keepme.ntpacker", info2.metadata.path);
+    TEST_ASSERT_EQUAL_STRING("keepme", info2.metadata.name);
+    tp_journal_recovery_free(&info2);
+    tp_model_destroy(m3);
+}
+
+/* [3] version bump: a journal whose header version field is 2 (the now-previous version) is surfaced as
+ * VERSION_MISMATCH by BOTH recover and peek -- never silently mis-replayed as if the new META record type
+ * did not exist, never BAD_MAGIC. Bytes preserved. FAILS pre-bump (version 2 == current -> accepted). */
+void test_v2_header_reads_version_mismatch(void) {
+    tp_id128 key = key_of(0xA2);
+    tp_error err;
+    tp_journal_io io;
+    tp_model *m = model_with_journal(key, &io);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "a2000000000000000000000000000001", 0, "one"));
+    size_t blen = 0;
+    uint8_t *bytes = snapshot_io(io, &blen);
+    tp_model_destroy(m);
+    /* Overwrite the 4-byte BE format-version field (right after the 8-byte magic) with the old value 2. */
+    tp_jrn_put_u32(bytes + TP_JRN_MAGIC_LEN, 2u);
+
+    tp_journal_io io_r = io_from_bytes(bytes, blen);
+    tp_journal *jr = tp_journal_create(io_r, key);
+    TEST_ASSERT_NOT_NULL(jr);
+    tp_journal_recovery rec;
+    memset(&rec, 0, sizeof rec);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_recover(jr, &rec, &err));
+    TEST_ASSERT_EQUAL_INT(TP_JOURNAL_RECOVERY_VERSION_MISMATCH, rec.status);
+    TEST_ASSERT_EQUAL_INT(0, rec.records_recovered);                       /* nothing recovered */
+    TEST_ASSERT_EQUAL_INT64((int64_t)blen, (int64_t)rec.bytes_total);      /* bytes preserved */
+    tp_journal_recovery_free(&rec);
+    tp_journal_destroy(jr);
+
+    tp_journal_peek_result pk;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_peek(io_from_bytes(bytes, blen), &pk, &err));
+    TEST_ASSERT_EQUAL_INT(TP_JOURNAL_RECOVERY_VERSION_MISMATCH, pk.status);
+    TEST_ASSERT_EQUAL_UINT32(2u, pk.format_version); /* peek reports the header version */
+    tp_journal_peek_free(&pk);
+
+    free(bytes);
+}
+
 int main(int argc, char **argv) {
     if (argc > 1) {
         g_dir = argv[1];
@@ -1769,5 +2081,12 @@ int main(int argc, char **argv) {
     RUN_TEST(test_peek_metadata);
     RUN_TEST(test_peek_and_recover_agree);
     RUN_TEST(test_peek_empty);
+    /* R5a fix round: adversarial-review findings [0][1][2][3][5] */
+    RUN_TEST(test_compact_meta_reemit_failure_keeps_recovery);
+    RUN_TEST(test_set_metadata_write_failure_no_effect);
+    RUN_TEST(test_peek_agrees_recover_torn_tail);
+    RUN_TEST(test_peek_agrees_recover_midstream_corrupt);
+    RUN_TEST(test_recovered_metadata_survives_recompaction);
+    RUN_TEST(test_v2_header_reads_version_mismatch);
     return UNITY_END();
 }
