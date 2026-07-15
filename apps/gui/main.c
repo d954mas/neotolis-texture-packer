@@ -224,6 +224,7 @@ static void ensure_ids(void) {
     s_id_status_pill = nt_ui_id("ntpacker/status_pill");
     s_id_right_content = nt_ui_id("ntpacker/right_content");
     s_id_export_modal = nt_ui_id("ntpacker/export_modal");
+    s_id_recovery = nt_ui_id("ntpacker/recovery_modal");
     s_id_mb_file = nt_ui_id("ntpacker/mb_file");
     s_id_mb_edit = nt_ui_id("ntpacker/mb_edit");
     s_id_mb_view = nt_ui_id("ntpacker/mb_view");
@@ -394,7 +395,7 @@ static void handle_canvas_input(void) {
      * stay live while a text field holds focus. A press outside the panels also blurs that field (see
      * the blur-request block before nt_ui_begin). */
     if (gui_canvas_get_mode(&s_canvas) != GUI_CANVAS_ATLAS || !gui_canvas_has_atlas(&s_canvas) ||
-        s_confirm_open || s_about_open || s_export_open || s_edit_kind != EDIT_NONE) {
+        s_confirm_open || s_about_open || s_export_open || s_recovery_open || s_edit_kind != EDIT_NONE) {
         s_lmb_armed = s_lmb_panning = s_mmb_panning = false;
         return;
     }
@@ -498,7 +499,7 @@ static void handle_shortcuts(void) {
     if (gui_shot_active()) {
         return; /* headless capture: the user's live typing must not trigger hotkeys mid-shot */
     }
-    if (nt_ui_input_any_focused(s_ctx) || s_confirm_open || s_about_open || s_export_open) {
+    if (nt_ui_input_any_focused(s_ctx) || s_confirm_open || s_about_open || s_export_open || s_recovery_open) {
         return;
     }
     /* Preview + editor accelerators (each also a button; §3.3e). */
@@ -616,6 +617,8 @@ static void frame(void) {
             s_export_open = false;
         } else if (s_about_open) {
             s_about_open = false;
+        } else if (s_recovery_open) {
+            s_recovery_open = false; /* Esc = "Later": leave every orphan on disk, no data loss */
         } else if (s_confirm_open) {
             s_confirm_open = false;
             s_after_confirm = AFTER_NONE;
@@ -830,6 +833,7 @@ static void frame(void) {
         declare_context_menu(s_ctx);
         declare_tooltips(s_ctx);
         declare_confirm_modal(s_ctx);
+        declare_recovery_modal(s_ctx);
         declare_about_modal(s_ctx);
         declare_export_modal(s_ctx);
 
@@ -1106,9 +1110,10 @@ int main(int argc, char *argv[]) {
     /* R5b-2: crash recovery lives in a per-project FOLDER <app-data>/recovery/ with one journal per editing
      * session -- a PER-SESSION RANDOM filename (gui_project_make_session_slot), NOT a path hash, so reopening
      * a crashed project never collides with its own orphan (project identity is carried in the journal
-     * METADATA, read by the scan). At startup we SCAN that folder for journals orphaned by crashed sessions
-     * and AUTO-ADOPT the newest one holding unsaved work (no modal -- that is R6; every non-adopted orphan is
-     * LEFT on disk for R6). Every step is fail-closed + NON-FATAL: a folder/RNG/scan failure merely disables
+     * METADATA, read by the scan). At startup we COLLECT the journals orphaned by crashed sessions and, if any,
+     * open the R6b startup recovery MODAL to resolve each one (Discard / Save to original / Save As) via the R6a
+     * layer -- the live editor starts FRESH untitled (recovery resolves journals to DISK, never adopts); every
+     * non-resolved orphan is LEFT on disk for next launch. Every step is fail-closed + NON-FATAL: a folder/RNG/scan failure merely disables
      * recovery for this launch (journal-less), never crashing or blocking startup. GATED OUT of the headless
      * selftest build -- that build runs THIS exe non-headless and drives recovery itself on ISOLATED temp
      * folders via test seams (J18-J21), so the production auto-scan must never fire and adopt a test journal. */
@@ -1116,30 +1121,34 @@ int main(int argc, char *argv[]) {
      * there is no installed base with a pre-R5b-2 <exe_dir>/ntpacker_recovery.ntpjournal deterministic
      * slot to migrate -- the old exe-dir slot is intentionally NOT migrated into this per-session folder.
      * If we ever ship before R5b-2 lands, add a one-time migration here. */
-    gui_recovery_candidates rec_cands;
-    memset(&rec_cands, 0, sizeof rec_cands);
 #ifndef NTPACKER_GUI_SELFTEST
     char rec_root[GUI_PATHS_MAX];
     char rec_folder[GUI_PATHS_MAX];
     if (gui_paths_app_data_root(rec_root, sizeof rec_root)) {
-        int nf = snprintf(rec_folder, sizeof rec_folder, "%s/recovery", rec_root); /* mirrors gui_crash.c's <root>/crash */
+        int nf = snprintf(rec_folder, sizeof rec_folder, "%s/recovery", rec_root);
         if (nf > 0 && (size_t)nf < (int)sizeof rec_folder && gui_paths_ensure_dir(rec_folder)) {
             char live_slot[1200];
             if (gui_project_make_session_slot(rec_folder, live_slot, sizeof live_slot)) {
                 gui_project_enable_recovery(live_slot); /* acquire this session's live-slot lock */
-                /* fix [2]: collect ALL adoptable orphans newest-first (capped -- fix [6]); init tries them
-                 * in order so if the newest peeks adoptable but FAILS the real recover an older recoverable
-                 * one is still adopted. */
-                (void)gui_project_scan_pick_candidates(rec_folder, live_slot, &rec_cands);
+                /* R6b: COLLECT orphan journals (incl. old-format VERSION_MISMATCH for Discard) and, if any,
+                 * open the startup recovery modal -- resolved interactively in frame() via the R6a layer.
+                 * The live editor stays FRESH untitled: recovery resolves journals to DISK, never adopts. */
+                gui_recovery_list rlist;
+                /* R6b + shot seam: never raise the modal under `--shot` (gui_shot_active). The screenshot
+                 * seam neutralizes input every frame, so a modal raised by a leftover orphan journal could
+                 * never be dismissed and would corrupt the byte-reproducible capture -- skip collect+open. */
+                if (!gui_shot_active() && gui_recovery_collect(rec_folder, live_slot, &rlist) > 0) {
+                    gui_actions_open_recovery(&rlist);
+                }
             }
         }
     }
 #endif
-    gui_project_init_adopt_candidates(&rec_cands); /* adopt newest-recoverable, else fresh (recovery-less on any failure) */
+    gui_project_init_adopt_candidates(NULL); /* fresh untitled model -- no silent auto-adopt (R6b modal owns recovery) */
     /* H/P1-8 fix: TWO distinct startup facets, no longer conflated in one bool.
-     *  - recovery_warn_shown: did EITHER startup recovery warning get shown this launch -- the
-     *    adopted-unsaved-work notice OR the "another window open -> crash recovery is off for this one"
-     *    BUSY notice? Both are STATUS_WARNING that a later terminal default ("Ready...", "Opened %s",
+     *  - recovery_warn_shown: did the startup recovery warning get shown this launch -- the "another window
+     *    open -> crash recovery is off for this one" BUSY notice (R6b dropped the adopted-unsaved-work notice,
+     *    since recovery no longer auto-adopts, so only the busy one remains)? It is STATUS_WARNING that a later terminal default ("Ready...", "Opened %s",
      *    "project not found") must NOT clobber before the first frame. The busy notice warns that recovery
      *    is OFF -- silently losing it (finding 1) means a later crash discards work with no prior warning.
      *  - the actual DATA-SAFETY deferral keys off the DURABLE model predicate
@@ -1150,11 +1159,10 @@ int main(int argc, char *argv[]) {
 #ifndef NTPACKER_GUI_SELFTEST
     {
         char rnotice[256];
-        if (gui_project_take_recovery_notice(rnotice, sizeof rnotice)) {
+        /* R6b: the adopted-unsaved-work notice is gone (recovery now goes through the startup modal, which
+         * never adopts). The BUSY notice remains -- a 2nd concurrent instance runs journal-less and must warn. */
+        if (gui_project_take_recovery_busy_notice(rnotice, sizeof rnotice)) {
             recovery_warn_shown = true;
-            set_status_ex(STATUS_WARNING, rnotice); /* "Recovered unsaved changes ... Save to keep them." */
-        } else if (gui_project_take_recovery_busy_notice(rnotice, sizeof rnotice)) {
-            recovery_warn_shown = true;             /* fix [1] + finding 1: the BUSY notice must survive too */
             set_status_ex(STATUS_WARNING, rnotice); /* "Another window open -- crash recovery off." */
         }
     }
@@ -1167,20 +1175,24 @@ int main(int argc, char *argv[]) {
 
     /* open a project passed on the command line (errors go to the status bar).
      * H/P1-8 fix: route the open/defer choice through the PURE gui_startup_decide (single source of truth;
-     * J14 truth-table). `recovered` is the DURABLE model predicate, so a recovered launch DEFERS even when
-     * the arg is stale (DEFER > MISSING -- finding 2). No terminal default status clobbers a recovery
-     * warning that is already up (recovery_warn_shown): "Opened %s" / "project not found" / "Ready..." are
-     * suppressed then. A genuine open ERROR still shows -- see the OPEN case. */
+     * J14 truth-table). The `recovered` predicate DEFERS the CLI open even when the arg is stale
+     * (DEFER > MISSING -- finding 2). Post-R6b it is has_recovered_unsaved() (the durable auto-adopt
+     * predicate, now always false) OR s_recovery_open (the startup recovery modal is up): the modal can
+     * Save-to-original the very file named on the CLI, so opening that file into the live editor behind the
+     * modal would show the STALE pre-crash copy and risk a later Save clobbering the just-recovered state.
+     * Deferring keeps the editor fresh-empty behind the modal (the settled R6b design). No terminal default
+     * status clobbers a recovery warning already up (recovery_warn_shown). A genuine open ERROR still shows. */
     if (proj_arg != NULL) {
         char err[256];
-        switch (gui_startup_decide(true, gui_scan_exists(proj_arg), gui_project_has_recovered_unsaved())) {
+        const bool recovery_pending = gui_project_has_recovered_unsaved() || s_recovery_open;
+        switch (gui_startup_decide(true, gui_scan_exists(proj_arg), recovery_pending)) {
         case GUI_STARTUP_DEFER:
-            /* Crash-recovery adopted unsaved work at init. Opening the CLI file now would SILENTLY DISCARD it
-             * -- gui_project_open has no dirty prompt (pending_discard + wrap_model + re-checkpoint of the
-             * recovery slot). Defer: keep the recovered model + its slot intact and tell the user to resolve
-             * it first, then open via File>Open (which IS dirty-gated). This arg-specific warning deliberately
-             * replaces the generic recovery notice (both STATUS_WARNING; this one is more actionable). */
-            set_statusf_ex(STATUS_WARNING, "Recovered unsaved changes -- save or discard before opening %s", proj_arg);
+            /* The startup recovery modal is up and can Save-to-original the very file named on the CLI.
+             * Opening it into the live editor now would load the STALE pre-crash copy behind the modal, so a
+             * later Save could clobber the state the user just recovered. Defer: leave the editor fresh-empty
+             * behind the modal (settled R6b design) and tell the user to resolve recovery first, then open via
+             * File>Open. (Pre-R6b this same path fired for an auto-adopted model -- same defer, new cause.) */
+            set_statusf_ex(STATUS_WARNING, "Resolve recovered projects first, then open %s via File > Open", proj_arg);
             break;
         case GUI_STARTUP_MISSING:
             if (!recovery_warn_shown) { /* stale argv -> continue with untitled (F6b); keep any recovery warning */

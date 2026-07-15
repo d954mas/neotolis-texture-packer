@@ -137,14 +137,15 @@ bool gui_project_take_recovery_busy_notice(char *out, size_t cap);
 /* ============================ R6a: recovery-resolution decision/action layer ============================
  * The headless-testable layer the R6b startup modal drives: collect recovered-journal entries WITH metadata
  * + status (incl. an old-format VERSION_MISMATCH journal surfaced for Discard), then resolve ONE per the
- * user's choice (Discard / Save-backup-original / Save As). NON-DESTRUCTIVE ON FAILURE: a recovered journal
+ * user's choice (Discard / Save to original / Save As). NON-DESTRUCTIVE ON FAILURE: a recovered journal
  * is deleted ONLY after a SUCCESSFUL save (or an explicit Discard) -- a failed save leaves the journal for a
- * retry and never clobbers the user's original file without first making a `.bak`. Unlike the R5b-2
+ * retry and never clobbers the user's original file: a failed save leaves the original untouched (the atomic
+ * core save writes a temp then renames). Unlike the R5b-2
  * auto-adopt, this NEVER adopts the recovered work into the live editor model. NO nt_ui / main.c wiring /
  * startup behavior change here (that is R6b); exercised HEADLESSLY by selftest J26-J30. */
 typedef enum {
     GUI_RECOVERY_DISCARD = 0,   /* delete the journal (+ its .lock); resolve nothing else */
-    GUI_RECOVERY_SAVE_ORIGINAL, /* save the recovered state over its ORIGINAL file (old file -> `.bak` first) */
+    GUI_RECOVERY_SAVE_ORIGINAL, /* atomically save the recovered state over its ORIGINAL file (no backup; atomic replace) */
     GUI_RECOVERY_SAVE_AS        /* save the recovered state to a NEW target file (the original is untouched) */
 } gui_recovery_action;
 
@@ -176,10 +177,11 @@ int gui_recovery_collect(const char *folder, const char *live_slot, gui_recovery
 
 /* Resolve ONE recovered journal per the user's `action`. NON-DESTRUCTIVE ON FAILURE: the journal (+ .lock)
  * is deleted ONLY after a successful save, or on an explicit Discard -- a failed save LEAVES the journal for
- * a retry and never clobbers the user's original without a `.bak` first. Recovers the state into a standalone
+ * a retry and never clobbers the user's original: a failed save leaves it untouched (atomic temp+rename in
+ * the core save). Recovers the state into a standalone
  * clone (NEVER adopted into the live editor model) and always destroys the clone.
  *  - GUI_RECOVERY_DISCARD       : delete the journal (+ .lock). orig_path / target_path ignored.
- *  - GUI_RECOVERY_SAVE_ORIGINAL : save the recovered state over `orig_path` (old file -> `<orig>.bak` first);
+ *  - GUI_RECOVERY_SAVE_ORIGINAL : atomically save the recovered state over `orig_path` (no backup);
  *                                 requires orig_path != "" (a saved project), else INVALID_ARGUMENT.
  *  - GUI_RECOVERY_SAVE_AS       : save the recovered state to `target_path`.
  * Returns TP_STATUS_OK on success; on a fault fills err_out (NUL-terminated within err_cap) and the journal

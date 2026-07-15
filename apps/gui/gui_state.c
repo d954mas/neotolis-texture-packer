@@ -69,6 +69,7 @@ uint32_t s_id_strip;
 uint32_t s_id_status_pill;
 uint32_t s_id_right_content;
 uint32_t s_id_export_modal;
+uint32_t s_id_recovery;
 uint32_t s_id_mb_file, s_id_mb_edit, s_id_mb_view, s_id_mb_help;
 uint32_t s_id_menu_file, s_id_menu_edit, s_id_menu_view, s_id_menu_help;
 

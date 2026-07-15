@@ -50,6 +50,16 @@ extern bool s_confirm_open;
 enum { MODAL_NONE = 0, MODAL_SAVE, MODAL_DISCARD, MODAL_CANCEL };
 extern int s_modal_action;
 
+/* --- R6b: startup crash-recovery modal glue --- */
+extern bool s_recovery_open;                       /* R6b: the startup recovery modal is visible */
+/* The orphan list is stashed inside gui_actions.c; the modal (gui_view_chrome.c) reads it via count/at
+ * and requests a per-row action, which is DEFERRED to the next apply_pending() (so the Save-As file dialog
+ * and the disk-mutating resolve run outside nt_ui_begin/end, like s_pending_save_as). */
+void gui_actions_open_recovery(const gui_recovery_list *list); /* copy list, set s_recovery_open (main() startup) */
+int  gui_actions_recovery_count(void);
+const gui_recovery_entry *gui_actions_recovery_at(int i);      /* NULL if out of range */
+void gui_actions_recovery_request(int row, int action);        /* action = gui_recovery_action; deferred */
+
 /* --- last successful pack timing (written by the pack actions; read by the canvas stats line) --- */
 extern double s_last_pack_ms;   /* wall-clock ms of the last successful pack (for the stats line) */
 extern int s_last_pack_atlas;   /* which atlas that timing belongs to */

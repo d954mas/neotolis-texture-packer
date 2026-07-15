@@ -46,6 +46,10 @@ void declare_tooltips(nt_ui_context_t *ctx);
 /* Unsaved-changes confirm modal (Save / Discard / Cancel). */
 void declare_confirm_modal(nt_ui_context_t *ctx);
 
+/* R6b startup crash-recovery modal: lists every recovered crash-orphan and resolves each one via the
+ * R6a layer (Discard / Save to original / Save As). Dormant while s_recovery_open is false. */
+void declare_recovery_modal(nt_ui_context_t *ctx);
+
 /* About modal (version / engine / repo link). */
 void declare_about_modal(nt_ui_context_t *ctx);
 

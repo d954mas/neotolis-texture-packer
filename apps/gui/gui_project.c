@@ -928,7 +928,7 @@ static bool try_adopt_recovered(const char *source) {
     tp_status st = tp_model_recover(io, recovery_key(), &rm, &info, &err); /* TAKES OWNERSHIP of io */
     /* R5b-1 finding [3]: CAPTURE the crashed project's recovery identity {path, name, time} BEFORE
      * tp_journal_recovery_free frees info.metadata. The FRESH (adopted) journal must carry the ORIGINAL
-     * path/name so R5b-2's startup scan + R6's "Save (backup original)" see the recovered project's real
+     * path/name so R5b-2's startup scan + R6's "Save to original" see the recovered project's real
      * identity -- even though the LIVE window stays untitled. strdup the strings (guard NULL as "");
      * an OOM capturing the label just drops the (informational) carry -- never crash recovery. */
     bool had_meta = info.has_metadata;

@@ -84,6 +84,7 @@ extern uint32_t s_id_strip;       /* canvas action strip (bbox: the overflow-pro
 extern uint32_t s_id_status_pill;  /* floating message pill over the canvas (replaces the status bar row) */
 extern uint32_t s_id_right_content; /* right-panel scroll content (bbox: detect rows wider than the panel) */
 extern uint32_t s_id_export_modal; /* the Export dialog */
+extern uint32_t s_id_recovery;     /* R6b: the startup crash-recovery modal */
 /* Menubar buttons + their drop-down panels. Same class as s_id_ctx_menu below (an id seeded once in
  * ensure_ids / the shell, read only by the declare machinery that moved to gui_view_chrome.c in step
  * 6b) -- moved here alongside it rather than left main.c-local, so it can never be view-local either. */

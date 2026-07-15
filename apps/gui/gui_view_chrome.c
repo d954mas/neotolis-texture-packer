@@ -477,6 +477,84 @@ void declare_confirm_modal(nt_ui_context_t *ctx) {
     }
 }
 
+/* R6b startup crash-recovery modal: one row per recovered crash-orphan; each row resolves via the R6a
+ * layer (Discard always; Save-to-original + Save As only for a genuinely recoverable orphan -- an
+ * old-format entry is Discard-only, marked "(old format)"). Actions are requested through gui_actions
+ * (deferred to apply_pending, which runs the Save-As dialog + disk save outside begin/end). "Later"
+ * leaves every orphan on disk for next launch. Mirrors declare_export_modal's scrolled per-row list +
+ * unique per-row button IDs. Dormant when s_recovery_open is false (as in the whole selftest build). */
+void declare_recovery_modal(nt_ui_context_t *ctx) {
+    if (!nt_ui_modal_visible(ctx, s_id_recovery, &s_modal_style, &s_recovery_open)) {
+        return;
+    }
+    const int n = gui_actions_recovery_count();
+    float list_h = (float)n * S(44.0F) + S(6.0F);
+    const float list_cap = S(320.0F);
+    if (list_h > list_cap) {
+        list_h = list_cap;
+    }
+    CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(S(560)), CLAY_SIZING_FIT(0)},
+                     .padding = {Su(22), Su(22), Su(22), Su(22)},
+                     .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                     .childGap = Su(14)},
+          .backgroundColor = C_PANEL,
+          .cornerRadius = CLAY_CORNER_RADIUS(S(8)),
+          .border = {.color = C_BORDER, .width = {Su(1), Su(1), Su(1), Su(1), 0}}}) {
+        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Recover unsaved work", &g_body);
+        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT),
+                    "A previous session ended with unsaved changes. Choose what to do with each project.", &g_caption);
+        nt_ui_scroll_begin(ctx, NULL, nt_ui_id("recovery/scroll"), &s_panel_scroll,
+                           &(Clay_ElementDeclaration){.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(list_h)}}});
+        CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)}, .layoutDirection = CLAY_TOP_TO_BOTTOM, .childGap = Su(6), .padding = {0, Su(8), 0, 0}}}) {
+            for (int i = 0; i < n; i++) {
+                const gui_recovery_entry *e = gui_actions_recovery_at(i);
+                if (e == NULL) {
+                    continue;
+                }
+                char idb[48];
+                (void)snprintf(idb, sizeof idb, "recovery/row%d", i);
+                const uint32_t rid = nt_ui_id(idb);
+                char namebuf[288];
+                if (e->adoptable) {
+                    (void)snprintf(namebuf, sizeof namebuf, "%s", e->name);
+                } else {
+                    (void)snprintf(namebuf, sizeof namebuf, "%s (old format)", e->name);
+                }
+                CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(40))},
+                                 .layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = Su(10),
+                                 .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+                    CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)},
+                                     .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+                        ui_label_fit(ctx, namebuf, e->adoptable ? &g_body : &g_dim, S(140), 0U);
+                    }
+                    if (ui_btn(ctx, nt_ui_child_id(rid, "discard"), "Discard", &g_btn, true, 96.0F, 30.0F, &g_body)) {
+                        gui_actions_recovery_request(i, GUI_RECOVERY_DISCARD);
+                    }
+                    if (e->adoptable && e->orig_path[0] != '\0') {
+                        if (ui_btn(ctx, nt_ui_child_id(rid, "orig"), "Save to original", &g_btn_primary, true, 150.0F, 30.0F, &g_onaccent)) {
+                            gui_actions_recovery_request(i, GUI_RECOVERY_SAVE_ORIGINAL);
+                        }
+                    }
+                    if (e->adoptable) {
+                        if (ui_btn(ctx, nt_ui_child_id(rid, "saveas"), "Save As\xE2\x80\xA6", &g_btn, true, 110.0F, 30.0F, &g_body)) {
+                            gui_actions_recovery_request(i, GUI_RECOVERY_SAVE_AS);
+                        }
+                    }
+                }
+            }
+        }
+        nt_ui_scroll_end(ctx);
+        /* footer: Later = leave everything on disk, decide next launch (no data loss) */
+        CLAY({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = Su(12),
+                         .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+            if (ui_btn(ctx, nt_ui_id("ntpacker/recovery_later"), "Later", &g_btn, true, 100.0F, 34.0F, &g_body)) {
+                s_recovery_open = false; /* orphans stay on disk; offered again next launch */
+            }
+        }
+    }
+    nt_ui_modal_end(ctx);
+}
+
 void declare_about_modal(nt_ui_context_t *ctx) {
     if (nt_ui_modal_visible(ctx, s_id_about, &s_modal_style, &s_about_open)) {
         CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(S(460)), CLAY_SIZING_FIT(0)},

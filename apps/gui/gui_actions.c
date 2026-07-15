@@ -48,6 +48,13 @@ int s_pending_preview_target = -1;       /* strip preview-selector pick (-1 none
 int s_after_confirm;
 bool s_confirm_open;
 int s_modal_action;
+/* R6b: startup crash-recovery modal glue. The orphan list lives here; the modal reads it via the
+ * count/at accessors and requests a per-row action, deferred to apply_pending() (below) so the
+ * Save-As dialog + disk-mutating gui_recovery_resolve run outside nt_ui_begin/end, like s_pending_save_as. */
+bool s_recovery_open;
+static gui_recovery_list s_recovery_list;           /* orphans awaiting the user's decision */
+static int s_recovery_pending_row = -1;             /* -1 = none; else a row index requested this frame */
+static int s_recovery_pending_action = 0;           /* gui_recovery_action for the pending row */
 double s_last_pack_ms;      /* wall-clock ms of the last successful pack (for the stats line) */
 int s_last_pack_atlas = -1; /* which atlas that timing belongs to */
 
@@ -1482,6 +1489,42 @@ static void commit_active_edit(bool force) {
 }
 // #endregion
 
+// #region R6b startup crash-recovery modal glue
+void gui_actions_open_recovery(const gui_recovery_list *list) {
+    if (!list || list->count <= 0) {
+        s_recovery_open = false;
+        return;
+    }
+    s_recovery_list = *list; /* value copy of the fixed-size struct */
+    s_recovery_pending_row = -1;
+    s_recovery_open = true;
+}
+int gui_actions_recovery_count(void) { return s_recovery_list.count; }
+const gui_recovery_entry *gui_actions_recovery_at(int i) {
+    if (i < 0 || i >= s_recovery_list.count) {
+        return NULL;
+    }
+    return &s_recovery_list.items[i];
+}
+void gui_actions_recovery_request(int row, int action) {
+    s_recovery_pending_row = row;
+    s_recovery_pending_action = action;
+}
+/* Drop a resolved row (shift-down); close the modal when the list empties. */
+static void recovery_remove_row(int row) {
+    if (row < 0 || row >= s_recovery_list.count) {
+        return;
+    }
+    for (int i = row; i + 1 < s_recovery_list.count; i++) {
+        s_recovery_list.items[i] = s_recovery_list.items[i + 1];
+    }
+    s_recovery_list.count--;
+    if (s_recovery_list.count <= 0) {
+        s_recovery_open = false;
+    }
+}
+// #endregion
+
 // #region deferred side-effects (run at the top of the frame, between frames)
 void apply_pending(void) {
     poll_async(); /* land any finished async pack/export/preview before this frame's canvas pickup */
@@ -1537,6 +1580,52 @@ void apply_pending(void) {
         s_after_confirm = AFTER_NONE;
     }
     s_modal_action = MODAL_NONE;
+
+    /* R6b: harvest a per-row recovery decision requested last frame. Runs here (same spot the confirm
+     * harvest lands do_save()->tinyfd_*) so the Save-As dialog + disk-mutating resolve run outside
+     * nt_ui_begin/end. NON-DESTRUCTIVE ON FAILURE: a failed save leaves the journal + the row for a retry. */
+    if (s_recovery_pending_row >= 0) {
+        const int row = s_recovery_pending_row;
+        const int action = s_recovery_pending_action;
+        s_recovery_pending_row = -1;
+        const gui_recovery_entry *e = gui_actions_recovery_at(row);
+        if (e != NULL) {
+            /* copy the fields we need -- resolve/remove may not invalidate e here, but be defensive */
+            char journal[GUI_RECOVERY_PATH_CAP];
+            char orig[GUI_RECOVERY_PATH_CAP];
+            char nm[256];
+            (void)snprintf(journal, sizeof journal, "%s", e->journal_path);
+            (void)snprintf(orig, sizeof orig, "%s", e->orig_path);
+            (void)snprintf(nm, sizeof nm, "%s", e->name);
+            const char *target = "";
+            bool proceed = true;
+            if (action == GUI_RECOVERY_SAVE_AS) {
+                static const char *filt[] = {"*.ntpacker_project"};
+                const char *def = (orig[0] != '\0') ? orig : "recovered.ntpacker_project";
+                const char *picked = tinyfd_saveFileDialog("Save Recovered Project As", def, 1, filt, "ntpacker project");
+                if (picked == NULL) {
+                    proceed = false; /* cancelled -> keep the row, journal stays on disk */
+                } else {
+                    target = picked;
+                }
+            }
+            if (proceed) {
+                char err[256];
+                tp_status st = gui_recovery_resolve(journal, orig, (gui_recovery_action)action, target, err, sizeof err);
+                if (st == TP_STATUS_OK) {
+                    recovery_remove_row(row);
+                    if (action == GUI_RECOVERY_DISCARD) {
+                        set_statusf("Discarded recovered '%s'.", nm);
+                    } else {
+                        set_statusf("Recovered '%s' saved.", nm);
+                    }
+                } else {
+                    /* NON-DESTRUCTIVE: the journal is still on disk; keep the row so the user can retry. */
+                    set_statusf_ex(STATUS_ERROR, "Recover '%s' failed: %s", nm, err);
+                }
+            }
+        }
+    }
 
     if (s_pending_open) {
         do_open();
