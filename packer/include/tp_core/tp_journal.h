@@ -93,10 +93,12 @@ typedef struct tp_journal_io {
     int64_t (*length)(void *ctx);
     /* Truncate the store to `len` bytes (rolls a failed append back). 0 / <0. */
     int (*truncate)(void *ctx, size_t len);
-    /* Read the WHOLE store into a fresh malloc'd buffer (*out, *out_len); caller
-     * frees *out. 0 on success (empty store -> *out NULL, *out_len 0, return 0);
-     * negative on failure. */
-    int (*read_all)(void *ctx, uint8_t **out, size_t *out_len);
+    /* Read the WHOLE store into a fresh malloc'd buffer (*out, *out_len), but
+     * reject before allocation/copy when its live length exceeds `max_len`.
+     * Caller frees *out. 0 on success (empty store -> *out NULL, *out_len 0,
+     * return 0); negative on failure. */
+    int (*read_all)(void *ctx, size_t max_len, uint8_t **out,
+                    size_t *out_len);
     /* Best-effort flush to stable storage; may be NULL. 0 / <0. */
     int (*sync)(void *ctx);
     /* Free ctx; may be NULL for a borrowed store. */

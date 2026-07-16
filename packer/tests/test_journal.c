@@ -497,7 +497,7 @@ static tp_model *model_with_journal(tp_id128 key, tp_journal_io *io_out) {
 /* Snapshot a memory io's durable bytes into a fresh malloc'd buffer (may be NULL). */
 static uint8_t *snapshot_io(tp_journal_io io, size_t *len) {
     uint8_t *b = NULL;
-    TEST_ASSERT_EQUAL_INT(0, io.read_all(io.ctx, &b, len));
+    TEST_ASSERT_EQUAL_INT(0, io.read_all(io.ctx, SIZE_MAX, &b, len));
     return b;
 }
 
@@ -1274,6 +1274,9 @@ typedef struct {
     tp_journal_io inner; /* owned memory io */
     int write_count;
     int fail_at; /* 1-based index of the write to fail; 0 = never */
+    int read_count;
+    int64_t length_override; /* <0 delegates to inner */
+    size_t read_len_override; /* SIZE_MAX delegates to inner */
 } faulty_io_ctx;
 
 static int64_t faulty_write(void *ctx, const uint8_t *data, size_t len) {
@@ -1286,15 +1289,24 @@ static int64_t faulty_write(void *ctx, const uint8_t *data, size_t len) {
 }
 static int64_t faulty_length(void *ctx) {
     faulty_io_ctx *f = (faulty_io_ctx *)ctx;
+    if (f->length_override >= 0) {
+        return f->length_override;
+    }
     return f->inner.length(f->inner.ctx);
 }
 static int faulty_truncate(void *ctx, size_t len) {
     faulty_io_ctx *f = (faulty_io_ctx *)ctx;
     return f->inner.truncate(f->inner.ctx, len);
 }
-static int faulty_read_all(void *ctx, uint8_t **out, size_t *out_len) {
+static int faulty_read_all(void *ctx, size_t max_len, uint8_t **out,
+                           size_t *out_len) {
     faulty_io_ctx *f = (faulty_io_ctx *)ctx;
-    return f->inner.read_all(f->inner.ctx, out, out_len);
+    f->read_count++;
+    const int status = f->inner.read_all(f->inner.ctx, max_len, out, out_len);
+    if (status == 0 && f->read_len_override != SIZE_MAX) {
+        *out_len = f->read_len_override;
+    }
+    return status;
 }
 static int faulty_sync(void *ctx) {
     faulty_io_ctx *f = (faulty_io_ctx *)ctx;
@@ -1315,6 +1327,8 @@ static tp_journal_io faulty_io(void) {
     f->inner = tp_journal_io_memory();
     TEST_ASSERT_NOT_NULL(f->inner.ctx);
     f->fail_at = 0;
+    f->length_override = -1;
+    f->read_len_override = SIZE_MAX;
     tp_journal_io io;
     io.ctx = f;
     io.write = faulty_write;
@@ -2048,6 +2062,57 @@ void test_io_file_read_no_create(void) {
     remove(path);
 }
 
+void test_recovery_rejects_oversized_abstract_store_before_read(void) {
+    tp_journal_io io = faulty_io();
+    faulty_io_ctx *ctx = (faulty_io_ctx *)io.ctx;
+    ctx->length_override = 9;
+    tp_journal__test_set_file_limit(8U);
+    tp_journal *journal = tp_journal_create(io, tp_id128_nil());
+    TEST_ASSERT_NOT_NULL(journal);
+    tp_journal_recovery recovery = {0};
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS,
+                          tp_journal_recover(journal, &recovery, &error));
+    TEST_ASSERT_EQUAL_INT(0, ctx->read_count);
+    tp_journal_recovery_free(&recovery);
+    tp_journal_destroy(journal);
+    tp_journal__test_set_file_limit(0U);
+}
+
+void test_peek_rejects_post_read_oversize_from_abstract_store(void) {
+    tp_journal_io io = faulty_io();
+    faulty_io_ctx *ctx = (faulty_io_ctx *)io.ctx;
+    const uint8_t byte = 0U;
+    TEST_ASSERT_EQUAL_INT64(1, io.write(io.ctx, &byte, 1U));
+    ctx->length_override = 1;
+    ctx->read_len_override = 9U;
+    tp_journal__test_set_file_limit(8U);
+    tp_journal_peek_result peek = {0};
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS,
+                          tp_journal_peek(io, &peek, &error));
+    tp_journal__test_set_file_limit(0U);
+}
+
+void test_recovery_backend_rejects_growth_before_copy(void) {
+    tp_journal_io io = faulty_io();
+    faulty_io_ctx *ctx = (faulty_io_ctx *)io.ctx;
+    const uint8_t bytes[9] = {0};
+    TEST_ASSERT_EQUAL_INT64(9, io.write(io.ctx, bytes, sizeof bytes));
+    ctx->length_override = 1; /* preflight sees the old in-limit length */
+    tp_journal__test_set_file_limit(8U);
+    tp_journal *journal = tp_journal_create(io, tp_id128_nil());
+    TEST_ASSERT_NOT_NULL(journal);
+    tp_journal_recovery recovery = {0};
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED,
+                          tp_journal_recover(journal, &recovery, &error));
+    TEST_ASSERT_EQUAL_INT(1, ctx->read_count);
+    tp_journal_recovery_free(&recovery);
+    tp_journal_destroy(journal);
+    tp_journal__test_set_file_limit(0U);
+}
+
 void test_journal_crc32_matches_ieee_reference_vector(void) {
     static const uint8_t reference[] = "123456789";
     TEST_ASSERT_EQUAL_HEX32(0xCBF43926u,
@@ -2076,9 +2141,9 @@ void test_file_journal_rejects_oversize_before_read(void) {
 
     tp_journal_peek_result pk;
     tp_error err = {0};
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED,
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS,
                           tp_journal_peek(tp_journal_io_file_read(path), &pk, &err));
-    TEST_ASSERT_NOT_NULL(strstr(err.msg, "read failed"));
+    TEST_ASSERT_NOT_NULL(strstr(err.msg, "supported byte bound"));
     remove(path);
 }
 
@@ -4081,6 +4146,9 @@ int main(int argc, char **argv) {
     RUN_TEST(test_file_journal_roundtrip);
     RUN_TEST(test_io_file_read_no_create); /* R5b-2 fix [3]: read-only, no-create opener */
     RUN_TEST(test_file_journal_rejects_oversize_before_read);
+    RUN_TEST(test_recovery_rejects_oversized_abstract_store_before_read);
+    RUN_TEST(test_peek_rejects_post_read_oversize_from_abstract_store);
+    RUN_TEST(test_recovery_backend_rejects_growth_before_copy);
     RUN_TEST(test_file_journal_initial_checkpoint_cannot_exceed_reader_cap);
     RUN_TEST(test_file_journal_transaction_rejected_before_crossing_reader_cap);
     RUN_TEST(test_file_journal_undo_rejected_before_crossing_reader_cap);

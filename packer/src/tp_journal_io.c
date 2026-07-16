@@ -107,8 +107,12 @@ static int mem_truncate(void *ctx, size_t len) {
     return 0;
 }
 
-static int mem_read_all(void *ctx, uint8_t **out, size_t *out_len) {
+static int mem_read_all(void *ctx, size_t max_len, uint8_t **out,
+                        size_t *out_len) {
     const journal_mem *m = (const journal_mem *)ctx;
+    if (m->len > max_len) {
+        return -1;
+    }
     if (m->len == 0) {
         *out = NULL;
         *out_len = 0;
@@ -233,7 +237,8 @@ static int file_truncate(void *ctx, size_t len) {
     return (rc == 0) ? 0 : -1;
 }
 
-static int file_read_all(void *ctx, uint8_t **out, size_t *out_len) {
+static int file_read_all(void *ctx, size_t max_len, uint8_t **out,
+                         size_t *out_len) {
     journal_file *f = (journal_file *)ctx;
     if (TP_FSEEK64(f->fp, 0, SEEK_END) != 0) {
         return -1;
@@ -247,7 +252,8 @@ static int file_read_all(void *ctx, uint8_t **out, size_t *out_len) {
         *out_len = 0;
         return 0;
     }
-    if ((uint64_t)sz > (uint64_t)TP_JOURNAL_MAX_FILE_BYTES || (uint64_t)sz > (uint64_t)SIZE_MAX) {
+    if ((uint64_t)sz > (uint64_t)max_len ||
+        (uint64_t)sz > (uint64_t)SIZE_MAX) {
         return -1; /* reject before malloc/read: recovery input is untrusted */
     }
     if (TP_FSEEK64(f->fp, 0, SEEK_SET) != 0) {

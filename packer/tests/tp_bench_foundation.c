@@ -264,11 +264,15 @@ static int recovery_probe_truncate(void *ctx, size_t len) {
     return -1;
 }
 
-static int recovery_probe_read_all(void *ctx, uint8_t **out, size_t *out_len) {
+static int recovery_probe_read_all(void *ctx, size_t max_len, uint8_t **out,
+                                   size_t *out_len) {
     recovery_read_probe *probe = (recovery_read_probe *)ctx;
     *out = NULL;
     *out_len = 0U;
     probe->read_calls++;
+    if (probe->source_len > max_len) {
+        return -1;
+    }
     if (probe->source_len == 0U) {
         return 0;
     }
@@ -949,7 +953,7 @@ static bool recovery_scaling_baseline_create(const fixture *f, int requested_ope
     }
     free(payload);
 
-    if (io.read_all(io.ctx, &out->bytes, &out->byte_count) != 0 || !out->bytes) {
+    if (io.read_all(io.ctx, SIZE_MAX, &out->bytes, &out->byte_count) != 0 || !out->bytes) {
         tp_journal_destroy(journal);
         tp_model_destroy(expected_model);
         recovery_scaling_baseline_free(out);
@@ -1095,7 +1099,7 @@ static bool recovery_max_payload_baseline_create(const fixture *f, bool fill_fil
             break;
         }
     }
-    if (io.read_all(io.ctx, &out->bytes, &out->byte_count) != 0 || !out->bytes) {
+    if (io.read_all(io.ctx, SIZE_MAX, &out->bytes, &out->byte_count) != 0 || !out->bytes) {
         goto cleanup;
     }
     out->checkpoint_bytes = snapshot_len;
@@ -1236,7 +1240,7 @@ static bool recovery_max_op_density_baseline_create(const fixture *f,
     if (record_count <= 0 ||
         (size_t)record_count > (size_t)TP_JOURNAL_MAX_REPLAY_RECORDS ||
         aggregate_operations != (size_t)TP_JOURNAL_MAX_REPLAY_OPERATIONS ||
-        io.read_all(io.ctx, &out->bytes, &out->byte_count) != 0 || !out->bytes) {
+        io.read_all(io.ctx, SIZE_MAX, &out->bytes, &out->byte_count) != 0 || !out->bytes) {
         goto cleanup;
     }
     out->checkpoint_bytes = snapshot_len;
@@ -1291,7 +1295,7 @@ static bool recovery_max_total_frames_baseline_create(
     }
     uint8_t *checkpoint = NULL;
     size_t checkpoint_len = 0U;
-    if (io.read_all(io.ctx, &checkpoint, &checkpoint_len) != 0 || !checkpoint) {
+    if (io.read_all(io.ctx, SIZE_MAX, &checkpoint, &checkpoint_len) != 0 || !checkpoint) {
         tp_journal_destroy(journal);
         free(snapshot);
         return false;

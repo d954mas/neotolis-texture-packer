@@ -170,6 +170,34 @@ static size_t journal_file_limit(void) {
                              : (size_t)TP_JOURNAL_MAX_FILE_BYTES;
 }
 
+static tp_status journal_fail(tp_error *err, const char *msg);
+
+static tp_status journal_read_all_bounded(tp_journal_io *io, uint8_t **out,
+                                          size_t *out_len, tp_error *err) {
+    *out = NULL;
+    *out_len = 0U;
+    const int64_t advertised = io->length(io->ctx);
+    if (advertised < 0) {
+        return journal_fail(err, "journal length query failed");
+    }
+    if ((uint64_t)advertised > (uint64_t)journal_file_limit()) {
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                            "journal exceeds the supported byte bound");
+    }
+    const size_t limit = journal_file_limit();
+    if (io->read_all(io->ctx, limit, out, out_len) != 0) {
+        return journal_fail(err, "journal read failed");
+    }
+    if (*out_len > limit) {
+        free(*out);
+        *out = NULL;
+        *out_len = 0U;
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                            "journal grew beyond the supported byte bound while reading");
+    }
+    return TP_STATUS_OK;
+}
+
 void tp_journal__test_set_record_limit(size_t limit) {
     s_test_record_limit = limit;
 }
@@ -1412,8 +1440,9 @@ tp_status tp_journal_recover(tp_journal *j, tp_journal_recovery *out, tp_error *
     memset(out, 0, sizeof *out);
     uint8_t *buf = NULL;
     size_t len = 0;
-    if (j->io.read_all(j->io.ctx, &buf, &len) != 0) {
-        return journal_fail(err, "journal read failed");
+    tp_status read_status = journal_read_all_bounded(&j->io, &buf, &len, err);
+    if (read_status != TP_STATUS_OK) {
+        return read_status;
     }
     out->bytes_total = len;
     /* Recovery rebuilds BOTH in-memory caches from the store so a reused journal reflects ONLY what the
@@ -1603,7 +1632,7 @@ tp_status tp_journal_peek(tp_journal_io io, tp_journal_peek_result *out, tp_erro
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "null peek out");
     }
     memset(out, 0, sizeof *out);
-    if (!io.ctx || !io.read_all) {
+    if (!io.ctx || !io.length || !io.read_all) {
         if (io.destroy) {
             io.destroy(io.ctx);
         }
@@ -1611,13 +1640,13 @@ tp_status tp_journal_peek(tp_journal_io io, tp_journal_peek_result *out, tp_erro
     }
     uint8_t *buf = NULL;
     size_t len = 0;
-    int rc = io.read_all(io.ctx, &buf, &len);
+    tp_status read_status = journal_read_all_bounded(&io, &buf, &len, err);
     if (io.destroy) {
         io.destroy(io.ctx); /* peek TAKES OWNERSHIP of io; the bytes are now in buf */
     }
-    if (rc != 0) {
+    if (read_status != TP_STATUS_OK) {
         free(buf);
-        return journal_fail(err, "journal read failed");
+        return read_status;
     }
 
     /* Header: shared classifier (same BAD_MAGIC / VERSION_MISMATCH / EMPTY / torn-header split as
