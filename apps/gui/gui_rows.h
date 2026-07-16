@@ -15,6 +15,7 @@
 #include "tp_core/tp_id.h"
 #include "tp_core/tp_operation.h"
 #include "tp_core/tp_scan.h"
+#include "tp_core/tp_session.h"
 
 #include "gui_state.h" /* shared editor state the row/selection helpers read + grow */
 
@@ -69,6 +70,13 @@ extern int s_row_count;
  * key and performs no allocation or filesystem work. */
 void build_rows(void);
 
+/* Cached selected leaf and its sparse project override. The first lookup after
+ * a row rebuild or selection change is bounded by the row/index rebuild data;
+ * unchanged frames perform no linear row/override scan. Returned pointers are
+ * owned by the current row/snapshot caches. */
+const sprite_row *gui_rows_selected_leaf(void);
+const tp_snapshot_sprite *gui_rows_selected_override(void);
+
 #if defined(NTPACKER_GUI_BENCH)
 typedef struct gui_rows_bench_counters {
     uint64_t row_realloc_calls;
@@ -81,6 +89,8 @@ typedef struct gui_rows_bench_counters {
     uint64_t source_iterations;
     uint64_t path_resolve_calls;
     uint64_t child_iterations;
+    uint64_t selected_row_iterations;
+    uint64_t selected_cache_hits;
     int row_capacity;
     int override_index_capacity;
 } gui_rows_bench_counters;

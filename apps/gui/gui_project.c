@@ -34,6 +34,7 @@
 // #region state
 static tp_session *s_session; /* sole owner of the live model and project */
 static tp_session_snapshot *s_snapshot; /* one cached immutable GUI read view */
+static uint64_t s_snapshot_lifetime_generation;
 static uint64_t s_txn_seq; /* monotonic transaction-id source (unique per commit) */
 static bool s_preview_stale;
 static char s_name[256]; /* cached basename for the menu bar */
@@ -103,6 +104,9 @@ static bool s_pending_preview_stale_before;
 static void note_session_reject(tp_status status, const tp_error *err);
 
 static void snapshot_drop(void) {
+    if (s_snapshot) {
+        s_snapshot_lifetime_generation++;
+    }
     tp_session_snapshot_destroy(s_snapshot);
     s_snapshot = NULL;
 }
@@ -115,6 +119,10 @@ const tp_session_snapshot *gui_project_snapshot(void) {
         }
     }
     return s_snapshot;
+}
+
+uint64_t gui_project_snapshot_lifetime_generation(void) {
+    return s_snapshot_lifetime_generation;
 }
 
 tp_session *gui_project_session_for_jobs(void) { return s_session; }

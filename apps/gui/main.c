@@ -781,20 +781,7 @@ static void frame(void) {
          * owner: "добавил и не вижу"). Result names are the original atlas-relative key + ext. */
         s_canvas.sel_slice9[0] = s_canvas.sel_slice9[1] = s_canvas.sel_slice9[2] = s_canvas.sel_slice9[3] = 0;
         if (want && s_canvas.sel_sprite >= 0 && s_canvas.sel_sprite < want->sprite_count) {
-            const sprite_row *selected = NULL;
-            for (int i = 0; i < s_row_count; i++) {
-                const sprite_row *row = &s_rows[i];
-                const bool is_selected = row->is_source
-                                             ? (s_sel_src == row->src && s_sel_child == -1)
-                                             : (s_sel_src == row->src &&
-                                                s_sel_child == row->child);
-                if (is_selected && !row->is_folder && !row->missing &&
-                    !tp_id128_is_nil(row->source_id) &&
-                    row->source_key[0] != '\0') {
-                    selected = row;
-                    break;
-                }
-            }
+            const sprite_row *selected = gui_rows_selected_leaf();
             const tp_session_snapshot *snapshot = gui_project_snapshot();
             const tp_snapshot_atlas *atlas = snapshot
                                                   ? tp_session_snapshot_atlas_at(snapshot,
@@ -814,9 +801,7 @@ static void frame(void) {
                     }
                 } else {
                     const tp_snapshot_sprite *s9ov =
-                        tp_session_snapshot_sprite_by_key(snapshot, atlas->id,
-                                                          selected->source_id,
-                                                          selected->source_key);
+                        gui_rows_selected_override();
                     if (s9ov) {
                         for (int k = 0; k < 4; k++) {
                             s_canvas.sel_slice9[k] = (int)s9ov->slice9_lrtb[k];

@@ -35,9 +35,14 @@ int s_sel_child = -1;
 char s_sel_abs[512];
 bool s_sel_missing;
 static const tp_session_snapshot *s_fixture_snapshot;
+static uint64_t s_fixture_snapshot_lifetime;
 
 const tp_session_snapshot *gui_project_snapshot(void) {
     return s_fixture_snapshot;
+}
+
+uint64_t gui_project_snapshot_lifetime_generation(void) {
+    return s_fixture_snapshot_lifetime;
 }
 
 static bool s_status_failed;
@@ -398,6 +403,21 @@ static bool fixture_publish_source_generation(row_fixture *fixture) {
     tp_session_snapshot_destroy(fixture->snapshot);
     fixture->snapshot = next;
     s_fixture_snapshot = next;
+    s_fixture_snapshot_lifetime++;
+    return true;
+}
+
+static bool fixture_replace_snapshot_same_generation(row_fixture *fixture) {
+    tp_error err = {{0}};
+    tp_session_snapshot *next = NULL;
+    if (tp_session_snapshot_create(fixture->session, &next, &err) !=
+        TP_STATUS_OK) {
+        return false;
+    }
+    tp_session_snapshot_destroy(fixture->snapshot);
+    fixture->snapshot = next;
+    s_fixture_snapshot = next;
+    s_fixture_snapshot_lifetime++;
     return true;
 }
 
@@ -412,6 +432,51 @@ static bool run_fixture(row_fixture *fixture, int iterations) {
                           "(iteration=%d status_failed=%d rows=%d expected=%d)\n",
                           fixture->spec.name, i, s_status_failed ? 1 : 0,
                           s_row_count, fixture_row_count(fixture));
+            return false;
+        }
+    }
+    if (fixture->spec.children > 0) {
+        s_sel_src = 0;
+        s_sel_child = fixture->spec.overrides > 0
+                          ? fixture->spec.overrides - 1
+                          : fixture->spec.children - 1;
+        if (!gui_rows_selected_leaf()) {
+            return false;
+        }
+        const tp_snapshot_sprite *selected_override =
+            gui_rows_selected_override();
+        if ((fixture->spec.overrides > 0) != (selected_override != NULL)) {
+            return false;
+        }
+    }
+
+    /* Save and identity-only paths may replace the immutable snapshot without
+     * changing model/source generations. Prove borrowed override DTOs still
+     * force exactly one row-cache rebuild on that lifetime transition. */
+    if (!fixture_replace_snapshot_same_generation(fixture)) {
+        return false;
+    }
+    gui_rows_bench_reset_counters();
+    /* Accessors must detect a snapshot replacement that happens after the
+     * frame's build_rows() call and rebuild before touching borrowed slots. */
+    if (fixture->spec.children > 0) {
+        if (!gui_rows_selected_leaf()) {
+            return false;
+        }
+    } else {
+        build_rows();
+    }
+    if (gui_rows_bench_get_counters().rebuilds != 1U ||
+        !fixture_rows_match(fixture)) {
+        (void)fprintf(stderr,
+                      "tp_bench_gui_rows: snapshot lifetime rebuild failed for %s\n",
+                      fixture->spec.name);
+        return false;
+    }
+    if (fixture->spec.children > 0) {
+        const tp_snapshot_sprite *selected_override =
+            gui_rows_selected_override();
+        if ((fixture->spec.overrides > 0) != (selected_override != NULL)) {
             return false;
         }
     }
@@ -433,6 +498,12 @@ static bool run_fixture(row_fixture *fixture, int iterations) {
         s_status_failed = false;
         const double start = tp_bench_now_ms();
         build_rows();
+        if (fixture->spec.children > 0) {
+            if (!gui_rows_selected_leaf()) {
+                return false;
+            }
+            (void)gui_rows_selected_override();
+        }
         const double elapsed = tp_bench_now_ms() - start;
         if (!tp_bench_samples_record(&samples, fixture_rows_match(fixture),
                                      elapsed)) {
@@ -451,6 +522,8 @@ static bool run_fixture(row_fixture *fixture, int iterations) {
         rows.override_index_realloc_calls != 0U ||
         rows.source_iterations != 0U || rows.path_resolve_calls != 0U ||
         rows.child_iterations != 0U || scan.directory_walks != 0U ||
+        rows.selected_row_iterations != 0U ||
+        (fixture->spec.children > 0 && rows.override_lookup_calls != 0U) ||
         scan.get_calls != 0U || scan.exists_fs_calls != 0U ||
         scan.is_dir_fs_calls != 0U) {
         (void)fprintf(stderr,
@@ -480,6 +553,12 @@ static bool run_fixture(row_fixture *fixture, int iterations) {
     s_status_failed = false;
     const double rebuild_start = tp_bench_now_ms();
     build_rows();
+    if (fixture->spec.children > 0) {
+        if (!gui_rows_selected_leaf()) {
+            return false;
+        }
+        (void)gui_rows_selected_override();
+    }
     const double rebuild_ms = tp_bench_now_ms() - rebuild_start;
     const gui_rows_bench_counters rebuild_rows =
         gui_rows_bench_get_counters();
@@ -488,7 +567,8 @@ static bool run_fixture(row_fixture *fixture, int iterations) {
     const uint64_t linear_units = (uint64_t)fixture->spec.sources +
                                   (uint64_t)fixture->spec.children +
                                   (uint64_t)fixture->spec.overrides;
-    const uint64_t expected_lookups = (uint64_t)fixture->spec.children;
+    const uint64_t expected_lookups = (uint64_t)fixture->spec.children +
+                                      (fixture->spec.children > 0 ? 1U : 0U);
     const uint64_t expected_gets = fixture->spec.children > 0 ? 1U : 0U;
     const uint64_t expected_is_dir = fixture->spec.children > 0 ? 1U : 0U;
     if (!fixture_rows_match(fixture) || rebuild_rows.cache_key_checks != 1U ||

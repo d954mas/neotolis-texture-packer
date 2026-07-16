@@ -391,19 +391,6 @@ static void declare_atlas_settings(nt_ui_context_t *ctx,
     }
 }
 
-/* Currently-selected leaf sprite row (a file source or a folder child), or NULL. */
-static const sprite_row *selected_leaf_row(void) {
-    for (int i = 0; i < s_row_count; i++) {
-        const sprite_row *r = &s_rows[i];
-        const bool sel = r->is_source ? (s_sel_src == r->src && s_sel_child == -1)
-                                      : (s_sel_src == r->src && s_sel_child == r->child);
-        if (sel && !r->is_folder && !r->missing && r->sprite_name[0] != '\0') {
-            return r;
-        }
-    }
-    return NULL;
-}
-
 /* Per-sprite "Default (inherited: ..) then explicit values" override combo. `cur_ov`
  * is TP_PROJECT_OV_INHERIT or an explicit index; row 0 is Default. Returns the new
  * override value (or TP_PROJECT_OV_INHERIT), or INT_MIN if unchanged. */
@@ -453,7 +440,7 @@ static bool right_panel_rename_row(nt_ui_context_t *ctx, const char *label, cons
 static void declare_region_settings(nt_ui_context_t *ctx,
                                     const tp_session_snapshot *snapshot,
                                     const tp_snapshot_atlas *atlas) {
-    const sprite_row *row = selected_leaf_row();
+    const sprite_row *row = gui_rows_selected_leaf();
     if (!row) {
         if (s_sel_missing) {
             panel_note(ctx, "Selected file is missing \xE2\x80\x94 restore it and press Refresh (F5).");
@@ -465,8 +452,7 @@ static void declare_region_settings(nt_ui_context_t *ctx,
     const char *sprite = row->sprite_name;
     const gui_sprite_ref sprite_ref = {atlas->id, row->source_id, row->source_key,
                                        tp_session_snapshot_revision(snapshot)};
-    const tp_snapshot_sprite *ov = tp_session_snapshot_sprite_by_key(
-        snapshot, atlas->id, row->source_id, row->source_key);
+    const tp_snapshot_sprite *ov = gui_rows_selected_override();
     const tp_result *pr = gui_pack_result(s_sel_atlas);
     const int ri = pr ? gui_pack_find_sprite_ref(s_sel_atlas, row->source_id,
                                                   row->source_key)

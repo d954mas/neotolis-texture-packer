@@ -166,6 +166,10 @@ tp_status gui_recovery_resolve_entry(const gui_recovery_entry *entry, gui_recove
 /* --- accessors --- */
 /* Cached immutable read view. Invalidated only at model-change chokepoints. */
 const tp_session_snapshot *gui_project_snapshot(void);
+/* Changes whenever the cached snapshot object is destroyed, including Save
+ * paths whose model/source generations remain unchanged. Borrowing GUI caches
+ * include this token in their lifetime key. */
+uint64_t gui_project_snapshot_lifetime_generation(void);
 /* Narrow orchestration seam for the derived Pack / side-effect Export job
  * adapter. The session remains opaque and owns the one active typed handle. */
 tp_session *gui_project_session_for_jobs(void);

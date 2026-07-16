@@ -155,14 +155,14 @@ sprite_row *s_rows;
 int s_row_count;
 static int s_rows_cap;
 
-/* Cache-local transient lookup over the snapshot/project's sparse overrides.
- * Slots borrow strings only while a rebuild is running; the row labels copy the
- * required text. A later rebuild clears every slot before dereferencing it, so a
- * clone-swap between generations cannot leave a live borrowed alias. */
+/* Cache-local lookup over the snapshot/project's sparse overrides. Slots borrow
+ * immutable DTO pointers while the row key includes the GUI snapshot-lifetime
+ * generation. Snapshot destruction changes that token, forcing a rebuild before
+ * any view can reuse a borrowed override. */
 typedef struct override_slot {
     tp_id128 source_id;
     const char *source_key;
-    const char *rename;
+    const tp_snapshot_sprite *sprite;
 } override_slot;
 
 static override_slot *s_override_index;
@@ -171,6 +171,14 @@ static bool s_row_cache_valid;
 static tp_id128 s_row_cache_atlas_id;
 static uint64_t s_row_cache_snapshot_generation;
 static uint64_t s_row_cache_source_generation;
+static uint64_t s_row_cache_snapshot_lifetime;
+static uint64_t s_row_cache_generation;
+static bool s_selected_cache_valid;
+static uint64_t s_selected_cache_row_generation;
+static int s_selected_cache_src;
+static int s_selected_cache_child;
+static int s_selected_cache_row;
+static const tp_snapshot_sprite *s_selected_cache_override;
 #if defined(NTPACKER_GUI_BENCH)
 static gui_rows_bench_counters s_bench_counters;
 #endif
@@ -244,7 +252,7 @@ static bool override_index_build(const tp_session_snapshot *snapshot,
             if (!entry->source_key) {
                 entry->source_id = sprite->source_id;
                 entry->source_key = sprite->source_key;
-                entry->rename = sprite->rename;
+                entry->sprite = sprite;
 #if defined(NTPACKER_GUI_BENCH)
                 s_bench_counters.override_inserts++;
 #endif
@@ -260,8 +268,8 @@ static bool override_index_build(const tp_session_snapshot *snapshot,
     return true;
 }
 
-static const char *override_rename(tp_id128 source_id,
-                                   const char *source_key) {
+static const tp_snapshot_sprite *override_by_key(tp_id128 source_id,
+                                                 const char *source_key) {
 #if defined(NTPACKER_GUI_BENCH)
     s_bench_counters.override_lookup_calls++;
 #endif
@@ -277,7 +285,7 @@ static const char *override_rename(tp_id128 source_id,
         }
         if (tp_id128_eq(entry->source_id, source_id) &&
             strcmp(entry->source_key, source_key) == 0) {
-            return entry->rename;
+            return entry->sprite;
         }
         slot = (slot + 1U) & mask;
     }
@@ -288,7 +296,8 @@ static const char *override_rename(tp_id128 source_id,
 static void row_display(tp_id128 source_id, const char *source_key,
                         const char *base_label, const char *paren,
                         char *out, size_t cap) {
-    const char *rename = override_rename(source_id, source_key);
+    const tp_snapshot_sprite *override = override_by_key(source_id, source_key);
+    const char *rename = override ? override->rename : NULL;
     if (rename) {
         (void)snprintf(out, cap, "%s (%s)", rename, paren);
     } else {
@@ -328,12 +337,17 @@ void build_rows(void) {
         tp_session_snapshot_model_generation(snapshot);
     const uint64_t source_generation =
         tp_session_snapshot_source_generation(snapshot);
+    const uint64_t snapshot_lifetime =
+        gui_project_snapshot_lifetime_generation();
     if (a && s_row_cache_valid && tp_id128_eq(s_row_cache_atlas_id, a->id) &&
         s_row_cache_snapshot_generation == snapshot_generation &&
-        s_row_cache_source_generation == source_generation) {
+        s_row_cache_source_generation == source_generation &&
+        s_row_cache_snapshot_lifetime == snapshot_lifetime) {
         return;
     }
     s_row_cache_valid = false;
+    s_selected_cache_valid = false;
+    s_row_cache_generation++;
     s_row_count = 0;
     if (!a) {
         return;
@@ -417,7 +431,60 @@ void build_rows(void) {
     s_row_cache_atlas_id = a->id;
     s_row_cache_snapshot_generation = snapshot_generation;
     s_row_cache_source_generation = source_generation;
+    s_row_cache_snapshot_lifetime = snapshot_lifetime;
     s_row_cache_valid = true;
+}
+
+static void selected_cache_refresh(void) {
+    /* Frame-side actions (notably screenshot pack/refresh) can replace the GUI
+     * snapshot after build_rows() ran. Never inspect selected-cache or override
+     * slots borrowed from that expired snapshot; refresh the row owner first. */
+    if (s_row_cache_snapshot_lifetime !=
+        gui_project_snapshot_lifetime_generation()) {
+        build_rows();
+    }
+    if (s_selected_cache_valid &&
+        s_selected_cache_row_generation == s_row_cache_generation &&
+        s_selected_cache_src == s_sel_src &&
+        s_selected_cache_child == s_sel_child) {
+#if defined(NTPACKER_GUI_BENCH)
+        s_bench_counters.selected_cache_hits++;
+#endif
+        return;
+    }
+    s_selected_cache_valid = true;
+    s_selected_cache_row_generation = s_row_cache_generation;
+    s_selected_cache_src = s_sel_src;
+    s_selected_cache_child = s_sel_child;
+    s_selected_cache_row = -1;
+    s_selected_cache_override = NULL;
+    for (int i = 0; i < s_row_count; ++i) {
+#if defined(NTPACKER_GUI_BENCH)
+        s_bench_counters.selected_row_iterations++;
+#endif
+        const sprite_row *row = &s_rows[i];
+        const bool selected = row->is_source
+                                  ? (s_sel_src == row->src && s_sel_child == -1)
+                                  : (s_sel_src == row->src &&
+                                     s_sel_child == row->child);
+        if (selected && !row->is_folder && !row->missing &&
+            !tp_id128_is_nil(row->source_id) && row->source_key[0] != '\0') {
+            s_selected_cache_row = i;
+            s_selected_cache_override = override_by_key(row->source_id,
+                                                        row->source_key);
+            return;
+        }
+    }
+}
+
+const sprite_row *gui_rows_selected_leaf(void) {
+    selected_cache_refresh();
+    return s_selected_cache_row >= 0 ? &s_rows[s_selected_cache_row] : NULL;
+}
+
+const tp_snapshot_sprite *gui_rows_selected_override(void) {
+    selected_cache_refresh();
+    return s_selected_cache_override;
 }
 
 #if defined(NTPACKER_GUI_BENCH)
@@ -445,6 +512,7 @@ void gui_rows_bench_shutdown(void) {
     s_rows_cap = 0;
     s_override_index_cap = 0U;
     s_row_cache_valid = false;
+    s_selected_cache_valid = false;
     memset(&s_bench_counters, 0, sizeof s_bench_counters);
 }
 #endif
