@@ -551,6 +551,99 @@ void test_apply_per_op_alloc_fault(void) {
     tp_model_destroy(m);
 }
 
+/* Typed input is untrusted too: canonical sizing must not walk a claimed frame
+ * array before the operation owner has rejected a missing pointer. */
+void test_typed_null_frame_array_rejected_before_encoding(void) {
+    tp_project *p = base_project();
+    const tp_id128 aid = p->atlases[0].id;
+    tp_model *m = tp_model_wrap(p);
+    char *before = serialize(tp_model_project(m));
+
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_ANIMATION_CREATE;
+    op.atlas_id = aid;
+    op.u.anim_create.anim_id = id_of(0xC8);
+    op.u.anim_create.name = (char *)"walk";
+    op.u.anim_create.fps = 12.0F;
+    op.u.anim_create.frames = NULL;
+    op.u.anim_create.frame_count = 1;
+
+    tp_txn_request req = {0};
+    memcpy(req.id_hex, "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", 33U);
+    req.schema = TP_TXN_SCHEMA;
+    req.ops = &op;
+    req.op_count = 1;
+
+    tp_txn_result res;
+    tp_error err = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_model_apply(m, &req, &res, &err));
+    TEST_ASSERT_FALSE(res.committed);
+    TEST_ASSERT_EQUAL_INT64(0, tp_model_revision(m));
+    TEST_ASSERT_EQUAL_INT(1, res.error_count);
+    TEST_ASSERT_EQUAL_INT(0, res.errors[0].op_index);
+    TEST_ASSERT_EQUAL_STRING("frames", res.errors[0].field);
+    char *after = serialize(tp_model_project(m));
+    TEST_ASSERT_EQUAL_STRING(before, after);
+
+    free(before);
+    free(after);
+    tp_txn_result_free(&res);
+    tp_model_destroy(m);
+}
+
+/* The public request owns a fixed 33-byte ID buffer. A caller that fills every
+ * byte without a terminator must get id_malformed, never an unbounded %s/scan. */
+void test_typed_nonterminated_transaction_id_rejected_bounded(void) {
+    tp_project *p = base_project();
+    const tp_id128 aid = p->atlases[0].id;
+    tp_model *m = tp_model_wrap(p);
+
+    tp_operation op;
+    op_atlas_rename(&op, aid, "not-applied");
+    tp_txn_request req = {0};
+    memset(req.id_hex, 'a', sizeof req.id_hex);
+    req.schema = TP_TXN_SCHEMA;
+    req.ops = &op;
+    req.op_count = 1;
+
+    tp_txn_result res;
+    tp_error err = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_ID_MALFORMED,
+                          tp_model_apply(m, &req, &res, &err));
+    TEST_ASSERT_FALSE(res.committed);
+    TEST_ASSERT_EQUAL_INT64(0, tp_model_revision(m));
+    TEST_ASSERT_EQUAL_INT(1, res.error_count);
+    TEST_ASSERT_EQUAL_STRING("id", res.errors[0].field);
+    TEST_ASSERT_EQUAL_INT(32, (int)strlen(res.transaction_id));
+    TEST_ASSERT_EQUAL_STRING("atlas1", tp_model_project(m)->atlases[0].name);
+
+    tp_txn_result_free(&res);
+    tp_model_destroy(m);
+}
+
+void test_json_short_transaction_ids_rejected_bounded(void) {
+    static const char *const ids[] = {"", "a"};
+    for (size_t i = 0U; i < sizeof ids / sizeof ids[0]; ++i) {
+        tp_model *m = tp_model_wrap(base_project());
+        char json[256];
+        (void)snprintf(json, sizeof json,
+                       "{\"schema\":1,\"transaction\":{\"id\":\"%s\","
+                       "\"expected_revision\":0,\"operations\":[]}}",
+                       ids[i]);
+        tp_txn_result res;
+        tp_error err = {{0}};
+        TEST_ASSERT_EQUAL_INT(TP_STATUS_ID_MALFORMED,
+                              tp_model_apply_json(m, json, &res, &err));
+        TEST_ASSERT_FALSE(res.committed);
+        TEST_ASSERT_EQUAL_STRING("", res.transaction_id);
+        TEST_ASSERT_EQUAL_INT64(0, tp_model_revision(m));
+        tp_txn_result_free(&res);
+        tp_model_destroy(m);
+    }
+}
+
 /* ---- expected_revision semantics ---------------------------------------- */
 
 void test_expected_revision(void) {
@@ -1942,6 +2035,9 @@ int main(void) {
     RUN_TEST(test_atomicity_op_fails);
     RUN_TEST(test_apply_clone_fault);
     RUN_TEST(test_apply_per_op_alloc_fault);
+    RUN_TEST(test_typed_null_frame_array_rejected_before_encoding);
+    RUN_TEST(test_typed_nonterminated_transaction_id_rejected_bounded);
+    RUN_TEST(test_json_short_transaction_ids_rejected_bounded);
     RUN_TEST(test_expected_revision);
     RUN_TEST(test_idempotent_retry);
     RUN_TEST(test_idempotency_retention_window_evicts_fifo);

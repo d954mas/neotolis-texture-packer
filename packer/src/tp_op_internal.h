@@ -63,6 +63,12 @@ void tp_op__test_apply_count_reset(void);
 size_t tp_op__test_apply_count_take(void);
 void tp_op__test_apply_count_publish(size_t count);
 
+/* Reject typed shapes that the canonical encoder cannot safely traverse.
+ * Model-dependent validation still runs against the progressively applied
+ * transaction clone. */
+tp_status tp_op__validate_encode_shape(const tp_operation *operation,
+                                       tp_op_reject *reject);
+
 /* Produce the operation identity used by validation, mutation, and durable
  * transaction encoding. SOURCE_ADD/REPLACE keys are resolved against the
  * current saved-project directory; every other operation is a shallow copy.

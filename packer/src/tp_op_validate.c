@@ -228,14 +228,43 @@ static tp_status validate_canonical_frame_key(const char *key,
     return TP_STATUS_OK;
 }
 
-static tp_status validate_frames(const tp_project_atlas *atlas,
-                                 const tp_op_sprite_ref *frames, int n,
-                                 tp_op_reject *rej) {
+static tp_status validate_frame_array_shape(const tp_op_sprite_ref *frames,
+                                            int n, tp_op_reject *rej) {
     if (n < 0) { /* a negative count would loop &frames[-1] in apply -> heap underflow */
         return tp_op__reject(rej, TP_STATUS_OUT_OF_RANGE, "frame_count", "frame_count %d must be >= 0", n);
     }
     if (n > 0 && frames == NULL) { /* count claims frames but the array ptr is null -> frames[i] derefs NULL */
         return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "frames", "frame_count %d but the frames array is null", n);
+    }
+    return TP_STATUS_OK;
+}
+
+tp_status tp_op__validate_encode_shape(const tp_operation *operation,
+                                       tp_op_reject *rej) {
+    tp_op__reject_ok(rej);
+    if (!operation) {
+        return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "",
+                             "null operation");
+    }
+    if (operation->kind == TP_OP_ANIMATION_CREATE) {
+        return validate_frame_array_shape(operation->u.anim_create.frames,
+                                          operation->u.anim_create.frame_count,
+                                          rej);
+    }
+    if (operation->kind == TP_OP_ANIMATION_FRAMES_SET) {
+        return validate_frame_array_shape(
+            operation->u.anim_frames_set.frames,
+            operation->u.anim_frames_set.frame_count, rej);
+    }
+    return TP_STATUS_OK;
+}
+
+static tp_status validate_frames(const tp_project_atlas *atlas,
+                                 const tp_op_sprite_ref *frames, int n,
+                                 tp_op_reject *rej) {
+    const tp_status shape = validate_frame_array_shape(frames, n, rej);
+    if (shape != TP_STATUS_OK) {
+        return shape;
     }
     for (int i = 0; i < n; i++) {
         if (tp_id128_is_nil(frames[i].source_id)) {

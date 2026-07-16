@@ -154,7 +154,14 @@ void tp_txn__result_reset(tp_txn_result *out, const char *id_hex) {
         return;
     }
     out->schema = TP_TXN_SCHEMA;
-    (void)snprintf(out->transaction_id, sizeof out->transaction_id, "%s", id_hex ? id_hex : "");
+    size_t id_len = 0U;
+    if (id_hex) {
+        while (id_len < sizeof out->transaction_id - 1U && id_hex[id_len]) {
+            id_len++;
+        }
+        memcpy(out->transaction_id, id_hex, id_len);
+    }
+    out->transaction_id[id_len] = '\0';
     out->committed = false;
     out->no_change = false;
     out->revision = 0;
@@ -361,6 +368,15 @@ tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_tx
         if (!req->ops || !tp_op_info_by_kind(req->ops[i].kind)) {
             encodable = false;
             break;
+        }
+        tp_op_reject reject;
+        const tp_status shape =
+            tp_op__validate_encode_shape(&req->ops[i], &reject);
+        if (shape != TP_STATUS_OK) {
+            tp_txn__commit_reject(out, NULL, NULL, NULL, NULL, m->revision,
+                                  i, shape, reject.field, reject.message);
+            return tp_error_set(err, shape, "operation %d rejected: %s", i,
+                                reject.message);
         }
     }
     size_t payload_len = 0U;
@@ -719,14 +735,20 @@ bool tp_txn__is_hex32_lower(const char *s) {
     if (!s) {
         return false;
     }
-    int n = 0;
-    for (; s[n]; n++) {
-        char c = s[n];
+    size_t len = 0U;
+    while (len < 33U && s[len]) {
+        len++;
+    }
+    if (len != 32U) {
+        return false;
+    }
+    for (size_t i = 0U; i < len; i++) {
+        const char c = s[i];
         if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
             return false;
         }
     }
-    return n == 32;
+    return true;
 }
 
 tp_status tp_txn__check_op_count(int op_count, tp_error *err) {
