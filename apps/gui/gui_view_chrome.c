@@ -46,7 +46,7 @@ enum {
 /* Right-click context menu: one cursor-anchored menu whose items depend on the row a right-click
  * armed it over (§3.3e mouse-complete access). Its actions call the same code paths as the [x]
  * buttons / inline editors. The trigger/payload state (s_id_ctx_menu, s_ctx_state, s_ctx_kind, the
- * CTX_ enum, s_ctx_atlas, s_ctx_anim, s_ctx_target, s_ctx_src, s_ctx_sprite, s_ctx_leaf,
+ * CTX_ enum, typed context refs, s_ctx_leaf,
  * s_ctx_removable) lives in gui_state (step 4 -- written by three different views); s_ctx_menu is the
  * declare-machinery working buffer for declare_context_menu below, chrome-local. */
 static nt_ui_menu_ctx_t s_ctx_menu;
@@ -230,23 +230,25 @@ void declare_context_menu(nt_ui_context_t *ctx) {
     nt_ui_menu_begin(&s_ctx_menu, ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, s_id_ctx_menu, &s_ctx_state, &s_menu_style);
     if (s_ctx_kind == CTX_ATLAS) {
         if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_RENAME, "Rename")) {
-            start_atlas_edit(s_ctx_atlas);
+            start_atlas_edit_ref(s_ctx_atlas_id, s_ctx_atlas_revision);
         }
         const tp_session_snapshot *snapshot = gui_project_snapshot();
         const int atlas_count = snapshot ? tp_session_snapshot_atlas_count(snapshot) : 0;
         nt_ui_menu_item_opts_t rm = {.disabled = (atlas_count <= 1)};
         if (nt_ui_menu_item_ex(&s_ctx_menu, MK_CTX_REMOVE, "Remove", rm)) {
-            const tp_snapshot_atlas *atlas = tp_session_snapshot_atlas_at(snapshot, s_ctx_atlas);
-            if (atlas) {
+            if (!tp_id128_is_nil(s_ctx_atlas_id)) {
                 s_pending_remove_atlas = true;
-                s_pending_remove_atlas_id = atlas->id;
-                s_pending_remove_atlas_revision = tp_session_snapshot_revision(snapshot);
+                s_pending_remove_atlas_id = s_ctx_atlas_id;
+                s_pending_remove_atlas_revision = s_ctx_atlas_revision;
             }
         }
     } else if (s_ctx_kind == CTX_SPRITE) {
         if (s_ctx_leaf) {
             if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_RENAME, "Rename")) {
-                start_sprite_edit_named(s_ctx_sprite);
+                const gui_sprite_ref sprite = {
+                    s_ctx_sprite_atlas_id, s_ctx_sprite_source_id,
+                    s_ctx_sprite_source_key, s_ctx_sprite_revision};
+                start_sprite_edit_ref(&sprite, s_ctx_sprite_display_name);
             }
         }
         if (s_multi_sel_count > 0) {
@@ -258,54 +260,43 @@ void declare_context_menu(nt_ui_context_t *ctx) {
         }
         if (s_ctx_removable) {
             if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_REMOVE, "Remove")) {
-                const tp_session_snapshot *snapshot = gui_project_snapshot();
-                const tp_snapshot_atlas *atlas = snapshot
-                                                     ? tp_session_snapshot_atlas_at(snapshot, s_ctx_atlas)
-                                                     : NULL;
-                const tp_snapshot_source *source = atlas
-                                                       ? tp_session_snapshot_source_at(
-                                                             snapshot, atlas->id, s_ctx_src)
-                                                       : NULL;
-                if (source) {
+                if (!tp_id128_is_nil(s_ctx_sprite_atlas_id) &&
+                    !tp_id128_is_nil(s_ctx_sprite_source_id)) {
                     s_pending_remove_source = true;
-                    s_pending_remove_source_atlas_id = atlas->id;
-                    s_pending_remove_source_id = source->id;
-                    s_pending_remove_source_revision =
-                        tp_session_snapshot_revision(snapshot);
+                    s_pending_remove_source_atlas_id =
+                        s_ctx_sprite_atlas_id;
+                    s_pending_remove_source_id = s_ctx_sprite_source_id;
+                    s_pending_remove_source_revision = s_ctx_sprite_revision;
                 }
             }
         }
     } else if (s_ctx_kind == CTX_ANIM) {
+        const gui_animation_ref animation = {
+            s_ctx_anim_atlas_id, s_ctx_anim_id, s_ctx_anim_revision};
         if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_PREVIEW, "Preview")) {
-            s_sel_anim = s_ctx_anim;
-            gui_animation_ref animation;
-            if (gui_project_animation_ref_at(s_sel_atlas, s_ctx_anim,
-                                              &animation)) {
-                gui_request_open_preview(&animation);
-            }
+            gui_request_open_preview(&animation);
         }
         if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_RENAME, "Rename")) {
-            start_anim_edit(s_ctx_anim);
+            start_anim_edit_ref(&animation);
         }
         if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_REMOVE, "Remove")) {
-            gui_request_remove_animation(s_ctx_anim);
+            gui_request_remove_animation_ref(&animation);
         }
     } else if (s_ctx_kind == CTX_TARGET) {
         const tp_session_snapshot *snapshot = gui_project_snapshot();
-        const tp_snapshot_atlas *a = snapshot ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas) : NULL;
-        const tp_snapshot_target *t = a
-                                          ? tp_session_snapshot_target_at(snapshot, a->id, s_ctx_target)
-                                          : NULL;
+        const tp_snapshot_target *t = snapshot
+            ? tp_session_snapshot_target_by_id(
+                  snapshot, s_ctx_target_atlas_id, s_ctx_target_id)
+            : NULL;
         if (t) {
-            gui_target_ref target;
+            const gui_target_ref target = {
+                s_ctx_target_atlas_id, s_ctx_target_id,
+                s_ctx_target_revision};
             if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_TOGGLE, t->enabled ? "Disable" : "Enable")) {
-                if (gui_project_target_ref_at(s_sel_atlas, s_ctx_target,
-                                              &target)) {
-                    gui_edit_target_enabled(&target, !t->enabled);
-                }
+                gui_edit_target_enabled(&target, !t->enabled);
             }
             if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_REMOVE, "Remove")) {
-                gui_request_remove_target(s_ctx_target);
+                gui_request_remove_target_ref(&target);
             }
         }
     } else if (s_ctx_kind == CTX_CANVAS) {

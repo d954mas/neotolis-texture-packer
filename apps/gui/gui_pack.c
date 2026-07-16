@@ -705,23 +705,6 @@ const tp_result *gui_pack_result(int atlas_index) {
     return s_slots[atlas_index].result;
 }
 
-int gui_pack_find_sprite(int atlas_index, const char *key) {
-    const tp_result *r = gui_pack_result(atlas_index);
-    if (!r || !key) {
-        return -1;
-    }
-    for (int i = 0; i < r->sprite_count; i++) {
-        char sk[256];
-        const char *raw = strchr(r->sprites[i].name, ':');
-        raw = raw ? raw + 1 : r->sprites[i].name;
-        tp_sprite_export_key(raw, sk, sizeof sk);
-        if (strcmp(sk, key) == 0) {
-            return i;
-        }
-    }
-    return -1;
-}
-
 bool gui_pack_sprite_matches_ref(int atlas_index, int sprite_index,
                                  tp_id128 source_id,
                                  const char *source_key) {

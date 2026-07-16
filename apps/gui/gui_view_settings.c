@@ -476,7 +476,7 @@ static void declare_region_settings(nt_ui_context_t *ctx,
     char fname[224];
     (void)snprintf(fname, sizeof fname, "%s", (ov && ov->rename) ? ov->rename : sprite);
     if (right_panel_rename_row(ctx, "Final name", fname, nt_ui_id("reg/rename"))) {
-        start_sprite_edit_named(sprite);
+        start_sprite_edit_ref(&sprite_ref, sprite);
     }
 
     /* Source file + size (from the last pack result when available). */
@@ -702,7 +702,9 @@ static void declare_export_targets(nt_ui_context_t *ctx,
         if (nt_ui_menu_open_trigger(ctx, s_id_ctx_menu, row_id, false, &s_ctx_state)) {
             close_menubar_menus();
             s_ctx_kind = CTX_TARGET;
-            s_ctx_target = ti;
+            s_ctx_target_atlas_id = target.atlas_id;
+            s_ctx_target_id = target.target_id;
+            s_ctx_target_revision = target.expected_revision;
         }
         /* find current exporter index for the combo selection */
         int cur_exp = -1;
@@ -814,7 +816,7 @@ static void declare_animation_editor(nt_ui_context_t *ctx,
         panel_note(ctx, "The selected animation is no longer available.");
         return;
     }
-    const bool editing_id = (s_edit_kind == EDIT_ANIM && s_edit_anim == s_sel_anim);
+    const bool editing_id = gui_animation_edit_matches(a->id, an->id);
 
     if (editing_id) {
         PANEL_ROW_BEGIN("Id", &g_row) {

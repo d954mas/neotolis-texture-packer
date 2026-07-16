@@ -28,6 +28,7 @@
 #include <stddef.h>
 
 #include "tp_core/tp_project.h"
+#include "tp_core/tp_operation.h"
 #include "tp_core/tp_session.h"
 
 #ifdef __cplusplus
@@ -281,7 +282,7 @@ bool gui_project_set_sprite_override(const gui_sprite_ref *sprite, gui_sprite_ov
  * the first free of {base, base"2", base"3", ...}; a NULL/empty base auto-names "anim1"/"anim2"/...
  * `frames` may be NULL/0 for an empty animation. Returns the new animation index, or -1. */
 int gui_project_create_animation(tp_id128 atlas_id, int64_t expected_revision,
-                                 const char *base, const char *const *frames,
+                                 const char *base, const tp_op_sprite_ref *frames,
                                  int frame_count);
 /* Removes the animation with `id`. Returns true iff removed (false on flush-abort/not-found). */
 bool gui_project_remove_animation(const gui_animation_ref *animation);
@@ -292,7 +293,7 @@ bool gui_project_set_anim_playback(const gui_animation_ref *animation, int playb
 bool gui_project_set_anim_flip(const gui_animation_ref *animation, bool flip_h, bool flip_v);
 /* Appends `frames` (in order) to animation `anim_index` as ONE undo entry. */
 bool gui_project_anim_add_frames(const gui_animation_ref *animation,
-                                 const char *const *frames, int count);
+                                 const tp_op_sprite_ref *frames, int count);
 bool gui_project_anim_remove_frame(const gui_animation_ref *animation, int frame_index);
 bool gui_project_anim_move_frame(const gui_animation_ref *animation, int frame_index,
                                  int delta);

@@ -41,7 +41,7 @@ typedef struct pending_create_animation {
     tp_id128 atlas_id;
     int64_t expected_revision;
     char *name;
-    char **frames;
+    tp_op_sprite_ref *frames;
     int frame_count;
 } pending_create_animation;
 static pending_create_animation s_pending_create_anim;
@@ -163,8 +163,8 @@ typedef struct animation_edit_intent {
     float value;
     bool flip_h;
     bool flip_v;
-    char **keys;
-    int key_count;
+    tp_op_sprite_ref *frames;
+    int frame_count;
 } animation_edit_intent;
 
 static animation_edit_intent *s_animation_intents;
@@ -200,6 +200,40 @@ static char *edit_strdup(const char *s) {
         memcpy(c, s, n);
     }
     return c;
+}
+
+static void frame_refs_dispose(tp_op_sprite_ref *frames, int count) {
+    if (!frames) {
+        return;
+    }
+    for (int i = 0; i < count; ++i) {
+        free(frames[i].src_key);
+    }
+    free(frames);
+}
+
+static tp_op_sprite_ref *frame_refs_copy(const tp_op_sprite_ref *frames,
+                                         int count) {
+    if (!frames || count <= 0) {
+        return NULL;
+    }
+    tp_op_sprite_ref *copy = calloc((size_t)count, sizeof *copy);
+    if (!copy) {
+        return NULL;
+    }
+    for (int i = 0; i < count; ++i) {
+        if (!frames[i].src_key) {
+            frame_refs_dispose(copy, count);
+            return NULL;
+        }
+        copy[i].source_id = frames[i].source_id;
+        copy[i].src_key = edit_strdup(frames[i].src_key);
+        if (!copy[i].src_key) {
+            frame_refs_dispose(copy, count);
+            return NULL;
+        }
+    }
+    return copy;
 }
 
 /* Frees an edit's heap payload. Safe on a zeroed/partially-built edit. */
@@ -281,12 +315,7 @@ static bool animation_intent_push(animation_edit_intent *intent) {
         animation_edit_intent *intents = (animation_edit_intent *)realloc(
             s_animation_intents, (size_t)capacity * sizeof *intents);
         if (!intents) {
-            if (intent->keys) {
-                for (int i = 0; i < intent->key_count; i++) {
-                    free(intent->keys[i]);
-                }
-                free(intent->keys);
-            }
+            frame_refs_dispose(intent->frames, intent->frame_count);
             set_status_ex(STATUS_ERROR,
                           "Out of memory: this animation edit could not be queued (change not applied).");
             return false;
@@ -393,47 +422,26 @@ void gui_edit_target_exporter(const gui_target_ref *target,
     (void)target_intent_push(&e);
 }
 
-/* Enqueue an "add frames" edit carrying a COPY of the selection keys (F1). "Add frames" used to
+/* Enqueue an "add frames" edit carrying a COPY of canonical selection refs (F1). "Add frames" used to
  * commit synchronously from inside declare_animation_editor, which clone-swaps + frees the project
  * under the live `an`/`a` the same declare invocation keeps dereferencing (frame_count, frames[].
  * name) -> a use-after-free on an ordinary click. Deferring it (drain replays via
  * gui_project_anim_add_frames at frame top, no live pointer held) closes that last synchronous
- * commit; the keys are copied NOW so a selection change before the drain cannot alter what lands. */
+ * commit; refs are copied NOW so a selection change before the drain cannot alter what lands. */
 void gui_edit_anim_add_frames(const gui_animation_ref *animation,
-                              const char *const *keys, int count) {
+                              const tp_op_sprite_ref *frames, int count) {
     if (count <= 0) {
         return;
     }
     animation_edit_intent intent = {0};
     intent.kind = ANIMATION_INTENT_ADD_FRAMES;
     if (animation) intent.animation = *animation;
-    intent.keys = (char **)calloc((size_t)count, sizeof *intent.keys);
-    if (!intent.keys) {
+    intent.frames = frame_refs_copy(frames, count);
+    if (!intent.frames) {
         set_status_ex(STATUS_ERROR, "Out of memory: add-frames not applied.");
         return;
     }
-    int w = 0;
-    bool oom = false;
-    for (int i = 0; i < count; i++) {
-        if (!keys[i] || keys[i][0] == '\0') {
-            continue; /* skip empties (the setter would too) */
-        }
-        intent.keys[w] = edit_strdup(keys[i]);
-        if (!intent.keys[w]) {
-            oom = true;
-            break;
-        }
-        w++;
-    }
-    intent.key_count = w;
-    if (oom || w == 0) {
-        for (int i = 0; i < w; i++) free(intent.keys[i]);
-        free(intent.keys);
-        if (oom) {
-            set_status_ex(STATUS_ERROR, "Out of memory: add-frames not applied.");
-        }
-        return;
-    }
+    intent.frame_count = count;
     (void)animation_intent_push(&intent);
 }
 
@@ -498,17 +506,12 @@ static void drain_edits(void) {
                 break;
             case ANIMATION_INTENT_ADD_FRAMES:
                 (void)gui_project_anim_add_frames(
-                    &intent->animation, (const char *const *)intent->keys,
-                    intent->key_count);
+                    &intent->animation, intent->frames,
+                    intent->frame_count);
                 break;
         }
-        if (intent->keys) {
-            for (int key = 0; key < intent->key_count; key++) {
-                free(intent->keys[key]);
-            }
-            free(intent->keys);
-            intent->keys = NULL;
-        }
+        frame_refs_dispose(intent->frames, intent->frame_count);
+        intent->frames = NULL;
     }
     s_animation_intent_count = 0;
     for (int i = 0; i < s_target_intent_count; i++) {
@@ -555,6 +558,9 @@ static unsigned s_refresh_epoch;
 static unsigned s_pack_start_refresh_epoch;
 static tp_id128 s_edit_atlas_id;
 static int64_t s_edit_atlas_revision;
+static tp_id128 s_edit_anim_atlas_id;
+static tp_id128 s_edit_anim_id;
+static int64_t s_edit_anim_revision;
 static tp_id128 s_edit_sprite_atlas_id;
 static tp_id128 s_edit_sprite_source_id;
 static int64_t s_edit_sprite_revision;
@@ -605,6 +611,9 @@ void cancel_edit(void) {
     s_edit_atlas = -1;
     s_edit_atlas_id = tp_id128_nil();
     s_edit_atlas_revision = 0;
+    s_edit_anim_atlas_id = tp_id128_nil();
+    s_edit_anim_id = tp_id128_nil();
+    s_edit_anim_revision = 0;
     s_edit_sprite[0] = '\0';
     s_edit_sprite_atlas_id = tp_id128_nil();
     s_edit_sprite_source_id = tp_id128_nil();
@@ -625,11 +634,29 @@ void start_atlas_edit(int i) {
     if (!atlas) {
         return;
     }
+    start_atlas_edit_ref(atlas->id, tp_session_snapshot_revision(snapshot));
+}
+void start_atlas_edit_ref(tp_id128 atlas_id, int64_t expected_revision) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas = snapshot
+        ? tp_session_snapshot_atlas_by_id(snapshot, atlas_id)
+        : NULL;
+    if (!atlas) {
+        return;
+    }
     cancel_edit();
     s_edit_kind = EDIT_ATLAS;
-    s_edit_atlas = i;
+    s_edit_atlas = -1;
+    for (int i = 0; i < tp_session_snapshot_atlas_count(snapshot); ++i) {
+        const tp_snapshot_atlas *candidate =
+            tp_session_snapshot_atlas_at(snapshot, i);
+        if (candidate && tp_id128_eq(candidate->id, atlas_id)) {
+            s_edit_atlas = i;
+            break;
+        }
+    }
     s_edit_atlas_id = atlas->id;
-    s_edit_atlas_revision = tp_session_snapshot_revision(snapshot);
+    s_edit_atlas_revision = expected_revision;
     (void)snprintf(s_edit_buf, sizeof s_edit_buf, "%s", atlas->name);
     set_status("Rename atlas: type, Enter to commit, Esc to cancel.");
 }
@@ -640,23 +667,69 @@ void start_anim_edit(int i) {
     if (!animation) {
         return;
     }
+    const gui_animation_ref ref = {
+        a->id, animation->id, tp_session_snapshot_revision(snapshot)};
+    start_anim_edit_ref(&ref);
+}
+void start_anim_edit_ref(const gui_animation_ref *ref) {
+    if (!ref) {
+        return;
+    }
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_animation *animation = snapshot
+        ? tp_session_snapshot_animation_by_id(snapshot, ref->atlas_id,
+                                              ref->animation_id)
+        : NULL;
+    if (!animation) {
+        return;
+    }
     cancel_edit();
     s_edit_kind = EDIT_ANIM;
-    s_edit_anim = i;
+    s_edit_anim = -1;
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_by_id(snapshot, ref->atlas_id);
+    for (int i = 0; atlas && i < atlas->animation_count; ++i) {
+        const tp_snapshot_animation *candidate =
+            tp_session_snapshot_animation_at(snapshot, atlas->id, i);
+        if (candidate && tp_id128_eq(candidate->id, ref->animation_id)) {
+            s_edit_anim = i;
+            break;
+        }
+    }
+    s_edit_anim_atlas_id = ref->atlas_id;
+    s_edit_anim_id = animation->id;
+    s_edit_anim_revision = ref->expected_revision;
     (void)snprintf(s_edit_buf, sizeof s_edit_buf, "%s", animation->name);
     set_status("Rename animation: type, Enter to commit, Esc to cancel.");
 }
-void start_sprite_edit_named(const char *sprite_name) {
-    if (!sprite_name || sprite_name[0] == '\0') {
+void start_sprite_edit_ref(const gui_sprite_ref *sprite,
+                           const char *display_name) {
+    if (!sprite || tp_id128_is_nil(sprite->atlas_id) ||
+        tp_id128_is_nil(sprite->source_id) || !sprite->source_key ||
+        sprite->source_key[0] == '\0' || !display_name ||
+        display_name[0] == '\0') {
         return;
     }
-    for (int i = 0; i < s_row_count; i++) {
-        if (!s_rows[i].is_folder && !s_rows[i].missing &&
-            strcmp(s_rows[i].sprite_name, sprite_name) == 0) {
-            start_sprite_edit(&s_rows[i]);
-            return;
-        }
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas = snapshot
+        ? tp_session_snapshot_atlas_by_id(snapshot, sprite->atlas_id)
+        : NULL;
+    if (!atlas) {
+        return;
     }
+    cancel_edit();
+    s_edit_kind = EDIT_SPRITE;
+    s_edit_sprite_atlas_id = sprite->atlas_id;
+    s_edit_sprite_source_id = sprite->source_id;
+    s_edit_sprite_revision = sprite->expected_revision;
+    (void)snprintf(s_edit_sprite_source_key, sizeof s_edit_sprite_source_key,
+                   "%s", sprite->source_key);
+    (void)snprintf(s_edit_sprite, sizeof s_edit_sprite, "%s", display_name);
+    const tp_snapshot_sprite *ov = tp_session_snapshot_sprite_by_key(
+        snapshot, sprite->atlas_id, sprite->source_id, sprite->source_key);
+    (void)snprintf(s_edit_buf, sizeof s_edit_buf, "%s",
+                   (ov && ov->rename) ? ov->rename : display_name);
+    set_status("Rename region: type, Enter to commit, Esc clears/cancels.");
 }
 void start_sprite_edit(const sprite_row *row) {
     if (!row || row->is_folder || row->missing || row->sprite_name[0] == '\0' ||
@@ -670,23 +743,27 @@ void start_sprite_edit(const sprite_row *row) {
     if (!atlas) {
         return;
     }
-    cancel_edit();
-    s_edit_kind = EDIT_SPRITE;
-    s_edit_sprite_atlas_id = atlas->id;
-    s_edit_sprite_source_id = row->source_id;
-    s_edit_sprite_revision = tp_session_snapshot_revision(snapshot);
-    (void)snprintf(s_edit_sprite_source_key, sizeof s_edit_sprite_source_key, "%s",
-                   row->source_key);
-    (void)snprintf(s_edit_sprite, sizeof s_edit_sprite, "%s", row->sprite_name);
-    const tp_snapshot_sprite *ov = tp_session_snapshot_sprite_by_key(
-        snapshot, atlas->id, row->source_id, row->source_key);
-    /* Seed with the CURRENT name: the rename override if set, else the file-derived final name
-     * (sprite_name is the ext-stripped atlas-relative key = the default export name). The input
-     * string is game-owned (nt_ui_input edits s_edit_buf in place), so seeding it here is the fix
-     * for the "field opens empty" bug -- previously it seeded the (empty) override. */
-    (void)snprintf(s_edit_buf, sizeof s_edit_buf, "%s",
-                   (ov && ov->rename) ? ov->rename : row->sprite_name);
-    set_status("Rename region: type, Enter to commit, Esc clears/cancels.");
+    const gui_sprite_ref sprite = {
+        atlas->id, row->source_id, row->source_key,
+        tp_session_snapshot_revision(snapshot)};
+    start_sprite_edit_ref(&sprite, row->sprite_name);
+}
+
+bool gui_sprite_edit_matches(const sprite_row *row) {
+    return row && s_edit_kind == EDIT_SPRITE &&
+           tp_id128_eq(s_edit_sprite_source_id, row->source_id) &&
+           strcmp(s_edit_sprite_source_key, row->source_key) == 0;
+}
+
+bool gui_atlas_edit_matches(tp_id128 atlas_id) {
+    return s_edit_kind == EDIT_ATLAS &&
+           tp_id128_eq(s_edit_atlas_id, atlas_id);
+}
+
+bool gui_animation_edit_matches(tp_id128 atlas_id, tp_id128 animation_id) {
+    return s_edit_kind == EDIT_ANIM &&
+           tp_id128_eq(s_edit_anim_atlas_id, atlas_id) &&
+           tp_id128_eq(s_edit_anim_id, animation_id);
 }
 
 void clamp_selection(void) {
@@ -726,11 +803,13 @@ static int build_sorted_selection(void) {
         return 0;
     }
     for (int i = 0; i < n; i++) {
-        (void)snprintf(s_sel_sort_buf[i], sizeof s_sel_sort_buf[0], "%s", s_multi_sel[i]);
+        s_sel_sort_buf[i] = s_multi_sel[i];
     }
     qsort(s_sel_sort_buf, (size_t)n, sizeof s_sel_sort_buf[0], nat_cmp_qsort);
     for (int i = 0; i < n; i++) {
-        s_sel_sort_ptr[i] = s_sel_sort_buf[i];
+        s_sel_sort_ptr[i] = s_sel_sort_buf[i].source_key;
+        s_sel_sort_refs[i].source_id = s_sel_sort_buf[i].source_id;
+        s_sel_sort_refs[i].src_key = s_sel_sort_buf[i].source_key;
     }
     return n;
 }
@@ -740,12 +819,7 @@ static void pending_create_animation_dispose(pending_create_animation *request) 
         return;
     }
     free(request->name);
-    if (request->frames) {
-        for (int i = 0; i < request->frame_count; i++) {
-            free(request->frames[i]);
-        }
-    }
-    free(request->frames);
+    frame_refs_dispose(request->frames, request->frame_count);
     memset(request, 0, sizeof *request);
 }
 
@@ -767,23 +841,13 @@ void gui_request_create_animation_from_selection(void) {
     }
 
     pending_create_animation request = {0};
-    request.frames = (char **)calloc((size_t)frame_count,
-                                     sizeof *request.frames);
+    request.frames = frame_refs_copy(s_sel_sort_refs, frame_count);
     if (!request.frames) {
         set_status_ex(STATUS_ERROR,
                       "Out of memory: animation creation could not be queued.");
         return;
     }
     request.frame_count = frame_count;
-    for (int i = 0; i < frame_count; i++) {
-        request.frames[i] = edit_strdup(s_sel_sort_ptr[i]);
-        if (!request.frames[i]) {
-            pending_create_animation_dispose(&request);
-            set_status_ex(STATUS_ERROR,
-                          "Out of memory: animation creation could not be queued.");
-            return;
-        }
-    }
 
     char base[192];
     tp_names_common_prefix(s_sel_sort_ptr, frame_count, base, sizeof base);
@@ -854,7 +918,7 @@ int create_animation_from_selection(void) {
                                          : NULL;
     const int idx = atlas ? gui_project_create_animation(
                                 atlas->id, tp_session_snapshot_revision(snapshot),
-                                base[0] ? base : NULL, s_sel_sort_ptr, n)
+                                base[0] ? base : NULL, s_sel_sort_refs, n)
                           : -1;
     if (idx >= 0) {
         s_sel_anim = idx;
@@ -887,7 +951,7 @@ void add_selection_frames_to_anim(int anim_index) {
     if (!gui_project_animation_ref_at(s_sel_atlas, anim_index, &animation)) {
         return;
     }
-    gui_edit_anim_add_frames(&animation, s_sel_sort_ptr, n);
+    gui_edit_anim_add_frames(&animation, s_sel_sort_refs, n);
     set_statusf("Adding %d frame(s) to the animation (Ctrl+Z to undo).", n); /* lands on the next drain */
 }
 
@@ -1099,16 +1163,31 @@ static void do_save(void) {
 void gui_request_remove_animation(int animation_index) {
     gui_animation_ref animation;
     if (gui_project_animation_ref_at(s_sel_atlas, animation_index, &animation)) {
+        gui_request_remove_animation_ref(&animation);
+    }
+}
+
+void gui_request_remove_animation_ref(const gui_animation_ref *animation) {
+    if (animation && !tp_id128_is_nil(animation->atlas_id) &&
+        !tp_id128_is_nil(animation->animation_id)) {
         s_pending_remove_anim = true;
-        s_pending_remove_anim_ref = animation;
+        s_pending_remove_anim_ref = *animation;
     }
 }
 
 void gui_request_remove_target(int target_index) {
     gui_target_ref target;
     if (gui_project_target_ref_at(s_sel_atlas, target_index, &target)) {
+        gui_request_remove_target_ref(&target);
+    }
+}
+
+
+void gui_request_remove_target_ref(const gui_target_ref *target) {
+    if (target && !tp_id128_is_nil(target->atlas_id) &&
+        !tp_id128_is_nil(target->target_id)) {
         s_pending_remove_target = true;
-        s_pending_remove_target_ref = target;
+        s_pending_remove_target_ref = *target;
     }
 }
 
@@ -1787,10 +1866,6 @@ static void poll_async(void) {
 void commit_sprite_rename(void) {
     /* empty input clears the override back to the file-derived name. (Reached only via commit_active_edit,
      * which flush-firsts, so set_sprite_rename's own flush is a no-op here.) */
-    const tp_session_snapshot *snapshot = gui_project_snapshot();
-    if (snapshot && tp_session_snapshot_atlas_by_id(snapshot, s_edit_sprite_atlas_id)) {
-        s_edit_sprite_revision = tp_session_snapshot_revision(snapshot);
-    }
     const gui_sprite_ref sprite = {s_edit_sprite_atlas_id, s_edit_sprite_source_id,
                                    s_edit_sprite_source_key, s_edit_sprite_revision};
     if (gui_project_set_sprite_rename(&sprite, s_edit_buf)) {
@@ -1822,12 +1897,35 @@ static void commit_active_edit(bool force) {
     if (s_edit_kind == EDIT_NONE) {
         return; /* nothing being edited */
     }
+    const tp_session_snapshot *before_flush = gui_project_snapshot();
+    const int64_t revision_before_flush = before_flush
+        ? tp_session_snapshot_revision(before_flush)
+        : 0;
+    const bool rebase_atlas = s_edit_kind == EDIT_ATLAS &&
+                              s_edit_atlas_revision == revision_before_flush;
+    const bool rebase_sprite = s_edit_kind == EDIT_SPRITE &&
+                               s_edit_sprite_revision == revision_before_flush;
+    const bool rebase_anim = s_edit_kind == EDIT_ANIM &&
+                             s_edit_anim_revision == revision_before_flush;
     if (flush_failed()) {
         /* a buffered gesture could not be journaled -> abort the rename commit (error already surfaced) */
         if (force) {
             cancel_edit();
         }
         return;
+    }
+    const tp_session_snapshot *after_flush = gui_project_snapshot();
+    const int64_t revision_after_flush = after_flush
+        ? tp_session_snapshot_revision(after_flush)
+        : revision_before_flush;
+    if (revision_after_flush != revision_before_flush) {
+        if (rebase_atlas) {
+            s_edit_atlas_revision = revision_after_flush;
+        } else if (rebase_sprite) {
+            s_edit_sprite_revision = revision_after_flush;
+        } else if (rebase_anim) {
+            s_edit_anim_revision = revision_after_flush;
+        }
     }
     if (s_edit_kind == EDIT_ATLAS) {
         const tp_session_snapshot *snapshot = gui_project_snapshot();
@@ -1836,7 +1934,6 @@ static void commit_active_edit(bool force) {
             cancel_edit();
             return;
         }
-        s_edit_atlas_revision = tp_session_snapshot_revision(snapshot);
         if (!gui_project_set_atlas_name(s_edit_atlas_id, s_edit_atlas_revision,
                                         s_edit_buf)) {
             char atlas_err[256];
@@ -1863,9 +1960,9 @@ static void commit_active_edit(bool force) {
     } else if (s_edit_kind == EDIT_SPRITE) {
         commit_sprite_rename();
     } else if (s_edit_kind == EDIT_ANIM) {
-        gui_animation_ref animation;
-        if (!gui_project_animation_ref_at(s_sel_atlas, s_edit_anim, &animation) ||
-            !gui_project_set_anim_id(&animation, s_edit_buf)) {
+        const gui_animation_ref animation = {
+            s_edit_anim_atlas_id, s_edit_anim_id, s_edit_anim_revision};
+        if (!gui_project_set_anim_id(&animation, s_edit_buf)) {
             /* H/P1-2: animation rename is a first-class op now (undoable + journaled), so a false is a
              * core REJECT -- a name collision (validate enforces uniqueness) or a rare OOM/stale-index
              * failure. The structured reject rides commit_txn_now's op-error channel, so surface it
@@ -2131,7 +2228,7 @@ void apply_pending(void) {
             s_pending_create_anim.atlas_id,
             s_pending_create_anim.expected_revision,
             s_pending_create_anim.name[0] ? s_pending_create_anim.name : NULL,
-            (const char *const *)s_pending_create_anim.frames,
+            s_pending_create_anim.frames,
             s_pending_create_anim.frame_count);
         if (idx >= 0) {
             const tp_session_snapshot *after_snapshot = gui_project_snapshot();

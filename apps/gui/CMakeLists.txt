@@ -131,6 +131,44 @@ nt_set_warning_flags(tp_test_gui_session_adapter)
 nt_set_sanitizer_flags(tp_test_gui_session_adapter)
 add_test(NAME tp_gui_session_adapter COMMAND tp_test_gui_session_adapter)
 
+# Canonical GUI identity regression: two distinct sources may expose the same
+# source-local key.  The headless target exercises the production row,
+# selection/action and project/session adapters without creating a window.
+add_executable(tp_test_gui_canonical_identity
+    test_gui_canonical_identity.c
+    gui_state.c
+    gui_actions.c
+    gui_rows.c
+    gui_project.c
+    gui_session_adapter.c
+    gui_scan.c
+    gui_canvas.c
+    gui_pack.c
+    gui_paths.c
+)
+target_link_libraries(tp_test_gui_canonical_identity PRIVATE
+    nt_core nt_app nt_input nt_window nt_math nt_log nt_time nt_resource
+    nt_material nt_shared nt_atlas
+    nt_sprite_renderer nt_text_renderer nt_font nt_ui
+    nt_render nt_hash nt_mem_scratch nt_shape_renderer
+    nt_gfx nt_http_stub nt_fs nt_clipboard
+    tp_build stb_image tinyfiledialogs tinycthread unity
+)
+target_include_directories(tp_test_gui_canonical_identity PRIVATE
+    "${CMAKE_SOURCE_DIR}/packer/src"
+    "${CMAKE_SOURCE_DIR}/apps/common"
+)
+target_compile_definitions(tp_test_gui_canonical_identity PRIVATE
+    TP_GUI_IDENTITY_TEST_DIR="${CMAKE_CURRENT_BINARY_DIR}/tp_gui_identity_tmp"
+    _CRT_SECURE_NO_WARNINGS
+    NT_INTROSPECT_ENABLED=$<BOOL:${NT_INTROSPECT_ENABLED}>
+    NT_INTROSPECT_WRITE_ENABLED=$<BOOL:${NT_INTROSPECT_WRITE_ENABLED}>
+)
+target_compile_options(tp_test_gui_canonical_identity PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_gui_canonical_identity)
+nt_set_sanitizer_flags(tp_test_gui_canonical_identity)
+add_test(NAME tp_gui_canonical_identity COMMAND tp_test_gui_canonical_identity)
+
 # M5 capability/parity corpus. The second adapter is intentionally test-only:
 # it calls tp_session directly and proves the future transport host needs no
 # duplicate mutable session wrapper.

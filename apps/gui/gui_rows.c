@@ -51,25 +51,28 @@ const char *path_last(const char *p) {
 // #endregion
 
 // #region multi-select + natural sort (ux.md §3.7b selection gesture)
-bool multi_sel_contains(const char *name) {
-    if (!name || !name[0]) {
+bool multi_sel_contains_ref(tp_id128 source_id, const char *source_key) {
+    if (tp_id128_is_nil(source_id) || !source_key || !source_key[0]) {
         return false;
     }
     for (int i = 0; i < s_multi_sel_count; i++) {
-        if (strcmp(s_multi_sel[i], name) == 0) {
+        if (tp_id128_eq(s_multi_sel[i].source_id, source_id) &&
+            strcmp(s_multi_sel[i].source_key, source_key) == 0) {
             return true;
         }
     }
     return false;
 }
 void multi_sel_clear(void) { s_multi_sel_count = 0; }
-void multi_sel_add(const char *name) {
-    if (!name || !name[0] || multi_sel_contains(name)) {
+void multi_sel_add_ref(tp_id128 source_id, const char *source_key) {
+    if (tp_id128_is_nil(source_id) || !source_key || !source_key[0] ||
+        multi_sel_contains_ref(source_id, source_key)) {
         return;
     }
     if (s_multi_sel_count >= s_multi_sel_cap) {
         const int newcap = s_multi_sel_cap ? s_multi_sel_cap * 2 : MULTI_SEL_INIT_CAP;
-        char (*grown)[TP_SCAN_REL_CAP] = realloc(s_multi_sel, (size_t)newcap * sizeof *s_multi_sel);
+        gui_selected_sprite *grown = realloc(s_multi_sel,
+                                             (size_t)newcap * sizeof *s_multi_sel);
         if (!grown) {
             set_status_ex(STATUS_ERROR, "Out of memory: selection not fully updated.");
             return; /* keep old capacity + the entries already in it; loud, never silent */
@@ -77,32 +80,44 @@ void multi_sel_add(const char *name) {
         s_multi_sel = grown;
         s_multi_sel_cap = newcap;
     }
-    (void)snprintf(s_multi_sel[s_multi_sel_count], sizeof s_multi_sel[0], "%s", name);
+    s_multi_sel[s_multi_sel_count].source_id = source_id;
+    (void)snprintf(s_multi_sel[s_multi_sel_count].source_key,
+                   sizeof s_multi_sel[s_multi_sel_count].source_key, "%s",
+                   source_key);
     s_multi_sel_count++;
 }
-void multi_sel_remove(const char *name) {
+void multi_sel_remove_ref(tp_id128 source_id, const char *source_key) {
     for (int i = 0; i < s_multi_sel_count; i++) {
-        if (strcmp(s_multi_sel[i], name) == 0) {
+        if (tp_id128_eq(s_multi_sel[i].source_id, source_id) &&
+            strcmp(s_multi_sel[i].source_key, source_key) == 0) {
             for (int j = i; j < s_multi_sel_count - 1; j++) {
-                memcpy(s_multi_sel[j], s_multi_sel[j + 1], sizeof s_multi_sel[0]);
+                s_multi_sel[j] = s_multi_sel[j + 1];
             }
             s_multi_sel_count--;
             return;
         }
     }
 }
-void multi_sel_set_single(const char *name) {
+void multi_sel_set_single_ref(tp_id128 source_id, const char *source_key) {
     multi_sel_clear();
-    multi_sel_add(name);
+    multi_sel_add_ref(source_id, source_key);
 }
 
 /* qsort adapter over the core natural-order comparator (tp_names). */
-int nat_cmp_qsort(const void *a, const void *b) { return tp_nat_cmp((const char *)a, (const char *)b); }
+int nat_cmp_qsort(const void *a, const void *b) {
+    const gui_selected_sprite *left = (const gui_selected_sprite *)a;
+    const gui_selected_sprite *right = (const gui_selected_sprite *)b;
+    const int key_order = tp_nat_cmp(left->source_key, right->source_key);
+    return key_order ? key_order
+                     : memcmp(left->source_id.bytes, right->source_id.bytes,
+                              sizeof left->source_id.bytes);
+}
 
 /* Shared scratch for the selection-gesture sort (heap; grows WITH the multi-select set so the sort
  * path can never truncate the selection -- P1 fix, step 7). */
-char (*s_sel_sort_buf)[TP_SCAN_REL_CAP];
+gui_selected_sprite *s_sel_sort_buf;
 const char **s_sel_sort_ptr;
+tp_op_sprite_ref *s_sel_sort_refs;
 static int s_sel_sort_cap;
 
 bool sel_sort_reserve(int n) {
@@ -113,7 +128,8 @@ bool sel_sort_reserve(int n) {
     while (newcap < n) {
         newcap *= 2;
     }
-    char (*gb)[TP_SCAN_REL_CAP] = realloc(s_sel_sort_buf, (size_t)newcap * sizeof *s_sel_sort_buf);
+    gui_selected_sprite *gb = realloc(s_sel_sort_buf,
+                                      (size_t)newcap * sizeof *s_sel_sort_buf);
     if (!gb) {
         return false; /* keep old capacity (s_sel_sort_cap unchanged) */
     }
@@ -123,6 +139,12 @@ bool sel_sort_reserve(int n) {
         return false; /* buf physically grew but cap not bumped -- next call retries both, stays consistent */
     }
     s_sel_sort_ptr = gp;
+    tp_op_sprite_ref *gr = realloc(s_sel_sort_refs,
+                                   (size_t)newcap * sizeof *s_sel_sort_refs);
+    if (!gr) {
+        return false;
+    }
+    s_sel_sort_refs = gr;
     s_sel_sort_cap = newcap;
     return true;
 }
@@ -138,7 +160,8 @@ static int s_rows_cap;
  * required text. A later rebuild clears every slot before dereferencing it, so a
  * clone-swap between generations cannot leave a live borrowed alias. */
 typedef struct override_slot {
-    const char *name;
+    tp_id128 source_id;
+    const char *source_key;
     const char *rename;
 } override_slot;
 
@@ -152,9 +175,13 @@ static uint64_t s_row_cache_source_generation;
 static gui_rows_bench_counters s_bench_counters;
 #endif
 
-static uint64_t override_hash(const char *text) {
+static uint64_t override_hash(tp_id128 source_id, const char *source_key) {
     uint64_t hash = UINT64_C(1469598103934665603);
-    for (const unsigned char *p = (const unsigned char *)text; *p; ++p) {
+    for (size_t i = 0; i < sizeof source_id.bytes; ++i) {
+        hash ^= (uint64_t)source_id.bytes[i];
+        hash *= UINT64_C(1099511628211);
+    }
+    for (const unsigned char *p = (const unsigned char *)source_key; *p; ++p) {
         hash ^= (uint64_t)*p;
         hash *= UINT64_C(1099511628211);
     }
@@ -203,24 +230,28 @@ static bool override_index_build(const tp_session_snapshot *snapshot,
     for (int i = 0; i < atlas->sprite_count; ++i) {
         const tp_snapshot_sprite *sprite = tp_session_snapshot_sprite_at_index(
             snapshot, atlas_index, i);
-        if (!sprite || !sprite->name || sprite->name[0] == '\0') {
+        if (!sprite || tp_id128_is_nil(sprite->source_id) ||
+            !sprite->source_key || sprite->source_key[0] == '\0') {
             continue;
         }
-        size_t slot = (size_t)override_hash(sprite->name) & mask;
+        size_t slot = (size_t)override_hash(sprite->source_id,
+                                             sprite->source_key) & mask;
         for (;;) {
 #if defined(NTPACKER_GUI_BENCH)
             s_bench_counters.override_probes++;
 #endif
             override_slot *entry = &s_override_index[slot];
-            if (!entry->name) {
-                entry->name = sprite->name;
+            if (!entry->source_key) {
+                entry->source_id = sprite->source_id;
+                entry->source_key = sprite->source_key;
                 entry->rename = sprite->rename;
 #if defined(NTPACKER_GUI_BENCH)
                 s_bench_counters.override_inserts++;
 #endif
                 break;
             }
-            if (strcmp(entry->name, sprite->name) == 0) {
+            if (tp_id128_eq(entry->source_id, sprite->source_id) &&
+                strcmp(entry->source_key, sprite->source_key) == 0) {
                 break;
             }
             slot = (slot + 1U) & mask;
@@ -229,21 +260,23 @@ static bool override_index_build(const tp_session_snapshot *snapshot,
     return true;
 }
 
-static const char *override_rename(const char *sprite_name) {
+static const char *override_rename(tp_id128 source_id,
+                                   const char *source_key) {
 #if defined(NTPACKER_GUI_BENCH)
     s_bench_counters.override_lookup_calls++;
 #endif
     const size_t mask = s_override_index_cap - 1U;
-    size_t slot = (size_t)override_hash(sprite_name) & mask;
+    size_t slot = (size_t)override_hash(source_id, source_key) & mask;
     for (;;) {
 #if defined(NTPACKER_GUI_BENCH)
         s_bench_counters.override_probes++;
 #endif
         const override_slot *entry = &s_override_index[slot];
-        if (!entry->name) {
+        if (!entry->source_key) {
             return NULL;
         }
-        if (strcmp(entry->name, sprite_name) == 0) {
+        if (tp_id128_eq(entry->source_id, source_id) &&
+            strcmp(entry->source_key, source_key) == 0) {
             return entry->rename;
         }
         slot = (slot + 1U) & mask;
@@ -252,8 +285,10 @@ static const char *override_rename(const char *sprite_name) {
 
 /* Rename-aware display label: a renamed sprite shows "final (file.png)" so the mapping
  * stays visible; otherwise the file-derived base label. */
-static void row_display(const char *sprite_name, const char *base_label, const char *paren, char *out, size_t cap) {
-    const char *rename = override_rename(sprite_name);
+static void row_display(tp_id128 source_id, const char *source_key,
+                        const char *base_label, const char *paren,
+                        char *out, size_t cap) {
+    const char *rename = override_rename(source_id, source_key);
     if (rename) {
         (void)snprintf(out, cap, "%s (%s)", rename, paren);
     } else {
@@ -339,6 +374,7 @@ void build_rows(void) {
         r->child = -1;
         r->is_source = true;
         r->is_folder = is_dir;
+        r->source_id = source->id;
         if (!exists) {
             r->missing = true;
             (void)snprintf(r->label, sizeof r->label, "\xE2\x9A\xA0 %s", path_last(sp));
@@ -364,16 +400,16 @@ void build_rows(void) {
                 (void)snprintf(cr->source_key, sizeof cr->source_key, "%s", sc->entries[ci].rel);
                 tp_sprite_export_key(sc->entries[ci].rel, cr->sprite_name,
                                      sizeof cr->sprite_name);
-                row_display(cr->sprite_name, sc->entries[ci].rel,
+                row_display(cr->source_id, cr->source_key, sc->entries[ci].rel,
                             path_last(sc->entries[ci].rel), cr->label,
                             sizeof cr->label);
                 (void)snprintf(cr->abs, sizeof cr->abs, "%s", sc->entries[ci].abs);
             }
         } else {
-            r->source_id = source->id;
             (void)snprintf(r->source_key, sizeof r->source_key, "%s", path_last(sp));
             tp_sprite_export_key(path_last(sp), r->sprite_name, sizeof r->sprite_name);
-            row_display(r->sprite_name, r->sprite_name, path_last(sp), r->label,
+            row_display(r->source_id, r->source_key, r->sprite_name,
+                        path_last(sp), r->label,
                         sizeof r->label);
             (void)snprintf(r->abs, sizeof r->abs, "%s", abs);
         }

@@ -84,6 +84,37 @@ static const tp_snapshot_frame *selftest_frame_at(int atlas_index,
                : NULL;
 }
 
+/* Legacy selftest fixtures spell unique sprite selectors as names. Resolve at
+ * the test intent boundary, then call the canonical production selection API. */
+static void selftest_multi_sel_add_name(const char *selector) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas = snapshot
+                                         ? tp_session_snapshot_atlas_at(
+                                               snapshot, s_sel_atlas)
+                                         : NULL;
+    tp_selector_result resolved;
+    tp_id128 source_id = tp_id128_nil();
+    char source_key[TP_SCAN_REL_CAP];
+    tp_error err = {0};
+    const tp_status status = atlas
+        ? tp_session_snapshot_resolve_sprite_selector(
+              snapshot, atlas->id, selector, &resolved, &source_id,
+              source_key, sizeof source_key, NULL, &err)
+        : TP_STATUS_NOT_FOUND;
+    if (status == TP_STATUS_OK) {
+        multi_sel_add_ref(source_id, source_key);
+    } else {
+        /* Capacity-only fixtures intentionally use synthetic names that do not
+         * exist in the project. Keep them structurally canonical without
+         * reintroducing a production name-only selection path. */
+        source_id = tp_id128_nil();
+        source_id.bytes[0] = 1U;
+        multi_sel_add_ref(source_id, selector);
+    }
+}
+
+#define multi_sel_add(selector) selftest_multi_sel_add_name(selector)
+
 static const tp_snapshot_target *selftest_target_at(int atlas_index,
                                                     int target_index) {
     const tp_session_snapshot *snapshot = gui_project_snapshot();
@@ -212,6 +243,15 @@ static bool selftest_set_sprite_rename_at(int atlas_index, const char *source_ke
            gui_project_set_sprite_rename(&sprite, rename);
 }
 
+static int selftest_pack_find_sprite_at(int atlas_index,
+                                        const char *source_key) {
+    gui_sprite_ref sprite;
+    return selftest_sprite_ref_at(atlas_index, source_key, &sprite)
+               ? gui_pack_find_sprite_ref(atlas_index, sprite.source_id,
+                                          sprite.source_key)
+               : -1;
+}
+
 static bool selftest_rename_animation_frame_at(int atlas_index,
                                                int animation_index,
                                                int frame_index,
@@ -267,10 +307,39 @@ static int selftest_create_animation_at(int atlas_index, const char *base,
                                         const char *const *frames, int frame_count) {
     const tp_session_snapshot *snapshot = NULL;
     const tp_snapshot_atlas *atlas = selftest_atlas_at(atlas_index, &snapshot);
-    return atlas ? gui_project_create_animation(
-                       atlas->id, tp_session_snapshot_revision(snapshot), base,
-                       frames, frame_count)
-                 : -1;
+    if (!atlas || frame_count < 0 || (frame_count > 0 && !frames)) {
+        return -1;
+    }
+    tp_op_sprite_ref *refs = frame_count > 0
+        ? calloc((size_t)frame_count, sizeof *refs)
+        : NULL;
+    char (*keys)[TP_SCAN_REL_CAP] = frame_count > 0
+        ? calloc((size_t)frame_count, sizeof *keys)
+        : NULL;
+    if (frame_count > 0 && (!refs || !keys)) {
+        free(refs);
+        free(keys);
+        return -1;
+    }
+    for (int i = 0; i < frame_count; ++i) {
+        tp_selector_result resolved;
+        tp_error err = {0};
+        if (tp_session_snapshot_resolve_sprite_selector(
+                snapshot, atlas->id, frames[i], &resolved,
+                &refs[i].source_id, keys[i], sizeof keys[i], NULL,
+                &err) != TP_STATUS_OK) {
+            free(refs);
+            free(keys);
+            return -1;
+        }
+        refs[i].src_key = keys[i];
+    }
+    const int result = gui_project_create_animation(
+        atlas->id, tp_session_snapshot_revision(snapshot), base, refs,
+        frame_count);
+    free(refs);
+    free(keys);
+    return result;
 }
 
 static bool selftest_set_anim_id_at(int atlas_index, int animation_index,
@@ -445,6 +514,8 @@ static bool selftest_stale_discrete_intent_is_rejected(void) {
     selftest_add_sources_at((index), (paths), (count), (kind), (added), (duplicate))
 #define gui_project_set_sprite_rename(index, key, rename) \
     selftest_set_sprite_rename_at((index), (key), (rename))
+#define gui_pack_find_sprite(index, key) \
+    selftest_pack_find_sprite_at((index), (key))
 #define gui_project_set_sprite_origin(index, key, axis, value) \
     selftest_set_sprite_origin_at((index), (key), (axis), (value))
 #define gui_project_set_sprite_slice9(index, key, component, value) \
@@ -1168,7 +1239,7 @@ void run_selftest(void) {
         for (int i = 0; i < BIG_N; i++) {
             char want[24];
             (void)snprintf(want, sizeof want, "cap_%05d", i);
-            NT_ASSERT(s_sel_sort_ptr[i] == s_sel_sort_buf[i] &&
+            NT_ASSERT(s_sel_sort_ptr[i] == s_sel_sort_buf[i].source_key &&
                       strcmp(s_sel_sort_ptr[i], want) == 0 &&
                       "SELFTEST: sort companions hold the whole selection");
         }

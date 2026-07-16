@@ -2,7 +2,7 @@
 #define NTPACKER_GUI_ROWS_H
 
 /* Row model + selection-set helpers for the ntpacker GUI: the flattened per-atlas sprite rows
- * (rebuilt each frame), the multi-select set over leaf sprite NAMES, natural-order sorting +
+ * (rebuilt each frame), the canonical leaf-sprite multi-select, natural-order sorting +
  * the sort scratch, the common-name-prefix helper, the canvas region -> row selection sync, and
  * the shared path/name string helpers. Split out of main.c (GUI decomposition step 2) as a pure
  * move -- no behavior change. Include discipline: rows -> gui_state + model headers only; it must
@@ -13,6 +13,7 @@
 #include <stdint.h>
 
 #include "tp_core/tp_id.h"
+#include "tp_core/tp_operation.h"
 #include "tp_core/tp_scan.h"
 
 #include "gui_state.h" /* shared editor state the row/selection helpers read + grow */
@@ -27,12 +28,12 @@ void normalize_slashes(char *s);
 /* Returns the basename (past the last / or \) of `p`. */
 const char *path_last(const char *p);
 
-/* --- multi-select set over leaf sprite NAMES (ux.md §3.7b selection gesture) --- */
-bool multi_sel_contains(const char *name);
+/* --- canonical multi-select set (ux.md §3.7b selection gesture) --- */
+bool multi_sel_contains_ref(tp_id128 source_id, const char *source_key);
 void multi_sel_clear(void);
-void multi_sel_add(const char *name);
-void multi_sel_remove(const char *name);
-void multi_sel_set_single(const char *name);
+void multi_sel_add_ref(tp_id128 source_id, const char *source_key);
+void multi_sel_remove_ref(tp_id128 source_id, const char *source_key);
+void multi_sel_set_single_ref(tp_id128 source_id, const char *source_key);
 
 /* qsort adapter for natural order (wraps tp_nat_cmp; digit runs compare numerically). */
 int nat_cmp_qsort(const void *a, const void *b);
@@ -40,8 +41,9 @@ int nat_cmp_qsort(const void *a, const void *b);
  * companions to the multi-select set (P1 fix, step 7): they MUST hold the whole selection or the sort
  * path would re-introduce the old truncation. sel_sort_reserve grows both to >= n (false == OOM, old
  * capacity kept); callers must reserve before writing. */
-extern char (*s_sel_sort_buf)[TP_SCAN_REL_CAP];
+extern gui_selected_sprite *s_sel_sort_buf;
 extern const char **s_sel_sort_ptr;
+extern tp_op_sprite_ref *s_sel_sort_refs;
 bool sel_sort_reserve(int n);
 
 /* --- flattened sprite rows for the current atlas (growable; P1 fix, step 7) --- */

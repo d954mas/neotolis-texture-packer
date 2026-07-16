@@ -81,7 +81,7 @@ char s_sel_abs[512];
 bool s_sel_missing;
 
 /* --- multi-select set (growable; grown by multi_sel_add in gui_rows.c -- P1 fix, step 7) --- */
-char (*s_multi_sel)[TP_SCAN_REL_CAP];
+gui_selected_sprite *s_multi_sel;
 int s_multi_sel_count;
 int s_multi_sel_cap;
 int s_sel_anchor_row = -1;
@@ -130,11 +130,19 @@ bool s_export_open;
 uint32_t s_id_ctx_menu;
 nt_ui_menu_state_t s_ctx_state;
 int s_ctx_kind;
-int s_ctx_atlas;
-int s_ctx_anim = -1;
-int s_ctx_target = -1;
-int s_ctx_src = -1;
-char s_ctx_sprite[TP_SCAN_REL_CAP];
+tp_id128 s_ctx_atlas_id;
+int64_t s_ctx_atlas_revision;
+tp_id128 s_ctx_anim_atlas_id;
+tp_id128 s_ctx_anim_id;
+int64_t s_ctx_anim_revision;
+tp_id128 s_ctx_target_atlas_id;
+tp_id128 s_ctx_target_id;
+int64_t s_ctx_target_revision;
+tp_id128 s_ctx_sprite_atlas_id;
+tp_id128 s_ctx_sprite_source_id;
+int64_t s_ctx_sprite_revision;
+char s_ctx_sprite_source_key[TP_SCAN_REL_CAP];
+char s_ctx_sprite_display_name[TP_SCAN_REL_CAP];
 bool s_ctx_leaf;
 bool s_ctx_removable;
 

@@ -1641,7 +1641,7 @@ bool gui_project_target_ref_at(int atlas_index, int target_index,
 }
 
 int gui_project_create_animation(tp_id128 atlas_id, int64_t expected_revision,
-                                 const char *base, const char *const *frames,
+                                 const char *base, const tp_op_sprite_ref *frames,
                                  int frame_count) {
     const int64_t revision_before_flush = tp_session_revision(s_session);
     if (!gui_project_flush_pending()) {
@@ -1827,7 +1827,7 @@ bool gui_project_set_anim_flip(const gui_animation_ref *animation, bool flip_h,
 }
 
 bool gui_project_anim_add_frames(const gui_animation_ref *animation,
-                                 const char *const *frames, int count) {
+                                 const tp_op_sprite_ref *frames, int count) {
     if (!animation) {
         return false;
     }
@@ -1843,27 +1843,12 @@ bool gui_project_anim_add_frames(const gui_animation_ref *animation,
     if (!frames || count <= 0) {
         return false;
     }
-    const char **valid = (const char **)calloc((size_t)count, sizeof *valid);
-    if (!valid) {
-        return false;
-    }
-    int n = 0;
-    for (int i = 0; i < count; i++) {
-        if (frames[i] && frames[i][0]) {
-            valid[n++] = frames[i];
-        }
-    }
-    if (n == 0) {
-        free(valid);
-        return false;
-    }
     char transaction_id[33];
     next_transaction_id(transaction_id);
     tp_error err = {0};
     const tp_status status = gui_session_add_animation_frames(
         s_session, animation->atlas_id, animation->animation_id,
-        expected_revision, valid, n, transaction_id, &err);
-    free(valid);
+        expected_revision, frames, count, transaction_id, &err);
     if (status != TP_STATUS_OK) {
         note_session_reject(status, &err);
         return false;

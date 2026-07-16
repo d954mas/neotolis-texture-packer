@@ -5,7 +5,6 @@
 #include <string.h>
 
 #include "tp_core/tp_transaction.h"
-#include "tp_core/tp_srckey.h"
 
 static char *adapter_dup(const char *text) {
     if (!text) {
@@ -19,32 +18,19 @@ static char *adapter_dup(const char *text) {
     return copy;
 }
 
-static tp_status resolve_frame_refs(tp_session *session, tp_id128 atlas_id,
-                                    const char *const *selectors, int count,
-                                    tp_op_sprite_ref *out, tp_error *err) {
-    tp_session_snapshot *snapshot = NULL;
-    tp_status status = tp_session_snapshot_create(session, &snapshot, err);
-    if (status != TP_STATUS_OK) {
-        return status;
+static tp_status copy_frame_ref(const tp_op_sprite_ref *input,
+                                tp_op_sprite_ref *output, tp_error *err) {
+    if (!input || !output || !input->src_key) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "animation frame copy requires a source-key pointer");
     }
-    for (int i = 0; i < count; i++) {
-        tp_selector_result resolved;
-        char key[TP_SRCKEY_MAX];
-        status = tp_session_snapshot_resolve_sprite_selector(
-            snapshot, atlas_id, selectors[i], &resolved, &out[i].source_id,
-            key, sizeof key, NULL, err);
-        if (status != TP_STATUS_OK) {
-            break;
-        }
-        out[i].src_key = adapter_dup(key);
-        if (!out[i].src_key) {
-            status = tp_error_set(err, TP_STATUS_OOM,
-                                  "animation frame reference allocation failed");
-            break;
-        }
+    output->source_id = input->source_id;
+    output->src_key = adapter_dup(input->src_key);
+    if (!output->src_key) {
+        return tp_error_set(err, TP_STATUS_OOM,
+                            "animation frame reference allocation failed");
     }
-    tp_session_snapshot_destroy(snapshot);
-    return status;
+    return TP_STATUS_OK;
 }
 
 static tp_status apply_atlas_ops(tp_session *session, tp_operation *operations,
@@ -239,7 +225,8 @@ tp_status gui_session_set_sprite_override(tp_session *session, tp_id128 atlas_id
 tp_status gui_session_create_animation(tp_session *session, tp_id128 atlas_id,
                                        tp_id128 animation_id,
                                        int64_t expected_revision, const char *name,
-                                       const char *const *frames, int frame_count,
+                                       const tp_op_sprite_ref *frames,
+                                       int frame_count,
                                        const char *transaction_id, tp_error *err) {
     if (!name || frame_count < 0 || (frame_count > 0 && !frames)) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
@@ -264,11 +251,14 @@ tp_status gui_session_create_animation(tp_session *session, tp_id128 atlas_id,
                             "animation create intent allocation failed");
     }
     operation.u.anim_create.frame_count = frame_count;
-    tp_status status = resolve_frame_refs(session, atlas_id, frames, frame_count,
-                                          operation.u.anim_create.frames, err);
-    if (status != TP_STATUS_OK) {
-        tp_operation_free(&operation);
-        return status;
+    tp_status status = TP_STATUS_OK;
+    for (int i = 0; i < frame_count; ++i) {
+        status = copy_frame_ref(&frames[i],
+                                &operation.u.anim_create.frames[i], err);
+        if (status != TP_STATUS_OK) {
+            tp_operation_free(&operation);
+            return status;
+        }
     }
     status = apply_atlas_ops(session, &operation, 1, expected_revision,
                              transaction_id, err);
@@ -326,7 +316,8 @@ tp_status gui_session_set_animation_settings(tp_session *session, tp_id128 atlas
 tp_status gui_session_add_animation_frames(tp_session *session, tp_id128 atlas_id,
                                            tp_id128 animation_id,
                                            int64_t expected_revision,
-                                           const char *const *frames, int frame_count,
+                                           const tp_op_sprite_ref *frames,
+                                           int frame_count,
                                            const char *transaction_id, tp_error *err) {
     if (!frames || frame_count <= 0) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
@@ -339,21 +330,16 @@ tp_status gui_session_add_animation_frames(tp_session *session, tp_id128 atlas_i
                             "animation frame-add intent allocation failed");
     }
     tp_status status = TP_STATUS_OK;
-    tp_op_sprite_ref *refs = (tp_op_sprite_ref *)calloc((size_t)frame_count,
-                                                        sizeof *refs);
-    if (!refs) {
-        free(operations);
-        return tp_error_set(err, TP_STATUS_OOM,
-                            "animation frame-add intent allocation failed");
-    }
-    status = resolve_frame_refs(session, atlas_id, frames, frame_count, refs, err);
     for (int i = 0; i < frame_count; i++) {
         operations[i].kind = TP_OP_ANIMATION_FRAME_ADD;
         operations[i].atlas_id = atlas_id;
         operations[i].u.anim_frame_add.anim_id = animation_id;
-        operations[i].u.anim_frame_add.frame = refs[i];
-        refs[i].src_key = NULL;
         operations[i].u.anim_frame_add.index = -1;
+        status = copy_frame_ref(&frames[i],
+                                &operations[i].u.anim_frame_add.frame, err);
+        if (status != TP_STATUS_OK) {
+            break;
+        }
     }
     if (status == TP_STATUS_OK) {
         status = apply_atlas_ops(session, operations, frame_count,
@@ -361,9 +347,7 @@ tp_status gui_session_add_animation_frames(tp_session *session, tp_id128 atlas_i
     }
     for (int i = 0; i < frame_count; i++) {
         tp_operation_free(&operations[i]);
-        free(refs[i].src_key);
     }
-    free(refs);
     free(operations);
     return status;
 }

@@ -202,17 +202,8 @@ void test_animation_family_uses_stable_ids_revision_and_snapshot_read(void) {
         gui_session_add_sources(session, atlas_id, &source_id, source_path, 1,
                                 TP_SNAPSHOT_SOURCE_FOLDER, 0,
                                 "80808080808080808080808080808080", &err));
-    char source_text[TP_ID_TEXT_CAP];
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_id_format(TP_ID_KIND_SOURCE, source_id, source_text,
-                                       sizeof source_text, &err));
-    char frame1[TP_ID_TEXT_CAP + 32U];
-    char frame2[TP_ID_TEXT_CAP + 32U];
-    char frame3[TP_ID_TEXT_CAP + 32U];
-    (void)snprintf(frame1, sizeof frame1, "%s:walk_1.png", source_text);
-    (void)snprintf(frame2, sizeof frame2, "%s:walk_2.png", source_text);
-    (void)snprintf(frame3, sizeof frame3, "%s:walk_3.png", source_text);
-    const char *initial_frames[2] = {frame1, frame2};
+    const tp_op_sprite_ref initial_frames[2] = {
+        {source_id, "walk_1.png"}, {source_id, "walk_2.png"}};
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         gui_session_create_animation(
@@ -230,7 +221,7 @@ void test_animation_family_uses_stable_ids_revision_and_snapshot_read(void) {
         gui_session_set_animation_settings(
             session, atlas_id, animation_id, 2, &settings,
             "82828282828282828282828282828282", &err));
-    const char *extra[1] = {frame3};
+    const tp_op_sprite_ref extra[1] = {{source_id, "walk_3.png"}};
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         gui_session_add_animation_frames(

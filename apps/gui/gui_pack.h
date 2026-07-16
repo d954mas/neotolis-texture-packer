@@ -37,10 +37,6 @@ bool gui_pack_atlas(int atlas_index, double *out_ms, char *err, size_t err_cap, 
 /* The stored result for `atlas_index`, or NULL if never packed / last pack failed. */
 const tp_result *gui_pack_result(int atlas_index);
 
-/* Legacy display-name lookup for selftest/presentation-only callers. It selects
- * the first match and must not be used where duplicate source keys are possible. */
-int gui_pack_find_sprite(int atlas_index, const char *key);
-
 /* Canonical lookup used by rows and animation frames. Project-built pack inputs
  * use a collision-free internal name derived from {source_id, source_key}; display
  * names are never authoritative here. */

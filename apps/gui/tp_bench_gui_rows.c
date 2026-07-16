@@ -26,7 +26,7 @@
 #endif
 
 /* Exact narrow stubs for the non-build_rows references in gui_rows.c. */
-char (*s_multi_sel)[TP_SCAN_REL_CAP];
+gui_selected_sprite *s_multi_sel;
 int s_multi_sel_count;
 int s_multi_sel_cap;
 int s_sel_atlas;
@@ -274,26 +274,34 @@ static bool fixture_prepare(row_fixture *fixture, row_fixture_spec spec, const c
             return false;
         }
     }
+    tp_error err = {{0}};
+    uint64_t counter = 1U;
+    tp_rng rng = {deterministic_fill, &counter};
+    if (tp_project_promote_ids(project, &rng, &err) != TP_STATUS_OK) {
+        tp_project_destroy(project);
+        tp_scan_free(&seeded);
+        fixture_cleanup(fixture);
+        return false;
+    }
     for (int i = 0; i < spec.overrides; ++i) {
         char key[64];
         char rename[64];
-        int key_n = snprintf(key, sizeof key, "sprite_%05d", i);
+        int key_n = snprintf(key, sizeof key, "sprite_%05d.png", i);
         int rename_n = snprintf(rename, sizeof rename, "renamed_%05d", i);
         tp_project_sprite *sprite = NULL;
         if (key_n < 0 || (size_t)key_n >= sizeof key || rename_n < 0 || (size_t)rename_n >= sizeof rename ||
-            tp_project_atlas_add_sprite(atlas, key, &sprite) != TP_STATUS_OK || !sprite ||
-            tp_project_atlas_set_sprite_rename(atlas, key, rename) != TP_STATUS_OK) {
+            tp_project_atlas_add_sprite_by_source_key(
+                atlas, atlas->sources[0].id, key, &sprite) != TP_STATUS_OK ||
+            !sprite ||
+            tp_project_atlas_set_sprite_rename_by_source_key(
+                atlas, atlas->sources[0].id, key, rename) != TP_STATUS_OK) {
             tp_project_destroy(project);
             tp_scan_free(&seeded);
             fixture_cleanup(fixture);
             return false;
         }
     }
-    tp_error err = {{0}};
-    uint64_t counter = 1U;
-    tp_rng rng = {deterministic_fill, &counter};
-    if (tp_project_promote_ids(project, &rng, &err) != TP_STATUS_OK ||
-        tp_project_save(project, fixture->project_path, &err) != TP_STATUS_OK) {
+    if (tp_project_save(project, fixture->project_path, &err) != TP_STATUS_OK) {
         (void)fprintf(stderr, "tp_bench_gui_rows: project save failed: %s\n",
                       err.msg);
         tp_project_destroy(project);

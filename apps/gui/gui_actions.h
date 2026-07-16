@@ -4,7 +4,7 @@
 /* Model/state mutation layer for the ntpacker GUI: the deferred side-effect queue (s_pending_*) +
  * its pump (apply_pending), the pack/export/undo/redo/refresh actions, file dialogs + add-files/
  * folder, the new/open/save/exit unsaved-changes confirm flow, inline-rename commits + the start-edit
- * entry points (start_atlas_edit/start_anim_edit/start_sprite_edit_named/start_sprite_edit -- the
+ * entry points (start_atlas_edit/start_anim_edit/start_sprite_edit_ref/start_sprite_edit -- the
  * entry side of the same edit lifecycle, moved here in step 4 so every view that starts an inline
  * edit shares one home), the animation ops + preview player, and the small selection/edit helpers.
  * Split out of main.c (GUI decomposition step 2) as a pure move -- no behavior change. This layer is
@@ -41,8 +41,10 @@ extern tp_id128 s_pending_remove_source_atlas_id;
 extern tp_id128 s_pending_remove_source_id;
 extern int64_t s_pending_remove_source_revision;
 void gui_request_remove_animation(int animation_index);
+void gui_request_remove_animation_ref(const gui_animation_ref *animation);
 void gui_request_add_target(int atlas_index);
 void gui_request_remove_target(int target_index);
+void gui_request_remove_target_ref(const gui_target_ref *target);
 void gui_request_browse_target(int atlas_index, int target_index);
 extern int s_pending_preview_target; /* boundary-ok: exporter option, not a target entity index */
 
@@ -88,10 +90,10 @@ void gui_edit_anim_playback(const gui_animation_ref *animation, int playback);
 void gui_edit_anim_flip(const gui_animation_ref *animation, bool flip_h, bool flip_v);
 void gui_edit_anim_frame_remove(const gui_animation_ref *animation, int frame_index);
 void gui_edit_anim_frame_move(const gui_animation_ref *animation, int frame_index, int delta);
-/* Enqueue "Add frames": COPIES `keys` (count) into the edit so the drain can replay them next
+/* Enqueue "Add frames": COPIES canonical refs into the edit so the drain can replay them next
  * frame -- "Add frames" must NOT commit synchronously from the anim editor's declare fn (F1 UAF). */
 void gui_edit_anim_add_frames(const gui_animation_ref *animation,
-                              const char *const *keys, int count);
+                              const tp_op_sprite_ref *frames, int count);
 void gui_edit_target(const gui_target_ref *target, const char *exporter_id,
                      const char *out_path, bool enabled);
 /* H/G3: the out-path text field's per-keystroke enqueue -- drains to the COALESCABLE setter so an edit
@@ -135,9 +137,15 @@ const tp_result *preview_target_result(void); /* the result the canvas binds thi
 
 /* --- start-edit entry points (pair with the inline-rename commits below) --- */
 void start_atlas_edit(int i);
+void start_atlas_edit_ref(tp_id128 atlas_id, int64_t expected_revision);
 void start_anim_edit(int i);
-void start_sprite_edit_named(const char *sprite_name);
+void start_anim_edit_ref(const gui_animation_ref *animation);
+void start_sprite_edit_ref(const gui_sprite_ref *sprite,
+                           const char *display_name);
 void start_sprite_edit(const sprite_row *row);
+bool gui_sprite_edit_matches(const sprite_row *row);
+bool gui_atlas_edit_matches(tp_id128 atlas_id);
+bool gui_animation_edit_matches(tp_id128 atlas_id, tp_id128 animation_id);
 
 /* --- inline rename commits --- */
 /* The live Enter/blur path is commit_active_edit (static, gui_actions.c), which inlines the atlas +

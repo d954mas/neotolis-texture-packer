@@ -49,7 +49,8 @@ tp_status gui_session_set_sprite_override(tp_session *session, tp_id128 atlas_id
 tp_status gui_session_create_animation(tp_session *session, tp_id128 atlas_id,
                                        tp_id128 animation_id,
                                        int64_t expected_revision, const char *name,
-                                       const char *const *frames, int frame_count,
+                                       const tp_op_sprite_ref *frames,
+                                       int frame_count,
                                        const char *transaction_id, tp_error *err);
 tp_status gui_session_remove_animation(tp_session *session, tp_id128 atlas_id,
                                        tp_id128 animation_id,
@@ -68,7 +69,8 @@ tp_status gui_session_set_animation_settings(tp_session *session, tp_id128 atlas
 tp_status gui_session_add_animation_frames(tp_session *session, tp_id128 atlas_id,
                                            tp_id128 animation_id,
                                            int64_t expected_revision,
-                                           const char *const *frames, int frame_count,
+                                           const tp_op_sprite_ref *frames,
+                                           int frame_count,
                                            const char *transaction_id, tp_error *err);
 tp_status gui_session_remove_animation_frame(tp_session *session, tp_id128 atlas_id,
                                              tp_id128 animation_id,

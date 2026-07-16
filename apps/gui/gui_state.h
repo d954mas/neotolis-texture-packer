@@ -15,6 +15,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "tp_core/tp_id.h"
 #include "tp_core/tp_scan.h"
 
 #include "font/nt_font.h"        /* nt_font_t (s_font) */
@@ -100,11 +101,15 @@ extern int s_sel_child;      /* selected folder-child index (-1 = the source row
 extern char s_sel_abs[512];  /* resolved absolute image path of the selection ("" = none/folder) */
 extern bool s_sel_missing;   /* selection is a missing file -> canvas shows a placeholder (§3.7) */
 
-/* Multi-select set over leaf sprite NAMES (stable identity; rows rebuild each frame). Drives
+/* Multi-select set over canonical leaf sprite identities (rows rebuild each frame). Drives
  * "Create animation from selection" + the editor's "Add frames" (ux.md §3.7b). Growable storage
  * (P1 fix, decomposition step 7): the old fixed 4096 cap silently ignored selections past it. Grows
- * geometrically in multi_sel_add (gui_rows.c); see the growth-policy note there. */
-extern char (*s_multi_sel)[TP_SCAN_REL_CAP];
+ * geometrically in multi_sel_add_ref (gui_rows.c); see the growth-policy note there. */
+typedef struct gui_selected_sprite {
+    tp_id128 source_id;
+    char source_key[TP_SCAN_REL_CAP];
+} gui_selected_sprite;
+extern gui_selected_sprite *s_multi_sel;
 extern int s_multi_sel_count;
 extern int s_multi_sel_cap;  /* allocated slots in s_multi_sel (grow-only; 0 == unallocated) */
 extern int s_sel_anchor_row; /* row index anchor for Shift-range selection */
@@ -169,11 +174,19 @@ extern uint32_t s_id_ctx_menu;
 extern nt_ui_menu_state_t s_ctx_state;
 enum { CTX_NONE = 0, CTX_ATLAS, CTX_SPRITE, CTX_CANVAS, CTX_TARGET, CTX_ANIM };
 extern int s_ctx_kind;
-extern int s_ctx_atlas;        /* CTX_ATLAS target index */
-extern int s_ctx_anim;         /* CTX_ANIM animation index */
-extern int s_ctx_target;       /* CTX_TARGET target index (enable/disable, remove) */
-extern int s_ctx_src;          /* CTX_SPRITE source index (for Remove) */
-extern char s_ctx_sprite[TP_SCAN_REL_CAP]; /* CTX_SPRITE override key (for Rename) */
+extern tp_id128 s_ctx_atlas_id;
+extern int64_t s_ctx_atlas_revision;
+extern tp_id128 s_ctx_anim_atlas_id;
+extern tp_id128 s_ctx_anim_id;
+extern int64_t s_ctx_anim_revision;
+extern tp_id128 s_ctx_target_atlas_id;
+extern tp_id128 s_ctx_target_id;
+extern int64_t s_ctx_target_revision;
+extern tp_id128 s_ctx_sprite_atlas_id;
+extern tp_id128 s_ctx_sprite_source_id;
+extern int64_t s_ctx_sprite_revision;
+extern char s_ctx_sprite_source_key[TP_SCAN_REL_CAP];
+extern char s_ctx_sprite_display_name[TP_SCAN_REL_CAP];
 extern bool s_ctx_leaf;        /* a renamable leaf sprite (file source or folder child) */
 extern bool s_ctx_removable;   /* a removable source row (has an [x] today) */
 
