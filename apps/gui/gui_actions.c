@@ -1980,7 +1980,7 @@ static void commit_active_edit(bool force) {
 
 // #region R6b startup crash-recovery modal glue
 void gui_actions_open_recovery(const gui_recovery_list *list) {
-    if (!list || list->count <= 0) {
+    if (!list || list->count == 0U) {
         s_recovery_open = false;
         return;
     }
@@ -1988,10 +1988,10 @@ void gui_actions_open_recovery(const gui_recovery_list *list) {
     s_recovery_pending_row = -1;
     s_recovery_open = true;
 }
-int gui_actions_recovery_count(void) { return s_recovery_list.count; }
+int gui_actions_recovery_count(void) { return (int)s_recovery_list.count; }
 bool gui_actions_recovery_has_more(void) { return s_recovery_list.has_more; }
 const gui_recovery_entry *gui_actions_recovery_at(int i) {
-    if (i < 0 || i >= s_recovery_list.count) {
+    if (i < 0 || (size_t)i >= s_recovery_list.count) {
         return NULL;
     }
     return &s_recovery_list.items[i];
@@ -2002,14 +2002,14 @@ void gui_actions_recovery_request(int row, int action) {
 }
 /* Drop a resolved row (shift-down); close the modal when the list empties. */
 static void recovery_remove_row(int row) {
-    if (row < 0 || row >= s_recovery_list.count) {
+    if (row < 0 || (size_t)row >= s_recovery_list.count) {
         return;
     }
-    for (int i = row; i + 1 < s_recovery_list.count; i++) {
+    for (size_t i = (size_t)row; i + 1U < s_recovery_list.count; ++i) {
         s_recovery_list.items[i] = s_recovery_list.items[i + 1];
     }
     s_recovery_list.count--;
-    if (s_recovery_list.count <= 0 && !s_recovery_list.has_more) {
+    if (s_recovery_list.count == 0U && !s_recovery_list.has_more) {
         s_recovery_open = false;
     }
 }
@@ -2091,22 +2091,22 @@ void apply_pending(void) {
                 (void)snprintf(prompt, sizeof prompt,
                                "Permanently discard recovered unsaved work for '%s'?\n\n%s\n\n"
                                "This cannot be undone.",
-                               entry.name, entry.orig_path[0] ? entry.orig_path : "Untitled project");
+                               entry.name, entry.original_path[0] ? entry.original_path : "Untitled project");
                 proceed = tinyfd_messageBox("Discard recovered work?", prompt, "yesno", "warning", 0) == 1;
             } else if (action == GUI_RECOVERY_SAVE_AS) {
                 static const char *filt[] = {"*.ntpacker_project"};
                 char recovered_default[GUI_RECOVERY_PATH_CAP + 32];
                 const char *def = "recovered.ntpacker_project";
-                if (entry.orig_path[0] != '\0') {
+                if (entry.original_path[0] != '\0') {
                     static const char suffix[] = ".ntpacker_project";
-                    const size_t path_len = strlen(entry.orig_path);
+                    const size_t path_len = strlen(entry.original_path);
                     const size_t suffix_len = sizeof suffix - 1u;
-                    if (path_len >= suffix_len && strcmp(entry.orig_path + path_len - suffix_len, suffix) == 0) {
+                    if (path_len >= suffix_len && strcmp(entry.original_path + path_len - suffix_len, suffix) == 0) {
                         (void)snprintf(recovered_default, sizeof recovered_default, "%.*s.recovered%s",
-                                       (int)(path_len - suffix_len), entry.orig_path, suffix);
+                                       (int)(path_len - suffix_len), entry.original_path, suffix);
                     } else {
                         (void)snprintf(recovered_default, sizeof recovered_default, "%s.recovered%s",
-                                       entry.orig_path, suffix);
+                                       entry.original_path, suffix);
                     }
                     def = recovered_default;
                 }

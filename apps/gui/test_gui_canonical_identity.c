@@ -209,6 +209,22 @@ void test_preview_result_rejects_source_refresh_after_job_capture(void) {
     TEST_ASSERT_NULL(gui_pack_preview_result(0));
 }
 
+void test_recovery_entry_keeps_core_path_capacity(void) {
+    char original_path[1501];
+    memset(original_path, 'p', sizeof original_path - 1U);
+    original_path[0] = 'C';
+    original_path[1] = ':';
+    original_path[2] = '/';
+    original_path[sizeof original_path - 1U] = '\0';
+
+    gui_recovery_entry entry = {0};
+    TEST_ASSERT_EQUAL_size_t(TP_IDENTITY_PATH_MAX,
+                             sizeof entry.original_path);
+    (void)snprintf(entry.original_path, sizeof entry.original_path, "%s",
+                   original_path);
+    TEST_ASSERT_EQUAL_STRING(original_path, entry.original_path);
+}
+
 void test_rows_apply_renames_by_canonical_source_and_key(void) {
     tp_id128 left_id = {{0}};
     tp_id128 right_id = {{0}};
@@ -389,5 +405,6 @@ int main(void) {
     RUN_TEST(test_sprite_edit_rejects_genuinely_stale_captured_revision);
     RUN_TEST(test_delayed_animation_context_ref_never_retargets_after_index_shift);
     RUN_TEST(test_preview_result_rejects_source_refresh_after_job_capture);
+    RUN_TEST(test_recovery_entry_keeps_core_path_capacity);
     return UNITY_END();
 }

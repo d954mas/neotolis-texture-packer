@@ -738,33 +738,16 @@ int gui_recovery_collect(gui_recovery_list *out) {
         return 0;
     }
     tp_error err = {0};
-    tp_recovery_candidates candidates;
-    memset(&candidates, 0, sizeof candidates);
     tp_status status = tp_recovery_scan_root(
-        s_recovery_root, recovery_key(), s_session, &candidates, &err);
+        s_recovery_root, recovery_key(), s_session, out, &err);
     if (status != TP_STATUS_OK) {
         gui_project_note_recovery_setup_failure("the recovery directory could not be scanned");
         return 0;
     }
-    out->has_more = candidates.has_more;
-    out->count = (int)candidates.count;
-    for (size_t i = 0U; i < candidates.count; ++i) {
-        const tp_recovery_candidate *source = &candidates.items[i];
-        gui_recovery_entry *target = &out->items[i];
-        (void)snprintf(target->journal_path, sizeof target->journal_path,
-                       "%s", source->journal_path);
-        (void)snprintf(target->orig_path, sizeof target->orig_path, "%s", source->original_path);
-        (void)snprintf(target->name, sizeof target->name, "%s", source->name);
-        target->timestamp = source->timestamp;
-        target->status = (int)source->status;
-        target->adoptable = source->adoptable;
-        target->file_fingerprint = source->file_fingerprint;
-        target->has_file_fingerprint = source->has_file_fingerprint;
-    }
-    if (candidates.has_more) {
+    if (out->has_more) {
         note_recovery_scan_limited();
     }
-    return out->count;
+    return (int)out->count;
 }
 
 static void recovery_copy_error(char *out, size_t cap, tp_status status,
@@ -780,10 +763,9 @@ tp_status
 #else
 static tp_status
 #endif
-gui_recovery_resolve(const char *journal_path, const char *orig_path,
-                     gui_recovery_action action, const char *target_path,
+gui_recovery_resolve(const char *journal_path, gui_recovery_action action,
+                     const char *target_path,
                      char *err_out, size_t err_cap) {
-    (void)orig_path; /* Candidate metadata is the sole Save Original authority. */
     if (err_out && err_cap) {
         err_out[0] = '\0';
     }
@@ -835,7 +817,8 @@ tp_status gui_recovery_resolve_entry(const gui_recovery_entry *entry, gui_recove
         }
         return TP_STATUS_INVALID_ARGUMENT;
     }
-    return gui_recovery_resolve(entry->journal_path, entry->orig_path, action, target_path, err_out, err_cap);
+    return gui_recovery_resolve(entry->journal_path, action, target_path,
+                                err_out, err_cap);
 }
 // #endregion
 
@@ -894,25 +877,7 @@ tp_id128 gui_project__test_recovery_key(void) { return recovery_key(); }
  * regression guard is DETERMINISTIC -- independent of filesystem enumeration order (readdir on Linux is
  * unsorted, so a filesystem-crafted cap test passed even with the ordering reverted). */
 void gui_project__test_recovery_insert(gui_recovery_list *out, const gui_recovery_entry *e) {
-    tp_recovery_candidates candidates;
-    memset(&candidates, 0, sizeof candidates);
-    candidates.count = (size_t)out->count;
-    candidates.has_more = out->has_more;
-    for (int i = 0; i < out->count; ++i) {
-        candidates.items[i].adoptable = out->items[i].adoptable;
-        candidates.items[i].timestamp = out->items[i].timestamp;
-    }
-    tp_recovery_candidate candidate;
-    memset(&candidate, 0, sizeof candidate);
-    candidate.adoptable = e->adoptable;
-    candidate.timestamp = e->timestamp;
-    tp_recovery__test_candidate_insert(&candidates, &candidate);
-    out->count = (int)candidates.count;
-    out->has_more = candidates.has_more;
-    for (int i = 0; i < out->count; ++i) {
-        out->items[i].adoptable = candidates.items[i].adoptable;
-        out->items[i].timestamp = candidates.items[i].timestamp;
-    }
+    tp_recovery__test_candidate_insert(out, e);
 }
 /* Dev seam (selftest only, fix2 F3): arm a one-shot failure of the resolve's post-save load-verify so the
  * verify+keep-journal backstop has a regression test (a real save-OK-but-reload-fail input is not cleanly

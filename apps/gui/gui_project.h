@@ -29,6 +29,7 @@
 
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_operation.h"
+#include "tp_core/tp_recovery.h"
 #include "tp_core/tp_session.h"
 
 #ifdef __cplusplus
@@ -89,77 +90,35 @@ void gui_project_enable_recovery(const char *root);
  * one-shot warning through gui_project_take_recovery_setup_notice(). */
 void gui_project_note_recovery_setup_failure(const char *reason);
 
-/* R6 recovery lists are bounded so a pathological folder cannot grow startup memory without limit. */
-#define GUI_RECOVERY_MAX_CANDIDATES 16
-#define GUI_RECOVERY_PATH_CAP 1200
+/* UI buffers and loops follow the recovery core's bounded value contract. */
+#define GUI_RECOVERY_MAX_CANDIDATES TP_RECOVERY_MAX_CANDIDATES
+#define GUI_RECOVERY_PATH_CAP TP_IDENTITY_PATH_MAX
 /* Drains the one-shot "crash recovery is unavailable" notice. The text distinguishes another live
  * owner from path/directory/lock setup failures. */
 bool gui_project_take_recovery_setup_notice(char *out, size_t cap);
 
-/* ============================ R6a: recovery-resolution decision/action layer ============================
- * The headless-testable layer the R6b startup modal drives: collect recovered-journal entries WITH metadata
- * + status (incl. an old-format VERSION_MISMATCH journal surfaced for Discard), then resolve ONE per the
- * user's choice (Discard / Save to original / Save As). NON-DESTRUCTIVE ON FAILURE: a recovered journal
- * is deleted ONLY after a SUCCESSFUL save (or an explicit Discard) -- a failed save leaves the journal for a
- * retry and never clobbers the user's original file: a failed save leaves the original untouched (the atomic
- * core save writes a temp then renames). Unlike the retired R5b-2 auto-adopt, this NEVER adopts the
- * recovered work into the live editor model. R6b drives it from the startup modal; the protocol is
- * exercised headlessly by selftests J26-J37. */
+/* Startup-modal choices mapped onto the core recovery action vocabulary. */
 typedef enum {
     GUI_RECOVERY_DISCARD = 0,   /* delete the journal; the permanent lock file remains */
     GUI_RECOVERY_SAVE_ORIGINAL, /* atomically save the recovered state over its ORIGINAL file (no backup; atomic replace) */
     GUI_RECOVERY_SAVE_AS        /* save the recovered state to a NEW target file (the original is untouched) */
 } gui_recovery_action;
 
-/* One recovered orphan journal the modal lists: its on-disk journal path + the recovered project's original
- * file path / display name + when + how peek classified it. `adoptable` is true for a genuinely recoverable
- * journal (OK/TRUNCATED/CORRUPT + checkpoint + post-checkpoint unsaved work) and false for an old-format
- * (VERSION_MISMATCH) journal surfaced only so the user can Discard it. */
-typedef struct {
-    char journal_path[GUI_RECOVERY_PATH_CAP]; /* the orphan .ntpjournal on disk */
-    char orig_path[GUI_RECOVERY_PATH_CAP];    /* recovered project's ORIGINAL file path; "" = untitled */
-    char name[256];                           /* display name; "untitled" when no orig path */
-    int64_t timestamp;                        /* unix-seconds (meta.timestamp; 0 if none) */
-    int status;                               /* tp_journal_recovery_status */
-    bool adoptable;                           /* true = recoverable; false = old-format, Discard-only */
-    tp_id128 file_fingerprint;                 /* saved original baseline, when present */
-    bool has_file_fingerprint;
-} gui_recovery_entry;
-typedef struct {
-    gui_recovery_entry items[GUI_RECOVERY_MAX_CANDIDATES];
-    int count;
-    bool has_more; /* actionable entries were omitted by the bounded UI list cap */
-} gui_recovery_list;
+/* The modal consumes the core-owned recovery value contract directly. */
+typedef tp_recovery_candidate gui_recovery_entry;
+typedef tp_recovery_candidates gui_recovery_list;
 
-/* Collect recovered-journal entries from the configured recovery domain. Core
- * excludes its live slot and any live-locked orphan. For each remaining journal, peek + classify:
- *  - adoptable (status OK/TRUNCATED/CORRUPT && has_checkpoint && record_count > 1) -> entry, adoptable=true;
- *  - VERSION_MISMATCH (our file, old format) -> entry, adoptable=false (surfaced for Discard);
- *  - BAD_MAGIC (foreign) / EMPTY / no-work / STALE_KEY -> SKIP (left untouched, not listed).
- * Entries NEWEST-FIRST by timestamp, capped at GUI_RECOVERY_MAX_CANDIDATES. Reads only (no-create io);
- * DELETES NOTHING. `out` is zeroed first; returns out->count. */
+/* Thin adapter over tp_recovery_scan_root; returns the bounded result count. */
 int gui_recovery_collect(gui_recovery_list *out);
 
-/* Resolve ONE recovered journal per the user's `action`. NON-DESTRUCTIVE ON FAILURE: the journal
- * is deleted ONLY after a successful save, or on an explicit Discard -- a failed save LEAVES the journal for
- * a retry and never clobbers the user's original: a failed save leaves it untouched (atomic temp+rename in
- * the core save). Recovers the state into a standalone
- * clone (NEVER adopted into the live editor model) and always destroys the clone.
- *  - GUI_RECOVERY_DISCARD       : delete the journal. orig_path / target_path ignored.
- *  - GUI_RECOVERY_SAVE_ORIGINAL : atomically save the recovered state over `orig_path` (no backup);
- *                                 requires orig_path != "" (a saved project), else INVALID_ARGUMENT.
- *  - GUI_RECOVERY_SAVE_AS       : save the recovered state to `target_path`.
- * Returns TP_STATUS_OK on success; on a fault fills err_out (NUL-terminated within err_cap) and the journal
- * is left intact on disk. */
+/* Thin adapter over tp_recovery_resolve_journal. */
 #ifdef NTPACKER_GUI_SELFTEST
 /* Raw-path seam for protocol fault tests. Production exposes only the typed entry API below. */
-tp_status gui_recovery_resolve(const char *journal_path, const char *orig_path, gui_recovery_action action,
+tp_status gui_recovery_resolve(const char *journal_path, gui_recovery_action action,
                                const char *target_path, char *err_out, size_t err_cap);
 #endif
 
-/* Production/modal entry point: keeps the decision tied to the exact typed row collected from disk.
- * The resolver re-reads metadata under an exclusive claim before mutating anything; the entry is the
- * stable user-visible identity, not an authority that can bypass the persisted fingerprint. */
+/* Production modal entry point bound to the selected typed row. */
 tp_status gui_recovery_resolve_entry(const gui_recovery_entry *entry, gui_recovery_action action,
                                      const char *target_path, char *err_out, size_t err_cap);
 

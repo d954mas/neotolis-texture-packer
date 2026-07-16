@@ -573,7 +573,7 @@ void declare_recovery_modal(nt_ui_context_t *ctx) {
                 }
                 char detailbuf[GUI_RECOVERY_PATH_CAP + 48];
                 (void)snprintf(detailbuf, sizeof detailbuf, "%s  |  %s",
-                               e->orig_path[0] ? e->orig_path : "Untitled project", timebuf);
+                               e->original_path[0] ? e->original_path : "Untitled project", timebuf);
                 CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(58))},
                                  .layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = Su(10),
                                  .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
@@ -586,7 +586,7 @@ void declare_recovery_modal(nt_ui_context_t *ctx) {
                     if (ui_btn(ctx, nt_ui_child_id(rid, "discard"), "Discard", &g_btn, true, 96.0F, 30.0F, &g_body)) {
                         gui_actions_recovery_request(i, GUI_RECOVERY_DISCARD);
                     }
-                    if (e->adoptable && e->orig_path[0] != '\0') {
+                    if (e->adoptable && e->original_path[0] != '\0') {
                         if (ui_btn(ctx, nt_ui_child_id(rid, "orig"), "Save to original", &g_btn_primary, true, 150.0F, 30.0F, &g_onaccent)) {
                             gui_actions_recovery_request(i, GUI_RECOVERY_SAVE_ORIGINAL);
                         }

@@ -105,6 +105,7 @@ static void cleanup_known_files(void) {
         "candidate-stale.ntpacker_project",
         "original.ntpjournal", "original.ntpjournal.lock",
         "original.ntpacker_project",
+        "long-metadata.ntpjournal",
         "discard.ntpjournal", "discard.ntpjournal.lock",
         "version.ntpjournal", "version.ntpjournal.lock",
         "scan-target.ntpjournal", "scan-target.ntpjournal.lock",
@@ -1191,6 +1192,30 @@ void test_scan_surfaces_only_same_key_version_mismatch(void) {
     tp_recovery_store_destroy(store);
 }
 
+void test_candidate_preserves_project_path_beyond_legacy_gui_capacity(void) {
+    char journal[TP_IDENTITY_PATH_MAX];
+    join_path(journal, sizeof journal, g_root, "long-metadata.ntpjournal");
+    char original_path[1501];
+    memset(original_path, 'p', sizeof original_path - 1U);
+    original_path[0] = 'C';
+    original_path[1] = ':';
+    original_path[2] = '/';
+    original_path[sizeof original_path - 1U] = '\0';
+
+    tp_error err = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_recovery__test_craft_metadata_journal(
+            journal, recovery_key(), 112, original_path, "long-path", &err));
+    tp_recovery_candidate candidate;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_recovery__test_peek_candidate(journal, &candidate, &err));
+    TEST_ASSERT_EQUAL_STRING(original_path, candidate.original_path);
+
+    (void)remove(journal);
+}
+
 #ifndef _WIN32
 void test_scan_never_follows_journal_symlink(void) {
     char root[TP_IDENTITY_PATH_MAX];
@@ -1370,6 +1395,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_save_original_requires_lease_and_exact_fingerprint);
     RUN_TEST(test_claim_discard_deletes_only_journal_and_keeps_lock_domain);
     RUN_TEST(test_scan_surfaces_only_same_key_version_mismatch);
+    RUN_TEST(test_candidate_preserves_project_path_beyond_legacy_gui_capacity);
 #ifndef _WIN32
     RUN_TEST(test_scan_never_follows_journal_symlink);
 #endif

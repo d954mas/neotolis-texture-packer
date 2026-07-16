@@ -51,6 +51,10 @@
 #include "gui_startup.h"  /* H/P1-8: gui_startup_decide + GUI_STARTUP_* (J14 truth table) */
 #include "gui_state.h"    /* s_canvas / s_sel_* / s_sec_* / s_about_open / s_export_open / s_ctx / s_id_* */
 
+/* Recovery phases run sequentially. Reuse one bounded core DTO instead of
+ * placing several 136 KiB lists in run_selftest's single debug stack frame. */
+static gui_recovery_list s_recovery_scratch;
+
 /* Dev-seam index conveniences resolve against the same owned snapshot a real
  * widget uses, then exercise the stable-ID production contract. */
 static const tp_snapshot_atlas *selftest_atlas_at(int index,
@@ -2556,11 +2560,11 @@ void run_selftest(void) {
 
         gui_project_enable_recovery(""); gui_project_shutdown();
         gui_project_enable_recovery(j12c_dir);
-        gui_recovery_list j12c_stale;
-        (void)gui_recovery_collect(&j12c_stale);
-        for (int k = 0; k < j12c_stale.count; k++) {
+        gui_recovery_list *j12c_stale = &s_recovery_scratch;
+        (void)gui_recovery_collect(j12c_stale);
+        for (size_t k = 0U; k < j12c_stale->count; ++k) {
             char discard_error[256] = {0};
-            (void)gui_recovery_resolve_entry(&j12c_stale.items[k],
+            (void)gui_recovery_resolve_entry(&j12c_stale->items[k],
                                              GUI_RECOVERY_DISCARD, "",
                                              discard_error,
                                              sizeof discard_error);
@@ -2574,12 +2578,12 @@ void run_selftest(void) {
                   "J12c: Undo appends a dirty candidate checkpoint");
         gui_project_enable_recovery(""); gui_project_shutdown(); /* crash-sim: leave slot on disk */
 
-        gui_recovery_list j12c_list;
+        gui_recovery_list *j12c_list = &s_recovery_scratch;
         gui_project_enable_recovery(j12c_dir);
-        const int j12c_count = gui_recovery_collect(&j12c_list);
+        const int j12c_count = gui_recovery_collect(j12c_list);
         bool j12c_offered = false;
-        for (int k = 0; k < j12c_list.count; k++) {
-            if (j12c_list.items[k].adoptable) {
+        for (size_t k = 0U; k < j12c_list->count; ++k) {
+            if (j12c_list->items[k].adoptable) {
                 j12c_offered = true;
             }
         }
@@ -2587,9 +2591,9 @@ void run_selftest(void) {
                     j12c_count, (int)j12c_offered);
         NT_ASSERT(j12c_count > 0 && j12c_offered &&
                   "J12c: R6 collect offers the dirty Undo checkpoint journal");
-        for (int k = 0; k < j12c_list.count; k++) {
+        for (size_t k = 0U; k < j12c_list->count; ++k) {
             char discard_error[256] = {0};
-            (void)gui_recovery_resolve_entry(&j12c_list.items[k],
+            (void)gui_recovery_resolve_entry(&j12c_list->items[k],
                                              GUI_RECOVERY_DISCARD, "",
                                              discard_error,
                                              sizeof discard_error);
@@ -2834,39 +2838,39 @@ void run_selftest(void) {
             }
             NT_ASSERT(gui_project__test_hold_foreign_lock(j26lock) && "J26: a live instance holds the locked orphan");
 
-            gui_recovery_list rl;
+            gui_recovery_list *rl = &s_recovery_scratch;
             gui_project_enable_recovery(j26live);
-            const int n26 = gui_recovery_collect(&rl);
+            const int n26 = gui_recovery_collect(rl);
             nt_log_info("SELFTEST: J26 collect n=%d [0]=%s/%d [1]=%s/%d [2]=%s/%d (want 3; saved,untitled,oldfmt)",
-                        n26, n26 > 0 ? rl.items[0].name : "-", n26 > 0 ? rl.items[0].status : -1,
-                        n26 > 1 ? rl.items[1].name : "-", n26 > 1 ? rl.items[1].status : -1,
-                        n26 > 2 ? rl.items[2].name : "-", n26 > 2 ? rl.items[2].status : -1);
-            NT_ASSERT(n26 == 3 && rl.count == 3 &&
+                        n26, n26 > 0 ? rl->items[0].name : "-", n26 > 0 ? rl->items[0].status : -1,
+                        n26 > 1 ? rl->items[1].name : "-", n26 > 1 ? rl->items[1].status : -1,
+                        n26 > 2 ? rl->items[2].name : "-", n26 > 2 ? rl->items[2].status : -1);
+            NT_ASSERT(n26 == 3 && rl->count == 3 &&
                       "J26: exactly 3 collected (foreign-key + live-locked + checkpoint-only + BAD_MAGIC excluded)");
             /* [0] newest = the SAVED adoptable (ts 8000): meta path+name carried, adoptable, status OK. */
-            NT_ASSERT(rl.items[0].adoptable && rl.items[0].status == (int)TP_JOURNAL_RECOVERY_OK &&
-                      rl.items[0].timestamp == 8000 &&
-                      strcmp(rl.items[0].name, "saved26.ntpacker_project") == 0 &&
-                      strcmp(rl.items[0].orig_path, "/proj/saved26.ntpacker_project") == 0 &&
-                      selftest_same_path(rl.items[0].journal_path, j26saved) &&
+            NT_ASSERT(rl->items[0].adoptable && rl->items[0].status == (int)TP_JOURNAL_RECOVERY_OK &&
+                      rl->items[0].timestamp == 8000 &&
+                      strcmp(rl->items[0].name, "saved26.ntpacker_project") == 0 &&
+                      strcmp(rl->items[0].original_path, "/proj/saved26.ntpacker_project") == 0 &&
+                      selftest_same_path(rl->items[0].journal_path, j26saved) &&
                       "J26: [0] = saved adoptable with meta name+orig_path (newest)");
             /* [1] = the UNTITLED adoptable (ts 7000): empty orig_path, name defaults to "untitled". */
-            NT_ASSERT(rl.items[1].adoptable && rl.items[1].status == (int)TP_JOURNAL_RECOVERY_OK &&
-                      rl.items[1].timestamp == 7000 && rl.items[1].orig_path[0] == '\0' &&
-                      strcmp(rl.items[1].name, "untitled") == 0 &&
-                      selftest_same_path(rl.items[1].journal_path, j26unt) &&
+            NT_ASSERT(rl->items[1].adoptable && rl->items[1].status == (int)TP_JOURNAL_RECOVERY_OK &&
+                      rl->items[1].timestamp == 7000 && rl->items[1].original_path[0] == '\0' &&
+                      strcmp(rl->items[1].name, "untitled") == 0 &&
+                      selftest_same_path(rl->items[1].journal_path, j26unt) &&
                       "J26: [1] = untitled adoptable (orig_path \"\", name \"untitled\")");
             /* [2] = the VERSION_MISMATCH (ts 0): NON-adoptable, surfaced for Discard. */
-            NT_ASSERT(!rl.items[2].adoptable && rl.items[2].status == (int)TP_JOURNAL_RECOVERY_VERSION_MISMATCH &&
-                      selftest_same_path(rl.items[2].journal_path, j26vmis) &&
+            NT_ASSERT(!rl->items[2].adoptable && rl->items[2].status == (int)TP_JOURNAL_RECOVERY_VERSION_MISMATCH &&
+                      selftest_same_path(rl->items[2].journal_path, j26vmis) &&
                       "J26: [2] = version-mismatch non-adoptable (surfaced for Discard)");
             /* fix [2]: the FOREIGN-KEY journal (valid framing, wrong key) is NEVER listed -- collect only
              * offers what resolve can recover. Nor the live-locked or BAD_MAGIC file. */
-            for (int k = 0; k < rl.count; k++) {
-                NT_ASSERT(!selftest_same_path(rl.items[k].journal_path, j26fkey) &&
-                          !selftest_same_path(rl.items[k].journal_path, j26lock) &&
-                          !selftest_same_path(rl.items[k].journal_path, j26noedit) &&
-                          !selftest_same_path(rl.items[k].journal_path, j26bad) &&
+            for (size_t k = 0U; k < rl->count; ++k) {
+                NT_ASSERT(!selftest_same_path(rl->items[k].journal_path, j26fkey) &&
+                          !selftest_same_path(rl->items[k].journal_path, j26lock) &&
+                          !selftest_same_path(rl->items[k].journal_path, j26noedit) &&
+                          !selftest_same_path(rl->items[k].journal_path, j26bad) &&
                           "J26/[2]: foreign-key + live-locked + checkpoint-only + BAD_MAGIC are never listed");
             }
             /* fix [2]: resolve SAVE_AS on the excluded foreign-key journal must FAIL (STALE_KEY -> nothing
@@ -2876,7 +2880,7 @@ void run_selftest(void) {
                 char j26ftarget[1030];
                 (void)snprintf(j26ftarget, sizeof j26ftarget, "%s/foreignkey_out.ntpacker_project", scan26);
                 (void)remove(j26ftarget);
-                const tp_status rf = gui_recovery_resolve(j26fkey, "", GUI_RECOVERY_SAVE_AS, j26ftarget, e26f, sizeof e26f);
+                const tp_status rf = gui_recovery_resolve(j26fkey, GUI_RECOVERY_SAVE_AS, j26ftarget, e26f, sizeof e26f);
                 nt_log_info("SELFTEST: J26 foreign-key resolve r=%s src_exists=%d target_exists=%d (want !ok,1,0)",
                             tp_status_str(rf), (int)tp_scan_exists(j26fkey), (int)tp_scan_exists(j26ftarget));
                 NT_ASSERT(rf != TP_STATUS_OK && e26f[0] &&
@@ -2911,7 +2915,7 @@ void run_selftest(void) {
 
             gui_project_enable_recovery(scan27);
             char e27[256] = {0};
-            const tp_status r27 = gui_recovery_resolve(j27src, "", GUI_RECOVERY_SAVE_AS, j27target, e27, sizeof e27);
+            const tp_status r27 = gui_recovery_resolve(j27src, GUI_RECOVERY_SAVE_AS, j27target, e27, sizeof e27);
             tp_project *ld27 = NULL;
             tp_error le27 = {0};
             const tp_status l27 = tp_project_load(j27target, &ld27, &le27);
@@ -2960,7 +2964,7 @@ void run_selftest(void) {
 
             gui_project_enable_recovery(scan28);
             char e28[256] = {0};
-            const tp_status r28 = gui_recovery_resolve(j28src, j28orig, GUI_RECOVERY_SAVE_ORIGINAL, "", e28, sizeof e28);
+            const tp_status r28 = gui_recovery_resolve(j28src, GUI_RECOVERY_SAVE_ORIGINAL, "", e28, sizeof e28);
             tp_project *cur28 = NULL;
             tp_error ce28 = {0};
             const tp_status lc = tp_project_load(j28orig, &cur28, &ce28);
@@ -2987,7 +2991,7 @@ void run_selftest(void) {
             scan_make_orphan(j28src_b, "recovered28b", 5100);
             gui_project_enable_recovery(scan28);
             char e28b[256] = {0};
-            const tp_status r28b = gui_recovery_resolve(j28src_b, j28orig_b, GUI_RECOVERY_SAVE_ORIGINAL, "", e28b, sizeof e28b);
+            const tp_status r28b = gui_recovery_resolve(j28src_b, GUI_RECOVERY_SAVE_ORIGINAL, "", e28b, sizeof e28b);
             nt_log_info("SELFTEST: J28b no-orig r=%s orig_exists=%d bak_exists=%d src_exists=%d (want changed,0,0,1)",
                         tp_status_str(r28b), (int)tp_scan_exists(j28orig_b), (int)selftest_file_exists(j28bak_b),
                         (int)tp_scan_exists(j28src_b));
@@ -2996,7 +3000,7 @@ void run_selftest(void) {
             NT_ASSERT(!selftest_file_exists(j28bak_b) && "J28b: no .bak is created when there was no original");
             NT_ASSERT(tp_scan_exists(j28src_b) && "J28b: journal is kept after the refused Save Original");
             char e28b_as[256] = {0};
-            const tp_status r28b_as = gui_recovery_resolve(j28src_b, "", GUI_RECOVERY_SAVE_AS,
+            const tp_status r28b_as = gui_recovery_resolve(j28src_b, GUI_RECOVERY_SAVE_AS,
                                                            j28orig_b, e28b_as, sizeof e28b_as);
             NT_ASSERT(r28b_as == TP_STATUS_OK && tp_scan_exists(j28orig_b) &&
                       "J28b: explicit Save As remains available without original metadata");
@@ -3027,7 +3031,7 @@ void run_selftest(void) {
             tp_project__test_fail_next_temp_create();
             gui_project_enable_recovery(scan28);
             char e_f[256] = {0};
-            const tp_status r_f = gui_recovery_resolve(j28f_src, j28f_orig, GUI_RECOVERY_SAVE_ORIGINAL, "", e_f, sizeof e_f);
+            const tp_status r_f = gui_recovery_resolve(j28f_src, GUI_RECOVERY_SAVE_ORIGINAL, "", e_f, sizeof e_f);
             tp_project *f_orig = NULL;
             tp_error fe = {0};
             const tp_status lf = tp_project_load(j28f_orig, &f_orig, &fe);
@@ -3066,7 +3070,7 @@ void run_selftest(void) {
             gui_project_shutdown();
 
             gui_project_enable_recovery(dir28c);
-            const tp_status rst28c = gui_recovery_resolve(src28c, orig28c, GUI_RECOVERY_SAVE_ORIGINAL, "",
+            const tp_status rst28c = gui_recovery_resolve(src28c, GUI_RECOVERY_SAVE_ORIGINAL, "",
                                                           err28c, sizeof err28c);
             tp_project *loaded = NULL;
             tp_error load_err28c = {0};
@@ -3081,7 +3085,7 @@ void run_selftest(void) {
              * alias) must not turn the safe Save-Original refusal above into an unguarded overwrite. */
             char alias28c[1020], alias_err28c[256] = {0};
             (void)snprintf(alias28c, sizeof alias28c, "%s/./original.ntpacker_project", dir28c);
-            const tp_status alias_st28c = gui_recovery_resolve(src28c, orig28c, GUI_RECOVERY_SAVE_AS,
+            const tp_status alias_st28c = gui_recovery_resolve(src28c, GUI_RECOVERY_SAVE_AS,
                                                                alias28c, alias_err28c, sizeof alias_err28c);
             loaded = NULL;
             memset(&load_err28c, 0, sizeof load_err28c);
@@ -3113,7 +3117,7 @@ void run_selftest(void) {
 
             gui_project_enable_recovery(scan29);
             char e29[256] = {0};
-            const tp_status r29 = gui_recovery_resolve(j29src, "", GUI_RECOVERY_DISCARD, "", e29, sizeof e29);
+            const tp_status r29 = gui_recovery_resolve(j29src, GUI_RECOVERY_DISCARD, "", e29, sizeof e29);
             nt_log_info("SELFTEST: J29 Discard r=%s src_exists=%d lock_exists=%d keep_exists=%d (want ok,0,1,1)",
                         tp_status_str(r29), (int)tp_scan_exists(j29src), (int)selftest_file_exists(j29src_lk),
                         (int)selftest_file_exists(j29keep));
@@ -3135,11 +3139,11 @@ void run_selftest(void) {
             scan_make_orphan(src29b, "busy29b", 5700);
             NT_ASSERT(gui_project__test_hold_foreign_lock(src29b) && "J29b foreign resolver claim held");
             gui_project_enable_recovery(dir29b);
-            const tp_status busy29b = gui_recovery_resolve(src29b, "", GUI_RECOVERY_DISCARD, "", err29b, sizeof err29b);
+            const tp_status busy29b = gui_recovery_resolve(src29b, GUI_RECOVERY_DISCARD, "", err29b, sizeof err29b);
             NT_ASSERT(busy29b == TP_STATUS_RECOVERY_BUSY && tp_scan_exists(src29b) &&
                       "J29b concurrent resolve is rejected without deleting the journal");
             gui_project__test_release_foreign_lock();
-            NT_ASSERT(gui_recovery_resolve(src29b, "", GUI_RECOVERY_DISCARD, "", err29b, sizeof err29b) == TP_STATUS_OK &&
+            NT_ASSERT(gui_recovery_resolve(src29b, GUI_RECOVERY_DISCARD, "", err29b, sizeof err29b) == TP_STATUS_OK &&
                       !tp_scan_exists(src29b) && "J29b journal is retryable after the claim releases");
 
             char blocker29c[1000], src29c[1030], err29c[256] = {0};
@@ -3147,7 +3151,7 @@ void run_selftest(void) {
             (void)snprintf(src29c, sizeof src29c, "%s/orphan.ntpjournal", blocker29c);
             { FILE *bf = fopen(blocker29c, "wb"); if (bf) { (void)fputs("x", bf); (void)fclose(bf); } }
             const tp_status invalid29c =
-                gui_recovery_resolve(src29c, "", GUI_RECOVERY_DISCARD, "", err29c, sizeof err29c);
+                gui_recovery_resolve(src29c, GUI_RECOVERY_DISCARD, "", err29c, sizeof err29c);
             NT_ASSERT(invalid29c != TP_STATUS_OK && invalid29c != TP_STATUS_RECOVERY_BUSY &&
                       "J29c invalid storage/path is rejected before any resolver claim");
             (void)remove(blocker29c);
@@ -3172,7 +3176,7 @@ void run_selftest(void) {
 
             gui_project_enable_recovery(scan30);
             char e30[256] = {0};
-            const tp_status r30 = gui_recovery_resolve(j30src, "", GUI_RECOVERY_SAVE_AS, j30target, e30, sizeof e30);
+            const tp_status r30 = gui_recovery_resolve(j30src, GUI_RECOVERY_SAVE_AS, j30target, e30, sizeof e30);
             nt_log_info("SELFTEST: J30 save-fail r=%s err='%s' src_exists=%d target_exists=%d (want !ok,<msg>,1,0)",
                         tp_status_str(r30), e30, (int)tp_scan_exists(j30src), (int)tp_scan_exists(j30target));
             NT_ASSERT(r30 != TP_STATUS_OK && e30[0] && "J30: a failed Save returns a fault");
@@ -3192,8 +3196,8 @@ void run_selftest(void) {
          * share ts 0, so under a reverted timestamp-only insert the full equal-ts list would DROP the last
          * (adoptable) insert -> the assert below catches the regression on every OS. */
         {
-            gui_recovery_list rl31;
-            memset(&rl31, 0, sizeof rl31);
+            gui_recovery_list *rl31 = &s_recovery_scratch;
+            memset(rl31, 0, sizeof *rl31);
             for (int i = 0; i < GUI_RECOVERY_MAX_CANDIDATES; i++) {
                 gui_recovery_entry e31;
                 memset(&e31, 0, sizeof e31);
@@ -3201,7 +3205,7 @@ void run_selftest(void) {
                 (void)snprintf(e31.name, sizeof e31.name, "vmis31_%02d", i);
                 e31.timestamp = 0;
                 e31.adoptable = false; /* fill the cap with non-adoptable, equal-ts entries */
-                gui_project__test_recovery_insert(&rl31, &e31);
+                gui_project__test_recovery_insert(rl31, &e31);
             }
             gui_recovery_entry good31;
             memset(&good31, 0, sizeof good31);
@@ -3209,18 +3213,18 @@ void run_selftest(void) {
             (void)snprintf(good31.name, sizeof good31.name, "adoptable31");
             good31.timestamp = 0;   /* same ts as the noise -> a timestamp-only insert would DROP it */
             good31.adoptable = true;
-            gui_project__test_recovery_insert(&rl31, &good31);
+            gui_project__test_recovery_insert(rl31, &good31);
 
             bool found_adoptable31 = false;
-            for (int k = 0; k < rl31.count; k++) {
-                if (rl31.items[k].adoptable) {
+            for (size_t k = 0U; k < rl31->count; ++k) {
+                if (rl31->items[k].adoptable) {
                     found_adoptable31 = true;
                 }
             }
-            nt_log_info("SELFTEST: J31 cap deterministic count=%d found_adoptable=%d (want %d,1)",
-                        rl31.count, (int)found_adoptable31, GUI_RECOVERY_MAX_CANDIDATES);
-            NT_ASSERT(rl31.count == GUI_RECOVERY_MAX_CANDIDATES && "J31: the list stays capped at GUI_RECOVERY_MAX_CANDIDATES");
-            NT_ASSERT(rl31.has_more && "J31: the capped list explicitly reports omitted recovery entries");
+            nt_log_info("SELFTEST: J31 cap deterministic count=%zu found_adoptable=%d (want %d,1)",
+                        rl31->count, (int)found_adoptable31, GUI_RECOVERY_MAX_CANDIDATES);
+            NT_ASSERT(rl31->count == GUI_RECOVERY_MAX_CANDIDATES && "J31: the list stays capped at GUI_RECOVERY_MAX_CANDIDATES");
+            NT_ASSERT(rl31->has_more && "J31: the capped list explicitly reports omitted recovery entries");
             NT_ASSERT(found_adoptable31 &&
                       "J31/[1]: the adoptable entry evicts a non-adoptable one and SURVIVES the full cap");
         }
@@ -3259,25 +3263,25 @@ void run_selftest(void) {
                 craft_meta_orphan(j31b_fkey, fk31b, 6400, "/proj/foreign31b.ntpacker_project", "foreign31b.ntpacker_project");
             }
 
-            gui_recovery_list rl31b;
+            gui_recovery_list *rl31b = &s_recovery_scratch;
             gui_project_enable_recovery(scan31b);
-            const int n31b = gui_recovery_collect(&rl31b);
+            const int n31b = gui_recovery_collect(rl31b);
             int adopt_ok31b = 0, vmis_ok31b = 0, fkey_listed31b = 0;
-            for (int k = 0; k < rl31b.count; k++) {
-                if (selftest_same_path(rl31b.items[k].journal_path, j31b_adopt) && rl31b.items[k].adoptable) {
+            for (size_t k = 0U; k < rl31b->count; ++k) {
+                if (selftest_same_path(rl31b->items[k].journal_path, j31b_adopt) && rl31b->items[k].adoptable) {
                     adopt_ok31b = 1;
                 }
-                if (selftest_same_path(rl31b.items[k].journal_path, j31b_vmis) && !rl31b.items[k].adoptable &&
-                    rl31b.items[k].status == (int)TP_JOURNAL_RECOVERY_VERSION_MISMATCH) {
+                if (selftest_same_path(rl31b->items[k].journal_path, j31b_vmis) && !rl31b->items[k].adoptable &&
+                    rl31b->items[k].status == (int)TP_JOURNAL_RECOVERY_VERSION_MISMATCH) {
                     vmis_ok31b = 1;
                 }
-                if (selftest_same_path(rl31b.items[k].journal_path, j31b_fkey)) {
+                if (selftest_same_path(rl31b->items[k].journal_path, j31b_fkey)) {
                     fkey_listed31b = 1;
                 }
             }
             nt_log_info("SELFTEST: J31b collect n=%d adoptable_ok=%d vmis_ok=%d fkey_listed=%d (want 2,1,1,0)",
                         n31b, adopt_ok31b, vmis_ok31b, fkey_listed31b);
-            NT_ASSERT(n31b == 2 && rl31b.count == 2 &&
+            NT_ASSERT(n31b == 2 && rl31b->count == 2 &&
                       "J31b: exactly 2 listed (adoptable + version-mismatch; foreign-key excluded)");
             NT_ASSERT(adopt_ok31b && "J31b: the adoptable orphan is surfaced with adoptable==true");
             NT_ASSERT(vmis_ok31b && "J31b: the version-mismatch is listed NON-adoptable (for Discard)");
@@ -3302,9 +3306,9 @@ void run_selftest(void) {
             scan_make_orphan(j32src, "recovered32", 3200);
             gui_project_enable_recovery(scan32);
             char e32a[256] = {0};
-            const tp_status r32a = gui_recovery_resolve(j32src, "", GUI_RECOVERY_SAVE_AS, j32src_alias, e32a, sizeof e32a);
+            const tp_status r32a = gui_recovery_resolve(j32src, GUI_RECOVERY_SAVE_AS, j32src_alias, e32a, sizeof e32a);
             char e32a2[256] = {0};
-            const tp_status r32a2 = gui_recovery_resolve(j32src, j32src_alias, GUI_RECOVERY_SAVE_ORIGINAL, "", e32a2, sizeof e32a2);
+            const tp_status r32a2 = gui_recovery_resolve(j32src, GUI_RECOVERY_SAVE_ORIGINAL, "", e32a2, sizeof e32a2);
             nt_log_info("SELFTEST: J32a self-target save_as=%s save_orig=%s src_exists=%d (want invalid,changed,1)",
                         tp_status_str(r32a), tp_status_str(r32a2), (int)tp_scan_exists(j32src));
             NT_ASSERT(r32a == TP_STATUS_INVALID_ARGUMENT &&
@@ -3326,7 +3330,7 @@ void run_selftest(void) {
             NT_ASSERT(gui_project__test_recovery_active() && tp_scan_exists(j32slot) &&
                       "J32b: a live (locked) journal sits at the slot");
             char e32b[256] = {0};
-            const tp_status r32b = gui_recovery_resolve(j32slot, "", GUI_RECOVERY_DISCARD, "", e32b, sizeof e32b);
+            const tp_status r32b = gui_recovery_resolve(j32slot, GUI_RECOVERY_DISCARD, "", e32b, sizeof e32b);
             nt_log_info("SELFTEST: J32b live-slot discard r=%s slot_exists=%d (want invalid,1)",
                         tp_status_str(r32b), (int)tp_scan_exists(j32slot));
             NT_ASSERT(r32b == TP_STATUS_INVALID_ARGUMENT && "J32b/[5]: refuse to resolve the LIVE session slot");
@@ -3357,7 +3361,7 @@ void run_selftest(void) {
             gui_project_enable_recovery(scan33);
             gui_project__test_fail_next_load_verify(); /* one-shot: the NEXT post-save load-verify reports failure */
             char e33[256] = {0};
-            const tp_status r33 = gui_recovery_resolve(j33src, "", GUI_RECOVERY_SAVE_AS, j33target, e33, sizeof e33);
+            const tp_status r33 = gui_recovery_resolve(j33src, GUI_RECOVERY_SAVE_AS, j33target, e33, sizeof e33);
             nt_log_info("SELFTEST: J33 verify-fail r=%s err='%s' journal_kept=%d target_written=%d (want !ok,<msg>,1,1)",
                         tp_status_str(r33), e33, (int)tp_scan_exists(j33src), (int)tp_scan_exists(j33target));
             NT_ASSERT(r33 != TP_STATUS_OK && e33[0] &&
@@ -3382,20 +3386,20 @@ void run_selftest(void) {
             scan_make_orphan_2edits(src34, "truncated34_good", "truncated34_torn", 7100);
             NT_ASSERT(selftest_chop_file_tail(src34, 6) && "J34: tear the final transaction tail");
 
-            gui_recovery_list list34;
+            gui_recovery_list *list34 = &s_recovery_scratch;
             gui_project_enable_recovery(scan34);
-            const int n34 = gui_recovery_collect(&list34);
+            const int n34 = gui_recovery_collect(list34);
             bool offered34 = false;
-            for (int k = 0; k < list34.count; k++) {
-                if (selftest_same_path(list34.items[k].journal_path, src34) && list34.items[k].adoptable &&
-                    list34.items[k].status == (int)TP_JOURNAL_RECOVERY_TRUNCATED) {
+            for (size_t k = 0U; k < list34->count; ++k) {
+                if (selftest_same_path(list34->items[k].journal_path, src34) && list34->items[k].adoptable &&
+                    list34->items[k].status == (int)TP_JOURNAL_RECOVERY_TRUNCATED) {
                     offered34 = true;
                 }
             }
             NT_ASSERT(n34 > 0 && offered34 && "J34: R6 collect offers the truncated committed prefix");
 
             char err34[256] = {0};
-            NT_ASSERT(gui_recovery_resolve(src34, "", GUI_RECOVERY_SAVE_AS, target34, err34, sizeof err34) ==
+            NT_ASSERT(gui_recovery_resolve(src34, GUI_RECOVERY_SAVE_AS, target34, err34, sizeof err34) ==
                           TP_STATUS_OK &&
                       "J34: R6 resolves a truncated committed prefix");
             tp_project *loaded34 = NULL;
@@ -3429,20 +3433,20 @@ void run_selftest(void) {
             gui_project__test_set_recovery_now(-1);
             NT_ASSERT(selftest_corrupt_journal_record(src35, 3) && "J35: corrupt the middle transaction");
 
-            gui_recovery_list list35;
+            gui_recovery_list *list35 = &s_recovery_scratch;
             gui_project_enable_recovery(scan35);
-            const int n35 = gui_recovery_collect(&list35);
+            const int n35 = gui_recovery_collect(list35);
             bool offered35 = false;
-            for (int k = 0; k < list35.count; k++) {
-                if (selftest_same_path(list35.items[k].journal_path, src35) && list35.items[k].adoptable &&
-                    list35.items[k].status == (int)TP_JOURNAL_RECOVERY_CORRUPT) {
+            for (size_t k = 0U; k < list35->count; ++k) {
+                if (selftest_same_path(list35->items[k].journal_path, src35) && list35->items[k].adoptable &&
+                    list35->items[k].status == (int)TP_JOURNAL_RECOVERY_CORRUPT) {
                     offered35 = true;
                 }
             }
             NT_ASSERT(n35 > 0 && offered35 && "J35: R6 collect offers the corrupt committed prefix");
 
             char err35[256] = {0};
-            NT_ASSERT(gui_recovery_resolve(src35, "", GUI_RECOVERY_SAVE_AS, target35, err35, sizeof err35) ==
+            NT_ASSERT(gui_recovery_resolve(src35, GUI_RECOVERY_SAVE_AS, target35, err35, sizeof err35) ==
                           TP_STATUS_OK &&
                       "J35: R6 resolves a corrupt committed prefix");
             tp_project *loaded35 = NULL;
@@ -3466,7 +3470,7 @@ void run_selftest(void) {
             (void)fputs("ordinary user file", f36);
             (void)fclose(f36);
             char err36[256] = {0};
-            NT_ASSERT(gui_recovery_resolve(foreign36, "", GUI_RECOVERY_DISCARD, "", err36,
+            NT_ASSERT(gui_recovery_resolve(foreign36, GUI_RECOVERY_DISCARD, "", err36,
                                            sizeof err36) != TP_STATUS_OK &&
                       tp_scan_exists(foreign36) &&
                       "J36: raw resolver rejects and preserves an arbitrary .ntpjournal-named file");
