@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "tp_core/tp_project.h"
+#include "tp_session_internal.h"
 
 /* nt_atlas_shape_t: 0 = RECT (see tp_pack.h shape). Kept as a literal so this
  * TU pulls in no builder header (tp_core stays builder-free, #282). */
@@ -344,4 +345,25 @@ tp_status tp_export_predict_loss(const struct tp_project *project, int atlas_ind
     }
 #undef PREDICT_ADD
     return TP_STATUS_OK;
+}
+
+tp_status tp_export_predict_loss_snapshot(const tp_session_snapshot *snapshot,
+                                          tp_id128 atlas_id,
+                                          const tp_export_caps *caps,
+                                          const char *target_id,
+                                          const tp_export_prepared *opt_prep,
+                                          tp_export_notices *out,
+                                          tp_error *err) {
+    if (!snapshot) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "export loss snapshot requires snapshot");
+    }
+    const tp_project *project = tp_session_snapshot_project_internal(snapshot);
+    const int atlas_index = tp_project_find_atlas_by_id(project, atlas_id);
+    if (atlas_index < 0) {
+        return tp_error_set(err, TP_STATUS_NOT_FOUND,
+                            "export loss atlas id was not found");
+    }
+    return tp_export_predict_loss(project, atlas_index, caps, target_id,
+                                  opt_prep, out, err);
 }

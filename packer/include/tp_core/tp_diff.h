@@ -19,17 +19,14 @@
  * proves A->forward->B->inverse->A' is byte-identical to A and equals the legacy
  * full-snapshot restore.
  *
- * HONEST SCOPE (the F1-03/F2-01/F2-02 lesson -- see docs/decisions/0012): F2-03
- * builds and CORE-TESTS the diff/inverse ENGINE + a minimal history primitive. It
- * does NOT wire the GUI Undo/Redo shortcuts, save-checkpoint visibility, or
- * ownership (that SESSION/GUI behavior is F3-02), does NOT route the shipping
- * frontends (F2-05), and does NOT persist history across reopen/crash (F2-04
- * journal). The legacy GUI snapshot stack (apps/gui/gui_history.c) is left in place
- * untouched (not deleted, not rewired); the oracle reproduces its full-snapshot
- * restore via tp_project_save_buffer/tp_project_load_buffer as the comparison oracle.
+ * The session is the shipping owner of this primitive: it admits transactions,
+ * exposes Undo/Redo, and journals checkpoints. Frontends never maintain a second
+ * snapshot history. History remains bounded in-memory state; journal recovery
+ * reconstructs the recoverable model rather than serializing these allocations.
  */
 
 #include <stdbool.h>
+#include <stddef.h>
 
 #include "tp_core/tp_error.h"
 #include "tp_core/tp_transaction.h" /* tp_model (the history attaches to it) */
@@ -38,12 +35,20 @@
 extern "C" {
 #endif
 
+/* History is deliberately bounded session state. A transaction whose semantic
+ * diff cannot fit the single-record budget is rejected before journal append or
+ * model publication: committing an edit without its Undo record is forbidden.
+ * Older undo steps are evicted FIFO only after the transaction's durable ACK. */
+#define TP_HISTORY_MAX_STEPS 256
+#define TP_HISTORY_MAX_BYTES (64U * 1024U * 1024U)
+#define TP_HISTORY_MAX_RECORD_BYTES (32U * 1024U * 1024U)
+
 /* ---- attach an in-memory undo/redo history to a model -------------------- *
  * Off by default: a model with no history behaves EXACTLY like F2-02 (a committed
  * transaction captures nothing). Enabling it makes each subsequently committed
  * transaction capture a compact semantic diff and push it as one undoable step; a
  * NEW transaction applied after an Undo discards the redo branch. History is
- * in-memory session state (not serialized, not crash-durable -- F2-04). Idempotent
+ * in-memory session state (not serialized as a history stack). Idempotent
  * (a no-op if already enabled). Returns TP_STATUS_OOM if the stack cannot allocate.
  * Owned by the model; freed by tp_model_destroy. */
 tp_status tp_model_enable_history(tp_model *m);

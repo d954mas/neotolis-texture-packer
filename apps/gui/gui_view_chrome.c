@@ -232,10 +232,16 @@ void declare_context_menu(nt_ui_context_t *ctx) {
         if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_RENAME, "Rename")) {
             start_atlas_edit(s_ctx_atlas);
         }
-        const tp_project *cp = gui_project_get();
-        nt_ui_menu_item_opts_t rm = {.disabled = (cp == NULL || cp->atlas_count <= 1)};
+        const tp_session_snapshot *snapshot = gui_project_snapshot();
+        const int atlas_count = snapshot ? tp_session_snapshot_atlas_count(snapshot) : 0;
+        nt_ui_menu_item_opts_t rm = {.disabled = (atlas_count <= 1)};
         if (nt_ui_menu_item_ex(&s_ctx_menu, MK_CTX_REMOVE, "Remove", rm)) {
-            s_pending_remove_atlas = s_ctx_atlas;
+            const tp_snapshot_atlas *atlas = tp_session_snapshot_atlas_at(snapshot, s_ctx_atlas);
+            if (atlas) {
+                s_pending_remove_atlas = true;
+                s_pending_remove_atlas_id = atlas->id;
+                s_pending_remove_atlas_revision = tp_session_snapshot_revision(snapshot);
+            }
         }
     } else if (s_ctx_kind == CTX_SPRITE) {
         if (s_ctx_leaf) {
@@ -247,34 +253,59 @@ void declare_context_menu(nt_ui_context_t *ctx) {
             char lbl[48];
             (void)snprintf(lbl, sizeof lbl, "Create animation from selection (%d)", s_multi_sel_count);
             if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_CREATE_ANIM, lbl)) {
-                s_pending_create_anim = true;
+                gui_request_create_animation_from_selection();
             }
         }
         if (s_ctx_removable) {
             if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_REMOVE, "Remove")) {
-                s_pending_remove_source = s_ctx_src;
+                const tp_session_snapshot *snapshot = gui_project_snapshot();
+                const tp_snapshot_atlas *atlas = snapshot
+                                                     ? tp_session_snapshot_atlas_at(snapshot, s_ctx_atlas)
+                                                     : NULL;
+                const tp_snapshot_source *source = atlas
+                                                       ? tp_session_snapshot_source_at(
+                                                             snapshot, atlas->id, s_ctx_src)
+                                                       : NULL;
+                if (source) {
+                    s_pending_remove_source = true;
+                    s_pending_remove_source_atlas_id = atlas->id;
+                    s_pending_remove_source_id = source->id;
+                    s_pending_remove_source_revision =
+                        tp_session_snapshot_revision(snapshot);
+                }
             }
         }
     } else if (s_ctx_kind == CTX_ANIM) {
         if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_PREVIEW, "Preview")) {
             s_sel_anim = s_ctx_anim;
-            s_pending_open_preview = true;
+            gui_animation_ref animation;
+            if (gui_project_animation_ref_at(s_sel_atlas, s_ctx_anim,
+                                              &animation)) {
+                gui_request_open_preview(&animation);
+            }
         }
         if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_RENAME, "Rename")) {
             start_anim_edit(s_ctx_anim);
         }
         if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_REMOVE, "Remove")) {
-            s_pending_remove_anim = s_ctx_anim;
+            gui_request_remove_animation(s_ctx_anim);
         }
     } else if (s_ctx_kind == CTX_TARGET) {
-        tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
-        if (a && s_ctx_target >= 0 && s_ctx_target < a->target_count) {
-            tp_project_target *t = &a->targets[s_ctx_target];
+        const tp_session_snapshot *snapshot = gui_project_snapshot();
+        const tp_snapshot_atlas *a = snapshot ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas) : NULL;
+        const tp_snapshot_target *t = a
+                                          ? tp_session_snapshot_target_at(snapshot, a->id, s_ctx_target)
+                                          : NULL;
+        if (t) {
+            gui_target_ref target;
             if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_TOGGLE, t->enabled ? "Disable" : "Enable")) {
-                gui_edit_target_enabled(s_sel_atlas, s_ctx_target, !t->enabled); /* H/G3: preserves a buffered out-path edit */
+                if (gui_project_target_ref_at(s_sel_atlas, s_ctx_target,
+                                              &target)) {
+                    gui_edit_target_enabled(&target, !t->enabled);
+                }
             }
             if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_REMOVE, "Remove")) {
-                s_pending_remove_target = s_ctx_target;
+                gui_request_remove_target(s_ctx_target);
             }
         }
     } else if (s_ctx_kind == CTX_CANVAS) {
@@ -329,20 +360,22 @@ void declare_export_modal(nt_ui_context_t *ctx) {
     if (!nt_ui_modal_visible(ctx, s_id_export_modal, &s_modal_style, &s_export_open)) {
         return;
     }
-    tp_project *p = gui_project_get();
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const int atlas_count = snapshot ? tp_session_snapshot_atlas_count(snapshot) : 0;
     int enabled_targets = 0;
     int atlases_with = 0;
     int total_targets = 0;
     int line_count = 0;
-    for (int ai = 0; p && ai < p->atlas_count; ai++) {
-        const tp_project_atlas *a = &p->atlases[ai];
+    for (int ai = 0; ai < atlas_count; ai++) {
+        const tp_snapshot_atlas *a = tp_session_snapshot_atlas_at(snapshot, ai);
         if (a->target_count > 0) {
             atlases_with++;
             line_count += 1 + a->target_count;
         }
         for (int ti = 0; ti < a->target_count; ti++) {
             total_targets++;
-            enabled_targets += a->targets[ti].enabled ? 1 : 0;
+            const tp_snapshot_target *target = tp_session_snapshot_target_at(snapshot, a->id, ti);
+            enabled_targets += target && target->enabled ? 1 : 0;
         }
     }
     CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(S(560)), CLAY_SIZING_FIT(0)},
@@ -376,14 +409,17 @@ void declare_export_modal(nt_ui_context_t *ctx) {
         nt_ui_scroll_begin(ctx, NULL, nt_ui_id("export/scroll"), &s_panel_scroll,
                            &(Clay_ElementDeclaration){.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(list_h)}}});
         CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)}, .layoutDirection = CLAY_TOP_TO_BOTTOM, .childGap = Su(4), .padding = {0, Su(8), 0, 0}}}) {
-            for (int ai = 0; ai < p->atlas_count; ai++) {
-                tp_project_atlas *a = &p->atlases[ai];
+            for (int ai = 0; ai < atlas_count; ai++) {
+                const tp_snapshot_atlas *a = tp_session_snapshot_atlas_at(snapshot, ai);
                 if (a->target_count == 0) {
                     continue;
                 }
                 nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), a->name, &g_row);
                 for (int ti = 0; ti < a->target_count && ti < GUI_MAX_TARGETS; ti++) {
-                    tp_project_target *t = &a->targets[ti];
+                    const tp_snapshot_target *t = tp_session_snapshot_target_at(snapshot, a->id, ti);
+                    if (!t) {
+                        continue;
+                    }
                     char idb[48];
                     (void)snprintf(idb, sizeof idb, "export/a%d_t%d", ai, ti);
                     const uint32_t rid = nt_ui_id(idb);
@@ -398,15 +434,17 @@ void declare_export_modal(nt_ui_context_t *ctx) {
                     const bool has_path = (t->out_path && t->out_path[0] != '\0');
                     const nt_ui_events_t pev = nt_ui_events(ctx, nt_ui_child_id(rid, "path"), NULL);
                     if (pev.clicked) {
-                        s_pending_export_browse_atlas = ai;
-                        s_pending_export_browse_target = ti;
+                        gui_request_browse_target(ai, ti);
                     }
                     CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H))},
                                      .padding = {Su(8), Su(6), 0, 0},
                                      .childGap = Su(8),
                                      .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
                         if (tp_checkbox(ctx, nt_ui_child_id(rid, "en"), t->enabled, true)) {
-                            gui_edit_target_enabled(ai, ti, !t->enabled); /* H/G3: preserves a buffered out-path edit */
+                            gui_target_ref target;
+                            if (gui_project_target_ref_at(ai, ti, &target)) {
+                                gui_edit_target_enabled(&target, !t->enabled);
+                            }
                         }
                         CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(S(96)), CLAY_SIZING_GROW(0)}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
                             ui_label_fit(ctx, exp_name, &g_caption, S(96), 0U);
@@ -418,8 +456,7 @@ void declare_export_modal(nt_ui_context_t *ctx) {
                             ui_label_fit(ctx, has_path ? t->out_path : "(click to set output path)", has_path ? &g_row : &g_dim, S(300), 0U);
                         }
                         if (ui_btn(ctx, nt_ui_child_id(rid, "br"), "\xE2\x80\xA6", &g_btn_ghost, true, 28.0F, 22.0F, &g_caption)) {
-                            s_pending_export_browse_atlas = ai;
-                            s_pending_export_browse_target = ti;
+                            gui_request_browse_target(ai, ti);
                         }
                     }
                 }

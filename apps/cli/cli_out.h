@@ -19,6 +19,7 @@ void cli_sb_free(cli_sb *sb);
 void cli_sb_putc(cli_sb *sb, char c);
 void cli_sb_str(cli_sb *sb, const char *s);
 void cli_sb_int(cli_sb *sb, long v);
+void cli_sb_size(cli_sb *sb, size_t v);
 void cli_sb_num(cli_sb *sb, double v);           /* %.9g; relies on LC_NUMERIC="C" (main) */
 void cli_sb_json_str(cli_sb *sb, const char *s); /* quoted + JSON-escaped */
 void cli_sb_indent(cli_sb *sb, int depth);       /* 2 spaces per depth level */

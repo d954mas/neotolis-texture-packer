@@ -9,17 +9,22 @@
 # key normalizer (src/tp_srckey.c) can PRIVATE-link it. Was spike-only until F1-02
 # promoted tp_srckey into production. -w vendored; no on-disk schema of its own.
 add_subdirectory(deps/utf8proc)
+find_package(Threads REQUIRED)
 
 add_library(tp_core STATIC
     src/tp_arena.c src/tp_names.c src/tp_name_map.c src/tp_pack_read.c src/tp_project.c
-    src/tp_pack_settings.c src/tp_scan.c src/tp_input.c
+    src/tp_pack_settings.c src/tp_scan.c src/tp_input.c src/tp_validate.c
     src/tp_export.c src/tp_normalize.c src/tp_export_png.c src/tp_export_json_neotolis.c
     src/tp_export_defold.c
     # F1-00 production project-identity boundary: 128-bit runtime ID + RNG seam,
     # canonical saved-project path (lexical + realpath), Save-As transition DTO.
     # Promoted from the accepted C0-01 spike; no engine API, no new link deps
     # (POSIX realpath in libc / Win32 kernel32 auto-linked).
-    src/tp_id.c src/tp_identity.c src/tp_identity_session.c
+    src/tp_id.c src/tp_identity.c src/tp_identity_session.c src/tp_source_plan.c
+    src/tp_project_lease.c src/tp_recovery.c
+    # M5: fixed client capability vocabulary/matrix. Unsupported surfaces are a
+    # typed result, not ad-hoc frontend prose or a pretend live CLI session.
+    src/tp_client_capability.c
     # F1-01 schema-v2 identity migration: deterministic legacy synthesis +
     # atomic writable promotion (kept out of tp_project.c's loader/serializer).
     src/tp_project_migrate.c
@@ -47,6 +52,10 @@ add_library(tp_core STATIC
     # retained-id index (one place for the membership + growth logic).
     src/tp_idset.c
     src/tp_project_clone.c src/tp_semantic.c src/tp_txn_idset.c src/tp_txn_apply.c
+    # Architecture foundation M1: synchronous orchestration owner and the one
+    # public owned immutable snapshot boundary. Business validation remains in
+    # the operation/model modules; no GUI, protocol, recovery backend, or jobs.
+    src/tp_session.c
     # P-01 (plan §17): arena-backed alternative to the malloc project deep-clone --
     # a memcpy-bound clone off one tp_arena, byte-identical to tp_project_clone.
     # Integration into the live model stays deferred; M0's authoritative normal
@@ -84,7 +93,7 @@ target_include_directories(tp_core PRIVATE
 # (nt_pack_format.h / nt_atlas_format.h / nt_texture_format.h), nt_hash is the small
 # hash lib (hash/nt_hash.h), nt_log is logging. None pull basisu, so tp_core is safe
 # to link into the GPU runtime (the GUI).
-target_link_libraries(tp_core PUBLIC nt_shared nt_hash nt_log)
+target_link_libraries(tp_core PUBLIC nt_shared nt_hash nt_log PRIVATE Threads::Threads)
 # cJSON (engine-vendored, MIT) parses .ntpacker_project. PRIVATE: tp_project.h never
 # exposes cJSON; Save uses a hand-rolled deterministic writer.
 # stb_image_write (engine-vendored, public domain) is the PNG page writer. Linked
@@ -110,7 +119,7 @@ nt_set_sanitizer_flags(tp_core)
 # --- tp_build: pack orchestration (drives nt_builder) ---------------------------
 # Isolated so ONLY pack-time consumers (GUI, CLI, smoke, pack tests) pull
 # nt_builder -> nt_basisu_encoder. Since #283 the GUI links tp_build directly.
-add_library(tp_build STATIC src/tp_pack.c src/tp_export_run.c)
+add_library(tp_build STATIC src/tp_pack.c src/tp_export_run.c src/tp_job.c)
 # nt_builder BEFORE tp_core: GNU ld resolves static archives left-to-right and
 # nt_builder needs nt_log_write from tp_core's PUBLIC nt_log; the old order
 # flattened to ...libnt_log.a...libnt_builder.a and the Linux release link

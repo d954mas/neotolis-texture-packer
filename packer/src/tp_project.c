@@ -1,6 +1,7 @@
 #include "tp_core/tp_project.h"
 
 #include <ctype.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -347,6 +348,7 @@ void tp_project_destroy(tp_project *p) {
     }
     free(p->atlases);
     free(p->project_dir);
+    free(p->source_base_dir);
     free(p);
 }
 
@@ -371,6 +373,21 @@ static tp_status atlas_push_source(tp_project_atlas *a, const char *path, tp_sou
     return TP_STATUS_OK;
 }
 
+static bool tp_source_path_equal(const char *a, const char *b) {
+    if (!a || !b) {
+        return false;
+    }
+    char left[TP_PATH_MAX];
+    char right[TP_PATH_MAX];
+    if ((size_t)snprintf(left, sizeof left, "%s", a) >= sizeof left ||
+        (size_t)snprintf(right, sizeof right, "%s", b) >= sizeof right) {
+        return false;
+    }
+    tp_normalize_slashes(left);
+    tp_normalize_slashes(right);
+    return strcmp(left, right) == 0;
+}
+
 /* True when the atlas already holds a source whose '/'-normalized path equals
  * `path`'s -- the "an atlas never holds two identical source paths" invariant that
  * both the mutation API and the v3 loader enforce. A path that overflows the
@@ -378,16 +395,8 @@ static tp_status atlas_push_source(tp_project_atlas *a, const char *path, tp_sou
  * treated as absent (the caller then pushes it -- an anomalous over-long path is
  * never silently merged). */
 static bool atlas_has_source_path(const tp_project_atlas *a, const char *path) {
-    char norm[TP_PATH_MAX];
-    if ((size_t)snprintf(norm, sizeof norm, "%s", path) >= sizeof norm) {
-        return false;
-    }
-    tp_normalize_slashes(norm);
     for (int i = 0; i < a->source_count; i++) {
-        char existing[TP_PATH_MAX];
-        (void)snprintf(existing, sizeof existing, "%s", a->sources[i].path);
-        tp_normalize_slashes(existing);
-        if (strcmp(existing, norm) == 0) {
+        if (tp_source_path_equal(a->sources[i].path, path)) {
             return true;
         }
     }
@@ -458,69 +467,156 @@ tp_status tp_project_atlas_remove_source_by_id(tp_project_atlas *a, tp_id128 id)
     return TP_STATUS_OUT_OF_BOUNDS;
 }
 
-tp_project_sprite *tp_project_atlas_find_sprite(tp_project_atlas *a, const char *name) {
-    if (!a || !name) {
+static bool sprite_is_canonical(const tp_project_sprite *sprite) {
+    return sprite && !tp_id128_is_nil(sprite->source_ref) &&
+           sprite->src_key != NULL;
+}
+
+tp_project_sprite *tp_project_atlas_find_sprite_by_source_key(
+    tp_project_atlas *a, tp_id128 source_ref, const char *src_key) {
+    if (!a || tp_id128_is_nil(source_ref) || !src_key) {
         return NULL;
     }
     for (int i = 0; i < a->sprite_count; i++) {
-        if (strcmp(a->sprites[i].name, name) == 0) {
+        if (sprite_is_canonical(&a->sprites[i]) &&
+            tp_id128_eq(a->sprites[i].source_ref, source_ref) &&
+            strcmp(a->sprites[i].src_key, src_key) == 0) {
             return &a->sprites[i];
         }
     }
     return NULL;
 }
 
-tp_status tp_project_atlas_add_sprite(tp_project_atlas *a, const char *name, tp_project_sprite **out) {
+tp_project_sprite *tp_project_atlas_find_pending_sprite(
+    tp_project_atlas *a, const char *name) {
+    if (!a || !name) {
+        return NULL;
+    }
+    for (int i = 0; i < a->sprite_count; i++) {
+        if (!sprite_is_canonical(&a->sprites[i]) && a->sprites[i].name &&
+            strcmp(a->sprites[i].name, name) == 0) {
+            return &a->sprites[i];
+        }
+    }
+    return NULL;
+}
+
+static void sprite_init_defaults(tp_project_sprite *sprite) {
+    memset(sprite, 0, sizeof *sprite);
+    sprite->origin_x = TP_PROJECT_ORIGIN_DEFAULT;
+    sprite->origin_y = TP_PROJECT_ORIGIN_DEFAULT;
+    sprite->ov_shape = TP_PROJECT_OV_INHERIT;
+    sprite->ov_allow_rotate = TP_PROJECT_OV_INHERIT;
+    sprite->ov_max_vertices = TP_PROJECT_OV_INHERIT;
+    sprite->ov_margin = TP_PROJECT_OV_INHERIT;
+    sprite->ov_extrude = TP_PROJECT_OV_INHERIT;
+}
+
+static tp_project_sprite *sprite_push_default(tp_project_atlas *a) {
+    if (!tp_grow((void **)&a->sprites, &a->sprite_cap,
+                 a->sprite_count + 1, sizeof(tp_project_sprite))) {
+        return NULL;
+    }
+    tp_project_sprite *sprite = &a->sprites[a->sprite_count++];
+    sprite_init_defaults(sprite);
+    return sprite;
+}
+
+tp_status tp_project_atlas_add_pending_sprite(tp_project_atlas *a,
+                                              const char *name,
+                                              tp_project_sprite **out) {
     if (!a || !name) {
         return TP_STATUS_INVALID_ARGUMENT;
     }
-    tp_project_sprite *existing = tp_project_atlas_find_sprite(a, name);
+    tp_project_sprite *existing = tp_project_atlas_find_pending_sprite(a, name);
     if (existing) {
         if (out) {
             *out = existing;
         }
         return TP_STATUS_OK;
     }
-    if (!tp_grow((void **)&a->sprites, &a->sprite_cap, a->sprite_count + 1, sizeof(tp_project_sprite))) {
+    char *name_copy = tp_strdup(name);
+    if (!name_copy) {
         return TP_STATUS_OOM;
     }
-    tp_project_sprite *s = &a->sprites[a->sprite_count];
-    memset(s, 0, sizeof *s);
-    s->name = tp_strdup(name);
-    if (!s->name) {
+    tp_project_sprite *s = sprite_push_default(a);
+    if (!s) {
+        free(name_copy);
         return TP_STATUS_OOM;
     }
-    s->origin_x = TP_PROJECT_ORIGIN_DEFAULT;
-    s->origin_y = TP_PROJECT_ORIGIN_DEFAULT;
-    s->ov_shape = TP_PROJECT_OV_INHERIT;
-    s->ov_allow_rotate = TP_PROJECT_OV_INHERIT;
-    s->ov_max_vertices = TP_PROJECT_OV_INHERIT;
-    s->ov_margin = TP_PROJECT_OV_INHERIT;
-    s->ov_extrude = TP_PROJECT_OV_INHERIT;
-    a->sprite_count++;
+    s->name = name_copy;
     if (out) {
         *out = s;
     }
     return TP_STATUS_OK;
 }
 
-tp_status tp_project_atlas_remove_sprite(tp_project_atlas *a, const char *name) {
-    if (!a || !name) {
+tp_status tp_project_atlas_add_sprite_by_source_key(
+    tp_project_atlas *a, tp_id128 source_ref, const char *src_key,
+    tp_project_sprite **out) {
+    if (!a || tp_id128_is_nil(source_ref) || !src_key || src_key[0] == '\0') {
         return TP_STATUS_INVALID_ARGUMENT;
     }
-    for (int i = 0; i < a->sprite_count; i++) {
-        if (strcmp(a->sprites[i].name, name) == 0) {
-            free(a->sprites[i].name);
-            free(a->sprites[i].src_key);
-            free(a->sprites[i].rename);
-            for (int j = i; j < a->sprite_count - 1; j++) {
-                a->sprites[j] = a->sprites[j + 1];
-            }
-            a->sprite_count--;
-            return TP_STATUS_OK;
+    tp_project_sprite *existing =
+        tp_project_atlas_find_sprite_by_source_key(a, source_ref, src_key);
+    if (existing) {
+        if (out) {
+            *out = existing;
         }
+        return TP_STATUS_OK;
     }
-    return TP_STATUS_OUT_OF_BOUNDS;
+    char bridge[TP_SRCKEY_MAX];
+    tp_sprite_export_key(src_key, bridge, sizeof bridge);
+    char *name_copy = tp_strdup(bridge);
+    char *key_copy = tp_strdup(src_key);
+    if (!name_copy || !key_copy) {
+        free(name_copy);
+        free(key_copy);
+        return TP_STATUS_OOM;
+    }
+    tp_project_sprite *sprite = sprite_push_default(a);
+    if (!sprite) {
+        free(name_copy);
+        free(key_copy);
+        return TP_STATUS_OOM;
+    }
+    sprite->name = name_copy;
+    sprite->source_ref = source_ref;
+    sprite->src_key = key_copy;
+    if (out) {
+        *out = sprite;
+    }
+    return TP_STATUS_OK;
+}
+
+static tp_status remove_sprite_at(tp_project_atlas *a, int index) {
+    if (!a || index < 0 || index >= a->sprite_count) {
+        return TP_STATUS_OUT_OF_BOUNDS;
+    }
+    free(a->sprites[index].name);
+    free(a->sprites[index].src_key);
+    free(a->sprites[index].rename);
+    for (int j = index; j < a->sprite_count - 1; j++) {
+        a->sprites[j] = a->sprites[j + 1];
+    }
+    a->sprite_count--;
+    memset(&a->sprites[a->sprite_count], 0, sizeof *a->sprites);
+    return TP_STATUS_OK;
+}
+
+tp_status tp_project_atlas_remove_pending_sprite(tp_project_atlas *a,
+                                                 const char *name) {
+    tp_project_sprite *sprite = tp_project_atlas_find_pending_sprite(a, name);
+    return sprite ? remove_sprite_at(a, (int)(sprite - a->sprites))
+                  : TP_STATUS_OUT_OF_BOUNDS;
+}
+
+tp_status tp_project_atlas_remove_sprite_by_source_key(
+    tp_project_atlas *a, tp_id128 source_ref, const char *src_key) {
+    tp_project_sprite *sprite =
+        tp_project_atlas_find_sprite_by_source_key(a, source_ref, src_key);
+    return sprite ? remove_sprite_at(a, (int)(sprite - a->sprites))
+                  : TP_STATUS_OUT_OF_BOUNDS;
 }
 
 /* An override entry that would serialize to just its name (safe to drop). */
@@ -532,24 +628,25 @@ static bool tp_sprite_is_default(const tp_project_sprite *s) {
            s->ov_extrude == TP_PROJECT_OV_INHERIT;
 }
 
-tp_status tp_project_atlas_set_sprite_rename(tp_project_atlas *a, const char *sprite_name, const char *rename) {
+tp_status tp_project_atlas_set_pending_sprite_rename(
+    tp_project_atlas *a, const char *sprite_name, const char *rename) {
     if (!a || !sprite_name) {
         return TP_STATUS_INVALID_ARGUMENT;
     }
     if (rename == NULL || rename[0] == '\0') { /* clear back to the file-derived name */
-        tp_project_sprite *s = tp_project_atlas_find_sprite(a, sprite_name);
+        tp_project_sprite *s = tp_project_atlas_find_pending_sprite(a, sprite_name);
         if (!s) {
             return TP_STATUS_OK;
         }
         free(s->rename);
         s->rename = NULL;
         if (tp_sprite_is_default(s)) {
-            return tp_project_atlas_remove_sprite(a, sprite_name);
+            return tp_project_atlas_remove_pending_sprite(a, sprite_name);
         }
         return TP_STATUS_OK;
     }
     tp_project_sprite *s = NULL;
-    tp_status st = tp_project_atlas_add_sprite(a, sprite_name, &s);
+    tp_status st = tp_project_atlas_add_pending_sprite(a, sprite_name, &s);
     if (st != TP_STATUS_OK) {
         return st;
     }
@@ -562,15 +659,89 @@ tp_status tp_project_atlas_set_sprite_rename(tp_project_atlas *a, const char *sp
     return TP_STATUS_OK;
 }
 
-tp_status tp_project_atlas_prune_sprite(tp_project_atlas *a, const char *name) {
+tp_status tp_project_atlas_set_sprite_rename_by_source_key(
+    tp_project_atlas *a, tp_id128 source_ref, const char *src_key,
+    const char *rename) {
+    if (!a || tp_id128_is_nil(source_ref) || !src_key) {
+        return TP_STATUS_INVALID_ARGUMENT;
+    }
+    tp_project_sprite *sprite =
+        tp_project_atlas_find_sprite_by_source_key(a, source_ref, src_key);
+    if (!rename || rename[0] == '\0') {
+        if (!sprite) {
+            return TP_STATUS_OK;
+        }
+        free(sprite->rename);
+        sprite->rename = NULL;
+        return tp_sprite_is_default(sprite)
+                   ? tp_project_atlas_remove_sprite_by_source_key(
+                         a, source_ref, src_key)
+                   : TP_STATUS_OK;
+    }
+    tp_status status = tp_project_atlas_add_sprite_by_source_key(
+        a, source_ref, src_key, &sprite);
+    if (status != TP_STATUS_OK) {
+        return status;
+    }
+    char *copy = tp_strdup(rename);
+    if (!copy) {
+        return TP_STATUS_OOM;
+    }
+    free(sprite->rename);
+    sprite->rename = copy;
+    return TP_STATUS_OK;
+}
+
+tp_status tp_project_atlas_prune_pending_sprite(tp_project_atlas *a,
+                                                const char *name) {
     if (!a || !name) {
         return TP_STATUS_INVALID_ARGUMENT;
     }
-    tp_project_sprite *s = tp_project_atlas_find_sprite(a, name);
+    tp_project_sprite *s = tp_project_atlas_find_pending_sprite(a, name);
     if (s && tp_sprite_is_default(s)) {
-        return tp_project_atlas_remove_sprite(a, name);
+        return tp_project_atlas_remove_pending_sprite(a, name);
     }
     return TP_STATUS_OK;
+}
+
+tp_status tp_project_atlas_prune_sprite_by_source_key(
+    tp_project_atlas *a, tp_id128 source_ref, const char *src_key) {
+    if (!a || tp_id128_is_nil(source_ref) || !src_key) {
+        return TP_STATUS_INVALID_ARGUMENT;
+    }
+    tp_project_sprite *sprite =
+        tp_project_atlas_find_sprite_by_source_key(a, source_ref, src_key);
+    if (sprite && tp_sprite_is_default(sprite)) {
+        return tp_project_atlas_remove_sprite_by_source_key(a, source_ref,
+                                                            src_key);
+    }
+    return TP_STATUS_OK;
+}
+
+tp_project_sprite *tp_project_atlas_find_sprite(tp_project_atlas *a,
+                                                const char *name) {
+    return tp_project_atlas_find_pending_sprite(a, name);
+}
+
+tp_status tp_project_atlas_add_sprite(tp_project_atlas *a, const char *name,
+                                      tp_project_sprite **out) {
+    return tp_project_atlas_add_pending_sprite(a, name, out);
+}
+
+tp_status tp_project_atlas_remove_sprite(tp_project_atlas *a,
+                                         const char *name) {
+    return tp_project_atlas_remove_pending_sprite(a, name);
+}
+
+tp_status tp_project_atlas_prune_sprite(tp_project_atlas *a,
+                                        const char *name) {
+    return tp_project_atlas_prune_pending_sprite(a, name);
+}
+
+tp_status tp_project_atlas_set_sprite_rename(tp_project_atlas *a,
+                                             const char *sprite_name,
+                                             const char *rename) {
+    return tp_project_atlas_set_pending_sprite_rename(a, sprite_name, rename);
 }
 
 tp_status tp_project_atlas_add_animation(tp_project_atlas *a, const char *name, tp_project_anim **out) {
@@ -849,6 +1020,109 @@ bool tp_project_out_path_shared(const tp_project *p, const char *out_path, const
     return false;
 }
 
+tp_status tp_project_next_atlas_defaults(const tp_project *p, char *name,
+                                         size_t name_cap, char *out_path,
+                                         size_t out_path_cap,
+                                         const char **exporter_id,
+                                         bool *target_enabled, tp_error *err) {
+    if (!p || !name || name_cap == 0U || !out_path || out_path_cap == 0U ||
+        !exporter_id || !target_enabled) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "atlas defaults need project and output fields");
+    }
+    for (int n = 1; n < INT_MAX; ++n) {
+        const int nw = snprintf(name, name_cap, "atlas%d", n);
+        const int ow = snprintf(out_path, out_path_cap, "out/%s", name);
+        if (nw < 0 || ow < 0 || (size_t)nw >= name_cap ||
+            (size_t)ow >= out_path_cap) {
+            return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                                "atlas default name exceeds output capacity");
+        }
+        bool name_used = false;
+        for (int i = 0; i < p->atlas_count; ++i) {
+            if (p->atlases[i].name && strcmp(p->atlases[i].name, name) == 0) {
+                name_used = true;
+                break;
+            }
+        }
+        if (!name_used && !tp_project_out_path_shared(p, out_path, NULL)) {
+            *exporter_id = TP_EXPORTER_ID_JSON_NEOTOLIS;
+            *target_enabled = true;
+            return TP_STATUS_OK;
+        }
+    }
+    return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                        "atlas default namespace is exhausted");
+}
+
+tp_status tp_project_next_animation_name(const tp_project *p, tp_id128 atlas_id,
+                                         const char *base, char *name,
+                                         size_t name_cap, tp_error *err) {
+    if (!p || !name || name_cap == 0U) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "animation defaults need project and output buffer");
+    }
+    const int atlas_index = tp_project_find_atlas_by_id(p, atlas_id);
+    if (atlas_index < 0) {
+        return tp_error_set(err, TP_STATUS_NOT_FOUND,
+                            "animation defaults atlas was not found");
+    }
+    const tp_project_atlas *atlas = &p->atlases[atlas_index];
+    const bool automatic = !base || base[0] == '\0';
+    for (int n = automatic ? 1 : 0; n < INT_MAX; ++n) {
+        const int written = automatic
+                                ? snprintf(name, name_cap, "anim%d", n)
+                                : (n == 0 ? snprintf(name, name_cap, "%s", base)
+                                          : snprintf(name, name_cap, "%s%d", base, n + 1));
+        if (written < 0 || (size_t)written >= name_cap) {
+            name[0] = '\0';
+            return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                                "animation default name exceeds output capacity");
+        }
+        bool used = false;
+        for (int i = 0; i < atlas->animation_count; ++i) {
+            if (atlas->animations[i].name &&
+                strcmp(atlas->animations[i].name, name) == 0) {
+                used = true;
+                break;
+            }
+        }
+        if (!used) {
+            return TP_STATUS_OK;
+        }
+    }
+    name[0] = '\0';
+    return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                        "animation default namespace is exhausted");
+}
+
+tp_status tp_project_target_defaults(const tp_project *p, tp_id128 atlas_id,
+                                     const char **exporter_id, char *out_path,
+                                     size_t out_path_cap, bool *enabled,
+                                     tp_error *err) {
+    if (!p || !exporter_id || !out_path || out_path_cap == 0U || !enabled) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "target defaults need project and output fields");
+    }
+    const int atlas_index = tp_project_find_atlas_by_id(p, atlas_id);
+    if (atlas_index < 0) {
+        return tp_error_set(err, TP_STATUS_NOT_FOUND,
+                            "target defaults atlas was not found");
+    }
+    const char *atlas_name = p->atlases[atlas_index].name
+                                 ? p->atlases[atlas_index].name
+                                 : "atlas";
+    const int written = snprintf(out_path, out_path_cap, "out/%s", atlas_name);
+    if (written < 0 || (size_t)written >= out_path_cap) {
+        out_path[0] = '\0';
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                            "target default path exceeds output capacity");
+    }
+    *exporter_id = TP_EXPORTER_ID_JSON_NEOTOLIS;
+    *enabled = true;
+    return TP_STATUS_OK;
+}
+
 /* ======================================================================== */
 /* deterministic writer (ux.md principle 7)                                 */
 /* ======================================================================== */
@@ -857,18 +1131,73 @@ typedef struct tp_sb {
     char *buf;
     size_t len;
     size_t cap;
+    size_t limit;
     bool oom;
+    bool count_only;
+    bool too_large;
+    bool absolute_sources;
+    const char *source_base_dir;
 } tp_sb;
 
+static _Thread_local size_t s_test_save_buffer_calls;
+static _Thread_local size_t s_test_serializer_allocations;
+static _Thread_local size_t s_test_load_buffer_calls;
+static _Thread_local size_t s_test_size_query_calls;
+
+void tp_project__test_serialization_stats_reset(void) {
+    s_test_save_buffer_calls = 0U;
+    s_test_serializer_allocations = 0U;
+    s_test_load_buffer_calls = 0U;
+    s_test_size_query_calls = 0U;
+}
+
+size_t tp_project__test_save_buffer_calls(void) {
+    return s_test_save_buffer_calls;
+}
+
+size_t tp_project__test_serializer_allocations(void) {
+    return s_test_serializer_allocations;
+}
+
+size_t tp_project__test_load_buffer_calls(void) {
+    return s_test_load_buffer_calls;
+}
+
+size_t tp_project__test_size_query_calls(void) {
+    return s_test_size_query_calls;
+}
+
 static void tp_sb_write(tp_sb *sb, const char *s, size_t n) {
-    if (sb->oom) {
+    if (sb->oom || sb->too_large) {
         return;
     }
-    if (sb->len + n + 1U > sb->cap) {
+    if (n > SIZE_MAX - sb->len) {
+        sb->too_large = true;
+        return;
+    }
+    const size_t next = sb->len + n;
+    if (sb->count_only) {
+        if (next == SIZE_MAX || next > sb->limit) {
+            sb->too_large = true;
+            return;
+        }
+        sb->len = next;
+        return;
+    }
+    if (next == SIZE_MAX) {
+        sb->too_large = true;
+        return;
+    }
+    if (next + 1U > sb->cap) {
         size_t new_cap = (sb->cap == 0) ? 1024U : sb->cap;
-        while (sb->len + n + 1U > new_cap) {
+        while (next + 1U > new_cap) {
+            if (new_cap > SIZE_MAX / 2U) {
+                new_cap = next + 1U;
+                break;
+            }
             new_cap *= 2U;
         }
+        s_test_serializer_allocations++;
         char *nb = (char *)realloc(sb->buf, new_cap);
         if (!nb) {
             sb->oom = true;
@@ -878,7 +1207,7 @@ static void tp_sb_write(tp_sb *sb, const char *s, size_t n) {
         sb->cap = new_cap;
     }
     memcpy(sb->buf + sb->len, s, n);
-    sb->len += n;
+    sb->len = next;
     sb->buf[sb->len] = '\0';
 }
 
@@ -993,10 +1322,9 @@ static void tp_emit_id(tp_sb *sb, tp_id_kind kind, tp_id128 id) {
 }
 
 static void tp_emit_sprite(tp_sb *sb, int depth, const tp_project_sprite *s) {
-    /* v4 identity: a MIGRATED record persists its canonical {key, source}; a PENDING
-     * record (v3 legacy / added-by-name-before-scan) persists its `name` bridge. On
-     * load a migrated record re-derives `name` = strip_ext(key) with no scan, so the
-     * name-based pack/export path is unaffected (decision 0009). */
+    /* A canonical record persists {key, source}; a legacy pending record persists
+     * its display `name` as migration input. Canonical records re-derive that
+     * display bridge on load; pack/export application never keys on it. */
     const bool migrated = !tp_id128_is_nil(s->source_ref) && s->src_key != NULL;
     tp_sb_char(sb, '{');
     bool first = true;
@@ -1134,7 +1462,30 @@ static void tp_emit_source(tp_sb *sb, int depth, const tp_project_source *s) {
         tp_sb_json_string(sb, tp_source_kind_token(s->kind));
     }
     tp_obj_key(sb, depth + 1, &first, "path");
-    tp_sb_json_string(sb, s->path);
+    const char *path = s->path;
+    char absolute_path[TP_PATH_MAX];
+    if (sb->absolute_sources && !tp_path_is_absolute(path)) {
+        if (sb->source_base_dir) {
+            const int written = snprintf(absolute_path, sizeof absolute_path,
+                                         "%s/%s", sb->source_base_dir, path);
+            if (written < 0 || (size_t)written >= sizeof absolute_path) {
+                sb->too_large = true;
+            } else {
+                tp_normalize_slashes(absolute_path);
+                path = absolute_path;
+            }
+        } else {
+            tp_error path_error = {0};
+            if (tp_identity_path_absolute_lexical(
+                    path, absolute_path, sizeof absolute_path,
+                    &path_error) != TP_STATUS_OK) {
+                sb->too_large = true;
+            } else {
+                path = absolute_path;
+            }
+        }
+    }
+    tp_sb_json_string(sb, path);
     tp_sb_str(sb, "\n");
     tp_sb_indent(sb, depth);
     tp_sb_char(sb, '}');
@@ -1271,23 +1622,76 @@ static void tp_emit_root(tp_sb *sb, const tp_project *p, const tp_pack_settings 
 /* save                                                                     */
 /* ======================================================================== */
 
-tp_status tp_project_save_buffer(const tp_project *p, char **out, size_t *out_len, tp_error *err) {
+static tp_status project_save_buffer_mode(const tp_project *p, bool checkpoint,
+                                          char **out, size_t *out_len,
+                                          tp_error *err) {
     if (!p || !out || !out_len) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_project_save_buffer: NULL argument");
     }
     *out = NULL;
     *out_len = 0;
+    s_test_save_buffer_calls++;
     tp_pack_settings defaults;
     tp_pack_settings_defaults(&defaults);
     tp_sb sb = {0};
+    sb.absolute_sources = checkpoint;
+    sb.source_base_dir = p->source_base_dir ? p->source_base_dir : p->project_dir;
     tp_emit_root(&sb, p, &defaults);
-    if (sb.oom) {
+    if (sb.oom || sb.too_large) {
         free(sb.buf);
-        return tp_error_set(err, TP_STATUS_OOM, "tp_project_save_buffer: out of memory building JSON");
+        return tp_error_set(err, sb.oom ? TP_STATUS_OOM : TP_STATUS_OUT_OF_BOUNDS,
+                            sb.oom ? "tp_project_save_buffer: out of memory building JSON"
+                                   : "tp_project_save_buffer: serialized size overflow");
     }
     *out = sb.buf;
     *out_len = sb.len;
     return TP_STATUS_OK;
+}
+
+tp_status tp_project_save_buffer(const tp_project *p, char **out,
+                                 size_t *out_len, tp_error *err) {
+    return project_save_buffer_mode(p, false, out, out_len, err);
+}
+
+tp_status tp_project_checkpoint_save_buffer(const tp_project *p, char **out,
+                                            size_t *out_len, tp_error *err) {
+    return project_save_buffer_mode(p, true, out, out_len, err);
+}
+
+static tp_status project_serialized_size_bounded_mode(
+    const tp_project *p, bool checkpoint, size_t limit, size_t *out_len,
+    tp_error *err) {
+    s_test_size_query_calls++;
+    if (!p || !out_len) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "tp_project_serialized_size_bounded: NULL argument");
+    }
+    *out_len = 0U;
+    tp_pack_settings defaults;
+    tp_pack_settings_defaults(&defaults);
+    tp_sb sb = {0};
+    sb.limit = limit;
+    sb.count_only = true;
+    sb.absolute_sources = checkpoint;
+    sb.source_base_dir = p->source_base_dir ? p->source_base_dir : p->project_dir;
+    tp_emit_root(&sb, p, &defaults);
+    if (sb.too_large) {
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                            "serialized project exceeds the %zu-byte checkpoint limit",
+                            limit);
+    }
+    *out_len = sb.len;
+    return TP_STATUS_OK;
+}
+
+tp_status tp_project_serialized_size_bounded(const tp_project *p, size_t limit,
+                                             size_t *out_len, tp_error *err) {
+    return project_serialized_size_bounded_mode(p, false, limit, out_len, err);
+}
+
+tp_status tp_project_checkpoint_serialized_size_bounded(
+    const tp_project *p, size_t limit, size_t *out_len, tp_error *err) {
+    return project_serialized_size_bounded_mode(p, true, limit, out_len, err);
 }
 
 typedef enum tp_temp_open_result {
@@ -1296,7 +1700,7 @@ typedef enum tp_temp_open_result {
     TP_TEMP_OPEN_FAILED,
 } tp_temp_open_result;
 
-static bool s_test_fail_next_temp_create;
+static _Thread_local bool s_test_fail_next_temp_create;
 static bool s_test_save_max_bytes_armed;
 static size_t s_test_save_max_bytes;
 
@@ -1411,6 +1815,20 @@ static tp_status tp_project_save_stage(tp_project *p, const char *path, tp_id128
                 if (st != TP_STATUS_OK) {
                     return tp_error_set(err, st, "tp_project_save: cannot relativize %s", norm);
                 }
+            } else if (p->source_base_dir || p->project_dir) {
+                char resolved[TP_PATH_MAX];
+                st = tp_project_resolve_source_path(p, norm, resolved,
+                                                    sizeof resolved);
+                if (st != TP_STATUS_OK) {
+                    return tp_error_set(err, st,
+                                        "tp_project_save: cannot resolve %s", norm);
+                }
+                st = tp_relativize(resolved, new_dir, rel, sizeof rel);
+                if (st != TP_STATUS_OK) {
+                    return tp_error_set(err, st,
+                                        "tp_project_save: cannot relativize %s",
+                                        resolved);
+                }
             } else if ((size_t)snprintf(rel, sizeof rel, "%s", norm) >= sizeof rel) {
                 return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "tp_project_save: source path too long");
             }
@@ -1423,7 +1841,15 @@ static tp_status tp_project_save_stage(tp_project *p, const char *path, tp_id128
         }
     }
 
-    /* Update the in-memory project dir (Save / Save-As). */
+    if (!p->source_base_dir) {
+        p->source_base_dir = tp_strdup(new_dir);
+        if (!p->source_base_dir) {
+            return tp_error_set(err, TP_STATUS_OOM,
+                                "tp_project_save: out of memory");
+        }
+    }
+
+    /* Update the staged project dir (Save / Save-As). */
     char *dir_copy = tp_strdup(new_dir);
     if (!dir_copy) {
         return tp_error_set(err, TP_STATUS_OOM, "tp_project_save: out of memory");
@@ -1528,19 +1954,15 @@ static tp_status tp_project_save_stage(tp_project *p, const char *path, tp_id128
     return TP_STATUS_OK;
 }
 
-/* A save normalizes only project_dir and source path spellings. Apply those successful staged
- * mutations without replacing the outer project/atlas arrays, so existing live GUI pointers keep the
- * same lifetime contract. No allocation can fail here: ownership moves from the already-saved clone. */
-static void tp_project_adopt_saved_paths(tp_project *dst, tp_project *stage) {
+/* The staged clone owns serialization-only path normalization. Publish the new
+ * project-file directory while preserving an established live source base. */
+static void tp_project_adopt_saved_dir(tp_project *dst, tp_project *stage) {
     free(dst->project_dir);
     dst->project_dir = stage->project_dir;
     stage->project_dir = NULL;
-    for (int ai = 0; ai < dst->atlas_count; ai++) {
-        for (int si = 0; si < dst->atlases[ai].source_count; si++) {
-            free(dst->atlases[ai].sources[si].path);
-            dst->atlases[ai].sources[si].path = stage->atlases[ai].sources[si].path;
-            stage->atlases[ai].sources[si].path = NULL;
-        }
+    if (!dst->source_base_dir) {
+        dst->source_base_dir = stage->source_base_dir;
+        stage->source_base_dir = NULL;
     }
 }
 
@@ -1558,7 +1980,7 @@ static tp_status tp_project_save_staged(tp_project *p, const char *path, tp_id12
     }
     tp_status st = tp_project_save_stage(stage, path, out_fingerprint, expected_fingerprint, err);
     if (st == TP_STATUS_OK) {
-        tp_project_adopt_saved_paths(p, stage);
+        tp_project_adopt_saved_dir(p, stage);
     }
     tp_project_destroy(stage);
     return st;
@@ -1662,23 +2084,6 @@ static tp_status tp_load_id(const cJSON *o, const char *key, tp_id_kind expect_k
 /* Appends a fresh all-default sprite record (NO name-dedupe) and returns it, or NULL
  * on OOM. The v4 migrated-record path uses this because identity is (source, key), so
  * two records must never collapse just because their export-key bridges collide. */
-static tp_project_sprite *sprite_push_default(tp_project_atlas *a) {
-    if (!tp_grow((void **)&a->sprites, &a->sprite_cap, a->sprite_count + 1, sizeof(tp_project_sprite))) {
-        return NULL;
-    }
-    tp_project_sprite *s = &a->sprites[a->sprite_count];
-    memset(s, 0, sizeof *s);
-    s->origin_x = TP_PROJECT_ORIGIN_DEFAULT;
-    s->origin_y = TP_PROJECT_ORIGIN_DEFAULT;
-    s->ov_shape = TP_PROJECT_OV_INHERIT;
-    s->ov_allow_rotate = TP_PROJECT_OV_INHERIT;
-    s->ov_max_vertices = TP_PROJECT_OV_INHERIT;
-    s->ov_margin = TP_PROJECT_OV_INHERIT;
-    s->ov_extrude = TP_PROJECT_OV_INHERIT;
-    a->sprite_count++;
-    return s;
-}
-
 /* Load-time finder for a record still in PENDING {name} form (no stored {source,key})
  * whose name bridge matches. v4 record loading dedups a pending record ONLY against
  * other PENDING records -- it never merges a pending record into a MIGRATED one (or vice
@@ -1687,7 +2092,7 @@ static tp_project_sprite *sprite_push_default(tp_project_atlas *a) {
  * array order, instead of merge-or-shadow by element position. (Two legitimately distinct
  * migrated records -- different source or key -- also always coexist; validate flags a
  * true (source,key) duplicate. Two pending records with the same name still merge, as in
- * v3.) tp_project_atlas_add_sprite is unchanged -- it stays the mutate/rename dedup path. */
+ * v3.) Canonical mutation never uses this bridge; only pending migration does. */
 static tp_project_sprite *find_pending_sprite_by_name(tp_project_atlas *a, const char *name) {
     for (int i = 0; i < a->sprite_count; i++) {
         tp_project_sprite *s = &a->sprites[i];
@@ -1722,8 +2127,7 @@ static tp_status tp_load_sprite(tp_project_atlas *a, const cJSON *js, tp_error *
     const bool migrated = !tp_id128_is_nil(source_ref) && keyj != NULL;
     tp_project_sprite *s = NULL;
     if (migrated) {
-        /* Canonical (source, key). The `name` bridge is derived = strip_ext(key), so
-         * the name-based pack/export path resolves it with no disk scan. */
+        /* Canonical (source, key). Derive the display bridge without a disk scan. */
         char bridge[TP_SRCKEY_MAX];
         tp_sprite_export_key(keyj->valuestring, bridge, sizeof bridge);
         s = sprite_push_default(a);
@@ -2298,7 +2702,8 @@ tp_status tp_project_load_with_fingerprint(const char *path, tp_project **out, t
         return tp_error_set(err, status, "tp_project_load: path too long: %s", path);
     }
     (*out)->project_dir = tp_strdup(dir);
-    if (!(*out)->project_dir) {
+    (*out)->source_base_dir = tp_strdup(dir);
+    if (!(*out)->project_dir || !(*out)->source_base_dir) {
         tp_project_destroy(*out);
         *out = NULL;
         return tp_error_set(err, TP_STATUS_OOM, "tp_project_load: out of memory");
@@ -2314,6 +2719,7 @@ tp_status tp_project_load(const char *path, tp_project **out, tp_error *err) {
 }
 
 tp_status tp_project_load_buffer(const char *buf, size_t len, tp_project **out, tp_error *err) {
+    s_test_load_buffer_calls++;
     if (out) {
         *out = NULL;
     }
@@ -2342,6 +2748,25 @@ tp_status tp_project_resolve_path(const tp_project *p, const char *rel, char *ou
         return TP_STATUS_INVALID_ARGUMENT; /* no base for a relative path */
     }
     if ((size_t)snprintf(out_abs, cap, "%s/%s", p->project_dir, rel) >= cap) {
+        return TP_STATUS_OUT_OF_BOUNDS;
+    }
+    tp_normalize_slashes(out_abs);
+    return TP_STATUS_OK;
+}
+
+tp_status tp_project_resolve_source_path(const tp_project *p, const char *rel,
+                                         char *out_abs, size_t cap) {
+    if (!p || !rel || !out_abs || cap == 0U) {
+        return TP_STATUS_INVALID_ARGUMENT;
+    }
+    if (tp_path_is_absolute(rel)) {
+        return tp_project_resolve_path(p, rel, out_abs, cap);
+    }
+    const char *base = p->source_base_dir ? p->source_base_dir : p->project_dir;
+    if (!base) {
+        return TP_STATUS_INVALID_ARGUMENT;
+    }
+    if ((size_t)snprintf(out_abs, cap, "%s/%s", base, rel) >= cap) {
         return TP_STATUS_OUT_OF_BOUNDS;
     }
     tp_normalize_slashes(out_abs);

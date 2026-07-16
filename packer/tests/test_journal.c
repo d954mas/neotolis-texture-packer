@@ -19,6 +19,7 @@
  *   - a real on-disk file journal round-trips (honest durability).
  */
 
+#include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -29,13 +30,38 @@
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_project_migrate.h" /* tp_project_promote_ids */
 #include "tp_core/tp_transaction.h"
+#include "tp_diff_internal.h"    /* M3 bounded-history test seam + byte accounting */
+#include "tp_idset_internal.h"   /* M3 collision/probe bound for retained ids */
 #include "tp_journal_internal.h" /* format constants + memory-io fault seams */
+#include "tp_op_internal.h"      /* exact recovery replay operation count */
+#include "tp_project_internal.h" /* checkpoint materialization counters */
+#include "tp_txn_internal.h"     /* clone fault seam + replay count preflight */
 #include "unity.h"
 
 static const char *g_dir = NULL; /* scratch dir for the on-disk file journal test */
 
-void setUp(void) {}
-void tearDown(void) {}
+void setUp(void) {
+    tp_journal__test_set_record_limit(0U);
+    tp_journal__test_set_file_limit(0U);
+    tp_project__test_serialization_stats_reset();
+}
+void tearDown(void) {
+    tp_journal__test_set_record_limit(0U);
+    tp_journal__test_set_file_limit(0U);
+    tp_project__test_serialization_stats_reset();
+    tp_history__test_set_limits(0, 0U, 0U);
+    tp_idset__test_force_bucket(-1);
+    (void)tp_idset__test_probe_take();
+    (void)tp_op__test_apply_count_take();
+}
+
+static size_t checkpoint_store_bytes(size_t store_base, size_t snapshot_bytes,
+                                     int retained_ids) {
+    return store_base + (size_t)TP_JRN_SYNC_FIELD +
+           (size_t)TP_JRN_LEN_FIELD + (size_t)TP_JRN_CKPT_FIXED +
+           (size_t)retained_ids * (size_t)TP_JRN_IDLEN + snapshot_bytes +
+           (size_t)TP_JRN_CRC_FIELD;
+}
 
 /* ---- fixtures (mirror test_transaction.c) -------------------------------- */
 
@@ -65,7 +91,9 @@ static char *serialize(const tp_project *p) {
     char *buf = NULL;
     size_t len = 0;
     tp_error err;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_save_buffer(p, &buf, &len, &err));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_checkpoint_save_buffer(p, &buf, &len, &err));
     return buf;
 }
 
@@ -75,6 +103,281 @@ static tp_id128 key_of(uint8_t b) {
         x.bytes[i] = b;
     }
     return x;
+}
+
+static void retention_id(unsigned value, char out[33]) {
+    (void)snprintf(out, 33U, "%032x", value);
+}
+
+static uint8_t *snapshot_io(tp_journal_io io, size_t *len);
+static tp_journal_io io_from_bytes(const uint8_t *bytes, size_t len);
+static size_t record_offset(const uint8_t *buf, size_t len, int idx);
+
+static bool span_contains(const char *span, size_t span_len, const char *text) {
+    const size_t text_len = strlen(text);
+    if (!span || text_len > span_len) {
+        return false;
+    }
+    for (size_t i = 0U; i <= span_len - text_len; ++i) {
+        if (memcmp(span + i, text, text_len) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void test_idset_backward_shift_eviction_has_linear_probe_bound(void) {
+    tp_idset ids = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_idset_reserve(&ids));
+    tp_idset__test_force_bucket(TP_IDSET_TABLE_CAP - 17); /* cluster wraps index 0 */
+    char id[TP_IDSET_IDLEN + 1];
+    for (unsigned i = 0U; i < (unsigned)TP_TXN_RETAINED_ID_CAP; ++i) {
+        retention_id(i + 1U, id);
+        tp_idset_put_reserved(&ids, id);
+    }
+    TEST_ASSERT_EQUAL_INT(TP_TXN_RETAINED_ID_CAP, tp_idset_count(&ids));
+
+    char newest[TP_IDSET_IDLEN + 1];
+    retention_id((unsigned)TP_TXN_RETAINED_ID_CAP + 1U, newest);
+    tp_idset__test_probe_reset();
+    tp_idset_put_reserved(&ids, newest); /* full-window FIFO eviction */
+    TEST_ASSERT_TRUE(tp_idset_contains(&ids, newest));
+    const size_t probes = tp_idset__test_probe_take();
+    TEST_ASSERT_LESS_OR_EQUAL_size_t((size_t)TP_IDSET_TABLE_CAP * 4U, probes);
+
+    char oldest[TP_IDSET_IDLEN + 1];
+    char successor[TP_IDSET_IDLEN + 1];
+    char at[TP_IDSET_IDLEN + 1];
+    retention_id(1U, oldest);
+    retention_id(2U, successor);
+    TEST_ASSERT_FALSE(tp_idset_contains(&ids, oldest));
+    TEST_ASSERT_TRUE(tp_idset_contains(&ids, successor));
+    TEST_ASSERT_TRUE(tp_idset_format_at(&ids, 0, at));
+    TEST_ASSERT_EQUAL_STRING(successor, at);
+    TEST_ASSERT_TRUE(tp_idset_format_at(&ids, TP_TXN_RETAINED_ID_CAP - 1, at));
+    TEST_ASSERT_EQUAL_STRING(newest, at);
+    tp_idset_dispose(&ids);
+}
+
+void test_retained_id_eviction_is_durable_and_post_append(void) {
+    tp_journal_io io = tp_journal_io_memory();
+    TEST_ASSERT_NOT_NULL(io.ctx);
+    tp_journal *journal = tp_journal_create(io, key_of(0x7c));
+    TEST_ASSERT_NOT_NULL(journal);
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_init_checkpoint(journal, NULL, 0U, 0, &err));
+
+    char id[33];
+    for (unsigned i = 0U; i < (unsigned)TP_TXN_RETAINED_ID_CAP; ++i) {
+        retention_id(i + 1U, id);
+        TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                              tp_journal_append_txn(journal, id, (int64_t)i + 1, NULL, 0U, &err));
+    }
+    TEST_ASSERT_EQUAL_INT(TP_TXN_RETAINED_ID_CAP, tp_journal_id_count(journal));
+
+    char oldest[33];
+    char successor[33];
+    char newest[33];
+    retention_id(1U, oldest);
+    retention_id(2U, successor);
+    retention_id((unsigned)TP_TXN_RETAINED_ID_CAP + 1U, newest);
+
+    tp_journal_io_memory__fail_next_writes(io, 1);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED,
+                          tp_journal_append_txn(journal, newest, TP_TXN_RETAINED_ID_CAP + 1,
+                                                NULL, 0U, &err));
+    TEST_ASSERT_TRUE(tp_journal_contains(journal, oldest));
+    TEST_ASSERT_FALSE(tp_journal_contains(journal, newest));
+
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_journal_append_txn(journal, newest, TP_TXN_RETAINED_ID_CAP + 1,
+                                                NULL, 0U, &err));
+    TEST_ASSERT_EQUAL_INT(TP_TXN_RETAINED_ID_CAP, tp_journal_id_count(journal));
+    TEST_ASSERT_FALSE(tp_journal_contains(journal, oldest));
+    TEST_ASSERT_TRUE(tp_journal_contains(journal, successor));
+    TEST_ASSERT_TRUE(tp_journal_contains(journal, newest));
+
+    /* Rebuild from durable record order and prove the same deterministic window. */
+    tp_journal_recovery recovery;
+    memset(&recovery, 0, sizeof recovery);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_recover(journal, &recovery, &err));
+    TEST_ASSERT_EQUAL_INT(TP_TXN_RETAINED_ID_CAP, tp_journal_id_count(journal));
+    TEST_ASSERT_FALSE(tp_journal_contains(journal, oldest));
+    TEST_ASSERT_TRUE(tp_journal_contains(journal, successor));
+    TEST_ASSERT_TRUE(tp_journal_contains(journal, newest));
+    tp_journal_recovery_free(&recovery);
+    tp_journal_destroy(journal);
+}
+
+void test_recovery_retained_ids_publish_only_after_record_acceptance(void) {
+    tp_id128 key = key_of(0x7e);
+    tp_journal_io io = tp_journal_io_memory();
+    TEST_ASSERT_NOT_NULL(io.ctx);
+    tp_journal *journal = tp_journal_create(io, key);
+    TEST_ASSERT_NOT_NULL(journal);
+    tp_error err = {0};
+    static const uint8_t snapshot[] = {'{', '}'};
+    const char *id_a = "7e000000000000000000000000000001";
+    const char *id_b = "7e000000000000000000000000000002";
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_journal_init_checkpoint(journal, snapshot, sizeof snapshot, 0, &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_append_txn(journal, id_a, 1, NULL, 0U, &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_append_txn(journal, id_b, 2, NULL, 0U, &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_journal_init_checkpoint(journal, snapshot, sizeof snapshot, 3, &err));
+
+    size_t bytes_len = 0U;
+    uint8_t *bytes = snapshot_io(io, &bytes_len);
+    tp_journal_destroy(journal);
+    const size_t bad_record = record_offset(bytes, bytes_len, 3);
+    TEST_ASSERT_NOT_EQUAL(SIZE_MAX, bad_record);
+    const size_t payload = bad_record + (size_t)TP_JRN_SYNC_FIELD + (size_t)TP_JRN_LEN_FIELD;
+    const uint32_t payload_len = tp_jrn_get_u32(bytes + bad_record + (size_t)TP_JRN_SYNC_FIELD);
+    const size_t second_id = payload + (size_t)TP_JRN_CKPT_FIXED + (size_t)TP_JRN_IDLEN;
+    bytes[second_id] = 'z'; /* semantic corruption, then repair the frame CRC */
+    const size_t crc_span = (size_t)TP_JRN_SYNC_FIELD + (size_t)TP_JRN_LEN_FIELD + (size_t)payload_len;
+    tp_jrn_put_u32(bytes + bad_record + crc_span, tp_jrn_crc32(0, bytes + bad_record, crc_span));
+
+    journal = tp_journal_create(io_from_bytes(bytes, bytes_len), key);
+    free(bytes);
+    TEST_ASSERT_NOT_NULL(journal);
+    tp_journal_recovery recovery;
+    memset(&recovery, 0, sizeof recovery);
+    memset(&err, 0, sizeof err);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_recover(journal, &recovery, &err));
+    TEST_ASSERT_EQUAL_INT(TP_JOURNAL_RECOVERY_CORRUPT, recovery.status);
+    TEST_ASSERT_TRUE(tp_journal_contains(journal, id_a));
+    TEST_ASSERT_TRUE(tp_journal_contains(journal, id_b));
+    tp_journal_recovery_free(&recovery);
+    tp_journal_destroy(journal);
+}
+
+void test_journal_rejects_null_positive_payload_before_mutation(void) {
+    tp_journal_io io = tp_journal_io_memory();
+    TEST_ASSERT_NOT_NULL(io.ctx);
+    tp_journal *journal = tp_journal_create(io, key_of(0x7f));
+    TEST_ASSERT_NOT_NULL(journal);
+    tp_error err = {0};
+
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_journal_init_checkpoint(journal, NULL, 1U, 0, &err));
+    TEST_ASSERT_EQUAL_INT64(0, io.length(io.ctx));
+
+    static const uint8_t snapshot[] = {'o', 'k'};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_journal_init_checkpoint(journal, snapshot, sizeof snapshot, 0, &err));
+    const int64_t before = io.length(io.ctx);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_journal_append_txn(journal, "7f000000000000000000000000000001",
+                                                1, NULL, 1U, &err));
+    TEST_ASSERT_EQUAL_INT64(before, io.length(io.ctx));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_journal_compact(journal, NULL, 1U, 0, &err));
+    TEST_ASSERT_EQUAL_INT64(before, io.length(io.ctx));
+    tp_journal_destroy(journal);
+}
+
+void test_checkpoint_retained_id_count_limit_is_prepublication(void) {
+    const uint32_t id_count = (uint32_t)TP_TXN_RETAINED_ID_CAP + 1U;
+    const size_t payload_len = (size_t)TP_JRN_CKPT_FIXED + (size_t)id_count * (size_t)TP_JRN_IDLEN;
+    const size_t record_len = (size_t)TP_JRN_SYNC_FIELD + (size_t)TP_JRN_LEN_FIELD +
+                              payload_len + (size_t)TP_JRN_CRC_FIELD;
+    const size_t total_len = (size_t)TP_JRN_HEADER_LEN + record_len;
+    uint8_t *bytes = (uint8_t *)calloc(1U, total_len);
+    TEST_ASSERT_NOT_NULL(bytes);
+    const tp_id128 key = key_of(0x6d);
+    memcpy(bytes, tp_jrn_magic, TP_JRN_MAGIC_LEN);
+    tp_jrn_put_u32(bytes + TP_JRN_MAGIC_LEN, (uint32_t)TP_JOURNAL_FORMAT_VERSION);
+    memcpy(bytes + TP_JRN_KEY_OFF, key.bytes, 16U);
+
+    uint8_t *record = bytes + TP_JRN_HEADER_LEN;
+    tp_jrn_put_u32(record, (uint32_t)TP_JRN_SYNC_WORD);
+    tp_jrn_put_u32(record + TP_JRN_SYNC_FIELD, (uint32_t)payload_len);
+    uint8_t *payload = record + TP_JRN_SYNC_FIELD + TP_JRN_LEN_FIELD;
+    payload[0] = (uint8_t)TP_JRN_REC_CKPT;
+    tp_jrn_put_i64(payload + 1, 0);
+    tp_jrn_put_u32(payload + 9, id_count);
+    for (uint32_t i = 0U; i < id_count; ++i) {
+        char id[TP_JRN_IDLEN + 1];
+        (void)snprintf(id, sizeof id, "%032x", i + 1U);
+        memcpy(payload + TP_JRN_CKPT_FIXED + (size_t)i * TP_JRN_IDLEN, id, TP_JRN_IDLEN);
+    }
+    const size_t crc_span = (size_t)TP_JRN_SYNC_FIELD + (size_t)TP_JRN_LEN_FIELD + payload_len;
+    tp_jrn_put_u32(record + crc_span, tp_jrn_crc32(0, record, crc_span));
+
+    tp_journal_peek_result peek;
+    memset(&peek, 0, sizeof peek);
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_journal_peek(io_from_bytes(bytes, total_len), &peek, &err));
+
+    tp_journal *journal = tp_journal_create(io_from_bytes(bytes, total_len), key);
+    free(bytes);
+    TEST_ASSERT_NOT_NULL(journal);
+    tp_journal_recovery recovery;
+    memset(&recovery, 0, sizeof recovery);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_recover(journal, &recovery, &err));
+    TEST_ASSERT_EQUAL_INT(TP_JOURNAL_RECOVERY_CORRUPT, recovery.status);
+    TEST_ASSERT_EQUAL_INT(recovery.status, peek.status);
+    TEST_ASSERT_EQUAL_INT(recovery.records_recovered, peek.record_count);
+    TEST_ASSERT_EQUAL_INT(0, tp_journal_id_count(journal));
+    tp_journal_peek_free(&peek);
+    tp_journal_recovery_free(&recovery);
+    tp_journal_destroy(journal);
+}
+
+void test_replay_window_limit_is_prewrite_and_checkpoint_resets_it(void) {
+    tp_journal_io io = tp_journal_io_memory();
+    TEST_ASSERT_NOT_NULL(io.ctx);
+    tp_journal *journal = tp_journal_create(io, key_of(0x7d));
+    TEST_ASSERT_NOT_NULL(journal);
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_init_checkpoint(journal, NULL, 0U, 0, &err));
+
+    char id[33];
+    for (unsigned i = 0U; i < (unsigned)TP_JOURNAL_MAX_REPLAY_RECORDS; ++i) {
+        retention_id(i + 1U, id);
+        TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                              tp_journal_append_txn(journal, id, (int64_t)i + 1,
+                                                    NULL, 0U, &err));
+    }
+    /* Metadata is outside the replay window and must not reset its count. */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_journal_set_metadata(journal, 123, "", "window-full", &err));
+    const int64_t full_length = io.length(io.ctx);
+    TEST_ASSERT_GREATER_THAN_INT64(0, full_length);
+    tp_journal_recovery at_limit;
+    memset(&at_limit, 0, sizeof at_limit);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_recover(journal, &at_limit, &err));
+    TEST_ASSERT_EQUAL_UINT64(TP_JOURNAL_MAX_REPLAY_RECORDS, at_limit.op_count);
+    TEST_ASSERT_TRUE(tp_journal__test_recovery_ops_borrow_raw(&at_limit));
+    tp_journal_recovery_free(&at_limit);
+    retention_id((unsigned)TP_JOURNAL_MAX_REPLAY_RECORDS + 1U, id);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED,
+                          tp_journal_append_txn(journal, id,
+                                                (int64_t)TP_JOURNAL_MAX_REPLAY_RECORDS + 1,
+                                                NULL, 0U, &err));
+    TEST_ASSERT_EQUAL_INT64(full_length, io.length(io.ctx));
+    TEST_ASSERT_NOT_NULL(strstr(err.msg, "replay-window"));
+
+    /* A retained retry remains an idempotent no-op even when the window is full. */
+    retention_id((unsigned)TP_JOURNAL_MAX_REPLAY_RECORDS, id);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_journal_append_txn(journal, id,
+                                                (int64_t)TP_JOURNAL_MAX_REPLAY_RECORDS,
+                                                NULL, 0U, &err));
+    TEST_ASSERT_EQUAL_INT64(full_length, io.length(io.ctx));
+
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_journal_init_checkpoint(journal, NULL, 0U,
+                                                     (int64_t)TP_JOURNAL_MAX_REPLAY_RECORDS,
+                                                     &err));
+    retention_id((unsigned)TP_JOURNAL_MAX_REPLAY_RECORDS + 1U, id);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_journal_append_txn(journal, id,
+                                                (int64_t)TP_JOURNAL_MAX_REPLAY_RECORDS + 1,
+                                                NULL, 0U, &err));
+    tp_journal_destroy(journal);
 }
 
 /* Apply one atlas.rename as a whole transaction; returns the apply status. */
@@ -97,6 +400,54 @@ static tp_status commit_rename(tp_model *m, const char *id_hex, int64_t expected
     tp_status st = tp_model_apply(m, &req, &res, &err);
     tp_txn_result_free(&res);
     return st;
+}
+
+static char *dense_rename_payload(tp_id128 atlas_id) {
+    tp_operation *operations =
+        (tp_operation *)calloc((size_t)TP_TXN_MAX_OPS, sizeof *operations);
+    if (!operations) {
+        return NULL;
+    }
+    for (int i = 0; i < TP_TXN_MAX_OPS; ++i) {
+        operations[i].kind = TP_OP_ATLAS_RENAME;
+        operations[i].atlas_id = atlas_id;
+        operations[i].u.atlas_rename.name = (char *)((i & 1) == 0 ? "a" : "b");
+    }
+    tp_txn_request request;
+    memset(&request, 0, sizeof request);
+    request.schema = TP_TXN_SCHEMA;
+    (void)snprintf(request.id_hex, sizeof request.id_hex, "%s",
+                   "d1000000000000000000000000000001");
+    request.expected_revision = 0;
+    request.ops = operations;
+    request.op_count = TP_TXN_MAX_OPS;
+    char *payload = tp_txn_request_encode(&request);
+    free(operations); /* operation strings are borrowed literals */
+    return payload;
+}
+
+static char *dense_rename_payload_with_duplicate_operations(tp_id128 atlas_id) {
+    char *canonical = dense_rename_payload(atlas_id);
+    if (!canonical) {
+        return NULL;
+    }
+    char *array_end = strrchr(canonical, ']');
+    static const char duplicate[] = ",\"operations\":[]";
+    if (!array_end) {
+        free(canonical);
+        return NULL;
+    }
+    const size_t prefix = (size_t)(array_end - canonical) + 1U;
+    const size_t suffix = strlen(array_end + 1);
+    char *payload = (char *)malloc(prefix + sizeof duplicate - 1U + suffix + 1U);
+    if (payload) {
+        memcpy(payload, canonical, prefix);
+        memcpy(payload + prefix, duplicate, sizeof duplicate - 1U);
+        memcpy(payload + prefix + sizeof duplicate - 1U, array_end + 1,
+               suffix + 1U);
+    }
+    free(canonical);
+    return payload;
 }
 
 /* Commit a PARTIAL target.set (only out_path) on atlas[0]'s first target: exercises a mask-carrying op
@@ -159,6 +510,743 @@ static tp_journal_io io_from_bytes(const uint8_t *bytes, size_t len) {
         TEST_ASSERT_EQUAL_INT64((int64_t)len, io.write(io.ctx, bytes, len));
     }
     return io;
+}
+
+void test_total_record_limit_bounds_all_frame_types_before_write_and_recovery(void) {
+    tp_journal__test_set_record_limit(3U);
+    const tp_id128 key = key_of(0x79);
+    tp_journal_io io = tp_journal_io_memory();
+    TEST_ASSERT_NOT_NULL(io.ctx);
+    tp_journal *journal = tp_journal_create(io, key);
+    TEST_ASSERT_NOT_NULL(journal);
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_journal_init_checkpoint(journal, NULL, 0U, 0, &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_journal_set_metadata(journal, 1, "", "one", &err));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_journal_append_txn(journal, "79000000000000000000000000000001",
+                              1, NULL, 0U, &err));
+    const int64_t at_limit = io.length(io.ctx);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_journal_set_metadata(journal, 2, "", "must-not-write", &err));
+    TEST_ASSERT_EQUAL_INT64(at_limit, io.length(io.ctx));
+    TEST_ASSERT_NOT_NULL(strstr(err.msg, "total record limit"));
+
+    size_t bytes_len = 0U;
+    uint8_t *bytes = snapshot_io(io, &bytes_len);
+    tp_journal_destroy(journal);
+
+    tp_journal__test_set_record_limit(2U);
+    journal = tp_journal_create(io_from_bytes(bytes, bytes_len), key);
+    TEST_ASSERT_NOT_NULL(journal);
+    tp_journal_recovery recovery = {0};
+    memset(&err, 0, sizeof err);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS,
+                          tp_journal_recover(journal, &recovery, &err));
+    TEST_ASSERT_EQUAL_size_t(0U, recovery.op_count);
+    TEST_ASSERT_NULL(recovery._raw_record_buffer);
+    TEST_ASSERT_NOT_NULL(strstr(err.msg, "total record limit"));
+    tp_journal_recovery_free(&recovery);
+    tp_journal_destroy(journal);
+    free(bytes);
+}
+
+void test_total_record_admission_precedes_model_staging_and_metadata_cache_mutation(void) {
+    tp_error err = {0};
+
+    /* A model commit must reject an exhausted total-frame slot before canonical
+     * encoding or project cloning. The clone allocation counter is the observable
+     * staging boundary: zero means no mutable candidate was built. */
+    tp_journal_io model_io;
+    tp_model *model = model_with_journal(key_of(0x78), &model_io);
+    tp_journal__test_set_record_limit(1U); /* the attach checkpoint owns the only slot */
+    tp_project__test_set_clone_alloc_fail(-1);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        commit_rename(model, "78000000000000000000000000000001", 0,
+                      "must-not-stage"));
+    TEST_ASSERT_EQUAL_INT(0, tp_project__test_clone_alloc_count());
+    TEST_ASSERT_EQUAL_size_t(0U, tp_project__test_clone_allocation_bytes());
+    TEST_ASSERT_EQUAL_INT64(0, tp_model_revision(model));
+    tp_model_destroy(model);
+
+    tp_journal__test_set_record_limit(2U);
+    model = model_with_journal(key_of(0x76), &model_io);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_enable_history(model));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        commit_rename(model, "76000000000000000000000000000001", 0,
+                      "undo-candidate"));
+    tp_project__test_set_clone_alloc_fail(-1);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS, tp_model_undo(model, &err));
+    TEST_ASSERT_EQUAL_INT(0, tp_project__test_clone_alloc_count());
+    TEST_ASSERT_EQUAL_size_t(0U, tp_project__test_clone_allocation_bytes());
+    TEST_ASSERT_EQUAL_INT64(1, tp_model_revision(model));
+    tp_model_destroy(model);
+
+    /* Rejected metadata must not replace the write-side cache. After restoring
+     * the limit, compaction re-emits the last durable metadata ("before"). */
+    tp_journal__test_set_record_limit(2U);
+    tp_journal_io io = tp_journal_io_memory();
+    TEST_ASSERT_NOT_NULL(io.ctx);
+    const tp_id128 key = key_of(0x77);
+    tp_journal *journal = tp_journal_create(io, key);
+    TEST_ASSERT_NOT_NULL(journal);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_journal_init_checkpoint(journal, NULL, 0U, 0, &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_journal_set_metadata(journal, 1, "/before", "before", &err));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_journal_set_metadata(journal, 2, "/after", "must-not-cache", &err));
+    tp_journal__test_set_record_limit(0U);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_journal_compact(journal, NULL, 0U, 0, &err));
+    size_t bytes_len = 0U;
+    uint8_t *bytes = snapshot_io(io, &bytes_len);
+    tp_journal_destroy(journal);
+
+    tp_journal_peek_result peek = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_journal_peek(io_from_bytes(bytes, bytes_len), &peek, &err));
+    TEST_ASSERT_TRUE(peek.has_meta);
+    TEST_ASSERT_EQUAL_STRING("/before", peek.meta.path);
+    TEST_ASSERT_EQUAL_STRING("before", peek.meta.name);
+    tp_journal_peek_free(&peek);
+    free(bytes);
+}
+
+void test_file_byte_admission_precedes_transaction_staging_and_metadata_cache_mutation(void) {
+    tp_error err = {0};
+
+    tp_journal_io model_io;
+    tp_model *model = model_with_journal(key_of(0x75), &model_io);
+    const int64_t checkpoint_bytes = model_io.length(model_io.ctx);
+    TEST_ASSERT_GREATER_THAN_INT64(0, checkpoint_bytes);
+
+    tp_operation op = {0};
+    op.kind = TP_OP_ATLAS_RENAME;
+    op.atlas_id = tp_model_project(model)->atlases[0].id;
+    op.u.atlas_rename.name = "must-not-stage";
+    tp_txn_request req = {0};
+    req.schema = TP_TXN_SCHEMA;
+    (void)snprintf(req.id_hex, sizeof req.id_hex, "%s",
+                   "75000000000000000000000000000001");
+    req.expected_revision = 0;
+    req.ops = &op;
+    req.op_count = 1;
+    char *canonical = tp_txn_request_encode(&req);
+    TEST_ASSERT_NOT_NULL(canonical);
+    const size_t request_bytes = strlen(canonical);
+    free(canonical);
+    const size_t frame_bytes = (size_t)TP_JRN_SYNC_FIELD +
+                               (size_t)TP_JRN_LEN_FIELD +
+                               (size_t)TP_JRN_TXN_FIXED + request_bytes +
+                               (size_t)TP_JRN_CRC_FIELD;
+
+    /* One byte short of the exact canonical frame: reject after an exact
+     * count-only pass, before the allocating encoder or any model staging. */
+    tp_journal__test_set_file_limit((size_t)checkpoint_bytes + frame_bytes - 1U);
+    tp_project__test_set_clone_alloc_fail(-1);
+    tp_txn__test_encode_stats_reset();
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_JOURNAL_FAILED,
+        commit_rename(model, "75000000000000000000000000000001", 0,
+                      "must-not-stage"));
+    TEST_ASSERT_EQUAL_size_t(0U, tp_txn__test_last_measure_allocations());
+    TEST_ASSERT_EQUAL_size_t(0U, tp_txn__test_request_encode_calls());
+    TEST_ASSERT_EQUAL_INT(0, tp_project__test_clone_alloc_count());
+    TEST_ASSERT_EQUAL_size_t(0U, tp_project__test_clone_allocation_bytes());
+    TEST_ASSERT_EQUAL_INT64(0, tp_model_revision(model));
+
+    /* The exact boundary is admitted, proving the preflight is not a
+     * conservative estimate that rejects a valid transaction. */
+    tp_journal__test_set_file_limit((size_t)checkpoint_bytes + frame_bytes);
+    tp_txn__test_encode_stats_reset();
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        commit_rename(model, "75000000000000000000000000000001", 0,
+                      "must-not-stage"));
+    TEST_ASSERT_EQUAL_size_t(0U, tp_txn__test_last_measure_allocations());
+    TEST_ASSERT_EQUAL_size_t(1U, tp_txn__test_request_encode_calls());
+    TEST_ASSERT_EQUAL_INT64(1, tp_model_revision(model));
+    tp_model_destroy(model);
+
+    tp_journal__test_set_file_limit(0U);
+    tp_journal_io io = tp_journal_io_memory();
+    TEST_ASSERT_NOT_NULL(io.ctx);
+    const tp_id128 key = key_of(0x74);
+    tp_journal *journal = tp_journal_create(io, key);
+    TEST_ASSERT_NOT_NULL(journal);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_journal_init_checkpoint(journal, NULL, 0U, 0, &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_journal_set_metadata(journal, 1, "/before", "before", &err));
+    const int64_t metadata_bytes = io.length(io.ctx);
+    TEST_ASSERT_GREATER_THAN_INT64(0, metadata_bytes);
+    tp_journal__test_set_file_limit((size_t)metadata_bytes + 1U);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_JOURNAL_FAILED,
+        tp_journal_set_metadata(journal, 2, "/after", "must-not-cache", &err));
+
+    tp_journal__test_set_file_limit(0U);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_journal_compact(journal, NULL, 0U, 0, &err));
+    size_t bytes_len = 0U;
+    uint8_t *bytes = snapshot_io(io, &bytes_len);
+    tp_journal_destroy(journal);
+
+    tp_journal_peek_result peek = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_journal_peek(io_from_bytes(bytes, bytes_len), &peek, &err));
+    TEST_ASSERT_TRUE(peek.has_meta);
+    TEST_ASSERT_EQUAL_STRING("/before", peek.meta.path);
+    TEST_ASSERT_EQUAL_STRING("before", peek.meta.name);
+    tp_journal_peek_free(&peek);
+    free(bytes);
+}
+
+void test_checkpoint_byte_admission_precedes_attach_materialization_and_counts_ids(void) {
+    tp_model *model = tp_model_wrap(base_project());
+    TEST_ASSERT_NOT_NULL(model);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        commit_rename(model, "73000000000000000000000000000001", 0,
+                      "retained-before-attach"));
+
+    size_t snapshot_bytes = 0U;
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_checkpoint_serialized_size_bounded(
+            tp_model_project(model), SIZE_MAX, &snapshot_bytes, &err));
+    tp_journal_io io = tp_journal_io_memory();
+    TEST_ASSERT_NOT_NULL(io.ctx);
+    tp_journal *journal = tp_journal_create(io, key_of(0x73));
+    TEST_ASSERT_NOT_NULL(journal);
+    const size_t exact = checkpoint_store_bytes(
+        (size_t)TP_JRN_HEADER_LEN, snapshot_bytes, 1);
+
+    tp_journal__test_set_file_limit(exact - 1U);
+    tp_project__test_serialization_stats_reset();
+    tp_project__test_set_clone_alloc_fail(-1);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED,
+                          tp_model_attach_journal(model, journal, &err));
+    TEST_ASSERT_EQUAL_INT64(0, io.length(io.ctx));
+    TEST_ASSERT_EQUAL_size_t(0U, tp_project__test_save_buffer_calls());
+    TEST_ASSERT_EQUAL_size_t(0U, tp_project__test_serializer_allocations());
+    TEST_ASSERT_EQUAL_size_t(0U, tp_project__test_load_buffer_calls());
+    TEST_ASSERT_EQUAL_INT(0, tp_project__test_clone_alloc_count());
+
+    tp_journal__test_set_file_limit(exact);
+    tp_project__test_serialization_stats_reset();
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_model_attach_journal(model, journal, &err));
+    TEST_ASSERT_EQUAL_INT64((int64_t)exact, io.length(io.ctx));
+    TEST_ASSERT_EQUAL_size_t(1U, tp_project__test_save_buffer_calls());
+    TEST_ASSERT_GREATER_THAN_size_t(0U,
+                                    tp_project__test_serializer_allocations());
+    TEST_ASSERT_EQUAL_size_t(1U, tp_project__test_load_buffer_calls());
+    tp_model_destroy(model);
+}
+
+void test_checkpoint_pathological_length_rejects_before_write(void) {
+    tp_journal_io io = tp_journal_io_memory();
+    TEST_ASSERT_NOT_NULL(io.ctx);
+    tp_journal *journal = tp_journal_create(io, key_of(0x74));
+    TEST_ASSERT_NOT_NULL(journal);
+    tp_error err = {0};
+    const uint8_t sentinel = 0U;
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_JOURNAL_FAILED,
+        tp_journal_init_checkpoint(journal, &sentinel, SIZE_MAX, 0, &err));
+    TEST_ASSERT_EQUAL_INT64(0, io.length(io.ctx));
+    tp_journal_destroy(journal);
+}
+
+void test_compact_admits_checkpoint_and_cached_metadata_as_one_layout(void) {
+    tp_journal_io io = tp_journal_io_memory();
+    TEST_ASSERT_NOT_NULL(io.ctx);
+    tp_journal *journal = tp_journal_create(io, key_of(0x75));
+    TEST_ASSERT_NOT_NULL(journal);
+    tp_error err = {0};
+    const uint8_t old_snapshot[] = {'o', 'l', 'd'};
+    const uint8_t new_snapshot[] = {'n', 'e', 'w'};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_journal_init_checkpoint(journal, old_snapshot,
+                                   sizeof old_snapshot, 0, &err));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_journal_set_metadata(journal, 1700000075,
+                                "/saved/project.ntpacker", "project", &err));
+    const int64_t complete_before = io.length(io.ctx);
+    TEST_ASSERT_GREATER_THAN_INT64(0, complete_before);
+
+    const size_t checkpoint_only = checkpoint_store_bytes(
+        (size_t)TP_JRN_HEADER_LEN, sizeof new_snapshot, 0);
+    tp_journal__test_set_file_limit(checkpoint_only);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_JOURNAL_FAILED,
+        tp_journal_compact(journal, new_snapshot, sizeof new_snapshot, 1,
+                           &err));
+    TEST_ASSERT_EQUAL_INT64(complete_before, io.length(io.ctx));
+
+    tp_journal__test_set_file_limit(0U);
+    tp_journal__test_set_record_limit(1U);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_journal_compact(journal, new_snapshot, sizeof new_snapshot, 1,
+                           &err));
+    TEST_ASSERT_EQUAL_INT64(complete_before, io.length(io.ctx));
+
+    tp_journal__test_set_record_limit(2U);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_journal_compact(journal, new_snapshot, sizeof new_snapshot, 1,
+                           &err));
+    tp_journal_destroy(journal);
+}
+
+void test_checkpoint_byte_admission_precedes_compact_materialization(void) {
+    tp_journal_io io;
+    tp_model *model = model_with_journal(key_of(0x72), &io);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        commit_rename(model, "72000000000000000000000000000001", 0,
+                      "retained-before-compact"));
+    size_t snapshot_bytes = 0U;
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_checkpoint_serialized_size_bounded(
+            tp_model_project(model), SIZE_MAX, &snapshot_bytes, &err));
+    const size_t exact = checkpoint_store_bytes(
+        (size_t)TP_JRN_HEADER_LEN, snapshot_bytes,
+        tp_journal_id_count(model->journal));
+
+    tp_journal__test_set_file_limit(exact - 1U);
+    tp_project__test_serialization_stats_reset();
+    tp_project__test_set_clone_alloc_fail(-1);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED,
+                          tp_model_compact_journal(model, &err));
+    TEST_ASSERT_EQUAL_size_t(0U, tp_project__test_save_buffer_calls());
+    TEST_ASSERT_EQUAL_size_t(0U, tp_project__test_serializer_allocations());
+    TEST_ASSERT_EQUAL_size_t(0U, tp_project__test_load_buffer_calls());
+    TEST_ASSERT_EQUAL_INT(0, tp_project__test_clone_alloc_count());
+
+    tp_journal__test_set_file_limit(exact);
+    tp_project__test_serialization_stats_reset();
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_model_compact_journal(model, &err));
+    TEST_ASSERT_EQUAL_INT64((int64_t)exact, io.length(io.ctx));
+    TEST_ASSERT_EQUAL_size_t(1U, tp_project__test_save_buffer_calls());
+    TEST_ASSERT_GREATER_THAN_size_t(0U,
+                                    tp_project__test_serializer_allocations());
+    TEST_ASSERT_EQUAL_size_t(1U, tp_project__test_load_buffer_calls());
+    tp_model_destroy(model);
+}
+
+void test_checkpoint_byte_admission_precedes_undo_redo_materialization(void) {
+    tp_journal_io io;
+    tp_model *model = model_with_journal(key_of(0x71), &io);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_enable_history(model));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        commit_rename(model, "71000000000000000000000000000001", 0,
+                      "a-name-long-enough-to-change-checkpoint-size"));
+    tp_error err = {0};
+
+    tp_project *undo_candidate = tp_project_clone(tp_model_project(model));
+    TEST_ASSERT_NOT_NULL(undo_candidate);
+    tp_diff_record *record = tp_history_undo_record(model->history);
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_diff_record_apply(undo_candidate, record, true,
+                                               &err));
+    size_t undo_bytes = 0U;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_checkpoint_serialized_size_bounded(
+            undo_candidate, SIZE_MAX, &undo_bytes, &err));
+    tp_project_destroy(undo_candidate);
+    const size_t undo_exact = checkpoint_store_bytes(
+        (size_t)io.length(io.ctx), undo_bytes,
+        tp_journal_id_count(model->journal));
+    tp_journal__test_set_file_limit(undo_exact - 1U);
+    tp_project__test_serialization_stats_reset();
+    tp_project__test_set_clone_alloc_fail(-1);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED,
+                          tp_model_undo(model, &err));
+    TEST_ASSERT_EQUAL_size_t(0U, tp_project__test_save_buffer_calls());
+    TEST_ASSERT_EQUAL_size_t(0U, tp_project__test_serializer_allocations());
+    TEST_ASSERT_EQUAL_size_t(0U, tp_project__test_load_buffer_calls());
+    TEST_ASSERT_GREATER_THAN_INT(0, tp_project__test_clone_alloc_count());
+    TEST_ASSERT_EQUAL_size_t(1U, tp_project__test_size_query_calls());
+    TEST_ASSERT_EQUAL_INT64(1, tp_model_revision(model));
+
+    tp_journal__test_set_file_limit(undo_exact);
+    tp_project__test_serialization_stats_reset();
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_undo(model, &err));
+    TEST_ASSERT_EQUAL_size_t(1U, tp_project__test_save_buffer_calls());
+    TEST_ASSERT_EQUAL_size_t(1U, tp_project__test_load_buffer_calls());
+
+    tp_project *redo_candidate = tp_project_clone(tp_model_project(model));
+    TEST_ASSERT_NOT_NULL(redo_candidate);
+    record = tp_history_redo_record(model->history);
+    TEST_ASSERT_NOT_NULL(record);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_diff_record_apply(redo_candidate, record, false,
+                                               &err));
+    size_t redo_bytes = 0U;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_checkpoint_serialized_size_bounded(
+            redo_candidate, SIZE_MAX, &redo_bytes, &err));
+    tp_project_destroy(redo_candidate);
+    const size_t redo_exact = checkpoint_store_bytes(
+        (size_t)io.length(io.ctx), redo_bytes,
+        tp_journal_id_count(model->journal));
+    tp_journal__test_set_file_limit(redo_exact - 1U);
+    tp_project__test_serialization_stats_reset();
+    tp_project__test_set_clone_alloc_fail(-1);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED,
+                          tp_model_redo(model, &err));
+    TEST_ASSERT_EQUAL_size_t(0U, tp_project__test_save_buffer_calls());
+    TEST_ASSERT_EQUAL_size_t(0U, tp_project__test_serializer_allocations());
+    TEST_ASSERT_EQUAL_size_t(0U, tp_project__test_load_buffer_calls());
+    TEST_ASSERT_GREATER_THAN_INT(0, tp_project__test_clone_alloc_count());
+    TEST_ASSERT_EQUAL_size_t(1U, tp_project__test_size_query_calls());
+    TEST_ASSERT_EQUAL_INT64(2, tp_model_revision(model));
+
+    tp_journal__test_set_file_limit(redo_exact);
+    tp_project__test_serialization_stats_reset();
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_redo(model, &err));
+    TEST_ASSERT_EQUAL_size_t(1U, tp_project__test_save_buffer_calls());
+    TEST_ASSERT_EQUAL_size_t(1U, tp_project__test_load_buffer_calls());
+    tp_model_destroy(model);
+}
+
+void test_save_stages_path_normalization_without_invalidating_history(void) {
+    if (!g_dir) {
+        return;
+    }
+    tp_project *project = base_project();
+    tp_project_source *source = &project->atlases[0].sources[0];
+    char absolute_source[1024];
+    char project_path[1024];
+    (void)snprintf(absolute_source, sizeof absolute_source,
+                   "%s/assets/hero.png", g_dir);
+    (void)snprintf(project_path, sizeof project_path,
+                   "%s/history-size-refresh.ntpacker", g_dir);
+    char *source_copy = (char *)malloc(strlen(absolute_source) + 1U);
+    TEST_ASSERT_NOT_NULL(source_copy);
+    memcpy(source_copy, absolute_source, strlen(absolute_source) + 1U);
+    free(source->path);
+    source->path = source_copy;
+
+    tp_model *model = tp_model_wrap(project);
+    TEST_ASSERT_NOT_NULL(model);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_enable_history(model));
+    tp_journal_io io = tp_journal_io_memory();
+    TEST_ASSERT_NOT_NULL(io.ctx);
+    tp_journal *journal = tp_journal_create(io, key_of(0x76));
+    TEST_ASSERT_NOT_NULL(journal);
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_model_attach_journal(model, journal, &err));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        commit_rename(model, "76000000000000000000000000000001", 0,
+                      "edited-before-save"));
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_save(tp_model_project(model), project_path, &err));
+    TEST_ASSERT_EQUAL_STRING(
+        absolute_source,
+        tp_model_project(model)->atlases[0].sources[0].path);
+    tp_model_mark_saved(model);
+    TEST_ASSERT_EQUAL_INT(1, tp_model_undo_depth(model));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_undo(model, &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_redo(model, &err));
+
+    tp_model_destroy(model);
+    (void)remove(project_path);
+}
+
+void test_save_as_compact_recovery_keeps_source_target_self_contained(void) {
+    if (!g_dir) {
+        return;
+    }
+    char old_path[1024];
+    char new_path[1024];
+    char new_dir[1024];
+    (void)snprintf(old_path, sizeof old_path, "%s/recovery-old.ntpacker", g_dir);
+    (void)snprintf(new_dir, sizeof new_dir, "%s", g_dir);
+    char *slash = strrchr(new_dir, '/');
+    if (!slash) {
+        slash = strrchr(new_dir, '\\');
+    }
+    TEST_ASSERT_NOT_NULL(slash);
+    *slash = '\0';
+    (void)snprintf(new_path, sizeof new_path, "%s/recovery-new.ntpacker",
+                   new_dir);
+
+    tp_project *project = base_project();
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_save(project, old_path, &err));
+    char target_before[1024];
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_resolve_source_path(
+            project, project->atlases[0].sources[0].path, target_before,
+            sizeof target_before));
+
+    tp_model *model = tp_model_wrap(project);
+    TEST_ASSERT_NOT_NULL(model);
+    tp_journal_io io = tp_journal_io_memory();
+    TEST_ASSERT_NOT_NULL(io.ctx);
+    tp_journal *journal = tp_journal_create(io, key_of(0x79));
+    TEST_ASSERT_NOT_NULL(journal);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_model_attach_journal(model, journal, &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_save(tp_model_project(model), new_path,
+                                          &err));
+    tp_model_mark_saved(model);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_model_set_recovery_metadata(model, 1700000079, new_path,
+                                       "recovery-new", &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_model_compact_journal(model, &err));
+
+    size_t journal_len = 0U;
+    uint8_t *journal_bytes = snapshot_io(io, &journal_len);
+    tp_model_destroy(model);
+    tp_journal_io recovered_io = io_from_bytes(journal_bytes, journal_len);
+    free(journal_bytes);
+    tp_model *recovered = NULL;
+    tp_journal_recovery recovery = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_model_recover(recovered_io, key_of(0x79), &recovered, &recovery,
+                         &err));
+    TEST_ASSERT_NOT_NULL(recovered);
+    const tp_project *recovered_project = tp_model_project(recovered);
+    char target_after[1024];
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_resolve_source_path(
+            recovered_project, recovered_project->atlases[0].sources[0].path,
+            target_after, sizeof target_after));
+    TEST_ASSERT_EQUAL_STRING(target_before, target_after);
+
+    tp_journal_recovery_free(&recovery);
+    tp_model_destroy(recovered);
+    (void)remove(new_path);
+    (void)remove(old_path);
+}
+
+void test_mark_saved_preserves_deep_history_without_clone_work(void) {
+    tp_model *model = tp_model_wrap(base_project());
+    TEST_ASSERT_NOT_NULL(model);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_enable_history(model));
+    for (int i = 0; i < 16; ++i) {
+        char id[33];
+        char name[64];
+        (void)snprintf(id, sizeof id, "%032x", (unsigned)(0x7700 + i));
+        (void)snprintf(name, sizeof name, "deep-history-%d", i);
+        TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                              commit_rename(model, id, i, name));
+    }
+    TEST_ASSERT_TRUE(tp_model_dirty(model));
+    tp_error err = {0};
+    for (int i = 0; i < 4; ++i) {
+        TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_undo(model, &err));
+    }
+    TEST_ASSERT_EQUAL_INT(12, tp_model_undo_depth(model));
+    TEST_ASSERT_EQUAL_INT(4, tp_model_redo_depth(model));
+
+    tp_project__test_set_clone_alloc_fail(-1);
+    tp_model_mark_saved(model);
+    TEST_ASSERT_FALSE(tp_model_dirty(model));
+    TEST_ASSERT_EQUAL_INT(0, tp_project__test_clone_alloc_count());
+    TEST_ASSERT_EQUAL_INT(12, tp_model_undo_depth(model));
+    TEST_ASSERT_EQUAL_INT(4, tp_model_redo_depth(model));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_redo(model, &err));
+    tp_model_destroy(model);
+}
+
+void test_replay_operation_budget_is_prewrite_preclone_and_checkpoint_reset(void) {
+    const tp_id128 key = key_of(0x6c);
+    tp_journal_io io = tp_journal_io_memory();
+    TEST_ASSERT_NOT_NULL(io.ctx);
+    tp_journal *journal = tp_journal_create(io, key);
+    TEST_ASSERT_NOT_NULL(journal);
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_journal_init_checkpoint(journal, NULL, 0U, 0, &err));
+    const char *at_limit_id = "6c000000000000000000000000000001";
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_journal_append_txn_counted(
+            journal, at_limit_id, 1, NULL, 0U,
+            (size_t)TP_JOURNAL_MAX_REPLAY_OPERATIONS, &err));
+    const int64_t at_limit_bytes = io.length(io.ctx);
+    TEST_ASSERT_GREATER_THAN_INT64(0, at_limit_bytes);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_journal_append_txn_counted(
+            journal, "6c000000000000000000000000000002", 2, NULL, 0U, 1U, &err));
+    TEST_ASSERT_EQUAL_INT64(at_limit_bytes, io.length(io.ctx));
+    TEST_ASSERT_FALSE(tp_journal_contains(journal,
+                                          "6c000000000000000000000000000002"));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_journal_append_txn_counted(journal, at_limit_id, 1, NULL, 0U, 1U, &err));
+    TEST_ASSERT_EQUAL_INT64(at_limit_bytes, io.length(io.ctx));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_journal_init_checkpoint(journal, NULL, 0U, 2, &err));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_journal_append_txn_counted(
+            journal, "6c000000000000000000000000000002", 3, NULL, 0U, 1U, &err));
+    tp_journal_destroy(journal);
+
+    tp_journal_io model_io;
+    tp_model *model = model_with_journal(key_of(0x6b), &model_io);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_journal__set_replay_operations(
+            model->journal, (size_t)TP_JOURNAL_MAX_REPLAY_OPERATIONS, &err));
+    const int64_t revision_before = tp_model_revision(model);
+    char *project_before = serialize(tp_model_project(model));
+    tp_project__test_set_clone_alloc_fail(0);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        commit_rename(model, "6b000000000000000000000000000001",
+                      revision_before, "must-not-commit"));
+    tp_project__test_set_clone_alloc_fail(-1);
+    TEST_ASSERT_EQUAL_INT64(revision_before, tp_model_revision(model));
+    char *project_after = serialize(tp_model_project(model));
+    TEST_ASSERT_EQUAL_STRING(project_before, project_after);
+    free(project_after);
+    free(project_before);
+    tp_model_destroy(model);
+}
+
+void test_recovery_rejects_aggregate_operation_overflow_before_apply(void) {
+    const tp_id128 key = key_of(0x6a);
+    tp_project *project = base_project();
+    const tp_id128 atlas_id = project->atlases[0].id;
+    char *snapshot = serialize(project);
+    char *payload = dense_rename_payload(atlas_id);
+    TEST_ASSERT_NOT_NULL(payload);
+    const size_t payload_len = strlen(payload);
+    TEST_ASSERT_TRUE(payload_len < (size_t)TP_TXN_MAX_REQUEST_BYTES);
+
+    tp_journal_io io = tp_journal_io_memory();
+    TEST_ASSERT_NOT_NULL(io.ctx);
+    tp_journal *journal = tp_journal_create(io, key);
+    TEST_ASSERT_NOT_NULL(journal);
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_journal_init_checkpoint(journal, (const uint8_t *)snapshot,
+                                   strlen(snapshot), 0, &err));
+    const size_t records =
+        (size_t)TP_JOURNAL_MAX_REPLAY_OPERATIONS / (size_t)TP_TXN_MAX_OPS + 1U;
+    for (size_t i = 0U; i < records; ++i) {
+        char id[33];
+        (void)snprintf(id, sizeof id, "%032" PRIx64,
+                       (uint64_t)i + UINT64_C(0x6a0000));
+        TEST_ASSERT_EQUAL_INT(
+            TP_STATUS_OK,
+            tp_journal_append_txn(journal, id, (int64_t)i + 1,
+                                  (const uint8_t *)payload, payload_len, &err));
+    }
+    size_t bytes_len = 0U;
+    uint8_t *bytes = snapshot_io(io, &bytes_len);
+    tp_journal_destroy(journal);
+
+    tp_model *recovered = NULL;
+    tp_journal_recovery info;
+    memset(&info, 0, sizeof info);
+    tp_op__test_apply_count_reset();
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_model_recover(io_from_bytes(bytes, bytes_len), key, &recovered, &info, &err));
+    TEST_ASSERT_NULL(recovered);
+    TEST_ASSERT_EQUAL_size_t(0U, tp_op__test_apply_count_take());
+    TEST_ASSERT_EQUAL_size_t(records, info.op_count);
+    TEST_ASSERT_TRUE(tp_journal__test_recovery_ops_borrow_raw(&info));
+    TEST_ASSERT_NOT_NULL(strstr(err.msg, "operation limit"));
+
+    tp_journal_recovery_free(&info);
+    free(bytes);
+    free(payload);
+    free(snapshot);
+    tp_project_destroy(project);
+}
+
+void test_recovery_rejects_duplicate_operations_before_aggregate_apply(void) {
+    const tp_id128 key = key_of(0x69);
+    tp_project *project = base_project();
+    char *snapshot = serialize(project);
+    char *payload = dense_rename_payload_with_duplicate_operations(
+        project->atlases[0].id);
+    TEST_ASSERT_NOT_NULL(payload);
+    const size_t payload_len = strlen(payload);
+    TEST_ASSERT_TRUE(payload_len < (size_t)TP_TXN_MAX_REQUEST_BYTES);
+
+    tp_journal_io io = tp_journal_io_memory();
+    TEST_ASSERT_NOT_NULL(io.ctx);
+    tp_journal *journal = tp_journal_create(io, key);
+    TEST_ASSERT_NOT_NULL(journal);
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_journal_init_checkpoint(journal, (const uint8_t *)snapshot,
+                                   strlen(snapshot), 0, &err));
+    const size_t records =
+        (size_t)TP_JOURNAL_MAX_REPLAY_OPERATIONS / (size_t)TP_TXN_MAX_OPS + 1U;
+    for (size_t i = 0U; i < records; ++i) {
+        char id[33];
+        (void)snprintf(id, sizeof id, "%032" PRIx64,
+                       (uint64_t)i + UINT64_C(0x690000));
+        TEST_ASSERT_EQUAL_INT(
+            TP_STATUS_OK,
+            tp_journal_append_txn(journal, id, (int64_t)i + 1,
+                                  (const uint8_t *)payload, payload_len, &err));
+    }
+    size_t bytes_len = 0U;
+    uint8_t *bytes = snapshot_io(io, &bytes_len);
+    tp_journal_destroy(journal);
+
+    tp_model *recovered = NULL;
+    tp_journal_recovery info = {0};
+    tp_op__test_apply_count_reset();
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_model_recover(io_from_bytes(bytes, bytes_len), key, &recovered,
+                         &info, &err));
+    TEST_ASSERT_NULL(recovered);
+    TEST_ASSERT_EQUAL_size_t(0U, tp_op__test_apply_count_take());
+    TEST_ASSERT_EQUAL_size_t(records, info.op_count);
+    TEST_ASSERT_NOT_NULL(strstr(err.msg, "duplicate operations"));
+
+    tp_journal_recovery_free(&info);
+    free(bytes);
+    free(payload);
+    free(snapshot);
+    tp_project_destroy(project);
 }
 
 /* Byte offset of record #idx (0-based, after the 28-byte header) in a journal store,
@@ -290,7 +1378,9 @@ void test_checkpoint_and_replay(void) {
     tp_journal_recovery info;
     memset(&info, 0, sizeof info);
     tp_error err;
+    tp_op__test_apply_count_reset();
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_recover(io2, key, &m2, &info, &err));
+    TEST_ASSERT_EQUAL_size_t(2U, tp_op__test_apply_count_take());
     TEST_ASSERT_NOT_NULL(m2);
     TEST_ASSERT_EQUAL_INT(TP_JOURNAL_RECOVERY_OK, info.status);
     TEST_ASSERT_EQUAL_INT(3, info.records_recovered); /* checkpoint + 2 txns */
@@ -343,8 +1433,8 @@ void test_format_b_replays_ops_onto_checkpoint(void) {
     /* (1) format-B shape: a base checkpoint snapshot + exactly two post-checkpoint op-payloads. */
     TEST_ASSERT_EQUAL_INT(2, (int)info.op_count);
     TEST_ASSERT_NOT_NULL(info.snapshot);
-    TEST_ASSERT_NOT_NULL(strstr(info.snapshot, "atlas1")); /* the base IS the rev-0 checkpoint */
-    TEST_ASSERT_NULL(strstr(info.snapshot, "second"));     /* the base does NOT hold the final state */
+    TEST_ASSERT_TRUE(span_contains(info.snapshot, info.snapshot_len, "atlas1"));
+    TEST_ASSERT_FALSE(span_contains(info.snapshot, info.snapshot_len, "second"));
     TEST_ASSERT_EQUAL_INT64(1, info.ops[0].revision);
     TEST_ASSERT_EQUAL_INT64(2, info.ops[1].revision);
 
@@ -390,8 +1480,8 @@ void test_format_b_recovers_masked_target_set(void) {
 
     /* base checkpoint = the ORIGINAL out_path; the edit lives ONLY in the replayed op-payload */
     TEST_ASSERT_EQUAL_INT(1, (int)info.op_count);
-    TEST_ASSERT_NOT_NULL(strstr(info.snapshot, "out/a"));
-    TEST_ASSERT_NULL(strstr(info.snapshot, "out/changed.json"));
+    TEST_ASSERT_TRUE(span_contains(info.snapshot, info.snapshot_len, "out/a"));
+    TEST_ASSERT_FALSE(span_contains(info.snapshot, info.snapshot_len, "out/changed.json"));
 
     /* replaying the masked op onto the base reaches the committed state, byte-identical */
     char *got = serialize(tp_model_project(m2));
@@ -958,6 +2048,13 @@ void test_io_file_read_no_create(void) {
     remove(path);
 }
 
+void test_journal_crc32_matches_ieee_reference_vector(void) {
+    static const uint8_t reference[] = "123456789";
+    TEST_ASSERT_EQUAL_HEX32(0xCBF43926u,
+                            tp_jrn_crc32(0U, reference,
+                                         sizeof reference - 1U));
+}
+
 void test_file_journal_rejects_oversize_before_read(void) {
     if (!g_dir) {
         TEST_IGNORE_MESSAGE("no scratch dir (argv[1]) provided");
@@ -1122,16 +2219,14 @@ void test_file_journal_metadata_failure_at_reader_cap_is_reported(void) {
     TEST_ASSERT_EQUAL_INT64((int64_t)TP_JOURNAL_MAX_FILE_BYTES - 1, io.length(io.ctx));
 
     TEST_ASSERT_EQUAL_INT(0, io.truncate(io.ctx, (size_t)valid_len));
-    /* The failed durable META append is still cache-authoritative; compaction after
-     * space is reclaimed must persist it exactly as other transient META failures do. */
+    /* Byte-cap admission is deterministic and happens before cache mutation.
+     * Reclaiming space and compacting must not resurrect rejected metadata. */
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_compact(j, snapshot, sizeof snapshot, 0, &err));
     tp_journal_destroy(j);
     tp_journal_peek_result pk;
     memset(&pk, 0, sizeof pk);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_peek(tp_journal_io_file_read(path), &pk, &err));
-    TEST_ASSERT_TRUE(pk.has_meta);
-    TEST_ASSERT_EQUAL_STRING("/cached/project.ntpacker_project", pk.meta.path);
-    TEST_ASSERT_EQUAL_STRING("cached", pk.meta.name);
+    TEST_ASSERT_FALSE(pk.has_meta);
     tp_journal_peek_free(&pk);
     remove(path);
 }
@@ -1562,8 +2657,8 @@ void test_compaction_then_commit_recovers_as_ckpt_plus_op(void) {
     TEST_ASSERT_NOT_NULL(m2);
     TEST_ASSERT_EQUAL_INT(2, info.records_recovered); /* compacted checkpoint + 1 txn */
     TEST_ASSERT_EQUAL_INT(1, (int)info.op_count);     /* (e) exactly one post-checkpoint op */
-    TEST_ASSERT_NOT_NULL(strstr(info.snapshot, "two"));   /* base = the compacted "two" state */
-    TEST_ASSERT_NULL(strstr(info.snapshot, "three"));     /* the final edit is NOT in the base */
+    TEST_ASSERT_TRUE(span_contains(info.snapshot, info.snapshot_len, "two"));
+    TEST_ASSERT_FALSE(span_contains(info.snapshot, info.snapshot_len, "three"));
     TEST_ASSERT_EQUAL_INT64(exp_rev, tp_model_revision(m2));
     char *got = serialize(tp_model_project(m2));
     TEST_ASSERT_EQUAL_STRING(expected, got);
@@ -1661,27 +2756,59 @@ void test_compaction_init_failure_poisons(void) {
     tp_journal_destroy(j);
 }
 
-/* R3 fail-closed (glue): a broken-store compaction poisons the journal; tp_model_compact_journal must
- * DETACH it so the session continues JOURNAL-LESS (still editable, recovery disabled) rather than leave
- * a poisoned journal that would REJECT every subsequent commit. Proves (b) detach + edits continue and
- * (c) no journal is left accumulating unrecoverable appends. */
-void test_compaction_broken_store_detaches_to_journal_less(void) {
+/* A failed replacement checkpoint must not silently remove recovery/idempotency authority. The
+ * poisoned journal remains attached, retains acknowledged ids, and rejects later mutations with a
+ * structured durability status until the owner explicitly repairs or replaces the authority. */
+void test_compaction_broken_store_keeps_fail_closed_authority(void) {
     tp_id128 key = key_of(0x86);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "86000000000000000000000000000001", 0, "one"));
 
-    /* Compaction: truncate OK, fresh-checkpoint write FAILS -> the journal poisons itself; the glue must
-     * DETACH it (the journal + its io are destroyed here -- do NOT touch `io` afterward). */
+    const char *acknowledged = "86000000000000000000000000000001";
+    const char *blocked = "86000000000000000000000000000002";
+    TEST_ASSERT_TRUE(tp_journal_contains(m->journal, acknowledged));
+    const int retained_before = tp_journal_id_count(m->journal);
+
+    /* Compaction: truncate OK, fresh-checkpoint write FAILS -> journal poisons itself but stays the
+     * sole idempotency authority for this live model. */
     tp_journal_io_memory__fail_next_writes(io, 1);
     tp_error err;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED, tp_model_compact_journal(m, &err));
-    TEST_ASSERT_NULL(m->journal); /* (b) detached -> session runs journal-less */
+    TEST_ASSERT_NOT_NULL(m->journal);
+    TEST_ASSERT_TRUE(tp_journal__is_poisoned(m->journal));
+    TEST_ASSERT_EQUAL_INT(retained_before, tp_journal_id_count(m->journal));
+    TEST_ASSERT_TRUE(tp_journal_contains(m->journal, acknowledged));
 
-    /* A subsequent commit still SUCCEEDS journal-less, not rejected by a poisoned journal. */
-    int64_t rev_before = tp_model_revision(m);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "86000000000000000000000000000002", rev_before, "two"));
-    TEST_ASSERT_EQUAL_INT64(rev_before + 1, tp_model_revision(m)); /* (c) edits continue, nothing appended to a dead journal */
+    tp_operation op = {0};
+    op.kind = TP_OP_ATLAS_RENAME;
+    op.atlas_id = tp_model_project(m)->atlases[0].id;
+    op.u.atlas_rename.name = "two";
+    tp_txn_request req = {0};
+    req.schema = TP_TXN_SCHEMA;
+    (void)snprintf(req.id_hex, sizeof req.id_hex, "%s", blocked);
+    req.expected_revision = tp_model_revision(m);
+    req.ops = &op;
+    req.op_count = 1;
+    tp_txn_result result = {0};
+    const int64_t revision_before = tp_model_revision(m);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED, tp_model_apply(m, &req, &result, &err));
+    TEST_ASSERT_FALSE(result.committed);
+    TEST_ASSERT_EQUAL_INT64(revision_before, result.revision);
+    TEST_ASSERT_EQUAL_INT(1, result.error_count);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED, result.errors[0].code);
+    TEST_ASSERT_EQUAL_STRING("one", tp_model_project(m)->atlases[0].name);
+    TEST_ASSERT_FALSE(tp_journal_contains(m->journal, blocked));
+    TEST_ASSERT_EQUAL_INT(retained_before, tp_journal_id_count(m->journal));
+    tp_txn_result_free(&result);
+
+    /* A retry of an acknowledged id is still rejected as duplicate before touching the poisoned
+     * store, proving the retained authority did not disappear with the failed checkpoint. */
+    (void)snprintf(req.id_hex, sizeof req.id_hex, "%s", acknowledged);
+    memset(&result, 0, sizeof result);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_DUPLICATE_ID, tp_model_apply(m, &req, &result, &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_DUPLICATE_ID, result.errors[0].code);
+    tp_txn_result_free(&result);
 
     tp_model_destroy(m);
 }
@@ -1734,6 +2861,56 @@ void test_journal_undo_append_failure_rolls_back_history_commit(void) {
     tp_model_destroy(m);
 }
 
+void test_peek_and_recover_share_retained_id_policy(void) {
+    const tp_id128 key = key_of(0xa6);
+    tp_journal_io io = tp_journal_io_memory();
+    TEST_ASSERT_NOT_NULL(io.ctx);
+    tp_journal *journal = tp_journal_create(io, key);
+    TEST_ASSERT_NOT_NULL(journal);
+    tp_error err = {0};
+    static const uint8_t snapshot[] = {'b', 'a', 's', 'e'};
+    static const uint8_t op[] = {'{', '}'};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_journal_init_checkpoint(journal, snapshot, sizeof snapshot, 0, &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_journal_append_txn(journal, "a6000000000000000000000000000001",
+                                                1, op, sizeof op, &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_journal_append_txn(journal, "a6000000000000000000000000000002",
+                                                2, op, sizeof op, &err));
+    size_t bytes_len = 0U;
+    uint8_t *bytes = snapshot_io(io, &bytes_len);
+    tp_journal_destroy(journal);
+
+    const size_t first = record_offset(bytes, bytes_len, 1);
+    const size_t second = record_offset(bytes, bytes_len, 2);
+    TEST_ASSERT_NOT_EQUAL(SIZE_MAX, first);
+    TEST_ASSERT_NOT_EQUAL(SIZE_MAX, second);
+    const size_t header = (size_t)TP_JRN_SYNC_FIELD + (size_t)TP_JRN_LEN_FIELD;
+    memcpy(bytes + second + header + 1U, bytes + first + header + 1U, TP_JRN_IDLEN);
+    const uint32_t payload_len = tp_jrn_get_u32(bytes + second + TP_JRN_SYNC_FIELD);
+    const size_t crc_span = header + (size_t)payload_len;
+    tp_jrn_put_u32(bytes + second + crc_span, tp_jrn_crc32(0, bytes + second, crc_span));
+
+    tp_journal *recover_journal = tp_journal_create(io_from_bytes(bytes, bytes_len), key);
+    TEST_ASSERT_NOT_NULL(recover_journal);
+    tp_journal_recovery recovery = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_journal_recover(recover_journal, &recovery, &err));
+    tp_journal_peek_result peek = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_journal_peek(io_from_bytes(bytes, bytes_len), &peek, &err));
+    free(bytes);
+
+    TEST_ASSERT_EQUAL_INT(TP_JOURNAL_RECOVERY_CORRUPT, recovery.status);
+    TEST_ASSERT_EQUAL_INT(recovery.status, peek.status);
+    TEST_ASSERT_EQUAL_INT(recovery.records_recovered, peek.record_count);
+    TEST_ASSERT_EQUAL_INT(2, recovery.records_recovered);
+    tp_journal_recovery_free(&recovery);
+    tp_journal_peek_free(&peek);
+    tp_journal_destroy(recover_journal);
+}
+
 /* Redo has the identical durable gate: if its checkpoint append fails, the already-undone live
  * state and cursor stay exactly where they were. */
 void test_journal_redo_append_failure_rolls_back_history_commit(void) {
@@ -1775,6 +2952,44 @@ void test_journal_redo_append_failure_rolls_back_history_commit(void) {
 
     free(project_before);
     free(project_after);
+    free(journal_before);
+    free(journal_after);
+    tp_model_destroy(m);
+}
+
+/* A full step budget needs an eviction plan, but the old record must remain owned
+ * until the replacement transaction's journal append is acknowledged. */
+void test_history_eviction_waits_for_journal_append_ack(void) {
+    tp_history__test_set_limits(1, TP_HISTORY_MAX_BYTES, TP_HISTORY_MAX_RECORD_BYTES);
+    tp_journal_io io;
+    tp_model *m = model_with_journal(key_of(0x89), &io);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_enable_history(m));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "89000000000000000000000000000001", 0, "one"));
+    const size_t history_bytes = m->history->bytes;
+    size_t journal_before_len = 0U;
+    uint8_t *journal_before = snapshot_io(io, &journal_before_len);
+
+    tp_journal_io_memory__fail_next_writes(io, 1);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED,
+                          commit_rename(m, "89000000000000000000000000000002", 1, "two"));
+    TEST_ASSERT_EQUAL_STRING("one", tp_model_project(m)->atlases[0].name);
+    TEST_ASSERT_EQUAL_INT64(1, tp_model_revision(m));
+    TEST_ASSERT_EQUAL_INT(1, tp_model_undo_depth(m));
+    TEST_ASSERT_EQUAL_UINT64(history_bytes, m->history->bytes);
+    size_t journal_after_len = 0U;
+    uint8_t *journal_after = snapshot_io(io, &journal_after_len);
+    TEST_ASSERT_EQUAL_UINT64(journal_before_len, journal_after_len);
+    TEST_ASSERT_EQUAL_MEMORY(journal_before, journal_after, journal_before_len);
+
+    /* The identical id remains retryable. Only the successful ACK replaces the
+     * retained Undo record, so Undo still restores the previous committed state. */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "89000000000000000000000000000002", 1, "two"));
+    TEST_ASSERT_EQUAL_INT(1, tp_model_undo_depth(m));
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_undo(m, &err));
+    TEST_ASSERT_EQUAL_STRING("one", tp_model_project(m)->atlases[0].name);
+    TEST_ASSERT_FALSE(tp_model_can_undo(m));
+
     free(journal_before);
     free(journal_after);
     tp_model_destroy(m);
@@ -2029,6 +3244,212 @@ void test_metadata_fingerprint_roundtrip_and_compaction(void) {
     tp_model_destroy(m2);
 }
 
+/* A relative source key accepted after a checkpoint must be journaled with the
+ * same project-relative identity that apply stores. Recovery loads a self-contained
+ * checkpoint (no project_dir), so replay proves that the durable payload is already
+ * canonical rather than depending on process CWD. Exercise both ADD and REPLACE. */
+void test_compaction_relative_source_ops_recover_canonical_paths(void) {
+    if (!g_dir) {
+        return;
+    }
+    char project_path[1024];
+    (void)snprintf(project_path, sizeof project_path,
+                   "%s/relative-source-replay.ntpacker", g_dir);
+    tp_project *project = base_project();
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_save(project, project_path, &err));
+    tp_model *model = tp_model_wrap(project);
+    TEST_ASSERT_NOT_NULL(model);
+    const tp_id128 key = key_of(0xc2);
+    tp_journal_io io = tp_journal_io_memory();
+    TEST_ASSERT_NOT_NULL(io.ctx);
+    tp_journal *journal = tp_journal_create(io, key);
+    TEST_ASSERT_NOT_NULL(journal);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_model_attach_journal(model, journal, &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_model_compact_journal(model, &err));
+
+    tp_operation add = {0};
+    add.kind = TP_OP_SOURCE_ADD;
+    add.atlas_id = project->atlases[0].id;
+    add.u.source_add.source_id = key_of(0x31);
+    add.u.source_add.kind = TP_SOURCE_KIND_FOLDER;
+    add.u.source_add.key = (char *)"future/add";
+    tp_txn_request request = {0};
+    request.schema = TP_TXN_SCHEMA;
+    (void)snprintf(request.id_hex, sizeof request.id_hex, "%s",
+                   "c2000000000000000000000000000001");
+    request.expected_revision = 0;
+    request.ops = &add;
+    request.op_count = 1;
+    tp_txn_result result = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_model_apply(model, &request, &result, &err));
+    tp_txn_result_free(&result);
+
+    tp_operation replace = {0};
+    replace.kind = TP_OP_SOURCE_REPLACE;
+    replace.atlas_id = add.atlas_id;
+    replace.u.source_ref.source_id = add.u.source_add.source_id;
+    replace.u.source_ref.key = (char *)"future/replaced";
+    request.ops = &replace;
+    request.expected_revision = 1;
+    (void)snprintf(request.id_hex, sizeof request.id_hex, "%s",
+                   "c2000000000000000000000000000002");
+    memset(&result, 0, sizeof result);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_model_apply(model, &request, &result, &err));
+    tp_txn_result_free(&result);
+
+    const tp_project *live_project = tp_model_project(model);
+    const tp_project_source *live =
+        tp_project_atlas_find_source_by_id(&live_project->atlases[0],
+                                           add.u.source_add.source_id);
+    TEST_ASSERT_NOT_NULL(live);
+    char expected[4096];
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_resolve_path(live_project, "future/replaced",
+                                                  expected, sizeof expected));
+    TEST_ASSERT_EQUAL_STRING(expected, live->path);
+    const tp_id128 expected_identity = tp_semantic_identity(live_project);
+
+    size_t bytes_len = 0U;
+    uint8_t *bytes = snapshot_io(io, &bytes_len);
+    tp_model_destroy(model);
+    tp_model *recovered = NULL;
+    tp_journal_recovery info = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_model_recover(io_from_bytes(bytes, bytes_len), key, &recovered,
+                         &info, &err));
+    free(bytes);
+    TEST_ASSERT_NOT_NULL(recovered);
+    const tp_project *rp = tp_model_project(recovered);
+    const tp_project_source *replayed =
+        tp_project_atlas_find_source_by_id(&rp->atlases[0],
+                                           add.u.source_add.source_id);
+    TEST_ASSERT_NOT_NULL(replayed);
+    TEST_ASSERT_EQUAL_STRING(expected, replayed->path);
+    TEST_ASSERT_TRUE(tp_id128_eq(expected_identity,
+                                tp_semantic_identity(rp)));
+    tp_journal_recovery_free(&info);
+    tp_model_destroy(recovered);
+    (void)remove(project_path);
+}
+
+void test_checkpoint_only_recovery_borrows_raw_storage_without_payload_copy(void) {
+    const tp_id128 key = key_of(0x12);
+    tp_journal_io io;
+    tp_model *model = model_with_journal(key, &io);
+    size_t byte_count = 0U;
+    uint8_t *bytes = snapshot_io(io, &byte_count);
+    tp_model_destroy(model);
+
+    tp_journal *journal = tp_journal_create(io_from_bytes(bytes, byte_count), key);
+    free(bytes);
+    TEST_ASSERT_NOT_NULL(journal);
+    tp_journal_recovery recovery;
+    memset(&recovery, 0, sizeof recovery);
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_journal_recover(journal, &recovery, &err));
+    TEST_ASSERT_NOT_NULL(recovery.snapshot);
+    TEST_ASSERT_EQUAL_size_t(0U, recovery.op_count);
+
+    tp_journal_recovery_copy_stats copies;
+    tp_journal__test_recovery_copy_stats(&recovery, &copies);
+    TEST_ASSERT_EQUAL_size_t(1U, copies.raw_storage_copies);
+    TEST_ASSERT_EQUAL_size_t(byte_count, copies.raw_storage_bytes);
+    TEST_ASSERT_EQUAL_size_t(0U, copies.checkpoint_payload_copies);
+    TEST_ASSERT_EQUAL_size_t(0U, copies.checkpoint_payload_bytes);
+    TEST_ASSERT_EQUAL_size_t(0U, copies.operation_payload_copies);
+    TEST_ASSERT_EQUAL_size_t(0U, copies.operation_payload_bytes);
+
+    tp_journal_recovery_free(&recovery);
+    tp_journal_destroy(journal);
+}
+
+void test_recovery_borrows_all_op_payloads_from_one_buffer(void) {
+    tp_id128 key = key_of(0xc1);
+    tp_journal_io io;
+    tp_model *m = model_with_journal(key, &io);
+    for (int i = 0; i < 100; ++i) {
+        char id[33];
+        char name[32];
+        (void)snprintf(id, sizeof id, "%032x", i + 1);
+        (void)snprintf(name, sizeof name, "recovery-%d", i);
+        TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, id, i, name));
+    }
+
+    size_t bytes_len = 0;
+    uint8_t *bytes = snapshot_io(io, &bytes_len);
+    tp_model_destroy(m);
+
+    tp_journal *journal = tp_journal_create(io_from_bytes(bytes, bytes_len), key);
+    free(bytes);
+    TEST_ASSERT_NOT_NULL(journal);
+    tp_journal_recovery info;
+    memset(&info, 0, sizeof info);
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_recover(journal, &info, &err));
+    TEST_ASSERT_EQUAL_UINT64(100, info.op_count);
+    TEST_ASSERT_TRUE(tp_journal__test_recovery_ops_borrow_raw(&info));
+    tp_journal_recovery_copy_stats copies;
+    tp_journal__test_recovery_copy_stats(&info, &copies);
+    TEST_ASSERT_EQUAL_size_t(1U, copies.raw_storage_copies);
+    TEST_ASSERT_EQUAL_size_t(bytes_len, copies.raw_storage_bytes);
+    TEST_ASSERT_EQUAL_size_t(0U, copies.checkpoint_payload_copies);
+    TEST_ASSERT_EQUAL_size_t(0U, copies.checkpoint_payload_bytes);
+    TEST_ASSERT_EQUAL_size_t(0U, copies.operation_payload_copies);
+    TEST_ASSERT_EQUAL_size_t(0U, copies.operation_payload_bytes);
+    for (size_t i = 0; i < info.op_count; ++i) {
+        tp_txn_request *request = NULL;
+        TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                              tp_txn_request_decode_n(info.ops[i].payload,
+                                                      info.ops[i].payload_len,
+                                                      &request, &err));
+        TEST_ASSERT_NOT_NULL(request);
+        tp_txn_request_free(request);
+    }
+    tp_journal_recovery_free(&info);
+    tp_journal_destroy(journal);
+}
+
+void test_recovery_rejects_oversize_borrowed_op_before_parse(void) {
+    tp_id128 key = key_of(0xc2);
+    tp_journal_io io;
+    tp_model *m = model_with_journal(key, &io);
+    const size_t payload_len = (size_t)TP_TXN_MAX_REQUEST_BYTES + 1U;
+    uint8_t *payload = (uint8_t *)malloc(payload_len);
+    TEST_ASSERT_NOT_NULL(payload);
+    memset(payload, '{', payload_len);
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_journal_append_txn(m->journal, "c2000000000000000000000000000001", 1,
+                              payload, payload_len, &err));
+    free(payload);
+
+    size_t bytes_len = 0;
+    uint8_t *bytes = snapshot_io(io, &bytes_len);
+    tp_model_destroy(m);
+    tp_model *recovered = NULL;
+    tp_journal_recovery info;
+    memset(&info, 0, sizeof info);
+    memset(&err, 0, sizeof err);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS,
+                          tp_model_recover(io_from_bytes(bytes, bytes_len), key,
+                                           &recovered, &info, &err));
+    free(bytes);
+    TEST_ASSERT_NULL(recovered);
+    TEST_ASSERT_EQUAL_UINT64(1, info.op_count);
+    TEST_ASSERT_TRUE(tp_journal__test_recovery_ops_borrow_raw(&info));
+    TEST_ASSERT_NOT_NULL(strstr(err.msg, "maximum"));
+    tp_journal_recovery_free(&info);
+}
+
 void test_corrupt_resync_crc_work_is_linear(void) {
     tp_id128 key = key_of(0x70);
     tp_journal_io io;
@@ -2264,7 +3685,7 @@ void test_peek_empty(void) {
 /* ==== R5a FIX ROUND: adversarial-review findings [0][1][2][3][5] ========== */
 
 /* A checkpoint without its canonical path/fingerprint is not complete Save-Original authority. A rolled-
- * back META re-emit leaves the bytes recoverable but must return failure so the host detaches the slot. */
+ * back META re-emit leaves document bytes recoverable but poisons this incomplete replacement authority. */
 void test_compact_meta_reemit_failure_is_reported(void) {
     tp_id128 key = key_of(0xA0);
     tp_journal_io io = faulty_io();
@@ -2282,7 +3703,7 @@ void test_compact_meta_reemit_failure_is_reported(void) {
     faulty_io_fail_at(io, 3);
     const uint8_t snap2[] = {'n', 'e', 'w'};
     TEST_ASSERT_NOT_EQUAL(TP_STATUS_OK, tp_journal_compact(j, snap2, sizeof snap2, 2, &err));
-    TEST_ASSERT_FALSE(tp_journal__is_poisoned(j)); /* healthy checkpoint NOT poisoned over a lost label */
+    TEST_ASSERT_TRUE(tp_journal__is_poisoned(j));
 
     /* Recovery INTACT: the fresh checkpoint recovered; metadata simply absent (re-emit was swallowed). */
     size_t blen = 0;
@@ -2299,7 +3720,7 @@ void test_compact_meta_reemit_failure_is_reported(void) {
     TEST_ASSERT_EQUAL_INT(1, rec.records_recovered); /* the compacted checkpoint */
     TEST_ASSERT_EQUAL_INT(0, (int)rec.op_count);
     TEST_ASSERT_NOT_NULL(rec.snapshot);
-    TEST_ASSERT_NOT_NULL(strstr(rec.snapshot, "new")); /* == the post-compaction state */
+    TEST_ASSERT_TRUE(span_contains(rec.snapshot, rec.snapshot_len, "new")); /* post-compaction state */
     TEST_ASSERT_FALSE(rec.has_metadata);               /* metadata absent, recovery still works */
     tp_journal_recovery_free(&rec);
     tp_journal_destroy(j2);
@@ -2583,12 +4004,36 @@ int main(int argc, char **argv) {
     }
     UNITY_BEGIN();
     RUN_TEST(test_journal_is_sidecar_byte_identical);
+    RUN_TEST(test_journal_crc32_matches_ieee_reference_vector);
+    RUN_TEST(test_idset_backward_shift_eviction_has_linear_probe_bound);
     RUN_TEST(test_checkpoint_and_replay);
+    RUN_TEST(test_checkpoint_only_recovery_borrows_raw_storage_without_payload_copy);
     RUN_TEST(test_format_b_replays_ops_onto_checkpoint);
+    RUN_TEST(test_recovery_borrows_all_op_payloads_from_one_buffer);
+    RUN_TEST(test_recovery_rejects_oversize_borrowed_op_before_parse);
     RUN_TEST(test_format_b_recovers_masked_target_set);
     RUN_TEST(test_duplicate_retry_after_restart);
     RUN_TEST(test_append_failure_rolls_back);
     RUN_TEST(test_append_oom_is_retryable);
+    RUN_TEST(test_retained_id_eviction_is_durable_and_post_append);
+    RUN_TEST(test_recovery_retained_ids_publish_only_after_record_acceptance);
+    RUN_TEST(test_journal_rejects_null_positive_payload_before_mutation);
+    RUN_TEST(test_checkpoint_retained_id_count_limit_is_prepublication);
+    RUN_TEST(test_replay_window_limit_is_prewrite_and_checkpoint_resets_it);
+    RUN_TEST(test_total_record_limit_bounds_all_frame_types_before_write_and_recovery);
+    RUN_TEST(test_total_record_admission_precedes_model_staging_and_metadata_cache_mutation);
+    RUN_TEST(test_file_byte_admission_precedes_transaction_staging_and_metadata_cache_mutation);
+    RUN_TEST(test_checkpoint_byte_admission_precedes_attach_materialization_and_counts_ids);
+    RUN_TEST(test_checkpoint_pathological_length_rejects_before_write);
+    RUN_TEST(test_compact_admits_checkpoint_and_cached_metadata_as_one_layout);
+    RUN_TEST(test_checkpoint_byte_admission_precedes_compact_materialization);
+    RUN_TEST(test_checkpoint_byte_admission_precedes_undo_redo_materialization);
+    RUN_TEST(test_save_stages_path_normalization_without_invalidating_history);
+    RUN_TEST(test_save_as_compact_recovery_keeps_source_target_self_contained);
+    RUN_TEST(test_mark_saved_preserves_deep_history_without_clone_work);
+    RUN_TEST(test_replay_operation_budget_is_prewrite_preclone_and_checkpoint_reset);
+    RUN_TEST(test_recovery_rejects_aggregate_operation_overflow_before_apply);
+    RUN_TEST(test_recovery_rejects_duplicate_operations_before_aggregate_apply);
     RUN_TEST(test_short_write_every_boundary);
     RUN_TEST(test_torn_tail_invisible);
     RUN_TEST(test_checksum_mismatch);
@@ -2618,13 +4063,15 @@ int main(int argc, char **argv) {
     RUN_TEST(test_compaction_resets_to_one_checkpoint);
     RUN_TEST(test_compaction_preserves_retained_ids);
     RUN_TEST(test_compaction_then_commit_recovers_as_ckpt_plus_op);
+    RUN_TEST(test_compaction_relative_source_ops_recover_canonical_paths);
     RUN_TEST(test_compaction_no_journal_is_noop);
     RUN_TEST(test_compaction_truncate_failure_is_fault);
     RUN_TEST(test_compaction_init_failure_poisons);
-    RUN_TEST(test_compaction_broken_store_detaches_to_journal_less);
+    RUN_TEST(test_compaction_broken_store_keeps_fail_closed_authority);
     /* R4: journal-gated undo/redo checkpoint commits (P1-1) */
     RUN_TEST(test_journal_undo_append_failure_rolls_back_history_commit);
     RUN_TEST(test_journal_redo_append_failure_rolls_back_history_commit);
+    RUN_TEST(test_history_eviction_waits_for_journal_append_ack);
     RUN_TEST(test_revision_max_rejects_commit_and_history_without_overflow);
     RUN_TEST(test_recovery_rejects_invalid_or_nonmonotonic_revisions);
     RUN_TEST(test_journal_undo_recovers_undone_state);
@@ -2643,6 +4090,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_set_metadata_write_failure_is_reported_but_still_caches);
     RUN_TEST(test_peek_agrees_recover_torn_tail);
     RUN_TEST(test_peek_agrees_recover_midstream_corrupt);
+    RUN_TEST(test_peek_and_recover_share_retained_id_policy);
     RUN_TEST(test_recovered_metadata_survives_recompaction);
     RUN_TEST(test_v2_header_reads_version_mismatch);
     /* R5b-1: model-level metadata glue the GUI calls at the set_path identity chokepoint */

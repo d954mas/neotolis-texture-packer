@@ -35,7 +35,9 @@
 #include "tp_core/tp_arena.h"
 #include "tp_core/tp_export.h"
 #include "tp_core/tp_export_run.h"
+#include "tp_core/tp_identity.h"
 #include "tp_core/tp_input.h"
+#include "tp_core/tp_operation.h"
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_project.h"
 #include "unity.h"
@@ -46,6 +48,19 @@ static uint8_t g_rgba[32 * 32 * 4]; /* opaque square for the clamp pack regressi
 
 void setUp(void) {}
 void tearDown(void) {}
+
+void test_internal_pack_name_has_one_core_formatter(void) {
+    tp_id128 source_id = {{0}};
+    source_id.bytes[15] = 0x2AU;
+    char name[TP_PACK_INTERNAL_NAME_CAP];
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_pack_input_format_sprite_name(source_id, "dir/hero.png", name,
+                                         sizeof name, &error));
+    TEST_ASSERT_EQUAL_STRING(
+        "source_0000000000000000000000000000002a:dir/hero.png", name);
+}
 
 // #region fixture helpers
 static void mkdir_p(const char *path) {
@@ -79,7 +94,9 @@ static void write_file(const char *path, const char *content) {
 /* Finds the desc with the given raw name, or NULL. */
 static const tp_pack_sprite_desc *find_desc(const tp_pack_input *in, const char *name) {
     for (int i = 0; i < in->count; i++) {
-        if (strcmp(in->descs[i].name, name) == 0) {
+        if ((in->descs[i].source_key &&
+             strcmp(in->descs[i].source_key, name) == 0) ||
+            strcmp(in->descs[i].name, name) == 0) {
             return &in->descs[i];
         }
     }
@@ -95,12 +112,19 @@ static void build_hero(int atlas_shape, const tp_project_sprite *ov_template, tp
     tp_project_atlas *a = tp_project_get_atlas(p, 0);
     a->shape = atlas_shape;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_source(a, g_hero));
+    memset(&a->sources[0].id, 0x11, sizeof a->sources[0].id);
     if (ov_template) {
         tp_project_sprite *sp = NULL;
-        TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_sprite(a, "hero", &sp));
-        const char *keep_name = sp->name; /* the finder key; template does not carry it */
+        TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                              tp_project_atlas_add_sprite_by_source_key(
+                                  a, a->sources[0].id, "hero.png", &sp));
+        char *keep_name = sp->name;
+        char *keep_key = sp->src_key;
+        tp_id128 keep_source = sp->source_ref;
         *sp = *ov_template;
-        sp->name = (char *)keep_name;
+        sp->name = keep_name;
+        sp->src_key = keep_key;
+        sp->source_ref = keep_source;
     }
     tp_error e = {0};
     TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, tp_pack_input_build(p, 0, out, &e), e.msg);
@@ -121,6 +145,12 @@ static tp_project_sprite ov_default(void) {
     s.ov_margin = TP_PROJECT_OV_INHERIT;
     s.ov_extrude = TP_PROJECT_OV_INHERIT;
     return s;
+}
+
+static tp_id128 test_id(uint8_t byte) {
+    tp_id128 id;
+    memset(&id, byte, sizeof id);
+    return id;
 }
 // #endregion
 
@@ -150,7 +180,8 @@ void test_file_source_override(void) {
     TEST_ASSERT_EQUAL_INT(1, in.count);
     TEST_ASSERT_EQUAL_INT(0, in.missing_sources);
     const tp_pack_sprite_desc *d = &in.descs[0];
-    TEST_ASSERT_EQUAL_STRING("hero.png", d->name); /* ext kept in the raw name */
+    TEST_ASSERT_EQUAL_STRING("hero.png", d->source_key);
+    TEST_ASSERT_EQUAL_STRING("hero", d->logical_name);
     TEST_ASSERT_NOT_NULL(d->path);
     TEST_ASSERT_TRUE(d->origin_x > 0.74F && d->origin_x < 0.76F);
     TEST_ASSERT_TRUE(d->origin_y > 0.24F && d->origin_y < 0.26F);
@@ -166,7 +197,7 @@ void test_file_source_no_override(void) {
     build_hero(2 /*CONCAVE atlas*/, NULL, &in);
     TEST_ASSERT_EQUAL_INT(1, in.count);
     const tp_pack_sprite_desc *d = &in.descs[0];
-    TEST_ASSERT_EQUAL_STRING("hero.png", d->name);
+    TEST_ASSERT_EQUAL_STRING("hero.png", d->source_key);
     TEST_ASSERT_TRUE(d->origin_x > 0.49F && d->origin_x < 0.51F);
     TEST_ASSERT_EQUAL_UINT8(0, d->ov_mask);
     tp_pack_input_free(&in);
@@ -191,8 +222,11 @@ void test_folder_dotfile_key(void) {
     tp_project_atlas *a = tp_project_get_atlas(p, 0);
     a->shape = 0;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_source(a, root));
+    memset(&a->sources[0].id, 0x12, sizeof a->sources[0].id);
     tp_project_sprite *sp = NULL;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_sprite(a, "tank/.png", &sp));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_sprite_by_source_key(
+                              a, a->sources[0].id, "tank/.png", &sp));
     sp->origin_x = 0.1F;
 
     tp_pack_input in;
@@ -269,11 +303,104 @@ void test_per_source_order(void) {
     tp_project_destroy(p);
 
     TEST_ASSERT_EQUAL_INT(3, in.count);
-    TEST_ASSERT_EQUAL_STRING("a.png", in.descs[0].name);
-    TEST_ASSERT_EQUAL_STRING("y.png", in.descs[1].name);
-    TEST_ASSERT_EQUAL_STRING_MESSAGE("b.png", in.descs[2].name,
+    TEST_ASSERT_EQUAL_STRING("a.png", in.descs[0].source_key);
+    TEST_ASSERT_EQUAL_STRING("y.png", in.descs[1].source_key);
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("b.png", in.descs[2].source_key,
                                      "second source's child must follow the first source's (no global sort)");
     tp_pack_input_free(&in);
+}
+
+void test_same_source_key_in_two_sources_keeps_distinct_override_identity(void) {
+    char first_dir[700];
+    char second_dir[700];
+    char path[800];
+    char project_path[800];
+    (void)snprintf(first_dir, sizeof first_dir, "%s/same_key_first", g_dir);
+    (void)snprintf(second_dir, sizeof second_dir, "%s/same_key_second", g_dir);
+    mkdir_p(first_dir);
+    mkdir_p(second_dir);
+    (void)snprintf(path, sizeof path, "%s/hero.png", first_dir);
+    write_file(path, "A");
+    (void)snprintf(path, sizeof path, "%s/hero.png", second_dir);
+    write_file(path, "B");
+    (void)snprintf(project_path, sizeof project_path,
+                   "%s/two_source_identity.ntpacker_project", g_dir);
+
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    tp_project_atlas *atlas = tp_project_get_atlas(project, 0);
+    atlas->id = test_id(0x11U);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_source(atlas, first_dir));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_source(atlas, second_dir));
+    atlas->sources[0].id = test_id(0x21U);
+    atlas->sources[1].id = test_id(0x22U);
+
+    tp_operation set = {0};
+    set.kind = TP_OP_SPRITE_OVERRIDE_SET;
+    set.atlas_id = atlas->id;
+    set.u.sprite_set.src_key = (char *)"hero.png";
+    set.u.sprite_set.mask = TP_SPF_ORIGIN;
+    set.u.sprite_set.origin_x = 0.1F;
+    set.u.sprite_set.origin_y = 0.2F;
+    set.u.sprite_set.source_id = atlas->sources[0].id;
+    tp_op_reject reject;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_operation_apply(project, &set, &reject));
+    set.u.sprite_set.source_id = atlas->sources[1].id;
+    set.u.sprite_set.origin_x = 0.8F;
+    set.u.sprite_set.origin_y = 0.9F;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_operation_apply(project, &set, &reject));
+    TEST_ASSERT_EQUAL_INT(2, atlas->sprite_count);
+
+    tp_error error = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK,
+                                  tp_project_save(project, project_path,
+                                                  &error), error.msg);
+    tp_project_destroy(project);
+    project = NULL;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK,
+                                  tp_project_load(project_path, &project,
+                                                  &error), error.msg);
+    atlas = tp_project_get_atlas(project, 0);
+    const tp_project_sprite *first =
+        tp_project_atlas_find_sprite_by_source_key(
+            atlas, atlas->sources[0].id, "hero.png");
+    const tp_project_sprite *second =
+        tp_project_atlas_find_sprite_by_source_key(
+            atlas, atlas->sources[1].id, "hero.png");
+    TEST_ASSERT_NOT_NULL(first);
+    TEST_ASSERT_NOT_NULL(second);
+    TEST_ASSERT_TRUE(first != second);
+    TEST_ASSERT_TRUE(first->origin_x > 0.09F && first->origin_x < 0.11F);
+    TEST_ASSERT_TRUE(second->origin_x > 0.79F && second->origin_x < 0.81F);
+
+    tp_pack_input input = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK,
+                                  tp_pack_input_build(project, 0, &input,
+                                                      &error), error.msg);
+    TEST_ASSERT_EQUAL_INT(2, input.count);
+    TEST_ASSERT_TRUE(input.descs[0].origin_x > 0.09F &&
+                     input.descs[0].origin_x < 0.11F);
+    TEST_ASSERT_TRUE(input.descs[1].origin_x > 0.79F &&
+                     input.descs[1].origin_x < 0.81F);
+    tp_pack_input_free(&input);
+
+    tp_operation clear = {0};
+    clear.kind = TP_OP_SPRITE_OVERRIDE_CLEAR;
+    clear.atlas_id = atlas->id;
+    clear.u.sprite_clear.source_id = atlas->sources[0].id;
+    clear.u.sprite_clear.src_key = (char *)"hero.png";
+    clear.u.sprite_clear.mask = TP_SPF_ALL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_operation_apply(project, &clear, &reject));
+    TEST_ASSERT_NULL(tp_project_atlas_find_sprite_by_source_key(
+        atlas, atlas->sources[0].id, "hero.png"));
+    TEST_ASSERT_NOT_NULL(tp_project_atlas_find_sprite_by_source_key(
+        atlas, atlas->sources[1].id, "hero.png"));
+    tp_project_destroy(project);
 }
 
 /* A resolvable-but-absent source is counted as missing and contributes no descs;
@@ -294,6 +421,54 @@ void test_missing_source_count(void) {
     TEST_ASSERT_EQUAL_INT(1, in.count);
     TEST_ASSERT_EQUAL_INT(1, in.missing_sources);
     tp_pack_input_free(&in);
+}
+
+void test_long_resolved_source_path_is_not_silently_dropped(void) {
+    tp_project *p = tp_project_create();
+    TEST_ASSERT_NOT_NULL(p);
+    tp_project_atlas *a = tp_project_get_atlas(p, 0);
+    TEST_ASSERT_NOT_NULL(a);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_source(a, "sprite.png"));
+
+    const size_t dir_len = 700U;
+    p->project_dir = (char *)malloc(dir_len + 1U);
+    TEST_ASSERT_NOT_NULL(p->project_dir);
+    memcpy(p->project_dir, "C:/", 3U);
+    memset(p->project_dir + 3U, 'a', dir_len - 3U);
+    p->project_dir[dir_len] = '\0';
+
+    tp_pack_input in = {0};
+    tp_error e = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_pack_input_build(p, 0, &in, &e));
+    TEST_ASSERT_EQUAL_INT(0, in.count);
+    TEST_ASSERT_EQUAL_INT(1, in.missing_sources);
+    tp_pack_input_free(&in);
+    tp_project_destroy(p);
+}
+
+void test_source_path_beyond_identity_limit_is_structured_failure(void) {
+    tp_project *p = tp_project_create();
+    TEST_ASSERT_NOT_NULL(p);
+    tp_project_atlas *a = tp_project_get_atlas(p, 0);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_source(a, "sprite.png"));
+
+    const size_t dir_len = (size_t)TP_IDENTITY_PATH_MAX + 32U;
+    p->project_dir = (char *)malloc(dir_len + 1U);
+    TEST_ASSERT_NOT_NULL(p->project_dir);
+    memcpy(p->project_dir, "C:/", 3U);
+    memset(p->project_dir + 3U, 'b', dir_len - 3U);
+    p->project_dir[dir_len] = '\0';
+
+    tp_pack_input in = {0};
+    tp_error e = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS,
+                          tp_pack_input_build(p, 0, &in, &e));
+    TEST_ASSERT_NULL(in.descs);
+    TEST_ASSERT_EQUAL_INT(0, in.count);
+    TEST_ASSERT_NOT_NULL(strstr(e.msg, "source path"));
+    tp_project_destroy(p);
 }
 
 /* Bad arguments return structured errors and leave *out empty, never crash.
@@ -386,13 +561,17 @@ int main(int argc, char **argv) {
     }
 
     UNITY_BEGIN();
+    RUN_TEST(test_internal_pack_name_has_one_core_formatter);
     RUN_TEST(test_effective_shape_matrix);
     RUN_TEST(test_file_source_override);
     RUN_TEST(test_file_source_no_override);
     RUN_TEST(test_folder_dotfile_key);
     RUN_TEST(test_extrude_gating);
     RUN_TEST(test_per_source_order);
+    RUN_TEST(test_same_source_key_in_two_sources_keeps_distinct_override_identity);
     RUN_TEST(test_missing_source_count);
+    RUN_TEST(test_long_resolved_source_path_is_not_silently_dropped);
+    RUN_TEST(test_source_path_beyond_identity_limit_is_structured_failure);
     RUN_TEST(test_bad_args);
     RUN_TEST(test_concave_extrude_clamp_exports);
     return UNITY_END();

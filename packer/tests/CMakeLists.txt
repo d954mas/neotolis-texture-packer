@@ -83,6 +83,49 @@ target_compile_options(tp_test_transaction PRIVATE -U_DLL)
 nt_set_warning_flags(tp_test_transaction)   # AGENTS.md invariant: our test TUs too
 add_test(NAME tp_transaction COMMAND tp_test_transaction)
 
+# Architecture foundation M1: the synchronous session is the only live model
+# owner; snapshots are independently owned and rejected commits publish nothing.
+add_executable(tp_test_session test_session.c)
+target_link_libraries(tp_test_session PRIVATE tp_core unity)
+target_include_directories(tp_test_session PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_options(tp_test_session PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_session)
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_session_test")
+add_test(NAME tp_session COMMAND tp_test_session "${CMAKE_BINARY_DIR}/tp_session_test")
+
+add_executable(tp_test_job_owner test_job_owner.c)
+target_link_libraries(tp_test_job_owner PRIVATE tp_core tinycthread unity)
+target_include_directories(tp_test_job_owner PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_options(tp_test_job_owner PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_job_owner)
+add_test(NAME tp_job_owner COMMAND tp_test_job_owner)
+
+# M5 thin-boundary validation: all project validation rules are core-owned and
+# exposed as an owned typed report over a file-oriented entry point.
+add_executable(tp_test_validate test_validate.c)
+target_link_libraries(tp_test_validate PRIVATE tp_core unity)
+target_include_directories(tp_test_validate PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_definitions(tp_test_validate PRIVATE
+    TP_CLI_TESTDATA_DIR="${CMAKE_SOURCE_DIR}/apps/cli/testdata"
+    TP_VALIDATE_TEST_DIR="${CMAKE_BINARY_DIR}/tp_validate_test")
+target_compile_options(tp_test_validate PRIVATE -U_DLL)
+target_compile_definitions(tp_test_validate PRIVATE _CRT_SECURE_NO_WARNINGS)
+nt_set_warning_flags(tp_test_validate)
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_validate_test")
+add_test(NAME tp_validate COMMAND tp_test_validate)
+
+# Validation resource/complexity gate: a real saved project with 1k resolved
+# sprites, overrides, and frames. Elapsed time is evidence; deterministic probe
+# growth is the hard cross-platform contract.
+add_executable(tp_bench_validate tp_bench_validate.c)
+target_link_libraries(tp_bench_validate PRIVATE tp_core nt_time)
+target_include_directories(tp_bench_validate PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_options(tp_bench_validate PRIVATE -U_DLL)
+target_compile_definitions(tp_bench_validate PRIVATE _CRT_SECURE_NO_WARNINGS)
+nt_set_warning_flags(tp_bench_validate)
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_bench_validate")
+add_test(NAME tp_validate_large COMMAND tp_bench_validate "${CMAKE_BINARY_DIR}/tp_bench_validate")
+
 # F2-03: semantic diff / exact inverse (Undo) + redo replay + in-memory history.
 # The ORACLE suite: A->forward->B->inverse->A' byte-identical for EVERY op kind (and
 # == the legacy full-snapshot restore), reference cascade, a 100-anim batch as one
@@ -170,6 +213,24 @@ target_compile_options(tp_test_identity_session PRIVATE -U_DLL)
 nt_set_warning_flags(tp_test_identity_session)   # AGENTS.md invariant: our test TUs too
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_identity_test")
 add_test(NAME tp_identity_session COMMAND tp_test_identity_session "${CMAKE_BINARY_DIR}/tp_identity_test")
+
+# Architecture foundation M4/A1: OS-backed exclusive canonical project lease.
+# The executable re-enters itself as a child process to prove cross-process busy
+# detection while keeping the test independent from GUI/session/recovery code.
+add_executable(tp_test_project_lease test_project_lease.c)
+target_link_libraries(tp_test_project_lease PRIVATE tp_core unity)
+target_compile_options(tp_test_project_lease PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_project_lease)
+add_test(NAME tp_project_lease COMMAND tp_test_project_lease
+    "${CMAKE_BINARY_DIR}/tp_project_lease_test" "$<TARGET_FILE:ntpacker>")
+
+add_executable(tp_test_recovery_store test_recovery_store.c)
+target_link_libraries(tp_test_recovery_store PRIVATE tp_core unity)
+target_include_directories(tp_test_recovery_store PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_options(tp_test_recovery_store PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_recovery_store)
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_recovery_store_test")
+add_test(NAME tp_recovery_store COMMAND tp_test_recovery_store "${CMAKE_BINARY_DIR}/tp_recovery_store_test")
 
 # A1 op-layer: canonical sprite-name key + natural order + common prefix.
 # Pins the dot-basename key fix that the showcase draw-hash gate cannot see.

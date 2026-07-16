@@ -15,8 +15,6 @@
 
 /* Reader recovers exact frame rects only for page dims <= 4096 (plan §2.5), and
  * that is also the builder's own texture-size cap (nt_builder.h:43). */
-#define TP_PACK_MAX_PAGE_DIM NT_BUILD_MAX_TEXTURE_SIZE
-
 /* The desc override values (tp_pack.h) mirror the engine encoding 1:1. */
 _Static_assert(TP_PACK_SPRITE_SHAPE_RECT == NT_ATLAS_SPRITE_SHAPE_RECT, "sprite shape RECT encoding");
 _Static_assert(TP_PACK_SPRITE_SHAPE_CONVEX == NT_ATLAS_SPRITE_SHAPE_CONVEX, "sprite shape CONVEX encoding");
@@ -69,29 +67,31 @@ static tp_status validate_settings(const tp_pack_settings *s, tp_error *err) {
     if (!s->sprites || s->sprite_count <= 0) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_pack: at least one sprite is required");
     }
-    if (s->max_size < 1 || s->max_size > TP_PACK_MAX_PAGE_DIM) {
+    if (!tp_pack_max_size_valid(s->max_size)) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_pack: max_size %d out of range [1..%d]", s->max_size,
                             (int)TP_PACK_MAX_PAGE_DIM);
     }
-    if (s->padding < 0 || s->margin < 0 || s->extrude < 0) {
+    if (!tp_pack_nonnegative_valid(s->padding) ||
+        !tp_pack_nonnegative_valid(s->margin) ||
+        !tp_pack_nonnegative_valid(s->extrude)) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_pack: padding/margin/extrude must be >= 0");
     }
-    if (s->alpha_threshold < 0 || s->alpha_threshold > 255) {
+    if (!tp_pack_alpha_threshold_valid(s->alpha_threshold)) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_pack: alpha_threshold %d out of range [0..255]",
                             s->alpha_threshold);
     }
-    if (s->max_vertices < 1 || s->max_vertices > 16) {
+    if (!tp_pack_max_vertices_valid(s->max_vertices)) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_pack: max_vertices %d out of range [1..16]",
                             s->max_vertices);
     }
-    if (s->shape < NT_ATLAS_SHAPE_RECT || s->shape > NT_ATLAS_SHAPE_CONCAVE_CONTOUR) {
+    if (!tp_pack_shape_valid(s->shape)) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_pack: shape %d out of range [0..2]", s->shape);
     }
-    if (s->extrude > 0 && s->shape != NT_ATLAS_SHAPE_RECT) {
+    if (!tp_pack_extrude_shape_valid(s->extrude, s->shape)) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "tp_pack: extrude > 0 is only valid for shape RECT (got shape %d)", s->shape);
     }
-    if (!(s->pixels_per_unit > 0.0f) || !isfinite(s->pixels_per_unit)) {
+    if (!tp_pack_pixels_per_unit_valid(s->pixels_per_unit)) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_pack: pixels_per_unit must be positive and finite");
     }
 
@@ -117,7 +117,8 @@ static tp_status validate_settings(const tp_pack_settings *s, tp_error *err) {
                                 "tp_pack: sprite '%s' allow_rotate override %d invalid (only no-rotate)", sp->name,
                                 (int)sp->ov_allow_rotate);
         }
-        if ((sp->ov_mask & TP_PACK_OV_MAXVERT) && (sp->ov_max_vertices < 1 || sp->ov_max_vertices > 16)) {
+        if ((sp->ov_mask & TP_PACK_OV_MAXVERT) &&
+            !tp_pack_max_vertices_valid(sp->ov_max_vertices)) {
             return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                                 "tp_pack: sprite '%s' max_vertices override %d out of range [1..16]", sp->name,
                                 (int)sp->ov_max_vertices);

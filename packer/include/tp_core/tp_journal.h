@@ -65,6 +65,20 @@ extern "C" {
  * Normal Save compaction reclaims the append budget. */
 #define TP_JOURNAL_MAX_FILE_BYTES (64U * 1024U * 1024U)
 
+/* Explicit component budgets within the file bound. They prevent hostile tiny
+ * records from turning byte-bounded recovery into an unbounded descriptor
+ * allocation while preserving the calibrated 64 MiB recovery fixture. */
+/* 28-byte header + 12-byte record frame leave this exact payload maximum. */
+#define TP_JOURNAL_MAX_RECORD_BYTES (TP_JOURNAL_MAX_FILE_BYTES - 40U)
+/* Total CRC-valid frames of every type in one sidecar. This is independent of
+ * the post-checkpoint replay window: repeated META/CKPT frames are bounded too. */
+#define TP_JOURNAL_MAX_RECORDS 524288U
+/* Independent post-checkpoint replay budgets. The record limit bounds descriptor
+ * count; the operation limit bounds the aggregate decoded work across those
+ * records. Both reset only after a durable checkpoint. */
+#define TP_JOURNAL_MAX_REPLAY_RECORDS 262144U
+#define TP_JOURNAL_MAX_REPLAY_OPERATIONS 262144U
+
 /* ---- injectable I/O seam ------------------------------------------------- *
  * The journal never calls the filesystem directly: all durability goes through
  * this seam, so the fault suite drives an in-memory backing store with a write-
@@ -139,19 +153,6 @@ tp_status tp_journal_init_checkpoint(tp_journal *j, const uint8_t *snapshot, siz
  * -- nothing partially compacted). NULL journal -> TP_STATUS_INVALID_ARGUMENT. */
 tp_status tp_journal_compact(tp_journal *j, const uint8_t *snapshot, size_t len, int64_t revision, tp_error *err);
 
-/* Append one committed transaction record {id_hex(32 hex), revision, snapshot}.
- * This is the ACKNOWLEDGEMENT gate: a transaction is committed only once this
- * returns OK. It is the LAST fallible step of a commit -- everything after a
- * successful append is allocation-free. Internally, in order:
- *   (1) reserve an in-memory retained-id slot (OOM -> TP_STATUS_OOM, nothing written);
- *   (2) durably write the framed record (short write / I/O error -> the store is
- *       truncated back to its prior length, TP_STATUS_JOURNAL_FAILED);
- *   (3) infallibly register id_hex in the reserved slot.
- * On ANY non-OK return nothing was durably retained and id_hex is NOT registered,
- * so the same transaction id stays retryable (never poisoned to DUPLICATE_ID). */
-tp_status tp_journal_append_txn(tp_journal *j, const char *id_hex, int64_t revision, const uint8_t *snapshot,
-                                size_t len, tp_error *err);
-
 /* R5a: record the owning project's metadata {timestamp, path, name} so a startup scan can list
  * this journal's crashed project by path + name + time. The values are cached on the journal for
  * compaction and appended durably immediately. EVERY append failure is returned, even when the
@@ -203,13 +204,14 @@ typedef struct tp_journal_meta {
     bool has_file_fingerprint; /* false for legacy metadata and untitled projects */
 } tp_journal_meta;
 
-/* Format B (R2): one recovered post-checkpoint committed transaction -- an owned op-payload
- * to replay onto the base checkpoint. The payload is a tp_txn_request_encode() blob (canonical
- * NUL-terminated JSON); the model<->journal glue decodes it and re-applies its ops to reach the
- * committed state, so the journal itself stays payload-agnostic (no tp_project/tp_operation dep). */
+/* Format B (R2): one recovered post-checkpoint committed transaction. `payload` is a read-only
+ * borrowed span into the recovery result's single bounded raw-record buffer. It is NOT required
+ * to be NUL-terminated and remains valid until tp_journal_recovery_free. The model<->journal glue
+ * must decode exactly payload_len bytes and re-apply the operations to reach the committed state,
+ * so the journal itself stays payload-agnostic (no tp_project/tp_operation dependency). */
 typedef struct tp_journal_recovered_op {
-    char *payload;       /* owned, NUL-terminated: a serialized tp_txn_request to replay */
-    size_t payload_len;  /* payload length in bytes, excludes the NUL */
+    const char *payload; /* borrowed, read-only serialized tp_txn_request bytes */
+    size_t payload_len;  /* exact payload length in bytes */
     int64_t revision;    /* the committed revision this transaction produced */
 } tp_journal_recovered_op;
 
@@ -227,13 +229,15 @@ typedef struct tp_journal_recovery {
     /* Format B REPLAY BASELINE: `snapshot` is the LAST CHECKPOINT's project bytes -- the base
      * that recovery loads and then replays `ops` onto. (Under the old format-A journal this was
      * the last good record's snapshot; format-B checkpoints are the only snapshot-bearing records.)
-     * NUL-terminated (*snapshot_len excludes the NUL), or NULL if no checkpoint was recovered.
-     * Caller frees via tp_journal_recovery_free (or moves it out). */
-    char *snapshot;
+     * It is a read-only borrowed length-delimited span into `_raw_record_buffer`, is NOT required
+     * to be NUL-terminated, and remains valid until tp_journal_recovery_free. NULL if no usable
+     * checkpoint was recovered. */
+    const char *snapshot;
     size_t snapshot_len;
-    /* Format B: the post-checkpoint committed transactions, in commit order, each an owned
-     * op-payload to replay onto `snapshot` to reach `revision`. Empty (NULL/0) when no txn
-     * followed the last checkpoint. Freed by tp_journal_recovery_free. */
+    /* Format B: the post-checkpoint committed transactions, in commit order. Each payload is a
+     * borrowed span owned by this recovery result and replayed onto `snapshot` to reach `revision`.
+     * Empty (NULL/0) when no txn followed the last checkpoint. Freed by
+     * tp_journal_recovery_free. */
     tp_journal_recovered_op *ops;
     size_t op_count;
     /* R5a: the LAST metadata record seen (last-wins), owned. A META record is NOT a txn/ckpt:
@@ -242,6 +246,11 @@ typedef struct tp_journal_recovery {
      * tp_journal_recovery_free. */
     tp_journal_meta metadata;
     bool has_metadata;
+    /* Internal owner for snapshot and every borrowed ops[i].payload span. Callers must not access
+     * or free it; tp_journal_recovery_free releases it after the span list. Kept in the result so
+     * spans remain valid when ownership is transferred out of tp_model_recover. */
+    uint8_t *_raw_record_buffer;
+    size_t _raw_record_buffer_len;
 } tp_journal_recovery;
 
 void tp_journal_recovery_free(tp_journal_recovery *r);

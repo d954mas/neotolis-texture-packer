@@ -1,16 +1,17 @@
-/* Shared project loader for the read verbs (B2). One home for the exit-3
- * structured-error path so inspect and validate fail identically. */
+/* Shared immutable project loader for the read verbs. One home for the exit-3
+ * structured-error path so inspect, validate, and pack fail identically. */
 #include "cli_cmds.h"
 
 #include "cli_exit.h"
 #include "cli_out.h"
 #include "tp_core/tp_error.h"
-#include "tp_core/tp_project.h"
+#include "tp_core/tp_session.h"
 
-int cli_load_project(const char *path, bool json, bool quiet, tp_project **out) {
+int cli_load_snapshot(const char *path, bool json, bool quiet,
+                      tp_session_snapshot **out) {
     *out = NULL;
     tp_error err = {0};
-    tp_status st = tp_project_load(path, out, &err);
+    tp_status st = tp_session_snapshot_load(path, out, &err);
     if (st == TP_STATUS_OK) {
         return CLI_EXIT_OK;
     }

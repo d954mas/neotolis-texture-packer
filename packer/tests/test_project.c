@@ -416,7 +416,7 @@ void test_absolute_path_relativized(void) {
     tp_error err = {0};
     TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, tp_project_load(path, &loaded, &err), err.msg);
     TEST_ASSERT_NOT_NULL(loaded);
-    /* loaded model still holds the absolute path (relativize is a save step) */
+    /* Loaded model holds the absolute spelling; Save relativizes only its staged output. */
     TEST_ASSERT_EQUAL_INT(1, loaded->atlases[0].source_count);
 
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_save(loaded, path, &err));
@@ -428,8 +428,13 @@ void test_absolute_path_relativized(void) {
     TEST_ASSERT_NULL(strstr(buf, norm_dir));           /* absolute prefix gone */
     free(buf);
 
-    /* model source is now the relative form */
-    TEST_ASSERT_EQUAL_STRING("art/hero", loaded->atlases[0].sources[0].path);
+    /* Serialization normalization is staged; Save does not rewrite the live
+     * source record behind history/client references. */
+    char expected_source[1024];
+    (void)snprintf(expected_source, sizeof expected_source, "%s/art/hero",
+                   norm_dir);
+    TEST_ASSERT_EQUAL_STRING(expected_source,
+                             loaded->atlases[0].sources[0].path);
     tp_project_destroy(loaded);
 }
 
@@ -453,8 +458,86 @@ void test_resolve_path(void) {
     /* absolute passes through (normalized to '/') */
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_resolve_path(p, "C:/abs/x.png", out, sizeof out));
     TEST_ASSERT_EQUAL_STRING("C:/abs/x.png", out);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_project_resolve_source_path(p, NULL, out,
+                                                         sizeof out));
 
     tp_project_destroy(p);
+}
+
+void test_save_as_preserves_relative_source_target(void) {
+    char old_path[512];
+    char new_path[512];
+    join(old_path, sizeof old_path, "relative-old.ntpacker_project");
+    char new_dir[512];
+    (void)snprintf(new_dir, sizeof new_dir, "%s", g_dir);
+    char *slash = strrchr(new_dir, '/');
+    if (!slash) {
+        slash = strrchr(new_dir, '\\');
+    }
+    TEST_ASSERT_NOT_NULL(slash);
+    *slash = '\0';
+    (void)snprintf(new_path, sizeof new_path,
+                   "%s/relative-new.ntpacker_project", new_dir);
+
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_source(&project->atlases[0], "art/hero"));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_target(&project->atlases[0],
+                                    TP_EXPORTER_ID_JSON_NEOTOLIS,
+                                    "out/atlas", NULL));
+    promote(project);
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_save(project, old_path, &err));
+    char old_base[1024];
+    (void)snprintf(old_base, sizeof old_base, "%s", project->project_dir);
+    char resolved_before[1024];
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_resolve_source_path(project, "art/hero", resolved_before,
+                                       sizeof resolved_before));
+
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_save(project, new_path, &err));
+    TEST_ASSERT_EQUAL_STRING(new_dir, project->project_dir);
+    TEST_ASSERT_EQUAL_STRING(old_base, project->source_base_dir);
+    char resolved_after[1024];
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_resolve_source_path(
+            project, project->atlases[0].sources[0].path, resolved_after,
+            sizeof resolved_after));
+    TEST_ASSERT_EQUAL_STRING(resolved_before, resolved_after);
+    char target_after[1024];
+    char expected_target[1024];
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_resolve_path(project, "out/atlas", target_after,
+                                sizeof target_after));
+    (void)snprintf(expected_target, sizeof expected_target, "%s/out/atlas",
+                   new_dir);
+    TEST_ASSERT_EQUAL_STRING(expected_target, target_after);
+
+    tp_project *reloaded = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_load(new_path, &reloaded, &err));
+    char reloaded_target[1024];
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_resolve_source_path(
+            reloaded, reloaded->atlases[0].sources[0].path, reloaded_target,
+            sizeof reloaded_target));
+    TEST_ASSERT_EQUAL_STRING(resolved_before, reloaded_target);
+
+    tp_project_destroy(reloaded);
+    tp_project_destroy(project);
+    (void)remove(new_path);
+    (void)remove(old_path);
 }
 
 /* 6. atlas -> tp_pack_settings mapping; defaults flow from one place */
@@ -592,6 +675,43 @@ void test_buffer_roundtrip(void) {
     free(bb);
     tp_project_destroy(from_file);
     tp_project_destroy(from_buf);
+    tp_project_destroy(p);
+}
+
+void test_serialized_size_bounded_matches_writer_without_materialization(void) {
+    tp_project *p = build_rich();
+    promote(p);
+    tp_error err = {0};
+    size_t measured = 0U;
+
+    tp_project__test_serialization_stats_reset();
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_serialized_size_bounded(p, SIZE_MAX, &measured, &err));
+    TEST_ASSERT_GREATER_THAN_size_t(0U, measured);
+    TEST_ASSERT_EQUAL_size_t(0U, tp_project__test_save_buffer_calls());
+    TEST_ASSERT_EQUAL_size_t(0U, tp_project__test_serializer_allocations());
+    TEST_ASSERT_EQUAL_size_t(0U, tp_project__test_load_buffer_calls());
+
+    char *bytes = NULL;
+    size_t written = 0U;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_save_buffer(p, &bytes, &written, &err));
+    TEST_ASSERT_EQUAL_size_t(measured, written);
+    TEST_ASSERT_EQUAL_size_t(1U, tp_project__test_save_buffer_calls());
+    TEST_ASSERT_GREATER_THAN_size_t(0U,
+                                    tp_project__test_serializer_allocations());
+    free(bytes);
+
+    tp_project__test_serialization_stats_reset();
+    measured = 123U;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_project_serialized_size_bounded(p, written - 1U, &measured, &err));
+    TEST_ASSERT_EQUAL_size_t(0U, measured);
+    TEST_ASSERT_EQUAL_size_t(0U, tp_project__test_save_buffer_calls());
+    TEST_ASSERT_EQUAL_size_t(0U, tp_project__test_serializer_allocations());
+    TEST_ASSERT_EQUAL_size_t(0U, tp_project__test_load_buffer_calls());
     tp_project_destroy(p);
 }
 
@@ -1171,6 +1291,57 @@ void test_fingerprinted_io_clears_output_on_failure(void) {
     TEST_ASSERT_EQUAL_INT(0, remove(path));
 }
 
+void test_core_owns_animation_and_target_defaults_without_truncation(void) {
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    promote(project);
+    tp_project_atlas *atlas = &project->atlases[0];
+    char name[128];
+    tp_error err = {0};
+
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_next_animation_name(
+                              project, atlas->id, NULL, name, sizeof name,
+                              &err));
+    TEST_ASSERT_EQUAL_STRING("anim1", name);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_animation(atlas, name, NULL));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_next_animation_name(
+                              project, atlas->id, NULL, name, sizeof name,
+                              &err));
+    TEST_ASSERT_EQUAL_STRING("anim2", name);
+
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_animation(atlas, "walk", NULL));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_next_animation_name(
+                              project, atlas->id, "walk", name, sizeof name,
+                              &err));
+    TEST_ASSERT_EQUAL_STRING("walk2", name);
+
+    char long_base[200];
+    memset(long_base, 'x', sizeof long_base - 1U);
+    long_base[sizeof long_base - 1U] = '\0';
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS,
+                          tp_project_next_animation_name(
+                              project, atlas->id, long_base, name, sizeof name,
+                              &err));
+    TEST_ASSERT_EQUAL_CHAR('\0', name[0]);
+
+    const char *exporter_id = NULL;
+    char out_path[128];
+    bool enabled = false;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_target_defaults(
+                              project, atlas->id, &exporter_id, out_path,
+                              sizeof out_path, &enabled, &err));
+    TEST_ASSERT_EQUAL_STRING(TP_EXPORTER_ID_JSON_NEOTOLIS, exporter_id);
+    TEST_ASSERT_EQUAL_STRING("out/atlas1", out_path);
+    TEST_ASSERT_TRUE(enabled);
+    tp_project_destroy(project);
+}
+
 int main(int argc, char **argv) {
     g_dir = (argc > 1) ? argv[1] : ".";
     UNITY_BEGIN();
@@ -1184,10 +1355,12 @@ int main(int argc, char **argv) {
     RUN_TEST(test_unknown_keys_ignored);
     RUN_TEST(test_absolute_path_relativized);
     RUN_TEST(test_resolve_path);
+    RUN_TEST(test_save_as_preserves_relative_source_target);
     RUN_TEST(test_to_settings_mapping);
     RUN_TEST(test_mutation_helpers);
     RUN_TEST(test_anim_frame_edit);
     RUN_TEST(test_buffer_roundtrip);
+    RUN_TEST(test_serialized_size_bounded_matches_writer_without_materialization);
     RUN_TEST(test_add_source_dedupe);
     RUN_TEST(test_source_kind_roundtrip);
     RUN_TEST(test_v3_source_dup_collapse);
@@ -1206,5 +1379,6 @@ int main(int argc, char **argv) {
     RUN_TEST(test_save_with_fingerprint_returns_exact_written_bytes);
     RUN_TEST(test_save_rejects_bytes_above_reader_limit_before_publish);
     RUN_TEST(test_fingerprinted_io_clears_output_on_failure);
+    RUN_TEST(test_core_owns_animation_and_target_defaults_without_truncation);
     return UNITY_END();
 }

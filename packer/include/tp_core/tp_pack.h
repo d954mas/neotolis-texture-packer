@@ -17,9 +17,11 @@
  * yields a byte-identical session .ntpack and a field-identical tp_result. */
 
 #include <stdbool.h>
+#include <float.h>
 #include <stdint.h>
 
 #include "tp_core/tp_error.h"
+#include "tp_core/tp_id.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -27,6 +29,39 @@ extern "C" {
 
 struct tp_arena;
 struct tp_result;
+
+/* Canonical packing-knob contract shared by operation admission, saved-project
+ * validation, and the defensive Pack boundary. Keep one owner so clients cannot
+ * drift from the engine/build cap. */
+#ifndef NT_BUILD_MAX_TEXTURE_SIZE
+#define TP_PACK_MAX_PAGE_DIM 4096
+#else
+#define TP_PACK_MAX_PAGE_DIM NT_BUILD_MAX_TEXTURE_SIZE
+#endif
+#define TP_PACK_ALPHA_MAX 255
+#define TP_PACK_MAX_VERTICES 16
+#define TP_PACK_SHAPE_MIN 0
+#define TP_PACK_SHAPE_MAX 2
+
+static inline bool tp_pack_max_size_valid(int value) {
+    return value >= 1 && value <= TP_PACK_MAX_PAGE_DIM;
+}
+static inline bool tp_pack_nonnegative_valid(int value) { return value >= 0; }
+static inline bool tp_pack_alpha_threshold_valid(int value) {
+    return value >= 0 && value <= TP_PACK_ALPHA_MAX;
+}
+static inline bool tp_pack_max_vertices_valid(int value) {
+    return value >= 1 && value <= TP_PACK_MAX_VERTICES;
+}
+static inline bool tp_pack_shape_valid(int value) {
+    return value >= TP_PACK_SHAPE_MIN && value <= TP_PACK_SHAPE_MAX;
+}
+static inline bool tp_pack_pixels_per_unit_valid(float value) {
+    return value > 0.0F && value <= FLT_MAX;
+}
+static inline bool tp_pack_extrude_shape_valid(int extrude, int shape) {
+    return extrude == 0 || shape == TP_PACK_SHAPE_MIN;
+}
 
 /* tp_pack_sprite_desc.ov_mask bits: which atlas packing knobs a sprite overrides.
  * A zero ov_mask = inherit everything (zero-init safe -- existing desc builders and
@@ -52,6 +87,13 @@ struct tp_result;
 typedef struct tp_pack_sprite_desc {
     const char *name; /* required, unique within the atlas */
     const char *path; /* file input; if NULL, the raw fields below are used */
+
+    /* Optional canonical project identity. Project-built inputs populate these
+     * and use `name` as an internal collision-free packing key; exporters map
+     * back to logical_name. Direct raw pack callers may leave them zero/NULL. */
+    tp_id128 source_id;
+    const char *source_key;
+    const char *logical_name;
 
     const uint8_t *rgba; /* raw RGBA8, w*h*4 bytes, y-down; used when path == NULL */
     int w;

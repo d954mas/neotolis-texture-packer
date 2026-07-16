@@ -112,11 +112,11 @@ tp_status tp_project_validate_ids(const tp_project *p, tp_error *err);
  *     sprite_id is tp_sprite_id(source_id, src_key);
  *   - zero matches       -> left pending (a soft orphan: it applies to nothing now
  *     and re-keys automatically if the file returns);
- *   - more than one match -> left pending, NEVER guessed (an ambiguous legacy
- *     reference across sources; validate surfaces it -- §5.6).
+ *   - more than one match -> TP_STATUS_INVALID_ARGUMENT, NEVER guessed (an
+ *     ambiguous legacy reference across sources -- §5.6).
  * A record that is ALREADY migrated is untouched (so a stored orphan keeps its
- * identity and reactivates purely through the name-based apply path). Mutates `p`;
- * returns TP_STATUS_OK, or TP_STATUS_OOM (every record left unchanged on the OOM). */
+ * identity and reactivates only if that canonical source/key returns). Mutation is
+ * atomic for the selected atlas: ambiguity or OOM leaves every record unchanged. */
 tp_status tp_project_resolve_atlas_sprites(tp_project *p, int atlas_index, const struct tp_sprite_index *idx,
                                            tp_error *err);
 

@@ -91,23 +91,23 @@ void test_nat_cmp_table(void) {
 void test_common_prefix_table(void) {
     char out[192];
 
-    char two[2][192] = {"walk_01", "walk_02"};
+    const char *two[2] = {"walk_01", "walk_02"};
     tp_names_common_prefix(two, 2, out, sizeof out);
     TEST_ASSERT_EQUAL_STRING("walk", out); /* trailing digits + '_' trimmed */
 
-    char three[3][192] = {"walk_01", "walk_02", "walk_03"};
+    const char *three[3] = {"walk_01", "walk_02", "walk_03"};
     tp_names_common_prefix(three, 3, out, sizeof out);
     TEST_ASSERT_EQUAL_STRING("walk", out);
 
-    char folder[2][192] = {"tank/walk_1", "tank/walk_2"};
+    const char *folder[2] = {"tank/walk_1", "tank/walk_2"};
     tp_names_common_prefix(folder, 2, out, sizeof out);
     TEST_ASSERT_EQUAL_STRING("tank/walk", out);
 
-    char none[2][192] = {"run_1", "jump_1"};
+    const char *none[2] = {"run_1", "jump_1"};
     tp_names_common_prefix(none, 2, out, sizeof out); /* no shared prefix */
     TEST_ASSERT_EQUAL_STRING("", out);
 
-    char one[1][192] = {"hero"};
+    const char *one[1] = {"hero"};
     tp_names_common_prefix(one, 1, out, sizeof out); /* single: whole name, no trailing to trim */
     TEST_ASSERT_EQUAL_STRING("hero", out);
 

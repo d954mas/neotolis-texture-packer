@@ -12,7 +12,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "tp_core/tp_project.h" /* tp_project / tp_project_atlas (build_rows signature) */
+#include "tp_core/tp_id.h"
+#include "tp_core/tp_scan.h"
 
 #include "gui_state.h" /* shared editor state the row/selection helpers read + grow */
 
@@ -39,32 +40,47 @@ int nat_cmp_qsort(const void *a, const void *b);
  * companions to the multi-select set (P1 fix, step 7): they MUST hold the whole selection or the sort
  * path would re-introduce the old truncation. sel_sort_reserve grows both to >= n (false == OOM, old
  * capacity kept); callers must reserve before writing. */
-extern char (*s_sel_sort_buf)[192];
+extern char (*s_sel_sort_buf)[TP_SCAN_REL_CAP];
 extern const char **s_sel_sort_ptr;
 bool sel_sort_reserve(int n);
 
-/* --- flattened sprite rows for the current atlas, rebuilt each frame (growable; P1 fix, step 7) --- */
+/* --- flattened sprite rows for the current atlas (growable; P1 fix, step 7) --- */
 typedef struct sprite_row {
     int src;
     int child;
     int indent;
     bool is_source;
     bool is_folder;
+    tp_id128 source_id;
+    char source_key[TP_SCAN_REL_CAP];
     bool missing;             /* source path gone from disk (§3.7) */
     char label[224];          /* display label (rename-aware: "final (file.png)") */
-    char sprite_name[192];    /* atlas-relative override key ("" for folders / missing) */
+    char sprite_name[TP_SCAN_REL_CAP]; /* export key; "" for folders / missing */
     char abs[512];
 } sprite_row;
 extern sprite_row *s_rows;
 extern int s_row_count;
 
-/* Rebuilds s_rows/s_row_count for atlas `a` of project `proj` (folders expand to their children). */
-void build_rows(tp_project *proj, tp_project_atlas *a);
+/* Updates s_rows/s_row_count for the selected atlas (folders expand to their
+ * children). The row model is cached by {atlas id, project model
+ * generation, source scan generation}; an unchanged call only compares that
+ * key and performs no allocation or filesystem work. */
+void build_rows(void);
 
 #if defined(NTPACKER_GUI_BENCH)
 typedef struct gui_rows_bench_counters {
     uint64_t row_realloc_calls;
+    uint64_t override_index_realloc_calls;
+    uint64_t cache_key_checks;
+    uint64_t rebuilds;
+    uint64_t override_inserts;
+    uint64_t override_lookup_calls;
+    uint64_t override_probes;
+    uint64_t source_iterations;
+    uint64_t path_resolve_calls;
+    uint64_t child_iterations;
     int row_capacity;
+    int override_index_capacity;
 } gui_rows_bench_counters;
 
 void gui_rows_bench_reset_counters(void);

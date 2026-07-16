@@ -14,7 +14,9 @@ hit() {
 
 # Sources under apps/, excluding vendored deps and the selftest (test-internal code).
 app_srcs() {
-    find apps -name '*.c' -o -name '*.h' | grep -v '/deps/' | grep -v 'gui_selftest.c'
+    find apps -type f \( -name '*.c' -o -name '*.h' \) |
+        grep -v '/deps/' |
+        grep -vE '/(gui_selftest|test_[^/]*|tp_bench_[^/]*)\.(c|h)$'
 }
 
 # 1. No sprite-name extension stripping outside tp_core (tp_sprite_export_key is
@@ -139,6 +141,126 @@ if ! printf '    a->padding = 7;\n' | grep -qE "$_galiaswrite"; then
 fi
 if printf '    op.u.atlas_settings.padding = iv;\n    tp_project_atlas_seed_default_target(p, idx);\n    tp_id128 aid = a->id;\n' | grep -qE "$_gmuts|$_gprojwrite|$_galiaswrite"; then
     hit "R7-selftest" "R7 detector false-positives on a legitimate op-payload / lifecycle / alias-read line"
+fi
+
+# 8. A shipping frontend must not create/borrow mutable model/project authority.
+#    Reads use immutable session snapshots; mutation/persistence goes through
+#    tp_session. There is no read-only tp_project exemption.
+_frontend_authority='(^|[^A-Za-z0-9_])(tp_model[[:space:]]*\*|tp_model_[A-Za-z0-9_]*\(|tp_project[[:space:]]*\*|tp_project_(load|create|destroy|get_atlas|save|save_with_fingerprint|save_if_unchanged|add_atlas|remove_atlas|set_atlas_name|atlas_[A-Za-z0-9_]*)\(|tp_identity_file_fingerprint\()'
+r8=$(app_srcs | grep -vE '/(test_[^/]*|tp_bench_[^/]*)\.(c|h)$' |
+    xargs grep -nE "$_frontend_authority" 2>/dev/null | grep -v 'boundary-ok:')
+[ -n "$r8" ] && hit "R8 mutable model/direct save in shipping frontend (use tp_session)" "$r8"
+for _seed in \
+    '    tp_model *m;' \
+    '    tp_model_can_redo(m);' \
+    '    tp_project *p;' \
+    '    tp_project_load(path, &p, &err);' \
+    '    tp_project_get_atlas(p, 0);' \
+    '    tp_project_save(p, path, &err);' \
+    '    tp_project_save_with_fingerprint(p, path, &fp, &err);' \
+    '    tp_project_save_if_unchanged(p, path, fp, &err);' \
+    '    tp_identity_file_fingerprint(path, &fp, &err);'
+do
+    if ! printf '%s\n' "$_seed" | grep -qE "$_frontend_authority"; then
+        hit "R8-selftest" "R8 detector failed to catch seeded authority: $_seed"
+    fi
+done
+if printf '    tp_session *s = NULL;\n    tp_session_save(s, &result, &err);\n    tp_project_save_buffer(p, &bytes, &length, &err);\n    const tp_snapshot_atlas *a = view;\n' |
+    grep -qE "$_frontend_authority"; then
+    hit "R8-selftest" "R8 detector false-positives on session authority / read-only serialization / immutable DTOs"
+fi
+
+# 9. The GUI may present recovery choices and map typed results, but it must not
+#    own the recovery store/live slot/claim or construct journal I/O. Those
+#    lifetimes belong to the shared recovery/session boundary.
+_gui_recovery_owner='(^|[^A-Za-z0-9_])(tp_recovery_(domain|store|live|claim)[[:space:]]*\*|tp_recovery_(domain|store|live|claim)_[A-Za-z0-9_]*\(|tp_journal_(create|destroy|io_[A-Za-z0-9_]*)\()'
+r9=$(find apps/gui -type f \( -name '*.c' -o -name '*.h' \) |
+    grep -vE '/(gui_selftest|test_[^/]*|tp_bench_[^/]*)\.(c|h)$' |
+    xargs grep -nE "$_gui_recovery_owner" 2>/dev/null | grep -v 'boundary-ok:')
+[ -n "$r9" ] && hit "R9 recovery storage ownership in GUI (use shared recovery flow)" "$r9"
+if ! printf '    tp_recovery_domain *domain;\n    tp_recovery_store *store;\n    tp_journal_io_file(path);\n' |
+    grep -qE "$_gui_recovery_owner"; then
+    hit "R9-selftest" "R9 detector failed to catch seeded GUI recovery ownership"
+fi
+if printf '    tp_recovery_candidates list;\n    tp_recovery_resolution *choice;\n' |
+    grep -qE "$_gui_recovery_owner"; then
+    hit "R9-selftest" "R9 detector false-positives on recovery presentation/result DTOs"
+fi
+
+# 10. tp_session is orchestration only. It may call public recovery/lease APIs,
+#     but may not depend on a frontend/protocol or contain a recovery codec,
+#     filesystem/lock backend, Pack, or Export implementation.
+_session_deps='#include[[:space:]]*[<"][^>"]*(apps/|gui|cli|protocol|cJSON)'
+_session_impl='(^|[^A-Za-z0-9_])(fopen|fwrite|open|CreateFile|LockFile|tp_journal_(encode|decode)[A-Za-z0-9_]*|tp_pack|tp_export_run)[[:space:]]*\('
+r10a=$(grep -nE "$_session_deps" packer/src/tp_session.c packer/src/tp_session_internal.h 2>/dev/null |
+    grep -v 'boundary-ok:')
+[ -n "$r10a" ] && hit "R10a frontend/protocol dependency in tp_session" "$r10a"
+r10b=$(grep -nE "$_session_impl" packer/src/tp_session.c packer/src/tp_session_internal.h 2>/dev/null |
+    grep -v 'boundary-ok:')
+[ -n "$r10b" ] && hit "R10b backend/codec/Pack/Export implementation in tp_session" "$r10b"
+if ! printf '#include "apps/gui/gui_project.h"\n' | grep -qE "$_session_deps"; then
+    hit "R10-selftest" "R10a detector failed to catch seeded GUI dependency"
+fi
+if ! printf '    FILE *f = fopen(path, "rb");\n    tp_pack(input, &out, &err);\n' |
+    grep -qE "$_session_impl"; then
+    hit "R10-selftest" "R10b detector failed to catch seeded backend/job implementation"
+fi
+if printf '#include "tp_core/tp_recovery.h"\n    tp_project_lease_acquire(path, &lease, &err);\n    tp_session_snapshot_create(s, &snapshot, &err);\n' |
+    grep -qE "$_session_deps|$_session_impl"; then
+    hit "R10-selftest" "R10 detector false-positives on allowed public orchestration calls"
+fi
+
+# 11. GUI source refresh has one publication choke point. The scan backend may
+#     clear its own cache, but shipping callers must also advance the session
+#     source generation/event through gui_project_invalidate_sources().
+r11=$(find apps/gui -type f \( -name '*.c' -o -name '*.h' \) |
+    grep -vE '/(gui_project|gui_scan|gui_selftest|test_[^/]*|tp_bench_[^/]*)\.(c|h)$' |
+    xargs grep -nE 'gui_scan_invalidate_all[[:space:]]*\(' 2>/dev/null)
+[ -n "$r11" ] && hit "R11 raw GUI source invalidation outside project chokepoint" "$r11"
+if ! printf '    gui_scan_invalidate_all();\n' | grep -qE 'gui_scan_invalidate_all[[:space:]]*\('; then
+    hit "R11-selftest" "R11 detector failed to catch a seeded raw invalidation"
+fi
+
+# 12. Deferred collection intents capture stable IDs + expected revision, never
+#     a mutable collection index. A sanctioned non-entity option carries the
+#     normal boundary-ok annotation.
+_queued_index='(^|[^A-Za-z0-9_])int[[:space:]]+s_pending_[A-Za-z0-9_]*(atlas|source|anim|target|selection)[[:space:]]*(=|;)'
+r12=$(grep -nE "$_queued_index" apps/gui/gui_actions.c apps/gui/gui_actions.h 2>/dev/null |
+    grep -v 'boundary-ok:')
+[ -n "$r12" ] && hit "R12 queued GUI collection index (capture stable ID + revision)" "$r12"
+if ! printf '    int s_pending_browse_target = -1;\n' | grep -qE "$_queued_index"; then
+    hit "R12-selftest" "R12 detector failed to catch a seeded queued target index"
+fi
+
+# 13. gui_pack is a thin adapter over the session-owned typed runtime handle.
+#     Worker/thread/atomic job authority belongs to tp_build (tp_job.c), never
+#     to the frontend again. Synchronous selftest helpers must drain this same
+#     typed path; direct input/settings assembly or Pack/Export algorithms are
+#     not a sanctioned second route.
+_gui_job_owner='(^|[^A-Za-z0-9_])(thrd_(create|join)|atomic_[A-Za-z0-9_]*|_Atomic|pack_worker|export_worker|s_job(_active)?|tp_pack[[:space:]]*\(|tp_pack_input_build[A-Za-z0-9_]*[[:space:]]*\(|tp_pack_settings_build[A-Za-z0-9_]*[[:space:]]*\(|tp_export_snapshot_job_[A-Za-z0-9_]*[[:space:]]*\(|tp_pack_sprite_desc)([^A-Za-z0-9_]|$)'
+r13=$(grep -nE "$_gui_job_owner" apps/gui/gui_pack.c 2>/dev/null |
+    grep -v 'boundary-ok:')
+[ -n "$r13" ] && hit "R13 GUI owns Pack/Export worker state (use tp_session job API)" "$r13"
+if ! printf '    static _Atomic int s_job_active;\n    thrd_create(&thread, pack_worker, ctx);\n    tp_pack(&settings, arena, &result, &err);\n' |
+    grep -qE "$_gui_job_owner"; then
+    hit "R13-selftest" "R13 detector failed to catch seeded GUI job authority"
+fi
+if printf '    tp_session_pack_job_start(session, &request, &err);\n    tp_session_job_poll(session, &progress, &err);\n' |
+    grep -qE "$_gui_job_owner"; then
+    hit "R13-selftest" "R13 detector false-positives on typed job orchestration"
+fi
+
+# 14. Core semantic-diff admission is the single no-change owner. The deleted
+#     GUI action tags and pending_is_noop mirror must not return under another
+#     maintenance pass; the adapter submits typed intent and observes revision.
+_gui_noop_owner='(^|[^A-Za-z0-9_])(pending_is_noop|gui_action|GUI_ACT_[A-Za-z0-9_]+)([^A-Za-z0-9_]|$)'
+r14=$(grep -nE "$_gui_noop_owner" apps/gui/gui_project.c apps/gui/gui_project.h 2>/dev/null)
+[ -n "$r14" ] && hit "R14 GUI duplicates semantic no-change ownership" "$r14"
+if ! printf '    static bool pending_is_noop(void);\n' | grep -qE "$_gui_noop_owner"; then
+    hit "R14-selftest" "R14 detector failed to catch seeded GUI no-op ownership"
+fi
+if printf '    refresh_after_session_commit();\n' | grep -qE "$_gui_noop_owner"; then
+    hit "R14-selftest" "R14 detector false-positives on thin post-commit projection"
 fi
 
 if [ "$fail" -eq 0 ]; then

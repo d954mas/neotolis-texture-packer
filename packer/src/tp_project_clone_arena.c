@@ -75,6 +75,7 @@ size_t tp_project_clone_arena_footprint(const tp_project *src) {
     }
     size_t n = acl_align_up(sizeof(tp_project));
     n += acl_str_bytes(src->project_dir);
+    n += acl_str_bytes(src->source_base_dir);
     if (src->atlas_count > 0) {
         n += acl_align_up((size_t)src->atlas_count * sizeof(tp_project_atlas));
     }
@@ -232,11 +233,15 @@ tp_project *tp_project_clone_into_arena(const tp_project *src, tp_arena *arena) 
     }
     dst->schema_version = src->schema_version;
     dst->project_dir = NULL;
+    dst->source_base_dir = NULL;
     dst->atlases = NULL;
     dst->atlas_count = 0;
     dst->atlas_cap = 0;
 
     if (!acl_dup(arena, src->project_dir, &dst->project_dir)) {
+        return NULL;
+    }
+    if (!acl_dup(arena, src->source_base_dir, &dst->source_base_dir)) {
         return NULL;
     }
     if (!acl_array(arena, src->atlas_count, sizeof(tp_project_atlas), (void **)&dst->atlases)) {

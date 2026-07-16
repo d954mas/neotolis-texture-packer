@@ -24,7 +24,7 @@ if(WIN32)
     target_link_libraries(tinyfiledialogs PUBLIC comdlg32 ole32 shell32 user32)
 endif()
 
-add_executable(ntpacker-gui main.c gui_state.c gui_widgets.c gui_actions.c gui_rows.c gui_selftest.c gui_shot.c gui_startup.c gui_paths.c gui_log_file.c gui_crash.c gui_project.c gui_scan.c gui_canvas.c gui_pack.c gui_view_settings.c gui_view_lists.c gui_view_canvas.c gui_view_chrome.c)
+add_executable(ntpacker-gui main.c gui_state.c gui_widgets.c gui_actions.c gui_rows.c gui_selftest.c gui_shot.c gui_startup.c gui_paths.c gui_log_file.c gui_crash.c gui_project.c gui_session_adapter.c gui_scan.c gui_canvas.c gui_pack.c gui_view_settings.c gui_view_lists.c gui_view_canvas.c gui_view_chrome.c)
 # Link set derived from examples/ui_showcase; nt_shape_renderer is re-added for the atlas-page
 # canvas overlays (region outlines / hull polygons / pivot markers). Kept the concrete impls the
 # engine's *_interface deps require at final link: nt_gfx (font/ui), nt_fs + nt_http_stub
@@ -33,8 +33,8 @@ add_executable(ntpacker-gui main.c gui_state.c gui_widgets.c gui_actions.c gui_r
 # tp_build (in-process packing) is now linked: engine issue #282 is FIXED (basisu single shared
 # transcoder TU, commit 8d0133cb), so nt_builder + nt_basisu_encoder no longer duplicate the render
 # runtime's transcoder symbol and coexist with nt_gfx in one image. tp_build PUBLIC-links tp_core +
-# nt_builder, so the read/model/edit core comes transitively. The GUI packs atlases live via
-# gui_pack.c -> tp_pack. stb_image decodes source images for the canvas source-preview mode.
+# nt_builder, so the read/model/edit core comes transitively. gui_pack.c is a thin adapter over
+# session-owned typed Pack/Export jobs. stb_image decodes images for source-preview mode.
 target_link_libraries(ntpacker-gui PRIVATE
     nt_core nt_app nt_input nt_window nt_math nt_log nt_time nt_resource
     nt_material nt_shared nt_atlas
@@ -43,7 +43,7 @@ target_link_libraries(ntpacker-gui PRIVATE
     nt_gfx nt_http_stub nt_fs nt_clipboard
     nt_fpng # dev screenshot mode (--shot): PNG-encode the framebuffer readback
     tp_build stb_image tinyfiledialogs
-    tinycthread # interactive async pack/export worker thread (gui_pack.c); already in-closure via nt_builder
+    tinycthread # thread-safe GUI log sink; already in-closure via nt_builder
 )
 # D2 crash handler: MiniDumpWriteDump (gui_crash.c) needs DbgHelp on Windows. Target-scoped link
 # addition only (no preset/toolchain change); POSIX uses libc backtrace, no extra lib.
@@ -52,6 +52,7 @@ if(WIN32)
 endif()
 # Generated asset header from the pack builder (ntpacker_ui_assets.h).
 target_include_directories(ntpacker-gui PRIVATE "${GUI_GENERATED_DIR}")
+target_include_directories(ntpacker-gui PRIVATE "${CMAKE_SOURCE_DIR}/packer/src")
 # Shared product version header (apps/common/ntpacker_version.h), also used by the CLI.
 target_include_directories(ntpacker-gui PRIVATE "${CMAKE_SOURCE_DIR}/apps/common")
 # The engine sets these build-wide via add_compile_definitions in its OWN directory scope;
@@ -119,6 +120,28 @@ target_compile_definitions(tp_bench_gui_rows PRIVATE
 nt_set_warning_flags(tp_bench_gui_rows)
 nt_set_sanitizer_flags(tp_bench_gui_rows)
 set_target_properties(tp_bench_gui_rows PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${GUI_OUTPUT_DIR}")
+
+# M1 contract probe: the production GUI atlas-rename adapter must admit the
+# canonical transaction through tp_session and read the result from one owned
+# snapshot. Headless: no window, renderer, dialogs, or GUI globals.
+add_executable(tp_test_gui_session_adapter test_gui_session_adapter.c gui_session_adapter.c)
+target_link_libraries(tp_test_gui_session_adapter PRIVATE tp_core unity)
+target_compile_options(tp_test_gui_session_adapter PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_gui_session_adapter)
+nt_set_sanitizer_flags(tp_test_gui_session_adapter)
+add_test(NAME tp_gui_session_adapter COMMAND tp_test_gui_session_adapter)
+
+# M5 capability/parity corpus. The second adapter is intentionally test-only:
+# it calls tp_session directly and proves the future transport host needs no
+# duplicate mutable session wrapper.
+add_executable(tp_test_client_parity test_client_parity.c gui_session_adapter.c)
+target_link_libraries(tp_test_client_parity PRIVATE tp_build unity)
+target_compile_options(tp_test_client_parity PRIVATE -U_DLL)
+target_compile_definitions(tp_test_client_parity PRIVATE
+    TP_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+nt_set_warning_flags(tp_test_client_parity)
+nt_set_sanitizer_flags(tp_test_client_parity)
+add_test(NAME tp_client_parity COMMAND tp_test_client_parity)
 
 set(GUI_PACK_NAMES ntpacker_ui.ntpack)
 

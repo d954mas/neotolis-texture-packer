@@ -31,10 +31,22 @@ void tp_txn__result_reset(tp_txn_result *out, const char *id_hex);
  * batch never falsely commits under allocation pressure. */
 bool tp_txn__result_add_error(tp_txn_result *out, int op_index, tp_status code, const char *field, const char *msg);
 
+/* Exact one-allocation collector used after the JSON shape pass has counted its
+ * bounded errors. Keeps capacity private to the collector instead of leaking
+ * builder state into the public result DTO. */
+bool tp_txn__result_reserve_errors(tp_txn_result *out, int count);
+bool tp_txn__result_add_error_reserved(tp_txn_result *out, int capacity, int op_index,
+                                       tp_status code, const char *field, const char *msg);
+
 /* True iff `s` is exactly 32 lowercase-hex characters (the 128-bit idempotency
  * transaction-id shape). Shared by the envelope structural decode and the preflight
  * so the two id-format checks cannot drift. NULL-safe (NULL -> false). */
 bool tp_txn__is_hex32_lower(const char *s);
+
+/* Shared typed/JSON operation-count admission. A negative count is malformed;
+ * a count above TP_TXN_MAX_OPS is a resource-bound rejection. Runs before the
+ * typed operation array is allocated/lowered or the model is cloned. */
+tp_status tp_txn__check_op_count(int op_count, tp_error *err);
 
 /* The shared preflight gate BOTH entry points run before the atomic commit, so the
  * typed path (tp_model_apply) and the JSON path (tp_model_apply_json) cannot drift:
@@ -57,7 +69,7 @@ tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_tx
  * The live model is never touched; tp_history.c calls this as the LAST fallible
  * gate before publishing an Undo/Redo candidate + cursor move. */
 tp_status tp_model__append_history_checkpoint(tp_model *m, const tp_project *candidate, int64_t revision,
-                                              tp_error *err);
+                                              size_t snapshot_bytes, tp_error *err);
 
 /* Checked monotonic revision increment shared by transaction commit and Undo/Redo.
  * Rejects corrupted negative/MAX revisions before any staging or signed overflow. */
@@ -67,6 +79,41 @@ tp_status tp_model__next_revision(int64_t current, int64_t *next, tp_error *err)
  * Set N so the (N+1)th add_error grow returns failure once, proving that a dropped
  * shape-error record still forces a reject (the batch never falsely commits). */
 void tp_txn__test_set_add_error_fail(int nth);
+
+/* Deterministic complexity probes for the bounded JSON path. The op-walk counter
+ * counts linked-list node inspections across structural/shape/lowering passes;
+ * the error-allocation counter counts backing-array grow allocations. */
+void tp_txn__test_complexity_reset(void);
+size_t tp_txn__test_op_walk_steps(void);
+size_t tp_txn__test_error_allocations(void);
+void tp_txn__test_count_op_walk(size_t steps);
+
+/* Canonical request sizing/encoding probes. A byte-cap rejection must perform
+ * the exact sizing pass with zero allocations and must not enter the allocating
+ * encoder at all. */
+void tp_txn__test_encode_stats_reset(void);
+size_t tp_txn__test_request_encode_calls(void);
+size_t tp_txn__test_last_measure_allocations(void);
+
+/* Run the allocation-free JSON operation-count preflight and report input-byte
+ * inspections. The scanner is single-pass; adversarial nesting tests pin work <=
+ * input length instead of relying on wall-clock timing. */
+tp_status tp_txn__test_json_precheck(const char *json, size_t json_len, size_t *steps,
+                                     tp_error *err);
+
+/* Allocation-free exact operation count for one bounded canonical request span.
+ * Recovery uses this for its aggregate replay admission before cJSON lowering or
+ * any operation is applied. */
+tp_status tp_txn__count_operations_json_n(const char *json, size_t json_len,
+                                          int *count_out, tp_error *err);
+
+/* Recovery-only lowering after the same payload span already passed the exact
+ * byte/count preflight. Skips that duplicate lexical scan, but verifies the
+ * parsed operation count before returning a request. */
+tp_status tp_txn__decode_prechecked_json_n(const char *json, size_t json_len,
+                                           int expected_op_count,
+                                           tp_txn_request **out,
+                                           tp_error *err);
 
 /* Test-only allocation fault seam for tp_project_clone (implemented in
  * tp_project_clone.c; default off / -1). Set N to make the (N+1)th clone
@@ -78,5 +125,16 @@ void tp_project__test_set_clone_alloc_fail(int nth);
  * succeeded or was fault-injected). Lets a fault-injection test sweep every clone
  * allocation index without hard-coding the count. */
 int tp_project__test_clone_alloc_count(void);
+
+/* Sum of successful allocation request sizes owned by the last successful
+ * clone. For a completed clone this is its exact payload live-byte count
+ * (allocator metadata excluded), not an estimate from allocation count. */
+size_t tp_project__test_clone_allocation_bytes(void);
+
+/* Exact semantic identity for one atlas, using the same field/order rules as
+ * tp_semantic_identity. The single-operation commit path uses it to detect a
+ * true no-change without folding unrelated atlases. */
+tp_id128 tp_semantic_atlas_identity(const tp_project *project,
+                                    const tp_project_atlas *atlas);
 
 #endif /* TP_CORE_SRC_TP_TXN_INTERNAL_H */

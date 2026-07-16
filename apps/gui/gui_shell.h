@@ -41,10 +41,8 @@ extern "C" {
  * a sibling view header. */
 void close_menubar_menus(void);
 
-/* Clears the shell's cached "result currently bound to the canvas" pointer (s_shown_result). Called by
- * the destructive flows (undo/redo/new/open) right after gui_pack_clear(-1) frees the slot arenas: the
- * cache would otherwise hold a freed address that next frame's `want != s_shown_result` bind compares
- * (indeterminate-pointer read, C11 6.2.4 -- P2 hardening). NULL is always a valid comparand. */
+/* Releases the canvas result borrow and clears the shell comparison cache after
+ * destructive flows free the pack-slot arenas. */
 void gui_shell_reset_shown_result(void);
 
 #ifdef __cplusplus

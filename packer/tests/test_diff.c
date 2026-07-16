@@ -33,6 +33,7 @@ void setUp(void) {}
 void tearDown(void) {
     tp_diff__test_set_alloc_fail(-1);
     tp_diff__test_reset_alloc_count();
+    tp_history__test_set_limits(0, 0U, 0U);
 }
 
 /* ---- fixtures ------------------------------------------------------------- */
@@ -309,7 +310,9 @@ void test_oracle_sprite_name_set(void) {
 
 void test_oracle_animation_create(void) {
     tp_model *m = fresh();
-    static char *frames[2] = {(char *)"hero", (char *)"hero2"};
+    tp_op_sprite_ref frames[2] = {
+        {src0_id(m), (char *)"hero.png"},
+        {src0_id(m), (char *)"hero2.png"}};
     tp_operation op;
     memset(&op, 0, sizeof op);
     op.kind = TP_OP_ANIMATION_CREATE;
@@ -393,7 +396,9 @@ void test_oracle_animation_settings_set(void) {
 
 void test_oracle_animation_frames_set(void) { /* reserved bulk op */
     tp_model *m = fresh();
-    static char *frames[3] = {(char *)"a", (char *)"b", (char *)"c"};
+    tp_op_sprite_ref frames[3] = {
+        {src0_id(m), (char *)"a.png"}, {src0_id(m), (char *)"b.png"},
+        {src0_id(m), (char *)"c.png"}};
     tp_operation op;
     memset(&op, 0, sizeof op);
     op.kind = TP_OP_ANIMATION_FRAMES_SET;
@@ -412,7 +417,7 @@ void test_oracle_animation_frame_add(void) {
     op.kind = TP_OP_ANIMATION_FRAME_ADD;
     op.atlas_id = a0_id(m);
     op.u.anim_frame_add.anim_id = anim0_id(m);
-    op.u.anim_frame_add.frame = (char *)"hero3";
+    op.u.anim_frame_add.frame = (tp_op_sprite_ref){src0_id(m), (char *)"hero3.png"};
     op.u.anim_frame_add.index = 1; /* insert in the middle */
     run_oracle(m, &op, 1);
     tp_model_destroy(m);
@@ -1147,6 +1152,121 @@ void test_reserve_oom_leaves_id_retryable(void) {
     tp_model_destroy(m);
 }
 
+/* ---- M3 bounded history admission + post-ACK FIFO ----------------------- */
+
+static tp_status apply_rename_result(tp_model *m, const char *name, tp_txn_result *res) {
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_ATLAS_RENAME;
+    op.atlas_id = a0_id(m);
+    op.u.atlas_rename.name = (char *)name;
+    tp_txn_request req = {0};
+    req.schema = TP_TXN_SCHEMA;
+    next_txn_id(req.id_hex);
+    req.expected_revision = tp_model_revision(m);
+    req.ops = &op;
+    req.op_count = 1;
+    tp_error err = {0};
+    memset(res, 0, sizeof *res);
+    return tp_model_apply(m, &req, res, &err);
+}
+
+static void commit_rename_ok(tp_model *m, const char *name) {
+    tp_txn_result res;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, apply_rename_result(m, name, &res));
+    TEST_ASSERT_TRUE(res.committed);
+    tp_txn_result_free(&res);
+}
+
+void test_history_record_exact_byte_boundary_and_oversize_reject(void) {
+    /* First measure the real owned components of this semantic diff. */
+    tp_model *probe = fresh();
+    commit_rename_ok(probe, "bounded");
+    const size_t bytes = probe->history->records[0]->bytes;
+    TEST_ASSERT_GREATER_THAN(sizeof(tp_diff_record) + sizeof(tp_diff_op), bytes);
+    TEST_ASSERT_EQUAL_UINT64(bytes, probe->history->bytes);
+    tp_model_destroy(probe);
+
+    /* Exact boundary is admitted. */
+    tp_history__test_set_limits(1, bytes, bytes);
+    tp_model *exact = fresh();
+    commit_rename_ok(exact, "bounded");
+    TEST_ASSERT_EQUAL_INT(1, tp_model_undo_depth(exact));
+    TEST_ASSERT_EQUAL_UINT64(bytes, exact->history->bytes);
+    tp_model_destroy(exact);
+
+    /* One byte below the measured record rejects before model publication. */
+    tp_history__test_set_limits(1, bytes - 1U, bytes - 1U);
+    tp_model *over = fresh();
+    char *before = serialize(tp_model_project(over));
+    tp_txn_result res;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS, apply_rename_result(over, "bounded", &res));
+    TEST_ASSERT_FALSE(res.committed);
+    TEST_ASSERT_EQUAL_INT(1, res.error_count);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS, res.errors[0].code);
+    TEST_ASSERT_EQUAL_STRING("history", res.errors[0].field);
+    TEST_ASSERT_EQUAL_INT64(0, tp_model_revision(over));
+    TEST_ASSERT_EQUAL_INT(0, tp_model_undo_depth(over));
+    char *after = serialize(tp_model_project(over));
+    TEST_ASSERT_EQUAL_STRING(before, after);
+    free(before);
+    free(after);
+    tp_txn_result_free(&res);
+    tp_model_destroy(over);
+}
+
+void test_history_step_budget_discards_redo_then_evicts_fifo(void) {
+    tp_history__test_set_limits(2, TP_HISTORY_MAX_BYTES, TP_HISTORY_MAX_RECORD_BYTES);
+    tp_model *m = fresh();
+    tp_error err = {0};
+
+    commit_rename_ok(m, "A");
+    commit_rename_ok(m, "B");
+    TEST_ASSERT_EQUAL_INT(2, tp_model_undo_depth(m)); /* exact step boundary */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_undo(m, &err));
+    TEST_ASSERT_EQUAL_STRING("A", tp_model_project(m)->atlases[0].name);
+    TEST_ASSERT_EQUAL_INT(1, tp_model_redo_depth(m));
+
+    commit_rename_ok(m, "C"); /* atomically drops B's redo branch */
+    TEST_ASSERT_EQUAL_INT(2, tp_model_undo_depth(m));
+    TEST_ASSERT_EQUAL_INT(0, tp_model_redo_depth(m));
+    commit_rename_ok(m, "D"); /* FIFO-evicts A; retained records are C,D */
+    TEST_ASSERT_EQUAL_INT(2, tp_model_undo_depth(m));
+
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_undo(m, &err));
+    TEST_ASSERT_EQUAL_STRING("C", tp_model_project(m)->atlases[0].name);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_undo(m, &err));
+    TEST_ASSERT_EQUAL_STRING("A", tp_model_project(m)->atlases[0].name);
+    TEST_ASSERT_FALSE(tp_model_can_undo(m));
+    TEST_ASSERT_LESS_OR_EQUAL_UINT64(TP_HISTORY_MAX_BYTES, m->history->bytes);
+    tp_model_destroy(m);
+}
+
+void test_history_total_byte_budget_evicts_fifo_at_exact_boundary(void) {
+    tp_model *probe = fresh();
+    commit_rename_ok(probe, "AAAAAA"); /* same byte length as the original atlas1 */
+    const size_t record_bytes = probe->history->records[0]->bytes;
+    tp_model_destroy(probe);
+
+    tp_history__test_set_limits(10, record_bytes * 2U, record_bytes);
+    tp_model *m = fresh();
+    commit_rename_ok(m, "AAAAAA");
+    commit_rename_ok(m, "BBBBBB");
+    TEST_ASSERT_EQUAL_INT(2, tp_model_undo_depth(m));
+    TEST_ASSERT_EQUAL_UINT64(record_bytes * 2U, m->history->bytes); /* exact total boundary */
+
+    commit_rename_ok(m, "CCCCCC"); /* byte budget, not step budget, evicts oldest */
+    TEST_ASSERT_EQUAL_INT(2, tp_model_undo_depth(m));
+    TEST_ASSERT_EQUAL_UINT64(record_bytes * 2U, m->history->bytes);
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_undo(m, &err));
+    TEST_ASSERT_EQUAL_STRING("BBBBBB", tp_model_project(m)->atlases[0].name);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_undo(m, &err));
+    TEST_ASSERT_EQUAL_STRING("AAAAAA", tp_model_project(m)->atlases[0].name);
+    TEST_ASSERT_FALSE(tp_model_can_undo(m));
+    tp_model_destroy(m);
+}
+
 /* ---- [5a] all-fields completeness oracle: the safety net for the deep-copy fork ---- */
 
 /* An atlas whose EVERY persistent field -- and every field of every child entity kind
@@ -1306,6 +1426,9 @@ int main(void) {
     RUN_TEST(test_capture_oob_frame_remove_index);
     /* [3] reserve-OOM keeps the transaction id retryable */
     RUN_TEST(test_reserve_oom_leaves_id_retryable);
+    RUN_TEST(test_history_record_exact_byte_boundary_and_oversize_reject);
+    RUN_TEST(test_history_step_budget_discards_redo_then_evicts_fifo);
+    RUN_TEST(test_history_total_byte_budget_evicts_fifo_at_exact_boundary);
     /* [5a] all-fields completeness oracle for the deep-copy fork */
     RUN_TEST(test_completeness_oracle_atlas_remove);
     RUN_TEST(test_completeness_oracle_source_remove);

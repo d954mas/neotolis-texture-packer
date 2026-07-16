@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "utf8proc.h"
+#include "tp_srckey_internal.h"
 
 /* ------------------------------------------------------------------------- *
  * Internal ASCII + component-lexing helpers (promoted from the C0-01
@@ -160,6 +161,26 @@ tp_status tp_srckey_casefold(const char *normalized_key, char *out, size_t cap, 
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "input or out is NULL");
     }
     return utf8_map_into(normalized_key, (utf8proc_option_t)(UTF8PROC_CASEFOLD | UTF8PROC_COMPOSE), out, cap, err);
+}
+
+tp_status tp_srckey__casefold_owned(const char *normalized_key, char **out,
+                                    tp_error *err) {
+    if (!normalized_key || !out) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "input or owned out is NULL");
+    }
+    *out = NULL;
+    utf8proc_uint8_t *folded = NULL;
+    size_t folded_len = 0U;
+    tp_status status = utf8_map_alloc(
+        normalized_key,
+        (utf8proc_option_t)(UTF8PROC_CASEFOLD | UTF8PROC_COMPOSE),
+        &folded, &folded_len, err);
+    (void)folded_len;
+    if (status == TP_STATUS_OK) {
+        *out = (char *)folded;
+    }
+    return status;
 }
 
 tp_status tp_srckey_collides(const char *key_a, const char *key_b, bool *out_collides, tp_error *err) {

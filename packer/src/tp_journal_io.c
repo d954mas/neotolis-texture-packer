@@ -26,12 +26,16 @@
 /* Windows `long` is 32-bit: ftell/fseek cap at 2 GB. Use the 64-bit CRT variants. */
 #define TP_FSEEK64(fp, off, whence) _fseeki64((fp), (off), (whence))
 #define TP_FTELL64(fp) _ftelli64((fp))
+#define TP_FDOPEN(fd, mode) _fdopen((fd), (mode))
+#define TP_CLOSE(fd) _close((fd))
 _Static_assert(sizeof(long long) == 8, "journal file offsets must be 64-bit");
 #else
 #include <unistd.h> /* ftruncate, fileno */
 /* fseeko/ftello take/return off_t (64-bit under _FILE_OFFSET_BITS=64 above). */
 #define TP_FSEEK64(fp, off, whence) fseeko((fp), (off), (whence))
 #define TP_FTELL64(fp) ftello((fp))
+#define TP_FDOPEN(fd, mode) fdopen((fd), (mode))
+#define TP_CLOSE(fd) close((fd))
 _Static_assert(sizeof(off_t) >= 8, "journal file offsets must be 64-bit (define _FILE_OFFSET_BITS=64)");
 #endif
 
@@ -278,6 +282,33 @@ static void file_destroy(void *ctx) {
     }
 }
 
+tp_journal_io tp_journal_io_file_adopt_fd(int native_fd) {
+    tp_journal_io io;
+    memset(&io, 0, sizeof io);
+    if (native_fd < 0) {
+        return io;
+    }
+    FILE *fp = TP_FDOPEN(native_fd, "r+b");
+    if (!fp) {
+        (void)TP_CLOSE(native_fd);
+        return io;
+    }
+    journal_file *f = (journal_file *)calloc(1, sizeof *f);
+    if (!f) {
+        (void)fclose(fp);
+        return io;
+    }
+    f->fp = fp;
+    io.ctx = f;
+    io.write = file_write;
+    io.length = file_length;
+    io.truncate = file_truncate;
+    io.read_all = file_read_all;
+    io.sync = file_sync;
+    io.destroy = file_destroy;
+    return io;
+}
+
 tp_journal_io tp_journal_io_file(const char *path) {
     tp_journal_io io;
     memset(&io, 0, sizeof io);
@@ -321,6 +352,33 @@ static int file_truncate_ro(void *ctx, size_t len) {
     (void)ctx;
     (void)len;
     return -1; /* read-only: cannot truncate */
+}
+
+tp_journal_io tp_journal_io_file_adopt_fd_read(int native_fd) {
+    tp_journal_io io;
+    memset(&io, 0, sizeof io);
+    if (native_fd < 0) {
+        return io;
+    }
+    FILE *fp = TP_FDOPEN(native_fd, "rb");
+    if (!fp) {
+        (void)TP_CLOSE(native_fd);
+        return io;
+    }
+    journal_file *f = (journal_file *)calloc(1, sizeof *f);
+    if (!f) {
+        (void)fclose(fp);
+        return io;
+    }
+    f->fp = fp;
+    io.ctx = f;
+    io.write = file_write_ro;
+    io.length = file_length;
+    io.truncate = file_truncate_ro;
+    io.read_all = file_read_all;
+    io.sync = NULL;
+    io.destroy = file_destroy;
+    return io;
 }
 
 tp_journal_io tp_journal_io_file_read(const char *path) {

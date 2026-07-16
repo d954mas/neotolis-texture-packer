@@ -55,11 +55,13 @@ void test_status_id_tokens(void) {
     TEST_ASSERT_EQUAL_STRING("recovery_cleanup_failed", tp_status_id(TP_STATUS_RECOVERY_CLEANUP_FAILED));
     TEST_ASSERT_EQUAL_STRING("recovery_busy", tp_status_id(TP_STATUS_RECOVERY_BUSY));
     TEST_ASSERT_EQUAL_STRING("recovery_claim_failed", tp_status_id(TP_STATUS_RECOVERY_CLAIM_FAILED));
+    TEST_ASSERT_EQUAL_STRING("project_live", tp_status_id(TP_STATUS_PROJECT_LIVE));
+    TEST_ASSERT_EQUAL_STRING("unsupported_capability", tp_status_id(TP_STATUS_UNSUPPORTED_CAPABILITY));
 }
 
 /* Tokens are machine ids: lowercase, no spaces (unlike tp_status_str prose). */
 void test_status_id_is_machine_token(void) {
-    for (int s = TP_STATUS_OK; s <= TP_STATUS_RECOVERY_CLAIM_FAILED; s++) {
+    for (int s = TP_STATUS_OK; s <= TP_STATUS_UNSUPPORTED_CAPABILITY; s++) {
         const char *id = tp_status_id((tp_status)s);
         for (const char *c = id; *c; c++) {
             TEST_ASSERT_TRUE_MESSAGE(*c != ' ', id);

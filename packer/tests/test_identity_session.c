@@ -145,6 +145,41 @@ void test_not_yet_created_canonicalizes_via_existing_parent(void) {
     TEST_ASSERT_EQUAL_STRING("not_created_yet.ntpacker_project", dest_canon + pl + 1);
 }
 
+void test_project_path_canonical_accepts_relative_cli_gui_input(void) {
+    char absolute[TP_IDENTITY_PATH_MAX];
+    joinp(absolute, sizeof absolute, g_dir, "relative.ntpacker_project");
+    touch(absolute);
+    char previous[TP_IDENTITY_PATH_MAX];
+#if defined(_WIN32)
+    TEST_ASSERT_NOT_NULL(_getcwd(previous, sizeof previous));
+    TEST_ASSERT_EQUAL_INT(0, _chdir(g_dir));
+#else
+    TEST_ASSERT_NOT_NULL(getcwd(previous, sizeof previous));
+    TEST_ASSERT_EQUAL_INT(0, chdir(g_dir));
+#endif
+    char relative_canonical[TP_IDENTITY_PATH_MAX];
+    char absolute_canonical[TP_IDENTITY_PATH_MAX];
+    tp_error err = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_identity_project_path_canonical("./relative.ntpacker_project",
+                                           relative_canonical,
+                                           sizeof relative_canonical, &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_identity_path_canonical(absolute,
+                                                     absolute_canonical,
+                                                     sizeof absolute_canonical,
+                                                     &err));
+    TEST_ASSERT_TRUE(tp_identity_path_equal(relative_canonical,
+                                            absolute_canonical));
+#if defined(_WIN32)
+    TEST_ASSERT_EQUAL_INT(0, _chdir(previous));
+#else
+    TEST_ASSERT_EQUAL_INT(0, chdir(previous));
+#endif
+    (void)remove(absolute);
+}
+
 void test_missing_destination_parent(void) {
     uint8_t seed[16] = {9};
     tp_rng rng = seeded_rng(seed);
@@ -378,6 +413,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_init_unsaved_rng_failure);
     RUN_TEST(test_first_save_transition);
     RUN_TEST(test_not_yet_created_canonicalizes_via_existing_parent);
+    RUN_TEST(test_project_path_canonical_accepts_relative_cli_gui_input);
     RUN_TEST(test_missing_destination_parent);
     RUN_TEST(test_first_save_failure_rollback);
     RUN_TEST(test_save_as_path_to_path);

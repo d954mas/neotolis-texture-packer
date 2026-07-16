@@ -17,22 +17,50 @@ typedef struct tp_sb {
     char *buf;
     size_t len;
     size_t cap;
+    size_t limit; /* 0 = unlimited; otherwise maximum bytes excluding NUL */
+    bool count_only; /* exact allocation-free sizing pass */
+    size_t *allocation_count; /* optional deterministic test/perf probe */
     bool oom;
+    bool limit_exceeded;
 } tp_sb;
 
 static inline void tp_sb_write(tp_sb *sb, const char *s, size_t n) {
-    if (sb->oom) {
+    if (sb->oom || sb->limit_exceeded) {
         return;
     }
-    if (sb->len + n + 1U > sb->cap) {
+    if (sb->len == SIZE_MAX || n > SIZE_MAX - sb->len - 1U) {
+        sb->oom = true;
+        return;
+    }
+    if (sb->limit != 0U && (sb->len > sb->limit || n > sb->limit - sb->len)) {
+        sb->limit_exceeded = true;
+        return;
+    }
+    if (sb->count_only) {
+        sb->len += n;
+        return;
+    }
+    const size_t needed = sb->len + n + 1U;
+    if (needed > sb->cap) {
         size_t new_cap = (sb->cap == 0) ? 1024U : sb->cap;
-        while (sb->len + n + 1U > new_cap) {
+        while (needed > new_cap) {
+            if (new_cap > SIZE_MAX / 2U) {
+                new_cap = needed;
+                break;
+            }
             new_cap *= 2U;
+        }
+        if (sb->limit != 0U && sb->limit != SIZE_MAX &&
+            new_cap > sb->limit + 1U) {
+            new_cap = sb->limit + 1U;
         }
         char *nb = (char *)realloc(sb->buf, new_cap);
         if (!nb) {
             sb->oom = true;
             return;
+        }
+        if (sb->allocation_count) {
+            (*sb->allocation_count)++;
         }
         sb->buf = nb;
         sb->cap = new_cap;
@@ -82,7 +110,8 @@ static inline void tp_sb_num(tp_sb *sb, double v) {
 
 static inline void tp_sb_json_string(tp_sb *sb, const char *s) {
     tp_sb_char(sb, '"');
-    for (const unsigned char *c = (const unsigned char *)s; *c; c++) {
+    for (const unsigned char *c = (const unsigned char *)s;
+         *c && !sb->oom && !sb->limit_exceeded; c++) {
         switch (*c) {
             case '"': tp_sb_str(sb, "\\\""); break;
             case '\\': tp_sb_str(sb, "\\\\"); break;

@@ -58,6 +58,14 @@ void cli_sb_int(cli_sb *sb, long v) {
     }
 }
 
+void cli_sb_size(cli_sb *sb, size_t v) {
+    char tmp[32];
+    int n = snprintf(tmp, sizeof tmp, "%zu", v);
+    if (n > 0) {
+        sb_write(sb, tmp, (size_t)n);
+    }
+}
+
 void cli_sb_num(cli_sb *sb, double v) {
     char tmp[64];
     int n = snprintf(tmp, sizeof tmp, "%.9g", v);

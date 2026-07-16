@@ -12,7 +12,7 @@
  * byte-identical on every OS regardless of float/int representation.
  *
  * PARTICIPATES (promoted from tp_c0_semantic): atlas name + the 10 packing knobs +
- * id; source id + normalized key (path) + kind; sprite id-key (name bridge +
+ * id; source id + normalized key (path) + kind; sprite identity (display name +
  * source_ref + src_key) + origin + slice9 + rename + the five ov_* overrides;
  * animation id + name + fps + playback + flips + FRAMES; target exporter_id +
  * out_path + enabled + id; every structural id.
@@ -41,6 +41,7 @@
 #include <string.h>
 
 #include "tp_core/tp_id.h"
+#include "tp_core/tp_identity.h"
 #include "tp_core/tp_project.h"
 
 /* ---- feed helpers: canonical, endian-stable field mixing ----------------- */
@@ -95,11 +96,23 @@ static void id128_add(tp_id128 *acc, tp_id128 val) {
 
 /* ---- per-entity hashes --------------------------------------------------- */
 
-static tp_id128 source_identity(const tp_project_source *s) {
+static tp_id128 source_identity(const tp_project *project,
+                                const tp_project_source *s) {
     tp_hasher h = tp_hasher_init();
     feed_str(&h, "src");
     feed_id(&h, s->id);
-    feed_str(&h, s->path);
+    char canonical_path[TP_IDENTITY_PATH_MAX];
+    const char *path = s->path;
+    if ((project->source_base_dir &&
+         tp_project_resolve_source_path(project, s->path, canonical_path,
+                                        sizeof canonical_path) == TP_STATUS_OK) ||
+        (!project->source_base_dir &&
+         tp_identity_path_absolute_lexical(s->path, canonical_path,
+                                           sizeof canonical_path,
+                                           NULL) == TP_STATUS_OK)) {
+        path = canonical_path;
+    }
+    feed_str(&h, path);
     feed_i64(&h, (int64_t)s->kind);
     return tp_hasher_final(h);
 }
@@ -166,7 +179,8 @@ static tp_id128 target_identity(const tp_project_target *t) {
         feed_id((H), acc);                                   \
     } while (0)
 
-static tp_id128 atlas_identity(const tp_project_atlas *a) {
+tp_id128 tp_semantic_atlas_identity(const tp_project *project,
+                                    const tp_project_atlas *a) {
     tp_hasher h = tp_hasher_init();
     feed_str(&h, "atl");
     feed_id(&h, a->id);
@@ -181,7 +195,8 @@ static tp_id128 atlas_identity(const tp_project_atlas *a) {
     feed_bool(&h, a->allow_transform);
     feed_bool(&h, a->power_of_two);
     feed_f(&h, (double)a->pixels_per_unit);
-    FOLD_UNORDERED(&h, "sources", a->source_count, source_identity(&a->sources[_i]));
+    FOLD_UNORDERED(&h, "sources", a->source_count,
+                   source_identity(project, &a->sources[_i]));
     FOLD_UNORDERED(&h, "sprites", a->sprite_count, sprite_identity(&a->sprites[_i]));
     FOLD_UNORDERED(&h, "animations", a->animation_count, anim_identity(&a->animations[_i]));
     FOLD_UNORDERED(&h, "targets", a->target_count, target_identity(&a->targets[_i]));
@@ -192,7 +207,8 @@ tp_id128 tp_semantic_identity(const tp_project *p) {
     tp_hasher h = tp_hasher_init();
     feed_str(&h, "tp-project-identity/1"); /* algorithm version tag */
     if (p) {
-        FOLD_UNORDERED(&h, "atlases", p->atlas_count, atlas_identity(&p->atlases[_i]));
+        FOLD_UNORDERED(&h, "atlases", p->atlas_count,
+                       tp_semantic_atlas_identity(p, &p->atlases[_i]));
     } else {
         feed_str(&h, "atlases");
         feed_i64(&h, 0);

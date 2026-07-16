@@ -8,14 +8,14 @@
  * entry side of the same edit lifecycle, moved here in step 4 so every view that starts an inline
  * edit shares one home), the animation ops + preview player, and the small selection/edit helpers.
  * Split out of main.c (GUI decomposition step 2) as a pure move -- no behavior change. This layer is
- * Clay-free AND nt_ui-free: views set the s_pending_* flags; apply_pending consumes them at the top
- * of the next frame. Include discipline: actions -> gui_state + gui_rows + model headers
+ * Clay-free AND nt_ui-free: views enqueue typed requests that capture stable structural IDs,
+ * expected revision, typed arguments, and owned copied strings; apply_pending consumes them at the
+ * top of the next frame. Include discipline: actions -> gui_state + gui_rows + model headers
  * (gui_project/gui_scan/gui_canvas/gui_pack) + tinyfiledialogs; it must never include
  * widgets or any view header. */
 
 #include <stdbool.h>
 
-#include "tp_core/tp_project.h" /* tp_project_anim (current_anim return type) */
 #include "tp_core/tp_model.h"   /* tp_result (preview_target_result return type) */
 
 #include "gui_project.h" /* gui_atlas_field / gui_sprite_ov (deferred-edit enqueue types) */
@@ -30,18 +30,21 @@ extern bool s_pending_open, s_pending_save, s_pending_save_as, s_pending_add_fil
 extern bool s_pending_pack, s_pending_export;
 extern bool s_pending_commit_edit; /* a press landed outside the active inline-edit field -> commit it */
 extern bool s_pending_commit_edit_enter; /* Enter pressed in the inline editor -> commit it (deferred, non-force) */
-extern bool s_pending_add_anim;    /* "+ Animation" -> append empty animation, select it */
-extern bool s_pending_create_anim; /* "Create animation from selection" */
-extern bool s_pending_open_preview;/* open the anim preview player on s_ctx_anim / s_sel_anim */
-extern int s_pending_remove_atlas;
-extern int s_pending_remove_source;
-extern int s_pending_remove_anim;  /* animation index to remove */
-extern bool s_pending_add_target;
-extern int s_pending_remove_target;
-extern int s_pending_browse_target;        /* target whose out-path "..." dialog is queued */
-extern int s_pending_export_browse_atlas;  /* Export dialog: atlas of the queued out-path browse */
-extern int s_pending_export_browse_target; /* Export dialog: target index of the queued browse */
-extern int s_pending_preview_target;       /* strip preview-selector pick (-1 none; 0 Native; k = exporter k-1) */
+void gui_request_add_animation(int atlas_index);
+void gui_request_create_animation_from_selection(void);
+void gui_request_open_preview(const gui_animation_ref *animation);
+extern bool s_pending_remove_atlas;
+extern tp_id128 s_pending_remove_atlas_id;
+extern int64_t s_pending_remove_atlas_revision;
+extern bool s_pending_remove_source;
+extern tp_id128 s_pending_remove_source_atlas_id;
+extern tp_id128 s_pending_remove_source_id;
+extern int64_t s_pending_remove_source_revision;
+void gui_request_remove_animation(int animation_index);
+void gui_request_add_target(int atlas_index);
+void gui_request_remove_target(int target_index);
+void gui_request_browse_target(int atlas_index, int target_index);
+extern int s_pending_preview_target; /* boundary-ok: exporter option, not a target entity index */
 
 /* --- new/open/exit unsaved-changes confirm flow --- */
 enum { AFTER_NONE = 0, AFTER_NEW, AFTER_EXIT, AFTER_OPEN };
@@ -75,29 +78,31 @@ extern int s_last_pack_atlas;   /* which atlas that timing belongs to */
  * transaction (they do not commit on drain); a gesture boundary raises
  * gui_request_gesture_commit(), which apply_pending honours by flushing the buffer -- so one
  * interaction = one committed transaction = one undo step (F2-05b-ii-A, decision 0015). */
-void gui_edit_atlas_int(int atlas, gui_atlas_field field, int value);
-void gui_edit_atlas_bool(int atlas, gui_atlas_field field, bool value);
-void gui_edit_atlas_float(int atlas, gui_atlas_field field, float value);
-void gui_edit_sprite_origin(int atlas, const char *sprite_name, int axis, float value); /* axis 0=X, 1=Y (#2) */
-void gui_edit_sprite_slice9(int atlas, const char *sprite_name, int lrtb_index, int value);
-void gui_edit_sprite_override(int atlas, const char *sprite_name, gui_sprite_ov which, int value);
-void gui_edit_anim_fps(int atlas, int anim_index, float fps);
-void gui_edit_anim_playback(int atlas, int anim_index, int playback);
-void gui_edit_anim_flip(int atlas, int anim_index, bool flip_h, bool flip_v);
-void gui_edit_anim_frame_remove(int atlas, int anim_index, int frame_index);
-void gui_edit_anim_frame_move(int atlas, int anim_index, int frame_index, int delta);
+void gui_queue_atlas_setting(tp_id128 atlas_id, int64_t expected_revision,
+                             gui_atlas_field field, int ivalue, float fvalue);
+void gui_queue_sprite_origin(const gui_sprite_ref *sprite, int axis, float value); /* axis 0=X, 1=Y (#2) */
+void gui_queue_sprite_slice9(const gui_sprite_ref *sprite, int lrtb_index, int value);
+void gui_queue_sprite_override(const gui_sprite_ref *sprite, gui_sprite_ov which, int value);
+void gui_edit_anim_fps(const gui_animation_ref *animation, float fps);
+void gui_edit_anim_playback(const gui_animation_ref *animation, int playback);
+void gui_edit_anim_flip(const gui_animation_ref *animation, bool flip_h, bool flip_v);
+void gui_edit_anim_frame_remove(const gui_animation_ref *animation, int frame_index);
+void gui_edit_anim_frame_move(const gui_animation_ref *animation, int frame_index, int delta);
 /* Enqueue "Add frames": COPIES `keys` (count) into the edit so the drain can replay them next
  * frame -- "Add frames" must NOT commit synchronously from the anim editor's declare fn (F1 UAF). */
-void gui_edit_anim_add_frames(int atlas, int anim_index, const char *const *keys, int count);
-void gui_edit_target(int atlas, int index, const char *exporter_id, const char *out_path, bool enabled);
+void gui_edit_anim_add_frames(const gui_animation_ref *animation,
+                              const char *const *keys, int count);
+void gui_edit_target(const gui_target_ref *target, const char *exporter_id,
+                     const char *out_path, bool enabled);
 /* H/G3: the out-path text field's per-keystroke enqueue -- drains to the COALESCABLE setter so an edit
  * gesture (typing then Enter/blur) collapses into ONE undo step, unlike the immediate gui_edit_target. */
-void gui_edit_target_out_path(int atlas, int index, const char *out_path);
+void gui_edit_target_out_path(const gui_target_ref *target, const char *out_path);
 /* H/G3: discrete enabled/exporter enqueues -- carry ONLY the changed field; the drain setters read the
  * un-edited fields from the committed record post-flush, so a discrete edit mid-typing never reverts the
  * just-typed out_path. Use these instead of gui_edit_target for the enabled checkbox / exporter dropdown. */
-void gui_edit_target_enabled(int atlas, int index, bool enabled);
-void gui_edit_target_exporter(int atlas, int index, const char *exporter_id);
+void gui_edit_target_enabled(const gui_target_ref *target, bool enabled);
+void gui_edit_target_exporter(const gui_target_ref *target,
+                              const char *exporter_id);
 
 /* --- deferred side-effect pump: lands async pack/export, commits blur edits, drains the queue --- */
 void apply_pending(void);
@@ -141,7 +146,7 @@ void start_sprite_edit(const sprite_row *row);
 void commit_sprite_rename(void);
 
 /* --- animation ops + preview player (ux.md §3.7b) --- */
-tp_project_anim *current_anim(void); /* selected animation of the selected atlas, or NULL */
+const tp_snapshot_animation *current_anim(void); /* selected snapshot animation, or NULL */
 int create_animation_from_selection(void);
 void add_selection_frames_to_anim(int anim_index);
 void open_preview(int anim_index);

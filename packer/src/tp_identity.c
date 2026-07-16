@@ -694,3 +694,51 @@ tp_status tp_identity_path_canonical(const char *input, char *out, size_t cap, t
     return fs_resolve_posix(lex, out, cap, err);
 #endif
 }
+
+tp_status tp_identity_path_absolute_lexical(const char *input, char *out,
+                                            size_t cap, tp_error *err) {
+    tp_status status = tp_identity_path_lexical(input, out, cap, err);
+    if (status != TP_STATUS_PATH_NOT_ABSOLUTE) {
+        return status;
+    }
+    if (!input || input[0] == '\0') {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "project path is empty");
+    }
+    char cwd[TP_IDENTITY_PATH_MAX];
+#if defined(_WIN32)
+    wchar_t wide[TP_IDENTITY_PATH_MAX];
+    const DWORD length = GetCurrentDirectoryW(
+        (DWORD)(sizeof wide / sizeof wide[0]), wide);
+    if (length == 0U || length >= (DWORD)(sizeof wide / sizeof wide[0]) ||
+        fs_narrow(wide, cwd, sizeof cwd, err) != TP_STATUS_OK) {
+        return tp_error_set(err, TP_STATUS_PATH_RESOLVE_FAILED,
+                            "current directory cannot be resolved");
+    }
+#else
+    if (!getcwd(cwd, sizeof cwd)) {
+        return tp_error_set(err, TP_STATUS_PATH_RESOLVE_FAILED,
+                            "current directory cannot be resolved: %s",
+                            strerror(errno));
+    }
+#endif
+    char absolute[TP_IDENTITY_PATH_MAX];
+    const int written = snprintf(absolute, sizeof absolute, "%s/%s", cwd,
+                                 input);
+    if (written < 0 || (size_t)written >= sizeof absolute) {
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                            "project path exceeds the supported limit");
+    }
+    return tp_identity_path_lexical(absolute, out, cap, err);
+}
+
+tp_status tp_identity_project_path_canonical(const char *input, char *out,
+                                             size_t cap, tp_error *err) {
+    char absolute[TP_IDENTITY_PATH_MAX];
+    tp_status status = tp_identity_path_absolute_lexical(
+        input, absolute, sizeof absolute, err);
+    if (status != TP_STATUS_OK) {
+        return status;
+    }
+    return tp_identity_path_canonical(absolute, out, cap, err);
+}

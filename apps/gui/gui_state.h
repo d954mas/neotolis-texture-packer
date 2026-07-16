@@ -15,6 +15,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "tp_core/tp_scan.h"
+
 #include "font/nt_font.h"        /* nt_font_t (s_font) */
 #include "ui/nt_ui.h"            /* nt_ui_context_t (s_ctx) */
 #include "ui/nt_ui_button.h"     /* nt_ui_button_style_t */
@@ -102,7 +104,7 @@ extern bool s_sel_missing;   /* selection is a missing file -> canvas shows a pl
  * "Create animation from selection" + the editor's "Add frames" (ux.md §3.7b). Growable storage
  * (P1 fix, decomposition step 7): the old fixed 4096 cap silently ignored selections past it. Grows
  * geometrically in multi_sel_add (gui_rows.c); see the growth-policy note there. */
-extern char (*s_multi_sel)[192];
+extern char (*s_multi_sel)[TP_SCAN_REL_CAP];
 extern int s_multi_sel_count;
 extern int s_multi_sel_cap;  /* allocated slots in s_multi_sel (grow-only; 0 == unallocated) */
 extern int s_sel_anchor_row; /* row index anchor for Shift-range selection */
@@ -118,7 +120,7 @@ extern int s_sel_anim_frame; /* selected frame row in the editor (for the Del ho
  * intent + when to drop it. Shared with the canvas view (selector + chip), actions (start/reset/bind),
  * the selftest and the shot seam, so they can never be view-local. --- */
 extern int s_preview_target;       /* 0 = Native; else 1 + tp_exporter_at index */
-extern unsigned s_preview_ver;     /* gui_project_model_version captured at preview start (drop on edit) */
+extern uint64_t s_preview_ver;     /* snapshot generation captured at preview start */
 
 /* Animation preview player (canvas ANIM mode). s_preview_time is the master clock; the frame index is
  * a pure function of it (gui_canvas_anim_frame_at), so play/pause/step all reduce to moving the clock. */
@@ -134,8 +136,8 @@ enum { EDIT_NONE = 0, EDIT_ATLAS, EDIT_SPRITE, EDIT_ANIM };
 extern int s_edit_kind;
 extern int s_edit_atlas;        /* atlas being renamed (EDIT_ATLAS) */
 extern int s_edit_anim;         /* animation index being renamed (EDIT_ANIM) */
-extern char s_edit_sprite[192]; /* atlas-relative sprite name being renamed (EDIT_SPRITE) */
-extern char s_edit_buf[192];    /* the input buffer */
+extern char s_edit_sprite[TP_SCAN_REL_CAP]; /* atlas-relative sprite name being renamed */
+extern char s_edit_buf[TP_SCAN_REL_CAP];    /* the input buffer */
 
 /* Runtime (already SCALED) column widths. Clamped narrow when the window can't fit both side panels +
  * a minimal canvas, so the panels never get pushed off-screen (recomputed each frame). */
@@ -171,7 +173,7 @@ extern int s_ctx_atlas;        /* CTX_ATLAS target index */
 extern int s_ctx_anim;         /* CTX_ANIM animation index */
 extern int s_ctx_target;       /* CTX_TARGET target index (enable/disable, remove) */
 extern int s_ctx_src;          /* CTX_SPRITE source index (for Remove) */
-extern char s_ctx_sprite[192]; /* CTX_SPRITE override key (for Rename) */
+extern char s_ctx_sprite[TP_SCAN_REL_CAP]; /* CTX_SPRITE override key (for Rename) */
 extern bool s_ctx_leaf;        /* a renamable leaf sprite (file source or folder child) */
 extern bool s_ctx_removable;   /* a removable source row (has an [x] today) */
 

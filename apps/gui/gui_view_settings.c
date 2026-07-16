@@ -15,6 +15,7 @@
 #include "ui/nt_ui_slider.h"
 
 #include "tp_core/tp_export.h" /* exporter registry -> target dropdown */
+#include "tp_core/tp_validate.h"
 
 #include "gui_defs.h"
 #include "gui_state.h"
@@ -313,12 +314,23 @@ static int size_preset_index(int v) {
 }
 
 /* --- Atlas settings (region F) --- */
-static void declare_atlas_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
+static void offer_atlas_setting(const tp_session_snapshot *snapshot,
+                                const tp_snapshot_atlas *atlas,
+                                gui_atlas_field field, int ivalue, float fvalue) {
+    if (snapshot && atlas) {
+        gui_queue_atlas_setting(atlas->id, tp_session_snapshot_revision(snapshot),
+                                field, ivalue, fvalue);
+    }
+}
+
+static void declare_atlas_settings(nt_ui_context_t *ctx,
+                                   const tp_session_snapshot *snapshot,
+                                   const tp_snapshot_atlas *a) {
     /* Basic: shape, max size, padding, allow transform. */
     const int ns = row_combo(ctx, "Shape", nt_ui_id("set/shape"), &s_dd_shape_open,
                              (a->shape >= 0 && a->shape < 3) ? k_shape_names[a->shape] : "?", a->shape, k_shape_names, 3, true);
     if (ns >= 0 && ns != a->shape) {
-        gui_edit_atlas_int(s_sel_atlas, GUI_ATLAS_SHAPE, ns);
+        offer_atlas_setting(snapshot, a, GUI_ATLAS_SHAPE, ns, 0.0F);
     }
     char szpv[16];
     (void)snprintf(szpv, sizeof szpv, "%d", a->max_size);
@@ -326,7 +338,7 @@ static void declare_atlas_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
     const int nsz = row_combo(ctx, "Max page size", nt_ui_id("set/size"), &s_dd_size_open, szpv, size_preset_index(a->max_size),
                               size_labels, 7, true);
     if (nsz >= 0 && k_size_presets[nsz] != a->max_size) {
-        gui_edit_atlas_int(s_sel_atlas, GUI_ATLAS_MAX_SIZE, k_size_presets[nsz]);
+        offer_atlas_setting(snapshot, a, GUI_ATLAS_MAX_SIZE, k_size_presets[nsz], 0.0F);
     }
     if (a->max_size > 4096) {
         panel_note(ctx, "Pages over 4096 may not load on mobile GPUs / stock engine runtime.");
@@ -339,11 +351,11 @@ static void declare_atlas_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
      * enqueues (coalesced, latest wins); a gesture that nets back to committed is dropped by the flush-
      * time no-op suppression (#3), so no phantom commit results. */
     if (row_int(ctx, "Padding", nt_ui_id("set/pad"), s_nb_pad, sizeof s_nb_pad, a->padding, 0, 16384, true, &iv)) {
-        gui_edit_atlas_int(s_sel_atlas, GUI_ATLAS_PADDING, iv);
+        offer_atlas_setting(snapshot, a, GUI_ATLAS_PADDING, iv, 0.0F);
     }
     bool bv = false;
     if (row_check(ctx, "Allow transform", nt_ui_id("set/xform"), a->allow_transform, true, &bv)) {
-        gui_edit_atlas_bool(s_sel_atlas, GUI_ATLAS_ALLOW_TRANSFORM, bv);
+        offer_atlas_setting(snapshot, a, GUI_ATLAS_ALLOW_TRANSFORM, bv ? 1 : 0, 0.0F);
     }
 
     /* Advanced disclosure. */
@@ -352,30 +364,30 @@ static void declare_atlas_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
         return;
     }
     if (row_int(ctx, "Margin", nt_ui_id("set/margin"), s_nb_margin, sizeof s_nb_margin, a->margin, 0, 16384, true, &iv)) {
-        gui_edit_atlas_int(s_sel_atlas, GUI_ATLAS_MARGIN, iv);
+        offer_atlas_setting(snapshot, a, GUI_ATLAS_MARGIN, iv, 0.0F);
     }
     const bool extrude_ok = (a->shape == 0 /* RECT */);
     if (row_int(ctx, "Extrude", nt_ui_id("set/extrude"), s_nb_extrude, sizeof s_nb_extrude, a->extrude, 0, 255, extrude_ok,
                 &iv)) {
-        gui_edit_atlas_int(s_sel_atlas, GUI_ATLAS_EXTRUDE, iv);
+        offer_atlas_setting(snapshot, a, GUI_ATLAS_EXTRUDE, iv, 0.0F);
     }
     if (!extrude_ok) {
         panel_note(ctx, "Extrude requires Rect shape \xE2\x80\x94 use Padding for polygon modes.");
     }
     if (row_slider(ctx, "Alpha threshold", nt_ui_id("set/alpha"), s_nb_alpha, sizeof s_nb_alpha, a->alpha_threshold, 0,
                    255, true, &iv)) {
-        gui_edit_atlas_int(s_sel_atlas, GUI_ATLAS_ALPHA_THRESHOLD, iv);
+        offer_atlas_setting(snapshot, a, GUI_ATLAS_ALPHA_THRESHOLD, iv, 0.0F);
     }
     if (row_int(ctx, "Max vertices", nt_ui_id("set/maxv"), s_nb_maxv, sizeof s_nb_maxv, a->max_vertices, 1, 16, true, &iv)) {
-        gui_edit_atlas_int(s_sel_atlas, GUI_ATLAS_MAX_VERTICES, iv);
+        offer_atlas_setting(snapshot, a, GUI_ATLAS_MAX_VERTICES, iv, 0.0F);
     }
     if (row_check(ctx, "Power of two", nt_ui_id("set/pot"), a->power_of_two, true, &bv)) {
-        gui_edit_atlas_bool(s_sel_atlas, GUI_ATLAS_POWER_OF_TWO, bv);
+        offer_atlas_setting(snapshot, a, GUI_ATLAS_POWER_OF_TWO, bv ? 1 : 0, 0.0F);
     }
     float fv = 0.0F;
     if (row_float(ctx, "Pixels/unit", nt_ui_id("set/ppu"), s_nb_ppu, sizeof s_nb_ppu, a->pixels_per_unit, 0.0001F,
                   100000.0F, true, &fv)) {
-        gui_edit_atlas_float(s_sel_atlas, GUI_ATLAS_PIXELS_PER_UNIT, fv);
+        offer_atlas_setting(snapshot, a, GUI_ATLAS_PIXELS_PER_UNIT, 0, fv);
     }
 }
 
@@ -438,7 +450,9 @@ static bool right_panel_rename_row(nt_ui_context_t *ctx, const char *label, cons
 }
 
 /* --- Region (selected sprite) + per-region packing overrides --- */
-static void declare_region_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
+static void declare_region_settings(nt_ui_context_t *ctx,
+                                    const tp_session_snapshot *snapshot,
+                                    const tp_snapshot_atlas *atlas) {
     const sprite_row *row = selected_leaf_row();
     if (!row) {
         if (s_sel_missing) {
@@ -449,9 +463,14 @@ static void declare_region_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
         return;
     }
     const char *sprite = row->sprite_name;
-    const tp_project_sprite *ov = tp_project_atlas_find_sprite(a, sprite);
+    const gui_sprite_ref sprite_ref = {atlas->id, row->source_id, row->source_key,
+                                       tp_session_snapshot_revision(snapshot)};
+    const tp_snapshot_sprite *ov = tp_session_snapshot_sprite_by_key(
+        snapshot, atlas->id, row->source_id, row->source_key);
     const tp_result *pr = gui_pack_result(s_sel_atlas);
-    const int ri = pr ? gui_pack_find_sprite(s_sel_atlas, sprite) : -1;
+    const int ri = pr ? gui_pack_find_sprite_ref(s_sel_atlas, row->source_id,
+                                                  row->source_key)
+                      : -1;
 
     /* Final name + Rename (reuse the existing inline rename path). */
     char fname[224];
@@ -474,9 +493,12 @@ static void declare_region_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
     PANEL_ROW_END;
     /* Smart-folder provenance (owner 2026-07-11): a folder child (!is_source) came in via its parent
      * smart folder -- name it. The row model already carries src (index into a->sources), so this is free. */
-    if (!row->is_source && row->src >= 0 && row->src < a->source_count) {
+    if (!row->is_source && row->src >= 0 && row->src < atlas->source_count) {
+        const tp_snapshot_source *source = tp_session_snapshot_source_at(snapshot, atlas->id,
+                                                                         row->src);
         char via[224];
-        (void)snprintf(via, sizeof via, "via smart folder %s/", path_last(a->sources[row->src].path));
+        (void)snprintf(via, sizeof via, "via smart folder %s/",
+                       source ? path_last(source->path) : "?");
         panel_note(ctx, via);
     }
 
@@ -487,10 +509,10 @@ static void declare_region_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
      * committed record after flushing the buffered axis, so editing X then Y never loses X (#2). The
      * view no longer does the stale read-modify-write that dropped a buffered X. */
     if (row_float(ctx, "Pivot X", nt_ui_id("reg/ox"), s_nb_ox, sizeof s_nb_ox, ox, -100.0F, 100.0F, true, &fv)) {
-        gui_edit_sprite_origin(s_sel_atlas, sprite, 0, fv);
+        gui_queue_sprite_origin(&sprite_ref, 0, fv);
     }
     if (row_float(ctx, "Pivot Y", nt_ui_id("reg/oy"), s_nb_oy, sizeof s_nb_oy, oy, -100.0F, 100.0F, true, &fv)) {
-        gui_edit_sprite_origin(s_sel_atlas, sprite, 1, fv);
+        gui_queue_sprite_origin(&sprite_ref, 1, fv);
     }
 
     static const char *const s9_labels[4] = {"Slice9 L", "Slice9 R", "Slice9 T", "Slice9 B"};
@@ -506,7 +528,7 @@ static void declare_region_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
          * a slice9 component returned to its committed value must still enqueue the correction. A net-
          * zero gesture is dropped by the flush-time no-op suppression (#3). */
         if (row_int(ctx, s9_labels[k], nt_ui_id(s9_ids[k]), s_nb_s9[k], sizeof s_nb_s9[k], cur, 0, 4096, true, &iv)) {
-            gui_edit_sprite_slice9(s_sel_atlas, sprite, k, iv);
+            gui_queue_sprite_slice9(&sprite_ref, k, iv);
         }
     }
     if (any_s9) {
@@ -536,43 +558,43 @@ static void declare_region_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
     if (!s_region_ov_open) {
         return;
     }
-    const int ov_shape = ov ? ov->ov_shape : TP_PROJECT_OV_INHERIT;
-    const int ov_rot = ov ? ov->ov_allow_rotate : TP_PROJECT_OV_INHERIT;
-    const int ov_mv = ov ? ov->ov_max_vertices : TP_PROJECT_OV_INHERIT;
-    const int ov_margin = ov ? ov->ov_margin : TP_PROJECT_OV_INHERIT;
-    const int ov_extrude = ov ? ov->ov_extrude : TP_PROJECT_OV_INHERIT;
+    const int ov_shape = ov ? ov->override_shape : TP_PROJECT_OV_INHERIT;
+    const int ov_rot = ov ? ov->override_allow_rotate : TP_PROJECT_OV_INHERIT;
+    const int ov_mv = ov ? ov->override_max_vertices : TP_PROJECT_OV_INHERIT;
+    const int ov_margin = ov ? ov->override_margin : TP_PROJECT_OV_INHERIT;
+    const int ov_extrude = ov ? ov->override_extrude : TP_PROJECT_OV_INHERIT;
 
     /* Slice9 auto-forces RECT + no-rotate: show the shape/rotate overrides disabled. */
     if (any_s9) {
         panel_note(ctx, "Shape & rotation overrides are set by slice-9 (Rect, no rotation).");
     }
     char shape_def[48];
-    (void)snprintf(shape_def, sizeof shape_def, "Default (%s)", (a->shape >= 0 && a->shape < 3) ? k_shape_names[a->shape] : "?");
+    (void)snprintf(shape_def, sizeof shape_def, "Default (%s)", (atlas->shape >= 0 && atlas->shape < 3) ? k_shape_names[atlas->shape] : "?");
     const int ps = row_override_combo(ctx, "Shape", nt_ui_id("reg/ov_shape"), &s_dd_ov_shape_open, ov_shape, 0,
                                       k_shape_names, 3, shape_def, !any_s9);
     if (ps != OV_UNCHANGED && ps != ov_shape) {
-        gui_edit_sprite_override(s_sel_atlas, sprite, GUI_SPRITE_OV_SHAPE, ps);
+        gui_queue_sprite_override(&sprite_ref, GUI_SPRITE_OV_SHAPE, ps);
     }
     static const char *const rot_values[1] = {"No rotation"};
-    const char *rot_def = a->allow_transform ? "Default (rotate/flip)" : "Default (no transform)";
+    const char *rot_def = atlas->allow_transform ? "Default (rotate/flip)" : "Default (no transform)";
     const int prv = row_override_combo(ctx, "Rotation", nt_ui_id("reg/ov_rot"), &s_dd_ov_rot_open, ov_rot, 0, rot_values,
                                        1, rot_def, !any_s9);
     if (prv != OV_UNCHANGED && prv != ov_rot) {
-        gui_edit_sprite_override(s_sel_atlas, sprite, GUI_SPRITE_OV_ROTATE, prv);
+        gui_queue_sprite_override(&sprite_ref, GUI_SPRITE_OV_ROTATE, prv);
     }
     static const char *const mv_values[16] = {"1", "2",  "3",  "4",  "5",  "6",  "7",  "8",
                                               "9", "10", "11", "12", "13", "14", "15", "16"};
     char mv_def[40];
-    (void)snprintf(mv_def, sizeof mv_def, "Default (%d)", a->max_vertices);
+    (void)snprintf(mv_def, sizeof mv_def, "Default (%d)", atlas->max_vertices);
     const int pmv = row_override_combo(ctx, "Max vertices", nt_ui_id("reg/ov_mv"), &s_dd_ov_mv_open, ov_mv, 1, mv_values,
                                        16, mv_def, true);
     if (pmv != OV_UNCHANGED && pmv != ov_mv) {
-        gui_edit_sprite_override(s_sel_atlas, sprite, GUI_SPRITE_OV_MAXVERT, pmv);
+        gui_queue_sprite_override(&sprite_ref, GUI_SPRITE_OV_MAXVERT, pmv);
     }
 
     /* margin / extrude overrides: a "override?" checkbox + numeric (1..255). extrude is
      * disabled unless the sprite's effective shape is RECT (§3.3f, per sprite). */
-    const int eff_shape = tp_project_sprite_effective_shape(a->shape, any_s9, ov_shape);
+    const int eff_shape = tp_project_sprite_effective_shape(atlas->shape, any_s9, ov_shape);
     {
         bool on = (ov_margin != TP_PROJECT_OV_INHERIT);
         PANEL_ROW_BEGIN("Margin ovr", &g_row) {
@@ -580,9 +602,10 @@ static void declare_region_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
             if (cbc) {
                 on = !on;
             }
-            const int seed = (a->margin >= 1) ? (a->margin > 255 ? 255 : a->margin) : 1;
+            const int seed = (atlas->margin >= 1) ? (atlas->margin > 255 ? 255 : atlas->margin) : 1;
             if (cbc) {
-                gui_edit_sprite_override(s_sel_atlas, sprite, GUI_SPRITE_OV_MARGIN, on ? seed : TP_PROJECT_OV_INHERIT);
+                gui_queue_sprite_override(&sprite_ref, GUI_SPRITE_OV_MARGIN,
+                                         on ? seed : TP_PROJECT_OV_INHERIT);
                 gui_request_gesture_commit(); /* discrete toggle -> commit now (coalescable override, decision 0015) */
             }
             const int disp = (ov_margin != TP_PROJECT_OV_INHERIT) ? ov_margin : seed;
@@ -593,7 +616,7 @@ static void declare_region_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
             if (ui_int_field(ctx, nt_ui_id("reg/ov_mf"), s_nb_ov_margin, sizeof s_nb_ov_margin, disp, 1, 255,
                              on && !cbc, &iv) &&
                 on) {
-                gui_edit_sprite_override(s_sel_atlas, sprite, GUI_SPRITE_OV_MARGIN, iv);
+                gui_queue_sprite_override(&sprite_ref, GUI_SPRITE_OV_MARGIN, iv);
             }
         }
         PANEL_ROW_END;
@@ -606,9 +629,10 @@ static void declare_region_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
             if (cbc) {
                 on = !on;
             }
-            const int seed = (a->extrude >= 1) ? (a->extrude > 255 ? 255 : a->extrude) : 1;
+            const int seed = (atlas->extrude >= 1) ? (atlas->extrude > 255 ? 255 : atlas->extrude) : 1;
             if (cbc && ex_enabled) {
-                gui_edit_sprite_override(s_sel_atlas, sprite, GUI_SPRITE_OV_EXTRUDE, on ? seed : TP_PROJECT_OV_INHERIT);
+                gui_queue_sprite_override(&sprite_ref, GUI_SPRITE_OV_EXTRUDE,
+                                         on ? seed : TP_PROJECT_OV_INHERIT);
                 gui_request_gesture_commit(); /* discrete toggle -> commit now (coalescable override, decision 0015) */
             }
             const int disp = (ov_extrude != TP_PROJECT_OV_INHERIT) ? ov_extrude : seed;
@@ -617,7 +641,7 @@ static void declare_region_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
             if (ui_int_field(ctx, nt_ui_id("reg/ov_ef"), s_nb_ov_extrude, sizeof s_nb_ov_extrude, disp, 1, 255,
                              ex_enabled && on && !cbc, &iv) &&
                 on) {
-                gui_edit_sprite_override(s_sel_atlas, sprite, GUI_SPRITE_OV_EXTRUDE, iv);
+                gui_queue_sprite_override(&sprite_ref, GUI_SPRITE_OV_EXTRUDE, iv);
             }
         }
         PANEL_ROW_END;
@@ -629,7 +653,8 @@ static void declare_region_settings(nt_ui_context_t *ctx, tp_project_atlas *a) {
 
 /* The exporter dropdown cell for one target row (its own element so it can sit inline on a wide panel or
  * drop to a dedicated row when narrow). `preview` must already be width-fit (combo_preview_fit). */
-static void declare_target_exporter_combo(nt_ui_context_t *ctx, uint32_t row_id, int ti, tp_project_target *t,
+static void declare_target_exporter_combo(nt_ui_context_t *ctx, uint32_t row_id, int ti,
+                                          const gui_target_ref *target,
                                           const char *const *exp_labels, int nlabels, int cur_exp, const char *preview) {
     CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
         if (nt_ui_combo_begin(ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, nt_ui_child_id(row_id, "exp"), preview,
@@ -638,7 +663,7 @@ static void declare_target_exporter_combo(nt_ui_context_t *ctx, uint32_t row_id,
                 if (nt_ui_combo_selectable(ctx, (uint32_t)i, exp_labels[i], i == cur_exp)) {
                     const tp_exporter *e = tp_exporter_at(i);
                     if (e) {
-                        gui_edit_target_exporter(s_sel_atlas, ti, e->id); /* H/G3: preserves a buffered out-path edit */
+                        gui_edit_target_exporter(target, e->id); /* H/G3: preserves a buffered out-path edit */
                     }
                 }
             }
@@ -648,7 +673,9 @@ static void declare_target_exporter_combo(nt_ui_context_t *ctx, uint32_t row_id,
 }
 
 /* --- Export targets (region G, audit I1) --- */
-static void declare_export_targets(nt_ui_context_t *ctx, tp_project_atlas *a) {
+static void declare_export_targets(nt_ui_context_t *ctx,
+                                   const tp_session_snapshot *snapshot,
+                                   const tp_snapshot_atlas *a) {
     const int ne = tp_exporter_count();
     const char *exp_labels[24];
     int nlabels = 0;
@@ -661,7 +688,14 @@ static void declare_export_targets(nt_ui_context_t *ctx, tp_project_atlas *a) {
     }
     const int shown = (a->target_count < GUI_MAX_TARGETS) ? a->target_count : GUI_MAX_TARGETS;
     for (int ti = 0; ti < shown; ti++) {
-        tp_project_target *t = &a->targets[ti];
+        const tp_snapshot_target *t = tp_session_snapshot_target_at(snapshot, a->id, ti);
+        if (!t) {
+            continue;
+        }
+        gui_target_ref target;
+        if (!gui_project_target_ref_at(s_sel_atlas, ti, &target)) {
+            continue;
+        }
         char idbuf[48];
         (void)snprintf(idbuf, sizeof idbuf, "tgt/row_%d", ti);
         const uint32_t row_id = nt_ui_id(idbuf);
@@ -693,10 +727,12 @@ static void declare_export_targets(nt_ui_context_t *ctx, tp_project_atlas *a) {
             const bool tgt_narrow = s_right_panel_w < S(210.0F);
             CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H))}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
                 if (tp_checkbox(ctx, nt_ui_child_id(row_id, "en"), t->enabled, true)) {
-                    gui_edit_target_enabled(s_sel_atlas, ti, !t->enabled); /* H/G3: preserves a buffered out-path edit */
+                    gui_edit_target_enabled(&target, !t->enabled); /* H/G3: preserves a buffered out-path edit */
                 }
                 if (!tgt_narrow) {
-                    declare_target_exporter_combo(ctx, row_id, ti, t, exp_labels, nlabels, cur_exp, pvbuf);
+                    declare_target_exporter_combo(ctx, row_id, ti, &target,
+                                                  exp_labels, nlabels, cur_exp,
+                                                  pvbuf);
                 } else {
                     CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}}) {} /* push x to the right */
                 }
@@ -704,12 +740,14 @@ static void declare_export_targets(nt_ui_context_t *ctx, tp_project_atlas *a) {
                 record_row_tip(rm_id, "Remove target");
                 if (ui_icon_btn(ctx, rm_id, &s_ic_x, 12.0F, NULL, &g_btn_ghost, true, 24.0F, 22.0F,
                                 nt_ui_query_events(ctx, rm_id).hovered ? &g_danger : &g_caption)) {
-                    s_pending_remove_target = ti;
+                    gui_request_remove_target(ti);
                 }
             }
             if (tgt_narrow) {
                 CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H))}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
-                    declare_target_exporter_combo(ctx, row_id, ti, t, exp_labels, nlabels, cur_exp, pvbuf);
+                    declare_target_exporter_combo(ctx, row_id, ti, &target,
+                                                  exp_labels, nlabels, cur_exp,
+                                                  pvbuf);
                 }
             }
             /* row 2: out path + browse */
@@ -717,27 +755,29 @@ static void declare_export_targets(nt_ui_context_t *ctx, tp_project_atlas *a) {
                 CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
                     if (ui_text_field(ctx, nt_ui_child_id(row_id, "path"), s_nb_target_path[ti], sizeof s_nb_target_path[ti],
                                       t->out_path, true, "out/atlas.json")) {
-                        gui_edit_target_out_path(s_sel_atlas, ti, s_nb_target_path[ti]); /* H/G3: coalesce -> ONE undo step */
+                        gui_edit_target_out_path(&target, s_nb_target_path[ti]); /* H/G3: coalesce -> ONE undo step */
                     }
                 }
                 if (ui_btn(ctx, nt_ui_child_id(row_id, "browse"), "\xE2\x80\xA6", &g_btn_ghost, true, 28.0F, 22.0F, &g_caption)) { /* U+2026 */
-                    s_pending_browse_target = ti;
+                    gui_request_browse_target(s_sel_atlas, ti);
                 }
             }
         }
-        /* C3: surface an invalid/duplicate target under its row so the user knows why it won't export --
-         * C2's masked per-field edits no longer validate at edit time, so this is the safety net. Mirrors
-         * the CLI `validate` codes. The empty/duplicate notes gate on `enabled` (only enabled targets
-         * export, so a parked/disabled target is not flagged); the detector excludes `t` by pointer. */
-        if (t->enabled) {
-            if (!t->out_path || t->out_path[0] == '\0') {
-                panel_note(ctx, "This target has no output path -- it won't export.");
-            } else if (tp_project_out_path_shared(gui_project_get(), t->out_path, t)) {
-                panel_note(ctx, "Another target already exports to this path -- they overwrite each other.");
+        tp_target_validation_report diagnostics;
+        tp_error validation_error = {0};
+        if (tp_validate_session_snapshot_target(snapshot, a->id, t->id,
+                                                &diagnostics,
+                                                &validation_error) == TP_STATUS_OK) {
+            for (size_t issue = 0; issue < diagnostics.issue_count; ++issue) {
+                const char *code = diagnostics.issues[issue].code;
+                if (strcmp(code, TP_VALIDATION_CODE_TARGET_NO_OUT_PATH) == 0) {
+                    panel_note(ctx, "This target has no output path -- it won't export.");
+                } else if (strcmp(code, TP_VALIDATION_CODE_DUPLICATE_OUT_PATH) == 0) {
+                    panel_note(ctx, "Another target already exports to this path -- they overwrite each other.");
+                } else if (strcmp(code, TP_VALIDATION_CODE_UNKNOWN_EXPORTER) == 0) {
+                    panel_note(ctx, "Unknown exporter -- this target won't export.");
+                }
             }
-        }
-        if (tp_exporter_find(t->exporter_id) == NULL) {
-            panel_note(ctx, "Unknown exporter -- this target won't export.");
         }
     }
     /* The UI arrays (s_dd_target_open / s_nb_target_path) are fixed at GUI_MAX_TARGETS, so targets past
@@ -750,17 +790,30 @@ static void declare_export_targets(nt_ui_context_t *ctx, tp_project_atlas *a) {
         panel_note(ctx, more);
     }
     if (ui_icon_btn(ctx, nt_ui_id("tgt/add"), &s_ic_plus, 16.0F, "Target", &g_btn_ghost, true, 0.0F, 26.0F, &g_caption)) {
-        s_pending_add_target = true;
+        gui_request_add_target(s_sel_atlas);
     }
 }
 
 /* --- Animation editor (ux.md §3.7b): id / fps / playback / flips + ordered frame list --- */
-static void declare_animation_editor(nt_ui_context_t *ctx, tp_project_atlas *a) {
+static void declare_animation_editor(nt_ui_context_t *ctx,
+                                     const tp_session_snapshot *snapshot,
+                                     const tp_snapshot_atlas *a) {
     if (s_sel_anim < 0 || s_sel_anim >= a->animation_count) {
         panel_note(ctx, "Select an animation (left panel) to edit its frames, fps, playback and flips.");
         return;
     }
-    tp_project_anim *an = &a->animations[s_sel_anim];
+    const tp_snapshot_animation *an = tp_session_snapshot_animation_at(
+        snapshot, a->id, s_sel_anim);
+    if (!an) {
+        panel_note(ctx, "The selected animation is no longer available.");
+        return;
+    }
+    gui_animation_ref animation_ref;
+    if (!gui_project_animation_ref_at(s_sel_atlas, s_sel_anim,
+                                      &animation_ref)) {
+        panel_note(ctx, "The selected animation is no longer available.");
+        return;
+    }
     const bool editing_id = (s_edit_kind == EDIT_ANIM && s_edit_anim == s_sel_anim);
 
     if (editing_id) {
@@ -777,7 +830,7 @@ static void declare_animation_editor(nt_ui_context_t *ctx, tp_project_atlas *a) 
     PANEL_ROW_BEGIN("Preview", &g_row) {
         if (ui_btn(ctx, nt_ui_id("anim/play"), s_preview_active ? "Playing\xE2\x80\xA6" : "Play", &g_btn, true, 0.0F, 24.0F,
                    &g_caption)) {
-            s_pending_open_preview = true;
+            gui_request_open_preview(&animation_ref);
         }
     }
     PANEL_ROW_END;
@@ -785,20 +838,20 @@ static void declare_animation_editor(nt_ui_context_t *ctx, tp_project_atlas *a) 
     float fv = 0.0F;
     if (row_float(ctx, "FPS", nt_ui_id("anim/fps"), s_nb_anim_fps, sizeof s_nb_anim_fps, an->fps, 1.0F, 240.0F, true,
                   &fv)) {
-        gui_edit_anim_fps(s_sel_atlas, s_sel_anim, fv);
+        gui_edit_anim_fps(&animation_ref, fv);
     }
     const char *pv = (an->playback >= 0 && an->playback < 7) ? k_playback_names[an->playback] : "?";
     const int npb = row_combo(ctx, "Playback", nt_ui_id("anim/pb"), &s_dd_playback_open, pv, an->playback,
                               k_playback_names, 7, true);
     if (npb >= 0 && npb != an->playback) {
-        gui_edit_anim_playback(s_sel_atlas, s_sel_anim, npb);
+        gui_edit_anim_playback(&animation_ref, npb);
     }
     bool bv = false;
     if (row_check(ctx, "Flip H", nt_ui_id("anim/fh"), an->flip_h, true, &bv)) {
-        gui_edit_anim_flip(s_sel_atlas, s_sel_anim, bv, an->flip_v);
+        gui_edit_anim_flip(&animation_ref, bv, an->flip_v);
     }
     if (row_check(ctx, "Flip V", nt_ui_id("anim/fv"), an->flip_v, true, &bv)) {
-        gui_edit_anim_flip(s_sel_atlas, s_sel_anim, an->flip_h, bv);
+        gui_edit_anim_flip(&animation_ref, an->flip_h, bv);
     }
 
     /* Frames header + "Add frames" (from the current sprite multi-selection). */
@@ -839,7 +892,10 @@ static void declare_animation_editor(nt_ui_context_t *ctx, tp_project_atlas *a) 
               .backgroundColor = bg,
               .cornerRadius = CLAY_CORNER_RADIUS(S(4))}) {
             char lab[224];
-            (void)snprintf(lab, sizeof lab, "%02d  %s", fi + 1, an->frames[fi].name);
+            const tp_snapshot_frame *frame = tp_session_snapshot_animation_frame_at(
+                snapshot, a->id, an->id, fi);
+            (void)snprintf(lab, sizeof lab, "%02d  %s", fi + 1,
+                           frame ? frame->name : "?");
             CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
                 ui_label_fit(ctx, lab, &g_row, right_panel_text_w(S(98.0F)), row_id); /* reserve: up/down/x + gaps */
             }
@@ -862,19 +918,22 @@ static void declare_animation_editor(nt_ui_context_t *ctx, tp_project_atlas *a) 
         }
     }
     if (fact == 1 && fidx >= 0) {
-        gui_edit_anim_frame_remove(s_sel_atlas, s_sel_anim, fidx);
+        gui_edit_anim_frame_remove(&animation_ref, fidx);
         s_sel_anim_frame = -1;
     } else if (fact == 2 && fidx >= 0) {
-        gui_edit_anim_frame_move(s_sel_atlas, s_sel_anim, fidx, -1);
+        gui_edit_anim_frame_move(&animation_ref, fidx, -1);
         s_sel_anim_frame = fidx - 1;
     } else if (fact == 3 && fidx >= 0) {
-        gui_edit_anim_frame_move(s_sel_atlas, s_sel_anim, fidx, +1);
+        gui_edit_anim_frame_move(&animation_ref, fidx, +1);
         s_sel_anim_frame = fidx + 1;
     }
 }
 
 void declare_right_panel(nt_ui_context_t *ctx) {
-    tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *snapshot_atlas = snapshot
+                                                  ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas)
+                                                  : NULL;
     /* Pin the combo trigger min-width to the widget cell so a FIT combo can't grow past the panel (Su(110)
      * scales up at 1.5/2.0 and would otherwise bleed on a narrow panel). Restored after the sections so the
      * wider export-modal combos keep their own default. */
@@ -891,29 +950,29 @@ void declare_right_panel(nt_ui_context_t *ctx) {
                          .padding = {Su(8), Su(8), Su(8), Su(10)},
                          .layoutDirection = CLAY_TOP_TO_BOTTOM,
                          .childGap = Su(4)}}) {
-            if (!a) {
+            if (!snapshot_atlas) {
                 nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "No atlas selected.", &g_caption);
             } else {
                 char title[96];
-                (void)snprintf(title, sizeof title, "Atlas settings \xC2\xB7 %s", a->name);
+                (void)snprintf(title, sizeof title, "Atlas settings \xC2\xB7 %s", snapshot_atlas->name);
                 panel_header(ctx, nt_ui_id("sec/atlas"), title, &s_sec_atlas_open, &g_title, C_HEADER, true);
                 if (s_sec_atlas_open) {
-                    declare_atlas_settings(ctx, a);
+                    declare_atlas_settings(ctx, snapshot, snapshot_atlas);
                 }
                 CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(6))}}}) {}
                 panel_header(ctx, nt_ui_id("sec/region"), "REGION", &s_sec_region_open, &g_section, C_HEADER, true);
                 if (s_sec_region_open) {
-                    declare_region_settings(ctx, a);
+                    declare_region_settings(ctx, snapshot, snapshot_atlas);
                 }
                 CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(6))}}}) {}
                 panel_header(ctx, nt_ui_id("sec/anim"), "ANIMATION", &s_sec_anim_open, &g_section, C_HEADER, true);
                 if (s_sec_anim_open) {
-                    declare_animation_editor(ctx, a);
+                    declare_animation_editor(ctx, snapshot, snapshot_atlas);
                 }
                 CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(6))}}}) {}
                 panel_header(ctx, nt_ui_id("sec/export"), "EXPORT TARGETS", &s_sec_export_open, &g_section, C_HEADER, true);
                 if (s_sec_export_open) {
-                    declare_export_targets(ctx, a);
+                    declare_export_targets(ctx, snapshot, snapshot_atlas);
                 }
             }
         }

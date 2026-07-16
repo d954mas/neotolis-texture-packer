@@ -34,6 +34,7 @@ extern "C" {
 #endif
 
 struct tp_project;
+struct tp_session_snapshot;
 
 /* One resolved sprite: the canonical identity + the human/bridge labels. All
  * strings are malloc-owned by the index and freed by tp_sprite_index_free. */
@@ -70,6 +71,10 @@ tp_status tp_sprite_id_parse(const char *text, tp_id128 *out_id, tp_error *err);
  * error: a missing source is a model state). Read-only over `p`. On success *out
  * owns its refs; free with tp_sprite_index_free even on the empty result. */
 tp_status tp_sprite_index_build(const struct tp_project *p, int atlas_index, tp_sprite_index *out, tp_error *err);
+/* Snapshot-owned frontend seam. The model pointer remains component-private. */
+tp_status tp_sprite_index_build_snapshot(const struct tp_session_snapshot *snapshot,
+                                         int atlas_index, tp_sprite_index *out,
+                                         tp_error *err);
 
 /* Frees every ref's strings + the refs array and zeroes *idx. NULL-safe. */
 void tp_sprite_index_free(tp_sprite_index *idx);

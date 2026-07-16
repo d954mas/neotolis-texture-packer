@@ -24,7 +24,7 @@
 #include "gui_actions.h" /* do_pack_blocking */
 #include "gui_canvas.h"  /* s_canvas ops + GUI_CANVAS_ATLAS */
 #include "gui_pack.h"    /* gui_pack_result / gui_pack_debug_force_busy / gui_pack_preview_blocking */
-#include "gui_project.h" /* gui_project_mark_stale / gui_project_model_version */
+#include "gui_project.h" /* gui_project_mark_stale / snapshot generation */
 #include "gui_rows.h"    /* select_row_for_region */
 #include "gui_state.h"   /* s_ctx / s_id_* / s_sel_atlas / g_ui_scale / s_status_fixed_time / s_preview_* */
 
@@ -148,7 +148,7 @@ void gui_shot_tick(void) {
                 }
                 if (idx >= 0) {
                     s_preview_target = idx + 1; /* 0 = Native; k = exporter k-1 */
-                    s_preview_ver = gui_project_model_version();
+                    s_preview_ver = gui_project_snapshot_model_generation();
                 }
             } else {
                 nt_log_error("SHOT: preview '%s' failed: %s", s_shot_preview, perr);

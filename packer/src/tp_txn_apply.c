@@ -27,8 +27,11 @@
 #include <string.h>
 
 #include "tp_diff_internal.h" /* F2-03: optional per-op diff capture on commit */
+#include "tp_encode_internal.h"
 #include "tp_idset_internal.h" /* F2-04 fix C1: migrate retained ids into the journal on attach */
 #include "tp_journal_internal.h" /* F2-04 fix C3: poison the journal from the recovery glue */
+#include "tp_op_internal.h"
+#include "tp_project_internal.h"
 #include "tp_txn_internal.h"
 
 /* ---- model lifecycle ----------------------------------------------------- */
@@ -153,6 +156,7 @@ void tp_txn__result_reset(tp_txn_result *out, const char *id_hex) {
     out->schema = TP_TXN_SCHEMA;
     (void)snprintf(out->transaction_id, sizeof out->transaction_id, "%s", id_hex ? id_hex : "");
     out->committed = false;
+    out->no_change = false;
     out->revision = 0;
     out->ops = NULL;
     out->op_count = 0;
@@ -163,17 +167,23 @@ void tp_txn__result_reset(tp_txn_result *out, const char *id_hex) {
 /* Test-only fault seam for the add_error grow: -1 = off; N = the (N+1)th call's
  * grow fails once (then re-arms to off). Lets a test prove a dropped shape-error
  * record still forces a reject. */
-static int s_add_error_fail = -1;
+static _Thread_local int s_add_error_fail = -1;
+static _Thread_local size_t s_test_op_walk_steps = 0U;
+static _Thread_local size_t s_test_error_allocations = 0U;
 void tp_txn__test_set_add_error_fail(int nth) { s_add_error_fail = nth; }
+void tp_txn__test_complexity_reset(void) {
+    s_test_op_walk_steps = 0U;
+    s_test_error_allocations = 0U;
+}
+size_t tp_txn__test_op_walk_steps(void) { return s_test_op_walk_steps; }
+size_t tp_txn__test_error_allocations(void) { return s_test_error_allocations; }
+void tp_txn__test_count_op_walk(size_t steps) { s_test_op_walk_steps += steps; }
 
 /* Append one error (grows the dynamic error array). Returns true when stored; false
  * when the grow failed (OOM). A collect-all caller must treat a false as a forced
  * reject -- a shape-faulted batch must never falsely commit just because its error
  * record could not be stored. */
-bool tp_txn__result_add_error(tp_txn_result *out, int op_index, tp_status code, const char *field, const char *msg) {
-    if (!out) {
-        return false;
-    }
+static bool result_error_store_allowed(void) {
     if (s_add_error_fail >= 0) { /* fault seam: fail this grow once */
         if (s_add_error_fail == 0) {
             s_add_error_fail = -1;
@@ -181,16 +191,58 @@ bool tp_txn__result_add_error(tp_txn_result *out, int op_index, tp_status code, 
         }
         s_add_error_fail--;
     }
-    tp_txn_error *n = (tp_txn_error *)realloc(out->errors, (size_t)(out->error_count + 1) * sizeof *n);
-    if (!n) {
-        return false;
-    }
-    out->errors = n;
-    tp_txn_error *e = &out->errors[out->error_count];
+    return true;
+}
+
+static void result_error_fill(tp_txn_error *e, int op_index, tp_status code,
+                              const char *field, const char *msg) {
     e->op_index = op_index;
     e->code = code;
     (void)snprintf(e->field, sizeof e->field, "%s", field ? field : "");
     (void)snprintf(e->message, sizeof e->message, "%s", msg ? msg : "");
+}
+
+bool tp_txn__result_add_error(tp_txn_result *out, int op_index, tp_status code, const char *field, const char *msg) {
+    if (!out || !result_error_store_allowed()) {
+        return false;
+    }
+    tp_txn_error *n = (tp_txn_error *)realloc(out->errors, (size_t)(out->error_count + 1) * sizeof *n);
+    if (!n) {
+        return false;
+    }
+    s_test_error_allocations++;
+    out->errors = n;
+    tp_txn_error *e = &out->errors[out->error_count];
+    result_error_fill(e, op_index, code, field, msg);
+    out->error_count++;
+    return true;
+}
+
+bool tp_txn__result_reserve_errors(tp_txn_result *out, int count) {
+    if (!out || count < 0 || out->errors || out->error_count != 0) {
+        return false;
+    }
+    if (count == 0) {
+        return true;
+    }
+    if ((size_t)count > SIZE_MAX / sizeof *out->errors) {
+        return false;
+    }
+    out->errors = (tp_txn_error *)malloc((size_t)count * sizeof *out->errors);
+    if (!out->errors) {
+        return false;
+    }
+    s_test_error_allocations++;
+    return true;
+}
+
+bool tp_txn__result_add_error_reserved(tp_txn_result *out, int capacity, int op_index,
+                                       tp_status code, const char *field, const char *msg) {
+    if (!out || capacity < 0 || out->error_count >= capacity ||
+        !result_error_store_allowed()) {
+        return false;
+    }
+    result_error_fill(&out->errors[out->error_count], op_index, code, field, msg);
     out->error_count++;
     return true;
 }
@@ -265,7 +317,8 @@ static void fill_result_op(tp_txn_result_op *ro, const tp_operation *op) {
  * structured error, and discards the clone so the LIVE model stays byte-unchanged.
  * `entry` / `rec` / `clone` may each be NULL (all frees are NULL-safe). */
 static void tp_txn__commit_reject(tp_txn_result *out, tp_project *clone, tp_diff_record *rec, tp_diff_op *entry,
-                                  int64_t revision, int op_index, tp_status code, const char *field, const char *msg) {
+                                  char *payload, int64_t revision, int op_index, tp_status code, const char *field,
+                                  const char *msg) {
     tp_diff_op_free(entry);   /* NULL-safe: frees a partially-captured before/after entry */
     tp_diff_record_free(rec); /* NULL-safe */
     if (out) {
@@ -274,6 +327,7 @@ static void tp_txn__commit_reject(tp_txn_result *out, tp_project *clone, tp_diff
         tp_txn__result_add_error(out, op_index, code, field, msg);
     }
     tp_project_destroy(clone); /* NULL-safe; discard the clone -- live model untouched */
+    free(payload);
 }
 
 /* ---- the atomic commit path (shared by the typed and JSON entry points) --- *
@@ -282,16 +336,95 @@ static void tp_txn__commit_reject(tp_txn_result *out, tp_project *clone, tp_diff
  * Fills `out` committed/rejected. The live model is byte-unchanged unless it returns
  * TP_STATUS_OK. */
 tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_txn_result *out, tp_error *err) {
-    int64_t next_revision = 0;
-    tp_status next_st = tp_model__next_revision(m->revision, &next_revision, err);
-    if (next_st != TP_STATUS_OK) {
-        tp_txn__commit_reject(out, NULL, NULL, NULL, m->revision, -1, next_st, "revision",
-                              "the model revision cannot be advanced");
-        return next_st;
+    if (m->journal) {
+        tp_status replay_st = tp_journal__check_append_admission(
+            m->journal, (size_t)req->op_count, err);
+        if (replay_st != TP_STATUS_OK) {
+            tp_txn__commit_reject(out, NULL, NULL, NULL, NULL, m->revision, -1,
+                                  replay_st, "operations",
+                                  "journal replay operation budget is exhausted; save/compact is required");
+            return replay_st;
+        }
+        /* Even the smallest TXN frame cannot fit: reject before canonical
+         * encoding allocates. The exact request length is checked below. */
+        tp_status byte_st = tp_journal__check_txn_min_bytes(m->journal, err);
+        if (byte_st != TP_STATUS_OK) {
+            tp_txn__commit_reject(out, NULL, NULL, NULL, NULL, m->revision, -1,
+                                  byte_st, "request",
+                                  "journal byte budget is exhausted; save/compact is required");
+            return byte_st;
+        }
+    }
+    /* Canonical journal payload admission is shared by typed and JSON callers. */
+    bool encodable = true;
+    for (int i = 0; i < req->op_count; i++) {
+        if (!req->ops || !tp_op_info_by_kind(req->ops[i].kind)) {
+            encodable = false;
+            break;
+        }
+    }
+    size_t payload_len = 0U;
+    if (encodable) {
+        /* The public transaction byte contract applies with or without a
+         * journal. Measure allocation-free before encoding or cloning. */
+        if (!tp_txn_request_encoded_size_for_project(
+                req, m->project, &payload_len)) {
+            tp_txn__commit_reject(out, NULL, NULL, NULL, NULL, m->revision, -1,
+                                  TP_STATUS_OUT_OF_BOUNDS, "request",
+                                  "canonical transaction request size overflow");
+            return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                                "canonical transaction request size overflow");
+        }
+        if (payload_len > (size_t)TP_TXN_MAX_REQUEST_BYTES) {
+            tp_txn__commit_reject(out, NULL, NULL, NULL, NULL, m->revision, -1,
+                                  TP_STATUS_OUT_OF_BOUNDS, "request",
+                                  "canonical transaction request exceeds the byte limit");
+            return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                                "canonical transaction request has %zu bytes; maximum is %u",
+                                payload_len, (unsigned)TP_TXN_MAX_REQUEST_BYTES);
+        }
+        if (m->journal) {
+            tp_status byte_st = tp_journal__check_txn_bytes(
+                m->journal, payload_len, err);
+            if (byte_st != TP_STATUS_OK) {
+                tp_txn__commit_reject(
+                    out, NULL, NULL, NULL, NULL, m->revision, -1, byte_st,
+                    "request",
+                    "journal byte budget is exhausted; save/compact is required");
+                return byte_st;
+            }
+        }
+    }
+    bool payload_too_large = false;
+    char *payload = encodable
+                        ? tp_txn_request_encode_bounded_for_project(
+                              req, m->project,
+                              (size_t)TP_TXN_MAX_REQUEST_BYTES,
+                              &payload_too_large)
+                        : NULL;
+    if (payload_too_large) {
+        tp_txn__commit_reject(out, NULL, NULL, NULL, NULL, m->revision, -1, TP_STATUS_OUT_OF_BOUNDS,
+                              "request", "canonical transaction request exceeds the byte limit");
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                            "canonical transaction request exceeds the %u-byte maximum",
+                            (unsigned)TP_TXN_MAX_REQUEST_BYTES);
+    }
+    if (encodable && !payload) {
+        tp_txn__commit_reject(out, NULL, NULL, NULL, NULL, m->revision, -1, TP_STATUS_OOM, "request",
+                              "could not serialize the transaction request (out of memory)");
+        return tp_error_set(err, TP_STATUS_OOM, "transaction request serialization failed");
+    }
+    payload_len = payload ? strlen(payload) : 0U;
+    if (payload && payload_len > (size_t)TP_TXN_MAX_REQUEST_BYTES) {
+        tp_txn__commit_reject(out, NULL, NULL, NULL, payload, m->revision, -1, TP_STATUS_OUT_OF_BOUNDS,
+                              "request", "canonical transaction request exceeds the byte limit");
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                            "canonical transaction request has %zu bytes; maximum is %u", payload_len,
+                            (unsigned)TP_TXN_MAX_REQUEST_BYTES);
     }
     tp_project *clone = tp_project_clone(m->project);
     if (!clone) {
-        tp_txn__commit_reject(out, NULL, NULL, NULL, m->revision, -1, TP_STATUS_OOM, "",
+        tp_txn__commit_reject(out, NULL, NULL, NULL, payload, m->revision, -1, TP_STATUS_OOM, "",
                               "could not clone the model (out of memory)");
         return tp_error_set(err, TP_STATUS_OOM, "transaction clone failed");
     }
@@ -302,11 +435,18 @@ tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_tx
      * F2-02 atomicity is preserved. A NULL history => exactly the F2-02 code path. */
     tp_diff_record *rec = NULL;
     if (m->history) {
+        tp_diff__record_budget_begin(tp_history_record_byte_limit());
         rec = tp_diff_record_new(req->label, req->author, req->op_count);
         if (!rec) {
-            tp_txn__commit_reject(out, clone, NULL, NULL, m->revision, -1, TP_STATUS_OOM, "",
-                                  "could not allocate the diff record (out of memory)");
-            return tp_error_set(err, TP_STATUS_OOM, "diff record allocation failed");
+            const bool over_budget = tp_diff__record_budget_exceeded();
+            (void)tp_diff__record_budget_end(NULL);
+            const tp_status rst = over_budget ? TP_STATUS_OUT_OF_BOUNDS : TP_STATUS_OOM;
+            tp_txn__commit_reject(out, clone, NULL, NULL, payload, m->revision, -1, rst,
+                                  over_budget ? "history" : "",
+                                  over_budget ? "semantic diff exceeds the history record budget"
+                                              : "could not allocate the diff record (out of memory)");
+            return tp_error_set(err, rst, over_budget ? "semantic diff exceeds the history record budget"
+                                                      : "diff record allocation failed");
         }
     }
 
@@ -322,42 +462,164 @@ tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_tx
              * is an allocation fault (op_index -1, the F2-02 convention). */
             tp_status cst = tp_diff_capture_before(clone, &req->ops[i], &entry);
             if (cst != TP_STATUS_OK) {
+                const bool over_budget = tp_diff__record_budget_exceeded();
+                (void)tp_diff__record_budget_end(NULL);
+                if (over_budget) {
+                    cst = TP_STATUS_OUT_OF_BOUNDS;
+                }
                 int op_index = (cst == TP_STATUS_OOM) ? -1 : i;
-                const char *cmsg = (cst == TP_STATUS_OOM)
+                const char *cmsg = over_budget ? "semantic diff exceeds the history record budget"
+                                   : (cst == TP_STATUS_OOM)
                                        ? "diff capture failed (out of memory)"
                                        : "operation references a missing entity or an out-of-range index";
-                tp_txn__commit_reject(out, clone, rec, &entry, m->revision, op_index, cst, "", cmsg);
-                return tp_error_set(err, cst, "diff capture (before) failed at op %d", i);
+                tp_txn__commit_reject(out, clone, rec, &entry, payload, m->revision,
+                                      over_budget ? -1 : op_index, cst, over_budget ? "history" : "", cmsg);
+                return over_budget ? tp_error_set(err, cst, "semantic diff exceeds the history record budget")
+                                   : tp_error_set(err, cst, "diff capture (before) failed at op %d", i);
             }
         }
         tp_op_reject rej;
         tp_status st = tp_operation_apply(clone, &req->ops[i], &rej);
         if (st != TP_STATUS_OK) {
-            tp_txn__commit_reject(out, clone, rec, rec ? &entry : NULL, m->revision, i, st, rej.field, rej.message);
+            if (rec) {
+                (void)tp_diff__record_budget_end(NULL);
+            }
+            tp_txn__commit_reject(out, clone, rec, rec ? &entry : NULL, payload, m->revision, i, st, rej.field,
+                                  rej.message);
             return tp_error_set(err, st, "operation %d rejected: %s", i, rej.message);
         }
         if (rec) {
             tp_status cst = tp_diff_capture_after(clone, &req->ops[i], &entry);
             if (cst != TP_STATUS_OK) {
-                tp_txn__commit_reject(out, clone, rec, &entry, m->revision, -1, cst, "",
-                                      "diff capture failed (out of memory)");
-                return tp_error_set(err, cst, "diff capture (after) failed at op %d", i);
+                const bool over_budget = tp_diff__record_budget_exceeded();
+                (void)tp_diff__record_budget_end(NULL);
+                if (over_budget) {
+                    cst = TP_STATUS_OUT_OF_BOUNDS;
+                }
+                tp_txn__commit_reject(out, clone, rec, &entry, payload, m->revision, -1, cst,
+                                      over_budget ? "history" : "",
+                                      over_budget ? "semantic diff exceeds the history record budget"
+                                                  : "diff capture failed (out of memory)");
+                return over_budget ? tp_error_set(err, cst, "semantic diff exceeds the history record budget")
+                                   : tp_error_set(err, cst, "diff capture (after) failed at op %d", i);
             }
             tp_diff_record_push_op(rec, &entry); /* ownership of `entry`'s pointers moves into rec */
         }
     }
 
-    /* Reserve the history slot FIRST (fix [3]): ALL fallible work -- clone, capture,
-     * record build, history reserve -- must happen BEFORE idstore->record, so that once
+    /* Acceptance is not publication. If the fully-applied candidate has the
+     * same semantic identity, report a typed no-change outcome and leave every
+     * model-side authority untouched: revision, retained ids, journal, history
+     * (including a redo branch), dirty anchor, and side-effect coordinator. */
+    bool no_change = false;
+    bool no_change_known = false;
+    if (req->op_count == 1 &&
+        req->ops[0].kind != TP_OP_ATLAS_CREATE &&
+        req->ops[0].kind != TP_OP_ATLAS_REMOVE) {
+        /* Every non-structural single operation is scoped to one atlas. Fold
+         * that atlas with the canonical semantic owner instead of traversing
+         * every unrelated sprite twice. Multi-op batches retain the full fold
+         * because their effects may cancel across operations. */
+        const int before_index = tp_project_find_atlas_by_id(
+            m->project, req->ops[0].atlas_id);
+        const int after_index = tp_project_find_atlas_by_id(
+            clone, req->ops[0].atlas_id);
+        if (before_index >= 0 && after_index >= 0) {
+            const tp_project_atlas *before =
+                &m->project->atlases[before_index];
+            const tp_operation *only = &req->ops[0];
+            if (only->kind == TP_OP_ATLAS_RENAME) {
+                no_change_known = true;
+                no_change = strcmp(before->name,
+                                   only->u.atlas_rename.name) == 0;
+            } else if (only->kind == TP_OP_ATLAS_SETTINGS_SET) {
+                const tp_op_atlas_settings *s = &only->u.atlas_settings;
+                no_change_known = true;
+                no_change = true;
+#define TP_SETTING_DIFF(BIT, FIELD)                                            \
+                if ((s->mask & (BIT)) && before->FIELD != s->FIELD) {          \
+                    no_change = false;                                         \
+                }
+                TP_SETTING_DIFF(TP_AF_MAX_SIZE, max_size)
+                TP_SETTING_DIFF(TP_AF_PADDING, padding)
+                TP_SETTING_DIFF(TP_AF_MARGIN, margin)
+                TP_SETTING_DIFF(TP_AF_EXTRUDE, extrude)
+                TP_SETTING_DIFF(TP_AF_ALPHA_THRESHOLD, alpha_threshold)
+                TP_SETTING_DIFF(TP_AF_MAX_VERTICES, max_vertices)
+                TP_SETTING_DIFF(TP_AF_SHAPE, shape)
+                TP_SETTING_DIFF(TP_AF_ALLOW_TRANSFORM, allow_transform)
+                TP_SETTING_DIFF(TP_AF_POWER_OF_TWO, power_of_two)
+#undef TP_SETTING_DIFF
+                /* Float semantic identity follows canonical %.9g text. An
+                 * exact equality is a known no-change; a different binary
+                 * value needs the canonical atlas fold to catch equal text. */
+                if ((s->mask & TP_AF_PIXELS_PER_UNIT) &&
+                    before->pixels_per_unit != s->pixels_per_unit) {
+                    no_change_known = false;
+                }
+            }
+            if (!no_change_known) {
+                no_change = tp_id128_eq(
+                    tp_semantic_atlas_identity(m->project, before),
+                    tp_semantic_atlas_identity(
+                        clone, &clone->atlases[after_index]));
+            }
+        }
+    } else if (req->op_count != 1) {
+        no_change = tp_id128_eq(tp_semantic_identity(clone),
+                                tp_semantic_identity(m->project));
+    }
+    if (no_change) {
+        if (rec) {
+            (void)tp_diff__record_budget_end(NULL);
+            tp_diff_record_free(rec);
+        }
+        tp_project_destroy(clone);
+        free(payload);
+        if (out) {
+            out->committed = false;
+            out->no_change = true;
+            out->revision = m->revision;
+        }
+        return TP_STATUS_OK;
+    }
+
+    int64_t next_revision = 0;
+    tp_status next_st = tp_model__next_revision(m->revision, &next_revision,
+                                                err);
+    if (next_st != TP_STATUS_OK) {
+        if (rec) {
+            (void)tp_diff__record_budget_end(NULL);
+        }
+        tp_txn__commit_reject(out, clone, rec, NULL, payload, m->revision, -1,
+                              next_st, "revision",
+                              "the model revision cannot be advanced");
+        return next_st;
+    }
+
+    tp_history_push_plan history_plan;
+    memset(&history_plan, 0, sizeof history_plan);
+    if (rec && !tp_diff__record_budget_end(&rec->bytes)) {
+        tp_txn__commit_reject(out, clone, rec, NULL, payload, m->revision, -1, TP_STATUS_OUT_OF_BOUNDS,
+                              "history", "diff byte accounting overflowed");
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "diff byte accounting overflowed");
+    }
+
+    /* Prepare history eviction FIRST: ALL fallible work -- clone, capture,
+     * record build, history admission -- must happen BEFORE idstore->record, so that once
      * the id is recorded the only remaining steps are the allocation-free swap + revision
      * bump + push. A reserve OOM fails the commit cleanly (id NOT yet recorded -> the same
      * transaction id stays retryable, never poisoned into a permanent DUPLICATE_ID). */
     if (rec) {
-        tp_status rvst = tp_history_reserve(m->history);
+        tp_status rvst = tp_history_prepare_push(m->history, rec, &history_plan, err);
         if (rvst != TP_STATUS_OK) {
-            tp_txn__commit_reject(out, clone, rec, NULL, m->revision, -1, rvst, "",
-                                  "could not reserve a history slot (out of memory)");
-            return tp_error_set(err, rvst, "history reserve failed");
+            const char *message = rvst == TP_STATUS_OOM ? "could not prepare history (out of memory)"
+                                                        : "semantic diff exceeds the history budget";
+            tp_txn__commit_reject(out, clone, rec, NULL, payload, m->revision, -1, rvst, "history", message);
+            if (rvst == TP_STATUS_OOM) {
+                return tp_error_set(err, rvst, "history prepare failed");
+            }
+            return rvst;
         }
     }
 
@@ -374,7 +636,8 @@ tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_tx
     if (m->coordinator && m->coordinator->prepare) {
         tp_status ps = m->coordinator->prepare(m->coordinator->ctx, req, err);
         if (ps != TP_STATUS_OK) {
-            tp_txn__commit_reject(out, clone, rec, NULL, m->revision, -1, ps, "", "side-effect prepare failed");
+            tp_txn__commit_reject(out, clone, rec, NULL, payload, m->revision, -1, ps, "",
+                                  "side-effect prepare failed");
             return ps;
         }
     }
@@ -389,19 +652,10 @@ tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_tx
     tp_status gate = TP_STATUS_OK;
     const char *gate_msg = "";
     if (m->journal) {
-        /* The op request already validated + applied to the clone above, so encode() fails
-         * only on OOM (an INVALID-kind op is impossible here). The journal payload is OPAQUE
-         * bytes to the log -- no journal API change. */
-        char *payload = tp_txn_request_encode(req);
-        if (!payload) {
-            gate = tp_error_set(err, TP_STATUS_OOM, "could not serialize the operation for the recovery journal");
-            gate_msg = "could not serialize the operation for the journal";
-        } else {
-            gate = tp_journal_append_txn(m->journal, req->id_hex, next_revision, (const uint8_t *)payload,
-                                         strlen(payload), err);
-            gate_msg = "recovery journal append failed (transaction rolled back)";
-        }
-        free(payload);
+        gate = tp_journal_append_txn_counted(
+            m->journal, req->id_hex, next_revision, (const uint8_t *)payload,
+            payload_len, (size_t)req->op_count, err);
+        gate_msg = "recovery journal append failed (transaction rolled back)";
     } else if (m->idstore && m->idstore->record) {
         gate = m->idstore->record(m->idstore->ctx, req->id_hex, err);
         gate_msg = "could not record the transaction id (out of memory)";
@@ -412,9 +666,10 @@ tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_tx
         if (m->coordinator && m->coordinator->abort) {
             m->coordinator->abort(m->coordinator->ctx, req);
         }
-        tp_txn__commit_reject(out, clone, rec, NULL, m->revision, -1, gate, "", gate_msg);
+        tp_txn__commit_reject(out, clone, rec, NULL, payload, m->revision, -1, gate, "", gate_msg);
         return gate;
     }
+    free(payload);
 
     /* The commit: allocation-free pointer swap + one revision bump. */
     tp_project_destroy(m->project);
@@ -425,7 +680,7 @@ tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_tx
      * redo branch (a new transaction after an Undo drops the redo steps). */
     if (rec) {
         rec->revision = m->revision;
-        tp_history_push_reserved(m->history, rec);
+        tp_history_push_prepared(m->history, rec, &history_plan);
     }
 
     /* (iii) Publish tied side-effects now that the transaction is durably acknowledged.
@@ -474,6 +729,17 @@ bool tp_txn__is_hex32_lower(const char *s) {
     return n == 32;
 }
 
+tp_status tp_txn__check_op_count(int op_count, tp_error *err) {
+    if (op_count < 0) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "transaction operation count cannot be negative");
+    }
+    if (op_count > TP_TXN_MAX_OPS) {
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                            "transaction has %d operations; maximum is %d", op_count, TP_TXN_MAX_OPS);
+    }
+    return TP_STATUS_OK;
+}
+
 tp_status tp_txn__preflight(tp_model *m, const char *id_hex, int64_t expected_revision, tp_txn_result *out,
                             tp_error *err) {
     tp_txn__result_reset(out, id_hex); /* NULL-safe */
@@ -519,6 +785,30 @@ tp_status tp_model_apply(tp_model *m, const tp_txn_request *req, tp_txn_result *
     if (!m || !req) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "null model or request");
     }
+    /* Structural resource admission precedes idempotency/revision and clone work,
+     * matching the JSON envelope path. The result is still a normal structured
+     * rejection tagged with the caller's transaction id/current revision. */
+    tp_status count_st = tp_txn__check_op_count(req->op_count, err);
+    if (count_st != TP_STATUS_OK) {
+        tp_txn__result_reset(out, req->id_hex);
+        if (out) {
+            out->revision = m->revision;
+            tp_txn__result_add_error(out, -1, count_st, "operations", err ? err->msg : "");
+        }
+        return count_st;
+    }
+    if (req->op_count > 0 && !req->ops) {
+        const tp_status pointer_st = tp_error_set(
+            err, TP_STATUS_INVALID_ARGUMENT,
+            "transaction operations are null for a positive operation count");
+        tp_txn__result_reset(out, req->id_hex);
+        if (out) {
+            out->revision = m->revision;
+            tp_txn__result_add_error(out, -1, pointer_st, "operations",
+                                     err ? err->msg : "transaction operations are null");
+        }
+        return pointer_st;
+    }
     /* Shared preflight: id format + idempotency + revision precondition. */
     tp_status pf = tp_txn__preflight(m, req->id_hex, req->expected_revision, out, err);
     if (pf != TP_STATUS_OK) {
@@ -557,13 +847,21 @@ void tp_model_set_coordinator(tp_model *m, tp_side_effect_coordinator *c) {
  * checkpoint paths inherit the guarantee. On any
  * failure *snap is NULL/0 and a wrapped error is returned; the caller leaves the journal
  * untouched. */
-static tp_status project_checkpoint_snapshot(const tp_project *project, char **snap, size_t *snap_len,
-                                             tp_error *err) {
+static tp_status project_checkpoint_snapshot(const tp_project *project, size_t expected_len,
+                                             char **snap, size_t *snap_len, tp_error *err) {
     *snap = NULL;
     *snap_len = 0;
-    tp_status ss = tp_project_save_buffer(project, snap, snap_len, err);
+    tp_status ss = tp_project_checkpoint_save_buffer(project, snap, snap_len,
+                                                     err);
     if (ss != TP_STATUS_OK) {
         return ss;
+    }
+    if (*snap_len != expected_len) {
+        free(*snap);
+        *snap = NULL;
+        *snap_len = 0;
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "project changed while its checkpoint was serialized");
     }
     tp_project *probe = NULL;
     tp_status vs = tp_project_load_buffer(*snap, *snap_len, &probe, err);
@@ -595,7 +893,12 @@ tp_status tp_model_attach_journal(tp_model *m, tp_journal *j, tp_error *err) {
     if (pre) {
         int pre_count = tp_idset_count(pre);
         for (int i = 0; i < pre_count; i++) {
-            tp_status ms = tp_journal_seed_retained_id(j, tp_idset_at(pre, i));
+            char id_hex[TP_IDSET_IDLEN + 1];
+            if (!tp_idset_format_at(pre, i, id_hex)) {
+                return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                                    "in-memory retained-id ordering is invalid");
+            }
+            tp_status ms = tp_journal_seed_retained_id(j, id_hex);
             if (ms != TP_STATUS_OK) {
                 return tp_error_set(err, ms, "could not migrate retained ids into the journal (out of memory)");
             }
@@ -604,9 +907,20 @@ tp_status tp_model_attach_journal(tp_model *m, tp_journal *j, tp_error *err) {
     /* Initial CHECKPOINT of the current committed state so the journal is self-sufficient for
      * recovery (spec §22.3 checkpoint + journal), via the shared round-trip-proving helper. On
      * failure the model is NOT attached and the caller still owns j. */
+    size_t measured_len = 0;
+    tp_status ss = tp_project_checkpoint_serialized_size_bounded(
+        m->project, SIZE_MAX, &measured_len, err);
+    if (ss != TP_STATUS_OK) {
+        return ss;
+    }
+    ss = tp_journal__check_checkpoint_append_bytes(j, measured_len, err);
+    if (ss != TP_STATUS_OK) {
+        return ss;
+    }
     char *snap = NULL;
     size_t snap_len = 0;
-    tp_status ss = project_checkpoint_snapshot(m->project, &snap, &snap_len, err);
+    ss = project_checkpoint_snapshot(m->project, measured_len,
+                                     &snap, &snap_len, err);
     if (ss != TP_STATUS_OK) {
         return ss;
     }
@@ -620,12 +934,17 @@ tp_status tp_model_attach_journal(tp_model *m, tp_journal *j, tp_error *err) {
 }
 
 tp_status tp_model__append_history_checkpoint(tp_model *m, const tp_project *candidate, int64_t revision,
-                                              tp_error *err) {
+                                              size_t snapshot_bytes, tp_error *err) {
     if (!m || !candidate) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "null model or history candidate");
     }
     if (!m->journal) {
         return TP_STATUS_OK;
+    }
+    tp_status admission = tp_journal__check_checkpoint_append_bytes(
+        m->journal, snapshot_bytes, err);
+    if (admission != TP_STATUS_OK) {
+        return admission;
     }
 
     /* Undo/Redo has no uniformly encodable forward operation (notably inverse remove),
@@ -634,7 +953,8 @@ tp_status tp_model__append_history_checkpoint(tp_model *m, const tp_project *can
      * and record_count advances past the startup scan's unsaved-work threshold. */
     char *snap = NULL;
     size_t snap_len = 0;
-    tp_status ss = project_checkpoint_snapshot(candidate, &snap, &snap_len, err);
+    tp_status ss = project_checkpoint_snapshot(candidate, snapshot_bytes,
+                                               &snap, &snap_len, err);
     if (ss != TP_STATUS_OK) {
         return ss;
     }
@@ -667,28 +987,30 @@ tp_status tp_model_compact_journal(tp_model *m, tp_error *err) {
      * compacted checkpoint is guaranteed loadable (it becomes the recovery base). On any snapshot/probe
      * failure the journal is left UNCHANGED (keeps its larger-but-correct checkpoint+ops and still
      * recovers); the compaction primitive itself fails closed on a truncate failure (poison preserved). */
+    size_t measured_len = 0;
+    tp_status ss = tp_project_checkpoint_serialized_size_bounded(
+        m->project, SIZE_MAX, &measured_len, err);
+    if (ss != TP_STATUS_OK) {
+        return ss;
+    }
+    ss = tp_journal__check_checkpoint_compact_bytes(
+        m->journal, measured_len, err);
+    if (ss != TP_STATUS_OK) {
+        return ss;
+    }
     char *snap = NULL;
     size_t snap_len = 0;
-    tp_status ss = project_checkpoint_snapshot(m->project, &snap, &snap_len, err);
+    ss = project_checkpoint_snapshot(m->project, measured_len,
+                                     &snap, &snap_len, err);
     if (ss != TP_STATUS_OK) {
         return ss; /* snapshot/probe failed BEFORE any truncate: journal untouched, keeps recovering */
     }
     tp_status cs = tp_journal_compact(m->journal, (const uint8_t *)snap, snap_len, m->revision, err);
     free(snap);
-    if (cs != TP_STATUS_OK) {
-        /* A poisoned journal here means the BROKEN-STORE case: the truncate removed the old checkpoint
-         * but the fresh one could not be written, so the store is checkpoint-LESS and appends onto it
-         * would be unrecoverable. Poison would make every subsequent commit REJECT (append refused),
-         * leaving the app unable to edit. DETACH the journal and continue JOURNAL-LESS (still editable,
-         * recovery disabled for the session) rather than append unrecoverable records. A benign truncate
-         * FAILURE leaves the store byte-intact + the journal healthy (NOT poisoned) -> keep it as-is. */
-        if (tp_journal__is_poisoned(m->journal)) {
-            tp_journal_destroy(m->journal);
-            m->journal = NULL;
-        }
-        return cs;
-    }
-    return TP_STATUS_OK;
+    /* Never auto-detach on a poisoned replacement failure. The journal remains the
+     * model's idempotency/durability authority and subsequent mutations fail closed
+     * with TP_STATUS_JOURNAL_FAILED until an owner explicitly repairs or replaces it. */
+    return cs;
 }
 
 tp_status tp_model_set_recovery_metadata(tp_model *m, int64_t timestamp, const char *path, const char *name,
@@ -759,12 +1081,64 @@ tp_status tp_model_recover(tp_journal_io io, tp_id128 key, tp_model **out, tp_jo
             tp_journal__poison(j);
         }
     }
+    int *operation_counts = rec.op_count > 0U
+                                ? (int *)calloc(rec.op_count, sizeof *operation_counts)
+                                : NULL;
+    if (rec.op_count > 0U && !operation_counts) {
+        if (info) {
+            *info = rec;
+        } else {
+            tp_journal_recovery_free(&rec);
+        }
+        tp_journal_destroy(j);
+        return tp_error_set(err, TP_STATUS_OOM,
+                            "journal replay count index allocation failed");
+    }
+    size_t replay_operations = 0U;
+    for (size_t k = 0U; k < rec.op_count; ++k) {
+        int operation_count = 0;
+        tp_status count_st = tp_txn__count_operations_json_n(
+            rec.ops[k].payload, rec.ops[k].payload_len, &operation_count, err);
+        if (count_st != TP_STATUS_OK || operation_count < 0 ||
+            (size_t)operation_count >
+                (size_t)TP_JOURNAL_MAX_REPLAY_OPERATIONS - replay_operations) {
+            const tp_status reject_st = count_st != TP_STATUS_OK
+                                            ? count_st
+                                            : TP_STATUS_OUT_OF_BOUNDS;
+            if (count_st == TP_STATUS_OK) {
+                (void)tp_error_set(err, reject_st,
+                                   "journal replay operation limit exceeded before materialization");
+            }
+            if (info) {
+                *info = rec;
+            } else {
+                tp_journal_recovery_free(&rec);
+            }
+            free(operation_counts);
+            tp_journal_destroy(j);
+            return reject_st;
+        }
+        replay_operations += (size_t)operation_count;
+        operation_counts[k] = operation_count;
+    }
+    tp_status seed_st = tp_journal__set_replay_operations(j, replay_operations, err);
+    if (seed_st != TP_STATUS_OK) {
+        if (info) {
+            *info = rec;
+        } else {
+            tp_journal_recovery_free(&rec);
+        }
+        free(operation_counts);
+        tp_journal_destroy(j);
+        return seed_st;
+    }
     bool keep_info = (info != NULL);
     if (keep_info) {
         *info = rec; /* transfer the snapshot ownership to the caller */
     }
 
     tp_status ret = TP_STATUS_OK;
+    size_t applied_operations = 0U;
     bool j_consumed = false; /* set once a model takes ownership of j */
     if (rec.records_recovered > 0 && rec.snapshot && rec.snapshot_len > 0) {
         /* Format B: load the last CHECKPOINT snapshot as the base, then REPLAY the post-checkpoint
@@ -779,7 +1153,9 @@ tp_status tp_model_recover(tp_journal_io io, tp_id128 key, tp_model **out, tp_jo
         } else {
             for (size_t k = 0; ls == TP_STATUS_OK && k < rec.op_count; k++) {
                 tp_txn_request *req = NULL;
-                tp_status ds = tp_txn_request_decode(rec.ops[k].payload, &req, err);
+                tp_status ds = tp_txn__decode_prechecked_json_n(
+                    rec.ops[k].payload, rec.ops[k].payload_len,
+                    operation_counts[k], &req, err);
                 if (ds != TP_STATUS_OK) {
                     ls = ds; /* a durable op-payload did not decode */
                     break;
@@ -793,6 +1169,7 @@ tp_status tp_model_recover(tp_journal_io io, tp_id128 key, tp_model **out, tp_jo
                                           rej.message);
                         break;
                     }
+                    applied_operations++;
                 }
                 tp_txn_request_free(req);
             }
@@ -827,5 +1204,7 @@ tp_status tp_model_recover(tp_journal_io io, tp_id128 key, tp_model **out, tp_jo
     if (!keep_info) {
         tp_journal_recovery_free(&rec);
     }
+    free(operation_counts);
+    tp_op__test_apply_count_publish(applied_operations);
     return ret;
 }

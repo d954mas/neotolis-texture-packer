@@ -4,11 +4,12 @@
 #include <string.h>
 
 #include "tp_core/tp_names.h"   /* tp_sprite_export_key */
-#include "tp_core/tp_project.h" /* tp_project + tp_project_resolve_path */
+#include "tp_core/tp_project.h" /* project + source path resolution */
 #include "tp_core/tp_scan.h"    /* tp_scan_dir / _exists / _is_dir */
 #include "tp_core/tp_srckey.h"  /* tp_srckey_normalize */
 #include "tp_hex.h"             /* tp_hex_encode_lower (shared drift-guard encoder) */
 #include "tp_strutil.h"         /* shared tp_strdup / tp_path_basename / tp_slash_norm (fix [8]) */
+#include "tp_session_internal.h"
 
 /* ------------------------------------------------------------------ */
 /* sprite-id text (sprite_<32hex>): no tp_id_kind entry exists for a   */
@@ -131,7 +132,7 @@ tp_status tp_sprite_index_build(const struct tp_project *p, int atlas_index, tp_
     for (int si = 0; si < a->source_count && !oom; si++) {
         const tp_project_source *src = &a->sources[si];
         char abs[512];
-        if (tp_project_resolve_path(p, src->path, abs, sizeof abs) != TP_STATUS_OK) {
+        if (tp_project_resolve_source_path(p, src->path, abs, sizeof abs) != TP_STATUS_OK) {
             continue; /* unresolvable (relative source, unsaved project) -- skip */
         }
         if (!tp_scan_exists(abs)) {
@@ -155,6 +156,17 @@ tp_status tp_sprite_index_build(const struct tp_project *p, int atlas_index, tp_
         return tp_error_set(err, TP_STATUS_OOM, "tp_sprite_index_build: out of memory building the sprite index");
     }
     return TP_STATUS_OK;
+}
+
+tp_status tp_sprite_index_build_snapshot(const tp_session_snapshot *snapshot,
+                                         int atlas_index, tp_sprite_index *out,
+                                         tp_error *err) {
+    if (!snapshot) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "tp_sprite_index_build_snapshot: snapshot is NULL");
+    }
+    return tp_sprite_index_build(tp_session_snapshot_project_internal(snapshot),
+                                 atlas_index, out, err);
 }
 
 void tp_sprite_index_free(tp_sprite_index *idx) {

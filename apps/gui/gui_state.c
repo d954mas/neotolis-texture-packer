@@ -81,7 +81,7 @@ char s_sel_abs[512];
 bool s_sel_missing;
 
 /* --- multi-select set (growable; grown by multi_sel_add in gui_rows.c -- P1 fix, step 7) --- */
-char (*s_multi_sel)[192];
+char (*s_multi_sel)[TP_SCAN_REL_CAP];
 int s_multi_sel_count;
 int s_multi_sel_cap;
 int s_sel_anchor_row = -1;
@@ -92,7 +92,7 @@ int s_sel_anim_frame = -1;
 
 /* --- export-target preview (EXP-PREVIEW): 0 = Native (default) --- */
 int s_preview_target;
-unsigned s_preview_ver;
+uint64_t s_preview_ver;
 
 /* --- animation preview player --- */
 bool s_preview_active;
@@ -106,8 +106,8 @@ int s_preview_frame_count;
 int s_edit_kind;
 int s_edit_atlas;
 int s_edit_anim;
-char s_edit_sprite[192];
-char s_edit_buf[192];
+char s_edit_sprite[TP_SCAN_REL_CAP];
+char s_edit_buf[TP_SCAN_REL_CAP];
 
 /* --- runtime column widths --- */
 float s_content_w = 1280.0F;
@@ -134,7 +134,7 @@ int s_ctx_atlas;
 int s_ctx_anim = -1;
 int s_ctx_target = -1;
 int s_ctx_src = -1;
-char s_ctx_sprite[192];
+char s_ctx_sprite[TP_SCAN_REL_CAP];
 bool s_ctx_leaf;
 bool s_ctx_removable;
 

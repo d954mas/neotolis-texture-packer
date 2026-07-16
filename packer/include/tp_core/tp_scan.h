@@ -14,8 +14,12 @@
 extern "C" {
 #endif
 
+/* Includes the trailing NUL. Source keys are exact normalized relative paths;
+ * every adapter storing one must use this capacity or an owned string. */
+#define TP_SCAN_REL_CAP 256
+
 typedef struct tp_scan_entry {
-    char rel[256];   /* path relative to the scanned root, '/'-normalized (e.g. "tank/walk_01.png") */
+    char rel[TP_SCAN_REL_CAP]; /* path relative to the scanned root, '/'-normalized */
     char abs[512];   /* absolute path on disk */
     long long size;  /* file size in bytes */
     long long mtime; /* platform last-write time (opaque; compare for equality only) */

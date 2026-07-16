@@ -2,13 +2,13 @@
  *
  * PROJECT EDITOR + LIVE PACKER (this iteration): create/open/save .ntpacker_project files,
  * manage atlases, add image files/folders as sources, browse+select sprites, PACK atlases
- * in-process (gui_pack -> tp_pack), render the real packed page on the center canvas with
- * zoom/pan + region overlays + selection sync, and EXPORT target files (gui_pack -> tp_export_run).
- * The single source of truth is the linked tp_project (tp_core) -- the GUI is a thin editor
+ * through typed session jobs, render the real packed page on the center canvas with
+ * zoom/pan + region overlays + selection sync, and export target files through the same boundary.
+ * The session is the single mutable source of truth; the GUI reads owned snapshots as a thin editor
  * (AGENTS tool-parity). The Pack button surfaces the "preview stale" state per ux.md §3.3b.
  *
  * Module split: gui_project (state + dirty bits + load/save), gui_scan (display-only folder
- * enumeration), gui_pack (in-process pack + export orchestration), gui_canvas (dual-mode
+ * enumeration), gui_pack (typed job adapter + presentation slots), gui_canvas (dual-mode
  * source-image / atlas-page custom nt_ui element). main.c is init/frame/shutdown + layout +
  * the OS file dialogs (tinyfiledialogs).
  *
@@ -176,10 +176,13 @@ static float s_pan_last_x, s_pan_last_y;
  * gui_view_chrome.c (GUI decomposition step 6b) as a pure move: it is chrome-only, the About modal
  * is its sole caller. */
 
-/* Shell-owned reset of the canvas-bound-result cache (gui_shell.h): the destructive flows call this
- * right after gui_pack_clear(-1) so s_shown_result never holds a freed slot pointer at the next
- * frame's `want != s_shown_result` compare (P2 hardening). */
-void gui_shell_reset_shown_result(void) { s_shown_result = NULL; }
+/* Shell-owned release of the canvas borrow and its comparison cache. The pack
+ * arena is already gone when destructive flows call this, so leaving either
+ * pointer bound would make the next render inspect freed tp_result storage. */
+void gui_shell_reset_shown_result(void) {
+    gui_canvas_set_result(&s_canvas, NULL);
+    s_shown_result = NULL;
+}
 // #endregion
 
 // #region init helpers
@@ -510,7 +513,9 @@ static void handle_shortcuts(void) {
         nt_input_key_is_pressed(NT_KEY_DELETE)) {
         /* fix3 completeness: clear the frame selection ONLY on a real removal -- a journal-failed flush
          * aborts the remove (frame still present), so don't deselect it (op-error surfaces via poll_async). */
-        if (gui_project_anim_remove_frame(s_sel_atlas, s_sel_anim, s_sel_anim_frame)) {
+        gui_animation_ref animation;
+        if (gui_project_animation_ref_at(s_sel_atlas, s_sel_anim, &animation) &&
+            gui_project_anim_remove_frame(&animation, s_sel_anim_frame)) {
             s_sel_anim_frame = -1;
         }
     }
@@ -724,7 +729,10 @@ static void frame(void) {
         clamp_selection();
         /* keep the animation selection valid after undo/redo/atlas changes */
         {
-            tp_project_atlas *sel_a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
+            const tp_session_snapshot *snapshot = gui_project_snapshot();
+            const tp_snapshot_atlas *sel_a = snapshot
+                                                 ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas)
+                                                 : NULL;
             if (!sel_a || s_sel_anim >= sel_a->animation_count) {
                 s_sel_anim = -1;
                 s_sel_anim_frame = -1;
@@ -733,7 +741,7 @@ static void frame(void) {
                 }
             }
         }
-        build_rows(gui_project_get(), tp_project_get_atlas(gui_project_get(), s_sel_atlas));
+        build_rows();
         s_content_w = scale.logical_w; /* for caption/status truncation */
         compute_panel_widths(scale.logical_w); /* clamp side-panel widths so they never leave the screen */
         gui_shot_tick(); /* screenshot mode: pack + select + (post-draw) capture; no-op unless --shot */
@@ -773,20 +781,42 @@ static void frame(void) {
          * owner: "добавил и не вижу"). Result names are the original atlas-relative key + ext. */
         s_canvas.sel_slice9[0] = s_canvas.sel_slice9[1] = s_canvas.sel_slice9[2] = s_canvas.sel_slice9[3] = 0;
         if (want && s_canvas.sel_sprite >= 0 && s_canvas.sel_sprite < want->sprite_count) {
-            tp_project_atlas *sel_a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
-            if (sel_a) {
-                char s9key[192];
-                tp_sprite_export_key(want->sprites[s_canvas.sel_sprite].name, s9key, sizeof s9key);
+            const sprite_row *selected = NULL;
+            for (int i = 0; i < s_row_count; i++) {
+                const sprite_row *row = &s_rows[i];
+                const bool is_selected = row->is_source
+                                             ? (s_sel_src == row->src && s_sel_child == -1)
+                                             : (s_sel_src == row->src &&
+                                                s_sel_child == row->child);
+                if (is_selected && !row->is_folder && !row->missing &&
+                    !tp_id128_is_nil(row->source_id) &&
+                    row->source_key[0] != '\0') {
+                    selected = row;
+                    break;
+                }
+            }
+            const tp_session_snapshot *snapshot = gui_project_snapshot();
+            const tp_snapshot_atlas *atlas = snapshot
+                                                  ? tp_session_snapshot_atlas_at(snapshot,
+                                                                                 s_sel_atlas)
+                                                  : NULL;
+            if (selected && atlas) {
+                const gui_sprite_ref sprite = {
+                    atlas->id, selected->source_id, selected->source_key,
+                    tp_session_snapshot_revision(snapshot)};
                 /* EFFECTIVE value (#5): a slice9 edit BUFFERS until the gesture boundary, so the committed
                  * record freezes mid-typing. Prefer the buffered slice9 (peek) when one is in flight for
                  * this atlas+sprite, so the guides move THIS frame; else read the committed record. */
                 int eff[4];
-                if (gui_project_peek_pending_slice9(s_sel_atlas, s9key, eff)) {
+                if (gui_project_peek_pending_slice9(&sprite, eff)) {
                     for (int k = 0; k < 4; k++) {
                         s_canvas.sel_slice9[k] = eff[k];
                     }
                 } else {
-                    const tp_project_sprite *s9ov = tp_project_atlas_find_sprite(sel_a, s9key);
+                    const tp_snapshot_sprite *s9ov =
+                        tp_session_snapshot_sprite_by_key(snapshot, atlas->id,
+                                                          selected->source_id,
+                                                          selected->source_key);
                     if (s9ov) {
                         for (int k = 0; k < 4; k++) {
                             s_canvas.sel_slice9[k] = (int)s9ov->slice9_lrtb[k];
@@ -890,6 +920,41 @@ static void frame(void) {
  * are minted, so `out` is byte-comparable to the same logical edits applied by the
  * byte-identity-proven CLI (scripts/gui_parity_check.sh). Runs before any window/GL init
  * (pure model layer). Returns 0 on success, 2 on open/save failure. */
+static bool parity_atlas_name(const char *name) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas = snapshot
+                                         ? tp_session_snapshot_atlas_at(snapshot, 0)
+                                         : NULL;
+    return atlas && gui_project_set_atlas_name(
+                        atlas->id, tp_session_snapshot_revision(snapshot), name);
+}
+
+static bool parity_atlas_setting(gui_atlas_field field, int ivalue, float fvalue) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas = snapshot
+                                         ? tp_session_snapshot_atlas_at(snapshot, 0)
+                                         : NULL;
+    return atlas && gui_project_set_atlas_setting(
+                        atlas->id, tp_session_snapshot_revision(snapshot), field,
+                        ivalue, fvalue);
+}
+
+static bool parity_sprite_ref(const char *source_key, gui_sprite_ref *out) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas = snapshot
+                                         ? tp_session_snapshot_atlas_at(snapshot, 0)
+                                         : NULL;
+    const tp_snapshot_source *source = atlas && atlas->source_count > 0
+                                           ? tp_session_snapshot_source_at(snapshot, atlas->id, 0)
+                                           : NULL;
+    if (!source) {
+        return false;
+    }
+    *out = (gui_sprite_ref){atlas->id, source->id, source_key,
+                            tp_session_snapshot_revision(snapshot)};
+    return true;
+}
+
 static int gui_run_parity(const char *in, const char *out) {
     char err[256] = {0};
     gui_project_init();
@@ -899,38 +964,53 @@ static int gui_run_parity(const char *in, const char *out) {
     }
     /* atlas rename + all 10 knobs (each a single-knob atlas.settings.set transaction; the
      * final atlas is identical to the CLI's one multi-knob `set`). */
-    (void)gui_project_set_atlas_name(0, "hero_atlas");
-    (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, 7, 0.0F);
-    (void)gui_project_set_atlas_setting(0, GUI_ATLAS_MARGIN, 3, 0.0F);
-    (void)gui_project_set_atlas_setting(0, GUI_ATLAS_EXTRUDE, 2, 0.0F);
-    (void)gui_project_set_atlas_setting(0, GUI_ATLAS_SHAPE, 0, 0.0F);
-    (void)gui_project_set_atlas_setting(0, GUI_ATLAS_ALPHA_THRESHOLD, 42, 0.0F);
-    (void)gui_project_set_atlas_setting(0, GUI_ATLAS_MAX_VERTICES, 5, 0.0F);
-    (void)gui_project_set_atlas_setting(0, GUI_ATLAS_MAX_SIZE, 2048, 0.0F);
-    (void)gui_project_set_atlas_setting(0, GUI_ATLAS_ALLOW_TRANSFORM, 0, 0.0F);
-    (void)gui_project_set_atlas_setting(0, GUI_ATLAS_POWER_OF_TWO, 1, 0.0F);
-    (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PIXELS_PER_UNIT, 0, 64.0F);
-    /* a pending (name-keyed) sprite override -- shape + origin + rename on an arbitrary key
-     * (matches the CLI `sprite set <atlas> psp shape=0 origin=0.25,0.75 rename=psp_final`). */
-    (void)gui_project_set_sprite_rename(0, "psp", "psp_final");
-    (void)gui_project_set_sprite_override(0, "psp", GUI_SPRITE_OV_SHAPE, 0);
+    (void)parity_atlas_name("hero_atlas");
+    (void)parity_atlas_setting(GUI_ATLAS_PADDING, 7, 0.0F);
+    (void)parity_atlas_setting(GUI_ATLAS_MARGIN, 3, 0.0F);
+    (void)parity_atlas_setting(GUI_ATLAS_EXTRUDE, 2, 0.0F);
+    (void)parity_atlas_setting(GUI_ATLAS_SHAPE, 0, 0.0F);
+    (void)parity_atlas_setting(GUI_ATLAS_ALPHA_THRESHOLD, 42, 0.0F);
+    (void)parity_atlas_setting(GUI_ATLAS_MAX_VERTICES, 5, 0.0F);
+    (void)parity_atlas_setting(GUI_ATLAS_MAX_SIZE, 2048, 0.0F);
+    (void)parity_atlas_setting(GUI_ATLAS_ALLOW_TRANSFORM, 0, 0.0F);
+    (void)parity_atlas_setting(GUI_ATLAS_POWER_OF_TWO, 1, 0.0F);
+    (void)parity_atlas_setting(GUI_ATLAS_PIXELS_PER_UNIT, 0, 64.0F);
+    /* Canonical source-owned sprite override: shape + origin + rename on the
+     * resolved `psp` source key, matching the CLI selector contract. */
+    gui_sprite_ref parity_sprite;
+    if (parity_sprite_ref("psp", &parity_sprite)) {
+        (void)gui_project_set_sprite_rename(&parity_sprite, "psp_final");
+    }
+    if (parity_sprite_ref("psp", &parity_sprite)) {
+        (void)gui_project_set_sprite_override(&parity_sprite, GUI_SPRITE_OV_SHAPE, 0);
+    }
     /* origin is now COMPONENT-keyed (#2): set X then Y (matches the CLI `origin=0.25,0.75`). The final
      * override record is byte-identical -- editing Y flushes the buffered X (X committed), then Y seeds
      * the committed X, so the saved sprite carries origin=(0.25,0.75) exactly as the single-op form did. */
-    (void)gui_project_set_sprite_origin(0, "psp", 0 /* X */, 0.25F);
-    (void)gui_project_set_sprite_origin(0, "psp", 1 /* Y */, 0.75F);
-    (void)gui_project_set_sprite_slice9(0, "psp", 0, 4);
-    /* target 0: keep its exporter (read from the model -- no exporter-id literal), set path. #4 UAF fix:
-     * FLUSH the buffered slice9 FIRST (it clone-swaps + frees the current project), THEN re-get `a` from
-     * the now-stable project and COPY exporter_id into a local before set_target (whose own flush is now a
-     * no-op) -- the pre-fix code read a->targets[0].exporter_id AFTER set_target's flush had freed it. */
+    if (parity_sprite_ref("psp", &parity_sprite)) {
+        (void)gui_project_set_sprite_origin(&parity_sprite, 0 /* X */, 0.25F);
+    }
+    if (parity_sprite_ref("psp", &parity_sprite)) {
+        (void)gui_project_set_sprite_origin(&parity_sprite, 1 /* Y */, 0.75F);
+    }
+    if (parity_sprite_ref("psp", &parity_sprite)) {
+        (void)gui_project_set_sprite_slice9(&parity_sprite, 0, 4);
+    }
+    /* Target 0 keeps its exporter from the immutable snapshot. Flush the buffered
+     * slice9 first, then capture a fresh stable-ID target ref and copy the DTO string
+     * before the next operation can invalidate the cached snapshot. */
     {
         gui_project_flush_pending();
-        tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), 0);
-        if (a && a->target_count > 0) {
+        const tp_session_snapshot *snapshot = gui_project_snapshot();
+        const tp_snapshot_atlas *a = snapshot ? tp_session_snapshot_atlas_at(snapshot, 0) : NULL;
+        const tp_snapshot_target *t = a ? tp_session_snapshot_target_at(snapshot, a->id, 0) : NULL;
+        if (t) {
+            gui_target_ref target;
             char exporter[64];
-            (void)snprintf(exporter, sizeof exporter, "%s", a->targets[0].exporter_id);
-            (void)gui_project_set_target(0, 0, exporter, "out/hero", true);
+            (void)snprintf(exporter, sizeof exporter, "%s", t->exporter_id);
+            if (gui_project_target_ref_at(0, 0, &target)) {
+                (void)gui_project_set_target(&target, exporter, "out/hero", true);
+            }
         }
     }
     if (gui_project_save_as(out, err, sizeof err) != TP_STATUS_OK) {
@@ -1107,10 +1187,8 @@ int main(int argc, char *argv[]) {
     /* editor state + the canvas custom-draw handler (registered outside begin/end) */
     gui_canvas_init(&s_canvas);
     nt_ui_set_custom_handler(s_ctx, gui_canvas_handler, &s_canvas);
-    /* R5b-2: crash recovery lives in a per-project FOLDER <app-data>/recovery/ with one journal per editing
-     * session -- a PER-SESSION RANDOM filename (gui_project_make_session_slot), NOT a path hash, so reopening
-     * a crashed project never collides with its own orphan (project identity is carried in the journal
-     * METADATA, read by the scan). At startup we COLLECT the journals orphaned by crashed sessions and, if any,
+    /* Crash recovery lives in <app-data>/recovery/. Core owns the random
+     * live-slot identity, lock, and scan exclusion. At startup we collect orphaned journals and, if any,
      * open the R6b startup recovery MODAL to resolve each one (Discard / Save to original / Save As) via the R6a
      * layer -- the live editor starts FRESH untitled (recovery resolves journals to DISK, never adopts); every
      * non-resolved orphan is LEFT on disk for next launch. Every step is fail-closed + NON-FATAL: a folder/RNG/scan failure merely disables
@@ -1133,21 +1211,14 @@ int main(int argc, char *argv[]) {
         } else if (!gui_paths_ensure_dir(rec_folder)) {
             gui_project_note_recovery_setup_failure("the recovery directory could not be created");
         } else {
-            char live_slot[1200];
-            if (!gui_project_make_session_slot(rec_folder, live_slot, sizeof live_slot)) {
-                gui_project_note_recovery_setup_failure("a recovery session id could not be created");
-            } else {
-                gui_project_enable_recovery(live_slot); /* acquire this session's live-slot lock */
-                /* R6b: COLLECT orphan journals (incl. old-format VERSION_MISMATCH for Discard) and, if any,
-                 * open the startup recovery modal -- resolved interactively in frame() via the R6a layer.
-                 * The live editor stays FRESH untitled: recovery resolves journals to DISK, never adopts. */
-                gui_recovery_list rlist;
-                /* R6b + shot seam: never raise the modal under `--shot` (gui_shot_active). The screenshot
-                 * seam neutralizes input every frame, so a modal raised by a leftover orphan journal could
-                 * never be dismissed and would corrupt the byte-reproducible capture -- skip collect+open. */
-                if (!gui_shot_active() && gui_recovery_collect(rec_folder, live_slot, &rlist) > 0) {
-                    gui_actions_open_recovery(&rlist);
-                }
+            gui_project_enable_recovery(rec_folder);
+            /* R6b: collect orphan journals and open the startup modal. The
+             * live editor stays fresh; recovery resolves only to disk. */
+            gui_recovery_list rlist;
+            /* Screenshot automation cannot dismiss a modal, so it skips the
+             * startup scan without changing recovery ownership. */
+            if (!gui_shot_active() && gui_recovery_collect(&rlist) > 0) {
+                gui_actions_open_recovery(&rlist);
             }
         }
     }
@@ -1222,15 +1293,12 @@ int main(int argc, char *argv[]) {
 #endif
 
     clamp_selection();
-    nt_log_info("ntpacker-gui: starting (live in-process packing + atlas-page canvas)");
+    nt_log_info("ntpacker-gui: starting (typed session jobs + atlas-page canvas)");
 
     nt_app_run(frame);
 
-    /* The window closed (X / Alt+F4) while a pack/export was still on the worker thread. tp_pack is
-     * non-interruptible (engine limitation), so we cannot abort it -- but instead of blocking the UI
-     * thread in gui_pack_shutdown's bare join (a frozen "not responding" ghost window), keep the OS
-     * message pump alive and poll until the worker lands. Cancel first (export stops between atlases);
-     * the wait is bounded by the pack's remaining time, and gui_pack_shutdown below is then instant. */
+    /* The window closed while a session job was still active. Cancellation is cooperative, so keep
+     * the OS message pump alive and poll until the typed job reaches a terminal state. */
     if (gui_pack_worker_active()) {
         gui_pack_async_cancel();
         while (gui_pack_worker_active()) {

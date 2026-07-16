@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "findings": [
+    {
+      "severity": "error",
+      "code": "missing_source",
+      "message": "source 'does_not_exist' does not exist on disk",
+      "atlas": "problems"
+    },
+    {
+      "severity": "error",
+      "code": "dangling_anim_frame",
+      "message": "animation 'run' references frame 'ghost' which matches no sprite export key",
+      "atlas": "problems",
+      "anim": "run",
+      "frame": "ghost"
+    }
+  ],
+  "counts": {
+    "error": 2,
+    "warning": 0
+  }
+}

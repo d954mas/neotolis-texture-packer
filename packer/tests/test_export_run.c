@@ -201,14 +201,26 @@ void test_rename_and_anim_through_run(void) {
     a->alpha_threshold = 1;
     a->max_size = 1024;
     a->pixels_per_unit = 1.0F;
+    const tp_id128 source_id = {{0x41}};
 
     /* rename the sprite whose KEY is "hero" (raw desc "hero.png") */
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_set_sprite_rename(a, "hero", "champion"));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_set_sprite_rename_by_source_key(
+            a, source_id, "hero.png", "champion"));
     /* an animation whose frames are stored in KEY space (ext stripped) */
     tp_project_anim *an = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_animation(a, "run", &an));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "hero"));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "gem"));
+    an->frames[0].source_ref = source_id;
+    an->frames[0].src_key = (char *)malloc(sizeof "hero.png");
+    an->frames[1].source_ref = source_id;
+    an->frames[1].src_key = (char *)malloc(sizeof "gem.png");
+    TEST_ASSERT_NOT_NULL(an->frames[0].src_key);
+    TEST_ASSERT_NOT_NULL(an->frames[1].src_key);
+    memcpy(an->frames[0].src_key, "hero.png", sizeof "hero.png");
+    memcpy(an->frames[1].src_key, "gem.png", sizeof "gem.png");
 
     char jbase[1024];
     char dbase[1024];
@@ -219,8 +231,8 @@ void test_rename_and_anim_through_run(void) {
 
     tp_pack_sprite_desc sprites[2];
     memset(sprites, 0, sizeof sprites);
-    sprites[0] = (tp_pack_sprite_desc){.name = "hero.png", .rgba = hero, .w = 32, .h = 32, .origin_x = 0.5F, .origin_y = 0.5F};
-    sprites[1] = (tp_pack_sprite_desc){.name = "gem.png", .rgba = gem, .w = 24, .h = 24, .origin_x = 0.5F, .origin_y = 0.5F};
+    sprites[0] = (tp_pack_sprite_desc){.name = "hero.png", .source_id = source_id, .source_key = "hero.png", .logical_name = "hero", .rgba = hero, .w = 32, .h = 32, .origin_x = 0.5F, .origin_y = 0.5F};
+    sprites[1] = (tp_pack_sprite_desc){.name = "gem.png", .source_id = source_id, .source_key = "gem.png", .logical_name = "gem", .rgba = gem, .w = 24, .h = 24, .origin_x = 0.5F, .origin_y = 0.5F};
 
     tp_arena *ar = tp_arena_create(0);
     TEST_ASSERT_NOT_NULL(ar);
@@ -279,15 +291,20 @@ void test_dangling_frame_through_run(void) {
     a->alpha_threshold = 1;
     a->max_size = 256;
     a->pixels_per_unit = 1.0F;
+    const tp_id128 source_id = {{0x42}};
     tp_project_anim *an = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_animation(a, "run", &an));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "ghost")); /* never packed */
+    an->frames[0].source_ref = source_id;
+    an->frames[0].src_key = (char *)malloc(sizeof "ghost.png");
+    TEST_ASSERT_NOT_NULL(an->frames[0].src_key);
+    memcpy(an->frames[0].src_key, "ghost.png", sizeof "ghost.png");
     char jbase[1024];
     (void)snprintf(jbase, sizeof jbase, "%s/rn_dangling", g_dir);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(a, "json-neotolis", jbase, NULL));
     tp_pack_sprite_desc sprites[1];
     memset(sprites, 0, sizeof sprites);
-    sprites[0] = (tp_pack_sprite_desc){.name = "hero.png", .rgba = px, .w = 16, .h = 16, .origin_x = 0.5F, .origin_y = 0.5F};
+    sprites[0] = (tp_pack_sprite_desc){.name = "hero.png", .source_id = source_id, .source_key = "hero.png", .logical_name = "hero", .rgba = px, .w = 16, .h = 16, .origin_x = 0.5F, .origin_y = 0.5F};
     tp_arena *ar = tp_arena_create(0);
     TEST_ASSERT_NOT_NULL(ar);
     tp_export_notices nts;
@@ -300,6 +317,75 @@ void test_dangling_frame_through_run(void) {
     tp_export_notices_free(&nts);
     tp_arena_destroy(ar);
     tp_project_destroy(proj);
+}
+
+void test_duplicate_source_keys_export_the_canonical_animation_frame(void) {
+    static uint8_t left_pixels[8 * 8 * 4];
+    static uint8_t right_pixels[8 * 8 * 4];
+    fill(left_pixels, 8 * 8, 255, 0, 0);
+    fill(right_pixels, 8 * 8, 0, 255, 0);
+    const tp_id128 left_source = {{0x51}};
+    const tp_id128 right_source = {{0x52}};
+    tp_project *project = tp_project_create();
+    tp_project_atlas *atlas = tp_project_get_atlas(project, 0);
+    atlas->shape = 0;
+    atlas->allow_transform = false;
+    atlas->power_of_two = false;
+    atlas->alpha_threshold = 1;
+    atlas->max_size = 128;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_set_sprite_rename_by_source_key(
+                              atlas, left_source, "shared.png", "left"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_set_sprite_rename_by_source_key(
+                              atlas, right_source, "shared.png", "right"));
+    tp_project_anim *animation = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_animation(atlas, "pick", &animation));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_anim_add_frame(animation, "shared"));
+    animation->frames[0].source_ref = right_source;
+    animation->frames[0].src_key = (char *)malloc(sizeof "shared.png");
+    TEST_ASSERT_NOT_NULL(animation->frames[0].src_key);
+    memcpy(animation->frames[0].src_key, "shared.png", sizeof "shared.png");
+    char out[1024];
+    (void)snprintf(out, sizeof out, "%s/canonical_frame", g_dir);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_target(atlas, "json-neotolis", out,
+                                                      NULL));
+
+    tp_pack_sprite_desc sprites[2];
+    memset(sprites, 0, sizeof sprites);
+    sprites[0] = (tp_pack_sprite_desc){
+        .name = "left-source:shared.png", .source_id = left_source,
+        .source_key = "shared.png", .logical_name = "shared",
+        .rgba = left_pixels, .w = 8, .h = 8, .origin_x = 0.5F,
+        .origin_y = 0.5F};
+    sprites[1] = (tp_pack_sprite_desc){
+        .name = "right-source:shared.png", .source_id = right_source,
+        .source_key = "shared.png", .logical_name = "shared",
+        .rgba = right_pixels, .w = 8, .h = 8, .origin_x = 0.5F,
+        .origin_y = 0.5F};
+    tp_arena *arena = tp_arena_create(0);
+    tp_export_notices notices;
+    tp_export_notices_init(&notices);
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_export_run(project, 0, sprites, 2, g_dir, arena, &notices, NULL,
+                      &error),
+        error.msg);
+    cJSON *json = load_json(out);
+    TEST_ASSERT_NOT_NULL(json);
+    cJSON *pick = anim_by_id(json, "pick");
+    TEST_ASSERT_NOT_NULL(pick);
+    cJSON *frames = cJSON_GetObjectItemCaseSensitive(pick, "frames");
+    TEST_ASSERT_TRUE(cJSON_IsArray(frames));
+    TEST_ASSERT_EQUAL_STRING("right", cJSON_GetArrayItem(frames, 0)->valuestring);
+    cJSON_Delete(json);
+    tp_export_notices_free(&notices);
+    tp_arena_destroy(arena);
+    tp_project_destroy(project);
 }
 // #endregion
 
@@ -552,6 +638,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_nopivot_drops_pivot_with_notice);
     RUN_TEST(test_rename_and_anim_through_run);
     RUN_TEST(test_dangling_frame_through_run);
+    RUN_TEST(test_duplicate_source_keys_export_the_canonical_animation_frame);
     RUN_TEST(test_report_ex);
     RUN_TEST(test_dry_run);
     int rc = UNITY_END();

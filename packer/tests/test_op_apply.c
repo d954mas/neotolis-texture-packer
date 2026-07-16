@@ -152,6 +152,43 @@ void test_apply_source_ops(void) {
     tp_project_destroy(p);
 }
 
+void test_relative_source_ops_bind_to_current_project_dir(void) {
+    tp_project *p = base_project();
+    const char current_dir[] = "current-project-dir";
+    const char old_source_base[] = "old-source-base";
+    p->project_dir = (char *)malloc(sizeof current_dir);
+    p->source_base_dir = (char *)malloc(sizeof old_source_base);
+    TEST_ASSERT_NOT_NULL(p->project_dir);
+    TEST_ASSERT_NOT_NULL(p->source_base_dir);
+    memcpy(p->project_dir, current_dir, sizeof current_dir);
+    memcpy(p->source_base_dir, old_source_base, sizeof old_source_base);
+
+    tp_operation op = {0};
+    op.kind = TP_OP_SOURCE_ADD;
+    op.atlas_id = p->atlases[0].id;
+    op.u.source_add.source_id = id_of(0xB2);
+    op.u.source_add.kind = TP_SOURCE_KIND_FOLDER;
+    op.u.source_add.key = (char *)"future/assets";
+    tp_op_reject reject;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_operation_apply(p, &op, &reject));
+    tp_project_source *source = tp_project_atlas_find_source_by_id(
+        &p->atlases[0], id_of(0xB2));
+    TEST_ASSERT_NOT_NULL(source);
+    TEST_ASSERT_EQUAL_STRING("current-project-dir/future/assets", source->path);
+
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_SOURCE_REPLACE;
+    op.atlas_id = p->atlases[0].id;
+    op.u.source_ref.source_id = id_of(0xB2);
+    op.u.source_ref.key = (char *)"replacement/assets";
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_operation_apply(p, &op, &reject));
+    TEST_ASSERT_EQUAL_STRING("current-project-dir/replacement/assets",
+                             source->path);
+    tp_project_destroy(p);
+}
+
 /* ---- forward + error per kind: sprite ------------------------------------ */
 
 void test_apply_sprite_ops(void) {
@@ -172,7 +209,8 @@ void test_apply_sprite_ops(void) {
     op.u.sprite_set.slice9[0] = 2;
     op.u.sprite_set.slice9[1] = 3;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_operation_apply(p, &op, &rej));
-    tp_project_sprite *s = tp_project_atlas_find_sprite(&p->atlases[0], "hero"); /* bridge = strip_ext */
+    tp_project_sprite *s = tp_project_atlas_find_sprite_by_source_key(
+        &p->atlases[0], src0, "hero.png");
     TEST_ASSERT_NOT_NULL(s);
     TEST_ASSERT_TRUE(s->origin_x == 0.25F); /* exact in float; Unity float asserts are disabled here */
     TEST_ASSERT_EQUAL_UINT16(3, s->slice9_lrtb[1]);
@@ -184,7 +222,8 @@ void test_apply_sprite_ops(void) {
     op.u.sprite_name.src_key = (char *)"hero.png";
     op.u.sprite_name.name = (char *)"HERO";
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_operation_apply(p, &op, &rej));
-    s = tp_project_atlas_find_sprite(&p->atlases[0], "hero");
+    s = tp_project_atlas_find_sprite_by_source_key(&p->atlases[0], src0,
+                                                    "hero.png");
     TEST_ASSERT_NOT_NULL(s);
     TEST_ASSERT_EQUAL_STRING("HERO", s->rename);
 
@@ -195,7 +234,8 @@ void test_apply_sprite_ops(void) {
     op.u.sprite_clear.src_key = (char *)"hero.png";
     op.u.sprite_clear.mask = TP_SPF_SLICE9;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_operation_apply(p, &op, &rej));
-    s = tp_project_atlas_find_sprite(&p->atlases[0], "hero");
+    s = tp_project_atlas_find_sprite_by_source_key(&p->atlases[0], src0,
+                                                    "hero.png");
     TEST_ASSERT_NOT_NULL(s); /* still present: origin + rename remain */
     TEST_ASSERT_EQUAL_UINT16(0, s->slice9_lrtb[1]);
 
@@ -206,7 +246,8 @@ void test_apply_sprite_ops(void) {
     op.u.sprite_clear.src_key = (char *)"hero.png";
     op.u.sprite_clear.mask = TP_SPF_ALL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_operation_apply(p, &op, &rej));
-    TEST_ASSERT_NULL(tp_project_atlas_find_sprite(&p->atlases[0], "hero"));
+    TEST_ASSERT_NULL(tp_project_atlas_find_sprite_by_source_key(
+        &p->atlases[0], src0, "hero.png"));
 
     /* error: override.set on a bad source reference */
     memset(&op, 0, sizeof op);
@@ -220,11 +261,10 @@ void test_apply_sprite_ops(void) {
     tp_project_destroy(p);
 }
 
-/* F2-05a: a sprite op with a NIL source_id is a PENDING (name-keyed) override -- what
- * the CLI `sprite set`/`unset` builds on a SOURCE-LESS atlas (an override added by
- * export-key before any source scan). Apply keys it by the export bridge and leaves
- * the record pending; a NON-nil unknown source still rejects. */
-void test_apply_sprite_pending_no_source(void) {
+/* Canonical typed sprite operations never create legacy pending/name-keyed
+ * records. Those records remain a loader/migration concern; every mutation must
+ * identify an owning source. */
+void test_apply_sprite_nil_source_rejected(void) {
     tp_project *p = tp_project_create();
     TEST_ASSERT_NOT_NULL(p);
     tp_id128 aid = id_of(0x21);
@@ -234,88 +274,36 @@ void test_apply_sprite_pending_no_source(void) {
     tp_op_reject rej;
     tp_operation op;
 
-    memset(&op, 0, sizeof op); /* sprite.override.set, NIL source -> pending override */
+    memset(&op, 0, sizeof op);
     op.kind = TP_OP_SPRITE_OVERRIDE_SET;
     op.atlas_id = aid;
     op.u.sprite_set.source_id = tp_id128_nil();
     op.u.sprite_set.src_key = (char *)"hero";
     op.u.sprite_set.mask = TP_SPF_ORIGIN;
-    op.u.sprite_set.origin_x = 0.25F;
-    op.u.sprite_set.origin_y = 0.75F;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_operation_apply(p, &op, &rej));
-    tp_project_sprite *s = tp_project_atlas_find_sprite(&p->atlases[0], "hero");
-    TEST_ASSERT_NOT_NULL(s);
-    TEST_ASSERT_TRUE(s->origin_x == 0.25F);
-    TEST_ASSERT_TRUE(tp_id128_is_nil(s->source_ref)); /* stays pending (name-keyed) */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_ID_MALFORMED,
+                          tp_operation_apply(p, &op, &rej));
+    TEST_ASSERT_EQUAL_STRING("source_id", rej.field);
+    TEST_ASSERT_NULL(tp_project_atlas_find_sprite(&p->atlases[0], "hero"));
 
-    memset(&op, 0, sizeof op); /* sprite.name.set, NIL source */
+    memset(&op, 0, sizeof op);
     op.kind = TP_OP_SPRITE_NAME_SET;
     op.atlas_id = aid;
     op.u.sprite_name.source_id = tp_id128_nil();
     op.u.sprite_name.src_key = (char *)"hero";
     op.u.sprite_name.name = (char *)"HERO";
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_operation_apply(p, &op, &rej));
-    s = tp_project_atlas_find_sprite(&p->atlases[0], "hero");
-    TEST_ASSERT_NOT_NULL(s);
-    TEST_ASSERT_EQUAL_STRING("HERO", s->rename);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_ID_MALFORMED,
+                          tp_operation_apply(p, &op, &rej));
+    TEST_ASSERT_EQUAL_STRING("source_id", rej.field);
 
-    memset(&op, 0, sizeof op); /* sprite.override.clear ALL, NIL source -> drop record */
+    memset(&op, 0, sizeof op);
     op.kind = TP_OP_SPRITE_OVERRIDE_CLEAR;
     op.atlas_id = aid;
     op.u.sprite_clear.source_id = tp_id128_nil();
     op.u.sprite_clear.src_key = (char *)"hero";
     op.u.sprite_clear.mask = TP_SPF_ALL;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_operation_apply(p, &op, &rej));
-    TEST_ASSERT_NULL(tp_project_atlas_find_sprite(&p->atlases[0], "hero"));
-    /* clear on an absent record is an idempotent OK no-op. */
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_operation_apply(p, &op, &rej));
-
-    memset(&op, 0, sizeof op); /* a NON-nil unknown source still rejects (regression guard) */
-    op.kind = TP_OP_SPRITE_OVERRIDE_SET;
-    op.atlas_id = aid;
-    op.u.sprite_set.source_id = id_of(0x66);
-    op.u.sprite_set.src_key = (char *)"hero";
-    op.u.sprite_set.mask = TP_SPF_ORIGIN;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_NOT_FOUND, tp_operation_apply(p, &op, &rej));
-    tp_project_destroy(p);
-}
-
-/* F2 (byte-identity): a PENDING (nil source_id) override stores + clears under the
- * VERBATIM key the CLI passed -- NOT the ext-stripped export bridge. This reproduces the
- * pre-cutover inline CLI (which did add_sprite/remove_sprite on the raw key). It keeps
- * `sprite set hero.png` byte-identical AND lets `sprite unset hero.png` clear a
- * pre-existing verbatim "hero.png" record instead of keying on "hero" and missing it.
- * (A source-ATTACHED override -- non-nil source_id, test_apply_sprite_ops -- still keys
- * under the export bridge so the pack path resolves it.) */
-void test_apply_sprite_pending_verbatim_ext_key(void) {
-    tp_project *p = tp_project_create();
-    TEST_ASSERT_NOT_NULL(p);
-    tp_id128 aid = id_of(0x31);
-    p->atlases[0].id = aid;
-    p->atlases[0].id_synthetic = false;
-    tp_op_reject rej;
-    tp_operation op;
-
-    memset(&op, 0, sizeof op); /* set, nil source, ext-carrying key -> stored VERBATIM */
-    op.kind = TP_OP_SPRITE_OVERRIDE_SET;
-    op.atlas_id = aid;
-    op.u.sprite_set.source_id = tp_id128_nil();
-    op.u.sprite_set.src_key = (char *)"hero.png";
-    op.u.sprite_set.mask = TP_SPF_ORIGIN;
-    op.u.sprite_set.origin_x = 0.25F;
-    op.u.sprite_set.origin_y = 0.75F;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_operation_apply(p, &op, &rej));
-    TEST_ASSERT_NOT_NULL(tp_project_atlas_find_sprite(&p->atlases[0], "hero.png")); /* verbatim */
-    TEST_ASSERT_NULL(tp_project_atlas_find_sprite(&p->atlases[0], "hero"));         /* NOT bridged */
-
-    memset(&op, 0, sizeof op); /* unset (clear ALL), nil source, ext key -> removes the verbatim record */
-    op.kind = TP_OP_SPRITE_OVERRIDE_CLEAR;
-    op.atlas_id = aid;
-    op.u.sprite_clear.source_id = tp_id128_nil();
-    op.u.sprite_clear.src_key = (char *)"hero.png";
-    op.u.sprite_clear.mask = TP_SPF_ALL;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_operation_apply(p, &op, &rej));
-    TEST_ASSERT_NULL(tp_project_atlas_find_sprite(&p->atlases[0], "hero.png")); /* cleared, not a silent no-op */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_ID_MALFORMED,
+                          tp_operation_apply(p, &op, &rej));
+    TEST_ASSERT_EQUAL_STRING("source_id", rej.field);
     tp_project_destroy(p);
 }
 
@@ -326,7 +314,9 @@ void test_apply_anim_ops(void) {
     tp_id128 aid = p->atlases[0].id;
     tp_op_reject rej;
     tp_operation op;
-    char *frames2[] = {(char *)"a", (char *)"b"};
+    tp_id128 source_id = p->atlases[0].sources[0].id;
+    tp_op_sprite_ref frames2[] = {{source_id, (char *)"a"},
+                                  {source_id, (char *)"b"}};
 
     memset(&op, 0, sizeof op); /* animation.create with initial frames */
     op.kind = TP_OP_ANIMATION_CREATE;
@@ -359,7 +349,7 @@ void test_apply_anim_ops(void) {
     op.kind = TP_OP_ANIMATION_FRAME_ADD;
     op.atlas_id = aid;
     op.u.anim_frame_add.anim_id = id_of(0xC1);
-    op.u.anim_frame_add.frame = (char *)"c";
+    op.u.anim_frame_add.frame = (tp_op_sprite_ref){source_id, (char *)"c"};
     op.u.anim_frame_add.index = -1;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_operation_apply(p, &op, &rej));
     an = tp_project_atlas_find_animation_by_id(&p->atlases[0], id_of(0xC1));
@@ -386,7 +376,7 @@ void test_apply_anim_ops(void) {
     TEST_ASSERT_EQUAL_INT(2, an->frame_count);
 
     memset(&op, 0, sizeof op); /* animation.frames.set (bulk replace) */
-    char *one[] = {(char *)"x"};
+    tp_op_sprite_ref one[] = {{source_id, (char *)"x"}};
     op.kind = TP_OP_ANIMATION_FRAMES_SET;
     op.atlas_id = aid;
     op.u.anim_frames_set.anim_id = id_of(0xC1);
@@ -516,7 +506,10 @@ void test_alloc_fail_before_commit(void) {
     tp_id128 aid = p->atlases[0].id;
     char *before = serialize(p);
 
-    char *frames3[] = {(char *)"a", (char *)"b", (char *)"c"};
+    tp_id128 source_id = p->atlases[0].sources[0].id;
+    tp_op_sprite_ref frames3[] = {{source_id, (char *)"a"},
+                                  {source_id, (char *)"b"},
+                                  {source_id, (char *)"c"}};
     tp_operation op;
     memset(&op, 0, sizeof op);
     op.kind = TP_OP_ANIMATION_CREATE;
@@ -584,19 +577,19 @@ void test_parity_settings(void) {
     tp_project_destroy(b);
 }
 
-void test_parity_sprite_override(void) {
+void test_sprite_override_preserves_structural_identity(void) {
     tp_project *seed = base_project();
     char *buf = serialize(seed);
     tp_project_destroy(seed);
 
     tp_project *a = NULL;
-    tp_project *b = NULL;
     tp_error err;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_load_buffer(buf, strlen(buf), &a, &err));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_load_buffer(buf, strlen(buf), &b, &err));
     tp_id128 src0 = a->atlases[0].sources[0].id;
 
-    /* engine path: canonical {source_id, src_key} */
+    /* The typed operation owns canonical {source_id, src_key} identity.  The
+     * removed name-keyed frontend bridge must not collapse it to an export
+     * name when the project is serialized. */
     tp_operation op;
     memset(&op, 0, sizeof op);
     op.kind = TP_OP_SPRITE_OVERRIDE_SET;
@@ -609,24 +602,21 @@ void test_parity_sprite_override(void) {
     tp_op_reject rej;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_operation_apply(a, &op, &rej));
 
-    /* existing-mutator path: the name-keyed bridge, exactly as the CLI does */
-    char bridge[512];
-    tp_sprite_export_key("hero.png", bridge, sizeof bridge);
-    tp_project_sprite *s = NULL;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_sprite(&b->atlases[0], bridge, &s));
-    s->origin_x = 0.25F;
-    s->origin_y = 0.75F;
-    (void)tp_project_atlas_prune_sprite(&b->atlases[0], bridge);
+    tp_project_sprite *s = tp_project_atlas_find_sprite_by_source_key(
+        &a->atlases[0], src0, "hero.png");
+    TEST_ASSERT_NOT_NULL(s);
+    TEST_ASSERT_TRUE(tp_id128_eq(src0, s->source_ref));
+    TEST_ASSERT_EQUAL_STRING("hero.png", s->src_key);
+    TEST_ASSERT_TRUE(s->origin_x == 0.25F);
+    TEST_ASSERT_TRUE(s->origin_y == 0.75F);
 
     char *sa = serialize(a);
-    char *sb = serialize(b);
-    TEST_ASSERT_EQUAL_STRING(sb, sa);
+    TEST_ASSERT_NOT_NULL(strstr(sa, "\"key\": \"hero.png\""));
+    TEST_ASSERT_NOT_NULL(strstr(sa, "\"source\": \"source_030405060708090a0b0c0d0e0f101112\""));
 
     free(buf);
     free(sa);
-    free(sb);
     tp_project_destroy(a);
-    tp_project_destroy(b);
 }
 
 /* ---- selector -> operation builders (resolve / ambiguity / not-found) ----- */
@@ -849,15 +839,15 @@ int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_apply_atlas_ops);
     RUN_TEST(test_apply_source_ops);
+    RUN_TEST(test_relative_source_ops_bind_to_current_project_dir);
     RUN_TEST(test_apply_sprite_ops);
-    RUN_TEST(test_apply_sprite_pending_no_source);
-    RUN_TEST(test_apply_sprite_pending_verbatim_ext_key);
+    RUN_TEST(test_apply_sprite_nil_source_rejected);
     RUN_TEST(test_apply_anim_ops);
     RUN_TEST(test_apply_anim_rename);
     RUN_TEST(test_apply_target_ops);
     RUN_TEST(test_alloc_fail_before_commit);
     RUN_TEST(test_parity_settings);
-    RUN_TEST(test_parity_sprite_override);
+    RUN_TEST(test_sprite_override_preserves_structural_identity);
     RUN_TEST(test_builders);
     RUN_TEST(test_apply_negative_frames_unchanged);
     RUN_TEST(test_apply_source_add_dup_rejected);

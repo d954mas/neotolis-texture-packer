@@ -193,12 +193,12 @@ bool tp_op_field_allowed(tp_op_kind kind, const char *key) {
 /* tp_operation_free: release the active arm's malloc-owned strings/arrays. Freeing
  * NULL is safe; a zero-initialized op frees nothing. Kept beside the catalog (both
  * are pure metadata about op shape). */
-static void free_frames(char **frames, int count) {
+static void free_frames(tp_op_sprite_ref *frames, int count) {
     if (!frames) {
         return;
     }
     for (int i = 0; i < count; i++) {
-        free(frames[i]);
+        free(frames[i].src_key);
     }
     free(frames);
 }
@@ -227,7 +227,7 @@ void tp_operation_free(tp_operation *op) {
         case TP_OP_ANIMATION_FRAMES_SET:
             free_frames(op->u.anim_frames_set.frames, op->u.anim_frames_set.frame_count);
             break;
-        case TP_OP_ANIMATION_FRAME_ADD: free(op->u.anim_frame_add.frame); break;
+        case TP_OP_ANIMATION_FRAME_ADD: free(op->u.anim_frame_add.frame.src_key); break;
         case TP_OP_TARGET_CREATE:
             free(op->u.target_create.exporter_id);
             free(op->u.target_create.out_path);

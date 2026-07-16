@@ -62,6 +62,20 @@ tp_status tp_identity_path_lexical(const char *input, char *out, size_t cap, tp_
  * permission, symlink loop -- prose carries the specifics). */
 tp_status tp_identity_path_canonical(const char *input, char *out, size_t cap, tp_error *err);
 
+/* Produces an absolute lexical path without requiring the destination to exist.
+ * Relative input is resolved once against the process working directory; native
+ * drive-relative/device rules remain errors. This is the common request-edge
+ * path normalization used by project and source identity owners. */
+tp_status tp_identity_path_absolute_lexical(const char *input, char *out,
+                                            size_t cap, tp_error *err);
+
+/* Canonicalizes a user-supplied project path. Absolute inputs use the exact
+ * identity contract above; relative inputs are resolved once against the
+ * process working directory and then pass through the same canonicalizer.
+ * Drive-relative Windows paths ("C:foo") remain invalid. */
+tp_status tp_identity_project_path_canonical(const char *input, char *out,
+                                             size_t cap, tp_error *err);
+
 /* Identity equality of two ALREADY-canonical paths under the native host case
  * policy (POSIX byte-exact; Windows ASCII case-fold). */
 bool tp_identity_path_equal(const char *canon_a, const char *canon_b);

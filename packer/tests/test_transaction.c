@@ -19,12 +19,15 @@
 #include <string.h>
 
 #include "tp_core/tp_export.h"          /* TP_EXPORTER_ID_JSON_NEOTOLIS */
+#include "tp_core/tp_diff.h"
+#include "tp_core/tp_journal.h"
 #include "tp_core/tp_operation.h"
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_project_migrate.h" /* tp_project_promote_ids */
 #include "tp_core/tp_transaction.h"
 #include "tp_txn_internal.h"            /* clone fault seam */
 #include "tp_op_internal.h"             /* tp_op__test_set_alloc_fail */
+#include "tp_project_internal.h"        /* checkpoint-size traversal seam */
 #include "tp_project_clone_arena.h"     /* P-01: arena-backed clone under test */
 #include "tp_core/tp_arena.h"
 #include "unity.h"
@@ -77,6 +80,107 @@ static char *serialize(const tp_project *p) {
     return buf;
 }
 
+static char *txn_json_with_author_size(size_t total_len) {
+    static const char prefix[] =
+        "{\"schema\":1,\"transaction\":{\"id\":\"00000000000000000000000000000000\","
+        "\"expected_revision\":0,\"author\":\"";
+    static const char suffix[] = "\",\"operations\":[]}}";
+    TEST_ASSERT_TRUE(total_len >= (sizeof prefix - 1U) + (sizeof suffix - 1U));
+    char *json = (char *)malloc(total_len + 1U);
+    TEST_ASSERT_NOT_NULL(json);
+    memcpy(json, prefix, sizeof prefix - 1U);
+    const size_t author_len = total_len - (sizeof prefix - 1U) - (sizeof suffix - 1U);
+    memset(json + sizeof prefix - 1U, 'a', author_len);
+    memcpy(json + sizeof prefix - 1U + author_len, suffix, sizeof suffix);
+    return json;
+}
+
+static char *txn_json_with_remove_ops(int op_count) {
+    static const char prefix[] =
+        "{\"schema\":1,\"transaction\":{\"id\":\"00000000000000000000000000000000\","
+        "\"expected_revision\":0,\"operations\":[";
+    static const char op[] =
+        "{\"op\":\"atlas.remove\",\"atlas_id\":\"atlas_11111111111111111111111111111111\"}";
+    static const char suffix[] = "]}}";
+    TEST_ASSERT_TRUE(op_count >= 0);
+    const size_t separators = (op_count > 0) ? (size_t)(op_count - 1) : 0U;
+    const size_t total_len = (sizeof prefix - 1U) + (size_t)op_count * (sizeof op - 1U) + separators +
+                             (sizeof suffix - 1U);
+    TEST_ASSERT_TRUE(total_len <= TP_TXN_MAX_REQUEST_BYTES);
+    char *json = (char *)malloc(total_len + 1U);
+    TEST_ASSERT_NOT_NULL(json);
+    size_t off = 0;
+    memcpy(json + off, prefix, sizeof prefix - 1U);
+    off += sizeof prefix - 1U;
+    for (int i = 0; i < op_count; i++) {
+        if (i > 0) {
+            json[off++] = ',';
+        }
+        memcpy(json + off, op, sizeof op - 1U);
+        off += sizeof op - 1U;
+    }
+    memcpy(json + off, suffix, sizeof suffix);
+    TEST_ASSERT_EQUAL_size_t(total_len, off + sizeof suffix - 1U);
+    return json;
+}
+
+static char *txn_json_with_unknown_ops(int op_count) {
+    static const char prefix[] =
+        "{\"schema\":1,\"transaction\":{\"id\":\"00000000000000000000000000000000\","
+        "\"expected_revision\":0,\"operations\":[";
+    static const char op[] = "{\"op\":\"unknown.operation\"}";
+    static const char suffix[] = "]}}";
+    TEST_ASSERT_TRUE(op_count >= 0);
+    const size_t separators = (op_count > 0) ? (size_t)(op_count - 1) : 0U;
+    const size_t total_len = (sizeof prefix - 1U) + (size_t)op_count * (sizeof op - 1U) + separators +
+                             (sizeof suffix - 1U);
+    TEST_ASSERT_TRUE(total_len <= TP_TXN_MAX_REQUEST_BYTES);
+    char *json = (char *)malloc(total_len + 1U);
+    TEST_ASSERT_NOT_NULL(json);
+    size_t off = 0U;
+    memcpy(json + off, prefix, sizeof prefix - 1U);
+    off += sizeof prefix - 1U;
+    for (int i = 0; i < op_count; ++i) {
+        if (i > 0) json[off++] = ',';
+        memcpy(json + off, op, sizeof op - 1U);
+        off += sizeof op - 1U;
+    }
+    memcpy(json + off, suffix, sizeof suffix);
+    TEST_ASSERT_EQUAL_size_t(total_len, off + sizeof suffix - 1U);
+    return json;
+}
+
+static char *txn_json_with_nested_operations(int depth, size_t *out_len) {
+    static const char prefix[] =
+        "{\"schema\":1,\"transaction\":{\"id\":\"00000000000000000000000000000000\","
+        "\"expected_revision\":0,\"operations\":[";
+    static const char nested[] = "{\"operations\":[";
+    static const char suffix[] = "]}}";
+    TEST_ASSERT_TRUE(depth > 0);
+    const size_t len = (sizeof prefix - 1U) + (size_t)depth * (sizeof nested - 1U) + 1U +
+                       (size_t)depth * 2U + (sizeof suffix - 1U);
+    char *json = (char *)malloc(len + 1U);
+    TEST_ASSERT_NOT_NULL(json);
+    size_t off = 0U;
+    memcpy(json + off, prefix, sizeof prefix - 1U);
+    off += sizeof prefix - 1U;
+    for (int i = 0; i < depth; ++i) {
+        memcpy(json + off, nested, sizeof nested - 1U);
+        off += sizeof nested - 1U;
+    }
+    json[off++] = '0';
+    for (int i = 0; i < depth; ++i) {
+        json[off++] = ']';
+        json[off++] = '}';
+    }
+    memcpy(json + off, suffix, sizeof suffix);
+    TEST_ASSERT_EQUAL_size_t(len, off + sizeof suffix - 1U);
+    if (out_len) {
+        *out_len = len;
+    }
+    return json;
+}
+
 /* ---- deep-clone ---------------------------------------------------------- */
 
 void test_clone_byte_identity(void) {
@@ -94,6 +198,8 @@ void test_clone_byte_identity(void) {
 
     tp_project *c = tp_project_clone(p);
     TEST_ASSERT_NOT_NULL(c);
+    TEST_ASSERT_GREATER_THAN_size_t(sizeof *c,
+                                    tp_project__test_clone_allocation_bytes());
     char *bp = serialize(p);
     char *bc = serialize(c);
     TEST_ASSERT_EQUAL_STRING(bp, bc);
@@ -419,7 +525,9 @@ void test_apply_per_op_alloc_fault(void) {
     ops[1].u.anim_create.anim_id = id_of(0xC7);
     ops[1].u.anim_create.name = (char *)"walk";
     ops[1].u.anim_create.fps = 12.0F;
-    static char *frames[2] = {(char *)"a", (char *)"b"};
+    tp_id128 source_id = p->atlases[0].sources[0].id;
+    tp_op_sprite_ref frames[2] = {{source_id, (char *)"a"},
+                                  {source_id, (char *)"b"}};
     ops[1].u.anim_create.frames = frames;
     ops[1].u.anim_create.frame_count = 2;
 
@@ -529,6 +637,185 @@ void test_idempotent_retry(void) {
     free(after);
     tp_txn_result_free(&res);
     tp_model_destroy(m);
+}
+
+static tp_status commit_numbered_change(tp_model *model, unsigned id_value,
+                                        int64_t expected_revision,
+                                        tp_txn_result *result, tp_error *err) {
+    tp_txn_request request = {0};
+    tp_operation operation;
+    char name[32];
+    (void)snprintf(name, sizeof name, "atlas-%u", id_value);
+    op_atlas_rename(&operation, model->project->atlases[0].id, name);
+    request.schema = TP_TXN_SCHEMA;
+    (void)snprintf(request.id_hex, sizeof request.id_hex, "%032x", id_value);
+    request.expected_revision = expected_revision;
+    request.ops = &operation;
+    request.op_count = 1;
+    return tp_model_apply(model, &request, result, err);
+}
+
+void test_idempotency_retention_window_evicts_fifo(void) {
+    tp_model *model = tp_model_create();
+    TEST_ASSERT_NOT_NULL(model);
+    model->project->atlases[0].id = id_of(0x77);
+    model->project->atlases[0].id_synthetic = false;
+    tp_txn_result result;
+    tp_error err = {0};
+
+    for (unsigned i = 0U; i < (unsigned)TP_TXN_RETAINED_ID_CAP; ++i) {
+        TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                              commit_numbered_change(model, i + 1U,
+                                                     (int64_t)i, &result,
+                                                     &err));
+        tp_txn_result_free(&result);
+    }
+
+    /* The boundary element is retained and duplicate detection still precedes
+     * its deliberately stale expected revision. */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_DUPLICATE_ID,
+                          commit_numbered_change(model, 1U, 0, &result, &err));
+    TEST_ASSERT_EQUAL_INT64(TP_TXN_RETAINED_ID_CAP, result.revision);
+    tp_txn_result_free(&result);
+
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          commit_numbered_change(
+                              model, (unsigned)TP_TXN_RETAINED_ID_CAP + 1U,
+                              TP_TXN_RETAINED_ID_CAP, &result, &err));
+    tp_txn_result_free(&result);
+
+    /* One successful commit evicts exactly the oldest ID, not its successor. */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_DUPLICATE_ID,
+                          commit_numbered_change(model, 2U, 0, &result, &err));
+    tp_txn_result_free(&result);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          commit_numbered_change(
+                              model, 1U, TP_TXN_RETAINED_ID_CAP + 1,
+                              &result, &err));
+    tp_txn_result_free(&result);
+
+    tp_model_destroy(model);
+}
+
+void test_semantic_no_change_is_not_committed_or_retained(void) {
+    tp_project *project = base_project();
+    const tp_id128 atlas_id = project->atlases[0].id;
+    tp_model *model = tp_model_wrap(project);
+    TEST_ASSERT_NOT_NULL(model);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_enable_history(model));
+
+    tp_journal_io io = tp_journal_io_memory();
+    TEST_ASSERT_NOT_NULL(io.ctx);
+    tp_journal *journal = tp_journal_create(io, id_of(0xA5));
+    TEST_ASSERT_NOT_NULL(journal);
+    tp_error error = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_model_attach_journal(model, journal, &error));
+    const int64_t journal_bytes_before = io.length(io.ctx);
+
+    tp_operation operation;
+    op_atlas_rename(&operation, atlas_id, "atlas1");
+    tp_txn_request request = {0};
+    request.schema = TP_TXN_SCHEMA;
+    memcpy(request.id_hex, "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", 33U);
+    request.expected_revision = 0;
+    request.ops = &operation;
+    request.op_count = 1;
+    tp_txn_result result;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_model_apply(model, &request, &result, &error));
+    TEST_ASSERT_FALSE(result.committed);
+    TEST_ASSERT_TRUE(result.no_change);
+    TEST_ASSERT_EQUAL_INT64(0, result.revision);
+    TEST_ASSERT_EQUAL_INT(0, result.error_count);
+    TEST_ASSERT_EQUAL_INT64(0, tp_model_revision(model));
+    TEST_ASSERT_FALSE(tp_model_dirty(model));
+    TEST_ASSERT_EQUAL_INT(0, tp_model_undo_depth(model));
+    TEST_ASSERT_EQUAL_INT64(journal_bytes_before, io.length(io.ctx));
+    char *encoded = tp_txn_result_encode(&result);
+    TEST_ASSERT_NOT_NULL(encoded);
+    TEST_ASSERT_NOT_NULL(strstr(encoded, "\"status\": \"no_change\""));
+    free(encoded);
+    tp_txn_result_free(&result);
+
+    /* A no-change request is not a retained committed ID. Retrying it returns
+     * the same typed outcome, never duplicate_id. */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_model_apply(model, &request, &result, &error));
+    TEST_ASSERT_TRUE(result.no_change);
+    TEST_ASSERT_EQUAL_INT(0, result.error_count);
+    TEST_ASSERT_EQUAL_INT64(journal_bytes_before, io.length(io.ctx));
+    tp_txn_result_free(&result);
+    tp_model_destroy(model);
+}
+
+void test_semantic_no_change_preserves_redo_branch(void) {
+    tp_project *project = base_project();
+    const tp_id128 atlas_id = project->atlases[0].id;
+    tp_model *model = tp_model_wrap(project);
+    TEST_ASSERT_NOT_NULL(model);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_enable_history(model));
+    tp_error error = {0};
+
+    tp_operation change;
+    op_atlas_rename(&change, atlas_id, "changed");
+    tp_txn_request request = {0};
+    request.schema = TP_TXN_SCHEMA;
+    memcpy(request.id_hex, "dddddddddddddddddddddddddddddddd", 33U);
+    request.ops = &change;
+    request.op_count = 1;
+    tp_txn_result result;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_model_apply(model, &request, &result, &error));
+    tp_txn_result_free(&result);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_undo(model, &error));
+    TEST_ASSERT_TRUE(tp_model_can_redo(model));
+    const int redo_depth = tp_model_redo_depth(model);
+    const int64_t revision = tp_model_revision(model);
+
+    tp_operation no_change;
+    op_atlas_rename(&no_change, atlas_id, "atlas1");
+    request.ops = &no_change;
+    request.expected_revision = revision;
+    memcpy(request.id_hex, "cccccccccccccccccccccccccccccccc", 33U);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_model_apply(model, &request, &result, &error));
+    TEST_ASSERT_TRUE(result.no_change);
+    TEST_ASSERT_EQUAL_INT64(revision, tp_model_revision(model));
+    TEST_ASSERT_EQUAL_INT(redo_depth, tp_model_redo_depth(model));
+    TEST_ASSERT_TRUE(tp_model_can_redo(model));
+    tp_txn_result_free(&result);
+    tp_model_destroy(model);
+}
+
+void test_journal_less_history_avoids_checkpoint_size_traversals(void) {
+    tp_project *project = base_project();
+    const tp_id128 atlas_id = project->atlases[0].id;
+    tp_model *model = tp_model_wrap(project);
+    TEST_ASSERT_NOT_NULL(model);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_enable_history(model));
+
+    tp_operation change;
+    op_atlas_rename(&change, atlas_id, "history-without-journal");
+    tp_txn_request request = {0};
+    request.schema = TP_TXN_SCHEMA;
+    memcpy(request.id_hex, "abababababababababababababababab", 33U);
+    request.ops = &change;
+    request.op_count = 1;
+    tp_txn_result result = {0};
+    tp_error error = {0};
+
+    tp_project__test_serialization_stats_reset();
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_model_apply(model, &request, &result, &error));
+    TEST_ASSERT_TRUE(result.committed);
+    TEST_ASSERT_EQUAL_size_t(0U, tp_project__test_size_query_calls());
+    tp_txn_result_free(&result);
+
+    tp_project__test_serialization_stats_reset();
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_undo(model, &error));
+    TEST_ASSERT_EQUAL_size_t(0U, tp_project__test_size_query_calls());
+    tp_model_destroy(model);
 }
 
 /* ---- dirty = semantic identity (NOT revision) --------------------------- */
@@ -649,6 +936,297 @@ void test_json_structural_fail_fast(void) {
                       "\",\"expected_revision\":0,\"operations\":[]}}";
     TEST_ASSERT_NOT_EQUAL(TP_STATUS_OK, tp_model_apply_json(m, bad, &res, &err));
     tp_txn_result_free(&res);
+    tp_model_destroy(m);
+}
+
+void test_json_request_byte_limit_is_inclusive_and_preparse(void) {
+    char *at_limit = txn_json_with_author_size((size_t)TP_TXN_MAX_REQUEST_BYTES);
+    tp_txn_request *req = NULL;
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_txn_request_decode_n(at_limit, (size_t)TP_TXN_MAX_REQUEST_BYTES, &req, &err));
+    TEST_ASSERT_NOT_NULL(req);
+    tp_txn_request_free(req);
+    req = NULL;
+
+    char *over_limit = txn_json_with_author_size((size_t)TP_TXN_MAX_REQUEST_BYTES + 1U);
+    memset(&err, 0, sizeof err);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS,
+                          tp_txn_request_decode_n(over_limit, (size_t)TP_TXN_MAX_REQUEST_BYTES + 1U,
+                                                  &req, &err));
+    TEST_ASSERT_NULL(req);
+    memset(&err, 0, sizeof err);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS, tp_txn_request_decode(over_limit, &req, &err));
+    TEST_ASSERT_NULL(req); /* legacy C-string path uses the same bounded admission */
+
+    /* Invalid JSON above the byte cap still reports the cap, proving rejection occurs
+     * before cJSON is allowed to parse/materialize attacker-controlled input. */
+    memset(over_limit, '{', (size_t)TP_TXN_MAX_REQUEST_BYTES + 1U);
+    memset(&err, 0, sizeof err);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS,
+                          tp_txn_request_decode_n(over_limit, (size_t)TP_TXN_MAX_REQUEST_BYTES + 1U,
+                                                  &req, &err));
+    TEST_ASSERT_NULL(req);
+    free(at_limit);
+    free(over_limit);
+}
+
+void test_json_operation_count_limit_is_inclusive(void) {
+    char *at_limit = txn_json_with_remove_ops(TP_TXN_MAX_OPS);
+    tp_txn_request *req = NULL;
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_txn_request_decode_n(at_limit, strlen(at_limit), &req, &err));
+    TEST_ASSERT_NOT_NULL(req);
+    TEST_ASSERT_EQUAL_INT(TP_TXN_MAX_OPS, req->op_count);
+    tp_txn_request_free(req);
+    free(at_limit);
+
+    char *over_limit = txn_json_with_remove_ops(TP_TXN_MAX_OPS + 1);
+    req = NULL;
+    memset(&err, 0, sizeof err);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS,
+                          tp_txn_request_decode_n(over_limit, strlen(over_limit), &req, &err));
+    TEST_ASSERT_NULL(req);
+
+    /* The count gate runs before cJSON: even a syntactically incomplete suffix
+     * cannot force materialization of an already oversized operations array. */
+    const size_t malformed_len = strlen(over_limit);
+    over_limit[malformed_len - 1U] = 'x';
+    memset(&err, 0, sizeof err);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS,
+                          tp_txn_request_decode_n(over_limit, malformed_len, &req, &err));
+    TEST_ASSERT_NULL(req);
+    free(over_limit);
+}
+
+void test_json_precheck_rejects_duplicate_counted_envelope_keys(void) {
+    const char *duplicate_operations =
+        "{\"schema\":1,\"transaction\":{\"id\":\"00000000000000000000000000000001\","
+        "\"expected_revision\":0,\"operations\":[{}],\"operations\":[]}}";
+    const char *duplicate_transaction =
+        "{\"schema\":1,\"transaction\":{\"id\":\"00000000000000000000000000000001\","
+        "\"expected_revision\":0,\"operations\":[{}]},\"transaction\":{\"operations\":[]}}";
+    tp_error err = {0};
+    int count = -1;
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_txn__count_operations_json_n(duplicate_operations,
+                                        strlen(duplicate_operations), &count, &err));
+    TEST_ASSERT_EQUAL_INT(0, count);
+    TEST_ASSERT_NOT_NULL(strstr(err.msg, "duplicate operations"));
+
+    memset(&err, 0, sizeof err);
+    count = -1;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_txn__count_operations_json_n(duplicate_transaction,
+                                        strlen(duplicate_transaction), &count, &err));
+    TEST_ASSERT_EQUAL_INT(0, count);
+    TEST_ASSERT_NOT_NULL(strstr(err.msg, "duplicate transaction"));
+}
+
+void test_json_operation_precheck_is_single_pass_under_adversarial_nesting(void) {
+    size_t json_len = 0U;
+    char *json = txn_json_with_nested_operations(256, &json_len);
+    tp_txn_request *req = NULL;
+    tp_error err = {0};
+    size_t steps = 0U;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_txn__test_json_precheck(json, json_len, &steps, &err));
+    TEST_ASSERT_GREATER_THAN_size_t(0U, steps);
+    TEST_ASSERT_LESS_OR_EQUAL_size_t(json_len, steps);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_txn_request_decode_n(json, json_len, &req, &err));
+    TEST_ASSERT_NULL(req);
+    free(json);
+}
+
+void test_json_max_ops_walk_and_error_growth_are_linear(void) {
+    char *valid = txn_json_with_remove_ops(TP_TXN_MAX_OPS);
+    tp_txn_request *req = NULL;
+    tp_error err = {0};
+    tp_txn__test_complexity_reset();
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_txn_request_decode_n(valid, strlen(valid), &req, &err));
+    TEST_ASSERT_NOT_NULL(req);
+    TEST_ASSERT_EQUAL_INT(TP_TXN_MAX_OPS, req->op_count);
+    TEST_ASSERT_LESS_OR_EQUAL_size_t((size_t)TP_TXN_MAX_OPS * 3U,
+                                     tp_txn__test_op_walk_steps());
+    tp_txn_request_free(req);
+    free(valid);
+
+    char *faults = txn_json_with_unknown_ops(TP_TXN_MAX_OPS);
+    tp_model *model = tp_model_wrap(base_project());
+    tp_txn_result result;
+    memset(&err, 0, sizeof err);
+    tp_txn__test_complexity_reset();
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_UNKNOWN_OP,
+                          tp_model_apply_json_n(model, faults, strlen(faults), &result, &err));
+    TEST_ASSERT_FALSE(result.committed);
+    TEST_ASSERT_EQUAL_INT(TP_TXN_MAX_OPS, result.error_count);
+    TEST_ASSERT_EQUAL_INT(0, result.errors[0].op_index);
+    TEST_ASSERT_EQUAL_INT(TP_TXN_MAX_OPS - 1,
+                          result.errors[result.error_count - 1].op_index);
+    TEST_ASSERT_LESS_OR_EQUAL_size_t((size_t)TP_TXN_MAX_OPS * 3U,
+                                     tp_txn__test_op_walk_steps());
+    TEST_ASSERT_EQUAL_size_t(1U, tp_txn__test_error_allocations());
+    tp_txn_result_free(&result);
+    tp_model_destroy(model);
+    free(faults);
+}
+
+void test_length_aware_json_requires_exact_span_consumption(void) {
+    const char *valid = "{\"schema\":1,\"transaction\":{"
+                        "\"id\":\"00000000000000000000000000000000\","
+                        "\"expected_revision\":0,\"operations\":[]}}";
+    const size_t valid_len = strlen(valid);
+    char *buffer = (char *)malloc(valid_len + 5U);
+    TEST_ASSERT_NOT_NULL(buffer);
+    memcpy(buffer, valid, valid_len);
+    memcpy(buffer + valid_len, "junk", 4U);
+    buffer[valid_len + 4U] = '\0';
+
+    tp_txn_request *req = NULL;
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_txn_request_decode_n(buffer, valid_len + 4U, &req, &err));
+    TEST_ASSERT_NULL(req);
+
+    buffer[valid_len] = '\0';
+    memset(&err, 0, sizeof err);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_txn_request_decode_n(buffer, valid_len + 4U, &req, &err));
+    TEST_ASSERT_NULL(req);
+
+    memcpy(buffer + valid_len, " \r\n\t", 4U);
+    memset(&err, 0, sizeof err);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_txn_request_decode_n(buffer, valid_len + 4U, &req, &err));
+    TEST_ASSERT_NOT_NULL(req);
+    tp_txn_request_free(req);
+    free(buffer);
+}
+
+void test_operation_count_rejects_before_clone_for_json_and_typed_apply(void) {
+    tp_model *m = tp_model_create();
+    TEST_ASSERT_NOT_NULL(m);
+    char *over_limit = txn_json_with_remove_ops(TP_TXN_MAX_OPS + 1);
+    tp_txn_result res;
+    tp_error err = {0};
+
+    tp_project__test_set_clone_alloc_fail(0);
+    char *bytes_over = txn_json_with_author_size((size_t)TP_TXN_MAX_REQUEST_BYTES + 1U);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS,
+                          tp_model_apply_json_n(m, bytes_over,
+                                                (size_t)TP_TXN_MAX_REQUEST_BYTES + 1U, &res, &err));
+    TEST_ASSERT_FALSE(res.committed);
+    TEST_ASSERT_EQUAL_INT64(0, res.revision);
+    tp_txn_result_free(&res);
+
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS,
+                          tp_model_apply_json_n(m, over_limit, strlen(over_limit), &res, &err));
+    TEST_ASSERT_FALSE(res.committed);
+    TEST_ASSERT_EQUAL_INT64(0, res.revision);
+    tp_txn_result_free(&res);
+
+    tp_txn_request typed = {0};
+    typed.schema = TP_TXN_SCHEMA;
+    (void)snprintf(typed.id_hex, sizeof typed.id_hex, "%s", "11111111111111111111111111111111");
+    typed.expected_revision = 0;
+    typed.op_count = TP_TXN_MAX_OPS + 1;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS, tp_model_apply(m, &typed, &res, &err));
+    TEST_ASSERT_FALSE(res.committed);
+    TEST_ASSERT_EQUAL_INT64(0, res.revision);
+    tp_txn_result_free(&res);
+
+    typed.op_count = 0;
+    typed.label = (char *)malloc((size_t)TP_TXN_MAX_REQUEST_BYTES + 1U);
+    TEST_ASSERT_NOT_NULL(typed.label);
+    memset(typed.label, 'x', (size_t)TP_TXN_MAX_REQUEST_BYTES);
+    typed.label[TP_TXN_MAX_REQUEST_BYTES] = '\0';
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS, tp_model_apply(m, &typed, &res, &err));
+    TEST_ASSERT_FALSE(res.committed);
+    TEST_ASSERT_EQUAL_INT64(0, res.revision);
+    tp_txn_result_free(&res);
+    free(typed.label);
+    typed.label = NULL;
+
+    /* The first clone allocation still fails: no over-limit path reached clone. */
+    tp_operation op = {0};
+    op.kind = TP_OP_ATLAS_REMOVE;
+    op.atlas_id = tp_model_project(m)->atlases[0].id;
+    typed.ops = &op;
+    typed.op_count = 1;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OOM, tp_model_apply(m, &typed, &res, &err));
+    TEST_ASSERT_EQUAL_INT64(0, tp_model_revision(m));
+    tp_txn_result_free(&res);
+
+    free(bytes_over);
+    free(over_limit);
+    tp_model_destroy(m);
+}
+
+void test_typed_byte_limit_rejects_before_encode_or_clone_without_journal(void) {
+    tp_project *project = base_project();
+    tp_model *model = tp_model_wrap(project);
+    TEST_ASSERT_NOT_NULL(model);
+    char *author = malloc((size_t)TP_TXN_MAX_REQUEST_BYTES + 1U);
+    TEST_ASSERT_NOT_NULL(author);
+    memset(author, 'a', (size_t)TP_TXN_MAX_REQUEST_BYTES);
+    author[TP_TXN_MAX_REQUEST_BYTES] = '\0';
+
+    tp_txn_request request = {0};
+    request.schema = TP_TXN_SCHEMA;
+    memcpy(request.id_hex, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 33U);
+    request.author = author;
+    tp_txn_result result;
+    tp_error error = {0};
+    tp_txn__test_encode_stats_reset();
+    tp_project__test_set_clone_alloc_fail(0);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS,
+                          tp_model_apply(model, &request, &result, &error));
+    TEST_ASSERT_EQUAL_UINT64(0, tp_txn__test_request_encode_calls());
+    TEST_ASSERT_EQUAL_INT(0, tp_project__test_clone_alloc_count());
+    TEST_ASSERT_EQUAL_INT64(0, tp_model_revision(model));
+    tp_txn_result_free(&result);
+    free(author);
+    tp_model_destroy(model);
+}
+
+void test_typed_positive_op_count_requires_operations_before_clone(void) {
+    tp_model *m = tp_model_wrap(base_project());
+    TEST_ASSERT_NOT_NULL(m);
+    char *before = serialize(tp_model_project(m));
+
+    tp_txn_request typed = {0};
+    typed.schema = TP_TXN_SCHEMA;
+    (void)snprintf(typed.id_hex, sizeof typed.id_hex, "%s",
+                   "12121212121212121212121212121212");
+    typed.expected_revision = 0;
+    typed.ops = NULL;
+    typed.op_count = 1;
+    TEST_ASSERT_NULL(tp_txn_request_encode(&typed));
+
+    tp_txn_result result = {0};
+    tp_error err = {0};
+    tp_project__test_set_clone_alloc_fail(0);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_model_apply(m, &typed, &result, &err));
+    tp_project__test_set_clone_alloc_fail(-1);
+
+    TEST_ASSERT_FALSE(result.committed);
+    TEST_ASSERT_EQUAL_INT64(0, result.revision);
+    TEST_ASSERT_EQUAL_INT(1, result.error_count);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT, result.errors[0].code);
+    TEST_ASSERT_EQUAL_STRING("operations", result.errors[0].field);
+    TEST_ASSERT_EQUAL_INT64(0, tp_model_revision(m));
+    char *after = serialize(tp_model_project(m));
+    TEST_ASSERT_EQUAL_STRING(before, after);
+
+    free(after);
+    free(before);
+    tp_txn_result_free(&result);
     tp_model_destroy(m);
 }
 
@@ -1009,9 +1587,10 @@ void test_json_nonstring_id_collect_all(void) {
     tp_model_destroy(m);
 }
 
-/* [0] sprite override int16 fields are range-checked BEFORE the narrowing cast, so an
- * out-of-range value rejects (was: 65535 wrapped to -1 == INHERIT and silently
- * dropped, apply COMMITTED). A valid value commits. */
+/* Sprite transport fields stay wide through decode; the shared operation validator
+ * owns the storage/domain range and rejects before the apply-side narrowing cast.
+ * This prevents 65535 wrapping to -1 == INHERIT while keeping every frontend's
+ * structured error semantics identical. */
 void test_json_ov_int16_range(void) {
     tp_project *p = base_project();
     tp_id128 aid = p->atlases[0].id;
@@ -1034,6 +1613,8 @@ void test_json_ov_int16_range(void) {
         tp_txn_result res;
         TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_RANGE, tp_model_apply_json(m, json, &res, &err));
         TEST_ASSERT_FALSE(res.committed);
+        TEST_ASSERT_EQUAL_INT(1, res.error_count);
+        TEST_ASSERT_EQUAL_STRING("ov_margin", res.errors[0].field);
         TEST_ASSERT_EQUAL_INT64(0, tp_model_revision(m)); /* nothing committed */
         tp_txn_result_free(&res);
     }
@@ -1319,6 +1900,37 @@ void test_json_target_set_lower_edges(void) {
     tp_txn_request_free(r1);
 }
 
+void test_prechecked_recovery_decode_verifies_operation_count(void) {
+    const char *json =
+        "{\"schema\":1,\"transaction\":{"
+        "\"id\":\"00000000000000000000000000000000\","
+        "\"expected_revision\":0,\"operations\":["
+        "{\"op\":\"atlas.rename\","
+        "\"atlas_id\":\"atlas_11111111111111111111111111111111\","
+        "\"name\":\"renamed\"}]}}";
+    tp_error err = {0};
+    int count = 0;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_txn__count_operations_json_n(json, strlen(json), &count, &err));
+    TEST_ASSERT_EQUAL_INT(1, count);
+    tp_txn_request *request = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_txn__decode_prechecked_json_n(json, strlen(json), count, &request,
+                                         &err));
+    TEST_ASSERT_NOT_NULL(request);
+    TEST_ASSERT_EQUAL_INT(count, request->op_count);
+    tp_txn_request_free(request);
+
+    request = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_txn__decode_prechecked_json_n(json, strlen(json), count + 1,
+                                         &request, &err));
+    TEST_ASSERT_NULL(request);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_clone_byte_identity);
@@ -1332,11 +1944,24 @@ int main(void) {
     RUN_TEST(test_apply_per_op_alloc_fault);
     RUN_TEST(test_expected_revision);
     RUN_TEST(test_idempotent_retry);
+    RUN_TEST(test_idempotency_retention_window_evicts_fifo);
+    RUN_TEST(test_semantic_no_change_is_not_committed_or_retained);
+    RUN_TEST(test_semantic_no_change_preserves_redo_branch);
+    RUN_TEST(test_journal_less_history_avoids_checkpoint_size_traversals);
     RUN_TEST(test_dirty_is_semantic_identity);
     RUN_TEST(test_identity_excludes_runtime);
     RUN_TEST(test_identity_order_normalized);
     RUN_TEST(test_identity_frames_order_semantic);
     RUN_TEST(test_json_structural_fail_fast);
+    RUN_TEST(test_json_request_byte_limit_is_inclusive_and_preparse);
+    RUN_TEST(test_json_operation_count_limit_is_inclusive);
+    RUN_TEST(test_json_precheck_rejects_duplicate_counted_envelope_keys);
+    RUN_TEST(test_json_operation_precheck_is_single_pass_under_adversarial_nesting);
+    RUN_TEST(test_json_max_ops_walk_and_error_growth_are_linear);
+    RUN_TEST(test_length_aware_json_requires_exact_span_consumption);
+    RUN_TEST(test_operation_count_rejects_before_clone_for_json_and_typed_apply);
+    RUN_TEST(test_typed_byte_limit_rejects_before_encode_or_clone_without_journal);
+    RUN_TEST(test_typed_positive_op_count_requires_operations_before_clone);
     RUN_TEST(test_json_revision_short_circuit_alone);
     RUN_TEST(test_json_shape_collect_all);
     RUN_TEST(test_json_request_encode_golden);
@@ -1358,5 +1983,6 @@ int main(void) {
     RUN_TEST(test_json_target_set_full_is_all);
     RUN_TEST(test_json_target_set_roundtrip_enabled);
     RUN_TEST(test_json_target_set_lower_edges);
+    RUN_TEST(test_prechecked_recovery_decode_verifies_operation_count);
     return UNITY_END();
 }

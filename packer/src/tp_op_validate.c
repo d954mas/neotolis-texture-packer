@@ -14,7 +14,9 @@
 #include <string.h>
 
 #include "tp_core/tp_export.h"  /* tp_exporter_find (exporter-id validation) */
+#include "tp_core/tp_pack.h"
 #include "tp_core/tp_project.h"
+#include "tp_core/tp_srckey.h"
 #include "tp_op_internal.h"
 
 /* Reject NaN / +-inf; `pos` also rejects <= 0. No libm: comparisons only. */
@@ -34,6 +36,28 @@ static int find_atlas_by_name(const tp_project *p, const char *name) {
         }
     }
     return -1;
+}
+
+static tp_status validate_atlas_name_shape(const char *name,
+                                           tp_op_reject *rej) {
+    if (!name || name[0] == '\0') {
+        return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "name",
+                             "atlas name must be non-empty");
+    }
+    bool only_dots = true;
+    for (const char *c = name; *c; ++c) {
+        if (*c == '/' || *c == '\\') {
+            return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "name",
+                                 "atlas name must not contain path separators");
+        }
+        if (*c != '.') {
+            only_dots = false;
+        }
+    }
+    return only_dots
+               ? tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "name",
+                               "atlas name must not be dots-only")
+               : TP_STATUS_OK;
 }
 /* const adapters over the public id-addressed accessors (fix [8]): validate holds a
  * const project; the accessors take non-const and only READ, so the cast is safe. This
@@ -66,13 +90,17 @@ static tp_status min_i(tp_op_reject *rej, const char *field, long v, long lo) {
 }
 
 /* atlas.settings.set: check every masked knob against its range. */
-static tp_status validate_atlas_settings(const tp_op_atlas_settings *s, tp_op_reject *rej) {
+static tp_status validate_atlas_settings(const tp_project_atlas *atlas,
+                                         const tp_op_atlas_settings *s,
+                                         tp_op_reject *rej) {
     tp_status st = TP_STATUS_OK;
     if (s->mask == 0) {
         return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "", "atlas.settings.set names no field");
     }
-    if ((s->mask & TP_AF_MAX_SIZE) && (st = range_i(rej, "max_size", s->max_size, 1, TP_OP_MAX_PAGE_DIM))) {
-        return st;
+    if ((s->mask & TP_AF_MAX_SIZE) && !tp_pack_max_size_valid(s->max_size)) {
+        return tp_op__reject(rej, TP_STATUS_OUT_OF_RANGE, "max_size",
+                             "max_size = %d must be in [1..%d]", s->max_size,
+                             TP_PACK_MAX_PAGE_DIM);
     }
     /* padding / margin / extrude: CLI `set` accepts any >= 0 (no upper cap here; tp_pack
      * clamps). Matching that keeps the op engine neither stricter nor looser than the CLI. */
@@ -86,17 +114,34 @@ static tp_status validate_atlas_settings(const tp_op_atlas_settings *s, tp_op_re
         return st;
     }
     if ((s->mask & TP_AF_ALPHA_THRESHOLD) &&
-        (st = range_i(rej, "alpha_threshold", s->alpha_threshold, 0, TP_OP_ALPHA_MAX))) {
-        return st;
+        !tp_pack_alpha_threshold_valid(s->alpha_threshold)) {
+        return tp_op__reject(rej, TP_STATUS_OUT_OF_RANGE, "alpha_threshold",
+                             "alpha_threshold = %d must be in [0..%d]",
+                             s->alpha_threshold, TP_PACK_ALPHA_MAX);
     }
-    if ((s->mask & TP_AF_MAX_VERTICES) && (st = range_i(rej, "max_vertices", s->max_vertices, 1, TP_OP_MAX_VERTICES))) {
-        return st;
+    if ((s->mask & TP_AF_MAX_VERTICES) &&
+        !tp_pack_max_vertices_valid(s->max_vertices)) {
+        return tp_op__reject(rej, TP_STATUS_OUT_OF_RANGE, "max_vertices",
+                             "max_vertices = %d must be in [1..%d]",
+                             s->max_vertices, TP_PACK_MAX_VERTICES);
     }
-    if ((s->mask & TP_AF_SHAPE) && (st = range_i(rej, "shape", s->shape, 0, TP_OP_SHAPE_MAX))) {
-        return st;
+    if ((s->mask & TP_AF_SHAPE) && !tp_pack_shape_valid(s->shape)) {
+        return tp_op__reject(rej, TP_STATUS_OUT_OF_RANGE, "shape",
+                             "shape = %d must be in [%d..%d]", s->shape,
+                             TP_PACK_SHAPE_MIN, TP_PACK_SHAPE_MAX);
     }
-    if ((s->mask & TP_AF_PIXELS_PER_UNIT) && !finite_pos(s->pixels_per_unit)) {
+    if ((s->mask & TP_AF_PIXELS_PER_UNIT) &&
+        !tp_pack_pixels_per_unit_valid(s->pixels_per_unit)) {
         return tp_op__reject(rej, TP_STATUS_OUT_OF_RANGE, "pixels_per_unit", "pixels_per_unit must be positive finite");
+    }
+    const int effective_extrude = (s->mask & TP_AF_EXTRUDE)
+                                      ? s->extrude
+                                      : atlas->extrude;
+    const int effective_shape = (s->mask & TP_AF_SHAPE) ? s->shape
+                                                        : atlas->shape;
+    if (!tp_pack_extrude_shape_valid(effective_extrude, effective_shape)) {
+        return tp_op__reject(rej, TP_STATUS_OUT_OF_RANGE, "extrude",
+                             "extrude > 0 requires shape RECT");
     }
     return TP_STATUS_OK; /* allow_transform / power_of_two are booleans -- any value */
 }
@@ -110,17 +155,31 @@ static tp_status validate_sprite_set(const tp_op_sprite_set *s, tp_op_reject *re
     if ((s->mask & TP_SPF_ORIGIN) && (!finite_any(s->origin_x) || !finite_any(s->origin_y))) {
         return tp_op__reject(rej, TP_STATUS_OUT_OF_RANGE, "origin_x", "origin must be finite");
     }
+    if (s->mask & TP_SPF_SLICE9) {
+        static const char *const fields[4] = {
+            "slice9_l", "slice9_r", "slice9_t", "slice9_b"};
+        for (int i = 0; i < 4; i++) {
+            if ((st = range_i(rej, fields[i], s->slice9[i], 0,
+                              UINT16_MAX)) != TP_STATUS_OK) {
+                return st;
+            }
+        }
+    }
     if ((s->mask & TP_SPF_SHAPE) && s->ov_shape != TP_PROJECT_OV_INHERIT &&
-        (st = range_i(rej, "ov_shape", s->ov_shape, 0, TP_OP_SHAPE_MAX))) {
+        (st = range_i(rej, "ov_shape", s->ov_shape, TP_PACK_SHAPE_MIN,
+                      TP_PACK_SHAPE_MAX))) {
         return st;
     }
     if ((s->mask & TP_SPF_ALLOW_ROTATE) && s->ov_allow_rotate != TP_PROJECT_OV_INHERIT &&
         (st = range_i(rej, "ov_allow_rotate", s->ov_allow_rotate, 0, 1))) {
         return st;
     }
-    if ((s->mask & TP_SPF_MAX_VERTICES) && s->ov_max_vertices != TP_PROJECT_OV_INHERIT &&
-        (st = range_i(rej, "ov_max_vertices", s->ov_max_vertices, 1, TP_OP_MAX_VERTICES))) {
-        return st;
+    if ((s->mask & TP_SPF_MAX_VERTICES) &&
+        s->ov_max_vertices != TP_PROJECT_OV_INHERIT &&
+        !tp_pack_max_vertices_valid(s->ov_max_vertices)) {
+        return tp_op__reject(rej, TP_STATUS_OUT_OF_RANGE, "ov_max_vertices",
+                             "ov_max_vertices = %d must be in [1..%d]",
+                             s->ov_max_vertices, TP_PACK_MAX_VERTICES);
     }
     if ((s->mask & TP_SPF_MARGIN) && s->ov_margin != TP_PROJECT_OV_INHERIT &&
         (st = range_i(rej, "ov_margin", s->ov_margin, 0, TP_OP_OV_MARGIN_MAX))) {
@@ -130,7 +189,7 @@ static tp_status validate_sprite_set(const tp_op_sprite_set *s, tp_op_reject *re
         (st = range_i(rej, "ov_extrude", s->ov_extrude, 0, TP_OP_OV_MARGIN_MAX))) {
         return st;
     }
-    return TP_STATUS_OK; /* slice9 components are uint16 -- already in range */
+    return TP_STATUS_OK;
 }
 
 /* fps + playback checks shared by animation.create / .settings.set. */
@@ -144,7 +203,33 @@ static tp_status validate_anim_knobs(bool check_fps, float fps, bool check_pb, i
     return TP_STATUS_OK;
 }
 
-static tp_status validate_frames(char *const *frames, int n, tp_op_reject *rej) {
+static tp_status validate_canonical_frame_key(const char *key,
+                                              const char *field,
+                                              tp_op_reject *rej) {
+    if (!key || key[0] == '\0') {
+        return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, field,
+                             "frame key must be non-empty");
+    }
+    char normalized[TP_SRCKEY_MAX];
+    tp_error error = {{0}};
+    const tp_status status = tp_srckey_normalize(
+        key, normalized, sizeof normalized, &error);
+    if (status != TP_STATUS_OK) {
+        return tp_op__reject(rej, status, field,
+                             "frame key is not a valid source-local key: %s",
+                             error.msg);
+    }
+    if (strcmp(key, normalized) != 0) {
+        return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, field,
+                             "frame key must already be normalized as '%s'",
+                             normalized);
+    }
+    return TP_STATUS_OK;
+}
+
+static tp_status validate_frames(const tp_project_atlas *atlas,
+                                 const tp_op_sprite_ref *frames, int n,
+                                 tp_op_reject *rej) {
     if (n < 0) { /* a negative count would loop &frames[-1] in apply -> heap underflow */
         return tp_op__reject(rej, TP_STATUS_OUT_OF_RANGE, "frame_count", "frame_count %d must be >= 0", n);
     }
@@ -152,11 +237,89 @@ static tp_status validate_frames(char *const *frames, int n, tp_op_reject *rej) 
         return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "frames", "frame_count %d but the frames array is null", n);
     }
     for (int i = 0; i < n; i++) {
-        if (!frames[i] || frames[i][0] == '\0') {
-            return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "frames", "frame %d is empty", i);
+        if (tp_id128_is_nil(frames[i].source_id)) {
+            return tp_op__reject(rej, TP_STATUS_ID_MALFORMED, "frames",
+                                 "frame %d needs a canonical source id", i);
+        }
+        if (!find_source(atlas, frames[i].source_id)) {
+            return tp_op__reject(rej, TP_STATUS_NOT_FOUND, "frames",
+                                 "frame %d source does not exist in the atlas", i);
+        }
+        const tp_status key_status = validate_canonical_frame_key(
+            frames[i].src_key, "frames", rej);
+        if (key_status != TP_STATUS_OK) {
+            return key_status;
         }
     }
     return TP_STATUS_OK;
+}
+
+tp_status tp_op__canonical_view(const tp_project *project,
+                                const tp_operation *operation,
+                                tp_operation *view, char *path_buf,
+                                size_t path_buf_size) {
+    if (!project || !operation || !view || !path_buf || path_buf_size == 0U) {
+        return TP_STATUS_INVALID_ARGUMENT;
+    }
+    *view = *operation;
+    char **key = NULL;
+    if (operation->kind == TP_OP_SOURCE_ADD) {
+        key = &view->u.source_add.key;
+    } else if (operation->kind == TP_OP_SOURCE_REPLACE) {
+        key = &view->u.source_ref.key;
+    }
+    if (!key || !*key || (*key)[0] == '\0' || !project->project_dir) {
+        return TP_STATUS_OK;
+    }
+    tp_status status = tp_project_resolve_path(project, *key, path_buf,
+                                               path_buf_size);
+    if (status == TP_STATUS_OK) {
+        *key = path_buf;
+    }
+    return status;
+}
+
+static bool source_path_identity(const tp_project *project, const char *path,
+                                 bool stored, char *out, size_t out_size) {
+    char resolved[TP_IDENTITY_PATH_MAX];
+    tp_status status = stored
+                           ? tp_project_resolve_source_path(
+                                 project, path, resolved, sizeof resolved)
+                           : tp_identity_path_absolute_lexical(
+                                 path, resolved, sizeof resolved, NULL);
+    if (stored && status != TP_STATUS_OK) {
+        status = tp_identity_path_absolute_lexical(
+            path, resolved, sizeof resolved, NULL);
+    }
+    if (status != TP_STATUS_OK) {
+        return false;
+    }
+    return tp_identity_path_absolute_lexical(resolved, out, out_size, NULL) ==
+           TP_STATUS_OK;
+}
+
+static bool atlas_has_effective_source_path(const tp_project *project,
+                                            const tp_project_atlas *atlas,
+                                            const char *candidate,
+                                            tp_id128 except_id) {
+    char wanted[TP_IDENTITY_PATH_MAX];
+    if (!source_path_identity(project, candidate, false, wanted,
+                              sizeof wanted)) {
+        return false;
+    }
+    for (int i = 0; i < atlas->source_count; ++i) {
+        const tp_project_source *source = &atlas->sources[i];
+        if (!tp_id128_is_nil(except_id) && tp_id128_eq(source->id, except_id)) {
+            continue;
+        }
+        char existing[TP_IDENTITY_PATH_MAX];
+        if (source_path_identity(project, source->path, true, existing,
+                                 sizeof existing) &&
+            strcmp(existing, wanted) == 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_op_reject *rej) {
@@ -164,6 +327,15 @@ tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_
     if (!p || !op) {
         return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "", "null project or operation");
     }
+    tp_operation canonical;
+    char canonical_path[TP_IDENTITY_PATH_MAX];
+    tp_status canonical_status = tp_op__canonical_view(
+        p, op, &canonical, canonical_path, sizeof canonical_path);
+    if (canonical_status != TP_STATUS_OK) {
+        return tp_op__reject(rej, canonical_status, "key",
+                             "source path cannot be resolved against the project");
+    }
+    op = &canonical;
     if (tp_op_info_by_kind(op->kind) == NULL) {
         return tp_op__reject(rej, TP_STATUS_UNKNOWN_OP, "op", "operation kind %d is not in the catalog", (int)op->kind);
     }
@@ -177,8 +349,9 @@ tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_
             return tp_op__reject(rej, TP_STATUS_DUPLICATE_ID, "atlas_id", "an atlas with that id already exists");
         }
         const char *nm = op->u.atlas_create.name;
-        if (!nm || nm[0] == '\0') {
-            return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "name", "atlas name must be non-empty");
+        tp_status name_status = validate_atlas_name_shape(nm, rej);
+        if (name_status != TP_STATUS_OK) {
+            return name_status;
         }
         if (find_atlas_by_name(p, nm) >= 0) { /* CLI `atlas add` rejects a duplicate name */
             return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "name", "an atlas named '%s' already exists", nm);
@@ -196,8 +369,9 @@ tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_
         case TP_OP_ATLAS_REMOVE: return TP_STATUS_OK;
         case TP_OP_ATLAS_RENAME: {
             const char *nm = op->u.atlas_rename.name;
-            if (!nm || nm[0] == '\0') {
-                return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "name", "atlas name must be non-empty");
+            tp_status name_status = validate_atlas_name_shape(nm, rej);
+            if (name_status != TP_STATUS_OK) {
+                return name_status;
             }
             /* CLI `atlas rename` rejects a collision with ANOTHER atlas; renaming to the
              * same name (self) is allowed (a no-op). */
@@ -207,7 +381,8 @@ tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_
             }
             return TP_STATUS_OK;
         }
-        case TP_OP_ATLAS_SETTINGS_SET: return validate_atlas_settings(&op->u.atlas_settings, rej);
+        case TP_OP_ATLAS_SETTINGS_SET:
+            return validate_atlas_settings(a, &op->u.atlas_settings, rej);
 
         case TP_OP_SOURCE_ADD:
             if (tp_id128_is_nil(op->u.source_add.source_id)) {
@@ -224,7 +399,8 @@ tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_
              * with THIS id at this path") cannot honor a path that already belongs to another
              * source, so reject the conflict here. (The F2-05 CLI adapter pre-checks/skips to
              * preserve the CLI's silent-dedupe UX.) */
-            if (tp_project_atlas_has_source_path(a, op->u.source_add.key)) {
+            if (atlas_has_effective_source_path(p, a, op->u.source_add.key,
+                                                tp_id128_nil())) {
                 return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "key",
                                      "a source with path '%s' already exists in the atlas", op->u.source_add.key);
             }
@@ -246,15 +422,22 @@ tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_
             if (!op->u.source_ref.key || op->u.source_ref.key[0] == '\0') {
                 return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "key", "source path must be non-empty");
             }
+            if (atlas_has_effective_source_path(
+                    p, a, op->u.source_ref.key,
+                    op->u.source_ref.source_id)) {
+                return tp_op__reject(
+                    rej, TP_STATUS_INVALID_ARGUMENT, "key",
+                    "another source with path '%s' already exists in the atlas",
+                    op->u.source_ref.key);
+            }
             return TP_STATUS_OK;
 
         case TP_OP_SPRITE_OVERRIDE_SET:
-            /* A NIL source_id is a PENDING (name-keyed) override -- an override added by
-             * export-key before any source scan (tp_project_sprite's documented pending
-             * state, decision 0010 §2). The CLI `sprite set` adds overrides this way on a
-             * source-less atlas; apply keys by the export-key bridge and leaves the record
-             * pending. A NON-nil source_id must still resolve to a real source. */
-            if (!tp_id128_is_nil(op->u.sprite_set.source_id) && !find_source(a, op->u.sprite_set.source_id)) {
+            if (tp_id128_is_nil(op->u.sprite_set.source_id)) {
+                return tp_op__reject(rej, TP_STATUS_ID_MALFORMED, "source_id",
+                                     "sprite operation needs a canonical source id");
+            }
+            if (!find_source(a, op->u.sprite_set.source_id)) {
                 return tp_op__reject(rej, TP_STATUS_NOT_FOUND, "source_id", "no source with that id in the atlas");
             }
             if (!op->u.sprite_set.src_key || op->u.sprite_set.src_key[0] == '\0') {
@@ -262,8 +445,11 @@ tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_
             }
             return validate_sprite_set(&op->u.sprite_set, rej);
         case TP_OP_SPRITE_OVERRIDE_CLEAR:
-            /* NIL source_id = pending (name-keyed) override (see .SET above). */
-            if (!tp_id128_is_nil(op->u.sprite_clear.source_id) && !find_source(a, op->u.sprite_clear.source_id)) {
+            if (tp_id128_is_nil(op->u.sprite_clear.source_id)) {
+                return tp_op__reject(rej, TP_STATUS_ID_MALFORMED, "source_id",
+                                     "sprite operation needs a canonical source id");
+            }
+            if (!find_source(a, op->u.sprite_clear.source_id)) {
                 return tp_op__reject(rej, TP_STATUS_NOT_FOUND, "source_id", "no source with that id in the atlas");
             }
             if (!op->u.sprite_clear.src_key || op->u.sprite_clear.src_key[0] == '\0') {
@@ -274,8 +460,11 @@ tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_
             }
             return TP_STATUS_OK;
         case TP_OP_SPRITE_NAME_SET:
-            /* NIL source_id = pending (name-keyed) override (see .SET above). */
-            if (!tp_id128_is_nil(op->u.sprite_name.source_id) && !find_source(a, op->u.sprite_name.source_id)) {
+            if (tp_id128_is_nil(op->u.sprite_name.source_id)) {
+                return tp_op__reject(rej, TP_STATUS_ID_MALFORMED, "source_id",
+                                     "sprite operation needs a canonical source id");
+            }
+            if (!find_source(a, op->u.sprite_name.source_id)) {
                 return tp_op__reject(rej, TP_STATUS_NOT_FOUND, "source_id", "no source with that id in the atlas");
             }
             if (!op->u.sprite_name.src_key || op->u.sprite_name.src_key[0] == '\0') {
@@ -295,10 +484,19 @@ tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_
             if (!c->name || c->name[0] == '\0') {
                 return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "name", "animation name must be non-empty");
             }
+            for (int i = 0; i < a->animation_count; ++i) {
+                if (a->animations[i].name &&
+                    strcmp(a->animations[i].name, c->name) == 0) {
+                    return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT,
+                                         "name",
+                                         "an animation named '%s' already exists",
+                                         c->name);
+                }
+            }
             if ((st = validate_anim_knobs(true, c->fps, true, c->playback, rej))) {
                 return st;
             }
-            return validate_frames(c->frames, c->frame_count, rej);
+            return validate_frames(a, c->frames, c->frame_count, rej);
         }
         case TP_OP_ANIMATION_REMOVE:
             return find_anim(a, op->u.anim_ref.anim_id)
@@ -342,15 +540,25 @@ tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_
             if (!find_anim(a, s->anim_id)) {
                 return tp_op__reject(rej, TP_STATUS_NOT_FOUND, "anim_id", "no animation with that id in the atlas");
             }
-            return validate_frames(s->frames, s->frame_count, rej);
+            return validate_frames(a, s->frames, s->frame_count, rej);
         }
         case TP_OP_ANIMATION_FRAME_ADD: {
             const tp_op_anim_frame_add *s = &op->u.anim_frame_add;
             if (!find_anim(a, s->anim_id)) {
                 return tp_op__reject(rej, TP_STATUS_NOT_FOUND, "anim_id", "no animation with that id in the atlas");
             }
-            if (!s->frame || s->frame[0] == '\0') {
-                return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "frame", "frame reference must be non-empty");
+            if (tp_id128_is_nil(s->frame.source_id)) {
+                return tp_op__reject(rej, TP_STATUS_ID_MALFORMED, "frame",
+                                     "frame needs a canonical source id");
+            }
+            if (!find_source(a, s->frame.source_id)) {
+                return tp_op__reject(rej, TP_STATUS_NOT_FOUND, "frame",
+                                     "frame source does not exist in the atlas");
+            }
+            tp_status key_status = validate_canonical_frame_key(
+                s->frame.src_key, "frame", rej);
+            if (key_status != TP_STATUS_OK) {
+                return key_status;
             }
             if (s->index < -1) {
                 return tp_op__reject(rej, TP_STATUS_OUT_OF_RANGE, "index", "index must be >= -1 (-1 = append)");

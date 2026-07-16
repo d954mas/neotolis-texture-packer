@@ -36,12 +36,77 @@ const uint8_t tp_jrn_magic[TP_JRN_MAGIC_LEN] = {'N', 'T', 'P', 'K', 'J', 'R', 'N
 /* ---- endian-stable CRC-32 + byte-at-a-time integer codecs ---------------- */
 
 uint32_t tp_jrn_crc32(uint32_t crc, const uint8_t *data, size_t len) {
+    /* Reflected IEEE CRC-32, one immutable/thread-safe lookup per byte. */
+    static const uint32_t table[256] = {
+        0x00000000u, 0x77073096u, 0xEE0E612Cu, 0x990951BAu,
+        0x076DC419u, 0x706AF48Fu, 0xE963A535u, 0x9E6495A3u,
+        0x0EDB8832u, 0x79DCB8A4u, 0xE0D5E91Eu, 0x97D2D988u,
+        0x09B64C2Bu, 0x7EB17CBDu, 0xE7B82D07u, 0x90BF1D91u,
+        0x1DB71064u, 0x6AB020F2u, 0xF3B97148u, 0x84BE41DEu,
+        0x1ADAD47Du, 0x6DDDE4EBu, 0xF4D4B551u, 0x83D385C7u,
+        0x136C9856u, 0x646BA8C0u, 0xFD62F97Au, 0x8A65C9ECu,
+        0x14015C4Fu, 0x63066CD9u, 0xFA0F3D63u, 0x8D080DF5u,
+        0x3B6E20C8u, 0x4C69105Eu, 0xD56041E4u, 0xA2677172u,
+        0x3C03E4D1u, 0x4B04D447u, 0xD20D85FDu, 0xA50AB56Bu,
+        0x35B5A8FAu, 0x42B2986Cu, 0xDBBBC9D6u, 0xACBCF940u,
+        0x32D86CE3u, 0x45DF5C75u, 0xDCD60DCFu, 0xABD13D59u,
+        0x26D930ACu, 0x51DE003Au, 0xC8D75180u, 0xBFD06116u,
+        0x21B4F4B5u, 0x56B3C423u, 0xCFBA9599u, 0xB8BDA50Fu,
+        0x2802B89Eu, 0x5F058808u, 0xC60CD9B2u, 0xB10BE924u,
+        0x2F6F7C87u, 0x58684C11u, 0xC1611DABu, 0xB6662D3Du,
+        0x76DC4190u, 0x01DB7106u, 0x98D220BCu, 0xEFD5102Au,
+        0x71B18589u, 0x06B6B51Fu, 0x9FBFE4A5u, 0xE8B8D433u,
+        0x7807C9A2u, 0x0F00F934u, 0x9609A88Eu, 0xE10E9818u,
+        0x7F6A0DBBu, 0x086D3D2Du, 0x91646C97u, 0xE6635C01u,
+        0x6B6B51F4u, 0x1C6C6162u, 0x856530D8u, 0xF262004Eu,
+        0x6C0695EDu, 0x1B01A57Bu, 0x8208F4C1u, 0xF50FC457u,
+        0x65B0D9C6u, 0x12B7E950u, 0x8BBEB8EAu, 0xFCB9887Cu,
+        0x62DD1DDFu, 0x15DA2D49u, 0x8CD37CF3u, 0xFBD44C65u,
+        0x4DB26158u, 0x3AB551CEu, 0xA3BC0074u, 0xD4BB30E2u,
+        0x4ADFA541u, 0x3DD895D7u, 0xA4D1C46Du, 0xD3D6F4FBu,
+        0x4369E96Au, 0x346ED9FCu, 0xAD678846u, 0xDA60B8D0u,
+        0x44042D73u, 0x33031DE5u, 0xAA0A4C5Fu, 0xDD0D7CC9u,
+        0x5005713Cu, 0x270241AAu, 0xBE0B1010u, 0xC90C2086u,
+        0x5768B525u, 0x206F85B3u, 0xB966D409u, 0xCE61E49Fu,
+        0x5EDEF90Eu, 0x29D9C998u, 0xB0D09822u, 0xC7D7A8B4u,
+        0x59B33D17u, 0x2EB40D81u, 0xB7BD5C3Bu, 0xC0BA6CADu,
+        0xEDB88320u, 0x9ABFB3B6u, 0x03B6E20Cu, 0x74B1D29Au,
+        0xEAD54739u, 0x9DD277AFu, 0x04DB2615u, 0x73DC1683u,
+        0xE3630B12u, 0x94643B84u, 0x0D6D6A3Eu, 0x7A6A5AA8u,
+        0xE40ECF0Bu, 0x9309FF9Du, 0x0A00AE27u, 0x7D079EB1u,
+        0xF00F9344u, 0x8708A3D2u, 0x1E01F268u, 0x6906C2FEu,
+        0xF762575Du, 0x806567CBu, 0x196C3671u, 0x6E6B06E7u,
+        0xFED41B76u, 0x89D32BE0u, 0x10DA7A5Au, 0x67DD4ACCu,
+        0xF9B9DF6Fu, 0x8EBEEFF9u, 0x17B7BE43u, 0x60B08ED5u,
+        0xD6D6A3E8u, 0xA1D1937Eu, 0x38D8C2C4u, 0x4FDFF252u,
+        0xD1BB67F1u, 0xA6BC5767u, 0x3FB506DDu, 0x48B2364Bu,
+        0xD80D2BDAu, 0xAF0A1B4Cu, 0x36034AF6u, 0x41047A60u,
+        0xDF60EFC3u, 0xA867DF55u, 0x316E8EEFu, 0x4669BE79u,
+        0xCB61B38Cu, 0xBC66831Au, 0x256FD2A0u, 0x5268E236u,
+        0xCC0C7795u, 0xBB0B4703u, 0x220216B9u, 0x5505262Fu,
+        0xC5BA3BBEu, 0xB2BD0B28u, 0x2BB45A92u, 0x5CB36A04u,
+        0xC2D7FFA7u, 0xB5D0CF31u, 0x2CD99E8Bu, 0x5BDEAE1Du,
+        0x9B64C2B0u, 0xEC63F226u, 0x756AA39Cu, 0x026D930Au,
+        0x9C0906A9u, 0xEB0E363Fu, 0x72076785u, 0x05005713u,
+        0x95BF4A82u, 0xE2B87A14u, 0x7BB12BAEu, 0x0CB61B38u,
+        0x92D28E9Bu, 0xE5D5BE0Du, 0x7CDCEFB7u, 0x0BDBDF21u,
+        0x86D3D2D4u, 0xF1D4E242u, 0x68DDB3F8u, 0x1FDA836Eu,
+        0x81BE16CDu, 0xF6B9265Bu, 0x6FB077E1u, 0x18B74777u,
+        0x88085AE6u, 0xFF0F6A70u, 0x66063BCAu, 0x11010B5Cu,
+        0x8F659EFFu, 0xF862AE69u, 0x616BFFD3u, 0x166CCF45u,
+        0xA00AE278u, 0xD70DD2EEu, 0x4E048354u, 0x3903B3C2u,
+        0xA7672661u, 0xD06016F7u, 0x4969474Du, 0x3E6E77DBu,
+        0xAED16A4Au, 0xD9D65ADCu, 0x40DF0B66u, 0x37D83BF0u,
+        0xA9BCAE53u, 0xDEBB9EC5u, 0x47B2CF7Fu, 0x30B5FFE9u,
+        0xBDBDF21Cu, 0xCABAC28Au, 0x53B39330u, 0x24B4A3A6u,
+        0xBAD03605u, 0xCDD70693u, 0x54DE5729u, 0x23D967BFu,
+        0xB3667A2Eu, 0xC4614AB8u, 0x5D681B02u, 0x2A6F2B94u,
+        0xB40BBE37u, 0xC30C8EA1u, 0x5A05DF1Bu, 0x2D02EF8Du,
+    };
     crc = crc ^ 0xFFFFFFFFu;
     for (size_t i = 0; i < len; i++) {
         crc ^= (uint32_t)data[i];
-        for (int k = 0; k < 8; k++) {
-            crc = (crc & 1u) ? ((crc >> 1) ^ 0xEDB88320u) : (crc >> 1);
-        }
+        crc = (crc >> 8) ^ table[crc & 0xFFu];
     }
     return crc ^ 0xFFFFFFFFu;
 }
@@ -78,6 +143,9 @@ struct tp_journal {
     tp_journal_io io;  /* owned */
     tp_id128 key;
     bool poisoned;     /* a failed append/tail-clean: refuse further appends */
+    size_t record_count; /* all durable CKPT/TXN/META frames in the store */
+    size_t replay_count; /* TXN record refs after the latest durable checkpoint */
+    size_t replay_operations; /* decoded operations across those records */
     tp_idset ids;      /* retained-id index (shared set); mirrors the durable records */
     /* R5a: cached project metadata (owned copies). Set by tp_journal_set_metadata and re-emitted by
      * tp_journal_compact so it survives compaction. has_meta stays false until first set. */
@@ -88,6 +156,27 @@ struct tp_journal {
     bool meta_has_file_fingerprint;
     bool has_meta;
 };
+
+static _Thread_local size_t s_test_record_limit;
+static _Thread_local size_t s_test_file_limit;
+
+static size_t journal_record_limit(void) {
+    return s_test_record_limit ? s_test_record_limit
+                               : (size_t)TP_JOURNAL_MAX_RECORDS;
+}
+
+static size_t journal_file_limit(void) {
+    return s_test_file_limit ? s_test_file_limit
+                             : (size_t)TP_JOURNAL_MAX_FILE_BYTES;
+}
+
+void tp_journal__test_set_record_limit(size_t limit) {
+    s_test_record_limit = limit;
+}
+
+void tp_journal__test_set_file_limit(size_t limit) {
+    s_test_file_limit = limit;
+}
 
 tp_journal *tp_journal_create(tp_journal_io io, tp_id128 key) {
     if (!io.ctx || !io.write || !io.length || !io.truncate || !io.read_all) {
@@ -105,6 +194,13 @@ tp_journal *tp_journal_create(tp_journal_io io, tp_id128 key) {
     }
     j->io = io;
     j->key = key;
+    if (tp_idset_reserve(&j->ids) != TP_STATUS_OK) {
+        if (j->io.destroy) {
+            j->io.destroy(j->io.ctx);
+        }
+        free(j);
+        return NULL;
+    }
     return j;
 }
 
@@ -162,16 +258,35 @@ static tp_status record_limit_check_at(int64_t store_len, size_t payload_len, tp
                               : (uint64_t)store_len;
     const uint64_t frame = (uint64_t)TP_JRN_SYNC_FIELD + (uint64_t)TP_JRN_LEN_FIELD +
                            (uint64_t)payload_len + (uint64_t)TP_JRN_CRC_FIELD;
-    if ((uint64_t)payload_len > UINT32_MAX || frame > SIZE_MAX ||
-        base > (uint64_t)TP_JOURNAL_MAX_FILE_BYTES ||
-        frame > (uint64_t)TP_JOURNAL_MAX_FILE_BYTES - base) {
+    const uint64_t file_limit = (uint64_t)journal_file_limit();
+    if ((uint64_t)payload_len > UINT32_MAX ||
+        payload_len > (size_t)TP_JOURNAL_MAX_RECORD_BYTES || frame > SIZE_MAX ||
+        base > file_limit || frame > file_limit - base) {
         return journal_fail(err, "journal append would exceed the recoverable file-size limit");
     }
     return TP_STATUS_OK;
 }
 
-static tp_status record_limit_check(tp_journal *j, size_t payload_len, tp_error *err) {
+static tp_status record_limit_check(const tp_journal *j, size_t payload_len, tp_error *err) {
     return record_limit_check_at(j->io.length(j->io.ctx), payload_len, err);
+}
+
+/* Total-frame admission is deliberately separate from byte-size admission: it
+ * needs no payload and therefore runs before metadata copies, checkpoint
+ * assembly, transaction encoding, or model cloning. write_record repeats it at
+ * the final durable boundary so external store changes cannot bypass the cap. */
+static tp_status record_slot_check(const tp_journal *j, tp_error *err) {
+    if (!j) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "null journal");
+    }
+    if (j->poisoned) {
+        return journal_fail(err, "journal is poisoned: a prior append could not be rolled back");
+    }
+    if (j->record_count >= journal_record_limit()) {
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                            "journal total record limit reached; save/compact is required");
+    }
+    return TP_STATUS_OK;
 }
 
 void tp_journal__poison(tp_journal *j) {
@@ -182,11 +297,64 @@ void tp_journal__poison(tp_journal *j) {
 
 bool tp_journal__is_poisoned(const tp_journal *j) { return j && j->poisoned; }
 
+tp_status tp_journal__check_replay_operations(const tp_journal *j, size_t add,
+                                              tp_error *err) {
+    if (!j) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "null journal");
+    }
+    if (add > (size_t)TP_JOURNAL_MAX_REPLAY_OPERATIONS ||
+        j->replay_operations >
+            (size_t)TP_JOURNAL_MAX_REPLAY_OPERATIONS - add) {
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                            "journal replay operation limit reached; save/compact is required");
+    }
+    return TP_STATUS_OK;
+}
+
+tp_status tp_journal__check_append_admission(const tp_journal *j,
+                                             size_t replay_operations,
+                                             tp_error *err) {
+    tp_status status = record_slot_check(j, err);
+    if (status != TP_STATUS_OK) {
+        return status;
+    }
+    if (j->replay_count >= (size_t)TP_JOURNAL_MAX_REPLAY_RECORDS) {
+        return journal_fail(err,
+                            "journal replay-window record limit reached; save/compact is required");
+    }
+    return tp_journal__check_replay_operations(j, replay_operations, err);
+}
+
+tp_status tp_journal__check_txn_bytes(const tp_journal *j, size_t request_bytes,
+                                      tp_error *err) {
+    if (!j || request_bytes > SIZE_MAX - (size_t)TP_JRN_TXN_FIXED) {
+        return tp_error_set(err, j ? TP_STATUS_OUT_OF_BOUNDS
+                                   : TP_STATUS_INVALID_ARGUMENT,
+                            j ? "journal transaction record size overflow"
+                              : "null journal");
+    }
+    return record_limit_check(j, (size_t)TP_JRN_TXN_FIXED + request_bytes, err);
+}
+
+tp_status tp_journal__check_txn_min_bytes(const tp_journal *j, tp_error *err) {
+    return tp_journal__check_txn_bytes(j, 0U, err);
+}
+
+tp_status tp_journal__set_replay_operations(tp_journal *j, size_t count,
+                                            tp_error *err) {
+    if (!j || count > (size_t)TP_JOURNAL_MAX_REPLAY_OPERATIONS) {
+        return tp_error_set(err, j ? TP_STATUS_OUT_OF_BOUNDS : TP_STATUS_INVALID_ARGUMENT,
+                            "journal replay operation count is outside the supported bound");
+    }
+    j->replay_operations = count;
+    return TP_STATUS_OK;
+}
+
 tp_status tp_journal_seed_retained_id(tp_journal *j, const char *id_hex) {
     if (!j || !id_hex) {
         return TP_STATUS_INVALID_ARGUMENT;
     }
-    return tp_idset_add(&j->ids, id_hex); /* dedup + grow; OOM -> non-OK, no durable write */
+    return tp_idset_add(&j->ids, id_hex); /* bounded dedup/FIFO policy shared with recovery */
 }
 
 bool tp_journal_contains(const tp_journal *j, const char *id_hex) {
@@ -219,6 +387,7 @@ static tp_status ensure_header(tp_journal *j, tp_error *err) {
             j->poisoned = true; /* could not reset the torn header: refuse appends */
             return journal_fail(err, "could not reset a torn journal header");
         }
+        j->record_count = 0U;
     }
     uint8_t hdr[TP_JRN_HEADER_LEN];
     memcpy(hdr, tp_jrn_magic, TP_JRN_MAGIC_LEN);
@@ -237,8 +406,9 @@ static tp_status ensure_header(tp_journal *j, tp_error *err) {
 /* Frame [len|payload|crc], append durably, and roll the store back on a failed
  * write so no torn tail persists. */
 static tp_status write_record(tp_journal *j, const uint8_t *payload, size_t payload_len, tp_error *err) {
-    if (j->poisoned) {
-        return journal_fail(err, "journal is poisoned: a prior append could not be rolled back");
+    tp_status slot = record_slot_check(j, err);
+    if (slot != TP_STATUS_OK) {
+        return slot;
     }
     /* First check leaves even an empty/torn-header store byte-unchanged on a limit rejection. */
     tp_status limit = record_limit_check(j, payload_len, err);
@@ -281,6 +451,7 @@ static tp_status write_record(tp_journal *j, const uint8_t *payload, size_t payl
     if (j->io.sync) {
         (void)j->io.sync(j->io.ctx);
     }
+    j->record_count++;
     return TP_STATUS_OK;
 }
 
@@ -290,8 +461,9 @@ static tp_status write_record(tp_journal *j, const uint8_t *payload, size_t payl
  * (finding [2]: set_metadata) and compaction can re-emit the cache (finding [0]). path/name may be
  * "" (never NULL from our callers; a NULL is defensively treated as ""). Reuses write_record so it
  * inherits the fail-closed / poison / rollback discipline. */
-static tp_status write_meta_record(tp_journal *j, int64_t timestamp, const char *path, const char *name,
-                                   const tp_id128 *file_fingerprint, tp_error *err) {
+static tp_status metadata_payload_size(const char *path, const char *name,
+                                       const tp_id128 *file_fingerprint,
+                                       size_t *out, tp_error *err) {
     size_t plen = path ? strlen(path) : 0;
     size_t nlen = name ? strlen(name) : 0;
     const size_t fingerprint_len = file_fingerprint ? sizeof file_fingerprint->bytes : 0;
@@ -301,7 +473,20 @@ static tp_status write_meta_record(tp_journal *j, int64_t timestamp, const char 
     if (payload64 > SIZE_MAX) {
         return journal_fail(err, "journal metadata record size overflow");
     }
-    size_t payload_len = (size_t)payload64;
+    *out = (size_t)payload64;
+    return TP_STATUS_OK;
+}
+
+static tp_status write_meta_record(tp_journal *j, int64_t timestamp, const char *path, const char *name,
+                                   const tp_id128 *file_fingerprint, tp_error *err) {
+    const size_t plen = path ? strlen(path) : 0U;
+    const size_t nlen = name ? strlen(name) : 0U;
+    size_t payload_len = 0U;
+    tp_status size_status = metadata_payload_size(path, name, file_fingerprint,
+                                                  &payload_len, err);
+    if (size_status != TP_STATUS_OK) {
+        return size_status;
+    }
     tp_status limit = record_limit_check(j, payload_len, err);
     if (limit != TP_STATUS_OK) {
         return limit;
@@ -344,6 +529,22 @@ tp_status tp_journal_set_metadata_ex(tp_journal *j, int64_t timestamp, const cha
     if (!j) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "null journal");
     }
+    tp_status slot = record_slot_check(j, err);
+    if (slot != TP_STATUS_OK) {
+        return slot;
+    }
+    /* strlen-based sizing is allocation-free. Reject an exhausted byte budget
+     * before duplicating or replacing the write-side metadata cache. */
+    size_t payload_len = 0U;
+    tp_status payload_status = metadata_payload_size(
+        path, name, file_fingerprint, &payload_len, err);
+    if (payload_status != TP_STATUS_OK) {
+        return payload_status;
+    }
+    tp_status byte_status = record_limit_check(j, payload_len, err);
+    if (byte_status != TP_STATUS_OK) {
+        return byte_status;
+    }
     /* Commit the cache first, then append the authoritative recovery metadata. The cache remains
      * useful for a later compaction even when the append was rolled back cleanly, but the caller MUST
      * see every durable-write failure: until a META record reaches the store, a crash may recover the
@@ -378,15 +579,76 @@ tp_status tp_journal_set_metadata_ex(tp_journal *j, int64_t timestamp, const cha
 
 static tp_status checkpoint_payload_size(const tp_journal *j, size_t snapshot_len, size_t *out,
                                          tp_error *err) {
-    int id_count = tp_idset_count(&j->ids);
-    const uint64_t payload64 = (uint64_t)TP_JRN_CKPT_FIXED +
-                               (uint64_t)(unsigned int)id_count * (uint64_t)TP_JRN_IDLEN +
-                               (uint64_t)snapshot_len;
-    if (payload64 > SIZE_MAX) {
+    if (!j || !out) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "invalid checkpoint size query");
+    }
+    const size_t id_count = (size_t)tp_idset_count(&j->ids);
+    if (id_count > (SIZE_MAX - (size_t)TP_JRN_CKPT_FIXED) /
+                       (size_t)TP_JRN_IDLEN) {
         return journal_fail(err, "journal checkpoint record size overflow");
     }
-    *out = (size_t)payload64;
+    const size_t prefix = (size_t)TP_JRN_CKPT_FIXED +
+                          id_count * (size_t)TP_JRN_IDLEN;
+    if (snapshot_len > SIZE_MAX - prefix) {
+        return journal_fail(err, "journal checkpoint record size overflow");
+    }
+    *out = prefix + snapshot_len;
     return TP_STATUS_OK;
+}
+
+tp_status tp_journal__check_checkpoint_append_bytes(const tp_journal *j,
+                                                     size_t snapshot_bytes,
+                                                     tp_error *err) {
+    tp_status status = record_slot_check(j, err);
+    if (status != TP_STATUS_OK) {
+        return status;
+    }
+    size_t payload_len = 0U;
+    status = checkpoint_payload_size(j, snapshot_bytes, &payload_len, err);
+    return status == TP_STATUS_OK ? record_limit_check(j, payload_len, err)
+                                  : status;
+}
+
+tp_status tp_journal__check_checkpoint_compact_bytes(const tp_journal *j,
+                                                      size_t snapshot_bytes,
+                                                      tp_error *err) {
+    if (!j) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "null journal");
+    }
+    const size_t replacement_records = j->has_meta ? 2U : 1U;
+    if (replacement_records > journal_record_limit()) {
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                            "compacted journal replacement exceeds the total record limit");
+    }
+    size_t payload_len = 0U;
+    tp_status status = checkpoint_payload_size(j, snapshot_bytes, &payload_len,
+                                               err);
+    if (status != TP_STATUS_OK) {
+        return status;
+    }
+    status = record_limit_check_at((int64_t)TP_JRN_HEADER_LEN, payload_len,
+                                   err);
+    if (status != TP_STATUS_OK || !j->has_meta) {
+        return status;
+    }
+    const uint64_t checkpoint_end = (uint64_t)TP_JRN_HEADER_LEN +
+                                    (uint64_t)TP_JRN_SYNC_FIELD +
+                                    (uint64_t)TP_JRN_LEN_FIELD +
+                                    (uint64_t)payload_len +
+                                    (uint64_t)TP_JRN_CRC_FIELD;
+    if (checkpoint_end > INT64_MAX) {
+        return journal_fail(err, "compacted journal replacement size overflow");
+    }
+    size_t metadata_len = 0U;
+    status = metadata_payload_size(
+        j->meta_path, j->meta_name,
+        j->meta_has_file_fingerprint ? &j->meta_file_fingerprint : NULL,
+        &metadata_len, err);
+    return status == TP_STATUS_OK
+               ? record_limit_check_at((int64_t)checkpoint_end, metadata_len,
+                                       err)
+               : status;
 }
 
 tp_status tp_journal_init_checkpoint(tp_journal *j, const uint8_t *snapshot, size_t len, int64_t revision,
@@ -394,14 +656,17 @@ tp_status tp_journal_init_checkpoint(tp_journal *j, const uint8_t *snapshot, siz
     if (!j) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "null journal");
     }
+    if (len > 0U && !snapshot) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "null checkpoint payload with positive length");
+    }
+    tp_status slot = tp_journal__check_checkpoint_append_bytes(j, len, err);
+    if (slot != TP_STATUS_OK) {
+        return slot;
+    }
     size_t payload_len = 0;
     tp_status ps = checkpoint_payload_size(j, len, &payload_len, err);
     if (ps != TP_STATUS_OK) {
         return ps;
-    }
-    tp_status limit = record_limit_check(j, payload_len, err);
-    if (limit != TP_STATUS_OK) {
-        return limit;
     }
     int id_count = tp_idset_count(&j->ids);
     uint8_t *payload = (uint8_t *)malloc(payload_len);
@@ -415,7 +680,12 @@ tp_status tp_journal_init_checkpoint(tp_journal *j, const uint8_t *snapshot, siz
     tp_jrn_put_u32(payload + off, (uint32_t)id_count);
     off += 4;
     for (int i = 0; i < id_count; i++) {
-        memcpy(payload + off, tp_idset_at(&j->ids, i), TP_JRN_IDLEN);
+        char id_hex[TP_JRN_IDLEN + 1];
+        if (!tp_idset_format_at(&j->ids, i, id_hex)) {
+            free(payload);
+            return journal_fail(err, "journal retained-id ordering is invalid");
+        }
+        memcpy(payload + off, id_hex, TP_JRN_IDLEN);
         off += TP_JRN_IDLEN;
     }
     if (len) {
@@ -423,6 +693,10 @@ tp_status tp_journal_init_checkpoint(tp_journal *j, const uint8_t *snapshot, siz
     }
     tp_status st = write_record(j, payload, payload_len, err);
     free(payload);
+    if (st == TP_STATUS_OK) {
+        j->replay_count = 0U;
+        j->replay_operations = 0U;
+    }
     return st;
 }
 
@@ -430,15 +704,13 @@ tp_status tp_journal_compact(tp_journal *j, const uint8_t *snapshot, size_t len,
     if (!j) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "null journal");
     }
+    if (len > 0U && !snapshot) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "null checkpoint payload with positive length");
+    }
     /* Reject an intrinsically oversized fresh checkpoint BEFORE truncate. Otherwise
      * compaction would destroy the current recoverable log and only then discover that
      * the replacement can never be read under this build's cap. */
-    size_t payload_len = 0;
-    tp_status ps = checkpoint_payload_size(j, len, &payload_len, err);
-    if (ps != TP_STATUS_OK) {
-        return ps;
-    }
-    tp_status limit = record_limit_check_at((int64_t)TP_JRN_HEADER_LEN, payload_len, err);
+    tp_status limit = tp_journal__check_checkpoint_compact_bytes(j, len, err);
     if (limit != TP_STATUS_OK) {
         return limit;
     }
@@ -459,6 +731,7 @@ tp_status tp_journal_compact(tp_journal *j, const uint8_t *snapshot, size_t len,
          * itself, but do not brick a healthy journal. */
         return journal_fail(err, "journal compaction truncate failed (store unchanged, journal preserved)");
     }
+    j->record_count = 0U;
     j->poisoned = false; /* the truncate-to-0 removed any offending record: appends are safe again */
     tp_status cs = tp_journal_init_checkpoint(j, snapshot, len, revision, err);
     if (cs != TP_STATUS_OK) {
@@ -466,7 +739,8 @@ tp_status tp_journal_compact(tp_journal *j, const uint8_t *snapshot, size_t len,
          * NOT be written (OOM / I/O; init_checkpoint rolled its store back to length 0). The store is now
          * checkpoint-LESS: appending TXN op-payloads onto it would recover to NOTHING (no base snapshot)
          * after a crash -- silent loss of every post-Save edit. FAIL CLOSED: poison the journal so
-         * write_record refuses further appends; the glue then detaches it and continues journal-less. */
+         * write_record refuses further appends. The model keeps this authority attached rather than
+         * silently falling back to a second journal-less source of truth. */
         j->poisoned = true;
         return cs;
     }
@@ -478,6 +752,7 @@ tp_status tp_journal_compact(tp_journal *j, const uint8_t *snapshot, size_t len,
         const tp_id128 *fingerprint = j->meta_has_file_fingerprint ? &j->meta_file_fingerprint : NULL;
         tp_status ms = write_meta_record(j, j->meta_time, j->meta_path, j->meta_name, fingerprint, &meta_err);
         if (ms != TP_STATUS_OK) {
+            j->poisoned = true;
             return tp_error_set(err, ms, "%s",
                                 meta_err.msg[0] ? meta_err.msg
                                                 : "journal metadata re-emit failed after compaction");
@@ -486,22 +761,32 @@ tp_status tp_journal_compact(tp_journal *j, const uint8_t *snapshot, size_t len,
     return TP_STATUS_OK;
 }
 
-tp_status tp_journal_append_txn(tp_journal *j, const char *id_hex, int64_t revision, const uint8_t *snapshot,
-                                size_t len, tp_error *err) {
+tp_status tp_journal_append_txn_counted(tp_journal *j, const char *id_hex, int64_t revision,
+                                        const uint8_t *snapshot, size_t len,
+                                        size_t replay_operations, tp_error *err) {
     if (!j || !id_hex) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "null journal or id");
     }
-    if (strlen(id_hex) != TP_JRN_IDLEN) {
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "journal id must be 32 hex characters");
+    if (len > 0U && !snapshot) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "null transaction payload with positive length");
+    }
+    if (!tp_idset_valid_hex(id_hex)) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "journal id must be 32 lowercase hex characters");
     }
     /* (1) reserve the retained-id slot BEFORE the durable write so step (3) is
      * allocation-free. An OOM here writes nothing (id stays retryable). */
     if (tp_idset_contains(&j->ids, id_hex)) {
         return TP_STATUS_OK; /* already retained: an idempotent no-op (never double-appends) */
     }
+    tp_status admission =
+        tp_journal__check_append_admission(j, replay_operations, err);
+    if (admission != TP_STATUS_OK) {
+        return admission;
+    }
     tp_status rs = tp_idset_reserve(&j->ids);
     if (rs != TP_STATUS_OK) {
-        return tp_error_set(err, rs, "journal retained-id reserve failed (out of memory)");
+        return tp_error_set(err, rs, "journal retained-id storage is unavailable");
     }
     const uint64_t payload64 = (uint64_t)TP_JRN_TXN_FIXED + (uint64_t)len;
     if (payload64 > SIZE_MAX) {
@@ -533,7 +818,14 @@ tp_status tp_journal_append_txn(tp_journal *j, const char *id_hex, int64_t revis
     }
     /* (3) infallibly register the id in the reserved slot. */
     tp_idset_put_reserved(&j->ids, id_hex);
+    j->replay_count++;
+    j->replay_operations += replay_operations;
     return TP_STATUS_OK;
+}
+
+tp_status tp_journal_append_txn(tp_journal *j, const char *id_hex, int64_t revision,
+                                const uint8_t *snapshot, size_t len, tp_error *err) {
+    return tp_journal_append_txn_counted(j, id_hex, revision, snapshot, len, 0U, err);
 }
 
 /* ---- recovery ------------------------------------------------------------ */
@@ -542,15 +834,14 @@ void tp_journal_recovery_free(tp_journal_recovery *r) {
     if (!r) {
         return;
     }
-    free(r->snapshot);
     r->snapshot = NULL;
     r->snapshot_len = 0;
-    for (size_t i = 0; i < r->op_count; i++) { /* format B: free each replay op-payload */
-        free(r->ops[i].payload);
-    }
     free(r->ops);
     r->ops = NULL;
     r->op_count = 0;
+    free(r->_raw_record_buffer);
+    r->_raw_record_buffer = NULL;
+    r->_raw_record_buffer_len = 0;
     free(r->metadata.path); /* R5a: owned metadata strings */
     free(r->metadata.name);
     r->metadata.path = NULL;
@@ -558,94 +849,87 @@ void tp_journal_recovery_free(tp_journal_recovery *r) {
     r->has_metadata = false;
 }
 
-/* R5a: parse a META (type 3) payload -- type(1) | timestamp i64 | path_len u32 | path | name_len u32
- * | name (all BE) -- into owned NUL-terminated strdup'd `*path`/`*name` copies + `*ts`. Every field
- * is bounds-checked with size_t math before it is read. Returns TP_STATUS_OK (caller owns the
- * strings), TP_STATUS_OUT_OF_BOUNDS for a malformed/short payload (a corruption boundary), or
- * TP_STATUS_OOM. On any non-OK return the out strings are NULL (nothing leaks). Shared by recover + peek. */
-static tp_status parse_meta(const uint8_t *pl, size_t plen, int64_t *ts, char **path, char **name,
-                            tp_id128 *file_fingerprint, bool *has_file_fingerprint) {
-    *ts = 0;
-    *path = NULL;
-    *name = NULL;
-    memset(file_fingerprint, 0, sizeof *file_fingerprint);
-    *has_file_fingerprint = false;
+/* Metadata is common in long-lived sessions. Recovery therefore validates each
+ * frame into a borrowed last-wins descriptor and allocates the two result strings
+ * once, after the walk. Repeated META frames remain O(1) auxiliary memory and do
+ * not perform two malloc/free pairs per frame. */
+typedef struct tp_jrn_meta_ref {
+    int64_t timestamp;
+    const uint8_t *path;
+    size_t path_len;
+    const uint8_t *name;
+    size_t name_len;
+    tp_id128 file_fingerprint;
+    bool has_file_fingerprint;
+} tp_jrn_meta_ref;
+
+static tp_status parse_meta_ref(const uint8_t *pl, size_t plen,
+                                tp_jrn_meta_ref *out) {
+    memset(out, 0, sizeof *out);
     if (plen < (size_t)TP_JRN_META_FIXED) {
         return TP_STATUS_OUT_OF_BOUNDS; /* too short for type + timestamp + path_len */
     }
-    *ts = tp_jrn_get_i64(pl + 1);
+    out->timestamp = tp_jrn_get_i64(pl + 1);
     uint32_t path_len = tp_jrn_get_u32(pl + 9);
     size_t off = (size_t)TP_JRN_META_FIXED;
     if (plen - off < (size_t)path_len) {
         return TP_STATUS_OUT_OF_BOUNDS; /* path overruns the payload */
     }
-    char *p = jrn_dup_bytes(pl + off, (size_t)path_len);
-    if (!p) {
-        return TP_STATUS_OOM;
-    }
+    out->path = pl + off;
+    out->path_len = (size_t)path_len;
     off += (size_t)path_len;
     if (plen - off < (size_t)TP_JRN_LEN_FIELD) {
-        free(p);
         return TP_STATUS_OUT_OF_BOUNDS; /* no room for name_len */
     }
     uint32_t name_len = tp_jrn_get_u32(pl + off);
     off += (size_t)TP_JRN_LEN_FIELD;
     if (plen - off < (size_t)name_len) {
-        free(p);
         return TP_STATUS_OUT_OF_BOUNDS; /* name overruns the payload */
     }
-    char *n = jrn_dup_bytes(pl + off, (size_t)name_len);
-    if (!n) {
-        free(p);
-        return TP_STATUS_OOM;
-    }
+    out->name = pl + off;
+    out->name_len = (size_t)name_len;
     off += (size_t)name_len;
     const size_t trailing = plen - off;
-    if (trailing != 0 && trailing != sizeof file_fingerprint->bytes) {
-        free(p);
-        free(n);
+    if (trailing != 0 && trailing != sizeof out->file_fingerprint.bytes) {
         return TP_STATUS_OUT_OF_BOUNDS;
     }
-    if (trailing == sizeof file_fingerprint->bytes) {
-        memcpy(file_fingerprint->bytes, pl + off, sizeof file_fingerprint->bytes);
-        *has_file_fingerprint = true;
+    if (trailing == sizeof out->file_fingerprint.bytes) {
+        memcpy(out->file_fingerprint.bytes, pl + off,
+               sizeof out->file_fingerprint.bytes);
+        out->has_file_fingerprint = true;
     }
-    *path = p;
-    *name = n;
     return TP_STATUS_OK;
 }
 
-/* R5a fix [4]: capture a META payload into *dst (last-wins: frees any prior strings). Returns
- * TP_STATUS_OK, TP_STATUS_OOM (hard fault -> caller aborts), or TP_STATUS_OUT_OF_BOUNDS (malformed ->
- * corruption boundary). Shared by the recover + peek frame walks so their META handling cannot drift. */
-static tp_status capture_meta(const uint8_t *pl, size_t plen, tp_journal_meta *dst, bool *has_dst) {
-    int64_t mts = 0;
-    char *mpath = NULL, *mname = NULL;
-    tp_id128 fingerprint;
-    bool has_fingerprint = false;
-    tp_status ms = parse_meta(pl, plen, &mts, &mpath, &mname, &fingerprint, &has_fingerprint);
-    if (ms != TP_STATUS_OK) {
-        return ms; /* OOM or OUT_OF_BOUNDS; parse_meta guarantees mpath/mname NULL on non-OK (no leak) */
+static tp_status materialize_meta(const tp_jrn_meta_ref *ref,
+                                  tp_journal_meta *dst) {
+    char *path = jrn_dup_bytes(ref->path, ref->path_len);
+    if (!path) {
+        return TP_STATUS_OOM;
     }
-    free(dst->path); /* last-wins: drop any earlier metadata record */
-    free(dst->name);
-    dst->timestamp = mts;
-    dst->path = mpath;
-    dst->name = mname;
-    dst->file_fingerprint = fingerprint;
-    dst->has_file_fingerprint = has_fingerprint;
-    *has_dst = true;
+    char *name = jrn_dup_bytes(ref->name, ref->name_len);
+    if (!name) {
+        free(path);
+        return TP_STATUS_OOM;
+    }
+    dst->timestamp = ref->timestamp;
+    dst->path = path;
+    dst->name = name;
+    dst->file_fingerprint = ref->file_fingerprint;
+    dst->has_file_fingerprint = ref->has_file_fingerprint;
     return TP_STATUS_OK;
 }
 
-/* Decode one payload; when `ids` is non-NULL register its ids into it; output the record type, the
+/* Decode one payload without publishing its ids; output the record type, the
  * payload SLICE offset (relative to payload start) + length + revision. For a CHECKPOINT the slice is
  * the project snapshot; for a TXN (format B) it is the serialized op-payload; a META record has no
- * slice (0/0). `ids` NULL = classify + bounds-check only, no registration (peek shares this decoder,
- * having no idset). Returns TP_STATUS_OK on a good record, TP_STATUS_OOM on a hard fault (abort), or
+ * slice (0/0). When `ids` is present it is read only to reject a retained duplicate transaction;
+ * accepted ids are published by the walker only after its record callback succeeds. `ids` NULL means
+ * classify + bounds-check only (peek shares this decoder, having no idset). Returns TP_STATUS_OK on a
+ * good record, TP_STATUS_OOM on a hard fault (abort), or
  * TP_STATUS_OUT_OF_BOUNDS for a malformed/unknown payload (a corruption boundary). All reads
  * bounds-checked. */
-static tp_status decode_payload(tp_idset *ids, const uint8_t *pl, size_t plen, uint8_t *rec_type, size_t *snap_off,
+static tp_status decode_payload(const tp_idset *ids, const uint8_t *pl, size_t plen, uint8_t *rec_type, size_t *snap_off,
                                 size_t *snap_len, int64_t *rev) {
     if (plen < 1) {
         return TP_STATUS_OUT_OF_BOUNDS;
@@ -659,10 +943,18 @@ static tp_status decode_payload(tp_idset *ids, const uint8_t *pl, size_t plen, u
         char idhex[33];
         memcpy(idhex, pl + 1, TP_JRN_IDLEN);
         idhex[TP_JRN_IDLEN] = '\0';
+        if (!tp_idset_valid_hex(idhex)) {
+            return TP_STATUS_OUT_OF_BOUNDS;
+        }
         *rev = tp_jrn_get_i64(pl + 1 + TP_JRN_IDLEN);
         *snap_off = (size_t)TP_JRN_TXN_FIXED;
         *snap_len = plen - (size_t)TP_JRN_TXN_FIXED;
-        return ids ? tp_idset_add(ids, idhex) : TP_STATUS_OK;
+        if (!ids) {
+            return TP_STATUS_OK;
+        }
+        /* A retained duplicate could not have been emitted by the writer. Reject
+         * it before replay instead of applying the same acknowledged operation twice. */
+        return tp_idset_contains(ids, idhex) ? TP_STATUS_OUT_OF_BOUNDS : TP_STATUS_OK;
     }
     if (type == (uint8_t)TP_JRN_REC_CKPT) {
         if (plen < (size_t)TP_JRN_CKPT_FIXED) {
@@ -674,19 +966,29 @@ static tp_status decode_payload(tp_idset *ids, const uint8_t *pl, size_t plen, u
         if ((size_t)idc > avail / (size_t)TP_JRN_IDLEN) {
             return TP_STATUS_OUT_OF_BOUNDS; /* overflow-safe: id list would exceed the payload */
         }
-        size_t ids_bytes = (size_t)idc * (size_t)TP_JRN_IDLEN;
-        if (ids) {
-            tp_idset_reset(ids); /* a checkpoint RESETS the retained set to its captured id list */
-            for (uint32_t i = 0; i < idc; i++) {
-                char idhex[33];
-                memcpy(idhex, pl + (size_t)TP_JRN_CKPT_FIXED + (size_t)i * (size_t)TP_JRN_IDLEN, TP_JRN_IDLEN);
-                idhex[TP_JRN_IDLEN] = '\0';
-                tp_status r = tp_idset_add(ids, idhex);
-                if (r != TP_STATUS_OK) {
-                    return r;
-                }
-            }
+        if (idc > (uint32_t)TP_TXN_RETAINED_ID_CAP) {
+            return TP_STATUS_OUT_OF_BOUNDS;
         }
+        size_t ids_bytes = (size_t)idc * (size_t)TP_JRN_IDLEN;
+        tp_idset checkpoint_ids = {0};
+        if (idc > 0U && tp_idset_reserve(&checkpoint_ids) != TP_STATUS_OK) {
+            return TP_STATUS_OOM;
+        }
+        for (uint32_t i = 0; i < idc; i++) {
+            char idhex[33];
+            memcpy(idhex, pl + (size_t)TP_JRN_CKPT_FIXED + (size_t)i * (size_t)TP_JRN_IDLEN, TP_JRN_IDLEN);
+            idhex[TP_JRN_IDLEN] = '\0';
+            if (!tp_idset_valid_hex(idhex)) {
+                tp_idset_dispose(&checkpoint_ids);
+                return TP_STATUS_OUT_OF_BOUNDS;
+            }
+            if (tp_idset_contains(&checkpoint_ids, idhex)) {
+                tp_idset_dispose(&checkpoint_ids);
+                return TP_STATUS_OUT_OF_BOUNDS;
+            }
+            tp_idset_put_reserved(&checkpoint_ids, idhex);
+        }
+        tp_idset_dispose(&checkpoint_ids);
         *snap_off = (size_t)TP_JRN_CKPT_FIXED + ids_bytes;
         *snap_len = plen - *snap_off;
         return TP_STATUS_OK;
@@ -706,8 +1008,9 @@ static tp_status decode_payload(tp_idset *ids, const uint8_t *pl, size_t plen, u
  * vs VERSION_MISMATCH identically. Returns true when the header is well-formed (caller may walk
  * records) and sets *version + *key (a 16-byte pointer into buf). Otherwise sets *status to the
  * classified failure (EMPTY / TRUNCATED torn-header / BAD_MAGIC / VERSION_MISMATCH) and returns false.
- * *version is best-effort populated from the header bytes when present (0 otherwise); *key is NULL
- * unless a complete header is present. */
+ * *version is best-effort populated from the header bytes when present (0 otherwise); *key points
+ * into every complete same-magic header, including a version mismatch, so store classification can
+ * distinguish this application's legacy journal from a foreign key without parsing records. */
 static bool header_ok(const uint8_t *buf, size_t len, tp_journal_recovery_status *status, uint32_t *version,
                       const uint8_t **key) {
     *version = 0;
@@ -727,11 +1030,11 @@ static bool header_ok(const uint8_t *buf, size_t len, tp_journal_recovery_status
         *status = TP_JOURNAL_RECOVERY_BAD_MAGIC; /* not our file */
         return false;
     }
+    *key = buf + TP_JRN_KEY_OFF;
     if (*version != (uint32_t)TP_JOURNAL_FORMAT_VERSION) {
         *status = TP_JOURNAL_RECOVERY_VERSION_MISMATCH; /* our file, wrong format version */
         return false;
     }
-    *key = buf + TP_JRN_KEY_OFF;
     return true;
 }
 
@@ -847,32 +1150,125 @@ static bool has_valid_record_after(const uint8_t *buf, size_t len, size_t from, 
     return false;
 }
 
+/* Publish a fully validated and accepted record's retained IDs. The backing set
+ * was reserved when the journal was created, so this phase is allocation-free and
+ * cannot fail after the replay callback accepted the record. */
+static void publish_payload_ids(tp_idset *ids, const uint8_t *pl, uint8_t type) {
+    if (!ids) return;
+    if (type == (uint8_t)TP_JRN_REC_TXN) {
+        char idhex[TP_JRN_IDLEN + 1];
+        memcpy(idhex, pl + 1, TP_JRN_IDLEN);
+        idhex[TP_JRN_IDLEN] = '\0';
+        tp_idset_put_reserved(ids, idhex);
+        return;
+    }
+    if (type == (uint8_t)TP_JRN_REC_CKPT) {
+        const uint32_t idc = tp_jrn_get_u32(pl + 9);
+        tp_idset_reset(ids);
+        for (uint32_t i = 0; i < idc; ++i) {
+            char idhex[TP_JRN_IDLEN + 1];
+            memcpy(idhex, pl + (size_t)TP_JRN_CKPT_FIXED + (size_t)i * (size_t)TP_JRN_IDLEN,
+                   TP_JRN_IDLEN);
+            idhex[TP_JRN_IDLEN] = '\0';
+            tp_idset_put_reserved(ids, idhex);
+        }
+    }
+}
+
 bool tp_journal__test_has_valid_record_after(const uint8_t *buf, size_t len, size_t from,
                                              size_t *crc_work_out) {
     return has_valid_record_after(buf, len, from, crc_work_out);
 }
 
+bool tp_journal__test_recovery_ops_borrow_raw(const tp_journal_recovery *recovery) {
+    if (!recovery) {
+        return false;
+    }
+    if (recovery->op_count == 0U) {
+        return true;
+    }
+    if (!recovery->ops || !recovery->_raw_record_buffer ||
+        recovery->_raw_record_buffer_len == 0U) {
+        return false;
+    }
+    const uintptr_t begin = (uintptr_t)recovery->_raw_record_buffer;
+    if (recovery->_raw_record_buffer_len > UINTPTR_MAX - begin) {
+        return false;
+    }
+    const uintptr_t end = begin + recovery->_raw_record_buffer_len;
+    for (size_t i = 0U; i < recovery->op_count; ++i) {
+        const uintptr_t payload = (uintptr_t)recovery->ops[i].payload;
+        if (payload < begin || payload > end ||
+            recovery->ops[i].payload_len > (size_t)(end - payload)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void tp_journal__test_recovery_copy_stats(
+    const tp_journal_recovery *recovery,
+    tp_journal_recovery_copy_stats *out) {
+    if (!out) {
+        return;
+    }
+    memset(out, 0, sizeof *out);
+    if (!recovery) {
+        return;
+    }
+    if (recovery->bytes_total > 0U) {
+        out->raw_storage_copies = 1U;
+        out->raw_storage_bytes = recovery->bytes_total;
+    }
+    const uintptr_t begin = (uintptr_t)recovery->_raw_record_buffer;
+    const bool raw_range_valid = recovery->_raw_record_buffer &&
+                                 recovery->_raw_record_buffer_len <= UINTPTR_MAX - begin;
+    const uintptr_t end = raw_range_valid
+                              ? begin + recovery->_raw_record_buffer_len
+                              : begin;
+    const uintptr_t snapshot = (uintptr_t)recovery->snapshot;
+    const bool snapshot_borrowed = raw_range_valid && recovery->snapshot &&
+                                   snapshot >= begin && snapshot <= end &&
+                                   recovery->snapshot_len <= (size_t)(end - snapshot);
+    if (recovery->snapshot && !snapshot_borrowed) {
+        out->checkpoint_payload_copies = 1U;
+        out->checkpoint_payload_bytes = recovery->snapshot_len;
+    }
+    for (size_t i = 0U; i < recovery->op_count; ++i) {
+        const uintptr_t payload = (uintptr_t)recovery->ops[i].payload;
+        const bool borrowed = raw_range_valid && recovery->ops[i].payload &&
+                              payload >= begin && payload <= end &&
+                              recovery->ops[i].payload_len <= (size_t)(end - payload);
+        if (!borrowed) {
+            out->operation_payload_copies++;
+            out->operation_payload_bytes += recovery->ops[i].payload_len;
+        }
+    }
+}
+
 /* R5a fix [5]: per-record callback for the SHARED front-to-back walk. Invoked ONCE per good CKPT/TXN
  * record (META is handled inside the walker, never dispatched here). It accumulates the type-specific
  * result (recover: base slice + ordered op-refs; peek: has_checkpoint). Returns TP_STATUS_OK, or
- * TP_STATUS_OOM for a hard fault (a refs realloc failure) which the walker propagates as an abort --
- * NOT a corruption boundary. `buf` + the slice offsets locate the payload inside the raw buffer. */
+ * a hard resource status (refs OOM/count limit) which the walker propagates as an abort -- NOT a
+ * corruption boundary. `buf` + the slice offsets locate the payload inside the raw buffer. */
 typedef tp_status (*tp_jrn_on_record)(void *ctx, uint8_t rtype, const uint8_t *buf, size_t payload_off,
                                       size_t snap_off, size_t snap_len, int64_t rev);
 
 /* R5a fix [5]: the SINGLE front-to-back frame walk driven by BOTH recover + peek so their status
- * classification can never diverge. For each frame: validate geometry (frame_parse_at); decode +
- * (when ids != NULL) register ids via decode_payload; capture META (last-wins) into *meta + *has_meta;
+ * classification can never diverge. For each frame: validate geometry (frame_parse_at); decode and
+ * validate ids without publishing them; capture META (last-wins) into *meta + *has_meta;
  * and for each good CKPT/TXN record invoke on_record. Counts good CKPT/TXN records into *records (META
  * excluded), tracks *last_rev (last good record's revision) + *have_any, and stops at the first
  * torn/corrupt boundary (sets *stop). Always sets *stop_off to where the walk stopped. Returns
- * TP_STATUS_OOM on a hard fault (a decode/parse/callback OOM -> caller aborts); else TP_STATUS_OK
+ * a non-OK hard resource status (decode/parse/callback -> caller aborts); else TP_STATUS_OK
  * (corruption is reported via *stop, not the return). The caller does the post-walk
  * has_valid_record_after + classify_stop + (recover only) poison/mid_stream + materialization. */
-static tp_status walk_records(const uint8_t *buf, size_t len, tp_idset *ids, tp_journal_meta *meta,
+static tp_status walk_records(const uint8_t *buf, size_t len, tp_idset *ids, tp_jrn_meta_ref *meta,
                               bool *has_meta, tp_jrn_on_record on_record, void *cb_ctx, size_t *stop_off,
-                              tp_jrn_stop *stop, int *records, int64_t *last_rev, bool *have_any) {
+                              tp_jrn_stop *stop, int *records, size_t *frame_count,
+                              int64_t *last_rev, bool *have_any) {
     *records = 0;
+    *frame_count = 0U;
     *last_rev = 0;
     *have_any = false;
     *stop = TP_JRN_STOP_EOF;
@@ -887,6 +1283,10 @@ static tp_status walk_records(const uint8_t *buf, size_t len, tp_idset *ids, tp_
         if (fs == FRAME_BAD) {
             *stop = TP_JRN_STOP_CORRUPT; /* bad sync-word or a CRC mismatch on a complete record */
             break;
+        }
+        if (*frame_count >= journal_record_limit()) {
+            *stop_off = off;
+            return TP_STATUS_OUT_OF_BOUNDS;
         }
         /* FRAME_OK: sync + length + crc all check out; decode the payload semantics. */
         uint8_t rtype = 0;
@@ -905,15 +1305,13 @@ static tp_status walk_records(const uint8_t *buf, size_t len, tp_idset *ids, tp_
             /* A META record is captured (last-wins) but never counted / dispatched to on_record: it is
              * not a txn/ckpt. A malformed META (CRC-valid but bad internals) is a corruption boundary;
              * an OOM strdup is a hard fault. */
-            tp_status ms = capture_meta(buf + payload_off, payload_len, meta, has_meta);
-            if (ms == TP_STATUS_OOM) {
-                *stop_off = off;
-                return TP_STATUS_OOM;
-            }
+            tp_status ms = parse_meta_ref(buf + payload_off, payload_len, meta);
             if (ms != TP_STATUS_OK) {
                 *stop = TP_JRN_STOP_CORRUPT;
                 break;
             }
+            *has_meta = true;
+            *frame_count += 1U;
             off = frame_end;
             continue;
         }
@@ -924,16 +1322,18 @@ static tp_status walk_records(const uint8_t *buf, size_t len, tp_idset *ids, tp_
             *stop = TP_JRN_STOP_CORRUPT;
             break;
         }
-        /* A good CKPT/TXN record: hand it to the type-specific accumulator (a realloc OOM in the
-         * callback is a HARD fault, not a CORRUPT stop). */
+        /* A good CKPT/TXN record: hand it to the type-specific accumulator. Allocation or
+         * component-limit failure is a HARD fault, not a CORRUPT stop. */
         tp_status cs = on_record(cb_ctx, rtype, buf, payload_off, snap_off, snap_len, rev);
-        if (cs == TP_STATUS_OOM) {
+        if (cs != TP_STATUS_OK) {
             *stop_off = off;
-            return TP_STATUS_OOM;
+            return cs;
         }
+        publish_payload_ids(ids, buf + payload_off, rtype);
         *last_rev = rev;
         *have_any = true;
         *records += 1;
+        *frame_count += 1U;
         off = frame_end;
     }
     *stop_off = off;
@@ -941,9 +1341,9 @@ static tp_status walk_records(const uint8_t *buf, size_t len, tp_idset *ids, tp_
 }
 
 /* A post-checkpoint TXN op-payload located in the raw recovery buffer (offset+len+rev).
- * The walk records these lazily and materializes them into owned tp_journal_recovered_op
- * copies once framing is fully classified -- a checkpoint mid-walk just resets the count
- * (a fresh baseline supersedes prior ops) with no owned allocations to unwind (format B). */
+ * The walk records these lazily and materializes one borrowed-span descriptor array once
+ * framing is fully classified -- a checkpoint mid-walk just resets the count (a fresh
+ * baseline supersedes prior ops) with no payload allocations to unwind (format B). */
 typedef struct {
     size_t off;
     size_t len;
@@ -973,8 +1373,14 @@ static tp_status recover_on_record(void *ctx, uint8_t rtype, const uint8_t *buf,
         return TP_STATUS_OK;
     }
     /* Format B TXN: record its op-payload slice to replay onto the base, in commit order. */
+    if (c->ref_count >= (size_t)TP_JOURNAL_MAX_REPLAY_RECORDS) {
+        return TP_STATUS_OUT_OF_BOUNDS;
+    }
     if (c->ref_count == c->ref_cap) {
-        size_t new_cap = c->ref_cap ? c->ref_cap * 2 : 8;
+        size_t new_cap = c->ref_cap ? c->ref_cap * 2U : 8U;
+        if (new_cap > (size_t)TP_JOURNAL_MAX_REPLAY_RECORDS) {
+            new_cap = (size_t)TP_JOURNAL_MAX_REPLAY_RECORDS;
+        }
         tp_recop_ref *grown = (tp_recop_ref *)realloc(c->refs, new_cap * sizeof *grown);
         if (!grown) {
             return TP_STATUS_OOM; /* hard fault: the walker aborts, the caller frees c->refs */
@@ -1038,22 +1444,30 @@ tp_status tp_journal_recover(tp_journal *j, tp_journal_recovery *out, tp_error *
     recover_walk_ctx wc;
     memset(&wc, 0, sizeof wc);
     int records = 0;
+    size_t frame_count = 0U;
     int64_t last_rev = 0;
     bool have_any = false;
     tp_jrn_stop stop = TP_JRN_STOP_EOF;
     size_t off = (size_t)TP_JRN_HEADER_LEN;
-    tp_status hard = walk_records(buf, len, &j->ids, &out->metadata, &out->has_metadata, recover_on_record,
-                                  &wc, &off, &stop, &records, &last_rev, &have_any);
+    tp_jrn_meta_ref meta_ref = {0};
+    tp_status hard = walk_records(buf, len, &j->ids, &meta_ref, &out->has_metadata, recover_on_record,
+                                  &wc, &off, &stop, &records, &frame_count,
+                                  &last_rev, &have_any);
     if (hard != TP_STATUS_OK) {
         free(wc.refs);
         free(buf);
         tp_journal_recovery_free(out); /* frees any captured metadata (nothing else set yet) */
-        return tp_error_set(err, hard, "journal recovery ran out of memory");
+        return tp_error_set(err, hard,
+                            hard == TP_STATUS_OUT_OF_BOUNDS
+                                ? "journal total record limit or replay-window limit exceeded"
+                                : "journal recovery ran out of memory");
     }
 
     out->records_recovered = records;
     out->stop_offset = off;
     out->revision = have_any ? last_rev : 0;
+    j->replay_count = wc.ref_count;
+    j->record_count = frame_count;
 
     /* P1-5 / C2: the truncate-vs-preserve decision reduces to ONE question -- is there a
      * CRC-valid record STILL after the boundary? (Scan from off+1 so the corrupt record at
@@ -1069,20 +1483,12 @@ tp_status tp_journal_recover(tp_journal *j, tp_journal_recovery *out, tp_error *
         j->poisoned = true;
     }
 
-    /* Format B materialization: copy the BASE checkpoint snapshot + the ordered op-payloads out of
-     * `buf` into owned buffers (buf is freed below). Any OOM here frees what was built + returns a
-     * hard fault (tp_journal_recovery_free leaves *out clean for the caller). */
+    /* Format B materialization: checkpoint and ordered op payloads are borrowed spans into the
+     * one bounded raw record buffer. The length-aware project/transaction parsers need no NUL
+     * sentinel, so recovery performs no payload malloc/copy. Any descriptor OOM still frees the
+     * raw owner and returns a hard fault. */
     if (wc.have_base && wc.base_len > 0) {
-        char *snap = (char *)malloc(wc.base_len + 1);
-        if (!snap) {
-            free(wc.refs);
-            free(buf);
-            tp_journal_recovery_free(out); /* frees any captured metadata */
-            return tp_error_set(err, TP_STATUS_OOM, "journal snapshot copy failed (out of memory)");
-        }
-        memcpy(snap, buf + wc.base_off, wc.base_len);
-        snap[wc.base_len] = '\0';
-        out->snapshot = snap;
+        out->snapshot = (const char *)(buf + wc.base_off);
         out->snapshot_len = wc.base_len;
     }
     if (wc.ref_count > 0) {
@@ -1090,29 +1496,29 @@ tp_status tp_journal_recover(tp_journal *j, tp_journal_recovery *out, tp_error *
         if (!ops) {
             free(wc.refs);
             free(buf);
-            tp_journal_recovery_free(out); /* frees the base snapshot already set */
+            tp_journal_recovery_free(out);
             return tp_error_set(err, TP_STATUS_OOM, "journal recovery op-list allocation failed (out of memory)");
         }
         for (size_t i = 0; i < wc.ref_count; i++) {
-            char *payload = (char *)malloc(wc.refs[i].len + 1);
-            if (!payload) {
-                for (size_t k = 0; k < i; k++) {
-                    free(ops[k].payload);
-                }
-                free(ops);
-                free(wc.refs);
-                free(buf);
-                tp_journal_recovery_free(out); /* frees the base snapshot already set */
-                return tp_error_set(err, TP_STATUS_OOM, "journal recovery op-payload copy failed (out of memory)");
-            }
-            memcpy(payload, buf + wc.refs[i].off, wc.refs[i].len);
-            payload[wc.refs[i].len] = '\0';
-            ops[i].payload = payload;
+            ops[i].payload = (const char *)(buf + wc.refs[i].off);
             ops[i].payload_len = wc.refs[i].len;
             ops[i].revision = wc.refs[i].rev;
         }
         out->ops = ops;
         out->op_count = wc.ref_count;
+    }
+
+    if (out->has_metadata && materialize_meta(&meta_ref, &out->metadata) != TP_STATUS_OK) {
+        free(wc.refs);
+        free(buf);
+        out->has_metadata = false;
+        return tp_error_set(err, TP_STATUS_OOM,
+                            "journal recovery metadata allocation failed (out of memory)");
+    }
+    if (out->snapshot || out->op_count > 0U) {
+        out->_raw_record_buffer = buf;
+        out->_raw_record_buffer_len = len;
+        buf = NULL;
     }
 
     /* R5a fix [1]: seed the journal's WRITE-side metadata cache from the recovered metadata so a later
@@ -1212,29 +1618,50 @@ tp_status tp_journal_peek(tp_journal_io io, tp_journal_peek_result *out, tp_erro
     if (!header_ok(buf, len, &hstatus, &hversion, &hkey)) {
         out->status = hstatus;
         out->format_version = hversion;
+        if (hkey) {
+            memcpy(out->key, hkey, sizeof out->key);
+        }
         free(buf);
         return TP_STATUS_OK;
     }
     out->format_version = hversion;
     memcpy(out->key, hkey, 16);
 
-    /* R5a fix [5]: drive the SAME shared frame walk as recover (with a NULL idset so nothing is
-     * registered and no model is built), capturing META into out->meta and noting a checkpoint via
-     * peek_on_record. `records`/`last_rev`/`have_any` are populated by the walker; peek uses only the
-     * record count + the stop classification (no materialization). */
+    /* Drive the same shared frame walk as recover with an independently-owned bounded
+     * retained-id scratch set. Peek publishes accepted ids only into this scratch set,
+     * so duplicate/cap/FIFO policy classifies identically without mutating a model. */
+    tp_idset peek_ids = {0};
+    if (tp_idset_reserve(&peek_ids) != TP_STATUS_OK) {
+        free(buf);
+        tp_journal_peek_free(out);
+        return tp_error_set(err, TP_STATUS_OOM, "journal peek id-set allocation failed");
+    }
     peek_walk_ctx pc;
     memset(&pc, 0, sizeof pc);
     int records = 0;
+    size_t frame_count = 0U;
     int64_t last_rev = 0;
     bool have_any = false;
     tp_jrn_stop stop = TP_JRN_STOP_EOF;
     size_t off = (size_t)TP_JRN_HEADER_LEN;
-    tp_status hard = walk_records(buf, len, NULL, &out->meta, &out->has_meta, peek_on_record, &pc, &off,
-                                  &stop, &records, &last_rev, &have_any);
+    tp_jrn_meta_ref meta_ref = {0};
+    tp_status hard = walk_records(buf, len, &peek_ids, &meta_ref, &out->has_meta, peek_on_record, &pc,
+                                  &off, &stop, &records, &frame_count,
+                                  &last_rev, &have_any);
+    tp_idset_dispose(&peek_ids);
     if (hard != TP_STATUS_OK) {
         free(buf);
         tp_journal_peek_free(out);
-        return tp_error_set(err, hard, "journal peek ran out of memory");
+        return tp_error_set(err, hard,
+                            hard == TP_STATUS_OUT_OF_BOUNDS
+                                ? "journal total record limit exceeded"
+                                : "journal peek ran out of memory");
+    }
+    if (out->has_meta && materialize_meta(&meta_ref, &out->meta) != TP_STATUS_OK) {
+        free(buf);
+        out->has_meta = false;
+        return tp_error_set(err, TP_STATUS_OOM,
+                            "journal peek metadata allocation failed (out of memory)");
     }
     out->has_checkpoint = pc.has_checkpoint;
     out->record_count = records;

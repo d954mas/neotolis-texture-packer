@@ -29,11 +29,17 @@ static const nt_ui_events_cfg_t s_dbl_cfg = {.long_press_secs = 0.0F, .double_cl
 /* start_atlas_edit/start_anim_edit/start_sprite_edit_named/start_sprite_edit moved to gui_actions
  * (step 4 -- the entry side of the edit lifecycle, needed by both this panel and the settings view). */
 
-static void declare_atlas_list(nt_ui_context_t *ctx, tp_project *proj) {
+static void declare_atlas_list(nt_ui_context_t *ctx, const tp_session_snapshot *snapshot) {
     CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(20.0F))}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
         section_rule_label(ctx, "ATLASES");
     }
-    for (int i = 0; i < proj->atlas_count; i++) {
+    const int atlas_count = snapshot ? tp_session_snapshot_atlas_count(snapshot) : 0;
+    const int64_t revision = snapshot ? tp_session_snapshot_revision(snapshot) : 0;
+    for (int i = 0; i < atlas_count; i++) {
+        const tp_snapshot_atlas *atlas = tp_session_snapshot_atlas_at(snapshot, i);
+        if (!atlas) {
+            continue;
+        }
         char idbuf[64];
         (void)snprintf(idbuf, sizeof idbuf, "ntpacker/atlas_row_%d", i);
         const uint32_t row_id = nt_ui_id(idbuf);
@@ -43,7 +49,9 @@ static void declare_atlas_list(nt_ui_context_t *ctx, tp_project *proj) {
         const nt_ui_events_t ev = nt_ui_events(ctx, row_id, &s_dbl_cfg);
         const nt_ui_events_t xev = nt_ui_events(ctx, x_id, NULL);
         if (xev.clicked) {
-            s_pending_remove_atlas = i;
+            s_pending_remove_atlas = true;
+            s_pending_remove_atlas_id = atlas->id;
+            s_pending_remove_atlas_revision = revision;
         } else if (ev.double_clicked) {
             start_atlas_edit(i);
         } else if (ev.clicked && i != s_sel_atlas) {
@@ -59,7 +67,7 @@ static void declare_atlas_list(nt_ui_context_t *ctx, tp_project *proj) {
             s_ctx_kind = CTX_ATLAS;
             s_ctx_atlas = i;
         }
-        const bool has_x = (proj->atlas_count > 1);
+        const bool has_x = (atlas_count > 1);
         const Clay_Color bg = selected ? C_SEL : (ev.hovered ? C_HOVER : C_TRANSPARENT);
         CLAY({.id = {.id = row_id},
               .layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H))},
@@ -75,7 +83,7 @@ static void declare_atlas_list(nt_ui_context_t *ctx, tp_project *proj) {
                         s_pending_commit_edit_enter = true; /* defer: never commit while holding `proj` (F2-05b-i) */
                     }
                 } else {
-                    ui_label_fit(ctx, proj->atlases[i].name, selected ? &g_row_strong : &g_row,
+                    ui_label_fit(ctx, atlas->name, selected ? &g_row_strong : &g_row,
                                  fmaxf(left_row_text_w(S(8.0F), has_x) - S(ROW_ICON_RESERVE), S(16.0F)), row_id);
                 }
             }
@@ -130,7 +138,9 @@ static void select_sprite_row(int i, bool ctrl, bool shift) {
         s_sel_anchor_row = -1;
     }
     if (gui_canvas_get_mode(&s_canvas) == GUI_CANVAS_ATLAS && leaf) {
-        gui_canvas_select(&s_canvas, gui_pack_find_sprite(s_sel_atlas, row->sprite_name));
+        gui_canvas_select(&s_canvas,
+                          gui_pack_find_sprite_ref(s_sel_atlas, row->source_id,
+                                                   row->source_key));
     }
 }
 
@@ -185,7 +195,21 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
                 xev = nt_ui_events(ctx, x_id, NULL);
                 x_clicked = xev.clicked;
                 if (x_clicked) {
-                    s_pending_remove_source = row->src;
+                    const tp_session_snapshot *snapshot = gui_project_snapshot();
+                    const tp_snapshot_atlas *atlas = snapshot
+                                                         ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas)
+                                                         : NULL;
+                    const tp_snapshot_source *source = atlas
+                                                           ? tp_session_snapshot_source_at(
+                                                                 snapshot, atlas->id, row->src)
+                                                           : NULL;
+                    if (source) {
+                        s_pending_remove_source = true;
+                        s_pending_remove_source_atlas_id = atlas->id;
+                        s_pending_remove_source_id = source->id;
+                        s_pending_remove_source_revision =
+                            tp_session_snapshot_revision(snapshot);
+                    }
                 }
             }
             if (ev.double_clicked && !row->is_folder && !row->missing) {
@@ -208,6 +232,7 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
                     (void)snprintf(s_sel_abs, sizeof s_sel_abs, "%s", row->abs);
                 }
                 s_ctx_kind = CTX_SPRITE;
+                s_ctx_atlas = s_sel_atlas;
                 s_ctx_src = row->src;
                 (void)snprintf(s_ctx_sprite, sizeof s_ctx_sprite, "%s", row->sprite_name);
                 s_ctx_leaf = leaf_row;
@@ -261,12 +286,14 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
 
 /* ANIMATIONS block (ux.md §2.1 region D, §3.7b): one row per animation (id + frame count), a per-row
  * [x] remove + right-click Rename/Remove/Preview, "+ Animation" to add. Double-click a row = preview. */
-static void declare_animations_list(nt_ui_context_t *ctx, tp_project_atlas *a) {
+static void declare_animations_list(nt_ui_context_t *ctx,
+                                    const tp_session_snapshot *snapshot,
+                                    const tp_snapshot_atlas *a) {
     CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(28))}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
         section_rule_label(ctx, "ANIMATIONS");
         CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}}) {}
         if (ui_icon_btn(ctx, nt_ui_id("ntpacker/add_anim"), &s_ic_plus, 16.0F, "Animation", &g_btn_ghost, true, 0.0F, 24.0F, &g_caption)) {
-            s_pending_add_anim = true;
+            gui_request_add_animation(s_sel_atlas);
         }
     }
     if (!a || a->animation_count == 0) {
@@ -275,6 +302,11 @@ static void declare_animations_list(nt_ui_context_t *ctx, tp_project_atlas *a) {
         return;
     }
     for (int i = 0; i < a->animation_count; i++) {
+        const tp_snapshot_animation *animation = tp_session_snapshot_animation_at(
+            snapshot, a->id, i);
+        if (!animation) {
+            continue;
+        }
         char idbuf[64];
         (void)snprintf(idbuf, sizeof idbuf, "ntpacker/anim_row_%d", i);
         const uint32_t row_id = nt_ui_id(idbuf);
@@ -284,11 +316,14 @@ static void declare_animations_list(nt_ui_context_t *ctx, tp_project_atlas *a) {
         const nt_ui_events_t ev = nt_ui_events(ctx, row_id, &s_dbl_cfg);
         const nt_ui_events_t xev = nt_ui_events(ctx, x_id, NULL);
         if (xev.clicked) {
-            s_pending_remove_anim = i;
+            gui_request_remove_animation(i);
         } else if (ev.double_clicked) {
             s_sel_anim = i;
             s_sel_anim_frame = -1;
-            s_pending_open_preview = true;
+            const gui_animation_ref preview = {
+                a->id, animation->id,
+                tp_session_snapshot_revision(snapshot)};
+            gui_request_open_preview(&preview);
         } else if (ev.clicked) {
             s_sel_anim = i;
             s_sel_anim_frame = -1;
@@ -316,12 +351,12 @@ static void declare_animations_list(nt_ui_context_t *ctx, tp_project_atlas *a) {
                         s_pending_commit_edit_enter = true; /* defer: never commit while holding `a` (F2-05b-i) */
                     }
                 } else {
-                    ui_label_fit(ctx, a->animations[i].name, selected ? &g_row_strong : &g_row,
+                    ui_label_fit(ctx, animation->name, selected ? &g_row_strong : &g_row,
                                  fmaxf(left_row_text_w(S(8.0F), true) - S(28.0F) - S(ROW_ICON_RESERVE), S(16.0F)), row_id);
                 }
             }
             char fc[16];
-            (void)snprintf(fc, sizeof fc, "%df", a->animations[i].frame_count);
+            (void)snprintf(fc, sizeof fc, "%df", animation->frame_count);
             nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), fc, &g_caption);
             record_row_tip(x_id, "Remove animation");
             (void)ui_icon_btn(ctx, x_id, &s_ic_x, 12.0F, NULL, &g_btn_ghost, true, 24.0F, 22.0F,
@@ -331,8 +366,10 @@ static void declare_animations_list(nt_ui_context_t *ctx, tp_project_atlas *a) {
 }
 
 void declare_left_panel(nt_ui_context_t *ctx) {
-    tp_project *proj = gui_project_get();
-    tp_project_atlas *a = tp_project_get_atlas(proj, s_sel_atlas);
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *a = snapshot
+                                     ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas)
+                                     : NULL;
     s_row_tip_count = 0; /* per-frame; filled by ui_label_fit when a row truncates */
     CLAY({.id = {.id = s_id_left_panel},
           .layout = {.sizing = {CLAY_SIZING_FIXED(s_left_panel_w), CLAY_SIZING_GROW(0)},
@@ -346,10 +383,10 @@ void declare_left_panel(nt_ui_context_t *ctx) {
            * window heights the animations hint wraps tall and would otherwise draw past the panel bottom.
            * The sprite vlist keeps its own inner scroll. */
           .clip = {.vertical = true}}) {
-        declare_atlas_list(ctx, proj);
+        declare_atlas_list(ctx, snapshot);
         CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(1))}}, .backgroundColor = C_BORDER}) {}
         declare_sprite_list(ctx);
         CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(1))}}, .backgroundColor = C_BORDER}) {}
-        declare_animations_list(ctx, a);
+        declare_animations_list(ctx, snapshot, a);
     }
 }

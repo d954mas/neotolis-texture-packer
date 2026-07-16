@@ -17,6 +17,7 @@
 #include <stdbool.h>
 
 #include "tp_core/tp_error.h"
+#include "tp_core/tp_id.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -26,6 +27,54 @@ struct tp_project;
 struct tp_pack_sprite_desc;
 struct tp_arena;
 struct tp_export_notices;
+struct tp_session_snapshot;
+typedef struct tp_export_snapshot_job tp_export_snapshot_job;
+typedef struct tp_export_report tp_export_report;
+
+typedef struct tp_export_snapshot_atlas_info {
+    tp_id128 atlas_id;
+    const char *name;
+    int source_count;
+    int enabled_target_count;
+} tp_export_snapshot_atlas_info;
+
+typedef struct tp_export_snapshot_job_opts {
+    const char *target_exporter_id; /* NULL keeps every enabled target */
+    const char *out_dir;            /* NULL preserves target paths; must be absolute */
+    bool dry_run;
+} tp_export_snapshot_job_opts;
+
+tp_status tp_export_snapshot_job_create(const struct tp_session_snapshot *snapshot,
+                                        const char *work_dir,
+                                        tp_export_snapshot_job **out,
+                                        tp_error *err);
+tp_status tp_export_snapshot_job_create_ex(const struct tp_session_snapshot *snapshot,
+                                           const char *work_dir,
+                                           const tp_export_snapshot_job_opts *opts,
+                                           tp_export_snapshot_job **out,
+                                           tp_error *err);
+void tp_export_snapshot_job_destroy(tp_export_snapshot_job *job);
+int tp_export_snapshot_job_atlas_count(const tp_export_snapshot_job *job);
+tp_status tp_export_snapshot_job_atlas_info(const tp_export_snapshot_job *job,
+                                            int atlas_index,
+                                            tp_export_snapshot_atlas_info *out,
+                                            tp_error *err);
+tp_status tp_export_snapshot_job_run_atlas(tp_export_snapshot_job *job,
+                                           int atlas_index,
+                                           struct tp_arena *arena,
+                                           struct tp_export_notices *notices,
+                                           int *out_pack_runs,
+                                           int *out_missing_sources,
+                                           tp_error *err);
+tp_status tp_export_snapshot_job_run_atlas_ex(tp_export_snapshot_job *job,
+                                              int atlas_index,
+                                              struct tp_arena *arena,
+                                              struct tp_export_notices *notices,
+                                              tp_export_report *report,
+                                              int *out_pack_runs,
+                                              int *out_sprite_count,
+                                              int *out_missing_sources,
+                                              tp_error *err);
 
 /* --- Structured export report (optional, produced by tp_export_run_ex) --------
  * The CLI build report (and, follow-up, GUI export stats) consume this instead of
@@ -79,14 +128,14 @@ typedef struct tp_export_report_target {
  * caller maps this to a pack failure rather than a per-target export failure).
  * `dry_run` mirrors the request: true when NO target files were written (each ok
  * target instead carries a `would_write` list + predicted-loss notices). */
-typedef struct tp_export_report {
+struct tp_export_report {
     tp_export_report_run *runs;
     int run_count;
     tp_export_report_target *targets;
     int target_count;
     bool pack_failed;
     bool dry_run;
-} tp_export_report;
+};
 
 /* Runs every enabled target of project->atlases[atlas_index] over `sprites`.
  *

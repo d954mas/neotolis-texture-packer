@@ -10,6 +10,7 @@
 
 #include "tp_core/tp_names.h" /* canonical key / natural order / common prefix (op layer) */
 
+#include <limits.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -68,7 +69,7 @@ void multi_sel_add(const char *name) {
     }
     if (s_multi_sel_count >= s_multi_sel_cap) {
         const int newcap = s_multi_sel_cap ? s_multi_sel_cap * 2 : MULTI_SEL_INIT_CAP;
-        char (*grown)[192] = realloc(s_multi_sel, (size_t)newcap * sizeof *s_multi_sel);
+        char (*grown)[TP_SCAN_REL_CAP] = realloc(s_multi_sel, (size_t)newcap * sizeof *s_multi_sel);
         if (!grown) {
             set_status_ex(STATUS_ERROR, "Out of memory: selection not fully updated.");
             return; /* keep old capacity + the entries already in it; loud, never silent */
@@ -100,7 +101,7 @@ int nat_cmp_qsort(const void *a, const void *b) { return tp_nat_cmp((const char 
 
 /* Shared scratch for the selection-gesture sort (heap; grows WITH the multi-select set so the sort
  * path can never truncate the selection -- P1 fix, step 7). */
-char (*s_sel_sort_buf)[192];
+char (*s_sel_sort_buf)[TP_SCAN_REL_CAP];
 const char **s_sel_sort_ptr;
 static int s_sel_sort_cap;
 
@@ -112,7 +113,7 @@ bool sel_sort_reserve(int n) {
     while (newcap < n) {
         newcap *= 2;
     }
-    char (*gb)[192] = realloc(s_sel_sort_buf, (size_t)newcap * sizeof *s_sel_sort_buf);
+    char (*gb)[TP_SCAN_REL_CAP] = realloc(s_sel_sort_buf, (size_t)newcap * sizeof *s_sel_sort_buf);
     if (!gb) {
         return false; /* keep old capacity (s_sel_sort_cap unchanged) */
     }
@@ -128,23 +129,137 @@ bool sel_sort_reserve(int n) {
 // #endregion
 
 // #region row model
+sprite_row *s_rows;
+int s_row_count;
+static int s_rows_cap;
+
+/* Cache-local transient lookup over the snapshot/project's sparse overrides.
+ * Slots borrow strings only while a rebuild is running; the row labels copy the
+ * required text. A later rebuild clears every slot before dereferencing it, so a
+ * clone-swap between generations cannot leave a live borrowed alias. */
+typedef struct override_slot {
+    const char *name;
+    const char *rename;
+} override_slot;
+
+static override_slot *s_override_index;
+static size_t s_override_index_cap;
+static bool s_row_cache_valid;
+static tp_id128 s_row_cache_atlas_id;
+static uint64_t s_row_cache_snapshot_generation;
+static uint64_t s_row_cache_source_generation;
+#if defined(NTPACKER_GUI_BENCH)
+static gui_rows_bench_counters s_bench_counters;
+#endif
+
+static uint64_t override_hash(const char *text) {
+    uint64_t hash = UINT64_C(1469598103934665603);
+    for (const unsigned char *p = (const unsigned char *)text; *p; ++p) {
+        hash ^= (uint64_t)*p;
+        hash *= UINT64_C(1099511628211);
+    }
+    return hash;
+}
+
+static bool override_index_reserve(int count) {
+    size_t needed = 8U;
+    if (count > 0) {
+        if ((size_t)count > (SIZE_MAX - 1U) / 2U) {
+            return false;
+        }
+        const size_t wanted = (size_t)count * 2U + 1U;
+        while (needed < wanted) {
+            if (needed > SIZE_MAX / 2U) {
+                return false;
+            }
+            needed *= 2U;
+        }
+    }
+    if (needed > s_override_index_cap) {
+        if (needed > SIZE_MAX / sizeof *s_override_index) {
+            return false;
+        }
+#if defined(NTPACKER_GUI_BENCH)
+        s_bench_counters.override_index_realloc_calls++;
+#endif
+        override_slot *grown = realloc(s_override_index, needed * sizeof *grown);
+        if (!grown) {
+            return false;
+        }
+        s_override_index = grown;
+        s_override_index_cap = needed;
+    }
+    memset(s_override_index, 0, s_override_index_cap * sizeof *s_override_index);
+    return true;
+}
+
+static bool override_index_build(const tp_session_snapshot *snapshot,
+                                 int atlas_index,
+                                 const tp_snapshot_atlas *atlas) {
+    if (!override_index_reserve(atlas->sprite_count)) {
+        return false;
+    }
+    const size_t mask = s_override_index_cap - 1U;
+    for (int i = 0; i < atlas->sprite_count; ++i) {
+        const tp_snapshot_sprite *sprite = tp_session_snapshot_sprite_at_index(
+            snapshot, atlas_index, i);
+        if (!sprite || !sprite->name || sprite->name[0] == '\0') {
+            continue;
+        }
+        size_t slot = (size_t)override_hash(sprite->name) & mask;
+        for (;;) {
+#if defined(NTPACKER_GUI_BENCH)
+            s_bench_counters.override_probes++;
+#endif
+            override_slot *entry = &s_override_index[slot];
+            if (!entry->name) {
+                entry->name = sprite->name;
+                entry->rename = sprite->rename;
+#if defined(NTPACKER_GUI_BENCH)
+                s_bench_counters.override_inserts++;
+#endif
+                break;
+            }
+            if (strcmp(entry->name, sprite->name) == 0) {
+                break;
+            }
+            slot = (slot + 1U) & mask;
+        }
+    }
+    return true;
+}
+
+static const char *override_rename(const char *sprite_name) {
+#if defined(NTPACKER_GUI_BENCH)
+    s_bench_counters.override_lookup_calls++;
+#endif
+    const size_t mask = s_override_index_cap - 1U;
+    size_t slot = (size_t)override_hash(sprite_name) & mask;
+    for (;;) {
+#if defined(NTPACKER_GUI_BENCH)
+        s_bench_counters.override_probes++;
+#endif
+        const override_slot *entry = &s_override_index[slot];
+        if (!entry->name) {
+            return NULL;
+        }
+        if (strcmp(entry->name, sprite_name) == 0) {
+            return entry->rename;
+        }
+        slot = (slot + 1U) & mask;
+    }
+}
+
 /* Rename-aware display label: a renamed sprite shows "final (file.png)" so the mapping
  * stays visible; otherwise the file-derived base label. */
-static void row_display(tp_project_atlas *a, const char *sprite_name, const char *base_label, const char *paren, char *out, size_t cap) {
-    const tp_project_sprite *ov = tp_project_atlas_find_sprite(a, sprite_name);
-    if (ov && ov->rename) {
-        (void)snprintf(out, cap, "%s (%s)", ov->rename, paren);
+static void row_display(const char *sprite_name, const char *base_label, const char *paren, char *out, size_t cap) {
+    const char *rename = override_rename(sprite_name);
+    if (rename) {
+        (void)snprintf(out, cap, "%s (%s)", rename, paren);
     } else {
         (void)snprintf(out, cap, "%s", base_label);
     }
 }
-
-sprite_row *s_rows;
-int s_row_count;
-static int s_rows_cap;
-#if defined(NTPACKER_GUI_BENCH)
-static uint64_t s_bench_row_realloc_calls;
-#endif
 
 /* Appends one zero-uninitialized row slot and returns it (caller memsets), growing s_rows on a new
  * high-water mark. Returns NULL on OOM (old capacity kept) -- build_rows then stops + raises status.
@@ -154,7 +269,7 @@ static sprite_row *rows_push(void) {
     if (s_row_count >= s_rows_cap) {
         const int newcap = s_rows_cap ? s_rows_cap * 2 : ROWS_INIT_CAP;
 #if defined(NTPACKER_GUI_BENCH)
-        s_bench_row_realloc_calls++;
+        s_bench_counters.row_realloc_calls++;
 #endif
         sprite_row *grown = realloc(s_rows, (size_t)newcap * sizeof *s_rows);
         if (!grown) {
@@ -166,15 +281,50 @@ static sprite_row *rows_push(void) {
     return &s_rows[s_row_count++];
 }
 
-void build_rows(tp_project *proj, tp_project_atlas *a) {
+void build_rows(void) {
+#if defined(NTPACKER_GUI_BENCH)
+    s_bench_counters.cache_key_checks++;
+#endif
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *a = snapshot
+                                     ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas)
+                                     : NULL;
+    const uint64_t snapshot_generation =
+        tp_session_snapshot_model_generation(snapshot);
+    const uint64_t source_generation =
+        tp_session_snapshot_source_generation(snapshot);
+    if (a && s_row_cache_valid && tp_id128_eq(s_row_cache_atlas_id, a->id) &&
+        s_row_cache_snapshot_generation == snapshot_generation &&
+        s_row_cache_source_generation == source_generation) {
+        return;
+    }
+    s_row_cache_valid = false;
     s_row_count = 0;
     if (!a) {
         return;
     }
-    for (int si = 0; si < a->source_count; si++) {
-        const char *sp = a->sources[si].path;
+#if defined(NTPACKER_GUI_BENCH)
+    s_bench_counters.rebuilds++;
+#endif
+    if (!override_index_build(snapshot, s_sel_atlas, a)) {
+        set_status_ex(STATUS_ERROR, "Out of memory: sprite override index unavailable.");
+        return;
+    }
+    for (int si = 0; si < a->source_count; ++si) {
+#if defined(NTPACKER_GUI_BENCH)
+        s_bench_counters.source_iterations++;
+        s_bench_counters.path_resolve_calls++;
+#endif
+        const tp_snapshot_source *source = NULL;
         char abs[512];
-        if (tp_project_resolve_path(proj, sp, abs, sizeof abs) != TP_STATUS_OK) {
+        tp_error error = {0};
+        const tp_status path_status = tp_session_snapshot_source_resolved_at(
+            snapshot, s_sel_atlas, si, &source, abs, sizeof abs, &error);
+        if (!source) {
+            continue;
+        }
+        const char *sp = source->path;
+        if (path_status != TP_STATUS_OK) {
             abs[0] = '\0';
         }
         const bool exists = gui_scan_exists(abs);
@@ -189,20 +339,18 @@ void build_rows(tp_project *proj, tp_project_atlas *a) {
         r->child = -1;
         r->is_source = true;
         r->is_folder = is_dir;
-        r->indent = 0;
-        if (!exists) { /* missing source: row stays, warning badge, selectable (§3.7) */
+        if (!exists) {
             r->missing = true;
-            (void)snprintf(r->label, sizeof r->label, "\xE2\x9A\xA0 %s", path_last(sp)); /* U+26A0 warning */
+            (void)snprintf(r->label, sizeof r->label, "\xE2\x9A\xA0 %s", path_last(sp));
             (void)snprintf(r->abs, sizeof r->abs, "%s", abs);
         } else if (is_dir) {
             const gui_scan_result *sc = gui_scan_get(abs);
-            /* Smart-folder row: name + a child-count suffix (TexturePacker convention -- "animals/ · 60")
-             * so the count of packed assets is visible at a glance without expanding. `r` is fully
-             * written HERE, before the child loop -- a rows_push() below may realloc-move s_rows and
-             * invalidate `r`, but it is never dereferenced again. */
-            (void)snprintf(r->label, sizeof r->label, "%s/  \xC2\xB7  %d", path_last(sp), sc->count);
-            r->abs[0] = '\0';
-            for (int ci = 0; ci < sc->count; ci++) {
+            (void)snprintf(r->label, sizeof r->label, "%s/  \xC2\xB7  %d",
+                           path_last(sp), sc->count);
+            for (int ci = 0; ci < sc->count; ++ci) {
+#if defined(NTPACKER_GUI_BENCH)
+                s_bench_counters.child_iterations++;
+#endif
                 sprite_row *cr = rows_push();
                 if (!cr) {
                     set_status_ex(STATUS_ERROR, "Out of memory: sprite list truncated.");
@@ -211,50 +359,73 @@ void build_rows(tp_project *proj, tp_project_atlas *a) {
                 memset(cr, 0, sizeof *cr);
                 cr->src = si;
                 cr->child = ci;
-                cr->is_source = false;
                 cr->indent = 1;
-                tp_sprite_export_key(sc->entries[ci].rel, cr->sprite_name, sizeof cr->sprite_name);
-                row_display(a, cr->sprite_name, sc->entries[ci].rel, path_last(sc->entries[ci].rel), cr->label, sizeof cr->label);
+                cr->source_id = source->id;
+                (void)snprintf(cr->source_key, sizeof cr->source_key, "%s", sc->entries[ci].rel);
+                tp_sprite_export_key(sc->entries[ci].rel, cr->sprite_name,
+                                     sizeof cr->sprite_name);
+                row_display(cr->sprite_name, sc->entries[ci].rel,
+                            path_last(sc->entries[ci].rel), cr->label,
+                            sizeof cr->label);
                 (void)snprintf(cr->abs, sizeof cr->abs, "%s", sc->entries[ci].abs);
             }
-        } else { /* file source: a leaf sprite -- strip the folder (path_last) THEN key */
+        } else {
+            r->source_id = source->id;
+            (void)snprintf(r->source_key, sizeof r->source_key, "%s", path_last(sp));
             tp_sprite_export_key(path_last(sp), r->sprite_name, sizeof r->sprite_name);
-            row_display(a, r->sprite_name, r->sprite_name, path_last(sp), r->label, sizeof r->label);
+            row_display(r->sprite_name, r->sprite_name, path_last(sp), r->label,
+                        sizeof r->label);
             (void)snprintf(r->abs, sizeof r->abs, "%s", abs);
         }
     }
+    s_row_cache_atlas_id = a->id;
+    s_row_cache_snapshot_generation = snapshot_generation;
+    s_row_cache_source_generation = source_generation;
+    s_row_cache_valid = true;
 }
 
 #if defined(NTPACKER_GUI_BENCH)
-void gui_rows_bench_reset_counters(void) { s_bench_row_realloc_calls = 0U; }
+void gui_rows_bench_reset_counters(void) {
+    const int row_capacity = s_rows_cap;
+    const int override_capacity = s_override_index_cap > (size_t)INT_MAX ? INT_MAX : (int)s_override_index_cap;
+    memset(&s_bench_counters, 0, sizeof s_bench_counters);
+    s_bench_counters.row_capacity = row_capacity;
+    s_bench_counters.override_index_capacity = override_capacity;
+}
 
 gui_rows_bench_counters gui_rows_bench_get_counters(void) {
-    gui_rows_bench_counters out = {s_bench_row_realloc_calls, s_rows_cap};
+    gui_rows_bench_counters out = s_bench_counters;
+    out.row_capacity = s_rows_cap;
+    out.override_index_capacity = s_override_index_cap > (size_t)INT_MAX ? INT_MAX : (int)s_override_index_cap;
     return out;
 }
 
 void gui_rows_bench_shutdown(void) {
     free(s_rows);
+    free(s_override_index);
     s_rows = NULL;
+    s_override_index = NULL;
     s_row_count = 0;
     s_rows_cap = 0;
-    s_bench_row_realloc_calls = 0U;
+    s_override_index_cap = 0U;
+    s_row_cache_valid = false;
+    memset(&s_bench_counters, 0, sizeof s_bench_counters);
 }
 #endif
 // #endregion
 
 // #region canvas region -> row selection sync
-/* Selects the sprite-tree row matching a canvas region (region -> row selection sync). The region's
- * raw name stripped of its extension == the row's override key. */
+/* Selects the sprite-tree row matching a canvas region by canonical source/key. */
 void select_row_for_region(int region_idx) {
     const tp_result *r = gui_pack_result(s_sel_atlas);
     if (!r || region_idx < 0 || region_idx >= r->sprite_count) {
         return;
     }
-    char key[192];
-    tp_sprite_export_key(r->sprites[region_idx].name, key, sizeof key);
     for (int i = 0; i < s_row_count; i++) {
-        if (!s_rows[i].is_folder && s_rows[i].sprite_name[0] != '\0' && strcmp(s_rows[i].sprite_name, key) == 0) {
+        if (!s_rows[i].is_folder && s_rows[i].source_key[0] != '\0' &&
+            gui_pack_sprite_matches_ref(s_sel_atlas, region_idx,
+                                        s_rows[i].source_id,
+                                        s_rows[i].source_key)) {
             s_sel_src = s_rows[i].src;
             s_sel_child = s_rows[i].child;
             s_sel_missing = false;

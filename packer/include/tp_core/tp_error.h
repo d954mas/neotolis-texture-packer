@@ -102,7 +102,9 @@ typedef enum tp_status {
     TP_STATUS_FILE_CHANGED_EXTERNALLY, /* saved project bytes differ from the persisted session fingerprint */
     TP_STATUS_RECOVERY_CLEANUP_FAILED, /* recovered output is safe, but its orphan journal could not be removed */
     TP_STATUS_RECOVERY_BUSY,           /* another process claimed this recovery journal */
-    TP_STATUS_RECOVERY_CLAIM_FAILED    /* recovery journal lock could not be created/acquired for a storage reason */
+    TP_STATUS_RECOVERY_CLAIM_FAILED,   /* recovery journal lock could not be created/acquired for a storage reason */
+    TP_STATUS_PROJECT_LIVE,            /* canonical project identity is leased by another writer */
+    TP_STATUS_UNSUPPORTED_CAPABILITY   /* the selected client has no authority/surface for this capability */
 } tp_status;
 
 /* Fixed-size message buffer -- no heap, safe to embed by value on the stack. */
@@ -173,6 +175,8 @@ static inline const char *tp_status_str(tp_status status) {
         case TP_STATUS_RECOVERY_CLEANUP_FAILED: return "recovery cleanup failed";
         case TP_STATUS_RECOVERY_BUSY: return "recovery journal is busy";
         case TP_STATUS_RECOVERY_CLAIM_FAILED: return "recovery journal claim failed";
+        case TP_STATUS_PROJECT_LIVE: return "project is live in another writer";
+        case TP_STATUS_UNSUPPORTED_CAPABILITY: return "unsupported client capability";
     }
     return "unknown status";
 }
@@ -221,6 +225,8 @@ static inline const char *tp_status_id(tp_status status) {
         case TP_STATUS_RECOVERY_CLEANUP_FAILED: return "recovery_cleanup_failed";
         case TP_STATUS_RECOVERY_BUSY: return "recovery_busy";
         case TP_STATUS_RECOVERY_CLAIM_FAILED: return "recovery_claim_failed";
+        case TP_STATUS_PROJECT_LIVE: return "project_live";
+        case TP_STATUS_UNSUPPORTED_CAPABILITY: return "unsupported_capability";
     }
     return "unknown_status";
 }

@@ -11,18 +11,30 @@
  * (tp_scan/tp_names/tp_project + the tp_pack.h desc struct) -- no builder. */
 
 #include "tp_core/tp_error.h"
+#include "tp_core/tp_id.h"
 #include "tp_core/tp_pack.h" /* tp_pack_sprite_desc */
+#include "tp_core/tp_srckey.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 struct tp_project;
+struct tp_session_snapshot;
 
-/* Assembled pack input for one atlas. `descs` and each `descs[i].name`/`.path`
- * are malloc-owned (free with tp_pack_input_free), independent of the project --
- * the input outlives a tp_project_destroy. `missing_sources` counts sources that
- * resolved but do not exist on disk (skipped, not fatal -- ux.md §3.7). */
+/* Collision-free internal packed name. This is the single owner of the
+ * source-id/key encoding consumed by pack-result canonical lookups. */
+#define TP_PACK_INTERNAL_NAME_CAP (TP_ID_TEXT_CAP + TP_SRCKEY_MAX)
+tp_status tp_pack_input_format_sprite_name(tp_id128 source_id,
+                                           const char *source_key,
+                                           char *out, size_t capacity,
+                                           tp_error *err);
+
+/* Assembled pack input for one atlas. `descs` and each descriptor's `name`,
+ * `path`, `source_key`, and `logical_name` are malloc-owned (free with
+ * tp_pack_input_free), independent of the project -- the input outlives a
+ * tp_project_destroy. `missing_sources` counts sources that resolved but do not
+ * exist on disk (skipped, not fatal -- ux.md §3.7). */
 typedef struct tp_pack_input {
     tp_pack_sprite_desc *descs;
     int count;
@@ -42,7 +54,17 @@ typedef struct tp_pack_input {
  * On any error *out is left empty (except a NULL `out`, which is untouched). */
 tp_status tp_pack_input_build(const struct tp_project *p, int atlas_index, tp_pack_input *out, tp_error *err);
 
-/* Frees the descs (each name/path + the array) and zeroes *out. NULL-safe. */
+/* Frontend-safe pack admission: resolves a stable atlas ID inside an immutable
+ * session snapshot and returns only the typed, caller-owned pack input. */
+tp_status tp_pack_input_build_snapshot(const struct tp_session_snapshot *snapshot,
+                                       tp_id128 atlas_id, tp_pack_input *out,
+                                       tp_error *err);
+tp_status tp_pack_settings_build_snapshot(const struct tp_session_snapshot *snapshot,
+                                          tp_id128 atlas_id,
+                                          tp_pack_settings *out,
+                                          tp_error *err);
+
+/* Frees every owned descriptor string plus the array and zeroes *out. NULL-safe. */
 void tp_pack_input_free(tp_pack_input *out);
 
 #ifdef __cplusplus

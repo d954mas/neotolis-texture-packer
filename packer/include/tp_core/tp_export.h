@@ -18,7 +18,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "tp_core/tp_id.h"
+
 #include "tp_core/tp_error.h"
+#include "tp_core/tp_id.h"
 #include "tp_core/tp_model.h"
 #include "tp_core/tp_pack.h"
 
@@ -28,6 +31,7 @@ extern "C" {
 
 struct tp_arena;
 struct tp_project;
+struct tp_session_snapshot;
 
 /* Stable exporter id for the full-fidelity reference target. Frontends seed and
  * reference targets through this constant, never a bare string literal (review
@@ -118,15 +122,26 @@ typedef struct tp_export_name_override {
 /* One explicit animation from the project (SUMMARY.md §5a). Frames are FINAL
  * export names in explicit playback order. Animations are assembled EXPLICITLY
  * (docs/design/ux.md 3.7b) -- there is no numeric-suffix auto-grouping. */
+typedef struct tp_export_frame_ref {
+    tp_id128 source_id;
+    const char *source_key;
+} tp_export_frame_ref;
+
 typedef struct tp_export_anim_in {
     const char *id;
-    const char *const *frames;
+    const tp_export_frame_ref *frames;
     int frame_count;
     float fps;
     int playback;
     bool flip_h;
     bool flip_v;
 } tp_export_anim_in;
+
+typedef struct tp_export_sprite_ref_in {
+    const char *raw_name;
+    tp_id128 source_id;
+    const char *source_key;
+} tp_export_sprite_ref_in;
 
 /* Options for tp_normalize. NULL is equivalent to tp_normalize_opts_defaults. */
 typedef struct tp_normalize_opts {
@@ -141,6 +156,8 @@ typedef struct tp_normalize_opts {
     /* Explicit project animations (assembled verbatim; no auto-grouping). */
     const tp_export_anim_in *animations;
     int animation_count;
+    const tp_export_sprite_ref_in *sprite_refs;
+    int sprite_ref_count;
 } tp_normalize_opts;
 
 /* Seeds `out` with the documented defaults. */
@@ -226,6 +243,13 @@ bool tp_export_settings_equal(const tp_pack_settings *a, const tp_pack_settings 
 tp_status tp_export_predict_loss(const struct tp_project *project, int atlas_index, const tp_export_caps *caps,
                                  const char *target_id, const tp_export_prepared *opt_prep, tp_export_notices *out,
                                  tp_error *err);
+tp_status tp_export_predict_loss_snapshot(const struct tp_session_snapshot *snapshot,
+                                          tp_id128 atlas_id,
+                                          const tp_export_caps *caps,
+                                          const char *target_id,
+                                          const tp_export_prepared *opt_prep,
+                                          tp_export_notices *out,
+                                          tp_error *err);
 
 /* ------------------------------------------------------------------ */
 /* Page PNG writer (shared helper used by every exporter).              */

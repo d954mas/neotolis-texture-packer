@@ -18,9 +18,23 @@
 #include "tp_core/tp_id.h"
 #include "tp_txn_json.h"
 
-/* Read the frames[] string array into a fresh char** (each entry duped). absent ->
- * (NULL, 0). A non-array or non-string element -> structured fault. */
-static tp_status lower_frames(const cJSON *oj, char ***out_frames, int *out_n, tp_error *err) {
+static tp_status lower_frame_ref(const cJSON *value, tp_op_sprite_ref *out,
+                                 tp_error *err) {
+    if (!cJSON_IsObject(value)) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "frame must be a {source_id, src_key} object");
+    }
+    tp_status status = j_opt_shape_id(value, "source_id", TP_ID_KIND_SOURCE,
+                                      &out->source_id, err);
+    if (status != TP_STATUS_OK) {
+        return status;
+    }
+    return j_opt_dup(value, "src_key", &out->src_key, err);
+}
+
+/* Read canonical frames[] objects into a fresh array. */
+static tp_status lower_frames(const cJSON *oj, tp_op_sprite_ref **out_frames,
+                              int *out_n, tp_error *err) {
     *out_frames = NULL;
     *out_n = 0;
     const cJSON *arr = cJSON_GetObjectItemCaseSensitive(oj, "frames");
@@ -34,29 +48,21 @@ static tp_status lower_frames(const cJSON *oj, char ***out_frames, int *out_n, t
     if (n == 0) {
         return TP_STATUS_OK;
     }
-    char **frames = (char **)calloc((size_t)n, sizeof(char *));
+    tp_op_sprite_ref *frames = (tp_op_sprite_ref *)calloc((size_t)n,
+                                                          sizeof *frames);
     if (!frames) {
         return tp_error_set(err, TP_STATUS_OOM, "frames alloc");
     }
     for (int i = 0; i < n; i++) {
         const cJSON *el = cJSON_GetArrayItem(arr, i);
-        if (!cJSON_IsString(el)) {
+        tp_status status = lower_frame_ref(el, &frames[i], err);
+        if (status != TP_STATUS_OK) {
             for (int j = 0; j < i; j++) {
-                free(frames[j]);
+                free(frames[j].src_key);
             }
             free(frames);
-            return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "frame %d is not a string", i);
+            return status;
         }
-        size_t len = strlen(el->valuestring) + 1U;
-        frames[i] = (char *)malloc(len);
-        if (!frames[i]) {
-            for (int j = 0; j < i; j++) {
-                free(frames[j]);
-            }
-            free(frames);
-            return tp_error_set(err, TP_STATUS_OOM, "frame dup");
-        }
-        memcpy(frames[i], el->valuestring, len);
     }
     *out_frames = frames;
     *out_n = n;
@@ -135,24 +141,6 @@ static tp_status lower_atlas_settings(const cJSON *oj, tp_op_atlas_settings *s, 
     return TP_STATUS_OK;
 }
 
-/* Optional int16 override field: range-checked int (j_opt_int) THEN bounded to the
- * int16 storage range BEFORE the narrowing cast. Without this bound a client value
- * like ov_margin:65535 wraps to -1 (== TP_PROJECT_OV_INHERIT), validate skips it, and
- * apply COMMITS with the override silently dropped (65536->0, 65537->1). absent ->
- * present=false, *out untouched. */
-static tp_status opt_i16(const cJSON *oj, const char *key, int16_t *out, bool *present, tp_error *err) {
-    int v = 0;
-    tp_status st = j_opt_int(oj, key, &v, present, err);
-    if (st != TP_STATUS_OK || !*present) {
-        return st;
-    }
-    if (v < INT16_MIN || v > INT16_MAX) {
-        return tp_error_set(err, TP_STATUS_OUT_OF_RANGE, "%s = %d must be in [%d..%d]", key, v, INT16_MIN, INT16_MAX);
-    }
-    *out = (int16_t)v;
-    return TP_STATUS_OK;
-}
-
 static tp_status lower_sprite_set(const cJSON *oj, tp_op_sprite_set *s, tp_error *err) {
     tp_status st;
     bool pr = false;
@@ -168,21 +156,18 @@ static tp_status lower_sprite_set(const cJSON *oj, tp_op_sprite_set *s, tp_error
         if (pr) {
             any9 = true;
         }
-        if (v < 0 || v > 65535) {
-            return tp_error_set(err, TP_STATUS_OUT_OF_RANGE, "%s = %d must be in [0..65535]", k9[i], v);
-        }
-        s->slice9[i] = (uint16_t)v;
+        s->slice9[i] = v;
     }
     if (any9) s->mask |= TP_SPF_SLICE9;
-    if ((st = opt_i16(oj, "ov_shape", &s->ov_shape, &pr, err)) != TP_STATUS_OK) return st;
+    if ((st = j_opt_int(oj, "ov_shape", &s->ov_shape, &pr, err)) != TP_STATUS_OK) return st;
     if (pr) s->mask |= TP_SPF_SHAPE;
-    if ((st = opt_i16(oj, "ov_allow_rotate", &s->ov_allow_rotate, &pr, err)) != TP_STATUS_OK) return st;
+    if ((st = j_opt_int(oj, "ov_allow_rotate", &s->ov_allow_rotate, &pr, err)) != TP_STATUS_OK) return st;
     if (pr) s->mask |= TP_SPF_ALLOW_ROTATE;
-    if ((st = opt_i16(oj, "ov_max_vertices", &s->ov_max_vertices, &pr, err)) != TP_STATUS_OK) return st;
+    if ((st = j_opt_int(oj, "ov_max_vertices", &s->ov_max_vertices, &pr, err)) != TP_STATUS_OK) return st;
     if (pr) s->mask |= TP_SPF_MAX_VERTICES;
-    if ((st = opt_i16(oj, "ov_margin", &s->ov_margin, &pr, err)) != TP_STATUS_OK) return st;
+    if ((st = j_opt_int(oj, "ov_margin", &s->ov_margin, &pr, err)) != TP_STATUS_OK) return st;
     if (pr) s->mask |= TP_SPF_MARGIN;
-    if ((st = opt_i16(oj, "ov_extrude", &s->ov_extrude, &pr, err)) != TP_STATUS_OK) return st;
+    if ((st = j_opt_int(oj, "ov_extrude", &s->ov_extrude, &pr, err)) != TP_STATUS_OK) return st;
     if (pr) s->mask |= TP_SPF_EXTRUDE;
     return TP_STATUS_OK;
 }
@@ -285,7 +270,8 @@ tp_status tp_txn__lower_op(const cJSON *oj, tp_operation *out, tp_error *err) {
         case TP_OP_ANIMATION_FRAME_ADD: {
             bool pr = false;
             TRY(j_opt_shape_id(oj, "anim_id", TP_ID_KIND_ANIM, &out->u.anim_frame_add.anim_id, err));
-            TRY(j_opt_dup(oj, "frame", &out->u.anim_frame_add.frame, err));
+            const cJSON *frame = cJSON_GetObjectItemCaseSensitive(oj, "frame");
+            TRY(lower_frame_ref(frame, &out->u.anim_frame_add.frame, err));
             out->u.anim_frame_add.index = -1; /* default append */
             TRY(j_opt_int(oj, "index", &out->u.anim_frame_add.index, &pr, err));
             break;

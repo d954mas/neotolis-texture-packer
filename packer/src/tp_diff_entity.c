@@ -32,15 +32,44 @@
 #include "tp_diff_internal.h"
 
 /* ---- allocation fault seam (test-only; default disabled) ------------------ */
-static int s_fail = -1;  /* countdown; -1 disabled. Fires exactly once. */
-static int s_count = 0;  /* allocations since the last reset */
+static _Thread_local int s_fail = -1; /* countdown; -1 disabled. Fires once. */
+static _Thread_local int s_count = 0; /* allocations since the last reset */
+static _Thread_local bool s_record_budget_active = false;
+static _Thread_local bool s_record_budget_exceeded = false;
+static _Thread_local size_t s_record_budget_limit = 0U;
+static _Thread_local size_t s_record_budget_bytes = 0U;
 
 void tp_diff__test_set_alloc_fail(int nth) { s_fail = nth; }
 int tp_diff__test_alloc_count(void) { return s_count; }
 void tp_diff__test_reset_alloc_count(void) { s_count = 0; }
 
+void tp_diff__record_budget_begin(size_t byte_limit) {
+    s_record_budget_active = true;
+    s_record_budget_exceeded = false;
+    s_record_budget_limit = byte_limit;
+    s_record_budget_bytes = 0U;
+}
+
+bool tp_diff__record_budget_exceeded(void) { return s_record_budget_active && s_record_budget_exceeded; }
+
+bool tp_diff__record_budget_end(size_t *bytes) {
+    const bool ok = s_record_budget_active && !s_record_budget_exceeded;
+    if (bytes) {
+        *bytes = ok ? s_record_budget_bytes : 0U;
+    }
+    s_record_budget_active = false;
+    s_record_budget_exceeded = false;
+    s_record_budget_limit = 0U;
+    s_record_budget_bytes = 0U;
+    return ok;
+}
+
 void *tp_diff__alloc(size_t n) {
     s_count++;
+    if (s_record_budget_active && n > s_record_budget_limit - s_record_budget_bytes) {
+        s_record_budget_exceeded = true;
+        return NULL;
+    }
     if (s_fail == 0) {
         s_fail = -1;
         return NULL;
@@ -48,7 +77,11 @@ void *tp_diff__alloc(size_t n) {
     if (s_fail > 0) {
         s_fail--;
     }
-    return calloc(1, n);
+    void *p = calloc(1, n);
+    if (p && s_record_budget_active) {
+        s_record_budget_bytes += n;
+    }
+    return p;
 }
 
 char *tp_diff__dup(const char *s, bool *ok) {

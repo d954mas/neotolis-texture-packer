@@ -46,6 +46,19 @@ extern "C" {
 /* Current transaction JSON schema version -- the only version this build accepts. */
 #define TP_TXN_SCHEMA 1
 
+/* M3 resource-admission bounds. The wire-byte limit is independent of the 64 MiB
+ * journal/checkpoint cap: a transaction request is admitted before cJSON builds a
+ * tree, while a checkpoint may legitimately contain the canonical 17+ MiB HUGE
+ * project fixture. `TP_TXN_MAX_REQUEST_BYTES` counts JSON bytes, excluding an
+ * optional trailing NUL. The operation count is checked before lowering allocates
+ * the typed operation array and before the model clone/apply path begins. */
+#define TP_TXN_MAX_REQUEST_BYTES (1U * 1024U * 1024U)
+#define TP_TXN_MAX_OPS 4096
+
+/* A committed transaction ID remains duplicate-protected while it is one of
+ * the newest IDs in this deterministic FIFO retention window. */
+#define TP_TXN_RETAINED_ID_CAP 4096
+
 /* ---- idempotency retention store (pluggable interface, task 6) ------------ *
  * The transaction-id retention set is an INTERFACE so F2-04's on-disk journal can
  * back it later; F2-02 ships an in-memory default. Keys are the 32-lowercase-hex
@@ -61,9 +74,9 @@ typedef struct tp_txn_idstore {
     void (*destroy)(void *ctx); /* frees ctx; may be NULL for a borrowed store */
 } tp_txn_idstore;
 
-/* The in-memory default retention store (a growable hex-id set). Returns a store
- * whose ctx it owns; free the whole thing with the store's destroy hook (or via
- * tp_model_destroy when embedded in a model). NULL on OOM. */
+/* The in-memory default retention store uses the bounded binary window above.
+ * Its fixed backing arrays are allocated at creation; record/lookup/eviction do
+ * not allocate. Free it through the destroy hook or tp_model_destroy. */
 tp_txn_idstore *tp_txn_idstore_memory_create(void);
 
 /* Forward: the F2-03 in-memory undo/redo history (opaque here; tp_diff.h +
@@ -154,7 +167,7 @@ typedef struct tp_txn_request {
     int64_t expected_revision;
     char *label;               /* NULL when absent (sparse) */
     char *author;              /* NULL when absent (sparse) */
-    tp_operation *ops;         /* dynamic; NO fixed cap (large batches allowed, §7) */
+    tp_operation *ops;         /* dynamic; admitted up to TP_TXN_MAX_OPS */
     int op_count;
 } tp_txn_request;
 
@@ -191,6 +204,7 @@ typedef struct tp_txn_result {
     int schema;
     char transaction_id[33];
     bool committed;
+    bool no_change;            /* accepted semantic no-op; no revision/history/journal */
     int64_t revision;          /* new if committed; unchanged if rejected */
     tp_txn_result_op *ops;     /* committed: echoed ops (dynamic) */
     int op_count;
@@ -324,6 +338,13 @@ tp_status tp_model_recover(tp_journal_io io, tp_id128 key, tp_model **out, tp_jo
  * *out = NULL, and fills `err`. */
 tp_status tp_txn_request_decode(const char *json, tp_txn_request **out, tp_error *err);
 
+/* Length-aware request decode for untrusted/buffered input. `json[0..json_len)`
+ * need not be NUL-terminated. Rejects more than TP_TXN_MAX_REQUEST_BYTES before
+ * invoking cJSON and rejects more than TP_TXN_MAX_OPS before lowering/materializing
+ * the typed operation array. The legacy C-string entry point above applies the
+ * same limits and delegates here. */
+tp_status tp_txn_request_decode_n(const char *json, size_t json_len, tp_txn_request **out, tp_error *err);
+
 /* Canonical byte-stable encode of a typed request. Returns a heap NUL-terminated
  * string (caller frees), or NULL on OOM / an INVALID-kind op. */
 char *tp_txn_request_encode(const tp_txn_request *req);
@@ -338,6 +359,13 @@ char *tp_txn_result_encode(const tp_txn_result *res);
  * -> atomic apply. Fills `*out` (committed or rejected; free with tp_txn_result_free)
  * and mutates the model atomically on commit. Returns the apply status. */
 tp_status tp_model_apply_json(tp_model *m, const char *json, tp_txn_result *out, tp_error *err);
+
+/* Length-aware twin of tp_model_apply_json. Applies the same pre-materialization
+ * byte/op limits as tp_txn_request_decode_n; over-limit input leaves model state,
+ * revision, history and idempotency state unchanged and returns a structured
+ * TP_STATUS_OUT_OF_BOUNDS result. */
+tp_status tp_model_apply_json_n(tp_model *m, const char *json, size_t json_len,
+                                tp_txn_result *out, tp_error *err);
 
 #ifdef __cplusplus
 }

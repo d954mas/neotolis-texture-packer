@@ -26,9 +26,9 @@ void tp_sprite_export_key(const char *raw, char *out, size_t cap);
 int tp_nat_cmp(const char *a, const char *b);
 
 /* Longest common prefix of `names`, trimmed of trailing digits/separators so
- * walk_01/walk_02 -> "walk". Writes "" when there is none. The char[][192]
- * stride mirrors the GUI selection-sort buffer that feeds it. */
-void tp_names_common_prefix(char names[][192], int count, char *out, size_t cap);
+ * walk_01/walk_02 -> "walk". Writes "" when there is none. */
+void tp_names_common_prefix(const char *const *names, int count, char *out,
+                            size_t cap);
 
 #ifdef __cplusplus
 }

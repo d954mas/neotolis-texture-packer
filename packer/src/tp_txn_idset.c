@@ -6,11 +6,9 @@
  * apply core. Only COMMITTED ids are ever recorded, so idempotency blocks exactly
  * the retries of applied transactions.
  *
- * The set itself is the shared tp_idset (tp_idset_internal.h) -- the SAME primitive
- * the journal's retained-id index uses, so the membership + growth logic lives in one
- * place. `record` is transactional: tp_idset_add grows first and only appends on
- * success, so an OOM leaves the set unchanged and the caller discards the transaction's
- * clone -- the model stays byte-unchanged.
+ * The set itself is the shared bounded binary tp_idset -- the SAME primitive the
+ * journal rebuilds during recovery. Its fixed arrays are allocated with the model,
+ * then every lookup/record/eviction is allocation-free.
  */
 
 #include "tp_core/tp_transaction.h"
@@ -24,7 +22,7 @@ static bool mem_contains(void *ctx, const char *id_hex) { return tp_idset_contai
 static tp_status mem_record(void *ctx, const char *id_hex, tp_error *err) {
     tp_status st = tp_idset_add((tp_idset *)ctx, id_hex);
     if (st != TP_STATUS_OK) {
-        return tp_error_set(err, st, "idempotency set grow failed");
+        return tp_error_set(err, st, "idempotency retention insert failed");
     }
     return TP_STATUS_OK;
 }
@@ -49,6 +47,11 @@ tp_txn_idstore *tp_txn_idstore_memory_create(void) {
     tp_txn_idstore *store = (tp_txn_idstore *)calloc(1, sizeof *store);
     tp_idset *s = (tp_idset *)calloc(1, sizeof *s);
     if (!store || !s) {
+        free(store);
+        free(s);
+        return NULL;
+    }
+    if (tp_idset_reserve(s) != TP_STATUS_OK) {
         free(store);
         free(s);
         return NULL;

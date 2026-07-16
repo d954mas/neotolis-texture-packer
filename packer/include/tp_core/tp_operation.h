@@ -185,15 +185,15 @@ typedef struct tp_op_source_ref {  /* source.remove / .replace address by source
 
 /* Sprite ops address by CANONICAL identity {source_id, src_key} (§5.2/§5.4); the
  * derived sprite_id = tp_sprite_id(source_id, src_key) is emitted for reference.
- * atlas_id = parent atlas. See docs/decisions for how apply maps this to the
- * existing export-key-bridge sprite-override storage (byte-identical to the CLI). */
+ * atlas_id = parent atlas. Apply stores this same canonical pair; any derived
+ * display/export name is non-authoritative metadata. */
 typedef struct tp_op_sprite_set {
     tp_id128 source_id;
     char *src_key;                 /* normalized source-local key (NFC, ext KEPT) */
     uint32_t mask;                 /* tp_sprite_field_mask: which fields to set */
     float origin_x, origin_y;
-    uint16_t slice9[4];            /* [l,r,t,b] */
-    int16_t ov_shape, ov_allow_rotate, ov_max_vertices, ov_margin, ov_extrude;
+    int slice9[4];                 /* [l,r,t,b]; core validates storage range */
+    int ov_shape, ov_allow_rotate, ov_max_vertices, ov_margin, ov_extrude;
 } tp_op_sprite_set;
 
 typedef struct tp_op_sprite_clear {
@@ -208,13 +208,21 @@ typedef struct tp_op_sprite_name { /* the logical/export rename is a distinct re
     char *name;                    /* new export name; NULL clears back to file-derived */
 } tp_op_sprite_name;
 
+/* Canonical sprite address used by every new animation operation. Human-facing
+ * selectors are resolved before transaction admission; journals never persist
+ * a name-only frame reference. */
+typedef struct tp_op_sprite_ref {
+    tp_id128 source_id;
+    char *src_key;
+} tp_op_sprite_ref;
+
 typedef struct tp_op_anim_create { /* atlas_id = parent atlas */
     tp_id128 anim_id;              /* the NEW animation id */
     char *name;                    /* logical/display name */
     float fps;
     int playback;
     bool flip_h, flip_v;
-    char **frames;                 /* initial frame references (export-name bridge), in order */
+    tp_op_sprite_ref *frames;      /* canonical initial frame references, in order */
     int frame_count;
 } tp_op_anim_create;
 
@@ -235,13 +243,13 @@ typedef struct tp_op_anim_rename { /* atlas_id = parent atlas; anim_id addresses
 
 typedef struct tp_op_anim_frames_set { /* reserved bulk set: replace the whole list */
     tp_id128 anim_id;
-    char **frames;
+    tp_op_sprite_ref *frames;
     int frame_count;
 } tp_op_anim_frames_set;
 
 typedef struct tp_op_anim_frame_add {
     tp_id128 anim_id;
-    char *frame;                   /* frame reference (export-name bridge) */
+    tp_op_sprite_ref frame;        /* canonical frame reference */
     int index;                     /* insert position; < 0 = append */
 } tp_op_anim_frame_add;
 

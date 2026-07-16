@@ -33,18 +33,38 @@ bool s_pending_open, s_pending_save, s_pending_save_as, s_pending_add_files, s_p
 bool s_pending_pack, s_pending_export;
 bool s_pending_commit_edit; /* a press landed outside the active inline-edit field -> commit it */
 bool s_pending_commit_edit_enter; /* Enter in the inline editor -> commit it (deferred, non-force) */
-bool s_pending_add_anim;    /* "+ Animation" -> append empty animation, select it */
-bool s_pending_create_anim; /* "Create animation from selection" */
-bool s_pending_open_preview;/* open the anim preview player on s_ctx_anim / s_sel_anim */
-int s_pending_remove_atlas = -1;
-int s_pending_remove_source = -1;
-int s_pending_remove_anim = -1; /* animation index to remove */
-bool s_pending_add_target;
-int s_pending_remove_target = -1;
-int s_pending_browse_target = -1;        /* target whose out-path "..." dialog is queued */
-int s_pending_export_browse_atlas = -1;  /* Export dialog: atlas of the queued out-path browse */
-int s_pending_export_browse_target = -1; /* Export dialog: target index of the queued browse */
-int s_pending_preview_target = -1;       /* strip preview-selector pick (-1 none; 0 Native; k = exporter k-1) */
+static bool s_pending_add_anim;
+static tp_id128 s_pending_add_anim_atlas_id;
+static int64_t s_pending_add_anim_revision;
+typedef struct pending_create_animation {
+    bool active;
+    tp_id128 atlas_id;
+    int64_t expected_revision;
+    char *name;
+    char **frames;
+    int frame_count;
+} pending_create_animation;
+static pending_create_animation s_pending_create_anim;
+static bool s_pending_open_preview;
+static gui_animation_ref s_pending_open_preview_ref;
+static gui_animation_ref s_preview_animation_ref;
+bool s_pending_remove_atlas;
+tp_id128 s_pending_remove_atlas_id;
+int64_t s_pending_remove_atlas_revision;
+bool s_pending_remove_source;
+tp_id128 s_pending_remove_source_atlas_id;
+tp_id128 s_pending_remove_source_id;
+int64_t s_pending_remove_source_revision;
+static bool s_pending_remove_anim;
+static gui_animation_ref s_pending_remove_anim_ref;
+static bool s_pending_add_target;
+static tp_id128 s_pending_add_target_atlas_id;
+static int64_t s_pending_add_target_revision;
+static bool s_pending_remove_target;
+static gui_target_ref s_pending_remove_target_ref;
+static bool s_pending_browse_target;
+static gui_target_ref s_pending_browse_target_ref;
+int s_pending_preview_target = -1; /* boundary-ok: exporter option, not a target entity index */
 int s_after_confirm;
 bool s_confirm_open;
 int s_modal_action;
@@ -69,39 +89,105 @@ int s_last_pack_atlas = -1; /* which atlas that timing belongs to */
  * TP_PATH_MAX (4096) so a 256-byte slot silently truncated + persisted a corrupted export
  * path on a mere target toggle (F2); add-frames carries a variable-length list of COPIED
  * sprite keys so "Add frames" can defer instead of committing synchronously mid-declare (F1).
- * edit_dispose frees that heap payload after the edit drains (or if a queue-OOM drops it). */
-typedef enum {
-    GEDIT_ATLAS = 0, /* one atlas.settings.set knob: field in i0, ivalue in i1, fvalue in f0 (F7) */
-    GEDIT_SPRITE_ORIGIN,
-    GEDIT_SPRITE_SLICE9,
-    GEDIT_SPRITE_OVERRIDE,
-    GEDIT_ANIM_FPS,
-    GEDIT_ANIM_PLAYBACK,
-    GEDIT_ANIM_FLIP,
-    GEDIT_ANIM_FRAME_REMOVE,
-    GEDIT_ANIM_FRAME_MOVE,
-    GEDIT_ANIM_ADD_FRAMES, /* append COPIED selection keys to anim i0 (F1: was a sync commit -> UAF) */
-    GEDIT_TARGET,
-    GEDIT_TARGET_OUTPATH,  /* H/G3: out-path-only target edit (COALESCABLE) -- heap out_path like GEDIT_TARGET */
-    GEDIT_TARGET_ENABLED,  /* H/G3: enabled-only toggle -- reads exporter+out_path from committed post-flush */
-    GEDIT_TARGET_EXPORTER  /* H/G3: exporter-only change -- reads out_path+enabled from committed post-flush */
-} gui_edit_kind;
+ * each typed intent queue frees its heap payload after drain (or queue OOM). */
+typedef enum target_intent_kind {
+    TARGET_INTENT_FULL = 0,
+    TARGET_INTENT_OUT_PATH,
+    TARGET_INTENT_ENABLED,
+    TARGET_INTENT_EXPORTER
+} target_intent_kind;
 
-typedef struct {
-    gui_edit_kind kind;
-    int atlas;
+typedef struct target_edit_intent {
+    target_intent_kind kind;
+    tp_id128 atlas_id;
+    tp_id128 target_id;
+    int64_t expected_revision;
     int i0, i1, i2; /* field/which/anim_index/target_index; ivalue/frame_index/playback; delta */
     float f0, f1;
     bool b0, b1;
-    char s0[256];   /* sprite name / exporter id -- short + bounded (registry id / GUI-wide 256 key) */
+    char s0[256];   /* exporter id -- short + bounded registry id */
     char *out_path; /* HEAP: target out_path (up to TP_PATH_MAX); freed after drain -- F2 (no 255 cap) */
-    char **keys;    /* HEAP: add-frames sprite keys, copied at enqueue; freed after drain -- F1 */
-    int key_count;
-} gui_edit;
+} target_edit_intent;
 
-static gui_edit *s_edits;
-static int s_edit_count;
-static int s_edit_cap;
+static target_edit_intent *s_target_intents;
+static int s_target_intent_count;
+static int s_target_intent_cap;
+
+typedef struct atlas_setting_intent {
+    tp_id128 atlas_id;
+    int64_t expected_revision;
+    gui_atlas_field field;
+    int ivalue;
+    float fvalue;
+} atlas_setting_intent;
+
+static atlas_setting_intent *s_atlas_setting_intents;
+static int s_atlas_setting_intent_count;
+static int s_atlas_setting_intent_cap;
+
+typedef enum sprite_intent_kind {
+    SPRITE_INTENT_ORIGIN = 0,
+    SPRITE_INTENT_SLICE9,
+    SPRITE_INTENT_OVERRIDE
+} sprite_intent_kind;
+
+typedef struct sprite_edit_intent {
+    sprite_intent_kind kind;
+    tp_id128 atlas_id;
+    tp_id128 source_id;
+    int64_t expected_revision;
+    char *source_key;
+    int field;
+    int ivalue;
+    float fvalue;
+} sprite_edit_intent;
+
+static sprite_edit_intent *s_sprite_intents;
+static int s_sprite_intent_count;
+static int s_sprite_intent_cap;
+
+typedef enum animation_intent_kind {
+    ANIMATION_INTENT_FPS = 0,
+    ANIMATION_INTENT_PLAYBACK,
+    ANIMATION_INTENT_FLIP,
+    ANIMATION_INTENT_FRAME_REMOVE,
+    ANIMATION_INTENT_FRAME_MOVE,
+    ANIMATION_INTENT_ADD_FRAMES
+} animation_intent_kind;
+
+typedef struct animation_edit_intent {
+    animation_intent_kind kind;
+    gui_animation_ref animation;
+    int first;
+    int second;
+    float value;
+    bool flip_h;
+    bool flip_v;
+    char **keys;
+    int key_count;
+} animation_edit_intent;
+
+static animation_edit_intent *s_animation_intents;
+static int s_animation_intent_count;
+static int s_animation_intent_cap;
+
+void gui_queue_atlas_setting(tp_id128 atlas_id, int64_t expected_revision,
+                             gui_atlas_field field, int ivalue, float fvalue) {
+    if (s_atlas_setting_intent_count == s_atlas_setting_intent_cap) {
+        const int capacity = s_atlas_setting_intent_cap ? s_atlas_setting_intent_cap * 2 : 8;
+        atlas_setting_intent *intents = (atlas_setting_intent *)realloc(
+            s_atlas_setting_intents, (size_t)capacity * sizeof *intents);
+        if (!intents) {
+            set_status_ex(STATUS_ERROR,
+                          "Out of memory: this atlas edit could not be queued (change not applied).");
+            return;
+        }
+        s_atlas_setting_intents = intents;
+        s_atlas_setting_intent_cap = capacity;
+    }
+    s_atlas_setting_intents[s_atlas_setting_intent_count++] =
+        (atlas_setting_intent){atlas_id, expected_revision, field, ivalue, fvalue};
+}
 
 /* Local heap strdup (POSIX strdup is not ISO C17). NULL treated as ""; NULL on OOM. */
 static char *edit_strdup(const char *s) {
@@ -116,18 +202,10 @@ static char *edit_strdup(const char *s) {
     return c;
 }
 
-/* Frees an edit's heap payload (out_path + copied keys). Safe on a zeroed/partially-built edit. */
-static void edit_dispose(gui_edit *e) {
+/* Frees an edit's heap payload. Safe on a zeroed/partially-built edit. */
+static void target_intent_dispose(target_edit_intent *e) {
     free(e->out_path);
     e->out_path = NULL;
-    if (e->keys) {
-        for (int i = 0; i < e->key_count; i++) {
-            free(e->keys[i]);
-        }
-        free(e->keys);
-        e->keys = NULL;
-    }
-    e->key_count = 0;
 }
 
 /* Appends `e` to the queue (shallow copy -> the queue TAKES OWNERSHIP of e's heap out_path/keys;
@@ -135,120 +213,142 @@ static void edit_dispose(gui_edit *e) {
  * is DROPPED: its heap payload is freed (no leak) and a status-bar error is raised so the drop is
  * visible -- the widget already returned "committed", so without this the value silently reverts
  * next frame with no explanation (F5). Returns true iff queued. */
-static bool edit_push(gui_edit *e) {
-    if (s_edit_count == s_edit_cap) {
-        int nc = s_edit_cap ? s_edit_cap * 2 : 8;
-        gui_edit *ne = (gui_edit *)realloc(s_edits, (size_t)nc * sizeof *ne);
+static bool target_intent_push(target_edit_intent *e) {
+    if (s_target_intent_count == s_target_intent_cap) {
+        int nc = s_target_intent_cap ? s_target_intent_cap * 2 : 8;
+        target_edit_intent *ne = (target_edit_intent *)realloc(
+            s_target_intents, (size_t)nc * sizeof *ne);
         if (!ne) {
-            edit_dispose(e);
+            target_intent_dispose(e);
             set_status_ex(STATUS_ERROR, "Out of memory: this edit could not be queued (change not applied).");
             return false;
         }
-        s_edits = ne;
-        s_edit_cap = nc;
+        s_target_intents = ne;
+        s_target_intent_cap = nc;
     }
-    s_edits[s_edit_count++] = *e;
+    s_target_intents[s_target_intent_count++] = *e;
     return true;
 }
 
-void gui_edit_atlas_int(int atlas, gui_atlas_field field, int value) {
-    gui_edit e = {0};
-    e.kind = GEDIT_ATLAS;
-    e.atlas = atlas;
-    e.i0 = (int)field;
-    e.i1 = value;
-    (void)edit_push(&e);
+static void queue_sprite_intent(sprite_intent_kind kind,
+                                const gui_sprite_ref *sprite, int field,
+                                int ivalue, float fvalue) {
+    if (!sprite || tp_id128_is_nil(sprite->atlas_id) ||
+        tp_id128_is_nil(sprite->source_id) || !sprite->source_key ||
+        sprite->source_key[0] == '\0') {
+        return;
+    }
+    char *source_key = edit_strdup(sprite->source_key);
+    if (!source_key) {
+        set_status_ex(STATUS_ERROR,
+                      "Out of memory: this sprite edit could not be queued (change not applied).");
+        return;
+    }
+    if (s_sprite_intent_count == s_sprite_intent_cap) {
+        const int capacity = s_sprite_intent_cap ? s_sprite_intent_cap * 2 : 8;
+        sprite_edit_intent *intents = (sprite_edit_intent *)realloc(
+            s_sprite_intents, (size_t)capacity * sizeof *intents);
+        if (!intents) {
+            free(source_key);
+            set_status_ex(STATUS_ERROR,
+                          "Out of memory: this sprite edit could not be queued (change not applied).");
+            return;
+        }
+        s_sprite_intents = intents;
+        s_sprite_intent_cap = capacity;
+    }
+    s_sprite_intents[s_sprite_intent_count++] = (sprite_edit_intent){
+        kind, sprite->atlas_id, sprite->source_id, sprite->expected_revision,
+        source_key, field, ivalue, fvalue};
 }
-void gui_edit_atlas_bool(int atlas, gui_atlas_field field, bool value) {
-    gui_edit e = {0};
-    e.kind = GEDIT_ATLAS;
-    e.atlas = atlas;
-    e.i0 = (int)field;
-    e.i1 = value ? 1 : 0; /* bool == ivalue 0/1 (F7) */
-    (void)edit_push(&e);
+
+void gui_queue_sprite_origin(const gui_sprite_ref *sprite, int axis, float value) {
+    queue_sprite_intent(SPRITE_INTENT_ORIGIN, sprite, axis, 0, value);
 }
-void gui_edit_atlas_float(int atlas, gui_atlas_field field, float value) {
-    gui_edit e = {0};
-    e.kind = GEDIT_ATLAS;
-    e.atlas = atlas;
-    e.i0 = (int)field;
-    e.f0 = value;
-    (void)edit_push(&e);
+void gui_queue_sprite_slice9(const gui_sprite_ref *sprite, int lrtb_index, int value) {
+    queue_sprite_intent(SPRITE_INTENT_SLICE9, sprite, lrtb_index, value, 0.0F);
 }
-void gui_edit_sprite_origin(int atlas, const char *sprite_name, int axis, float value) {
-    gui_edit e = {0};
-    e.kind = GEDIT_SPRITE_ORIGIN;
-    e.atlas = atlas;
-    e.i0 = axis; /* 0 = Pivot X, 1 = Pivot Y -- component-keyed (F2-05b-ii-A #2) */
-    e.f0 = value;
-    (void)snprintf(e.s0, sizeof e.s0, "%s", sprite_name ? sprite_name : "");
-    (void)edit_push(&e);
+void gui_queue_sprite_override(const gui_sprite_ref *sprite, gui_sprite_ov which, int value) {
+    queue_sprite_intent(SPRITE_INTENT_OVERRIDE, sprite, (int)which, value, 0.0F);
 }
-void gui_edit_sprite_slice9(int atlas, const char *sprite_name, int lrtb_index, int value) {
-    gui_edit e = {0};
-    e.kind = GEDIT_SPRITE_SLICE9;
-    e.atlas = atlas;
-    e.i0 = lrtb_index;
-    e.i1 = value;
-    (void)snprintf(e.s0, sizeof e.s0, "%s", sprite_name ? sprite_name : "");
-    (void)edit_push(&e);
+static bool animation_intent_push(animation_edit_intent *intent) {
+    if (!intent || tp_id128_is_nil(intent->animation.atlas_id) ||
+        tp_id128_is_nil(intent->animation.animation_id)) {
+        return false;
+    }
+    if (s_animation_intent_count == s_animation_intent_cap) {
+        const int capacity = s_animation_intent_cap ? s_animation_intent_cap * 2 : 8;
+        animation_edit_intent *intents = (animation_edit_intent *)realloc(
+            s_animation_intents, (size_t)capacity * sizeof *intents);
+        if (!intents) {
+            if (intent->keys) {
+                for (int i = 0; i < intent->key_count; i++) {
+                    free(intent->keys[i]);
+                }
+                free(intent->keys);
+            }
+            set_status_ex(STATUS_ERROR,
+                          "Out of memory: this animation edit could not be queued (change not applied).");
+            return false;
+        }
+        s_animation_intents = intents;
+        s_animation_intent_cap = capacity;
+    }
+    s_animation_intents[s_animation_intent_count++] = *intent;
+    return true;
 }
-void gui_edit_sprite_override(int atlas, const char *sprite_name, gui_sprite_ov which, int value) {
-    gui_edit e = {0};
-    e.kind = GEDIT_SPRITE_OVERRIDE;
-    e.atlas = atlas;
-    e.i0 = (int)which;
-    e.i1 = value;
-    (void)snprintf(e.s0, sizeof e.s0, "%s", sprite_name ? sprite_name : "");
-    (void)edit_push(&e);
+
+void gui_edit_anim_fps(const gui_animation_ref *animation, float fps) {
+    animation_edit_intent intent = {0};
+    intent.kind = ANIMATION_INTENT_FPS;
+    if (animation) intent.animation = *animation;
+    intent.value = fps;
+    (void)animation_intent_push(&intent);
 }
-void gui_edit_anim_fps(int atlas, int anim_index, float fps) {
-    gui_edit e = {0};
-    e.kind = GEDIT_ANIM_FPS;
-    e.atlas = atlas;
-    e.i0 = anim_index;
-    e.f0 = fps;
-    (void)edit_push(&e);
+void gui_edit_anim_playback(const gui_animation_ref *animation, int playback) {
+    animation_edit_intent intent = {0};
+    intent.kind = ANIMATION_INTENT_PLAYBACK;
+    if (animation) intent.animation = *animation;
+    intent.first = playback;
+    (void)animation_intent_push(&intent);
 }
-void gui_edit_anim_playback(int atlas, int anim_index, int playback) {
-    gui_edit e = {0};
-    e.kind = GEDIT_ANIM_PLAYBACK;
-    e.atlas = atlas;
-    e.i0 = anim_index;
-    e.i1 = playback;
-    (void)edit_push(&e);
+void gui_edit_anim_flip(const gui_animation_ref *animation, bool flip_h, bool flip_v) {
+    animation_edit_intent intent = {0};
+    intent.kind = ANIMATION_INTENT_FLIP;
+    if (animation) intent.animation = *animation;
+    intent.flip_h = flip_h;
+    intent.flip_v = flip_v;
+    (void)animation_intent_push(&intent);
 }
-void gui_edit_anim_flip(int atlas, int anim_index, bool flip_h, bool flip_v) {
-    gui_edit e = {0};
-    e.kind = GEDIT_ANIM_FLIP;
-    e.atlas = atlas;
-    e.i0 = anim_index;
-    e.b0 = flip_h;
-    e.b1 = flip_v;
-    (void)edit_push(&e);
+void gui_edit_anim_frame_remove(const gui_animation_ref *animation, int frame_index) {
+    animation_edit_intent intent = {0};
+    intent.kind = ANIMATION_INTENT_FRAME_REMOVE;
+    if (animation) intent.animation = *animation;
+    intent.first = frame_index;
+    (void)animation_intent_push(&intent);
 }
-void gui_edit_anim_frame_remove(int atlas, int anim_index, int frame_index) {
-    gui_edit e = {0};
-    e.kind = GEDIT_ANIM_FRAME_REMOVE;
-    e.atlas = atlas;
-    e.i0 = anim_index;
-    e.i1 = frame_index;
-    (void)edit_push(&e);
+void gui_edit_anim_frame_move(const gui_animation_ref *animation, int frame_index, int delta) {
+    animation_edit_intent intent = {0};
+    intent.kind = ANIMATION_INTENT_FRAME_MOVE;
+    if (animation) intent.animation = *animation;
+    intent.first = frame_index;
+    intent.second = delta;
+    (void)animation_intent_push(&intent);
 }
-void gui_edit_anim_frame_move(int atlas, int anim_index, int frame_index, int delta) {
-    gui_edit e = {0};
-    e.kind = GEDIT_ANIM_FRAME_MOVE;
-    e.atlas = atlas;
-    e.i0 = anim_index;
-    e.i1 = frame_index;
-    e.i2 = delta;
-    (void)edit_push(&e);
+static void edit_capture_target(target_edit_intent *edit,
+                                const gui_target_ref *target) {
+    if (target) {
+        edit->atlas_id = target->atlas_id;
+        edit->target_id = target->target_id;
+        edit->expected_revision = target->expected_revision;
+    }
 }
-void gui_edit_target(int atlas, int index, const char *exporter_id, const char *out_path, bool enabled) {
-    gui_edit e = {0};
-    e.kind = GEDIT_TARGET;
-    e.atlas = atlas;
-    e.i0 = index;
+
+void gui_edit_target(const gui_target_ref *target, const char *exporter_id,
+                     const char *out_path, bool enabled) {
+    target_edit_intent e = {0};
+    e.kind = TARGET_INTENT_FULL;
+    edit_capture_target(&e, target);
     e.b0 = enabled;
     (void)snprintf(e.s0, sizeof e.s0, "%s", exporter_id ? exporter_id : "");
     e.out_path = edit_strdup(out_path); /* HEAP full path -- a >255 out_path must not truncate (F2) */
@@ -256,43 +356,41 @@ void gui_edit_target(int atlas, int index, const char *exporter_id, const char *
         set_status_ex(STATUS_ERROR, "Out of memory: export target edit not applied.");
         return;
     }
-    (void)edit_push(&e);
+    (void)target_intent_push(&e);
 }
 /* H/G3: the out-path text field's per-keystroke enqueue. Same heap out_path as gui_edit_target (up to
  * TP_PATH_MAX, no 255 slot), but the drain routes to the COALESCABLE gui_project_set_target_out_path so
  * the field's Enter/blur gesture-commit collapses the whole edit into ONE undo step. */
-void gui_edit_target_out_path(int atlas, int index, const char *out_path) {
-    gui_edit e = {0};
-    e.kind = GEDIT_TARGET_OUTPATH;
-    e.atlas = atlas;
-    e.i0 = index;
+void gui_edit_target_out_path(const gui_target_ref *target, const char *out_path) {
+    target_edit_intent e = {0};
+    e.kind = TARGET_INTENT_OUT_PATH;
+    edit_capture_target(&e, target);
     e.out_path = edit_strdup(out_path); /* HEAP full path -- a >255 out_path must not truncate (F2) */
     if (!e.out_path) {
         set_status_ex(STATUS_ERROR, "Out of memory: export target edit not applied.");
         return;
     }
-    (void)edit_push(&e);
+    (void)target_intent_push(&e);
 }
 /* H/G3: discrete enabled toggle. Carries ONLY the new enabled + the target index; the drain setter reads
  * exporter_id + out_path from the committed record AFTER flushing any buffered out-path gesture, so a
  * still-uncommitted typed out-path is preserved (not reverted by a stale re-send). */
-void gui_edit_target_enabled(int atlas, int index, bool enabled) {
-    gui_edit e = {0};
-    e.kind = GEDIT_TARGET_ENABLED;
-    e.atlas = atlas;
-    e.i0 = index;
+void gui_edit_target_enabled(const gui_target_ref *target, bool enabled) {
+    target_edit_intent e = {0};
+    e.kind = TARGET_INTENT_ENABLED;
+    edit_capture_target(&e, target);
     e.b0 = enabled;
-    (void)edit_push(&e);
+    (void)target_intent_push(&e);
 }
 /* H/G3: discrete exporter change. Carries ONLY the new exporter_id + the target index; the drain setter
  * reads out_path + enabled from the committed record post-flush (same anti-stale-revert reason). */
-void gui_edit_target_exporter(int atlas, int index, const char *exporter_id) {
-    gui_edit e = {0};
-    e.kind = GEDIT_TARGET_EXPORTER;
-    e.atlas = atlas;
-    e.i0 = index;
+void gui_edit_target_exporter(const gui_target_ref *target,
+                              const char *exporter_id) {
+    target_edit_intent e = {0};
+    e.kind = TARGET_INTENT_EXPORTER;
+    edit_capture_target(&e, target);
     (void)snprintf(e.s0, sizeof e.s0, "%s", exporter_id ? exporter_id : "");
-    (void)edit_push(&e);
+    (void)target_intent_push(&e);
 }
 
 /* Enqueue an "add frames" edit carrying a COPY of the selection keys (F1). "Add frames" used to
@@ -301,16 +399,16 @@ void gui_edit_target_exporter(int atlas, int index, const char *exporter_id) {
  * name) -> a use-after-free on an ordinary click. Deferring it (drain replays via
  * gui_project_anim_add_frames at frame top, no live pointer held) closes that last synchronous
  * commit; the keys are copied NOW so a selection change before the drain cannot alter what lands. */
-void gui_edit_anim_add_frames(int atlas, int anim_index, const char *const *keys, int count) {
+void gui_edit_anim_add_frames(const gui_animation_ref *animation,
+                              const char *const *keys, int count) {
     if (count <= 0) {
         return;
     }
-    gui_edit e = {0};
-    e.kind = GEDIT_ANIM_ADD_FRAMES;
-    e.atlas = atlas;
-    e.i0 = anim_index;
-    e.keys = (char **)calloc((size_t)count, sizeof *e.keys);
-    if (!e.keys) {
+    animation_edit_intent intent = {0};
+    intent.kind = ANIMATION_INTENT_ADD_FRAMES;
+    if (animation) intent.animation = *animation;
+    intent.keys = (char **)calloc((size_t)count, sizeof *intent.keys);
+    if (!intent.keys) {
         set_status_ex(STATUS_ERROR, "Out of memory: add-frames not applied.");
         return;
     }
@@ -320,77 +418,123 @@ void gui_edit_anim_add_frames(int atlas, int anim_index, const char *const *keys
         if (!keys[i] || keys[i][0] == '\0') {
             continue; /* skip empties (the setter would too) */
         }
-        e.keys[w] = edit_strdup(keys[i]);
-        if (!e.keys[w]) {
+        intent.keys[w] = edit_strdup(keys[i]);
+        if (!intent.keys[w]) {
             oom = true;
             break;
         }
         w++;
     }
-    e.key_count = w;
+    intent.key_count = w;
     if (oom || w == 0) {
-        edit_dispose(&e);
+        for (int i = 0; i < w; i++) free(intent.keys[i]);
+        free(intent.keys);
         if (oom) {
             set_status_ex(STATUS_ERROR, "Out of memory: add-frames not applied.");
         }
         return;
     }
-    (void)edit_push(&e);
+    (void)animation_intent_push(&intent);
 }
 
 /* Replays every queued edit through the committing setters, then clears the queue. Runs at
  * frame top (apply_pending) with NO live declare-fn pointer held, so the per-edit clone-swap
  * is safe. Each setter re-fetches by index/name internally. */
 static void drain_edits(void) {
-    for (int i = 0; i < s_edit_count; i++) {
-        gui_edit *e = &s_edits[i];
-        switch (e->kind) {
-            case GEDIT_ATLAS: /* int/bool -> ivalue (i1); float -> fvalue (f0); the other is 0 (F7) */
-                (void)gui_project_set_atlas_setting(e->atlas, (gui_atlas_field)e->i0, e->i1, e->f0);
+    for (int i = 0; i < s_atlas_setting_intent_count; i++) {
+        const atlas_setting_intent *intent = &s_atlas_setting_intents[i];
+        (void)gui_project_set_atlas_setting(intent->atlas_id,
+                                            intent->expected_revision,
+                                            intent->field, intent->ivalue,
+                                            intent->fvalue);
+    }
+    s_atlas_setting_intent_count = 0;
+    for (int i = 0; i < s_sprite_intent_count; i++) {
+        sprite_edit_intent *intent = &s_sprite_intents[i];
+        const gui_sprite_ref sprite = {
+            intent->atlas_id, intent->source_id, intent->source_key,
+            intent->expected_revision};
+        switch (intent->kind) {
+            case SPRITE_INTENT_ORIGIN:
+                (void)gui_project_set_sprite_origin(&sprite, intent->field,
+                                                     intent->fvalue);
                 break;
-            case GEDIT_SPRITE_ORIGIN:
-                (void)gui_project_set_sprite_origin(e->atlas, e->s0, e->i0, e->f0);
+            case SPRITE_INTENT_SLICE9:
+                (void)gui_project_set_sprite_slice9(&sprite, intent->field,
+                                                     intent->ivalue);
                 break;
-            case GEDIT_SPRITE_SLICE9:
-                (void)gui_project_set_sprite_slice9(e->atlas, e->s0, e->i0, e->i1);
-                break;
-            case GEDIT_SPRITE_OVERRIDE:
-                (void)gui_project_set_sprite_override(e->atlas, e->s0, (gui_sprite_ov)e->i0, e->i1);
-                break;
-            case GEDIT_ANIM_FPS:
-                (void)gui_project_set_anim_fps(e->atlas, e->i0, e->f0);
-                break;
-            case GEDIT_ANIM_PLAYBACK:
-                (void)gui_project_set_anim_playback(e->atlas, e->i0, e->i1);
-                break;
-            case GEDIT_ANIM_FLIP:
-                (void)gui_project_set_anim_flip(e->atlas, e->i0, e->b0, e->b1);
-                break;
-            case GEDIT_ANIM_FRAME_REMOVE:
-                (void)gui_project_anim_remove_frame(e->atlas, e->i0, e->i1);
-                break;
-            case GEDIT_ANIM_FRAME_MOVE:
-                (void)gui_project_anim_move_frame(e->atlas, e->i0, e->i1, e->i2);
-                break;
-            case GEDIT_ANIM_ADD_FRAMES:
-                (void)gui_project_anim_add_frames(e->atlas, e->i0, (const char *const *)e->keys, e->key_count);
-                break;
-            case GEDIT_TARGET:
-                (void)gui_project_set_target(e->atlas, e->i0, e->s0, e->out_path ? e->out_path : "", e->b0);
-                break;
-            case GEDIT_TARGET_OUTPATH: /* H/G3: coalescable out-path-only edit */
-                (void)gui_project_set_target_out_path(e->atlas, e->i0, e->out_path ? e->out_path : "");
-                break;
-            case GEDIT_TARGET_ENABLED: /* H/G3: discrete enabled toggle (reads exporter+out_path post-flush) */
-                (void)gui_project_set_target_enabled(e->atlas, e->i0, e->b0);
-                break;
-            case GEDIT_TARGET_EXPORTER: /* H/G3: discrete exporter change (reads out_path+enabled post-flush) */
-                (void)gui_project_set_target_exporter(e->atlas, e->i0, e->s0);
+            case SPRITE_INTENT_OVERRIDE:
+                (void)gui_project_set_sprite_override(
+                    &sprite, (gui_sprite_ov)intent->field, intent->ivalue);
                 break;
         }
-        edit_dispose(e); /* free this edit's heap payload (out_path / copied keys) after it replays */
+        free(intent->source_key);
+        intent->source_key = NULL;
     }
-    s_edit_count = 0;
+    s_sprite_intent_count = 0;
+    for (int i = 0; i < s_animation_intent_count; i++) {
+        animation_edit_intent *intent = &s_animation_intents[i];
+        switch (intent->kind) {
+            case ANIMATION_INTENT_FPS:
+                (void)gui_project_set_anim_fps(&intent->animation, intent->value);
+                break;
+            case ANIMATION_INTENT_PLAYBACK:
+                (void)gui_project_set_anim_playback(&intent->animation,
+                                                    intent->first);
+                break;
+            case ANIMATION_INTENT_FLIP:
+                (void)gui_project_set_anim_flip(&intent->animation,
+                                                intent->flip_h,
+                                                intent->flip_v);
+                break;
+            case ANIMATION_INTENT_FRAME_REMOVE:
+                (void)gui_project_anim_remove_frame(&intent->animation,
+                                                    intent->first);
+                break;
+            case ANIMATION_INTENT_FRAME_MOVE:
+                (void)gui_project_anim_move_frame(&intent->animation,
+                                                  intent->first,
+                                                  intent->second);
+                break;
+            case ANIMATION_INTENT_ADD_FRAMES:
+                (void)gui_project_anim_add_frames(
+                    &intent->animation, (const char *const *)intent->keys,
+                    intent->key_count);
+                break;
+        }
+        if (intent->keys) {
+            for (int key = 0; key < intent->key_count; key++) {
+                free(intent->keys[key]);
+            }
+            free(intent->keys);
+            intent->keys = NULL;
+        }
+    }
+    s_animation_intent_count = 0;
+    for (int i = 0; i < s_target_intent_count; i++) {
+        target_edit_intent *e = &s_target_intents[i];
+        const gui_target_ref target = {e->atlas_id, e->target_id,
+                                       e->expected_revision};
+        switch (e->kind) {
+            case TARGET_INTENT_FULL:
+                (void)gui_project_set_target(&target, e->s0,
+                                             e->out_path ? e->out_path : "",
+                                             e->b0);
+                break;
+            case TARGET_INTENT_OUT_PATH:
+                (void)gui_project_set_target_out_path(
+                    &target, e->out_path ? e->out_path : "");
+                break;
+            case TARGET_INTENT_ENABLED:
+                (void)gui_project_set_target_enabled(&target, e->b0);
+                break;
+            case TARGET_INTENT_EXPORTER:
+                (void)gui_project_set_target_exporter(&target, e->s0);
+                break;
+        }
+        target_intent_dispose(e);
+    }
+    s_target_intent_count = 0;
 }
 
 /* Set by a view widget the frame its edit GESTURE ENDS (slider release / field Enter+blur / a
@@ -409,6 +553,14 @@ void gui_request_gesture_commit(void) { s_gesture_commit = true; }
  * only when the model is unchanged AND no Refresh happened since the pack started. */
 static unsigned s_refresh_epoch;
 static unsigned s_pack_start_refresh_epoch;
+static tp_id128 s_edit_atlas_id;
+static int64_t s_edit_atlas_revision;
+static tp_id128 s_edit_sprite_atlas_id;
+static tp_id128 s_edit_sprite_source_id;
+static int64_t s_edit_sprite_revision;
+static char s_edit_sprite_source_key[TP_SCAN_REL_CAP];
+_Static_assert(sizeof s_edit_sprite_source_key == sizeof ((sprite_row *)0)->source_key,
+               "editor and row source-key capacities must match");
 
 /* True (and raises a status) when an async pack/export is running: the destructive ops (new/open/exit/
  * undo/redo) refuse while busy. Centralizes the guard the request_* fns had copy-pasted, and closes the
@@ -425,6 +577,7 @@ static bool busy_block(void) {
 /* Stops the animation preview player and restores the canvas to its atlas/source view. */
 void preview_stop(void) {
     s_preview_active = false;
+    memset(&s_preview_animation_ref, 0, sizeof s_preview_animation_ref);
     s_preview_playing = false;
     s_preview_finished = false;
     s_preview_time = 0.0;
@@ -450,7 +603,13 @@ void reset_selection(void) {
 void cancel_edit(void) {
     s_edit_kind = EDIT_NONE;
     s_edit_atlas = -1;
+    s_edit_atlas_id = tp_id128_nil();
+    s_edit_atlas_revision = 0;
     s_edit_sprite[0] = '\0';
+    s_edit_sprite_atlas_id = tp_id128_nil();
+    s_edit_sprite_source_id = tp_id128_nil();
+    s_edit_sprite_revision = 0;
+    s_edit_sprite_source_key[0] = '\0';
     s_edit_buf[0] = '\0';
 }
 
@@ -459,90 +618,87 @@ void cancel_edit(void) {
  * rename to commit_sprite_rename). Moved here in step 4 (they are Clay-free) so gui_view_lists and
  * gui_view_settings -- both of which start edits -- share one home instead of step 5 re-deciding. --- */
 void start_atlas_edit(int i) {
-    tp_project *p = gui_project_get();
-    if (!p || i < 0 || i >= p->atlas_count) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas = snapshot
+                                         ? tp_session_snapshot_atlas_at(snapshot, i)
+                                         : NULL;
+    if (!atlas) {
         return;
     }
     cancel_edit();
     s_edit_kind = EDIT_ATLAS;
     s_edit_atlas = i;
-    (void)snprintf(s_edit_buf, sizeof s_edit_buf, "%s", p->atlases[i].name);
+    s_edit_atlas_id = atlas->id;
+    s_edit_atlas_revision = tp_session_snapshot_revision(snapshot);
+    (void)snprintf(s_edit_buf, sizeof s_edit_buf, "%s", atlas->name);
     set_status("Rename atlas: type, Enter to commit, Esc to cancel.");
 }
 void start_anim_edit(int i) {
-    tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
-    if (!a || i < 0 || i >= a->animation_count) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *a = snapshot ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas) : NULL;
+    const tp_snapshot_animation *animation = a ? tp_session_snapshot_animation_at(snapshot, a->id, i) : NULL;
+    if (!animation) {
         return;
     }
     cancel_edit();
     s_edit_kind = EDIT_ANIM;
     s_edit_anim = i;
-    (void)snprintf(s_edit_buf, sizeof s_edit_buf, "%s", a->animations[i].name);
+    (void)snprintf(s_edit_buf, sizeof s_edit_buf, "%s", animation->name);
     set_status("Rename animation: type, Enter to commit, Esc to cancel.");
 }
 void start_sprite_edit_named(const char *sprite_name) {
     if (!sprite_name || sprite_name[0] == '\0') {
         return;
     }
-    tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
+    for (int i = 0; i < s_row_count; i++) {
+        if (!s_rows[i].is_folder && !s_rows[i].missing &&
+            strcmp(s_rows[i].sprite_name, sprite_name) == 0) {
+            start_sprite_edit(&s_rows[i]);
+            return;
+        }
+    }
+}
+void start_sprite_edit(const sprite_row *row) {
+    if (!row || row->is_folder || row->missing || row->sprite_name[0] == '\0' ||
+        tp_id128_is_nil(row->source_id) || row->source_key[0] == '\0') {
+        return;
+    }
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas = snapshot
+                                         ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas)
+                                         : NULL;
+    if (!atlas) {
+        return;
+    }
     cancel_edit();
     s_edit_kind = EDIT_SPRITE;
-    (void)snprintf(s_edit_sprite, sizeof s_edit_sprite, "%s", sprite_name);
-    const tp_project_sprite *ov = a ? tp_project_atlas_find_sprite(a, sprite_name) : NULL;
+    s_edit_sprite_atlas_id = atlas->id;
+    s_edit_sprite_source_id = row->source_id;
+    s_edit_sprite_revision = tp_session_snapshot_revision(snapshot);
+    (void)snprintf(s_edit_sprite_source_key, sizeof s_edit_sprite_source_key, "%s",
+                   row->source_key);
+    (void)snprintf(s_edit_sprite, sizeof s_edit_sprite, "%s", row->sprite_name);
+    const tp_snapshot_sprite *ov = tp_session_snapshot_sprite_by_key(
+        snapshot, atlas->id, row->source_id, row->source_key);
     /* Seed with the CURRENT name: the rename override if set, else the file-derived final name
      * (sprite_name is the ext-stripped atlas-relative key = the default export name). The input
      * string is game-owned (nt_ui_input edits s_edit_buf in place), so seeding it here is the fix
      * for the "field opens empty" bug -- previously it seeded the (empty) override. */
-    (void)snprintf(s_edit_buf, sizeof s_edit_buf, "%s", (ov && ov->rename) ? ov->rename : sprite_name);
+    (void)snprintf(s_edit_buf, sizeof s_edit_buf, "%s",
+                   (ov && ov->rename) ? ov->rename : row->sprite_name);
     set_status("Rename region: type, Enter to commit, Esc clears/cancels.");
-}
-void start_sprite_edit(const sprite_row *row) {
-    if (!row || row->is_folder || row->missing || row->sprite_name[0] == '\0') {
-        return;
-    }
-    start_sprite_edit_named(row->sprite_name);
-}
-
-/* Atlas-name validation (F1): non-empty, unique among atlases, and normalization-safe
- * (no path separators, not dots-only). Fills `err` on failure. */
-static bool atlas_name_valid(const char *name, int self_idx, char *err, size_t cap) {
-    if (!name || name[0] == '\0') {
-        (void)snprintf(err, cap, "Atlas name cannot be empty");
-        return false;
-    }
-    bool only_dots = true;
-    for (const char *c = name; *c; c++) {
-        if (*c == '/' || *c == '\\') {
-            (void)snprintf(err, cap, "Atlas name cannot contain / or \\");
-            return false;
-        }
-        if (*c != '.') {
-            only_dots = false;
-        }
-    }
-    if (only_dots) {
-        (void)snprintf(err, cap, "Atlas name cannot be dots-only");
-        return false;
-    }
-    tp_project *p = gui_project_get();
-    for (int i = 0; p && i < p->atlas_count; i++) {
-        if (i != self_idx && strcmp(p->atlases[i].name, name) == 0) {
-            (void)snprintf(err, cap, "Atlas '%s' already exists", name);
-            return false;
-        }
-    }
-    return true;
 }
 
 void clamp_selection(void) {
-    tp_project *p = gui_project_get();
-    if (!p || p->atlas_count == 0) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const int atlas_count = snapshot ? tp_session_snapshot_atlas_count(snapshot) : 0;
+    if (atlas_count == 0) {
         s_sel_atlas = 0;
         reset_selection();
         return;
     }
-    if (s_sel_atlas >= p->atlas_count) {
-        s_sel_atlas = p->atlas_count - 1;
+    if (s_sel_atlas >= atlas_count) {
+        s_sel_atlas = atlas_count - 1;
     }
     if (s_sel_atlas < 0) {
         s_sel_atlas = 0;
@@ -552,12 +708,13 @@ void clamp_selection(void) {
 
 // #region animation + preview actions (ux.md §3.7b)
 /* The selected animation of the selected atlas, or NULL. */
-tp_project_anim *current_anim(void) {
-    tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
-    if (!a || s_sel_anim < 0 || s_sel_anim >= a->animation_count) {
-        return NULL;
-    }
-    return &a->animations[s_sel_anim];
+const tp_snapshot_animation *current_anim(void) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas = snapshot
+                                         ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas)
+                                         : NULL;
+    return atlas ? tp_session_snapshot_animation_at(snapshot, atlas->id, s_sel_anim)
+                 : NULL;
 }
 
 /* Copies the multi-selection into the shared buffers, natural-sorted; returns the count (0 on OOM,
@@ -578,6 +735,106 @@ static int build_sorted_selection(void) {
     return n;
 }
 
+static void pending_create_animation_dispose(pending_create_animation *request) {
+    if (!request) {
+        return;
+    }
+    free(request->name);
+    if (request->frames) {
+        for (int i = 0; i < request->frame_count; i++) {
+            free(request->frames[i]);
+        }
+    }
+    free(request->frames);
+    memset(request, 0, sizeof *request);
+}
+
+void gui_request_create_animation_from_selection(void) {
+    if (s_multi_sel_count <= 0) {
+        return;
+    }
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas = snapshot
+                                         ? tp_session_snapshot_atlas_at(snapshot,
+                                                                        s_sel_atlas)
+                                         : NULL;
+    if (!atlas) {
+        return;
+    }
+    const int frame_count = build_sorted_selection();
+    if (frame_count <= 0) {
+        return;
+    }
+
+    pending_create_animation request = {0};
+    request.frames = (char **)calloc((size_t)frame_count,
+                                     sizeof *request.frames);
+    if (!request.frames) {
+        set_status_ex(STATUS_ERROR,
+                      "Out of memory: animation creation could not be queued.");
+        return;
+    }
+    request.frame_count = frame_count;
+    for (int i = 0; i < frame_count; i++) {
+        request.frames[i] = edit_strdup(s_sel_sort_ptr[i]);
+        if (!request.frames[i]) {
+            pending_create_animation_dispose(&request);
+            set_status_ex(STATUS_ERROR,
+                          "Out of memory: animation creation could not be queued.");
+            return;
+        }
+    }
+
+    char base[192];
+    tp_names_common_prefix(s_sel_sort_ptr, frame_count, base, sizeof base);
+    request.name = edit_strdup(base);
+    if (!request.name) {
+        pending_create_animation_dispose(&request);
+        set_status_ex(STATUS_ERROR,
+                      "Out of memory: animation creation could not be queued.");
+        return;
+    }
+    request.active = true;
+    request.atlas_id = atlas->id;
+    request.expected_revision = tp_session_snapshot_revision(snapshot);
+
+    pending_create_animation_dispose(&s_pending_create_anim);
+    s_pending_create_anim = request;
+}
+
+void gui_request_open_preview(const gui_animation_ref *animation) {
+    if (!animation || tp_id128_is_nil(animation->atlas_id) ||
+        tp_id128_is_nil(animation->animation_id)) {
+        return;
+    }
+    s_pending_open_preview = true;
+    s_pending_open_preview_ref = *animation;
+}
+
+static bool resolve_animation_ref(const gui_animation_ref *animation,
+                                  int *atlas_index, int *animation_index) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const int atlas_count = snapshot ? tp_session_snapshot_atlas_count(snapshot) : 0;
+    for (int ai = 0; ai < atlas_count; ai++) {
+        const tp_snapshot_atlas *atlas = tp_session_snapshot_atlas_at(snapshot, ai);
+        if (!atlas || !tp_id128_eq(atlas->id, animation->atlas_id)) {
+            continue;
+        }
+        for (int i = 0; i < atlas->animation_count; i++) {
+            const tp_snapshot_animation *candidate =
+                tp_session_snapshot_animation_at(snapshot, atlas->id, i);
+            if (candidate && tp_id128_eq(candidate->id,
+                                         animation->animation_id)) {
+                *atlas_index = ai;
+                *animation_index = i;
+                return true;
+            }
+        }
+        return false;
+    }
+    return false;
+}
+
 /* Creates an animation from the current multi-selection: frames natural-sorted, id from the common
  * prefix (auto "animN" when there is none). Selects the new animation (opens its editor). */
 int create_animation_from_selection(void) {
@@ -589,13 +846,24 @@ int create_animation_from_selection(void) {
         return -1; /* OOM in the sort scratch (status already set) -- do nothing rather than truncate */
     }
     char base[192];
-    tp_names_common_prefix(s_sel_sort_buf, n, base, sizeof base);
-    const int idx = gui_project_create_animation(s_sel_atlas, base[0] ? base : NULL, s_sel_sort_ptr, n);
+    tp_names_common_prefix(s_sel_sort_ptr, n, base, sizeof base);
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas = snapshot
+                                         ? tp_session_snapshot_atlas_at(snapshot,
+                                                                        s_sel_atlas)
+                                         : NULL;
+    const int idx = atlas ? gui_project_create_animation(
+                                atlas->id, tp_session_snapshot_revision(snapshot),
+                                base[0] ? base : NULL, s_sel_sort_ptr, n)
+                          : -1;
     if (idx >= 0) {
         s_sel_anim = idx;
         s_sel_anim_frame = -1;
-        tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
-        set_statusf("Created animation '%s' with %d frame(s) (Ctrl+Z to undo).", a->animations[idx].name, n);
+        const tp_session_snapshot *after = gui_project_snapshot();
+        const tp_snapshot_atlas *a = after ? tp_session_snapshot_atlas_at(after, s_sel_atlas) : NULL;
+        const tp_snapshot_animation *created = a ? tp_session_snapshot_animation_at(after, a->id, idx) : NULL;
+        set_statusf("Created animation '%s' with %d frame(s) (Ctrl+Z to undo).",
+                    created ? created->name : "?", n);
     }
     return idx;
 }
@@ -615,20 +883,28 @@ void add_selection_frames_to_anim(int anim_index) {
     if (n <= 0) {
         return; /* OOM in the sort scratch (status already set) -- do nothing rather than truncate */
     }
-    gui_edit_anim_add_frames(s_sel_atlas, anim_index, s_sel_sort_ptr, n);
+    gui_animation_ref animation;
+    if (!gui_project_animation_ref_at(s_sel_atlas, anim_index, &animation)) {
+        return;
+    }
+    gui_edit_anim_add_frames(&animation, s_sel_sort_ptr, n);
     set_statusf("Adding %d frame(s) to the animation (Ctrl+Z to undo).", n); /* lands on the next drain */
 }
 
 /* Opens the preview player on animation `anim_index` (plays from the packed regions; if the atlas is
  * not packed yet, the canvas shows a "Pack to preview" hint). */
 void open_preview(int anim_index) {
-    tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
-    if (!a || anim_index < 0 || anim_index >= a->animation_count) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *a = snapshot ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas) : NULL;
+    const tp_snapshot_animation *animation = a ? tp_session_snapshot_animation_at(snapshot, a->id, anim_index) : NULL;
+    if (!animation) {
         return;
     }
     cancel_edit();
     preview_target_reset(); /* the anim player owns the canvas -> never leave an export preview bound under it */
     s_sel_anim = anim_index;
+    s_preview_animation_ref = (gui_animation_ref){
+        a->id, animation->id, tp_session_snapshot_revision(snapshot)};
     s_preview_active = true;
     s_preview_playing = true;
     s_preview_finished = false;
@@ -636,7 +912,7 @@ void open_preview(int anim_index) {
     if (!gui_pack_result(s_sel_atlas)) {
         set_status("Pack (Ctrl+P) to preview the animation on packed regions.");
     } else {
-        set_statusf("Previewing '%s' \xE2\x80\x94 Space play/pause.", a->animations[anim_index].name);
+        set_statusf("Previewing '%s' \xE2\x80\x94 Space play/pause.", animation->name);
     }
 }
 
@@ -660,7 +936,7 @@ void preview_step(int delta) {
     if (!s_preview_active) {
         return;
     }
-    const tp_project_anim *an = current_anim();
+    const tp_snapshot_animation *an = current_anim();
     const float fps = (an && an->fps >= 1.0F) ? an->fps : 1.0F;
     s_preview_playing = false;
     s_preview_finished = false;
@@ -678,7 +954,7 @@ void update_preview(void) {
     if (!s_preview_active) {
         return;
     }
-    tp_project_anim *an = current_anim();
+    const tp_snapshot_animation *an = current_anim();
     const tp_result *pr = gui_pack_result(s_sel_atlas);
     s_canvas.anim_sprite = -1;
     s_preview_frame_count = 0;
@@ -707,7 +983,16 @@ void update_preview(void) {
     int rw = 1;
     int rh = 1;
     for (int i = 0; i < an->frame_count && n < idxs_cap; i++) {
-        const int si = gui_pack_find_sprite(s_sel_atlas, an->frames[i].name);
+        const tp_session_snapshot *snapshot = gui_project_snapshot();
+        const tp_snapshot_atlas *atlas = snapshot ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas) : NULL;
+        const tp_snapshot_frame *frame = atlas
+                                             ? tp_session_snapshot_animation_frame_at(
+                                                   snapshot, atlas->id, an->id, i)
+                                             : NULL;
+        const int si = frame ? gui_pack_find_sprite_ref(
+                                   s_sel_atlas, frame->source_id,
+                                   frame->source_key)
+                             : -1;
         if (si >= 0 && si < pr->sprite_count) {
             idxs[n++] = si;
             if (pr->sprites[si].sourceSize.w > rw) {
@@ -811,6 +1096,35 @@ static void do_save(void) {
     }
 }
 
+void gui_request_remove_animation(int animation_index) {
+    gui_animation_ref animation;
+    if (gui_project_animation_ref_at(s_sel_atlas, animation_index, &animation)) {
+        s_pending_remove_anim = true;
+        s_pending_remove_anim_ref = animation;
+    }
+}
+
+void gui_request_remove_target(int target_index) {
+    gui_target_ref target;
+    if (gui_project_target_ref_at(s_sel_atlas, target_index, &target)) {
+        s_pending_remove_target = true;
+        s_pending_remove_target_ref = target;
+    }
+}
+
+static bool selected_atlas_intent(tp_id128 *atlas_id, int64_t *revision) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas = snapshot
+                                         ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas)
+                                         : NULL;
+    if (!atlas) {
+        return false;
+    }
+    *atlas_id = atlas->id;
+    *revision = tp_session_snapshot_revision(snapshot);
+    return true;
+}
+
 static void do_add_files(void) {
     static const char *filt[] = {"*.png", "*.jpg", "*.jpeg", "*.bmp", "*.tga"};
     const char *res = tinyfd_openFileDialog("Add Image Files", "", 5, filt, "image files", 1);
@@ -855,7 +1169,11 @@ static void do_add_files(void) {
         start = bar + 1;
     }
     /* These come from the file-picker dialog: record the true kind. One atomic transaction, one undo step. */
-    const bool ok = gui_project_add_sources(s_sel_atlas, ptrs, n, TP_SOURCE_KIND_FILE, &added, &dup);
+    tp_id128 atlas_id;
+    int64_t revision = 0;
+    const bool ok = selected_atlas_intent(&atlas_id, &revision) &&
+                    gui_project_add_sources(atlas_id, revision, ptrs, n,
+                                            TP_SOURCE_KIND_FILE, &added, &dup);
     if (!ok) {
         /* the whole atomic batch was rejected (journal/disk-full, OOM, core) -- the reason is already on
          * the op-error channel; make THIS line an ERROR too, not a benign info-toned "Added 0". */
@@ -874,9 +1192,17 @@ static void do_add_files(void) {
 /* Best-effort relativize `abs` against the project dir (targets travel like sources).
  * Absolute paths outside the project dir are kept as-is (usable, save leaves them). */
 static void relativize_to_project(const char *abs, char *out, size_t cap) {
-    tp_project *p = gui_project_get();
-    const char *dir = p ? p->project_dir : NULL;
-    if (dir && dir[0] != '\0') {
+    char dir[TP_IDENTITY_PATH_MAX];
+    (void)snprintf(dir, sizeof dir, "%s", gui_project_path());
+    char *slash = strrchr(dir, '/');
+    char *backslash = strrchr(dir, '\\');
+    char *last = !slash ? backslash : (!backslash || slash > backslash ? slash : backslash);
+    if (last) {
+        *last = '\0';
+    } else {
+        dir[0] = '\0';
+    }
+    if (dir[0] != '\0') {
         const size_t dl = strlen(dir);
         if (strncmp(abs, dir, dl) == 0 && (abs[dl] == '/' || abs[dl] == '\\')) {
             (void)snprintf(out, cap, "%s", abs + dl + 1);
@@ -892,31 +1218,79 @@ static bool flush_failed(void); /* defined below; a discrete browse is a flush-f
 
 /* Save dialog for a target's output path, relativized to the project like sources. Atlas-explicit so
  * the Export dialog (which spans all atlases) can browse any target, not just the selected atlas's. */
-static void do_browse_target_at(int atlas, int ti) {
+static void do_browse_target(const gui_target_ref *queued) {
     /* H/G3: commit any BUFFERED out-path gesture FIRST so the Save dialog seeds from the just-typed path,
      * not a stale committed one (clicking the "..." button is in-panel, so no blur gesture-commit fired).
      * Route through flush_failed() like every other flush-first entry: a journal-failed flush surfaces the
      * error and ABORTS -- never pop a Save dialog over a rejected-commit model. Re-fetch a/t AFTER the flush
-     * (a committed flush clone-swaps the project). An empty path is never buffered, so no empty-reject here. */
+     * (a committed flush clone-swaps the project). */
     if (flush_failed()) {
         return;
     }
-    tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), atlas);
-    if (!a || ti < 0 || ti >= a->target_count) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *a = snapshot && queued
+                                     ? tp_session_snapshot_atlas_by_id(snapshot,
+                                                                        queued->atlas_id)
+                                     : NULL;
+    const tp_snapshot_target *t = a
+                                      ? tp_session_snapshot_target_by_id(
+                                            snapshot, a->id, queued->target_id)
+                                      : NULL;
+    if (!t) {
         return;
     }
-    const tp_project_target *t = &a->targets[ti];
+    const gui_target_ref target = {
+        .atlas_id = a->id,
+        .target_id = t->id,
+        .expected_revision = tp_session_snapshot_revision(snapshot),
+    };
+    char exporter_id[256];
+    (void)snprintf(exporter_id, sizeof exporter_id, "%s", t->exporter_id);
+    const bool enabled = t->enabled;
     const char *path = tinyfd_saveFileDialog("Export output path", t->out_path, 0, NULL, NULL);
     if (!path) {
         return;
     }
     char rel[600];
     relativize_to_project(path, rel, sizeof rel);
-    if (gui_project_set_target(atlas, ti, t->exporter_id, rel, t->enabled)) {
+    if (gui_project_set_target(&target, exporter_id, rel, enabled)) {
         set_statusf("Output path: %s", rel);
     }
 }
-static void do_browse_target(int ti) { do_browse_target_at(s_sel_atlas, ti); }
+
+void gui_request_browse_target(int atlas_index, int target_index) {
+    gui_target_ref target;
+    if (gui_project_target_ref_at(atlas_index, target_index, &target)) {
+        s_pending_browse_target = true;
+        s_pending_browse_target_ref = target;
+    }
+}
+
+void gui_request_add_target(int atlas_index) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas = snapshot
+                                         ? tp_session_snapshot_atlas_at(snapshot,
+                                                                        atlas_index)
+                                         : NULL;
+    if (atlas) {
+        s_pending_add_target = true;
+        s_pending_add_target_atlas_id = atlas->id;
+        s_pending_add_target_revision = tp_session_snapshot_revision(snapshot);
+    }
+}
+
+void gui_request_add_animation(int atlas_index) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas = snapshot
+                                         ? tp_session_snapshot_atlas_at(snapshot,
+                                                                        atlas_index)
+                                         : NULL;
+    if (atlas) {
+        s_pending_add_anim = true;
+        s_pending_add_anim_atlas_id = atlas->id;
+        s_pending_add_anim_revision = tp_session_snapshot_revision(snapshot);
+    }
+}
 
 static void do_add_folder(void) {
     const char *dir = tinyfd_selectFolderDialog("Add Folder", "");
@@ -926,7 +1300,11 @@ static void do_add_folder(void) {
     char norm[600];
     (void)snprintf(norm, sizeof norm, "%s", dir);
     normalize_slashes(norm);
-    const gui_add_status r = gui_project_add_source(s_sel_atlas, norm);
+    tp_id128 atlas_id;
+    int64_t revision = 0;
+    const gui_add_status r = selected_atlas_intent(&atlas_id, &revision)
+                                 ? gui_project_add_source(atlas_id, revision, norm)
+                                 : GUI_ADD_FAILED;
     if (r == GUI_ADD_ADDED) {
         set_statusf("Added folder %s", path_last(norm));
     } else if (r == GUI_ADD_DUPLICATE) {
@@ -1078,12 +1456,16 @@ typedef struct fp_entry {
 } fp_entry;
 
 static void fp_collect(fp_entry **arr, int *count, int *cap) {
-    tp_project *p = gui_project_get();
-    for (int ai = 0; p && ai < p->atlas_count; ai++) {
-        const tp_project_atlas *a = &p->atlases[ai];
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const int atlas_count = snapshot ? tp_session_snapshot_atlas_count(snapshot) : 0;
+    for (int ai = 0; ai < atlas_count; ai++) {
+        const tp_snapshot_atlas *a = tp_session_snapshot_atlas_at(snapshot, ai);
         for (int si = 0; si < a->source_count; si++) {
+            const tp_snapshot_source *source = tp_session_snapshot_source_at(snapshot, a->id, si);
             char abs[512];
-            if (tp_project_resolve_path(p, a->sources[si].path, abs, sizeof abs) != TP_STATUS_OK) {
+            tp_error err = {0};
+            if (!source || tp_session_snapshot_resolve_path(snapshot, a->id, source->id,
+                                                            abs, sizeof abs, &err) != TP_STATUS_OK) {
                 continue;
             }
             if (gui_scan_is_dir(abs)) {
@@ -1141,7 +1523,7 @@ static void do_refresh(void) {
     int bc = 0;
     fp_collect(&before, &bn, &bc);
 
-    gui_scan_invalidate_all(); /* drop per-dir caches so fp_collect below rescans disk */
+    gui_project_invalidate_sources(); /* publish the external runtime refresh */
 
     fp_entry *after = NULL;
     int an = 0;
@@ -1173,16 +1555,17 @@ static void do_refresh(void) {
     set_statusf("Refresh: +%d new, %d removed, %d changed", added, removed, changed);
 }
 
-/* Ctrl+P / Pack: pack the selected atlas in-process (gui_pack -> tp_pack). On success clear the
+/* Ctrl+P / Pack: start the selected atlas's typed session Pack job. On success clear the
  * preview-stale bit and upload the packed pages to the canvas (atlas-page view); on failure the
  * previous result + the "outdated" tag stay (ux.md §3.3b). */
-/* Blocking pack of the selected atlas (deterministic path for the selftest + --shot). Interactive
- * Pack (do_pack) runs this on a worker thread; the result lands via poll_async. */
+/* Blocking pack of the selected atlas (deterministic path for selftest + --shot). Interactive
+ * Pack starts the same session job and polls its typed result at frame boundaries. */
 void do_pack_blocking(void) {
     if (flush_failed()) {
         return; /* fix2 [1]: a journal-failed flush dropped the edit -> abort (never pack a stale model + report success) */
     }
-    tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *a = snapshot ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas) : NULL;
     if (!a || a->source_count == 0) {
         set_status_ex(STATUS_WARNING, "No sources to pack -- add a smart folder or files first.");
         return;
@@ -1213,7 +1596,8 @@ void do_pack(void) {
     if (flush_failed()) {
         return; /* fix2 [1]: a journal-failed flush dropped the edit -> abort (never pack a stale model + report success) */
     }
-    tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *a = snapshot ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas) : NULL;
     if (!a || a->source_count == 0) {
         set_status_ex(STATUS_WARNING, "No sources to pack -- add a smart folder or files first.");
         return;
@@ -1284,7 +1668,8 @@ static void preview_target_start(int combo_index) {
         preview_target_reset();
         return;
     }
-    tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *a = snapshot ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas) : NULL;
     if (!a || a->source_count == 0) {
         set_status_ex(STATUS_WARNING, "Add sources first to preview an export target.");
         preview_target_reset();
@@ -1298,7 +1683,7 @@ static void preview_target_start(int combo_index) {
     char err[256] = {0};
     if (gui_pack_preview_async_start(s_sel_atlas, e->id, err, sizeof err)) {
         s_preview_target = combo_index;
-        s_preview_ver = gui_project_model_version();
+        s_preview_ver = gui_project_snapshot_model_generation();
         set_statusf_ex(STATUS_INFO, "Preview: %s\xE2\x80\xA6", e->display_name ? e->display_name : e->id);
     } else {
         preview_target_reset();
@@ -1309,7 +1694,8 @@ static void preview_target_start(int combo_index) {
 /* Per-frame reconciliation: a model edit since the preview packed makes it stale -> drop to Native (never
  * show a silently-wrong preview). Atlas switch / undo / redo / open / new drop it via reset_selection. */
 static void preview_target_sync(void) {
-    if (s_preview_target != 0 && gui_project_model_version() != s_preview_ver) {
+    if (s_preview_target != 0 &&
+        gui_project_snapshot_model_generation() != s_preview_ver) {
         preview_target_reset();
     }
 }
@@ -1387,12 +1773,6 @@ static void poll_async(void) {
         default:
             break;
     }
-    /* Surface a pending id-promotion fault recorded by a snapshot/touch (OS-RNG
-     * failure): the model kept its nil ids, so warn loudly instead of swallowing it. */
-    char id_err[256];
-    if (gui_project_take_id_error(id_err, sizeof id_err)) {
-        set_statusf_ex(STATUS_ERROR, "Structural id assignment failed: %s", id_err);
-    }
     /* Surface a pending transaction REJECT (core rejected a mutator's op -- out-of-range value
      * or bad reference): the model was left byte-unchanged, so report it as a soft error
      * (F2-05b-i). In practice the widgets clamp valid ranges, so this rarely fires. */
@@ -1407,7 +1787,13 @@ static void poll_async(void) {
 void commit_sprite_rename(void) {
     /* empty input clears the override back to the file-derived name. (Reached only via commit_active_edit,
      * which flush-firsts, so set_sprite_rename's own flush is a no-op here.) */
-    if (gui_project_set_sprite_rename(s_sel_atlas, s_edit_sprite, s_edit_buf)) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    if (snapshot && tp_session_snapshot_atlas_by_id(snapshot, s_edit_sprite_atlas_id)) {
+        s_edit_sprite_revision = tp_session_snapshot_revision(snapshot);
+    }
+    const gui_sprite_ref sprite = {s_edit_sprite_atlas_id, s_edit_sprite_source_id,
+                                   s_edit_sprite_source_key, s_edit_sprite_revision};
+    if (gui_project_set_sprite_rename(&sprite, s_edit_buf)) {
         if (s_edit_buf[0] == '\0') {
             set_statusf("Cleared rename on '%s'", s_edit_sprite);
         } else {
@@ -1444,29 +1830,42 @@ static void commit_active_edit(bool force) {
         return;
     }
     if (s_edit_kind == EDIT_ATLAS) {
-        char err[128];
-        if (!atlas_name_valid(s_edit_buf, s_edit_atlas, err, sizeof err)) {
-            set_status_ex(STATUS_WARNING, err);
+        const tp_session_snapshot *snapshot = gui_project_snapshot();
+        if (!snapshot || !tp_session_snapshot_atlas_by_id(snapshot, s_edit_atlas_id)) {
+            set_status_ex(STATUS_WARNING, "The atlas changed before the rename could be applied.");
+            cancel_edit();
+            return;
+        }
+        s_edit_atlas_revision = tp_session_snapshot_revision(snapshot);
+        if (!gui_project_set_atlas_name(s_edit_atlas_id, s_edit_atlas_revision,
+                                        s_edit_buf)) {
+            char atlas_err[256];
+            if (gui_project_take_op_error(atlas_err, sizeof atlas_err)) {
+                set_status_ex(STATUS_WARNING, atlas_err);
+            } else {
+                set_status_ex(STATUS_ERROR, "Could not rename the atlas.");
+            }
             if (force) {
                 cancel_edit();
             }
             return;
         }
-        if (gui_project_set_atlas_name(s_edit_atlas, s_edit_buf)) {
-            set_statusf("Renamed atlas to '%s'", s_edit_buf);
+        char committed_name[256];
+        tp_error read_error = {0};
+        if (gui_project_copy_atlas_name(s_edit_atlas_id, committed_name,
+                                        sizeof committed_name, &read_error) == TP_STATUS_OK) {
+            set_statusf("Renamed atlas to '%s'", committed_name);
+        } else {
+            set_status_ex(STATUS_ERROR,
+                          read_error.msg[0] ? read_error.msg : "Renamed atlas could not be read back.");
         }
         cancel_edit();
     } else if (s_edit_kind == EDIT_SPRITE) {
         commit_sprite_rename();
     } else if (s_edit_kind == EDIT_ANIM) {
-        if (s_edit_buf[0] == '\0') {
-            set_status_ex(STATUS_WARNING, "Animation name cannot be empty.");
-            if (force) {
-                cancel_edit();
-            }
-            return;
-        }
-        if (!gui_project_set_anim_id(s_sel_atlas, s_edit_anim, s_edit_buf)) {
+        gui_animation_ref animation;
+        if (!gui_project_animation_ref_at(s_sel_atlas, s_edit_anim, &animation) ||
+            !gui_project_set_anim_id(&animation, s_edit_buf)) {
             /* H/P1-2: animation rename is a first-class op now (undoable + journaled), so a false is a
              * core REJECT -- a name collision (validate enforces uniqueness) or a rare OOM/stale-index
              * failure. The structured reject rides commit_txn_now's op-error channel, so surface it
@@ -1667,62 +2066,109 @@ void apply_pending(void) {
         if (idx >= 0) {
             s_sel_atlas = idx;
             reset_selection();
-            set_statusf("Added atlas '%s'", tp_project_get_atlas(gui_project_get(), idx)->name);
+            const tp_snapshot_atlas *added = tp_session_snapshot_atlas_at(gui_project_snapshot(), idx);
+            set_statusf("Added atlas '%s'", added ? added->name : "?");
         }
     }
-    if (s_pending_remove_source >= 0) {
+    if (s_pending_remove_source) {
         /* fix3 [0]: side-effects + "Removed" run ONLY on a real removal -- a journal-failed flush
          * aborts the wrapper (returns false), so no false "Removed" / bad Ctrl+Z (op-error surfaced). */
-        if (gui_project_remove_source(s_sel_atlas, s_pending_remove_source)) {
+        if (gui_project_remove_source(s_pending_remove_source_atlas_id,
+                                      s_pending_remove_source_id,
+                                      s_pending_remove_source_revision)) {
             reset_selection();
             set_status("Removed source (Ctrl+Z to undo).");
         }
     }
-    if (s_pending_remove_atlas >= 0) {
-        if (gui_project_remove_atlas(s_pending_remove_atlas)) {
+    if (s_pending_remove_atlas) {
+        if (gui_project_remove_atlas(s_pending_remove_atlas_id,
+                                     s_pending_remove_atlas_revision)) {
             clamp_selection();
             reset_selection();
             set_status("Removed atlas (Ctrl+Z to undo).");
         }
     }
     if (s_pending_add_target) {
-        const int ti = gui_project_add_target(s_sel_atlas);
+        const int ti = gui_project_add_target(s_pending_add_target_atlas_id,
+                                              s_pending_add_target_revision);
         if (ti >= 0) {
             set_status("Added export target (Ctrl+Z to undo).");
         }
     }
-    if (s_pending_remove_target >= 0) {
-        if (gui_project_remove_target(s_sel_atlas, s_pending_remove_target)) {
+    if (s_pending_remove_target) {
+        if (gui_project_remove_target(&s_pending_remove_target_ref)) {
             set_status("Removed export target (Ctrl+Z to undo).");
         }
     }
-    if (s_pending_export_browse_atlas >= 0 && s_pending_export_browse_target >= 0) {
-        do_browse_target_at(s_pending_export_browse_atlas, s_pending_export_browse_target);
-    }
-    if (s_pending_browse_target >= 0) {
-        do_browse_target(s_pending_browse_target);
+    if (s_pending_browse_target) {
+        do_browse_target(&s_pending_browse_target_ref);
     }
     if (s_pending_add_anim) {
-        const int idx = gui_project_create_animation(s_sel_atlas, NULL, NULL, 0);
+        const int idx = gui_project_create_animation(
+            s_pending_add_anim_atlas_id, s_pending_add_anim_revision,
+            NULL, NULL, 0);
         if (idx >= 0) {
-            s_sel_anim = idx;
-            s_sel_anim_frame = -1;
-            set_statusf("Added animation '%s' (Ctrl+Z to undo).",
-                        tp_project_get_atlas(gui_project_get(), s_sel_atlas)->animations[idx].name);
+            const tp_session_snapshot *after_snapshot = gui_project_snapshot();
+            const tp_snapshot_atlas *after_atlas = after_snapshot
+                ? tp_session_snapshot_atlas_by_id(
+                      after_snapshot, s_pending_add_anim_atlas_id)
+                : NULL;
+            const tp_snapshot_animation *animation = after_atlas
+                                                         ? tp_session_snapshot_animation_at(after_snapshot, after_atlas->id, idx)
+                                                         : NULL;
+            const tp_snapshot_atlas *selected = after_snapshot
+                ? tp_session_snapshot_atlas_at(after_snapshot, s_sel_atlas)
+                : NULL;
+            if (selected && tp_id128_eq(selected->id, s_pending_add_anim_atlas_id)) {
+                s_sel_anim = idx;
+                s_sel_anim_frame = -1;
+            }
+            set_statusf("Added animation '%s' (Ctrl+Z to undo).", animation ? animation->name : "?");
         }
     }
-    if (s_pending_create_anim) {
-        (void)create_animation_from_selection();
+    if (s_pending_create_anim.active) {
+        const int idx = gui_project_create_animation(
+            s_pending_create_anim.atlas_id,
+            s_pending_create_anim.expected_revision,
+            s_pending_create_anim.name[0] ? s_pending_create_anim.name : NULL,
+            (const char *const *)s_pending_create_anim.frames,
+            s_pending_create_anim.frame_count);
+        if (idx >= 0) {
+            const tp_session_snapshot *after_snapshot = gui_project_snapshot();
+            const tp_snapshot_atlas *after_atlas = after_snapshot
+                ? tp_session_snapshot_atlas_by_id(
+                      after_snapshot, s_pending_create_anim.atlas_id)
+                : NULL;
+            const tp_snapshot_animation *animation = after_atlas
+                ? tp_session_snapshot_animation_at(after_snapshot,
+                                                   after_atlas->id, idx)
+                : NULL;
+            const tp_snapshot_atlas *selected = after_snapshot
+                ? tp_session_snapshot_atlas_at(after_snapshot, s_sel_atlas)
+                : NULL;
+            if (selected &&
+                tp_id128_eq(selected->id, s_pending_create_anim.atlas_id)) {
+                s_sel_anim = idx;
+                s_sel_anim_frame = -1;
+            }
+            set_statusf("Created animation '%s' with %d frame(s) (Ctrl+Z to undo).",
+                        animation ? animation->name : "?",
+                        s_pending_create_anim.frame_count);
+        }
     }
-    if (s_pending_remove_anim >= 0) {
-        tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
-        if (a && s_pending_remove_anim < a->animation_count) {
+    pending_create_animation_dispose(&s_pending_create_anim);
+    if (s_pending_remove_anim) {
             /* fix3 [0]: preview_stop + the selection reset + "Removed" run ONLY on a real removal. A
              * journal-failed flush aborts the wrapper (returns false) -> the animation is still there,
              * so we must NOT stop its preview or clear the selection. (preview_stop only resets flags,
              * so running it AFTER the removal is safe -- no project deref.) */
-            const bool was_previewing = (s_preview_active && s_sel_anim == s_pending_remove_anim);
-            if (gui_project_remove_animation(s_sel_atlas, a->animations[s_pending_remove_anim].name)) {
+            const bool was_previewing =
+                s_preview_active &&
+                tp_id128_eq(s_preview_animation_ref.atlas_id,
+                            s_pending_remove_anim_ref.atlas_id) &&
+                tp_id128_eq(s_preview_animation_ref.animation_id,
+                            s_pending_remove_anim_ref.animation_id);
+            if (gui_project_remove_animation(&s_pending_remove_anim_ref)) {
                 if (was_previewing) {
                     preview_stop();
                 }
@@ -1730,10 +2176,15 @@ void apply_pending(void) {
                 s_sel_anim_frame = -1;
                 set_status("Removed animation (Ctrl+Z to undo).");
             }
-        }
     }
     if (s_pending_open_preview) {
-        open_preview(s_sel_anim);
+        int atlas_index = -1;
+        int animation_index = -1;
+        if (resolve_animation_ref(&s_pending_open_preview_ref, &atlas_index,
+                                  &animation_index)) {
+            s_sel_atlas = atlas_index;
+            open_preview(animation_index);
+        }
     }
     if (s_pending_refresh) {
         do_refresh();
@@ -1752,14 +2203,26 @@ void apply_pending(void) {
     s_pending_add_files = s_pending_add_folder = s_pending_add_atlas = false;
     s_pending_refresh = s_pending_pack = s_pending_export = false;
     s_pending_add_target = false;
-    s_pending_add_anim = s_pending_create_anim = s_pending_open_preview = false;
-    s_pending_remove_source = -1;
-    s_pending_remove_atlas = -1;
-    s_pending_remove_target = -1;
-    s_pending_export_browse_atlas = -1;
-    s_pending_export_browse_target = -1;
-    s_pending_remove_anim = -1;
-    s_pending_browse_target = -1;
+    s_pending_add_target_atlas_id = tp_id128_nil();
+    s_pending_add_target_revision = 0;
+    s_pending_add_anim = false;
+    s_pending_open_preview = false;
+    memset(&s_pending_open_preview_ref, 0,
+           sizeof s_pending_open_preview_ref);
+    s_pending_add_anim_atlas_id = tp_id128_nil();
+    s_pending_add_anim_revision = 0;
+    s_pending_remove_source = false;
+    s_pending_remove_source_atlas_id = tp_id128_nil();
+    s_pending_remove_source_id = tp_id128_nil();
+    s_pending_remove_source_revision = 0;
+    s_pending_remove_atlas = false;
+    s_pending_remove_atlas_id = tp_id128_nil();
+    s_pending_remove_atlas_revision = 0;
+    s_pending_remove_target = false;
+    s_pending_remove_anim = false;
+    s_pending_browse_target = false;
+    memset(&s_pending_browse_target_ref, 0,
+           sizeof s_pending_browse_target_ref);
     s_pending_preview_target = -1;
 }
 // #endregion

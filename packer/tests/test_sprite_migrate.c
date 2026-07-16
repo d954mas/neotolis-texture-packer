@@ -138,7 +138,8 @@ void test_pending_resolves_and_persists_v4(void) {
     tp_project *p2 = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_load(proj, &p2, &e));
     tp_project_atlas *a2 = tp_project_get_atlas(p2, 0);
-    tp_project_sprite *sp2 = tp_project_atlas_find_sprite(a2, "hero");
+    tp_project_sprite *sp2 = tp_project_atlas_find_sprite_by_source_key(
+        a2, sid, "hero.png");
     TEST_ASSERT_NOT_NULL_MESSAGE(sp2, "the name bridge must still resolve after reload");
     TEST_ASSERT_EQUAL_STRING("hero.png", sp2->src_key);
     TEST_ASSERT_TRUE(tp_id128_eq(sp2->source_ref, sid));
@@ -146,8 +147,8 @@ void test_pending_resolves_and_persists_v4(void) {
     tp_project_destroy(p2);
 }
 
-/* A pending override whose name resolves to no scanned sprite stays pending (a soft
- * orphan), never guessed onto some other sprite. */
+/* A missing legacy reference remains an inert pending orphan. With the normal
+ * name fallback removed it cannot apply until exactly one sprite reappears. */
 void test_unresolved_stays_pending(void) {
     char root[600];
     (void)snprintf(root, sizeof root, "%s/mig_orphan", g_dir);
@@ -167,12 +168,54 @@ void test_unresolved_stays_pending(void) {
     tp_sprite_index idx;
     tp_error e = {0};
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_sprite_index_build(p, 0, &idx, &e));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_resolve_atlas_sprites(p, 0, &idx, &e));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_resolve_atlas_sprites(p, 0, &idx, &e));
     tp_sprite_index_free(&idx);
 
     TEST_ASSERT_TRUE_MESSAGE(tp_id128_is_nil(sp->source_ref), "an unresolved name stays a pending soft-orphan");
     TEST_ASSERT_NULL(sp->src_key);
     tp_project_destroy(p);
+}
+
+void test_ambiguous_legacy_reference_rejects_without_mutation(void) {
+    char left[600];
+    char right[600];
+    (void)snprintf(left, sizeof left, "%s/mig_ambiguous_left", g_dir);
+    (void)snprintf(right, sizeof right, "%s/mig_ambiguous_right", g_dir);
+    mkdir_p(left);
+    mkdir_p(right);
+    char path[800];
+    (void)snprintf(path, sizeof path, "%s/hero.png", left);
+    write_file(path, "L");
+    (void)snprintf(path, sizeof path, "%s/hero.png", right);
+    write_file(path, "R");
+
+    tp_project *project = tp_project_create();
+    tp_project_atlas *atlas = tp_project_get_atlas(project, 0);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_source(atlas, left));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_source(atlas, right));
+    atlas->sources[0].id = seeded_id(0x31U);
+    atlas->sources[1].id = seeded_id(0x32U);
+    tp_project_sprite *sprite = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_pending_sprite(atlas, "hero",
+                                                              &sprite));
+    sprite->origin_x = 0.2F;
+    tp_sprite_index index;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_sprite_index_build(project, 0, &index, &error));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_project_resolve_atlas_sprites(project, 0, &index,
+                                                           &error));
+    TEST_ASSERT_NOT_NULL(strstr(error.msg, "ambiguous"));
+    tp_sprite_index_free(&index);
+    TEST_ASSERT_TRUE(tp_id128_is_nil(sprite->source_ref));
+    TEST_ASSERT_NULL(sprite->src_key);
+    TEST_ASSERT_TRUE(sprite->origin_x > 0.19F && sprite->origin_x < 0.21F);
+    tp_project_destroy(project);
 }
 
 /* A migrated record whose source file disappears keeps its stored identity and
@@ -464,6 +507,7 @@ int main(int argc, char **argv) {
     UNITY_BEGIN();
     RUN_TEST(test_pending_resolves_and_persists_v4);
     RUN_TEST(test_unresolved_stays_pending);
+    RUN_TEST(test_ambiguous_legacy_reference_rejects_without_mutation);
     RUN_TEST(test_orphan_reactivates_on_key_return);
     RUN_TEST(test_frames_resolve_persist_and_survive_reorder);
     RUN_TEST(test_v4_sprite_record_load_order_independent);

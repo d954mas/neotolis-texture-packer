@@ -26,6 +26,8 @@
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_transaction.h"
 #include "tp_diff_internal.h"
+#include "tp_journal_internal.h"
+#include "tp_project_internal.h"
 #include "tp_txn_internal.h"
 
 /* ---- diff record + per-op entry lifecycle -------------------------------- */
@@ -111,7 +113,16 @@ void tp_diff_record_push_op(tp_diff_record *r, tp_diff_op *e) {
 
 tp_history *tp_history_create(void) {
     tp_history *h = (tp_history *)calloc(1, sizeof *h);
-    return h; /* records=NULL, count=cap=pos=0 */
+    if (!h) {
+        return NULL;
+    }
+    h->records = (tp_diff_record **)calloc((size_t)TP_HISTORY_MAX_STEPS, sizeof *h->records);
+    if (!h->records) {
+        free(h);
+        return NULL;
+    }
+    h->cap = TP_HISTORY_MAX_STEPS;
+    return h;
 }
 
 void tp_history_destroy(tp_history *h) {
@@ -125,50 +136,102 @@ void tp_history_destroy(tp_history *h) {
     free(h);
 }
 
-/* Test-only fault seam (fix [3] pin): force the next history-slot grow to report OOM
- * once, then re-arm to off. Lets a test prove a reserve OOM happens BEFORE the id is
+/* Test-only fault seam (fix [3] pin): force the next history admission to report OOM
+ * once, then re-arm to off. Lets a test prove the failure happens BEFORE the id is
  * recorded, so the same transaction id stays retryable (never poisoned to DUPLICATE_ID). */
-static bool s_reserve_fail = false;
+static _Thread_local bool s_reserve_fail = false;
+static _Thread_local int s_test_max_steps = 0;
+static _Thread_local size_t s_test_max_bytes = 0U;
+static _Thread_local size_t s_test_max_record_bytes = 0U;
 void tp_history__test_fail_next_reserve(void) { s_reserve_fail = true; }
 
-tp_status tp_history_reserve(tp_history *h) {
-    if (h->cap >= h->count + 1) {
-        return TP_STATUS_OK;
+void tp_history__test_set_limits(int max_steps, size_t max_bytes, size_t max_record_bytes) {
+    s_test_max_steps = max_steps;
+    s_test_max_bytes = max_bytes;
+    s_test_max_record_bytes = max_record_bytes;
+}
+
+size_t tp_history_record_byte_limit(void) {
+    const size_t max_bytes = s_test_max_bytes > 0U ? s_test_max_bytes : (size_t)TP_HISTORY_MAX_BYTES;
+    const size_t max_record = s_test_max_record_bytes > 0U ? s_test_max_record_bytes
+                                                           : (size_t)TP_HISTORY_MAX_RECORD_BYTES;
+    return max_record < max_bytes ? max_record : max_bytes;
+}
+
+tp_status tp_history_prepare_push(const tp_history *h, const tp_diff_record *r, tp_history_push_plan *plan,
+                                  tp_error *err) {
+    if (!h || !r || !plan) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "invalid history push");
     }
     if (s_reserve_fail) {
         s_reserve_fail = false;
         return TP_STATUS_OOM;
     }
-    int ncap = (h->cap == 0) ? 8 : (h->cap * 2);
-    tp_diff_record **n = (tp_diff_record **)tp_diff__alloc((size_t)ncap * sizeof *n);
-    if (!n) {
-        return TP_STATUS_OOM;
+
+    const int max_steps = s_test_max_steps > 0 ? s_test_max_steps : TP_HISTORY_MAX_STEPS;
+    const size_t max_bytes = s_test_max_bytes > 0U ? s_test_max_bytes : (size_t)TP_HISTORY_MAX_BYTES;
+    const size_t max_record = s_test_max_record_bytes > 0U ? s_test_max_record_bytes
+                                                           : (size_t)TP_HISTORY_MAX_RECORD_BYTES;
+    if (max_steps > h->cap) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "history step limit exceeds fixed capacity");
     }
-    if (h->records && h->count > 0) {
-        memcpy(n, h->records, (size_t)h->count * sizeof *n);
+    if (r->bytes == 0U || r->bytes > max_record || r->bytes > max_bytes) {
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                            "semantic diff has %zu bytes; record maximum is %zu and history maximum is %zu",
+                            r->bytes, max_record, max_bytes);
     }
-    free(h->records);
-    h->records = n;
-    h->cap = ncap;
+
+    size_t kept_bytes = h->bytes;
+    for (int i = h->pos; i < h->count; i++) {
+        kept_bytes -= h->records[i]->bytes; /* redo branch will be discarded after ACK */
+    }
+    int kept_count = h->pos;
+    int drop = 0;
+    while (kept_count >= max_steps || kept_bytes > max_bytes - r->bytes) {
+        if (drop >= h->pos) {
+            return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "semantic diff cannot fit history budget");
+        }
+        kept_bytes -= h->records[drop]->bytes;
+        drop++;
+        kept_count--;
+    }
+    plan->drop_oldest = drop;
+    plan->final_bytes = kept_bytes + r->bytes;
     return TP_STATUS_OK;
 }
 
-void tp_history_push_reserved(tp_history *h, tp_diff_record *r) {
-    /* discard the redo branch (records above the cursor) */
+void tp_history_push_prepared(tp_history *h, tp_diff_record *r, const tp_history_push_plan *plan) {
+    /* No mutation happened during prepare. Redo and FIFO eviction become visible
+     * together here, after the transaction's durable acknowledgement. */
     for (int i = h->pos; i < h->count; i++) {
         tp_diff_record_free(h->records[i]);
         h->records[i] = NULL;
     }
-    h->count = h->pos;
-    h->records[h->count] = r; /* cap ensured by tp_history_reserve */
-    h->count++;
-    h->pos++;
+    for (int i = 0; i < plan->drop_oldest; i++) {
+        tp_diff_record_free(h->records[i]);
+        h->records[i] = NULL;
+    }
+    const int kept = h->pos - plan->drop_oldest;
+    if (kept > 0 && plan->drop_oldest > 0) {
+        memmove(h->records, h->records + plan->drop_oldest, (size_t)kept * sizeof *h->records);
+    }
+    for (int i = kept; i < h->count; i++) {
+        h->records[i] = NULL;
+    }
+    h->records[kept] = r;
+    h->count = kept + 1;
+    h->pos = h->count;
+    h->bytes = plan->final_bytes;
 }
 
 tp_diff_record *tp_history_undo_record(tp_history *h) { return h->pos > 0 ? h->records[h->pos - 1] : NULL; }
 tp_diff_record *tp_history_redo_record(tp_history *h) { return h->pos < h->count ? h->records[h->pos] : NULL; }
-void tp_history_commit_undo(tp_history *h) { h->pos--; }
-void tp_history_commit_redo(tp_history *h) { h->pos++; }
+void tp_history_commit_undo(tp_history *h) {
+    h->pos--;
+}
+void tp_history_commit_redo(tp_history *h) {
+    h->pos++;
+}
 
 /* ---- model-facing history API (tp_diff.h) -------------------------------- */
 
@@ -218,6 +281,15 @@ tp_status tp_model_undo(tp_model *m, tp_error *err) {
     if (st != TP_STATUS_OK) {
         return st;
     }
+    if (m->journal) {
+        /* Reject an already-full journal before staging the semantic clone. The
+         * exact candidate byte admission follows the allocation-free size pass
+         * below, before checkpoint materialization. */
+        st = tp_journal__check_checkpoint_append_bytes(m->journal, 0U, err);
+        if (st != TP_STATUS_OK) {
+            return st;
+        }
+    }
     tp_project *clone = tp_project_clone(m->project);
     if (!clone) {
         return tp_error_set(err, TP_STATUS_OOM, "undo: clone failed");
@@ -227,7 +299,17 @@ tp_status tp_model_undo(tp_model *m, tp_error *err) {
         tp_project_destroy(clone); /* rollback: live model byte-unchanged */
         return st;
     }
-    st = tp_model__append_history_checkpoint(m, clone, revision, err);
+    size_t checkpoint_bytes = 0U;
+    if (m->journal) {
+        st = tp_project_checkpoint_serialized_size_bounded(
+            clone, SIZE_MAX, &checkpoint_bytes, err);
+        if (st != TP_STATUS_OK) {
+            tp_project_destroy(clone);
+            return st;
+        }
+    }
+    st = tp_model__append_history_checkpoint(
+        m, clone, revision, checkpoint_bytes, err);
     if (st != TP_STATUS_OK) {
         tp_project_destroy(clone); /* durable gate rejected: model + revision + cursor unchanged */
         return st;
@@ -252,6 +334,12 @@ tp_status tp_model_redo(tp_model *m, tp_error *err) {
     if (st != TP_STATUS_OK) {
         return st;
     }
+    if (m->journal) {
+        st = tp_journal__check_checkpoint_append_bytes(m->journal, 0U, err);
+        if (st != TP_STATUS_OK) {
+            return st;
+        }
+    }
     tp_project *clone = tp_project_clone(m->project);
     if (!clone) {
         return tp_error_set(err, TP_STATUS_OOM, "redo: clone failed");
@@ -261,7 +349,17 @@ tp_status tp_model_redo(tp_model *m, tp_error *err) {
         tp_project_destroy(clone);
         return st;
     }
-    st = tp_model__append_history_checkpoint(m, clone, revision, err);
+    size_t checkpoint_bytes = 0U;
+    if (m->journal) {
+        st = tp_project_checkpoint_serialized_size_bounded(
+            clone, SIZE_MAX, &checkpoint_bytes, err);
+        if (st != TP_STATUS_OK) {
+            tp_project_destroy(clone);
+            return st;
+        }
+    }
+    st = tp_model__append_history_checkpoint(
+        m, clone, revision, checkpoint_bytes, err);
     if (st != TP_STATUS_OK) {
         tp_project_destroy(clone);
         return st;

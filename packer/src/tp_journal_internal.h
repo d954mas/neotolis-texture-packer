@@ -14,6 +14,12 @@
 
 #include "tp_core/tp_journal.h"
 
+/* Filesystem owners that already opened a regular file with their required
+ * no-follow/create-new policy transfer that native descriptor here. The
+ * returned io owns and closes it. `native_fd` is a CRT fd on every platform. */
+tp_journal_io tp_journal_io_file_adopt_fd(int native_fd);
+tp_journal_io tp_journal_io_file_adopt_fd_read(int native_fd);
+
 /* ---- byte-exact on-disk layout (all #define; never a const array bound, which
  * macOS -Wgnu-folding-constant rejects as a VLA) ------------------------------ */
 #define TP_JRN_MAGIC_LEN 8
@@ -42,8 +48,9 @@
 /* The 8 magic bytes "NTPKJRNL" -- brace-init (NUL-free) so it is exactly 8 bytes. */
 extern const uint8_t tp_jrn_magic[TP_JRN_MAGIC_LEN];
 
-/* Endian-stable CRC-32 (IEEE 0xEDB88320), byte-at-a-time, table-less: same output
- * on every OS. Detects a flipped byte or a torn tail. Seed with 0. */
+/* Endian-stable CRC-32 (IEEE 0xEDB88320), byte-at-a-time with an immutable
+ * 256-entry byte table: same output on every OS. Detects a flipped byte or a
+ * torn tail. Seed with 0. */
 uint32_t tp_jrn_crc32(uint32_t crc, const uint8_t *data, size_t len);
 
 /* Byte-at-a-time big-endian codecs (no memcpy of multi-byte ints, no host-endian
@@ -61,17 +68,83 @@ int64_t tp_jrn_get_i64(const uint8_t *p);
  * record must never hide a later acknowledged append. NULL-safe. */
 void tp_journal__poison(tp_journal *j);
 
-/* R3: true iff the journal is poisoned (refuses further appends). The compaction glue reads it to
- * distinguish a broken-store compaction (truncate OK but the fresh checkpoint could not be written
- * -> poisoned -> detach + run journal-less) from a benign truncate failure (store intact, journal
- * healthy -> keep it). NULL-safe (false). */
+/* Test/recovery diagnostic: true iff the journal is poisoned and refuses further
+ * appends. A poisoned authority remains attached and fails closed. NULL-safe. */
 bool tp_journal__is_poisoned(const tp_journal *j);
+
+/* Aggregate post-checkpoint operation admission shared by the model's pre-clone
+ * gate and the counted durable append. Recovery seeds the exact allocation-free
+ * pre-count before handing the journal back to a live model. */
+tp_status tp_journal__check_replay_operations(const tp_journal *j, size_t add,
+                                              tp_error *err);
+/* Allocation-free writer admission. The model calls this before request
+ * encoding/cloning; the counted append calls it again immediately before
+ * durable staging. Retained duplicate ids are filtered before this seam. */
+tp_status tp_journal__check_append_admission(const tp_journal *j,
+                                             size_t replay_operations,
+                                             tp_error *err);
+/* Allocation-free byte-cap admission for model transactions. The minimum and
+ * exact count-only checks both run before canonical encoding and all mutable
+ * model/history staging. */
+tp_status tp_journal__check_txn_min_bytes(const tp_journal *j, tp_error *err);
+tp_status tp_journal__check_txn_bytes(const tp_journal *j, size_t request_bytes,
+                                      tp_error *err);
+/* Exact checkpoint admission including fixed framing and the journal's retained
+ * ID set. Append uses the current store length and total-frame slot; compact
+ * uses a fresh header because the old store will be replaced. Both are
+ * allocation-free and are repeated by the final journal writer. */
+tp_status tp_journal__check_checkpoint_append_bytes(const tp_journal *j,
+                                                     size_t snapshot_bytes,
+                                                     tp_error *err);
+tp_status tp_journal__check_checkpoint_compact_bytes(const tp_journal *j,
+                                                      size_t snapshot_bytes,
+                                                      tp_error *err);
+tp_status tp_journal__set_replay_operations(tp_journal *j, size_t count,
+                                            tp_error *err);
+
+/* The durable transaction append is not a client-facing journal API. The model
+ * owns the counted acknowledgement gate; recovery codec tests use the uncounted
+ * fixture form for deliberately non-transaction payloads. Both remain internal
+ * so no frontend can invent or omit replay-operation accounting. */
+tp_status tp_journal_append_txn_counted(tp_journal *j, const char *id_hex,
+                                        int64_t revision, const uint8_t *payload,
+                                        size_t len, size_t replay_operations,
+                                        tp_error *err);
+tp_status tp_journal_append_txn(tp_journal *j, const char *id_hex,
+                                int64_t revision, const uint8_t *fixture_payload,
+                                size_t len, tp_error *err);
 
 /* Test-only direct probe for the corruption resync scanner. Returns the same
  * conservative "valid record or budget exhausted" decision as production and
  * reports aggregate CRC bytes without shared mutable state. */
 bool tp_journal__test_has_valid_record_after(const uint8_t *buf, size_t len, size_t from,
                                              size_t *crc_work_out);
+
+/* Test-only ownership probe: true iff every recovered op payload is a bounded span inside the
+ * result's one raw-record owner (therefore no per-operation payload allocation/copy exists). */
+bool tp_journal__test_recovery_ops_borrow_raw(const tp_journal_recovery *recovery);
+
+typedef struct tp_journal_recovery_copy_stats {
+    size_t raw_storage_copies;
+    size_t raw_storage_bytes;
+    size_t checkpoint_payload_copies;
+    size_t checkpoint_payload_bytes;
+    size_t operation_payload_copies;
+    size_t operation_payload_bytes;
+} tp_journal_recovery_copy_stats;
+
+/* Test/benchmark accounting derived from the result's actual ownership graph.
+ * One read_all materialization is the raw-storage copy. Any checkpoint/op span
+ * outside that owner is reported as an additional payload copy. */
+void tp_journal__test_recovery_copy_stats(
+    const tp_journal_recovery *recovery,
+    tp_journal_recovery_copy_stats *out);
+
+/* Test-only deterministic override for the total CRC-valid frame budget.
+ * Zero restores TP_JOURNAL_MAX_RECORDS. */
+void tp_journal__test_set_record_limit(size_t limit);
+/* Zero restores TP_JOURNAL_MAX_FILE_BYTES. */
+void tp_journal__test_set_file_limit(size_t limit);
 
 /* F2-04 fix C1: register an already-durable retained id into the in-memory index
  * WITHOUT writing a record. tp_model_attach_journal calls it to migrate ids the model

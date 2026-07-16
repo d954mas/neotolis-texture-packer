@@ -404,13 +404,10 @@ tp_status tp_project_promote_ids(tp_project *p, const tp_rng *rng, tp_error *err
     return TP_STATUS_OK;
 }
 
-/* F2 ENTRY POINT (groundwork; decision 0009 "Область"). This lazy v3->v4 re-key is
- * currently exercised ONLY by tests, `inspect`, and `validate` -- it has NO production
- * caller yet, so real GUI/CLI projects keep their sprite/frame records in PENDING {name}
- * form and pack/export apply them by the name bridge exactly as before F1-03. The
- * production trigger (a writable session that scans, re-keys, then saves) and the switch
- * to id-based override APPLICATION both land in F2's op-layer (plan F2-01). Until then
- * this is dormant groundwork: correct, atomic, but not wired into any save path. */
+/* Legacy v3/v4 re-key primitive (decision 0009). Session open/snapshot load/save
+ * call it on a project-level clone, then swap only after every atlas succeeds.
+ * A uniquely resolved record becomes canonical; a missing record remains an
+ * inert orphan; ambiguity is a structured failure and commits nothing. */
 tp_status tp_project_resolve_atlas_sprites(tp_project *p, int atlas_index, const struct tp_sprite_index *idx,
                                            tp_error *err) {
     if (!p || !idx) {
@@ -447,6 +444,7 @@ tp_status tp_project_resolve_atlas_sprites(tp_project *p, int atlas_index, const
     }
     size_t staged = 0;
     bool oom = false;
+    tp_status resolve_status = TP_STATUS_OK;
 
     for (int i = 0; i < a->sprite_count && !oom; i++) {
         tp_project_sprite *s = &a->sprites[i];
@@ -456,8 +454,15 @@ tp_status tp_project_resolve_atlas_sprites(tp_project *p, int atlas_index, const
         }
         int matches = 0;
         const tp_sprite_ref *r = tp_sprite_index_by_export_key(idx, s->name, &matches);
-        if (matches != 1 || !r) {
-            continue; /* 0 = soft orphan (keeps applying by name); >1 = ambiguous, never guessed */
+        if (matches == 0 || !r) {
+            continue; /* inert legacy orphan; no name fallback applies it */
+        }
+        if (matches > 1) {
+            resolve_status = tp_error_set(
+                err, TP_STATUS_INVALID_ARGUMENT,
+                "legacy sprite reference '%s' is ambiguous (%d candidates)",
+                s->name, matches);
+            break;
         }
         char *k = tp_strdup(r->source_key);
         if (!k) {
@@ -466,11 +471,11 @@ tp_status tp_project_resolve_atlas_sprites(tp_project *p, int atlas_index, const
         }
         stage[staged] = (rekey_stage){&s->src_key, &s->source_ref, k, r->source_id};
         staged++;
-        /* `name` stays the export-key bridge -- it already equals r->export_key (that
-         * is how the record matched), so the name-based apply path is unchanged. */
+        /* `name` remains display/migration metadata. Normal apply is keyed only by
+         * the canonical pair staged above. */
     }
     /* Animation frame references re-key identically (a frame IS a sprite reference). */
-    for (int ai = 0; ai < a->animation_count && !oom; ai++) {
+    for (int ai = 0; ai < a->animation_count && !oom && resolve_status == TP_STATUS_OK; ai++) {
         tp_project_anim *an = &a->animations[ai];
         for (int f = 0; f < an->frame_count && !oom; f++) {
             tp_project_frame *fr = &an->frames[f];
@@ -480,8 +485,15 @@ tp_status tp_project_resolve_atlas_sprites(tp_project *p, int atlas_index, const
             }
             int fmatches = 0;
             const tp_sprite_ref *r = tp_sprite_index_by_export_key(idx, fr->name, &fmatches);
-            if (fmatches != 1 || !r) {
-                continue;
+            if (fmatches == 0 || !r) {
+                continue; /* inert orphan until one sprite reappears */
+            }
+            if (fmatches > 1) {
+                resolve_status = tp_error_set(
+                    err, TP_STATUS_INVALID_ARGUMENT,
+                    "legacy animation frame '%s' is ambiguous (%d candidates)",
+                    fr->name, fmatches);
+                break;
             }
             char *k = tp_strdup(r->source_key);
             if (!k) {
@@ -493,12 +505,14 @@ tp_status tp_project_resolve_atlas_sprites(tp_project *p, int atlas_index, const
         }
     }
 
-    if (oom) {
+    if (oom || resolve_status != TP_STATUS_OK) {
         for (size_t j = 0; j < staged; j++) {
             free(stage[j].new_key); /* nothing committed to the model yet -- model unchanged */
         }
         free(stage);
-        return tp_error_set(err, TP_STATUS_OOM, "tp_project_resolve_atlas_sprites: out of memory");
+        return oom ? tp_error_set(err, TP_STATUS_OOM,
+                                  "tp_project_resolve_atlas_sprites: out of memory")
+                   : resolve_status;
     }
     /* Commit: every strdup succeeded, so re-key the staged records in one sweep. */
     for (size_t j = 0; j < staged; j++) {

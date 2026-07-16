@@ -243,7 +243,8 @@ static bool strip_preview_chip(nt_ui_context_t *ctx, float h) {
 static void declare_status_pill(nt_ui_context_t *ctx); /* floating message pill, defined below (canvas child) */
 
 static void declare_canvas_strip(nt_ui_context_t *ctx, bool atlas) {
-    tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *a = snapshot ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas) : NULL;
     s_pack_has_sources = a && a->source_count > 0;
     s_pack_stale = gui_project_is_stale();
     const bool accent = s_pack_has_sources && s_pack_stale;
@@ -326,7 +327,7 @@ static void declare_canvas_strip(nt_ui_context_t *ctx, bool atlas) {
 /* Animation preview player in the canvas area (ux.md §3.7b): a control strip (play/pause, frame step,
  * "cur/total", Close) over the ANIM-mode custom element, or a "Pack to preview" hint without a result. */
 static void declare_canvas_preview(nt_ui_context_t *ctx) {
-    const tp_project_anim *an = current_anim();
+    const tp_snapshot_animation *an = current_anim();
     const bool have = (an != NULL && gui_pack_result(s_sel_atlas) != NULL && s_preview_frame_count > 0);
     const float cap_w = s_content_w - s_left_panel_w - s_right_panel_w - S(70.0F);
     char caption[192];
@@ -475,7 +476,10 @@ void declare_canvas(nt_ui_context_t *ctx) {
                 ui_label_fit(ctx, label, &g_warn, cap_w, 0U);
                 nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Restore the file and press Refresh (F5) to bring it back.", &g_caption);
             } else {
-                const tp_project_atlas *ea = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
+                const tp_session_snapshot *snapshot = gui_project_snapshot();
+                const tp_snapshot_atlas *ea = snapshot
+                                                  ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas)
+                                                  : NULL;
                 const bool no_sources = (ea == NULL || ea->source_count == 0);
                 if (no_sources) {
                     /* Empty state (§2.7): hero folder-plus + "Add a folder to start" + a PRIMARY Add-folder

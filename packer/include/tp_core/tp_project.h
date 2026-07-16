@@ -66,15 +66,15 @@ struct tp_pack_settings;
  *     src_key NULL while the record is PENDING (loaded from a v3 file, or added by
  *     name before any scan) -- it cannot be keyed to (source, key) without a disk
  *     scan, which load never does. Lazy resolution fills them (tp_project_migrate).
- *   - `name`: the export-KEY bridge (ext-stripped, folder-kept). ALWAYS populated for
- *     an active record and the key the name-based pack/export path still matches on,
- *     so re-keying does NOT change which override applies to which packed sprite. For
+ *   - `name`: the display/export-key bridge (ext-stripped, folder-kept). It is
+ *     never authoritative for override application; canonical lookup uses
+ *     `(source_ref,src_key)`. For
  *     a migrated (v4) record it is derived on load = strip_ext(src_key) -- no scan.
  * A migrated record whose (source_ref, src_key) resolves to no current sprite is an
- * ORPHAN: stored verbatim, inactive (the name bridge naturally matches nothing), and
+ * ORPHAN: stored verbatim and inactive, and
  * reactivating when the key returns. */
 typedef struct tp_project_sprite {
-    char *name;          /* export-key bridge (ext-stripped, folder-kept); the name-based apply key */
+    char *name;          /* display/export-key bridge; never an application key */
     tp_id128 source_ref; /* owning source's structural id; nil = pending (unresolved) */
     char *src_key;       /* normalized source-local key (NFC, ext KEPT); NULL = pending */
     float origin_x;
@@ -105,11 +105,10 @@ typedef struct tp_project_sprite {
  * identity fields:
  *   - `source_ref` / `src_key`: the canonical v4 identity; nil / NULL while PENDING
  *     (a v3 name-keyed frame, or one added by name before a scan) -- re-keyed lazily.
- *   - `name`: the export-key bridge (the frame's human/display reference); ALWAYS set
- *     for an active frame and what the name-based export path (tp_normalize) resolves
- *     against, so re-keying does not change which sprite a frame resolves to. */
+ *   - `name`: the frame's human/display reference. Export resolves exclusively
+ *     through the canonical fields and then maps to the packed logical name. */
 typedef struct tp_project_frame {
-    char *name;          /* export-key bridge (display reference); the name-based resolve key */
+    char *name;          /* display reference for snapshots/human selectors */
     tp_id128 source_ref; /* owning source's structural id; nil = pending */
     char *src_key;       /* normalized source-local key (NFC, ext KEPT); NULL = pending */
 } tp_project_frame;
@@ -217,11 +216,14 @@ typedef struct tp_project_atlas {
     int target_cap;
 } tp_project_atlas;
 
-/* The whole project. `project_dir` is the absolute directory of the project file
- * (set on load/save; NULL while unsaved) and the base for path resolution. */
+/* The whole project. `project_dir` is the absolute directory of the current
+ * project file (set on load/save; NULL while unsaved). `source_base_dir` owns
+ * the resolution base of stable live source spellings; Save As can update the
+ * former without retargeting sources or rewriting history-owned records. */
 typedef struct tp_project {
     int schema_version;
     char *project_dir; /* absolute; NULL if never saved */
+    char *source_base_dir; /* absolute; NULL until relative sources acquire a base */
     tp_project_atlas *atlases;
     int atlas_count;
     int atlas_cap;
@@ -236,7 +238,7 @@ tp_project *tp_project_create(void);
 void tp_project_destroy(tp_project *p);
 
 /* Deep-clones `src` into a fresh independent project (every malloc-owned field
- * duplicated: project_dir, atlas name/knobs/ids, sources, sparse sprite overrides,
+ * duplicated: project/source base dirs, atlas name/knobs/ids, sources, sparse sprite overrides,
  * animations + frames, targets). OOM-SAFE: on any allocation failure returns NULL
  * and frees the partial clone (no leak). The clone is byte-identical under
  * tp_project_save_buffer (test-pinned). This is the atomicity primitive the F2-02
@@ -306,15 +308,32 @@ tp_status tp_project_atlas_remove_source_by_id(tp_project_atlas *a, tp_id128 id)
 
 /* --- sprite-override mutation --- */
 
-/* Returns the override for `name`, or NULL if none exists. */
-tp_project_sprite *tp_project_atlas_find_sprite(tp_project_atlas *a, const char *name);
+/* Canonical v4 sparse-record lookup. Two sources may expose the same `src_key`;
+ * their records remain distinct because identity is the full (source,key) pair. */
+tp_project_sprite *tp_project_atlas_find_sprite_by_source_key(
+    tp_project_atlas *a, tp_id128 source_ref, const char *src_key);
+
+/* Explicit legacy bridge for a PENDING record that has not yet been resolved to
+ * (source,key). Canonical records are deliberately never returned by this lookup. */
+tp_project_sprite *tp_project_atlas_find_pending_sprite(
+    tp_project_atlas *a, const char *name);
 
 /* Returns the existing override for `name`, or appends a new default one. The
  * entry is written to *out (if non-NULL). */
-tp_status tp_project_atlas_add_sprite(tp_project_atlas *a, const char *name, tp_project_sprite **out);
+tp_status tp_project_atlas_add_pending_sprite(tp_project_atlas *a, const char *name,
+                                              tp_project_sprite **out);
+
+/* Returns the canonical record for (source_ref,src_key), or appends a default
+ * record whose human/export bridge is derived from src_key. */
+tp_status tp_project_atlas_add_sprite_by_source_key(
+    tp_project_atlas *a, tp_id128 source_ref, const char *src_key,
+    tp_project_sprite **out);
 
 /* Removes the override for `name`. Absent -> OUT_OF_BOUNDS. */
-tp_status tp_project_atlas_remove_sprite(tp_project_atlas *a, const char *name);
+tp_status tp_project_atlas_remove_pending_sprite(tp_project_atlas *a,
+                                                 const char *name);
+tp_status tp_project_atlas_remove_sprite_by_source_key(
+    tp_project_atlas *a, tp_id128 source_ref, const char *src_key);
 
 /* Drops the override entry for `name` IF it now holds only defaults (keeps storage
  * sparse -- the invariant tp_project_sprite documents). A no-op TP_STATUS_OK when the
@@ -322,12 +341,33 @@ tp_status tp_project_atlas_remove_sprite(tp_project_atlas *a, const char *name);
  * sparse-prune both frontends do after clearing a field back to inherit (the CLI
  * `sprite set <field>=inherit` path; the GUI does the same inline after an override
  * edit). Composes existing find + remove -- no new sparse rule. */
-tp_status tp_project_atlas_prune_sprite(tp_project_atlas *a, const char *name);
+tp_status tp_project_atlas_prune_pending_sprite(tp_project_atlas *a,
+                                                const char *name);
+tp_status tp_project_atlas_prune_sprite_by_source_key(
+    tp_project_atlas *a, tp_id128 source_ref, const char *src_key);
 
 /* Sets (or clears) a sprite's `rename` export-name override. A non-empty `rename`
  * ensures the override entry and stores it verbatim; NULL or "" clears it and
  * removes the entry if it then holds only defaults (keeps storage sparse). */
-tp_status tp_project_atlas_set_sprite_rename(tp_project_atlas *a, const char *sprite_name, const char *rename);
+tp_status tp_project_atlas_set_pending_sprite_rename(
+    tp_project_atlas *a, const char *sprite_name, const char *rename);
+tp_status tp_project_atlas_set_sprite_rename_by_source_key(
+    tp_project_atlas *a, tp_id128 source_ref, const char *src_key,
+    const char *rename);
+
+/* Legacy pending-only compatibility surface. These never address canonical
+ * (source,key) records; new mutation code must use the explicit APIs above. */
+tp_project_sprite *tp_project_atlas_find_sprite(tp_project_atlas *a,
+                                                const char *name);
+tp_status tp_project_atlas_add_sprite(tp_project_atlas *a, const char *name,
+                                      tp_project_sprite **out);
+tp_status tp_project_atlas_remove_sprite(tp_project_atlas *a,
+                                         const char *name);
+tp_status tp_project_atlas_prune_sprite(tp_project_atlas *a,
+                                        const char *name);
+tp_status tp_project_atlas_set_sprite_rename(tp_project_atlas *a,
+                                             const char *sprite_name,
+                                             const char *rename);
 
 /* --- animation mutation --- */
 
@@ -406,6 +446,23 @@ tp_status tp_project_atlas_seed_default_target(tp_project *p, int atlas_index);
  * excludes nothing. The shared source of truth for the duplicate check both frontends
  * surface (validate + the GUI target panel). NULL p -> false. */
 bool tp_project_out_path_shared(const tp_project *p, const char *out_path, const tp_project_target *self);
+/* Chooses the lowest free atlasN/default out path using the same normalized,
+ * enabled-target collision rules as validation/export. */
+tp_status tp_project_next_atlas_defaults(const tp_project *p, char *name,
+                                         size_t name_cap, char *out_path,
+                                         size_t out_path_cap,
+                                         const char **exporter_id,
+                                         bool *target_enabled, tp_error *err);
+/* Chooses the first available animation name: `base`, `base2`, ...; an empty
+ * base uses `anim1`, `anim2`, ... . Never truncates a candidate. */
+tp_status tp_project_next_animation_name(const tp_project *p, tp_id128 atlas_id,
+                                         const char *base, char *name,
+                                         size_t name_cap, tp_error *err);
+/* Canonical defaults for one newly-created target. */
+tp_status tp_project_target_defaults(const tp_project *p, tp_id128 atlas_id,
+                                     const char **exporter_id, char *out_path,
+                                     size_t out_path_cap, bool *enabled,
+                                     tp_error *err);
 
 /* --- load / save --- */
 
@@ -422,9 +479,8 @@ tp_status tp_project_load_with_fingerprint(const char *path, tp_project **out, t
                                            tp_error *err);
 
 /* Writes `p` deterministically to `path` (see the serialization contract above),
- * updating p->project_dir to path's absolute directory and relativizing absolute
- * source paths against it. `p` is non-const because Save/Save-As updates the
- * in-memory project_dir + path forms (mutation-friendly, GUI live edit).
+ * updating p->project_dir to path's absolute directory. Source path normalization
+ * is staged for output; live source spellings and source_base_dir remain stable.
  * file-save = relativize + tp_project_save_buffer + fwrite. */
 tp_status tp_project_save(tp_project *p, const char *path, tp_error *err);
 
@@ -448,6 +504,13 @@ tp_status tp_project_save_if_unchanged(tp_project *p, const char *path,
  * -- so it is the exact snapshot primitive undo/redo needs. Caller frees *out. */
 tp_status tp_project_save_buffer(const tp_project *p, char **out, size_t *out_len, tp_error *err);
 
+/* Runs the canonical serializer in allocation-free counting mode. On success,
+ * *out_len is the exact byte count tp_project_save_buffer would produce
+ * (excluding NUL). `limit` is inclusive; an oversized project returns
+ * TP_STATUS_OUT_OF_BOUNDS before allocating or materializing JSON. */
+tp_status tp_project_serialized_size_bounded(const tp_project *p, size_t limit,
+                                             size_t *out_len, tp_error *err);
+
 /* Parses `len` bytes of project JSON at `buf` into a new project (*out). Mirror
  * of tp_project_load minus the file read; project_dir stays NULL (no path). */
 tp_status tp_project_load_buffer(const char *buf, size_t len, tp_project **out, tp_error *err);
@@ -458,6 +521,12 @@ tp_status tp_project_load_buffer(const char *buf, size_t len, tp_project **out, 
  * `cap`, '/'-normalized). Absolute `rel` is copied through (normalized). Returns
  * TP_STATUS_OUT_OF_BOUNDS if the result would not fit. */
 tp_status tp_project_resolve_path(const tp_project *p, const char *rel, char *out_abs, size_t cap);
+
+/* Resolves a live source spelling against source_base_dir (falling back to
+ * project_dir for older/in-memory projects). Export targets continue to use
+ * tp_project_resolve_path and therefore follow Save As. */
+tp_status tp_project_resolve_source_path(const tp_project *p, const char *rel,
+                                         char *out_abs, size_t cap);
 
 /* --- per-sprite effective rules --- */
 
