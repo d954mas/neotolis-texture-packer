@@ -56,7 +56,7 @@ typedef struct tp_session_pack_job_result {
     tp_arena *arena;
     tp_result *result;
     int missing_sources;
-    uint64_t model_generation_at_start;
+    tp_session_input_token input_token_at_start;
     char preview_exporter_id[64];
 } tp_session_pack_job_result;
 

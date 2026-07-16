@@ -11,12 +11,14 @@
 #endif
 
 #include "gui_actions.h"
+#include "gui_pack.h"
 #include "gui_project.h"
 #include "gui_rows.h"
 #include "gui_scan.h"
 #include "gui_state.h"
 
 #include "tp_core/tp_scan.h"
+#include "tinycthread.h"
 
 #include "unity.h"
 
@@ -167,9 +169,44 @@ void setUp(void) {
 
 void tearDown(void) {
     multi_sel_clear();
+    gui_pack_shutdown();
     gui_project_shutdown();
     gui_scan_shutdown();
     remove_fixture_files();
+}
+
+void test_preview_result_rejects_source_refresh_after_job_capture(void) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas = snapshot
+                                         ? tp_session_snapshot_atlas_at(snapshot, 0)
+                                         : NULL;
+    TEST_ASSERT_NOT_NULL(atlas);
+    char source_path[1024];
+    (void)snprintf(source_path, sizeof source_path,
+                   "%s/apps/cli/testdata/sprites/coin.png",
+                   TP_TEST_SOURCE_DIR);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_ADD_ADDED,
+        gui_project_add_source_kind(atlas->id,
+                                    tp_session_snapshot_revision(snapshot),
+                                    source_path, TP_SOURCE_KIND_FILE));
+    gui_pack_init(TP_GUI_IDENTITY_TEST_DIR);
+    char error[256] = {0};
+    TEST_ASSERT_TRUE(gui_pack_preview_async_start(0, "defold", error,
+                                                  sizeof error));
+    gui_project_invalidate_sources();
+
+    gui_pack_result_info info;
+    gui_pack_done done = GUI_PACK_DONE_NONE;
+    for (int i = 0; i < 100000 && done == GUI_PACK_DONE_NONE; ++i) {
+        done = gui_pack_poll(&info);
+        if (done == GUI_PACK_DONE_NONE) {
+            thrd_yield();
+        }
+    }
+    TEST_ASSERT_EQUAL_INT(GUI_PACK_DONE_PREVIEW_OK, done);
+    TEST_ASSERT_TRUE(info.input_changed);
+    TEST_ASSERT_NULL(gui_pack_preview_result(0));
 }
 
 void test_rows_apply_renames_by_canonical_source_and_key(void) {
@@ -351,5 +388,6 @@ int main(void) {
     RUN_TEST(test_sprite_edit_state_uses_canonical_duplicate_identity);
     RUN_TEST(test_sprite_edit_rejects_genuinely_stale_captured_revision);
     RUN_TEST(test_delayed_animation_context_ref_never_retargets_after_index_shift);
+    RUN_TEST(test_preview_result_rejects_source_refresh_after_job_capture);
     return UNITY_END();
 }

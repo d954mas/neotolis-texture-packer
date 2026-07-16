@@ -92,7 +92,6 @@ int s_sel_anim_frame = -1;
 
 /* --- export-target preview (EXP-PREVIEW): 0 = Native (default) --- */
 int s_preview_target;
-uint64_t s_preview_ver;
 
 /* --- animation preview player --- */
 bool s_preview_active;

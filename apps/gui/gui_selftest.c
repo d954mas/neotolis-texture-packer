@@ -3972,7 +3972,6 @@ void selftest_pre_frame(void) {
 
             /* (c) preview binds while active; back to Native re-binds the session result with no repack */
             s_preview_target = defold_idx + 1;
-            s_preview_ver = gui_project_snapshot_model_generation();
             s_canvas_w = 700.0F; /* single-row tier (>= STRIP_SINGLE_MIN_W) so the preview binds, not compact */
             const tp_result *shown_pv = preview_target_result();
             NT_ASSERT((const void *)shown_pv == (const void *)pv && "SELFTEST preview: preview bound while active");

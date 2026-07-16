@@ -549,13 +549,6 @@ static bool s_gesture_commit;
 void gui_request_gesture_commit(void) { s_gesture_commit = true; }
 // #endregion
 
-/* Refresh-vs-pack honesty latch (P2): a Refresh dirties the sources on DISK without touching the model,
- * so model_changed_since (which only diffs the serialized model) can't see it. If a Refresh lands while
- * an async pack is in flight, the just-landed result reflects the PRE-refresh disk -- so it must NOT
- * clear stale. do_refresh bumps s_refresh_epoch; do_pack snapshots it at start; poll_async clears stale
- * only when the model is unchanged AND no Refresh happened since the pack started. */
-static unsigned s_refresh_epoch;
-static unsigned s_pack_start_refresh_epoch;
 static tp_id128 s_edit_atlas_id;
 static int64_t s_edit_atlas_revision;
 static tp_id128 s_edit_anim_atlas_id;
@@ -1630,7 +1623,6 @@ static void do_refresh(void) {
 
     gui_canvas_invalidate(&s_canvas); /* force the shown image to reload (or show missing) */
     gui_project_mark_stale();         /* disk changed -> preview stale, project NOT dirtied */
-    s_refresh_epoch++;                /* an in-flight pack landing later must NOT clear this stale (P2) */
     set_statusf("Refresh: +%d new, %d removed, %d changed", added, removed, changed);
 }
 
@@ -1687,7 +1679,6 @@ void do_pack(void) {
     }
     char err[256] = {0};
     if (gui_pack_async_start(s_sel_atlas, err, sizeof err)) {
-        s_pack_start_refresh_epoch = s_refresh_epoch; /* a Refresh after this must keep stale when it lands (P2) */
         set_status_ex(STATUS_INFO, "Packing\xE2\x80\xA6");   /* result lands via poll_async */
     } else {
         set_statusf_ex(STATUS_ERROR, "Pack failed: %s", err);
@@ -1716,7 +1707,6 @@ static void do_export(void) {
 /* Back to Native: drop the preview state + free gui_pack's preview slot. Idempotent. */
 void preview_target_reset(void) {
     s_preview_target = 0;
-    s_preview_ver = 0;
     gui_pack_preview_clear();
 }
 
@@ -1762,7 +1752,6 @@ static void preview_target_start(int combo_index) {
     char err[256] = {0};
     if (gui_pack_preview_async_start(s_sel_atlas, e->id, err, sizeof err)) {
         s_preview_target = combo_index;
-        s_preview_ver = gui_project_snapshot_model_generation();
         set_statusf_ex(STATUS_INFO, "Preview: %s\xE2\x80\xA6", e->display_name ? e->display_name : e->id);
     } else {
         preview_target_reset();
@@ -1773,8 +1762,8 @@ static void preview_target_start(int combo_index) {
 /* Per-frame reconciliation: a model edit since the preview packed makes it stale -> drop to Native (never
  * show a silently-wrong preview). Atlas switch / undo / redo / open / new drop it via reset_selection. */
 static void preview_target_sync(void) {
-    if (s_preview_target != 0 &&
-        gui_project_snapshot_model_generation() != s_preview_ver) {
+    if (s_preview_target != 0 && !gui_pack_async_busy() &&
+        !gui_pack_preview_result(s_sel_atlas)) {
         preview_target_reset();
     }
 }
@@ -1787,16 +1776,15 @@ static void poll_async(void) {
     gui_pack_result_info info;
     switch (gui_pack_poll(&info)) {
         case GUI_PACK_DONE_PACK_OK: {
-            /* Clear stale only when the model is unchanged since the packed snapshot AND no Refresh
-             * dirtied the sources on disk since the pack started (model_changed_since can't see a
-             * disk-only Refresh -- P2). Otherwise the just-landed result is honestly stale. */
-            if (!info.model_changed && s_refresh_epoch == s_pack_start_refresh_epoch) {
+            /* The core-captured immutable input token covers both committed
+             * model state and source-runtime refreshes. */
+            if (!info.input_changed) {
                 gui_project_mark_packed();
             }
             s_last_pack_ms = info.ms;
             s_last_pack_atlas = info.atlas_index;
             const tp_result *r = gui_pack_result(info.atlas_index);
-            const char *stale = info.model_changed ? " -- model changed, stale" : "";
+            const char *stale = info.input_changed ? " -- inputs changed, stale" : "";
             if (r && info.note[0] != '\0') {
                 set_statusf_ex(STATUS_SUCCESS, "Packed %d sprites, %d page(s) in %.0f ms (%s)%s", r->sprite_count, r->page_count, info.ms, info.note, stale);
             } else if (r) {
@@ -1821,7 +1809,11 @@ static void poll_async(void) {
             set_status_ex(STATUS_INFO, "Export cancelled.");
             break;
         case GUI_PACK_DONE_PREVIEW_OK:
-            if (s_preview_target == 0) {
+            if (info.input_changed) {
+                preview_target_reset();
+                set_status_ex(STATUS_WARNING,
+                              "Preview inputs changed -- run Preview again.");
+            } else if (s_preview_target == 0) {
                 gui_pack_preview_clear(); /* selection reset/changed while packing -> drop the orphan slot */
             } else {
                 /* The degradation chip is width-gated (STRIP_CHIP_MIN_W) and drops on common window

@@ -100,6 +100,14 @@ target_compile_options(tp_test_job_owner PRIVATE -U_DLL)
 nt_set_warning_flags(tp_test_job_owner)
 add_test(NAME tp_job_owner COMMAND tp_test_job_owner)
 
+# Architecture foundation job freshness: a result captures both immutable model
+# and source-runtime generations. Generation zero is data, never a stale sentinel.
+add_executable(tp_test_job_input_token test_job_input_token.c)
+target_link_libraries(tp_test_job_input_token PRIVATE tp_core unity)
+target_compile_options(tp_test_job_input_token PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_job_input_token)
+add_test(NAME tp_job_input_token COMMAND tp_test_job_input_token)
+
 # M5 thin-boundary validation: all project validation rules are core-owned and
 # exposed as an owned typed report over a file-oriented entry point.
 add_executable(tp_test_validate test_validate.c)

@@ -160,6 +160,7 @@ target_include_directories(tp_test_gui_canonical_identity PRIVATE
 )
 target_compile_definitions(tp_test_gui_canonical_identity PRIVATE
     TP_GUI_IDENTITY_TEST_DIR="${CMAKE_CURRENT_BINARY_DIR}/tp_gui_identity_tmp"
+    TP_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
     _CRT_SECURE_NO_WARNINGS
     NT_INTROSPECT_ENABLED=$<BOOL:${NT_INTROSPECT_ENABLED}>
     NT_INTROSPECT_WRITE_ENABLED=$<BOOL:${NT_INTROSPECT_WRITE_ENABLED}>

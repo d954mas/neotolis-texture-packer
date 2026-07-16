@@ -126,7 +126,7 @@ typedef struct {
     gui_pack_done kind;
     int atlas_index;    /* pack: which atlas landed */
     double ms;          /* pack: wall-clock pack time */
-    bool model_changed; /* pack: model differs from the packed snapshot -> keep preview stale */
+    bool input_changed; /* pack: model/source token differs -> keep preview stale */
     int missing;        /* pack: skipped-missing-source count */
     int targets;        /* export: enabled targets written */
     int notices;        /* export: metadata-loss notices */

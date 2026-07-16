@@ -148,7 +148,6 @@ void gui_shot_tick(void) {
                 }
                 if (idx >= 0) {
                     s_preview_target = idx + 1; /* 0 = Native; k = exporter k-1 */
-                    s_preview_ver = gui_project_snapshot_model_generation();
                 }
             } else {
                 nt_log_error("SHOT: preview '%s' failed: %s", s_shot_preview, perr);

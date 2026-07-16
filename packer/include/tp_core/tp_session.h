@@ -19,6 +19,15 @@ typedef struct tp_txn_result tp_txn_result;
 typedef struct tp_project tp_project;
 typedef struct tp_journal tp_journal;
 
+/* Immutable identity of the inputs consumed by a derived job. Both zeroes are
+ * valid generations; freshness is exact value equality, never a sentinel test. */
+typedef struct tp_session_input_token {
+    uint64_t model_generation;
+    uint64_t source_generation;
+} tp_session_input_token;
+bool tp_session_input_token_equal(tp_session_input_token left,
+                                  tp_session_input_token right);
+
 /* Session calls are synchronous and serialized. They are intentionally
  * non-reentrant: side-effect/journal callbacks invoked during admission must not
  * call back into this same session. There is no actor thread or hidden mailbox. */
@@ -179,6 +188,8 @@ int64_t tp_session_snapshot_revision(const tp_session_snapshot *snapshot);
 uint64_t tp_session_snapshot_model_generation(const tp_session_snapshot *snapshot);
 uint64_t tp_session_snapshot_admission_sequence(const tp_session_snapshot *snapshot);
 uint64_t tp_session_snapshot_source_generation(const tp_session_snapshot *snapshot);
+tp_session_input_token tp_session_snapshot_input_token(
+    const tp_session_snapshot *snapshot);
 uint64_t tp_session_snapshot_event_sequence(const tp_session_snapshot *snapshot);
 bool tp_session_snapshot_dirty(const tp_session_snapshot *snapshot);
 bool tp_session_snapshot_recovery_available(const tp_session_snapshot *snapshot);

@@ -51,6 +51,7 @@ typedef struct {
     tp_arena *arena;
     tp_result *result;
     tp_id128 atlas_id;
+    tp_session_input_token input_token;
     bool valid;
     int atlas_index; /* atlas this preview belongs to (-1 = none) */
     char exporter_id[64];
@@ -205,8 +206,10 @@ static bool report_job_start(tp_status status, const tp_error *error,
     return false;
 }
 
-static bool model_changed_since(uint64_t generation) {
-    return generation == 0U || gui_project_snapshot_model_generation() != generation;
+static bool input_changed_since(tp_session_input_token token) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    return !snapshot || !tp_session_input_token_equal(
+                            tp_session_snapshot_input_token(snapshot), token);
 }
 
 bool gui_pack_async_start(int atlas_index, char *err, size_t err_cap) {
@@ -313,22 +316,30 @@ gui_pack_done gui_pack_poll(gui_pack_result_info *out) {
                 rc = preview ? GUI_PACK_DONE_PREVIEW_CANCELLED
                              : GUI_PACK_DONE_PACK_CANCELLED;
             } else if (preview) {
+                const bool input_changed = input_changed_since(
+                    result.pack.input_token_at_start);
+                if (out) {
+                    out->atlas_index = atlas_index;
+                    out->ms = result.elapsed_ms;
+                    out->input_changed = input_changed;
+                }
+                if (input_changed) {
+                    rc = GUI_PACK_DONE_PREVIEW_OK;
+                    goto pack_result_handled;
+                }
                 if (s_preview.arena) {
                     tp_arena_destroy(s_preview.arena);
                 }
                 s_preview.arena = result.pack.arena;
                 s_preview.result = result.pack.result;
                 s_preview.atlas_id = result.pack.atlas_id;
+                s_preview.input_token = result.pack.input_token_at_start;
                 s_preview.valid = true;
                 s_preview.atlas_index = atlas_index;
                 (void)snprintf(s_preview.exporter_id,
                                sizeof s_preview.exporter_id, "%s",
                                result.pack.preview_exporter_id);
                 result.pack.arena = NULL;
-                if (out) {
-                    out->atlas_index = atlas_index;
-                    out->ms = result.elapsed_ms;
-                }
                 nt_log_info("gui_pack(async): preview '%s' via %s packed %d sprite(s), %d page(s) in %.1f ms",
                             s_preview.result->atlas_name,
                             s_preview.exporter_id,
@@ -359,8 +370,8 @@ gui_pack_done gui_pack_poll(gui_pack_result_info *out) {
                     out->atlas_index = atlas_index;
                     out->ms = result.elapsed_ms;
                     out->missing = result.pack.missing_sources;
-                    out->model_changed = model_changed_since(
-                        result.pack.model_generation_at_start);
+                    out->input_changed = input_changed_since(
+                        result.pack.input_token_at_start);
                     if (result.pack.missing_sources > 0) {
                         (void)snprintf(out->note, sizeof out->note,
                                        "%d missing file(s) skipped",
@@ -523,7 +534,8 @@ bool gui_pack_preview_blocking(int atlas_index, const char *exporter_id, char *e
     }
     gui_pack_result_info info;
     const gui_pack_done done = wait_for_job(&info);
-    if (done == GUI_PACK_DONE_PREVIEW_OK && info.atlas_index == atlas_index) {
+    if (done == GUI_PACK_DONE_PREVIEW_OK && info.atlas_index == atlas_index &&
+        !info.input_changed) {
         return true;
     }
     if (err && err_cap > 0U) {
@@ -566,7 +578,9 @@ bool gui_pack_preview_async_start(int atlas_index, const char *exporter_id, char
 const tp_result *gui_pack_preview_result(int atlas_index) {
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     const tp_snapshot_atlas *atlas = snapshot ? tp_session_snapshot_atlas_at(snapshot, atlas_index) : NULL;
-    if (!s_preview.valid || !atlas || !tp_id128_eq(s_preview.atlas_id, atlas->id)) {
+    if (!s_preview.valid || !atlas || !tp_id128_eq(s_preview.atlas_id, atlas->id) ||
+        !tp_session_input_token_equal(tp_session_snapshot_input_token(snapshot),
+                                      s_preview.input_token)) {
         return NULL;
     }
     return s_preview.result;
@@ -579,6 +593,7 @@ void gui_pack_preview_clear(void) {
     s_preview.arena = NULL;
     s_preview.result = NULL;
     s_preview.atlas_id = tp_id128_nil();
+    s_preview.input_token = (tp_session_input_token){0};
     s_preview.valid = false;
     s_preview.atlas_index = -1;
     s_preview.exporter_id[0] = '\0';

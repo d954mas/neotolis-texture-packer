@@ -38,7 +38,7 @@ typedef struct tp_live_job {
     tp_error error;
 
     tp_id128 atlas_id;
-    uint64_t model_generation_at_start;
+    tp_session_input_token input_token_at_start;
     tp_pack_input input;
     tp_pack_settings settings;
     char *atlas_name;
@@ -250,8 +250,7 @@ tp_status tp_session_pack_job_start(tp_session *session,
         return tp_error_set(err, TP_STATUS_OOM, "Pack job allocation failed");
     }
     job->atlas_id = request->atlas_id;
-    job->model_generation_at_start =
-        tp_session_snapshot_model_generation(snapshot);
+    job->input_token_at_start = tp_session_snapshot_input_token(snapshot);
     job->atlas_name = job_strdup(atlas->name);
     job->work_dir = job_strdup(request->work_dir);
     status = tp_pack_input_build_snapshot(snapshot, request->atlas_id,
@@ -457,7 +456,7 @@ tp_status tp_session_job_take_result(tp_session *session,
     if (job->kind == TP_SESSION_JOB_PACK) {
         out->pack.atlas_id = job->atlas_id;
         out->pack.missing_sources = job->input.missing_sources;
-        out->pack.model_generation_at_start = job->model_generation_at_start;
+        out->pack.input_token_at_start = job->input_token_at_start;
         (void)snprintf(out->pack.preview_exporter_id,
                        sizeof out->pack.preview_exporter_id, "%s",
                        job->preview_exporter_id);

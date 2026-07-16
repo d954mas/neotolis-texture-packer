@@ -376,6 +376,12 @@ void test_live_headless_runs_real_session_owned_pack_job(void) {
                                          "91919191919191919191919191919191",
                                          &err));
 
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_snapshot_create(session, &snapshot, &err));
+    const tp_session_input_token input_at_start =
+        tp_session_snapshot_input_token(snapshot);
+    tp_session_snapshot_destroy(snapshot);
+
     tp_pack_job_request request = {
         .atlas_id = atlas_id,
         .work_dir = ".",
@@ -384,6 +390,8 @@ void test_live_headless_runs_real_session_owned_pack_job(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_session_pack_job_start(session, &request, &err));
     TEST_ASSERT_TRUE(tp_session_job_active(session));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_invalidate_sources(session, &err));
 
     tp_session_job_progress progress;
     do {
@@ -403,6 +411,19 @@ void test_live_headless_runs_real_session_owned_pack_job(void) {
     TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_PACK, result.kind);
     TEST_ASSERT_NOT_NULL(result.pack.result);
     TEST_ASSERT_EQUAL_INT(1, result.pack.result->sprite_count);
+    TEST_ASSERT_EQUAL_UINT64(input_at_start.model_generation,
+                             result.pack.input_token_at_start.model_generation);
+    TEST_ASSERT_EQUAL_UINT64(input_at_start.source_generation,
+                             result.pack.input_token_at_start.source_generation);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_snapshot_create(session, &snapshot, &err));
+    const tp_session_input_token current_input =
+        tp_session_snapshot_input_token(snapshot);
+    TEST_ASSERT_EQUAL_UINT64(input_at_start.model_generation,
+                             current_input.model_generation);
+    TEST_ASSERT_EQUAL_UINT64(input_at_start.source_generation + 1U,
+                             current_input.source_generation);
+    tp_session_snapshot_destroy(snapshot);
     TEST_ASSERT_FALSE(tp_session_job_active(session));
     tp_session_job_result_destroy(&result);
     tp_session_destroy(session);

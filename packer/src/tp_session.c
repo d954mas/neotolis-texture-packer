@@ -1328,6 +1328,21 @@ uint64_t tp_session_snapshot_source_generation(const tp_session_snapshot *snapsh
     return snapshot ? snapshot->source_generation : 0U;
 }
 
+tp_session_input_token tp_session_snapshot_input_token(
+    const tp_session_snapshot *snapshot) {
+    const tp_session_input_token token = {
+        .model_generation = snapshot ? snapshot->model_generation : 0U,
+        .source_generation = snapshot ? snapshot->source_generation : 0U,
+    };
+    return token;
+}
+
+bool tp_session_input_token_equal(tp_session_input_token left,
+                                  tp_session_input_token right) {
+    return left.model_generation == right.model_generation &&
+           left.source_generation == right.source_generation;
+}
+
 uint64_t tp_session_snapshot_event_sequence(const tp_session_snapshot *snapshot) {
     return snapshot ? snapshot->event_sequence : 0U;
 }

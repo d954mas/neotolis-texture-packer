@@ -125,7 +125,6 @@ extern int s_sel_anim_frame; /* selected frame row in the editor (for the Del ho
  * intent + when to drop it. Shared with the canvas view (selector + chip), actions (start/reset/bind),
  * the selftest and the shot seam, so they can never be view-local. --- */
 extern int s_preview_target;       /* 0 = Native; else 1 + tp_exporter_at index */
-extern uint64_t s_preview_ver;     /* snapshot generation captured at preview start */
 
 /* Animation preview player (canvas ANIM mode). s_preview_time is the master clock; the frame index is
  * a pure function of it (gui_canvas_anim_frame_at), so play/pause/step all reduce to moving the clock. */
