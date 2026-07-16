@@ -61,11 +61,11 @@ static int child_acquire_exit(const char *path) {
     return (int)_spawnl(_P_WAIT, g_self, g_self, "--child-acquire", path, NULL);
 #else
     pid_t pid = fork();
-    TEST_ASSERT_GREATER_THAN_INT(0, (int)pid);
     if (pid == 0) {
         (void)execl(g_self, g_self, "--child-acquire", path, (char *)NULL);
         _exit(127);
     }
+    TEST_ASSERT_GREATER_THAN_INT(0, (int)pid);
     int status = 0;
     TEST_ASSERT_EQUAL_INT(pid, waitpid(pid, &status, 0));
     TEST_ASSERT_TRUE(WIFEXITED(status));
@@ -79,11 +79,11 @@ static int cli_atlas_add_exit(const char *path, const char *name) {
                         NULL);
 #else
     pid_t pid = fork();
-    TEST_ASSERT_GREATER_THAN_INT(0, (int)pid);
     if (pid == 0) {
         (void)execl(g_cli, g_cli, "atlas", "add", path, name, (char *)NULL);
         _exit(127);
     }
+    TEST_ASSERT_GREATER_THAN_INT(0, (int)pid);
     int status = 0;
     TEST_ASSERT_EQUAL_INT(pid, waitpid(pid, &status, 0));
     TEST_ASSERT_TRUE(WIFEXITED(status));
@@ -98,7 +98,6 @@ static int cli_read_exit(const char *verb, const char *path,
                   : (int)_spawnl(_P_WAIT, g_cli, g_cli, verb, path, NULL);
 #else
     pid_t pid = fork();
-    TEST_ASSERT_GREATER_THAN_INT(0, (int)pid);
     if (pid == 0) {
         if (option) {
             (void)execl(g_cli, g_cli, verb, path, option, (char *)NULL);
@@ -107,6 +106,7 @@ static int cli_read_exit(const char *verb, const char *path,
         }
         _exit(127);
     }
+    TEST_ASSERT_GREATER_THAN_INT(0, (int)pid);
     int status = 0;
     TEST_ASSERT_EQUAL_INT(pid, waitpid(pid, &status, 0));
     TEST_ASSERT_TRUE(WIFEXITED(status));

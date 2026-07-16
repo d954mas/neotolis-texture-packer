@@ -78,4 +78,22 @@ static inline void tp_slash_norm(const char *src, char *out, size_t cap) {
     out[i] = '\0';
 }
 
+/* Project source/target path spellings are portable data, not native POSIX path
+ * syntax: both separators denote the same stored '/' form on every host. Keep
+ * this normalization at the project-path boundary instead of weakening the
+ * native identity API, where a backslash remains a legal POSIX filename byte. */
+static inline tp_status tp_project_path_slash_normalize(const char *src,
+                                                        char *out,
+                                                        size_t cap) {
+    if (!src || !out || cap == 0U) {
+        return TP_STATUS_INVALID_ARGUMENT;
+    }
+    const size_t length = strlen(src);
+    if (length >= cap) {
+        return TP_STATUS_OUT_OF_BOUNDS;
+    }
+    tp_slash_norm(src, out, cap);
+    return TP_STATUS_OK;
+}
+
 #endif /* TP_STRUTIL_H */

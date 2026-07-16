@@ -344,12 +344,12 @@ static int child_claim_exit(const char *path, bool leak_claim) {
                         leak_text, NULL);
 #else
     pid_t pid = fork();
-    TEST_ASSERT_GREATER_THAN_INT(0, (int)pid);
     if (pid == 0) {
         (void)execl(g_self, g_self, "--child-claim", g_root, path, leak_text,
                     (char *)NULL);
         _exit(127);
     }
+    TEST_ASSERT_GREATER_THAN_INT(0, (int)pid);
     int status = 0;
     TEST_ASSERT_EQUAL_INT(pid, waitpid(pid, &status, 0));
     TEST_ASSERT_TRUE(WIFEXITED(status));
@@ -363,11 +363,11 @@ static int child_project_lease_exit(const char *path) {
                         NULL);
 #else
     pid_t pid = fork();
-    TEST_ASSERT_GREATER_THAN_INT(0, (int)pid);
     if (pid == 0) {
         (void)execl(g_self, g_self, "--child-project-lease", path, (char *)NULL);
         _exit(127);
     }
+    TEST_ASSERT_GREATER_THAN_INT(0, (int)pid);
     int status = 0;
     TEST_ASSERT_EQUAL_INT(pid, waitpid(pid, &status, 0));
     TEST_ASSERT_TRUE(WIFEXITED(status));

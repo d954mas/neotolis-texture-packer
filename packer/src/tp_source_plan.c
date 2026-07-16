@@ -3,6 +3,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "tp_strutil.h"
+
 typedef struct source_identity {
     char *absolute;
     char *canonical;
@@ -39,9 +41,16 @@ static tp_status source_identity_from_input(const char *input,
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "source path is empty");
     }
+    char portable[TP_IDENTITY_PATH_MAX];
+    tp_status status = tp_project_path_slash_normalize(
+        input, portable, sizeof portable);
+    if (status != TP_STATUS_OK) {
+        return tp_error_set(err, status,
+                            "source path exceeds the supported limit");
+    }
     char absolute[TP_IDENTITY_PATH_MAX];
-    tp_status status = tp_identity_path_absolute_lexical(
-        input, absolute, sizeof absolute, err);
+    status = tp_identity_path_absolute_lexical(portable, absolute,
+                                               sizeof absolute, err);
     if (status != TP_STATUS_OK) {
         return status;
     }

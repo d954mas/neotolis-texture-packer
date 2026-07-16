@@ -18,6 +18,7 @@
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_srckey.h"
 #include "tp_op_internal.h"
+#include "tp_strutil.h"
 
 /* Reject NaN / +-inf; `pos` also rejects <= 0. No libm: comparisons only. */
 static bool finite_any(float v) { return v == v && v >= -FLT_MAX && v <= FLT_MAX; }
@@ -281,15 +282,20 @@ tp_status tp_op__canonical_view(const tp_project *project,
 
 static bool source_path_identity(const tp_project *project, const char *path,
                                  bool stored, char *out, size_t out_size) {
+    char portable[TP_IDENTITY_PATH_MAX];
+    if (tp_project_path_slash_normalize(path, portable, sizeof portable) !=
+        TP_STATUS_OK) {
+        return false;
+    }
     char resolved[TP_IDENTITY_PATH_MAX];
     tp_status status = stored
                            ? tp_project_resolve_source_path(
-                                 project, path, resolved, sizeof resolved)
+                                 project, portable, resolved, sizeof resolved)
                            : tp_identity_path_absolute_lexical(
-                                 path, resolved, sizeof resolved, NULL);
+                                 portable, resolved, sizeof resolved, NULL);
     if (stored && status != TP_STATUS_OK) {
         status = tp_identity_path_absolute_lexical(
-            path, resolved, sizeof resolved, NULL);
+            portable, resolved, sizeof resolved, NULL);
     }
     if (status != TP_STATUS_OK) {
         return false;

@@ -835,9 +835,11 @@ void run_selftest(void) {
                                                   ? tp_session_snapshot_source_at(folder_snapshot,
                                                                                   folder_atlas->id, 0)
                                                   : NULL;
+    const tp_id128 folder_atlas_id = folder_atlas ? folder_atlas->id : (tp_id128){{0}};
+    const tp_id128 folder_source_id = folder_source ? folder_source->id : (tp_id128){{0}};
     tp_error folder_error = {0};
-    if (folder_source && tp_session_snapshot_resolve_path(folder_snapshot, folder_atlas->id,
-                                                          folder_source->id, folder_abs,
+    if (folder_source && tp_session_snapshot_resolve_path(folder_snapshot, folder_atlas_id,
+                                                          folder_source_id, folder_abs,
                                                           sizeof folder_abs,
                                                           &folder_error) == TP_STATUS_OK) {
         const gui_scan_result *sc = gui_scan_get(folder_abs);
@@ -851,7 +853,7 @@ void run_selftest(void) {
             }
             gui_project_set_sprite_rename(0, sprite, "renamed_region");
             const tp_snapshot_sprite *ov = tp_session_snapshot_sprite_by_key(
-                gui_project_snapshot(), folder_atlas->id, folder_source->id, sprite);
+                gui_project_snapshot(), folder_atlas_id, folder_source_id, sprite);
             nt_log_info("SELFTEST: rename region '%s' -> override='%s'", sprite, (ov && ov->rename) ? ov->rename : "(none)");
         }
     }
