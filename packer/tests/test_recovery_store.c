@@ -313,6 +313,28 @@ static tp_model *create_model(void) {
     return model;
 }
 
+static void commit_recovery_fixture_change(tp_model *model) {
+    tp_project *project = tp_model_project(model);
+    TEST_ASSERT_NOT_NULL(project);
+    TEST_ASSERT_GREATER_THAN_INT(0, project->atlas_count);
+
+    tp_operation op = {0};
+    op.kind = TP_OP_ATLAS_RENAME;
+    op.atlas_id = project->atlases[0].id;
+    op.u.atlas_rename.name = "recovery-fixture-dirty";
+    tp_txn_request request = {0};
+    request.schema = TP_TXN_SCHEMA;
+    memcpy(request.id_hex, "f1000000000000000000000000000001", 33U);
+    request.expected_revision = tp_model_revision(model);
+    request.ops = &op;
+    request.op_count = 1;
+    tp_txn_result result = {0};
+    tp_error err = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_model_apply(model, &request, &result, &err));
+    tp_txn_result_free(&result);
+}
+
 static void make_preserved_live_journal_with_metadata(
     tp_recovery_store *store, const char *journal,
     const tp_recovery_metadata *metadata) {
@@ -322,6 +344,9 @@ static void make_preserved_live_journal_with_metadata(
     tp_model *model = create_model();
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_recovery_live_attach(live, model, metadata, NULL));
+    /* Recovery discovery deliberately ignores checkpoint-only clean sessions.
+     * Persist one real transaction so this fixture represents unsaved work. */
+    commit_recovery_fixture_change(model);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_recovery_live_finish(live, true, NULL));
     tp_recovery_live_destroy(live);
@@ -822,6 +847,8 @@ void test_failed_live_cleanup_keeps_journal_discoverable_after_restart(void) {
     };
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_recovery_live_attach(live, model, &metadata, NULL));
+
+    commit_recovery_fixture_change(model);
 
     tp_recovery__test_fail_next_quarantine_unlink();
     TEST_ASSERT_EQUAL_INT(TP_STATUS_RECOVERY_CLEANUP_FAILED,
