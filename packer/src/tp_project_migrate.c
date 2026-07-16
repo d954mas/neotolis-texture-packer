@@ -5,7 +5,38 @@
 #include <string.h>
 
 #include "tp_core/tp_sprite_index.h" /* lazy v3->v4 sprite re-keying uses the resolved index */
+#include "tp_project_internal.h"      /* component-local complexity probes */
 #include "tp_strutil.h"              /* shared tp_strdup (one core definition, fix [8]) */
+
+static _Thread_local bool s_test_measure_id_validation;
+static _Thread_local size_t s_test_id_validation_probes;
+static _Thread_local bool s_test_measure_legacy_ids;
+static _Thread_local size_t s_test_legacy_id_probes;
+static _Thread_local bool s_test_fail_legacy_id_index_alloc;
+
+void tp_project__test_id_validation_work_reset(void) {
+    s_test_id_validation_probes = 0U;
+    s_test_measure_id_validation = true;
+}
+
+size_t tp_project__test_id_validation_work_take(void) {
+    s_test_measure_id_validation = false;
+    return s_test_id_validation_probes;
+}
+
+void tp_project__test_legacy_id_work_reset(void) {
+    s_test_legacy_id_probes = 0U;
+    s_test_measure_legacy_ids = true;
+}
+
+size_t tp_project__test_legacy_id_work_take(void) {
+    s_test_measure_legacy_ids = false;
+    return s_test_legacy_id_probes;
+}
+
+void tp_project__test_fail_next_legacy_id_index_alloc(void) {
+    s_test_fail_legacy_id_index_alloc = true;
+}
 
 /* ======================================================================== */
 /* deterministic legacy assigner (promoted from C0-01 tp_c0_legacy)          */
@@ -40,42 +71,15 @@ tp_id128 tp_legacy_hash_default(void *ctx, tp_id_kind kind, const char *tuple, u
     return tp_hasher_final(h);
 }
 
-/* Open-addressed (linear-probe) set of already-assigned IDs, keyed by
- * tp_id128_bucket(). An empty slot is a nil ID -- nil is reserved and never
- * inserted, so a zeroed table is an empty set. `mask` == capacity-1 (capacity is
- * a power of two >= 2n), so the load factor stays <= 0.5: a free slot always
- * exists and probing terminates. */
-static bool legacy_set_contains(const tp_id128 *slots, size_t mask, tp_id128 id) {
-    size_t idx = (size_t)tp_id128_bucket(id) & mask;
-    for (;;) {
-        if (tp_id128_is_nil(slots[idx])) {
-            return false;
-        }
-        if (tp_id128_eq(slots[idx], id)) {
-            return true;
-        }
-        idx = (idx + 1U) & mask;
-    }
-}
+#define TP_LEGACY_ID_MAX_PROBES 64U
 
-static void legacy_set_insert(tp_id128 *slots, size_t mask, tp_id128 id) {
-    size_t idx = (size_t)tp_id128_bucket(id) & mask;
-    while (!tp_id128_is_nil(slots[idx])) {
-        idx = (idx + 1U) & mask;
-    }
-    slots[idx] = id;
-}
-
-/* Salt-sweep body shared by the hashed path and its O(n^2) fallback, so the sweep
- * policy (nil-skip, salt bound, exhaustion token, array order) lives in ONE place
- * and the two paths can never silently diverge. They differ ONLY in how a clash
- * with an already-assigned id is detected (`clashes`) and how a freshly assigned id
- * is recorded (`note`). Returns TP_STATUS_OK or exhaustion. */
-typedef bool (*legacy_clash_fn)(void *ctx, size_t assigned, tp_id128 cand);
-typedef void (*legacy_note_fn)(void *ctx, tp_id128 cand);
-
-static tp_status legacy_salt_sweep(tp_legacy_entry *entries, size_t n, tp_legacy_hash_fn hash, void *hctx,
-                                   legacy_clash_fn clashes, legacy_note_fn note, void *cctx, tp_error *err) {
+/* Assign in canonical entry order. The table is at most half full and each
+ * candidate performs bounded work; memory pressure fails instead of falling
+ * back to a quadratic scan. */
+static tp_status legacy_salt_sweep(tp_legacy_entry *entries, size_t n,
+                                   tp_legacy_hash_fn hash, void *hctx,
+                                   tp_id128 *slots, size_t mask,
+                                   tp_error *err) {
     for (size_t i = 0; i < n; i++) {
         bool assigned = false;
         for (uint32_t salt = 0; salt <= (uint32_t)TP_LEGACY_MAX_SALT; salt++) {
@@ -83,53 +87,40 @@ static tp_status legacy_salt_sweep(tp_legacy_entry *entries, size_t n, tp_legacy
             if (tp_id128_is_nil(cand)) {
                 continue; /* nil is reserved -- bump salt */
             }
-            if (clashes(cctx, i, cand)) {
-                continue; /* clash with an already-assigned entry -- bump salt */
+            size_t slot = (size_t)tp_id128_bucket(cand) & mask;
+            bool resolved = false;
+            for (size_t probe = 0U;
+                 probe < (size_t)TP_LEGACY_ID_MAX_PROBES; probe++) {
+                if (s_test_measure_legacy_ids) {
+                    s_test_legacy_id_probes++;
+                }
+                if (tp_id128_is_nil(slots[slot])) {
+                    slots[slot] = cand;
+                    entries[i].id = cand;
+                    assigned = true;
+                    resolved = true;
+                    break;
+                }
+                if (tp_id128_eq(slots[slot], cand)) {
+                    resolved = true; /* collision: retry this entry at next salt */
+                    break;
+                }
+                slot = (slot + 1U) & mask;
             }
-            entries[i].id = cand;
-            note(cctx, cand);
-            assigned = true;
-            break;
+            if (!resolved) {
+                return tp_error_set(
+                    err, TP_STATUS_OUT_OF_BOUNDS,
+                    "legacy structural id lookup exceeds the work limit");
+            }
+            if (assigned) {
+                break;
+            }
         }
         if (!assigned) {
             return tp_error_set(err, TP_STATUS_ID_COLLISION_EXHAUSTED, "legacy salt sweep exhausted for entry %zu", i);
         }
     }
     return TP_STATUS_OK;
-}
-
-/* Hashed path (O(n) total): probe + update the open-addressed set. */
-typedef struct {
-    tp_id128 *slots;
-    size_t mask;
-} legacy_hashed_ctx;
-static bool legacy_clash_hashed(void *ctx, size_t assigned, tp_id128 cand) {
-    (void)assigned;
-    const legacy_hashed_ctx *h = (const legacy_hashed_ctx *)ctx;
-    return legacy_set_contains(h->slots, h->mask, cand);
-}
-static void legacy_note_hashed(void *ctx, tp_id128 cand) {
-    legacy_hashed_ctx *h = (legacy_hashed_ctx *)ctx;
-    legacy_set_insert(h->slots, h->mask, cand);
-}
-
-/* O(n^2) fallback used only if the set allocation fails, so a memory-pressure load
- * never aborts and never changes the result (byte-identical to the hashed path:
- * same array order, same salt-bump sequence, same collision bound). Scans the
- * already-assigned prefix entries[0..assigned) and records nothing -- the entries
- * array the sweep just wrote is its own source of truth. */
-static bool legacy_clash_linear(void *ctx, size_t assigned, tp_id128 cand) {
-    const tp_legacy_entry *entries = (const tp_legacy_entry *)ctx;
-    for (size_t j = 0; j < assigned; j++) {
-        if (tp_id128_eq(entries[j].id, cand)) {
-            return true;
-        }
-    }
-    return false;
-}
-static void legacy_note_linear(void *ctx, tp_id128 cand) {
-    (void)ctx;
-    (void)cand;
 }
 
 tp_status tp_legacy_assign(tp_legacy_entry *entries, size_t n, tp_legacy_hash_fn hash, void *ctx, tp_error *err) {
@@ -145,16 +136,28 @@ tp_status tp_legacy_assign(tp_legacy_entry *entries, size_t n, tp_legacy_hash_fn
     if (n == 0) {
         return TP_STATUS_OK;
     }
-    size_t cap = 1;
-    while (cap < n * 2U) {
-        cap <<= 1; /* smallest power of two >= 2n */
+    if (n > SIZE_MAX / 2U) {
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                            "too many legacy structural ids");
     }
-    tp_id128 *slots = calloc(cap, sizeof *slots); /* zeroed == all-nil == empty */
+    size_t cap = 16U;
+    const size_t needed = n * 2U;
+    while (cap < needed) {
+        if (cap > SIZE_MAX / 2U) {
+            return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                                "too many legacy structural ids");
+        }
+        cap *= 2U;
+    }
+    const bool fail_alloc = s_test_fail_legacy_id_index_alloc;
+    s_test_fail_legacy_id_index_alloc = false;
+    tp_id128 *slots = fail_alloc ? NULL : (tp_id128 *)calloc(cap, sizeof *slots);
     if (!slots) {
-        return legacy_salt_sweep(entries, n, hash, ctx, legacy_clash_linear, legacy_note_linear, entries, err);
+        return tp_error_set(err, TP_STATUS_OOM,
+                            "tp_legacy_assign: out of memory");
     }
-    legacy_hashed_ctx hc = {slots, cap - 1U};
-    tp_status st = legacy_salt_sweep(entries, n, hash, ctx, legacy_clash_hashed, legacy_note_hashed, &hc, err);
+    tp_status st = legacy_salt_sweep(entries, n, hash, ctx, slots, cap - 1U,
+                                     err);
     free(slots);
     return st;
 }
@@ -580,17 +583,89 @@ tp_status tp_project_migrate_sprite_refs(tp_project *project, tp_error *err) {
     return TP_STATUS_OK;
 }
 
+#define TP_ID_VALIDATION_MAX_PROBES 64U
+
+typedef struct tp_project_id_ref {
+    tp_id128 id;
+    const char *label;
+} tp_project_id_ref;
+
+static tp_status validate_unique_ids(const tp_project_id_ref *refs, size_t count,
+                                     tp_error *err) {
+    if (count == 0U) {
+        return TP_STATUS_OK;
+    }
+    if (count > (size_t)UINT32_MAX || count > SIZE_MAX / 2U) {
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                            "too many structural ids to validate");
+    }
+    size_t capacity = 16U;
+    const size_t needed = count * 2U;
+    while (capacity < needed) {
+        if (capacity > SIZE_MAX / 2U) {
+            return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                                "too many structural ids to validate");
+        }
+        capacity *= 2U;
+    }
+    uint32_t *slots = (uint32_t *)calloc(capacity, sizeof *slots);
+    if (!slots) {
+        return tp_error_set(err, TP_STATUS_OOM,
+                            "tp_project_validate_ids: out of memory");
+    }
+
+    size_t duplicate_first = SIZE_MAX;
+    size_t duplicate_second = SIZE_MAX;
+    tp_status status = TP_STATUS_OK;
+    for (size_t i = 0U; i < count; i++) {
+        size_t slot_index =
+            (size_t)tp_id128_bucket(refs[i].id) & (capacity - 1U);
+        bool resolved = false;
+        for (size_t probe = 0U;
+             probe < capacity && probe < (size_t)TP_ID_VALIDATION_MAX_PROBES;
+             probe++) {
+            if (s_test_measure_id_validation) {
+                s_test_id_validation_probes++;
+            }
+            const uint32_t existing = slots[slot_index];
+            if (existing == 0U) {
+                slots[slot_index] = (uint32_t)(i + 1U);
+                resolved = true;
+                break;
+            }
+            const size_t first = (size_t)existing - 1U;
+            if (tp_id128_eq(refs[first].id, refs[i].id)) {
+                if (first < duplicate_first) {
+                    duplicate_first = first;
+                    duplicate_second = i;
+                }
+                resolved = true;
+                break;
+            }
+            slot_index = (slot_index + 1U) & (capacity - 1U);
+        }
+        if (!resolved) {
+            status = tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                                  "structural id lookup exceeds the work limit");
+            break;
+        }
+    }
+    if (status == TP_STATUS_OK && duplicate_first != SIZE_MAX) {
+        status = tp_error_set(
+            err, TP_STATUS_DUPLICATE_ID,
+            "'%s' and '%s' share a structural id", refs[duplicate_first].label,
+            refs[duplicate_second].label);
+    }
+    free(slots);
+    return status;
+}
+
 tp_status tp_project_validate_ids(const tp_project *p, tp_error *err) {
     if (!p) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_project_validate_ids: NULL project");
     }
 
     /* Flatten every structural ID + a human label, checking nil during the walk. */
-    typedef struct {
-        tp_id128 id;
-        const char *label;
-    } id_ref;
-
     size_t total = 0;
     for (int ai = 0; ai < p->atlas_count; ai++) {
         total += 1U + (size_t)p->atlases[ai].source_count + (size_t)p->atlases[ai].animation_count +
@@ -599,7 +674,8 @@ tp_status tp_project_validate_ids(const tp_project *p, tp_error *err) {
     if (total == 0) {
         return TP_STATUS_OK;
     }
-    id_ref *refs = (id_ref *)calloc(total, sizeof *refs);
+    tp_project_id_ref *refs =
+        (tp_project_id_ref *)calloc(total, sizeof *refs);
     if (!refs) {
         return tp_error_set(err, TP_STATUS_OOM, "tp_project_validate_ids: out of memory");
     }
@@ -654,14 +730,8 @@ tp_status tp_project_validate_ids(const tp_project *p, tp_error *err) {
         }
     }
 
-    for (size_t i = 0; i < n && st == TP_STATUS_OK; i++) {
-        for (size_t j = i + 1; j < n; j++) {
-            if (tp_id128_eq(refs[i].id, refs[j].id)) {
-                st = tp_error_set(err, TP_STATUS_DUPLICATE_ID, "'%s' and '%s' share a structural id", refs[i].label,
-                                  refs[j].label);
-                break;
-            }
-        }
+    if (st == TP_STATUS_OK) {
+        st = validate_unique_ids(refs, n, err);
     }
     free(refs);
     return st;

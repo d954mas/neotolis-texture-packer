@@ -12,6 +12,7 @@
 
 #include <math.h>
 #include <stdbool.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -50,6 +51,180 @@ static const char *g_dir;
 static void promote(tp_project *p) {
     tp_rng rng = tp_rng_os();
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_promote_ids(p, &rng, NULL));
+}
+
+static size_t append_json(char *buffer, size_t capacity, size_t used,
+                          const char *format, ...) {
+    TEST_ASSERT_TRUE(used < capacity);
+    va_list args;
+    va_start(args, format);
+    const int written =
+        vsnprintf(buffer + used, capacity - used, format, args);
+    va_end(args);
+    TEST_ASSERT_TRUE(written >= 0);
+    TEST_ASSERT_TRUE((size_t)written < capacity - used);
+    return used + (size_t)written;
+}
+
+void test_project_load_lookup_work_is_linear(void) {
+    enum { RECORDS = 512 };
+    const size_t capacity = (size_t)RECORDS * 160U + 256U;
+    char *json = (char *)malloc(capacity);
+    TEST_ASSERT_NOT_NULL(json);
+    size_t used = append_json(
+        json, capacity, 0U,
+        "{\"version\":4,\"atlases\":[{\"id\":\"atlas_"
+        "ffffffffffffffffffffffffffffffff\",\"name\":\"a\","
+        "\"sources\":[", 0U);
+    for (unsigned i = 0U; i < (unsigned)RECORDS; i++) {
+        used = append_json(
+            json, capacity, used,
+            "%s{\"id\":\"source_%032x\",\"path\":\"path/",
+            i == 0U ? "" : ",", i + 1U);
+        used = append_json(json, capacity, used, "%u\"}", i);
+    }
+    used = append_json(json, capacity, used, "],\"sprites\":[", 0U);
+    for (unsigned i = 0U; i < (unsigned)RECORDS; i++) {
+        used = append_json(json, capacity, used,
+                           "%s{\"name\":\"sprite-",
+                           i == 0U ? "" : ",");
+        used = append_json(
+            json, capacity, used,
+            "%u\",\"origin\":[0.25,0.5]}", i);
+    }
+    used = append_json(json, capacity, used, "]}]}", 0U);
+
+    tp_project__test_load_lookup_work_reset();
+    tp_project__test_id_validation_work_reset();
+    tp_project *project = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_project_load_buffer(json, used, &project, &error), error.msg);
+    const tp_project_load_lookup_work work =
+        tp_project__test_load_lookup_work_take();
+    const size_t id_probes = tp_project__test_id_validation_work_take();
+    TEST_ASSERT_LESS_OR_EQUAL_size_t(
+        (size_t)RECORDS * 8U, work.source_path_comparisons);
+    TEST_ASSERT_LESS_OR_EQUAL_size_t(
+        (size_t)RECORDS * 8U, work.pending_name_comparisons);
+    TEST_ASSERT_LESS_OR_EQUAL_size_t(
+        ((size_t)RECORDS + 1U) * 8U, id_probes);
+    TEST_ASSERT_EQUAL_INT(RECORDS, project->atlases[0].source_count);
+    TEST_ASSERT_EQUAL_INT(RECORDS, project->atlases[0].sprite_count);
+
+    tp_project_destroy(project);
+    free(json);
+}
+
+static uint64_t test_load_hash(const char *key) {
+    uint64_t hash = UINT64_C(14695981039346656037);
+    for (; *key; key++) {
+        hash ^= (uint64_t)(unsigned char)*key;
+        hash *= UINT64_C(1099511628211);
+    }
+    return hash;
+}
+
+void test_project_load_adversarial_hash_cluster_is_bounded(void) {
+    enum { RECORDS = 65, TABLE_MASK = 255 };
+    char keys[RECORDS][32];
+    unsigned found = 0U;
+    for (unsigned candidate = 0U; found < (unsigned)RECORDS; candidate++) {
+        char key[32];
+        const int written = snprintf(key, sizeof key, "collision-%u", candidate);
+        TEST_ASSERT_TRUE(written > 0 && (size_t)written < sizeof key);
+        if ((test_load_hash(key) & (uint64_t)TABLE_MASK) == 0U) {
+            (void)snprintf(keys[found], sizeof keys[found], "%s", key);
+            found++;
+        }
+    }
+
+    char json[8192];
+    size_t used = append_json(
+        json, sizeof json, 0U,
+        "{\"version\":4,\"atlases\":[{\"id\":\"atlas_"
+        "ffffffffffffffffffffffffffffffff\",\"name\":\"a\","
+        "\"sprites\":[");
+    for (unsigned i = 0U; i < (unsigned)RECORDS; i++) {
+        used = append_json(json, sizeof json, used,
+                           "%s{\"name\":\"%s\"}", i == 0U ? "" : ",",
+                           keys[i]);
+    }
+    used = append_json(json, sizeof json, used, "]}]}");
+
+    tp_project__test_load_lookup_work_reset();
+    tp_project *project = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_project_load_buffer(json, used, &project, &error));
+    const tp_project_load_lookup_work work =
+        tp_project__test_load_lookup_work_take();
+    TEST_ASSERT_NULL(project);
+    TEST_ASSERT_LESS_OR_EQUAL_size_t(
+        (size_t)RECORDS * 64U, work.pending_name_comparisons);
+}
+
+void test_legacy_load_rejects_overlong_source_paths(void) {
+    char path[4097];
+    memset(path, 'a', sizeof path - 1U);
+    path[sizeof path - 1U] = '\0';
+
+    char json[4600];
+    for (unsigned version = 1U; version <= 2U; version++) {
+        size_t used = append_json(
+            json, sizeof json, 0U,
+            "{\"version\":%u,\"atlases\":[{\"name\":\"a\"", version);
+        if (version == 2U) {
+            used = append_json(
+                json, sizeof json, used,
+                ",\"id\":\"atlas_ffffffffffffffffffffffffffffffff\"");
+        }
+        used = append_json(json, sizeof json, used,
+                           ",\"sources\":[\"%s\"]}]}", path);
+        tp_project *project = NULL;
+        tp_error error = {{0}};
+        TEST_ASSERT_EQUAL_INT(
+            TP_STATUS_OUT_OF_BOUNDS,
+            tp_project_load_buffer(json, used, &project, &error));
+        TEST_ASSERT_NULL(project);
+    }
+}
+
+void test_v3_overlong_source_records_bypass_dedupe_index(void) {
+    enum { RECORDS = 65, PATH_BYTES = 4096 };
+    char path[PATH_BYTES + 1];
+    memset(path, 'a', PATH_BYTES);
+    path[PATH_BYTES] = '\0';
+    const size_t capacity =
+        (size_t)RECORDS * ((size_t)PATH_BYTES + 96U) + 256U;
+    char *json = (char *)malloc(capacity);
+    TEST_ASSERT_NOT_NULL(json);
+    size_t used = append_json(
+        json, capacity, 0U,
+        "{\"version\":3,\"atlases\":[{\"id\":\"atlas_"
+        "ffffffffffffffffffffffffffffffff\",\"name\":\"a\","
+        "\"sources\":[");
+    for (unsigned i = 0U; i < (unsigned)RECORDS; i++) {
+        used = append_json(
+            json, capacity, used,
+            "%s{\"id\":\"source_%032x\",\"path\":\"%s\"}",
+            i == 0U ? "" : ",", i + 1U, path);
+    }
+    used = append_json(json, capacity, used, "]}]}");
+
+    tp_project *project = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_project_load_buffer(json, used, &project, &error), error.msg);
+    TEST_ASSERT_EQUAL_INT(RECORDS, project->atlases[0].source_count);
+    TEST_ASSERT_EQUAL_STRING(path, project->atlases[0].sources[0].path);
+    TEST_ASSERT_EQUAL_STRING(
+        path, project->atlases[0].sources[RECORDS - 1].path);
+    tp_project_destroy(project);
+    free(json);
 }
 
 void test_json_admission_exact_limits_and_escaped_punctuation(void) {
@@ -914,7 +1089,7 @@ void test_v3_source_dup_collapse(void) {
         "00000000"
         "00000000"
         "00000002"
-        "\", \"path\": \"dup/path\" }\n"
+        "\", \"path\": \"dup\\\\path\" }\n"
         "      ]\n"
         "    }\n"
         "  ]\n"
@@ -948,6 +1123,30 @@ void test_v3_source_dup_collapse(void) {
     TEST_ASSERT_FALSE(tp_id128_eq(a->sources[0].id, id2));
 
     tp_project_destroy(p);
+}
+
+void test_pending_sprite_duplicates_keep_first_position_and_merge_fields(void) {
+    static const char json[] =
+        "{\"version\":4,\"atlases\":[{"
+        "\"id\":\"atlas_ffffffffffffffffffffffffffffffff\","
+        "\"name\":\"a\",\"sprites\":["
+        "{\"name\":\"hero\",\"origin\":[0.25,0.5]},"
+        "{\"name\":\"one\"},{\"name\":\"two\"},{\"name\":\"three\"},"
+        "{\"name\":\"four\"},{\"name\":\"five\"},{\"name\":\"six\"},"
+        "{\"name\":\"seven\"},{\"name\":\"eight\"},{\"name\":\"nine\"},"
+        "{\"name\":\"hero\",\"rename\":\"champ\"}]}]}";
+    tp_project *project = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_project_load_buffer(json, sizeof json - 1U, &project, &error),
+        error.msg);
+    const tp_project_atlas *atlas = &project->atlases[0];
+    TEST_ASSERT_EQUAL_INT(10, atlas->sprite_count);
+    TEST_ASSERT_TRUE(fabsf(atlas->sprites[0].origin_x - 0.25F) < EPS);
+    TEST_ASSERT_TRUE(fabsf(atlas->sprites[0].origin_y - 0.5F) < EPS);
+    TEST_ASSERT_EQUAL_STRING("champ", atlas->sprites[0].rename);
+    tp_project_destroy(project);
 }
 
 /* 10. sprite rename override: set creates the sparse entry; clear removes it when
@@ -1461,6 +1660,10 @@ int main(int argc, char **argv) {
     g_dir = (argc > 1) ? argv[1] : ".";
     UNITY_BEGIN();
     RUN_TEST(test_seed_default_target);
+    RUN_TEST(test_project_load_lookup_work_is_linear);
+    RUN_TEST(test_project_load_adversarial_hash_cluster_is_bounded);
+    RUN_TEST(test_legacy_load_rejects_overlong_source_paths);
+    RUN_TEST(test_v3_overlong_source_records_bypass_dedupe_index);
     RUN_TEST(test_json_admission_exact_limits_and_escaped_punctuation);
     RUN_TEST(test_json_admission_rejects_nodes_entries_and_depth);
     RUN_TEST(test_json_admission_rejects_byte_limit_before_buffer_access);
@@ -1484,6 +1687,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_add_source_dedupe);
     RUN_TEST(test_source_kind_roundtrip);
     RUN_TEST(test_v3_source_dup_collapse);
+    RUN_TEST(test_pending_sprite_duplicates_keep_first_position_and_merge_fields);
     RUN_TEST(test_sprite_rename_override);
     RUN_TEST(test_set_target);
     RUN_TEST(test_out_path_shared);

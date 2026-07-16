@@ -18,6 +18,7 @@
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_project_migrate.h"
 #include "unity.h"
+#include "../src/tp_project_internal.h"
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -215,6 +216,69 @@ void test_duplicate_id_rejected(void) {
     tp_status st = tp_project_load(path, &loaded, &err);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_DUPLICATE_ID, st);
     TEST_ASSERT_NULL(loaded);
+}
+
+void test_duplicate_id_error_keeps_original_entity_order(void) {
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    for (int i = 0; i < 3; i++) {
+        TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                              tp_project_add_atlas(project, "x", NULL));
+    }
+    static const char *names[] = {"a", "b", "c", "d"};
+    for (int i = 0; i < 4; i++) {
+        TEST_ASSERT_EQUAL_INT(
+            TP_STATUS_OK,
+            tp_project_set_atlas_name(&project->atlases[i], names[i]));
+    }
+    tp_id128 first = tp_id128_nil();
+    tp_id128 second = tp_id128_nil();
+    first.bytes[15] = 1U;
+    second.bytes[15] = 2U;
+    project->atlases[0].id = first;
+    project->atlases[1].id = second;
+    project->atlases[2].id = second;
+    project->atlases[3].id = first;
+
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_DUPLICATE_ID,
+                          tp_project_validate_ids(project, &error));
+    TEST_ASSERT_EQUAL_STRING("'a' and 'd' share a structural id", error.msg);
+    tp_project_destroy(project);
+}
+
+void test_id_validation_adversarial_bucket_cluster_is_bounded(void) {
+    enum { RECORDS = 65, TABLE_MASK = 255 };
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    for (int i = 1; i < RECORDS; i++) {
+        TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                              tp_project_add_atlas(project, "x", NULL));
+    }
+
+    int found = 0;
+    for (uint32_t candidate = 1U; found < RECORDS; candidate++) {
+        tp_id128 id = tp_id128_nil();
+        id.bytes[12] = (uint8_t)(candidate >> 24U);
+        id.bytes[13] = (uint8_t)(candidate >> 16U);
+        id.bytes[14] = (uint8_t)(candidate >> 8U);
+        id.bytes[15] = (uint8_t)candidate;
+        if ((tp_id128_bucket(id) & (uint64_t)TABLE_MASK) == 0U) {
+            project->atlases[found++].id = id;
+        }
+    }
+    const tp_id128 first = project->atlases[0].id;
+    const tp_id128 last = project->atlases[RECORDS - 1].id;
+
+    tp_project__test_id_validation_work_reset();
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS,
+                          tp_project_validate_ids(project, &error));
+    const size_t probes = tp_project__test_id_validation_work_take();
+    TEST_ASSERT_LESS_OR_EQUAL_size_t((size_t)RECORDS * 64U, probes);
+    TEST_ASSERT_TRUE(tp_id128_eq(first, project->atlases[0].id));
+    TEST_ASSERT_TRUE(tp_id128_eq(last, project->atlases[RECORDS - 1].id));
+    tp_project_destroy(project);
 }
 
 /* 5b. malformed / wrong-kind / nil IDs on load -> TP_STATUS_ID_MALFORMED. */
@@ -704,6 +768,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_save_failure_does_not_remap_ids);
     RUN_TEST(test_rng_failure_structured_and_atomic);
     RUN_TEST(test_duplicate_id_rejected);
+    RUN_TEST(test_duplicate_id_error_keeps_original_entity_order);
+    RUN_TEST(test_id_validation_adversarial_bucket_cluster_is_bounded);
     RUN_TEST(test_malformed_id_rejected);
     RUN_TEST(test_v2_missing_id_rejected);
     RUN_TEST(test_v2_anim_missing_name_rejected);

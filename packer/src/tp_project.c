@@ -33,6 +33,19 @@
 
 #define TP_PATH_MAX 4096
 
+static _Thread_local bool s_test_measure_load_lookups;
+static _Thread_local tp_project_load_lookup_work s_test_load_lookup_work;
+
+void tp_project__test_load_lookup_work_reset(void) {
+    memset(&s_test_load_lookup_work, 0, sizeof s_test_load_lookup_work);
+    s_test_measure_load_lookups = true;
+}
+
+tp_project_load_lookup_work tp_project__test_load_lookup_work_take(void) {
+    s_test_measure_load_lookups = false;
+    return s_test_load_lookup_work;
+}
+
 /* ======================================================================== */
 /* small dynamic-array primitives (owned-string helpers live in tp_strutil.h) */
 /* ======================================================================== */
@@ -66,6 +79,18 @@ static void tp_normalize_slashes(char *s) {
             *s = '/';
         }
     }
+}
+
+static tp_status tp_source_path_admit(const char *path) {
+    if (!path) {
+        return TP_STATUS_INVALID_ARGUMENT;
+    }
+    size_t length = 0U;
+    while (length < (size_t)TP_PATH_MAX && path[length] != '\0') {
+        length++;
+    }
+    return length < (size_t)TP_PATH_MAX ? TP_STATUS_OK
+                                        : TP_STATUS_OUT_OF_BOUNDS;
 }
 
 static bool tp_path_is_absolute(const char *p) {
@@ -377,23 +402,28 @@ static bool tp_source_path_equal(const char *a, const char *b) {
     if (!a || !b) {
         return false;
     }
-    char left[TP_PATH_MAX];
-    char right[TP_PATH_MAX];
-    if ((size_t)snprintf(left, sizeof left, "%s", a) >= sizeof left ||
-        (size_t)snprintf(right, sizeof right, "%s", b) >= sizeof right) {
+    /* v3 historically tolerates overlong paths so validation can diagnose the
+     * file; such anomalous records never silently deduplicate. */
+    if (tp_source_path_admit(a) != TP_STATUS_OK ||
+        tp_source_path_admit(b) != TP_STATUS_OK) {
         return false;
     }
-    tp_normalize_slashes(left);
-    tp_normalize_slashes(right);
-    return strcmp(left, right) == 0;
+    for (;;) {
+        const char left = *a == '\\' ? '/' : *a;
+        const char right = *b == '\\' ? '/' : *b;
+        if (left != right || left == '\0') {
+            return left == right;
+        }
+        a++;
+        b++;
+    }
 }
 
 /* True when the atlas already holds a source whose '/'-normalized path equals
  * `path`'s -- the "an atlas never holds two identical source paths" invariant that
  * both the mutation API and the v3 loader enforce. A path that overflows the
- * TP_PATH_MAX compare buffer cannot equal a stored (also-capped) path, so it is
- * treated as absent (the caller then pushes it -- an anomalous over-long path is
- * never silently merged). */
+ * Mutation and legacy load admit normal paths before this lookup; anomalous v3
+ * paths deliberately compare unequal so validation sees every record. */
 static bool atlas_has_source_path(const tp_project_atlas *a, const char *path) {
     for (int i = 0; i < a->source_count; i++) {
         if (tp_source_path_equal(a->sources[i].path, path)) {
@@ -407,11 +437,9 @@ tp_status tp_project_atlas_add_source_kind(tp_project_atlas *a, const char *path
     if (!a || !path) {
         return TP_STATUS_INVALID_ARGUMENT;
     }
-    /* The mutation API rejects a path that cannot round-trip the dedupe buffer
-     * (stricter than the loader, which tolerates an anomalous file). */
-    char norm[TP_PATH_MAX];
-    if ((size_t)snprintf(norm, sizeof norm, "%s", path) >= sizeof norm) {
-        return TP_STATUS_OUT_OF_BOUNDS;
+    const tp_status admission = tp_source_path_admit(path);
+    if (admission != TP_STATUS_OK) {
+        return admission;
     }
     /* Dedupe: an exact ('/'-normalized) duplicate is an OK no-op (keeps its kind). */
     if (atlas_has_source_path(a, path)) {
@@ -2132,30 +2160,108 @@ static tp_status tp_load_id(const cJSON *o, const char *key, tp_id_kind expect_k
     return TP_STATUS_OK;
 }
 
-/* Appends a fresh all-default sprite record (NO name-dedupe) and returns it, or NULL
- * on OOM. The v4 migrated-record path uses this because identity is (source, key), so
- * two records must never collapse just because their export-key bridges collide. */
-/* Load-time finder for a record still in PENDING {name} form (no stored {source,key})
- * whose name bridge matches. v4 record loading dedups a pending record ONLY against
- * other PENDING records -- it never merges a pending record into a MIGRATED one (or vice
- * versa). This makes loading ORDER-INDEPENDENT (fix [3]): a migrated {source,key} record
- * and a pending {name} record that share a name bridge always COEXIST regardless of JSON
- * array order, instead of merge-or-shadow by element position. (Two legitimately distinct
- * migrated records -- different source or key -- also always coexist; validate flags a
- * true (source,key) duplicate. Two pending records with the same name still merge, as in
- * v3.) Canonical mutation never uses this bridge; only pending migration does. */
-static tp_project_sprite *find_pending_sprite_by_name(tp_project_atlas *a, const char *name) {
-    for (int i = 0; i < a->sprite_count; i++) {
-        tp_project_sprite *s = &a->sprites[i];
-        const bool migrated = !tp_id128_is_nil(s->source_ref) && s->src_key != NULL;
-        if (!migrated && s->name && strcmp(s->name, name) == 0) {
-            return s;
+/* Parse-local borrowed-string index. It exists only while one JSON array is
+ * materialized; the project model remains the sole owner of stored strings. */
+typedef struct tp_load_lookup_slot {
+    uint64_t hash;
+    const char *key;
+    int model_index;
+} tp_load_lookup_slot;
+
+typedef struct tp_load_lookup {
+    tp_load_lookup_slot *slots;
+    size_t capacity;
+    bool normalize_slashes;
+} tp_load_lookup;
+
+#define TP_LOAD_LOOKUP_MAX_PROBES 64U
+
+static uint64_t tp_load_key_hash(const char *key, bool normalize_slashes) {
+    uint64_t hash = UINT64_C(14695981039346656037);
+    for (; *key; key++) {
+        unsigned char byte = (unsigned char)*key;
+        if (normalize_slashes && byte == (unsigned char)'\\') {
+            byte = (unsigned char)'/';
+        }
+        hash ^= (uint64_t)byte;
+        hash *= UINT64_C(1099511628211);
+    }
+    return hash;
+}
+
+static bool tp_load_lookup_init(tp_load_lookup *lookup, int expected,
+                                bool normalize_slashes) {
+    memset(lookup, 0, sizeof *lookup);
+    lookup->normalize_slashes = normalize_slashes;
+    if (expected <= 0) {
+        return true;
+    }
+    if ((size_t)expected > SIZE_MAX / 2U) {
+        return false;
+    }
+    size_t capacity = 16U;
+    const size_t needed = (size_t)expected * 2U;
+    while (capacity < needed) {
+        if (capacity > SIZE_MAX / 2U) {
+            return false;
+        }
+        capacity *= 2U;
+    }
+    lookup->slots =
+        (tp_load_lookup_slot *)calloc(capacity, sizeof *lookup->slots);
+    if (!lookup->slots) {
+        return false;
+    }
+    lookup->capacity = capacity;
+    return true;
+}
+
+static void tp_load_lookup_free(tp_load_lookup *lookup) {
+    free(lookup->slots);
+    memset(lookup, 0, sizeof *lookup);
+}
+
+static tp_load_lookup_slot *tp_load_lookup_find(tp_load_lookup *lookup,
+                                                const char *key) {
+    if (!lookup || lookup->capacity == 0U || !key) {
+        return NULL;
+    }
+    const uint64_t hash = tp_load_key_hash(key, lookup->normalize_slashes);
+    const size_t start = (size_t)hash & (lookup->capacity - 1U);
+    for (size_t i = 0U;
+         i < lookup->capacity && i < (size_t)TP_LOAD_LOOKUP_MAX_PROBES; i++) {
+        tp_load_lookup_slot *slot =
+            &lookup->slots[(start + i) & (lookup->capacity - 1U)];
+        if (!slot->key) {
+            slot->hash = hash;
+            return slot;
+        }
+        if (s_test_measure_load_lookups) {
+            if (lookup->normalize_slashes) {
+                s_test_load_lookup_work.source_path_comparisons++;
+            } else {
+                s_test_load_lookup_work.pending_name_comparisons++;
+            }
+        }
+        if (slot->hash == hash) {
+            const bool equal = lookup->normalize_slashes
+                                   ? tp_source_path_equal(slot->key, key)
+                                   : strcmp(slot->key, key) == 0;
+            if (equal) {
+                return slot;
+            }
         }
     }
     return NULL;
 }
 
-static tp_status tp_load_sprite(tp_project_atlas *a, const cJSON *js, tp_error *err) {
+/* Appends a fresh all-default sprite record (NO name-dedupe) and returns it, or NULL
+ * on OOM. The v4 migrated-record path uses this because identity is (source, key), so
+ * two records must never collapse just because their export-key bridges collide. */
+static tp_status tp_load_sprite(tp_project_atlas *a, const cJSON *js,
+                                tp_load_lookup *pending_lookup,
+                                int pending_expected,
+                                tp_error *err) {
     if (!cJSON_IsObject(js)) {
         return tp_error_set(err, TP_STATUS_BAD_PROJECT, "sprite override must be an object");
     }
@@ -2197,8 +2303,20 @@ static tp_status tp_load_sprite(tp_project_atlas *a, const cJSON *js, tp_error *
         }
         /* Dedup pending-against-pending ONLY (fix [3]); never merge into a migrated record,
          * so records sharing a name bridge load order-independently. */
-        s = find_pending_sprite_by_name(a, name->valuestring);
-        if (!s) {
+        if (pending_lookup->capacity == 0U &&
+            !tp_load_lookup_init(pending_lookup, pending_expected, false)) {
+            return tp_error_set(err, TP_STATUS_OOM,
+                                "out of memory indexing sprite overrides");
+        }
+        tp_load_lookup_slot *slot =
+            tp_load_lookup_find(pending_lookup, name->valuestring);
+        if (!slot) {
+            return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                                "sprite override lookup exceeds the work limit");
+        }
+        if (slot->key) {
+            s = &a->sprites[slot->model_index];
+        } else {
             s = sprite_push_default(a);
             if (!s) {
                 return tp_error_set(err, TP_STATUS_OOM, "out of memory adding sprite override");
@@ -2207,6 +2325,8 @@ static tp_status tp_load_sprite(tp_project_atlas *a, const cJSON *js, tp_error *
             if (!s->name) {
                 return tp_error_set(err, TP_STATUS_OOM, "out of memory adding sprite override");
             }
+            slot->key = s->name;
+            slot->model_index = a->sprite_count - 1;
         }
     }
     const cJSON *origin = cJSON_GetObjectItemCaseSensitive(js, "origin");
@@ -2398,7 +2518,9 @@ static tp_status tp_load_source_kind(const cJSON *jsrc, tp_source_kind *out, tp_
  * historical self-healing collapse. A migrated v3 file never has duplicate paths
  * (the v1/v2 load already collapsed them before the v3 save), so only an anomalous
  * file exercises this. */
-static tp_status tp_load_source_obj(tp_project_atlas *a, const cJSON *jsrc, tp_error *err) {
+static tp_status tp_load_source_obj(tp_project_atlas *a, const cJSON *jsrc,
+                                    tp_load_lookup *source_lookup,
+                                    tp_error *err) {
     if (!cJSON_IsObject(jsrc)) {
         return tp_error_set(err, TP_STATUS_BAD_PROJECT, "source must be an object");
     }
@@ -2415,12 +2537,26 @@ static tp_status tp_load_source_obj(tp_project_atlas *a, const cJSON *jsrc, tp_e
     if ((st = tp_load_id(jsrc, "id", TP_ID_KIND_SOURCE, &id, err)) != TP_STATUS_OK) {
         return st;
     }
-    if (atlas_has_source_path(a, jpath->valuestring)) {
-        return TP_STATUS_OK; /* duplicate path -- collapse to the first, drop this object */
+    tp_load_lookup_slot *slot = NULL;
+    if (tp_source_path_admit(jpath->valuestring) == TP_STATUS_OK) {
+        slot = tp_load_lookup_find(source_lookup, jpath->valuestring);
+        if (!slot) {
+            return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                                "source lookup exceeds the work limit");
+        }
+        if (slot->key) {
+            return TP_STATUS_OK; /* duplicate path -- collapse to the first */
+        }
     }
+    /* Overlong tagged paths remain separate so validation can diagnose every
+     * anomalous record; they never enter the dedupe index. */
     st = atlas_push_source(a, jpath->valuestring, kind, id);
     if (st != TP_STATUS_OK) {
         return tp_error_set(err, st, "out of memory adding source");
+    }
+    if (slot) {
+        slot->key = a->sources[a->source_count - 1].path;
+        slot->model_index = a->source_count - 1;
     }
     return TP_STATUS_OK;
 }
@@ -2461,25 +2597,58 @@ static tp_status tp_load_atlas(tp_project *p, const cJSON *jatlas, bool v2, bool
         if (!cJSON_IsArray(sources)) {
             return tp_error_set(err, TP_STATUS_BAD_PROJECT, "atlas 'sources' must be an array");
         }
+        tp_load_lookup source_lookup;
+        if (!tp_load_lookup_init(&source_lookup, cJSON_GetArraySize(sources),
+                                 true)) {
+            return tp_error_set(err, TP_STATUS_OOM,
+                                "out of memory indexing sources");
+        }
         const cJSON *src = NULL;
         cJSON_ArrayForEach(src, sources) {
             if (v3) {
                 /* v3: each source is a tagged object {id, kind?, path}. */
-                if ((st = tp_load_source_obj(a, src, err)) != TP_STATUS_OK) {
+                st = tp_load_source_obj(a, src, &source_lookup, err);
+                if (st != TP_STATUS_OK) {
+                    tp_load_lookup_free(&source_lookup);
                     return st;
                 }
             } else {
                 /* v1/v2: a bare path string -> tagged record, kind=folder (decision
                  * 0008), id nil (synthesized post-parse by legacy migration). */
                 if (!cJSON_IsString(src) || !src->valuestring) {
+                    tp_load_lookup_free(&source_lookup);
                     return tp_error_set(err, TP_STATUS_BAD_PROJECT, "source path must be a string");
                 }
-                st = tp_project_atlas_add_source(a, src->valuestring);
-                if (st != TP_STATUS_OK) {
-                    return tp_error_set(err, st, "out of memory adding source");
+                const tp_status admission =
+                    tp_source_path_admit(src->valuestring);
+                if (admission != TP_STATUS_OK) {
+                    tp_load_lookup_free(&source_lookup);
+                    return tp_error_set(
+                        err, admission,
+                        "source path exceeds the supported limit");
+                }
+                tp_load_lookup_slot *slot =
+                    tp_load_lookup_find(&source_lookup, src->valuestring);
+                if (!slot) {
+                    tp_load_lookup_free(&source_lookup);
+                    return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                                        "source lookup exceeds the work limit");
+                }
+                if (!slot->key) {
+                    st = atlas_push_source(a, src->valuestring,
+                                           TP_SOURCE_KIND_FOLDER,
+                                           tp_id128_nil());
+                    if (st != TP_STATUS_OK) {
+                        tp_load_lookup_free(&source_lookup);
+                        return tp_error_set(err, st,
+                                            "out of memory adding source");
+                    }
+                    slot->key = a->sources[a->source_count - 1].path;
+                    slot->model_index = a->source_count - 1;
                 }
             }
         }
+        tp_load_lookup_free(&source_lookup);
     }
 
     const cJSON *sprites = cJSON_GetObjectItemCaseSensitive(jatlas, "sprites");
@@ -2487,12 +2656,17 @@ static tp_status tp_load_atlas(tp_project *p, const cJSON *jatlas, bool v2, bool
         if (!cJSON_IsArray(sprites)) {
             return tp_error_set(err, TP_STATUS_BAD_PROJECT, "atlas 'sprites' must be an array");
         }
+        tp_load_lookup pending_lookup = {0};
+        const int sprite_count = cJSON_GetArraySize(sprites);
         const cJSON *js = NULL;
         cJSON_ArrayForEach(js, sprites) {
-            if ((st = tp_load_sprite(a, js, err)) != TP_STATUS_OK) {
+            st = tp_load_sprite(a, js, &pending_lookup, sprite_count, err);
+            if (st != TP_STATUS_OK) {
+                tp_load_lookup_free(&pending_lookup);
                 return st;
             }
         }
+        tp_load_lookup_free(&pending_lookup);
     }
 
     const cJSON *anims = cJSON_GetObjectItemCaseSensitive(jatlas, "animations");

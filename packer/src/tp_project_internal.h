@@ -20,6 +20,19 @@ size_t tp_project__test_serializer_peak_capacity(void);
 size_t tp_project__test_load_buffer_calls(void);
 size_t tp_project__test_size_query_calls(void);
 
+typedef struct tp_project_load_lookup_work {
+    size_t source_path_comparisons;
+    size_t pending_name_comparisons;
+} tp_project_load_lookup_work;
+
+void tp_project__test_load_lookup_work_reset(void);
+tp_project_load_lookup_work tp_project__test_load_lookup_work_take(void);
+void tp_project__test_id_validation_work_reset(void);
+size_t tp_project__test_id_validation_work_take(void);
+void tp_project__test_legacy_id_work_reset(void);
+size_t tp_project__test_legacy_id_work_take(void);
+void tp_project__test_fail_next_legacy_id_index_alloc(void);
+
 typedef struct tp_project_json_limits {
     size_t bytes;
     size_t nodes;

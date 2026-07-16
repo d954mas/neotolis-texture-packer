@@ -1,12 +1,13 @@
 /* F1-01 Part C (low-level): deterministic legacy synthetic-ID assigner promoted
  * from the accepted C0-01 spike. Golden default-hash vectors (identical to the
  * spike: same "lid1" tag + kind bytes), stability across repeated loads, kind
- * sensitivity, and a forced-collision seam proving the salt-sweep fallback is
+ * sensitivity, and a forced-collision seam proving the bounded salt sweep is
  * itself deterministic and reports exhaustion as a structured tp_status. */
 
 #include "tp_core/tp_project_migrate.h"
 #include "tp_hex.h"
 #include "unity.h"
+#include "../src/tp_project_internal.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -55,7 +56,7 @@ void test_kind_changes_id(void) {
 }
 
 /* Toy seam: salt 0 ignores the tuple, so two entries collide; a salt bump moves
- * byte[15]. Proves the fallback disambiguates deterministically. */
+ * byte[15]. Proves the bounded sweep disambiguates deterministically. */
 static tp_id128 toy_hash(void *ctx, tp_id_kind kind, const char *tuple, uint32_t salt) {
     (void)ctx;
     (void)tuple;
@@ -106,6 +107,62 @@ void test_collision_exhaustion_is_structured(void) {
     TEST_ASSERT_EQUAL_STRING("id_collision_exhausted", tp_status_id(st));
 }
 
+typedef struct cluster_hash_context {
+    tp_id128 ids[65];
+} cluster_hash_context;
+
+static tp_id128 cluster_hash(void *ctx, tp_id_kind kind, const char *tuple,
+                             uint32_t salt) {
+    (void)kind;
+    (void)salt;
+    cluster_hash_context *cluster = (cluster_hash_context *)ctx;
+    size_t index = 0U;
+    for (; *tuple; tuple++) {
+        index = index * 10U + (size_t)(*tuple - '0');
+    }
+    return cluster->ids[index];
+}
+
+void test_adversarial_legacy_bucket_cluster_is_bounded(void) {
+    enum { RECORDS = 65, TABLE_MASK = 255 };
+    cluster_hash_context cluster = {0};
+    int found = 0;
+    for (uint32_t candidate = 1U; found < RECORDS; candidate++) {
+        tp_id128 id = tp_id128_nil();
+        id.bytes[12] = (uint8_t)(candidate >> 24U);
+        id.bytes[13] = (uint8_t)(candidate >> 16U);
+        id.bytes[14] = (uint8_t)(candidate >> 8U);
+        id.bytes[15] = (uint8_t)candidate;
+        if ((tp_id128_bucket(id) & (uint64_t)TABLE_MASK) == 0U) {
+            cluster.ids[found++] = id;
+        }
+    }
+
+    tp_legacy_entry entries[RECORDS] = {{0}};
+    char tuples[RECORDS][8];
+    for (int i = 0; i < RECORDS; i++) {
+        (void)snprintf(tuples[i], sizeof tuples[i], "%d", i);
+        entries[i].kind = TP_ID_KIND_SOURCE;
+        entries[i].tuple = tuples[i];
+    }
+    tp_project__test_legacy_id_work_reset();
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_legacy_assign(entries, RECORDS, cluster_hash, &cluster, NULL));
+    const size_t probes = tp_project__test_legacy_id_work_take();
+    TEST_ASSERT_LESS_OR_EQUAL_size_t((size_t)RECORDS * 64U, probes);
+}
+
+void test_legacy_index_oom_has_no_quadratic_fallback(void) {
+    tp_legacy_entry entry = {
+        TP_ID_KIND_ATLAS, "0", {{0xffU}},
+    };
+    tp_project__test_fail_next_legacy_id_index_alloc();
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OOM,
+                          tp_legacy_assign(&entry, 1U, NULL, NULL, NULL));
+    TEST_ASSERT_TRUE(tp_id128_is_nil(entry.id));
+}
+
 /* The hash-set assigner must stay unique and deterministic at scale. */
 void test_assign_1000_unique_and_deterministic(void) {
     enum { N = 1000 };
@@ -141,6 +198,8 @@ int main(void) {
     RUN_TEST(test_kind_changes_id);
     RUN_TEST(test_forced_collision_disambiguates_deterministically);
     RUN_TEST(test_collision_exhaustion_is_structured);
+    RUN_TEST(test_adversarial_legacy_bucket_cluster_is_bounded);
+    RUN_TEST(test_legacy_index_oom_has_no_quadratic_fallback);
     RUN_TEST(test_assign_1000_unique_and_deterministic);
     return UNITY_END();
 }
