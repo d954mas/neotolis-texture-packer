@@ -155,6 +155,67 @@ static int current_atlas_index(tp_id128 atlas_id) {
     return -1;
 }
 
+static pack_slot *pack_slot_for_atlas_id(tp_id128 atlas_id) {
+    for (int i = 0; i < GUI_PACK_MAX_ATLASES; ++i) {
+        if (s_slots[i].valid && tp_id128_eq(s_slots[i].atlas_id, atlas_id)) {
+            return &s_slots[i];
+        }
+    }
+    return NULL;
+}
+
+static pack_slot *pack_slot_for_atlas_index(int atlas_index) {
+    if (atlas_index < 0 || atlas_index >= GUI_PACK_MAX_ATLASES) {
+        return NULL;
+    }
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas = snapshot
+                                         ? tp_session_snapshot_atlas_at(
+                                               snapshot, atlas_index)
+                                         : NULL;
+    if (!atlas) {
+        return NULL;
+    }
+    if (s_slots[atlas_index].valid &&
+        tp_id128_eq(s_slots[atlas_index].atlas_id, atlas->id)) {
+        return &s_slots[atlas_index];
+    }
+    return pack_slot_for_atlas_id(atlas->id);
+}
+
+static bool snapshot_has_atlas(const tp_session_snapshot *snapshot,
+                               tp_id128 atlas_id) {
+    const int count = snapshot ? tp_session_snapshot_atlas_count(snapshot) : 0;
+    for (int i = 0; i < count; ++i) {
+        const tp_snapshot_atlas *atlas =
+            tp_session_snapshot_atlas_at(snapshot, i);
+        if (atlas && tp_id128_eq(atlas->id, atlas_id)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static pack_slot *pack_slot_for_publish(int atlas_index, tp_id128 atlas_id) {
+    pack_slot *slot = pack_slot_for_atlas_id(atlas_id);
+    if (slot) {
+        return slot;
+    }
+    for (int i = 0; i < GUI_PACK_MAX_ATLASES; ++i) {
+        if (!s_slots[i].valid) {
+            return &s_slots[i];
+        }
+    }
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    for (int i = 0; i < GUI_PACK_MAX_ATLASES; ++i) {
+        if (!snapshot_has_atlas(snapshot, s_slots[i].atlas_id)) {
+            return &s_slots[i];
+        }
+    }
+    /* More than 64 live packed atlases are outside this GUI adapter's bound. */
+    return &s_slots[atlas_index];
+}
+
 // #endregion
 
 // #region public
@@ -168,14 +229,18 @@ void gui_pack_init(const char *work_dir) {
 }
 
 void gui_pack_clear(int atlas_index) {
-    for (int i = 0; i < GUI_PACK_MAX_ATLASES; i++) {
-        if (atlas_index >= 0 && i != atlas_index) {
-            continue;
+    if (atlas_index >= 0) {
+        pack_slot *slot = pack_slot_for_atlas_index(atlas_index);
+        if (slot) {
+            pack_slot_clear(slot);
         }
-        pack_slot_clear(&s_slots[i]);
+    } else {
+        for (int i = 0; i < GUI_PACK_MAX_ATLASES; i++) {
+            pack_slot_clear(&s_slots[i]);
+        }
     }
-    /* The preview is a derived view of the session pack -- clearing the session slot(s) it mirrors
-     * invalidates it too (open/new/undo/redo/repack all pass -1 or the preview's atlas). */
+    /* The preview is a derived view of the session pack, so clearing its source
+     * slot invalidates it too. */
     if (atlas_index < 0 || atlas_index == s_preview.atlas_index) {
         gui_pack_preview_clear();
     }
@@ -358,13 +423,15 @@ gui_pack_done gui_pack_poll(gui_pack_result_info *out) {
                     rc = GUI_PACK_DONE_PACK_FAIL;
                     goto pack_result_handled;
                 }
-                pack_slot_clear(&s_slots[atlas_index]);
-                s_slots[atlas_index].arena = result.pack.arena;
-                s_slots[atlas_index].result = result.pack.result;
-                s_slots[atlas_index].ref_index = ref_index;
-                s_slots[atlas_index].ref_index_cap = ref_index_cap;
-                s_slots[atlas_index].atlas_id = result.pack.atlas_id;
-                s_slots[atlas_index].valid = true;
+                pack_slot *slot = pack_slot_for_publish(
+                    atlas_index, result.pack.atlas_id);
+                pack_slot_clear(slot);
+                slot->arena = result.pack.arena;
+                slot->result = result.pack.result;
+                slot->ref_index = ref_index;
+                slot->ref_index_cap = ref_index_cap;
+                slot->atlas_id = result.pack.atlas_id;
+                slot->valid = true;
                 result.pack.arena = NULL;
                 if (out) {
                     out->atlas_index = atlas_index;
@@ -379,9 +446,9 @@ gui_pack_done gui_pack_poll(gui_pack_result_info *out) {
                     }
                 }
                 nt_log_info("gui_pack(async): atlas '%s' packed %d sprite(s), %d page(s) in %.1f ms",
-                            s_slots[atlas_index].result->atlas_name,
-                            s_slots[atlas_index].result->sprite_count,
-                            s_slots[atlas_index].result->page_count,
+                            slot->result->atlas_name,
+                            slot->result->sprite_count,
+                            slot->result->page_count,
                             result.elapsed_ms);
                 rc = GUI_PACK_DONE_PACK_OK;
             }
@@ -709,15 +776,8 @@ void gui_pack_shutdown(void) {
 }
 
 const tp_result *gui_pack_result(int atlas_index) {
-    if (atlas_index < 0 || atlas_index >= GUI_PACK_MAX_ATLASES || !s_slots[atlas_index].valid) {
-        return NULL;
-    }
-    const tp_session_snapshot *snapshot = gui_project_snapshot();
-    const tp_snapshot_atlas *atlas = snapshot ? tp_session_snapshot_atlas_at(snapshot, atlas_index) : NULL;
-    if (!atlas || !tp_id128_eq(s_slots[atlas_index].atlas_id, atlas->id)) {
-        return NULL;
-    }
-    return s_slots[atlas_index].result;
+    const pack_slot *slot = pack_slot_for_atlas_index(atlas_index);
+    return slot ? slot->result : NULL;
 }
 
 bool gui_pack_sprite_matches_ref(int atlas_index, int sprite_index,
@@ -740,8 +800,26 @@ bool gui_pack_sprite_matches_ref(int atlas_index, int sprite_index,
 
 int gui_pack_find_sprite_ref(int atlas_index, tp_id128 source_id,
                              const char *source_key) {
-    if (!gui_pack_result(atlas_index) || atlas_index < 0 ||
-        atlas_index >= GUI_PACK_MAX_ATLASES) {
+    if (atlas_index < 0 || atlas_index >= GUI_PACK_MAX_ATLASES) {
+        return -1;
+    }
+    /* The selected atlas may drive thousands of row lookups per frame after an
+     * index shift. This borrowed static-slot pointer is revalidated by ID. */
+    static const pack_slot *last_slot;
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas = snapshot
+                                         ? tp_session_snapshot_atlas_at(
+                                               snapshot, atlas_index)
+                                         : NULL;
+    if (!atlas) {
+        return -1;
+    }
+    const pack_slot *slot = last_slot;
+    if (!slot || !slot->valid || !tp_id128_eq(slot->atlas_id, atlas->id)) {
+        slot = pack_slot_for_atlas_id(atlas->id);
+        last_slot = slot;
+    }
+    if (!slot) {
         return -1;
     }
     char canonical_name[TP_PACK_INTERNAL_NAME_CAP];
@@ -750,7 +828,6 @@ int gui_pack_find_sprite_ref(int atlas_index, tp_id128 source_id,
             NULL) != TP_STATUS_OK) {
         return -1;
     }
-    const pack_slot *slot = &s_slots[atlas_index];
 #ifdef NTPACKER_GUI_SELFTEST
     s_ref_index_work.lookup_calls++;
 #endif

@@ -11,7 +11,7 @@
 #include "gui_scan.h"
 #include "gui_canvas.h"
 #include "gui_pack.h"
-#include "gui_shell.h" /* gui_shell_reset_shown_result: kill the freed-pointer bind after a clear (P2) */
+#include "gui_shell.h" /* reset the canvas borrow across pack/history transitions */
 #include "tinyfiledialogs.h"
 
 #include "tp_core/tp_export.h" /* tp_exporter_at -> the preview selector's exporter list */
@@ -1487,7 +1487,6 @@ void do_undo(void) {
                  * (undo does NOT journal), so "Nothing to undo." below is correct again. */
     }
     if (gui_project_undo()) {
-        gui_pack_clear(-1);
         gui_shell_reset_shown_result();
         cancel_edit();
         clamp_selection();
@@ -1506,7 +1505,6 @@ void do_redo(void) {
         return; /* fix4 [2]: a journal-failed flush is not "Nothing to redo" -- abort (error surfaced) */
     }
     if (gui_project_redo()) {
-        gui_pack_clear(-1);
         gui_shell_reset_shown_result();
         cancel_edit();
         clamp_selection();

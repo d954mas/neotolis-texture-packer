@@ -144,6 +144,37 @@ static const sprite_row *row_for_source(tp_id128 source_id) {
     return NULL;
 }
 
+static tp_id128 add_coin_source_to_atlas(int atlas_index) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas = snapshot
+                                         ? tp_session_snapshot_atlas_at(snapshot,
+                                                                        atlas_index)
+                                         : NULL;
+    TEST_ASSERT_NOT_NULL(atlas);
+    const tp_id128 atlas_id = atlas->id;
+    char source_path[1024];
+    (void)snprintf(source_path, sizeof source_path,
+                   "%s/apps/cli/testdata/sprites/coin.png",
+                   TP_TEST_SOURCE_DIR);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_ADD_ADDED,
+        gui_project_add_source_kind(atlas_id,
+                                    tp_session_snapshot_revision(snapshot),
+                                    source_path, TP_SOURCE_KIND_FILE));
+    return atlas_id;
+}
+
+static tp_id128 add_coin_source(void) {
+    return add_coin_source_to_atlas(0);
+}
+
+static void assert_atlas_name(tp_id128 atlas_id, const char *name) {
+    const tp_snapshot_atlas *atlas = tp_session_snapshot_atlas_by_id(
+        gui_project_snapshot(), atlas_id);
+    TEST_ASSERT_NOT_NULL(atlas);
+    TEST_ASSERT_EQUAL_STRING(name, atlas->name);
+}
+
 static bool animation_has_frame(const tp_session_snapshot *snapshot,
                                 tp_id128 atlas_id,
                                 const tp_snapshot_animation *animation,
@@ -176,20 +207,7 @@ void tearDown(void) {
 }
 
 void test_preview_result_rejects_source_refresh_after_job_capture(void) {
-    const tp_session_snapshot *snapshot = gui_project_snapshot();
-    const tp_snapshot_atlas *atlas = snapshot
-                                         ? tp_session_snapshot_atlas_at(snapshot, 0)
-                                         : NULL;
-    TEST_ASSERT_NOT_NULL(atlas);
-    char source_path[1024];
-    (void)snprintf(source_path, sizeof source_path,
-                   "%s/apps/cli/testdata/sprites/coin.png",
-                   TP_TEST_SOURCE_DIR);
-    TEST_ASSERT_EQUAL_INT(
-        GUI_ADD_ADDED,
-        gui_project_add_source_kind(atlas->id,
-                                    tp_session_snapshot_revision(snapshot),
-                                    source_path, TP_SOURCE_KIND_FILE));
+    (void)add_coin_source();
     gui_pack_init(TP_GUI_IDENTITY_TEST_DIR);
     char error[256] = {0};
     TEST_ASSERT_TRUE(gui_pack_preview_async_start(0, "defold", error,
@@ -223,6 +241,96 @@ void test_recovery_entry_keeps_core_path_capacity(void) {
     (void)snprintf(entry.original_path, sizeof entry.original_path, "%s",
                    original_path);
     TEST_ASSERT_EQUAL_STRING(original_path, entry.original_path);
+}
+
+void test_undo_redo_keep_last_successful_pack_result(void) {
+    const tp_id128 atlas_id = add_coin_source();
+
+    gui_pack_init(TP_GUI_IDENTITY_TEST_DIR);
+    do_pack_blocking();
+    const tp_result *packed = gui_pack_result(0);
+    TEST_ASSERT_NOT_NULL(packed);
+    TEST_ASSERT_FALSE(gui_project_is_stale());
+    const int sprite_count = packed->sprite_count;
+    const int page_count = packed->page_count;
+
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    TEST_ASSERT_TRUE(gui_project_set_atlas_name(
+        atlas_id, tp_session_snapshot_revision(snapshot), "edited"));
+    assert_atlas_name(atlas_id, "edited");
+
+    do_undo();
+    packed = gui_pack_result(0);
+    TEST_ASSERT_NOT_NULL(packed);
+    TEST_ASSERT_EQUAL_INT(sprite_count, packed->sprite_count);
+    TEST_ASSERT_EQUAL_INT(page_count, packed->page_count);
+    assert_atlas_name(atlas_id, "atlas1");
+    TEST_ASSERT_TRUE(gui_project_is_stale());
+
+    do_redo();
+    packed = gui_pack_result(0);
+    TEST_ASSERT_NOT_NULL(packed);
+    TEST_ASSERT_EQUAL_INT(sprite_count, packed->sprite_count);
+    TEST_ASSERT_EQUAL_INT(page_count, packed->page_count);
+    assert_atlas_name(atlas_id, "edited");
+    TEST_ASSERT_TRUE(gui_project_is_stale());
+}
+
+void test_pack_result_follows_stable_atlas_across_index_shift(void) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *first = tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(first);
+    const tp_id128 first_id = first->id;
+    TEST_ASSERT_EQUAL_INT(1, gui_project_add_atlas());
+    const tp_id128 packed_atlas_id = add_coin_source_to_atlas(1);
+
+    s_sel_atlas = 1;
+    gui_pack_init(TP_GUI_IDENTITY_TEST_DIR);
+    do_pack_blocking();
+    const tp_result *packed = gui_pack_result(1);
+    TEST_ASSERT_NOT_NULL(packed);
+    const int sprite_count = packed->sprite_count;
+
+    snapshot = gui_project_snapshot();
+    TEST_ASSERT_TRUE(gui_project_remove_atlas(
+        first_id, tp_session_snapshot_revision(snapshot)));
+    snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *shifted = tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(shifted);
+    TEST_ASSERT_TRUE(tp_id128_eq(packed_atlas_id, shifted->id));
+    packed = gui_pack_result(0);
+    TEST_ASSERT_NOT_NULL(packed);
+    TEST_ASSERT_EQUAL_INT(sprite_count, packed->sprite_count);
+
+    TEST_ASSERT_TRUE(gui_project_undo());
+    packed = gui_pack_result(1);
+    TEST_ASSERT_NOT_NULL(packed);
+    TEST_ASSERT_EQUAL_INT(sprite_count, packed->sprite_count);
+
+    TEST_ASSERT_TRUE(gui_project_redo());
+    packed = gui_pack_result(0);
+    TEST_ASSERT_NOT_NULL(packed);
+    TEST_ASSERT_EQUAL_INT(sprite_count, packed->sprite_count);
+
+    snapshot = gui_project_snapshot();
+    TEST_ASSERT_TRUE(gui_project_set_atlas_setting(
+        packed_atlas_id, tp_session_snapshot_revision(snapshot),
+        GUI_ATLAS_PIXELS_PER_UNIT, 0, 2.0F));
+    s_sel_atlas = 0;
+    do_pack_blocking();
+    packed = gui_pack_result(0);
+    TEST_ASSERT_NOT_NULL(packed);
+    TEST_ASSERT_TRUE(packed->pixels_per_unit == 2.0F);
+
+    TEST_ASSERT_EQUAL_INT(1, gui_project_add_atlas());
+    (void)add_coin_source_to_atlas(1);
+    s_sel_atlas = 1;
+    do_pack_blocking();
+    TEST_ASSERT_NOT_NULL(gui_pack_result(1));
+    packed = gui_pack_result(0);
+    TEST_ASSERT_NOT_NULL(packed);
+    TEST_ASSERT_EQUAL_INT(sprite_count, packed->sprite_count);
+    TEST_ASSERT_TRUE(packed->pixels_per_unit == 2.0F);
 }
 
 void test_rows_apply_renames_by_canonical_source_and_key(void) {
@@ -406,5 +514,7 @@ int main(void) {
     RUN_TEST(test_delayed_animation_context_ref_never_retargets_after_index_shift);
     RUN_TEST(test_preview_result_rejects_source_refresh_after_job_capture);
     RUN_TEST(test_recovery_entry_keeps_core_path_capacity);
+    RUN_TEST(test_undo_redo_keep_last_successful_pack_result);
+    RUN_TEST(test_pack_result_follows_stable_atlas_across_index_shift);
     return UNITY_END();
 }

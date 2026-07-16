@@ -41,8 +41,8 @@ extern "C" {
  * a sibling view header. */
 void close_menubar_menus(void);
 
-/* Releases the canvas result borrow and clears the shell comparison cache after
- * destructive flows free the pack-slot arenas. */
+/* Releases the canvas result borrow and comparison cache when slots are cleared
+ * or history navigation requires a clean rebind. */
 void gui_shell_reset_shown_result(void);
 
 #ifdef __cplusplus

@@ -34,7 +34,8 @@ void gui_pack_init(const char *work_dir);
  * fills `err` (nullable). An atlas with zero usable sprites is a failure (nothing to show). */
 bool gui_pack_atlas(int atlas_index, double *out_ms, char *err, size_t err_cap, char *notice, size_t notice_cap);
 
-/* The stored result for `atlas_index`, or NULL if never packed / last pack failed. */
+/* The last successful result for `atlas_index`, or NULL if never packed. A
+ * failed Pack leaves it intact; gui_project reports freshness separately. */
 const tp_result *gui_pack_result(int atlas_index);
 
 /* Canonical lookup used by rows and animation frames. Project-built pack inputs

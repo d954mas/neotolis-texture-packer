@@ -176,9 +176,9 @@ static float s_pan_last_x, s_pan_last_y;
  * gui_view_chrome.c (GUI decomposition step 6b) as a pure move: it is chrome-only, the About modal
  * is its sole caller. */
 
-/* Shell-owned release of the canvas borrow and its comparison cache. The pack
- * arena is already gone when destructive flows call this, so leaving either
- * pointer bound would make the next render inspect freed tp_result storage. */
+/* Shell-owned release of the canvas borrow and its comparison cache. Callers
+ * either free pack slots or retain a stale slot across history navigation; the
+ * next frame binds the then-current result without reusing the old borrow. */
 void gui_shell_reset_shown_result(void) {
     gui_canvas_set_result(&s_canvas, NULL);
     s_shown_result = NULL;
