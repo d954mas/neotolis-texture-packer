@@ -37,7 +37,9 @@
 #include "unity.h"
 #include "../src/tp_project_internal.h"
 
-void setUp(void) {}
+void setUp(void) {
+    tp_project__test_serialization_stats_reset();
+}
 void tearDown(void) {}
 
 static const char *g_dir;
@@ -48,6 +50,112 @@ static const char *g_dir;
 static void promote(tp_project *p) {
     tp_rng rng = tp_rng_os();
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_promote_ids(p, &rng, NULL));
+}
+
+void test_json_admission_exact_limits_and_escaped_punctuation(void) {
+    static const char json[] =
+        "{\"version\":4,\"x\":\"[,{\\\"}]\"}";
+    const tp_project_json_limits limits = {
+        sizeof json - 1U, 5U, 2U, 1U,
+    };
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project__test_json_admit(
+                              json, sizeof json - 1U, &limits, &error));
+}
+
+void test_json_admission_rejects_nodes_entries_and_depth(void) {
+    static const char node_bomb[] =
+        "{\"version\":4,\"x\":[0,0,0]}";
+    static const char depth_bomb[] =
+        "{\"version\":4,\"x\":[[0]]}";
+    tp_error error = {{0}};
+
+    const tp_project_json_limits node_limits = {
+        sizeof node_bomb - 1U, 7U, 3U, 2U,
+    };
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS,
+                          tp_project__test_json_admit(
+                              node_bomb, sizeof node_bomb - 1U,
+                              &node_limits, &error));
+
+    const tp_project_json_limits entry_limits = {
+        sizeof node_bomb - 1U, 8U, 2U, 2U,
+    };
+    memset(&error, 0, sizeof error);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS,
+                          tp_project__test_json_admit(
+                              node_bomb, sizeof node_bomb - 1U,
+                              &entry_limits, &error));
+
+    const tp_project_json_limits depth_limits = {
+        sizeof depth_bomb - 1U, 8U, 3U, 2U,
+    };
+    memset(&error, 0, sizeof error);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS,
+                          tp_project__test_json_admit(
+                              depth_bomb, sizeof depth_bomb - 1U,
+                              &depth_limits, &error));
+}
+
+void test_json_admission_rejects_byte_limit_before_buffer_access(void) {
+    const char byte = '{';
+    tp_project *project = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_project_load_buffer(&byte,
+                               (size_t)TP_IDENTITY_FILE_MAX_BYTES + 1U,
+                               &project, &error));
+    TEST_ASSERT_NULL(project);
+}
+
+void test_save_buffers_obey_project_json_admission_limits(void) {
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    char *bytes = NULL;
+    size_t length = 0U;
+    tp_error error = {{0}};
+    const tp_project_json_limits limits = {
+        (size_t)TP_IDENTITY_FILE_MAX_BYTES, SIZE_MAX, SIZE_MAX, 1U,
+    };
+
+    /* Every canonical project has a root object containing an atlases array. */
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_project__test_save_buffer_with_json_limits(
+            project, false, &limits, &bytes, &length, &error));
+    TEST_ASSERT_NULL(bytes);
+    TEST_ASSERT_EQUAL_size_t(0U, length);
+
+    memset(&error, 0, sizeof error);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_project__test_save_buffer_with_json_limits(
+            project, true, &limits, &bytes, &length, &error));
+    TEST_ASSERT_NULL(bytes);
+    TEST_ASSERT_EQUAL_size_t(0U, length);
+    tp_project_destroy(project);
+}
+
+void test_save_buffer_stops_at_byte_limit_before_growth(void) {
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    const tp_project_json_limits limits = {1U, SIZE_MAX, SIZE_MAX, 64U};
+    char *bytes = NULL;
+    size_t length = 0U;
+    tp_error error = {{0}};
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_project__test_save_buffer_with_json_limits(
+            project, false, &limits, &bytes, &length, &error));
+    TEST_ASSERT_NULL(bytes);
+    TEST_ASSERT_EQUAL_size_t(0U, length);
+    TEST_ASSERT_EQUAL_size_t(1U, tp_project__test_serializer_allocations());
+    TEST_ASSERT_EQUAL_size_t(2U,
+                             tp_project__test_serializer_peak_capacity());
+    tp_project_destroy(project);
 }
 
 #define EPS 1e-6F
@@ -689,15 +797,22 @@ void test_serialized_size_bounded_matches_writer_without_materialization(void) {
         TP_STATUS_OK,
         tp_project_serialized_size_bounded(p, SIZE_MAX, &measured, &err));
     TEST_ASSERT_GREATER_THAN_size_t(0U, measured);
+    const size_t expected = measured;
     TEST_ASSERT_EQUAL_size_t(0U, tp_project__test_save_buffer_calls());
     TEST_ASSERT_EQUAL_size_t(0U, tp_project__test_serializer_allocations());
     TEST_ASSERT_EQUAL_size_t(0U, tp_project__test_load_buffer_calls());
+
+    measured = 123U;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_project_serialized_size_bounded(p, 0U, &measured, &err));
+    TEST_ASSERT_EQUAL_size_t(0U, measured);
 
     char *bytes = NULL;
     size_t written = 0U;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_project_save_buffer(p, &bytes, &written, &err));
-    TEST_ASSERT_EQUAL_size_t(measured, written);
+    TEST_ASSERT_EQUAL_size_t(expected, written);
     TEST_ASSERT_EQUAL_size_t(1U, tp_project__test_save_buffer_calls());
     TEST_ASSERT_GREATER_THAN_size_t(0U,
                                     tp_project__test_serializer_allocations());
@@ -1346,6 +1461,11 @@ int main(int argc, char **argv) {
     g_dir = (argc > 1) ? argv[1] : ".";
     UNITY_BEGIN();
     RUN_TEST(test_seed_default_target);
+    RUN_TEST(test_json_admission_exact_limits_and_escaped_punctuation);
+    RUN_TEST(test_json_admission_rejects_nodes_entries_and_depth);
+    RUN_TEST(test_json_admission_rejects_byte_limit_before_buffer_access);
+    RUN_TEST(test_save_buffers_obey_project_json_admission_limits);
+    RUN_TEST(test_save_buffer_stops_at_byte_limit_before_growth);
     RUN_TEST(test_roundtrip_and_byte_identical);
     RUN_TEST(test_sparse_defaults_absent);
     RUN_TEST(test_determinism);

@@ -1141,12 +1141,14 @@ typedef struct tp_sb {
 
 static _Thread_local size_t s_test_save_buffer_calls;
 static _Thread_local size_t s_test_serializer_allocations;
+static _Thread_local size_t s_test_serializer_peak_capacity;
 static _Thread_local size_t s_test_load_buffer_calls;
 static _Thread_local size_t s_test_size_query_calls;
 
 void tp_project__test_serialization_stats_reset(void) {
     s_test_save_buffer_calls = 0U;
     s_test_serializer_allocations = 0U;
+    s_test_serializer_peak_capacity = 0U;
     s_test_load_buffer_calls = 0U;
     s_test_size_query_calls = 0U;
 }
@@ -1157,6 +1159,10 @@ size_t tp_project__test_save_buffer_calls(void) {
 
 size_t tp_project__test_serializer_allocations(void) {
     return s_test_serializer_allocations;
+}
+
+size_t tp_project__test_serializer_peak_capacity(void) {
+    return s_test_serializer_peak_capacity;
 }
 
 size_t tp_project__test_load_buffer_calls(void) {
@@ -1176,8 +1182,12 @@ static void tp_sb_write(tp_sb *sb, const char *s, size_t n) {
         return;
     }
     const size_t next = sb->len + n;
+    if (next > sb->limit) {
+        sb->too_large = true;
+        return;
+    }
     if (sb->count_only) {
-        if (next == SIZE_MAX || next > sb->limit) {
+        if (next == SIZE_MAX) {
             sb->too_large = true;
             return;
         }
@@ -1189,10 +1199,15 @@ static void tp_sb_write(tp_sb *sb, const char *s, size_t n) {
         return;
     }
     if (next + 1U > sb->cap) {
+        const size_t max_cap =
+            sb->limit < SIZE_MAX ? sb->limit + 1U : SIZE_MAX;
         size_t new_cap = (sb->cap == 0) ? 1024U : sb->cap;
+        if (new_cap > max_cap) {
+            new_cap = max_cap;
+        }
         while (next + 1U > new_cap) {
-            if (new_cap > SIZE_MAX / 2U) {
-                new_cap = next + 1U;
+            if (new_cap > max_cap / 2U) {
+                new_cap = max_cap;
                 break;
             }
             new_cap *= 2U;
@@ -1205,6 +1220,9 @@ static void tp_sb_write(tp_sb *sb, const char *s, size_t n) {
         }
         sb->buf = nb;
         sb->cap = new_cap;
+        if (new_cap > s_test_serializer_peak_capacity) {
+            s_test_serializer_peak_capacity = new_cap;
+        }
     }
     memcpy(sb->buf + sb->len, s, n);
     sb->len = next;
@@ -1622,10 +1640,26 @@ static void tp_emit_root(tp_sb *sb, const tp_project *p, const tp_pack_settings 
 /* save                                                                     */
 /* ======================================================================== */
 
+#define TP_PROJECT_JSON_MAX_NODES 1048576U
+#define TP_PROJECT_JSON_MAX_CONTAINER_ENTRIES 262144U
+#define TP_PROJECT_JSON_MAX_DEPTH 64U
+
+static const tp_project_json_limits TP_PROJECT_JSON_LIMITS = {
+    (size_t)TP_IDENTITY_FILE_MAX_BYTES,
+    (size_t)TP_PROJECT_JSON_MAX_NODES,
+    (size_t)TP_PROJECT_JSON_MAX_CONTAINER_ENTRIES,
+    (size_t)TP_PROJECT_JSON_MAX_DEPTH,
+};
+
+static tp_status tp_project_json_admit(
+    const char *text, size_t len, const tp_project_json_limits *limits,
+    tp_error *err);
+
 static tp_status project_save_buffer_mode(const tp_project *p, bool checkpoint,
+                                          const tp_project_json_limits *limits,
                                           char **out, size_t *out_len,
                                           tp_error *err) {
-    if (!p || !out || !out_len) {
+    if (!p || !limits || !out || !out_len) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_project_save_buffer: NULL argument");
     }
     *out = NULL;
@@ -1634,6 +1668,7 @@ static tp_status project_save_buffer_mode(const tp_project *p, bool checkpoint,
     tp_pack_settings defaults;
     tp_pack_settings_defaults(&defaults);
     tp_sb sb = {0};
+    sb.limit = limits->bytes;
     sb.absolute_sources = checkpoint;
     sb.source_base_dir = p->source_base_dir ? p->source_base_dir : p->project_dir;
     tp_emit_root(&sb, p, &defaults);
@@ -1643,6 +1678,12 @@ static tp_status project_save_buffer_mode(const tp_project *p, bool checkpoint,
                             sb.oom ? "tp_project_save_buffer: out of memory building JSON"
                                    : "tp_project_save_buffer: serialized size overflow");
     }
+    const tp_status admission = tp_project_json_admit(
+        sb.buf, sb.len, limits, err);
+    if (admission != TP_STATUS_OK) {
+        free(sb.buf);
+        return admission;
+    }
     *out = sb.buf;
     *out_len = sb.len;
     return TP_STATUS_OK;
@@ -1650,12 +1691,22 @@ static tp_status project_save_buffer_mode(const tp_project *p, bool checkpoint,
 
 tp_status tp_project_save_buffer(const tp_project *p, char **out,
                                  size_t *out_len, tp_error *err) {
-    return project_save_buffer_mode(p, false, out, out_len, err);
+    return project_save_buffer_mode(p, false, &TP_PROJECT_JSON_LIMITS, out,
+                                    out_len, err);
 }
 
 tp_status tp_project_checkpoint_save_buffer(const tp_project *p, char **out,
                                             size_t *out_len, tp_error *err) {
-    return project_save_buffer_mode(p, true, out, out_len, err);
+    return project_save_buffer_mode(p, true, &TP_PROJECT_JSON_LIMITS, out,
+                                    out_len, err);
+}
+
+tp_status tp_project__test_save_buffer_with_json_limits(
+    const tp_project *project, bool checkpoint,
+    const tp_project_json_limits *limits, char **out, size_t *out_len,
+    tp_error *err) {
+    return project_save_buffer_mode(project, checkpoint, limits, out, out_len,
+                                    err);
 }
 
 static tp_status project_serialized_size_bounded_mode(
@@ -2556,10 +2607,143 @@ static tp_status tp_read_file(const char *path, char **out, size_t *out_len, tp_
     return TP_STATUS_OK;
 }
 
+typedef struct tp_json_preflight_frame {
+    char opener;
+    size_t commas;
+    bool nonempty;
+} tp_json_preflight_frame;
+
+/* Bounds cJSON allocation count and depth before tree materialization. */
+static tp_status tp_project_json_admit(
+    const char *text, size_t len, const tp_project_json_limits *limits,
+    tp_error *err) {
+    if (!text || !limits || limits->bytes == 0U || limits->nodes == 0U ||
+        limits->container_entries == 0U || limits->depth == 0U ||
+        limits->depth > (size_t)TP_PROJECT_JSON_MAX_DEPTH) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "invalid project JSON admission arguments");
+    }
+    if (len > limits->bytes) {
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                            "project JSON exceeds the supported byte limit");
+    }
+    tp_json_preflight_frame stack[TP_PROJECT_JSON_MAX_DEPTH];
+    size_t depth = 0U;
+    size_t nodes = 0U;
+
+    for (size_t i = 0U; i < len;) {
+        const unsigned char c = (unsigned char)text[i];
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+            i++;
+            continue;
+        }
+        const bool closes_top = depth > 0U &&
+            ((c == '}' && stack[depth - 1U].opener == '{') ||
+             (c == ']' && stack[depth - 1U].opener == '['));
+        if (depth > 0U && !closes_top) {
+            stack[depth - 1U].nonempty = true;
+        }
+
+        if (c == '"') {
+            if (nodes >= limits->nodes) {
+                return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                                    "project JSON exceeds the structural node limit");
+            }
+            nodes++;
+            i++;
+            while (i < len) {
+                if (text[i] == '\\') {
+                    i += (i + 1U < len) ? 2U : 1U;
+                } else if (text[i] == '"') {
+                    i++;
+                    break;
+                } else {
+                    i++;
+                }
+            }
+            continue;
+        }
+        if (c == '{' || c == '[') {
+            if (nodes >= limits->nodes) {
+                return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                                    "project JSON exceeds the structural node limit");
+            }
+            nodes++;
+            if (depth >= limits->depth) {
+                return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                                    "project JSON exceeds the nesting depth limit");
+            }
+            stack[depth++] = (tp_json_preflight_frame){(char)c, 0U, false};
+            i++;
+            continue;
+        }
+        if (c == '}' || c == ']') {
+            if (!closes_top) {
+                i++;
+                continue; /* malformed syntax: cJSON owns the diagnostic */
+            }
+            const tp_json_preflight_frame frame = stack[depth - 1U];
+            const size_t entries = frame.nonempty ? frame.commas + 1U : 0U;
+            if (entries > limits->container_entries) {
+                return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                                    "project JSON container exceeds the entry limit");
+            }
+            depth--;
+            i++;
+            continue;
+        }
+        if (c == ',') {
+            if (depth > 0U) {
+                if (stack[depth - 1U].commas >=
+                    limits->container_entries) {
+                    return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                                        "project JSON container exceeds the entry limit");
+                }
+                stack[depth - 1U].commas++;
+            }
+            i++;
+            continue;
+        }
+        if (c == ':') {
+            i++;
+            continue;
+        }
+
+        if (nodes >= limits->nodes) {
+            return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                                "project JSON exceeds the structural node limit");
+        }
+        nodes++;
+        i++;
+        while (i < len) {
+            const unsigned char next = (unsigned char)text[i];
+            if (next == ' ' || next == '\t' || next == '\r' || next == '\n' ||
+                next == ',' || next == ':' || next == '{' || next == '}' ||
+                next == '[' || next == ']') {
+                break;
+            }
+            i++;
+        }
+    }
+    return TP_STATUS_OK;
+}
+
+tp_status tp_project__test_json_admit(
+    const char *text, size_t len, const tp_project_json_limits *limits,
+    tp_error *err) {
+    return tp_project_json_admit(text, len, limits, err);
+}
+
 /* Parse core shared by load (from file) + load_buffer (from memory). Borrows
  * `text` (does not free it); leaves project_dir NULL -- the file loader sets it. */
 static tp_status tp_project_parse(const char *text, size_t len, tp_project **out, tp_error *err) {
     *out = NULL;
+
+    tp_status status = tp_project_json_admit(
+        text, len, &TP_PROJECT_JSON_LIMITS, err);
+    if (status != TP_STATUS_OK) {
+        return status;
+    }
 
     const char *parse_end = NULL;
     cJSON *root = cJSON_ParseWithLengthOpts(text, len, &parse_end, 0);
@@ -2569,7 +2753,7 @@ static tp_status tp_project_parse(const char *text, size_t len, tp_project **out
         return tp_error_set(err, TP_STATUS_BAD_PROJECT, "tp_project_load: malformed JSON near offset %ld", off);
     }
 
-    tp_status status = TP_STATUS_OK;
+    status = TP_STATUS_OK;
     tp_project *p = NULL;
 
     if (!cJSON_IsObject(root)) {
