@@ -160,13 +160,14 @@ static int s_rows_cap;
  * generation. Snapshot destruction changes that token, forcing a rebuild before
  * any view can reuse a borrowed override. */
 typedef struct override_slot {
+    uint64_t generation;
     tp_id128 source_id;
-    const char *source_key;
     const tp_snapshot_sprite *sprite;
 } override_slot;
 
 static override_slot *s_override_index;
 static size_t s_override_index_cap;
+static uint64_t s_override_index_generation;
 static bool s_row_cache_valid;
 static tp_id128 s_row_cache_atlas_id;
 static uint64_t s_row_cache_snapshot_generation;
@@ -217,14 +218,19 @@ static bool override_index_reserve(int count) {
 #if defined(NTPACKER_GUI_BENCH)
         s_bench_counters.override_index_realloc_calls++;
 #endif
+        const size_t old_capacity = s_override_index_cap;
         override_slot *grown = realloc(s_override_index, needed * sizeof *grown);
         if (!grown) {
             return false;
         }
         s_override_index = grown;
         s_override_index_cap = needed;
+        memset(&s_override_index[old_capacity], 0,
+               (needed - old_capacity) * sizeof *s_override_index);
+#if defined(NTPACKER_GUI_BENCH)
+        s_bench_counters.override_slot_clears += needed - old_capacity;
+#endif
     }
-    memset(s_override_index, 0, s_override_index_cap * sizeof *s_override_index);
     return true;
 }
 
@@ -233,6 +239,15 @@ static bool override_index_build(const tp_session_snapshot *snapshot,
                                  const tp_snapshot_atlas *atlas) {
     if (!override_index_reserve(atlas->sprite_count)) {
         return false;
+    }
+    s_override_index_generation++;
+    if (s_override_index_generation == 0U) {
+        memset(s_override_index, 0,
+               s_override_index_cap * sizeof *s_override_index);
+#if defined(NTPACKER_GUI_BENCH)
+        s_bench_counters.override_slot_clears += s_override_index_cap;
+#endif
+        s_override_index_generation = 1U;
     }
     const size_t mask = s_override_index_cap - 1U;
     for (int i = 0; i < atlas->sprite_count; ++i) {
@@ -249,9 +264,9 @@ static bool override_index_build(const tp_session_snapshot *snapshot,
             s_bench_counters.override_probes++;
 #endif
             override_slot *entry = &s_override_index[slot];
-            if (!entry->source_key) {
+            if (entry->generation != s_override_index_generation) {
+                entry->generation = s_override_index_generation;
                 entry->source_id = sprite->source_id;
-                entry->source_key = sprite->source_key;
                 entry->sprite = sprite;
 #if defined(NTPACKER_GUI_BENCH)
                 s_bench_counters.override_inserts++;
@@ -259,7 +274,7 @@ static bool override_index_build(const tp_session_snapshot *snapshot,
                 break;
             }
             if (tp_id128_eq(entry->source_id, sprite->source_id) &&
-                strcmp(entry->source_key, sprite->source_key) == 0) {
+                strcmp(entry->sprite->source_key, sprite->source_key) == 0) {
                 break;
             }
             slot = (slot + 1U) & mask;
@@ -280,11 +295,11 @@ static const tp_snapshot_sprite *override_by_key(tp_id128 source_id,
         s_bench_counters.override_probes++;
 #endif
         const override_slot *entry = &s_override_index[slot];
-        if (!entry->source_key) {
+        if (entry->generation != s_override_index_generation) {
             return NULL;
         }
         if (tp_id128_eq(entry->source_id, source_id) &&
-            strcmp(entry->source_key, source_key) == 0) {
+            strcmp(entry->sprite->source_key, source_key) == 0) {
             return entry->sprite;
         }
         slot = (slot + 1U) & mask;
@@ -511,6 +526,7 @@ void gui_rows_bench_shutdown(void) {
     s_row_count = 0;
     s_rows_cap = 0;
     s_override_index_cap = 0U;
+    s_override_index_generation = 0U;
     s_row_cache_valid = false;
     s_selected_cache_valid = false;
     memset(&s_bench_counters, 0, sizeof s_bench_counters);

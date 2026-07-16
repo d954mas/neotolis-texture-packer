@@ -520,6 +520,7 @@ static bool run_fixture(row_fixture *fixture, int iterations) {
         rows.cache_key_checks != (uint64_t)iterations || rows.rebuilds != 0U ||
         rows.row_realloc_calls != 0U ||
         rows.override_index_realloc_calls != 0U ||
+        rows.override_slot_clears != 0U ||
         rows.source_iterations != 0U || rows.path_resolve_calls != 0U ||
         rows.child_iterations != 0U || scan.directory_walks != 0U ||
         rows.selected_row_iterations != 0U ||
@@ -575,6 +576,7 @@ static bool run_fixture(row_fixture *fixture, int iterations) {
         rebuild_rows.rebuilds != 1U ||
         rebuild_rows.row_realloc_calls != 0U ||
         rebuild_rows.override_index_realloc_calls != 0U ||
+        rebuild_rows.override_slot_clears != 0U ||
         rebuild_rows.source_iterations != (uint64_t)fixture->spec.sources ||
         rebuild_rows.path_resolve_calls != (uint64_t)fixture->spec.sources ||
         rebuild_rows.child_iterations != (uint64_t)fixture->spec.children ||

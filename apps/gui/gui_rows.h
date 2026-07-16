@@ -86,6 +86,7 @@ typedef struct gui_rows_bench_counters {
     uint64_t override_inserts;
     uint64_t override_lookup_calls;
     uint64_t override_probes;
+    uint64_t override_slot_clears;
     uint64_t source_iterations;
     uint64_t path_resolve_calls;
     uint64_t child_iterations;
