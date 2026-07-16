@@ -56,11 +56,6 @@ add_library(tp_core STATIC
     # public owned immutable snapshot boundary. Business validation remains in
     # the operation/model modules; no GUI, protocol, recovery backend, or jobs.
     src/tp_session.c
-    # P-01 (plan §17): arena-backed alternative to the malloc project deep-clone --
-    # a memcpy-bound clone off one tp_arena, byte-identical to tp_project_clone.
-    # Integration into the live model stays deferred; M0's authoritative normal
-    # transaction allocation baseline lives in tests/tp_bench_foundation.
-    src/tp_project_clone_arena.c
     src/tp_txn_parse.c src/tp_txn_lower.c src/tp_txn_encode.c
     # F2-03 semantic diff / exact inverse (Undo) + redo replay + a minimal in-memory
     # undo/redo history: per-op state-capture diff (before/after entity data + position),

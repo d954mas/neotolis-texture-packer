@@ -300,6 +300,64 @@ if printf '    gui_pack_find_sprite_ref(0, source_id, key);\n    tp_session_snap
     hit "R15-selftest" "R15 detector false-positives on canonical foundation APIs"
 fi
 
+# 16. The measured arena transaction-clone prototype never acquired a production
+#     caller and was retired with its benchmark. A future isolated benchmark may
+#     revisit immutable snapshots, but shipping code keeps one clone owner until
+#     profiling selects a replacement. GUI private-core visibility is selftest-only.
+_retired_clone_symbols='(^|[^A-Za-z0-9_])(tp_project_clone_arena_footprint|tp_project_clone_into_arena)([^A-Za-z0-9_]|$)'
+r16a=$(shipping_srcs | xargs grep -nE "$_retired_clone_symbols" 2>/dev/null)
+[ -n "$r16a" ] && hit "R16a retired arena project clone returned" "$r16a"
+
+gui_private_scope_counts() {
+    awk '
+        /if[[:space:]]*\([[:space:]]*NTPACKER_GUI_SELFTEST[[:space:]]*\)/ {
+            selftest = 1
+        }
+        !in_include && /target_include_directories[[:space:]]*\(/ {
+            in_include = 1
+            include_command = ""
+            include_selftest = selftest
+        }
+        in_include {
+            include_command = include_command " " $0
+            if ($0 ~ /\)/) {
+                if (include_command ~ /ntpacker-gui/ &&
+                    include_command ~ /packer\/src/) {
+                    total++
+                    if (include_selftest) scoped++; else outside++
+                }
+                in_include = 0
+            }
+        }
+        selftest && /^[[:space:]]*endif[[:space:]]*\(/ {
+            selftest = 0
+        }
+        END { printf "%d %d %d", total, scoped, outside }
+    '
+}
+gui_private_scope=$(gui_private_scope_counts < apps/gui/CMakeLists.txt)
+[ "$gui_private_scope" != "1 1 0" ] &&
+    hit "R16b shipping GUI private-core include exposure" \
+        "expected total/selftest/outside = 1 1 0, found $gui_private_scope"
+
+if ! printf '    tp_project_clone_into_arena(project, arena);\n' |
+    grep -qE "$_retired_clone_symbols"; then
+    hit "R16-selftest" "R16a detector failed to catch the retired arena clone"
+fi
+seeded_private_scope=$(printf '%s\n' \
+    'target_include_directories(ntpacker-gui PRIVATE "${CMAKE_SOURCE_DIR}/packer/src")' |
+    gui_private_scope_counts)
+if [ "$seeded_private_scope" != "1 0 1" ]; then
+    hit "R16-selftest" "R16b scope detector missed an unconditional GUI private include"
+fi
+seeded_multiline_scope=$(printf '%s\n' \
+    'target_include_directories(ntpacker-gui PRIVATE' \
+    '    "${CMAKE_SOURCE_DIR}/packer/src")' |
+    gui_private_scope_counts)
+if [ "$seeded_multiline_scope" != "1 0 1" ]; then
+    hit "R16-selftest" "R16b scope detector missed a multiline unconditional GUI private include"
+fi
+
 if [ "$fail" -eq 0 ]; then
     say "boundaries OK"
 fi

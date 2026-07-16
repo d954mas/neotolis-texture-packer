@@ -52,7 +52,6 @@ if(WIN32)
 endif()
 # Generated asset header from the pack builder (ntpacker_ui_assets.h).
 target_include_directories(ntpacker-gui PRIVATE "${GUI_GENERATED_DIR}")
-target_include_directories(ntpacker-gui PRIVATE "${CMAKE_SOURCE_DIR}/packer/src")
 # Shared product version header (apps/common/ntpacker_version.h), also used by the CLI.
 target_include_directories(ntpacker-gui PRIVATE "${CMAKE_SOURCE_DIR}/apps/common")
 # The engine sets these build-wide via add_compile_definitions in its OWN directory scope;
