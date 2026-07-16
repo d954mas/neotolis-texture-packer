@@ -22,6 +22,7 @@
 #include "tp_recovery_internal.h"
 #include "tp_session_internal.h"
 #include "tp_job_owner_internal.h"
+#include "tp_txn_internal.h"
 
 #define TP_SESSION_EVENT_CAPACITY 64U
 
@@ -93,59 +94,6 @@ static bool recovery_is_healthy(const tp_session *session) {
         return session->recovery_healthy;
     }
     return !session->recovery_required && session->recovery_healthy;
-}
-
-static bool project_has_pending_sprite_refs(const tp_project *project) {
-    for (int ai = 0; project && ai < project->atlas_count; ai++) {
-        const tp_project_atlas *atlas = &project->atlases[ai];
-        for (int i = 0; i < atlas->sprite_count; i++) {
-            if (tp_id128_is_nil(atlas->sprites[i].source_ref) ||
-                !atlas->sprites[i].src_key) {
-                return true;
-            }
-        }
-        for (int i = 0; i < atlas->animation_count; i++) {
-            const tp_project_anim *animation = &atlas->animations[i];
-            for (int f = 0; f < animation->frame_count; f++) {
-                if (tp_id128_is_nil(animation->frames[f].source_ref) ||
-                    !animation->frames[f].src_key) {
-                    return true;
-                }
-            }
-        }
-    }
-    return false;
-}
-
-static tp_status migrate_project_sprite_refs(tp_project *project,
-                                             tp_error *err) {
-    if (!project_has_pending_sprite_refs(project)) {
-        return TP_STATUS_OK;
-    }
-    tp_project *candidate = tp_project_clone(project);
-    if (!candidate) {
-        return tp_error_set(err, TP_STATUS_OOM,
-                            "legacy reference migration clone failed");
-    }
-    for (int ai = 0; ai < candidate->atlas_count; ai++) {
-        tp_sprite_index index;
-        tp_status status = tp_sprite_index_build(candidate, ai, &index, err);
-        if (status != TP_STATUS_OK) {
-            tp_project_destroy(candidate);
-            return status;
-        }
-        status = tp_project_resolve_atlas_sprites(candidate, ai, &index, err);
-        tp_sprite_index_free(&index);
-        if (status != TP_STATUS_OK) {
-            tp_project_destroy(candidate);
-            return status;
-        }
-    }
-    const tp_project old = *project;
-    *project = *candidate;
-    *candidate = old;
-    tp_project_destroy(candidate);
-    return TP_STATUS_OK;
 }
 
 void tp_session__test_reset_snapshot_allocations(void) {
@@ -443,7 +391,7 @@ tp_status tp_session_open(const char *path, const tp_rng *rng,
         tp_project_lease_release(lease);
         return status;
     }
-    status = migrate_project_sprite_refs(tp_model_project(session->model), err);
+    status = tp_model__migrate_sprite_refs(session->model, err);
     if (status != TP_STATUS_OK) {
         tp_session_destroy(session);
         tp_project_lease_release(lease);
@@ -730,7 +678,7 @@ static tp_status save_as_locked(tp_session *session, const char *path,
     }
     tp_project *save_project = tp_model_project(session->model);
     tp_project *migrated = NULL;
-    if (project_has_pending_sprite_refs(save_project)) {
+    if (tp_project_has_pending_sprite_refs(save_project)) {
         migrated = tp_project_clone(save_project);
         if (!migrated) {
             if (destination_lease != session->project_lease) {
@@ -739,7 +687,7 @@ static tp_status save_as_locked(tp_session *session, const char *path,
             return tp_error_set(err, TP_STATUS_OOM,
                                 "legacy reference migration clone failed");
         }
-        status = migrate_project_sprite_refs(migrated, err);
+        status = tp_project_migrate_sprite_refs(migrated, err);
         if (status != TP_STATUS_OK) {
             tp_project_destroy(migrated);
             if (destination_lease != session->project_lease) {
@@ -764,9 +712,7 @@ static tp_status save_as_locked(tp_session *session, const char *path,
         return status;
     }
     if (migrated) {
-        tp_project *old_project = session->model->project;
-        session->model->project = migrated;
-        tp_project_destroy(old_project);
+        tp_model__adopt_project(session->model, migrated);
     }
     tp_project_lease *old_lease = session->project_lease;
     session->identity = next_identity;
@@ -853,10 +799,10 @@ tp_status tp_session_save_detached_recovery(
     if (status == TP_STATUS_OK) {
         tp_project *save_project = tp_model_project(session->model);
         tp_project *migrated = NULL;
-        if (project_has_pending_sprite_refs(save_project)) {
+        if (tp_project_has_pending_sprite_refs(save_project)) {
             migrated = tp_project_clone(save_project);
             status = migrated
-                         ? migrate_project_sprite_refs(migrated, err)
+                         ? tp_project_migrate_sprite_refs(migrated, err)
                          : tp_error_set(err, TP_STATUS_OOM,
                                         "legacy reference migration clone failed");
             if (status == TP_STATUS_OK) {
@@ -874,10 +820,8 @@ tp_status tp_session_save_detached_recovery(
         }
         if (status == TP_STATUS_OK) {
             if (migrated) {
-                tp_project *old_project = session->model->project;
-                session->model->project = migrated;
+                tp_model__adopt_project(session->model, migrated);
                 migrated = NULL;
-                tp_project_destroy(old_project);
             }
             tp_model_mark_saved(session->model);
             result->saved = true;
@@ -1262,7 +1206,7 @@ tp_status tp_session_snapshot_load(const char *path,
         return tp_error_set(err, TP_STATUS_FILE_CHANGED_EXTERNALLY,
                             "project changed while it was read");
     }
-    status = migrate_project_sprite_refs(project, err);
+    status = tp_project_migrate_sprite_refs(project, err);
     if (status != TP_STATUS_OK) {
         tp_project_destroy(project);
         return status;

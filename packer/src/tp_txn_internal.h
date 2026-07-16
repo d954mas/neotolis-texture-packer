@@ -16,6 +16,12 @@
 struct tp_idset;
 const struct tp_idset *tp_txn_idstore_mem_view(const tp_txn_idstore *store);
 
+/* Model-owned project replacement after a separately staged project has been
+ * persisted successfully. Takes ownership of `project`; session remains only
+ * the persistence/orchestration caller. */
+void tp_model__adopt_project(tp_model *model, tp_project *project);
+tp_status tp_model__migrate_sprite_refs(tp_model *model, tp_error *error);
+
 /* ---- shared between the JSON path (tp_txn_parse.c) and the apply core
  * (tp_txn_apply.c). NOT public: the JSON path runs the idempotency + revision
  * gates in the contract order (structural -> idempotency -> revision -> per-op

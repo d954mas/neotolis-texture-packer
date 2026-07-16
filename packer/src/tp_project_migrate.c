@@ -524,6 +524,62 @@ tp_status tp_project_resolve_atlas_sprites(tp_project *p, int atlas_index, const
     return TP_STATUS_OK;
 }
 
+bool tp_project_has_pending_sprite_refs(const tp_project *project) {
+    for (int ai = 0; project && ai < project->atlas_count; ai++) {
+        const tp_project_atlas *atlas = &project->atlases[ai];
+        for (int i = 0; i < atlas->sprite_count; i++) {
+            if (tp_id128_is_nil(atlas->sprites[i].source_ref) ||
+                !atlas->sprites[i].src_key) {
+                return true;
+            }
+        }
+        for (int i = 0; i < atlas->animation_count; i++) {
+            const tp_project_anim *animation = &atlas->animations[i];
+            for (int f = 0; f < animation->frame_count; f++) {
+                if (tp_id128_is_nil(animation->frames[f].source_ref) ||
+                    !animation->frames[f].src_key) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+tp_status tp_project_migrate_sprite_refs(tp_project *project, tp_error *err) {
+    if (!project) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "tp_project_migrate_sprite_refs: NULL project");
+    }
+    if (!tp_project_has_pending_sprite_refs(project)) {
+        return TP_STATUS_OK;
+    }
+    tp_project *candidate = tp_project_clone(project);
+    if (!candidate) {
+        return tp_error_set(err, TP_STATUS_OOM,
+                            "legacy reference migration clone failed");
+    }
+    for (int ai = 0; ai < candidate->atlas_count; ai++) {
+        tp_sprite_index index;
+        tp_status status = tp_sprite_index_build(candidate, ai, &index, err);
+        if (status != TP_STATUS_OK) {
+            tp_project_destroy(candidate);
+            return status;
+        }
+        status = tp_project_resolve_atlas_sprites(candidate, ai, &index, err);
+        tp_sprite_index_free(&index);
+        if (status != TP_STATUS_OK) {
+            tp_project_destroy(candidate);
+            return status;
+        }
+    }
+    const tp_project old = *project;
+    *project = *candidate;
+    *candidate = old;
+    tp_project_destroy(candidate);
+    return TP_STATUS_OK;
+}
+
 tp_status tp_project_validate_ids(const tp_project *p, tp_error *err) {
     if (!p) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_project_validate_ids: NULL project");

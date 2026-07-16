@@ -207,6 +207,11 @@ r10a=$(grep -nE "$_session_deps" packer/src/tp_session.c packer/src/tp_session_i
 r10b=$(grep -nE "$_session_impl" packer/src/tp_session.c packer/src/tp_session_internal.h 2>/dev/null |
     grep -v 'boundary-ok:')
 [ -n "$r10b" ] && hit "R10b backend/codec/Pack/Export implementation in tp_session" "$r10b"
+_session_model_owner='->[[:space:]]*project([^A-Za-z0-9_]|$)|(^|[^A-Za-z0-9_])tp_project_resolve_atlas_sprites[[:space:]]*\('
+r10c=$(sed -E 's/snapshot->[[:space:]]*project([^A-Za-z0-9_]|$)/\1/g' \
+    packer/src/tp_session.c 2>/dev/null |
+    grep -nE -- "$_session_model_owner")
+[ -n "$r10c" ] && hit "R10c model migration/mutable-project ownership in tp_session" "$r10c"
 if ! printf '#include "apps/gui/gui_project.h"\n' | grep -qE "$_session_deps"; then
     hit "R10-selftest" "R10a detector failed to catch seeded GUI dependency"
 fi
@@ -217,6 +222,20 @@ fi
 if printf '#include "tp_core/tp_recovery.h"\n    tp_project_lease_acquire(path, &lease, &err);\n    tp_session_snapshot_create(s, &snapshot, &err);\n' |
     grep -qE "$_session_deps|$_session_impl"; then
     hit "R10-selftest" "R10 detector false-positives on allowed public orchestration calls"
+fi
+if ! printf '    tp_model *model = session->model;\n    model->project = migrated;\n    tp_project_resolve_atlas_sprites(project, 0, &index, &err);\n' |
+    grep -qE -- "$_session_model_owner"; then
+    hit "R10-selftest" "R10c detector failed to catch seeded model migration ownership"
+fi
+if printf '    snapshot->project = cloned;\n' |
+    sed -E 's/snapshot->[[:space:]]*project([^A-Za-z0-9_]|$)/\1/g' |
+    grep -qE -- "$_session_model_owner"; then
+    hit "R10-selftest" "R10c detector false-positives on snapshot ownership"
+fi
+if ! printf '    snapshot->project = model->project;\n' |
+    sed -E 's/snapshot->[[:space:]]*project([^A-Za-z0-9_]|$)/\1/g' |
+    grep -qE -- "$_session_model_owner"; then
+    hit "R10-selftest" "R10c detector missed mixed snapshot/model ownership"
 fi
 
 # 11. GUI source refresh has one publication choke point. The scan backend may

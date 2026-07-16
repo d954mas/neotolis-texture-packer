@@ -27,6 +27,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdbool.h>
 
 #include "tp_core/tp_error.h"
 #include "tp_core/tp_id.h"
@@ -119,6 +120,12 @@ tp_status tp_project_validate_ids(const tp_project *p, tp_error *err);
  * atomic for the selected atlas: ambiguity or OOM leaves every record unchanged. */
 tp_status tp_project_resolve_atlas_sprites(tp_project *p, int atlas_index, const struct tp_sprite_index *idx,
                                            tp_error *err);
+
+/* Project-level owner for lazy legacy sprite/frame reference migration. The
+ * operation is atomic across every atlas: it resolves on a clone and swaps only
+ * after every scan/allocation succeeds. */
+bool tp_project_has_pending_sprite_refs(const tp_project *project);
+tp_status tp_project_migrate_sprite_refs(tp_project *project, tp_error *err);
 
 #ifdef __cplusplus
 }

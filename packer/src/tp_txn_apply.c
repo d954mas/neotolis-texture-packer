@@ -21,6 +21,7 @@
  */
 
 #include "tp_core/tp_transaction.h"
+#include "tp_core/tp_project_migrate.h"
 
 #include <inttypes.h>
 #include <stdlib.h>
@@ -87,6 +88,23 @@ void tp_model_destroy(tp_model *m) {
 
 tp_project *tp_model_project(tp_model *m) { return m ? m->project : NULL; }
 int64_t tp_model_revision(const tp_model *m) { return m ? m->revision : 0; }
+
+void tp_model__adopt_project(tp_model *model, tp_project *project) {
+    if (!model || !project || model->project == project) {
+        return;
+    }
+    tp_project *old = model->project;
+    model->project = project;
+    tp_project_destroy(old);
+}
+
+tp_status tp_model__migrate_sprite_refs(tp_model *model, tp_error *error) {
+    if (!model) {
+        return tp_error_set(error, TP_STATUS_INVALID_ARGUMENT,
+                            "model is required for reference migration");
+    }
+    return tp_project_migrate_sprite_refs(model->project, error);
+}
 
 bool tp_model_dirty(const tp_model *m) {
     if (!m) {

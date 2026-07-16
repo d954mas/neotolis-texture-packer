@@ -88,6 +88,13 @@ static char *dupz(const char *s) {
     return p;
 }
 
+void test_project_migration_rejects_null_project(void) {
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_project_migrate_sprite_refs(NULL, &error));
+    TEST_ASSERT_NOT_NULL(strstr(error.msg, "NULL project"));
+}
+
 /* A pending v3 name-keyed override re-keys to {source, key} at first resolution, and
  * the next save persists the v4 form; reload re-derives the name bridge, override
  * intact. */
@@ -505,6 +512,7 @@ int main(int argc, char **argv) {
     g_dir = (argc > 1) ? argv[1] : ".";
     mkdir_p(g_dir);
     UNITY_BEGIN();
+    RUN_TEST(test_project_migration_rejects_null_project);
     RUN_TEST(test_pending_resolves_and_persists_v4);
     RUN_TEST(test_unresolved_stays_pending);
     RUN_TEST(test_ambiguous_legacy_reference_rejects_without_mutation);
