@@ -19,6 +19,15 @@ app_srcs() {
         grep -vE '/(gui_selftest|test_[^/]*|tp_bench_[^/]*)\.(c|h)$'
 }
 
+# Shipping app/core sources only. Documentation, fixtures, unit tests, spikes,
+# benchmarks, and the GUI selftest oracle are deliberately outside deletion
+# gates: they may name a retired path while proving migration compatibility.
+shipping_srcs() {
+    app_srcs
+    find packer/include/tp_core packer/src -type f \
+        \( -name '*.c' -o -name '*.h' \)
+}
+
 # 1. No sprite-name extension stripping outside tp_core (tp_sprite_export_key is
 #    the single owner). Project-FILENAME helpers must carry a boundary-ok note.
 r1=$(app_srcs | xargs grep -nE "strrchr\([^,]+, *'\.'\)" 2>/dev/null | grep -v 'boundary-ok:')
@@ -261,6 +270,34 @@ if ! printf '    static bool pending_is_noop(void);\n' | grep -qE "$_gui_noop_ow
 fi
 if printf '    refresh_after_session_commit();\n' | grep -qE "$_gui_noop_owner"; then
     hit "R14-selftest" "R14 detector false-positives on thin post-commit projection"
+fi
+
+# 15. Architecture-foundation deletion gate. These identifiers belonged to
+#     superseded authoritative paths and must not return to shipping app/core
+#     code. Test/selftest code may retain an oracle with the old spelling, but
+#     production has no compatibility exception or boundary-ok escape hatch.
+_retired_foundation_symbols='(^|[^A-Za-z0-9_])(GEDIT_[A-Za-z0-9_]*|s_refresh_epoch|s_pack_start_refresh_epoch|s_preview_ver|model_generation_at_start|model_changed_since|TP_CLIENT_CAPABILITY_LIVE_JOBS)([^A-Za-z0-9_]|$)|(^|[^A-Za-z0-9_])(gui_project_get|gui_pack_find_sprite)[[:space:]]*\('
+r15=$(shipping_srcs | xargs grep -nE "$_retired_foundation_symbols" 2>/dev/null)
+[ -n "$r15" ] && hit "R15 retired foundation path in shipping source" "$r15"
+
+for _seed in \
+    '    GEDIT_ATLAS_RENAME,' \
+    '    gui_project_get();' \
+    '    gui_pack_find_sprite(0, "hero");' \
+    '    ++s_refresh_epoch;' \
+    '    s_pack_start_refresh_epoch = s_refresh_epoch;' \
+    '    s_preview_ver = generation;' \
+    '    result.model_generation_at_start = generation;' \
+    '    model_changed_since = generation != start_generation;' \
+    '    TP_CLIENT_CAPABILITY_LIVE_JOBS'
+do
+    if ! printf '%s\n' "$_seed" | grep -qE "$_retired_foundation_symbols"; then
+        hit "R15-selftest" "R15 detector failed to catch retired symbol: $_seed"
+    fi
+done
+if printf '    gui_pack_find_sprite_ref(0, source_id, key);\n    tp_session_snapshot_model_generation(snapshot);\n    TP_CLIENT_CAPABILITY_PACK_JOB\n' |
+    grep -qE "$_retired_foundation_symbols"; then
+    hit "R15-selftest" "R15 detector false-positives on canonical foundation APIs"
 fi
 
 if [ "$fail" -eq 0 ]; then

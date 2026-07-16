@@ -243,12 +243,15 @@ static bool selftest_set_sprite_rename_at(int atlas_index, const char *source_ke
            gui_project_set_sprite_rename(&sprite, rename);
 }
 
-static int selftest_pack_find_sprite_at(int atlas_index,
-                                        const char *source_key) {
-    gui_sprite_ref sprite;
-    return selftest_sprite_ref_at(atlas_index, source_key, &sprite)
-               ? gui_pack_find_sprite_ref(atlas_index, sprite.source_id,
-                                          sprite.source_key)
+static int selftest_pack_find_sprite_ref_at(int atlas_index, int source_index,
+                                            const char *source_key) {
+    const tp_session_snapshot *snapshot = NULL;
+    const tp_snapshot_atlas *atlas = selftest_atlas_at(atlas_index, &snapshot);
+    const tp_snapshot_source *source =
+        atlas ? tp_session_snapshot_source_at(snapshot, atlas->id, source_index)
+              : NULL;
+    return source && source_key && source_key[0] != '\0'
+               ? gui_pack_find_sprite_ref(atlas_index, source->id, source_key)
                : -1;
 }
 
@@ -514,8 +517,6 @@ static bool selftest_stale_discrete_intent_is_rejected(void) {
     selftest_add_sources_at((index), (paths), (count), (kind), (added), (duplicate))
 #define gui_project_set_sprite_rename(index, key, rename) \
     selftest_set_sprite_rename_at((index), (key), (rename))
-#define gui_pack_find_sprite(index, key) \
-    selftest_pack_find_sprite_at((index), (key))
 #define gui_project_set_sprite_origin(index, key, axis, value) \
     selftest_set_sprite_origin_at((index), (key), (axis), (value))
 #define gui_project_set_sprite_slice9(index, key, component, value) \
@@ -992,11 +993,13 @@ void run_selftest(void) {
             char note[128] = {0};
             const bool okr = (i_rotate >= 0) && gui_pack_atlas(i_rotate, &ms_r, pe, sizeof pe, note, sizeof note);
             const tp_result *rr = gui_pack_result(i_rotate);
-            nt_log_info("SELFTEST: pack 'rotate' -> %d in %.1f ms sprites=%d pages=%d (find 'a'=%d) %s", okr, ms_r,
-                        rr ? rr->sprite_count : -1, rr ? rr->page_count : -1, gui_pack_find_sprite(i_rotate, "a"),
+            const int rotate_a =
+                selftest_pack_find_sprite_ref_at(i_rotate, 0, "a.png");
+            nt_log_info("SELFTEST: pack 'rotate' -> %d in %.1f ms sprites=%d pages=%d (find 'a.png'=%d) %s", okr, ms_r,
+                        rr ? rr->sprite_count : -1, rr ? rr->page_count : -1, rotate_a,
                         okr ? "" : pe);
             NT_ASSERT(okr && rr && rr->sprite_count == 3 && rr->page_count >= 1 && "pack rotate");
-            NT_ASSERT(gui_pack_find_sprite(i_rotate, "a") >= 0 && "region lookup 'a'");
+            NT_ASSERT(rotate_a >= 0 && "canonical region lookup 'a.png'");
             char pe2[256] = {0};
             const bool okb = (i_basic >= 0) && gui_pack_atlas(i_basic, &ms_b, pe2, sizeof pe2, note, sizeof note);
             const tp_result *rb = gui_pack_result(i_basic);
@@ -1088,8 +1091,10 @@ void run_selftest(void) {
             (void)snprintf(fp, sizeof fp, "%s/spr_%03d.tga", sdir, i);
             write_tga_2x2(fp);
         }
+        char cyr_source_key[192];
+        (void)snprintf(cyr_source_key, sizeof cyr_source_key, "%s.tga", CYR_STEM);
         char cfp[840];
-        (void)snprintf(cfp, sizeof cfp, "%s/%s.tga", sdir, CYR_STEM);
+        (void)snprintf(cfp, sizeof cfp, "%s/%s", sdir, cyr_source_key);
         write_tga_2x2(cfp);
 
         const int sidx = gui_project_add_atlas();
@@ -1101,14 +1106,16 @@ void run_selftest(void) {
             char snote[128] = {0};
             const bool oks = gui_pack_atlas(sidx, &sms, serr, sizeof serr, snote, sizeof snote);
             const tp_result *sr = gui_pack_result(sidx);
-            const int cyr_idx = gui_pack_find_sprite(sidx, CYR_STEM);
+            const int cyr_idx =
+                selftest_pack_find_sprite_ref_at(sidx, 0, cyr_source_key);
             nt_log_info("SELFTEST: stress pack -> %d in %.1f ms sprites=%d pages=%d cyr_idx=%d %s", oks, sms,
                         sr ? sr->sprite_count : -1, sr ? sr->page_count : -1, cyr_idx, oks ? "" : serr);
             NT_ASSERT(oks && sr && sr->sprite_count >= N + 1 && "stress pack 520+ sprites");
             NT_ASSERT(cyr_idx >= 0 && "Cyrillic-named region lookup");
 
             /* Cyrillic rename + save/load round-trip (multi-byte name survives serialization). */
-            gui_project_set_sprite_rename(sidx, CYR_STEM, "\xD0\xB8\xD0\xBC\xD1\x8F"); /* "имя" */
+            gui_project_set_sprite_rename(sidx, cyr_source_key,
+                                          "\xD0\xB8\xD0\xBC\xD1\x8F"); /* "имя" */
             char *sbuf = NULL;
             size_t slen = 0;
             tp_error sbe = {0};
@@ -1128,7 +1135,7 @@ void run_selftest(void) {
             const tp_snapshot_sprite *ov =
                 (slp_atlas && slp_source)
                     ? tp_session_snapshot_sprite_by_key(
-                          slp, slp_atlas->id, slp_source->id, CYR_STEM)
+                          slp, slp_atlas->id, slp_source->id, cyr_source_key)
                     : NULL;
             nt_log_info("SELFTEST: Cyrillic rename RT save=%s load=%s override='%s'", tp_status_str(sbst),
                         tp_status_str(slst), (ov && ov->rename) ? ov->rename : "(none)");
@@ -1171,7 +1178,7 @@ void run_selftest(void) {
      *     EXACT counts so a reintroduced fixed cap fails HERE. Two routes: (A) an in-memory synthetic
      *     project exceeds the 4096 row/multi-select caps without writing >4096 files (too heavy for CI);
      *     (B) a >512-frame animation over REAL packed sprites, which the preview idxs[] path must
-     *     resolve end-to-end (a fake result cannot exercise gui_pack_find_sprite). --- */
+     *     resolve end-to-end (a fake result cannot exercise canonical result lookup). --- */
     {
         const int BIG_N = 4200; /* > the old 4096 row / multi-select cap */
 
@@ -1218,10 +1225,15 @@ void run_selftest(void) {
 
         /* (A2) multi-select: >4096 distinct names -- multi_sel_add grows s_multi_sel. */
         multi_sel_clear();
+        tp_id128 synthetic_source_id = tp_id128_nil();
+        synthetic_source_id.bytes[0] = 1U;
         for (int i = 0; i < BIG_N; i++) {
             char nm[24];
             (void)snprintf(nm, sizeof nm, "cap_%05d", i);
-            multi_sel_add(nm);
+            /* Capacity-only selectors are intentionally unresolved. Feed the
+             * canonical selection seam directly: resolving each synthetic name
+             * across BIG_N sources would make test setup quadratic. */
+            multi_sel_add_ref(synthetic_source_id, nm);
         }
         nt_log_info("SELFTEST: caps multi_sel=%d (want %d; old cap 4096)", s_multi_sel_count, BIG_N);
         NT_ASSERT(s_multi_sel_count == BIG_N && "multi-select grows past the old 4096 cap");
@@ -1386,7 +1398,8 @@ void run_selftest(void) {
                 gui_project_set_sprite_override(0, source_key, GUI_SPRITE_OV_SHAPE, 0 /* RECT */); /* coalescable: buffers */
                 gui_project_flush_pending(); /* commit the buffered override before the raw pack reads the model */
                 (void)gui_pack_atlas(0, &pms, perr, sizeof perr, pnote, sizeof pnote);
-                const int rri = gui_pack_find_sprite(0, spn);
+                const int rri =
+                    selftest_pack_find_sprite_ref_at(0, 0, source_key);
                 const tp_result *rr = gui_pack_result(0);
                 const int vc = (rr && rri >= 0) ? rr->sprites[rri].vert_count : -1;
                 nt_log_info("SELFTEST: sprite '%s' RECT override -> vert_count=%d (expect 4)", spn, vc);

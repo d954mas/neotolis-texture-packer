@@ -27,12 +27,26 @@ typedef struct corpus_result {
     tp_status validation;
     tp_status conflict;
     tp_status duplicate;
+    tp_status source_add;
+    tp_status sprite_override;
+    tp_status animation_create;
+    tp_status target_create;
     int64_t revision;
     uint64_t model_generation;
     uint64_t event_sequence;
     tp_id128 semantic_identity;
     char atlas_name[64];
-    tp_session_event events[4];
+    char source_path[64];
+    float sprite_origin_x;
+    char animation_name[64];
+    float animation_fps;
+    int animation_frame_count;
+    tp_id128 frame_source_id;
+    char frame_source_key[64];
+    char target_exporter_id[64];
+    char target_out_path[64];
+    bool target_enabled;
+    tp_session_event events[12];
     size_t event_count;
     bool event_resync;
 } corpus_result;
@@ -140,6 +154,103 @@ static tp_status apply_padding(corpus_adapter adapter, tp_session *session,
                           transaction_id, err);
 }
 
+static tp_status apply_source_add(corpus_adapter adapter, tp_session *session,
+                                  tp_id128 atlas_id, tp_id128 source_id,
+                                  int64_t expected_revision, const char *path,
+                                  const char *transaction_id, tp_error *err) {
+    if (adapter == CORPUS_GUI) {
+        const char *paths[1] = {path};
+        return gui_session_add_sources(
+            session, atlas_id, &source_id, paths, 1,
+            TP_SNAPSHOT_SOURCE_FILE, expected_revision, transaction_id, err);
+    }
+    tp_operation operation;
+    memset(&operation, 0, sizeof operation);
+    operation.kind = TP_OP_SOURCE_ADD;
+    operation.atlas_id = atlas_id;
+    operation.u.source_add.source_id = source_id;
+    operation.u.source_add.kind = TP_SOURCE_KIND_FILE;
+    operation.u.source_add.key = (char *)path;
+    return headless_apply(session, &operation, expected_revision,
+                          transaction_id, err);
+}
+
+static tp_status apply_sprite_origin(corpus_adapter adapter,
+                                     tp_session *session, tp_id128 atlas_id,
+                                     tp_id128 source_id,
+                                     int64_t expected_revision,
+                                     const char *source_key, float origin_x,
+                                     float origin_y,
+                                     const char *transaction_id,
+                                     tp_error *err) {
+    tp_op_sprite_set settings;
+    memset(&settings, 0, sizeof settings);
+    settings.mask = TP_SPF_ORIGIN;
+    settings.origin_x = origin_x;
+    settings.origin_y = origin_y;
+    if (adapter == CORPUS_GUI) {
+        return gui_session_set_sprite_override(
+            session, atlas_id, source_id, source_key, expected_revision,
+            &settings, transaction_id, err);
+    }
+    tp_operation operation;
+    memset(&operation, 0, sizeof operation);
+    operation.kind = TP_OP_SPRITE_OVERRIDE_SET;
+    operation.atlas_id = atlas_id;
+    operation.u.sprite_set = settings;
+    operation.u.sprite_set.source_id = source_id;
+    operation.u.sprite_set.src_key = (char *)source_key;
+    return headless_apply(session, &operation, expected_revision,
+                          transaction_id, err);
+}
+
+static tp_status apply_animation_create(
+    corpus_adapter adapter, tp_session *session, tp_id128 atlas_id,
+    tp_id128 animation_id, tp_id128 source_id, int64_t expected_revision,
+    const char *source_key, const char *transaction_id, tp_error *err) {
+    tp_op_sprite_ref frame = {source_id, (char *)source_key};
+    if (adapter == CORPUS_GUI) {
+        return gui_session_create_animation(
+            session, atlas_id, animation_id, expected_revision, "walk", &frame,
+            1, transaction_id, err);
+    }
+    tp_operation operation;
+    memset(&operation, 0, sizeof operation);
+    operation.kind = TP_OP_ANIMATION_CREATE;
+    operation.atlas_id = atlas_id;
+    operation.u.anim_create.anim_id = animation_id;
+    operation.u.anim_create.name = "walk";
+    operation.u.anim_create.fps = TP_PROJECT_ANIM_FPS_DEFAULT;
+    operation.u.anim_create.playback = TP_PROJECT_ANIM_PLAYBACK_DEFAULT;
+    operation.u.anim_create.frames = &frame;
+    operation.u.anim_create.frame_count = 1;
+    return headless_apply(session, &operation, expected_revision,
+                          transaction_id, err);
+}
+
+static tp_status apply_target_create(corpus_adapter adapter,
+                                     tp_session *session, tp_id128 atlas_id,
+                                     tp_id128 target_id,
+                                     int64_t expected_revision,
+                                     const char *transaction_id,
+                                     tp_error *err) {
+    if (adapter == CORPUS_GUI) {
+        return gui_session_create_target(
+            session, atlas_id, target_id, expected_revision, "json-neotolis",
+            "out/golden", true, transaction_id, err);
+    }
+    tp_operation operation;
+    memset(&operation, 0, sizeof operation);
+    operation.kind = TP_OP_TARGET_CREATE;
+    operation.atlas_id = atlas_id;
+    operation.u.target_create.target_id = target_id;
+    operation.u.target_create.exporter_id = "json-neotolis";
+    operation.u.target_create.out_path = "out/golden";
+    operation.u.target_create.enabled = true;
+    return headless_apply(session, &operation, expected_revision,
+                          transaction_id, err);
+}
+
 static corpus_result run_corpus(corpus_adapter adapter) {
     uint8_t seed = 17U;
     const tp_rng rng = {deterministic_fill, &seed};
@@ -156,6 +267,18 @@ static corpus_result run_corpus(corpus_adapter adapter) {
     const tp_id128 atlas_id = atlas->id;
     tp_session_snapshot_destroy(initial);
 
+    const tp_id128 source_id = {{
+        0x61, 0x61, 0x61, 0x61, 0x61, 0x61, 0x61, 0x61,
+        0x62, 0x62, 0x62, 0x62, 0x62, 0x62, 0x62, 0x62}};
+    const tp_id128 animation_id = {{
+        0x71, 0x71, 0x71, 0x71, 0x71, 0x71, 0x71, 0x71,
+        0x72, 0x72, 0x72, 0x72, 0x72, 0x72, 0x72, 0x72}};
+    const tp_id128 target_id = {{
+        0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81,
+        0x82, 0x82, 0x82, 0x82, 0x82, 0x82, 0x82, 0x82}};
+    static const char source_path[] = "sprites/hero.png";
+    static const char source_key[] = "hero.png";
+
     corpus_result out;
     memset(&out, 0, sizeof out);
     out.success = apply_rename(adapter, session, atlas_id, 0, "golden",
@@ -166,6 +289,18 @@ static corpus_result run_corpus(corpus_adapter adapter) {
                                 "33333333333333333333333333333333", &err);
     out.duplicate = apply_rename(adapter, session, atlas_id, 0, "retry",
                                  "11111111111111111111111111111111", &err);
+    out.source_add = apply_source_add(
+        adapter, session, atlas_id, source_id, 1, source_path,
+        "44444444444444444444444444444444", &err);
+    out.sprite_override = apply_sprite_origin(
+        adapter, session, atlas_id, source_id, 2, source_key, 0.25F, 0.75F,
+        "66666666666666666666666666666666", &err);
+    out.animation_create = apply_animation_create(
+        adapter, session, atlas_id, animation_id, source_id, 3, source_key,
+        "77777777777777777777777777777777", &err);
+    out.target_create = apply_target_create(
+        adapter, session, atlas_id, target_id, 4,
+        "99999999999999999999999999999999", &err);
 
     tp_session_snapshot *snapshot = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
@@ -174,6 +309,35 @@ static corpus_result run_corpus(corpus_adapter adapter) {
         tp_session_snapshot_atlas_by_id(snapshot, atlas_id);
     TEST_ASSERT_NOT_NULL(final_atlas);
     (void)snprintf(out.atlas_name, sizeof out.atlas_name, "%s", final_atlas->name);
+    const tp_snapshot_source *source = tp_session_snapshot_source_by_id(
+        snapshot, atlas_id, source_id);
+    TEST_ASSERT_NOT_NULL(source);
+    (void)snprintf(out.source_path, sizeof out.source_path, "%s", source->path);
+    const tp_snapshot_sprite *sprite = tp_session_snapshot_sprite_by_key(
+        snapshot, atlas_id, source_id, source_key);
+    TEST_ASSERT_NOT_NULL(sprite);
+    out.sprite_origin_x = sprite->origin_x;
+    const tp_snapshot_animation *animation =
+        tp_session_snapshot_animation_by_id(snapshot, atlas_id, animation_id);
+    TEST_ASSERT_NOT_NULL(animation);
+    (void)snprintf(out.animation_name, sizeof out.animation_name, "%s",
+                   animation->name);
+    out.animation_fps = animation->fps;
+    out.animation_frame_count = animation->frame_count;
+    const tp_snapshot_frame *frame = tp_session_snapshot_animation_frame_at(
+        snapshot, atlas_id, animation_id, 0);
+    TEST_ASSERT_NOT_NULL(frame);
+    out.frame_source_id = frame->source_id;
+    (void)snprintf(out.frame_source_key, sizeof out.frame_source_key, "%s",
+                   frame->source_key);
+    const tp_snapshot_target *target = tp_session_snapshot_target_by_id(
+        snapshot, atlas_id, target_id);
+    TEST_ASSERT_NOT_NULL(target);
+    (void)snprintf(out.target_exporter_id, sizeof out.target_exporter_id, "%s",
+                   target->exporter_id);
+    (void)snprintf(out.target_out_path, sizeof out.target_out_path, "%s",
+                   target->out_path);
+    out.target_enabled = target->enabled;
     out.revision = tp_session_snapshot_revision(snapshot);
     out.model_generation = tp_session_snapshot_model_generation(snapshot);
     out.event_sequence = tp_session_snapshot_event_sequence(snapshot);
@@ -492,10 +656,18 @@ void test_gui_and_headless_share_golden_transaction_session_corpus(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_RANGE, gui.validation);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_REVISION_CONFLICT, gui.conflict);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_DUPLICATE_ID, gui.duplicate);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, gui.source_add);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, gui.sprite_override);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, gui.animation_create);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, gui.target_create);
     TEST_ASSERT_EQUAL_INT(gui.success, headless.success);
     TEST_ASSERT_EQUAL_INT(gui.validation, headless.validation);
     TEST_ASSERT_EQUAL_INT(gui.conflict, headless.conflict);
     TEST_ASSERT_EQUAL_INT(gui.duplicate, headless.duplicate);
+    TEST_ASSERT_EQUAL_INT(gui.source_add, headless.source_add);
+    TEST_ASSERT_EQUAL_INT(gui.sprite_override, headless.sprite_override);
+    TEST_ASSERT_EQUAL_INT(gui.animation_create, headless.animation_create);
+    TEST_ASSERT_EQUAL_INT(gui.target_create, headless.target_create);
 
     TEST_ASSERT_EQUAL_INT64(gui.revision, headless.revision);
     TEST_ASSERT_EQUAL_UINT64(gui.model_generation, headless.model_generation);
@@ -504,8 +676,33 @@ void test_gui_and_headless_share_golden_transaction_session_corpus(void) {
                              sizeof gui.semantic_identity);
     TEST_ASSERT_EQUAL_STRING(gui.atlas_name, headless.atlas_name);
     TEST_ASSERT_EQUAL_STRING("golden", gui.atlas_name);
-    TEST_ASSERT_EQUAL_UINT64(1, gui.event_sequence);
-    TEST_ASSERT_EQUAL_UINT(1, gui.event_count);
+    TEST_ASSERT_EQUAL_STRING(gui.source_path, headless.source_path);
+    TEST_ASSERT_EQUAL_STRING("sprites/hero.png", gui.source_path);
+    TEST_ASSERT_TRUE(gui.sprite_origin_x == headless.sprite_origin_x);
+    TEST_ASSERT_TRUE(gui.sprite_origin_x == 0.25F);
+    TEST_ASSERT_EQUAL_STRING(gui.animation_name, headless.animation_name);
+    TEST_ASSERT_EQUAL_STRING("walk", gui.animation_name);
+    TEST_ASSERT_TRUE(gui.animation_fps == headless.animation_fps);
+    TEST_ASSERT_TRUE(gui.animation_fps == TP_PROJECT_ANIM_FPS_DEFAULT);
+    TEST_ASSERT_EQUAL_INT(gui.animation_frame_count,
+                          headless.animation_frame_count);
+    TEST_ASSERT_EQUAL_INT(1, gui.animation_frame_count);
+    TEST_ASSERT_EQUAL_MEMORY(&gui.frame_source_id, &headless.frame_source_id,
+                             sizeof gui.frame_source_id);
+    TEST_ASSERT_FALSE(tp_id128_is_nil(gui.frame_source_id));
+    TEST_ASSERT_EQUAL_STRING(gui.frame_source_key, headless.frame_source_key);
+    TEST_ASSERT_EQUAL_STRING("hero.png", gui.frame_source_key);
+    TEST_ASSERT_EQUAL_STRING(gui.target_exporter_id,
+                             headless.target_exporter_id);
+    TEST_ASSERT_EQUAL_STRING("json-neotolis", gui.target_exporter_id);
+    TEST_ASSERT_EQUAL_STRING(gui.target_out_path, headless.target_out_path);
+    TEST_ASSERT_EQUAL_STRING("out/golden", gui.target_out_path);
+    TEST_ASSERT_EQUAL_INT(gui.target_enabled, headless.target_enabled);
+    TEST_ASSERT_TRUE(gui.target_enabled);
+    TEST_ASSERT_EQUAL_INT64(5, gui.revision);
+    TEST_ASSERT_EQUAL_UINT64(5, gui.model_generation);
+    TEST_ASSERT_EQUAL_UINT64(5, gui.event_sequence);
+    TEST_ASSERT_EQUAL_UINT(5, gui.event_count);
     TEST_ASSERT_EQUAL_UINT(gui.event_count, headless.event_count);
     TEST_ASSERT_FALSE(gui.event_resync);
     TEST_ASSERT_EQUAL_INT(gui.event_resync, headless.event_resync);

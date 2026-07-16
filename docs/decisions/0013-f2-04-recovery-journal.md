@@ -1,13 +1,16 @@
 # 0013 — F2-04: минимальный recovery journal для side-effect workflows
 
+> **Foundation addendum (2026-07-16):** accepted, implemented and reviewed through
+> M0/M3/M4. The current journal/recovery ownership, `duplicate_id` contract and
+> triggered P-UNDO follow-up are recorded in the master spec and foundation review.
+> Pending/deferred statements below describe the pre-foundation implementation state.
+
 **Дата:** 2026-07-13
-**Статус:** lead-reviewed; correctness fixes applied (C1–C6 + cleanups Q1/Q2, см. §Fix pass);
-**owner-confirmation pending** по: формат записи/версионирование, новый commit-ordering + новый
-status-токен `journal_failed`, per-txn full-snapshot payload vs redo-log (deferred → F2-05 perf pass,
-§D2), scope coordinator’а (publish crash-window → B1-02, §D1), compaction cadence (deferred → F2-05).
-Не «accepted» — decided-vs-deferred расписано ниже честно.
-**Принял:** deep-reasoner (F2-04, делегированные полномочия); lead review DONE (19-agent adversarial
-review → 6 correctness fixes applied); owner confirmation pending на пунктах §Открытое.
+**Статус:** accepted; foundation implementation reviewed 2026-07-16
+**Исторический F2-04 review record:** correctness fixes C1–C6 + Q1/Q2 were
+applied before foundation. Its then-open D1 publication window remains routed to
+B1-02; full-snapshot Undo/Redo cost and compaction work are now routed to P-UNDO.
+**Принял:** deep-reasoner (F2-04, делегированные полномочия); foundation lead review complete
 **Реализуется в:** F2-04 (`tp_journal` в core: `tp_journal.c`, `tp_journal_io.c`; public header
 `tp_core/tp_journal.h`; internal `packer/src/tp_journal_internal.h`; поля `journal`/`coordinator` в
 `tp_model` + acknowledgement-gate в `tp_txn_apply.c`; coordinator-интерфейс + model↔journal glue в

@@ -1,8 +1,12 @@
 # 0012 — F2-03: semantic diff / точный inverse (Undo) + redo + snapshot oracle
 
+> **Foundation addendum (2026-07-16):** accepted, implemented and reviewed as part of
+> M0–M5. `tp_session` now owns the live semantic history; the former GUI snapshot
+> history is deleted. M0 measurements triggered the separate P-UNDO follow-up.
+
 **Дата:** 2026-07-13
-**Статус:** accepted (нужно подтверждение владельца по inverse-механизму, revision-bump на Undo/Redo и границе F2-03/F3-02)
-**Принял:** deep-reasoner (F2-03, делегированные полномочия), lead review pending
+**Статус:** accepted; foundation implementation reviewed 2026-07-16
+**Принял:** deep-reasoner (F2-03, делегированные полномочия); foundation lead review complete
 **Реализуется в:** F2-03 (`tp_diff` в core: `tp_diff_entity.c`, `tp_diff_capture.c`,
 `tp_diff_apply.c`, `tp_history.c`; public header `tp_core/tp_diff.h`; поле `history` в
 `tp_model` + capture-хук в `tp_txn_apply.c`). Master spec §9–9.5, §59 items 15–17.

@@ -1,8 +1,12 @@
 # 0014 — F2-05a: CLI transaction cutover (ordinary CLI routed through the op/txn engine)
 
+> **Foundation addendum (2026-07-16):** accepted, implemented and reviewed. Ordinary
+> CLI mutations now execute through the common `tp_session` boundary; the
+> journal-less one-shot ownership described below is retained as cutover history.
+
 **Date:** 2026-07-13
-**Status:** accepted (lead review pending)
-**Decided by:** F2-05a implementation agent (delegated), lead review pending
+**Status:** accepted; foundation implementation reviewed 2026-07-16
+**Decided by:** F2-05a implementation agent (delegated); foundation lead review complete
 **Implemented in:** `apps/cli/cli_mutate.c` (rewrite), one core change in
 `packer/src/tp_op_validate.c`, coverage in `packer/tests/test_op_apply.c` +
 `scripts/check_boundaries.sh` (rule R6). Master spec §4.1–4.2, §7.1, §14.2, §59

@@ -49,6 +49,30 @@ operation, source, session и format-package contracts.
 Shared foundation — не третий пользовательский эпик. Это обязательная общая
 основа для A и B (master spec §3).
 
+## Architecture foundation M0-M5 checkpoint
+
+**Статус:** `DONE` (2026-07-16). Exact-SHA terminal CI remains a handoff gate;
+its current result is recorded on the PR and in the task handoff.
+
+M0-M5 from `plans/architecture-foundation-plan.md` completed the shared
+ownership foundation: one session-owned mutable model, immutable snapshots,
+thin GUI/CLI adapters, bounded recovery, exact job/capability contracts and
+closed deletion gates. Evidence:
+
+- `reviews/architecture-foundation-m0-baseline.md`;
+- `reviews/architecture-foundation-migration-ledger.md`;
+- `reviews/architecture-foundation-m1-m5.md`.
+
+This checkpoint does **not** mark the complete C0/F1/F2/F3 product phases DONE;
+their remaining product gates still require separate phase audits. In
+particular, visible shared History and full `pack_input_hash`/result LRU remain
+F3 work.
+
+**Routed F3 finding — P-UNDO (`TRIGGERED`):** the M0 HUGE fixture measured about
+17.36 MB per durable Undo/Redo append and p95 around 1.5-1.65 s. Compact history
+acknowledgement is the named post-foundation packet in the architecture plan
+§7 and should be scheduled explicitly; it is not silently included in M0-M5.
+
 ## Граф зависимостей
 
 ```text

@@ -15,6 +15,7 @@
 #include "tp_core/tp_transaction.h"
 #include "tp_journal_internal.h"
 #include "tp_op_internal.h"
+#include "tp_project_internal.h"
 #include "tp_session_internal.h"
 #include "tp_txn_internal.h"
 
@@ -1597,6 +1598,27 @@ static bool save_sample_prepare(const fixture *f, const char *journal_path,
     return true;
 }
 
+static bool checkpoint_roundtrip_identity(const tp_project *project,
+                                          tp_id128 *out, tp_error *err) {
+    char *checkpoint = NULL;
+    size_t checkpoint_len = 0U;
+    tp_project *roundtrip = NULL;
+    const tp_status save_status = tp_project_checkpoint_save_buffer(
+        project, &checkpoint, &checkpoint_len, err);
+    const tp_status load_status =
+        save_status == TP_STATUS_OK
+            ? tp_project_load_buffer(checkpoint, checkpoint_len, &roundtrip, err)
+            : save_status;
+    free(checkpoint);
+    if (load_status != TP_STATUS_OK || !roundtrip) {
+        tp_project_destroy(roundtrip);
+        return false;
+    }
+    *out = tp_semantic_identity(roundtrip);
+    tp_project_destroy(roundtrip);
+    return true;
+}
+
 static bool bench_save(const fixture *f, const char *scratch, int warmups, int iterations) {
     tp_bench_samples samples;
     tp_bench_samples_init(&samples);
@@ -1611,6 +1633,10 @@ static bool bench_save(const fixture *f, const char *scratch, int warmups, int i
         (void)remove(save_path);
         tp_model *model = NULL;
         if (!save_sample_prepare(f, journal_path, (uint64_t)i + 5000U, &model)) {
+            (void)fprintf(stderr,
+                          "benchmark_evidence scenario=save_compact fixture=%s "
+                          "phase=prepare sample=%d failed\n",
+                          f->spec.name, i);
             return false;
         }
         tp_error err = {{0}};
@@ -1624,7 +1650,20 @@ static bool bench_save(const fixture *f, const char *scratch, int warmups, int i
         int64_t saved_bytes = file_size(save_path);
         const int64_t expected_revision = tp_model_revision(model);
         const tp_id128 expected_identity = tp_semantic_identity(tp_model_project(model));
-        bool ok = status == TP_STATUS_OK && !tp_model_dirty(model) && saved_bytes > 0 &&
+        tp_id128 expected_recovery_identity = tp_id128_nil();
+        const bool recovery_identity_ready =
+            status == TP_STATUS_OK &&
+            checkpoint_roundtrip_identity(tp_model_project(model),
+                                          &expected_recovery_identity, &err);
+        if (status == TP_STATUS_OK && !recovery_identity_ready) {
+            (void)fprintf(stderr,
+                          "benchmark_evidence scenario=save_compact fixture=%s "
+                          "phase=checkpoint_oracle sample=%d error=%s\n",
+                          f->spec.name, i, err.msg);
+        }
+        const bool dirty_after_save = tp_model_dirty(model);
+        bool ok = status == TP_STATUS_OK && recovery_identity_ready &&
+                  !dirty_after_save && saved_bytes > 0 &&
                   tp_model_project(model)->atlases[f->spec.atlases - 1].padding == 9;
         if (ok && (uint64_t)saved_bytes > max_saved_bytes) {
             max_saved_bytes = (uint64_t)saved_bytes;
@@ -1634,8 +1673,17 @@ static bool bench_save(const fixture *f, const char *scratch, int warmups, int i
         tp_project *loaded = NULL;
         tp_error verify_err = {{0}};
         if (ok) {
-            ok = tp_project_load(save_path, &loaded, &verify_err) == TP_STATUS_OK && loaded &&
+            const tp_status load_status =
+                tp_project_load(save_path, &loaded, &verify_err);
+            ok = load_status == TP_STATUS_OK && loaded &&
                  tp_id128_eq(tp_semantic_identity(loaded), expected_identity);
+            if (!ok) {
+                (void)fprintf(stderr,
+                              "benchmark_evidence scenario=save_compact fixture=%s "
+                              "phase=reload sample=%d status=%s error=%s\n",
+                              f->spec.name, i, tp_status_str(load_status),
+                              verify_err.msg);
+            }
         }
         tp_project_destroy(loaded);
 
@@ -1644,18 +1692,54 @@ static bool bench_save(const fixture *f, const char *scratch, int warmups, int i
         memset(&info, 0, sizeof info);
         if (ok) {
             tp_journal_io verify_io = tp_journal_io_file(journal_path);
-            ok = verify_io.ctx &&
-                 tp_model_recover(verify_io, journal_key(), &recovered, &info, &verify_err) == TP_STATUS_OK &&
+            const tp_status recover_status =
+                verify_io.ctx
+                    ? tp_model_recover(verify_io, journal_key(), &recovered,
+                                       &info, &verify_err)
+                    : TP_STATUS_BAD_PROJECT;
+            ok = verify_io.ctx && recover_status == TP_STATUS_OK &&
                  recovered && info.status == TP_JOURNAL_RECOVERY_OK && !info.mid_stream_corrupt &&
                  info.records_recovered == 1 && info.op_count == 0U && info.revision == expected_revision &&
                  tp_model_revision(recovered) == expected_revision &&
-                 tp_id128_eq(tp_semantic_identity(tp_model_project(recovered)), expected_identity);
+                 tp_id128_eq(tp_semantic_identity(tp_model_project(recovered)),
+                             expected_recovery_identity);
+            if (!ok) {
+                const int64_t recovered_revision =
+                    recovered ? tp_model_revision(recovered) : -1;
+                const bool identity_equal =
+                    recovered && tp_id128_eq(
+                                     tp_semantic_identity(
+                                         tp_model_project(recovered)),
+                                     expected_recovery_identity);
+                (void)fprintf(stderr,
+                              "benchmark_evidence scenario=save_compact fixture=%s "
+                              "phase=recover sample=%d status=%s recovery_status=%d "
+                              "records=%d ops=%zu revision=%" PRId64
+                              " expected_revision=%" PRId64
+                              " recovered_revision=%" PRId64
+                              " mid_stream=%d identity_equal=%d error=%s\n",
+                              f->spec.name, i, tp_status_str(recover_status),
+                              (int)info.status, info.records_recovered,
+                              info.op_count, info.revision, expected_revision,
+                              recovered_revision,
+                              info.mid_stream_corrupt ? 1 : 0,
+                              identity_equal ? 1 : 0, verify_err.msg);
+            }
         }
         tp_journal_recovery_free(&info);
         tp_model_destroy(recovered);
         (void)remove(save_path);
         (void)remove(journal_path);
         if (!ok) {
+            if (status != TP_STATUS_OK || dirty_after_save || saved_bytes <= 0) {
+                (void)fprintf(stderr,
+                              "benchmark_evidence scenario=save_compact fixture=%s "
+                              "phase=save sample=%d status=%s dirty=%d bytes=%" PRId64
+                              " error=%s\n",
+                              f->spec.name, i, tp_status_str(status),
+                              dirty_after_save ? 1 : 0, saved_bytes,
+                              err.msg);
+            }
             if (i >= warmups) {
                 (void)tp_bench_samples_record(&samples, false, elapsed);
             }

@@ -1,8 +1,13 @@
 # 0010 — F2-01: типизированный operation engine (catalog / apply / validate / encode / builders)
 
+> **Foundation addendum (2026-07-16):** accepted, implemented and reviewed as part of
+> M0–M5. Intermediate ownership and cutover descriptions below are retained as
+> implementation history; the current state is recorded in the master spec,
+> architecture-foundation plan and M1–M5 completion review.
+
 **Дата:** 2026-07-13
-**Статус:** accepted (нужно подтверждение владельца по новым status-токенам и sprite-addressing)
-**Принял:** deep-reasoner (F2-01, делегированные полномочия), lead review pending
+**Статус:** accepted; foundation implementation reviewed 2026-07-16
+**Принял:** deep-reasoner (F2-01, делегированные полномочия); foundation lead review complete
 **Реализуется в:** F2-01 (`tp_operation` в core: `tp_op_catalog.c`, `tp_op_validate.c`,
 `tp_op_apply.c`, `tp_op_encode.c`, `tp_op_build.c`; id-addressed accessors в `tp_project`).
 Промоут принятого C0-02 spike. Master spec §4.1–4.2, §6–6.2, §7, §54 Phase-0 item 4. Plan F2-01.

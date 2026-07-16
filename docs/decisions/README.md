@@ -26,3 +26,4 @@ implementation-policy выборы). Формат: контекст, решен�
 | [0012](0012-f2-03-semantic-diff-inverse.md) | F2-03: semantic diff / точный inverse (Undo) + redo + snapshot oracle | accepted |
 | [0013](0013-f2-04-recovery-journal.md) | F2-04: minimum recovery journal (versioned checksummed log, append-gated commit, checkpoint+replay recovery, corruption fallback, side-effect coordinator) | accepted |
 | [0014](0014-f2-05a-cli-transaction-cutover.md) | F2-05a: CLI mutation verbs routed through the op/txn engine (journal-less one-shot), value-range validation → core, nil-source pending sprite override, boundary rule R6 | accepted |
+| [0015](0015-f2-05b-gui-transaction-journal-cutover.md) | F2-05b: GUI cutover from transitional local model/history/recovery ownership to the shared session boundary | accepted; foundation reviewed |

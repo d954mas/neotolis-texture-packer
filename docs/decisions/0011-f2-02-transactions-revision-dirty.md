@@ -1,8 +1,13 @@
 # 0011 — F2-02: атомарные транзакции, revision и semantic dirty
 
+> **Foundation addendum (2026-07-16):** accepted, implemented and reviewed as part of
+> M0–M5. Intermediate ownership and cutover descriptions below are historical.
+> Retained transaction IDs return structured `duplicate_id` without reapplying;
+> durable result replay remains an optional advertised transport upgrade.
+
 **Дата:** 2026-07-13
-**Статус:** accepted (нужно подтверждение владельца по atomicity-механизму, source-`kind` в identity и новым status-токенам)
-**Принял:** deep-reasoner (F2-02, делегированные полномочия), lead review pending
+**Статус:** accepted; foundation implementation reviewed 2026-07-16
+**Принял:** deep-reasoner (F2-02, делегированные полномочия); foundation lead review complete
 **Реализуется в:** F2-02 (`tp_transaction` в core: `tp_project_clone.c`, `tp_semantic.c`,
 `tp_txn_idset.c`, `tp_txn_apply.c`, `tp_txn_parse.c`, `tp_txn_lower.c`, `tp_txn_encode.c`;
 public header `tp_core/tp_transaction.h`; `tp_project_clone` в `tp_project.h`).

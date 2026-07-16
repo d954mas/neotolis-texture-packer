@@ -1,7 +1,15 @@
 # Architecture foundation plan
 
-Статус: reviewed / handoff-ready — architecture, recovery и performance
-convergence gates пройдены
+Статус: **IMPLEMENTED (M0–M5)** — local correctness, architecture,
+performance, debug/release and boundary gates are recorded in
+`docs/reviews/architecture-foundation-m1-m5.md`. Exact-SHA terminal CI is a
+handoff gate whose current result is recorded on the PR and in the task handoff.
+
+| Package | Status | Durable evidence |
+|---|---|---|
+| M0 | DONE | `docs/reviews/architecture-foundation-m0-baseline.md` |
+| M1–M5 | DONE | `docs/reviews/architecture-foundation-m1-m5.md` |
+| Migration/deletion ledger | CLOSED | `docs/reviews/architecture-foundation-migration-ledger.md` |
 
 Нормативный источник: `docs/ntpacker-master-spec.md`
 
@@ -429,6 +437,11 @@ Gate:
 - отдельный ADR + two-process handoff tests до реализации.
 
 ### P-UNDO — Compact Undo/Redo acknowledgement
+
+**Status: TRIGGERED by M0 measurements.** The foundation keeps the measured
+journal-backed semantic-history path correct and single-owned; compact acknowledgement
+work remains a separate post-foundation packet. See the ROADMAP checkpoint and the
+M1–M5 completion review for the measured evidence.
 
 M0 обязательно измеряет текущий journal-backed Undo/Redo checkpoint path. Normal
 recovery TXN остаётся owner-locked serialized-operation format.

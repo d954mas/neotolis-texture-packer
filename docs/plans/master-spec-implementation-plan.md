@@ -7,6 +7,21 @@
 Язык реализации: C17
 Граница движка: `external/neotolis-engine/` только для чтения; требуемые изменения идут отдельным issue/PR в репозиторий движка.
 
+## 2026-07-16 architecture foundation checkpoint
+
+Ownership foundation M0-M5 from `architecture-foundation-plan.md` is implemented.
+Current evidence is in `../reviews/architecture-foundation-m1-m5.md`.
+Exact-SHA terminal CI is a handoff gate whose current result is recorded on the
+PR and in the task handoff. This checkpoint supersedes obsolete as-built
+statements below that describe the pre-foundation commit `46b172b`.
+
+Current foundation facts: structural IDs and tagged sources exist; GUI and CLI
+mutations use typed operations through `tp_session`; the GUI reads owned
+snapshots and uses semantic session history; recovery and project leases are
+core-owned; Pack/Export have typed session-owned handles; validation and
+capability rules are below frontends. Remaining product work is still tracked
+by its original packets and is not marked complete by this checkpoint.
+
 ## 1. Назначение и правила исполнения
 
 Этот документ переводит master spec в проверяемые вертикальные пакеты работ. Он не переопределяет продуктовые решения master spec. При конфликте текст master spec имеет приоритет.
@@ -22,6 +37,10 @@
 7. не считать ручную GUI-проверку заменой executable acceptance tests.
 
 ## 2. Текущее состояние и исходный разрыв
+
+> Historical baseline: this section captured commit `46b172b` before M0-M5.
+> It is retained as planning history, not a description of the current tree.
+> Use the checkpoint above and the completion review for current ownership.
 
 У проекта сильная baseline-основа:
 
@@ -711,6 +730,12 @@ recovery state с уже опубликованными файлами и без
 
 ### F3-01 — Serialized `tp_session` admission boundary
 
+**Foundation update (2026-07-16).** A synchronous serialized `tp_session`,
+owned immutable snapshots, revision/event sequencing and session-owned job
+handles now exist. No actor thread or mailbox was introduced. Remaining work in
+this packet is product-level multi-host/controller behavior, not creation of a
+second session abstraction.
+
 **Goal / user outcome.** GUI edits, Undo/Redo, refresh и будущий MCP наблюдают один authoritative ordered commit stream.
 
 **Spec refs.** §4.6, §6.1, §7.1, §9.1–9.3, §21, §59 items 18–19.
@@ -739,6 +764,13 @@ recovery state с уже опубликованными файлами и без
 
 ### F3-02 — Shared semantic history и checkpoints
 
+**Foundation update (2026-07-16).** Production GUI snapshot history and
+`gui_history` authority are deleted. Semantic history and session Undo/Redo are
+live; visible shared History/checkpoint UX and host-transfer behavior remain.
+P-UNDO is explicitly **TRIGGERED** by the M0 HUGE result (about 17.36 MB per
+durable append and p95 around 1.5-1.65 s); implementation belongs to the named
+post-foundation packet in `architecture-foundation-plan.md` §7.
+
 **Goal / user outcome.** Один Ctrl+Z отменяет целую human/agent transaction; save виден checkpoint-ом, но не Undo step.
 
 **Spec refs.** §8–9.5, §54 Phase 2 items 2–4.
@@ -765,6 +797,12 @@ recovery state с уже опубликованными файлами и без
 **Non-goals / blockers.** Crash recovery full Undo stack не восстанавливает.
 
 ### F3-03 — Pack hash, freshness и result cache
+
+**Foundation update (2026-07-16).** Pack and export-preview jobs use one
+core-owned composite `{model_generation, source_generation}` freshness token;
+the GUI refresh epochs and model-only preview generation are deleted. Full
+semantic `pack_input_hash`, result ordering/cache and byte-budget LRU remain
+planned product work.
 
 **Goal / user outcome.** После Undo предыдущий preview появляется сразу из cache; завершившийся старый pack остаётся видимым и честно помечается stale.
 

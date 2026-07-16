@@ -1,5 +1,10 @@
 # Architecture foundation migration ledger
 
+Status: **CLOSED** (2026-07-16)
+
+Implementation range: `f7d353a` through `57ba946`, plus the final parity/docs
+commit. Closure requires the executable boundary and parity gates named below.
+
 Этот ledger фиксирует закрытие старых authoritative paths для M1–M5. Он не
 создаёт новых продуктовых решений: нормативным источником остаётся
 `docs/ntpacker-master-spec.md`.
@@ -21,3 +26,26 @@
 Для каждой строки gate считается закрытым только вместе с executable boundary
 check и указанными parity/fault tests; наличие adapter само по себе не является
 доказательством cutover.
+
+## Corrective deletion closure
+
+- Selected sprites, row overrides and animation frames use canonical
+  `{source_id, source_key}` identity. Shipping `gui_pack_find_sprite(name)` was
+  removed; the remaining name helper is compiled only into selftest as an
+  oracle, never as authority.
+- Row override indexing is canonical and linear. The superseded per-row linear
+  override scan and unchanged-frame filesystem path were removed.
+- Pack and target-preview freshness use the core-owned immutable
+  `{model_generation, source_generation}` token. `s_refresh_epoch`,
+  `s_pack_start_refresh_epoch`, `model_changed_since`,
+  `model_generation_at_start` and `s_preview_ver` were removed.
+- Generic `TP_CLIENT_CAPABILITY_LIVE_JOBS` was removed. The matrix now names
+  Pack job and Export command separately and reports async Inspect/Validate jobs
+  as typed `NOT_IMPLEMENTED` for live hosts.
+- The weak snapshot-input capability seam test was removed; the live-headless
+  harness executes real Pack and Export work through the session-owned handle.
+- GUI recovery/worker/model authority paths are absent and guarded by the
+  boundary script's seeded deletion detectors.
+
+Foundation does not claim the later full semantic `pack_input_hash`, result
+ordering/cache or byte-budget LRU from F3.5.
