@@ -3,9 +3,17 @@
 #include <stdio.h>
 #include <string.h>
 
+#ifdef _WIN32
+#include <direct.h>
+#define test_rmdir _rmdir
+#else
+#include <unistd.h>
+#define test_rmdir rmdir
+#endif
+
 #include "tp_core/tp_client_capability.h"
-#include "tp_core/tp_input.h"
 #include "tp_core/tp_job.h"
+#include "tp_core/tp_scan.h"
 #include "tp_core/tp_transaction.h"
 #include "unity.h"
 
@@ -47,8 +55,29 @@ static int deterministic_fill(void *ctx, uint8_t *dst, size_t count) {
     return (int)count;
 }
 
-void setUp(void) {}
-void tearDown(void) {}
+static void cleanup_export_fixture(void) {
+    static const char *const relative_files[] = {
+        "out/atlas1-0.png",
+        "out/atlas1.json",
+        "atlas1.h",
+        "atlas1.ntpack",
+        "live-export.ntpacker_project.ntpacker.lock",
+        "live-export.ntpacker_project",
+    };
+    char path[1024];
+    for (size_t i = 0U;
+         i < sizeof relative_files / sizeof relative_files[0]; ++i) {
+        (void)snprintf(path, sizeof path, "%s/%s", TP_TEST_BINARY_DIR,
+                       relative_files[i]);
+        (void)remove(path);
+    }
+    (void)snprintf(path, sizeof path, "%s/out", TP_TEST_BINARY_DIR);
+    (void)test_rmdir(path);
+    (void)test_rmdir(TP_TEST_BINARY_DIR);
+}
+
+void setUp(void) { cleanup_export_fixture(); }
+void tearDown(void) { cleanup_export_fixture(); }
 
 static tp_status headless_apply(tp_session *session, tp_operation *operation,
                                 int64_t expected_revision, const char *transaction_id,
@@ -266,27 +295,49 @@ static invalid_corpus_result run_invalid_corpus(corpus_adapter adapter) {
 }
 
 void test_capability_matrix_is_typed_and_exact(void) {
-    static const tp_client_capability_availability expected[3][6] = {
+    static const tp_client_capability capabilities[9] = {
+        TP_CLIENT_CAPABILITY_TRANSACTION,
+        TP_CLIENT_CAPABILITY_PERSISTENCE,
+        TP_CLIENT_CAPABILITY_EVENTS,
+        TP_CLIENT_CAPABILITY_HISTORY,
+        TP_CLIENT_CAPABILITY_RECOVERY,
+        TP_CLIENT_CAPABILITY_PACK_JOB,
+        TP_CLIENT_CAPABILITY_EXPORT_COMMAND,
+        TP_CLIENT_CAPABILITY_INSPECT_ASYNC_JOB,
+        TP_CLIENT_CAPABILITY_VALIDATE_ASYNC_JOB,
+    };
+    static const tp_client_capability_availability expected[3][9] = {
         {TP_CLIENT_CAPABILITY_NOT_APPLICABLE, TP_CLIENT_CAPABILITY_AVAILABLE,
          TP_CLIENT_CAPABILITY_NOT_APPLICABLE, TP_CLIENT_CAPABILITY_NOT_APPLICABLE,
+         TP_CLIENT_CAPABILITY_NOT_APPLICABLE, TP_CLIENT_CAPABILITY_NOT_APPLICABLE,
+         TP_CLIENT_CAPABILITY_AVAILABLE,
          TP_CLIENT_CAPABILITY_NOT_APPLICABLE, TP_CLIENT_CAPABILITY_NOT_APPLICABLE},
         {TP_CLIENT_CAPABILITY_AVAILABLE, TP_CLIENT_CAPABILITY_AVAILABLE,
          TP_CLIENT_CAPABILITY_AVAILABLE, TP_CLIENT_CAPABILITY_AVAILABLE,
-         TP_CLIENT_CAPABILITY_AVAILABLE, TP_CLIENT_CAPABILITY_AVAILABLE},
+         TP_CLIENT_CAPABILITY_AVAILABLE, TP_CLIENT_CAPABILITY_AVAILABLE,
+         TP_CLIENT_CAPABILITY_AVAILABLE,
+         TP_CLIENT_CAPABILITY_NOT_IMPLEMENTED,
+         TP_CLIENT_CAPABILITY_NOT_IMPLEMENTED},
         {TP_CLIENT_CAPABILITY_AVAILABLE, TP_CLIENT_CAPABILITY_AVAILABLE,
          TP_CLIENT_CAPABILITY_AVAILABLE, TP_CLIENT_CAPABILITY_AVAILABLE,
-         TP_CLIENT_CAPABILITY_AVAILABLE, TP_CLIENT_CAPABILITY_AVAILABLE}
+         TP_CLIENT_CAPABILITY_AVAILABLE, TP_CLIENT_CAPABILITY_AVAILABLE,
+         TP_CLIENT_CAPABILITY_AVAILABLE,
+         TP_CLIENT_CAPABILITY_NOT_IMPLEMENTED,
+         TP_CLIENT_CAPABILITY_NOT_IMPLEMENTED}
     };
     for (int client = TP_CLIENT_FILE_CLI; client <= TP_CLIENT_LIVE_HEADLESS; client++) {
-        for (int capability = TP_CLIENT_CAPABILITY_TRANSACTION;
-             capability <= TP_CLIENT_CAPABILITY_LIVE_JOBS; capability++) {
+        for (size_t capability_index = 0;
+             capability_index < sizeof capabilities / sizeof capabilities[0];
+             capability_index++) {
+            const tp_client_capability capability =
+                capabilities[capability_index];
             tp_client_capability_result result;
             memset(&result, 0, sizeof result);
             const tp_status status = tp_client_capability_query(
                 (tp_client_kind)client, (tp_client_capability)capability, &result);
             const tp_client_capability_availability want =
                 expected[client - TP_CLIENT_FILE_CLI]
-                        [capability - TP_CLIENT_CAPABILITY_TRANSACTION];
+                        [capability_index];
             TEST_ASSERT_EQUAL_INT(client, result.client);
             TEST_ASSERT_EQUAL_INT(capability, result.capability);
             TEST_ASSERT_EQUAL_INT(want, result.availability);
@@ -314,36 +365,7 @@ void test_capability_matrix_is_typed_and_exact(void) {
                                                      &invalid));
 }
 
-void test_live_headless_job_capability_has_snapshot_owned_input_seam(void) {
-    uint8_t seed = 71U;
-    const tp_rng rng = {deterministic_fill, &seed};
-    tp_error err = {{0}};
-    tp_session *session = NULL;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_session_create_default_project(&rng, &session, &err));
-    tp_session_snapshot *snapshot = NULL;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_session_snapshot_create(session, &snapshot, &err));
-    const tp_snapshot_atlas *atlas = tp_session_snapshot_atlas_at(snapshot, 0);
-    TEST_ASSERT_NOT_NULL(atlas);
-
-    tp_pack_settings settings;
-    memset(&settings, 0, sizeof settings);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_pack_settings_build_snapshot(snapshot, atlas->id,
-                                                          &settings, &err));
-    tp_pack_input input;
-    memset(&input, 0, sizeof input);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_pack_input_build_snapshot(snapshot, atlas->id,
-                                                       &input, &err));
-    TEST_ASSERT_EQUAL_INT(0, input.count);
-    tp_pack_input_free(&input);
-    tp_session_snapshot_destroy(snapshot);
-    tp_session_destroy(session);
-}
-
-void test_live_headless_runs_real_session_owned_pack_job(void) {
+void test_live_headless_runs_real_pack_job_and_export_command(void) {
     uint8_t seed = 91U;
     const tp_rng rng = {deterministic_fill, &seed};
     tp_error err = {{0}};
@@ -375,6 +397,7 @@ void test_live_headless_runs_real_session_owned_pack_job(void) {
                           headless_apply(session, &source, 0,
                                          "91919191919191919191919191919191",
                                          &err));
+    tp_mkdirs(TP_TEST_BINARY_DIR);
 
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_session_snapshot_create(session, &snapshot, &err));
@@ -384,7 +407,7 @@ void test_live_headless_runs_real_session_owned_pack_job(void) {
 
     tp_pack_job_request request = {
         .atlas_id = atlas_id,
-        .work_dir = ".",
+        .work_dir = TP_TEST_BINARY_DIR,
         .preview_exporter_id = NULL,
     };
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
@@ -425,6 +448,38 @@ void test_live_headless_runs_real_session_owned_pack_job(void) {
                              current_input.source_generation);
     tp_session_snapshot_destroy(snapshot);
     TEST_ASSERT_FALSE(tp_session_job_active(session));
+    tp_session_job_result_destroy(&result);
+
+    char project_path[1024];
+    (void)snprintf(project_path, sizeof project_path,
+                   "%s/live-export.ntpacker_project", TP_TEST_BINARY_DIR);
+    tp_session_save_result save_result;
+    memset(&save_result, 0, sizeof save_result);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_save_as(session, project_path,
+                                             &save_result, &err));
+    const tp_export_command_request export_request = {
+        .work_dir = TP_TEST_BINARY_DIR,
+        .atlas_id = atlas_id,
+    };
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_export_start(session, &export_request,
+                                                  &err));
+    do {
+        memset(&progress, 0, sizeof progress);
+        TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                              tp_session_job_poll(session, &progress, &err));
+    } while (progress.state == TP_SESSION_JOB_RUNNING);
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_EXPORT, progress.kind);
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_SUCCEEDED, progress.state);
+    memset(&result, 0, sizeof result);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_job_take_result(session, &result, &err));
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_EXPORT, result.kind);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, result.status);
+    TEST_ASSERT_EQUAL_INT(1, result.export_result.targets);
+    TEST_ASSERT_EQUAL_INT(1, result.export_result.atlases_ok);
+    TEST_ASSERT_EQUAL_INT(0, result.export_result.atlases_failed);
     tp_session_job_result_destroy(&result);
     tp_session_destroy(session);
 }
@@ -480,8 +535,7 @@ void test_gui_invalid_intents_are_classified_by_the_shared_core(void) {
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_capability_matrix_is_typed_and_exact);
-    RUN_TEST(test_live_headless_job_capability_has_snapshot_owned_input_seam);
-    RUN_TEST(test_live_headless_runs_real_session_owned_pack_job);
+    RUN_TEST(test_live_headless_runs_real_pack_job_and_export_command);
     RUN_TEST(test_gui_and_headless_share_golden_transaction_session_corpus);
     RUN_TEST(test_gui_invalid_intents_are_classified_by_the_shared_core);
     return UNITY_END();

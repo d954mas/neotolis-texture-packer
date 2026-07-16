@@ -1,35 +1,41 @@
 #include "tp_core/tp_client_capability.h"
 
+static const tp_client_capability_availability s_capabilities[3][9] = {
+    /* One-shot file CLI: Inspect/Validate/Pack remain synchronous file
+     * commands; Export is an external side-effect command. */
+    {TP_CLIENT_CAPABILITY_NOT_APPLICABLE, TP_CLIENT_CAPABILITY_AVAILABLE,
+     TP_CLIENT_CAPABILITY_NOT_APPLICABLE, TP_CLIENT_CAPABILITY_NOT_APPLICABLE,
+     TP_CLIENT_CAPABILITY_NOT_APPLICABLE, TP_CLIENT_CAPABILITY_NOT_APPLICABLE,
+     TP_CLIENT_CAPABILITY_AVAILABLE, TP_CLIENT_CAPABILITY_NOT_APPLICABLE,
+     TP_CLIENT_CAPABILITY_NOT_APPLICABLE},
+    /* Native GUI live host. */
+    {TP_CLIENT_CAPABILITY_AVAILABLE, TP_CLIENT_CAPABILITY_AVAILABLE,
+     TP_CLIENT_CAPABILITY_AVAILABLE, TP_CLIENT_CAPABILITY_AVAILABLE,
+     TP_CLIENT_CAPABILITY_AVAILABLE, TP_CLIENT_CAPABILITY_AVAILABLE,
+     TP_CLIENT_CAPABILITY_AVAILABLE, TP_CLIENT_CAPABILITY_NOT_IMPLEMENTED,
+     TP_CLIENT_CAPABILITY_NOT_IMPLEMENTED},
+    /* In-process headless live host, before transport work. */
+    {TP_CLIENT_CAPABILITY_AVAILABLE, TP_CLIENT_CAPABILITY_AVAILABLE,
+     TP_CLIENT_CAPABILITY_AVAILABLE, TP_CLIENT_CAPABILITY_AVAILABLE,
+     TP_CLIENT_CAPABILITY_AVAILABLE, TP_CLIENT_CAPABILITY_AVAILABLE,
+     TP_CLIENT_CAPABILITY_AVAILABLE, TP_CLIENT_CAPABILITY_NOT_IMPLEMENTED,
+     TP_CLIENT_CAPABILITY_NOT_IMPLEMENTED},
+};
+
 tp_status tp_client_capability_query(tp_client_kind client,
                                      tp_client_capability capability,
                                      tp_client_capability_result *out) {
     if (!out || client < TP_CLIENT_FILE_CLI || client > TP_CLIENT_LIVE_HEADLESS ||
         capability < TP_CLIENT_CAPABILITY_TRANSACTION ||
-        capability > TP_CLIENT_CAPABILITY_LIVE_JOBS) {
+        capability > TP_CLIENT_CAPABILITY_VALIDATE_ASYNC_JOB) {
         return TP_STATUS_INVALID_ARGUMENT;
     }
 
     out->client = client;
     out->capability = capability;
-    out->availability = TP_CLIENT_CAPABILITY_NOT_IMPLEMENTED;
-
-    switch (client) {
-        case TP_CLIENT_FILE_CLI:
-            /* Ordinary CLI uses typed operations internally, but its public
-             * shape is one-shot file commands: it exposes no live revision /
-             * transaction-id admission contract. Persistence is the only
-             * capability in this matrix that applies to that client shape. */
-            out->availability = capability == TP_CLIENT_CAPABILITY_PERSISTENCE
-                                    ? TP_CLIENT_CAPABILITY_AVAILABLE
-                                    : TP_CLIENT_CAPABILITY_NOT_APPLICABLE;
-            break;
-        case TP_CLIENT_GUI:
-            out->availability = TP_CLIENT_CAPABILITY_AVAILABLE;
-            break;
-        case TP_CLIENT_LIVE_HEADLESS:
-            out->availability = TP_CLIENT_CAPABILITY_AVAILABLE;
-            break;
-    }
+    out->availability =
+        s_capabilities[client - TP_CLIENT_FILE_CLI]
+                      [capability - TP_CLIENT_CAPABILITY_TRANSACTION];
 
     return out->availability == TP_CLIENT_CAPABILITY_AVAILABLE
                ? TP_STATUS_OK

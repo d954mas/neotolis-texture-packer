@@ -177,7 +177,8 @@ add_executable(tp_test_client_parity test_client_parity.c gui_session_adapter.c)
 target_link_libraries(tp_test_client_parity PRIVATE tp_build unity)
 target_compile_options(tp_test_client_parity PRIVATE -U_DLL)
 target_compile_definitions(tp_test_client_parity PRIVATE
-    TP_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    TP_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+    TP_TEST_BINARY_DIR="${CMAKE_CURRENT_BINARY_DIR}/tp_client_parity_tmp")
 nt_set_warning_flags(tp_test_client_parity)
 nt_set_sanitizer_flags(tp_test_client_parity)
 add_test(NAME tp_client_parity COMMAND tp_test_client_parity)

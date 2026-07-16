@@ -22,7 +22,13 @@ typedef enum tp_client_capability {
     TP_CLIENT_CAPABILITY_EVENTS = 3,
     TP_CLIENT_CAPABILITY_HISTORY = 4,
     TP_CLIENT_CAPABILITY_RECOVERY = 5,
-    TP_CLIENT_CAPABILITY_LIVE_JOBS = 6
+    TP_CLIENT_CAPABILITY_PACK_JOB = 6,
+    TP_CLIENT_CAPABILITY_EXPORT_COMMAND = 7,
+    /* Snapshot Inspect/Validate contracts already exist. These capabilities
+     * name only optional asynchronous session jobs, which foundation does not
+     * implement or imply. */
+    TP_CLIENT_CAPABILITY_INSPECT_ASYNC_JOB = 8,
+    TP_CLIENT_CAPABILITY_VALIDATE_ASYNC_JOB = 9
 } tp_client_capability;
 
 typedef enum tp_client_capability_availability {
