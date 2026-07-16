@@ -10,6 +10,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #else
+#include <errno.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -45,6 +46,25 @@ static tp_id128 recovery_key(void) {
 static void join_path(char *out, size_t cap, const char *root, const char *leaf) {
     (void)snprintf(out, cap, "%s/%s", root, leaf);
 }
+
+#ifndef _WIN32
+static bool create_isolated_root(char *out, size_t cap, const char *label) {
+    for (unsigned attempt = 0U; attempt < 16U; ++attempt) {
+        const int written = snprintf(out, cap, "%s/%s-%ld-%u", g_root, label,
+                                     (long)getpid(), attempt);
+        if (written < 0 || (size_t)written >= cap) {
+            return false;
+        }
+        if (mkdir(out, 0700) == 0) {
+            return true;
+        }
+        if (errno != EEXIST) {
+            return false;
+        }
+    }
+    return false;
+}
+#endif
 
 static void write_file(const char *path, const char *bytes) {
     FILE *file = fopen(path, "wb");
@@ -781,12 +801,16 @@ void test_live_owner_never_deletes_a_replacement_path(void) {
 
 #ifndef _WIN32
 void test_failed_live_cleanup_keeps_journal_discoverable_after_restart(void) {
+    char root[TP_IDENTITY_PATH_MAX];
+    TEST_ASSERT_TRUE(create_isolated_root(root, sizeof root, "cleanup-fail"));
     char journal[TP_IDENTITY_PATH_MAX];
-    join_path(journal, sizeof journal, g_root, "live-cleanup-fail.ntpjournal");
+    char lock[TP_IDENTITY_PATH_MAX];
+    join_path(journal, sizeof journal, root, "live-cleanup-fail.ntpjournal");
+    (void)snprintf(lock, sizeof lock, "%s.lock", journal);
     (void)remove(journal);
     tp_recovery_store *store = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_recovery_store_create(g_root, recovery_key(), &store, NULL));
+                          tp_recovery_store_create(root, recovery_key(), &store, NULL));
     tp_recovery_live *live = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_recovery_store_create_live(store, journal, &live, NULL));
@@ -811,14 +835,28 @@ void test_failed_live_cleanup_keeps_journal_discoverable_after_restart(void) {
      * scan-visible quarantine fallback. */
     store = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_recovery_store_create(g_root, recovery_key(), &store, NULL));
+                          tp_recovery_store_create(root, recovery_key(), &store, NULL));
     tp_recovery_candidates candidates;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_recovery_store_scan(store, NULL, &candidates, NULL));
-    TEST_ASSERT_EQUAL_size_t(1U, candidates.count);
-    TEST_ASSERT_EQUAL_STRING("cleanup-failure", candidates.items[0].name);
+    const size_t candidate_count = candidates.count;
+    const bool metadata_matches =
+        candidate_count == 1U &&
+        strcmp(candidates.items[0].name, "cleanup-failure") == 0;
+    char discovered[TP_IDENTITY_PATH_MAX] = {0};
+    if (candidate_count == 1U) {
+        (void)snprintf(discovered, sizeof discovered, "%s",
+                       candidates.items[0].journal_path);
+    }
     tp_recovery_store_destroy(store);
     (void)remove(journal);
+    if (discovered[0] != '\0') {
+        (void)remove(discovered);
+    }
+    (void)remove(lock);
+    TEST_ASSERT_EQUAL_INT(0, rmdir(root));
+    TEST_ASSERT_EQUAL_size_t(1U, candidate_count);
+    TEST_ASSERT_TRUE(metadata_matches);
 }
 #endif
 
@@ -1128,29 +1166,40 @@ void test_scan_surfaces_only_same_key_version_mismatch(void) {
 
 #ifndef _WIN32
 void test_scan_never_follows_journal_symlink(void) {
+    char root[TP_IDENTITY_PATH_MAX];
+    TEST_ASSERT_TRUE(create_isolated_root(root, sizeof root, "symlink-scan"));
     char target[TP_IDENTITY_PATH_MAX];
     char link[TP_IDENTITY_PATH_MAX];
-    join_path(target, sizeof target, g_root, "scan-target.ntpjournal");
-    join_path(link, sizeof link, g_root, "scan-link.ntpjournal");
+    char target_lock[TP_IDENTITY_PATH_MAX];
+    join_path(target, sizeof target, root, "scan-target.ntpjournal");
+    join_path(link, sizeof link, root, "scan-link.ntpjournal");
+    (void)snprintf(target_lock, sizeof target_lock, "%s.lock", target);
     (void)unlink(link);
     tp_recovery_store *store = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_recovery_store_create(g_root, recovery_key(), &store, NULL));
+                          tp_recovery_store_create(root, recovery_key(), &store, NULL));
     make_preserved_live_journal(store, target, 120);
     TEST_ASSERT_EQUAL_INT(0, symlink(target, link));
     tp_recovery_candidates candidates;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_recovery_store_scan(store, NULL, &candidates, NULL));
     bool target_found = false;
+    bool link_found = false;
     for (size_t i = 0U; i < candidates.count; ++i) {
-        TEST_ASSERT_NULL(strstr(candidates.items[i].journal_path,
-                                "scan-link.ntpjournal"));
+        link_found = link_found ||
+                     strstr(candidates.items[i].journal_path,
+                            "scan-link.ntpjournal") != NULL;
         target_found = target_found ||
                        strstr(candidates.items[i].journal_path,
                               "scan-target.ntpjournal") != NULL;
     }
-    TEST_ASSERT_TRUE(target_found);
     tp_recovery_store_destroy(store);
+    (void)unlink(link);
+    (void)remove(target);
+    (void)remove(target_lock);
+    TEST_ASSERT_EQUAL_INT(0, rmdir(root));
+    TEST_ASSERT_FALSE(link_found);
+    TEST_ASSERT_TRUE(target_found);
 }
 #endif
 
