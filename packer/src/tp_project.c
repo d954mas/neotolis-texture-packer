@@ -35,6 +35,8 @@
 
 static _Thread_local bool s_test_measure_load_lookups;
 static _Thread_local tp_project_load_lookup_work s_test_load_lookup_work;
+static _Thread_local bool s_test_measure_load_resources;
+static _Thread_local tp_project_load_resources s_test_load_resources;
 
 void tp_project__test_load_lookup_work_reset(void) {
     memset(&s_test_load_lookup_work, 0, sizeof s_test_load_lookup_work);
@@ -44,6 +46,40 @@ void tp_project__test_load_lookup_work_reset(void) {
 tp_project_load_lookup_work tp_project__test_load_lookup_work_take(void) {
     s_test_measure_load_lookups = false;
     return s_test_load_lookup_work;
+}
+
+void tp_project__test_load_resources_reset(void) {
+    memset(&s_test_load_resources, 0, sizeof s_test_load_resources);
+    s_test_measure_load_resources = true;
+}
+
+tp_project_load_resources tp_project__test_load_resources_take(void) {
+    s_test_measure_load_resources = false;
+    return s_test_load_resources;
+}
+
+bool tp_project__test_load_resources_enabled(void) {
+    return s_test_measure_load_resources;
+}
+
+void tp_project__test_note_id_resources(size_t refs_bytes,
+                                        size_t index_bytes) {
+    if (!s_test_measure_load_resources) {
+        return;
+    }
+    if (refs_bytes > s_test_load_resources.id_refs_bytes) {
+        s_test_load_resources.id_refs_bytes = refs_bytes;
+    }
+    if (index_bytes > s_test_load_resources.id_index_bytes) {
+        s_test_load_resources.id_index_bytes = index_bytes;
+    }
+}
+
+void tp_project__test_note_legacy_resources(size_t peak_bytes) {
+    if (s_test_measure_load_resources &&
+        peak_bytes > s_test_load_resources.legacy_peak_bytes) {
+        s_test_load_resources.legacy_peak_bytes = peak_bytes;
+    }
 }
 
 /* ======================================================================== */
@@ -1668,10 +1704,6 @@ static void tp_emit_root(tp_sb *sb, const tp_project *p, const tp_pack_settings 
 /* save                                                                     */
 /* ======================================================================== */
 
-#define TP_PROJECT_JSON_MAX_NODES 1048576U
-#define TP_PROJECT_JSON_MAX_CONTAINER_ENTRIES 262144U
-#define TP_PROJECT_JSON_MAX_DEPTH 64U
-
 static const tp_project_json_limits TP_PROJECT_JSON_LIMITS = {
     (size_t)TP_IDENTITY_FILE_MAX_BYTES,
     (size_t)TP_PROJECT_JSON_MAX_NODES,
@@ -2213,6 +2245,15 @@ static bool tp_load_lookup_init(tp_load_lookup *lookup, int expected,
         return false;
     }
     lookup->capacity = capacity;
+    if (s_test_measure_load_resources) {
+        const size_t bytes = capacity * sizeof *lookup->slots;
+        size_t *peak = normalize_slashes
+                           ? &s_test_load_resources.source_index_peak_bytes
+                           : &s_test_load_resources.pending_index_peak_bytes;
+        if (bytes > *peak) {
+            *peak = bytes;
+        }
+    }
     return true;
 }
 

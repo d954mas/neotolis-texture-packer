@@ -96,6 +96,7 @@ void test_project_load_lookup_work_is_linear(void) {
 
     tp_project__test_load_lookup_work_reset();
     tp_project__test_id_validation_work_reset();
+    tp_project__test_load_resources_reset();
     tp_project *project = NULL;
     tp_error error = {{0}};
     TEST_ASSERT_EQUAL_INT_MESSAGE(
@@ -104,17 +105,45 @@ void test_project_load_lookup_work_is_linear(void) {
     const tp_project_load_lookup_work work =
         tp_project__test_load_lookup_work_take();
     const size_t id_probes = tp_project__test_id_validation_work_take();
+    const tp_project_load_resources resources =
+        tp_project__test_load_resources_take();
     TEST_ASSERT_LESS_OR_EQUAL_size_t(
         (size_t)RECORDS * 8U, work.source_path_comparisons);
     TEST_ASSERT_LESS_OR_EQUAL_size_t(
         (size_t)RECORDS * 8U, work.pending_name_comparisons);
     TEST_ASSERT_LESS_OR_EQUAL_size_t(
         ((size_t)RECORDS + 1U) * 8U, id_probes);
+    TEST_ASSERT_GREATER_THAN_size_t(0U, resources.source_index_peak_bytes);
+    TEST_ASSERT_GREATER_THAN_size_t(0U, resources.pending_index_peak_bytes);
+    TEST_ASSERT_GREATER_THAN_size_t(0U, resources.id_refs_bytes);
+    TEST_ASSERT_GREATER_THAN_size_t(0U, resources.id_index_bytes);
+    TEST_ASSERT_EQUAL_size_t(0U, resources.legacy_peak_bytes);
     TEST_ASSERT_EQUAL_INT(RECORDS, project->atlases[0].source_count);
     TEST_ASSERT_EQUAL_INT(RECORDS, project->atlases[0].sprite_count);
 
     tp_project_destroy(project);
     free(json);
+}
+
+void test_legacy_load_reports_bounded_synthesis_storage(void) {
+    static const char json[] =
+        "{\"version\":1,\"atlases\":[{\"name\":\"a\","
+        "\"sources\":[\"one\",\"two\"]}]}";
+    tp_project__test_load_resources_reset();
+    tp_project *project = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_project_load_buffer(json, sizeof json - 1U, &project, &error),
+        error.msg);
+    const tp_project_load_resources resources =
+        tp_project__test_load_resources_take();
+    TEST_ASSERT_GREATER_THAN_size_t(0U, resources.source_index_peak_bytes);
+    TEST_ASSERT_EQUAL_size_t(0U, resources.pending_index_peak_bytes);
+    TEST_ASSERT_GREATER_THAN_size_t(0U, resources.id_refs_bytes);
+    TEST_ASSERT_GREATER_THAN_size_t(0U, resources.id_index_bytes);
+    TEST_ASSERT_GREATER_THAN_size_t(0U, resources.legacy_peak_bytes);
+    tp_project_destroy(project);
 }
 
 static uint64_t test_load_hash(const char *key) {
@@ -1662,6 +1691,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_seed_default_target);
     RUN_TEST(test_project_load_lookup_work_is_linear);
     RUN_TEST(test_project_load_adversarial_hash_cluster_is_bounded);
+    RUN_TEST(test_legacy_load_reports_bounded_synthesis_storage);
     RUN_TEST(test_legacy_load_rejects_overlong_source_paths);
     RUN_TEST(test_v3_overlong_source_records_bypass_dedupe_index);
     RUN_TEST(test_json_admission_exact_limits_and_escaped_punctuation);

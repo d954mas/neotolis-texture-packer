@@ -404,8 +404,11 @@ target_compile_options(tp_demo_export PRIVATE -U_DLL)
 # authoritative core measurement path. Timing remains advisory; status, sample,
 # fixture, allocation and byte accounting fail closed.
 #   tp_bench_foundation [scratch_dir] [iterations] [recovery_ops]
-add_executable(tp_bench_foundation tp_bench_foundation.c)
-target_link_libraries(tp_bench_foundation PRIVATE tp_core nt_time)
+#   tp_bench_foundation --project-load-scaling [iterations]
+add_executable(tp_bench_foundation
+    tp_bench_foundation.c
+    tp_bench_project_load.c)
+target_link_libraries(tp_bench_foundation PRIVATE tp_core nt_time cjson)
 target_include_directories(tp_bench_foundation PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_compile_options(tp_bench_foundation PRIVATE -U_DLL)
 target_compile_definitions(tp_bench_foundation PRIVATE _CRT_SECURE_NO_WARNINGS)

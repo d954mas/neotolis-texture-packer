@@ -3,6 +3,7 @@
  * ctest. Setup and cleanup stay outside every timed region. */
 
 #include "tp_bench_support.h"
+#include "tp_bench_project_load.h"
 
 #include "tp_core/tp_diff.h"
 #include "tp_core/tp_journal.h"
@@ -149,6 +150,8 @@ static bool fixture_prepare(fixture *out, fixture_spec spec) {
     char *serialized = NULL;
     size_t serialized_len = 0U;
     if (tp_project_save_buffer(project, &serialized, &serialized_len, &err) != TP_STATUS_OK) {
+        (void)fprintf(stderr, "fixture serialization failed: %s error=%s\n",
+                      spec.name, err.msg);
         tp_project_destroy(project);
         return false;
     }
@@ -167,6 +170,14 @@ static bool fixture_prepare(fixture *out, fixture_spec spec) {
     out->project = project;
     out->serialized_bytes = serialized_len;
     return true;
+}
+
+static void fixture_free(fixture *f) {
+    if (!f) {
+        return;
+    }
+    tp_project_destroy(f->project);
+    memset(f, 0, sizeof *f);
 }
 
 static void print_fixture(const fixture *f, int warmups, int iterations, int recovery_ops) {
@@ -237,6 +248,29 @@ static void report_samples(const char *scenario, const fixture *f, tp_bench_samp
     (void)printf("scenario=%s fixture=%s p50_ms=%.6f p95_ms=%.6f accepted=%zu failed=%zu %s=%" PRIu64 "\n",
                  scenario, f->spec.name, p50, p95, samples->count, samples->failed,
                  count_a_name, count_a);
+}
+
+static int run_project_load_scaling(int iterations) {
+    const fixture_spec huge_spec = {"HUGE", 100, 2, 1000, 0, 0};
+    fixture huge;
+    if (!fixture_prepare(&huge, huge_spec)) {
+        return 1;
+    }
+    char *huge_json = NULL;
+    size_t huge_json_bytes = 0U;
+    tp_error err = {{0}};
+    if (tp_project_save_buffer(huge.project, &huge_json, &huge_json_bytes,
+                               &err) != TP_STATUS_OK) {
+        (void)fprintf(stderr, "shipped HUGE serialization failed: %s\n",
+                      err.msg);
+        fixture_free(&huge);
+        return 1;
+    }
+    fixture_free(&huge);
+    const int result = tp_bench_project_load_run(
+        iterations, huge_json, huge_json_bytes);
+    free(huge_json);
+    return result;
 }
 
 typedef struct recovery_read_probe {
@@ -1562,7 +1596,7 @@ static int run_recovery_scaling(int iterations) {
                                                  warmups, iterations) &&
                     bench_recovery_scaling_point(&f, "max_replay_ops_density", 0, 3,
                                                  warmups, iterations);
-    tp_project_destroy(f.project);
+    fixture_free(&f);
     if (!ok) {
         (void)fprintf(stderr, "recovery scaling benchmark failed\n");
         return 1;
@@ -1761,6 +1795,21 @@ static bool bench_save(const fixture *f, const char *scratch, int warmups, int i
 }
 
 int main(int argc, char **argv) {
+    if (argc > 1 && strcmp(argv[1], "--project-load-scaling") == 0) {
+        int scaling_iterations = 3;
+        if (argc > 3 ||
+            (argc == 3 && !parse_positive(argv[2], (int)TP_BENCH_MAX_SAMPLES,
+                                          &scaling_iterations))) {
+            (void)fprintf(
+                stderr,
+                "usage: tp_bench_foundation --project-load-scaling [iterations 1..%u]\n",
+                (unsigned)TP_BENCH_MAX_SAMPLES);
+            return 2;
+        }
+        (void)printf("tp_bench_foundation clock=monotonic source=nt_time_now "
+                     "mode=project_load_scaling thresholds=accounted-resource-hard-timing-advisory\n");
+        return run_project_load_scaling(scaling_iterations);
+    }
     if (argc > 1 && strcmp(argv[1], "--recovery-scaling") == 0) {
         int scaling_iterations = 3;
         if (argc > 3 ||
@@ -1805,7 +1854,7 @@ int main(int argc, char **argv) {
                   bench_history(&f, scratch, warmups, iterations, true) &&
                   bench_recovery(&f, scratch, warmups, iterations, recovery_ops) &&
                   bench_save(&f, scratch, warmups, iterations);
-        tp_project_destroy(f.project);
+        fixture_free(&f);
         if (!ok) {
             (void)fprintf(stderr, "benchmark scenario failed: %s\n", specs[i].name);
             return 1;

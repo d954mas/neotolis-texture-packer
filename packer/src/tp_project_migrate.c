@@ -288,7 +288,23 @@ static tp_status assign_legacy_scoped(tp_project *p, bool sources_only, const ch
     }
 
     tp_status st = oom ? tp_error_set(err, TP_STATUS_OOM, "%s: out of memory", who)
-                       : tp_legacy_assign(entries, n, NULL, NULL, err);
+                       : TP_STATUS_OK;
+    if (st == TP_STATUS_OK && tp_project__test_load_resources_enabled()) {
+        size_t tuple_bytes = 0U;
+        for (size_t i = 0U; i < n; i++) {
+            tuple_bytes += strlen(entries[i].tuple) + 1U;
+        }
+        size_t index_capacity = 16U;
+        while (index_capacity < n * 2U) {
+            index_capacity *= 2U;
+        }
+        tp_project__test_note_legacy_resources(
+            n * (sizeof *entries + sizeof *slots + sizeof *synth) +
+            tuple_bytes + index_capacity * sizeof(tp_id128));
+    }
+    if (st == TP_STATUS_OK) {
+        st = tp_legacy_assign(entries, n, NULL, NULL, err);
+    }
     if (st == TP_STATUS_OK) {
         for (size_t i = 0; i < n; i++) {
             *slots[i] = entries[i].id; /* commit synthetic IDs into the model */
@@ -613,6 +629,8 @@ static tp_status validate_unique_ids(const tp_project_id_ref *refs, size_t count
         return tp_error_set(err, TP_STATUS_OOM,
                             "tp_project_validate_ids: out of memory");
     }
+    tp_project__test_note_id_resources(count * sizeof *refs,
+                                       capacity * sizeof *slots);
 
     size_t duplicate_first = SIZE_MAX;
     size_t duplicate_second = SIZE_MAX;
