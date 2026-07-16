@@ -56,6 +56,8 @@ typedef struct gui_pack_ref_index_work {
 } gui_pack_ref_index_work;
 void gui_pack_ref_index_work_reset(void);
 gui_pack_ref_index_work gui_pack_ref_index_work_get(void);
+void gui_pack_preview_diff_work_reset(void);
+uint64_t gui_pack_preview_diff_rebuilds(void);
 #endif
 
 /* Exports every ENABLED target of atlas `atlas_index` through a typed session job. Returns true on success

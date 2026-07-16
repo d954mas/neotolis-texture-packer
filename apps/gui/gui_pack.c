@@ -58,13 +58,34 @@ typedef struct {
 } preview_slot;
 static preview_slot s_preview = {.atlas_index = -1};
 
+/* One active canvas target needs one value cache. The key is self-validating;
+ * no mutator owns an invalidation callback. */
+typedef struct {
+    const tp_exporter *exporter;
+    tp_id128 atlas_id;
+    uint64_t model_generation;
+    uint64_t snapshot_lifetime;
+    int count;
+    char chip[128];
+    char tip[512];
+    bool valid;
+} preview_diff_cache;
+static preview_diff_cache s_preview_diff;
+
 #ifdef NTPACKER_GUI_SELFTEST
 static gui_pack_ref_index_work s_ref_index_work;
+static uint64_t s_preview_diff_rebuilds;
 void gui_pack_ref_index_work_reset(void) {
     memset(&s_ref_index_work, 0, sizeof s_ref_index_work);
 }
 gui_pack_ref_index_work gui_pack_ref_index_work_get(void) {
     return s_ref_index_work;
+}
+void gui_pack_preview_diff_work_reset(void) {
+    s_preview_diff_rebuilds = 0U;
+}
+uint64_t gui_pack_preview_diff_rebuilds(void) {
+    return s_preview_diff_rebuilds;
 }
 #endif
 // #endregion
@@ -713,11 +734,33 @@ int gui_pack_preview_diff(int atlas_index, const char *exporter_id, char *chip, 
     if (!atlas) {
         return 0;
     }
+    const uint64_t model_generation =
+        tp_session_snapshot_model_generation(snapshot);
+    const uint64_t snapshot_lifetime =
+        gui_project_snapshot_lifetime_generation();
+    if (s_preview_diff.valid && s_preview_diff.exporter == e &&
+        tp_id128_eq(s_preview_diff.atlas_id, atlas->id) &&
+        s_preview_diff.model_generation == model_generation &&
+        s_preview_diff.snapshot_lifetime == snapshot_lifetime) {
+        if (chip && chip_cap) {
+            (void)snprintf(chip, chip_cap, "%s", s_preview_diff.chip);
+        }
+        if (tip && tip_cap) {
+            (void)snprintf(tip, tip_cap, "%s", s_preview_diff.tip);
+        }
+        return s_preview_diff.count;
+    }
+    s_preview_diff.valid = false;
+    s_preview_diff.chip[0] = '\0';
+    s_preview_diff.tip[0] = '\0';
     /* One core enumeration for both frontends (review §3.1); NULL prep = project-only
      * preview (no alias/multipage axes -- those need the packed result). */
     tp_export_notices nz;
     tp_export_notices_init(&nz);
     tp_error te = {{0}};
+#ifdef NTPACKER_GUI_SELFTEST
+    s_preview_diff_rebuilds++;
+#endif
     if (tp_export_predict_loss_snapshot(snapshot, atlas->id, &e->caps, exporter_id,
                                         NULL, &nz, &te) != TP_STATUS_OK) {
         tp_export_notices_free(&nz);
@@ -735,14 +778,18 @@ int gui_pack_preview_diff(int atlas_index, const char *exporter_id, char *chip, 
         if (!preview_field_phrases(nz.items[i].field_id, &short_tok, &long_line)) {
             continue;
         }
-        if (chip && clen < chip_cap) {
-            const int w_ = snprintf(chip + clen, chip_cap - clen, "%s%s", n > 0 ? ", " : "", short_tok);
+        if (clen < sizeof s_preview_diff.chip) {
+            const int w_ = snprintf(s_preview_diff.chip + clen,
+                                    sizeof s_preview_diff.chip - clen,
+                                    "%s%s", n > 0 ? ", " : "", short_tok);
             if (w_ > 0) {
                 clen += (size_t)w_;
             }
         }
-        if (tip && tlen < tip_cap) {
-            const int w2_ = snprintf(tip + tlen, tip_cap - tlen, "%s%s", n > 0 ? "\n" : "", long_line);
+        if (tlen < sizeof s_preview_diff.tip) {
+            const int w2_ = snprintf(s_preview_diff.tip + tlen,
+                                     sizeof s_preview_diff.tip - tlen,
+                                     "%s%s", n > 0 ? "\n" : "", long_line);
             if (w2_ > 0) {
                 tlen += (size_t)w2_;
             }
@@ -750,6 +797,18 @@ int gui_pack_preview_diff(int atlas_index, const char *exporter_id, char *chip, 
         n++;
     }
     tp_export_notices_free(&nz);
+    s_preview_diff.exporter = e;
+    s_preview_diff.atlas_id = atlas->id;
+    s_preview_diff.model_generation = model_generation;
+    s_preview_diff.snapshot_lifetime = snapshot_lifetime;
+    s_preview_diff.count = n;
+    s_preview_diff.valid = true;
+    if (chip && chip_cap) {
+        (void)snprintf(chip, chip_cap, "%s", s_preview_diff.chip);
+    }
+    if (tip && tip_cap) {
+        (void)snprintf(tip, tip_cap, "%s", s_preview_diff.tip);
+    }
     return n;
 }
 // #endregion

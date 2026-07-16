@@ -4000,9 +4000,32 @@ void selftest_pre_frame(void) {
             /* (d) degradation summary non-empty for defold */
             char chip[96] = {0};
             char tip[224] = {0};
+            gui_pack_preview_diff_work_reset();
             const int nd = gui_pack_preview_diff(0, "defold", chip, sizeof chip, tip, sizeof tip);
+            char chip_again[96] = {0};
+            char tip_again[224] = {0};
+            const int nd_again = gui_pack_preview_diff(
+                0, "defold", chip_again, sizeof chip_again, tip_again,
+                sizeof tip_again);
             nt_log_info("SELFTEST: preview defold degradation nd=%d chip='%s'", nd, chip);
             NT_ASSERT(nd > 0 && chip[0] != '\0' && "SELFTEST preview: defold degradation summary non-empty");
+            NT_ASSERT(nd_again == nd && strcmp(chip_again, chip) == 0 &&
+                      strcmp(tip_again, tip) == 0 &&
+                      gui_pack_preview_diff_rebuilds() == 1U &&
+                      "SELFTEST preview: unchanged degradation diff is cached");
+            NT_ASSERT(gui_project_set_atlas_name(0, "preview-cache-refresh") &&
+                      "SELFTEST preview: cache invalidation edit commits");
+            (void)gui_pack_preview_diff(0, "defold", chip_again,
+                                        sizeof chip_again, tip_again,
+                                        sizeof tip_again);
+            NT_ASSERT(gui_pack_preview_diff_rebuilds() == 2U &&
+                      "SELFTEST preview: model generation invalidates degradation cache");
+            const int full_diff = gui_pack_preview_diff(
+                0, TP_EXPORTER_ID_JSON_NEOTOLIS, chip_again,
+                sizeof chip_again, tip_again, sizeof tip_again);
+            NT_ASSERT(full_diff == 0 &&
+                      gui_pack_preview_diff_rebuilds() == 3U &&
+                      "SELFTEST preview: exporter identity invalidates degradation cache");
 
             gui_pack_preview_clear();
             preview_target_reset();
