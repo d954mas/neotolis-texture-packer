@@ -1504,6 +1504,28 @@ const tp_snapshot_frame *tp_session_snapshot_animation_frame_at(const tp_session
     return NULL;
 }
 
+const tp_snapshot_frame *tp_session_snapshot_animation_frames(
+    const tp_session_snapshot *snapshot, tp_id128 atlas_id,
+    tp_id128 animation_id, int *out_count) {
+    if (out_count) {
+        *out_count = 0;
+    }
+    const tp_snapshot_atlas_storage *atlas = atlas_storage(snapshot, atlas_id);
+    if (!atlas || tp_id128_is_nil(animation_id)) {
+        return NULL;
+    }
+    for (int i = 0; i < atlas->dto.animation_count; ++i) {
+        if (tp_id128_eq(atlas->animations[i].id, animation_id)) {
+            const int count = atlas->animations[i].frame_count;
+            if (out_count) {
+                *out_count = count;
+            }
+            return count > 0 ? &atlas->frames[atlas->frame_offsets[i]] : NULL;
+        }
+    }
+    return NULL;
+}
+
 const tp_snapshot_target *tp_session_snapshot_target_at(const tp_session_snapshot *snapshot,
                                                         tp_id128 atlas_id, int index) {
     const tp_snapshot_atlas_storage *atlas = atlas_storage(snapshot, atlas_id);

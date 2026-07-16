@@ -154,13 +154,24 @@ bool gui_animation_edit_matches(tp_id128 atlas_id, tp_id128 animation_id);
 void commit_sprite_rename(void);
 
 /* --- animation ops + preview player (ux.md §3.7b) --- */
-const tp_snapshot_animation *current_anim(void); /* selected snapshot animation, or NULL */
+const tp_snapshot_animation *preview_animation(void); /* active stable-ID target, or NULL */
 int create_animation_from_selection(void);
 void add_selection_frames_to_anim(int anim_index);
 void open_preview(int anim_index);
 void preview_toggle_play(void);
 void preview_step(int delta);
 void update_preview(void);
+
+#ifdef NTPACKER_GUI_SELFTEST
+typedef struct gui_preview_frame_work {
+    uint64_t rebuilds;
+    uint64_t frame_span_lookups;
+    uint64_t frame_iterations;
+    uint64_t realloc_calls;
+} gui_preview_frame_work;
+void gui_preview_frame_work_reset(void);
+gui_preview_frame_work gui_preview_frame_work_get(void);
+#endif
 
 #ifdef __cplusplus
 }

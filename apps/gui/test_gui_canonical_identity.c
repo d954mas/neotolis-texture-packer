@@ -4,6 +4,7 @@
 
 #ifdef _WIN32
 #include <direct.h>
+#include <windows.h>
 #define test_rmdir _rmdir
 #else
 #include <unistd.h>
@@ -216,10 +217,15 @@ void test_preview_result_rejects_source_refresh_after_job_capture(void) {
 
     gui_pack_result_info info;
     gui_pack_done done = GUI_PACK_DONE_NONE;
-    for (int i = 0; i < 100000 && done == GUI_PACK_DONE_NONE; ++i) {
+    for (int i = 0; i < 5000 && done == GUI_PACK_DONE_NONE; ++i) {
         done = gui_pack_poll(&info);
         if (done == GUI_PACK_DONE_NONE) {
-            thrd_yield();
+#ifdef _WIN32
+            Sleep(1);
+#else
+            const struct timespec poll_pause = {0, 1000000L};
+            (void)thrd_sleep(&poll_pause, NULL);
+#endif
         }
     }
     TEST_ASSERT_EQUAL_INT(GUI_PACK_DONE_PREVIEW_OK, done);

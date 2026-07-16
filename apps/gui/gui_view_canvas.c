@@ -327,8 +327,8 @@ static void declare_canvas_strip(nt_ui_context_t *ctx, bool atlas) {
 /* Animation preview player in the canvas area (ux.md §3.7b): a control strip (play/pause, frame step,
  * "cur/total", Close) over the ANIM-mode custom element, or a "Pack to preview" hint without a result. */
 static void declare_canvas_preview(nt_ui_context_t *ctx) {
-    const tp_snapshot_animation *an = current_anim();
-    const bool have = (an != NULL && gui_pack_result(s_sel_atlas) != NULL && s_preview_frame_count > 0);
+    const tp_snapshot_animation *an = preview_animation();
+    const bool have = an != NULL && s_preview_frame_count > 0;
     const float cap_w = s_content_w - s_left_panel_w - s_right_panel_w - S(70.0F);
     char caption[192];
     if (an) {

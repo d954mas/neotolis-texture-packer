@@ -19,13 +19,14 @@
 
 #include "app/nt_app.h"
 
+#include <limits.h>
 #include <math.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* Initial capacity of the preview resolved-frame scratch (update_preview); grows past it (P1 fix). */
+/* Initial capacity of the grow-only active-preview frame map. */
 #define PREVIEW_IDXS_INIT_CAP 512
 
 /* deferred side effects (dialogs + model mutations), applied at the top of the next frame */
@@ -48,6 +49,29 @@ static pending_create_animation s_pending_create_anim;
 static bool s_pending_open_preview;
 static gui_animation_ref s_pending_open_preview_ref;
 static gui_animation_ref s_preview_animation_ref;
+/* Presentation-only mapping from the active stable animation to one Pack result. */
+typedef struct preview_frame_cache {
+    int *indices;
+    int capacity;
+    int count;
+    int ref_w;
+    int ref_h;
+    tp_id128 atlas_id;
+    tp_id128 animation_id;
+    uint64_t model_generation;
+    uint64_t pack_result_version;
+    bool valid;
+} preview_frame_cache;
+static preview_frame_cache s_preview_frames;
+#ifdef NTPACKER_GUI_SELFTEST
+static gui_preview_frame_work s_preview_frame_work;
+void gui_preview_frame_work_reset(void) {
+    memset(&s_preview_frame_work, 0, sizeof s_preview_frame_work);
+}
+gui_preview_frame_work gui_preview_frame_work_get(void) {
+    return s_preview_frame_work;
+}
+#endif
 bool s_pending_remove_atlas;
 tp_id128 s_pending_remove_atlas_id;
 int64_t s_pending_remove_atlas_revision;
@@ -777,14 +801,26 @@ void clamp_selection(void) {
 // #endregion
 
 // #region animation + preview actions (ux.md §3.7b)
-/* The selected animation of the selected atlas, or NULL. */
-const tp_snapshot_animation *current_anim(void) {
+const tp_snapshot_animation *preview_animation(void) {
     const tp_session_snapshot *snapshot = gui_project_snapshot();
-    const tp_snapshot_atlas *atlas = snapshot
-                                         ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas)
-                                         : NULL;
-    return atlas ? tp_session_snapshot_animation_at(snapshot, atlas->id, s_sel_anim)
-                 : NULL;
+    return s_preview_active && snapshot
+               ? tp_session_snapshot_animation_by_id(
+                     snapshot, s_preview_animation_ref.atlas_id,
+                     s_preview_animation_ref.animation_id)
+               : NULL;
+}
+
+static int snapshot_atlas_index_by_id(const tp_session_snapshot *snapshot,
+                                      tp_id128 atlas_id) {
+    const int count = snapshot ? tp_session_snapshot_atlas_count(snapshot) : 0;
+    for (int i = 0; i < count; ++i) {
+        const tp_snapshot_atlas *atlas =
+            tp_session_snapshot_atlas_at(snapshot, i);
+        if (atlas && tp_id128_eq(atlas->id, atlas_id)) {
+            return i;
+        }
+    }
+    return -1;
 }
 
 /* Copies the multi-selection into the shared buffers, natural-sorted; returns the count (0 on OOM,
@@ -988,12 +1024,87 @@ void preview_toggle_play(void) {
     }
 }
 
+static bool preview_frames_reserve(int needed) {
+    if (needed <= s_preview_frames.capacity) {
+        return true;
+    }
+    int capacity = s_preview_frames.capacity
+                       ? s_preview_frames.capacity
+                       : PREVIEW_IDXS_INIT_CAP;
+    while (capacity < needed) {
+        if (capacity > INT_MAX / 2) {
+            capacity = needed;
+            break;
+        }
+        capacity *= 2;
+    }
+#ifdef NTPACKER_GUI_SELFTEST
+    s_preview_frame_work.realloc_calls++;
+#endif
+    int *grown = realloc(s_preview_frames.indices,
+                         (size_t)capacity * sizeof *grown);
+    if (!grown) {
+        set_status_ex(STATUS_ERROR, "Out of memory: preview frames truncated.");
+        return false;
+    }
+    s_preview_frames.indices = grown;
+    s_preview_frames.capacity = capacity;
+    return true;
+}
+
+static void preview_frames_rebuild(const tp_session_snapshot *snapshot,
+                                   int atlas_index,
+                                   const tp_snapshot_animation *animation,
+                                   const tp_result *result,
+                                   uint64_t result_version) {
+#ifdef NTPACKER_GUI_SELFTEST
+    s_preview_frame_work.rebuilds++;
+    s_preview_frame_work.frame_span_lookups++;
+#endif
+    int frame_count = 0;
+    const tp_snapshot_frame *frames = tp_session_snapshot_animation_frames(
+        snapshot, s_preview_animation_ref.atlas_id,
+        s_preview_animation_ref.animation_id, &frame_count);
+    const bool complete = frame_count == animation->frame_count &&
+                          preview_frames_reserve(frame_count);
+    int count = 0;
+    int ref_w = 1;
+    int ref_h = 1;
+    for (int i = 0; i < frame_count && count < s_preview_frames.capacity; ++i) {
+#ifdef NTPACKER_GUI_SELFTEST
+        s_preview_frame_work.frame_iterations++;
+#endif
+        const tp_snapshot_frame *frame = &frames[i];
+        const int sprite_index = gui_pack_find_sprite_ref(
+            atlas_index, frame->source_id, frame->source_key);
+        if (sprite_index < 0 || sprite_index >= result->sprite_count) {
+            continue;
+        }
+        s_preview_frames.indices[count++] = sprite_index;
+        if (result->sprites[sprite_index].sourceSize.w > ref_w) {
+            ref_w = result->sprites[sprite_index].sourceSize.w;
+        }
+        if (result->sprites[sprite_index].sourceSize.h > ref_h) {
+            ref_h = result->sprites[sprite_index].sourceSize.h;
+        }
+    }
+    s_preview_frames.atlas_id = s_preview_animation_ref.atlas_id;
+    s_preview_frames.animation_id = s_preview_animation_ref.animation_id;
+    s_preview_frames.model_generation =
+        tp_session_snapshot_model_generation(snapshot);
+    s_preview_frames.pack_result_version = result_version;
+    s_preview_frames.count = count;
+    s_preview_frames.ref_w = ref_w;
+    s_preview_frames.ref_h = ref_h;
+    s_preview_frames.valid = complete;
+}
+
 /* Nudges the preview timeline by `delta` frame-ticks (pauses first). */
 void preview_step(int delta) {
     if (!s_preview_active) {
         return;
     }
-    const tp_snapshot_animation *an = current_anim();
+    const tp_snapshot_animation *an = preview_animation();
     const float fps = (an && an->fps >= 1.0F) ? an->fps : 1.0F;
     s_preview_playing = false;
     s_preview_finished = false;
@@ -1011,55 +1122,34 @@ void update_preview(void) {
     if (!s_preview_active) {
         return;
     }
-    const tp_snapshot_animation *an = current_anim();
-    const tp_result *pr = gui_pack_result(s_sel_atlas);
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_animation *an = snapshot
+                                          ? tp_session_snapshot_animation_by_id(
+                                                snapshot,
+                                                s_preview_animation_ref.atlas_id,
+                                                s_preview_animation_ref.animation_id)
+                                          : NULL;
+    const int atlas_index = snapshot_atlas_index_by_id(
+        snapshot, s_preview_animation_ref.atlas_id);
+    const tp_result *pr = gui_pack_result(atlas_index);
+    const uint64_t result_version = gui_pack_result_version(atlas_index);
     s_canvas.anim_sprite = -1;
     s_preview_frame_count = 0;
-    if (!an || !pr) {
+    if (!an || !pr || result_version == 0U) {
         return; /* declare_canvas draws the "Pack to preview" hint */
     }
-    /* Resolved-frame scratch: grows to hold every frame (realloc-keep-capacity; runs each frame while
-     * previewing, so it never mallocs once large enough). The old fixed idxs[512] silently dropped
-     * frames past 512 (P1 fix, step 7). On OOM we keep the old capacity and the loop truncates loudly. */
-    static int *idxs;
-    static int idxs_cap;
-    if (an->frame_count > idxs_cap) {
-        int newcap = idxs_cap ? idxs_cap : PREVIEW_IDXS_INIT_CAP;
-        while (newcap < an->frame_count) {
-            newcap *= 2;
-        }
-        int *grown = realloc(idxs, (size_t)newcap * sizeof *idxs);
-        if (grown) {
-            idxs = grown;
-            idxs_cap = newcap;
-        } else {
-            set_status_ex(STATUS_ERROR, "Out of memory: preview frames truncated.");
-        }
+    const uint64_t model_generation =
+        tp_session_snapshot_model_generation(snapshot);
+    if (!s_preview_frames.valid ||
+        !tp_id128_eq(s_preview_frames.atlas_id,
+                     s_preview_animation_ref.atlas_id) ||
+        !tp_id128_eq(s_preview_frames.animation_id,
+                     s_preview_animation_ref.animation_id) ||
+        s_preview_frames.model_generation != model_generation ||
+        s_preview_frames.pack_result_version != result_version) {
+        preview_frames_rebuild(snapshot, atlas_index, an, pr, result_version);
     }
-    int n = 0;
-    int rw = 1;
-    int rh = 1;
-    for (int i = 0; i < an->frame_count && n < idxs_cap; i++) {
-        const tp_session_snapshot *snapshot = gui_project_snapshot();
-        const tp_snapshot_atlas *atlas = snapshot ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas) : NULL;
-        const tp_snapshot_frame *frame = atlas
-                                             ? tp_session_snapshot_animation_frame_at(
-                                                   snapshot, atlas->id, an->id, i)
-                                             : NULL;
-        const int si = frame ? gui_pack_find_sprite_ref(
-                                   s_sel_atlas, frame->source_id,
-                                   frame->source_key)
-                             : -1;
-        if (si >= 0 && si < pr->sprite_count) {
-            idxs[n++] = si;
-            if (pr->sprites[si].sourceSize.w > rw) {
-                rw = pr->sprites[si].sourceSize.w;
-            }
-            if (pr->sprites[si].sourceSize.h > rh) {
-                rh = pr->sprites[si].sourceSize.h;
-            }
-        }
-    }
+    const int n = s_preview_frames.count;
     s_preview_frame_count = n;
     if (n == 0) {
         return;
@@ -1082,9 +1172,9 @@ void update_preview(void) {
     }
     s_preview_cur = cur;
     s_canvas.mode = GUI_CANVAS_ANIM;
-    s_canvas.anim_sprite = idxs[cur];
-    s_canvas.anim_ref_w = rw;
-    s_canvas.anim_ref_h = rh;
+    s_canvas.anim_sprite = s_preview_frames.indices[cur];
+    s_canvas.anim_ref_w = s_preview_frames.ref_w;
+    s_canvas.anim_ref_h = s_preview_frames.ref_h;
     s_canvas.anim_flip_h = an->flip_h;
     s_canvas.anim_flip_v = an->flip_v;
 }

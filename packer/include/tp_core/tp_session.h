@@ -238,6 +238,11 @@ const tp_snapshot_animation *tp_session_snapshot_animation_by_id(const tp_sessio
 const tp_snapshot_frame *tp_session_snapshot_animation_frame_at(const tp_session_snapshot *snapshot,
                                                                 tp_id128 atlas_id, tp_id128 animation_id,
                                                                 int index);
+/* Returns the snapshot-owned contiguous frame range for one stable animation.
+ * `out_count` is set to zero when the animation is absent. */
+const tp_snapshot_frame *tp_session_snapshot_animation_frames(
+    const tp_session_snapshot *snapshot, tp_id128 atlas_id,
+    tp_id128 animation_id, int *out_count);
 const tp_snapshot_target *tp_session_snapshot_target_at(const tp_session_snapshot *snapshot,
                                                         tp_id128 atlas_id, int index);
 const tp_snapshot_target *tp_session_snapshot_target_by_id(const tp_session_snapshot *snapshot,

@@ -37,6 +37,8 @@ bool gui_pack_atlas(int atlas_index, double *out_ms, char *err, size_t err_cap, 
 /* The last successful result for `atlas_index`, or NULL if never packed. A
  * failed Pack leaves it intact; gui_project reports freshness separately. */
 const tp_result *gui_pack_result(int atlas_index);
+/* Changes whenever a successful Pack publishes a new result into this atlas slot. */
+uint64_t gui_pack_result_version(int atlas_index);
 
 /* Canonical lookup used by rows and animation frames. Project-built pack inputs
  * use a collision-free internal name derived from {source_id, source_key}; display

@@ -644,6 +644,13 @@ void test_snapshot_has_id_addressed_nested_dtos(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_sprite(atlas, "hero", &sprite));
     sprite->rename = test_dup("hero-final");
     tp_project_anim *animation = NULL;
+    for (int i = 0; i < 32; ++i) {
+        char name[32];
+        (void)snprintf(name, sizeof name, "sibling-%d", i);
+        TEST_ASSERT_EQUAL_INT(
+            TP_STATUS_OK,
+            tp_project_atlas_add_animation(atlas, name, &animation));
+    }
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_animation(atlas, "walk", &animation));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(animation, "hero"));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
@@ -657,11 +664,11 @@ void test_snapshot_has_id_addressed_nested_dtos(void) {
     sprite = &atlas->sprites[0];
     sprite->source_ref = atlas->sources[0].id;
     sprite->src_key = test_dup("hero.png");
-    animation = &atlas->animations[0];
+    animation = &atlas->animations[atlas->animation_count - 1];
     animation->frames[0].source_ref = atlas->sources[0].id;
     animation->frames[0].src_key = test_dup("hero.png");
     const tp_id128 source_id = atlas->sources[0].id;
-    const tp_id128 animation_id = atlas->animations[0].id;
+    const tp_id128 animation_id = animation->id;
     const tp_id128 target_id = atlas->targets[0].id;
 
     tp_session *session = NULL;
@@ -697,6 +704,11 @@ void test_snapshot_has_id_addressed_nested_dtos(void) {
     TEST_ASSERT_NOT_NULL(frame);
     TEST_ASSERT_EQUAL_STRING("hero.png", frame->source_key);
     TEST_ASSERT_TRUE(tp_id128_eq(frame->sprite_id, sprite_dto->id));
+    int frame_count = -1;
+    const tp_snapshot_frame *frames = tp_session_snapshot_animation_frames(
+        snapshot, atlas_dto->id, animation_dto->id, &frame_count);
+    TEST_ASSERT_EQUAL_INT(1, frame_count);
+    TEST_ASSERT_EQUAL_PTR(frame, frames);
     const tp_snapshot_target *target = tp_session_snapshot_target_by_id(
         snapshot, atlas_dto->id, target_id);
     TEST_ASSERT_NOT_NULL(target);

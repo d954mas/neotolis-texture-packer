@@ -37,10 +37,12 @@ typedef struct {
     pack_ref_entry *ref_index; /* derived immutable canonical-name -> result index */
     size_t ref_index_cap;
     tp_id128 atlas_id;
+    uint64_t version;
     bool valid;
 } pack_slot;
 
 static pack_slot s_slots[GUI_PACK_MAX_ATLASES];
+static uint64_t s_next_result_version;
 static char s_work_dir[1024];
 
 /* Export-target preview (EXP-PREVIEW): ONE arena-owned result, separate from the session slots. Keyed
@@ -162,6 +164,14 @@ static void pack_slot_clear(pack_slot *slot) {
         tp_arena_destroy(slot->arena);
     }
     memset(slot, 0, sizeof *slot);
+}
+
+static uint64_t next_result_version(void) {
+    s_next_result_version++;
+    if (s_next_result_version == 0U) {
+        s_next_result_version = 1U;
+    }
+    return s_next_result_version;
 }
 
 static int current_atlas_index(tp_id128 atlas_id) {
@@ -452,6 +462,7 @@ gui_pack_done gui_pack_poll(gui_pack_result_info *out) {
                 slot->ref_index = ref_index;
                 slot->ref_index_cap = ref_index_cap;
                 slot->atlas_id = result.pack.atlas_id;
+                slot->version = next_result_version();
                 slot->valid = true;
                 result.pack.arena = NULL;
                 if (out) {
@@ -837,6 +848,11 @@ void gui_pack_shutdown(void) {
 const tp_result *gui_pack_result(int atlas_index) {
     const pack_slot *slot = pack_slot_for_atlas_index(atlas_index);
     return slot ? slot->result : NULL;
+}
+
+uint64_t gui_pack_result_version(int atlas_index) {
+    const pack_slot *slot = pack_slot_for_atlas_index(atlas_index);
+    return slot ? slot->version : 0U;
 }
 
 bool gui_pack_sprite_matches_ref(int atlas_index, int sprite_index,

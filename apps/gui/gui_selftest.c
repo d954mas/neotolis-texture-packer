@@ -1299,8 +1299,15 @@ void run_selftest(void) {
         }
         nt_log_info("SELFTEST: caps preview select-all=%d (want %d)", s_multi_sel_count, M);
         NT_ASSERT(s_multi_sel_count == M && "caps: select-all resolves M leaf rows");
+        enum { PREVIEW_SIBLINGS = 32 };
+        for (int i = 0; i < PREVIEW_SIBLINGS; ++i) {
+            NT_ASSERT(selftest_create_animation_at(0, "preview_sibling", NULL,
+                                                   0) >= 0 &&
+                      "caps: create sibling animation for lookup bound");
+        }
         const int panim = create_animation_from_selection();
         NT_ASSERT(panim >= 0 && "caps: animation from M frames");
+        gui_preview_frame_work_reset();
         open_preview(panim);
         update_preview();
         nt_log_info("SELFTEST: caps preview frames resolved=%d (want %d; old cap 512)", s_preview_frame_count, M);
@@ -1322,6 +1329,65 @@ void run_selftest(void) {
                   ref_work.build_probes + ref_work.lookup_probes <=
                       ref_work_bound &&
                   "canonical preview resolution is O(S+F), not O(S*F)");
+        const gui_preview_frame_work first_preview_work =
+            gui_preview_frame_work_get();
+        update_preview();
+        const gui_preview_frame_work unchanged_preview_work =
+            gui_preview_frame_work_get();
+        NT_ASSERT(first_preview_work.rebuilds == 1U &&
+                  first_preview_work.frame_span_lookups == 1U &&
+                  first_preview_work.frame_iterations == (uint64_t)M &&
+                  first_preview_work.realloc_calls <= 1U &&
+                  unchanged_preview_work.rebuilds == first_preview_work.rebuilds &&
+                  unchanged_preview_work.frame_span_lookups ==
+                      first_preview_work.frame_span_lookups &&
+                  unchanged_preview_work.frame_iterations ==
+                      first_preview_work.frame_iterations &&
+                  unchanged_preview_work.realloc_calls ==
+                      first_preview_work.realloc_calls &&
+                  gui_pack_ref_index_work_get().lookup_calls == (uint64_t)M &&
+                  "unchanged animation preview reuses the resolved frame map");
+
+        NT_ASSERT(gui_project_set_anim_fps(0, panim, 24.0F) &&
+                  "preview cache model-key edit commits");
+        NT_ASSERT(gui_project_flush_pending() &&
+                  "preview cache model-key edit flushes");
+        update_preview();
+        gui_preview_frame_work changed_preview_work =
+            gui_preview_frame_work_get();
+        NT_ASSERT(changed_preview_work.rebuilds == 2U &&
+                  changed_preview_work.frame_span_lookups == 2U &&
+                  changed_preview_work.frame_iterations == (uint64_t)(2 * M) &&
+                  "animation edit rebuilds the preview frame map once");
+
+        NT_ASSERT(gui_pack_atlas(0, &cms, cerr, sizeof cerr, cnote,
+                                 sizeof cnote) &&
+                  "successful repack publishes a new preview input");
+        update_preview();
+        changed_preview_work = gui_preview_frame_work_get();
+        NT_ASSERT(changed_preview_work.rebuilds == 3U &&
+                  changed_preview_work.frame_span_lookups == 3U &&
+                  changed_preview_work.frame_iterations == (uint64_t)(3 * M) &&
+                  "new Pack result rebuilds the preview frame map once");
+
+        const tp_snapshot_animation *preview_before_shift =
+            preview_animation();
+        NT_ASSERT(preview_before_shift &&
+                  "active preview fixture has a stable target");
+        const tp_id128 preview_id_before_shift = preview_before_shift->id;
+        NT_ASSERT(selftest_remove_animation_named_at(0, "preview_sibling") &&
+                  "active preview fixture removes a preceding animation");
+        update_preview();
+        const tp_snapshot_animation *preview_after_shift = preview_animation();
+        changed_preview_work = gui_preview_frame_work_get();
+        NT_ASSERT(preview_after_shift &&
+                  tp_id128_eq(preview_after_shift->id,
+                              preview_id_before_shift) &&
+                  s_preview_frame_count == M &&
+                  changed_preview_work.rebuilds == 4U &&
+                  changed_preview_work.frame_span_lookups == 4U &&
+                  changed_preview_work.frame_iterations == (uint64_t)(4 * M) &&
+                  "active preview keeps the stable target and frame map after collection shift");
         preview_stop();
         multi_sel_clear();
 
@@ -1580,7 +1646,15 @@ void run_selftest(void) {
                   tp_id128_eq(shift_selected->id, preview_ref.animation_id) &&
                   "M2: deferred preview follows the same animation after index shift");
 
-        gui_request_remove_animation(s_sel_anim);
+        s_sel_anim = -1;
+        const tp_snapshot_animation *stable_preview = preview_animation();
+        NT_ASSERT(stable_preview &&
+                  tp_id128_eq(stable_preview->id, preview_ref.animation_id) &&
+                  "M2: active preview does not depend on numeric selection");
+        const gui_animation_ref remove_preview_ref = {
+            preview_ref.atlas_id, preview_ref.animation_id,
+            tp_session_snapshot_revision(gui_project_snapshot())};
+        gui_request_remove_animation_ref(&remove_preview_ref);
         s_sel_anim = 0; /* stale numeric selection must not define preview ownership */
         apply_pending();
         NT_ASSERT(!s_preview_active &&
