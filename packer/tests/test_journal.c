@@ -3244,6 +3244,41 @@ void test_metadata_fingerprint_roundtrip_and_compaction(void) {
     tp_model_destroy(m2);
 }
 
+void test_recovery_metadata_oom_cleans_materialized_descriptors(void) {
+    const tp_id128 key = key_of(0x91);
+    tp_journal_io io;
+    tp_model *model = model_with_journal(key, &io);
+    tp_error err = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_journal_set_metadata(model->journal, 1700000001,
+                                "/foo/oom.ntpacker", "oom", &err));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        commit_rename(model, "91000000000000000000000000000001", 0,
+                      "renamed"));
+    size_t length = 0U;
+    uint8_t *bytes = snapshot_io(io, &length);
+    tp_model_destroy(model);
+
+    tp_journal *journal = tp_journal_create(io_from_bytes(bytes, length), key);
+    free(bytes);
+    TEST_ASSERT_NOT_NULL(journal);
+    tp_journal_recovery recovery;
+    memset(&recovery, 0, sizeof recovery);
+    tp_journal__test_fail_next_metadata_materialize();
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OOM,
+                          tp_journal_recover(journal, &recovery, &err));
+    TEST_ASSERT_NULL(recovery.ops);
+    TEST_ASSERT_EQUAL_UINT64(0U, recovery.op_count);
+    TEST_ASSERT_NULL(recovery.snapshot);
+    TEST_ASSERT_NULL(recovery._raw_record_buffer);
+    TEST_ASSERT_FALSE(recovery.has_metadata);
+
+    tp_journal_recovery_free(&recovery);
+    tp_journal_destroy(journal);
+}
+
 /* A relative source key accepted after a checkpoint must be journaled with the
  * same project-relative identity that apply stores. Recovery loads a self-contained
  * checkpoint (no project_dir), so replay proves that the durable payload is already
@@ -4078,6 +4113,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_journal_redo_recovers_redone_state);
     /* R5a: metadata record + peek API + BAD_HEADER split */
     RUN_TEST(test_metadata_roundtrip);
+    RUN_TEST(test_recovery_metadata_oom_cleans_materialized_descriptors);
     RUN_TEST(test_metadata_fingerprint_roundtrip_and_compaction);
     RUN_TEST(test_metadata_empty_path);
     RUN_TEST(test_metadata_last_wins);

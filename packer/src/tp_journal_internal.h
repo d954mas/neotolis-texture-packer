@@ -145,6 +145,8 @@ void tp_journal__test_recovery_copy_stats(
 void tp_journal__test_set_record_limit(size_t limit);
 /* Zero restores TP_JOURNAL_MAX_FILE_BYTES. */
 void tp_journal__test_set_file_limit(size_t limit);
+/* Fail the next recovery metadata materialization before it allocates. */
+void tp_journal__test_fail_next_metadata_materialize(void);
 
 /* F2-04 fix C1: register an already-durable retained id into the in-memory index
  * WITHOUT writing a record. tp_model_attach_journal calls it to migrate ids the model

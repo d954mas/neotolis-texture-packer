@@ -901,8 +901,18 @@ static tp_status parse_meta_ref(const uint8_t *pl, size_t plen,
     return TP_STATUS_OK;
 }
 
+static _Thread_local bool s_fail_next_metadata_materialize;
+
+void tp_journal__test_fail_next_metadata_materialize(void) {
+    s_fail_next_metadata_materialize = true;
+}
+
 static tp_status materialize_meta(const tp_jrn_meta_ref *ref,
                                   tp_journal_meta *dst) {
+    if (s_fail_next_metadata_materialize) {
+        s_fail_next_metadata_materialize = false;
+        return TP_STATUS_OOM;
+    }
     char *path = jrn_dup_bytes(ref->path, ref->path_len);
     if (!path) {
         return TP_STATUS_OOM;
@@ -1510,8 +1520,8 @@ tp_status tp_journal_recover(tp_journal *j, tp_journal_recovery *out, tp_error *
 
     if (out->has_metadata && materialize_meta(&meta_ref, &out->metadata) != TP_STATUS_OK) {
         free(wc.refs);
+        tp_journal_recovery_free(out);
         free(buf);
-        out->has_metadata = false;
         return tp_error_set(err, TP_STATUS_OOM,
                             "journal recovery metadata allocation failed (out of memory)");
     }
