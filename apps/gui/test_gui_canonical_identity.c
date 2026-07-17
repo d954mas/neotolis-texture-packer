@@ -4,7 +4,6 @@
 
 #ifdef _WIN32
 #include <direct.h>
-#include <windows.h>
 #define test_rmdir _rmdir
 #else
 #include <unistd.h>
@@ -18,8 +17,8 @@
 #include "gui_scan.h"
 #include "gui_state.h"
 
+#include "time/nt_time.h"
 #include "tp_core/tp_scan.h"
-#include "tinycthread.h"
 
 #include "unity.h"
 
@@ -220,12 +219,7 @@ void test_preview_result_rejects_source_refresh_after_job_capture(void) {
     for (int i = 0; i < 5000 && done == GUI_PACK_DONE_NONE; ++i) {
         done = gui_pack_poll(&info);
         if (done == GUI_PACK_DONE_NONE) {
-#ifdef _WIN32
-            Sleep(1);
-#else
-            const struct timespec poll_pause = {0, 1000000L};
-            (void)thrd_sleep(&poll_pause, NULL);
-#endif
+            nt_time_sleep(0.001);
         }
     }
     TEST_ASSERT_EQUAL_INT(GUI_PACK_DONE_PREVIEW_OK, done);
