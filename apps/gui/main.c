@@ -1176,8 +1176,8 @@ int main(int argc, char *argv[]) {
      * live-slot identity, lock, and scan exclusion. At startup we collect orphaned journals and, if any,
      * open the R6b startup recovery MODAL to resolve each one (Discard / Save to original / Save As) via the R6a
      * layer -- the live editor starts FRESH untitled (recovery resolves journals to DISK, never adopts); every
-     * non-resolved orphan is LEFT on disk for next launch. Every step is fail-closed + NON-FATAL: a folder/RNG/scan failure merely disables
-     * recovery for this launch (journal-less), never crashing or blocking startup. GATED OUT of the headless
+     * non-resolved orphan is LEFT on disk for next launch. Every step is fail-closed + NON-FATAL: a folder/RNG/scan failure leaves the
+     * window available for Save As or Discard while mutation stays blocked. GATED OUT of the headless
      * selftest build -- that build runs THIS exe non-headless and drives recovery itself on ISOLATED temp
      * folders via R6 test seams, so the production scan must never inspect test journals. */
     /* fix [4] (ACCEPTED, no migration code): crash recovery is UNRELEASED (all on impl/master-spec), so
@@ -1185,6 +1185,7 @@ int main(int argc, char *argv[]) {
      * slot to migrate -- the old exe-dir slot is intentionally NOT migrated into this per-session folder.
      * If we ever ship before R5b-2 lands, add a one-time migration here. */
 #ifndef NTPACKER_GUI_SELFTEST
+    gui_project_require_recovery();
     char rec_root[GUI_PATHS_MAX];
     char rec_folder[GUI_PATHS_MAX];
     if (!gui_paths_app_data_root(rec_root, sizeof rec_root)) {
@@ -1216,7 +1217,7 @@ int main(int argc, char *argv[]) {
         char rnotice[256];
         if (gui_project_take_recovery_setup_notice(rnotice, sizeof rnotice)) {
             recovery_warn_shown = true;
-            set_status_ex(STATUS_WARNING, rnotice); /* "Another window open -- crash recovery off." */
+            set_status_ex(STATUS_WARNING, rnotice);
         }
     }
 #endif
@@ -1253,14 +1254,14 @@ int main(int argc, char *argv[]) {
             break;
         case GUI_STARTUP_OPEN:
             if (gui_project_open(proj_arg, err, sizeof err) == TP_STATUS_OK) {
-                if (!recovery_warn_shown) { /* routine confirmation -> must not clobber the busy "recovery off" warning */
+                if (!recovery_warn_shown) { /* routine confirmation must not clobber the recovery warning */
                     set_statusf("Opened %s", gui_project_display_name());
                 }
             } else {
                 /* A genuine open FAILURE is surfaced even over a recovery warning: it is a concrete,
                  * user-initiated failure the user is actively waiting on (they asked to open THIS file), it
                  * is higher severity (STATUS_ERROR > STATUS_WARNING), and it is rare. Present actionable
-                 * failure wins over the latent "recovery off" warning. */
+                 * failure wins over the latent recovery warning. */
                 set_statusf_ex(STATUS_ERROR, "Open '%s' failed: %s", proj_arg, err);
             }
             break;

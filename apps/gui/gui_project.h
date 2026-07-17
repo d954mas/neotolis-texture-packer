@@ -82,12 +82,17 @@ void gui_project_shutdown(void);
  * dirty recovery journal so a raw window close remains recoverable. */
 void gui_project_discard_recovery_on_shutdown(void);
 
-/* F2-05b-ii-B crash recovery. `root` is the app-data recovery directory;
- * core owns the random live-slot name, lock, and scan exclusion. NULL/""
- * disables recovery. Call once before the first interactive gui_project_init. */
+/* Require recovery admission for every subsequently created GUI session. The
+ * interactive host calls this once before gui_project_init; tests may leave
+ * recovery optional. */
+void gui_project_require_recovery(void);
+/* Configure the app-data recovery directory. Core owns the random live-slot
+ * name, lock, and scan exclusion. NULL/"" clears the configured directory but
+ * does not relax a recovery requirement. */
 void gui_project_enable_recovery(const char *root);
-/* Record a non-fatal startup/setup failure that disables crash recovery. The UI drains the resulting
- * one-shot warning through gui_project_take_recovery_setup_notice(). */
+/* Record a non-fatal startup/setup failure. Required sessions remain available
+ * for Save As or Discard, while mutation stays blocked. The UI drains the
+ * resulting one-shot warning through gui_project_take_recovery_setup_notice(). */
 void gui_project_note_recovery_setup_failure(const char *reason);
 
 /* UI buffers and loops follow the recovery core's bounded value contract. */

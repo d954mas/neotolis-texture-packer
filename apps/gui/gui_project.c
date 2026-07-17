@@ -51,9 +51,10 @@ static char s_op_error_msg[256];
 /* Host policy only. Recovery core creates/destroys stores and claims per call;
  * a successful live attach transfers its concrete owner to tp_session. */
 static char s_recovery_root[TP_IDENTITY_PATH_MAX];
+static bool s_recovery_required;
 /* A one-shot startup notice explaining why recovery is unavailable. This deliberately covers both
- * contention and setup/storage failures: the editor remains usable, but silently losing crash
- * durability would be a data-safety bug. */
+ * contention and setup/storage failures: the window remains available for Save As or Discard, but
+ * mutation stays blocked rather than silently losing crash durability. */
 static bool s_recovery_setup_notice_pending;
 static char s_recovery_setup_notice[256];
 // #endregion
@@ -245,10 +246,19 @@ static bool recovery_configured(void) {
  * The session owns the handle on every accepted attach path, including degraded
  * filesystem outcomes; GUI retains only configuration and presentation state. */
 static void attach_recovery_live(tp_session *session) {
-    if (!session || !recovery_configured()) {
+    if (!session) {
         return;
     }
     tp_error err = {0};
+    if (s_recovery_required &&
+        tp_session_require_recovery(session, &err) != TP_STATUS_OK) {
+        gui_project_note_recovery_setup_failure(
+            err.msg[0] ? err.msg : "recovery could not be required");
+        return;
+    }
+    if (!recovery_configured()) {
+        return;
+    }
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     const tp_session_identity identity = tp_session_snapshot_identity(snapshot);
     tp_id128 saved_fingerprint = tp_id128_nil();
@@ -493,8 +503,13 @@ static void pending_route(const coalesce_key *k) {
 
 /* Buffer `op` (TAKES OWNERSHIP of the arms) under `k`. Precondition (pending_route ran): a still-
  * valid pending is same-key -> replace its value (latest wins). Preview goes stale immediately;
- * the commit (and model_ver bump) is deferred to the flush. Always returns true. */
+ * the commit (and model_ver bump) is deferred to the flush. */
 static bool pending_offer(const coalesce_key *k, tp_operation *op) {
+    if (!tp_session_recovery_available(s_session)) {
+        tp_operation_free(op);
+        note_recovery_degraded("mutation is unavailable");
+        return false;
+    }
     if (!s_pending_valid) {
         s_pending_preview_stale_before = s_preview_stale;
     }
@@ -579,6 +594,8 @@ void gui_project_shutdown(void) {
 
 void gui_project_discard_recovery_on_shutdown(void) { s_discard_recovery_on_shutdown = true; }
 
+void gui_project_require_recovery(void) { s_recovery_required = true; }
+
 /* Configure crash recovery from the host app-data root. Core generates the
  * per-process slot identity and owns all liveness and exclusion mechanics. */
 void gui_project_enable_recovery(const char *root) {
@@ -613,7 +630,7 @@ static int64_t revision_after_owned_route(int64_t captured_revision,
 void gui_project_note_recovery_setup_failure(const char *reason) {
     s_recovery_setup_notice_pending = true;
     (void)snprintf(s_recovery_setup_notice, sizeof s_recovery_setup_notice,
-                   "Crash recovery is off for this window (%s).",
+                   "Editing is unavailable because crash recovery could not start (%s).",
                    (reason && reason[0] != '\0') ? reason : "startup setup failed");
 }
 
@@ -631,7 +648,7 @@ bool gui_project_take_recovery_setup_notice(char *out, size_t cap) {
     if (out && cap) {
         (void)snprintf(out, cap, "%s", s_recovery_setup_notice[0] != '\0'
                                              ? s_recovery_setup_notice
-                                             : "Crash recovery is off for this window.");
+                                             : "Editing is unavailable because crash recovery could not start.");
     }
     s_recovery_setup_notice_pending = false;
     s_recovery_setup_notice[0] = '\0';
