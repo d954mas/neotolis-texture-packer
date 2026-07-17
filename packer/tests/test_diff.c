@@ -27,6 +27,7 @@
 #include "tp_core/tp_project_migrate.h" /* tp_project_promote_ids */
 #include "tp_core/tp_transaction.h"
 #include "tp_diff_internal.h" /* diff alloc seam + record/history internals (corrupt + rollback) */
+#include "tp_test_model.h"
 #include "unity.h"
 
 void setUp(void) {}
@@ -38,33 +39,12 @@ void tearDown(void) {
 
 /* ---- fixtures ------------------------------------------------------------- */
 
-static int det_fill(void *ctx, uint8_t *out, size_t len) {
-    uint8_t *ctr = (uint8_t *)ctx;
-    for (size_t j = 0; j < len; j++) {
-        out[j] = (uint8_t)(*ctr + (uint8_t)j + 1U);
-    }
-    (*ctr)++;
-    return (int)len;
-}
-
-static tp_id128 id_of(uint8_t b) {
-    tp_id128 x;
-    for (int i = 0; i < 16; i++) {
-        x.bytes[i] = b;
-    }
-    return x;
-}
-
+/* tp_test_det_fill / tp_test_id_of / tp_test_serialize_project: shared
+ * byte-identical fixtures, see tp_test_model.h. next_txn_id/s_id_ctr and
+ * make_base()/fresh() below stay local: make_base() is a larger 2-atlas +
+ * animation fixture, not the same as tp_test_base_project(). */
 static int s_id_ctr = 0;
 static void next_txn_id(char *buf) { (void)snprintf(buf, 33, "%032x", (unsigned)(++s_id_ctr)); }
-
-static char *serialize(const tp_project *p) {
-    char *buf = NULL;
-    size_t len = 0;
-    tp_error err;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_save_buffer(p, &buf, &len, &err));
-    return buf;
-}
 
 /* A0 "atlas1" {source "sprites", target json-neotolis "out/a", anim "walk"[hero,hero2]}
  * + A1 "atlas2" (empty). All structural ids promoted (deterministic). */
@@ -81,7 +61,7 @@ static tp_project *make_base(void) {
     int idx = -1;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_add_atlas(p, "atlas2", &idx));
     uint8_t ctr = 1;
-    tp_rng rng = {det_fill, &ctr};
+    tp_rng rng = {tp_test_det_fill, &ctr};
     tp_error err;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_promote_ids(p, &rng, &err));
     return p;
@@ -105,7 +85,7 @@ static tp_id128 anim0_id(tp_model *m) { return tp_model_project(m)->atlases[0].a
 
 static void run_oracle(tp_model *m, tp_operation *ops, int n) {
     tp_error err;
-    char *A = serialize(tp_model_project(m));
+    char *A = tp_test_serialize_project(tp_model_project(m));
     /* legacy full-snapshot of A -- the comparison oracle. */
     char *snapA = NULL;
     size_t snapAlen = 0;
@@ -126,18 +106,18 @@ static void run_oracle(tp_model *m, tp_operation *ops, int n) {
     TEST_ASSERT_EQUAL_INT64(rev0 + 1, tp_model_revision(m));
     TEST_ASSERT_EQUAL_INT(depth0 + 1, tp_model_undo_depth(m)); /* one new undoable step */
     TEST_ASSERT_TRUE(tp_model_can_undo(m));
-    char *B = serialize(tp_model_project(m));
+    char *B = tp_test_serialize_project(tp_model_project(m));
 
     /* inverse (Undo) -> A' */
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_undo(m, &err));
     TEST_ASSERT_EQUAL_INT64(rev0 + 2, tp_model_revision(m)); /* Undo bumps the revision */
-    char *Ap = serialize(tp_model_project(m));
+    char *Ap = tp_test_serialize_project(tp_model_project(m));
     TEST_ASSERT_EQUAL_STRING(A, Ap); /* diff restore is byte-identical to A */
 
     /* legacy full-snapshot restore of A == the diff restore. */
     tp_project *legacy = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_load_buffer(snapA, snapAlen, &legacy, &err));
-    char *Aleg = serialize(legacy);
+    char *Aleg = tp_test_serialize_project(legacy);
     TEST_ASSERT_EQUAL_STRING(Aleg, Ap); /* diff restore == full-snapshot restore */
     tp_project_destroy(legacy);
 
@@ -145,7 +125,7 @@ static void run_oracle(tp_model *m, tp_operation *ops, int n) {
     TEST_ASSERT_TRUE(tp_model_can_redo(m));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_redo(m, &err));
     TEST_ASSERT_EQUAL_INT64(rev0 + 3, tp_model_revision(m));
-    char *Bp = serialize(tp_model_project(m));
+    char *Bp = tp_test_serialize_project(tp_model_project(m));
     TEST_ASSERT_EQUAL_STRING(B, Bp);
 
     free(A);
@@ -186,7 +166,7 @@ void test_oracle_atlas_create(void) {
     tp_operation op;
     memset(&op, 0, sizeof op);
     op.kind = TP_OP_ATLAS_CREATE;
-    op.atlas_id = id_of(0x51);
+    op.atlas_id = tp_test_id_of(0x51);
     op.u.atlas_create.name = (char *)"created";
     run_oracle(m, &op, 1);
     tp_model_destroy(m);
@@ -234,7 +214,7 @@ void test_oracle_source_add(void) {
     memset(&op, 0, sizeof op);
     op.kind = TP_OP_SOURCE_ADD;
     op.atlas_id = a0_id(m);
-    op.u.source_add.source_id = id_of(0x52);
+    op.u.source_add.source_id = tp_test_id_of(0x52);
     op.u.source_add.kind = TP_SOURCE_KIND_FILE;
     op.u.source_add.key = (char *)"extra/tiles.png";
     run_oracle(m, &op, 1);
@@ -317,7 +297,7 @@ void test_oracle_animation_create(void) {
     memset(&op, 0, sizeof op);
     op.kind = TP_OP_ANIMATION_CREATE;
     op.atlas_id = a0_id(m);
-    op.u.anim_create.anim_id = id_of(0x53);
+    op.u.anim_create.anim_id = tp_test_id_of(0x53);
     op.u.anim_create.name = (char *)"run";
     op.u.anim_create.fps = 24.0F;
     op.u.anim_create.playback = 1;
@@ -454,7 +434,7 @@ void test_oracle_target_create(void) {
     memset(&op, 0, sizeof op);
     op.kind = TP_OP_TARGET_CREATE;
     op.atlas_id = a0_id(m);
-    op.u.target_create.target_id = id_of(0x54);
+    op.u.target_create.target_id = tp_test_id_of(0x54);
     op.u.target_create.exporter_id = (char *)"defold";
     op.u.target_create.out_path = (char *)"out/defold";
     op.u.target_create.enabled = true;
@@ -533,7 +513,7 @@ void test_batch_100_animations_one_inverse(void) {
         memset(&ops[i], 0, sizeof ops[i]);
         ops[i].kind = TP_OP_ANIMATION_CREATE;
         ops[i].atlas_id = aid;
-        ops[i].u.anim_create.anim_id = id_of((uint8_t)(0x80 + i));
+        ops[i].u.anim_create.anim_id = tp_test_id_of((uint8_t)(0x80 + i));
         ops[i].u.anim_create.name = names[i];
         ops[i].u.anim_create.fps = 30.0F;
     }
@@ -547,7 +527,7 @@ void test_batch_100_animations_one_inverse(void) {
  * and the reverse-order inverse unwinds the whole batch back to A byte-identical. */
 void test_batch_mixed_intrabatch(void) {
     tp_model *m = fresh();
-    tp_id128 newa = id_of(0x51);
+    tp_id128 newa = tp_test_id_of(0x51);
     tp_operation ops[4];
     memset(ops, 0, sizeof ops);
     ops[0].kind = TP_OP_ATLAS_CREATE;
@@ -555,12 +535,12 @@ void test_batch_mixed_intrabatch(void) {
     ops[0].u.atlas_create.name = (char *)"born";
     ops[1].kind = TP_OP_SOURCE_ADD;
     ops[1].atlas_id = newa;
-    ops[1].u.source_add.source_id = id_of(0x52);
+    ops[1].u.source_add.source_id = tp_test_id_of(0x52);
     ops[1].u.source_add.kind = TP_SOURCE_KIND_FOLDER;
     ops[1].u.source_add.key = (char *)"born/sprites";
     ops[2].kind = TP_OP_ANIMATION_CREATE;
     ops[2].atlas_id = newa;
-    ops[2].u.anim_create.anim_id = id_of(0x53);
+    ops[2].u.anim_create.anim_id = tp_test_id_of(0x53);
     ops[2].u.anim_create.name = (char *)"idle";
     ops[2].u.anim_create.fps = 12.0F;
     ops[3].kind = TP_OP_ATLAS_RENAME;
@@ -591,7 +571,7 @@ void test_inverse_alloc_failure_rolls_back(void) {
     tp_txn_result res;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_apply(m, &req, &res, &err));
     tp_txn_result_free(&res);
-    char *B = serialize(tp_model_project(m));
+    char *B = tp_test_serialize_project(tp_model_project(m));
     int64_t revB = tp_model_revision(m);
 
     /* dry-count the diff allocations the inverse needs (on a throwaway clone). */
@@ -613,7 +593,7 @@ void test_inverse_alloc_failure_rolls_back(void) {
         TEST_ASSERT_EQUAL_INT(TP_STATUS_OOM, st);
         TEST_ASSERT_EQUAL_INT64(revB, tp_model_revision(m)); /* unchanged */
         TEST_ASSERT_TRUE(tp_model_can_undo(m));              /* cursor unchanged */
-        char *now = serialize(tp_model_project(m));
+        char *now = tp_test_serialize_project(tp_model_project(m));
         TEST_ASSERT_EQUAL_STRING(B, now); /* rolled back: model byte-unchanged */
         free(now);
     }
@@ -633,10 +613,10 @@ void test_capture_alloc_failure_fails_commit_atomically(void) {
     memset(&probe_op, 0, sizeof probe_op);
 
     tp_model *probe = fresh();
-    char *A = serialize(tp_model_project(probe));
+    char *A = tp_test_serialize_project(tp_model_project(probe));
     probe_op.kind = TP_OP_SOURCE_ADD;
     probe_op.atlas_id = a0_id(probe);
-    probe_op.u.source_add.source_id = id_of(0x52);
+    probe_op.u.source_add.source_id = tp_test_id_of(0x52);
     probe_op.u.source_add.kind = TP_SOURCE_KIND_FILE;
     probe_op.u.source_add.key = (char *)"extra/tiles.png";
     tp_txn_request req = {0};
@@ -661,7 +641,7 @@ void test_capture_alloc_failure_fails_commit_atomically(void) {
         memset(&op, 0, sizeof op);
         op.kind = TP_OP_SOURCE_ADD;
         op.atlas_id = a0_id(m);
-        op.u.source_add.source_id = id_of(0x52);
+        op.u.source_add.source_id = tp_test_id_of(0x52);
         op.u.source_add.kind = TP_SOURCE_KIND_FILE;
         op.u.source_add.key = (char *)"extra/tiles.png";
         tp_txn_request r2 = {0};
@@ -677,7 +657,7 @@ void test_capture_alloc_failure_fails_commit_atomically(void) {
         TEST_ASSERT_FALSE(res2.committed);
         TEST_ASSERT_EQUAL_INT64(0, tp_model_revision(m)); /* unchanged */
         TEST_ASSERT_EQUAL_INT(0, tp_model_undo_depth(m)); /* no history entry */
-        char *now = serialize(tp_model_project(m));
+        char *now = tp_test_serialize_project(tp_model_project(m));
         TEST_ASSERT_EQUAL_STRING(A, now); /* model byte-unchanged */
         free(now);
         tp_txn_result_free(&res2);
@@ -706,14 +686,14 @@ void test_corrupted_diff_unknown_atlas(void) {
     tp_txn_result res;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_apply(m, &req, &res, &err));
     tp_txn_result_free(&res);
-    char *B = serialize(tp_model_project(m));
+    char *B = tp_test_serialize_project(tp_model_project(m));
 
     /* corrupt the record: a stale/unknown atlas id. */
     tp_diff_record *r = tp_history_undo_record(tp_model_history(m));
     tp_id128 saved = r->ops[0].atlas_id;
-    r->ops[0].atlas_id = id_of(0xEE);
+    r->ops[0].atlas_id = tp_test_id_of(0xEE);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_NOT_FOUND, tp_model_undo(m, &err)); /* structured, no crash */
-    char *now = serialize(tp_model_project(m));
+    char *now = tp_test_serialize_project(tp_model_project(m));
     TEST_ASSERT_EQUAL_STRING(B, now); /* model byte-unchanged */
     TEST_ASSERT_TRUE(tp_model_can_undo(m));
     free(now);
@@ -742,13 +722,13 @@ void test_corrupted_diff_bad_position(void) {
     tp_txn_result res;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_apply(m, &req, &res, &err));
     tp_txn_result_free(&res);
-    char *B = serialize(tp_model_project(m));
+    char *B = tp_test_serialize_project(tp_model_project(m));
 
     tp_diff_record *r = tp_history_undo_record(tp_model_history(m));
     int saved = r->ops[0].position;
     r->ops[0].position = 999; /* out-of-range insert index */
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS, tp_model_undo(m, &err));
-    char *now = serialize(tp_model_project(m));
+    char *now = tp_test_serialize_project(tp_model_project(m));
     TEST_ASSERT_EQUAL_STRING(B, now);
     free(now);
 
@@ -763,7 +743,7 @@ void test_corrupted_diff_bad_position(void) {
 void test_redo_branch_discard(void) {
     tp_model *m = fresh();
     tp_error err;
-    char *A = serialize(tp_model_project(m));
+    char *A = tp_test_serialize_project(tp_model_project(m));
 
     tp_operation op;
     tp_txn_request req = {0};
@@ -806,7 +786,7 @@ void test_redo_branch_discard(void) {
 
     /* undo the new step -> back to A byte-identical. */
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_undo(m, &err));
-    char *Ap = serialize(tp_model_project(m));
+    char *Ap = tp_test_serialize_project(tp_model_project(m));
     TEST_ASSERT_EQUAL_STRING(A, Ap);
     free(A);
     free(Ap);
@@ -820,7 +800,7 @@ void test_multi_step_undo_redo(void) {
     tp_error err;
     const char *names[3] = {"n1", "n2", "n3"};
     char *snaps[4];
-    snaps[0] = serialize(tp_model_project(m));
+    snaps[0] = tp_test_serialize_project(tp_model_project(m));
     tp_operation op;
     tp_txn_request req = {0};
     req.schema = TP_TXN_SCHEMA;
@@ -836,12 +816,12 @@ void test_multi_step_undo_redo(void) {
         next_txn_id(req.id_hex);
         TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_apply(m, &req, &res, &err));
         tp_txn_result_free(&res);
-        snaps[i + 1] = serialize(tp_model_project(m));
+        snaps[i + 1] = tp_test_serialize_project(tp_model_project(m));
     }
     /* undo all the way down, checking each intermediate state byte-identical. */
     for (int i = 2; i >= 0; i--) {
         TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_undo(m, &err));
-        char *cur = serialize(tp_model_project(m));
+        char *cur = tp_test_serialize_project(tp_model_project(m));
         TEST_ASSERT_EQUAL_STRING(snaps[i], cur);
         free(cur);
     }
@@ -850,7 +830,7 @@ void test_multi_step_undo_redo(void) {
     /* redo all the way up. */
     for (int i = 0; i < 3; i++) {
         TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_redo(m, &err));
-        char *cur = serialize(tp_model_project(m));
+        char *cur = tp_test_serialize_project(tp_model_project(m));
         TEST_ASSERT_EQUAL_STRING(snaps[i + 1], cur);
         free(cur);
     }
@@ -962,7 +942,7 @@ static apply_probe apply_one(tp_model *m, tp_operation *op) {
     pr.err0_code = res.error_count > 0 ? res.errors[0].code : TP_STATUS_OK;
     pr.err0_op = res.error_count > 0 ? res.errors[0].op_index : -999;
     tp_txn_result_free(&res);
-    pr.serial = serialize(tp_model_project(m));
+    pr.serial = tp_test_serialize_project(tp_model_project(m));
     return pr;
 }
 
@@ -974,8 +954,8 @@ static void assert_enabled_equals_disabled(tp_operation *op, tp_status want) {
     tp_model *me = tp_model_wrap(make_base());
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_enable_history(me));
     tp_model *md = tp_model_wrap(make_base()); /* history off */
-    char *before_e = serialize(tp_model_project(me));
-    char *before_d = serialize(tp_model_project(md));
+    char *before_e = tp_test_serialize_project(tp_model_project(me));
+    char *before_d = tp_test_serialize_project(tp_model_project(md));
 
     apply_probe pe = apply_one(me, op);
     apply_probe pd = apply_one(md, op);
@@ -1019,7 +999,7 @@ void test_capture_dangling_atlas_rename(void) {
     tp_operation op;
     memset(&op, 0, sizeof op);
     op.kind = TP_OP_ATLAS_RENAME;
-    op.atlas_id = id_of(0xEE); /* no such atlas */
+    op.atlas_id = tp_test_id_of(0xEE); /* no such atlas */
     op.u.atlas_rename.name = (char *)"x";
     assert_enabled_equals_disabled(&op, TP_STATUS_NOT_FOUND);
 }
@@ -1028,7 +1008,7 @@ void test_capture_dangling_atlas_settings(void) {
     tp_operation op;
     memset(&op, 0, sizeof op);
     op.kind = TP_OP_ATLAS_SETTINGS_SET;
-    op.atlas_id = id_of(0xEE);
+    op.atlas_id = tp_test_id_of(0xEE);
     op.u.atlas_settings.mask = TP_AF_MAX_SIZE;
     op.u.atlas_settings.max_size = 1234;
     assert_enabled_equals_disabled(&op, TP_STATUS_NOT_FOUND);
@@ -1038,7 +1018,7 @@ void test_capture_dangling_atlas_remove(void) {
     tp_operation op;
     memset(&op, 0, sizeof op);
     op.kind = TP_OP_ATLAS_REMOVE;
-    op.atlas_id = id_of(0xEE);
+    op.atlas_id = tp_test_id_of(0xEE);
     assert_enabled_equals_disabled(&op, TP_STATUS_NOT_FOUND);
 }
 
@@ -1047,7 +1027,7 @@ void test_capture_dangling_source_remove(void) {
     memset(&op, 0, sizeof op);
     op.kind = TP_OP_SOURCE_REMOVE;
     op.atlas_id = base_atlas0_id(); /* valid atlas ... */
-    op.u.source_ref.source_id = id_of(0xEE); /* ... dangling source */
+    op.u.source_ref.source_id = tp_test_id_of(0xEE); /* ... dangling source */
     assert_enabled_equals_disabled(&op, TP_STATUS_NOT_FOUND);
 }
 
@@ -1055,8 +1035,8 @@ void test_capture_dangling_sprite_atlas(void) {
     tp_operation op;
     memset(&op, 0, sizeof op);
     op.kind = TP_OP_SPRITE_OVERRIDE_SET;
-    op.atlas_id = id_of(0xEE); /* dangling atlas -> grab_sprite must not deref NULL */
-    op.u.sprite_set.source_id = id_of(0x01);
+    op.atlas_id = tp_test_id_of(0xEE); /* dangling atlas -> grab_sprite must not deref NULL */
+    op.u.sprite_set.source_id = tp_test_id_of(0x01);
     op.u.sprite_set.src_key = (char *)"hero.png";
     op.u.sprite_set.mask = TP_SPF_ORIGIN;
     assert_enabled_equals_disabled(&op, TP_STATUS_NOT_FOUND);
@@ -1067,7 +1047,7 @@ void test_capture_dangling_anim_settings(void) {
     memset(&op, 0, sizeof op);
     op.kind = TP_OP_ANIMATION_SETTINGS_SET;
     op.atlas_id = base_atlas0_id();
-    op.u.anim_settings.anim_id = id_of(0xEE); /* dangling animation */
+    op.u.anim_settings.anim_id = tp_test_id_of(0xEE); /* dangling animation */
     op.u.anim_settings.mask = TP_ANF_FPS;
     op.u.anim_settings.fps = 12.0F;
     assert_enabled_equals_disabled(&op, TP_STATUS_NOT_FOUND);
@@ -1078,7 +1058,7 @@ void test_capture_dangling_frame_remove_anim(void) {
     memset(&op, 0, sizeof op);
     op.kind = TP_OP_ANIMATION_FRAME_REMOVE;
     op.atlas_id = base_atlas0_id();
-    op.u.anim_frame_rm.anim_id = id_of(0xEE); /* dangling animation */
+    op.u.anim_frame_rm.anim_id = tp_test_id_of(0xEE); /* dangling animation */
     op.u.anim_frame_rm.index = 0;
     assert_enabled_equals_disabled(&op, TP_STATUS_NOT_FOUND);
 }
@@ -1088,7 +1068,7 @@ void test_capture_dangling_target_set(void) {
     memset(&op, 0, sizeof op);
     op.kind = TP_OP_TARGET_SET;
     op.atlas_id = base_atlas0_id();
-    op.u.target_set.target_id = id_of(0xEE); /* dangling target */
+    op.u.target_set.target_id = tp_test_id_of(0xEE); /* dangling target */
     op.u.target_set.mask = TP_TF_ALL;
     op.u.target_set.exporter_id = (char *)"defold";
     op.u.target_set.out_path = (char *)"out/x";
@@ -1126,7 +1106,7 @@ void test_reserve_oom_leaves_id_retryable(void) {
     req.expected_revision = tp_model_revision(m);
     req.ops = &op;
     req.op_count = 1;
-    char *before = serialize(tp_model_project(m));
+    char *before = tp_test_serialize_project(tp_model_project(m));
 
     /* history_reserve OOMs on this commit: it must fail cleanly BEFORE idstore->record. */
     tp_history__test_fail_next_reserve();
@@ -1135,7 +1115,7 @@ void test_reserve_oom_leaves_id_retryable(void) {
     TEST_ASSERT_FALSE(res.committed);
     TEST_ASSERT_EQUAL_INT64(0, tp_model_revision(m)); /* unchanged */
     TEST_ASSERT_EQUAL_INT(0, tp_model_undo_depth(m)); /* no history entry */
-    char *now = serialize(tp_model_project(m));
+    char *now = tp_test_serialize_project(tp_model_project(m));
     TEST_ASSERT_EQUAL_STRING(before, now); /* model byte-unchanged */
     free(now);
     tp_txn_result_free(&res);
@@ -1198,7 +1178,7 @@ void test_history_record_exact_byte_boundary_and_oversize_reject(void) {
     /* One byte below the measured record rejects before model publication. */
     tp_history__test_set_limits(1, bytes - 1U, bytes - 1U);
     tp_model *over = fresh();
-    char *before = serialize(tp_model_project(over));
+    char *before = tp_test_serialize_project(tp_model_project(over));
     tp_txn_result res;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS, apply_rename_result(over, "bounded", &res));
     TEST_ASSERT_FALSE(res.committed);
@@ -1207,7 +1187,7 @@ void test_history_record_exact_byte_boundary_and_oversize_reject(void) {
     TEST_ASSERT_EQUAL_STRING("history", res.errors[0].field);
     TEST_ASSERT_EQUAL_INT64(0, tp_model_revision(over));
     TEST_ASSERT_EQUAL_INT(0, tp_model_undo_depth(over));
-    char *after = serialize(tp_model_project(over));
+    char *after = tp_test_serialize_project(tp_model_project(over));
     TEST_ASSERT_EQUAL_STRING(before, after);
     free(before);
     free(after);
@@ -1333,7 +1313,7 @@ static tp_project *make_maximal(void) {
     t2->enabled = false; /* default true */
 
     uint8_t ctr = 7;
-    tp_rng rng = {det_fill, &ctr};
+    tp_rng rng = {tp_test_det_fill, &ctr};
     tp_error err;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_promote_ids(p, &rng, &err));
     /* wire the resolved records to a real source id (ids exist only after promote); the

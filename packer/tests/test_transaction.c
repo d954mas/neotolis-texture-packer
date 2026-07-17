@@ -28,6 +28,7 @@
 #include "tp_txn_internal.h"            /* clone fault seam */
 #include "tp_op_internal.h"             /* tp_op__test_set_alloc_fail */
 #include "tp_project_internal.h"        /* checkpoint-size traversal seam */
+#include "tp_test_model.h"
 #include "unity.h"
 
 void setUp(void) {}
@@ -39,44 +40,9 @@ void tearDown(void) {
 
 /* ---- fixtures ------------------------------------------------------------- */
 
-static int det_fill(void *ctx, uint8_t *out, size_t len) {
-    uint8_t *ctr = (uint8_t *)ctx;
-    for (size_t j = 0; j < len; j++) {
-        out[j] = (uint8_t)(*ctr + (uint8_t)j + 1U);
-    }
-    (*ctr)++;
-    return (int)len;
-}
-
-static tp_id128 id_of(uint8_t b) {
-    tp_id128 x;
-    for (int i = 0; i < 16; i++) {
-        x.bytes[i] = b;
-    }
-    return x;
-}
-
-/* One default atlas + one folder source + one json-neotolis target, ids promoted. */
-static tp_project *base_project(void) {
-    tp_project *p = tp_project_create();
-    TEST_ASSERT_NOT_NULL(p);
-    tp_project_atlas *a = &p->atlases[0];
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_source(a, "sprites"));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(a, TP_EXPORTER_ID_JSON_NEOTOLIS, "out/a", NULL));
-    uint8_t ctr = 1;
-    tp_rng rng = {det_fill, &ctr};
-    tp_error err;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_promote_ids(p, &rng, &err));
-    return p;
-}
-
-static char *serialize(const tp_project *p) {
-    char *buf = NULL;
-    size_t len = 0;
-    tp_error err;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_save_buffer(p, &buf, &len, &err));
-    return buf;
-}
+/* tp_test_det_fill / tp_test_id_of / tp_test_base_project /
+ * tp_test_serialize_project: shared byte-identical fixtures, see
+ * tp_test_model.h. */
 
 static char *txn_json_with_author_size(size_t total_len) {
     static const char prefix[] =
@@ -182,7 +148,7 @@ static char *txn_json_with_nested_operations(int depth, size_t *out_len) {
 /* ---- deep-clone ---------------------------------------------------------- */
 
 void test_clone_byte_identity(void) {
-    tp_project *p = base_project();
+    tp_project *p = tp_test_base_project();
     /* enrich: a sprite override + an animation with frames */
     tp_project_atlas *a = &p->atlases[0];
     tp_project_sprite *s = NULL;
@@ -198,13 +164,13 @@ void test_clone_byte_identity(void) {
     TEST_ASSERT_NOT_NULL(c);
     TEST_ASSERT_GREATER_THAN_size_t(sizeof *c,
                                     tp_project__test_clone_allocation_bytes());
-    char *bp = serialize(p);
-    char *bc = serialize(c);
+    char *bp = tp_test_serialize_project(p);
+    char *bc = tp_test_serialize_project(c);
     TEST_ASSERT_EQUAL_STRING(bp, bc);
 
     /* independence: mutating the clone does not touch the original */
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_set_atlas_name(&c->atlases[0], "changed"));
-    char *bp2 = serialize(p);
+    char *bp2 = tp_test_serialize_project(p);
     TEST_ASSERT_EQUAL_STRING(bp, bp2);
 
     free(bp);
@@ -215,7 +181,7 @@ void test_clone_byte_identity(void) {
 }
 
 void test_clone_alloc_fault_sweep(void) {
-    tp_project *p = base_project();
+    tp_project *p = tp_test_base_project();
     /* Count the allocations a full clone needs. */
     tp_project *ok = tp_project_clone(p);
     TEST_ASSERT_NOT_NULL(ok);
@@ -266,7 +232,7 @@ static void op_atlas_rename(tp_operation *op, tp_id128 atlas, const char *name) 
 /* ---- atomic commit + revision ------------------------------------------- */
 
 void test_commit_and_revision(void) {
-    tp_project *p = base_project();
+    tp_project *p = tp_test_base_project();
     tp_id128 aid = p->atlases[0].id;
     tp_model *m = tp_model_wrap(p);
     TEST_ASSERT_NOT_NULL(m);
@@ -297,7 +263,7 @@ void test_commit_and_revision(void) {
 
 /* property: applying the batch == applying the same ops one-by-one via F2-01. */
 void test_batch_equals_one_by_one(void) {
-    tp_project *p1 = base_project();
+    tp_project *p1 = tp_test_base_project();
     tp_id128 aid = p1->atlases[0].id;
     tp_operation ops[2];
     op_atlas_settings(&ops[0], aid, 1024, 2);
@@ -312,14 +278,14 @@ void test_batch_equals_one_by_one(void) {
     tp_txn_result res;
     tp_error err;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_apply(m, &req, &res, &err));
-    char *batched = serialize(tp_model_project(m));
+    char *batched = tp_test_serialize_project(tp_model_project(m));
     tp_txn_result_free(&res);
 
-    tp_project *p2 = base_project(); /* identical initial state, same ids (deterministic) */
+    tp_project *p2 = tp_test_base_project(); /* identical initial state, same ids (deterministic) */
     tp_op_reject rej;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_operation_apply(p2, &ops[0], &rej));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_operation_apply(p2, &ops[1], &rej));
-    char *onebyone = serialize(p2);
+    char *onebyone = tp_test_serialize_project(p2);
 
     TEST_ASSERT_EQUAL_STRING(onebyone, batched);
     free(batched);
@@ -330,16 +296,16 @@ void test_batch_equals_one_by_one(void) {
 
 /* atomicity: op N (here op1) fails semantic validation -> nothing applied. */
 void test_atomicity_op_fails(void) {
-    tp_project *p = base_project();
+    tp_project *p = tp_test_base_project();
     tp_id128 aid = p->atlases[0].id;
     tp_model *m = tp_model_wrap(p);
-    char *before = serialize(tp_model_project(m));
+    char *before = tp_test_serialize_project(tp_model_project(m));
 
     tp_operation ops[2];
     op_atlas_settings(&ops[0], aid, 2048, 4);   /* valid */
     memset(&ops[1], 0, sizeof ops[1]);          /* invalid: settings on a nonexistent atlas */
     ops[1].kind = TP_OP_ATLAS_SETTINGS_SET;
-    ops[1].atlas_id = id_of(0xEE);
+    ops[1].atlas_id = tp_test_id_of(0xEE);
     ops[1].u.atlas_settings.mask = TP_AF_MAX_SIZE;
     ops[1].u.atlas_settings.max_size = 512;
 
@@ -357,7 +323,7 @@ void test_atomicity_op_fails(void) {
     TEST_ASSERT_EQUAL_INT(1, res.errors[0].op_index); /* op1 is the offender */
     TEST_ASSERT_EQUAL_INT64(0, tp_model_revision(m)); /* unchanged */
 
-    char *after = serialize(tp_model_project(m));
+    char *after = tp_test_serialize_project(tp_model_project(m));
     TEST_ASSERT_EQUAL_STRING(before, after); /* op0 NOT applied: model byte-unchanged */
     free(before);
     free(after);
@@ -367,10 +333,10 @@ void test_atomicity_op_fails(void) {
 
 /* clone-alloc fault at apply time -> model byte-unchanged, revision unchanged. */
 void test_apply_clone_fault(void) {
-    tp_project *p = base_project();
+    tp_project *p = tp_test_base_project();
     tp_id128 aid = p->atlases[0].id;
     tp_model *m = tp_model_wrap(p);
-    char *before = serialize(tp_model_project(m));
+    char *before = tp_test_serialize_project(tp_model_project(m));
 
     tp_operation ops[1];
     op_atlas_rename(&ops[0], aid, "x");
@@ -386,7 +352,7 @@ void test_apply_clone_fault(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OOM, tp_model_apply(m, &req, &res, &err));
     TEST_ASSERT_FALSE(res.committed);
     TEST_ASSERT_EQUAL_INT64(0, tp_model_revision(m));
-    char *after = serialize(tp_model_project(m));
+    char *after = tp_test_serialize_project(tp_model_project(m));
     TEST_ASSERT_EQUAL_STRING(before, after);
     free(before);
     free(after);
@@ -396,17 +362,17 @@ void test_apply_clone_fault(void) {
 
 /* per-op staging-alloc fault (animation.create frames) mid-batch -> unchanged. */
 void test_apply_per_op_alloc_fault(void) {
-    tp_project *p = base_project();
+    tp_project *p = tp_test_base_project();
     tp_id128 aid = p->atlases[0].id;
     tp_model *m = tp_model_wrap(p);
-    char *before = serialize(tp_model_project(m));
+    char *before = tp_test_serialize_project(tp_model_project(m));
 
     tp_operation ops[2];
     op_atlas_settings(&ops[0], aid, 2048, 4); /* op0 valid */
     memset(&ops[1], 0, sizeof ops[1]);        /* op1: anim.create with frames (compound staging) */
     ops[1].kind = TP_OP_ANIMATION_CREATE;
     ops[1].atlas_id = aid;
-    ops[1].u.anim_create.anim_id = id_of(0xC7);
+    ops[1].u.anim_create.anim_id = tp_test_id_of(0xC7);
     ops[1].u.anim_create.name = (char *)"walk";
     ops[1].u.anim_create.fps = 12.0F;
     tp_id128 source_id = p->atlases[0].sources[0].id;
@@ -427,7 +393,7 @@ void test_apply_per_op_alloc_fault(void) {
     TEST_ASSERT_NOT_EQUAL(TP_STATUS_OK, tp_model_apply(m, &req, &res, &err));
     TEST_ASSERT_FALSE(res.committed);
     TEST_ASSERT_EQUAL_INT64(0, tp_model_revision(m));
-    char *after = serialize(tp_model_project(m));
+    char *after = tp_test_serialize_project(tp_model_project(m));
     TEST_ASSERT_EQUAL_STRING(before, after); /* op0 rolled back with the clone */
     free(before);
     free(after);
@@ -438,16 +404,16 @@ void test_apply_per_op_alloc_fault(void) {
 /* Typed input is untrusted too: canonical sizing must not walk a claimed frame
  * array before the operation owner has rejected a missing pointer. */
 void test_typed_null_frame_array_rejected_before_encoding(void) {
-    tp_project *p = base_project();
+    tp_project *p = tp_test_base_project();
     const tp_id128 aid = p->atlases[0].id;
     tp_model *m = tp_model_wrap(p);
-    char *before = serialize(tp_model_project(m));
+    char *before = tp_test_serialize_project(tp_model_project(m));
 
     tp_operation op;
     memset(&op, 0, sizeof op);
     op.kind = TP_OP_ANIMATION_CREATE;
     op.atlas_id = aid;
-    op.u.anim_create.anim_id = id_of(0xC8);
+    op.u.anim_create.anim_id = tp_test_id_of(0xC8);
     op.u.anim_create.name = (char *)"walk";
     op.u.anim_create.fps = 12.0F;
     op.u.anim_create.frames = NULL;
@@ -468,7 +434,7 @@ void test_typed_null_frame_array_rejected_before_encoding(void) {
     TEST_ASSERT_EQUAL_INT(1, res.error_count);
     TEST_ASSERT_EQUAL_INT(0, res.errors[0].op_index);
     TEST_ASSERT_EQUAL_STRING("frames", res.errors[0].field);
-    char *after = serialize(tp_model_project(m));
+    char *after = tp_test_serialize_project(tp_model_project(m));
     TEST_ASSERT_EQUAL_STRING(before, after);
 
     free(before);
@@ -480,7 +446,7 @@ void test_typed_null_frame_array_rejected_before_encoding(void) {
 /* The public request owns a fixed 33-byte ID buffer. A caller that fills every
  * byte without a terminator must get id_malformed, never an unbounded %s/scan. */
 void test_typed_nonterminated_transaction_id_rejected_bounded(void) {
-    tp_project *p = base_project();
+    tp_project *p = tp_test_base_project();
     const tp_id128 aid = p->atlases[0].id;
     tp_model *m = tp_model_wrap(p);
 
@@ -510,7 +476,7 @@ void test_typed_nonterminated_transaction_id_rejected_bounded(void) {
 void test_json_short_transaction_ids_rejected_bounded(void) {
     static const char *const ids[] = {"", "a"};
     for (size_t i = 0U; i < sizeof ids / sizeof ids[0]; ++i) {
-        tp_model *m = tp_model_wrap(base_project());
+        tp_model *m = tp_model_wrap(tp_test_base_project());
         char json[256];
         (void)snprintf(json, sizeof json,
                        "{\"schema\":1,\"transaction\":{\"id\":\"%s\","
@@ -531,7 +497,7 @@ void test_json_short_transaction_ids_rejected_bounded(void) {
 /* ---- expected_revision semantics ---------------------------------------- */
 
 void test_expected_revision(void) {
-    tp_project *p = base_project();
+    tp_project *p = tp_test_base_project();
     tp_id128 aid = p->atlases[0].id;
     tp_model *m = tp_model_wrap(p);
     tp_operation op;
@@ -572,7 +538,7 @@ void test_expected_revision(void) {
 /* ---- idempotency: retry the same id (with the STALE original revision) --- */
 
 void test_idempotent_retry(void) {
-    tp_project *p = base_project();
+    tp_project *p = tp_test_base_project();
     tp_id128 aid = p->atlases[0].id;
     tp_model *m = tp_model_wrap(p);
     tp_operation op;
@@ -597,7 +563,7 @@ void test_idempotent_retry(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_apply(m, &later_req, &res, &err)); /* rev -> 2 */
     tp_txn_result_free(&res);
 
-    char *before = serialize(tp_model_project(m));
+    char *before = tp_test_serialize_project(tp_model_project(m));
     /* Retry the original id after another commit, with the original stale revision:
      * duplicate detection precedes revision and returns the CURRENT revision. */
     TEST_ASSERT_EQUAL_INT(TP_STATUS_DUPLICATE_ID, tp_model_apply(m, &req, &res, &err));
@@ -608,7 +574,7 @@ void test_idempotent_retry(void) {
     TEST_ASSERT_EQUAL_STRING("id", res.errors[0].field);
     TEST_ASSERT_TRUE(err.msg[0] != '\0');
     TEST_ASSERT_EQUAL_INT64(2, tp_model_revision(m));
-    char *after = serialize(tp_model_project(m));
+    char *after = tp_test_serialize_project(tp_model_project(m));
     TEST_ASSERT_EQUAL_STRING(before, after);
     free(before);
     free(after);
@@ -635,7 +601,7 @@ static tp_status commit_numbered_change(tp_model *model, unsigned id_value,
 void test_idempotency_retention_window_evicts_fifo(void) {
     tp_model *model = tp_model_create();
     TEST_ASSERT_NOT_NULL(model);
-    tp_model_project(model)->atlases[0].id = id_of(0x77);
+    tp_model_project(model)->atlases[0].id = tp_test_id_of(0x77);
     tp_model_project(model)->atlases[0].id_synthetic = false;
     tp_txn_result result;
     tp_error err = {0};
@@ -675,7 +641,7 @@ void test_idempotency_retention_window_evicts_fifo(void) {
 }
 
 void test_semantic_no_change_is_not_committed_or_retained(void) {
-    tp_project *project = base_project();
+    tp_project *project = tp_test_base_project();
     const tp_id128 atlas_id = project->atlases[0].id;
     tp_model *model = tp_model_wrap(project);
     TEST_ASSERT_NOT_NULL(model);
@@ -683,7 +649,7 @@ void test_semantic_no_change_is_not_committed_or_retained(void) {
 
     tp_journal_io io = tp_journal_io_memory();
     TEST_ASSERT_NOT_NULL(io.ctx);
-    tp_journal *journal = tp_journal_create(io, id_of(0xA5));
+    tp_journal *journal = tp_journal_create(io, tp_test_id_of(0xA5));
     TEST_ASSERT_NOT_NULL(journal);
     tp_error error = {0};
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
@@ -727,7 +693,7 @@ void test_semantic_no_change_is_not_committed_or_retained(void) {
 }
 
 void test_semantic_no_change_preserves_redo_branch(void) {
-    tp_project *project = base_project();
+    tp_project *project = tp_test_base_project();
     const tp_id128 atlas_id = project->atlases[0].id;
     tp_model *model = tp_model_wrap(project);
     TEST_ASSERT_NOT_NULL(model);
@@ -766,7 +732,7 @@ void test_semantic_no_change_preserves_redo_branch(void) {
 }
 
 void test_journal_less_history_avoids_checkpoint_size_traversals(void) {
-    tp_project *project = base_project();
+    tp_project *project = tp_test_base_project();
     const tp_id128 atlas_id = project->atlases[0].id;
     tp_model *model = tp_model_wrap(project);
     TEST_ASSERT_NOT_NULL(model);
@@ -798,7 +764,7 @@ void test_journal_less_history_avoids_checkpoint_size_traversals(void) {
 /* ---- dirty = semantic identity (NOT revision) --------------------------- */
 
 void test_dirty_is_semantic_identity(void) {
-    tp_project *p = base_project();
+    tp_project *p = tp_test_base_project();
     tp_id128 aid = p->atlases[0].id;
     tp_model *m = tp_model_wrap(p);
     TEST_ASSERT_FALSE(tp_model_dirty(m)); /* freshly wrapped == clean */
@@ -841,7 +807,7 @@ void test_dirty_is_semantic_identity(void) {
 }
 
 void test_identity_excludes_runtime(void) {
-    tp_project *p = base_project();
+    tp_project *p = tp_test_base_project();
     tp_id128 before = tp_semantic_identity(p);
     /* the project file path is an identity KEY, not semantic content -> excluded. */
     free(p->project_dir);
@@ -861,12 +827,12 @@ void test_identity_excludes_runtime(void) {
 
 /* identity is order-normalized for ID-keyed collections (targets). */
 void test_identity_order_normalized(void) {
-    tp_project *p = base_project();
+    tp_project *p = tp_test_base_project();
     tp_project_atlas *a = &p->atlases[0];
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(a, "defold", "out/b", NULL));
     /* promote the new target's id so it is addressable/stable */
     uint8_t ctr = 9;
-    tp_rng rng = {det_fill, &ctr};
+    tp_rng rng = {tp_test_det_fill, &ctr};
     tp_error err;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_promote_ids(p, &rng, &err));
     tp_id128 before = tp_semantic_identity(p);
@@ -881,7 +847,7 @@ void test_identity_order_normalized(void) {
 
 /* animation frame order IS semantic: reordering frames changes identity. */
 void test_identity_frames_order_semantic(void) {
-    tp_project *p = base_project();
+    tp_project *p = tp_test_base_project();
     tp_project_atlas *a = &p->atlases[0];
     tp_project_anim *an = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_animation(a, "walk", &an));
@@ -1034,7 +1000,7 @@ void test_json_max_ops_walk_and_error_growth_are_linear(void) {
     free(valid);
 
     char *faults = txn_json_with_unknown_ops(TP_TXN_MAX_OPS);
-    tp_model *model = tp_model_wrap(base_project());
+    tp_model *model = tp_model_wrap(tp_test_base_project());
     tp_txn_result result;
     memset(&err, 0, sizeof err);
     tp_txn__test_complexity_reset();
@@ -1145,7 +1111,7 @@ void test_operation_count_rejects_before_clone_for_json_and_typed_apply(void) {
 }
 
 void test_typed_byte_limit_rejects_before_encode_or_clone_without_journal(void) {
-    tp_project *project = base_project();
+    tp_project *project = tp_test_base_project();
     tp_model *model = tp_model_wrap(project);
     TEST_ASSERT_NOT_NULL(model);
     char *author = malloc((size_t)TP_TXN_MAX_REQUEST_BYTES + 1U);
@@ -1172,9 +1138,9 @@ void test_typed_byte_limit_rejects_before_encode_or_clone_without_journal(void) 
 }
 
 void test_typed_positive_op_count_requires_operations_before_clone(void) {
-    tp_model *m = tp_model_wrap(base_project());
+    tp_model *m = tp_model_wrap(tp_test_base_project());
     TEST_ASSERT_NOT_NULL(m);
-    char *before = serialize(tp_model_project(m));
+    char *before = tp_test_serialize_project(tp_model_project(m));
 
     tp_txn_request typed = {0};
     typed.schema = TP_TXN_SCHEMA;
@@ -1198,7 +1164,7 @@ void test_typed_positive_op_count_requires_operations_before_clone(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT, result.errors[0].code);
     TEST_ASSERT_EQUAL_STRING("operations", result.errors[0].field);
     TEST_ASSERT_EQUAL_INT64(0, tp_model_revision(m));
-    char *after = serialize(tp_model_project(m));
+    char *after = tp_test_serialize_project(tp_model_project(m));
     TEST_ASSERT_EQUAL_STRING(before, after);
 
     free(after);
@@ -1209,7 +1175,7 @@ void test_typed_positive_op_count_requires_operations_before_clone(void) {
 
 /* revision short-circuits ALONE (op_index -1) even with a malformed op present. */
 void test_json_revision_short_circuit_alone(void) {
-    tp_project *p = base_project();
+    tp_project *p = tp_test_base_project();
     tp_model *m = tp_model_wrap(p);
     /* expected_revision 7 (> current 0) AND an unknown op: only the revision error. */
     const char *json = "{\"schema\":1,\"transaction\":{"
@@ -1228,7 +1194,7 @@ void test_json_revision_short_circuit_alone(void) {
 
 /* per-op shape faults collected in (op_index, field) order. */
 void test_json_shape_collect_all(void) {
-    tp_project *p = base_project();
+    tp_project *p = tp_test_base_project();
     tp_model *m = tp_model_wrap(p);
     /* op0: known op with an UNKNOWN field; op1: known op with a MALFORMED atlas_id;
      * op2: UNKNOWN op wire. Expect three errors, in that order. */
@@ -1259,11 +1225,11 @@ void test_json_shape_collect_all(void) {
 
 void test_json_request_encode_golden(void) {
     tp_operation ops[2];
-    op_atlas_settings(&ops[0], id_of(0xA1), 2048, 4);
+    op_atlas_settings(&ops[0], tp_test_id_of(0xA1), 2048, 4);
     memset(&ops[1], 0, sizeof ops[1]);
     ops[1].kind = TP_OP_TARGET_CREATE;
-    ops[1].atlas_id = id_of(0xA1);
-    ops[1].u.target_create.target_id = id_of(0xB2);
+    ops[1].atlas_id = tp_test_id_of(0xA1);
+    ops[1].u.target_create.target_id = tp_test_id_of(0xB2);
     ops[1].u.target_create.exporter_id = (char *)"defold";
     ops[1].u.target_create.out_path = (char *)"out/x";
     ops[1].u.target_create.enabled = true;
@@ -1324,8 +1290,8 @@ void test_json_anim_rename_roundtrip(void) {
     tp_operation op;
     memset(&op, 0, sizeof op);
     op.kind = TP_OP_ANIMATION_RENAME;
-    op.atlas_id = id_of(0xA1);
-    op.u.anim_rename.anim_id = id_of(0xC1);
+    op.atlas_id = tp_test_id_of(0xA1);
+    op.u.anim_rename.anim_id = tp_test_id_of(0xC1);
     op.u.anim_rename.name = (char *)"renamed";
     tp_txn_request req = {0};
     req.schema = TP_TXN_SCHEMA;
@@ -1356,7 +1322,7 @@ void test_json_anim_rename_roundtrip(void) {
 
 /* the batch decoded from JSON applies == the same ops one-by-one via F2-01. */
 void test_json_batch_equals_one_by_one(void) {
-    tp_project *p1 = base_project();
+    tp_project *p1 = tp_test_base_project();
     tp_id128 aid = p1->atlases[0].id;
     tp_operation ops[2];
     op_atlas_settings(&ops[0], aid, 1500, 3);
@@ -1375,7 +1341,7 @@ void test_json_batch_equals_one_by_one(void) {
     tp_error err;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_apply_json(m, json, &res, &err));
     TEST_ASSERT_TRUE(res.committed);
-    char *batched = serialize(tp_model_project(m));
+    char *batched = tp_test_serialize_project(tp_model_project(m));
     /* the committed result encodes byte-stable too */
     char *rjson = tp_txn_result_encode(&res);
     TEST_ASSERT_NOT_NULL(rjson);
@@ -1383,11 +1349,11 @@ void test_json_batch_equals_one_by_one(void) {
     TEST_ASSERT_NOT_NULL(strstr(rjson, "\"revision\": 1"));
     tp_txn_result_free(&res);
 
-    tp_project *p2 = base_project();
+    tp_project *p2 = tp_test_base_project();
     tp_op_reject rej;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_operation_apply(p2, &ops[0], &rej));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_operation_apply(p2, &ops[1], &rej));
-    char *onebyone = serialize(p2);
+    char *onebyone = tp_test_serialize_project(p2);
 
     TEST_ASSERT_EQUAL_STRING(onebyone, batched);
     free(json);
@@ -1420,7 +1386,7 @@ void test_number_handling(void) {
     tp_model_destroy(m);
 
     /* an int knob out of int range routes through the range-checked converter. */
-    tp_project *p = base_project();
+    tp_project *p = tp_test_base_project();
     char aid[TP_ID_TEXT_CAP];
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_id_format(TP_ID_KIND_ATLAS, p->atlases[0].id, aid, sizeof aid, &err));
     tp_model *m2 = tp_model_wrap(p);
@@ -1440,7 +1406,7 @@ void test_number_handling(void) {
 /* [8] the typed path validates the transaction-id format (was: garbage id committed
  * and a second garbage id then collided on duplicate_id). */
 void test_typed_malformed_id_rejected(void) {
-    tp_project *p = base_project();
+    tp_project *p = tp_test_base_project();
     tp_id128 aid = p->atlases[0].id;
     tp_model *m = tp_model_wrap(p);
     tp_operation op;
@@ -1480,7 +1446,7 @@ void test_typed_malformed_id_rejected(void) {
 /* [1] tp_model_apply_json(m, json, NULL, err) never dereferences a NULL out, on any
  * reject path or the commit path. */
 void test_json_null_out_no_crash(void) {
-    tp_project *p = base_project();
+    tp_project *p = tp_test_base_project();
     tp_id128 aid = p->atlases[0].id;
     tp_model *m = tp_model_wrap(p);
     tp_error err;
@@ -1513,7 +1479,7 @@ void test_json_null_out_no_crash(void) {
 /* [3] a malformed-JSON reject preserves the current revision (was: result.revision 0,
  * making the client believe the model reset). */
 void test_json_malformed_preserves_revision(void) {
-    tp_project *p = base_project();
+    tp_project *p = tp_test_base_project();
     tp_id128 aid = p->atlases[0].id;
     tp_model *m = tp_model_wrap(p);
     tp_error err;
@@ -1542,7 +1508,7 @@ void test_json_malformed_preserves_revision(void) {
  * a whole batch's bad ids report together (was: only the first caught fail-fast in
  * lowering, one bad id per round-trip). */
 void test_json_nonstring_id_collect_all(void) {
-    tp_project *p = base_project();
+    tp_project *p = tp_test_base_project();
     tp_model *m = tp_model_wrap(p);
     const char *json = "{\"schema\":1,\"transaction\":{"
                        "\"id\":\"00000000000000000000000000000000\",\"expected_revision\":0,\"operations\":["
@@ -1569,7 +1535,7 @@ void test_json_nonstring_id_collect_all(void) {
  * This prevents 65535 wrapping to -1 == INHERIT while keeping every frontend's
  * structured error semantics identical. */
 void test_json_ov_int16_range(void) {
-    tp_project *p = base_project();
+    tp_project *p = tp_test_base_project();
     tp_id128 aid = p->atlases[0].id;
     tp_id128 src0 = p->atlases[0].sources[0].id;
     tp_model *m = tp_model_wrap(p);
@@ -1613,7 +1579,7 @@ void test_json_ov_int16_range(void) {
 /* [field] the rejected-result JSON emits the offending `field` (sparse: omitted when
  * ""), matching F2-01 tp_op_result_encode + canonical ascending key order. */
 void test_json_result_error_field_golden(void) {
-    tp_project *p = base_project();
+    tp_project *p = tp_test_base_project();
     tp_id128 aid = p->atlases[0].id;
     tp_model *m = tp_model_wrap(p);
     tp_error err;
@@ -1673,13 +1639,13 @@ void test_json_fractional_schema_rejected(void) {
 /* [OOM] a shape-faulted batch whose error record cannot be stored must REJECT, never
  * commit (was: add_error dropped the error, error_count 0, the batch committed). */
 void test_json_shape_oom_must_not_commit(void) {
-    tp_project *p = base_project();
+    tp_project *p = tp_test_base_project();
     tp_id128 aid = p->atlases[0].id;
     tp_model *m = tp_model_wrap(p);
     tp_error err;
     char adhex[TP_ID_TEXT_CAP];
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_id_format(TP_ID_KIND_ATLAS, aid, adhex, sizeof adhex, &err));
-    char *before = serialize(tp_model_project(m));
+    char *before = tp_test_serialize_project(tp_model_project(m));
     /* a shape fault (unknown field "bogus") on an OTHERWISE valid+committable op: if
      * the fault record is dropped and error_count stays 0, the old code would lower
      * (ignoring the unknown field) and COMMIT. */
@@ -1695,7 +1661,7 @@ void test_json_shape_oom_must_not_commit(void) {
     TEST_ASSERT_NOT_EQUAL(TP_STATUS_OK, st); /* rejected, NOT committed */
     TEST_ASSERT_FALSE(res.committed);
     TEST_ASSERT_EQUAL_INT64(0, tp_model_revision(m)); /* revision unchanged */
-    char *after = serialize(tp_model_project(m));
+    char *after = tp_test_serialize_project(tp_model_project(m));
     TEST_ASSERT_EQUAL_STRING(before, after); /* model byte-unchanged */
     free(before);
     free(after);
@@ -1713,8 +1679,8 @@ void test_sprite_clear_field_roundtrip(void) {
         tp_operation op;
         memset(&op, 0, sizeof op);
         op.kind = TP_OP_SPRITE_OVERRIDE_CLEAR;
-        op.atlas_id = id_of(0xA1);
-        op.u.sprite_clear.source_id = id_of(0xB2);
+        op.atlas_id = tp_test_id_of(0xA1);
+        op.u.sprite_clear.source_id = tp_test_id_of(0xB2);
         op.u.sprite_clear.src_key = (char *)"hero.png";
         op.u.sprite_clear.mask = bits[i];
 

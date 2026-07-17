@@ -11,28 +11,14 @@
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_project_migrate.h" /* tp_project_promote_ids */
+#include "tp_test_model.h"
 #include "unity.h"
 
-/* Deterministic distinct non-nil bytes per call (mirrors test_project_ids). */
-static int det_fill(void *ctx, uint8_t *out, size_t len) {
-    uint8_t *ctr = (uint8_t *)ctx;
-    for (size_t j = 0; j < len; j++) {
-        out[j] = (uint8_t)(*ctr + (uint8_t)j + 1U);
-    }
-    (*ctr)++;
-    return (int)len;
-}
+/* det_fill / id_of: shared byte-identical fixtures, see tp_test_model.h
+ * (tp_test_det_fill / tp_test_id_of). */
 
 void setUp(void) {}
 void tearDown(void) {}
-
-static tp_id128 id_of(uint8_t b) {
-    tp_id128 x;
-    for (int i = 0; i < 16; i++) {
-        x.bytes[i] = b;
-    }
-    return x;
-}
 
 /* ---- catalog ------------------------------------------------------------- */
 
@@ -74,7 +60,7 @@ void test_encode_golden_atlas_create(void) {
     tp_operation op;
     memset(&op, 0, sizeof op);
     op.kind = TP_OP_ATLAS_CREATE;
-    op.atlas_id = id_of(0x11);
+    op.atlas_id = tp_test_id_of(0x11);
     op.u.atlas_create.name = (char *)"hero"; /* not freed: literal, op not passed to tp_operation_free */
     char *j = tp_operation_encode(&op);
     TEST_ASSERT_NOT_NULL(j);
@@ -91,7 +77,7 @@ void test_encode_golden_settings_sparse(void) {
     tp_operation op;
     memset(&op, 0, sizeof op);
     op.kind = TP_OP_ATLAS_SETTINGS_SET;
-    op.atlas_id = id_of(0x11);
+    op.atlas_id = tp_test_id_of(0x11);
     op.u.atlas_settings.mask = TP_AF_MAX_SIZE | TP_AF_SHAPE; /* sparse: only these two emit */
     op.u.atlas_settings.max_size = 1024;
     op.u.atlas_settings.shape = 2;
@@ -111,9 +97,9 @@ void test_encode_animation_frame_keeps_canonical_source_identity(void) {
     tp_operation op;
     memset(&op, 0, sizeof op);
     op.kind = TP_OP_ANIMATION_FRAME_ADD;
-    op.atlas_id = id_of(0x11);
-    op.u.anim_frame_add.anim_id = id_of(0x22);
-    op.u.anim_frame_add.frame.source_id = id_of(0x33);
+    op.atlas_id = tp_test_id_of(0x11);
+    op.u.anim_frame_add.anim_id = tp_test_id_of(0x22);
+    op.u.anim_frame_add.frame.source_id = tp_test_id_of(0x33);
     op.u.anim_frame_add.frame.src_key = (char *)"shared.png";
     op.u.anim_frame_add.index = -1;
     char *json = tp_operation_encode(&op);
@@ -127,7 +113,7 @@ void test_encode_result_committed(void) {
     tp_operation op;
     memset(&op, 0, sizeof op);
     op.kind = TP_OP_ATLAS_CREATE;
-    op.atlas_id = id_of(0x11);
+    op.atlas_id = tp_test_id_of(0x11);
     op.u.atlas_create.name = (char *)"hero";
     char *j = tp_op_result_encode(&op, NULL);
     TEST_ASSERT_NOT_NULL(j);
@@ -143,7 +129,7 @@ void test_encode_result_rejected(void) {
     tp_operation op;
     memset(&op, 0, sizeof op);
     op.kind = TP_OP_ATLAS_SETTINGS_SET;
-    op.atlas_id = id_of(0x11);
+    op.atlas_id = tp_test_id_of(0x11);
     tp_op_reject rej;
     rej.status = TP_STATUS_OUT_OF_RANGE;
     (void)snprintf(rej.field, sizeof rej.field, "%s", "max_size");
@@ -168,7 +154,7 @@ static tp_project *promoted_project(tp_id128 *out_aid) {
     tp_project *p = tp_project_create();
     TEST_ASSERT_NOT_NULL(p);
     uint8_t ctr = 7;
-    tp_rng rng = {det_fill, &ctr};
+    tp_rng rng = {tp_test_det_fill, &ctr};
     tp_error err;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_promote_ids(p, &rng, &err));
     if (out_aid) {
@@ -205,7 +191,7 @@ void test_validate_bad_reference(void) {
     tp_operation op;
     memset(&op, 0, sizeof op);
     op.kind = TP_OP_ATLAS_RENAME;
-    op.atlas_id = id_of(0x55); /* no such atlas */
+    op.atlas_id = tp_test_id_of(0x55); /* no such atlas */
     op.u.atlas_rename.name = (char *)"x";
     tp_op_reject rej;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_NOT_FOUND, tp_operation_validate(p, &op, &rej));
@@ -244,7 +230,7 @@ static tp_project *anim_project(tp_id128 *out_aid, tp_id128 *out_anid, int frame
         TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, names[i]));
     }
     uint8_t ctr = 7;
-    tp_rng rng = {det_fill, &ctr};
+    tp_rng rng = {tp_test_det_fill, &ctr};
     tp_error err;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_promote_ids(p, &rng, &err));
     if (out_aid) {
@@ -268,7 +254,7 @@ void test_validate_negative_frame_count(void) {
     memset(&op, 0, sizeof op);
     op.kind = TP_OP_ANIMATION_CREATE;
     op.atlas_id = aid;
-    op.u.anim_create.anim_id = id_of(0xC1);
+    op.u.anim_create.anim_id = tp_test_id_of(0xC1);
     op.u.anim_create.name = (char *)"run";
     op.u.anim_create.fps = 12.0F;
     op.u.anim_create.playback = 0;
@@ -300,7 +286,7 @@ void test_validate_null_frames_array(void) {
     memset(&op, 0, sizeof op);
     op.kind = TP_OP_ANIMATION_CREATE;
     op.atlas_id = aid;
-    op.u.anim_create.anim_id = id_of(0xC2);
+    op.u.anim_create.anim_id = tp_test_id_of(0xC2);
     op.u.anim_create.name = (char *)"run";
     op.u.anim_create.fps = 12.0F;
     op.u.anim_create.playback = 0;
@@ -332,7 +318,7 @@ void test_validate_animation_frame_requires_normalized_source_key(void) {
         tp_project_atlas_add_animation(&project->atlases[0], "walk",
                                        &animation));
     uint8_t counter = 43U;
-    tp_rng rng = {det_fill, &counter};
+    tp_rng rng = {tp_test_det_fill, &counter};
     tp_error error = {{0}};
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_project_promote_ids(project, &rng, &error));
@@ -360,7 +346,7 @@ void test_validate_atlas_create_dup_name(void) {
     tp_operation op;
     memset(&op, 0, sizeof op);
     op.kind = TP_OP_ATLAS_CREATE;
-    op.atlas_id = id_of(0xA5);
+    op.atlas_id = tp_test_id_of(0xA5);
     op.u.atlas_create.name = (char *)"atlas1";
     tp_op_reject rej;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT, tp_operation_validate(p, &op, &rej));
@@ -375,7 +361,7 @@ void test_validate_atlas_rename_collision(void) {
     tp_project *p = tp_project_create(); /* atlas[0] = "atlas1" */
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_add_atlas(p, "atlas2", NULL));
     uint8_t ctr = 7;
-    tp_rng rng = {det_fill, &ctr};
+    tp_rng rng = {tp_test_det_fill, &ctr};
     tp_error err;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_promote_ids(p, &rng, &err));
     tp_operation op;
@@ -424,7 +410,7 @@ void test_validate_anim_rename(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_animation(&p->atlases[0], "walk", &a1));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_animation(&p->atlases[0], "run", &a2));
     uint8_t ctr = 7;
-    tp_rng rng = {det_fill, &ctr};
+    tp_rng rng = {tp_test_det_fill, &ctr};
     tp_error err;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_promote_ids(p, &rng, &err));
     tp_id128 aid = p->atlases[0].id;
@@ -450,7 +436,7 @@ void test_validate_anim_rename(void) {
     op.u.anim_rename.name = (char *)"sprint"; /* a fresh name: allowed */
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_operation_validate(p, &op, &rej));
 
-    op.u.anim_rename.anim_id = id_of(0x99); /* unknown anim id -> not_found */
+    op.u.anim_rename.anim_id = tp_test_id_of(0x99); /* unknown anim id -> not_found */
     TEST_ASSERT_EQUAL_INT(TP_STATUS_NOT_FOUND, tp_operation_validate(p, &op, &rej));
     TEST_ASSERT_EQUAL_STRING("anim_id", rej.field);
     tp_project_destroy(p);
@@ -462,14 +448,14 @@ void test_validate_source_add_dup_path(void) {
     tp_project *p = tp_project_create();
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_source(&p->atlases[0], "sprites/hero"));
     uint8_t ctr = 7;
-    tp_rng rng = {det_fill, &ctr};
+    tp_rng rng = {tp_test_det_fill, &ctr};
     tp_error err;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_promote_ids(p, &rng, &err));
     tp_operation op;
     memset(&op, 0, sizeof op);
     op.kind = TP_OP_SOURCE_ADD;
     op.atlas_id = p->atlases[0].id;
-    op.u.source_add.source_id = id_of(0xB9);
+    op.u.source_add.source_id = tp_test_id_of(0xB9);
     op.u.source_add.kind = TP_SOURCE_KIND_FOLDER;
     op.u.source_add.key = (char *)"sprites/hero"; /* exact duplicate */
     tp_op_reject rej;
@@ -501,7 +487,7 @@ void test_validate_source_add_dup_relative_to_saved_project(void) {
                           tp_project_atlas_add_source(&p->atlases[0],
                                                       "sprites/hero"));
     uint8_t ctr = 7;
-    tp_rng rng = {det_fill, &ctr};
+    tp_rng rng = {tp_test_det_fill, &ctr};
     tp_error err;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_promote_ids(p, &rng, &err));
 
@@ -509,7 +495,7 @@ void test_validate_source_add_dup_relative_to_saved_project(void) {
     memset(&op, 0, sizeof op);
     op.kind = TP_OP_SOURCE_ADD;
     op.atlas_id = p->atlases[0].id;
-    op.u.source_add.source_id = id_of(0xB8);
+    op.u.source_add.source_id = tp_test_id_of(0xB8);
     op.u.source_add.kind = TP_SOURCE_KIND_FOLDER;
     op.u.source_add.key = (char *)"sprites/hero";
     tp_op_reject rej;
@@ -534,14 +520,14 @@ void test_validate_saved_source_keys_preserve_empty_and_replace_uniqueness(void)
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_project_atlas_add_source(&p->atlases[0], "two"));
     uint8_t ctr = 9;
-    tp_rng rng = {det_fill, &ctr};
+    tp_rng rng = {tp_test_det_fill, &ctr};
     tp_error err;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_promote_ids(p, &rng, &err));
 
     tp_operation op = {0};
     op.kind = TP_OP_SOURCE_ADD;
     op.atlas_id = p->atlases[0].id;
-    op.u.source_add.source_id = id_of(0xB7);
+    op.u.source_add.source_id = tp_test_id_of(0xB7);
     op.u.source_add.kind = TP_SOURCE_KIND_FOLDER;
     op.u.source_add.key = (char *)"";
     tp_op_reject rej;
@@ -570,7 +556,7 @@ void test_validate_source_add_bad_kind(void) {
     memset(&op, 0, sizeof op);
     op.kind = TP_OP_SOURCE_ADD;
     op.atlas_id = aid;
-    op.u.source_add.source_id = id_of(0xBA);
+    op.u.source_add.source_id = tp_test_id_of(0xBA);
     op.u.source_add.key = (char *)"sprites/new";
     tp_op_reject rej;
 
@@ -595,7 +581,7 @@ void test_validate_source_paths_fail_closed(void) {
         TP_STATUS_OK,
         tp_project_atlas_add_source(&project->atlases[0], "existing"));
     uint8_t counter = 23;
-    tp_rng rng = {det_fill, &counter};
+    tp_rng rng = {tp_test_det_fill, &counter};
     tp_error err = {{0}};
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_project_promote_ids(project, &rng, &err));
@@ -606,7 +592,7 @@ void test_validate_source_paths_fail_closed(void) {
     tp_operation op = {0};
     op.kind = TP_OP_SOURCE_ADD;
     op.atlas_id = project->atlases[0].id;
-    op.u.source_add.source_id = id_of(0xB6);
+    op.u.source_add.source_id = tp_test_id_of(0xB6);
     op.u.source_add.kind = TP_SOURCE_KIND_FOLDER;
     op.u.source_add.key = oversized;
     tp_op_reject reject;
@@ -629,7 +615,7 @@ void test_source_attached_sprite_ops_preserve_structural_identity(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_project_atlas_add_source(&project->atlases[0], "sprites"));
     uint8_t counter = 19U;
-    tp_rng rng = {det_fill, &counter};
+    tp_rng rng = {tp_test_det_fill, &counter};
     tp_error err = {{0}};
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_project_promote_ids(project, &rng, &err));
@@ -763,7 +749,7 @@ static tp_project *target_project(tp_id128 *out_aid, tp_id128 *out_tid) {
                           tp_project_atlas_add_target(&p->atlases[0], TP_EXPORTER_ID_JSON_NEOTOLIS, "out/orig", &t));
     t->enabled = true;
     uint8_t ctr = 7;
-    tp_rng rng = {det_fill, &ctr};
+    tp_rng rng = {tp_test_det_fill, &ctr};
     tp_error err;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_promote_ids(p, &rng, &err));
     if (out_aid) {

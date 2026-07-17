@@ -36,6 +36,7 @@
 #include "tp_op_internal.h"      /* exact recovery replay operation count */
 #include "tp_project_internal.h" /* checkpoint materialization counters */
 #include "tp_txn_internal.h"     /* clone fault seam + replay count preflight */
+#include "tp_test_model.h"
 #include "unity.h"
 
 static const char *g_dir = NULL; /* scratch dir for the on-disk file journal test */
@@ -63,29 +64,12 @@ static size_t checkpoint_store_bytes(size_t store_base, size_t snapshot_bytes,
            (size_t)TP_JRN_CRC_FIELD;
 }
 
-/* ---- fixtures (mirror test_transaction.c) -------------------------------- */
-
-static int det_fill(void *ctx, uint8_t *out, size_t len) {
-    uint8_t *ctr = (uint8_t *)ctx;
-    for (size_t j = 0; j < len; j++) {
-        out[j] = (uint8_t)(*ctr + (uint8_t)j + 1U);
-    }
-    (*ctr)++;
-    return (int)len;
-}
-
-static tp_project *base_project(void) {
-    tp_project *p = tp_project_create();
-    TEST_ASSERT_NOT_NULL(p);
-    tp_project_atlas *a = &p->atlases[0];
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_source(a, "sprites"));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(a, TP_EXPORTER_ID_JSON_NEOTOLIS, "out/a", NULL));
-    uint8_t ctr = 1;
-    tp_rng rng = {det_fill, &ctr};
-    tp_error err;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_promote_ids(p, &rng, &err));
-    return p;
-}
+/* ---- fixtures -------------------------------------------------------------
+ * det_fill / base_project / key_of: shared byte-identical fixtures, see
+ * tp_test_model.h (tp_test_det_fill / tp_test_base_project / tp_test_id_of;
+ * key_of here was a same-body twin of id_of elsewhere). serialize() below
+ * stays LOCAL: it uses tp_project_checkpoint_save_buffer (checkpoint format),
+ * not the tp_test_serialize_project() save_buffer contract. */
 
 static char *serialize(const tp_project *p) {
     char *buf = NULL;
@@ -95,14 +79,6 @@ static char *serialize(const tp_project *p) {
         TP_STATUS_OK,
         tp_project_checkpoint_save_buffer(p, &buf, &len, &err));
     return buf;
-}
-
-static tp_id128 key_of(uint8_t b) {
-    tp_id128 x;
-    for (int i = 0; i < 16; i++) {
-        x.bytes[i] = b;
-    }
-    return x;
 }
 
 static void retention_id(unsigned value, char out[33]) {
@@ -162,7 +138,7 @@ void test_idset_backward_shift_eviction_has_linear_probe_bound(void) {
 void test_retained_id_eviction_is_durable_and_post_append(void) {
     tp_journal_io io = tp_journal_io_memory();
     TEST_ASSERT_NOT_NULL(io.ctx);
-    tp_journal *journal = tp_journal_create(io, key_of(0x7c));
+    tp_journal *journal = tp_journal_create(io, tp_test_id_of(0x7c));
     TEST_ASSERT_NOT_NULL(journal);
     tp_error err = {0};
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_init_checkpoint(journal, NULL, 0U, 0, &err));
@@ -210,7 +186,7 @@ void test_retained_id_eviction_is_durable_and_post_append(void) {
 }
 
 void test_recovery_retained_ids_publish_only_after_record_acceptance(void) {
-    tp_id128 key = key_of(0x7e);
+    tp_id128 key = tp_test_id_of(0x7e);
     tp_journal_io io = tp_journal_io_memory();
     TEST_ASSERT_NOT_NULL(io.ctx);
     tp_journal *journal = tp_journal_create(io, key);
@@ -255,7 +231,7 @@ void test_recovery_retained_ids_publish_only_after_record_acceptance(void) {
 void test_journal_rejects_null_positive_payload_before_mutation(void) {
     tp_journal_io io = tp_journal_io_memory();
     TEST_ASSERT_NOT_NULL(io.ctx);
-    tp_journal *journal = tp_journal_create(io, key_of(0x7f));
+    tp_journal *journal = tp_journal_create(io, tp_test_id_of(0x7f));
     TEST_ASSERT_NOT_NULL(journal);
     tp_error err = {0};
 
@@ -285,7 +261,7 @@ void test_checkpoint_retained_id_count_limit_is_prepublication(void) {
     const size_t total_len = (size_t)TP_JRN_HEADER_LEN + record_len;
     uint8_t *bytes = (uint8_t *)calloc(1U, total_len);
     TEST_ASSERT_NOT_NULL(bytes);
-    const tp_id128 key = key_of(0x6d);
+    const tp_id128 key = tp_test_id_of(0x6d);
     memcpy(bytes, tp_jrn_magic, TP_JRN_MAGIC_LEN);
     tp_jrn_put_u32(bytes + TP_JRN_MAGIC_LEN, (uint32_t)TP_JOURNAL_FORMAT_VERSION);
     memcpy(bytes + TP_JRN_KEY_OFF, key.bytes, 16U);
@@ -329,7 +305,7 @@ void test_checkpoint_retained_id_count_limit_is_prepublication(void) {
 void test_replay_window_limit_is_prewrite_and_checkpoint_resets_it(void) {
     tp_journal_io io = tp_journal_io_memory();
     TEST_ASSERT_NOT_NULL(io.ctx);
-    tp_journal *journal = tp_journal_create(io, key_of(0x7d));
+    tp_journal *journal = tp_journal_create(io, tp_test_id_of(0x7d));
     TEST_ASSERT_NOT_NULL(journal);
     tp_error err = {0};
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_init_checkpoint(journal, NULL, 0U, 0, &err));
@@ -481,7 +457,7 @@ static tp_status commit_target_out_path(tp_model *m, const char *id_hex, int64_t
  * handle (shared ctx) is returned via *io_out so a test can snapshot the durable
  * bytes before destroying the model. */
 static tp_model *model_with_journal(tp_id128 key, tp_journal_io *io_out) {
-    tp_project *p = base_project();
+    tp_project *p = tp_test_base_project();
     tp_model *m = tp_model_wrap(p);
     TEST_ASSERT_NOT_NULL(m);
     tp_journal_io io = tp_journal_io_memory();
@@ -514,7 +490,7 @@ static tp_journal_io io_from_bytes(const uint8_t *bytes, size_t len) {
 
 void test_total_record_limit_bounds_all_frame_types_before_write_and_recovery(void) {
     tp_journal__test_set_record_limit(3U);
-    const tp_id128 key = key_of(0x79);
+    const tp_id128 key = tp_test_id_of(0x79);
     tp_journal_io io = tp_journal_io_memory();
     TEST_ASSERT_NOT_NULL(io.ctx);
     tp_journal *journal = tp_journal_create(io, key);
@@ -561,7 +537,7 @@ void test_total_record_admission_precedes_model_staging_and_metadata_cache_mutat
      * encoding or project cloning. The clone allocation counter is the observable
      * staging boundary: zero means no mutable candidate was built. */
     tp_journal_io model_io;
-    tp_model *model = model_with_journal(key_of(0x78), &model_io);
+    tp_model *model = model_with_journal(tp_test_id_of(0x78), &model_io);
     tp_journal__test_set_record_limit(1U); /* the attach checkpoint owns the only slot */
     tp_project__test_set_clone_alloc_fail(-1);
     TEST_ASSERT_EQUAL_INT(
@@ -574,7 +550,7 @@ void test_total_record_admission_precedes_model_staging_and_metadata_cache_mutat
     tp_model_destroy(model);
 
     tp_journal__test_set_record_limit(2U);
-    model = model_with_journal(key_of(0x76), &model_io);
+    model = model_with_journal(tp_test_id_of(0x76), &model_io);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_enable_history(model));
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
@@ -592,7 +568,7 @@ void test_total_record_admission_precedes_model_staging_and_metadata_cache_mutat
     tp_journal__test_set_record_limit(2U);
     tp_journal_io io = tp_journal_io_memory();
     TEST_ASSERT_NOT_NULL(io.ctx);
-    const tp_id128 key = key_of(0x77);
+    const tp_id128 key = tp_test_id_of(0x77);
     tp_journal *journal = tp_journal_create(io, key);
     TEST_ASSERT_NOT_NULL(journal);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
@@ -623,7 +599,7 @@ void test_file_byte_admission_precedes_transaction_staging_and_metadata_cache_mu
     tp_error err = {0};
 
     tp_journal_io model_io;
-    tp_model *model = model_with_journal(key_of(0x75), &model_io);
+    tp_model *model = model_with_journal(tp_test_id_of(0x75), &model_io);
     const int64_t checkpoint_bytes = model_io.length(model_io.ctx);
     TEST_ASSERT_GREATER_THAN_INT64(0, checkpoint_bytes);
 
@@ -678,7 +654,7 @@ void test_file_byte_admission_precedes_transaction_staging_and_metadata_cache_mu
     tp_journal__test_set_file_limit(0U);
     tp_journal_io io = tp_journal_io_memory();
     TEST_ASSERT_NOT_NULL(io.ctx);
-    const tp_id128 key = key_of(0x74);
+    const tp_id128 key = tp_test_id_of(0x74);
     tp_journal *journal = tp_journal_create(io, key);
     TEST_ASSERT_NOT_NULL(journal);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
@@ -710,7 +686,7 @@ void test_file_byte_admission_precedes_transaction_staging_and_metadata_cache_mu
 }
 
 void test_checkpoint_byte_admission_precedes_attach_materialization_and_counts_ids(void) {
-    tp_model *model = tp_model_wrap(base_project());
+    tp_model *model = tp_model_wrap(tp_test_base_project());
     TEST_ASSERT_NOT_NULL(model);
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
@@ -725,7 +701,7 @@ void test_checkpoint_byte_admission_precedes_attach_materialization_and_counts_i
             tp_model_project(model), SIZE_MAX, &snapshot_bytes, &err));
     tp_journal_io io = tp_journal_io_memory();
     TEST_ASSERT_NOT_NULL(io.ctx);
-    tp_journal *journal = tp_journal_create(io, key_of(0x73));
+    tp_journal *journal = tp_journal_create(io, tp_test_id_of(0x73));
     TEST_ASSERT_NOT_NULL(journal);
     const size_t exact = checkpoint_store_bytes(
         (size_t)TP_JRN_HEADER_LEN, snapshot_bytes, 1);
@@ -756,7 +732,7 @@ void test_checkpoint_byte_admission_precedes_attach_materialization_and_counts_i
 void test_checkpoint_pathological_length_rejects_before_write(void) {
     tp_journal_io io = tp_journal_io_memory();
     TEST_ASSERT_NOT_NULL(io.ctx);
-    tp_journal *journal = tp_journal_create(io, key_of(0x74));
+    tp_journal *journal = tp_journal_create(io, tp_test_id_of(0x74));
     TEST_ASSERT_NOT_NULL(journal);
     tp_error err = {0};
     const uint8_t sentinel = 0U;
@@ -771,7 +747,7 @@ void test_checkpoint_pathological_length_rejects_before_write(void) {
 void test_compact_admits_checkpoint_and_cached_metadata_as_one_layout(void) {
     tp_journal_io io = tp_journal_io_memory();
     TEST_ASSERT_NOT_NULL(io.ctx);
-    tp_journal *journal = tp_journal_create(io, key_of(0x75));
+    tp_journal *journal = tp_journal_create(io, tp_test_id_of(0x75));
     TEST_ASSERT_NOT_NULL(journal);
     tp_error err = {0};
     const uint8_t old_snapshot[] = {'o', 'l', 'd'};
@@ -814,7 +790,7 @@ void test_compact_admits_checkpoint_and_cached_metadata_as_one_layout(void) {
 
 void test_checkpoint_byte_admission_precedes_compact_materialization(void) {
     tp_journal_io io;
-    tp_model *model = model_with_journal(key_of(0x72), &io);
+    tp_model *model = model_with_journal(tp_test_id_of(0x72), &io);
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         commit_rename(model, "72000000000000000000000000000001", 0,
@@ -853,7 +829,7 @@ void test_checkpoint_byte_admission_precedes_compact_materialization(void) {
 
 void test_checkpoint_byte_admission_precedes_undo_redo_materialization(void) {
     tp_journal_io io;
-    tp_model *model = model_with_journal(key_of(0x71), &io);
+    tp_model *model = model_with_journal(tp_test_id_of(0x71), &io);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_enable_history(model));
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
@@ -935,7 +911,7 @@ void test_save_stages_path_normalization_without_invalidating_history(void) {
     if (!g_dir) {
         return;
     }
-    tp_project *project = base_project();
+    tp_project *project = tp_test_base_project();
     tp_project_source *source = &project->atlases[0].sources[0];
     char absolute_source[1024];
     char project_path[1024];
@@ -954,7 +930,7 @@ void test_save_stages_path_normalization_without_invalidating_history(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_enable_history(model));
     tp_journal_io io = tp_journal_io_memory();
     TEST_ASSERT_NOT_NULL(io.ctx);
-    tp_journal *journal = tp_journal_create(io, key_of(0x76));
+    tp_journal *journal = tp_journal_create(io, tp_test_id_of(0x76));
     TEST_ASSERT_NOT_NULL(journal);
     tp_error err = {0};
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
@@ -997,7 +973,7 @@ void test_save_as_compact_recovery_keeps_source_target_self_contained(void) {
     (void)snprintf(new_path, sizeof new_path, "%s/recovery-new.ntpacker",
                    new_dir);
 
-    tp_project *project = base_project();
+    tp_project *project = tp_test_base_project();
     tp_error err = {0};
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_project_save(project, old_path, &err));
@@ -1012,7 +988,7 @@ void test_save_as_compact_recovery_keeps_source_target_self_contained(void) {
     TEST_ASSERT_NOT_NULL(model);
     tp_journal_io io = tp_journal_io_memory();
     TEST_ASSERT_NOT_NULL(io.ctx);
-    tp_journal *journal = tp_journal_create(io, key_of(0x79));
+    tp_journal *journal = tp_journal_create(io, tp_test_id_of(0x79));
     TEST_ASSERT_NOT_NULL(journal);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_model_attach_journal(model, journal, &err));
@@ -1036,7 +1012,7 @@ void test_save_as_compact_recovery_keeps_source_target_self_contained(void) {
     tp_journal_recovery recovery = {0};
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        tp_model_recover(recovered_io, key_of(0x79), &recovered, &recovery,
+        tp_model_recover(recovered_io, tp_test_id_of(0x79), &recovered, &recovery,
                          &err));
     TEST_ASSERT_NOT_NULL(recovered);
     const tp_project *recovered_project = tp_model_project(recovered);
@@ -1055,7 +1031,7 @@ void test_save_as_compact_recovery_keeps_source_target_self_contained(void) {
 }
 
 void test_mark_saved_preserves_deep_history_without_clone_work(void) {
-    tp_model *model = tp_model_wrap(base_project());
+    tp_model *model = tp_model_wrap(tp_test_base_project());
     TEST_ASSERT_NOT_NULL(model);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_enable_history(model));
     for (int i = 0; i < 16; ++i) {
@@ -1085,7 +1061,7 @@ void test_mark_saved_preserves_deep_history_without_clone_work(void) {
 }
 
 void test_replay_operation_budget_is_prewrite_preclone_and_checkpoint_reset(void) {
-    const tp_id128 key = key_of(0x6c);
+    const tp_id128 key = tp_test_id_of(0x6c);
     tp_journal_io io = tp_journal_io_memory();
     TEST_ASSERT_NOT_NULL(io.ctx);
     tp_journal *journal = tp_journal_create(io, key);
@@ -1121,7 +1097,7 @@ void test_replay_operation_budget_is_prewrite_preclone_and_checkpoint_reset(void
     tp_journal_destroy(journal);
 
     tp_journal_io model_io;
-    tp_model *model = model_with_journal(key_of(0x6b), &model_io);
+    tp_model *model = model_with_journal(tp_test_id_of(0x6b), &model_io);
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         tp_journal__set_replay_operations(
@@ -1143,8 +1119,8 @@ void test_replay_operation_budget_is_prewrite_preclone_and_checkpoint_reset(void
 }
 
 void test_recovery_rejects_aggregate_operation_overflow_before_apply(void) {
-    const tp_id128 key = key_of(0x6a);
-    tp_project *project = base_project();
+    const tp_id128 key = tp_test_id_of(0x6a);
+    tp_project *project = tp_test_base_project();
     const tp_id128 atlas_id = project->atlases[0].id;
     char *snapshot = serialize(project);
     char *payload = dense_rename_payload(atlas_id);
@@ -1197,8 +1173,8 @@ void test_recovery_rejects_aggregate_operation_overflow_before_apply(void) {
 }
 
 void test_recovery_rejects_duplicate_operations_before_aggregate_apply(void) {
-    const tp_id128 key = key_of(0x69);
-    tp_project *project = base_project();
+    const tp_id128 key = tp_test_id_of(0x69);
+    tp_project *project = tp_test_base_project();
     char *snapshot = serialize(project);
     char *payload = dense_rename_payload_with_duplicate_operations(
         project->atlases[0].id);
@@ -1351,13 +1327,13 @@ static void faulty_io_fail_at(tp_journal_io io, int n) {
 
 void test_journal_is_sidecar_byte_identical(void) {
     /* Same op on a journal-LESS and a journal-BACKED model -> identical project bytes. */
-    tp_project *p0 = base_project();
+    tp_project *p0 = tp_test_base_project();
     tp_model *plain = tp_model_wrap(p0);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(plain, "10000000000000000000000000000001", 0, "renamed"));
     char *plain_bytes = serialize(tp_model_project(plain));
 
     tp_journal_io io;
-    tp_model *j = model_with_journal(key_of(0x01), &io);
+    tp_model *j = model_with_journal(tp_test_id_of(0x01), &io);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(j, "10000000000000000000000000000001", 0, "renamed"));
     char *j_bytes = serialize(tp_model_project(j));
 
@@ -1373,7 +1349,7 @@ void test_journal_is_sidecar_byte_identical(void) {
 /* ---- checkpoint + journal replay restores state + retained id set -------- */
 
 void test_checkpoint_and_replay(void) {
-    tp_id128 key = key_of(0x11);
+    tp_id128 key = tp_test_id_of(0x11);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "aa000000000000000000000000000001", 0, "alpha"));
@@ -1422,7 +1398,7 @@ void test_checkpoint_and_replay(void) {
  * model (the same tp_operation_apply, same order, as commit); (3) the recovered revision is the
  * FINAL one. */
 void test_format_b_replays_ops_onto_checkpoint(void) {
-    tp_id128 key = key_of(0x13);
+    tp_id128 key = tp_test_id_of(0x13);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io); /* checkpoint captured at rev 0 (atlas "atlas1") */
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "ab000000000000000000000000000001", 0, "first"));
@@ -1470,7 +1446,7 @@ void test_format_b_replays_ops_onto_checkpoint(void) {
  * replace that would clobber exporter/enabled. Guards the masked-op round-trip R2a fixed (the rename-
  * only test above covers a plain op). */
 void test_format_b_recovers_masked_target_set(void) {
-    tp_id128 key = key_of(0x14);
+    tp_id128 key = tp_test_id_of(0x14);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
@@ -1512,7 +1488,7 @@ void test_format_b_recovers_masked_target_set(void) {
 /* ---- duplicate retry after restart is de-duplicated (§7.2) --------------- */
 
 void test_duplicate_retry_after_restart(void) {
-    tp_id128 key = key_of(0x12);
+    tp_id128 key = tp_test_id_of(0x12);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "bb000000000000000000000000000001", 0, "one"));
@@ -1550,7 +1526,7 @@ void test_duplicate_retry_after_restart(void) {
 /* ---- append failure after apply -> exact rollback, no ack, retryable ----- */
 
 void test_append_failure_rolls_back(void) {
-    tp_id128 key = key_of(0x22);
+    tp_id128 key = tp_test_id_of(0x22);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "cc000000000000000000000000000001", 0, "one"));
@@ -1606,7 +1582,7 @@ void test_append_oom_is_retryable(void) {
      * registers exactly once. */
     tp_journal_io io = tp_journal_io_memory();
     TEST_ASSERT_NOT_NULL(io.ctx);
-    tp_journal *j = tp_journal_create(io, key_of(0x23));
+    tp_journal *j = tp_journal_create(io, tp_test_id_of(0x23));
     TEST_ASSERT_NOT_NULL(j);
     tp_error err;
     const uint8_t snap[] = {'x', 'y', 'z'};
@@ -1632,7 +1608,7 @@ void test_append_oom_is_retryable(void) {
 /* ---- short write at EVERY byte boundary: UB-clean prefix recovery -------- */
 
 void test_short_write_every_boundary(void) {
-    tp_id128 key = key_of(0x33);
+    tp_id128 key = tp_test_id_of(0x33);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "b0000000000000000000000000000001", 0, "one"));
@@ -1675,7 +1651,7 @@ void test_short_write_every_boundary(void) {
 /* ---- torn tail (payload truncated) -> invisible, no dup on retry --------- */
 
 void test_torn_tail_invisible(void) {
-    tp_id128 key = key_of(0x34);
+    tp_id128 key = tp_test_id_of(0x34);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "c0000000000000000000000000000001", 0, "one"));
@@ -1710,7 +1686,7 @@ void test_torn_tail_invisible(void) {
 /* ---- checksum mismatch -> corruption boundary, safe fallback ------------- */
 
 void test_checksum_mismatch(void) {
-    tp_id128 key = key_of(0x35);
+    tp_id128 key = tp_test_id_of(0x35);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "d0000000000000000000000000000001", 0, "one"));
@@ -1742,8 +1718,8 @@ void test_checksum_mismatch(void) {
 /* ---- stale journal for a moved project -> detected, not applied ---------- */
 
 void test_stale_key_not_applied(void) {
-    tp_id128 k1 = key_of(0x44);
-    tp_id128 k2 = key_of(0x55);
+    tp_id128 k1 = tp_test_id_of(0x44);
+    tp_id128 k2 = tp_test_id_of(0x55);
     tp_journal_io io;
     tp_model *m = model_with_journal(k1, &io);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "ee000000000000000000000000000001", 0, "one"));
@@ -1766,7 +1742,7 @@ void test_stale_key_not_applied(void) {
 /* ---- UB-clean on arbitrary / garbage / absurd-length bytes --------------- */
 
 void test_recover_arbitrary_bytes(void) {
-    tp_id128 key = key_of(0x66);
+    tp_id128 key = tp_test_id_of(0x66);
     for (size_t len = 0; len <= 320; len++) {
         uint8_t *buf = (uint8_t *)malloc(len ? len : 1);
         TEST_ASSERT_NOT_NULL(buf);
@@ -1816,7 +1792,7 @@ void test_recover_arbitrary_bytes(void) {
  * from an out-of-date recovery journal. Both keep the old semantics (nothing recovered, bytes on disk
  * preserved, return OK) -- only the classification splits. recover AND peek must agree per case. */
 void test_bad_magic_vs_version_mismatch(void) {
-    tp_id128 key = key_of(0x67);
+    tp_id128 key = tp_test_id_of(0x67);
     tp_error err;
 
     /* (1) BAD_MAGIC: a complete header whose magic is not "NTPKJRNL" -> not our file. */
@@ -1876,7 +1852,7 @@ void test_bad_magic_vs_version_mismatch(void) {
 void test_poison_on_truncate_failure(void) {
     tp_journal_io io = tp_journal_io_memory();
     TEST_ASSERT_NOT_NULL(io.ctx);
-    tp_journal *j = tp_journal_create(io, key_of(0x68));
+    tp_journal *j = tp_journal_create(io, tp_test_id_of(0x68));
     TEST_ASSERT_NOT_NULL(j);
     tp_error err;
     const uint8_t snap[] = {'a', 'b', 'c', 'd'};
@@ -1931,7 +1907,7 @@ void test_coordinator_ordering(void) {
     coord.abort = cc_abort;
 
     tp_journal_io io;
-    tp_model *m = model_with_journal(key_of(0x77), &io);
+    tp_model *m = model_with_journal(tp_test_id_of(0x77), &io);
     tp_model_set_coordinator(m, &coord);
 
     /* (a) success: prepare + publish, no abort. */
@@ -1961,7 +1937,7 @@ void test_coordinator_ordering(void) {
 void test_coordinator_noop(void) {
     tp_side_effect_coordinator noop = tp_side_effect_coordinator_noop();
     tp_journal_io io;
-    tp_model *m = model_with_journal(key_of(0x78), &io);
+    tp_model *m = model_with_journal(tp_test_id_of(0x78), &io);
     tp_model_set_coordinator(m, &noop);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "02000000000000000000000000000001", 0, "one"));
     TEST_ASSERT_EQUAL_INT64(1, tp_model_revision(m));
@@ -1979,12 +1955,12 @@ void test_file_journal_roundtrip(void) {
     (void)snprintf(path, sizeof path, "%s/roundtrip.journal", g_dir);
     remove(path);
 
-    tp_id128 key = key_of(0x79);
+    tp_id128 key = tp_test_id_of(0x79);
     tp_journal_io io = tp_journal_io_file(path);
     TEST_ASSERT_NOT_NULL(io.ctx);
     tp_journal *j = tp_journal_create(io, key);
     TEST_ASSERT_NOT_NULL(j);
-    tp_project *p = base_project();
+    tp_project *p = tp_test_base_project();
     tp_model *m = tp_model_wrap(p);
     tp_error err;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_attach_journal(m, j, &err));
@@ -2036,7 +2012,7 @@ void test_io_file_read_no_create(void) {
     TEST_ASSERT_NULL(ro_again.ctx); /* still missing => the read-only opener created no file */
 
     /* Write a real journal (checkpoint + one txn) with the create-capable opener, then close it. */
-    tp_id128 key = key_of(0x7B);
+    tp_id128 key = tp_test_id_of(0x7B);
     tp_journal_io wio = tp_journal_io_file(path);
     TEST_ASSERT_NOT_NULL(wio.ctx);
     tp_journal *j = tp_journal_create(wio, key);
@@ -2161,7 +2137,7 @@ void test_file_journal_initial_checkpoint_cannot_exceed_reader_cap(void) {
 
     tp_journal_io io = tp_journal_io_file(path);
     TEST_ASSERT_NOT_NULL(io.ctx);
-    tp_journal *j = tp_journal_create(io, key_of(0xC1));
+    tp_journal *j = tp_journal_create(io, tp_test_id_of(0xC1));
     TEST_ASSERT_NOT_NULL(j);
     const size_t frame_bytes = (size_t)TP_JRN_HEADER_LEN + (size_t)TP_JRN_SYNC_FIELD +
                                (size_t)TP_JRN_LEN_FIELD + (size_t)TP_JRN_CRC_FIELD +
@@ -2188,12 +2164,12 @@ void test_file_journal_transaction_rejected_before_crossing_reader_cap(void) {
     (void)snprintf(path, sizeof path, "%s/cap-transaction.journal", g_dir);
     remove(path);
 
-    tp_id128 key = key_of(0xC2);
+    tp_id128 key = tp_test_id_of(0xC2);
     tp_journal_io io = tp_journal_io_file(path);
     TEST_ASSERT_NOT_NULL(io.ctx);
     tp_journal *j = tp_journal_create(io, key);
     TEST_ASSERT_NOT_NULL(j);
-    tp_project *p = base_project();
+    tp_project *p = tp_test_base_project();
     tp_model *m = tp_model_wrap(p);
     TEST_ASSERT_NOT_NULL(m);
     tp_error err = {0};
@@ -2233,9 +2209,9 @@ void test_file_journal_undo_rejected_before_crossing_reader_cap(void) {
 
     tp_journal_io io = tp_journal_io_file(path);
     TEST_ASSERT_NOT_NULL(io.ctx);
-    tp_journal *j = tp_journal_create(io, key_of(0xC3));
+    tp_journal *j = tp_journal_create(io, tp_test_id_of(0xC3));
     TEST_ASSERT_NOT_NULL(j);
-    tp_model *m = tp_model_wrap(base_project());
+    tp_model *m = tp_model_wrap(tp_test_base_project());
     TEST_ASSERT_NOT_NULL(m);
     tp_error err = {0};
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_attach_journal(m, j, &err));
@@ -2271,7 +2247,7 @@ void test_file_journal_metadata_failure_at_reader_cap_is_reported(void) {
 
     tp_journal_io io = tp_journal_io_file(path);
     TEST_ASSERT_NOT_NULL(io.ctx);
-    tp_journal *j = tp_journal_create(io, key_of(0xC4));
+    tp_journal *j = tp_journal_create(io, tp_test_id_of(0xC4));
     TEST_ASSERT_NOT_NULL(j);
     const uint8_t snapshot[] = {'o', 'k'};
     tp_error err = {0};
@@ -2301,8 +2277,8 @@ void test_file_journal_metadata_failure_at_reader_cap_is_reported(void) {
 /* C1: a journal attached AFTER journal-less commits must inherit the model's already-
  * retained ids, so a re-submit de-duplicates instead of double-applying (§7.2). */
 void test_attach_migrates_retained_ids(void) {
-    tp_id128 key = key_of(0x6A);
-    tp_project *p = base_project();
+    tp_id128 key = tp_test_id_of(0x6A);
+    tp_project *p = tp_test_base_project();
     tp_model *m = tp_model_wrap(p);
     TEST_ASSERT_NOT_NULL(m);
     /* Commit journal-LESS: the id lands only in the in-memory idstore. */
@@ -2341,7 +2317,7 @@ void test_attach_migrates_retained_ids(void) {
 /* C2 (torn tail): an incomplete final record IS truncated back to the last good
  * record, and continued appends work (the journal stays healthy). */
 void test_torn_tail_is_truncated(void) {
-    tp_id128 key = key_of(0x6D);
+    tp_id128 key = tp_test_id_of(0x6D);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "1d000000000000000000000000000001", 0, "one"));
@@ -2382,7 +2358,7 @@ void test_torn_tail_is_truncated(void) {
  * last good record, PRESERVE the file, and poison the journal against appends behind
  * the corruption. This is the crux fix: torn-tail (truncate) vs mid-stream (preserve). */
 void test_midstream_corrupt_preserves_trailing(void) {
-    tp_id128 key = key_of(0x6E);
+    tp_id128 key = tp_test_id_of(0x6E);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io);
     /* Store layout: header | checkpoint(#0) | txn01(#1) | txn02(#2). */
@@ -2432,7 +2408,7 @@ void test_midstream_corrupt_preserves_trailing(void) {
  * trailing record and classify this as CORRUPT + mid-stream: the file is preserved and the
  * journal poisoned. This is the exact regression the sync-word closes. */
 void test_midstream_bloated_length_preserves_trailing(void) {
-    tp_id128 key = key_of(0x6F);
+    tp_id128 key = tp_test_id_of(0x6F);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io);
     /* Store layout: header | checkpoint(#0) | txn01(#1) | txn02(#2). */
@@ -2480,7 +2456,7 @@ void test_midstream_bloated_length_preserves_trailing(void) {
 /* C3: if the recovery tail-clean truncate itself fails, the journal is poisoned -- a
  * still-present torn record must never hide a later acknowledged append. */
 void test_truncate_failure_poisons_recovery(void) {
-    tp_id128 key = key_of(0x6F);
+    tp_id128 key = tp_test_id_of(0x6F);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "1f000000000000000000000000000001", 0, "one"));
@@ -2512,7 +2488,7 @@ void test_truncate_failure_poisons_recovery(void) {
 /* C4: a torn PARTIAL header (crash mid initial 28-byte write) is re-initializable, not
  * a permanent brick -- while a COMPLETE but foreign header is still refused. */
 void test_torn_header_reinitializable(void) {
-    tp_id128 key = key_of(0x70);
+    tp_id128 key = tp_test_id_of(0x70);
     tp_error err;
     /* A crash during the initial header write leaves a sub-header (10-byte) partial. */
     uint8_t junk[10] = {'N', 'T', 'P', 'K', 0x01, 0x02, 0x03, 0x04, 0x05, 0x06};
@@ -2562,7 +2538,7 @@ void test_torn_header_reinitializable(void) {
 /* C5: a crash-recovered model is ahead of the on-disk project file -> it must report
  * dirty until an explicit Save re-baselines it (else save-on-dirty-shutdown loses it). */
 void test_recovered_model_is_dirty(void) {
-    tp_id128 key = key_of(0x71);
+    tp_id128 key = tp_test_id_of(0x71);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "21000000000000000000000000000001", 0, "one"));
@@ -2596,7 +2572,7 @@ void test_recovered_model_is_dirty(void) {
  * a single checkpoint), the FINAL revision, the SAME serialized project, and the full retained-id
  * set re-persisted from the live index into the fresh checkpoint. */
 void test_compaction_resets_to_one_checkpoint(void) {
-    tp_id128 key = key_of(0x80);
+    tp_id128 key = tp_test_id_of(0x80);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io); /* checkpoint at rev 0 */
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "80000000000000000000000000000001", 0, "alpha"));
@@ -2653,7 +2629,7 @@ void test_compaction_resets_to_one_checkpoint(void) {
  * crash-recover. Guards the "only the byte store is truncated, j->ids is kept" invariant: if
  * compaction reset the id index, an acked id would double-apply after Save (§7.2). */
 void test_compaction_preserves_retained_ids(void) {
-    tp_id128 key = key_of(0x81);
+    tp_id128 key = tp_test_id_of(0x81);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "81000000000000000000000000000001", 0, "one"));
@@ -2697,7 +2673,7 @@ void test_compaction_preserves_retained_ids(void) {
  * (the diff journal resumed from the fresh baseline). The base checkpoint holds the compacted
  * state; the post-compaction edit lives ONLY in the replayed op-payload. */
 void test_compaction_then_commit_recovers_as_ckpt_plus_op(void) {
-    tp_id128 key = key_of(0x82);
+    tp_id128 key = tp_test_id_of(0x82);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "82000000000000000000000000000001", 0, "one"));
@@ -2737,7 +2713,7 @@ void test_compaction_then_commit_recovers_as_ckpt_plus_op(void) {
 /* R3: tp_model_compact_journal is a no-op (returns OK, mutates nothing) when no journal is
  * attached -- a journal-less model (recovery disabled) Saves without a compaction error. */
 void test_compaction_no_journal_is_noop(void) {
-    tp_project *p = base_project();
+    tp_project *p = tp_test_base_project();
     tp_model *m = tp_model_wrap(p);
     TEST_ASSERT_NOT_NULL(m);
     TEST_ASSERT_NULL(tp_model_journal(m));
@@ -2758,7 +2734,7 @@ void test_compaction_no_journal_is_noop(void) {
  * compaction that cannot reset the store never silently loses the existing recovery log. The
  * journal stays healthy (a FAILED compaction does not poison it): continued appends work. */
 void test_compaction_truncate_failure_is_fault(void) {
-    tp_id128 key = key_of(0x84);
+    tp_id128 key = tp_test_id_of(0x84);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "84000000000000000000000000000001", 0, "one"));
@@ -2790,7 +2766,7 @@ void test_compaction_truncate_failure_is_fault(void) {
 void test_compaction_init_failure_poisons(void) {
     tp_journal_io io = tp_journal_io_memory();
     TEST_ASSERT_NOT_NULL(io.ctx);
-    tp_journal *j = tp_journal_create(io, key_of(0x85));
+    tp_journal *j = tp_journal_create(io, tp_test_id_of(0x85));
     TEST_ASSERT_NOT_NULL(j);
     tp_error err;
     const uint8_t snap[] = {'s', 'n', 'a', 'p'};
@@ -2825,7 +2801,7 @@ void test_compaction_init_failure_poisons(void) {
  * poisoned journal remains attached, retains acknowledged ids, and rejects later mutations with a
  * structured durability status until the owner explicitly repairs or replaces the authority. */
 void test_compaction_broken_store_keeps_fail_closed_authority(void) {
-    tp_id128 key = key_of(0x86);
+    tp_id128 key = tp_test_id_of(0x86);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "86000000000000000000000000000001", 0, "one"));
@@ -2884,7 +2860,7 @@ void test_compaction_broken_store_keeps_fail_closed_authority(void) {
  * the candidate project swap. A failed append must leave the live document, revision, history cursor,
  * and durable byte store unchanged; the one-shot failure then remains retryable. */
 void test_journal_undo_append_failure_rolls_back_history_commit(void) {
-    tp_id128 key = key_of(0x87);
+    tp_id128 key = tp_test_id_of(0x87);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_enable_history(m));
@@ -2927,7 +2903,7 @@ void test_journal_undo_append_failure_rolls_back_history_commit(void) {
 }
 
 void test_peek_and_recover_share_retained_id_policy(void) {
-    const tp_id128 key = key_of(0xa6);
+    const tp_id128 key = tp_test_id_of(0xa6);
     tp_journal_io io = tp_journal_io_memory();
     TEST_ASSERT_NOT_NULL(io.ctx);
     tp_journal *journal = tp_journal_create(io, key);
@@ -2979,7 +2955,7 @@ void test_peek_and_recover_share_retained_id_policy(void) {
 /* Redo has the identical durable gate: if its checkpoint append fails, the already-undone live
  * state and cursor stay exactly where they were. */
 void test_journal_redo_append_failure_rolls_back_history_commit(void) {
-    tp_id128 key = key_of(0x88);
+    tp_id128 key = tp_test_id_of(0x88);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_enable_history(m));
@@ -3027,7 +3003,7 @@ void test_journal_redo_append_failure_rolls_back_history_commit(void) {
 void test_history_eviction_waits_for_journal_append_ack(void) {
     tp_history__test_set_limits(1, TP_HISTORY_MAX_BYTES, TP_HISTORY_MAX_RECORD_BYTES);
     tp_journal_io io;
-    tp_model *m = model_with_journal(key_of(0x89), &io);
+    tp_model *m = model_with_journal(tp_test_id_of(0x89), &io);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_enable_history(m));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "89000000000000000000000000000001", 0, "one"));
     const size_t history_bytes = tp_model_history(m)->bytes;
@@ -3061,7 +3037,7 @@ void test_history_eviction_waits_for_journal_append_ack(void) {
 }
 
 void test_revision_max_rejects_commit_and_history_without_overflow(void) {
-    tp_model *m = tp_model_wrap(base_project());
+    tp_model *m = tp_model_wrap(tp_test_base_project());
     TEST_ASSERT_NOT_NULL(m);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_enable_history(m));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
@@ -3092,7 +3068,7 @@ void test_recovery_rejects_invalid_or_nonmonotonic_revisions(void) {
     const uint8_t snap[] = {'{', '}'};
 
     tp_journal_io io = tp_journal_io_memory();
-    tp_journal *j = tp_journal_create(io, key_of(0x8E));
+    tp_journal *j = tp_journal_create(io, tp_test_id_of(0x8E));
     TEST_ASSERT_NOT_NULL(j);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_init_checkpoint(j, snap, sizeof snap, 0, &err));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
@@ -3110,7 +3086,7 @@ void test_recovery_rejects_invalid_or_nonmonotonic_revisions(void) {
     free(bytes);
 
     io = tp_journal_io_memory();
-    j = tp_journal_create(io, key_of(0x8D));
+    j = tp_journal_create(io, tp_test_id_of(0x8D));
     TEST_ASSERT_NOT_NULL(j);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_journal_init_checkpoint(j, snap, sizeof snap, INT64_MAX, &err));
@@ -3129,7 +3105,7 @@ void test_recovery_rejects_invalid_or_nonmonotonic_revisions(void) {
  * which is exactly the startup scan's adoptable-unsaved threshold, and crash recovery must load the
  * undone state without a GUI post-history hook. */
 void test_journal_undo_recovers_undone_state(void) {
-    tp_id128 key = key_of(0x89);
+    tp_id128 key = tp_test_id_of(0x89);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io);          /* checkpoint at rev 0 (atlas "atlas1") */
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_enable_history(m)); /* undo needs the diff history */
@@ -3182,7 +3158,7 @@ void test_journal_undo_recovers_undone_state(void) {
 /* Redo is symmetric. Compact the successfully undone state to one clean checkpoint, then redo must
  * append a second checkpoint (scan candidate) and recover the redone document after a crash. */
 void test_journal_redo_recovers_redone_state(void) {
-    tp_id128 key = key_of(0x8a);
+    tp_id128 key = tp_test_id_of(0x8a);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_enable_history(m));
@@ -3227,7 +3203,7 @@ void test_journal_redo_recovers_redone_state(void) {
 /* R5a: a metadata record {timestamp, path, name} round-trips through recovery, and does NOT disturb
  * replay -- the rename still applies and the revision is right (META is captured-and-skipped). */
 void test_metadata_roundtrip(void) {
-    tp_id128 key = key_of(0x90);
+    tp_id128 key = tp_test_id_of(0x90);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io);
     tp_error err;
@@ -3272,8 +3248,8 @@ void test_metadata_roundtrip(void) {
  * journal metadata was recorded. The optional v3 metadata trailer carries that fingerprint
  * without invalidating older v3 records, and compaction must preserve it. */
 void test_metadata_fingerprint_roundtrip_and_compaction(void) {
-    tp_id128 key = key_of(0x9b);
-    tp_id128 fingerprint = key_of(0xc7);
+    tp_id128 key = tp_test_id_of(0x9b);
+    tp_id128 fingerprint = tp_test_id_of(0xc7);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io);
     tp_error err = {0};
@@ -3310,7 +3286,7 @@ void test_metadata_fingerprint_roundtrip_and_compaction(void) {
 }
 
 void test_recovery_metadata_oom_cleans_materialized_descriptors(void) {
-    const tp_id128 key = key_of(0x91);
+    const tp_id128 key = tp_test_id_of(0x91);
     tp_journal_io io;
     tp_model *model = model_with_journal(key, &io);
     tp_error err = {{0}};
@@ -3355,13 +3331,13 @@ void test_compaction_relative_source_ops_recover_canonical_paths(void) {
     char project_path[1024];
     (void)snprintf(project_path, sizeof project_path,
                    "%s/relative-source-replay.ntpacker", g_dir);
-    tp_project *project = base_project();
+    tp_project *project = tp_test_base_project();
     tp_error err = {0};
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_project_save(project, project_path, &err));
     tp_model *model = tp_model_wrap(project);
     TEST_ASSERT_NOT_NULL(model);
-    const tp_id128 key = key_of(0xc2);
+    const tp_id128 key = tp_test_id_of(0xc2);
     tp_journal_io io = tp_journal_io_memory();
     TEST_ASSERT_NOT_NULL(io.ctx);
     tp_journal *journal = tp_journal_create(io, key);
@@ -3374,7 +3350,7 @@ void test_compaction_relative_source_ops_recover_canonical_paths(void) {
     tp_operation add = {0};
     add.kind = TP_OP_SOURCE_ADD;
     add.atlas_id = project->atlases[0].id;
-    add.u.source_add.source_id = key_of(0x31);
+    add.u.source_add.source_id = tp_test_id_of(0x31);
     add.u.source_add.kind = TP_SOURCE_KIND_FOLDER;
     add.u.source_add.key = (char *)"future/add";
     tp_txn_request request = {0};
@@ -3440,7 +3416,7 @@ void test_compaction_relative_source_ops_recover_canonical_paths(void) {
 }
 
 void test_checkpoint_only_recovery_borrows_raw_storage_without_payload_copy(void) {
-    const tp_id128 key = key_of(0x12);
+    const tp_id128 key = tp_test_id_of(0x12);
     tp_journal_io io;
     tp_model *model = model_with_journal(key, &io);
     size_t byte_count = 0U;
@@ -3472,7 +3448,7 @@ void test_checkpoint_only_recovery_borrows_raw_storage_without_payload_copy(void
 }
 
 void test_recovery_borrows_all_op_payloads_from_one_buffer(void) {
-    tp_id128 key = key_of(0xc1);
+    tp_id128 key = tp_test_id_of(0xc1);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io);
     for (int i = 0; i < 100; ++i) {
@@ -3518,7 +3494,7 @@ void test_recovery_borrows_all_op_payloads_from_one_buffer(void) {
 }
 
 void test_recovery_rejects_oversize_borrowed_op_before_parse(void) {
-    tp_id128 key = key_of(0xc2);
+    tp_id128 key = tp_test_id_of(0xc2);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io);
     const size_t payload_len = (size_t)TP_TXN_MAX_REQUEST_BYTES + 1U;
@@ -3551,7 +3527,7 @@ void test_recovery_rejects_oversize_borrowed_op_before_parse(void) {
 }
 
 void test_corrupt_resync_crc_work_is_linear(void) {
-    tp_id128 key = key_of(0x70);
+    tp_id128 key = tp_test_id_of(0x70);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "20000000000000000000000000000001", 0, "one"));
@@ -3592,7 +3568,7 @@ void test_corrupt_resync_crc_work_is_linear(void) {
 
 /* R5a: an untitled project (empty path + name) round-trips as empty strings, not NULL. */
 void test_metadata_empty_path(void) {
-    tp_id128 key = key_of(0x91);
+    tp_id128 key = tp_test_id_of(0x91);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io);
     tp_error err;
@@ -3620,7 +3596,7 @@ void test_metadata_empty_path(void) {
 
 /* R5a: two metadata records -> recovery yields the SECOND (last-wins), no leak of the first. */
 void test_metadata_last_wins(void) {
-    tp_id128 key = key_of(0x92);
+    tp_id128 key = tp_test_id_of(0x92);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io);
     tp_error err;
@@ -3648,7 +3624,7 @@ void test_metadata_last_wins(void) {
 /* R5a: metadata survives compaction -- compact re-emits the cached META record, so recovery from the
  * compacted store still carries it AND recovers the post-compaction state. */
 void test_metadata_survives_compaction(void) {
-    tp_id128 key = key_of(0x93);
+    tp_id128 key = tp_test_id_of(0x93);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io);
     tp_error err;
@@ -3694,7 +3670,7 @@ void test_metadata_survives_compaction(void) {
  * checkpoint + a txn -> status OK, has_checkpoint true, record_count 2 (META excluded), key matches,
  * meta exact. */
 void test_peek_metadata(void) {
-    tp_id128 key = key_of(0x94);
+    tp_id128 key = tp_test_id_of(0x94);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io);
     tp_error err;
@@ -3723,7 +3699,7 @@ void test_peek_metadata(void) {
 /* R5a: peek and recover agree on the same bytes -- same status + same metadata (peek shares recover's
  * header-validate + frame-walk). */
 void test_peek_and_recover_agree(void) {
-    tp_id128 key = key_of(0x95);
+    tp_id128 key = tp_test_id_of(0x95);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io);
     tp_error err;
@@ -3763,7 +3739,7 @@ void test_peek_and_recover_agree(void) {
 
 /* R5a: peek a header-only journal -> EMPTY, has_checkpoint false, no metadata. */
 void test_peek_empty(void) {
-    tp_id128 key = key_of(0x96);
+    tp_id128 key = tp_test_id_of(0x96);
     uint8_t hdr[TP_JRN_HEADER_LEN];
     memset(hdr, 0, sizeof hdr);
     memcpy(hdr, tp_jrn_magic, TP_JRN_MAGIC_LEN);
@@ -3787,7 +3763,7 @@ void test_peek_empty(void) {
 /* A checkpoint without its canonical path/fingerprint is not complete Save-Original authority. A rolled-
  * back META re-emit leaves document bytes recoverable but poisons this incomplete replacement authority. */
 void test_compact_meta_reemit_failure_is_reported(void) {
-    tp_id128 key = key_of(0xA0);
+    tp_id128 key = tp_test_id_of(0xA0);
     tp_journal_io io = faulty_io();
     tp_journal *j = tp_journal_create(io, key);
     TEST_ASSERT_NOT_NULL(j);
@@ -3829,7 +3805,7 @@ void test_compact_meta_reemit_failure_is_reported(void) {
 /* A healthy rollback preserves the cache for a possible compaction, but the authority caller still sees
  * the failed durable META append and can detach the slot before stale metadata becomes destructive. */
 void test_set_metadata_write_failure_is_reported_but_still_caches(void) {
-    tp_id128 key = key_of(0xA1);
+    tp_id128 key = tp_test_id_of(0xA1);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io); /* header + initial checkpoint durably written */
     tp_error err;
@@ -3865,7 +3841,7 @@ void test_set_metadata_write_failure_is_reported_but_still_caches(void) {
  * status + same CKPT/TXN count). A metadata record is present so both walkers exercise the shared
  * capture-and-skip too. */
 void test_peek_agrees_recover_torn_tail(void) {
-    tp_id128 key = key_of(0xA4);
+    tp_id128 key = tp_test_id_of(0xA4);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io);
     tp_error err;
@@ -3901,7 +3877,7 @@ void test_peek_agrees_recover_torn_tail(void) {
 /* [5]/parity: a MID-STREAM corrupt record followed by a valid one classifies as CORRUPT by BOTH peek and
  * recover (shared walker + shared has_valid_record_after boundary decision). */
 void test_peek_agrees_recover_midstream_corrupt(void) {
-    tp_id128 key = key_of(0xA5);
+    tp_id128 key = tp_test_id_of(0xA5);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io);
     tp_error err;
@@ -3943,7 +3919,7 @@ void test_peek_agrees_recover_midstream_corrupt(void) {
  * cycle: recover populates j->meta -> compact re-emits -> a second recover still sees it. FAILS pre-fix
  * (recover never seeded the cache, so has_meta==false and the recompaction dropped the metadata). */
 void test_recovered_metadata_survives_recompaction(void) {
-    tp_id128 key = key_of(0xA3);
+    tp_id128 key = tp_test_id_of(0xA3);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io);
     tp_error err;
@@ -3991,7 +3967,7 @@ void test_recovered_metadata_survives_recompaction(void) {
  * VERSION_MISMATCH by BOTH recover and peek -- never silently mis-replayed as if the new META record type
  * did not exist, never BAD_MAGIC. Bytes preserved. FAILS pre-bump (version 2 == current -> accepted). */
 void test_v2_header_reads_version_mismatch(void) {
-    tp_id128 key = key_of(0xA2);
+    tp_id128 key = tp_test_id_of(0xA2);
     tp_error err;
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io);
@@ -4027,7 +4003,7 @@ void test_v2_header_reads_version_mismatch(void) {
  * attached journal (the GUI calls it at the set_path identity chokepoint). The metadata round-trips
  * through recovery, and the no-journal case is a safe no-op success (recovery is optional). */
 void test_model_set_recovery_metadata_glue(void) {
-    tp_id128 key = key_of(0x93);
+    tp_id128 key = tp_test_id_of(0x93);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io);
     tp_error err;
@@ -4057,7 +4033,7 @@ void test_model_set_recovery_metadata_glue(void) {
 
     /* No-journal (recovery off / journal-less) model: the glue is a no-op success -- no crash, nothing
      * durable. A NULL model is INVALID_ARGUMENT. */
-    tp_model *bare = tp_model_wrap(base_project());
+    tp_model *bare = tp_model_wrap(tp_test_base_project());
     TEST_ASSERT_NOT_NULL(bare);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_model_set_recovery_metadata(bare, 42, "/ignored", "ignored", &err));
@@ -4066,7 +4042,7 @@ void test_model_set_recovery_metadata_glue(void) {
                           tp_model_set_recovery_metadata(NULL, 0, "", "", &err));
 
     tp_journal_io detach_io;
-    tp_model *detached = model_with_journal(key_of(0x94), &detach_io);
+    tp_model *detached = model_with_journal(tp_test_id_of(0x94), &detach_io);
     TEST_ASSERT_TRUE(tp_model_has_journal(detached));
     tp_model_detach_journal(detached);
     TEST_ASSERT_FALSE(tp_model_has_journal(detached));
@@ -4076,8 +4052,8 @@ void test_model_set_recovery_metadata_glue(void) {
 }
 
 void test_model_set_recovery_metadata_fingerprint_glue(void) {
-    tp_id128 key = key_of(0xbd);
-    tp_id128 fingerprint = key_of(0x4e);
+    tp_id128 key = tp_test_id_of(0xbd);
+    tp_id128 fingerprint = tp_test_id_of(0x4e);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io);
     tp_error err = {0};
