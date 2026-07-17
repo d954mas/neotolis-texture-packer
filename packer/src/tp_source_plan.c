@@ -212,9 +212,6 @@ tp_status tp_source_batch_plan_create(
     int accepted_count = 0;
     int duplicate_count = 0;
     for (int i = 0; i < input_count; ++i) {
-        if (!inputs[i] || inputs[i][0] == '\0') {
-            continue;
-        }
         source_identity candidate;
         status = source_identity_from_input(inputs[i], &candidate, err);
         if (status != TP_STATUS_OK) {

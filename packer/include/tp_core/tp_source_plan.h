@@ -24,8 +24,9 @@ typedef struct tp_source_batch_plan {
     tp_source_plan_storage *storage;
 } tp_source_batch_plan;
 
-/* Plans one atomic add batch against an immutable snapshot. Empty inputs are
- * ignored. Existing sources and earlier accepted inputs are compared by one
+/* Plans one atomic add batch against an immutable snapshot. A zero-length batch
+ * is a no-op; a NULL or empty path element rejects the whole request. Existing
+ * sources and earlier accepted inputs use one
  * native path identity: absolute lexical spelling first, then filesystem
  * canonical identity when both paths can be resolved. Thus ./, ../ and
  * symlink/reparse aliases collapse without requiring frontend policy. */

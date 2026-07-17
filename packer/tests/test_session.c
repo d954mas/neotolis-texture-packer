@@ -392,6 +392,42 @@ void test_source_batch_plan_collapses_lexical_and_symlink_aliases(void) {
     (void)remove(alias_path);
 }
 
+void test_source_batch_plan_rejects_empty_inputs_atomically(void) {
+    tp_session *session = make_session();
+    tp_error err = {{0}};
+    tp_session_snapshot *snapshot = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_snapshot_create(session, &snapshot, &err));
+    const tp_snapshot_atlas *atlas = tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+
+    const char *inputs[] = {g_scratch, ""};
+    tp_source_batch_plan plan = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_source_batch_plan_create(snapshot, atlas->id, inputs, 2, &plan,
+                                    &err));
+    TEST_ASSERT_EQUAL_INT(0, plan.count);
+    TEST_ASSERT_NULL(plan.items);
+    TEST_ASSERT_NULL(plan.storage);
+    TEST_ASSERT_NOT_EQUAL(0, err.msg[0]);
+
+    const char *null_input[] = {NULL};
+    memset(&err, 0, sizeof err);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_source_batch_plan_create(snapshot, atlas->id, null_input, 1,
+                                    &plan, &err));
+    TEST_ASSERT_EQUAL_INT(0, plan.count);
+    TEST_ASSERT_NULL(plan.items);
+    TEST_ASSERT_NULL(plan.storage);
+    TEST_ASSERT_NOT_EQUAL(0, err.msg[0]);
+
+    tp_session_snapshot_destroy(snapshot);
+    tp_session_destroy(session);
+}
+
 void test_owned_snapshot_survives_later_commit(void) {
     tp_session *session = make_session();
     tp_error err;
@@ -1639,6 +1675,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_read_snapshot_load_keeps_legacy_ids_stable);
     RUN_TEST(test_writable_open_save_preserves_missing_legacy_orphan_until_unique_return);
     RUN_TEST(test_source_batch_plan_collapses_lexical_and_symlink_aliases);
+    RUN_TEST(test_source_batch_plan_rejects_empty_inputs_atomically);
     RUN_TEST(test_rejected_commit_does_not_publish_event_or_generation);
     RUN_TEST(test_no_change_apply_does_not_publish_event_or_generation);
     RUN_TEST(test_undo_redo_are_session_commands_with_ordered_events);

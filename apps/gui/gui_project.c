@@ -879,8 +879,8 @@ gui_add_status gui_project_add_source(tp_id128 atlas_id,
 
 /* Batch-add multiple sources as ONE atomic transaction (H/P2-13) -- the "Add Files" multi-select path,
  * which previously committed one txn PER file (N undo steps + a mid-batch failure left a partial add).
- * Skips empty paths and any path already in the atlas OR already queued in THIS batch (both counted into
- * *out_dup), so the committed txn holds only DISTINCT new sources and never self-rejects on a duplicate.
+ * The shared planner rejects invalid path elements and skips paths already in the atlas or queued in this
+ * batch (reported through *out_dup), so the committed txn holds only distinct new sources.
  * Commits nothing when nothing is new. Returns true iff the txn committed (or was a clean no-op); false
  * on flush-fail / OOM / a core reject (the model is then byte-unchanged). Both out-counts are always set
  * (0 on early failure). One commit -> ONE undo step for the whole multi-select. */
