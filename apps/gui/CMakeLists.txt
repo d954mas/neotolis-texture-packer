@@ -150,7 +150,7 @@ add_executable(tp_test_gui_canonical_identity
     gui_paths.c
 )
 target_link_libraries(tp_test_gui_canonical_identity PRIVATE
-    nt_core nt_app nt_input nt_window nt_math nt_log nt_time nt_resource
+    nt_core nt_app nt_window nt_input nt_math nt_log nt_time nt_resource
     nt_material nt_shared nt_atlas
     nt_sprite_renderer nt_text_renderer nt_font nt_ui
     nt_render nt_hash nt_mem_scratch nt_shape_renderer
