@@ -445,7 +445,7 @@ tp_journal_internal     tp_journal|tp_journal_io|tp_history|tp_txn_apply|tp_reco
 tp_idset_internal       tp_idset|tp_txn_idset|tp_journal|tp_txn_apply
 tp_project_internal     tp_project|tp_project_migrate|tp_history|tp_txn_apply
 tp_txn_internal         tp_txn_apply|tp_txn_parse|tp_txn_encode|tp_txn_idset|tp_txn_lower|tp_project_clone|tp_history
-tp_model_seam           tp_session|tp_txn_internal|tp_txn_apply|tp_txn_parse|tp_txn_encode|tp_txn_idset|tp_txn_lower|tp_project_clone|tp_history
+tp_model_seam           tp_session|tp_session_snapshot|tp_recovery|tp_txn_internal|tp_txn_apply|tp_txn_parse|tp_txn_encode|tp_txn_idset|tp_txn_lower|tp_project_clone|tp_history
 tp_recovery_live_seam   tp_session|tp_recovery|tp_recovery_internal
 tp_session_internal     tp_session|tp_session_snapshot|tp_session_layout|tp_recovery|tp_validate|tp_export|tp_export_run|tp_input|tp_sprite_index
 tp_session_layout       tp_session|tp_session_snapshot
@@ -566,6 +566,25 @@ else
 
     rm -rf "$_r18_dir"
     trap - EXIT
+fi
+
+# 19. The live mutable project borrowed from tp_model is a core-only seam. Public
+#     clients mutate through tp_session and read through immutable snapshots; putting
+#     tp_model_project back under packer/include would reopen the raw-authority escape.
+_public_model_project='(^|[^A-Za-z0-9_])tp_model_project[[:space:]]*\('
+r19=$(for f in packer/include/tp_core/*.h; do
+    sed -e 's|/\*.*\*/||g' -e 's|//.*||' -e 's|/\*.*||' -e '/^[[:space:]]*\*/d' "$f" |
+        grep -nE "$_public_model_project" | sed "s|^|$f:|"
+done)
+[ -n "$r19" ] && hit "R19 mutable model project escape in public tp header" "$r19"
+
+if ! printf 'tp_project *tp_model_project(tp_model *model);\n' |
+    grep -qE "$_public_model_project"; then
+    hit "R19-selftest" "R19 detector failed to catch a seeded public tp_model_project declaration"
+fi
+if printf 'tp_project *tp_model_project_view(tp_model *model);\n' |
+    grep -qE "$_public_model_project"; then
+    hit "R19-selftest" "R19 detector false-positives on a distinct symbol"
 fi
 
 if [ "$fail" -eq 0 ]; then

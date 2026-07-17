@@ -33,6 +33,7 @@
 #include "tp_diff_internal.h"    /* M3 bounded-history test seam + byte accounting */
 #include "tp_idset_internal.h"   /* M3 collision/probe bound for retained ids */
 #include "tp_journal_internal.h" /* format constants + memory-io fault seams */
+#include "tp_model_seam.h"
 #include "tp_op_internal.h"      /* exact recovery replay operation count */
 #include "tp_project_internal.h" /* checkpoint materialization counters */
 #include "tp_txn_internal.h"     /* clone fault seam + replay count preflight */

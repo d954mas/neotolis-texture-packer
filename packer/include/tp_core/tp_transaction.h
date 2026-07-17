@@ -77,10 +77,6 @@ tp_model *tp_model_create(void);
 /* Frees the model, its project, and its owned idstore. NULL-safe. */
 void tp_model_destroy(tp_model *m);
 
-/* The live project (borrowed; valid until the next committed transaction swaps it
- * or the model is destroyed). */
-tp_project *tp_model_project(tp_model *m);
-
 /* The attached recovery journal (borrowed; NULL if none is attached). */
 tp_journal *tp_model_journal(tp_model *m);
 

@@ -15,6 +15,7 @@
 #include "tp_core/tp_project_lease.h"
 #include "tp_core/tp_transaction.h"
 #include "tp_journal_internal.h"
+#include "tp_model_seam.h"
 #include "tp_recovery_internal.h"
 #include "tp_session_internal.h"
 

@@ -4,6 +4,10 @@
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_transaction.h"
 
+/* The live project (borrowed; valid until the next committed transaction swaps it
+ * or the model is destroyed). Core-only: clients read immutable session snapshots. */
+tp_project *tp_model_project(tp_model *model);
+
 /* Model-owned project replacement after a separately staged project persisted.
  * Takes ownership of `project`; session stays the persistence/orchestration caller. */
 void tp_model__adopt_project(tp_model *model, tp_project *project);

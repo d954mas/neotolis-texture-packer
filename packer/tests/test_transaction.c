@@ -25,6 +25,7 @@
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_project_migrate.h" /* tp_project_promote_ids */
 #include "tp_core/tp_transaction.h"
+#include "tp_model_seam.h"
 #include "tp_txn_internal.h"            /* clone fault seam */
 #include "tp_op_internal.h"             /* tp_op__test_set_alloc_fail */
 #include "tp_project_internal.h"        /* checkpoint-size traversal seam */

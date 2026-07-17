@@ -27,6 +27,7 @@
 #include "tp_core/tp_project_migrate.h" /* tp_project_promote_ids */
 #include "tp_core/tp_transaction.h"
 #include "tp_diff_internal.h" /* diff alloc seam + record/history internals (corrupt + rollback) */
+#include "tp_model_seam.h"
 #include "tp_test_model.h"
 #include "unity.h"
 

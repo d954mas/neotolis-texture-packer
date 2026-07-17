@@ -31,6 +31,7 @@
 #include "tp_encode_internal.h"
 #include "tp_idset_internal.h" /* migrate retained ids into the journal on attach */
 #include "tp_journal_internal.h" /* poison the journal from the recovery glue */
+#include "tp_model_seam.h"
 #include "tp_op_internal.h"
 #include "tp_project_internal.h"
 #include "tp_txn_internal.h"

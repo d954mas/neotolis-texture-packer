@@ -14,6 +14,7 @@
 #include "tp_core/tp_sprite_index.h"
 #include "tp_core/tp_srckey.h"
 #include "tp_core/tp_transaction.h"
+#include "tp_model_seam.h"
 #include "tp_session_layout.h"
 
 // #region snapshot types

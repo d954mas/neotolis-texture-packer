@@ -26,6 +26,7 @@
 #include "tp_core/tp_session.h"
 #include "tp_core/tp_transaction.h"
 #include "tp_journal_internal.h"
+#include "tp_model_seam.h"
 #include "tp_recovery_internal.h"
 #include "unity.h"
 
