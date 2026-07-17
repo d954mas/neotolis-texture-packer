@@ -153,6 +153,9 @@ tp_status tp_session_save(tp_session *session, tp_session_save_result *result,
                           tp_error *err);
 tp_status tp_session_save_as(tp_session *session, const char *path,
                              tp_session_save_result *result, tp_error *err);
+/* Save As with create-only publication for commands such as `ntpacker new`. */
+tp_status tp_session_save_new(tp_session *session, const char *path,
+                              tp_session_save_result *result, tp_error *err);
 tp_status tp_session_discard(tp_session *session, tp_error *err);
 tp_status tp_session_invalidate_sources(tp_session *session, tp_error *err);
 /* Makes recovery acknowledgement mandatory for this live host. Call before

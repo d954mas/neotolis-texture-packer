@@ -470,17 +470,13 @@ static int commit_session_ops(cli_edit *edit, tp_operation *ops, int nops,
 /* ------------------------------------------------------------------ */
 
 static int do_new(const char *path, bool json, bool quiet) {
-    if (tp_scan_exists(path)) {
-        cli_emit_error(json, quiet, "file_exists", "refusing to overwrite existing path '%s'", path);
-        return CLI_EXIT_PROJECT;
-    }
     tp_rng rng = tp_rng_os();
     tp_error err = {0};
     tp_session *session = NULL;
     tp_status st = tp_session_create_default_project(&rng, &session, &err);
     if (st == TP_STATUS_OK) {
         tp_session_save_result result;
-        st = tp_session_save_as(session, path, &result, &err);
+        st = tp_session_save_new(session, path, &result, &err);
     }
     if (st != TP_STATUS_OK) {
         cli_emit_error(json, quiet, tp_status_id(st), "%s",

@@ -615,6 +615,7 @@ tp_status tp_session_redo(tp_session *session, tp_error *err) {
 }
 
 static tp_status save_as_locked(tp_session *session, const char *path,
+                                bool create_only,
                                 tp_session_save_result *result, tp_error *err) {
     if (result) {
         memset(result, 0, sizeof *result);
@@ -667,12 +668,16 @@ static tp_status save_as_locked(tp_session *session, const char *path,
         save_project = migrated;
     }
     tp_id128 fingerprint;
-    status = same_identity
-                 ? tp_project_save_if_unchanged(save_project, canonical,
-                                                &session->saved_file_fingerprint,
-                                                &fingerprint, err)
-                 : tp_project_save_with_fingerprint(save_project, canonical,
-                                                    &fingerprint, err);
+    status = create_only
+                 ? tp_project_save_new_with_fingerprint(save_project, canonical,
+                                                        &fingerprint, err)
+                 : same_identity
+                       ? tp_project_save_if_unchanged(
+                             save_project, canonical,
+                             &session->saved_file_fingerprint,
+                             &fingerprint, err)
+                       : tp_project_save_with_fingerprint(
+                             save_project, canonical, &fingerprint, err);
     if (status != TP_STATUS_OK) {
         tp_project_destroy(migrated);
         if (destination_lease != session->project_lease) {
@@ -745,8 +750,10 @@ static tp_status save_as_locked(tp_session *session, const char *path,
     return TP_STATUS_OK;
 }
 
-tp_status tp_session_save_as(tp_session *session, const char *path,
-                             tp_session_save_result *result, tp_error *err) {
+static tp_status session_save_as(tp_session *session, const char *path,
+                                 bool create_only,
+                                 tp_session_save_result *result,
+                                 tp_error *err) {
     if (!session || !path || path[0] == '\0') {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "Save As requires session and destination path");
@@ -757,9 +764,19 @@ tp_status tp_session_save_as(tp_session *session, const char *path,
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "session was discarded");
     }
     session->admission_sequence++;
-    tp_status status = save_as_locked(session, path, result, err);
+    tp_status status = save_as_locked(session, path, create_only, result, err);
     gate_unlock(session);
     return status;
+}
+
+tp_status tp_session_save_as(tp_session *session, const char *path,
+                             tp_session_save_result *result, tp_error *err) {
+    return session_save_as(session, path, false, result, err);
+}
+
+tp_status tp_session_save_new(tp_session *session, const char *path,
+                              tp_session_save_result *result, tp_error *err) {
+    return session_save_as(session, path, true, result, err);
 }
 
 tp_status tp_session_save_detached_recovery(
@@ -839,7 +856,8 @@ tp_status tp_session_save(tp_session *session, tp_session_save_result *result,
                             "unsaved session requires Save As");
     }
     session->admission_sequence++;
-    tp_status status = save_as_locked(session, session->identity.canonical_path, result, err);
+    tp_status status = save_as_locked(session, session->identity.canonical_path,
+                                      false, result, err);
     gate_unlock(session);
     return status;
 }

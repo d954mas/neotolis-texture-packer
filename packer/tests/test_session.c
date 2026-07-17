@@ -1251,6 +1251,40 @@ void test_open_holds_project_lease_until_session_close(void) {
     (void)remove(path);
 }
 
+void test_save_new_never_replaces_existing_destination(void) {
+    char path[1024];
+    (void)snprintf(path, sizeof path,
+                   "%s/tp_session_create_only.ntpacker_project", g_scratch);
+    FILE *file = fopen(path, "wb");
+    TEST_ASSERT_NOT_NULL(file);
+    static const char sentinel[] = "created-by-another-writer";
+    TEST_ASSERT_EQUAL_UINT64(sizeof sentinel - 1U,
+                             fwrite(sentinel, 1U, sizeof sentinel - 1U, file));
+    TEST_ASSERT_EQUAL_INT(0, fclose(file));
+
+    tp_session *session = make_session();
+    tp_session_save_result result;
+    tp_error err = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_FILE_EXISTS,
+                          tp_session_save_new(session, path, &result, &err));
+    TEST_ASSERT_FALSE(result.saved);
+    tp_session_snapshot *snapshot = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_snapshot_create(session, &snapshot, &err));
+    TEST_ASSERT_EQUAL_INT(TP_IDENTITY_UNSAVED,
+                          tp_session_snapshot_identity(snapshot).kind);
+    tp_session_snapshot_destroy(snapshot);
+    file = fopen(path, "rb");
+    TEST_ASSERT_NOT_NULL(file);
+    char actual[sizeof sentinel] = {0};
+    TEST_ASSERT_EQUAL_UINT64(sizeof sentinel - 1U,
+                             fread(actual, 1U, sizeof sentinel - 1U, file));
+    TEST_ASSERT_EQUAL_INT(0, fclose(file));
+    TEST_ASSERT_EQUAL_STRING(sentinel, actual);
+    tp_session_destroy(session);
+    (void)remove(path);
+}
+
 void test_save_as_acquires_destination_before_releasing_old_lease(void) {
     char original[1024];
     char destination[1024];
@@ -1793,6 +1827,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_future_event_cursor_requires_resync);
     RUN_TEST(test_save_reports_recovery_degradation_and_blocks_later_mutation);
     RUN_TEST(test_open_holds_project_lease_until_session_close);
+    RUN_TEST(test_save_new_never_replaces_existing_destination);
     RUN_TEST(test_save_as_acquires_destination_before_releasing_old_lease);
     RUN_TEST(test_save_as_lease_conflict_preserves_old_identity_lease);
     RUN_TEST(test_save_as_publish_failure_releases_destination_and_keeps_old_lease);

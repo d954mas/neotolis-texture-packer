@@ -1,6 +1,7 @@
 #include "tp_core/tp_project.h"
 
 #include <ctype.h>
+#include <errno.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -14,7 +15,11 @@
 #include <windows.h> /* MoveFileExA -- atomic replace-on-rename */
 #define tp_getcwd _getcwd
 #else
+#include <fcntl.h>
 #include <sys/stat.h>
+#if defined(__linux__)
+#include <sys/syscall.h>
+#endif
 #include <unistd.h>  /* (already present) fsync, rename via <stdio.h> */
 #define tp_getcwd getcwd
 #endif
@@ -1895,8 +1900,28 @@ static tp_temp_open_result tp_open_save_temp(const char *path, char *tmp, size_t
 #endif
 }
 
+#ifndef _WIN32
+static int tp_publish_new_file(const char *from, const char *to) {
+#if defined(__linux__) && defined(SYS_renameat2)
+#ifndef RENAME_NOREPLACE
+#define RENAME_NOREPLACE (1U)
+#endif
+    return (int)syscall(SYS_renameat2, AT_FDCWD, from, AT_FDCWD, to,
+                        RENAME_NOREPLACE);
+#elif defined(__APPLE__)
+    return renamex_np(from, to, RENAME_EXCL);
+#else
+    (void)from;
+    (void)to;
+    errno = ENOTSUP;
+    return -1;
+#endif
+}
+#endif
+
 static tp_status tp_project_save_stage(tp_project *p, const char *path, tp_id128 *out_fingerprint,
-                                       const tp_id128 *expected_fingerprint, tp_error *err) {
+                                       const tp_id128 *expected_fingerprint,
+                                       bool create_only, tp_error *err) {
     if (out_fingerprint) {
         memset(out_fingerprint, 0, sizeof *out_fingerprint);
     }
@@ -2048,15 +2073,34 @@ static tp_status tp_project_save_stage(tp_project *p, const char *path, tp_id128
                                 "tp_project_save: destination changed before publish: %s", path);
         }
     }
-    /* Atomically move the fully-written temp onto `path`, replacing any existing file. */
+    /* Atomically publish the fully-written temp. Create-only publication must
+     * fail if another writer won the destination after our earlier checks. */
     int moved;
+    bool destination_exists = false;
 #ifdef _WIN32
-    moved = MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) ? 1 : 0;
+    const DWORD flags = MOVEFILE_WRITE_THROUGH |
+                        (create_only ? 0U : MOVEFILE_REPLACE_EXISTING);
+    moved = MoveFileExA(tmp, path, flags) ? 1 : 0;
+    if (!moved && create_only) {
+        const DWORD code = GetLastError();
+        destination_exists = code == ERROR_FILE_EXISTS ||
+                             code == ERROR_ALREADY_EXISTS;
+    }
 #else
-    moved = (rename(tmp, path) == 0) ? 1 : 0; /* POSIX rename atomically replaces an existing dest */
+    if (create_only) {
+        moved = tp_publish_new_file(tmp, path) == 0 ? 1 : 0;
+        destination_exists = !moved && errno == EEXIST;
+    } else {
+        moved = rename(tmp, path) == 0 ? 1 : 0;
+    }
 #endif
     if (!moved) {
         (void)remove(tmp);
+        if (destination_exists) {
+            return tp_error_set(err, TP_STATUS_FILE_EXISTS,
+                                "tp_project_save: destination already exists: %s",
+                                path);
+        }
         return tp_error_set(err, TP_STATUS_BAD_PROJECT, "tp_project_save: could not finalize save to %s", path);
     }
     if (out_fingerprint) {
@@ -2078,7 +2122,8 @@ static void tp_project_adopt_saved_dir(tp_project *dst, tp_project *stage) {
 }
 
 static tp_status tp_project_save_staged(tp_project *p, const char *path, tp_id128 *out_fingerprint,
-                                        const tp_id128 *expected_fingerprint, tp_error *err) {
+                                        const tp_id128 *expected_fingerprint,
+                                        bool create_only, tp_error *err) {
     if (out_fingerprint) {
         memset(out_fingerprint, 0, sizeof *out_fingerprint);
     }
@@ -2089,7 +2134,8 @@ static tp_status tp_project_save_staged(tp_project *p, const char *path, tp_id12
     if (!stage) {
         return tp_error_set(err, TP_STATUS_OOM, "tp_project_save: could not stage project paths");
     }
-    tp_status st = tp_project_save_stage(stage, path, out_fingerprint, expected_fingerprint, err);
+    tp_status st = tp_project_save_stage(stage, path, out_fingerprint,
+                                         expected_fingerprint, create_only, err);
     if (st == TP_STATUS_OK) {
         tp_project_adopt_saved_dir(p, stage);
     }
@@ -2099,7 +2145,12 @@ static tp_status tp_project_save_staged(tp_project *p, const char *path, tp_id12
 
 tp_status tp_project_save_with_fingerprint(tp_project *p, const char *path, tp_id128 *out_fingerprint,
                                            tp_error *err) {
-    return tp_project_save_staged(p, path, out_fingerprint, NULL, err);
+    return tp_project_save_staged(p, path, out_fingerprint, NULL, false, err);
+}
+
+tp_status tp_project_save_new_with_fingerprint(
+    tp_project *p, const char *path, tp_id128 *out_fingerprint, tp_error *err) {
+    return tp_project_save_staged(p, path, out_fingerprint, NULL, true, err);
 }
 
 tp_status tp_project_save_if_unchanged(tp_project *p, const char *path,
@@ -2112,7 +2163,8 @@ tp_status tp_project_save_if_unchanged(tp_project *p, const char *path,
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "tp_project_save_if_unchanged: NULL expected fingerprint");
     }
-    return tp_project_save_staged(p, path, out_fingerprint, expected_fingerprint, err);
+    return tp_project_save_staged(p, path, out_fingerprint,
+                                  expected_fingerprint, false, err);
 }
 
 tp_status tp_project_save(tp_project *p, const char *path, tp_error *err) {

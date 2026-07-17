@@ -104,7 +104,8 @@ typedef enum tp_status {
     TP_STATUS_RECOVERY_BUSY,           /* another process claimed this recovery journal */
     TP_STATUS_RECOVERY_CLAIM_FAILED,   /* recovery journal lock could not be created/acquired for a storage reason */
     TP_STATUS_PROJECT_LIVE,            /* canonical project identity is leased by another writer */
-    TP_STATUS_UNSUPPORTED_CAPABILITY   /* the selected client has no authority/surface for this capability */
+    TP_STATUS_UNSUPPORTED_CAPABILITY,  /* the selected client has no authority/surface for this capability */
+    TP_STATUS_FILE_EXISTS              /* create-only publication found an existing destination */
 } tp_status;
 
 /* Fixed-size message buffer -- no heap, safe to embed by value on the stack. */
@@ -177,6 +178,7 @@ static inline const char *tp_status_str(tp_status status) {
         case TP_STATUS_RECOVERY_CLAIM_FAILED: return "recovery journal claim failed";
         case TP_STATUS_PROJECT_LIVE: return "project is live in another writer";
         case TP_STATUS_UNSUPPORTED_CAPABILITY: return "unsupported client capability";
+        case TP_STATUS_FILE_EXISTS: return "file already exists";
     }
     return "unknown status";
 }
@@ -227,6 +229,7 @@ static inline const char *tp_status_id(tp_status status) {
         case TP_STATUS_RECOVERY_CLAIM_FAILED: return "recovery_claim_failed";
         case TP_STATUS_PROJECT_LIVE: return "project_live";
         case TP_STATUS_UNSUPPORTED_CAPABILITY: return "unsupported_capability";
+        case TP_STATUS_FILE_EXISTS: return "file_exists";
     }
     return "unknown_status";
 }

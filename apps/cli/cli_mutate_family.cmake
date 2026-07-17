@@ -299,6 +299,7 @@ elseif(FAMILY STREQUAL "anim")
 
 elseif(FAMILY STREQUAL "target")
     run(0 new "${PROJ}")                                        # seeds 1 json-neotolis target
+    run_match(3 "file_exists" new "${PROJ}" --json)
     run(0 target add "${PROJ}" atlas1 defold out/atlas1_def)
     assert_contains("\"exporter_id\": \"defold\"")
     run(2 target add "${PROJ}" atlas1 not-an-exporter out/x)    # unknown exporter -> usage

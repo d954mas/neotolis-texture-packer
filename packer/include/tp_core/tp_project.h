@@ -490,6 +490,11 @@ tp_status tp_project_save(tp_project *p, const char *path, tp_error *err);
 tp_status tp_project_save_with_fingerprint(tp_project *p, const char *path, tp_id128 *out_fingerprint,
                                            tp_error *err);
 
+/* Create-only atomic save. If `path` exists at publish time, returns
+ * TP_STATUS_FILE_EXISTS without changing it or the staged project paths. */
+tp_status tp_project_save_new_with_fingerprint(
+    tp_project *p, const char *path, tp_id128 *out_fingerprint, tp_error *err);
+
 /* Staged optimistic save for an already-bound identity. The original project is not path-normalized
  * unless publish succeeds. After the sibling temp is fully written, the destination's exact bytes are
  * fingerprinted immediately before atomic replace; a missing/different/unreadable destination returns
