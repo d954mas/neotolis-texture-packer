@@ -273,6 +273,9 @@ static bool install_session(tp_session *next) {
         return false;
     }
     snapshot_drop();
+    if (s_session) {
+        (void)tp_session_discard(s_session, NULL);
+    }
     tp_session_destroy(s_session);
     s_session = next;
     return true;

@@ -2685,6 +2685,51 @@ void run_selftest(void) {
         gui_project_init();
         NT_ASSERT(gui_recovery_collect(j15list) == 0 &&
                   "J15: clean close leaves no recovery candidate");
+
+        /* Successful New/Open replace the outgoing session only after the
+         * replacement is ready. The explicit replacement discards its dirty
+         * recovery slot; a failed Open keeps the current session and slot. */
+        char j15outgoing[TP_IDENTITY_PATH_MAX];
+        const char *j15live = NULL;
+        NT_ASSERT(gui_project_set_atlas_name(0, "discarded_by_new"));
+        j15live = tp_session__recovery_journal_path(
+            gui_project__test_session());
+        NT_ASSERT(j15live &&
+                  snprintf(j15outgoing, sizeof j15outgoing, "%s", j15live) > 0 &&
+                  selftest_file_exists(j15outgoing));
+        NT_ASSERT(gui_project_new() &&
+                  !selftest_file_exists(j15outgoing) &&
+                  gui_recovery_collect(j15list) == 0 &&
+                  "J15: New->Discard removes the outgoing dirty recovery slot");
+
+        NT_ASSERT(gui_project_set_atlas_name(0, "discarded_by_open"));
+        j15live = tp_session__recovery_journal_path(
+            gui_project__test_session());
+        NT_ASSERT(j15live &&
+                  snprintf(j15outgoing, sizeof j15outgoing, "%s", j15live) > 0 &&
+                  selftest_file_exists(j15outgoing));
+        NT_ASSERT(gui_project_open(j15original, j15err, sizeof j15err) ==
+                      TP_STATUS_OK &&
+                  !selftest_file_exists(j15outgoing) &&
+                  gui_recovery_collect(j15list) == 0 &&
+                  "J15: Open->Discard removes the outgoing dirty recovery slot");
+
+        NT_ASSERT(gui_project_set_atlas_name(0, "failed_open_kept"));
+        tp_session *j15before_failed_open = gui_project__test_session();
+        j15live = tp_session__recovery_journal_path(j15before_failed_open);
+        NT_ASSERT(j15live &&
+                  snprintf(j15outgoing, sizeof j15outgoing, "%s", j15live) > 0 &&
+                  selftest_file_exists(j15outgoing));
+        char j15missing[TP_IDENTITY_PATH_MAX];
+        j15n = snprintf(j15missing, sizeof j15missing,
+                        "%s/missing.ntpacker_project", j15root);
+        NT_ASSERT(j15n > 0 && (size_t)j15n < sizeof j15missing &&
+                  gui_project_open(j15missing, j15err, sizeof j15err) !=
+                      TP_STATUS_OK &&
+                  gui_project__test_session() == j15before_failed_open &&
+                  gui_project_is_dirty() &&
+                  selftest_file_exists(j15outgoing) &&
+                  "J15: failed Open preserves the outgoing dirty session and recovery slot");
         nt_log_info("SELFTEST: J15 typed recovery boundary and shutdown policy OK");
         free(j15list);
         gui_project_shutdown();
