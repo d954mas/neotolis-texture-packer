@@ -163,6 +163,29 @@ static tp_operation rename_op(tp_id128 atlas_id, const char *name) {
     return op;
 }
 
+/* Apply one atlas.rename as a whole session transaction; asserts the apply
+ * status equals expected_status. Writes the txn result to *out -- the caller
+ * owns it and must tp_txn_result_free() it -- so result-field assertions
+ * (committed, revision, no_change) some call sites still need stay possible.
+ * A void helper that freed *out internally would silently drop those. */
+static void session_apply_rename(tp_session *session, const char *id_hex,
+                                 int64_t expected_rev, tp_id128 atlas_id,
+                                 const char *name, tp_status expected_status,
+                                 tp_txn_result *out, tp_error *err) {
+    tp_operation op = rename_op(atlas_id, name);
+    tp_txn_request req;
+    memset(&req, 0, sizeof req);
+    req.schema = TP_TXN_SCHEMA;
+    (void)snprintf(req.id_hex, sizeof req.id_hex, "%s", id_hex);
+    req.expected_revision = expected_rev;
+    req.ops = &op;
+    req.op_count = 1;
+    memset(out, 0, sizeof *out);
+    TEST_ASSERT_EQUAL_INT(expected_status,
+                          tp_session_apply(session, &req, out, err));
+    tp_operation_free(&op);
+}
+
 static char *test_dup(const char *text) {
     const size_t len = strlen(text) + 1U;
     char *copy = (char *)malloc(len);
@@ -481,22 +504,12 @@ void test_owned_snapshot_survives_later_commit(void) {
     TEST_ASSERT_NOT_NULL(old_atlas);
     TEST_ASSERT_EQUAL_STRING("atlas1", old_atlas->name);
 
-    tp_operation op = rename_op(old_atlas->id, "renamed");
-    tp_txn_request req;
-    memset(&req, 0, sizeof req);
-    req.schema = TP_TXN_SCHEMA;
-    memcpy(req.id_hex, "00112233445566778899aabbccddeeff", 33U);
-    req.expected_revision = 0;
-    req.ops = &op;
-    req.op_count = 1;
-
     tp_txn_result result;
-    memset(&result, 0, sizeof result);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_apply(session, &req, &result, &err));
+    session_apply_rename(session, "00112233445566778899aabbccddeeff", 0,
+                         old_atlas->id, "renamed", TP_STATUS_OK, &result, &err);
     TEST_ASSERT_TRUE(result.committed);
     TEST_ASSERT_EQUAL_INT64(1, result.revision);
     tp_txn_result_free(&result);
-    tp_operation_free(&op);
 
     tp_session_snapshot *after = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_snapshot_create(session, &after, &err));
@@ -517,21 +530,12 @@ void test_rejected_commit_does_not_publish_event_or_generation(void) {
     const tp_snapshot_atlas *atlas = tp_session_snapshot_atlas_at(snapshot, 0);
     TEST_ASSERT_NOT_NULL(atlas);
 
-    tp_operation op = rename_op(atlas->id, "not-committed");
-    tp_txn_request req;
-    memset(&req, 0, sizeof req);
-    req.schema = TP_TXN_SCHEMA;
-    memcpy(req.id_hex, "ffeeddccbbaa99887766554433221100", 33U);
-    req.expected_revision = 99;
-    req.ops = &op;
-    req.op_count = 1;
-
     tp_txn_result result;
-    memset(&result, 0, sizeof result);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_REVISION, tp_session_apply(session, &req, &result, &err));
+    session_apply_rename(session, "ffeeddccbbaa99887766554433221100", 99,
+                         atlas->id, "not-committed", TP_STATUS_INVALID_REVISION,
+                         &result, &err);
     TEST_ASSERT_FALSE(result.committed);
     tp_txn_result_free(&result);
-    tp_operation_free(&op);
 
     TEST_ASSERT_EQUAL_UINT64(0, tp_session_event_sequence(session));
     tp_session_snapshot *after = NULL;
@@ -553,20 +557,13 @@ void test_no_change_apply_does_not_publish_event_or_generation(void) {
     const tp_snapshot_atlas *atlas = tp_session_snapshot_atlas_at(before, 0);
     TEST_ASSERT_NOT_NULL(atlas);
 
-    tp_operation op = rename_op(atlas->id, atlas->name);
-    tp_txn_request request = {0};
-    request.schema = TP_TXN_SCHEMA;
-    memcpy(request.id_hex, "abcdefabcdefabcdefabcdefabcdefab", 33U);
-    request.expected_revision = tp_session_snapshot_revision(before);
-    request.ops = &op;
-    request.op_count = 1;
     tp_txn_result result;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_session_apply(session, &request, &result, &err));
+    session_apply_rename(session, "abcdefabcdefabcdefabcdefabcdefab",
+                         tp_session_snapshot_revision(before), atlas->id,
+                         atlas->name, TP_STATUS_OK, &result, &err);
     TEST_ASSERT_FALSE(result.committed);
     TEST_ASSERT_TRUE(result.no_change);
     tp_txn_result_free(&result);
-    tp_operation_free(&op);
 
     TEST_ASSERT_EQUAL_UINT64(0, tp_session_event_sequence(session));
     tp_session_snapshot *after = NULL;
@@ -590,19 +587,10 @@ void test_undo_redo_are_session_commands_with_ordered_events(void) {
     const tp_snapshot_atlas *atlas = tp_session_snapshot_atlas_at(initial, 0);
     TEST_ASSERT_NOT_NULL(atlas);
 
-    tp_operation op = rename_op(atlas->id, "renamed");
-    tp_txn_request req;
-    memset(&req, 0, sizeof req);
-    req.schema = TP_TXN_SCHEMA;
-    memcpy(req.id_hex, "1234567890abcdef1234567890abcdef", 33U);
-    req.expected_revision = 0;
-    req.ops = &op;
-    req.op_count = 1;
     tp_txn_result result;
-    memset(&result, 0, sizeof result);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_apply(session, &req, &result, &err));
+    session_apply_rename(session, "1234567890abcdef1234567890abcdef", 0,
+                         atlas->id, "renamed", TP_STATUS_OK, &result, &err);
     tp_txn_result_free(&result);
-    tp_operation_free(&op);
     TEST_ASSERT_TRUE(tp_session_can_undo(session));
 
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_undo(session, &err));
@@ -656,22 +644,13 @@ void test_journal_append_failure_publishes_nothing(void) {
     TEST_ASSERT_NOT_NULL(journal);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_attach_journal(session, journal, &err));
 
-    tp_operation op = rename_op(atlas->id, "must-rollback");
-    tp_txn_request req;
-    memset(&req, 0, sizeof req);
-    req.schema = TP_TXN_SCHEMA;
-    memcpy(req.id_hex, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 33U);
-    req.expected_revision = 0;
-    req.ops = &op;
-    req.op_count = 1;
-    tp_txn_result result;
-    memset(&result, 0, sizeof result);
     tp_journal_io_memory__fail_next_writes(io, 1);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED,
-                          tp_session_apply(session, &req, &result, &err));
+    tp_txn_result result;
+    session_apply_rename(session, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 0,
+                         atlas->id, "must-rollback", TP_STATUS_JOURNAL_FAILED,
+                         &result, &err);
     TEST_ASSERT_FALSE(result.committed);
     tp_txn_result_free(&result);
-    tp_operation_free(&op);
 
     TEST_ASSERT_EQUAL_UINT64(0, tp_session_event_sequence(session));
     tp_session_snapshot *after = NULL;
@@ -705,19 +684,10 @@ void test_source_invalidation_is_runtime_only_and_event_window_resyncs(void) {
         tp_session_snapshot *current = NULL;
         TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_snapshot_create(session, &current, &err));
         const tp_snapshot_atlas *atlas = tp_session_snapshot_atlas_at(current, 0);
-        tp_operation op = rename_op(atlas->id, name);
-        tp_txn_request req;
-        memset(&req, 0, sizeof req);
-        req.schema = TP_TXN_SCHEMA;
-        memcpy(req.id_hex, id, sizeof req.id_hex);
-        req.expected_revision = tp_session_snapshot_revision(current);
-        req.ops = &op;
-        req.op_count = 1;
         tp_txn_result result;
-        memset(&result, 0, sizeof result);
-        TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_apply(session, &req, &result, &err));
+        session_apply_rename(session, id, tp_session_snapshot_revision(current),
+                             atlas->id, name, TP_STATUS_OK, &result, &err);
         tp_txn_result_free(&result);
-        tp_operation_free(&op);
         tp_session_snapshot_destroy(current);
     }
 
@@ -740,19 +710,10 @@ void test_save_as_and_open_are_session_owned_commands(void) {
     tp_session_snapshot *initial = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_snapshot_create(session, &initial, &err));
     const tp_snapshot_atlas *atlas = tp_session_snapshot_atlas_at(initial, 0);
-    tp_operation op = rename_op(atlas->id, "persisted");
-    tp_txn_request req;
-    memset(&req, 0, sizeof req);
-    req.schema = TP_TXN_SCHEMA;
-    memcpy(req.id_hex, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 33U);
-    req.expected_revision = 0;
-    req.ops = &op;
-    req.op_count = 1;
     tp_txn_result result;
-    memset(&result, 0, sizeof result);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_apply(session, &req, &result, &err));
+    session_apply_rename(session, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 0,
+                         atlas->id, "persisted", TP_STATUS_OK, &result, &err);
     tp_txn_result_free(&result);
-    tp_operation_free(&op);
     tp_session_snapshot *dirty = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_snapshot_create(session, &dirty, &err));
     TEST_ASSERT_TRUE(tp_session_snapshot_dirty(dirty));
@@ -1209,20 +1170,11 @@ void test_save_reports_recovery_degradation_and_blocks_later_mutation(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED, save_result.recovery_status);
     TEST_ASSERT_FALSE(tp_session_recovery_available(session));
 
-    tp_operation op = rename_op(atlas->id, "unsafe-after-degrade");
-    tp_txn_request req;
-    memset(&req, 0, sizeof req);
-    req.schema = TP_TXN_SCHEMA;
-    memcpy(req.id_hex, "cccccccccccccccccccccccccccccccc", 33U);
-    req.expected_revision = 0;
-    req.ops = &op;
-    req.op_count = 1;
     tp_txn_result txn_result;
-    memset(&txn_result, 0, sizeof txn_result);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED,
-                          tp_session_apply(session, &req, &txn_result, &err));
+    session_apply_rename(session, "cccccccccccccccccccccccccccccccc", 0,
+                         atlas->id, "unsafe-after-degrade",
+                         TP_STATUS_JOURNAL_FAILED, &txn_result, &err);
     tp_txn_result_free(&txn_result);
-    tp_operation_free(&op);
     tp_session_snapshot_destroy(before);
     tp_session_destroy(session);
     (void)remove(path);
@@ -1409,20 +1361,11 @@ void test_save_rejects_external_change_without_overwriting_it(void) {
     TEST_ASSERT_TRUE(tp_session_snapshot_saved_file_fingerprint(
         snapshot, &opened_fingerprint));
     const tp_snapshot_atlas *atlas = tp_session_snapshot_atlas_at(snapshot, 0);
-    tp_operation op = rename_op(atlas->id, "local-change");
-    tp_txn_request req;
-    memset(&req, 0, sizeof req);
-    req.schema = TP_TXN_SCHEMA;
-    memcpy(req.id_hex, "81818181818181818181818181818181", 33U);
-    req.expected_revision = tp_session_snapshot_revision(snapshot);
-    req.ops = &op;
-    req.op_count = 1;
     tp_txn_result txn_result;
-    memset(&txn_result, 0, sizeof txn_result);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_session_apply(session, &req, &txn_result, &err));
+    session_apply_rename(session, "81818181818181818181818181818181",
+                         tp_session_snapshot_revision(snapshot), atlas->id,
+                         "local-change", TP_STATUS_OK, &txn_result, &err);
     tp_txn_result_free(&txn_result);
-    tp_operation_free(&op);
     tp_session_snapshot_destroy(snapshot);
 
     static const char external[] = "external-owner\n";
@@ -1455,6 +1398,34 @@ void test_save_rejects_external_change_without_overwriting_it(void) {
     (void)remove(path);
 }
 
+/* Create a recovery store rooted at g_scratch, a live journal at
+ * `journal_path`, and a fresh session attached to it with the given
+ * metadata; asserts each step succeeds. Returns the session and writes the
+ * store to *store_out (both owned by the caller as usual). */
+static tp_session *attach_live_recovery(const char *journal_path,
+                                        int64_t timestamp,
+                                        const char *project_name,
+                                        tp_recovery_store **store_out,
+                                        tp_error *err) {
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_recovery_store_create(g_scratch, recovery_key(), store_out, err));
+    tp_recovery_live *live = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_recovery_store_create_live(*store_out, journal_path, &live, err));
+    tp_session *session = make_session();
+    tp_recovery_metadata metadata = {
+        .timestamp = timestamp,
+        .project_path = "",
+        .project_name = project_name,
+    };
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_attach_recovery_live(session, live, &metadata, err));
+    return session;
+}
+
 void test_session_owns_live_recovery_clean_close_order(void) {
     char journal[1024];
     char lock[1050];
@@ -1464,19 +1435,8 @@ void test_session_owns_live_recovery_clean_close_order(void) {
     (void)remove(lock);
     tp_recovery_store *store = NULL;
     tp_error err = {{0}};
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_recovery_store_create(g_scratch, recovery_key(), &store, &err));
-    tp_recovery_live *live = NULL;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_recovery_store_create_live(store, journal, &live, &err));
-    tp_session *session = make_session();
-    tp_recovery_metadata metadata = {
-        .timestamp = 60,
-        .project_path = "",
-        .project_name = "session-live",
-    };
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_session_attach_recovery_live(session, live, &metadata, &err));
+    tp_session *session = attach_live_recovery(journal, 60, "session-live",
+                                               &store, &err);
     TEST_ASSERT_TRUE(tp_session_recovery_available(session));
     TEST_ASSERT_TRUE(test_file_exists(journal));
     tp_session_destroy(session);
@@ -1495,36 +1455,16 @@ void test_session_preserves_dirty_live_recovery_on_destroy(void) {
     (void)remove(journal);
     tp_recovery_store *store = NULL;
     tp_error err = {{0}};
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_recovery_store_create(g_scratch, recovery_key(), &store, &err));
-    tp_recovery_live *live = NULL;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_recovery_store_create_live(store, journal, &live, &err));
-    tp_session *session = make_session();
-    tp_recovery_metadata metadata = {
-        .timestamp = 70,
-        .project_path = "",
-        .project_name = "session-dirty",
-    };
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_session_attach_recovery_live(session, live, &metadata, &err));
+    tp_session *session = attach_live_recovery(journal, 70, "session-dirty",
+                                               &store, &err);
     tp_session_snapshot *snapshot = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_session_snapshot_create(session, &snapshot, &err));
-    tp_operation op = rename_op(tp_session_snapshot_atlas_at(snapshot, 0)->id,
-                                "dirty-live");
+    const tp_id128 atlas_id = tp_session_snapshot_atlas_at(snapshot, 0)->id;
     tp_session_snapshot_destroy(snapshot);
-    tp_txn_request request;
-    memset(&request, 0, sizeof request);
-    request.schema = TP_TXN_SCHEMA;
-    memcpy(request.id_hex, "10000000000000000000000000000070", 33U);
-    request.expected_revision = 0;
-    request.ops = &op;
-    request.op_count = 1;
     tp_txn_result result;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_session_apply(session, &request, &result, &err));
-    tp_operation_free(&op);
+    session_apply_rename(session, "10000000000000000000000000000070", 0,
+                         atlas_id, "dirty-live", TP_STATUS_OK, &result, &err);
     tp_session_destroy(session);
     TEST_ASSERT_TRUE(test_file_exists(journal));
     tp_recovery_candidates candidates;
@@ -1550,19 +1490,9 @@ void test_save_as_updates_live_recovery_identity_before_compaction(void) {
     (void)remove(target);
     tp_recovery_store *store = NULL;
     tp_error err = {{0}};
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_recovery_store_create(g_scratch, recovery_key(), &store, &err));
-    tp_recovery_live *live = NULL;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_recovery_store_create_live(store, journal, &live, &err));
-    tp_session *session = make_session();
-    const tp_recovery_metadata metadata = {
-        .timestamp = 75,
-        .project_path = "",
-        .project_name = "session-save-identity",
-    };
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_session_attach_recovery_live(session, live, &metadata, &err));
+    tp_session *session = attach_live_recovery(journal, 75,
+                                               "session-save-identity",
+                                               &store, &err);
     tp_session_save_result save_result;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_session_save_as(session, target, &save_result, &err));
@@ -1572,22 +1502,14 @@ void test_save_as_updates_live_recovery_identity_before_compaction(void) {
     tp_session_snapshot *snapshot = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_session_snapshot_create(session, &snapshot, &err));
-    tp_operation op = rename_op(tp_session_snapshot_atlas_at(snapshot, 0)->id,
-                                "dirty-after-save");
+    const tp_id128 atlas_id = tp_session_snapshot_atlas_at(snapshot, 0)->id;
     const int64_t revision = tp_session_snapshot_revision(snapshot);
     tp_session_snapshot_destroy(snapshot);
-    tp_txn_request request;
-    memset(&request, 0, sizeof request);
-    request.schema = TP_TXN_SCHEMA;
-    memcpy(request.id_hex, "10000000000000000000000000000075", 33U);
-    request.expected_revision = revision;
-    request.ops = &op;
-    request.op_count = 1U;
     tp_txn_result txn_result;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_session_apply(session, &request, &txn_result, &err));
+    session_apply_rename(session, "10000000000000000000000000000075",
+                         revision, atlas_id, "dirty-after-save",
+                         TP_STATUS_OK, &txn_result, &err);
     tp_txn_result_free(&txn_result);
-    tp_operation_free(&op);
     tp_session_destroy(session);
 
     tp_recovery_candidates candidates;
@@ -1652,21 +1574,14 @@ void test_cross_identity_save_retires_journal_after_metadata_failure(void) {
     tp_session_snapshot *snapshot = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_session_snapshot_create(session, &snapshot, &err));
-    tp_operation op = rename_op(tp_session_snapshot_atlas_at(snapshot, 0)->id,
-                                "dirty-before-save-as");
-    tp_txn_request request;
-    memset(&request, 0, sizeof request);
-    request.schema = TP_TXN_SCHEMA;
-    memcpy(request.id_hex, "10000000000000000000000000000076", 33U);
-    request.expected_revision = tp_session_snapshot_revision(snapshot);
-    request.ops = &op;
-    request.op_count = 1U;
+    const tp_id128 atlas_id = tp_session_snapshot_atlas_at(snapshot, 0)->id;
+    const int64_t expected_rev = tp_session_snapshot_revision(snapshot);
     tp_session_snapshot_destroy(snapshot);
     tp_txn_result txn_result;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_session_apply(session, &request, &txn_result, &err));
+    session_apply_rename(session, "10000000000000000000000000000076",
+                         expected_rev, atlas_id, "dirty-before-save-as",
+                         TP_STATUS_OK, &txn_result, &err);
     tp_txn_result_free(&txn_result);
-    tp_operation_free(&op);
     /* Checkpoint + initial META + transaction consume all three slots, so the
      * Save As identity META fails only after B was published. */
     tp_journal__test_set_record_limit(3U);
@@ -1723,20 +1638,12 @@ void test_degraded_session_live_blocks_mutation_and_preserves_slot(void) {
     tp_session_snapshot *snapshot = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_session_snapshot_create(session, &snapshot, &err));
-    tp_operation op = rename_op(tp_session_snapshot_atlas_at(snapshot, 0)->id,
-                                "must-not-commit");
+    const tp_id128 atlas_id = tp_session_snapshot_atlas_at(snapshot, 0)->id;
     tp_session_snapshot_destroy(snapshot);
-    tp_txn_request request;
-    memset(&request, 0, sizeof request);
-    request.schema = TP_TXN_SCHEMA;
-    memcpy(request.id_hex, "10000000000000000000000000000080", 33U);
-    request.expected_revision = 0;
-    request.ops = &op;
-    request.op_count = 1;
     tp_txn_result result;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED,
-                          tp_session_apply(session, &request, &result, &err));
-    tp_operation_free(&op);
+    session_apply_rename(session, "10000000000000000000000000000080", 0,
+                         atlas_id, "must-not-commit", TP_STATUS_JOURNAL_FAILED,
+                         &result, &err);
     tp_session_destroy(session);
     TEST_ASSERT_TRUE(tp_scan_is_dir(journal));
     tp_recovery_store_destroy(store);
