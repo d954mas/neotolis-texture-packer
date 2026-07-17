@@ -115,6 +115,9 @@ elseif(FAMILY STREQUAL "source")
     run(0 remove "${PROJ}" atlas1 "${SPRITES}")
     run_json(0 "inspect;sprites=0" inspect "${PROJ}" --json)
     run(3 remove "${PROJ}" atlas1 "no/such/source")            # not found -> exit 3
+    string(REPEAT "oversized_segment_" 260 _oversized_source)
+    run_match(2 "\"id\":\"out_of_bounds\"" remove "${PROJ}" atlas1
+        "${_oversized_source}" --json)                          # malformed path -> usage, not not-found
     # M5 regression: the old 1024-byte frontend buffers silently persisted only
     # the first 999 bytes while reporting success. The full argument must survive.
     string(REPEAT "long_segment_" 92 _long_source)

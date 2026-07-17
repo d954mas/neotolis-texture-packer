@@ -604,12 +604,25 @@ static int do_remove_source(const char *const *pos, int npos, bool json, bool qu
         return rc;
     }
     const tp_snapshot_source *source = NULL;
-    if (tp_source_snapshot_find(edit.snapshot, atlas_dto->id, src, &source,
-                                NULL) !=
-        TP_STATUS_OK) {
-        cli_emit_error(json, quiet, "source_not_found", "atlas '%s' has no source matching '%s'", atlas, src);
+    tp_error lookup_error = {0};
+    const tp_status lookup_status = tp_source_snapshot_find(
+        edit.snapshot, atlas_dto->id, src, &source, &lookup_error);
+    if (lookup_status != TP_STATUS_OK) {
+        if (lookup_status == TP_STATUS_NOT_FOUND) {
+            cli_emit_error(json, quiet, "source_not_found",
+                           "atlas '%s' has no source matching '%s'", atlas,
+                           src);
+        } else {
+            cli_emit_error(json, quiet, tp_status_id(lookup_status), "%s",
+                           lookup_error.msg[0]
+                               ? lookup_error.msg
+                               : tp_status_str(lookup_status));
+        }
         edit_close(&edit);
-        return CLI_EXIT_PROJECT;
+        return status_is_internal_fault(lookup_status)
+                   ? CLI_EXIT_INTERNAL
+                   : (lookup_status == TP_STATUS_NOT_FOUND ? CLI_EXIT_PROJECT
+                                                          : CLI_EXIT_USAGE);
     }
     tp_operation op;
     memset(&op, 0, sizeof op);
