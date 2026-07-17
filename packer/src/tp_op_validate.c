@@ -18,6 +18,7 @@
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_srckey.h"
 #include "tp_op_internal.h"
+#include "tp_source_plan_internal.h"
 #include "tp_strutil.h"
 
 /* Reject NaN / +-inf; `pos` also rejects <= 0. No libm: comparisons only. */
@@ -309,52 +310,57 @@ tp_status tp_op__canonical_view(const tp_project *project,
     return status;
 }
 
-static bool source_path_identity(const tp_project *project, const char *path,
-                                 bool stored, char *out, size_t out_size) {
-    char portable[TP_IDENTITY_PATH_MAX];
-    if (tp_project_path_slash_normalize(path, portable, sizeof portable) !=
-        TP_STATUS_OK) {
-        return false;
-    }
-    char resolved[TP_IDENTITY_PATH_MAX];
-    tp_status status = stored
-                           ? tp_project_resolve_source_path(
-                                 project, portable, resolved, sizeof resolved)
-                           : tp_identity_path_absolute_lexical(
-                                 portable, resolved, sizeof resolved, NULL);
-    if (stored && status != TP_STATUS_OK) {
-        status = tp_identity_path_absolute_lexical(
-            portable, resolved, sizeof resolved, NULL);
-    }
+static tp_status atlas_has_effective_source_path(
+    const tp_project *project, const tp_project_atlas *atlas,
+    const char *candidate, tp_id128 except_id, bool *out_found,
+    tp_error *err) {
+    *out_found = false;
+    tp_source_path_identity wanted;
+    tp_status status = tp_source_path_identity_from_input(candidate, &wanted,
+                                                          err);
     if (status != TP_STATUS_OK) {
-        return false;
-    }
-    return tp_identity_path_absolute_lexical(resolved, out, out_size, NULL) ==
-           TP_STATUS_OK;
-}
-
-static bool atlas_has_effective_source_path(const tp_project *project,
-                                            const tp_project_atlas *atlas,
-                                            const char *candidate,
-                                            tp_id128 except_id) {
-    char wanted[TP_IDENTITY_PATH_MAX];
-    if (!source_path_identity(project, candidate, false, wanted,
-                              sizeof wanted)) {
-        return false;
+        return status;
     }
     for (int i = 0; i < atlas->source_count; ++i) {
         const tp_project_source *source = &atlas->sources[i];
         if (!tp_id128_is_nil(except_id) && tp_id128_eq(source->id, except_id)) {
             continue;
         }
-        char existing[TP_IDENTITY_PATH_MAX];
-        if (source_path_identity(project, source->path, true, existing,
-                                 sizeof existing) &&
-            strcmp(existing, wanted) == 0) {
-            return true;
+        tp_source_path_identity existing;
+        status = tp_source_path_identity_from_stored(
+            project, source->path, &existing, err);
+        if (status != TP_STATUS_OK) {
+            return status;
+        }
+        if (tp_source_path_identity_equal_text(
+                wanted.absolute, wanted.has_canonical ? wanted.canonical : NULL,
+                existing.absolute,
+                existing.has_canonical ? existing.canonical : NULL)) {
+            *out_found = true;
+            return TP_STATUS_OK;
         }
     }
-    return false;
+    return TP_STATUS_OK;
+}
+
+static tp_status validate_unique_source_path(
+    const tp_project *project, const tp_project_atlas *atlas,
+    const char *candidate, tp_id128 except_id, tp_op_reject *reject) {
+    bool duplicate = false;
+    tp_error error = {{0}};
+    const tp_status status = atlas_has_effective_source_path(
+        project, atlas, candidate, except_id, &duplicate, &error);
+    if (status != TP_STATUS_OK) {
+        return tp_op__reject(
+            reject, status, "key", "source path is invalid: %s",
+            error.msg[0] ? error.msg : "identity failed");
+    }
+    return duplicate
+               ? tp_op__reject(
+                     reject, TP_STATUS_INVALID_ARGUMENT, "key",
+                     "%s source with path '%s' already exists in the atlas",
+                     tp_id128_is_nil(except_id) ? "a" : "another", candidate)
+               : TP_STATUS_OK;
 }
 
 tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_op_reject *rej) {
@@ -434,10 +440,10 @@ tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_
              * with THIS id at this path") cannot honor a path that already belongs to another
              * source, so reject the conflict here. (The F2-05 CLI adapter pre-checks/skips to
              * preserve the CLI's silent-dedupe UX.) */
-            if (atlas_has_effective_source_path(p, a, op->u.source_add.key,
-                                                tp_id128_nil())) {
-                return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "key",
-                                     "a source with path '%s' already exists in the atlas", op->u.source_add.key);
+            tp_status path_status = validate_unique_source_path(
+                p, a, op->u.source_add.key, tp_id128_nil(), rej);
+            if (path_status != TP_STATUS_OK) {
+                return path_status;
             }
             /* kind must be a currently-valid enum value {FOLDER=0, FILE=1}: apply stores kind verbatim and
              * it re-serializes by token, so an out-of-range kind (99, or the reserved ATLAS=2) would
@@ -457,15 +463,8 @@ tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_
             if (!op->u.source_ref.key || op->u.source_ref.key[0] == '\0') {
                 return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "key", "source path must be non-empty");
             }
-            if (atlas_has_effective_source_path(
-                    p, a, op->u.source_ref.key,
-                    op->u.source_ref.source_id)) {
-                return tp_op__reject(
-                    rej, TP_STATUS_INVALID_ARGUMENT, "key",
-                    "another source with path '%s' already exists in the atlas",
-                    op->u.source_ref.key);
-            }
-            return TP_STATUS_OK;
+            return validate_unique_source_path(
+                p, a, op->u.source_ref.key, op->u.source_ref.source_id, rej);
 
         case TP_OP_SPRITE_OVERRIDE_SET:
             if (tp_id128_is_nil(op->u.sprite_set.source_id)) {

@@ -330,6 +330,9 @@ void test_source_batch_plan_collapses_lexical_and_symlink_aliases(void) {
     char dot_path[TP_IDENTITY_PATH_MAX];
     char parent_alias[TP_IDENTITY_PATH_MAX];
     char new_path[TP_IDENTITY_PATH_MAX];
+#ifdef _WIN32
+    char case_alias[TP_IDENTITY_PATH_MAX];
+#endif
     (void)snprintf(real_path, sizeof real_path, "%s/source_real", g_scratch);
     (void)snprintf(alias_path, sizeof alias_path, "%s/source_alias", g_scratch);
     (void)snprintf(dot_path, sizeof dot_path, "%s/source_real/.", g_scratch);
@@ -343,6 +346,17 @@ void test_source_batch_plan_collapses_lexical_and_symlink_aliases(void) {
 #ifdef _WIN32
     has_symlink = CreateSymbolicLinkA(alias_path, real_path,
                                       SYMBOLIC_LINK_FLAG_DIRECTORY) != 0;
+    (void)snprintf(case_alias, sizeof case_alias, "%s", real_path);
+    for (char *c = case_alias + 3; *c; ++c) {
+        if (*c >= 'a' && *c <= 'z') {
+            *c = (char)(*c - ('a' - 'A'));
+            break;
+        }
+        if (*c >= 'A' && *c <= 'Z') {
+            *c = (char)(*c + ('a' - 'A'));
+            break;
+        }
+    }
 #else
     has_symlink = symlink(real_path, alias_path) == 0;
 #endif
@@ -356,6 +370,27 @@ void test_source_batch_plan_collapses_lexical_and_symlink_aliases(void) {
     uint8_t seed = 19U;
     tp_rng rng = {deterministic_fill, &seed};
     tp_error err = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_promote_ids(project, &rng, &err));
+    const char *operation_alias = has_symlink ? alias_path :
+#ifdef _WIN32
+                                                    case_alias;
+#else
+                                                    NULL;
+#endif
+    if (operation_alias) {
+        tp_operation add_alias = {0};
+        add_alias.kind = TP_OP_SOURCE_ADD;
+        add_alias.atlas_id = project->atlases[0].id;
+        add_alias.u.source_add.source_id = (tp_id128){{0x71}};
+        add_alias.u.source_add.kind = TP_SOURCE_KIND_FOLDER;
+        add_alias.u.source_add.key = (char *)operation_alias;
+        tp_op_reject reject;
+        TEST_ASSERT_EQUAL_INT(
+            TP_STATUS_INVALID_ARGUMENT,
+            tp_operation_validate(project, &add_alias, &reject));
+        TEST_ASSERT_EQUAL_STRING("key", reject.field);
+    }
     tp_session *session = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_session_adopt_owned(project, &rng, &session, &err));

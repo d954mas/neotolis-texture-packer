@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "tp_source_plan_internal.h"
 #include "tp_strutil.h"
 
 typedef struct source_identity {
@@ -33,36 +34,99 @@ static void source_identity_drop(source_identity *identity) {
     memset(identity, 0, sizeof *identity);
 }
 
-static tp_status source_identity_from_input(const char *input,
-                                            source_identity *out,
-                                            tp_error *err) {
+tp_status tp_source_path_identity_from_input(const char *input,
+                                             tp_source_path_identity *out,
+                                             tp_error *err) {
+    if (!out) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "source identity output is required");
+    }
     memset(out, 0, sizeof *out);
     if (!input || input[0] == '\0') {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "source path is empty");
     }
-    char portable[TP_IDENTITY_PATH_MAX];
     tp_status status = tp_project_path_slash_normalize(
-        input, portable, sizeof portable);
+        input, out->canonical, sizeof out->canonical);
     if (status != TP_STATUS_OK) {
         return tp_error_set(err, status,
                             "source path exceeds the supported limit");
     }
-    char absolute[TP_IDENTITY_PATH_MAX];
-    status = tp_identity_path_absolute_lexical(portable, absolute,
-                                               sizeof absolute, err);
+    status = tp_identity_path_absolute_lexical(
+        out->canonical, out->absolute, sizeof out->absolute, err);
     if (status != TP_STATUS_OK) {
         return status;
     }
-    out->absolute = source_strdup(absolute);
+    out->has_canonical =
+        tp_identity_path_canonical(out->absolute, out->canonical,
+                                   sizeof out->canonical, NULL) == TP_STATUS_OK;
+    return TP_STATUS_OK;
+}
+
+tp_status tp_source_path_identity_from_stored(const tp_project *project,
+                                              const char *path,
+                                              tp_source_path_identity *out,
+                                              tp_error *err) {
+    if (!project || !path || !out) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "stored source identity arguments are invalid");
+    }
+    memset(out, 0, sizeof *out);
+    tp_status status = tp_project_path_slash_normalize(
+        path, out->canonical, sizeof out->canonical);
+    if (status != TP_STATUS_OK) {
+        return tp_error_set(err, status,
+                            "source path exceeds the supported limit");
+    }
+    status = tp_project_resolve_source_path(
+        project, out->canonical, out->absolute, sizeof out->absolute);
+    if (status != TP_STATUS_OK) {
+        status = tp_identity_path_absolute_lexical(
+            out->canonical, out->absolute, sizeof out->absolute, err);
+    }
+    if (status != TP_STATUS_OK) {
+        return status;
+    }
+    status = tp_identity_path_absolute_lexical(
+        out->absolute, out->canonical, sizeof out->canonical, err);
+    if (status != TP_STATUS_OK) {
+        return status;
+    }
+    memcpy(out->absolute, out->canonical, strlen(out->canonical) + 1U);
+    out->has_canonical =
+        tp_identity_path_canonical(out->absolute, out->canonical,
+                                   sizeof out->canonical, NULL) == TP_STATUS_OK;
+    return TP_STATUS_OK;
+}
+
+bool tp_source_path_identity_equal_text(const char *left_absolute,
+                                        const char *left_canonical,
+                                        const char *right_absolute,
+                                        const char *right_canonical) {
+    if (tp_identity_path_equal(left_absolute, right_absolute)) {
+        return true;
+    }
+    return left_canonical && right_canonical &&
+           tp_identity_path_equal(left_canonical, right_canonical);
+}
+
+static tp_status source_identity_from_input(const char *input,
+                                            source_identity *out,
+                                            tp_error *err) {
+    memset(out, 0, sizeof *out);
+    tp_source_path_identity identity;
+    tp_status status = tp_source_path_identity_from_input(input, &identity,
+                                                          err);
+    if (status != TP_STATUS_OK) {
+        return status;
+    }
+    out->absolute = source_strdup(identity.absolute);
     if (!out->absolute) {
         return tp_error_set(err, TP_STATUS_OOM,
                             "source identity allocation failed");
     }
-    char canonical[TP_IDENTITY_PATH_MAX];
-    if (tp_identity_path_canonical(absolute, canonical, sizeof canonical,
-                                   NULL) == TP_STATUS_OK) {
-        out->canonical = source_strdup(canonical);
+    if (identity.has_canonical) {
+        out->canonical = source_strdup(identity.canonical);
         if (!out->canonical) {
             source_identity_drop(out);
             return tp_error_set(err, TP_STATUS_OOM,
@@ -106,11 +170,8 @@ static tp_status source_identity_from_snapshot(
 
 static bool source_identity_equal(const source_identity *left,
                                   const source_identity *right) {
-    if (tp_identity_path_equal(left->absolute, right->absolute)) {
-        return true;
-    }
-    return left->canonical && right->canonical &&
-           tp_identity_path_equal(left->canonical, right->canonical);
+    return tp_source_path_identity_equal_text(
+        left->absolute, left->canonical, right->absolute, right->canonical);
 }
 
 static int snapshot_atlas_index(const tp_session_snapshot *snapshot,

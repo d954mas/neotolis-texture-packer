@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "tp_core/tp_export.h"          /* TP_EXPORTER_ID_JSON_NEOTOLIS */
+#include "tp_core/tp_identity.h"
 #include "tp_core/tp_operation.h"
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_project.h"
@@ -587,6 +588,41 @@ void test_validate_source_add_bad_kind(void) {
     tp_project_destroy(p);
 }
 
+void test_validate_source_paths_fail_closed(void) {
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_source(&project->atlases[0], "existing"));
+    uint8_t counter = 23;
+    tp_rng rng = {det_fill, &counter};
+    tp_error err = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_promote_ids(project, &rng, &err));
+
+    char oversized[TP_IDENTITY_PATH_MAX + 1U];
+    memset(oversized, 'x', sizeof oversized - 1U);
+    oversized[sizeof oversized - 1U] = '\0';
+    tp_operation op = {0};
+    op.kind = TP_OP_SOURCE_ADD;
+    op.atlas_id = project->atlases[0].id;
+    op.u.source_add.source_id = id_of(0xB6);
+    op.u.source_add.kind = TP_SOURCE_KIND_FOLDER;
+    op.u.source_add.key = oversized;
+    tp_op_reject reject;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS,
+                          tp_operation_validate(project, &op, &reject));
+    TEST_ASSERT_EQUAL_STRING("key", reject.field);
+
+    op.kind = TP_OP_SOURCE_REPLACE;
+    op.u.source_ref.source_id = project->atlases[0].sources[0].id;
+    op.u.source_ref.key = oversized;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS,
+                          tp_operation_validate(project, &op, &reject));
+    TEST_ASSERT_EQUAL_STRING("key", reject.field);
+    tp_project_destroy(project);
+}
+
 void test_source_attached_sprite_ops_preserve_structural_identity(void) {
     tp_project *project = tp_project_create();
     TEST_ASSERT_NOT_NULL(project);
@@ -838,6 +874,7 @@ int main(void) {
     RUN_TEST(test_validate_source_add_dup_relative_to_saved_project);
     RUN_TEST(test_validate_saved_source_keys_preserve_empty_and_replace_uniqueness);
     RUN_TEST(test_validate_source_add_bad_kind);
+    RUN_TEST(test_validate_source_paths_fail_closed);
     RUN_TEST(test_source_attached_sprite_ops_preserve_structural_identity);
     RUN_TEST(test_validate_knob_bounds_match_cli);
     RUN_TEST(test_validate_frame_move_to_index_unbounded);
