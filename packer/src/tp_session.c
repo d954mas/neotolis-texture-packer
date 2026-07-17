@@ -82,6 +82,7 @@ struct tp_session_snapshot {
 
 static _Thread_local size_t s_snapshot_allocations;
 static _Thread_local size_t s_snapshot_allocation_bytes;
+static _Thread_local size_t s_snapshot_fail_after = SIZE_MAX;
 
 static void gate_lock(const tp_session *session);
 static void gate_unlock(const tp_session *session);
@@ -99,6 +100,7 @@ static bool recovery_is_healthy(const tp_session *session) {
 void tp_session__test_reset_snapshot_allocations(void) {
     s_snapshot_allocations = 0U;
     s_snapshot_allocation_bytes = 0U;
+    s_snapshot_fail_after = SIZE_MAX;
 }
 
 size_t tp_session__test_snapshot_allocation_count(void) {
@@ -107,6 +109,10 @@ size_t tp_session__test_snapshot_allocation_count(void) {
 
 size_t tp_session__test_snapshot_allocation_bytes(void) {
     return s_snapshot_allocation_bytes;
+}
+
+void tp_session__test_fail_snapshot_allocation_after(size_t successful) {
+    s_snapshot_fail_after = successful;
 }
 
 tp_status tp_session__test_attach_memory_recovery(tp_session *session,
@@ -180,6 +186,13 @@ const char *tp_session__recovery_journal_path(const tp_session *session) {
 }
 
 static void *snapshot_calloc(size_t count, size_t size) {
+    if (s_snapshot_fail_after != SIZE_MAX) {
+        if (s_snapshot_fail_after == 0U) {
+            s_snapshot_fail_after = SIZE_MAX;
+            return NULL;
+        }
+        s_snapshot_fail_after--;
+    }
     void *allocation = calloc(count, size);
     if (allocation) {
         s_snapshot_allocations++;
@@ -1238,13 +1251,15 @@ void tp_session_snapshot_destroy(tp_session_snapshot *snapshot) {
     if (!snapshot) {
         return;
     }
-    for (int i = 0; i < snapshot->atlas_count; ++i) {
-        free(snapshot->atlases[i].sources);
-        free(snapshot->atlases[i].sprites);
-        free(snapshot->atlases[i].animations);
-        free(snapshot->atlases[i].frames);
-        free(snapshot->atlases[i].frame_offsets);
-        free(snapshot->atlases[i].targets);
+    if (snapshot->atlases) {
+        for (int i = 0; i < snapshot->atlas_count; ++i) {
+            free(snapshot->atlases[i].sources);
+            free(snapshot->atlases[i].sprites);
+            free(snapshot->atlases[i].animations);
+            free(snapshot->atlases[i].frames);
+            free(snapshot->atlases[i].frame_offsets);
+            free(snapshot->atlases[i].targets);
+        }
     }
     free(snapshot->atlases);
     tp_project_destroy(snapshot->project);

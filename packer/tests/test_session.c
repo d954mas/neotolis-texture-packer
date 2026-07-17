@@ -51,6 +51,85 @@ static tp_session *make_session(void) {
     return session;
 }
 
+void test_snapshot_allocation_failures_return_structured_oom(void) {
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    tp_project_atlas *atlas = &project->atlases[0];
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_source_kind(atlas, "sprites",
+                                         TP_SOURCE_KIND_FOLDER));
+    tp_project_sprite *sprite = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_sprite(atlas, "hero", &sprite));
+    tp_project_anim *animation = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_animation(atlas, "walk", &animation));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_anim_add_frame(animation, "hero"));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_target(atlas, "json-neotolis", "out", NULL));
+    uint8_t seed = 41U;
+    tp_rng rng = {deterministic_fill, &seed};
+    tp_error err = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_promote_ids(project, &rng, &err));
+    char path[1024];
+    (void)snprintf(path, sizeof path,
+                   "%s/tp_session_snapshot_oom.ntpacker_project", g_scratch);
+    (void)remove(path);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_save(project, path, &err));
+    tp_session *session = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_adopt_owned(project, &rng, &session, &err));
+    tp_session_snapshot *snapshot = NULL;
+    tp_session__test_reset_snapshot_allocations();
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_snapshot_create(session, &snapshot, &err));
+    const size_t allocation_count =
+        tp_session__test_snapshot_allocation_count();
+    TEST_ASSERT_GREATER_OR_EQUAL_size_t(8U, allocation_count);
+    tp_session_snapshot_destroy(snapshot);
+
+    for (size_t i = 0U; i < allocation_count; ++i) {
+        snapshot = (tp_session_snapshot *)(uintptr_t)1U;
+        tp_session__test_fail_snapshot_allocation_after(i);
+        memset(&err, 0, sizeof err);
+        TEST_ASSERT_EQUAL_INT(
+            TP_STATUS_OOM,
+            tp_session_snapshot_create(session, &snapshot, &err));
+        TEST_ASSERT_NULL(snapshot);
+        TEST_ASSERT_NOT_EQUAL('\0', err.msg[0]);
+    }
+    tp_session_destroy(session);
+
+    tp_session__test_reset_snapshot_allocations();
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_snapshot_load(path, &snapshot, &err));
+    const size_t load_allocation_count =
+        tp_session__test_snapshot_allocation_count();
+    TEST_ASSERT_GREATER_OR_EQUAL_size_t(8U, load_allocation_count);
+    tp_session_snapshot_destroy(snapshot);
+    for (size_t i = 0U; i < load_allocation_count; ++i) {
+        snapshot = (tp_session_snapshot *)(uintptr_t)1U;
+        tp_session__test_fail_snapshot_allocation_after(i);
+        memset(&err, 0, sizeof err);
+        TEST_ASSERT_EQUAL_INT(
+            TP_STATUS_OOM,
+            tp_session_snapshot_load(path, &snapshot, &err));
+        TEST_ASSERT_NULL(snapshot);
+        TEST_ASSERT_NOT_EQUAL('\0', err.msg[0]);
+    }
+    (void)remove(path);
+}
+
 static tp_id128 recovery_key(void) {
     tp_id128 key;
     static const uint8_t bytes[16] = {'n', 't', 'p', 'k', '_', 'r', 'e', 'c',
@@ -1555,6 +1634,7 @@ int main(int argc, char **argv) {
     TEST_ASSERT_TRUE(argc >= 2);
     g_scratch = argv[1];
     UNITY_BEGIN();
+    RUN_TEST(test_snapshot_allocation_failures_return_structured_oom);
     RUN_TEST(test_owned_snapshot_survives_later_commit);
     RUN_TEST(test_read_snapshot_load_keeps_legacy_ids_stable);
     RUN_TEST(test_writable_open_save_preserves_missing_legacy_orphan_until_unique_return);

@@ -44,6 +44,7 @@ tp_status tp_session_attach_recovery_live(
 void tp_session__test_reset_snapshot_allocations(void);
 size_t tp_session__test_snapshot_allocation_count(void);
 size_t tp_session__test_snapshot_allocation_bytes(void);
+void tp_session__test_fail_snapshot_allocation_after(size_t successful);
 
 /* Fault-injection-only recovery seam. The session retains all journal/io
  * ownership; callers can only attach an in-memory journal and arm writes. */
