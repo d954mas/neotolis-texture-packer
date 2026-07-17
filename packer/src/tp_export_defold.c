@@ -4,6 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "tp_fs_internal.h"
+
 #include "tp_sb.h"
 
 /* Defold exporter: emits the extension-texturepacker `.tpinfo` (packed layout,
@@ -26,7 +28,7 @@
  * through the supported pipeline -- the rotation path below is exercised directly
  * by tests and is ready for the future rotation-only engine policy. */
 
-#define TP_DEFOLD_PATH_MAX 1024
+#define TP_DEFOLD_PATH_MAX TP_IDENTITY_PATH_MAX
 /* TP_DEFOLD_TPINFO_VERSION now lives in tp_core/tp_export.h (shared with the CLI
  * version manifest). */
 #define TP_DEFOLD_DESCRIPTION "Exported using neotolis-texture-packer"
@@ -56,14 +58,10 @@ static const char *path_basename(const char *p) {
     return base;
 }
 
-/* True if a regular file exists at `path` (portable fopen probe). */
+/* True if a regular, non-reparse file exists at `path`. */
 static bool file_probe(const char *path) {
-    FILE *f = fopen(path, "rb");
-    if (f) {
-        (void)fclose(f);
-        return true;
-    }
-    return false;
+    tp_fs_info info;
+    return tp_fs_stat(path, &info) && info.kind == TP_FS_KIND_REGULAR && !info.reparse;
 }
 
 /* How many parent directories we walk looking for the Defold project root. */
@@ -422,8 +420,8 @@ static void emit_sprite(tp_sb *sb, int depth, const tp_export_prepared *prep, co
     tp_sb_str(sb, "}\n");
 }
 
-static void emit_tpinfo(tp_sb *sb, const tp_export_prepared *prep, const tp_export_caps *caps, const char *page_base,
-                        tp_export_notices *notices) {
+static tp_status emit_tpinfo(tp_sb *sb, const tp_export_prepared *prep, const tp_export_caps *caps,
+                             const char *page_base, tp_export_notices *notices, tp_error *err) {
     const tp_result *r = prep->result;
 
     tp_sb_str(sb, "# Exported by neotolis-texture-packer\n");
@@ -434,7 +432,10 @@ static void emit_tpinfo(tp_sb *sb, const tp_export_prepared *prep, const tp_expo
     for (int p = 0; p < r->page_count; p++) {
         tp_sb_str(sb, "pages {\n");
         char name[TP_DEFOLD_PATH_MAX];
-        (void)snprintf(name, sizeof name, "%s-%d.png", page_base, p);
+        tp_status st = tp_export_page_path(page_base, p, name, err);
+        if (st != TP_STATUS_OK) {
+            return st;
+        }
         kv_str(sb, 1, "name", name);
         emit_size(sb, 1, "size", r->pages[p].w, r->pages[p].h);
         /* prep->sprites is final-name sorted; filtering by page keeps that order. */
@@ -452,6 +453,7 @@ static void emit_tpinfo(tp_sb *sb, const tp_export_prepared *prep, const tp_expo
                                       "atlas '%s' has %d pages but the target is single-page",
                                       r->atlas_name ? r->atlas_name : "", r->page_count);
     }
+    return TP_STATUS_OK;
 }
 
 /* ------------------------------------------------------------------ */
@@ -503,23 +505,19 @@ static void emit_tpatlas(tp_sb *sb, const tp_export_prepared *prep, const char *
 /* files                                                              */
 /* ------------------------------------------------------------------ */
 
+static void ignore_output_path(void *ud, const char *path);
+
 static tp_status write_text(const char *base, const char *ext, const tp_sb *sb, tp_error *err) {
     if (sb->oom) {
         return tp_error_set(err, TP_STATUS_OOM, "defold: OOM building %s", ext);
     }
     char path[TP_DEFOLD_PATH_MAX];
-    int n = snprintf(path, sizeof path, "%s%s", base, ext);
-    if (n < 0 || (size_t)n >= sizeof path) {
-        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "defold: output path too long");
+    tp_status st = tp_export_output_path(base, ext, path, err);
+    if (st != TP_STATUS_OK) {
+        return st;
     }
-    FILE *f = fopen(path, "wb"); /* binary: keep LF */
-    if (!f) {
-        return tp_error_set(err, TP_STATUS_BAD_PROJECT, "defold: cannot open '%s' for writing", path);
-    }
-    size_t wrote = fwrite(sb->buf, 1U, sb->len, f);
-    (void)fclose(f);
-    if (wrote != sb->len) {
-        return tp_error_set(err, TP_STATUS_BAD_PROJECT, "defold: short write to '%s'", path);
+    if (!tp_fs_write_file(path, sb->buf, sb->len)) { /* binary: keep LF */
+        return tp_error_set(err, TP_STATUS_BAD_PROJECT, "defold: cannot write '%s'", path);
     }
     return TP_STATUS_OK;
 }
@@ -530,8 +528,13 @@ tp_status tp_export_defold_write(const tp_export_prepared *prep, const tp_export
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "defold: NULL prep/caps/out_path_base");
     }
 
+    tp_status st = tp_export_defold_list_outputs(prep, out_path_base, ignore_output_path, NULL, err);
+    if (st != TP_STATUS_OK) {
+        return st;
+    }
+
     /* Page PNGs: straight-alpha (Defold texture profiles premultiply at build). */
-    tp_status st = tp_export_write_pages(prep->result, out_path_base, false, err);
+    st = tp_export_write_pages(prep->result, out_path_base, false, err);
     if (st != TP_STATUS_OK) {
         return st;
     }
@@ -539,7 +542,11 @@ tp_status tp_export_defold_write(const tp_export_prepared *prep, const tp_export
     const char *base = path_basename(out_path_base);
 
     tp_sb info = {0};
-    emit_tpinfo(&info, prep, caps, base, notices);
+    st = emit_tpinfo(&info, prep, caps, base, notices, err);
+    if (st != TP_STATUS_OK) {
+        free(info.buf);
+        return st;
+    }
     st = write_text(out_path_base, ".tpinfo", &info, err);
     free(info.buf);
     if (st != TP_STATUS_OK) {
@@ -561,19 +568,32 @@ tp_status tp_export_defold_write(const tp_export_prepared *prep, const tp_export
     return st;
 }
 
-void tp_export_defold_list_outputs(const tp_export_prepared *prep, const char *out_path_base, tp_export_path_sink sink,
-                                   void *ud) {
+static void ignore_output_path(void *ud, const char *path) {
+    (void)ud;
+    (void)path;
+}
+
+tp_status tp_export_defold_list_outputs(const tp_export_prepared *prep, const char *out_path_base,
+                                        tp_export_path_sink sink, void *ud, tp_error *err) {
     if (!prep || !out_path_base || !sink) {
-        return;
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "defold output listing requires prep, base, and sink");
     }
-    char path[TP_DEFOLD_PATH_MAX];
-    int n = snprintf(path, sizeof path, "%s.tpinfo", out_path_base);
-    if (n > 0 && (size_t)n < sizeof path) {
-        sink(ud, path);
+    char tpinfo[TP_DEFOLD_PATH_MAX];
+    tp_status st = tp_export_output_path(out_path_base, ".tpinfo", tpinfo, err);
+    if (st != TP_STATUS_OK) {
+        return st;
     }
-    n = snprintf(path, sizeof path, "%s.tpatlas", out_path_base);
-    if (n > 0 && (size_t)n < sizeof path) {
-        sink(ud, path);
+    char tpatlas[TP_DEFOLD_PATH_MAX];
+    st = tp_export_output_path(out_path_base, ".tpatlas", tpatlas, err);
+    if (st != TP_STATUS_OK) {
+        return st;
     }
-    tp_export_list_page_files(prep->result, out_path_base, sink, ud);
+    st = tp_export_list_page_files(prep->result, out_path_base, ignore_output_path, NULL, err);
+    if (st != TP_STATUS_OK) {
+        return st;
+    }
+    sink(ud, tpinfo);
+    sink(ud, tpatlas);
+    return tp_export_list_page_files(prep->result, out_path_base, sink, ud, err);
 }

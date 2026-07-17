@@ -142,7 +142,7 @@ add_test(NAME tp_validate_large COMMAND tp_bench_validate "${CMAKE_BINARY_DIR}/t
 # F2-03: semantic diff / exact inverse (Undo) + redo replay + in-memory history.
 # The ORACLE suite: A->forward->B->inverse->A' byte-identical for EVERY op kind (and
 # == the legacy full-snapshot restore), reference cascade, a 100-anim batch as one
-# inverse, inverse-apply alloc-failure rollback (sweep), capture-alloc atomicity,
+# inverse, reference-integrity rejection for source.remove, inverse-apply alloc-failure rollback (sweep), capture-alloc atomicity,
 # redo + redo-branch discard, and corrupted-diff structured errors. Includes the
 # private src/ internal header for the diff alloc seam + record/history internals.
 add_executable(tp_test_diff test_diff.c)
@@ -184,24 +184,6 @@ target_include_directories(tp_test_selector PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/
 target_compile_options(tp_test_selector PRIVATE -U_DLL)
 nt_set_warning_flags(tp_test_selector)   # AGENTS.md invariant: our test TUs too
 add_test(NAME tp_selector COMMAND tp_test_selector "${CMAKE_BINARY_DIR}/tp_selector_test")
-
-# F1-03: v4 sprite-record identity lifecycle -- lazy v3->v4 re-key, pending soft-orphan,
-# stored-orphan reactivation, and v4 {source,key} save/reload round-trip.
-add_executable(tp_test_sprite_migrate test_sprite_migrate.c)
-target_link_libraries(tp_test_sprite_migrate PRIVATE tp_core unity)
-target_include_directories(tp_test_sprite_migrate PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
-target_compile_options(tp_test_sprite_migrate PRIVATE -U_DLL)
-nt_set_warning_flags(tp_test_sprite_migrate)   # AGENTS.md invariant: our test TUs too
-add_test(NAME tp_sprite_migrate COMMAND tp_test_sprite_migrate "${CMAKE_BINARY_DIR}/tp_sprite_migrate_test")
-
-# F1-01 Part C (low-level): deterministic legacy synthetic-ID assigner +
-# collision-fallback determinism/exhaustion goldens.
-add_executable(tp_test_migrate test_migrate.c)
-target_link_libraries(tp_test_migrate PRIVATE tp_core unity)
-target_include_directories(tp_test_migrate PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)  # tp_hex.h (shared drift-guard encoder)
-target_compile_options(tp_test_migrate PRIVATE -U_DLL)
-nt_set_warning_flags(tp_test_migrate)   # AGENTS.md invariant: our test TUs too
-add_test(NAME tp_migrate COMMAND tp_test_migrate)
 
 # F1-00 project identity: LEXICAL canonical-path fixtures.
 # Includes the src-only internal header so BOTH host rule sets run on every CI OS.
@@ -311,10 +293,21 @@ add_test(NAME tp_uv_property COMMAND tp_test_uv_property)
 # session .ntpack files.
 add_executable(tp_test_pack test_pack.c)
 target_link_libraries(tp_test_pack PRIVATE tp_build unity)  # tp_build: drives nt_builder
+target_include_directories(tp_test_pack PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_compile_options(tp_test_pack PRIVATE -U_DLL)
 nt_set_warning_flags(tp_test_pack)   # AGENTS.md invariant: our test TUs too
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_pack_test")
 add_test(NAME tp_pack COMMAND tp_test_pack "${CMAKE_BINARY_DIR}/tp_pack_test")
+
+# Shared strict-UTF-8 raster ingress: memory decode, bounded resources and
+# explicit allocator ownership.  The scratch tree includes a Cyrillic filename.
+add_executable(tp_test_image test_image.c)
+target_link_libraries(tp_test_image PRIVATE tp_core unity)
+target_include_directories(tp_test_image PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_options(tp_test_image PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_image)
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_image_test")
+add_test(NAME tp_image COMMAND tp_test_image "${CMAKE_BINARY_DIR}/tp_image_test")
 
 # Phase 3 tp_project load/save: round-trip, sparse, determinism, version refusal,
 # path relativization, to_settings bridge. Needs a scratch dir for project files.
@@ -326,16 +319,20 @@ nt_set_warning_flags(tp_test_project)   # AGENTS.md invariant: our test TUs too
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_project_test")
 add_test(NAME tp_project COMMAND tp_test_project "${CMAKE_BINARY_DIR}/tp_project_test")
 
-# F1-01 identity migration/promotion battery: v1->v2 migration byte-golden, stable
-# read-only synthesis, writable promote (once/atomic/idempotent), save-failure +
-# RNG-failure invariants, duplicate/malformed/nil id rejection, id survival across
-# rename/reorder/remove, and forward-compat over the checked-in v1 CLI fixtures.
+# Canonical-only schema v5 gate: exact version admission and save-time
+# canonicality are independent of the broader project round-trip battery.
+add_executable(tp_test_schema_v5 test_schema_v5.c)
+target_link_libraries(tp_test_schema_v5 PRIVATE tp_core unity)
+target_include_directories(tp_test_schema_v5 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_options(tp_test_schema_v5 PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_schema_v5)
+add_test(NAME tp_schema_v5 COMMAND tp_test_schema_v5)
+
+# Canonical structural identity: atomic/idempotent assignment and exact loaded IDs.
 add_executable(tp_test_project_ids test_project_ids.c)
 target_link_libraries(tp_test_project_ids PRIVATE tp_core unity)
 target_include_directories(tp_test_project_ids PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_compile_options(tp_test_project_ids PRIVATE -U_DLL)
-target_compile_definitions(tp_test_project_ids PRIVATE
-    TP_CLI_TESTDATA_DIR="${CMAKE_SOURCE_DIR}/apps/cli/testdata")
 nt_set_warning_flags(tp_test_project_ids)   # AGENTS.md invariant: our test TUs too
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_project_ids_test")
 add_test(NAME tp_project_ids COMMAND tp_test_project_ids "${CMAKE_BINARY_DIR}/tp_project_ids_test")
@@ -442,3 +439,11 @@ target_include_directories(tp_bench_foundation PRIVATE ${CMAKE_CURRENT_SOURCE_DI
 target_compile_options(tp_bench_foundation PRIVATE -U_DLL)
 target_compile_definitions(tp_bench_foundation PRIVATE _CRT_SECURE_NO_WARNINGS)
 nt_set_warning_flags(tp_bench_foundation)
+
+# Tests are executable boundaries, so sanitizer instrumentation must be linked
+# on each one rather than only on tp_core/tp_build. Keep this directory-wide
+# gate at the end so newly added first-party tests cannot silently miss it.
+get_property(_tp_test_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+foreach(_tp_test_target IN LISTS _tp_test_targets)
+    nt_set_sanitizer_flags(${_tp_test_target})
+endforeach()

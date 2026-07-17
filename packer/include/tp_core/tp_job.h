@@ -4,6 +4,7 @@
 #include <stdbool.h>
 
 #include "tp_core/tp_arena.h"
+#include "tp_core/tp_export.h"
 #include "tp_core/tp_model.h"
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_session.h"
@@ -57,7 +58,7 @@ typedef struct tp_session_pack_job_result {
     tp_result *result;
     int missing_sources;
     tp_session_input_token input_token_at_start;
-    char preview_exporter_id[64];
+    char preview_exporter_id[TP_EXPORTER_ID_MAX];
 } tp_session_pack_job_result;
 
 typedef struct tp_session_export_job_result {

@@ -10,6 +10,7 @@
 #include "gui_scan.h"
 #include "gui_canvas.h"
 #include "gui_pack.h"
+#include "gui_paths.h"
 #include "gui_shell.h" /* reset the canvas borrow across pack/history transitions */
 #include "tinyfiledialogs.h"
 
@@ -128,7 +129,7 @@ typedef struct target_edit_intent {
     int i0, i1, i2; /* field/which/anim_index/target_index; ivalue/frame_index/playback; delta */
     float f0, f1;
     bool b0, b1;
-    char s0[256];   /* exporter id -- short + bounded registry id */
+    char s0[TP_EXPORTER_ID_MAX]; /* exact canonical exporter id */
     char *out_path; /* HEAP: target out_path (up to TP_PATH_MAX); freed after drain -- F2 (no 255 cap) */
 } target_edit_intent;
 
@@ -388,12 +389,25 @@ void gui_edit_anim_frame_move(const gui_animation_ref *animation, int frame_inde
     (void)animation_intent_push(&intent);
 }
 static void edit_capture_target(target_edit_intent *edit,
-                                const gui_target_ref *target) {
+                                 const gui_target_ref *target) {
     if (target) {
         edit->atlas_id = target->atlas_id;
         edit->target_id = target->target_id;
         edit->expected_revision = target->expected_revision;
     }
+}
+
+static bool edit_copy_exporter_id(char out[TP_EXPORTER_ID_MAX],
+                                  const char *exporter_id) {
+    tp_error error = {0};
+    const tp_status status = tp_exporter_id_validate(exporter_id, &error);
+    if (status != TP_STATUS_OK) {
+        set_statusf_ex(STATUS_ERROR, "Export target edit rejected: %s",
+                       error.msg);
+        return false;
+    }
+    memcpy(out, exporter_id, strlen(exporter_id) + 1U);
+    return true;
 }
 
 void gui_edit_target(const gui_target_ref *target, const char *exporter_id,
@@ -402,7 +416,9 @@ void gui_edit_target(const gui_target_ref *target, const char *exporter_id,
     e.kind = TARGET_INTENT_FULL;
     edit_capture_target(&e, target);
     e.b0 = enabled;
-    (void)snprintf(e.s0, sizeof e.s0, "%s", exporter_id ? exporter_id : "");
+    if (!edit_copy_exporter_id(e.s0, exporter_id)) {
+        return;
+    }
     e.out_path = edit_strdup(out_path); /* HEAP full path -- a >255 out_path must not truncate (F2) */
     if (!e.out_path) {
         set_status_ex(STATUS_ERROR, "Out of memory: export target edit not applied.");
@@ -441,7 +457,9 @@ void gui_edit_target_exporter(const gui_target_ref *target,
     target_edit_intent e = {0};
     e.kind = TARGET_INTENT_EXPORTER;
     edit_capture_target(&e, target);
-    (void)snprintf(e.s0, sizeof e.s0, "%s", exporter_id ? exporter_id : "");
+    if (!edit_copy_exporter_id(e.s0, exporter_id)) {
+        return;
+    }
     (void)target_intent_push(&e);
 }
 
@@ -580,9 +598,9 @@ static int64_t s_edit_anim_revision;
 static tp_id128 s_edit_sprite_atlas_id;
 static tp_id128 s_edit_sprite_source_id;
 static int64_t s_edit_sprite_revision;
-static char s_edit_sprite_source_key[TP_SCAN_REL_CAP];
-_Static_assert(sizeof s_edit_sprite_source_key == sizeof ((sprite_row *)0)->source_key,
-               "editor and row source-key capacities must match");
+static char s_edit_sprite_source_key[TP_SRCKEY_MAX];
+_Static_assert(sizeof s_edit_sprite_source_key == TP_SRCKEY_MAX,
+               "editor source-key buffer must match the canonical bound");
 
 /* True (and raises a status) when an async pack/export is running: the destructive ops (new/open/exit/
  * undo/redo) refuse while busy. Centralizes the guard the request_* fns had copy-pasted, and closes the
@@ -642,6 +660,17 @@ void cancel_edit(void) {
  * path below (commit_active_edit, which inlines the atlas + animation rename and delegates the sprite
  * rename to commit_sprite_rename). They live here (Clay-free) so gui_view_lists and gui_view_settings
  * -- both of which start edits -- share one home. --- */
+static bool edit_text_fits(const char *value, size_t capacity,
+                           const char *entity) {
+    if (value && strlen(value) < capacity) {
+        return true;
+    }
+    set_statusf_ex(STATUS_ERROR,
+                   "%s name exceeds the GUI edit limit; it was not changed.",
+                   entity ? entity : "Item");
+    return false;
+}
+
 void start_atlas_edit(int i) {
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     const tp_snapshot_atlas *atlas = snapshot
@@ -660,6 +689,9 @@ void start_atlas_edit_ref(tp_id128 atlas_id, int64_t expected_revision) {
     if (!atlas) {
         return;
     }
+    if (!edit_text_fits(atlas->name, sizeof s_edit_buf, "Atlas")) {
+        return;
+    }
     cancel_edit();
     s_edit_kind = EDIT_ATLAS;
     s_edit_atlas = -1;
@@ -673,7 +705,7 @@ void start_atlas_edit_ref(tp_id128 atlas_id, int64_t expected_revision) {
     }
     s_edit_atlas_id = atlas->id;
     s_edit_atlas_revision = expected_revision;
-    (void)snprintf(s_edit_buf, sizeof s_edit_buf, "%s", atlas->name);
+    memcpy(s_edit_buf, atlas->name, strlen(atlas->name) + 1U);
     set_status("Rename atlas: type, Enter to commit, Esc to cancel.");
 }
 void start_anim_edit(int i) {
@@ -699,6 +731,9 @@ void start_anim_edit_ref(const gui_animation_ref *ref) {
     if (!animation) {
         return;
     }
+    if (!edit_text_fits(animation->name, sizeof s_edit_buf, "Animation")) {
+        return;
+    }
     cancel_edit();
     s_edit_kind = EDIT_ANIM;
     s_edit_anim = -1;
@@ -715,7 +750,7 @@ void start_anim_edit_ref(const gui_animation_ref *ref) {
     s_edit_anim_atlas_id = ref->atlas_id;
     s_edit_anim_id = animation->id;
     s_edit_anim_revision = ref->expected_revision;
-    (void)snprintf(s_edit_buf, sizeof s_edit_buf, "%s", animation->name);
+    memcpy(s_edit_buf, animation->name, strlen(animation->name) + 1U);
     set_status("Rename animation: type, Enter to commit, Esc to cancel.");
 }
 void start_sprite_edit_ref(const gui_sprite_ref *sprite,
@@ -733,23 +768,30 @@ void start_sprite_edit_ref(const gui_sprite_ref *sprite,
     if (!atlas) {
         return;
     }
+    const tp_snapshot_sprite *ov = tp_session_snapshot_sprite_by_key(
+        snapshot, sprite->atlas_id, sprite->source_id, sprite->source_key);
+    const char *edit_value = (ov && ov->rename) ? ov->rename : display_name;
+    if (!edit_text_fits(sprite->source_key,
+                        sizeof s_edit_sprite_source_key, "Region key") ||
+        !edit_text_fits(display_name, sizeof s_edit_sprite, "Region") ||
+        !edit_text_fits(edit_value, sizeof s_edit_buf, "Region")) {
+        return;
+    }
     cancel_edit();
     s_edit_kind = EDIT_SPRITE;
     s_edit_sprite_atlas_id = sprite->atlas_id;
     s_edit_sprite_source_id = sprite->source_id;
     s_edit_sprite_revision = sprite->expected_revision;
-    (void)snprintf(s_edit_sprite_source_key, sizeof s_edit_sprite_source_key,
-                   "%s", sprite->source_key);
-    (void)snprintf(s_edit_sprite, sizeof s_edit_sprite, "%s", display_name);
-    const tp_snapshot_sprite *ov = tp_session_snapshot_sprite_by_key(
-        snapshot, sprite->atlas_id, sprite->source_id, sprite->source_key);
-    (void)snprintf(s_edit_buf, sizeof s_edit_buf, "%s",
-                   (ov && ov->rename) ? ov->rename : display_name);
+    memcpy(s_edit_sprite_source_key, sprite->source_key,
+           strlen(sprite->source_key) + 1U);
+    memcpy(s_edit_sprite, display_name, strlen(display_name) + 1U);
+    memcpy(s_edit_buf, edit_value, strlen(edit_value) + 1U);
     set_status("Rename region: type, Enter to commit, Esc clears/cancels.");
 }
 void start_sprite_edit(const sprite_row *row) {
-    if (!row || row->is_folder || row->missing || row->sprite_name[0] == '\0' ||
-        tp_id128_is_nil(row->source_id) || row->source_key[0] == '\0') {
+    if (!row || row->is_folder || row->missing || !row->sprite_name ||
+        row->sprite_name[0] == '\0' || tp_id128_is_nil(row->source_id) ||
+        !row->source_key || row->source_key[0] == '\0') {
         return;
     }
     const tp_session_snapshot *snapshot = gui_project_snapshot();
@@ -767,6 +809,7 @@ void start_sprite_edit(const sprite_row *row) {
 
 bool gui_sprite_edit_matches(const sprite_row *row) {
     return row && s_edit_kind == EDIT_SPRITE &&
+           row->source_key &&
            tp_id128_eq(s_edit_sprite_source_id, row->source_id) &&
            strcmp(s_edit_sprite_source_key, row->source_key) == 0;
 }
@@ -1180,15 +1223,6 @@ void update_preview(void) {
 // #endregion
 
 // #region file dialogs (tinyfiledialogs)
-static void ensure_project_ext(const char *in, char *out, size_t cap) {
-    (void)snprintf(out, cap, "%s", in);
-    const char *base = path_last(out);
-    if (strrchr(base, '.') == NULL) { /* boundary-ok: project FILENAME ext, not a sprite key */
-        size_t len = strlen(out);
-        (void)snprintf(out + len, cap - len, ".ntpacker_project");
-    }
-}
-
 static void do_open(void) {
     static const char *filt[] = {"*.ntpacker_project"};
     const char *path = tinyfd_openFileDialog("Open Project", "", 1, filt, "ntpacker project", 0);
@@ -1219,11 +1253,20 @@ static void do_save_as(void) {
     if (!path) {
         return;
     }
-    char full[600];
-    ensure_project_ext(path, full, sizeof full);
+    char full[TP_IDENTITY_PATH_MAX];
+    if (!gui_paths_project_file(path, full, sizeof full)) {
+        set_status_ex(STATUS_ERROR,
+                      "Save path is invalid or exceeds the supported path limit.");
+        return;
+    }
     char err[256];
     if (gui_project_save_as(full, err, sizeof err) == TP_STATUS_OK) {
-        set_statusf("Saved %s", gui_project_display_name());
+        char notice[256];
+        if (gui_project_take_save_notice(notice, sizeof notice)) {
+            set_statusf_ex(STATUS_WARNING, "%s", notice);
+        } else {
+            set_statusf("Saved %s", gui_project_display_name());
+        }
     } else {
         set_statusf_ex(STATUS_ERROR, "Save failed: %s", err);
     }
@@ -1236,7 +1279,12 @@ static void do_save(void) {
     }
     char err[256];
     if (gui_project_save(err, sizeof err) == TP_STATUS_OK) {
-        set_statusf("Saved %s", gui_project_display_name());
+        char notice[256];
+        if (gui_project_take_save_notice(notice, sizeof notice)) {
+            set_statusf_ex(STATUS_WARNING, "%s", notice);
+        } else {
+            set_statusf("Saved %s", gui_project_display_name());
+        }
     } else {
         set_statusf_ex(STATUS_ERROR, "Save failed: %s", err);
     }
@@ -1350,31 +1398,6 @@ static void do_add_files(void) {
     }
 }
 
-/* Best-effort relativize `abs` against the project dir (targets travel like sources).
- * Absolute paths outside the project dir are kept as-is (usable, save leaves them). */
-static void relativize_to_project(const char *abs, char *out, size_t cap) {
-    char dir[TP_IDENTITY_PATH_MAX];
-    (void)snprintf(dir, sizeof dir, "%s", gui_project_path());
-    char *slash = strrchr(dir, '/');
-    char *backslash = strrchr(dir, '\\');
-    char *last = !slash ? backslash : (!backslash || slash > backslash ? slash : backslash);
-    if (last) {
-        *last = '\0';
-    } else {
-        dir[0] = '\0';
-    }
-    if (dir[0] != '\0') {
-        const size_t dl = strlen(dir);
-        if (strncmp(abs, dir, dl) == 0 && (abs[dl] == '/' || abs[dl] == '\\')) {
-            (void)snprintf(out, cap, "%s", abs + dl + 1);
-            normalize_slashes(out);
-            return;
-        }
-    }
-    (void)snprintf(out, cap, "%s", abs);
-    normalize_slashes(out);
-}
-
 static bool flush_failed(void); /* defined below; a discrete browse is a flush-first entry point */
 
 /* Save dialog for a target's output path, relativized to the project like sources. Atlas-explicit so
@@ -1405,16 +1428,22 @@ static void do_browse_target(const gui_target_ref *queued) {
         .target_id = t->id,
         .expected_revision = tp_session_snapshot_revision(snapshot),
     };
-    char exporter_id[256];
-    (void)snprintf(exporter_id, sizeof exporter_id, "%s", t->exporter_id);
-    const bool enabled = t->enabled;
     const char *path = tinyfd_saveFileDialog("Export output path", t->out_path, 0, NULL, NULL);
     if (!path) {
         return;
     }
-    char rel[600];
-    relativize_to_project(path, rel, sizeof rel);
-    if (gui_project_set_target(&target, exporter_id, rel, enabled)) {
+    char rel[TP_IDENTITY_PATH_MAX];
+    if (!gui_paths_relativize_to_project(path, gui_project_path(), rel,
+                                         sizeof rel)) {
+        set_status_ex(STATUS_ERROR,
+                      "Output path is invalid or exceeds the supported path limit.");
+        return;
+    }
+    /* Browse changes one field only. Commit the masked out-path operation as
+     * this dialog's discrete gesture; never round-trip exporter/enabled through
+     * frontend buffers where a long registered format id could be truncated. */
+    if (gui_project_set_target_out_path(&target, rel) &&
+        gui_project_flush_pending()) {
         set_statusf("Output path: %s", rel);
     }
 }
@@ -1458,9 +1487,12 @@ static void do_add_folder(void) {
     if (!dir) {
         return;
     }
-    char norm[600];
-    (void)snprintf(norm, sizeof norm, "%s", dir);
-    normalize_slashes(norm);
+    char norm[TP_IDENTITY_PATH_MAX];
+    if (!gui_paths_copy_normalized(dir, norm, sizeof norm)) {
+        set_status_ex(STATUS_ERROR,
+                      "Folder path is invalid or exceeds the supported path limit.");
+        return;
+    }
     tp_id128 atlas_id;
     int64_t revision = 0;
     const gui_add_status r = selected_atlas_intent(&atlas_id, &revision)
@@ -1609,61 +1641,90 @@ void do_redo(void) {
  * directly) so a Refresh can diff added/removed/changed. Missing entries carry
  * size==-1 so a vanish/restore reads as removed/added. */
 typedef struct fp_entry {
-    char abs[512];
+    char *abs;
     long long size;
     long long mtime;
 } fp_entry;
 
-static void fp_collect(fp_entry **arr, int *count, int *cap) {
+static void fp_free(fp_entry *entries, int count) {
+    for (int i = 0; i < count; ++i) {
+        free(entries[i].abs);
+    }
+    free(entries);
+}
+
+static tp_status fp_push(fp_entry **arr, int *count, int *cap,
+                         const char *abs, long long size, long long mtime,
+                         tp_error *error) {
+    if (*count == *cap) {
+        if (*cap > INT_MAX / 2) {
+            return tp_error_set(error, TP_STATUS_OUT_OF_BOUNDS,
+                                "refresh fingerprint has too many entries");
+        }
+        int nc = *cap ? *cap * 2 : 64;
+        if ((size_t)nc > SIZE_MAX / sizeof **arr) {
+            return tp_error_set(error, TP_STATUS_OUT_OF_BOUNDS,
+                                "refresh fingerprint table overflows size_t");
+        }
+        fp_entry *ne =
+            (fp_entry *)realloc(*arr, (size_t)nc * sizeof *ne);
+        if (!ne) {
+            return tp_error_set(error, TP_STATUS_OOM,
+                                "refresh fingerprint allocation failed");
+        }
+        *arr = ne;
+        *cap = nc;
+    }
+    char *path = edit_strdup(abs);
+    if (!path) {
+        return tp_error_set(error, TP_STATUS_OOM,
+                            "refresh fingerprint path allocation failed");
+    }
+    (*arr)[*count] = (fp_entry){path, size, mtime};
+    (*count)++;
+    return TP_STATUS_OK;
+}
+
+static tp_status fp_collect(fp_entry **arr, int *count, int *cap,
+                            tp_error *error) {
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     const int atlas_count = snapshot ? tp_session_snapshot_atlas_count(snapshot) : 0;
     for (int ai = 0; ai < atlas_count; ai++) {
         const tp_snapshot_atlas *a = tp_session_snapshot_atlas_at(snapshot, ai);
         for (int si = 0; si < a->source_count; si++) {
             const tp_snapshot_source *source = tp_session_snapshot_source_at(snapshot, a->id, si);
-            char abs[512];
-            tp_error err = {0};
+            char abs[TP_IDENTITY_PATH_MAX];
             if (!source || tp_session_snapshot_resolve_path(snapshot, a->id, source->id,
-                                                            abs, sizeof abs, &err) != TP_STATUS_OK) {
+                                                            abs, sizeof abs, error) != TP_STATUS_OK) {
                 continue;
             }
             if (gui_scan_is_dir(abs)) {
-                const gui_scan_result *sc = gui_scan_get(abs);
+                const gui_scan_result *sc = NULL;
+                tp_status scan_status = gui_scan_get(abs, &sc, error);
+                if (scan_status != TP_STATUS_OK) {
+                    return scan_status;
+                }
                 for (int ci = 0; ci < sc->count; ci++) {
-                    if (*count == *cap) {
-                        int nc = *cap ? *cap * 2 : 64;
-                        fp_entry *ne = (fp_entry *)realloc(*arr, (size_t)nc * sizeof *ne);
-                        if (!ne) {
-                            return;
-                        }
-                        *arr = ne;
-                        *cap = nc;
+                    tp_status push_status = fp_push(
+                        arr, count, cap, sc->entries[ci].abs,
+                        sc->entries[ci].size, sc->entries[ci].mtime, error);
+                    if (push_status != TP_STATUS_OK) {
+                        return push_status;
                     }
-                    (void)snprintf((*arr)[*count].abs, sizeof (*arr)[0].abs, "%s", sc->entries[ci].abs);
-                    (*arr)[*count].size = sc->entries[ci].size;
-                    (*arr)[*count].mtime = sc->entries[ci].mtime;
-                    (*count)++;
                 }
             } else {
-                if (*count == *cap) {
-                    int nc = *cap ? *cap * 2 : 64;
-                    fp_entry *ne = (fp_entry *)realloc(*arr, (size_t)nc * sizeof *ne);
-                    if (!ne) {
-                        return;
-                    }
-                    *arr = ne;
-                    *cap = nc;
-                }
                 long long sz = -1;
                 long long mt = -1;
                 (void)gui_scan_stat(abs, &sz, &mt);
-                (void)snprintf((*arr)[*count].abs, sizeof (*arr)[0].abs, "%s", abs);
-                (*arr)[*count].size = sz;
-                (*arr)[*count].mtime = mt;
-                (*count)++;
+                tp_status push_status = fp_push(arr, count, cap, abs, sz, mt,
+                                                error);
+                if (push_status != TP_STATUS_OK) {
+                    return push_status;
+                }
             }
         }
     }
+    return TP_STATUS_OK;
 }
 
 static const fp_entry *fp_find(const fp_entry *arr, int n, const char *abs) {
@@ -1680,14 +1741,26 @@ static void do_refresh(void) {
     fp_entry *before = NULL;
     int bn = 0;
     int bc = 0;
-    fp_collect(&before, &bn, &bc);
+    tp_error error = {0};
+    tp_status status = fp_collect(&before, &bn, &bc, &error);
+    if (status != TP_STATUS_OK) {
+        fp_free(before, bn);
+        set_statusf_ex(STATUS_ERROR, "Refresh failed: %s", error.msg);
+        return;
+    }
 
     gui_project_invalidate_sources(); /* publish the external runtime refresh */
 
     fp_entry *after = NULL;
     int an = 0;
     int ac = 0;
-    fp_collect(&after, &an, &ac);
+    status = fp_collect(&after, &an, &ac, &error);
+    if (status != TP_STATUS_OK) {
+        fp_free(before, bn);
+        fp_free(after, an);
+        set_statusf_ex(STATUS_ERROR, "Refresh failed: %s", error.msg);
+        return;
+    }
 
     int added = 0;
     int removed = 0;
@@ -1705,8 +1778,8 @@ static void do_refresh(void) {
             removed++;
         }
     }
-    free(before);
-    free(after);
+    fp_free(before, bn);
+    fp_free(after, an);
 
     gui_canvas_invalidate(&s_canvas); /* force the shown image to reload (or show missing) */
     gui_project_mark_stale();         /* disk changed -> preview stale, project NOT dirtied */
@@ -2026,7 +2099,7 @@ static void commit_active_edit(bool force) {
             }
             return;
         }
-        char committed_name[256];
+        char committed_name[TP_SRCKEY_MAX];
         tp_error read_error = {0};
         if (gui_project_copy_atlas_name(s_edit_atlas_id, committed_name,
                                         sizeof committed_name, &read_error) == TP_STATUS_OK) {

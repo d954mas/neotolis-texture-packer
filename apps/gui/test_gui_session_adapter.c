@@ -171,9 +171,14 @@ void test_source_family_uses_stable_ids_and_atomic_batch_admission(void) {
         gui_session_remove_source(session, atlas_id, ids[0], 0,
                                   "ffffffffffffffffffffffffffffffff", &err));
     TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_OK,
+        TP_STATUS_INVALID_ARGUMENT,
         gui_session_remove_source(session, atlas_id, ids[0], 3,
                                   "abababababababababababababababab", &err));
+    TEST_ASSERT_EQUAL_INT64(3, tp_session_revision(session));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_session_remove_source(session, atlas_id, ids[1], 3,
+                                  "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0", &err));
     TEST_ASSERT_EQUAL_INT64(4, tp_session_revision(session));
     tp_session_destroy(session);
 }

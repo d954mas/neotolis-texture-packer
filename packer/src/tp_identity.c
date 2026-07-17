@@ -1,8 +1,11 @@
 #include "tp_core/tp_identity.h"
+#include "tp_core/tp_utf8.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
+#include "tp_fs_internal.h"
 #include "tp_identity_internal.h"
 
 #if defined(_WIN32)
@@ -16,7 +19,6 @@
 #else
 #include <errno.h>
 #include <fcntl.h>
-#include <stdlib.h>   /* realpath */
 #include <sys/stat.h> /* lstat: tell a dangling symlink apart from an absent node */
 #include <unistd.h>
 #endif
@@ -54,6 +56,10 @@ tp_status tp_path_canonical_lexical(const char *input, tp_host host, char *out, 
     }
     if (input[0] == '\0') {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "empty path");
+    }
+    if (!tp_utf8_is_valid_c_string(input)) {
+        return tp_error_set(err, TP_STATUS_INVALID_UTF8,
+                            "identity path is not valid UTF-8");
     }
 
     char work[TP_IDENTITY_PATH_MAX];
@@ -245,6 +251,10 @@ tp_status tp_identity_file_fingerprint(const char *path, tp_id128 *out, tp_error
     if (!path || path[0] == '\0' || !out) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "file fingerprint requires path and output");
     }
+    if (!tp_utf8_is_valid_c_string(path)) {
+        return tp_error_set(err, TP_STATUS_INVALID_UTF8,
+                            "fingerprint path is not valid UTF-8");
+    }
 
     tp_hasher hasher = tp_hasher_init();
     tp_id128 stable_fingerprint = {{0}};
@@ -253,8 +263,13 @@ tp_status tp_identity_file_fingerprint(const char *path, tp_id128 *out, tp_error
     /* Deny write/delete sharing while the bytes are sampled. Besides making the two-pass
      * stability check below deterministic, this prevents a cooperating Windows writer from
      * changing or rename-replacing the destination during the fingerprint operation. */
-    HANDLE h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
+    wchar_t *wide_path = tp_fs_win32_path_alloc(path);
+    if (!wide_path) {
+        return tp_error_set(err, TP_STATUS_PATH_RESOLVE_FAILED, "cannot decode UTF-8 path '%s'", path);
+    }
+    HANDLE h = CreateFileW(wide_path, GENERIC_READ, FILE_SHARE_READ, NULL,
                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    free(wide_path);
     if (h == INVALID_HANDLE_VALUE) {
         return tp_error_set(err, TP_STATUS_PATH_RESOLVE_FAILED, "cannot open '%s' for fingerprinting", path);
     }
@@ -333,8 +348,11 @@ tp_status tp_identity_file_fingerprint(const char *path, tp_id128 *out, tp_error
     /* A concurrent atomic replace does not mutate `h`: it moves the pathname to a new file while this
      * handle keeps reading the old one. Re-open the current pathname while `h` is still alive and require
      * the same volume+file index, shrinking the remaining race to the final identity-check->publish gap. */
-    HANDLE current = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
-                                 FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    wide_path = tp_fs_win32_path_alloc(path);
+    HANDLE current = wide_path ? CreateFileW(wide_path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                                             FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL)
+                               : INVALID_HANDLE_VALUE;
+    free(wide_path);
     BY_HANDLE_FILE_INFORMATION current_info;
     if (current == INVALID_HANDLE_VALUE || !GetFileInformationByHandle(current, &current_info) ||
         (current_info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0U ||
@@ -540,19 +558,9 @@ static tp_status fs_resolve_posix(const char *lex, char *out, size_t cap, tp_err
 
 #else /* _WIN32 */
 
-/* UTF-8 -> UTF-16 into a fixed wide buffer. */
-static tp_status fs_widen(const char *utf8, wchar_t *wout, int wcap, tp_error *err) {
-    int n = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, wout, wcap);
-    if (n == 0) {
-        return tp_error_set(err, TP_STATUS_PATH_RESOLVE_FAILED, "UTF-8 to UTF-16 conversion failed");
-    }
-    return TP_STATUS_OK;
-}
-
 /* UTF-16 -> UTF-8 into `out`. */
 static tp_status fs_narrow(const wchar_t *w, char *out, size_t cap, tp_error *err) {
-    int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, out, (int)cap, NULL, NULL);
-    if (n == 0) {
+    if (!tp_fs_win32_utf16_to_utf8(w, out, cap)) {
         return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "resolved path exceeds out buffer");
     }
     return TP_STATUS_OK;
@@ -569,12 +577,18 @@ static HANDLE fs_open_query(const char *path_slash) {
      * forward slashes in ordinary (non-verbatim) paths, so we widen the '/'-form
      * directly; the old copy into a '\'-rewritten buffer was dead work (it would
      * only ever matter for a verbatim path, which never reaches this function). */
-    wchar_t wpath[TP_IDENTITY_PATH_MAX];
-    if (fs_widen(path_slash, wpath, (int)(sizeof wpath / sizeof wpath[0]), NULL) != TP_STATUS_OK) {
+    wchar_t *wpath = tp_fs_win32_path_alloc(path_slash);
+    if (!wpath) {
         return INVALID_HANDLE_VALUE;
     }
-    return CreateFileW(wpath, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
-                       FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    HANDLE handle = CreateFileW(wpath, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+                                FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    DWORD open_error = handle == INVALID_HANDLE_VALUE ? GetLastError() : ERROR_SUCCESS;
+    free(wpath);
+    if (handle == INVALID_HANDLE_VALUE) {
+        SetLastError(open_error);
+    }
+    return handle;
 }
 
 /* GetFinalPathNameByHandleW -> UTF-8 "\\?\..."/"\\?\UNC\..." raw form. The
@@ -602,14 +616,16 @@ static tp_status fs_final_path(HANDLE h, char *raw, size_t cap, tp_error *err) {
  * flips once the target appears). Fails closed (reports the node present) when the
  * name can't be widened. */
 static bool fs_path_is_absent(const char *path_slash) {
-    wchar_t wpath[TP_IDENTITY_PATH_MAX];
-    if (fs_widen(path_slash, wpath, (int)(sizeof wpath / sizeof wpath[0]), NULL) != TP_STATUS_OK) {
+    wchar_t *wpath = tp_fs_win32_path_alloc(path_slash);
+    if (!wpath) {
         return false;
     }
     if (GetFileAttributesW(wpath) != INVALID_FILE_ATTRIBUTES) {
+        free(wpath);
         return false; /* node exists (possibly a dangling reparse point) */
     }
     DWORD e = GetLastError();
+    free(wpath);
     return e == ERROR_FILE_NOT_FOUND || e == ERROR_PATH_NOT_FOUND;
 }
 

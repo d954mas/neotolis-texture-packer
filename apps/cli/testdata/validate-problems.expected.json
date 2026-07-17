@@ -1,18 +1,24 @@
 {
-  "schema": 1,
+  "schema": 2,
   "findings": [
     {
       "severity": "error",
       "code": "missing_source",
       "message": "source 'does_not_exist' does not exist on disk",
-      "atlas": "problems"
+      "atlas": "problems",
+      "atlas_id": "atlas_00000000000000000000000000000701",
+      "source": "does_not_exist",
+      "source_id": "source_00000000000000000000000000000704"
     },
     {
       "severity": "error",
       "code": "dangling_anim_frame",
-      "message": "animation 'run' references frame 'ghost' which matches no sprite export key",
+      "message": "animation 'run' references frame 'ghost' which matches no canonical sprite",
       "atlas": "problems",
+      "atlas_id": "atlas_00000000000000000000000000000701",
+      "source_id": "source_00000000000000000000000000000703",
       "anim": "run",
+      "animation_id": "anim_00000000000000000000000000000702",
       "frame": "ghost"
     }
   ],

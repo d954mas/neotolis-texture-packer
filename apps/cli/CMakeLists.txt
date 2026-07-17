@@ -5,9 +5,15 @@
 # as apps/smoke and the builder-linking tests).
 set(CLI_OUTPUT_DIR "${CMAKE_SOURCE_DIR}/build/apps/cli/${NT_PRESET_NAME}")
 
-set(_ntpacker_sources main.c cli_out.c cli_project.c cli_inspect.c cli_validate.c cli_pack.c cli_mutate.c)
+set(_ntpacker_sources main.c cli_exit.c cli_out.c cli_project.c cli_inspect.c cli_validate.c cli_pack.c cli_mutate.c)
+if(WIN32)
+    list(APPEND _ntpacker_sources "${CMAKE_SOURCE_DIR}/apps/common/nt_utf8_argv.c")
+endif()
 function(ntpacker_configure_target target)
     target_link_libraries(${target} PRIVATE tp_build)
+    if(WIN32)
+        target_link_libraries(${target} PRIVATE shell32)
+    endif()
     target_include_directories(${target} PRIVATE "${CMAKE_SOURCE_DIR}/apps/common")
     target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS)
     target_compile_options(${target} PRIVATE -U_DLL)
@@ -39,10 +45,35 @@ target_compile_definitions(cli_json_check PRIVATE _CRT_SECURE_NO_WARNINGS)
 target_compile_options(cli_json_check PRIVATE -U_DLL)
 
 add_executable(cli_out_contract_test cli_out_contract_test.c cli_out.c)
+target_link_libraries(cli_out_contract_test PRIVATE tp_core)
 target_compile_definitions(cli_out_contract_test PRIVATE _CRT_SECURE_NO_WARNINGS)
 target_compile_options(cli_out_contract_test PRIVATE -U_DLL)
 nt_set_warning_flags(cli_out_contract_test)
+nt_set_sanitizer_flags(cli_out_contract_test)
 add_test(NAME cli_out_contract COMMAND cli_out_contract_test)
+
+add_executable(cli_exit_contract_test test_cli_exit.c cli_exit.c)
+target_link_libraries(cli_exit_contract_test PRIVATE tp_core)
+target_compile_definitions(cli_exit_contract_test PRIVATE _CRT_SECURE_NO_WARNINGS)
+target_compile_options(cli_exit_contract_test PRIVATE -U_DLL)
+nt_set_warning_flags(cli_exit_contract_test)
+nt_set_sanitizer_flags(cli_exit_contract_test)
+add_test(NAME cli_exit_contract COMMAND cli_exit_contract_test)
+
+if(WIN32)
+    add_executable(cli_utf8_argv_test
+        test_utf8_argv.c
+        "${CMAKE_SOURCE_DIR}/apps/common/nt_utf8_argv.c"
+        "${CMAKE_SOURCE_DIR}/apps/common/nt_utf8_fs.c")
+    target_include_directories(cli_utf8_argv_test PRIVATE
+        "${CMAKE_SOURCE_DIR}/apps/common")
+    target_link_libraries(cli_utf8_argv_test PRIVATE unity shell32)
+    target_compile_definitions(cli_utf8_argv_test PRIVATE _CRT_SECURE_NO_WARNINGS)
+    target_compile_options(cli_utf8_argv_test PRIVATE -U_DLL)
+    nt_set_warning_flags(cli_utf8_argv_test)
+    nt_set_sanitizer_flags(cli_utf8_argv_test)
+    add_test(NAME cli_utf8_argv COMMAND cli_utf8_argv_test)
+endif()
 
 set(_run "${CMAKE_CURRENT_SOURCE_DIR}/cli_run_expect.cmake")
 
@@ -79,6 +110,23 @@ add_test(NAME cli_inspect_json COMMAND ${CMAKE_COMMAND}
     -DCHECKER=$<TARGET_FILE:cli_json_check> "-DCHECK_ARGS=inspect sprites=2"
     -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_inspect.json
     -P "${_run}")
+
+if(WIN32)
+    # Process-level proof for the Windows UTF-16 -> strict UTF-8 ingress and
+    # packer filesystem boundary. CMake launches the child through CreateProcessW.
+    set(_unicode_td "${CMAKE_CURRENT_BINARY_DIR}/нтпакер")
+    file(MAKE_DIRECTORY "${_unicode_td}")
+    configure_file("${_td}/clean.ntpacker_project"
+                   "${_unicode_td}/проект.ntpacker_project" COPYONLY)
+    file(COPY "${_td}/sprites" DESTINATION "${_unicode_td}")
+    add_test(NAME cli_inspect_unicode_path COMMAND ${CMAKE_COMMAND}
+        -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0
+        "-DARGS=inspect ${_unicode_td}/проект.ntpacker_project --json"
+        -DCHECKER=$<TARGET_FILE:cli_json_check>
+        "-DCHECK_ARGS=inspect sprites=2"
+        -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_inspect_unicode.json
+        -P "${_run}")
+endif()
 
 # The documented one-shot CLI accepts project paths relative to its process CWD;
 # the core identity boundary, not each verb, owns that resolution.
@@ -160,23 +208,21 @@ add_test(NAME cli_validate_long_paths COMMAND ${CMAKE_COMMAND}
     -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_validate_long_paths.json
     -P "${_run}")
 
-# (i5) F1-03 §5.6 sprite-record integrity: a v4 fixture with a migrated override whose
-# stored source id is absent from the atlas (sprite_bad_source) and another whose
-# (source,key) resolves to no scanned sprite (orphan_sprite). Both are WARNINGS -- a
-# removed source / gone key orphans the override, it does not corrupt data (fix [5]).
-# So error=0 warning=2 and, without --strict, exit 0.
+# (i5) Canonical v5 orphan integrity: both sparse records target a real source ID,
+# but their source-local keys are currently absent. They remain valid orphaned
+# metadata and reactivate if either key returns; no name-only bridge exists.
+# Both findings are warnings, so without --strict the command exits 0.
 add_test(NAME cli_validate_sprite_records COMMAND ${CMAKE_COMMAND}
-    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0 "-DARGS=validate ${_td}/v4_orphan.ntpacker_project --json"
+    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0 "-DARGS=validate ${_td}/v5_orphan.ntpacker_project --json"
     -DCHECKER=$<TARGET_FILE:cli_json_check>
-    "-DCHECK_ARGS=validate error=0 warning=2 code=sprite_bad_source code=orphan_sprite"
+    "-DCHECK_ARGS=validate error=0 warning=2 code=orphan_sprite"
     -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_validate_sprite_records.json
     -P "${_run}")
 
-# (i5b) fix [5] regression: the SAME fixture WITH --strict must still exit 0. A migrated
-# override whose source was removed is an orphan [warning], not an error -- a routine
-# source-removal edit must not flip validate --strict to exit 7.
+# (i5b) The same canonical orphan fixture with --strict still exits 0 because
+# missing physical keys are warnings, not malformed project identity.
 add_test(NAME cli_validate_sprite_records_strict COMMAND ${CMAKE_COMMAND}
-    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0 "-DARGS=validate ${_td}/v4_orphan.ntpacker_project --strict"
+    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0 "-DARGS=validate ${_td}/v5_orphan.ntpacker_project --strict"
     -P "${_run}")
 
 # (i6) C3 duplicate/invalid export targets: a fixture with two atlases whose targets both
@@ -190,6 +236,7 @@ add_test(NAME cli_validate_dup_target COMMAND ${CMAKE_COMMAND}
     -DCHECKER=$<TARGET_FILE:cli_json_check>
     "-DCHECK_ARGS=validate error=0 warning=2 code=duplicate_out_path"
     -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_validate_dup_target.json
+    -DEXPECT_FILE=${_td}/validate-dup-target.expected.json
     -P "${_run}")
 
 # (j) validate on an unloadable file -> exit 3.

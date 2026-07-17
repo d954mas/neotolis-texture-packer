@@ -64,15 +64,11 @@ struct tp_side_effect_coordinator;
  * tp_txn_parse.c, tp_history.c) via tp_txn_internal.h. */
 typedef struct tp_model tp_model;
 
-/* Wrap an existing project (TAKES OWNERSHIP) in a model at revision 0 with a fresh
- * in-memory idstore; the saved baseline is the wrapped project's current identity
- * (so a freshly-wrapped model is clean). NULL on OOM (the project is NOT freed on
- * failure -- the caller still owns it). */
+/* Wrap an existing canonical project (TAKES OWNERSHIP) in a model at revision 0
+ * with a fresh in-memory idstore; the saved baseline is the wrapped project's
+ * current identity (so a freshly-wrapped model is clean). NULL on a noncanonical
+ * graph or OOM; on failure the project is NOT freed and remains caller-owned. */
 tp_model *tp_model_wrap(tp_project *project);
-
-/* tp_model_wrap(tp_project_create()): a fresh one-atlas project wrapped in a model.
- * NULL on OOM. */
-tp_model *tp_model_create(void);
 
 /* Frees the model, its project, and its owned idstore. NULL-safe. */
 void tp_model_destroy(tp_model *m);
@@ -100,7 +96,7 @@ void tp_model_mark_saved(tp_model *m);
  * Deterministic, endian-stable 128-bit identity over the participating persistent
  * partition (see tp_semantic.c). Order-normalized for ID-keyed collections; an
  * animation's frames are order-semantic. Excludes all runtime fields, the project
- * path, and schema_version. NULL project -> a fixed empty identity. */
+ * path. NULL project -> a fixed empty identity. */
 tp_id128 tp_semantic_identity(const tp_project *p);
 
 /* ---- revision precondition ----------------------------------------------- *
@@ -143,7 +139,7 @@ typedef struct tp_txn_addr {
     char key[16];
     tp_id_kind idk;    /* INVALID => `str` holds a plain string value */
     tp_id128 id;
-    char str[64];      /* src_key (bounded echo) when idk == INVALID */
+    char *str;         /* exact result-owned src_key when idk == INVALID */
 } tp_txn_addr;
 
 typedef struct tp_txn_result_op {
@@ -160,6 +156,7 @@ typedef struct tp_txn_result {
     int64_t revision;          /* new if committed; unchanged if rejected */
     tp_txn_result_op *ops;     /* committed: echoed ops (dynamic) */
     int op_count;
+    char *string_storage;      /* owns exact string addresses in ops */
     tp_txn_error *errors;      /* rejected: collected errors (dynamic) */
     int error_count;
 } tp_txn_result;

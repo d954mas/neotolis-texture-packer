@@ -35,7 +35,6 @@ void test_status_id_tokens(void) {
     /* F1-01 structural-ID faults. */
     TEST_ASSERT_EQUAL_STRING("id_malformed", tp_status_id(TP_STATUS_ID_MALFORMED));
     TEST_ASSERT_EQUAL_STRING("duplicate_id", tp_status_id(TP_STATUS_DUPLICATE_ID));
-    TEST_ASSERT_EQUAL_STRING("id_collision_exhausted", tp_status_id(TP_STATUS_ID_COLLISION_EXHAUSTED));
     /* F1-02 source-key normalization faults. */
     TEST_ASSERT_EQUAL_STRING("invalid_utf8", tp_status_id(TP_STATUS_INVALID_UTF8));
     TEST_ASSERT_EQUAL_STRING("key_absolute", tp_status_id(TP_STATUS_KEY_ABSOLUTE));
@@ -58,11 +57,13 @@ void test_status_id_tokens(void) {
     TEST_ASSERT_EQUAL_STRING("project_live", tp_status_id(TP_STATUS_PROJECT_LIVE));
     TEST_ASSERT_EQUAL_STRING("unsupported_capability", tp_status_id(TP_STATUS_UNSUPPORTED_CAPABILITY));
     TEST_ASSERT_EQUAL_STRING("file_exists", tp_status_id(TP_STATUS_FILE_EXISTS));
+    TEST_ASSERT_EQUAL_STRING("file_durability_uncertain",
+                             tp_status_id(TP_STATUS_FILE_DURABILITY_UNCERTAIN));
 }
 
 /* Tokens are machine ids: lowercase, no spaces (unlike tp_status_str prose). */
 void test_status_id_is_machine_token(void) {
-    for (int s = TP_STATUS_OK; s <= TP_STATUS_FILE_EXISTS; s++) {
+    for (int s = TP_STATUS_OK; s <= TP_STATUS_FILE_DURABILITY_UNCERTAIN; s++) {
         const char *id = tp_status_id((tp_status)s);
         for (const char *c = id; *c; c++) {
             TEST_ASSERT_TRUE_MESSAGE(*c != ' ', id);

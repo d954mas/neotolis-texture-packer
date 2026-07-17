@@ -88,16 +88,47 @@ is the authoritative machine signal (see `cli_exit.h`: 0 ok · 1 internal ·
 - `--dry-run` (B3b) — same report, no files written, predicted degradations
   included.
 
-## `inspect` (schema 2) / `validate` (schema 1)
+## `inspect` (schema 4) / `validate` (schema 2)
 
-Schema 2 (F1-01): each animation object carries an opaque structural `id` (shape-ID)
-plus a human `name`; `name` is the selector every mutation verb uses (`anim <name>`,
-id-based selectors arrive in F1-03). The `anim list --json` query shares this schema
-(same animation shape). An operator branches on the `schema` number to detect the change.
+Schema 4 reports a canonical-v5 project: tagged source objects carry stable
+structural IDs, sprite overrides and animation frames use `{source,key}`
+identity, and each animation carries both opaque structural `id` and human
+`name`. The `anim list --json` query shares this schema and animation shape. An
+operator branches on the payload `schema` number; project-file schema is
+reported separately as `project.schema_version`.
 
-See `apps/cli/cli_inspect.c` / `cli_validate.c` headers; `validate` findings:
-`{severity: error|warning, code: <stable token>, message, atlas?, sprite?,
-anim?, frame?, target?}` with `counts:{error,warning}`. Stable finding codes:
+See `apps/cli/cli_inspect.c` / `cli_validate.c` headers. Validate schema 2 keeps
+exact (non-truncated) contexts and adds stable structural identities:
+`{severity, code, message, atlas?, atlas_id?, source?, source_id?, sprite?,
+anim?, animation_id?, frame?, target?, target_id?}` with
+`counts:{error,warning}`. Examples of stable finding codes:
 `missing_source, empty_atlas, dangling_anim_frame, duplicate_export_key,
 export_name_collision, unknown_exporter, setting_out_of_range,
-input_build_failed`.
+input_build_failed`. The complete append-only vocabulary is defined by
+`TP_VALIDATION_CODE_*` in `packer/include/tp_core/tp_validate.h`; adapters emit
+those tokens verbatim.
+
+## Mutation success (schema 1)
+
+Normal success is
+`{"schema":1,"ok":true,"verb":"<verb>","count":N}`. A successful
+mutation may additionally contain `notices`. In particular:
+
+```json
+{
+  "schema": 1,
+  "ok": true,
+  "verb": "set",
+  "count": 1,
+  "notices": [{
+    "id": "file_durability_uncertain",
+    "message": "project file was published, but storage durability could not be confirmed",
+    "status": "file_durability_uncertain"
+  }]
+}
+```
+
+This is not a failed or absent write: the canonical project bytes were
+published and are authoritative. Clients must surface the notice and must not
+retry as if no write occurred. `recovery_degraded` is likewise a successful
+Save notice about local crash-recovery authority, not project-file publication.

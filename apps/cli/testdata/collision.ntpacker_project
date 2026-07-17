@@ -1,12 +1,22 @@
 {
-  "version": 1,
+  "version": 5,
   "atlases": [
     {
+      "id": "atlas_00000000000000000000000000000201",
       "name": "coll",
       "sources": [
-        "Art/hero",
-        "art/hero",
-        "con.png"
+        {
+          "id": "source_00000000000000000000000000000202",
+          "path": "Art/hero"
+        },
+        {
+          "id": "source_00000000000000000000000000000203",
+          "path": "art/hero"
+        },
+        {
+          "id": "source_00000000000000000000000000000204",
+          "path": "con.png"
+        }
       ]
     }
   ]

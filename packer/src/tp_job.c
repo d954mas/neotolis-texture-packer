@@ -43,7 +43,7 @@ typedef struct tp_live_job {
     tp_pack_settings settings;
     char *atlas_name;
     char *work_dir;
-    char preview_exporter_id[64];
+    char preview_exporter_id[TP_EXPORTER_ID_MAX];
     tp_arena *arena;
     tp_result *pack_result;
 
@@ -260,21 +260,24 @@ tp_status tp_session_pack_job_start(tp_session *session,
                                                  &job->settings, err);
     }
     if (status == TP_STATUS_OK && request->preview_exporter_id) {
-        const tp_exporter *exporter = tp_exporter_find(
-            request->preview_exporter_id);
-        if (!exporter) {
+        status = tp_exporter_id_validate(request->preview_exporter_id, err);
+        const tp_exporter *exporter =
+            status == TP_STATUS_OK
+                ? tp_exporter_find(request->preview_exporter_id)
+                : NULL;
+        if (status == TP_STATUS_OK && !exporter) {
             status = tp_error_set(err, TP_STATUS_NOT_FOUND,
                                   "unknown preview exporter '%s'",
                                   request->preview_exporter_id);
-        } else {
+        } else if (status == TP_STATUS_OK) {
             tp_pack_settings effective;
             status = tp_export_effective_settings(&job->settings,
                                                   &exporter->caps, &effective);
             if (status == TP_STATUS_OK) {
                 job->settings = effective;
-                (void)snprintf(job->preview_exporter_id,
-                               sizeof job->preview_exporter_id, "%s",
-                               request->preview_exporter_id);
+                const size_t id_size = strlen(request->preview_exporter_id) + 1U;
+                memcpy(job->preview_exporter_id,
+                       request->preview_exporter_id, id_size);
             }
         }
     }
@@ -457,9 +460,8 @@ tp_status tp_session_job_take_result(tp_session *session,
         out->pack.atlas_id = job->atlas_id;
         out->pack.missing_sources = job->input.missing_sources;
         out->pack.input_token_at_start = job->input_token_at_start;
-        (void)snprintf(out->pack.preview_exporter_id,
-                       sizeof out->pack.preview_exporter_id, "%s",
-                       job->preview_exporter_id);
+        memcpy(out->pack.preview_exporter_id, job->preview_exporter_id,
+               strlen(job->preview_exporter_id) + 1U);
         if (state == TP_SESSION_JOB_SUCCEEDED) {
             out->pack.arena = job->arena;
             out->pack.result = job->pack_result;

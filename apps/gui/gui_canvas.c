@@ -3,13 +3,15 @@
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "math/nt_math.h"
 #include "renderers/nt_shape_renderer.h"
 
+#include "tp_core/tp_image.h"
+
 #include "clay.h"
-#include "stb_image.h"
 
 /* Vertex the sprite shaders consume: a_position(loc0, vec3), a_color(loc2, vec4),
  * a_texcoord(loc3, vec2). Tightly packed -> stride 36. */
@@ -211,27 +213,35 @@ bool gui_canvas_set_image(gui_canvas *c, const char *abs_path, char *err_out, si
     if (!abs_path || abs_path[0] == '\0') {
         return false;
     }
-    if (c->has_tex && strcmp(c->loaded_path, abs_path) == 0) {
-        return true;
-    }
-    int w = 0;
-    int h = 0;
-    int comp = 0;
-    stbi_set_flip_vertically_on_load(0);
-    unsigned char *src = stbi_load(abs_path, &w, &h, &comp, 4);
-    if (!src) {
-        const char *why = stbi_failure_reason();
+    const size_t path_len = strlen(abs_path);
+    if (path_len >= sizeof c->loaded_path) {
         if (err_out && err_cap) {
-            (void)snprintf(err_out, err_cap, "decode failed: %s", why ? why : "unknown");
+            (void)snprintf(err_out, err_cap,
+                           "image path exceeds maximum of %zu UTF-8 bytes",
+                           sizeof c->loaded_path - 1U);
         }
         return false;
     }
+    if (c->has_tex && strcmp(c->loaded_path, abs_path) == 0) {
+        return true;
+    }
+    tp_image_rgba8 image = {0};
+    tp_error error = {{0}};
+    tp_status status = tp_image_load_file(abs_path, &image, &error);
+    if (status != TP_STATUS_OK) {
+        if (err_out && err_cap) {
+            (void)snprintf(err_out, err_cap, "%s", error.msg);
+        }
+        return false;
+    }
+    const int w = image.width;
+    const int h = image.height;
     uint32_t maxdim = nt_gfx_gpu_caps() ? nt_gfx_gpu_caps()->max_texture_size : 4096U;
     if (maxdim == 0U) {
         maxdim = 4096U;
     }
     if ((uint32_t)w > maxdim || (uint32_t)h > maxdim) {
-        stbi_image_free(src);
+        tp_image_free(&image);
         if (err_out && err_cap) {
             (void)snprintf(err_out, err_cap, "image %dx%d exceeds max texture %u", w, h, maxdim);
         }
@@ -241,12 +251,12 @@ bool gui_canvas_set_image(gui_canvas *c, const char *abs_path, char *err_out, si
         nt_gfx_destroy_texture(c->tex);
         c->has_tex = false;
     }
-    c->tex = upload_rgba_premul(src, w, h, "ntpacker_canvas_img");
-    stbi_image_free(src);
+    c->tex = upload_rgba_premul(image.pixels, w, h, "ntpacker_canvas_img");
+    tp_image_free(&image);
     c->img_w = w;
     c->img_h = h;
     c->has_tex = true;
-    (void)snprintf(c->loaded_path, sizeof c->loaded_path, "%s", abs_path);
+    memcpy(c->loaded_path, abs_path, path_len + 1U);
     return true;
 }
 

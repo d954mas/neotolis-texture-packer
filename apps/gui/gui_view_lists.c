@@ -106,7 +106,8 @@ static void select_sprite_row(int i, bool ctrl, bool shift) {
         return;
     }
     const sprite_row *row = &s_rows[i];
-    const bool leaf = (!row->is_folder && !row->missing && row->sprite_name[0] != '\0');
+    const bool leaf = (!row->is_folder && !row->missing && row->sprite_name &&
+                       row->sprite_name[0] != '\0');
     s_sel_src = row->src;
     s_sel_child = row->child;
     s_sel_missing = row->missing;
@@ -118,7 +119,8 @@ static void select_sprite_row(int i, bool ctrl, bool shift) {
             const int hi = (s_sel_anchor_row < i) ? i : s_sel_anchor_row;
             for (int k = lo; k <= hi; k++) {
                 const sprite_row *rk = &s_rows[k];
-                if (!rk->is_folder && !rk->missing && rk->sprite_name[0] != '\0') {
+                if (!rk->is_folder && !rk->missing && rk->sprite_name &&
+                    rk->sprite_name[0] != '\0') {
                     multi_sel_add_ref(rk->source_id, rk->source_key);
                 }
             }
@@ -182,9 +184,11 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
             const uint32_t row_id = nt_ui_vlist_item_id(ctx, i);
             const uint32_t hit_id = nt_ui_child_id(row_id, "hit");
             const uint32_t x_id = nt_ui_child_id(row_id, "x");
-            const bool editing = row->sprite_name[0] != '\0' &&
+            const bool editing = row->sprite_name && row->sprite_name[0] != '\0' &&
                                  gui_sprite_edit_matches(row);
-            const bool leaf_row = (!row->is_folder && !row->missing && row->sprite_name[0] != '\0');
+            const bool leaf_row = (!row->is_folder && !row->missing &&
+                                   row->sprite_name &&
+                                   row->sprite_name[0] != '\0');
             const bool primary = (row->is_source ? (s_sel_src == row->src && s_sel_child == -1)
                                                   : (s_sel_src == row->src && s_sel_child == row->child));
             const bool selected = primary ||

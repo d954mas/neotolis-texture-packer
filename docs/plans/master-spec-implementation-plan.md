@@ -23,6 +23,52 @@ core-owned; Pack/Export have typed session-owned handles; validation and
 capability rules are below frontends. Remaining product work is still tracked
 by its original packets and is not marked complete by this checkpoint.
 
+## 2026-07-17 canonical project-schema checkpoint
+
+Decision 0016 and master spec §5.5 replace every v1–v4 project migration plan
+below. The production loader accepts exactly schema v5; valid fixtures and
+examples are canonical v5; unsupported files receive a structured version error
+and are not rewritten. Synthetic IDs, lazy name-to-key migration, pending
+name-only sprite/frame records, and an in-product converter are deleted rather
+than carried as compatibility debt.
+
+The old F1-01/F1-02 migration task text is retained only as historical planning
+context and **must not be executed**. Current completion evidence is: exact-only
+load tests, atomic missing-ID assignment at private session adoption, rejection
+of noncanonical save/checkpoint candidates, canonical `{source,key}` fixtures,
+and full Debug/Release gates.
+
+## 2026-07-17 history, durability, and path hardening checkpoint
+
+**Status: DONE.** Undo/Redo uses compact versioned `HISTORY` transitions with
+deterministic checkpoint fallback only for unsupported/oversized diffs. Journal
+acknowledgement requires its durability barrier. Project Save uses an exclusive
+synced sibling temp, atomic publication, and parent-directory sync; a
+post-publication failure is the structured `file_durability_uncertain` success
+notice. Windows client arguments and core filesystem paths use strict UTF-8
+boundaries. Fault injection, hostile-input tests, mixed replay, budgets, and
+Debug/Release/boundary gates are the executable evidence.
+
+Any older packet below that says journal sync is optional, Undo/Redo normally
+appends a full checkpoint, canonical-v5 work is pending, or production still
+owns a GUI snapshot-history stack is non-executable implementation history.
+
+## 2026-07-17 builder-containment checkpoint
+
+**Status: IN PROGRESS.** Shared `tp_image` now performs bounded UTF-8 reads and
+canonical RGBA8 decode; `tp_pack` supplies raw pixels and preflights the known
+transparent/slice9/footprint/spacing conditions that otherwise reach engine
+assertions. This closes bad-image and Unicode source ingress, but it does not
+make the current engine builder fallible: narrow output-path I/O, allocation,
+codec, write, and unknown assertion failures can still terminate an in-process
+client.
+
+The remaining mandatory packet is roadmap `H0.3–H0.5` / decision 0018: a
+versioned bounded private builder worker, ASCII relative staging, parent-owned
+UTF-8 publication and crash/cancel/malformed/full-disk tests. It is a
+prerequisite of F3's production Pack session gate. Do not mark the core
+crash-proof or substitute additional assertion prechecks for failure isolation.
+
 ## 1. Назначение и правила исполнения
 
 Этот документ переводит master spec в проверяемые вертикальные пакеты работ. Он не переопределяет продуктовые решения master spec. При конфликте текст master spec имеет приоритет.
@@ -209,7 +255,10 @@ Fault injection должен быть детерминированным: alloca
 
 **Completion evidence.** Утверждённые binary vectors/state table и исполнимый raw-ownership regression test либо ссылка на upstream issue.
 
-**Non-goals / blockers.** Не фиксировать checkpoint cadence, production cache budgets и singular authority cutover — это открытые решения §60.
+**Historical non-goals.** На этом discovery-этапе cadence ещё не была
+зафиксирована. Текущий исполнимый контракт определён checkpoint-ом 2026-07-17
+выше: attach checkpoint, compact-on-Save и без периодических checkpoint.
+Production cache budgets и singular authority cutover остаются отдельной работой.
 
 ### Deterministic raster color/orientation discovery
 
@@ -293,7 +342,10 @@ without frontend-specific path logic; identity tests pass on all CI platforms.
 **Non-goals / blockers.** No cross-process claim or dead-owner proof; those
 remain Epic A.
 
-### F1-01 — ID primitives и schema v2 migration
+### F1-01 — Historical schema-v2 migration packet (superseded by 0016)
+
+> Non-executable history. Do not implement the migration tasks in this section;
+> use the 2026-07-17 canonical project-schema checkpoint above.
 
 **Goal / user outcome.** Rename/reorder/save/reload больше не ломают ссылки на atlas/source/animation/target.
 
@@ -327,7 +379,10 @@ rename/reorder/remove/Undo-oracle/save/reload identity invariants.
 
 **Non-goals / blockers.** Persistent `project_id` запрещён. Project identity — canonical path, не поле файла.
 
-### F1-02 — Tagged source schema и normalization
+### F1-02 — Historical tagged-source migration packet (superseded by 0016)
+
+> Non-executable history. Tagged sources remain canonical, but the old-file
+> migration path described here is deliberately absent from production.
 
 **Goal / user outcome.** Source становится адресуемой сущностью и готов к linked atlas без параллельной модели.
 
@@ -498,7 +553,9 @@ saved project и temporary runtime session ID для unsaved; не входит
 
 **Completion evidence.** Crash/fault suite доказывает: любой acknowledged transaction восстановим и не дублируется; неacknowledged transaction невидим.
 
-**Non-goals / blockers.** Не обещать per-operation `fsync` или power-loss durability; exact compaction/cadence остаются configurable/open.
+**Superseded durability note.** Текущий контракт требует durability barrier для
+каждого acknowledged journal record (`fflush` + `fsync`/`_commit`), а локальная
+compaction/cadence policy зафиксирована checkpoint-ом 2026-07-17 выше.
 
 ### F2-05 — CLI/GUI operation adapters и production cutover
 
@@ -775,15 +832,18 @@ second session abstraction.
 **Foundation update (2026-07-16).** Production GUI snapshot history and
 `gui_history` authority are deleted. Semantic history and session Undo/Redo are
 live; visible shared History/checkpoint UX and host-transfer behavior remain.
-P-UNDO is explicitly **TRIGGERED** by the M0 HUGE result (about 17.36 MB per
-durable append and p95 around 1.5-1.65 s); implementation belongs to the named
-post-foundation packet in `architecture-foundation-plan.md` §7.
+P-UNDO is **DONE (2026-07-17)**: normal Undo/Redo appends a compact versioned
+`HISTORY` transition; only unsupported or oversized diffs use deterministic
+full-checkpoint fallback. Mixed replay, sync-failure rollback and size/admission
+budgets are test-pinned.
 
 **Goal / user outcome.** Один Ctrl+Z отменяет целую human/agent transaction; save виден checkpoint-ом, но не Undo step.
 
 **Spec refs.** §8–9.5, §54 Phase 2 items 2–4.
 
-**Current code delta.** Snapshot stack и coalescing (`apps/gui/gui_history.c:111-160`), GUI buffer reload (`apps/gui/gui_project.c:536-576`).
+**Current code.** Session-owned semantic history is the production authority;
+the GUI contains no snapshot-history owner. Serialized checkpoint round-trips
+remain only as tests and recovery primitives.
 
 **Dependencies.** F3-01, F2-03.
 
@@ -1200,7 +1260,10 @@ round-trip где meaningful, malformed/companion/capability fixtures.
 
 ### Foundation accepted
 
-- schema v1 migrates to v2 без потери baseline behavior;
+- schema v5 is the only accepted project representation; v1–v4/future files
+  fail with a structured version error and their bytes remain untouched;
+- session adoption assigns missing structural IDs atomically, while
+  save/checkpoint publication rejects every noncanonical graph;
 - IDs стабильны при rename/reorder/save/reload;
 - все persistent mutations проходят typed transactions;
 - atomic rollback/revision/dirty/inverse/journal fault suites зелёные;
@@ -1322,11 +1385,23 @@ round-trip где meaningful, malformed/companion/capability fixtures.
 9. **G3 (НОВОЕ, из аудита поверхности)** — поле пути таргета (out-path) коммитит `TARGET_SET` НА КАЖДУЮ КЛАВИШУ (`TARGET_SET` структурный, не коалесится → валится прямо в `commit_txn_now`): N undo-шагов + N полных снапшотов; на HUGE = D2-обрыв (17МБ/245мс) на каждую букву; прямо противоречит инварианту коалесинга ADR 0015. Фикс: сделать поле пути/экспортёра коалесящимся (ключ `CK_TARGET`) либо коммит только по Enter/blur (не по `changed`). GUI.
 
 Складываются в **R** (обе про журнал, R его и так переделывает + бампает формат v1→v2):
-- **P1-1 — DONE (R4, journal-gated history).** Undo/Redo строят candidate-модель, сериализуют/проверяют её round-trip и сначала аппендят recovery-checkpoint; только после успешной durable записи публикуются model + history cursor. Ошибка append оставляет model/revision/cursor без изменений и возвращается вызывающему. Undo-стек по-прежнему не персистится: recovery восстанавливает состояние документа, но больше не существует окна «UI уже изменён, журнал ещё старый» и ложного успеха после сбоя компакции.
-- **P1-5** — раздутое поле длины записи классифицируется как «оборванный хвост» ДО CRC → физически удаляет валидные записи после испорченной (нарушает C2 + ложное утверждение ADR 0013). До GUI не доходит (recovery берёт последний хороший снапшот + стирает слот), но обязательно до не-GUI потребителя журнала. Фикс — sync-word / устойчивость кадрирования при бампе формата v1→v2.
+- **P1-1 — DONE (compact durable history).** Undo/Redo строят candidate-модель и
+  аппендят versioned compact `HISTORY` transition; deterministic full-checkpoint
+  fallback разрешён только для unsupported/oversized diff. Только после успешной
+  durability barrier публикуются model + history cursor. Ошибка append/sync
+  оставляет model/revision/cursor без изменений. Recovery восстанавливает текущее
+  состояние документа, но не локальный Undo cursor.
+- **P1-5 — DONE (journal v4 sync-word framing).** Hostile length/corrupt-frame
+  cases fail closed without silently consuming a later valid frame; committed
+  prefix recovery and mixed TXN/HISTORY replay are executable-test pinned.
 
 Спека/доки (без кода):
 - **P2-9 — РЕШЕНИЕ ВЛАДЕЛЬЦА 2026-07-14: вариант A.** Узаконить `duplicate_id` в мастер-спеке §7.2 как корректный контракт на повтор транзакции. Безопасная суть (не применять дважды; retained-id переживают рестарт) уже реализована и покрыта `test_transaction.c`; снимается только буква §7.2 «вернуть прежний результат». B (durable result-replay) — аддитивный апгрейд, если появится ретраящий сетевой MCP-клиент. Обоснование низкого риска: ретрай физически невозможен у существующих клиентов — GUI in-process/синхронно/свежие монотонные id; CLI one-shot (перезапуск = новый id = новая транзакция, не повтор). Ретрай реален только у будущего долгоживущего MCP-агента по транспорту с потерей ответа; id создаваемых сущностей генерит клиент, единственный «теряемый» датум — точная ревизия.
-- **P1-3 / P1-7 / P2-11 — reviewed-and-accepted, кода не трогаем.** P1-3 (sprite override по export-имени игнорит source — задокументированный bridge ADR 0009/0010; вредный кейс двух source с одним export-key уже ловится `export_name_collision` в validate/pack, т.е. только в непакуемом атласе). P1-7 (правки при отказе журнала ОТКЛОНЯЮТСЯ на коммите, а attach-fail и 2-е окно СИГНАЛЯТ пользователю — санкционировано ADR 0015). P2-11 (recovery сбрасывает revision→0 / retained-id — намеренный fix[0]+[2], предотвращает `DUPLICATE_ID`-фриз, безвреден для одно-клиентного GUI).
+- **P1-3 superseded by decision 0016.** Sprite overrides and frames match only
+  canonical `{source,key}`; the old export-name bridge is not an accepted state.
+  **P1-7 / P2-11 remain reviewed-and-accepted.** P1-7: правки при отказе журнала
+  ОТКЛОНЯЮТСЯ на коммите, а attach-fail и 2-е окно СИГНАЛЯТ пользователю (ADR 0015).
+  P2-11: recovery сбрасывает revision→0 / retained-id, предотвращая
+  `DUPLICATE_ID`-фриз в одно-клиентном GUI.
 
 Аудит покрытия (оба прохода, 2026-07-14) — **поверхность чистая**: покрыто 100% (все меню/контекст-меню/шорткаты/поля/экспорт-модалка; OS drag-drop отсутствует); каждая существующая мутация идёт через конвейер `op→txn→diff→history→journal`, КРОМЕ 3 дыр выше (P1-2 rename, P2-13 Add Files, G3 путь-по-клавише); каталог из 20 операций прошит равномерно, ни одна не пропускает слой (validate/lower/apply/diff-прямой+обратный/encode-decode/тесты; есть oracle-тест полноты diff). «Недостающие операции» из нижнего прохода — reorder/MOVE для атласов/источников/анимаций/таргетов (MOVE есть только у кадров) и смена `kind` источника folder↔file — это фичи, которых в GUI НЕТ вовсе (порядок коллекций меняется только add-в-конец/remove, обе операции), → scope только при добавлении drag-reorder/смены типа, НЕ баги. `source.replace` + `animation.frames.set` — зарезервированы намеренно (нет CLI-verb/билдера).

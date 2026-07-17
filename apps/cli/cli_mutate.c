@@ -23,7 +23,8 @@
  *   1 internal: OOM / RNG fault from the transaction, promote, or save.
  *   0 ok.
  * A committed transaction that rejects maps its tp_status to this split
- * (map_reject_exit); the emitted structured error carries the core status id + field.
+ * (cli_exit_for_rejected_status); the emitted structured error carries the core
+ * status id + field.
  */
 #include "cli_cmds.h"
 
@@ -231,8 +232,7 @@ typedef struct cli_edit {
 } cli_edit;
 
 static bool status_is_internal_fault(tp_status status) {
-    return status == TP_STATUS_OOM || status == TP_STATUS_RNG_FAILED ||
-           status == TP_STATUS_ID_COLLISION_EXHAUSTED;
+    return cli_exit_for_rejected_status(status) == CLI_EXIT_INTERNAL;
 }
 
 static tp_status emit_selector_error(
@@ -377,17 +377,6 @@ static int edit_open_atlas(cli_edit *edit, const char *path,
  * project-state error (3); every other reject (out-of-range value, name collision,
  * bad payload) is a usage error (2) -- the value/vocabulary is fixed BEFORE the model
  * changes, exactly as the pre-cutover inline path classified them. */
-static int map_reject_exit(tp_status code) {
-    switch (code) {
-        case TP_STATUS_OOM:
-        case TP_STATUS_RNG_FAILED:
-        case TP_STATUS_ID_COLLISION_EXHAUSTED: return CLI_EXIT_INTERNAL;
-        case TP_STATUS_NOT_FOUND:
-        case TP_STATUS_OUT_OF_BOUNDS: return CLI_EXIT_PROJECT;
-        default: return CLI_EXIT_USAGE;
-    }
-}
-
 /* Emits the structured error for a rejected transaction (id = core status token,
  * message = the offending op's context) and returns the mapped exit code. */
 static int emit_reject(const tp_txn_result *res, tp_status st, const tp_error *err, bool json, bool quiet) {
@@ -409,13 +398,31 @@ static int emit_reject(const tp_txn_result *res, tp_status st, const tp_error *e
     if (code == TP_STATUS_NOT_FOUND && strcmp(field, "exporter_id") == 0) {
         return CLI_EXIT_USAGE;
     }
-    return map_reject_exit(code);
+    return cli_exit_for_rejected_status(code);
 }
 
 /* Frees each operation's malloc-owned arms (NOT the array container). */
 static void free_ops(tp_operation *ops, int n) {
     for (int i = 0; i < n; i++) {
         tp_operation_free(&ops[i]);
+    }
+}
+
+static void report_save_notices_human(
+    const tp_session_save_result *result, bool quiet) {
+    if (!result || quiet) {
+        return;
+    }
+    if (result->file_durability_degraded) {
+        (void)fprintf(
+            stderr,
+            "ntpacker: notice [file_durability_uncertain]: project file was published, but storage durability could not be confirmed\n");
+    }
+    if (result->recovery_degraded) {
+        (void)fprintf(
+            stderr,
+            "ntpacker: notice [recovery_degraded]: project was saved, but crash recovery is degraded (%s)\n",
+            tp_status_id(result->recovery_status));
     }
 }
 
@@ -454,8 +461,9 @@ static int commit_session_ops(cli_edit *edit, tp_operation *ops, int nops,
             rc = status_is_internal_fault(status) ? CLI_EXIT_INTERNAL
                                                    : CLI_EXIT_PROJECT;
         } else if (json) {
-            cli_emit_mutation(verb, count);
+            cli_emit_mutation(verb, count, &save_result);
         } else if (!quiet) {
+            report_save_notices_human(&save_result, false);
             (void)printf("%s\n", human);
         }
     }
@@ -473,9 +481,10 @@ static int do_new(const char *path, bool json, bool quiet) {
     tp_rng rng = tp_rng_os();
     tp_error err = {0};
     tp_session *session = NULL;
+    tp_session_save_result result;
+    memset(&result, 0, sizeof result);
     tp_status st = tp_session_create_default_project(&rng, &session, &err);
     if (st == TP_STATUS_OK) {
-        tp_session_save_result result;
         st = tp_session_save_new(session, path, &result, &err);
     }
     if (st != TP_STATUS_OK) {
@@ -483,15 +492,16 @@ static int do_new(const char *path, bool json, bool quiet) {
                        err.msg[0] ? err.msg : tp_status_str(st));
         tp_session_destroy(session);
         return st == TP_STATUS_OOM || st == TP_STATUS_RNG_FAILED ||
-                       st == TP_STATUS_ID_COLLISION_EXHAUSTED
+                       st == TP_STATUS_DUPLICATE_ID
                    ? CLI_EXIT_INTERNAL
                    : CLI_EXIT_PROJECT;
     }
     char human[CLI_PATH_MAX + 32];
     (void)snprintf(human, sizeof human, "Created project %s", path);
     if (json) {
-        cli_emit_mutation("new", 1);
+        cli_emit_mutation("new", 1, &result);
     } else if (!quiet) {
+        report_save_notices_human(&result, false);
         (void)printf("%s\n", human);
     }
     tp_session_destroy(session);

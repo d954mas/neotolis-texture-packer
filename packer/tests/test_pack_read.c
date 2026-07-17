@@ -29,6 +29,8 @@
 #include "tp_core/tp_model.h"
 #include "tp_core/tp_name_map.h"
 #include "tp_core/tp_pack_read.h"
+#include "../src/tp_fs_internal.h"
+#include "../src/tp_pack_read_internal.h"
 #include "unity.h"
 
 #include "tp_fixtures.h"
@@ -390,6 +392,61 @@ void test_determinism_byte_identical(void) {
     free(b2);
 }
 
+void test_read_file_accepts_utf8_path(void) {
+    static const char utf8_name[] =
+        "\xD0\xB0\xD1\x82\xD0\xBB\xD0\xB0\xD1\x81-\xD1\x82\xD0\xB5\xD1\x81\xD1\x82.ntpack";
+    char dir[1024];
+    (void)snprintf(dir, sizeof dir, "%s", g_cc[0].path);
+    char *slash = strrchr(dir, '/');
+    char *backslash = strrchr(dir, '\\');
+    if (backslash && (!slash || backslash > slash)) {
+        slash = backslash;
+    }
+    TEST_ASSERT_NOT_NULL(slash);
+    *slash = '\0';
+    char path[1200];
+    (void)snprintf(path, sizeof path, "%s/%s", dir, utf8_name);
+    TEST_ASSERT_TRUE(tp_fs_write_file(path, g_plain_bytes, g_plain_size));
+
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_result **results = NULL;
+    int count = 0;
+    tp_error err = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK,
+                                  tp_pack_read_file(path, g_names, arena, &results, &count, &err), err.msg);
+    TEST_ASSERT_EQUAL_INT(1, count);
+    TEST_ASSERT_NOT_NULL(results);
+    TEST_ASSERT_NOT_NULL(results[0]);
+    tp_arena_destroy(arena);
+    TEST_ASSERT_TRUE(tp_fs_remove_file(path));
+}
+
+void test_page_name_preserves_long_atlas_identity(void) {
+    char atlas_name[1024];
+    memset(atlas_name, 'n', sizeof atlas_name - 1U);
+    atlas_name[sizeof atlas_name - 1U] = '\0';
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_error error = {{0}};
+    const char *single = NULL;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_pack_read_page_name(atlas_name, 1U, 0U, arena, &single, &error),
+        error.msg);
+    TEST_ASSERT_EQUAL_STRING(atlas_name, single);
+
+    const char *third = NULL;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_pack_read_page_name(atlas_name, 4U, 3U, arena, &third, &error),
+        error.msg);
+    TEST_ASSERT_EQUAL_size_t(strlen(atlas_name) + 2U, strlen(third));
+    TEST_ASSERT_EQUAL_MEMORY(atlas_name, third, strlen(atlas_name));
+    TEST_ASSERT_EQUAL_STRING(".3", third + strlen(atlas_name));
+    tp_arena_destroy(arena);
+}
+
 void test_neg_truncated(void) {
     tp_arena *ar = tp_arena_create(0);
     TEST_ASSERT_NOT_NULL(ar);
@@ -502,6 +559,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_pixels_per_unit);
     RUN_TEST(test_diagonal_transform_present);
     RUN_TEST(test_determinism_byte_identical);
+    RUN_TEST(test_read_file_accepts_utf8_path);
+    RUN_TEST(test_page_name_preserves_long_atlas_identity);
     RUN_TEST(test_neg_truncated);
     RUN_TEST(test_neg_bad_magic);
     RUN_TEST(test_neg_unknown_region);

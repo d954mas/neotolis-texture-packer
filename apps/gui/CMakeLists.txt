@@ -24,7 +24,11 @@ if(WIN32)
     target_link_libraries(tinyfiledialogs PUBLIC comdlg32 ole32 shell32 user32)
 endif()
 
-add_executable(ntpacker-gui main.c gui_state.c gui_widgets.c gui_actions.c gui_rows.c gui_selftest.c gui_shot.c gui_startup.c gui_paths.c gui_log_file.c gui_crash.c gui_project.c gui_session_adapter.c gui_scan.c gui_canvas.c gui_pack.c gui_view_settings.c gui_view_lists.c gui_view_canvas.c gui_view_chrome.c)
+add_executable(ntpacker-gui main.c gui_state.c gui_widgets.c gui_actions.c gui_rows.c gui_selftest.c gui_shot.c gui_startup.c gui_paths.c gui_log_file.c gui_crash.c gui_project.c gui_session_adapter.c gui_scan.c gui_canvas.c gui_pack.c gui_view_settings.c gui_view_lists.c gui_view_canvas.c gui_view_chrome.c
+    "${CMAKE_SOURCE_DIR}/apps/common/nt_utf8_fs.c")
+if(WIN32)
+    target_sources(ntpacker-gui PRIVATE "${CMAKE_SOURCE_DIR}/apps/common/nt_utf8_argv.c")
+endif()
 # Link set derived from examples/ui_showcase; nt_shape_renderer is re-added for the atlas-page
 # canvas overlays (region outlines / hull polygons / pivot markers). Kept the concrete impls the
 # engine's *_interface deps require at final link: nt_gfx (font/ui), nt_fs + nt_http_stub
@@ -34,7 +38,8 @@ add_executable(ntpacker-gui main.c gui_state.c gui_widgets.c gui_actions.c gui_r
 # transcoder TU, commit 8d0133cb), so nt_builder + nt_basisu_encoder no longer duplicate the render
 # runtime's transcoder symbol and coexist with nt_gfx in one image. tp_build PUBLIC-links tp_core +
 # nt_builder, so the read/model/edit core comes transitively. gui_pack.c is a thin adapter over
-# session-owned typed Pack/Export jobs. stb_image decodes images for source-preview mode.
+# session-owned typed Pack/Export jobs. Source-preview raster ingress is shared
+# with pack jobs through tp_core (strict UTF-8 path + bounded memory decode).
 target_link_libraries(ntpacker-gui PRIVATE
     nt_core nt_app nt_input nt_window nt_math nt_log nt_time nt_resource
     nt_material nt_shared nt_atlas
@@ -42,13 +47,13 @@ target_link_libraries(ntpacker-gui PRIVATE
     nt_render nt_hash nt_mem_scratch nt_shape_renderer
     nt_gfx nt_http_stub nt_fs nt_clipboard
     nt_fpng # dev screenshot mode (--shot): PNG-encode the framebuffer readback
-    tp_build stb_image tinyfiledialogs
+    tp_build tinyfiledialogs
     tinycthread # thread-safe GUI log sink; already in-closure via nt_builder
 )
 # D2 crash handler: MiniDumpWriteDump (gui_crash.c) needs DbgHelp on Windows. Target-scoped link
 # addition only (no preset/toolchain change); POSIX uses libc backtrace, no extra lib.
 if(WIN32)
-    target_link_libraries(ntpacker-gui PRIVATE dbghelp)
+    target_link_libraries(ntpacker-gui PRIVATE dbghelp shell32)
 endif()
 # Generated asset header from the pack builder (ntpacker_ui_assets.h).
 target_include_directories(ntpacker-gui PRIVATE "${GUI_GENERATED_DIR}")
@@ -136,6 +141,20 @@ nt_set_warning_flags(tp_test_gui_session_adapter)
 nt_set_sanitizer_flags(tp_test_gui_session_adapter)
 add_test(NAME tp_gui_session_adapter COMMAND tp_test_gui_session_adapter)
 
+add_executable(tp_test_gui_paths test_gui_paths.c gui_paths.c)
+target_link_libraries(tp_test_gui_paths PRIVATE tp_core unity)
+target_compile_options(tp_test_gui_paths PRIVATE -U_DLL)
+target_include_directories(tp_test_gui_paths PRIVATE
+    "${CMAKE_SOURCE_DIR}/apps/common")
+if(WIN32)
+    target_sources(tp_test_gui_paths PRIVATE
+        "${CMAKE_SOURCE_DIR}/apps/common/nt_utf8_argv.c")
+    target_link_libraries(tp_test_gui_paths PRIVATE shell32)
+endif()
+nt_set_warning_flags(tp_test_gui_paths)
+nt_set_sanitizer_flags(tp_test_gui_paths)
+add_test(NAME tp_gui_paths COMMAND tp_test_gui_paths)
+
 # Canonical GUI identity regression: two distinct sources may expose the same
 # source-local key.  The headless target exercises the production row,
 # selection/action and project/session adapters without creating a window.
@@ -151,6 +170,10 @@ add_executable(tp_test_gui_canonical_identity
     gui_pack.c
     gui_paths.c
 )
+if(WIN32)
+    target_sources(tp_test_gui_canonical_identity PRIVATE
+        "${CMAKE_SOURCE_DIR}/apps/common/nt_utf8_argv.c")
+endif()
 target_link_libraries(tp_test_gui_canonical_identity PRIVATE
     nt_core nt_app nt_window nt_input nt_math nt_log nt_time nt_resource
     nt_material nt_shared nt_atlas

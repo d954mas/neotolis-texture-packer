@@ -18,9 +18,8 @@
  *     loaded project is byte-identical (memcmp-pinned).
  *
  * Load rules (ux.md §3.6/§3.7):
- *   - version > current  -> TP_STATUS_BAD_VERSION ("needs a newer ntpacker").
- *   - version < current  -> chained migration hook (a switch; empty at v1).
- *   - unknown keys        -> ignored (forward-compat for minor additions).
+ *   - version != current -> TP_STATUS_BAD_VERSION.
+ *   - unknown keys        -> TP_STATUS_BAD_PROJECT (closed canonical schema).
  *   - malformed JSON / wrong types -> TP_STATUS_BAD_PROJECT (with context).
  *   - missing source files on disk are NOT load errors (they are model states).
  */
@@ -30,7 +29,7 @@
 #include <stdint.h>
 
 #include "tp_core/tp_error.h"
-#include "tp_core/tp_id.h" /* tp_id128: persistent structural IDs (schema v2) */
+#include "tp_core/tp_id.h" /* tp_id128: persistent structural IDs */
 
 #ifdef __cplusplus
 extern "C" {
@@ -38,45 +37,25 @@ extern "C" {
 
 struct tp_pack_settings;
 
-/* Bump when the on-disk schema changes; add a migration case in the loader.
- * v2: atlas/animation/target carry a persistent tp_id128 `id`; the
- * animation's old string `id` became its logical `name` (id/name split).
- * v3: the bare `sources` string array becomes an array of tagged source
- * OBJECTS {id, kind, path}; each source carries a persistent tp_id128 `id`.
- * A v2 bare-string source migrates to kind=folder (decision 0008).
- * v4: a sparse sprite override is keyed by its owning source + source-local
- * KEY ({source, key}) instead of the mutable atlas-relative `name`, and an animation
- * frame reference likewise carries {source, key} -- so a logical/export rename never
- * moves an override or a frame, and the derived sprite_id survives reorder/reload
- * (decision 0009). The re-key needs a disk scan (name has no extension; the key does)
- * and load MUST NOT scan, so a v3 name-keyed record loads as a "pending" record and
- * is rewritten to {source, key} lazily at first successful resolution; a record whose
- * key never resolves stays orphaned and reactivates when the key returns. A record
- * still in pending form is a valid v4 state (serialized with `name`). */
-#define TP_PROJECT_SCHEMA_VERSION 4
+/* The production loader accepts exactly this schema version. Unsupported older
+ * or newer versions are rejected; conversion is intentionally outside tp_core. */
+#define TP_PROJECT_SCHEMA_VERSION 5
 
 /* Per-sprite override. Sparse: an entry exists only when at least one field is
  * non-default. Defaults: origin (0.5,0.5), slice9 all-zero, rename NULL (see the
  * *_DEFAULT constants below).
  *
- * Identity (schema v4): the CANONICAL key is the owning source + source-local
- * key, from which sprite_id derives (tp_sprite_id(source_id, src_key)); this survives
- * a logical/export rename and source reorder.
- *   - `source_ref` / `src_key`: the persisted v4 identity. source_ref is nil and
- *     src_key NULL while the record is PENDING (loaded from a v3 file, or added by
- *     name before any scan) -- it cannot be keyed to (source, key) without a disk
- *     scan, which load never does. Lazy resolution fills them (tp_project_migrate).
- *   - `name`: the display/export-key bridge (ext-stripped, folder-kept). It is
- *     never authoritative for override application; canonical lookup uses
- *     `(source_ref,src_key)`. For
- *     a migrated (v4) record it is derived on load = strip_ext(src_key) -- no scan.
- * A migrated record whose (source_ref, src_key) resolves to no current sprite is an
- * ORPHAN: stored verbatim and inactive, and
- * reactivating when the key returns. */
+ * The canonical identity is the owning source ID plus normalized source-local
+ * key, from which sprite_id derives (tp_sprite_id(source_id, src_key)). `name`
+ * is a derived display/export bridge and is never authoritative for lookup.
+ *
+ * The source entity and source_ref must remain present in the project graph. A
+ * record is an orphan only when that physical source is unavailable or the
+ * source-local key is absent; it becomes active again when the same key returns. */
 typedef struct tp_project_sprite {
     char *name;          /* display/export-key bridge; never an application key */
-    tp_id128 source_ref; /* owning source's structural id; nil = pending (unresolved) */
-    char *src_key;       /* normalized source-local key (NFC, ext KEPT); NULL = pending */
+    tp_id128 source_ref; /* owning source's structural id; always non-nil */
+    char *src_key;       /* normalized source-local key (NFC, ext KEPT) */
     float origin_x;
     float origin_y;
     uint16_t slice9_lrtb[4]; /* [left,right,top,bottom] px; all-zero = none */
@@ -86,8 +65,8 @@ typedef struct tp_project_sprite {
      * TP_PROJECT_OV_INHERIT (-1) = inherit the atlas value (never serialized).
      * shape uses atlas-shape semantics (0=RECT,1=CONVEX_HULL,2=CONCAVE_CONTOUR);
      * allow_rotate 0 = force no-rotate (the engine has no force-rotate). margin/
-     * extrude/max_vertices carry the raw value; an explicit 0 is unrepresentable
-     * engine-side and is rejected by tp_pack (documented follow-up). */
+     * extrude/max_vertices carry the raw value; explicit 0 and values that do
+     * not fit the builder descriptor are rejected before model adoption. */
     int16_t ov_shape;
     int16_t ov_allow_rotate;
     int16_t ov_max_vertices;
@@ -99,32 +78,22 @@ typedef struct tp_project_sprite {
 #define TP_PROJECT_OV_INHERIT (-1)
 
 /* One animation frame reference: a sprite in the same atlas, in playback order.
- * Schema v4: keyed by its owning source + source-local key, exactly like a
- * sprite override, so a frame reference targets the derived sprite_id and survives
- * reorder/reload/logical-rename (decision 0009). Mirror of tp_project_sprite's
- * identity fields:
- *   - `source_ref` / `src_key`: the canonical v4 identity; nil / NULL while PENDING
- *     (a v3 name-keyed frame, or one added by name before a scan) -- re-keyed lazily.
- *   - `name`: the frame's human/display reference. Export resolves exclusively
- *     through the canonical fields and then maps to the packed logical name. */
+ * It uses the same canonical source ID + source-local key identity as a sprite
+ * override. `name` is derived for display; export resolves through the canonical
+ * fields and then maps to the packed logical name. */
 typedef struct tp_project_frame {
     char *name;          /* display reference for snapshots/human selectors */
-    tp_id128 source_ref; /* owning source's structural id; nil = pending */
-    char *src_key;       /* normalized source-local key (NFC, ext KEPT); NULL = pending */
+    tp_id128 source_ref; /* owning source's structural id; always non-nil */
+    char *src_key;       /* normalized source-local key (NFC, ext KEPT) */
 } tp_project_frame;
 
 /* Flipbook metadata over sprite references, orthogonal to placement (SUMMARY.md §5a).
- * `frames` are frame references in explicit playback order (schema v4: {source, key},
- * see tp_project_frame).
- *
- * id/name split (schema v2): `id` is the persistent structural ID (survives
- * rename/reorder/save/reload); `name` is the logical/display name and the human
- * reference key. The v1 string `id` migrated into `name`. */
+ * `frames` are canonical {source, key} references in explicit playback order.
+ * `id` is persistent and survives rename/reorder/save/reload; `name` is the
+ * logical/display name and human selector. */
 typedef struct tp_project_anim {
-    tp_id128 id;       /* persistent structural ID (schema v2); nil until assigned/promoted */
-    bool id_synthetic; /* TRANSIENT (never serialized): the loader synthesized this id for a
-                        * legacy gap -- the first writable promote re-randomizes it (§5.5, decision 0007) */
-    char *name;    /* logical/display name; the name-keyed reference (was v1 `id`) */
+    tp_id128 id;   /* persistent structural ID; fresh private entities start nil */
+    char *name;    /* logical/display name */
     tp_project_frame *frames;
     int frame_count;
     int frame_cap; /* internal: allocation capacity of `frames` */
@@ -140,39 +109,34 @@ typedef struct tp_project_anim {
 /* One export target: a pluggable exporter id + its output path. `enabled`
  * defaults true (sparse: only written when false). */
 typedef struct tp_project_target {
-    tp_id128 id;       /* persistent structural ID (schema v2); nil until assigned/promoted */
-    bool id_synthetic; /* TRANSIENT (never serialized): the loader synthesized this id for a
-                        * legacy gap -- the first writable promote re-randomizes it (§5.5, decision 0007) */
+    tp_id128 id;       /* persistent structural ID; fresh private entities start nil */
     char *exporter_id; /* exporter kind, e.g. "json-neotolis", "defold" (NOT the structural id) */
     char *out_path;    /* project-relative output path/prefix */
     bool enabled;
 } tp_project_target;
 
-/* Source kind (schema v3). Master spec §11 models a source as
+/* Source kind. Master spec §11 models a source as
  * `kind: path | atlas`, where a "path" source is either a scanned folder or a
  * single image file; this enum makes that file-vs-folder sub-distinction explicit.
  * APPEND-ONLY (the value is the stored classification): TP_SOURCE_KIND_ATLAS
  * (foreign atlas descriptor) is reserved for Epic B1. `folder` is the zero/default
- * value -- a migrated v2 bare-string source and any add_source without a kind
- * become `folder` (decision 0008). Serialized as a string token ("folder" is the
- * omitted sparse default; "file" is written). */
+ * value. add_source without an explicit kind creates a folder source. Serialized
+ * as a string token ("folder" is the omitted sparse default; "file" is written). */
 typedef enum tp_source_kind {
     TP_SOURCE_KIND_FOLDER = 0, /* recursively scanned folder (default) */
     TP_SOURCE_KIND_FILE = 1    /* single image file */
     /* TP_SOURCE_KIND_ATLAS = 2  -- reserved for Epic B1; do NOT use before then */
 } tp_source_kind;
 
-/* One tagged source (schema v3): a persistent structural id + its kind + the
+/* One tagged source: a persistent structural id + its kind + the
  * folder/file path (project-relative, '/'-normalized; stored verbatim, save
- * relativizes absolute forms). `id` starts nil until assigned/promoted. Scan
+ * relativizes absolute forms). A fresh private entity starts with a nil ID until
+ * session adoption assigns it. Scan
  * classifies file-vs-folder at runtime by stat, so a stored kind that disagrees
  * with disk still packs correctly; kind is authoritative only where disk cannot
  * be consulted (a missing source, for sprite-id derivation). */
 typedef struct tp_project_source {
-    tp_id128 id;         /* persistent structural ID (schema v3); nil until assigned/promoted */
-    bool id_synthetic;   /* TRANSIENT (never serialized): the loader synthesized this id for a legacy
-                          * gap (a v2 file's bare-string source) -- the first writable promote
-                          * re-randomizes it, while a real v3/v4 loaded source id is left untouched */
+    tp_id128 id;         /* persistent structural ID */
     tp_source_kind kind; /* folder (default) / file */
     char *path;          /* folder/file path, project-relative, '/'-normalized */
 } tp_project_source;
@@ -181,9 +145,7 @@ typedef struct tp_project_source {
  * sparse per-sprite overrides + animations + export targets. All arrays are
  * malloc-owned dynamic vectors; use the helpers below to mutate them. */
 typedef struct tp_project_atlas {
-    tp_id128 id;       /* persistent structural ID (schema v2); nil until assigned/promoted */
-    bool id_synthetic; /* TRANSIENT (never serialized): the loader synthesized this id for a
-                        * legacy gap -- the first writable promote re-randomizes it (§5.5, decision 0007) */
+    tp_id128 id;       /* persistent structural ID; fresh private entities start nil */
     char *name;
 
     /* Packing knobs -- mirror tp_pack_settings; seeded by tp_pack_settings
@@ -199,7 +161,7 @@ typedef struct tp_project_atlas {
     bool power_of_two;
     float pixels_per_unit;
 
-    tp_project_source *sources; /* tagged source records (schema v3) */
+    tp_project_source *sources; /* tagged source records */
     int source_count;
     int source_cap;
 
@@ -221,7 +183,6 @@ typedef struct tp_project_atlas {
  * the resolution base of stable live source spellings; Save As can update the
  * former without retargeting sources or rewriting history-owned records. */
 typedef struct tp_project {
-    int schema_version;
     char *project_dir; /* absolute; NULL if never saved */
     char *source_base_dir; /* absolute; NULL until relative sources acquire a base */
     tp_project_atlas *atlases;
@@ -266,7 +227,7 @@ bool tp_project_atlas_has_source_path(const tp_project_atlas *a, const char *pat
  * applies) so "out\x" and "out/x" resolve to one file and DO collide. An empty/NULL
  * `out_path` never "collides" (that is the separate empty-out_path check) -> false.
  * `self` is the caller's own target (excluded by POINTER identity, so this is robust
- * even when target ids are nil -- unpromoted / RNG-fault sessions); a NULL `self`
+ * even when target ids are nil in an unpublished private candidate); a NULL `self`
  * excludes nothing. The shared source of truth for the duplicate check both frontends
  * surface (validate + the GUI target panel). NULL p -> false. */
 bool tp_project_out_path_shared(const tp_project *p, const char *out_path, const tp_project_target *self);
@@ -291,7 +252,7 @@ tp_status tp_project_target_defaults(const tp_project *p, tp_id128 atlas_id,
 /* --- load / save --- */
 
 /* Parses `path` into a new project (*out). project_dir is set to path's absolute
- * directory. Errors: TP_STATUS_BAD_VERSION (newer schema), TP_STATUS_BAD_PROJECT
+ * directory. Errors: TP_STATUS_BAD_VERSION (non-v5 schema), TP_STATUS_BAD_PROJECT
  * (open/parse/type error). On any error *out is set to NULL and `err` is filled. */
 tp_status tp_project_load(const char *path, tp_project **out, tp_error *err);
 
@@ -305,12 +266,16 @@ tp_status tp_project_load_with_fingerprint(const char *path, tp_project **out, t
 /* Writes `p` deterministically to `path` (see the serialization contract above),
  * updating p->project_dir to path's absolute directory. Source path normalization
  * is staged for output; live source spellings and source_base_dir remain stable.
- * file-save = relativize + tp_project_save_buffer + fwrite. */
+ * Publication is sibling-temp + file sync + atomic replace/create + parent sync.
+ * TP_STATUS_FILE_DURABILITY_UNCERTAIN is a post-publication outcome: the new file
+ * and staged project directory are authoritative, so callers must surface a
+ * warning and must not retry as though no write occurred. */
 tp_status tp_project_save(tp_project *p, const char *path, tp_error *err);
 
 /* Like tp_project_save, additionally returning the fingerprint of the exact
- * serialized buffer successfully written and atomically promoted to `path`.
- * `out_fingerprint` is optional and is cleared on failure. */
+ * serialized buffer atomically promoted to `path`. `out_fingerprint` is optional
+ * and is cleared on pre-publication failure; it remains populated for
+ * TP_STATUS_FILE_DURABILITY_UNCERTAIN because those bytes were published. */
 tp_status tp_project_save_with_fingerprint(tp_project *p, const char *path, tp_id128 *out_fingerprint,
                                            tp_error *err);
 

@@ -41,9 +41,11 @@ tp_journal_io tp_journal_io_file_adopt_fd_read(int native_fd);
 #define TP_JRN_REC_TXN 1      /* payload rec_type: committed transaction */
 #define TP_JRN_REC_CKPT 2     /* payload rec_type: checkpoint (state + retained id set) */
 #define TP_JRN_REC_META 3     /* payload rec_type: project metadata {timestamp, path, name} (R5) */
+#define TP_JRN_REC_HISTORY 4  /* payload rec_type: compact Undo/Redo transition */
 #define TP_JRN_TXN_FIXED 41   /* TXN payload fixed prefix: type(1) + tx_id(32) + revision(8) */
 #define TP_JRN_CKPT_FIXED 13  /* CKPT payload fixed prefix: type(1) + revision(8) + id_count(4) */
 #define TP_JRN_META_FIXED 13  /* META payload fixed prefix: type(1) + timestamp(8) + path_len(4) */
+#define TP_JRN_HISTORY_FIXED 9 /* HISTORY fixed prefix: type(1) + revision(8) */
 
 /* The 8 magic bytes "NTPKJRNL" -- brace-init (NUL-free) so it is exactly 8 bytes. */
 extern const uint8_t tp_jrn_magic[TP_JRN_MAGIC_LEN];
@@ -99,6 +101,12 @@ tp_status tp_journal__check_checkpoint_append_bytes(const tp_journal *j,
 tp_status tp_journal__check_checkpoint_compact_bytes(const tp_journal *j,
                                                       size_t snapshot_bytes,
                                                       tp_error *err);
+/* Exact compact-HISTORY frame admission. The history layer calls this after
+ * its count-only codec pass and before staging a candidate project. */
+tp_status tp_journal__check_history_append_bytes(const tp_journal *j,
+                                                 size_t transition_bytes,
+                                                 size_t replay_operations,
+                                                 tp_error *err);
 tp_status tp_journal__set_replay_operations(tp_journal *j, size_t count,
                                             tp_error *err);
 
@@ -113,6 +121,10 @@ tp_status tp_journal_append_txn_counted(tp_journal *j, const char *id_hex,
 tp_status tp_journal_append_txn(tp_journal *j, const char *id_hex,
                                 int64_t revision, const uint8_t *fixture_payload,
                                 size_t len, tp_error *err);
+tp_status tp_journal_append_history_counted(tp_journal *j, int64_t revision,
+                                            const uint8_t *payload, size_t len,
+                                            size_t replay_operations,
+                                            tp_error *err);
 
 /* Test-only direct probe for the corruption resync scanner. Returns the same
  * conservative "valid record or budget exhausted" decision as production and
@@ -167,6 +179,16 @@ void tp_journal_io_memory__short_next_write(tp_journal_io io, int64_t n);
 /* Make the next truncate() call fail (return -1). Proves the poison-on-truncate-
  * failure path. */
 void tp_journal_io_memory__fail_next_truncate(tp_journal_io io);
+
+/* Make the next durability barrier fail. The record bytes may have reached the
+ * backing store, but they are never acknowledged; write_record rolls back its
+ * append and poisons the authority. */
+void tp_journal_io_memory__fail_next_sync(tp_journal_io io);
+
+/* Number of durability-barrier calls observed by the memory backend. This lets
+ * the fault suite prove a failed append also attempts to durably confirm its
+ * successful rollback. */
+size_t tp_journal_io_memory__sync_count(tp_journal_io io);
 
 /* Overwrite one byte of the backing store in place (flip a byte / corrupt a record
  * for the checksum-mismatch test). No-op if `at` is out of range. */

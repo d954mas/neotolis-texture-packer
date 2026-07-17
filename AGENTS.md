@@ -3,11 +3,11 @@
 ## Repository Role
 
 Standalone texture/atlas packer built on neotolis-engine. The current baseline
-has one shared packing/export core and two shipped clients: the CLI and native
-GUI app (engine `nt_ui`). The target architecture adds one typed
-operation/session layer for capability-equivalent GUI, CLI, MCP, and Dev API
-clients, plus stable structural IDs, tagged sources, a unified format registry,
-and canonical Import/Export IRs.
+has one shared packing/export core, typed operation/session ownership, stable
+structural IDs, canonical-v5 tagged sources, semantic history/recovery, and two
+thin shipped clients: the CLI and native GUI app (engine `nt_ui`). Target work
+adds canonical Import/Export IRs, the unified format registry, and
+capability-equivalent MCP and Dev API clients.
 
 `docs/ntpacker-master-spec.md` is the normative product and architecture source.
 `docs/ROADMAP.md` and `docs/plans/master-spec-implementation-plan.md` are
@@ -41,8 +41,9 @@ work itself. Create a new role only when the catalog has no fitting role.
 
 - `external/neotolis-engine/` — engine submodule. **Read-only for agents.**
 - `packer/` — the current shared project/packing/export core
-  (`tp_core`/`tp_build`). Target operation/session, import, source-runtime,
-  format-registry, and canonical-IR modules also belong here as they land. No
+  (`tp_core`/`tp_build`). Operation/session/history/recovery already live here;
+  target import, source-runtime, format-registry, and canonical-IR modules also
+  belong here as they land. No
   UI, transport, or CLI parsing here.
 - `apps/cli/` — `ntpacker` file-oriented CLI frontend. `apps/gui/` — native
   GUI frontend. Live headless sessions belong to `ntpacker mcp`, not ordinary

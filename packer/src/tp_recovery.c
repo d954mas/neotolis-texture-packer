@@ -14,6 +14,7 @@
 #include "tp_core/tp_session.h"
 #include "tp_core/tp_project_lease.h"
 #include "tp_core/tp_transaction.h"
+#include "tp_fs_internal.h"
 #include "tp_journal_internal.h"
 #include "tp_model_seam.h"
 #include "tp_recovery_internal.h"
@@ -25,7 +26,6 @@
 #include <io.h>
 #include <windows.h>
 #else
-#include <dirent.h>
 #include <fcntl.h>
 #include <sys/file.h>
 #include <sys/stat.h>
@@ -190,67 +190,43 @@ static tp_status lock_path_for(const tp_recovery_store *store, const char *journ
     }
     return TP_STATUS_OK;
 }
+
+/* Recovery intentionally visits every directory entry, not only regular files:
+ * a directory/reparse node with an .ntpjournal suffix must surface as a
+ * structured unreadable-candidate diagnostic instead of disappearing. */
+static bool recovery_visit_journals_utf8(const char *dir,
+                                         tp_scan_name_visitor visit, void *ctx) {
+    if (!dir || dir[0] == '\0' || !visit) {
+        return false;
+    }
+    tp_fs_dir *stream = tp_fs_dir_open(dir);
+    if (!stream) {
+        return false;
+    }
+    tp_fs_dir_entry entry;
+    tp_fs_dir_result next;
+    while ((next = tp_fs_dir_next(stream, &entry)) == TP_FS_DIR_ENTRY) {
+        const uint64_t size = entry.info.kind == TP_FS_KIND_REGULAR ? entry.info.size : 0U;
+        if (!visit(ctx, entry.name, size)) {
+            tp_fs_dir_close(stream);
+            return true;
+        }
+    }
+    tp_fs_dir_close(stream);
+    return next == TP_FS_DIR_END;
+}
 // #endregion
 
 #ifdef _WIN32
 // #region OS file backend win32
-static bool utf8_to_wide(const char *path, WCHAR *wide, size_t cap) {
-    return MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide,
-                               (int)cap) != 0;
-}
-
 static bool recovery_root_is_dir(const char *path) {
-    WCHAR wide[TP_IDENTITY_PATH_MAX];
-    if (!utf8_to_wide(path, wide, TP_IDENTITY_PATH_MAX)) {
-        return false;
-    }
-    const DWORD attributes = GetFileAttributesW(wide);
-    return attributes != INVALID_FILE_ATTRIBUTES &&
-           (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0U &&
-           (attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0U;
+    tp_fs_info info;
+    return tp_fs_stat(path, &info) && info.kind == TP_FS_KIND_DIRECTORY && !info.reparse;
 }
 
 static bool recovery_visit_journals(const char *dir,
-                                    tp_scan_name_visitor visit, void *ctx) {
-    WCHAR pattern[TP_IDENTITY_PATH_MAX + 3U];
-    if (!utf8_to_wide(dir, pattern, TP_IDENTITY_PATH_MAX)) {
-        return false;
-    }
-    const size_t dir_len = wcslen(pattern);
-    if (dir_len + 3U > sizeof pattern / sizeof pattern[0]) {
-        return false;
-    }
-    pattern[dir_len] = L'\\';
-    pattern[dir_len + 1U] = L'*';
-    pattern[dir_len + 2U] = L'\0';
-
-    WIN32_FIND_DATAW found;
-    HANDLE search = FindFirstFileW(pattern, &found);
-    if (search == INVALID_HANDLE_VALUE) {
-        return false;
-    }
-    do {
-        if (wcscmp(found.cFileName, L".") == 0 ||
-            wcscmp(found.cFileName, L"..") == 0) {
-            continue;
-        }
-        const uint64_t size = ((uint64_t)found.nFileSizeHigh << 32U) |
-                              (uint64_t)found.nFileSizeLow;
-        char name[TP_IDENTITY_PATH_MAX];
-        if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
-                                found.cFileName, -1, name,
-                                (int)sizeof name, NULL, NULL) == 0) {
-            if (!visit(ctx, "?", size)) {
-                break;
-            }
-            continue;
-        }
-        if (!visit(ctx, name, size)) {
-            break;
-        }
-    } while (FindNextFileW(search, &found));
-    (void)FindClose(search);
-    return true;
+                                     tp_scan_name_visitor visit, void *ctx) {
+    return recovery_visit_journals_utf8(dir, visit, ctx);
 }
 
 static bool handle_is_regular_nofollow(HANDLE handle) {
@@ -263,14 +239,15 @@ static bool handle_is_regular_nofollow(HANDLE handle) {
 static tp_journal_io journal_read_nofollow(const char *path) {
     tp_journal_io io;
     memset(&io, 0, sizeof io);
-    WCHAR wide[TP_IDENTITY_PATH_MAX];
-    if (!utf8_to_wide(path, wide, TP_IDENTITY_PATH_MAX)) {
+    WCHAR *wide = tp_fs_win32_path_alloc(path);
+    if (!wide) {
         return io;
     }
     HANDLE handle = CreateFileW(wide, GENERIC_READ,
                                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                                 NULL, OPEN_EXISTING,
                                 FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    free(wide);
     if (handle == INVALID_HANDLE_VALUE) {
         return io;
     }
@@ -291,8 +268,8 @@ static tp_journal_io live_io_create_new(tp_recovery_live *live,
     tp_journal_io io;
     memset(&io, 0, sizeof io);
     *status_out = TP_STATUS_JOURNAL_FAILED;
-    WCHAR wide[TP_IDENTITY_PATH_MAX];
-    if (!utf8_to_wide(live->journal_path, wide, TP_IDENTITY_PATH_MAX)) {
+    WCHAR *wide = tp_fs_win32_path_alloc(live->journal_path);
+    if (!wide) {
         (void)tp_error_set(err, TP_STATUS_JOURNAL_FAILED,
                            "recovery live journal path conversion failed");
         return io;
@@ -301,8 +278,10 @@ static tp_journal_io live_io_create_new(tp_recovery_live *live,
                                 FILE_SHARE_READ, NULL, CREATE_NEW,
                                 FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
                                 NULL);
+    const DWORD open_code = handle == INVALID_HANDLE_VALUE ? GetLastError() : ERROR_SUCCESS;
+    free(wide);
     if (handle == INVALID_HANDLE_VALUE) {
-        const DWORD code = GetLastError();
+        const DWORD code = open_code;
         if (code == ERROR_FILE_EXISTS || code == ERROR_ALREADY_EXISTS) {
             *status_out = TP_STATUS_RECOVERY_BUSY;
             (void)tp_error_set(err, TP_STATUS_RECOVERY_BUSY,
@@ -352,8 +331,8 @@ static tp_status live_delete_pin(tp_recovery_live *live, tp_error *err) {
         return tp_error_set(err, TP_STATUS_RECOVERY_CLEANUP_FAILED,
                             "recovery live journal pin is unavailable");
     }
-    WCHAR wide[TP_IDENTITY_PATH_MAX];
-    if (!utf8_to_wide(live->journal_path, wide, TP_IDENTITY_PATH_MAX)) {
+    WCHAR *wide = tp_fs_win32_path_alloc(live->journal_path);
+    if (!wide) {
         return tp_error_set(err, TP_STATUS_RECOVERY_CLEANUP_FAILED,
                             "recovery live journal path conversion failed");
     }
@@ -361,10 +340,12 @@ static tp_status live_delete_pin(tp_recovery_live *live, tp_error *err) {
                                 NULL, OPEN_EXISTING,
                                 FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
                                 NULL);
+    const DWORD open_code = handle == INVALID_HANDLE_VALUE ? GetLastError() : ERROR_SUCCESS;
+    free(wide);
     if (handle == INVALID_HANDLE_VALUE) {
         return tp_error_set(err, TP_STATUS_RECOVERY_CLEANUP_FAILED,
                             "recovery live journal could not be pinned for deletion (error %lu)",
-                            (unsigned long)GetLastError());
+                            (unsigned long)open_code);
     }
     BY_HANDLE_FILE_INFORMATION info;
     if (!handle_is_regular_nofollow(handle) ||
@@ -391,16 +372,18 @@ static tp_status live_delete_pin(tp_recovery_live *live, tp_error *err) {
 }
 
 static tp_status lock_open(recovery_lock *lock, tp_error *err) {
-    WCHAR wide[TP_RECOVERY_LOCK_PATH_MAX];
-    if (!utf8_to_wide(lock->lock_path, wide, TP_RECOVERY_LOCK_PATH_MAX)) {
+    WCHAR *wide = tp_fs_win32_path_alloc(lock->lock_path);
+    if (!wide) {
         return tp_error_set(err, TP_STATUS_RECOVERY_CLAIM_FAILED,
                             "recovery claim lock path conversion failed");
     }
     HANDLE handle = CreateFileW(wide, GENERIC_READ | GENERIC_WRITE, 0, NULL,
                                 OPEN_ALWAYS,
                                 FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    const DWORD open_code = handle == INVALID_HANDLE_VALUE ? GetLastError() : ERROR_SUCCESS;
+    free(wide);
     if (handle == INVALID_HANDLE_VALUE) {
-        const DWORD code = GetLastError();
+        const DWORD code = open_code;
         if (code == ERROR_SHARING_VIOLATION || code == ERROR_LOCK_VIOLATION) {
             return tp_error_set(err, TP_STATUS_RECOVERY_BUSY,
                                 "recovery journal is claimed by another process");
@@ -426,15 +409,17 @@ static void lock_release(recovery_lock *lock) {
 }
 
 static bool lock_is_unowned(const char *lock_path) {
-    WCHAR wide[TP_RECOVERY_LOCK_PATH_MAX];
-    if (!utf8_to_wide(lock_path, wide, TP_RECOVERY_LOCK_PATH_MAX)) {
+    WCHAR *wide = tp_fs_win32_path_alloc(lock_path);
+    if (!wide) {
         return false;
     }
     HANDLE handle = CreateFileW(wide, GENERIC_READ | GENERIC_WRITE, 0, NULL,
                                 OPEN_EXISTING,
                                 FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    const DWORD open_code = handle == INVALID_HANDLE_VALUE ? GetLastError() : ERROR_SUCCESS;
+    free(wide);
     if (handle == INVALID_HANDLE_VALUE) {
-        const DWORD code = GetLastError();
+        const DWORD code = open_code;
         return code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND;
     }
     const bool unowned = handle_is_regular_nofollow(handle);
@@ -448,8 +433,8 @@ static tp_journal_io candidate_pin(tp_recovery_owned_candidate *candidate,
     tp_journal_io io;
     memset(&io, 0, sizeof io);
     *status_out = TP_STATUS_BAD_PROJECT;
-    WCHAR wide[TP_IDENTITY_PATH_MAX];
-    if (!utf8_to_wide(path, wide, TP_IDENTITY_PATH_MAX)) {
+    WCHAR *wide = tp_fs_win32_path_alloc(path);
+    if (!wide) {
         (void)tp_error_set(err, TP_STATUS_BAD_PROJECT,
                            "recovery journal path conversion failed");
         return io;
@@ -458,10 +443,12 @@ static tp_journal_io candidate_pin(tp_recovery_owned_candidate *candidate,
                                 NULL, OPEN_EXISTING,
                                 FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
                                 NULL);
+    const DWORD open_code = handle == INVALID_HANDLE_VALUE ? GetLastError() : ERROR_SUCCESS;
+    free(wide);
     if (handle == INVALID_HANDLE_VALUE) {
         (void)tp_error_set(err, TP_STATUS_BAD_PROJECT,
                            "recovery journal could not be pinned (error %lu)",
-                           (unsigned long)GetLastError());
+                           (unsigned long)open_code);
         return io;
     }
     BY_HANDLE_FILE_INFORMATION info;
@@ -532,39 +519,13 @@ static tp_status candidate_delete_pin(tp_recovery_owned_candidate *candidate,
 #else
 // #region OS file backend posix
 static bool recovery_root_is_dir(const char *path) {
-    return tp_scan_is_dir(path);
+    tp_fs_info info;
+    return tp_fs_stat(path, &info) && info.kind == TP_FS_KIND_DIRECTORY && !info.reparse;
 }
 
 static bool recovery_visit_journals(const char *dir,
-                                    tp_scan_name_visitor visit, void *ctx) {
-    if (!dir || dir[0] == '\0' || !visit) {
-        return false;
-    }
-    DIR *directory = opendir(dir);
-    if (!directory) {
-        return false;
-    }
-    struct dirent *entry = NULL;
-    while ((entry = readdir(directory)) != NULL) {
-        const char *name = entry->d_name;
-        if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
-            continue;
-        }
-        uint64_t size = 0U;
-        char path[TP_IDENTITY_PATH_MAX];
-        const int written = snprintf(path, sizeof path, "%s/%s", dir, name);
-        if (written > 0 && (size_t)written < sizeof path) {
-            struct stat info;
-            if (lstat(path, &info) == 0 && info.st_size > 0) {
-                size = (uint64_t)info.st_size;
-            }
-        }
-        if (!visit(ctx, name, size)) {
-            break;
-        }
-    }
-    (void)closedir(directory);
-    return true;
+                                     tp_scan_name_visitor visit, void *ctx) {
+    return recovery_visit_journals_utf8(dir, visit, ctx);
 }
 
 static int rename_exclusive(const char *from, const char *to) {
@@ -1995,11 +1956,8 @@ static tp_status recovery_resolve_store(
         }
         if (status == TP_STATUS_OK && s_test_fail_next_resolve_verify) {
             s_test_fail_next_resolve_verify = false;
-            FILE *invalid = fopen(receipt.target_path, "wb");
-            if (invalid) {
-                (void)fputs("injected invalid project", invalid);
-                (void)fclose(invalid);
-            }
+            static const char invalid_project[] = "injected invalid project";
+            (void)tp_fs_write_file(receipt.target_path, invalid_project, sizeof invalid_project - 1U);
         }
         if (status == TP_STATUS_OK) {
             status = tp_recovery_resolution_finalize(resolution, &receipt, err);

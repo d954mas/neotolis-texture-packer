@@ -6,12 +6,14 @@
 #include "unity.h"
 
 #include "tp_core/tp_validate.h"
+#include "tp_core/tp_identity.h"
 #include "tp_core/tp_project.h"
 #include "tp_project_mutation_internal.h"
-#include "tp_core/tp_project_migrate.h"
+#include "tp_project_identity_internal.h"
 #include "tp_core/tp_scan.h"
 #include "tp_core/tp_session.h"
 #include "tp_validate_internal.h"
+#include "../src/tp_fs_internal.h"
 
 #ifndef TP_CLI_TESTDATA_DIR
 #error "TP_CLI_TESTDATA_DIR is required"
@@ -69,41 +71,160 @@ void test_problem_file_report_is_exact_and_stably_ordered(void) {
     TEST_ASSERT_EQUAL_STRING("source 'does_not_exist' does not exist on disk",
                              report.findings[0].message);
     TEST_ASSERT_EQUAL_STRING("problems", report.findings[0].atlas);
+    TEST_ASSERT_EQUAL_STRING("does_not_exist", report.findings[0].source);
     TEST_ASSERT_EQUAL_STRING("", report.findings[0].sprite);
     TEST_ASSERT_EQUAL_STRING("", report.findings[0].anim);
     TEST_ASSERT_EQUAL_STRING("", report.findings[0].frame);
     TEST_ASSERT_EQUAL_STRING("", report.findings[0].target);
+    tp_id_kind id_kind = TP_ID_KIND_INVALID;
+    tp_id128 expected_id = tp_id128_nil();
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_id_parse("atlas_00000000000000000000000000000701",
+                    &id_kind, &expected_id, NULL));
+    TEST_ASSERT_EQUAL_INT(TP_ID_KIND_ATLAS, id_kind);
+    TEST_ASSERT_TRUE(tp_id128_eq(expected_id, report.findings[0].atlas_id));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_id_parse("source_00000000000000000000000000000704",
+                    &id_kind, &expected_id, NULL));
+    TEST_ASSERT_EQUAL_INT(TP_ID_KIND_SOURCE, id_kind);
+    TEST_ASSERT_TRUE(tp_id128_eq(expected_id, report.findings[0].source_id));
 
     TEST_ASSERT_EQUAL_INT(TP_VALIDATION_ERROR, report.findings[1].severity);
     TEST_ASSERT_EQUAL_STRING(TP_VALIDATION_CODE_DANGLING_ANIM_FRAME, report.findings[1].code);
     TEST_ASSERT_EQUAL_STRING(
-        "animation 'run' references frame 'ghost' which matches no sprite export key",
+        "animation 'run' references frame 'ghost' which matches no canonical sprite",
         report.findings[1].message);
     TEST_ASSERT_EQUAL_STRING("problems", report.findings[1].atlas);
+    TEST_ASSERT_EQUAL_STRING("", report.findings[1].source);
     TEST_ASSERT_EQUAL_STRING("", report.findings[1].sprite);
     TEST_ASSERT_EQUAL_STRING("run", report.findings[1].anim);
     TEST_ASSERT_EQUAL_STRING("ghost", report.findings[1].frame);
     TEST_ASSERT_EQUAL_STRING("", report.findings[1].target);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_id_parse("anim_00000000000000000000000000000702",
+                    &id_kind, &expected_id, NULL));
+    TEST_ASSERT_EQUAL_INT(TP_ID_KIND_ANIM, id_kind);
+    TEST_ASSERT_TRUE(
+        tp_id128_eq(expected_id, report.findings[1].animation_id));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_id_parse("source_00000000000000000000000000000703",
+                    &id_kind, &expected_id, NULL));
+    TEST_ASSERT_EQUAL_INT(TP_ID_KIND_SOURCE, id_kind);
+    TEST_ASSERT_TRUE(tp_id128_eq(expected_id, report.findings[1].source_id));
     tp_validation_report_free(&report);
+}
+
+void test_long_shared_prefix_atlas_contexts_remain_exact_and_distinct(void) {
+    char first[384];
+    char second[384];
+    char first_source[384];
+    char second_source[384];
+    memset(first, 'a', sizeof first);
+    memset(second, 'a', sizeof second);
+    memset(first_source, 's', sizeof first_source);
+    memset(second_source, 's', sizeof second_source);
+    first[sizeof first - 2U] = 'x';
+    second[sizeof second - 2U] = 'y';
+    first[sizeof first - 1U] = '\0';
+    second[sizeof second - 1U] = '\0';
+    first_source[sizeof first_source - 2U] = 'x';
+    second_source[sizeof second_source - 2U] = 'y';
+    first_source[sizeof first_source - 1U] = '\0';
+    second_source[sizeof second_source - 1U] = '\0';
+    const char *path =
+        TP_VALIDATE_TEST_DIR "/long-finding-context.ntpacker_project";
+
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_set_atlas_name(&project->atlases[0], first));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_add_atlas(project, second, NULL));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_source(&project->atlases[0], first_source));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_source(&project->atlases[1], second_source));
+    tp_rng rng = tp_rng_os();
+    tp_error error = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK, tp_project_assign_missing_ids(project, &rng, &error),
+        error.msg);
+    const tp_id128 first_id = project->atlases[0].id;
+    const tp_id128 second_id = project->atlases[1].id;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK, tp_project_save(project, path, &error), error.msg);
+    tp_project_destroy(project);
+
+    tp_validation_report report = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK, tp_validate_project_file(path, &report, &error),
+        error.msg);
+    const tp_validation_finding *first_empty = NULL;
+    const tp_validation_finding *second_empty = NULL;
+    const tp_validation_finding *first_missing = NULL;
+    const tp_validation_finding *second_missing = NULL;
+    for (size_t i = 0U; i < report.finding_count; ++i) {
+        const tp_validation_finding *finding = &report.findings[i];
+        if (strcmp(finding->code, TP_VALIDATION_CODE_EMPTY_ATLAS) == 0) {
+            if (strcmp(finding->atlas, first) == 0) {
+                first_empty = finding;
+            } else if (strcmp(finding->atlas, second) == 0) {
+                second_empty = finding;
+            }
+        } else if (strcmp(finding->code,
+                          TP_VALIDATION_CODE_MISSING_SOURCE) == 0) {
+            if (strcmp(finding->source, first_source) == 0) {
+                first_missing = finding;
+            } else if (strcmp(finding->source, second_source) == 0) {
+                second_missing = finding;
+            }
+        }
+    }
+    TEST_ASSERT_NOT_NULL(first_empty);
+    TEST_ASSERT_NOT_NULL(second_empty);
+    TEST_ASSERT_NOT_EQUAL(0, strcmp(first_empty->atlas, second_empty->atlas));
+    TEST_ASSERT_TRUE(tp_id128_eq(first_id, first_empty->atlas_id));
+    TEST_ASSERT_TRUE(tp_id128_eq(second_id, second_empty->atlas_id));
+    TEST_ASSERT_NOT_NULL(first_missing);
+    TEST_ASSERT_NOT_NULL(second_missing);
+    TEST_ASSERT_GREATER_THAN_size_t(256U, strlen(first_missing->message));
+    TEST_ASSERT_NOT_EQUAL(0,
+                          strcmp(first_missing->message,
+                                 second_missing->message));
+
+    tp_validation_report_free(&report);
+    TEST_ASSERT_EQUAL_INT(0, remove(path));
 }
 
 static void write_many_empty_atlases(const char *path, size_t count) {
     FILE *f = fopen(path, "wb");
     TEST_ASSERT_NOT_NULL(f);
-    TEST_ASSERT_TRUE(fputs("{\"version\":1,\"atlases\":[", f) >= 0);
+    TEST_ASSERT_TRUE(fputs("{\"version\":5,\"atlases\":[", f) >= 0);
     for (size_t i = 0; i < count; i++) {
-        TEST_ASSERT_TRUE(fprintf(f, "%s{\"name\":\"atlas_%zu\",\"max_size\":0}", i == 0U ? "" : ",", i) > 0);
+        TEST_ASSERT_TRUE(
+            fprintf(f,
+                    "%s{\"id\":\"atlas_%032llx\","
+                    "\"name\":\"atlas_%zu\",\"max_size\":0}",
+                    i == 0U ? "" : ",", (unsigned long long)(i + 1U),
+                    i) > 0);
     }
     TEST_ASSERT_TRUE(fputs("]}\n", f) >= 0);
     TEST_ASSERT_EQUAL_INT(0, fclose(f));
 }
 
-static void write_v3_sources(const char *path, const char *first,
-                             const char *second) {
+static void write_canonical_sources(const char *path, const char *first,
+                                    const char *second) {
     FILE *f = fopen(path, "wb");
     TEST_ASSERT_NOT_NULL(f);
     TEST_ASSERT_TRUE(fputs(
-        "{\"version\":3,\"atlases\":[{"
+        "{\"version\":5,\"atlases\":[{"
         "\"id\":\"atlas_00000000000000000000000000000001\","
         "\"name\":\"source-keys\",\"sources\":[{"
         "\"id\":\"source_00000000000000000000000000000010\","
@@ -155,17 +276,14 @@ void test_canonical_animation_frame_does_not_match_same_key_in_other_source(void
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_project_atlas_add_animation(atlas, "walk",
                                                          &animation));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_project_anim_add_frame(animation, "shared"));
     tp_rng rng = tp_rng_os();
     tp_error error = {{0}};
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_project_promote_ids(project, &rng, &error));
-    animation->frames[0].source_ref = atlas->sources[0].id;
-    const char *key = "shared.png";
-    animation->frames[0].src_key = malloc(strlen(key) + 1U);
-    TEST_ASSERT_NOT_NULL(animation->frames[0].src_key);
-    memcpy(animation->frames[0].src_key, key, strlen(key) + 1U);
+                          tp_project_assign_missing_ids(project, &rng, &error));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_anim_add_frame(animation, atlas->sources[0].id,
+                                  "shared.png"));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_project_save(project, project_path, &error));
     tp_project_destroy(project);
@@ -181,7 +299,7 @@ void test_canonical_animation_frame_does_not_match_same_key_in_other_source(void
     TEST_ASSERT_EQUAL_INT(0, remove(project_path));
 }
 
-void test_persisted_canonical_keys_report_invalid_normalization_before_dangling(void) {
+void test_save_rejects_invalid_canonical_key_normalization(void) {
     char source_dir[512];
     char project_path[640];
     (void)snprintf(source_dir, sizeof source_dir, "%s/invalid-canonical-keys",
@@ -196,49 +314,43 @@ void test_persisted_canonical_keys_report_invalid_normalization_before_dangling(
     tp_project_atlas *atlas = &project->atlases[0];
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_project_atlas_add_source(atlas, source_dir));
-    tp_project_sprite *sprite = NULL;
+    tp_rng rng = tp_rng_os();
+    tp_error error = {{0}};
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_project_atlas_add_pending_sprite(atlas, "bad",
-                                                              &sprite));
+                          tp_project_assign_missing_ids(project, &rng, &error));
+    const tp_id128 source_id = atlas->sources[0].id;
+    tp_project_sprite *sprite = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_sprite_by_source_key(
+            atlas, source_id, "bad.png", &sprite));
     tp_project_anim *animation = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_project_atlas_add_animation(atlas, "walk",
                                                          &animation));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_project_anim_add_frame(animation, "hero"));
-    tp_rng rng = tp_rng_os();
-    tp_error error = {{0}};
+                          tp_project_anim_add_frame(animation, source_id,
+                                                    "dir/hero.png"));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_project_promote_ids(project, &rng, &error));
-    const tp_id128 source_id = atlas->sources[0].id;
-    sprite->source_ref = source_id;
+                          tp_project_assign_missing_ids(project, &rng, &error));
     const char *bad_sprite_key = "../escape.png";
+    free(sprite->src_key);
     sprite->src_key = malloc(strlen(bad_sprite_key) + 1U);
     TEST_ASSERT_NOT_NULL(sprite->src_key);
     memcpy(sprite->src_key, bad_sprite_key, strlen(bad_sprite_key) + 1U);
-    animation->frames[0].source_ref = source_id;
+    free(animation->frames[0].src_key);
     const char *bad_frame_key = "dir//hero.png";
     animation->frames[0].src_key = malloc(strlen(bad_frame_key) + 1U);
     TEST_ASSERT_NOT_NULL(animation->frames[0].src_key);
     memcpy(animation->frames[0].src_key, bad_frame_key,
            strlen(bad_frame_key) + 1U);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_BAD_PROJECT,
                           tp_project_save(project, project_path, &error));
     tp_project_destroy(project);
-
-    tp_validation_report report = {0};
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_validate_project_file(project_path, &report,
-                                                   &error));
-    TEST_ASSERT_TRUE(report_has_code(&report,
-                                     TP_VALIDATION_CODE_INVALID_SPRITE_KEY));
-    TEST_ASSERT_TRUE(report_has_code(&report,
-                                     TP_VALIDATION_CODE_INVALID_FRAME_KEY));
-    tp_validation_report_free(&report);
-    TEST_ASSERT_EQUAL_INT(0, remove(project_path));
+    TEST_ASSERT_NOT_EQUAL(0, remove(project_path));
 }
 
-void test_oversized_source_fallback_never_truncates_distinct_paths(void) {
+void test_oversized_source_path_is_rejected(void) {
     char first[5002];
     char second[5002];
     memset(first, 'a', sizeof first - 2U);
@@ -248,22 +360,18 @@ void test_oversized_source_fallback_never_truncates_distinct_paths(void) {
     first[sizeof first - 1U] = '\0';
     second[sizeof second - 1U] = '\0';
     const char *path = TP_VALIDATE_TEST_DIR "/long-source-keys.ntpacker_project";
-    write_v3_sources(path, first, second);
+    write_canonical_sources(path, first, second);
 
     tp_validation_report report = {0};
     tp_error err = {0};
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_BAD_PROJECT,
                           tp_validate_project_file(path, &report, &err));
-    TEST_ASSERT_FALSE(report_has_code(&report,
-                                      TP_VALIDATION_CODE_DUPLICATE_SOURCE));
-    TEST_ASSERT_FALSE(report_has_code(&report,
-                                      TP_VALIDATION_CODE_SOURCE_COLLISION));
     tp_validation_report_free(&report);
     TEST_ASSERT_EQUAL_INT(0, remove(path));
 }
 
 void test_expanding_unicode_casefold_detects_full_length_collision(void) {
-    enum { REPEATS = 1400 };
+    enum { REPEATS = 1000 };
     char first[REPEATS * 2 + 1];
     char second[REPEATS * 3 + 1];
     for (int i = 0; i < REPEATS; ++i) {
@@ -276,7 +384,7 @@ void test_expanding_unicode_casefold_detects_full_length_collision(void) {
     first[sizeof first - 1U] = '\0';
     second[sizeof second - 1U] = '\0';
     const char *path = TP_VALIDATE_TEST_DIR "/fold-source-keys.ntpacker_project";
-    write_v3_sources(path, first, second);
+    write_canonical_sources(path, first, second);
 
     tp_validation_report report = {0};
     tp_error err = {0};
@@ -313,10 +421,15 @@ void test_large_report_is_bounded_and_ends_with_deterministic_summary(void) {
         "validation report truncated: omitted 2153 of 4200 findings (1077 errors, 1076 warnings); limits are 2048 findings and 4194304 bytes",
         summary->message);
     TEST_ASSERT_EQUAL_STRING("", summary->atlas);
+    TEST_ASSERT_EQUAL_STRING("", summary->source);
     TEST_ASSERT_EQUAL_STRING("", summary->sprite);
     TEST_ASSERT_EQUAL_STRING("", summary->anim);
     TEST_ASSERT_EQUAL_STRING("", summary->frame);
     TEST_ASSERT_EQUAL_STRING("", summary->target);
+    TEST_ASSERT_TRUE(tp_id128_is_nil(summary->atlas_id));
+    TEST_ASSERT_TRUE(tp_id128_is_nil(summary->source_id));
+    TEST_ASSERT_TRUE(tp_id128_is_nil(summary->animation_id));
+    TEST_ASSERT_TRUE(tp_id128_is_nil(summary->target_id));
 
     tp_validation_report_free(&report);
     TEST_ASSERT_EQUAL_INT(0, remove(path));
@@ -377,10 +490,30 @@ void test_target_row_diagnostics_reuse_full_validation_predicates(void) {
     tp_rng rng = tp_rng_os();
     tp_error err = {0};
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_project_promote_ids(project, &rng, &err));
+                          tp_project_assign_missing_ids(project, &rng, &err));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_project_save(project, path, &err));
+    const tp_id128 atlas_id = project->atlases[0].id;
+    const tp_id128 target_id = project->atlases[0].targets[1].id;
     tp_project_destroy(project);
+
+    tp_validation_report full_report = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_validate_project_file(path, &full_report, &err));
+    const tp_validation_finding *unknown_exporter = NULL;
+    for (size_t i = 0U; i < full_report.finding_count; ++i) {
+        if (strcmp(full_report.findings[i].code,
+                   TP_VALIDATION_CODE_UNKNOWN_EXPORTER) == 0) {
+            unknown_exporter = &full_report.findings[i];
+            break;
+        }
+    }
+    TEST_ASSERT_NOT_NULL(unknown_exporter);
+    TEST_ASSERT_TRUE(tp_id128_eq(atlas_id, unknown_exporter->atlas_id));
+    TEST_ASSERT_TRUE(tp_id128_eq(target_id, unknown_exporter->target_id));
+    TEST_ASSERT_EQUAL_STRING("missing-exporter", unknown_exporter->target);
+    tp_validation_report_free(&full_report);
 
     tp_session *session = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
@@ -408,18 +541,74 @@ void test_target_row_diagnostics_reuse_full_validation_predicates(void) {
     TEST_ASSERT_EQUAL_INT(0, remove(path));
 }
 
+void test_validation_does_not_misreport_existing_long_source_as_missing(void) {
+    char root[TP_IDENTITY_PATH_MAX];
+    char dir[TP_IDENTITY_PATH_MAX];
+    char image[TP_IDENTITY_PATH_MAX];
+    const char *project_path =
+        TP_VALIDATE_TEST_DIR "/long-existing-source.ntpacker_project";
+    (void)snprintf(root, sizeof root, "%s/long-existing-source",
+                   TP_VALIDATE_TEST_DIR);
+    (void)snprintf(dir, sizeof dir, "%s", root);
+    for (int i = 0; i < 24; ++i) {
+        char segment[64];
+        (void)snprintf(segment, sizeof segment,
+                       "/segment_%02d_abcdefghijklmnop", i);
+        size_t used = strlen(dir);
+        TEST_ASSERT_TRUE(used + strlen(segment) + 1U < sizeof dir);
+        memcpy(dir + used, segment, strlen(segment) + 1U);
+    }
+    (void)snprintf(image, sizeof image,
+                   "%s/\xD1\x81\xD0\xBF\xD1\x80\xD0\xB0\xD0\xB9\xD1\x82.png",
+                   dir);
+    TEST_ASSERT_GREATER_THAN_size_t(511U, strlen(image));
+    tp_mkdirs(dir);
+    FILE *file = tp_fs_fopen(image, "wb");
+    TEST_ASSERT_NOT_NULL(file);
+    TEST_ASSERT_TRUE(tp_fs_write_all(file, "X", 1U));
+    TEST_ASSERT_TRUE(tp_fs_close(file));
+
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_source(&project->atlases[0], dir));
+    tp_rng rng = tp_rng_os();
+    tp_error error = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK, tp_project_assign_missing_ids(project, &rng, &error),
+        error.msg);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK, tp_project_save(project, project_path, &error),
+        error.msg);
+    tp_project_destroy(project);
+
+    tp_validation_report report = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_validate_project_file(project_path, &report, &error), error.msg);
+    for (size_t i = 0; i < report.finding_count; ++i) {
+        TEST_ASSERT_NOT_EQUAL(
+            0, strcmp(report.findings[i].code,
+                      TP_VALIDATION_CODE_MISSING_SOURCE));
+    }
+    tp_validation_report_free(&report);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_clean_file_returns_owned_empty_report);
     RUN_TEST(test_problem_file_report_is_exact_and_stably_ordered);
+    RUN_TEST(test_long_shared_prefix_atlas_contexts_remain_exact_and_distinct);
     RUN_TEST(test_load_failure_leaves_report_freeable);
     RUN_TEST(test_findings_allocation_failure_cleans_partial_report);
     RUN_TEST(test_sprite_index_oom_fails_validation_and_cleans_report);
     RUN_TEST(test_large_report_is_bounded_and_ends_with_deterministic_summary);
-    RUN_TEST(test_oversized_source_fallback_never_truncates_distinct_paths);
+    RUN_TEST(test_oversized_source_path_is_rejected);
     RUN_TEST(test_expanding_unicode_casefold_detects_full_length_collision);
     RUN_TEST(test_canonical_animation_frame_does_not_match_same_key_in_other_source);
-    RUN_TEST(test_persisted_canonical_keys_report_invalid_normalization_before_dangling);
+    RUN_TEST(test_save_rejects_invalid_canonical_key_normalization);
     RUN_TEST(test_target_row_diagnostics_reuse_full_validation_predicates);
+    RUN_TEST(test_validation_does_not_misreport_existing_long_source_as_missing);
     return UNITY_END();
 }

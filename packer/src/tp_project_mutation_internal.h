@@ -28,27 +28,16 @@ tp_project_source *tp_project_atlas_find_source_by_id(tp_project_atlas *atlas,
 tp_status tp_project_atlas_remove_source_by_id(tp_project_atlas *atlas,
                                                 tp_id128 id);
 
-/* Sparse sprite overrides: canonical (source,key) and unresolved pending records. */
+/* Sparse sprite overrides: canonical (source,key) records only. */
 tp_project_sprite *tp_project_atlas_find_sprite_by_source_key(
     tp_project_atlas *atlas, tp_id128 source_ref, const char *src_key);
-tp_project_sprite *tp_project_atlas_find_pending_sprite(
-    tp_project_atlas *atlas, const char *name);
-tp_status tp_project_atlas_add_pending_sprite(tp_project_atlas *atlas,
-                                               const char *name,
-                                               tp_project_sprite **out);
 tp_status tp_project_atlas_add_sprite_by_source_key(
     tp_project_atlas *atlas, tp_id128 source_ref, const char *src_key,
     tp_project_sprite **out);
-tp_status tp_project_atlas_remove_pending_sprite(tp_project_atlas *atlas,
-                                                  const char *name);
 tp_status tp_project_atlas_remove_sprite_by_source_key(
     tp_project_atlas *atlas, tp_id128 source_ref, const char *src_key);
-tp_status tp_project_atlas_prune_pending_sprite(tp_project_atlas *atlas,
-                                                 const char *name);
 tp_status tp_project_atlas_prune_sprite_by_source_key(
     tp_project_atlas *atlas, tp_id128 source_ref, const char *src_key);
-tp_status tp_project_atlas_set_pending_sprite_rename(
-    tp_project_atlas *atlas, const char *sprite_name, const char *rename);
 tp_status tp_project_atlas_set_sprite_rename_by_source_key(
     tp_project_atlas *atlas, tp_id128 source_ref, const char *src_key,
     const char *rename);
@@ -62,7 +51,8 @@ tp_project_anim *tp_project_atlas_find_animation_by_id(
 tp_status tp_project_atlas_remove_animation_by_id(tp_project_atlas *atlas,
                                                    tp_id128 id);
 tp_status tp_project_anim_add_frame(tp_project_anim *animation,
-                                    const char *frame_name);
+                                    tp_id128 source_ref,
+                                    const char *src_key);
 tp_status tp_project_anim_remove_frame(tp_project_anim *animation, int index);
 tp_status tp_project_anim_move_frame(tp_project_anim *animation, int index,
                                      int delta);

@@ -6,7 +6,6 @@
 #ifdef _WIN32
 #include <windows.h>
 #else
-#include <sys/stat.h>
 #include <time.h>
 #endif
 
@@ -18,7 +17,9 @@
 #include "tp_core/tp_job.h"
 #include "tp_core/tp_input.h"
 #include "tp_core/tp_names.h"
+#include "tp_core/tp_scan.h"
 
+#include "gui_paths.h"
 #include "gui_project.h"
 
 // #region state
@@ -43,7 +44,8 @@ typedef struct {
 
 static pack_slot s_slots[GUI_PACK_MAX_ATLASES];
 static uint64_t s_next_result_version;
-static char s_work_dir[1024];
+static char s_work_dir[TP_IDENTITY_PATH_MAX];
+static bool s_work_dir_ready;
 
 /* Export-target preview (EXP-PREVIEW): ONE arena-owned result, separate from the session slots. Keyed
  * by stable atlas id so a structural edit cannot bind it to a different atlas.
@@ -56,7 +58,7 @@ typedef struct {
     tp_session_input_token input_token;
     bool valid;
     int atlas_index; /* atlas this preview belongs to (-1 = none) */
-    char exporter_id[64];
+    char exporter_id[TP_EXPORTER_ID_MAX];
 } preview_slot;
 static preview_slot s_preview = {.atlas_index = -1};
 
@@ -250,13 +252,18 @@ static pack_slot *pack_slot_for_publish(int atlas_index, tp_id128 atlas_id) {
 // #endregion
 
 // #region public
-void gui_pack_init(const char *work_dir) {
-    (void)snprintf(s_work_dir, sizeof s_work_dir, "%s", work_dir ? work_dir : ".");
-#ifdef _WIN32
-    (void)CreateDirectoryA(s_work_dir, NULL); /* ok if it already exists */
-#else
-    (void)mkdir(s_work_dir, 0755);
-#endif
+bool gui_pack_init(const char *work_dir) {
+    s_work_dir_ready = false;
+    if (!gui_paths_copy_normalized(work_dir ? work_dir : ".", s_work_dir,
+                                   sizeof s_work_dir)) {
+        return false;
+    }
+    tp_mkdirs(s_work_dir);
+    s_work_dir_ready = tp_scan_is_dir(s_work_dir);
+    if (!s_work_dir_ready) {
+        s_work_dir[0] = '\0';
+    }
+    return s_work_dir_ready;
 }
 
 void gui_pack_clear(int atlas_index) {
@@ -302,6 +309,17 @@ static bool report_job_start(tp_status status, const tp_error *error,
     return false;
 }
 
+static bool require_work_dir(char *err, size_t err_cap) {
+    if (s_work_dir_ready) {
+        return true;
+    }
+    if (err && err_cap > 0U) {
+        (void)snprintf(err, err_cap,
+                       "pack work directory is unavailable or exceeds the supported path limit");
+    }
+    return false;
+}
+
 static bool input_changed_since(tp_session_input_token token) {
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     return !snapshot || !tp_session_input_token_equal(
@@ -309,6 +327,9 @@ static bool input_changed_since(tp_session_input_token token) {
 }
 
 bool gui_pack_async_start(int atlas_index, char *err, size_t err_cap) {
+    if (!require_work_dir(err, err_cap)) {
+        return false;
+    }
     if (job_active()) {
         if (err) {
             (void)snprintf(err, err_cap, "busy -- a pack or export is already running");
@@ -345,6 +366,9 @@ bool gui_pack_async_start(int atlas_index, char *err, size_t err_cap) {
 }
 
 static bool export_start(tp_id128 atlas_id, char *err, size_t err_cap) {
+    if (!require_work_dir(err, err_cap)) {
+        return false;
+    }
     if (job_active()) {
         if (err) {
             (void)snprintf(err, err_cap, "busy -- a pack or export is already running");
@@ -432,9 +456,9 @@ gui_pack_done gui_pack_poll(gui_pack_result_info *out) {
                 s_preview.input_token = result.pack.input_token_at_start;
                 s_preview.valid = true;
                 s_preview.atlas_index = atlas_index;
-                (void)snprintf(s_preview.exporter_id,
-                               sizeof s_preview.exporter_id, "%s",
-                               result.pack.preview_exporter_id);
+                memcpy(s_preview.exporter_id,
+                       result.pack.preview_exporter_id,
+                       strlen(result.pack.preview_exporter_id) + 1U);
                 result.pack.arena = NULL;
                 nt_log_info("gui_pack(async): preview '%s' via %s packed %d sprite(s), %d page(s) in %.1f ms",
                             s_preview.result->atlas_name,
@@ -645,6 +669,9 @@ bool gui_pack_preview_blocking(int atlas_index, const char *exporter_id, char *e
 }
 
 bool gui_pack_preview_async_start(int atlas_index, const char *exporter_id, char *err, size_t err_cap) {
+    if (!require_work_dir(err, err_cap)) {
+        return false;
+    }
     if (job_active()) {
         if (err) {
             (void)snprintf(err, err_cap, "busy -- a pack or export is already running");

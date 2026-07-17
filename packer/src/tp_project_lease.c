@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include "tp_core/tp_identity.h"
+#include "tp_fs_internal.h"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -43,20 +44,20 @@ static tp_status lease_storage_error(tp_error *err, const char *operation,
 
 #ifdef _WIN32
 static tp_status lock_open(tp_project_lease *lease, tp_error *err) {
-    WCHAR wide[TP_PROJECT_LEASE_PATH_MAX];
-    const int converted = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-                                               lease->lock_path, -1, wide,
-                                               (int)TP_PROJECT_LEASE_PATH_MAX);
-    if (converted == 0) {
-        return lease_storage_error(err, "path conversion", GetLastError());
+    wchar_t *wide = tp_fs_win32_path_alloc(lease->lock_path);
+    if (!wide) {
+        return lease_storage_error(err, "path conversion", (unsigned long)errno);
     }
 
     HANDLE handle = CreateFileW(wide, GENERIC_READ | GENERIC_WRITE,
                                 0, NULL, OPEN_ALWAYS,
                                 FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
                                 NULL);
+    const DWORD open_error =
+        handle == INVALID_HANDLE_VALUE ? GetLastError() : ERROR_SUCCESS;
+    free(wide);
     if (handle == INVALID_HANDLE_VALUE) {
-        const DWORD code = GetLastError();
+        const DWORD code = open_error;
         if (code == ERROR_SHARING_VIOLATION || code == ERROR_LOCK_VIOLATION) {
             return tp_error_set(err, TP_STATUS_PROJECT_LIVE,
                                 "project '%s' is already leased by another writer",

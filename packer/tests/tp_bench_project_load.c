@@ -5,7 +5,6 @@
 
 #include "tp_core/tp_identity.h"
 #include "tp_core/tp_project.h"
-#include "tp_core/tp_project_migrate.h"
 #include "tp_project_internal.h"
 #include "cJSON.h"
 
@@ -27,7 +26,6 @@ typedef struct project_load_case {
     size_t expected_atlases;
     size_t expected_sources;
     size_t expected_sprites;
-    bool legacy;
 } project_load_case;
 
 #define TP_PROJECT_LOAD_ACCOUNTED_BUDGET_BYTES (257U * 1024U * 1024U)
@@ -137,7 +135,7 @@ static bool project_load_case_mixed(size_t records, const char *point,
     memset(out, 0, sizeof *out);
     json_builder b = {0};
     bool ok = json_builder_append(
-        &b, "{\"version\":3,\"atlases\":[{\"id\":\"atlas_"
+        &b, "{\"version\":5,\"atlases\":[{\"id\":\"atlas_"
             "ffffffffffffffffffffffffffffffff\",\"name\":\"a\","
             "\"sources\":[");
     for (size_t i = 0U; ok && i < records; i++) {
@@ -147,8 +145,11 @@ static bool project_load_case_mixed(size_t records, const char *point,
     }
     ok = ok && json_builder_append(&b, "],\"sprites\":[");
     for (size_t i = 0U; ok && i < records; i++) {
-        ok = json_builder_append(&b, "%s{\"name\":\"sprite/%zu\"}",
-                                 i == 0U ? "" : ",", i);
+        ok = json_builder_append(
+            &b,
+            "%s{\"key\":\"sprite/%zu.png\",\"source\":"
+            "\"source_%032x\"}",
+            i == 0U ? "" : ",", i, 1U);
     }
     ok = ok && json_builder_append(&b, "]}]}");
     if (!ok) {
@@ -156,23 +157,24 @@ static bool project_load_case_mixed(size_t records, const char *point,
         return false;
     }
     *out = (project_load_case){
-        "schema_mixed", point, b.bytes, b.len, 14U + 8U * records,
-        records, 5U, 1U, records, records, false,
+        "canonical_mixed", point, b.bytes, b.len, 14U + 10U * records,
+        records, 5U, 1U, records, records,
     };
     return project_load_case_admission_is_exact(out);
 }
 
-static bool project_load_case_legacy(size_t records, const char *point,
-                                     project_load_case *out) {
+static bool project_load_case_sources(size_t records, const char *point,
+                                      project_load_case *out) {
     memset(out, 0, sizeof *out);
     json_builder b = {0};
     bool ok = json_builder_append(
-        &b, "{\"version\":2,\"atlases\":[{\"id\":\"atlas_"
+        &b, "{\"version\":5,\"atlases\":[{\"id\":\"atlas_"
             "ffffffffffffffffffffffffffffffff\",\"name\":\"a\","
             "\"sources\":[");
     for (size_t i = 0U; ok && i < records; i++) {
-        ok = json_builder_append(&b, "%s\"path/%zu\"",
-                                 i == 0U ? "" : ",", i);
+        ok = json_builder_append(
+            &b, "%s{\"id\":\"source_%032x\",\"path\":\"path/%zu\"}",
+            i == 0U ? "" : ",", (unsigned)(i + 1U), i);
     }
     ok = ok && json_builder_append(&b, "]}]}");
     if (!ok) {
@@ -180,8 +182,8 @@ static bool project_load_case_legacy(size_t records, const char *point,
         return false;
     }
     *out = (project_load_case){
-        "legacy_sources", point, b.bytes, b.len, 12U + records,
-        records, 4U, 1U, records, 0U, true,
+        "canonical_sources", point, b.bytes, b.len, 12U + 5U * records,
+        records, 5U, 1U, records, 0U,
     };
     return project_load_case_admission_is_exact(out);
 }
@@ -192,7 +194,7 @@ static bool project_load_case_combined(project_load_case *out) {
     const size_t scalars = (size_t)TP_PROJECT_JSON_MAX_NODES - 9U - arrays;
     json_builder b = {0};
     bool ok = json_builder_append(
-        &b, "{\"version\":4,\"atlases\":[],\"ignored\":[");
+        &b, "{\"version\":5,\"atlases\":[],\"ignored\":[");
     size_t emitted = 0U;
     for (size_t array = 0U; ok && array < arrays; array++) {
         ok = json_builder_append(&b, "%s[", array == 0U ? "" : ",");
@@ -223,7 +225,7 @@ static bool project_load_case_combined(project_load_case *out) {
         "admission_combined_max", "max", b.bytes, b.len,
         (size_t)TP_PROJECT_JSON_MAX_NODES,
         (size_t)TP_PROJECT_JSON_MAX_CONTAINER_ENTRIES, 3U,
-        0U, 0U, 0U, false,
+        0U, 0U, 0U,
     };
     return project_load_case_admission_is_exact(out);
 }
@@ -292,13 +294,10 @@ static bool bench_project_load_case(const project_load_case *c, int warmups,
     size_t model_bytes_max = 0U;
     size_t lookup_work_max = 0U;
     size_t id_work_max = 0U;
-    size_t legacy_work_max = 0U;
-    tp_id128 legacy_first_id = tp_id128_nil();
     for (int sample = 0; sample < warmups + iterations; sample++) {
         tp_project__test_load_resources_reset();
         tp_project__test_load_lookup_work_reset();
         tp_project__test_id_validation_work_reset();
-        tp_project__test_legacy_id_work_reset();
         tp_project *project = NULL;
         tp_error err = {{0}};
         const double start = tp_bench_now_ms();
@@ -310,28 +309,15 @@ static bool bench_project_load_case(const project_load_case *c, int warmups,
         const tp_project_load_lookup_work lookup =
             tp_project__test_load_lookup_work_take();
         const size_t id_work = tp_project__test_id_validation_work_take();
-        const size_t legacy_work = tp_project__test_legacy_id_work_take();
         bool ok = status == TP_STATUS_OK &&
                   project_load_counts_match(c, project);
-        if (ok && c->legacy && c->expected_sources > 0U) {
-            const tp_id128 id = project->atlases[0].sources[0].id;
-            if (sample == 0) {
-                legacy_first_id = id;
-            } else {
-                ok = tp_id128_eq(id, legacy_first_id);
-            }
-        }
         const size_t records = c->expected_sources + c->expected_sprites +
                                c->expected_atlases;
         ok = ok && lookup.source_path_comparisons <= c->expected_sources * 64U &&
-             lookup.pending_name_comparisons <= c->expected_sprites * 64U &&
-             id_work <= records * 64U && legacy_work <= records * 64U;
+             id_work <= records * 64U;
         const size_t model_bytes = ok ? project_owned_live_bytes(project) : 0U;
         if (resources.source_index_peak_bytes > resource_max.source_index_peak_bytes) {
             resource_max.source_index_peak_bytes = resources.source_index_peak_bytes;
-        }
-        if (resources.pending_index_peak_bytes > resource_max.pending_index_peak_bytes) {
-            resource_max.pending_index_peak_bytes = resources.pending_index_peak_bytes;
         }
         if (resources.id_refs_bytes > resource_max.id_refs_bytes) {
             resource_max.id_refs_bytes = resources.id_refs_bytes;
@@ -339,15 +325,10 @@ static bool bench_project_load_case(const project_load_case *c, int warmups,
         if (resources.id_index_bytes > resource_max.id_index_bytes) {
             resource_max.id_index_bytes = resources.id_index_bytes;
         }
-        if (resources.legacy_peak_bytes > resource_max.legacy_peak_bytes) {
-            resource_max.legacy_peak_bytes = resources.legacy_peak_bytes;
-        }
         model_bytes_max = max_size(model_bytes_max, model_bytes);
-        lookup_work_max = max_size(
-            lookup_work_max, lookup.source_path_comparisons +
-                                 lookup.pending_name_comparisons);
+        lookup_work_max =
+            max_size(lookup_work_max, lookup.source_path_comparisons);
         id_work_max = max_size(id_work_max, id_work);
-        legacy_work_max = max_size(legacy_work_max, legacy_work);
         tp_project_destroy(project);
         if (!ok) {
             (void)fprintf(stderr,
@@ -377,10 +358,8 @@ static bool bench_project_load_case(const project_load_case *c, int warmups,
     const size_t cjson_requested = c->nodes * sizeof(cJSON) + c->json_bytes;
     const size_t id_transient = resource_max.id_refs_bytes +
                                 resource_max.id_index_bytes;
-    const size_t transient = max_size(
-        max_size(resource_max.source_index_peak_bytes,
-                 resource_max.pending_index_peak_bytes),
-        max_size(resource_max.legacy_peak_bytes, id_transient));
+    const size_t transient =
+        max_size(resource_max.source_index_peak_bytes, id_transient);
     const size_t accounted_peak = c->json_bytes + cjson_requested +
                                   model_bytes_max + transient;
     if (accounted_peak > (size_t)TP_PROJECT_LOAD_ACCOUNTED_BUDGET_BYTES) {
@@ -400,18 +379,16 @@ static bool bench_project_load_case(const project_load_case *c, int warmups,
         "benchmark_evidence scenario=project_load shape=%s point=%s "
         "raw_input_bytes=%zu admitted_nodes=%zu max_container_entries=%zu "
         "max_depth=%zu cjson_requested_bytes=%zu model_owned_bytes=%zu "
-        "source_index_peak_bytes=%zu pending_index_peak_bytes=%zu "
-        "legacy_peak_bytes=%zu id_refs_bytes=%zu id_index_bytes=%zu "
+        "source_index_peak_bytes=%zu id_refs_bytes=%zu id_index_bytes=%zu "
         "accounted_peak_bytes=%zu accounted_budget_bytes=%u lookup_work=%zu "
-        "id_work=%zu legacy_work=%zu\n",
+        "id_work=%zu\n",
         c->shape, c->point, c->json_bytes, c->nodes, c->max_entries,
         c->max_depth, cjson_requested, model_bytes_max,
         resource_max.source_index_peak_bytes,
-        resource_max.pending_index_peak_bytes,
-        resource_max.legacy_peak_bytes, resource_max.id_refs_bytes,
+        resource_max.id_refs_bytes,
         resource_max.id_index_bytes, accounted_peak,
         (unsigned)TP_PROJECT_LOAD_ACCOUNTED_BUDGET_BYTES, lookup_work_max,
-        id_work_max, legacy_work_max);
+        id_work_max);
     return true;
 }
 
@@ -421,7 +398,7 @@ int tp_bench_project_load_run(int iterations,
     const int warmups = 1;
     project_load_case shipped = {
         "shipped_huge", "max", shipped_huge_json, shipped_huge_json_bytes,
-        1502805U, 1000U, 6U, 100U, 200U, 100000U, false,
+        1702805U, 1000U, 6U, 100U, 200U, 100000U,
     };
     bool ok = project_load_case_admission_is_exact(&shipped) &&
               bench_project_load_case(&shipped, warmups, iterations);
@@ -429,20 +406,33 @@ int tp_bench_project_load_run(int iterations,
     static const struct {
         size_t records;
         const char *point;
-    } points[] = {
+    } mixed_points[] = {
         {1000U, "1k"},
         {10000U, "10k"},
-        {(size_t)TP_PROJECT_JSON_MAX_CONTAINER_ENTRIES, "max"},
+        {((size_t)TP_PROJECT_JSON_MAX_NODES - 14U) / 10U,
+         "node_max"},
     };
-    for (size_t i = 0U; ok && i < sizeof points / sizeof points[0]; i++) {
+    for (size_t i = 0U;
+         ok && i < sizeof mixed_points / sizeof mixed_points[0]; i++) {
         project_load_case c;
-        ok = project_load_case_mixed(points[i].records, points[i].point, &c) &&
+        ok = project_load_case_mixed(mixed_points[i].records,
+                                     mixed_points[i].point, &c) &&
              bench_project_load_case(&c, warmups, iterations);
         free(c.json);
     }
-    for (size_t i = 0U; ok && i < sizeof points / sizeof points[0]; i++) {
+    static const struct {
+        size_t records;
+        const char *point;
+    } source_points[] = {
+        {1000U, "1k"},
+        {10000U, "10k"},
+        {(size_t)TP_PROJECT_JSON_MAX_CONTAINER_ENTRIES, "container_max"},
+    };
+    for (size_t i = 0U;
+         ok && i < sizeof source_points / sizeof source_points[0]; i++) {
         project_load_case c;
-        ok = project_load_case_legacy(points[i].records, points[i].point, &c) &&
+        ok = project_load_case_sources(source_points[i].records,
+                                       source_points[i].point, &c) &&
              bench_project_load_case(&c, warmups, iterations);
         free(c.json);
     }

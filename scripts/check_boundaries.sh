@@ -20,8 +20,8 @@ app_srcs() {
 }
 
 # Shipping app/core sources only. Documentation, fixtures, unit tests, spikes,
-# benchmarks, and the GUI selftest oracle are deliberately outside deletion
-# gates: they may name a retired path while proving migration compatibility.
+# benchmarks, and the GUI selftest oracle are deliberately outside shipping
+# dependency gates; tests may intentionally construct rejected input shapes.
 shipping_srcs() {
     app_srcs
     find packer/include/tp_core packer/src -type f \
@@ -112,14 +112,14 @@ fi
 #    assigning into the loaded project's arrays (R7b), nor through an alias into it (R7c).
 #    Scoped to the mutation-surface TUs (mirrors R6's cli_mutate.c scope). gui_selftest.c (a
 #    boundary-excluded dev-seam test harness that pokes internals -- like the CLI's tests) and
-#    main.c (app shell + the --parity dev seam) are out of scope, as is the SANCTIONED set:
-#    tp_project_atlas_seed_default_target + tp_project_promote_ids (lifecycle, not a mutation
-#    op). (H/P1-2 retired the former animation-rename direct-write exception: animation rename
+#    main.c (app shell + the --parity dev seam) are out of scope, as is the sanctioned
+#    tp_project_atlas_seed_default_target lifecycle call. (H/P1-2 retired the former
+#    animation-rename direct-write exception: animation rename
 #    now routes through TP_OP_ANIMATION_RENAME.) A legit exception carries a "boundary-ok:" note
 #    on the same line.
 _gui_muts="apps/gui/gui_project.c apps/gui/gui_view_settings.c apps/gui/gui_view_lists.c apps/gui/gui_view_chrome.c apps/gui/gui_actions.c"
-# The inline project mutators the F2-05b-i ops replaced (as R6, seed_default_target +
-# promote_ids are lifecycle, NOT banned).
+# The inline project mutators the F2-05b-i ops replaced (as R6,
+# seed_default_target is lifecycle and not banned).
 _gmuts='tp_project_(add_atlas|remove_atlas|set_atlas_name|atlas_add_source|atlas_add_source_kind|atlas_remove_source|atlas_add_sprite|atlas_remove_sprite|atlas_prune_sprite|atlas_set_sprite_rename|atlas_add_animation|atlas_remove_animation|anim_add_frame|anim_remove_frame|anim_move_frame|atlas_add_target|atlas_remove_target|atlas_set_target)\('
 _gprojwrite='(p|proj)->atlases\[[^]]*\]\.[A-Za-z_]+[[:space:]]*=[^=]'
 # R7c bans the SAME in-place write through an ALIAS into the loaded project (a/an/t/ov the
@@ -212,11 +212,11 @@ r10a=$(grep -nE "$_session_deps" $_session_gate_srcs 2>/dev/null |
 r10b=$(grep -nE "$_session_impl" $_session_gate_srcs 2>/dev/null |
     grep -v 'boundary-ok:')
 [ -n "$r10b" ] && hit "R10b backend/codec/Pack/Export implementation in tp_session" "$r10b"
-_session_model_owner='->[[:space:]]*project([^A-Za-z0-9_]|$)|(^|[^A-Za-z0-9_])tp_project_resolve_atlas_sprites[[:space:]]*\('
+_session_model_owner='->[[:space:]]*project([^A-Za-z0-9_]|$)'
 r10c=$(sed -E 's/snapshot->[[:space:]]*project([^A-Za-z0-9_]|$)/\1/g' \
     $_session_gate_owner_srcs 2>/dev/null |
     grep -nE -- "$_session_model_owner")
-[ -n "$r10c" ] && hit "R10c model migration/mutable-project ownership in tp_session" "$r10c"
+[ -n "$r10c" ] && hit "R10c mutable-project ownership in tp_session" "$r10c"
 if ! printf '#include "apps/gui/gui_project.h"\n' | grep -qE "$_session_deps"; then
     hit "R10-selftest" "R10a detector failed to catch seeded GUI dependency"
 fi
@@ -228,9 +228,9 @@ if printf '#include "tp_core/tp_recovery.h"\n    tp_project_lease_acquire(path, 
     grep -qE "$_session_deps|$_session_impl"; then
     hit "R10-selftest" "R10 detector false-positives on allowed public orchestration calls"
 fi
-if ! printf '    tp_model *model = session->model;\n    model->project = migrated;\n    tp_project_resolve_atlas_sprites(project, 0, &index, &err);\n' |
+if ! printf '    tp_model *model = session->model;\n    model->project = replacement;\n' |
     grep -qE -- "$_session_model_owner"; then
-    hit "R10-selftest" "R10c detector failed to catch seeded model migration ownership"
+    hit "R10-selftest" "R10c detector failed to catch seeded mutable-model ownership"
 fi
 if printf '    snapshot->project = cloned;\n' |
     sed -E 's/snapshot->[[:space:]]*project([^A-Za-z0-9_]|$)/\1/g' |
@@ -438,12 +438,17 @@ fi
 # for, so it is deliberately left out of the registry and the scan.
 _internal_header_registry() {
     cat <<'EOF'
-tp_diff_internal        tp_diff_entity|tp_diff_apply|tp_diff_capture|tp_history|tp_op_apply|tp_txn_apply
-tp_op_internal          tp_op_catalog|tp_op_validate|tp_op_apply|tp_op_build|tp_op_encode|tp_txn_encode|tp_txn_apply
+tp_diff_internal        tp_diff_entity|tp_diff_apply|tp_diff_capture|tp_history|tp_history_codec|tp_history_codec_internal|tp_op_apply|tp_txn_apply
+tp_op_internal          tp_op_catalog|tp_op_validate|tp_op_apply|tp_op_build|tp_op_encode|tp_txn_encode|tp_txn_apply|tp_txn_lower|tp_txn_parse
 tp_encode_internal      tp_op_encode|tp_txn_encode|tp_txn_apply
+tp_fs_internal          tp_fs_internal|tp_export_defold|tp_export_json_neotolis|tp_export_png|tp_identity|tp_image|tp_journal_io|tp_pack_read|tp_project|tp_project_lease|tp_recovery|tp_scan
+tp_history_codec_internal tp_history|tp_history_codec|tp_txn_apply
 tp_journal_internal     tp_journal|tp_journal_io|tp_history|tp_txn_apply|tp_recovery
+tp_json_internal        tp_json_internal|tp_project|tp_txn_parse
+tp_utf8_internal        tp_utf8|tp_fs_internal|tp_image|tp_json_internal|tp_op_validate|tp_project_identity
 tp_idset_internal       tp_idset|tp_txn_idset|tp_journal|tp_txn_apply
-tp_project_internal     tp_project|tp_project_migrate|tp_history|tp_session|tp_txn_apply
+tp_project_internal     tp_project|tp_project_identity|tp_history|tp_session|tp_txn_apply
+tp_project_identity_internal tp_project|tp_project_identity|tp_history_codec|tp_input|tp_op_validate|tp_session|tp_txn_apply
 tp_project_generation_internal tp_project_generation|tp_session_snapshot|tp_txn_apply
 tp_project_mutation_internal tp_project|tp_diff_entity|tp_diff_apply|tp_diff_capture|tp_export_run|tp_input|tp_op_apply|tp_op_validate|tp_session|tp_session_snapshot
 tp_txn_internal         tp_txn_apply|tp_txn_parse|tp_txn_encode|tp_txn_idset|tp_txn_lower|tp_project_clone|tp_history
@@ -454,7 +459,7 @@ tp_session_layout       tp_session|tp_session_snapshot
 tp_recovery_internal    tp_recovery
 tp_job_owner_internal   tp_session|tp_job
 tp_source_plan_internal tp_source_plan|tp_op_validate
-tp_srckey_internal      tp_srckey|tp_validate
+tp_srckey_internal      tp_srckey|tp_project_identity|tp_validate
 tp_validate_internal    tp_validate
 tp_identity_internal    tp_identity|tp_identity_session
 tp_pack_read_internal   tp_pack_read

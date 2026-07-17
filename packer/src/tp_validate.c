@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "tp_core/tp_export.h"
+#include "tp_core/tp_identity.h"
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_scan.h"
@@ -25,13 +26,71 @@ typedef struct {
     tp_validation_finding *v;
     size_t n;
     size_t cap;
+    size_t storage_bytes;
     size_t total;
     size_t errors;
     size_t warnings;
     size_t omitted_errors;
     size_t omitted_warnings;
+    bool materialization_closed;
     bool oom;
 } validation_builder;
+
+typedef struct {
+    const char *atlas;
+    tp_id128 atlas_id;
+    const char *source;
+    tp_id128 source_id;
+    const char *sprite;
+    const char *anim;
+    tp_id128 animation_id;
+    const char *frame;
+    const char *target;
+    tp_id128 target_id;
+} finding_context;
+
+static finding_context context_atlas(const tp_project_atlas *atlas) {
+    finding_context context = {0};
+    context.atlas = atlas ? atlas->name : NULL;
+    context.atlas_id = atlas ? atlas->id : tp_id128_nil();
+    return context;
+}
+
+static finding_context context_source(const tp_project_atlas *atlas,
+                                      const tp_project_source *source) {
+    finding_context context = context_atlas(atlas);
+    context.source = source ? source->path : NULL;
+    context.source_id = source ? source->id : tp_id128_nil();
+    return context;
+}
+
+static finding_context context_sprite(const tp_project_atlas *atlas,
+                                      tp_id128 source_id,
+                                      const char *sprite) {
+    finding_context context = context_atlas(atlas);
+    context.source_id = source_id;
+    context.sprite = sprite;
+    return context;
+}
+
+static finding_context context_frame(const tp_project_atlas *atlas,
+                                     const tp_project_anim *animation,
+                                     const tp_project_frame *frame) {
+    finding_context context = context_atlas(atlas);
+    context.source_id = frame ? frame->source_ref : tp_id128_nil();
+    context.anim = animation ? animation->name : NULL;
+    context.animation_id = animation ? animation->id : tp_id128_nil();
+    context.frame = frame ? frame->name : NULL;
+    return context;
+}
+
+static finding_context context_target(const tp_project_atlas *atlas,
+                                      const tp_project_target *target) {
+    finding_context context = context_atlas(atlas);
+    context.target = target ? target->exporter_id : NULL;
+    context.target_id = target ? target->id : tp_id128_nil();
+    return context;
+}
 
 enum {
     TARGET_ISSUE_UNKNOWN_EXPORTER = 1U << 0,
@@ -74,7 +133,31 @@ static size_t report_ordinary_limit(void) {
 }
 
 static bool report_has_room(const validation_builder *fs) {
-    return fs->n < report_ordinary_limit();
+    return !fs->materialization_closed && fs->n < report_ordinary_limit();
+}
+
+#define TP_VALIDATION_SUMMARY_STORAGE_RESERVE 384U
+
+static bool size_add(size_t *value, size_t increment) {
+    if (*value > SIZE_MAX - increment) {
+        return false;
+    }
+    *value += increment;
+    return true;
+}
+
+static bool report_can_materialize(const validation_builder *fs,
+                                   size_t storage_bytes) {
+    /* Reserve the vector's maximum possible capacity, not only its current
+     * logical length: realloc grows geometrically and the public byte limit is
+     * a hard materialization bound, including unused capacity. */
+    size_t bytes = report_slot_limit() * sizeof(tp_validation_finding);
+    if (!size_add(&bytes, fs->storage_bytes) ||
+        !size_add(&bytes, storage_bytes) ||
+        !size_add(&bytes, TP_VALIDATION_SUMMARY_STORAGE_RESERVE)) {
+        return false;
+    }
+    return bytes <= (size_t)TP_VALIDATION_REPORT_MAX_BYTES;
 }
 
 static void add_omitted(validation_builder *fs, tp_validation_severity severity, size_t count) {
@@ -119,23 +202,38 @@ static tp_validation_finding *findings_new(validation_builder *fs) {
     }
     tp_validation_finding *f = &fs->v[fs->n++];
     memset(f, 0, sizeof *f);
+    f->message = "";
+    f->atlas = "";
+    f->source = "";
+    f->sprite = "";
+    f->anim = "";
+    f->frame = "";
+    f->target = "";
     return f;
 }
 
-static void set_field(char *dst, size_t cap, const char *v) {
-    if (v) {
-        (void)snprintf(dst, cap, "%s", v);
-    }
+static bool storage_size_add_string(size_t *bytes, const char *value) {
+    const size_t length = value ? strlen(value) : 0U;
+    return length < SIZE_MAX && size_add(bytes, length + 1U);
+}
+
+static void storage_copy_string(char **cursor, const char *value,
+                                const char **out) {
+    const char *source = value ? value : "";
+    const size_t bytes = strlen(source) + 1U;
+    memcpy(*cursor, source, bytes);
+    *out = *cursor;
+    *cursor += bytes;
 }
 
 /* Appends one finding. NULL context fields are omitted. Never aborts: on OOM the
  * findings list poisons and the caller reports it as an internal error. */
 #if defined(__GNUC__) || defined(__clang__)
-__attribute__((format(printf, 9, 10)))
+__attribute__((format(printf, 5, 6)))
 #endif
-static void
-add_finding(validation_builder *fs, tp_validation_severity severity, const char *code, const char *atlas, const char *sprite, const char *anim,
-            const char *frame, const char *target, const char *fmt, ...) {
+static void add_finding(validation_builder *fs,
+                        tp_validation_severity severity, const char *code,
+                        finding_context context, const char *fmt, ...) {
     fs->total++;
     if (severity == TP_VALIDATION_ERROR) {
         fs->errors++;
@@ -150,21 +248,69 @@ add_finding(validation_builder *fs, tp_validation_severity severity, const char 
         }
         return;
     }
+
+    va_list ap;
+    va_start(ap, fmt);
+    va_list measure;
+    va_copy(measure, ap);
+    const int message_length = vsnprintf(NULL, 0U, fmt, measure);
+    va_end(measure);
+    if (message_length < 0) {
+        va_end(ap);
+        fs->oom = true;
+        return;
+    }
+    size_t storage_bytes = (size_t)message_length + 1U;
+    if (!storage_size_add_string(&storage_bytes, context.atlas) ||
+        !storage_size_add_string(&storage_bytes, context.source) ||
+        !storage_size_add_string(&storage_bytes, context.sprite) ||
+        !storage_size_add_string(&storage_bytes, context.anim) ||
+        !storage_size_add_string(&storage_bytes, context.frame) ||
+        !storage_size_add_string(&storage_bytes, context.target)) {
+        va_end(ap);
+        fs->oom = true;
+        return;
+    }
+    if (!report_can_materialize(fs, storage_bytes)) {
+        va_end(ap);
+        fs->materialization_closed = true;
+        if (severity == TP_VALIDATION_ERROR) {
+            fs->omitted_errors++;
+        } else {
+            fs->omitted_warnings++;
+        }
+        return;
+    }
+
     tp_validation_finding *f = findings_new(fs);
     if (!f) {
+        va_end(ap);
+        return;
+    }
+    f->owned_storage = (char *)malloc(storage_bytes);
+    if (!f->owned_storage) {
+        va_end(ap);
+        fs->oom = true;
         return;
     }
     f->severity = severity;
     (void)snprintf(f->code, sizeof f->code, "%s", code);
-    set_field(f->atlas, sizeof f->atlas, atlas);
-    set_field(f->sprite, sizeof f->sprite, sprite);
-    set_field(f->anim, sizeof f->anim, anim);
-    set_field(f->frame, sizeof f->frame, frame);
-    set_field(f->target, sizeof f->target, target);
-    va_list ap;
-    va_start(ap, fmt);
-    (void)vsnprintf(f->message, sizeof f->message, fmt, ap);
+    char *cursor = f->owned_storage;
+    f->message = cursor;
+    (void)vsnprintf(cursor, (size_t)message_length + 1U, fmt, ap);
+    cursor += (size_t)message_length + 1U;
     va_end(ap);
+    storage_copy_string(&cursor, context.atlas, &f->atlas);
+    storage_copy_string(&cursor, context.source, &f->source);
+    storage_copy_string(&cursor, context.sprite, &f->sprite);
+    storage_copy_string(&cursor, context.anim, &f->anim);
+    storage_copy_string(&cursor, context.frame, &f->frame);
+    storage_copy_string(&cursor, context.target, &f->target);
+    f->atlas_id = context.atlas_id;
+    f->source_id = context.source_id;
+    f->animation_id = context.animation_id;
+    f->target_id = context.target_id;
+    fs->storage_bytes += storage_bytes;
 }
 
 static void add_truncation_summary(validation_builder *fs) {
@@ -179,11 +325,32 @@ static void add_truncation_summary(validation_builder *fs) {
     }
     f->severity = fs->omitted_errors > 0U ? TP_VALIDATION_ERROR : TP_VALIDATION_WARNING;
     (void)snprintf(f->code, sizeof f->code, "%s", TP_VALIDATION_CODE_TRUNCATED);
-    (void)snprintf(f->message, sizeof f->message,
+    const int message_length = snprintf(
+        NULL, 0U,
+        "validation report truncated: omitted %zu of %zu findings (%zu errors, %zu warnings); "
+        "limits are %u findings and %u bytes",
+        omitted, fs->total, fs->omitted_errors, fs->omitted_warnings,
+        (unsigned)TP_VALIDATION_REPORT_MAX_FINDINGS,
+        (unsigned)TP_VALIDATION_REPORT_MAX_BYTES);
+    if (message_length < 0) {
+        fs->oom = true;
+        return;
+    }
+    const size_t storage_bytes = (size_t)message_length + 1U;
+    f->owned_storage = (char *)malloc(storage_bytes);
+    if (!f->owned_storage) {
+        fs->oom = true;
+        return;
+    }
+    f->message = f->owned_storage;
+    (void)snprintf(f->owned_storage, storage_bytes,
                    "validation report truncated: omitted %zu of %zu findings (%zu errors, %zu warnings); "
                    "limits are %u findings and %u bytes",
-                   omitted, fs->total, fs->omitted_errors, fs->omitted_warnings,
-                   (unsigned)TP_VALIDATION_REPORT_MAX_FINDINGS, (unsigned)TP_VALIDATION_REPORT_MAX_BYTES);
+                   omitted, fs->total, fs->omitted_errors,
+                   fs->omitted_warnings,
+                   (unsigned)TP_VALIDATION_REPORT_MAX_FINDINGS,
+                   (unsigned)TP_VALIDATION_REPORT_MAX_BYTES);
+    fs->storage_bytes += storage_bytes;
 }
 
 /* Validation-local borrowed-string index. Slots own no strings and live only for
@@ -407,14 +574,21 @@ static void id_key_index_free(id_key_index *index) {
 
 /* Reports duplicated values in `vals[0..n)` once per distinct duplicate. `code`/
  * `severity` select which check; the shared field is `sprite` (the key or final name). */
-static void report_duplicates(validation_builder *fs, const char *atlas, const char *const *vals, int n,
-                              const str_index *index, tp_validation_severity severity,
+static void report_duplicates(validation_builder *fs,
+                              const tp_project_atlas *atlas,
+                              const char *const *vals,
+                              const tp_sprite_ref *refs, int n,
+                              const str_index *index,
+                              tp_validation_severity severity,
                               const char *code, const char *what) {
     for (int i = 0; i < n; i++) {
         const str_slot *slot = str_index_find(index, vals[i]);
         if (slot && slot->first_index == i && slot->count > 1U) {
-            add_finding(fs, severity, code, atlas, vals[i], NULL, NULL, NULL, "%zu sprites %s '%s'", slot->count, what,
-                        vals[i]);
+            const tp_id128 source_id =
+                refs ? refs[i].source_id : tp_id128_nil();
+            add_finding(fs, severity, code,
+                        context_sprite(atlas, source_id, vals[i]),
+                        "%zu sprites %s '%s'", slot->count, what, vals[i]);
         }
     }
 }
@@ -576,7 +750,9 @@ static void validate_sources(validation_builder *fs, const tp_project_atlas *a) 
             unsigned flags = TP_SRCKEY_PORT_OK;
             k[i].canon = validate_strdup(normalized);
             if (tp_srckey_portability(normalized, &flags, NULL) == TP_STATUS_OK && flags != TP_SRCKEY_PORT_OK) {
-                add_finding(fs, TP_VALIDATION_WARNING, TP_VALIDATION_CODE_SOURCE_PORTABILITY, a->name, NULL, NULL, NULL, NULL,
+                add_finding(fs, TP_VALIDATION_WARNING,
+                            TP_VALIDATION_CODE_SOURCE_PORTABILITY,
+                            context_source(a, &a->sources[i]),
                             "source '%s' has non-portable path parts:%s%s%s", path,
                             (flags & TP_SRCKEY_PORT_RESERVED_NAME) ? " reserved-name" : "",
                             (flags & TP_SRCKEY_PORT_INVALID_CHAR) ? " invalid-char" : "",
@@ -592,11 +768,15 @@ static void validate_sources(validation_builder *fs, const tp_project_atlas *a) 
              * slash-normalized key -- never abort validate, never false-positive a
              * duplicate. Invalid-UTF-8 / over-long paths land in the else branch. */
             if (st == TP_STATUS_KEY_ABSOLUTE || st == TP_STATUS_KEY_TRAVERSAL) {
-                add_finding(fs, TP_VALIDATION_WARNING, TP_VALIDATION_CODE_SOURCE_ESCAPES_ROOT, a->name, NULL, NULL, NULL, NULL,
+                add_finding(fs, TP_VALIDATION_WARNING,
+                            TP_VALIDATION_CODE_SOURCE_ESCAPES_ROOT,
+                            context_source(a, &a->sources[i]),
                             "source '%s' is absolute or escapes the project directory (not portable across machines)",
                             path);
             } else {
-                add_finding(fs, TP_VALIDATION_WARNING, TP_VALIDATION_CODE_SOURCE_PORTABILITY, a->name, NULL, NULL, NULL, NULL,
+                add_finding(fs, TP_VALIDATION_WARNING,
+                            TP_VALIDATION_CODE_SOURCE_PORTABILITY,
+                            context_source(a, &a->sources[i]),
                             "source '%s' could not be canonicalized (%s)", path, err.msg);
             }
             k[i].canon = slash_norm_owned(path);
@@ -653,10 +833,14 @@ static void validate_sources(validation_builder *fs, const tp_project_atlas *a) 
         while (visited < previous && report_has_room(fs)) {
             s_work.probes++;
             if (strcmp(k[i].canon, k[j].canon) == 0) {
-                add_finding(fs, TP_VALIDATION_WARNING, TP_VALIDATION_CODE_DUPLICATE_SOURCE, a->name, NULL, NULL, NULL, NULL,
+                add_finding(fs, TP_VALIDATION_WARNING,
+                            TP_VALIDATION_CODE_DUPLICATE_SOURCE,
+                            context_source(a, &a->sources[i]),
                             "source '%s' is listed more than once", a->sources[i].path);
             } else {
-                add_finding(fs, TP_VALIDATION_WARNING, TP_VALIDATION_CODE_SOURCE_COLLISION, a->name, NULL, NULL, NULL, NULL,
+                add_finding(fs, TP_VALIDATION_WARNING,
+                            TP_VALIDATION_CODE_SOURCE_COLLISION,
+                            context_source(a, &a->sources[i]),
                             "sources '%s' and '%s' collide case-insensitively (cross-platform name clash)",
                             a->sources[j].path, a->sources[i].path);
             }
@@ -708,8 +892,9 @@ static tp_status stored_source_key_status(const char *key) {
  *   PENDING legacy records have no stored {source,key} to id-check, so validation uses
  *   their migration lookup name only to report orphan/ambiguity. Normal pack/apply never
  *   uses that name as an authoritative fallback. */
-static void validate_sprite_records(validation_builder *fs, const tp_project_atlas *a, const tp_sprite_index *idx,
-                                    const str_index *export_keys) {
+static void validate_sprite_records(validation_builder *fs,
+                                    const tp_project_atlas *a,
+                                    const tp_sprite_index *idx) {
     id_index source_ids = {0};
     id_key_index live_sprites = {0};
     id_key_index seen_overrides = {0};
@@ -732,27 +917,11 @@ static void validate_sprite_records(validation_builder *fs, const tp_project_atl
     }
     for (int i = 0; i < a->sprite_count; i++) {
         const tp_project_sprite *s = &a->sprites[i];
-        if (tp_id128_is_nil(s->source_ref) || !s->src_key) {
-            /* PENDING legacy input: the name is migration metadata, not an apply key.
-             * Check whether migration can currently reactivate it. */
-            int matches = 0;
-            if (s->name) {
-                const str_slot *slot = str_index_find(export_keys, s->name);
-                matches = slot && slot->key ? (int)slot->count : 0;
-            }
-            if (matches == 0) {
-                add_finding(fs, TP_VALIDATION_WARNING, TP_VALIDATION_CODE_ORPHAN_SPRITE, a->name, s->name, NULL, NULL, NULL,
-                            "sprite override '%s' matches no current sprite "
-                            "(orphaned by name; not yet id-validated, re-keys to {source, key} in F2)",
-                            s->name ? s->name : "");
-            }
-            continue;
-        }
         const tp_status key_status = stored_source_key_status(s->src_key);
         if (key_status != TP_STATUS_OK) {
             add_finding(fs, TP_VALIDATION_ERROR,
-                        TP_VALIDATION_CODE_INVALID_SPRITE_KEY, a->name,
-                        s->name, NULL, NULL, NULL,
+                        TP_VALIDATION_CODE_INVALID_SPRITE_KEY,
+                        context_sprite(a, s->source_ref, s->name),
                         "sprite override '%s' has invalid canonical key '%s' (%s)",
                         s->name ? s->name : "", s->src_key,
                         tp_status_id(key_status));
@@ -763,14 +932,18 @@ static void validate_sprite_records(validation_builder *fs, const tp_project_atl
              * ORPHAN, not a hard error: the override applies to nothing now and reactivates
              * only if its canonical source/key returns (§5.2/§5.6). WARNING, so a plain
              * source-removal does not flip `validate --strict` (exit 7). */
-            add_finding(fs, TP_VALIDATION_WARNING, TP_VALIDATION_CODE_SPRITE_BAD_SOURCE, a->name, s->name, NULL, NULL, NULL,
+            add_finding(fs, TP_VALIDATION_WARNING,
+                        TP_VALIDATION_CODE_SPRITE_BAD_SOURCE,
+                        context_sprite(a, s->source_ref, s->name),
                         "sprite override '%s' references a source id not in this atlas "
                         "(source removed; orphaned, reactivates if the canonical source/key returns)",
                         s->name ? s->name : "");
             continue;
         }
         if (!id_key_index_contains(&live_sprites, s->source_ref, s->src_key)) {
-            add_finding(fs, TP_VALIDATION_WARNING, TP_VALIDATION_CODE_ORPHAN_SPRITE, a->name, s->name, NULL, NULL, NULL,
+            add_finding(fs, TP_VALIDATION_WARNING,
+                        TP_VALIDATION_CODE_ORPHAN_SPRITE,
+                        context_sprite(a, s->source_ref, s->name),
                         "sprite override '%s' (key '%s') resolves to no current sprite "
                         "(orphaned; reactivates if the source key returns)",
                         s->name ? s->name : "", s->src_key);
@@ -778,8 +951,7 @@ static void validate_sprite_records(validation_builder *fs, const tp_project_atl
     }
     for (int i = 0; i < a->sprite_count; i++) {
         const tp_project_sprite *si = &a->sprites[i];
-        if (tp_id128_is_nil(si->source_ref) || !si->src_key ||
-            stored_source_key_status(si->src_key) != TP_STATUS_OK) {
+        if (stored_source_key_status(si->src_key) != TP_STATUS_OK) {
             continue;
         }
         bool duplicate = false;
@@ -788,7 +960,9 @@ static void validate_sprite_records(validation_builder *fs, const tp_project_atl
             break;
         }
         if (duplicate) {
-            add_finding(fs, TP_VALIDATION_WARNING, TP_VALIDATION_CODE_DUPLICATE_SPRITE_KEY, a->name, si->src_key, NULL, NULL, NULL,
+            add_finding(fs, TP_VALIDATION_WARNING,
+                        TP_VALIDATION_CODE_DUPLICATE_SPRITE_KEY,
+                        context_sprite(a, si->source_ref, si->src_key),
                         "two sprite overrides share the same (source, key) '%s'", si->src_key);
         }
     }
@@ -796,14 +970,11 @@ static void validate_sprite_records(validation_builder *fs, const tp_project_atl
         const tp_project_anim *pa = &a->animations[an];
         for (int f = 0; f < pa->frame_count; f++) {
             const tp_project_frame *fr = &pa->frames[f];
-            if (tp_id128_is_nil(fr->source_ref) || !fr->src_key) {
-                continue;
-            }
             const tp_status key_status = stored_source_key_status(fr->src_key);
             if (key_status != TP_STATUS_OK) {
                 add_finding(fs, TP_VALIDATION_ERROR,
-                            TP_VALIDATION_CODE_INVALID_FRAME_KEY, a->name,
-                            NULL, pa->name, fr->name, NULL,
+                            TP_VALIDATION_CODE_INVALID_FRAME_KEY,
+                            context_frame(a, pa, fr),
                             "animation '%s' frame '%s' has invalid canonical key '%s' (%s)",
                             pa->name ? pa->name : "",
                             fr->name ? fr->name : "", fr->src_key,
@@ -811,7 +982,9 @@ static void validate_sprite_records(validation_builder *fs, const tp_project_atl
                 continue;
             }
             if (!id_index_contains(&source_ids, fr->source_ref)) {
-                add_finding(fs, TP_VALIDATION_ERROR, TP_VALIDATION_CODE_FRAME_BAD_SOURCE, a->name, NULL, pa->name, fr->name, NULL,
+                add_finding(fs, TP_VALIDATION_ERROR,
+                            TP_VALIDATION_CODE_FRAME_BAD_SOURCE,
+                            context_frame(a, pa, fr),
                             "animation '%s' frame '%s' references a source id not in this atlas",
                             pa->name ? pa->name : "", fr->name ? fr->name : "");
             }
@@ -828,13 +1001,18 @@ static void validate_atlas(validation_builder *fs, const tp_project *p, int ai,
 
     /* (a) missing sources -- walk per-source so the finding names the offender. */
     for (int s = 0; s < a->source_count; s++) {
-        const char *sp = a->sources[s].path;
-        char abs[512];
+        const tp_project_source *source = &a->sources[s];
+        const char *sp = source->path;
+        char abs[TP_IDENTITY_PATH_MAX];
         if (tp_project_resolve_source_path(p, sp, abs, sizeof abs) != TP_STATUS_OK) {
-            add_finding(fs, TP_VALIDATION_ERROR, TP_VALIDATION_CODE_MISSING_SOURCE, a->name, NULL, NULL, NULL, NULL,
+            add_finding(fs, TP_VALIDATION_ERROR,
+                        TP_VALIDATION_CODE_MISSING_SOURCE,
+                        context_source(a, source),
                         "source '%s' cannot be resolved to an absolute path", sp);
         } else if (!tp_scan_exists(abs)) {
-            add_finding(fs, TP_VALIDATION_ERROR, TP_VALIDATION_CODE_MISSING_SOURCE, a->name, NULL, NULL, NULL, NULL,
+            add_finding(fs, TP_VALIDATION_ERROR,
+                        TP_VALIDATION_CODE_MISSING_SOURCE,
+                        context_source(a, source),
                         "source '%s' does not exist on disk", sp);
         }
     }
@@ -853,12 +1031,15 @@ static void validate_atlas(validation_builder *fs, const tp_project *p, int ai,
     if (index_status == TP_STATUS_OOM) {
         fs->oom = true;
     } else if (index_status != TP_STATUS_OK) {
-        add_finding(fs, TP_VALIDATION_ERROR, TP_VALIDATION_CODE_INPUT_BUILD_FAILED, a->name, NULL, NULL, NULL, NULL, "%s", ierr.msg);
+        add_finding(fs, TP_VALIDATION_ERROR,
+                    TP_VALIDATION_CODE_INPUT_BUILD_FAILED,
+                    context_atlas(a), "%s", ierr.msg);
     } else {
         int n = sidx.count;
         if (n == 0) {
             /* (b) an atlas that resolves no sprites packs nothing. */
-            add_finding(fs, TP_VALIDATION_WARNING, TP_VALIDATION_CODE_EMPTY_ATLAS, a->name, NULL, NULL, NULL, NULL,
+            add_finding(fs, TP_VALIDATION_WARNING,
+                        TP_VALIDATION_CODE_EMPTY_ATLAS, context_atlas(a),
                         "atlas has no usable sprites (no images resolved from its sources)");
         }
         /* keys[]/finals[] BORROW the index's export keys (and any project rename string) --
@@ -896,45 +1077,41 @@ static void validate_atlas(validation_builder *fs, const tp_project *p, int ai,
             fs->oom = true;
         } else {
             /* (d) two descs -> one export key: per-sprite overrides become ambiguous. */
-            report_duplicates(fs, a->name, keys, n, &key_index, TP_VALIDATION_WARNING, TP_VALIDATION_CODE_DUPLICATE_EXPORT_KEY,
+            report_duplicates(fs, a, keys, sidx.refs, n, &key_index,
+                              TP_VALIDATION_WARNING,
+                              TP_VALIDATION_CODE_DUPLICATE_EXPORT_KEY,
                               "map to export key");
             /* (e) two sprites -> one final name: tp_normalize would hard-error. */
-            report_duplicates(fs, a->name, finals, n, &final_index, TP_VALIDATION_ERROR, TP_VALIDATION_CODE_EXPORT_NAME_COLLISION,
+            report_duplicates(fs, a, finals, sidx.refs, n, &final_index,
+                              TP_VALIDATION_ERROR,
+                              TP_VALIDATION_CODE_EXPORT_NAME_COLLISION,
                               "resolve to export name");
-            /* (c) dangling anim frames: canonical refs match the exact source/key
-             * pair used by export. Only pending legacy frames consult the migration
-             * name, and only a unique match is live. */
+            /* (c) dangling animation frames use their canonical source/key. */
             for (int an = 0; an < a->animation_count; an++) {
                 const tp_project_anim *pa = &a->animations[an];
                 for (int f = 0; f < pa->frame_count; f++) {
                     const tp_project_frame *frame = &pa->frames[f];
                     const char *fr = frame->name ? frame->name : "";
                     bool found = false;
-                    int legacy_matches = 0;
-                    if (!tp_id128_is_nil(frame->source_ref) && frame->src_key &&
-                        stored_source_key_status(frame->src_key) == TP_STATUS_OK) {
+                    if (stored_source_key_status(frame->src_key) ==
+                        TP_STATUS_OK) {
                         found = tp_sprite_index_by_source_key(
                                     &sidx, frame->source_ref,
                                     frame->src_key) != NULL;
-                    } else if (!tp_id128_is_nil(frame->source_ref) &&
-                               frame->src_key) {
-                        continue; /* invalid-key finding is emitted by §5.6 below */
                     } else {
-                        found = tp_sprite_index_by_export_key(
-                                    &sidx, fr, &legacy_matches) != NULL &&
-                                legacy_matches == 1;
+                        continue; /* invalid-key finding is emitted by §5.6 below */
                     }
                     if (!found) {
-                        add_finding(fs, TP_VALIDATION_ERROR, TP_VALIDATION_CODE_DANGLING_ANIM_FRAME, a->name, NULL, pa->name, fr, NULL,
-                                    legacy_matches > 1
-                                        ? "animation '%s' references legacy frame '%s' ambiguously (%d sprites)"
-                                        : "animation '%s' references frame '%s' which matches no sprite export key",
-                                    pa->name, fr, legacy_matches);
+                        add_finding(fs, TP_VALIDATION_ERROR,
+                                    TP_VALIDATION_CODE_DANGLING_ANIM_FRAME,
+                                    context_frame(a, pa, frame),
+                                    "animation '%s' references frame '%s' which matches no canonical sprite",
+                                    pa->name, fr);
                     }
                 }
             }
             /* (h) §5.6 sprite-record integrity over the SAME resolved index. */
-            validate_sprite_records(fs, a, &sidx, &key_index);
+            validate_sprite_records(fs, a, &sidx);
         }
         free((void *)keys);
         free((void *)finals);
@@ -965,15 +1142,21 @@ static void validate_atlas(validation_builder *fs, const tp_project *p, int ai,
             tg->exporter_id, tg->enabled, tg->out_path,
             path_group && path_group->count > 1U);
         if ((issues & TARGET_ISSUE_UNKNOWN_EXPORTER) != 0U) {
-            add_finding(fs, TP_VALIDATION_ERROR, TP_VALIDATION_CODE_UNKNOWN_EXPORTER, a->name, NULL, NULL, NULL, tg->exporter_id,
+            add_finding(fs, TP_VALIDATION_ERROR,
+                        TP_VALIDATION_CODE_UNKNOWN_EXPORTER,
+                        context_target(a, tg),
                         "target references unknown exporter '%s'", tg->exporter_id);
         }
         if ((issues & TARGET_ISSUE_NO_OUT_PATH) != 0U) {
-            add_finding(fs, TP_VALIDATION_ERROR, TP_VALIDATION_CODE_TARGET_NO_OUT_PATH, a->name, NULL, NULL, NULL, tg->exporter_id,
+            add_finding(fs, TP_VALIDATION_ERROR,
+                        TP_VALIDATION_CODE_TARGET_NO_OUT_PATH,
+                        context_target(a, tg),
                         "target has no output path -- it cannot produce a file");
         }
         if ((issues & TARGET_ISSUE_DUPLICATE_OUT_PATH) != 0U) {
-            add_finding(fs, TP_VALIDATION_WARNING, TP_VALIDATION_CODE_DUPLICATE_OUT_PATH, a->name, NULL, NULL, NULL, tg->exporter_id,
+            add_finding(fs, TP_VALIDATION_WARNING,
+                        TP_VALIDATION_CODE_DUPLICATE_OUT_PATH,
+                        context_target(a, tg),
                         "two or more targets export to '%s' (they overwrite each other)", tg->out_path);
         }
     }
@@ -984,7 +1167,7 @@ static void validate_atlas(validation_builder *fs, const tp_project *p, int ai,
     if (tp_project_atlas_to_settings(p, ai, &sset, &serr) == TP_STATUS_OK) {
         if (!tp_pack_max_size_valid(sset.max_size)) {
             add_finding(fs, TP_VALIDATION_ERROR, TP_VALIDATION_CODE_SETTING_OUT_OF_RANGE,
-                        a->name, NULL, NULL, NULL, NULL,
+                        context_atlas(a),
                         "max_size = %d is out of range [1..%d]", sset.max_size,
                         TP_PACK_MAX_PAGE_DIM);
         }
@@ -994,50 +1177,61 @@ static void validate_atlas(validation_builder *fs, const tp_project *p, int ai,
         for (size_t i = 0U; i < sizeof nonnegative / sizeof nonnegative[0]; ++i) {
             if (!tp_pack_nonnegative_valid(nonnegative[i].value)) {
                 add_finding(fs, TP_VALIDATION_ERROR,
-                            TP_VALIDATION_CODE_SETTING_OUT_OF_RANGE, a->name,
-                            NULL, NULL, NULL, NULL, "%s = %d must be >= 0",
+                            TP_VALIDATION_CODE_SETTING_OUT_OF_RANGE,
+                            context_atlas(a), "%s = %d must be >= 0",
                             nonnegative[i].name, nonnegative[i].value);
             }
         }
         if (!tp_pack_alpha_threshold_valid(sset.alpha_threshold)) {
             add_finding(fs, TP_VALIDATION_ERROR, TP_VALIDATION_CODE_SETTING_OUT_OF_RANGE,
-                        a->name, NULL, NULL, NULL, NULL,
+                        context_atlas(a),
                         "alpha_threshold = %d is out of range [0..%d]",
                         sset.alpha_threshold, TP_PACK_ALPHA_MAX);
         }
         if (!tp_pack_max_vertices_valid(sset.max_vertices)) {
             add_finding(fs, TP_VALIDATION_ERROR, TP_VALIDATION_CODE_SETTING_OUT_OF_RANGE,
-                        a->name, NULL, NULL, NULL, NULL,
+                        context_atlas(a),
                         "max_vertices = %d is out of range [1..%d]",
                         sset.max_vertices, TP_PACK_MAX_VERTICES);
         }
         if (!tp_pack_shape_valid(sset.shape)) {
             add_finding(fs, TP_VALIDATION_ERROR, TP_VALIDATION_CODE_SETTING_OUT_OF_RANGE,
-                        a->name, NULL, NULL, NULL, NULL,
+                        context_atlas(a),
                         "shape = %d is out of range [%d..%d]", sset.shape,
                         TP_PACK_SHAPE_MIN, TP_PACK_SHAPE_MAX);
         }
         if (!tp_pack_pixels_per_unit_valid(sset.pixels_per_unit)) {
-            add_finding(fs, TP_VALIDATION_ERROR, TP_VALIDATION_CODE_SETTING_OUT_OF_RANGE, a->name, NULL, NULL, NULL, NULL,
+            add_finding(fs, TP_VALIDATION_ERROR,
+                        TP_VALIDATION_CODE_SETTING_OUT_OF_RANGE,
+                        context_atlas(a),
                         "pixels_per_unit must be positive and finite");
         }
         if (tp_pack_shape_valid(sset.shape) &&
             tp_pack_nonnegative_valid(sset.extrude) &&
             !tp_pack_extrude_shape_valid(sset.extrude, sset.shape)) {
             add_finding(fs, TP_VALIDATION_ERROR,
-                        TP_VALIDATION_CODE_SETTING_OUT_OF_RANGE, a->name,
-                        NULL, NULL, NULL, NULL,
+                        TP_VALIDATION_CODE_SETTING_OUT_OF_RANGE,
+                        context_atlas(a),
                         "extrude > 0 requires shape RECT");
         }
     }
 }
 
 
+static void findings_free(tp_validation_finding *findings, size_t count) {
+    if (findings) {
+        for (size_t i = 0U; i < count; ++i) {
+            free(findings[i].owned_storage);
+        }
+    }
+    free(findings);
+}
+
 void tp_validation_report_free(tp_validation_report *report) {
     if (!report) {
         return;
     }
-    free(report->findings);
+    findings_free(report->findings, report->finding_count);
     memset(report, 0, sizeof *report);
 }
 
@@ -1069,7 +1263,7 @@ static tp_status validate_project(const tp_project *project,
     add_truncation_summary(&builder);
 
     if (builder.oom) {
-        free(builder.v);
+        findings_free(builder.v, builder.n);
         return tp_error_set(err, TP_STATUS_OOM, "out of memory collecting validation findings");
     }
 

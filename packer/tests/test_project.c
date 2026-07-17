@@ -2,7 +2,8 @@
  *
  * Covers: programmatic round-trip (deep-equal + byte-identical re-save),
  * sparse storage (defaults absent from the text), determinism (same model ->
- * identical bytes), version refusal + malformed + forward-compat, absolute->
+ * identical bytes), version refusal + malformed + closed-schema rejection,
+ * absolute->
  * relative path handling with '/' separators, resolve_path, and the
  * atlas->tp_pack_settings bridge. A scratch dir is passed as argv[1].
  *
@@ -34,7 +35,7 @@
 #include "tp_core/tp_identity.h"
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_project.h"
-#include "tp_core/tp_project_migrate.h"
+#include "tp_project_identity_internal.h"
 #include "unity.h"
 #include "../src/tp_project_internal.h"
 #include "tp_project_mutation_internal.h"
@@ -46,12 +47,11 @@ void tearDown(void) {}
 
 static const char *g_dir;
 
-/* A writable session assigns final IDs before saving (master spec §5.5). Tests
- * that build a project programmatically and save it promote first, so the saved
- * file carries non-nil structural IDs and round-trips. */
-static void promote(tp_project *p) {
+/* A writable session assigns final IDs before publication. Test fixtures use
+ * the same private candidate boundary before invoking a save primitive. */
+static void assign_ids(tp_project *p) {
     tp_rng rng = tp_rng_os();
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_promote_ids(p, &rng, NULL));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_assign_missing_ids(p, &rng, NULL));
 }
 
 static size_t append_json(char *buffer, size_t capacity, size_t used,
@@ -74,12 +74,12 @@ static size_t append_json(char *buffer, size_t capacity, size_t used,
 
 void test_project_load_lookup_work_is_linear(void) {
     enum { RECORDS = 512 };
-    const size_t capacity = (size_t)RECORDS * 160U + 256U;
+    const size_t capacity = (size_t)RECORDS * 256U + 256U;
     char *json = (char *)malloc(capacity);
     TEST_ASSERT_NOT_NULL(json);
     size_t used = append_json(
         json, capacity, 0U,
-        "{\"version\":4,\"atlases\":[{\"id\":\"atlas_"
+        "{\"version\":5,\"atlases\":[{\"id\":\"atlas_"
         "ffffffffffffffffffffffffffffffff\",\"name\":\"a\","
         "\"sources\":[", 0U);
     for (unsigned i = 0U; i < (unsigned)RECORDS; i++) {
@@ -91,12 +91,11 @@ void test_project_load_lookup_work_is_linear(void) {
     }
     used = append_json(json, capacity, used, "],\"sprites\":[", 0U);
     for (unsigned i = 0U; i < (unsigned)RECORDS; i++) {
-        used = append_json(json, capacity, used,
-                           "%s{\"name\":\"sprite-",
-                           i == 0U ? "" : ",");
         used = append_json(
             json, capacity, used,
-            "%u\",\"origin\":[0.25,0.5]}", i);
+            "%s{\"key\":\"sprite-%u.png\",\"origin\":[0.25,0.5],"
+            "\"source\":\"source_%032x\"}",
+            i == 0U ? "" : ",", i, i + 1U);
     }
     used = append_json(json, capacity, used, "]}]}", 0U);
 
@@ -116,40 +115,15 @@ void test_project_load_lookup_work_is_linear(void) {
     TEST_ASSERT_LESS_OR_EQUAL_size_t(
         (size_t)RECORDS * 8U, work.source_path_comparisons);
     TEST_ASSERT_LESS_OR_EQUAL_size_t(
-        (size_t)RECORDS * 8U, work.pending_name_comparisons);
-    TEST_ASSERT_LESS_OR_EQUAL_size_t(
         ((size_t)RECORDS + 1U) * 8U, id_probes);
     TEST_ASSERT_GREATER_THAN_size_t(0U, resources.source_index_peak_bytes);
-    TEST_ASSERT_GREATER_THAN_size_t(0U, resources.pending_index_peak_bytes);
     TEST_ASSERT_GREATER_THAN_size_t(0U, resources.id_refs_bytes);
     TEST_ASSERT_GREATER_THAN_size_t(0U, resources.id_index_bytes);
-    TEST_ASSERT_EQUAL_size_t(0U, resources.legacy_peak_bytes);
     TEST_ASSERT_EQUAL_INT(RECORDS, project->atlases[0].source_count);
     TEST_ASSERT_EQUAL_INT(RECORDS, project->atlases[0].sprite_count);
 
     tp_project_destroy(project);
     free(json);
-}
-
-void test_legacy_load_reports_bounded_synthesis_storage(void) {
-    static const char json[] =
-        "{\"version\":1,\"atlases\":[{\"name\":\"a\","
-        "\"sources\":[\"one\",\"two\"]}]}";
-    tp_project__test_load_resources_reset();
-    tp_project *project = NULL;
-    tp_error error = {{0}};
-    TEST_ASSERT_EQUAL_INT_MESSAGE(
-        TP_STATUS_OK,
-        tp_project_load_buffer(json, sizeof json - 1U, &project, &error),
-        error.msg);
-    const tp_project_load_resources resources =
-        tp_project__test_load_resources_take();
-    TEST_ASSERT_GREATER_THAN_size_t(0U, resources.source_index_peak_bytes);
-    TEST_ASSERT_EQUAL_size_t(0U, resources.pending_index_peak_bytes);
-    TEST_ASSERT_GREATER_THAN_size_t(0U, resources.id_refs_bytes);
-    TEST_ASSERT_GREATER_THAN_size_t(0U, resources.id_index_bytes);
-    TEST_ASSERT_GREATER_THAN_size_t(0U, resources.legacy_peak_bytes);
-    tp_project_destroy(project);
 }
 
 static uint64_t test_load_hash(const char *key) {
@@ -178,13 +152,13 @@ void test_project_load_adversarial_hash_cluster_is_bounded(void) {
     char json[8192];
     size_t used = append_json(
         json, sizeof json, 0U,
-        "{\"version\":4,\"atlases\":[{\"id\":\"atlas_"
+        "{\"version\":5,\"atlases\":[{\"id\":\"atlas_"
         "ffffffffffffffffffffffffffffffff\",\"name\":\"a\","
-        "\"sprites\":[");
+        "\"sources\":[");
     for (unsigned i = 0U; i < (unsigned)RECORDS; i++) {
         used = append_json(json, sizeof json, used,
-                           "%s{\"name\":\"%s\"}", i == 0U ? "" : ",",
-                           keys[i]);
+                           "%s{\"id\":\"source_%032x\",\"path\":\"%s\"}",
+                           i == 0U ? "" : ",", i + 1U, keys[i]);
     }
     used = append_json(json, sizeof json, used, "]}]}");
 
@@ -198,73 +172,12 @@ void test_project_load_adversarial_hash_cluster_is_bounded(void) {
         tp_project__test_load_lookup_work_take();
     TEST_ASSERT_NULL(project);
     TEST_ASSERT_LESS_OR_EQUAL_size_t(
-        (size_t)RECORDS * 64U, work.pending_name_comparisons);
-}
-
-void test_legacy_load_rejects_overlong_source_paths(void) {
-    char path[4097];
-    memset(path, 'a', sizeof path - 1U);
-    path[sizeof path - 1U] = '\0';
-
-    char json[4600];
-    for (unsigned version = 1U; version <= 2U; version++) {
-        size_t used = append_json(
-            json, sizeof json, 0U,
-            "{\"version\":%u,\"atlases\":[{\"name\":\"a\"", version);
-        if (version == 2U) {
-            used = append_json(
-                json, sizeof json, used,
-                ",\"id\":\"atlas_ffffffffffffffffffffffffffffffff\"");
-        }
-        used = append_json(json, sizeof json, used,
-                           ",\"sources\":[\"%s\"]}]}", path);
-        tp_project *project = NULL;
-        tp_error error = {{0}};
-        TEST_ASSERT_EQUAL_INT(
-            TP_STATUS_OUT_OF_BOUNDS,
-            tp_project_load_buffer(json, used, &project, &error));
-        TEST_ASSERT_NULL(project);
-    }
-}
-
-void test_v3_overlong_source_records_bypass_dedupe_index(void) {
-    enum { RECORDS = 65, PATH_BYTES = 4096 };
-    char path[PATH_BYTES + 1];
-    memset(path, 'a', PATH_BYTES);
-    path[PATH_BYTES] = '\0';
-    const size_t capacity =
-        (size_t)RECORDS * ((size_t)PATH_BYTES + 96U) + 256U;
-    char *json = (char *)malloc(capacity);
-    TEST_ASSERT_NOT_NULL(json);
-    size_t used = append_json(
-        json, capacity, 0U,
-        "{\"version\":3,\"atlases\":[{\"id\":\"atlas_"
-        "ffffffffffffffffffffffffffffffff\",\"name\":\"a\","
-        "\"sources\":[");
-    for (unsigned i = 0U; i < (unsigned)RECORDS; i++) {
-        used = append_json(
-            json, capacity, used,
-            "%s{\"id\":\"source_%032x\",\"path\":\"%s\"}",
-            i == 0U ? "" : ",", i + 1U, path);
-    }
-    used = append_json(json, capacity, used, "]}]}");
-
-    tp_project *project = NULL;
-    tp_error error = {{0}};
-    TEST_ASSERT_EQUAL_INT_MESSAGE(
-        TP_STATUS_OK,
-        tp_project_load_buffer(json, used, &project, &error), error.msg);
-    TEST_ASSERT_EQUAL_INT(RECORDS, project->atlases[0].source_count);
-    TEST_ASSERT_EQUAL_STRING(path, project->atlases[0].sources[0].path);
-    TEST_ASSERT_EQUAL_STRING(
-        path, project->atlases[0].sources[RECORDS - 1].path);
-    tp_project_destroy(project);
-    free(json);
+        (size_t)RECORDS * 64U, work.source_path_comparisons);
 }
 
 void test_json_admission_exact_limits_and_escaped_punctuation(void) {
     static const char json[] =
-        "{\"version\":4,\"x\":\"[,{\\\"}]\"}";
+        "{\"version\":5,\"x\":\"[,{\\\"}]\"}";
     const tp_project_json_limits limits = {
         sizeof json - 1U, 5U, 2U, 1U,
     };
@@ -276,9 +189,9 @@ void test_json_admission_exact_limits_and_escaped_punctuation(void) {
 
 void test_json_admission_rejects_nodes_entries_and_depth(void) {
     static const char node_bomb[] =
-        "{\"version\":4,\"x\":[0,0,0]}";
+        "{\"version\":5,\"x\":[0,0,0]}";
     static const char depth_bomb[] =
-        "{\"version\":4,\"x\":[[0]]}";
+        "{\"version\":5,\"x\":[[0]]}";
     tp_error error = {{0}};
 
     const tp_project_json_limits node_limits = {
@@ -323,6 +236,7 @@ void test_json_admission_rejects_byte_limit_before_buffer_access(void) {
 void test_save_buffers_obey_project_json_admission_limits(void) {
     tp_project *project = tp_project_create();
     TEST_ASSERT_NOT_NULL(project);
+    assign_ids(project);
     char *bytes = NULL;
     size_t length = 0U;
     tp_error error = {{0}};
@@ -351,6 +265,7 @@ void test_save_buffers_obey_project_json_admission_limits(void) {
 void test_save_buffer_stops_at_byte_limit_before_growth(void) {
     tp_project *project = tp_project_create();
     TEST_ASSERT_NOT_NULL(project);
+    assign_ids(project);
     const tp_project_json_limits limits = {1U, SIZE_MAX, SIZE_MAX, 64U};
     char *bytes = NULL;
     size_t length = 0U;
@@ -365,6 +280,35 @@ void test_save_buffer_stops_at_byte_limit_before_growth(void) {
     TEST_ASSERT_EQUAL_size_t(1U, tp_project__test_serializer_allocations());
     TEST_ASSERT_EQUAL_size_t(2U,
                              tp_project__test_serializer_peak_capacity());
+    tp_project_destroy(project);
+}
+
+void test_save_buffer_rejects_invalid_utf8_before_emitting_unloadable_json(void) {
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    assign_ids(project);
+    tp_project_atlas *atlas = tp_project_get_atlas(project, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    free(atlas->name);
+    atlas->name = (char *)malloc(4U);
+    TEST_ASSERT_NOT_NULL(atlas->name);
+    atlas->name[0] = 'b';
+    atlas->name[1] = (char)0xC3;
+    atlas->name[2] = 'x';
+    atlas->name[3] = '\0';
+
+    char *bytes = NULL;
+    size_t length = 0U;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_BAD_PROJECT,
+                          tp_project_validate_canonical(project, &error));
+    memset(&error, 0, sizeof error);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_BAD_PROJECT,
+                          tp_project_save_buffer(project, &bytes, &length,
+                                                 &error));
+    TEST_ASSERT_NULL(bytes);
+    TEST_ASSERT_EQUAL_size_t(0U, length);
+    TEST_ASSERT_NOT_NULL(strstr(error.msg, "UTF-8"));
     tp_project_destroy(project);
 }
 
@@ -422,9 +366,14 @@ static tp_project *build_rich(void) {
     hero->name = dupstr("hero");
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_source(hero, "art/hero"));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_source(hero, "art/enemies"));
+    assign_ids(p);
+    const tp_id128 hero_source_id = hero->sources[0].id;
 
     tp_project_sprite *sp = NULL;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_pending_sprite(hero, "hero/walk_01", &sp));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_sprite_by_source_key(
+            hero, hero_source_id, "hero/walk_01.png", &sp));
     sp->origin_x = 0.25F;
     sp->origin_y = 0.75F;
     sp->slice9_lrtb[0] = 4;
@@ -441,8 +390,12 @@ static tp_project *build_rich(void) {
 
     tp_project_anim *an = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_animation(hero, "walk", &an));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "hero/walk_01"));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "hero/walk_02"));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_anim_add_frame(an, hero_source_id, "hero/walk_01.png"));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_anim_add_frame(an, hero_source_id, "hero/walk_02.png"));
     an->fps = 24.0F;
     an->playback = 1;
     an->flip_h = true;
@@ -467,7 +420,7 @@ static tp_project *build_rich(void) {
     ui->power_of_two = false;
     ui->pixels_per_unit = 2.0F;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_source(ui, "art/ui"));
-    promote(p); /* assign final structural IDs before any save (writable session) */
+    assign_ids(p);
     return p;
 }
 
@@ -494,6 +447,10 @@ static void assert_atlas_equal(const tp_project_atlas *a, const tp_project_atlas
     TEST_ASSERT_EQUAL_INT(a->sprite_count, b->sprite_count);
     for (int i = 0; i < a->sprite_count; i++) {
         TEST_ASSERT_EQUAL_STRING(a->sprites[i].name, b->sprites[i].name);
+        TEST_ASSERT_TRUE(tp_id128_eq(a->sprites[i].source_ref,
+                                     b->sprites[i].source_ref));
+        TEST_ASSERT_EQUAL_STRING(a->sprites[i].src_key,
+                                 b->sprites[i].src_key);
         feq(a->sprites[i].origin_x, b->sprites[i].origin_x);
         feq(a->sprites[i].origin_y, b->sprites[i].origin_y);
         for (int k = 0; k < 4; k++) {
@@ -522,6 +479,11 @@ static void assert_atlas_equal(const tp_project_atlas *a, const tp_project_atlas
         TEST_ASSERT_EQUAL_INT(a->animations[i].frame_count, b->animations[i].frame_count);
         for (int k = 0; k < a->animations[i].frame_count; k++) {
             TEST_ASSERT_EQUAL_STRING(a->animations[i].frames[k].name, b->animations[i].frames[k].name);
+            TEST_ASSERT_TRUE(tp_id128_eq(
+                a->animations[i].frames[k].source_ref,
+                b->animations[i].frames[k].source_ref));
+            TEST_ASSERT_EQUAL_STRING(a->animations[i].frames[k].src_key,
+                                     b->animations[i].frames[k].src_key);
         }
     }
     TEST_ASSERT_EQUAL_INT(a->target_count, b->target_count);
@@ -534,7 +496,6 @@ static void assert_atlas_equal(const tp_project_atlas *a, const tp_project_atlas
 }
 
 static void assert_project_equal(const tp_project *a, const tp_project *b) {
-    TEST_ASSERT_EQUAL_INT(a->schema_version, b->schema_version);
     TEST_ASSERT_EQUAL_INT(a->atlas_count, b->atlas_count);
     for (int i = 0; i < a->atlas_count; i++) {
         assert_atlas_equal(&a->atlases[i], &b->atlases[i]);
@@ -583,18 +544,24 @@ void test_sparse_defaults_absent(void) {
     tp_project *p = tp_project_create(); /* atlas "atlas1", all-default knobs */
     tp_project_atlas *a = tp_project_get_atlas(p, 0);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_source(a, "art"));
+    assign_ids(p);
+    const tp_id128 source_id = a->sources[0].id;
 
     tp_project_sprite *sp = NULL; /* origin only -> slice9 stays default */
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_pending_sprite(a, "s1", &sp));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_sprite_by_source_key(a, source_id, "s1.png",
+                                                  &sp));
     sp->origin_x = 0.1F;
 
     tp_project_anim *an = NULL; /* default fps/playback/flips */
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_animation(a, "idle", &an));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "s1"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_anim_add_frame(an, source_id, "s1.png"));
 
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(a, "json-neotolis", "out.json", NULL));
 
-    promote(p);
+    assign_ids(p);
     tp_error err = {0};
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_save(p, path, &err));
 
@@ -615,7 +582,7 @@ void test_sparse_defaults_absent(void) {
     TEST_ASSERT_NULL(strstr(buf, "flip_h"));
     TEST_ASSERT_NULL(strstr(buf, "enabled")); /* target enabled default true */
     /* present, non-default */
-    TEST_ASSERT_NOT_NULL(strstr(buf, "\"version\": 4"));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"version\": 5"));
     TEST_ASSERT_NULL(strstr(buf, "\"kind\"")); /* source kept the folder default -> kind omitted (sparse) */
     TEST_ASSERT_NOT_NULL(strstr(buf, "origin"));
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"frames\""));
@@ -649,11 +616,11 @@ void test_determinism(void) {
     tp_project_destroy(p);
 }
 
-/* 4a. newer schema version is refused (schema v4 is current -> use a future v5) */
+/* 4a. a newer schema version is refused. */
 void test_version_newer_refused(void) {
     char path[512];
-    join(path, sizeof path, "v5.ntpacker_project");
-    write_text(path, "{\n  \"version\": 5,\n  \"atlases\": []\n}\n");
+    join(path, sizeof path, "v6.ntpacker_project");
+    write_text(path, "{\n  \"version\": 6,\n  \"atlases\": []\n}\n");
 
     tp_project *loaded = NULL;
     tp_error err = {0};
@@ -680,7 +647,10 @@ void test_malformed_bad_project(void) {
 void test_wrong_type_bad_project(void) {
     char path[512];
     join(path, sizeof path, "wrongtype.ntpacker_project");
-    write_text(path, "{\n  \"version\": 1,\n  \"atlases\": [ { \"name\": \"a\", \"padding\": \"oops\" } ]\n}\n");
+    write_text(path,
+               "{\n  \"version\": 5,\n  \"atlases\": [ {"
+               " \"id\": \"atlas_00000000000000000000000000000001\","
+               " \"name\": \"a\", \"padding\": \"oops\" } ]\n}\n");
 
     tp_project *loaded = NULL;
     tp_error err = {0};
@@ -705,21 +675,31 @@ static void assert_project_json_rejected(const char *json) {
     TEST_ASSERT_TRUE_MESSAGE(err.msg[0] != '\0', json);
 }
 
+#define TEST_CANON_ATLAS_HEAD                                                   \
+    "{\"version\":5,\"atlases\":[{"                                      \
+    "\"id\":\"atlas_00000000000000000000000000000001\","                \
+    "\"name\":\"a\","
+#define TEST_CANON_SPRITE_HEAD                                                  \
+    TEST_CANON_ATLAS_HEAD                                                       \
+    "\"sources\":[{"                                                        \
+    "\"id\":\"source_00000000000000000000000000000002\","               \
+    "\"path\":\"sprites\"}],\"sprites\":[{"                          \
+    "\"key\":\"hero.png\",\"source\":"                              \
+    "\"source_00000000000000000000000000000002\","
+
 void test_loader_rejects_trailing_non_whitespace(void) {
     assert_project_json_rejected(
-        "{\"version\":4,\"atlases\":[]} trailing");
+        "{\"version\":5,\"atlases\":[]} trailing");
 }
 
 void test_loader_rejects_non_finite_atlas_float(void) {
     assert_project_json_rejected(
-        "{\"version\":1,\"atlases\":[{\"name\":\"a\","
-        "\"pixels_per_unit\":1e999}]}");
+        TEST_CANON_ATLAS_HEAD "\"pixels_per_unit\":1e999}]}");
 }
 
 void test_loader_rejects_non_finite_sprite_origin(void) {
     assert_project_json_rejected(
-        "{\"version\":1,\"atlases\":[{\"name\":\"a\",\"sprites\":["
-        "{\"name\":\"hero\",\"origin\":[1e999,0.5]}]}]}");
+        TEST_CANON_SPRITE_HEAD "\"origin\":[1e999,0.5]}]}]}");
 }
 
 void test_loader_rejects_fractional_version(void) {
@@ -729,64 +709,76 @@ void test_loader_rejects_fractional_version(void) {
 
 void test_loader_rejects_fractional_padding(void) {
     assert_project_json_rejected(
-        "{\"version\":1,\"atlases\":[{\"name\":\"a\",\"padding\":1.5}]}");
+        TEST_CANON_ATLAS_HEAD "\"padding\":1.5}]}");
 }
 
 void test_loader_rejects_out_of_int_range_max_size(void) {
     assert_project_json_rejected(
-        "{\"version\":1,\"atlases\":[{\"name\":\"a\","
-        "\"max_size\":2147483648}]}");
+        TEST_CANON_ATLAS_HEAD "\"max_size\":2147483648}]}");
+}
+
+void test_direct_project_file_io_rejects_invalid_utf8_path(void) {
+    const char invalid[] = {'t', 'p', '_', (char)0xc3, 'x', '\0'};
+    tp_error error = {{0}};
+    tp_project *loaded = (tp_project *)(uintptr_t)1U;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_UTF8,
+                          tp_project_load(invalid, &loaded, &error));
+    TEST_ASSERT_NULL(loaded);
+
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    memset(&error, 0, sizeof error);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_UTF8,
+                          tp_project_save(project, invalid, &error));
+    tp_project_destroy(project);
 }
 
 void test_loader_rejects_out_of_int_range_padding(void) {
     assert_project_json_rejected(
-        "{\"version\":1,\"atlases\":[{\"name\":\"a\","
-        "\"padding\":2147483648}]}");
+        TEST_CANON_ATLAS_HEAD "\"padding\":2147483648}]}");
 }
 
 void test_loader_rejects_non_numeric_origin_items(void) {
     assert_project_json_rejected(
-        "{\"version\":1,\"atlases\":[{\"name\":\"a\",\"sprites\":["
-        "{\"name\":\"hero\",\"origin\":[\"left\",null]}]}]}");
+        TEST_CANON_SPRITE_HEAD "\"origin\":[\"left\",null]}]}]}");
 }
 
 void test_loader_rejects_non_numeric_slice9_items(void) {
     assert_project_json_rejected(
-        "{\"version\":1,\"atlases\":[{\"name\":\"a\",\"sprites\":["
-        "{\"name\":\"hero\",\"slice9\":[1,\"right\",3,null]}]}]}");
+        TEST_CANON_SPRITE_HEAD "\"slice9\":[1,\"right\",3,null]}]}]}");
 }
 
 void test_loader_rejects_fractional_slice9_items(void) {
     assert_project_json_rejected(
-        "{\"version\":1,\"atlases\":[{\"name\":\"a\",\"sprites\":["
-        "{\"name\":\"hero\",\"slice9\":[1.5,2,3,4]}]}]}");
+        TEST_CANON_SPRITE_HEAD "\"slice9\":[1.5,2,3,4]}]}]}");
 }
 
 void test_loader_rejects_out_of_uint16_range_slice9_items(void) {
     assert_project_json_rejected(
-        "{\"version\":1,\"atlases\":[{\"name\":\"a\",\"sprites\":["
-        "{\"name\":\"hero\",\"slice9\":[65536,2,3,4]}]}]}");
+        TEST_CANON_SPRITE_HEAD "\"slice9\":[65536,2,3,4]}]}]}");
 }
 
-/* 4d. unknown extra keys ignored (forward compat) */
-void test_unknown_keys_ignored(void) {
+/* 4d. canonical v5 is a closed schema: typo fields must not survive load only
+ * to disappear on save. */
+void test_unknown_keys_rejected_before_lossy_roundtrip(void) {
     char path[512];
     join(path, sizeof path, "future.ntpacker_project");
     write_text(path,
                "{\n"
-               "  \"version\": 1,\n"
+               "  \"version\": 5,\n"
                "  \"future_root\": 42,\n"
-               "  \"atlases\": [ { \"name\": \"a\", \"future_atlas\": true, \"padding\": 3 } ]\n"
+               "  \"atlases\": [ { \"id\": "
+               "\"atlas_00000000000000000000000000000001\", "
+               "\"name\": \"a\", \"future_atlas\": true, "
+               "\"padding\": 3 } ]\n"
                "}\n");
 
     tp_project *loaded = NULL;
     tp_error err = {0};
-    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, tp_project_load(path, &loaded, &err), err.msg);
-    TEST_ASSERT_NOT_NULL(loaded);
-    TEST_ASSERT_EQUAL_INT(1, loaded->atlas_count);
-    TEST_ASSERT_EQUAL_STRING("a", loaded->atlases[0].name);
-    TEST_ASSERT_EQUAL_INT(3, loaded->atlases[0].padding);
-    tp_project_destroy(loaded);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_BAD_PROJECT,
+                          tp_project_load(path, &loaded, &err));
+    TEST_ASSERT_NULL(loaded);
+    TEST_ASSERT_NOT_NULL(strstr(err.msg, "unknown"));
 }
 
 /* 5. absolute source path loads; save relativizes it; output uses '/' */
@@ -802,7 +794,11 @@ void test_absolute_path_relativized(void) {
     /* an absolute source under the project dir -> relativizes to "art/hero" */
     char json[1600];
     (void)snprintf(json, sizeof json,
-                   "{\n  \"version\": 1,\n  \"atlases\": [ { \"name\": \"a\", \"sources\": [ \"%s/art/hero\" ] } ]\n}\n",
+                   "{\n  \"version\": 5,\n  \"atlases\": [ {"
+                   " \"id\": \"atlas_00000000000000000000000000000001\","
+                   " \"name\": \"a\", \"sources\": [ {"
+                   " \"id\": \"source_00000000000000000000000000000002\","
+                   " \"path\": \"%s/art/hero\" } ] } ]\n}\n",
                    norm_dir);
 
     char path[512];
@@ -841,7 +837,7 @@ void test_resolve_path(void) {
     join(path, sizeof path, "resolve.ntpacker_project");
 
     tp_project *p = tp_project_create();
-    promote(p);
+    assign_ids(p);
     tp_error err = {0};
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_save(p, path, &err)); /* sets project_dir */
     TEST_ASSERT_NOT_NULL(p->project_dir);
@@ -887,7 +883,7 @@ void test_save_as_preserves_relative_source_target(void) {
         tp_project_atlas_add_target(&project->atlases[0],
                                     TP_EXPORTER_ID_JSON_NEOTOLIS,
                                     "out/atlas", NULL));
-    promote(project);
+    assign_ids(project);
     tp_error err = {0};
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_project_save(project, old_path, &err));
@@ -981,14 +977,32 @@ void test_to_settings_mapping(void) {
 void test_mutation_helpers(void) {
     tp_project *p = tp_project_create();
     tp_project_atlas *a = tp_project_get_atlas(p, 0);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_source(a, "sprites"));
+    assign_ids(p);
+    const tp_id128 source_id = a->sources[0].id;
 
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_pending_sprite(a, "dup", NULL));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_pending_sprite(a, "dup", NULL)); /* idempotent */
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_sprite_by_source_key(a, source_id, "dup.png",
+                                                  NULL));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_sprite_by_source_key(a, source_id, "dup.png",
+                                                  NULL));
     TEST_ASSERT_EQUAL_INT(1, a->sprite_count);
-    TEST_ASSERT_NOT_NULL(tp_project_atlas_find_pending_sprite(a, "dup"));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_remove_pending_sprite(a, "dup"));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS, tp_project_atlas_remove_pending_sprite(a, "dup"));
-    TEST_ASSERT_NULL(tp_project_atlas_find_pending_sprite(a, "dup"));
+    TEST_ASSERT_NOT_NULL(tp_project_atlas_find_sprite_by_source_key(
+        a, source_id, "dup.png"));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_remove_sprite_by_source_key(a, source_id,
+                                                     "dup.png"));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_project_atlas_remove_sprite_by_source_key(a, source_id,
+                                                     "dup.png"));
+    TEST_ASSERT_NULL(tp_project_atlas_find_sprite_by_source_key(
+        a, source_id, "dup.png"));
 
     int idx = 0;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_add_atlas(p, "extra", &idx));
@@ -1004,13 +1018,21 @@ void test_mutation_helpers(void) {
 void test_anim_frame_edit(void) {
     tp_project *p = tp_project_create();
     tp_project_atlas *a = tp_project_get_atlas(p, 0);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_source(a, "sprites"));
+    assign_ids(p);
+    const tp_id128 source_id = a->sources[0].id;
 
     tp_project_anim *an = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_animation(a, "walk", &an));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "f0"));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "f1"));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "f2"));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "f3"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_anim_add_frame(an, source_id, "f0"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_anim_add_frame(an, source_id, "f1"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_anim_add_frame(an, source_id, "f2"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_anim_add_frame(an, source_id, "f3"));
     TEST_ASSERT_EQUAL_INT(4, an->frame_count);
 
     /* move first frame down by 2 -> f1,f2,f0,f3 */
@@ -1077,7 +1099,7 @@ void test_buffer_roundtrip(void) {
 
 void test_serialized_size_bounded_matches_writer_without_materialization(void) {
     tp_project *p = build_rich();
-    promote(p);
+    assign_ids(p);
     tp_error err = {0};
     size_t measured = 0U;
 
@@ -1146,7 +1168,7 @@ void test_source_kind_roundtrip(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_project_atlas_add_source_kind(a, "art/one.png", TP_SOURCE_KIND_FILE)); /* file */
     TEST_ASSERT_EQUAL_INT(2, a->source_count);
-    promote(p); /* assign real ids to the fresh sources */
+    assign_ids(p);
     TEST_ASSERT_FALSE(tp_id128_is_nil(a->sources[0].id));
     TEST_ASSERT_FALSE(tp_id128_is_nil(a->sources[1].id));
 
@@ -1173,118 +1195,50 @@ void test_source_kind_roundtrip(void) {
     tp_project_destroy(p);
 }
 
-/* 9c (F1-02 Fix A). A hand-written/corrupt v3 file that lists the same path twice
- * (two source objects with distinct valid ids) loads with the duplicate collapsed
- * to the FIRST object -- else `pack` (which does NOT run validate) would scan the
- * folder twice and double every sprite. The later object's id is dropped. */
-void test_v3_source_dup_collapse(void) {
-    /* 32-hex ids written as 4x8 concatenated literals so the length is self-evident. */
-    static const char v3_dup[] =
-        "{\n"
-        "  \"version\": 3,\n"
-        "  \"atlases\": [\n"
-        "    {\n"
-        "      \"name\": \"a1\",\n"
-        "      \"id\": \"atlas_"
-        "00000000"
-        "00000000"
-        "00000000"
-        "00000abc"
-        "\",\n"
-        "      \"sources\": [\n"
-        "        { \"id\": \"source_"
-        "00000000"
-        "00000000"
-        "00000000"
-        "00000001"
-        "\", \"path\": \"dup/path\" },\n"
-        "        { \"id\": \"source_"
-        "00000000"
-        "00000000"
-        "00000000"
-        "00000002"
-        "\", \"path\": \"dup\\\\path\" }\n"
-        "      ]\n"
-        "    }\n"
-        "  ]\n"
-        "}\n";
-    tp_project *p = NULL;
-    tp_error err = {0};
-    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, tp_project_load_buffer(v3_dup, sizeof v3_dup - 1U, &p, &err), err.msg);
-    tp_project_atlas *a = tp_project_get_atlas(p, 0);
-    TEST_ASSERT_EQUAL_INT(1, a->source_count); /* duplicate path collapsed */
-    TEST_ASSERT_EQUAL_STRING("dup/path", a->sources[0].path);
-
-    /* The FIRST object survives; the later object's id is dropped. */
-    tp_id_kind k = TP_ID_KIND_INVALID;
-    tp_id128 id1;
-    tp_id128 id2;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_id_parse("source_"
-                                      "00000000"
-                                      "00000000"
-                                      "00000000"
-                                      "00000001",
-                                      &k, &id1, NULL));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_id_parse("source_"
-                                      "00000000"
-                                      "00000000"
-                                      "00000000"
-                                      "00000002",
-                                      &k, &id2, NULL));
-    TEST_ASSERT_TRUE(tp_id128_eq(a->sources[0].id, id1));
-    TEST_ASSERT_FALSE(tp_id128_eq(a->sources[0].id, id2));
-
-    tp_project_destroy(p);
-}
-
-void test_pending_sprite_duplicates_keep_first_position_and_merge_fields(void) {
-    static const char json[] =
-        "{\"version\":4,\"atlases\":[{"
-        "\"id\":\"atlas_ffffffffffffffffffffffffffffffff\","
-        "\"name\":\"a\",\"sprites\":["
-        "{\"name\":\"hero\",\"origin\":[0.25,0.5]},"
-        "{\"name\":\"one\"},{\"name\":\"two\"},{\"name\":\"three\"},"
-        "{\"name\":\"four\"},{\"name\":\"five\"},{\"name\":\"six\"},"
-        "{\"name\":\"seven\"},{\"name\":\"eight\"},{\"name\":\"nine\"},"
-        "{\"name\":\"hero\",\"rename\":\"champ\"}]}]}";
-    tp_project *project = NULL;
-    tp_error error = {{0}};
-    TEST_ASSERT_EQUAL_INT_MESSAGE(
-        TP_STATUS_OK,
-        tp_project_load_buffer(json, sizeof json - 1U, &project, &error),
-        error.msg);
-    const tp_project_atlas *atlas = &project->atlases[0];
-    TEST_ASSERT_EQUAL_INT(10, atlas->sprite_count);
-    TEST_ASSERT_TRUE(fabsf(atlas->sprites[0].origin_x - 0.25F) < EPS);
-    TEST_ASSERT_TRUE(fabsf(atlas->sprites[0].origin_y - 0.5F) < EPS);
-    TEST_ASSERT_EQUAL_STRING("champ", atlas->sprites[0].rename);
-    tp_project_destroy(project);
-}
-
 /* 10. sprite rename override: set creates the sparse entry; clear removes it when
  * the entry would then hold only defaults, else keeps it. */
 void test_sprite_rename_override(void) {
     tp_project *p = tp_project_create();
     tp_project_atlas *a = tp_project_get_atlas(p, 0);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_source(a, "sprites"));
+    assign_ids(p);
+    const tp_id128 source_id = a->sources[0].id;
 
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_set_pending_sprite_rename(a, "walk_01", "hero_walk"));
-    tp_project_sprite *s = tp_project_atlas_find_pending_sprite(a, "walk_01");
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_set_sprite_rename_by_source_key(
+            a, source_id, "walk_01.png", "hero_walk"));
+    tp_project_sprite *s = tp_project_atlas_find_sprite_by_source_key(
+        a, source_id, "walk_01.png");
     TEST_ASSERT_NOT_NULL(s);
     TEST_ASSERT_EQUAL_STRING("hero_walk", s->rename);
     TEST_ASSERT_EQUAL_INT(1, a->sprite_count);
 
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_set_pending_sprite_rename(a, "walk_01", NULL)); /* clears + drops */
-    TEST_ASSERT_NULL(tp_project_atlas_find_pending_sprite(a, "walk_01"));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_set_sprite_rename_by_source_key(
+            a, source_id, "walk_01.png", NULL));
+    TEST_ASSERT_NULL(tp_project_atlas_find_sprite_by_source_key(
+        a, source_id, "walk_01.png"));
     TEST_ASSERT_EQUAL_INT(0, a->sprite_count);
 
     tp_project_sprite *sp = NULL;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_pending_sprite(a, "walk_02", &sp));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_sprite_by_source_key(
+            a, source_id, "walk_02.png", &sp));
     sp->origin_x = 0.1F; /* non-default -> the entry survives a rename clear */
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_set_pending_sprite_rename(a, "walk_02", "hero_walk2"));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_set_pending_sprite_rename(a, "walk_02", ""));
-    sp = tp_project_atlas_find_pending_sprite(a, "walk_02");
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_set_sprite_rename_by_source_key(
+            a, source_id, "walk_02.png", "hero_walk2"));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_set_sprite_rename_by_source_key(
+            a, source_id, "walk_02.png", ""));
+    sp = tp_project_atlas_find_sprite_by_source_key(
+        a, source_id, "walk_02.png");
     TEST_ASSERT_NOT_NULL(sp);
     TEST_ASSERT_NULL(sp->rename);
 
@@ -1328,7 +1282,7 @@ void test_out_path_shared(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(a1, "json-neotolis", "out/y", NULL)); /* [1] */
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(a1, "defold", "out/uniq", NULL));    /* [2] disabled */
 
-    /* NO promote(): ids stay NIL, proving the detector excludes `self` by POINTER identity (review finding
+    /* IDs stay nil, proving the detector excludes `self` by pointer identity (review finding
      * on the nil-id self-match), not by id. */
     a0 = tp_project_get_atlas(p, 0);
     a1 = tp_project_get_atlas(p, a1i);
@@ -1368,15 +1322,22 @@ void test_sprite_override_sparse(void) {
 
     tp_project *p = tp_project_create();
     tp_project_atlas *a = tp_project_get_atlas(p, 0);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_source(a, "sprites"));
+    assign_ids(p);
+    const tp_id128 source_id = a->sources[0].id;
     tp_project_sprite *sp = NULL;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_pending_sprite(a, "s1", &sp));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_sprite_by_source_key(a, source_id, "s1.png",
+                                                  &sp));
     /* defaults inherit -> all override keys absent */
     TEST_ASSERT_EQUAL_INT(TP_PROJECT_OV_INHERIT, sp->ov_shape);
     TEST_ASSERT_EQUAL_INT(TP_PROJECT_OV_INHERIT, sp->ov_extrude);
     sp->ov_shape = 0;        /* RECT */
     sp->ov_max_vertices = 4; /* explicit */
 
-    promote(p);
+    assign_ids(p);
     tp_error err = {0};
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_save(p, path, &err));
     size_t n = 0;
@@ -1389,7 +1350,8 @@ void test_sprite_override_sparse(void) {
 
     tp_project *loaded = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_load(path, &loaded, &err));
-    tp_project_sprite *ls = tp_project_atlas_find_pending_sprite(tp_project_get_atlas(loaded, 0), "s1");
+    tp_project_sprite *ls = tp_project_atlas_find_sprite_by_source_key(
+        tp_project_get_atlas(loaded, 0), source_id, "s1.png");
     TEST_ASSERT_NOT_NULL(ls);
     TEST_ASSERT_EQUAL_INT(0, ls->ov_shape);
     TEST_ASSERT_EQUAL_INT(4, ls->ov_max_vertices);
@@ -1425,6 +1387,24 @@ void test_seed_default_target(void) {
 
     /* out-of-range atlas -> OUT_OF_BOUNDS, never a crash. */
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS, tp_project_atlas_seed_default_target(p, 5));
+
+    /* The public path contract is 4096 bytes including NUL. The seed helper
+     * accepts the exact boundary and rejects overflow atomically instead of
+     * persisting a silently truncated target. */
+    char exact[4092];
+    memset(exact, 'a', sizeof exact - 1U);
+    exact[sizeof exact - 1U] = '\0';
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_set_atlas_name(a, exact));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_seed_default_target(p, 0));
+    TEST_ASSERT_EQUAL_size_t(4095U, strlen(a->targets[1].out_path));
+
+    char overflow[4093];
+    memset(overflow, 'b', sizeof overflow - 1U);
+    overflow[sizeof overflow - 1U] = '\0';
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_set_atlas_name(a, overflow));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS,
+                          tp_project_atlas_seed_default_target(p, 0));
+    TEST_ASSERT_EQUAL_INT(2, a->target_count);
     tp_project_destroy(p);
 }
 
@@ -1446,24 +1426,47 @@ void test_set_atlas_name(void) {
 void test_prune_sprite(void) {
     tp_project *p = tp_project_create();
     tp_project_atlas *a = tp_project_get_atlas(p, 0);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_source(a, "sprites"));
+    assign_ids(p);
+    const tp_id128 source_id = a->sources[0].id;
     tp_project_sprite *s = NULL;
 
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_pending_sprite(a, "s1", &s));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_sprite_by_source_key(a, source_id, "s1.png",
+                                                  &s));
     TEST_ASSERT_EQUAL_INT(1, a->sprite_count);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_prune_pending_sprite(a, "s1")); /* all-default -> dropped */
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_prune_sprite_by_source_key(a, source_id,
+                                                    "s1.png"));
     TEST_ASSERT_EQUAL_INT(0, a->sprite_count);
-    TEST_ASSERT_NULL(tp_project_atlas_find_pending_sprite(a, "s1"));
+    TEST_ASSERT_NULL(tp_project_atlas_find_sprite_by_source_key(
+        a, source_id, "s1.png"));
 
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_prune_pending_sprite(a, "absent")); /* no-op OK */
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_prune_sprite_by_source_key(a, source_id,
+                                                    "absent.png"));
 
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_pending_sprite(a, "s2", &s));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_sprite_by_source_key(a, source_id, "s2.png",
+                                                  &s));
     s->slice9_lrtb[0] = 4; /* non-default -> survives prune */
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_prune_pending_sprite(a, "s2"));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_prune_sprite_by_source_key(a, source_id,
+                                                    "s2.png"));
     TEST_ASSERT_EQUAL_INT(1, a->sprite_count);
-    s = tp_project_atlas_find_pending_sprite(a, "s2");
+    s = tp_project_atlas_find_sprite_by_source_key(a, source_id, "s2.png");
     TEST_ASSERT_NOT_NULL(s);
     s->slice9_lrtb[0] = 0; /* cleared back to default -> now prunes */
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_prune_pending_sprite(a, "s2"));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_prune_sprite_by_source_key(a, source_id,
+                                                    "s2.png"));
     TEST_ASSERT_EQUAL_INT(0, a->sprite_count);
     tp_project_destroy(p);
 }
@@ -1558,6 +1561,73 @@ void test_project_save_temp_create_failure_keeps_destination(void) {
     tp_project_destroy(p);
 }
 
+void test_project_save_file_sync_failure_keeps_destination(void) {
+    char path[512];
+    join(path, sizeof path, "file-sync-failure.ntpacker_project");
+    tp_project *project = build_rich();
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK, tp_project_save(project, path, &error));
+    size_t before_length = 0U;
+    char *before = read_all(path, &before_length);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_set_atlas_name(tp_project_get_atlas(project, 0),
+                                  "must-not-publish"));
+
+    tp_id128 fingerprint = {{0xFF}};
+    tp_project__test_fail_next_file_sync();
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_BAD_PROJECT,
+        tp_project_save_with_fingerprint(project, path, &fingerprint, &error));
+    TEST_ASSERT_TRUE(tp_id128_is_nil(fingerprint));
+
+    size_t after_length = 0U;
+    char *after = read_all(path, &after_length);
+    TEST_ASSERT_EQUAL_size_t(before_length, after_length);
+    TEST_ASSERT_EQUAL_MEMORY(before, after, before_length);
+
+    free(before);
+    free(after);
+    TEST_ASSERT_EQUAL_INT(0, remove(path));
+    tp_project_destroy(project);
+}
+
+void test_project_save_parent_sync_failure_reports_published_file(void) {
+    char path[512];
+    join(path, sizeof path, "parent-sync-failure.ntpacker_project");
+    tp_project *project = build_rich();
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK, tp_project_save(project, path, &error));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_set_atlas_name(tp_project_get_atlas(project, 0),
+                                  "published-with-warning"));
+
+    tp_id128 fingerprint = {{0}};
+    tp_project__test_fail_next_parent_sync();
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_FILE_DURABILITY_UNCERTAIN,
+        tp_project_save_with_fingerprint(project, path, &fingerprint, &error));
+    TEST_ASSERT_FALSE(tp_id128_is_nil(fingerprint));
+    TEST_ASSERT_NOT_NULL(strstr(error.msg, "was published"));
+
+    tp_project *loaded = NULL;
+    tp_id128 loaded_fingerprint = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_load_with_fingerprint(path, &loaded, &loaded_fingerprint,
+                                         &error));
+    TEST_ASSERT_EQUAL_STRING("published-with-warning",
+                             tp_project_get_atlas(loaded, 0)->name);
+    TEST_ASSERT_TRUE(tp_id128_eq(fingerprint, loaded_fingerprint));
+
+    tp_project_destroy(loaded);
+    TEST_ASSERT_EQUAL_INT(0, remove(path));
+    tp_project_destroy(project);
+}
+
 void test_failed_save_as_keeps_live_project_paths(void) {
     char first[512];
     char other[512];
@@ -1588,7 +1658,7 @@ void test_save_if_unchanged_rechecks_immediately_before_publish(void) {
     char path[512];
     join(path, sizeof path, "conditional-save.ntpacker_project");
     tp_project *p = build_rich();
-    promote(p);
+    assign_ids(p);
     tp_id128 baseline = {{0}};
     tp_error err = {0};
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
@@ -1639,7 +1709,7 @@ void test_atomic_replace_preserves_existing_posix_mode(void) {
 void test_load_with_fingerprint_returns_exact_consumed_bytes(void) {
     char path[512];
     join(path, sizeof path, "load-fingerprint.ntpacker_project");
-    const char json[] = "{\n  \"version\": 4,\n  \"atlases\": []\n}\n";
+    const char json[] = "{\n  \"version\": 5,\n  \"atlases\": []\n}\n";
     write_text(path, json);
 
     tp_project *p = NULL;
@@ -1660,7 +1730,7 @@ void test_save_with_fingerprint_returns_exact_written_bytes(void) {
     char path[512];
     join(path, sizeof path, "save-fingerprint.ntpacker_project");
     tp_project *p = build_rich();
-    promote(p);
+    assign_ids(p);
     tp_id128 actual = {{0}};
     tp_id128 expected = {{0}};
     tp_error err = {0};
@@ -1682,7 +1752,7 @@ void test_save_rejects_bytes_above_reader_limit_before_publish(void) {
     join(path, sizeof path, "save-size-cap.ntpacker_project");
     (void)remove(path);
     tp_project *p = build_rich();
-    promote(p);
+    assign_ids(p);
     tp_id128 fingerprint = {{0xFF}};
     tp_error err = {0};
 
@@ -1708,7 +1778,7 @@ void test_fingerprinted_io_clears_output_on_failure(void) {
     TEST_ASSERT_TRUE(tp_id128_is_nil(fingerprint));
 
     tp_project *p = build_rich();
-    promote(p);
+    assign_ids(p);
     fingerprint = (tp_id128){{0xFF}};
     tp_project__test_fail_next_temp_create();
     TEST_ASSERT_NOT_EQUAL(TP_STATUS_OK,
@@ -1722,7 +1792,7 @@ void test_fingerprinted_io_clears_output_on_failure(void) {
 void test_core_owns_animation_and_target_defaults_without_truncation(void) {
     tp_project *project = tp_project_create();
     TEST_ASSERT_NOT_NULL(project);
-    promote(project);
+    assign_ids(project);
     tp_project_atlas *atlas = &project->atlases[0];
     char name[128];
     tp_error err = {0};
@@ -1770,20 +1840,110 @@ void test_core_owns_animation_and_target_defaults_without_truncation(void) {
     tp_project_destroy(project);
 }
 
+void test_target_exporter_id_bound_is_enforced_at_model_and_load_boundaries(void) {
+    char oversized[TP_EXPORTER_ID_MAX + 1U];
+    memset(oversized, 'e', sizeof oversized - 1U);
+    oversized[sizeof oversized - 1U] = '\0';
+
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    tp_project_atlas *atlas = tp_project_get_atlas(project, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_project_atlas_add_target(atlas, oversized, "out/a", NULL));
+    TEST_ASSERT_EQUAL_INT(0, atlas->target_count);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_target(
+                              atlas, TP_EXPORTER_ID_JSON_NEOTOLIS, "out/a",
+                              NULL));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_project_atlas_set_target(atlas, 0, oversized, "out/b", true));
+    TEST_ASSERT_EQUAL_STRING(TP_EXPORTER_ID_JSON_NEOTOLIS,
+                             atlas->targets[0].exporter_id);
+    tp_project_destroy(project);
+
+    char json[1024];
+    const int written = snprintf(
+        json, sizeof json,
+        "{\"version\":5,\"atlases\":[{\"id\":\"atlas_00000000000000000000000000000001\","
+        "\"name\":\"a\",\"targets\":[{\"id\":\"target_00000000000000000000000000000002\","
+        "\"exporter_id\":\"%s\",\"out_path\":\"out/a\"}]}]}",
+        oversized);
+    TEST_ASSERT_GREATER_THAN_INT(0, written);
+    TEST_ASSERT_LESS_THAN_INT((int)sizeof json, written);
+    tp_project *loaded = NULL;
+    tp_error error = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_BAD_PROJECT,
+        tp_project_load_buffer(json, (size_t)written, &loaded, &error));
+    TEST_ASSERT_NULL(loaded);
+}
+
+void test_relativize_is_unc_aware_reentrant_and_component_unbounded(void) {
+    char absolute[TP_IDENTITY_PATH_MAX];
+    char expected[TP_IDENTITY_PATH_MAX];
+    char relative[TP_IDENTITY_PATH_MAX];
+    (void)snprintf(absolute, sizeof absolute, "/foundation/base");
+    expected[0] = '\0';
+    size_t absolute_used = strlen(absolute);
+    size_t expected_used = 0U;
+    for (int i = 0; i < 300; i++) {
+        const int aw = snprintf(absolute + absolute_used,
+                                sizeof absolute - absolute_used, "/c%03d", i);
+        const int ew = snprintf(expected + expected_used,
+                                sizeof expected - expected_used, "%sc%03d",
+                                i == 0 ? "" : "/", i);
+        TEST_ASSERT_GREATER_THAN_INT(0, aw);
+        TEST_ASSERT_GREATER_THAN_INT(0, ew);
+        TEST_ASSERT_LESS_THAN_size_t(sizeof absolute - absolute_used,
+                                     (size_t)aw);
+        TEST_ASSERT_LESS_THAN_size_t(sizeof expected - expected_used,
+                                     (size_t)ew);
+        absolute_used += (size_t)aw;
+        expected_used += (size_t)ew;
+    }
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project__test_relativize(absolute, "/foundation/base", relative,
+                                    sizeof relative));
+    TEST_ASSERT_EQUAL_STRING(expected, relative);
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project__test_relativize(
+            "//Server/Share/project/assets/hero.png",
+            "//server/share/project", relative, sizeof relative));
+    TEST_ASSERT_EQUAL_STRING("assets/hero.png", relative);
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project__test_relativize(
+            "//server/other/assets/hero.png", "//server/share/project",
+            relative, sizeof relative));
+    TEST_ASSERT_EQUAL_STRING("//server/other/assets/hero.png", relative);
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project__test_relativize("//other/share/assets/hero.png",
+                                    "//server/share/project", relative,
+                                    sizeof relative));
+    TEST_ASSERT_EQUAL_STRING("//other/share/assets/hero.png", relative);
+}
+
 int main(int argc, char **argv) {
     g_dir = (argc > 1) ? argv[1] : ".";
     UNITY_BEGIN();
     RUN_TEST(test_seed_default_target);
     RUN_TEST(test_project_load_lookup_work_is_linear);
     RUN_TEST(test_project_load_adversarial_hash_cluster_is_bounded);
-    RUN_TEST(test_legacy_load_reports_bounded_synthesis_storage);
-    RUN_TEST(test_legacy_load_rejects_overlong_source_paths);
-    RUN_TEST(test_v3_overlong_source_records_bypass_dedupe_index);
     RUN_TEST(test_json_admission_exact_limits_and_escaped_punctuation);
     RUN_TEST(test_json_admission_rejects_nodes_entries_and_depth);
     RUN_TEST(test_json_admission_rejects_byte_limit_before_buffer_access);
     RUN_TEST(test_save_buffers_obey_project_json_admission_limits);
     RUN_TEST(test_save_buffer_stops_at_byte_limit_before_growth);
+    RUN_TEST(test_save_buffer_rejects_invalid_utf8_before_emitting_unloadable_json);
     RUN_TEST(test_roundtrip_and_byte_identical);
     RUN_TEST(test_sparse_defaults_absent);
     RUN_TEST(test_determinism);
@@ -1796,12 +1956,13 @@ int main(int argc, char **argv) {
     RUN_TEST(test_loader_rejects_fractional_version);
     RUN_TEST(test_loader_rejects_fractional_padding);
     RUN_TEST(test_loader_rejects_out_of_int_range_max_size);
+    RUN_TEST(test_direct_project_file_io_rejects_invalid_utf8_path);
     RUN_TEST(test_loader_rejects_out_of_int_range_padding);
     RUN_TEST(test_loader_rejects_non_numeric_origin_items);
     RUN_TEST(test_loader_rejects_non_numeric_slice9_items);
     RUN_TEST(test_loader_rejects_fractional_slice9_items);
     RUN_TEST(test_loader_rejects_out_of_uint16_range_slice9_items);
-    RUN_TEST(test_unknown_keys_ignored);
+    RUN_TEST(test_unknown_keys_rejected_before_lossy_roundtrip);
     RUN_TEST(test_absolute_path_relativized);
     RUN_TEST(test_resolve_path);
     RUN_TEST(test_save_as_preserves_relative_source_target);
@@ -1812,8 +1973,6 @@ int main(int argc, char **argv) {
     RUN_TEST(test_serialized_size_bounded_matches_writer_without_materialization);
     RUN_TEST(test_add_source_dedupe);
     RUN_TEST(test_source_kind_roundtrip);
-    RUN_TEST(test_v3_source_dup_collapse);
-    RUN_TEST(test_pending_sprite_duplicates_keep_first_position_and_merge_fields);
     RUN_TEST(test_sprite_rename_override);
     RUN_TEST(test_set_target);
     RUN_TEST(test_out_path_shared);
@@ -1822,6 +1981,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_prune_sprite);
     RUN_TEST(test_project_save_ignores_unowned_fixed_temp_name);
     RUN_TEST(test_project_save_temp_create_failure_keeps_destination);
+    RUN_TEST(test_project_save_file_sync_failure_keeps_destination);
+    RUN_TEST(test_project_save_parent_sync_failure_reports_published_file);
     RUN_TEST(test_failed_save_as_keeps_live_project_paths);
     RUN_TEST(test_save_if_unchanged_rechecks_immediately_before_publish);
     RUN_TEST(test_atomic_replace_preserves_existing_posix_mode);
@@ -1830,5 +1991,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_save_rejects_bytes_above_reader_limit_before_publish);
     RUN_TEST(test_fingerprinted_io_clears_output_on_failure);
     RUN_TEST(test_core_owns_animation_and_target_defaults_without_truncation);
+    RUN_TEST(test_target_exporter_id_bound_is_enforced_at_model_and_load_boundaries);
+    RUN_TEST(test_relativize_is_unc_aware_reentrant_and_component_unbounded);
     return UNITY_END();
 }

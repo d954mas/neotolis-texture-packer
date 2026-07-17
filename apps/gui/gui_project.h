@@ -102,6 +102,10 @@ void gui_project_note_recovery_setup_failure(const char *reason);
  * owner from path/directory/lock setup failures. */
 bool gui_project_take_recovery_setup_notice(char *out, size_t cap);
 
+/* Drains the one-shot warning raised when Save published the file but could
+ * not confirm the containing-directory durability barrier. */
+bool gui_project_take_save_notice(char *out, size_t cap);
+
 /* Startup-modal choices mapped onto the core recovery action vocabulary. */
 typedef enum {
     GUI_RECOVERY_DISCARD = 0,   /* delete the journal; the permanent lock file remains */

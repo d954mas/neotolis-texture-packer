@@ -1,4 +1,6 @@
 #include "tp_core/tp_identity.h"
+#include "tp_core/tp_utf8.h"
+#include "../src/tp_fs_internal.h"
 #include "unity.h"
 
 #include <stdio.h>
@@ -80,6 +82,34 @@ void test_fingerprint_rejects_oversized_file(void) {
     TEST_ASSERT_EQUAL_INT(0, remove(s_path));
 }
 
+void test_fingerprint_accepts_utf8_path(void) {
+    static const char path[] =
+        "tp_fingerprint_\xD1\x81\xD0\xBF\xD1\x80\xD0\xB0\xD0\xB9\xD1\x82.tmp"; /* спрайт */
+    (void)tp_fs_remove_file(path);
+    FILE *f = tp_fs_fopen(path, "wb");
+    TEST_ASSERT_NOT_NULL(f);
+    TEST_ASSERT_TRUE(tp_fs_write_all(f, "abc", 3U));
+    TEST_ASSERT_TRUE(tp_fs_close(f));
+
+    tp_id128 from_file = {{0}};
+    tp_id128 from_bytes = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_identity_file_fingerprint(path, &from_file, NULL));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_identity_bytes_fingerprint("abc", 3U, &from_bytes, NULL));
+    TEST_ASSERT_TRUE(tp_id128_eq(from_file, from_bytes));
+    TEST_ASSERT_TRUE(tp_fs_remove_file(path));
+}
+
+void test_fingerprint_rejects_invalid_utf8_before_filesystem_io(void) {
+    const char invalid[] = {'t', 'p', '_', (char)0xc3, 'x', '\0'};
+    tp_id128 out = {{0xff}};
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_UTF8,
+        tp_identity_file_fingerprint(invalid, &out, &error));
+    TEST_ASSERT_TRUE(tp_id128_is_nil(out));
+    TEST_ASSERT_TRUE(tp_utf8_is_valid_c_string(error.msg));
+}
+
 #ifndef _WIN32
 void test_fingerprint_rejects_symlink(void) {
     const char *target = "tp_file_fingerprint_target.tmp";
@@ -114,6 +144,8 @@ int main(void) {
     RUN_TEST(test_fingerprint_failure_is_structured_and_clears_output);
     RUN_TEST(test_buffer_fingerprint_hashes_exact_bytes);
     RUN_TEST(test_fingerprint_rejects_oversized_file);
+    RUN_TEST(test_fingerprint_accepts_utf8_path);
+    RUN_TEST(test_fingerprint_rejects_invalid_utf8_before_filesystem_io);
 #ifndef _WIN32
     RUN_TEST(test_fingerprint_rejects_symlink);
     RUN_TEST(test_fingerprint_rejects_fifo_without_blocking);

@@ -47,7 +47,7 @@ void set_statusf_ex(status_sev_t sev, const char *fmt, ...) {
 bool s_pack_has_sources, s_pack_stale;
 
 /* --- executable directory --- */
-char s_exe_dir[1024];
+char s_exe_dir[TP_IDENTITY_PATH_MAX];
 
 /* --- nt_ui context + canvas --- */
 nt_ui_context_t *s_ctx;
@@ -75,7 +75,7 @@ uint32_t s_id_menu_file, s_id_menu_edit, s_id_menu_view, s_id_menu_help;
 int s_sel_atlas;
 int s_sel_src = -1;
 int s_sel_child = -1;
-char s_sel_abs[512];
+char s_sel_abs[TP_IDENTITY_PATH_MAX];
 bool s_sel_missing;
 
 /* --- multi-select set (growable; grown by multi_sel_add in gui_rows.c) --- */
@@ -103,8 +103,8 @@ int s_preview_frame_count;
 int s_edit_kind;
 int s_edit_atlas;
 int s_edit_anim;
-char s_edit_sprite[TP_SCAN_REL_CAP];
-char s_edit_buf[TP_SCAN_REL_CAP];
+char s_edit_sprite[TP_SRCKEY_MAX];
+char s_edit_buf[TP_SRCKEY_MAX];
 
 /* --- runtime column widths --- */
 float s_content_w = 1280.0F;
@@ -138,8 +138,8 @@ int64_t s_ctx_target_revision;
 tp_id128 s_ctx_sprite_atlas_id;
 tp_id128 s_ctx_sprite_source_id;
 int64_t s_ctx_sprite_revision;
-char s_ctx_sprite_source_key[TP_SCAN_REL_CAP];
-char s_ctx_sprite_display_name[TP_SCAN_REL_CAP];
+char s_ctx_sprite_source_key[TP_SRCKEY_MAX];
+char s_ctx_sprite_display_name[TP_SRCKEY_MAX];
 bool s_ctx_leaf;
 bool s_ctx_removable;
 

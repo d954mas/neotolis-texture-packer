@@ -126,6 +126,11 @@ typedef struct tp_session_event {
 
 typedef struct tp_session_save_result {
     bool saved;
+    /* The file was atomically published and session identity/fingerprint were
+     * advanced, but the containing-directory durability barrier failed. This
+     * is a successful Save with a structured warning, not a retryable failure. */
+    bool file_durability_degraded;
+    tp_status file_durability_status;
     bool recovery_degraded;
     tp_status recovery_status;
     char target_path[TP_IDENTITY_PATH_MAX];
@@ -181,9 +186,10 @@ tp_status tp_session_events_after(const tp_session *session, uint64_t after_sequ
 tp_status tp_session_snapshot_create(const tp_session *session,
                                      tp_session_snapshot **out, tp_error *err);
 /* Loads one immutable file-oriented snapshot without acquiring the exclusive
- * writer lease or promoting loader-synthesized legacy IDs. This is the read
- * boundary for one-shot inspect/validate/pack clients. Relative project paths
- * use the same canonical identity owner as tp_session_open(). */
+ * writer lease. Exact schema-v5 bytes are parsed read-only; the snapshot never
+ * rewrites or repairs the source file. This is the boundary for one-shot
+ * inspect/validate/pack clients. Relative project paths use the same canonical
+ * identity owner as tp_session_open(). */
 tp_status tp_session_snapshot_load(const char *path,
                                    tp_session_snapshot **out, tp_error *err);
 void tp_session_snapshot_destroy(tp_session_snapshot *snapshot);

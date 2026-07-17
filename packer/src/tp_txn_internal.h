@@ -101,6 +101,10 @@ tp_status tp_model__next_revision(int64_t current, int64_t *next, tp_error *err)
  * shape-error record still forces a reject (the batch never falsely commits). */
 void tp_txn__test_set_add_error_fail(int nth);
 
+/* Fails the (N+1)th exact result-echo allocation once. Echo reservation runs
+ * before durable acknowledgement, so the transaction must remain unchanged. */
+void tp_txn__test_set_result_echo_fail(int nth);
+
 /* Deterministic complexity probes for the bounded JSON path. The op-walk counter
  * counts linked-list node inspections across structural/shape/lowering passes;
  * the error-allocation counter counts backing-array grow allocations. */

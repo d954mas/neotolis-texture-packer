@@ -104,7 +104,13 @@ tp_status tp_id128_generate(const tp_rng *rng, tp_id128 *out, tp_error *err) {
     if ((size_t)n != sizeof buf) {
         return tp_error_set(err, TP_STATUS_RNG_FAILED, "rng produced %d of 16 bytes", n);
     }
-    memcpy(out->bytes, buf, sizeof buf);
+    tp_id128 generated;
+    memcpy(generated.bytes, buf, sizeof buf);
+    if (tp_id128_is_nil(generated)) {
+        return tp_error_set(err, TP_STATUS_RNG_FAILED,
+                            "rng produced the reserved nil id");
+    }
+    *out = generated;
     return TP_STATUS_OK;
 }
 

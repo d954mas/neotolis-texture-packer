@@ -1,24 +1,39 @@
 {
-  "version": 1,
+  "version": 5,
   "atlases": [
     {
-      "name": "problems",
       "animations": [
         {
           "frames": [
-            "hero",
-            "ghost"
+            {
+              "key": "hero.png",
+              "source": "source_00000000000000000000000000000703"
+            },
+            {
+              "key": "ghost.png",
+              "source": "source_00000000000000000000000000000703"
+            }
           ],
-          "id": "run"
+          "id": "anim_00000000000000000000000000000702",
+          "name": "run"
         }
       ],
+      "id": "atlas_00000000000000000000000000000701",
+      "name": "problems",
       "sources": [
-        "sprites",
-        "does_not_exist"
+        {
+          "id": "source_00000000000000000000000000000703",
+          "path": "sprites"
+        },
+        {
+          "id": "source_00000000000000000000000000000704",
+          "path": "does_not_exist"
+        }
       ],
       "targets": [
         {
           "exporter_id": "json-neotolis",
+          "id": "target_00000000000000000000000000000705",
           "out_path": "out/problems.json"
         }
       ]

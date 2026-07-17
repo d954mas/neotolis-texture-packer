@@ -1,5 +1,8 @@
 #include "cli_out.h"
 
+#include "tp_core/tp_session.h"
+#include "tp_core/tp_utf8.h"
+
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -81,9 +84,26 @@ void cli_sb_indent(cli_sb *sb, int depth) {
 }
 
 void cli_sb_json_str(cli_sb *sb, const char *s) {
+    if (!s) {
+        s = "";
+    }
+    const size_t length = strlen(s);
     cli_sb_putc(sb, '"');
-    for (const unsigned char *c = (const unsigned char *)s; *c; c++) {
-        switch (*c) {
+    for (size_t offset = 0U; offset < length;) {
+        const unsigned char c = (unsigned char)s[offset];
+        if (c >= 0x80U) {
+            const size_t width =
+                tp_utf8_codepoint_width(s + offset, length - offset);
+            if (width == 0U) {
+                cli_sb_str(sb, "\\ufffd");
+                offset++;
+            } else {
+                sb_write(sb, s + offset, width);
+                offset += width;
+            }
+            continue;
+        }
+        switch (c) {
             case '"': cli_sb_str(sb, "\\\""); break;
             case '\\': cli_sb_str(sb, "\\\\"); break;
             case '\b': cli_sb_str(sb, "\\b"); break;
@@ -92,17 +112,18 @@ void cli_sb_json_str(cli_sb *sb, const char *s) {
             case '\r': cli_sb_str(sb, "\\r"); break;
             case '\t': cli_sb_str(sb, "\\t"); break;
             default:
-                if (*c < 0x20U) {
+                if (c < 0x20U) {
                     char esc[8];
-                    int n = snprintf(esc, sizeof esc, "\\u%04x", (unsigned)*c);
+                    int n = snprintf(esc, sizeof esc, "\\u%04x", (unsigned)c);
                     if (n > 0) {
                         sb_write(sb, esc, (size_t)n);
                     }
                 } else {
-                    cli_sb_putc(sb, (char)*c);
+                    cli_sb_putc(sb, (char)c);
                 }
                 break;
         }
+        offset++;
     }
     cli_sb_putc(sb, '"');
 }
@@ -168,12 +189,48 @@ void cli_emit_reject(bool json, bool quiet, const char *id, const char *field, i
     va_end(ap);
 }
 
-void cli_emit_mutation(const char *verb, int count) {
+void cli_emit_mutation(const char *verb, int count,
+                       const tp_session_save_result *save_result) {
     cli_sb sb = {0};
     cli_sb_str(&sb, "{\"schema\":1,\"ok\":true,\"verb\":");
     cli_sb_json_str(&sb, verb);
     cli_sb_str(&sb, ",\"count\":");
     cli_sb_int(&sb, count);
+    const bool file_notice =
+        save_result && save_result->file_durability_degraded;
+    const bool recovery_notice =
+        save_result && save_result->recovery_degraded;
+    if (file_notice || recovery_notice) {
+        cli_sb_str(&sb, ",\"notices\":[");
+        bool comma = false;
+        if (file_notice) {
+            cli_sb_str(
+                &sb,
+                "{\"id\":\"file_durability_uncertain\",\"message\":");
+            cli_sb_json_str(
+                &sb,
+                "project file was published, but storage durability could not be confirmed");
+            cli_sb_str(&sb, ",\"status\":");
+            cli_sb_json_str(
+                &sb, tp_status_id(save_result->file_durability_status));
+            cli_sb_putc(&sb, '}');
+            comma = true;
+        }
+        if (recovery_notice) {
+            if (comma) {
+                cli_sb_putc(&sb, ',');
+            }
+            cli_sb_str(&sb, "{\"id\":\"recovery_degraded\",\"message\":");
+            cli_sb_json_str(
+                &sb,
+                "project was saved, but crash recovery is degraded");
+            cli_sb_str(&sb, ",\"status\":");
+            cli_sb_json_str(&sb,
+                            tp_status_id(save_result->recovery_status));
+            cli_sb_putc(&sb, '}');
+        }
+        cli_sb_putc(&sb, ']');
+    }
     cli_sb_putc(&sb, '}');
     if (sb.oom) { /* the payload is tiny; OOM here is near-impossible, but never crash */
         cli_sb_free(&sb);

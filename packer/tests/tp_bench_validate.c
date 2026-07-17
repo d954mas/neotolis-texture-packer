@@ -35,22 +35,34 @@ static int write_fixture(const char *root, char *project_path, size_t project_pa
     if (!project) {
         return 0;
     }
-    if (fputs("{\"version\":1,\"atlases\":[{\"name\":\"large\",\"sources\":[\"sprites\"],\"sprites\":[", project) < 0) {
+    if (fputs("{\"version\":5,\"atlases\":[{"
+              "\"id\":\"atlas_00000000000000000000000000000001\","
+              "\"name\":\"large\",\"sources\":[{"
+              "\"id\":\"source_00000000000000000000000000000002\","
+              "\"path\":\"sprites\"}],\"sprites\":[", project) < 0) {
         (void)fclose(project);
         return 0;
     }
     for (size_t i = 0; i < VALIDATE_ROWS; i++) {
-        if (fprintf(project, "%s{\"name\":\"sprite_%04zu\",\"rename\":\"same\"}", i == 0U ? "" : ",", i) <= 0) {
+        if (fprintf(project,
+                    "%s{\"source\":\"source_00000000000000000000000000000002\","
+                    "\"key\":\"sprite_%04zu.png\",\"rename\":\"same\"}",
+                    i == 0U ? "" : ",", i) <= 0) {
             (void)fclose(project);
             return 0;
         }
     }
-    if (fputs("],\"animations\":[{\"id\":\"run\",\"frames\":[", project) < 0) {
+    if (fputs("],\"animations\":[{"
+              "\"id\":\"anim_00000000000000000000000000000003\","
+              "\"name\":\"run\",\"frames\":[", project) < 0) {
         (void)fclose(project);
         return 0;
     }
     for (size_t i = 0; i < VALIDATE_ROWS; i++) {
-        if (fprintf(project, "%s\"sprite_%04zu\"", i == 0U ? "" : ",", i) <= 0) {
+        if (fprintf(project,
+                    "%s{\"source\":\"source_00000000000000000000000000000002\","
+                    "\"key\":\"sprite_%04zu.png\"}",
+                    i == 0U ? "" : ",", i) <= 0) {
             (void)fclose(project);
             return 0;
         }
@@ -66,7 +78,10 @@ static int write_source_fixture(const char *root, char *project_path, size_t pro
         return 0;
     }
     FILE *project = fopen(project_path, "wb");
-    if (!project || fputs("{\"version\":1,\"atlases\":[{\"name\":\"sources\",\"sources\":[", project) < 0) {
+    if (!project ||
+        fputs("{\"version\":5,\"atlases\":[{"
+              "\"id\":\"atlas_00000000000000000000000000000011\","
+              "\"name\":\"sources\",\"sources\":[", project) < 0) {
         if (project) {
             (void)fclose(project);
         }
@@ -79,7 +94,9 @@ static int write_source_fixture(const char *root, char *project_path, size_t pro
                 name[bit] = (char)(name[bit] - ('a' - 'A'));
             }
         }
-        if (fprintf(project, "%s\"%s\"", i == 0U ? "" : ",", name) <= 0) {
+        if (fprintf(project,
+                    "%s{\"id\":\"source_%032zx\",\"path\":\"%s\"}",
+                    i == 0U ? "" : ",", i + 0x100U, name) <= 0) {
             (void)fclose(project);
             return 0;
         }
@@ -99,7 +116,9 @@ static int write_target_fixture(const char *root, char *project_path,
     }
     FILE *project = fopen(project_path, "wb");
     if (!project ||
-        fputs("{\"version\":1,\"atlases\":[{\"name\":\"targets\",\"targets\":[",
+        fputs("{\"version\":5,\"atlases\":[{"
+              "\"id\":\"atlas_00000000000000000000000000000021\","
+              "\"name\":\"targets\",\"targets\":[",
               project) < 0) {
         if (project) {
             (void)fclose(project);
@@ -108,8 +127,10 @@ static int write_target_fixture(const char *root, char *project_path,
     }
     for (size_t i = 0U; i < TARGET_ROWS; ++i) {
         if (fprintf(project,
-                    "%s{\"exporter_id\":\"json-neotolis\",\"out_path\":\"out/%04zu\"}",
-                    i == 0U ? "" : ",", i) <= 0) {
+                    "%s{\"id\":\"target_%032zx\","
+                    "\"exporter_id\":\"json-neotolis\","
+                    "\"out_path\":\"out/%04zu\"}",
+                    i == 0U ? "" : ",", i + 0x1000U, i) <= 0) {
             (void)fclose(project);
             return 0;
         }

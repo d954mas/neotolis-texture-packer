@@ -17,7 +17,7 @@
 #include "tp_core/tp_export.h" /* TP_EXPORTER_ID_JSON_NEOTOLIS */
 #include "tp_core/tp_project.h"
 #include "tp_project_mutation_internal.h"
-#include "tp_core/tp_project_migrate.h" /* tp_project_promote_ids */
+#include "tp_project_identity_internal.h"
 #include "unity.h"
 
 /* Deterministic distinct non-nil byte fill for tp_rng: byte j of call n is
@@ -51,7 +51,8 @@ static inline tp_project *tp_test_base_project(void) {
     uint8_t ctr = 1;
     tp_rng rng = {tp_test_det_fill, &ctr};
     tp_error err;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_promote_ids(p, &rng, &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_assign_missing_ids(p, &rng, &err));
     return p;
 }
 

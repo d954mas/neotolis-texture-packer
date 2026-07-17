@@ -54,11 +54,11 @@ typedef struct sprite_row {
     bool is_source;
     bool is_folder;
     tp_id128 source_id;
-    char source_key[TP_SCAN_REL_CAP];
+    char *source_key;         /* malloc-owned exact authoritative key */
     bool missing;             /* source path gone from disk (§3.7) */
     char label[224];          /* display label (rename-aware: "final (file.png)") */
-    char sprite_name[TP_SCAN_REL_CAP]; /* export key; "" for folders / missing */
-    char abs[512];
+    char *sprite_name;        /* malloc-owned exact export key */
+    char *abs;                /* malloc-owned exact resolved decode path */
 } sprite_row;
 extern sprite_row *s_rows;
 extern int s_row_count;
@@ -68,6 +68,10 @@ extern int s_row_count;
  * generation, source scan generation}; an unchanged call only compares that
  * key and performs no allocation or filesystem work. */
 void build_rows(void);
+
+/* Releases all row/selection caches owned by this module. Safe before first
+ * build and after a partial/OOM build; call once during GUI shutdown. */
+void gui_rows_shutdown(void);
 
 /* Cached selected leaf and its sparse project override. The first lookup after
  * a row rebuild or selection change is bounded by the row/index rebuild data;

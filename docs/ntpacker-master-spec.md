@@ -272,6 +272,18 @@ save.
 Recovery records, live-session claims, and local integration permissions are
 keyed by canonical project path. They are not embedded in the project file.
 
+GUI/CLI argument paths and every `tp_core` filesystem path are strict UTF-8.
+On Windows, clients read the UTF-16 process command line, reject malformed
+UTF-16, and convert once at ingress. The core filesystem boundary converts to
+UTF-16 and uses only W-suffixed Win32 APIs, including controlled extended drive
+and UNC paths for long-path I/O.
+
+Saved source paths are relativized only when project and source share the same
+explicit root: POSIX `/`, Windows drive, or the complete UNC `server/share`
+tuple. Different roots preserve the absolute spelling. Component processing is
+re-entrant and streaming; path depth has no smaller hidden limit than the
+canonical 4095-byte path bound.
+
 ### 5.2 Derived sprite identity
 
 Every resolved sprite has a unique deterministic `sprite_id`, including sprites
@@ -331,27 +343,38 @@ CLI and MCP may accept names, paths, or compound selectors for convenience. A
 selector must resolve to exactly one ID before transaction validation. An
 ambiguous selector produces an error and candidate list; it is never guessed.
 
-### 5.5 Legacy migration
+### 5.5 Canonical project schema
 
-Loading an old project without structural IDs generates deterministic temporary
-IDs from entity kind and stable legacy structure. Repeated loads before save must
-produce the same IDs. The next successful save persists normal random IDs for
-saved structural entities.
+The project file has one accepted representation: schema v5. The loader accepts
+exactly v5 and returns a structured version error for v1-v4 or a future version;
+it never rewrites an unsupported file. Missing or malformed version data is a
+malformed-project error. The production core contains no legacy project converter.
 
-Derived `sprite_id` values remain deterministic from migrated `source_id` and
-normalized source key.
+Every persisted atlas, source, animation, and target has a non-nil, kind-correct,
+unique structural ID. Sources are tagged records. Sprite overrides and animation
+frames use only the canonical `{source, key}` identity, where `key` is the
+normalized source-local key with its extension preserved. Name-only pending forms
+are not valid project states. `sprite_id` remains derived and is never persisted.
+
+New private candidates may temporarily contain missing IDs. The writable session
+adoption boundary assigns all missing IDs atomically and validates the complete
+graph before publication. Saves, checkpoints, and externally visible snapshots
+must already satisfy the canonical invariant. See decision 0016.
 
 ### 5.6 Validation
 
 Validation reports:
 
-- missing, malformed, or duplicate persistent IDs;
+- missing, malformed, wrong-kind, or duplicate persistent IDs;
 - references to unknown IDs;
 - duplicate exact source keys;
 - case-insensitive and platform-name collisions;
 - invalid normalization or traversal;
-- ambiguous legacy references;
-- a persisted sprite record whose stored source key does not reproduce its ID.
+- a sprite override or animation frame that is not canonical `{source, key}`;
+- canonical records whose source entity remains in the graph but whose physical
+  source is unavailable or source-local key is absent, reported as orphaned model
+  state rather than migrated or silently discarded. An unknown source ID is a
+  graph-integrity error and cannot pass adoption, save, or checkpoint publication.
 
 ## 6. Typed operations
 
@@ -502,13 +525,12 @@ A transaction is not exposed as committed or visible to any frontend until it:
 3. received a new revision;
 4. was appended to the recovery journal.
 
-If journal append fails, the transaction is rolled back and no committed event is
-published. GUI and external controllers therefore receive the same recovery
-guarantee and observe the same ordered commit stream.
-
-A full project save or checkpoint is not required. The v1 guarantee covers
-recovery from process failure. It does not require an `fsync` for every operation
-and therefore does not promise survival of an immediate power loss.
+Each journal record is acknowledged only after its backend durability barrier
+succeeds (`fflush` plus `fsync`/`_commit`). If append or sync fails, the frame is
+rolled back when possible, the journal authority fails closed, and no model,
+revision, event, or history-position change is published. GUI and external
+controllers therefore receive the same ordered commit guarantee. A full project
+save is not required for transaction acknowledgement.
 
 ### 7.2 Idempotency
 
@@ -635,13 +657,13 @@ Snapshots remain useful for:
 - resynchronization;
 - crash-recovery checkpoints;
 - history compaction;
-- migration tests;
+- exact-inverse and codec tests;
 - debugging.
 
-### 9.5 Migration oracle
+### 9.5 Exactness oracle
 
-The existing snapshot-based Undo implementation remains temporarily as a test
-oracle.
+Production Undo/Redo stores semantic diffs. Checkpoint serialization is a test
+oracle and recovery primitive, not a production Undo stack.
 
 For each new semantic operation:
 
@@ -653,7 +675,7 @@ A
 -> byte-identical A
 ```
 
-The restored project must also match the old snapshot restoration.
+The restored project must serialize byte-identically to state A.
 
 ## 10. Pack results, freshness, and memory cache
 
@@ -753,6 +775,28 @@ contract of `tp_build -> neotolis-engine`.
 Whether the engine copies, adopts, trims, or retains raw RGBA during packing is an
 engine-builder decision to be fixed by API contract and profiling, not by this
 session specification.
+
+### 10.6 Fallible builder containment
+
+Ordinary source, settings, output-path, allocation, codec, and filesystem
+failures must not terminate a GUI, CLI, MCP, or Dev API host. The shared core
+decodes path sources to bounded canonical RGBA8 and validates every known
+user-controlled builder precondition before invoking the engine. This preflight
+is a safety boundary, not a substitute for a fallible builder API.
+
+While the engine builder exposes aborting assertions or narrow path-based output,
+the production integration runs it in a private worker process. The worker
+receives a versioned bounded request containing validated settings and raw pixels,
+uses only private ASCII relative staging names, and returns a versioned result.
+The parent owns cancellation, timeout, crash detection, UTF-8 filesystem reads,
+and final publication. A worker exit, signal, malformed response, or missing
+artifact becomes a structured `builder_crashed`/`builder_failed` result and cannot
+replace the last successful preview.
+
+An upstream fallible memory/sink builder API may replace the process boundary
+after its error, ownership, cancellation, and UTF-8 contracts are executable-test
+pinned. Clients never call the engine builder directly, and this replacement does
+not change public operation/session semantics.
 
 ## 11. Tagged source model and live source state
 
@@ -977,6 +1021,21 @@ this protection.
 Before saving, GUI/headless live hosts compare the project-file fingerprint with
 the version loaded or last saved. External file modification produces
 `file_changed_externally`; it is never overwritten silently.
+
+Project-file Save writes canonical bytes to an exclusively created sibling
+temporary file, durably syncs and closes it, rechecks any expected fingerprint
+immediately before publication, and atomically creates or replaces the
+destination. A pre-publication failure leaves the destination unchanged. A
+post-publication parent-directory sync failure returns
+`file_durability_uncertain`; the published bytes and returned fingerprint remain
+authoritative, so clients surface a warning and do not retry as if no write
+occurred.
+
+Machine validation findings preserve exact UTF-8 context strings and include
+the applicable stable atlas/source/animation/target IDs. Presentation adapters
+may omit absent contexts but must not truncate or substitute them. Reports have
+a hard byte/count budget and end with a deterministic structured truncation
+finding when the complete set does not fit.
 
 ### 14.3 MCP
 
@@ -1289,8 +1348,8 @@ MCP retains pending transaction IDs and can retry idempotently after connection
 failure.
 
 A success response is sent only after the authoritative host has appended the
-transaction to its recovery journal. No full project save or per-operation
-`fsync` is required.
+transaction to its recovery journal and its durability barrier has succeeded.
+No full project save is required.
 
 ### 22.2 GUI crash
 
@@ -1302,20 +1361,22 @@ must never accept writes for the same session simultaneously.
 
 ### 22.3 Local recovery journal and checkpoints
 
-The authoritative host maintains a local transaction journal plus periodic/full
-checkpoints. The journal is not written into the project repository.
+The authoritative host maintains a bounded local version-4 journal. It contains
+one attach checkpoint, ordered TXN operation records, compact HISTORY
+transitions, and optional metadata. The journal is not written into the project
+repository.
 
 The minimum recovery guarantee is:
 
 - all committed model transactions survive process restart;
 - the current committed project state can be reconstructed;
 - full Undo/Redo history does not have to survive a crash;
-- successful normal save/checkpoint may compact or clear obsolete journal data.
+- successful normal Save compacts the journal to one fresh checkpoint.
 
-Power-loss durability without per-operation `fsync` is not guaranteed.
-
-The exact checkpoint cadence, journal record format, deduplication, corruption
-handling, and compaction policy remain open contracts in §60.
+There is no periodic in-session checkpoint. Unsupported or oversized history
+transitions may fall back deterministically to a full checkpoint. Version
+mismatch, corruption, replay limits, record-size limits, and durability-barrier
+failure all fail closed.
 
 ## 23. Authorization
 
@@ -1724,6 +1785,11 @@ added.
 
 A new `format_id` is used for a materially different representation or semantic
 contract, not for every compatible version increment.
+
+`format_id` is a non-empty strict-UTF-8 machine token of at most 255 bytes
+(256-byte storage including NUL), normally reverse-DNS for external packages.
+The registry, project loader/model, typed operations, jobs, and clients enforce
+this one bound; an ID is either preserved exactly or rejected, never truncated.
 
 ## 32. Handler implementation
 
@@ -2663,7 +2729,7 @@ Built-in packages run through the same descriptor-level tests.
 
 ### B1 — project atlas sources
 
-- tagged source migration;
+- canonical tagged-source extension with linked-atlas descriptors;
 - linked atlas source;
 - read-only behavior;
 - refresh;
@@ -2763,11 +2829,12 @@ Choose or implement the constrained template syntax and escaping/helper set. The
 accepted product decision is that templates exist and are export-only; exact
 syntax is not yet fixed.
 
-### 52.5 Journal and authority state machine
+### 52.5 Authority state machine
 
-Finalize the exact journal record format, GUI commit timing, checkpoint cadence,
-compaction, stale-controller proof, and singular authority cutover state machine.
-These details must satisfy the accepted guarantees in Epic A.
+Finalize stale-controller proof and the singular authority cutover state
+machine. Journal framing, acknowledgement and local compaction are already fixed
+by the version-4 executable contract; cross-host mirror/cutover behavior must
+preserve those guarantees.
 
 ## 53. Critical review
 
@@ -2814,7 +2881,7 @@ Both epics can trigger large refactors simultaneously.
 
 Do not implement:
 
-- source migration;
+- source-model extension;
 - semantic Undo;
 - Dev API;
 - Lua;
@@ -2851,7 +2918,7 @@ implementation order, not a reduction of the final design.
 3. Deterministic sprite IDs and selector resolution.
 4. Typed model operations separated from session commands/jobs.
 5. Transaction/revision/dirty-state tests.
-6. Tagged source schema migration with path sources.
+6. Canonical tagged path-source schema; no legacy project-file migration.
 7. Preserve deterministic save behavior.
 
 ### Phase 1 — source runtime and Epic B immediate value
@@ -2872,7 +2939,7 @@ This creates a marketable interoperability workflow without requiring Lua or MCP
 1. One serialized session queue.
 2. Semantic diff types and forward/reverse tests.
 3. Monotonic revision and semantic saved baseline.
-4. GUI history migration and Save checkpoints.
+4. Shared History presentation and Save checkpoints.
 5. Immutable async Pack jobs.
 6. `pack_input_hash`, stale-preview UX, memory-only compressed Pack-result LRU.
 7. Ownership contract tests with `neotolis-engine` raw RGBA inputs.
@@ -3007,8 +3074,8 @@ reopened.
     resets after normal close/reopen.
 18. All live-model mutation passes through one serialized session queue.
 19. GUI, MCP, Undo, and Redo share one commit contract: recovery-journal append
-    is required before the transaction becomes committed/visible, but full save
-    and per-operation `fsync` are not required.
+    plus its durability barrier are required before the transaction becomes
+    committed/visible; a full project save is not required.
 
 ### Pack, sources, and memory
 
@@ -3078,6 +3145,9 @@ reopened.
     fixtures, and golden contract tests.
 53. The final architecture remains complete and long-lived; vertical slices are
     implementation order, not removal of target behavior.
+54. Invalid builder input, output/filesystem failure, and a builder worker crash
+    return structured diagnostics and cannot terminate a client host or replace
+    its last successful preview.
 
 ---
 
@@ -3086,19 +3156,17 @@ reopened.
 The following items were not decided in the discussion and must not be treated as
 settled:
 
-1. **Journal internals.** Exact record format, checkpoint cadence, compaction,
-   dedup retention window, corruption handling, and optional `fsync` modes.
-2. **Ownership state machine.** Exact process-claim mechanism, proof that a host
+1. **Ownership state machine.** Exact process-claim mechanism, proof that a host
    is dead, and the singular authority-cutover protocol.
-3. **Cache budgets.** Exact CPU/GPU memory budgets, compressed Pack
+2. **Cache budgets.** Exact CPU/GPU memory budgets, compressed Pack
    representation, and eviction thresholds.
-4. **Template language.** Concrete syntax and the final mechanically enforced
+3. **Template language.** Concrete syntax and the final mechanically enforced
    boundary between template and Lua.
-5. **Capability vocabulary and public schemas.** Exact field names and modes for
+4. **Capability vocabulary and public schemas.** Exact field names and modes for
    manifests, Import/Export IR, Dev API, MCP resources/tools, and CLI JSON.
-6. **Extraction publication crash recovery.** Exact manifest/cleanup behavior if
+5. **Extraction publication crash recovery.** Exact manifest/cleanup behavior if
    the process fails during final staged-file publication.
-7. **Color-management profile.** Exact deterministic ICC/gamma/orientation
+6. **Color-management profile.** Exact deterministic ICC/gamma/orientation
    normalization rules for all supported raster decoders.
 
 These are open contracts, not missing product direction. They should be closed by

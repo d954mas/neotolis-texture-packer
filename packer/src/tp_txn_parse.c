@@ -2,7 +2,8 @@
  * Structural decode of the versioned transaction
  * request envelope + the per-op SHAPE collect-all, and the two public entry points
  * (tp_txn_request_decode, tp_model_apply_json). cJSON is a PRIVATE dep confined to
- * this TU + tp_txn_lower.c + tp_txn_json.h.
+ * the transaction/project decoders and their shared tp_json_internal admission
+ * helper; it never crosses a public header.
  *
  * VALIDATION ORDER (decision 0011 §6, pinned): (1) structural decode -- envelope
  * faults fail
@@ -29,6 +30,8 @@
 
 #include "cJSON.h"
 #include "tp_core/tp_id.h"
+#include "tp_json_internal.h"
+#include "tp_op_internal.h"
 #include "tp_txn_internal.h"
 #include "tp_txn_json.h"
 #include "tp_txn_parse_priv.h"
@@ -295,6 +298,11 @@ tp_status tp_txn__count_operations_json_n(const char *json, size_t json_len,
     if (byte_st != TP_STATUS_OK) {
         return byte_st;
     }
+    tp_status string_st = tp_json_reject_c_string_ambiguity(
+        json, json_len, TP_STATUS_INVALID_ARGUMENT, "transaction JSON", err);
+    if (string_st != TP_STATUS_OK) {
+        return string_st;
+    }
     return txn_request_op_count_precheck(json, json_len, NULL, count_out, err);
 }
 
@@ -326,6 +334,12 @@ static tp_id_kind addr_kind(const char *key) {
  * envelope fault returns non-OK + `err`, and *out_ops is left NULL. */
 static tp_status parse_envelope(const cJSON *root, tp_txn_request *req, const cJSON **out_ops, tp_error *err) {
     *out_ops = NULL;
+
+    const tp_status duplicate_status = tp_json_reject_duplicate_keys(
+        root, TP_STATUS_INVALID_ARGUMENT, "transaction JSON", err);
+    if (duplicate_status != TP_STATUS_OK) {
+        return duplicate_status;
+    }
 
     const cJSON *schema = cJSON_GetObjectItemCaseSensitive(root, "schema");
     if (!schema) {
@@ -469,6 +483,63 @@ static bool shape_check_op(const cJSON *oj, int idx, tp_txn_result *out,
             faulted = true;
             continue;
         }
+        if (kind == TP_OP_SPRITE_OVERRIDE_CLEAR &&
+            strcmp(c->string, "fields") == 0) {
+            char msg[192];
+            bool invalid = !cJSON_IsArray(c);
+            if (invalid) {
+                (void)snprintf(msg, sizeof msg,
+                               "field 'fields' must be an array of known tokens");
+            } else {
+                int token_index = 0;
+                for (const cJSON *token = c->child; token;
+                     token = token->next, token_index++) {
+                    if (!cJSON_IsString(token) ||
+                        !tp_op__sprite_clear_bit(token->valuestring, NULL)) {
+                        invalid = true;
+                        if (cJSON_IsString(token)) {
+                            (void)snprintf(
+                                msg, sizeof msg,
+                                "unknown sprite override field '%s' at fields[%d]",
+                                token->valuestring, token_index);
+                        } else {
+                            (void)snprintf(msg, sizeof msg,
+                                           "fields[%d] must be a string token",
+                                           token_index);
+                        }
+                        break;
+                    }
+                }
+            }
+            if (invalid) {
+                shape_record_error(out, reserved_capacity, fault_count,
+                                   store_oom, idx,
+                                   TP_STATUS_INVALID_ARGUMENT, "fields", msg);
+                faulted = true;
+            }
+            continue;
+        }
+        if (kind == TP_OP_SOURCE_ADD && strcmp(c->string, "kind") == 0) {
+            const bool valid =
+                cJSON_IsString(c) &&
+                (strcmp(c->valuestring, "folder") == 0 ||
+                 strcmp(c->valuestring, "file") == 0);
+            if (!valid) {
+                char msg[192];
+                if (cJSON_IsString(c)) {
+                    (void)snprintf(msg, sizeof msg,
+                                   "unknown source kind '%s'", c->valuestring);
+                } else {
+                    (void)snprintf(msg, sizeof msg,
+                                   "field 'kind' must be a string token");
+                }
+                shape_record_error(out, reserved_capacity, fault_count,
+                                   store_oom, idx,
+                                   TP_STATUS_INVALID_ARGUMENT, "kind", msg);
+                faulted = true;
+            }
+            continue;
+        }
         tp_id_kind ak = addr_kind(c->string);
         if (ak == TP_ID_KIND_INVALID) {
             continue;
@@ -527,15 +598,22 @@ static tp_status txn_request_decode_n_impl(const char *json, size_t json_len,
         if (byte_st != TP_STATUS_OK) {
             return byte_st;
         }
+    } else if (!json || expected_op_count < 0 ||
+               expected_op_count > TP_TXN_MAX_OPS) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "invalid prechecked transaction span");
+    }
+    tp_status string_st = tp_json_reject_c_string_ambiguity(
+        json, json_len, TP_STATUS_INVALID_ARGUMENT, "transaction JSON", err);
+    if (string_st != TP_STATUS_OK) {
+        return string_st;
+    }
+    if (!prechecked) {
         tp_status count_st = txn_request_op_count_precheck(
             json, json_len, NULL, NULL, err);
         if (count_st != TP_STATUS_OK) {
             return count_st;
         }
-    } else if (!json || expected_op_count < 0 ||
-               expected_op_count > TP_TXN_MAX_OPS) {
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
-                            "invalid prechecked transaction span");
     }
     cJSON *root = txn_parse_exact(json, json_len);
     if (!root) {
@@ -626,6 +704,15 @@ static tp_status apply_json_into(tp_model *m, const char *json, size_t json_len,
         res->revision = m->revision;
         tp_txn__result_add_error(res, -1, byte_st, "transaction", err ? err->msg : "");
         return byte_st;
+    }
+
+    tp_status string_st = tp_json_reject_c_string_ambiguity(
+        json, json_len, TP_STATUS_INVALID_ARGUMENT, "transaction JSON", err);
+    if (string_st != TP_STATUS_OK) {
+        res->revision = m->revision;
+        tp_txn__result_add_error(res, -1, string_st, "transaction",
+                                 err ? err->msg : "");
+        return string_st;
     }
 
     tp_status count_st = txn_request_op_count_precheck(json, json_len, NULL, NULL, err);

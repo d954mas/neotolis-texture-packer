@@ -120,12 +120,17 @@ jobs:
       - name: Configure
         run: cmake --preset native-tests-debug
 
-      # Build ONLY the self-test exe. Building everything would also compile the packer/spike
-      # test exes, which (unlike the app targets tp_core/tp_build/ntpacker-gui/ntpacker) do not
-      # carry sanitizer LINK flags and so fail to link under this Debug ASan/UBSan build on Linux.
-      # ntpacker-gui itself already has nt_set_sanitizer_flags, so the self-test runs under ASan+UBSan.
-      - name: Build GUI self-test exe
-        run: cmake --build --preset native-tests-debug --target ntpacker-gui
+      # Every first-party test executable carries both sanitizer compile and link
+      # flags. Build the complete Debug graph here so the core/session/recovery
+      # foundation is exercised under ASan+UBSan as well as the GUI self-test.
+      - name: Build sanitized Debug graph
+        run: cmake --build --preset native-tests-debug
+
+      - name: Run headless core tests (ASan+UBSan)
+        env:
+          ASAN_OPTIONS: "detect_leaks=0"
+          UBSAN_OPTIONS: "print_stacktrace=1"
+        run: ctest --preset native-tests-debug -E ntpacker_gui_selftest --output-on-failure
 
       # xvfb gives a virtual X display; llvmpipe forces Mesa's software GL so the self-test gets a
       # modern GL context with no GPU. LSan (part of ASan) is off for now -- the engine/GL driver

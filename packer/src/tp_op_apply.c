@@ -229,7 +229,6 @@ static tp_status apply_anim_create(tp_project_atlas *a, const tp_op_anim_create 
     }
     /* Commit: no more allocations can fail. */
     an->id = c->anim_id;
-    an->id_synthetic = false;
     an->fps = c->fps;
     an->playback = c->playback;
     an->flip_h = c->flip_h;
@@ -302,7 +301,6 @@ tp_status tp_operation_apply(tp_project *p, const tp_operation *op, tp_op_reject
             st = tp_project_add_atlas(p, op->u.atlas_create.name, &idx);
             if (st == TP_STATUS_OK) {
                 p->atlases[idx].id = op->atlas_id; /* deterministic: the op owns the id */
-                p->atlases[idx].id_synthetic = false;
             }
             break;
         }
@@ -357,7 +355,6 @@ tp_status tp_operation_apply(tp_project *p, const tp_operation *op, tp_op_reject
             if (st == TP_STATUS_OK) {
                 if (a->source_count > before) {
                     a->sources[a->source_count - 1].id = op->u.source_add.source_id;
-                    a->sources[a->source_count - 1].id_synthetic = false;
                 } else {
                     /* validate rejects a duplicate path, so a dedupe no-op is unreachable here;
                      * refuse to "commit" one -- it would strand the op's source_id (a false id). */
@@ -492,7 +489,6 @@ tp_status tp_operation_apply(tp_project *p, const tp_operation *op, tp_op_reject
             st = tp_project_atlas_add_target(a, op->u.target_create.exporter_id, op->u.target_create.out_path, &t);
             if (st == TP_STATUS_OK) {
                 t->id = op->u.target_create.target_id;
-                t->id_synthetic = false;
                 t->enabled = op->u.target_create.enabled;
             }
             break;

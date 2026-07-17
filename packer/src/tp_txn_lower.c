@@ -16,6 +16,7 @@
 #include <string.h>
 
 #include "tp_core/tp_id.h"
+#include "tp_op_internal.h"
 #include "tp_txn_json.h"
 
 static tp_status lower_frame_ref(const cJSON *value, tp_op_sprite_ref *out,
@@ -69,39 +70,54 @@ static tp_status lower_frames(const cJSON *oj, tp_op_sprite_ref **out_frames,
     return TP_STATUS_OK;
 }
 
-/* fields[] token array -> sprite override mask. Unknown tokens are ignored (the
- * shape pass validated the `fields` key itself; token content is validated by
- * tp_operation_validate rejecting a mask of 0). */
-static uint32_t lower_clear_mask(const cJSON *oj) {
-    uint32_t mask = 0;
+static tp_status require_field(const cJSON *oj, const char *key,
+                               tp_error *err) {
+    if (!cJSON_GetObjectItemCaseSensitive(oj, key)) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "missing required field \"%s\"", key);
+    }
+    return TP_STATUS_OK;
+}
+
+static tp_status j_req_int(const cJSON *oj, const char *key, int *out,
+                           tp_error *err) {
+    bool present = false;
+    tp_status status = j_opt_int(oj, key, out, &present, err);
+    if (status != TP_STATUS_OK) {
+        return status;
+    }
+    return present ? TP_STATUS_OK
+                   : tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                                  "missing required field \"%s\"", key);
+}
+
+/* fields[] token array -> sprite override mask. The token vocabulary is closed:
+ * accepting a token that the encoder cannot reproduce would make journal replay
+ * differ from the acknowledged mutation. */
+static tp_status lower_clear_mask(const cJSON *oj, uint32_t *out,
+                                  tp_error *err) {
+    *out = 0U;
     const cJSON *arr = cJSON_GetObjectItemCaseSensitive(oj, "fields");
     if (!cJSON_IsArray(arr)) {
-        return 0;
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "fields must be an array");
     }
     int n = cJSON_GetArraySize(arr);
     for (int i = 0; i < n; i++) {
         const cJSON *el = cJSON_GetArrayItem(arr, i);
         if (!cJSON_IsString(el)) {
-            continue;
+            return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                                "fields[%d] must be a string", i);
         }
-        const char *t = el->valuestring;
-        if (strcmp(t, "origin") == 0) {
-            mask |= TP_SPF_ORIGIN;
-        } else if (strcmp(t, "slice9") == 0) {
-            mask |= TP_SPF_SLICE9;
-        } else if (strcmp(t, "shape") == 0) {
-            mask |= TP_SPF_SHAPE;
-        } else if (strcmp(t, "allow_rotate") == 0) {
-            mask |= TP_SPF_ALLOW_ROTATE;
-        } else if (strcmp(t, "max_vertices") == 0) {
-            mask |= TP_SPF_MAX_VERTICES;
-        } else if (strcmp(t, "margin") == 0) {
-            mask |= TP_SPF_MARGIN;
-        } else if (strcmp(t, "extrude") == 0) {
-            mask |= TP_SPF_EXTRUDE;
+        uint32_t bit = 0U;
+        if (!tp_op__sprite_clear_bit(el->valuestring, &bit)) {
+            return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                                "unknown sprite override field '%s'",
+                                el->valuestring);
         }
+        *out |= bit;
     }
-    return mask;
+    return TP_STATUS_OK;
 }
 
 /* TRY: propagate a lowering fault after freeing the partially-filled op. Used only
@@ -147,18 +163,26 @@ static tp_status lower_sprite_set(const cJSON *oj, tp_op_sprite_set *s, tp_error
     bool ox = false, oy = false;
     if ((st = j_opt_float(oj, "origin_x", &s->origin_x, &ox, err)) != TP_STATUS_OK) return st;
     if ((st = j_opt_float(oj, "origin_y", &s->origin_y, &oy, err)) != TP_STATUS_OK) return st;
+    if (ox != oy) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "origin_x and origin_y must be provided together");
+    }
     if (ox || oy) s->mask |= TP_SPF_ORIGIN;
-    bool any9 = false;
+    int present9 = 0;
     const char *k9[4] = {"slice9_l", "slice9_r", "slice9_t", "slice9_b"};
     for (int i = 0; i < 4; i++) {
         int v = 0;
         if ((st = j_opt_int(oj, k9[i], &v, &pr, err)) != TP_STATUS_OK) return st;
         if (pr) {
-            any9 = true;
+            present9++;
         }
         s->slice9[i] = v;
     }
-    if (any9) s->mask |= TP_SPF_SLICE9;
+    if (present9 != 0 && present9 != 4) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "slice9_l/r/t/b must be provided together");
+    }
+    if (present9 == 4) s->mask |= TP_SPF_SLICE9;
     if ((st = j_opt_int(oj, "ov_shape", &s->ov_shape, &pr, err)) != TP_STATUS_OK) return st;
     if (pr) s->mask |= TP_SPF_SHAPE;
     if ((st = j_opt_int(oj, "ov_allow_rotate", &s->ov_allow_rotate, &pr, err)) != TP_STATUS_OK) return st;
@@ -210,8 +234,18 @@ tp_status tp_txn__lower_op(const cJSON *oj, tp_operation *out, tp_error *err) {
             TRY(j_opt_dup(oj, "key", &out->u.source_add.key, err));
             const cJSON *kind = cJSON_GetObjectItemCaseSensitive(oj, "kind");
             out->u.source_add.kind = TP_SOURCE_KIND_FOLDER;
-            if (cJSON_IsString(kind) && strcmp(kind->valuestring, "file") == 0) {
+            if (!kind) {
+                break;
+            }
+            if (!cJSON_IsString(kind)) {
+                TRY(tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                                 "\"kind\" must be a string"));
+            }
+            if (strcmp(kind->valuestring, "file") == 0) {
                 out->u.source_add.kind = TP_SOURCE_KIND_FILE;
+            } else if (strcmp(kind->valuestring, "folder") != 0) {
+                TRY(tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                                 "unknown source kind '%s'", kind->valuestring));
             }
             break;
         }
@@ -231,11 +265,12 @@ tp_status tp_txn__lower_op(const cJSON *oj, tp_operation *out, tp_error *err) {
         case TP_OP_SPRITE_OVERRIDE_CLEAR:
             TRY(j_opt_shape_id(oj, "source_id", TP_ID_KIND_SOURCE, &out->u.sprite_clear.source_id, err));
             TRY(j_opt_dup(oj, "src_key", &out->u.sprite_clear.src_key, err));
-            out->u.sprite_clear.mask = lower_clear_mask(oj);
+            TRY(lower_clear_mask(oj, &out->u.sprite_clear.mask, err));
             break;
         case TP_OP_SPRITE_NAME_SET:
             TRY(j_opt_shape_id(oj, "source_id", TP_ID_KIND_SOURCE, &out->u.sprite_name.source_id, err));
             TRY(j_opt_dup(oj, "src_key", &out->u.sprite_name.src_key, err));
+            TRY(require_field(oj, "name", err));
             TRY(j_opt_dup(oj, "name", &out->u.sprite_name.name, err)); /* NULL clears the rename */
             break;
 
@@ -265,6 +300,7 @@ tp_status tp_txn__lower_op(const cJSON *oj, tp_operation *out, tp_error *err) {
             break;
         case TP_OP_ANIMATION_FRAMES_SET:
             TRY(j_opt_shape_id(oj, "anim_id", TP_ID_KIND_ANIM, &out->u.anim_frames_set.anim_id, err));
+            TRY(require_field(oj, "frames", err));
             TRY(lower_frames(oj, &out->u.anim_frames_set.frames, &out->u.anim_frames_set.frame_count, err));
             break;
         case TP_OP_ANIMATION_FRAME_ADD: {
@@ -277,16 +313,14 @@ tp_status tp_txn__lower_op(const cJSON *oj, tp_operation *out, tp_error *err) {
             break;
         }
         case TP_OP_ANIMATION_FRAME_REMOVE: {
-            bool pr = false;
             TRY(j_opt_shape_id(oj, "anim_id", TP_ID_KIND_ANIM, &out->u.anim_frame_rm.anim_id, err));
-            TRY(j_opt_int(oj, "index", &out->u.anim_frame_rm.index, &pr, err));
+            TRY(j_req_int(oj, "index", &out->u.anim_frame_rm.index, err));
             break;
         }
         case TP_OP_ANIMATION_FRAME_MOVE: {
-            bool pr = false;
             TRY(j_opt_shape_id(oj, "anim_id", TP_ID_KIND_ANIM, &out->u.anim_frame_move.anim_id, err));
-            TRY(j_opt_int(oj, "from_index", &out->u.anim_frame_move.from_index, &pr, err));
-            TRY(j_opt_int(oj, "to_index", &out->u.anim_frame_move.to_index, &pr, err));
+            TRY(j_req_int(oj, "from_index", &out->u.anim_frame_move.from_index, err));
+            TRY(j_req_int(oj, "to_index", &out->u.anim_frame_move.to_index, err));
             break;
         }
 

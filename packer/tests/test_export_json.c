@@ -357,6 +357,23 @@ void test_determinism_reexport(void) {
         }
     }
 }
+
+void test_metadata_path_above_legacy_limit_reaches_the_filesystem_boundary(void) {
+    tp_result result = {.atlas_name = "long-path", .page_count = 0};
+    tp_export_prepared prep = {.result = &result};
+    tp_export_caps caps = tp_export_caps_full();
+    char base[1200];
+    const int prefix = snprintf(base, sizeof base, "%s/missing-long-path/", g_dir);
+    TEST_ASSERT_TRUE(prefix > 0 && prefix < 1100);
+    memset(base + prefix, 'a', 1100U - (size_t)prefix);
+    base[1100] = '\0';
+    tp_error err = {{0}};
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_BAD_PROJECT,
+        tp_export_json_neotolis_write(&prep, &caps, base, NULL, &err));
+    TEST_ASSERT_TRUE(strlen(err.msg) > 0U);
+}
 // #endregion
 
 static bool setup_all(const char *dir) {
@@ -411,6 +428,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_alias_fidelity);
     RUN_TEST(test_multipage_fidelity);
     RUN_TEST(test_determinism_reexport);
+    RUN_TEST(test_metadata_path_above_legacy_limit_reaches_the_filesystem_boundary);
     int rc = UNITY_END();
     tp_arena_destroy(g_arena);
     tp_name_map_destroy(g_names);

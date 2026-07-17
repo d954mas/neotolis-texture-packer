@@ -15,7 +15,6 @@
 /* Operation-only ranges that do not belong to the shared pack-setting contract.
  * Pack settings use TP_PACK_* constants/predicates from tp_pack.h so operation,
  * project validation, and pack admission cannot drift. */
-#define TP_OP_OV_MARGIN_MAX 32767
 #define TP_OP_PLAYBACK_MAX 6
 
 /* Fill a structured rejection (task 5): status id + offending closed-vocab field +
@@ -77,5 +76,16 @@ tp_status tp_op__canonical_view(const tp_project *project,
                                 const tp_operation *operation,
                                 tp_operation *view, char *path_buf,
                                 size_t path_buf_size);
+
+typedef struct tp_sprite_clear_field {
+    const char *token;
+    uint32_t bit;
+} tp_sprite_clear_field;
+
+/* One canonical token<->bit vocabulary shared by JSON validation/lowering and
+ * encoding. This prevents a field from being accepted but silently dropped by
+ * the durable transaction encoder. */
+const tp_sprite_clear_field *tp_op__sprite_clear_fields(size_t *count);
+bool tp_op__sprite_clear_bit(const char *token, uint32_t *bit);
 
 #endif /* TP_CORE_SRC_TP_OP_INTERNAL_H */

@@ -5,6 +5,7 @@
 
 #define _CRT_SECURE_NO_WARNINGS
 
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,8 +15,11 @@
 
 #include "tp_core/tp_arena.h"
 #include "tp_core/tp_export.h"
+#include "tp_core/tp_identity.h"
 #include "tp_core/tp_model.h"
 #include "tp_core/tp_pack.h"
+#include "tp_core/tp_scan.h"
+#include "../src/tp_fs_internal.h"
 #include "unity.h"
 
 #define SW 32
@@ -150,6 +154,108 @@ void test_premultiply_toggle_changes_bytes(void) {
     TEST_ASSERT_EQUAL_UINT8(FILL[3], f[3]);
     stbi_image_free(img);
 }
+
+void test_page_export_writes_utf8_path_through_memory_encoder(void) {
+    static const char utf8_dir[] = "\xD0\xB2\xD1\x8B\xD0\xB2\xD0\xBE\xD0\xB4"; /* вывод */
+    static const char utf8_base[] = "\xD0\xB0\xD1\x82\xD0\xBB\xD0\xB0\xD1\x81"; /* атлас */
+    char dir[1024];
+    char base[1152];
+    char path[1216];
+    (void)snprintf(dir, sizeof dir, "%s/%s", g_dir, utf8_dir);
+    tp_mkdirs(dir);
+    (void)snprintf(base, sizeof base, "%s/%s", dir, utf8_base);
+
+    tp_error e = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, tp_export_write_pages(g_res, base, false, &e), e.msg);
+    (void)snprintf(path, sizeof path, "%s-%d.png", base, g_sp->page);
+
+    FILE *f = tp_fs_fopen(path, "rb");
+    TEST_ASSERT_NOT_NULL(f);
+    TEST_ASSERT_EQUAL_INT(0, fseek(f, 0, SEEK_END));
+    long size = ftell(f);
+    TEST_ASSERT_TRUE(size > 0);
+    rewind(f);
+    unsigned char *bytes = (unsigned char *)malloc((size_t)size);
+    TEST_ASSERT_NOT_NULL(bytes);
+    TEST_ASSERT_EQUAL_size_t((size_t)size, fread(bytes, 1U, (size_t)size, f));
+    TEST_ASSERT_TRUE(tp_fs_close(f));
+
+    int w = 0;
+    int h = 0;
+    int comp = 0;
+    unsigned char *img = stbi_load_from_memory(bytes, (int)size, &w, &h, &comp, 4);
+    free(bytes);
+    TEST_ASSERT_NOT_NULL(img);
+    TEST_ASSERT_EQUAL_INT(g_res->pages[g_sp->page].w, w);
+    TEST_ASSERT_EQUAL_INT(g_res->pages[g_sp->page].h, h);
+    stbi_image_free(img);
+}
+
+void test_page_export_rejects_overflowing_dimensions_before_encoding(void) {
+    uint8_t byte = 0U;
+    tp_page page = {.w = INT_MAX, .h = 2, .rgba = &byte};
+    tp_result result = {.page_count = 1, .pages = &page};
+    tp_error err = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS,
+                          tp_export_write_pages(&result, "overflow-page", false, &err));
+}
+
+typedef struct page_path_capture {
+    int count;
+    char path[TP_IDENTITY_PATH_MAX];
+} page_path_capture;
+
+static void capture_page_path(void *ud, const char *path) {
+    page_path_capture *capture = (page_path_capture *)ud;
+    capture->count++;
+    (void)snprintf(capture->path, sizeof capture->path, "%s", path);
+}
+
+void test_page_output_listing_accepts_canonical_path_above_legacy_limit(void) {
+    char base[1200];
+    memset(base, 'a', sizeof base);
+    base[1100] = '\0';
+    tp_result result = {.page_count = 1};
+    page_path_capture capture = {0};
+    tp_error err = {{0}};
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_export_list_page_files(&result, base, capture_page_path, &capture, &err), err.msg);
+
+    TEST_ASSERT_EQUAL_INT(1, capture.count);
+    TEST_ASSERT_EQUAL_size_t(strlen(base) + strlen("-0.png"), strlen(capture.path));
+    TEST_ASSERT_EQUAL_STRING("-0.png", capture.path + strlen(base));
+}
+
+void test_page_output_listing_rejects_suffix_overflow_without_partial_output(void) {
+    char base[TP_IDENTITY_PATH_MAX];
+    const size_t base_len = TP_IDENTITY_PATH_MAX - strlen("-0.png");
+    memset(base, 'a', base_len);
+    base[base_len] = '\0';
+    tp_result result = {.page_count = 1};
+    page_path_capture capture = {0};
+    tp_error err = {{0}};
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_export_list_page_files(&result, base, capture_page_path, &capture, &err));
+    TEST_ASSERT_EQUAL_INT(0, capture.count);
+    TEST_ASSERT_TRUE(strlen(err.msg) > 0U);
+}
+
+void test_page_output_listing_rejects_invalid_utf8_without_partial_output(void) {
+    const char invalid_base[] = {'x', (char)0xFF, '\0'};
+    tp_result result = {.page_count = 1};
+    page_path_capture capture = {0};
+    tp_error err = {{0}};
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_UTF8,
+        tp_export_list_page_files(&result, invalid_base, capture_page_path, &capture, &err));
+    TEST_ASSERT_EQUAL_INT(0, capture.count);
+    TEST_ASSERT_TRUE(strlen(err.msg) > 0U);
+}
 // #endregion
 
 static bool setup_all(const char *dir) {
@@ -207,6 +313,11 @@ int main(int argc, char **argv) {
     RUN_TEST(test_page_decodes_to_expected_dims);
     RUN_TEST(test_probe_pixel_content_and_orientation);
     RUN_TEST(test_premultiply_toggle_changes_bytes);
+    RUN_TEST(test_page_export_writes_utf8_path_through_memory_encoder);
+    RUN_TEST(test_page_export_rejects_overflowing_dimensions_before_encoding);
+    RUN_TEST(test_page_output_listing_accepts_canonical_path_above_legacy_limit);
+    RUN_TEST(test_page_output_listing_rejects_suffix_overflow_without_partial_output);
+    RUN_TEST(test_page_output_listing_rejects_invalid_utf8_without_partial_output);
     int rc = UNITY_END();
     tp_arena_destroy(g_arena);
     return rc;

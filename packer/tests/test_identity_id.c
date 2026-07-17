@@ -64,6 +64,17 @@ void test_generate_failure_is_structured(void) {
     TEST_ASSERT_TRUE(tp_id128_is_nil(id));
 }
 
+void test_generate_rejects_reserved_nil(void) {
+    uint8_t seed[16] = {0};
+    tp_rng rng = {fixed_fill, seed};
+    tp_id128 id;
+    tp_error err = {0};
+    const tp_status status = tp_id128_generate(&rng, &id, &err);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_RNG_FAILED, status);
+    TEST_ASSERT_EQUAL_STRING("rng_failed", tp_status_id(status));
+    TEST_ASSERT_TRUE(tp_id128_is_nil(id));
+}
+
 void test_generate_null_args(void) {
     tp_id128 id;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT, tp_id128_generate(NULL, &id, NULL));
@@ -100,6 +111,7 @@ int main(void) {
     RUN_TEST(test_generate_fixed_bytes);
     RUN_TEST(test_generate_short_read_is_structured);
     RUN_TEST(test_generate_failure_is_structured);
+    RUN_TEST(test_generate_rejects_reserved_nil);
     RUN_TEST(test_generate_null_args);
     RUN_TEST(test_nil_and_eq);
     RUN_TEST(test_os_rng_produces_distinct_ids);

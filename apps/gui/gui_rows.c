@@ -22,8 +22,7 @@
  * per-frame producers (build_rows, the preview loop) never malloc in the steady state. Failure
  * policy: on realloc OOM we KEEP the old capacity and raise a STATUS_ERROR ("... truncated") -- the
  * truncation becomes LOUD, never silent, and never a crash/out-of-bounds write. The buffers are
- * process-lifetime singletons (grow-only, always reachable from these globals -- no leak; matches
- * the old BSS arrays, which were likewise never freed). */
+ * module-owned, grow-only during the session, and released by gui_rows_shutdown(). */
 #define MULTI_SEL_INIT_CAP 64
 #define SEL_SORT_INIT_CAP 64
 #define ROWS_INIT_CAP 256
@@ -47,6 +46,18 @@ const char *path_last(const char *p) {
     return b;
 }
 
+static char *rows_strdup(const char *text) {
+    if (!text) {
+        return NULL;
+    }
+    const size_t length = strlen(text) + 1U;
+    char *copy = (char *)malloc(length);
+    if (copy) {
+        memcpy(copy, text, length);
+    }
+    return copy;
+}
+
 // #endregion
 
 // #region multi-select + natural sort (ux.md §3.7b selection gesture)
@@ -62,10 +73,21 @@ bool multi_sel_contains_ref(tp_id128 source_id, const char *source_key) {
     }
     return false;
 }
-void multi_sel_clear(void) { s_multi_sel_count = 0; }
+void multi_sel_clear(void) {
+    for (int i = 0; i < s_multi_sel_count; ++i) {
+        free(s_multi_sel[i].source_key);
+        s_multi_sel[i].source_key = NULL;
+    }
+    s_multi_sel_count = 0;
+}
 void multi_sel_add_ref(tp_id128 source_id, const char *source_key) {
     if (tp_id128_is_nil(source_id) || !source_key || !source_key[0] ||
         multi_sel_contains_ref(source_id, source_key)) {
+        return;
+    }
+    char *key_copy = rows_strdup(source_key);
+    if (!key_copy) {
+        set_status_ex(STATUS_ERROR, "Out of memory: selection not fully updated.");
         return;
     }
     if (s_multi_sel_count >= s_multi_sel_cap) {
@@ -73,6 +95,7 @@ void multi_sel_add_ref(tp_id128 source_id, const char *source_key) {
         gui_selected_sprite *grown = realloc(s_multi_sel,
                                              (size_t)newcap * sizeof *s_multi_sel);
         if (!grown) {
+            free(key_copy);
             set_status_ex(STATUS_ERROR, "Out of memory: selection not fully updated.");
             return; /* keep old capacity + the entries already in it; loud, never silent */
         }
@@ -80,19 +103,19 @@ void multi_sel_add_ref(tp_id128 source_id, const char *source_key) {
         s_multi_sel_cap = newcap;
     }
     s_multi_sel[s_multi_sel_count].source_id = source_id;
-    (void)snprintf(s_multi_sel[s_multi_sel_count].source_key,
-                   sizeof s_multi_sel[s_multi_sel_count].source_key, "%s",
-                   source_key);
+    s_multi_sel[s_multi_sel_count].source_key = key_copy;
     s_multi_sel_count++;
 }
 void multi_sel_remove_ref(tp_id128 source_id, const char *source_key) {
     for (int i = 0; i < s_multi_sel_count; i++) {
         if (tp_id128_eq(s_multi_sel[i].source_id, source_id) &&
             strcmp(s_multi_sel[i].source_key, source_key) == 0) {
+            free(s_multi_sel[i].source_key);
             for (int j = i; j < s_multi_sel_count - 1; j++) {
                 s_multi_sel[j] = s_multi_sel[j + 1];
             }
             s_multi_sel_count--;
+            s_multi_sel[s_multi_sel_count].source_key = NULL;
             return;
         }
     }
@@ -153,6 +176,50 @@ bool sel_sort_reserve(int n) {
 sprite_row *s_rows;
 int s_row_count;
 static int s_rows_cap;
+
+static void row_drop(sprite_row *row) {
+    if (!row) {
+        return;
+    }
+    free(row->source_key);
+    free(row->sprite_name);
+    free(row->abs);
+    row->source_key = NULL;
+    row->sprite_name = NULL;
+    row->abs = NULL;
+}
+
+static void rows_clear(void) {
+    for (int i = 0; i < s_row_count; ++i) {
+        row_drop(&s_rows[i]);
+    }
+    s_row_count = 0;
+}
+
+static char *row_export_key_dup(const char *raw) {
+    char key[TP_SRCKEY_MAX];
+    tp_sprite_export_key(raw, key, sizeof key);
+    return rows_strdup(key);
+}
+
+static bool row_set_strings(sprite_row *row, const char *source_key,
+                            const char *raw_name, const char *abs) {
+    if (source_key) {
+        row->source_key = rows_strdup(source_key);
+    }
+    if (raw_name) {
+        row->sprite_name = row_export_key_dup(raw_name);
+    }
+    if (abs) {
+        row->abs = rows_strdup(abs);
+    }
+    if ((source_key && !row->source_key) ||
+        (raw_name && !row->sprite_name) || (abs && !row->abs)) {
+        row_drop(row);
+        return false;
+    }
+    return true;
+}
 
 /* Cache-local lookup over the snapshot/project's sparse overrides. Slots borrow
  * immutable DTO pointers while the row key includes the GUI snapshot-lifetime
@@ -362,7 +429,7 @@ void build_rows(void) {
     s_row_cache_valid = false;
     s_selected_cache_valid = false;
     s_row_cache_generation++;
-    s_row_count = 0;
+    rows_clear();
     if (!a) {
         return;
     }
@@ -379,7 +446,7 @@ void build_rows(void) {
         s_bench_counters.path_resolve_calls++;
 #endif
         const tp_snapshot_source *source = NULL;
-        char abs[512];
+        char abs[TP_IDENTITY_PATH_MAX];
         tp_error error = {0};
         const tp_status path_status = tp_session_snapshot_source_resolved_at(
             snapshot, s_sel_atlas, si, &source, abs, sizeof abs, &error);
@@ -394,6 +461,7 @@ void build_rows(void) {
         const bool is_dir = exists && gui_scan_is_dir(abs);
         sprite_row *r = rows_push();
         if (!r) {
+            rows_clear();
             set_status_ex(STATUS_ERROR, "Out of memory: sprite list truncated.");
             return;
         }
@@ -406,17 +474,36 @@ void build_rows(void) {
         if (!exists) {
             r->missing = true;
             (void)snprintf(r->label, sizeof r->label, "\xE2\x9A\xA0 %s", path_last(sp));
-            (void)snprintf(r->abs, sizeof r->abs, "%s", abs);
+            if (!row_set_strings(r, NULL, NULL, abs)) {
+                rows_clear();
+                set_status_ex(STATUS_ERROR,
+                              "Out of memory: sprite list unavailable.");
+                return;
+            }
         } else if (is_dir) {
-            const gui_scan_result *sc = gui_scan_get(abs);
+            const gui_scan_result *sc = NULL;
+            const tp_status scan_status = gui_scan_get(abs, &sc, &error);
+            if (scan_status != TP_STATUS_OK) {
+                rows_clear();
+                set_statusf_ex(STATUS_ERROR, "Could not scan source: %s",
+                               error.msg);
+                return;
+            }
             (void)snprintf(r->label, sizeof r->label, "%s/  \xC2\xB7  %d",
                            path_last(sp), sc->count);
+            if (!row_set_strings(r, NULL, NULL, abs)) {
+                rows_clear();
+                set_status_ex(STATUS_ERROR,
+                              "Out of memory: sprite list unavailable.");
+                return;
+            }
             for (int ci = 0; ci < sc->count; ++ci) {
 #if defined(NTPACKER_GUI_BENCH)
                 s_bench_counters.child_iterations++;
 #endif
                 sprite_row *cr = rows_push();
                 if (!cr) {
+                    rows_clear();
                     set_status_ex(STATUS_ERROR, "Out of memory: sprite list truncated.");
                     return;
                 }
@@ -425,21 +512,28 @@ void build_rows(void) {
                 cr->child = ci;
                 cr->indent = 1;
                 cr->source_id = source->id;
-                (void)snprintf(cr->source_key, sizeof cr->source_key, "%s", sc->entries[ci].rel);
-                tp_sprite_export_key(sc->entries[ci].rel, cr->sprite_name,
-                                     sizeof cr->sprite_name);
+                if (!row_set_strings(cr, sc->entries[ci].rel,
+                                     sc->entries[ci].rel,
+                                     sc->entries[ci].abs)) {
+                    rows_clear();
+                    set_status_ex(STATUS_ERROR,
+                                  "Out of memory: sprite list unavailable.");
+                    return;
+                }
                 row_display(cr->source_id, cr->source_key, sc->entries[ci].rel,
                             path_last(sc->entries[ci].rel), cr->label,
                             sizeof cr->label);
-                (void)snprintf(cr->abs, sizeof cr->abs, "%s", sc->entries[ci].abs);
             }
         } else {
-            (void)snprintf(r->source_key, sizeof r->source_key, "%s", path_last(sp));
-            tp_sprite_export_key(path_last(sp), r->sprite_name, sizeof r->sprite_name);
+            if (!row_set_strings(r, path_last(sp), path_last(sp), abs)) {
+                rows_clear();
+                set_status_ex(STATUS_ERROR,
+                              "Out of memory: sprite list unavailable.");
+                return;
+            }
             row_display(r->source_id, r->source_key, r->sprite_name,
                         path_last(sp), r->label,
                         sizeof r->label);
-            (void)snprintf(r->abs, sizeof r->abs, "%s", abs);
         }
     }
     s_row_cache_atlas_id = a->id;
@@ -482,7 +576,8 @@ static void selected_cache_refresh(void) {
                                   : (s_sel_src == row->src &&
                                      s_sel_child == row->child);
         if (selected && !row->is_folder && !row->missing &&
-            !tp_id128_is_nil(row->source_id) && row->source_key[0] != '\0') {
+            !tp_id128_is_nil(row->source_id) && row->source_key &&
+            row->source_key[0] != '\0') {
             s_selected_cache_row = i;
             s_selected_cache_override = override_by_key(row->source_id,
                                                         row->source_key);
@@ -499,6 +594,46 @@ const sprite_row *gui_rows_selected_leaf(void) {
 const tp_snapshot_sprite *gui_rows_selected_override(void) {
     selected_cache_refresh();
     return s_selected_cache_override;
+}
+
+void gui_rows_shutdown(void) {
+    multi_sel_clear();
+    free(s_multi_sel);
+    s_multi_sel = NULL;
+    s_multi_sel_count = 0;
+    s_multi_sel_cap = 0;
+
+    free(s_sel_sort_buf);
+    free(s_sel_sort_ptr);
+    free(s_sel_sort_refs);
+    s_sel_sort_buf = NULL;
+    s_sel_sort_ptr = NULL;
+    s_sel_sort_refs = NULL;
+    s_sel_sort_cap = 0;
+
+    rows_clear();
+    free(s_rows);
+    s_rows = NULL;
+    s_row_count = 0;
+    s_rows_cap = 0;
+
+    free(s_override_index);
+    s_override_index = NULL;
+    s_override_index_cap = 0U;
+    s_override_index_generation = 0U;
+
+    s_row_cache_valid = false;
+    s_row_cache_atlas_id = tp_id128_nil();
+    s_row_cache_snapshot_generation = 0U;
+    s_row_cache_source_generation = 0U;
+    s_row_cache_snapshot_lifetime = 0U;
+    s_row_cache_generation = 0U;
+    s_selected_cache_valid = false;
+    s_selected_cache_row_generation = 0U;
+    s_selected_cache_src = -1;
+    s_selected_cache_child = -1;
+    s_selected_cache_row = -1;
+    s_selected_cache_override = NULL;
 }
 
 #if defined(NTPACKER_GUI_BENCH)
@@ -518,16 +653,7 @@ gui_rows_bench_counters gui_rows_bench_get_counters(void) {
 }
 
 void gui_rows_bench_shutdown(void) {
-    free(s_rows);
-    free(s_override_index);
-    s_rows = NULL;
-    s_override_index = NULL;
-    s_row_count = 0;
-    s_rows_cap = 0;
-    s_override_index_cap = 0U;
-    s_override_index_generation = 0U;
-    s_row_cache_valid = false;
-    s_selected_cache_valid = false;
+    gui_rows_shutdown();
     memset(&s_bench_counters, 0, sizeof s_bench_counters);
 }
 #endif
@@ -541,7 +667,8 @@ void select_row_for_region(int region_idx) {
         return;
     }
     for (int i = 0; i < s_row_count; i++) {
-        if (!s_rows[i].is_folder && s_rows[i].source_key[0] != '\0' &&
+        if (!s_rows[i].is_folder && s_rows[i].source_key &&
+            s_rows[i].source_key[0] != '\0' &&
             gui_pack_sprite_matches_ref(s_sel_atlas, region_idx,
                                         s_rows[i].source_id,
                                         s_rows[i].source_key)) {

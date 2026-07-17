@@ -1,50 +1,78 @@
 {
-  "version": 1,
+  "version": 5,
   "atlases": [
     {
       "animations": [
         {
           "fps": 4,
           "frames": [
-            "box_fill_128",
-            "box_fill_64"
+            {
+              "key": "box_fill_128.png",
+              "source": "source_20000000000000000000000000000002"
+            },
+            {
+              "key": "box_fill_64.png",
+              "source": "source_20000000000000000000000000000002"
+            }
           ],
-          "id": "BoxFlip",
+          "id": "anim_20000000000000000000000000000003",
+          "name": "BoxFlip",
           "playback": 1
         }
       ],
+      "id": "atlas_20000000000000000000000000000001",
       "max_size": 256,
       "name": "basic",
       "sources": [
-        "examples/basic/original"
+        {
+          "id": "source_20000000000000000000000000000002",
+          "path": "examples/basic/original"
+        }
       ],
       "targets": [
         {
           "exporter_id": "json-neotolis",
+          "id": "target_20000000000000000000000000000004",
           "out_path": "examples/basic/basic_nt_json"
         },
         {
           "exporter_id": "defold",
+          "id": "target_20000000000000000000000000000005",
           "out_path": "examples/basic/basic_nt"
         }
       ]
     },
     {
+      "id": "atlas_20000000000000000000000000000011",
       "max_size": 512,
       "name": "rotate",
       "padding": 0,
       "sources": [
-        "examples/rotate/a.png",
-        "examples/rotate/b.png",
-        "examples/rotate/c.png"
+        {
+          "id": "source_20000000000000000000000000000012",
+          "kind": "file",
+          "path": "examples/rotate/a.png"
+        },
+        {
+          "id": "source_20000000000000000000000000000013",
+          "kind": "file",
+          "path": "examples/rotate/b.png"
+        },
+        {
+          "id": "source_20000000000000000000000000000014",
+          "kind": "file",
+          "path": "examples/rotate/c.png"
+        }
       ],
       "targets": [
         {
           "exporter_id": "json-neotolis",
+          "id": "target_20000000000000000000000000000015",
           "out_path": "examples/rotate/rotate_nt_json"
         },
         {
           "exporter_id": "defold",
+          "id": "target_20000000000000000000000000000016",
           "out_path": "examples/rotate/rotate_nt"
         }
       ]
@@ -54,33 +82,40 @@
         {
           "fps": 6,
           "frames": [
-            "sq1",
-            "sq2",
-            "sq3",
-            "sq4",
-            "sq5",
-            "sq6",
-            "sq7",
-            "sq8",
-            "sq9",
-            "sq10"
+            { "key": "sq1.png", "source": "source_20000000000000000000000000000022" },
+            { "key": "sq2.png", "source": "source_20000000000000000000000000000022" },
+            { "key": "sq3.png", "source": "source_20000000000000000000000000000022" },
+            { "key": "sq4.png", "source": "source_20000000000000000000000000000022" },
+            { "key": "sq5.png", "source": "source_20000000000000000000000000000022" },
+            { "key": "sq6.png", "source": "source_20000000000000000000000000000022" },
+            { "key": "sq7.png", "source": "source_20000000000000000000000000000022" },
+            { "key": "sq8.png", "source": "source_20000000000000000000000000000022" },
+            { "key": "sq9.png", "source": "source_20000000000000000000000000000022" },
+            { "key": "sq10.png", "source": "source_20000000000000000000000000000022" }
           ],
-          "id": "anim_trim",
+          "id": "anim_20000000000000000000000000000023",
+          "name": "anim_trim",
           "playback": 1
         }
       ],
+      "id": "atlas_20000000000000000000000000000021",
       "max_size": 128,
       "name": "anim_trim",
       "sources": [
-        "examples/anim_trim/anims"
+        {
+          "id": "source_20000000000000000000000000000022",
+          "path": "examples/anim_trim/anims"
+        }
       ],
       "targets": [
         {
           "exporter_id": "json-neotolis",
+          "id": "target_20000000000000000000000000000024",
           "out_path": "examples/anim_trim/anim_trim_nt_json"
         },
         {
           "exporter_id": "defold",
+          "id": "target_20000000000000000000000000000025",
           "out_path": "examples/anim_trim/anim_trim_nt"
         }
       ]

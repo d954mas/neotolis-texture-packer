@@ -18,10 +18,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "tp_core/tp_id.h"
-
 #include "tp_core/tp_error.h"
 #include "tp_core/tp_id.h"
+#include "tp_core/tp_identity.h"
 #include "tp_core/tp_model.h"
 #include "tp_core/tp_pack.h"
 
@@ -37,6 +36,13 @@ struct tp_session_snapshot;
  * reference targets through this constant, never a bare string literal (review
  * §4 boundary gate: no exporter-id literals in apps/). */
 #define TP_EXPORTER_ID_JSON_NEOTOLIS "json-neotolis"
+
+/* Canonical format/exporter identifier capacity, including NUL. Package ids
+ * are machine tokens (typically reverse-DNS), not unbounded display names. */
+#define TP_EXPORTER_ID_MAX 256
+
+/* Validates non-empty, strict UTF-8, and the shared byte bound. */
+tp_status tp_exporter_id_validate(const char *id, tp_error *err);
 
 /* ------------------------------------------------------------------ */
 /* Capability flags: what a target FORMAT can hold (SUMMARY.md §5b).    */
@@ -266,10 +272,20 @@ tp_status tp_export_write_pages(const tp_result *result, const char *out_path_ba
  * caller's context. */
 typedef void (*tp_export_path_sink)(void *ud, const char *path);
 
+/* Checked constructors for exporter-owned suffixes. `out` is always bounded by
+ * the canonical path contract, including the NUL terminator. */
+tp_status tp_export_output_path(const char *out_path_base, const char *suffix,
+                                char out[TP_IDENTITY_PATH_MAX], tp_error *err);
+tp_status tp_export_page_path(const char *out_path_base, int page,
+                              char out[TP_IDENTITY_PATH_MAX], tp_error *err);
+
 /* Appends every page-PNG path ("<out_path_base>-<N>.png", N in [0,page_count)) to
  * `sink`. Single source of the page-file naming tp_export_write_pages uses, so an
- * exporter's list_outputs and the actual writer never drift. NULL-safe args. */
-void tp_export_list_page_files(const tp_result *result, const char *out_path_base, tp_export_path_sink sink, void *ud);
+ * exporter's list_outputs and the actual writer never drift. All paths are
+ * validated before the first sink call; overflow is a structured error, never a
+ * silently omitted report entry. */
+tp_status tp_export_list_page_files(const tp_result *result, const char *out_path_base,
+                                    tp_export_path_sink sink, void *ud, tp_error *err);
 
 /* ------------------------------------------------------------------ */
 /* Exporter registry (data + one write fn over the canonical model).    */
@@ -286,9 +302,11 @@ typedef tp_status (*tp_export_write_fn)(const tp_export_prepared *prep, const tp
  * out_path_base, via `sink`. Lets the run layer report every written file honestly
  * without re-encoding each writer's naming. NULL => the run layer assumes the
  * common shape "<base>.<extension>" + the page PNGs. Defold sets it because it also
- * writes a .tpatlas sibling the single primary `extension` cannot express. */
-typedef void (*tp_export_list_outputs_fn)(const tp_export_prepared *prep, const char *out_path_base,
-                                          tp_export_path_sink sink, void *ud);
+ * writes a .tpatlas sibling the single primary `extension` cannot express.
+ * Implementations must reject unrepresentable paths through status/error before
+ * invoking the sink. */
+typedef tp_status (*tp_export_list_outputs_fn)(const tp_export_prepared *prep, const char *out_path_base,
+                                               tp_export_path_sink sink, void *ud, tp_error *err);
 
 typedef struct tp_exporter {
     const char *id;           /* stable id, e.g. "json-neotolis" */
@@ -334,8 +352,8 @@ tp_status tp_export_defold_write(const tp_export_prepared *prep, const tp_export
 /* Enumerates the Defold writer's outputs ("<base>.tpinfo", "<base>.tpatlas", and
  * the page PNGs). Wired into the Defold exporter descriptor's list_outputs so the
  * run layer's report lists the .tpatlas sibling the primary extension omits. */
-void tp_export_defold_list_outputs(const tp_export_prepared *prep, const char *out_path_base,
-                                   tp_export_path_sink sink, void *ud);
+tp_status tp_export_defold_list_outputs(const tp_export_prepared *prep, const char *out_path_base,
+                                        tp_export_path_sink sink, void *ud, tp_error *err);
 
 #ifdef __cplusplus
 }

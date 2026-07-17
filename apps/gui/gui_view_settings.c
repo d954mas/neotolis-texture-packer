@@ -13,6 +13,7 @@
 #include "ui/nt_ui_slider.h"
 
 #include "tp_core/tp_export.h" /* exporter registry -> target dropdown */
+#include "tp_core/tp_identity.h"
 #include "tp_core/tp_validate.h"
 
 #include "gui_defs.h"
@@ -42,7 +43,7 @@ static char s_nb_pad[16], s_nb_margin[16], s_nb_extrude[16], s_nb_maxv[16], s_nb
 static char s_nb_alpha[16]; /* alpha-threshold numeric input (paired with the slider) */
 static char s_nb_ox[24], s_nb_oy[24], s_nb_s9[4][16];
 static char s_nb_ov_margin[16], s_nb_ov_extrude[16];
-static char s_nb_target_path[GUI_MAX_TARGETS][256];
+static char s_nb_target_path[GUI_MAX_TARGETS][TP_IDENTITY_PATH_MAX];
 /* --- animation editor (right-panel section 4) --- */
 static bool s_dd_playback_open;     /* playback-mode combo open bit */
 static char s_nb_anim_fps[16];      /* fps field edit buffer */
@@ -118,7 +119,15 @@ static bool ui_float_field(nt_ui_context_t *ctx, uint32_t id, char *buf, size_t 
 static bool ui_text_field(nt_ui_context_t *ctx, uint32_t id, char *buf, size_t cap, const char *cur, bool enabled,
                           const char *placeholder) {
     if (!nt_ui_input_focused(ctx, id)) {
-        (void)snprintf(buf, cap, "%s", cur ? cur : "");
+        const char *text = cur ? cur : "";
+        const size_t length = strlen(text);
+        if (length >= cap) {
+            if (cap > 0U) {
+                buf[0] = '\0';
+            }
+            return false;
+        }
+        memcpy(buf, text, length + 1U);
     }
     const nt_ui_input_props_t tp = {
         .placeholder = placeholder, .allow = NULL, .max_length = 0U, .keyboard = NT_UI_KB_TEXT, .password = false};
@@ -739,14 +748,19 @@ static void declare_export_targets(nt_ui_context_t *ctx,
             /* row 2: out path + browse */
             CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H))}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
                 CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+                    const bool path_editable =
+                        strlen(t->out_path) < sizeof s_nb_target_path[ti];
                     if (ui_text_field(ctx, nt_ui_child_id(row_id, "path"), s_nb_target_path[ti], sizeof s_nb_target_path[ti],
-                                      t->out_path, true, "out/atlas.json")) {
+                                      t->out_path, path_editable, "out/atlas.json")) {
                         gui_edit_target_out_path(&target, s_nb_target_path[ti]); /* H/G3: coalesce -> ONE undo step */
                     }
                 }
                 if (ui_btn(ctx, nt_ui_child_id(row_id, "browse"), "\xE2\x80\xA6", &g_btn_ghost, true, 28.0F, 22.0F, &g_caption)) { /* U+2026 */
                     gui_request_browse_target(s_sel_atlas, ti);
                 }
+            }
+            if (strlen(t->out_path) >= sizeof s_nb_target_path[ti]) {
+                panel_note(ctx, "Output path exceeds the GUI path limit; shorten it before editing.");
             }
         }
         tp_target_validation_report diagnostics;

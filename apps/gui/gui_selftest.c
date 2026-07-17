@@ -121,7 +121,7 @@ static void selftest_multi_sel_add_name(const char *selector) {
                                          : NULL;
     tp_selector_result resolved;
     tp_id128 source_id = tp_id128_nil();
-    char source_key[TP_SCAN_REL_CAP];
+    char source_key[TP_SRCKEY_MAX];
     tp_error err = {0};
     const tp_status status = atlas
         ? tp_session_snapshot_resolve_sprite_selector(
@@ -331,7 +331,7 @@ static int selftest_create_animation_at(int atlas_index, const char *base,
     tp_op_sprite_ref *refs = frame_count > 0
         ? calloc((size_t)frame_count, sizeof *refs)
         : NULL;
-    char (*keys)[TP_SCAN_REL_CAP] = frame_count > 0
+    char (*keys)[TP_SRCKEY_MAX] = frame_count > 0
         ? calloc((size_t)frame_count, sizeof *keys)
         : NULL;
     if (frame_count > 0 && (!refs || !keys)) {
@@ -882,7 +882,7 @@ void run_selftest(void) {
               "redo re-applies the rename + re-dirties");
 
     /* --- rename a region (sprite override), verify it is stored on the model --- */
-    char folder_abs[512];
+    char folder_abs[TP_IDENTITY_PATH_MAX];
     const tp_session_snapshot *folder_snapshot = gui_project_snapshot();
     const tp_snapshot_atlas *folder_atlas = selftest_atlas_at(0, NULL);
     const tp_snapshot_source *folder_source = folder_atlas
@@ -896,19 +896,26 @@ void run_selftest(void) {
                                                           folder_source_id, folder_abs,
                                                           sizeof folder_abs,
                                                           &folder_error) == TP_STATUS_OK) {
-        const gui_scan_result *sc = gui_scan_get(folder_abs);
-        nt_log_info("SELFTEST: folder scan found %d image(s)", sc->count);
-        if (sc->count > 0) {
-            char sprite[192];
-            (void)snprintf(sprite, sizeof sprite, "%s", sc->entries[0].rel);
-            char *dot = strrchr(sprite, '.');
-            if (dot) {
-                *dot = '\0';
+        const gui_scan_result *sc = NULL;
+        if (gui_scan_get(folder_abs, &sc, &folder_error) != TP_STATUS_OK) {
+            sc = NULL;
+        }
+        if (!sc) {
+            nt_log_error("SELFTEST: folder scan failed: %s", folder_error.msg);
+        } else {
+            nt_log_info("SELFTEST: folder scan found %d image(s)", sc->count);
+            if (sc->count > 0) {
+                char sprite[192];
+                (void)snprintf(sprite, sizeof sprite, "%s", sc->entries[0].rel);
+                char *dot = strrchr(sprite, '.');
+                if (dot) {
+                    *dot = '\0';
+                }
+                gui_project_set_sprite_rename(0, sprite, "renamed_region");
+                const tp_snapshot_sprite *ov = tp_session_snapshot_sprite_by_key(
+                    gui_project_snapshot(), folder_atlas_id, folder_source_id, sprite);
+                nt_log_info("SELFTEST: rename region '%s' -> override='%s'", sprite, (ov && ov->rename) ? ov->rename : "(none)");
             }
-            gui_project_set_sprite_rename(0, sprite, "renamed_region");
-            const tp_snapshot_sprite *ov = tp_session_snapshot_sprite_by_key(
-                gui_project_snapshot(), folder_atlas_id, folder_source_id, sprite);
-            nt_log_info("SELFTEST: rename region '%s' -> override='%s'", sprite, (ov && ov->rename) ? ov->rename : "(none)");
         }
     }
 
@@ -941,10 +948,19 @@ void run_selftest(void) {
         (void)fclose(tf);
     }
     gui_scan_invalidate_all();
-    const int before_n = gui_scan_get(rdir)->count;
+    const gui_scan_result *refresh_scan = NULL;
+    tp_error refresh_error = {0};
+    const int before_n =
+        gui_scan_get(rdir, &refresh_scan, &refresh_error) == TP_STATUS_OK
+            ? refresh_scan->count
+            : -1;
     (void)remove(rfile);
     gui_scan_invalidate_all();
-    const int after_n = gui_scan_get(rdir)->count;
+    refresh_scan = NULL;
+    const int after_n =
+        gui_scan_get(rdir, &refresh_scan, &refresh_error) == TP_STATUS_OK
+            ? refresh_scan->count
+            : -1;
     nt_log_info("SELFTEST: refresh cycle temp png before=%d after=%d (removed=%d)", before_n, after_n, before_n - after_n);
 #ifdef _WIN32
     (void)RemoveDirectoryA(rdir);
@@ -1271,7 +1287,8 @@ void run_selftest(void) {
         build_rows();
         multi_sel_clear();
         for (int i = 0; i < s_row_count; i++) { /* select-all the leaf sprites (the real UI gesture) */
-            if (!s_rows[i].is_folder && !s_rows[i].missing && s_rows[i].sprite_name[0] != '\0') {
+            if (!s_rows[i].is_folder && !s_rows[i].missing &&
+                s_rows[i].sprite_name && s_rows[i].sprite_name[0] != '\0') {
                 multi_sel_add(s_rows[i].sprite_name);
             }
         }
@@ -1422,7 +1439,7 @@ void run_selftest(void) {
         NT_ASSERT(okc && "concave+extrude=3 packs (effective extrude 0)");
 
         /* per-sprite shape=RECT override -> that region packs as an exact 4-vert rect */
-        char afabs[512];
+        char afabs[TP_IDENTITY_PATH_MAX];
         const tp_session_snapshot *source_snapshot = gui_project_snapshot();
         const tp_snapshot_atlas *source_atlas = selftest_atlas_at(0, NULL);
         const tp_snapshot_source *source0 = source_atlas
@@ -1433,9 +1450,10 @@ void run_selftest(void) {
         if (source0 && tp_session_snapshot_resolve_path(source_snapshot, source_atlas->id,
                                                         source0->id, afabs, sizeof afabs,
                                                         &source_error) == TP_STATUS_OK) {
-            const gui_scan_result *sc = gui_scan_get(afabs);
-            if (sc->count > 0) {
-                char source_key[TP_SCAN_REL_CAP];
+            const gui_scan_result *sc = NULL;
+            if (gui_scan_get(afabs, &sc, &source_error) == TP_STATUS_OK &&
+                sc->count > 0) {
+                char source_key[TP_SRCKEY_MAX];
                 char spn[192];
                 (void)snprintf(source_key, sizeof source_key, "%s", sc->entries[0].rel);
                 (void)snprintf(spn, sizeof spn, "%s", sc->entries[0].rel);
@@ -1956,8 +1974,8 @@ void run_selftest(void) {
         (void)gui_project_set_sprite_slice9(0, "p4sprite", 0 /* L */, 5); /* buffered across the flush boundary */
         gui_project_flush_pending();                                      /* commit -> clone-swap + free the old project */
         const tp_snapshot_target *g4b = selftest_target_at(0, 0); /* re-get from the now-stable snapshot */
-        char g4_exp[64];
-        (void)snprintf(g4_exp, sizeof g4_exp, "%s", g4b->exporter_id); /* COPY before set_target's flush */
+        char g4_exp[TP_EXPORTER_ID_MAX];
+        memcpy(g4_exp, g4b->exporter_id, strlen(g4b->exporter_id) + 1U); /* COPY before set_target's flush */
         (void)gui_project_set_target(0, 0, g4_exp, "out/p4", true);
         const tp_snapshot_target *g4c = selftest_target_at(0, 0);
         nt_log_info("SELFTEST: #4 flush-before-read target path='%s' exporter='%s'", g4c->out_path,
@@ -1995,8 +2013,8 @@ void run_selftest(void) {
                   "#9 setup: install canonical source identity before borrowing target strings");
         const tp_snapshot_target *g9a = selftest_target_at(0, 0);
         NT_ASSERT(g9a && "#9: fresh project seeds a default target");
-        char g9_want[64];
-        (void)snprintf(g9_want, sizeof g9_want, "%s", g9a->exporter_id); /* expected value (copied now) */
+        char g9_want[TP_EXPORTER_ID_MAX];
+        memcpy(g9_want, g9a->exporter_id, strlen(g9a->exporter_id) + 1U); /* expected value (copied now) */
         (void)gui_project_set_sprite_slice9(0, "g9sprite", 0 /* L */, 7); /* buffer a real (non-noop) pending op, UNFLUSHED */
         const bool g9_set = gui_project_set_target(0, 0, g9_want, "out/g9", true);
         const tp_snapshot_target *g9c = selftest_target_at(0, 0);
@@ -2049,8 +2067,8 @@ void run_selftest(void) {
         const char t11_base[] = "out/base.json";
         NT_ASSERT(strcmp(t11a->out_path, t11_base) == 0 && "#11: baseline out_path committed");
         const bool t11_en = t11a->enabled;
-        char t11_exp[64];
-        (void)snprintf(t11_exp, sizeof t11_exp, "%s", t11a->exporter_id); /* remember for the RMW-seed check */
+        char t11_exp[TP_EXPORTER_ID_MAX];
+        memcpy(t11_exp, t11a->exporter_id, strlen(t11a->exporter_id) + 1U); /* remember for the RMW-seed check */
         const int t11_u0 = gui_project_undo_depth();
         /* simulate typing "out/f" -> ... -> "out/final.json": several DISTINCT values, SAME key, NO flush between */
         (void)gui_project_set_target_out_path(0, 0, "out/f");
@@ -2771,9 +2789,10 @@ void run_selftest(void) {
             gui_project_set_target(e_atlas, 0, t0->exporter_id, t0->out_path, !was); /* dialog toggle path */
             const tp_snapshot_target *changed = selftest_target_at(e_atlas, 0);
             const bool now = changed->enabled;
-            char exporter[64];
+            char exporter[TP_EXPORTER_ID_MAX];
             char out_path[TP_IDENTITY_PATH_MAX];
-            (void)snprintf(exporter, sizeof exporter, "%s", changed->exporter_id);
+            memcpy(exporter, changed->exporter_id,
+                   strlen(changed->exporter_id) + 1U);
             (void)snprintf(out_path, sizeof out_path, "%s", changed->out_path);
             gui_project_set_target(e_atlas, 0, exporter, out_path, was); /* restore */
             nt_log_info("SELFTEST: export-dialog toggle atlas=%d target0 %d->%d (restored=%d)", e_atlas, was, now, was);

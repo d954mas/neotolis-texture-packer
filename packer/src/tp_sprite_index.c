@@ -1,14 +1,16 @@
 #include "tp_core/tp_sprite_index.h"
 
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "tp_core/tp_names.h"   /* tp_sprite_export_key */
+#include "tp_core/tp_identity.h"
+#include "tp_core/tp_names.h"
 #include "tp_core/tp_project.h" /* project + source path resolution */
 #include "tp_core/tp_scan.h"    /* tp_scan_dir / _exists / _is_dir */
 #include "tp_core/tp_srckey.h"  /* tp_srckey_normalize */
 #include "tp_hex.h"             /* tp_hex_encode_lower (shared drift-guard encoder) */
-#include "tp_strutil.h"         /* shared tp_strdup / tp_path_basename / tp_slash_norm */
+#include "tp_strutil.h"         /* shared tp_strdup / tp_path_basename */
 #include "tp_session_internal.h"
 
 /* ------------------------------------------------------------------ */
@@ -75,44 +77,72 @@ tp_status tp_sprite_id_parse(const char *text, tp_id128 *out_id, tp_error *err) 
 /* build                                                              */
 /* ------------------------------------------------------------------ */
 
-static bool index_push(tp_sprite_index *idx, tp_id128 source_id, int source_index, const char *raw, const char *abs) {
+static tp_status index_export_key_dup(const char *raw, char **out,
+                                      tp_error *err) {
+    *out = NULL;
+    char key[TP_SRCKEY_MAX];
+    tp_sprite_export_key(raw, key, sizeof key);
+    char *copy = tp_strdup(key);
+    if (!copy) {
+        return tp_error_set(err, TP_STATUS_OOM,
+                            "sprite index export-key allocation failed");
+    }
+    *out = copy;
+    return TP_STATUS_OK;
+}
+
+static tp_status index_push(tp_sprite_index *idx, tp_id128 source_id,
+                            int source_index, const char *raw,
+                            const char *abs, tp_error *err) {
     if (idx->count == idx->cap) {
+        if (idx->cap > INT_MAX / 2) {
+            return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                                "sprite index has too many entries");
+        }
         int nc = idx->cap ? idx->cap * 2 : 32;
-        tp_sprite_ref *nr = (tp_sprite_ref *)realloc(idx->refs, (size_t)nc * sizeof *nr);
+        if ((size_t)nc > SIZE_MAX / sizeof *idx->refs) {
+            return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                                "sprite index table overflows size_t");
+        }
+        tp_sprite_ref *nr =
+            (tp_sprite_ref *)realloc(idx->refs,
+                                     (size_t)nc * sizeof *nr);
         if (!nr) {
-            return false;
+            return tp_error_set(err, TP_STATUS_OOM,
+                                "sprite index table allocation failed");
         }
         idx->refs = nr;
         idx->cap = nc;
     }
     char keybuf[TP_SRCKEY_MAX];
-    if (tp_srckey_normalize(raw, keybuf, sizeof keybuf, NULL) != TP_STATUS_OK) {
-        /* Deliberate tolerant fallback (tp_strutil.h contract): this is a display/index
-         * key, so the value must flow through instead of vanishing; over-length input is
-         * already rejected upstream by tp_srckey_normalize. */
-        tp_slash_norm(raw, keybuf, sizeof keybuf);
+    tp_status status = tp_srckey_normalize(raw, keybuf, sizeof keybuf, err);
+    if (status != TP_STATUS_OK) {
+        return status;
     }
-    char ekey[TP_SRCKEY_MAX];
-    tp_sprite_export_key(raw, ekey, sizeof ekey);
 
     tp_sprite_ref *r = &idx->refs[idx->count];
     memset(r, 0, sizeof *r);
     r->source_id = source_id;
     r->source_index = source_index;
     r->source_key = tp_strdup(keybuf);
-    r->export_key = tp_strdup(ekey);
+    status = index_export_key_dup(keybuf, &r->export_key, err);
     r->raw_name = tp_strdup(raw);
     r->abs_path = tp_strdup(abs ? abs : "");
-    if (!r->source_key || !r->export_key || !r->raw_name || !r->abs_path) {
+    if (status != TP_STATUS_OK || !r->source_key || !r->raw_name ||
+        !r->abs_path) {
         free(r->source_key);
         free(r->export_key);
         free(r->raw_name);
         free(r->abs_path);
-        return false;
+        memset(r, 0, sizeof *r);
+        return status != TP_STATUS_OK
+                   ? status
+                   : tp_error_set(err, TP_STATUS_OOM,
+                                  "sprite index string allocation failed");
     }
     r->sprite_id = tp_sprite_id(source_id, r->source_key);
     idx->count++;
-    return true;
+    return TP_STATUS_OK;
 }
 
 tp_status tp_sprite_index_build(const struct tp_project *p, int atlas_index, tp_sprite_index *out, tp_error *err) {
@@ -131,32 +161,51 @@ tp_status tp_sprite_index_build(const struct tp_project *p, int atlas_index, tp_
     }
     const tp_project_atlas *a = &p->atlases[atlas_index];
 
-    bool oom = false;
-    for (int si = 0; si < a->source_count && !oom; si++) {
+    for (int si = 0; si < a->source_count; si++) {
         const tp_project_source *src = &a->sources[si];
-        char abs[512];
-        if (tp_project_resolve_source_path(p, src->path, abs, sizeof abs) != TP_STATUS_OK) {
-            continue; /* unresolvable (relative source, unsaved project) -- skip */
+        char abs[TP_IDENTITY_PATH_MAX];
+        tp_status status =
+            tp_project_resolve_source_path(p, src->path, abs, sizeof abs);
+        if (status == TP_STATUS_INVALID_ARGUMENT) {
+            continue; /* relative source in an unsaved project: unresolved state */
+        }
+        if (status != TP_STATUS_OK) {
+            tp_sprite_index_free(out);
+            return tp_error_set(err, status,
+                                "sprite index source path %d could not be resolved",
+                                si);
         }
         if (!tp_scan_exists(abs)) {
             continue; /* missing source: a model state, contributes no sprites */
         }
         if (tp_scan_is_dir(abs)) {
-            tp_scan_result sc;
-            tp_scan_dir(abs, &sc);
-            for (int ci = 0; ci < sc.count && !oom; ci++) {
-                if (!index_push(out, src->id, si, sc.entries[ci].rel, sc.entries[ci].abs)) {
-                    oom = true;
+            tp_scan_result sc = {0};
+            status = tp_scan_dir(abs, &sc, err);
+            if (status == TP_STATUS_NOT_FOUND) {
+                continue;
+            }
+            if (status != TP_STATUS_OK) {
+                tp_sprite_index_free(out);
+                return status;
+            }
+            for (int ci = 0; ci < sc.count; ci++) {
+                status = index_push(out, src->id, si, sc.entries[ci].rel,
+                                    sc.entries[ci].abs, err);
+                if (status != TP_STATUS_OK) {
+                    tp_scan_free(&sc);
+                    tp_sprite_index_free(out);
+                    return status;
                 }
             }
             tp_scan_free(&sc);
-        } else if (!index_push(out, src->id, si, tp_path_basename(src->path), abs)) {
-            oom = true;
+        } else {
+            status = index_push(out, src->id, si,
+                                tp_path_basename(src->path), abs, err);
+            if (status != TP_STATUS_OK) {
+                tp_sprite_index_free(out);
+                return status;
+            }
         }
-    }
-    if (oom) {
-        tp_sprite_index_free(out);
-        return tp_error_set(err, TP_STATUS_OOM, "tp_sprite_index_build: out of memory building the sprite index");
     }
     return TP_STATUS_OK;
 }

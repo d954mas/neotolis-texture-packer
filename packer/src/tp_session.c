@@ -6,7 +6,6 @@
 
 #include "tp_core/tp_diff.h"
 #include "tp_core/tp_project_lease.h"
-#include "tp_core/tp_project_migrate.h"
 #include "tp_core/tp_recovery.h"
 #include "tp_core/tp_journal.h"
 #include "tp_core/tp_sprite_index.h"
@@ -17,6 +16,7 @@
 #include "tp_job_owner_internal.h"
 #include "tp_model_seam.h"
 #include "tp_project_internal.h"
+#include "tp_project_identity_internal.h"
 #include "tp_project_mutation_internal.h"
 
 // #region gate & recovery health
@@ -122,7 +122,6 @@ static void publish_event(tp_session *session, tp_session_event_kind kind,
 
 // #region lifetime
 static tp_status session_adopt_owned(tp_project *project, const tp_rng *rng,
-                                     bool migrate_sprite_refs,
                                      tp_session **out, tp_error *err) {
     if (!project || !rng || !rng->fill || !out) {
         tp_project_destroy(project);
@@ -131,17 +130,15 @@ static tp_status session_adopt_owned(tp_project *project, const tp_rng *rng,
     }
     *out = NULL;
 
-    tp_status status = tp_project_promote_ids(project, rng, err);
+    tp_status status = tp_project_assign_missing_ids(project, rng, err);
     if (status != TP_STATUS_OK) {
         tp_project_destroy(project);
         return status;
     }
-    if (migrate_sprite_refs) {
-        status = tp_project_migrate_sprite_refs(project, err);
-        if (status != TP_STATUS_OK) {
-            tp_project_destroy(project);
-            return status;
-        }
+    status = tp_project_validate_canonical(project, err);
+    if (status != TP_STATUS_OK) {
+        tp_project_destroy(project);
+        return status;
     }
 
     tp_session *session = (tp_session *)calloc(1, sizeof *session);
@@ -182,7 +179,7 @@ static tp_status session_adopt_owned(tp_project *project, const tp_rng *rng,
 
 tp_status tp_session_adopt_owned(tp_project *project, const tp_rng *rng,
                                  tp_session **out, tp_error *err) {
-    return session_adopt_owned(project, rng, false, out, err);
+    return session_adopt_owned(project, rng, out, err);
 }
 
 tp_status tp_session_create(const tp_rng *rng, tp_session **out, tp_error *err) {
@@ -268,7 +265,7 @@ tp_status tp_session_open(const char *path, const tp_rng *rng,
                             "project changed while it was opened");
     }
     tp_session *session = NULL;
-    status = session_adopt_owned(project, rng, true, &session, err);
+    status = session_adopt_owned(project, rng, &session, err);
     if (status != TP_STATUS_OK) {
         tp_project_lease_release(lease);
         return status;
@@ -539,6 +536,7 @@ static tp_status save_as_locked(tp_session *session, const char *path,
                                 tp_session_save_result *result, tp_error *err) {
     if (result) {
         memset(result, 0, sizeof *result);
+        result->file_durability_status = TP_STATUS_OK;
         result->recovery_status = TP_STATUS_OK;
     }
     char canonical[TP_IDENTITY_PATH_MAX];
@@ -574,26 +572,29 @@ static tp_status save_as_locked(tp_session *session, const char *path,
         return tp_error_set(err, TP_STATUS_OOM,
                             "save candidate clone failed");
     }
-    status = tp_project_migrate_sprite_refs(candidate, err);
-    if (status != TP_STATUS_OK) {
-        tp_project_destroy(candidate);
-        if (destination_lease != session->project_lease) {
-            tp_project_lease_release(destination_lease);
-        }
-        return status;
-    }
     tp_id128 fingerprint;
     const tp_id128 *expected_fingerprint =
         same_identity ? &session->saved_file_fingerprint : NULL;
     status = tp_project_save_candidate_with_fingerprint(
         candidate, canonical, expected_fingerprint, create_only,
         &fingerprint, err);
-    if (status != TP_STATUS_OK) {
+    const bool file_durability_degraded =
+        status == TP_STATUS_FILE_DURABILITY_UNCERTAIN;
+    const tp_status file_durability_status =
+        file_durability_degraded ? status : TP_STATUS_OK;
+    if (status != TP_STATUS_OK && !file_durability_degraded) {
         tp_project_destroy(candidate);
         if (destination_lease != session->project_lease) {
             tp_project_lease_release(destination_lease);
         }
         return status;
+    }
+    /* Publication already completed for the degraded outcome. From here the
+     * candidate, lease, identity, fingerprint, dirty anchor, and Saved event
+     * must advance exactly as on the fully durable path. */
+    status = TP_STATUS_OK;
+    if (file_durability_degraded && err) {
+        err->msg[0] = '\0';
     }
     bool recovery_degraded = !recovery_is_healthy(session);
     tp_status recovery_status = recovery_degraded
@@ -621,14 +622,20 @@ static tp_status save_as_locked(tp_session *session, const char *path,
             session->recovery_healthy = false;
         }
     }
-    tp_model__adopt_project(session->model, candidate);
+    if (same_identity) {
+        tp_project_destroy(candidate);
+        candidate = NULL;
+    } else {
+        tp_model__adopt_project(session->model, candidate);
+        candidate = NULL;
+        session->model_generation++;
+    }
     tp_project_lease *old_lease = session->project_lease;
     session->identity = next_identity;
     session->project_lease = destination_lease;
     session->saved_file_fingerprint = fingerprint;
     session->has_saved_file_fingerprint = true;
     tp_model_mark_saved(session->model);
-    session->model_generation++;
     if (!recovery_degraded) {
         tp_error compact_error = {{0}};
         recovery_status = tp_model_compact_journal(session->model, &compact_error);
@@ -640,6 +647,8 @@ static tp_status save_as_locked(tp_session *session, const char *path,
     }
     if (result) {
         result->saved = true;
+        result->file_durability_degraded = file_durability_degraded;
+        result->file_durability_status = file_durability_status;
         result->recovery_degraded = recovery_degraded;
         result->recovery_status = recovery_status;
         (void)snprintf(result->target_path, sizeof result->target_path, "%s", canonical);
@@ -693,6 +702,7 @@ tp_status tp_session_save_detached_recovery(
                             "detached recovery save requires session, path, and receipt");
     }
     memset(result, 0, sizeof *result);
+    result->file_durability_status = TP_STATUS_OK;
     result->recovery_status = TP_STATUS_OK;
     gate_lock(session);
     if (!session->has_recovery_token || session->discarded) {
@@ -710,26 +720,38 @@ tp_status tp_session_save_detached_recovery(
         if (!candidate) {
             status = tp_error_set(err, TP_STATUS_OOM,
                                   "save candidate clone failed");
-        } else {
-            status = tp_project_migrate_sprite_refs(candidate, err);
         }
         tp_id128 fingerprint;
+        bool file_durability_degraded = false;
+        tp_status file_durability_status = TP_STATUS_OK;
         if (status == TP_STATUS_OK) {
             status = tp_project_save_candidate_with_fingerprint(
                 candidate, canonical, expected_fingerprint, false,
                 &fingerprint, err);
+            file_durability_degraded =
+                status == TP_STATUS_FILE_DURABILITY_UNCERTAIN;
+            file_durability_status = file_durability_degraded
+                                         ? status
+                                         : TP_STATUS_OK;
         }
-        if (status == TP_STATUS_OK) {
+        if (status == TP_STATUS_OK || file_durability_degraded) {
             tp_model__adopt_project(session->model, candidate);
             candidate = NULL;
             tp_model_mark_saved(session->model);
             session->model_generation++;
             result->saved = true;
+            result->file_durability_degraded =
+                file_durability_degraded;
+            result->file_durability_status = file_durability_status;
             (void)snprintf(result->target_path, sizeof result->target_path,
                            "%s", canonical);
             result->file_fingerprint = fingerprint;
             result->recovery_token = session->recovery_token;
             result->has_recovery_token = true;
+            status = TP_STATUS_OK;
+            if (file_durability_degraded && err) {
+                err->msg[0] = '\0';
+            }
         }
         tp_project_destroy(candidate);
     }

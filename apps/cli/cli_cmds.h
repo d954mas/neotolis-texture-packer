@@ -27,6 +27,10 @@ struct tp_session_snapshot;
  * derived deterministic id) and `source` (owning source shape-ID) keys. */
 #define CLI_INSPECT_SCHEMA 4
 
+/* `validate --json` schema 2 adds exact report-owned contexts plus stable
+ * structural atlas/source/animation/target IDs. */
+#define CLI_VALIDATE_SCHEMA 2
+
 /* Loads `path` as an immutable snapshot into *out without taking the writer
  * lease. On failure emits a structured error (id = tp_status_id,
  * message = tp_error prose) honoring --json/--quiet, and returns the CLI exit code

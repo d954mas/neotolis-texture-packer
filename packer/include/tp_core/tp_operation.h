@@ -104,7 +104,8 @@ enum tp_atlas_field_mask {
     TP_AF_SHAPE = 1u << 6,
     TP_AF_ALLOW_TRANSFORM = 1u << 7,
     TP_AF_POWER_OF_TWO = 1u << 8,
-    TP_AF_PIXELS_PER_UNIT = 1u << 9
+    TP_AF_PIXELS_PER_UNIT = 1u << 9,
+    TP_AF_ALL = 0x3FFu
 };
 
 /* sprite.override.set / .clear: which override fields the op sets / clears.
@@ -126,7 +127,8 @@ enum tp_anim_field_mask {
     TP_ANF_FPS = 1u << 0,
     TP_ANF_PLAYBACK = 1u << 1,
     TP_ANF_FLIP_H = 1u << 2,
-    TP_ANF_FLIP_V = 1u << 3
+    TP_ANF_FLIP_V = 1u << 3,
+    TP_ANF_ALL = 0xFu
 };
 
 /* target.set: which of the target's fields the op sets. */

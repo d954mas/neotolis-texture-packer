@@ -3,7 +3,7 @@
 
 /*
  * Shared owned-string + path primitives for the tp_core src/ TUs: ONE definition
- * each so tp_project.c, tp_input.c, tp_sprite_index.c, and tp_project_migrate.c
+ * each so tp_project.c, tp_input.c, tp_sprite_index.c, and project identity code
  * don't re-implement them. Header-only static inline (like tp_hex.h) -- a private
  * packer/src header, NOT a public tp_core API; frontends keep their own copies.
  */

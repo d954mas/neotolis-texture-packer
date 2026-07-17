@@ -10,7 +10,7 @@ add_subdirectory(deps/utf8proc)
 find_package(Threads REQUIRED)
 
 add_library(tp_core STATIC
-    src/tp_arena.c src/tp_names.c src/tp_name_map.c src/tp_pack_read.c src/tp_project.c
+    src/tp_arena.c src/tp_fs_internal.c src/tp_image.c src/tp_json_internal.c src/tp_utf8.c src/tp_names.c src/tp_name_map.c src/tp_pack_read.c src/tp_project.c
     src/tp_pack_settings.c src/tp_scan.c src/tp_input.c src/tp_validate.c
     src/tp_export.c src/tp_normalize.c src/tp_export_png.c src/tp_export_json_neotolis.c
     src/tp_export_defold.c
@@ -19,8 +19,8 @@ add_library(tp_core STATIC
     src/tp_project_lease.c src/tp_recovery.c
     # Fixed client capability vocabulary and matrix.
     src/tp_client_capability.c
-    # Deterministic schema migration, separate from serialization.
-    src/tp_project_migrate.c
+    # Canonical schema identity assignment and validation.
+    src/tp_project_identity.c
     # Source-key normalization, collision, and portability rules.
     src/tp_srckey.c
     # Deterministic sprite IDs, index, and selector resolution.
@@ -34,7 +34,7 @@ add_library(tp_core STATIC
     src/tp_session.c src/tp_session_snapshot.c src/tp_project_generation.c
     src/tp_txn_parse.c src/tp_txn_lower.c src/tp_txn_encode.c
     # Semantic diff, exact inverse/redo, and bounded in-memory history.
-    src/tp_diff_entity.c src/tp_diff_capture.c src/tp_diff_apply.c src/tp_history.c
+    src/tp_diff_entity.c src/tp_diff_capture.c src/tp_diff_apply.c src/tp_history_codec.c src/tp_history.c
     # Durable recovery journal and injectable I/O seam.
     src/tp_journal.c src/tp_journal_io.c)
 target_include_directories(tp_core PUBLIC include)
@@ -56,15 +56,14 @@ target_include_directories(tp_core PRIVATE
 target_link_libraries(tp_core PUBLIC nt_shared nt_hash nt_log PRIVATE Threads::Threads)
 # cJSON (engine-vendored, MIT) parses .ntpacker_project. PRIVATE: tp_project.h never
 # exposes cJSON; Save uses a hand-rolled deterministic writer.
-# stb_image_write (engine-vendored, public domain) is the PNG page writer. Linked
-# DIRECTLY here (NOT via nt_builder): it is a standalone single-header impl with no
-# basisu / no static-CRT-duplicate concern, so it is safe in tp_core's closure and
-# the GUI (which links tp_core) picks it up transitively -- same PRIVATE static-lib
-# propagation cjson already relies on. Its own -U_DLL objects mix with tp_core's
-# default-CRT objects exactly like the GUI's existing stb_image dependency.
+# stb_image / stb_image_write (engine-vendored, public domain) are the bounded
+# memory decoder and PNG page writer. Linked DIRECTLY here (NOT via nt_builder):
+# each is a standalone single-header implementation with no basisu concern. The
+# decoder allocator is hidden behind tp_image_free, so allocation and release
+# stay inside the matching library runtime.
 # utf8proc (vendored, MIT) powers src/tp_srckey.c's NFC + case-fold. PRIVATE:
 # tp_srckey.h never exposes utf8proc types; its allocations are freed in-TU.
-target_link_libraries(tp_core PRIVATE cjson stb_image_write utf8proc)
+target_link_libraries(tp_core PRIVATE cjson stb_image stb_image_write utf8proc)
 target_compile_definitions(tp_core PRIVATE _CRT_SECURE_NO_WARNINGS)
 # CRT: tp_core no longer links the static-CRT builder, so it DROPS -U_DLL and uses the
 # engine runtime's default CRT -- matching its own deps (nt_hash/nt_log/cjson) and the

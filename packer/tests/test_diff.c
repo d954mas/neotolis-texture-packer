@@ -3,8 +3,8 @@
  *   - per-op oracle for EVERY op kind: A -> forward transaction -> B -> inverse -> A'
  *     is BYTE-IDENTICAL to A, and equals the legacy FULL-SNAPSHOT restore
  *     (tp_project_save_buffer/load_buffer). redo -> B' is byte-identical to B;
- *   - reference cascade: a coarse atlas.remove (whole subtree) and a source.remove
- *     that sprites/frames reference -> inverse restores everything byte-identical;
+ *   - reference integrity: atlas.remove removes its whole subtree; source.remove
+ *     is rejected while sprite/frame references still target that source;
  *   - a 100-animation batch committed as ONE transaction -> ONE inverse restores A;
  *   - inverse-apply allocation failure at EVERY staging depth -> ROLLBACK (model
  *     byte-unchanged, cursor unchanged), no leak (ASan/LSan in CI);
@@ -25,10 +25,12 @@
 #include "tp_core/tp_operation.h"
 #include "tp_core/tp_project.h"
 #include "tp_project_mutation_internal.h"
-#include "tp_core/tp_project_migrate.h" /* tp_project_promote_ids */
 #include "tp_core/tp_transaction.h"
 #include "tp_diff_internal.h" /* diff alloc seam + record/history internals (corrupt + rollback) */
+#include "tp_history_codec_internal.h"
+#include "tp_journal_internal.h" /* bounded binary codec helpers for hostile HISTORY fixtures */
 #include "tp_model_seam.h"
+#include "tp_project_identity_internal.h"
 #include "tp_test_model.h"
 #include "unity.h"
 
@@ -48,24 +50,62 @@ void tearDown(void) {
 static int s_id_ctr = 0;
 static void next_txn_id(char *buf) { (void)snprintf(buf, 33, "%032x", (unsigned)(++s_id_ctr)); }
 
-/* A0 "atlas1" {source "sprites", target json-neotolis "out/a", anim "walk"[hero,hero2]}
+/* A CRC-independent, syntactically valid HISTORY frames.set transition whose
+ * key is deliberately noncanonical. The decoder accepts it (string + ids are
+ * well formed); final project validation must reject it before publication. */
+static size_t noncanonical_frame_transition(uint8_t *out, size_t cap,
+                                            tp_id128 atlas_id, tp_id128 anim_id,
+                                            tp_id128 source_id) {
+    static const char key[] = "a/../b.png";
+    const size_t need = 8U + 1U + 16U + 16U + 4U + 16U + 4U + sizeof key - 1U;
+    if (!out || cap < need) return 0U;
+    size_t off = 0U;
+    tp_jrn_put_u32(out + off, TP_HISTORY_CODEC_VERSION);
+    off += 4U;
+    tp_jrn_put_u32(out + off, 1U);
+    off += 4U;
+    out[off++] = (uint8_t)TP_DIFF_SHAPE_FRAMES_LIST;
+    memcpy(out + off, atlas_id.bytes, sizeof atlas_id.bytes);
+    off += sizeof atlas_id.bytes;
+    memcpy(out + off, anim_id.bytes, sizeof anim_id.bytes);
+    off += sizeof anim_id.bytes;
+    tp_jrn_put_u32(out + off, 1U);
+    off += 4U;
+    memcpy(out + off, source_id.bytes, sizeof source_id.bytes);
+    off += sizeof source_id.bytes;
+    tp_jrn_put_u32(out + off, (uint32_t)(sizeof key - 1U));
+    off += 4U;
+    memcpy(out + off, key, sizeof key - 1U);
+    return off + sizeof key - 1U;
+}
+
+/* A0 "atlas1" {sources "sprites" + unreferenced "unused", target json-neotolis
+ * "out/a", anim "walk"[hero,hero2]}
  * + A1 "atlas2" (empty). All structural ids promoted (deterministic). */
 static tp_project *make_base(void) {
     tp_project *p = tp_project_create();
     TEST_ASSERT_NOT_NULL(p);
     tp_project_atlas *a0 = &p->atlases[0];
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_source(a0, "sprites"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_source(a0, "unused"));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(a0, TP_EXPORTER_ID_JSON_NEOTOLIS, "out/a", NULL));
     tp_project_anim *an = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_animation(a0, "walk", &an));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "hero"));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "hero2"));
     int idx = -1;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_add_atlas(p, "atlas2", &idx));
+    a0 = &p->atlases[0];
+    an = &a0->animations[0];
     uint8_t ctr = 1;
     tp_rng rng = {tp_test_det_fill, &ctr};
     tp_error err;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_promote_ids(p, &rng, &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_assign_missing_ids(p, &rng, &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_anim_add_frame(an, a0->sources[0].id,
+                                                    "hero.png"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_anim_add_frame(an, a0->sources[0].id,
+                                                    "hero2.png"));
     return p;
 }
 
@@ -80,6 +120,7 @@ static tp_model *fresh(void) {
 static tp_id128 a0_id(tp_model *m) { return tp_model_project(m)->atlases[0].id; }
 static tp_id128 a1_id(tp_model *m) { return tp_model_project(m)->atlases[1].id; }
 static tp_id128 src0_id(tp_model *m) { return tp_model_project(m)->atlases[0].sources[0].id; }
+static tp_id128 src1_id(tp_model *m) { return tp_model_project(m)->atlases[0].sources[1].id; }
 static tp_id128 tgt0_id(tp_model *m) { return tp_model_project(m)->atlases[0].targets[0].id; }
 static tp_id128 anim0_id(tp_model *m) { return tp_model_project(m)->atlases[0].animations[0].id; }
 
@@ -110,6 +151,45 @@ static void run_oracle(tp_model *m, tp_operation *ops, int n) {
     TEST_ASSERT_TRUE(tp_model_can_undo(m));
     char *B = tp_test_serialize_project(tp_model_project(m));
 
+    /* The durable history codec is a one-way projection of the same semantic
+     * record. Exercise it for every operation kind covered by this oracle. */
+    tp_history *history = tp_model_history(m);
+    TEST_ASSERT_NOT_NULL(history);
+    const tp_diff_record *record = history->records[history->pos - 1];
+    tp_project *codec_project = tp_project_clone(tp_model_project(m));
+    TEST_ASSERT_NOT_NULL(codec_project);
+    tp_history_transition_blob transition = {0};
+    tp_history_codec_outcome outcome = TP_HISTORY_CODEC_ERROR;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_history_transition_encode(record, true, codec_project, SIZE_MAX,
+                                     &transition, &outcome, &err));
+    TEST_ASSERT_EQUAL_INT(TP_HISTORY_CODEC_OK, outcome);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_history_transition_apply(codec_project,
+                                                      transition.data,
+                                                      transition.len, NULL,
+                                                      &err));
+    char *codec_A = tp_test_serialize_project(codec_project);
+    TEST_ASSERT_EQUAL_STRING(A, codec_A);
+    tp_history_transition_blob_free(&transition);
+
+    outcome = TP_HISTORY_CODEC_ERROR;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_history_transition_encode(record, false, codec_project, SIZE_MAX,
+                                     &transition, &outcome, &err));
+    TEST_ASSERT_EQUAL_INT(TP_HISTORY_CODEC_OK, outcome);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_history_transition_apply(codec_project,
+                                                      transition.data,
+                                                      transition.len, NULL,
+                                                      &err));
+    char *codec_B = tp_test_serialize_project(codec_project);
+    TEST_ASSERT_EQUAL_STRING(B, codec_B);
+    tp_history_transition_blob_free(&transition);
+    tp_project_destroy(codec_project);
+
     /* inverse (Undo) -> A' */
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_undo(m, &err));
     TEST_ASSERT_EQUAL_INT64(rev0 + 2, tp_model_revision(m)); /* Undo bumps the revision */
@@ -135,7 +215,138 @@ static void run_oracle(tp_model *m, tp_operation *ops, int n) {
     free(Ap);
     free(Bp);
     free(Aleg);
+    free(codec_A);
+    free(codec_B);
     free(snapA);
+}
+
+void test_history_codec_atlas_name_roundtrip_both_directions(void) {
+    tp_model *m = fresh();
+    tp_project *before = tp_project_clone(tp_model_project(m));
+    TEST_ASSERT_NOT_NULL(before);
+
+    tp_operation op = {0};
+    op.kind = TP_OP_ATLAS_RENAME;
+    op.atlas_id = a0_id(m);
+    op.u.atlas_rename.name = (char *)"codec-name";
+    tp_txn_request req = {0};
+    req.schema = TP_TXN_SCHEMA;
+    next_txn_id(req.id_hex);
+    req.expected_revision = tp_model_revision(m);
+    req.ops = &op;
+    req.op_count = 1;
+    tp_txn_result result = {0};
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_apply(m, &req, &result, &err));
+    TEST_ASSERT_TRUE(result.committed);
+    tp_txn_result_free(&result);
+
+    tp_project *after = tp_project_clone(tp_model_project(m));
+    TEST_ASSERT_NOT_NULL(after);
+    tp_history *history = tp_model_history(m);
+    TEST_ASSERT_NOT_NULL(history);
+    TEST_ASSERT_EQUAL_INT(1, history->count);
+    const tp_diff_record *record = history->records[0];
+
+    tp_history_transition_blob undo = {0};
+    tp_history_codec_outcome outcome = TP_HISTORY_CODEC_ERROR;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_history_transition_encode(record, true, after, SIZE_MAX, &undo,
+                                     &outcome, &err));
+    TEST_ASSERT_EQUAL_INT(TP_HISTORY_CODEC_OK, outcome);
+    TEST_ASSERT_EQUAL_UINT32(1U, undo.op_count);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_history_transition_apply(after, undo.data,
+                                                      undo.len, NULL, &err));
+    char *expected_before = tp_test_serialize_project(before);
+    char *actual_before = tp_test_serialize_project(after);
+    TEST_ASSERT_EQUAL_STRING(expected_before, actual_before);
+
+    tp_history_transition_blob redo = {0};
+    outcome = TP_HISTORY_CODEC_ERROR;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_history_transition_encode(record, false, before, SIZE_MAX, &redo,
+                                     &outcome, &err));
+    TEST_ASSERT_EQUAL_INT(TP_HISTORY_CODEC_OK, outcome);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_history_transition_apply(before, redo.data,
+                                                      redo.len, NULL, &err));
+    char *expected_after = tp_test_serialize_project(tp_model_project(m));
+    char *actual_after = tp_test_serialize_project(before);
+    TEST_ASSERT_EQUAL_STRING(expected_after, actual_after);
+
+    free(expected_before);
+    free(actual_before);
+    free(expected_after);
+    free(actual_after);
+    tp_history_transition_blob_free(&undo);
+    tp_history_transition_blob_free(&redo);
+    tp_project_destroy(before);
+    tp_project_destroy(after);
+    tp_model_destroy(m);
+}
+
+/* Compact history has exactly two non-error fallbacks: a future shape the
+ * current codec cannot express, or a record that genuinely exceeds its byte
+ * budget. A malformed value in a known shape is a hard error -- silently
+ * checkpointing it would hide a core corruption bug. */
+void test_history_codec_rejects_malformed_known_shape_but_falls_back_for_unknown_shape(void) {
+    tp_model *m = fresh();
+    tp_error err = {0};
+    tp_history_transition_blob blob = {0};
+    tp_history_codec_outcome outcome = TP_HISTORY_CODEC_OK;
+
+    tp_diff_op malformed = {0};
+    malformed.shape = TP_DIFF_SHAPE_ATLAS_NAME;
+    malformed.atlas_id = a0_id(m);
+    malformed.name_after = NULL; /* known shape, invalid wire value */
+    tp_diff_record bad = {.ops = &malformed, .op_count = 1};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_history_transition_encode(&bad, false, tp_model_project(m), SIZE_MAX,
+                                     &blob, &outcome, &err));
+    TEST_ASSERT_EQUAL_INT(TP_HISTORY_CODEC_ERROR, outcome);
+    TEST_ASSERT_NULL(blob.data);
+
+    tp_diff_op future = {0};
+    future.shape = (tp_diff_shape)99;
+    tp_diff_record unknown = {.ops = &future, .op_count = 1};
+    outcome = TP_HISTORY_CODEC_ERROR;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_history_transition_encode(&unknown, false, tp_model_project(m),
+                                     SIZE_MAX, &blob, &outcome, &err));
+    TEST_ASSERT_EQUAL_INT(TP_HISTORY_CODEC_UNSUPPORTED, outcome);
+    TEST_ASSERT_NULL(blob.data);
+
+    tp_model_destroy(m);
+}
+
+void test_history_codec_atomic_apply_rejects_noncanonical_result(void) {
+    tp_model *m = fresh();
+    const tp_project_atlas *atlas = &tp_model_project(m)->atlases[0];
+    uint8_t transition[96];
+    const size_t transition_len = noncanonical_frame_transition(
+        transition, sizeof transition, atlas->id, atlas->animations[0].id,
+        atlas->sources[0].id);
+    TEST_ASSERT_GREATER_THAN_size_t(0U, transition_len);
+    char *before = tp_test_serialize_project(tp_model_project(m));
+    /* The test owns this model and exercises the codec's project-level atomic
+     * helper directly; the public accessor is intentionally const. */
+    tp_project *live = (tp_project *)(void *)tp_model_project(m);
+    tp_error err = {0};
+    uint32_t op_count = 0U;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_BAD_PROJECT,
+                          tp_history_transition_apply(live,
+                                                      transition, transition_len,
+                                                      &op_count, &err));
+    char *after = tp_test_serialize_project(tp_model_project(m));
+    TEST_ASSERT_EQUAL_STRING(before, after);
+    free(after);
+    free(before);
+    tp_model_destroy(m);
 }
 
 /* seed a sparse sprite override on {src, key} so a *.clear has something to remove. */
@@ -229,7 +440,7 @@ void test_oracle_source_remove(void) {
     memset(&op, 0, sizeof op);
     op.kind = TP_OP_SOURCE_REMOVE;
     op.atlas_id = a0_id(m);
-    op.u.source_ref.source_id = src0_id(m);
+    op.u.source_ref.source_id = src1_id(m); /* no persistent references */
     run_oracle(m, &op, 1);
     tp_model_destroy(m);
 }
@@ -487,18 +698,37 @@ void test_cascade_atlas_remove_full_subtree(void) {
     tp_model_destroy(m);
 }
 
-/* Removing a source that a sprite override + an animation frame reference: the
- * dependent records orphan (keyed by id) but are byte-unchanged; the inverse
- * restores the source so the references resolve again. */
-void test_cascade_source_remove_with_references(void) {
+/* Canonical v5 records cannot reference an unknown source. Removing a source
+ * with sprite/frame references is rejected before staging and changes nothing. */
+void test_source_remove_rejects_referenced_source_atomically(void) {
     tp_model *m = fresh();
     seed_sprite(m, "hero.png"); /* a sprite override bridging into the atlas */
+    char *before = tp_test_serialize_project(tp_model_project(m));
+    const int64_t before_revision = tp_model_revision(m);
+    const int before_undo_depth = tp_model_undo_depth(m);
     tp_operation op;
     memset(&op, 0, sizeof op);
     op.kind = TP_OP_SOURCE_REMOVE;
     op.atlas_id = a0_id(m);
     op.u.source_ref.source_id = src0_id(m);
-    run_oracle(m, &op, 1);
+    tp_txn_request req = {0};
+    req.schema = TP_TXN_SCHEMA;
+    next_txn_id(req.id_hex);
+    req.expected_revision = before_revision;
+    req.ops = &op;
+    req.op_count = 1;
+    tp_txn_result result = {0};
+    tp_error err = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_model_apply(m, &req, &result, &err));
+    TEST_ASSERT_FALSE(result.committed);
+    tp_txn_result_free(&result);
+    char *after = tp_test_serialize_project(tp_model_project(m));
+    TEST_ASSERT_EQUAL_STRING(before, after);
+    TEST_ASSERT_EQUAL_INT64(before_revision, tp_model_revision(m));
+    TEST_ASSERT_EQUAL_INT(before_undo_depth, tp_model_undo_depth(m));
+    free(after);
+    free(before);
     tp_model_destroy(m);
 }
 
@@ -714,7 +944,7 @@ void test_corrupted_diff_bad_position(void) {
     memset(&op, 0, sizeof op);
     op.kind = TP_OP_SOURCE_REMOVE; /* undo re-inserts at `position` */
     op.atlas_id = a0_id(m);
-    op.u.source_ref.source_id = src0_id(m);
+    op.u.source_ref.source_id = src1_id(m);
     tp_txn_request req = {0};
     req.schema = TP_TXN_SCHEMA;
     next_txn_id(req.id_hex);
@@ -1277,10 +1507,23 @@ static tp_project *make_maximal(void) {
 
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_source_kind(a, "art/hero", TP_SOURCE_KIND_FOLDER));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_source_kind(a, "art/tiles.png", TP_SOURCE_KIND_FILE));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_source_kind(a, "art/unused.png", TP_SOURCE_KIND_FILE));
 
-    /* sprite A: name-bridge (pending) with every other field non-default. */
+    /* Give sources stable ids before their canonical {source,key} refs are
+     * constructed. Structural entities added below receive their ids in the
+     * second assignment pass. */
+    uint8_t ctr = 7;
+    tp_rng rng = {tp_test_det_fill, &ctr};
+    tp_error err;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_assign_missing_ids(p, &rng, &err));
+    const tp_id128 source_folder = a->sources[0].id;
+    const tp_id128 source_file = a->sources[1].id;
+
+    /* sprite A: canonical {source,key} with every other field non-default. */
     tp_project_sprite *sp = NULL;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_pending_sprite(a, "hero/walk_01", &sp));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_sprite_by_source_key(
+                              a, source_folder, "hero/walk_01", &sp));
     sp->origin_x = 0.25F;
     sp->origin_y = 0.75F;
     sp->slice9_lrtb[0] = 4;
@@ -1293,17 +1536,25 @@ static tp_project *make_maximal(void) {
     sp->ov_max_vertices = 6;
     sp->ov_margin = 3;
     sp->ov_extrude = 5;
-    /* sprite B: RESOLVED {source, key} -- exercises copy_sprite_fields' src_key dup. */
+    /* sprite B: exercises copy_sprite_fields' canonical source/key duplicate. */
     tp_project_sprite *sp2 = NULL;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_pending_sprite(a, "grass", &sp2));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_sprite_by_source_key(
+                              a, source_file, "grass.png", &sp2));
     sp2->origin_x = 0.1F;
 
-    /* animation: every field non-default + two pending frames + one resolved frame. */
+    /* animation: every field non-default + canonical frames. */
     tp_project_anim *an = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_animation(a, "walk", &an));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "hero/walk_01"));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "hero/walk_02"));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "grass")); /* -> resolved below */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_anim_add_frame(an, source_folder,
+                                                    "hero/walk_01"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_anim_add_frame(an, source_folder,
+                                                    "hero/walk_02"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_anim_add_frame(an, source_file,
+                                                    "grass.png"));
     an->fps = 24.0F;
     an->playback = 2;
     an->flip_h = true;
@@ -1314,17 +1565,7 @@ static tp_project *make_maximal(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(a, "defold", "out/hero.tpinfo", &t2));
     t2->enabled = false; /* default true */
 
-    uint8_t ctr = 7;
-    tp_rng rng = {tp_test_det_fill, &ctr};
-    tp_error err;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_promote_ids(p, &rng, &err));
-    /* wire the resolved records to a real source id (ids exist only after promote); the
-     * name bridge (strip_ext(key)) already equals each record's name, so it round-trips. */
-    tp_id128 src_file = a->sources[1].id;
-    sp2->source_ref = src_file;
-    sp2->src_key = dup_cstr("grass.png");
-    an->frames[2].source_ref = src_file;
-    an->frames[2].src_key = dup_cstr("grass.png");
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_assign_missing_ids(p, &rng, &err));
     return p;
 }
 
@@ -1339,7 +1580,7 @@ static void run_remove_oracle(tp_op_kind kind, tp_id128 anim_id, int frame_or_po
     op.kind = kind;
     op.atlas_id = a->id;
     switch (kind) {
-        case TP_OP_SOURCE_REMOVE: op.u.source_ref.source_id = a->sources[1].id; break; /* the FILE source */
+        case TP_OP_SOURCE_REMOVE: op.u.source_ref.source_id = a->sources[2].id; break; /* the unreferenced FILE source */
         case TP_OP_ANIMATION_REMOVE: op.u.anim_ref.anim_id = anim_id; break;
         case TP_OP_TARGET_REMOVE: op.u.target_ref.target_id = a->targets[1].id; break; /* the disabled target */
         default: break; /* atlas.remove: atlas_id only */
@@ -1362,6 +1603,9 @@ void test_completeness_oracle_anim_remove(void) {
 
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(test_history_codec_atlas_name_roundtrip_both_directions);
+    RUN_TEST(test_history_codec_rejects_malformed_known_shape_but_falls_back_for_unknown_shape);
+    RUN_TEST(test_history_codec_atomic_apply_rejects_noncanonical_result);
     RUN_TEST(test_oracle_atlas_create);
     RUN_TEST(test_oracle_atlas_remove);
     RUN_TEST(test_oracle_atlas_rename);
@@ -1385,7 +1629,7 @@ int main(void) {
     RUN_TEST(test_oracle_target_remove);
     RUN_TEST(test_oracle_target_set);
     RUN_TEST(test_cascade_atlas_remove_full_subtree);
-    RUN_TEST(test_cascade_source_remove_with_references);
+    RUN_TEST(test_source_remove_rejects_referenced_source_atomically);
     RUN_TEST(test_batch_100_animations_one_inverse);
     RUN_TEST(test_batch_mixed_intrabatch);
     RUN_TEST(test_inverse_alloc_failure_rolls_back);

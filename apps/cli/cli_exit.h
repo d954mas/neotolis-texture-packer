@@ -1,6 +1,8 @@
 #ifndef NTPACKER_CLI_EXIT_H
 #define NTPACKER_CLI_EXIT_H
 
+#include "tp_core/tp_error.h"
+
 /* Process exit codes -- a stable contract (ai-first.md item 3, plan "CLI v1
  * contract"). Agents branch on these, so the numbers are frozen; 8+ is reserved
  * for future distinct failures. Every enumerator's WHY is the condition that
@@ -16,5 +18,10 @@ typedef enum cli_exit {
     CLI_EXIT_VALIDATE = 7  /* `validate` found problems AND --strict was set (findings otherwise live in the payload) */
     /* 8+ reserved: add a distinct code, never overload an existing one. */
 } cli_exit;
+
+/* Maps a core rejection from a CLI-built transaction to the stable process
+ * contract. Generated-ID failures are internal; missing model references are
+ * project errors; malformed values/vocabulary are usage errors. */
+int cli_exit_for_rejected_status(tp_status status);
 
 #endif /* NTPACKER_CLI_EXIT_H */

@@ -68,10 +68,8 @@ static tp_status grab_sprite(const tp_project_atlas *a, const tp_operation *op,
     tp_id128 source_id;
     const char *src_key = NULL;
     sprite_address(op, &source_id, &src_key);
-    const tp_project_sprite *s = tp_id128_is_nil(source_id)
-        ? tp_project_atlas_find_pending_sprite((tp_project_atlas *)a, src_key)
-        : tp_project_atlas_find_sprite_by_source_key(
-              (tp_project_atlas *)a, source_id, src_key);
+    const tp_project_sprite *s = tp_project_atlas_find_sprite_by_source_key(
+        (tp_project_atlas *)a, source_id, src_key);
     if (!s) {
         *present = false;
         *index = -1;

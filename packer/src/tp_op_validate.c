@@ -18,9 +18,11 @@
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_srckey.h"
 #include "tp_op_internal.h"
+#include "tp_project_identity_internal.h"
 #include "tp_project_mutation_internal.h"
 #include "tp_source_plan_internal.h"
 #include "tp_strutil.h"
+#include "tp_utf8_internal.h"
 
 /* Reject NaN / +-inf; `pos` also rejects <= 0. No libm: comparisons only. */
 static bool finite_any(float v) { return v == v && v >= -FLT_MAX && v <= FLT_MAX; }
@@ -75,6 +77,24 @@ static const tp_project_target *find_target(const tp_project_atlas *a, tp_id128 
     return tp_project_atlas_find_target_by_id((tp_project_atlas *)a, id);
 }
 
+static bool source_is_referenced(const tp_project_atlas *atlas,
+                                 tp_id128 source_id) {
+    for (int i = 0; i < atlas->sprite_count; i++) {
+        if (tp_id128_eq(atlas->sprites[i].source_ref, source_id)) {
+            return true;
+        }
+    }
+    for (int i = 0; i < atlas->animation_count; i++) {
+        const tp_project_anim *animation = &atlas->animations[i];
+        for (int f = 0; f < animation->frame_count; f++) {
+            if (tp_id128_eq(animation->frames[f].source_ref, source_id)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 /* Range-check one integer knob; returns OK or an OUT_OF_RANGE rejection. */
 static tp_status range_i(tp_op_reject *rej, const char *field, long v, long lo, long hi) {
     if (v < lo || v > hi) {
@@ -83,12 +103,118 @@ static tp_status range_i(tp_op_reject *rej, const char *field, long v, long lo, 
     return TP_STATUS_OK;
 }
 
-/* Lower-bound-only check (no artificial upper cap). Mirrors the CLI `set` for the knobs
- * whose only constraint is `>= 0` -- the authoritative page-dim clamp lives in tp_pack. */
-static tp_status min_i(tp_op_reject *rej, const char *field, long v, long lo) {
-    if (v < lo) {
-        return tp_op__reject(rej, TP_STATUS_OUT_OF_RANGE, field, "%s = %ld must be >= %ld", field, v, lo);
+static tp_status validate_persisted_utf8(const char *value, const char *field,
+                                         tp_op_reject *reject) {
+    if (!value) {
+        return TP_STATUS_OK; /* Required/nullable semantics stay with each op. */
     }
+    tp_error error = {{0}};
+    const tp_status status = tp_utf8_validate_c_string(
+        value, TP_STATUS_INVALID_UTF8, field, &error);
+    return status == TP_STATUS_OK
+               ? TP_STATUS_OK
+               : tp_op__reject(reject, TP_STATUS_INVALID_UTF8, field, "%s",
+                               error.msg);
+}
+
+static tp_status validate_exporter_id(const char *value,
+                                      tp_op_reject *reject) {
+    tp_error error = {0};
+    const tp_status status = tp_exporter_id_validate(value, &error);
+    return status == TP_STATUS_OK
+               ? TP_STATUS_OK
+               : tp_op__reject(reject, status, "exporter_id", "%s",
+                               error.msg);
+}
+
+/* Validate every string that the active operation can persist before path
+ * canonicalization, mutation, or integer/string encoding. Unmasked payload
+ * storage is deliberately ignored: field-presence means it is not data. */
+static tp_status validate_operation_utf8(const tp_operation *operation,
+                                         tp_op_reject *reject) {
+    tp_status status = TP_STATUS_OK;
+#define CHECK_UTF8(value, field)                                                \
+    do {                                                                        \
+        status = validate_persisted_utf8((value), (field), reject);             \
+        if (status != TP_STATUS_OK) {                                            \
+            return status;                                                      \
+        }                                                                       \
+    } while (0)
+    switch (operation->kind) {
+        case TP_OP_ATLAS_CREATE:
+            CHECK_UTF8(operation->u.atlas_create.name, "name");
+            break;
+        case TP_OP_ATLAS_RENAME:
+            CHECK_UTF8(operation->u.atlas_rename.name, "name");
+            break;
+        case TP_OP_SOURCE_ADD:
+            CHECK_UTF8(operation->u.source_add.key, "key");
+            break;
+        case TP_OP_SOURCE_REPLACE:
+            CHECK_UTF8(operation->u.source_ref.key, "key");
+            break;
+        case TP_OP_SPRITE_OVERRIDE_SET:
+            CHECK_UTF8(operation->u.sprite_set.src_key, "src_key");
+            break;
+        case TP_OP_SPRITE_OVERRIDE_CLEAR:
+            CHECK_UTF8(operation->u.sprite_clear.src_key, "src_key");
+            break;
+        case TP_OP_SPRITE_NAME_SET:
+            CHECK_UTF8(operation->u.sprite_name.src_key, "src_key");
+            CHECK_UTF8(operation->u.sprite_name.name, "name");
+            break;
+        case TP_OP_ANIMATION_CREATE:
+            CHECK_UTF8(operation->u.anim_create.name, "name");
+            if (operation->u.anim_create.frames &&
+                operation->u.anim_create.frame_count > 0) {
+                for (int i = 0; i < operation->u.anim_create.frame_count; i++) {
+                    CHECK_UTF8(operation->u.anim_create.frames[i].src_key,
+                               "frames");
+                }
+            }
+            break;
+        case TP_OP_ANIMATION_RENAME:
+            CHECK_UTF8(operation->u.anim_rename.name, "name");
+            break;
+        case TP_OP_ANIMATION_FRAMES_SET:
+            if (operation->u.anim_frames_set.frames &&
+                operation->u.anim_frames_set.frame_count > 0) {
+                for (int i = 0;
+                     i < operation->u.anim_frames_set.frame_count; i++) {
+                    CHECK_UTF8(
+                        operation->u.anim_frames_set.frames[i].src_key,
+                        "frames");
+                }
+            }
+            break;
+        case TP_OP_ANIMATION_FRAME_ADD:
+            CHECK_UTF8(operation->u.anim_frame_add.frame.src_key, "frame");
+            break;
+        case TP_OP_TARGET_CREATE:
+            CHECK_UTF8(operation->u.target_create.exporter_id, "exporter_id");
+            CHECK_UTF8(operation->u.target_create.out_path, "out_path");
+            break;
+        case TP_OP_TARGET_SET:
+            if (operation->u.target_set.mask & TP_TF_EXPORTER) {
+                CHECK_UTF8(operation->u.target_set.exporter_id, "exporter_id");
+            }
+            if (operation->u.target_set.mask & TP_TF_OUT_PATH) {
+                CHECK_UTF8(operation->u.target_set.out_path, "out_path");
+            }
+            break;
+        case TP_OP_INVALID:
+        case TP_OP_ATLAS_REMOVE:
+        case TP_OP_ATLAS_SETTINGS_SET:
+        case TP_OP_SOURCE_REMOVE:
+        case TP_OP_ANIMATION_REMOVE:
+        case TP_OP_ANIMATION_SETTINGS_SET:
+        case TP_OP_ANIMATION_FRAME_REMOVE:
+        case TP_OP_ANIMATION_FRAME_MOVE:
+        case TP_OP_TARGET_REMOVE:
+        case TP_OP_KIND_COUNT:
+            break;
+    }
+#undef CHECK_UTF8
     return TP_STATUS_OK;
 }
 
@@ -100,21 +226,90 @@ static tp_status validate_atlas_settings(const tp_project_atlas *atlas,
     if (s->mask == 0) {
         return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "", "atlas.settings.set names no field");
     }
+    if ((s->mask & ~(uint32_t)TP_AF_ALL) != 0U) {
+        return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "",
+                             "atlas.settings.set contains unknown field bits");
+    }
     if ((s->mask & TP_AF_MAX_SIZE) && !tp_pack_max_size_valid(s->max_size)) {
         return tp_op__reject(rej, TP_STATUS_OUT_OF_RANGE, "max_size",
                              "max_size = %d must be in [1..%d]", s->max_size,
                              TP_PACK_MAX_PAGE_DIM);
     }
-    /* padding / margin / extrude: CLI `set` accepts any >= 0 (no upper cap here; tp_pack
-     * clamps). Matching that keeps the op engine neither stricter nor looser than the CLI. */
-    if ((s->mask & TP_AF_PADDING) && (st = min_i(rej, "padding", s->padding, 0))) {
+    const int effective_max_size = (s->mask & TP_AF_MAX_SIZE)
+                                       ? s->max_size
+                                       : atlas->max_size;
+    if (!tp_pack_max_size_valid(effective_max_size)) {
+        return tp_op__reject(rej, TP_STATUS_OUT_OF_RANGE, "max_size",
+                             "effective max_size = %d must be in [1..%d]",
+                             effective_max_size, TP_PACK_MAX_PAGE_DIM);
+    }
+    if ((s->mask & TP_AF_PADDING) &&
+        (st = range_i(rej, "padding", s->padding, 0,
+                      effective_max_size))) {
         return st;
     }
-    if ((s->mask & TP_AF_MARGIN) && (st = min_i(rej, "margin", s->margin, 0))) {
+    if ((s->mask & TP_AF_MARGIN) &&
+        (st = range_i(rej, "margin", s->margin, 0,
+                      effective_max_size))) {
         return st;
     }
-    if ((s->mask & TP_AF_EXTRUDE) && (st = min_i(rej, "extrude", s->extrude, 0))) {
+    if ((s->mask & TP_AF_EXTRUDE) &&
+        (st = range_i(rej, "extrude", s->extrude, 0,
+                      effective_max_size))) {
         return st;
+    }
+
+    const int effective_padding = (s->mask & TP_AF_PADDING)
+                                      ? s->padding
+                                      : atlas->padding;
+    const int effective_margin = (s->mask & TP_AF_MARGIN)
+                                     ? s->margin
+                                     : atlas->margin;
+    const int effective_extrude = (s->mask & TP_AF_EXTRUDE)
+                                      ? s->extrude
+                                      : atlas->extrude;
+    if (effective_padding < 0 || effective_padding > effective_max_size) {
+        const char *field = (s->mask & TP_AF_PADDING) ? "padding"
+                                                      : "max_size";
+        return tp_op__reject(
+            rej, TP_STATUS_OUT_OF_RANGE, field,
+            "effective padding = %d must be in [0..%d]",
+            effective_padding, effective_max_size);
+    }
+    if (effective_margin < 0 || effective_margin > effective_max_size) {
+        const char *field = (s->mask & TP_AF_MARGIN) ? "margin"
+                                                     : "max_size";
+        return tp_op__reject(
+            rej, TP_STATUS_OUT_OF_RANGE, field,
+            "effective margin = %d must be in [0..%d]", effective_margin,
+            effective_max_size);
+    }
+    if (effective_extrude < 0 || effective_extrude > effective_max_size) {
+        const char *field = (s->mask & TP_AF_EXTRUDE) ? "extrude"
+                                                      : "max_size";
+        return tp_op__reject(
+            rej, TP_STATUS_OUT_OF_RANGE, field,
+            "effective extrude = %d must be in [0..%d]",
+            effective_extrude, effective_max_size);
+    }
+    if (s->mask & TP_AF_MAX_SIZE) {
+        for (int i = 0; i < atlas->sprite_count; ++i) {
+            const tp_project_sprite *sprite = &atlas->sprites[i];
+            if (sprite->ov_margin != TP_PROJECT_OV_INHERIT &&
+                sprite->ov_margin > effective_max_size) {
+                return tp_op__reject(
+                    rej, TP_STATUS_OUT_OF_RANGE, "max_size",
+                    "max_size = %d is smaller than sprite margin override %d",
+                    effective_max_size, sprite->ov_margin);
+            }
+            if (sprite->ov_extrude != TP_PROJECT_OV_INHERIT &&
+                sprite->ov_extrude > effective_max_size) {
+                return tp_op__reject(
+                    rej, TP_STATUS_OUT_OF_RANGE, "max_size",
+                    "max_size = %d is smaller than sprite extrude override %d",
+                    effective_max_size, sprite->ov_extrude);
+            }
+        }
     }
     if ((s->mask & TP_AF_ALPHA_THRESHOLD) &&
         !tp_pack_alpha_threshold_valid(s->alpha_threshold)) {
@@ -137,9 +332,6 @@ static tp_status validate_atlas_settings(const tp_project_atlas *atlas,
         !tp_pack_pixels_per_unit_valid(s->pixels_per_unit)) {
         return tp_op__reject(rej, TP_STATUS_OUT_OF_RANGE, "pixels_per_unit", "pixels_per_unit must be positive finite");
     }
-    const int effective_extrude = (s->mask & TP_AF_EXTRUDE)
-                                      ? s->extrude
-                                      : atlas->extrude;
     const int effective_shape = (s->mask & TP_AF_SHAPE) ? s->shape
                                                         : atlas->shape;
     if (!tp_pack_extrude_shape_valid(effective_extrude, effective_shape)) {
@@ -150,10 +342,16 @@ static tp_status validate_atlas_settings(const tp_project_atlas *atlas,
 }
 
 /* sprite.override.set: range-check each masked override field (INHERIT passes). */
-static tp_status validate_sprite_set(const tp_op_sprite_set *s, tp_op_reject *rej) {
+static tp_status validate_sprite_set(const tp_project_atlas *atlas,
+                                     const tp_op_sprite_set *s,
+                                     tp_op_reject *rej) {
     tp_status st = TP_STATUS_OK;
     if (s->mask == 0) {
         return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "", "sprite.override.set names no field");
+    }
+    if ((s->mask & ~(uint32_t)TP_SPF_ALL) != 0U) {
+        return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "",
+                             "sprite.override.set contains unknown field bits");
     }
     if ((s->mask & TP_SPF_ORIGIN) && (!finite_any(s->origin_x) || !finite_any(s->origin_y))) {
         return tp_op__reject(rej, TP_STATUS_OUT_OF_RANGE, "origin_x", "origin must be finite");
@@ -173,9 +371,13 @@ static tp_status validate_sprite_set(const tp_op_sprite_set *s, tp_op_reject *re
                       TP_PACK_SHAPE_MAX))) {
         return st;
     }
-    if ((s->mask & TP_SPF_ALLOW_ROTATE) && s->ov_allow_rotate != TP_PROJECT_OV_INHERIT &&
-        (st = range_i(rej, "ov_allow_rotate", s->ov_allow_rotate, 0, 1))) {
-        return st;
+    if ((s->mask & TP_SPF_ALLOW_ROTATE) &&
+        s->ov_allow_rotate != TP_PROJECT_OV_INHERIT &&
+        s->ov_allow_rotate != 0) {
+        return tp_op__reject(
+            rej, TP_STATUS_OUT_OF_RANGE, "ov_allow_rotate",
+            "ov_allow_rotate = %d must be 0 (force no-rotate) or -1 (inherit)",
+            s->ov_allow_rotate);
     }
     if ((s->mask & TP_SPF_MAX_VERTICES) &&
         s->ov_max_vertices != TP_PROJECT_OV_INHERIT &&
@@ -185,12 +387,28 @@ static tp_status validate_sprite_set(const tp_op_sprite_set *s, tp_op_reject *re
                              s->ov_max_vertices, TP_PACK_MAX_VERTICES);
     }
     if ((s->mask & TP_SPF_MARGIN) && s->ov_margin != TP_PROJECT_OV_INHERIT &&
-        (st = range_i(rej, "ov_margin", s->ov_margin, 0, TP_OP_OV_MARGIN_MAX))) {
+        (st = range_i(rej, "ov_margin", s->ov_margin, 1, UINT8_MAX))) {
         return st;
     }
+    if ((s->mask & TP_SPF_MARGIN) &&
+        s->ov_margin != TP_PROJECT_OV_INHERIT &&
+        s->ov_margin > atlas->max_size) {
+        return tp_op__reject(
+            rej, TP_STATUS_OUT_OF_RANGE, "ov_margin",
+            "ov_margin = %d must not exceed atlas max_size %d", s->ov_margin,
+            atlas->max_size);
+    }
     if ((s->mask & TP_SPF_EXTRUDE) && s->ov_extrude != TP_PROJECT_OV_INHERIT &&
-        (st = range_i(rej, "ov_extrude", s->ov_extrude, 0, TP_OP_OV_MARGIN_MAX))) {
+        (st = range_i(rej, "ov_extrude", s->ov_extrude, 1, UINT8_MAX))) {
         return st;
+    }
+    if ((s->mask & TP_SPF_EXTRUDE) &&
+        s->ov_extrude != TP_PROJECT_OV_INHERIT &&
+        s->ov_extrude > atlas->max_size) {
+        return tp_op__reject(
+            rej, TP_STATUS_OUT_OF_RANGE, "ov_extrude",
+            "ov_extrude = %d must not exceed atlas max_size %d",
+            s->ov_extrude, atlas->max_size);
     }
     return TP_STATUS_OK;
 }
@@ -369,6 +587,13 @@ tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_
     if (!p || !op) {
         return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "", "null project or operation");
     }
+    if (tp_op_info_by_kind(op->kind) == NULL) {
+        return tp_op__reject(rej, TP_STATUS_UNKNOWN_OP, "op", "operation kind %d is not in the catalog", (int)op->kind);
+    }
+    tp_status utf8_status = validate_operation_utf8(op, rej);
+    if (utf8_status != TP_STATUS_OK) {
+        return utf8_status;
+    }
     tp_operation canonical;
     char canonical_path[TP_IDENTITY_PATH_MAX];
     tp_status canonical_status = tp_op__canonical_view(
@@ -378,17 +603,14 @@ tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_
                              "source path cannot be resolved against the project");
     }
     op = &canonical;
-    if (tp_op_info_by_kind(op->kind) == NULL) {
-        return tp_op__reject(rej, TP_STATUS_UNKNOWN_OP, "op", "operation kind %d is not in the catalog", (int)op->kind);
-    }
-
     /* atlas.create is the one op that must NOT already resolve its atlas_id. */
     if (op->kind == TP_OP_ATLAS_CREATE) {
         if (tp_id128_is_nil(op->atlas_id)) {
             return tp_op__reject(rej, TP_STATUS_ID_MALFORMED, "atlas_id", "atlas.create needs a real atlas id");
         }
-        if (find_atlas(p, op->atlas_id)) {
-            return tp_op__reject(rej, TP_STATUS_DUPLICATE_ID, "atlas_id", "an atlas with that id already exists");
+        if (tp_project_has_structural_id(p, op->atlas_id)) {
+            return tp_op__reject(rej, TP_STATUS_DUPLICATE_ID, "atlas_id",
+                                 "that structural id already belongs to a project entity");
         }
         const char *nm = op->u.atlas_create.name;
         tp_status name_status = validate_atlas_name_shape(nm, rej);
@@ -430,8 +652,9 @@ tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_
             if (tp_id128_is_nil(op->u.source_add.source_id)) {
                 return tp_op__reject(rej, TP_STATUS_ID_MALFORMED, "source_id", "source.add needs a real source id");
             }
-            if (find_source(a, op->u.source_add.source_id)) {
-                return tp_op__reject(rej, TP_STATUS_DUPLICATE_ID, "source_id", "a source with that id already exists");
+            if (tp_project_has_structural_id(p, op->u.source_add.source_id)) {
+                return tp_op__reject(rej, TP_STATUS_DUPLICATE_ID, "source_id",
+                                     "that structural id already belongs to a project entity");
             }
             if (!op->u.source_add.key || op->u.source_add.key[0] == '\0') {
                 return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "key", "source path must be non-empty");
@@ -454,9 +677,15 @@ tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_
              * knob (shape/playback/alpha) -> OUT_OF_RANGE. */
             return range_i(rej, "kind", (long)op->u.source_add.kind, 0, 1);
         case TP_OP_SOURCE_REMOVE:
-            return find_source(a, op->u.source_ref.source_id)
-                       ? TP_STATUS_OK
-                       : tp_op__reject(rej, TP_STATUS_NOT_FOUND, "source_id", "no source with that id in the atlas");
+            if (!find_source(a, op->u.source_ref.source_id)) {
+                return tp_op__reject(rej, TP_STATUS_NOT_FOUND, "source_id",
+                                     "no source with that id in the atlas");
+            }
+            return source_is_referenced(a, op->u.source_ref.source_id)
+                       ? tp_op__reject(
+                             rej, TP_STATUS_INVALID_ARGUMENT, "source_id",
+                             "source is still referenced by sprite overrides or animation frames")
+                       : TP_STATUS_OK;
         case TP_OP_SOURCE_REPLACE:
             if (!find_source(a, op->u.source_ref.source_id)) {
                 return tp_op__reject(rej, TP_STATUS_NOT_FOUND, "source_id", "no source with that id in the atlas");
@@ -478,7 +707,7 @@ tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_
             if (!op->u.sprite_set.src_key || op->u.sprite_set.src_key[0] == '\0') {
                 return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "src_key", "sprite key must be non-empty");
             }
-            return validate_sprite_set(&op->u.sprite_set, rej);
+            return validate_sprite_set(a, &op->u.sprite_set, rej);
         case TP_OP_SPRITE_OVERRIDE_CLEAR:
             if (tp_id128_is_nil(op->u.sprite_clear.source_id)) {
                 return tp_op__reject(rej, TP_STATUS_ID_MALFORMED, "source_id",
@@ -492,6 +721,11 @@ tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_
             }
             if (op->u.sprite_clear.mask == 0) {
                 return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "fields", "sprite.override.clear names no field");
+            }
+            if ((op->u.sprite_clear.mask & ~(uint32_t)TP_SPF_ALL) != 0U) {
+                return tp_op__reject(
+                    rej, TP_STATUS_INVALID_ARGUMENT, "fields",
+                    "sprite.override.clear contains unknown field bits");
             }
             return TP_STATUS_OK;
         case TP_OP_SPRITE_NAME_SET:
@@ -513,8 +747,9 @@ tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_
             if (tp_id128_is_nil(c->anim_id)) {
                 return tp_op__reject(rej, TP_STATUS_ID_MALFORMED, "anim_id", "animation.create needs a real anim id");
             }
-            if (find_anim(a, c->anim_id)) {
-                return tp_op__reject(rej, TP_STATUS_DUPLICATE_ID, "anim_id", "an animation with that id already exists");
+            if (tp_project_has_structural_id(p, c->anim_id)) {
+                return tp_op__reject(rej, TP_STATUS_DUPLICATE_ID, "anim_id",
+                                     "that structural id already belongs to a project entity");
             }
             if (!c->name || c->name[0] == '\0') {
                 return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "name", "animation name must be non-empty");
@@ -566,6 +801,11 @@ tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_
             }
             if (s->mask == 0) {
                 return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "", "animation.settings.set names no field");
+            }
+            if ((s->mask & ~(uint32_t)TP_ANF_ALL) != 0U) {
+                return tp_op__reject(
+                    rej, TP_STATUS_INVALID_ARGUMENT, "",
+                    "animation.settings.set contains unknown field bits");
             }
             return validate_anim_knobs((s->mask & TP_ANF_FPS) != 0, s->fps, (s->mask & TP_ANF_PLAYBACK) != 0,
                                        s->playback, rej);
@@ -632,10 +872,16 @@ tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_
             if (tp_id128_is_nil(t->target_id)) {
                 return tp_op__reject(rej, TP_STATUS_ID_MALFORMED, "target_id", "target.create needs a real target id");
             }
-            if (find_target(a, t->target_id)) {
-                return tp_op__reject(rej, TP_STATUS_DUPLICATE_ID, "target_id", "a target with that id already exists");
+            if (tp_project_has_structural_id(p, t->target_id)) {
+                return tp_op__reject(rej, TP_STATUS_DUPLICATE_ID, "target_id",
+                                     "that structural id already belongs to a project entity");
             }
-            if (!t->exporter_id || !tp_exporter_find(t->exporter_id)) {
+            tp_status exporter_status =
+                validate_exporter_id(t->exporter_id, rej);
+            if (exporter_status != TP_STATUS_OK) {
+                return exporter_status;
+            }
+            if (!tp_exporter_find(t->exporter_id)) {
                 return tp_op__reject(rej, TP_STATUS_NOT_FOUND, "exporter_id", "unknown exporter id '%s'",
                                      t->exporter_id ? t->exporter_id : "");
             }
@@ -658,9 +904,21 @@ tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_
             if (t->mask == 0) {
                 return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "", "target.set names no field");
             }
-            if ((t->mask & TP_TF_EXPORTER) && (!t->exporter_id || !tp_exporter_find(t->exporter_id))) {
-                return tp_op__reject(rej, TP_STATUS_NOT_FOUND, "exporter_id", "unknown exporter id '%s'",
-                                     t->exporter_id ? t->exporter_id : "");
+            if ((t->mask & ~(uint32_t)TP_TF_ALL) != 0U) {
+                return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "",
+                                     "target.set contains unknown field bits");
+            }
+            if (t->mask & TP_TF_EXPORTER) {
+                tp_status exporter_status =
+                    validate_exporter_id(t->exporter_id, rej);
+                if (exporter_status != TP_STATUS_OK) {
+                    return exporter_status;
+                }
+                if (!tp_exporter_find(t->exporter_id)) {
+                    return tp_op__reject(
+                        rej, TP_STATUS_NOT_FOUND, "exporter_id",
+                        "unknown exporter id '%s'", t->exporter_id);
+                }
             }
             if ((t->mask & TP_TF_OUT_PATH) && (!t->out_path || t->out_path[0] == '\0')) {
                 return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "out_path", "out_path must be non-empty");

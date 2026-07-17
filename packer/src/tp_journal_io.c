@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "tp_fs_internal.h"
 #include "tp_journal_internal.h"
 
 #if defined(_WIN32)
@@ -28,6 +29,7 @@
 #define TP_FTELL64(fp) _ftelli64((fp))
 #define TP_FDOPEN(fd, mode) _fdopen((fd), (mode))
 #define TP_CLOSE(fd) _close((fd))
+#define TP_FILENO(fp) _fileno((fp))
 _Static_assert(sizeof(long long) == 8, "journal file offsets must be 64-bit");
 #else
 #include <unistd.h> /* ftruncate, fileno */
@@ -36,6 +38,7 @@ _Static_assert(sizeof(long long) == 8, "journal file offsets must be 64-bit");
 #define TP_FTELL64(fp) ftello((fp))
 #define TP_FDOPEN(fd, mode) fdopen((fd), (mode))
 #define TP_CLOSE(fd) close((fd))
+#define TP_FILENO(fp) fileno((fp))
 _Static_assert(sizeof(off_t) >= 8, "journal file offsets must be 64-bit (define _FILE_OFFSET_BITS=64)");
 #endif
 
@@ -48,6 +51,8 @@ typedef struct {
     int fail_writes;    /* fail the next N write() calls entirely */
     int64_t short_next; /* >=0: next write is a short write of this many bytes */
     bool fail_truncate; /* fail the next truncate() call */
+    bool fail_sync;     /* fail the next durability barrier */
+    size_t sync_count;
 } journal_mem;
 
 static int64_t mem_write(void *ctx, const uint8_t *data, size_t len) {
@@ -129,7 +134,12 @@ static int mem_read_all(void *ctx, size_t max_len, uint8_t **out,
 }
 
 static int mem_sync(void *ctx) {
-    (void)ctx;
+    journal_mem *m = (journal_mem *)ctx;
+    m->sync_count++;
+    if (m->fail_sync) {
+        m->fail_sync = false;
+        return -1;
+    }
     return 0;
 }
 
@@ -182,6 +192,16 @@ void tp_journal_io_memory__fail_next_truncate(tp_journal_io io) {
     if (m) {
         m->fail_truncate = true;
     }
+}
+void tp_journal_io_memory__fail_next_sync(tp_journal_io io) {
+    journal_mem *m = mem_of(io);
+    if (m) {
+        m->fail_sync = true;
+    }
+}
+size_t tp_journal_io_memory__sync_count(tp_journal_io io) {
+    journal_mem *m = mem_of(io);
+    return m ? m->sync_count : 0U;
 }
 void tp_journal_io_memory__poke(tp_journal_io io, size_t at, uint8_t val) {
     journal_mem *m = mem_of(io);
@@ -275,7 +295,18 @@ static int file_read_all(void *ctx, size_t max_len, uint8_t **out,
 
 static int file_sync(void *ctx) {
     journal_file *f = (journal_file *)ctx;
-    return (fflush(f->fp) == 0) ? 0 : -1;
+    if (!f || !f->fp || fflush(f->fp) != 0) {
+        return -1;
+    }
+    const int fd = TP_FILENO(f->fp);
+    if (fd < 0) {
+        return -1;
+    }
+#if defined(_WIN32)
+    return _commit(fd) == 0 ? 0 : -1;
+#else
+    return fsync(fd) == 0 ? 0 : -1;
+#endif
 }
 
 static void file_destroy(void *ctx) {
@@ -321,9 +352,9 @@ tp_journal_io tp_journal_io_file(const char *path) {
     if (!path) {
         return io;
     }
-    FILE *fp = fopen(path, "r+b"); /* existing journal */
+    FILE *fp = tp_fs_fopen(path, "r+b"); /* existing journal */
     if (!fp) {
-        fp = fopen(path, "w+b"); /* create fresh */
+        fp = tp_fs_fopen(path, "w+b"); /* create fresh */
     }
     if (!fp) {
         return io; /* ctx == NULL => create fails */
@@ -393,7 +424,7 @@ tp_journal_io tp_journal_io_file_read(const char *path) {
     if (!path) {
         return io;
     }
-    FILE *fp = fopen(path, "rb"); /* READ-ONLY, NEVER create (no "w+b" fallback) */
+    FILE *fp = tp_fs_fopen(path, "rb"); /* READ-ONLY, NEVER create (no "w+b" fallback) */
     if (!fp) {
         return io; /* missing / unopenable -> ctx == NULL (caller skips this candidate) */
     }

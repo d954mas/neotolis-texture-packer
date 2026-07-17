@@ -23,10 +23,11 @@ extern "C" {
 typedef tp_scan_entry gui_scan_entry;
 typedef tp_scan_result gui_scan_result;
 
-/* Recursive listing of image files (.png/.jpg/.jpeg/.bmp/.tga, case-insensitive) under
- * abs_dir. Never NULL; count==0 for an empty/missing/inaccessible dir. The result is
- * owned by the module (cached) -- do NOT free or mutate it. */
-const gui_scan_result *gui_scan_get(const char *abs_dir);
+/* Recursive listing of image files under abs_dir. On success, *out_result is a
+ * non-NULL module-owned cached result (possibly empty). Scan/open/read/OOM/path
+ * failures are returned exactly and are never cached as an empty success. */
+tp_status gui_scan_get(const char *abs_dir,
+                       const gui_scan_result **out_result, tp_error *err);
 
 /* True if abs points at an existing directory (distinguishes a folder source from a file
  * source without trusting the extension). False for files, missing paths, and NULL. */

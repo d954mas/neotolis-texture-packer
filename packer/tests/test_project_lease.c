@@ -15,7 +15,7 @@
 #include "tp_core/tp_identity.h"
 #include "tp_core/tp_project.h"
 #include "tp_project_mutation_internal.h"
-#include "tp_core/tp_project_migrate.h"
+#include "tp_project_identity_internal.h"
 #include "tp_core/tp_project_lease.h"
 #include "tp_core/tp_scan.h"
 #include "unity.h"
@@ -201,6 +201,38 @@ void test_canonical_alias_uses_same_lock_domain(void) {
     tp_project_lease_release(lease);
 }
 
+#ifdef _WIN32
+void test_acquires_project_lease_beyond_win32_max_path(void) {
+    char long_dir[TP_IDENTITY_PATH_MAX];
+    const int prefix_written = snprintf(long_dir, sizeof long_dir, "%s", g_dir);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, prefix_written);
+    TEST_ASSERT_LESS_THAN_INT((int)sizeof long_dir, prefix_written);
+
+    for (unsigned int segment = 0U; strlen(long_dir) <= 300U; segment++) {
+        const size_t used = strlen(long_dir);
+        const int written = snprintf(long_dir + used, sizeof long_dir - used,
+                                     "/lease-long-path-segment-%02u", segment);
+        TEST_ASSERT_GREATER_THAN_INT(0, written);
+        TEST_ASSERT_LESS_THAN_INT((int)(sizeof long_dir - used), written);
+    }
+    tp_mkdirs(long_dir);
+    TEST_ASSERT_TRUE(tp_scan_is_dir(long_dir));
+
+    char project[TP_IDENTITY_PATH_MAX];
+    join_path(project, sizeof project, long_dir, "long.ntpacker_project");
+    TEST_ASSERT_TRUE(strlen(project) > 260U);
+
+    tp_project_lease *lease = NULL;
+    tp_error err = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_lease_acquire(project, &lease, &err));
+    TEST_ASSERT_NOT_NULL(lease);
+    TEST_ASSERT_EQUAL_INT(23, child_acquire_exit(project));
+    tp_project_lease_release(lease);
+    TEST_ASSERT_EQUAL_INT(0, child_acquire_exit(project));
+}
+#endif
+
 void test_cli_mutation_respects_process_project_lease(void) {
     char project[TP_IDENTITY_PATH_MAX];
     join_path(project, sizeof project, g_dir, "cli-busy.ntpacker_project");
@@ -208,7 +240,7 @@ void test_cli_mutation_respects_process_project_lease(void) {
     TEST_ASSERT_NOT_NULL(seed);
     tp_rng rng = tp_rng_os();
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_project_promote_ids(seed, &rng, NULL));
+                          tp_project_assign_missing_ids(seed, &rng, NULL));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_project_save(seed, project, NULL));
     tp_project_destroy(seed);
@@ -236,7 +268,7 @@ void test_cli_reads_do_not_require_writer_lease(void) {
     TEST_ASSERT_NOT_NULL(seed);
     tp_rng rng = tp_rng_os();
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_project_promote_ids(seed, &rng, NULL));
+                          tp_project_assign_missing_ids(seed, &rng, NULL));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_project_save(seed, project, NULL));
     tp_project_destroy(seed);
@@ -286,6 +318,9 @@ int main(int argc, char **argv) {
     RUN_TEST(test_live_owner_returns_project_live_to_other_process);
     RUN_TEST(test_stale_lock_file_is_not_a_live_owner);
     RUN_TEST(test_canonical_alias_uses_same_lock_domain);
+#ifdef _WIN32
+    RUN_TEST(test_acquires_project_lease_beyond_win32_max_path);
+#endif
     RUN_TEST(test_cli_mutation_respects_process_project_lease);
     RUN_TEST(test_cli_reads_do_not_require_writer_lease);
     return UNITY_END();

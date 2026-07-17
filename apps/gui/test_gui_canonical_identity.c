@@ -11,6 +11,7 @@
 #endif
 
 #include "gui_actions.h"
+#include "gui_canvas.h"
 #include "gui_pack.h"
 #include "gui_project.h"
 #include "gui_rows.h"
@@ -208,7 +209,7 @@ void tearDown(void) {
 
 void test_preview_result_rejects_source_refresh_after_job_capture(void) {
     (void)add_coin_source();
-    gui_pack_init(TP_GUI_IDENTITY_TEST_DIR);
+    TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_IDENTITY_TEST_DIR));
     char error[256] = {0};
     TEST_ASSERT_TRUE(gui_pack_preview_async_start(0, "defold", error,
                                                   sizeof error));
@@ -227,6 +228,98 @@ void test_preview_result_rejects_source_refresh_after_job_capture(void) {
     TEST_ASSERT_NULL(gui_pack_preview_result(0));
 }
 
+void test_long_sprite_keys_with_shared_prefix_never_coalesce(void) {
+    const tp_id128 atlas_id = add_coin_source();
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_source *source =
+        tp_session_snapshot_source_at(snapshot, atlas_id, 0);
+    TEST_ASSERT_NOT_NULL(source);
+    const tp_id128 source_id = source->id;
+
+    char first[320];
+    char second[320];
+    memset(first, 'k', sizeof first - 1U);
+    memcpy(second, first, sizeof first);
+    first[sizeof first - 2U] = 'a';
+    second[sizeof second - 2U] = 'b';
+    first[sizeof first - 1U] = '\0';
+    second[sizeof second - 1U] = '\0';
+    TEST_ASSERT_EQUAL_MEMORY(first, second, 255U);
+
+    const int64_t revision = tp_session_snapshot_revision(snapshot);
+    const gui_sprite_ref first_ref = {atlas_id, source_id, first, revision};
+    const gui_sprite_ref second_ref = {atlas_id, source_id, second, revision};
+    TEST_ASSERT_TRUE(gui_project_set_sprite_override(
+        &first_ref, GUI_SPRITE_OV_MARGIN, 3));
+    TEST_ASSERT_TRUE(gui_project_set_sprite_override(
+        &second_ref, GUI_SPRITE_OV_MARGIN, 7));
+    TEST_ASSERT_TRUE(gui_project_flush_pending());
+
+    snapshot = gui_project_snapshot();
+    const tp_snapshot_sprite *first_sprite =
+        tp_session_snapshot_sprite_by_key(snapshot, atlas_id, source_id, first);
+    const tp_snapshot_sprite *second_sprite =
+        tp_session_snapshot_sprite_by_key(snapshot, atlas_id, source_id, second);
+    TEST_ASSERT_NOT_NULL(first_sprite);
+    TEST_ASSERT_NOT_NULL(second_sprite);
+    TEST_ASSERT_EQUAL_INT(3, first_sprite->override_margin);
+    TEST_ASSERT_EQUAL_INT(7, second_sprite->override_margin);
+}
+
+void test_oversized_names_cannot_enter_a_truncating_editor(void) {
+    char oversized[TP_SRCKEY_MAX + 1U];
+    memset(oversized, 'z', sizeof oversized - 1U);
+    oversized[sizeof oversized - 1U] = '\0';
+
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas = tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const tp_id128 atlas_id = atlas->id;
+    TEST_ASSERT_TRUE(gui_project_set_atlas_name(
+        atlas_id, tp_session_snapshot_revision(snapshot), oversized));
+    snapshot = gui_project_snapshot();
+    cancel_edit();
+    start_atlas_edit_ref(atlas_id, tp_session_snapshot_revision(snapshot));
+    TEST_ASSERT_EQUAL_INT(EDIT_NONE, s_edit_kind);
+
+    const int animation_index = gui_project_create_animation(
+        atlas_id, tp_session_snapshot_revision(snapshot), "long-name-fixture",
+        NULL, 0);
+    TEST_ASSERT_EQUAL_INT(0, animation_index);
+    snapshot = gui_project_snapshot();
+    const tp_snapshot_animation *animation =
+        tp_session_snapshot_animation_at(snapshot, atlas_id, animation_index);
+    TEST_ASSERT_NOT_NULL(animation);
+    gui_animation_ref animation_ref = {
+        atlas_id, animation->id, tp_session_snapshot_revision(snapshot)};
+    TEST_ASSERT_TRUE(gui_project_set_anim_id(&animation_ref, oversized));
+    snapshot = gui_project_snapshot();
+    animation_ref.expected_revision = tp_session_snapshot_revision(snapshot);
+    cancel_edit();
+    start_anim_edit_ref(&animation_ref);
+    TEST_ASSERT_EQUAL_INT(EDIT_NONE, s_edit_kind);
+
+    (void)add_coin_source();
+    snapshot = gui_project_snapshot();
+    atlas = tp_session_snapshot_atlas_by_id(snapshot, atlas_id);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const tp_snapshot_source *source =
+        tp_session_snapshot_source_at(snapshot, atlas_id, 0);
+    TEST_ASSERT_NOT_NULL(source);
+    const tp_id128 source_id = source->id;
+    const gui_sprite_ref sprite = {
+        atlas_id, source_id, "coin.png",
+        tp_session_snapshot_revision(snapshot)};
+    TEST_ASSERT_TRUE(gui_project_set_sprite_rename(&sprite, oversized));
+    snapshot = gui_project_snapshot();
+    const gui_sprite_ref renamed = {
+        atlas_id, source_id, "coin.png",
+        tp_session_snapshot_revision(snapshot)};
+    cancel_edit();
+    start_sprite_edit_ref(&renamed, oversized);
+    TEST_ASSERT_EQUAL_INT(EDIT_NONE, s_edit_kind);
+}
+
 void test_recovery_entry_keeps_core_path_capacity(void) {
     char original_path[1501];
     memset(original_path, 'p', sizeof original_path - 1U);
@@ -243,10 +336,25 @@ void test_recovery_entry_keeps_core_path_capacity(void) {
     TEST_ASSERT_EQUAL_STRING(original_path, entry.original_path);
 }
 
+void test_canvas_cache_key_keeps_core_path_capacity(void) {
+    gui_canvas canvas = {0};
+    TEST_ASSERT_EQUAL_size_t(TP_IDENTITY_PATH_MAX,
+                             sizeof canvas.loaded_path);
+
+    char oversized[TP_IDENTITY_PATH_MAX + 1U];
+    memset(oversized, 'p', sizeof oversized - 1U);
+    oversized[sizeof oversized - 1U] = '\0';
+    char error[128] = {0};
+    TEST_ASSERT_FALSE(
+        gui_canvas_set_image(&canvas, oversized, error, sizeof error));
+    TEST_ASSERT_NOT_NULL(strstr(error, "maximum"));
+    TEST_ASSERT_EQUAL_CHAR('\0', canvas.loaded_path[0]);
+}
+
 void test_undo_redo_keep_last_successful_pack_result(void) {
     const tp_id128 atlas_id = add_coin_source();
 
-    gui_pack_init(TP_GUI_IDENTITY_TEST_DIR);
+    TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_IDENTITY_TEST_DIR));
     do_pack_blocking();
     const tp_result *packed = gui_pack_result(0);
     TEST_ASSERT_NOT_NULL(packed);
@@ -285,7 +393,7 @@ void test_pack_result_follows_stable_atlas_across_index_shift(void) {
     const tp_id128 packed_atlas_id = add_coin_source_to_atlas(1);
 
     s_sel_atlas = 1;
-    gui_pack_init(TP_GUI_IDENTITY_TEST_DIR);
+    TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_IDENTITY_TEST_DIR));
     do_pack_blocking();
     const tp_result *packed = gui_pack_result(1);
     TEST_ASSERT_NOT_NULL(packed);
@@ -547,7 +655,10 @@ int main(void) {
     RUN_TEST(test_sprite_edit_rejects_genuinely_stale_captured_revision);
     RUN_TEST(test_delayed_animation_context_ref_never_retargets_after_index_shift);
     RUN_TEST(test_preview_result_rejects_source_refresh_after_job_capture);
+    RUN_TEST(test_long_sprite_keys_with_shared_prefix_never_coalesce);
+    RUN_TEST(test_oversized_names_cannot_enter_a_truncating_editor);
     RUN_TEST(test_recovery_entry_keeps_core_path_capacity);
+    RUN_TEST(test_canvas_cache_key_keeps_core_path_capacity);
     RUN_TEST(test_undo_redo_keep_last_successful_pack_result);
     RUN_TEST(test_pack_result_follows_stable_atlas_across_index_shift);
     RUN_TEST(test_required_recovery_blocks_gui_mutation_without_root);

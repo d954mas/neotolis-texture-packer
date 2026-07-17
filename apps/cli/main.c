@@ -13,6 +13,9 @@
 #include "cli_exit.h"
 #include "cli_out.h"
 #include "ntpacker_version.h"
+#if defined(_WIN32)
+#include "nt_utf8_argv.h"
+#endif
 #include "tp_core/tp_export.h"
 #include "tp_core/tp_project.h"
 
@@ -78,7 +81,9 @@ static void build_manifest(cli_sb *sb) {
     cli_sb_str(sb, ",\n");
     indent(sb, 2);
     cli_sb_json_str(sb, "validate");
-    cli_sb_str(sb, ": 1,\n");
+    cli_sb_str(sb, ": ");
+    cli_sb_int(sb, CLI_VALIDATE_SCHEMA);
+    cli_sb_str(sb, ",\n");
     indent(sb, 2);
     cli_sb_json_str(sb, "pack");
     cli_sb_str(sb, ": 1,\n");
@@ -219,7 +224,7 @@ static void print_usage(FILE *out) {
                   NTPACKER_VERSION);
 }
 
-int main(int argc, char **argv) {
+static int ntpacker_main_utf8(int argc, char **argv) {
     /* BLOCKER-3: pin dot-decimal float formatting for every payload, before any
      * output. tp_core's %.9g writers and the CLI's cli_sb_num both depend on it. */
     (void)setlocale(LC_NUMERIC, "C");
@@ -378,3 +383,30 @@ int main(int argc, char **argv) {
     cli_emit_error(json, quiet, "usage", "unknown command '%s'; try 'ntpacker help'", verb);
     return CLI_EXIT_USAGE;
 }
+
+#if defined(_WIN32)
+static bool narrow_argv_has_flag(int argc, char **argv, const char *flag) {
+    for (int i = 1; i < argc; ++i) {
+        if (argv[i] && strcmp(argv[i], flag) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+int main(int argc, char **argv) {
+    nt_utf8_argv utf8 = {0};
+    char error[160] = {0};
+    if (!nt_utf8_argv_from_command_line(&utf8, error, sizeof error)) {
+        const bool json = narrow_argv_has_flag(argc, argv, "--json");
+        const bool quiet = narrow_argv_has_flag(argc, argv, "--quiet");
+        cli_emit_error(json, quiet, "invalid_utf16", "%s", error);
+        return CLI_EXIT_USAGE;
+    }
+    const int result = ntpacker_main_utf8(utf8.argc, utf8.argv);
+    nt_utf8_argv_dispose(&utf8);
+    return result;
+}
+#else
+int main(int argc, char **argv) { return ntpacker_main_utf8(argc, argv); }
+#endif

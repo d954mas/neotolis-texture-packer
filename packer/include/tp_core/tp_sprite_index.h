@@ -67,8 +67,9 @@ void tp_sprite_id_format(tp_id128 sprite_id, char *out, size_t cap);
 tp_status tp_sprite_id_parse(const char *text, tp_id128 *out_id, tp_error *err);
 
 /* Build the resolved sprite index for atlas[atlas_index]. Deterministic order ==
- * the pack input order. Missing / unresolvable sources contribute nothing (not an
- * error: a missing source is a model state). Read-only over `p`. On success *out
+ * the pack input order. Missing sources and relative sources in an unsaved project
+ * contribute nothing (model/runtime states). Other resolve/scan/key/OOM failures
+ * propagate precisely and leave *out empty. Read-only over `p`. On success *out
  * owns its refs; free with tp_sprite_index_free even on the empty result. */
 tp_status tp_sprite_index_build(const struct tp_project *p, int atlas_index, tp_sprite_index *out, tp_error *err);
 /* Snapshot-owned frontend seam. The model pointer remains component-private. */

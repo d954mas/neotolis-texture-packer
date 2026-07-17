@@ -23,8 +23,9 @@
 extern "C" {
 #endif
 
-/* Stores the work-dir intent used when starting typed Pack jobs and creates it. */
-void gui_pack_init(const char *work_dir);
+/* Stores the work-dir intent used when starting typed Pack jobs and creates it.
+ * Returns false instead of retaining a truncated or unusable directory. */
+bool gui_pack_init(const char *work_dir);
 
 /* Packs atlas `atlas_index` through a typed session job and stores the returned
  * result in the atlas presentation slot (the previous slot is destroyed first).

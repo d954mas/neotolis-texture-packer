@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "atlases": [
     {
       "id": "atlas_00000000000000000000000000000a01",
@@ -17,9 +17,9 @@
           "source": "source_00000000000000000000000000000b01"
         },
         {
-          "key": "hero.png",
+          "key": "gone.png",
           "rename": "champion",
-          "source": "source_0000000000000000000000000000dead"
+          "source": "source_00000000000000000000000000000b01"
         }
       ]
     }

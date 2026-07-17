@@ -21,19 +21,19 @@
  */
 
 #include "tp_core/tp_transaction.h"
-#include "tp_core/tp_project_migrate.h"
-
 #include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "tp_diff_internal.h" /* optional per-op diff capture on commit */
 #include "tp_encode_internal.h"
+#include "tp_history_codec_internal.h" /* compact durable Undo/Redo replay */
 #include "tp_idset_internal.h" /* migrate retained ids into the journal on attach */
 #include "tp_journal_internal.h" /* poison the journal from the recovery glue */
 #include "tp_model_seam.h"
 #include "tp_op_internal.h"
 #include "tp_project_generation_internal.h"
+#include "tp_project_identity_internal.h"
 #include "tp_project_internal.h"
 #include "tp_txn_internal.h"
 
@@ -41,6 +41,11 @@
 
 tp_model *tp_model_wrap(tp_project *project) {
     if (!project) {
+        return NULL;
+    }
+    tp_error canonical_error = {{0}};
+    if (tp_project_validate_canonical(project, &canonical_error) !=
+        TP_STATUS_OK) {
         return NULL;
     }
     tp_model *m = (tp_model *)calloc(1, sizeof *m);
@@ -56,19 +61,6 @@ tp_model *tp_model_wrap(tp_project *project) {
     m->owns_idstore = true;
     m->revision = 0;
     m->saved_identity = tp_semantic_identity(project); /* freshly wrapped == clean */
-    return m;
-}
-
-tp_model *tp_model_create(void) {
-    tp_project *p = tp_project_create();
-    if (!p) {
-        return NULL;
-    }
-    tp_model *m = tp_model_wrap(p);
-    if (!m) {
-        tp_project_destroy(p);
-        return NULL;
-    }
     return m;
 }
 
@@ -197,8 +189,10 @@ void tp_txn_result_free(tp_txn_result *res) {
         return;
     }
     free(res->ops);
+    free(res->string_storage);
     free(res->errors);
     res->ops = NULL;
+    res->string_storage = NULL;
     res->errors = NULL;
     res->op_count = res->error_count = 0;
 }
@@ -223,6 +217,7 @@ void tp_txn__result_reset(tp_txn_result *out, const char *id_hex) {
     out->revision = 0;
     out->ops = NULL;
     out->op_count = 0;
+    out->string_storage = NULL;
     out->errors = NULL;
     out->error_count = 0;
 }
@@ -319,22 +314,28 @@ static void addr_id(tp_txn_result_op *ro, const char *key, tp_id_kind idk, tp_id
     (void)snprintf(a->key, sizeof a->key, "%s", key);
     a->idk = idk;
     a->id = id;
-    a->str[0] = '\0';
+    a->str = NULL;
 }
 
-static void addr_str(tp_txn_result_op *ro, const char *key, const char *val) {
+static void addr_str(tp_txn_result_op *ro, const char *key, const char *val,
+                     char **storage) {
     if (ro->addr_count >= 3) {
         return;
     }
+    const char *value = val ? val : "";
+    const size_t length = strlen(value);
     tp_txn_addr *a = &ro->addr[ro->addr_count++];
     (void)snprintf(a->key, sizeof a->key, "%s", key);
     a->idk = TP_ID_KIND_INVALID;
     a->id = tp_id128_nil();
-    (void)snprintf(a->str, sizeof a->str, "%s", val ? val : "");
+    a->str = *storage;
+    memcpy(*storage, value, length + 1U);
+    *storage += length + 1U;
 }
 
 /* Echo an op's wire + addressing ids on a committed result op (no diff). */
-static void fill_result_op(tp_txn_result_op *ro, const tp_operation *op) {
+static void fill_result_op(tp_txn_result_op *ro, const tp_operation *op,
+                           char **storage) {
     memset(ro, 0, sizeof *ro);
     (void)snprintf(ro->wire, sizeof ro->wire, "%s", tp_op_wire(op->kind));
     addr_id(ro, "atlas_id", TP_ID_KIND_ATLAS, op->atlas_id);
@@ -344,15 +345,15 @@ static void fill_result_op(tp_txn_result_op *ro, const tp_operation *op) {
         case TP_OP_SOURCE_REPLACE: addr_id(ro, "source_id", TP_ID_KIND_SOURCE, op->u.source_ref.source_id); break;
         case TP_OP_SPRITE_OVERRIDE_SET:
             addr_id(ro, "source_id", TP_ID_KIND_SOURCE, op->u.sprite_set.source_id);
-            addr_str(ro, "src_key", op->u.sprite_set.src_key);
+            addr_str(ro, "src_key", op->u.sprite_set.src_key, storage);
             break;
         case TP_OP_SPRITE_OVERRIDE_CLEAR:
             addr_id(ro, "source_id", TP_ID_KIND_SOURCE, op->u.sprite_clear.source_id);
-            addr_str(ro, "src_key", op->u.sprite_clear.src_key);
+            addr_str(ro, "src_key", op->u.sprite_clear.src_key, storage);
             break;
         case TP_OP_SPRITE_NAME_SET:
             addr_id(ro, "source_id", TP_ID_KIND_SOURCE, op->u.sprite_name.source_id);
-            addr_str(ro, "src_key", op->u.sprite_name.src_key);
+            addr_str(ro, "src_key", op->u.sprite_name.src_key, storage);
             break;
         case TP_OP_ANIMATION_CREATE: addr_id(ro, "anim_id", TP_ID_KIND_ANIM, op->u.anim_create.anim_id); break;
         case TP_OP_ANIMATION_REMOVE: addr_id(ro, "anim_id", TP_ID_KIND_ANIM, op->u.anim_ref.anim_id); break;
@@ -374,6 +375,90 @@ static void fill_result_op(tp_txn_result_op *ro, const tp_operation *op) {
     }
 }
 
+static _Thread_local int s_result_echo_fail = -1;
+void tp_txn__test_set_result_echo_fail(int nth) {
+    s_result_echo_fail = nth;
+}
+
+static bool result_echo_allocation_allowed(void) {
+    if (s_result_echo_fail < 0) {
+        return true;
+    }
+    if (s_result_echo_fail == 0) {
+        s_result_echo_fail = -1;
+        return false;
+    }
+    --s_result_echo_fail;
+    return true;
+}
+
+static const char *result_op_string(const tp_operation *operation) {
+    switch (operation->kind) {
+        case TP_OP_SPRITE_OVERRIDE_SET:
+            return operation->u.sprite_set.src_key;
+        case TP_OP_SPRITE_OVERRIDE_CLEAR:
+            return operation->u.sprite_clear.src_key;
+        case TP_OP_SPRITE_NAME_SET:
+            return operation->u.sprite_name.src_key;
+        default:
+            return NULL;
+    }
+}
+
+static void result_echo_discard(tp_txn_result *out) {
+    if (!out) {
+        return;
+    }
+    free(out->ops);
+    free(out->string_storage);
+    out->ops = NULL;
+    out->string_storage = NULL;
+    out->op_count = 0;
+}
+
+static bool result_echo_prepare(tp_txn_result *out,
+                                const tp_txn_request *request) {
+    if (!out || request->op_count == 0) {
+        return true;
+    }
+    size_t string_bytes = 0U;
+    for (int i = 0; i < request->op_count; ++i) {
+        const char *value = result_op_string(&request->ops[i]);
+        if (!value) {
+            continue;
+        }
+        const size_t length = strlen(value) + 1U;
+        if (string_bytes > SIZE_MAX - length) {
+            return false;
+        }
+        string_bytes += length;
+    }
+    if (!result_echo_allocation_allowed()) {
+        return false;
+    }
+    out->ops = calloc((size_t)request->op_count, sizeof *out->ops);
+    if (!out->ops) {
+        return false;
+    }
+    if (string_bytes > 0U) {
+        if (!result_echo_allocation_allowed()) {
+            result_echo_discard(out);
+            return false;
+        }
+        out->string_storage = malloc(string_bytes);
+        if (!out->string_storage) {
+            result_echo_discard(out);
+            return false;
+        }
+    }
+    char *cursor = out->string_storage;
+    for (int i = 0; i < request->op_count; ++i) {
+        fill_result_op(&out->ops[i], &request->ops[i], &cursor);
+    }
+    out->op_count = request->op_count;
+    return true;
+}
+
 /* Reject the in-flight commit -- the single home for the clone/record cleanup-and-fail
  * contract. Frees the partially-captured entry
  * and the diff record, marks `out` rejected at the UNCHANGED revision with one
@@ -385,6 +470,7 @@ static void tp_txn__commit_reject(tp_txn_result *out, tp_project *clone, tp_diff
     tp_diff_op_free(entry);   /* NULL-safe: frees a partially-captured before/after entry */
     tp_diff_record_free(rec); /* NULL-safe */
     if (out) {
+        result_echo_discard(out);
         out->committed = false;
         out->revision = revision; /* unchanged: nothing committed */
         tp_txn__result_add_error(out, op_index, code, field, msg);
@@ -420,6 +506,7 @@ tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_tx
     }
     /* Canonical journal payload admission is shared by typed and JSON callers. */
     bool encodable = true;
+    bool structural_create_applied = false;
     for (int i = 0; i < req->op_count; i++) {
         if (!req->ops || !tp_op_info_by_kind(req->ops[i].kind)) {
             encodable = false;
@@ -466,6 +553,19 @@ tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_tx
                 return byte_st;
             }
         }
+    }
+    /* A committed result must echo every operation exactly. Reserve the whole
+     * result (including one contiguous source-key pool) before journal append
+     * or model publication, so OOM is an ordinary unchanged rejection. */
+    if (!result_echo_prepare(out, req)) {
+        if (out) {
+            out->revision = m->revision;
+            (void)tp_txn__result_add_error(
+                out, -1, TP_STATUS_OOM, "result",
+                "could not allocate the exact transaction result echo");
+        }
+        return tp_error_set(err, TP_STATUS_OOM,
+                            "transaction result echo allocation failed");
     }
     bool payload_too_large = false;
     char *payload = encodable
@@ -553,6 +653,16 @@ tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_tx
                                   rej.message);
             return tp_error_set(err, st, "operation %d rejected: %s", i, rej.message);
         }
+        switch (req->ops[i].kind) {
+            case TP_OP_ATLAS_CREATE:
+            case TP_OP_SOURCE_ADD:
+            case TP_OP_ANIMATION_CREATE:
+            case TP_OP_TARGET_CREATE:
+                structural_create_applied = true;
+                break;
+            default:
+                break;
+        }
         if (rec) {
             tp_status cst = tp_diff_capture_after(clone, &req->ops[i], &entry);
             if (cst != TP_STATUS_OK) {
@@ -569,6 +679,28 @@ tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_tx
                                    : tp_error_set(err, cst, "diff capture (after) failed at op %d", i);
             }
             tp_diff_record_push_op(rec, &entry); /* ownership of `entry`'s pointers moves into rec */
+        }
+    }
+
+    /* Defense in depth at the transaction boundary: create validators reject
+     * project-wide ID collisions at the offending op, while this one linear
+     * canonical pass guarantees no future create mutator can publish a model
+     * that only fails later at Save. Non-create transactions retain the narrow
+     * semantic-identity fast path and pay no whole-project validation cost. */
+    if (structural_create_applied) {
+        tp_error canonical_error = {{0}};
+        const tp_status canonical_status =
+            tp_project_validate_canonical(clone, &canonical_error);
+        if (canonical_status != TP_STATUS_OK) {
+            if (rec) {
+                (void)tp_diff__record_budget_end(NULL);
+            }
+            const char *message = canonical_error.msg[0]
+                                      ? canonical_error.msg
+                                      : "transaction candidate is not canonical";
+            tp_txn__commit_reject(out, clone, rec, NULL, payload, m->revision,
+                                  -1, canonical_status, "project", message);
+            return tp_error_set(err, canonical_status, "%s", message);
         }
     }
 
@@ -642,6 +774,7 @@ tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_tx
         tp_project_destroy(clone);
         free(payload);
         if (out) {
+            result_echo_discard(out);
             out->committed = false;
             out->no_change = true;
             out->revision = m->revision;
@@ -762,17 +895,6 @@ tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_tx
     if (out) {
         out->committed = true;
         out->revision = m->revision;
-        if (req->op_count > 0) {
-            out->ops = (tp_txn_result_op *)calloc((size_t)req->op_count, sizeof *out->ops);
-            if (out->ops) {
-                for (int i = 0; i < req->op_count; i++) {
-                    fill_result_op(&out->ops[i], &req->ops[i]);
-                }
-                out->op_count = req->op_count;
-            }
-            /* An echo alloc failure does not un-commit: the transaction IS applied.
-             * out->op_count stays 0 (the committed status + new revision still hold). */
-        }
     }
     return TP_STATUS_OK;
 }
@@ -1017,10 +1139,11 @@ tp_status tp_model__append_history_checkpoint(tp_model *m, const tp_project *can
         return admission;
     }
 
-    /* Undo/Redo has no uniformly encodable forward operation (notably inverse remove),
-     * so its durable record is a full checkpoint. It is APPENDED, never compacted:
-     * the existing clean checkpoint remains intact until this candidate is durable,
-     * and record_count advances past the startup scan's unsaved-work threshold. */
+    /* Compact HISTORY is the normal Undo/Redo record. This full checkpoint is
+     * the fallback only for an unsupported future diff shape or an oversized
+     * compact transition. It is APPENDED, never compacted: the existing clean
+     * checkpoint remains intact until this candidate is durable, and
+     * record_count advances past the startup scan's unsaved-work threshold. */
     char *snap = NULL;
     size_t snap_len = 0;
     tp_status ss = project_checkpoint_snapshot(candidate, snapshot_bytes,
@@ -1151,8 +1274,12 @@ tp_status tp_model_recover(tp_journal_io io, tp_id128 key, tp_model **out, tp_jo
             tp_journal__poison(j);
         }
     }
-    int *operation_counts = rec.op_count > 0U
-                                ? (int *)calloc(rec.op_count, sizeof *operation_counts)
+    /* Preflight EVERY physical replay record before materializing the project.
+     * This is deliberately separate from apply: a malformed compact history
+     * transition cannot publish the prefix that happened to precede it. */
+    size_t *operation_counts = rec.op_count > 0U
+                                   ? (size_t *)calloc(rec.op_count,
+                                                     sizeof *operation_counts)
                                 : NULL;
     if (rec.op_count > 0U && !operation_counts) {
         if (info) {
@@ -1166,11 +1293,27 @@ tp_status tp_model_recover(tp_journal_io io, tp_id128 key, tp_model **out, tp_jo
     }
     size_t replay_operations = 0U;
     for (size_t k = 0U; k < rec.op_count; ++k) {
-        int operation_count = 0;
-        tp_status count_st = tp_txn__count_operations_json_n(
-            rec.ops[k].payload, rec.ops[k].payload_len, &operation_count, err);
-        if (count_st != TP_STATUS_OK || operation_count < 0 ||
-            (size_t)operation_count >
+        size_t operation_count = 0U;
+        tp_status count_st = TP_STATUS_INVALID_ARGUMENT;
+        if (rec.ops[k].kind == TP_JOURNAL_REPLAY_TXN) {
+            int txn_operation_count = 0;
+            count_st = tp_txn__count_operations_json_n(
+                rec.ops[k].payload, rec.ops[k].payload_len,
+                &txn_operation_count, err);
+            if (count_st == TP_STATUS_OK && txn_operation_count >= 0) {
+                operation_count = (size_t)txn_operation_count;
+            } else if (count_st == TP_STATUS_OK) {
+                count_st = TP_STATUS_INVALID_ARGUMENT;
+            }
+        } else if (rec.ops[k].kind == TP_JOURNAL_REPLAY_HISTORY) {
+            uint32_t history_operation_count = 0U;
+            count_st = tp_history_transition_validate(
+                (const uint8_t *)rec.ops[k].payload, rec.ops[k].payload_len,
+                &history_operation_count, err);
+            operation_count = (size_t)history_operation_count;
+        }
+        if (count_st != TP_STATUS_OK ||
+            operation_count >
                 (size_t)TP_JOURNAL_MAX_REPLAY_OPERATIONS - replay_operations) {
             const tp_status reject_st = count_st != TP_STATUS_OK
                                             ? count_st
@@ -1222,10 +1365,35 @@ tp_status tp_model_recover(tp_journal_io io, tp_id128 key, tp_model **out, tp_jo
             ret = ls; /* durable checkpoint snapshot did not load (real corruption despite a valid crc) */
         } else {
             for (size_t k = 0; ls == TP_STATUS_OK && k < rec.op_count; k++) {
+                if (rec.ops[k].kind == TP_JOURNAL_REPLAY_HISTORY) {
+                    uint32_t history_operation_count = 0U;
+                    /* The full replay stream was structurally preflighted
+                     * before `p` was built. `p` is caller-owned and disposable:
+                     * a stale semantic reference may mutate its prefix, but the
+                     * failure path destroys the entire candidate before any
+                     * model is published. Avoid a full clone per HISTORY frame. */
+                    ls = tp_history_transition_apply_disposable(
+                        p, (const uint8_t *)rec.ops[k].payload,
+                        rec.ops[k].payload_len, &history_operation_count, err);
+                    if (ls == TP_STATUS_OK &&
+                        (size_t)history_operation_count != operation_counts[k]) {
+                        ls = tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                                          "history replay count changed after preflight");
+                    }
+                    if (ls == TP_STATUS_OK) {
+                        applied_operations += (size_t)history_operation_count;
+                    }
+                    continue;
+                }
+                if (rec.ops[k].kind != TP_JOURNAL_REPLAY_TXN) {
+                    ls = tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                                      "unknown journal replay record kind");
+                    break;
+                }
                 tp_txn_request *req = NULL;
                 tp_status ds = tp_txn__decode_prechecked_json_n(
                     rec.ops[k].payload, rec.ops[k].payload_len,
-                    operation_counts[k], &req, err);
+                    (int)operation_counts[k], &req, err);
                 if (ds != TP_STATUS_OK) {
                     ls = ds; /* a durable op-payload did not decode */
                     break;
@@ -1242,6 +1410,14 @@ tp_status tp_model_recover(tp_journal_io io, tp_id128 key, tp_model **out, tp_jo
                     applied_operations++;
                 }
                 tp_txn_request_free(req);
+            }
+            /* Individual replay operations establish only their local
+             * preconditions. Validate the complete candidate exactly once
+             * before publication so a CRC-valid TXN/HISTORY stream cannot
+             * leave a noncanonical graph (for example an unnormalized key or
+             * a dangling reference) in a recovered live model. */
+            if (ls == TP_STATUS_OK) {
+                ls = tp_project_validate_canonical(p, err);
             }
             if (ls != TP_STATUS_OK) {
                 tp_project_destroy(p);

@@ -143,8 +143,8 @@ struct tp_journal {
     tp_journal_io io;  /* owned */
     tp_id128 key;
     bool poisoned;     /* a failed append/tail-clean: refuse further appends */
-    size_t record_count; /* all durable CKPT/TXN/META frames in the store */
-    size_t replay_count; /* TXN record refs after the latest durable checkpoint */
+    size_t record_count; /* all durable CKPT/TXN/HISTORY/META frames in the store */
+    size_t replay_count; /* TXN/HISTORY refs after the latest durable checkpoint */
     size_t replay_operations; /* decoded operations across those records */
     tp_idset ids;      /* retained-id index (shared set); mirrors the durable records */
     /* Cached project metadata (owned copies). Set by tp_journal_set_metadata and re-emitted by
@@ -368,6 +368,25 @@ tp_status tp_journal__check_txn_min_bytes(const tp_journal *j, tp_error *err) {
     return tp_journal__check_txn_bytes(j, 0U, err);
 }
 
+tp_status tp_journal__check_history_append_bytes(
+    const tp_journal *j, size_t transition_bytes, size_t replay_operations,
+    tp_error *err) {
+    if (!j) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "null journal");
+    }
+    if (transition_bytes > SIZE_MAX - (size_t)TP_JRN_HISTORY_FIXED) {
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                            "journal history record size overflow");
+    }
+    tp_status admission =
+        tp_journal__check_append_admission(j, replay_operations, err);
+    if (admission != TP_STATUS_OK) {
+        return admission;
+    }
+    return record_limit_check(
+        j, (size_t)TP_JRN_HISTORY_FIXED + transition_bytes, err);
+}
+
 tp_status tp_journal__set_replay_operations(tp_journal *j, size_t count,
                                             tp_error *err) {
     if (!j || count > (size_t)TP_JOURNAL_MAX_REPLAY_OPERATIONS) {
@@ -432,7 +451,11 @@ static tp_status ensure_header(tp_journal *j, tp_error *err) {
 }
 
 /* Frame [len|payload|crc], append durably, and roll the store back on a failed
- * write so no torn tail persists. */
+ * write OR durability barrier so no unacknowledged tail persists. After a
+ * barrier failure, a successful truncate gets its own best-effort durability
+ * barrier: this can confirm removal for a transient one-shot failure. The
+ * authority is poisoned regardless, because callers must never treat the
+ * original unconfirmed append as retryable acknowledgement. */
 static tp_status write_record(tp_journal *j, const uint8_t *payload, size_t payload_len, tp_error *err) {
     tp_status slot = record_slot_check(j, err);
     if (slot != TP_STATUS_OK) {
@@ -442,6 +465,10 @@ static tp_status write_record(tp_journal *j, const uint8_t *payload, size_t payl
     tp_status limit = record_limit_check(j, payload_len, err);
     if (limit != TP_STATUS_OK) {
         return limit;
+    }
+    if (!j->io.sync) {
+        return journal_fail(err,
+                            "journal durability barrier is unavailable");
     }
     tp_status hs = ensure_header(j, err);
     if (hs != TP_STATUS_OK) {
@@ -476,8 +503,25 @@ static tp_status write_record(tp_journal *j, const uint8_t *payload, size_t payl
         }
         return journal_fail(err, "journal record append failed (rolled back)");
     }
-    if (j->io.sync) {
-        (void)j->io.sync(j->io.ctx);
+    if (j->io.sync(j->io.ctx) != 0) {
+        const int rollback = j->io.truncate(j->io.ctx, (size_t)prior);
+        if (rollback != 0) {
+            j->poisoned = true;
+            return journal_fail(err,
+                                "journal durability barrier failed and rollback failed; tail is unknown");
+        }
+        /* A failed initial barrier leaves append durability unknown. Try to
+         * durably establish the rollback, but retain fail-closed poison even
+         * if it succeeds; a second failure likewise leaves bytes unknown and
+         * cannot be repaired in this authority. */
+        const int rollback_sync = j->io.sync(j->io.ctx);
+        j->poisoned = true;
+        if (rollback_sync != 0) {
+            return journal_fail(err,
+                                "journal durability barrier failed and rollback was not durable; tail is unknown");
+        }
+        return journal_fail(err,
+                            "journal durability barrier failed; rollback completed but append was not acknowledged");
     }
     j->record_count++;
     return TP_STATUS_OK;
@@ -748,7 +792,7 @@ tp_status tp_journal_compact(tp_journal *j, const uint8_t *snapshot, size_t len,
      * in-memory retained-id index (j->ids) is left INTACT so tp_journal_init_checkpoint below
      * re-persists the SAME live id set into the fresh checkpoint; clearing it would let an
      * already-acknowledged txn id double-apply after Save (§7.2 idempotency). After truncate-to-0
-     * ensure_header re-emits a fresh v3 header, so the compacted store = header + one CHECKPOINT. */
+     * ensure_header re-emits the current-format header, so the compacted store = header + one CHECKPOINT. */
     if (j->io.truncate(j->io.ctx, 0) != 0) {
         /* Store byte-intact (nothing removed) + poison state UNCHANGED: the journal is still fully
          * usable (its old checkpoint + records survive, appends continue). Fail closed on the compaction
@@ -850,6 +894,36 @@ tp_status tp_journal_append_txn_counted(tp_journal *j, const char *id_hex, int64
 tp_status tp_journal_append_txn(tp_journal *j, const char *id_hex, int64_t revision,
                                 const uint8_t *snapshot, size_t len, tp_error *err) {
     return tp_journal_append_txn_counted(j, id_hex, revision, snapshot, len, 0U, err);
+}
+
+tp_status tp_journal_append_history_counted(tp_journal *j, int64_t revision,
+                                            const uint8_t *transition,
+                                            size_t len,
+                                            size_t replay_operations,
+                                            tp_error *err) {
+    if (!j || (len > 0U && !transition)) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "invalid journal history transition");
+    }
+    tp_status admission = tp_journal__check_history_append_bytes(
+        j, len, replay_operations, err);
+    if (admission != TP_STATUS_OK) return admission;
+    const size_t payload_len = (size_t)TP_JRN_HISTORY_FIXED + len;
+    uint8_t *payload = (uint8_t *)malloc(payload_len);
+    if (!payload) {
+        return tp_error_set(err, TP_STATUS_OOM,
+                            "journal history payload allocation failed");
+    }
+    payload[0] = (uint8_t)TP_JRN_REC_HISTORY;
+    tp_jrn_put_i64(payload + 1, revision);
+    if (len) memcpy(payload + TP_JRN_HISTORY_FIXED, transition, len);
+    tp_status status = write_record(j, payload, payload_len, err);
+    free(payload);
+    if (status == TP_STATUS_OK) {
+        j->replay_count++;
+        j->replay_operations += replay_operations;
+    }
+    return status;
 }
 
 /* ---- recovery ------------------------------------------------------------ */
@@ -1033,6 +1107,15 @@ static tp_status decode_payload(const tp_idset *ids, const uint8_t *pl, size_t p
          * META interleaved with TXNs is not mistaken for corruption. */
         *snap_off = 0;
         *snap_len = 0;
+        return TP_STATUS_OK;
+    }
+    if (type == (uint8_t)TP_JRN_REC_HISTORY) {
+        if (plen < (size_t)TP_JRN_HISTORY_FIXED + 8U) {
+            return TP_STATUS_OUT_OF_BOUNDS;
+        }
+        *rev = tp_jrn_get_i64(pl + 1);
+        *snap_off = (size_t)TP_JRN_HISTORY_FIXED;
+        *snap_len = plen - (size_t)TP_JRN_HISTORY_FIXED;
         return TP_STATUS_OK;
     }
     return TP_STATUS_OUT_OF_BOUNDS; /* unknown record type => corruption */
@@ -1382,6 +1465,7 @@ typedef struct {
     size_t off;
     size_t len;
     int64_t rev;
+    uint8_t type;
 } tp_recop_ref;
 
 /* Recovery accumulator. A checkpoint sets a fresh replay base and drops any prior
@@ -1425,6 +1509,7 @@ static tp_status recover_on_record(void *ctx, uint8_t rtype, const uint8_t *buf,
     c->refs[c->ref_count].off = payload_off + snap_off;
     c->refs[c->ref_count].len = snap_len;
     c->refs[c->ref_count].rev = rev;
+    c->refs[c->ref_count].type = rtype;
     c->ref_count++;
     return TP_STATUS_OK;
 }
@@ -1538,6 +1623,9 @@ tp_status tp_journal_recover(tp_journal *j, tp_journal_recovery *out, tp_error *
             ops[i].payload = (const char *)(buf + wc.refs[i].off);
             ops[i].payload_len = wc.refs[i].len;
             ops[i].revision = wc.refs[i].rev;
+            ops[i].kind = wc.refs[i].type == (uint8_t)TP_JRN_REC_HISTORY
+                              ? TP_JOURNAL_REPLAY_HISTORY
+                              : TP_JOURNAL_REPLAY_TXN;
         }
         out->ops = ops;
         out->op_count = wc.ref_count;

@@ -42,21 +42,31 @@ typedef enum {
 #define TP_VALIDATION_CODE_TRUNCATED "validation_truncated"
 
 /* Hard report-materialization limits. The count includes the deterministic
- * truncation summary when present; the byte limit covers the findings vector. */
+ * truncation summary when present; the byte limit covers the findings vector
+ * plus exact report-owned message/context strings. */
 #define TP_VALIDATION_REPORT_MAX_FINDINGS 2048U
 #define TP_VALIDATION_REPORT_MAX_BYTES 4194304U
 
-/* Owned, presentation-neutral validation result. Empty context strings mean
- * "not present"; adapters may omit them from their wire/UI representation. */
+/* Owned, presentation-neutral validation result. Context and message strings
+ * are exact report-owned UTF-8 values: validation never truncates a valid model
+ * value to fit a presentation buffer. Empty context strings and nil IDs mean
+ * "not present"; adapters may omit them from their wire/UI representation.
+ * `owned_storage` is an ownership detail for tp_validation_report_free(). */
 typedef struct {
     tp_validation_severity severity;
     char code[32];
-    char message[256];
-    char atlas[128];
-    char sprite[256];
-    char anim[128];
-    char frame[256];
-    char target[64];
+    const char *message;
+    const char *atlas;
+    tp_id128 atlas_id;
+    const char *source;
+    tp_id128 source_id;
+    const char *sprite;
+    const char *anim;
+    tp_id128 animation_id;
+    const char *frame;
+    const char *target;
+    tp_id128 target_id;
+    char *owned_storage;
 } tp_validation_finding;
 
 typedef struct {

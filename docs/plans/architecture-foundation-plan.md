@@ -8,6 +8,7 @@ recorded on the PR and in the task handoff.
 |---|---|---|
 | M0 | DONE | `tp_bench_foundation`, `tp_bench_gui_rows`, `tp_test_bench_support` |
 | M1–M5 | DONE | §10 executable matrix |
+| P-UNDO | DONE (2026-07-17) | compact HISTORY codec/replay/fault tests + current benchmark |
 | Migration/deletion gate | CLOSED | client parity tests + `scripts/check_boundaries.sh` |
 
 Нормативный источник: `docs/ntpacker-master-spec.md`
@@ -439,10 +440,11 @@ Gate:
 
 ### P-UNDO — Compact Undo/Redo acknowledgement
 
-**Status: TRIGGERED by M0 measurements.** The foundation keeps the measured
-journal-backed semantic-history path correct and single-owned; compact acknowledgement
-work remains a separate post-foundation packet. See the ROADMAP checkpoint for
-the measured evidence.
+**Status: DONE (2026-07-17).** Normal Undo/Redo writes one compact versioned
+`HISTORY` transition. Deterministic full-checkpoint fallback is limited to
+unsupported or oversized diffs. Mixed TXN/HISTORY replay, append/sync failure,
+recovery limits, admission budgets, and benchmark paths are executable-test
+pinned.
 
 M0 обязательно измеряет текущий journal-backed Undo/Redo checkpoint path. Normal
 recovery TXN остаётся owner-locked serialized-operation format.
@@ -459,18 +461,18 @@ recovery TXN остаётся owner-locked serialized-operation format.
 5. Normal `TXN` writer не менять.
 6. Новый writer использует один новый format version; старый sidecar имеет явную
    read/migrate/version-mismatch policy.
-7. Existing checkpoint остаётся deterministic fallback для unsupported/oversized
-   transition на migration stage; timing-based выбор запрещён.
+7. Existing checkpoint остаётся deterministic fallback только для
+   unsupported/oversized transition; timing-based выбор запрещён.
 
 Gate при срабатывании trigger:
 
 - все supported history shapes имеют parity Undo/Redo transition;
 - обычный accepted Undo/Redo больше не пишет полный checkpoint;
-- fallback разрешён только для явно oversized, legacy или migration случаев и
+- fallback разрешён только для явно unsupported/oversized случаев и
   не может маскировать target path;
 - append failure сохраняет model state, revision и history cursor;
-- fault/migration tests покрывают mixed sequence
-  `CKPT -> TXN -> HISTORY_TRANSITION -> TXN` и старый format.
+- fault/hostile-input tests покрывают mixed sequence
+  `CKPT -> TXN -> HISTORY_TRANSITION -> TXN` и version mismatch.
 
 Этот packet не блокирует правильную session boundary, но не может быть молча
 отложен, если M0 докажет нарушение поддерживаемого UX/memory budget.

@@ -47,8 +47,6 @@ typedef enum tp_status {
     TP_STATUS_ID_MALFORMED,        /* shape-ID text is malformed (bad prefix/hex/length/trailing/empty),
                                     * or a nil ID appears where a real structural ID is required (tp_id) */
     TP_STATUS_DUPLICATE_ID,        /* two structural entities share one persistent ID on load/validate (tp_project) */
-    TP_STATUS_ID_COLLISION_EXHAUSTED, /* deterministic legacy salt sweep could not disambiguate synthetic IDs
-                                       * (unreachable with the default hash; only a degenerate injected hash hits it) */
 
     /* --- source-key normalization faults ---
      * Append-only: new values go at the END. A source-local key that is invalid
@@ -105,7 +103,11 @@ typedef enum tp_status {
     TP_STATUS_RECOVERY_CLAIM_FAILED,   /* recovery journal lock could not be created/acquired for a storage reason */
     TP_STATUS_PROJECT_LIVE,            /* canonical project identity is leased by another writer */
     TP_STATUS_UNSUPPORTED_CAPABILITY,  /* the selected client has no authority/surface for this capability */
-    TP_STATUS_FILE_EXISTS              /* create-only publication found an existing destination */
+    TP_STATUS_FILE_EXISTS,             /* create-only publication found an existing destination */
+    /* The project was atomically published and is the authoritative saved
+     * state, but the containing-directory durability barrier failed. Clients
+     * must report this as a success notice, never retry as if no write occurred. */
+    TP_STATUS_FILE_DURABILITY_UNCERTAIN
 } tp_status;
 
 /* Fixed-size message buffer -- no heap, safe to embed by value on the stack. */
@@ -161,7 +163,6 @@ static inline const char *tp_status_str(tp_status status) {
         case TP_STATUS_IDENTITY_COLLISION: return "identity collision";
         case TP_STATUS_ID_MALFORMED: return "malformed structural id";
         case TP_STATUS_DUPLICATE_ID: return "duplicate structural id";
-        case TP_STATUS_ID_COLLISION_EXHAUSTED: return "legacy id collision sweep exhausted";
         case TP_STATUS_INVALID_UTF8: return "invalid UTF-8";
         case TP_STATUS_KEY_ABSOLUTE: return "source key is not relative";
         case TP_STATUS_KEY_TRAVERSAL: return "source key escapes its root";
@@ -179,6 +180,7 @@ static inline const char *tp_status_str(tp_status status) {
         case TP_STATUS_PROJECT_LIVE: return "project is live in another writer";
         case TP_STATUS_UNSUPPORTED_CAPABILITY: return "unsupported client capability";
         case TP_STATUS_FILE_EXISTS: return "file already exists";
+        case TP_STATUS_FILE_DURABILITY_UNCERTAIN: return "project file durability is uncertain";
     }
     return "unknown status";
 }
@@ -212,7 +214,6 @@ static inline const char *tp_status_id(tp_status status) {
         case TP_STATUS_IDENTITY_COLLISION: return "identity_collision";
         case TP_STATUS_ID_MALFORMED: return "id_malformed";
         case TP_STATUS_DUPLICATE_ID: return "duplicate_id";
-        case TP_STATUS_ID_COLLISION_EXHAUSTED: return "id_collision_exhausted";
         case TP_STATUS_INVALID_UTF8: return "invalid_utf8";
         case TP_STATUS_KEY_ABSOLUTE: return "key_absolute";
         case TP_STATUS_KEY_TRAVERSAL: return "key_traversal";
@@ -230,6 +231,7 @@ static inline const char *tp_status_id(tp_status status) {
         case TP_STATUS_PROJECT_LIVE: return "project_live";
         case TP_STATUS_UNSUPPORTED_CAPABILITY: return "unsupported_capability";
         case TP_STATUS_FILE_EXISTS: return "file_exists";
+        case TP_STATUS_FILE_DURABILITY_UNCERTAIN: return "file_durability_uncertain";
     }
     return "unknown_status";
 }

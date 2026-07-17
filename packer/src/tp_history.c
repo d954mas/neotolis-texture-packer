@@ -6,7 +6,7 @@
  *
  * Undo/Redo reuse the clone/swap for STAGE-THEN-COMMIT atomicity: the inverse
  * (or forward) diff is applied to a CLONE and swapped in only on FULL success, so an
- * allocation failure, corrupted diff, checkpoint serialization fault, or durable
+ * allocation failure, corrupted diff, compact-transition/checkpoint serialization fault, or durable
  * journal-append failure rolls back with the live model, revision, and cursor
  * byte-unchanged. A successful Undo/Redo bumps the revision by one (a new committed
  * state); dirty stays identity-derived (an Undo to the saved baseline is clean even
@@ -14,7 +14,8 @@
  *
  * HONEST SCOPE: the undo STACK is in-memory session state and is not restored after
  * restart. When a recovery journal is attached, the DOCUMENT STATE produced by each
- * Undo/Redo is crash-durable via an appended checkpoint; recovery starts with a fresh
+ * Undo/Redo is crash-durable via an appended compact transition (with a checkpoint
+ * fallback only for an unsupported or oversized diff); recovery starts with a fresh
  * empty history stack.
  */
 
@@ -26,6 +27,7 @@
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_transaction.h"
 #include "tp_diff_internal.h"
+#include "tp_history_codec_internal.h"
 #include "tp_journal_internal.h"
 #include "tp_project_internal.h"
 #include "tp_txn_internal.h"
@@ -270,6 +272,73 @@ const char *tp_model_undo_author(const tp_model *m) {
     return m->history->records[m->history->pos - 1]->author;
 }
 
+typedef struct tp_history_durable_transition {
+    tp_history_transition_blob blob;
+    tp_history_codec_outcome outcome;
+} tp_history_durable_transition;
+
+/* Measure and admit the ordinary compact record before building the mutable
+ * candidate. The semantic diff already contains both sides of every effect, so
+ * this is exact and does not depend on applying Undo/Redo first. */
+static tp_status prepare_history_transition(
+    tp_model *m, const tp_diff_record *record, bool reverse,
+    tp_history_durable_transition *out, tp_error *err) {
+    memset(out, 0, sizeof *out);
+    out->outcome = TP_HISTORY_CODEC_ERROR;
+    if (!m->journal) return TP_STATUS_OK;
+    tp_status status = tp_history_transition_encode(
+        record, reverse, m->project,
+        (size_t)TP_JOURNAL_MAX_RECORD_BYTES -
+            (size_t)TP_JRN_HISTORY_FIXED,
+        &out->blob, &out->outcome, err);
+    if (status != TP_STATUS_OK) return status;
+    if (out->outcome == TP_HISTORY_CODEC_OK) {
+        status = tp_journal__check_history_append_bytes(
+            m->journal, out->blob.len, out->blob.op_count, err);
+        if (status != TP_STATUS_OK) {
+            tp_history_transition_blob_free(&out->blob);
+        }
+        return status;
+    }
+    if (out->outcome == TP_HISTORY_CODEC_UNSUPPORTED ||
+        out->outcome == TP_HISTORY_CODEC_OVERSIZED) {
+        /* Fallback appends a CHECKPOINT, which resets the replay window. Do
+         * not apply the full replay-op budget that a HISTORY record would
+         * consume; before staging we can still reject a full record store or
+         * insufficient room for the checkpoint's fixed prefix/id set. The
+         * exact candidate snapshot size is measured after application. */
+        return tp_journal__check_checkpoint_append_bytes(m->journal, 0U, err);
+    }
+    return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                        "history transition encoding failed");
+}
+
+static tp_status append_history_transition(
+    tp_model *m, const tp_project *candidate, int64_t revision,
+    const tp_history_durable_transition *prepared, tp_error *err) {
+    if (!m->journal) return TP_STATUS_OK;
+    if (prepared->outcome == TP_HISTORY_CODEC_OK) {
+        return tp_journal_append_history_counted(
+            m->journal, revision, prepared->blob.data, prepared->blob.len,
+            prepared->blob.op_count, err);
+    }
+    if (prepared->outcome != TP_HISTORY_CODEC_UNSUPPORTED &&
+        prepared->outcome != TP_HISTORY_CODEC_OVERSIZED) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "invalid prepared history transition");
+    }
+
+    /* Only a genuinely unsupported future diff shape or an intrinsically
+     * oversized compact transition may fall back to a full checkpoint. */
+    size_t checkpoint_bytes = 0U;
+    tp_status status = tp_project_checkpoint_serialized_size_bounded(
+        candidate, SIZE_MAX, &checkpoint_bytes, err);
+    return status == TP_STATUS_OK
+               ? tp_model__append_history_checkpoint(
+                     m, candidate, revision, checkpoint_bytes, err)
+               : status;
+}
+
 tp_status tp_model_undo(tp_model *m, tp_error *err) {
     if (!m || !m->history) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "undo: model has no history");
@@ -283,35 +352,24 @@ tp_status tp_model_undo(tp_model *m, tp_error *err) {
     if (st != TP_STATUS_OK) {
         return st;
     }
-    if (m->journal) {
-        /* Reject an already-full journal before staging the semantic clone. The
-         * exact candidate byte admission follows the allocation-free size pass
-         * below, before checkpoint materialization. */
-        st = tp_journal__check_checkpoint_append_bytes(m->journal, 0U, err);
-        if (st != TP_STATUS_OK) {
-            return st;
-        }
+    tp_history_durable_transition durable;
+    st = prepare_history_transition(m, r, true, &durable, err);
+    if (st != TP_STATUS_OK) {
+        return st;
     }
     tp_project *clone = tp_project_clone(m->project);
     if (!clone) {
+        tp_history_transition_blob_free(&durable.blob);
         return tp_error_set(err, TP_STATUS_OOM, "undo: clone failed");
     }
     st = tp_diff_record_apply(clone, r, /*reverse=*/true, err);
     if (st != TP_STATUS_OK) {
         tp_project_destroy(clone); /* rollback: live model byte-unchanged */
+        tp_history_transition_blob_free(&durable.blob);
         return st;
     }
-    size_t checkpoint_bytes = 0U;
-    if (m->journal) {
-        st = tp_project_checkpoint_serialized_size_bounded(
-            clone, SIZE_MAX, &checkpoint_bytes, err);
-        if (st != TP_STATUS_OK) {
-            tp_project_destroy(clone);
-            return st;
-        }
-    }
-    st = tp_model__append_history_checkpoint(
-        m, clone, revision, checkpoint_bytes, err);
+    st = append_history_transition(m, clone, revision, &durable, err);
+    tp_history_transition_blob_free(&durable.blob);
     if (st != TP_STATUS_OK) {
         tp_project_destroy(clone); /* durable gate rejected: model + revision + cursor unchanged */
         return st;
@@ -335,32 +393,24 @@ tp_status tp_model_redo(tp_model *m, tp_error *err) {
     if (st != TP_STATUS_OK) {
         return st;
     }
-    if (m->journal) {
-        st = tp_journal__check_checkpoint_append_bytes(m->journal, 0U, err);
-        if (st != TP_STATUS_OK) {
-            return st;
-        }
+    tp_history_durable_transition durable;
+    st = prepare_history_transition(m, r, false, &durable, err);
+    if (st != TP_STATUS_OK) {
+        return st;
     }
     tp_project *clone = tp_project_clone(m->project);
     if (!clone) {
+        tp_history_transition_blob_free(&durable.blob);
         return tp_error_set(err, TP_STATUS_OOM, "redo: clone failed");
     }
     st = tp_diff_record_apply(clone, r, /*reverse=*/false, err);
     if (st != TP_STATUS_OK) {
         tp_project_destroy(clone);
+        tp_history_transition_blob_free(&durable.blob);
         return st;
     }
-    size_t checkpoint_bytes = 0U;
-    if (m->journal) {
-        st = tp_project_checkpoint_serialized_size_bounded(
-            clone, SIZE_MAX, &checkpoint_bytes, err);
-        if (st != TP_STATUS_OK) {
-            tp_project_destroy(clone);
-            return st;
-        }
-    }
-    st = tp_model__append_history_checkpoint(
-        m, clone, revision, checkpoint_bytes, err);
+    st = append_history_transition(m, clone, revision, &durable, err);
+    tp_history_transition_blob_free(&durable.blob);
     if (st != TP_STATUS_OK) {
         tp_project_destroy(clone);
         return st;

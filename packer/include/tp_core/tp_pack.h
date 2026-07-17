@@ -42,6 +42,10 @@ struct tp_result;
 #define TP_PACK_MAX_VERTICES 16
 #define TP_PACK_SHAPE_MIN 0
 #define TP_PACK_SHAPE_MAX 2
+/* Current nt_builder vector-packer hard limit.  Keep this public because it is
+ * a product capability boundary, not an implementation accident: admission
+ * must reject a provably larger job before the assertion-based backend sees it. */
+#define TP_PACK_MAX_PAGES 64
 
 static inline bool tp_pack_max_size_valid(int value) {
     return value >= 1 && value <= TP_PACK_MAX_PAGE_DIM;
@@ -71,6 +75,9 @@ static inline bool tp_pack_extrude_shape_valid(int extrude, int shape) {
 #define TP_PACK_OV_MAXVERT ((uint8_t)(1u << 2))
 #define TP_PACK_OV_MARGIN ((uint8_t)(1u << 3))
 #define TP_PACK_OV_EXTRUDE ((uint8_t)(1u << 4))
+#define TP_PACK_OV_ALL                                                         \
+    ((uint8_t)(TP_PACK_OV_SHAPE | TP_PACK_OV_ROTATE | TP_PACK_OV_MAXVERT |    \
+               TP_PACK_OV_MARGIN | TP_PACK_OV_EXTRUDE))
 
 /* Desc per-sprite override VALUES mirror the engine nt_atlas_sprite_opts_t encoding
  * (tp_pack.c static-asserts they match). shape/allow_rotate carry explicit non-zero
@@ -82,8 +89,9 @@ static inline bool tp_pack_extrude_shape_valid(int extrude, int shape) {
 #define TP_PACK_SPRITE_SHAPE_CONCAVE 3
 #define TP_PACK_SPRITE_ROTATE_NO 1
 
-/* One sprite. Either `path` (file input, stb-decoded by the builder) OR raw
- * pixels (`rgba` + `w` + `h`) when `path == NULL`. */
+/* One sprite. Either `path` (strict-UTF-8 file input, decoded through the
+ * shared bounded tp_image ingress and submitted to the builder as raw RGBA8)
+ * OR raw pixels (`rgba` + `w` + `h`) when `path == NULL`. */
 typedef struct tp_pack_sprite_desc {
     const char *name; /* required, unique within the atlas */
     const char *path; /* file input; if NULL, the raw fields below are used */

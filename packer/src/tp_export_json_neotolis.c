@@ -4,6 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "tp_fs_internal.h"
+
 #include "tp_sb.h"
 
 /* Full-fidelity json-neotolis writer. Deterministic (tp_project.c conventions:
@@ -25,6 +27,11 @@ static const char *path_basename(const char *p) {
         }
     }
     return base;
+}
+
+static void ignore_output_path(void *ud, const char *path) {
+    (void)ud;
+    (void)path;
 }
 
 /* Decodes a D4 mask into a readable token string (raw-mask semantics: diag =
@@ -292,7 +299,7 @@ static void emit_anim(tp_sb *sb, int depth, const tp_export_anim *a) {
 }
 
 static tp_status emit_root(tp_sb *sb, const tp_export_prepared *prep, const tp_export_caps *caps,
-                           const char *page_base, tp_export_notices *notices) {
+                           const char *page_base, tp_export_notices *notices, tp_error *err) {
     const tp_result *r = prep->result;
     tp_sb_char(sb, '{');
     bool first = true;
@@ -326,8 +333,11 @@ static tp_status emit_root(tp_sb *sb, const tp_export_prepared *prep, const tp_e
             tp_sb_indent(sb, 2);
             tp_sb_char(sb, '{');
             bool f2 = true;
-            char file[1024];
-            (void)snprintf(file, sizeof file, "%s-%d.png", page_base, p);
+            char file[TP_IDENTITY_PATH_MAX];
+            tp_status st = tp_export_page_path(page_base, p, file, err);
+            if (st != TP_STATUS_OK) {
+                return st;
+            }
             tp_obj_key(sb, 3, &f2, "file");
             tp_sb_json_string(sb, file);
             tp_obj_key(sb, 3, &f2, "h");
@@ -387,15 +397,25 @@ tp_status tp_export_json_neotolis_write(const tp_export_prepared *prep, const tp
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "json-neotolis: NULL prep/caps/out_path_base");
     }
 
+    char path[TP_IDENTITY_PATH_MAX];
+    tp_status st = tp_export_output_path(out_path_base, ".json", path, err);
+    if (st != TP_STATUS_OK) {
+        return st;
+    }
+    st = tp_export_list_page_files(prep->result, out_path_base, ignore_output_path, NULL, err);
+    if (st != TP_STATUS_OK) {
+        return st;
+    }
+
     /* Pages sit next to the json; straight-alpha default (ROADMAP). */
-    tp_status st = tp_export_write_pages(prep->result, out_path_base, false, err);
+    st = tp_export_write_pages(prep->result, out_path_base, false, err);
     if (st != TP_STATUS_OK) {
         return st;
     }
 
     const char *page_base = path_basename(out_path_base);
     tp_sb sb = {0};
-    st = emit_root(&sb, prep, caps, page_base, notices);
+    st = emit_root(&sb, prep, caps, page_base, notices, err);
     if (st != TP_STATUS_OK) {
         free(sb.buf);
         return st;
@@ -405,22 +425,10 @@ tp_status tp_export_json_neotolis_write(const tp_export_prepared *prep, const tp
         return tp_error_set(err, TP_STATUS_OOM, "json-neotolis: OOM building JSON");
     }
 
-    char path[1024];
-    int nn = snprintf(path, sizeof path, "%s.json", out_path_base);
-    if (nn < 0 || (size_t)nn >= sizeof path) {
+    if (!tp_fs_write_file(path, sb.buf, sb.len)) { /* binary: keep LF */
         free(sb.buf);
-        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "json-neotolis: output path too long");
+        return tp_error_set(err, TP_STATUS_BAD_PROJECT, "json-neotolis: cannot write '%s'", path);
     }
-    FILE *f = fopen(path, "wb"); /* binary: keep LF */
-    if (!f) {
-        free(sb.buf);
-        return tp_error_set(err, TP_STATUS_BAD_PROJECT, "json-neotolis: cannot open '%s' for writing", path);
-    }
-    size_t wrote = fwrite(sb.buf, 1U, sb.len, f);
-    (void)fclose(f);
     free(sb.buf);
-    if (wrote != sb.len) {
-        return tp_error_set(err, TP_STATUS_BAD_PROJECT, "json-neotolis: short write to '%s'", path);
-    }
     return TP_STATUS_OK;
 }

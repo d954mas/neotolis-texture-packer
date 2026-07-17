@@ -53,9 +53,13 @@
 #include "window/nt_window.h"
 
 #include "ntpacker_ui_assets.h"
+#if defined(_WIN32)
+#include "nt_utf8_argv.h"
+#endif
 
 #include "clay.h"
 
+#include "tp_core/tp_export.h"
 #include "tp_core/tp_names.h" /* tp_sprite_export_key (slice9 frame-sync key) */
 
 #include "gui_canvas.h"
@@ -974,8 +978,8 @@ static int gui_run_parity(const char *in, const char *out) {
         const tp_snapshot_target *t = a ? tp_session_snapshot_target_at(snapshot, a->id, 0) : NULL;
         if (t) {
             gui_target_ref target;
-            char exporter[64];
-            (void)snprintf(exporter, sizeof exporter, "%s", t->exporter_id);
+            char exporter[TP_EXPORTER_ID_MAX];
+            memcpy(exporter, t->exporter_id, strlen(t->exporter_id) + 1U);
             if (gui_project_target_ref_at(0, 0, &target)) {
                 (void)gui_project_set_target(&target, exporter, "out/hero", true);
             }
@@ -986,13 +990,19 @@ static int gui_run_parity(const char *in, const char *out) {
         return 2;
     }
     (void)fprintf(stdout, "parity: wrote %s\n", out);
+    gui_rows_shutdown();
     gui_project_shutdown();
     return 0;
 }
 // #endregion
 
 // #region main + init/shutdown
-int main(int argc, char *argv[]) {
+static int gui_main_utf8(int argc, char *argv[]) {
+#ifdef _WIN32
+    /* All client/core paths are UTF-8. tinyfiledialogs defaults to the process
+     * ANSI code page unless this is set before its first native dialog. */
+    tinyfd_winUtf8 = 1;
+#endif
     nt_engine_config_t config = {0};
     config.app_name = "ntpacker-gui";
     config.version = 1;
@@ -1098,7 +1108,7 @@ int main(int argc, char *argv[]) {
     });
 
     resolve_exe_dir();
-    char ui_pack_path[1280];
+    char ui_pack_path[GUI_PATHS_MAX + 256];
     (void)snprintf(ui_pack_path, sizeof ui_pack_path, "%s/assets/ntpacker_ui.ntpack", s_exe_dir);
     s_pack_id = nt_hash32_str("ntpacker_ui");
     nt_resource_mount(s_pack_id, 100);
@@ -1204,9 +1214,13 @@ int main(int argc, char *argv[]) {
 #endif
 
     /* in-process packing: session .ntpack goes under the exe dir (existing convention) */
-    char pack_session[1152];
+    char pack_session[GUI_PATHS_MAX + 128];
     (void)snprintf(pack_session, sizeof pack_session, "%s/pack_session", s_exe_dir);
-    gui_pack_init(pack_session);
+    const bool pack_work_ready = gui_pack_init(pack_session);
+    if (!pack_work_ready) {
+        set_status_ex(STATUS_ERROR,
+                      "Pack work directory is unavailable or exceeds the supported path limit.");
+    }
 
     /* open a project passed on the command line (errors go to the status bar).
      * Route the open/defer choice through the PURE gui_startup_decide (single source of truth;
@@ -1249,7 +1263,7 @@ int main(int argc, char *argv[]) {
         case GUI_STARTUP_IDLE:
             break; /* unreachable with proj_arg != NULL; listed for switch exhaustiveness */
         }
-    } else if (!recovery_warn_shown) {
+    } else if (!recovery_warn_shown && pack_work_ready) {
         set_status("Ready. New project -- add files or a folder to start.");
     }
     /* proj_arg == NULL && recovery_warn_shown: keep the recovery STATUS_WARNING as the first-frame status
@@ -1276,6 +1290,7 @@ int main(int argc, char *argv[]) {
 
     gui_canvas_shutdown(&s_canvas);
     gui_pack_shutdown();
+    gui_rows_shutdown();
     gui_scan_shutdown();
     gui_project_shutdown();
     nt_ui_destroy_context(s_ctx);
@@ -1307,3 +1322,19 @@ int main(int argc, char *argv[]) {
     return 0;
 }
 // #endregion
+
+#if defined(_WIN32)
+int main(void) {
+    nt_utf8_argv utf8 = {0};
+    char error[160] = {0};
+    if (!nt_utf8_argv_from_command_line(&utf8, error, sizeof error)) {
+        (void)fprintf(stderr, "ntpacker-gui: invalid Windows command line: %s\n", error);
+        return 2;
+    }
+    const int result = gui_main_utf8(utf8.argc, utf8.argv);
+    nt_utf8_argv_dispose(&utf8);
+    return result;
+}
+#else
+int main(int argc, char *argv[]) { return gui_main_utf8(argc, argv); }
+#endif

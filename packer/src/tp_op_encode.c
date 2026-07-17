@@ -13,6 +13,7 @@
 
 #include "tp_core/tp_id.h"
 #include "tp_encode_internal.h"
+#include "tp_op_internal.h"
 #include "tp_sb.h"
 
 typedef enum { FT_ID, FT_STR, FT_INT, FT_NUM, FT_BOOL, FT_ARR, FT_REF, FT_REFS } ftype;
@@ -227,13 +228,14 @@ bool tp_operation_emit_canonical(tp_sb *sb, const tp_operation *op, int depth,
             uint32_t m = op->u.sprite_clear.mask;
             PUSH_ID("source_id", TP_ID_KIND_SOURCE, op->u.sprite_clear.source_id);
             PUSH_STR("src_key", op->u.sprite_clear.src_key);
-            if (m & TP_SPF_ORIGIN) clr_toks[clr_n++] = "origin";
-            if (m & TP_SPF_SLICE9) clr_toks[clr_n++] = "slice9";
-            if (m & TP_SPF_SHAPE) clr_toks[clr_n++] = "shape";
-            if (m & TP_SPF_ALLOW_ROTATE) clr_toks[clr_n++] = "allow_rotate";
-            if (m & TP_SPF_MAX_VERTICES) clr_toks[clr_n++] = "max_vertices";
-            if (m & TP_SPF_MARGIN) clr_toks[clr_n++] = "margin";
-            if (m & TP_SPF_EXTRUDE) clr_toks[clr_n++] = "extrude";
+            size_t clear_count = 0U;
+            const tp_sprite_clear_field *clear_fields =
+                tp_op__sprite_clear_fields(&clear_count);
+            for (size_t i = 0U; i < clear_count; i++) {
+                if ((m & clear_fields[i].bit) != 0U) {
+                    clr_toks[clr_n++] = clear_fields[i].token;
+                }
+            }
             PUSH_ARR("fields", (char *const *)clr_toks, clr_n);
             break;
         }

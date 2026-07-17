@@ -23,7 +23,7 @@
 #include "tp_core/tp_journal.h"
 #include "tp_core/tp_operation.h"
 #include "tp_core/tp_project.h"
-#include "tp_core/tp_project_migrate.h" /* tp_project_promote_ids */
+#include "tp_project_identity_internal.h"
 #include "tp_core/tp_transaction.h"
 #include "tp_model_seam.h"
 #include "tp_txn_internal.h"            /* clone fault seam */
@@ -38,6 +38,7 @@ void tearDown(void) {
     tp_project__test_set_clone_alloc_fail(-1);
     tp_op__test_set_alloc_fail(-1);
     tp_txn__test_set_add_error_fail(-1);
+    tp_txn__test_set_result_echo_fail(-1);
 }
 
 /* ---- fixtures ------------------------------------------------------------- */
@@ -154,13 +155,27 @@ void test_clone_byte_identity(void) {
     /* enrich: a sprite override + an animation with frames */
     tp_project_atlas *a = &p->atlases[0];
     tp_project_sprite *s = NULL;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_pending_sprite(a, "hero", &s));
+    const tp_id128 source_id = a->sources[0].id;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_sprite_by_source_key(a, source_id, "hero.png",
+                                                  &s));
     s->origin_x = 0.25F;
     s->slice9_lrtb[0] = 3;
     tp_project_anim *an = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_animation(a, "walk", &an));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "hero"));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "hero2"));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_anim_add_frame(an, source_id, "hero.png"));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_anim_add_frame(an, source_id, "hero2.png"));
+    uint8_t counter = 31U;
+    tp_rng rng = {tp_test_det_fill, &counter};
+    tp_error assign_error = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_assign_missing_ids(p, &rng, &assign_error));
 
     tp_project *c = tp_project_clone(p);
     TEST_ASSERT_NOT_NULL(c);
@@ -203,6 +218,13 @@ void test_clone_alloc_fault_sweep(void) {
     TEST_ASSERT_NOT_NULL(c2);
     tp_project_destroy(c2);
     tp_project_destroy(p);
+}
+
+void test_model_wrap_rejects_noncanonical_project(void) {
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    TEST_ASSERT_NULL(tp_model_wrap(project));
+    tp_project_destroy(project); /* ownership remains with the caller on reject */
 }
 
 /* ---- revision precondition ----------------------------------------------- */
@@ -331,6 +353,86 @@ void test_atomicity_op_fails(void) {
     free(after);
     tp_txn_result_free(&res);
     tp_model_destroy(m);
+}
+
+static void assert_duplicate_create_rejected_atomically(
+    tp_project *project, tp_operation *operation, const char *transaction_id,
+    const char *field) {
+    tp_model *model = tp_model_wrap(project);
+    TEST_ASSERT_NOT_NULL(model);
+    char *before = tp_test_serialize_project(tp_model_project(model));
+
+    tp_txn_request request = {0};
+    request.schema = TP_TXN_SCHEMA;
+    (void)snprintf(request.id_hex, sizeof request.id_hex, "%s",
+                   transaction_id);
+    request.expected_revision = 0;
+    request.ops = operation;
+    request.op_count = 1;
+
+    tp_txn_result result;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_DUPLICATE_ID,
+        tp_model_apply(model, &request, &result, &error));
+    TEST_ASSERT_FALSE(result.committed);
+    TEST_ASSERT_EQUAL_INT64(0, tp_model_revision(model));
+    TEST_ASSERT_EQUAL_INT(1, result.error_count);
+    TEST_ASSERT_EQUAL_INT(0, result.errors[0].op_index);
+    TEST_ASSERT_EQUAL_STRING(field, result.errors[0].field);
+
+    char *after = tp_test_serialize_project(tp_model_project(model));
+    TEST_ASSERT_EQUAL_STRING(before, after);
+    free(before);
+    free(after);
+    tp_txn_result_free(&result);
+    tp_model_destroy(model);
+}
+
+void test_create_rejects_cross_kind_structural_id_duplicate(void) {
+    tp_project *project = tp_test_base_project();
+    tp_project_atlas *atlas = &project->atlases[0];
+
+    tp_operation operation = {0};
+    operation.kind = TP_OP_TARGET_CREATE;
+    operation.atlas_id = atlas->id;
+    operation.u.target_create.target_id = atlas->sources[0].id;
+    operation.u.target_create.exporter_id =
+        (char *)TP_EXPORTER_ID_JSON_NEOTOLIS;
+    operation.u.target_create.out_path = (char *)"out/duplicate";
+    operation.u.target_create.enabled = true;
+
+    assert_duplicate_create_rejected_atomically(
+        project, &operation, "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "target_id");
+}
+
+void test_create_rejects_cross_atlas_structural_id_duplicate(void) {
+    tp_project *project = tp_test_base_project();
+    const tp_id128 existing_source_id = project->atlases[0].sources[0].id;
+    int second_index = -1;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_add_atlas(project, "second", &second_index));
+    TEST_ASSERT_TRUE(second_index >= 0);
+    tp_project_atlas *second = &project->atlases[second_index];
+    uint8_t counter = 71U;
+    tp_rng rng = {tp_test_det_fill, &counter};
+    tp_error assign_error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_assign_missing_ids(project, &rng, &assign_error));
+
+    tp_operation operation = {0};
+    operation.kind = TP_OP_SOURCE_ADD;
+    operation.atlas_id = second->id;
+    operation.u.source_add.source_id = existing_source_id;
+    operation.u.source_add.key = (char *)"other-sprites";
+    operation.u.source_add.kind = TP_SOURCE_KIND_FOLDER;
+
+    assert_duplicate_create_rejected_atomically(
+        project, &operation, "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+        "source_id");
 }
 
 /* clone-alloc fault at apply time -> model byte-unchanged, revision unchanged. */
@@ -604,7 +706,6 @@ void test_idempotency_retention_window_evicts_fifo(void) {
     tp_project *project = tp_project_create();
     TEST_ASSERT_NOT_NULL(project);
     project->atlases[0].id = tp_test_id_of(0x77);
-    project->atlases[0].id_synthetic = false;
     tp_model *model = tp_model_wrap(project);
     TEST_ASSERT_NOT_NULL(model);
     tp_txn_result result;
@@ -735,6 +836,82 @@ void test_semantic_no_change_preserves_redo_branch(void) {
     tp_model_destroy(model);
 }
 
+void test_committed_result_preserves_distinct_long_sprite_keys(void) {
+    tp_project *project = tp_test_base_project();
+    const tp_id128 atlas_id = project->atlases[0].id;
+    const tp_id128 source_id = project->atlases[0].sources[0].id;
+    tp_model *model = tp_model_wrap(project);
+    TEST_ASSERT_NOT_NULL(model);
+
+    char first[320];
+    char second[320];
+    memset(first, 's', sizeof first - 1U);
+    memcpy(second, first, sizeof first);
+    first[sizeof first - 2U] = 'a';
+    second[sizeof second - 2U] = 'b';
+    first[sizeof first - 1U] = '\0';
+    second[sizeof second - 1U] = '\0';
+    TEST_ASSERT_EQUAL_MEMORY(first, second, 255U);
+
+    tp_operation operations[2] = {0};
+    for (int i = 0; i < 2; ++i) {
+        operations[i].kind = TP_OP_SPRITE_OVERRIDE_SET;
+        operations[i].atlas_id = atlas_id;
+        operations[i].u.sprite_set.source_id = source_id;
+        operations[i].u.sprite_set.src_key = i == 0 ? first : second;
+        operations[i].u.sprite_set.mask = TP_SPF_MARGIN;
+        operations[i].u.sprite_set.ov_margin = i + 1;
+    }
+    tp_txn_request request = {0};
+    request.schema = TP_TXN_SCHEMA;
+    memcpy(request.id_hex, "abababababababababababababababab", 33U);
+    request.ops = operations;
+    request.op_count = 2;
+    tp_txn_result result = {0};
+    tp_error error = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK, tp_model_apply(model, &request, &result, &error),
+        error.msg);
+    TEST_ASSERT_TRUE(result.committed);
+    TEST_ASSERT_EQUAL_INT(2, result.op_count);
+    TEST_ASSERT_EQUAL_STRING(first, result.ops[0].addr[2].str);
+    TEST_ASSERT_EQUAL_STRING(second, result.ops[1].addr[2].str);
+    char *json = tp_txn_result_encode(&result);
+    TEST_ASSERT_NOT_NULL(json);
+    TEST_ASSERT_NOT_NULL(strstr(json, first));
+    TEST_ASSERT_NOT_NULL(strstr(json, second));
+    free(json);
+    tp_txn_result_free(&result);
+    tp_model_destroy(model);
+}
+
+void test_result_echo_oom_rejects_before_publication(void) {
+    tp_project *project = tp_test_base_project();
+    const tp_id128 atlas_id = project->atlases[0].id;
+    tp_model *model = tp_model_wrap(project);
+    TEST_ASSERT_NOT_NULL(model);
+    tp_operation operation = {0};
+    op_atlas_rename(&operation, atlas_id, "must-not-commit");
+    tp_txn_request request = {0};
+    request.schema = TP_TXN_SCHEMA;
+    memcpy(request.id_hex, "acacacacacacacacacacacacacacacac", 33U);
+    request.ops = &operation;
+    request.op_count = 1;
+    tp_txn_result result = {0};
+    tp_error error = {0};
+    tp_txn__test_set_result_echo_fail(0);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OOM,
+        tp_model_apply(model, &request, &result, &error));
+    TEST_ASSERT_FALSE(result.committed);
+    TEST_ASSERT_EQUAL_INT64(0, tp_model_revision(model));
+    TEST_ASSERT_EQUAL_STRING("atlas1",
+                             tp_model_project(model)->atlases[0].name);
+    TEST_ASSERT_EQUAL_INT(1, result.error_count);
+    tp_txn_result_free(&result);
+    tp_model_destroy(model);
+}
+
 void test_journal_less_history_avoids_checkpoint_size_traversals(void) {
     tp_project *project = tp_test_base_project();
     const tp_id128 atlas_id = project->atlases[0].id;
@@ -822,10 +999,6 @@ void test_identity_excludes_runtime(void) {
     tp_id128 after = tp_semantic_identity(p);
     TEST_ASSERT_TRUE(tp_id128_eq(before, after));
 
-    /* schema_version is a serialization envelope -> excluded. */
-    p->schema_version += 1;
-    tp_id128 after2 = tp_semantic_identity(p);
-    TEST_ASSERT_TRUE(tp_id128_eq(before, after2));
     tp_project_destroy(p);
 }
 
@@ -838,7 +1011,7 @@ void test_identity_order_normalized(void) {
     uint8_t ctr = 9;
     tp_rng rng = {tp_test_det_fill, &ctr};
     tp_error err;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_promote_ids(p, &rng, &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_assign_missing_ids(p, &rng, &err));
     tp_id128 before = tp_semantic_identity(p);
     /* swap the two targets' array order: identity must not change */
     tp_project_target tmp = a->targets[0];
@@ -855,8 +1028,12 @@ void test_identity_frames_order_semantic(void) {
     tp_project_atlas *a = &p->atlases[0];
     tp_project_anim *an = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_animation(a, "walk", &an));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "f0"));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "f1"));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_anim_add_frame(an, a->sources[0].id, "f0"));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_anim_add_frame(an, a->sources[0].id, "f1"));
     tp_id128 before = tp_semantic_identity(p);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_move_frame(an, 0, 1)); /* swap frame order */
     tp_id128 after = tp_semantic_identity(p);
@@ -867,7 +1044,7 @@ void test_identity_frames_order_semantic(void) {
 /* ---- JSON contract: validation ordering --------------------------------- */
 
 void test_json_structural_fail_fast(void) {
-    tp_model *m = tp_model_create();
+    tp_model *m = tp_model_wrap(tp_test_base_project());
     tp_txn_result res;
     tp_error err;
     /* malformed JSON */
@@ -1056,7 +1233,7 @@ void test_length_aware_json_requires_exact_span_consumption(void) {
 }
 
 void test_operation_count_rejects_before_clone_for_json_and_typed_apply(void) {
-    tp_model *m = tp_model_create();
+    tp_model *m = tp_model_wrap(tp_test_base_project());
     TEST_ASSERT_NOT_NULL(m);
     char *over_limit = txn_json_with_remove_ops(TP_TXN_MAX_OPS + 1);
     tp_txn_result res;
@@ -1371,7 +1548,7 @@ void test_json_batch_equals_one_by_one(void) {
 /* ---- UB-free number handling -------------------------------------------- */
 
 void test_number_handling(void) {
-    tp_model *m = tp_model_create();
+    tp_model *m = tp_model_wrap(tp_test_base_project());
     tp_txn_result res;
     tp_error err;
     /* expected_revision 1e300 is outside +/-2^53 -> structured reject, NO UB cast. */
@@ -1624,7 +1801,7 @@ void test_json_result_error_field_golden(void) {
 /* [schema] a fractional/out-of-range schema is rejected (was: truncating
  * schema->valueint accepted {"schema":1.9} as 1). */
 void test_json_fractional_schema_rejected(void) {
-    tp_model *m = tp_model_create();
+    tp_model *m = tp_model_wrap(tp_test_base_project());
     tp_txn_result res;
     tp_error err;
     const char *frac = "{\"schema\":1.9,\"transaction\":{"
@@ -1704,6 +1881,338 @@ void test_sprite_clear_field_roundtrip(void) {
         TEST_ASSERT_EQUAL_UINT32(bits[i], rd->ops[0].u.sprite_clear.mask); /* round-trip identity */
         free(json);
         tp_txn_request_free(rd);
+    }
+}
+
+void test_json_sprite_clear_rejects_unknown_field_token(void) {
+    tp_project *project = tp_test_base_project();
+    const tp_project_atlas *atlas = &project->atlases[0];
+    char atlas_id[TP_ID_TEXT_CAP];
+    char source_id[TP_ID_TEXT_CAP];
+    tp_error format_error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_id_format(TP_ID_KIND_ATLAS, atlas->id, atlas_id,
+                     sizeof atlas_id, &format_error));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_id_format(TP_ID_KIND_SOURCE, atlas->sources[0].id, source_id,
+                     sizeof source_id, &format_error));
+    tp_model *model = tp_model_wrap(project);
+    TEST_ASSERT_NOT_NULL(model);
+
+    char json[1024];
+    const int written = snprintf(
+        json, sizeof json,
+        "{\"schema\":1,\"transaction\":{\"id\":"
+        "\"c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3\","
+        "\"expected_revision\":0,\"operations\":[{"
+        "\"op\":\"sprite.override.clear\","
+        "\"atlas_id\":\"%s\",\"source_id\":\"%s\","
+        "\"src_key\":\"hero.png\","
+        "\"fields\":[\"origin\",\"typo\"]}]}}",
+        atlas_id, source_id);
+    TEST_ASSERT_TRUE(written > 0 && (size_t)written < sizeof json);
+
+    tp_txn_result result;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_model_apply_json(model, json, &result, &error));
+    TEST_ASSERT_FALSE(result.committed);
+    TEST_ASSERT_EQUAL_INT64(0, tp_model_revision(model));
+    TEST_ASSERT_EQUAL_INT(1, result.error_count);
+    TEST_ASSERT_EQUAL_INT(0, result.errors[0].op_index);
+    TEST_ASSERT_EQUAL_STRING("fields", result.errors[0].field);
+
+    tp_txn_result_free(&result);
+    tp_model_destroy(model);
+}
+
+static void assert_single_operation_decode_rejected(const char *operation) {
+    char json[2048];
+    const int written = snprintf(
+        json, sizeof json,
+        "{\"schema\":1,\"transaction\":{\"id\":"
+        "\"d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4\","
+        "\"expected_revision\":0,\"operations\":[%s]}}",
+        operation);
+    TEST_ASSERT_TRUE(written > 0 && (size_t)written < sizeof json);
+    tp_txn_request *request = NULL;
+    tp_error error = {{0}};
+    const tp_status status = tp_txn_request_decode(json, &request, &error);
+    if (request) {
+        tp_txn_request_free(request);
+    }
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT, status);
+}
+
+void test_json_mutating_payloads_require_presence(void) {
+    static const char *const operations[] = {
+        "{\"op\":\"sprite.name.set\","
+        "\"atlas_id\":\"atlas_11111111111111111111111111111111\","
+        "\"source_id\":\"source_22222222222222222222222222222222\","
+        "\"src_key\":\"hero.png\"}",
+        "{\"op\":\"animation.frames.set\","
+        "\"atlas_id\":\"atlas_11111111111111111111111111111111\","
+        "\"anim_id\":\"anim_33333333333333333333333333333333\"}",
+        "{\"op\":\"animation.frame.remove\","
+        "\"atlas_id\":\"atlas_11111111111111111111111111111111\","
+        "\"anim_id\":\"anim_33333333333333333333333333333333\"}",
+        "{\"op\":\"animation.frame.move\","
+        "\"atlas_id\":\"atlas_11111111111111111111111111111111\","
+        "\"anim_id\":\"anim_33333333333333333333333333333333\","
+        "\"to_index\":1}",
+        "{\"op\":\"animation.frame.move\","
+        "\"atlas_id\":\"atlas_11111111111111111111111111111111\","
+        "\"anim_id\":\"anim_33333333333333333333333333333333\","
+        "\"from_index\":0}",
+    };
+    for (size_t i = 0; i < sizeof operations / sizeof operations[0]; ++i) {
+        assert_single_operation_decode_rejected(operations[i]);
+    }
+}
+
+void test_json_explicit_empty_payloads_are_not_treated_as_absent(void) {
+    static const char *const operations[] = {
+        "{\"op\":\"sprite.name.set\","
+        "\"atlas_id\":\"atlas_11111111111111111111111111111111\","
+        "\"source_id\":\"source_22222222222222222222222222222222\","
+        "\"src_key\":\"hero.png\",\"name\":\"\"}",
+        "{\"op\":\"animation.frames.set\","
+        "\"atlas_id\":\"atlas_11111111111111111111111111111111\","
+        "\"anim_id\":\"anim_33333333333333333333333333333333\","
+        "\"frames\":[]}",
+    };
+    for (size_t i = 0; i < sizeof operations / sizeof operations[0]; ++i) {
+        char json[2048];
+        const int written = snprintf(
+            json, sizeof json,
+            "{\"schema\":1,\"transaction\":{\"id\":"
+            "\"d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5\","
+            "\"expected_revision\":0,\"operations\":[%s]}}",
+            operations[i]);
+        TEST_ASSERT_TRUE(written > 0 && (size_t)written < sizeof json);
+        tp_txn_request *request = NULL;
+        tp_error error = {{0}};
+        TEST_ASSERT_EQUAL_INT(
+            TP_STATUS_OK,
+            tp_txn_request_decode(json, &request, &error));
+        TEST_ASSERT_NOT_NULL(request);
+        tp_txn_request_free(request);
+    }
+}
+
+void test_json_source_add_kind_absent_and_closed_values_are_accepted(void) {
+    static const char *const kind_fragments[] = {"", ",\"kind\":\"folder\"",
+                                                 ",\"kind\":\"file\""};
+    static const tp_source_kind expected[] = {TP_SOURCE_KIND_FOLDER,
+                                              TP_SOURCE_KIND_FOLDER,
+                                              TP_SOURCE_KIND_FILE};
+    for (size_t i = 0; i < sizeof kind_fragments / sizeof kind_fragments[0]; ++i) {
+        char json[1024];
+        const int written = snprintf(
+            json, sizeof json,
+            "{\"schema\":1,\"transaction\":{\"id\":"
+            "\"e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4\","
+            "\"expected_revision\":0,\"operations\":[{"
+            "\"op\":\"source.add\","
+            "\"atlas_id\":\"atlas_11111111111111111111111111111111\","
+            "\"source_id\":\"source_22222222222222222222222222222222\","
+            "\"key\":\"sprites/new\"%s}]}}",
+            kind_fragments[i]);
+        TEST_ASSERT_TRUE(written > 0 && (size_t)written < sizeof json);
+        tp_txn_request *request = NULL;
+        tp_error error = {{0}};
+        TEST_ASSERT_EQUAL_INT(
+            TP_STATUS_OK,
+            tp_txn_request_decode(json, &request, &error));
+        TEST_ASSERT_NOT_NULL(request);
+        TEST_ASSERT_EQUAL_INT(expected[i], request->ops[0].u.source_add.kind);
+        tp_txn_request_free(request);
+    }
+}
+
+void test_json_duplicate_object_keys_are_rejected_at_every_depth(void) {
+    static const char *const requests[] = {
+        "{\"schema\":1,\"schema\":1,\"transaction\":{"
+        "\"id\":\"f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6\","
+        "\"expected_revision\":0,\"operations\":[]}}",
+        "{\"schema\":1,\"transaction\":{"
+        "\"id\":\"f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6\","
+        "\"expected_revision\":0,\"expected_revision\":1,"
+        "\"operations\":[]}}",
+        "{\"schema\":1,\"transaction\":{"
+        "\"id\":\"f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6\","
+        "\"expected_revision\":0,\"operations\":[{"
+        "\"op\":\"atlas.rename\","
+        "\"atlas_id\":\"atlas_11111111111111111111111111111111\","
+        "\"name\":\"safe\",\"name\":\"destructive-shadow\"}]}}",
+        "{\"schema\":1,\"transaction\":{"
+        "\"id\":\"f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6\","
+        "\"expected_revision\":0,\"operations\":[{"
+        "\"op\":\"atlas.rename\","
+        "\"atlas_id\":\"atlas_11111111111111111111111111111111\","
+        "\"name\":\"safe\",\"na\\u006de\":\"escaped-shadow\"}]}}",
+        "{\"schema\":1,\"transaction\":{"
+        "\"id\":\"f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6\","
+        "\"expected_revision\":0,\"operations\":[{"
+        "\"op\":\"animation.frames.set\","
+        "\"atlas_id\":\"atlas_11111111111111111111111111111111\","
+        "\"anim_id\":\"anim_33333333333333333333333333333333\","
+        "\"frames\":[{"
+        "\"source_id\":\"source_22222222222222222222222222222222\","
+        "\"source_id\":\"source_44444444444444444444444444444444\","
+        "\"src_key\":\"hero.png\"}]}]}}",
+    };
+    for (size_t i = 0; i < sizeof requests / sizeof requests[0]; ++i) {
+        tp_txn_request *request = NULL;
+        tp_error error = {{0}};
+        TEST_ASSERT_EQUAL_INT(
+            TP_STATUS_INVALID_ARGUMENT,
+            tp_txn_request_decode(requests[i], &request, &error));
+        TEST_ASSERT_NULL(request);
+        TEST_ASSERT_NOT_EQUAL(0, strstr(error.msg, "duplicate JSON key"));
+    }
+}
+
+void test_json_escaped_nul_is_rejected_before_c_string_lowering(void) {
+    const char *json =
+        "{\"schema\":1,\"transaction\":{"
+        "\"id\":\"f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7\","
+        "\"expected_revision\":0,\"operations\":[{"
+        "\"op\":\"atlas.rename\","
+        "\"atlas_id\":\"atlas_11111111111111111111111111111111\","
+        "\"name\":\"hero\\u0000shadow\"}]}}";
+    tp_txn_request *request = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_txn_request_decode(json, &request, &error));
+    TEST_ASSERT_NULL(request);
+    TEST_ASSERT_NOT_EQUAL(0, strstr(error.msg, "NUL"));
+
+    static const char raw_nul[] =
+        "{\"schema\":1,\"transaction\":{"
+        "\"id\":\"f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7\","
+        "\"expected_revision\":0,\"operations\":[]}}\0shadow";
+    memset(&error, 0, sizeof error);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_txn_request_decode_n(raw_nul, sizeof raw_nul - 1U, &request,
+                                &error));
+    TEST_ASSERT_NULL(request);
+    TEST_ASSERT_NOT_EQUAL(0, strstr(error.msg, "NUL"));
+}
+
+static tp_status decode_transaction_with_name_bytes(
+    const unsigned char *name_bytes, size_t name_len, tp_txn_request **out,
+    tp_error *error) {
+    static const char prefix[] =
+        "{\"schema\":1,\"transaction\":{"
+        "\"id\":\"f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8f8\","
+        "\"expected_revision\":0,\"operations\":[{"
+        "\"op\":\"atlas.rename\","
+        "\"atlas_id\":\"atlas_11111111111111111111111111111111\","
+        "\"name\":\"";
+    static const char suffix[] = "\"}]}}";
+    char json[512];
+    const size_t prefix_len = sizeof prefix - 1U;
+    const size_t suffix_len = sizeof suffix - 1U;
+    TEST_ASSERT_TRUE(prefix_len + name_len + suffix_len <= sizeof json);
+    memcpy(json, prefix, prefix_len);
+    memcpy(json + prefix_len, name_bytes, name_len);
+    memcpy(json + prefix_len + name_len, suffix, suffix_len);
+    return tp_txn_request_decode_n(json, prefix_len + name_len + suffix_len,
+                                   out, error);
+}
+
+void test_transaction_json_rejects_invalid_raw_utf8_length_aware(void) {
+    static const unsigned char invalid[] = {0xf0U, 0x80U, 0x80U, 0x80U};
+    tp_txn_request *request = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        decode_transaction_with_name_bytes(invalid, sizeof invalid, &request,
+                                           &error));
+    TEST_ASSERT_NULL(request);
+    TEST_ASSERT_NOT_EQUAL(0, strstr(error.msg, "UTF-8"));
+}
+
+void test_transaction_json_accepts_well_formed_multibyte_utf8(void) {
+    static const unsigned char name[] = {0xd0U, 0x90U, 0xf0U, 0x9fU, 0x98U,
+                                         0x80U};
+    tp_txn_request *request = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        decode_transaction_with_name_bytes(name, sizeof name, &request,
+                                           &error));
+    TEST_ASSERT_NOT_NULL(request);
+    tp_txn_request_free(request);
+}
+
+void test_json_sprite_grouped_fields_require_complete_tuple(void) {
+    static const char *const operations[] = {
+        "{\"op\":\"sprite.override.set\","
+        "\"atlas_id\":\"atlas_11111111111111111111111111111111\","
+        "\"source_id\":\"source_22222222222222222222222222222222\","
+        "\"src_key\":\"hero.png\",\"origin_x\":0.25}",
+        "{\"op\":\"sprite.override.set\","
+        "\"atlas_id\":\"atlas_11111111111111111111111111111111\","
+        "\"source_id\":\"source_22222222222222222222222222222222\","
+        "\"src_key\":\"hero.png\",\"origin_y\":0.75}",
+        "{\"op\":\"sprite.override.set\","
+        "\"atlas_id\":\"atlas_11111111111111111111111111111111\","
+        "\"source_id\":\"source_22222222222222222222222222222222\","
+        "\"src_key\":\"hero.png\",\"slice9_l\":1,\"slice9_r\":2,"
+        "\"slice9_t\":3}",
+    };
+    for (size_t i = 0; i < sizeof operations / sizeof operations[0]; ++i) {
+        assert_single_operation_decode_rejected(operations[i]);
+    }
+}
+
+void test_json_source_add_kind_is_closed_string(void) {
+    static const char *const invalid_kinds[] = {"\"archive\"", "7"};
+    for (size_t i = 0; i < sizeof invalid_kinds / sizeof invalid_kinds[0]; ++i) {
+        tp_project *project = tp_test_base_project();
+        char atlas_id[TP_ID_TEXT_CAP];
+        char source_id[TP_ID_TEXT_CAP];
+        tp_error error = {{0}};
+        TEST_ASSERT_EQUAL_INT(
+            TP_STATUS_OK,
+            tp_id_format(TP_ID_KIND_ATLAS, project->atlases[0].id, atlas_id,
+                         sizeof atlas_id, &error));
+        TEST_ASSERT_EQUAL_INT(
+            TP_STATUS_OK,
+            tp_id_format(TP_ID_KIND_SOURCE, tp_test_id_of(0xE4), source_id,
+                         sizeof source_id, &error));
+        tp_model *model = tp_model_wrap(project);
+        TEST_ASSERT_NOT_NULL(model);
+
+        char json[1024];
+        const int written = snprintf(
+            json, sizeof json,
+            "{\"schema\":1,\"transaction\":{\"id\":"
+            "\"e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5\","
+            "\"expected_revision\":0,\"operations\":[{"
+            "\"op\":\"source.add\",\"atlas_id\":\"%s\","
+            "\"source_id\":\"%s\",\"key\":\"sprites/new\","
+            "\"kind\":%s}]}}",
+            atlas_id, source_id, invalid_kinds[i]);
+        TEST_ASSERT_TRUE(written > 0 && (size_t)written < sizeof json);
+
+        tp_txn_result result;
+        const tp_status status =
+            tp_model_apply_json(model, json, &result, &error);
+        TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT, status);
+        TEST_ASSERT_FALSE(result.committed);
+        TEST_ASSERT_EQUAL_INT64(0, tp_model_revision(model));
+        TEST_ASSERT_EQUAL_INT(1, result.error_count);
+        TEST_ASSERT_EQUAL_STRING("kind", result.errors[0].field);
+        tp_txn_result_free(&result);
+        tp_model_destroy(model);
     }
 }
 
@@ -1882,10 +2391,13 @@ int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_clone_byte_identity);
     RUN_TEST(test_clone_alloc_fault_sweep);
+    RUN_TEST(test_model_wrap_rejects_noncanonical_project);
     RUN_TEST(test_revision_check);
     RUN_TEST(test_commit_and_revision);
     RUN_TEST(test_batch_equals_one_by_one);
     RUN_TEST(test_atomicity_op_fails);
+    RUN_TEST(test_create_rejects_cross_kind_structural_id_duplicate);
+    RUN_TEST(test_create_rejects_cross_atlas_structural_id_duplicate);
     RUN_TEST(test_apply_clone_fault);
     RUN_TEST(test_apply_per_op_alloc_fault);
     RUN_TEST(test_typed_null_frame_array_rejected_before_encoding);
@@ -1896,6 +2408,8 @@ int main(void) {
     RUN_TEST(test_idempotency_retention_window_evicts_fifo);
     RUN_TEST(test_semantic_no_change_is_not_committed_or_retained);
     RUN_TEST(test_semantic_no_change_preserves_redo_branch);
+    RUN_TEST(test_committed_result_preserves_distinct_long_sprite_keys);
+    RUN_TEST(test_result_echo_oom_rejects_before_publication);
     RUN_TEST(test_journal_less_history_avoids_checkpoint_size_traversals);
     RUN_TEST(test_dirty_is_semantic_identity);
     RUN_TEST(test_identity_excludes_runtime);
@@ -1926,6 +2440,16 @@ int main(void) {
     RUN_TEST(test_json_fractional_schema_rejected);
     RUN_TEST(test_json_shape_oom_must_not_commit);
     RUN_TEST(test_sprite_clear_field_roundtrip);
+    RUN_TEST(test_json_sprite_clear_rejects_unknown_field_token);
+    RUN_TEST(test_json_mutating_payloads_require_presence);
+    RUN_TEST(test_json_explicit_empty_payloads_are_not_treated_as_absent);
+    RUN_TEST(test_json_source_add_kind_absent_and_closed_values_are_accepted);
+    RUN_TEST(test_json_duplicate_object_keys_are_rejected_at_every_depth);
+    RUN_TEST(test_json_escaped_nul_is_rejected_before_c_string_lowering);
+    RUN_TEST(test_transaction_json_rejects_invalid_raw_utf8_length_aware);
+    RUN_TEST(test_transaction_json_accepts_well_formed_multibyte_utf8);
+    RUN_TEST(test_json_sprite_grouped_fields_require_complete_tuple);
+    RUN_TEST(test_json_source_add_kind_is_closed_string);
     RUN_TEST(test_json_target_set_presence);
     RUN_TEST(test_json_target_set_enabled_only);
     RUN_TEST(test_json_target_set_roundtrip);

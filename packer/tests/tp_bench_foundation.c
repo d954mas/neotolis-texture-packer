@@ -9,7 +9,7 @@
 #include "tp_core/tp_journal.h"
 #include "tp_core/tp_operation.h"
 #include "tp_core/tp_project.h"
-#include "tp_core/tp_project_migrate.h"
+#include "tp_project_identity_internal.h"
 #include "tp_core/tp_scan.h"
 #include "tp_core/tp_session.h"
 #include "tp_core/tp_sprite_index.h"
@@ -83,7 +83,9 @@ static bool parse_positive(const char *text, int max_value, int *out) {
     return true;
 }
 
-static bool fill_atlas(tp_project_atlas *atlas, const fixture_spec *spec) {
+static bool fill_atlas(tp_project *project, tp_project_atlas *atlas,
+                       const fixture_spec *spec, tp_rng *rng,
+                       tp_error *err) {
     char key[96];
     char value[96];
     for (int i = 0; i < spec->sources_per_atlas; i++) {
@@ -92,12 +94,24 @@ static bool fill_atlas(tp_project_atlas *atlas, const fixture_spec *spec) {
             return false;
         }
     }
+    if ((spec->overrides_per_atlas > 0 || spec->animations_per_atlas > 0) &&
+        spec->sources_per_atlas == 0) {
+        return false;
+    }
+    if (tp_project_assign_missing_ids(project, rng, err) != TP_STATUS_OK) {
+        return false;
+    }
     for (int i = 0; i < spec->overrides_per_atlas; i++) {
         tp_project_sprite *sprite = NULL;
-        if (snprintf(key, sizeof key, "sprites/hero_walk_%05d", i) < 0 ||
+        const tp_id128 source_id =
+            atlas->sources[i % spec->sources_per_atlas].id;
+        if (snprintf(key, sizeof key, "sprites/hero_walk_%05d.png", i) < 0 ||
             snprintf(value, sizeof value, "player_walk_%05d", i) < 0 ||
-            tp_project_atlas_add_pending_sprite(atlas, key, &sprite) != TP_STATUS_OK || !sprite ||
-            tp_project_atlas_set_pending_sprite_rename(atlas, key, value) != TP_STATUS_OK) {
+            tp_project_atlas_add_sprite_by_source_key(atlas, source_id, key,
+                                                      &sprite) != TP_STATUS_OK ||
+            !sprite ||
+            tp_project_atlas_set_sprite_rename_by_source_key(
+                atlas, source_id, key, value) != TP_STATUS_OK) {
             return false;
         }
         sprite->origin_x = 0.25F;
@@ -111,8 +125,12 @@ static bool fill_atlas(tp_project_atlas *atlas, const fixture_spec *spec) {
         }
         animation->fps = 24.0F;
         for (int frame = 0; frame < spec->frames_per_animation; frame++) {
-            if (snprintf(value, sizeof value, "sprites/hero_walk_%05d", frame) < 0 ||
-                tp_project_anim_add_frame(animation, value) != TP_STATUS_OK) {
+            const tp_id128 source_id =
+                atlas->sources[frame % spec->sources_per_atlas].id;
+            if (snprintf(value, sizeof value,
+                         "sprites/hero_walk_%05d.png", frame) < 0 ||
+                tp_project_anim_add_frame(animation, source_id, value) !=
+                    TP_STATUS_OK) {
                 return false;
             }
         }
@@ -127,6 +145,9 @@ static bool fixture_prepare(fixture *out, fixture_spec spec) {
     if (!project) {
         return false;
     }
+    uint64_t counter = 0U;
+    tp_rng rng = {deterministic_rng, &counter};
+    tp_error err = {{0}};
     for (int i = 0; i < spec.atlases; i++) {
         int index = 0;
         if (i > 0) {
@@ -137,15 +158,13 @@ static bool fixture_prepare(fixture *out, fixture_spec spec) {
                 return false;
             }
         }
-        if (!fill_atlas(&project->atlases[index], &spec)) {
+        if (!fill_atlas(project, &project->atlases[index], &spec, &rng,
+                        &err)) {
             tp_project_destroy(project);
             return false;
         }
     }
-    uint64_t counter = 0U;
-    tp_rng rng = {deterministic_rng, &counter};
-    tp_error err = {{0}};
-    if (tp_project_promote_ids(project, &rng, &err) != TP_STATUS_OK) {
+    if (tp_project_assign_missing_ids(project, &rng, &err) != TP_STATUS_OK) {
         tp_project_destroy(project);
         return false;
     }

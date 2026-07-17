@@ -212,7 +212,6 @@ tp_status tp_diff__copy_sprite_fields(const tp_project_sprite *src, tp_project_s
 
 static tp_status fill_source(tp_project_source *dst, const tp_project_source *src) {
     dst->id = src->id;
-    dst->id_synthetic = src->id_synthetic;
     dst->kind = src->kind;
     bool ok = true;
     dst->path = tp_diff__dup(src->path, &ok);
@@ -221,7 +220,6 @@ static tp_status fill_source(tp_project_source *dst, const tp_project_source *sr
 
 static tp_status fill_target(tp_project_target *dst, const tp_project_target *src) {
     dst->id = src->id;
-    dst->id_synthetic = src->id_synthetic;
     dst->enabled = src->enabled;
     dst->exporter_id = dst->out_path = NULL;
     bool ok = true;
@@ -246,7 +244,7 @@ static tp_status fill_frame(tp_project_frame *dst, const tp_project_frame *src) 
 }
 
 static tp_status fill_anim(tp_project_anim *dst, const tp_project_anim *src) {
-    *dst = *src; /* scalars: id, id_synthetic, fps, playback, flips */
+    *dst = *src; /* scalars: id, fps, playback, flips */
     dst->name = NULL;
     dst->frames = NULL;
     dst->frame_count = dst->frame_cap = 0;
@@ -268,7 +266,7 @@ static tp_status fill_anim(tp_project_anim *dst, const tp_project_anim *src) {
  * sprites + animations w/ frames + targets). Grows each sub-count as it fills so a
  * mid-way OOM leaves a destroy-safe partial atlas. */
 static tp_status fill_atlas(tp_project_atlas *dst, const tp_project_atlas *src) {
-    *dst = *src; /* every scalar knob + id + id_synthetic */
+    *dst = *src; /* every scalar knob + id */
     dst->name = NULL;
     dst->sources = NULL;
     dst->source_count = dst->source_cap = 0;

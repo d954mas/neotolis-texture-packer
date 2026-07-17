@@ -13,6 +13,7 @@
 #include "tp_core/tp_identity.h"
 #include "tp_core/tp_recovery.h"
 #include "tp_core/tp_source_plan.h"
+#include "tp_core/tp_srckey.h"
 #ifdef NTPACKER_GUI_SELFTEST
 #include "tp_session_internal.h"
 #endif
@@ -48,6 +49,8 @@ static bool s_recovery_required;
  * mutation stays blocked rather than silently losing crash durability. */
 static bool s_recovery_setup_notice_pending;
 static char s_recovery_setup_notice[256];
+static bool s_save_notice_pending;
+static char s_save_notice[256];
 // #endregion
 
 // #region transaction coalescing
@@ -72,7 +75,7 @@ typedef struct {
     tp_id128 atlas_id; /* structural identity for session-owned atlas intents */
     tp_id128 source_id;
     int field;         /* atlas field / sprite-override which / slice9 component; -1 if n/a */
-    char sprite[256];  /* sprite export key; "" if n/a */
+    char sprite[TP_SRCKEY_MAX]; /* exact source-local key; "" if n/a */
 } coalesce_key;
 
 static bool s_pending_valid;        /* a coalescable edit is buffered (uncommitted) */
@@ -172,10 +175,6 @@ static int64_t recovery_now(void) {
     return (int64_t)time(NULL);
 }
 
-/* Assign a random persistent ID to any structural entity that lacks one -- nil (a freshly
- * created project/atlas/anim/target) OR loader-synthesized for a migrated legacy file (§5.5). A
- * real loaded ID (v3/v4) is preserved. Idempotent after the first call. Returns the promote
- * status. */
 /* Record a void-context id-promotion failure so the UI can surface it. */
 bool gui_project_take_op_error(char *out, size_t cap) {
     if (!s_op_error) {
@@ -278,6 +277,8 @@ static bool install_session(tp_session *next) {
     }
     tp_session_destroy(s_session);
     s_session = next;
+    s_save_notice_pending = false;
+    s_save_notice[0] = '\0';
     return true;
 }
 
@@ -331,32 +332,40 @@ static bool refresh_after_session_commit(void) {
 // #endregion
 
 // #region pending-buffer primitives
-static coalesce_key make_key(coalesce_kind kind, int field, const char *sprite) {
+static coalesce_key make_key(coalesce_kind kind, int field) {
     coalesce_key k;
     memset(&k, 0, sizeof k);
     k.kind = kind;
     k.atlas_id = tp_id128_nil();
     k.source_id = tp_id128_nil();
     k.field = field;
-    (void)snprintf(k.sprite, sizeof k.sprite, "%s", sprite ? sprite : "");
     return k;
 }
 
 static coalesce_key make_atlas_key(tp_id128 atlas_id, int field) {
-    coalesce_key key = make_key(CK_ATLAS_SETTING, field, "");
+    coalesce_key key = make_key(CK_ATLAS_SETTING, field);
     key.atlas_id = atlas_id;
     return key;
 }
 
-static coalesce_key make_sprite_key(coalesce_kind kind, const gui_sprite_ref *sprite,
-                                    int field) {
-    coalesce_key key = make_key(kind, field,
-                                sprite ? sprite->source_key : "");
-    if (sprite) {
-        key.atlas_id = sprite->atlas_id;
-        key.source_id = sprite->source_id;
+static bool make_sprite_key(coalesce_kind kind, const gui_sprite_ref *sprite,
+                            int field, coalesce_key *out) {
+    if (!sprite || !sprite->source_key || !out) {
+        return false;
     }
-    return key;
+    const size_t length = strlen(sprite->source_key);
+    if (length >= sizeof out->sprite) {
+        tp_error error = {0};
+        (void)tp_error_set(&error, TP_STATUS_OUT_OF_BOUNDS,
+                           "sprite source key exceeds the supported limit");
+        note_session_reject(TP_STATUS_OUT_OF_BOUNDS, &error);
+        return false;
+    }
+    *out = make_key(kind, field);
+    out->atlas_id = sprite->atlas_id;
+    out->source_id = sprite->source_id;
+    memcpy(out->sprite, sprite->source_key, length + 1U);
+    return true;
 }
 
 static bool key_eq(const coalesce_key *a, const coalesce_key *b) {
@@ -566,6 +575,8 @@ void gui_project_shutdown(void) {
     s_session = NULL;
     s_recovery_root[0] = '\0';
     s_discard_recovery_on_shutdown = false;
+    s_save_notice_pending = false;
+    s_save_notice[0] = '\0';
 }
 
 void gui_project_discard_recovery_on_shutdown(void) { s_discard_recovery_on_shutdown = true; }
@@ -628,6 +639,18 @@ bool gui_project_take_recovery_setup_notice(char *out, size_t cap) {
     }
     s_recovery_setup_notice_pending = false;
     s_recovery_setup_notice[0] = '\0';
+    return true;
+}
+
+bool gui_project_take_save_notice(char *out, size_t cap) {
+    if (!s_save_notice_pending) {
+        return false;
+    }
+    if (out && cap > 0U) {
+        (void)snprintf(out, cap, "%s", s_save_notice);
+    }
+    s_save_notice_pending = false;
+    s_save_notice[0] = '\0';
     return true;
 }
 // #endregion
@@ -772,7 +795,7 @@ int gui_project_add_atlas(void) {
         return -1;
     }
     char name[64];
-    char out_path[576];
+    char out_path[TP_IDENTITY_PATH_MAX];
     const char *exporter_id = NULL;
     bool target_enabled = false;
     tp_error err = {0};
@@ -1120,7 +1143,10 @@ bool gui_project_set_sprite_origin(const gui_sprite_ref *sprite, int axis, float
      * value of the non-edited component and the two components can never merge against a stale model.
      * (The pre-fix code keyed both axes the same AND seeded from a view-side committed read, so a
      * back-to-back X then Y replaced {x=new,y=old} with {x=old,y=new} and silently lost the X edit.) */
-    coalesce_key ck = make_sprite_key(CK_SPRITE_ORIGIN, sprite, axis);
+    coalesce_key ck;
+    if (!make_sprite_key(CK_SPRITE_ORIGIN, sprite, axis, &ck)) {
+        return false;
+    }
     const int64_t revision_before_route = tp_session_revision(s_session);
     pending_route(&ck);
     gui_sprite_ref routed = *sprite;
@@ -1148,7 +1174,10 @@ bool gui_project_set_sprite_slice9(const gui_sprite_ref *sprite, int lrtb_index,
      * different key, so pending_route flushes the prior component's pending BEFORE the RMW seed
      * below reads the model -> the seed carries the committed value of every OTHER component and
      * two components can never merge against a stale model (the RMW lost-edit is impossible). */
-    coalesce_key ck = make_sprite_key(CK_SPRITE_SLICE9, sprite, lrtb_index);
+    coalesce_key ck;
+    if (!make_sprite_key(CK_SPRITE_SLICE9, sprite, lrtb_index, &ck)) {
+        return false;
+    }
     const int64_t revision_before_route = tp_session_revision(s_session);
     pending_route(&ck);
     gui_sprite_ref routed = *sprite;
@@ -1174,7 +1203,10 @@ bool gui_project_set_sprite_override(const gui_sprite_ref *sprite, gui_sprite_ov
     if (!s_session || !sprite) {
         return false;
     }
-    coalesce_key ck = make_sprite_key(CK_SPRITE_OVERRIDE, sprite, (int)which);
+    coalesce_key ck;
+    if (!make_sprite_key(CK_SPRITE_OVERRIDE, sprite, (int)which, &ck)) {
+        return false;
+    }
     const int64_t revision_before_route = tp_session_revision(s_session);
     pending_route(&ck);
     gui_sprite_ref routed = *sprite;
@@ -1218,7 +1250,7 @@ int gui_project_add_target(tp_id128 atlas_id, int64_t expected_revision) {
     if (!gen_id(&target_id)) {
         return -1;
     }
-    char out_path[576];
+    char out_path[TP_IDENTITY_PATH_MAX];
     const char *exporter_id = NULL;
     bool enabled = false;
     tp_error err = {0};
@@ -1316,7 +1348,7 @@ bool gui_project_set_target(const gui_target_ref *target, const char *exporter_i
 
 /* H/G3 + C1 mask: COALESCABLE out-path-only setter for the export-target path text field. Discrete target
  * edits build their own single-field MASKED ops (enabled checkbox -> TP_TF_ENABLED, exporter dropdown ->
- * TP_TF_EXPORTER, below); browse still uses the full-replace gui_project_set_target. The free-text out-path
+ * TP_TF_EXPORTER, below); browse calls this setter and flushes immediately. The free-text out-path
  * field, however, fired one gui_project_set_target per keystroke -> one committed TP_OP_TARGET_SET per
  * keystroke = undo spam. Buffering it under a per-target key (field = index) makes
  * the field's existing Enter/blur gesture-commit flush the whole edit as ONE undo step -- mirrors the
@@ -1327,7 +1359,7 @@ bool gui_project_set_target(const gui_target_ref *target, const char *exporter_i
 bool gui_project_set_target_out_path(const gui_target_ref *target,
                                      const char *out_path) {
     if (!target) return false;
-    coalesce_key ck = make_key(CK_TARGET_OUTPATH, -1, "");
+    coalesce_key ck = make_key(CK_TARGET_OUTPATH, -1);
     ck.atlas_id = target->atlas_id;
     ck.source_id = target->target_id;
     const int64_t revision_before_route = tp_session_revision(s_session);
@@ -1565,7 +1597,7 @@ bool gui_project_set_anim_id(const gui_animation_ref *animation, const char *new
 /* Buffers one animation.settings.set under `k` (the caller has run pending_route). */
 static coalesce_key make_animation_key(coalesce_kind kind,
                                        const gui_animation_ref *animation) {
-    coalesce_key key = make_key(kind, -1, "");
+    coalesce_key key = make_key(kind, -1);
     if (animation) {
         key.atlas_id = animation->atlas_id;
         key.source_id = animation->animation_id;
@@ -1877,6 +1909,12 @@ tp_status gui_project_save(char *err_out, size_t err_cap) {
     if (result.recovery_degraded) {
         note_recovery_degraded("recovery checkpoint compaction failed");
     }
+    if (result.file_durability_degraded) {
+        s_save_notice_pending = true;
+        (void)snprintf(
+            s_save_notice, sizeof s_save_notice,
+            "Saved, but storage durability could not be confirmed");
+    }
     return TP_STATUS_OK;
 }
 
@@ -1920,6 +1958,12 @@ tp_status gui_project_save_as(const char *path, char *err_out, size_t err_cap) {
     recompute_name();
     if (result.recovery_degraded) {
         note_recovery_degraded("recovery checkpoint compaction failed");
+    }
+    if (result.file_durability_degraded) {
+        s_save_notice_pending = true;
+        (void)snprintf(
+            s_save_notice, sizeof s_save_notice,
+            "Saved, but storage durability could not be confirmed");
     }
     return TP_STATUS_OK;
 }

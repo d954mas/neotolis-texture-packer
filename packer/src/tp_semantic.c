@@ -20,7 +20,7 @@
  * EXCLUDED runtime state (never dirty): the revision counter, dirty flag, Undo/Redo,
  * the saved baseline, session/authority, pack results/hashes, source watchers/mtime/
  * pixels, thumbnails, GUI view state + s_model_ver, the project file PATH (identity
- * key, not content), and schema_version (serialization envelope).
+ * key, not content).
  *
  * ORDER RULE (decision 0011 §4): ID-keyed collections
  * (atlases/sources/sprites/animations/
@@ -122,7 +122,6 @@ static tp_id128 source_identity(const tp_project *project,
 static tp_id128 sprite_identity(const tp_project_sprite *s) {
     tp_hasher h = tp_hasher_init();
     feed_str(&h, "spr");
-    feed_str(&h, s->name); /* export-key bridge: the stable name-addressed key */
     feed_id(&h, s->source_ref);
     feed_str(&h, s->src_key);
     feed_f(&h, (double)s->origin_x);
@@ -151,7 +150,6 @@ static tp_id128 anim_identity(const tp_project_anim *a) {
     /* frames are ORDER-SEMANTIC: fold in array (playback) order. */
     feed_i64(&h, (int64_t)a->frame_count);
     for (int i = 0; i < a->frame_count; i++) {
-        feed_str(&h, a->frames[i].name);
         feed_id(&h, a->frames[i].source_ref);
         feed_str(&h, a->frames[i].src_key);
     }
@@ -207,7 +205,7 @@ tp_id128 tp_semantic_atlas_identity(const tp_project *project,
 
 tp_id128 tp_semantic_identity(const tp_project *p) {
     tp_hasher h = tp_hasher_init();
-    feed_str(&h, "tp-project-identity/1"); /* algorithm version tag */
+    feed_str(&h, "tp-project-identity/2"); /* canonical-ref algorithm tag */
     if (p) {
         FOLD_UNORDERED(&h, "atlases", p->atlas_count,
                        tp_semantic_atlas_identity(p, &p->atlases[_i]));
@@ -216,7 +214,6 @@ tp_id128 tp_semantic_identity(const tp_project *p) {
         feed_i64(&h, 0);
         feed_id(&h, tp_id128_nil());
     }
-    /* schema_version and project_dir are DELIBERATELY excluded (serialization
-     * envelope + identity key, not semantic content). */
+    /* project_dir is identity metadata, not semantic content. */
     return tp_hasher_final(h);
 }

@@ -28,8 +28,8 @@
 #include <string.h>
 
 #ifdef _WIN32
-#include <direct.h>
 #include <windows.h>
+#include "nt_utf8_argv.h"
 #else
 #include <time.h>
 #include <unistd.h>
@@ -79,45 +79,84 @@ static bool path_is_abs(const char *p) {
     return false;
 }
 
-/* Makes `p` absolute against the current working directory (path need not exist). */
-static void abspath_cwd(const char *p, char *out, size_t cap) {
-    if (path_is_abs(p)) {
-        (void)snprintf(out, cap, "%s", p);
-        return;
+/* Makes `p` absolute against the current working directory (path need not
+ * exist). Windows retrieves the directory through the UTF-16 OS boundary. */
+static tp_status abspath_cwd(const char *p, char *out, size_t cap,
+                             tp_error *err) {
+    if (!p || !out || cap == 0U) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "invalid output-directory path");
     }
-    char cwd[512];
+    if (path_is_abs(p)) {
+        const int copied = snprintf(out, cap, "%s", p);
+        return copied >= 0 && (size_t)copied < cap
+                   ? TP_STATUS_OK
+                   : tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                                  "output-directory path is too long");
+    }
+    char cwd[TP_IDENTITY_PATH_MAX];
 #ifdef _WIN32
-    if (!_getcwd(cwd, (int)sizeof cwd)) {
-        (void)snprintf(out, cap, "%s", p);
-        return;
+    char platform_error[160] = {0};
+    if (!nt_win_current_directory_utf8(cwd, sizeof cwd, platform_error,
+                                       sizeof platform_error)) {
+        return tp_error_set(err, TP_STATUS_PATH_RESOLVE_FAILED, "%s",
+                            platform_error);
     }
 #else
     if (!getcwd(cwd, sizeof cwd)) {
-        (void)snprintf(out, cap, "%s", p);
-        return;
+        return tp_error_set(err, TP_STATUS_PATH_RESOLVE_FAILED,
+                            "could not read the current directory");
     }
 #endif
-    (void)snprintf(out, cap, "%s/%s", cwd, p);
+    const int joined = snprintf(out, cap, "%s/%s", cwd, p);
+    return joined >= 0 && (size_t)joined < cap
+               ? TP_STATUS_OK
+               : tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                              "absolute output-directory path is too long");
 }
 
 /* A transient work dir for the session .ntpack files (system temp; gitignored). */
-static void cli_work_dir(char *out, size_t cap) {
+static tp_status cli_work_dir(char *out, size_t cap, tp_error *err) {
+    if (!out || cap == 0U) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "invalid pack work-directory output");
+    }
+    char tmp[TP_IDENTITY_PATH_MAX];
 #ifdef _WIN32
-    char tmp[512];
-    DWORD n = GetTempPathA((DWORD)sizeof tmp, tmp); /* ends with a backslash */
-    if (n == 0 || n >= sizeof tmp) {
-        (void)snprintf(out, cap, ".");
-    } else {
-        (void)snprintf(out, cap, "%sntpacker_work", tmp);
+    char platform_error[160] = {0};
+    if (!nt_win_temp_path_utf8(tmp, sizeof tmp, platform_error,
+                               sizeof platform_error)) {
+        return tp_error_set(err, TP_STATUS_PATH_RESOLVE_FAILED, "%s",
+                            platform_error);
     }
 #else
     const char *t = getenv("TMPDIR");
     if (!t || !t[0]) {
         t = "/tmp";
     }
-    (void)snprintf(out, cap, "%s/ntpacker_work", t);
+    const int temp_copied = snprintf(tmp, sizeof tmp, "%s", t);
+    if (temp_copied < 0 || (size_t)temp_copied >= sizeof tmp) {
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                            "temporary-directory path is too long");
+    }
 #endif
+    const size_t temp_length = strlen(tmp);
+    const bool has_separator = temp_length > 0U &&
+                               (tmp[temp_length - 1U] == '/' ||
+                                tmp[temp_length - 1U] == '\\');
+    const int joined = snprintf(out, cap, has_separator ? "%sntpacker_work"
+                                                       : "%s/ntpacker_work",
+                                tmp);
+    if (joined < 0 || (size_t)joined >= cap) {
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                            "pack work-directory path is too long");
+    }
     tp_mkdirs(out);
+    if (!tp_scan_is_dir(out)) {
+        return tp_error_set(err, TP_STATUS_PATH_RESOLVE_FAILED,
+                            "could not create pack work directory '%s'", out);
+    }
+    return TP_STATUS_OK;
 }
 
 /* Stable string names for the structured notice enums (JSON is machine-readable:
@@ -417,10 +456,31 @@ int cmd_pack(const char *project_path, const char *opt_atlas, const char *opt_ta
 
     char out_dir_abs[TP_IDENTITY_PATH_MAX] = {0};
     if (opt_out_dir) {
-        abspath_cwd(opt_out_dir, out_dir_abs, sizeof out_dir_abs);
+        tp_error path_error = {0};
+        const tp_status path_status = abspath_cwd(
+            opt_out_dir, out_dir_abs, sizeof out_dir_abs, &path_error);
+        if (path_status != TP_STATUS_OK) {
+            cli_emit_error(json, quiet, tp_status_id(path_status), "%s",
+                           path_error.msg[0] ? path_error.msg
+                                             : tp_status_str(path_status));
+            tp_session_snapshot_destroy(snapshot);
+            return path_status == TP_STATUS_OUT_OF_BOUNDS ||
+                           path_status == TP_STATUS_INVALID_ARGUMENT
+                       ? CLI_EXIT_USAGE
+                       : CLI_EXIT_INTERNAL;
+        }
     }
-    char work_dir[512];
-    cli_work_dir(work_dir, sizeof work_dir);
+    char work_dir[TP_IDENTITY_PATH_MAX];
+    tp_error work_error = {0};
+    const tp_status work_status =
+        cli_work_dir(work_dir, sizeof work_dir, &work_error);
+    if (work_status != TP_STATUS_OK) {
+        cli_emit_error(json, quiet, tp_status_id(work_status), "%s",
+                       work_error.msg[0] ? work_error.msg
+                                         : tp_status_str(work_status));
+        tp_session_snapshot_destroy(snapshot);
+        return CLI_EXIT_PACK;
+    }
 
     tp_export_snapshot_job_opts job_opts = {
         .target_exporter_id = opt_target,

@@ -12,8 +12,6 @@
 #include "tp_core/tp_session.h"
 #include "tp_core/tp_validate.h"
 
-#define CLI_VALIDATE_SCHEMA 1
-
 static void key(cli_sb *sb, int depth, bool *first, const char *name) {
     cli_sb_str(sb, *first ? "\n" : ",\n");
     *first = false;
@@ -30,8 +28,24 @@ static void emit_context(cli_sb *sb, int depth, bool *first, const char *name, c
     cli_sb_json_str(sb, value);
 }
 
-static void build_validate_json(cli_sb *sb, const tp_validation_report *report) {
+static bool emit_id_context(cli_sb *sb, int depth, bool *first,
+                            const char *name, tp_id_kind kind, tp_id128 id) {
+    if (tp_id128_is_nil(id)) {
+        return true;
+    }
+    char text[TP_ID_TEXT_CAP];
+    if (tp_id_format(kind, id, text, sizeof text, NULL) != TP_STATUS_OK) {
+        return false;
+    }
+    key(sb, depth, first, name);
+    cli_sb_json_str(sb, text);
+    return true;
+}
+
+static bool build_validate_json(cli_sb *sb,
+                                const tp_validation_report *report) {
     bool first = true;
+    bool ids_ok = true;
     cli_sb_putc(sb, '{');
     key(sb, 1, &first, "schema");
     cli_sb_int(sb, CLI_VALIDATE_SCHEMA);
@@ -54,10 +68,28 @@ static void build_validate_json(cli_sb *sb, const tp_validation_report *report) 
             key(sb, 3, &finding_first, "message");
             cli_sb_json_str(sb, finding->message);
             emit_context(sb, 3, &finding_first, "atlas", finding->atlas);
+            if (!emit_id_context(sb, 3, &finding_first, "atlas_id",
+                                 TP_ID_KIND_ATLAS, finding->atlas_id)) {
+                ids_ok = false;
+            }
+            emit_context(sb, 3, &finding_first, "source", finding->source);
+            if (!emit_id_context(sb, 3, &finding_first, "source_id",
+                                 TP_ID_KIND_SOURCE, finding->source_id)) {
+                ids_ok = false;
+            }
             emit_context(sb, 3, &finding_first, "sprite", finding->sprite);
             emit_context(sb, 3, &finding_first, "anim", finding->anim);
+            if (!emit_id_context(sb, 3, &finding_first, "animation_id",
+                                 TP_ID_KIND_ANIM,
+                                 finding->animation_id)) {
+                ids_ok = false;
+            }
             emit_context(sb, 3, &finding_first, "frame", finding->frame);
             emit_context(sb, 3, &finding_first, "target", finding->target);
+            if (!emit_id_context(sb, 3, &finding_first, "target_id",
+                                 TP_ID_KIND_TARGET, finding->target_id)) {
+                ids_ok = false;
+            }
             cli_sb_str(sb, "\n");
             cli_sb_indent(sb, 2);
             cli_sb_putc(sb, '}');
@@ -80,6 +112,7 @@ static void build_validate_json(cli_sb *sb, const tp_validation_report *report) 
         cli_sb_putc(sb, '}');
     }
     cli_sb_str(sb, "\n}");
+    return ids_ok;
 }
 
 static void print_validate_human(const tp_validation_report *report, const char *path) {
@@ -110,7 +143,15 @@ int cmd_validate(const char *path, bool json, bool quiet, bool strict) {
 
     if (json) {
         cli_sb sb = {0};
-        build_validate_json(&sb, &report);
+        const bool ids_ok = build_validate_json(&sb, &report);
+        if (!ids_ok) {
+            cli_sb_free(&sb);
+            tp_validation_report_free(&report);
+            cli_emit_error(true, false,
+                           tp_status_id(TP_STATUS_ID_MALFORMED),
+                           "validation report contained an unformattable structural id");
+            return CLI_EXIT_INTERNAL;
+        }
         if (sb.oom) {
             cli_sb_free(&sb);
             tp_validation_report_free(&report);

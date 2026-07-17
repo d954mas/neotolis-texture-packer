@@ -128,7 +128,7 @@ static bool clone_frames(clone_ctx *ctx, const tp_project_anim *src,
 
 static bool clone_atlas(clone_ctx *ctx, const tp_project_atlas *src,
                         tp_project_atlas *dst) {
-    *dst = *src;                    /* copy every scalar (knobs, id, id_synthetic) */
+    *dst = *src;                    /* copy every scalar knob and id */
     dst->name = NULL;               /* re-own the pointer fields; drop aliases */
     dst->sources = NULL;
     dst->source_count = dst->source_cap = 0;
@@ -150,7 +150,6 @@ static bool clone_atlas(clone_ctx *ctx, const tp_project_atlas *src,
     dst->source_cap = src->source_count;
     for (int i = 0; i < src->source_count; i++) {
         dst->sources[i].id = src->sources[i].id;
-        dst->sources[i].id_synthetic = src->sources[i].id_synthetic;
         dst->sources[i].kind = src->sources[i].kind;
         if (!cl_dup(ctx, src->sources[i].path, &dst->sources[i].path)) {
             return false;
@@ -186,7 +185,7 @@ static bool clone_atlas(clone_ctx *ctx, const tp_project_atlas *src,
     dst->animation_cap = src->animation_count;
     for (int i = 0; i < src->animation_count; i++) {
         tp_project_anim *da = &dst->animations[i];
-        *da = src->animations[i]; /* scalars: id, id_synthetic, fps, playback, flips */
+        *da = src->animations[i]; /* scalars: id, fps, playback, flips */
         da->name = NULL;
         da->frames = NULL;
         da->frame_count = da->frame_cap = 0;
@@ -208,7 +207,6 @@ static bool clone_atlas(clone_ctx *ctx, const tp_project_atlas *src,
     for (int i = 0; i < src->target_count; i++) {
         tp_project_target *dt = &dst->targets[i];
         dt->id = src->targets[i].id;
-        dt->id_synthetic = src->targets[i].id_synthetic;
         dt->enabled = src->targets[i].enabled;
         dt->exporter_id = dt->out_path = NULL;
         if (!cl_dup(ctx, src->targets[i].exporter_id, &dt->exporter_id)) {
@@ -234,7 +232,6 @@ tp_project *tp_project_clone(const tp_project *src) {
         s_clone_allocation_bytes = ctx.allocation_bytes;
         return NULL;
     }
-    dst->schema_version = src->schema_version;
     dst->project_dir = NULL;
     dst->source_base_dir = NULL;
     dst->atlases = NULL;

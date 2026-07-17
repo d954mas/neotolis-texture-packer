@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+struct tp_session_save_result;
+
 /* Minimal local JSON/text string builder for the CLI. Deliberately NOT
  * packer/src/tp_sb.h -- that is a tp_core-PRIVATE header and apps/ must not
  * reach into src/. Same output conventions (LF, %.9g floats, escaped strings).
@@ -49,7 +51,10 @@ void cli_emit_reject(bool json, bool quiet, const char *id, const char *field, i
 /* Minimal, shared success payload for the B4 mutation verbs, emitted to STDOUT:
  * {"schema":1,"ok":true,"verb":"<verb>","count":<count>}. Defined once, kept tiny
  * (plan B4 item 8). `count` = the number of primary items affected (sources added,
- * frames added, ...); a scalar edit passes 1. */
-void cli_emit_mutation(const char *verb, int count);
+ * frames added, ...); a scalar edit passes 1. Save degradation is appended as
+ * a structured `notices` array without turning an already-published mutation
+ * into an error. */
+void cli_emit_mutation(const char *verb, int count,
+                       const struct tp_session_save_result *save_result);
 
 #endif /* NTPACKER_CLI_OUT_H */

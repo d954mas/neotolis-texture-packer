@@ -1339,6 +1339,49 @@ void test_demo_atlases(void) {
 
     tp_arena_destroy(ar);
 }
+
+typedef struct output_path_count {
+    int count;
+} output_path_count;
+
+static void count_output_path(void *ud, const char *path) {
+    (void)path;
+    ((output_path_count *)ud)->count++;
+}
+
+void test_defold_output_listing_rejects_suffix_overflow_atomically(void) {
+    tp_result result = {.atlas_name = "long-path", .page_count = 0};
+    tp_export_prepared prep = {.result = &result};
+    char base[TP_IDENTITY_PATH_MAX];
+    const size_t base_len = TP_IDENTITY_PATH_MAX - strlen(".tpatlas");
+    memset(base, 'a', base_len);
+    base[base_len] = '\0';
+    output_path_count count = {0};
+    tp_error err = {{0}};
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_export_defold_list_outputs(&prep, base, count_output_path, &count, &err));
+    TEST_ASSERT_EQUAL_INT(0, count.count);
+    TEST_ASSERT_TRUE(strlen(err.msg) > 0U);
+}
+
+void test_defold_metadata_path_above_legacy_limit_reaches_the_filesystem_boundary(void) {
+    tp_result result = {.atlas_name = "long-path", .page_count = 0};
+    tp_export_prepared prep = {.result = &result};
+    tp_export_caps caps = tp_export_caps_full();
+    char base[1200];
+    const int prefix = snprintf(base, sizeof base, "%s/missing-long-path/", g_dir);
+    TEST_ASSERT_TRUE(prefix > 0 && prefix < 1100);
+    memset(base + prefix, 'a', 1100U - (size_t)prefix);
+    base[1100] = '\0';
+    tp_error err = {{0}};
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_BAD_PROJECT,
+        tp_export_defold_write(&prep, &caps, base, NULL, &err));
+    TEST_ASSERT_TRUE(strlen(err.msg) > 0U);
+}
 // #endregion
 
 int main(int argc, char **argv) {
@@ -1359,5 +1402,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_caps_repack_identity_and_slice9_notice);
     RUN_TEST(test_playback_enum_and_flags);
     RUN_TEST(test_demo_atlases);
+    RUN_TEST(test_defold_output_listing_rejects_suffix_overflow_atomically);
+    RUN_TEST(test_defold_metadata_path_above_legacy_limit_reaches_the_filesystem_boundary);
     return UNITY_END();
 }

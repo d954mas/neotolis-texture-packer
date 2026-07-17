@@ -18,13 +18,15 @@
 #endif
 
 #include "tp_core/tp_journal.h"
+#include "tp_core/tp_identity.h"
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_project_lease.h"
-#include "tp_core/tp_project_migrate.h"
+#include "tp_project_identity_internal.h"
 #include "tp_core/tp_recovery.h"
 #include "tp_core/tp_scan.h"
 #include "tp_core/tp_session.h"
 #include "tp_core/tp_transaction.h"
+#include "tp_fs_internal.h"
 #include "tp_journal_internal.h"
 #include "tp_model_seam.h"
 #include "tp_project_internal.h"
@@ -36,6 +38,16 @@ static const char *g_root;
 
 void setUp(void) {}
 void tearDown(void) {}
+
+static void assert_canonical_path(const char *input, const char *actual) {
+    char expected[TP_IDENTITY_PATH_MAX];
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_identity_path_canonical(input, expected, sizeof expected, &error),
+        error.msg);
+    TEST_ASSERT_EQUAL_STRING(expected, actual);
+}
 
 static tp_id128 recovery_key(void) {
     tp_id128 key;
@@ -91,6 +103,33 @@ static void make_preserved_live_journal(tp_recovery_store *store,
                                         int64_t timestamp);
 static void craft_orphan(const char *path, int64_t timestamp);
 
+static bool name_has_suffix(const char *name, const char *suffix) {
+    const size_t name_length = strlen(name);
+    const size_t suffix_length = strlen(suffix);
+    return name_length >= suffix_length &&
+           memcmp(name + name_length - suffix_length, suffix,
+                  suffix_length) == 0;
+}
+
+static void cleanup_generated_journals(void) {
+    tp_fs_dir *directory = tp_fs_dir_open(g_root);
+    if (!directory) {
+        return;
+    }
+    tp_fs_dir_entry entry;
+    while (tp_fs_dir_next(directory, &entry) == TP_FS_DIR_ENTRY) {
+        if (entry.info.kind != TP_FS_KIND_REGULAR ||
+            (!name_has_suffix(entry.name, ".ntpjournal") &&
+             !name_has_suffix(entry.name, ".ntpjournal.lock"))) {
+            continue;
+        }
+        char path[TP_IDENTITY_PATH_MAX];
+        join_path(path, sizeof path, g_root, entry.name);
+        (void)tp_fs_remove_file(path);
+    }
+    tp_fs_dir_close(directory);
+}
+
 static void cleanup_known_files(void) {
     static const char *names[] = {
         "live.ntpjournal", "live.ntpjournal.lock", "scan.ntpjournal",
@@ -134,6 +173,7 @@ static void cleanup_known_files(void) {
         join_path(path, sizeof path, g_root, name);
         (void)remove(path);
     }
+    cleanup_generated_journals();
 }
 
 #ifdef _WIN32
@@ -235,7 +275,7 @@ void test_frontend_flow_attaches_scans_and_resolves_without_owner_handles(void) 
     TEST_ASSERT_TRUE(result.journal_deleted);
     TEST_ASSERT_TRUE(result.project_saved);
     TEST_ASSERT_TRUE(result.has_file_fingerprint);
-    TEST_ASSERT_EQUAL_STRING(target_path, result.target_path);
+    assert_canonical_path(target_path, result.target_path);
     TEST_ASSERT_FALSE(file_exists(resolve_path));
     TEST_ASSERT_TRUE(file_exists(target_path));
 
@@ -312,7 +352,7 @@ static tp_model *create_model(void) {
     tp_rng rng = {det_fill, &counter};
     tp_error err = {{0}};
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_project_promote_ids(project, &rng, &err));
+                          tp_project_assign_missing_ids(project, &rng, &err));
     tp_model *model = tp_model_wrap(project);
     TEST_ASSERT_NOT_NULL(model);
     return model;
@@ -552,7 +592,7 @@ void test_live_owner_attaches_updates_and_cleanly_closes(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_recovery_store_create_live(store, journal, &live, NULL));
     TEST_ASSERT_NOT_NULL(live);
-    TEST_ASSERT_EQUAL_STRING(journal, tp_recovery_live_journal_path(live));
+    assert_canonical_path(journal, tp_recovery_live_journal_path(live));
 
     tp_recovery_live *competitor = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_RECOVERY_BUSY,
@@ -701,9 +741,14 @@ void test_live_attach_never_replaces_an_existing_orphan(void) {
 #ifdef _WIN32
 void test_unicode_root_and_orphan_scan_resolve_end_to_end(void) {
     char root[TP_IDENTITY_PATH_MAX];
+    char journal[TP_IDENTITY_PATH_MAX];
     char lock[TP_IDENTITY_PATH_MAX];
     (void)snprintf(root, sizeof root, "%s/%s", g_root,
                    "\xD1\x85\xD1\x80\xD0\xB0\xD0\xBD\xD0\xB8\xD0\xBB\xD0\xB8\xD1\x89\xD0\xB5");
+    join_path(journal, sizeof journal, root, "unicode-live.ntpjournal");
+    (void)snprintf(lock, sizeof lock, "%s.lock", journal);
+    win_utf8_delete_file(journal);
+    win_utf8_delete_file(lock);
     win_utf8_remove_dir(root);
     TEST_ASSERT_TRUE(win_utf8_make_dir(root));
 
@@ -714,9 +759,6 @@ void test_unicode_root_and_orphan_scan_resolve_end_to_end(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_session_create_default_project(&rng, &session,
                                                             &err));
-    char journal[TP_IDENTITY_PATH_MAX];
-    join_path(journal, sizeof journal, root, "unicode-live.ntpjournal");
-    (void)snprintf(lock, sizeof lock, "%s.lock", journal);
     const tp_recovery_metadata metadata = {
         .timestamp = 33,
         .project_path = "",
@@ -753,7 +795,7 @@ void test_unicode_root_and_orphan_scan_resolve_end_to_end(void) {
                           tp_recovery_scan_root(root, recovery_key(), NULL,
                                                 &candidates, &err));
     TEST_ASSERT_EQUAL_size_t(1U, candidates.count);
-    TEST_ASSERT_EQUAL_STRING(journal, candidates.items[0].journal_path);
+    assert_canonical_path(journal, candidates.items[0].journal_path);
     TEST_ASSERT_TRUE(candidates.items[0].adoptable);
 
     tp_recovery_resolve_result resolved = {0};

@@ -1,8 +1,8 @@
 {
-    // Owner workflow target: F5 -> ntpacker-gui. Today this launches the GUI
-    // SHELL skeleton (toolbar / sprite panel / preview canvas / status bar); the
-    // arg is shown in the status bar but not loaded yet. Project-file editing,
-    // live atlas preview, and export grow this app in roadmap Phase 6.
+    // Owner workflow target: F5 -> the normal interactive GUI. The pre-launch
+    // task always reconfigures native-debug/native-release, which clears any
+    // sticky GUI self-test flags from a different preset before the executable
+    // is built and launched.
     "version": "0.2.0",
     "configurations": [
         {

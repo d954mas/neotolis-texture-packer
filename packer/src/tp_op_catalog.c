@@ -10,7 +10,7 @@
  * deliberately NO raw field-patch escape hatch (§6.2).
  */
 
-#include "tp_core/tp_operation.h"
+#include "tp_op_internal.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -46,6 +46,41 @@ static const tp_op_info k_ops[TP_OP_KIND_COUNT] = {
     /* Appended (APPEND-ONLY catalog) -- animation rename is a first-class undoable+journaled op. */
     {TP_OP_ANIMATION_RENAME, "animation.rename", TP_OP_CLASS_SET, TP_ID_KIND_ANIM, "anim rename"},
 };
+
+static const tp_sprite_clear_field k_sprite_clear_fields[] = {
+    {"origin", TP_SPF_ORIGIN},
+    {"slice9", TP_SPF_SLICE9},
+    {"shape", TP_SPF_SHAPE},
+    {"allow_rotate", TP_SPF_ALLOW_ROTATE},
+    {"max_vertices", TP_SPF_MAX_VERTICES},
+    {"margin", TP_SPF_MARGIN},
+    {"extrude", TP_SPF_EXTRUDE},
+};
+
+const tp_sprite_clear_field *tp_op__sprite_clear_fields(size_t *count) {
+    if (count) {
+        *count = sizeof k_sprite_clear_fields /
+                 sizeof k_sprite_clear_fields[0];
+    }
+    return k_sprite_clear_fields;
+}
+
+bool tp_op__sprite_clear_bit(const char *token, uint32_t *bit) {
+    if (!token) {
+        return false;
+    }
+    for (size_t i = 0U;
+         i < sizeof k_sprite_clear_fields / sizeof k_sprite_clear_fields[0];
+         i++) {
+        if (strcmp(k_sprite_clear_fields[i].token, token) == 0) {
+            if (bit) {
+                *bit = k_sprite_clear_fields[i].bit;
+            }
+            return true;
+        }
+    }
+    return false;
+}
 
 const tp_op_info *tp_op_info_by_kind(tp_op_kind kind) {
     if (kind <= TP_OP_INVALID || kind >= TP_OP_KIND_COUNT) {

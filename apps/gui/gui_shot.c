@@ -9,6 +9,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "nt_utf8_fs.h"
+
 #include "app/nt_app.h"       /* nt_app_quit */
 #include "fpng/nt_fpng.h"     /* nt_fpng_encode_rgb (PNG capture) */
 #include "graphics/nt_gfx.h"  /* nt_gfx_read_pixels */
@@ -18,6 +20,8 @@
 #include "window/nt_window.h" /* g_nt_window (framebuffer dims) */
 
 #include "tp_core/tp_export.h" /* tp_exporter_count/at -> map --shot-preview id to a selector index */
+#include "tp_core/tp_identity.h"
+#include "tp_core/tp_utf8.h"
 
 #include "gui_actions.h" /* do_pack_blocking */
 #include "gui_canvas.h"  /* s_canvas ops + GUI_CANVAS_ATLAS */
@@ -32,7 +36,7 @@
  * at arbitrary resolutions without a human taking screenshots. Not documented in --help/README on
  * purpose -- it is a dev seam, same spirit as NTPACKER_GUI_SELFTEST but available in every build. */
 static bool s_shot_active;
-static char s_shot_path[1024];
+static char s_shot_path[TP_IDENTITY_PATH_MAX];
 static int s_shot_w = 1280;
 static int s_shot_h = 800;
 static float s_shot_scale;  /* 0 = keep the DPI-detected scale */
@@ -40,14 +44,25 @@ static int s_shot_frame;    /* counts only frames the UI actually rendered (can_
 static bool s_shot_written; /* capture happened; quit on the next frame boundary */
 static bool s_shot_stale;   /* --shot-stale: pack, then re-mark stale so the shot shows the amber Pack + chip */
 static bool s_shot_packing; /* --shot-packing: pack (blocking), then force the busy strip for the shot */
-static char s_shot_preview[64]; /* --shot-preview=<exporter_id>: bind that export-target preview for the shot */
+static char s_shot_preview[TP_EXPORTER_ID_MAX]; /* exact canonical exporter id */
 
 /* main() arg loop: handle one dev screenshot flag; returns true if `arg` was consumed. Mirrors the
  * original inline parsing (order + validation unchanged). */
 bool gui_shot_parse_arg(const char *arg) {
     if (strncmp(arg, "--shot=", 7) == 0) {
-        (void)snprintf(s_shot_path, sizeof s_shot_path, "%s", arg + 7);
-        s_shot_active = s_shot_path[0] != '\0';
+        const char *path = arg + 7;
+        const size_t length = strlen(path);
+        if (path[0] == '\0' || length >= sizeof s_shot_path ||
+            !tp_utf8_is_valid_c_string(path)) {
+            s_shot_path[0] = '\0';
+            s_shot_active = false;
+            s_status_fixed_time = false;
+            (void)fprintf(stderr,
+                          "ntpacker-gui: --shot path is empty, invalid UTF-8, or too long\n");
+            return true;
+        }
+        memcpy(s_shot_path, path, length + 1U);
+        s_shot_active = true;
         s_status_fixed_time = s_shot_active; /* shots must be byte-reproducible (refactor gate) */
         return true;
     }
@@ -76,7 +91,16 @@ bool gui_shot_parse_arg(const char *arg) {
         return true;
     }
     if (strncmp(arg, "--shot-preview=", 15) == 0) {
-        (void)snprintf(s_shot_preview, sizeof s_shot_preview, "%s", arg + 15); /* dev: bind an export-target preview */
+        const char *exporter_id = arg + 15;
+        tp_error error = {0};
+        if (tp_exporter_id_validate(exporter_id, &error) != TP_STATUS_OK) {
+            s_shot_preview[0] = '\0';
+            (void)fprintf(stderr, "ntpacker-gui: --shot-preview: %s\n",
+                          error.msg);
+            return true;
+        }
+        const size_t length = strlen(exporter_id);
+        memcpy(s_shot_preview, exporter_id, length + 1U); /* dev: bind an export-target preview */
         return true;
     }
     return false;
@@ -202,7 +226,7 @@ void gui_shot_post_draw(void) {
         }
         nt_fpng_init();
         const uint32_t n = nt_fpng_encode_rgb(rgb, w, h, png, rgba_n + 65536u);
-        FILE *f = (n > 0) ? fopen(s_shot_path, "wb") : NULL;
+        FILE *f = (n > 0) ? nt_utf8_fopen(s_shot_path, "wb") : NULL;
         ok = f && fwrite(png, 1, n, f) == n;
         if (f) {
             (void)fclose(f);

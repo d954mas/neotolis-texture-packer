@@ -13,8 +13,9 @@
 #endif
 
 #include "tp_core/tp_operation.h"
+#include "tp_core/tp_identity.h"
 #include "tp_core/tp_project_lease.h"
-#include "tp_core/tp_project_migrate.h"
+#include "tp_project_identity_internal.h"
 #include "tp_core/tp_recovery.h"
 #include "tp_core/tp_scan.h"
 #include "tp_core/tp_session.h"
@@ -36,6 +37,16 @@ void setUp(void) {
 }
 void tearDown(void) {
     tp_journal__test_set_record_limit(0U);
+}
+
+static void assert_canonical_path(const char *input, const char *actual) {
+    char expected[TP_IDENTITY_PATH_MAX];
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_identity_path_canonical(input, expected, sizeof expected, &error),
+        error.msg);
+    TEST_ASSERT_EQUAL_STRING(expected, actual);
 }
 
 static int deterministic_fill(void *ctx, uint8_t *out, size_t len) {
@@ -65,24 +76,29 @@ void test_snapshot_allocation_failures_return_structured_oom(void) {
         TP_STATUS_OK,
         tp_project_atlas_add_source_kind(atlas, "sprites",
                                          TP_SOURCE_KIND_FOLDER));
+    uint8_t seed = 41U;
+    tp_rng rng = {deterministic_fill, &seed};
+    tp_error err = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_assign_missing_ids(project, &rng, &err));
+    const tp_id128 source_id = atlas->sources[0].id;
     tp_project_sprite *sprite = NULL;
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        tp_project_atlas_add_pending_sprite(atlas, "hero", &sprite));
+        tp_project_atlas_add_sprite_by_source_key(atlas, source_id,
+                                                  "hero.png", &sprite));
     tp_project_anim *animation = NULL;
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         tp_project_atlas_add_animation(atlas, "walk", &animation));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_project_anim_add_frame(animation, "hero"));
+                          tp_project_anim_add_frame(animation, source_id,
+                                                    "hero.png"));
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         tp_project_atlas_add_target(atlas, "json-neotolis", "out", NULL));
-    uint8_t seed = 41U;
-    tp_rng rng = {deterministic_fill, &seed};
-    tp_error err = {{0}};
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_project_promote_ids(project, &rng, &err));
+                          tp_project_assign_missing_ids(project, &rng, &err));
     char path[1024];
     (void)snprintf(path, sizeof path,
                    "%s/tp_session_snapshot_oom.ntpacker_project", g_scratch);
@@ -201,7 +217,7 @@ static void save_project_with_ids(const char *path, uint8_t seed) {
     TEST_ASSERT_NOT_NULL(project);
     tp_rng rng = {deterministic_fill, &seed};
     tp_error err = {{0}};
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_promote_ids(project, &rng, &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_assign_missing_ids(project, &rng, &err));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_save(project, path, &err));
     tp_project_destroy(project);
 }
@@ -222,57 +238,34 @@ static void make_test_dir(const char *path) {
 #endif
 }
 
-void test_read_snapshot_load_keeps_legacy_ids_stable(void) {
+void test_read_snapshot_rejects_unsupported_schema(void) {
     char path[1024];
     (void)snprintf(path, sizeof path,
-                   "%s/tp_session_legacy_read.ntpacker_project", g_scratch);
+                   "%s/tp_session_old_schema.ntpacker_project", g_scratch);
     (void)remove(path);
     write_text_file(path,
                     "{\n"
                     "  \"version\": 1,\n"
-                    "  \"atlases\": [{\"name\": \"legacy\", \"sources\": [\"sprites\"]}]\n"
+                    "  \"atlases\": []\n"
                     "}\n");
 
     tp_error err = {{0}};
-    tp_session_snapshot *first = NULL;
-    tp_session_snapshot *second = NULL;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_session_snapshot_load(path, &first, &err));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_session_snapshot_load(path, &second, &err));
-    const tp_snapshot_atlas *first_atlas =
-        tp_session_snapshot_atlas_at(first, 0);
-    const tp_snapshot_atlas *second_atlas =
-        tp_session_snapshot_atlas_at(second, 0);
-    TEST_ASSERT_NOT_NULL(first_atlas);
-    TEST_ASSERT_NOT_NULL(second_atlas);
-    TEST_ASSERT_TRUE(tp_id128_eq(first_atlas->id, second_atlas->id));
-    const tp_snapshot_source *first_source =
-        tp_session_snapshot_source_at(first, first_atlas->id, 0);
-    const tp_snapshot_source *second_source =
-        tp_session_snapshot_source_at(second, second_atlas->id, 0);
-    TEST_ASSERT_NOT_NULL(first_source);
-    TEST_ASSERT_NOT_NULL(second_source);
-    TEST_ASSERT_TRUE(tp_id128_eq(first_source->id, second_source->id));
-    TEST_ASSERT_EQUAL_INT(TP_IDENTITY_SAVED,
-                          tp_session_snapshot_identity(first).kind);
-    TEST_ASSERT_FALSE(tp_session_snapshot_dirty(first));
-    TEST_ASSERT_EQUAL_INT64(0, tp_session_snapshot_revision(first));
-
-    tp_session_snapshot_destroy(second);
-    tp_session_snapshot_destroy(first);
+    tp_session_snapshot *snapshot = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_BAD_VERSION,
+                          tp_session_snapshot_load(path, &snapshot, &err));
+    TEST_ASSERT_NULL(snapshot);
     (void)remove(path);
 }
 
-void test_writable_open_save_preserves_missing_legacy_orphan_until_unique_return(void) {
+void test_writable_open_save_preserves_canonical_orphan(void) {
     char source_dir[1024];
     char sprite_path[1024];
     char project_path[1024];
-    (void)snprintf(source_dir, sizeof source_dir, "%s/session_legacy_orphan",
+    (void)snprintf(source_dir, sizeof source_dir, "%s/session_canonical_orphan",
                    g_scratch);
     (void)snprintf(sprite_path, sizeof sprite_path, "%s/ghost.png", source_dir);
     (void)snprintf(project_path, sizeof project_path,
-                   "%s/session_legacy_orphan.ntpacker_project", g_scratch);
+                   "%s/session_canonical_orphan.ntpacker_project", g_scratch);
     make_test_dir(source_dir);
     (void)remove(sprite_path);
     (void)remove(project_path);
@@ -282,16 +275,19 @@ void test_writable_open_save_preserves_missing_legacy_orphan_until_unique_return
     tp_project_atlas *atlas = &project->atlases[0];
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_project_atlas_add_source(atlas, source_dir));
-    tp_project_sprite *pending = NULL;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_project_atlas_add_pending_sprite(atlas, "ghost",
-                                                              &pending));
-    pending->origin_x = 0.25F;
-    uint8_t promote_seed = 37U;
-    tp_rng promote_rng = {deterministic_fill, &promote_seed};
+    uint8_t assign_seed = 37U;
+    tp_rng assign_rng = {deterministic_fill, &assign_seed};
     tp_error err = {{0}};
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_project_promote_ids(project, &promote_rng, &err));
+                          tp_project_assign_missing_ids(project, &assign_rng,
+                                                        &err));
+    const tp_id128 source_id = atlas->sources[0].id;
+    tp_project_sprite *orphan_record = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_sprite_by_source_key(
+            atlas, source_id, "ghost.png", &orphan_record));
+    orphan_record->origin_x = 0.25F;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_project_save(project, project_path, &err));
     tp_project_destroy(project);
@@ -310,8 +306,8 @@ void test_writable_open_save_preserves_missing_legacy_orphan_until_unique_return
     const tp_snapshot_sprite *orphan =
         tp_session_snapshot_sprite_at(snapshot, opened_atlas->id, 0);
     TEST_ASSERT_NOT_NULL(orphan);
-    TEST_ASSERT_TRUE(tp_id128_is_nil(orphan->source_id));
-    TEST_ASSERT_NULL(orphan->source_key);
+    TEST_ASSERT_TRUE(tp_id128_eq(source_id, orphan->source_id));
+    TEST_ASSERT_EQUAL_STRING("ghost.png", orphan->source_key);
     TEST_ASSERT_FALSE(tp_session_snapshot_dirty(snapshot));
     tp_session_snapshot_destroy(snapshot);
 
@@ -321,7 +317,8 @@ void test_writable_open_save_preserves_missing_legacy_orphan_until_unique_return
     TEST_ASSERT_TRUE(save_result.saved);
     tp_session_destroy(session);
 
-    /* A later unique match reactivates only through writable-open migration. */
+    /* Physical return reactivates the same canonical identity without rewriting
+     * the project graph. */
     write_text_file(sprite_path, "sprite");
     open_seed = 91U;
     session = NULL;
@@ -333,10 +330,9 @@ void test_writable_open_save_preserves_missing_legacy_orphan_until_unique_return
     opened_atlas = tp_session_snapshot_atlas_at(snapshot, 0);
     orphan = tp_session_snapshot_sprite_at(snapshot, opened_atlas->id, 0);
     TEST_ASSERT_NOT_NULL(orphan);
-    TEST_ASSERT_FALSE(tp_id128_is_nil(orphan->source_id));
+    TEST_ASSERT_TRUE(tp_id128_eq(source_id, orphan->source_id));
     TEST_ASSERT_EQUAL_STRING("ghost.png", orphan->source_key);
     TEST_ASSERT_FALSE(tp_session_snapshot_dirty(snapshot));
-    const tp_id128 canonical_source = orphan->source_id;
     tp_session_snapshot_destroy(snapshot);
     memset(&save_result, 0, sizeof save_result);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
@@ -347,7 +343,7 @@ void test_writable_open_save_preserves_missing_legacy_orphan_until_unique_return
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_project_load(project_path, &project, &err));
     TEST_ASSERT_NOT_NULL(tp_project_atlas_find_sprite_by_source_key(
-        &project->atlases[0], canonical_source, "ghost.png"));
+        &project->atlases[0], source_id, "ghost.png"));
     tp_project_destroy(project);
     (void)remove(sprite_path);
     (void)remove(project_path);
@@ -400,7 +396,7 @@ void test_source_batch_plan_collapses_lexical_and_symlink_aliases(void) {
     tp_rng rng = {deterministic_fill, &seed};
     tp_error err = {{0}};
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_project_promote_ids(project, &rng, &err));
+                          tp_project_assign_missing_ids(project, &rng, &err));
     const char *operation_alias = has_symlink ? alias_path :
 #ifdef _WIN32
                                                     case_alias;
@@ -925,8 +921,17 @@ void test_snapshot_has_id_addressed_nested_dtos(void) {
     tp_project_atlas *atlas = &project->atlases[0];
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_project_atlas_add_source_kind(atlas, "sprites", TP_SOURCE_KIND_FOLDER));
+    uint8_t seed = 33U;
+    tp_rng rng = {deterministic_fill, &seed};
+    tp_error err;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_assign_missing_ids(project, &rng, &err));
+    const tp_id128 source_id = atlas->sources[0].id;
     tp_project_sprite *sprite = NULL;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_pending_sprite(atlas, "hero", &sprite));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_sprite_by_source_key(atlas, source_id,
+                                                  "hero.png", &sprite));
     sprite->rename = test_dup("hero-final");
     tp_project_anim *animation = NULL;
     for (int i = 0; i < 32; ++i) {
@@ -937,22 +942,16 @@ void test_snapshot_has_id_addressed_nested_dtos(void) {
             tp_project_atlas_add_animation(atlas, name, &animation));
     }
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_animation(atlas, "walk", &animation));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(animation, "hero"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_anim_add_frame(animation, source_id,
+                                                    "hero.png"));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_project_atlas_add_target(atlas, "json-neotolis", "out/hero", NULL));
 
-    uint8_t seed = 33U;
-    tp_rng rng = {deterministic_fill, &seed};
-    tp_error err;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_promote_ids(project, &rng, &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_assign_missing_ids(project, &rng, &err));
     atlas = &project->atlases[0];
     sprite = &atlas->sprites[0];
-    sprite->source_ref = atlas->sources[0].id;
-    sprite->src_key = test_dup("hero.png");
     animation = &atlas->animations[atlas->animation_count - 1];
-    animation->frames[0].source_ref = atlas->sources[0].id;
-    animation->frames[0].src_key = test_dup("hero.png");
-    const tp_id128 source_id = atlas->sources[0].id;
     const tp_id128 animation_id = animation->id;
     const tp_id128 target_id = atlas->targets[0].id;
 
@@ -1019,7 +1018,7 @@ void test_snapshot_resolves_source_by_direct_indices(void) {
     tp_rng rng = {deterministic_fill, &seed};
     tp_error err = {{0}};
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_project_promote_ids(project, &rng, &err));
+                          tp_project_assign_missing_ids(project, &rng, &err));
     tp_session *session = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_session_adopt_owned(project, &rng, &session, &err));
@@ -1138,7 +1137,7 @@ void test_snapshot_sprite_selector_matches_headless_canonical_operation(void) {
     tp_selector_result resolved;
     tp_selector_candidates candidates = {0};
     tp_id128 resolved_source = tp_id128_nil();
-    char resolved_key[TP_SCAN_REL_CAP];
+    char resolved_key[TP_SRCKEY_MAX];
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_AMBIGUOUS_SELECTOR,
         tp_session_snapshot_resolve_sprite_selector(
@@ -1462,7 +1461,8 @@ void test_save_as_lease_conflict_preserves_old_identity_lease(void) {
     TEST_ASSERT_NULL(old_probe);
     tp_session_snapshot *snapshot = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_snapshot_create(session, &snapshot, &err));
-    TEST_ASSERT_EQUAL_STRING(original, tp_session_snapshot_identity(snapshot).canonical_path);
+    assert_canonical_path(
+        original, tp_session_snapshot_identity(snapshot).canonical_path);
     tp_session_snapshot_destroy(snapshot);
     tp_project_lease_release(busy);
     tp_session_destroy(session);
@@ -1499,11 +1499,85 @@ void test_save_as_publish_failure_releases_destination_and_keeps_old_lease(void)
     TEST_ASSERT_NULL(probe);
     tp_session_snapshot *snapshot = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_snapshot_create(session, &snapshot, &err));
-    TEST_ASSERT_EQUAL_STRING(original, tp_session_snapshot_identity(snapshot).canonical_path);
+    assert_canonical_path(
+        original, tp_session_snapshot_identity(snapshot).canonical_path);
     tp_session_snapshot_destroy(snapshot);
     tp_session_destroy(session);
     (void)remove(original);
     (void)remove(destination);
+}
+
+void test_save_parent_sync_warning_advances_authoritative_session_state(void) {
+    char path[1024];
+    (void)snprintf(path, sizeof path,
+                   "%s/tp_session_parent_sync_warning.ntpacker_project",
+                   g_scratch);
+    (void)remove(path);
+    save_project_with_ids(path, 36U);
+
+    tp_error error = {{0}};
+    uint8_t seed = 75U;
+    tp_rng rng = {deterministic_fill, &seed};
+    tp_session *session = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK, tp_session_open(path, &rng, &session, &error));
+    tp_session_snapshot *before = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_snapshot_create(session, &before, &error));
+    const tp_id128 atlas_id = tp_session_snapshot_atlas_at(before, 0)->id;
+    const int64_t revision = tp_session_snapshot_revision(before);
+    tp_session_snapshot_destroy(before);
+
+    tp_txn_result transaction;
+    session_apply_rename(session, "82828282828282828282828282828282",
+                         revision, atlas_id, "published-with-warning",
+                         TP_STATUS_OK, &transaction, &error);
+    tp_txn_result_free(&transaction);
+
+    tp_project__test_fail_next_parent_sync();
+    tp_session_save_result save_result;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK, tp_session_save(session, &save_result, &error));
+    TEST_ASSERT_TRUE(save_result.saved);
+    TEST_ASSERT_TRUE(save_result.file_durability_degraded);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_FILE_DURABILITY_UNCERTAIN,
+                          save_result.file_durability_status);
+    TEST_ASSERT_EQUAL_CHAR('\0', error.msg[0]);
+
+    tp_session_snapshot *saved = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_snapshot_create(session, &saved, &error));
+    TEST_ASSERT_FALSE(tp_session_snapshot_dirty(saved));
+    tp_id128 saved_fingerprint = tp_id128_nil();
+    TEST_ASSERT_TRUE(tp_session_snapshot_saved_file_fingerprint(
+        saved, &saved_fingerprint));
+    TEST_ASSERT_TRUE(tp_id128_eq(saved_fingerprint,
+                                 save_result.file_fingerprint));
+    tp_session_snapshot_destroy(saved);
+
+    tp_project *published = NULL;
+    tp_id128 disk_fingerprint = tp_id128_nil();
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_load_with_fingerprint(path, &published, &disk_fingerprint,
+                                         &error));
+    TEST_ASSERT_EQUAL_STRING("published-with-warning",
+                             tp_project_get_atlas(published, 0)->name);
+    TEST_ASSERT_TRUE(tp_id128_eq(saved_fingerprint, disk_fingerprint));
+    tp_project_destroy(published);
+
+    /* A retry is safe because the session advanced its optimistic-concurrency
+     * baseline to the bytes that were actually published. */
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK, tp_session_save(session, &save_result, &error));
+    TEST_ASSERT_FALSE(save_result.file_durability_degraded);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          save_result.file_durability_status);
+
+    tp_session_destroy(session);
+    (void)remove(path);
 }
 
 void test_save_rejects_external_change_without_overwriting_it(void) {
@@ -1955,8 +2029,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_snapshot_survives_session_destroy);
     RUN_TEST(test_generation_owner_oom_is_structured_and_retryable);
     RUN_TEST(test_owned_snapshot_survives_later_commit);
-    RUN_TEST(test_read_snapshot_load_keeps_legacy_ids_stable);
-    RUN_TEST(test_writable_open_save_preserves_missing_legacy_orphan_until_unique_return);
+    RUN_TEST(test_read_snapshot_rejects_unsupported_schema);
+    RUN_TEST(test_writable_open_save_preserves_canonical_orphan);
     RUN_TEST(test_source_batch_plan_collapses_lexical_and_symlink_aliases);
     RUN_TEST(test_source_batch_plan_rejects_empty_inputs_atomically);
     RUN_TEST(test_rejected_commit_does_not_publish_event_or_generation);
@@ -1979,6 +2053,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_save_as_acquires_destination_before_releasing_old_lease);
     RUN_TEST(test_save_as_lease_conflict_preserves_old_identity_lease);
     RUN_TEST(test_save_as_publish_failure_releases_destination_and_keeps_old_lease);
+    RUN_TEST(test_save_parent_sync_warning_advances_authoritative_session_state);
     RUN_TEST(test_save_rejects_external_change_without_overwriting_it);
     RUN_TEST(test_session_owns_live_recovery_clean_close_order);
     RUN_TEST(test_session_preserves_dirty_live_recovery_on_destroy);

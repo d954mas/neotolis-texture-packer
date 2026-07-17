@@ -159,30 +159,49 @@ static void file_fill_sink(void *ud, const char *path) {
     fc->files[fc->count++] = dup;
 }
 
+static void ignore_output_path(void *ud, const char *path) {
+    (void)ud;
+    (void)path;
+}
+
 /* Enumerates a target's produced files (exporter list_outputs, or the common
  * "<base>.<ext>" + page PNGs default) into `sink`. */
-static void list_target_outputs(const tp_exporter *exp, const tp_export_prepared *prep, const char *out_base,
-                                tp_export_path_sink sink, void *ud) {
+static tp_status list_target_outputs(const tp_exporter *exp, const tp_export_prepared *prep, const char *out_base,
+                                     tp_export_path_sink sink, void *ud, tp_error *err) {
     if (exp->list_outputs) {
-        exp->list_outputs(prep, out_base, sink, ud);
-        return;
+        return exp->list_outputs(prep, out_base, sink, ud, err);
+    }
+    char suffix[TP_IDENTITY_PATH_MAX];
+    int sn = snprintf(suffix, sizeof suffix, ".%s", exp->extension ? exp->extension : "");
+    if (sn < 0 || (size_t)sn >= sizeof suffix) {
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                            "export extension exceeds the canonical path limit");
     }
     char path[TP_RUN_PATH_MAX];
-    int n = snprintf(path, sizeof path, "%s.%s", out_base, exp->extension ? exp->extension : "");
-    if (n > 0 && (size_t)n < sizeof path) {
-        sink(ud, path);
+    tp_status st = tp_export_output_path(out_base, suffix, path, err);
+    if (st != TP_STATUS_OK) {
+        return st;
     }
-    tp_export_list_page_files(prep->result, out_base, sink, ud);
+    st = tp_export_list_page_files(prep->result, out_base, ignore_output_path, NULL, err);
+    if (st != TP_STATUS_OK) {
+        return st;
+    }
+    sink(ud, path);
+    return tp_export_list_page_files(prep->result, out_base, sink, ud, err);
 }
 
 /* Enumerates the target's output paths (two passes: count then fill) into an
  * arena-owned array, writing out_files + out_count. Used for both the wet-path
  * written_files and the dry-path would_write (identical list; dry just never
- * writes). Returns TP_STATUS_OOM on allocation failure. */
+ * writes). Returns a typed listing error or TP_STATUS_OOM on allocation failure. */
 static tp_status collect_output_files(const tp_exporter *exp, const tp_export_prepared *prep, const char *out_base,
-                                      tp_arena *arena, const char *const **out_files, int *out_count) {
+                                      tp_arena *arena, const char *const **out_files, int *out_count,
+                                      tp_error *err) {
     file_collect c = {.arena = arena};
-    list_target_outputs(exp, prep, out_base, file_count_sink, &c);
+    tp_status st = list_target_outputs(exp, prep, out_base, file_count_sink, &c, err);
+    if (st != TP_STATUS_OK) {
+        return st;
+    }
     int n = c.count;
     if (n <= 0) {
         *out_files = NULL;
@@ -191,15 +210,24 @@ static tp_status collect_output_files(const tp_exporter *exp, const tp_export_pr
     }
     const char **arr = (const char **)tp_arena_alloc(arena, (size_t)n * sizeof(char *));
     if (!arr) {
-        return TP_STATUS_OOM;
+        return tp_error_set(err, TP_STATUS_OOM,
+                            "tp_export_run: OOM collecting output paths");
     }
     file_collect f = {.arena = arena, .files = arr, .cap = n};
-    list_target_outputs(exp, prep, out_base, file_fill_sink, &f);
+    st = list_target_outputs(exp, prep, out_base, file_fill_sink, &f, err);
+    if (st != TP_STATUS_OK) {
+        return st;
+    }
     if (f.oom) {
-        return TP_STATUS_OOM;
+        return tp_error_set(err, TP_STATUS_OOM,
+                            "tp_export_run: OOM copying output paths");
+    }
+    if (f.count != n) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "export output enumeration changed between passes");
     }
     *out_files = arr;
-    *out_count = (f.count < n) ? f.count : n;
+    *out_count = f.count;
     return TP_STATUS_OK;
 }
 
@@ -442,6 +470,31 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
             rt->notice_begin = nbefore;
         }
 
+        /* The typed output set is a precondition for BOTH execution modes. Do
+         * this before write() so a registered exporter cannot publish files and
+         * only then reveal that its report paths are invalid. The same immutable
+         * list becomes would_write (dry) or written_files (wet). */
+        const char *const *output_files = NULL;
+        int output_file_count = 0;
+        tp_status cst = collect_output_files(exp, prep, out_bases[t], arena,
+                                             &output_files, &output_file_count, err);
+        if (cst != TP_STATUS_OK) {
+            if (rt) {
+                rt->notice_end = nbefore;
+            }
+            if (!report) {
+                return cst;
+            }
+            if (rt) {
+                rt->ok = false;
+                rt->error = tp_arena_strdup(arena, err && err->msg[0] ? err->msg : "output listing failed");
+            }
+            if (first_fail == TP_STATUS_OK) {
+                first_fail = cst;
+            }
+            continue;
+        }
+
         if (dry_run) {
             /* No writes. The wet path's notices come from the writers, which do not
              * run here -- so predict every degradation instead (full axes: the packed
@@ -466,11 +519,8 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
             }
             if (rt) {
                 rt->ok = true;
-                tp_status cst = collect_output_files(exp, prep, out_bases[t], arena, &rt->would_write,
-                                                     &rt->would_write_count);
-                if (cst != TP_STATUS_OK) {
-                    return tp_error_set(err, cst, "tp_export_run: OOM (would-write report)");
-                }
+                rt->would_write = output_files;
+                rt->would_write_count = output_file_count;
             }
             continue;
         }
@@ -494,11 +544,8 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
         }
         if (rt) {
             rt->ok = true;
-            tp_status cst =
-                collect_output_files(exp, prep, out_bases[t], arena, &rt->written_files, &rt->written_file_count);
-            if (cst != TP_STATUS_OK) {
-                return tp_error_set(err, cst, "tp_export_run: OOM (written-files report)");
-            }
+            rt->written_files = output_files;
+            rt->written_file_count = output_file_count;
         }
     }
 

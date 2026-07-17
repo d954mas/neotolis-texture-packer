@@ -26,9 +26,7 @@
 #include "tp_core/tp_export_run.h"
 #include "tp_core/tp_input.h"
 #include "tp_core/tp_project.h"
-#include "tp_core/tp_project_migrate.h"
 #include "tp_core/tp_scan.h" /* tp_mkdirs / tp_mkdirs_parent (tp_core owns FS helpers) */
-#include "tp_core/tp_sprite_index.h"
 
 static int run_atlas(tp_project *proj, int idx, const char *work_dir) {
     const tp_project_atlas *a = &proj->atlases[idx];
@@ -85,21 +83,6 @@ int main(int argc, char **argv) {
         (void)fprintf(stderr, "cannot load project '%s': %s\n", proj_path, e.msg);
         return 1;
     }
-    for (int i = 0; i < proj->atlas_count; i++) {
-        tp_sprite_index index;
-        tp_status status = tp_sprite_index_build(proj, i, &index, &e);
-        if (status == TP_STATUS_OK) {
-            status = tp_project_resolve_atlas_sprites(proj, i, &index, &e);
-            tp_sprite_index_free(&index);
-        }
-        if (status != TP_STATUS_OK) {
-            (void)fprintf(stderr, "cannot migrate project '%s': %s\n",
-                          proj_path, e.msg);
-            tp_project_destroy(proj);
-            return 1;
-        }
-    }
-
     /* work_dir holds only transient session .ntpack files (gitignored); default to
      * the current directory so we never resurrect an output tree. */
     const char *work_dir = (argc > 2) ? argv[2] : ".";

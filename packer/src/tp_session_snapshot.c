@@ -10,7 +10,6 @@
 
 #include "tp_core/tp_id.h"
 #include "tp_core/tp_project.h"
-#include "tp_core/tp_project_migrate.h"
 #include "tp_core/tp_sprite_index.h"
 #include "tp_core/tp_srckey.h"
 #include "tp_core/tp_transaction.h"
@@ -228,9 +227,7 @@ static tp_status snapshot_materialize(tp_session_snapshot *snapshot,
         for (int j = 0; j < source->sprite_count; ++j) {
             const tp_project_sprite *input = &source->sprites[j];
             tp_snapshot_sprite *output = &storage->sprites[j];
-            output->id = !tp_id128_is_nil(input->source_ref) && input->src_key
-                             ? tp_sprite_id(input->source_ref, input->src_key)
-                             : tp_id128_nil();
+            output->id = tp_sprite_id(input->source_ref, input->src_key);
             output->source_id = input->source_ref;
             output->source_key = input->src_key;
             output->name = input->name;
@@ -256,10 +253,8 @@ static tp_status snapshot_materialize(tp_session_snapshot *snapshot,
             output->frame_count = input->frame_count;
             const int offset = storage->frame_offsets[j];
             for (int k = 0; k < input->frame_count; ++k) {
-                storage->frames[offset + k].sprite_id =
-                    !tp_id128_is_nil(input->frames[k].source_ref) && input->frames[k].src_key
-                        ? tp_sprite_id(input->frames[k].source_ref, input->frames[k].src_key)
-                        : tp_id128_nil();
+                storage->frames[offset + k].sprite_id = tp_sprite_id(
+                    input->frames[k].source_ref, input->frames[k].src_key);
                 storage->frames[offset + k].source_id = input->frames[k].source_ref;
                 storage->frames[offset + k].source_key = input->frames[k].src_key;
                 storage->frames[offset + k].name = input->frames[k].name;
@@ -305,12 +300,6 @@ tp_status tp_session_snapshot_load(const char *path,
         return tp_error_set(err, TP_STATUS_FILE_CHANGED_EXTERNALLY,
                             "project changed while it was read");
     }
-    status = tp_project_migrate_sprite_refs(project, err);
-    if (status != TP_STATUS_OK) {
-        tp_project_destroy(project);
-        return status;
-    }
-
     tp_session_snapshot *snapshot =
         (tp_session_snapshot *)snapshot_calloc(1U, sizeof *snapshot);
     if (!snapshot) {
@@ -419,7 +408,7 @@ tp_session_identity tp_session_snapshot_identity(const tp_session_snapshot *snap
 }
 
 int tp_session_snapshot_project_schema_version(const tp_session_snapshot *snapshot) {
-    return snapshot && snapshot->project ? snapshot->project->schema_version : 0;
+    return snapshot && snapshot->project ? TP_PROJECT_SCHEMA_VERSION : 0;
 }
 
 const char *tp_session_snapshot_project_dir(const tp_session_snapshot *snapshot) {

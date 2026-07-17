@@ -7,6 +7,8 @@
 #include <string.h>
 #include <time.h>
 
+#include "nt_utf8_fs.h"
+
 #include "gui_paths.h"
 
 #include "log/nt_log.h"
@@ -50,18 +52,18 @@ static void rotate_files(void) {
     char from[GUI_PATHS_MAX];
     char to[GUI_PATHS_MAX];
     build_slot_path(to, sizeof to, GUI_LOG_KEEP);
-    (void)remove(to);
+    (void)nt_utf8_remove(to);
     for (int i = GUI_LOG_KEEP - 1; i >= 0; i--) {
         build_slot_path(from, sizeof from, i);
         build_slot_path(to, sizeof to, i + 1);
-        (void)rename(from, to);
+        (void)nt_utf8_rename(from, to);
     }
 }
 
 /* Open the active log for append (binary: exact byte accounting + no CRLF translation) and seed
  * s_bytes from its current size. Returns false if it can't be opened. */
 static bool open_active(void) {
-    s_file = fopen(s_log_path, "ab");
+    s_file = nt_utf8_fopen(s_log_path, "ab");
     if (s_file == NULL) {
         return false;
     }

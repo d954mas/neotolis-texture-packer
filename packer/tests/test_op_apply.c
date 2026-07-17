@@ -12,7 +12,7 @@
 #include "tp_core/tp_names.h"           /* tp_sprite_export_key (parity bridge) */
 #include "tp_core/tp_project.h"
 #include "tp_project_mutation_internal.h"
-#include "tp_core/tp_project_migrate.h" /* tp_project_promote_ids */
+#include "tp_project_identity_internal.h"
 #include "tp_op_internal.h"             /* tp_op__test_set_alloc_fail */
 #include "tp_test_model.h"
 #include "unity.h"
@@ -227,15 +227,12 @@ void test_apply_sprite_ops(void) {
     tp_project_destroy(p);
 }
 
-/* Canonical typed sprite operations never create legacy pending/name-keyed
- * records. Those records remain a loader/migration concern; every mutation must
- * identify an owning source. */
+/* Canonical typed sprite operations require an owning source. */
 void test_apply_sprite_nil_source_rejected(void) {
     tp_project *p = tp_project_create();
     TEST_ASSERT_NOT_NULL(p);
     tp_id128 aid = tp_test_id_of(0x21);
     p->atlases[0].id = aid; /* address the source-less default atlas by a real id */
-    p->atlases[0].id_synthetic = false;
     TEST_ASSERT_EQUAL_INT(0, p->atlases[0].source_count); /* no sources at all */
     tp_op_reject rej;
     tp_operation op;
@@ -249,7 +246,7 @@ void test_apply_sprite_nil_source_rejected(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_ID_MALFORMED,
                           tp_operation_apply(p, &op, &rej));
     TEST_ASSERT_EQUAL_STRING("source_id", rej.field);
-    TEST_ASSERT_NULL(tp_project_atlas_find_pending_sprite(&p->atlases[0], "hero"));
+    TEST_ASSERT_EQUAL_INT(0, p->atlases[0].sprite_count);
 
     memset(&op, 0, sizeof op);
     op.kind = TP_OP_SPRITE_NAME_SET;
@@ -683,9 +680,9 @@ void test_apply_source_add_dup_rejected(void) {
     tp_project_destroy(p);
 }
 
-/* ---- [7] PARITY: padding=8000 via op == via the mutator (byte-identical) ---------- */
+/* ---- [7] PARITY: padding at page limit via op == mutator (byte-identical) -------- */
 
-void test_parity_padding_large(void) {
+void test_parity_padding_at_page_limit(void) {
     tp_project *seed = tp_test_base_project();
     char *buf = tp_test_serialize_project(seed);
     tp_project_destroy(seed);
@@ -701,11 +698,11 @@ void test_parity_padding_large(void) {
     op.kind = TP_OP_ATLAS_SETTINGS_SET;
     op.atlas_id = a->atlases[0].id;
     op.u.atlas_settings.mask = TP_AF_PADDING;
-    op.u.atlas_settings.padding = 8000; /* above the old artificial 4096 cap */
+    op.u.atlas_settings.padding = a->atlases[0].max_size;
     tp_op_reject rej;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_operation_apply(a, &op, &rej));
 
-    b->atlases[0].padding = 8000; /* existing-mutator path (what the CLI `set` does) */
+    b->atlases[0].padding = b->atlases[0].max_size;
 
     char *sa = tp_test_serialize_project(a);
     char *sb = tp_test_serialize_project(b);
@@ -721,15 +718,22 @@ void test_parity_padding_large(void) {
 
 void test_parity_frame_move_to_end(void) {
     tp_project *seed = tp_project_create();
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_source(&seed->atlases[0], "sprites"));
     tp_project_anim *an = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_animation(&seed->atlases[0], "walk", &an));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "a"));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "b"));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "c"));
     uint8_t ctr = 9;
     tp_rng rng = {tp_test_det_fill, &ctr};
     tp_error err;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_promote_ids(seed, &rng, &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_assign_missing_ids(seed, &rng, &err));
+    const tp_id128 source_id = seed->atlases[0].sources[0].id;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_anim_add_frame(an, source_id, "a"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_anim_add_frame(an, source_id, "b"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_anim_add_frame(an, source_id, "c"));
     char *buf = tp_test_serialize_project(seed);
     tp_project_destroy(seed);
 
@@ -778,7 +782,7 @@ void test_builder_scopes_to_atlas(void) {
     uint8_t ctr = 3;
     tp_rng rng = {tp_test_det_fill, &ctr};
     tp_error err;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_promote_ids(p, &rng, &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_assign_missing_ids(p, &rng, &err));
 
     tp_operation op;
     /* target "out/b" lives in atlas2; pairing it with atlas1 must NOT silently succeed */
@@ -817,7 +821,7 @@ int main(void) {
     RUN_TEST(test_builders);
     RUN_TEST(test_apply_negative_frames_unchanged);
     RUN_TEST(test_apply_source_add_dup_rejected);
-    RUN_TEST(test_parity_padding_large);
+    RUN_TEST(test_parity_padding_at_page_limit);
     RUN_TEST(test_parity_frame_move_to_end);
     RUN_TEST(test_builder_scopes_to_atlas);
     return UNITY_END();

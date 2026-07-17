@@ -48,10 +48,10 @@ typedef struct tp_pack_input {
  * -- packing layout depends on input order (arch review R2). Each sprite's
  * per-sprite overrides are looked up by tp_sprite_export_key and encoded onto the
  * desc. Zero descs is not an error (the caller decides whether "empty" is fatal).
- * An unresolvable source (e.g. a relative path with no project_dir) is skipped and
- * NOT counted as missing. Returns TP_STATUS_OK, TP_STATUS_OUT_OF_BOUNDS (bad
- * atlas_index), TP_STATUS_INVALID_ARGUMENT (NULL project/out), or TP_STATUS_OOM.
- * On any error *out is left empty (except a NULL `out`, which is untouched). */
+ * A source that resolves but is absent is counted as missing and skipped. Source
+ * resolution, directory open/read, UTF-8/key normalization, path-bound, and OOM
+ * failures propagate their precise tp_status/tp_error. On any error *out is left
+ * empty (except a NULL `out`, which is untouched). */
 tp_status tp_pack_input_build(const struct tp_project *p, int atlas_index, tp_pack_input *out, tp_error *err);
 
 /* Frontend-safe pack admission: resolves a stable atlas ID inside an immutable

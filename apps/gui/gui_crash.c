@@ -9,6 +9,8 @@
 #include <string.h>
 #include <time.h>
 
+#include "nt_utf8_fs.h"
+
 #ifdef _WIN32
 #include <windows.h> /* must precede dbghelp.h (it uses Win32 types) */
 #include <dbghelp.h> /* MiniDumpWriteDump, MINIDUMP_* */
@@ -37,6 +39,10 @@ static char s_marker_prefix[128];           /* pre-rendered marker text (session
 static size_t s_marker_prefix_len;
 #ifdef _WIN32
 static char s_dump_path[GUI_PATHS_MAX]; /* <app-data>/crash/crash-<ts>.dmp */
+/* Exception-filter paths are converted before the handler is installed. The
+ * extra cells cover the controlled \\?\ / \\?\UNC\ long-path prefix. */
+static wchar_t s_marker_path_w[GUI_PATHS_MAX + 8];
+static wchar_t s_dump_path_w[GUI_PATHS_MAX + 8];
 #else
 static char s_backtrace_path[GUI_PATHS_MAX]; /* <app-data>/crash/crash-<ts>.txt */
 #endif
@@ -140,8 +146,9 @@ static LONG WINAPI crash_exception_filter(EXCEPTION_POINTERS *info) {
     }
 
     /* Marker FIRST (even a failed dump still tells the next launch we crashed). */
-    if (s_marker_path[0] != '\0') {
-        HANDLE h = CreateFileA(s_marker_path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (s_marker_path_w[0] != L'\0') {
+        HANDLE h = CreateFileW(s_marker_path_w, GENERIC_WRITE, 0, NULL,
+                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         if (h != INVALID_HANDLE_VALUE) {
             DWORD wrote = 0;
             (void)WriteFile(h, s_marker_prefix, (DWORD)s_marker_prefix_len, &wrote, NULL);
@@ -160,8 +167,9 @@ static LONG WINAPI crash_exception_filter(EXCEPTION_POINTERS *info) {
 
     /* MiniDump: MiniDumpNormal|MiniDumpWithDataSegs = small file that still carries the thread stacks
      * + global/static data segments (enough to symbolize a crash without a huge full-memory dump). */
-    if (s_dump_path[0] != '\0') {
-        HANDLE h = CreateFileA(s_dump_path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (s_dump_path_w[0] != L'\0') {
+        HANDLE h = CreateFileW(s_dump_path_w, GENERIC_WRITE, 0, NULL,
+                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         if (h != INVALID_HANDLE_VALUE) {
             MINIDUMP_EXCEPTION_INFORMATION mei;
             mei.ThreadId = GetCurrentThreadId();
@@ -206,6 +214,15 @@ void gui_crash_install(void) {
         if (nm <= 0 || (size_t)nm >= sizeof s_marker_path) {
             s_marker_path[0] = '\0';
         }
+#ifdef _WIN32
+        if (s_marker_path[0] != '\0' &&
+            !nt_utf8_path_to_utf16(
+                s_marker_path, s_marker_path_w,
+                sizeof s_marker_path_w / sizeof s_marker_path_w[0])) {
+            s_marker_path[0] = '\0';
+            s_marker_path_w[0] = L'\0';
+        }
+#endif
         /* Per-run dump/backtrace path: SESSION-START timestamp + PID (both resolved here, never in the
          * handler -- strftime/snprintf/getpid are not needed on the signal path). The PID disambiguates
          * two instances that crash in the SAME second, so a dump never overwrites another run's. */
@@ -223,6 +240,11 @@ void gui_crash_install(void) {
                           (unsigned long)GetCurrentProcessId());
         if (np <= 0 || (size_t)np >= sizeof s_dump_path) {
             s_dump_path[0] = '\0';
+        } else if (!nt_utf8_path_to_utf16(
+                       s_dump_path, s_dump_path_w,
+                       sizeof s_dump_path_w / sizeof s_dump_path_w[0])) {
+            s_dump_path[0] = '\0';
+            s_dump_path_w[0] = L'\0';
         }
 #else
         int np = snprintf(s_backtrace_path, sizeof s_backtrace_path, "%s/crash-%s-%ld.txt", crash_dir, stamp,
@@ -258,13 +280,14 @@ void gui_crash_clear_marker(void) {
     if (s_marker_path[0] == '\0') {
         return; /* never installed / no crash dir -> nothing to clear */
     }
-    (void)remove(s_marker_path); /* clean exit: drop the marker so D3 only fires after a real crash */
+    (void)nt_utf8_remove(
+        s_marker_path); /* clean exit: drop marker so D3 only fires after a real crash */
 }
 
 /* True iff the marker file is present on disk. D3 runs long after any fault (next launch), so plain
  * stdio is fine here -- none of the signal-handler async-safety rules apply on this path. */
 static bool crash_marker_exists(void) {
-    FILE *f = fopen(s_marker_path, "rb");
+    FILE *f = nt_utf8_fopen(s_marker_path, "rb");
     if (f == NULL) {
         return false;
     }
@@ -277,9 +300,9 @@ static bool crash_marker_exists(void) {
  * embedded ' as the '\'' escape. The crash dir is USER-DERIVED (it sits under $HOME), so a home with
  * an apostrophe -- /home/o'brien/... -- would otherwise break the quoting and let path metacharacters
  * inject into the shell command. Writes out[out_size]; returns false (caller then skips the open) if it
- * would not fit. (Windows takes the path as a ShellExecuteA parameter, not a shell string -> no quoting
- * there. A fork+execlp with argv would avoid the shell entirely; escaping is the smaller change and
- * keeps this parallel to gui_view_chrome.c's gui_open_url.) */
+ * would not fit. Windows passes the UTF-16 path directly to ShellExecuteW. A fork+execlp with argv
+ * would avoid the POSIX shell entirely; escaping is the smaller change and keeps this parallel to
+ * gui_view_chrome.c's gui_open_url. */
 static bool crash_shell_squote(const char *in, char *out, size_t out_size) {
     size_t o = 0;
     if (out_size < 3) { /* need at least '' + NUL */
@@ -309,13 +332,18 @@ static bool crash_shell_squote(const char *in, char *out, size_t out_size) {
 #endif
 
 /* Open `dir` in the OS file explorer, best-effort; returns true if the open was dispatched. Mirrors
- * gui_view_chrome.c's gui_open_url: Windows ShellExecuteA (shell32 -- already linked for
+ * gui_view_chrome.c's gui_open_url: Windows ShellExecuteW (shell32 -- already linked for
  * tinyfiledialogs), POSIX open/xdg-open. A failed open is non-fatal (the prompt already showed the
  * path, so the user can still reach the folder by hand) -- the caller logs the miss. */
 static bool crash_open_folder(const char *dir) {
 #ifdef _WIN32
-    HINSTANCE rc = ShellExecuteA(NULL, "open", dir, NULL, NULL, SW_SHOWNORMAL);
-    return (INT_PTR)rc > 32; /* ShellExecuteA returns > 32 on success (path is a parameter, not shell) */
+    wchar_t wide[GUI_PATHS_MAX + 8];
+    if (!nt_utf8_path_to_utf16(dir, wide, sizeof wide / sizeof wide[0])) {
+        return false;
+    }
+    HINSTANCE rc =
+        ShellExecuteW(NULL, L"open", wide, NULL, NULL, SW_SHOWNORMAL);
+    return (INT_PTR)rc > 32; /* returns > 32 on success (path parameter, not shell) */
 #else
     char quoted[GUI_PATHS_MAX * 4 + 4]; /* worst case: every byte an escaped ' -> 4x, + the two quotes */
     if (!crash_shell_squote(dir, quoted, sizeof quoted)) {

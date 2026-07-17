@@ -8,7 +8,7 @@
 #include "tp_bench_support.h"
 #include "tp_core/tp_project.h"
 #include "tp_project_mutation_internal.h"
-#include "tp_core/tp_project_migrate.h"
+#include "tp_project_identity_internal.h"
 #include "tp_core/tp_scan.h"
 #include "tp_core/tp_session.h"
 
@@ -33,7 +33,7 @@ int s_multi_sel_cap;
 int s_sel_atlas;
 int s_sel_src = -1;
 int s_sel_child = -1;
-char s_sel_abs[512];
+char s_sel_abs[TP_IDENTITY_PATH_MAX];
 bool s_sel_missing;
 static const tp_session_snapshot *s_fixture_snapshot;
 static uint64_t s_fixture_snapshot_lifetime;
@@ -52,6 +52,10 @@ void set_status_ex(status_sev_t sev, const char *msg) {
     if (sev == STATUS_ERROR) {
         s_status_failed = true;
     }
+}
+
+void set_statusf_ex(status_sev_t sev, const char *fmt, ...) {
+    set_status_ex(sev, fmt);
 }
 
 const tp_result *gui_pack_result(int atlas_index) {
@@ -105,6 +109,15 @@ static int process_id(void) {
 #endif
 }
 
+static char *bench_strdup(const char *text) {
+    const size_t length = strlen(text) + 1U;
+    char *copy = (char *)malloc(length);
+    if (copy) {
+        memcpy(copy, text, length);
+    }
+    return copy;
+}
+
 static int remove_empty_dir(const char *path) {
 #ifdef _WIN32
     return _rmdir(path);
@@ -150,7 +163,7 @@ static bool parse_iterations(const char *text, int *out) {
 }
 
 static bool make_long_source_key(int index, char *out, size_t capacity) {
-    const size_t prefix = 220U;
+    const size_t prefix = 700U;
     if (!out || capacity <= prefix + 7U) {
         return false;
     }
@@ -219,25 +232,32 @@ static bool fixture_prepare(row_fixture *fixture, row_fixture_spec spec, const c
         fixture->scan_bytes =
             (size_t)spec.children * sizeof *seeded.entries;
         for (int i = 0; i < spec.children; ++i) {
+            char rel[TP_SRCKEY_MAX];
+            char abs[TP_IDENTITY_PATH_MAX];
             const int rel_n = spec.long_keys
                                   ? (make_long_source_key(
-                                         i, seeded.entries[i].rel,
-                                         sizeof seeded.entries[i].rel)
-                                         ? (int)strlen(seeded.entries[i].rel)
+                                         i, rel, sizeof rel)
+                                         ? (int)strlen(rel)
                                          : -1)
-                                  : snprintf(seeded.entries[i].rel,
-                                             sizeof seeded.entries[i].rel,
+                                  : snprintf(rel, sizeof rel,
                                              "sprite_%05d.png", i);
-            const int abs_n = snprintf(seeded.entries[i].abs,
-                                       sizeof seeded.entries[i].abs,
+            const int abs_n = snprintf(abs, sizeof abs,
                                        "%s/sprite_%05d.png", fixture->dir, i);
             if (rel_n < 0 ||
-                (size_t)rel_n >= sizeof seeded.entries[i].rel || abs_n < 0 ||
-                (size_t)abs_n >= sizeof seeded.entries[i].abs) {
+                (size_t)rel_n >= sizeof rel || abs_n < 0 ||
+                (size_t)abs_n >= sizeof abs) {
                 tp_scan_free(&seeded);
                 fixture_cleanup(fixture);
                 return false;
             }
+            seeded.entries[i].rel = bench_strdup(rel);
+            seeded.entries[i].abs = bench_strdup(abs);
+            if (!seeded.entries[i].rel || !seeded.entries[i].abs) {
+                tp_scan_free(&seeded);
+                fixture_cleanup(fixture);
+                return false;
+            }
+            fixture->scan_bytes += strlen(rel) + 1U + strlen(abs) + 1U;
         }
     }
 
@@ -283,7 +303,7 @@ static bool fixture_prepare(row_fixture *fixture, row_fixture_spec spec, const c
     tp_error err = {{0}};
     uint64_t counter = 1U;
     tp_rng rng = {deterministic_fill, &counter};
-    if (tp_project_promote_ids(project, &rng, &err) != TP_STATUS_OK) {
+    if (tp_project_assign_missing_ids(project, &rng, &err) != TP_STATUS_OK) {
         tp_project_destroy(project);
         tp_scan_free(&seeded);
         fixture_cleanup(fixture);
@@ -359,8 +379,8 @@ static bool fixture_rows_match(const row_fixture *fixture) {
                s_rows[expected_rows - 1].src == fixture->spec.sources - 1;
     }
     if (fixture->spec.long_keys) {
-        char key0[TP_SCAN_REL_CAP];
-        char key1[TP_SCAN_REL_CAP];
+        char key0[TP_SRCKEY_MAX];
+        char key1[TP_SRCKEY_MAX];
         if (!make_long_source_key(0, key0, sizeof key0) ||
             !make_long_source_key(1, key1, sizeof key1)) {
             return false;
@@ -368,8 +388,8 @@ static bool fixture_rows_match(const row_fixture *fixture) {
         return strcmp(s_rows[1].source_key, key0) == 0 &&
                strcmp(s_rows[2].source_key, key1) == 0 &&
                strcmp(s_rows[1].source_key, s_rows[2].source_key) != 0 &&
-               strlen(s_rows[1].source_key) > 191U &&
-               strlen(s_rows[1].sprite_name) > 191U &&
+               strlen(s_rows[1].source_key) > 511U &&
+               strlen(s_rows[1].sprite_name) > 511U &&
                strcmp(s_rows[1].sprite_name, s_rows[2].sprite_name) != 0;
     }
     char expected_last[64];

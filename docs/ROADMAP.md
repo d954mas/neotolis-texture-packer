@@ -32,8 +32,9 @@ deterministic output, machine-readable CLI, project editing, dry-run,
 inspect/validate, runtime exporter registration и raw RGBA inputs.
 
 Этот baseline необходимо сохранять на каждом этапе. Новая работа начинается не
-с повторной реализации этих возможностей, а с миграции их на целевые identity,
-operation, source, session и format-package contracts.
+с повторной реализации этих возможностей, а с укрепления целевых identity,
+operation, source, session и format-package contracts. Для pre-release project
+schema обратная совместимость не является требованием: действует canonical v5.
 
 ## Outcomes эпиков
 
@@ -66,16 +67,19 @@ their remaining product gates still require separate phase audits. In
 particular, visible shared History and full `pack_input_hash`/result LRU remain
 F3 work.
 
-**Routed F3 finding — P-UNDO (`TRIGGERED`):** the M0 HUGE fixture measured about
-17.36 MB per durable Undo/Redo append and p95 around 1.5-1.65 s. Compact history
-acknowledgement is the named post-foundation packet in the architecture plan
-§7 and should be scheduled explicitly; it is not silently included in M0-M5.
+**Resolved F3 finding — P-UNDO (`DONE`, 2026-07-17):** Undo/Redo now append
+versioned compact `HISTORY` transitions. Full checkpoints are a deterministic
+fallback only for unsupported or oversized diffs. Mixed TXN/HISTORY replay,
+append/sync-failure rollback, hostile-input handling and admission budgets are
+test-pinned.
 
 ## Граф зависимостей
 
 ```text
 BASELINE
-   |
+   |\
+   | +------> H0  fallible builder containment --------+
+   |                                                  |
    v
   F1  persistent identities + tagged project schema
    |\
@@ -86,7 +90,7 @@ BASELINE
    +------> B1  linked atlas sources + Extract Sprites
                |
                v
-              F3  session/history/Pack
+              F3  session/history/Pack <--------------+
               |
               v
               B2  package registry
@@ -112,15 +116,38 @@ import/source (`B1`) и package (`B3`) путей.
 
 Временный pre-production spike-слой выведен из build и больше не является
 этапом или prerequisite. Принятые результаты находятся в production core/tests
-и decisions 0002, 0004–0013. Уникальные byte-exact raster-oracles сохранены как
+и decisions 0002, 0004–0006, 0010–0018. Уникальные byte-exact raster-oracles сохранены как
 non-normative research в `docs/research/raster-normalization-goldens.md`.
 Незакрытые решения master spec §60 отслеживаются непосредственно тем active
 packet, который публикует соответствующий API.
 
+### H0 — Fallible builder containment
+
+**Статус:** `IN PROGRESS` — strict UTF-8 image ingress, canonical RGBA8 decode и
+known-assert preflight реализованы; containment output/allocation/unknown assert
+failures ещё требует private worker по decision 0018.
+**Prerequisite:** текущий `BASELINE`.
+**Основание:** master spec §10.5–§10.6 и acceptance criterion 54.
+
+| ID | Результат |
+|---|---|
+| `H0.1` | Все path sources читаются shared UTF-8 FS/decoder boundary и передаются builder как raw RGBA8 |
+| `H0.2` | Core preflight возвращает structured error для transparent-at-threshold, invalid slice9, impossible footprint и spacing/settings assertions |
+| `H0.3` | Versioned bounded private worker protocol; builder abort/non-zero exit/malformed response становятся `builder_crashed`/`builder_failed` |
+| `H0.4` | Только ASCII relative worker staging; parent владеет UTF-8 read/publication, cancellation, timeout и cleanup |
+| `H0.5` | Byte-identical normal-result oracle и crash/Unicode/full-disk/cancellation regression suite |
+
+**Gate:** ни один user/resource/output-path failure движка не завершает client
+host и не заменяет last successful preview; Unicode/long parent paths проходят
+через private staging; worker crash/cancel не оставляет опубликованный partial
+artifact. Квалифицирующий upstream fallible sink API может заменить процесс без
+изменения public contracts.
+
 ### F1 — Persistent identities и tagged project schema
 
-**Статус:** `IN PROGRESS` — production foundation реализован; полный phase gate
-ещё требует отдельного аудита.
+**Статус:** `DONE` (2026-07-17) — exact-only schema-v5 load/write,
+atomic private-adoption ID assignment, canonical `{source,key}` records and
+noncanonical save/checkpoint rejection are executable-test pinned.
 **Prerequisite:** текущий `BASELINE` и master spec.
 **Основание:** master spec §5, §11, §54 Phase 0.
 
@@ -129,12 +156,13 @@ packet, который публикует соответствующий API.
 | `F1.1` | Canonical project-path identity; временный runtime ID для unsaved session; без persistent `project_id` |
 | `F1.2` | Random persistent IDs для atlas/source/animation/target и deterministic derived `sprite_id` |
 | `F1.3` | Нормализация source-local keys, collision/traversal validation и однозначные selectors |
-| `F1.4` | Tagged source schema с path-source migration и sparse sprite records |
-| `F1.5` | Реализовать утверждённый в decision 0007 atomic legacy-ID promotion без изменения ссылок внутри writable session |
+| `F1.4` | Canonical tagged source records и sparse sprite/frame records только в форме `{source,key}` |
+| `F1.5` | Exact-only schema v5 loader; atomic assignment missing IDs на private session-adoption candidate; без legacy promotion/migrations |
 
-**Gate:** migration повторяема; rename/reorder/save/reload не меняют structural
-IDs; одинаковый source key воспроизводит `sprite_id`; malformed/duplicate IDs и
-portability collisions возвращаются как structured findings.
+**Gate:** v1–v4/future versions дают structured version error и не переписываются;
+save/checkpoint не публикуют noncanonical graph; rename/reorder/save/reload не
+меняют structural IDs; одинаковый source key воспроизводит `sprite_id`;
+malformed/duplicate IDs и portability collisions возвращаются как structured findings.
 
 ### F2 — Typed operations, transactions и revisions
 
@@ -159,7 +187,8 @@ test-pinned; GUI и CLI не содержат параллельных mutation 
 
 ### B0 — Native import foundation
 
-**Статус:** `PLANNED`
+**Статус:** `IN PROGRESS` — session queue, semantic history and bounded local
+journal are implemented; visible shared History and Pack hash/LRU remain.
 **Prerequisite:** `F1`.
 **Основание:** master spec §35, §38–§41, §43, §50 B0.
 
@@ -195,17 +224,17 @@ project mutation или опубликованный неполный набор
 ### F3 — Semantic history и Pack session behavior
 
 **Статус:** `PLANNED`
-**Prerequisites:** `F2`, `B1`.
+**Prerequisites:** `F2`, `B1`, `H0`.
 **Основание:** master spec §7.1, §9–§10, §27 A1, §54 Phase 2.
 
 | ID | Результат |
 |---|---|
 | `F3.1` | Одна serialized session queue для GUI, future MCP, Undo/Redo и Refresh |
-| `F3.2` | Semantic forward/reverse diffs; snapshot implementation используется как migration oracle |
+| `F3.2` | Semantic forward/reverse diffs are production history; serialized checkpoint round-trips remain test oracles only |
 | `F3.3` | Shared visible History с non-Undoable Save checkpoints |
 | `F3.4` | Immutable asynchronous Pack jobs и ordered result selection |
 | `F3.5` | `pack_input_hash`, stale-preview UX и memory-only byte-budget result LRU |
-| `F3.6` | Расширить минимальный journal до checkpoint/compaction/recovery policy, не меняя commit acknowledgement |
+| `F3.6` | Extend the implemented bounded local journal/checkpoint policy to ownership transfer and mirrors without changing durable acknowledgement |
 
 **Gate:** forward + reverse даёт byte-identical исходное состояние; Undo/Redo
 создают новые revisions; save не меняет revision; stale result остаётся видимым;

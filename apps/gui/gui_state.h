@@ -15,6 +15,7 @@
 #include <stdint.h>
 
 #include "tp_core/tp_id.h"
+#include "tp_core/tp_identity.h"
 #include "tp_core/tp_scan.h"
 
 #include "font/nt_font.h"        /* nt_font_t (s_font) */
@@ -66,7 +67,7 @@ void set_statusf_ex(status_sev_t sev, const char *fmt, ...) GUI_PRINTF(2, 3);
 extern bool s_pack_has_sources, s_pack_stale;
 
 /* --- executable directory (resolved once at startup; selftest + pack-session paths hang off it) --- */
-extern char s_exe_dir[1024];
+extern char s_exe_dir[TP_IDENTITY_PATH_MAX];
 
 /* --- nt_ui context + the dual-mode center canvas --- */
 extern nt_ui_context_t *s_ctx;
@@ -97,7 +98,7 @@ extern uint32_t s_id_menu_file, s_id_menu_edit, s_id_menu_view, s_id_menu_help;
 extern int s_sel_atlas;      /* selected atlas index */
 extern int s_sel_src;        /* selected source index within the atlas */
 extern int s_sel_child;      /* selected folder-child index (-1 = the source row / a file) */
-extern char s_sel_abs[512];  /* resolved absolute image path of the selection ("" = none/folder) */
+extern char s_sel_abs[TP_IDENTITY_PATH_MAX]; /* authoritative resolved image path */
 extern bool s_sel_missing;   /* selection is a missing file -> canvas shows a placeholder (§3.7) */
 
 /* Multi-select set over canonical leaf sprite identities (rows rebuild each frame). Drives
@@ -106,7 +107,7 @@ extern bool s_sel_missing;   /* selection is a missing file -> canvas shows a pl
  * geometrically in multi_sel_add_ref (gui_rows.c); see the growth-policy note there. */
 typedef struct gui_selected_sprite {
     tp_id128 source_id;
-    char source_key[TP_SCAN_REL_CAP];
+    char *source_key; /* malloc-owned exact canonical key */
 } gui_selected_sprite;
 extern gui_selected_sprite *s_multi_sel;
 extern int s_multi_sel_count;
@@ -139,8 +140,8 @@ enum { EDIT_NONE = 0, EDIT_ATLAS, EDIT_SPRITE, EDIT_ANIM };
 extern int s_edit_kind;
 extern int s_edit_atlas;        /* atlas being renamed (EDIT_ATLAS) */
 extern int s_edit_anim;         /* animation index being renamed (EDIT_ANIM) */
-extern char s_edit_sprite[TP_SCAN_REL_CAP]; /* atlas-relative sprite name being renamed */
-extern char s_edit_buf[TP_SCAN_REL_CAP];    /* the input buffer */
+extern char s_edit_sprite[TP_SRCKEY_MAX]; /* atlas-relative sprite name being renamed */
+extern char s_edit_buf[TP_SRCKEY_MAX];    /* the input buffer */
 
 /* Runtime (already SCALED) column widths. Clamped narrow when the window can't fit both side panels +
  * a minimal canvas, so the panels never get pushed off-screen (recomputed each frame). */
@@ -183,8 +184,8 @@ extern int64_t s_ctx_target_revision;
 extern tp_id128 s_ctx_sprite_atlas_id;
 extern tp_id128 s_ctx_sprite_source_id;
 extern int64_t s_ctx_sprite_revision;
-extern char s_ctx_sprite_source_key[TP_SCAN_REL_CAP];
-extern char s_ctx_sprite_display_name[TP_SCAN_REL_CAP];
+extern char s_ctx_sprite_source_key[TP_SRCKEY_MAX];
+extern char s_ctx_sprite_display_name[TP_SRCKEY_MAX];
 extern bool s_ctx_leaf;        /* a renamable leaf sprite (file source or folder child) */
 extern bool s_ctx_removable;   /* a removable source row (has an [x] today) */
 

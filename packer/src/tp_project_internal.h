@@ -4,7 +4,7 @@
 #include <stddef.h>
 
 /* Exact nodes in the calibrated max mixed schema fixture: one atlas with
- * 262,144 tagged sources and 262,144 pending sprite records. Together with a
+ * 262,144 tagged sources and canonical sprite records. Together with a
  * 64 MiB input it stays below the benchmark's 257 MiB accounted-byte budget. */
 #define TP_PROJECT_JSON_MAX_NODES 2097166U
 #define TP_PROJECT_JSON_MAX_CONTAINER_ENTRIES 262144U
@@ -13,6 +13,12 @@
 /* Deterministic save-I/O fault seam for core and GUI self-tests. One-shot; it
  * fails before a temp file is created, so the destination must remain untouched. */
 void tp_project__test_fail_next_temp_create(void);
+
+/* Save fault seams around the two durability barriers. File-sync failure is
+ * pre-publication (destination unchanged); parent-sync failure is
+ * post-publication (FILE_DURABILITY_UNCERTAIN, saved bytes authoritative). */
+void tp_project__test_fail_next_file_sync(void);
+void tp_project__test_fail_next_parent_sync(void);
 
 /* One-shot writer-size limit override. Lets tests prove the save-side cap is
  * checked before publishing without constructing a 64 MiB project. */
@@ -29,30 +35,23 @@ size_t tp_project__test_size_query_calls(void);
 
 typedef struct tp_project_load_lookup_work {
     size_t source_path_comparisons;
-    size_t pending_name_comparisons;
 } tp_project_load_lookup_work;
 
 typedef struct tp_project_load_resources {
     size_t source_index_peak_bytes;
-    size_t pending_index_peak_bytes;
     size_t id_refs_bytes;
     size_t id_index_bytes;
-    size_t legacy_peak_bytes;
 } tp_project_load_resources;
 
 void tp_project__test_load_lookup_work_reset(void);
 tp_project_load_lookup_work tp_project__test_load_lookup_work_take(void);
 void tp_project__test_id_validation_work_reset(void);
 size_t tp_project__test_id_validation_work_take(void);
-void tp_project__test_legacy_id_work_reset(void);
-size_t tp_project__test_legacy_id_work_take(void);
-void tp_project__test_fail_next_legacy_id_index_alloc(void);
 void tp_project__test_load_resources_reset(void);
 tp_project_load_resources tp_project__test_load_resources_take(void);
 bool tp_project__test_load_resources_enabled(void);
 void tp_project__test_note_id_resources(size_t refs_bytes,
                                         size_t index_bytes);
-void tp_project__test_note_legacy_resources(size_t peak_bytes);
 
 typedef struct tp_project_json_limits {
     size_t bytes;
@@ -70,6 +69,10 @@ tp_status tp_project__test_save_buffer_with_json_limits(
     const tp_project *project, bool checkpoint,
     const tp_project_json_limits *limits, char **out, size_t *out_len,
     tp_error *err);
+
+/* Pure regression seam over the production save-path relativizer. */
+tp_status tp_project__test_relativize(const char *abs, const char *base_dir,
+                                      char *out, size_t cap);
 
 /* Recovery checkpoints are self-contained: relative live source spellings are
  * emitted as absolute paths using their stable runtime source base. */
