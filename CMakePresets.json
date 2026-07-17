@@ -15,7 +15,16 @@
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
         "NT_UI_DEBUG_TOOLS": "ON",
         "NTPACKER_GUI_SELFTEST": "OFF",
-        "NTPACKER_GUI_CTEST": "OFF"
+        "NTPACKER_GUI_CTEST": "OFF",
+        "NT_DEVAPI_ENABLED": "OFF",
+        "NT_DEVAPI_GROUP_INPUT": "OFF",
+        "NT_DEVAPI_GROUP_CORE": "OFF",
+        "NT_DEVAPI_GROUP_TIME": "OFF",
+        "NT_DEVAPI_GROUP_DISCOVERY": "OFF",
+        "NT_DEVAPI_GROUP_UI": "OFF",
+        "NT_DEVAPI_GROUP_OBS": "OFF",
+        "NT_DEVAPI_GROUP_ENTITY_WRITE": "OFF",
+        "NT_DEVAPI_GROUP_CAPTURE": "OFF"
       }
     },
     {
