@@ -112,12 +112,6 @@ typedef tp_recovery_candidates gui_recovery_list;
 int gui_recovery_collect(gui_recovery_list *out);
 
 /* Thin adapter over tp_recovery_resolve_journal. */
-#ifdef NTPACKER_GUI_SELFTEST
-/* Raw-path seam for protocol fault tests. Production exposes only the typed entry API below. */
-tp_status gui_recovery_resolve(const char *journal_path, gui_recovery_action action,
-                               const char *target_path, char *err_out, size_t err_cap);
-#endif
-
 /* Production modal entry point bound to the selected typed row. */
 tp_status gui_recovery_resolve_entry(const gui_recovery_entry *entry, gui_recovery_action action,
                                      const char *target_path, char *err_out, size_t err_cap);
@@ -322,28 +316,6 @@ void gui_project_flush_error(char *out, size_t cap);
  * and arm a bounded number of write failures. */
 bool gui_project__test_attach_memory_recovery(void);
 void gui_project__test_fail_next_recovery_writes(int count);
-/* Dev seam (selftest only, fix [1]): hold / release a FOREIGN single-instance lock on `slot` from a
- * separate handle (simulates another live editor), and query whether recovery is ACTIVE (slot owned).
- * Lets the selftest prove a 2nd instance that cannot lock skips recovery + never touches the slot. */
-bool gui_project__test_hold_foreign_lock(const char *slot);
-void gui_project__test_release_foreign_lock(void);
-bool gui_project__test_recovery_active(void);
-/* Arm a one-shot skip of the next recovery-slot reset so a pre-seeded stale slot reaches the fresh
- * attach -- lets the selftest prove attach_recovery_journal fails CLOSED (journal-less + degraded
- * notice) rather than building a journal on foreign bytes. */
-void gui_project__test_skip_next_recovery_reset(void);
-/* Pin the recovery-metadata clock to `t` (>= 0) so ordering/classification tests are deterministic despite
- * time()'s 1-second resolution; pass < 0 to restore the real clock. */
-void gui_project__test_set_recovery_now(int64_t t);
-/* Dev seam (selftest only, R6a fix [2]): the REAL recovery-journal key, so a test can craft an orphan that
- * gui_recovery_collect / the candidate scan will actually classify adoptable (collect now key-filters). */
-tp_id128 gui_project__test_recovery_key(void);
-/* Dev seam (selftest only, fix2 F2): insert one fully-built entry into `out` through the real (adoptable desc,
- * timestamp desc) cap eviction, so the cap-regression guard is deterministic (no readdir-order dependence). */
-void gui_project__test_recovery_insert(gui_recovery_list *out, const gui_recovery_entry *e);
-/* Dev seam (selftest only, fix2 F3): arm a one-shot failure of gui_recovery_resolve's post-save load-verify so
- * the "save OK but the written file fails to reload -> journal KEPT" backstop has a regression test. */
-void gui_project__test_fail_next_load_verify(void);
 #endif
 
 #ifdef __cplusplus

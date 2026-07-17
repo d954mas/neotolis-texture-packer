@@ -14,7 +14,6 @@
 #include "tp_core/tp_recovery.h"       /* shared bounded orphan store + OS-backed claims */
 #include "tp_core/tp_source_plan.h"    /* one source identity/dedupe owner */
 #ifdef NTPACKER_GUI_SELFTEST
-#include "tp_recovery_internal.h"
 #include "tp_session_internal.h"
 #endif
 
@@ -52,10 +51,6 @@ static char s_op_error_msg[256];
 /* Host policy only. Recovery core creates/destroys stores and claims per call;
  * a successful live attach transfers its concrete owner to tp_session. */
 static char s_recovery_root[TP_IDENTITY_PATH_MAX];
-#ifdef NTPACKER_GUI_SELFTEST
-/* Legacy deterministic-path fixtures; production always lets core name slots. */
-static char s_recovery_test_slot[TP_IDENTITY_PATH_MAX];
-#endif
 /* A one-shot startup notice explaining why recovery is unavailable. This deliberately covers both
  * contention and setup/storage failures: the editor remains usable, but silently losing crash
  * durability would be a data-safety bug. */
@@ -183,23 +178,9 @@ static void recompute_name(void) {
     (void)snprintf(s_name, sizeof s_name, "%s", base);
 }
 
-/* Recovery helpers are defined further down with the rest of the recovery plumbing. */
-#ifdef NTPACKER_GUI_SELFTEST
-static bool recovery_active(void);
-#endif
 static void note_recovery_degraded(const char *msg);
 
-/* Unix-seconds clock for recovery metadata. The selftest override makes list ordering and recovery
- * classification deterministic despite time()'s one-second resolution; production always uses time(). */
-#ifdef NTPACKER_GUI_SELFTEST
-static int64_t s_test_recovery_now = -1; /* >= 0 overrides time(NULL) */
-#endif
 static int64_t recovery_now(void) {
-#ifdef NTPACKER_GUI_SELFTEST
-    if (s_test_recovery_now >= 0) {
-        return s_test_recovery_now;
-    }
-#endif
     return (int64_t)time(NULL);
 }
 
@@ -256,12 +237,6 @@ static void note_recovery_degraded(const char *msg) {
                    msg ? msg : "unknown");
 }
 
-#ifdef NTPACKER_GUI_SELFTEST
-static bool recovery_active(void) {
-    return s_session && tp_session_recovery_available(s_session);
-}
-#endif
-
 static bool recovery_configured(void) {
     return s_recovery_root[0] != '\0';
 }
@@ -269,22 +244,11 @@ static bool recovery_configured(void) {
 /* Attach one shared live recovery owner after the session identity is final.
  * The session owns the handle on every accepted attach path, including degraded
  * filesystem outcomes; GUI retains only configuration and presentation state. */
-#ifdef NTPACKER_GUI_SELFTEST
-static bool s_test_skip_recovery_reset = false;
-#endif
 static void attach_recovery_live(tp_session *session) {
     if (!session || !recovery_configured()) {
         return;
     }
     tp_error err = {0};
-#ifdef NTPACKER_GUI_SELFTEST
-    if (s_test_skip_recovery_reset) {
-        s_test_skip_recovery_reset = false;
-        (void)tp_session_require_recovery(session, &err);
-        note_recovery_degraded("could not reset the recovery slot -- a stale journal is present");
-        return;
-    }
-#endif
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     const tp_session_identity identity = tp_session_snapshot_identity(snapshot);
     tp_id128 saved_fingerprint = tp_id128_nil();
@@ -298,19 +262,9 @@ static void attach_recovery_live(tp_session *session) {
         .project_name = s_name,
         .file_fingerprint = has_saved_fingerprint ? &saved_fingerprint : NULL,
     };
-    tp_status status;
-#ifdef NTPACKER_GUI_SELFTEST
-    if (s_recovery_test_slot[0] != '\0') {
-        status = tp_recovery__test_session_attach_at(
-            s_recovery_root, recovery_key(), s_recovery_test_slot, session,
-            &metadata, &err);
-    } else
-#endif
-    {
-        tp_rng rng = tp_rng_os();
-        status = tp_recovery_session_attach(
-            s_recovery_root, recovery_key(), &rng, session, &metadata, &err);
-    }
+    tp_rng rng = tp_rng_os();
+    const tp_status status = tp_recovery_session_attach(
+        s_recovery_root, recovery_key(), &rng, session, &metadata, &err);
     if (status != TP_STATUS_OK && !tp_session_recovery_available(session)) {
         gui_project_note_recovery_setup_failure(
             status == TP_STATUS_RECOVERY_BUSY
@@ -620,9 +574,6 @@ void gui_project_shutdown(void) {
     tp_session_destroy(s_session); /* frees the sole owned model/project/history/journal */
     s_session = NULL;
     s_recovery_root[0] = '\0';
-#ifdef NTPACKER_GUI_SELFTEST
-    s_recovery_test_slot[0] = '\0';
-#endif
     s_discard_recovery_on_shutdown = false;
 }
 
@@ -632,55 +583,14 @@ void gui_project_discard_recovery_on_shutdown(void) { s_discard_recovery_on_shut
  * per-process slot identity and owns all liveness and exclusion mechanics. */
 void gui_project_enable_recovery(const char *root) {
     s_recovery_root[0] = '\0';
-#ifdef NTPACKER_GUI_SELFTEST
-    s_recovery_test_slot[0] = '\0';
-#endif
     if (!root || root[0] == '\0') {
         return;
     }
     tp_error err = {0};
-    tp_status status;
-#ifdef NTPACKER_GUI_SELFTEST
-    /* Legacy recovery tests name exact fixture journals. Keep that capability
-     * behind a test-only core seam; production never accepts a slot path. */
-    const char *base = root;
-    for (const char *p = root; *p; ++p) {
-        if (*p == '/' || *p == '\\') {
-            base = p + 1;
-        }
-    }
-    const size_t root_len = strlen(root);
-    static const char suffix[] = ".ntpjournal";
-    if (base != root && root_len >= sizeof suffix - 1U &&
-        strcmp(root + root_len - (sizeof suffix - 1U), suffix) == 0) {
-        size_t parent_len = (size_t)(base - root);
-        while (parent_len > 0U &&
-               (root[parent_len - 1U] == '/' || root[parent_len - 1U] == '\\')) {
-            parent_len--;
-        }
-        char parent[TP_IDENTITY_PATH_MAX];
-        if (parent_len == 0U || parent_len >= sizeof parent) {
-            status = tp_error_set(&err, TP_STATUS_OUT_OF_BOUNDS,
-                                  "recovery fixture path is too long");
-        } else {
-            memcpy(parent, root, parent_len);
-            parent[parent_len] = '\0';
-            status = tp_recovery_root_validate(parent, recovery_key(), &err);
-            if (status == TP_STATUS_OK) {
-                (void)snprintf(s_recovery_root, sizeof s_recovery_root, "%s",
-                               parent);
-                (void)snprintf(s_recovery_test_slot,
-                               sizeof s_recovery_test_slot, "%s", root);
-            }
-        }
-    } else
-#endif
-    {
-        status = tp_recovery_root_validate(root, recovery_key(), &err);
-        if (status == TP_STATUS_OK) {
-            (void)snprintf(s_recovery_root, sizeof s_recovery_root, "%s",
-                           root);
-        }
+    const tp_status status = tp_recovery_root_validate(
+        root, recovery_key(), &err);
+    if (status == TP_STATUS_OK) {
+        (void)snprintf(s_recovery_root, sizeof s_recovery_root, "%s", root);
     }
     if (status != TP_STATUS_OK) {
         gui_project_note_recovery_setup_failure(
@@ -758,11 +668,7 @@ static void recovery_copy_error(char *out, size_t cap, tp_status status,
     }
 }
 
-#ifdef NTPACKER_GUI_SELFTEST
-tp_status
-#else
 static tp_status
-#endif
 gui_recovery_resolve(const char *journal_path, gui_recovery_action action,
                      const char *target_path,
                      char *err_out, size_t err_cap) {
@@ -833,58 +739,6 @@ void gui_project__test_fail_next_recovery_writes(int count) {
     tp_session__test_fail_next_recovery_writes(s_session, count);
 }
 
-/* Dev seam (selftest only, fix [1] regression): hold a FOREIGN single-instance lock on `slot` from a
- * SEPARATE handle, simulating another live editor, so a following gui_project_enable_recovery(slot)
- * sees the slot busy and runs journal-less. Returns true if the foreign lock was taken. */
-bool gui_project__test_hold_foreign_lock(const char *slot) {
-    gui_project__test_release_foreign_lock();
-    if (!slot || slot[0] == '\0') {
-        return false;
-    }
-    const char *base = slot;
-    for (const char *p = slot; *p; ++p) {
-        if (*p == '/' || *p == '\\') {
-            base = p + 1;
-        }
-    }
-    size_t parent_len = (size_t)(base - slot);
-    while (parent_len > 0U &&
-           (slot[parent_len - 1U] == '/' || slot[parent_len - 1U] == '\\')) {
-        parent_len--;
-    }
-    char root[TP_IDENTITY_PATH_MAX];
-    if (parent_len == 0U || parent_len >= sizeof root) {
-        return false;
-    }
-    memcpy(root, slot, parent_len);
-    root[parent_len] = '\0';
-    return tp_recovery__test_hold_foreign_lock(root, recovery_key(), slot);
-}
-void gui_project__test_release_foreign_lock(void) {
-    tp_recovery__test_release_foreign_lock();
-}
-/* True iff the current session owns the shared live recovery handle. */
-bool gui_project__test_recovery_active(void) { return recovery_active(); }
-/* Dev seam: simulate a failed live-slot reset before shared-owner attach. */
-void gui_project__test_skip_next_recovery_reset(void) { s_test_skip_recovery_reset = true; }
-/* Dev seam: pin the recovery-metadata clock for deterministic ordering/classification tests. */
-void gui_project__test_set_recovery_now(int64_t t) { s_test_recovery_now = t; }
-/* Dev seam (selftest only, R6a fix [2]): the REAL recovery-journal key. collect now KEY-FILTERS adoptable
- * orphans (a foreign-key journal is excluded), so a test that wants an orphan classified adoptable must craft
- * it with THIS key -- a synthetic repeated byte no longer peeks adoptable. */
-tp_id128 gui_project__test_recovery_key(void) { return recovery_key(); }
-/* Dev seam (selftest only, fix2 F2): drive the (adoptable desc, timestamp desc) cap eviction directly so the
- * regression guard is DETERMINISTIC -- independent of filesystem enumeration order (readdir on Linux is
- * unsorted, so a filesystem-crafted cap test passed even with the ordering reverted). */
-void gui_project__test_recovery_insert(gui_recovery_list *out, const gui_recovery_entry *e) {
-    tp_recovery__test_candidate_insert(out, e);
-}
-/* Dev seam (selftest only, fix2 F3): arm a one-shot failure of the resolve's post-save load-verify so the
- * verify+keep-journal backstop has a regression test (a real save-OK-but-reload-fail input is not cleanly
- * constructible). Consumed on use inside gui_recovery_resolve. */
-void gui_project__test_fail_next_load_verify(void) {
-    tp_recovery__test_fail_next_resolve_verify();
-}
 #endif
 // #endregion
 
