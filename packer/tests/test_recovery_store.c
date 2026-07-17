@@ -115,6 +115,8 @@ static void cleanup_known_files(void) {
         "flow-scan.ntpjournal", "flow-scan.ntpjournal.lock",
         "flow-resolve.ntpjournal", "flow-resolve.ntpjournal.lock",
         "flow-resolve.ntpacker_project",
+        "scan-valid-corrupt.ntpjournal", "scan-corrupt.ntpjournal",
+        "scan-valid-unreadable.ntpjournal", "scan-unreadable.ntpjournal",
     };
     char path[TP_IDENTITY_PATH_MAX];
     for (size_t i = 0U; i < sizeof names / sizeof names[0]; ++i) {
@@ -1194,6 +1196,99 @@ void test_scan_surfaces_only_same_key_version_mismatch(void) {
     tp_recovery_store_destroy(store);
 }
 
+void test_scan_reports_corrupt_journal_without_hiding_valid_candidate(void) {
+    char valid[TP_IDENTITY_PATH_MAX];
+    char corrupt[TP_IDENTITY_PATH_MAX];
+    join_path(valid, sizeof valid, g_root, "scan-valid-corrupt.ntpjournal");
+    join_path(corrupt, sizeof corrupt, g_root, "scan-corrupt.ntpjournal");
+    (void)remove(valid);
+    (void)remove(corrupt);
+    craft_orphan(valid, 113);
+    write_file(corrupt, "not a recovery journal");
+
+    tp_recovery_store *store = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_recovery_store_create(g_root, recovery_key(), &store, NULL));
+    tp_recovery_candidates candidates;
+    tp_error err = {{0}};
+    const tp_status scan_status =
+        tp_recovery_store_scan(store, NULL, &candidates, &err);
+
+    bool valid_found = false;
+    for (size_t i = 0U; i < candidates.count; ++i) {
+        valid_found = valid_found ||
+                      strstr(candidates.items[i].journal_path,
+                             "scan-valid-corrupt.ntpjournal") != NULL;
+    }
+    bool diagnostic_found = false;
+    for (size_t i = 0U; i < candidates.diagnostic_count; ++i) {
+        diagnostic_found = diagnostic_found ||
+                           (strstr(candidates.diagnostics[i].journal_path,
+                                   "scan-corrupt.ntpjournal") != NULL &&
+                            candidates.diagnostics[i].status ==
+                                TP_STATUS_BAD_PROJECT);
+    }
+
+    tp_recovery_store_destroy(store);
+    (void)remove(valid);
+    (void)remove(corrupt);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, scan_status, err.msg);
+    TEST_ASSERT_TRUE(valid_found);
+    TEST_ASSERT_TRUE(diagnostic_found);
+}
+
+void test_scan_reports_unreadable_entry_without_hiding_valid_candidate(void) {
+    char valid[TP_IDENTITY_PATH_MAX];
+    char unreadable[TP_IDENTITY_PATH_MAX];
+    join_path(valid, sizeof valid, g_root, "scan-valid-unreadable.ntpjournal");
+    join_path(unreadable, sizeof unreadable, g_root,
+              "scan-unreadable.ntpjournal");
+    (void)remove(valid);
+    (void)remove(unreadable);
+    craft_orphan(valid, 114);
+#ifdef _WIN32
+    TEST_ASSERT_EQUAL_INT(0, _mkdir(unreadable));
+#else
+    TEST_ASSERT_EQUAL_INT(0, mkdir(unreadable, 0700));
+#endif
+
+    tp_recovery_store *store = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_recovery_store_create(g_root, recovery_key(), &store, NULL));
+    tp_recovery_candidates candidates;
+    tp_error err = {{0}};
+    const tp_status scan_status =
+        tp_recovery_store_scan(store, NULL, &candidates, &err);
+
+    bool valid_found = false;
+    for (size_t i = 0U; i < candidates.count; ++i) {
+        valid_found = valid_found ||
+                      strstr(candidates.items[i].journal_path,
+                             "scan-valid-unreadable.ntpjournal") != NULL;
+    }
+    bool diagnostic_found = false;
+    for (size_t i = 0U; i < candidates.diagnostic_count; ++i) {
+        diagnostic_found = diagnostic_found ||
+                           (strstr(candidates.diagnostics[i].journal_path,
+                                   "scan-unreadable.ntpjournal") != NULL &&
+                            candidates.diagnostics[i].status ==
+                                TP_STATUS_PATH_RESOLVE_FAILED);
+    }
+
+    tp_recovery_store_destroy(store);
+    (void)remove(valid);
+#ifdef _WIN32
+    (void)_rmdir(unreadable);
+#else
+    (void)rmdir(unreadable);
+#endif
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, scan_status, err.msg);
+    TEST_ASSERT_TRUE(valid_found);
+    TEST_ASSERT_TRUE(diagnostic_found);
+}
+
 void test_candidate_preserves_project_path_beyond_legacy_gui_capacity(void) {
     char journal[TP_IDENTITY_PATH_MAX];
     join_path(journal, sizeof journal, g_root, "long-metadata.ntpjournal");
@@ -1397,6 +1492,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_save_original_requires_lease_and_exact_fingerprint);
     RUN_TEST(test_claim_discard_deletes_only_journal_and_keeps_lock_domain);
     RUN_TEST(test_scan_surfaces_only_same_key_version_mismatch);
+    RUN_TEST(test_scan_reports_corrupt_journal_without_hiding_valid_candidate);
+    RUN_TEST(test_scan_reports_unreadable_entry_without_hiding_valid_candidate);
     RUN_TEST(test_candidate_preserves_project_path_beyond_legacy_gui_capacity);
 #ifndef _WIN32
     RUN_TEST(test_scan_never_follows_journal_symlink);

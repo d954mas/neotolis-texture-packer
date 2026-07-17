@@ -15,6 +15,7 @@ extern "C" {
 #endif
 
 #define TP_RECOVERY_MAX_CANDIDATES 16
+#define TP_RECOVERY_MAX_SCAN_DIAGNOSTICS 16
 
 typedef struct tp_session tp_session;
 
@@ -36,10 +37,22 @@ typedef struct tp_recovery_candidate {
     bool has_file_fingerprint;
 } tp_recovery_candidate;
 
+/* A per-entry scan failure. Scan remains best-effort and returns TP_STATUS_OK
+ * when the root itself was enumerated: readable candidates stay available and
+ * callers receive a stable status id plus the path of each skipped journal.
+ * BAD_PROJECT means readable but malformed/corrupt; PATH_RESOLVE_FAILED means
+ * the entry could not be opened as a regular no-follow journal. */
+typedef struct tp_recovery_scan_diagnostic {
+    char journal_path[TP_IDENTITY_PATH_MAX];
+    tp_status status;
+} tp_recovery_scan_diagnostic;
+
 typedef struct tp_recovery_candidates {
     tp_recovery_candidate items[TP_RECOVERY_MAX_CANDIDATES];
     size_t count;
-    bool has_more;
+    tp_recovery_scan_diagnostic diagnostics[TP_RECOVERY_MAX_SCAN_DIAGNOSTICS];
+    size_t diagnostic_count;
+    bool has_more; /* candidates or diagnostics were omitted by a cap/budget */
 } tp_recovery_candidates;
 
 /* Frontend-facing recovery orchestration. Frontends inject host policy (root,

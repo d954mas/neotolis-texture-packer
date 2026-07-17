@@ -1576,6 +1576,37 @@ static void candidate_insert(tp_recovery_candidates *out,
     }
 }
 
+static void scan_diagnostic_insert(tp_recovery_candidates *out,
+                                   const char *journal_path,
+                                   tp_status status) {
+    size_t index = 0U;
+    while (index < out->diagnostic_count &&
+           strcmp(out->diagnostics[index].journal_path, journal_path) <= 0) {
+        index++;
+    }
+    if (out->diagnostic_count >= TP_RECOVERY_MAX_SCAN_DIAGNOSTICS) {
+        out->has_more = true;
+    }
+    if (index >= TP_RECOVERY_MAX_SCAN_DIAGNOSTICS) {
+        return;
+    }
+    size_t last = out->diagnostic_count < TP_RECOVERY_MAX_SCAN_DIAGNOSTICS
+                      ? out->diagnostic_count
+                      : TP_RECOVERY_MAX_SCAN_DIAGNOSTICS - 1U;
+    while (last > index) {
+        out->diagnostics[last] = out->diagnostics[last - 1U];
+        last--;
+    }
+    tp_recovery_scan_diagnostic *diagnostic = &out->diagnostics[index];
+    memset(diagnostic, 0, sizeof *diagnostic);
+    (void)snprintf(diagnostic->journal_path,
+                   sizeof diagnostic->journal_path, "%s", journal_path);
+    diagnostic->status = status;
+    if (out->diagnostic_count < TP_RECOVERY_MAX_SCAN_DIAGNOSTICS) {
+        out->diagnostic_count++;
+    }
+}
+
 void tp_recovery__test_candidate_insert(tp_recovery_candidates *out,
                                         const tp_recovery_candidate *candidate) {
     if (out && candidate) {
@@ -1708,23 +1739,44 @@ static bool scan_candidate(void *context, const char *name, uint64_t size) {
     char journal[TP_IDENTITY_PATH_MAX];
     const int written = snprintf(journal, sizeof journal, "%s/%s", scan->store->root, name);
     if (written < 0 || (size_t)written >= sizeof journal) {
+        scan_diagnostic_insert(scan->out, name, TP_STATUS_PATH_RESOLVE_FAILED);
         return true;
     }
     char lock_path[TP_RECOVERY_LOCK_PATH_MAX];
     const int lock_written = snprintf(lock_path, sizeof lock_path, "%s%s", journal,
                                       TP_RECOVERY_LOCK_SUFFIX);
-    if (lock_written < 0 || (size_t)lock_written >= sizeof lock_path ||
-        !lock_is_unowned(lock_path)) {
+    if (lock_written < 0 || (size_t)lock_written >= sizeof lock_path) {
+        scan_diagnostic_insert(scan->out, journal,
+                               TP_STATUS_PATH_RESOLVE_FAILED);
+        return true;
+    }
+    if (!lock_is_unowned(lock_path)) {
         return true;
     }
     tp_journal_io io = journal_read_nofollow(journal);
     if (!io.ctx) {
+        scan_diagnostic_insert(scan->out, journal,
+                               TP_STATUS_PATH_RESOLVE_FAILED);
         return true;
     }
     tp_journal_peek_result peek;
     memset(&peek, 0, sizeof peek);
     tp_error peek_err = {{0}};
-    if (tp_journal_peek(io, &peek, &peek_err) != TP_STATUS_OK) {
+    const tp_status peek_status = tp_journal_peek(io, &peek, &peek_err);
+    if (peek_status != TP_STATUS_OK) {
+        scan_diagnostic_insert(scan->out, journal, peek_status);
+        tp_journal_peek_free(&peek);
+        return true;
+    }
+
+    static const uint8_t empty_key[16] = {0};
+    const bool has_header_key =
+        memcmp(peek.key, empty_key, sizeof peek.key) != 0;
+    if (peek.status == TP_JOURNAL_RECOVERY_BAD_MAGIC ||
+        (!has_header_key &&
+         (peek.status == TP_JOURNAL_RECOVERY_EMPTY ||
+          peek.status == TP_JOURNAL_RECOVERY_TRUNCATED))) {
+        scan_diagnostic_insert(scan->out, journal, TP_STATUS_BAD_PROJECT);
         tp_journal_peek_free(&peek);
         return true;
     }
@@ -1737,6 +1789,9 @@ static bool scan_candidate(void *context, const char *name, uint64_t size) {
                             peek.status == TP_JOURNAL_RECOVERY_CORRUPT);
     const bool version_mismatch = key_matches &&
                                   peek.status == TP_JOURNAL_RECOVERY_VERSION_MISMATCH;
+    if (key_matches && !adoptable && !version_mismatch) {
+        scan_diagnostic_insert(scan->out, journal, TP_STATUS_BAD_PROJECT);
+    }
     if (adoptable || version_mismatch) {
         tp_recovery_candidate candidate;
         memset(&candidate, 0, sizeof candidate);
