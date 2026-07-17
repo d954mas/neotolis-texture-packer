@@ -58,8 +58,13 @@ static size_t append_json(char *buffer, size_t capacity, size_t used,
     TEST_ASSERT_TRUE(used < capacity);
     va_list args;
     va_start(args, format);
+    /* format is this helper's own variadic parameter, not attacker input -- suppress
+     * locally instead of dropping the target's warning flags. */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat-nonliteral"
     const int written =
         vsnprintf(buffer + used, capacity - used, format, args);
+#pragma clang diagnostic pop
     va_end(args);
     TEST_ASSERT_TRUE(written >= 0);
     TEST_ASSERT_TRUE((size_t)written < capacity - used);

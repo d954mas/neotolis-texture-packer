@@ -1,11 +1,13 @@
 add_executable(tp_test_arena test_arena.c)
 target_link_libraries(tp_test_arena PRIVATE tp_core unity)
 target_compile_options(tp_test_arena PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_arena)   # AGENTS.md invariant: our test TUs too
 add_test(NAME tp_arena COMMAND tp_test_arena)
 
 add_executable(tp_test_name_map test_name_map.c)
 target_link_libraries(tp_test_name_map PRIVATE tp_core unity)
 target_compile_options(tp_test_name_map PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_name_map)   # AGENTS.md invariant: our test TUs too
 add_test(NAME tp_name_map COMMAND tp_test_name_map)
 
 # B1: tp_status_id() stable machine tokens (--json error-id contract), pinned per
@@ -13,6 +15,7 @@ add_test(NAME tp_name_map COMMAND tp_test_name_map)
 add_executable(tp_test_status_id test_status_id.c)
 target_link_libraries(tp_test_status_id PRIVATE tp_core unity)
 target_compile_options(tp_test_status_id PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_status_id)   # AGENTS.md invariant: our test TUs too
 add_test(NAME tp_status_id COMMAND tp_test_status_id)
 
 # F1-00 project identity: 128-bit runtime ID + injectable RNG seam (deterministic).
@@ -245,6 +248,7 @@ add_test(NAME tp_recovery_store COMMAND tp_test_recovery_store "${CMAKE_BINARY_D
 add_executable(tp_test_names test_names.c)
 target_link_libraries(tp_test_names PRIVATE tp_core unity)
 target_compile_options(tp_test_names PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_names)   # AGENTS.md invariant: our test TUs too
 add_test(NAME tp_names COMMAND tp_test_names)
 
 # A2 op-layer: tp_scan directory recursion + image-ext whitelist, moved out of the
@@ -252,6 +256,7 @@ add_test(NAME tp_names COMMAND tp_test_names)
 add_executable(tp_test_scan test_scan.c)
 target_link_libraries(tp_test_scan PRIVATE tp_core unity)
 target_compile_options(tp_test_scan PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_scan)   # AGENTS.md invariant: our test TUs too
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_scan_test")
 add_test(NAME tp_scan COMMAND tp_test_scan "${CMAKE_BINARY_DIR}/tp_scan_test")
 
@@ -263,6 +268,7 @@ add_test(NAME tp_scan COMMAND tp_test_scan "${CMAKE_BINARY_DIR}/tp_scan_test")
 add_executable(tp_test_input test_input.c)
 target_link_libraries(tp_test_input PRIVATE tp_build unity)
 target_compile_options(tp_test_input PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_input)   # AGENTS.md invariant: our test TUs too
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_input_test")
 add_test(NAME tp_input COMMAND tp_test_input "${CMAKE_BINARY_DIR}/tp_input_test")
 
@@ -272,6 +278,7 @@ add_executable(tp_test_transform_decode test_transform_decode.c)
 target_link_libraries(tp_test_transform_decode PRIVATE tp_core unity)
 target_include_directories(tp_test_transform_decode PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_compile_options(tp_test_transform_decode PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_transform_decode)   # AGENTS.md invariant: our test TUs too
 add_test(NAME tp_transform_decode COMMAND tp_test_transform_decode)
 
 # Fixture-driven golden round-trip: builds every fixture case (tp_fixtures) via
@@ -280,6 +287,7 @@ add_test(NAME tp_transform_decode COMMAND tp_test_transform_decode)
 add_executable(tp_test_pack_read test_pack_read.c tp_fixtures.c)
 target_link_libraries(tp_test_pack_read PRIVATE tp_build unity)  # tp_build: fixtures pack via nt_builder
 target_compile_options(tp_test_pack_read PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_pack_read)   # AGENTS.md invariant: our test TUs too
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_test")
 add_test(NAME tp_pack_read COMMAND tp_test_pack_read "${CMAKE_BINARY_DIR}/tp_test")
 
@@ -289,6 +297,7 @@ add_executable(tp_test_uv_property test_uv_property.c)
 target_link_libraries(tp_test_uv_property PRIVATE tp_core unity)
 target_include_directories(tp_test_uv_property PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_compile_options(tp_test_uv_property PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_uv_property)   # AGENTS.md invariant: our test TUs too
 add_test(NAME tp_uv_property COMMAND tp_test_uv_property)
 
 # Phase 1b tp_pack invariants + determinism (plan §3.4): drives nt_builder
@@ -297,6 +306,7 @@ add_test(NAME tp_uv_property COMMAND tp_test_uv_property)
 add_executable(tp_test_pack test_pack.c)
 target_link_libraries(tp_test_pack PRIVATE tp_build unity)  # tp_build: drives nt_builder
 target_compile_options(tp_test_pack PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_pack)   # AGENTS.md invariant: our test TUs too
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_pack_test")
 add_test(NAME tp_pack COMMAND tp_test_pack "${CMAKE_BINARY_DIR}/tp_pack_test")
 
@@ -305,6 +315,7 @@ add_test(NAME tp_pack COMMAND tp_test_pack "${CMAKE_BINARY_DIR}/tp_pack_test")
 add_executable(tp_test_project test_project.c)
 target_link_libraries(tp_test_project PRIVATE tp_core unity)
 target_compile_options(tp_test_project PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_project)   # AGENTS.md invariant: our test TUs too
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_project_test")
 add_test(NAME tp_project COMMAND tp_test_project "${CMAKE_BINARY_DIR}/tp_project_test")
 
@@ -327,6 +338,7 @@ add_test(NAME tp_project_ids COMMAND tp_test_project_ids "${CMAKE_BINARY_DIR}/tp
 add_executable(tp_test_normalize test_normalize.c)
 target_link_libraries(tp_test_normalize PRIVATE tp_core unity)
 target_compile_options(tp_test_normalize PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_normalize)   # AGENTS.md invariant: our test TUs too
 add_test(NAME tp_normalize COMMAND tp_test_normalize)
 
 # Phase 2 json-neotolis golden fidelity + determinism: builds every fixture via
@@ -334,6 +346,7 @@ add_test(NAME tp_normalize COMMAND tp_test_normalize)
 add_executable(tp_test_export_json test_export_json.c tp_fixtures.c)
 target_link_libraries(tp_test_export_json PRIVATE tp_build unity cjson)
 target_compile_options(tp_test_export_json PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_export_json)   # AGENTS.md invariant: our test TUs too
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_export_json_test")
 add_test(NAME tp_export_json COMMAND tp_test_export_json "${CMAKE_BINARY_DIR}/tp_export_json_test")
 
@@ -342,6 +355,7 @@ add_test(NAME tp_export_json COMMAND tp_test_export_json "${CMAKE_BINARY_DIR}/tp
 add_executable(tp_test_export_png test_export_png.c)
 target_link_libraries(tp_test_export_png PRIVATE tp_build unity stb_image)
 target_compile_options(tp_test_export_png PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_export_png)   # AGENTS.md invariant: our test TUs too
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_export_png_test")
 add_test(NAME tp_export_png COMMAND tp_test_export_png "${CMAKE_BINARY_DIR}/tp_export_png_test")
 
@@ -350,6 +364,7 @@ add_test(NAME tp_export_png COMMAND tp_test_export_png "${CMAKE_BINARY_DIR}/tp_e
 add_executable(tp_test_export_run test_export_run.c)
 target_link_libraries(tp_test_export_run PRIVATE tp_build unity cjson)
 target_compile_options(tp_test_export_run PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_export_run)   # AGENTS.md invariant: our test TUs too
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_export_run_test")
 add_test(NAME tp_export_run COMMAND tp_test_export_run "${CMAKE_BINARY_DIR}/tp_export_run_test")
 
@@ -360,6 +375,7 @@ add_test(NAME tp_export_run COMMAND tp_test_export_run "${CMAKE_BINARY_DIR}/tp_e
 add_executable(tp_test_predict test_predict.c)
 target_link_libraries(tp_test_predict PRIVATE tp_build unity)
 target_compile_options(tp_test_predict PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_predict)   # AGENTS.md invariant: our test TUs too
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_predict_test")
 add_test(NAME tp_predict COMMAND tp_test_predict "${CMAKE_BINARY_DIR}/tp_predict_test")
 
@@ -373,6 +389,7 @@ target_link_libraries(tp_test_export_defold PRIVATE tp_build unity stb_image)
 target_compile_options(tp_test_export_defold PRIVATE -U_DLL)
 target_compile_definitions(tp_test_export_defold PRIVATE
     TP_DEFOLD_DEMO_DIR="${CMAKE_SOURCE_DIR}/examples/defold-demo")
+nt_set_warning_flags(tp_test_export_defold)   # AGENTS.md invariant: our test TUs too
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_export_defold_test")
 add_test(NAME tp_export_defold
     COMMAND tp_test_export_defold "${CMAKE_BINARY_DIR}/tp_export_defold_test" "${CMAKE_SOURCE_DIR}/examples/defold-demo")
@@ -398,6 +415,7 @@ add_test(NAME tp_raw_ownership COMMAND tp_test_raw_ownership "${CMAKE_BINARY_DIR
 add_executable(tp_demo_export tp_demo_export.c)
 target_link_libraries(tp_demo_export PRIVATE tp_build)
 target_compile_options(tp_demo_export PRIVATE -U_DLL)
+nt_set_warning_flags(tp_demo_export)   # AGENTS.md invariant: engine warning flags on all our targets
 
 # M0 production-path baseline. The superseded component clone, full-snapshot-as-
 # commit, and throwaway diff-spike executables were removed: this is the single
