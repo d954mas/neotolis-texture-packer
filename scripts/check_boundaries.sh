@@ -416,9 +416,10 @@ if printf '%s\n' \
     hit "R17-selftest" "R17 detector false-positives on legitimate suffix/strftime/PATH/section-reference content"
 fi
 
-# 18. Internal-header discipline. A *_internal.h (or the tp_model_seam.h persistence
-#     seam) is a component-private contract; only the TUs registered for it -- the
-#     owning family plus any explicitly allowlisted seam consumer -- may include it.
+# 18. Internal-header discipline. A *_internal.h (or the tp_model_seam.h /
+#     tp_recovery_live_seam.h lifecycle seams) is a component-private contract;
+#     only the TUs registered for it -- the owning family plus any explicitly
+#     allowlisted seam consumer -- may include it.
 #     Keeps a private contract from leaking into a module it was never designed to
 #     couple with. Scoped to shipping_srcs (test/bench/selftest sources are outside
 #     it and keep wider access, as with every other rule in this script). An include
@@ -440,8 +441,9 @@ tp_idset_internal       tp_idset|tp_txn_idset|tp_journal|tp_txn_apply
 tp_project_internal     tp_project|tp_project_migrate|tp_history|tp_txn_apply
 tp_txn_internal         tp_txn_apply|tp_txn_parse|tp_txn_encode|tp_txn_idset|tp_txn_lower|tp_project_clone|tp_history
 tp_model_seam           tp_session|tp_txn_internal|tp_txn_apply|tp_txn_parse|tp_txn_encode|tp_txn_idset|tp_txn_lower|tp_project_clone|tp_history
+tp_recovery_live_seam   tp_session|tp_recovery|tp_recovery_internal
 tp_session_internal     tp_session|tp_session_snapshot|tp_recovery|tp_validate|tp_export|tp_export_run|tp_input|tp_sprite_index
-tp_recovery_internal    tp_recovery|tp_session
+tp_recovery_internal    tp_recovery
 tp_job_owner_internal   tp_session|tp_job
 tp_source_plan_internal tp_source_plan|tp_op_validate
 tp_srckey_internal      tp_srckey|tp_validate
@@ -471,7 +473,7 @@ _internal_header_scan() {
             next
         }
         guard > 0 { next }
-        (/#include[[:space:]]*"[A-Za-z0-9_]+_internal\.h"/ || /#include[[:space:]]*"tp_model_seam\.h"/) {
+        (/#include[[:space:]]*"[A-Za-z0-9_]+_internal\.h"/ || /#include[[:space:]]*"tp_model_seam\.h"/ || /#include[[:space:]]*"tp_recovery_live_seam\.h"/) {
             if ($0 ~ /boundary-ok:/) next
             line = $0
             if (match(line, /"[A-Za-z0-9_]+\.h"/)) {

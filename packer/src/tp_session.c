@@ -18,7 +18,7 @@
 #include "tp_core/tp_sprite_index.h"
 #include "tp_core/tp_srckey.h"
 #include "tp_core/tp_transaction.h"
-#include "tp_recovery_internal.h"
+#include "tp_recovery_live_seam.h"
 #include "tp_session_internal.h"
 #include "tp_job_owner_internal.h"
 #include "tp_model_seam.h"
