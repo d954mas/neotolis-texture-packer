@@ -853,7 +853,9 @@ void test_failed_live_cleanup_keeps_journal_discoverable_after_restart(void) {
 
     tp_recovery__test_fail_next_quarantine_unlink();
     TEST_ASSERT_EQUAL_INT(TP_STATUS_RECOVERY_CLEANUP_FAILED,
-                          tp_recovery_live_finish(live, false, NULL));
+                          tp_recovery_live_retire(live, NULL));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_RECOVERY_CLEANUP_FAILED,
+                          tp_recovery_live_retire(live, NULL));
     tp_recovery_live_destroy(live);
     tp_model_destroy(model);
     tp_recovery_store_destroy(store);

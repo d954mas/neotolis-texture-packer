@@ -29,8 +29,12 @@
 
 static const char *g_scratch = NULL;
 
-void setUp(void) {}
-void tearDown(void) {}
+void setUp(void) {
+    tp_journal__test_set_record_limit(0U);
+}
+void tearDown(void) {
+    tp_journal__test_set_record_limit(0U);
+}
 
 static int deterministic_fill(void *ctx, uint8_t *out, size_t len) {
     uint8_t *next = (uint8_t *)ctx;
@@ -1548,6 +1552,7 @@ void test_save_as_updates_live_recovery_identity_before_compaction(void) {
     tp_txn_result txn_result;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_session_apply(session, &request, &txn_result, &err));
+    tp_txn_result_free(&txn_result);
     tp_operation_free(&op);
     tp_session_destroy(session);
 
@@ -1577,41 +1582,85 @@ void test_save_as_updates_live_recovery_identity_before_compaction(void) {
     (void)remove(target);
 }
 
-void test_save_reports_preexisting_live_recovery_degradation(void) {
+void test_cross_identity_save_retires_journal_after_metadata_failure(void) {
     char journal[1024];
+    char original[1024];
     char target[1024];
     (void)snprintf(journal, sizeof journal,
                    "%s/session-predegraded.ntpjournal", g_scratch);
+    (void)snprintf(original, sizeof original,
+                   "%s/session-predegraded-a.ntpacker_project", g_scratch);
     (void)snprintf(target, sizeof target,
-                   "%s/session-predegraded.ntpacker_project", g_scratch);
+                   "%s/session-predegraded-b.ntpacker_project", g_scratch);
     (void)remove(journal);
+    (void)remove(original);
     (void)remove(target);
     tp_recovery_store *store = NULL;
     tp_error err = {{0}};
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_recovery_store_create(g_scratch, recovery_key(), &store, &err));
+    tp_session *session = make_session();
+    tp_session_save_result original_result;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_save_as(session, original,
+                                             &original_result, &err));
     tp_recovery_live *live = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_recovery_store_create_live(store, journal, &live, &err));
-    tp_session *session = make_session();
     const tp_recovery_metadata metadata = {
         .timestamp = 76,
-        .project_path = "",
-        .project_name = "session-predegraded",
+        .project_path = original_result.target_path,
+        .project_name = "session-predegraded-a.ntpacker_project",
+        .file_fingerprint = &original_result.file_fingerprint,
     };
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_session_attach_recovery_live(session, live, &metadata, &err));
-    tp_recovery_live__mark_degraded(live);
+    tp_session_snapshot *snapshot = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_snapshot_create(session, &snapshot, &err));
+    tp_operation op = rename_op(tp_session_snapshot_atlas_at(snapshot, 0)->id,
+                                "dirty-before-save-as");
+    tp_txn_request request;
+    memset(&request, 0, sizeof request);
+    request.schema = TP_TXN_SCHEMA;
+    memcpy(request.id_hex, "10000000000000000000000000000076", 33U);
+    request.expected_revision = tp_session_snapshot_revision(snapshot);
+    request.ops = &op;
+    request.op_count = 1U;
+    tp_session_snapshot_destroy(snapshot);
+    tp_txn_result txn_result;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_apply(session, &request, &txn_result, &err));
+    tp_txn_result_free(&txn_result);
+    tp_operation_free(&op);
+    /* Checkpoint + initial META + transaction consume all three slots, so the
+     * Save As identity META fails only after B was published. */
+    tp_journal__test_set_record_limit(3U);
     tp_session_save_result result;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_session_save_as(session, target, &result, &err));
+    tp_journal__test_set_record_limit(0U);
     TEST_ASSERT_TRUE(result.saved);
     TEST_ASSERT_TRUE(result.recovery_degraded);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED, result.recovery_status);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS, result.recovery_status);
+    tp_id128 original_after;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_identity_file_fingerprint(original,
+                                                       &original_after, &err));
+    TEST_ASSERT_TRUE(tp_id128_eq(original_result.file_fingerprint,
+                                 original_after));
     tp_session_destroy(session);
-    TEST_ASSERT_TRUE(test_file_exists(journal));
+    TEST_ASSERT_FALSE(test_file_exists(journal));
+    tp_recovery_candidates candidates;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_recovery_store_scan(store, NULL, &candidates, &err));
+    for (size_t i = 0U; i < candidates.count; ++i) {
+        TEST_ASSERT_NULL(strstr(candidates.items[i].journal_path,
+                                "session-predegraded.ntpjournal"));
+    }
     tp_recovery_store_destroy(store);
     (void)remove(journal);
+    (void)remove(original);
     (void)remove(target);
 }
 
@@ -1751,7 +1800,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_session_owns_live_recovery_clean_close_order);
     RUN_TEST(test_session_preserves_dirty_live_recovery_on_destroy);
     RUN_TEST(test_save_as_updates_live_recovery_identity_before_compaction);
-    RUN_TEST(test_save_reports_preexisting_live_recovery_degradation);
+    RUN_TEST(test_cross_identity_save_retires_journal_after_metadata_failure);
     RUN_TEST(test_degraded_session_live_blocks_mutation_and_preserves_slot);
     RUN_TEST(test_required_recovery_blocks_apply_undo_redo_without_journal);
     return UNITY_END();

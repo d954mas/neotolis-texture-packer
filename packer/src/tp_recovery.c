@@ -114,6 +114,7 @@ struct tp_recovery_live {
     char metadata_name[256];
     bool healthy;
     bool finished;
+    tp_status terminal_status;
 };
 
 static bool has_journal_suffix(const char *name) {
@@ -1094,27 +1095,37 @@ const char *tp_recovery_live_journal_path(const tp_recovery_live *live) {
     return live ? live->journal_path : NULL;
 }
 
-tp_status tp_recovery_live_finish(tp_recovery_live *live,
-                                  bool preserve_journal, tp_error *err) {
+static tp_status live_finish(tp_recovery_live *live, bool preserve_journal,
+                             bool retire_unhealthy, tp_error *err) {
     if (!live) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "recovery live handle is required");
     }
     if (live->finished) {
-        return TP_STATUS_OK;
+        return live->terminal_status;
     }
     if (live->attached_model) {
         tp_model_detach_journal(live->attached_model);
         live->attached_model = NULL;
     }
     tp_status status = TP_STATUS_OK;
-    if (!preserve_journal && live->healthy) {
+    if (!preserve_journal && (live->healthy || retire_unhealthy)) {
         status = live_delete_pin(live, err);
     }
     live_close_pin(live);
     lock_release(&live->lock);
     live->finished = true;
+    live->terminal_status = status;
     return status;
+}
+
+tp_status tp_recovery_live_finish(tp_recovery_live *live,
+                                  bool preserve_journal, tp_error *err) {
+    return live_finish(live, preserve_journal, false, err);
+}
+
+tp_status tp_recovery_live_retire(tp_recovery_live *live, tp_error *err) {
+    return live_finish(live, false, true, err);
 }
 
 void tp_recovery_live_destroy(tp_recovery_live *live) {

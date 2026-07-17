@@ -680,14 +680,6 @@ static tp_status save_as_locked(tp_session *session, const char *path,
         }
         return status;
     }
-    if (migrated) {
-        tp_model__adopt_project(session->model, migrated);
-    }
-    tp_project_lease *old_lease = session->project_lease;
-    session->identity = next_identity;
-    session->project_lease = destination_lease;
-    session->saved_file_fingerprint = fingerprint;
-    session->has_saved_file_fingerprint = true;
     bool recovery_degraded = !recovery_is_healthy(session);
     tp_status recovery_status = recovery_degraded
                                     ? TP_STATUS_JOURNAL_FAILED
@@ -701,6 +693,30 @@ static tp_status save_as_locked(tp_session *session, const char *path,
             session->recovery_healthy = false;
         }
     }
+    if (recovery_degraded && !same_identity && session->recovery_live) {
+        tp_error cleanup_error = {{0}};
+        status = tp_recovery_live_retire(session->recovery_live,
+                                         &cleanup_error);
+        if (status != TP_STATUS_OK) {
+            tp_project_destroy(migrated);
+            if (destination_lease != session->project_lease) {
+                tp_project_lease_release(destination_lease);
+            }
+            return tp_error_set(
+                err, status, "%s",
+                cleanup_error.msg[0]
+                    ? cleanup_error.msg
+                    : "stale recovery identity could not be retired");
+        }
+    }
+    if (migrated) {
+        tp_model__adopt_project(session->model, migrated);
+    }
+    tp_project_lease *old_lease = session->project_lease;
+    session->identity = next_identity;
+    session->project_lease = destination_lease;
+    session->saved_file_fingerprint = fingerprint;
+    session->has_saved_file_fingerprint = true;
     tp_model_mark_saved(session->model);
     session->model_generation++;
     if (!recovery_degraded) {

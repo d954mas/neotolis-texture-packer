@@ -27,6 +27,8 @@ bool tp_recovery_live_healthy(const tp_recovery_live *live);
 const char *tp_recovery_live_journal_path(const tp_recovery_live *live);
 tp_status tp_recovery_live_finish(tp_recovery_live *live,
                                   bool preserve_journal, tp_error *err);
+/* Retire a stale identity slot even after journal health was lost. */
+tp_status tp_recovery_live_retire(tp_recovery_live *live, tp_error *err);
 void tp_recovery_live_destroy(tp_recovery_live *live);
 tp_status tp_recovery_store_scan(tp_recovery_store *store, const char *live_slot,
                                  tp_recovery_candidates *out, tp_error *err);
