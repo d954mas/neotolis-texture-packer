@@ -9,7 +9,7 @@
       "targets": [
         {
           "exporter_id": "json-neotolis",
-          "out_path": "out/animals.json"
+          "out_path": "out/animals"
         },
         {
           "exporter_id": "defold",
