@@ -688,6 +688,85 @@ void test_wrong_type_bad_project(void) {
     TEST_ASSERT_NULL(loaded);
 }
 
+static void assert_project_json_rejected(const char *json) {
+    tp_project *loaded = NULL;
+    tp_error err = {{0}};
+    const tp_status status =
+        tp_project_load_buffer(json, strlen(json), &loaded, &err);
+    const bool returned_project = loaded != NULL;
+    tp_project_destroy(loaded);
+
+    /* TP_STATUS_BAD_PROJECT is the public structured parse/invalid-project
+     * status promised by tp_project.h. A rejection must not leak a partial
+     * model and must carry actionable context for headless clients. */
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_BAD_PROJECT, status, json);
+    TEST_ASSERT_FALSE_MESSAGE(returned_project, json);
+    TEST_ASSERT_TRUE_MESSAGE(err.msg[0] != '\0', json);
+}
+
+void test_loader_rejects_trailing_non_whitespace(void) {
+    assert_project_json_rejected(
+        "{\"version\":4,\"atlases\":[]} trailing");
+}
+
+void test_loader_rejects_non_finite_atlas_float(void) {
+    assert_project_json_rejected(
+        "{\"version\":1,\"atlases\":[{\"name\":\"a\","
+        "\"pixels_per_unit\":1e999}]}");
+}
+
+void test_loader_rejects_non_finite_sprite_origin(void) {
+    assert_project_json_rejected(
+        "{\"version\":1,\"atlases\":[{\"name\":\"a\",\"sprites\":["
+        "{\"name\":\"hero\",\"origin\":[1e999,0.5]}]}]}");
+}
+
+void test_loader_rejects_fractional_version(void) {
+    assert_project_json_rejected(
+        "{\"version\":1.5,\"atlases\":[]}");
+}
+
+void test_loader_rejects_fractional_padding(void) {
+    assert_project_json_rejected(
+        "{\"version\":1,\"atlases\":[{\"name\":\"a\",\"padding\":1.5}]}");
+}
+
+void test_loader_rejects_out_of_int_range_max_size(void) {
+    assert_project_json_rejected(
+        "{\"version\":1,\"atlases\":[{\"name\":\"a\","
+        "\"max_size\":2147483648}]}");
+}
+
+void test_loader_rejects_out_of_int_range_padding(void) {
+    assert_project_json_rejected(
+        "{\"version\":1,\"atlases\":[{\"name\":\"a\","
+        "\"padding\":2147483648}]}");
+}
+
+void test_loader_rejects_non_numeric_origin_items(void) {
+    assert_project_json_rejected(
+        "{\"version\":1,\"atlases\":[{\"name\":\"a\",\"sprites\":["
+        "{\"name\":\"hero\",\"origin\":[\"left\",null]}]}]}");
+}
+
+void test_loader_rejects_non_numeric_slice9_items(void) {
+    assert_project_json_rejected(
+        "{\"version\":1,\"atlases\":[{\"name\":\"a\",\"sprites\":["
+        "{\"name\":\"hero\",\"slice9\":[1,\"right\",3,null]}]}]}");
+}
+
+void test_loader_rejects_fractional_slice9_items(void) {
+    assert_project_json_rejected(
+        "{\"version\":1,\"atlases\":[{\"name\":\"a\",\"sprites\":["
+        "{\"name\":\"hero\",\"slice9\":[1.5,2,3,4]}]}]}");
+}
+
+void test_loader_rejects_out_of_uint16_range_slice9_items(void) {
+    assert_project_json_rejected(
+        "{\"version\":1,\"atlases\":[{\"name\":\"a\",\"sprites\":["
+        "{\"name\":\"hero\",\"slice9\":[65536,2,3,4]}]}]}");
+}
+
 /* 4d. unknown extra keys ignored (forward compat) */
 void test_unknown_keys_ignored(void) {
     char path[512];
@@ -1710,6 +1789,17 @@ int main(int argc, char **argv) {
     RUN_TEST(test_version_newer_refused);
     RUN_TEST(test_malformed_bad_project);
     RUN_TEST(test_wrong_type_bad_project);
+    RUN_TEST(test_loader_rejects_trailing_non_whitespace);
+    RUN_TEST(test_loader_rejects_non_finite_atlas_float);
+    RUN_TEST(test_loader_rejects_non_finite_sprite_origin);
+    RUN_TEST(test_loader_rejects_fractional_version);
+    RUN_TEST(test_loader_rejects_fractional_padding);
+    RUN_TEST(test_loader_rejects_out_of_int_range_max_size);
+    RUN_TEST(test_loader_rejects_out_of_int_range_padding);
+    RUN_TEST(test_loader_rejects_non_numeric_origin_items);
+    RUN_TEST(test_loader_rejects_non_numeric_slice9_items);
+    RUN_TEST(test_loader_rejects_fractional_slice9_items);
+    RUN_TEST(test_loader_rejects_out_of_uint16_range_slice9_items);
     RUN_TEST(test_unknown_keys_ignored);
     RUN_TEST(test_absolute_path_relativized);
     RUN_TEST(test_resolve_path);

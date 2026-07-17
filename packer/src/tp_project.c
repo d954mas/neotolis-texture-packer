@@ -2,7 +2,9 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <float.h>
 #include <limits.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -2175,16 +2177,51 @@ tp_status tp_project_save(tp_project *p, const char *path, tp_error *err) {
 /* load                                                                     */
 /* ======================================================================== */
 
+static tp_status tp_json_int_in_range(const cJSON *item, const char *label,
+                                      int minimum, int maximum, int *out,
+                                      tp_error *err) {
+    if (!cJSON_IsNumber(item)) {
+        return tp_error_set(err, TP_STATUS_BAD_PROJECT,
+                            "field '%s' must be a number", label);
+    }
+    const double value = item->valuedouble;
+    if (!isfinite(value) || value < (double)minimum ||
+        value > (double)maximum) {
+        return tp_error_set(err, TP_STATUS_BAD_PROJECT,
+                            "field '%s' must be an integer in [%d,%d]",
+                            label, minimum, maximum);
+    }
+    const int converted = (int)value;
+    if ((double)converted != value) {
+        return tp_error_set(err, TP_STATUS_BAD_PROJECT,
+                            "field '%s' must be an integer", label);
+    }
+    *out = converted;
+    return TP_STATUS_OK;
+}
+
+static tp_status tp_json_float(const cJSON *item, const char *label,
+                               float *out, tp_error *err) {
+    if (!cJSON_IsNumber(item)) {
+        return tp_error_set(err, TP_STATUS_BAD_PROJECT,
+                            "field '%s' must be a number", label);
+    }
+    const double value = item->valuedouble;
+    if (!isfinite(value) || value < -(double)FLT_MAX ||
+        value > (double)FLT_MAX) {
+        return tp_error_set(err, TP_STATUS_BAD_PROJECT,
+                            "field '%s' must be a finite 32-bit number", label);
+    }
+    *out = (float)value;
+    return TP_STATUS_OK;
+}
+
 static tp_status tp_opt_int(const cJSON *o, const char *k, int *dst, tp_error *err) {
     const cJSON *it = cJSON_GetObjectItemCaseSensitive(o, k);
     if (!it) {
         return TP_STATUS_OK;
     }
-    if (!cJSON_IsNumber(it)) {
-        return tp_error_set(err, TP_STATUS_BAD_PROJECT, "field '%s' must be a number", k);
-    }
-    *dst = (int)it->valuedouble;
-    return TP_STATUS_OK;
+    return tp_json_int_in_range(it, k, INT_MIN, INT_MAX, dst, err);
 }
 
 static tp_status tp_opt_float(const cJSON *o, const char *k, float *dst, tp_error *err) {
@@ -2192,11 +2229,7 @@ static tp_status tp_opt_float(const cJSON *o, const char *k, float *dst, tp_erro
     if (!it) {
         return TP_STATUS_OK;
     }
-    if (!cJSON_IsNumber(it)) {
-        return tp_error_set(err, TP_STATUS_BAD_PROJECT, "field '%s' must be a number", k);
-    }
-    *dst = (float)it->valuedouble;
-    return TP_STATUS_OK;
+    return tp_json_float(it, k, dst, err);
 }
 
 static tp_status tp_opt_bool(const cJSON *o, const char *k, bool *dst, tp_error *err) {
@@ -2427,8 +2460,16 @@ static tp_status tp_load_sprite(tp_project_atlas *a, const cJSON *js,
         if (!cJSON_IsArray(origin) || cJSON_GetArraySize(origin) != 2) {
             return tp_error_set(err, TP_STATUS_BAD_PROJECT, "sprite 'origin' must be a [x,y] array");
         }
-        s->origin_x = (float)cJSON_GetArrayItem(origin, 0)->valuedouble;
-        s->origin_y = (float)cJSON_GetArrayItem(origin, 1)->valuedouble;
+        st = tp_json_float(cJSON_GetArrayItem(origin, 0), "origin[0]",
+                           &s->origin_x, err);
+        if (st != TP_STATUS_OK) {
+            return st;
+        }
+        st = tp_json_float(cJSON_GetArrayItem(origin, 1), "origin[1]",
+                           &s->origin_y, err);
+        if (st != TP_STATUS_OK) {
+            return st;
+        }
     }
     const cJSON *rename = cJSON_GetObjectItemCaseSensitive(js, "rename");
     if (rename) {
@@ -2447,7 +2488,14 @@ static tp_status tp_load_sprite(tp_project_atlas *a, const cJSON *js,
             return tp_error_set(err, TP_STATUS_BAD_PROJECT, "sprite 'slice9' must be a [l,r,t,b] array");
         }
         for (int k = 0; k < 4; k++) {
-            s->slice9_lrtb[k] = (uint16_t)cJSON_GetArrayItem(slice9, k)->valuedouble;
+            int value = 0;
+            st = tp_json_int_in_range(cJSON_GetArrayItem(slice9, k),
+                                      "slice9 item", 0, UINT16_MAX, &value,
+                                      err);
+            if (st != TP_STATUS_OK) {
+                return st;
+            }
+            s->slice9_lrtb[k] = (uint16_t)value;
         }
     }
     /* Per-sprite packing overrides (absent = inherit, already seeded to -1). Values
@@ -2465,11 +2513,13 @@ static tp_status tp_load_sprite(tp_project_atlas *a, const cJSON *js,
     for (size_t i = 0; i < sizeof ov_fields / sizeof ov_fields[0]; i++) {
         const cJSON *jv = cJSON_GetObjectItemCaseSensitive(js, ov_fields[i].key);
         if (jv) {
-            if (!cJSON_IsNumber(jv)) {
-                return tp_error_set(err, TP_STATUS_BAD_PROJECT, "sprite override '%s' must be a number",
-                                    ov_fields[i].key);
+            int value = 0;
+            st = tp_json_int_in_range(jv, ov_fields[i].key, INT16_MIN,
+                                      INT16_MAX, &value, err);
+            if (st != TP_STATUS_OK) {
+                return st;
             }
-            *(int16_t *)((char *)s + ov_fields[i].offset) = (int16_t)jv->valuedouble;
+            *(int16_t *)((char *)s + ov_fields[i].offset) = (int16_t)value;
         }
     }
     return TP_STATUS_OK;
@@ -3020,6 +3070,23 @@ static tp_status tp_project_parse(const char *text, size_t len, tp_project **out
         return tp_error_set(err, TP_STATUS_BAD_PROJECT, "tp_project_load: malformed JSON near offset %ld", off);
     }
 
+    const char *const text_end = text + len;
+    const char *trailing = parse_end;
+    while (trailing && trailing < text_end &&
+           (*trailing == ' ' || *trailing == '\t' || *trailing == '\r' ||
+            *trailing == '\n')) {
+        trailing++;
+    }
+    if (!trailing || trailing != text_end) {
+        const long off = trailing && trailing >= text
+                             ? (long)(trailing - text)
+                             : -1L;
+        cJSON_Delete(root);
+        return tp_error_set(
+            err, TP_STATUS_BAD_PROJECT,
+            "tp_project_load: trailing data near offset %ld", off);
+    }
+
     status = TP_STATUS_OK;
     tp_project *p = NULL;
 
@@ -3029,11 +3096,17 @@ static tp_status tp_project_parse(const char *text, size_t len, tp_project **out
     }
 
     const cJSON *version = cJSON_GetObjectItemCaseSensitive(root, "version");
-    if (!cJSON_IsNumber(version)) {
-        status = tp_error_set(err, TP_STATUS_BAD_PROJECT, "tp_project_load: missing integer 'version'");
+    int file_version = 0;
+    if (!version) {
+        status = tp_error_set(err, TP_STATUS_BAD_PROJECT,
+                              "tp_project_load: missing integer 'version'");
         goto done;
     }
-    const int file_version = (int)version->valuedouble;
+    status = tp_json_int_in_range(version, "version", INT_MIN, INT_MAX,
+                                  &file_version, err);
+    if (status != TP_STATUS_OK) {
+        goto done;
+    }
     if (file_version > TP_PROJECT_SCHEMA_VERSION) {
         status = tp_error_set(err, TP_STATUS_BAD_VERSION,
                               "project schema version %d needs a newer ntpacker (this build supports %d)",
