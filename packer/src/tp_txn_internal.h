@@ -1,7 +1,7 @@
 #ifndef TP_CORE_SRC_TP_TXN_INTERNAL_H
 #define TP_CORE_SRC_TP_TXN_INTERNAL_H
 
-/* F2-02 transaction-engine internals shared across the transaction TUs
+/* Transaction-engine internals shared across the transaction TUs
  * (project clone / semantic identity / apply / parse / encode / idset). Not a
  * public header -- tests include it from src/ the same way test_op_apply.c
  * includes tp_op_internal.h. */
@@ -25,7 +25,7 @@ struct tp_model {
     struct tp_side_effect_coordinator *coordinator; /* optional borrowed hooks */
 };
 
-/* F2-04 fix C1: the shared id-set behind a memory idstore (NULL for a foreign store).
+/* The shared id-set behind a memory idstore (NULL for a foreign store).
  * tp_model_attach_journal uses it to migrate ids the model committed journal-less into
  * the fresh journal's retained-id index. Defined in tp_txn_idset.c. */
 struct tp_idset;

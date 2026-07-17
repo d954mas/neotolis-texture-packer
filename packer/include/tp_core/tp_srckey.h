@@ -3,8 +3,7 @@
 
 /*
  * Persistent source-local key normalization + portability validation (master spec
- * §5.3, §5.6, §59 item 8). Promoted from the accepted, 3-OS-green C0-01 spike
- * (packer/spike/c0/src/tp_c0_srckey.c) into the production tp_status model.
+ * §5.3, §5.6, §59 item 8).
  *
  * A source key addresses a sprite within a source root. Canonical form is:
  *   - UTF-8, Unicode NFC;
@@ -23,8 +22,8 @@
  * outputs go into caller buffers (no cross-CRT malloc handoff): the utf8proc
  * allocation is consumed and freed inside the translation unit.
  *
- * SCOPE: F1-02 promotes these primitives and validates source paths with them;
- * full sprite-key resolution (tp_sprite_id wiring) lands in F1-03.
+ * SCOPE: this header promotes these primitives and validates source paths with them;
+ * full sprite-key resolution (tp_sprite_id wiring) happens separately.
  */
 
 #include <stdbool.h>

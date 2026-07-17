@@ -206,8 +206,8 @@ tp_status gui_project_copy_atlas_name(tp_id128 atlas_id, char *out, size_t capac
 /* Sets/clears a sprite's rename export-name override (empty/NULL clears it). */
 bool gui_project_set_sprite_rename(const gui_sprite_ref *sprite, const char *rename);
 
-/* The 10 atlas packing knobs, as a closed selector for gui_project_set_atlas_setting
- * (F2-05b-i). Each maps to one tp_atlas_field_mask bit; the panel edits ONE knob per
+/* The 10 atlas packing knobs, as a closed selector for gui_project_set_atlas_setting.
+ * Each maps to one tp_atlas_field_mask bit; the panel edits ONE knob per
  * gesture, so the op carries a single-bit mask (byte-identical to the old in-place write). */
 typedef enum {
     GUI_ATLAS_MAX_SIZE = 0,
@@ -279,7 +279,7 @@ bool gui_project_set_target_enabled(const gui_target_ref *target, bool enabled);
 bool gui_project_set_target_exporter(const gui_target_ref *target,
                                      const char *exporter_id);
 
-/* --- undo / redo (F2-03 diff history) --- */
+/* --- undo / redo (diff history) --- */
 bool gui_project_can_undo(void); /* true if a committed step OR a buffered gesture can be reverted */
 bool gui_project_can_redo(void);
 int gui_project_undo_depth(void); /* committed undoable steps from the session snapshot */
@@ -294,7 +294,7 @@ bool gui_project_redo(void);
 /* --- file operations (paths explicit; dialogs live in the UI layer) --- */
 /* Fresh empty project: replaces the current one, clears path + both bits. Returns false
  * (KEEPING the current project intact) only when creating/wrapping the fresh project OOMs
- * (F2-05b-i F3: never lose the open project on an allocation failure). */
+ * (never lose the open project on an allocation failure). */
 bool gui_project_new(void);
 /* Loads `path`; on failure fills err_out (from tp_error) and leaves the current project
  * intact. On success replaces it, sets path, clears dirty, marks preview stale. */

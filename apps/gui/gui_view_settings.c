@@ -1,6 +1,4 @@
-/* Right settings panel view (see gui_view_settings.h). Split out of main.c (GUI decomposition
- * step 4) as a pure move -- function bodies + panel-local statics relocated verbatim, no behavior
- * change. */
+/* Right settings panel view (see gui_view_settings.h). */
 
 #include "gui_view_settings.h"
 
@@ -24,7 +22,7 @@
 #include "gui_rows.h"
 #include "gui_project.h"
 #include "gui_pack.h"
-#include "gui_shell.h" /* close_menubar_menus (interim -- moves to gui_view_chrome in step 6b) */
+#include "gui_shell.h" /* close_menubar_menus */
 
 #include <limits.h>
 #include <math.h>
@@ -344,8 +342,8 @@ static void declare_atlas_settings(nt_ui_context_t *ctx,
         panel_note(ctx, "Pages over 4096 may not load on mobile GPUs / stock engine runtime.");
     }
     int iv = 0;
-    /* No committed-value guard (`iv != a->padding`) here or on the other coalescable knobs below
-     * (F2-05b-ii-A #1): during a buffered gesture the committed model is FROZEN, so a control returned
+    /* No committed-value guard (`iv != a->padding`) here or on the other coalescable knobs below:
+     * during a buffered gesture the committed model is FROZEN, so a control returned
      * to its committed value would SKIP the correcting enqueue while the pending buffer kept the stale
      * intermediate -> the flush then committed the WRONG value (data loss). Every changed frame now
      * enqueues (coalesced, latest wins); a gesture that nets back to committed is dropped by the flush-
@@ -807,7 +805,7 @@ static void declare_animation_editor(nt_ui_context_t *ctx,
     if (editing_id) {
         PANEL_ROW_BEGIN("Id", &g_row) {
             if (render_rename_field(ctx)) {
-                s_pending_commit_edit_enter = true; /* defer: never commit while holding `an` (F2-05b-i) */
+                s_pending_commit_edit_enter = true; /* defer: never commit while holding `an` */
             }
         }
         PANEL_ROW_END;

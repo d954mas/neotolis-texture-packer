@@ -4,9 +4,8 @@
 /* Row model + selection-set helpers for the ntpacker GUI: the flattened per-atlas sprite rows
  * (rebuilt each frame), the canonical leaf-sprite multi-select, natural-order sorting +
  * the sort scratch, the common-name-prefix helper, the canvas region -> row selection sync, and
- * the shared path/name string helpers. Split out of main.c (GUI decomposition step 2) as a pure
- * move -- no behavior change. Include discipline: rows -> gui_state + model headers only; it must
- * never include a sibling view/actions/widgets header. */
+ * the shared path/name string helpers. Include discipline: rows -> gui_state + model headers only;
+ * it must never include a sibling view/actions/widgets header. */
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -39,7 +38,7 @@ void multi_sel_set_single_ref(tp_id128 source_id, const char *source_key);
 /* qsort adapter for natural order (wraps tp_nat_cmp; digit runs compare numerically). */
 int nat_cmp_qsort(const void *a, const void *b);
 /* Shared scratch for the selection-gesture sort (filled by the animation ops in gui_actions). Growable
- * companions to the multi-select set (P1 fix, step 7): they MUST hold the whole selection or the sort
+ * companions to the multi-select set: they MUST hold the whole selection or the sort
  * path would re-introduce the old truncation. sel_sort_reserve grows both to >= n (false == OOM, old
  * capacity kept); callers must reserve before writing. */
 extern gui_selected_sprite *s_sel_sort_buf;
@@ -47,7 +46,7 @@ extern const char **s_sel_sort_ptr;
 extern tp_op_sprite_ref *s_sel_sort_refs;
 bool sel_sort_reserve(int n);
 
-/* --- flattened sprite rows for the current atlas (growable; P1 fix, step 7) --- */
+/* --- flattened sprite rows for the current atlas (growable) --- */
 typedef struct sprite_row {
     int src;
     int child;

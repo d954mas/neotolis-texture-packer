@@ -1,9 +1,8 @@
 /* ntpacker-gui: the startup CLI-arg open/defer decision, extracted as a PURE function.
  *
- * H/P1-8 fix: main()'s crash-recovery data-loss guard used to be inline branches with ZERO automated
- * coverage (a refactor that restored an unconditional gui_project_open on a CLI arg would ship green).
- * This is the SINGLE SOURCE OF TRUTH for that decision: it does NO I/O and writes NO status -- the
- * caller maps the returned action to a status line and/or a gui_project_open. Being pure (bools in,
+ * This is the SINGLE SOURCE OF TRUTH for main()'s crash-recovery data-loss guard: it does NO I/O and
+ * writes NO status -- the caller maps the returned action to a status line and/or a gui_project_open.
+ * Being pure (bools in,
  * enum out) it is directly headless-testable (main() is not); the selftest drives the full truth table
  * (J14). Truth table:
  *

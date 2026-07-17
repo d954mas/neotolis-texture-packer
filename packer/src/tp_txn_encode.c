@@ -1,12 +1,12 @@
 /*
- * F2-02 task 3 (encode half): canonical BYTE-STABLE encode of a transaction request
+ * Canonical BYTE-STABLE encode of a transaction request
  * and result. Same conventions as the tp_project writer (src/tp_sb.h): 2-space
  * indent, LF, keys ASCENDING with the discriminator ("schema" at the envelope, "op"
  * in an operation) first, a trailing newline; integral 64-bit numbers via PRId64
  * (no decimal point), fractional via "%.9g"; label/author sparse-omitted. Goldens
  * are byte-identical on every OS.
  *
- * Each operation object is emitted by REUSING the F2-01 tp_operation_encode (the one
+ * Each operation object is emitted by REUSING tp_operation_encode (the one
  * owner of the per-kind canonical op shape) and re-indenting its 2-space-based
  * output into the operations array -- so a batch op is byte-identical to the same op
  * encoded standalone, and no per-kind emit logic is duplicated here.
@@ -266,7 +266,7 @@ char *tp_txn_result_encode(const tp_txn_result *res) {
                 bool ef = true;
                 tp_obj_key(&sb, 4, &ef, "code");
                 tp_sb_json_string(&sb, tp_status_id(res->errors[i].code));
-                if (res->errors[i].field[0]) { /* sparse: omit when "" -- matches F2-01 tp_op_result_encode */
+                if (res->errors[i].field[0]) { /* sparse: omit when "" -- matches tp_op_result_encode */
                     tp_obj_key(&sb, 4, &ef, "field");
                     tp_sb_json_string(&sb, res->errors[i].field);
                 }

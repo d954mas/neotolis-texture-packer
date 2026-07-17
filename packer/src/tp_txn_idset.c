@@ -1,8 +1,8 @@
 /*
- * F2-02 task 6: the transaction-id idempotency retention store, in-memory default
+ * The transaction-id idempotency retention store, in-memory default
  * behind the pluggable tp_txn_idstore interface (master spec §7.2). Re-submitting a
  * committed 32-hex transaction id is a duplicate the caller rejects (duplicate_id);
- * F2-04's on-disk journal can back the SAME interface later without touching the
+ * the on-disk journal can back the SAME interface later without touching the
  * apply core. Only COMMITTED ids are ever recorded, so idempotency blocks exactly
  * the retries of applied transactions.
  *
@@ -35,7 +35,7 @@ static void mem_destroy(void *ctx) {
     }
 }
 
-/* F2-04 fix C1: the internal set behind a memory idstore (or NULL for a foreign
+/* The internal set behind a memory idstore (or NULL for a foreign
  * store), so tp_model_attach_journal can migrate ids committed BEFORE a journal was
  * attached into the fresh journal's retained-id index. Mirrors mem_of() in
  * tp_journal_io.c: recognized by the `contains` function pointer. */

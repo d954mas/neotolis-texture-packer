@@ -133,7 +133,7 @@ static int check_inspect(const cJSON *root, int argc, char **argv) {
         return fail("inspect: atlas[0] missing name/settings/sources/sprites/animations/targets");
     }
     const cJSON *sprites = cJSON_GetObjectItemCaseSensitive(a0, "sprites");
-    /* Every sprite carries its resolved keys + derived identity (F1-03). */
+    /* Every sprite carries its resolved keys + derived identity. */
     const cJSON *sp = NULL;
     cJSON_ArrayForEach(sp, sprites) {
         if (!cJSON_IsString(cJSON_GetObjectItemCaseSensitive(sp, "name")) ||

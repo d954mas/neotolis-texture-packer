@@ -1,10 +1,10 @@
 /*
- * F2-03 tasks 2/3/5: the diff-record lifecycle + a MINIMAL in-memory undo/redo
+ * The diff-record lifecycle + a MINIMAL in-memory undo/redo
  * history and the model-facing Undo/Redo. A committed transaction pushes ONE record
  * (its ordered per-op diffs + label/author + produced revision); a NEW transaction
  * applied after an Undo discards the redo branch (cursor semantics).
  *
- * Undo/Redo reuse the F2-02 clone/swap for STAGE-THEN-COMMIT atomicity: the inverse
+ * Undo/Redo reuse the clone/swap for STAGE-THEN-COMMIT atomicity: the inverse
  * (or forward) diff is applied to a CLONE and swapped in only on FULL success, so an
  * allocation failure, corrupted diff, checkpoint serialization fault, or durable
  * journal-append failure rolls back with the live model, revision, and cursor
@@ -136,7 +136,7 @@ void tp_history_destroy(tp_history *h) {
     free(h);
 }
 
-/* Test-only fault seam (fix [3] pin): force the next history admission to report OOM
+/* Test-only fault seam: force the next history admission to report OOM
  * once, then re-arm to off. Lets a test prove the failure happens BEFORE the id is
  * recorded, so the same transaction id stays retryable (never poisoned to DUPLICATE_ID). */
 static _Thread_local bool s_reserve_fail = false;

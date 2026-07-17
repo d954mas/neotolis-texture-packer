@@ -2,7 +2,7 @@
 #define TP_CORE_SRC_TP_JOURNAL_INTERNAL_H
 
 /*
- * F2-04 journal internals shared between tp_journal.c / tp_journal_io.c and the
+ * Journal internals shared between tp_journal.c / tp_journal_io.c and the
  * fault suite (test_journal.c includes this from src/ the same way test_diff.c
  * includes tp_diff_internal.h). Exposes the byte-exact record layout constants,
  * the endian-stable CRC-32, and the memory-io fault-injection seams so the suite
@@ -30,7 +30,7 @@ tp_journal_io tp_journal_io_file_adopt_fd_read(int native_fd);
 #define TP_JRN_LEN_FIELD 4    /* payload_len u32 BE */
 #define TP_JRN_CRC_FIELD 4    /* crc32 u32 BE */
 
-/* F2-04 v2 (plan S18 R / P1-5): every RECORD frame begins with this fixed sync-word so
+/* v2 framing: every RECORD frame begins with this fixed sync-word so
  * recovery can tell a genuinely torn TAIL from a mid-stream record whose length field was
  * corrupted to a bloated value -- which would otherwise masquerade as a torn tail and get
  * the acknowledged records AFTER it deleted. On any framing/CRC break, recovery scans
@@ -63,7 +63,7 @@ int64_t tp_jrn_get_i64(const uint8_t *p);
 
 /* ---- recovery glue seams (shared with tp_txn_apply.c's tp_model_recover) -------- */
 
-/* F2-04 fix C3: mark the journal poisoned so it refuses further appends. Called by the
+/* Mark the journal poisoned so it refuses further appends. Called by the
  * recovery glue when a torn tail could NOT be truncated away -- a still-present bad
  * record must never hide a later acknowledged append. NULL-safe. */
 void tp_journal__poison(tp_journal *j);
@@ -148,7 +148,7 @@ void tp_journal__test_set_file_limit(size_t limit);
 /* Fail the next recovery metadata materialization before it allocates. */
 void tp_journal__test_fail_next_metadata_materialize(void);
 
-/* F2-04 fix C1: register an already-durable retained id into the in-memory index
+/* Register an already-durable retained id into the in-memory index
  * WITHOUT writing a record. tp_model_attach_journal calls it to migrate ids the model
  * committed journal-less, BEFORE the initial checkpoint (so the checkpoint id-list AND
  * the live index both carry them). OOM -> non-OK; a bad/NULL arg -> INVALID_ARGUMENT. */

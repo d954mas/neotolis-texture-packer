@@ -2,16 +2,16 @@
 #define TP_CORE_TP_IDENTITY_H
 
 /*
- * Project identity boundary (F1-00; master spec §5.1, §15-16, §59 items 1-3).
+ * Project identity boundary (master spec §5.1, §15-16, §59 items 1-3).
  *
  * Saved-project identity is the canonical normalized path of the
  * `.ntpacker_project` file; an unsaved session's identity is a random 128-bit
  * runtime ID (NOT a path). `Save As`, and the first Save of an unsaved session,
  * are ATOMIC identity transitions. Recovery/journal/live-session consumers (F2+)
  * key off this boundary. Identity is NEVER written into `.ntpacker_project` --
- * it is exposed only through the runtime DTO below (F1-00 task 4, §59 item 2).
+ * it is exposed only through the runtime DTO below (§59 item 2).
  *
- * The canonical path has two layers, matching the accepted C0-01 contract:
+ * The canonical path has two layers, matching the accepted contract:
  *   (a) LEXICAL canonicalization -- separators, drive-letter case, UNC, `\\?\`
  *       device-alias policy, `.`/`..`/repeated-sep normalization. Pure, so a
  *       not-yet-created Save-As destination canonicalizes fine.
@@ -20,7 +20,7 @@
  *       symlinks/junctions are followed to their target); a not-yet-created
  *       destination resolves its existing PARENT directory and appends the final
  *       component lexically. `..` is resolved LEXICALLY *before* realpath (the
- *       C0-01-pinned policy: identity is textual for `..`, not symlink-physical).
+ *       policy: identity is textual for `..`, not symlink-physical).
  *
  * Case equality policy: POSIX byte-exact (case-sensitive); Windows folds ASCII
  * case. All entry points return a structured tp_status + tp_error on bad input

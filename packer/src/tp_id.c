@@ -12,9 +12,8 @@
 #endif
 
 /* ======================================================================== */
-/* RNG seam (promoted verbatim from C0-01 tp_c0_id.c: no engine-private API,  */
-/* no extra link deps). A short read / failure is surfaced upstream as a     */
-/* structured tp_status, never an abort.                                     */
+/* RNG seam (no engine-private API, no extra link deps). A short read /     */
+/* failure is surfaced upstream as a structured tp_status, never an abort.  */
 /* ======================================================================== */
 
 static int rng_os_fill(void *ctx, uint8_t *out, size_t len) {

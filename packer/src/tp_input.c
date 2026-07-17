@@ -8,7 +8,7 @@
 #include "tp_core/tp_names.h"
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_scan.h"
-#include "tp_strutil.h" /* shared tp_strdup / tp_path_basename (fix [8]) */
+#include "tp_strutil.h" /* shared tp_strdup / tp_path_basename */
 #include "tp_session_internal.h"
 
 /* Growable desc vector, local to a build; handed off to tp_pack_input on success. */

@@ -1,5 +1,5 @@
 /*
- * F2-03 task 2: apply one op-diff to restore the BEFORE (Undo) or AFTER (Redo)
+ * Apply one op-diff to restore the BEFORE (Undo) or AFTER (Redo)
  * state. The caller applies a whole record to a CLONE of the live model and swaps it
  * in only on full success (tp_history.c), so a failure here (allocator OR a corrupted
  * diff) discards the clone with the live model byte-unchanged -- STAGE-THEN-COMMIT.

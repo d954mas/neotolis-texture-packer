@@ -1,5 +1,5 @@
 /*
- * F2-03: element-level deep-copy / free + positional collection primitives for the
+ * Element-level deep-copy / free + positional collection primitives for the
  * semantic diff. The diff STATE-CAPTURES touched entities (docs/decisions/0012), so
  * it needs to copy one source/sprite/animation/target/frame/atlas-subtree out of the
  * live model and, on inverse/redo, splice a deep copy back in at an exact index.
@@ -7,10 +7,10 @@
  * These mirror tp_project_clone.c's element copies (fill_atlas/anim/source/target/
  * frame/copy_sprite_fields <-> clone_atlas/clone_frames) but are kept SEPARATE on
  * purpose: routing them through the diff fault-seam (tp_diff__alloc), not the clone
- * seam (cl_alloc), keeps F2-02's clone alloc-count goldens byte-stable, and the diff
+ * seam (cl_alloc), keeps tp_project_clone.c's clone alloc-count goldens byte-stable, and the diff
  * owns its captured data with its own single-free discipline (decision 0012 §6).
  *
- * !! FORK-SYNC WARNING (review [5]) !! A persistent field added to tp_project_clone.c
+ * !! FORK-SYNC WARNING !! A persistent field added to tp_project_clone.c
  * MUST be added here too, or Undo/Redo silently restores a non-byte-identical project.
  * The safety net is the completeness oracle test_completeness_oracle_* in test_diff.c:
  * it sets EVERY persistent field of EVERY entity kind non-default and asserts
@@ -485,7 +485,7 @@ tp_status tp_diff__insert_atlas(tp_project *p, int index, const tp_project_atlas
     }
     return fill_atlas((tp_project_atlas *)slot, src);
 }
-/* The positional REMOVE direction delegates to the canonical public remover (fix [6]:
+/* The positional REMOVE direction delegates to the canonical public remover:
  * the bounds-check + element free-discipline + down-shift lives in ONE place, killing
  * the drift risk of a second free-list). Only re-zero the vacated tail slot afterward so
  * the diff's array invariant holds ([count,cap) carry only NULL owned pointers; the
@@ -510,7 +510,7 @@ tp_status tp_diff__insert_source(tp_project_atlas *a, int index, const tp_projec
     return fill_source((tp_project_source *)slot, src);
 }
 tp_status tp_diff__remove_source(tp_project_atlas *a, int index) {
-    tp_status st = tp_project_atlas_remove_source(a, index); /* fix [6]: delegate free+shift */
+    tp_status st = tp_project_atlas_remove_source(a, index); /* delegate free+shift */
     if (st == TP_STATUS_OK) {
         memset(&a->sources[a->source_count], 0, sizeof *a->sources);
     }
@@ -548,7 +548,7 @@ tp_status tp_diff__insert_target(tp_project_atlas *a, int index, const tp_projec
     return fill_target((tp_project_target *)slot, src);
 }
 tp_status tp_diff__remove_target(tp_project_atlas *a, int index) {
-    tp_status st = tp_project_atlas_remove_target(a, index); /* fix [6]: delegate free+shift */
+    tp_status st = tp_project_atlas_remove_target(a, index); /* delegate free+shift */
     if (st == TP_STATUS_OK) {
         memset(&a->targets[a->target_count], 0, sizeof *a->targets);
     }
@@ -566,7 +566,7 @@ tp_status tp_diff__insert_frame(tp_project_anim *an, int index, const tp_project
     return fill_frame((tp_project_frame *)slot, src);
 }
 tp_status tp_diff__remove_frame_at(tp_project_anim *an, int index) {
-    tp_status st = tp_project_anim_remove_frame(an, index); /* fix [6]: delegate free+shift */
+    tp_status st = tp_project_anim_remove_frame(an, index); /* delegate free+shift */
     if (st == TP_STATUS_OK) {
         memset(&an->frames[an->frame_count], 0, sizeof *an->frames);
     }

@@ -2,7 +2,7 @@
 #define TP_CORE_TP_SPRITE_INDEX_H
 
 /*
- * Resolved sprite index (F1-03, master spec §5.2, §5.4). A RUNTIME structure --
+ * Resolved sprite index (master spec §5.2, §5.4). A RUNTIME structure --
  * never serialized -- produced by scanning an atlas's sources and deriving, for
  * every resolved sprite, its canonical identity:
  *

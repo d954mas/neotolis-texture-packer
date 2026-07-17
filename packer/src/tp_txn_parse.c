@@ -1,5 +1,5 @@
 /*
- * F2-02 task 3 (decode half): structural decode of the versioned transaction
+ * Structural decode of the versioned transaction
  * request envelope + the per-op SHAPE collect-all, and the two public entry points
  * (tp_txn_request_decode, tp_model_apply_json). cJSON is a PRIVATE dep confined to
  * this TU + tp_txn_lower.c + tp_txn_json.h.

@@ -7,9 +7,9 @@
 #include "tp_srckey_internal.h"
 
 /* ------------------------------------------------------------------------- *
- * Internal ASCII + component-lexing helpers (promoted from the C0-01
- * tp_c0_lex.h; kept static in this TU -- no other production TU splits paths
- * this way). Each caller layers its own '.'/'..'/emit policy on top.
+ * Internal ASCII + component-lexing helpers (kept static in this TU -- no
+ * other production TU splits paths this way). Each caller layers its own
+ * '.'/'..'/emit policy on top.
  * ------------------------------------------------------------------------- */
 
 static inline bool sk_is_alpha(char c) { return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'); }

@@ -1,7 +1,7 @@
 #ifndef TP_CORE_SRC_TP_OP_INTERNAL_H
 #define TP_CORE_SRC_TP_OP_INTERNAL_H
 
-/* F2-01 operation-engine internals shared across the op TUs (catalog / validate /
+/* Operation-engine internals shared across the op TUs (catalog / validate /
  * apply / encode / build). Not a public header -- tests include it from src/ the
  * same way test_id.c includes tp_hex.h. */
 

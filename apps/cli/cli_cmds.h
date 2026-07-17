@@ -15,15 +15,15 @@ struct tp_session_snapshot;
  * cli_mutate.c's anim_list, and main.c's `version --json` manifest all read this so
  * the number can never drift between the payloads and their advertised version.
  *
- * Bumped 1 -> 2 in F1-01: the animation object changed field semantics -- `.id` is now
+ * Bumped 1 -> 2: the animation object changed field semantics -- `.id` is now
  * an opaque structural shape-ID and the human/selector name moved to a new `.name`
  * field. Mutation verbs still select an animation BY NAME (`anim <name>`); id-based
- * selectors arrive in F1-03. An AI operator branches on this number to detect the break.
+ * selectors arrive later. An AI operator branches on this number to detect the break.
  *
- * Bumped 2 -> 3 in F1-02: the inspect `sources[]` object gained `id` (structural
+ * Bumped 2 -> 3: the inspect `sources[]` object gained `id` (structural
  * source shape-ID) and `stored_kind` (persisted folder/file classification) keys --
  * a versioned-contract change, same reason the anim reshape bumped the number.
- * Bumped 3 -> 4 in F1-03: each resolved `sprites[]` entry gained `sprite_id` (the
+ * Bumped 3 -> 4: each resolved `sprites[]` entry gained `sprite_id` (the
  * derived deterministic id) and `source` (owning source shape-ID) keys. */
 #define CLI_INSPECT_SCHEMA 4
 

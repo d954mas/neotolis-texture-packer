@@ -8,7 +8,7 @@
 #include "tp_core/tp_scan.h"    /* tp_scan_dir / _exists / _is_dir */
 #include "tp_core/tp_srckey.h"  /* tp_srckey_normalize */
 #include "tp_hex.h"             /* tp_hex_encode_lower (shared drift-guard encoder) */
-#include "tp_strutil.h"         /* shared tp_strdup / tp_path_basename / tp_slash_norm (fix [8]) */
+#include "tp_strutil.h"         /* shared tp_strdup / tp_path_basename / tp_slash_norm */
 #include "tp_session_internal.h"
 
 /* ------------------------------------------------------------------ */

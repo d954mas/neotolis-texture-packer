@@ -3,12 +3,10 @@
 
 /*
  * tp_identity internal seam -- lives in src/ (NOT installed). It exposes the
- * host-PARAMETERIZED lexical canonicalizer + the tiny ASCII/lex helpers that
- * were promoted from the C0-01 spike (packer/spike/c0/src/tp_c0_lex.h +
- * tp_c0_path.c).
+ * host-PARAMETERIZED lexical canonicalizer + the tiny ASCII/lex helpers.
  *
  * WHY a host parameter here when the PUBLIC API (tp_identity.h) is native-host
- * (#if defined(_WIN32))?  The public surface is native-host as F1-00 requires,
+ * (#if defined(_WIN32))?  The public surface is native-host as required,
  * but the lexical rules are byte-deterministic for BOTH POSIX and Windows on
  * every OS. Keeping a host-parameterized core lets the production tests run the
  * full cross-OS golden corpus on a single CI runner -- preserving the spike's
@@ -19,7 +17,7 @@
  * frozen contract fixture; production got its OWN adapted copy of the lexical
  * logic (spike is never linked into tp_core -- it is deliberately out of the
  * tp_core/tp_build/apps link closure). Drift between the two copies is caught by
- * porting the identical golden vectors into packer/tests (F1-00 task 5): if the
+ * porting the identical golden vectors into packer/tests: if the
  * production copy ever diverges from the pinned rules, a ported vector fails.
  */
 

@@ -2,15 +2,10 @@
 #define TP_STRUTIL_H
 
 /*
- * Shared owned-string + path primitives for the tp_core src/ TUs (fix [8]). ONE
- * definition of each, so tp_project.c, tp_input.c, tp_sprite_index.c, and
- * tp_project_migrate.c stop re-implementing the same three helpers (they had drifted
- * into dup_str / base_name / slash_norm / mig_strdup / tp_strdup copies). Header-only
- * static inline, same pattern as tp_hex.h -- a private packer/src header, NOT a public
- * tp_core API (frontends link only the public headers and keep their own copies).
- *
- * Behaviour is byte-for-byte identical to the copies these replace: no allocation
- * strategy, iteration order, or output changes.
+ * Shared owned-string + path primitives for the tp_core src/ TUs: ONE definition
+ * each so tp_project.c, tp_input.c, tp_sprite_index.c, and tp_project_migrate.c
+ * don't re-implement them. Header-only static inline (like tp_hex.h) -- a private
+ * packer/src header, NOT a public tp_core API; frontends keep their own copies.
  */
 
 #include <stddef.h>
@@ -24,14 +19,9 @@
  * succeeds free the old *slot and store the copy, so a failed dup leaves *slot (and the whole
  * enclosing model) BYTE-UNCHANGED. Returns TP_STATUS_OK, else TP_STATUS_OOM.
  *
- * `dup` is a parameter (not a fixed allocator) on purpose: the callers each own a different
- * test-only allocation fault seam -- tp_op_apply.c's stage_strdup (driven by
- * tp_op__test_set_alloc_fail) and tp_diff_apply.c's tp_diff__dup (driven by
- * tp_diff__test_set_alloc_fail). Routing the dup through the caller's seam keeps every existing
- * OOM / rollback assertion firing on this exact field swap while still collapsing the three
- * dup->check->free->assign copies onto ONE definition. Error MESSAGE reporting stays at the call
- * site (op apply returns a bare status; diff apply wraps it in tp_error_set) so the emitted
- * bytes are unchanged. */
+ * `dup` is a parameter (not a fixed allocator) so each caller routes this swap through its own
+ * OOM fault seam while sharing ONE dup->check->free->assign definition; error-message reporting
+ * stays at the call site. */
 static inline tp_status tp_set_owned_dup(char **slot, const char *src, char *(*dup)(const char *)) {
     char *copy = dup(src);
     if (!copy) {

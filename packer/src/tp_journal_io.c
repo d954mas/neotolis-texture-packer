@@ -1,6 +1,6 @@
 /*
- * F2-04 journal I/O seams: an in-memory backing store (deterministic; drives the
- * fault suite) and a real file backing store (production durability, F2-05). All
+ * Journal I/O seams: an in-memory backing store (deterministic; drives the
+ * fault suite) and a real file backing store (production durability). All
  * durability the journal core needs goes through the tp_journal_io vtable, so the
  * core is testable on crafted/corrupt bytes without real-fs flakiness. Every path
  * closes its resources (no fd/buffer leak under LSan).
@@ -344,7 +344,7 @@ tp_journal_io tp_journal_io_file(const char *path) {
     return io;
 }
 
-/* R5b-2 fix [3]: read-only io write/truncate stubs -- they NEVER touch the file. tp_journal_create
+/* Read-only io write/truncate stubs -- they NEVER touch the file. tp_journal_create
  * requires non-NULL write/length/truncate/read_all, so these must exist; they fail closed (a durable
  * append over a read-only handle is a bug, and tp_model_recover's one best-effort tail-truncate simply
  * poisons the throwaway recovery journal, which the adopt path clones-off and discards). */

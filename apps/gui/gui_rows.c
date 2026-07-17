@@ -1,5 +1,4 @@
-/* Row model + selection-set helpers for the ntpacker GUI (see gui_rows.h). Split out of main.c
- * (GUI decomposition step 2) as a pure move -- definitions relocated verbatim, no behavior change. */
+/* Row model + selection-set helpers for the ntpacker GUI (see gui_rows.h). */
 
 #include "gui_rows.h"
 
@@ -16,7 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Growable-storage policy (P1 fix, decomposition step 7) shared by the multi-select set, the
+/* Growable-storage policy shared by the multi-select set, the
  * selection-sort companions, and the sprite-row array. These used to be fixed 4096/512-cap arrays
  * that silently DROPPED entries past the cap (sprites packed fine but vanished from the UI). Now:
  * realloc-keep-capacity -- grow geometrically (x2) on a new high-water mark, NEVER shrink, so the
@@ -114,7 +113,7 @@ int nat_cmp_qsort(const void *a, const void *b) {
 }
 
 /* Shared scratch for the selection-gesture sort (heap; grows WITH the multi-select set so the sort
- * path can never truncate the selection -- P1 fix, step 7). */
+ * path can never truncate the selection). */
 gui_selected_sprite *s_sel_sort_buf;
 const char **s_sel_sort_ptr;
 tp_op_sprite_ref *s_sel_sort_refs;

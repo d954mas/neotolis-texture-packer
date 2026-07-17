@@ -39,12 +39,12 @@ extern "C" {
 struct tp_pack_settings;
 
 /* Bump when the on-disk schema changes; add a migration case in the loader.
- * v2 (F1-01): atlas/animation/target carry a persistent tp_id128 `id`; the
+ * v2: atlas/animation/target carry a persistent tp_id128 `id`; the
  * animation's old string `id` became its logical `name` (id/name split).
- * v3 (F1-02): the bare `sources` string array becomes an array of tagged source
+ * v3: the bare `sources` string array becomes an array of tagged source
  * OBJECTS {id, kind, path}; each source carries a persistent tp_id128 `id`.
  * A v2 bare-string source migrates to kind=folder (decision 0008).
- * v4 (F1-03): a sparse sprite override is keyed by its owning source + source-local
+ * v4: a sparse sprite override is keyed by its owning source + source-local
  * KEY ({source, key}) instead of the mutable atlas-relative `name`, and an animation
  * frame reference likewise carries {source, key} -- so a logical/export rename never
  * moves an override or a frame, and the derived sprite_id survives reorder/reload
@@ -59,7 +59,7 @@ struct tp_pack_settings;
  * non-default. Defaults: origin (0.5,0.5), slice9 all-zero, rename NULL (see the
  * *_DEFAULT constants below).
  *
- * Identity (schema v4, F1-03): the CANONICAL key is the owning source + source-local
+ * Identity (schema v4): the CANONICAL key is the owning source + source-local
  * key, from which sprite_id derives (tp_sprite_id(source_id, src_key)); this survives
  * a logical/export rename and source reorder.
  *   - `source_ref` / `src_key`: the persisted v4 identity. source_ref is nil and
@@ -99,7 +99,7 @@ typedef struct tp_project_sprite {
 #define TP_PROJECT_OV_INHERIT (-1)
 
 /* One animation frame reference: a sprite in the same atlas, in playback order.
- * Schema v4 (F1-03): keyed by its owning source + source-local key, exactly like a
+ * Schema v4: keyed by its owning source + source-local key, exactly like a
  * sprite override, so a frame reference targets the derived sprite_id and survives
  * reorder/reload/logical-rename (decision 0009). Mirror of tp_project_sprite's
  * identity fields:
@@ -117,7 +117,7 @@ typedef struct tp_project_frame {
  * `frames` are frame references in explicit playback order (schema v4: {source, key},
  * see tp_project_frame).
  *
- * id/name split (F1-01, schema v2): `id` is the persistent structural ID (survives
+ * id/name split (schema v2): `id` is the persistent structural ID (survives
  * rename/reorder/save/reload); `name` is the logical/display name and the human
  * reference key. The v1 string `id` migrated into `name`. */
 typedef struct tp_project_anim {
@@ -148,7 +148,7 @@ typedef struct tp_project_target {
     bool enabled;
 } tp_project_target;
 
-/* Source kind (schema v3, F1-02). Master spec §11 models a source as
+/* Source kind (schema v3). Master spec §11 models a source as
  * `kind: path | atlas`, where a "path" source is either a scanned folder or a
  * single image file; this enum makes that file-vs-folder sub-distinction explicit.
  * APPEND-ONLY (the value is the stored classification): TP_SOURCE_KIND_ATLAS
@@ -167,7 +167,7 @@ typedef enum tp_source_kind {
  * relativizes absolute forms). `id` starts nil until assigned/promoted. Scan
  * classifies file-vs-folder at runtime by stat, so a stored kind that disagrees
  * with disk still packs correctly; kind is authoritative only where disk cannot
- * be consulted (a missing source, for F1-03 sprite-id derivation). */
+ * be consulted (a missing source, for sprite-id derivation). */
 typedef struct tp_project_source {
     tp_id128 id;         /* persistent structural ID (schema v3); nil until assigned/promoted */
     bool id_synthetic;   /* TRANSIENT (never serialized): the loader synthesized this id for a legacy
@@ -241,7 +241,7 @@ void tp_project_destroy(tp_project *p);
  * duplicated: project/source base dirs, atlas name/knobs/ids, sources, sparse sprite overrides,
  * animations + frames, targets). OOM-SAFE: on any allocation failure returns NULL
  * and frees the partial clone (no leak). The clone is byte-identical under
- * tp_project_save_buffer (test-pinned). This is the atomicity primitive the F2-02
+ * tp_project_save_buffer (test-pinned). This is the atomicity primitive the
  * transaction engine clones the model with before applying a batch (§7). NULL src
  * -> NULL. */
 tp_project *tp_project_clone(const tp_project *src);
@@ -374,7 +374,7 @@ tp_status tp_project_atlas_set_sprite_rename(tp_project_atlas *a,
 /* Appends an animation with logical `name` (default fps/playback/flips, no frames;
  * `id` starts nil -- a writable session assigns it via tp_project_promote_ids).
  * Written to *out (if non-NULL). Use tp_project_anim_add_frame to populate frames
- * in order. The name-keyed API is retained for F1-03 to migrate to id selectors. */
+ * in order. The name-keyed API is retained to migrate to id selectors. */
 tp_status tp_project_atlas_add_animation(tp_project_atlas *a, const char *name, tp_project_anim **out);
 
 /* Removes the animation whose logical `name` matches. Absent -> OUT_OF_BOUNDS. */

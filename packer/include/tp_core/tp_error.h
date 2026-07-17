@@ -27,7 +27,7 @@ typedef enum tp_status {
     TP_STATUS_BUILDER_FAILED, /* nt_builder start/finish returned an error (tp_pack) */
     TP_STATUS_BAD_PROJECT,    /* malformed/invalid .ntpacker_project JSON (tp_project) */
 
-    /* --- project identity faults (F1-00, promoted from the C0-01 spike) ---
+    /* --- project identity faults ---
      * Append-only: new values go at the END so existing tokens never shift.
      * Distinct identity faults that a client acts on differently; generic
      * empty/NULL/too-small inputs still reuse INVALID_ARGUMENT / OUT_OF_BOUNDS. */
@@ -40,7 +40,7 @@ typedef enum tp_status {
     TP_STATUS_RNG_FAILED,         /* the injected RNG did not deliver the requested bytes (tp_id) */
     TP_STATUS_IDENTITY_COLLISION, /* Save-As destination canonicalizes to an already-claimed key (tp_identity) */
 
-    /* --- structural-ID faults (F1-01, promoted from the C0-01 id/legacy spike) ---
+    /* --- structural-ID faults ---
      * Append-only: new values go at the END. Distinct id faults a client acts on
      * differently; generic NULL/too-small inputs still reuse INVALID_ARGUMENT /
      * OUT_OF_BOUNDS (a format buffer too small is OUT_OF_BOUNDS). */
@@ -50,7 +50,7 @@ typedef enum tp_status {
     TP_STATUS_ID_COLLISION_EXHAUSTED, /* deterministic legacy salt sweep could not disambiguate synthetic IDs
                                        * (unreachable with the default hash; only a degenerate injected hash hits it) */
 
-    /* --- source-key normalization faults (F1-02, promoted from the C0-01 srckey spike) ---
+    /* --- source-key normalization faults ---
      * Append-only: new values go at the END. A source-local key that is invalid
      * UTF-8, absolute, or contains a '..' traversal component; generic empty/NULL
      * inputs still reuse INVALID_ARGUMENT and an overflowing buffer OUT_OF_BOUNDS. */
@@ -58,7 +58,7 @@ typedef enum tp_status {
     TP_STATUS_KEY_ABSOLUTE,        /* source key/path must be source-root-relative, not absolute (tp_srckey) */
     TP_STATUS_KEY_TRAVERSAL,       /* a '..' component would escape the source root (tp_srckey) */
 
-    /* --- selector resolution faults (F1-03, master spec §5.4) ---
+    /* --- selector resolution faults (master spec §5.4) ---
      * Append-only: new values go at the END. A human selector must resolve to
      * EXACTLY ONE id before it is used; zero and >1 matches are distinct faults a
      * client acts on differently (NOT_FOUND surfaces "no such entity", AMBIGUOUS
@@ -67,7 +67,7 @@ typedef enum tp_status {
     TP_STATUS_NOT_FOUND,           /* a selector matched no entity (tp_selector) */
     TP_STATUS_AMBIGUOUS_SELECTOR,  /* a selector matched more than one entity; a candidate list is returned */
 
-    /* --- typed operation-engine faults (F2-01, master spec §6-6.2, §7) ---
+    /* --- typed operation-engine faults (master spec §6-6.2, §7) ---
      * Append-only: new values go at the END. Distinct faults a client acts on
      * differently from the generic INVALID_ARGUMENT: UNKNOWN_OP -> the op kind is
      * not in the catalog (fix the verb/wire); OUT_OF_RANGE -> a payload VALUE is
@@ -79,7 +79,7 @@ typedef enum tp_status {
     TP_STATUS_UNKNOWN_OP,          /* the operation kind/wire is not in the append-only catalog (tp_operation) */
     TP_STATUS_OUT_OF_RANGE,        /* a payload value is outside its allowed range (tp_op_validate) */
 
-    /* --- transaction concurrency faults (F2-02, master spec §8) ---
+    /* --- transaction concurrency faults (master spec §8) ---
      * Append-only: new values go at the END. A transaction carries an
      * expected_revision optimistic-concurrency precondition; the two mismatch
      * directions are distinct faults a client acts on differently. CONFLICT (stale:
@@ -91,7 +91,7 @@ typedef enum tp_status {
     TP_STATUS_REVISION_CONFLICT,   /* expected_revision < current: stale; rebuild and retry (tp_transaction) */
     TP_STATUS_INVALID_REVISION,    /* expected_revision > current: a revision that never existed (tp_transaction) */
 
-    /* --- recovery-journal durability fault (F2-04, master spec §7.1, §22.3) ---
+    /* --- recovery-journal durability fault (master spec §7.1, §22.3) ---
      * Append-only: new value at the END. A committed transaction is not acknowledged
      * until its recovery record is durably appended (§7.1); when that durable append
      * fails the transaction is rolled back (live model byte-unchanged, no committed

@@ -1,10 +1,9 @@
 #ifndef TP_CORE_SRC_TP_SB_H
 #define TP_CORE_SRC_TP_SB_H
 
-/* Deterministic JSON string builder -- the exact conventions proven in
- * tp_project.c (2-space indent, LF, %.9g floats, sorted keys). Header-only
- * (static inline) so the exporter reuses them without a separate TU; kept out
- * of tp_project.c on purpose (that writer stays untouched, byte-identical). */
+/* Deterministic JSON string builder (2-space indent, LF, %.9g floats, sorted
+ * keys). Header-only static inline so the exporter reuses these without a
+ * separate TU. */
 
 #include <inttypes.h>
 #include <stdint.h>

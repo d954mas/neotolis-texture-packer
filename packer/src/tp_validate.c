@@ -550,7 +550,7 @@ static bool target_path_index_build(const tp_project *project,
 
 /* (a2) §5.3/§5.6 source-path validation (all WARNINGS -- never flips the --strict
  * exit): exact duplicate, cross-platform case-fold collision, portability, and a
- * non-portable absolute/escaping source, via the promoted tp_srckey primitives.
+ * non-portable absolute/escaping source, via the tp_srckey primitives.
  * Each path is canonicalized + case-folded once into owned full-length storage, then
  * grouped by folded key. Work is linear for distinct keys; colliding pairs are emitted
  * only while the bounded report has room and the remainder is counted without walking
@@ -841,7 +841,7 @@ static void validate_atlas(validation_builder *fs, const tp_project *p, int ai,
     validate_sources(fs, a); /* (a2) duplicate / case-fold collision / portability */
 
     /* Build ONE resolved sprite index (single disk scan) and feed BOTH the export-key /
-     * dangling-frame checks AND the §5.6 record checks from it (fix [7]). The index mirrors
+     * dangling-frame checks AND the §5.6 record checks from it. The index mirrors
      * tp_pack_input_build's iteration EXACTLY (same sources, same order, same raw names), so
      * ref[i].export_key equals the export key of pack desc[i] -- the validate output is
      * identical to the old two-scan version, at one scan instead of two. */

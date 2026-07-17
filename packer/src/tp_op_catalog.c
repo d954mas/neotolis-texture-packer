@@ -1,7 +1,6 @@
 /*
- * F2-01 task 1: the append-only operation catalog + closed field vocabulary.
- * Promoted from the accepted C0-02 spike (packer/spike/c0/src/tp_c0_op_catalog.c)
- * onto the production tp_id_kind. Row order matches the enum so index == kind;
+ * The append-only operation catalog + closed field vocabulary. Row order
+ * matches the enum so index == kind;
  * tp_op_catalog_selfcheck() pins that a reorder can't silently mis-map a kind.
  *
  * Every current ntpacker mutation verb appears in the cli_verb column (a compound
@@ -44,7 +43,7 @@ static const tp_op_info k_ops[TP_OP_KIND_COUNT] = {
     {TP_OP_TARGET_REMOVE, "target.remove", TP_OP_CLASS_REMOVE, TP_ID_KIND_TARGET, "target remove"},
     {TP_OP_TARGET_SET, "target.set", TP_OP_CLASS_SET, TP_ID_KIND_TARGET, "target set"},
 
-    /* H/P1-2: appended (APPEND-ONLY catalog) -- animation rename is a first-class undoable+journaled op. */
+    /* Appended (APPEND-ONLY catalog) -- animation rename is a first-class undoable+journaled op. */
     {TP_OP_ANIMATION_RENAME, "animation.rename", TP_OP_CLASS_SET, TP_ID_KIND_ANIM, "anim rename"},
 };
 

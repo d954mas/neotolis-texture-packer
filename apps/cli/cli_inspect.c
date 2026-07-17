@@ -18,7 +18,7 @@
 #include "tp_core/tp_names.h"
 #include "tp_core/tp_scan.h"
 #include "tp_core/tp_session.h"
-#include "tp_core/tp_sprite_index.h" /* resolved sprite index: sprite_id + owning source (F1-03) */
+#include "tp_core/tp_sprite_index.h" /* resolved sprite index: sprite_id + owning source */
 
 /* Emits `,\n` (or `\n` for the first entry) + indent + "key": -- the same
  * first-tracking pattern tp_project.c's writer uses, so nesting stays balanced. */

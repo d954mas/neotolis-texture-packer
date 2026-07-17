@@ -68,10 +68,10 @@
 #include "gui_project.h"
 #include "gui_scan.h"
 #include "gui_shell.h"    /* shell-owned surface the dev seams read (UI pool caps) */
-#include "gui_paths.h"    /* D1: app-data root + exe-dir resolver (canonical home for s_exe_dir) */
-#include "gui_log_file.h" /* D1: rotating app-side log file (nt_log sink); no-op under headless */
-#include "gui_crash.h"    /* D2: crash handler + dump + marker (installed first thing in main) */
-#include "gui_startup.h"  /* H/P1-8: pure startup open/defer guard (gui_startup_decide) */
+#include "gui_paths.h"    /* app-data root + exe-dir resolver (canonical home for s_exe_dir) */
+#include "gui_log_file.h" /* rotating app-side log file (nt_log sink); no-op under headless */
+#include "gui_crash.h"    /* crash handler + dump + marker (installed first thing in main) */
+#include "gui_startup.h"  /* pure startup open/defer guard (gui_startup_decide) */
 #include "gui_selftest.h" /* dev seam: headless self-test (compiled out unless flag on) */
 #include "gui_shot.h"     /* dev seam: --shot screenshot capture */
 #include "gui_view_canvas.h"   /* center canvas view (declare_canvas) */
@@ -96,21 +96,10 @@
 // #endregion
 
 // #region engine state
-/* UI context capacities. UI_STATE_SLOTS / UI_STATE_PROBE_MAX / UI_ROW_ID_RING moved to gui_shell.h
- * in step 3 (shared with the selftest dev-seam); their rationale + values live there. The notes
- * below still describe them. Provisioned with generous headroom for a heavy desktop session
- * (thousands of project rows). The sprite list is virtualized (nt_ui_vlist): only the visible
- * window materializes Clay elements + widget state each frame, and per-row ids RECYCLE through
- * the vlist id_ring, so live widgets are bounded by the viewport, not by project size.
- * nt_ui_state has NO per-frame eviction -- a state cell persists until its id is reused -- so the
- * pool must hold every DISTINCT id that appears over a session. With recycling that is
- * id_ring x per-row stateful children + fixed chrome (menus, overlay cluster, page bar, modals).
- *   UI_STATE_SLOTS     : power-of-2 retained-state cells. Was 512 -> overflowed once a 500-file
- *                        folder scrolled through every ring slot (256 ring x [hit + x] ~= 512).
- *   UI_STATE_PROBE_MAX : linear-probe window. The engine default (4) is far too small at this
- *                        load -- placement failed well below capacity and fired the "pool
- *                        overflow" assert (nt_ui_state.c:38). THIS was the real crash trigger.
- *   UI_MAX_ELEMENTS    : Clay layout-element cap (also Clay's persistent per-id hashmap). */
+/* UI context capacities. UI_STATE_SLOTS / UI_STATE_PROBE_MAX / UI_ROW_ID_RING live in gui_shell.h
+ * (shared with the selftest dev-seam) and exceed the engine defaults because nt_ui_state has no
+ * per-frame eviction: a heavy session scrolling a large folder must retain every distinct row id
+ * or placement overflows the pool. UI_MAX_ELEMENTS is the Clay layout-element cap. */
 #define UI_MAX_ELEMENTS ((uint32_t)8192U)
 #define UI_ARENA_SIZE ((size_t)24U * 1024U * 1024U)
 #define SCRATCH_ARENA_SIZE ((size_t)4U * 1024U * 1024U)
@@ -137,11 +126,10 @@ static bool s_ids_ready;
 /* s_id_mb_ file/edit/view/help and s_id_menu_ file/edit/view/help (menubar + menu-panel ids), the
  * menu-state buffers (s_file/edit/view/help_state + the four nt_ui_menu_ctx_t working buffers), the
  * MK_ item-key enum, and s_ctx_menu (the context-menu declare-machinery working buffer) moved to
- * gui_view_chrome.c (GUI decomposition step 6b) -- nothing outside chrome ever read them. The ids
- * themselves moved into gui_state (same precedent as s_id_ctx_menu in step 4) rather than staying
- * chrome-local, so ensure_ids below still seeds them directly with no extra hook function; the
- * menu-state buffers and the item-key enum, which nothing outside chrome touches, became
- * chrome-local statics instead. */
+ * gui_view_chrome.c -- nothing outside chrome ever read them. The ids themselves moved into
+ * gui_state (same precedent as s_id_ctx_menu) rather than staying chrome-local, so ensure_ids below
+ * still seeds them directly with no extra hook function; the menu-state buffers and the item-key
+ * enum, which nothing outside chrome touches, became chrome-local statics instead. */
 // #endregion
 
 // #region editor state
@@ -157,15 +145,15 @@ static float s_pan_last_x, s_pan_last_y;
 #define CANVAS_DRAG_THRESHOLD 4.0F
 
 /* The deferred side-effect queue (s_pending_*), the new/open/exit confirm-flow flags (s_after_confirm/
- * s_confirm_open/s_modal_action) and the last-pack timing (s_last_pack_*) moved to gui_actions (step 2);
- * the modal open flags (s_about_open / s_export_open) moved to gui_state (step 3 -- shared with the
- * selftest); s_blur_inputs (set here by frame(), read by the settings-panel field widgets) moved to
- * gui_state too (step 4 -- the view TU needs it). */
+ * s_confirm_open/s_modal_action) and the last-pack timing (s_last_pack_*) moved to gui_actions; the
+ * modal open flags (s_about_open / s_export_open) moved to gui_state (shared with the selftest);
+ * s_blur_inputs (set here by frame(), read by the settings-panel field widgets) moved to gui_state
+ * too (the view TU needs it). */
 
 /* s_pack_has_sources/s_pack_stale (pack-button state cached for the tooltip pass) moved to
- * gui_state (step 6a -- written by gui_view_canvas's declare_canvas_strip, read by gui_view_chrome's
+ * gui_state (written by gui_view_canvas's declare_canvas_strip, read by gui_view_chrome's
  * declare_tooltips). The right settings panel's disclosure/dropdown-open bits and numeric-field edit
- * buffers moved to gui_view_settings.c (step 4 -- panel-local). GUI_MAX_TARGETS and k_playback_names
+ * buffers moved to gui_view_settings.c (panel-local). GUI_MAX_TARGETS and k_playback_names
  * live in gui_defs.h (shared with gui_view_chrome's declare_export_modal / gui_view_canvas's
  * declare_canvas_preview). */
 
@@ -173,8 +161,7 @@ static float s_pan_last_x, s_pan_last_y;
 
 // #region small helpers
 /* gui_open_url (opens a URL in the OS default browser -- the About link) moved to
- * gui_view_chrome.c (GUI decomposition step 6b) as a pure move: it is chrome-only, the About modal
- * is its sole caller. */
+ * gui_view_chrome.c: it is chrome-only, the About modal is its sole caller. */
 
 /* Shell-owned release of the canvas borrow and its comparison cache. Callers
  * either free pack slots or retain a stale slot across history navigation; the
@@ -375,16 +362,14 @@ static void try_bind_resources(void) {
 // #region menu bar
 /* close_menubar_menus/close_all_menus, the File/Edit/View/Help menu item builders (file_items/
  * edit_items/scale_item/overlay_item/view_items/help_items), menubar_entry, and declare_menubar
- * moved to gui_view_chrome.c (GUI decomposition step 6b) as a pure move. close_menubar_menus keeps a
- * prototype here via gui_shell.h (the sanctioned cross-view surface the three other views' context-
- * menu triggers read) and in gui_view_chrome.h (for frame() below); its definition lives in
- * gui_view_chrome.c now. */
+ * moved to gui_view_chrome.c. close_menubar_menus keeps a prototype here via gui_shell.h (the
+ * sanctioned cross-view surface the three other views' context-menu triggers read) and in
+ * gui_view_chrome.h (for frame() below); its definition lives in gui_view_chrome.c now. */
 // #endregion
 
 // #region left panel (atlases + sprites)
-/* declare_left_panel + its atlas/sprite/animation row helpers moved to gui_view_lists.c (GUI
- * decomposition step 5). declare_row_tooltips moved to gui_view_chrome.c (step 6b -- chrome-owned
- * per the plan's §3 fan-out table). */
+/* declare_left_panel + its atlas/sprite/animation row helpers moved to gui_view_lists.c.
+ * declare_row_tooltips moved to gui_view_chrome.c (chrome-owned per the plan's §3 fan-out table). */
 // #endregion
 
 // #region canvas
@@ -479,21 +464,21 @@ static void handle_canvas_input(void) {
 
 /* atlas_fill_pct, strip_group_actions/pages/zoom, declare_canvas_strip, declare_canvas_preview,
  * declare_canvas, status_sev_color/status_sev_icon, and declare_status_pill moved to
- * gui_view_canvas.c (GUI decomposition step 6a) as a pure move. handle_canvas_input above stays
- * here per the P-2 lead ruling (docs/plans/gui-decomposition.md §2). */
+ * gui_view_canvas.c. handle_canvas_input above stays here per the P-2 lead ruling
+ * (docs/plans/gui-decomposition.md §2). */
 // #endregion
 
 // #region status bar + menus + tooltips
-/* status_sev_color, status_sev_icon, declare_status_pill moved to gui_view_canvas.c (GUI
- * decomposition step 6a) as a pure move -- see the note in the canvas region above.
+/* status_sev_color, status_sev_icon, declare_status_pill moved to gui_view_canvas.c -- see the note
+ * in the canvas region above.
  *
  * declare_menus, declare_context_menu, declare_tooltips, declare_export_modal, declare_confirm_modal,
- * and declare_about_modal moved to gui_view_chrome.c (GUI decomposition step 6b) as a pure move. */
+ * and declare_about_modal moved to gui_view_chrome.c. */
 // #endregion
 
 /* The right settings panel (regions F/G + per-region packing overrides) moved to
- * gui_view_settings.c/h (step 4) as a pure move -- declare_right_panel is called from frame() below;
- * the header exposes only that entry point. */
+ * gui_view_settings.c/h -- declare_right_panel is called from frame() below; the header exposes
+ * only that entry point. */
 
 // #region keyboard shortcuts (ux.md §3.3d)
 /* Global shortcuts routed through the SAME actions as the menus. Text-input focus swallows
@@ -590,7 +575,7 @@ static void frame(void) {
     apply_pending();
 
     /* Fallback commit for a buffered gesture that never got a release/blur/discrete boundary
-     * (F2-05b-ii-A, decision 0015). GATED on no active gesture -- no held pointer and no focused
+     * (decision 0015). GATED on no active gesture -- no held pointer and no focused
      * input -- so it can never split a live drag or a mid-typing field; the 0.30 s window inside
      * only fires when the edit has truly gone idle. Primary commits are gesture-scoped. */
     if (!g_nt_input.pointers[0].buttons[NT_BUTTON_LEFT].is_down && !nt_ui_input_any_focused(s_ctx)) {
@@ -763,7 +748,7 @@ static void frame(void) {
             }
         }
         /* A blur (press outside the panel while a field held focus) is a field's gesture boundary:
-         * flush its buffered edit as ONE undo step (F2-05b-ii-A, decision 0015). The value is already
+         * flush its buffered edit as ONE undo step (decision 0015). The value is already
          * in gui_project's pending buffer from the last keystroke; apply_pending commits it next frame. */
         if (s_blur_inputs) {
             gui_request_gesture_commit();
@@ -900,7 +885,7 @@ static void frame(void) {
 
 // #region dev seam: --parity (headless saved-bytes byte-parity check)
 /* Applies a FIXED non-creating edit sequence to `in` through the OP-based gui_project_*
- * setters (the F2-05b-i cutover) and saves it to `out`. Non-creating (rename/settings/
+ * setters (the typed-op cutover) and saves it to `out`. Non-creating (rename/settings/
  * override/target on an already-fixed-id project) => deterministic bytes: no random ids
  * are minted, so `out` is byte-comparable to the same logical edits applied by the
  * byte-identity-proven CLI (scripts/gui_parity_check.sh). Runs before any window/GL init
@@ -1180,10 +1165,8 @@ int main(int argc, char *argv[]) {
      * window available for Save As or Discard while mutation stays blocked. GATED OUT of the headless
      * selftest build -- that build runs THIS exe non-headless and drives recovery itself on ISOLATED temp
      * folders via R6 test seams, so the production scan must never inspect test journals. */
-    /* fix [4] (ACCEPTED, no migration code): crash recovery is UNRELEASED (all on impl/master-spec), so
-     * there is no installed base with a pre-R5b-2 <exe_dir>/ntpacker_recovery.ntpjournal deterministic
-     * slot to migrate -- the old exe-dir slot is intentionally NOT migrated into this per-session folder.
-     * If we ever ship before R5b-2 lands, add a one-time migration here. */
+    /* No migration code: crash recovery is unreleased, so there is no installed base with the old
+     * deterministic exe-dir recovery slot to migrate into this per-session folder. */
 #ifndef NTPACKER_GUI_SELFTEST
     gui_project_require_recovery();
     char rec_root[GUI_PATHS_MAX];
@@ -1228,7 +1211,7 @@ int main(int argc, char *argv[]) {
     gui_pack_init(pack_session);
 
     /* open a project passed on the command line (errors go to the status bar).
-     * H/P1-8 fix: route the open/defer choice through the PURE gui_startup_decide (single source of truth;
+     * Route the open/defer choice through the PURE gui_startup_decide (single source of truth;
      * J14 truth-table). A pending R6 modal DEFERS the CLI open even when the arg is stale
      * (DEFER > MISSING): the modal can
      * Save-to-original the very file named on the CLI, so opening that file into the live editor behind the
@@ -1316,9 +1299,9 @@ int main(int argc, char *argv[]) {
     nt_gfx_shutdown();
     nt_input_shutdown();
     nt_window_shutdown();
-    gui_log_file_shutdown(); /* D1: unregister the sink + close the file before the engine goes down */
+    gui_log_file_shutdown(); /* unregister the sink + close the file before the engine goes down */
     nt_engine_shutdown();
-    /* D2: drop the crash marker LAST -- after engine teardown, with nothing left that can fault. Clearing
+    /* Drop the crash marker LAST -- after engine teardown, with nothing left that can fault. Clearing
      * it earlier would race a teardown fault: the handler is still live during nt_engine_shutdown, so a
      * crash there would re-create the just-cleared marker -> a false "crashed" next launch. Only a fully
      * clean run reaches here; remove() on the pre-resolved path is safe post-shutdown. */

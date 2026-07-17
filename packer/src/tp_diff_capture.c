@@ -1,5 +1,5 @@
 /*
- * F2-03 task 1: per-op before/after capture. As the F2-02 commit applies each op to
+ * Per-op before/after capture. As the commit applies each op to
  * the transactional clone, we snapshot the touched entity's before (pre-apply) and
  * after (post-apply) state + ordering position -- the compact semantic diff, keyed by
  * effect class (C0-02 §6). capture_before also fixes the entry's shape + addressing
@@ -85,7 +85,7 @@ tp_status tp_diff_capture_before(const tp_project *pre, const tp_operation *op, 
     const tp_project_atlas *a = find_atlas(pre, op->atlas_id); /* NULL only for atlas.create */
     /* Capture runs BEFORE tp_operation_apply validates, so it must be equally defensive
      * as tp_diff_apply.c: resolve the parent atlas + the addressed sub-entity and
-     * bounds-check every index BEFORE any dereference (fix [1]/[2]). Every op but
+     * bounds-check every index BEFORE any dereference. Every op but
      * atlas.create addresses an existing atlas; a dangling id yields a structured
      * NOT_FOUND (never a NULL deref), the SAME status the history-less apply returns. */
     if (op->kind != TP_OP_ATLAS_CREATE && !a) {
@@ -216,7 +216,7 @@ tp_status tp_diff_capture_before(const tp_project *pre, const tp_operation *op, 
             }
             int idx = op->u.anim_frame_rm.index;
             if (idx < 0 || idx >= an->frame_count) {
-                return TP_STATUS_OUT_OF_BOUNDS; /* fix [2]: bounds-check before &an->frames[idx] */
+                return TP_STATUS_OUT_OF_BOUNDS; /* bounds-check before &an->frames[idx] */
             }
             e->position = idx;
             return tp_diff__copy_elem(TP_DIFF_COLL_FRAME, &an->frames[idx], &e->elem);

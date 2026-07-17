@@ -6,7 +6,7 @@
 
 #include "tp_core/tp_sprite_index.h" /* lazy v3->v4 sprite re-keying uses the resolved index */
 #include "tp_project_internal.h"      /* component-local complexity probes */
-#include "tp_strutil.h"              /* shared tp_strdup (one core definition, fix [8]) */
+#include "tp_strutil.h"              /* shared tp_strdup (one core definition) */
 
 static _Thread_local bool s_test_measure_id_validation;
 static _Thread_local size_t s_test_id_validation_probes;
@@ -39,7 +39,7 @@ void tp_project__test_fail_next_legacy_id_index_alloc(void) {
 }
 
 /* ======================================================================== */
-/* deterministic legacy assigner (promoted from C0-01 tp_c0_legacy)          */
+/* deterministic legacy assigner                                            */
 /* ======================================================================== */
 
 /* Upper bound on the salt sweep. The base hash is 128-bit, so a real collision
@@ -438,7 +438,7 @@ tp_status tp_project_resolve_atlas_sprites(tp_project *p, int atlas_index, const
     }
     tp_project_atlas *a = &p->atlases[atlas_index];
 
-    /* ATOMICITY (fix [4]): stage every new {source_ref, src_key} into scratch -- doing
+    /* ATOMICITY: stage every new {source_ref, src_key} into scratch -- doing
      * all strdups up front -- and mutate the model only after EVERY allocation has
      * succeeded. So an OOM on record k does not leave records 0..k-1 already re-keyed;
      * the model stays byte-unchanged (the header's all-or-nothing contract). Upper bound

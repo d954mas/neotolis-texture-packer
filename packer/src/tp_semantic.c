@@ -1,5 +1,5 @@
 /*
- * F2-02 task 5: semantic-state identity, computed SEPARATELY from the revision
+ * Semantic-state identity, computed SEPARATELY from the revision
  * counter (master spec §8, C0-02 §4). `dirty = current identity != saved-baseline
  * identity` -- NOT derived from the revision number, so applying the inverse of an
  * edit returns to clean even at a higher revision, and "mark saved" re-baselines
@@ -11,7 +11,7 @@
  * decimal / "%.9g" text (the same forms the serializer emits) so the identity is
  * byte-identical on every OS regardless of float/int representation.
  *
- * PARTICIPATES (promoted from tp_c0_semantic): atlas name + the 10 packing knobs +
+ * PARTICIPATES: atlas name + the 10 packing knobs +
  * id; source id + normalized key (path) + kind; sprite identity (display name +
  * source_ref + src_key) + origin + slice9 + rename + the five ov_* overrides;
  * animation id + name + fps + playback + flips + FRAMES; target exporter_id +
@@ -27,7 +27,7 @@
  * is an animation's `frames`, whose order IS semantic (playback order): frames fold
  * in array order into the animation hash.
  *
- * A note on source `kind`: the C0-02 field table enumerates {source_id, key}. This
+ * A note on source `kind`: the field table enumerates {source_id, key}. This
  * implementation additionally folds `kind` (folder/file) -- a deliberate, minor,
  * conservative SUPERSET: kind is persistent serialized content whose change alters
  * packing and (for a missing source) sprite-id derivation, so over-detecting a change

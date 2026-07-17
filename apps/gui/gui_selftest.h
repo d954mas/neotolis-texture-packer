@@ -5,7 +5,7 @@
  * plus an auto-quit phase driver that renders real frames, pixel-verifies the region overlay + no
  * layout overflow, then quits. Entirely compiled out unless NTPACKER_GUI_SELFTEST is defined
  * (gui_selftest.c is then an empty TU). The three hooks below are the ONLY entry points main()/frame()
- * call. Split out of main.c as GUI decomposition step 3 -- pure move, no behavior change. */
+ * call. */
 
 #ifdef NTPACKER_GUI_SELFTEST
 

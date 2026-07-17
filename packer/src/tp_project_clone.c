@@ -1,5 +1,5 @@
 /*
- * F2-02 task 2: an OOM-safe deep-clone of the tp_project model -- the atomicity
+ * An OOM-safe deep-clone of the tp_project model -- the atomicity
  * primitive the transaction engine copies the live model with before applying a
  * batch. On FULL success the clone is swapped in and the old model freed; on ANY
  * op/allocator failure the clone is discarded and the live model is byte-unchanged
@@ -18,7 +18,7 @@
  * allocations succeed. tp_free_atlas / tp_free_anim (via tp_project_destroy) then
  * iterate only the filled prefix; the zeroed tail holds only NULL pointers.
  *
- * !! FORK-SYNC WARNING (review [5]) !! packer/src/tp_diff_entity.c keeps a DELIBERATE
+ * !! FORK-SYNC WARNING !! packer/src/tp_diff_entity.c keeps a DELIBERATE
  * second copy of this deep-copy (fill_atlas/anim/source/target/frame/copy_sprite_fields)
  * on its own fault seam so the diff never perturbs this file's clone-alloc-count goldens
  * (decision 0012 §6). A persistent field added HERE MUST be mirrored THERE, or Undo/Redo

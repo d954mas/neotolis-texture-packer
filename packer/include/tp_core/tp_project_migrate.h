@@ -2,7 +2,7 @@
 #define TP_CORE_TP_PROJECT_MIGRATE_H
 
 /*
- * F1-01 schema-v2 identity migration + writable promotion (master spec §5, §5.5).
+ * Schema-v2 identity migration + writable promotion (master spec §5, §5.5).
  * Kept in its own TU so tp_project.c's loader/serializer is not bloated by the
  * id-assignment policy.
  *
@@ -39,7 +39,7 @@ extern "C" {
 
 struct tp_sprite_index;
 
-/* ----- low-level deterministic legacy assigner (promoted from C0-01) ------ *
+/* ----- low-level deterministic legacy assigner ------ *
  * One legacy entity to receive a synthetic ID. `tuple` is the caller-built
  * canonical discriminator derived from the v1 file (e.g. atlas index, or
  * "atlasIdx|exporter_id|out_path" for a target); it must be stable across loads
@@ -75,7 +75,7 @@ tp_status tp_legacy_assign(tp_legacy_entry *entries, size_t n, tp_legacy_hash_fn
  * the default hash. */
 tp_status tp_project_assign_legacy_ids(tp_project *p, tp_error *err);
 
-/* Sources-only variant (F1-02): synthesize deterministic ids for NIL source ids
+/* Sources-only variant: synthesize deterministic ids for NIL source ids
  * ONLY, leaving atlas/animation/target ids untouched. Used by the v2->v3 migration
  * path -- a v2 file already carries atlas/anim/target ids but no source ids, so a
  * nil atlas/anim/target id there stays a genuine anomaly for validate to reject
@@ -100,7 +100,7 @@ tp_status tp_project_promote_ids(tp_project *p, const tp_rng *rng, tp_error *err
  * after IDs are resolved; also usable by validate tooling. */
 tp_status tp_project_validate_ids(const tp_project *p, tp_error *err);
 
-/* ----- lazy v3->v4 sprite re-keying (F1-03, master spec §5.2, decision 0009) ---- *
+/* ----- lazy v3->v4 sprite re-keying (master spec §5.2, decision 0009) ---- *
  * Rewrite PENDING sprite overrides (a v3 name-keyed record, or one added by name
  * before a scan: source_ref nil / src_key NULL) onto their canonical {source_ref,
  * src_key} using the CURRENT resolved sprite index `idx` (which the caller built by

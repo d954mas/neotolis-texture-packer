@@ -1,5 +1,5 @@
 /*
- * F2-01 task 2: ID-only apply of ONE validated operation to the tp_project model.
+ * ID-only apply of ONE validated operation to the tp_project model.
  * Entities are addressed BY STABLE ID (never array index or mutable name); a human
  * selector is resolved to an id at the request edge (tp_op_build_*), not here.
  *
@@ -12,8 +12,8 @@
  * mid-build failure never half-populates an animation. tp_op__test_set_alloc_fail
  * drives that staging path in the fault-injection test.
  *
- * F2-01/F2-05 boundary: this engine is CORE-TESTED groundwork. The shipping CLI/GUI
- * mutators are NOT routed through it here -- that cutover is F2-05.
+ * Boundary: this engine is CORE-TESTED groundwork. The shipping CLI/GUI
+ * mutators are NOT routed through it here -- that cutover comes later.
  */
 
 #include "tp_core/tp_operation.h"

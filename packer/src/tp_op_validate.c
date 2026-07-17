@@ -1,5 +1,5 @@
 /*
- * F2-01 tasks 4+5: operation payload + reference validation moved INTO core.
+ * Operation payload + reference validation moved INTO core.
  * The range / name / exporter-id / reference rules that were duplicated in
  * apps/cli/cli_mutate.c (CLI-specific) and the apps/gui wrappers now live here,
  * once, producing a STRUCTURED status id + offending field + context (not prose).
@@ -61,7 +61,7 @@ static tp_status validate_atlas_name_shape(const char *name,
                                "atlas name must not be dots-only")
                : TP_STATUS_OK;
 }
-/* const adapters over the public id-addressed accessors (fix [8]): validate holds a
+/* const adapters over the public id-addressed accessors: validate holds a
  * const project; the accessors take non-const and only READ, so the cast is safe. This
  * removes the lookup loops that duplicated the tp_project_atlas_find_*_by_id accessors. */
 static const tp_project_source *find_source(const tp_project_atlas *a, tp_id128 id) {
@@ -438,7 +438,7 @@ tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_
             /* The apply mutator dedupes a matching '/'-normalized path (count unchanged),
              * which would strand the op's source_id. The id-contract ("create a NEW source
              * with THIS id at this path") cannot honor a path that already belongs to another
-             * source, so reject the conflict here. (The F2-05 CLI adapter pre-checks/skips to
+             * source, so reject the conflict here. (The CLI adapter pre-checks/skips to
              * preserve the CLI's silent-dedupe UX.) */
             tp_status path_status = validate_unique_source_path(
                 p, a, op->u.source_add.key, tp_id128_nil(), rej);
@@ -547,7 +547,7 @@ tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_
             }
             /* Reject a collision with ANOTHER animation in the atlas; renaming to the same name
              * (self) is allowed (a no-op) -- mirrors atlas.rename's uniqueness check. This is the
-             * policy the pre-H/P1-2 GUI enforced client-side (decision 0015); it now lives here so
+             * policy the GUI enforced client-side (decision 0015); it now lives here so
              * every frontend reuses the one structured reject (invalid_argument + field). */
             for (int i = 0; i < a->animation_count; i++) {
                 const tp_project_anim *other = &a->animations[i];

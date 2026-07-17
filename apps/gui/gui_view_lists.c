@@ -1,5 +1,4 @@
-/* Left panel view (see gui_view_lists.h). Split out of main.c (GUI decomposition step 5) as a pure
- * move -- function bodies + panel-local statics relocated verbatim, no behavior change. */
+/* Left panel view (see gui_view_lists.h). */
 
 #include "gui_view_lists.h"
 
@@ -16,7 +15,7 @@
 #include "gui_canvas.h"
 #include "gui_pack.h"
 #include "gui_project.h"
-#include "gui_shell.h" /* close_menubar_menus (interim -- moves to gui_view_chrome in step 6b) */
+#include "gui_shell.h" /* close_menubar_menus */
 
 #include <math.h>
 #include <stdint.h>
@@ -27,7 +26,7 @@
 static const nt_ui_events_cfg_t s_dbl_cfg = {.long_press_secs = 0.0F, .double_click = true};
 
 /* start_atlas_edit/start_anim_edit/start_sprite_edit_ref/start_sprite_edit moved to gui_actions
- * (step 4 -- the entry side of the edit lifecycle, needed by both this panel and the settings view). */
+ * (the entry side of the edit lifecycle, needed by both this panel and the settings view). */
 
 static void declare_atlas_list(nt_ui_context_t *ctx, const tp_session_snapshot *snapshot) {
     CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(20.0F))}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
@@ -81,7 +80,7 @@ static void declare_atlas_list(nt_ui_context_t *ctx, const tp_session_snapshot *
                 ui_row_icon(ctx, &s_ic_layers, selected ? &g_row_strong : &g_caption);
                 if (editing) {
                     if (render_rename_field(ctx)) {
-                        s_pending_commit_edit_enter = true; /* defer: never commit while holding `proj` (F2-05b-i) */
+                        s_pending_commit_edit_enter = true; /* defer: never commit while holding `proj` */
                     }
                 } else {
                     ui_label_fit(ctx, atlas->name, selected ? &g_row_strong : &g_row,
@@ -276,7 +275,7 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
                     ui_row_icon(ctx, ic, ic_tint);
                     if (editing) {
                         if (render_rename_field(ctx)) {
-                            s_pending_commit_edit_enter = true; /* defer: never commit while holding row pointers (F2-05b-i) */
+                            s_pending_commit_edit_enter = true; /* defer: never commit while holding row pointers */
                         }
                     } else {
                         /* Folder rows carry a fixed smart-folder tooltip on the whole row (below), so skip the
@@ -367,7 +366,7 @@ static void declare_animations_list(nt_ui_context_t *ctx,
                 ui_row_icon(ctx, &s_ic_film, selected ? &g_row_strong : &g_caption);
                 if (editing) {
                     if (render_rename_field(ctx)) {
-                        s_pending_commit_edit_enter = true; /* defer: never commit while holding `a` (F2-05b-i) */
+                        s_pending_commit_edit_enter = true; /* defer: never commit while holding `a` */
                     }
                 } else {
                     ui_label_fit(ctx, animation->name, selected ? &g_row_strong : &g_row,

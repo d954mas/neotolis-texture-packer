@@ -1,5 +1,4 @@
-/* Shared mutable editor/UI state for the ntpacker GUI (see gui_state.h). Split out of main.c
- * (GUI decomposition step 1) as a pure move -- definitions relocated verbatim, no behavior change. */
+/* Shared mutable editor/UI state for the ntpacker GUI (see gui_state.h). */
 
 #include "gui_state.h"
 
@@ -44,8 +43,7 @@ void set_statusf_ex(status_sev_t sev, const char *fmt, ...) {
     s_status_dismissed = false;
 }
 
-/* --- pack-button state cached for the tooltip pass (moved from the shell in step 6a; shared with
- * declare_tooltips, which stays in main.c until chrome, step 6b) --- */
+/* --- pack-button state cached for the tooltip pass (shared with declare_tooltips) --- */
 bool s_pack_has_sources, s_pack_stale;
 
 /* --- executable directory --- */
@@ -80,7 +78,7 @@ int s_sel_child = -1;
 char s_sel_abs[512];
 bool s_sel_missing;
 
-/* --- multi-select set (growable; grown by multi_sel_add in gui_rows.c -- P1 fix, step 7) --- */
+/* --- multi-select set (growable; grown by multi_sel_add in gui_rows.c) --- */
 gui_selected_sprite *s_multi_sel;
 int s_multi_sel_count;
 int s_multi_sel_cap;
@@ -120,12 +118,12 @@ bool s_sec_atlas_open = true, s_sec_region_open = true, s_sec_export_open = true
 bool s_atlas_adv_open = false;
 bool s_sec_anim_open = true;
 
-/* --- modal open flags (moved from the shell in step 3; shared with the selftest) --- */
+/* --- modal open flags (shared with the selftest) --- */
 bool s_about_open;
 bool s_export_open;
 
-/* --- context-menu shared state (moved from the shell in step 4; written by left panel/canvas/settings,
- * read by the declare machinery in gui_view_chrome.c since step 6b) --- */
+/* --- context-menu shared state (written by left panel/canvas/settings,
+ * read by the declare machinery in gui_view_chrome.c) --- */
 uint32_t s_id_ctx_menu;
 nt_ui_menu_state_t s_ctx_state;
 int s_ctx_kind;
@@ -145,7 +143,7 @@ char s_ctx_sprite_display_name[TP_SCAN_REL_CAP];
 bool s_ctx_leaf;
 bool s_ctx_removable;
 
-/* --- shell-set, view-read input-blur flag (moved from the shell in step 4) --- */
+/* --- shell-set, view-read input-blur flag --- */
 bool s_blur_inputs;
 
 /* --- per-frame row tooltips --- */

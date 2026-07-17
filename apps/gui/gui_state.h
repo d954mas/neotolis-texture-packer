@@ -4,8 +4,7 @@
 /* Shared mutable editor/UI state for the ntpacker GUI: selection, multi-select set, inline-edit,
  * disclosure bits, animation preview, runtime panel widths, the nt_ui context + canvas, executable
  * dir, UI ids, per-frame row tooltips, the status line, and the ~30 per-frame-scaled style objects
- * (written by apply_ui_scale in gui_widgets + seeded once in ensure_ids; read everywhere). Split out
- * of main.c (GUI decomposition step 1) as a pure move -- no behavior change.
+ * (written by apply_ui_scale in gui_widgets + seeded once in ensure_ids; read everywhere).
  *
  * Include discipline: this header pulls in ENGINE ui/font/atlas headers (for the style + context
  * types) plus the one MODEL header gui_canvas.h (for the gui_canvas type). It must NEVER include a
@@ -62,8 +61,8 @@ void set_statusf_ex(status_sev_t sev, const char *fmt, ...) GUI_PRINTF(2, 3);
 
 /* Pack-button state cached for the tooltip pass. Written each frame by the canvas strip
  * (gui_view_canvas's declare_canvas_strip); s_pack_stale is also read by gui_view_chrome's
- * declare_tooltips (step 6b) to word the Pack tooltip, so it can never be canvas-view-local -- same
- * class of shared UI state as the disclosure/modal flags above (moved out of main.c in step 6a). */
+ * declare_tooltips to word the Pack tooltip, so it can never be canvas-view-local -- same
+ * class of shared UI state as the disclosure/modal flags above. */
 extern bool s_pack_has_sources, s_pack_stale;
 
 /* --- executable directory (resolved once at startup; selftest + pack-session paths hang off it) --- */
@@ -102,8 +101,8 @@ extern char s_sel_abs[512];  /* resolved absolute image path of the selection ("
 extern bool s_sel_missing;   /* selection is a missing file -> canvas shows a placeholder (§3.7) */
 
 /* Multi-select set over canonical leaf sprite identities (rows rebuild each frame). Drives
- * "Create animation from selection" + the editor's "Add frames" (ux.md §3.7b). Growable storage
- * (P1 fix, decomposition step 7): the old fixed 4096 cap silently ignored selections past it. Grows
+ * "Create animation from selection" + the editor's "Add frames" (ux.md §3.7b). Growable storage:
+ * the old fixed 4096 cap silently ignored selections past it. Grows
  * geometrically in multi_sel_add_ref (gui_rows.c); see the growth-policy note there. */
 typedef struct gui_selected_sprite {
     tp_id128 source_id;
@@ -159,16 +158,16 @@ extern bool s_sec_anim_open;  /* the "Animation" section disclosure */
 
 /* Modal open flags: the About box + the Export dialog. Shared with the selftest (it opens both so the
  * auto-quit frames render them, and closes them before the pixel probe), so they can never be
- * view-local. Moved out of the shell in step 3; gui_view_chrome owns their declares since step 6b. */
+ * view-local. gui_view_chrome owns their declares. */
 extern bool s_about_open;
 extern bool s_export_open;
 
 /* Right-click context menu: one cursor-anchored menu whose items depend on the row a right-click armed
  * it over (§3.3e mouse-complete access). This is the shared TRIGGER/PAYLOAD state written by three
  * different views (left panel / canvas / settings) and read by the DECLARE machinery (gui_view_chrome's
- * declare_context_menu, since step 6b) -- "menu/modal open flags", same class as
+ * declare_context_menu) -- "menu/modal open flags", same class as
  * s_about_open/s_export_open, so it can never be view-local. s_id_ctx_menu is seeded once in
- * ensure_ids (shell); only the storage moved here (step 4). */
+ * ensure_ids (shell); only the storage moved here. */
 extern uint32_t s_id_ctx_menu;
 extern nt_ui_menu_state_t s_ctx_state;
 enum { CTX_NONE = 0, CTX_ATLAS, CTX_SPRITE, CTX_CANVAS, CTX_TARGET, CTX_ANIM };
@@ -192,7 +191,7 @@ extern bool s_ctx_removable;   /* a removable source row (has an [x] today) */
 /* One frame: a press landed outside the panels -> declare the settings-panel numeric/text fields
  * disabled so the engine drops keyboard focus (the engine exposes no programmatic blur). Set by the
  * shell input pre-pass (frame()), read by view field widgets (gui_view_settings' ui_int/float/
- * text_field). Same family as the published pending flags (step 2) -- a shell-set, view-read bit. */
+ * text_field). Same family as the published pending flags -- a shell-set, view-read bit. */
 extern bool s_blur_inputs;
 
 /* Per-frame collected row tooltips: TRUNCATED-label full text AND icon-only remove-x "Remove" hints.

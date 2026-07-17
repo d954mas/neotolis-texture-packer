@@ -34,7 +34,7 @@
 #include "tp_core/tp_srckey.h" /* TP_SRCKEY_MAX (v4 sprite key buffer) */
 #include "tp_core/tp_project_migrate.h" /* legacy synthesis + duplicate validation on load */
 #include "tp_project_internal.h"         /* deterministic save fault seam for tests */
-#include "tp_strutil.h"                 /* shared tp_strdup (one core definition, fix [8]) */
+#include "tp_strutil.h"                 /* shared tp_strdup (one core definition) */
 
 #define TP_PATH_MAX 4096
 
@@ -2394,7 +2394,7 @@ static tp_status tp_load_sprite(tp_project_atlas *a, const cJSON *js,
         if (!name) {
             return tp_error_set(err, TP_STATUS_BAD_PROJECT, "sprite override needs 'name' or 'source'+'key'");
         }
-        /* Dedup pending-against-pending ONLY (fix [3]); never merge into a migrated record,
+        /* Dedup pending-against-pending ONLY; never merge into a migrated record,
          * so records sharing a name bridge load order-independently. */
         if (pending_lookup->capacity == 0U &&
             !tp_load_lookup_init(pending_lookup, pending_expected, false)) {

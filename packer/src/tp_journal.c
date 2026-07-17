@@ -1,5 +1,5 @@
 /*
- * F2-04 minimum recovery journal -- a PURE durable log over the tp_journal_io seam
+ * Minimum recovery journal -- a PURE durable log over the tp_journal_io seam
  * (master spec §7.1-7.2, §22.3). It deals in opaque project-snapshot blobs + 32-hex
  * transaction ids and knows nothing about tp_project; the model<->journal glue lives
  * in tp_txn_apply.c.
@@ -1510,7 +1510,7 @@ tp_status tp_journal_recover(tp_journal *j, tp_journal_recovery *out, tp_error *
      * field, a lost sync-word, or a flipped byte -- and truncating would delete the trailing
      * acknowledged records, so preserve the file and poison the journal against appends behind
      * it. If not, the tail is genuinely torn/corrupt and is safe to truncate away. A bloated
-     * length that used to masquerade as a clean torn tail (TRUNCATED) is now caught here. */
+     * length field is MID-STREAM corruption, not a clean torn tail, so it is preserved here. */
     bool more_after = (stop != TP_JRN_STOP_EOF) && has_valid_record_after(buf, len, off + 1, NULL);
     out->status = classify_stop(stop, out->records_recovered, more_after);
     if (more_after) {

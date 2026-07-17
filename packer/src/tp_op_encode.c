@@ -1,5 +1,5 @@
 /*
- * F2-01 determinism: canonical BYTE-STABLE encoders for an operation and an apply
+ * Determinism: canonical BYTE-STABLE encoders for an operation and an apply
  * result. Same conventions as the tp_project writer (src/tp_sb.h): 2-space indent,
  * LF, %.9g floats, keys ASCENDING with the "op" discriminator first, a trailing
  * newline. Endian-independent (no reinterpret), so goldens are byte-identical on

@@ -2,7 +2,7 @@
 #define TP_CORE_SRC_TP_DIFF_INTERNAL_H
 
 /*
- * F2-03 semantic-diff internals shared across the diff TUs (entity copy/free +
+ * Semantic-diff internals shared across the diff TUs (entity copy/free +
  * collection primitives / per-op capture / inverse+redo apply / history stack) and
  * the oracle test. NOT a public header -- tests include it from src/ the same way
  * test_transaction.c includes tp_txn_internal.h.
@@ -63,7 +63,7 @@ typedef struct tp_diff_anim_settings {
 
 /* One committed op's reverse-apply record. The inverse/redo path switches on `shape`
  * (the effect class), not the op kind -- the op kind + class were dead reference/debug
- * fields and are dropped (fix [8]). */
+ * fields and are dropped. */
 typedef struct tp_diff_op {
     tp_diff_shape shape;
 

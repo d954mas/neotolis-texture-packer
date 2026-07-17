@@ -5,10 +5,9 @@
  * its pump (apply_pending), the pack/export/undo/redo/refresh actions, file dialogs + add-files/
  * folder, the new/open/save/exit unsaved-changes confirm flow, inline-rename commits + the start-edit
  * entry points (start_atlas_edit/start_anim_edit/start_sprite_edit_ref/start_sprite_edit -- the
- * entry side of the same edit lifecycle, moved here in step 4 so every view that starts an inline
+ * entry side of the same edit lifecycle, so every view that starts an inline
  * edit shares one home), the animation ops + preview player, and the small selection/edit helpers.
- * Split out of main.c (GUI decomposition step 2) as a pure move -- no behavior change. This layer is
- * Clay-free AND nt_ui-free: views enqueue typed requests that capture stable structural IDs,
+ * This layer is Clay-free AND nt_ui-free: views enqueue typed requests that capture stable structural IDs,
  * expected revision, typed arguments, and owned copied strings; apply_pending consumes them at the
  * top of the next frame. Include discipline: actions -> gui_state + gui_rows + model headers
  * (gui_project/gui_scan/gui_canvas/gui_pack) + tinyfiledialogs; it must never include
@@ -70,7 +69,7 @@ void gui_actions_recovery_request(int row, int action);        /* action = gui_r
 extern double s_last_pack_ms;   /* wall-clock ms of the last successful pack (for the stats line) */
 extern int s_last_pack_atlas;   /* which atlas that timing belongs to */
 
-/* --- deferred MODEL-EDIT queue (F2-05b-i, decision 0015) ---
+/* --- deferred MODEL-EDIT queue (decision 0015) ---
  * A commit clone-swaps the model and frees the old project, so a declare_* render fn must
  * NEVER commit while holding a live atlas/sprite/anim/target pointer (the whole
  * pointer-invalidation UAF class). Instead the declare fns ENQUEUE the edit here (capturing
@@ -79,7 +78,7 @@ extern int s_last_pack_atlas;   /* which atlas that timing belongs to */
  * self-contained gui_project_* setters. Coalescable setters BUFFER into gui_project's pending
  * transaction (they do not commit on drain); a gesture boundary raises
  * gui_request_gesture_commit(), which apply_pending honours by flushing the buffer -- so one
- * interaction = one committed transaction = one undo step (F2-05b-ii-A, decision 0015). */
+ * interaction = one committed transaction = one undo step (decision 0015). */
 void gui_queue_atlas_setting(tp_id128 atlas_id, int64_t expected_revision,
                              gui_atlas_field field, int ivalue, float fvalue);
 void gui_queue_sprite_origin(const gui_sprite_ref *sprite, int axis, float value); /* axis 0=X, 1=Y (#2) */
@@ -111,7 +110,7 @@ void apply_pending(void);
 
 /* Raised by a view widget when an EDIT GESTURE ENDS (slider release / field Enter+blur / a discrete
  * dropdown/checkbox pick): apply_pending flushes gui_project's pending transaction AFTER the queue
- * drains, committing the whole gesture as ONE undo step (F2-05b-ii-A, decision 0015). */
+ * drains, committing the whole gesture as ONE undo step (decision 0015). */
 void gui_request_gesture_commit(void);
 
 /* --- pack / export / undo / redo / refresh --- */

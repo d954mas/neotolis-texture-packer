@@ -3,11 +3,10 @@
 
 /* Right settings panel view (regions F/G + per-region packing overrides): atlas settings, the
  * selected region's fields + per-region packing overrides, export targets, and the animation editor.
- * Split out of main.c (GUI decomposition step 4) as a pure move -- no behavior change. Declare-only:
- * exposes the one entry point frame() calls. Include discipline: this view TU may include gui_defs/
- * gui_state/gui_widgets/gui_actions/gui_rows headers + model headers (gui_project/gui_pack) +
- * gui_shell.h (interim close_menubar_menus prototype) + nt_ui/Clay; it must never include another
- * view TU's header (none exist yet). */
+ * Declare-only: exposes the one entry point frame() calls. Include discipline: this view TU may
+ * include gui_defs/gui_state/gui_widgets/gui_actions/gui_rows headers + model headers
+ * (gui_project/gui_pack) + gui_shell.h (interim close_menubar_menus prototype) + nt_ui/Clay; it must
+ * never include another view TU's header (none exist yet). */
 
 #include "ui/nt_ui.h" /* nt_ui_context_t */
 

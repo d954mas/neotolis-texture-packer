@@ -2,7 +2,7 @@
 #define TP_CORE_SRC_TP_TXN_JSON_H
 
 /*
- * F2-02 private cJSON reader helpers shared by the transaction request decoder
+ * Private cJSON reader helpers shared by the transaction request decoder
  * (tp_txn_parse.c) and the JSON->tp_operation lowering (tp_txn_lower.c). cJSON is a
  * PRIVATE dep confined to these src/ TUs -- it never appears on a public header.
  *

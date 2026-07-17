@@ -1,5 +1,4 @@
-/* Chrome view (see gui_view_chrome.h). Split out of main.c (GUI decomposition step 6b) as a pure
- * move -- function bodies + chrome-local statics relocated verbatim, no behavior change. */
+/* Chrome view (see gui_view_chrome.h). */
 
 #include "gui_view_chrome.h"
 
@@ -47,7 +46,7 @@ enum {
  * armed it over (§3.3e mouse-complete access). Its actions call the same code paths as the [x]
  * buttons / inline editors. The trigger/payload state (s_id_ctx_menu, s_ctx_state, s_ctx_kind, the
  * CTX_ enum, typed context refs, s_ctx_leaf,
- * s_ctx_removable) lives in gui_state (step 4 -- written by three different views); s_ctx_menu is the
+ * s_ctx_removable) lives in gui_state (written by three different views); s_ctx_menu is the
  * declare-machinery working buffer for declare_context_menu below, chrome-local. */
 static nt_ui_menu_ctx_t s_ctx_menu;
 
@@ -346,7 +345,7 @@ void declare_tooltips(nt_ui_context_t *ctx) {
 
 /* Export dialog (mouse-complete): every atlas's targets, toggle/browse per target, then Export runs the
  * same do_export path. All edits enqueue via gui_edit_target (committed at frame top; dirty + undo,
- * no parallel state) -- never commit while holding p/a/t (F2-05b-i UAF fix). */
+ * no parallel state) -- never commit while holding p/a/t (UAF fix). */
 void declare_export_modal(nt_ui_context_t *ctx) {
     if (!nt_ui_modal_visible(ctx, s_id_export_modal, &s_modal_style, &s_export_open)) {
         return;

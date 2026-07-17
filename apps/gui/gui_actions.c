@@ -1,6 +1,5 @@
-/* Model/state mutation layer for the ntpacker GUI (see gui_actions.h). Split out of main.c
- * (GUI decomposition step 2) as a pure move -- definitions relocated verbatim, no behavior change.
- * This TU is Clay-free AND nt_ui-free: it reads/mutates the model + shared state only. */
+/* Model/state mutation layer for the ntpacker GUI (see gui_actions.h). This TU is Clay-free AND
+ * nt_ui-free: it reads/mutates the model + shared state only. */
 
 #include "gui_actions.h"
 
@@ -102,7 +101,7 @@ static int s_recovery_pending_action = 0;           /* gui_recovery_action for t
 double s_last_pack_ms;      /* wall-clock ms of the last successful pack (for the stats line) */
 int s_last_pack_atlas = -1; /* which atlas that timing belongs to */
 
-// #region deferred model-edit queue (F2-05b-i, decision 0015)
+// #region deferred model-edit queue (decision 0015)
 /* A commit clone-swaps the model + frees the old project, so declare_* render fns must not
  * commit while holding a live atlas/sprite/anim/target pointer. They ENQUEUE the edit here;
  * drain_edits() (run at frame top from apply_pending, no live pointer held) replays each via
@@ -567,7 +566,7 @@ static void drain_edits(void) {
 /* Set by a view widget the frame its edit GESTURE ENDS (slider release / field Enter+blur / a
  * discrete dropdown/checkbox pick). apply_pending flushes gui_project's pending transaction AFTER
  * drain_edits buffers this frame's value, so the whole gesture commits as ONE undo step
- * (F2-05b-ii-A, decision 0015). One shared flag suffices: pending_route already flushes a prior
+ * (decision 0015). One shared flag suffices: pending_route already flushes a prior
  * gesture when a different-key edit arrives, so the flag always targets the latest buffered edit. */
 static bool s_gesture_commit;
 void gui_request_gesture_commit(void) { s_gesture_commit = true; }
@@ -641,8 +640,8 @@ void cancel_edit(void) {
 
 /* --- start-edit entry points: the entry side of the same edit lifecycle as the inline-rename commit
  * path below (commit_active_edit, which inlines the atlas + animation rename and delegates the sprite
- * rename to commit_sprite_rename). Moved here in step 4 (they are Clay-free) so gui_view_lists and
- * gui_view_settings -- both of which start edits -- share one home instead of step 5 re-deciding. --- */
+ * rename to commit_sprite_rename). They live here (Clay-free) so gui_view_lists and gui_view_settings
+ * -- both of which start edits -- share one home. --- */
 void start_atlas_edit(int i) {
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     const tp_snapshot_atlas *atlas = snapshot
@@ -827,7 +826,7 @@ static int snapshot_atlas_index_by_id(const tp_session_snapshot *snapshot,
  * with a status set -- the caller then does nothing, never truncates). */
 static int build_sorted_selection(void) {
     const int n = s_multi_sel_count;
-    if (!sel_sort_reserve(n)) { /* grow the sort scratch WITH the selection (P1 fix, step 7) */
+    if (!sel_sort_reserve(n)) { /* grow the sort scratch WITH the selection */
         set_status_ex(STATUS_ERROR, "Out of memory: could not sort the selection.");
         return 0;
     }
@@ -962,7 +961,7 @@ int create_animation_from_selection(void) {
 }
 
 /* Appends the current multi-selection (natural-sorted) as frames of animation `anim_index`.
- * DEFERRED (F2-05b-i F1): this is called from declare_animation_editor, which holds live
+ * DEFERRED: this is called from declare_animation_editor, which holds live
  * `a`/`an` pointers it keeps dereferencing AFTER this returns. A synchronous commit here would
  * clone-swap + free the project under those pointers -> use-after-free on a plain "Add frames"
  * click. So it builds the sorted selection (read-only) and ENQUEUES an add-frames edit carrying
@@ -1933,8 +1932,8 @@ static void poll_async(void) {
             break;
     }
     /* Surface a pending transaction REJECT (core rejected a mutator's op -- out-of-range value
-     * or bad reference): the model was left byte-unchanged, so report it as a soft error
-     * (F2-05b-i). In practice the widgets clamp valid ranges, so this rarely fires. */
+     * or bad reference): the model was left byte-unchanged, so report it as a soft error.
+     * In practice the widgets clamp valid ranges, so this rarely fires. */
     char op_err[256];
     if (gui_project_take_op_error(op_err, sizeof op_err)) {
         set_statusf_ex(STATUS_WARNING, "Edit rejected: %s", op_err);
@@ -1967,7 +1966,7 @@ void commit_sprite_rename(void) {
  * flush_failed(). Any buffered gesture is committed-or-aborted HERE; on a journal-failed flush the
  * neutral error is surfaced and we abort (keeping the editor open unless forced, so the user can retry
  * after freeing disk). After a successful flush, each rename op's OWN internal flush is a guaranteed
- * no-op, so its return is DOMAIN-ONLY. As of H/P1-2 the anim branch also routes through an op
+ * no-op, so its return is DOMAIN-ONLY. The anim branch also routes through an op
  * (set_anim_id builds TP_OP_ANIMATION_RENAME -> commit_txn_now), so a false there is a core reject whose
  * structured message rides the op-error channel -- surfaced directly, no anim_id_exists heuristic (fix3's
  * heuristic was wrong: it matched the anim's own unchanged name). set_atlas_name / set_sprite_rename /
@@ -2043,7 +2042,7 @@ static void commit_active_edit(bool force) {
         const gui_animation_ref animation = {
             s_edit_anim_atlas_id, s_edit_anim_id, s_edit_anim_revision};
         if (!gui_project_set_anim_id(&animation, s_edit_buf)) {
-            /* H/P1-2: animation rename is a first-class op now (undoable + journaled), so a false is a
+            /* Animation rename is a first-class op now (undoable + journaled), so a false is a
              * core REJECT -- a name collision (validate enforces uniqueness) or a rare OOM/stale-index
              * failure. The structured reject rides commit_txn_now's op-error channel, so surface it
              * DIRECTLY instead of re-deriving the reason with the old anim_id_exists heuristic (which
@@ -2118,7 +2117,7 @@ void apply_pending(void) {
     /* Enter pressed in an inline editor last frame -> commit it here (deferred, non-force: an
      * invalid atlas/anim name keeps the editor open). Deferring the commit off the declare pass is
      * what keeps declare_left_panel / the anim editor from committing while holding proj/a/an
-     * (F2-05b-i UAF fix). */
+     * (UAF fix). */
     if (s_edit_kind != EDIT_NONE && s_pending_commit_edit_enter) {
         commit_active_edit(false);
     }
@@ -2132,7 +2131,7 @@ void apply_pending(void) {
 
     /* A gesture ended last frame (slider release / field Enter+blur / discrete pick): commit the
      * buffered transaction NOW that drain_edits has folded in this frame's final value, so one
-     * interaction == one undo step (F2-05b-ii-A, decision 0015). */
+     * interaction == one undo step (decision 0015). */
     if (s_gesture_commit) {
         /* fix2: the bool is intentionally IGNORED -- this is the gesture-BOUNDARY commit (one interaction
          * = one undo step). A journal-failed flush here drops the gesture WITH the op-error surfaced

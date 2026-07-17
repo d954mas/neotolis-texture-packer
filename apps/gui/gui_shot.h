@@ -3,9 +3,8 @@
 
 /* Dev seam: the `--shot` screenshot mode -- render the real UI at a requested size/scale, pack +
  * select so the panels populate, dump ONE full-frame PNG at the pre-swap point, and quit. Compiled
- * into EVERY build (unlike the selftest) -- it doubles as the byte-reproducible refactor gate. Split
- * out of main.c as GUI decomposition step 3 -- pure move, no behavior change. The prototypes below are
- * the only entry points main()/frame() call. */
+ * into EVERY build (unlike the selftest) -- it doubles as the byte-reproducible refactor gate. The
+ * prototypes below are the only entry points main()/frame() call. */
 
 #include <stdbool.h>
 

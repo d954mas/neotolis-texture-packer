@@ -1,16 +1,16 @@
 /*
- * F2-02 tasks 1-4: the atomic transaction core over the live tp_project model.
+ * The atomic transaction core over the live tp_project model.
  *
  * Mechanism -- transactional CLONE (docs/decisions/0011): idempotency (a seen id ->
  * duplicate_id) -> revision precondition (mismatch rejects ALONE, op_index -1, before
  * any per-op work) -> clone the model -> validate+apply each op to the CLONE op-by-op
- * via the F2-01 tp_operation_apply (so op N may depend on ops 1..N-1) -> on FULL
+ * via tp_operation_apply (so op N may depend on ops 1..N-1) -> on FULL
  * success record the id, swap the clone in (freeing the old model), and bump the
  * revision by exactly 1. On ANY op rejection or allocator failure the clone is
  * discarded and the LIVE model is byte-unchanged (§416). The commit point is an
  * allocation-free pointer swap: provably atomic.
  *
- * SEMANTIC vs SHAPE validation (divergence from the C0-02 static-table spike,
+ * SEMANTIC vs SHAPE validation (divergence from a static-table approach,
  * documented in decision 0011): the model-INDEPENDENT shape faults (unknown op,
  * unknown field, malformed *_id) are collected-all in tp_txn_parse.c before any
  * apply. The model-DEPENDENT semantic faults (dangling id, range, name collision)
@@ -27,10 +27,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "tp_diff_internal.h" /* F2-03: optional per-op diff capture on commit */
+#include "tp_diff_internal.h" /* optional per-op diff capture on commit */
 #include "tp_encode_internal.h"
-#include "tp_idset_internal.h" /* F2-04 fix C1: migrate retained ids into the journal on attach */
-#include "tp_journal_internal.h" /* F2-04 fix C3: poison the journal from the recovery glue */
+#include "tp_idset_internal.h" /* migrate retained ids into the journal on attach */
+#include "tp_journal_internal.h" /* poison the journal from the recovery glue */
 #include "tp_op_internal.h"
 #include "tp_project_internal.h"
 #include "tp_txn_internal.h"
@@ -74,8 +74,8 @@ void tp_model_destroy(tp_model *m) {
     if (!m) {
         return;
     }
-    tp_history_destroy(m->history); /* F2-03: NULL-safe when history was never enabled */
-    tp_journal_destroy(m->journal); /* F2-04: NULL-safe when no journal was attached */
+    tp_history_destroy(m->history); /* NULL-safe when history was never enabled */
+    tp_journal_destroy(m->journal); /* NULL-safe when no journal was attached */
     tp_project_destroy(m->project);
     if (m->idstore) {
         if (m->owns_idstore && m->idstore->destroy) {
@@ -302,7 +302,7 @@ static void addr_str(tp_txn_result_op *ro, const char *key, const char *val) {
     (void)snprintf(a->str, sizeof a->str, "%s", val ? val : "");
 }
 
-/* Echo an op's wire + addressing ids on a committed result op (no diff -- F2-03). */
+/* Echo an op's wire + addressing ids on a committed result op (no diff). */
 static void fill_result_op(tp_txn_result_op *ro, const tp_operation *op) {
     memset(ro, 0, sizeof *ro);
     (void)snprintf(ro->wire, sizeof ro->wire, "%s", tp_op_wire(op->kind));
@@ -344,7 +344,7 @@ static void fill_result_op(tp_txn_result_op *ro, const tp_operation *op) {
 }
 
 /* Reject the in-flight commit -- the single home for the clone/record cleanup-and-fail
- * contract (fix [4]; was ~7x near-identical blocks). Frees the partially-captured entry
+ * contract. Frees the partially-captured entry
  * and the diff record, marks `out` rejected at the UNCHANGED revision with one
  * structured error, and discards the clone so the LIVE model stays byte-unchanged.
  * `entry` / `rec` / `clone` may each be NULL (all frees are NULL-safe). */
@@ -470,10 +470,10 @@ tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_tx
         return tp_error_set(err, TP_STATUS_OOM, "transaction clone failed");
     }
 
-    /* F2-03: when a history is attached, capture the per-op semantic diff as each op
+    /* When a history is attached, capture the per-op semantic diff as each op
      * applies to the clone. The whole diff is built PRE-swap, so a capture allocation
      * failure fails the commit cleanly (clone discarded, live model byte-unchanged) --
-     * F2-02 atomicity is preserved. A NULL history => exactly the F2-02 code path. */
+     * atomicity is preserved. A NULL history => exactly the history-less code path. */
     tp_diff_record *rec = NULL;
     if (m->history) {
         tp_diff__record_budget_begin(tp_history_record_byte_limit());
@@ -496,11 +496,11 @@ tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_tx
         memset(&entry, 0, sizeof entry);
         if (rec) {
             /* Capture runs BEFORE tp_operation_apply validates, so capture itself must
-             * resolve every entity + bounds-check every index before any deref (fix
-             * [1]/[2]) -- a dangling id / out-of-range index yields a structured status,
+             * resolve every entity + bounds-check every index before any deref -- a
+             * dangling id / out-of-range index yields a structured status,
              * never a crash. A NOT_FOUND/OUT_OF_BOUNDS is an op-content rejection at op i
              * (the same status the history-LESS apply path returns for this input); an OOM
-             * is an allocation fault (op_index -1, the F2-02 convention). */
+             * is an allocation fault (op_index -1). */
             tp_status cst = tp_diff_capture_before(clone, &req->ops[i], &entry);
             if (cst != TP_STATUS_OK) {
                 const bool over_budget = tp_diff__record_budget_exceeded();
@@ -667,7 +667,7 @@ tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_tx
     /* The commit ACKNOWLEDGEMENT gate (spec §7.1): validate/stage -> apply -> APPEND ->
      * publish. The LAST fallible step before the allocation-free swap is either the
      * durable journal append (journal-backed) or the in-memory id record (journal-less,
-     * EXACTLY the F2-02/03 path). Everything after a successful gate -- swap + revision++
+     * EXACTLY the history-less path). Everything after a successful gate -- swap + revision++
      * + diff push + side-effect publish -- is allocation-free, so "gate passed => commit
      * cannot fail" holds. Whichever gate is used registers the transaction id ONLY on
      * success, so a rolled-back txn never poisons the id into a permanent DUPLICATE_ID. */
@@ -686,7 +686,7 @@ tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_tx
     /* (ii) The gate itself: journal-backed durably appends this transaction's SERIALIZED
      * OPERATION (format B -- a tp_txn_request_encode blob), so recovery re-runs apply from
      * the last checkpoint (load the checkpoint base, replay the post-checkpoint op-payloads);
-     * journal-less records the id in the in-memory idstore (EXACTLY the F2-02/03 path).
+     * journal-less records the id in the in-memory idstore (EXACTLY the history-less path).
      * Either way the transaction id is registered ONLY on success, so a rolled-back txn
      * never poisons the id into a permanent DUPLICATE_ID. (Checkpoints, written on attach and
      * on the R3 compaction cadence, remain full snapshots -- the durable replay baseline.) */
@@ -803,7 +803,7 @@ tp_status tp_txn__preflight(tp_model *m, const char *id_hex, int64_t expected_re
 
     /* (b) idempotency: a re-submitted committed id rejects (model unchanged). When a
      * journal is attached its retained-id index is the idempotency authority (§7.2:
-     * recoverable across restart); otherwise the in-memory idstore answers (F2-02). */
+     * recoverable across restart); otherwise the in-memory idstore answers. */
     bool dup = m->journal ? tp_journal_contains(m->journal, id_hex)
                           : (m->idstore && m->idstore->contains && m->idstore->contains(m->idstore->ctx, id_hex));
     if (dup) {
@@ -865,7 +865,7 @@ tp_status tp_model_apply(tp_model *m, const tp_txn_request *req, tp_txn_result *
     return tp_txn__commit_validated(m, req, out, err);
 }
 
-/* ---- F2-04 side-effect coordinator + model <-> journal glue -------------- */
+/* ---- side-effect coordinator + model <-> journal glue ------------------- */
 
 tp_side_effect_coordinator tp_side_effect_coordinator_noop(void) {
     tp_side_effect_coordinator c;
@@ -1081,7 +1081,7 @@ tp_status tp_model_set_recovery_metadata_ex(tp_model *m, int64_t timestamp, cons
 }
 
 bool tp_model_has_journal(const tp_model *m) {
-    /* R5b-2 fix [0]: m->journal is set ONLY after tp_journal_init_checkpoint durably wrote (see
+    /* m->journal is set ONLY after tp_journal_init_checkpoint durably wrote (see
      * tp_model_attach_journal), so a non-NULL journal means the current committed state is durably
      * backed. The GUI adopt-delete guard keys off this: never delete the adopted source when this is
      * false (journal-less attach), because the source is then the sole durable copy. */

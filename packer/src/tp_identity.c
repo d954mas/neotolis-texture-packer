@@ -22,9 +22,9 @@
 #endif
 
 /* ======================================================================== */
-/* (a) LEXICAL canonicalization -- promoted/adapted from the accepted C0-01  */
-/*     tp_c0_path.c. Host-parameterized so both rule sets run on every OS in  */
-/*     the production tests; the spike's tp_c0_detail tokens become tp_status. */
+/* (a) LEXICAL canonicalization. Host-parameterized so both rule sets run   */
+/*     on every OS in the production tests; the spike's tp_c0_detail tokens  */
+/*     become tp_status.                                                    */
 /* ======================================================================== */
 
 tp_host tp_host_native(void) {

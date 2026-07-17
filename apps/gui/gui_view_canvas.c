@@ -1,6 +1,5 @@
-/* Center canvas view (see gui_view_canvas.h). Split out of main.c (GUI decomposition step 6a) as a
- * pure move -- function bodies + canvas-local statics relocated verbatim, no behavior change.
- * handle_canvas_input stays in main.c per the P-2 lead ruling (see the header comment). */
+/* Center canvas view (see gui_view_canvas.h). handle_canvas_input stays in main.c per the P-2 lead
+ * ruling (see the header comment). */
 
 #include "gui_view_canvas.h"
 
@@ -20,7 +19,7 @@
 #include "gui_canvas.h"
 #include "gui_pack.h"
 #include "gui_project.h"
-#include "gui_shell.h" /* close_menubar_menus (interim -- moves to gui_view_chrome in step 6b) */
+#include "gui_shell.h" /* close_menubar_menus */
 
 #include <math.h>
 #include <stdint.h>
@@ -48,7 +47,7 @@ static float atlas_fill_pct(const tp_result *r) {
     return (total > 0.0) ? (float)(placed * 100.0 / total) : 0.0F;
 }
 
-/* transform_decode_str moved to gui_widgets (step 4 -- shared by this canvas readout and the
+/* transform_decode_str moved to gui_widgets (shared by this canvas readout and the
  * settings-panel "Packed" row). */
 
 /* --- Canvas strip control groups (icons; shared by the single-row strip and the two-row compact). Every

@@ -2,15 +2,15 @@
 #define TP_HEX_H
 
 /*
- * Shared lowercase-hex byte encoder (F1-00). ONE definition used by both the
+ * Shared lowercase-hex byte encoder. ONE definition used by both the
  * production session-key hex (tp_identity_session.c) and its drift-guard tests
  * (test_identity_id.c, test_identity_session.c) so the two can never silently
  * diverge -- a bug in the encoding fails the pinned golden vectors.
  *
- * DELIBERATELY generic (raw bytes -> hex), NOT a tp_id128 formatter: F1-01 owns
- * the full tp_id128 parse/format surface (the "atlas_/source_/..." canonical
- * shape-ID text and its hash). This primitive stays orthogonal so F1-01 need not
- * rework it -- it can build on it or ignore it.
+ * DELIBERATELY generic (raw bytes -> hex), NOT a tp_id128 formatter: the full
+ * tp_id128 parse/format surface (the "atlas_/source_/..." canonical shape-ID
+ * text and its hash) lives elsewhere. This primitive stays orthogonal so that
+ * surface need not rework it -- it can build on it or ignore it.
  */
 
 #include <stddef.h>

@@ -1,8 +1,6 @@
 /* ntpacker-gui dev seam: the `--shot` screenshot mode (compiled into every build). Renders the real
  * UI at a requested size/scale, packs + selects so the panels populate, dumps ONE full-frame PNG at
- * the pre-swap point, and quits -- also the byte-reproducible refactor gate. Moved verbatim out of
- * main.c (GUI decomposition step 3); the arg-loop + pre-init wiring became the gui_shot_* entry
- * points main() calls. See gui_shot.h. */
+ * the pre-swap point, and quits -- also the byte-reproducible refactor gate. See gui_shot.h. */
 
 #include "gui_shot.h"
 
@@ -45,7 +43,7 @@ static bool s_shot_packing; /* --shot-packing: pack (blocking), then force the b
 static char s_shot_preview[64]; /* --shot-preview=<exporter_id>: bind that export-target preview for the shot */
 
 /* main() arg loop: handle one dev screenshot flag; returns true if `arg` was consumed. Mirrors the
- * original inline parsing (order + validation unchanged) -- lifted out of main() in step 3. */
+ * original inline parsing (order + validation unchanged). */
 bool gui_shot_parse_arg(const char *arg) {
     if (strncmp(arg, "--shot=", 7) == 0) {
         (void)snprintf(s_shot_path, sizeof s_shot_path, "%s", arg + 7);

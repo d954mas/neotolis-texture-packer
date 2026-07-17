@@ -3,8 +3,8 @@
 
 /*
  * Semantic diff / exact inverse (Undo) + redo replay over a committed transaction,
- * and a minimal in-memory undo/redo history (F2-03, master spec §9-9.5, §59 items
- * 15-17). Builds on the F2-02 transaction engine (tp_transaction.h): a committed
+ * and a minimal in-memory undo/redo history (master spec §9-9.5, §59 items
+ * 15-17). Builds on the transaction engine (tp_transaction.h): a committed
  * transaction captures ONE compact SEMANTIC DIFF -- the per-op before/after data +
  * ordering position needed to invert it -- NOT a full project snapshot. The exact
  * inverse restores the pre-transaction state byte-for-byte; redo re-applies it.
@@ -44,7 +44,7 @@ extern "C" {
 #define TP_HISTORY_MAX_RECORD_BYTES (32U * 1024U * 1024U)
 
 /* ---- attach an in-memory undo/redo history to a model -------------------- *
- * Off by default: a model with no history behaves EXACTLY like F2-02 (a committed
+ * Off by default: a model with no history behaves EXACTLY like the transaction engine (a committed
  * transaction captures nothing). Enabling it makes each subsequently committed
  * transaction capture a compact semantic diff and push it as one undoable step; a
  * NEW transaction applied after an Undo discards the redo branch. History is
@@ -69,7 +69,7 @@ const char *tp_model_undo_author(const tp_model *m);
 /* ---- exact inverse (Undo) + redo replay ---------------------------------- *
  * Undo reverses the most recently committed (or redone) transaction via its
  * captured semantic diff; Redo re-applies the next transaction on the redo branch.
- * STAGE-THEN-COMMIT (reuses the F2-02 clone/swap): the inverse is applied to a CLONE
+ * STAGE-THEN-COMMIT (reuses the clone/swap): the inverse is applied to a CLONE
  * of the live model and swapped in only on FULL success, so an allocation failure
  * mid-inverse ROLLS BACK -- the live model is BYTE-UNCHANGED, the revision and the
  * history cursor unchanged. Each Undo/Redo that succeeds bumps the revision by

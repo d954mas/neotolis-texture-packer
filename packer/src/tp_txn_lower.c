@@ -1,6 +1,6 @@
 /*
- * F2-02 task 3 (decode half, lowering): a shape-valid transaction op JSON object ->
- * a typed F2-01 tp_operation. This is the inverse of tp_operation_encode; it reads
+ * A shape-valid transaction op JSON object ->
+ * a typed tp_operation. This is the inverse of tp_operation_encode; it reads
  * ONLY the closed per-kind field vocabulary (tp_op_fields) and derives each SET op's
  * presence mask from which fields are present. Every number routes through the
  * range-checked j_i64 converter (tp_txn_json.h) -- no out-of-range double->int cast.

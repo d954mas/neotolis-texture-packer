@@ -3,8 +3,7 @@
 
 /* Pure constants, macros and immutable style tokens for the ntpacker GUI -- include-anywhere.
  * No mutable state lives here: the one `extern float g_ui_scale` is only the DECLARATION that
- * S()/Su() read; its definition lives in gui_state.c. Split out of main.c (GUI decomposition
- * step 1) as a pure move -- no behavior change. gui_pack.h is the header-shape template. */
+ * S()/Su() read; its definition lives in gui_state.c. gui_pack.h is the header-shape template. */
 
 #include <stdint.h>
 
