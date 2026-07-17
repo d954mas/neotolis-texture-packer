@@ -39,6 +39,7 @@
 #define TP_RECOVERY_SCAN_MAX_FILES 256U
 #define TP_RECOVERY_SCAN_MAX_BYTES ((uint64_t)TP_JOURNAL_MAX_FILE_BYTES * 2U)
 
+// #region types & state
 static tp_recovery_store *s_test_foreign_store;
 static tp_recovery_claim *s_test_foreign_claim;
 static bool s_test_fail_next_resolve_verify;
@@ -116,7 +117,9 @@ struct tp_recovery_live {
     bool finished;
     tp_status terminal_status;
 };
+// #endregion
 
+// #region store paths
 static bool has_journal_suffix(const char *name) {
     static const char suffix[] = ".ntpjournal";
     const size_t len = name ? strlen(name) : 0U;
@@ -185,8 +188,10 @@ static tp_status lock_path_for(const tp_recovery_store *store, const char *journ
     }
     return TP_STATUS_OK;
 }
+// #endregion
 
 #ifdef _WIN32
+// #region OS file backend win32
 static bool utf8_to_wide(const char *path, WCHAR *wide, size_t cap) {
     return MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide,
                                (int)cap) != 0;
@@ -521,7 +526,9 @@ static tp_status candidate_delete_pin(tp_recovery_owned_candidate *candidate,
     candidate_close_pin(candidate);
     return TP_STATUS_OK;
 }
+// #endregion
 #else
+// #region OS file backend posix
 static bool recovery_root_is_dir(const char *path) {
     return tp_scan_is_dir(path);
 }
@@ -895,8 +902,10 @@ static tp_status candidate_delete_pin(tp_recovery_owned_candidate *candidate,
     }
     return status;
 }
+// #endregion
 #endif
 
+// #region store & live slot
 tp_status tp_recovery_store_create(const char *root, tp_id128 journal_key,
                                    tp_recovery_store **out, tp_error *err) {
     if (!out) {
@@ -1135,7 +1144,9 @@ void tp_recovery_live_destroy(tp_recovery_live *live) {
     (void)tp_recovery_live_finish(live, true, NULL);
     free(live);
 }
+// #endregion
 
+// #region claim & candidate
 tp_status tp_recovery_store_claim(tp_recovery_store *store, const char *journal_path,
                                   tp_recovery_claim **out, tp_error *err) {
     if (!out) {
@@ -1251,7 +1262,9 @@ tp_status tp_recovery_claim_recover(tp_recovery_claim *claim,
     *out = candidate;
     return TP_STATUS_OK;
 }
+// #endregion
 
+// #region resolution
 tp_status tp_recovery_candidate_create_resolution(
     tp_recovery_owned_candidate *candidate, const tp_rng *rng,
     tp_recovery_resolution **out, tp_error *err) {
@@ -1466,7 +1479,9 @@ void tp_recovery_resolution_destroy(tp_recovery_resolution *resolution) {
     }
     free(resolution);
 }
+// #endregion
 
+// #region discard
 tp_status tp_recovery_claim_discard(tp_recovery_claim *claim, tp_error *err) {
     if (!claim) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
@@ -1518,7 +1533,9 @@ tp_status tp_recovery_claim_discard(tp_recovery_claim *claim, tp_error *err) {
     owned_candidate_destroy(candidate);
     return status;
 }
+// #endregion
 
+// #region candidate ranking
 static bool candidate_outranks(const tp_recovery_candidate *kept,
                                const tp_recovery_candidate *candidate) {
     if (kept->adoptable != candidate->adoptable) {
@@ -1558,7 +1575,9 @@ void tp_recovery__test_candidate_insert(tp_recovery_candidates *out,
         candidate_insert(out, candidate);
     }
 }
+// #endregion
 
+// #region test seams
 bool tp_recovery__test_hold_foreign_lock(
     const char *root, tp_id128 journal_key, const char *journal_path) {
     tp_recovery__test_release_foreign_lock();
@@ -1642,7 +1661,9 @@ tp_status tp_recovery__test_peek_candidate(
     tp_journal_peek_free(&peek);
     return status;
 }
+// #endregion
 
+// #region scan
 typedef struct recovery_scan_context {
     tp_recovery_store *store;
     const char *live_basename;
@@ -1751,7 +1772,9 @@ tp_status tp_recovery_store_scan(tp_recovery_store *store, const char *live_slot
     }
     return TP_STATUS_OK;
 }
+// #endregion
 
+// #region session attach & resolve
 static tp_status recovery_session_attach_store(
     tp_recovery_store *store, const char *journal_path, tp_session *session,
     const tp_recovery_metadata *metadata, tp_error *err) {
@@ -1953,3 +1976,4 @@ tp_status tp_recovery_resolve_journal(
     tp_recovery_store_destroy(store);
     return status;
 }
+// #endregion

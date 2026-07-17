@@ -198,18 +198,23 @@ fi
 
 # 10. tp_session is orchestration only. It may call public recovery/lease APIs,
 #     but may not depend on a frontend/protocol or contain a recovery codec,
-#     filesystem/lock backend, Pack, or Export implementation.
+#     filesystem/lock backend, Pack, or Export implementation. The snapshot/query
+#     TU tp_session_snapshot.c is the same orchestration boundary and is gated too.
 _session_deps='#include[[:space:]]*[<"][^>"]*(apps/|gui|cli|protocol|cJSON)'
 _session_impl='(^|[^A-Za-z0-9_])(fopen|fwrite|open|CreateFile|LockFile|tp_journal_(encode|decode)[A-Za-z0-9_]*|tp_pack|tp_export_run)[[:space:]]*\('
-r10a=$(grep -nE "$_session_deps" packer/src/tp_session.c packer/src/tp_session_internal.h 2>/dev/null |
+# Both session TUs plus the shared private header. R10c's mutable-project-ownership
+# scan runs over the two .c TUs only (the header declares no ->project code).
+_session_gate_srcs="packer/src/tp_session.c packer/src/tp_session_snapshot.c packer/src/tp_session_internal.h"
+_session_gate_owner_srcs="packer/src/tp_session.c packer/src/tp_session_snapshot.c"
+r10a=$(grep -nE "$_session_deps" $_session_gate_srcs 2>/dev/null |
     grep -v 'boundary-ok:')
 [ -n "$r10a" ] && hit "R10a frontend/protocol dependency in tp_session" "$r10a"
-r10b=$(grep -nE "$_session_impl" packer/src/tp_session.c packer/src/tp_session_internal.h 2>/dev/null |
+r10b=$(grep -nE "$_session_impl" $_session_gate_srcs 2>/dev/null |
     grep -v 'boundary-ok:')
 [ -n "$r10b" ] && hit "R10b backend/codec/Pack/Export implementation in tp_session" "$r10b"
 _session_model_owner='->[[:space:]]*project([^A-Za-z0-9_]|$)|(^|[^A-Za-z0-9_])tp_project_resolve_atlas_sprites[[:space:]]*\('
 r10c=$(sed -E 's/snapshot->[[:space:]]*project([^A-Za-z0-9_]|$)/\1/g' \
-    packer/src/tp_session.c 2>/dev/null |
+    $_session_gate_owner_srcs 2>/dev/null |
     grep -nE -- "$_session_model_owner")
 [ -n "$r10c" ] && hit "R10c model migration/mutable-project ownership in tp_session" "$r10c"
 if ! printf '#include "apps/gui/gui_project.h"\n' | grep -qE "$_session_deps"; then

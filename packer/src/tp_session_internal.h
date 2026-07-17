@@ -5,7 +5,60 @@
 #include "tp_core/tp_recovery.h"
 #include "tp_core/tp_transaction.h"
 
+/* struct tp_session embeds the platform lock by value, so the session family's
+ * private header carries the lock type. Only tp_session.c and tp_session_snapshot.c
+ * read the layout; the other includers keep using tp_session as an opaque handle. */
+#if defined(_WIN32)
+#include <windows.h>
+#else
+#include <pthread.h>
+#endif
+
 typedef struct tp_recovery_live tp_recovery_live;
+typedef struct tp_project_lease tp_project_lease;
+typedef struct tp_session_owned_job tp_session_owned_job;
+
+#define TP_SESSION_EVENT_CAPACITY 64U
+
+/* Serialized single-writer session layout. Promoted out of tp_session.c so the
+ * snapshot/query TU (tp_session_snapshot.c) can sample the committed immutable
+ * fields under the shared gate. It stays private to the session family: no
+ * frontend or protocol adapter includes this header. */
+struct tp_session {
+#if defined(_WIN32)
+    SRWLOCK gate;
+#else
+    pthread_mutex_t gate;
+#endif
+    tp_model *model;
+    tp_recovery_live *recovery_live;
+    tp_project_lease *project_lease;
+    tp_session_owned_job *active_job;
+    tp_session_identity identity;
+    tp_id128 saved_file_fingerprint;
+    tp_id128 recovery_token;
+    bool has_saved_file_fingerprint;
+    bool has_recovery_token;
+    bool recovery_healthy;
+    bool recovery_required;
+    bool discarded;
+    uint64_t admission_sequence;
+    uint64_t model_generation;
+    uint64_t source_generation;
+    uint64_t event_sequence;
+    tp_session_event events[TP_SESSION_EVENT_CAPACITY];
+    size_t event_count;
+    size_t event_start;
+};
+
+/* The single-writer gate, defined in tp_session.c. Both the writer TU and the
+ * snapshot TU acquire it to sample a consistent admission point. */
+void gate_lock(const tp_session *session);
+void gate_unlock(const tp_session *session);
+
+/* Recovery-health predicate defined in tp_session.c beside the live seam. The
+ * writer gates mutation on it and snapshot_create records it, so both TUs need it. */
+bool recovery_is_healthy(const tp_session *session);
 
 /* Internal Open/recovery construction seam. Always consumes `project`, including
  * every failure path, so ownership cannot become ambiguous under allocation/RNG
