@@ -2,31 +2,11 @@
 #define TP_CORE_TP_TRANSACTION_H
 
 /*
- * Atomic multi-operation transactions, a canonical revision counter,
- * expected_revision optimistic concurrency, semantic-state dirty tracking,
- * transaction-id idempotency, and the versioned transaction request/result JSON
- * contract (F2-02, master spec §7-8, §9.1, §59 items 12-19). Promoted from the
- * accepted, 3-OS-green C0-02 spike (packer/spike/c0 tp_c0_txn / tp_c0_semantic /
- * tp_c0_ack), made REAL against the live tp_project model + the F2-01
- * tp_operation engine.
- *
- * ATOMICITY MECHANISM -- transactional CLONE (docs/decisions/0011): a transaction
- * deep-clones the project (tp_project_clone), applies its ops to the clone op-by-op
- * via the F2-01 tp_operation_apply, and only on FULL success swaps the clone into
- * place (freeing the old model) and bumps the revision exactly once. On ANY op
- * rejection or allocator failure the clone is discarded and the LIVE model is
- * byte-unchanged (§416). The commit point is an allocation-free pointer swap, which
- * is why the mechanism is provably atomic. It reuses F2-01 apply UNCHANGED and does
- * NOT compute per-op inverse diffs -- that is F2-03.
- *
- * HONEST SCOPE (the F1-03/F2-01 lesson -- see docs/decisions/0011): F2-02 builds and
- * CORE-TESTS the transaction engine. It does NOT route the shipping CLI/GUI mutators
- * (apps/cli/cli_mutate.c, apps/gui/gui_project.c) through it -- that FRONTEND CUTOVER
- * is F2-05. Nothing here claims a live frontend is wired. Per-op inverse diffs are
- * F2-03; the on-disk recovery journal is F2-04; the session/network protocol is F3.
- *
- * cJSON (engine-vendored) is a PRIVATE dependency confined to tp_txn_parse.c: it
- * never appears on this public header (request/result structs are hand-typed).
+ * Atomic typed transactions with monotonic revisions, semantic dirty tracking,
+ * bounded idempotency, history, and journal acknowledgement. Apply clones the
+ * project, validates and applies the complete batch, then publishes with one
+ * allocation-free pointer swap. Rejection leaves the live model byte-unchanged.
+ * cJSON remains private to the request parser.
  */
 
 #include <stdbool.h>
@@ -35,8 +15,8 @@
 
 #include "tp_core/tp_error.h"
 #include "tp_core/tp_id.h"
-#include "tp_core/tp_journal.h"   /* F2-04 recovery journal (io seam + recovery types) */
-#include "tp_core/tp_operation.h" /* the F2-01 typed op the batch carries + applies */
+#include "tp_core/tp_journal.h"
+#include "tp_core/tp_operation.h"
 #include "tp_core/tp_project.h"
 
 #ifdef __cplusplus
@@ -46,12 +26,8 @@ extern "C" {
 /* Current transaction JSON schema version -- the only version this build accepts. */
 #define TP_TXN_SCHEMA 1
 
-/* M3 resource-admission bounds. The wire-byte limit is independent of the 64 MiB
- * journal/checkpoint cap: a transaction request is admitted before cJSON builds a
- * tree, while a checkpoint may legitimately contain the canonical 17+ MiB HUGE
- * project fixture. `TP_TXN_MAX_REQUEST_BYTES` counts JSON bytes, excluding an
- * optional trailing NUL. The operation count is checked before lowering allocates
- * the typed operation array and before the model clone/apply path begins. */
+/* Request bytes and operation count are checked before JSON materialization,
+ * lowering, or model cloning. The byte count excludes an optional trailing NUL. */
 #define TP_TXN_MAX_REQUEST_BYTES (1U * 1024U * 1024U)
 #define TP_TXN_MAX_OPS 4096
 
@@ -59,14 +35,9 @@ extern "C" {
  * the newest IDs in this deterministic FIFO retention window. */
 #define TP_TXN_RETAINED_ID_CAP 4096
 
-/* ---- idempotency retention store (pluggable interface, task 6) ------------ *
- * The transaction-id retention set is an INTERFACE so F2-04's on-disk journal can
- * back it later; F2-02 ships an in-memory default. Keys are the 32-lowercase-hex
- * transaction id. `contains` answers "already committed?"; `record` remembers a
- * just-committed id (only committed ids are recorded, so idempotency blocks exactly
- * the retries of applied transactions). `record` is transactional: on OOM it
- * returns non-OK WITHOUT recording, so the caller discards the clone and the model
- * stays byte-unchanged. */
+/* ---- idempotency retention store ----------------------------------------- *
+ * Keys are 32-lowercase-hex transaction IDs. Only committed IDs are recorded;
+ * a failed record rejects the candidate transaction before publication. */
 typedef struct tp_txn_idstore {
     void *ctx;
     bool (*contains)(void *ctx, const char *id_hex);
@@ -79,13 +50,9 @@ typedef struct tp_txn_idstore {
  * not allocate. Free it through the destroy hook or tp_model_destroy. */
 tp_txn_idstore *tp_txn_idstore_memory_create(void);
 
-/* Forward: the F2-03 in-memory undo/redo history (opaque here; tp_diff.h +
- * tp_history.c own it). NULL unless tp_model_enable_history is called. */
+/* Opaque history owned by tp_history.c. */
 struct tp_history;
 
-/* Forward: the F2-04 recovery journal (tp_journal.h) and the side-effect
- * coordinator (defined below). Both are opt-in, NULL by default -> exactly the
- * F2-02/F2-03 behavior. */
 struct tp_journal;
 struct tp_side_effect_coordinator;
 
@@ -97,21 +64,12 @@ typedef struct tp_model {
     tp_project *project;      /* the authoritative live model (owned) */
     int64_t revision;         /* canonical monotonic counter; runtime, not persisted */
     tp_id128 saved_identity;  /* semantic identity of the saved baseline (dirty anchor) */
-    bool recovered_unsaved;   /* F2-04 fix C5: a crash-recovered model whose committed state is
-                               * ahead of the on-disk project file -> DIRTY until an explicit Save
-                               * (tp_model_mark_saved) re-baselines it, regardless of identity. */
+    bool recovered_unsaved;   /* recovered state is dirty until explicitly saved */
     tp_txn_idstore *idstore;  /* idempotency retention (owned unless borrowed) */
     bool owns_idstore;
-    struct tp_history *history; /* F2-03 undo/redo (NULL unless enabled); owned. When
-                                 * set, each committed transaction captures a semantic
-                                 * diff (tp_diff.h). NULL => exactly the F2-02 behavior. */
-    struct tp_journal *journal; /* F2-04 recovery journal (NULL unless attached); owned.
-                                 * When set, a commit is not acknowledged until its record
-                                 * is durably appended, and the journal's retained-id index
-                                 * answers idempotency. NULL => exactly the F2-02/03 path. */
-    struct tp_side_effect_coordinator *coordinator; /* F2-04 side-effect coordinator
-                                 * (NULL unless set); BORROWED. Ties published side-effects
-                                 * (B1 Extract) to the journal-gated commit. NULL => none. */
+    struct tp_history *history; /* optional owned Undo/Redo history */
+    struct tp_journal *journal; /* optional owned acknowledgement journal */
+    struct tp_side_effect_coordinator *coordinator; /* optional borrowed hooks */
 } tp_model;
 
 /* Wrap an existing project (TAKES OWNERSHIP) in a model at revision 0 with a fresh
@@ -143,14 +101,14 @@ bool tp_model_dirty(const tp_model *m);
  * revision (the "mark saved" that Save performs, §8/§420). */
 void tp_model_mark_saved(tp_model *m);
 
-/* ---- semantic-state identity (task 5) ------------------------------------ *
+/* ---- semantic-state identity --------------------------------------------- *
  * Deterministic, endian-stable 128-bit identity over the participating persistent
  * partition (see tp_semantic.c). Order-normalized for ID-keyed collections; an
  * animation's frames are order-semantic. Excludes all runtime fields, the project
  * path, and schema_version. NULL project -> a fixed empty identity. */
 tp_id128 tp_semantic_identity(const tp_project *p);
 
-/* ---- revision precondition (task 4) -------------------------------------- *
+/* ---- revision precondition ----------------------------------------------- *
  * expected == current -> OK; expected < current -> TP_STATUS_REVISION_CONFLICT
  * (stale; rebuild & retry); expected > current -> TP_STATUS_INVALID_REVISION. No
  * CRDT/merge (§8). Fills `err` prose on a mismatch. */
@@ -158,7 +116,7 @@ tp_status tp_revision_check(int64_t expected_revision, int64_t current_revision,
 
 /* ---- transaction request (typed) ----------------------------------------- *
  * A transaction = a 32-hex idempotency id + an expected_revision precondition +
- * optional label/author + an ordered batch of F2-01 typed operations. The ops are
+ * optional label/author + an ordered batch of typed operations. The ops are
  * malloc-owned tp_operation values (free the whole request with tp_txn_request_free,
  * which frees each op's arms + the ops array + label/author). */
 typedef struct tp_txn_request {
@@ -176,8 +134,7 @@ void tp_txn_request_free(tp_txn_request *req);
 /* ---- transaction result -------------------------------------------------- *
  * Committed: echoes each op's wire + addressing ids + the new revision. Rejected:
  * the collected errors (op_index -1 = envelope/revision level) + the UNCHANGED
- * revision. NO `diff` object -- computing before/after diffs from the live model is
- * F2-03. */
+ * revision. No serialized diff is exposed. */
 typedef struct tp_txn_error {
     int op_index;      /* -1 = envelope/revision level; >= 0 = operation index */
     tp_status code;
@@ -214,29 +171,20 @@ typedef struct tp_txn_result {
 
 void tp_txn_result_free(tp_txn_result *res);
 
-/* ---- apply (tasks 1-4, the atomic core) ---------------------------------- *
- * Apply a typed transaction to the model. Order (docs/decisions/0011): idempotency
- * (a seen id -> duplicate_id, model unchanged) -> revision precondition (mismatch
- * rejects ALONE, op_index -1, before any per-op work) -> clone the model -> validate
- * + apply each op to the CLONE op-by-op via tp_operation_apply (so an op may depend
- * on an earlier op in the same batch) -> on FULL success record the id, swap the
- * clone in, and bump revision by exactly 1. On ANY rejection/allocator failure the
- * clone is discarded and the live model is BYTE-UNCHANGED.
+/* ---- apply --------------------------------------------------------------- *
+ * After request admission: duplicate check -> revision check -> clone -> ordered
+ * validation/apply -> history and side-effect preparation -> acknowledgement gate
+ * (durable when journal-backed) -> allocation-free publish. Any rejection or
+ * allocation failure discards the candidate and leaves the live model unchanged.
  *
  * Returns TP_STATUS_OK on commit, else the first/short-circuit status; `*out` (if
  * non-NULL) is always filled (committed or rejected) and must be freed with
  * tp_txn_result_free. Never aborts on caller data. */
 tp_status tp_model_apply(tp_model *m, const tp_txn_request *req, tp_txn_result *out, tp_error *err);
 
-/* ---- F2-04 side-effect coordinator (task 5, spec §44.2 Extract) ----------- *
- * Ties external side-effects (B1 Extract's published PNG files) to a model
- * transaction so file publication and the model commit succeed/fail together. The
- * commit path drives it around the acknowledgement gate: prepare() runs after the
- * ops apply to the clone but BEFORE the gate (the durable journal append when a
- * journal is attached, else the in-memory id record); on an acknowledged commit
- * publish() makes staged side-effects live; on ANY rollback (gate failure after a
- * successful prepare) abort() discards them. This is the INTERFACE + a default
- * no-op; the full Extract binding is B1. */
+/* ---- side-effect coordinator --------------------------------------------- *
+ * Optional hooks stage before acknowledgement, publish after its gate, and
+ * abort on rollback. Full Extract binding remains separate. */
 typedef struct tp_side_effect_coordinator {
     void *ctx;
     /* Stage side-effects for `req` before the commit. Non-OK aborts the commit
@@ -258,7 +206,7 @@ tp_side_effect_coordinator tp_side_effect_coordinator_noop(void);
  * caller keeps it alive across commits. */
 void tp_model_set_coordinator(tp_model *m, tp_side_effect_coordinator *c);
 
-/* ---- F2-04 model <-> journal glue (tasks 2-4) ---------------------------- *
+/* ---- model <-> journal glue ---------------------------------------------- *
  * Attach an OWNED recovery journal to `m` (tp_model_destroy frees it). Writes an
  * initial CHECKPOINT capturing the current committed project state + revision so the
  * journal is self-sufficient for recovery. Fails INVALID_ARGUMENT if a journal is
@@ -268,39 +216,25 @@ void tp_model_set_coordinator(tp_model *m, tp_side_effect_coordinator *c);
  * index answers idempotency (§7.2). */
 tp_status tp_model_attach_journal(tp_model *m, struct tp_journal *j, tp_error *err);
 
-/* R3 (plan S18 R / spec §22.3): compact the attached recovery journal to a single fresh
- * CHECKPOINT capturing the model's CURRENT committed state + revision + retained-id set -- the
- * Save-window reset. This is a Save-only maintenance operation; Undo/Redo append their candidate
- * checkpoints atomically inside core and never truncate. Call it AFTER a durable Save so the
- * journal's baseline == the just-saved
- * bytes and the unsaved replay window is zero (a later crash then recovers exactly the saved
- * state + any edits made after the Save), bounding the replay cost. A no-op (returns OK) when no
- * journal is attached. The checkpoint is proven to round-trip (the same guarantee as attach), and
- * the retained-id set is PRESERVED so an already-acknowledged id still de-duplicates post-Save
- * (§7.2). On failure the journal is left unchanged (it keeps its correct-but-larger log and still
- * recovers) -- Save callers should treat a failure as NON-fatal (the file is already written). */
+/* After a durable Save, compact to one checkpoint containing the current state,
+ * revision, and retained IDs. This bounds replay while preserving idempotency.
+ * With no journal this is a no-op. Pre-truncate failure preserves the old log;
+ * replacement failure after truncate poisons the journal so later edits fail
+ * closed. Neither failure rolls back the already completed Save. */
 tp_status tp_model_compact_journal(tp_model *m, tp_error *err);
 
-/* R5b-1 (plan S18 R): forward recovery metadata {timestamp, path, name} to the attached journal
- * (tp_journal_set_metadata) so a startup scan can list this journal's crashed project by path + name +
- * time. `timestamp` is a caller-supplied unix-seconds value (core stays deterministic -- it never calls
- * time()); `path`/`name` are UTF-8 and may be empty (untitled project -> path ""), NULL is treated as "".
- * A no-op (returns OK) when no journal is attached (recovery off / journal-less), mirroring
- * tp_model_compact_journal. Metadata is recovery authority: every durable write failure is returned so
- * the host can detach/remove the slot rather than retain stale path/fingerprint data. The caller may keep
- * an already-completed edit or Save successful while reporting recovery degradation. NULL model ->
- * INVALID_ARGUMENT. */
+/* Record recovery metadata on the attached journal. The caller supplies time;
+ * core remains deterministic. Missing strings become empty and no journal is a
+ * no-op. Durable failures are returned so the host can retire stale recovery
+ * authority without rolling back an already completed edit or Save. */
 tp_status tp_model_set_recovery_metadata(tp_model *m, int64_t timestamp, const char *path, const char *name,
                                          tp_error *err);
 tp_status tp_model_set_recovery_metadata_ex(tp_model *m, int64_t timestamp, const char *path, const char *name,
                                             const tp_id128 *file_fingerprint, tp_error *err);
 
-/* R5b-2 fix [0]: true iff `m` currently owns an attached recovery journal (m->journal != NULL). A
- * journal is attached ONLY after its initial CHECKPOINT durably wrote (tp_model_attach_journal sets
- * m->journal after tp_journal_init_checkpoint succeeds), so this answers "is the model's committed state
- * durably backed by a live journal right now?". The GUI adopt path uses it to gate the delete of an
- * adopted crash-recovery SOURCE: if the fresh live journal failed to attach (journal-less), the source is
- * the only durable copy of the recovered work and MUST NOT be deleted. NULL model -> false. */
+/* True only after the journal's initial checkpoint is durable. Recovery-source
+ * deletion must be gated on this; otherwise it may be the only durable copy.
+ * NULL model -> false. */
 bool tp_model_has_journal(const tp_model *m);
 
 /* Stop using and destroy the attached recovery journal, if any. The backing store is
@@ -322,7 +256,7 @@ void tp_model_detach_journal(tp_model *m);
  * to loading the project file. Free the recovery info's snapshot is handled internally. */
 tp_status tp_model_recover(tp_journal_io io, tp_id128 key, tp_model **out, tp_journal_recovery *info, tp_error *err);
 
-/* ---- transaction request/result JSON contract (task 3, C0-02 §3) --------- *
+/* ---- transaction request/result JSON contract --------------------------- *
  * Versioned envelope; `schema` = 1 the only accepted version. Byte-stable canonical
  * encoding (keys ascend; the discriminator "schema"/"op" first; 2-space indent, LF,
  * trailing newline; integral numbers with PRId64 and no decimal point, fractional

@@ -2,13 +2,12 @@
 #define TP_CORE_TP_JOURNAL_H
 
 /*
- * F2-04 minimum recovery journal (master spec §7.1-7.2, §22.3, §59 items 19,
- * 46-49, 52). A commit is not acknowledged as successful until its recovery
+ * Durable recovery sidecar. A commit is not acknowledged until its recovery
  * record is durably appended; the retained transaction-ID set is recoverable
  * from the journal after a process restart so an acknowledged transaction is
  * never applied twice (§7.2 idempotency).
  *
- * SCOPE: this is a PURE durable log over an injectable I/O seam -- it deals in
+ * This is a durable log over an injectable I/O seam. It deals in
  * opaque record payloads (a CHECKPOINT carries a project snapshot; a committed TXN
  * carries its serialized operation -- format B) + 32-hex transaction ids and knows
  * nothing about tp_project. The model<->journal glue (attach / commit append / recover-to-model)
@@ -22,15 +21,15 @@
  *            crc32 covers (sync ++ payload_len ++ payload). All multi-byte integers are
  *            written byte-at-a-time big-endian (no host-endian punning). The fixed
  *            per-record sync-word lets recovery re-synchronise after a corrupt length
- *            field (plan S18 R / P1-5): a torn TAIL (no valid record follows) is truncated,
+ *            field: a torn TAIL (no valid record follows) is truncated,
  *            a mid-stream corruption (a valid record still follows) is preserved.
  *   payload: rec_type u8 (1=TXN, 2=CHECKPOINT, 3=METADATA) then --
  *            TXN        : tx_id[32] hex | revision i64 BE | op_payload[rest]
  *            CHECKPOINT : revision i64 BE | id_count u32 BE | id[32]*id_count | snapshot[rest]
- *            METADATA   : timestamp i64 BE | path_len u32 BE | path | name_len u32 BE | name (v3, R5a)
+ *            METADATA   : timestamp i64 BE | path_len u32 BE | path | name_len u32 BE | name
  *
- * FORMAT B (plan S18 R / R2): a TXN record's payload is the SERIALIZED OPERATION REQUEST
- * (a tp_txn_request_encode blob), NOT a full snapshot. Only CHECKPOINT records carry a
+ * A TXN record's payload is the serialized operation request (a
+ * tp_txn_request_encode blob), not a full snapshot. Only CHECKPOINT records carry a
  * project snapshot. Recovery loads the last checkpoint's snapshot as a base and REPLAYS the
  * post-checkpoint TXN op-payloads onto it in commit order (via the model<->journal glue) --
  * a diff journal, so a committed transaction costs its op bytes, not a whole re-snapshot.
@@ -51,12 +50,8 @@
 extern "C" {
 #endif
 
-/* Current on-disk journal format version -- the only version this build reads. v2 added the
- * per-record sync-word (plan S18 R / P1-5 framing robustness); v3 adds the METADATA record type
- * (R5a). A journal written by a different format version is treated as a VERSION_MISMATCH (our
- * file, wrong format), distinct from a BAD_MAGIC foreign file (R5a). NO back-compat: a pre-v3
- * journal is surfaced as VERSION_MISMATCH (never silently mis-replayed as if the new record type
- * did not exist). The sidecar is ephemeral and compacted away on Save. */
+/* The only format this build reads. Other versions are VERSION_MISMATCH,
+ * distinct from BAD_MAGIC. The ephemeral sidecar is compacted on Save. */
 #define TP_JOURNAL_FORMAT_VERSION 3
 
 /* Shared writer/reader bound for one sidecar. Every durable append is rejected before record allocation/write
@@ -110,17 +105,12 @@ typedef struct tp_journal_io {
  * (tp_journal_create then fails cleanly). */
 tp_journal_io tp_journal_io_memory(void);
 
-/* File backing store at `path`, opened for read + append (created if absent). Real
- * on-disk durability for production wiring (F2-05). On open failure ctx == NULL. */
+/* File backing store at `path`, opened for read + append (created if absent).
+ * On open failure ctx == NULL. */
 tp_journal_io tp_journal_io_file(const char *path);
 
-/* R5b-2 fix [3]: READ-ONLY, NO-CREATE file backing store at `path` -- opens "rb" ONLY and NEVER
- * creates the file. On a missing/unopenable path returns a {0} io (ctx == NULL) so a racing/vanished
- * candidate is skipped rather than resurrected as a stray zero-byte journal (the peek + adopt-source
- * scan contract is strictly read-only). read_all/length are real; write/truncate are failing stubs
- * (they never write), so tp_journal_peek + tp_model_recover -- which only read, plus one best-effort
- * tail-truncate whose failure is harmless when the recovered model is cloned-off and discarded -- work
- * over it while any attempt to durably append fails closed. sync is NULL (nothing to flush). */
+/* Read-only, no-create file backing store. Missing files return {0}; write and
+ * truncate hooks fail closed. This keeps scan/peek/adopt paths non-mutating. */
 tp_journal_io tp_journal_io_file_read(const char *path);
 
 /* ---- the journal object (opaque) ----------------------------------------- */
@@ -143,8 +133,7 @@ void tp_journal_destroy(tp_journal *j);
 tp_status tp_journal_init_checkpoint(tp_journal *j, const uint8_t *snapshot, size_t len, int64_t revision,
                                      tp_error *err);
 
-/* R3 (plan S18 R / spec §22.3): COMPACT the store to a single fresh CHECKPOINT -- the
- * Save-window reset. Truncates the backing store to 0 (dropping the old checkpoint + every
+/* Compact to one fresh checkpoint. Truncates the backing store to zero, dropping the old checkpoint + every
  * post-checkpoint TXN record + any poisoned/corrupt record) and re-emits header + one
  * CHECKPOINT capturing `snapshot`/`revision` and the journal's CURRENT retained-id set, so
  * recovery after a Save replays from exactly the saved state. The compaction PRESERVES the
@@ -155,7 +144,7 @@ tp_status tp_journal_init_checkpoint(tp_journal *j, const uint8_t *snapshot, siz
  * -- nothing partially compacted). NULL journal -> TP_STATUS_INVALID_ARGUMENT. */
 tp_status tp_journal_compact(tp_journal *j, const uint8_t *snapshot, size_t len, int64_t revision, tp_error *err);
 
-/* R5a: record the owning project's metadata {timestamp, path, name} so a startup scan can list
+/* Record project metadata so a startup scan can list
  * this journal's crashed project by path + name + time. The values are cached on the journal for
  * compaction and appended durably immediately. EVERY append failure is returned, even when the
  * partially-written record was rolled back and the journal remains healthy: a caller that uses the
@@ -188,14 +177,13 @@ typedef enum tp_journal_recovery_status {
     TP_JOURNAL_RECOVERY_EMPTY,      /* valid header, zero records (or empty store) */
     TP_JOURNAL_RECOVERY_TRUNCATED,  /* torn/short tail ignored; recovered up to last good record */
     TP_JOURNAL_RECOVERY_CORRUPT,    /* a record failed its checksum mid-stream; stopped, recovered prior */
-    /* R5a (plan item 7): the old conflated BAD_HEADER split two ways so the R5b startup scan can
-     * distinguish a foreign file from an out-of-date recovery journal (shown, not lost silently). */
+    /* Distinguish a foreign file from an out-of-date journal. */
     TP_JOURNAL_RECOVERY_BAD_MAGIC,        /* magic != "NTPKJRNL": not our file; nothing recovered */
     TP_JOURNAL_RECOVERY_VERSION_MISMATCH, /* magic OK but format_version != current: our file, wrong format */
     TP_JOURNAL_RECOVERY_STALE_KEY   /* header valid but key != expected (moved project); NOT applied */
 } tp_journal_recovery_status;
 
-/* R5a: project metadata a recovery journal carries so a startup scan can list crashed projects by
+/* Metadata used to list crashed projects by
  * path + name + time WITHOUT reconstructing the model. `path`/`name` are owned, UTF-8, NUL-terminated
  * copies (an untitled project has path == ""); both NULL when no metadata record was present. */
 typedef struct tp_journal_meta {
@@ -206,7 +194,7 @@ typedef struct tp_journal_meta {
     bool has_file_fingerprint; /* false for legacy metadata and untitled projects */
 } tp_journal_meta;
 
-/* Format B (R2): one recovered post-checkpoint committed transaction. `payload` is a read-only
+/* One recovered post-checkpoint transaction. `payload` is a read-only
  * borrowed span into the recovery result's single bounded raw-record buffer. It is NOT required
  * to be NUL-terminated and remains valid until tp_journal_recovery_free. The model<->journal glue
  * must decode exactly payload_len bytes and re-apply the operations to reach the committed state,
@@ -242,7 +230,7 @@ typedef struct tp_journal_recovery {
      * tp_journal_recovery_free. */
     tp_journal_recovered_op *ops;
     size_t op_count;
-    /* R5a: the LAST metadata record seen (last-wins), owned. A META record is NOT a txn/ckpt:
+    /* The last metadata record (last-wins), owned. A META record is not a txn/checkpoint:
      * it never affects records_recovered / op replay / the retained-id set. `has_metadata` is
      * false and `metadata` is zeroed when no metadata record was recovered. Strings freed by
      * tp_journal_recovery_free. */
@@ -267,8 +255,8 @@ void tp_journal_recovery_free(tp_journal_recovery *r);
  * out->status); non-OK only on a hard fault (io read failure / OOM building the result). */
 tp_status tp_journal_recover(tp_journal *j, tp_journal_recovery *out, tp_error *err);
 
-/* ---- peek: header + metadata + status, no model reconstruction (R5a) ------ *
- * What the R5b startup scan reads per journal file: it classifies the header, reports the header
+/* ---- peek: header + metadata + status, no model reconstruction ----------- *
+ * Startup scan classifies the header, reports the header
  * key + format version + metadata, counts the well-formed records and notes whether a checkpoint
  * (a recoverable base) is present -- WITHOUT loading a tp_project or replaying any op. It shares the
  * header-validate + frame-walk with tp_journal_recover (same BAD_MAGIC / VERSION_MISMATCH / TRUNCATED

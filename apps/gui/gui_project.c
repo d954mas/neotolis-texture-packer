@@ -3,32 +3,23 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <time.h> /* R5b-1: time(NULL) for the recovery-journal metadata timestamp (libc header FIRST -- macOS include-order) */
+#include <time.h>
 
 #include "gui_scan.h"
 #include "gui_session_adapter.h"
 
-#include "tp_core/tp_id.h"             /* tp_rng_os + id128 generate/nil for op ids */
-#include "tp_core/tp_operation.h"      /* the typed op the GUI mutators build */
-#include "tp_core/tp_identity.h"       /* canonical paths + exact saved-file fingerprints */
-#include "tp_core/tp_recovery.h"       /* shared bounded orphan store + OS-backed claims */
-#include "tp_core/tp_source_plan.h"    /* one source identity/dedupe owner */
+#include "tp_core/tp_id.h"
+#include "tp_core/tp_operation.h"
+#include "tp_core/tp_identity.h"
+#include "tp_core/tp_recovery.h"
+#include "tp_core/tp_source_plan.h"
 #ifdef NTPACKER_GUI_SELFTEST
 #include "tp_session_internal.h"
 #endif
 
-/* F2-05b-ii-A (docs/decisions/0015): GUI Undo/Redo and every mutation run through
- * tp_session. The session owns the model/project, history, save admission, and
- * recovery acknowledgement gate; GUI reads only cached immutable snapshot DTOs.
- *
- * TRANSACTION-LEVEL COALESCING (b-ii-A crux): the F2-03 history has no built-in coalescing (one
- * commit = one undo step), so a raw slider drag would revert one tick at a time. A field-precise
- * debounce buffer holds ONE pending transaction; consecutive same-key edits replace its value
- * (latest wins), a different key flushes it first. The FLUSH TRIGGER is GESTURE-SCOPED (owner
- * decision, ADR 0015): the view layer commits one transaction per interaction on the widget's
- * gesture boundary (slider release / field Enter+blur / discrete click) via
- * gui_project_flush_pending; the 0.30 s time window is only a gated fallback
- * (gui_project_flush_elapsed). See the pending-buffer region below and decision 0015. */
+/* GUI mutation and Undo/Redo run through tp_session; reads use one cached owned
+ * snapshot. Field edits coalesce by exact target until the gesture boundary, so
+ * one gesture produces one transaction and one Undo step. */
 
 // #region state
 static tp_session *s_session; /* sole owner of the live model and project */
@@ -59,14 +50,10 @@ static bool s_recovery_setup_notice_pending;
 static char s_recovery_setup_notice[256];
 // #endregion
 
-// #region transaction-level coalescing buffer (b-ii-A crux, decision 0015)
-/* One pending transaction, keyed by (edit kind + atlas + EXACT target). Same key within the
- * window -> replace value (latest wins); different key / elapsed -> flush pending FIRST, then
- * buffer the new edit. Structural ops are non-coalescable (they flush pending, then commit
- * immediately). Field-precise keying is REQUIRED for correctness: keying slice9 by COMPONENT
- * makes a different-component edit flush the pending BEFORE its read-modify-write seed reads the
- * model, so each RMW read sees all prior edits committed (never merges two components against a
- * stale model -> no lost edit). */
+// #region transaction coalescing
+/* Same-target edits replace the pending value. A different target, elapsed
+ * fallback, or structural operation flushes first. Slice9 keys include the
+ * component so every read-modify-write observes earlier component edits. */
 #define GUI_COALESCE_SECS 0.30
 
 typedef enum {
@@ -215,13 +202,8 @@ void gui_project_flush_error(char *out, size_t cap) {
     (void)snprintf(out, cap, "%s", m);
 }
 
-/* Seeds a fresh atlas with the default target (core helper owns the exporter id +
- * "out/<name>" path). LIFECYCLE, not a mutation op (the exporter id is core's, never a
- * frontend literal); mirrors the CLI do_new. Only a target-free atlas is seeded. */
-/* F2-05b-ii-B: build/app-stable recovery-journal key. A fixed 128-bit tag identifying THIS app +
- * journal format, checked on recover so a foreign / old-format sidecar is rejected (in ADDITION to
- * the journal header's magic + version guard) rather than misapplied. Bump on any journal-format
- * change so old slots self-invalidate to a clean fresh init. */
+/* Stable application key for recovery sidecars. Bump when the journal contract
+ * changes incompatibly so old slots cannot be misapplied. */
 static tp_id128 recovery_key(void) {
     tp_id128 k;
     static const uint8_t b[16] = {'n', 't', 'p', 'k', '_', 'r', 'e', 'c', 'o', 'v', 'e', 'r', 'y', '_', '0', '1'};
@@ -390,11 +372,8 @@ static void pending_discard(void) {
     }
 }
 
-/* fix [3]: returns FALSE iff a buffered gesture existed and its commit FAILED (e.g. a journal append
- * failure) -- i.e. an edit could NOT be made durable. Returns TRUE when nothing was pending, the
- * pending committed as a core-classified semantic no-op, or it committed OK. Callers that persist or discard on the strength of
- * "no pending left" (save/save-as, undo/redo) MUST check this and ABORT on false so a journal-failed
- * flush is never mistaken for a clean state (no false "saved", no wrong undo target). */
+/* False means the pending gesture could not be committed. Save and history
+ * callers must stop rather than act on an older committed state. */
 bool gui_project_flush_pending(void) {
     if (!s_pending_valid) {
         return true;
@@ -524,22 +503,16 @@ static bool pending_offer(const coalesce_key *k, tp_operation *op) {
     return true;
 }
 
-/* FALLBACK ONLY (ADR 0015): commit a buffered gesture that never received a release/blur/discrete
- * boundary (e.g. a control that streams values with no pointer/focus edge). The caller (main.c)
- * gates this on NO active gesture (no held pointer, no focused input) so it can never split a live
- * drag or a mid-typing field. Primary commits are gesture-scoped; this only backstops a missed edge. */
+/* Fallback for a control that missed its gesture boundary. main.c calls this
+ * only when no pointer gesture or text input remains active. */
 void gui_project_flush_elapsed(void) {
     if (s_pending_valid && (s_now - s_pending_time) > GUI_COALESCE_SECS) {
         gui_project_flush_pending();
     }
 }
 
-/* F2-05b-ii-A #5: EFFECTIVE slice9 peek for the on-canvas guide lines. slice9 edits now BUFFER until
- * the gesture boundary, so the committed record is FROZEN mid-typing -- the guides would freeze with
- * it (regressing "typing in the Region panel moves the lines this same frame"). Returns true + fills
- * out_lrtb[4] with the BUFFERED slice9 when a slice9 gesture is buffered for this atlas+sprite (the
- * pending op already seeds all four components from the committed record, so it is the full effective
- * value); false otherwise, so the caller falls back to the committed record. No commit, read-only. */
+/* Exposes the full buffered slice9 value so canvas guides update before the
+ * gesture commits. False asks the caller to use the committed snapshot. */
 bool gui_project_peek_pending_slice9(const gui_sprite_ref *sprite, int out_lrtb[4]) {
     if (!sprite || !out_lrtb || !s_pending_valid ||
         s_pending_key.kind != CK_SPRITE_SLICE9 ||
@@ -656,7 +629,7 @@ bool gui_project_take_recovery_setup_notice(char *out, size_t cap) {
 }
 // #endregion
 
-// #region R6a recovery-resolution decision/action layer (headless-testable; the R6b modal calls this)
+// #region recovery resolution
 int gui_recovery_collect(gui_recovery_list *out) {
     if (out) {
         memset(out, 0, sizeof *out);
@@ -1755,7 +1728,7 @@ bool gui_project_anim_move_frame(const gui_animation_ref *animation,
 }
 // #endregion
 
-// #region undo / redo (F2-03 diff history)
+// #region undo / redo
 /* A pending buffered edit counts as undoable (undo flushes it into a step, then reverts it). */
 bool gui_project_can_undo(void) {
     return tp_session_recovery_available(s_session) &&
@@ -1784,8 +1757,7 @@ static void note_history_reject(const char *verb, tp_status st, const tp_error *
  * Dirty is identity-derived, so an undo back to the saved baseline reads clean. */
 bool gui_project_undo(void) {
     if (!gui_project_flush_pending()) {
-        return false; /* fix [3]: the buffered gesture could not commit (journal failed) -- do NOT
-                       * then undo a DIFFERENT (older) step; the op-error is already surfaced. */
+        return false;
     }
     tp_error e = {0};
     tp_status st = tp_session_undo(s_session, &e);
@@ -1803,7 +1775,7 @@ bool gui_project_undo(void) {
 
 bool gui_project_redo(void) {
     if (!gui_project_flush_pending()) {
-        return false; /* fix [3]: a journal-failed flush must not silently proceed into a redo */
+        return false;
     }
     tp_error e = {0};
     tp_status st = tp_session_redo(s_session, &e);
@@ -1926,12 +1898,9 @@ tp_status gui_project_save_as(const char *path, char *err_out, size_t err_cap) {
         }
         return canonical;
     }
-    /* fix [3]: the buffered gesture must be DURABLY committed before we persist. If its commit fails
-     * (e.g. a journal append failure -- full disk), the edit is NOT in the model, so writing the file
-     * + mark_saved would produce a file missing the edit AND a false "saved"/clean state (silent data
-     * loss). ABORT: do not save, do not mark_saved; surface the reason. The model stays dirty. */
+    /* Never save an older snapshot when the pending edit failed to commit. */
     if (!gui_project_flush_pending()) {
-        gui_project_flush_error(err_out, err_cap); /* fix3 [2]: shared neutral wording (save/pack/gate) */
+        gui_project_flush_error(err_out, err_cap);
         return TP_STATUS_JOURNAL_FAILED;
     }
     err = (tp_error){0};

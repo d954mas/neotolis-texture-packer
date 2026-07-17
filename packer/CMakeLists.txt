@@ -5,9 +5,7 @@
 # apps/gui/CMakeLists.txt). The split stays for layering (model-only consumers:
 # most tests, inspect-only tools) and CRT hygiene (tp_build pins -U_DLL to match
 # the static-CRT builder; tp_core stays default-CRT for the render runtime).
-# Vendored utf8proc (Unicode NFC + case-fold): added BEFORE tp_core so the source-
-# key normalizer (src/tp_srckey.c) can PRIVATE-link it. Was spike-only until F1-02
-# promoted tp_srckey into production. -w vendored; no on-disk schema of its own.
+# Vendored utf8proc supplies Unicode NFC and case-folding to source keys.
 add_subdirectory(deps/utf8proc)
 find_package(Threads REQUIRED)
 
@@ -16,61 +14,28 @@ add_library(tp_core STATIC
     src/tp_pack_settings.c src/tp_scan.c src/tp_input.c src/tp_validate.c
     src/tp_export.c src/tp_normalize.c src/tp_export_png.c src/tp_export_json_neotolis.c
     src/tp_export_defold.c
-    # F1-00 production project-identity boundary: 128-bit runtime ID + RNG seam,
-    # canonical saved-project path (lexical + realpath), Save-As transition DTO.
-    # Promoted from the accepted C0-01 spike; no engine API, no new link deps
-    # (POSIX realpath in libc / Win32 kernel32 auto-linked).
+    # Project identity, canonical paths, leases, source plans, and recovery.
     src/tp_id.c src/tp_identity.c src/tp_identity_session.c src/tp_source_plan.c
     src/tp_project_lease.c src/tp_recovery.c
-    # M5: fixed client capability vocabulary/matrix. Unsupported surfaces are a
-    # typed result, not ad-hoc frontend prose or a pretend live CLI session.
+    # Fixed client capability vocabulary and matrix.
     src/tp_client_capability.c
-    # F1-01 schema-v2 identity migration: deterministic legacy synthesis +
-    # atomic writable promotion (kept out of tp_project.c's loader/serializer).
+    # Deterministic schema migration, separate from serialization.
     src/tp_project_migrate.c
-    # F1-02 tagged sources: source-key normalization / case-fold collision /
-    # portability validation, promoted from the C0-01 srckey spike (uses utf8proc).
+    # Source-key normalization, collision, and portability rules.
     src/tp_srckey.c
-    # F1-03 deterministic sprite ids + canonical selectors: the resolved sprite
-    # index (scan -> source-local key -> sprite_id) and the human-selector resolver
-    # (id/name/path/compound -> exactly one id, ambiguity -> candidate list).
+    # Deterministic sprite IDs, index, and selector resolution.
     src/tp_sprite_index.c src/tp_selector.c
-    # F2-01 typed operation engine: the append-only op catalog + closed field
-    # vocabulary, payload/reference validation, id-only stage-then-commit apply,
-    # selector->operation builders, and the canonical byte-stable op/result encoder.
-    # Promoted from the accepted C0-02 spike. CORE-TESTED groundwork -- the CLI/GUI
-    # frontend cutover is F2-05 (this does not route the shipping mutators).
+    # Typed operation catalog, validation, apply, builders, and encoding.
     src/tp_op_catalog.c src/tp_op_validate.c src/tp_op_apply.c src/tp_op_encode.c src/tp_op_build.c
-    # F2-02 atomic transactions, revision & semantic dirty: an OOM-safe project
-    # deep-clone (the atomicity primitive), the semantic-state identity hash + dirty
-    # model, the pluggable transaction-id idempotency store, the atomic clone/apply/
-    # swap core over the F2-01 op engine, and the versioned transaction request/result
-    # JSON contract (decode/lower/encode; cJSON stays a PRIVATE dep in the .c files).
-    # Promoted from the accepted C0-02 spike. CORE-TESTED groundwork -- the CLI/GUI
-    # frontend cutover is F2-05 (this does not route the shipping mutators).
-    # F2-04 fix: the 32-hex idempotency id-set shared by the idstore + the journal's
-    # retained-id index (one place for the membership + growth logic).
+    # Transaction ID retention, clone/apply/publish, semantic dirty, and JSON.
     src/tp_idset.c
     src/tp_project_clone.c src/tp_semantic.c src/tp_txn_idset.c src/tp_txn_apply.c
-    # Architecture foundation M1: synchronous orchestration owner and the one
-    # public owned immutable snapshot boundary. Business validation remains in
-    # the operation/model modules; no GUI, protocol, recovery backend, or jobs.
+    # Synchronous orchestration and the owned immutable snapshot boundary.
     src/tp_session.c
     src/tp_txn_parse.c src/tp_txn_lower.c src/tp_txn_encode.c
-    # F2-03 semantic diff / exact inverse (Undo) + redo replay + a minimal in-memory
-    # undo/redo history: per-op state-capture diff (before/after entity data + position),
-    # element deep-copy + positional collection primitives, inverse/redo apply
-    # (stage-then-commit via the F2-02 clone/swap), and the history stack. Extends the
-    # F2-02 commit to capture a diff without breaking its atomicity. CORE-TESTED
-    # groundwork -- the GUI Undo cutover is F3-02, frontend routing F2-05, journal F2-04.
+    # Semantic diff, exact inverse/redo, and bounded in-memory history.
     src/tp_diff_entity.c src/tp_diff_capture.c src/tp_diff_apply.c src/tp_history.c
-    # F2-04 minimum recovery journal: a versioned, length-prefixed, CRC-checksummed
-    # durable log over an injectable I/O seam (in-memory for the fault suite, real file
-    # for production). A commit is not acknowledged until its record is durably appended
-    # (§7.1); the retained transaction-id set + committed state are recoverable from
-    # checkpoint + journal replay (§7.2), which is UB-clean on arbitrary/corrupt/torn
-    # bytes. Sidecar: does NOT change project serialization. Model glue + the commit
-    # acknowledgement gate live in tp_txn_apply.c; the coordinator interface in tp_transaction.h.
+    # Durable recovery journal and injectable I/O seam.
     src/tp_journal.c src/tp_journal_io.c)
 target_include_directories(tp_core PUBLIC include)
 # tp_pack_settings.c includes nt_builder.h for the header-only nt_atlas_opts_defaults()

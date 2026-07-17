@@ -2,29 +2,10 @@
 #define TP_CORE_TP_OPERATION_H
 
 /*
- * Typed semantic operation engine (F2-01, master spec §4.1-4.2, §6-6.2, §7).
- * Promoted from the accepted, 3-OS-green C0-02 spike (packer/spike/c0/tp_c0_op*)
- * into the production tp_core model + tp_status error contract.
- *
- * THE ONE mutation vocabulary all clients share (AGENTS.md tool-parity invariant):
- * every persistent model change is a typed operation from the APPEND-ONLY catalog
- * below, addressing entities BY STABLE ID (never array index or mutable name),
- * with a CLOSED per-op field vocabulary -- there is deliberately NO raw JSON/field
- * patch escape hatch (§6.2). Each op is exactly one effect class
- * CREATE / REMOVE / MOVE / SET.
- *
- * F2-01 / F2-05 BOUNDARY (honest scope -- see docs/decisions):
- *   F2-01 builds and CORE-TESTS this engine (per-op forward/error fixtures + a
- *   parity test proving an op applies == the existing tp_project mutator). It does
- *   NOT wire the shipping CLI/GUI mutators through it -- that FRONTEND CUTOVER is
- *   F2-05. The current apps/cli/cli_mutate.c and apps/gui/gui_project.c mutators are
- *   untouched. Nothing here claims a frontend is routed through the engine.
- *   Transactions / revision / dirty are F2-02: this applies ONE validated op
- *   (validate -> stage -> commit); apply is shaped so F2-02 can wrap it in a batch.
- *
- * Errors are the production tp_status model (never an abort on caller input): a
- * bad payload / dangling reference / out-of-range value yields a structured status
- * + offending field, never a crash. Payloads are bounds-checked, size_t math.
+ * Shared append-only mutation vocabulary. Operations address stable IDs, use a
+ * closed typed payload, and belong to one effect class: create, remove, move, or
+ * set. There is no raw field-patch escape hatch. Invalid caller input returns a
+ * structured tp_status and never aborts.
  */
 
 #include <stdbool.h>
@@ -42,9 +23,9 @@ extern "C" {
 
 struct tp_sprite_index;
 
-/* ---- append-only operation catalog (task 1) ------------------------------ *
+/* ---- append-only operation catalog --------------------------------------- *
  * New kinds are added before TP_OP_KIND_COUNT, NEVER reordered or removed (a
- * journaled/persisted op record must not shift). Mirrors the C0-02 catalog. */
+ * journaled/persisted operation record must not shift). */
 typedef enum tp_op_kind {
     TP_OP_INVALID = 0,
 
@@ -73,12 +54,12 @@ typedef enum tp_op_kind {
     TP_OP_TARGET_REMOVE,
     TP_OP_TARGET_SET,
 
-    TP_OP_ANIMATION_RENAME, /* H/P1-2: appended -- animation rename is now a first-class op */
+    TP_OP_ANIMATION_RENAME,
 
     TP_OP_KIND_COUNT
 } tp_op_kind;
 
-/* The four before/after diff classes (task 1, spec §9). Every op is exactly one. */
+/* Every operation belongs to exactly one before/after diff class. */
 typedef enum tp_op_class {
     TP_OP_CLASS_CREATE = 0,
     TP_OP_CLASS_REMOVE,
@@ -313,7 +294,7 @@ typedef struct tp_operation {
  * NULL-safe. A zero-initialized op (no strings set) frees nothing. */
 void tp_operation_free(tp_operation *op);
 
-/* ---- structured rejection (task 5) --------------------------------------- *
+/* ---- structured rejection ------------------------------------------------ *
  * Every rejection carries a machine status id (tp_status_id) + the offending
  * closed-vocabulary field + human context -- not only prose. */
 typedef struct tp_op_reject {
@@ -322,7 +303,7 @@ typedef struct tp_op_reject {
     char message[192];  /* human context */
 } tp_op_reject;
 
-/* ---- validation (task 4) ------------------------------------------------- *
+/* ---- validation ---------------------------------------------------------- *
  * Validate the op's payload (closed vocabulary, numeric RANGES, non-empty names,
  * exporter-id against the live registry) and its ID REFERENCES against `p` (parent
  * atlas exists; addressed entity exists). Pure: never mutates `p`. Returns
@@ -330,7 +311,7 @@ typedef struct tp_op_reject {
  * is the range/name/exporter/reference logic moved OUT of the CLI/GUI into core. */
 tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_op_reject *rej);
 
-/* ---- id-only apply (task 2) ---------------------------------------------- *
+/* ---- id-only apply ------------------------------------------------------- *
  * Validate then apply ONE operation to `p`, addressing entities by ID. STAGE-THEN-
  * COMMIT: any allocator failure before the commit point leaves the model
  * BYTE-UNCHANGED (a failed apply never half-mutates). On rejection fills *rej (may
@@ -349,10 +330,10 @@ char *tp_operation_encode(const tp_operation *op);
  * "op":...,"status":"rejected"}. */
 char *tp_op_result_encode(const tp_operation *op, const tp_op_reject *rej);
 
-/* ---- selector -> operation builders (task 3) ----------------------------- *
+/* ---- selector -> operation builders -------------------------------------- *
  * The CLI/MCP convenience layer: a human selector + already-typed args -> a typed,
  * ID-only operation, or a structured ambiguity/not-found. The builders resolve the
- * target via the production tp_selector (F1-03) so every frontend selects the same
+ * target via the production tp_selector so every frontend selects the same
  * entity without guessing. `cand` (may be NULL) receives the stable candidate list
  * ONLY on TP_STATUS_AMBIGUOUS_SELECTOR. On success *out owns its strings (free with
  * tp_operation_free). See tp_op_build.c for the full per-verb set. */
