@@ -18,7 +18,6 @@
 #include "tp_core/tp_sprite_index.h"
 #include "tp_core/tp_srckey.h"
 #include "tp_core/tp_transaction.h"
-#include "tp_journal_internal.h"
 #include "tp_recovery_internal.h"
 #include "tp_session_internal.h"
 #include "tp_job_owner_internal.h"
@@ -44,7 +43,6 @@ struct tp_session {
     bool recovery_healthy;
     bool recovery_required;
     bool discarded;
-    tp_journal_io test_recovery_io; /* borrowed fault seam; model owns it */
     uint64_t admission_sequence;
     uint64_t model_generation;
     uint64_t source_generation;
@@ -113,48 +111,6 @@ size_t tp_session__test_snapshot_allocation_bytes(void) {
 
 void tp_session__test_fail_snapshot_allocation_after(size_t successful) {
     s_snapshot_fail_after = successful;
-}
-
-tp_status tp_session__test_attach_memory_recovery(tp_session *session,
-                                                  tp_error *err) {
-    if (!session) {
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
-                            "memory recovery attach requires a session");
-    }
-    tp_journal_io io = tp_journal_io_memory();
-    if (!io.ctx) {
-        return tp_error_set(err, TP_STATUS_OOM,
-                            "memory recovery I/O allocation failed");
-    }
-    tp_id128 key;
-    static const uint8_t bytes[16] = {
-        'n', 't', 'p', 'k', '_', 'r', 'e', 'c',
-        'o', 'v', 'e', 'r', 'y', '_', '0', '1'};
-    memcpy(key.bytes, bytes, sizeof bytes);
-    tp_journal *journal = tp_journal_create(io, key);
-    if (!journal) {
-        return tp_error_set(err, TP_STATUS_OOM,
-                            "memory recovery journal allocation failed");
-    }
-    tp_status status = tp_session_attach_journal(session, journal, err);
-    if (status != TP_STATUS_OK) {
-        tp_journal_destroy(journal);
-        return status;
-    }
-    gate_lock(session);
-    session->test_recovery_io = io;
-    gate_unlock(session);
-    return TP_STATUS_OK;
-}
-
-void tp_session__test_fail_next_recovery_writes(tp_session *session, int count) {
-    if (!session) {
-        return;
-    }
-    gate_lock(session);
-    tp_journal_io io = session->test_recovery_io;
-    gate_unlock(session);
-    tp_journal_io_memory__fail_next_writes(io, count);
 }
 
 bool tp_session__owns_recovery_live(const tp_session *session,

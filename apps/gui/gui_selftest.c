@@ -32,8 +32,11 @@
 #include "tp_core/tp_id.h"      /* tp_id128_eq (F2-05b-ii-B append-fail identity check) */
 #include "tp_core/tp_model.h"   /* tp_result */
 #include "tp_core/tp_names.h"   /* tp_sprite_export_key (region -> override key) */
+#include "tp_core/tp_journal.h" /* in-memory recovery fixture */
 #include "tp_core/tp_scan.h"    /* tp_mkdirs (portable temp-dir creation for the CI stress dirs) */
 #include "tp_core/tp_sprite_index.h" /* canonical A4 selector fixture */
+#include "tp_journal_internal.h" /* bounded write-failure fixture */
+#include "tp_session_internal.h" /* recovery attach fixture */
 
 #include "gui_actions.h"  /* do_pack_blocking / reset_selection / preview_stop / anim ops + gui_request_gesture_commit */
 #include "gui_canvas.h"   /* s_canvas ops + GUI_CANVAS_ATLAS */
@@ -44,6 +47,36 @@
 #include "gui_shell.h"    /* UI_STATE_SLOTS / UI_STATE_PROBE_MAX / UI_ROW_ID_RING */
 #include "gui_startup.h"  /* H/P1-8: gui_startup_decide + GUI_STARTUP_* (J14 truth table) */
 #include "gui_state.h"    /* s_canvas / s_sel_* / s_sec_* / s_about_open / s_export_open / s_ctx / s_id_* */
+
+static tp_journal_io s_test_recovery_io; /* borrowed while the session owns ctx */
+
+static bool gui_project__test_attach_memory_recovery(void) {
+    tp_journal_io io = tp_journal_io_memory();
+    if (!io.ctx) {
+        return false;
+    }
+    static const uint8_t key_bytes[16] = {
+        'n', 't', 'p', 'k', '_', 'r', 'e', 'c',
+        'o', 'v', 'e', 'r', 'y', '_', '0', '1'};
+    tp_id128 key;
+    memcpy(key.bytes, key_bytes, sizeof key.bytes);
+    tp_journal *journal = tp_journal_create(io, key);
+    if (!journal) {
+        return false; /* create consumed io */
+    }
+    tp_error error = {{0}};
+    if (tp_session_attach_journal(gui_project__test_session(), journal,
+                                  &error) != TP_STATUS_OK) {
+        tp_journal_destroy(journal);
+        return false;
+    }
+    s_test_recovery_io = io;
+    return true;
+}
+
+static void gui_project__test_fail_next_recovery_writes(int count) {
+    tp_journal_io_memory__fail_next_writes(s_test_recovery_io, count);
+}
 
 /* Dev-seam index conveniences resolve against the same owned snapshot a real
  * widget uses, then exercise the stable-ID production contract. */

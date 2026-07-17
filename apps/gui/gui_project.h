@@ -317,10 +317,8 @@ bool gui_project_take_op_error(char *out, size_t cap);
 void gui_project_flush_error(char *out, size_t cap);
 
 #ifdef NTPACKER_GUI_SELFTEST
-/* Dev seam: session owns the in-memory recovery backend; GUI may only attach it
- * and arm a bounded number of write failures. */
-bool gui_project__test_attach_memory_recovery(void);
-void gui_project__test_fail_next_recovery_writes(int count);
+/* Borrowed dev-seam access for gui_selftest.c only. */
+tp_session *gui_project__test_session(void);
 #endif
 
 #ifdef __cplusplus

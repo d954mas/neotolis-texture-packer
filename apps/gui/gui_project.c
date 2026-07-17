@@ -747,14 +747,7 @@ tp_status gui_recovery_resolve_entry(const gui_recovery_entry *entry, gui_recove
 
 // #region lifecycle dev seams (selftest only)
 #ifdef NTPACKER_GUI_SELFTEST
-bool gui_project__test_attach_memory_recovery(void) {
-    tp_error err = {0};
-    return tp_session__test_attach_memory_recovery(s_session, &err) ==
-           TP_STATUS_OK;
-}
-void gui_project__test_fail_next_recovery_writes(int count) {
-    tp_session__test_fail_next_recovery_writes(s_session, count);
-}
+tp_session *gui_project__test_session(void) { return s_session; }
 
 #endif
 // #endregion

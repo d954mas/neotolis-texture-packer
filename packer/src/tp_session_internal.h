@@ -46,12 +46,6 @@ size_t tp_session__test_snapshot_allocation_count(void);
 size_t tp_session__test_snapshot_allocation_bytes(void);
 void tp_session__test_fail_snapshot_allocation_after(size_t successful);
 
-/* Fault-injection-only recovery seam. The session retains all journal/io
- * ownership; callers can only attach an in-memory journal and arm writes. */
-tp_status tp_session__test_attach_memory_recovery(tp_session *session,
-                                                  tp_error *err);
-void tp_session__test_fail_next_recovery_writes(tp_session *session, int count);
-
 /* Recovery orchestration uses this only to complete the ownership transfer on
  * an attach error: accepted live handles remain session-owned even degraded. */
 bool tp_session__owns_recovery_live(const tp_session *session,
