@@ -10,10 +10,10 @@
 ## 2026-07-16 architecture foundation checkpoint
 
 Ownership foundation M0-M5 from `architecture-foundation-plan.md` is implemented.
-Current evidence is in `../reviews/architecture-foundation-m1-m5.md`.
-Exact-SHA terminal CI is a handoff gate whose current result is recorded on the
-PR and in the task handoff. This checkpoint supersedes obsolete as-built
-statements below that describe the pre-foundation commit `46b172b`.
+The current plan §10 points directly to its executable evidence. Exact-SHA
+terminal CI is a handoff gate whose current result is recorded on the PR and in
+the task handoff. This checkpoint supersedes obsolete as-built statements below
+that describe the pre-foundation commit `46b172b`.
 
 Current foundation facts: structural IDs and tagged sources exist; GUI and CLI
 mutations use typed operations through `tp_session`; the GUI reads owned
@@ -40,7 +40,8 @@ by its original packets and is not marked complete by this checkpoint.
 
 > Historical baseline: this section captured commit `46b172b` before M0-M5.
 > It is retained as planning history, not a description of the current tree.
-> Use the checkpoint above and the completion review for current ownership.
+> Use the checkpoint above and architecture-foundation plan §10 for current
+> ownership.
 
 У проекта сильная baseline-основа:
 

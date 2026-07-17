@@ -3,7 +3,7 @@
 > **Foundation addendum (2026-07-16):** accepted, implemented and reviewed as part of
 > M0–M5. Intermediate ownership and cutover descriptions below are retained as
 > implementation history; the current state is recorded in the master spec,
-> architecture-foundation plan and M1–M5 completion review.
+> architecture-foundation plan and its §10 executable matrix.
 
 **Дата:** 2026-07-13
 **Статус:** accepted; foundation implementation reviewed 2026-07-16

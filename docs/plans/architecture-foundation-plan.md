@@ -1,15 +1,14 @@
 # Architecture foundation plan
 
-Статус: **IMPLEMENTED (M0–M5)** — local correctness, architecture,
-performance, debug/release and boundary gates are recorded in
-`docs/reviews/architecture-foundation-m1-m5.md`. Exact-SHA terminal CI is a
-handoff gate whose current result is recorded on the PR and in the task handoff.
+Статус: **IMPLEMENTED (M0–M5)** — executable evidence is the test and boundary
+matrix in §10. Exact-SHA terminal CI is a handoff gate whose current result is
+recorded on the PR and in the task handoff.
 
 | Package | Status | Durable evidence |
 |---|---|---|
-| M0 | DONE | `docs/reviews/architecture-foundation-m0-baseline.md` |
-| M1–M5 | DONE | `docs/reviews/architecture-foundation-m1-m5.md` |
-| Migration/deletion ledger | CLOSED | `docs/reviews/architecture-foundation-migration-ledger.md` |
+| M0 | DONE | `tp_bench_foundation`, `tp_bench_gui_rows`, `tp_test_bench_support` |
+| M1–M5 | DONE | §10 executable matrix |
+| Migration/deletion gate | CLOSED | client parity tests + `scripts/check_boundaries.sh` |
 
 Нормативный источник: `docs/ntpacker-master-spec.md`
 
@@ -210,7 +209,9 @@ M0 hard-gates корректность измерения: status accounting, ц
 GUI allocation/filesystem и row-complexity findings блокируют M2, а recovery
 limits/copies findings блокируют M3. Они не требуют реализации M2/M3 внутри M0.
 
-Completion evidence: `docs/reviews/architecture-foundation-m0-baseline.md`.
+Completion evidence: the release benchmark executables print fixture shape,
+bytes, iterations, accepted/failed samples and p50/p95; `tp_bench_support`
+pins the sample-acceptance and percentile rules.
 
 ### M1 — Session shell + единственный owned snapshot
 
@@ -247,7 +248,7 @@ Gate:
 
 **Цель.** Перевести GUI по operation families, удаляя старые пути монотонно.
 
-Для каждой family вести migration ledger:
+Для каждой family закрыть executable cutover gate:
 
 1. adapter резолвит index/name в stable ID в момент intent capture;
 2. intent содержит captured ID + expected revision;
@@ -408,8 +409,8 @@ Gate:
    recovery ownership и duplicate business rules; отдельно запретить session
    зависимости на GUI/protocol modules и прямое размещение recovery codec,
    filesystem/lock backend или Pack/Export implementation в session module.
-6. Удалить старые GUI globals/wrappers и transitional adapters, для которых
-   migration ledger закрыт.
+6. Удалить старые GUI globals/wrappers и transitional adapters после зелёных
+   parity tests и boundary deletion gate.
 
 Gate:
 
@@ -440,8 +441,8 @@ Gate:
 
 **Status: TRIGGERED by M0 measurements.** The foundation keeps the measured
 journal-backed semantic-history path correct and single-owned; compact acknowledgement
-work remains a separate post-foundation packet. See the ROADMAP checkpoint and the
-M1–M5 completion review for the measured evidence.
+work remains a separate post-foundation packet. See the ROADMAP checkpoint for
+the measured evidence.
 
 M0 обязательно измеряет текущий journal-backed Undo/Redo checkpoint path. Normal
 recovery TXN остаётся owner-locked serialized-operation format.
@@ -547,6 +548,8 @@ backend только после появления второй независи
 Каждый mandatory package проходит:
 
 - native debug/release build + ctest;
+- M0 measurement targets `tp_bench_foundation`, `tp_bench_gui_rows` and
+  `tp_test_bench_support` (CTest name `tp_bench_support`);
 - GUI selftest;
 - Linux/Windows/macOS CI;
 - `scripts/check_boundaries.sh`;
@@ -556,10 +559,18 @@ backend только после появления второй независи
 - independent correctness + architecture review;
 - deletion gate: superseded path действительно удалён.
 
+| Package | Executable evidence |
+|---|---|
+| M1 | `tp_session`, `tp_job_owner`, boundary R8/R10 |
+| M2 | `tp_gui_session_adapter`, `tp_gui_canonical_identity`, `tp_bench_gui_rows`, boundary R6/R7/R8/R11/R12/R14 |
+| M3 | `tp_journal`, `tp_bench_foundation`, journal fault corpus |
+| M4 | `tp_recovery_store`, `tp_project_lease`, boundary R9/R10 |
+| M5 | `tp_client_parity`, CLI mutation families, boundary R6–R15 |
+
 Дополнительно:
 
 - session snapshot — lifetime/generation/sanitizer tests;
-- GUI cutover — per-family migration ledger и parity corpus;
+- GUI cutover — per-family parity corpus и boundary deletion gate;
 - journal hardening — adversarial count/bytes/OOM corpus;
 - orphan recovery — real process/lock/filesystem tests;
 - journal version change — mixed/corrupt/torn migration corpus;
@@ -573,7 +584,8 @@ Foundation завершён, когда:
 - приложения не получают mutable project/model pointers;
 - `tp_session` остаётся orchestration boundary и не содержит запрещённых owning
   responsibilities из §4;
-- GUI migration ledger закрыт и старые branches/wrappers удалены;
+- GUI per-family parity и boundary deletion gates зелёные, старые
+  branches/wrappers удалены;
 - recovery scan/claim/candidate/cleanup не зависят от GUI;
 - CLI и live hosts делят применимые business contracts без ложной surface parity;
 - resource budgets executable и проверяются до materialization;

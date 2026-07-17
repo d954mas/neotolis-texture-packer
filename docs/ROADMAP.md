@@ -57,11 +57,9 @@ its current result is recorded on the PR and in the task handoff.
 M0-M5 from `plans/architecture-foundation-plan.md` completed the shared
 ownership foundation: one session-owned mutable model, immutable snapshots,
 thin GUI/CLI adapters, bounded recovery, exact job/capability contracts and
-closed deletion gates. Evidence:
-
-- `reviews/architecture-foundation-m0-baseline.md`;
-- `reviews/architecture-foundation-migration-ledger.md`;
-- `reviews/architecture-foundation-m1-m5.md`.
+closed deletion gates. Durable evidence is executable: the foundation plan §10
+names the debug/release tests, benchmark harnesses, client parity corpus and
+`scripts/check_boundaries.sh` deletion checks.
 
 This checkpoint does **not** mark the complete C0/F1/F2/F3 product phases DONE;
 their remaining product gates still require separate phase audits. In
