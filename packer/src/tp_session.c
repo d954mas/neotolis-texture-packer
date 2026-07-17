@@ -333,6 +333,11 @@ tp_status tp_session_job_attach_internal(tp_session *session,
                             "session job attach requires a concrete job handle");
     }
     gate_lock(session);
+    if (session->discarded) {
+        gate_unlock(session);
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "session was discarded");
+    }
     if (session->active_job) {
         gate_unlock(session);
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
@@ -606,18 +611,15 @@ static tp_status save_as_locked(tp_session *session, const char *path,
     }
     if (recovery_degraded && !same_identity && session->recovery_live) {
         tp_error cleanup_error = {{0}};
-        status = tp_recovery_live_retire(session->recovery_live,
-                                         &cleanup_error);
-        if (status != TP_STATUS_OK) {
-            tp_project_destroy(migrated);
-            if (destination_lease != session->project_lease) {
-                tp_project_lease_release(destination_lease);
-            }
-            return tp_error_set(
-                err, status, "%s",
-                cleanup_error.msg[0]
-                    ? cleanup_error.msg
-                    : "stale recovery identity could not be retired");
+        const tp_status cleanup_status =
+            tp_recovery_live_retire(session->recovery_live, &cleanup_error);
+        if (cleanup_status != TP_STATUS_OK) {
+            /* The destination file is already atomically published. It is now
+             * the authoritative saved state even when stale recovery cleanup
+             * fails. Report degraded recovery out-of-band, but never return a
+             * failure that lies about the completed Save As side effect. */
+            recovery_status = cleanup_status;
+            session->recovery_healthy = false;
         }
     }
     if (migrated) {

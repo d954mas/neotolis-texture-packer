@@ -54,6 +54,9 @@ bool tp_recovery__test_hold_foreign_lock(
     const char *root, tp_id128 journal_key, const char *journal_path);
 void tp_recovery__test_release_foreign_lock(void);
 void tp_recovery__test_fail_next_resolve_verify(void);
+/* Forces the next live-retire cleanup to fail after Save As has published its
+ * destination. This cross-platform seam verifies post-publication semantics. */
+void tp_recovery__test_fail_next_live_retire_cleanup(void);
 tp_status tp_recovery__test_session_attach_at(
     const char *root, tp_id128 journal_key, const char *journal_path,
     tp_session *session, const tp_recovery_metadata *metadata, tp_error *err);

@@ -100,8 +100,37 @@ void test_detach_cannot_destroy_a_concurrently_pinned_job(void) {
     tp_session_destroy(session);
 }
 
+void test_discarded_session_rejects_new_job_ownership(void) {
+    tp_rng rng = {fill_rng, NULL};
+    tp_session *session = NULL;
+    tp_error error = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_create(&rng, &session, &error));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_discard(session, &error));
+
+    fake_job job;
+    memset(&job, 0, sizeof job);
+    atomic_init(&job.destroyed, 0);
+    tp_session_owned_job_init(&job.owner, fake_cancel, fake_destroy);
+
+    const tp_status status =
+        tp_session_job_attach_internal(session, &job.owner, &error);
+    if (status == TP_STATUS_OK) {
+        TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                              tp_session_job_detach_internal(
+                                  session, &job.owner, &error));
+    }
+    tp_session_job_release_internal(&job.owner);
+
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT, status);
+    TEST_ASSERT_EQUAL_INT(1, atomic_load_explicit(&job.destroyed,
+                                                  memory_order_relaxed));
+    tp_session_destroy(session);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_detach_cannot_destroy_a_concurrently_pinned_job);
+    RUN_TEST(test_discarded_session_rejects_new_job_ownership);
     return UNITY_END();
 }

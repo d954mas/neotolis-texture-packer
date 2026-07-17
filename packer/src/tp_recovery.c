@@ -43,6 +43,7 @@
 static tp_recovery_store *s_test_foreign_store;
 static tp_recovery_claim *s_test_foreign_claim;
 static bool s_test_fail_next_resolve_verify;
+static bool s_test_fail_next_live_retire_cleanup;
 #ifndef _WIN32
 static bool s_test_fail_next_quarantine_unlink;
 #endif
@@ -1119,7 +1120,13 @@ static tp_status live_finish(tp_recovery_live *live, bool preserve_journal,
     }
     tp_status status = TP_STATUS_OK;
     if (!preserve_journal && (live->healthy || retire_unhealthy)) {
-        status = live_delete_pin(live, err);
+        if (retire_unhealthy && s_test_fail_next_live_retire_cleanup) {
+            s_test_fail_next_live_retire_cleanup = false;
+            status = tp_error_set(err, TP_STATUS_RECOVERY_CLEANUP_FAILED,
+                                  "injected recovery live-retire cleanup failure");
+        } else {
+            status = live_delete_pin(live, err);
+        }
     }
     live_close_pin(live);
     lock_release(&live->lock);
@@ -1597,6 +1604,10 @@ void tp_recovery__test_release_foreign_lock(void) {
 
 void tp_recovery__test_fail_next_resolve_verify(void) {
     s_test_fail_next_resolve_verify = true;
+}
+
+void tp_recovery__test_fail_next_live_retire_cleanup(void) {
+    s_test_fail_next_live_retire_cleanup = true;
 }
 
 #ifndef _WIN32

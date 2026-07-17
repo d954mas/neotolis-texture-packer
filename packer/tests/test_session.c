@@ -1613,6 +1613,77 @@ void test_cross_identity_save_retires_journal_after_metadata_failure(void) {
     (void)remove(target);
 }
 
+void test_save_as_keeps_published_destination_when_recovery_retire_fails(void) {
+    char journal[1024];
+    char original[1024];
+    char target[1024];
+    (void)snprintf(journal, sizeof journal,
+                   "%s/session-retire-fail.ntpjournal", g_scratch);
+    (void)snprintf(original, sizeof original,
+                   "%s/session-retire-fail-a.ntpacker_project", g_scratch);
+    (void)snprintf(target, sizeof target,
+                   "%s/session-retire-fail-b.ntpacker_project", g_scratch);
+    (void)remove(journal);
+    (void)remove(original);
+    (void)remove(target);
+
+    tp_error err = {{0}};
+    tp_recovery_store *store = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_recovery_store_create(g_scratch, recovery_key(),
+                                                   &store, &err));
+    tp_session *session = make_session();
+    tp_session_save_result original_result;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_save_as(session, original,
+                                             &original_result, &err));
+
+    tp_recovery_live *live = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_recovery_store_create_live(store, journal, &live,
+                                                        &err));
+    const tp_recovery_metadata metadata = {
+        .timestamp = 77,
+        .project_path = original_result.target_path,
+        .project_name = "session-retire-fail-a.ntpacker_project",
+        .file_fingerprint = &original_result.file_fingerprint,
+    };
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_attach_recovery_live(session, live,
+                                                          &metadata, &err));
+    tp_recovery_live__mark_degraded(live);
+    tp_recovery__test_fail_next_live_retire_cleanup();
+
+    tp_session_save_result result;
+    const tp_status status =
+        tp_session_save_as(session, target, &result, &err);
+
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, status);
+    TEST_ASSERT_TRUE(result.saved);
+    TEST_ASSERT_TRUE(result.recovery_degraded);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_RECOVERY_CLEANUP_FAILED,
+                          result.recovery_status);
+    TEST_ASSERT_TRUE(test_file_exists(target));
+
+    tp_session_snapshot *snapshot = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_snapshot_create(session, &snapshot, &err));
+    char canonical[TP_IDENTITY_PATH_MAX];
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_identity_path_canonical(target, canonical,
+                                                     sizeof canonical, &err));
+    TEST_ASSERT_EQUAL_STRING(
+        canonical, tp_session_snapshot_identity(snapshot).canonical_path);
+    TEST_ASSERT_FALSE(tp_session_snapshot_dirty(snapshot));
+    tp_session_snapshot_destroy(snapshot);
+
+    tp_session_destroy(session);
+    tp_recovery_store_destroy(store);
+    (void)remove(journal);
+    (void)remove(original);
+    (void)remove(target);
+}
+
 void test_degraded_session_live_blocks_mutation_and_preserves_slot(void) {
     char journal[1024];
     (void)snprintf(journal, sizeof journal, "%s/session-degraded.ntpjournal", g_scratch);
@@ -1743,6 +1814,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_session_preserves_dirty_live_recovery_on_destroy);
     RUN_TEST(test_save_as_updates_live_recovery_identity_before_compaction);
     RUN_TEST(test_cross_identity_save_retires_journal_after_metadata_failure);
+    RUN_TEST(test_save_as_keeps_published_destination_when_recovery_retire_fails);
     RUN_TEST(test_degraded_session_live_blocks_mutation_and_preserves_slot);
     RUN_TEST(test_required_recovery_blocks_apply_undo_redo_without_journal);
     return UNITY_END();
