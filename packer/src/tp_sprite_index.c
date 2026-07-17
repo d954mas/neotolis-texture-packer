@@ -87,6 +87,9 @@ static bool index_push(tp_sprite_index *idx, tp_id128 source_id, int source_inde
     }
     char keybuf[TP_SRCKEY_MAX];
     if (tp_srckey_normalize(raw, keybuf, sizeof keybuf, NULL) != TP_STATUS_OK) {
+        /* Deliberate tolerant fallback (tp_strutil.h contract): this is a display/index
+         * key, so the value must flow through instead of vanishing; over-length input is
+         * already rejected upstream by tp_srckey_normalize. */
         tp_slash_norm(raw, keybuf, sizeof keybuf);
     }
     char ekey[TP_SRCKEY_MAX];
