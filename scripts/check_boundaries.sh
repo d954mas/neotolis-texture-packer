@@ -377,6 +377,45 @@ if [ "$seeded_multiline_scope" != "1 0 1" ]; then
     hit "R16-selftest" "R16b scope detector missed a multiline unconditional GUI private include"
 fi
 
+# 17. Comment hygiene: shipping source comments are short WHY only, never a phase/
+#     review tag. Bans the bracketed fix/review markers, R5b-x phase labels, Fx-xx
+#     phase tags (incl. suffixed F2-05b-ii-A forms), and the Dx: crash-diagnostic
+#     comment prefix. Spec/decision references are deliberately NOT matched: a bare
+#     "§7.2", "decision 0012", or section-qualified "C0-02 §4" is permitted and must
+#     survive. The Fx-xx alternative omits a trailing \b so a reintroduced F2-05a /
+#     F2-05b-i variant is still caught; the Dx: alternative excludes a leading letter
+#     or '%' so "%H:%M:%S" strftime and "PATH:" are not flagged. Test/bench/selftest
+#     sources are outside shipping_srcs and keep their oracles. A legit hit (e.g. a
+#     string literal) may carry a "boundary-ok:" note on the same line.
+_comment_tags='\b(fix|review) \[[0-9]+\]|\bR5b-[0-9]|\bF[12]-[0-9]{2}|(^|[^%A-Za-z])D[12]:'
+r17=$(shipping_srcs | xargs grep -nE "$_comment_tags" 2>/dev/null | grep -v 'boundary-ok:')
+[ -n "$r17" ] && hit "R17 phase/review/diagnostic tag in shipping source comment" "$r17"
+
+# Self-test: the detector FIRES on each seeded tag form and does NOT false-positive on
+# the permitted suffix/strftime/PATH/section-reference forms (asserted every run).
+for _seed in \
+    '#include "x.h" /* fix [3] */' \
+    '/* R5b-2 read-only opener */' \
+    '/* F2-03 task 1: capture */' \
+    '/* F2-05b-ii-A gesture coalescing */' \
+    '#include "gui_crash.h" /* D2: crash handler */' \
+    '/* D1: app-data root */'
+do
+    if ! printf '%s\n' "$_seed" | grep -qE "$_comment_tags"; then
+        hit "R17-selftest" "R17 detector failed to catch a seeded tag: $_seed"
+    fi
+done
+if printf '%s\n' \
+    '/* keep the derived suffix [0] slot */' \
+    '    (void)snprintf(t, sizeof t, "%H:%M:%S", tm);' \
+    '    const char *k = "PATH:";' \
+    '/* selector resolution (master spec §7.2) */' \
+    '/* dedup pending (decision 0012 §6); never merge */' \
+    '/* order rule (C0-02 §4): id-keyed collections */' |
+    grep -qE "$_comment_tags"; then
+    hit "R17-selftest" "R17 detector false-positives on legitimate suffix/strftime/PATH/section-reference content"
+fi
+
 if [ "$fail" -eq 0 ]; then
     say "boundaries OK"
 fi
