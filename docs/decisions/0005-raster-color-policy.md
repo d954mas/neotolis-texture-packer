@@ -1,7 +1,8 @@
 # 0005 — Raster decode: byte-preserving sRGB, без ICC transforms
 
 **Дата:** 2026-07-12
-**Статус:** initial-policy; закрепляется golden fixtures в C0-04
+**Статус:** initial-policy; byte-exact research fixtures сохранены в
+`docs/research/raster-normalization-goldens.md`
 **Принял:** lead (делегировано owner)
 
 ## Решение

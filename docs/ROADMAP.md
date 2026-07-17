@@ -61,7 +61,7 @@ closed deletion gates. Durable evidence is executable: the foundation plan §10
 names the debug/release tests, benchmark harnesses, client parity corpus and
 `scripts/check_boundaries.sh` deletion checks.
 
-This checkpoint does **not** mark the complete C0/F1/F2/F3 product phases DONE;
+This checkpoint does **not** mark the complete F1/F2/F3 product phases DONE;
 their remaining product gates still require separate phase audits. In
 particular, visible shared History and full `pack_input_hash`/result LRU remain
 F3 work.
@@ -75,9 +75,6 @@ acknowledgement is the named post-foundation packet in the architecture plan
 
 ```text
 BASELINE
-   |
-   v
-  C0  contracts, fixtures, migration boundaries
    |
    v
   F1  persistent identities + tagged project schema
@@ -111,26 +108,20 @@ import/source (`B1`) и package (`B3`) путей.
 
 ## Этапы и задачи
 
-### C0 — Контрактная рамка и исполнимые оракулы
+### Promoted contract groundwork
 
-**Статус:** `PLANNED`
-**Основание:** master spec §4, §52, §58–§60.
-
-| ID | Результат |
-|---|---|
-| `C0.1` | Зафиксировать vocabulary и version boundaries только в объёме, нужном следующему этапу |
-| `C0.2` | Подготовить golden fixtures для project migration, deterministic save и текущих format/CLI contracts |
-| `C0.3` | Зафиксировать structured error/notice и selector ambiguity test oracles |
-| `C0.4` | Отделить as-built compatibility tests от target-architecture acceptance tests |
-| `C0.5` | Решить legacy-ID promotion, canonical-path identity, semantic-state identity, Pack supersession, минимальный journal record и deterministic raster color/orientation policy через executable spikes |
-
-**Gate:** fixtures воспроизводят текущий baseline; неизвестные решения из §60 не
-замаскированы implementation defaults; native build/tests зелёные.
+Временный pre-production spike-слой выведен из build и больше не является
+этапом или prerequisite. Принятые результаты находятся в production core/tests
+и decisions 0002, 0004–0013. Уникальные byte-exact raster-oracles сохранены как
+non-normative research в `docs/research/raster-normalization-goldens.md`.
+Незакрытые решения master spec §60 отслеживаются непосредственно тем active
+packet, который публикует соответствующий API.
 
 ### F1 — Persistent identities и tagged project schema
 
-**Статус:** `PLANNED`
-**Prerequisite:** `C0`.
+**Статус:** `IN PROGRESS` — production foundation реализован; полный phase gate
+ещё требует отдельного аудита.
+**Prerequisite:** текущий `BASELINE` и master spec.
 **Основание:** master spec §5, §11, §54 Phase 0.
 
 | ID | Результат |
@@ -139,7 +130,7 @@ import/source (`B1`) и package (`B3`) путей.
 | `F1.2` | Random persistent IDs для atlas/source/animation/target и deterministic derived `sprite_id` |
 | `F1.3` | Нормализация source-local keys, collision/traversal validation и однозначные selectors |
 | `F1.4` | Tagged source schema с path-source migration и sparse sprite records |
-| `F1.5` | Реализовать выбранный в `C0.5` atomic legacy-ID promotion без изменения ссылок внутри writable session |
+| `F1.5` | Реализовать утверждённый в decision 0007 atomic legacy-ID promotion без изменения ссылок внутри writable session |
 
 **Gate:** migration повторяема; rename/reorder/save/reload не меняют structural
 IDs; одинаковый source key воспроизводит `sprite_id`; malformed/duplicate IDs и
@@ -147,7 +138,8 @@ portability collisions возвращаются как structured findings.
 
 ### F2 — Typed operations, transactions и revisions
 
-**Статус:** `PLANNED`
+**Статус:** `IN PROGRESS` — typed operation/session foundation реализован;
+полный phase gate ещё требует отдельного аудита.
 **Prerequisite:** `F1`.
 **Основание:** master spec §6–§8, §27 A0.
 

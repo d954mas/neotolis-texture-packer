@@ -2,8 +2,8 @@
 #define TP_CORE_TP_ID_H
 
 /*
- * 128-bit runtime ID primitive + injectable RNG seam, promoted
- * from the accepted `tp_c0_id` contract.
+ * 128-bit runtime ID primitive + injectable RNG seam implementing the
+ * structural-ID contract in master spec §5.4.
  *
  * SCOPE BOUNDARY (architecture decision, lead review):
  *   This introduces ONLY what an unsaved-session identity needs: the 16-byte

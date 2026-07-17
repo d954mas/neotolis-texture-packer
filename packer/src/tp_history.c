@@ -316,8 +316,7 @@ tp_status tp_model_undo(tp_model *m, tp_error *err) {
         tp_project_destroy(clone); /* durable gate rejected: model + revision + cursor unchanged */
         return st;
     }
-    tp_project_destroy(m->project);
-    m->project = clone;
+    tp_model__replace_owned_project(m, clone);
     m->revision = revision;
     tp_history_commit_undo(m->history);
     return TP_STATUS_OK;
@@ -366,8 +365,7 @@ tp_status tp_model_redo(tp_model *m, tp_error *err) {
         tp_project_destroy(clone);
         return st;
     }
-    tp_project_destroy(m->project);
-    m->project = clone;
+    tp_model__replace_owned_project(m, clone);
     m->revision = revision;
     tp_history_commit_redo(m->history);
     return TP_STATUS_OK;

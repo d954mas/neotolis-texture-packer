@@ -1,9 +1,9 @@
 /* F1-01 Part A: the promoted structural-ID primitive surface (tp_id).
  *
  * Pins the production shape-ID parse/format (atlas_/source_/anim_/target_ + 32
- * hex), the versioned stable hash (FNV-1a/128) and sprite_id via byte-goldens
- * cross-checked against the accepted C0-01 spike vectors, plus the production
- * tp_status error mapping. A mix change to the hash is a visible golden diff. */
+ * hex), the versioned stable hash (FNV-1a/128) and sprite_id via byte-goldens,
+ * plus the production tp_status error mapping. A mix change to the hash is a
+ * visible golden diff. */
 
 #include "tp_core/tp_id.h"
 #include "tp_hex.h" /* shared lowercase-hex encoder (drift guard) */

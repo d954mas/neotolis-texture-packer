@@ -15,7 +15,8 @@
  * (tp_txn_apply.c, tp_txn_parse.c, tp_history.c); tp_transaction.h exposes only
  * the opaque handle + read accessors. */
 struct tp_model {
-    tp_project *project;      /* the authoritative live model (owned) */
+    tp_project *project;      /* authoritative immutable view; see generation */
+    tp_project_generation *generation; /* NULL => model directly owns project */
     int64_t revision;         /* canonical monotonic counter; runtime, not persisted */
     tp_id128 saved_identity;  /* semantic identity of the saved baseline (dirty anchor) */
     bool recovered_unsaved;   /* recovered state is dirty until explicitly saved */
@@ -25,6 +26,10 @@ struct tp_model {
     struct tp_journal *journal; /* optional owned acknowledgement journal */
     struct tp_side_effect_coordinator *coordinator; /* optional borrowed hooks */
 };
+
+/* Allocation-free publication shared by commit, Undo/Redo, and Save. Takes
+ * ownership of project and releases the previous direct/shared generation. */
+void tp_model__replace_owned_project(tp_model *model, tp_project *project);
 
 /* The shared id-set behind a memory idstore (NULL for a foreign store).
  * tp_model_attach_journal uses it to migrate ids the model committed journal-less into

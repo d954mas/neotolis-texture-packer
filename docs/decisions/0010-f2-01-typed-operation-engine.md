@@ -10,7 +10,7 @@
 **Принял:** deep-reasoner (F2-01, делегированные полномочия); foundation lead review complete
 **Реализуется в:** F2-01 (`tp_operation` в core: `tp_op_catalog.c`, `tp_op_validate.c`,
 `tp_op_apply.c`, `tp_op_encode.c`, `tp_op_build.c`; id-addressed accessors в `tp_project`).
-Промоут принятого C0-02 spike. Master spec §4.1–4.2, §6–6.2, §7, §54 Phase-0 item 4. Plan F2-01.
+Master spec §4.1–4.2, §6–6.2, §7, §54 Phase-0 item 4. Plan F2-01.
 
 ## Область: что F2-01 РЕАЛЬНО поставляет (groundwork) vs что переносится в F2-05/F2-02
 
@@ -44,7 +44,7 @@
 
 ## Ключевые решения
 
-### 1. tp_operation — реальный tagged union, промоут C0-02 каталога
+### 1. tp_operation — реальный tagged union и единый каталог
 `kind` — тег; `atlas_id` — родительский атлас для ВСЕХ sub-entity ops (явное scoping,
 см. §5); union-arm несёт типизированный payload. Строки malloc-owned, освобождает
 `tp_operation_free` (switch по kind). Каталог append-only: новые kind — перед
@@ -66,9 +66,9 @@ Apply НЕ штампует `{source_ref, src_key}` на запись override: 
 Итог: **операция id/key-адресована канонически, storage-представление не изменено**.
 Frame references несут name-bridge (pending), идентично модели и CLI.
 
-### 3. Явный parent `atlas_id` на каждом sub-entity op (divergence от C0-02)
-C0-02 минимальный vocab полагался на project-wide уникальность id (`source.remove` =
-`{source_id}`). F2-01 несёт `atlas_id` на source/sprite/anim/target ops и оперирует
+### 3. Явный parent `atlas_id` на каждом sub-entity op
+Операционный vocabulary не полагается на project-wide уникальность id.
+F2-01 несёт `atlas_id` на source/sprite/anim/target ops и оперирует
 ВНУТРИ этого атласа — explicit-over-implicit, без project-wide id-скана, совпадает с тем,
 как builder резолвит (в контексте атласа). Каталог vocab обновлён соответственно.
 
@@ -104,7 +104,7 @@ C0-02 минимальный vocab полагался на project-wide уник
 Encoder использует те же правила, что `tp_project` writer (2-space/LF/%.9g/ключи по
 возрастанию, `op` первым, trailing NL) — goldens байт-идентичны на всех OS. Sparse: SET
 эмитит только поля из presence-mask. `animation.frame.remove` адресуется ИНДЕКСОМ (порядок
-кадров семантичен), не именем — divergence от C0-02 `{anim_id, frame, index}`.
+кадров семантичен), не именем.
 
 ## Ревизия по adversarial-review (wf_b51c2d8f-b99): 9 подтверждённых дефектов
 

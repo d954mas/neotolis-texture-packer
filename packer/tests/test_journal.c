@@ -432,7 +432,7 @@ static char *dense_rename_payload_with_duplicate_operations(tp_id128 atlas_id) {
  * through the journaled commit path. Format B serializes it via tp_txn_request_encode and replays it on
  * recovery, so the partial mask must survive that round-trip (R2a) -- not re-expand to full-replace. */
 static tp_status commit_target_out_path(tp_model *m, const char *id_hex, int64_t expected_rev, const char *out_path) {
-    tp_project *p = tp_model_project(m);
+    const tp_project *p = tp_model_project(m);
     tp_operation op;
     memset(&op, 0, sizeof op);
     op.kind = TP_OP_TARGET_SET;
@@ -453,6 +453,23 @@ static tp_status commit_target_out_path(tp_model *m, const char *id_hex, int64_t
     tp_status st = tp_model_apply(m, &req, &res, &err);
     tp_txn_result_free(&res);
     return st;
+}
+
+static tp_status save_model_candidate(tp_model *model, const char *path,
+                                      tp_error *err) {
+    tp_project *candidate = tp_project_clone(tp_model_project(model));
+    if (!candidate) {
+        return tp_error_set(err, TP_STATUS_OOM,
+                            "model save candidate clone failed");
+    }
+    const tp_status status = tp_project_save_candidate_with_fingerprint(
+        candidate, path, NULL, false, NULL, err);
+    if (status != TP_STATUS_OK) {
+        tp_project_destroy(candidate);
+        return status;
+    }
+    tp_model__adopt_project(model, candidate);
+    return TP_STATUS_OK;
 }
 
 /* A model over base_project with a fresh in-memory journal keyed by `key`. The io
@@ -983,7 +1000,7 @@ void test_save_stages_path_normalization_without_invalidating_history(void) {
 
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        tp_project_save(tp_model_project(model), project_path, &err));
+        save_model_candidate(model, project_path, &err));
     TEST_ASSERT_EQUAL_STRING(
         absolute_source,
         tp_model_project(model)->atlases[0].sources[0].path);
@@ -1034,8 +1051,7 @@ void test_save_as_compact_recovery_keeps_source_target_self_contained(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_model_attach_journal(model, journal, &err));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_project_save(tp_model_project(model), new_path,
-                                          &err));
+                          save_model_candidate(model, new_path, &err));
     tp_model_mark_saved(model);
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
@@ -2840,7 +2856,7 @@ void test_journal_undo_append_failure_rolls_back_history_commit(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_enable_history(m));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "87000000000000000000000000000001", 0, "one"));
 
-    tp_project *project_ptr_before = tp_model_project(m);
+    const tp_project *project_ptr_before = tp_model_project(m);
     char *project_before = serialize(project_ptr_before);
     size_t journal_before_len = 0;
     uint8_t *journal_before = snapshot_io(io, &journal_before_len);
@@ -2937,7 +2953,7 @@ void test_journal_redo_append_failure_rolls_back_history_commit(void) {
     tp_error err = {0};
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_undo(m, &err));
 
-    tp_project *project_ptr_before = tp_model_project(m);
+    const tp_project *project_ptr_before = tp_model_project(m);
     char *project_before = serialize(project_ptr_before);
     size_t journal_before_len = 0;
     uint8_t *journal_before = snapshot_io(io, &journal_before_len);

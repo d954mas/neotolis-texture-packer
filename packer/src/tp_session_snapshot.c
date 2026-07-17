@@ -15,6 +15,7 @@
 #include "tp_core/tp_srckey.h"
 #include "tp_core/tp_transaction.h"
 #include "tp_model_seam.h"
+#include "tp_project_generation_internal.h"
 #include "tp_project_mutation_internal.h"
 #include "tp_session_layout.h"
 
@@ -30,7 +31,8 @@ typedef struct tp_snapshot_atlas_storage {
 } tp_snapshot_atlas_storage;
 
 struct tp_session_snapshot {
-    tp_project *project;
+    tp_project_generation *generation;
+    const tp_project *project;
     tp_snapshot_atlas_storage *atlases;
     int atlas_count;
     int64_t revision;
@@ -67,6 +69,10 @@ size_t tp_session__test_snapshot_allocation_bytes(void) {
 
 void tp_session__test_fail_snapshot_allocation_after(size_t successful) {
     s_snapshot_fail_after = successful;
+}
+
+void tp_session__test_fail_next_generation_owner_allocation(void) {
+    tp_project_generation__test_fail_next_allocation();
 }
 
 static void *snapshot_calloc(size_t count, size_t size) {
@@ -107,18 +113,21 @@ tp_status tp_session_snapshot_create(const tp_session *session,
         return tp_error_set(err, TP_STATUS_OOM, "snapshot allocation failed");
     }
 
-    /* Only cloning and scalar metadata capture require a consistent admission
-     * point. The clone is immutable after publication, so DTO materialization
-     * must not keep the single-writer gate held. */
+    /* Only generation retention and scalar metadata capture require a
+     * consistent admission point. The retained generation is immutable, so DTO
+     * materialization must not keep the single-writer gate held. */
     gate_lock(session);
-    tp_project *project = tp_project_clone(tp_model_project(session->model));
-    if (!project) {
+    tp_project_generation *generation = NULL;
+    tp_status retain_status = tp_model__retain_project_generation(
+        session->model, &generation, err);
+    if (retain_status != TP_STATUS_OK) {
         gate_unlock(session);
         free(snapshot);
-        return tp_error_set(err, TP_STATUS_OOM, "snapshot project clone failed");
+        return retain_status;
     }
-    snapshot->project = project;
-    snapshot->atlas_count = project->atlas_count;
+    snapshot->generation = generation;
+    snapshot->project = tp_project_generation_project(generation);
+    snapshot->atlas_count = snapshot->project->atlas_count;
     snapshot->revision = tp_model_revision(session->model);
     snapshot->admission_sequence = session->admission_sequence;
     snapshot->model_generation = session->model_generation;
@@ -140,7 +149,7 @@ tp_status tp_session_snapshot_create(const tp_session *session,
 
 static tp_status snapshot_materialize(tp_session_snapshot *snapshot,
                                       tp_error *err) {
-    tp_project *project = snapshot->project;
+    const tp_project *project = snapshot->project;
     if (project->atlas_count > 0) {
         snapshot->atlases = (tp_snapshot_atlas_storage *)snapshot_calloc(
             (size_t)project->atlas_count, sizeof *snapshot->atlases);
@@ -308,8 +317,15 @@ tp_status tp_session_snapshot_load(const char *path,
         tp_project_destroy(project);
         return tp_error_set(err, TP_STATUS_OOM, "snapshot allocation failed");
     }
-    snapshot->project = project;
-    snapshot->atlas_count = project->atlas_count;
+    snapshot->generation = tp_project_generation_create_owned(project);
+    if (!snapshot->generation) {
+        tp_project_destroy(project);
+        free(snapshot);
+        return tp_error_set(err, TP_STATUS_OOM,
+                            "snapshot project generation allocation failed");
+    }
+    snapshot->project = tp_project_generation_project(snapshot->generation);
+    snapshot->atlas_count = snapshot->project->atlas_count;
     snapshot->recovery_healthy = true;
     snapshot->identity.kind = TP_IDENTITY_SAVED;
     (void)snprintf(snapshot->identity.canonical_path,
@@ -339,7 +355,7 @@ void tp_session_snapshot_destroy(tp_session_snapshot *snapshot) {
         }
     }
     free(snapshot->atlases);
-    tp_project_destroy(snapshot->project);
+    tp_project_generation_release(snapshot->generation);
     free(snapshot);
 }
 

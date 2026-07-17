@@ -2,7 +2,8 @@
  * Per-op before/after capture. As the commit applies each op to
  * the transactional clone, we snapshot the touched entity's before (pre-apply) and
  * after (post-apply) state + ordering position -- the compact semantic diff, keyed by
- * effect class (C0-02 §6). capture_before also fixes the entry's shape + addressing
+ * the decision 0012 effect classes. capture_before also fixes the entry's shape +
+ * addressing
  * ids; capture_after fills the created/after data. Either may allocate; on OOM the
  * caller frees the entry and fails the whole commit (model byte-unchanged).
  *

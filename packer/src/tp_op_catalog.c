@@ -5,7 +5,7 @@
  *
  * Every current ntpacker mutation verb appears in the cli_verb column (a compound
  * verb -- `sprite set`, `new` -- names the verb whose canonical lowering is that
- * single op; see docs/decisions and C0-02-contract.md §1). Reserved rows
+ * single op; see decision 0010 §1). Reserved rows
  * (cli_verb == NULL) are spec-listed ops with no current verb. There is
  * deliberately NO raw field-patch escape hatch (§6.2).
  */

@@ -1,6 +1,6 @@
-/* F1-01 Part C (low-level): deterministic legacy synthetic-ID assigner promoted
- * from the accepted C0-01 spike. Golden default-hash vectors (identical to the
- * spike: same "lid1" tag + kind bytes), stability across repeated loads, kind
+/* F1-01 Part C (low-level): deterministic legacy synthetic-ID assigner.
+ * Golden default-hash vectors (same "lid1" tag + kind bytes), stability across
+ * repeated loads, kind
  * sensitivity, and a forced-collision seam proving the bounded salt sweep is
  * itself deterministic and reports exhaustion as a structured tp_status. */
 

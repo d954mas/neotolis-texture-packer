@@ -3,13 +3,13 @@
 **Дата:** 2026-07-12
 **Статус:** accepted
 **Принял:** lead (делегировано owner), после проверки engine
-**Реализуется в:** C0-01 (master spec §5.3, §59 item 8)
+**Реализовано в:** `tp_srckey` (`packer/src/tp_srckey.c`; master spec §5.3, §59 item 8)
 
 ## Решение
 
 Для NFC-нормализации persistent source-local keys вендорим utf8proc
-(MIT, фиксированная версия) в наш репозиторий (`packer/deps/` или `deps/`),
-точная версия/commit фиксируется в C0-01 contract note.
+(MIT, фиксированная версия) в наш репозиторий (`packer/deps/`);
+точная версия и per-file checksums фиксируются в `packer/deps/utf8proc/VENDOR.md`.
 
 ## Контекст
 

@@ -1,7 +1,7 @@
-/* F1-00 task 5: C0-01 canonical-path fixtures ported into production tp_core.
+/* F1-00 task 5: canonical-path fixtures for production tp_core.
  * These are LEXICAL-DETERMINISTIC vectors: the host rule set is a parameter on
  * the internal core, so BOTH the POSIX and Windows contracts run on every CI OS
- * -- no platform-specific golden output (the C0-01 property is preserved). The
+ * -- no platform-specific golden output. The
  * public native-host wrappers are covered too. The realpath (filesystem) half is
  * exercised separately in test_identity_session.c. */
 

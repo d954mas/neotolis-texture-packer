@@ -16,6 +16,7 @@
 #include "tp_session_layout.h"
 #include "tp_job_owner_internal.h"
 #include "tp_model_seam.h"
+#include "tp_project_internal.h"
 #include "tp_project_mutation_internal.h"
 
 // #region gate & recovery health
@@ -120,8 +121,9 @@ static void publish_event(tp_session *session, tp_session_event_kind kind,
 // #endregion
 
 // #region lifetime
-tp_status tp_session_adopt_owned(tp_project *project, const tp_rng *rng, tp_session **out,
-                                 tp_error *err) {
+static tp_status session_adopt_owned(tp_project *project, const tp_rng *rng,
+                                     bool migrate_sprite_refs,
+                                     tp_session **out, tp_error *err) {
     if (!project || !rng || !rng->fill || !out) {
         tp_project_destroy(project);
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
@@ -133,6 +135,13 @@ tp_status tp_session_adopt_owned(tp_project *project, const tp_rng *rng, tp_sess
     if (status != TP_STATUS_OK) {
         tp_project_destroy(project);
         return status;
+    }
+    if (migrate_sprite_refs) {
+        status = tp_project_migrate_sprite_refs(project, err);
+        if (status != TP_STATUS_OK) {
+            tp_project_destroy(project);
+            return status;
+        }
     }
 
     tp_session *session = (tp_session *)calloc(1, sizeof *session);
@@ -169,6 +178,11 @@ tp_status tp_session_adopt_owned(tp_project *project, const tp_rng *rng, tp_sess
     session->recovery_healthy = true;
     *out = session;
     return TP_STATUS_OK;
+}
+
+tp_status tp_session_adopt_owned(tp_project *project, const tp_rng *rng,
+                                 tp_session **out, tp_error *err) {
+    return session_adopt_owned(project, rng, false, out, err);
 }
 
 tp_status tp_session_create(const tp_rng *rng, tp_session **out, tp_error *err) {
@@ -254,14 +268,8 @@ tp_status tp_session_open(const char *path, const tp_rng *rng,
                             "project changed while it was opened");
     }
     tp_session *session = NULL;
-    status = tp_session_adopt_owned(project, rng, &session, err);
+    status = session_adopt_owned(project, rng, true, &session, err);
     if (status != TP_STATUS_OK) {
-        tp_project_lease_release(lease);
-        return status;
-    }
-    status = tp_model__migrate_sprite_refs(session->model, err);
-    if (status != TP_STATUS_OK) {
-        tp_session_destroy(session);
         tp_project_lease_release(lease);
         return status;
     }
@@ -558,40 +566,30 @@ static tp_status save_as_locked(tp_session *session, const char *path,
             return status;
         }
     }
-    tp_project *save_project = tp_model_project(session->model);
-    tp_project *migrated = NULL;
-    if (tp_project_has_pending_sprite_refs(save_project)) {
-        migrated = tp_project_clone(save_project);
-        if (!migrated) {
-            if (destination_lease != session->project_lease) {
-                tp_project_lease_release(destination_lease);
-            }
-            return tp_error_set(err, TP_STATUS_OOM,
-                                "legacy reference migration clone failed");
+    tp_project *candidate = tp_project_clone(tp_model_project(session->model));
+    if (!candidate) {
+        if (destination_lease != session->project_lease) {
+            tp_project_lease_release(destination_lease);
         }
-        status = tp_project_migrate_sprite_refs(migrated, err);
-        if (status != TP_STATUS_OK) {
-            tp_project_destroy(migrated);
-            if (destination_lease != session->project_lease) {
-                tp_project_lease_release(destination_lease);
-            }
-            return status;
+        return tp_error_set(err, TP_STATUS_OOM,
+                            "save candidate clone failed");
+    }
+    status = tp_project_migrate_sprite_refs(candidate, err);
+    if (status != TP_STATUS_OK) {
+        tp_project_destroy(candidate);
+        if (destination_lease != session->project_lease) {
+            tp_project_lease_release(destination_lease);
         }
-        save_project = migrated;
+        return status;
     }
     tp_id128 fingerprint;
-    status = create_only
-                 ? tp_project_save_new_with_fingerprint(save_project, canonical,
-                                                        &fingerprint, err)
-                 : same_identity
-                       ? tp_project_save_if_unchanged(
-                             save_project, canonical,
-                             &session->saved_file_fingerprint,
-                             &fingerprint, err)
-                       : tp_project_save_with_fingerprint(
-                             save_project, canonical, &fingerprint, err);
+    const tp_id128 *expected_fingerprint =
+        same_identity ? &session->saved_file_fingerprint : NULL;
+    status = tp_project_save_candidate_with_fingerprint(
+        candidate, canonical, expected_fingerprint, create_only,
+        &fingerprint, err);
     if (status != TP_STATUS_OK) {
-        tp_project_destroy(migrated);
+        tp_project_destroy(candidate);
         if (destination_lease != session->project_lease) {
             tp_project_lease_release(destination_lease);
         }
@@ -623,9 +621,7 @@ static tp_status save_as_locked(tp_session *session, const char *path,
             session->recovery_healthy = false;
         }
     }
-    if (migrated) {
-        tp_model__adopt_project(session->model, migrated);
-    }
+    tp_model__adopt_project(session->model, candidate);
     tp_project_lease *old_lease = session->project_lease;
     session->identity = next_identity;
     session->project_lease = destination_lease;
@@ -704,37 +700,30 @@ tp_status tp_session_save_detached_recovery(
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "session is not an active detached recovery session");
     }
+    session->admission_sequence++;
     char canonical[TP_IDENTITY_PATH_MAX];
     tp_status status = tp_identity_project_path_canonical(
         path, canonical, sizeof canonical, err);
     if (status == TP_STATUS_OK) {
-        tp_project *save_project = tp_model_project(session->model);
-        tp_project *migrated = NULL;
-        if (tp_project_has_pending_sprite_refs(save_project)) {
-            migrated = tp_project_clone(save_project);
-            status = migrated
-                         ? tp_project_migrate_sprite_refs(migrated, err)
-                         : tp_error_set(err, TP_STATUS_OOM,
-                                        "legacy reference migration clone failed");
-            if (status == TP_STATUS_OK) {
-                save_project = migrated;
-            }
+        tp_project *candidate = tp_project_clone(
+            tp_model_project(session->model));
+        if (!candidate) {
+            status = tp_error_set(err, TP_STATUS_OOM,
+                                  "save candidate clone failed");
+        } else {
+            status = tp_project_migrate_sprite_refs(candidate, err);
         }
         tp_id128 fingerprint;
         if (status == TP_STATUS_OK) {
-            status = expected_fingerprint
-                         ? tp_project_save_if_unchanged(save_project, canonical,
-                                                        expected_fingerprint,
-                                                        &fingerprint, err)
-                         : tp_project_save_with_fingerprint(save_project, canonical,
-                                                            &fingerprint, err);
+            status = tp_project_save_candidate_with_fingerprint(
+                candidate, canonical, expected_fingerprint, false,
+                &fingerprint, err);
         }
         if (status == TP_STATUS_OK) {
-            if (migrated) {
-                tp_model__adopt_project(session->model, migrated);
-                migrated = NULL;
-            }
+            tp_model__adopt_project(session->model, candidate);
+            candidate = NULL;
             tp_model_mark_saved(session->model);
+            session->model_generation++;
             result->saved = true;
             (void)snprintf(result->target_path, sizeof result->target_path,
                            "%s", canonical);
@@ -742,7 +731,7 @@ tp_status tp_session_save_detached_recovery(
             result->recovery_token = session->recovery_token;
             result->has_recovery_token = true;
         }
-        tp_project_destroy(migrated);
+        tp_project_destroy(candidate);
     }
     gate_unlock(session);
     return status;

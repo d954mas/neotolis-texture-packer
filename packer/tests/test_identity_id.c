@@ -1,6 +1,6 @@
 /* F1-00 task 2: 128-bit runtime ID generation via an injectable RNG seam
- * (fixed / short-read / failure seams -> structured tp_status, never abort),
- * promoted from the accepted C0-01 tp_c0_id contract. Deterministic. */
+ * (fixed / short-read / failure seams -> structured tp_status, never abort).
+ * Deterministic. */
 
 #include "tp_core/tp_id.h"
 #include "tp_hex.h" /* shared lowercase-hex encoder -- same code production uses (drift guard) */

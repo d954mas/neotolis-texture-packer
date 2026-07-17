@@ -1879,9 +1879,23 @@ static int tp_publish_new_file(const char *from, const char *to) {
 }
 #endif
 
-static tp_status tp_project_save_stage(tp_project *p, const char *path, tp_id128 *out_fingerprint,
+typedef struct tp_save_path_restore_entry {
+    char **slot;
+    char *original;
+} tp_save_path_restore_entry;
+
+typedef struct tp_save_path_restore {
+    tp_save_path_restore_entry *entries;
+    size_t count;
+    size_t capacity;
+} tp_save_path_restore;
+
+static tp_status tp_project_save_stage(tp_project *p, const char *path,
+                                       tp_id128 *out_fingerprint,
                                        const tp_id128 *expected_fingerprint,
-                                       bool create_only, tp_error *err) {
+                                       bool create_only,
+                                       tp_save_path_restore *restore,
+                                       tp_error *err) {
     if (out_fingerprint) {
         memset(out_fingerprint, 0, sizeof *out_fingerprint);
     }
@@ -1932,8 +1946,21 @@ static tp_status tp_project_save_stage(tp_project *p, const char *path, tp_id128
             if (!copy) {
                 return tp_error_set(err, TP_STATUS_OOM, "tp_project_save: out of memory");
             }
-            free(a->sources[si].path);
-            a->sources[si].path = copy;
+            if (restore) {
+                if (restore->count >= restore->capacity) {
+                    free(copy);
+                    return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                                        "tp_project_save: source restore capacity overflow");
+                }
+                tp_save_path_restore_entry *entry =
+                    &restore->entries[restore->count++];
+                entry->slot = &a->sources[si].path;
+                entry->original = a->sources[si].path;
+                a->sources[si].path = copy;
+            } else {
+                free(a->sources[si].path);
+                a->sources[si].path = copy;
+            }
         }
     }
 
@@ -2095,12 +2122,52 @@ static tp_status tp_project_save_staged(tp_project *p, const char *path, tp_id12
         return tp_error_set(err, TP_STATUS_OOM, "tp_project_save: could not stage project paths");
     }
     tp_status st = tp_project_save_stage(stage, path, out_fingerprint,
-                                         expected_fingerprint, create_only, err);
+                                         expected_fingerprint, create_only,
+                                         NULL, err);
     if (st == TP_STATUS_OK) {
         tp_project_adopt_saved_dir(p, stage);
     }
     tp_project_destroy(stage);
     return st;
+}
+
+tp_status tp_project_save_candidate_with_fingerprint(
+    tp_project *candidate, const char *path,
+    const tp_id128 *expected_fingerprint, bool create_only,
+    tp_id128 *out_fingerprint, tp_error *err) {
+    if (!candidate || !path) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "tp_project_save: NULL candidate or path");
+    }
+    size_t source_count = 0U;
+    for (int ai = 0; ai < candidate->atlas_count; ++ai) {
+        const int count = candidate->atlases[ai].source_count;
+        if (count < 0 || (size_t)count > SIZE_MAX - source_count) {
+            return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                                "tp_project_save: source restore count overflow");
+        }
+        source_count += (size_t)count;
+    }
+    tp_save_path_restore restore = {0};
+    if (source_count > 0U) {
+        restore.entries = calloc(source_count, sizeof *restore.entries);
+        if (!restore.entries) {
+            return tp_error_set(err, TP_STATUS_OOM,
+                                "tp_project_save: source restore allocation failed");
+        }
+        restore.capacity = source_count;
+    }
+    const tp_status status = tp_project_save_stage(
+        candidate, path, out_fingerprint, expected_fingerprint, create_only,
+        &restore, err);
+    for (size_t i = 0U; i < restore.count; ++i) {
+        tp_save_path_restore_entry *entry = &restore.entries[i];
+        char *normalized = *entry->slot;
+        *entry->slot = entry->original;
+        free(normalized);
+    }
+    free(restore.entries);
+    return status;
 }
 
 tp_status tp_project_save_with_fingerprint(tp_project *p, const char *path, tp_id128 *out_fingerprint,

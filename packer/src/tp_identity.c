@@ -22,9 +22,8 @@
 #endif
 
 /* ======================================================================== */
-/* (a) LEXICAL canonicalization. Host-parameterized so both rule sets run   */
-/*     on every OS in the production tests; the spike's tp_c0_detail tokens  */
-/*     become tp_status.                                                    */
+/* (a) LEXICAL canonicalization. Host-parameterized so both rule sets run */
+/*     on every OS in the production tests and report tp_status errors.   */
 /* ======================================================================== */
 
 tp_host tp_host_native(void) {

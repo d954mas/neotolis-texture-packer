@@ -1179,7 +1179,6 @@ static bool recovery_max_op_density_baseline_create(const fixture *f,
     char *snapshot = NULL;
     size_t snapshot_len = 0U;
     tp_project *expected_project = NULL;
-    tp_model *expected_model = NULL;
     tp_operation *operations = NULL;
     char *payload = NULL;
     tp_journal *journal = NULL;
@@ -1189,22 +1188,19 @@ static bool recovery_max_op_density_baseline_create(const fixture *f,
     if (tp_project_save_buffer(f->project, &snapshot, &snapshot_len, &err) != TP_STATUS_OK) {
         goto cleanup;
     }
-    stage = "clone_model";
+    stage = "clone_project";
     expected_project = tp_project_clone(f->project);
-    expected_model = expected_project ? tp_model_wrap(expected_project) : NULL;
-    if (!expected_model) {
-        tp_project_destroy(expected_project);
-        expected_project = NULL;
+    if (!expected_project) {
         goto cleanup;
     }
-    expected_project = NULL; /* owned by expected_model */
 
     stage = "allocate_operations";
     operations = (tp_operation *)calloc((size_t)TP_TXN_MAX_OPS, sizeof *operations);
     if (!operations) {
         goto cleanup;
     }
-    const tp_id128 atlas_id = tp_model_project(expected_model)->atlases[f->spec.atlases - 1].id;
+    const tp_id128 atlas_id =
+        expected_project->atlases[f->spec.atlases - 1].id;
     for (int i = 0; i < TP_TXN_MAX_OPS; ++i) {
         operations[i].kind = TP_OP_ATLAS_RENAME;
         operations[i].atlas_id = atlas_id;
@@ -1235,11 +1231,11 @@ static bool recovery_max_op_density_baseline_create(const fixture *f,
     }
     tp_txn_request_free(decoded);
 
-    stage = "apply_expected_model";
+    stage = "apply_expected_project";
     for (int i = 0; i < TP_TXN_MAX_OPS; ++i) {
         tp_op_reject reject;
         memset(&reject, 0, sizeof reject);
-        if (tp_operation_apply(tp_model_project(expected_model), &operations[i], &reject) !=
+        if (tp_operation_apply(expected_project, &operations[i], &reject) !=
             TP_STATUS_OK) {
             goto cleanup;
         }
@@ -1284,14 +1280,13 @@ static bool recovery_max_op_density_baseline_create(const fixture *f,
     out->record_count = record_count;
     out->operations_per_payload = TP_TXN_MAX_OPS;
     out->total_frame_count = (size_t)record_count + 1U;
-    out->expected_identity = tp_semantic_identity(tp_model_project(expected_model));
+    out->expected_identity = tp_semantic_identity(expected_project);
     ok = out->byte_count <= (size_t)TP_JOURNAL_MAX_FILE_BYTES;
 
 cleanup:
     tp_journal_destroy(journal);
     free(payload);
     free(operations);
-    tp_model_destroy(expected_model);
     tp_project_destroy(expected_project);
     free(snapshot);
     if (!ok) {
@@ -1654,6 +1649,23 @@ static bool checkpoint_roundtrip_identity(const tp_project *project,
     return true;
 }
 
+static tp_status save_model_candidate(tp_model *model, const char *path,
+                                      tp_error *err) {
+    tp_project *candidate = tp_project_clone(tp_model_project(model));
+    if (!candidate) {
+        return tp_error_set(err, TP_STATUS_OOM,
+                            "benchmark save candidate clone failed");
+    }
+    const tp_status status = tp_project_save_candidate_with_fingerprint(
+        candidate, path, NULL, false, NULL, err);
+    if (status != TP_STATUS_OK) {
+        tp_project_destroy(candidate);
+        return status;
+    }
+    tp_model__adopt_project(model, candidate);
+    return TP_STATUS_OK;
+}
+
 static bool bench_save(const fixture *f, const char *scratch, int warmups, int iterations) {
     tp_bench_samples samples;
     tp_bench_samples_init(&samples);
@@ -1676,7 +1688,7 @@ static bool bench_save(const fixture *f, const char *scratch, int warmups, int i
         }
         tp_error err = {{0}};
         double start = tp_bench_now_ms();
-        tp_status status = tp_project_save(tp_model_project(model), save_path, &err);
+        tp_status status = save_model_candidate(model, save_path, &err);
         if (status == TP_STATUS_OK) {
             tp_model_mark_saved(model);
             status = tp_model_compact_journal(model, &err);

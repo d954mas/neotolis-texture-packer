@@ -11,7 +11,6 @@
 **Реализуется в:** F2-02 (`tp_transaction` в core: `tp_project_clone.c`, `tp_semantic.c`,
 `tp_txn_idset.c`, `tp_txn_apply.c`, `tp_txn_parse.c`, `tp_txn_lower.c`, `tp_txn_encode.c`;
 public header `tp_core/tp_transaction.h`; `tp_project_clone` в `tp_project.h`).
-Промоут принятого C0-02 spike (`tp_c0_txn` / `tp_c0_semantic` / `tp_c0_ack`).
 Master spec §7–8, §9.1, §59 items 12–19. Plan F2-02 (строки 395–420).
 
 ## Область: что F2-02 РЕАЛЬНО поставляет (groundwork) vs что переносится в F2-03/04/05
@@ -102,8 +101,7 @@ status), эхнутая в `tp_txn_result`. НЕ per-op inverse diffs.
   **order-normalized** через КОММУТАТИВНУЮ 128-bit сумму per-element хешей (allocation-free,
   no sort, no XOR-cancellation — каждый элемент несёт свой уникальный id). Единственное
   исключение — animation `frames`: порядок СЕМАНТИЧЕН (playback), кадры фолдятся в array-order.
-- **Source `kind` (осознанная минорная дивергенция от C0-02-таблицы):** C0-02 semantic-таблица
-  перечисляет `{source_id, key}`; я ДОПОЛНИТЕЛЬНО фолжу `kind` (folder/file). Обоснование: kind
+- **Source `kind`:** semantic identity включает `{source_id, key, kind}`. Обоснование: kind
   — persistent сериализуемый content, чья смена меняет packing и (для missing source) sprite-id
   derivation; over-detect (лишний dirty) — БЕЗОПАСНОЕ направление ошибки (никогда не заявить
   clean при изменённом content). ← **точка подтверждения владельцем.**
@@ -130,9 +128,9 @@ range-checked ±2^53, unknown envelope/transaction key); (2) **idempotency** (se
 malformed `*_id`) — collect-all в стабильном порядке (op_index asc, потом field order);
 (5) lower в typed `tp_operation`; (6) atomic commit на клоне.
 
-**Дивергенция от C0-02 static-table spike (осознанная, документирована):** spike собирал ВСЕ
-per-op semantic-фолты против СТАТИЧЕСКОЙ entity-таблицы. Реальный batch имеет intra-batch
-зависимости (op0 создаёт atlas, op1 в него добавляет). Поэтому:
+**Shape collect-all vs semantic apply-on-clone:** сбор всех semantic-фолтов против
+начальной статической entity-таблицы ломает реальные intra-batch зависимости
+(op0 создаёт atlas, op1 в него добавляет). Поэтому:
 - **Shape-фолты** (model-НЕЗАВИСИМые: unknown op/field, malformed id) — collect-all ДО apply.
 - **Semantic-фолты** (model-ЗАВИСИМые: dangling id, range, name-collision) — валидируются
   против ПРОГРЕССИВНО-применяемого КЛОНА (через `tp_operation_apply`, который validate→apply),
@@ -144,7 +142,7 @@ PIN: `test_json_structural_fail_fast`, `test_json_revision_short_circuit_alone`,
 
 ### 7. JSON-контракт: dynamic storage, UB-free числа, unknown-field REJECT
 - Versioned envelope, `schema=1` — единственная принимаемая версия. **Dynamic storage**: НЕТ
-  фиксированных мелких op/error-капов spike’а (`TP_C0_MAX_OPS`=32) — большие batch’и («100
+  фиксированных мелких op/error-капов — большие batch’и («100
   анимаций в одной транзакции») поддержаны.
 - **Byte-stable canonical encode**: ключи по возрастанию, discriminator (`schema`/`op`) первым,
   2-space/LF/trailing-newline, integral через **PRId64** (без decimal point), fractional `%.9g`
@@ -222,8 +220,8 @@ PIN: `test_json_structural_fail_fast`, `test_json_revision_short_circuit_alone`,
 ## Что должен подтвердить владелец
 1. **Atomicity-механизм = clone** (§1): провабельно атомарен, reuse F2-01, не тащит F2-03
    inverse; цена — deep-copy на транзакцию. Ок как v1?
-2. **Source `kind` в semantic identity** (§4): консервативный superset над C0-02-таблицей
-   `{source_id, key}`. Приемлемо (over-detect как безопасное направление)?
+2. **Source `kind` в semantic identity** (§4): identity включает
+   `{source_id, key, kind}`. Приемлемо (over-detect как безопасное направление)?
 3. **Два новых status-токена** `revision_conflict`/`invalid_revision` (§8); idempotency
    переиспользует `duplicate_id`.
 4. **Semantic-фолты валидируются first-op-wins на клоне, не collect-all** (§6) — необходимая

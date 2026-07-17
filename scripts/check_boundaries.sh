@@ -386,7 +386,7 @@ fi
 #     review tag. Bans the bracketed fix/review markers, R5b-x phase labels, Fx-xx
 #     phase tags (incl. suffixed F2-05b-ii-A forms), and the Dx: crash-diagnostic
 #     comment prefix. Spec/decision references are deliberately NOT matched: a bare
-#     "§7.2", "decision 0012", or section-qualified "C0-02 §4" is permitted and must
+#     "§7.2" or section-qualified "decision 0011 §4" is permitted and must
 #     survive. The Fx-xx alternative omits a trailing \b so a reintroduced F2-05a /
 #     F2-05b-i variant is still caught; the Dx: alternative excludes a leading letter
 #     or '%' so "%H:%M:%S" strftime and "PATH:" are not flagged. Test/bench/selftest
@@ -416,7 +416,7 @@ if printf '%s\n' \
     '    const char *k = "PATH:";' \
     '/* selector resolution (master spec §7.2) */' \
     '/* dedup pending (decision 0012 §6); never merge */' \
-    '/* order rule (C0-02 §4): id-keyed collections */' |
+    '/* order rule (decision 0011 §4): id-keyed collections */' |
     grep -qE "$_comment_tags"; then
     hit "R17-selftest" "R17 detector false-positives on legitimate suffix/strftime/PATH/section-reference content"
 fi
@@ -443,7 +443,8 @@ tp_op_internal          tp_op_catalog|tp_op_validate|tp_op_apply|tp_op_build|tp_
 tp_encode_internal      tp_op_encode|tp_txn_encode|tp_txn_apply
 tp_journal_internal     tp_journal|tp_journal_io|tp_history|tp_txn_apply|tp_recovery
 tp_idset_internal       tp_idset|tp_txn_idset|tp_journal|tp_txn_apply
-tp_project_internal     tp_project|tp_project_migrate|tp_history|tp_txn_apply
+tp_project_internal     tp_project|tp_project_migrate|tp_history|tp_session|tp_txn_apply
+tp_project_generation_internal tp_project_generation|tp_session_snapshot|tp_txn_apply
 tp_project_mutation_internal tp_project|tp_diff_entity|tp_diff_apply|tp_diff_capture|tp_export_run|tp_input|tp_op_apply|tp_op_validate|tp_session|tp_session_snapshot
 tp_txn_internal         tp_txn_apply|tp_txn_parse|tp_txn_encode|tp_txn_idset|tp_txn_lower|tp_project_clone|tp_history
 tp_model_seam           tp_session|tp_session_snapshot|tp_recovery|tp_txn_internal|tp_txn_apply|tp_txn_parse|tp_txn_encode|tp_txn_idset|tp_txn_lower|tp_project_clone|tp_history
@@ -586,6 +587,56 @@ fi
 if printf 'tp_project *tp_model_project_view(tp_model *model);\n' |
     grep -qE "$_public_model_project"; then
     hit "R19-selftest" "R19 detector false-positives on a distinct symbol"
+fi
+
+# 20. The model project seam is an immutable borrowed view. Production code may
+#     clone that view for a private candidate, but may not bind it as mutable or
+#     cast const away. The C type system catches ordinary direct calls to mutable
+#     APIs; this source gate pins the seam declaration and blocks explicit escape
+#     hatches before they become an ownership convention.
+_mutable_model_project_scan() {
+    awk '
+        {
+            line = $0
+            sub(/\/\/.*/, "", line)
+            if (line !~ /tp_model_project[[:space:]]*\(/) next
+            mutable_binding = line ~ /tp_project[[:space:]]*\*[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=[[:space:]]*tp_model_project[[:space:]]*\(/
+            const_binding = line ~ /const[[:space:]]+tp_project[[:space:]]*\*[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=[[:space:]]*tp_model_project[[:space:]]*\(/
+            cast_away_const = line ~ /\([[:space:]]*tp_project[[:space:]]*\*[[:space:]]*\)[[:space:]]*tp_model_project[[:space:]]*\(/
+            if ((mutable_binding && !const_binding) || cast_away_const) {
+                printf "%s:%d:%s\n", FILENAME, FNR, $0
+            }
+        }
+    ' "$@" 2>/dev/null
+}
+
+_const_model_project_decl='^[[:space:]]*const[[:space:]]+tp_project[[:space:]]*\*[[:space:]]*tp_model_project[[:space:]]*\([[:space:]]*const[[:space:]]+tp_model[[:space:]]*\*[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\)[[:space:]]*;'
+if ! grep -qE "$_const_model_project_decl" packer/src/tp_model_seam.h; then
+    hit "R20 const model project seam" "tp_model_seam.h must expose tp_model_project as a const project view of a const model"
+fi
+
+r20=$(_mutable_model_project_scan $(shipping_srcs))
+[ -n "$r20" ] && hit "R20 mutable model project consumer" "$r20"
+
+_r20_dir=$(mktemp -d 2>/dev/null)
+if [ -z "$_r20_dir" ] || [ ! -d "$_r20_dir" ]; then
+    hit "R20-selftest" "R20 self-test could not create a scratch dir (mktemp failed)"
+else
+    trap 'rm -rf "$_r20_dir"' EXIT
+    printf 'tp_project *p = tp_model_project(model);\n' >"$_r20_dir/mutable.c"
+    printf 'tp_project *p = (tp_project *)tp_model_project(model);\n' >"$_r20_dir/cast.c"
+    printf 'const tp_project *p = tp_model_project(model);\n' >"$_r20_dir/const.c"
+    printf 'tp_project *p = tp_project_clone(tp_model_project(model));\n' >"$_r20_dir/clone.c"
+    [ -z "$(_mutable_model_project_scan "$_r20_dir/mutable.c")" ] &&
+        hit "R20-selftest" "R20 failed to catch a mutable model-project binding"
+    [ -z "$(_mutable_model_project_scan "$_r20_dir/cast.c")" ] &&
+        hit "R20-selftest" "R20 failed to catch a const-removing model-project cast"
+    [ -n "$(_mutable_model_project_scan "$_r20_dir/const.c")" ] &&
+        hit "R20-selftest" "R20 false-positives on a const model-project binding"
+    [ -n "$(_mutable_model_project_scan "$_r20_dir/clone.c")" ] &&
+        hit "R20-selftest" "R20 false-positives on a private candidate clone"
+    rm -rf "$_r20_dir"
+    trap - EXIT
 fi
 
 if [ "$fail" -eq 0 ]; then

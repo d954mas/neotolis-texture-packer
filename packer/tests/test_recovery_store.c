@@ -27,6 +27,7 @@
 #include "tp_core/tp_transaction.h"
 #include "tp_journal_internal.h"
 #include "tp_model_seam.h"
+#include "tp_project_internal.h"
 #include "tp_recovery_internal.h"
 #include "unity.h"
 
@@ -317,8 +318,26 @@ static tp_model *create_model(void) {
     return model;
 }
 
+static tp_status save_model_candidate_with_fingerprint(
+    tp_model *model, const char *path, tp_id128 *out_fingerprint,
+    tp_error *err) {
+    tp_project *candidate = tp_project_clone(tp_model_project(model));
+    if (!candidate) {
+        return tp_error_set(err, TP_STATUS_OOM,
+                            "model save candidate clone failed");
+    }
+    const tp_status status = tp_project_save_candidate_with_fingerprint(
+        candidate, path, NULL, false, out_fingerprint, err);
+    if (status != TP_STATUS_OK) {
+        tp_project_destroy(candidate);
+        return status;
+    }
+    tp_model__adopt_project(model, candidate);
+    return TP_STATUS_OK;
+}
+
 static void commit_recovery_fixture_change(tp_model *model) {
-    tp_project *project = tp_model_project(model);
+    const tp_project *project = tp_model_project(model);
     TEST_ASSERT_NOT_NULL(project);
     TEST_ASSERT_GREATER_THAN_INT(0, project->atlas_count);
 
@@ -1047,9 +1066,8 @@ void test_save_original_requires_lease_and_exact_fingerprint(void) {
     tp_id128 baseline;
     tp_error err = {{0}};
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_project_save_with_fingerprint(
-                              tp_model_project(original_model), original,
-                              &baseline, &err));
+                          save_model_candidate_with_fingerprint(
+                              original_model, original, &baseline, &err));
 
     tp_recovery_store *store = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
@@ -1090,9 +1108,8 @@ void test_save_original_requires_lease_and_exact_fingerprint(void) {
 
     tp_id128 restored;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_project_save_with_fingerprint(
-                              tp_model_project(original_model), original,
-                              &restored, &err));
+                          save_model_candidate_with_fingerprint(
+                              original_model, original, &restored, &err));
     TEST_ASSERT_TRUE(tp_id128_eq(baseline, restored));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_recovery_resolution_save_original(

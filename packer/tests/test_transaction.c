@@ -601,10 +601,12 @@ static tp_status commit_numbered_change(tp_model *model, unsigned id_value,
 }
 
 void test_idempotency_retention_window_evicts_fifo(void) {
-    tp_model *model = tp_model_create();
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    project->atlases[0].id = tp_test_id_of(0x77);
+    project->atlases[0].id_synthetic = false;
+    tp_model *model = tp_model_wrap(project);
     TEST_ASSERT_NOT_NULL(model);
-    tp_model_project(model)->atlases[0].id = tp_test_id_of(0x77);
-    tp_model_project(model)->atlases[0].id_synthetic = false;
     tp_txn_result result;
     tp_error err = {0};
 

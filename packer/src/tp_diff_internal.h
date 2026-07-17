@@ -31,7 +31,8 @@ typedef enum tp_diff_coll {
 } tp_diff_coll;
 
 /* ---- per-op diff shape (drives capture + inverse/redo) ------------------- *
- * Grouped by C0-02 §6 effect class. Only the shape's own fields are populated per
+ * Grouped by decision 0012 effect class. Only the shape's own fields are
+ * populated per
  * entry; every other owned pointer stays NULL so tp_diff_op_free is a safe no-op on
  * it (the tp_operation_free pattern). */
 typedef enum tp_diff_shape {

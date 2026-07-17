@@ -61,6 +61,7 @@ void tp_session__test_reset_snapshot_allocations(void);
 size_t tp_session__test_snapshot_allocation_count(void);
 size_t tp_session__test_snapshot_allocation_bytes(void);
 void tp_session__test_fail_snapshot_allocation_after(size_t successful);
+void tp_session__test_fail_next_generation_owner_allocation(void);
 
 /* Recovery orchestration uses this only to complete the ownership transfer on
  * an attach error: accepted live handles remain session-owned even degraded. */

@@ -36,7 +36,7 @@ typedef enum tp_host {
 tp_host tp_host_native(void);
 
 /* Lexically canonicalize an ABSOLUTE project path under `host` (touches no
- * filesystem). Promoted from tp_c0_project_path_canonical, tp_status errors:
+ * filesystem). Implements master spec §5.1 and decision 0006; tp_status errors:
  *   - not absolute        -> TP_STATUS_PATH_NOT_ABSOLUTE
  *   - Windows "C:foo"     -> TP_STATUS_PATH_DRIVE_RELATIVE
  *   - malformed UNC       -> TP_STATUS_PATH_BAD_UNC
@@ -51,7 +51,7 @@ tp_status tp_path_canonical_lexical(const char *input, tp_host host, char *out, 
  * POSIX byte-exact; Windows folds ASCII case. */
 bool tp_path_equal_host(const char *canon_a, const char *canon_b, tp_host host);
 
-/* ----- tiny ASCII + path-component helpers (promoted from tp_c0_lex.h) ---- */
+/* ----- tiny ASCII + path-component helpers ------------------------------- */
 
 static inline bool tp_ident_is_alpha(char c) {
     return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');

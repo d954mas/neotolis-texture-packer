@@ -11,7 +11,8 @@
  *
  * INVERSE REPRESENTATION -- state-capture, not inverse-operations (docs/decisions/0012):
  * each op's diff records the touched entity's before/after DATA + position (the
- * C0-02 §6 shapes: CREATE=after entity+position, REMOVE=before entity+position,
+ * decision 0012 state-capture shapes: CREATE=after entity+position,
+ * REMOVE=before entity+position,
  * MOVE=from/to index, SET=before/after field values); a dedicated diff-apply
  * restores the data directly. This is byte-exact under the array-order-sensitive
  * serializer (which the append-only op catalog cannot invert positionally) and

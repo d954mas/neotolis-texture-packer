@@ -35,8 +35,8 @@ target_compile_options(tp_test_id PRIVATE -U_DLL)
 nt_set_warning_flags(tp_test_id)   # AGENTS.md invariant: our test TUs too
 add_test(NAME tp_id COMMAND tp_test_id)
 
-# F1-02: source-key normalization / case-fold collision / portability validation,
-# promoted from the C0-01 srckey spike onto the production tp_status model.
+# F1-02: source-key normalization / case-fold collision / portability validation
+# against the production tp_status model and master spec §5.3.
 add_executable(tp_test_srckey test_srckey.c)
 target_link_libraries(tp_test_srckey PRIVATE tp_core unity)
 target_compile_options(tp_test_srckey PRIVATE -U_DLL)
@@ -203,7 +203,7 @@ target_compile_options(tp_test_migrate PRIVATE -U_DLL)
 nt_set_warning_flags(tp_test_migrate)   # AGENTS.md invariant: our test TUs too
 add_test(NAME tp_migrate COMMAND tp_test_migrate)
 
-# F1-00 project identity: LEXICAL canonical-path fixtures (C0-01 corpus ported).
+# F1-00 project identity: LEXICAL canonical-path fixtures.
 # Includes the src-only internal header so BOTH host rule sets run on every CI OS.
 add_executable(tp_test_identity_path test_identity_path.c)
 target_link_libraries(tp_test_identity_path PRIVATE tp_core unity)
@@ -405,11 +405,11 @@ file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_export_defold_test")
 add_test(NAME tp_export_defold
     COMMAND tp_test_export_defold "${CMAKE_BINARY_DIR}/tp_export_defold_test" "${CMAKE_SOURCE_DIR}/examples/defold-demo")
 
-# C0-03 task 6: raw-RGBA ownership regression. Drives nt_builder_atlas_add_raw
+# Raw-RGBA ownership regression. Drives nt_builder_atlas_add_raw
 # directly (links tp_build), mutates+frees the caller buffer immediately after the
 # add, packs, and asserts the packed page is unaffected -> the builder deep-copies
 # (nt_builder_atlas.c:771-775). Pins a lifetime the public header does not promise
-# (see packer/spike/c0/upstream-issue-raw-lifetime.md). Needs a scratch dir.
+# (see docs/research/neotolis-engine-raw-rgba-lifetime.md). Needs a scratch dir.
 add_executable(tp_test_raw_ownership test_raw_ownership.c)
 target_link_libraries(tp_test_raw_ownership PRIVATE tp_build unity)
 target_compile_options(tp_test_raw_ownership PRIVATE -U_DLL)

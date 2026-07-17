@@ -1,6 +1,5 @@
-/* F1-02: production source-key normalization + portability validation, promoted
- * from the accepted C0-01 srckey spike (packer/spike/c0/tests/test_c0_srckey.c)
- * onto the tp_status model. Separators ('/' and '\\'), '.'/repeated-sep collapse,
+/* F1-02: production source-key normalization + portability validation on the
+ * tp_status model. Separators ('/' and '\\'), '.'/repeated-sep collapse,
  * '..' reject, absolute reject, Unicode NFC (composed/decomposed equivalence),
  * preserved case, Windows reserved names / invalid chars / trailing dot-space,
  * and Unicode case-fold collision detection (incl. the ss/ss fold of "straße"

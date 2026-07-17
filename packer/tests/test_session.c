@@ -26,6 +26,7 @@
 #include "tp_project_mutation_internal.h"
 #include "tp_recovery_internal.h"
 #include "tp_session_internal.h"
+#include "tp_txn_internal.h"
 #include "unity.h"
 
 static const char *g_scratch = NULL;
@@ -523,6 +524,154 @@ void test_owned_snapshot_survives_later_commit(void) {
     tp_session_destroy(session);
 }
 
+void test_snapshot_creation_does_not_clone_and_same_generation_shares_project(void) {
+    tp_session *session = make_session();
+    tp_error err = {{0}};
+    tp_session_snapshot *first = NULL;
+    tp_session_snapshot *second = NULL;
+
+    /* Snapshot admission must retain the committed generation, not deep-clone it. */
+    tp_project__test_set_clone_alloc_fail(0);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_snapshot_create(session, &first, &err));
+    TEST_ASSERT_EQUAL_INT(0, tp_project__test_clone_alloc_count());
+
+    tp_project__test_set_clone_alloc_fail(0);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_snapshot_create(session, &second, &err));
+    TEST_ASSERT_EQUAL_INT(0, tp_project__test_clone_alloc_count());
+    TEST_ASSERT_EQUAL_PTR(tp_session_snapshot_project_internal(first),
+                          tp_session_snapshot_project_internal(second));
+
+    tp_session_snapshot_destroy(second);
+    tp_session_snapshot_destroy(first);
+    tp_session_destroy(session);
+    tp_project__test_set_clone_alloc_fail(-1);
+}
+
+void test_snapshot_survives_session_destroy(void) {
+    tp_session *session = make_session();
+    tp_error err = {{0}};
+    tp_session_snapshot *snapshot = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_snapshot_create(session, &snapshot, &err));
+    const tp_id128 identity = tp_session_snapshot_semantic_identity(snapshot);
+
+    tp_session_destroy(session);
+
+    TEST_ASSERT_EQUAL_INT(1, tp_session_snapshot_atlas_count(snapshot));
+    TEST_ASSERT_TRUE(tp_id128_eq(identity,
+                                 tp_session_snapshot_semantic_identity(snapshot)));
+    char *serialized = NULL;
+    size_t serialized_len = 0U;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_snapshot_serialize(snapshot, &serialized,
+                                                        &serialized_len, &err));
+    TEST_ASSERT_GREATER_THAN_size_t(0U, serialized_len);
+    free(serialized);
+    tp_session_snapshot_destroy(snapshot);
+}
+
+void test_generation_owner_oom_is_structured_and_retryable(void) {
+    tp_session *session = make_session();
+    tp_error err = {{0}};
+    tp_session_snapshot *snapshot = (tp_session_snapshot *)(uintptr_t)1U;
+    tp_session__test_fail_next_generation_owner_allocation();
+
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OOM,
+                          tp_session_snapshot_create(session, &snapshot, &err));
+    TEST_ASSERT_NULL(snapshot);
+    TEST_ASSERT_NOT_EQUAL('\0', err.msg[0]);
+    TEST_ASSERT_EQUAL_INT64(0, tp_session_revision(session));
+
+    memset(&err, 0, sizeof err);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_snapshot_create(session, &snapshot, &err));
+    TEST_ASSERT_NOT_NULL(snapshot);
+    tp_session_snapshot_destroy(snapshot);
+    tp_session_destroy(session);
+}
+
+void test_save_as_does_not_mutate_held_snapshot_project_dir(void) {
+    char path[1024];
+    (void)snprintf(path, sizeof path,
+                   "%s/tp_session_generation_save_as.ntpacker_project",
+                   g_scratch);
+    (void)remove(path);
+    tp_session *session = make_session();
+    tp_error err = {{0}};
+    tp_session_snapshot *before = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_snapshot_create(session, &before, &err));
+    TEST_ASSERT_EQUAL_STRING("", tp_session_snapshot_project_dir(before));
+
+    tp_session_save_result result = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_save_as(session, path, &result, &err));
+    TEST_ASSERT_TRUE(result.saved);
+    TEST_ASSERT_EQUAL_STRING("", tp_session_snapshot_project_dir(before));
+
+    tp_session_snapshot *after = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_snapshot_create(session, &after, &err));
+    TEST_ASSERT_NOT_EQUAL(0, tp_session_snapshot_project_dir(after)[0]);
+    TEST_ASSERT_NOT_EQUAL(tp_session_snapshot_project_internal(before),
+                          tp_session_snapshot_project_internal(after));
+
+    tp_session_snapshot_destroy(after);
+    tp_session_snapshot_destroy(before);
+    tp_session_destroy(session);
+    (void)remove(path);
+}
+
+void test_detached_recovery_save_publishes_new_model_generation(void) {
+    char path[1024];
+    (void)snprintf(path, sizeof path,
+                   "%s/tp_session_detached_generation.ntpacker_project",
+                   g_scratch);
+    (void)remove(path);
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    uint8_t seed = 73U;
+    tp_rng rng = {deterministic_fill, &seed};
+    const tp_id128 recovery_token = recovery_key();
+    tp_error err = {{0}};
+    tp_session *session = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_create_detached_recovery(project, &rng, recovery_token,
+                                            &session, &err));
+    tp_session_snapshot *before = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_snapshot_create(session, &before, &err));
+    TEST_ASSERT_EQUAL_UINT64(0U,
+                             tp_session_snapshot_model_generation(before));
+    TEST_ASSERT_EQUAL_STRING("", tp_session_snapshot_project_dir(before));
+
+    tp_session_save_result result = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_save_detached_recovery(session, path, NULL, &result, &err));
+    TEST_ASSERT_TRUE(result.saved);
+
+    tp_session_snapshot *after = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_snapshot_create(session, &after, &err));
+    TEST_ASSERT_EQUAL_UINT64(1U,
+                             tp_session_snapshot_model_generation(after));
+    TEST_ASSERT_EQUAL_UINT64(1U,
+                             tp_session_snapshot_admission_sequence(after));
+    TEST_ASSERT_EQUAL_STRING("", tp_session_snapshot_project_dir(before));
+    TEST_ASSERT_NOT_EQUAL(0, tp_session_snapshot_project_dir(after)[0]);
+    TEST_ASSERT_NOT_EQUAL(tp_session_snapshot_project_internal(before),
+                          tp_session_snapshot_project_internal(after));
+
+    tp_session_snapshot_destroy(after);
+    tp_session_snapshot_destroy(before);
+    tp_session_destroy(session);
+    (void)remove(path);
+}
+
 void test_rejected_commit_does_not_publish_event_or_generation(void) {
     tp_session *session = make_session();
     tp_error err;
@@ -623,6 +772,21 @@ void test_undo_redo_are_session_commands_with_ordered_events(void) {
     TEST_ASSERT_EQUAL_INT64(2, events[1].revision_after);
     TEST_ASSERT_EQUAL_INT64(2, events[2].revision_before);
     TEST_ASSERT_EQUAL_INT64(3, events[2].revision_after);
+
+    /* Every retained generation remains immutable after later history swaps. */
+    TEST_ASSERT_EQUAL_STRING("atlas1",
+                             tp_session_snapshot_atlas_by_id(initial,
+                                                             atlas->id)->name);
+    TEST_ASSERT_EQUAL_STRING("atlas1",
+                             tp_session_snapshot_atlas_by_id(undone,
+                                                             atlas->id)->name);
+    TEST_ASSERT_EQUAL_STRING("renamed",
+                             tp_session_snapshot_atlas_by_id(redone,
+                                                             atlas->id)->name);
+    TEST_ASSERT_NOT_EQUAL(tp_session_snapshot_project_internal(initial),
+                          tp_session_snapshot_project_internal(undone));
+    TEST_ASSERT_NOT_EQUAL(tp_session_snapshot_project_internal(undone),
+                          tp_session_snapshot_project_internal(redone));
 
     tp_session_snapshot_destroy(redone);
     tp_session_snapshot_destroy(undone);
@@ -1787,6 +1951,9 @@ int main(int argc, char **argv) {
     g_scratch = argv[1];
     UNITY_BEGIN();
     RUN_TEST(test_snapshot_allocation_failures_return_structured_oom);
+    RUN_TEST(test_snapshot_creation_does_not_clone_and_same_generation_shares_project);
+    RUN_TEST(test_snapshot_survives_session_destroy);
+    RUN_TEST(test_generation_owner_oom_is_structured_and_retryable);
     RUN_TEST(test_owned_snapshot_survives_later_commit);
     RUN_TEST(test_read_snapshot_load_keeps_legacy_ids_stable);
     RUN_TEST(test_writable_open_save_preserves_missing_legacy_orphan_until_unique_return);
@@ -1798,6 +1965,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_journal_append_failure_publishes_nothing);
     RUN_TEST(test_source_invalidation_is_runtime_only_and_event_window_resyncs);
     RUN_TEST(test_save_as_and_open_are_session_owned_commands);
+    RUN_TEST(test_save_as_does_not_mutate_held_snapshot_project_dir);
+    RUN_TEST(test_detached_recovery_save_publishes_new_model_generation);
     RUN_TEST(test_snapshot_has_id_addressed_nested_dtos);
     RUN_TEST(test_snapshot_resolves_source_by_direct_indices);
     RUN_TEST(test_snapshot_selector_uses_canonical_ambiguity_and_atlas_scope);

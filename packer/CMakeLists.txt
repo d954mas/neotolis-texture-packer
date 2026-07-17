@@ -31,7 +31,7 @@ add_library(tp_core STATIC
     src/tp_idset.c
     src/tp_project_clone.c src/tp_semantic.c src/tp_txn_idset.c src/tp_txn_apply.c
     # Synchronous orchestration and the owned immutable snapshot boundary.
-    src/tp_session.c src/tp_session_snapshot.c
+    src/tp_session.c src/tp_session_snapshot.c src/tp_project_generation.c
     src/tp_txn_parse.c src/tp_txn_lower.c src/tp_txn_encode.c
     # Semantic diff, exact inverse/redo, and bounded in-memory history.
     src/tp_diff_entity.c src/tp_diff_capture.c src/tp_diff_apply.c src/tp_history.c
@@ -90,11 +90,6 @@ target_compile_definitions(tp_build PRIVATE _CRT_SECURE_NO_WARNINGS)
 target_compile_options(tp_build PRIVATE -U_DLL)   # static CRT: match nt_builder (see apps/smoke)
 nt_set_warning_flags(tp_build)
 nt_set_sanitizer_flags(tp_build)
-
-# The C0-01 contract-spike primitives (tp_c0). Depends on tp_core's interface
-# includes + utf8proc (added above). Spike-only: not linked into apps, no on-disk
-# schema change.
-add_subdirectory(spike/c0)
 
 enable_testing()
 add_subdirectory(tests)

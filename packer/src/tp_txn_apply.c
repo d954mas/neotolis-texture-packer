@@ -33,6 +33,7 @@
 #include "tp_journal_internal.h" /* poison the journal from the recovery glue */
 #include "tp_model_seam.h"
 #include "tp_op_internal.h"
+#include "tp_project_generation_internal.h"
 #include "tp_project_internal.h"
 #include "tp_txn_internal.h"
 
@@ -77,7 +78,11 @@ void tp_model_destroy(tp_model *m) {
     }
     tp_history_destroy(m->history); /* NULL-safe when history was never enabled */
     tp_journal_destroy(m->journal); /* NULL-safe when no journal was attached */
-    tp_project_destroy(m->project);
+    if (m->generation) {
+        tp_project_generation_release(m->generation);
+    } else {
+        tp_project_destroy(m->project);
+    }
     if (m->idstore) {
         if (m->owns_idstore && m->idstore->destroy) {
             m->idstore->destroy(m->idstore->ctx);
@@ -87,7 +92,9 @@ void tp_model_destroy(tp_model *m) {
     free(m);
 }
 
-tp_project *tp_model_project(tp_model *m) { return m ? m->project : NULL; }
+const tp_project *tp_model_project(const tp_model *m) {
+    return m ? m->project : NULL;
+}
 tp_journal *tp_model_journal(tp_model *m) { return m ? m->journal : NULL; }
 int64_t tp_model_revision(const tp_model *m) { return m ? m->revision : 0; }
 
@@ -97,21 +104,44 @@ void tp_model__test_set_revision(tp_model *m, int64_t revision) {
     }
 }
 
-void tp_model__adopt_project(tp_model *model, tp_project *project) {
+void tp_model__replace_owned_project(tp_model *model, tp_project *project) {
     if (!model || !project || model->project == project) {
         return;
     }
     tp_project *old = model->project;
+    tp_project_generation *old_generation = model->generation;
     model->project = project;
-    tp_project_destroy(old);
+    model->generation = NULL;
+    if (old_generation) {
+        tp_project_generation_release(old_generation);
+    } else {
+        tp_project_destroy(old);
+    }
 }
 
-tp_status tp_model__migrate_sprite_refs(tp_model *model, tp_error *error) {
-    if (!model) {
+void tp_model__adopt_project(tp_model *model, tp_project *project) {
+    tp_model__replace_owned_project(model, project);
+}
+
+tp_status tp_model__retain_project_generation(
+    tp_model *model, tp_project_generation **out, tp_error *error) {
+    if (!model || !out) {
         return tp_error_set(error, TP_STATUS_INVALID_ARGUMENT,
-                            "model is required for reference migration");
+                            "model generation requires model and output");
     }
-    return tp_project_migrate_sprite_refs(model->project, error);
+    *out = NULL;
+    if (!model->generation) {
+        tp_project_generation *generation =
+            tp_project_generation_create_owned(model->project);
+        if (!generation) {
+            return tp_error_set(error, TP_STATUS_OOM,
+                                "project generation allocation failed");
+        }
+        model->generation = generation;
+    }
+    tp_project_generation_retain(model->generation);
+    *out = model->generation;
+    return TP_STATUS_OK;
 }
 
 bool tp_model_dirty(const tp_model *m) {
@@ -707,8 +737,7 @@ tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_tx
     free(payload);
 
     /* The commit: allocation-free pointer swap + one revision bump. */
-    tp_project_destroy(m->project);
-    m->project = clone;
+    tp_model__replace_owned_project(m, clone);
     m->revision = next_revision;
 
     /* Push the diff (allocation-free): records the produced revision + discards any

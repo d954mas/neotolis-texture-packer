@@ -4,7 +4,8 @@
  * (tp_txn_request_decode, tp_model_apply_json). cJSON is a PRIVATE dep confined to
  * this TU + tp_txn_lower.c + tp_txn_json.h.
  *
- * VALIDATION ORDER (C0-02 §5, pinned): (1) structural decode -- envelope faults fail
+ * VALIDATION ORDER (decision 0011 §6, pinned): (1) structural decode -- envelope
+ * faults fail
  * fast and alone (bad JSON, bad/absent schema, bad version, missing/typed field, bad
  * 32-hex id, a number outside the +/-2^53 range-checked converter, an unknown
  * envelope/transaction key); (2) idempotency -- a re-submitted committed id rejects;

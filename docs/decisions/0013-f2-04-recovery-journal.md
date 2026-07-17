@@ -16,8 +16,8 @@ B1-02; full-snapshot Undo/Redo cost and compaction work are now routed to P-UNDO
 `tp_model` + acknowledgement-gate в `tp_txn_apply.c`; coordinator-интерфейс + model↔journal glue в
 `tp_core/tp_transaction.h`; новый статус `TP_STATUS_JOURNAL_FAILED`). Master spec §7.1–7.2, §22.3,
 §44.2–44.4, §59 items 19/46–49/52. Plan F2-04 (строки 449–476). Строится на F2-02/F2-03
-(decisions 0011/0012: `tp_model` / clone-swap commit / `tp_project_save_buffer`/`load_buffer`) и
-на принятом C0-03 journal-spike (`packer/spike/c0/…journal…`, reference, НЕ линкуется).
+(decisions 0011/0012: `tp_model` / clone-swap commit / `tp_project_save_buffer`/`load_buffer`);
+production journal framing и recovery закреплены в `packer/tests/test_journal.c`.
 
 ## Область: что F2-04 РЕАЛЬНО поставляет (groundwork) vs что отложено
 

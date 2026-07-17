@@ -1333,7 +1333,7 @@ static void run_remove_oracle(tp_op_kind kind, tp_id128 anim_id, int frame_or_po
     tp_model *m = tp_model_wrap(make_maximal());
     TEST_ASSERT_NOT_NULL(m);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_enable_history(m));
-    tp_project_atlas *a = &tp_model_project(m)->atlases[0];
+    const tp_project_atlas *a = &tp_model_project(m)->atlases[0];
     tp_operation op;
     memset(&op, 0, sizeof op);
     op.kind = kind;

@@ -77,7 +77,7 @@ enum не сдвигается). То есть on-disk вокабуляр ста
 идентичен F1-01 (source-записи ничего не добавляют) — существующие golden не
 меняются.
 
-### 4. Валидация источников (§5.6, промоут C0-01 `tp_srckey`)
+### 4. Валидация источников (§5.6, production `tp_srckey`)
 
 `tp_srckey_normalize/casefold/collides/portability` подняты в production
 (`packer/src/tp_srckey.c`, tp_status-модель). `validate` (cli) добавляет

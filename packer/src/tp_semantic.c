@@ -1,6 +1,7 @@
 /*
  * Semantic-state identity, computed SEPARATELY from the revision
- * counter (master spec §8, C0-02 §4). `dirty = current identity != saved-baseline
+ * counter (master spec §8, decision 0011 §4).
+ * `dirty = current identity != saved-baseline
  * identity` -- NOT derived from the revision number, so applying the inverse of an
  * edit returns to clean even at a higher revision, and "mark saved" re-baselines
  * without changing revision.
@@ -21,7 +22,8 @@
  * pixels, thumbnails, GUI view state + s_model_ver, the project file PATH (identity
  * key, not content), and schema_version (serialization envelope).
  *
- * ORDER RULE (C0-02 §4): ID-keyed collections (atlases/sources/sprites/animations/
+ * ORDER RULE (decision 0011 §4): ID-keyed collections
+ * (atlases/sources/sprites/animations/
  * targets) are ORDER-NORMALIZED -- their per-element hashes are combined with a
  * COMMUTATIVE 128-bit sum, so a reorder does not change identity. The sole exception
  * is an animation's `frames`, whose order IS semantic (playback order): frames fold

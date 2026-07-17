@@ -78,4 +78,13 @@ tp_status tp_project_checkpoint_save_buffer(const tp_project *p, char **out,
 tp_status tp_project_checkpoint_serialized_size_bounded(
     const tp_project *p, size_t limit, size_t *out_len, tp_error *err);
 
+/* Publishes an already-cloned private model candidate without cloning it again.
+ * Serialization temporarily relativizes source paths, then restores their live
+ * spellings before returning. On success the candidate retains the new saved
+ * directory state and is ready for an allocation-free model pointer swap. */
+tp_status tp_project_save_candidate_with_fingerprint(
+    tp_project *candidate, const char *path,
+    const tp_id128 *expected_fingerprint, bool create_only,
+    tp_id128 *out_fingerprint, tp_error *err);
+
 #endif
