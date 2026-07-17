@@ -932,7 +932,8 @@ bool tp_session_can_undo(const tp_session *session) {
         return false;
     }
     gate_lock(session);
-    const bool can_undo = tp_model_can_undo(session->model);
+    const bool can_undo = !session->discarded && recovery_is_healthy(session) &&
+                          tp_model_can_undo(session->model);
     gate_unlock(session);
     return can_undo;
 }
@@ -942,7 +943,8 @@ bool tp_session_can_redo(const tp_session *session) {
         return false;
     }
     gate_lock(session);
-    const bool can_redo = tp_model_can_redo(session->model);
+    const bool can_redo = !session->discarded && recovery_is_healthy(session) &&
+                          tp_model_can_redo(session->model);
     gate_unlock(session);
     return can_redo;
 }

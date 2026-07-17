@@ -564,6 +564,7 @@ void test_undo_redo_are_session_commands_with_ordered_events(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_apply(session, &req, &result, &err));
     tp_txn_result_free(&result);
     tp_operation_free(&op);
+    TEST_ASSERT_TRUE(tp_session_can_undo(session));
 
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_undo(session, &err));
     tp_session_snapshot *undone = NULL;
@@ -730,7 +731,11 @@ void test_save_as_and_open_are_session_owned_commands(void) {
     TEST_ASSERT_EQUAL_UINT64(2, tp_session_snapshot_model_generation(saved));
     TEST_ASSERT_EQUAL_INT(TP_IDENTITY_SAVED, tp_session_snapshot_identity(saved).kind);
 
+    TEST_ASSERT_TRUE(tp_session_recovery_available(session));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_discard(session, &err));
+    TEST_ASSERT_TRUE(tp_session_recovery_available(session));
+    TEST_ASSERT_FALSE(tp_session_can_undo(session));
+    TEST_ASSERT_FALSE(tp_session_can_redo(session));
     tp_session_snapshot_destroy(saved);
     tp_session_snapshot_destroy(initial);
     tp_session_destroy(session);
@@ -1647,14 +1652,28 @@ void test_required_recovery_blocks_apply_undo_redo_without_journal(void) {
     tp_operation_free(&committed);
     TEST_ASSERT_EQUAL_INT64(1, tp_session_revision(session));
 
+    tp_operation committed_again = rename_op(atlas_id, "before-required-recovery-2");
+    request.ops = &committed_again;
+    request.expected_revision = 1;
+    memcpy(request.id_hex, "10000000000000000000000000000082", 33U);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_apply(session, &request, &result, &err));
+    tp_operation_free(&committed_again);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_undo(session, &err));
+    TEST_ASSERT_TRUE(tp_session_can_undo(session));
+    TEST_ASSERT_TRUE(tp_session_can_redo(session));
+    TEST_ASSERT_EQUAL_INT64(3, tp_session_revision(session));
+
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_session_require_recovery(session, &err));
     TEST_ASSERT_FALSE(tp_session_recovery_available(session));
+    TEST_ASSERT_FALSE(tp_session_can_undo(session));
+    TEST_ASSERT_FALSE(tp_session_can_redo(session));
 
     tp_operation rejected = rename_op(atlas_id, "must-not-commit");
     request.ops = &rejected;
-    request.expected_revision = 1;
-    memcpy(request.id_hex, "10000000000000000000000000000082", 33U);
+    request.expected_revision = 3;
+    memcpy(request.id_hex, "10000000000000000000000000000083", 33U);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED,
                           tp_session_apply(session, &request, &result, &err));
     tp_operation_free(&rejected);
@@ -1662,7 +1681,7 @@ void test_required_recovery_blocks_apply_undo_redo_without_journal(void) {
                           tp_session_undo(session, &err));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED,
                           tp_session_redo(session, &err));
-    TEST_ASSERT_EQUAL_INT64(1, tp_session_revision(session));
+    TEST_ASSERT_EQUAL_INT64(3, tp_session_revision(session));
     tp_session_destroy(session);
 }
 

@@ -1747,7 +1747,10 @@ bool gui_project_anim_move_frame(const gui_animation_ref *animation,
 
 // #region undo / redo (F2-03 diff history)
 /* A pending buffered edit counts as undoable (undo flushes it into a step, then reverts it). */
-bool gui_project_can_undo(void) { return s_pending_valid || tp_session_can_undo(s_session); }
+bool gui_project_can_undo(void) {
+    return tp_session_recovery_available(s_session) &&
+           (s_pending_valid || tp_session_can_undo(s_session));
+}
 bool gui_project_can_redo(void) { return tp_session_can_redo(s_session); }
 int gui_project_undo_depth(void) { return tp_session_undo_depth(s_session); }
 int gui_project_redo_depth(void) { return tp_session_redo_depth(s_session); }
