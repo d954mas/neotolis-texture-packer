@@ -456,13 +456,6 @@ tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_tx
         return tp_error_set(err, TP_STATUS_OOM, "transaction request serialization failed");
     }
     payload_len = payload ? strlen(payload) : 0U;
-    if (payload && payload_len > (size_t)TP_TXN_MAX_REQUEST_BYTES) {
-        tp_txn__commit_reject(out, NULL, NULL, NULL, payload, m->revision, -1, TP_STATUS_OUT_OF_BOUNDS,
-                              "request", "canonical transaction request exceeds the byte limit");
-        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
-                            "canonical transaction request has %zu bytes; maximum is %u", payload_len,
-                            (unsigned)TP_TXN_MAX_REQUEST_BYTES);
-    }
     tp_project *clone = tp_project_clone(m->project);
     if (!clone) {
         tp_txn__commit_reject(out, NULL, NULL, NULL, payload, m->revision, -1, TP_STATUS_OOM, "",
