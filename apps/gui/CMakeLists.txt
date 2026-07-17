@@ -124,7 +124,7 @@ set_tests_properties(tp_gui_rows_complexity PROPERTIES
     TIMEOUT 180
     LABELS "benchmark;gui")
 
-# M1 contract probe: the production GUI atlas-rename adapter must admit the
+# Contract probe: the production GUI atlas-rename adapter must admit the
 # canonical transaction through tp_session and read the result from one owned
 # snapshot. Headless: no window, renderer, dialogs, or GUI globals.
 add_executable(tp_test_gui_session_adapter test_gui_session_adapter.c gui_session_adapter.c)
@@ -173,7 +173,7 @@ nt_set_warning_flags(tp_test_gui_canonical_identity)
 nt_set_sanitizer_flags(tp_test_gui_canonical_identity)
 add_test(NAME tp_gui_canonical_identity COMMAND tp_test_gui_canonical_identity)
 
-# M5 capability/parity corpus. The second adapter is intentionally test-only:
+# Capability/parity corpus. The second adapter is intentionally test-only:
 # it calls tp_session directly and proves the future transport host needs no
 # duplicate mutable session wrapper.
 add_executable(tp_test_client_parity test_client_parity.c gui_session_adapter.c)

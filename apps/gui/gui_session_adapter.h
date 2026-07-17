@@ -6,9 +6,8 @@
 #include "tp_core/tp_session.h"
 #include "tp_core/tp_operation.h"
 
-/* Thin GUI intent adapter for the first M1 cutover family. Atlas indexes are
- * resolved against an owned snapshot before the canonical ID transaction is
- * admitted. The adapter never owns or exposes a model/project pointer. */
+/* Thin stable-ID -> typed-operation -> session adapter for GUI mutations.
+ * It never owns or exposes a model/project pointer. */
 tp_status gui_session_rename_atlas(tp_session *session, tp_id128 atlas_id,
                                    int64_t expected_revision, const char *name,
                                    const char *transaction_id,

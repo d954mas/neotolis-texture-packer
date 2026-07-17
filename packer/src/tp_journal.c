@@ -147,7 +147,7 @@ struct tp_journal {
     size_t replay_count; /* TXN record refs after the latest durable checkpoint */
     size_t replay_operations; /* decoded operations across those records */
     tp_idset ids;      /* retained-id index (shared set); mirrors the durable records */
-    /* R5a: cached project metadata (owned copies). Set by tp_journal_set_metadata and re-emitted by
+    /* Cached project metadata (owned copies). Set by tp_journal_set_metadata and re-emitted by
      * tp_journal_compact so it survives compaction. has_meta stays false until first set. */
     int64_t meta_time;
     char *meta_path;   /* owned; NULL until set (then never NULL, may be "") */
@@ -483,12 +483,8 @@ static tp_status write_record(tp_journal *j, const uint8_t *payload, size_t payl
     return TP_STATUS_OK;
 }
 
-/* R5a: durably append a META record built from the passed-in args (payload:
- * type(1)=3 | timestamp i64 | path_len u32 | path | name_len u32 | name -- all BE, no NUL on wire).
- * Takes explicit args (NOT j->meta_*) so a caller can write DURABLY BEFORE committing the cache
- * (finding [2]: set_metadata) and compaction can re-emit the cache (finding [0]). path/name may be
- * "" (never NULL from our callers; a NULL is defensively treated as ""). Reuses write_record so it
- * inherits the fail-closed / poison / rollback discipline. */
+/* META payload helpers take explicit values so normal writes and compaction share
+ * one sizing/encoding path. NULL path/name values encode as empty strings. */
 static tp_status metadata_payload_size(const char *path, const char *name,
                                        const tp_id128 *file_fingerprint,
                                        size_t *out, tp_error *err) {
@@ -742,7 +738,7 @@ tp_status tp_journal_compact(tp_journal *j, const uint8_t *snapshot, size_t len,
     if (limit != TP_STATUS_OK) {
         return limit;
     }
-    /* R3 (plan S18 R): compact the store to a SINGLE fresh checkpoint (Save-window reset).
+    /* Compact the store to a single fresh checkpoint (Save-window reset).
      * Truncate the BYTE STORE to 0 -- this physically removes the old checkpoint, every
      * post-checkpoint txn record, AND any mid-stream-corrupt record a prior recovery poisoned
      * against; nothing is left to hide behind, so a successful truncate clears the poison flag.
@@ -1032,7 +1028,7 @@ static tp_status decode_payload(const tp_idset *ids, const uint8_t *pl, size_t p
         return TP_STATUS_OK;
     }
     if (type == (uint8_t)TP_JRN_REC_META) {
-        /* R5a: a META record has no snapshot slice + registers no id; the walk parses its fields via
+        /* A META record has no snapshot slice and registers no id; the walk parses its fields via
          * parse_meta. Decoding here just accepts it as a well-formed (skippable) record so a CRC-valid
          * META interleaved with TXNs is not mistaken for corruption. */
         *snap_off = 0;
@@ -1042,7 +1038,7 @@ static tp_status decode_payload(const tp_idset *ids, const uint8_t *pl, size_t p
     return TP_STATUS_OUT_OF_BOUNDS; /* unknown record type => corruption */
 }
 
-/* R5a: classify the fixed header (magic + version), SHARED by recover + peek so both split BAD_MAGIC
+/* Classify the fixed header once for recover and peek so both split BAD_MAGIC
  * vs VERSION_MISMATCH identically. Returns true when the header is well-formed (caller may walk
  * records) and sets *version + *key (a 16-byte pointer into buf). Otherwise sets *status to the
  * classified failure (EMPTY / TRUNCATED torn-header / BAD_MAGIC / VERSION_MISMATCH) and returns false.
@@ -1081,7 +1077,7 @@ static bool header_ok(const uint8_t *buf, size_t len, tp_journal_recovery_status
  * payload). Shared by recover + peek. */
 typedef enum { TP_JRN_STOP_EOF, TP_JRN_STOP_INCOMPLETE, TP_JRN_STOP_CORRUPT } tp_jrn_stop;
 
-/* R5a: map a walk outcome to a recovery status, SHARED by recover + peek so both agree on
+/* Map a walk outcome to a recovery status so recover and peek agree on
  * OK/EMPTY/TRUNCATED/CORRUPT. `records` counts good CKPT/TXN records (META excluded); `more_after`
  * is true iff a CRC-valid record still follows the boundary (mid-stream corruption, not a tail). */
 static tp_journal_recovery_status classify_stop(tp_jrn_stop stop, int records, bool more_after) {
@@ -1136,7 +1132,7 @@ static tp_frame_status frame_parse_at(const uint8_t *buf, size_t len, size_t p, 
     return FRAME_OK;
 }
 
-/* P1-5 (plan S18 R): is there a CRC-valid record starting at any offset >= `from`? Recovery
+/* Is there a CRC-valid record starting at any offset >= `from`? Recovery
  * calls this at a framing/CRC boundary to decide truncate-vs-preserve: a valid record STILL
  * ahead => mid-stream corruption (a bloated length field, a lost sync-word, or a flipped
  * byte), so the file must be PRESERVED (truncating would delete the trailing acknowledged
@@ -1284,7 +1280,7 @@ void tp_journal__test_recovery_copy_stats(
     }
 }
 
-/* R5a fix [5]: per-record callback for the SHARED front-to-back walk. Invoked ONCE per good CKPT/TXN
+/* Per-record callback for the shared front-to-back walk. Invoked once per good CKPT/TXN
  * record (META is handled inside the walker, never dispatched here). It accumulates the type-specific
  * result (recover: base slice + ordered op-refs; peek: has_checkpoint). Returns TP_STATUS_OK, or
  * a hard resource status (refs OOM/count limit) which the walker propagates as an abort -- NOT a
@@ -1292,7 +1288,7 @@ void tp_journal__test_recovery_copy_stats(
 typedef tp_status (*tp_jrn_on_record)(void *ctx, uint8_t rtype, const uint8_t *buf, size_t payload_off,
                                       size_t snap_off, size_t snap_len, int64_t rev);
 
-/* R5a fix [5]: the SINGLE front-to-back frame walk driven by BOTH recover + peek so their status
+/* Single front-to-back frame walk shared by recover and peek so their status
  * classification can never diverge. For each frame: validate geometry (frame_parse_at); decode and
  * validate ids without publishing them; capture META (last-wins) into *meta + *has_meta;
  * and for each good CKPT/TXN record invoke on_record. Counts good CKPT/TXN records into *records (META
@@ -1388,7 +1384,7 @@ typedef struct {
     int64_t rev;
 } tp_recop_ref;
 
-/* R5a fix [5]: recover's on_record accumulator. A CKPT sets a fresh replay base + drops any prior
+/* Recovery accumulator. A checkpoint sets a fresh replay base and drops any prior
  * post-checkpoint op-refs (a checkpoint supersedes them); a TXN appends its op-payload slice (a realloc
  * OOM is a HARD fault the walker aborts on). */
 typedef struct {
@@ -1445,8 +1441,8 @@ tp_status tp_journal_recover(tp_journal *j, tp_journal_recovery *out, tp_error *
         return read_status;
     }
     out->bytes_total = len;
-    /* Recovery rebuilds BOTH in-memory caches from the store so a reused journal reflects ONLY what the
-     * store actually holds: the retained-id index AND (R5a fix [0]) the write-side metadata cache. Clearing
+    /* Recovery rebuilds both in-memory caches from the store so a reused journal reflects only what the
+     * store actually holds: the retained-id index and the write-side metadata cache. Clearing
      * the meta cache here -- symmetric with tp_idset_reset -- means recovering a metadata-LESS store on a
      * journal that once had set_metadata called drops the stale label instead of re-emitting a ghost label
      * (that it never stored) on the next compaction. The post-walk seed below repopulates it iff the store
@@ -1476,7 +1472,7 @@ tp_status tp_journal_recover(tp_journal *j, tp_journal_recovery *out, tp_error *
         return TP_STATUS_OK;
     }
 
-    /* R5a fix [5]: drive the SHARED front-to-back frame walk (identical to peek's) with recover's
+    /* Drive the shared front-to-back frame walk with recovery's
      * accumulator. It registers ids into j->ids, captures META into out->metadata (last-wins), and
      * feeds each good CKPT/TXN record to recover_on_record. `off`/`stop` mark where + why the walk
      * stopped; `last_rev`/`have_any` carry the FINAL recovered revision; a returned OOM is a hard fault. */
@@ -1508,7 +1504,7 @@ tp_status tp_journal_recover(tp_journal *j, tp_journal_recovery *out, tp_error *
     j->replay_count = wc.ref_count;
     j->record_count = frame_count;
 
-    /* P1-5 / C2: the truncate-vs-preserve decision reduces to ONE question -- is there a
+    /* The truncate-vs-preserve decision reduces to one question: is there a
      * CRC-valid record STILL after the boundary? (Scan from off+1 so the corrupt record at
      * off never self-matches.) If so the break is a MID-STREAM corruption -- a bloated length
      * field, a lost sync-word, or a flipped byte -- and truncating would delete the trailing
@@ -1560,15 +1556,8 @@ tp_status tp_journal_recover(tp_journal *j, tp_journal_recovery *out, tp_error *
         buf = NULL;
     }
 
-    /* R5a fix [1]: seed the journal's WRITE-side metadata cache from the recovered metadata so a later
-     * compaction (R3 Save / R4 undo) on THIS journal RE-EMITS it. Use INDEPENDENT copies (out->metadata's
-     * strings are freed separately by tp_journal_recovery_free). The cache was cleared up-front (above), so
-     * the no-metadata case needs no else. Non-fatal on OOM: the cache is informational, recovery must still
-     * succeed (has_meta simply stays false). Runs only on the SUCCESS path, so no double-free on any error path.
-     * NOTE: recovery consumers clone the recovered state
-     * and wraps a FRESH journal, discarding THIS seeded journal -- so R5b must carry out->metadata onto
-     * whatever journal it makes live for the recovered project (reuse this journal, OR call
-     * tp_journal_set_metadata on the fresh one). This seed is the correct core invariant either way. */
+    /* Seed the write-side metadata cache for later compaction. Copies are independent
+     * from the recovery result. OOM is non-fatal; recovery still succeeds without a cache. */
     if (out->has_metadata) {
         char *cp = jrn_strdup(out->metadata.path ? out->metadata.path : "");
         char *cn = jrn_strdup(out->metadata.name ? out->metadata.name : "");
@@ -1581,7 +1570,7 @@ tp_status tp_journal_recover(tp_journal *j, tp_journal_recovery *out, tp_error *
             j->meta_file_fingerprint = out->metadata.file_fingerprint;
             j->meta_has_file_fingerprint = out->metadata.has_file_fingerprint;
             j->has_meta = true;
-        } else { /* OOM: leave the cache untouched (has_meta stays false) -- informational only */
+        } else { /* Recovery stays valid; later compaction cannot re-emit metadata. */
             free(cp);
             free(cn);
         }
@@ -1592,7 +1581,7 @@ tp_status tp_journal_recover(tp_journal *j, tp_journal_recovery *out, tp_error *
     return TP_STATUS_OK;
 }
 
-/* ---- peek (R5a): header + metadata + status, no model reconstruction ------ */
+/* ---- peek: header + metadata + status, no model reconstruction ----------- */
 
 void tp_journal_peek_free(tp_journal_peek_result *r) {
     if (!r) {
@@ -1605,7 +1594,7 @@ void tp_journal_peek_free(tp_journal_peek_result *r) {
     r->has_meta = false;
 }
 
-/* R5a fix [5]: peek's on_record accumulator -- it only needs to note that a CKPT (a recoverable base)
+/* Peek accumulator: it only notes that a checkpoint (a recoverable base)
  * was seen; the walker itself counts records + captures META. Never returns OOM (no allocation). */
 typedef struct {
     bool has_checkpoint;

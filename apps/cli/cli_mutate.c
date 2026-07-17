@@ -1,4 +1,4 @@
-/* ntpacker mutation verbs (M5: thin CLI session cutover).
+/* ntpacker mutation verbs: thin file-oriented session adapter.
  *
  * Every mutating verb now BUILDS typed tp_operation(s) and commits them ATOMICALLY
  * through tp_session instead of hand-mutating tp_project fields. The CLI keeps
@@ -14,7 +14,7 @@
  * tp_session_open -> owned snapshot -> apply ONE transaction -> tp_session_save ->
  * destroy. The session owns locking, external-change detection, id promotion, and save.
  *
- * Exit-code split (agents branch on these; UNCHANGED from B4):
+ * Exit-code contract (agents branch on these):
  *   2 usage   : bad grammar/vocabulary/value BEFORE the model commits -- wrong arg
  *               count, unknown key, malformed key=value, a value core rejects as
  *               out-of-range, an unknown exporter id, a duplicate atlas/anim name.
