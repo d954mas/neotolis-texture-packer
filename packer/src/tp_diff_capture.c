@@ -16,6 +16,7 @@
 #include "tp_core/tp_operation.h"
 #include "tp_core/tp_project.h"
 #include "tp_diff_internal.h"
+#include "tp_project_mutation_internal.h"
 
 /* const-read lookups over the public (non-const) id accessors -- capture only
  * reads; the cast mirrors tp_op_validate.c's documented-safe pattern. */

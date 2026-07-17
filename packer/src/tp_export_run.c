@@ -12,6 +12,7 @@
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_input.h"
 #include "tp_core/tp_scan.h"
+#include "tp_project_mutation_internal.h"
 #include "tp_session_internal.h"
 
 #define TP_RUN_PATH_MAX TP_IDENTITY_PATH_MAX

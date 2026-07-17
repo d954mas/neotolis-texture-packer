@@ -18,6 +18,7 @@
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_srckey.h"
 #include "tp_op_internal.h"
+#include "tp_project_mutation_internal.h"
 #include "tp_source_plan_internal.h"
 #include "tp_strutil.h"
 

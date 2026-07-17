@@ -108,7 +108,9 @@ endif()
 # CTest enforces only correctness/count/complexity. Absolute timing is advisory.
 add_executable(tp_bench_gui_rows tp_bench_gui_rows.c gui_rows.c gui_scan.c)
 target_link_libraries(tp_bench_gui_rows PRIVATE tp_core nt_time nt_ui)
-target_include_directories(tp_bench_gui_rows PRIVATE "${CMAKE_SOURCE_DIR}/packer/tests")
+target_include_directories(tp_bench_gui_rows PRIVATE
+    "${CMAKE_SOURCE_DIR}/packer/tests"
+    "${CMAKE_SOURCE_DIR}/packer/src")
 target_compile_definitions(tp_bench_gui_rows PRIVATE
     NTPACKER_GUI_BENCH=1
     _CRT_SECURE_NO_WARNINGS

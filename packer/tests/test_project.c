@@ -37,6 +37,7 @@
 #include "tp_core/tp_project_migrate.h"
 #include "unity.h"
 #include "../src/tp_project_internal.h"
+#include "tp_project_mutation_internal.h"
 
 void setUp(void) {
     tp_project__test_serialization_stats_reset();
@@ -423,7 +424,7 @@ static tp_project *build_rich(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_source(hero, "art/enemies"));
 
     tp_project_sprite *sp = NULL;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_sprite(hero, "hero/walk_01", &sp));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_pending_sprite(hero, "hero/walk_01", &sp));
     sp->origin_x = 0.25F;
     sp->origin_y = 0.75F;
     sp->slice9_lrtb[0] = 4;
@@ -584,7 +585,7 @@ void test_sparse_defaults_absent(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_source(a, "art"));
 
     tp_project_sprite *sp = NULL; /* origin only -> slice9 stays default */
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_sprite(a, "s1", &sp));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_pending_sprite(a, "s1", &sp));
     sp->origin_x = 0.1F;
 
     tp_project_anim *an = NULL; /* default fps/playback/flips */
@@ -981,13 +982,13 @@ void test_mutation_helpers(void) {
     tp_project *p = tp_project_create();
     tp_project_atlas *a = tp_project_get_atlas(p, 0);
 
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_sprite(a, "dup", NULL));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_sprite(a, "dup", NULL)); /* idempotent */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_pending_sprite(a, "dup", NULL));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_pending_sprite(a, "dup", NULL)); /* idempotent */
     TEST_ASSERT_EQUAL_INT(1, a->sprite_count);
-    TEST_ASSERT_NOT_NULL(tp_project_atlas_find_sprite(a, "dup"));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_remove_sprite(a, "dup"));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS, tp_project_atlas_remove_sprite(a, "dup"));
-    TEST_ASSERT_NULL(tp_project_atlas_find_sprite(a, "dup"));
+    TEST_ASSERT_NOT_NULL(tp_project_atlas_find_pending_sprite(a, "dup"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_remove_pending_sprite(a, "dup"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS, tp_project_atlas_remove_pending_sprite(a, "dup"));
+    TEST_ASSERT_NULL(tp_project_atlas_find_pending_sprite(a, "dup"));
 
     int idx = 0;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_add_atlas(p, "extra", &idx));
@@ -1268,22 +1269,22 @@ void test_sprite_rename_override(void) {
     tp_project *p = tp_project_create();
     tp_project_atlas *a = tp_project_get_atlas(p, 0);
 
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_set_sprite_rename(a, "walk_01", "hero_walk"));
-    tp_project_sprite *s = tp_project_atlas_find_sprite(a, "walk_01");
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_set_pending_sprite_rename(a, "walk_01", "hero_walk"));
+    tp_project_sprite *s = tp_project_atlas_find_pending_sprite(a, "walk_01");
     TEST_ASSERT_NOT_NULL(s);
     TEST_ASSERT_EQUAL_STRING("hero_walk", s->rename);
     TEST_ASSERT_EQUAL_INT(1, a->sprite_count);
 
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_set_sprite_rename(a, "walk_01", NULL)); /* clears + drops */
-    TEST_ASSERT_NULL(tp_project_atlas_find_sprite(a, "walk_01"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_set_pending_sprite_rename(a, "walk_01", NULL)); /* clears + drops */
+    TEST_ASSERT_NULL(tp_project_atlas_find_pending_sprite(a, "walk_01"));
     TEST_ASSERT_EQUAL_INT(0, a->sprite_count);
 
     tp_project_sprite *sp = NULL;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_sprite(a, "walk_02", &sp));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_pending_sprite(a, "walk_02", &sp));
     sp->origin_x = 0.1F; /* non-default -> the entry survives a rename clear */
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_set_sprite_rename(a, "walk_02", "hero_walk2"));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_set_sprite_rename(a, "walk_02", ""));
-    sp = tp_project_atlas_find_sprite(a, "walk_02");
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_set_pending_sprite_rename(a, "walk_02", "hero_walk2"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_set_pending_sprite_rename(a, "walk_02", ""));
+    sp = tp_project_atlas_find_pending_sprite(a, "walk_02");
     TEST_ASSERT_NOT_NULL(sp);
     TEST_ASSERT_NULL(sp->rename);
 
@@ -1368,7 +1369,7 @@ void test_sprite_override_sparse(void) {
     tp_project *p = tp_project_create();
     tp_project_atlas *a = tp_project_get_atlas(p, 0);
     tp_project_sprite *sp = NULL;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_sprite(a, "s1", &sp));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_pending_sprite(a, "s1", &sp));
     /* defaults inherit -> all override keys absent */
     TEST_ASSERT_EQUAL_INT(TP_PROJECT_OV_INHERIT, sp->ov_shape);
     TEST_ASSERT_EQUAL_INT(TP_PROJECT_OV_INHERIT, sp->ov_extrude);
@@ -1388,7 +1389,7 @@ void test_sprite_override_sparse(void) {
 
     tp_project *loaded = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_load(path, &loaded, &err));
-    tp_project_sprite *ls = tp_project_atlas_find_sprite(tp_project_get_atlas(loaded, 0), "s1");
+    tp_project_sprite *ls = tp_project_atlas_find_pending_sprite(tp_project_get_atlas(loaded, 0), "s1");
     TEST_ASSERT_NOT_NULL(ls);
     TEST_ASSERT_EQUAL_INT(0, ls->ov_shape);
     TEST_ASSERT_EQUAL_INT(4, ls->ov_max_vertices);
@@ -1447,22 +1448,22 @@ void test_prune_sprite(void) {
     tp_project_atlas *a = tp_project_get_atlas(p, 0);
     tp_project_sprite *s = NULL;
 
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_sprite(a, "s1", &s));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_pending_sprite(a, "s1", &s));
     TEST_ASSERT_EQUAL_INT(1, a->sprite_count);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_prune_sprite(a, "s1")); /* all-default -> dropped */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_prune_pending_sprite(a, "s1")); /* all-default -> dropped */
     TEST_ASSERT_EQUAL_INT(0, a->sprite_count);
-    TEST_ASSERT_NULL(tp_project_atlas_find_sprite(a, "s1"));
+    TEST_ASSERT_NULL(tp_project_atlas_find_pending_sprite(a, "s1"));
 
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_prune_sprite(a, "absent")); /* no-op OK */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_prune_pending_sprite(a, "absent")); /* no-op OK */
 
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_sprite(a, "s2", &s));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_pending_sprite(a, "s2", &s));
     s->slice9_lrtb[0] = 4; /* non-default -> survives prune */
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_prune_sprite(a, "s2"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_prune_pending_sprite(a, "s2"));
     TEST_ASSERT_EQUAL_INT(1, a->sprite_count);
-    s = tp_project_atlas_find_sprite(a, "s2");
+    s = tp_project_atlas_find_pending_sprite(a, "s2");
     TEST_ASSERT_NOT_NULL(s);
     s->slice9_lrtb[0] = 0; /* cleared back to default -> now prunes */
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_prune_sprite(a, "s2"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_prune_pending_sprite(a, "s2"));
     TEST_ASSERT_EQUAL_INT(0, a->sprite_count);
     tp_project_destroy(p);
 }

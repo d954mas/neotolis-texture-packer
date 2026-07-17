@@ -22,6 +22,7 @@
 #include "tp_core/tp_export_run.h"
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_project.h"
+#include "tp_project_mutation_internal.h"
 #include "unity.h"
 
 /* wide + tall force the packer to rotate the tall sprite (diagonal bit). */

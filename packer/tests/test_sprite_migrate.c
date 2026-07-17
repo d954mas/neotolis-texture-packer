@@ -23,6 +23,7 @@
 
 #include "tp_core/tp_id.h"
 #include "tp_core/tp_project.h"
+#include "tp_project_mutation_internal.h"
 #include "tp_core/tp_project_migrate.h"
 #include "tp_core/tp_sprite_index.h"
 #include "unity.h"
@@ -114,7 +115,7 @@ void test_pending_resolves_and_persists_v4(void) {
     tp_id128 sid = a->sources[0].id;
 
     tp_project_sprite *sp = NULL;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_sprite(a, "hero", &sp));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_pending_sprite(a, "hero", &sp));
     sp->origin_x = 0.1F;
     TEST_ASSERT_TRUE_MESSAGE(tp_id128_is_nil(sp->source_ref), "a name-added override starts PENDING");
     TEST_ASSERT_NULL(sp->src_key);
@@ -169,7 +170,7 @@ void test_unresolved_stays_pending(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_source(a, root));
     a->sources[0].id = seeded_id(0x22U);
     tp_project_sprite *sp = NULL;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_sprite(a, "ghost", &sp)); /* no ghost.png */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_pending_sprite(a, "ghost", &sp)); /* no ghost.png */
     sp->origin_x = 0.2F;
 
     tp_sprite_index idx;
@@ -244,7 +245,7 @@ void test_orphan_reactivates_on_key_return(void) {
 
     /* resolve while present -> migrated */
     tp_project_sprite *sp = NULL;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_sprite(a, "hero", &sp));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_pending_sprite(a, "hero", &sp));
     sp->origin_x = 0.3F;
     tp_sprite_index idx;
     tp_error e = {0};
@@ -423,7 +424,7 @@ void test_migrated_record_frame_byte_golden(void) {
 
     /* migrated sprite override: every optional field non-default */
     tp_project_sprite *sp = NULL;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_sprite(a, "hero", &sp));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_pending_sprite(a, "hero", &sp));
     sp->source_ref = sid;
     sp->src_key = dupz("hero.png"); /* migrated: {source, key}, name bridge dropped on save */
     sp->ov_allow_rotate = 0;

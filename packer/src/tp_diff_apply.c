@@ -15,6 +15,7 @@
 #include "tp_core/tp_operation.h"
 #include "tp_core/tp_project.h"
 #include "tp_diff_internal.h"
+#include "tp_project_mutation_internal.h"
 #include "tp_strutil.h" /* tp_set_owned_dup (shared OOM-safe string-field swap) */
 
 static tp_project_atlas *atlas_of(tp_project *p, tp_id128 id) {

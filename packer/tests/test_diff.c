@@ -24,6 +24,7 @@
 #include "tp_core/tp_export.h" /* TP_EXPORTER_ID_JSON_NEOTOLIS */
 #include "tp_core/tp_operation.h"
 #include "tp_core/tp_project.h"
+#include "tp_project_mutation_internal.h"
 #include "tp_core/tp_project_migrate.h" /* tp_project_promote_ids */
 #include "tp_core/tp_transaction.h"
 #include "tp_diff_internal.h" /* diff alloc seam + record/history internals (corrupt + rollback) */
@@ -1279,7 +1280,7 @@ static tp_project *make_maximal(void) {
 
     /* sprite A: name-bridge (pending) with every other field non-default. */
     tp_project_sprite *sp = NULL;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_sprite(a, "hero/walk_01", &sp));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_pending_sprite(a, "hero/walk_01", &sp));
     sp->origin_x = 0.25F;
     sp->origin_y = 0.75F;
     sp->slice9_lrtb[0] = 4;
@@ -1294,7 +1295,7 @@ static tp_project *make_maximal(void) {
     sp->ov_extrude = 5;
     /* sprite B: RESOLVED {source, key} -- exercises copy_sprite_fields' src_key dup. */
     tp_project_sprite *sp2 = NULL;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_sprite(a, "grass", &sp2));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_pending_sprite(a, "grass", &sp2));
     sp2->origin_x = 0.1F;
 
     /* animation: every field non-default + two pending frames + one resolved frame. */

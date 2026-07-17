@@ -23,6 +23,7 @@
 #include "tp_core/tp_transaction.h"
 #include "tp_journal_internal.h"
 #include "tp_project_internal.h"
+#include "tp_project_mutation_internal.h"
 #include "tp_recovery_internal.h"
 #include "tp_session_internal.h"
 #include "unity.h"
@@ -66,7 +67,7 @@ void test_snapshot_allocation_failures_return_structured_oom(void) {
     tp_project_sprite *sprite = NULL;
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        tp_project_atlas_add_sprite(atlas, "hero", &sprite));
+        tp_project_atlas_add_pending_sprite(atlas, "hero", &sprite));
     tp_project_anim *animation = NULL;
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
@@ -761,7 +762,7 @@ void test_snapshot_has_id_addressed_nested_dtos(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_project_atlas_add_source_kind(atlas, "sprites", TP_SOURCE_KIND_FOLDER));
     tp_project_sprite *sprite = NULL;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_sprite(atlas, "hero", &sprite));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_pending_sprite(atlas, "hero", &sprite));
     sprite->rename = test_dup("hero-final");
     tp_project_anim *animation = NULL;
     for (int i = 0; i < 32; ++i) {

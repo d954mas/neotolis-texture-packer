@@ -19,6 +19,7 @@
 #include "tp_core/tp_project_migrate.h"
 #include "unity.h"
 #include "../src/tp_project_internal.h"
+#include "tp_project_mutation_internal.h"
 
 void setUp(void) {}
 void tearDown(void) {}

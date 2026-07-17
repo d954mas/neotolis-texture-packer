@@ -36,6 +36,7 @@
 #include "tp_core/tp_srckey.h" /* TP_SRCKEY_MAX (v4 sprite key buffer) */
 #include "tp_core/tp_project_migrate.h" /* legacy synthesis + duplicate validation on load */
 #include "tp_project_internal.h"         /* deterministic save fault seam for tests */
+#include "tp_project_mutation_internal.h"
 #include "tp_strutil.h"                 /* shared tp_strdup (one core definition) */
 
 #define TP_PATH_MAX 4096
@@ -277,7 +278,7 @@ static tp_project *tp_project_alloc_empty(void) {
     return p;
 }
 
-void tp_project_atlas_set_defaults(tp_project_atlas *a) {
+static void tp_project_atlas_set_defaults(tp_project_atlas *a) {
     if (!a) {
         return;
     }
@@ -789,32 +790,6 @@ tp_status tp_project_atlas_prune_sprite_by_source_key(
     return TP_STATUS_OK;
 }
 
-tp_project_sprite *tp_project_atlas_find_sprite(tp_project_atlas *a,
-                                                const char *name) {
-    return tp_project_atlas_find_pending_sprite(a, name);
-}
-
-tp_status tp_project_atlas_add_sprite(tp_project_atlas *a, const char *name,
-                                      tp_project_sprite **out) {
-    return tp_project_atlas_add_pending_sprite(a, name, out);
-}
-
-tp_status tp_project_atlas_remove_sprite(tp_project_atlas *a,
-                                         const char *name) {
-    return tp_project_atlas_remove_pending_sprite(a, name);
-}
-
-tp_status tp_project_atlas_prune_sprite(tp_project_atlas *a,
-                                        const char *name) {
-    return tp_project_atlas_prune_pending_sprite(a, name);
-}
-
-tp_status tp_project_atlas_set_sprite_rename(tp_project_atlas *a,
-                                             const char *sprite_name,
-                                             const char *rename) {
-    return tp_project_atlas_set_pending_sprite_rename(a, sprite_name, rename);
-}
-
 tp_status tp_project_atlas_add_animation(tp_project_atlas *a, const char *name, tp_project_anim **out) {
     if (!a || !name) {
         return TP_STATUS_INVALID_ARGUMENT;
@@ -835,23 +810,6 @@ tp_status tp_project_atlas_add_animation(tp_project_atlas *a, const char *name, 
         *out = an;
     }
     return TP_STATUS_OK;
-}
-
-tp_status tp_project_atlas_remove_animation(tp_project_atlas *a, const char *name) {
-    if (!a || !name) {
-        return TP_STATUS_INVALID_ARGUMENT;
-    }
-    for (int i = 0; i < a->animation_count; i++) {
-        if (a->animations[i].name && strcmp(a->animations[i].name, name) == 0) {
-            tp_free_anim(&a->animations[i]);
-            for (int j = i; j < a->animation_count - 1; j++) {
-                a->animations[j] = a->animations[j + 1];
-            }
-            a->animation_count--;
-            return TP_STATUS_OK;
-        }
-    }
-    return TP_STATUS_OUT_OF_BOUNDS;
 }
 
 tp_project_anim *tp_project_atlas_find_animation_by_id(tp_project_atlas *a, tp_id128 id) {

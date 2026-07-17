@@ -10,6 +10,7 @@
 #include "tp_core/tp_operation.h"
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_project.h"
+#include "tp_project_mutation_internal.h"
 #include "tp_core/tp_project_migrate.h" /* tp_project_promote_ids */
 #include "tp_test_model.h"
 #include "unity.h"
@@ -657,9 +658,10 @@ void test_source_attached_sprite_ops_preserve_structural_identity(void) {
     TEST_ASSERT_EQUAL_STRING("hero_final", sprite->rename);
 
     /* A canonical clear must never steal a same-name pending legacy record. */
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_project_atlas_set_sprite_rename(&project->atlases[0],
-                                                             "characters/enemy", "enemy_final"));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_set_pending_sprite_rename(
+            &project->atlases[0], "characters/enemy", "enemy_final"));
     sprite = tp_project_atlas_find_pending_sprite(&project->atlases[0],
                                                    "characters/enemy");
     TEST_ASSERT_NOT_NULL(sprite);

@@ -41,6 +41,7 @@
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_pack_read.h"
 #include "tp_core/tp_project.h"
+#include "tp_project_mutation_internal.h"
 #include "unity.h"
 
 #include "tp_fixtures.h"

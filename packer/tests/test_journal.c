@@ -36,6 +36,7 @@
 #include "tp_model_seam.h"
 #include "tp_op_internal.h"      /* exact recovery replay operation count */
 #include "tp_project_internal.h" /* checkpoint materialization counters */
+#include "tp_project_mutation_internal.h"
 #include "tp_txn_internal.h"     /* clone fault seam + replay count preflight */
 #include "tp_test_model.h"
 #include "unity.h"

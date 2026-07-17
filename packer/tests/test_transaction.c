@@ -29,6 +29,7 @@
 #include "tp_txn_internal.h"            /* clone fault seam */
 #include "tp_op_internal.h"             /* tp_op__test_set_alloc_fail */
 #include "tp_project_internal.h"        /* checkpoint-size traversal seam */
+#include "tp_project_mutation_internal.h"
 #include "tp_test_model.h"
 #include "unity.h"
 
@@ -153,7 +154,7 @@ void test_clone_byte_identity(void) {
     /* enrich: a sprite override + an animation with frames */
     tp_project_atlas *a = &p->atlases[0];
     tp_project_sprite *s = NULL;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_sprite(a, "hero", &s));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_pending_sprite(a, "hero", &s));
     s->origin_x = 0.25F;
     s->slice9_lrtb[0] = 3;
     tp_project_anim *an = NULL;

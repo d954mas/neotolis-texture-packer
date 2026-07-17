@@ -16,6 +16,7 @@
 
 #include "tp_core/tp_export.h" /* TP_EXPORTER_ID_JSON_NEOTOLIS */
 #include "tp_core/tp_project.h"
+#include "tp_project_mutation_internal.h"
 #include "tp_core/tp_project_migrate.h" /* tp_project_promote_ids */
 #include "unity.h"
 

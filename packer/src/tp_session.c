@@ -16,6 +16,7 @@
 #include "tp_session_layout.h"
 #include "tp_job_owner_internal.h"
 #include "tp_model_seam.h"
+#include "tp_project_mutation_internal.h"
 
 // #region gate & recovery health
 bool recovery_is_healthy(const tp_session *session) {

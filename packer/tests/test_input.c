@@ -40,6 +40,7 @@
 #include "tp_core/tp_operation.h"
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_project.h"
+#include "tp_project_mutation_internal.h"
 #include "unity.h"
 
 static const char *g_dir;         /* scratch dir (argv[1]) */

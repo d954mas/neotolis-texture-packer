@@ -18,6 +18,7 @@
 #include "tp_model_seam.h"
 #include "tp_op_internal.h"
 #include "tp_project_internal.h"
+#include "tp_project_mutation_internal.h"
 #include "tp_session_internal.h"
 #include "tp_txn_internal.h"
 
@@ -95,8 +96,8 @@ static bool fill_atlas(tp_project_atlas *atlas, const fixture_spec *spec) {
         tp_project_sprite *sprite = NULL;
         if (snprintf(key, sizeof key, "sprites/hero_walk_%05d", i) < 0 ||
             snprintf(value, sizeof value, "player_walk_%05d", i) < 0 ||
-            tp_project_atlas_add_sprite(atlas, key, &sprite) != TP_STATUS_OK || !sprite ||
-            tp_project_atlas_set_sprite_rename(atlas, key, value) != TP_STATUS_OK) {
+            tp_project_atlas_add_pending_sprite(atlas, key, &sprite) != TP_STATUS_OK || !sprite ||
+            tp_project_atlas_set_pending_sprite_rename(atlas, key, value) != TP_STATUS_OK) {
             return false;
         }
         sprite->origin_x = 0.25F;

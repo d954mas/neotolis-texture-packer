@@ -30,6 +30,7 @@
 #include <string.h>
 
 #include "tp_diff_internal.h"
+#include "tp_project_mutation_internal.h"
 
 /* ---- allocation fault seam (test-only; default disabled) ------------------ */
 static _Thread_local int s_fail = -1; /* countdown; -1 disabled. Fires once. */

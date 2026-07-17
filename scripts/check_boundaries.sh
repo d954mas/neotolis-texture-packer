@@ -444,6 +444,7 @@ tp_encode_internal      tp_op_encode|tp_txn_encode|tp_txn_apply
 tp_journal_internal     tp_journal|tp_journal_io|tp_history|tp_txn_apply|tp_recovery
 tp_idset_internal       tp_idset|tp_txn_idset|tp_journal|tp_txn_apply
 tp_project_internal     tp_project|tp_project_migrate|tp_history|tp_txn_apply
+tp_project_mutation_internal tp_project|tp_diff_entity|tp_diff_apply|tp_diff_capture|tp_export_run|tp_input|tp_op_apply|tp_op_validate|tp_session|tp_session_snapshot
 tp_txn_internal         tp_txn_apply|tp_txn_parse|tp_txn_encode|tp_txn_idset|tp_txn_lower|tp_project_clone|tp_history
 tp_model_seam           tp_session|tp_session_snapshot|tp_recovery|tp_txn_internal|tp_txn_apply|tp_txn_parse|tp_txn_encode|tp_txn_idset|tp_txn_lower|tp_project_clone|tp_history
 tp_recovery_live_seam   tp_session|tp_recovery|tp_recovery_internal

@@ -28,6 +28,7 @@
 #include "tp_core/tp_srckey.h"  /* TP_SRCKEY_MAX */
 #include "tp_diff_internal.h"
 #include "tp_op_internal.h"
+#include "tp_project_mutation_internal.h"
 #include "tp_strutil.h"         /* tp_set_owned_dup (shared OOM-safe string-field swap) */
 
 /* ---- staging allocation (with a test-only fault seam) -------------------- */

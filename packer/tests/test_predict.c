@@ -18,6 +18,7 @@
 #include "tp_core/tp_model.h"
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_project.h"
+#include "tp_project_mutation_internal.h"
 #include "unity.h"
 
 void setUp(void) {}
@@ -76,10 +77,10 @@ static tp_project *make_fixture(const char *exporter_id, const char *outbase) {
     a->max_size = 1024;
     a->pixels_per_unit = 1.0F;
     tp_project_sprite *sp = NULL;
-    (void)tp_project_atlas_add_sprite(a, "piv", &sp);
+    (void)tp_project_atlas_add_pending_sprite(a, "piv", &sp);
     sp->origin_x = 1.5F;
     sp->origin_y = -0.25F;
-    (void)tp_project_atlas_add_sprite(a, "sl", &sp);
+    (void)tp_project_atlas_add_pending_sprite(a, "sl", &sp);
     sp->slice9_lrtb[0] = sp->slice9_lrtb[1] = sp->slice9_lrtb[2] = sp->slice9_lrtb[3] = 4;
     (void)tp_project_atlas_add_target(a, exporter_id, outbase, NULL);
     return p;

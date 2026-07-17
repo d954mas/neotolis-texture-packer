@@ -7,6 +7,7 @@
 
 #include "tp_core/tp_validate.h"
 #include "tp_core/tp_project.h"
+#include "tp_project_mutation_internal.h"
 #include "tp_core/tp_project_migrate.h"
 #include "tp_core/tp_scan.h"
 #include "tp_core/tp_session.h"

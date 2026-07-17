@@ -47,6 +47,7 @@ add_test(NAME tp_srckey COMMAND tp_test_srckey)
 # Needs a scratch dir (argv[1]) for the on-disk scan fixtures.
 add_executable(tp_test_sprite_index test_sprite_index.c)
 target_link_libraries(tp_test_sprite_index PRIVATE tp_core unity)
+target_include_directories(tp_test_sprite_index PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_compile_options(tp_test_sprite_index PRIVATE -U_DLL)
 nt_set_warning_flags(tp_test_sprite_index)   # AGENTS.md invariant: our test TUs too
 add_test(NAME tp_sprite_index COMMAND tp_test_sprite_index "${CMAKE_BINARY_DIR}/tp_sprite_index_test")
@@ -56,6 +57,7 @@ add_test(NAME tp_sprite_index COMMAND tp_test_sprite_index "${CMAKE_BINARY_DIR}/
 # range/reference each -> the right structured status).
 add_executable(tp_test_operation test_operation.c)
 target_link_libraries(tp_test_operation PRIVATE tp_core unity)
+target_include_directories(tp_test_operation PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_compile_options(tp_test_operation PRIVATE -U_DLL)
 nt_set_warning_flags(tp_test_operation)   # AGENTS.md invariant: our test TUs too
 add_test(NAME tp_operation COMMAND tp_test_operation)
@@ -178,6 +180,7 @@ add_test(NAME tp_bench_support COMMAND tp_test_bench_support)
 # F1-03: canonical selector resolver (id/name/path/compound -> exactly one id).
 add_executable(tp_test_selector test_selector.c)
 target_link_libraries(tp_test_selector PRIVATE tp_core unity)
+target_include_directories(tp_test_selector PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_compile_options(tp_test_selector PRIVATE -U_DLL)
 nt_set_warning_flags(tp_test_selector)   # AGENTS.md invariant: our test TUs too
 add_test(NAME tp_selector COMMAND tp_test_selector "${CMAKE_BINARY_DIR}/tp_selector_test")
@@ -186,6 +189,7 @@ add_test(NAME tp_selector COMMAND tp_test_selector "${CMAKE_BINARY_DIR}/tp_selec
 # stored-orphan reactivation, and v4 {source,key} save/reload round-trip.
 add_executable(tp_test_sprite_migrate test_sprite_migrate.c)
 target_link_libraries(tp_test_sprite_migrate PRIVATE tp_core unity)
+target_include_directories(tp_test_sprite_migrate PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_compile_options(tp_test_sprite_migrate PRIVATE -U_DLL)
 nt_set_warning_flags(tp_test_sprite_migrate)   # AGENTS.md invariant: our test TUs too
 add_test(NAME tp_sprite_migrate COMMAND tp_test_sprite_migrate "${CMAKE_BINARY_DIR}/tp_sprite_migrate_test")
@@ -230,6 +234,7 @@ add_test(NAME tp_identity_session COMMAND tp_test_identity_session "${CMAKE_BINA
 # detection while keeping the test independent from GUI/session/recovery code.
 add_executable(tp_test_project_lease test_project_lease.c)
 target_link_libraries(tp_test_project_lease PRIVATE tp_core unity)
+target_include_directories(tp_test_project_lease PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_compile_options(tp_test_project_lease PRIVATE -U_DLL)
 nt_set_warning_flags(tp_test_project_lease)
 add_test(NAME tp_project_lease COMMAND tp_test_project_lease
@@ -267,6 +272,7 @@ add_test(NAME tp_scan COMMAND tp_test_scan "${CMAKE_BINARY_DIR}/tp_scan_test")
 # only need tp_core. Builds a fixture tree under a scratch dir at runtime (argv[1]).
 add_executable(tp_test_input test_input.c)
 target_link_libraries(tp_test_input PRIVATE tp_build unity)
+target_include_directories(tp_test_input PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_compile_options(tp_test_input PRIVATE -U_DLL)
 nt_set_warning_flags(tp_test_input)   # AGENTS.md invariant: our test TUs too
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_input_test")
@@ -314,6 +320,7 @@ add_test(NAME tp_pack COMMAND tp_test_pack "${CMAKE_BINARY_DIR}/tp_pack_test")
 # path relativization, to_settings bridge. Needs a scratch dir for project files.
 add_executable(tp_test_project test_project.c)
 target_link_libraries(tp_test_project PRIVATE tp_core unity)
+target_include_directories(tp_test_project PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_compile_options(tp_test_project PRIVATE -U_DLL)
 nt_set_warning_flags(tp_test_project)   # AGENTS.md invariant: our test TUs too
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_project_test")
@@ -325,6 +332,7 @@ add_test(NAME tp_project COMMAND tp_test_project "${CMAKE_BINARY_DIR}/tp_project
 # rename/reorder/remove, and forward-compat over the checked-in v1 CLI fixtures.
 add_executable(tp_test_project_ids test_project_ids.c)
 target_link_libraries(tp_test_project_ids PRIVATE tp_core unity)
+target_include_directories(tp_test_project_ids PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_compile_options(tp_test_project_ids PRIVATE -U_DLL)
 target_compile_definitions(tp_test_project_ids PRIVATE
     TP_CLI_TESTDATA_DIR="${CMAKE_SOURCE_DIR}/apps/cli/testdata")
@@ -363,6 +371,7 @@ add_test(NAME tp_export_png COMMAND tp_test_export_png "${CMAKE_BINARY_DIR}/tp_e
 # effective-settings repack, shared runs, and metadata-loss notices.
 add_executable(tp_test_export_run test_export_run.c)
 target_link_libraries(tp_test_export_run PRIVATE tp_build unity cjson)
+target_include_directories(tp_test_export_run PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_compile_options(tp_test_export_run PRIVATE -U_DLL)
 nt_set_warning_flags(tp_test_export_run)   # AGENTS.md invariant: our test TUs too
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_export_run_test")
@@ -374,6 +383,7 @@ add_test(NAME tp_export_run COMMAND tp_test_export_run "${CMAKE_BINARY_DIR}/tp_e
 # to pack + export the fixture through the real path (tp_export_run).
 add_executable(tp_test_predict test_predict.c)
 target_link_libraries(tp_test_predict PRIVATE tp_build unity)
+target_include_directories(tp_test_predict PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_compile_options(tp_test_predict PRIVATE -U_DLL)
 nt_set_warning_flags(tp_test_predict)   # AGENTS.md invariant: our test TUs too
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_predict_test")
@@ -386,6 +396,7 @@ add_test(NAME tp_predict COMMAND tp_test_predict "${CMAKE_BINARY_DIR}/tp_predict
 # the demo PNGs via stb_image.
 add_executable(tp_test_export_defold test_export_defold.c tp_fixtures.c)
 target_link_libraries(tp_test_export_defold PRIVATE tp_build unity stb_image)
+target_include_directories(tp_test_export_defold PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_compile_options(tp_test_export_defold PRIVATE -U_DLL)
 target_compile_definitions(tp_test_export_defold PRIVATE
     TP_DEFOLD_DEMO_DIR="${CMAKE_SOURCE_DIR}/examples/defold-demo")

@@ -11,6 +11,7 @@
 #include "tp_core/tp_export.h"          /* TP_EXPORTER_ID_JSON_NEOTOLIS */
 #include "tp_core/tp_names.h"           /* tp_sprite_export_key (parity bridge) */
 #include "tp_core/tp_project.h"
+#include "tp_project_mutation_internal.h"
 #include "tp_core/tp_project_migrate.h" /* tp_project_promote_ids */
 #include "tp_op_internal.h"             /* tp_op__test_set_alloc_fail */
 #include "tp_test_model.h"
@@ -248,7 +249,7 @@ void test_apply_sprite_nil_source_rejected(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_ID_MALFORMED,
                           tp_operation_apply(p, &op, &rej));
     TEST_ASSERT_EQUAL_STRING("source_id", rej.field);
-    TEST_ASSERT_NULL(tp_project_atlas_find_sprite(&p->atlases[0], "hero"));
+    TEST_ASSERT_NULL(tp_project_atlas_find_pending_sprite(&p->atlases[0], "hero"));
 
     memset(&op, 0, sizeof op);
     op.kind = TP_OP_SPRITE_NAME_SET;
