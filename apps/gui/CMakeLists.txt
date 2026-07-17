@@ -103,10 +103,9 @@ if(WIN32 AND CMAKE_BUILD_TYPE STREQUAL "Release")
     target_link_options(ntpacker-gui PRIVATE "LINKER:/entry:mainCRTStartup")
 endif()
 
-# M0 measurement-only GUI row rebuild benchmark. It compiles the production
-# gui_rows/gui_scan sources with narrow stubs in tp_bench_gui_rows.c; no window,
-# renderer, pack job, or GUI event loop is created. Timing remains advisory and
-# is intentionally not registered with ctest.
+# GUI row rebuild benchmark. It compiles the production gui_rows/gui_scan
+# sources with narrow stubs; no window, renderer, pack job, or event loop.
+# CTest enforces only correctness/count/complexity. Absolute timing is advisory.
 add_executable(tp_bench_gui_rows tp_bench_gui_rows.c gui_rows.c gui_scan.c)
 target_link_libraries(tp_bench_gui_rows PRIVATE tp_core nt_time nt_ui)
 target_include_directories(tp_bench_gui_rows PRIVATE "${CMAKE_SOURCE_DIR}/packer/tests")
@@ -119,6 +118,11 @@ target_compile_definitions(tp_bench_gui_rows PRIVATE
 nt_set_warning_flags(tp_bench_gui_rows)
 nt_set_sanitizer_flags(tp_bench_gui_rows)
 set_target_properties(tp_bench_gui_rows PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${GUI_OUTPUT_DIR}")
+add_test(NAME tp_gui_rows_complexity
+    COMMAND tp_bench_gui_rows "${CMAKE_CURRENT_BINARY_DIR}/tp_gui_rows_ctest" 1)
+set_tests_properties(tp_gui_rows_complexity PROPERTIES
+    TIMEOUT 180
+    LABELS "benchmark;gui")
 
 # M1 contract probe: the production GUI atlas-rename adapter must admit the
 # canonical transaction through tp_session and read the result from one owned

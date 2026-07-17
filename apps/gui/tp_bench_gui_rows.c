@@ -541,30 +541,11 @@ static bool run_fixture(row_fixture *fixture, int iterations) {
                  (unsigned long long)(rows.row_realloc_calls +
                                       rows.override_index_realloc_calls));
 
-    /* Publish a real source-runtime generation through tp_session, replace the
-     * cached immutable snapshot, then measure one exact production rebuild. */
-    if (!fixture_publish_source_generation(fixture)) {
-        (void)fprintf(stderr,
-                      "tp_bench_gui_rows: source generation failed for %s\n",
-                      fixture->spec.name);
-        return false;
-    }
-    gui_rows_bench_reset_counters();
-    gui_scan_bench_reset_counters();
-    s_status_failed = false;
-    const double rebuild_start = tp_bench_now_ms();
-    build_rows();
-    if (fixture->spec.children > 0) {
-        if (!gui_rows_selected_leaf()) {
-            return false;
-        }
-        (void)gui_rows_selected_override();
-    }
-    const double rebuild_ms = tp_bench_now_ms() - rebuild_start;
-    const gui_rows_bench_counters rebuild_rows =
-        gui_rows_bench_get_counters();
-    const gui_scan_bench_counters rebuild_scan =
-        gui_scan_bench_get_counters();
+    /* Invalidation and snapshot replacement stay outside each timed rebuild. */
+    tp_bench_samples rebuild_samples;
+    tp_bench_samples_init(&rebuild_samples);
+    gui_rows_bench_counters rebuild_rows = {0};
+    gui_scan_bench_counters rebuild_scan = {0};
     const uint64_t linear_units = (uint64_t)fixture->spec.sources +
                                   (uint64_t)fixture->spec.children +
                                   (uint64_t)fixture->spec.overrides;
@@ -572,30 +553,65 @@ static bool run_fixture(row_fixture *fixture, int iterations) {
                                       (fixture->spec.children > 0 ? 1U : 0U);
     const uint64_t expected_gets = fixture->spec.children > 0 ? 1U : 0U;
     const uint64_t expected_is_dir = fixture->spec.children > 0 ? 1U : 0U;
-    if (!fixture_rows_match(fixture) || rebuild_rows.cache_key_checks != 1U ||
-        rebuild_rows.rebuilds != 1U ||
-        rebuild_rows.row_realloc_calls != 0U ||
-        rebuild_rows.override_index_realloc_calls != 0U ||
-        rebuild_rows.override_slot_clears != 0U ||
-        rebuild_rows.source_iterations != (uint64_t)fixture->spec.sources ||
-        rebuild_rows.path_resolve_calls != (uint64_t)fixture->spec.sources ||
-        rebuild_rows.child_iterations != (uint64_t)fixture->spec.children ||
-        rebuild_rows.override_inserts != (uint64_t)fixture->spec.overrides ||
-        rebuild_rows.override_lookup_calls != expected_lookups ||
-        rebuild_rows.override_probes > linear_units * 8U ||
-        rebuild_scan.get_calls != expected_gets ||
-        rebuild_scan.exists_fs_calls != (uint64_t)fixture->spec.sources ||
-        rebuild_scan.is_dir_fs_calls != expected_is_dir ||
-        rebuild_scan.directory_walks != 0U) {
-        (void)fprintf(stderr,
-                      "tp_bench_gui_rows: rebuild counter failure for %s\n",
-                      fixture->spec.name);
-        return false;
+    (void)printf("   rebuild_samples_ms:");
+    for (int i = 0; i < warmup_iterations + iterations; ++i) {
+        if (!fixture_publish_source_generation(fixture)) {
+            (void)fprintf(stderr,
+                          "tp_bench_gui_rows: source generation failed for %s\n",
+                          fixture->spec.name);
+            return false;
+        }
+        gui_rows_bench_reset_counters();
+        gui_scan_bench_reset_counters();
+        s_status_failed = false;
+        const double rebuild_start = tp_bench_now_ms();
+        build_rows();
+        if (fixture->spec.children > 0) {
+            if (!gui_rows_selected_leaf()) {
+                return false;
+            }
+            (void)gui_rows_selected_override();
+        }
+        const double rebuild_ms = tp_bench_now_ms() - rebuild_start;
+        rebuild_rows = gui_rows_bench_get_counters();
+        rebuild_scan = gui_scan_bench_get_counters();
+        const bool rebuild_valid =
+            fixture_rows_match(fixture) && rebuild_rows.cache_key_checks == 1U &&
+            rebuild_rows.rebuilds == 1U && rebuild_rows.row_realloc_calls == 0U &&
+            rebuild_rows.override_index_realloc_calls == 0U &&
+            rebuild_rows.override_slot_clears == 0U &&
+            rebuild_rows.source_iterations == (uint64_t)fixture->spec.sources &&
+            rebuild_rows.path_resolve_calls == (uint64_t)fixture->spec.sources &&
+            rebuild_rows.child_iterations == (uint64_t)fixture->spec.children &&
+            rebuild_rows.override_inserts == (uint64_t)fixture->spec.overrides &&
+            rebuild_rows.override_lookup_calls == expected_lookups &&
+            rebuild_rows.override_probes <= linear_units * 8U &&
+            rebuild_scan.get_calls == expected_gets &&
+            rebuild_scan.exists_fs_calls == (uint64_t)fixture->spec.sources &&
+            rebuild_scan.is_dir_fs_calls == expected_is_dir &&
+            rebuild_scan.directory_walks == 0U;
+        if (!rebuild_valid ||
+            (i >= warmup_iterations &&
+             !tp_bench_samples_record(&rebuild_samples, true, rebuild_ms))) {
+            (void)printf(" FAILED\n");
+            (void)fprintf(stderr,
+                          "tp_bench_gui_rows: rebuild counter failure for %s\n",
+                          fixture->spec.name);
+            return false;
+        }
+        if (i >= warmup_iterations) {
+            (void)printf(" %s%.6f", i == warmup_iterations ? "" : ",",
+                         rebuild_ms);
+        }
     }
-    (void)printf("   rebuild_ms=%.6f sources=%llu children=%llu "
+    (void)printf("\n");
+    (void)printf("   rebuild_p50=%.6f ms rebuild_p95=%.6f ms accepted=%zu "
+                 "failed=%zu sources=%llu children=%llu "
                  "override_inserts=%llu override_lookups=%llu "
                  "override_probes=%llu linear_units=%llu row_heap_allocs=0\n",
-                 rebuild_ms,
+                 tp_bench_samples_percentile(&rebuild_samples, 50U),
+                 tp_bench_samples_percentile(&rebuild_samples, 95U),
+                 rebuild_samples.count, rebuild_samples.failed,
                  (unsigned long long)rebuild_rows.source_iterations,
                  (unsigned long long)rebuild_rows.child_iterations,
                  (unsigned long long)rebuild_rows.override_inserts,

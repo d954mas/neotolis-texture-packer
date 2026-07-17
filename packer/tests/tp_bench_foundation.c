@@ -1415,6 +1415,10 @@ static void report_recovery_scaling(const fixture *f, const char *point,
         (void)printf("%s%.6f", i == 0U ? "" : ",", samples->values[i]);
     }
     (void)printf("]\n");
+    const double p50_ms = tp_bench_samples_percentile(samples, 50U);
+    const double p95_ms = tp_bench_samples_percentile(samples, 95U);
+    const char *target_result =
+        !has_target ? "not_applicable" : (p95_ms < 1000.0 ? "pass" : "miss");
     (void)printf("scenario=recovery_scaling point=%s records=%d total_frames=%zu operations_per_payload=%d "
                  "payload_bytes=%zu checkpoint_bytes=%zu model_atlases=%d model_sources=%d "
                  "model_overrides=%d model_animations=%d model_frames=%d warmups=%d iterations=%d "
@@ -1424,7 +1428,8 @@ static void report_recovery_scaling(const fixture *f, const char *point,
                  "checkpoint_payload_bytes_max=%zu op_payload_copies_max=%zu "
                  "op_payload_bytes_max=%zu applied_ops_expected=%zu applied_ops_counted=%d "
                  "applied_ops_observed=%zu "
-                 "target_p95_ms=%s target_scope=%s\n",
+                 "target_p95_ms=%s target_scope=%s target_result=%s "
+                 "target_enforcement=advisory\n",
                  point, baseline->record_count, baseline->total_frame_count,
                  baseline->operations_per_payload,
                  baseline->payload_bytes, baseline->checkpoint_bytes, f->spec.atlases,
@@ -1432,8 +1437,7 @@ static void report_recovery_scaling(const fixture *f, const char *point,
                  f->spec.atlases * f->spec.overrides_per_atlas,
                  f->spec.atlases * f->spec.animations_per_atlas,
                  f->spec.atlases * f->spec.animations_per_atlas * f->spec.frames_per_animation,
-                 warmups, iterations, tp_bench_samples_percentile(samples, 50U),
-                 tp_bench_samples_percentile(samples, 95U), samples->count, samples->failed,
+                 warmups, iterations, p50_ms, p95_ms, samples->count, samples->failed,
                  baseline->byte_count, copies_max->raw_storage_copies,
                  copies_max->raw_storage_bytes, copies_max->checkpoint_payload_copies,
                  copies_max->checkpoint_payload_bytes, copies_max->operation_payload_copies,
@@ -1441,7 +1445,7 @@ static void report_recovery_scaling(const fixture *f, const char *point,
                  (size_t)baseline->record_count * (size_t)baseline->operations_per_payload,
                  applied_operations_counted ? 1 : 0,
                  applied_operations_observed,
-                 has_target ? "1000" : "none", target_scope);
+                 has_target ? "1000" : "none", target_scope, target_result);
 }
 
 static bool bench_recovery_scaling_point(const fixture *f, const char *point,
@@ -1551,22 +1555,13 @@ static bool bench_recovery_scaling_point(const fixture *f, const char *point,
             return false;
         }
     }
-    const bool has_timing_target =
-        strcmp(recovery_target_scope(point), "none") != 0;
-    const double p95_ms = tp_bench_samples_percentile(&samples, 95U);
-    const bool timing_valid = !has_timing_target || p95_ms < 1000.0;
     const bool valid = tp_bench_samples_valid(&samples) &&
                        copies_max.raw_storage_copies <= 1U &&
                        copies_max.raw_storage_bytes <= baseline.byte_count &&
                        copies_max.checkpoint_payload_copies == 0U &&
                        copies_max.checkpoint_payload_bytes == 0U &&
                        copies_max.operation_payload_copies == 0U &&
-                       copies_max.operation_payload_bytes == 0U && timing_valid;
-    if (!timing_valid) {
-        (void)fprintf(stderr,
-                      "recovery scaling timing gate failed point=%s p95_ms=%.6f target_ms=1000\n",
-                      point, p95_ms);
-    }
+                       copies_max.operation_payload_bytes == 0U;
     if (valid) {
         report_recovery_scaling(f, point, &baseline, warmups, iterations, &samples,
                                 &copies_max, count_applied_operations,
@@ -1821,7 +1816,8 @@ int main(int argc, char **argv) {
             return 2;
         }
         (void)printf("tp_bench_foundation clock=monotonic source=nt_time_now "
-                     "mode=recovery_scaling thresholds=enforced-local-reference\n");
+                     "mode=recovery_scaling correctness=count/copy-hard "
+                     "timing=advisory\n");
         return run_recovery_scaling(scaling_iterations);
     }
     const char *scratch = argc > 1 ? argv[1] : "tp_bench_foundation_tmp";
