@@ -328,7 +328,7 @@ static tp_status atlas_has_effective_source_path(
         }
         tp_source_path_identity existing;
         status = tp_source_path_identity_from_stored(
-            project, source->path, &existing, err);
+            project, source->path, wanted.has_canonical, &existing, err);
         if (status != TP_STATUS_OK) {
             return status;
         }

@@ -17,6 +17,7 @@ tp_status tp_source_path_identity_from_input(const char *input,
                                              tp_error *err);
 tp_status tp_source_path_identity_from_stored(const tp_project *project,
                                               const char *path,
+                                              bool resolve_canonical,
                                               tp_source_path_identity *out,
                                               tp_error *err);
 bool tp_source_path_identity_equal_text(const char *left_absolute,

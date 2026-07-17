@@ -65,6 +65,7 @@ tp_status tp_source_path_identity_from_input(const char *input,
 
 tp_status tp_source_path_identity_from_stored(const tp_project *project,
                                               const char *path,
+                                              bool resolve_canonical,
                                               tp_source_path_identity *out,
                                               tp_error *err) {
     if (!project || !path || !out) {
@@ -94,6 +95,7 @@ tp_status tp_source_path_identity_from_stored(const tp_project *project,
     }
     memcpy(out->absolute, out->canonical, strlen(out->canonical) + 1U);
     out->has_canonical =
+        resolve_canonical &&
         tp_identity_path_canonical(out->absolute, out->canonical,
                                    sizeof out->canonical, NULL) == TP_STATUS_OK;
     return TP_STATUS_OK;
