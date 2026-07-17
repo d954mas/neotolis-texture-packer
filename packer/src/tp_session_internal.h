@@ -4,7 +4,8 @@
 #include "tp_core/tp_session.h"
 #include "tp_core/tp_recovery.h"
 #include "tp_core/tp_transaction.h"
-#include "tp_recovery_internal.h"
+
+typedef struct tp_recovery_live tp_recovery_live;
 
 /* Internal Open/recovery construction seam. Always consumes `project`, including
  * every failure path, so ownership cannot become ambiguous under allocation/RNG

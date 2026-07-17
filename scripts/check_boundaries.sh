@@ -416,6 +416,150 @@ if printf '%s\n' \
     hit "R17-selftest" "R17 detector false-positives on legitimate suffix/strftime/PATH/section-reference content"
 fi
 
+# 18. Internal-header discipline. A *_internal.h (or the tp_model_seam.h persistence
+#     seam) is a component-private contract; only the TUs registered for it -- the
+#     owning family plus any explicitly allowlisted seam consumer -- may include it.
+#     Keeps a private contract from leaking into a module it was never designed to
+#     couple with. Scoped to shipping_srcs (test/bench/selftest sources are outside
+#     it and keep wider access, as with every other rule in this script). An include
+#     guarded by `#ifdef NTPACKER_GUI_SELFTEST` is dev-seam wiring compiled out of the
+#     shipped binary, not a production coupling, so the scanner skips it; a legit hit
+#     may still carry a "boundary-ok:" note on the same line.
+#
+# Registry: header name -> its allowed includer basenames (family + allowlisted
+# seams), one row per internal header that currently exists. tp_txn_parse_priv.h
+# also lives in packer/src but does not match the *_internal.h shape this rule scans
+# for, so it is deliberately left out of the registry and the scan.
+_internal_header_registry() {
+    cat <<'EOF'
+tp_diff_internal        tp_diff_entity|tp_diff_apply|tp_diff_capture|tp_history|tp_op_apply|tp_txn_apply
+tp_op_internal          tp_op_catalog|tp_op_validate|tp_op_apply|tp_op_build|tp_op_encode|tp_txn_encode|tp_txn_apply
+tp_encode_internal      tp_op_encode|tp_txn_encode|tp_txn_apply
+tp_journal_internal     tp_journal|tp_journal_io|tp_history|tp_txn_apply|tp_recovery
+tp_idset_internal       tp_idset|tp_txn_idset|tp_journal|tp_txn_apply
+tp_project_internal     tp_project|tp_project_migrate|tp_history|tp_txn_apply
+tp_txn_internal         tp_txn_apply|tp_txn_parse|tp_txn_encode|tp_txn_idset|tp_txn_lower|tp_project_clone|tp_history
+tp_model_seam           tp_session|tp_txn_internal|tp_txn_apply|tp_txn_parse|tp_txn_encode|tp_txn_idset|tp_txn_lower|tp_project_clone|tp_history
+tp_session_internal     tp_session|tp_session_snapshot|tp_recovery|tp_validate|tp_export|tp_export_run|tp_input|tp_sprite_index
+tp_recovery_internal    tp_recovery|tp_session
+tp_job_owner_internal   tp_session|tp_job
+tp_source_plan_internal tp_source_plan|tp_op_validate
+tp_srckey_internal      tp_srckey|tp_validate
+tp_validate_internal    tp_validate
+tp_identity_internal    tp_identity|tp_identity_session
+tp_pack_read_internal   tp_pack_read
+EOF
+}
+
+# Scanner: for each file given, emits "includer header path:line" per internal-header
+# include, skipping lines inside an `#ifdef NTPACKER_GUI_SELFTEST` guard (tracked with
+# a depth counter so a guard that nests an unrelated #if/#endif is still closed by its
+# own #endif) and lines carrying a "boundary-ok:" note.
+_internal_header_scan() {
+    awk '
+        FNR == 1 { guard = 0 }
+        guard == 0 && /^[[:space:]]*#[[:space:]]*ifdef[[:space:]]+NTPACKER_GUI_SELFTEST([[:space:]]|$)/ {
+            guard = 1
+            next
+        }
+        guard > 0 && /^[[:space:]]*#[[:space:]]*(ifdef|ifndef|if)([[:space:]]|\()/ {
+            guard++
+            next
+        }
+        guard > 0 && /^[[:space:]]*#[[:space:]]*endif/ {
+            guard--
+            next
+        }
+        guard > 0 { next }
+        (/#include[[:space:]]*"[A-Za-z0-9_]+_internal\.h"/ || /#include[[:space:]]*"tp_model_seam\.h"/) {
+            if ($0 ~ /boundary-ok:/) next
+            line = $0
+            if (match(line, /"[A-Za-z0-9_]+\.h"/)) {
+                header = substr(line, RSTART + 1, RLENGTH - 2)
+                sub(/\.h$/, "", header)
+                n = split(FILENAME, parts, "/")
+                includer = parts[n]
+                sub(/\.[ch]$/, "", includer)
+                printf "%s %s %s:%d\n", includer, header, FILENAME, FNR
+            }
+        }
+    ' "$@" 2>/dev/null
+}
+
+# Checker: reads "includer header path:line" rows from stdin and fails on (a) an
+# includer not registered for its header's allowed list, or (b) a header the scan
+# found that has no registry row at all.
+_internal_header_check() {
+    local registry="$1" includer header pathline allowed
+    while read -r includer header pathline; do
+        [ -z "$includer" ] && continue
+        allowed=$(printf '%s\n' "$registry" | awk -v h="$header" '$1 == h { print $2 }')
+        if [ -z "$allowed" ]; then
+            printf 'R18 %s not registered in the internal-header registry (include at %s)\n' "$header" "$pathline"
+            continue
+        fi
+        case "|$allowed|" in
+            *"|$includer|"*) ;;
+            *)
+                printf 'R18 %s may not include %s (allowed includers: %s) at %s\n' \
+                    "$includer" "$header" "$allowed" "$pathline"
+                ;;
+        esac
+    done
+}
+
+r18=$(_internal_header_scan $(shipping_srcs) | _internal_header_check "$(_internal_header_registry)")
+[ -n "$r18" ] && hit "R18 internal-header discipline" "$r18"
+
+# Self-test: seeded fixtures under a scratch dir prove the scanner/checker pair
+# actually fires on a cross-module include and an unregistered header, stays quiet
+# for a registered family/seam includer, and that the guard skip is a scanner-level
+# behavior (not just a checker false-negative) -- asserted every run.
+_r18_dir=$(mktemp -d 2>/dev/null)
+if [ -z "$_r18_dir" ] || [ ! -d "$_r18_dir" ]; then
+    hit "R18-selftest" "R18 self-test could not create a scratch dir (mktemp failed)"
+else
+    trap 'rm -rf "$_r18_dir"' EXIT
+
+    printf '#include "tp_txn_internal.h"\n' >"$_r18_dir/fake_frontend.c"
+    printf '#include "tp_totally_unregistered_internal.h"\n' >"$_r18_dir/fake_unregistered.c"
+    printf '#include "tp_txn_internal.h"\n' >"$_r18_dir/tp_txn_apply.c"
+    printf '#ifdef NTPACKER_GUI_SELFTEST\n#include "tp_txn_internal.h"\n#endif\n' >"$_r18_dir/fake_guarded.c"
+
+    _r18_registry=$(_internal_header_registry)
+
+    _r18_scan1=$(_internal_header_scan "$_r18_dir/fake_frontend.c")
+    _r18_check1=$(printf '%s\n' "$_r18_scan1" | _internal_header_check "$_r18_registry")
+    if [ -z "$_r18_check1" ]; then
+        hit "R18-selftest" "R18 checker failed to catch a seeded cross-module internal-header include"
+    fi
+
+    _r18_scan2=$(_internal_header_scan "$_r18_dir/fake_unregistered.c")
+    _r18_check2=$(printf '%s\n' "$_r18_scan2" | _internal_header_check "$_r18_registry")
+    if [ -z "$_r18_check2" ]; then
+        hit "R18-selftest" "R18 checker failed to catch an include of a header missing from the registry"
+    fi
+
+    _r18_scan3=$(_internal_header_scan "$_r18_dir/tp_txn_apply.c")
+    _r18_check3=$(printf '%s\n' "$_r18_scan3" | _internal_header_check "$_r18_registry")
+    if [ -n "$_r18_check3" ]; then
+        hit "R18-selftest" "R18 checker false-positives on a registered family member's include"
+    fi
+
+    _r18_scan4=$(_internal_header_scan "$_r18_dir/fake_guarded.c")
+    if [ -n "$_r18_scan4" ]; then
+        hit "R18-selftest" "R18 scanner failed to skip an NTPACKER_GUI_SELFTEST-guarded include"
+    fi
+
+    _r18_scan5=$(_internal_header_scan "$_r18_dir/fake_frontend.c")
+    if [ -z "$_r18_scan5" ]; then
+        hit "R18-selftest" "R18 scanner failed to emit an unguarded internal-header include"
+    fi
+
+    rm -rf "$_r18_dir"
+    trap - EXIT
+fi
+
 if [ "$fail" -eq 0 ]; then
     say "boundaries OK"
 fi

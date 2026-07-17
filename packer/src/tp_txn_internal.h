@@ -9,6 +9,7 @@
 #include <stdbool.h>
 
 #include "tp_core/tp_transaction.h"
+#include "tp_model_seam.h"
 
 /* The model-state wrapper's field layout. Private to the owning TUs
  * (tp_txn_apply.c, tp_txn_parse.c, tp_history.c); tp_transaction.h exposes only
@@ -30,12 +31,6 @@ struct tp_model {
  * the fresh journal's retained-id index. Defined in tp_txn_idset.c. */
 struct tp_idset;
 const struct tp_idset *tp_txn_idstore_mem_view(const tp_txn_idstore *store);
-
-/* Model-owned project replacement after a separately staged project has been
- * persisted successfully. Takes ownership of `project`; session remains only
- * the persistence/orchestration caller. */
-void tp_model__adopt_project(tp_model *model, tp_project *project);
-tp_status tp_model__migrate_sprite_refs(tp_model *model, tp_error *error);
 
 /* ---- shared between the JSON path (tp_txn_parse.c) and the apply core
  * (tp_txn_apply.c). NOT public: the JSON path runs the idempotency + revision

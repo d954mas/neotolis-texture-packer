@@ -21,7 +21,7 @@
 #include "tp_recovery_internal.h"
 #include "tp_session_internal.h"
 #include "tp_job_owner_internal.h"
-#include "tp_txn_internal.h"
+#include "tp_model_seam.h"
 
 #define TP_SESSION_EVENT_CAPACITY 64U
 
