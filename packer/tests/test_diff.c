@@ -595,7 +595,7 @@ void test_inverse_alloc_failure_rolls_back(void) {
     int64_t revB = tp_model_revision(m);
 
     /* dry-count the diff allocations the inverse needs (on a throwaway clone). */
-    tp_diff_record *r = tp_history_undo_record(m->history);
+    tp_diff_record *r = tp_history_undo_record(tp_model_history(m));
     TEST_ASSERT_NOT_NULL(r);
     tp_project *dry = tp_project_clone(tp_model_project(m));
     TEST_ASSERT_NOT_NULL(dry);
@@ -709,7 +709,7 @@ void test_corrupted_diff_unknown_atlas(void) {
     char *B = serialize(tp_model_project(m));
 
     /* corrupt the record: a stale/unknown atlas id. */
-    tp_diff_record *r = tp_history_undo_record(m->history);
+    tp_diff_record *r = tp_history_undo_record(tp_model_history(m));
     tp_id128 saved = r->ops[0].atlas_id;
     r->ops[0].atlas_id = id_of(0xEE);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_NOT_FOUND, tp_model_undo(m, &err)); /* structured, no crash */
@@ -744,7 +744,7 @@ void test_corrupted_diff_bad_position(void) {
     tp_txn_result_free(&res);
     char *B = serialize(tp_model_project(m));
 
-    tp_diff_record *r = tp_history_undo_record(m->history);
+    tp_diff_record *r = tp_history_undo_record(tp_model_history(m));
     int saved = r->ops[0].position;
     r->ops[0].position = 999; /* out-of-range insert index */
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS, tp_model_undo(m, &err));
@@ -1182,9 +1182,9 @@ void test_history_record_exact_byte_boundary_and_oversize_reject(void) {
     /* First measure the real owned components of this semantic diff. */
     tp_model *probe = fresh();
     commit_rename_ok(probe, "bounded");
-    const size_t bytes = probe->history->records[0]->bytes;
+    const size_t bytes = tp_model_history(probe)->records[0]->bytes;
     TEST_ASSERT_GREATER_THAN(sizeof(tp_diff_record) + sizeof(tp_diff_op), bytes);
-    TEST_ASSERT_EQUAL_UINT64(bytes, probe->history->bytes);
+    TEST_ASSERT_EQUAL_UINT64(bytes, tp_model_history(probe)->bytes);
     tp_model_destroy(probe);
 
     /* Exact boundary is admitted. */
@@ -1192,7 +1192,7 @@ void test_history_record_exact_byte_boundary_and_oversize_reject(void) {
     tp_model *exact = fresh();
     commit_rename_ok(exact, "bounded");
     TEST_ASSERT_EQUAL_INT(1, tp_model_undo_depth(exact));
-    TEST_ASSERT_EQUAL_UINT64(bytes, exact->history->bytes);
+    TEST_ASSERT_EQUAL_UINT64(bytes, tp_model_history(exact)->bytes);
     tp_model_destroy(exact);
 
     /* One byte below the measured record rejects before model publication. */
@@ -1238,14 +1238,14 @@ void test_history_step_budget_discards_redo_then_evicts_fifo(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_undo(m, &err));
     TEST_ASSERT_EQUAL_STRING("A", tp_model_project(m)->atlases[0].name);
     TEST_ASSERT_FALSE(tp_model_can_undo(m));
-    TEST_ASSERT_LESS_OR_EQUAL_UINT64(TP_HISTORY_MAX_BYTES, m->history->bytes);
+    TEST_ASSERT_LESS_OR_EQUAL_UINT64(TP_HISTORY_MAX_BYTES, tp_model_history(m)->bytes);
     tp_model_destroy(m);
 }
 
 void test_history_total_byte_budget_evicts_fifo_at_exact_boundary(void) {
     tp_model *probe = fresh();
     commit_rename_ok(probe, "AAAAAA"); /* same byte length as the original atlas1 */
-    const size_t record_bytes = probe->history->records[0]->bytes;
+    const size_t record_bytes = tp_model_history(probe)->records[0]->bytes;
     tp_model_destroy(probe);
 
     tp_history__test_set_limits(10, record_bytes * 2U, record_bytes);
@@ -1253,11 +1253,11 @@ void test_history_total_byte_budget_evicts_fifo_at_exact_boundary(void) {
     commit_rename_ok(m, "AAAAAA");
     commit_rename_ok(m, "BBBBBB");
     TEST_ASSERT_EQUAL_INT(2, tp_model_undo_depth(m));
-    TEST_ASSERT_EQUAL_UINT64(record_bytes * 2U, m->history->bytes); /* exact total boundary */
+    TEST_ASSERT_EQUAL_UINT64(record_bytes * 2U, tp_model_history(m)->bytes); /* exact total boundary */
 
     commit_rename_ok(m, "CCCCCC"); /* byte budget, not step budget, evicts oldest */
     TEST_ASSERT_EQUAL_INT(2, tp_model_undo_depth(m));
-    TEST_ASSERT_EQUAL_UINT64(record_bytes * 2U, m->history->bytes);
+    TEST_ASSERT_EQUAL_UINT64(record_bytes * 2U, tp_model_history(m)->bytes);
     tp_error err = {0};
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_undo(m, &err));
     TEST_ASSERT_EQUAL_STRING("BBBBBB", tp_model_project(m)->atlases[0].name);

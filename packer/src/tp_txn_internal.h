@@ -10,6 +10,21 @@
 
 #include "tp_core/tp_transaction.h"
 
+/* The model-state wrapper's field layout. Private to the owning TUs
+ * (tp_txn_apply.c, tp_txn_parse.c, tp_history.c); tp_transaction.h exposes only
+ * the opaque handle + read accessors. */
+struct tp_model {
+    tp_project *project;      /* the authoritative live model (owned) */
+    int64_t revision;         /* canonical monotonic counter; runtime, not persisted */
+    tp_id128 saved_identity;  /* semantic identity of the saved baseline (dirty anchor) */
+    bool recovered_unsaved;   /* recovered state is dirty until explicitly saved */
+    tp_txn_idstore *idstore;  /* idempotency retention (owned unless borrowed) */
+    bool owns_idstore;
+    struct tp_history *history; /* optional owned Undo/Redo history */
+    struct tp_journal *journal; /* optional owned acknowledgement journal */
+    struct tp_side_effect_coordinator *coordinator; /* optional borrowed hooks */
+};
+
 /* F2-04 fix C1: the shared id-set behind a memory idstore (NULL for a foreign store).
  * tp_model_attach_journal uses it to migrate ids the model committed journal-less into
  * the fresh journal's retained-id index. Defined in tp_txn_idset.c. */
@@ -142,5 +157,10 @@ size_t tp_project__test_clone_allocation_bytes(void);
  * true no-change without folding unrelated atlases. */
 tp_id128 tp_semantic_atlas_identity(const tp_project *project,
                                     const tp_project_atlas *atlas);
+
+/* Test-only revision seam: forces the canonical revision to an arbitrary value
+ * (e.g. INT64_MAX) so a test can prove the overflow guard rejects further
+ * commits/history transitions without going through TP_TXN_MAX_OPS commits. */
+void tp_model__test_set_revision(tp_model *m, int64_t revision);
 
 #endif /* TP_CORE_SRC_TP_TXN_INTERNAL_H */

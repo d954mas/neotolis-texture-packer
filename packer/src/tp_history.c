@@ -248,6 +248,8 @@ tp_status tp_model_enable_history(tp_model *m) {
 
 bool tp_model_has_history(const tp_model *m) { return m && m->history; }
 
+struct tp_history *tp_model_history(tp_model *m) { return m ? m->history : NULL; }
+
 bool tp_model_can_undo(const tp_model *m) { return m && m->history && m->history->pos > 0; }
 bool tp_model_can_redo(const tp_model *m) { return m && m->history && m->history->pos < m->history->count; }
 int tp_model_undo_depth(const tp_model *m) { return (m && m->history) ? m->history->pos : 0; }

@@ -87,7 +87,14 @@ void tp_model_destroy(tp_model *m) {
 }
 
 tp_project *tp_model_project(tp_model *m) { return m ? m->project : NULL; }
+tp_journal *tp_model_journal(tp_model *m) { return m ? m->journal : NULL; }
 int64_t tp_model_revision(const tp_model *m) { return m ? m->revision : 0; }
+
+void tp_model__test_set_revision(tp_model *m, int64_t revision) {
+    if (m) {
+        m->revision = revision;
+    }
+}
 
 void tp_model__adopt_project(tp_model *model, tp_project *project) {
     if (!model || !project || model->project == project) {

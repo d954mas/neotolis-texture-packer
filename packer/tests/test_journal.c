@@ -827,7 +827,7 @@ void test_checkpoint_byte_admission_precedes_compact_materialization(void) {
             tp_model_project(model), SIZE_MAX, &snapshot_bytes, &err));
     const size_t exact = checkpoint_store_bytes(
         (size_t)TP_JRN_HEADER_LEN, snapshot_bytes,
-        tp_journal_id_count(model->journal));
+        tp_journal_id_count(tp_model_journal(model)));
 
     tp_journal__test_set_file_limit(exact - 1U);
     tp_project__test_serialization_stats_reset();
@@ -863,7 +863,7 @@ void test_checkpoint_byte_admission_precedes_undo_redo_materialization(void) {
 
     tp_project *undo_candidate = tp_project_clone(tp_model_project(model));
     TEST_ASSERT_NOT_NULL(undo_candidate);
-    tp_diff_record *record = tp_history_undo_record(model->history);
+    tp_diff_record *record = tp_history_undo_record(tp_model_history(model));
     TEST_ASSERT_NOT_NULL(record);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_diff_record_apply(undo_candidate, record, true,
@@ -876,7 +876,7 @@ void test_checkpoint_byte_admission_precedes_undo_redo_materialization(void) {
     tp_project_destroy(undo_candidate);
     const size_t undo_exact = checkpoint_store_bytes(
         (size_t)io.length(io.ctx), undo_bytes,
-        tp_journal_id_count(model->journal));
+        tp_journal_id_count(tp_model_journal(model)));
     tp_journal__test_set_file_limit(undo_exact - 1U);
     tp_project__test_serialization_stats_reset();
     tp_project__test_set_clone_alloc_fail(-1);
@@ -897,7 +897,7 @@ void test_checkpoint_byte_admission_precedes_undo_redo_materialization(void) {
 
     tp_project *redo_candidate = tp_project_clone(tp_model_project(model));
     TEST_ASSERT_NOT_NULL(redo_candidate);
-    record = tp_history_redo_record(model->history);
+    record = tp_history_redo_record(tp_model_history(model));
     TEST_ASSERT_NOT_NULL(record);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_diff_record_apply(redo_candidate, record, false,
@@ -910,7 +910,7 @@ void test_checkpoint_byte_admission_precedes_undo_redo_materialization(void) {
     tp_project_destroy(redo_candidate);
     const size_t redo_exact = checkpoint_store_bytes(
         (size_t)io.length(io.ctx), redo_bytes,
-        tp_journal_id_count(model->journal));
+        tp_journal_id_count(tp_model_journal(model)));
     tp_journal__test_set_file_limit(redo_exact - 1U);
     tp_project__test_serialization_stats_reset();
     tp_project__test_set_clone_alloc_fail(-1);
@@ -1125,7 +1125,7 @@ void test_replay_operation_budget_is_prewrite_preclone_and_checkpoint_reset(void
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         tp_journal__set_replay_operations(
-            model->journal, (size_t)TP_JOURNAL_MAX_REPLAY_OPERATIONS, &err));
+            tp_model_journal(model), (size_t)TP_JOURNAL_MAX_REPLAY_OPERATIONS, &err));
     const int64_t revision_before = tp_model_revision(model);
     char *project_before = serialize(tp_model_project(model));
     tp_project__test_set_clone_alloc_fail(0);
@@ -1402,9 +1402,9 @@ void test_checkpoint_and_replay(void) {
 
     char *got = serialize(tp_model_project(m2));
     TEST_ASSERT_EQUAL_STRING(expected, got);
-    TEST_ASSERT_EQUAL_INT(2, tp_journal_id_count(m2->journal));
-    TEST_ASSERT_TRUE(tp_journal_contains(m2->journal, "aa000000000000000000000000000001"));
-    TEST_ASSERT_TRUE(tp_journal_contains(m2->journal, "aa000000000000000000000000000002"));
+    TEST_ASSERT_EQUAL_INT(2, tp_journal_id_count(tp_model_journal(m2)));
+    TEST_ASSERT_TRUE(tp_journal_contains(tp_model_journal(m2), "aa000000000000000000000000000001"));
+    TEST_ASSERT_TRUE(tp_journal_contains(tp_model_journal(m2), "aa000000000000000000000000000002"));
 
     free(expected);
     free(got);
@@ -1539,7 +1539,7 @@ void test_duplicate_retry_after_restart(void) {
     /* A NEW id after restart commits and appends onto the recovered journal. */
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           commit_rename(m2, "bb000000000000000000000000000002", tp_model_revision(m2), "two"));
-    TEST_ASSERT_EQUAL_INT(2, tp_journal_id_count(m2->journal));
+    TEST_ASSERT_EQUAL_INT(2, tp_journal_id_count(tp_model_journal(m2)));
 
     free(after_recover);
     free(after_dup);
@@ -1566,12 +1566,12 @@ void test_append_failure_rolls_back(void) {
     char *after = serialize(tp_model_project(m));
     TEST_ASSERT_EQUAL_STRING(before, after);
     TEST_ASSERT_EQUAL_INT64(rev_before, tp_model_revision(m));
-    TEST_ASSERT_FALSE(tp_journal_contains(m->journal, "cc000000000000000000000000000002"));
+    TEST_ASSERT_FALSE(tp_journal_contains(tp_model_journal(m), "cc000000000000000000000000000002"));
 
     /* Retry the SAME id -> succeeds (the failed append left no torn tail). */
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "cc000000000000000000000000000002", 1, "two"));
     TEST_ASSERT_EQUAL_INT64(rev_before + 1, tp_model_revision(m));
-    TEST_ASSERT_TRUE(tp_journal_contains(m->journal, "cc000000000000000000000000000002"));
+    TEST_ASSERT_TRUE(tp_journal_contains(tp_model_journal(m), "cc000000000000000000000000000002"));
 
     /* And the retried txn is recoverable exactly once (not duplicated). */
     size_t blen = 0;
@@ -1586,7 +1586,7 @@ void test_append_failure_rolls_back(void) {
     tp_error err;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_recover(io2, key, &m2, &info, &err));
     TEST_ASSERT_NOT_NULL(m2);
-    TEST_ASSERT_EQUAL_INT(2, tp_journal_id_count(m2->journal)); /* id01 + id02, once each */
+    TEST_ASSERT_EQUAL_INT(2, tp_journal_id_count(tp_model_journal(m2))); /* id01 + id02, once each */
     char *rec = serialize(tp_model_project(m2));
     TEST_ASSERT_EQUAL_STRING(committed, rec);
 
@@ -1663,7 +1663,7 @@ void test_short_write_every_boundary(void) {
         if (rm) {
             char *s = serialize(tp_model_project(rm)); /* recovered project must load + reserialize */
             free(s);
-            TEST_ASSERT_TRUE(tp_journal_id_count(rm->journal) <= info.records_recovered);
+            TEST_ASSERT_TRUE(tp_journal_id_count(tp_model_journal(rm)) <= info.records_recovered);
             tp_model_destroy(rm);
         }
         tp_journal_recovery_free(&info);
@@ -1694,13 +1694,13 @@ void test_torn_tail_invisible(void) {
     TEST_ASSERT_EQUAL_INT(TP_JOURNAL_RECOVERY_TRUNCATED, info.status);
     TEST_ASSERT_NOT_NULL(m2);
     /* The torn txn is invisible; the good prefix (checkpoint + txn01) survived. */
-    TEST_ASSERT_TRUE(tp_journal_contains(m2->journal, "c0000000000000000000000000000001"));
-    TEST_ASSERT_FALSE(tp_journal_contains(m2->journal, "c0000000000000000000000000000002"));
+    TEST_ASSERT_TRUE(tp_journal_contains(tp_model_journal(m2), "c0000000000000000000000000000001"));
+    TEST_ASSERT_FALSE(tp_journal_contains(tp_model_journal(m2), "c0000000000000000000000000000002"));
 
     /* Retrying the unacknowledged (torn) txn applies it once -- no dup. */
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           commit_rename(m2, "c0000000000000000000000000000002", tp_model_revision(m2), "two"));
-    TEST_ASSERT_TRUE(tp_journal_contains(m2->journal, "c0000000000000000000000000000002"));
+    TEST_ASSERT_TRUE(tp_journal_contains(tp_model_journal(m2), "c0000000000000000000000000000002"));
 
     free(full);
     tp_journal_recovery_free(&info);
@@ -1731,8 +1731,8 @@ void test_checksum_mismatch(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_recover(io2, key, &m2, &info, &err));
     TEST_ASSERT_EQUAL_INT(TP_JOURNAL_RECOVERY_CORRUPT, info.status);
     TEST_ASSERT_NOT_NULL(m2);
-    TEST_ASSERT_TRUE(tp_journal_contains(m2->journal, "d0000000000000000000000000000001"));
-    TEST_ASSERT_FALSE(tp_journal_contains(m2->journal, "d0000000000000000000000000000002"));
+    TEST_ASSERT_TRUE(tp_journal_contains(tp_model_journal(m2), "d0000000000000000000000000000001"));
+    TEST_ASSERT_FALSE(tp_journal_contains(tp_model_journal(m2), "d0000000000000000000000000000002"));
 
     free(full);
     tp_journal_recovery_free(&info);
@@ -2006,7 +2006,7 @@ void test_file_journal_roundtrip(void) {
     TEST_ASSERT_EQUAL_INT64(exp_rev, tp_model_revision(m2));
     char *got = serialize(tp_model_project(m2));
     TEST_ASSERT_EQUAL_STRING(expected, got);
-    TEST_ASSERT_EQUAL_INT(2, tp_journal_id_count(m2->journal));
+    TEST_ASSERT_EQUAL_INT(2, tp_journal_id_count(tp_model_journal(m2)));
 
     free(expected);
     free(got);
@@ -2316,7 +2316,7 @@ void test_attach_migrates_retained_ids(void) {
     TEST_ASSERT_NOT_NULL(j);
     tp_error err;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_attach_journal(m, j, &err));
-    TEST_ASSERT_TRUE(tp_journal_contains(m->journal, "1a000000000000000000000000000001"));
+    TEST_ASSERT_TRUE(tp_journal_contains(tp_model_journal(m), "1a000000000000000000000000000001"));
 
     /* Re-submitting the pre-attach id now rejects as a duplicate (model unchanged). */
     TEST_ASSERT_EQUAL_INT(TP_STATUS_DUPLICATE_ID,
@@ -2333,7 +2333,7 @@ void test_attach_migrates_retained_ids(void) {
     memset(&info, 0, sizeof info);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_recover(io2, key, &m2, &info, &err));
     TEST_ASSERT_NOT_NULL(m2);
-    TEST_ASSERT_TRUE(tp_journal_contains(m2->journal, "1a000000000000000000000000000001"));
+    TEST_ASSERT_TRUE(tp_journal_contains(tp_model_journal(m2), "1a000000000000000000000000000001"));
     tp_journal_recovery_free(&info);
     tp_model_destroy(m2);
 }
@@ -2370,7 +2370,7 @@ void test_torn_tail_is_truncated(void) {
     /* Re-append the unacknowledged txn -> succeeds (journal not poisoned), no dup. */
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           commit_rename(m2, "1d000000000000000000000000000002", tp_model_revision(m2), "two"));
-    TEST_ASSERT_TRUE(tp_journal_contains(m2->journal, "1d000000000000000000000000000002"));
+    TEST_ASSERT_TRUE(tp_journal_contains(tp_model_journal(m2), "1d000000000000000000000000000002"));
 
     free(full);
     tp_journal_recovery_free(&info);
@@ -2619,7 +2619,7 @@ void test_compaction_resets_to_one_checkpoint(void) {
     TEST_ASSERT_TRUE(post_len < pre_len); /* the 3 txn records were dropped */
 
     /* In-memory: the retained-id index survived compaction (idempotency authority intact). */
-    TEST_ASSERT_EQUAL_INT(3, tp_journal_id_count(m->journal));
+    TEST_ASSERT_EQUAL_INT(3, tp_journal_id_count(tp_model_journal(m)));
     tp_model_destroy(m);
 
     /* Recover from the compacted bytes: exactly one record (the checkpoint), no ops to replay. */
@@ -2638,9 +2638,9 @@ void test_compaction_resets_to_one_checkpoint(void) {
     char *got = serialize(tp_model_project(m2));
     TEST_ASSERT_EQUAL_STRING(expected, got); /* (d) recovers exactly the saved state */
     /* durable id set preserved: all three acknowledged ids recovered from the fresh checkpoint */
-    TEST_ASSERT_EQUAL_INT(3, tp_journal_id_count(m2->journal));
-    TEST_ASSERT_TRUE(tp_journal_contains(m2->journal, "80000000000000000000000000000001"));
-    TEST_ASSERT_TRUE(tp_journal_contains(m2->journal, "80000000000000000000000000000003"));
+    TEST_ASSERT_EQUAL_INT(3, tp_journal_id_count(tp_model_journal(m2)));
+    TEST_ASSERT_TRUE(tp_journal_contains(tp_model_journal(m2), "80000000000000000000000000000001"));
+    TEST_ASSERT_TRUE(tp_journal_contains(tp_model_journal(m2), "80000000000000000000000000000003"));
 
     free(expected);
     free(got);
@@ -2680,7 +2680,7 @@ void test_compaction_preserves_retained_ids(void) {
     memset(&info, 0, sizeof info);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_recover(io2, key, &m2, &info, &err));
     TEST_ASSERT_NOT_NULL(m2);
-    TEST_ASSERT_EQUAL_INT(2, tp_journal_id_count(m2->journal));
+    TEST_ASSERT_EQUAL_INT(2, tp_journal_id_count(tp_model_journal(m2)));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_DUPLICATE_ID,
                           commit_rename(m2, "81000000000000000000000000000002", tp_model_revision(m2), "two-again"));
     /* A NEW id still commits + appends onto the compacted journal (it is healthy, not poisoned). */
@@ -2740,14 +2740,14 @@ void test_compaction_no_journal_is_noop(void) {
     tp_project *p = base_project();
     tp_model *m = tp_model_wrap(p);
     TEST_ASSERT_NOT_NULL(m);
-    TEST_ASSERT_NULL(m->journal);
+    TEST_ASSERT_NULL(tp_model_journal(m));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "83000000000000000000000000000001", 0, "solo"));
     char *before = serialize(tp_model_project(m));
     tp_error err;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_compact_journal(m, &err)); /* no journal -> no-op */
     char *after = serialize(tp_model_project(m));
     TEST_ASSERT_EQUAL_STRING(before, after);
-    TEST_ASSERT_NULL(m->journal);
+    TEST_ASSERT_NULL(tp_model_journal(m));
     free(before);
     free(after);
     tp_model_destroy(m);
@@ -2776,7 +2776,7 @@ void test_compaction_truncate_failure_is_fault(void) {
 
     /* Not poisoned by the FAILED compaction -- a normal append still works. */
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "84000000000000000000000000000002", 1, "two"));
-    TEST_ASSERT_TRUE(tp_journal_contains(m->journal, "84000000000000000000000000000002"));
+    TEST_ASSERT_TRUE(tp_journal_contains(tp_model_journal(m), "84000000000000000000000000000002"));
 
     free(pre);
     free(post);
@@ -2832,18 +2832,18 @@ void test_compaction_broken_store_keeps_fail_closed_authority(void) {
 
     const char *acknowledged = "86000000000000000000000000000001";
     const char *blocked = "86000000000000000000000000000002";
-    TEST_ASSERT_TRUE(tp_journal_contains(m->journal, acknowledged));
-    const int retained_before = tp_journal_id_count(m->journal);
+    TEST_ASSERT_TRUE(tp_journal_contains(tp_model_journal(m), acknowledged));
+    const int retained_before = tp_journal_id_count(tp_model_journal(m));
 
     /* Compaction: truncate OK, fresh-checkpoint write FAILS -> journal poisons itself but stays the
      * sole idempotency authority for this live model. */
     tp_journal_io_memory__fail_next_writes(io, 1);
     tp_error err;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED, tp_model_compact_journal(m, &err));
-    TEST_ASSERT_NOT_NULL(m->journal);
-    TEST_ASSERT_TRUE(tp_journal__is_poisoned(m->journal));
-    TEST_ASSERT_EQUAL_INT(retained_before, tp_journal_id_count(m->journal));
-    TEST_ASSERT_TRUE(tp_journal_contains(m->journal, acknowledged));
+    TEST_ASSERT_NOT_NULL(tp_model_journal(m));
+    TEST_ASSERT_TRUE(tp_journal__is_poisoned(tp_model_journal(m)));
+    TEST_ASSERT_EQUAL_INT(retained_before, tp_journal_id_count(tp_model_journal(m)));
+    TEST_ASSERT_TRUE(tp_journal_contains(tp_model_journal(m), acknowledged));
 
     tp_operation op = {0};
     op.kind = TP_OP_ATLAS_RENAME;
@@ -2863,8 +2863,8 @@ void test_compaction_broken_store_keeps_fail_closed_authority(void) {
     TEST_ASSERT_EQUAL_INT(1, result.error_count);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED, result.errors[0].code);
     TEST_ASSERT_EQUAL_STRING("one", tp_model_project(m)->atlases[0].name);
-    TEST_ASSERT_FALSE(tp_journal_contains(m->journal, blocked));
-    TEST_ASSERT_EQUAL_INT(retained_before, tp_journal_id_count(m->journal));
+    TEST_ASSERT_FALSE(tp_journal_contains(tp_model_journal(m), blocked));
+    TEST_ASSERT_EQUAL_INT(retained_before, tp_journal_id_count(tp_model_journal(m)));
     tp_txn_result_free(&result);
 
     /* A retry of an acknowledged id is still rejected as duplicate before touching the poisoned
@@ -3030,7 +3030,7 @@ void test_history_eviction_waits_for_journal_append_ack(void) {
     tp_model *m = model_with_journal(key_of(0x89), &io);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_enable_history(m));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "89000000000000000000000000000001", 0, "one"));
-    const size_t history_bytes = m->history->bytes;
+    const size_t history_bytes = tp_model_history(m)->bytes;
     size_t journal_before_len = 0U;
     uint8_t *journal_before = snapshot_io(io, &journal_before_len);
 
@@ -3040,7 +3040,7 @@ void test_history_eviction_waits_for_journal_append_ack(void) {
     TEST_ASSERT_EQUAL_STRING("one", tp_model_project(m)->atlases[0].name);
     TEST_ASSERT_EQUAL_INT64(1, tp_model_revision(m));
     TEST_ASSERT_EQUAL_INT(1, tp_model_undo_depth(m));
-    TEST_ASSERT_EQUAL_UINT64(history_bytes, m->history->bytes);
+    TEST_ASSERT_EQUAL_UINT64(history_bytes, tp_model_history(m)->bytes);
     size_t journal_after_len = 0U;
     uint8_t *journal_after = snapshot_io(io, &journal_after_len);
     TEST_ASSERT_EQUAL_UINT64(journal_before_len, journal_after_len);
@@ -3071,7 +3071,7 @@ void test_revision_max_rejects_commit_and_history_without_overflow(void) {
     char name_copy[64];
     (void)snprintf(name_copy, sizeof name_copy, "%s", name_before);
 
-    m->revision = INT64_MAX; /* a CRC-valid hostile recovery record can carry any i64 */
+    tp_model__test_set_revision(m, INT64_MAX); /* a CRC-valid hostile recovery record can carry any i64 */
     tp_error err = {0};
     TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_REVISION,
                           commit_rename(m, "8f000000000000000000000000000002", INT64_MAX, "two"));
@@ -3232,7 +3232,7 @@ void test_metadata_roundtrip(void) {
     tp_model *m = model_with_journal(key, &io);
     tp_error err;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_journal_set_metadata(m->journal, 1700000000, "/foo/bar.ntpacker", "bar", &err));
+                          tp_journal_set_metadata(tp_model_journal(m), 1700000000, "/foo/bar.ntpacker", "bar", &err));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "90000000000000000000000000000001", 0, "renamed"));
     char *expected = serialize(tp_model_project(m));
     int64_t exp_rev = tp_model_revision(m);
@@ -3279,7 +3279,7 @@ void test_metadata_fingerprint_roundtrip_and_compaction(void) {
     tp_error err = {0};
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        tp_journal_set_metadata_ex(m->journal, 1700012345, "/fingerprint/p.ntpacker_project", "p",
+        tp_journal_set_metadata_ex(tp_model_journal(m), 1700012345, "/fingerprint/p.ntpacker_project", "p",
                                    &fingerprint, &err));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_compact_journal(m, &err));
 
@@ -3316,7 +3316,7 @@ void test_recovery_metadata_oom_cleans_materialized_descriptors(void) {
     tp_error err = {{0}};
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        tp_journal_set_metadata(model->journal, 1700000001,
+        tp_journal_set_metadata(tp_model_journal(model), 1700000001,
                                 "/foo/oom.ntpacker", "oom", &err));
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
@@ -3528,7 +3528,7 @@ void test_recovery_rejects_oversize_borrowed_op_before_parse(void) {
     tp_error err = {0};
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        tp_journal_append_txn(m->journal, "c2000000000000000000000000000001", 1,
+        tp_journal_append_txn(tp_model_journal(m), "c2000000000000000000000000000001", 1,
                               payload, payload_len, &err));
     free(payload);
 
@@ -3596,7 +3596,7 @@ void test_metadata_empty_path(void) {
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io);
     tp_error err;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_set_metadata(m->journal, 42, "", "", &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_set_metadata(tp_model_journal(m), 42, "", "", &err));
     size_t blen = 0;
     uint8_t *bytes = snapshot_io(io, &blen);
     tp_model_destroy(m);
@@ -3624,8 +3624,8 @@ void test_metadata_last_wins(void) {
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io);
     tp_error err;
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_set_metadata(m->journal, 100, "/old/path.ntpacker", "old", &err));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_set_metadata(m->journal, 200, "/new/path.ntpacker", "new", &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_set_metadata(tp_model_journal(m), 100, "/old/path.ntpacker", "old", &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_journal_set_metadata(tp_model_journal(m), 200, "/new/path.ntpacker", "new", &err));
     size_t blen = 0;
     uint8_t *bytes = snapshot_io(io, &blen);
     tp_model_destroy(m);
@@ -3653,7 +3653,7 @@ void test_metadata_survives_compaction(void) {
     tp_model *m = model_with_journal(key, &io);
     tp_error err;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_journal_set_metadata(m->journal, 1700001234, "/proj/p.ntpacker", "p", &err));
+                          tp_journal_set_metadata(tp_model_journal(m), 1700001234, "/proj/p.ntpacker", "p", &err));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "93000000000000000000000000000001", 0, "one"));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "93000000000000000000000000000002", 1, "two"));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_compact_journal(m, &err));
@@ -3699,7 +3699,7 @@ void test_peek_metadata(void) {
     tp_model *m = model_with_journal(key, &io);
     tp_error err;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_journal_set_metadata(m->journal, 1700005555, "/scan/proj.ntpacker", "proj", &err));
+                          tp_journal_set_metadata(tp_model_journal(m), 1700005555, "/scan/proj.ntpacker", "proj", &err));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "94000000000000000000000000000001", 0, "renamed"));
     size_t blen = 0;
     uint8_t *bytes = snapshot_io(io, &blen);
@@ -3728,7 +3728,7 @@ void test_peek_and_recover_agree(void) {
     tp_model *m = model_with_journal(key, &io);
     tp_error err;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_journal_set_metadata(m->journal, 1700009999, "/agree/a.ntpacker", "a", &err));
+                          tp_journal_set_metadata(tp_model_journal(m), 1700009999, "/agree/a.ntpacker", "a", &err));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "95000000000000000000000000000001", 0, "one"));
     size_t blen = 0;
     uint8_t *bytes = snapshot_io(io, &blen);
@@ -3837,8 +3837,8 @@ void test_set_metadata_write_failure_is_reported_but_still_caches(void) {
     tp_journal_io_memory__fail_next_writes(io, 1); /* fail ONLY the META durable write (header present) */
     TEST_ASSERT_NOT_EQUAL(
         TP_STATUS_OK,
-        tp_journal_set_metadata(m->journal, 1700000000, "/still/caches.ntpacker", "cached", &err));
-    TEST_ASSERT_FALSE(tp_journal__is_poisoned(m->journal)); /* torn META rolled back -> journal healthy */
+        tp_journal_set_metadata(tp_model_journal(m), 1700000000, "/still/caches.ntpacker", "cached", &err));
+    TEST_ASSERT_FALSE(tp_journal__is_poisoned(tp_model_journal(m))); /* torn META rolled back -> journal healthy */
 
     /* Fault exhausted -> compaction re-emits the cached (authoritative) metadata durably. */
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_compact_journal(m, &err));
@@ -3870,7 +3870,7 @@ void test_peek_agrees_recover_torn_tail(void) {
     tp_model *m = model_with_journal(key, &io);
     tp_error err;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_journal_set_metadata(m->journal, 1700003333, "/parity/torn.ntpacker", "torn", &err));
+                          tp_journal_set_metadata(tp_model_journal(m), 1700003333, "/parity/torn.ntpacker", "torn", &err));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "a4000000000000000000000000000001", 0, "one"));
     size_t full_len = 0;
     uint8_t *full = snapshot_io(io, &full_len);
@@ -3948,7 +3948,7 @@ void test_recovered_metadata_survives_recompaction(void) {
     tp_model *m = model_with_journal(key, &io);
     tp_error err;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_journal_set_metadata(m->journal, 1700007777, "/recov/keepme.ntpacker", "keepme", &err));
+                          tp_journal_set_metadata(tp_model_journal(m), 1700007777, "/recov/keepme.ntpacker", "keepme", &err));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "a3000000000000000000000000000001", 0, "one"));
     size_t blen = 0;
     uint8_t *bytes = snapshot_io(io, &blen);

@@ -623,7 +623,7 @@ static tp_status commit_numbered_change(tp_model *model, unsigned id_value,
     tp_operation operation;
     char name[32];
     (void)snprintf(name, sizeof name, "atlas-%u", id_value);
-    op_atlas_rename(&operation, model->project->atlases[0].id, name);
+    op_atlas_rename(&operation, tp_model_project(model)->atlases[0].id, name);
     request.schema = TP_TXN_SCHEMA;
     (void)snprintf(request.id_hex, sizeof request.id_hex, "%032x", id_value);
     request.expected_revision = expected_revision;
@@ -635,8 +635,8 @@ static tp_status commit_numbered_change(tp_model *model, unsigned id_value,
 void test_idempotency_retention_window_evicts_fifo(void) {
     tp_model *model = tp_model_create();
     TEST_ASSERT_NOT_NULL(model);
-    model->project->atlases[0].id = id_of(0x77);
-    model->project->atlases[0].id_synthetic = false;
+    tp_model_project(model)->atlases[0].id = id_of(0x77);
+    tp_model_project(model)->atlases[0].id_synthetic = false;
     tp_txn_result result;
     tp_error err = {0};
 

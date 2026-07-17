@@ -59,18 +59,10 @@ struct tp_side_effect_coordinator;
 /* ---- the model-state wrapper --------------------------------------------- *
  * project + canonical revision + saved-baseline identity + idempotency store. The
  * revision is RUNTIME: it is never serialized to the project file (§414) and starts
- * at 0. The wrapper OWNS the project (the atomic swap frees and replaces it). */
-typedef struct tp_model {
-    tp_project *project;      /* the authoritative live model (owned) */
-    int64_t revision;         /* canonical monotonic counter; runtime, not persisted */
-    tp_id128 saved_identity;  /* semantic identity of the saved baseline (dirty anchor) */
-    bool recovered_unsaved;   /* recovered state is dirty until explicitly saved */
-    tp_txn_idstore *idstore;  /* idempotency retention (owned unless borrowed) */
-    bool owns_idstore;
-    struct tp_history *history; /* optional owned Undo/Redo history */
-    struct tp_journal *journal; /* optional owned acknowledgement journal */
-    struct tp_side_effect_coordinator *coordinator; /* optional borrowed hooks */
-} tp_model;
+ * at 0. The wrapper OWNS the project (the atomic swap frees and replaces it).
+ * Opaque: the field layout is private to the owning TUs (tp_txn_apply.c,
+ * tp_txn_parse.c, tp_history.c) via tp_txn_internal.h. */
+typedef struct tp_model tp_model;
 
 /* Wrap an existing project (TAKES OWNERSHIP) in a model at revision 0 with a fresh
  * in-memory idstore; the saved baseline is the wrapped project's current identity
@@ -88,6 +80,13 @@ void tp_model_destroy(tp_model *m);
 /* The live project (borrowed; valid until the next committed transaction swaps it
  * or the model is destroyed). */
 tp_project *tp_model_project(tp_model *m);
+
+/* The attached recovery journal (borrowed; NULL if none is attached). */
+tp_journal *tp_model_journal(tp_model *m);
+
+/* The attached Undo/Redo history (borrowed; NULL if history is not enabled via
+ * tp_model_enable_history). */
+struct tp_history *tp_model_history(tp_model *m);
 
 /* The canonical revision. Increments by exactly 1 per committed transaction or
  * acknowledged Undo/Redo history transition; Save does NOT change it (§420). */
