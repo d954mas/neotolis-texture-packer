@@ -4,12 +4,6 @@
 #include <stdio.h>
 #include <string.h>
 
-#if defined(_WIN32)
-#include <windows.h>
-#else
-#include <pthread.h>
-#endif
-
 #include "tp_core/tp_diff.h"
 #include "tp_core/tp_project_lease.h"
 #include "tp_core/tp_project_migrate.h"
@@ -19,7 +13,7 @@
 #include "tp_core/tp_srckey.h"
 #include "tp_core/tp_transaction.h"
 #include "tp_recovery_live_seam.h"
-#include "tp_session_internal.h"
+#include "tp_session_layout.h"
 #include "tp_job_owner_internal.h"
 #include "tp_model_seam.h"
 

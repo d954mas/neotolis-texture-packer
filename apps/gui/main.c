@@ -123,13 +123,12 @@ static bool s_atlas_bound;
 // #region ui ids gate
 static bool s_ids_ready;
 
-/* s_id_mb_ file/edit/view/help and s_id_menu_ file/edit/view/help (menubar + menu-panel ids), the
- * menu-state buffers (s_file/edit/view/help_state + the four nt_ui_menu_ctx_t working buffers), the
- * MK_ item-key enum, and s_ctx_menu (the context-menu declare-machinery working buffer) moved to
- * gui_view_chrome.c -- nothing outside chrome ever read them. The ids themselves moved into
- * gui_state (same precedent as s_id_ctx_menu) rather than staying chrome-local, so ensure_ids below
- * still seeds them directly with no extra hook function; the menu-state buffers and the item-key
- * enum, which nothing outside chrome touches, became chrome-local statics instead. */
+/* s_id_mb_ file/edit/view/help and s_id_menu_ file/edit/view/help (menubar + menu-panel ids) live in
+ * gui_state (same precedent as s_id_ctx_menu), so ensure_ids below still seeds them directly with no
+ * extra hook function. The menu-state buffers (s_file/edit/view/help_state + the four
+ * nt_ui_menu_ctx_t working buffers), the MK_ item-key enum, and s_ctx_menu (the context-menu
+ * declare-machinery working buffer) are chrome-local statics in gui_view_chrome.c -- nothing outside
+ * chrome ever reads them. */
 // #endregion
 
 // #region editor state
@@ -145,22 +144,21 @@ static float s_pan_last_x, s_pan_last_y;
 #define CANVAS_DRAG_THRESHOLD 4.0F
 
 /* The deferred side-effect queue (s_pending_*), the new/open/exit confirm-flow flags (s_after_confirm/
- * s_confirm_open/s_modal_action) and the last-pack timing (s_last_pack_*) moved to gui_actions; the
- * modal open flags (s_about_open / s_export_open) moved to gui_state (shared with the selftest);
- * s_blur_inputs (set here by frame(), read by the settings-panel field widgets) moved to gui_state
- * too (the view TU needs it). */
+ * s_confirm_open/s_modal_action) and the last-pack timing (s_last_pack_*) live in gui_actions. The
+ * modal open flags (s_about_open / s_export_open) live in gui_state (shared with the selftest); so
+ * does s_blur_inputs -- set here by frame(), read by the settings-panel field widgets in the view TU. */
 
-/* s_pack_has_sources/s_pack_stale (pack-button state cached for the tooltip pass) moved to
+/* s_pack_has_sources/s_pack_stale (pack-button state cached for the tooltip pass) live in
  * gui_state (written by gui_view_canvas's declare_canvas_strip, read by gui_view_chrome's
  * declare_tooltips). The right settings panel's disclosure/dropdown-open bits and numeric-field edit
- * buffers moved to gui_view_settings.c (panel-local). GUI_MAX_TARGETS and k_playback_names
+ * buffers are panel-local statics in gui_view_settings.c. GUI_MAX_TARGETS and k_playback_names
  * live in gui_defs.h (shared with gui_view_chrome's declare_export_modal / gui_view_canvas's
  * declare_canvas_preview). */
 
 // #endregion
 
 // #region small helpers
-/* gui_open_url (opens a URL in the OS default browser -- the About link) moved to
+/* gui_open_url (opens a URL in the OS default browser -- the About link) lives in
  * gui_view_chrome.c: it is chrome-only, the About modal is its sole caller. */
 
 /* Shell-owned release of the canvas borrow and its comparison cache. Callers
@@ -362,14 +360,14 @@ static void try_bind_resources(void) {
 // #region menu bar
 /* close_menubar_menus/close_all_menus, the File/Edit/View/Help menu item builders (file_items/
  * edit_items/scale_item/overlay_item/view_items/help_items), menubar_entry, and declare_menubar
- * moved to gui_view_chrome.c. close_menubar_menus keeps a prototype here via gui_shell.h (the
- * sanctioned cross-view surface the three other views' context-menu triggers read) and in
- * gui_view_chrome.h (for frame() below); its definition lives in gui_view_chrome.c now. */
+ * live in gui_view_chrome.c. close_menubar_menus is declared here via gui_shell.h (the sanctioned
+ * cross-view surface the three other views' context-menu triggers read) and in gui_view_chrome.h
+ * (for frame() below); its definition lives in gui_view_chrome.c. */
 // #endregion
 
 // #region left panel (atlases + sprites)
-/* declare_left_panel + its atlas/sprite/animation row helpers moved to gui_view_lists.c.
- * declare_row_tooltips moved to gui_view_chrome.c (chrome-owned per the plan's §3 fan-out table). */
+/* declare_left_panel + its atlas/sprite/animation row helpers live in gui_view_lists.c.
+ * declare_row_tooltips lives in gui_view_chrome.c (chrome-owned per the plan's §3 fan-out table). */
 // #endregion
 
 // #region canvas
@@ -463,20 +461,20 @@ static void handle_canvas_input(void) {
 }
 
 /* atlas_fill_pct, strip_group_actions/pages/zoom, declare_canvas_strip, declare_canvas_preview,
- * declare_canvas, status_sev_color/status_sev_icon, and declare_status_pill moved to
+ * declare_canvas, status_sev_color/status_sev_icon, and declare_status_pill live in
  * gui_view_canvas.c. handle_canvas_input above stays here per the P-2 lead ruling
  * (docs/plans/gui-decomposition.md §2). */
 // #endregion
 
 // #region status bar + menus + tooltips
-/* status_sev_color, status_sev_icon, declare_status_pill moved to gui_view_canvas.c -- see the note
+/* status_sev_color, status_sev_icon, declare_status_pill live in gui_view_canvas.c -- see the note
  * in the canvas region above.
  *
  * declare_menus, declare_context_menu, declare_tooltips, declare_export_modal, declare_confirm_modal,
- * and declare_about_modal moved to gui_view_chrome.c. */
+ * and declare_about_modal live in gui_view_chrome.c. */
 // #endregion
 
-/* The right settings panel (regions F/G + per-region packing overrides) moved to
+/* The right settings panel (regions F/G + per-region packing overrides) lives in
  * gui_view_settings.c/h -- declare_right_panel is called from frame() below; the header exposes
  * only that entry point. */
 

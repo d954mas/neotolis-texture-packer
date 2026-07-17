@@ -47,7 +47,7 @@ static float atlas_fill_pct(const tp_result *r) {
     return (total > 0.0) ? (float)(placed * 100.0 / total) : 0.0F;
 }
 
-/* transform_decode_str moved to gui_widgets (shared by this canvas readout and the
+/* transform_decode_str lives in gui_widgets (shared by this canvas readout and the
  * settings-panel "Packed" row). */
 
 /* --- Canvas strip control groups (icons; shared by the single-row strip and the two-row compact). Every

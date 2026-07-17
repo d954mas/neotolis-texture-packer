@@ -1,6 +1,6 @@
 /* Immutable snapshot materialization and the DTO/selector query surface, split
  * from tp_session.c as the session family's read-only second responsibility zone.
- * It reads committed state through tp_session_internal.h under the shared writer
+ * It reads committed state through tp_session_layout.h under the shared writer
  * gate and never mutates the live model or its project. */
 #include "tp_core/tp_session.h"
 
@@ -14,7 +14,7 @@
 #include "tp_core/tp_sprite_index.h"
 #include "tp_core/tp_srckey.h"
 #include "tp_core/tp_transaction.h"
-#include "tp_session_internal.h"
+#include "tp_session_layout.h"
 
 // #region snapshot types
 typedef struct tp_snapshot_atlas_storage {
