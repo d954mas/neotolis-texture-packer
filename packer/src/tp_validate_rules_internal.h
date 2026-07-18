@@ -21,5 +21,9 @@ char *validation_slash_norm_owned(const char *source);
 void validate_source_domain(validation_builder *builder,
                             const tp_project *project,
                             const tp_project_atlas *atlas);
+void validate_sprite_animation_domain(validation_builder *builder,
+                                      const tp_project *project,
+                                      int atlas_index,
+                                      const tp_project_atlas *atlas);
 
 #endif /* TP_VALIDATE_RULES_INTERNAL_H */
