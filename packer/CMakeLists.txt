@@ -38,7 +38,7 @@ add_library(tp_core STATIC
     # Durable recovery journal and injectable I/O seam.
     src/tp_journal.c src/tp_journal_io.c)
 if(WIN32)
-    target_sources(tp_core PRIVATE src/tp_fs_win32.c)
+    target_sources(tp_core PRIVATE src/tp_fs_win32.c src/tp_recovery_backend_win32.c)
 else()
     target_sources(tp_core PRIVATE src/tp_fs_posix.c)
 endif()
