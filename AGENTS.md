@@ -90,6 +90,23 @@ cmake --build --preset native-debug
 Outputs land in `build/<area>/<target>/<preset>/`. Tests run via
 `ctest --preset native-release` (or `native-debug`).
 
+## Simplification Budget
+
+Production C excludes vendored, generated, test, benchmark, pack-builder, and
+GUI-selftest sources. New translation units target <=500 physical LOC and may
+not exceed 800. Existing files above 800 are exact no-growth ratchets enforced
+by `architecture_loc_budget`; lower the matching baseline whenever a file
+shrinks.
+
+Functions target <=60 physical LOC and cognitive complexity <=15. Hard limits
+for new or materially rewritten functions are 120 LOC, cognitive complexity 30,
+nesting depth 4, and 6 parameters. A dispatcher may exceed the CC limit only
+when its cases delegate to family handlers and contain no business rules.
+Existing hard-limit violations are not precedent: when touched, they must not
+grow and should be split along the responsibility map in the latest
+simplification audit. Measure CC with Clang-Tidy's
+`readability-function-cognitive-complexity` check.
+
 ## CI / Releases
 
 GitHub Actions (`.github/workflows/`): `ci.yml` builds and tests on
