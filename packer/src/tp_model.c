@@ -139,3 +139,32 @@ tp_status tp_revision_check(int64_t expected_revision, int64_t current_revision,
     return tp_error_set(err, TP_STATUS_INVALID_REVISION, "expected_revision %" PRId64 " > current %" PRId64,
                         expected_revision, current_revision);
 }
+
+/* ---- side-effect coordinator + model <-> journal glue ------------------- */
+
+tp_side_effect_coordinator tp_side_effect_coordinator_noop(void) {
+    tp_side_effect_coordinator c;
+    c.ctx = NULL;
+    c.prepare = NULL;
+    c.publish = NULL;
+    c.abort = NULL;
+    return c;
+}
+
+void tp_model_set_coordinator(tp_model *m, tp_side_effect_coordinator *c) {
+    if (m) {
+        m->coordinator = c;
+    }
+}
+
+tp_status tp_model__next_revision(int64_t current, int64_t *next, tp_error *err) {
+    if (!next) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "null next revision output");
+    }
+    if (current < 0 || current == INT64_MAX) {
+        return tp_error_set(err, TP_STATUS_INVALID_REVISION,
+                            "model revision cannot advance from %lld", (long long)current);
+    }
+    *next = current + 1;
+    return TP_STATUS_OK;
+}
