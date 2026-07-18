@@ -105,6 +105,20 @@ nt_set_warning_flags(tp_test_session)
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_session_test")
 add_test(NAME tp_session COMMAND tp_test_session "${CMAKE_BINARY_DIR}/tp_session_test")
 
+# Save I/O propagation at the live owner boundary. This stays separate from the
+# broad session battery so the identity/fingerprint/history outcome table is
+# easy to review when persistence changes.
+add_executable(tp_test_session_save_io_contract test_session_save_io_contract.c)
+target_link_libraries(tp_test_session_save_io_contract PRIVATE tp_core unity)
+target_include_directories(tp_test_session_save_io_contract PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_options(tp_test_session_save_io_contract PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_session_save_io_contract)
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_session_save_io_contract_test")
+add_test(NAME tp_session_save_io_contract COMMAND
+    tp_test_session_save_io_contract
+    "${CMAKE_BINARY_DIR}/tp_session_save_io_contract_test")
+
 add_executable(tp_test_job_owner test_job_owner.c)
 target_link_libraries(tp_test_job_owner PRIVATE tp_core tinycthread unity)
 target_include_directories(tp_test_job_owner PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)

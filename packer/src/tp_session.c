@@ -531,6 +531,13 @@ tp_status tp_session_redo(tp_session *session, tp_error *err) {
 // #endregion
 
 // #region save & identity
+static void remap_save_error_path(tp_status status, const char *public_path,
+                                  tp_error *err) {
+    if (status == TP_STATUS_FILE_IO_FAILED && err) {
+        err->file_io.path = public_path;
+    }
+}
+
 static tp_status save_as_locked(tp_session *session, const char *path,
                                 bool create_only,
                                 tp_session_save_result *result, tp_error *err) {
@@ -578,6 +585,7 @@ static tp_status save_as_locked(tp_session *session, const char *path,
     status = tp_project_save_candidate_with_fingerprint(
         candidate, canonical, expected_fingerprint, create_only,
         &fingerprint, err);
+    remap_save_error_path(status, path, err);
     const bool file_durability_degraded =
         status == TP_STATUS_FILE_DURABILITY_UNCERTAIN;
     const tp_status file_durability_status =
@@ -728,6 +736,7 @@ tp_status tp_session_save_detached_recovery(
             status = tp_project_save_candidate_with_fingerprint(
                 candidate, canonical, expected_fingerprint, false,
                 &fingerprint, err);
+            remap_save_error_path(status, path, err);
             file_durability_degraded =
                 status == TP_STATUS_FILE_DURABILITY_UNCERTAIN;
             file_durability_status = file_durability_degraded
