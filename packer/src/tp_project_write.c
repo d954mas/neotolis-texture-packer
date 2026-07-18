@@ -507,13 +507,6 @@ static void tp_emit_root(tp_sb *sb, const tp_project *p, const tp_pack_settings 
 /* save                                                                     */
 /* ======================================================================== */
 
-const tp_project_json_limits TP_PROJECT_JSON_LIMITS = {
-    (size_t)TP_IDENTITY_FILE_MAX_BYTES,
-    (size_t)TP_PROJECT_JSON_MAX_NODES,
-    (size_t)TP_PROJECT_JSON_MAX_CONTAINER_ENTRIES,
-    (size_t)TP_PROJECT_JSON_MAX_DEPTH,
-};
-
 static tp_status project_save_buffer_mode(const tp_project *p, bool checkpoint,
                                           const tp_project_json_limits *limits,
                                           char **out, size_t *out_len,
