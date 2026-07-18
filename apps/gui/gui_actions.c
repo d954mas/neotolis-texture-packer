@@ -34,9 +34,6 @@ bool s_pending_open, s_pending_save, s_pending_save_as, s_pending_add_files, s_p
 bool s_pending_pack, s_pending_export;
 bool s_pending_commit_edit; /* a press landed outside the active inline-edit field -> commit it */
 bool s_pending_commit_edit_enter; /* Enter in the inline editor -> commit it (deferred, non-force) */
-static bool s_pending_add_anim;
-static tp_id128 s_pending_add_anim_atlas_id;
-static int64_t s_pending_add_anim_revision;
 typedef struct pending_create_animation {
     bool active;
     tp_id128 atlas_id;
@@ -45,10 +42,6 @@ typedef struct pending_create_animation {
     tp_op_sprite_ref *frames;
     int frame_count;
 } pending_create_animation;
-static pending_create_animation s_pending_create_anim;
-static bool s_pending_open_preview;
-static gui_animation_ref s_pending_open_preview_ref;
-static gui_animation_ref s_preview_animation_ref;
 /* Presentation-only mapping from the active stable animation to one Pack result. */
 typedef struct preview_frame_cache {
     int *indices;
@@ -62,16 +55,6 @@ typedef struct preview_frame_cache {
     uint64_t pack_result_version;
     bool valid;
 } preview_frame_cache;
-static preview_frame_cache s_preview_frames;
-#ifdef NTPACKER_GUI_SELFTEST
-static gui_preview_frame_work s_preview_frame_work;
-void gui_preview_frame_work_reset(void) {
-    memset(&s_preview_frame_work, 0, sizeof s_preview_frame_work);
-}
-gui_preview_frame_work gui_preview_frame_work_get(void) {
-    return s_preview_frame_work;
-}
-#endif
 bool s_pending_remove_atlas;
 tp_id128 s_pending_remove_atlas_id;
 int64_t s_pending_remove_atlas_revision;
@@ -79,15 +62,6 @@ bool s_pending_remove_source;
 tp_id128 s_pending_remove_source_atlas_id;
 tp_id128 s_pending_remove_source_id;
 int64_t s_pending_remove_source_revision;
-static bool s_pending_remove_anim;
-static gui_animation_ref s_pending_remove_anim_ref;
-static bool s_pending_add_target;
-static tp_id128 s_pending_add_target_atlas_id;
-static int64_t s_pending_add_target_revision;
-static bool s_pending_remove_target;
-static gui_target_ref s_pending_remove_target_ref;
-static bool s_pending_browse_target;
-static gui_target_ref s_pending_browse_target_ref;
 int s_pending_preview_target = -1; /* boundary-ok: exporter option, not a target entity index */
 int s_after_confirm;
 bool s_confirm_open;
@@ -96,9 +70,6 @@ int s_modal_action;
  * count/at accessors and requests a per-row action, deferred to apply_pending() (below) so the
  * Save-As dialog + disk-mutating gui_recovery_resolve run outside nt_ui_begin/end, like s_pending_save_as. */
 bool s_recovery_open;
-static gui_recovery_list s_recovery_list;           /* orphans awaiting the user's decision */
-static int s_recovery_pending_row = -1;             /* -1 = none; else a row index requested this frame */
-static int s_recovery_pending_action = 0;           /* gui_recovery_action for the pending row */
 double s_last_pack_ms;      /* wall-clock ms of the last successful pack (for the stats line) */
 int s_last_pack_atlas = -1; /* which atlas that timing belongs to */
 
@@ -133,10 +104,6 @@ typedef struct target_edit_intent {
     char *out_path; /* HEAP: target out_path (up to TP_PATH_MAX); freed after drain -- F2 (no 255 cap) */
 } target_edit_intent;
 
-static target_edit_intent *s_target_intents;
-static int s_target_intent_count;
-static int s_target_intent_cap;
-
 typedef struct atlas_setting_intent {
     tp_id128 atlas_id;
     int64_t expected_revision;
@@ -144,10 +111,6 @@ typedef struct atlas_setting_intent {
     int ivalue;
     float fvalue;
 } atlas_setting_intent;
-
-static atlas_setting_intent *s_atlas_setting_intents;
-static int s_atlas_setting_intent_count;
-static int s_atlas_setting_intent_cap;
 
 typedef enum sprite_intent_kind {
     SPRITE_INTENT_ORIGIN = 0,
@@ -165,10 +128,6 @@ typedef struct sprite_edit_intent {
     int ivalue;
     float fvalue;
 } sprite_edit_intent;
-
-static sprite_edit_intent *s_sprite_intents;
-static int s_sprite_intent_count;
-static int s_sprite_intent_cap;
 
 typedef enum animation_intent_kind {
     ANIMATION_INTENT_FPS = 0,
@@ -191,25 +150,80 @@ typedef struct animation_edit_intent {
     int frame_count;
 } animation_edit_intent;
 
-static animation_edit_intent *s_animation_intents;
-static int s_animation_intent_count;
-static int s_animation_intent_cap;
+typedef struct gui_actions_state {
+    bool pending_add_anim;
+    tp_id128 pending_add_anim_atlas_id;
+    int64_t pending_add_anim_revision;
+    pending_create_animation pending_create_anim;
+    bool pending_open_preview;
+    gui_animation_ref pending_open_preview_ref;
+    gui_animation_ref preview_animation_ref;
+    preview_frame_cache preview_frames;
+#ifdef NTPACKER_GUI_SELFTEST
+    gui_preview_frame_work preview_frame_work;
+#endif
+    bool pending_remove_anim;
+    gui_animation_ref pending_remove_anim_ref;
+    bool pending_add_target;
+    tp_id128 pending_add_target_atlas_id;
+    int64_t pending_add_target_revision;
+    bool pending_remove_target;
+    gui_target_ref pending_remove_target_ref;
+    bool pending_browse_target;
+    gui_target_ref pending_browse_target_ref;
+    gui_recovery_list recovery_list;
+    int recovery_pending_row;
+    int recovery_pending_action;
+    target_edit_intent *target_intents;
+    int target_intent_count;
+    int target_intent_cap;
+    atlas_setting_intent *atlas_setting_intents;
+    int atlas_setting_intent_count;
+    int atlas_setting_intent_cap;
+    sprite_edit_intent *sprite_intents;
+    int sprite_intent_count;
+    int sprite_intent_cap;
+    animation_edit_intent *animation_intents;
+    int animation_intent_count;
+    int animation_intent_cap;
+    bool gesture_commit;
+    tp_id128 edit_atlas_id;
+    int64_t edit_atlas_revision;
+    tp_id128 edit_anim_atlas_id;
+    tp_id128 edit_anim_id;
+    int64_t edit_anim_revision;
+    tp_id128 edit_sprite_atlas_id;
+    tp_id128 edit_sprite_source_id;
+    int64_t edit_sprite_revision;
+    char edit_sprite_source_key[TP_SRCKEY_MAX];
+} gui_actions_state;
+
+static gui_actions_state s_actions = {.recovery_pending_row = -1};
+
+#ifdef NTPACKER_GUI_SELFTEST
+void gui_preview_frame_work_reset(void) {
+    memset(&s_actions.preview_frame_work, 0, sizeof s_actions.preview_frame_work);
+}
+gui_preview_frame_work gui_preview_frame_work_get(void) {
+    return s_actions.preview_frame_work;
+}
+#endif
 
 void gui_queue_atlas_setting(tp_id128 atlas_id, int64_t expected_revision,
                              gui_atlas_field field, int ivalue, float fvalue) {
-    if (s_atlas_setting_intent_count == s_atlas_setting_intent_cap) {
-        const int capacity = s_atlas_setting_intent_cap ? s_atlas_setting_intent_cap * 2 : 8;
+    if (s_actions.atlas_setting_intent_count == s_actions.atlas_setting_intent_cap) {
+        const int capacity = s_actions.atlas_setting_intent_cap ? s_actions.atlas_setting_intent_cap * 2 : 8;
         atlas_setting_intent *intents = (atlas_setting_intent *)realloc(
-            s_atlas_setting_intents, (size_t)capacity * sizeof *intents);
+            s_actions.atlas_setting_intents, (size_t)capacity * sizeof *intents);
         if (!intents) {
             set_status_ex(STATUS_ERROR,
                           "Out of memory: this atlas edit could not be queued (change not applied).");
             return;
         }
-        s_atlas_setting_intents = intents;
-        s_atlas_setting_intent_cap = capacity;
+        s_actions.atlas_setting_intents = intents;
+        s_actions.atlas_setting_intent_cap = capacity;
     }
-    s_atlas_setting_intents[s_atlas_setting_intent_count++] =
+    s_actions.atlas_setting_intents[s_actions.atlas_setting_intent_count++] =
         (atlas_setting_intent){atlas_id, expected_revision, field, ivalue, fvalue};
 }
 
@@ -272,19 +286,19 @@ static void target_intent_dispose(target_edit_intent *e) {
  * visible -- the widget already returned "committed", so without this the value silently reverts
  * next frame with no explanation (F5). Returns true iff queued. */
 static bool target_intent_push(target_edit_intent *e) {
-    if (s_target_intent_count == s_target_intent_cap) {
-        int nc = s_target_intent_cap ? s_target_intent_cap * 2 : 8;
+    if (s_actions.target_intent_count == s_actions.target_intent_cap) {
+        int nc = s_actions.target_intent_cap ? s_actions.target_intent_cap * 2 : 8;
         target_edit_intent *ne = (target_edit_intent *)realloc(
-            s_target_intents, (size_t)nc * sizeof *ne);
+            s_actions.target_intents, (size_t)nc * sizeof *ne);
         if (!ne) {
             target_intent_dispose(e);
             set_status_ex(STATUS_ERROR, "Out of memory: this edit could not be queued (change not applied).");
             return false;
         }
-        s_target_intents = ne;
-        s_target_intent_cap = nc;
+        s_actions.target_intents = ne;
+        s_actions.target_intent_cap = nc;
     }
-    s_target_intents[s_target_intent_count++] = *e;
+    s_actions.target_intents[s_actions.target_intent_count++] = *e;
     return true;
 }
 
@@ -302,20 +316,20 @@ static void queue_sprite_intent(sprite_intent_kind kind,
                       "Out of memory: this sprite edit could not be queued (change not applied).");
         return;
     }
-    if (s_sprite_intent_count == s_sprite_intent_cap) {
-        const int capacity = s_sprite_intent_cap ? s_sprite_intent_cap * 2 : 8;
+    if (s_actions.sprite_intent_count == s_actions.sprite_intent_cap) {
+        const int capacity = s_actions.sprite_intent_cap ? s_actions.sprite_intent_cap * 2 : 8;
         sprite_edit_intent *intents = (sprite_edit_intent *)realloc(
-            s_sprite_intents, (size_t)capacity * sizeof *intents);
+            s_actions.sprite_intents, (size_t)capacity * sizeof *intents);
         if (!intents) {
             free(source_key);
             set_status_ex(STATUS_ERROR,
                           "Out of memory: this sprite edit could not be queued (change not applied).");
             return;
         }
-        s_sprite_intents = intents;
-        s_sprite_intent_cap = capacity;
+        s_actions.sprite_intents = intents;
+        s_actions.sprite_intent_cap = capacity;
     }
-    s_sprite_intents[s_sprite_intent_count++] = (sprite_edit_intent){
+    s_actions.sprite_intents[s_actions.sprite_intent_count++] = (sprite_edit_intent){
         kind, sprite->atlas_id, sprite->source_id, sprite->expected_revision,
         source_key, field, ivalue, fvalue};
 }
@@ -334,20 +348,20 @@ static bool animation_intent_push(animation_edit_intent *intent) {
         tp_id128_is_nil(intent->animation.animation_id)) {
         return false;
     }
-    if (s_animation_intent_count == s_animation_intent_cap) {
-        const int capacity = s_animation_intent_cap ? s_animation_intent_cap * 2 : 8;
+    if (s_actions.animation_intent_count == s_actions.animation_intent_cap) {
+        const int capacity = s_actions.animation_intent_cap ? s_actions.animation_intent_cap * 2 : 8;
         animation_edit_intent *intents = (animation_edit_intent *)realloc(
-            s_animation_intents, (size_t)capacity * sizeof *intents);
+            s_actions.animation_intents, (size_t)capacity * sizeof *intents);
         if (!intents) {
             frame_refs_dispose(intent->frames, intent->frame_count);
             set_status_ex(STATUS_ERROR,
                           "Out of memory: this animation edit could not be queued (change not applied).");
             return false;
         }
-        s_animation_intents = intents;
-        s_animation_intent_cap = capacity;
+        s_actions.animation_intents = intents;
+        s_actions.animation_intent_cap = capacity;
     }
-    s_animation_intents[s_animation_intent_count++] = *intent;
+    s_actions.animation_intents[s_actions.animation_intent_count++] = *intent;
     return true;
 }
 
@@ -490,16 +504,16 @@ void gui_edit_anim_add_frames(const gui_animation_ref *animation,
  * frame top (apply_pending) with NO live declare-fn pointer held, so the per-edit clone-swap
  * is safe. Each setter re-fetches by index/name internally. */
 static void drain_edits(void) {
-    for (int i = 0; i < s_atlas_setting_intent_count; i++) {
-        const atlas_setting_intent *intent = &s_atlas_setting_intents[i];
+    for (int i = 0; i < s_actions.atlas_setting_intent_count; i++) {
+        const atlas_setting_intent *intent = &s_actions.atlas_setting_intents[i];
         (void)gui_project_set_atlas_setting(intent->atlas_id,
                                             intent->expected_revision,
                                             intent->field, intent->ivalue,
                                             intent->fvalue);
     }
-    s_atlas_setting_intent_count = 0;
-    for (int i = 0; i < s_sprite_intent_count; i++) {
-        sprite_edit_intent *intent = &s_sprite_intents[i];
+    s_actions.atlas_setting_intent_count = 0;
+    for (int i = 0; i < s_actions.sprite_intent_count; i++) {
+        sprite_edit_intent *intent = &s_actions.sprite_intents[i];
         const gui_sprite_ref sprite = {
             intent->atlas_id, intent->source_id, intent->source_key,
             intent->expected_revision};
@@ -520,9 +534,9 @@ static void drain_edits(void) {
         free(intent->source_key);
         intent->source_key = NULL;
     }
-    s_sprite_intent_count = 0;
-    for (int i = 0; i < s_animation_intent_count; i++) {
-        animation_edit_intent *intent = &s_animation_intents[i];
+    s_actions.sprite_intent_count = 0;
+    for (int i = 0; i < s_actions.animation_intent_count; i++) {
+        animation_edit_intent *intent = &s_actions.animation_intents[i];
         switch (intent->kind) {
             case ANIMATION_INTENT_FPS:
                 (void)gui_project_set_anim_fps(&intent->animation, intent->value);
@@ -554,9 +568,9 @@ static void drain_edits(void) {
         frame_refs_dispose(intent->frames, intent->frame_count);
         intent->frames = NULL;
     }
-    s_animation_intent_count = 0;
-    for (int i = 0; i < s_target_intent_count; i++) {
-        target_edit_intent *e = &s_target_intents[i];
+    s_actions.animation_intent_count = 0;
+    for (int i = 0; i < s_actions.target_intent_count; i++) {
+        target_edit_intent *e = &s_actions.target_intents[i];
         const gui_target_ref target = {e->atlas_id, e->target_id,
                                        e->expected_revision};
         switch (e->kind) {
@@ -578,7 +592,7 @@ static void drain_edits(void) {
         }
         target_intent_dispose(e);
     }
-    s_target_intent_count = 0;
+    s_actions.target_intent_count = 0;
 }
 
 /* Set by a view widget the frame its edit GESTURE ENDS (slider release / field Enter+blur / a
@@ -586,20 +600,9 @@ static void drain_edits(void) {
  * drain_edits buffers this frame's value, so the whole gesture commits as ONE undo step
  * (decision 0015). One shared flag suffices: pending_route already flushes a prior
  * gesture when a different-key edit arrives, so the flag always targets the latest buffered edit. */
-static bool s_gesture_commit;
-void gui_request_gesture_commit(void) { s_gesture_commit = true; }
+void gui_request_gesture_commit(void) { s_actions.gesture_commit = true; }
 // #endregion
-
-static tp_id128 s_edit_atlas_id;
-static int64_t s_edit_atlas_revision;
-static tp_id128 s_edit_anim_atlas_id;
-static tp_id128 s_edit_anim_id;
-static int64_t s_edit_anim_revision;
-static tp_id128 s_edit_sprite_atlas_id;
-static tp_id128 s_edit_sprite_source_id;
-static int64_t s_edit_sprite_revision;
-static char s_edit_sprite_source_key[TP_SRCKEY_MAX];
-_Static_assert(sizeof s_edit_sprite_source_key == TP_SRCKEY_MAX,
+_Static_assert(sizeof s_actions.edit_sprite_source_key == TP_SRCKEY_MAX,
                "editor source-key buffer must match the canonical bound");
 
 /* True (and raises a status) when an async pack/export is running: the destructive ops (new/open/exit/
@@ -617,7 +620,7 @@ static bool busy_block(void) {
 /* Stops the animation preview player and restores the canvas to its atlas/source view. */
 void preview_stop(void) {
     s_preview_active = false;
-    memset(&s_preview_animation_ref, 0, sizeof s_preview_animation_ref);
+    memset(&s_actions.preview_animation_ref, 0, sizeof s_actions.preview_animation_ref);
     s_preview_playing = false;
     s_preview_finished = false;
     s_preview_time = 0.0;
@@ -643,16 +646,16 @@ void reset_selection(void) {
 void cancel_edit(void) {
     s_edit_kind = EDIT_NONE;
     s_edit_atlas = -1;
-    s_edit_atlas_id = tp_id128_nil();
-    s_edit_atlas_revision = 0;
-    s_edit_anim_atlas_id = tp_id128_nil();
-    s_edit_anim_id = tp_id128_nil();
-    s_edit_anim_revision = 0;
+    s_actions.edit_atlas_id = tp_id128_nil();
+    s_actions.edit_atlas_revision = 0;
+    s_actions.edit_anim_atlas_id = tp_id128_nil();
+    s_actions.edit_anim_id = tp_id128_nil();
+    s_actions.edit_anim_revision = 0;
     s_edit_sprite[0] = '\0';
-    s_edit_sprite_atlas_id = tp_id128_nil();
-    s_edit_sprite_source_id = tp_id128_nil();
-    s_edit_sprite_revision = 0;
-    s_edit_sprite_source_key[0] = '\0';
+    s_actions.edit_sprite_atlas_id = tp_id128_nil();
+    s_actions.edit_sprite_source_id = tp_id128_nil();
+    s_actions.edit_sprite_revision = 0;
+    s_actions.edit_sprite_source_key[0] = '\0';
     s_edit_buf[0] = '\0';
 }
 
@@ -703,8 +706,8 @@ void start_atlas_edit_ref(tp_id128 atlas_id, int64_t expected_revision) {
             break;
         }
     }
-    s_edit_atlas_id = atlas->id;
-    s_edit_atlas_revision = expected_revision;
+    s_actions.edit_atlas_id = atlas->id;
+    s_actions.edit_atlas_revision = expected_revision;
     memcpy(s_edit_buf, atlas->name, strlen(atlas->name) + 1U);
     set_status("Rename atlas: type, Enter to commit, Esc to cancel.");
 }
@@ -747,9 +750,9 @@ void start_anim_edit_ref(const gui_animation_ref *ref) {
             break;
         }
     }
-    s_edit_anim_atlas_id = ref->atlas_id;
-    s_edit_anim_id = animation->id;
-    s_edit_anim_revision = ref->expected_revision;
+    s_actions.edit_anim_atlas_id = ref->atlas_id;
+    s_actions.edit_anim_id = animation->id;
+    s_actions.edit_anim_revision = ref->expected_revision;
     memcpy(s_edit_buf, animation->name, strlen(animation->name) + 1U);
     set_status("Rename animation: type, Enter to commit, Esc to cancel.");
 }
@@ -772,17 +775,17 @@ void start_sprite_edit_ref(const gui_sprite_ref *sprite,
         snapshot, sprite->atlas_id, sprite->source_id, sprite->source_key);
     const char *edit_value = (ov && ov->rename) ? ov->rename : display_name;
     if (!edit_text_fits(sprite->source_key,
-                        sizeof s_edit_sprite_source_key, "Region key") ||
+                        sizeof s_actions.edit_sprite_source_key, "Region key") ||
         !edit_text_fits(display_name, sizeof s_edit_sprite, "Region") ||
         !edit_text_fits(edit_value, sizeof s_edit_buf, "Region")) {
         return;
     }
     cancel_edit();
     s_edit_kind = EDIT_SPRITE;
-    s_edit_sprite_atlas_id = sprite->atlas_id;
-    s_edit_sprite_source_id = sprite->source_id;
-    s_edit_sprite_revision = sprite->expected_revision;
-    memcpy(s_edit_sprite_source_key, sprite->source_key,
+    s_actions.edit_sprite_atlas_id = sprite->atlas_id;
+    s_actions.edit_sprite_source_id = sprite->source_id;
+    s_actions.edit_sprite_revision = sprite->expected_revision;
+    memcpy(s_actions.edit_sprite_source_key, sprite->source_key,
            strlen(sprite->source_key) + 1U);
     memcpy(s_edit_sprite, display_name, strlen(display_name) + 1U);
     memcpy(s_edit_buf, edit_value, strlen(edit_value) + 1U);
@@ -810,19 +813,19 @@ void start_sprite_edit(const sprite_row *row) {
 bool gui_sprite_edit_matches(const sprite_row *row) {
     return row && s_edit_kind == EDIT_SPRITE &&
            row->source_key &&
-           tp_id128_eq(s_edit_sprite_source_id, row->source_id) &&
-           strcmp(s_edit_sprite_source_key, row->source_key) == 0;
+           tp_id128_eq(s_actions.edit_sprite_source_id, row->source_id) &&
+           strcmp(s_actions.edit_sprite_source_key, row->source_key) == 0;
 }
 
 bool gui_atlas_edit_matches(tp_id128 atlas_id) {
     return s_edit_kind == EDIT_ATLAS &&
-           tp_id128_eq(s_edit_atlas_id, atlas_id);
+           tp_id128_eq(s_actions.edit_atlas_id, atlas_id);
 }
 
 bool gui_animation_edit_matches(tp_id128 atlas_id, tp_id128 animation_id) {
     return s_edit_kind == EDIT_ANIM &&
-           tp_id128_eq(s_edit_anim_atlas_id, atlas_id) &&
-           tp_id128_eq(s_edit_anim_id, animation_id);
+           tp_id128_eq(s_actions.edit_anim_atlas_id, atlas_id) &&
+           tp_id128_eq(s_actions.edit_anim_id, animation_id);
 }
 
 void clamp_selection(void) {
@@ -847,8 +850,8 @@ const tp_snapshot_animation *preview_animation(void) {
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     return s_preview_active && snapshot
                ? tp_session_snapshot_animation_by_id(
-                     snapshot, s_preview_animation_ref.atlas_id,
-                     s_preview_animation_ref.animation_id)
+                     snapshot, s_actions.preview_animation_ref.atlas_id,
+                     s_actions.preview_animation_ref.animation_id)
                : NULL;
 }
 
@@ -933,8 +936,8 @@ void gui_request_create_animation_from_selection(void) {
     request.atlas_id = atlas->id;
     request.expected_revision = tp_session_snapshot_revision(snapshot);
 
-    pending_create_animation_dispose(&s_pending_create_anim);
-    s_pending_create_anim = request;
+    pending_create_animation_dispose(&s_actions.pending_create_anim);
+    s_actions.pending_create_anim = request;
 }
 
 void gui_request_open_preview(const gui_animation_ref *animation) {
@@ -942,8 +945,8 @@ void gui_request_open_preview(const gui_animation_ref *animation) {
         tp_id128_is_nil(animation->animation_id)) {
         return;
     }
-    s_pending_open_preview = true;
-    s_pending_open_preview_ref = *animation;
+    s_actions.pending_open_preview = true;
+    s_actions.pending_open_preview_ref = *animation;
 }
 
 static bool resolve_animation_ref(const gui_animation_ref *animation,
@@ -1038,7 +1041,7 @@ void open_preview(int anim_index) {
     cancel_edit();
     preview_target_reset(); /* the anim player owns the canvas -> never leave an export preview bound under it */
     s_sel_anim = anim_index;
-    s_preview_animation_ref = (gui_animation_ref){
+    s_actions.preview_animation_ref = (gui_animation_ref){
         a->id, animation->id, tp_session_snapshot_revision(snapshot)};
     s_preview_active = true;
     s_preview_playing = true;
@@ -1067,11 +1070,11 @@ void preview_toggle_play(void) {
 }
 
 static bool preview_frames_reserve(int needed) {
-    if (needed <= s_preview_frames.capacity) {
+    if (needed <= s_actions.preview_frames.capacity) {
         return true;
     }
-    int capacity = s_preview_frames.capacity
-                       ? s_preview_frames.capacity
+    int capacity = s_actions.preview_frames.capacity
+                       ? s_actions.preview_frames.capacity
                        : PREVIEW_IDXS_INIT_CAP;
     while (capacity < needed) {
         if (capacity > INT_MAX / 2) {
@@ -1081,16 +1084,16 @@ static bool preview_frames_reserve(int needed) {
         capacity *= 2;
     }
 #ifdef NTPACKER_GUI_SELFTEST
-    s_preview_frame_work.realloc_calls++;
+    s_actions.preview_frame_work.realloc_calls++;
 #endif
-    int *grown = realloc(s_preview_frames.indices,
+    int *grown = realloc(s_actions.preview_frames.indices,
                          (size_t)capacity * sizeof *grown);
     if (!grown) {
         set_status_ex(STATUS_ERROR, "Out of memory: preview frames truncated.");
         return false;
     }
-    s_preview_frames.indices = grown;
-    s_preview_frames.capacity = capacity;
+    s_actions.preview_frames.indices = grown;
+    s_actions.preview_frames.capacity = capacity;
     return true;
 }
 
@@ -1100,21 +1103,21 @@ static void preview_frames_rebuild(const tp_session_snapshot *snapshot,
                                    const tp_result *result,
                                    uint64_t result_version) {
 #ifdef NTPACKER_GUI_SELFTEST
-    s_preview_frame_work.rebuilds++;
-    s_preview_frame_work.frame_span_lookups++;
+    s_actions.preview_frame_work.rebuilds++;
+    s_actions.preview_frame_work.frame_span_lookups++;
 #endif
     int frame_count = 0;
     const tp_snapshot_frame *frames = tp_session_snapshot_animation_frames(
-        snapshot, s_preview_animation_ref.atlas_id,
-        s_preview_animation_ref.animation_id, &frame_count);
+        snapshot, s_actions.preview_animation_ref.atlas_id,
+        s_actions.preview_animation_ref.animation_id, &frame_count);
     const bool complete = frame_count == animation->frame_count &&
                           preview_frames_reserve(frame_count);
     int count = 0;
     int ref_w = 1;
     int ref_h = 1;
-    for (int i = 0; i < frame_count && count < s_preview_frames.capacity; ++i) {
+    for (int i = 0; i < frame_count && count < s_actions.preview_frames.capacity; ++i) {
 #ifdef NTPACKER_GUI_SELFTEST
-        s_preview_frame_work.frame_iterations++;
+        s_actions.preview_frame_work.frame_iterations++;
 #endif
         const tp_snapshot_frame *frame = &frames[i];
         const int sprite_index = gui_pack_find_sprite_ref(
@@ -1122,7 +1125,7 @@ static void preview_frames_rebuild(const tp_session_snapshot *snapshot,
         if (sprite_index < 0 || sprite_index >= result->sprite_count) {
             continue;
         }
-        s_preview_frames.indices[count++] = sprite_index;
+        s_actions.preview_frames.indices[count++] = sprite_index;
         if (result->sprites[sprite_index].sourceSize.w > ref_w) {
             ref_w = result->sprites[sprite_index].sourceSize.w;
         }
@@ -1130,15 +1133,15 @@ static void preview_frames_rebuild(const tp_session_snapshot *snapshot,
             ref_h = result->sprites[sprite_index].sourceSize.h;
         }
     }
-    s_preview_frames.atlas_id = s_preview_animation_ref.atlas_id;
-    s_preview_frames.animation_id = s_preview_animation_ref.animation_id;
-    s_preview_frames.model_generation =
+    s_actions.preview_frames.atlas_id = s_actions.preview_animation_ref.atlas_id;
+    s_actions.preview_frames.animation_id = s_actions.preview_animation_ref.animation_id;
+    s_actions.preview_frames.model_generation =
         tp_session_snapshot_model_generation(snapshot);
-    s_preview_frames.pack_result_version = result_version;
-    s_preview_frames.count = count;
-    s_preview_frames.ref_w = ref_w;
-    s_preview_frames.ref_h = ref_h;
-    s_preview_frames.valid = complete;
+    s_actions.preview_frames.pack_result_version = result_version;
+    s_actions.preview_frames.count = count;
+    s_actions.preview_frames.ref_w = ref_w;
+    s_actions.preview_frames.ref_h = ref_h;
+    s_actions.preview_frames.valid = complete;
 }
 
 /* Nudges the preview timeline by `delta` frame-ticks (pauses first). */
@@ -1168,11 +1171,11 @@ void update_preview(void) {
     const tp_snapshot_animation *an = snapshot
                                           ? tp_session_snapshot_animation_by_id(
                                                 snapshot,
-                                                s_preview_animation_ref.atlas_id,
-                                                s_preview_animation_ref.animation_id)
+                                                s_actions.preview_animation_ref.atlas_id,
+                                                s_actions.preview_animation_ref.animation_id)
                                           : NULL;
     const int atlas_index = snapshot_atlas_index_by_id(
-        snapshot, s_preview_animation_ref.atlas_id);
+        snapshot, s_actions.preview_animation_ref.atlas_id);
     const tp_result *pr = gui_pack_result(atlas_index);
     const uint64_t result_version = gui_pack_result_version(atlas_index);
     s_canvas.anim_sprite = -1;
@@ -1182,16 +1185,16 @@ void update_preview(void) {
     }
     const uint64_t model_generation =
         tp_session_snapshot_model_generation(snapshot);
-    if (!s_preview_frames.valid ||
-        !tp_id128_eq(s_preview_frames.atlas_id,
-                     s_preview_animation_ref.atlas_id) ||
-        !tp_id128_eq(s_preview_frames.animation_id,
-                     s_preview_animation_ref.animation_id) ||
-        s_preview_frames.model_generation != model_generation ||
-        s_preview_frames.pack_result_version != result_version) {
+    if (!s_actions.preview_frames.valid ||
+        !tp_id128_eq(s_actions.preview_frames.atlas_id,
+                     s_actions.preview_animation_ref.atlas_id) ||
+        !tp_id128_eq(s_actions.preview_frames.animation_id,
+                     s_actions.preview_animation_ref.animation_id) ||
+        s_actions.preview_frames.model_generation != model_generation ||
+        s_actions.preview_frames.pack_result_version != result_version) {
         preview_frames_rebuild(snapshot, atlas_index, an, pr, result_version);
     }
-    const int n = s_preview_frames.count;
+    const int n = s_actions.preview_frames.count;
     s_preview_frame_count = n;
     if (n == 0) {
         return;
@@ -1214,9 +1217,9 @@ void update_preview(void) {
     }
     s_preview_cur = cur;
     s_canvas.mode = GUI_CANVAS_ANIM;
-    s_canvas.anim_sprite = s_preview_frames.indices[cur];
-    s_canvas.anim_ref_w = s_preview_frames.ref_w;
-    s_canvas.anim_ref_h = s_preview_frames.ref_h;
+    s_canvas.anim_sprite = s_actions.preview_frames.indices[cur];
+    s_canvas.anim_ref_w = s_actions.preview_frames.ref_w;
+    s_canvas.anim_ref_h = s_actions.preview_frames.ref_h;
     s_canvas.anim_flip_h = an->flip_h;
     s_canvas.anim_flip_v = an->flip_v;
 }
@@ -1300,8 +1303,8 @@ void gui_request_remove_animation(int animation_index) {
 void gui_request_remove_animation_ref(const gui_animation_ref *animation) {
     if (animation && !tp_id128_is_nil(animation->atlas_id) &&
         !tp_id128_is_nil(animation->animation_id)) {
-        s_pending_remove_anim = true;
-        s_pending_remove_anim_ref = *animation;
+        s_actions.pending_remove_anim = true;
+        s_actions.pending_remove_anim_ref = *animation;
     }
 }
 
@@ -1316,8 +1319,8 @@ void gui_request_remove_target(int target_index) {
 void gui_request_remove_target_ref(const gui_target_ref *target) {
     if (target && !tp_id128_is_nil(target->atlas_id) &&
         !tp_id128_is_nil(target->target_id)) {
-        s_pending_remove_target = true;
-        s_pending_remove_target_ref = *target;
+        s_actions.pending_remove_target = true;
+        s_actions.pending_remove_target_ref = *target;
     }
 }
 
@@ -1451,8 +1454,8 @@ static void do_browse_target(const gui_target_ref *queued) {
 void gui_request_browse_target(int atlas_index, int target_index) {
     gui_target_ref target;
     if (gui_project_target_ref_at(atlas_index, target_index, &target)) {
-        s_pending_browse_target = true;
-        s_pending_browse_target_ref = target;
+        s_actions.pending_browse_target = true;
+        s_actions.pending_browse_target_ref = target;
     }
 }
 
@@ -1463,9 +1466,9 @@ void gui_request_add_target(int atlas_index) {
                                                                         atlas_index)
                                          : NULL;
     if (atlas) {
-        s_pending_add_target = true;
-        s_pending_add_target_atlas_id = atlas->id;
-        s_pending_add_target_revision = tp_session_snapshot_revision(snapshot);
+        s_actions.pending_add_target = true;
+        s_actions.pending_add_target_atlas_id = atlas->id;
+        s_actions.pending_add_target_revision = tp_session_snapshot_revision(snapshot);
     }
 }
 
@@ -1476,9 +1479,9 @@ void gui_request_add_animation(int atlas_index) {
                                                                         atlas_index)
                                          : NULL;
     if (atlas) {
-        s_pending_add_anim = true;
-        s_pending_add_anim_atlas_id = atlas->id;
-        s_pending_add_anim_revision = tp_session_snapshot_revision(snapshot);
+        s_actions.pending_add_anim = true;
+        s_actions.pending_add_anim_atlas_id = atlas->id;
+        s_actions.pending_add_anim_revision = tp_session_snapshot_revision(snapshot);
     }
 }
 
@@ -2018,8 +2021,8 @@ static void poll_async(void) {
 void commit_sprite_rename(void) {
     /* empty input clears the override back to the file-derived name. (Reached only via commit_active_edit,
      * which flush-firsts, so set_sprite_rename's own flush is a no-op here.) */
-    const gui_sprite_ref sprite = {s_edit_sprite_atlas_id, s_edit_sprite_source_id,
-                                   s_edit_sprite_source_key, s_edit_sprite_revision};
+    const gui_sprite_ref sprite = {s_actions.edit_sprite_atlas_id, s_actions.edit_sprite_source_id,
+                                   s_actions.edit_sprite_source_key, s_actions.edit_sprite_revision};
     if (gui_project_set_sprite_rename(&sprite, s_edit_buf)) {
         if (s_edit_buf[0] == '\0') {
             set_statusf("Cleared rename on '%s'", s_edit_sprite);
@@ -2054,11 +2057,11 @@ static void commit_active_edit(bool force) {
         ? tp_session_snapshot_revision(before_flush)
         : 0;
     const bool rebase_atlas = s_edit_kind == EDIT_ATLAS &&
-                              s_edit_atlas_revision == revision_before_flush;
+                              s_actions.edit_atlas_revision == revision_before_flush;
     const bool rebase_sprite = s_edit_kind == EDIT_SPRITE &&
-                               s_edit_sprite_revision == revision_before_flush;
+                               s_actions.edit_sprite_revision == revision_before_flush;
     const bool rebase_anim = s_edit_kind == EDIT_ANIM &&
-                             s_edit_anim_revision == revision_before_flush;
+                             s_actions.edit_anim_revision == revision_before_flush;
     if (flush_failed()) {
         /* a buffered gesture could not be journaled -> abort the rename commit (error already surfaced) */
         if (force) {
@@ -2072,21 +2075,21 @@ static void commit_active_edit(bool force) {
         : revision_before_flush;
     if (revision_after_flush != revision_before_flush) {
         if (rebase_atlas) {
-            s_edit_atlas_revision = revision_after_flush;
+            s_actions.edit_atlas_revision = revision_after_flush;
         } else if (rebase_sprite) {
-            s_edit_sprite_revision = revision_after_flush;
+            s_actions.edit_sprite_revision = revision_after_flush;
         } else if (rebase_anim) {
-            s_edit_anim_revision = revision_after_flush;
+            s_actions.edit_anim_revision = revision_after_flush;
         }
     }
     if (s_edit_kind == EDIT_ATLAS) {
         const tp_session_snapshot *snapshot = gui_project_snapshot();
-        if (!snapshot || !tp_session_snapshot_atlas_by_id(snapshot, s_edit_atlas_id)) {
+        if (!snapshot || !tp_session_snapshot_atlas_by_id(snapshot, s_actions.edit_atlas_id)) {
             set_status_ex(STATUS_WARNING, "The atlas changed before the rename could be applied.");
             cancel_edit();
             return;
         }
-        if (!gui_project_set_atlas_name(s_edit_atlas_id, s_edit_atlas_revision,
+        if (!gui_project_set_atlas_name(s_actions.edit_atlas_id, s_actions.edit_atlas_revision,
                                         s_edit_buf)) {
             char atlas_err[256];
             if (gui_project_take_op_error(atlas_err, sizeof atlas_err)) {
@@ -2101,7 +2104,7 @@ static void commit_active_edit(bool force) {
         }
         char committed_name[TP_SRCKEY_MAX];
         tp_error read_error = {0};
-        if (gui_project_copy_atlas_name(s_edit_atlas_id, committed_name,
+        if (gui_project_copy_atlas_name(s_actions.edit_atlas_id, committed_name,
                                         sizeof committed_name, &read_error) == TP_STATUS_OK) {
             set_statusf("Renamed atlas to '%s'", committed_name);
         } else {
@@ -2113,7 +2116,7 @@ static void commit_active_edit(bool force) {
         commit_sprite_rename();
     } else if (s_edit_kind == EDIT_ANIM) {
         const gui_animation_ref animation = {
-            s_edit_anim_atlas_id, s_edit_anim_id, s_edit_anim_revision};
+            s_actions.edit_anim_atlas_id, s_actions.edit_anim_id, s_actions.edit_anim_revision};
         if (!gui_project_set_anim_id(&animation, s_edit_buf)) {
             /* Animation rename is a first-class op now (undoable + journaled), so a false is a
              * core REJECT -- a name collision (validate enforces uniqueness) or a rare OOM/stale-index
@@ -2144,32 +2147,32 @@ void gui_actions_open_recovery(const gui_recovery_list *list) {
         s_recovery_open = false;
         return;
     }
-    s_recovery_list = *list; /* value copy of the fixed-size struct */
-    s_recovery_pending_row = -1;
+    s_actions.recovery_list = *list; /* value copy of the fixed-size struct */
+    s_actions.recovery_pending_row = -1;
     s_recovery_open = true;
 }
-int gui_actions_recovery_count(void) { return (int)s_recovery_list.count; }
-bool gui_actions_recovery_has_more(void) { return s_recovery_list.has_more; }
+int gui_actions_recovery_count(void) { return (int)s_actions.recovery_list.count; }
+bool gui_actions_recovery_has_more(void) { return s_actions.recovery_list.has_more; }
 const gui_recovery_entry *gui_actions_recovery_at(int i) {
-    if (i < 0 || (size_t)i >= s_recovery_list.count) {
+    if (i < 0 || (size_t)i >= s_actions.recovery_list.count) {
         return NULL;
     }
-    return &s_recovery_list.items[i];
+    return &s_actions.recovery_list.items[i];
 }
 void gui_actions_recovery_request(int row, int action) {
-    s_recovery_pending_row = row;
-    s_recovery_pending_action = action;
+    s_actions.recovery_pending_row = row;
+    s_actions.recovery_pending_action = action;
 }
 /* Drop a resolved row (shift-down); close the modal when the list empties. */
 static void recovery_remove_row(int row) {
-    if (row < 0 || (size_t)row >= s_recovery_list.count) {
+    if (row < 0 || (size_t)row >= s_actions.recovery_list.count) {
         return;
     }
-    for (size_t i = (size_t)row; i + 1U < s_recovery_list.count; ++i) {
-        s_recovery_list.items[i] = s_recovery_list.items[i + 1];
+    for (size_t i = (size_t)row; i + 1U < s_actions.recovery_list.count; ++i) {
+        s_actions.recovery_list.items[i] = s_actions.recovery_list.items[i + 1];
     }
-    s_recovery_list.count--;
-    if (s_recovery_list.count == 0U && !s_recovery_list.has_more) {
+    s_actions.recovery_list.count--;
+    if (s_actions.recovery_list.count == 0U && !s_actions.recovery_list.has_more) {
         s_recovery_open = false;
     }
 }
@@ -2205,13 +2208,13 @@ void apply_pending(void) {
     /* A gesture ended last frame (slider release / field Enter+blur / discrete pick): commit the
      * buffered transaction NOW that drain_edits has folded in this frame's final value, so one
      * interaction == one undo step (decision 0015). */
-    if (s_gesture_commit) {
+    if (s_actions.gesture_commit) {
         /* fix2: the bool is intentionally IGNORED -- this is the gesture-BOUNDARY commit (one interaction
          * = one undo step). A journal-failed flush here drops the gesture WITH the op-error surfaced
          * (poll_async shows it); there is no persist/discard "proceed as clean" decision after it to
          * abort (unlike save/new/pack). Audited fix2 [0]/[1]. */
         (void)gui_project_flush_pending();
-        s_gesture_commit = false;
+        s_actions.gesture_commit = false;
     }
 
     if (s_modal_action == MODAL_SAVE) {
@@ -2234,10 +2237,10 @@ void apply_pending(void) {
     /* R6b: harvest a per-row recovery decision requested last frame. Runs here (same spot the confirm
      * harvest lands do_save()->tinyfd_*) so the Save-As dialog + disk-mutating resolve run outside
      * nt_ui_begin/end. NON-DESTRUCTIVE ON FAILURE: a failed save leaves the journal + the row for a retry. */
-    if (s_recovery_pending_row >= 0) {
-        const int row = s_recovery_pending_row;
-        const int action = s_recovery_pending_action;
-        s_recovery_pending_row = -1;
+    if (s_actions.recovery_pending_row >= 0) {
+        const int row = s_actions.recovery_pending_row;
+        const int action = s_actions.recovery_pending_action;
+        s_actions.recovery_pending_row = -1;
         const gui_recovery_entry *e = gui_actions_recovery_at(row);
         if (e != NULL) {
             /* Copy the typed row before the list may compact after resolution. */
@@ -2337,30 +2340,30 @@ void apply_pending(void) {
             set_status("Removed atlas (Ctrl+Z to undo).");
         }
     }
-    if (s_pending_add_target) {
-        const int ti = gui_project_add_target(s_pending_add_target_atlas_id,
-                                              s_pending_add_target_revision);
+    if (s_actions.pending_add_target) {
+        const int ti = gui_project_add_target(s_actions.pending_add_target_atlas_id,
+                                              s_actions.pending_add_target_revision);
         if (ti >= 0) {
             set_status("Added export target (Ctrl+Z to undo).");
         }
     }
-    if (s_pending_remove_target) {
-        if (gui_project_remove_target(&s_pending_remove_target_ref)) {
+    if (s_actions.pending_remove_target) {
+        if (gui_project_remove_target(&s_actions.pending_remove_target_ref)) {
             set_status("Removed export target (Ctrl+Z to undo).");
         }
     }
-    if (s_pending_browse_target) {
-        do_browse_target(&s_pending_browse_target_ref);
+    if (s_actions.pending_browse_target) {
+        do_browse_target(&s_actions.pending_browse_target_ref);
     }
-    if (s_pending_add_anim) {
+    if (s_actions.pending_add_anim) {
         const int idx = gui_project_create_animation(
-            s_pending_add_anim_atlas_id, s_pending_add_anim_revision,
+            s_actions.pending_add_anim_atlas_id, s_actions.pending_add_anim_revision,
             NULL, NULL, 0);
         if (idx >= 0) {
             const tp_session_snapshot *after_snapshot = gui_project_snapshot();
             const tp_snapshot_atlas *after_atlas = after_snapshot
                 ? tp_session_snapshot_atlas_by_id(
-                      after_snapshot, s_pending_add_anim_atlas_id)
+                      after_snapshot, s_actions.pending_add_anim_atlas_id)
                 : NULL;
             const tp_snapshot_animation *animation = after_atlas
                                                          ? tp_session_snapshot_animation_at(after_snapshot, after_atlas->id, idx)
@@ -2368,25 +2371,25 @@ void apply_pending(void) {
             const tp_snapshot_atlas *selected = after_snapshot
                 ? tp_session_snapshot_atlas_at(after_snapshot, s_sel_atlas)
                 : NULL;
-            if (selected && tp_id128_eq(selected->id, s_pending_add_anim_atlas_id)) {
+            if (selected && tp_id128_eq(selected->id, s_actions.pending_add_anim_atlas_id)) {
                 s_sel_anim = idx;
                 s_sel_anim_frame = -1;
             }
             set_statusf("Added animation '%s' (Ctrl+Z to undo).", animation ? animation->name : "?");
         }
     }
-    if (s_pending_create_anim.active) {
+    if (s_actions.pending_create_anim.active) {
         const int idx = gui_project_create_animation(
-            s_pending_create_anim.atlas_id,
-            s_pending_create_anim.expected_revision,
-            s_pending_create_anim.name[0] ? s_pending_create_anim.name : NULL,
-            s_pending_create_anim.frames,
-            s_pending_create_anim.frame_count);
+            s_actions.pending_create_anim.atlas_id,
+            s_actions.pending_create_anim.expected_revision,
+            s_actions.pending_create_anim.name[0] ? s_actions.pending_create_anim.name : NULL,
+            s_actions.pending_create_anim.frames,
+            s_actions.pending_create_anim.frame_count);
         if (idx >= 0) {
             const tp_session_snapshot *after_snapshot = gui_project_snapshot();
             const tp_snapshot_atlas *after_atlas = after_snapshot
                 ? tp_session_snapshot_atlas_by_id(
-                      after_snapshot, s_pending_create_anim.atlas_id)
+                      after_snapshot, s_actions.pending_create_anim.atlas_id)
                 : NULL;
             const tp_snapshot_animation *animation = after_atlas
                 ? tp_session_snapshot_animation_at(after_snapshot,
@@ -2396,28 +2399,28 @@ void apply_pending(void) {
                 ? tp_session_snapshot_atlas_at(after_snapshot, s_sel_atlas)
                 : NULL;
             if (selected &&
-                tp_id128_eq(selected->id, s_pending_create_anim.atlas_id)) {
+                tp_id128_eq(selected->id, s_actions.pending_create_anim.atlas_id)) {
                 s_sel_anim = idx;
                 s_sel_anim_frame = -1;
             }
             set_statusf("Created animation '%s' with %d frame(s) (Ctrl+Z to undo).",
                         animation ? animation->name : "?",
-                        s_pending_create_anim.frame_count);
+                        s_actions.pending_create_anim.frame_count);
         }
     }
-    pending_create_animation_dispose(&s_pending_create_anim);
-    if (s_pending_remove_anim) {
+    pending_create_animation_dispose(&s_actions.pending_create_anim);
+    if (s_actions.pending_remove_anim) {
             /* fix3 [0]: preview_stop + the selection reset + "Removed" run ONLY on a real removal. A
              * journal-failed flush aborts the wrapper (returns false) -> the animation is still there,
              * so we must NOT stop its preview or clear the selection. (preview_stop only resets flags,
              * so running it AFTER the removal is safe -- no project deref.) */
             const bool was_previewing =
                 s_preview_active &&
-                tp_id128_eq(s_preview_animation_ref.atlas_id,
-                            s_pending_remove_anim_ref.atlas_id) &&
-                tp_id128_eq(s_preview_animation_ref.animation_id,
-                            s_pending_remove_anim_ref.animation_id);
-            if (gui_project_remove_animation(&s_pending_remove_anim_ref)) {
+                tp_id128_eq(s_actions.preview_animation_ref.atlas_id,
+                            s_actions.pending_remove_anim_ref.atlas_id) &&
+                tp_id128_eq(s_actions.preview_animation_ref.animation_id,
+                            s_actions.pending_remove_anim_ref.animation_id);
+            if (gui_project_remove_animation(&s_actions.pending_remove_anim_ref)) {
                 if (was_previewing) {
                     preview_stop();
                 }
@@ -2426,10 +2429,10 @@ void apply_pending(void) {
                 set_status("Removed animation (Ctrl+Z to undo).");
             }
     }
-    if (s_pending_open_preview) {
+    if (s_actions.pending_open_preview) {
         int atlas_index = -1;
         int animation_index = -1;
-        if (resolve_animation_ref(&s_pending_open_preview_ref, &atlas_index,
+        if (resolve_animation_ref(&s_actions.pending_open_preview_ref, &atlas_index,
                                   &animation_index)) {
             s_sel_atlas = atlas_index;
             open_preview(animation_index);
@@ -2451,15 +2454,15 @@ void apply_pending(void) {
     s_pending_open = s_pending_save = s_pending_save_as = false;
     s_pending_add_files = s_pending_add_folder = s_pending_add_atlas = false;
     s_pending_refresh = s_pending_pack = s_pending_export = false;
-    s_pending_add_target = false;
-    s_pending_add_target_atlas_id = tp_id128_nil();
-    s_pending_add_target_revision = 0;
-    s_pending_add_anim = false;
-    s_pending_open_preview = false;
-    memset(&s_pending_open_preview_ref, 0,
-           sizeof s_pending_open_preview_ref);
-    s_pending_add_anim_atlas_id = tp_id128_nil();
-    s_pending_add_anim_revision = 0;
+    s_actions.pending_add_target = false;
+    s_actions.pending_add_target_atlas_id = tp_id128_nil();
+    s_actions.pending_add_target_revision = 0;
+    s_actions.pending_add_anim = false;
+    s_actions.pending_open_preview = false;
+    memset(&s_actions.pending_open_preview_ref, 0,
+           sizeof s_actions.pending_open_preview_ref);
+    s_actions.pending_add_anim_atlas_id = tp_id128_nil();
+    s_actions.pending_add_anim_revision = 0;
     s_pending_remove_source = false;
     s_pending_remove_source_atlas_id = tp_id128_nil();
     s_pending_remove_source_id = tp_id128_nil();
@@ -2467,11 +2470,11 @@ void apply_pending(void) {
     s_pending_remove_atlas = false;
     s_pending_remove_atlas_id = tp_id128_nil();
     s_pending_remove_atlas_revision = 0;
-    s_pending_remove_target = false;
-    s_pending_remove_anim = false;
-    s_pending_browse_target = false;
-    memset(&s_pending_browse_target_ref, 0,
-           sizeof s_pending_browse_target_ref);
+    s_actions.pending_remove_target = false;
+    s_actions.pending_remove_anim = false;
+    s_actions.pending_browse_target = false;
+    memset(&s_actions.pending_browse_target_ref, 0,
+           sizeof s_actions.pending_browse_target_ref);
     s_pending_preview_target = -1;
 }
 // #endregion
