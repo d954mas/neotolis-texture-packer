@@ -29,7 +29,7 @@ add_library(tp_core STATIC
     src/tp_op_catalog.c src/tp_op_validate.c src/tp_op_validate_atlas.c src/tp_op_validate_source_sprite.c src/tp_op_validate_animation.c src/tp_op_validate_target.c src/tp_op_apply.c src/tp_op_encode.c src/tp_op_build.c
     # Transaction ID retention, clone/apply/publish, semantic dirty, and JSON.
     src/tp_idset.c
-    src/tp_project_clone.c src/tp_semantic.c src/tp_txn_idset.c src/tp_txn_apply.c
+    src/tp_project_clone.c src/tp_semantic.c src/tp_txn_idset.c src/tp_model.c src/tp_txn_apply.c
     # Synchronous orchestration and the owned immutable snapshot boundary.
     src/tp_session.c src/tp_session_snapshot.c src/tp_session_snapshot_query.c src/tp_project_generation.c
     src/tp_txn_parse.c src/tp_txn_lower.c src/tp_txn_encode.c
