@@ -39,6 +39,8 @@ add_library(tp_core STATIC
     src/tp_journal.c src/tp_journal_io.c)
 if(WIN32)
     target_sources(tp_core PRIVATE src/tp_fs_win32.c)
+else()
+    target_sources(tp_core PRIVATE src/tp_fs_posix.c)
 endif()
 target_include_directories(tp_core PUBLIC include)
 # tp_pack_settings.c includes nt_builder.h for the header-only nt_atlas_opts_defaults()
