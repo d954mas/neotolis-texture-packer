@@ -8,7 +8,7 @@ Import/Export IR, registry, MCP и Dev API функций. Нормативны�
 clean tracked tree, отдельный пользовательский untracked `.serena/`, build green,
 84/84 tests green.
 
-Цель прохода — убрать доказанное дублирование и зафиксировать ратчет сложности,
+Цель прохода — убрать доказанное дублирование и сделать сложность видимой,
 не меняя product contracts. Новый feature work в этот проход не входит.
 
 ## Responsibility map
@@ -35,10 +35,10 @@ semantics или canonical-v5 schema.
 |---|---|---|---|---|
 | F-01 | high | auto-fixable after CRT review | `apps/common/nt_utf8_fs.c` repeated core UTF-8→UTF-16, long-path and namespace policy; implementations had already drifted at the 32767-character bound | Fixed in `c508eea`. Core exports only caller-buffer path conversion; CRT-local `FILE*` ownership stays in each client adapter. Frontend implementation fell from 256 to 86 LOC. R21 prevents policy duplication from returning. |
 | F-02 | medium | auto-fixable | Canonical source-key normalize+compare existed in identity, operation admission and validation report code | Fixed in `f1de038` through `tp_srckey_validate_canonical()`. Each caller still maps status/message/severity independently. |
-| F-03 | medium | auto-fixable | No enforceable source-size budget; large files could grow invisibly | Fixed by `architecture_loc_budget` and the exact legacy ratchet in `scripts/check_loc_budget.cmake`. |
+| F-03 | medium | auto-fixable | Large production files could grow without a visible inventory | Hard size enforcement was rejected by the owner. Keep a non-gating LOC inventory; size alone never rejects a change or requires a split. |
 | F-04 | medium | auto-fixable, not attempted | Slash-normalized source-path text admission/equality is repeated in CRUD, canonical identity and operation preflight | Extract only bounded text admission/hash/equality. Do not merge effective canonical path identity or portability/case-fold reporting. |
 | F-05 | high | manual-only | Atlas settings and sprite override constraints are expressed in operation admission, validation reporting and defensive Pack checks | Introduce a pure typed constraints evaluator later. Preserve three policies: first reject, accumulated findings, and final engine-assertion guard. Requires a cross-layer boundary-vector matrix. |
-| F-06 | medium | manual-only | `tp_project`, `tp_validate`, `tp_op_validate`, history codec and filesystem TUs exceed the responsibility/complexity budget | Split by the map below, one oracle-backed packet at a time. Parser/save and history replay are highest risk. |
+| F-06 | medium | manual-only | `tp_project`, `tp_validate`, `tp_op_validate`, history codec and filesystem TUs are responsibility/complexity hotspots | Split only where the responsibility map yields a clearer seam, one oracle-backed packet at a time. Parser/save and history replay are highest risk. |
 
 ## Validation consolidation boundary
 
@@ -61,25 +61,17 @@ Must remain separate:
 Combining the pure predicate is simplification. Combining these policies would
 weaken contracts or destabilize structured output.
 
-## LOC and complexity budget
+## LOC and complexity observations
 
 Production C excludes vendor, generated, test, benchmark, pack-builder and GUI
-selftest sources.
+selftest sources. Physical LOC is one of the main signals for locating mixed
+responsibilities, but it is not an acceptance criterion. There are no hard
+LOC/CC limits, baselines, ratchets, or no-growth rules.
 
-| Measure | Soft target | Hard limit |
-|---|---:|---:|
-| Translation unit | 500 physical LOC | 800 physical LOC |
-| Function | 60 physical LOC | 120 physical LOC |
-| Cognitive complexity | 15 | 30 |
-| Nesting depth | 3 | 4 |
-| Parameters | 4 | 6 |
-
-New code may not exceed hard limits. Existing TU violations have exact no-growth
-limits in `scripts/check_loc_budget.cmake`; every shrink must lower the baseline.
-Existing function violations are not an allow-to-grow list. A touched function
-must not increase LOC/CC and should move toward a family handler below the hard
-limit. Dispatcher switches may exceed CC only when cases delegate and contain no
-business rules.
+A large file is reviewed together with its owned responsibilities, dependency
+fan-out, and fault/contract matrices. A long function may remain when it is
+cohesive and its regions are clear. Split functions only at a real semantic seam
+or for actual reuse; do not create one-use microhelpers to satisfy a metric.
 
 Clang-Tidy `readability-function-cognitive-complexity` at threshold 25 measured
 the current main hotspots:
@@ -111,8 +103,8 @@ Recommended physical cuts, in risk order:
   84/84 CTest passed;
 - F-02: new canonical-key unit test failed before the API existed, then targeted
   source-key/operation/schema/validation tests and full 84/84 CTest passed;
-- F-03: `cmake -P scripts/check_loc_budget.cmake` passes over 87 production TUs;
-  the gate is registered as a normal cross-platform CTest.
+- F-03: the original hard LOC gate passed over 87 production TUs, but its policy
+  was rejected after review. P0-01 replaces it with a non-gating inventory.
 
 ## Next simplification packets
 
@@ -123,4 +115,3 @@ Continue without feature work until each packet is independently green:
 3. validation-family split, preserving ordered JSON findings;
 4. filesystem TU split;
 5. only then decide the F-05 pack-constraints evaluator design.
-
