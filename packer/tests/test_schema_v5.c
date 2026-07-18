@@ -461,6 +461,53 @@ void test_assign_missing_ids_rejects_negative_counts(void) {
     tp_project_destroy(project);
 }
 
+void test_loader_rejects_noncanonical_reference_shapes(void) {
+    static const char *const bad_project[] = {
+        "{\"version\":5,\"atlases\":[{"
+        "\"id\":\"atlas_00000000000000000000000000000001\","
+        "\"name\":\"a\",\"sprites\":[{\"key\":\"hero.png\"}]}]}",
+        "{\"version\":5,\"atlases\":[{"
+        "\"id\":\"atlas_00000000000000000000000000000001\","
+        "\"name\":\"a\",\"sprites\":[{"
+        "\"source\":\"source_00000000000000000000000000000002\"}]}]}",
+        "{\"version\":5,\"atlases\":[{"
+        "\"id\":\"atlas_00000000000000000000000000000001\","
+        "\"name\":\"a\",\"animations\":[{"
+        "\"id\":\"anim_00000000000000000000000000000003\","
+        "\"name\":\"walk\",\"frames\":[\"hero.png\"]}]}]}",
+    };
+    for (size_t i = 0U;
+         i < sizeof bad_project / sizeof bad_project[0]; i++) {
+        tp_project *project = NULL;
+        tp_error error = {0};
+        TEST_ASSERT_EQUAL_INT(TP_STATUS_BAD_PROJECT,
+                              load_text(bad_project[i], &project, &error));
+        TEST_ASSERT_NULL(project);
+    }
+
+    static const char *const wrong_kind[] = {
+        "{\"version\":5,\"atlases\":[{"
+        "\"id\":\"atlas_00000000000000000000000000000001\","
+        "\"name\":\"a\",\"sprites\":[{"
+        "\"source\":\"atlas_00000000000000000000000000000002\","
+        "\"key\":\"hero.png\"}]}]}",
+        "{\"version\":5,\"atlases\":[{"
+        "\"id\":\"atlas_00000000000000000000000000000001\","
+        "\"name\":\"a\",\"animations\":[{"
+        "\"id\":\"anim_00000000000000000000000000000003\","
+        "\"name\":\"walk\",\"frames\":[{"
+        "\"source\":\"target_00000000000000000000000000000004\","
+        "\"key\":\"hero.png\"}]}]}]}"
+    };
+    for (size_t i = 0U; i < sizeof wrong_kind / sizeof wrong_kind[0]; i++) {
+        tp_project *project = NULL;
+        tp_error error = {0};
+        TEST_ASSERT_EQUAL_INT(TP_STATUS_ID_MALFORMED,
+                              load_text(wrong_kind[i], &project, &error));
+        TEST_ASSERT_NULL(project);
+    }
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_schema_version_is_exact_only);
@@ -480,5 +527,6 @@ int main(void) {
     RUN_TEST(test_save_rejects_duplicate_normalized_source_path);
     RUN_TEST(test_save_rejects_invalid_source_shape);
     RUN_TEST(test_assign_missing_ids_rejects_negative_counts);
+    RUN_TEST(test_loader_rejects_noncanonical_reference_shapes);
     return UNITY_END();
 }

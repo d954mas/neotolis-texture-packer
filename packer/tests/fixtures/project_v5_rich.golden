@@ -1,0 +1,80 @@
+{
+  "version": 5,
+  "atlases": [
+    {
+      "allow_transform": false,
+      "alpha_threshold": 123,
+      "animations": [
+        {
+          "flip_h": true,
+          "fps": 12.5,
+          "frames": [
+            {
+              "key": "ходьба/кадр_01.png",
+              "source": "source_00000000000000000000000000000021"
+            },
+            {
+              "key": "ui/button.png",
+              "source": "source_00000000000000000000000000000022"
+            }
+          ],
+          "id": "anim_00000000000000000000000000000031",
+          "name": "бег",
+          "playback": 2
+        }
+      ],
+      "extrude": 2,
+      "id": "atlas_00000000000000000000000000000011",
+      "margin": 3,
+      "max_size": 1024,
+      "max_vertices": 12,
+      "name": "Герой α",
+      "padding": 4,
+      "pixels_per_unit": 2.5,
+      "power_of_two": false,
+      "shape": 1,
+      "sources": [
+        {
+          "id": "source_00000000000000000000000000000021",
+          "path": "арт/герой"
+        },
+        {
+          "id": "source_00000000000000000000000000000022",
+          "kind": "file",
+          "path": "art/ui icon.png"
+        }
+      ],
+      "sprites": [
+        {
+          "allow_rotate": 0,
+          "extrude": 5,
+          "key": "ходьба/кадр_01.png",
+          "margin": 3,
+          "max_vertices": 6,
+          "origin": [0.25, 0.75],
+          "rename": "Игрок\n№1",
+          "shape": 0,
+          "slice9": [4, 5, 6, 7],
+          "source": "source_00000000000000000000000000000021"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_00000000000000000000000000000041",
+          "out_path": "out/герой.json"
+        },
+        {
+          "enabled": false,
+          "exporter_id": "defold",
+          "id": "target_00000000000000000000000000000042",
+          "out_path": "out/hero.atlas"
+        }
+      ]
+    },
+    {
+      "id": "atlas_00000000000000000000000000000012",
+      "name": "UI ✨"
+    }
+  ]
+}

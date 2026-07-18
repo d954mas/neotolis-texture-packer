@@ -344,6 +344,16 @@ nt_set_warning_flags(tp_test_project_ids)   # AGENTS.md invariant: our test TUs 
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_project_ids_test")
 add_test(NAME tp_project_ids COMMAND tp_test_project_ids "${CMAKE_BINARY_DIR}/tp_project_ids_test")
 
+# Independent canonical-v5 bytes/model oracles. This deliberately does not use
+# writer->loader round-trip as its assertion boundary.
+add_executable(tp_test_project_contract test_project_contract.c)
+target_link_libraries(tp_test_project_contract PRIVATE tp_core unity)
+target_include_directories(tp_test_project_contract PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_options(tp_test_project_contract PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_project_contract)
+add_test(NAME tp_project_contract COMMAND tp_test_project_contract
+    "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/project_v5_rich.golden")
+
 # Phase 2 normalization unit tests: ext/folder strip, rename override, animation
 # auto-group + explicit merge, collision, alias, final-name sort, scale. Pure
 # tp_core (synthetic tp_results, no builder).

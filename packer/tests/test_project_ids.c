@@ -128,11 +128,43 @@ void test_loaded_structural_ids_are_required_and_unique(void) {
     TEST_ASSERT_NULL(project);
 }
 
+void test_loaded_structural_id_text_is_strict(void) {
+    static const char *const invalid[] = {
+        "{\"version\":5,\"atlases\":[{\"id\":\"atlas_0000000000000000000000000000000g\",\"name\":\"a\"}]}",
+        "{\"version\":5,\"atlases\":[{\"id\":\"atlas_00000000000000000000000000000000\",\"name\":\"a\"}]}",
+        "{\"version\":5,\"atlases\":[{\"id\":\"source_00000000000000000000000000000001\",\"name\":\"a\"}]}",
+    };
+    for (size_t i = 0U; i < sizeof invalid / sizeof invalid[0]; i++) {
+        tp_project *project = NULL;
+        tp_error error = {0};
+        TEST_ASSERT_EQUAL_INT(TP_STATUS_ID_MALFORMED,
+                              load_json(invalid[i], &project, &error));
+        TEST_ASSERT_NULL(project);
+        TEST_ASSERT_TRUE(error.msg[0] != '\0');
+    }
+}
+
+void test_loaded_structural_ids_are_unique_across_entity_kinds(void) {
+    static const char json[] =
+        "{\"version\":5,\"atlases\":[{"
+        "\"id\":\"atlas_11111111111111111111111111111111\","
+        "\"name\":\"a\",\"sources\":[{"
+        "\"id\":\"source_11111111111111111111111111111111\","
+        "\"path\":\"sprites\"}]}]}";
+    tp_project *project = NULL;
+    tp_error error = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_DUPLICATE_ID,
+                          load_json(json, &project, &error));
+    TEST_ASSERT_NULL(project);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_assign_missing_ids_is_atomic_and_idempotent);
     RUN_TEST(test_rng_failure_leaves_every_id_unchanged);
     RUN_TEST(test_generated_collision_leaves_every_id_unchanged);
     RUN_TEST(test_loaded_structural_ids_are_required_and_unique);
+    RUN_TEST(test_loaded_structural_id_text_is_strict);
+    RUN_TEST(test_loaded_structural_ids_are_unique_across_entity_kinds);
     return UNITY_END();
 }
