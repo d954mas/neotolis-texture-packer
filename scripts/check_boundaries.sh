@@ -441,6 +441,7 @@ _internal_header_registry() {
 cli_mutate_internal     cli_mutate|cli_mutate_source|cli_mutate_atlas|cli_mutate_sprite|cli_mutate_anim|cli_mutate_target
 tp_diff_internal        tp_diff_entity|tp_diff_apply|tp_diff_capture|tp_history|tp_history_codec|tp_history_codec_internal|tp_op_apply|tp_txn_apply
 tp_op_internal          tp_op_catalog|tp_op_validate|tp_op_apply|tp_op_build|tp_op_encode|tp_txn_encode|tp_txn_apply|tp_txn_lower|tp_txn_parse
+tp_op_validate_family_internal tp_op_validate
 tp_encode_internal      tp_op_encode|tp_txn_encode|tp_txn_apply
 tp_fs_internal          tp_fs_io|tp_fs_win32|tp_fs_posix|tp_export_defold|tp_export_json_neotolis|tp_export_png|tp_identity|tp_image|tp_journal_io|tp_pack_read|tp_project_parse|tp_project_save|tp_project_lease|tp_recovery|tp_scan
 tp_pack_constraints_internal tp_pack_constraints|tp_op_validate|tp_pack|tp_project_identity|tp_project_parse|tp_validate_target_settings

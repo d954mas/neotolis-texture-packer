@@ -18,6 +18,7 @@
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_srckey.h"
 #include "tp_op_internal.h"
+#include "tp_op_validate_family_internal.h"
 #include "tp_pack_constraints_internal.h"
 #include "tp_project_identity_internal.h"
 #include "tp_project_mutation_internal.h"
@@ -67,7 +68,8 @@ static tp_status validate_atlas_name_shape(const char *name,
 /* const adapters over the public id-addressed accessors: validate holds a
  * const project; the accessors take non-const and only READ, so the cast is safe. This
  * removes the lookup loops that duplicated the tp_project_atlas_find_*_by_id accessors. */
-static const tp_project_source *find_source(const tp_project_atlas *a, tp_id128 id) {
+const tp_project_source *tp_op_validate_find_source(const tp_project_atlas *a,
+                                                    tp_id128 id) {
     return tp_project_atlas_find_source_by_id((tp_project_atlas *)a, id);
 }
 static const tp_project_anim *find_anim(const tp_project_atlas *a, tp_id128 id) {
@@ -589,7 +591,7 @@ static tp_status validate_frames(const tp_project_atlas *atlas,
             return tp_op__reject(rej, TP_STATUS_ID_MALFORMED, "frames",
                                  "frame %d needs a canonical source id", i);
         }
-        if (!find_source(atlas, frames[i].source_id)) {
+        if (!tp_op_validate_find_source(atlas, frames[i].source_id)) {
             return tp_op__reject(rej, TP_STATUS_NOT_FOUND, "frames",
                                  "frame %d source does not exist in the atlas", i);
         }
@@ -775,7 +777,7 @@ tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_
              * knob (shape/playback/alpha) -> OUT_OF_RANGE. */
             return range_i(rej, "kind", (long)op->u.source_add.kind, 0, 1);
         case TP_OP_SOURCE_REMOVE:
-            if (!find_source(a, op->u.source_ref.source_id)) {
+            if (!tp_op_validate_find_source(a, op->u.source_ref.source_id)) {
                 return tp_op__reject(rej, TP_STATUS_NOT_FOUND, "source_id",
                                      "no source with that id in the atlas");
             }
@@ -785,7 +787,7 @@ tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_
                              "source is still referenced by sprite overrides or animation frames")
                        : TP_STATUS_OK;
         case TP_OP_SOURCE_REPLACE:
-            if (!find_source(a, op->u.source_ref.source_id)) {
+            if (!tp_op_validate_find_source(a, op->u.source_ref.source_id)) {
                 return tp_op__reject(rej, TP_STATUS_NOT_FOUND, "source_id", "no source with that id in the atlas");
             }
             if (!op->u.source_ref.key || op->u.source_ref.key[0] == '\0') {
@@ -799,7 +801,7 @@ tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_
                 return tp_op__reject(rej, TP_STATUS_ID_MALFORMED, "source_id",
                                      "sprite operation needs a canonical source id");
             }
-            if (!find_source(a, op->u.sprite_set.source_id)) {
+            if (!tp_op_validate_find_source(a, op->u.sprite_set.source_id)) {
                 return tp_op__reject(rej, TP_STATUS_NOT_FOUND, "source_id", "no source with that id in the atlas");
             }
             if (!op->u.sprite_set.src_key || op->u.sprite_set.src_key[0] == '\0') {
@@ -811,7 +813,7 @@ tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_
                 return tp_op__reject(rej, TP_STATUS_ID_MALFORMED, "source_id",
                                      "sprite operation needs a canonical source id");
             }
-            if (!find_source(a, op->u.sprite_clear.source_id)) {
+            if (!tp_op_validate_find_source(a, op->u.sprite_clear.source_id)) {
                 return tp_op__reject(rej, TP_STATUS_NOT_FOUND, "source_id", "no source with that id in the atlas");
             }
             if (!op->u.sprite_clear.src_key || op->u.sprite_clear.src_key[0] == '\0') {
@@ -831,7 +833,7 @@ tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_
                 return tp_op__reject(rej, TP_STATUS_ID_MALFORMED, "source_id",
                                      "sprite operation needs a canonical source id");
             }
-            if (!find_source(a, op->u.sprite_name.source_id)) {
+            if (!tp_op_validate_find_source(a, op->u.sprite_name.source_id)) {
                 return tp_op__reject(rej, TP_STATUS_NOT_FOUND, "source_id", "no source with that id in the atlas");
             }
             if (!op->u.sprite_name.src_key || op->u.sprite_name.src_key[0] == '\0') {
@@ -924,7 +926,7 @@ tp_status tp_operation_validate(const tp_project *p, const tp_operation *op, tp_
                 return tp_op__reject(rej, TP_STATUS_ID_MALFORMED, "frame",
                                      "frame needs a canonical source id");
             }
-            if (!find_source(a, s->frame.source_id)) {
+            if (!tp_op_validate_find_source(a, s->frame.source_id)) {
                 return tp_op__reject(rej, TP_STATUS_NOT_FOUND, "frame",
                                      "frame source does not exist in the atlas");
             }
