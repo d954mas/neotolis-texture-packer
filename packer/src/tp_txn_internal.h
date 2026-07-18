@@ -46,6 +46,12 @@ const struct tp_idset *tp_txn_idstore_mem_view(const tp_txn_idstore *store);
 /* Reset a result to an empty rejected shell tagged with the transaction id. */
 void tp_txn__result_reset(tp_txn_result *out, const char *id_hex);
 
+/* Result echo storage is staged before durable acknowledgement and discarded
+ * on any commit rejection. These two ownership operations stay below commit. */
+bool tp_txn__result_echo_prepare(tp_txn_result *out,
+                                 const tp_txn_request *request);
+void tp_txn__result_echo_discard(tp_txn_result *out);
+
 /* Append one error to a result's dynamic error array. Returns true when the error
  * was stored, false when the grow failed (OOM) and the error had to be dropped --
  * a collect-all caller MUST treat a false as a forced reject so a shape-faulted
