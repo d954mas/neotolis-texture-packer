@@ -24,7 +24,7 @@ if(WIN32)
     target_link_libraries(tinyfiledialogs PUBLIC comdlg32 ole32 shell32 user32)
 endif()
 
-add_executable(ntpacker-gui main.c gui_state.c gui_widgets.c gui_actions.c gui_rows.c gui_selftest.c gui_shot.c gui_startup.c gui_paths.c gui_log_file.c gui_crash.c gui_project.c gui_session_adapter.c gui_scan.c gui_canvas.c gui_pack.c gui_view_settings.c gui_view_lists.c gui_view_canvas.c gui_view_chrome.c
+add_executable(ntpacker-gui main.c gui_state.c gui_widgets.c gui_actions.c gui_rows.c gui_selftest.c gui_shot.c gui_startup.c gui_paths.c gui_log_file.c gui_crash.c gui_project.c gui_project_pending.c gui_session_adapter.c gui_scan.c gui_canvas.c gui_pack.c gui_view_settings.c gui_view_lists.c gui_view_canvas.c gui_view_chrome.c
     "${CMAKE_SOURCE_DIR}/apps/common/nt_utf8_fs.c")
 if(WIN32)
     target_sources(ntpacker-gui PRIVATE "${CMAKE_SOURCE_DIR}/apps/common/nt_utf8_argv.c")
@@ -164,6 +164,7 @@ add_executable(tp_test_gui_canonical_identity
     gui_actions.c
     gui_rows.c
     gui_project.c
+    gui_project_pending.c
     gui_session_adapter.c
     gui_scan.c
     gui_canvas.c
@@ -208,6 +209,7 @@ add_executable(tp_test_gui_action_trace
     gui_actions.c
     gui_rows.c
     gui_project.c
+    gui_project_pending.c
     gui_session_adapter.c
     gui_scan.c
     gui_canvas.c
