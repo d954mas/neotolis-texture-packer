@@ -22,37 +22,6 @@
  * snapshot. Field edits coalesce by exact target until the gesture boundary, so
  * one gesture produces one transaction and one Undo step. */
 
-// #region state
-static tp_session *s_session; /* sole owner of the live model and project */
-static tp_session_snapshot *s_snapshot; /* one cached immutable GUI read view */
-static uint64_t s_snapshot_lifetime_generation;
-static uint64_t s_txn_seq; /* monotonic transaction-id source (unique per commit) */
-static bool s_preview_stale;
-static char s_name[256]; /* cached basename for the menu bar */
-static double s_now;     /* coalescing clock (seconds), fed each frame by gui_project_tick */
-
-/* Set only by the explicit Exit -> Discard confirmation. A raw OS close never sets it, so shutdown
- * preserves a dirty journal instead of silently treating X/Alt+F4 as confirmed data loss. */
-static bool s_discard_recovery_on_shutdown;
-
-/* Pending transaction REJECT (core rejected the op(s); model left byte-unchanged).
- * Surfaced once by the UI (gui_project_take_op_error) to the soft-error channel. */
-static bool s_op_error;
-static char s_op_error_msg[256];
-
-/* Host policy only. Recovery core creates/destroys stores and claims per call;
- * a successful live attach transfers its concrete owner to tp_session. */
-static char s_recovery_root[TP_IDENTITY_PATH_MAX];
-static bool s_recovery_required;
-/* A one-shot startup notice explaining why recovery is unavailable. This deliberately covers both
- * contention and setup/storage failures: the window remains available for Save As or Discard, but
- * mutation stays blocked rather than silently losing crash durability. */
-static bool s_recovery_setup_notice_pending;
-static char s_recovery_setup_notice[256];
-static bool s_save_notice_pending;
-static char s_save_notice[256];
-// #endregion
-
 // #region transaction coalescing
 /* Same-target edits replace the pending value. A different target, elapsed
  * fallback, or structural operation flushes first. Slice9 keys include the
@@ -78,48 +47,79 @@ typedef struct {
     char sprite[TP_SRCKEY_MAX]; /* exact source-local key; "" if n/a */
 } coalesce_key;
 
-static bool s_pending_valid;        /* a coalescable edit is buffered (uncommitted) */
-static coalesce_key s_pending_key;
-static tp_operation s_pending_op;   /* owns its arms until committed/replaced/discarded */
-static double s_pending_time;       /* time of the last replace (coalesce window anchor) */
-static int64_t s_pending_expected_revision; /* captured with the atlas snapshot intent */
-static bool s_pending_preview_stale_before;
+// #endregion
+
+// #region state
+typedef struct gui_project_state {
+    tp_session *session; /* sole owner of the live model and project */
+    tp_session_snapshot *snapshot; /* one cached immutable GUI read view */
+    uint64_t snapshot_lifetime_generation;
+    uint64_t txn_seq; /* monotonic transaction-id source (unique per commit) */
+    bool preview_stale;
+    char name[256]; /* cached basename for the menu bar */
+    double now;     /* coalescing clock (seconds), fed each frame by gui_project_tick */
+
+    /* Set only by the explicit Exit -> Discard confirmation. A raw OS close never sets it, so
+     * shutdown preserves a dirty journal instead of silently treating X/Alt+F4 as confirmed loss. */
+    bool discard_recovery_on_shutdown;
+
+    /* Pending transaction REJECT (core rejected the op(s); model left byte-unchanged). */
+    bool op_error;
+    char op_error_msg[256];
+
+    /* Host policy only. A successful live attach transfers its concrete owner to tp_session. */
+    char recovery_root[TP_IDENTITY_PATH_MAX];
+    bool recovery_required;
+    bool recovery_setup_notice_pending;
+    char recovery_setup_notice[256];
+    bool save_notice_pending;
+    char save_notice[256];
+
+    bool pending_valid; /* a coalescable edit is buffered (uncommitted) */
+    coalesce_key pending_key;
+    tp_operation pending_op; /* owns its arms until committed/replaced/discarded */
+    double pending_time;
+    int64_t pending_expected_revision;
+    bool pending_preview_stale_before;
+} gui_project_state;
+
+static gui_project_state s_project;
 // #endregion
 
 // #region helpers
 static void note_session_reject(tp_status status, const tp_error *err);
 
 static void snapshot_drop(void) {
-    if (s_snapshot) {
-        s_snapshot_lifetime_generation++;
+    if (s_project.snapshot) {
+        s_project.snapshot_lifetime_generation++;
     }
-    tp_session_snapshot_destroy(s_snapshot);
-    s_snapshot = NULL;
+    tp_session_snapshot_destroy(s_project.snapshot);
+    s_project.snapshot = NULL;
 }
 
 const tp_session_snapshot *gui_project_snapshot(void) {
-    if (!s_snapshot && s_session) {
+    if (!s_project.snapshot && s_project.session) {
         tp_error err = {0};
-        if (tp_session_snapshot_create(s_session, &s_snapshot, &err) != TP_STATUS_OK) {
-            s_snapshot = NULL;
+        if (tp_session_snapshot_create(s_project.session, &s_project.snapshot, &err) != TP_STATUS_OK) {
+            s_project.snapshot = NULL;
         }
     }
-    return s_snapshot;
+    return s_project.snapshot;
 }
 
 uint64_t gui_project_snapshot_lifetime_generation(void) {
-    return s_snapshot_lifetime_generation;
+    return s_project.snapshot_lifetime_generation;
 }
 
-tp_session *gui_project_session_for_jobs(void) { return s_session; }
+tp_session *gui_project_session_for_jobs(void) { return s_project.session; }
 
 void gui_project_invalidate_sources(void) {
     gui_scan_invalidate_all();
-    if (!s_session) {
+    if (!s_project.session) {
         return;
     }
     tp_error err = {0};
-    const tp_status status = tp_session_invalidate_sources(s_session, &err);
+    const tp_status status = tp_session_invalidate_sources(s_project.session, &err);
     if (status != TP_STATUS_OK) {
         note_session_reject(status, &err);
         return;
@@ -157,7 +157,7 @@ static void recompute_name(void) {
     const tp_session_identity identity = tp_session_snapshot_identity(snapshot);
     const char *path = identity.kind == TP_IDENTITY_SAVED ? identity.canonical_path : "";
     if (path[0] == '\0') {
-        (void)snprintf(s_name, sizeof s_name, "untitled");
+        (void)snprintf(s_project.name, sizeof s_project.name, "untitled");
         return;
     }
     const char *base = path;
@@ -166,7 +166,7 @@ static void recompute_name(void) {
             base = p + 1;
         }
     }
-    (void)snprintf(s_name, sizeof s_name, "%s", base);
+    (void)snprintf(s_project.name, sizeof s_project.name, "%s", base);
 }
 
 static void note_recovery_degraded(const char *msg);
@@ -177,13 +177,13 @@ static int64_t recovery_now(void) {
 
 /* Record a void-context id-promotion failure so the UI can surface it. */
 bool gui_project_take_op_error(char *out, size_t cap) {
-    if (!s_op_error) {
+    if (!s_project.op_error) {
         return false;
     }
     if (out && cap) {
-        (void)snprintf(out, cap, "%s", s_op_error_msg);
+        (void)snprintf(out, cap, "%s", s_project.op_error_msg);
     }
-    s_op_error = false;
+    s_project.op_error = false;
     return true;
 }
 
@@ -214,13 +214,13 @@ static tp_id128 recovery_key(void) {
  * requires recovery acknowledgement, so mutation stays blocked until a new
  * session can attach a healthy journal. Save/discard remain available. */
 static void note_recovery_degraded(const char *msg) {
-    s_op_error = true;
-    (void)snprintf(s_op_error_msg, sizeof s_op_error_msg, "Recovery journal unavailable (%s) -- changes are blocked to preserve commit guarantees.",
+    s_project.op_error = true;
+    (void)snprintf(s_project.op_error_msg, sizeof s_project.op_error_msg, "Recovery journal unavailable (%s) -- changes are blocked to preserve commit guarantees.",
                    msg ? msg : "unknown");
 }
 
 static bool recovery_configured(void) {
-    return s_recovery_root[0] != '\0';
+    return s_project.recovery_root[0] != '\0';
 }
 
 /* Attach one shared live recovery owner after the session identity is final.
@@ -231,7 +231,7 @@ static void attach_recovery_live(tp_session *session) {
         return;
     }
     tp_error err = {0};
-    if (s_recovery_required &&
+    if (s_project.recovery_required &&
         tp_session_require_recovery(session, &err) != TP_STATUS_OK) {
         gui_project_note_recovery_setup_failure(
             err.msg[0] ? err.msg : "recovery could not be required");
@@ -250,12 +250,12 @@ static void attach_recovery_live(tp_session *session) {
         .project_path = identity.kind == TP_IDENTITY_SAVED
                             ? identity.canonical_path
                             : "",
-        .project_name = s_name,
+        .project_name = s_project.name,
         .file_fingerprint = has_saved_fingerprint ? &saved_fingerprint : NULL,
     };
     tp_rng rng = tp_rng_os();
     const tp_status status = tp_recovery_session_attach(
-        s_recovery_root, recovery_key(), &rng, session, &metadata, &err);
+        s_project.recovery_root, recovery_key(), &rng, session, &metadata, &err);
     if (status != TP_STATUS_OK && !tp_session_recovery_available(session)) {
         gui_project_note_recovery_setup_failure(
             status == TP_STATUS_RECOVERY_BUSY
@@ -272,13 +272,13 @@ static bool install_session(tp_session *next) {
         return false;
     }
     snapshot_drop();
-    if (s_session) {
-        (void)tp_session_discard(s_session, NULL);
+    if (s_project.session) {
+        (void)tp_session_discard(s_project.session, NULL);
     }
-    tp_session_destroy(s_session);
-    s_session = next;
-    s_save_notice_pending = false;
-    s_save_notice[0] = '\0';
+    tp_session_destroy(s_project.session);
+    s_project.session = next;
+    s_project.save_notice_pending = false;
+    s_project.save_notice[0] = '\0';
     return true;
 }
 
@@ -305,7 +305,7 @@ static bool gen_id(tp_id128 *out) {
 }
 
 static void next_transaction_id(char out[33]) {
-    (void)snprintf(out, 33U, "%032llx", (unsigned long long)(s_txn_seq++));
+    (void)snprintf(out, 33U, "%032llx", (unsigned long long)(s_project.txn_seq++));
 }
 
 static void note_session_reject(tp_status status, const tp_error *err) {
@@ -313,18 +313,18 @@ static void note_session_reject(tp_status status, const tp_error *err) {
     if (status == TP_STATUS_JOURNAL_FAILED) {
         message = "Could not journal the edit -- disk full? Your change was not applied.";
     }
-    s_op_error = true;
-    (void)snprintf(s_op_error_msg, sizeof s_op_error_msg, "%s", message);
+    s_project.op_error = true;
+    (void)snprintf(s_project.op_error_msg, sizeof s_project.op_error_msg, "%s", message);
 }
 
 static bool refresh_after_session_commit(void) {
     /* Core is the sole semantic no-op owner. A no-change admission leaves the
      * revision unchanged, so keep the current projection and preview state. */
-    if (s_snapshot &&
-        tp_session_snapshot_revision(s_snapshot) == tp_session_revision(s_session)) {
+    if (s_project.snapshot &&
+        tp_session_snapshot_revision(s_project.snapshot) == tp_session_revision(s_project.session)) {
         return false;
     }
-    s_preview_stale = true;
+    s_project.preview_stale = true;
     snapshot_drop();
     return true;
 }
@@ -377,35 +377,35 @@ static bool key_eq(const coalesce_key *a, const coalesce_key *b) {
 
 /* Discard the buffered edit WITHOUT committing (new/open replace the whole project). */
 static void pending_discard(void) {
-    if (s_pending_valid) {
-        tp_operation_free(&s_pending_op);
-        memset(&s_pending_op, 0, sizeof s_pending_op);
-        s_pending_valid = false;
+    if (s_project.pending_valid) {
+        tp_operation_free(&s_project.pending_op);
+        memset(&s_project.pending_op, 0, sizeof s_project.pending_op);
+        s_project.pending_valid = false;
     }
 }
 
 /* False means the pending gesture could not be committed. Save and history
  * callers must stop rather than act on an older committed state. */
 bool gui_project_flush_pending(void) {
-    if (!s_pending_valid) {
+    if (!s_project.pending_valid) {
         return true;
     }
-    tp_operation op = s_pending_op; /* move: ownership of the arms transfers to the local */
-    const int64_t expected_revision = s_pending_expected_revision;
-    const bool preview_stale_before = s_pending_preview_stale_before;
-    memset(&s_pending_op, 0, sizeof s_pending_op);
-    s_pending_valid = false;
+    tp_operation op = s_project.pending_op; /* move: ownership of the arms transfers to the local */
+    const int64_t expected_revision = s_project.pending_expected_revision;
+    const bool preview_stale_before = s_project.pending_preview_stale_before;
+    memset(&s_project.pending_op, 0, sizeof s_project.pending_op);
+    s_project.pending_valid = false;
     if (op.kind == TP_OP_ATLAS_SETTINGS_SET) {
         char transaction_id[33];
         next_transaction_id(transaction_id);
         tp_error err = {0};
         const tp_status status = gui_session_set_atlas_settings(
-            s_session, op.atlas_id, expected_revision, &op.u.atlas_settings,
+            s_project.session, op.atlas_id, expected_revision, &op.u.atlas_settings,
             transaction_id, &err);
         tp_operation_free(&op);
         if (status == TP_STATUS_OK) {
             if (!refresh_after_session_commit()) {
-                s_preview_stale = preview_stale_before;
+                s_project.preview_stale = preview_stale_before;
             }
             return true;
         }
@@ -418,13 +418,13 @@ bool gui_project_flush_pending(void) {
         next_transaction_id(transaction_id);
         tp_error err = {0};
         const tp_status status = gui_session_set_sprite_override(
-            s_session, op.atlas_id, op.u.sprite_set.source_id,
+            s_project.session, op.atlas_id, op.u.sprite_set.source_id,
             op.u.sprite_set.src_key, expected_revision,
             &op.u.sprite_set, transaction_id, &err);
         tp_operation_free(&op);
         if (status == TP_STATUS_OK) {
             if (!refresh_after_session_commit()) {
-                s_preview_stale = preview_stale_before;
+                s_project.preview_stale = preview_stale_before;
             }
             return true;
         }
@@ -436,12 +436,12 @@ bool gui_project_flush_pending(void) {
         next_transaction_id(transaction_id);
         tp_error err = {0};
         const tp_status status = gui_session_set_animation_settings(
-            s_session, op.atlas_id, op.u.anim_settings.anim_id,
+            s_project.session, op.atlas_id, op.u.anim_settings.anim_id,
             expected_revision, &op.u.anim_settings, transaction_id, &err);
         tp_operation_free(&op);
         if (status == TP_STATUS_OK) {
             if (!refresh_after_session_commit()) {
-                s_preview_stale = preview_stale_before;
+                s_project.preview_stale = preview_stale_before;
             }
             return true;
         }
@@ -453,12 +453,12 @@ bool gui_project_flush_pending(void) {
         next_transaction_id(transaction_id);
         tp_error err = {0};
         const tp_status status = gui_session_set_target(
-            s_session, op.atlas_id, op.u.target_set.target_id,
+            s_project.session, op.atlas_id, op.u.target_set.target_id,
             expected_revision, &op.u.target_set, transaction_id, &err);
         tp_operation_free(&op);
         if (status == TP_STATUS_OK) {
             if (!refresh_after_session_commit()) {
-                s_preview_stale = preview_stale_before;
+                s_project.preview_stale = preview_stale_before;
             }
             return true;
         }
@@ -481,9 +481,9 @@ bool gui_project_flush_pending(void) {
  * flush trigger is the gesture boundary (slider release / field Enter+blur / discrete click),
  * NOT a timer -- so a SAME-key edit never flushes here regardless of how long the gesture takes
  * (a slow drag stays one transaction). The time window is a FALLBACK only (gui_project_flush_elapsed).
- * After this returns, s_pending_valid is true IFF a same-key pending remains (the replace target). */
+ * After this returns, s_project.pending_valid is true IFF a same-key pending remains (the replace target). */
 static void pending_route(const coalesce_key *k) {
-    if (s_pending_valid && !key_eq(k, &s_pending_key)) {
+    if (s_project.pending_valid && !key_eq(k, &s_project.pending_key)) {
         /* fix2: the bool is intentionally IGNORED here. On a journal-failed flush the different-key
          * gesture is dropped WITH the op-error surfaced (commit_txn_now set it); the caller then only
          * BUFFERS a new (uncommitted) edit -- there is no persist/discard "proceed as clean" decision to
@@ -496,29 +496,29 @@ static void pending_route(const coalesce_key *k) {
  * valid pending is same-key -> replace its value (latest wins). Preview goes stale immediately;
  * the commit (and model_ver bump) is deferred to the flush. */
 static bool pending_offer(const coalesce_key *k, tp_operation *op) {
-    if (!tp_session_recovery_available(s_session)) {
+    if (!tp_session_recovery_available(s_project.session)) {
         tp_operation_free(op);
         note_recovery_degraded("mutation is unavailable");
         return false;
     }
-    if (!s_pending_valid) {
-        s_pending_preview_stale_before = s_preview_stale;
+    if (!s_project.pending_valid) {
+        s_project.pending_preview_stale_before = s_project.preview_stale;
     }
-    if (s_pending_valid) {
-        tp_operation_free(&s_pending_op); /* same key: replace the value */
+    if (s_project.pending_valid) {
+        tp_operation_free(&s_project.pending_op); /* same key: replace the value */
     }
-    s_pending_op = *op; /* shallow move; caller must not free `op` after this */
-    s_pending_key = *k;
-    s_pending_time = s_now;
-    s_pending_valid = true;
-    s_preview_stale = true; /* immediate stale feedback while the gesture buffers */
+    s_project.pending_op = *op; /* shallow move; caller must not free `op` after this */
+    s_project.pending_key = *k;
+    s_project.pending_time = s_project.now;
+    s_project.pending_valid = true;
+    s_project.preview_stale = true; /* immediate stale feedback while the gesture buffers */
     return true;
 }
 
 /* Fallback for a control that missed its gesture boundary. main.c calls this
  * only when no pointer gesture or text input remains active. */
 void gui_project_flush_elapsed(void) {
-    if (s_pending_valid && (s_now - s_pending_time) > GUI_COALESCE_SECS) {
+    if (s_project.pending_valid && (s_project.now - s_project.pending_time) > GUI_COALESCE_SECS) {
         gui_project_flush_pending();
     }
 }
@@ -526,17 +526,17 @@ void gui_project_flush_elapsed(void) {
 /* Exposes the full buffered slice9 value so canvas guides update before the
  * gesture commits. False asks the caller to use the committed snapshot. */
 bool gui_project_peek_pending_slice9(const gui_sprite_ref *sprite, int out_lrtb[4]) {
-    if (!sprite || !out_lrtb || !s_pending_valid ||
-        s_pending_key.kind != CK_SPRITE_SLICE9 ||
-        !tp_id128_eq(s_pending_key.atlas_id, sprite->atlas_id) ||
-        !tp_id128_eq(s_pending_key.source_id, sprite->source_id)) {
+    if (!sprite || !out_lrtb || !s_project.pending_valid ||
+        s_project.pending_key.kind != CK_SPRITE_SLICE9 ||
+        !tp_id128_eq(s_project.pending_key.atlas_id, sprite->atlas_id) ||
+        !tp_id128_eq(s_project.pending_key.source_id, sprite->source_id)) {
         return false;
     }
-    if (strcmp(s_pending_key.sprite, sprite->source_key ? sprite->source_key : "") != 0) {
+    if (strcmp(s_project.pending_key.sprite, sprite->source_key ? sprite->source_key : "") != 0) {
         return false;
     }
     for (int k = 0; k < 4; k++) {
-        out_lrtb[k] = (int)s_pending_op.u.sprite_set.slice9[k];
+        out_lrtb[k] = (int)s_project.pending_op.u.sprite_set.slice9[k];
     }
     return true;
 }
@@ -548,13 +548,13 @@ bool gui_project_peek_pending_slice9(const gui_sprite_ref *sprite, int out_lrtb[
 static void fresh_init(void) {
     (void)install_fresh_session();
     recompute_name();
-    attach_recovery_live(s_session);
-    s_preview_stale = false;
+    attach_recovery_live(s_project.session);
+    s_project.preview_stale = false;
     snapshot_drop();
 }
 
 void gui_project_init(void) {
-    if (s_session) {
+    if (s_project.session) {
         return;
     }
     pending_discard();
@@ -565,28 +565,28 @@ void gui_project_shutdown(void) {
     /* The engine currently gives us no cancellable window-close callback. Flush a last buffered edit,
      * then keep the owned slot whenever the model is dirty or the flush failed. This turns X/Alt+F4
      * into a recoverable close. Only an explicit Exit -> Discard confirmation may remove dirty work. */
-    (void)(!s_session || gui_project_flush_pending());
+    (void)(!s_project.session || gui_project_flush_pending());
     pending_discard();
     snapshot_drop();
-    if (s_session && s_discard_recovery_on_shutdown) {
-        (void)tp_session_discard(s_session, NULL);
+    if (s_project.session && s_project.discard_recovery_on_shutdown) {
+        (void)tp_session_discard(s_project.session, NULL);
     }
-    tp_session_destroy(s_session); /* frees the sole owned model/project/history/journal */
-    s_session = NULL;
-    s_recovery_root[0] = '\0';
-    s_discard_recovery_on_shutdown = false;
-    s_save_notice_pending = false;
-    s_save_notice[0] = '\0';
+    tp_session_destroy(s_project.session); /* frees the sole owned model/project/history/journal */
+    s_project.session = NULL;
+    s_project.recovery_root[0] = '\0';
+    s_project.discard_recovery_on_shutdown = false;
+    s_project.save_notice_pending = false;
+    s_project.save_notice[0] = '\0';
 }
 
-void gui_project_discard_recovery_on_shutdown(void) { s_discard_recovery_on_shutdown = true; }
+void gui_project_discard_recovery_on_shutdown(void) { s_project.discard_recovery_on_shutdown = true; }
 
-void gui_project_require_recovery(void) { s_recovery_required = true; }
+void gui_project_require_recovery(void) { s_project.recovery_required = true; }
 
 /* Configure crash recovery from the host app-data root. Core generates the
  * per-process slot identity and owns all liveness and exclusion mechanics. */
 void gui_project_enable_recovery(const char *root) {
-    s_recovery_root[0] = '\0';
+    s_project.recovery_root[0] = '\0';
     if (!root || root[0] == '\0') {
         return;
     }
@@ -594,7 +594,7 @@ void gui_project_enable_recovery(const char *root) {
     const tp_status status = tp_recovery_root_validate(
         root, recovery_key(), &err);
     if (status == TP_STATUS_OK) {
-        (void)snprintf(s_recovery_root, sizeof s_recovery_root, "%s", root);
+        (void)snprintf(s_project.recovery_root, sizeof s_project.recovery_root, "%s", root);
     }
     if (status != TP_STATUS_OK) {
         gui_project_note_recovery_setup_failure(
@@ -607,7 +607,7 @@ void gui_project_enable_recovery(const char *root) {
  * stale so session admission rejects it instead of silently overwriting newer work. */
 static int64_t revision_after_owned_route(int64_t captured_revision,
                                           int64_t revision_before_route) {
-    const int64_t current_revision = tp_session_revision(s_session);
+    const int64_t current_revision = tp_session_revision(s_project.session);
     return captured_revision == revision_before_route &&
                    current_revision != revision_before_route
                ? current_revision
@@ -615,42 +615,42 @@ static int64_t revision_after_owned_route(int64_t captured_revision,
 }
 
 void gui_project_note_recovery_setup_failure(const char *reason) {
-    s_recovery_setup_notice_pending = true;
-    (void)snprintf(s_recovery_setup_notice, sizeof s_recovery_setup_notice,
+    s_project.recovery_setup_notice_pending = true;
+    (void)snprintf(s_project.recovery_setup_notice, sizeof s_project.recovery_setup_notice,
                    "Editing is unavailable because crash recovery could not start (%s).",
                    (reason && reason[0] != '\0') ? reason : "startup setup failed");
 }
 
 static void note_recovery_scan_limited(void) {
-    s_recovery_setup_notice_pending = true;
-    (void)snprintf(s_recovery_setup_notice, sizeof s_recovery_setup_notice,
+    s_project.recovery_setup_notice_pending = true;
+    (void)snprintf(s_project.recovery_setup_notice, sizeof s_project.recovery_setup_notice,
                    "Some previous recovery sessions were not scanned because the startup safety budget was reached.");
 }
 
 /* Drains the one-shot recovery-unavailable notice. */
 bool gui_project_take_recovery_setup_notice(char *out, size_t cap) {
-    if (!s_recovery_setup_notice_pending) {
+    if (!s_project.recovery_setup_notice_pending) {
         return false;
     }
     if (out && cap) {
-        (void)snprintf(out, cap, "%s", s_recovery_setup_notice[0] != '\0'
-                                             ? s_recovery_setup_notice
+        (void)snprintf(out, cap, "%s", s_project.recovery_setup_notice[0] != '\0'
+                                             ? s_project.recovery_setup_notice
                                              : "Editing is unavailable because crash recovery could not start.");
     }
-    s_recovery_setup_notice_pending = false;
-    s_recovery_setup_notice[0] = '\0';
+    s_project.recovery_setup_notice_pending = false;
+    s_project.recovery_setup_notice[0] = '\0';
     return true;
 }
 
 bool gui_project_take_save_notice(char *out, size_t cap) {
-    if (!s_save_notice_pending) {
+    if (!s_project.save_notice_pending) {
         return false;
     }
     if (out && cap > 0U) {
-        (void)snprintf(out, cap, "%s", s_save_notice);
+        (void)snprintf(out, cap, "%s", s_project.save_notice);
     }
-    s_save_notice_pending = false;
-    s_save_notice[0] = '\0';
+    s_project.save_notice_pending = false;
+    s_project.save_notice[0] = '\0';
     return true;
 }
 // #endregion
@@ -665,7 +665,7 @@ int gui_recovery_collect(gui_recovery_list *out) {
     }
     tp_error err = {0};
     tp_status status = tp_recovery_scan_root(
-        s_recovery_root, recovery_key(), s_session, out, &err);
+        s_project.recovery_root, recovery_key(), s_project.session, out, &err);
     if (status != TP_STATUS_OK) {
         gui_project_note_recovery_setup_failure("the recovery directory could not be scanned");
         return 0;
@@ -722,7 +722,7 @@ gui_recovery_resolve(const char *journal_path, gui_recovery_action action,
     tp_rng rng = tp_rng_os();
     tp_recovery_resolve_result result;
     const tp_status status = tp_recovery_resolve_journal(
-        s_recovery_root, recovery_key(), journal_path, s_session, core_action,
+        s_project.recovery_root, recovery_key(), journal_path, s_project.session, core_action,
         target_path, &rng, &result, &err);
     if (status != TP_STATUS_OK) {
         recovery_copy_error(err_out, err_cap, status, &err);
@@ -746,7 +746,7 @@ tp_status gui_recovery_resolve_entry(const gui_recovery_entry *entry, gui_recove
 
 // #region lifecycle dev seams (selftest only)
 #ifdef NTPACKER_GUI_SELFTEST
-tp_session *gui_project__test_session(void) { return s_session; }
+tp_session *gui_project__test_session(void) { return s_project.session; }
 
 #endif
 // #endregion
@@ -756,7 +756,7 @@ const char *gui_project_path(void) {
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     return tp_session_snapshot_canonical_path(snapshot);
 }
-const char *gui_project_display_name(void) { return s_name; }
+const char *gui_project_display_name(void) { return s_project.name; }
 bool gui_project_has_path(void) {
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     return tp_session_snapshot_identity(snapshot).kind == TP_IDENTITY_SAVED;
@@ -767,16 +767,16 @@ bool gui_project_is_dirty(void) {
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     return snapshot && tp_session_snapshot_dirty(snapshot);
 }
-bool gui_project_is_stale(void) { return s_preview_stale; }
+bool gui_project_is_stale(void) { return s_project.preview_stale; }
 // #endregion
 
 // #region dirty/stale choke point
 /* Post-commit choke point: a REAL committed mutation makes the preview stale and bumps the
  * session generation. Undo history + dirty are core-owned. `act` is vestigial (coalescing moved to the
  * transaction buffer) but kept for call-site clarity + the dev-seam signature. */
-void gui_project_mark_packed(void) { s_preview_stale = false; }
-void gui_project_mark_stale(void) { s_preview_stale = true; }
-void gui_project_tick(double now_seconds) { s_now = now_seconds; }
+void gui_project_mark_packed(void) { s_project.preview_stale = false; }
+void gui_project_mark_stale(void) { s_project.preview_stale = true; }
+void gui_project_tick(double now_seconds) { s_project.now = now_seconds; }
 // #endregion
 
 // #region mutation wrappers (each builds typed op(s) + commits through the model)
@@ -818,7 +818,7 @@ int gui_project_add_atlas(void) {
     next_transaction_id(transaction_id);
     err = (tp_error){0};
     const tp_status status = gui_session_create_atlas(
-        s_session, new_id, target_id, tp_session_snapshot_revision(snapshot), name,
+        s_project.session, new_id, target_id, tp_session_snapshot_revision(snapshot), name,
         exporter_id, out_path, target_enabled, transaction_id, &err);
     if (status != TP_STATUS_OK) {
         note_session_reject(status, &err);
@@ -840,22 +840,22 @@ int gui_project_add_atlas(void) {
  * invalid index, or a commit reject) so the deferred handler shows "Removed X (Ctrl+Z)" + resets
  * selection ONLY on a real removal -- never a false "Removed" over a dropped gesture. */
 bool gui_project_remove_atlas(tp_id128 atlas_id, int64_t expected_revision) {
-    const int64_t revision_before_flush = s_session ? tp_session_revision(s_session) : 0;
+    const int64_t revision_before_flush = s_project.session ? tp_session_revision(s_project.session) : 0;
     if (!gui_project_flush_pending()) {
         return false; /* fix2 [3]: journal-failed flush dropped the gesture -> abort (op-error surfaced) */
     }
-    if (tp_id128_is_nil(atlas_id) || !s_session) {
+    if (tp_id128_is_nil(atlas_id) || !s_project.session) {
         return false;
     }
     if (expected_revision == revision_before_flush &&
-        tp_session_revision(s_session) != revision_before_flush) {
-        expected_revision = tp_session_revision(s_session);
+        tp_session_revision(s_project.session) != revision_before_flush) {
+        expected_revision = tp_session_revision(s_project.session);
     }
     char transaction_id[33];
     next_transaction_id(transaction_id);
     tp_error err = {0};
     const tp_status status = gui_session_remove_atlas(
-        s_session, atlas_id, expected_revision, transaction_id, &err);
+        s_project.session, atlas_id, expected_revision, transaction_id, &err);
     if (status != TP_STATUS_OK) {
         note_session_reject(status, &err);
         return false;
@@ -902,7 +902,7 @@ bool gui_project_add_sources(tp_id128 atlas_id, int64_t expected_revision,
     if (out_dup) {
         *out_dup = 0;
     }
-    const int64_t revision_before_flush = s_session ? tp_session_revision(s_session) : 0;
+    const int64_t revision_before_flush = s_project.session ? tp_session_revision(s_project.session) : 0;
     if (!gui_project_flush_pending()) {
         return false; /* fix2 [3]: a journal-failed flush dropped the gesture -> abort (op-error surfaced) */
     }
@@ -912,8 +912,8 @@ bool gui_project_add_sources(tp_id128 atlas_id, int64_t expected_revision,
         return false;
     }
     if (expected_revision == revision_before_flush &&
-        tp_session_revision(s_session) != revision_before_flush) {
-        expected_revision = tp_session_revision(s_session);
+        tp_session_revision(s_project.session) != revision_before_flush) {
+        expected_revision = tp_session_revision(s_project.session);
     }
     tp_source_batch_plan plan = {0};
     tp_error plan_error = {0};
@@ -956,7 +956,7 @@ bool gui_project_add_sources(tp_id128 atlas_id, int64_t expected_revision,
         next_transaction_id(transaction_id);
         tp_error err = {0};
         const tp_status status = gui_session_add_sources(
-            s_session, atlas_id, ids, distinct, m,
+            s_project.session, atlas_id, ids, distinct, m,
             (tp_snapshot_source_kind)kind,
             expected_revision, transaction_id, &err);
         ok = status == TP_STATUS_OK;
@@ -982,22 +982,22 @@ bool gui_project_add_sources(tp_id128 atlas_id, int64_t expected_revision,
 /* fix3 [0]: bool -- true iff the removal committed (see gui_project_remove_atlas). */
 bool gui_project_remove_source(tp_id128 atlas_id, tp_id128 source_id,
                                int64_t expected_revision) {
-    const int64_t revision_before_flush = s_session ? tp_session_revision(s_session) : 0;
+    const int64_t revision_before_flush = s_project.session ? tp_session_revision(s_project.session) : 0;
     if (!gui_project_flush_pending()) {
         return false; /* fix2 [3]: journal-failed flush dropped the gesture -> abort (op-error surfaced) */
     }
-    if (!s_session || tp_id128_is_nil(atlas_id) || tp_id128_is_nil(source_id)) {
+    if (!s_project.session || tp_id128_is_nil(atlas_id) || tp_id128_is_nil(source_id)) {
         return false;
     }
     if (expected_revision == revision_before_flush &&
-        tp_session_revision(s_session) != revision_before_flush) {
-        expected_revision = tp_session_revision(s_session);
+        tp_session_revision(s_project.session) != revision_before_flush) {
+        expected_revision = tp_session_revision(s_project.session);
     }
     char transaction_id[33];
     next_transaction_id(transaction_id);
     tp_error err = {0};
     const tp_status status = gui_session_remove_source(
-        s_session, atlas_id, source_id, expected_revision, transaction_id, &err);
+        s_project.session, atlas_id, source_id, expected_revision, transaction_id, &err);
     if (status != TP_STATUS_OK) {
         note_session_reject(status, &err);
         return false;
@@ -1008,22 +1008,22 @@ bool gui_project_remove_source(tp_id128 atlas_id, tp_id128 source_id,
 }
 
 bool gui_project_set_atlas_name(tp_id128 atlas_id, int64_t expected_revision, const char *name) {
-    const int64_t revision_before_flush = s_session ? tp_session_revision(s_session) : 0;
+    const int64_t revision_before_flush = s_project.session ? tp_session_revision(s_project.session) : 0;
     if (!gui_project_flush_pending()) {
         return false; /* fix2 [3]: journal-failed flush dropped the gesture -> abort (op-error surfaced) */
     }
-    if (!s_session || !name) {
+    if (!s_project.session || !name) {
         return false;
     }
     if (expected_revision == revision_before_flush &&
-        tp_session_revision(s_session) != revision_before_flush) {
-        expected_revision = tp_session_revision(s_session);
+        tp_session_revision(s_project.session) != revision_before_flush) {
+        expected_revision = tp_session_revision(s_project.session);
     }
     char transaction_id[33];
     next_transaction_id(transaction_id);
     tp_error err = {0};
     const tp_status status = gui_session_rename_atlas(
-        s_session, atlas_id, expected_revision, name, transaction_id, &err);
+        s_project.session, atlas_id, expected_revision, name, transaction_id, &err);
     if (status != TP_STATUS_OK) {
         note_session_reject(status, &err);
         return false;
@@ -1038,25 +1038,25 @@ tp_status gui_project_copy_atlas_name(tp_id128 atlas_id, char *out, size_t capac
 }
 
 bool gui_project_set_sprite_rename(const gui_sprite_ref *sprite, const char *rename) {
-    const int64_t revision_before_flush = s_session ? tp_session_revision(s_session) : 0;
+    const int64_t revision_before_flush = s_project.session ? tp_session_revision(s_project.session) : 0;
     if (!gui_project_flush_pending()) {
         return false; /* fix2 [3]: journal-failed flush dropped the gesture -> abort (op-error surfaced) */
     }
-    if (!s_session || !sprite || tp_id128_is_nil(sprite->atlas_id) ||
+    if (!s_project.session || !sprite || tp_id128_is_nil(sprite->atlas_id) ||
         tp_id128_is_nil(sprite->source_id) || !sprite->source_key ||
         sprite->source_key[0] == '\0') {
         return false;
     }
     int64_t expected_revision = sprite->expected_revision;
     if (expected_revision == revision_before_flush &&
-        tp_session_revision(s_session) != revision_before_flush) {
-        expected_revision = tp_session_revision(s_session);
+        tp_session_revision(s_project.session) != revision_before_flush) {
+        expected_revision = tp_session_revision(s_project.session);
     }
     char transaction_id[33];
     next_transaction_id(transaction_id);
     tp_error err = {0};
     const tp_status status = gui_session_set_sprite_name(
-        s_session, sprite->atlas_id, sprite->source_id, sprite->source_key,
+        s_project.session, sprite->atlas_id, sprite->source_id, sprite->source_key,
         expected_revision, rename, transaction_id, &err);
     if (status != TP_STATUS_OK) {
         note_session_reject(status, &err);
@@ -1085,11 +1085,11 @@ static bool fill_atlas_knob(tp_op_atlas_settings *s, gui_atlas_field f, int iv, 
 
 bool gui_project_set_atlas_setting(tp_id128 atlas_id, int64_t expected_revision,
                                    gui_atlas_field field, int ivalue, float fvalue) {
-    if (!s_session || tp_id128_is_nil(atlas_id)) {
+    if (!s_project.session || tp_id128_is_nil(atlas_id)) {
         return false;
     }
     coalesce_key ck = make_atlas_key(atlas_id, (int)field);
-    const int64_t revision_before_route = tp_session_revision(s_session);
+    const int64_t revision_before_route = tp_session_revision(s_project.session);
     pending_route(&ck); /* flush a different knob's pending BEFORE reading this atlas */
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     if (!snapshot || !tp_session_snapshot_atlas_by_id(snapshot, atlas_id)) {
@@ -1105,7 +1105,7 @@ bool gui_project_set_atlas_setting(tp_id128 atlas_id, int64_t expected_revision,
     }
     expected_revision = revision_after_owned_route(expected_revision,
                                                    revision_before_route);
-    s_pending_expected_revision = expected_revision;
+    s_project.pending_expected_revision = expected_revision;
     return pending_offer(&ck, &op);
 }
 
@@ -1130,12 +1130,12 @@ static bool sprite_override_offer(const gui_sprite_ref *sprite, tp_op_sprite_set
         tp_operation_free(&op);
         return false;
     }
-    s_pending_expected_revision = sprite->expected_revision;
+    s_project.pending_expected_revision = sprite->expected_revision;
     return pending_offer(k, &op);
 }
 
 bool gui_project_set_sprite_origin(const gui_sprite_ref *sprite, int axis, float value) {
-    if (!s_session || !sprite || axis < 0 || axis > 1) {
+    if (!s_project.session || !sprite || axis < 0 || axis > 1) {
         return false; /* 0 = Pivot X, 1 = Pivot Y */
     }
     /* Component-precise key (mirror slice9): X and Y are DIFFERENT keys, so editing the OTHER axis
@@ -1147,7 +1147,7 @@ bool gui_project_set_sprite_origin(const gui_sprite_ref *sprite, int axis, float
     if (!make_sprite_key(CK_SPRITE_ORIGIN, sprite, axis, &ck)) {
         return false;
     }
-    const int64_t revision_before_route = tp_session_revision(s_session);
+    const int64_t revision_before_route = tp_session_revision(s_project.session);
     pending_route(&ck);
     gui_sprite_ref routed = *sprite;
     routed.expected_revision = revision_after_owned_route(
@@ -1167,7 +1167,7 @@ bool gui_project_set_sprite_origin(const gui_sprite_ref *sprite, int axis, float
 }
 
 bool gui_project_set_sprite_slice9(const gui_sprite_ref *sprite, int lrtb_index, int value) {
-    if (!s_session || !sprite || lrtb_index < 0 || lrtb_index >= 4) {
+    if (!s_project.session || !sprite || lrtb_index < 0 || lrtb_index >= 4) {
         return false;
     }
     /* Field-precise key: the component index. A different-component edit therefore has a
@@ -1178,7 +1178,7 @@ bool gui_project_set_sprite_slice9(const gui_sprite_ref *sprite, int lrtb_index,
     if (!make_sprite_key(CK_SPRITE_SLICE9, sprite, lrtb_index, &ck)) {
         return false;
     }
-    const int64_t revision_before_route = tp_session_revision(s_session);
+    const int64_t revision_before_route = tp_session_revision(s_project.session);
     pending_route(&ck);
     gui_sprite_ref routed = *sprite;
     routed.expected_revision = revision_after_owned_route(
@@ -1200,14 +1200,14 @@ bool gui_project_set_sprite_slice9(const gui_sprite_ref *sprite, int lrtb_index,
 }
 
 bool gui_project_set_sprite_override(const gui_sprite_ref *sprite, gui_sprite_ov which, int value) {
-    if (!s_session || !sprite) {
+    if (!s_project.session || !sprite) {
         return false;
     }
     coalesce_key ck;
     if (!make_sprite_key(CK_SPRITE_OVERRIDE, sprite, (int)which, &ck)) {
         return false;
     }
-    const int64_t revision_before_route = tp_session_revision(s_session);
+    const int64_t revision_before_route = tp_session_revision(s_project.session);
     pending_route(&ck);
     gui_sprite_ref routed = *sprite;
     routed.expected_revision = revision_after_owned_route(
@@ -1227,7 +1227,7 @@ bool gui_project_set_sprite_override(const gui_sprite_ref *sprite, gui_sprite_ov
 }
 
 int gui_project_add_target(tp_id128 atlas_id, int64_t expected_revision) {
-    const int64_t revision_before_flush = tp_session_revision(s_session);
+    const int64_t revision_before_flush = tp_session_revision(s_project.session);
     if (!gui_project_flush_pending()) {
         return -1; /* fix2 [3]: journal-failed flush dropped the gesture -> abort (op-error surfaced) */
     }
@@ -1243,8 +1243,8 @@ int gui_project_add_target(tp_id128 atlas_id, int64_t expected_revision) {
         return -1;
     }
     if (expected_revision == revision_before_flush &&
-        tp_session_revision(s_session) != revision_before_flush) {
-        expected_revision = tp_session_revision(s_session);
+        tp_session_revision(s_project.session) != revision_before_flush) {
+        expected_revision = tp_session_revision(s_project.session);
     }
     tp_id128 target_id;
     if (!gen_id(&target_id)) {
@@ -1264,7 +1264,7 @@ int gui_project_add_target(tp_id128 atlas_id, int64_t expected_revision) {
     char transaction_id[33];
     next_transaction_id(transaction_id);
     const tp_status status = gui_session_create_target(
-        s_session, atlas_id, target_id, expected_revision,
+        s_project.session, atlas_id, target_id, expected_revision,
         exporter_id, out_path, enabled, transaction_id, &err);
     if (status != TP_STATUS_OK) {
         note_session_reject(status, &err);
@@ -1279,20 +1279,20 @@ int gui_project_add_target(tp_id128 atlas_id, int64_t expected_revision) {
 /* fix3 [0]: bool -- true iff the removal committed (see gui_project_remove_atlas). */
 bool gui_project_remove_target(const gui_target_ref *target) {
     if (!target) return false;
-    const int64_t revision_before_flush = tp_session_revision(s_session);
+    const int64_t revision_before_flush = tp_session_revision(s_project.session);
     if (!gui_project_flush_pending()) {
         return false; /* fix2 [3]: journal-failed flush dropped the gesture -> abort (op-error surfaced) */
     }
     int64_t expected_revision = target->expected_revision;
     if (expected_revision == revision_before_flush &&
-        tp_session_revision(s_session) != revision_before_flush) {
-        expected_revision = tp_session_revision(s_session);
+        tp_session_revision(s_project.session) != revision_before_flush) {
+        expected_revision = tp_session_revision(s_project.session);
     }
     char transaction_id[33];
     next_transaction_id(transaction_id);
     tp_error err = {0};
     const tp_status status = gui_session_remove_target(
-        s_session, target->atlas_id, target->target_id, expected_revision,
+        s_project.session, target->atlas_id, target->target_id, expected_revision,
         transaction_id, &err);
     if (status != TP_STATUS_OK) {
         note_session_reject(status, &err);
@@ -1305,7 +1305,7 @@ bool gui_project_remove_target(const gui_target_ref *target) {
 bool gui_project_set_target(const gui_target_ref *target, const char *exporter_id,
                             const char *out_path, bool enabled) {
     if (!target) return false;
-    const int64_t revision_before_flush = tp_session_revision(s_session);
+    const int64_t revision_before_flush = tp_session_revision(s_project.session);
     /* Duplicate caller strings before flushing because exporter_id/out_path may
      * point into the cached snapshot that a successful flush invalidates. */
     char *exp = dupstr(exporter_id);
@@ -1334,7 +1334,7 @@ bool gui_project_set_target(const gui_target_ref *target, const char *exporter_i
     const int64_t expected_revision = revision_after_owned_route(
         target->expected_revision, revision_before_flush);
     const tp_status status = gui_session_set_target(
-        s_session, target->atlas_id, target->target_id,
+        s_project.session, target->atlas_id, target->target_id,
         expected_revision, &settings, transaction_id, &err);
     free(exp);
     free(outp);
@@ -1362,7 +1362,7 @@ bool gui_project_set_target_out_path(const gui_target_ref *target,
     coalesce_key ck = make_key(CK_TARGET_OUTPATH, -1);
     ck.atlas_id = target->atlas_id;
     ck.source_id = target->target_id;
-    const int64_t revision_before_route = tp_session_revision(s_session);
+    const int64_t revision_before_route = tp_session_revision(s_project.session);
     pending_route(&ck); /* flush a DIFFERENT key (other target / other knob) BEFORE reading this target */
     if (!out_path) {
         return false;
@@ -1378,7 +1378,7 @@ bool gui_project_set_target_out_path(const gui_target_ref *target,
     op.u.target_set.target_id = target->target_id;
     op.u.target_set.mask = TP_TF_OUT_PATH;     /* MASKED: only out_path -- exporter/enabled untouched (no RMW-seed) */
     op.u.target_set.out_path = outp;           /* ownership transfers to op */
-    s_pending_expected_revision = revision_after_owned_route(
+    s_project.pending_expected_revision = revision_after_owned_route(
         target->expected_revision, revision_before_route);
     return pending_offer(&ck, &op);
 }
@@ -1393,7 +1393,7 @@ bool gui_project_set_target_out_path(const gui_target_ref *target,
  * too. */
 bool gui_project_set_target_enabled(const gui_target_ref *target, bool enabled) {
     if (!target) return false;
-    const int64_t revision_before_flush = tp_session_revision(s_session);
+    const int64_t revision_before_flush = tp_session_revision(s_project.session);
     if (!gui_project_flush_pending()) { /* commit any buffered out-path gesture FIRST (gesture boundary) */
         return false;
     }
@@ -1406,7 +1406,7 @@ bool gui_project_set_target_enabled(const gui_target_ref *target, bool enabled) 
     const int64_t expected_revision = revision_after_owned_route(
         target->expected_revision, revision_before_flush);
     const tp_status status = gui_session_set_target(
-        s_session, target->atlas_id, target->target_id,
+        s_project.session, target->atlas_id, target->target_id,
         expected_revision, &settings, transaction_id, &err);
     if (status != TP_STATUS_OK) {
         note_session_reject(status, &err);
@@ -1419,7 +1419,7 @@ bool gui_project_set_target_enabled(const gui_target_ref *target, bool enabled) 
 bool gui_project_set_target_exporter(const gui_target_ref *target,
                                      const char *exporter_id) {
     if (!target) return false;
-    const int64_t revision_before_flush = tp_session_revision(s_session);
+    const int64_t revision_before_flush = tp_session_revision(s_project.session);
     if (!gui_project_flush_pending()) {
         return false;
     }
@@ -1436,7 +1436,7 @@ bool gui_project_set_target_exporter(const gui_target_ref *target,
     const int64_t expected_revision = revision_after_owned_route(
         target->expected_revision, revision_before_flush);
     const tp_status status = gui_session_set_target(
-        s_session, target->atlas_id, target->target_id,
+        s_project.session, target->atlas_id, target->target_id,
         expected_revision, &settings, transaction_id, &err);
     free(exp);
     if (status != TP_STATUS_OK) {
@@ -1488,7 +1488,7 @@ bool gui_project_target_ref_at(int atlas_index, int target_index,
 int gui_project_create_animation(tp_id128 atlas_id, int64_t expected_revision,
                                  const char *base, const tp_op_sprite_ref *frames,
                                  int frame_count) {
-    const int64_t revision_before_flush = tp_session_revision(s_session);
+    const int64_t revision_before_flush = tp_session_revision(s_project.session);
     if (!gui_project_flush_pending()) {
         return -1; /* fix2 [3]: journal-failed flush dropped the gesture -> abort (op-error surfaced) */
     }
@@ -1500,8 +1500,8 @@ int gui_project_create_animation(tp_id128 atlas_id, int64_t expected_revision,
         return -1;
     }
     if (expected_revision == revision_before_flush &&
-        tp_session_revision(s_session) != revision_before_flush) {
-        expected_revision = tp_session_revision(s_session);
+        tp_session_revision(s_project.session) != revision_before_flush) {
+        expected_revision = tp_session_revision(s_project.session);
     }
     char id[128];
     tp_error naming_error = {0};
@@ -1519,7 +1519,7 @@ int gui_project_create_animation(tp_id128 atlas_id, int64_t expected_revision,
     next_transaction_id(transaction_id);
     tp_error err = {0};
     const tp_status status = gui_session_create_animation(
-        s_session, atlas_id, anim_id, expected_revision, id, frames,
+        s_project.session, atlas_id, anim_id, expected_revision, id, frames,
         frame_count, transaction_id, &err);
     if (status != TP_STATUS_OK) {
         note_session_reject(status, &err);
@@ -1544,20 +1544,20 @@ bool gui_project_remove_animation(const gui_animation_ref *animation) {
     if (!animation) {
         return false;
     }
-    const int64_t revision_before_flush = tp_session_revision(s_session);
+    const int64_t revision_before_flush = tp_session_revision(s_project.session);
     if (!gui_project_flush_pending()) {
         return false;
     }
     int64_t expected_revision = animation->expected_revision;
     if (expected_revision == revision_before_flush &&
-        tp_session_revision(s_session) != revision_before_flush) {
-        expected_revision = tp_session_revision(s_session);
+        tp_session_revision(s_project.session) != revision_before_flush) {
+        expected_revision = tp_session_revision(s_project.session);
     }
     char transaction_id[33];
     next_transaction_id(transaction_id);
     tp_error err = {0};
     const tp_status status = gui_session_remove_animation(
-        s_session, animation->atlas_id, animation->animation_id,
+        s_project.session, animation->atlas_id, animation->animation_id,
         expected_revision, transaction_id, &err);
     if (status != TP_STATUS_OK) {
         note_session_reject(status, &err);
@@ -1571,20 +1571,20 @@ bool gui_project_set_anim_id(const gui_animation_ref *animation, const char *new
     if (!animation) {
         return false;
     }
-    const int64_t revision_before_flush = tp_session_revision(s_session);
+    const int64_t revision_before_flush = tp_session_revision(s_project.session);
     if (!gui_project_flush_pending()) {
         return false; /* fix2 [3]: journal-failed flush dropped the gesture -> abort (op-error surfaced) */
     }
     int64_t expected_revision = animation->expected_revision;
     if (expected_revision == revision_before_flush &&
-        tp_session_revision(s_session) != revision_before_flush) {
-        expected_revision = tp_session_revision(s_session);
+        tp_session_revision(s_project.session) != revision_before_flush) {
+        expected_revision = tp_session_revision(s_project.session);
     }
     char transaction_id[33];
     next_transaction_id(transaction_id);
     tp_error err = {0};
     const tp_status status = gui_session_rename_animation(
-        s_session, animation->atlas_id, animation->animation_id,
+        s_project.session, animation->atlas_id, animation->animation_id,
         expected_revision, new_id, transaction_id, &err);
     if (status != TP_STATUS_OK) {
         note_session_reject(status, &err);
@@ -1617,7 +1617,7 @@ static bool anim_settings_offer(const gui_animation_ref *animation,
     op.atlas_id = animation->atlas_id;
     op.u.anim_settings = *settings;
     op.u.anim_settings.anim_id = animation->animation_id;
-    s_pending_expected_revision = animation->expected_revision;
+    s_project.pending_expected_revision = animation->expected_revision;
     return pending_offer(key, &op);
 }
 
@@ -1626,7 +1626,7 @@ bool gui_project_set_anim_fps(const gui_animation_ref *animation, float fps) {
         return false;
     }
     coalesce_key ck = make_animation_key(CK_ANIM_FPS, animation);
-    const int64_t revision_before_route = tp_session_revision(s_session);
+    const int64_t revision_before_route = tp_session_revision(s_project.session);
     pending_route(&ck);
     gui_animation_ref routed = *animation;
     routed.expected_revision = revision_after_owned_route(
@@ -1642,7 +1642,7 @@ bool gui_project_set_anim_playback(const gui_animation_ref *animation, int playb
         return false;
     }
     coalesce_key ck = make_animation_key(CK_ANIM_PLAYBACK, animation);
-    const int64_t revision_before_route = tp_session_revision(s_session);
+    const int64_t revision_before_route = tp_session_revision(s_project.session);
     pending_route(&ck);
     gui_animation_ref routed = *animation;
     routed.expected_revision = revision_after_owned_route(
@@ -1659,7 +1659,7 @@ bool gui_project_set_anim_flip(const gui_animation_ref *animation, bool flip_h,
         return false;
     }
     coalesce_key ck = make_animation_key(CK_ANIM_FLIP, animation);
-    const int64_t revision_before_route = tp_session_revision(s_session);
+    const int64_t revision_before_route = tp_session_revision(s_project.session);
     pending_route(&ck);
     gui_animation_ref routed = *animation;
     routed.expected_revision = revision_after_owned_route(
@@ -1676,14 +1676,14 @@ bool gui_project_anim_add_frames(const gui_animation_ref *animation,
     if (!animation) {
         return false;
     }
-    const int64_t revision_before_flush = tp_session_revision(s_session);
+    const int64_t revision_before_flush = tp_session_revision(s_project.session);
     if (!gui_project_flush_pending()) {
         return false; /* fix2 [3]: journal-failed flush dropped the gesture -> abort (op-error surfaced) */
     }
     int64_t expected_revision = animation->expected_revision;
     if (expected_revision == revision_before_flush &&
-        tp_session_revision(s_session) != revision_before_flush) {
-        expected_revision = tp_session_revision(s_session);
+        tp_session_revision(s_project.session) != revision_before_flush) {
+        expected_revision = tp_session_revision(s_project.session);
     }
     if (!frames || count <= 0) {
         return false;
@@ -1692,7 +1692,7 @@ bool gui_project_anim_add_frames(const gui_animation_ref *animation,
     next_transaction_id(transaction_id);
     tp_error err = {0};
     const tp_status status = gui_session_add_animation_frames(
-        s_session, animation->atlas_id, animation->animation_id,
+        s_project.session, animation->atlas_id, animation->animation_id,
         expected_revision, frames, count, transaction_id, &err);
     if (status != TP_STATUS_OK) {
         note_session_reject(status, &err);
@@ -1707,20 +1707,20 @@ bool gui_project_anim_remove_frame(const gui_animation_ref *animation,
     if (!animation) {
         return false;
     }
-    const int64_t revision_before_flush = tp_session_revision(s_session);
+    const int64_t revision_before_flush = tp_session_revision(s_project.session);
     if (!gui_project_flush_pending()) {
         return false; /* fix2 [3]: journal-failed flush dropped the gesture -> abort (op-error surfaced) */
     }
     int64_t expected_revision = animation->expected_revision;
     if (expected_revision == revision_before_flush &&
-        tp_session_revision(s_session) != revision_before_flush) {
-        expected_revision = tp_session_revision(s_session);
+        tp_session_revision(s_project.session) != revision_before_flush) {
+        expected_revision = tp_session_revision(s_project.session);
     }
     char transaction_id[33];
     next_transaction_id(transaction_id);
     tp_error err = {0};
     const tp_status status = gui_session_remove_animation_frame(
-        s_session, animation->atlas_id, animation->animation_id,
+        s_project.session, animation->atlas_id, animation->animation_id,
         expected_revision, frame_index, transaction_id, &err);
     if (status != TP_STATUS_OK) {
         note_session_reject(status, &err);
@@ -1735,14 +1735,14 @@ bool gui_project_anim_move_frame(const gui_animation_ref *animation,
     if (!animation) {
         return false;
     }
-    const int64_t revision_before_flush = tp_session_revision(s_session);
+    const int64_t revision_before_flush = tp_session_revision(s_project.session);
     if (!gui_project_flush_pending()) {
         return false; /* fix2 [3]: journal-failed flush dropped the gesture -> abort (op-error surfaced) */
     }
     int64_t expected_revision = animation->expected_revision;
     if (expected_revision == revision_before_flush &&
-        tp_session_revision(s_session) != revision_before_flush) {
-        expected_revision = tp_session_revision(s_session);
+        tp_session_revision(s_project.session) != revision_before_flush) {
+        expected_revision = tp_session_revision(s_project.session);
     }
     const int to = frame_index + delta;
     if (to == frame_index) {
@@ -1752,7 +1752,7 @@ bool gui_project_anim_move_frame(const gui_animation_ref *animation,
     next_transaction_id(transaction_id);
     tp_error err = {0};
     const tp_status status = gui_session_move_animation_frame(
-        s_session, animation->atlas_id, animation->animation_id,
+        s_project.session, animation->atlas_id, animation->animation_id,
         expected_revision, frame_index, to, transaction_id, &err);
     if (status != TP_STATUS_OK) {
         note_session_reject(status, &err);
@@ -1766,24 +1766,24 @@ bool gui_project_anim_move_frame(const gui_animation_ref *animation,
 // #region undo / redo
 /* A pending buffered edit counts as undoable (undo flushes it into a step, then reverts it). */
 bool gui_project_can_undo(void) {
-    return tp_session_recovery_available(s_session) &&
-           (s_pending_valid || tp_session_can_undo(s_session));
+    return tp_session_recovery_available(s_project.session) &&
+           (s_project.pending_valid || tp_session_can_undo(s_project.session));
 }
-bool gui_project_can_redo(void) { return tp_session_can_redo(s_session); }
-int gui_project_undo_depth(void) { return tp_session_undo_depth(s_session); }
-int gui_project_redo_depth(void) { return tp_session_redo_depth(s_session); }
+bool gui_project_can_redo(void) { return tp_session_can_redo(s_project.session); }
+int gui_project_undo_depth(void) { return tp_session_undo_depth(s_project.session); }
+int gui_project_redo_depth(void) { return tp_session_redo_depth(s_project.session); }
 
 /* Undo/Redo is journal-gated inside core. Record a rejected history transition on
  * the same structured soft-error channel as a rejected transaction; no GUI-side
  * durability compensation is needed (and no false "success then degrade" is possible). */
 static void note_history_reject(const char *verb, tp_status st, const tp_error *err) {
     const char *detail = (err && err->msg[0]) ? err->msg : tp_status_str(st);
-    s_op_error = true;
+    s_project.op_error = true;
     if (st == TP_STATUS_JOURNAL_FAILED) {
-        (void)snprintf(s_op_error_msg, sizeof s_op_error_msg,
+        (void)snprintf(s_project.op_error_msg, sizeof s_project.op_error_msg,
                        "Could not journal the %s -- disk full? Nothing was changed.", verb);
     } else {
-        (void)snprintf(s_op_error_msg, sizeof s_op_error_msg, "%s rejected: %s", verb, detail);
+        (void)snprintf(s_project.op_error_msg, sizeof s_project.op_error_msg, "%s rejected: %s", verb, detail);
     }
 }
 
@@ -1795,7 +1795,7 @@ bool gui_project_undo(void) {
         return false;
     }
     tp_error e = {0};
-    tp_status st = tp_session_undo(s_session, &e);
+    tp_status st = tp_session_undo(s_project.session, &e);
     if (st != TP_STATUS_OK) {
         if (st != TP_STATUS_NOT_FOUND) {
             note_history_reject("undo", st, &e);
@@ -1803,7 +1803,7 @@ bool gui_project_undo(void) {
         return false;
     }
     snapshot_drop();
-    s_preview_stale = true;             /* restored model != last-packed; packing is blocked -> always stale */
+    s_project.preview_stale = true;             /* restored model != last-packed; packing is blocked -> always stale */
     gui_project_invalidate_sources();
     return true;
 }
@@ -1813,7 +1813,7 @@ bool gui_project_redo(void) {
         return false;
     }
     tp_error e = {0};
-    tp_status st = tp_session_redo(s_session, &e);
+    tp_status st = tp_session_redo(s_project.session, &e);
     if (st != TP_STATUS_OK) {
         if (st != TP_STATUS_NOT_FOUND) {
             note_history_reject("redo", st, &e);
@@ -1821,7 +1821,7 @@ bool gui_project_redo(void) {
         return false;
     }
     snapshot_drop();
-    s_preview_stale = true;
+    s_project.preview_stale = true;
     gui_project_invalidate_sources();
     return true;
 }
@@ -1834,8 +1834,8 @@ bool gui_project_new(void) {
         return false;
     }
     recompute_name();
-    attach_recovery_live(s_session);
-    s_preview_stale = false;
+    attach_recovery_live(s_project.session);
+    s_project.preview_stale = false;
     gui_project_invalidate_sources();
     snapshot_drop();
     return true;
@@ -1877,8 +1877,8 @@ tp_status gui_project_open(const char *path, char *err_out, size_t err_cap) {
         return TP_STATUS_OOM;
     }
     recompute_name();
-    attach_recovery_live(s_session);
-    s_preview_stale = true; /* nothing packed this session yet */
+    attach_recovery_live(s_project.session);
+    s_project.preview_stale = true; /* nothing packed this session yet */
     gui_project_invalidate_sources();
     snapshot_drop();
     return TP_STATUS_OK;
@@ -1897,7 +1897,7 @@ tp_status gui_project_save(char *err_out, size_t err_cap) {
     }
     tp_error err = {0};
     tp_session_save_result result;
-    const tp_status st = tp_session_save(s_session, &result, &err);
+    const tp_status st = tp_session_save(s_project.session, &result, &err);
     if (st != TP_STATUS_OK) {
         if (err_out && err_cap) {
             (void)snprintf(err_out, err_cap, "%s", err.msg[0] ? err.msg : tp_status_str(st));
@@ -1910,9 +1910,9 @@ tp_status gui_project_save(char *err_out, size_t err_cap) {
         note_recovery_degraded("recovery checkpoint compaction failed");
     }
     if (result.file_durability_degraded) {
-        s_save_notice_pending = true;
+        s_project.save_notice_pending = true;
         (void)snprintf(
-            s_save_notice, sizeof s_save_notice,
+            s_project.save_notice, sizeof s_project.save_notice,
             "Saved, but storage durability could not be confirmed");
     }
     return TP_STATUS_OK;
@@ -1946,7 +1946,7 @@ tp_status gui_project_save_as(const char *path, char *err_out, size_t err_cap) {
     }
     err = (tp_error){0};
     tp_session_save_result result;
-    const tp_status st = tp_session_save_as(s_session, canonical_path, &result, &err);
+    const tp_status st = tp_session_save_as(s_project.session, canonical_path, &result, &err);
     if (st != TP_STATUS_OK) {
         if (err_out && err_cap) {
             (void)snprintf(err_out, err_cap, "%s",
@@ -1960,9 +1960,9 @@ tp_status gui_project_save_as(const char *path, char *err_out, size_t err_cap) {
         note_recovery_degraded("recovery checkpoint compaction failed");
     }
     if (result.file_durability_degraded) {
-        s_save_notice_pending = true;
+        s_project.save_notice_pending = true;
         (void)snprintf(
-            s_save_notice, sizeof s_save_notice,
+            s_project.save_notice, sizeof s_project.save_notice,
             "Saved, but storage durability could not be confirmed");
     }
     return TP_STATUS_OK;
