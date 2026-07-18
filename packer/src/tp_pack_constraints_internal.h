@@ -60,6 +60,14 @@ typedef struct tp_pack_sprite_constraint_facts {
     bool effective_extrude_requires_rect;
 } tp_pack_sprite_constraint_facts;
 
+/* Storage/wire representability only. These predicates deliberately do not
+ * know about project-policy sentinels such as INHERIT, atlas max_size, slice9,
+ * or first-reject order. Callers invoke them only for an explicit override. */
+bool tp_pack_sprite_shape_wire_representable(int value);
+bool tp_pack_sprite_rotate_wire_representable(int value);
+bool tp_pack_sprite_max_vertices_wire_representable(int value);
+bool tp_pack_sprite_spacing_wire_representable(int value);
+
 tp_pack_atlas_constraint_facts tp_pack_atlas_constraint_facts_of(
     const tp_pack_atlas_constraint_input *input);
 tp_pack_sprite_constraint_facts tp_pack_sprite_constraint_facts_of(

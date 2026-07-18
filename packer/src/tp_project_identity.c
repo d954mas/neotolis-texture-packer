@@ -8,6 +8,7 @@
 #include "tp_core/tp_names.h"
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_srckey.h"
+#include "tp_pack_constraints_internal.h"
 #include "tp_project_internal.h"
 #include "tp_utf8_internal.h"
 
@@ -19,33 +20,44 @@ tp_status tp_project_validate_sprite_pack_overrides(
         return tp_error_set(error, TP_STATUS_INVALID_ARGUMENT,
                             "sprite override record is NULL");
     }
-    if (sprite->ov_shape != TP_PROJECT_OV_INHERIT &&
-        !tp_pack_shape_valid(sprite->ov_shape)) {
+    const tp_pack_sprite_constraint_input input = {
+        .has_shape = sprite->ov_shape != TP_PROJECT_OV_INHERIT,
+        .shape = sprite->ov_shape,
+        .has_allow_rotate =
+            sprite->ov_allow_rotate != TP_PROJECT_OV_INHERIT,
+        .allow_rotate = sprite->ov_allow_rotate,
+        .has_max_vertices =
+            sprite->ov_max_vertices != TP_PROJECT_OV_INHERIT,
+        .max_vertices = sprite->ov_max_vertices,
+        .has_margin = sprite->ov_margin != TP_PROJECT_OV_INHERIT,
+        .margin = sprite->ov_margin,
+        .has_extrude = sprite->ov_extrude != TP_PROJECT_OV_INHERIT,
+        .extrude = sprite->ov_extrude,
+    };
+    const tp_pack_sprite_constraint_facts facts =
+        tp_pack_sprite_constraint_facts_of(&input);
+    if (facts.shape_not_wire_representable) {
         return tp_error_set(error, TP_STATUS_BAD_PROJECT,
                             "sprite ov_shape %d is not representable",
                             sprite->ov_shape);
     }
-    if (sprite->ov_allow_rotate != TP_PROJECT_OV_INHERIT &&
-        sprite->ov_allow_rotate != 0) {
+    if (facts.allow_rotate_not_wire_representable) {
         return tp_error_set(
             error, TP_STATUS_BAD_PROJECT,
             "sprite ov_allow_rotate %d must be 0 or inherit",
             sprite->ov_allow_rotate);
     }
-    if (sprite->ov_max_vertices != TP_PROJECT_OV_INHERIT &&
-        !tp_pack_max_vertices_valid(sprite->ov_max_vertices)) {
+    if (facts.max_vertices_not_wire_representable) {
         return tp_error_set(error, TP_STATUS_BAD_PROJECT,
                             "sprite ov_max_vertices %d is not representable",
                             sprite->ov_max_vertices);
     }
-    if (sprite->ov_margin != TP_PROJECT_OV_INHERIT &&
-        (sprite->ov_margin < 1 || sprite->ov_margin > UINT8_MAX)) {
+    if (facts.margin_not_wire_representable) {
         return tp_error_set(error, TP_STATUS_BAD_PROJECT,
                             "sprite ov_margin %d is not representable",
                             sprite->ov_margin);
     }
-    if (sprite->ov_extrude != TP_PROJECT_OV_INHERIT &&
-        (sprite->ov_extrude < 1 || sprite->ov_extrude > UINT8_MAX)) {
+    if (facts.extrude_not_wire_representable) {
         return tp_error_set(error, TP_STATUS_BAD_PROJECT,
                             "sprite ov_extrude %d is not representable",
                             sprite->ov_extrude);

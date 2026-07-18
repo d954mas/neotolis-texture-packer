@@ -1,5 +1,21 @@
 #include "tp_pack_constraints_internal.h"
 
+bool tp_pack_sprite_shape_wire_representable(int value) {
+    return tp_pack_shape_valid(value);
+}
+
+bool tp_pack_sprite_rotate_wire_representable(int value) {
+    return value == 0;
+}
+
+bool tp_pack_sprite_max_vertices_wire_representable(int value) {
+    return tp_pack_max_vertices_valid(value);
+}
+
+bool tp_pack_sprite_spacing_wire_representable(int value) {
+    return value >= 1 && value <= UINT8_MAX;
+}
+
 tp_pack_atlas_constraint_facts tp_pack_atlas_constraint_facts_of(
     const tp_pack_atlas_constraint_input *input) {
     tp_pack_atlas_constraint_facts facts = {0};
@@ -34,18 +50,20 @@ tp_pack_sprite_constraint_facts tp_pack_sprite_constraint_facts_of(
         return facts;
     }
     facts.shape_not_wire_representable =
-        input->has_shape && !tp_pack_shape_valid(input->shape);
+        input->has_shape &&
+        !tp_pack_sprite_shape_wire_representable(input->shape);
     facts.allow_rotate_not_wire_representable =
-        input->has_allow_rotate && input->allow_rotate != 0;
+        input->has_allow_rotate &&
+        !tp_pack_sprite_rotate_wire_representable(input->allow_rotate);
     facts.max_vertices_not_wire_representable =
         input->has_max_vertices &&
-        !tp_pack_max_vertices_valid(input->max_vertices);
+        !tp_pack_sprite_max_vertices_wire_representable(input->max_vertices);
     facts.margin_not_wire_representable =
         input->has_margin &&
-        (input->margin < 1 || input->margin > UINT8_MAX);
+        !tp_pack_sprite_spacing_wire_representable(input->margin);
     facts.extrude_not_wire_representable =
         input->has_extrude &&
-        (input->extrude < 1 || input->extrude > UINT8_MAX);
+        !tp_pack_sprite_spacing_wire_representable(input->extrude);
     facts.margin_exceeds_max_size =
         input->has_margin && input->margin > input->atlas_max_size;
     facts.extrude_exceeds_max_size =

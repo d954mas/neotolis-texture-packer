@@ -33,6 +33,7 @@
 #include "tp_core/tp_srckey.h" /* canonical source-key normalization */
 #include "tp_core/tp_utf8.h"
 #include "tp_json_internal.h"
+#include "tp_pack_constraints_internal.h"
 #include "tp_project_identity_internal.h"
 #include "tp_fs_internal.h"
 #include "tp_project_internal.h"         /* deterministic save fault seam for tests */
@@ -2644,14 +2645,19 @@ static tp_status tp_load_sprite(tp_project_atlas *a, const cJSON *js,
         size_t offset;
         int minimum;
         int maximum;
+        bool (*representable)(int value);
     } ov_fields[] = {
         {"shape", offsetof(tp_project_sprite, ov_shape), TP_PACK_SHAPE_MIN,
-         TP_PACK_SHAPE_MAX},
-        {"allow_rotate", offsetof(tp_project_sprite, ov_allow_rotate), 0, 0},
+         TP_PACK_SHAPE_MAX, tp_pack_sprite_shape_wire_representable},
+        {"allow_rotate", offsetof(tp_project_sprite, ov_allow_rotate), 0, 0,
+         tp_pack_sprite_rotate_wire_representable},
         {"max_vertices", offsetof(tp_project_sprite, ov_max_vertices), 1,
-         TP_PACK_MAX_VERTICES},
-        {"margin", offsetof(tp_project_sprite, ov_margin), 1, 255},
-        {"extrude", offsetof(tp_project_sprite, ov_extrude), 1, 255},
+         TP_PACK_MAX_VERTICES,
+         tp_pack_sprite_max_vertices_wire_representable},
+        {"margin", offsetof(tp_project_sprite, ov_margin), 1, UINT8_MAX,
+         tp_pack_sprite_spacing_wire_representable},
+        {"extrude", offsetof(tp_project_sprite, ov_extrude), 1, UINT8_MAX,
+         tp_pack_sprite_spacing_wire_representable},
     };
     for (size_t i = 0; i < sizeof ov_fields / sizeof ov_fields[0]; i++) {
         const cJSON *jv = cJSON_GetObjectItemCaseSensitive(js, ov_fields[i].key);
@@ -2663,8 +2669,7 @@ static tp_status tp_load_sprite(tp_project_atlas *a, const cJSON *js,
                 return st;
             }
             if (value != TP_PROJECT_OV_INHERIT &&
-                (value < ov_fields[i].minimum ||
-                 value > ov_fields[i].maximum)) {
+                !ov_fields[i].representable(value)) {
                 return tp_error_set(
                     err, TP_STATUS_BAD_PROJECT,
                     "sprite override '%s' must be inherit (-1) or in [%d,%d]",

@@ -179,9 +179,37 @@ void test_sprite_constraint_facts_separate_wire_and_effective_domains(void) {
     TEST_ASSERT_FALSE(facts.effective_extrude_requires_rect);
 }
 
+void test_sprite_wire_predicates_cover_exact_storage_edges(void) {
+    TEST_ASSERT_FALSE(tp_pack_sprite_shape_wire_representable(-1));
+    TEST_ASSERT_TRUE(tp_pack_sprite_shape_wire_representable(
+        TP_PACK_SHAPE_MIN));
+    TEST_ASSERT_TRUE(tp_pack_sprite_shape_wire_representable(
+        TP_PACK_SHAPE_MAX));
+    TEST_ASSERT_FALSE(tp_pack_sprite_shape_wire_representable(
+        TP_PACK_SHAPE_MAX + 1));
+
+    TEST_ASSERT_FALSE(tp_pack_sprite_rotate_wire_representable(-1));
+    TEST_ASSERT_TRUE(tp_pack_sprite_rotate_wire_representable(0));
+    TEST_ASSERT_FALSE(tp_pack_sprite_rotate_wire_representable(1));
+
+    TEST_ASSERT_FALSE(tp_pack_sprite_max_vertices_wire_representable(0));
+    TEST_ASSERT_TRUE(tp_pack_sprite_max_vertices_wire_representable(1));
+    TEST_ASSERT_TRUE(tp_pack_sprite_max_vertices_wire_representable(
+        TP_PACK_MAX_VERTICES));
+    TEST_ASSERT_FALSE(tp_pack_sprite_max_vertices_wire_representable(
+        TP_PACK_MAX_VERTICES + 1));
+
+    TEST_ASSERT_FALSE(tp_pack_sprite_spacing_wire_representable(0));
+    TEST_ASSERT_TRUE(tp_pack_sprite_spacing_wire_representable(1));
+    TEST_ASSERT_TRUE(tp_pack_sprite_spacing_wire_representable(UINT8_MAX));
+    TEST_ASSERT_FALSE(tp_pack_sprite_spacing_wire_representable(
+        UINT8_MAX + 1));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_atlas_constraint_facts_cover_raw_boundaries);
     RUN_TEST(test_sprite_constraint_facts_separate_wire_and_effective_domains);
+    RUN_TEST(test_sprite_wire_predicates_cover_exact_storage_edges);
     return UNITY_END();
 }
