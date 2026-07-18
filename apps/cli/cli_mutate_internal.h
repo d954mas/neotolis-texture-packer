@@ -54,5 +54,7 @@ int do_set(const char *const *pos, int npos, bool json, bool quiet);
 int do_atlas(const char *const *pos, int npos, bool json, bool quiet);
 int do_sprite_set(const char *const *pos, int npos, bool json, bool quiet);
 int do_sprite_unset(const char *const *pos, int npos, bool json, bool quiet);
+int do_anim(const char *const *pos, int npos, const char *opt_at,
+            bool json, bool quiet);
 
 #endif /* NTPACKER_CLI_MUTATE_INTERNAL_H */
