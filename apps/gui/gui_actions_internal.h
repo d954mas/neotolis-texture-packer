@@ -148,5 +148,10 @@ void gui_actions__frame_refs_dispose(tp_op_sprite_ref *frames, int count);
 tp_op_sprite_ref *gui_actions__frame_refs_copy(const tp_op_sprite_ref *frames,
                                                int count);
 void gui_actions__drain_edits(void);
+void gui_actions__pending_create_animation_dispose(
+    pending_create_animation *request);
+bool gui_actions__resolve_animation_ref(const gui_animation_ref *animation,
+                                        int *atlas_index,
+                                        int *animation_index);
 
 #endif /* NTPACKER_GUI_ACTIONS_INTERNAL_H */
