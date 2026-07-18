@@ -156,19 +156,37 @@ tp_status tp_srckey_normalize(const char *input, char *out, size_t cap, tp_error
     return utf8_map_into(joined, UTF8PROC_COMPOSE, out, cap, err);
 }
 
-tp_status tp_srckey_validate_canonical(const char *key, tp_error *err) {
-    char normalized[TP_SRCKEY_MAX];
+tp_status tp_srckey_check_canonical(
+    const char *key, tp_srckey_canonical_result *out, tp_error *err) {
+    if (!out) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "canonical result is NULL");
+    }
+    out->reason = TP_SRCKEY_CANONICAL_NORMALIZE_ERROR;
+    out->canonical[0] = '\0';
     const tp_status status = tp_srckey_normalize(
-        key, normalized, sizeof normalized, err);
+        key, out->canonical, sizeof out->canonical, err);
     if (status != TP_STATUS_OK) {
+        out->canonical[0] = '\0';
         return status;
     }
-    if (strcmp(key, normalized) != 0) {
+    if (strcmp(key, out->canonical) != 0) {
+        out->reason = TP_SRCKEY_CANONICAL_SPELLING_MISMATCH;
+        return TP_STATUS_INVALID_ARGUMENT;
+    }
+    out->reason = TP_SRCKEY_CANONICAL_OK;
+    return TP_STATUS_OK;
+}
+
+tp_status tp_srckey_validate_canonical(const char *key, tp_error *err) {
+    tp_srckey_canonical_result result;
+    const tp_status status = tp_srckey_check_canonical(key, &result, err);
+    if (result.reason == TP_SRCKEY_CANONICAL_SPELLING_MISMATCH) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "source key must already be normalized as '%s'",
-                            normalized);
+                            result.canonical);
     }
-    return TP_STATUS_OK;
+    return status;
 }
 
 tp_status tp_srckey_casefold(const char *normalized_key, char *out, size_t cap, tp_error *err) {

@@ -505,8 +505,16 @@ static tp_status validate_canonical_frame_key(const char *key,
                              "frame key must be non-empty");
     }
     tp_error error = {{0}};
-    const tp_status status = tp_srckey_validate_canonical(key, &error);
+    tp_srckey_canonical_result result;
+    const tp_status status =
+        tp_srckey_check_canonical(key, &result, &error);
     if (status != TP_STATUS_OK) {
+        if (result.reason == TP_SRCKEY_CANONICAL_SPELLING_MISMATCH) {
+            return tp_op__reject(
+                rej, TP_STATUS_INVALID_ARGUMENT, field,
+                "frame key must already be normalized as '%s'",
+                result.canonical);
+        }
         return tp_op__reject(rej, status, field,
                              "frame key is not a valid source-local key: %s",
                              error.msg);

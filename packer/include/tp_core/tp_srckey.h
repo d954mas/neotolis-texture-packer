@@ -40,6 +40,17 @@ extern "C" {
  * const size_t: macos -Wgnu-folding-constant rejects that as a VLA bound). */
 #define TP_SRCKEY_MAX 4096
 
+typedef enum tp_srckey_canonical_reason {
+    TP_SRCKEY_CANONICAL_OK = 0,
+    TP_SRCKEY_CANONICAL_NORMALIZE_ERROR,
+    TP_SRCKEY_CANONICAL_SPELLING_MISMATCH,
+} tp_srckey_canonical_reason;
+
+typedef struct tp_srckey_canonical_result {
+    tp_srckey_canonical_reason reason;
+    char canonical[TP_SRCKEY_MAX];
+} tp_srckey_canonical_result;
+
 /* Normalize `input` (a source-root-relative path) into a canonical NFC key in
  * `out` (capacity `cap`). Faults:
  *   TP_STATUS_INVALID_ARGUMENT  NULL input/out, or empty result (e.g. "." / "///")
@@ -49,6 +60,12 @@ extern "C" {
  *   TP_STATUS_OUT_OF_BOUNDS     the result does not fit in `cap`
  *   TP_STATUS_OOM               utf8proc allocation failed */
 tp_status tp_srckey_normalize(const char *input, char *out, size_t cap, tp_error *err);
+
+/* Classify canonical admission without owning caller-facing mismatch prose.
+ * On success and spelling mismatch, `canonical` contains the normalized key.
+ * Normalization faults preserve their status/error and leave canonical empty. */
+tp_status tp_srckey_check_canonical(
+    const char *key, tp_srckey_canonical_result *out, tp_error *err);
 
 /* Accepts only an already-canonical persistent source key. Normalization
  * faults are preserved; a key that is valid but would change is rejected with

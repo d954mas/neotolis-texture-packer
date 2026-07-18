@@ -344,6 +344,9 @@ void test_validate_animation_frame_requires_normalized_source_key(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
                           tp_operation_validate(project, &operation, &reject));
     TEST_ASSERT_EQUAL_STRING("frame", reject.field);
+    TEST_ASSERT_EQUAL_STRING(
+        "frame key must already be normalized as 'hero.png'",
+        reject.message);
     tp_project_destroy(project);
 }
 
