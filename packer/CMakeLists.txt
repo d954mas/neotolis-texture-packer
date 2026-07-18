@@ -31,7 +31,7 @@ add_library(tp_core STATIC
     src/tp_idset.c
     src/tp_project_clone.c src/tp_semantic.c src/tp_txn_idset.c src/tp_txn_apply.c
     # Synchronous orchestration and the owned immutable snapshot boundary.
-    src/tp_session.c src/tp_session_snapshot.c src/tp_project_generation.c
+    src/tp_session.c src/tp_session_snapshot.c src/tp_session_snapshot_query.c src/tp_project_generation.c
     src/tp_txn_parse.c src/tp_txn_lower.c src/tp_txn_encode.c
     # Semantic diff, exact inverse/redo, and bounded in-memory history.
     src/tp_diff_entity.c src/tp_diff_capture.c src/tp_diff_apply.c src/tp_history_codec.c src/tp_history.c
