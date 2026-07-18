@@ -864,20 +864,6 @@ static void validate_sources(validation_builder *fs, const tp_project_atlas *a) 
     src_keys_free(k, n);
 }
 
-static tp_status stored_source_key_status(const char *key) {
-    if (!key || !key[0]) {
-        return TP_STATUS_INVALID_ARGUMENT;
-    }
-    char normalized[TP_SRCKEY_MAX];
-    const tp_status status = tp_srckey_normalize(
-        key, normalized, sizeof normalized, NULL);
-    if (status != TP_STATUS_OK) {
-        return status;
-    }
-    return strcmp(key, normalized) == 0 ? TP_STATUS_OK
-                                        : TP_STATUS_INVALID_ARGUMENT;
-}
-
 /* (h) §5.6 sprite-record integrity, over the resolved index `idx`:
  *   MIGRATED records (stored {source,key}) are id-checked:
  *     sprite_bad_source / frame_bad_source            a stored source id absent from the
@@ -917,7 +903,8 @@ static void validate_sprite_records(validation_builder *fs,
     }
     for (int i = 0; i < a->sprite_count; i++) {
         const tp_project_sprite *s = &a->sprites[i];
-        const tp_status key_status = stored_source_key_status(s->src_key);
+        const tp_status key_status =
+            tp_srckey_validate_canonical(s->src_key, NULL);
         if (key_status != TP_STATUS_OK) {
             add_finding(fs, TP_VALIDATION_ERROR,
                         TP_VALIDATION_CODE_INVALID_SPRITE_KEY,
@@ -951,7 +938,8 @@ static void validate_sprite_records(validation_builder *fs,
     }
     for (int i = 0; i < a->sprite_count; i++) {
         const tp_project_sprite *si = &a->sprites[i];
-        if (stored_source_key_status(si->src_key) != TP_STATUS_OK) {
+        if (tp_srckey_validate_canonical(si->src_key, NULL) !=
+            TP_STATUS_OK) {
             continue;
         }
         bool duplicate = false;
@@ -970,7 +958,8 @@ static void validate_sprite_records(validation_builder *fs,
         const tp_project_anim *pa = &a->animations[an];
         for (int f = 0; f < pa->frame_count; f++) {
             const tp_project_frame *fr = &pa->frames[f];
-            const tp_status key_status = stored_source_key_status(fr->src_key);
+            const tp_status key_status =
+                tp_srckey_validate_canonical(fr->src_key, NULL);
             if (key_status != TP_STATUS_OK) {
                 add_finding(fs, TP_VALIDATION_ERROR,
                             TP_VALIDATION_CODE_INVALID_FRAME_KEY,
@@ -1093,7 +1082,7 @@ static void validate_atlas(validation_builder *fs, const tp_project *p, int ai,
                     const tp_project_frame *frame = &pa->frames[f];
                     const char *fr = frame->name ? frame->name : "";
                     bool found = false;
-                    if (stored_source_key_status(frame->src_key) ==
+                    if (tp_srckey_validate_canonical(frame->src_key, NULL) ==
                         TP_STATUS_OK) {
                         found = tp_sprite_index_by_source_key(
                                     &sidx, frame->source_ref,

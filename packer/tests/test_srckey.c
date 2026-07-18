@@ -224,6 +224,20 @@ void test_status_tokens_stable(void) {
     TEST_ASSERT_EQUAL_STRING("invalid_utf8", tp_status_id(TP_STATUS_INVALID_UTF8));
 }
 
+void test_canonical_validation_distinguishes_valid_and_normalizable_keys(void) {
+    tp_error error = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_srckey_validate_canonical("sprites/hero.png", &error));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_srckey_validate_canonical("sprites//hero.png", &error));
+    TEST_ASSERT_NOT_NULL(strstr(error.msg, "sprites/hero.png"));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_KEY_TRAVERSAL,
+        tp_srckey_validate_canonical("../hero.png", &error));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_structure_normalization);
@@ -239,5 +253,6 @@ int main(void) {
     RUN_TEST(test_casefold_collisions);
     RUN_TEST(test_collides_near_limit);
     RUN_TEST(test_status_tokens_stable);
+    RUN_TEST(test_canonical_validation_distinguishes_valid_and_normalizable_keys);
     return UNITY_END();
 }

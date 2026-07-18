@@ -312,10 +312,9 @@ static tp_status validate_reference(tp_id128 source_ref, const char *src_key,
                             "%s identity requires source, key, and derived name",
                             kind);
     }
-    char normalized[TP_SRCKEY_MAX];
     tp_error key_error = {0};
-    const tp_status key_status = tp_srckey_normalize(
-        src_key, normalized, sizeof normalized, &key_error);
+    const tp_status key_status = tp_srckey_validate_canonical(
+        src_key, &key_error);
     if (key_status != TP_STATUS_OK) {
         if (key_status == TP_STATUS_OOM || key_status == TP_STATUS_OUT_OF_BOUNDS) {
             return tp_error_set(error, key_status, "%s key: %s", kind,
@@ -323,10 +322,6 @@ static tp_status validate_reference(tp_id128 source_ref, const char *src_key,
         }
         return tp_error_set(error, TP_STATUS_BAD_PROJECT,
                             "%s key is not canonical: %s", kind, key_error.msg);
-    }
-    if (strcmp(normalized, src_key) != 0) {
-        return tp_error_set(error, TP_STATUS_BAD_PROJECT,
-                            "%s key '%s' is not normalized", kind, src_key);
     }
     char derived[TP_SRCKEY_MAX];
     tp_sprite_export_key(src_key, derived, sizeof derived);

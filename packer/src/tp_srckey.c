@@ -156,6 +156,21 @@ tp_status tp_srckey_normalize(const char *input, char *out, size_t cap, tp_error
     return utf8_map_into(joined, UTF8PROC_COMPOSE, out, cap, err);
 }
 
+tp_status tp_srckey_validate_canonical(const char *key, tp_error *err) {
+    char normalized[TP_SRCKEY_MAX];
+    const tp_status status = tp_srckey_normalize(
+        key, normalized, sizeof normalized, err);
+    if (status != TP_STATUS_OK) {
+        return status;
+    }
+    if (strcmp(key, normalized) != 0) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "source key must already be normalized as '%s'",
+                            normalized);
+    }
+    return TP_STATUS_OK;
+}
+
 tp_status tp_srckey_casefold(const char *normalized_key, char *out, size_t cap, tp_error *err) {
     if (!normalized_key || !out) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "input or out is NULL");
