@@ -3336,7 +3336,7 @@ tp_status tp_project_resolve_source_path(const tp_project *p, const char *rel,
     }
     const char *base = p->source_base_dir ? p->source_base_dir : p->project_dir;
     if (!base) {
-        return TP_STATUS_INVALID_ARGUMENT;
+        return TP_STATUS_PATH_NOT_ABSOLUTE;
     }
     if ((size_t)snprintf(out_abs, cap, "%s/%s", base, rel) >= cap) {
         return TP_STATUS_OUT_OF_BOUNDS;

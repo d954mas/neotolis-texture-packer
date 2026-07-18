@@ -318,7 +318,9 @@ tp_status tp_project_resolve_path(const tp_project *p, const char *rel, char *ou
 
 /* Resolves a live source spelling against source_base_dir (falling back to
  * project_dir for older/in-memory projects). Export targets continue to use
- * tp_project_resolve_path and therefore follow Save As. */
+ * tp_project_resolve_path and therefore follow Save As. A relative source with
+ * neither base returns TP_STATUS_PATH_NOT_ABSOLUTE; callers may use that exact
+ * status to opt into request-edge CWD resolution. */
 tp_status tp_project_resolve_source_path(const tp_project *p, const char *rel,
                                          char *out_abs, size_t cap);
 

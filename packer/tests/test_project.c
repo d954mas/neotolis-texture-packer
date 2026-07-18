@@ -858,6 +858,47 @@ void test_resolve_path(void) {
     tp_project_destroy(p);
 }
 
+void test_resolve_source_path_status_contract(void) {
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    char resolved[128];
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_PATH_NOT_ABSOLUTE,
+        tp_project_resolve_source_path(project, "sprites/hero.png", resolved,
+                                       sizeof resolved));
+
+    project->source_base_dir = dupstr("C:\\project");
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_resolve_source_path(project, "sprites\\hero.png", resolved,
+                                       sizeof resolved));
+    TEST_ASSERT_EQUAL_STRING("C:/project/sprites/hero.png", resolved);
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_resolve_source_path(project, "/assets/hero.png", resolved,
+                                       sizeof resolved));
+    TEST_ASSERT_EQUAL_STRING("/assets/hero.png", resolved);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_resolve_source_path(project, "C:\\assets\\hero.png",
+                                       resolved, sizeof resolved));
+    TEST_ASSERT_EQUAL_STRING("C:/assets/hero.png", resolved);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_resolve_source_path(
+            project, "\\\\server\\share\\hero.png", resolved,
+            sizeof resolved));
+    TEST_ASSERT_EQUAL_STRING("//server/share/hero.png", resolved);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_project_resolve_source_path(project, "/assets/hero.png", resolved,
+                                       4U));
+
+    tp_project_destroy(project);
+}
+
 void test_save_as_preserves_relative_source_target(void) {
     char old_path[512];
     char new_path[512];
@@ -1965,6 +2006,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_unknown_keys_rejected_before_lossy_roundtrip);
     RUN_TEST(test_absolute_path_relativized);
     RUN_TEST(test_resolve_path);
+    RUN_TEST(test_resolve_source_path_status_contract);
     RUN_TEST(test_save_as_preserves_relative_source_target);
     RUN_TEST(test_to_settings_mapping);
     RUN_TEST(test_mutation_helpers);

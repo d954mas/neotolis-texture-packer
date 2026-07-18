@@ -81,7 +81,7 @@ tp_status tp_source_path_identity_from_stored(const tp_project *project,
     }
     status = tp_project_resolve_source_path(
         project, out->canonical, out->absolute, sizeof out->absolute);
-    if (status != TP_STATUS_OK) {
+    if (status == TP_STATUS_PATH_NOT_ABSOLUTE) {
         status = tp_identity_path_absolute_lexical(
             out->canonical, out->absolute, sizeof out->absolute, err);
     }
@@ -151,7 +151,8 @@ static tp_status source_identity_from_snapshot(
         /* An unsaved in-memory project has no project_dir yet. Its relative
          * source spelling still has a well-defined request-edge identity: the
          * same process CWD used for a relative incoming path. */
-        if (!source || !source->path) {
+        if (status != TP_STATUS_PATH_NOT_ABSOLUTE || !source ||
+            !source->path) {
             return status;
         }
         status = source_identity_from_input(source->path, out, err);

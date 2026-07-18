@@ -27,6 +27,7 @@
 #include "tp_project_mutation_internal.h"
 #include "tp_recovery_internal.h"
 #include "tp_session_internal.h"
+#include "tp_source_plan_internal.h"
 #include "tp_txn_internal.h"
 #include "unity.h"
 
@@ -1380,6 +1381,54 @@ void test_snapshot_frontend_queries_delegate_core_rules(void) {
     tp_session_destroy(session);
 }
 
+void test_source_plan_propagates_stored_base_overflow(void) {
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_source(&project->atlases[0], "sprites"));
+
+    char long_base[TP_IDENTITY_PATH_MAX];
+    memset(long_base, 'a', sizeof long_base);
+    long_base[0] = 'C';
+    long_base[1] = ':';
+    long_base[2] = '/';
+    long_base[sizeof long_base - 1U] = '\0';
+    project->source_base_dir = test_dup(long_base);
+
+    tp_source_path_identity identity = {0};
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_source_path_identity_from_stored(project, "sprites", false,
+                                            &identity, &error));
+
+    uint8_t seed = 92U;
+    tp_rng rng = {deterministic_fill, &seed};
+    tp_session *session = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_adopt_owned(project, &rng, &session, &error));
+    tp_session_snapshot *snapshot = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_snapshot_create(session, &snapshot, &error));
+    const tp_snapshot_atlas *atlas = tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+
+    const tp_snapshot_source *matched =
+        tp_session_snapshot_source_at(snapshot, atlas->id, 0);
+    TEST_ASSERT_NOT_NULL(matched);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_source_snapshot_find(snapshot, atlas->id, "sprites", &matched,
+                                &error));
+    TEST_ASSERT_NULL(matched);
+
+    tp_session_snapshot_destroy(snapshot);
+    tp_session_destroy(session);
+}
+
 void test_future_event_cursor_requires_resync(void) {
     tp_session *session = make_session();
     tp_error err;
@@ -2132,6 +2181,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_snapshot_selector_uses_canonical_ambiguity_and_atlas_scope);
     RUN_TEST(test_snapshot_sprite_selector_matches_headless_canonical_operation);
     RUN_TEST(test_snapshot_frontend_queries_delegate_core_rules);
+    RUN_TEST(test_source_plan_propagates_stored_base_overflow);
     RUN_TEST(test_future_event_cursor_requires_resync);
     RUN_TEST(test_save_reports_recovery_degradation_and_blocks_later_mutation);
     RUN_TEST(test_open_holds_project_lease_until_session_close);
