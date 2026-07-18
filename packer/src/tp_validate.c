@@ -19,9 +19,9 @@
 #include "tp_session_internal.h"
 #include "tp_core/tp_srckey.h"
 #include "tp_validate_internal.h"
+#include "tp_validate_index_internal.h"
 #include "tp_validate_report_internal.h"
 #include "tp_srckey_internal.h"
-#include "hash/nt_hash.h"
 
 static finding_context context_atlas(const tp_project_atlas *atlas) {
     finding_context context = {0};
@@ -96,228 +96,10 @@ static unsigned target_issue_mask(const char *exporter_id, bool enabled,
 }
 
 static _Thread_local bool s_fail_sprite_index;
-static _Thread_local tp_validate_work_stats s_work;
 void tp_validate__test_fail_sprite_index(bool fail) { s_fail_sprite_index = fail; }
-void tp_validate__test_work_reset(void) { memset(&s_work, 0, sizeof s_work); }
-tp_validate_work_stats tp_validate__test_work_get(void) { return s_work; }
-
-/* Validation-local borrowed-string index. Slots own no strings and live only for
- * one atlas validation; open addressing keeps the lookup owner here rather than
- * adding a generic map or changing tp_sprite_index's public contract. */
-typedef struct {
-    const char *key;
-    size_t count;
-    int first_index;
-    int last_index;
-} str_slot;
-
-typedef struct {
-    str_slot *slots;
-    size_t cap;
-} str_index;
-
-static bool str_index_init(str_index *index, int expected) {
-    memset(index, 0, sizeof *index);
-    if (expected <= 0) {
-        return true;
-    }
-    size_t cap = 16U;
-    const size_t need = (size_t)expected * 2U;
-    while (cap < need) {
-        if (cap > SIZE_MAX / 2U) {
-            return false;
-        }
-        cap *= 2U;
-    }
-    index->slots = (str_slot *)calloc(cap, sizeof *index->slots);
-    if (!index->slots) {
-        return false;
-    }
-    index->cap = cap;
-    return true;
-}
-
-static void str_index_free(str_index *index) {
-    free(index->slots);
-    memset(index, 0, sizeof *index);
-}
-
-static str_slot *str_index_find(const str_index *index, const char *key) {
-    if (!index || index->cap == 0U || !key) {
-        return NULL;
-    }
-    const size_t start = (size_t)nt_hash64_str(key).value & (index->cap - 1U);
-    for (size_t i = 0; i < index->cap; i++) {
-        s_work.probes++;
-        str_slot *slot = &index->slots[(start + i) & (index->cap - 1U)];
-        if (!slot->key || strcmp(slot->key, key) == 0) {
-            return slot;
-        }
-    }
-    return NULL;
-}
-
-static bool str_index_add(str_index *index, const char *key, int value_index) {
-    str_slot *slot = str_index_find(index, key);
-    if (!slot) {
-        return false;
-    }
-    if (!slot->key) {
-        slot->key = key;
-        slot->first_index = value_index;
-    }
-    slot->last_index = value_index;
-    slot->count++;
-    return true;
-}
-
-static bool str_index_build(str_index *index, const char *const *values, int count) {
-    if (!str_index_init(index, count)) {
-        return false;
-    }
-    for (int i = 0; i < count; i++) {
-        if (!str_index_add(index, values[i], i)) {
-            str_index_free(index);
-            return false;
-        }
-    }
-    return true;
-}
-
-typedef struct {
-    tp_id128 id;
-    bool occupied;
-} id_slot;
-
-typedef struct {
-    id_slot *slots;
-    size_t cap;
-} id_index;
-
-static bool id_index_init(id_index *index, int expected) {
-    memset(index, 0, sizeof *index);
-    if (expected <= 0) {
-        return true;
-    }
-    size_t cap = 16U;
-    const size_t need = (size_t)expected * 2U;
-    while (cap < need) {
-        if (cap > SIZE_MAX / 2U) {
-            return false;
-        }
-        cap *= 2U;
-    }
-    index->slots = (id_slot *)calloc(cap, sizeof *index->slots);
-    if (!index->slots) {
-        return false;
-    }
-    index->cap = cap;
-    return true;
-}
-
-static id_slot *id_index_find(const id_index *index, tp_id128 id) {
-    if (!index || index->cap == 0U) {
-        return NULL;
-    }
-    const size_t start = (size_t)tp_id128_bucket(id) & (index->cap - 1U);
-    for (size_t i = 0; i < index->cap; i++) {
-        s_work.probes++;
-        id_slot *slot = &index->slots[(start + i) & (index->cap - 1U)];
-        if (!slot->occupied || tp_id128_eq(slot->id, id)) {
-            return slot;
-        }
-    }
-    return NULL;
-}
-
-static bool id_index_add(id_index *index, tp_id128 id) {
-    id_slot *slot = id_index_find(index, id);
-    if (!slot) {
-        return false;
-    }
-    slot->id = id;
-    slot->occupied = true;
-    return true;
-}
-
-static bool id_index_contains(const id_index *index, tp_id128 id) {
-    const id_slot *slot = id_index_find(index, id);
-    return slot && slot->occupied;
-}
-
-static void id_index_free(id_index *index) {
-    free(index->slots);
-    memset(index, 0, sizeof *index);
-}
-
-typedef struct {
-    tp_id128 id;
-    const char *key;
-} id_key_slot;
-
-typedef struct {
-    id_key_slot *slots;
-    size_t cap;
-} id_key_index;
-
-static bool id_key_index_init(id_key_index *index, int expected) {
-    memset(index, 0, sizeof *index);
-    if (expected <= 0) {
-        return true;
-    }
-    size_t cap = 16U;
-    const size_t need = (size_t)expected * 2U;
-    while (cap < need) {
-        if (cap > SIZE_MAX / 2U) {
-            return false;
-        }
-        cap *= 2U;
-    }
-    index->slots = (id_key_slot *)calloc(cap, sizeof *index->slots);
-    if (!index->slots) {
-        return false;
-    }
-    index->cap = cap;
-    return true;
-}
-
-static id_key_slot *id_key_index_find(const id_key_index *index, tp_id128 id, const char *key) {
-    if (!index || index->cap == 0U || !key) {
-        return NULL;
-    }
-    const uint64_t hash = tp_id128_bucket(id) ^ (nt_hash64_str(key).value * UINT64_C(0x9e3779b97f4a7c15));
-    const size_t start = (size_t)hash & (index->cap - 1U);
-    for (size_t i = 0; i < index->cap; i++) {
-        s_work.probes++;
-        id_key_slot *slot = &index->slots[(start + i) & (index->cap - 1U)];
-        if (!slot->key || (tp_id128_eq(slot->id, id) && strcmp(slot->key, key) == 0)) {
-            return slot;
-        }
-    }
-    return NULL;
-}
-
-static bool id_key_index_add(id_key_index *index, tp_id128 id, const char *key, bool *already_present) {
-    id_key_slot *slot = id_key_index_find(index, id, key);
-    if (!slot) {
-        return false;
-    }
-    *already_present = slot->key != NULL;
-    if (!slot->key) {
-        slot->id = id;
-        slot->key = key;
-    }
-    return true;
-}
-
-static bool id_key_index_contains(const id_key_index *index, tp_id128 id, const char *key) {
-    const id_key_slot *slot = id_key_index_find(index, id, key);
-    return slot && slot->key;
-}
-
-static void id_key_index_free(id_key_index *index) {
-    free(index->slots);
-    memset(index, 0, sizeof *index);
+void tp_validate__test_work_reset(void) { tp_validate_work_probes = 0U; }
+tp_validate_work_stats tp_validate__test_work_get(void) {
+    return (tp_validate_work_stats){tp_validate_work_probes};
 }
 
 /* Reports duplicated values in `vals[0..n)` once per distinct duplicate. `code`/
@@ -579,7 +361,7 @@ static void validate_sources(validation_builder *fs, const tp_project_atlas *a) 
         size_t visited = 0U;
         int j = group->key ? group->first_index : -1;
         while (visited < previous && report_has_room(fs)) {
-            s_work.probes++;
+            tp_validate_work_probes++;
             if (strcmp(k[i].canon, k[j].canon) == 0) {
                 add_finding(fs, TP_VALIDATION_WARNING,
                             TP_VALIDATION_CODE_DUPLICATE_SOURCE,
