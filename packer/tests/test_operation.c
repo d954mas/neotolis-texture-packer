@@ -710,6 +710,11 @@ void test_validate_knob_bounds_match_cli(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_RANGE,
                           tp_operation_validate(p, &op, &rej));
     TEST_ASSERT_EQUAL_STRING("padding", rej.field);
+    char expected[128];
+    (void)snprintf(expected, sizeof expected,
+                   "padding = %d must be in [0..%d]", page_size + 1,
+                   page_size);
+    TEST_ASSERT_EQUAL_STRING(expected, rej.message);
     op.u.atlas_settings.padding = -1;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_RANGE,
                           tp_operation_validate(p, &op, &rej));
@@ -756,12 +761,16 @@ void test_validate_sprite_spacing_override_respects_page_size(void) {
     operation.atlas_id = atlas->id;
     operation.u.sprite_set.source_id = atlas->sources[0].id;
     operation.u.sprite_set.src_key = (char *)"hero.png";
+    atlas->max_size = 32;
     operation.u.sprite_set.mask = TP_SPF_MARGIN;
     operation.u.sprite_set.ov_margin = atlas->max_size + 1;
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OUT_OF_RANGE,
         tp_operation_validate(project, &operation, &reject));
     TEST_ASSERT_EQUAL_STRING("ov_margin", reject.field);
+    TEST_ASSERT_EQUAL_STRING(
+        "ov_margin = 33 must not exceed atlas max_size 32",
+        reject.message);
 
     operation.u.sprite_set.mask = TP_SPF_EXTRUDE;
     operation.u.sprite_set.ov_extrude = atlas->max_size + 1;
@@ -769,6 +778,9 @@ void test_validate_sprite_spacing_override_respects_page_size(void) {
         TP_STATUS_OUT_OF_RANGE,
         tp_operation_validate(project, &operation, &reject));
     TEST_ASSERT_EQUAL_STRING("ov_extrude", reject.field);
+    TEST_ASSERT_EQUAL_STRING(
+        "ov_extrude = 33 must not exceed atlas max_size 32",
+        reject.message);
 
     tp_project_sprite *sprite = NULL;
     TEST_ASSERT_EQUAL_INT(
@@ -786,6 +798,9 @@ void test_validate_sprite_spacing_override_respects_page_size(void) {
         TP_STATUS_OUT_OF_RANGE,
         tp_operation_validate(project, &operation, &reject));
     TEST_ASSERT_EQUAL_STRING("max_size", reject.field);
+    TEST_ASSERT_EQUAL_STRING(
+        "max_size = 99 is smaller than sprite margin override 100",
+        reject.message);
     tp_project_destroy(project);
 }
 

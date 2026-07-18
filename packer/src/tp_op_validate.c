@@ -18,6 +18,7 @@
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_srckey.h"
 #include "tp_op_internal.h"
+#include "tp_pack_constraints_internal.h"
 #include "tp_project_identity_internal.h"
 #include "tp_project_mutation_internal.h"
 #include "tp_source_plan_internal.h"
@@ -222,7 +223,6 @@ static tp_status validate_operation_utf8(const tp_operation *operation,
 static tp_status validate_atlas_settings(const tp_project_atlas *atlas,
                                          const tp_op_atlas_settings *s,
                                          tp_op_reject *rej) {
-    tp_status st = TP_STATUS_OK;
     if (s->mask == 0) {
         return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "", "atlas.settings.set names no field");
     }
@@ -230,33 +230,48 @@ static tp_status validate_atlas_settings(const tp_project_atlas *atlas,
         return tp_op__reject(rej, TP_STATUS_INVALID_ARGUMENT, "",
                              "atlas.settings.set contains unknown field bits");
     }
-    if ((s->mask & TP_AF_MAX_SIZE) && !tp_pack_max_size_valid(s->max_size)) {
+    const int effective_max_size = (s->mask & TP_AF_MAX_SIZE)
+                                       ? s->max_size
+                                       : atlas->max_size;
+    const tp_pack_atlas_constraint_input raw_input = {
+        .max_size = effective_max_size,
+        .padding = s->padding,
+        .margin = s->margin,
+        .extrude = s->extrude,
+        .alpha_threshold = s->alpha_threshold,
+        .max_vertices = s->max_vertices,
+        .shape = s->shape,
+        .pixels_per_unit = s->pixels_per_unit,
+    };
+    const tp_pack_atlas_constraint_facts raw =
+        tp_pack_atlas_constraint_facts_of(&raw_input);
+    if ((s->mask & TP_AF_MAX_SIZE) && raw.max_size_out_of_range) {
         return tp_op__reject(rej, TP_STATUS_OUT_OF_RANGE, "max_size",
                              "max_size = %d must be in [1..%d]", s->max_size,
                              TP_PACK_MAX_PAGE_DIM);
     }
-    const int effective_max_size = (s->mask & TP_AF_MAX_SIZE)
-                                       ? s->max_size
-                                       : atlas->max_size;
-    if (!tp_pack_max_size_valid(effective_max_size)) {
+    if (raw.max_size_out_of_range) {
         return tp_op__reject(rej, TP_STATUS_OUT_OF_RANGE, "max_size",
                              "effective max_size = %d must be in [1..%d]",
                              effective_max_size, TP_PACK_MAX_PAGE_DIM);
     }
     if ((s->mask & TP_AF_PADDING) &&
-        (st = range_i(rej, "padding", s->padding, 0,
-                      effective_max_size))) {
-        return st;
+        (raw.padding_negative || raw.padding_exceeds_max_size)) {
+        return tp_op__reject(rej, TP_STATUS_OUT_OF_RANGE, "padding",
+                             "padding = %d must be in [0..%d]", s->padding,
+                             effective_max_size);
     }
     if ((s->mask & TP_AF_MARGIN) &&
-        (st = range_i(rej, "margin", s->margin, 0,
-                      effective_max_size))) {
-        return st;
+        (raw.margin_negative || raw.margin_exceeds_max_size)) {
+        return tp_op__reject(rej, TP_STATUS_OUT_OF_RANGE, "margin",
+                             "margin = %d must be in [0..%d]", s->margin,
+                             effective_max_size);
     }
     if ((s->mask & TP_AF_EXTRUDE) &&
-        (st = range_i(rej, "extrude", s->extrude, 0,
-                      effective_max_size))) {
-        return st;
+        (raw.extrude_negative || raw.extrude_exceeds_max_size)) {
+        return tp_op__reject(rej, TP_STATUS_OUT_OF_RANGE, "extrude",
+                             "extrude = %d must be in [0..%d]", s->extrude,
+                             effective_max_size);
     }
 
     const int effective_padding = (s->mask & TP_AF_PADDING)
@@ -268,7 +283,25 @@ static tp_status validate_atlas_settings(const tp_project_atlas *atlas,
     const int effective_extrude = (s->mask & TP_AF_EXTRUDE)
                                       ? s->extrude
                                       : atlas->extrude;
-    if (effective_padding < 0 || effective_padding > effective_max_size) {
+    const tp_pack_atlas_constraint_input effective_input = {
+        .max_size = effective_max_size,
+        .padding = effective_padding,
+        .margin = effective_margin,
+        .extrude = effective_extrude,
+        .alpha_threshold = (s->mask & TP_AF_ALPHA_THRESHOLD)
+                               ? s->alpha_threshold
+                               : atlas->alpha_threshold,
+        .max_vertices = (s->mask & TP_AF_MAX_VERTICES)
+                            ? s->max_vertices
+                            : atlas->max_vertices,
+        .shape = (s->mask & TP_AF_SHAPE) ? s->shape : atlas->shape,
+        .pixels_per_unit = (s->mask & TP_AF_PIXELS_PER_UNIT)
+                               ? s->pixels_per_unit
+                               : atlas->pixels_per_unit,
+    };
+    const tp_pack_atlas_constraint_facts effective =
+        tp_pack_atlas_constraint_facts_of(&effective_input);
+    if (effective.padding_negative || effective.padding_exceeds_max_size) {
         const char *field = (s->mask & TP_AF_PADDING) ? "padding"
                                                       : "max_size";
         return tp_op__reject(
@@ -276,7 +309,7 @@ static tp_status validate_atlas_settings(const tp_project_atlas *atlas,
             "effective padding = %d must be in [0..%d]",
             effective_padding, effective_max_size);
     }
-    if (effective_margin < 0 || effective_margin > effective_max_size) {
+    if (effective.margin_negative || effective.margin_exceeds_max_size) {
         const char *field = (s->mask & TP_AF_MARGIN) ? "margin"
                                                      : "max_size";
         return tp_op__reject(
@@ -284,7 +317,7 @@ static tp_status validate_atlas_settings(const tp_project_atlas *atlas,
             "effective margin = %d must be in [0..%d]", effective_margin,
             effective_max_size);
     }
-    if (effective_extrude < 0 || effective_extrude > effective_max_size) {
+    if (effective.extrude_negative || effective.extrude_exceeds_max_size) {
         const char *field = (s->mask & TP_AF_EXTRUDE) ? "extrude"
                                                       : "max_size";
         return tp_op__reject(
@@ -295,15 +328,24 @@ static tp_status validate_atlas_settings(const tp_project_atlas *atlas,
     if (s->mask & TP_AF_MAX_SIZE) {
         for (int i = 0; i < atlas->sprite_count; ++i) {
             const tp_project_sprite *sprite = &atlas->sprites[i];
-            if (sprite->ov_margin != TP_PROJECT_OV_INHERIT &&
-                sprite->ov_margin > effective_max_size) {
+            const tp_pack_sprite_constraint_input sprite_input = {
+                .atlas_max_size = effective_max_size,
+                .has_margin =
+                    sprite->ov_margin != TP_PROJECT_OV_INHERIT,
+                .margin = sprite->ov_margin,
+                .has_extrude =
+                    sprite->ov_extrude != TP_PROJECT_OV_INHERIT,
+                .extrude = sprite->ov_extrude,
+            };
+            const tp_pack_sprite_constraint_facts sprite_facts =
+                tp_pack_sprite_constraint_facts_of(&sprite_input);
+            if (sprite_facts.margin_exceeds_max_size) {
                 return tp_op__reject(
                     rej, TP_STATUS_OUT_OF_RANGE, "max_size",
                     "max_size = %d is smaller than sprite margin override %d",
                     effective_max_size, sprite->ov_margin);
             }
-            if (sprite->ov_extrude != TP_PROJECT_OV_INHERIT &&
-                sprite->ov_extrude > effective_max_size) {
+            if (sprite_facts.extrude_exceeds_max_size) {
                 return tp_op__reject(
                     rej, TP_STATUS_OUT_OF_RANGE, "max_size",
                     "max_size = %d is smaller than sprite extrude override %d",
@@ -312,29 +354,28 @@ static tp_status validate_atlas_settings(const tp_project_atlas *atlas,
         }
     }
     if ((s->mask & TP_AF_ALPHA_THRESHOLD) &&
-        !tp_pack_alpha_threshold_valid(s->alpha_threshold)) {
+        raw.alpha_threshold_out_of_range) {
         return tp_op__reject(rej, TP_STATUS_OUT_OF_RANGE, "alpha_threshold",
                              "alpha_threshold = %d must be in [0..%d]",
                              s->alpha_threshold, TP_PACK_ALPHA_MAX);
     }
     if ((s->mask & TP_AF_MAX_VERTICES) &&
-        !tp_pack_max_vertices_valid(s->max_vertices)) {
+        raw.max_vertices_out_of_range) {
         return tp_op__reject(rej, TP_STATUS_OUT_OF_RANGE, "max_vertices",
                              "max_vertices = %d must be in [1..%d]",
                              s->max_vertices, TP_PACK_MAX_VERTICES);
     }
-    if ((s->mask & TP_AF_SHAPE) && !tp_pack_shape_valid(s->shape)) {
+    if ((s->mask & TP_AF_SHAPE) && raw.shape_out_of_range) {
         return tp_op__reject(rej, TP_STATUS_OUT_OF_RANGE, "shape",
                              "shape = %d must be in [%d..%d]", s->shape,
                              TP_PACK_SHAPE_MIN, TP_PACK_SHAPE_MAX);
     }
     if ((s->mask & TP_AF_PIXELS_PER_UNIT) &&
-        !tp_pack_pixels_per_unit_valid(s->pixels_per_unit)) {
+        raw.pixels_per_unit_out_of_range) {
         return tp_op__reject(rej, TP_STATUS_OUT_OF_RANGE, "pixels_per_unit", "pixels_per_unit must be positive finite");
     }
-    const int effective_shape = (s->mask & TP_AF_SHAPE) ? s->shape
-                                                        : atlas->shape;
-    if (!tp_pack_extrude_shape_valid(effective_extrude, effective_shape)) {
+    if (effective.extrude_requires_rect ||
+        (effective_extrude > 0 && effective.shape_out_of_range)) {
         return tp_op__reject(rej, TP_STATUS_OUT_OF_RANGE, "extrude",
                              "extrude > 0 requires shape RECT");
     }
@@ -366,14 +407,36 @@ static tp_status validate_sprite_set(const tp_project_atlas *atlas,
             }
         }
     }
+    const tp_pack_sprite_constraint_input input = {
+        .atlas_max_size = atlas->max_size,
+        .has_shape = (s->mask & TP_SPF_SHAPE) &&
+                     s->ov_shape != TP_PROJECT_OV_INHERIT,
+        .shape = s->ov_shape,
+        .has_allow_rotate = (s->mask & TP_SPF_ALLOW_ROTATE) &&
+                            s->ov_allow_rotate != TP_PROJECT_OV_INHERIT,
+        .allow_rotate = s->ov_allow_rotate,
+        .has_max_vertices = (s->mask & TP_SPF_MAX_VERTICES) &&
+                            s->ov_max_vertices != TP_PROJECT_OV_INHERIT,
+        .max_vertices = s->ov_max_vertices,
+        .has_margin = (s->mask & TP_SPF_MARGIN) &&
+                      s->ov_margin != TP_PROJECT_OV_INHERIT,
+        .margin = s->ov_margin,
+        .has_extrude = (s->mask & TP_SPF_EXTRUDE) &&
+                       s->ov_extrude != TP_PROJECT_OV_INHERIT,
+        .extrude = s->ov_extrude,
+    };
+    const tp_pack_sprite_constraint_facts facts =
+        tp_pack_sprite_constraint_facts_of(&input);
     if ((s->mask & TP_SPF_SHAPE) && s->ov_shape != TP_PROJECT_OV_INHERIT &&
-        (st = range_i(rej, "ov_shape", s->ov_shape, TP_PACK_SHAPE_MIN,
-                      TP_PACK_SHAPE_MAX))) {
-        return st;
+        facts.shape_not_wire_representable) {
+        return tp_op__reject(
+            rej, TP_STATUS_OUT_OF_RANGE, "ov_shape",
+            "ov_shape = %d must be in [%d..%d]", s->ov_shape,
+            TP_PACK_SHAPE_MIN, TP_PACK_SHAPE_MAX);
     }
     if ((s->mask & TP_SPF_ALLOW_ROTATE) &&
         s->ov_allow_rotate != TP_PROJECT_OV_INHERIT &&
-        s->ov_allow_rotate != 0) {
+        facts.allow_rotate_not_wire_representable) {
         return tp_op__reject(
             rej, TP_STATUS_OUT_OF_RANGE, "ov_allow_rotate",
             "ov_allow_rotate = %d must be 0 (force no-rotate) or -1 (inherit)",
@@ -381,30 +444,35 @@ static tp_status validate_sprite_set(const tp_project_atlas *atlas,
     }
     if ((s->mask & TP_SPF_MAX_VERTICES) &&
         s->ov_max_vertices != TP_PROJECT_OV_INHERIT &&
-        !tp_pack_max_vertices_valid(s->ov_max_vertices)) {
+        facts.max_vertices_not_wire_representable) {
         return tp_op__reject(rej, TP_STATUS_OUT_OF_RANGE, "ov_max_vertices",
                              "ov_max_vertices = %d must be in [1..%d]",
                              s->ov_max_vertices, TP_PACK_MAX_VERTICES);
     }
     if ((s->mask & TP_SPF_MARGIN) && s->ov_margin != TP_PROJECT_OV_INHERIT &&
-        (st = range_i(rej, "ov_margin", s->ov_margin, 1, UINT8_MAX))) {
-        return st;
+        facts.margin_not_wire_representable) {
+        return tp_op__reject(
+            rej, TP_STATUS_OUT_OF_RANGE, "ov_margin",
+            "ov_margin = %d must be in [1..%d]", s->ov_margin, UINT8_MAX);
     }
     if ((s->mask & TP_SPF_MARGIN) &&
         s->ov_margin != TP_PROJECT_OV_INHERIT &&
-        s->ov_margin > atlas->max_size) {
+        facts.margin_exceeds_max_size) {
         return tp_op__reject(
             rej, TP_STATUS_OUT_OF_RANGE, "ov_margin",
             "ov_margin = %d must not exceed atlas max_size %d", s->ov_margin,
             atlas->max_size);
     }
     if ((s->mask & TP_SPF_EXTRUDE) && s->ov_extrude != TP_PROJECT_OV_INHERIT &&
-        (st = range_i(rej, "ov_extrude", s->ov_extrude, 1, UINT8_MAX))) {
-        return st;
+        facts.extrude_not_wire_representable) {
+        return tp_op__reject(
+            rej, TP_STATUS_OUT_OF_RANGE, "ov_extrude",
+            "ov_extrude = %d must be in [1..%d]", s->ov_extrude,
+            UINT8_MAX);
     }
     if ((s->mask & TP_SPF_EXTRUDE) &&
         s->ov_extrude != TP_PROJECT_OV_INHERIT &&
-        s->ov_extrude > atlas->max_size) {
+        facts.extrude_exceeds_max_size) {
         return tp_op__reject(
             rej, TP_STATUS_OUT_OF_RANGE, "ov_extrude",
             "ov_extrude = %d must not exceed atlas max_size %d",
