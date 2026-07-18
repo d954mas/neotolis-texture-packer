@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "dry_run": true,
+  "atlases": [
+    {
+      "name": "clean",
+      "sprite_count": 2,
+      "missing_sources": 0,
+      "pack_runs": 1,
+      "pages": [
+        {
+          "index": 0,
+          "w": 16,
+          "h": 8,
+          "occupancy_pct": 14.0625
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "out_path": "<PACK_ROOT>/out/clean.json",
+          "pack_run": 0,
+          "status": "ok",
+          "written_files": [],
+          "would_write": [
+            "<PACK_ROOT>/out/clean.json.json",
+            "<PACK_ROOT>/out/clean.json-0.png"
+          ],
+          "notices": []
+        }
+      ]
+    }
+  ],
+  "totals": {
+    "targets_ok": 1,
+    "targets_failed": 0,
+    "files_written": 0
+  },
+  "timings_ms": {
+    "total": 0
+  }
+}

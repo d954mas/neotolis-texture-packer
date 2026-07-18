@@ -54,8 +54,9 @@ static char *read_file(const char *path) {
 
 /* --- manifest (version --json) --- */
 static int check_manifest(const cJSON *root) {
-    if (!cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(root, "schema"))) {
-        return fail("missing/!number: schema");
+    const cJSON *schema = cJSON_GetObjectItemCaseSensitive(root, "schema");
+    if (!cJSON_IsNumber(schema) || schema->valueint != 1) {
+        return fail("manifest: schema must equal 1");
     }
     if (!cJSON_IsString(cJSON_GetObjectItemCaseSensitive(root, "app_version"))) {
         return fail("missing/!string: app_version");
@@ -104,6 +105,9 @@ static int check_inspect(const cJSON *root, int argc, char **argv) {
     const cJSON *schema = cJSON_GetObjectItemCaseSensitive(root, "schema");
     if (!cJSON_IsNumber(schema)) {
         return fail("inspect: missing/!number: schema");
+    }
+    if (schema->valueint != 4) {
+        return fail("inspect: schema must equal 4");
     }
     const char *eschema = arg_val(argc, argv, "schema");
     if (eschema && schema->valueint != atoi(eschema)) {
@@ -157,8 +161,9 @@ static int check_inspect(const cJSON *root, int argc, char **argv) {
 
 /* --- validate --json --- */
 static int check_validate(const cJSON *root, int argc, char **argv) {
-    if (!cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(root, "schema"))) {
-        return fail("validate: missing/!number: schema");
+    const cJSON *schema = cJSON_GetObjectItemCaseSensitive(root, "schema");
+    if (!cJSON_IsNumber(schema) || schema->valueint != 2) {
+        return fail("validate: schema must equal 2");
     }
     const cJSON *findings = cJSON_GetObjectItemCaseSensitive(root, "findings");
     if (!cJSON_IsArray(findings)) {
@@ -220,6 +225,9 @@ static int check_anim(const cJSON *root, int argc, char **argv) {
     if (!cJSON_IsNumber(schema)) {
         return fail("anim: missing/!number: schema");
     }
+    if (schema->valueint != 4) {
+        return fail("anim: schema must equal 4");
+    }
     const char *eschema = arg_val(argc, argv, "schema");
     if (eschema && schema->valueint != atoi(eschema)) {
         (void)fprintf(stderr, "cli_json_check: anim schema %d != expected %s\n", schema->valueint, eschema);
@@ -252,8 +260,9 @@ static int check_anim(const cJSON *root, int argc, char **argv) {
 
 /* --- mutation success payload ({"schema":1,"ok":true,"verb":..,"count":..}) --- */
 static int check_mutation(const cJSON *root, int argc, char **argv) {
-    if (!cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(root, "schema"))) {
-        return fail("mutation: missing/!number: schema");
+    const cJSON *schema = cJSON_GetObjectItemCaseSensitive(root, "schema");
+    if (!cJSON_IsNumber(schema) || schema->valueint != 1) {
+        return fail("mutation: schema must equal 1");
     }
     const cJSON *ok = cJSON_GetObjectItemCaseSensitive(root, "ok");
     if (!cJSON_IsBool(ok) || !cJSON_IsTrue(ok)) {
@@ -276,8 +285,9 @@ static int check_mutation(const cJSON *root, int argc, char **argv) {
 
 /* --- pack --json --- */
 static int check_pack(const cJSON *root, int argc, char **argv) {
-    if (!cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(root, "schema"))) {
-        return fail("pack: missing/!number: schema");
+    const cJSON *schema = cJSON_GetObjectItemCaseSensitive(root, "schema");
+    if (!cJSON_IsNumber(schema) || schema->valueint != 1) {
+        return fail("pack: schema must equal 1");
     }
     const cJSON *atlases = cJSON_GetObjectItemCaseSensitive(root, "atlases");
     if (!cJSON_IsArray(atlases) || cJSON_GetArraySize(atlases) == 0) {

@@ -1,0 +1,60 @@
+{
+  "schema": 4,
+  "project": {
+    "path": "<TESTDATA_NATIVE><NATIVE_SEP>clean.ntpacker_project",
+    "schema_version": 5,
+    "project_dir": "<TESTDATA>"
+  },
+  "atlases": [
+    {
+      "id": "atlas_00000000000000000000000000000101",
+      "name": "clean",
+      "settings": {
+        "max_size": 2048,
+        "padding": 2,
+        "margin": 0,
+        "extrude": 0,
+        "alpha_threshold": 1,
+        "max_vertices": 8,
+        "shape": 2,
+        "allow_transform": true,
+        "power_of_two": true,
+        "pixels_per_unit": 1
+      },
+      "sources": [
+        {
+          "id": "source_00000000000000000000000000000102",
+          "path": "sprites",
+          "abs": "<TESTDATA>/sprites",
+          "stored_kind": "folder",
+          "kind": "dir"
+        }
+      ],
+      "sprites": [
+        {
+          "abs": "<TESTDATA>/sprites/coin.png",
+          "key": "coin",
+          "name": "coin.png",
+          "source": "source_00000000000000000000000000000102",
+          "sprite_id": "sprite_8358d3e3c96c8bd25524ad314827fd07"
+        },
+        {
+          "abs": "<TESTDATA>/sprites/hero.png",
+          "key": "hero",
+          "name": "hero.png",
+          "source": "source_00000000000000000000000000000102",
+          "sprite_id": "sprite_6e43dfe8266c8bb93056d2b03ca2ace6"
+        }
+      ],
+      "animations": [],
+      "targets": [
+        {
+          "id": "target_00000000000000000000000000000103",
+          "exporter_id": "json-neotolis",
+          "out_path": "out/clean.json",
+          "enabled": true
+        }
+      ]
+    }
+  ]
+}

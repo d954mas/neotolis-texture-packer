@@ -52,6 +52,16 @@ nt_set_warning_flags(cli_out_contract_test)
 nt_set_sanitizer_flags(cli_out_contract_test)
 add_test(NAME cli_out_contract COMMAND cli_out_contract_test)
 
+# Deterministic adapter fixture for the post-publication durability notice. The
+# fault itself is core-tested; this executable pins only the CLI wire payload.
+add_executable(cli_durability_payload_fixture
+    cli_durability_payload_fixture.c cli_out.c)
+target_link_libraries(cli_durability_payload_fixture PRIVATE tp_core)
+target_compile_definitions(cli_durability_payload_fixture PRIVATE
+    _CRT_SECURE_NO_WARNINGS)
+target_compile_options(cli_durability_payload_fixture PRIVATE -U_DLL)
+nt_set_warning_flags(cli_durability_payload_fixture)
+
 add_executable(cli_exit_contract_test test_cli_exit.c cli_exit.c)
 target_link_libraries(cli_exit_contract_test PRIVATE tp_core)
 target_compile_definitions(cli_exit_contract_test PRIVATE _CRT_SECURE_NO_WARNINGS)
@@ -103,6 +113,26 @@ add_test(NAME cli_version_json COMMAND ${CMAKE_COMMAND}
 # --- B2 read verbs: inspect + validate over checked-in fixtures (no GL/pack). ---
 # The fixtures live in the source tree; project_dir resolves sources against them.
 set(_td "${CMAKE_CURRENT_SOURCE_DIR}/testdata")
+
+# P1-05: exact schemas/payloads. Only elapsed time and the two known absolute
+# test roots are normalized; path policy and every suffix are asserted first.
+add_test(NAME cli_exact_payload_contract COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker>
+    -DCHECKER=$<TARGET_FILE:cli_json_check>
+    -DDURABILITY_EXE=$<TARGET_FILE:cli_durability_payload_fixture>
+    -DTD=${_td}
+    -DWORK=${CMAKE_CURRENT_BINARY_DIR}/cli_exact_contract
+    -DEXPECTED=${_td}
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/cli_exact_contract.cmake")
+
+# The process exit-code contract includes total export failure (5) and partial
+# success (6). Force portable write failures with directories at output paths.
+add_test(NAME cli_pack_exit_matrix COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker>
+    -DCHECKER=$<TARGET_FILE:cli_json_check>
+    -DTD=${_td}
+    -DWORK=${CMAKE_CURRENT_BINARY_DIR}/cli_pack_exit_matrix
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/cli_pack_exit_matrix.cmake")
 
 # (e) inspect --json on the clean fixture -> exit 0, parses, atlas[0] has 2 sprites.
 add_test(NAME cli_inspect_json COMMAND ${CMAKE_COMMAND}

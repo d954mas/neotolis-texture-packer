@@ -1,7 +1,10 @@
 #include "cli_exit.h"
 
 int main(void) {
-    if (cli_exit_for_rejected_status(TP_STATUS_OOM) != CLI_EXIT_INTERNAL ||
+    if (CLI_EXIT_OK != 0 || CLI_EXIT_INTERNAL != 1 || CLI_EXIT_USAGE != 2 ||
+        CLI_EXIT_PROJECT != 3 || CLI_EXIT_PACK != 4 || CLI_EXIT_EXPORT != 5 ||
+        CLI_EXIT_PARTIAL != 6 || CLI_EXIT_VALIDATE != 7 ||
+        cli_exit_for_rejected_status(TP_STATUS_OOM) != CLI_EXIT_INTERNAL ||
         cli_exit_for_rejected_status(TP_STATUS_RNG_FAILED) != CLI_EXIT_INTERNAL ||
         cli_exit_for_rejected_status(TP_STATUS_DUPLICATE_ID) != CLI_EXIT_INTERNAL ||
         cli_exit_for_rejected_status(TP_STATUS_NOT_FOUND) != CLI_EXIT_PROJECT ||
