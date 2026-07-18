@@ -441,6 +441,56 @@ proposed Phase 3–5 split, write a bounded packet-plan or change the decision t
 `keep` with evidence. Phase 3–5 target shapes below are provisional until this
 gate passes; their presence in the roadmap is not execution authorization.
 
+#### Phase 2 reassessment result — 2026-07-18
+
+The gate passed after P2-03. Native Debug builds cleanly, boundary checks pass,
+and 99/99 CTest tests pass. The corrected non-gating inventory contains 89
+production translation units and 48,626 physical LOC; test-only payload and
+client-parity executables are excluded. These numbers are observations, not
+limits. The split decisions below come from ownership and dependency seams, not
+from file length.
+
+Current dependency direction to preserve:
+
+| Area | Allowed direction after the split | Contract that prevents drift |
+|---|---|---|
+| Filesystem | neutral checked I/O → one selected OS backend; consumers → private FS facade | Win32 path, scan, Save I/O and session Save matrices |
+| Project | public entrypoints → model/path/writer/save/parser/pack bridge; writer and parser do not call each other | canonical-v5 bytes, load resource bounds, Save publication matrix |
+| Validation | ordered public orchestrator → rule domains → report owner; an index remains beside its sole rule owner | exact complete ordered finding corpus |
+| Operations | one dispatcher → family validators → shared immutable lookup/constraint facts | operation/transaction rejection and client parity corpora |
+| Snapshot | session → materializer; public queries → one owned immutable DTO | snapshot allocation/lifetime and GUI trace tests |
+| Recovery/history | session adapter → state machine → selected backend/wire primitive; no backend owns session state | fixed wire bytes, pin/no-follow, ranking and semantic replay tests |
+| GUI | views/actions → GUI adapters → public session/job contracts; state is passed as one owner or narrow substate | action-state trace, canonical identity and real CLI↔GUI parity |
+
+Every authorized item below is a separate green commit unless a row explicitly
+says that the seam and move form one indivisible compile step. A move commit may
+change linkage and source lists but not behavior, schemas, messages, ordering or
+wire bytes.
+
+| Packet | Decision | Bounded commit packets and mandatory focused oracle |
+|---|---|---|
+| P3-01 filesystem | **split** | `a` pin private facade/backend selection; `b` move Win32 primitives including Win32 sync; `c` move POSIX primitives including POSIX sync; `d` move platform-neutral checked read/write/flush/close/limits. Run FS, scan, identity, project Save and session Save tests after each locally buildable packet. |
+| P3-02 CLI mutation | **split** | `a` introduce narrow lifecycle/parse/commit private seam; `b` source; `c` atlas lifecycle/settings; `d` sprite; `e` animation; `f` target. Run the matching `cli_mutate_*`, exact payload/exit test and real parity after every family. |
+| P3-03 project | **split** | Move in order: `a` pack bridge; `b` path/source-base; `c` writer; `d` staged Save; `e` parser/load; `f` leave lifetime/CRUD/defaults in the root model owner and remove obsolete seams. Run pack/project tests, then path, canonical bytes, Save matrices and schema/load bounds respectively. |
+| P3-04 validation | **split** | `a` report storage/materialization/truncation; `b` source rules plus source-only indexes; `c` sprite/animation rules; `d` target/settings rules; `e` leave ordered orchestration/public file entrypoint in `tp_validate.c`. Run exact corpus and large validation after every move. |
+| P3-05 operation validation | **split** | Shared read-only context/reject helpers stay in one private seam; move `a` atlas, `b` source+sprite, `c` animation and `d` target families; `e` retain UTF-8 preflight and one dispatcher. The current switch already exposes these clean family boundaries. Run operation, transaction and parity tests after each. |
+| P3-06 snapshot | **split (two owners only)** | `a` materialization/allocation/destruction; `b` immutable queries plus selector resolution. Do not create per-query files and do not borrow live model memory. Run session snapshot allocation tests and both GUI traces. |
+| P4-01 recovery | **split** | `a` introduce backend value types that contain only pin/lock handles; `b` Win32 backend; `c` POSIX backend; `d` store/live lifecycle; `e` claim/candidate/resolution/discard; `f` scan/ranking; `g` leave a thin session attach adapter. Run recovery store/ranking, journal and session tests after every state-machine packet. |
+| P4-02 transaction apply | **split around atomic engine** | `a` model lifetime/adoption; `b` request/result/error assembly; `c` journal/recovery bridge. Keep `tp_txn__commit_validated` and its validation→clone→diff→journal-ack→swap protocol together in `tp_txn_apply.c`. Run transaction, history semantics, journal and parity tests. |
+| P4-03 journal | **split** | `a` wire/CRC primitives; `b` writer+admission; `c` reader/walk/recovery; `d` peek only if its includes remain reader-only after `c`, otherwise keep peek with reader. Keep injected `tp_journal_io` unchanged. Run fixed v4 stream, fault and recovery tests after each. |
+| P4-04 history codec | **split last** | `a` wire writer; `b` wire reader+shape validation; `c` replay adapter. The reader publishes nothing until full decode succeeds; replay retains clone/swap atomicity and reverse ordering. Run fixed v1 bytes, hostile identity fixtures and semantic publication tests after each. |
+| P5-01 GUI project | **split** | `a` encapsulate existing session/snapshot/notices/recovery/coalescing fields in one private state object; `b` pending coalescing; `c` typed mutation wrappers; `d` recovery presentation/resolution; `e` New/Open/Save and Undo/Redo adapters. Run GUI canonical identity, action trace, session adapter and real parity. |
+| P5-02 GUI actions | **split** | `a` encapsulate queue/preview/dialog/recovery/gesture state; then `b` deferred edit queues, `c` selection+preview, `d` dialogs/confirm, `e` pack/export actions, `f` recovery modal, `g` thin between-frame side-effect coordinator. Run shipped GUI build and both GUI trace families after every packet. |
+| P5-03 `main.c` | **split narrowly** | `a` move the headless parity seam; `b` move bootstrap/resource binding. Keep frame loop, canvas input, shortcuts and auto-pack together as application orchestration. |
+| P5-03 `gui_pack.c` | **split** | `a` make the existing session-job adapter state explicit; `b` move job start/poll/cancel; `c` move export-preview slot/diff while the native result-slot owner stays in `gui_pack.c`. Run job input/owner, GUI action trace and parity. |
+| P5-03 `gui_canvas.c` | **split** | The public `gui_canvas` already supplies the narrow owner: `a` move GPU resource/image/page lifetime; `b` leave view transforms, hit-testing, overlays and rendering together. Run transform/UV/canonical GUI tests and build the shipped GUI. |
+| P5-03 `gui_view_settings.c` | **keep** | It is one view-only declaration domain over one right panel. Its regions share layout state and no independently reusable owner exists. Regions are sufficient; split only if a later reusable view domain appears. |
+
+Authorization is therefore granted for the bounded P3–P5 packets above. A
+packet returns to `keep` if creating its proposed private seam requires broader
+authority than the table permits, or if its focused oracle cannot distinguish a
+bad move from a good one. That is a safety stop, not a LOC exception.
+
 ### Phase 3 — Lower-risk physical decomposition
 
 #### P3-01 — Filesystem backend split
