@@ -12,11 +12,11 @@ hit() {
     printf '%s\n' "$2"
 }
 
-# Sources under apps/, excluding vendored deps and the selftest (test-internal code).
+# Sources under apps/, excluding vendored deps and test-internal executables.
 app_srcs() {
     find apps -type f \( -name '*.c' -o -name '*.h' \) |
         grep -v '/deps/' |
-        grep -vE '/(gui_selftest|test_[^/]*|tp_bench_[^/]*)\.(c|h)$'
+        grep -vE '/(gui_selftest|client_parity_replay|test_[^/]*|tp_bench_[^/]*)\.(c|h)$'
 }
 
 # Shipping app/core sources only. Documentation, fixtures, unit tests, spikes,
@@ -442,10 +442,11 @@ tp_diff_internal        tp_diff_entity|tp_diff_apply|tp_diff_capture|tp_history|
 tp_op_internal          tp_op_catalog|tp_op_validate|tp_op_apply|tp_op_build|tp_op_encode|tp_txn_encode|tp_txn_apply|tp_txn_lower|tp_txn_parse
 tp_encode_internal      tp_op_encode|tp_txn_encode|tp_txn_apply
 tp_fs_internal          tp_fs_internal|tp_export_defold|tp_export_json_neotolis|tp_export_png|tp_identity|tp_image|tp_journal_io|tp_pack_read|tp_project|tp_project_lease|tp_recovery|tp_scan
+tp_pack_constraints_internal tp_pack_constraints|tp_op_validate|tp_pack|tp_project|tp_project_identity|tp_validate
 tp_history_codec_internal tp_history|tp_history_codec|tp_txn_apply
 tp_journal_internal     tp_journal|tp_journal_io|tp_history|tp_txn_apply|tp_recovery
 tp_json_internal        tp_json_internal|tp_project|tp_txn_parse
-tp_utf8_internal        tp_utf8|tp_fs_internal|tp_image|tp_json_internal|tp_op_validate|tp_project_identity
+tp_utf8_internal        tp_utf8|tp_fs_internal|tp_image|tp_json_internal|tp_op_validate|tp_project_identity|tp_source_path_text
 tp_idset_internal       tp_idset|tp_txn_idset|tp_journal|tp_txn_apply
 tp_project_internal     tp_project|tp_project_identity|tp_history|tp_session|tp_txn_apply
 tp_project_identity_internal tp_project|tp_project_identity|tp_history_codec|tp_input|tp_op_validate|tp_session|tp_txn_apply
@@ -459,6 +460,7 @@ tp_session_layout       tp_session|tp_session_snapshot
 tp_recovery_internal    tp_recovery
 tp_job_owner_internal   tp_session|tp_job
 tp_source_plan_internal tp_source_plan|tp_op_validate
+tp_source_path_text_internal tp_source_path_text|tp_op_validate|tp_project|tp_project_identity|tp_source_plan
 tp_srckey_internal      tp_srckey|tp_project_identity|tp_validate
 tp_validate_internal    tp_validate
 tp_identity_internal    tp_identity|tp_identity_session
@@ -644,15 +646,34 @@ else
     trap - EXIT
 fi
 
-# 21. The strict UTF-8/long-path policy is one tp_core boundary. apps/common may
+# 21. The strict UTF-8/long-path policy is one tp_core boundary. Frontends may
 #     retain CRT-local fopen/remove/rename adapters, but must not reimplement
 #     decoding, absolute-path resolution, namespace policy, or Win32 error maps.
-_frontend_fs_policy='(MultiByteToWideChar|GetFullPathNameW|win32_error_to_errno|ERROR_FILENAME_EXCED_RANGE|UNC\\\\)'
-r21=$(grep -nE "$_frontend_fs_policy" apps/common/nt_utf8_fs.c 2>/dev/null)
+#     nt_utf8_argv.c is the explicit process-ingress exception: Windows supplies
+#     UTF-16 argv, so that boundary legitimately encodes it once as UTF-8.
+_frontend_fs_policy='(MultiByteToWideChar|WideCharToMultiByte|GetFullPathNameW|win32_error_to_errno|ERROR_FILENAME_EXCED_RANGE|UNC\\\\)'
+_frontend_fs_ingress='apps/common/nt_utf8_argv.c'
+_frontend_fs_policy_scan() {
+    grep -nE "$_frontend_fs_policy" "$@" 2>/dev/null |
+        grep -v 'boundary-ok:'
+}
+r21=$(_frontend_fs_policy_scan $(app_srcs | grep -v "^$_frontend_fs_ingress$"))
 [ -n "$r21" ] && hit "R21 duplicate frontend filesystem policy" "$r21"
-if ! printf '    GetFullPathNameW(path, 0, NULL, NULL);\n' |
-    grep -qE "$_frontend_fs_policy"; then
-    hit "R21-selftest" "R21 failed to catch a seeded frontend path-policy implementation"
+
+_r21_dir=$(mktemp -d 2>/dev/null)
+if [ -z "$_r21_dir" ] || [ ! -d "$_r21_dir" ]; then
+    hit "R21-selftest" "R21 self-test could not create a scratch dir (mktemp failed)"
+else
+    trap 'rm -rf "$_r21_dir"' EXIT
+    mkdir -p "$_r21_dir/apps/gui" "$_r21_dir/apps/cli"
+    printf '    GetFullPathNameW(path, 0, NULL, NULL);\n' >"$_r21_dir/apps/gui/seeded_path_policy.c"
+    printf '    MultiByteToWideChar(CP_UTF8, 0, text, -1, out, cap);\n' >"$_r21_dir/apps/cli/seeded_decode_policy.c"
+    [ -z "$(_frontend_fs_policy_scan "$_r21_dir/apps/gui/seeded_path_policy.c")" ] &&
+        hit "R21-selftest" "R21 failed to catch seeded GUI path policy"
+    [ -z "$(_frontend_fs_policy_scan "$_r21_dir/apps/cli/seeded_decode_policy.c")" ] &&
+        hit "R21-selftest" "R21 failed to catch seeded CLI decode policy"
+    rm -rf "$_r21_dir"
+    trap - EXIT
 fi
 
 if [ "$fail" -eq 0 ]; then
