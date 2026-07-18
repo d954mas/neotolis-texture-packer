@@ -153,5 +153,10 @@ void gui_actions__pending_create_animation_dispose(
 bool gui_actions__resolve_animation_ref(const gui_animation_ref *animation,
                                         int *atlas_index,
                                         int *animation_index);
+bool gui_actions__busy_block(void);
+bool gui_actions__flush_failed(void);
+void gui_actions__apply_confirm(void);
+void gui_actions__apply_file_dialogs(void);
+void gui_actions__browse_target(const gui_target_ref *target);
 
 #endif /* NTPACKER_GUI_ACTIONS_INTERNAL_H */
