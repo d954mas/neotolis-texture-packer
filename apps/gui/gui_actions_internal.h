@@ -161,5 +161,7 @@ void gui_actions__browse_target(const gui_target_ref *target);
 void gui_actions__poll_pack(void);
 void gui_actions__apply_pack_requests(void);
 void gui_actions__apply_recovery(void);
+void gui_actions__apply_structural_edits(void);
+void gui_actions__clear_pending(void);
 
 #endif /* NTPACKER_GUI_ACTIONS_INTERNAL_H */

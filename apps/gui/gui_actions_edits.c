@@ -410,3 +410,161 @@ void gui_actions__drain_edits(void) {
  * gesture when a different-key edit arrives, so the flag always targets the latest buffered edit. */
 void gui_request_gesture_commit(void) { s_actions.gesture_commit = true; }
 // #endregion
+
+void gui_actions__apply_structural_edits(void) {
+    if (s_pending_add_atlas) {
+        int idx = gui_project_add_atlas();
+        if (idx >= 0) {
+            s_sel_atlas = idx;
+            reset_selection();
+            const tp_snapshot_atlas *added = tp_session_snapshot_atlas_at(gui_project_snapshot(), idx);
+            set_statusf("Added atlas '%s'", added ? added->name : "?");
+        }
+    }
+    if (s_pending_remove_source) {
+        /* fix3 [0]: side-effects + "Removed" run ONLY on a real removal -- a journal-failed flush
+         * aborts the wrapper (returns false), so no false "Removed" / bad Ctrl+Z (op-error surfaced). */
+        if (gui_project_remove_source(s_pending_remove_source_atlas_id,
+                                      s_pending_remove_source_id,
+                                      s_pending_remove_source_revision)) {
+            reset_selection();
+            set_status("Removed source (Ctrl+Z to undo).");
+        }
+    }
+    if (s_pending_remove_atlas) {
+        if (gui_project_remove_atlas(s_pending_remove_atlas_id,
+                                     s_pending_remove_atlas_revision)) {
+            clamp_selection();
+            reset_selection();
+            set_status("Removed atlas (Ctrl+Z to undo).");
+        }
+    }
+    if (s_actions.pending_add_target) {
+        const int ti = gui_project_add_target(s_actions.pending_add_target_atlas_id,
+                                              s_actions.pending_add_target_revision);
+        if (ti >= 0) {
+            set_status("Added export target (Ctrl+Z to undo).");
+        }
+    }
+    if (s_actions.pending_remove_target) {
+        if (gui_project_remove_target(&s_actions.pending_remove_target_ref)) {
+            set_status("Removed export target (Ctrl+Z to undo).");
+        }
+    }
+    if (s_actions.pending_browse_target) {
+        gui_actions__browse_target(&s_actions.pending_browse_target_ref);
+    }
+    if (s_actions.pending_add_anim) {
+        const int idx = gui_project_create_animation(
+            s_actions.pending_add_anim_atlas_id, s_actions.pending_add_anim_revision,
+            NULL, NULL, 0);
+        if (idx >= 0) {
+            const tp_session_snapshot *after_snapshot = gui_project_snapshot();
+            const tp_snapshot_atlas *after_atlas = after_snapshot
+                ? tp_session_snapshot_atlas_by_id(
+                      after_snapshot, s_actions.pending_add_anim_atlas_id)
+                : NULL;
+            const tp_snapshot_animation *animation = after_atlas
+                                                         ? tp_session_snapshot_animation_at(after_snapshot, after_atlas->id, idx)
+                                                         : NULL;
+            const tp_snapshot_atlas *selected = after_snapshot
+                ? tp_session_snapshot_atlas_at(after_snapshot, s_sel_atlas)
+                : NULL;
+            if (selected && tp_id128_eq(selected->id, s_actions.pending_add_anim_atlas_id)) {
+                s_sel_anim = idx;
+                s_sel_anim_frame = -1;
+            }
+            set_statusf("Added animation '%s' (Ctrl+Z to undo).", animation ? animation->name : "?");
+        }
+    }
+    if (s_actions.pending_create_anim.active) {
+        const int idx = gui_project_create_animation(
+            s_actions.pending_create_anim.atlas_id,
+            s_actions.pending_create_anim.expected_revision,
+            s_actions.pending_create_anim.name[0] ? s_actions.pending_create_anim.name : NULL,
+            s_actions.pending_create_anim.frames,
+            s_actions.pending_create_anim.frame_count);
+        if (idx >= 0) {
+            const tp_session_snapshot *after_snapshot = gui_project_snapshot();
+            const tp_snapshot_atlas *after_atlas = after_snapshot
+                ? tp_session_snapshot_atlas_by_id(
+                      after_snapshot, s_actions.pending_create_anim.atlas_id)
+                : NULL;
+            const tp_snapshot_animation *animation = after_atlas
+                ? tp_session_snapshot_animation_at(after_snapshot,
+                                                   after_atlas->id, idx)
+                : NULL;
+            const tp_snapshot_atlas *selected = after_snapshot
+                ? tp_session_snapshot_atlas_at(after_snapshot, s_sel_atlas)
+                : NULL;
+            if (selected &&
+                tp_id128_eq(selected->id, s_actions.pending_create_anim.atlas_id)) {
+                s_sel_anim = idx;
+                s_sel_anim_frame = -1;
+            }
+            set_statusf("Created animation '%s' with %d frame(s) (Ctrl+Z to undo).",
+                        animation ? animation->name : "?",
+                        s_actions.pending_create_anim.frame_count);
+        }
+    }
+    gui_actions__pending_create_animation_dispose(
+        &s_actions.pending_create_anim);
+    if (s_actions.pending_remove_anim) {
+            /* fix3 [0]: preview_stop + the selection reset + "Removed" run ONLY on a real removal. A
+             * journal-failed flush aborts the wrapper (returns false) -> the animation is still there,
+             * so we must NOT stop its preview or clear the selection. (preview_stop only resets flags,
+             * so running it AFTER the removal is safe -- no project deref.) */
+            const bool was_previewing =
+                s_preview_active &&
+                tp_id128_eq(s_actions.preview_animation_ref.atlas_id,
+                            s_actions.pending_remove_anim_ref.atlas_id) &&
+                tp_id128_eq(s_actions.preview_animation_ref.animation_id,
+                            s_actions.pending_remove_anim_ref.animation_id);
+            if (gui_project_remove_animation(&s_actions.pending_remove_anim_ref)) {
+                if (was_previewing) {
+                    preview_stop();
+                }
+                s_sel_anim = -1;
+                s_sel_anim_frame = -1;
+                set_status("Removed animation (Ctrl+Z to undo).");
+            }
+    }
+    if (s_actions.pending_open_preview) {
+        int atlas_index = -1;
+        int animation_index = -1;
+        if (gui_actions__resolve_animation_ref(
+                &s_actions.pending_open_preview_ref, &atlas_index,
+                &animation_index)) {
+            s_sel_atlas = atlas_index;
+            open_preview(animation_index);
+        }
+    }
+}
+
+void gui_actions__clear_pending(void) {
+    s_pending_open = s_pending_save = s_pending_save_as = false;
+    s_pending_add_files = s_pending_add_folder = s_pending_add_atlas = false;
+    s_pending_refresh = s_pending_pack = s_pending_export = false;
+    s_actions.pending_add_target = false;
+    s_actions.pending_add_target_atlas_id = tp_id128_nil();
+    s_actions.pending_add_target_revision = 0;
+    s_actions.pending_add_anim = false;
+    s_actions.pending_open_preview = false;
+    memset(&s_actions.pending_open_preview_ref, 0,
+           sizeof s_actions.pending_open_preview_ref);
+    s_actions.pending_add_anim_atlas_id = tp_id128_nil();
+    s_actions.pending_add_anim_revision = 0;
+    s_pending_remove_source = false;
+    s_pending_remove_source_atlas_id = tp_id128_nil();
+    s_pending_remove_source_id = tp_id128_nil();
+    s_pending_remove_source_revision = 0;
+    s_pending_remove_atlas = false;
+    s_pending_remove_atlas_id = tp_id128_nil();
+    s_pending_remove_atlas_revision = 0;
+    s_actions.pending_remove_target = false;
+    s_actions.pending_remove_anim = false;
+    s_actions.pending_browse_target = false;
+    memset(&s_actions.pending_browse_target_ref, 0,
+           sizeof s_actions.pending_browse_target_ref);
+    s_pending_preview_target = -1;
+}
