@@ -441,12 +441,12 @@ _internal_header_registry() {
 tp_diff_internal        tp_diff_entity|tp_diff_apply|tp_diff_capture|tp_history|tp_history_codec|tp_history_codec_internal|tp_op_apply|tp_txn_apply
 tp_op_internal          tp_op_catalog|tp_op_validate|tp_op_apply|tp_op_build|tp_op_encode|tp_txn_encode|tp_txn_apply|tp_txn_lower|tp_txn_parse
 tp_encode_internal      tp_op_encode|tp_txn_encode|tp_txn_apply
-tp_fs_internal          tp_fs_internal|tp_fs_win32|tp_fs_posix|tp_export_defold|tp_export_json_neotolis|tp_export_png|tp_identity|tp_image|tp_journal_io|tp_pack_read|tp_project|tp_project_lease|tp_recovery|tp_scan
+tp_fs_internal          tp_fs_io|tp_fs_win32|tp_fs_posix|tp_export_defold|tp_export_json_neotolis|tp_export_png|tp_identity|tp_image|tp_journal_io|tp_pack_read|tp_project|tp_project_lease|tp_recovery|tp_scan
 tp_pack_constraints_internal tp_pack_constraints|tp_op_validate|tp_pack|tp_project|tp_project_identity|tp_validate
 tp_history_codec_internal tp_history|tp_history_codec|tp_txn_apply
 tp_journal_internal     tp_journal|tp_journal_io|tp_history|tp_txn_apply|tp_recovery
 tp_json_internal        tp_json_internal|tp_project|tp_txn_parse
-tp_utf8_internal        tp_utf8|tp_fs_internal|tp_image|tp_json_internal|tp_op_validate|tp_project_identity|tp_source_path_text
+tp_utf8_internal        tp_utf8|tp_fs_io|tp_image|tp_json_internal|tp_op_validate|tp_project_identity|tp_source_path_text
 tp_idset_internal       tp_idset|tp_txn_idset|tp_journal|tp_txn_apply
 tp_project_internal     tp_project|tp_project_identity|tp_history|tp_session|tp_txn_apply
 tp_project_identity_internal tp_project|tp_project_identity|tp_history_codec|tp_input|tp_op_validate|tp_session|tp_txn_apply

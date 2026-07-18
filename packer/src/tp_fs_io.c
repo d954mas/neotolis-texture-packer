@@ -1,9 +1,6 @@
 #include "tp_fs_internal.h"
 
 #include <errno.h>
-#include <limits.h>
-#include <stdlib.h>
-#include <string.h>
 
 #include "tp_utf8_internal.h"
 
