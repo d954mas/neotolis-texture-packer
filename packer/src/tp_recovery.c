@@ -1510,7 +1510,13 @@ static bool candidate_outranks(const tp_recovery_candidate *kept,
     if (kept->adoptable != candidate->adoptable) {
         return kept->adoptable;
     }
-    return kept->timestamp >= candidate->timestamp;
+    if (kept->timestamp != candidate->timestamp) {
+        return kept->timestamp > candidate->timestamp;
+    }
+    /* Directory enumeration order is not a contract and differs by platform.
+     * The canonical journal path is unique within one root and gives equal-time
+     * candidates (including cap eviction) a total deterministic order. */
+    return strcmp(kept->journal_path, candidate->journal_path) <= 0;
 }
 
 static void candidate_insert(tp_recovery_candidates *out,

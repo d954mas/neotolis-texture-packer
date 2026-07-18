@@ -283,6 +283,18 @@ nt_set_warning_flags(tp_test_recovery_store)
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_recovery_store_test")
 add_test(NAME tp_recovery_store COMMAND tp_test_recovery_store "${CMAKE_BINARY_DIR}/tp_recovery_store_test")
 
+# P1-11 missing recovery oracle: ranking must not inherit filesystem directory
+# enumeration order, including equal timestamps at the bounded candidate cap.
+add_executable(tp_test_recovery_ranking_contract
+    test_recovery_ranking_contract.c)
+target_link_libraries(tp_test_recovery_ranking_contract PRIVATE tp_core unity)
+target_include_directories(tp_test_recovery_ranking_contract PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_options(tp_test_recovery_ranking_contract PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_recovery_ranking_contract)
+add_test(NAME tp_recovery_ranking_contract
+    COMMAND tp_test_recovery_ranking_contract)
+
 # A1 op-layer: canonical sprite-name key + natural order + common prefix.
 # Pins the dot-basename key fix that the showcase draw-hash gate cannot see.
 add_executable(tp_test_names test_names.c)

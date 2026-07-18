@@ -149,3 +149,18 @@ an acknowledged checkpoint.
 All pre-publication errors also carry the attempted public path and the captured
 errno-compatible native cause. The product performs no automatic atomic-replace
 retry.
+
+## P1-11 recovery oracle coverage
+
+The recovery store already had strong executable ownership/fault coverage, so
+P1-11 added only the missing deterministic equal-time ranking contract.
+
+| Required boundary | Executable coverage |
+|---|---|
+| pinned journal / no-follow | `test_resolution_refuses_save_over_pinned_journal_before_write`, `test_scan_never_follows_journal_symlink`, `test_claim_rejects_lock_symlink_without_touching_target` |
+| TOCTOU replacement safety | `test_live_owner_never_deletes_a_replacement_path`, `test_claimed_candidate_requires_bound_current_save_receipt` |
+| exclusive claim | `test_live_slot_competition_and_permanent_lock`, `test_competing_orphan_claim_and_process_death`, `test_stale_lock_is_reused_not_recreated` |
+| live-slot lifecycle | clean close, dirty preservation, orphan collision and degraded-slot tests in `test_recovery_store.c` |
+| deterministic scan/ranking | `test_recovery_ranking_contract.c`: adoptability, timestamp, lexical tie-break, permutation-invariant cap |
+| quarantine/discard | failed cleanup remains discoverable; discard deletes only the journal and retains the lock domain |
+| disposable candidate/resolution ownership | receipt binding, cancel invalidation/process-lease release and Save-original exact-fingerprint tests |
