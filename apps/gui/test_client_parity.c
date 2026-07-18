@@ -1,4 +1,5 @@
 #include "gui_session_adapter.h"
+#include "client_parity_manifest.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -529,6 +530,39 @@ void test_capability_matrix_is_typed_and_exact(void) {
                                                      &invalid));
 }
 
+void test_real_client_parity_manifest_covers_every_shipped_mutation(void) {
+    uint32_t aggregate = 0U;
+    size_t row_count = 0U;
+    const client_parity_manifest_row *rows =
+        client_parity_manifest_rows(&row_count);
+    TEST_ASSERT_NOT_NULL(rows);
+    TEST_ASSERT_EQUAL_UINT(19U, row_count);
+    bool seen[TP_OP_KIND_COUNT];
+    memset(seen, 0, sizeof seen);
+    for (size_t i = 0U; i < row_count; ++i) {
+        TEST_ASSERT_TRUE(rows[i].kind > TP_OP_INVALID);
+        TEST_ASSERT_TRUE(rows[i].kind < TP_OP_KIND_COUNT);
+        TEST_ASSERT_FALSE(seen[rows[i].kind]);
+        seen[rows[i].kind] = true;
+        TEST_ASSERT_NOT_NULL(rows[i].family);
+        TEST_ASSERT_NOT_NULL(rows[i].cli_oracle);
+        TEST_ASSERT_NOT_NULL(rows[i].gui_oracle);
+        TEST_ASSERT_BITS_HIGH(CLIENT_PARITY_REAL_CLI |
+                                  CLIENT_PARITY_REAL_GUI |
+                                  CLIENT_PARITY_SUCCESS |
+                                  CLIENT_PARITY_ERROR |
+                                  CLIENT_PARITY_FINAL_BYTES,
+                              rows[i].coverage);
+        aggregate |= rows[i].coverage;
+    }
+    for (int kind = TP_OP_ATLAS_CREATE; kind < TP_OP_KIND_COUNT; ++kind) {
+        const bool reserved = kind == TP_OP_SOURCE_REPLACE ||
+                              kind == TP_OP_ANIMATION_FRAMES_SET;
+        TEST_ASSERT_EQUAL_INT(!reserved, seen[kind]);
+    }
+    TEST_ASSERT_BITS_HIGH(CLIENT_PARITY_REQUIRED_COVERAGE, aggregate);
+}
+
 void test_live_headless_runs_real_pack_job_and_export_command(void) {
     uint8_t seed = 91U;
     const tp_rng rng = {deterministic_fill, &seed};
@@ -732,6 +766,7 @@ void test_gui_invalid_intents_are_classified_by_the_shared_core(void) {
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_capability_matrix_is_typed_and_exact);
+    RUN_TEST(test_real_client_parity_manifest_covers_every_shipped_mutation);
     RUN_TEST(test_live_headless_runs_real_pack_job_and_export_command);
     RUN_TEST(test_gui_and_headless_share_golden_transaction_session_corpus);
     RUN_TEST(test_gui_invalid_intents_are_classified_by_the_shared_core);

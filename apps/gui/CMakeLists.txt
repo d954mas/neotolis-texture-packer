@@ -244,7 +244,10 @@ add_test(NAME tp_gui_action_trace COMMAND tp_test_gui_action_trace)
 # Capability/parity corpus. The second adapter is intentionally test-only:
 # it calls tp_session directly and proves the future transport host needs no
 # duplicate mutable session wrapper.
-add_executable(tp_test_client_parity test_client_parity.c gui_session_adapter.c)
+add_executable(tp_test_client_parity
+    test_client_parity.c
+    client_parity_manifest.c
+    gui_session_adapter.c)
 target_link_libraries(tp_test_client_parity PRIVATE tp_build unity)
 target_compile_options(tp_test_client_parity PRIVATE -U_DLL)
 target_compile_definitions(tp_test_client_parity PRIVATE
@@ -253,6 +256,19 @@ target_compile_definitions(tp_test_client_parity PRIVATE
 nt_set_warning_flags(tp_test_client_parity)
 nt_set_sanitizer_flags(tp_test_client_parity)
 add_test(NAME tp_client_parity COMMAND tp_test_client_parity)
+
+add_executable(tp_client_parity_replay
+    client_parity_replay.c
+    gui_session_adapter.c)
+target_link_libraries(tp_client_parity_replay PRIVATE tp_build)
+target_compile_options(tp_client_parity_replay PRIVATE -U_DLL)
+nt_set_warning_flags(tp_client_parity_replay)
+nt_set_sanitizer_flags(tp_client_parity_replay)
+add_test(NAME tp_client_parity_real COMMAND ${CMAKE_COMMAND}
+    -DNTPACKER=$<TARGET_FILE:ntpacker>
+    -DREPLAY=$<TARGET_FILE:tp_client_parity_replay>
+    -DWORK=${CMAKE_CURRENT_BINARY_DIR}/tp_client_parity_real_tmp
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/client_parity_real.cmake")
 
 set(GUI_PACK_NAMES ntpacker_ui.ntpack)
 
