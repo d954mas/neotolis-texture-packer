@@ -38,6 +38,7 @@
 #include "tp_fs_internal.h"
 #include "tp_project_internal.h"         /* deterministic save fault seam for tests */
 #include "tp_project_mutation_internal.h"
+#include "tp_source_path_text_internal.h"
 #include "tp_strutil.h"                 /* shared tp_strdup (one core definition) */
 
 #define TP_PATH_MAX 4096
@@ -117,18 +118,6 @@ static void tp_normalize_slashes(char *s) {
             *s = '/';
         }
     }
-}
-
-static tp_status tp_source_path_admit(const char *path) {
-    if (!path) {
-        return TP_STATUS_INVALID_ARGUMENT;
-    }
-    size_t length = 0U;
-    while (length < (size_t)TP_PATH_MAX && path[length] != '\0') {
-        length++;
-    }
-    return length < (size_t)TP_PATH_MAX ? TP_STATUS_OK
-                                        : TP_STATUS_OUT_OF_BOUNDS;
 }
 
 static bool tp_path_is_absolute(const char *p) {
@@ -567,33 +556,12 @@ static tp_status atlas_push_source(tp_project_atlas *a, const char *path, tp_sou
     return TP_STATUS_OK;
 }
 
-static bool tp_source_path_equal(const char *a, const char *b) {
-    if (!a || !b) {
-        return false;
-    }
-    /* Overlong paths compare unequal so canonical validation can diagnose the
-     * anomalous records without reading beyond the bounded path contract. */
-    if (tp_source_path_admit(a) != TP_STATUS_OK ||
-        tp_source_path_admit(b) != TP_STATUS_OK) {
-        return false;
-    }
-    for (;;) {
-        const char left = *a == '\\' ? '/' : *a;
-        const char right = *b == '\\' ? '/' : *b;
-        if (left != right || left == '\0') {
-            return left == right;
-        }
-        a++;
-        b++;
-    }
-}
-
 /* True when the atlas already holds a source whose '/'-normalized path equals
  * `path`'s. Paths outside the bounded source-path contract compare unequal so
  * canonical validation can report each anomalous record. */
 static bool atlas_has_source_path(const tp_project_atlas *a, const char *path) {
     for (int i = 0; i < a->source_count; i++) {
-        if (tp_source_path_equal(a->sources[i].path, path)) {
+        if (tp_source_path_text_equal(a->sources[i].path, path)) {
             return true;
         }
     }
@@ -604,7 +572,7 @@ tp_status tp_project_atlas_add_source_kind(tp_project_atlas *a, const char *path
     if (!a || !path) {
         return TP_STATUS_INVALID_ARGUMENT;
     }
-    const tp_status admission = tp_source_path_admit(path);
+    const tp_status admission = tp_source_path_text_admit(path);
     if (admission != TP_STATUS_OK) {
         return admission;
     }
@@ -2396,19 +2364,6 @@ typedef struct tp_load_lookup {
 
 #define TP_LOAD_LOOKUP_MAX_PROBES 64U
 
-static uint64_t tp_load_key_hash(const char *key) {
-    uint64_t hash = UINT64_C(14695981039346656037);
-    for (; *key; key++) {
-        unsigned char byte = (unsigned char)*key;
-        if (byte == (unsigned char)'\\') {
-            byte = (unsigned char)'/';
-        }
-        hash ^= (uint64_t)byte;
-        hash *= UINT64_C(1099511628211);
-    }
-    return hash;
-}
-
 static bool tp_load_lookup_init(tp_load_lookup *lookup, int expected) {
     memset(lookup, 0, sizeof *lookup);
     if (expected <= 0) {
@@ -2450,7 +2405,7 @@ static tp_load_lookup_slot *tp_load_lookup_find(tp_load_lookup *lookup,
     if (!lookup || lookup->capacity == 0U || !key) {
         return NULL;
     }
-    const uint64_t hash = tp_load_key_hash(key);
+    const uint64_t hash = tp_source_path_text_hash(key);
     const size_t start = (size_t)hash & (lookup->capacity - 1U);
     for (size_t i = 0U;
          i < lookup->capacity && i < (size_t)TP_LOAD_LOOKUP_MAX_PROBES; i++) {
@@ -2464,7 +2419,7 @@ static tp_load_lookup_slot *tp_load_lookup_find(tp_load_lookup *lookup,
             s_test_load_lookup_work.source_path_comparisons++;
         }
         if (slot->hash == hash) {
-            if (tp_source_path_equal(slot->key, key)) {
+            if (tp_source_path_text_equal(slot->key, key)) {
                 return slot;
             }
         }
@@ -2884,7 +2839,7 @@ static tp_status tp_load_source_obj(tp_project_atlas *a, const cJSON *jsrc,
         return st;
     }
     tp_load_lookup_slot *slot = NULL;
-    if (tp_source_path_admit(jpath->valuestring) == TP_STATUS_OK) {
+    if (tp_source_path_text_admit(jpath->valuestring) == TP_STATUS_OK) {
         slot = tp_load_lookup_find(source_lookup, jpath->valuestring);
         if (!slot) {
             return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,

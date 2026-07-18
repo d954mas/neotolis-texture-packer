@@ -1197,6 +1197,22 @@ void test_add_source_dedupe(void) {
     tp_project_destroy(p);
 }
 
+void test_add_source_rejects_invalid_text_at_crud_boundary(void) {
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    tp_project_atlas *atlas = tp_project_get_atlas(project, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_project_atlas_add_source(atlas, ""));
+    const char invalid_utf8[] = {'a', (char)0xC0, (char)0xAF, '\0'};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_UTF8,
+        tp_project_atlas_add_source(atlas, invalid_utf8));
+    TEST_ASSERT_EQUAL_INT(0, atlas->source_count);
+    tp_project_destroy(project);
+}
+
 /* 9b (F1-02). tagged source round-trip: a folder source (default kind, omitted) and
  * a file source (kind=file, written) survive save/reload with id + kind intact. */
 void test_source_kind_roundtrip(void) {
@@ -2018,6 +2034,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_buffer_roundtrip);
     RUN_TEST(test_serialized_size_bounded_matches_writer_without_materialization);
     RUN_TEST(test_add_source_dedupe);
+    RUN_TEST(test_add_source_rejects_invalid_text_at_crud_boundary);
     RUN_TEST(test_source_kind_roundtrip);
     RUN_TEST(test_sprite_rename_override);
     RUN_TEST(test_set_target);
