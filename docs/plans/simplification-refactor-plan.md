@@ -411,9 +411,11 @@ normalization, hash and equality. Migrate in separate commits:
 
 Keep lexical absolute resolution, realpath identity, portability case-folding and
 validation prose in their current owners. Its table-driven contract explicitly
-covers strict UTF-8, byte bound, slash and dot-component behavior, traversal and
-absolute-path rejection, drive/UNC/POSIX forms, Unicode, and hash/equality
-invariants. It explicitly does **not** own source-local key identity,
+covers strict UTF-8, byte bound, slash and dot-component behavior, preservation
+of `..` and absolute drive/UNC/POSIX forms, Unicode, and hash/equality
+invariants. Absolute and parent-relative source paths remain valid because the
+master spec requires cross-root absolute spelling and relativization may
+legitimately produce `..`. It explicitly does **not** own source-local key identity,
 normalization-to-NFC, realpath or portability case-folding.
 
 #### P2-02 — Shared D4 geometry

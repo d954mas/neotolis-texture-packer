@@ -43,6 +43,14 @@ target_compile_options(tp_test_srckey PRIVATE -U_DLL)
 nt_set_warning_flags(tp_test_srckey)   # AGENTS.md invariant: our test TUs too
 add_test(NAME tp_srckey COMMAND tp_test_srckey)
 
+add_executable(tp_test_source_path_text test_source_path_text.c)
+target_link_libraries(tp_test_source_path_text PRIVATE tp_core unity)
+target_include_directories(tp_test_source_path_text PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_options(tp_test_source_path_text PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_source_path_text)
+add_test(NAME tp_source_path_text COMMAND tp_test_source_path_text)
+
 # F1-03: resolved sprite index (scan -> source-local key -> sprite_id) + lookups.
 # Needs a scratch dir (argv[1]) for the on-disk scan fixtures.
 add_executable(tp_test_sprite_index test_sprite_index.c)
