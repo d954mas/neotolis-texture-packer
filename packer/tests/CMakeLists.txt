@@ -159,6 +159,17 @@ target_compile_options(tp_test_diff PRIVATE -U_DLL)
 nt_set_warning_flags(tp_test_diff)   # AGENTS.md invariant: our test TUs too
 add_test(NAME tp_diff COMMAND tp_test_diff)
 
+add_executable(tp_test_history_codec_contract test_history_codec_contract.c)
+target_link_libraries(tp_test_history_codec_contract PRIVATE tp_core unity)
+target_include_directories(tp_test_history_codec_contract PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_options(tp_test_history_codec_contract PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_history_codec_contract)
+add_test(NAME tp_history_codec_contract COMMAND tp_test_history_codec_contract
+    "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/history_v1_forward.hex"
+    "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/history_v1_reverse.hex"
+    "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/history_v1_collections_forward.hex"
+    "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/history_v1_collections_reverse.hex")
+
 # F2-04: recovery-journal fault suite. Proves the §7.1/§7.2 contract -- acknowledged
 # (durably appended) transactions recover and never duplicate after restart; torn/failed
 # transactions are invisible; the reader is UB-clean on arbitrary/corrupt/short bytes
