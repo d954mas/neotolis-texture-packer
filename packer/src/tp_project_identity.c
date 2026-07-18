@@ -10,9 +10,8 @@
 #include "tp_core/tp_srckey.h"
 #include "tp_pack_constraints_internal.h"
 #include "tp_project_internal.h"
+#include "tp_source_path_text_internal.h"
 #include "tp_utf8_internal.h"
-
-#define TP_PROJECT_SOURCE_PATH_MAX 4096U
 
 tp_status tp_project_validate_sprite_pack_overrides(
     const tp_project_sprite *sprite, tp_error *error) {
@@ -350,29 +349,6 @@ typedef struct tp_source_id_index {
     size_t capacity;
 } tp_source_id_index;
 
-static uint64_t source_path_hash(const char *path) {
-    uint64_t hash = UINT64_C(14695981039346656037);
-    for (const unsigned char *p = (const unsigned char *)path; *p; p++) {
-        const unsigned char byte =
-            *p == (unsigned char)'\\' ? (unsigned char)'/' : *p;
-        hash ^= (uint64_t)byte;
-        hash *= UINT64_C(1099511628211);
-    }
-    return hash;
-}
-
-static bool source_paths_equal(const char *left, const char *right) {
-    for (;;) {
-        const char a = *left == '\\' ? '/' : *left;
-        const char b = *right == '\\' ? '/' : *right;
-        if (a != b || a == '\0') {
-            return a == b;
-        }
-        left++;
-        right++;
-    }
-}
-
 static tp_status validate_sources(const tp_project_atlas *atlas,
                                   tp_error *error) {
     if (atlas->source_count == 0) {
@@ -405,12 +381,9 @@ static tp_status validate_sources(const tp_project_atlas *atlas,
                                   "source path must be non-empty");
             break;
         }
-        size_t length = 0U;
-        while (length < (size_t)TP_PROJECT_SOURCE_PATH_MAX &&
-               source->path[length] != '\0') {
-            length++;
-        }
-        if (length == (size_t)TP_PROJECT_SOURCE_PATH_MAX) {
+        const tp_status text_status =
+            tp_source_path_text_admit(source->path);
+        if (text_status == TP_STATUS_OUT_OF_BOUNDS) {
             status = tp_error_set(error, TP_STATUS_BAD_PROJECT,
                                   "source path exceeds the supported limit");
             break;
@@ -422,15 +395,16 @@ static tp_status validate_sources(const tp_project_atlas *atlas,
             break;
         }
         tp_error utf8_error = {0};
-        const tp_status utf8_status = tp_utf8_validate_c_string(
-            source->path, TP_STATUS_BAD_PROJECT, "source path", &utf8_error);
-        if (utf8_status != TP_STATUS_OK) {
+        if (text_status == TP_STATUS_INVALID_UTF8) {
+            (void)tp_utf8_validate_c_string(
+                source->path, TP_STATUS_BAD_PROJECT, "source path",
+                &utf8_error);
             status = tp_error_set(error, TP_STATUS_BAD_PROJECT, "%s",
                                   utf8_error.msg);
             break;
         }
 
-        size_t bucket = (size_t)source_path_hash(source->path) &
+        size_t bucket = (size_t)tp_source_path_text_hash(source->path) &
                         (capacity - 1U);
         for (size_t probe = 0U; probe < capacity; probe++) {
             if (slots[bucket] == 0U) {
@@ -439,7 +413,7 @@ static tp_status validate_sources(const tp_project_atlas *atlas,
             }
             const tp_project_source *existing =
                 &atlas->sources[slots[bucket] - 1U];
-            if (source_paths_equal(existing->path, source->path)) {
+            if (tp_source_path_text_equal(existing->path, source->path)) {
                 status = tp_error_set(error, TP_STATUS_BAD_PROJECT,
                                       "duplicate source path '%s'",
                                       source->path);

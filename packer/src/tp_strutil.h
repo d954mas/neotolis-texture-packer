@@ -57,33 +57,4 @@ static inline const char *tp_path_basename(const char *p) {
     return b;
 }
 
-/* Tolerant fallback normalizer: copy `src` into `out` (capacity `cap`) replacing '\\'
- * with '/', always NUL-terminated. Used when the real canonicalizer (tp_srckey_normalize)
- * rejects a path, so the value still flows through instead of vanishing/aborting. */
-static inline void tp_slash_norm(const char *src, char *out, size_t cap) {
-    size_t i = 0;
-    for (; src[i] != '\0' && i + 1U < cap; i++) {
-        out[i] = (src[i] == '\\') ? '/' : src[i];
-    }
-    out[i] = '\0';
-}
-
-/* Project source/target path spellings are portable data, not native POSIX path
- * syntax: both separators denote the same stored '/' form on every host. Keep
- * this normalization at the project-path boundary instead of weakening the
- * native identity API, where a backslash remains a legal POSIX filename byte. */
-static inline tp_status tp_project_path_slash_normalize(const char *src,
-                                                        char *out,
-                                                        size_t cap) {
-    if (!src || !out || cap == 0U) {
-        return TP_STATUS_INVALID_ARGUMENT;
-    }
-    const size_t length = strlen(src);
-    if (length >= cap) {
-        return TP_STATUS_OUT_OF_BOUNDS;
-    }
-    tp_slash_norm(src, out, cap);
-    return TP_STATUS_OK;
-}
-
 #endif /* TP_STRUTIL_H */

@@ -3,8 +3,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "tp_source_path_text_internal.h"
 #include "tp_source_plan_internal.h"
-#include "tp_strutil.h"
 
 typedef struct source_identity {
     char *absolute;
@@ -46,11 +46,14 @@ tp_status tp_source_path_identity_from_input(const char *input,
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "source path is empty");
     }
-    tp_status status = tp_project_path_slash_normalize(
+    tp_status status = tp_source_path_text_normalize(
         input, out->canonical, sizeof out->canonical);
     if (status != TP_STATUS_OK) {
-        return tp_error_set(err, status,
-                            "source path exceeds the supported limit");
+        return tp_error_set(
+            err, status,
+            status == TP_STATUS_INVALID_UTF8
+                ? "source path contains invalid UTF-8"
+                : "source path exceeds the supported limit");
     }
     status = tp_identity_path_absolute_lexical(
         out->canonical, out->absolute, sizeof out->absolute, err);
@@ -73,11 +76,14 @@ tp_status tp_source_path_identity_from_stored(const tp_project *project,
                             "stored source identity arguments are invalid");
     }
     memset(out, 0, sizeof *out);
-    tp_status status = tp_project_path_slash_normalize(
+    tp_status status = tp_source_path_text_normalize(
         path, out->canonical, sizeof out->canonical);
     if (status != TP_STATUS_OK) {
-        return tp_error_set(err, status,
-                            "source path exceeds the supported limit");
+        return tp_error_set(
+            err, status,
+            status == TP_STATUS_INVALID_UTF8
+                ? "source path contains invalid UTF-8"
+                : "source path exceeds the supported limit");
     }
     status = tp_project_resolve_source_path(
         project, out->canonical, out->absolute, sizeof out->absolute);
