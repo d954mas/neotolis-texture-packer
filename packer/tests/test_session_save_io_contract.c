@@ -196,7 +196,13 @@ static void assert_session_outcome(const session_save_fault *fault,
                  ? tp_session_save_new(session, attempted_path, &save_result,
                                        &error)
                  : tp_session_save(session, &save_result, &error);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, status);
+    char retry_diagnostic[768];
+    (void)snprintf(retry_diagnostic, sizeof retry_diagnostic,
+                   "explicit retry after %s failed: status=%s phase=%s native=%d msg=%s",
+                   tp_file_io_phase_id(fault->phase), tp_status_id(status),
+                   tp_file_io_phase_id(error.file_io.phase),
+                   error.file_io.native_code, error.msg);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, status, retry_diagnostic);
     TEST_ASSERT_TRUE(save_result.saved);
     assert_disk_name(attempted_path, "after");
 

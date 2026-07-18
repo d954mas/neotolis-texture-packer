@@ -260,9 +260,10 @@ void test_preview_request_is_deferred_and_selection_reset_stops_it(void) {
 
 void test_confirm_save_publishes_before_new_and_new_message_wins(void) {
     char error[256] = {0};
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          gui_project_save_as(s_save_path, error,
-                                              sizeof error));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK,
+                                  gui_project_save_as(s_save_path, error,
+                                                      sizeof error),
+                                  error);
     TEST_ASSERT_FALSE(gui_project_is_dirty());
     TEST_ASSERT_EQUAL_INT(1, tp_session_snapshot_atlas_count(
                                  gui_project_snapshot()));
