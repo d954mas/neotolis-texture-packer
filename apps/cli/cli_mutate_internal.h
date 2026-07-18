@@ -52,5 +52,7 @@ int do_add(const char *const *pos, int npos, bool json, bool quiet);
 int do_remove_source(const char *const *pos, int npos, bool json, bool quiet);
 int do_set(const char *const *pos, int npos, bool json, bool quiet);
 int do_atlas(const char *const *pos, int npos, bool json, bool quiet);
+int do_sprite_set(const char *const *pos, int npos, bool json, bool quiet);
+int do_sprite_unset(const char *const *pos, int npos, bool json, bool quiet);
 
 #endif /* NTPACKER_CLI_MUTATE_INTERNAL_H */
