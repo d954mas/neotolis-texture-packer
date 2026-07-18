@@ -16,6 +16,7 @@
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_scan.h"
 #include "tp_core/tp_sprite_index.h"
+#include "tp_pack_constraints_internal.h"
 #include "tp_session_internal.h"
 #include "tp_core/tp_srckey.h"
 #include "tp_validate_internal.h"
@@ -1150,58 +1151,148 @@ static void validate_atlas(validation_builder *fs, const tp_project *p, int ai,
         }
     }
 
-    /* (g) knob ranges over the export-path settings (clamp applied). */
-    tp_pack_settings sset;
-    tp_error serr = {0};
-    if (tp_project_atlas_to_settings(p, ai, &sset, &serr) == TP_STATUS_OK) {
-        if (!tp_pack_max_size_valid(sset.max_size)) {
-            add_finding(fs, TP_VALIDATION_ERROR, TP_VALIDATION_CODE_SETTING_OUT_OF_RANGE,
-                        context_atlas(a),
-                        "max_size = %d is out of range [1..%d]", sset.max_size,
-                        TP_PACK_MAX_PAGE_DIM);
-        }
-        const struct { const char *name; int value; } nonnegative[] = {
-            {"padding", sset.padding}, {"margin", sset.margin},
-            {"extrude", sset.extrude}};
-        for (size_t i = 0U; i < sizeof nonnegative / sizeof nonnegative[0]; ++i) {
-            if (!tp_pack_nonnegative_valid(nonnegative[i].value)) {
-                add_finding(fs, TP_VALIDATION_ERROR,
-                            TP_VALIDATION_CODE_SETTING_OUT_OF_RANGE,
-                            context_atlas(a), "%s = %d must be >= 0",
-                            nonnegative[i].name, nonnegative[i].value);
-            }
-        }
-        if (!tp_pack_alpha_threshold_valid(sset.alpha_threshold)) {
-            add_finding(fs, TP_VALIDATION_ERROR, TP_VALIDATION_CODE_SETTING_OUT_OF_RANGE,
-                        context_atlas(a),
-                        "alpha_threshold = %d is out of range [0..%d]",
-                        sset.alpha_threshold, TP_PACK_ALPHA_MAX);
-        }
-        if (!tp_pack_max_vertices_valid(sset.max_vertices)) {
-            add_finding(fs, TP_VALIDATION_ERROR, TP_VALIDATION_CODE_SETTING_OUT_OF_RANGE,
-                        context_atlas(a),
-                        "max_vertices = %d is out of range [1..%d]",
-                        sset.max_vertices, TP_PACK_MAX_VERTICES);
-        }
-        if (!tp_pack_shape_valid(sset.shape)) {
-            add_finding(fs, TP_VALIDATION_ERROR, TP_VALIDATION_CODE_SETTING_OUT_OF_RANGE,
-                        context_atlas(a),
-                        "shape = %d is out of range [%d..%d]", sset.shape,
-                        TP_PACK_SHAPE_MIN, TP_PACK_SHAPE_MAX);
-        }
-        if (!tp_pack_pixels_per_unit_valid(sset.pixels_per_unit)) {
+    /* (g) Pack constraints over the raw project model.  Do this before the
+     * project->export settings bridge intentionally clamps non-RECT extrude;
+     * validation must diagnose persisted input, not its adapted projection. */
+    const tp_pack_atlas_constraint_input atlas_input = {
+        .max_size = a->max_size,
+        .padding = a->padding,
+        .margin = a->margin,
+        .extrude = a->extrude,
+        .alpha_threshold = a->alpha_threshold,
+        .max_vertices = a->max_vertices,
+        .shape = a->shape,
+        .pixels_per_unit = a->pixels_per_unit,
+    };
+    const tp_pack_atlas_constraint_facts atlas_facts =
+        tp_pack_atlas_constraint_facts_of(&atlas_input);
+    if (atlas_facts.max_size_out_of_range) {
+        add_finding(fs, TP_VALIDATION_ERROR,
+                    TP_VALIDATION_CODE_SETTING_OUT_OF_RANGE,
+                    context_atlas(a),
+                    "max_size = %d is out of range [1..%d]", a->max_size,
+                    TP_PACK_MAX_PAGE_DIM);
+    }
+    const struct {
+        const char *name;
+        int value;
+        bool negative;
+        bool exceeds_max_size;
+    } spacing[] = {
+        {"padding", a->padding, atlas_facts.padding_negative,
+         atlas_facts.padding_exceeds_max_size},
+        {"margin", a->margin, atlas_facts.margin_negative,
+         atlas_facts.margin_exceeds_max_size},
+        {"extrude", a->extrude, atlas_facts.extrude_negative,
+         atlas_facts.extrude_exceeds_max_size},
+    };
+    for (size_t i = 0U; i < sizeof spacing / sizeof spacing[0]; ++i) {
+        if (spacing[i].negative) {
             add_finding(fs, TP_VALIDATION_ERROR,
                         TP_VALIDATION_CODE_SETTING_OUT_OF_RANGE,
-                        context_atlas(a),
-                        "pixels_per_unit must be positive and finite");
-        }
-        if (tp_pack_shape_valid(sset.shape) &&
-            tp_pack_nonnegative_valid(sset.extrude) &&
-            !tp_pack_extrude_shape_valid(sset.extrude, sset.shape)) {
+                        context_atlas(a), "%s = %d must be >= 0",
+                        spacing[i].name, spacing[i].value);
+        } else if (!atlas_facts.max_size_out_of_range &&
+                   spacing[i].exceeds_max_size) {
             add_finding(fs, TP_VALIDATION_ERROR,
                         TP_VALIDATION_CODE_SETTING_OUT_OF_RANGE,
-                        context_atlas(a),
-                        "extrude > 0 requires shape RECT");
+                        context_atlas(a), "%s = %d must be in [0..%d]",
+                        spacing[i].name, spacing[i].value, a->max_size);
+        }
+    }
+    if (atlas_facts.alpha_threshold_out_of_range) {
+        add_finding(fs, TP_VALIDATION_ERROR,
+                    TP_VALIDATION_CODE_SETTING_OUT_OF_RANGE,
+                    context_atlas(a),
+                    "alpha_threshold = %d is out of range [0..%d]",
+                    a->alpha_threshold, TP_PACK_ALPHA_MAX);
+    }
+    if (atlas_facts.max_vertices_out_of_range) {
+        add_finding(fs, TP_VALIDATION_ERROR,
+                    TP_VALIDATION_CODE_SETTING_OUT_OF_RANGE,
+                    context_atlas(a),
+                    "max_vertices = %d is out of range [1..%d]",
+                    a->max_vertices, TP_PACK_MAX_VERTICES);
+    }
+    if (atlas_facts.shape_out_of_range) {
+        add_finding(fs, TP_VALIDATION_ERROR,
+                    TP_VALIDATION_CODE_SETTING_OUT_OF_RANGE,
+                    context_atlas(a),
+                    "shape = %d is out of range [%d..%d]", a->shape,
+                    TP_PACK_SHAPE_MIN, TP_PACK_SHAPE_MAX);
+    }
+    if (atlas_facts.pixels_per_unit_out_of_range) {
+        add_finding(fs, TP_VALIDATION_ERROR,
+                    TP_VALIDATION_CODE_SETTING_OUT_OF_RANGE,
+                    context_atlas(a),
+                    "pixels_per_unit must be positive and finite");
+    }
+    if (atlas_facts.extrude_requires_rect) {
+        add_finding(fs, TP_VALIDATION_ERROR,
+                    TP_VALIDATION_CODE_SETTING_OUT_OF_RANGE,
+                    context_atlas(a),
+                    "extrude > 0 requires shape RECT");
+    }
+    for (int i = 0; i < a->sprite_count; ++i) {
+        const tp_project_sprite *sprite = &a->sprites[i];
+        const bool slice9 = sprite->slice9_lrtb[0] ||
+                            sprite->slice9_lrtb[1] ||
+                            sprite->slice9_lrtb[2] ||
+                            sprite->slice9_lrtb[3];
+        const tp_pack_sprite_constraint_input sprite_input = {
+            .atlas_max_size = a->max_size,
+            .atlas_shape = a->shape,
+            .atlas_extrude = a->extrude,
+            .has_slice9 = slice9,
+            .has_shape = sprite->ov_shape != TP_PROJECT_OV_INHERIT,
+            .shape = sprite->ov_shape,
+            .has_allow_rotate =
+                sprite->ov_allow_rotate != TP_PROJECT_OV_INHERIT,
+            .allow_rotate = sprite->ov_allow_rotate,
+            .has_max_vertices =
+                sprite->ov_max_vertices != TP_PROJECT_OV_INHERIT,
+            .max_vertices = sprite->ov_max_vertices,
+            .has_margin = sprite->ov_margin != TP_PROJECT_OV_INHERIT,
+            .margin = sprite->ov_margin,
+            .has_extrude = sprite->ov_extrude != TP_PROJECT_OV_INHERIT,
+            .extrude = sprite->ov_extrude,
+        };
+        const tp_pack_sprite_constraint_facts sprite_facts =
+            tp_pack_sprite_constraint_facts_of(&sprite_input);
+        const finding_context context =
+            context_sprite(a, sprite->source_ref, sprite->name);
+        if (!atlas_facts.max_size_out_of_range &&
+            sprite_facts.margin_exceeds_max_size) {
+            add_finding(
+                fs, TP_VALIDATION_ERROR,
+                TP_VALIDATION_CODE_SETTING_OUT_OF_RANGE, context,
+                "sprite ov_margin = %d must not exceed atlas max_size %d",
+                sprite->ov_margin, a->max_size);
+        }
+        if (!atlas_facts.max_size_out_of_range &&
+            sprite_facts.extrude_exceeds_max_size) {
+            add_finding(
+                fs, TP_VALIDATION_ERROR,
+                TP_VALIDATION_CODE_SETTING_OUT_OF_RANGE, context,
+                "sprite ov_extrude = %d must not exceed atlas max_size %d",
+                sprite->ov_extrude, a->max_size);
+        }
+        if (sprite_facts.slice9_shape_conflict) {
+            add_finding(fs, TP_VALIDATION_ERROR,
+                        TP_VALIDATION_CODE_SETTING_OUT_OF_RANGE, context,
+                        "sprite ov_shape %d conflicts with slice9; slice9 requires RECT",
+                        sprite->ov_shape);
+        }
+        if (sprite_facts.effective_extrude_requires_rect) {
+            const int effective_extrude =
+                sprite->ov_extrude != TP_PROJECT_OV_INHERIT
+                    ? sprite->ov_extrude
+                    : a->extrude;
+            add_finding(
+                fs, TP_VALIDATION_ERROR,
+                TP_VALIDATION_CODE_SETTING_OUT_OF_RANGE, context,
+                "sprite effective extrude %d requires effective shape RECT",
+                effective_extrude);
         }
     }
 }

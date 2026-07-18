@@ -7,6 +7,7 @@
 
 #include "tp_core/tp_validate.h"
 #include "tp_core/tp_identity.h"
+#include "tp_core/tp_pack.h"
 #include "tp_core/tp_project.h"
 #include "tp_project_mutation_internal.h"
 #include "tp_project_identity_internal.h"
@@ -244,6 +245,128 @@ static bool report_has_code(const tp_validation_report *report, const char *code
         }
     }
     return false;
+}
+
+static size_t collect_setting_findings(
+    const tp_validation_report *report,
+    const tp_validation_finding **out, size_t capacity) {
+    size_t count = 0U;
+    for (size_t i = 0U; i < report->finding_count; ++i) {
+        if (strcmp(report->findings[i].code,
+                   TP_VALIDATION_CODE_SETTING_OUT_OF_RANGE) != 0) {
+            continue;
+        }
+        if (count < capacity) {
+            out[count] = &report->findings[i];
+        }
+        count++;
+    }
+    return count;
+}
+
+void test_validation_reports_raw_atlas_and_sprite_pack_constraints(void) {
+    const char *source_path = TP_VALIDATE_TEST_DIR "/constraint-source";
+    const char *project_path =
+        TP_VALIDATE_TEST_DIR "/raw-pack-constraints.ntpacker_project";
+    tp_mkdirs(source_path);
+
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    tp_project_atlas *atlas = &project->atlases[0];
+    atlas->max_size = 32;
+    atlas->padding = 64;
+    atlas->margin = 33;
+    atlas->extrude = 1;
+    atlas->shape = TP_PACK_SHAPE_MAX;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_source(atlas, source_path));
+    tp_rng rng = tp_rng_os();
+    tp_error error = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK, tp_project_assign_missing_ids(project, &rng, &error),
+        error.msg);
+    tp_project_sprite *sprite = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_sprite_by_source_key(
+            atlas, atlas->sources[0].id, "ghost.png", &sprite));
+    TEST_ASSERT_NOT_NULL(sprite);
+    sprite->ov_margin = 33;
+    sprite->ov_extrude = 33;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK, tp_project_save(project, project_path, &error),
+        error.msg);
+    tp_project_destroy(project);
+
+    tp_validation_report report = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_validate_project_file(project_path, &report, &error), error.msg);
+    const tp_validation_finding *settings[8] = {0};
+    TEST_ASSERT_EQUAL_size_t(
+        6U, collect_setting_findings(&report, settings,
+                                     sizeof settings / sizeof settings[0]));
+    TEST_ASSERT_EQUAL_STRING("padding = 64 must be in [0..32]",
+                             settings[0]->message);
+    TEST_ASSERT_EQUAL_STRING("margin = 33 must be in [0..32]",
+                             settings[1]->message);
+    TEST_ASSERT_EQUAL_STRING("extrude > 0 requires shape RECT",
+                             settings[2]->message);
+    TEST_ASSERT_EQUAL_STRING(
+        "sprite ov_margin = 33 must not exceed atlas max_size 32",
+        settings[3]->message);
+    TEST_ASSERT_EQUAL_STRING(
+        "sprite ov_extrude = 33 must not exceed atlas max_size 32",
+        settings[4]->message);
+    TEST_ASSERT_EQUAL_STRING(
+        "sprite effective extrude 33 requires effective shape RECT",
+        settings[5]->message);
+    tp_validation_report_free(&report);
+    TEST_ASSERT_EQUAL_INT(0, remove(project_path));
+}
+
+void test_validation_accepts_spacing_at_effective_max_size(void) {
+    const char *source_path = TP_VALIDATE_TEST_DIR "/constraint-source";
+    const char *project_path =
+        TP_VALIDATE_TEST_DIR "/pack-constraint-boundary.ntpacker_project";
+    tp_mkdirs(source_path);
+
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    tp_project_atlas *atlas = &project->atlases[0];
+    atlas->max_size = 32;
+    atlas->padding = 32;
+    atlas->margin = 32;
+    atlas->extrude = 32;
+    atlas->shape = TP_PACK_SHAPE_MIN;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_source(atlas, source_path));
+    tp_rng rng = tp_rng_os();
+    tp_error error = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK, tp_project_assign_missing_ids(project, &rng, &error),
+        error.msg);
+    tp_project_sprite *sprite = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_sprite_by_source_key(
+            atlas, atlas->sources[0].id, "ghost.png", &sprite));
+    TEST_ASSERT_NOT_NULL(sprite);
+    sprite->ov_margin = 32;
+    sprite->ov_extrude = 32;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK, tp_project_save(project, project_path, &error),
+        error.msg);
+    tp_project_destroy(project);
+
+    tp_validation_report report = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_validate_project_file(project_path, &report, &error), error.msg);
+    const tp_validation_finding *settings[1] = {0};
+    TEST_ASSERT_EQUAL_size_t(0U, collect_setting_findings(&report, settings, 1U));
+    tp_validation_report_free(&report);
+    TEST_ASSERT_EQUAL_INT(0, remove(project_path));
 }
 
 void test_canonical_animation_frame_does_not_match_same_key_in_other_source(void) {
@@ -607,6 +730,8 @@ int main(void) {
     RUN_TEST(test_oversized_source_path_is_rejected);
     RUN_TEST(test_expanding_unicode_casefold_detects_full_length_collision);
     RUN_TEST(test_canonical_animation_frame_does_not_match_same_key_in_other_source);
+    RUN_TEST(test_validation_reports_raw_atlas_and_sprite_pack_constraints);
+    RUN_TEST(test_validation_accepts_spacing_at_effective_max_size);
     RUN_TEST(test_save_rejects_invalid_canonical_key_normalization);
     RUN_TEST(test_target_row_diagnostics_reuse_full_validation_predicates);
     RUN_TEST(test_validation_does_not_misreport_existing_long_source_as_missing);
