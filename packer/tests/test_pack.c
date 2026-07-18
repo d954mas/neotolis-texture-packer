@@ -358,6 +358,91 @@ void test_neg_duplicate_sprite_name(void) {
     tp_arena_destroy(ar);
 }
 
+void test_constraint_first_reject_contract(void) {
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_pack_settings settings;
+    tp_result *result = NULL;
+    tp_error error = {0};
+
+    make_settings(&settings, g_dir);
+    settings.max_size = 0;
+    settings.padding = -1;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_pack(&settings, arena, &result, &error));
+    TEST_ASSERT_EQUAL_STRING("tp_pack: max_size 0 out of range [1..16384]",
+                             error.msg);
+
+    make_settings(&settings, g_dir);
+    settings.padding = -1;
+    settings.margin = settings.max_size + 1;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_pack(&settings, arena, &result, &error));
+    TEST_ASSERT_EQUAL_STRING(
+        "tp_pack: padding/margin/extrude must be >= 0", error.msg);
+
+    make_settings(&settings, g_dir);
+    settings.padding = settings.max_size + 1;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_pack(&settings, arena, &result, &error));
+    TEST_ASSERT_EQUAL_STRING(
+        "tp_pack: padding/margin/extrude must not exceed max_size 2048",
+        error.msg);
+
+    make_settings(&settings, g_dir);
+    settings.shape = TP_PACK_SHAPE_MAX;
+    settings.extrude = 1;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_pack(&settings, arena, &result, &error));
+    TEST_ASSERT_EQUAL_STRING(
+        "tp_pack: extrude > 0 is only valid for shape RECT (got shape 2)",
+        error.msg);
+
+    tp_pack_sprite_desc sprite = g_sprites[0];
+    sprite.name = "bad_facts";
+    sprite.ov_mask = TP_PACK_OV_SHAPE | TP_PACK_OV_ROTATE;
+    sprite.ov_shape = 0;
+    sprite.ov_allow_rotate = 0;
+    make_settings(&settings, g_dir);
+    settings.sprites = &sprite;
+    settings.sprite_count = 1;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_pack(&settings, arena, &result, &error));
+    TEST_ASSERT_EQUAL_STRING(
+        "tp_pack: sprite 'bad_facts' shape override 0 invalid", error.msg);
+
+    sprite = g_sprites[0];
+    sprite.name = "bad_spacing";
+    sprite.ov_mask = TP_PACK_OV_MARGIN | TP_PACK_OV_EXTRUDE;
+    sprite.ov_margin = 0;
+    sprite.ov_extrude = 0;
+    make_settings(&settings, g_dir);
+    settings.sprites = &sprite;
+    settings.sprite_count = 1;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_pack(&settings, arena, &result, &error));
+    TEST_ASSERT_EQUAL_STRING(
+        "tp_pack: sprite 'bad_spacing' margin override 0 unrepresentable (omit to inherit, or use >= 1)",
+        error.msg);
+
+    sprite = g_sprites[0];
+    sprite.name = "bad_slice9";
+    sprite.ov_mask = TP_PACK_OV_SHAPE | TP_PACK_OV_EXTRUDE;
+    sprite.ov_shape = TP_PACK_SPRITE_SHAPE_CONCAVE;
+    sprite.ov_extrude = 1;
+    sprite.slice9_lrtb[0] = 1;
+    make_settings(&settings, g_dir);
+    settings.sprites = &sprite;
+    settings.sprite_count = 1;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_pack(&settings, arena, &result, &error));
+    TEST_ASSERT_EQUAL_STRING(
+        "tp_pack: sprite 'bad_slice9' slice9 requires a RECT shape override",
+        error.msg);
+
+    tp_arena_destroy(arena);
+}
+
 /* Per-sprite packing overrides (owner scope 2026-07-10): a RECT override in a
  * CONCAVE atlas packs that sprite as an exact 4-vert rect; a NO-rotate override
  * yields an identity/flip-only transform (no diagonal bit). The default disc stays
@@ -1001,6 +1086,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_determinism);
     RUN_TEST(test_neg_invalid_atlas_name);
     RUN_TEST(test_neg_duplicate_sprite_name);
+    RUN_TEST(test_constraint_first_reject_contract);
     RUN_TEST(test_sprite_override_rect_and_rotate);
     RUN_TEST(test_sprite_override_validation);
     RUN_TEST(test_ascii_path_and_equivalent_raw_pixels_pack_byte_identically);

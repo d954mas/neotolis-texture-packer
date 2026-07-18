@@ -12,6 +12,7 @@
 #include "tp_core/tp_model.h"
 #include "tp_core/tp_name_map.h"
 #include "tp_core/tp_pack_read.h"
+#include "tp_pack_constraints_internal.h"
 
 #include "nt_builder.h"
 
@@ -74,37 +75,49 @@ static tp_status validate_settings(const tp_pack_settings *s, tp_error *err) {
                             "tp_pack: sprite_count %d exceeds %u regions",
                             s->sprite_count, (unsigned int)UINT16_MAX);
     }
-    if (!tp_pack_max_size_valid(s->max_size)) {
+    const tp_pack_atlas_constraint_input atlas_input = {
+        .max_size = s->max_size,
+        .padding = s->padding,
+        .margin = s->margin,
+        .extrude = s->extrude,
+        .alpha_threshold = s->alpha_threshold,
+        .max_vertices = s->max_vertices,
+        .shape = s->shape,
+        .pixels_per_unit = s->pixels_per_unit,
+    };
+    const tp_pack_atlas_constraint_facts atlas_facts =
+        tp_pack_atlas_constraint_facts_of(&atlas_input);
+    if (atlas_facts.max_size_out_of_range) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_pack: max_size %d out of range [1..%d]", s->max_size,
                             (int)TP_PACK_MAX_PAGE_DIM);
     }
-    if (!tp_pack_nonnegative_valid(s->padding) ||
-        !tp_pack_nonnegative_valid(s->margin) ||
-        !tp_pack_nonnegative_valid(s->extrude)) {
+    if (atlas_facts.padding_negative || atlas_facts.margin_negative ||
+        atlas_facts.extrude_negative) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_pack: padding/margin/extrude must be >= 0");
     }
-    if (s->padding > s->max_size || s->margin > s->max_size ||
-        s->extrude > s->max_size) {
+    if (atlas_facts.padding_exceeds_max_size ||
+        atlas_facts.margin_exceeds_max_size ||
+        atlas_facts.extrude_exceeds_max_size) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "tp_pack: padding/margin/extrude must not exceed max_size %d",
                             s->max_size);
     }
-    if (!tp_pack_alpha_threshold_valid(s->alpha_threshold)) {
+    if (atlas_facts.alpha_threshold_out_of_range) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_pack: alpha_threshold %d out of range [0..255]",
                             s->alpha_threshold);
     }
-    if (!tp_pack_max_vertices_valid(s->max_vertices)) {
+    if (atlas_facts.max_vertices_out_of_range) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_pack: max_vertices %d out of range [1..16]",
                             s->max_vertices);
     }
-    if (!tp_pack_shape_valid(s->shape)) {
+    if (atlas_facts.shape_out_of_range) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_pack: shape %d out of range [0..2]", s->shape);
     }
-    if (!tp_pack_extrude_shape_valid(s->extrude, s->shape)) {
+    if (atlas_facts.extrude_requires_rect) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "tp_pack: extrude > 0 is only valid for shape RECT (got shape %d)", s->shape);
     }
-    if (!tp_pack_pixels_per_unit_valid(s->pixels_per_unit)) {
+    if (atlas_facts.pixels_per_unit_out_of_range) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_pack: pixels_per_unit must be positive and finite");
     }
 
@@ -121,54 +134,66 @@ static tp_status validate_settings(const tp_pack_settings *s, tp_error *err) {
                                 "tp_pack: sprite '%s' ov_mask contains unknown bits 0x%02x",
                                 sp->name, (unsigned int)sp->ov_mask);
         }
+        const bool slice9 = sp->slice9_lrtb[0] || sp->slice9_lrtb[1] ||
+                            sp->slice9_lrtb[2] || sp->slice9_lrtb[3];
+        const tp_pack_sprite_constraint_input sprite_input = {
+            .atlas_max_size = s->max_size,
+            .atlas_shape = s->shape,
+            .atlas_extrude = s->extrude,
+            .has_slice9 = slice9,
+            .has_shape = (sp->ov_mask & TP_PACK_OV_SHAPE) != 0U,
+            .shape = (int)sp->ov_shape -
+                     (int)TP_PACK_SPRITE_SHAPE_RECT + TP_PACK_SHAPE_MIN,
+            .has_allow_rotate = (sp->ov_mask & TP_PACK_OV_ROTATE) != 0U,
+            .allow_rotate =
+                sp->ov_allow_rotate == TP_PACK_SPRITE_ROTATE_NO ? 0 : 1,
+            .has_max_vertices = (sp->ov_mask & TP_PACK_OV_MAXVERT) != 0U,
+            .max_vertices = sp->ov_max_vertices,
+            .has_margin = (sp->ov_mask & TP_PACK_OV_MARGIN) != 0U,
+            .margin = sp->ov_margin,
+            .has_extrude = (sp->ov_mask & TP_PACK_OV_EXTRUDE) != 0U,
+            .extrude = sp->ov_extrude,
+        };
+        const tp_pack_sprite_constraint_facts sprite_facts =
+            tp_pack_sprite_constraint_facts_of(&sprite_input);
         /* Per-sprite override validation (owner scope 2026-07-10). Every check here
          * prevents a downstream NT_BUILD_ASSERT and names the sprite. Effective
          * shape = slice9 forces RECT, else the sprite shape override, else the atlas
          * shape; effective extrude = sprite override else the atlas extrude. */
-        if ((sp->ov_mask & TP_PACK_OV_SHAPE) &&
-            (sp->ov_shape < TP_PACK_SPRITE_SHAPE_RECT || sp->ov_shape > TP_PACK_SPRITE_SHAPE_CONCAVE)) {
+        if (sprite_facts.shape_not_wire_representable) {
             return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_pack: sprite '%s' shape override %d invalid",
                                 sp->name, (int)sp->ov_shape);
         }
-        if ((sp->ov_mask & TP_PACK_OV_ROTATE) && sp->ov_allow_rotate != TP_PACK_SPRITE_ROTATE_NO) {
+        if (sprite_facts.allow_rotate_not_wire_representable) {
             return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                                 "tp_pack: sprite '%s' allow_rotate override %d invalid (only no-rotate)", sp->name,
                                 (int)sp->ov_allow_rotate);
         }
-        if ((sp->ov_mask & TP_PACK_OV_MAXVERT) &&
-            !tp_pack_max_vertices_valid(sp->ov_max_vertices)) {
+        if (sprite_facts.max_vertices_not_wire_representable) {
             return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                                 "tp_pack: sprite '%s' max_vertices override %d out of range [1..16]", sp->name,
                                 (int)sp->ov_max_vertices);
         }
-        if ((sp->ov_mask & TP_PACK_OV_MARGIN) && sp->ov_margin == 0) {
+        if (sprite_facts.margin_not_wire_representable) {
             return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                                 "tp_pack: sprite '%s' margin override 0 unrepresentable (omit to inherit, or use >= 1)",
                                 sp->name);
         }
-        if ((sp->ov_mask & TP_PACK_OV_EXTRUDE) && sp->ov_extrude == 0) {
+        if (sprite_facts.extrude_not_wire_representable) {
             return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                                 "tp_pack: sprite '%s' extrude override 0 unrepresentable (omit to inherit, or use >= 1)",
                                 sp->name);
         }
         {
-            const bool slice9 = sp->slice9_lrtb[0] || sp->slice9_lrtb[1] || sp->slice9_lrtb[2] || sp->slice9_lrtb[3];
-            bool eff_rect;
             if (slice9) {
-                if ((sp->ov_mask & TP_PACK_OV_SHAPE) &&
-                    sp->ov_shape != TP_PACK_SPRITE_SHAPE_RECT) {
+                if (sprite_facts.slice9_shape_conflict) {
                     return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                                         "tp_pack: sprite '%s' slice9 requires a RECT shape override",
                                         sp->name);
                 }
-                eff_rect = true; /* engine auto-forces RECT for slice9 sprites */
-            } else if (sp->ov_mask & TP_PACK_OV_SHAPE) {
-                eff_rect = (sp->ov_shape == TP_PACK_SPRITE_SHAPE_RECT);
-            } else {
-                eff_rect = (s->shape == NT_ATLAS_SHAPE_RECT);
             }
             const int eff_extrude = (sp->ov_mask & TP_PACK_OV_EXTRUDE) ? (int)sp->ov_extrude : s->extrude;
-            if (eff_extrude > 0 && !eff_rect) {
+            if (sprite_facts.effective_extrude_requires_rect) {
                 return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                                     "tp_pack: sprite '%s' effective extrude %d requires effective RECT shape",
                                     sp->name, eff_extrude);
