@@ -62,6 +62,13 @@ target_compile_options(tp_test_operation PRIVATE -U_DLL)
 nt_set_warning_flags(tp_test_operation)   # AGENTS.md invariant: our test TUs too
 add_test(NAME tp_operation COMMAND tp_test_operation)
 
+add_executable(tp_test_pack_constraints test_pack_constraints.c)
+target_link_libraries(tp_test_pack_constraints PRIVATE tp_core unity)
+target_include_directories(tp_test_pack_constraints PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_options(tp_test_pack_constraints PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_pack_constraints)
+add_test(NAME tp_pack_constraints COMMAND tp_test_pack_constraints)
+
 # F2-01: id-only apply (forward + error per op kind), stage-then-commit allocator-
 # fault safety, selector->operation builders, and the parity proof (op apply ==
 # existing mutator, byte-identical). Includes the private src/ internal header for
