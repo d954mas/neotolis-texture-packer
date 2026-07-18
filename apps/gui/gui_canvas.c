@@ -10,6 +10,7 @@
 #include "renderers/nt_shape_renderer.h"
 
 #include "tp_core/tp_image.h"
+#include "tp_core/tp_transform.h"
 
 #include "clay.h"
 
@@ -20,39 +21,6 @@ typedef struct canvas_vert {
     float col[4];
     float uv[2];
 } canvas_vert;
-
-// #region D4 decode (mirror of tp_pack_read.c:25-53 tp_transform_decode / tp_transform_out_dims)
-/* Maps a trim-local corner (x,y) in [0..tw]x[0..th] to its on-page-relative corner given the
- * region's D4 transform mask. Apply order: diagonal -> flipH -> flipV (corner reflection). */
-static void d4_decode(int32_t x, int32_t y, uint8_t flags, int32_t tw, int32_t th, int32_t *ox, int32_t *oy) {
-    int32_t rx = x;
-    int32_t ry = y;
-    if (flags & 4u) {
-        int32_t t = rx;
-        rx = ry;
-        ry = t;
-    }
-    int32_t w = (flags & 4u) ? th : tw;
-    int32_t h = (flags & 4u) ? tw : th;
-    if (flags & 1u) {
-        rx = w - rx;
-    }
-    if (flags & 2u) {
-        ry = h - ry;
-    }
-    *ox = rx;
-    *oy = ry;
-}
-static void d4_out_dims(uint8_t flags, int32_t tw, int32_t th, int32_t *ow, int32_t *oh) {
-    if (flags & 4u) {
-        *ow = th;
-        *oh = tw;
-    } else {
-        *ow = tw;
-        *oh = th;
-    }
-}
-// #endregion
 
 // #region lifecycle
 void gui_canvas_restore_gpu(gui_canvas *c) {
@@ -474,7 +442,7 @@ int gui_canvas_hit(const gui_canvas *c, float lx, float ly) {
         }
         int32_t ow = 0;
         int32_t oh = 0;
-        d4_out_dims(s->transform, s->frame.w, s->frame.h, &ow, &oh);
+        tp_transform_out_dims(s->transform, s->frame.w, s->frame.h, &ow, &oh);
         if (px >= (float)s->frame.x && px < (float)(s->frame.x + ow) && py >= (float)s->frame.y &&
             py < (float)(s->frame.y + oh)) {
             best = i; /* last match wins -> topmost in draw order */
@@ -617,13 +585,14 @@ static void draw_anim_frame(gui_canvas *c, const float world[16], const float bo
             pos[i][1] = 2.0F * cy - pos[i][1];
         }
     }
-    /* Each display corner maps to a trim-local corner; d4_decode bakes the page rotation/flip into UV. */
+    /* Each display corner maps to a trim-local corner; the shared D4 decode bakes the page rotation/flip into UV. */
     const int32_t lc[4][2] = {{0, 0}, {s->frame.w, 0}, {s->frame.w, s->frame.h}, {0, s->frame.h}};
     float uv[4][2];
     for (int i = 0; i < 4; i++) {
         int32_t px = 0;
         int32_t py = 0;
-        d4_decode(lc[i][0], lc[i][1], s->transform, s->frame.w, s->frame.h, &px, &py);
+        tp_transform_decode(lc[i][0], lc[i][1], s->transform,
+                            s->frame.w, s->frame.h, &px, &py);
         uv[i][0] = ((float)s->frame.x + (float)px) / pw;
         uv[i][1] = ((float)s->frame.y + (float)py) / ph;
     }
@@ -713,7 +682,8 @@ static int region_polygon(const tp_sprite *s, float ox, float oy, float scale, f
         for (int i = 0; i < s->vert_count; i++) {
             int32_t px = 0;
             int32_t py = 0;
-            d4_decode(s->verts[i].x, s->verts[i].y, s->transform, tw, th, &px, &py);
+            tp_transform_decode(s->verts[i].x, s->verts[i].y,
+                                s->transform, tw, th, &px, &py);
             pts[n][0] = ox + (float)(fx + px) * scale;
             pts[n][1] = oy + (float)(fy + py) * scale;
             n++;
@@ -721,7 +691,7 @@ static int region_polygon(const tp_sprite *s, float ox, float oy, float scale, f
     } else {
         int32_t ow = 0;
         int32_t oh = 0;
-        d4_out_dims(s->transform, tw, th, &ow, &oh);
+        tp_transform_out_dims(s->transform, tw, th, &ow, &oh);
         const int32_t cx[4] = {fx, fx + ow, fx + ow, fx};
         const int32_t cy[4] = {fy, fy, fy + oh, fy + oh};
         for (int i = 0; i < 4; i++) {
@@ -733,12 +703,12 @@ static int region_polygon(const tp_sprite *s, float ox, float oy, float scale, f
     return n;
 }
 
-/* Placed AABB (from d4_out_dims) in page-layout coords -- the rectangular bounds incl. the
+/* Placed AABB (from the shared D4 dimensions) in page-layout coords -- the rectangular bounds incl. the
  * padding gap between regions. Always 4 points. */
 static void region_aabb(const tp_sprite *s, float ox, float oy, float scale, float pts[4][2]) {
     int32_t ow = 0;
     int32_t oh = 0;
-    d4_out_dims(s->transform, s->frame.w, s->frame.h, &ow, &oh);
+    tp_transform_out_dims(s->transform, s->frame.w, s->frame.h, &ow, &oh);
     const int32_t fx = s->frame.x;
     const int32_t fy = s->frame.y;
     const int32_t cx[4] = {fx, fx + ow, fx + ow, fx};
@@ -759,27 +729,6 @@ static void stroke_polygon(const float world[16], const float pts[][2], int n, c
     }
 }
 
-/* Float D4 decode (pivot is fractional). Affine, so it extrapolates outside [0..tw]x[0..th]. */
-static void d4_decode_f(float x, float y, uint8_t flags, float tw, float th, float *ox, float *oy) {
-    float rx = x;
-    float ry = y;
-    if (flags & 4u) {
-        float t = rx;
-        rx = ry;
-        ry = t;
-    }
-    const float w = (flags & 4u) ? th : tw;
-    const float h = (flags & 4u) ? tw : th;
-    if (flags & 1u) {
-        rx = w - rx;
-    }
-    if (flags & 2u) {
-        ry = h - ry;
-    }
-    *ox = rx;
-    *oy = ry;
-}
-
 /* Original (untrimmed) source bounds in page-layout coords: the trim box is [0..tw]x[0..th] in
  * trim-local space; the source box is [-ssx..-ssx+srcW] x [-ssy..-ssy+srcH], mapped through the same
  * (affine) D4 transform + frame offset. Shows how much was trimmed away vs the packed content. */
@@ -797,7 +746,7 @@ static void region_source_rect(const tp_sprite *s, float ox, float oy, float sca
     for (int i = 0; i < 4; i++) {
         int32_t px = 0;
         int32_t py = 0;
-        d4_decode(cx[i], cy[i], s->transform, tw, th, &px, &py);
+        tp_transform_decode(cx[i], cy[i], s->transform, tw, th, &px, &py);
         pts[i][0] = ox + (float)(fx + px) * scale;
         pts[i][1] = oy + (float)(fy + py) * scale;
     }
@@ -811,8 +760,10 @@ static void slice9_line(const float world[16], const tp_sprite *s, float ox, flo
     float ay = 0.0F;
     float bx = 0.0F;
     float by = 0.0F;
-    d4_decode_f(x0, y0, s->transform, (float)s->frame.w, (float)s->frame.h, &ax, &ay);
-    d4_decode_f(x1, y1, s->transform, (float)s->frame.w, (float)s->frame.h, &bx, &by);
+    tp_transform_decode_f(x0, y0, s->transform, (float)s->frame.w,
+                          (float)s->frame.h, &ax, &ay);
+    tp_transform_decode_f(x1, y1, s->transform, (float)s->frame.w,
+                          (float)s->frame.h, &bx, &by);
     float wa[3];
     float wb[3];
     layout_to_world(world, ox + ((float)s->frame.x + ax) * scale, oy + ((float)s->frame.y + ay) * scale, wa);
@@ -827,7 +778,8 @@ static void pivot_point(const tp_sprite *s, float ox, float oy, float scale, flo
     const float pvy = s->pivot.y * (float)s->sourceSize.h - (float)s->spriteSourceSize.y;
     float dx = 0.0F;
     float dy = 0.0F;
-    d4_decode_f(pvx, pvy, s->transform, (float)s->frame.w, (float)s->frame.h, &dx, &dy);
+    tp_transform_decode_f(pvx, pvy, s->transform, (float)s->frame.w,
+                          (float)s->frame.h, &dx, &dy);
     out[0] = ox + ((float)s->frame.x + dx) * scale;
     out[1] = oy + ((float)s->frame.y + dy) * scale;
 }
