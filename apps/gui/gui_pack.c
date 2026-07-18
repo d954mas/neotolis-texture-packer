@@ -1,4 +1,4 @@
-#include "gui_pack.h"
+#include "gui_pack_internal.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -52,51 +52,15 @@ typedef struct {
     bool cancel_requested;          /* presentation-only: show Canceling... */
 } gui_pack_job_state;
 
-static gui_pack_job_state s_job;
-
-/* Export-target preview (EXP-PREVIEW): ONE arena-owned result, separate from the session slots. Keyed
- * by stable atlas id so a structural edit cannot bind it to a different atlas.
- * Only one preview is live at a time (the GUI drops it on atlas switch / edit), so a single slot is
- * sufficient and its lifetime mirrors a session slot: destroy the arena to free the result. */
-typedef struct {
-    tp_arena *arena;
-    tp_result *result;
-    tp_id128 atlas_id;
-    tp_session_input_token input_token;
-    bool valid;
-    int atlas_index; /* atlas this preview belongs to (-1 = none) */
-    char exporter_id[TP_EXPORTER_ID_MAX];
-} preview_slot;
-static preview_slot s_preview = {.atlas_index = -1};
-
-/* One active canvas target needs one value cache. The key is self-validating;
- * no mutator owns an invalidation callback. */
-typedef struct {
-    const tp_exporter *exporter;
-    tp_id128 atlas_id;
-    uint64_t model_generation;
-    uint64_t snapshot_lifetime;
-    int count;
-    char chip[128];
-    char tip[512];
-    bool valid;
-} preview_diff_cache;
-static preview_diff_cache s_preview_diff;
+static gui_pack_job_state s_adapter;
 
 #ifdef NTPACKER_GUI_SELFTEST
 static gui_pack_ref_index_work s_ref_index_work;
-static uint64_t s_preview_diff_rebuilds;
 void gui_pack_ref_index_work_reset(void) {
     memset(&s_ref_index_work, 0, sizeof s_ref_index_work);
 }
 gui_pack_ref_index_work gui_pack_ref_index_work_get(void) {
     return s_ref_index_work;
-}
-void gui_pack_preview_diff_work_reset(void) {
-    s_preview_diff_rebuilds = 0U;
-}
-uint64_t gui_pack_preview_diff_rebuilds(void) {
-    return s_preview_diff_rebuilds;
 }
 #endif
 // #endregion
@@ -260,17 +224,18 @@ static pack_slot *pack_slot_for_publish(int atlas_index, tp_id128 atlas_id) {
 
 // #region public
 bool gui_pack_init(const char *work_dir) {
-    s_job.work_dir_ready = false;
-    if (!gui_paths_copy_normalized(work_dir ? work_dir : ".", s_job.work_dir,
-                                   sizeof s_job.work_dir)) {
+    s_adapter.work_dir_ready = false;
+    if (!gui_paths_copy_normalized(work_dir ? work_dir : ".",
+                                   s_adapter.work_dir,
+                                   sizeof s_adapter.work_dir)) {
         return false;
     }
-    tp_mkdirs(s_job.work_dir);
-    s_job.work_dir_ready = tp_scan_is_dir(s_job.work_dir);
-    if (!s_job.work_dir_ready) {
-        s_job.work_dir[0] = '\0';
+    tp_mkdirs(s_adapter.work_dir);
+    s_adapter.work_dir_ready = tp_scan_is_dir(s_adapter.work_dir);
+    if (!s_adapter.work_dir_ready) {
+        s_adapter.work_dir[0] = '\0';
     }
-    return s_job.work_dir_ready;
+    return s_adapter.work_dir_ready;
 }
 
 void gui_pack_clear(int atlas_index) {
@@ -286,7 +251,7 @@ void gui_pack_clear(int atlas_index) {
     }
     /* The preview is a derived view of the session pack, so clearing its source
      * slot invalidates it too. */
-    if (atlas_index < 0 || atlas_index == s_preview.atlas_index) {
+    if (atlas_index < 0 || gui_pack_preview_belongs_to(atlas_index)) {
         gui_pack_preview_clear();
     }
 }
@@ -303,7 +268,7 @@ static bool job_active(void) {
 static bool report_job_start(tp_status status, const tp_error *error,
                              char *err, size_t err_cap) {
     if (status == TP_STATUS_OK) {
-        s_job.cancel_requested = false;
+        s_adapter.cancel_requested = false;
         return true;
     }
     if (err && err_cap > 0U) {
@@ -315,7 +280,7 @@ static bool report_job_start(tp_status status, const tp_error *error,
 }
 
 static bool require_work_dir(char *err, size_t err_cap) {
-    if (s_job.work_dir_ready) {
+    if (s_adapter.work_dir_ready) {
         return true;
     }
     if (err && err_cap > 0U) {
@@ -362,7 +327,7 @@ bool gui_pack_async_start(int atlas_index, char *err, size_t err_cap) {
     tp_error e = {{0}};
     const tp_pack_job_request request = {
         .atlas_id = a->id,
-        .work_dir = s_job.work_dir,
+        .work_dir = s_adapter.work_dir,
         .preview_exporter_id = NULL,
     };
     return report_job_start(
@@ -391,7 +356,7 @@ static bool export_start(tp_id128 atlas_id, char *err, size_t err_cap) {
 
     tp_error e = {{0}};
     const tp_export_command_request request = {
-        .work_dir = s_job.work_dir,
+        .work_dir = s_adapter.work_dir,
         .atlas_id = atlas_id,
     };
     return report_job_start(tp_session_export_start(session, &request, &e),
@@ -427,7 +392,7 @@ gui_pack_done gui_pack_poll(gui_pack_result_info *out) {
                    ? GUI_PACK_DONE_EXPORT_FAIL
                    : GUI_PACK_DONE_PACK_FAIL;
     }
-    const bool cancelled = s_job.cancel_requested ||
+    const bool cancelled = s_adapter.cancel_requested ||
                            result.state == TP_SESSION_JOB_CANCELLED;
     const bool preview = result.kind == TP_SESSION_JOB_PACK &&
                          result.pack.preview_exporter_id[0] != '\0';
@@ -452,24 +417,8 @@ gui_pack_done gui_pack_poll(gui_pack_result_info *out) {
                     rc = GUI_PACK_DONE_PREVIEW_OK;
                     goto pack_result_handled;
                 }
-                if (s_preview.arena) {
-                    tp_arena_destroy(s_preview.arena);
-                }
-                s_preview.arena = result.pack.arena;
-                s_preview.result = result.pack.result;
-                s_preview.atlas_id = result.pack.atlas_id;
-                s_preview.input_token = result.pack.input_token_at_start;
-                s_preview.valid = true;
-                s_preview.atlas_index = atlas_index;
-                memcpy(s_preview.exporter_id,
-                       result.pack.preview_exporter_id,
-                       strlen(result.pack.preview_exporter_id) + 1U);
-                result.pack.arena = NULL;
-                nt_log_info("gui_pack(async): preview '%s' via %s packed %d sprite(s), %d page(s) in %.1f ms",
-                            s_preview.result->atlas_name,
-                            s_preview.exporter_id,
-                            s_preview.result->sprite_count,
-                            s_preview.result->page_count, result.elapsed_ms);
+                gui_pack_preview_publish(&result.pack, atlas_index,
+                                         result.elapsed_ms);
                 rc = GUI_PACK_DONE_PREVIEW_OK;
             } else {
                 pack_ref_entry *ref_index = NULL;
@@ -556,7 +505,7 @@ pack_result_handled:;
     }
 
     tp_session_job_result_destroy(&result);
-    s_job.cancel_requested = false;
+    s_adapter.cancel_requested = false;
     if (out) {
         out->kind = rc;
     }
@@ -588,13 +537,13 @@ static gui_pack_done wait_for_job(gui_pack_result_info *out) {
     }
 }
 
-bool gui_pack_async_busy(void) { return job_active() || s_job.debug_busy != GUI_PACK_ASYNC_NONE; }
+bool gui_pack_async_busy(void) { return job_active() || s_adapter.debug_busy != GUI_PACK_ASYNC_NONE; }
 
 bool gui_pack_worker_active(void) { return job_active(); } /* excludes --shot debug busy */
 
 gui_pack_async_kind gui_pack_async_active_kind(void) {
-    if (s_job.debug_busy != GUI_PACK_ASYNC_NONE) {
-        return s_job.debug_busy;
+    if (s_adapter.debug_busy != GUI_PACK_ASYNC_NONE) {
+        return s_adapter.debug_busy;
     }
     tp_session *session = job_session();
     if (!session || !tp_session_job_active(session)) {
@@ -608,7 +557,7 @@ gui_pack_async_kind gui_pack_async_active_kind(void) {
 }
 
 double gui_pack_async_elapsed_sec(void) {
-    if (s_job.debug_busy != GUI_PACK_ASYNC_NONE) {
+    if (s_adapter.debug_busy != GUI_PACK_ASYNC_NONE) {
         return 3.2; /* fixed for reproducible --shot-packing captures */
     }
     tp_session *session = job_session();
@@ -619,7 +568,7 @@ double gui_pack_async_elapsed_sec(void) {
 }
 
 void gui_pack_export_progress(int *cur, int *total) {
-    if (s_job.debug_busy == GUI_PACK_ASYNC_EXPORT) {
+    if (s_adapter.debug_busy == GUI_PACK_ASYNC_EXPORT) {
         if (cur) {
             *cur = 2;
         }
@@ -643,13 +592,13 @@ void gui_pack_export_progress(int *cur, int *total) {
 void gui_pack_async_cancel(void) {
     tp_session *session = job_session();
     if (session && tp_session_job_cancel(session, NULL) == TP_STATUS_OK) {
-        s_job.cancel_requested = true;
+        s_adapter.cancel_requested = true;
     }
 }
 
-bool gui_pack_async_cancelling(void) { return job_active() && s_job.cancel_requested; }
+bool gui_pack_async_cancelling(void) { return job_active() && s_adapter.cancel_requested; }
 
-void gui_pack_debug_force_busy(gui_pack_async_kind kind) { s_job.debug_busy = kind; }
+void gui_pack_debug_force_busy(gui_pack_async_kind kind) { s_adapter.debug_busy = kind; }
 // #endregion
 
 // #region export-target preview (EXP-PREVIEW)
@@ -698,7 +647,7 @@ bool gui_pack_preview_async_start(int atlas_index, const char *exporter_id, char
     tp_error error = {{0}};
     const tp_pack_job_request request = {
         .atlas_id = atlas->id,
-        .work_dir = s_job.work_dir,
+        .work_dir = s_adapter.work_dir,
         .preview_exporter_id = exporter_id,
     };
     return report_job_start(
@@ -706,154 +655,6 @@ bool gui_pack_preview_async_start(int atlas_index, const char *exporter_id, char
         err, err_cap);
 }
 
-const tp_result *gui_pack_preview_result(int atlas_index) {
-    const tp_session_snapshot *snapshot = gui_project_snapshot();
-    const tp_snapshot_atlas *atlas = snapshot ? tp_session_snapshot_atlas_at(snapshot, atlas_index) : NULL;
-    if (!s_preview.valid || !atlas || !tp_id128_eq(s_preview.atlas_id, atlas->id) ||
-        !tp_session_input_token_equal(tp_session_snapshot_input_token(snapshot),
-                                      s_preview.input_token)) {
-        return NULL;
-    }
-    return s_preview.result;
-}
-
-void gui_pack_preview_clear(void) {
-    if (s_preview.arena) {
-        tp_arena_destroy(s_preview.arena);
-    }
-    s_preview.arena = NULL;
-    s_preview.result = NULL;
-    s_preview.atlas_id = tp_id128_nil();
-    s_preview.input_token = (tp_session_input_token){0};
-    s_preview.valid = false;
-    s_preview.atlas_index = -1;
-    s_preview.exporter_id[0] = '\0';
-}
-
-/* Maps one predicted-loss axis (core field_id) to the chip's short token + the
- * tooltip's long line. These strings are GUI presentation, byte-pinned by selftest
- * phase 11; the core predict pass supplies only the structured field_id. Returns
- * false for an axis the chip does not surface (alias/multipage never reach it --
- * the chip passes a NULL prep, so predict never emits those). */
-static bool preview_field_phrases(int field_id, const char **short_tok, const char **long_line) {
-    switch (field_id) {
-        case TP_NOTICE_FIELD_TRANSFORM:
-            *short_tok = "no rotate/flip";
-            *long_line = "Rotations/flips off -- this format can't encode the full D4 orientation set";
-            return true;
-        case TP_NOTICE_FIELD_POLYGON:
-            *short_tok = "polygons \xE2\x86\x92 rect";
-            *long_line = "Polygon hulls flattened to rectangles -- this format stores quads only";
-            return true;
-        case TP_NOTICE_FIELD_SLICE9:
-            *short_tok = "slice9 dropped";
-            *long_line = "9-slice borders dropped -- this format does not store them";
-            return true;
-        case TP_NOTICE_FIELD_PIVOT:
-            *short_tok = "pivot dropped";
-            *long_line = "Per-sprite pivots dropped -- this format does not store them";
-            return true;
-        default:
-            return false;
-    }
-}
-
-int gui_pack_preview_diff(int atlas_index, const char *exporter_id, char *chip, size_t chip_cap, char *tip,
-                          size_t tip_cap) {
-    if (chip && chip_cap) {
-        chip[0] = '\0';
-    }
-    if (tip && tip_cap) {
-        tip[0] = '\0';
-    }
-    const tp_exporter *e = tp_exporter_find(exporter_id);
-    if (!e) {
-        return 0;
-    }
-    const tp_session_snapshot *snapshot = gui_project_snapshot();
-    const tp_snapshot_atlas *atlas = snapshot
-                                         ? tp_session_snapshot_atlas_at(snapshot, atlas_index)
-                                         : NULL;
-    if (!atlas) {
-        return 0;
-    }
-    const uint64_t model_generation =
-        tp_session_snapshot_model_generation(snapshot);
-    const uint64_t snapshot_lifetime =
-        gui_project_snapshot_lifetime_generation();
-    if (s_preview_diff.valid && s_preview_diff.exporter == e &&
-        tp_id128_eq(s_preview_diff.atlas_id, atlas->id) &&
-        s_preview_diff.model_generation == model_generation &&
-        s_preview_diff.snapshot_lifetime == snapshot_lifetime) {
-        if (chip && chip_cap) {
-            (void)snprintf(chip, chip_cap, "%s", s_preview_diff.chip);
-        }
-        if (tip && tip_cap) {
-            (void)snprintf(tip, tip_cap, "%s", s_preview_diff.tip);
-        }
-        return s_preview_diff.count;
-    }
-    s_preview_diff.valid = false;
-    s_preview_diff.chip[0] = '\0';
-    s_preview_diff.tip[0] = '\0';
-    /* One core enumeration for both frontends (review §3.1); NULL prep = project-only
-     * preview (no alias/multipage axes -- those need the packed result). */
-    tp_export_notices nz;
-    tp_export_notices_init(&nz);
-    tp_error te = {{0}};
-#ifdef NTPACKER_GUI_SELFTEST
-    s_preview_diff_rebuilds++;
-#endif
-    if (tp_export_predict_loss_snapshot(snapshot, atlas->id, &e->caps, exporter_id,
-                                        NULL, &nz, &te) != TP_STATUS_OK) {
-        tp_export_notices_free(&nz);
-        return 0;
-    }
-
-    int n = 0;
-    /* Rebuild the exact chip/tooltip strings from the structured notices. Guarded so the
-     * write pointer never forms past-end and a truncating snprintf can't advance out of range. */
-    size_t clen = 0;
-    size_t tlen = 0;
-    for (int i = 0; i < nz.count; i++) {
-        const char *short_tok = NULL;
-        const char *long_line = NULL;
-        if (!preview_field_phrases(nz.items[i].field_id, &short_tok, &long_line)) {
-            continue;
-        }
-        if (clen < sizeof s_preview_diff.chip) {
-            const int w_ = snprintf(s_preview_diff.chip + clen,
-                                    sizeof s_preview_diff.chip - clen,
-                                    "%s%s", n > 0 ? ", " : "", short_tok);
-            if (w_ > 0) {
-                clen += (size_t)w_;
-            }
-        }
-        if (tlen < sizeof s_preview_diff.tip) {
-            const int w2_ = snprintf(s_preview_diff.tip + tlen,
-                                     sizeof s_preview_diff.tip - tlen,
-                                     "%s%s", n > 0 ? "\n" : "", long_line);
-            if (w2_ > 0) {
-                tlen += (size_t)w2_;
-            }
-        }
-        n++;
-    }
-    tp_export_notices_free(&nz);
-    s_preview_diff.exporter = e;
-    s_preview_diff.atlas_id = atlas->id;
-    s_preview_diff.model_generation = model_generation;
-    s_preview_diff.snapshot_lifetime = snapshot_lifetime;
-    s_preview_diff.count = n;
-    s_preview_diff.valid = true;
-    if (chip && chip_cap) {
-        (void)snprintf(chip, chip_cap, "%s", s_preview_diff.chip);
-    }
-    if (tip && tip_cap) {
-        (void)snprintf(tip, tip_cap, "%s", s_preview_diff.tip);
-    }
-    return n;
-}
 // #endregion
 
 void gui_pack_shutdown(void) {

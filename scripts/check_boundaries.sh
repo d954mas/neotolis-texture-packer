@@ -440,6 +440,7 @@ _internal_header_registry() {
     cat <<'EOF'
 cli_mutate_internal     cli_mutate|cli_mutate_source|cli_mutate_atlas|cli_mutate_sprite|cli_mutate_anim|cli_mutate_target
 gui_actions_internal    gui_actions|gui_actions_dialogs|gui_actions_edits|gui_actions_pack|gui_actions_preview|gui_actions_recovery
+gui_pack_internal       gui_pack|gui_pack_preview
 gui_project_internal    gui_project|gui_project_file|gui_project_mutations|gui_project_pending|gui_project_recovery
 tp_diff_internal        tp_diff_entity|tp_diff_apply|tp_diff_capture|tp_history|tp_history_codec|tp_history_codec_internal|tp_history_codec_read|tp_model|tp_model_journal|tp_op_apply|tp_txn_apply
 tp_op_internal          tp_op_catalog|tp_op_validate|tp_op_validate_atlas|tp_op_validate_source_sprite|tp_op_validate_animation|tp_op_validate_target|tp_op_apply|tp_op_build|tp_op_encode|tp_model_journal|tp_txn_encode|tp_txn_apply|tp_txn_lower|tp_txn_parse|tp_txn_result
