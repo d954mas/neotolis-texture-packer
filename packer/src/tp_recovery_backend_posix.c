@@ -360,6 +360,6 @@ tp_status tp_recovery_backend_candidate_delete(tp_recovery_file_pin *pin,
     return status;
 }
 
-void tp_recovery_backend_test_fail_next_quarantine_unlink(void) {
+void tp_recovery__test_fail_next_quarantine_unlink(void) {
     s_test_fail_next_quarantine_unlink = true;
 }

@@ -254,3 +254,60 @@ tp_status tp_recovery_store_scan(tp_recovery_store *store, const char *live_slot
     return TP_STATUS_OK;
 }
 // #endregion
+
+tp_status tp_recovery__test_craft_metadata_journal(
+    const char *path, tp_id128 key, int64_t timestamp,
+    const char *project_path, const char *project_name, tp_error *err) {
+    tp_journal_io io = tp_journal_io_file(path);
+    if (!io.ctx) {
+        return tp_error_set(err, TP_STATUS_JOURNAL_FAILED,
+                            "test journal could not be created");
+    }
+    tp_journal *journal = tp_journal_create(io, key);
+    if (!journal) {
+        return tp_error_set(err, TP_STATUS_OOM,
+                            "test journal allocation failed");
+    }
+    static const uint8_t snapshot[4] = {'r', '6', 'a', '!'};
+    tp_status status = tp_journal_init_checkpoint(
+        journal, snapshot, sizeof snapshot, 0, err);
+    if (status == TP_STATUS_OK) {
+        status = tp_journal_append_txn(
+            journal, "6a0000000000000000000000000000ff", 1,
+            snapshot, sizeof snapshot, err);
+    }
+    if (status == TP_STATUS_OK) {
+        status = tp_journal_set_metadata(journal, timestamp,
+                                         project_path, project_name, err);
+    }
+    tp_journal_destroy(journal);
+    return status;
+}
+
+tp_status tp_recovery__test_peek_candidate(
+    const char *path, tp_recovery_candidate *out, tp_error *err) {
+    if (!path || !out) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "test recovery peek requires path and output");
+    }
+    memset(out, 0, sizeof *out);
+    tp_journal_peek_result peek;
+    memset(&peek, 0, sizeof peek);
+    tp_status status = tp_journal_peek(tp_journal_io_file_read(path),
+                                       &peek, err);
+    if (status == TP_STATUS_OK) {
+        (void)snprintf(out->journal_path, sizeof out->journal_path, "%s", path);
+        (void)snprintf(out->original_path, sizeof out->original_path, "%s",
+                       peek.has_meta && peek.meta.path ? peek.meta.path : "");
+        (void)snprintf(out->name, sizeof out->name, "%s",
+                       peek.has_meta && peek.meta.name ? peek.meta.name : "");
+        out->timestamp = peek.has_meta ? peek.meta.timestamp : 0;
+        out->status = peek.status;
+        if (peek.has_meta && peek.meta.has_file_fingerprint) {
+            out->file_fingerprint = peek.meta.file_fingerprint;
+            out->has_file_fingerprint = true;
+        }
+    }
+    tp_journal_peek_free(&peek);
+    return status;
+}

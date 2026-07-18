@@ -330,6 +330,6 @@ void tp_recovery_live_destroy(tp_recovery_live *live) {
     free(live);
 }
 // #endregion
-void tp_recovery__live_test_fail_next_retire_cleanup(void) {
+void tp_recovery__test_fail_next_live_retire_cleanup(void) {
     s_test_fail_next_live_retire_cleanup = true;
 }

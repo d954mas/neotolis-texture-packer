@@ -7,6 +7,10 @@
 #include "tp_journal_internal.h"
 #include "tp_model_seam.h"
 #include "tp_session_internal.h"
+
+static tp_recovery_store *s_test_foreign_store;
+static tp_recovery_claim *s_test_foreign_claim;
+
 // #region claim & candidate
 tp_status tp_recovery_store_claim(tp_recovery_store *store, const char *journal_path,
                                   tp_recovery_claim **out, tp_error *err) {
@@ -388,3 +392,20 @@ tp_status tp_recovery_claim_discard(tp_recovery_claim *claim, tp_error *err) {
     return status;
 }
 // #endregion
+
+bool tp_recovery__test_hold_foreign_lock(
+    const char *root, tp_id128 journal_key, const char *journal_path) {
+    tp_recovery__test_release_foreign_lock();
+    tp_error err = {{0}};
+    return tp_recovery_store_create(root, journal_key, &s_test_foreign_store,
+                                    &err) == TP_STATUS_OK &&
+           tp_recovery_store_claim(s_test_foreign_store, journal_path,
+                                   &s_test_foreign_claim, &err) == TP_STATUS_OK;
+}
+
+void tp_recovery__test_release_foreign_lock(void) {
+    tp_recovery_claim_release(s_test_foreign_claim);
+    s_test_foreign_claim = NULL;
+    tp_recovery_store_destroy(s_test_foreign_store);
+    s_test_foreign_store = NULL;
+}

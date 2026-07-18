@@ -1,129 +1,18 @@
 #include "tp_core/tp_recovery.h"
 
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
-#include "tp_core/tp_scan.h"
-#include "tp_core/tp_session.h"
-#include "tp_core/tp_project_lease.h"
-#include "tp_core/tp_transaction.h"
 #include "tp_fs_internal.h"
-#include "tp_journal_internal.h"
-#include "tp_model_seam.h"
-#include "tp_recovery_backend_types_internal.h"
 #include "tp_recovery_internal.h"
 #include "tp_recovery_state_internal.h"
 #include "tp_session_internal.h"
 
-
-static tp_recovery_store *s_test_foreign_store;
-static tp_recovery_claim *s_test_foreign_claim;
 static bool s_test_fail_next_resolve_verify;
-
-
-
-
-
-
-
-
-
-
-
-
-
-// #region test seams
-bool tp_recovery__test_hold_foreign_lock(
-    const char *root, tp_id128 journal_key, const char *journal_path) {
-    tp_recovery__test_release_foreign_lock();
-    tp_error err = {{0}};
-    return tp_recovery_store_create(root, journal_key, &s_test_foreign_store,
-                                    &err) == TP_STATUS_OK &&
-           tp_recovery_store_claim(s_test_foreign_store, journal_path,
-                                   &s_test_foreign_claim, &err) == TP_STATUS_OK;
-}
-
-void tp_recovery__test_release_foreign_lock(void) {
-    tp_recovery_claim_release(s_test_foreign_claim);
-    s_test_foreign_claim = NULL;
-    tp_recovery_store_destroy(s_test_foreign_store);
-    s_test_foreign_store = NULL;
-}
 
 void tp_recovery__test_fail_next_resolve_verify(void) {
     s_test_fail_next_resolve_verify = true;
 }
-
-void tp_recovery__test_fail_next_live_retire_cleanup(void) {
-    tp_recovery__live_test_fail_next_retire_cleanup();
-}
-
-#ifndef _WIN32
-void tp_recovery__test_fail_next_quarantine_unlink(void) {
-    tp_recovery_backend_test_fail_next_quarantine_unlink();
-}
-#endif
-
-tp_status tp_recovery__test_craft_metadata_journal(
-    const char *path, tp_id128 key, int64_t timestamp,
-    const char *project_path, const char *project_name, tp_error *err) {
-    tp_journal_io io = tp_journal_io_file(path);
-    if (!io.ctx) {
-        return tp_error_set(err, TP_STATUS_JOURNAL_FAILED,
-                            "test journal could not be created");
-    }
-    tp_journal *journal = tp_journal_create(io, key);
-    if (!journal) {
-        return tp_error_set(err, TP_STATUS_OOM,
-                            "test journal allocation failed");
-    }
-    static const uint8_t snapshot[4] = {'r', '6', 'a', '!'};
-    tp_status status = tp_journal_init_checkpoint(
-        journal, snapshot, sizeof snapshot, 0, err);
-    if (status == TP_STATUS_OK) {
-        status = tp_journal_append_txn(
-            journal, "6a0000000000000000000000000000ff", 1,
-            snapshot, sizeof snapshot, err);
-    }
-    if (status == TP_STATUS_OK) {
-        status = tp_journal_set_metadata(journal, timestamp,
-                                         project_path, project_name, err);
-    }
-    tp_journal_destroy(journal);
-    return status;
-}
-
-tp_status tp_recovery__test_peek_candidate(
-    const char *path, tp_recovery_candidate *out, tp_error *err) {
-    if (!path || !out) {
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
-                            "test recovery peek requires path and output");
-    }
-    memset(out, 0, sizeof *out);
-    tp_journal_peek_result peek;
-    memset(&peek, 0, sizeof peek);
-    tp_status status = tp_journal_peek(tp_journal_io_file_read(path),
-                                       &peek, err);
-    if (status == TP_STATUS_OK) {
-        (void)snprintf(out->journal_path, sizeof out->journal_path, "%s", path);
-        (void)snprintf(out->original_path, sizeof out->original_path, "%s",
-                       peek.has_meta && peek.meta.path ? peek.meta.path : "");
-        (void)snprintf(out->name, sizeof out->name, "%s",
-                       peek.has_meta && peek.meta.name ? peek.meta.name : "");
-        out->timestamp = peek.has_meta ? peek.meta.timestamp : 0;
-        out->status = peek.status;
-        if (peek.has_meta && peek.meta.has_file_fingerprint) {
-            out->file_fingerprint = peek.meta.file_fingerprint;
-            out->has_file_fingerprint = true;
-        }
-    }
-    tp_journal_peek_free(&peek);
-    return status;
-}
-// #endregion
-
-
 
 // #region session attach & resolve
 static tp_status recovery_session_attach_store(

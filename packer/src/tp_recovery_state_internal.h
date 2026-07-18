@@ -71,6 +71,5 @@ tp_status tp_recovery__lock_path_for(
 tp_status tp_recovery__live_slot_generate(
     const tp_recovery_store *store, const tp_rng *rng,
     char *out, size_t out_cap, tp_error *err);
-void tp_recovery__live_test_fail_next_retire_cleanup(void);
 
 #endif /* TP_RECOVERY_STATE_INTERNAL_H */
