@@ -186,6 +186,19 @@ target_compile_options(tp_test_diff PRIVATE -U_DLL)
 nt_set_warning_flags(tp_test_diff)   # AGENTS.md invariant: our test TUs too
 add_test(NAME tp_diff COMMAND tp_test_diff)
 
+# P1-09: compact independent contract for semantic Undo/Redo, exact history
+# accounting, Redo-branch discard, and journal-failure non-publication at the
+# session event boundary.
+add_executable(tp_test_history_semantics_contract
+    test_history_semantics_contract.c)
+target_link_libraries(tp_test_history_semantics_contract PRIVATE tp_core unity)
+target_include_directories(tp_test_history_semantics_contract PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_options(tp_test_history_semantics_contract PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_history_semantics_contract)
+add_test(NAME tp_history_semantics_contract
+    COMMAND tp_test_history_semantics_contract)
+
 add_executable(tp_test_history_codec_contract test_history_codec_contract.c)
 target_link_libraries(tp_test_history_codec_contract PRIVATE tp_core unity)
 target_include_directories(tp_test_history_codec_contract PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
