@@ -93,10 +93,11 @@ Outputs land in `build/<area>/<target>/<preset>/`. Tests run via
 ## Simplification Policy
 
 Production LOC and complexity measurements are diagnostic inventory, not
-pass/fail gates. File LOC is an important hotspot signal, but no hard LOC/CC
-limit, baseline, ratchet, or no-growth rule may reject a change by itself.
-Assess large modules by owned responsibilities, dependency fan-out, contract
-risk, and whether a narrower seam improves the code.
+pass/fail gates. File LOC is an important hotspot signal. There are no hard
+LOC/CC limits, source-size baselines, ratchets, or no-growth rules. Size alone
+never rejects a change or requires a split. Assess large modules by owned
+responsibilities, dependency fan-out, contract risk, and whether a narrower
+seam improves the code.
 
 Do not split a cohesive function only to reduce a metric. Long functions may
 remain when they own one responsibility and have clear regions. Extract a

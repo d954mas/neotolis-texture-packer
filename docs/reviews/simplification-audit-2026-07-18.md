@@ -73,7 +73,7 @@ fan-out, and fault/contract matrices. A long function may remain when it is
 cohesive and its regions are clear. Split functions only at a real semantic seam
 or for actual reuse; do not create one-use microhelpers to satisfy a metric.
 
-Clang-Tidy `readability-function-cognitive-complexity` at threshold 25 measured
+A diagnostic Clang-Tidy `readability-function-cognitive-complexity` run measured
 the current main hotspots:
 
 | Function | CC |
@@ -88,10 +88,12 @@ the current main hotspots:
 | `validate_sources` | 62 |
 | `encode_op` | 52 |
 
-Recommended physical cuts, in risk order:
+Candidate responsibility boundaries for the Phase 2 reassessment:
 
-1. split operation validation by operation family;
-2. split validation indexes/materialization from atlas rules;
+1. operation validation by operation family, only if the shared constraints
+   work exposes a narrower stable seam;
+2. validation indexes/materialization from atlas rules, only if ordered report
+   orchestration remains simpler;
 3. split filesystem platform backends from checked durability helpers;
 4. split project path/model/writer/parser/bridge TUs without semantic edits;
 5. split history writer, reader/schema and replay adapter under byte goldens.
@@ -104,14 +106,14 @@ Recommended physical cuts, in risk order:
 - F-02: new canonical-key unit test failed before the API existed, then targeted
   source-key/operation/schema/validation tests and full 84/84 CTest passed;
 - F-03: the original hard LOC gate passed over 87 production TUs, but its policy
-  was rejected after review. P0-01 replaces it with a non-gating inventory.
+  was rejected after review. P0-01 removed it from CTest and replaced it with a
+  manually requested, non-gating inventory.
 
 ## Next simplification packets
 
-Continue without feature work until each packet is independently green:
-
-1. F-04 source-path text identity primitive;
-2. operation-family handler split, using exact operation tests as oracle;
-3. validation-family split, preserving ordered JSON findings;
-4. filesystem TU split;
-5. only then decide the F-05 pack-constraints evaluator design.
+Continue without feature work according to
+`docs/plans/simplification-refactor-plan.md`. Phase 0 closes contract defects
+before structural work; Phase 2 adds the shared primitives and boundary checks.
+Physical splits are authorized only after the Phase 2 reassessment confirms a
+clearer ownership seam and a bounded packet-plan protects the affected
+contracts.
