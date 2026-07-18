@@ -56,6 +56,7 @@ void gui_project__next_transaction_id(char out[33]);
 void gui_project__note_session_reject(tp_status status, const tp_error *err);
 void gui_project__note_recovery_degraded(const char *msg);
 bool gui_project__refresh_after_session_commit(void);
+void gui_project__attach_recovery_live(tp_session *session);
 
 void gui_project_pending_discard(void);
 void gui_project_pending_route(const gui_coalesce_key *key);
