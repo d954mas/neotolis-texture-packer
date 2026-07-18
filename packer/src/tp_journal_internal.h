@@ -13,6 +13,26 @@
 #include <stdint.h>
 
 #include "tp_core/tp_journal.h"
+#include "tp_idset_internal.h"
+
+struct tp_journal {
+    tp_journal_io io;
+    tp_id128 key;
+    bool poisoned;
+    size_t record_count;
+    size_t replay_count;
+    size_t replay_operations;
+    tp_idset ids;
+    int64_t meta_time;
+    char *meta_path;
+    char *meta_name;
+    tp_id128 meta_file_fingerprint;
+    bool meta_has_file_fingerprint;
+    bool has_meta;
+};
+
+size_t tp_journal__record_limit(void);
+size_t tp_journal__file_limit(void);
 
 /* Filesystem owners that already opened a regular file with their required
  * no-follow/create-new policy transfer that native descriptor here. The

@@ -36,7 +36,7 @@ add_library(tp_core STATIC
     # Semantic diff, exact inverse/redo, and bounded in-memory history.
     src/tp_diff_entity.c src/tp_diff_capture.c src/tp_diff_apply.c src/tp_history_codec.c src/tp_history.c
     # Durable recovery journal and injectable I/O seam.
-    src/tp_journal.c src/tp_journal_wire.c src/tp_journal_io.c)
+    src/tp_journal.c src/tp_journal_read.c src/tp_journal_wire.c src/tp_journal_io.c)
 if(WIN32)
     target_sources(tp_core PRIVATE src/tp_fs_win32.c src/tp_recovery_backend_win32.c)
 else()
