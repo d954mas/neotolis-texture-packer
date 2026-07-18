@@ -44,8 +44,15 @@ typedef struct {
 
 static pack_slot s_slots[GUI_PACK_MAX_ATLASES];
 static uint64_t s_next_result_version;
-static char s_work_dir[TP_IDENTITY_PATH_MAX];
-static bool s_work_dir_ready;
+
+typedef struct {
+    char work_dir[TP_IDENTITY_PATH_MAX];
+    bool work_dir_ready;
+    gui_pack_async_kind debug_busy; /* --shot-packing override */
+    bool cancel_requested;          /* presentation-only: show Canceling... */
+} gui_pack_job_state;
+
+static gui_pack_job_state s_job;
 
 /* Export-target preview (EXP-PREVIEW): ONE arena-owned result, separate from the session slots. Keyed
  * by stable atlas id so a structural edit cannot bind it to a different atlas.
@@ -253,17 +260,17 @@ static pack_slot *pack_slot_for_publish(int atlas_index, tp_id128 atlas_id) {
 
 // #region public
 bool gui_pack_init(const char *work_dir) {
-    s_work_dir_ready = false;
-    if (!gui_paths_copy_normalized(work_dir ? work_dir : ".", s_work_dir,
-                                   sizeof s_work_dir)) {
+    s_job.work_dir_ready = false;
+    if (!gui_paths_copy_normalized(work_dir ? work_dir : ".", s_job.work_dir,
+                                   sizeof s_job.work_dir)) {
         return false;
     }
-    tp_mkdirs(s_work_dir);
-    s_work_dir_ready = tp_scan_is_dir(s_work_dir);
-    if (!s_work_dir_ready) {
-        s_work_dir[0] = '\0';
+    tp_mkdirs(s_job.work_dir);
+    s_job.work_dir_ready = tp_scan_is_dir(s_job.work_dir);
+    if (!s_job.work_dir_ready) {
+        s_job.work_dir[0] = '\0';
     }
-    return s_work_dir_ready;
+    return s_job.work_dir_ready;
 }
 
 void gui_pack_clear(int atlas_index) {
@@ -285,8 +292,6 @@ void gui_pack_clear(int atlas_index) {
 }
 
 // #region async adapter (the session owns the one typed Pack / Export handle)
-static gui_pack_async_kind s_debug_busy; /* --shot-packing override */
-static bool s_cancel_requested;          /* presentation-only: show Canceling... */
 
 static tp_session *job_session(void) { return gui_project_session_for_jobs(); }
 
@@ -298,7 +303,7 @@ static bool job_active(void) {
 static bool report_job_start(tp_status status, const tp_error *error,
                              char *err, size_t err_cap) {
     if (status == TP_STATUS_OK) {
-        s_cancel_requested = false;
+        s_job.cancel_requested = false;
         return true;
     }
     if (err && err_cap > 0U) {
@@ -310,7 +315,7 @@ static bool report_job_start(tp_status status, const tp_error *error,
 }
 
 static bool require_work_dir(char *err, size_t err_cap) {
-    if (s_work_dir_ready) {
+    if (s_job.work_dir_ready) {
         return true;
     }
     if (err && err_cap > 0U) {
@@ -357,7 +362,7 @@ bool gui_pack_async_start(int atlas_index, char *err, size_t err_cap) {
     tp_error e = {{0}};
     const tp_pack_job_request request = {
         .atlas_id = a->id,
-        .work_dir = s_work_dir,
+        .work_dir = s_job.work_dir,
         .preview_exporter_id = NULL,
     };
     return report_job_start(
@@ -386,7 +391,7 @@ static bool export_start(tp_id128 atlas_id, char *err, size_t err_cap) {
 
     tp_error e = {{0}};
     const tp_export_command_request request = {
-        .work_dir = s_work_dir,
+        .work_dir = s_job.work_dir,
         .atlas_id = atlas_id,
     };
     return report_job_start(tp_session_export_start(session, &request, &e),
@@ -422,7 +427,7 @@ gui_pack_done gui_pack_poll(gui_pack_result_info *out) {
                    ? GUI_PACK_DONE_EXPORT_FAIL
                    : GUI_PACK_DONE_PACK_FAIL;
     }
-    const bool cancelled = s_cancel_requested ||
+    const bool cancelled = s_job.cancel_requested ||
                            result.state == TP_SESSION_JOB_CANCELLED;
     const bool preview = result.kind == TP_SESSION_JOB_PACK &&
                          result.pack.preview_exporter_id[0] != '\0';
@@ -551,7 +556,7 @@ pack_result_handled:;
     }
 
     tp_session_job_result_destroy(&result);
-    s_cancel_requested = false;
+    s_job.cancel_requested = false;
     if (out) {
         out->kind = rc;
     }
@@ -583,13 +588,13 @@ static gui_pack_done wait_for_job(gui_pack_result_info *out) {
     }
 }
 
-bool gui_pack_async_busy(void) { return job_active() || s_debug_busy != GUI_PACK_ASYNC_NONE; }
+bool gui_pack_async_busy(void) { return job_active() || s_job.debug_busy != GUI_PACK_ASYNC_NONE; }
 
 bool gui_pack_worker_active(void) { return job_active(); } /* excludes --shot debug busy */
 
 gui_pack_async_kind gui_pack_async_active_kind(void) {
-    if (s_debug_busy != GUI_PACK_ASYNC_NONE) {
-        return s_debug_busy;
+    if (s_job.debug_busy != GUI_PACK_ASYNC_NONE) {
+        return s_job.debug_busy;
     }
     tp_session *session = job_session();
     if (!session || !tp_session_job_active(session)) {
@@ -603,7 +608,7 @@ gui_pack_async_kind gui_pack_async_active_kind(void) {
 }
 
 double gui_pack_async_elapsed_sec(void) {
-    if (s_debug_busy != GUI_PACK_ASYNC_NONE) {
+    if (s_job.debug_busy != GUI_PACK_ASYNC_NONE) {
         return 3.2; /* fixed for reproducible --shot-packing captures */
     }
     tp_session *session = job_session();
@@ -614,7 +619,7 @@ double gui_pack_async_elapsed_sec(void) {
 }
 
 void gui_pack_export_progress(int *cur, int *total) {
-    if (s_debug_busy == GUI_PACK_ASYNC_EXPORT) {
+    if (s_job.debug_busy == GUI_PACK_ASYNC_EXPORT) {
         if (cur) {
             *cur = 2;
         }
@@ -638,13 +643,13 @@ void gui_pack_export_progress(int *cur, int *total) {
 void gui_pack_async_cancel(void) {
     tp_session *session = job_session();
     if (session && tp_session_job_cancel(session, NULL) == TP_STATUS_OK) {
-        s_cancel_requested = true;
+        s_job.cancel_requested = true;
     }
 }
 
-bool gui_pack_async_cancelling(void) { return job_active() && s_cancel_requested; }
+bool gui_pack_async_cancelling(void) { return job_active() && s_job.cancel_requested; }
 
-void gui_pack_debug_force_busy(gui_pack_async_kind kind) { s_debug_busy = kind; }
+void gui_pack_debug_force_busy(gui_pack_async_kind kind) { s_job.debug_busy = kind; }
 // #endregion
 
 // #region export-target preview (EXP-PREVIEW)
@@ -693,7 +698,7 @@ bool gui_pack_preview_async_start(int atlas_index, const char *exporter_id, char
     tp_error error = {{0}};
     const tp_pack_job_request request = {
         .atlas_id = atlas->id,
-        .work_dir = s_work_dir,
+        .work_dir = s_job.work_dir,
         .preview_exporter_id = exporter_id,
     };
     return report_job_start(
