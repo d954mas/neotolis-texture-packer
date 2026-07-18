@@ -16,7 +16,7 @@ hit() {
 app_srcs() {
     find apps -type f \( -name '*.c' -o -name '*.h' \) |
         grep -v '/deps/' |
-        grep -vE '/(gui_selftest|client_parity_replay|test_[^/]*|tp_bench_[^/]*)\.(c|h)$'
+        grep -vE '/(gui_selftest|client_parity_(manifest|replay)|test_[^/]*|tp_bench_[^/]*)\.(c|h)$'
 }
 
 # Shipping app/core sources only. Documentation, fixtures, unit tests, spikes,

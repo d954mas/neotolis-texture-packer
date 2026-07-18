@@ -14,7 +14,7 @@ set(total_lines 0)
 foreach(source IN LISTS production_sources)
     file(RELATIVE_PATH relative "${ROOT}" "${source}")
     string(REPLACE "\\" "/" relative "${relative}")
-    if(relative MATCHES "/deps/|/generated/|/(test_[^/]*|[^/]*_test|tp_bench_[^/]*|gui_selftest|build_packs)\\.c$")
+    if(relative MATCHES "/deps/|/generated/|/(test_[^/]*|[^/]*_test|tp_bench_[^/]*|gui_selftest|client_parity_(manifest|replay)|cli_[^/]*_payload_fixture|build_packs)\\.c$")
         continue()
     endif()
 
