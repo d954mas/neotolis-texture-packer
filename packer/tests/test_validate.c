@@ -369,6 +369,63 @@ void test_validation_accepts_spacing_at_effective_max_size(void) {
     TEST_ASSERT_EQUAL_INT(0, remove(project_path));
 }
 
+void test_validation_reports_loaded_animation_domains(void) {
+    const char *project_path =
+        TP_VALIDATE_TEST_DIR "/animation-domains.ntpacker_project";
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    tp_project_anim *low = NULL;
+    tp_project_anim *high = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_animation(&project->atlases[0], "low", &low));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_animation(&project->atlases[0], "high", &high));
+    TEST_ASSERT_NOT_NULL(low);
+    TEST_ASSERT_NOT_NULL(high);
+    low->fps = 0.0F;
+    low->playback = -1;
+    high->fps = -1.0F;
+    high->playback = 7;
+    tp_rng rng = tp_rng_os();
+    tp_error error = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK, tp_project_assign_missing_ids(project, &rng, &error),
+        error.msg);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK, tp_project_save(project, project_path, &error),
+        error.msg);
+    const tp_id128 low_id = low->id;
+    const tp_id128 high_id = high->id;
+    tp_project_destroy(project);
+
+    tp_validation_report report = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_validate_project_file(project_path, &report, &error), error.msg);
+    const tp_validation_finding *settings[4] = {0};
+    TEST_ASSERT_EQUAL_size_t(
+        4U, collect_setting_findings(&report, settings,
+                                     sizeof settings / sizeof settings[0]));
+    TEST_ASSERT_EQUAL_STRING("animation 'low' fps must be positive and finite",
+                             settings[0]->message);
+    TEST_ASSERT_EQUAL_STRING(
+        "animation 'low' playback = -1 is out of range [0..6]",
+        settings[1]->message);
+    TEST_ASSERT_EQUAL_STRING("animation 'high' fps must be positive and finite",
+                             settings[2]->message);
+    TEST_ASSERT_EQUAL_STRING(
+        "animation 'high' playback = 7 is out of range [0..6]",
+        settings[3]->message);
+    TEST_ASSERT_EQUAL_STRING("low", settings[0]->anim);
+    TEST_ASSERT_TRUE(tp_id128_eq(low_id, settings[0]->animation_id));
+    TEST_ASSERT_EQUAL_STRING("high", settings[2]->anim);
+    TEST_ASSERT_TRUE(tp_id128_eq(high_id, settings[2]->animation_id));
+    tp_validation_report_free(&report);
+    TEST_ASSERT_EQUAL_INT(0, remove(project_path));
+}
+
 void test_canonical_animation_frame_does_not_match_same_key_in_other_source(void) {
     char source_a[512];
     char source_b[512];
@@ -732,6 +789,7 @@ int main(void) {
     RUN_TEST(test_canonical_animation_frame_does_not_match_same_key_in_other_source);
     RUN_TEST(test_validation_reports_raw_atlas_and_sprite_pack_constraints);
     RUN_TEST(test_validation_accepts_spacing_at_effective_max_size);
+    RUN_TEST(test_validation_reports_loaded_animation_domains);
     RUN_TEST(test_save_rejects_invalid_canonical_key_normalization);
     RUN_TEST(test_target_row_diagnostics_reuse_full_validation_predicates);
     RUN_TEST(test_validation_does_not_misreport_existing_long_source_as_missing);

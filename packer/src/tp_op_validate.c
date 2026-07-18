@@ -27,7 +27,6 @@
 
 /* Reject NaN / +-inf; `pos` also rejects <= 0. No libm: comparisons only. */
 static bool finite_any(float v) { return v == v && v >= -FLT_MAX && v <= FLT_MAX; }
-static bool finite_pos(float v) { return v > 0.0F && v <= FLT_MAX; }
 
 static const tp_project_atlas *find_atlas(const tp_project *p, tp_id128 id) {
     int ai = tp_project_find_atlas_by_id(p, id);
@@ -483,11 +482,17 @@ static tp_status validate_sprite_set(const tp_project_atlas *atlas,
 
 /* fps + playback checks shared by animation.create / .settings.set. */
 static tp_status validate_anim_knobs(bool check_fps, float fps, bool check_pb, int pb, tp_op_reject *rej) {
-    if (check_fps && !finite_pos(fps)) {
+    if (check_fps && !tp_project_anim_fps_valid(fps)) {
         return tp_op__reject(rej, TP_STATUS_OUT_OF_RANGE, "fps", "fps must be positive finite");
     }
     if (check_pb) {
-        return range_i(rej, "playback", pb, 0, TP_OP_PLAYBACK_MAX);
+        if (!tp_project_anim_playback_valid(pb)) {
+            return tp_op__reject(
+                rej, TP_STATUS_OUT_OF_RANGE, "playback",
+                "playback = %d must be in [%d..%d]", pb,
+                TP_PROJECT_ANIM_PLAYBACK_MIN,
+                TP_PROJECT_ANIM_PLAYBACK_MAX);
+        }
     }
     return TP_STATUS_OK;
 }

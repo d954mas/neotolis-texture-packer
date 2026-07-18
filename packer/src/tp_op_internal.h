@@ -12,11 +12,6 @@
 #include "tp_core/tp_operation.h"
 #include "tp_core/tp_identity.h"
 
-/* Operation-only ranges that do not belong to the shared pack-setting contract.
- * Pack settings use TP_PACK_* constants/predicates from tp_pack.h so operation,
- * project validation, and pack admission cannot drift. */
-#define TP_OP_PLAYBACK_MAX 6
-
 /* Fill a structured rejection (task 5): status id + offending closed-vocab field +
  * human context. `field` may be NULL/"" when no single field is at fault. Returns
  * `st` so callers write `return tp_op__reject(rej, TP_STATUS_X, "field", "...")`. */

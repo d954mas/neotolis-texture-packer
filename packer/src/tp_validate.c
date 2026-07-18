@@ -85,6 +85,14 @@ static finding_context context_frame(const tp_project_atlas *atlas,
     return context;
 }
 
+static finding_context context_animation(const tp_project_atlas *atlas,
+                                         const tp_project_anim *animation) {
+    finding_context context = context_atlas(atlas);
+    context.anim = animation ? animation->name : NULL;
+    context.animation_id = animation ? animation->id : tp_id128_nil();
+    return context;
+}
+
 static finding_context context_target(const tp_project_atlas *atlas,
                                       const tp_project_target *target) {
     finding_context context = context_atlas(atlas);
@@ -957,6 +965,23 @@ static void validate_sprite_records(validation_builder *fs,
     }
     for (int an = 0; an < a->animation_count; an++) {
         const tp_project_anim *pa = &a->animations[an];
+        if (!tp_project_anim_fps_valid(pa->fps)) {
+            add_finding(fs, TP_VALIDATION_ERROR,
+                        TP_VALIDATION_CODE_SETTING_OUT_OF_RANGE,
+                        context_animation(a, pa),
+                        "animation '%s' fps must be positive and finite",
+                        pa->name ? pa->name : "");
+        }
+        if (!tp_project_anim_playback_valid(pa->playback)) {
+            add_finding(
+                fs, TP_VALIDATION_ERROR,
+                TP_VALIDATION_CODE_SETTING_OUT_OF_RANGE,
+                context_animation(a, pa),
+                "animation '%s' playback = %d is out of range [%d..%d]",
+                pa->name ? pa->name : "", pa->playback,
+                TP_PROJECT_ANIM_PLAYBACK_MIN,
+                TP_PROJECT_ANIM_PLAYBACK_MAX);
+        }
         for (int f = 0; f < pa->frame_count; f++) {
             const tp_project_frame *fr = &pa->frames[f];
             const tp_status key_status =

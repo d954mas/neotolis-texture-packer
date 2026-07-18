@@ -25,6 +25,7 @@
  */
 
 #include <stdbool.h>
+#include <float.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -105,6 +106,16 @@ typedef struct tp_project_anim {
 
 #define TP_PROJECT_ANIM_FPS_DEFAULT 30.0F
 #define TP_PROJECT_ANIM_PLAYBACK_DEFAULT 0
+#define TP_PROJECT_ANIM_PLAYBACK_MIN 0
+#define TP_PROJECT_ANIM_PLAYBACK_MAX 6
+
+static inline bool tp_project_anim_fps_valid(float value) {
+    return value > 0.0F && value <= FLT_MAX;
+}
+static inline bool tp_project_anim_playback_valid(int value) {
+    return value >= TP_PROJECT_ANIM_PLAYBACK_MIN &&
+           value <= TP_PROJECT_ANIM_PLAYBACK_MAX;
+}
 
 /* One export target: a pluggable exporter id + its output path. `enabled`
  * defaults true (sparse: only written when false). */
