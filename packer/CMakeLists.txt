@@ -11,7 +11,7 @@ find_package(Threads REQUIRED)
 
 add_library(tp_core STATIC
     src/tp_arena.c src/tp_fs_internal.c src/tp_image.c src/tp_json_internal.c src/tp_utf8.c src/tp_names.c src/tp_name_map.c src/tp_pack_read.c src/tp_project.c
-    src/tp_pack_settings.c src/tp_pack_constraints.c src/tp_scan.c src/tp_input.c src/tp_validate.c
+    src/tp_pack_settings.c src/tp_pack_constraints.c src/tp_transform.c src/tp_scan.c src/tp_input.c src/tp_validate.c
     src/tp_export.c src/tp_normalize.c src/tp_export_png.c src/tp_export_json_neotolis.c
     src/tp_export_defold.c
     # Project identity, canonical paths, leases, source plans, and recovery.

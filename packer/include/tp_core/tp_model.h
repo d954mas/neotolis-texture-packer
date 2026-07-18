@@ -21,6 +21,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "tp_core/tp_transform.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -34,12 +36,6 @@ typedef struct tp_point {
  * Apply order is diagonal -> flipH -> flipV; when bit2 (diagonal) is set the
  * trim dimensions (w,h) are swapped before flipping. 0 = identity.
  */
-typedef enum tp_transform {
-    TP_TRANSFORM_FLIP_H = 1,
-    TP_TRANSFORM_FLIP_V = 2,
-    TP_TRANSFORM_DIAGONAL = 4
-} tp_transform;
-
 typedef struct tp_sprite {
     const char *name; /* resolved via tp_name_map from the region's name_hash */
     int page;         /* multipack page index */
