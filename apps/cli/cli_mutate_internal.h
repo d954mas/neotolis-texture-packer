@@ -22,6 +22,7 @@ bool to_floats_csv(const char *s, float *out, int want);
 bool parse_playback(const char *s, int *out);
 char *cli_strdup(const char *s);
 bool cli_gen_id(tp_id128 *out);
+bool status_is_internal_fault(tp_status status);
 
 typedef struct cli_edit {
     tp_session *session;
@@ -45,5 +46,9 @@ int edit_fail_usage(cli_edit *edit, bool json, bool quiet,
 int commit_session_ops(cli_edit *edit, tp_operation *ops, int nops,
                        const char *verb, int count, const char *human,
                        bool json, bool quiet);
+void free_ops(tp_operation *ops, int n);
+
+int do_add(const char *const *pos, int npos, bool json, bool quiet);
+int do_remove_source(const char *const *pos, int npos, bool json, bool quiet);
 
 #endif /* NTPACKER_CLI_MUTATE_INTERNAL_H */

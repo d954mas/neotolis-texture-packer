@@ -63,7 +63,7 @@ fi
 #    tp_project_atlas_seed_default_target (project
 #    lifecycle, not a mutation op) are deliberately NOT in the banned set. A legit
 #    exception carries a "boundary-ok:" note on the same line.
-_cutover="apps/cli/cli_mutate.c"
+_cutover=$(find apps/cli -maxdepth 1 -type f -name 'cli_mutate*.c')
 # The inline project mutators the F2-05a ops replaced (op-payload field WRITES reuse the
 # same field NAMES, so a blanket field-name ban would false-positive: the reliable proof
 # of the cutover is that NONE of these mutators are called + a write into p->atlases[]).
@@ -78,12 +78,12 @@ _projwrite='p->atlases\[[^]]*\]\.[A-Za-z_]+[[:space:]]*=[^=]'
 # this does not false-positive.
 _aliaswrite='(^|[^A-Za-z0-9_])(a|an|t)->[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=[^=]'
 
-if [ -f "$_cutover" ]; then
-    r6a=$(grep -nE "$_muts" "$_cutover" 2>/dev/null | grep -v 'boundary-ok:')
+if [ -n "$_cutover" ]; then
+    r6a=$(printf '%s\n' "$_cutover" | xargs grep -nE "$_muts" 2>/dev/null | grep -v 'boundary-ok:')
     [ -n "$r6a" ] && hit "R6a inline project mutator in cli_mutate (use a tp_operation)" "$r6a"
-    r6b=$(grep -nE "$_projwrite" "$_cutover" 2>/dev/null | grep -v 'boundary-ok:')
+    r6b=$(printf '%s\n' "$_cutover" | xargs grep -nE "$_projwrite" 2>/dev/null | grep -v 'boundary-ok:')
     [ -n "$r6b" ] && hit "R6b direct write into the loaded project in cli_mutate (build an op)" "$r6b"
-    r6c=$(grep -nE "$_aliaswrite" "$_cutover" 2>/dev/null | grep -v 'boundary-ok:')
+    r6c=$(printf '%s\n' "$_cutover" | xargs grep -nE "$_aliaswrite" 2>/dev/null | grep -v 'boundary-ok:')
     [ -n "$r6c" ] && hit "R6c write through a loaded-project alias in cli_mutate (build an op)" "$r6c"
 
     # Self-test: prove the R6 detectors actually FIRE on a seeded violation (fail closed if
@@ -438,6 +438,7 @@ fi
 # for, so it is deliberately left out of the registry and the scan.
 _internal_header_registry() {
     cat <<'EOF'
+cli_mutate_internal     cli_mutate|cli_mutate_source|cli_mutate_atlas|cli_mutate_sprite|cli_mutate_anim|cli_mutate_target
 tp_diff_internal        tp_diff_entity|tp_diff_apply|tp_diff_capture|tp_history|tp_history_codec|tp_history_codec_internal|tp_op_apply|tp_txn_apply
 tp_op_internal          tp_op_catalog|tp_op_validate|tp_op_apply|tp_op_build|tp_op_encode|tp_txn_encode|tp_txn_apply|tp_txn_lower|tp_txn_parse
 tp_encode_internal      tp_op_encode|tp_txn_encode|tp_txn_apply
