@@ -449,9 +449,11 @@ tp_journal_internal     tp_journal|tp_journal_io|tp_history|tp_txn_apply|tp_reco
 tp_json_internal        tp_json_internal|tp_project|tp_txn_parse
 tp_utf8_internal        tp_utf8|tp_fs_io|tp_image|tp_json_internal|tp_op_validate|tp_project_identity|tp_source_path_text
 tp_idset_internal       tp_idset|tp_txn_idset|tp_journal|tp_txn_apply
-tp_project_internal     tp_project|tp_project_identity|tp_history|tp_session|tp_txn_apply
-tp_project_path_internal tp_project|tp_project_path
-tp_project_identity_internal tp_project|tp_project_identity|tp_history_codec|tp_input|tp_op_validate|tp_session|tp_txn_apply
+tp_project_internal     tp_project|tp_project_identity|tp_project_parse_internal|tp_project_write_internal|tp_project_write|tp_history|tp_session|tp_txn_apply
+tp_project_path_internal tp_project|tp_project_path|tp_project_write
+tp_project_parse_internal tp_project|tp_project_write
+tp_project_write_internal tp_project|tp_project_write
+tp_project_identity_internal tp_project|tp_project_identity|tp_project_write|tp_history_codec|tp_input|tp_op_validate|tp_session|tp_txn_apply
 tp_project_generation_internal tp_project_generation|tp_session_snapshot|tp_txn_apply
 tp_project_mutation_internal tp_project|tp_diff_entity|tp_diff_apply|tp_diff_capture|tp_export_run|tp_input|tp_op_apply|tp_op_validate|tp_session|tp_session_snapshot
 tp_txn_internal         tp_txn_apply|tp_txn_parse|tp_txn_encode|tp_txn_idset|tp_txn_lower|tp_project_clone|tp_history
