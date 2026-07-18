@@ -127,3 +127,25 @@ change, while an in-range move against the wrong frame remains detectable only
 by a future versioned history format. This is deferred to the codec work after
 the P1-02 fixed-byte oracle; the simplification packet does not invent an
 incompatible v1 field.
+
+## P1-07 Save outcome table
+
+The executable matrices in `test_save_io_contract.c` and
+`test_session_save_io_contract.c` pin the complete ownership boundary. “No
+checkpoint” below means the session does not advance its saved anchor or compact
+its recovery journal; serialization of the private publication candidate is not
+an acknowledged checkpoint.
+
+| Seam | Destination after return | Published / fingerprint | Session baseline, path, dirty, Undo, events | Checkpoint / journal compaction | Public result | Retry rule |
+|---|---|---|---|---|---|---|
+| temp open | previous bytes | no / nil | unchanged | none | `FILE_IO_FAILED`, phase `temp_open`, CLI 8 | caller may issue a new Save |
+| temp write | previous bytes | no / nil | unchanged | none | `FILE_IO_FAILED`, phase `temp_write`, CLI 8 | caller may issue a new Save |
+| file sync | previous bytes | no / nil | unchanged | none | `FILE_IO_FAILED`, phase `file_sync`, CLI 8 | caller may issue a new Save |
+| temp close | previous bytes | no / nil | unchanged | none | `FILE_IO_FAILED`, phase `temp_close`, CLI 8 | caller may issue a new Save |
+| atomic replace | previous bytes | no / nil | unchanged | none | `FILE_IO_FAILED`, phase `atomic_replace`, CLI 8 | caller may issue a new Save |
+| atomic create | destination remains absent | no / nil | old identity/fingerprint unchanged | none | `FILE_IO_FAILED`, phase `atomic_create`, CLI 8 | caller may issue a new Save |
+| parent sync | new bytes authoritative | yes / published fingerprint | advances path, fingerprint and clean anchor; emits Saved | compact attempted exactly as normal Save | success plus `file_durability_uncertain` notice, CLI 0 | never retry as a failed publication |
+
+All pre-publication errors also carry the attempted public path and the captured
+errno-compatible native cause. The product performs no automatic atomic-replace
+retry.

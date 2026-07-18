@@ -138,16 +138,12 @@ void cli_out_stdout(const cli_sb *sb) {
 /* Shared body for cli_emit_error / cli_emit_reject: formats the message once, then
  * emits. JSON mode -> {"schema":1,"error":{"id":...,"message":...[,"field":...,
  * "op_index":...]}} to STDOUT; text mode -> "ntpacker: error [id]: msg" to STDERR
- * (suppressed by --quiet). `has_loc` gates the two reject-only fields so the generic
- * cli_emit_error output stays byte-identical. */
-static void emit_error_v(bool json, bool quiet, const char *id, bool has_loc, const char *field, int op_index,
-                         const char *fmt, va_list ap) CLI_PRINTF_ATTR(7, 0);
-
-static void emit_error_v(bool json, bool quiet, const char *id, bool has_loc, const char *field, int op_index,
-                         const char *fmt, va_list ap) {
-    char msg[256];
-    (void)vsnprintf(msg, sizeof msg, fmt, ap);
-
+ * (suppressed by --quiet). `has_loc` gates the reject-only fields and `file_io`
+ * gates Save-only fields, so generic cli_emit_error stays byte-identical. */
+static void emit_error_message(bool json, bool quiet, const char *id,
+                               bool has_loc, const char *field, int op_index,
+                               const tp_file_io_context *file_io,
+                               const char *msg) {
     if (json) {
         cli_sb sb = {0};
         cli_sb_str(&sb, "{\"schema\":1,\"error\":{\"id\":");
@@ -160,12 +156,19 @@ static void emit_error_v(bool json, bool quiet, const char *id, bool has_loc, co
             cli_sb_str(&sb, ",\"op_index\":");
             cli_sb_int(&sb, op_index);
         }
+        if (file_io) {
+            cli_sb_str(&sb, ",\"phase\":");
+            cli_sb_json_str(&sb, tp_file_io_phase_id(file_io->phase));
+            cli_sb_str(&sb, ",\"path\":");
+            cli_sb_json_str(&sb, file_io->path ? file_io->path : "");
+            cli_sb_str(&sb, ",\"native_code\":");
+            cli_sb_int(&sb, file_io->native_code);
+        }
         cli_sb_str(&sb, "}}");
-        if (sb.oom) { /* a failed grow poisons the builder -> the buffer is TRUNCATED. Never emit a
-                       * partial (unparseable) --json line on the machine contract: fall back to a
-                       * minimal VALID error object, mirroring cli_emit_mutation's OOM guard. */
+        if (sb.oom) {
             cli_sb_free(&sb);
-            (void)fputs("{\"schema\":1,\"error\":{\"id\":\"internal\"}}\n", stdout);
+            (void)fputs("{\"schema\":1,\"error\":{\"id\":\"internal\"}}\n",
+                        stdout);
             return;
         }
         cli_out_stdout(&sb);
@@ -173,6 +176,27 @@ static void emit_error_v(bool json, bool quiet, const char *id, bool has_loc, co
     } else if (!quiet) {
         (void)fprintf(stderr, "ntpacker: error [%s]: %s\n", id, msg);
     }
+}
+
+static void emit_error_v(bool json, bool quiet, const char *id, bool has_loc,
+                         const char *field, int op_index, const char *fmt,
+                         va_list ap) CLI_PRINTF_ATTR(7, 0);
+
+static void emit_error_v(bool json, bool quiet, const char *id, bool has_loc, const char *field, int op_index,
+                         const char *fmt, va_list ap) {
+    char msg[256];
+    (void)vsnprintf(msg, sizeof msg, fmt, ap);
+    emit_error_message(json, quiet, id, has_loc, field, op_index, NULL, msg);
+}
+
+void cli_emit_file_io_error(bool json, bool quiet, const tp_error *error) {
+    const tp_file_io_context fallback = {TP_FILE_IO_PHASE_NONE, "", 0};
+    const tp_file_io_context *context = error ? &error->file_io : &fallback;
+    const char *message = error && error->msg[0]
+                              ? error->msg
+                              : tp_status_str(TP_STATUS_FILE_IO_FAILED);
+    emit_error_message(json, quiet, tp_status_id(TP_STATUS_FILE_IO_FAILED),
+                       false, "", -1, context, message);
 }
 
 void cli_emit_error(bool json, bool quiet, const char *id, const char *fmt, ...) {

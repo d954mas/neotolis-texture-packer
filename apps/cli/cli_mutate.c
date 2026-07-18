@@ -21,6 +21,7 @@
  *   3 project : load/parse error, `new` on an existing path, or a selector that names
  *               a missing model element (atlas/source/anim/frame/target).
  *   1 internal: OOM / RNG fault from the transaction, promote, or save.
+ *   8 file I/O: Save failed before atomic publication (typed phase/path/cause).
  *   0 ok.
  * A committed transaction that rejects maps its tp_status to this split
  * (cli_exit_for_rejected_status); the emitted structured error carries the core
@@ -433,6 +434,18 @@ static int edit_fail_usage(cli_edit *edit, bool json, bool quiet,
     return CLI_EXIT_USAGE;
 }
 
+static int emit_save_failure(tp_status status, const tp_error *error,
+                             bool json, bool quiet) {
+    if (status == TP_STATUS_FILE_IO_FAILED) {
+        cli_emit_file_io_error(json, quiet, error);
+    } else {
+        cli_emit_error(json, quiet, tp_status_id(status), "%s",
+                       error && error->msg[0] ? error->msg
+                                             : tp_status_str(status));
+    }
+    return cli_exit_for_save_status(status);
+}
+
 static int commit_session_ops(cli_edit *edit, tp_operation *ops, int nops,
                               const char *verb, int count,
                               const char *human, bool json, bool quiet) {
@@ -456,10 +469,7 @@ static int commit_session_ops(cli_edit *edit, tp_operation *ops, int nops,
         tp_session_save_result save_result;
         status = tp_session_save(edit->session, &save_result, &err);
         if (status != TP_STATUS_OK) {
-            cli_emit_error(json, quiet, tp_status_id(status), "%s",
-                           err.msg[0] ? err.msg : tp_status_str(status));
-            rc = status_is_internal_fault(status) ? CLI_EXIT_INTERNAL
-                                                   : CLI_EXIT_PROJECT;
+            rc = emit_save_failure(status, &err, json, quiet);
         } else if (json) {
             cli_emit_mutation(verb, count, &save_result);
         } else if (!quiet) {
@@ -488,13 +498,9 @@ static int do_new(const char *path, bool json, bool quiet) {
         st = tp_session_save_new(session, path, &result, &err);
     }
     if (st != TP_STATUS_OK) {
-        cli_emit_error(json, quiet, tp_status_id(st), "%s",
-                       err.msg[0] ? err.msg : tp_status_str(st));
+        const int exit_code = emit_save_failure(st, &err, json, quiet);
         tp_session_destroy(session);
-        return st == TP_STATUS_OOM || st == TP_STATUS_RNG_FAILED ||
-                       st == TP_STATUS_DUPLICATE_ID
-                   ? CLI_EXIT_INTERNAL
-                   : CLI_EXIT_PROJECT;
+        return exit_code;
     }
     char human[CLI_PATH_MAX + 32];
     (void)snprintf(human, sizeof human, "Created project %s", path);

@@ -140,6 +140,17 @@ foreach(_suffix IN ITEMS
         message(FATAL_ERROR "pack absolute output suffix missing: ${_suffix}")
     endif()
 endforeach()
+
+# Pre-publication Save failure is a real error with its own exit code at the
+# command boundary. Pin the complete typed JSON object independently of OS I/O.
+execute_process(COMMAND "${FILE_IO_EXE}"
+    RESULT_VARIABLE _file_io_exit OUTPUT_VARIABLE _file_io
+    ERROR_VARIABLE _file_io_err)
+if(NOT _file_io_exit EQUAL 8 OR NOT "${_file_io_err}" STREQUAL "")
+    message(FATAL_ERROR
+        "file I/O payload fixture failed: exit=${_file_io_exit} err=${_file_io_err}")
+endif()
+assert_exact("${_file_io}" "${EXPECTED}/file-io-error.expected.json")
 assert_occurrences("${_pack}" "${_pack_root}" 3 "pack output root")
 string(REPLACE "${_pack_root}" "<PACK_ROOT>" _pack_norm "${_pack}")
 string(REGEX MATCHALL "\"total\": [-+0-9.eE]+" _timing_fields

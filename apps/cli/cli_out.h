@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#include "tp_core/tp_error.h"
+
 struct tp_session_save_result;
 
 /* Minimal local JSON/text string builder for the CLI. Deliberately NOT
@@ -40,6 +42,10 @@ void cli_out_stdout(const cli_sb *sb);
  * Text mode: "ntpacker: error [id]: msg" to STDERR, suppressed by --quiet. Never
  * writes both streams. `id` is a stable machine token (usage/tp_status_id/...). */
 void cli_emit_error(bool json, bool quiet, const char *id, const char *fmt, ...) CLI_PRINTF_ATTR(4, 5);
+
+/* Typed pre-publication Save error. JSON adds stable phase/path/native_code
+ * fields; text keeps the ordinary one-line error form. */
+void cli_emit_file_io_error(bool json, bool quiet, const tp_error *error);
 
 /* Structured error for a REJECTED transaction: like cli_emit_error but the JSON
  * payload also carries the offending op's `field` (closed-vocabulary key; "" if

@@ -13,3 +13,14 @@ int cli_exit_for_rejected_status(tp_status status) {
         return CLI_EXIT_USAGE;
     }
 }
+
+int cli_exit_for_save_status(tp_status status) {
+    if (status == TP_STATUS_FILE_IO_FAILED) {
+        return CLI_EXIT_FILE_IO;
+    }
+    if (status == TP_STATUS_OOM || status == TP_STATUS_RNG_FAILED ||
+        status == TP_STATUS_DUPLICATE_ID) {
+        return CLI_EXIT_INTERNAL;
+    }
+    return CLI_EXIT_PROJECT;
+}
