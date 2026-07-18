@@ -464,6 +464,7 @@ tp_recovery_live_seam   tp_session|tp_recovery|tp_recovery_internal
 tp_session_internal     tp_session|tp_session_snapshot|tp_session_layout|tp_recovery|tp_validate|tp_validate_target_settings|tp_export|tp_export_run|tp_input|tp_sprite_index
 tp_session_layout       tp_session|tp_session_snapshot
 tp_session_snapshot_internal tp_session_snapshot|tp_session_snapshot_query
+tp_recovery_backend_types_internal tp_recovery
 tp_recovery_internal    tp_recovery
 tp_job_owner_internal   tp_session|tp_job
 tp_source_plan_internal tp_source_plan|tp_op_validate|tp_op_validate_source_sprite

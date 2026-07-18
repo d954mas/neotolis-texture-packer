@@ -17,6 +17,7 @@
 #include "tp_fs_internal.h"
 #include "tp_journal_internal.h"
 #include "tp_model_seam.h"
+#include "tp_recovery_backend_types_internal.h"
 #include "tp_recovery_internal.h"
 #include "tp_session_internal.h"
 
@@ -54,17 +55,9 @@ struct tp_recovery_store {
     tp_id128 journal_key;
 };
 
-typedef struct recovery_lock {
-    char lock_path[TP_RECOVERY_LOCK_PATH_MAX];
-#ifdef _WIN32
-    HANDLE handle;
-#else
-    int fd;
-#endif
-} recovery_lock;
-
 struct tp_recovery_claim {
-    recovery_lock lock;
+    tp_recovery_lock_pin lock;
+    char lock_path[TP_RECOVERY_LOCK_PATH_MAX];
     char journal_path[TP_IDENTITY_PATH_MAX];
     tp_id128 journal_key;
     tp_recovery_owned_candidate *candidate;
@@ -78,16 +71,7 @@ struct tp_recovery_owned_candidate {
     tp_id128 recovery_token;
     bool has_metadata;
     bool has_recovery_token;
-#ifdef _WIN32
-    HANDLE journal_handle;
-    DWORD journal_volume;
-    DWORD journal_index_high;
-    DWORD journal_index_low;
-#else
-    int journal_fd;
-    dev_t journal_device;
-    ino_t journal_inode;
-#endif
+    tp_recovery_file_pin journal_pin;
 };
 
 struct tp_recovery_resolution {
@@ -101,17 +85,9 @@ struct tp_recovery_resolution {
 struct tp_recovery_live {
     char journal_path[TP_IDENTITY_PATH_MAX];
     tp_id128 journal_key;
-    recovery_lock lock;
-#ifdef _WIN32
-    DWORD journal_volume;
-    DWORD journal_index_high;
-    DWORD journal_index_low;
-#else
-    int journal_fd;
-    dev_t journal_device;
-    ino_t journal_inode;
-#endif
-    bool has_journal_identity;
+    tp_recovery_lock_pin lock;
+    char lock_path[TP_RECOVERY_LOCK_PATH_MAX];
+    tp_recovery_file_pin journal_pin;
     tp_model *attached_model;
     int64_t metadata_timestamp;
     char metadata_name[256];
@@ -263,12 +239,13 @@ static tp_journal_io journal_read_nofollow(const char *path) {
     return tp_journal_io_file_adopt_fd_read(fd);
 }
 
-static tp_journal_io live_io_create_new(tp_recovery_live *live,
+static tp_journal_io live_io_create_new(const char *journal_path,
+                                        tp_recovery_file_pin *pin,
                                         tp_status *status_out, tp_error *err) {
     tp_journal_io io;
     memset(&io, 0, sizeof io);
     *status_out = TP_STATUS_JOURNAL_FAILED;
-    WCHAR *wide = tp_fs_win32_path_alloc(live->journal_path);
+    WCHAR *wide = tp_fs_win32_path_alloc(journal_path);
     if (!wide) {
         (void)tp_error_set(err, TP_STATUS_JOURNAL_FAILED,
                            "recovery live journal path conversion failed");
@@ -308,13 +285,15 @@ static tp_journal_io live_io_create_new(tp_recovery_live *live,
                            "recovery live journal descriptor conversion failed");
         return io;
     }
-    live->journal_volume = info.dwVolumeSerialNumber;
-    live->journal_index_high = info.nFileIndexHigh;
-    live->journal_index_low = info.nFileIndexLow;
-    live->has_journal_identity = true;
+    pin->identity_high = info.dwVolumeSerialNumber;
+    pin->identity_low = ((uint64_t)info.nFileIndexHigh << 32U) |
+                        (uint64_t)info.nFileIndexLow;
+    pin->has_identity = true;
     io = tp_journal_io_file_adopt_fd(fd);
     if (!io.ctx) {
-        live->has_journal_identity = false;
+        pin->identity_high = 0U;
+        pin->identity_low = 0U;
+        pin->has_identity = false;
         *status_out = TP_STATUS_OOM;
         (void)tp_error_set(err, TP_STATUS_OOM,
                            "recovery live journal I/O allocation failed");
@@ -322,16 +301,17 @@ static tp_journal_io live_io_create_new(tp_recovery_live *live,
     return io;
 }
 
-static void live_close_pin(tp_recovery_live *live) {
-    (void)live;
+static void live_close_pin(tp_recovery_file_pin *pin) {
+    (void)pin;
 }
 
-static tp_status live_delete_pin(tp_recovery_live *live, tp_error *err) {
-    if (!live || !live->has_journal_identity) {
+static tp_status live_delete_pin(const char *journal_path,
+                                 tp_recovery_file_pin *pin, tp_error *err) {
+    if (!journal_path || !pin || !pin->has_identity) {
         return tp_error_set(err, TP_STATUS_RECOVERY_CLEANUP_FAILED,
                             "recovery live journal pin is unavailable");
     }
-    WCHAR *wide = tp_fs_win32_path_alloc(live->journal_path);
+    WCHAR *wide = tp_fs_win32_path_alloc(journal_path);
     if (!wide) {
         return tp_error_set(err, TP_STATUS_RECOVERY_CLEANUP_FAILED,
                             "recovery live journal path conversion failed");
@@ -350,9 +330,9 @@ static tp_status live_delete_pin(tp_recovery_live *live, tp_error *err) {
     BY_HANDLE_FILE_INFORMATION info;
     if (!handle_is_regular_nofollow(handle) ||
         !GetFileInformationByHandle(handle, &info) ||
-        info.dwVolumeSerialNumber != live->journal_volume ||
-        info.nFileIndexHigh != live->journal_index_high ||
-        info.nFileIndexLow != live->journal_index_low) {
+        (uint64_t)info.dwVolumeSerialNumber != pin->identity_high ||
+        (((uint64_t)info.nFileIndexHigh << 32U) |
+         (uint64_t)info.nFileIndexLow) != pin->identity_low) {
         (void)CloseHandle(handle);
         return tp_error_set(err, TP_STATUS_RECOVERY_CLEANUP_FAILED,
                             "recovery live journal path no longer names the pinned slot");
@@ -371,8 +351,9 @@ static tp_status live_delete_pin(tp_recovery_live *live, tp_error *err) {
     return TP_STATUS_OK;
 }
 
-static tp_status lock_open(recovery_lock *lock, tp_error *err) {
-    WCHAR *wide = tp_fs_win32_path_alloc(lock->lock_path);
+static tp_status lock_open(tp_recovery_lock_pin *lock, const char *lock_path,
+                           tp_error *err) {
+    WCHAR *wide = tp_fs_win32_path_alloc(lock_path);
     if (!wide) {
         return tp_error_set(err, TP_STATUS_RECOVERY_CLAIM_FAILED,
                             "recovery claim lock path conversion failed");
@@ -397,14 +378,15 @@ static tp_status lock_open(recovery_lock *lock, tp_error *err) {
         return tp_error_set(err, TP_STATUS_RECOVERY_CLAIM_FAILED,
                             "recovery claim lock path is not a regular file");
     }
-    lock->handle = handle;
+    lock->native_handle = (intptr_t)handle;
     return TP_STATUS_OK;
 }
 
-static void lock_release(recovery_lock *lock) {
-    if (lock->handle && lock->handle != INVALID_HANDLE_VALUE) {
-        (void)CloseHandle(lock->handle);
-        lock->handle = INVALID_HANDLE_VALUE;
+static void lock_release(tp_recovery_lock_pin *lock) {
+    HANDLE handle = (HANDLE)lock->native_handle;
+    if (handle && handle != INVALID_HANDLE_VALUE) {
+        (void)CloseHandle(handle);
+        lock->native_handle = -1;
     }
 }
 
@@ -427,7 +409,7 @@ static bool lock_is_unowned(const char *lock_path) {
     return unowned;
 }
 
-static tp_journal_io candidate_pin(tp_recovery_owned_candidate *candidate,
+static tp_journal_io candidate_pin(tp_recovery_file_pin *pin,
                                    const char *path, tp_status *status_out,
                                    tp_error *err) {
     tp_journal_io io;
@@ -483,36 +465,39 @@ static tp_journal_io candidate_pin(tp_recovery_owned_candidate *candidate,
                            "recovery journal read I/O allocation failed");
         return io;
     }
-    candidate->journal_handle = handle;
-    candidate->journal_volume = info.dwVolumeSerialNumber;
-    candidate->journal_index_high = info.nFileIndexHigh;
-    candidate->journal_index_low = info.nFileIndexLow;
+    pin->native_handle = (intptr_t)handle;
+    pin->identity_high = info.dwVolumeSerialNumber;
+    pin->identity_low = ((uint64_t)info.nFileIndexHigh << 32U) |
+                        (uint64_t)info.nFileIndexLow;
+    pin->has_identity = true;
     return io;
 }
 
-static void candidate_close_pin(tp_recovery_owned_candidate *candidate) {
-    if (candidate->journal_handle &&
-        candidate->journal_handle != INVALID_HANDLE_VALUE) {
-        (void)CloseHandle(candidate->journal_handle);
-        candidate->journal_handle = INVALID_HANDLE_VALUE;
+static void candidate_close_pin(tp_recovery_file_pin *pin) {
+    HANDLE handle = (HANDLE)pin->native_handle;
+    if (handle && handle != INVALID_HANDLE_VALUE) {
+        (void)CloseHandle(handle);
+        pin->native_handle = -1;
     }
 }
 
-static tp_status candidate_delete_pin(tp_recovery_owned_candidate *candidate,
+static tp_status candidate_delete_pin(tp_recovery_file_pin *pin,
+                                      const char *journal_path,
                                       tp_error *err) {
-    if (!candidate || candidate->journal_handle == INVALID_HANDLE_VALUE) {
+    (void)journal_path;
+    if (!pin || pin->native_handle == -1) {
         return tp_error_set(err, TP_STATUS_RECOVERY_CLEANUP_FAILED,
                             "recovery journal pin is unavailable");
     }
     FILE_DISPOSITION_INFO disposition = {.DeleteFile = TRUE};
-    if (!SetFileInformationByHandle(candidate->journal_handle,
+    if (!SetFileInformationByHandle((HANDLE)pin->native_handle,
                                     FileDispositionInfo, &disposition,
                                     sizeof disposition)) {
         return tp_error_set(err, TP_STATUS_RECOVERY_CLEANUP_FAILED,
                             "recovery journal could not be deleted (error %lu)",
                             (unsigned long)GetLastError());
     }
-    candidate_close_pin(candidate);
+    candidate_close_pin(pin);
     return TP_STATUS_OK;
 }
 // #endregion
@@ -649,7 +634,8 @@ static tp_journal_io journal_read_nofollow(const char *path) {
     return tp_journal_io_file_adopt_fd_read(fd);
 }
 
-static tp_journal_io live_io_create_new(tp_recovery_live *live,
+static tp_journal_io live_io_create_new(const char *journal_path,
+                                        tp_recovery_file_pin *pin,
                                         tp_status *status_out, tp_error *err) {
     tp_journal_io io;
     memset(&io, 0, sizeof io);
@@ -661,7 +647,7 @@ static tp_journal_io live_io_create_new(tp_recovery_live *live,
 #ifdef O_NOFOLLOW
     flags |= O_NOFOLLOW;
 #endif
-    const int fd = open(live->journal_path, flags, 0600);
+    const int fd = open(journal_path, flags, 0600);
     if (fd < 0) {
         if (errno == EEXIST) {
             *status_out = TP_STATUS_RECOVERY_BUSY;
@@ -682,25 +668,27 @@ static tp_journal_io live_io_create_new(tp_recovery_live *live,
                            code);
         return io;
     }
-    live->journal_fd = pin_fd;
+    pin->native_handle = pin_fd;
     struct stat info;
     if (fstat(fd, &info) != 0 || !S_ISREG(info.st_mode)) {
         const int code = errno;
-        (void)close(live->journal_fd);
-        live->journal_fd = -1;
+        (void)close((int)pin->native_handle);
+        pin->native_handle = -1;
         (void)close(fd);
         (void)tp_error_set(err, TP_STATUS_JOURNAL_FAILED,
                            "recovery live journal is not a regular file (error %d)", code);
         return io;
     }
-    live->journal_device = info.st_dev;
-    live->journal_inode = info.st_ino;
-    live->has_journal_identity = true;
+    pin->identity_high = (uint64_t)info.st_dev;
+    pin->identity_low = (uint64_t)info.st_ino;
+    pin->has_identity = true;
     io = tp_journal_io_file_adopt_fd(fd);
     if (!io.ctx) {
-        (void)close(live->journal_fd);
-        live->journal_fd = -1;
-        live->has_journal_identity = false;
+        (void)close((int)pin->native_handle);
+        pin->native_handle = -1;
+        pin->identity_high = 0U;
+        pin->identity_low = 0U;
+        pin->has_identity = false;
         *status_out = TP_STATUS_OOM;
         (void)tp_error_set(err, TP_STATUS_OOM,
                            "recovery live journal I/O allocation failed");
@@ -708,28 +696,30 @@ static tp_journal_io live_io_create_new(tp_recovery_live *live,
     return io;
 }
 
-static void live_close_pin(tp_recovery_live *live) {
-    if (live->journal_fd >= 0) {
-        (void)close(live->journal_fd);
-        live->journal_fd = -1;
+static void live_close_pin(tp_recovery_file_pin *pin) {
+    if (pin->native_handle >= 0) {
+        (void)close((int)pin->native_handle);
+        pin->native_handle = -1;
     }
 }
 
-static tp_status live_delete_pin(tp_recovery_live *live, tp_error *err) {
-    if (!live || live->journal_fd < 0 || !live->has_journal_identity) {
+static tp_status live_delete_pin(const char *journal_path,
+                                 tp_recovery_file_pin *pin, tp_error *err) {
+    if (!journal_path || !pin || pin->native_handle < 0) {
         return tp_error_set(err, TP_STATUS_RECOVERY_CLEANUP_FAILED,
                             "recovery live journal pin is unavailable");
     }
     const tp_status status = delete_pinned_path(
-        live->journal_path, live->journal_fd, live->journal_device,
-        live->journal_inode, err);
+        journal_path, (int)pin->native_handle, (dev_t)pin->identity_high,
+        (ino_t)pin->identity_low, err);
     if (status == TP_STATUS_OK) {
-        live_close_pin(live);
+        live_close_pin(pin);
     }
     return status;
 }
 
-static tp_status lock_open(recovery_lock *lock, tp_error *err) {
+static tp_status lock_open(tp_recovery_lock_pin *lock, const char *lock_path,
+                           tp_error *err) {
     int flags = O_CREAT | O_RDWR;
 #ifdef O_CLOEXEC
     flags |= O_CLOEXEC;
@@ -737,7 +727,7 @@ static tp_status lock_open(recovery_lock *lock, tp_error *err) {
 #ifdef O_NOFOLLOW
     flags |= O_NOFOLLOW;
 #endif
-    const int fd = open(lock->lock_path, flags, 0600);
+    const int fd = open(lock_path, flags, 0600);
     if (fd < 0) {
         return tp_error_set(err, TP_STATUS_RECOVERY_CLAIM_FAILED,
                             "recovery claim lock open failed (error %d)", errno);
@@ -759,15 +749,15 @@ static tp_status lock_open(recovery_lock *lock, tp_error *err) {
         return tp_error_set(err, TP_STATUS_RECOVERY_CLAIM_FAILED,
                             "recovery claim lock failed (error %d)", code);
     }
-    lock->fd = fd;
+    lock->native_handle = fd;
     return TP_STATUS_OK;
 }
 
-static void lock_release(recovery_lock *lock) {
-    if (lock->fd >= 0) {
-        (void)flock(lock->fd, LOCK_UN);
-        (void)close(lock->fd);
-        lock->fd = -1;
+static void lock_release(tp_recovery_lock_pin *lock) {
+    if (lock->native_handle >= 0) {
+        (void)flock((int)lock->native_handle, LOCK_UN);
+        (void)close((int)lock->native_handle);
+        lock->native_handle = -1;
     }
 }
 
@@ -796,7 +786,7 @@ static bool lock_is_unowned(const char *lock_path) {
     return unowned;
 }
 
-static tp_journal_io candidate_pin(tp_recovery_owned_candidate *candidate,
+static tp_journal_io candidate_pin(tp_recovery_file_pin *pin,
                                    const char *path, tp_status *status_out,
                                    tp_error *err) {
     tp_journal_io io;
@@ -838,30 +828,32 @@ static tp_journal_io candidate_pin(tp_recovery_owned_candidate *candidate,
                            "recovery journal read I/O allocation failed");
         return io;
     }
-    candidate->journal_fd = fd;
-    candidate->journal_device = info.st_dev;
-    candidate->journal_inode = info.st_ino;
+    pin->native_handle = fd;
+    pin->identity_high = (uint64_t)info.st_dev;
+    pin->identity_low = (uint64_t)info.st_ino;
+    pin->has_identity = true;
     return io;
 }
 
-static void candidate_close_pin(tp_recovery_owned_candidate *candidate) {
-    if (candidate->journal_fd >= 0) {
-        (void)close(candidate->journal_fd);
-        candidate->journal_fd = -1;
+static void candidate_close_pin(tp_recovery_file_pin *pin) {
+    if (pin->native_handle >= 0) {
+        (void)close((int)pin->native_handle);
+        pin->native_handle = -1;
     }
 }
 
-static tp_status candidate_delete_pin(tp_recovery_owned_candidate *candidate,
+static tp_status candidate_delete_pin(tp_recovery_file_pin *pin,
+                                      const char *journal_path,
                                       tp_error *err) {
-    if (!candidate || candidate->journal_fd < 0) {
+    if (!pin || pin->native_handle < 0) {
         return tp_error_set(err, TP_STATUS_RECOVERY_CLEANUP_FAILED,
                             "recovery journal pin is unavailable");
     }
     const tp_status status = delete_pinned_path(
-        candidate->owner->journal_path, candidate->journal_fd,
-        candidate->journal_device, candidate->journal_inode, err);
+        journal_path, (int)pin->native_handle,
+        (dev_t)pin->identity_high, (ino_t)pin->identity_low, err);
     if (status == TP_STATUS_OK) {
-        candidate_close_pin(candidate);
+        candidate_close_pin(pin);
     }
     return status;
 }
@@ -945,18 +937,14 @@ tp_status tp_recovery_store_create_live(tp_recovery_store *store,
         return tp_error_set(err, TP_STATUS_OOM,
                             "recovery live allocation failed");
     }
-#ifndef _WIN32
-    live->lock.fd = -1;
-    live->journal_fd = -1;
-#else
-    live->lock.handle = INVALID_HANDLE_VALUE;
-#endif
+    live->lock = TP_RECOVERY_LOCK_PIN_INIT;
+    live->journal_pin = TP_RECOVERY_FILE_PIN_INIT;
     tp_status status = lock_path_for(store, journal_path, live->journal_path,
                                      sizeof live->journal_path,
-                                     live->lock.lock_path,
-                                     sizeof live->lock.lock_path, err);
+                                     live->lock_path,
+                                     sizeof live->lock_path, err);
     if (status == TP_STATUS_OK) {
-        status = lock_open(&live->lock, err);
+        status = lock_open(&live->lock, live->lock_path, err);
     }
     if (status != TP_STATUS_OK) {
         free(live);
@@ -1013,7 +1001,9 @@ tp_status tp_recovery_live_attach(tp_recovery_live *live, tp_model *model,
                             "recovery live attach requires an open unattached live handle, model, and metadata");
     }
     tp_status io_status = TP_STATUS_JOURNAL_FAILED;
-    tp_journal_io io = live_io_create_new(live, &io_status, err);
+    tp_journal_io io = live_io_create_new(live->journal_path,
+                                          &live->journal_pin,
+                                          &io_status, err);
     if (!io.ctx) {
         live->healthy = false;
         return io_status;
@@ -1087,10 +1077,11 @@ static tp_status live_finish(tp_recovery_live *live, bool preserve_journal,
             status = tp_error_set(err, TP_STATUS_RECOVERY_CLEANUP_FAILED,
                                   "injected recovery live-retire cleanup failure");
         } else {
-            status = live_delete_pin(live, err);
+            status = live_delete_pin(live->journal_path,
+                                     &live->journal_pin, err);
         }
     }
-    live_close_pin(live);
+    live_close_pin(&live->journal_pin);
     lock_release(&live->lock);
     live->finished = true;
     live->terminal_status = status;
@@ -1127,16 +1118,12 @@ tp_status tp_recovery_store_claim(tp_recovery_store *store, const char *journal_
     if (!claim) {
         return tp_error_set(err, TP_STATUS_OOM, "recovery claim allocation failed");
     }
-#ifndef _WIN32
-    claim->lock.fd = -1;
-#else
-    claim->lock.handle = INVALID_HANDLE_VALUE;
-#endif
+    claim->lock = TP_RECOVERY_LOCK_PIN_INIT;
     char journal[TP_IDENTITY_PATH_MAX];
     tp_status status = lock_path_for(store, journal_path, journal, sizeof journal,
-                                     claim->lock.lock_path, sizeof claim->lock.lock_path, err);
+                                     claim->lock_path, sizeof claim->lock_path, err);
     if (status == TP_STATUS_OK) {
-        status = lock_open(&claim->lock, err);
+        status = lock_open(&claim->lock, claim->lock_path, err);
     }
     if (status != TP_STATUS_OK) {
         free(claim);
@@ -1152,7 +1139,7 @@ static void owned_candidate_destroy(tp_recovery_owned_candidate *candidate) {
     if (!candidate) {
         return;
     }
-    candidate_close_pin(candidate);
+    candidate_close_pin(&candidate->journal_pin);
     tp_project_destroy(candidate->project);
     free(candidate->metadata.path);
     free(candidate->metadata.name);
@@ -1188,13 +1175,10 @@ tp_status tp_recovery_claim_recover(tp_recovery_claim *claim,
                             "recovery candidate allocation failed");
     }
     candidate->owner = claim;
-#ifdef _WIN32
-    candidate->journal_handle = INVALID_HANDLE_VALUE;
-#else
-    candidate->journal_fd = -1;
-#endif
+    candidate->journal_pin = TP_RECOVERY_FILE_PIN_INIT;
     tp_status pin_status = TP_STATUS_BAD_PROJECT;
-    tp_journal_io io = candidate_pin(candidate, claim->journal_path,
+    tp_journal_io io = candidate_pin(&candidate->journal_pin,
+                                     claim->journal_path,
                                      &pin_status, err);
     if (!io.ctx) {
         owned_candidate_destroy(candidate);
@@ -1415,7 +1399,8 @@ tp_status tp_recovery_resolution_finalize(
     if (status != TP_STATUS_OK) {
         return status;
     }
-    status = candidate_delete_pin(candidate, err);
+    status = candidate_delete_pin(&candidate->journal_pin,
+                                  claim->journal_path, err);
     if (status == TP_STATUS_OK) {
         tp_project_lease_release(resolution->project_lease);
         resolution->project_lease = NULL;
@@ -1461,7 +1446,8 @@ tp_status tp_recovery_claim_discard(tp_recovery_claim *claim, tp_error *err) {
                             "discard cannot race an active recovery resolution");
     }
     if (claim->candidate) {
-        return candidate_delete_pin(claim->candidate, err);
+        return candidate_delete_pin(&claim->candidate->journal_pin,
+                                    claim->journal_path, err);
     }
     tp_recovery_owned_candidate *candidate =
         (tp_recovery_owned_candidate *)calloc(1, sizeof *candidate);
@@ -1470,13 +1456,10 @@ tp_status tp_recovery_claim_discard(tp_recovery_claim *claim, tp_error *err) {
                             "discard candidate allocation failed");
     }
     candidate->owner = claim;
-#ifdef _WIN32
-    candidate->journal_handle = INVALID_HANDLE_VALUE;
-#else
-    candidate->journal_fd = -1;
-#endif
+    candidate->journal_pin = TP_RECOVERY_FILE_PIN_INIT;
     tp_status pin_status = TP_STATUS_BAD_PROJECT;
-    tp_journal_io io = candidate_pin(candidate, claim->journal_path,
+    tp_journal_io io = candidate_pin(&candidate->journal_pin,
+                                     claim->journal_path,
                                      &pin_status, err);
     if (!io.ctx) {
         owned_candidate_destroy(candidate);
@@ -1498,7 +1481,8 @@ tp_status tp_recovery_claim_discard(tp_recovery_claim *claim, tp_error *err) {
                    : tp_error_set(err, TP_STATUS_BAD_PROJECT,
                                   "discard requires a journal from this recovery domain");
     }
-    status = candidate_delete_pin(candidate, err);
+    status = candidate_delete_pin(&candidate->journal_pin,
+                                  claim->journal_path, err);
     owned_candidate_destroy(candidate);
     return status;
 }
