@@ -26,7 +26,7 @@ add_library(tp_core STATIC
     # Deterministic sprite IDs, index, and selector resolution.
     src/tp_sprite_index.c src/tp_selector.c
     # Typed operation catalog, validation, apply, builders, and encoding.
-    src/tp_op_catalog.c src/tp_op_validate.c src/tp_op_validate_atlas.c src/tp_op_apply.c src/tp_op_encode.c src/tp_op_build.c
+    src/tp_op_catalog.c src/tp_op_validate.c src/tp_op_validate_atlas.c src/tp_op_validate_source_sprite.c src/tp_op_apply.c src/tp_op_encode.c src/tp_op_build.c
     # Transaction ID retention, clone/apply/publish, semantic dirty, and JSON.
     src/tp_idset.c
     src/tp_project_clone.c src/tp_semantic.c src/tp_txn_idset.c src/tp_txn_apply.c
