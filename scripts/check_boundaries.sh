@@ -467,7 +467,8 @@ tp_job_owner_internal   tp_session|tp_job
 tp_source_plan_internal tp_source_plan|tp_op_validate
 tp_source_path_text_internal tp_source_path_text|tp_op_validate|tp_project|tp_project_identity|tp_project_parse|tp_source_plan
 tp_srckey_internal      tp_srckey|tp_project_identity|tp_validate
-tp_validate_internal    tp_validate
+tp_validate_internal    tp_validate|tp_validate_report
+tp_validate_report_internal tp_validate|tp_validate_report
 tp_identity_internal    tp_identity|tp_identity_session
 tp_pack_read_internal   tp_pack_read
 EOF
