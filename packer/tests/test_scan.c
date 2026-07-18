@@ -484,6 +484,15 @@ void test_existing_non_directory_is_a_scan_error_not_empty_success(void) {
     TEST_ASSERT_NOT_NULL(strstr(error.msg, "not a direct directory"));
 }
 
+static void assert_file_byte(const char *path, char expected) {
+    FILE *file = tp_fs_fopen(path, "rb");
+    TEST_ASSERT_NOT_NULL(file);
+    char actual = '\0';
+    TEST_ASSERT_TRUE(tp_fs_read_all(file, &actual, 1U));
+    TEST_ASSERT_EQUAL_INT(expected, actual);
+    TEST_ASSERT_TRUE(tp_fs_close(file));
+}
+
 void test_filesystem_publication_primitives_are_no_clobber_and_replace_safe(void) {
     char source[800];
     char destination[800];
@@ -506,8 +515,11 @@ void test_filesystem_publication_primitives_are_no_clobber_and_replace_safe(void
     TEST_ASSERT_EQUAL_INT(TP_FS_MOVE_DESTINATION_EXISTS, tp_fs_move_no_replace(source, destination));
     TEST_ASSERT_TRUE(tp_fs_exists(source));
     TEST_ASSERT_TRUE(tp_fs_exists(destination));
+    assert_file_byte(source, 'A');
+    assert_file_byte(destination, 'B');
     TEST_ASSERT_TRUE(tp_fs_replace(source, destination));
     TEST_ASSERT_FALSE(tp_fs_exists(source));
+    assert_file_byte(destination, 'A');
 
     f = tp_fs_create_exclusive(source, true);
     TEST_ASSERT_NOT_NULL(f);
@@ -524,7 +536,10 @@ void test_filesystem_publication_primitives_are_no_clobber_and_replace_safe(void
 
 void test_filesystem_backend_rejects_invalid_utf8(void) {
     char invalid[900];
+    char sentinel[900];
     (void)snprintf(invalid, sizeof invalid, "%s/bad-\xC3\x28.tmp", g_root);
+    (void)snprintf(sentinel, sizeof sentinel, "%s/invalid-sentinel.tmp", g_dir);
+    TEST_ASSERT_TRUE(tp_fs_write_file(sentinel, "S", 1U));
     errno = 0;
     TEST_ASSERT_NULL(tp_fs_fopen(invalid, "wb"));
     TEST_ASSERT_EQUAL_INT(EILSEQ, errno);
@@ -534,6 +549,23 @@ void test_filesystem_backend_rejects_invalid_utf8(void) {
     TEST_ASSERT_EQUAL_INT(EILSEQ, errno);
     TEST_ASSERT_NULL(tp_fs_dir_open(invalid));
     TEST_ASSERT_EQUAL_INT(EILSEQ, errno);
+    TEST_ASSERT_NULL(tp_fs_create_exclusive(invalid, false));
+    TEST_ASSERT_EQUAL_INT(EILSEQ, errno);
+    TEST_ASSERT_FALSE(tp_fs_remove_file(invalid));
+    TEST_ASSERT_EQUAL_INT(EILSEQ, errno);
+    TEST_ASSERT_FALSE(tp_fs_replace(invalid, sentinel));
+    TEST_ASSERT_EQUAL_INT(EILSEQ, errno);
+    TEST_ASSERT_FALSE(tp_fs_replace(sentinel, invalid));
+    TEST_ASSERT_EQUAL_INT(EILSEQ, errno);
+    TEST_ASSERT_EQUAL_INT(TP_FS_MOVE_ERROR,
+                          tp_fs_move_no_replace(invalid, sentinel));
+    TEST_ASSERT_EQUAL_INT(EILSEQ, errno);
+    TEST_ASSERT_EQUAL_INT(TP_FS_MOVE_ERROR,
+                          tp_fs_move_no_replace(sentinel, invalid));
+    TEST_ASSERT_EQUAL_INT(EILSEQ, errno);
+    TEST_ASSERT_FALSE(tp_fs_sync_parent(invalid));
+    TEST_ASSERT_EQUAL_INT(EILSEQ, errno);
+    assert_file_byte(sentinel, 'S');
 
     tp_scan_result result = {0};
     tp_error error = {{0}};
@@ -541,6 +573,7 @@ void test_filesystem_backend_rejects_invalid_utf8(void) {
                           tp_scan_dir(invalid, &result, &error));
     TEST_ASSERT_NULL(result.entries);
     TEST_ASSERT_EQUAL_INT(0, result.count);
+    TEST_ASSERT_TRUE(tp_fs_remove_file(sentinel));
 }
 
 #ifndef _WIN32

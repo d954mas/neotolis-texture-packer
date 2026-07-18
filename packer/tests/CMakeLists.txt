@@ -286,6 +286,33 @@ nt_set_warning_flags(tp_test_scan)   # AGENTS.md invariant: our test TUs too
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_scan_test")
 add_test(NAME tp_scan COMMAND tp_test_scan "${CMAKE_BINARY_DIR}/tp_scan_test")
 
+# P1-06: exact Win32 filesystem conversion boundaries live separately from the
+# cross-platform scan suite so platform backend moves retain an independent pin.
+if(WIN32)
+    add_executable(tp_test_fs_win32_contract test_fs_win32_contract.c)
+    target_link_libraries(tp_test_fs_win32_contract PRIVATE tp_core unity)
+    target_include_directories(tp_test_fs_win32_contract PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+    target_compile_definitions(tp_test_fs_win32_contract PRIVATE
+        _CRT_SECURE_NO_WARNINGS)
+    target_compile_options(tp_test_fs_win32_contract PRIVATE -U_DLL)
+    nt_set_warning_flags(tp_test_fs_win32_contract)
+    add_test(NAME tp_fs_win32_contract COMMAND tp_test_fs_win32_contract)
+endif()
+
+if(NOT WIN32)
+    add_executable(tp_test_project_save_posix_contract
+        test_project_save_posix_contract.c)
+    target_link_libraries(tp_test_project_save_posix_contract PRIVATE tp_core unity)
+    target_compile_definitions(tp_test_project_save_posix_contract PRIVATE
+        TP_PROJECT_SAVE_TEST_DIR="${CMAKE_BINARY_DIR}/tp_project_save_posix_test")
+    target_compile_options(tp_test_project_save_posix_contract PRIVATE -U_DLL)
+    nt_set_warning_flags(tp_test_project_save_posix_contract)
+    file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_project_save_posix_test")
+    add_test(NAME tp_project_save_posix_contract
+        COMMAND tp_test_project_save_posix_contract)
+endif()
+
 # A3a op-layer: tp_input project->pack-input build (assemble/desc_add moved out of
 # the GUI), the per-sprite effective-shape rule, and the non-RECT extrude clamp in
 # tp_project_atlas_to_settings. Links tp_build so the CONCAVE+extrude clamp
