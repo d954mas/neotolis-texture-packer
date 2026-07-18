@@ -43,4 +43,8 @@ void tp_recovery_backend_candidate_close(tp_recovery_file_pin *pin);
 tp_status tp_recovery_backend_candidate_delete(
     tp_recovery_file_pin *pin, const char *journal_path, tp_error *err);
 
+#ifndef _WIN32
+void tp_recovery_backend_test_fail_next_quarantine_unlink(void);
+#endif
+
 #endif

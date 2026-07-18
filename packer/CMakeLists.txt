@@ -40,7 +40,7 @@ add_library(tp_core STATIC
 if(WIN32)
     target_sources(tp_core PRIVATE src/tp_fs_win32.c src/tp_recovery_backend_win32.c)
 else()
-    target_sources(tp_core PRIVATE src/tp_fs_posix.c)
+    target_sources(tp_core PRIVATE src/tp_fs_posix.c src/tp_recovery_backend_posix.c)
 endif()
 target_include_directories(tp_core PUBLIC include)
 # tp_pack_settings.c includes nt_builder.h for the header-only nt_atlas_opts_defaults()
