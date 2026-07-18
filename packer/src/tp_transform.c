@@ -1,5 +1,37 @@
 #include "tp_core/tp_transform.h"
 
+void tp_transform_decode(int32_t x, int32_t y, uint8_t flags, int32_t tw,
+                         int32_t th, int32_t *ox, int32_t *oy) {
+    int32_t rx = x;
+    int32_t ry = y;
+    if (flags & 4u) {
+        int32_t t = rx;
+        rx = ry;
+        ry = t;
+    }
+    int32_t w = (flags & 4u) ? th : tw;
+    int32_t h = (flags & 4u) ? tw : th;
+    if (flags & 1u) {
+        rx = w - rx;
+    }
+    if (flags & 2u) {
+        ry = h - ry;
+    }
+    *ox = rx;
+    *oy = ry;
+}
+
+void tp_transform_out_dims(uint8_t flags, int32_t tw, int32_t th,
+                           int32_t *ow, int32_t *oh) {
+    if (flags & 4u) {
+        *ow = th;
+        *oh = tw;
+    } else {
+        *ow = tw;
+        *oh = th;
+    }
+}
+
 void tp_transform_decode_f(float x, float y, uint8_t flags, float width,
                            float height, float *out_x, float *out_y) {
     float transformed_x = x;
