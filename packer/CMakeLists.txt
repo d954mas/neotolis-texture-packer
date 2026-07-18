@@ -37,6 +37,9 @@ add_library(tp_core STATIC
     src/tp_diff_entity.c src/tp_diff_capture.c src/tp_diff_apply.c src/tp_history_codec.c src/tp_history.c
     # Durable recovery journal and injectable I/O seam.
     src/tp_journal.c src/tp_journal_io.c)
+if(WIN32)
+    target_sources(tp_core PRIVATE src/tp_fs_win32.c)
+endif()
 target_include_directories(tp_core PUBLIC include)
 # tp_pack_settings.c includes nt_builder.h for the header-only nt_atlas_opts_defaults()
 # inline (the single source of the packing defaults). HEADERS ONLY: this adds the builder
