@@ -1619,9 +1619,13 @@ void test_project_save_file_sync_failure_keeps_destination(void) {
     tp_id128 fingerprint = {{0xFF}};
     tp_project__test_fail_next_file_sync();
     TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_BAD_PROJECT,
+        TP_STATUS_FILE_IO_FAILED,
         tp_project_save_with_fingerprint(project, path, &fingerprint, &error));
     TEST_ASSERT_TRUE(tp_id128_is_nil(fingerprint));
+    TEST_ASSERT_EQUAL_INT(TP_FILE_IO_PHASE_FILE_SYNC,
+                          error.file_io.phase);
+    TEST_ASSERT_EQUAL_STRING(path, error.file_io.path);
+    TEST_ASSERT_TRUE(error.file_io.native_code != 0);
 
     size_t after_length = 0U;
     char *after = read_all(path, &after_length);

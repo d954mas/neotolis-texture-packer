@@ -1825,6 +1825,7 @@ typedef enum tp_temp_open_result {
 static _Thread_local bool s_test_fail_next_temp_create;
 static _Thread_local bool s_test_fail_next_file_sync;
 static _Thread_local bool s_test_fail_next_parent_sync;
+static _Thread_local tp_file_io_phase s_test_fail_next_save_io;
 static bool s_test_save_max_bytes_armed;
 static size_t s_test_save_max_bytes;
 
@@ -1832,6 +1833,9 @@ void tp_project__test_fail_next_temp_create(void) { s_test_fail_next_temp_create
 void tp_project__test_fail_next_file_sync(void) { s_test_fail_next_file_sync = true; }
 void tp_project__test_fail_next_parent_sync(void) {
     s_test_fail_next_parent_sync = true;
+}
+void tp_project__test_fail_next_save_io(tp_file_io_phase phase) {
+    s_test_fail_next_save_io = phase;
 }
 void tp_project__test_set_save_max_bytes(size_t max_bytes) {
     s_test_save_max_bytes = max_bytes;
@@ -1843,10 +1847,15 @@ void tp_project__test_set_save_max_bytes(size_t max_bytes) {
  * writer (or an interrupted save), so it is skipped rather than followed or
  * deleted. The returned FILE owns the underlying descriptor/handle. */
 static tp_temp_open_result tp_open_save_temp(const char *path, char *tmp,
-                                             size_t tmp_cap, FILE **out) {
+                                             size_t tmp_cap, FILE **out,
+                                             int *out_native_code) {
     *out = NULL;
-    if (s_test_fail_next_temp_create) {
+    *out_native_code = 0;
+    if (s_test_fail_next_temp_create ||
+        s_test_fail_next_save_io == TP_FILE_IO_PHASE_TEMP_OPEN) {
         s_test_fail_next_temp_create = false;
+        s_test_fail_next_save_io = TP_FILE_IO_PHASE_NONE;
+        *out_native_code = EACCES;
         return TP_TEMP_OPEN_FAILED;
     }
     static _Atomic uint64_t counter;
@@ -1866,6 +1875,7 @@ static tp_temp_open_result tp_open_save_temp(const char *path, char *tmp,
             if (errno == EEXIST) {
                 continue;
             }
+            *out_native_code = errno != 0 ? errno : EIO;
             return TP_TEMP_OPEN_FAILED;
         }
 #ifndef _WIN32
@@ -1876,6 +1886,7 @@ static tp_temp_open_result tp_open_save_temp(const char *path, char *tmp,
         if (lstat(path, &destination) == 0 &&
             S_ISREG(destination.st_mode) &&
             fchmod(fileno(f), destination.st_mode & 0777) != 0) {
+            *out_native_code = errno != 0 ? errno : EIO;
             (void)tp_fs_close(f);
             (void)tp_fs_remove_file(tmp);
             return TP_TEMP_OPEN_FAILED;
@@ -1884,6 +1895,7 @@ static tp_temp_open_result tp_open_save_temp(const char *path, char *tmp,
         *out = f;
         return TP_TEMP_OPEN_OK;
     }
+    *out_native_code = EEXIST;
     return TP_TEMP_OPEN_FAILED;
 }
 
@@ -2035,30 +2047,64 @@ static tp_status tp_project_save_stage(tp_project *p, const char *path,
      * corrupt/partial file. */
     char tmp[TP_PATH_MAX];
     FILE *f = NULL;
-    const tp_temp_open_result temp_rc = tp_open_save_temp(path, tmp, sizeof tmp, &f);
+    int native_code = 0;
+    const tp_temp_open_result temp_rc =
+        tp_open_save_temp(path, tmp, sizeof tmp, &f, &native_code);
     if (temp_rc == TP_TEMP_OPEN_PATH_TOO_LONG) {
         free(buf);
         return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "tp_project_save: path too long: %s", path);
     }
     if (temp_rc != TP_TEMP_OPEN_OK) {
         free(buf);
-        return tp_error_set(err, TP_STATUS_BAD_PROJECT, "tp_project_save: cannot create temporary file for %s", path);
+        return tp_error_set_file_io(
+            err, TP_FILE_IO_PHASE_TEMP_OPEN, path, native_code,
+            "tp_project_save: cannot create temporary file for %s", path);
     }
-    const bool wrote = tp_fs_write_all(f, buf, len);
-    bool synced = false;
-    if (wrote) {
-        if (s_test_fail_next_file_sync) {
-            s_test_fail_next_file_sync = false;
-        } else {
-            synced = tp_fs_sync(f);
+    tp_file_io_phase failed_phase = TP_FILE_IO_PHASE_NONE;
+    bool wrote = false;
+    if (s_test_fail_next_save_io == TP_FILE_IO_PHASE_TEMP_WRITE) {
+        s_test_fail_next_save_io = TP_FILE_IO_PHASE_NONE;
+        native_code = ENOSPC;
+        failed_phase = TP_FILE_IO_PHASE_TEMP_WRITE;
+    } else {
+        wrote = tp_fs_write_all(f, buf, len);
+        if (!wrote) {
+            native_code = errno != 0 ? errno : EIO;
+            failed_phase = TP_FILE_IO_PHASE_TEMP_WRITE;
         }
     }
-    const bool closed = tp_fs_close(f);
+    bool synced = false;
+    if (wrote) {
+        if (s_test_fail_next_file_sync ||
+            s_test_fail_next_save_io == TP_FILE_IO_PHASE_FILE_SYNC) {
+            s_test_fail_next_file_sync = false;
+            s_test_fail_next_save_io = TP_FILE_IO_PHASE_NONE;
+            native_code = EIO;
+            failed_phase = TP_FILE_IO_PHASE_FILE_SYNC;
+        } else {
+            synced = tp_fs_sync(f);
+            if (!synced) {
+                native_code = errno != 0 ? errno : EIO;
+                failed_phase = TP_FILE_IO_PHASE_FILE_SYNC;
+            }
+        }
+    }
+    const bool close_result = tp_fs_close(f);
+    bool closed = close_result;
+    if (s_test_fail_next_save_io == TP_FILE_IO_PHASE_TEMP_CLOSE) {
+        s_test_fail_next_save_io = TP_FILE_IO_PHASE_NONE;
+        native_code = EIO;
+        failed_phase = TP_FILE_IO_PHASE_TEMP_CLOSE;
+        closed = false;
+    } else if (!close_result && failed_phase == TP_FILE_IO_PHASE_NONE) {
+        native_code = errno != 0 ? errno : EIO;
+        failed_phase = TP_FILE_IO_PHASE_TEMP_CLOSE;
+    }
     free(buf);
     if (!wrote || !synced || !closed) {
         (void)tp_fs_remove_file(tmp);
-        return tp_error_set(
-            err, TP_STATUS_BAD_PROJECT,
+        return tp_error_set_file_io(
+            err, failed_phase, path, native_code,
             "tp_project_save: could not durably write temporary file for %s",
             path);
     }
@@ -2079,14 +2125,29 @@ static tp_status tp_project_save_stage(tp_project *p, const char *path,
      * fail if another writer won the destination after our earlier checks. */
     bool moved = false;
     bool destination_exists = false;
-    if (create_only) {
+    const tp_file_io_phase publish_phase =
+        create_only ? TP_FILE_IO_PHASE_ATOMIC_CREATE
+                    : TP_FILE_IO_PHASE_ATOMIC_REPLACE;
+    const bool inject_publish_failure =
+        s_test_fail_next_save_io == publish_phase;
+    if (inject_publish_failure) {
+        s_test_fail_next_save_io = TP_FILE_IO_PHASE_NONE;
+        native_code = EACCES;
+    }
+    if (!inject_publish_failure && create_only) {
         const tp_fs_move_result move_result =
             tp_fs_move_no_replace(tmp, path);
         moved = move_result == TP_FS_MOVE_OK;
         destination_exists =
             move_result == TP_FS_MOVE_DESTINATION_EXISTS;
-    } else {
+        if (!moved && !destination_exists) {
+            native_code = errno != 0 ? errno : EIO;
+        }
+    } else if (!inject_publish_failure) {
         moved = tp_fs_replace(tmp, path);
+        if (!moved) {
+            native_code = errno != 0 ? errno : EIO;
+        }
     }
     if (!moved) {
         (void)tp_fs_remove_file(tmp);
@@ -2095,7 +2156,9 @@ static tp_status tp_project_save_stage(tp_project *p, const char *path,
                                 "tp_project_save: destination already exists: %s",
                                 path);
         }
-        return tp_error_set(err, TP_STATUS_BAD_PROJECT, "tp_project_save: could not finalize save to %s", path);
+        return tp_error_set_file_io(
+            err, publish_phase, path, native_code,
+            "tp_project_save: could not finalize save to %s", path);
     }
     if (out_fingerprint) {
         *out_fingerprint = written_fingerprint;

@@ -12,6 +12,28 @@
 extern "C" {
 #endif
 
+/* Stable Save publication phases. A FILE_IO_FAILED error identifies the exact
+ * pre-publication boundary that failed; NONE is used by every other status. */
+typedef enum tp_file_io_phase {
+    TP_FILE_IO_PHASE_NONE = 0,
+    TP_FILE_IO_PHASE_TEMP_OPEN,
+    TP_FILE_IO_PHASE_TEMP_WRITE,
+    TP_FILE_IO_PHASE_FILE_SYNC,
+    TP_FILE_IO_PHASE_TEMP_CLOSE,
+    TP_FILE_IO_PHASE_ATOMIC_REPLACE,
+    TP_FILE_IO_PHASE_ATOMIC_CREATE
+} tp_file_io_phase;
+
+typedef struct tp_file_io_context {
+    tp_file_io_phase phase;
+    /* Borrowed from the Save caller and valid for the same lifetime as that
+     * input path. Session boundaries remap private canonical buffers before
+     * returning the error to their caller. */
+    const char *path;
+    /* errno-compatible cause captured before cleanup can overwrite it. */
+    int native_code;
+} tp_file_io_context;
+
 typedef enum tp_status {
     TP_STATUS_OK = 0,
     TP_STATUS_UNIMPLEMENTED,
@@ -107,12 +129,21 @@ typedef enum tp_status {
     /* The project was atomically published and is the authoritative saved
      * state, but the containing-directory durability barrier failed. Clients
      * must report this as a success notice, never retry as if no write occurred. */
-    TP_STATUS_FILE_DURABILITY_UNCERTAIN
+    TP_STATUS_FILE_DURABILITY_UNCERTAIN,
+
+    /* A Save failed before atomic publication. The destination and saved
+     * session baseline are unchanged; file_io carries phase/path/cause. */
+    TP_STATUS_FILE_IO_FAILED
 } tp_status;
 
-/* Fixed-size message buffer -- no heap, safe to embed by value on the stack. */
-typedef struct tp_error {
-    char msg[256];
+/* No heap, safe to embed by value on the stack. The single anonymous aggregate
+ * preserves the long-standing `tp_error error = {{0}}` initializer under the
+ * project's -Wmissing-field-initializers -Werror policy. */
+typedef union tp_error {
+    struct {
+        char msg[256];
+        tp_file_io_context file_io;
+    };
 } tp_error;
 
 #if defined(__GNUC__) || defined(__clang__)
@@ -127,6 +158,9 @@ static inline tp_status tp_error_set(tp_error *err, tp_status status, const char
 
 static inline tp_status tp_error_set(tp_error *err, tp_status status, const char *fmt, ...) {
     if (err) {
+        err->file_io.phase = TP_FILE_IO_PHASE_NONE;
+        err->file_io.path = NULL;
+        err->file_io.native_code = 0;
         if (fmt) {
             va_list args;
             va_start(args, fmt);
@@ -137,6 +171,42 @@ static inline tp_status tp_error_set(tp_error *err, tp_status status, const char
         }
     }
     return status;
+}
+
+static inline tp_status tp_error_set_file_io(
+    tp_error *err, tp_file_io_phase phase, const char *path, int native_code,
+    const char *fmt, ...) TP_PRINTF_ATTR(5, 6);
+
+static inline tp_status tp_error_set_file_io(
+    tp_error *err, tp_file_io_phase phase, const char *path, int native_code,
+    const char *fmt, ...) {
+    if (err) {
+        err->file_io.phase = phase;
+        err->file_io.path = path;
+        err->file_io.native_code = native_code;
+        if (fmt) {
+            va_list args;
+            va_start(args, fmt);
+            (void)vsnprintf(err->msg, sizeof(err->msg), fmt, args);
+            va_end(args);
+        } else {
+            err->msg[0] = '\0';
+        }
+    }
+    return TP_STATUS_FILE_IO_FAILED;
+}
+
+static inline const char *tp_file_io_phase_id(tp_file_io_phase phase) {
+    switch (phase) {
+        case TP_FILE_IO_PHASE_NONE: return "none";
+        case TP_FILE_IO_PHASE_TEMP_OPEN: return "temp_open";
+        case TP_FILE_IO_PHASE_TEMP_WRITE: return "temp_write";
+        case TP_FILE_IO_PHASE_FILE_SYNC: return "file_sync";
+        case TP_FILE_IO_PHASE_TEMP_CLOSE: return "temp_close";
+        case TP_FILE_IO_PHASE_ATOMIC_REPLACE: return "atomic_replace";
+        case TP_FILE_IO_PHASE_ATOMIC_CREATE: return "atomic_create";
+    }
+    return "unknown";
 }
 
 static inline const char *tp_status_str(tp_status status) {
@@ -181,6 +251,7 @@ static inline const char *tp_status_str(tp_status status) {
         case TP_STATUS_UNSUPPORTED_CAPABILITY: return "unsupported client capability";
         case TP_STATUS_FILE_EXISTS: return "file already exists";
         case TP_STATUS_FILE_DURABILITY_UNCERTAIN: return "project file durability is uncertain";
+        case TP_STATUS_FILE_IO_FAILED: return "project file I/O failed";
     }
     return "unknown status";
 }
@@ -232,6 +303,7 @@ static inline const char *tp_status_id(tp_status status) {
         case TP_STATUS_UNSUPPORTED_CAPABILITY: return "unsupported_capability";
         case TP_STATUS_FILE_EXISTS: return "file_exists";
         case TP_STATUS_FILE_DURABILITY_UNCERTAIN: return "file_durability_uncertain";
+        case TP_STATUS_FILE_IO_FAILED: return "file_io_failed";
     }
     return "unknown_status";
 }

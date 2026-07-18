@@ -278,6 +278,10 @@ tp_status tp_project_load_with_fingerprint(const char *path, tp_project **out, t
  * updating p->project_dir to path's absolute directory. Source path normalization
  * is staged for output; live source spellings and source_base_dir remain stable.
  * Publication is sibling-temp + file sync + atomic replace/create + parent sync.
+ * TP_STATUS_FILE_IO_FAILED is a typed pre-publication failure: destination,
+ * fingerprint, and staged project paths remain unchanged; err->file_io identifies
+ * the exact phase, attempted path, and captured native cause. The core does not
+ * retry atomic publication.
  * TP_STATUS_FILE_DURABILITY_UNCERTAIN is a post-publication outcome: the new file
  * and staged project directory are authoritative, so callers must surface a
  * warning and must not retry as though no write occurred. */

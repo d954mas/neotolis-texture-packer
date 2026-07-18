@@ -413,6 +413,18 @@ nt_set_warning_flags(tp_test_project_contract)
 add_test(NAME tp_project_contract COMMAND tp_test_project_contract
     "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/project_v5_rich.golden")
 
+# Exact pre-publication Save outcome matrix: typed phase/path/native cause,
+# unchanged destination, and caller-controlled retry for every I/O phase.
+add_executable(tp_test_save_io_contract test_save_io_contract.c)
+target_link_libraries(tp_test_save_io_contract PRIVATE tp_core unity)
+target_include_directories(tp_test_save_io_contract PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_options(tp_test_save_io_contract PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_save_io_contract)
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_save_io_contract_test")
+add_test(NAME tp_save_io_contract COMMAND tp_test_save_io_contract
+    "${CMAKE_BINARY_DIR}/tp_save_io_contract_test")
+
 # Phase 2 normalization unit tests: ext/folder strip, rename override, animation
 # auto-group + explicit merge, collision, alias, final-name sort, scale. Pure
 # tp_core (synthetic tp_results, no builder).

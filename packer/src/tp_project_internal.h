@@ -20,6 +20,10 @@ void tp_project__test_fail_next_temp_create(void);
 void tp_project__test_fail_next_file_sync(void);
 void tp_project__test_fail_next_parent_sync(void);
 
+/* One-shot exact pre-publication Save phase failure. Production never retries
+ * these phases; tests use this seam to pin the public outcome matrix. */
+void tp_project__test_fail_next_save_io(tp_file_io_phase phase);
+
 /* One-shot writer-size limit override. Lets tests prove the save-side cap is
  * checked before publishing without constructing a 64 MiB project. */
 void tp_project__test_set_save_max_bytes(size_t max_bytes);
