@@ -2,6 +2,7 @@
  * nt_ui-free: it reads/mutates the model + shared state only. */
 
 #include "gui_actions.h"
+#include "gui_actions_internal.h"
 
 #include "gui_defs.h" /* S() -- the compact-strip stop that folds the preview selector away */
 #include "gui_state.h"
@@ -34,27 +35,9 @@ bool s_pending_open, s_pending_save, s_pending_save_as, s_pending_add_files, s_p
 bool s_pending_pack, s_pending_export;
 bool s_pending_commit_edit; /* a press landed outside the active inline-edit field -> commit it */
 bool s_pending_commit_edit_enter; /* Enter in the inline editor -> commit it (deferred, non-force) */
-typedef struct pending_create_animation {
-    bool active;
-    tp_id128 atlas_id;
-    int64_t expected_revision;
-    char *name;
-    tp_op_sprite_ref *frames;
-    int frame_count;
-} pending_create_animation;
+
 /* Presentation-only mapping from the active stable animation to one Pack result. */
-typedef struct preview_frame_cache {
-    int *indices;
-    int capacity;
-    int count;
-    int ref_w;
-    int ref_h;
-    tp_id128 atlas_id;
-    tp_id128 animation_id;
-    uint64_t model_generation;
-    uint64_t pack_result_version;
-    bool valid;
-} preview_frame_cache;
+
 bool s_pending_remove_atlas;
 tp_id128 s_pending_remove_atlas_id;
 int64_t s_pending_remove_atlas_revision;
@@ -73,132 +56,7 @@ bool s_recovery_open;
 double s_last_pack_ms;      /* wall-clock ms of the last successful pack (for the stats line) */
 int s_last_pack_atlas = -1; /* which atlas that timing belongs to */
 
-// #region deferred model-edit queue (decision 0015)
-/* A commit clone-swaps the model + frees the old project, so declare_* render fns must not
- * commit while holding a live atlas/sprite/anim/target pointer. They ENQUEUE the edit here;
- * drain_edits() (run at frame top from apply_pending, no live pointer held) replays each via
- * the self-contained gui_project_* setters. The queue grows (never a fixed slot) so no edit is
- * ever dropped if two land in one frame; typically it holds 0 or 1.
- *
- * String args that can be LONG carry a HEAP copy, not a fixed slot: out_path is up to
- * TP_PATH_MAX (4096) so a 256-byte slot silently truncated + persisted a corrupted export
- * path on a mere target toggle (F2); add-frames carries a variable-length list of COPIED
- * sprite keys so "Add frames" can defer instead of committing synchronously mid-declare (F1).
- * each typed intent queue frees its heap payload after drain (or queue OOM). */
-typedef enum target_intent_kind {
-    TARGET_INTENT_FULL = 0,
-    TARGET_INTENT_OUT_PATH,
-    TARGET_INTENT_ENABLED,
-    TARGET_INTENT_EXPORTER
-} target_intent_kind;
-
-typedef struct target_edit_intent {
-    target_intent_kind kind;
-    tp_id128 atlas_id;
-    tp_id128 target_id;
-    int64_t expected_revision;
-    int i0, i1, i2; /* field/which/anim_index/target_index; ivalue/frame_index/playback; delta */
-    float f0, f1;
-    bool b0, b1;
-    char s0[TP_EXPORTER_ID_MAX]; /* exact canonical exporter id */
-    char *out_path; /* HEAP: target out_path (up to TP_PATH_MAX); freed after drain -- F2 (no 255 cap) */
-} target_edit_intent;
-
-typedef struct atlas_setting_intent {
-    tp_id128 atlas_id;
-    int64_t expected_revision;
-    gui_atlas_field field;
-    int ivalue;
-    float fvalue;
-} atlas_setting_intent;
-
-typedef enum sprite_intent_kind {
-    SPRITE_INTENT_ORIGIN = 0,
-    SPRITE_INTENT_SLICE9,
-    SPRITE_INTENT_OVERRIDE
-} sprite_intent_kind;
-
-typedef struct sprite_edit_intent {
-    sprite_intent_kind kind;
-    tp_id128 atlas_id;
-    tp_id128 source_id;
-    int64_t expected_revision;
-    char *source_key;
-    int field;
-    int ivalue;
-    float fvalue;
-} sprite_edit_intent;
-
-typedef enum animation_intent_kind {
-    ANIMATION_INTENT_FPS = 0,
-    ANIMATION_INTENT_PLAYBACK,
-    ANIMATION_INTENT_FLIP,
-    ANIMATION_INTENT_FRAME_REMOVE,
-    ANIMATION_INTENT_FRAME_MOVE,
-    ANIMATION_INTENT_ADD_FRAMES
-} animation_intent_kind;
-
-typedef struct animation_edit_intent {
-    animation_intent_kind kind;
-    gui_animation_ref animation;
-    int first;
-    int second;
-    float value;
-    bool flip_h;
-    bool flip_v;
-    tp_op_sprite_ref *frames;
-    int frame_count;
-} animation_edit_intent;
-
-typedef struct gui_actions_state {
-    bool pending_add_anim;
-    tp_id128 pending_add_anim_atlas_id;
-    int64_t pending_add_anim_revision;
-    pending_create_animation pending_create_anim;
-    bool pending_open_preview;
-    gui_animation_ref pending_open_preview_ref;
-    gui_animation_ref preview_animation_ref;
-    preview_frame_cache preview_frames;
-#ifdef NTPACKER_GUI_SELFTEST
-    gui_preview_frame_work preview_frame_work;
-#endif
-    bool pending_remove_anim;
-    gui_animation_ref pending_remove_anim_ref;
-    bool pending_add_target;
-    tp_id128 pending_add_target_atlas_id;
-    int64_t pending_add_target_revision;
-    bool pending_remove_target;
-    gui_target_ref pending_remove_target_ref;
-    bool pending_browse_target;
-    gui_target_ref pending_browse_target_ref;
-    gui_recovery_list recovery_list;
-    int recovery_pending_row;
-    int recovery_pending_action;
-    target_edit_intent *target_intents;
-    int target_intent_count;
-    int target_intent_cap;
-    atlas_setting_intent *atlas_setting_intents;
-    int atlas_setting_intent_count;
-    int atlas_setting_intent_cap;
-    sprite_edit_intent *sprite_intents;
-    int sprite_intent_count;
-    int sprite_intent_cap;
-    animation_edit_intent *animation_intents;
-    int animation_intent_count;
-    int animation_intent_cap;
-    bool gesture_commit;
-    tp_id128 edit_atlas_id;
-    int64_t edit_atlas_revision;
-    tp_id128 edit_anim_atlas_id;
-    tp_id128 edit_anim_id;
-    int64_t edit_anim_revision;
-    tp_id128 edit_sprite_atlas_id;
-    tp_id128 edit_sprite_source_id;
-    int64_t edit_sprite_revision;
-    char edit_sprite_source_key[TP_SRCKEY_MAX];
-} gui_actions_state;
-
-static gui_actions_state s_actions = {.recovery_pending_row = -1};
+gui_actions_state s_actions = {.recovery_pending_row = -1};
 
 #ifdef NTPACKER_GUI_SELFTEST
 void gui_preview_frame_work_reset(void) {
@@ -209,399 +67,7 @@ gui_preview_frame_work gui_preview_frame_work_get(void) {
 }
 #endif
 
-void gui_queue_atlas_setting(tp_id128 atlas_id, int64_t expected_revision,
-                             gui_atlas_field field, int ivalue, float fvalue) {
-    if (s_actions.atlas_setting_intent_count == s_actions.atlas_setting_intent_cap) {
-        const int capacity = s_actions.atlas_setting_intent_cap ? s_actions.atlas_setting_intent_cap * 2 : 8;
-        atlas_setting_intent *intents = (atlas_setting_intent *)realloc(
-            s_actions.atlas_setting_intents, (size_t)capacity * sizeof *intents);
-        if (!intents) {
-            set_status_ex(STATUS_ERROR,
-                          "Out of memory: this atlas edit could not be queued (change not applied).");
-            return;
-        }
-        s_actions.atlas_setting_intents = intents;
-        s_actions.atlas_setting_intent_cap = capacity;
-    }
-    s_actions.atlas_setting_intents[s_actions.atlas_setting_intent_count++] =
-        (atlas_setting_intent){atlas_id, expected_revision, field, ivalue, fvalue};
-}
 
-/* Local heap strdup (POSIX strdup is not ISO C17). NULL treated as ""; NULL on OOM. */
-static char *edit_strdup(const char *s) {
-    if (!s) {
-        s = "";
-    }
-    size_t n = strlen(s) + 1U;
-    char *c = (char *)malloc(n);
-    if (c) {
-        memcpy(c, s, n);
-    }
-    return c;
-}
-
-static void frame_refs_dispose(tp_op_sprite_ref *frames, int count) {
-    if (!frames) {
-        return;
-    }
-    for (int i = 0; i < count; ++i) {
-        free(frames[i].src_key);
-    }
-    free(frames);
-}
-
-static tp_op_sprite_ref *frame_refs_copy(const tp_op_sprite_ref *frames,
-                                         int count) {
-    if (!frames || count <= 0) {
-        return NULL;
-    }
-    tp_op_sprite_ref *copy = calloc((size_t)count, sizeof *copy);
-    if (!copy) {
-        return NULL;
-    }
-    for (int i = 0; i < count; ++i) {
-        if (!frames[i].src_key) {
-            frame_refs_dispose(copy, count);
-            return NULL;
-        }
-        copy[i].source_id = frames[i].source_id;
-        copy[i].src_key = edit_strdup(frames[i].src_key);
-        if (!copy[i].src_key) {
-            frame_refs_dispose(copy, count);
-            return NULL;
-        }
-    }
-    return copy;
-}
-
-/* Frees an edit's heap payload. Safe on a zeroed/partially-built edit. */
-static void target_intent_dispose(target_edit_intent *e) {
-    free(e->out_path);
-    e->out_path = NULL;
-}
-
-/* Appends `e` to the queue (shallow copy -> the queue TAKES OWNERSHIP of e's heap out_path/keys;
- * the caller must not free them afterward, on success OR failure). On queue-realloc OOM the edit
- * is DROPPED: its heap payload is freed (no leak) and a status-bar error is raised so the drop is
- * visible -- the widget already returned "committed", so without this the value silently reverts
- * next frame with no explanation (F5). Returns true iff queued. */
-static bool target_intent_push(target_edit_intent *e) {
-    if (s_actions.target_intent_count == s_actions.target_intent_cap) {
-        int nc = s_actions.target_intent_cap ? s_actions.target_intent_cap * 2 : 8;
-        target_edit_intent *ne = (target_edit_intent *)realloc(
-            s_actions.target_intents, (size_t)nc * sizeof *ne);
-        if (!ne) {
-            target_intent_dispose(e);
-            set_status_ex(STATUS_ERROR, "Out of memory: this edit could not be queued (change not applied).");
-            return false;
-        }
-        s_actions.target_intents = ne;
-        s_actions.target_intent_cap = nc;
-    }
-    s_actions.target_intents[s_actions.target_intent_count++] = *e;
-    return true;
-}
-
-static void queue_sprite_intent(sprite_intent_kind kind,
-                                const gui_sprite_ref *sprite, int field,
-                                int ivalue, float fvalue) {
-    if (!sprite || tp_id128_is_nil(sprite->atlas_id) ||
-        tp_id128_is_nil(sprite->source_id) || !sprite->source_key ||
-        sprite->source_key[0] == '\0') {
-        return;
-    }
-    char *source_key = edit_strdup(sprite->source_key);
-    if (!source_key) {
-        set_status_ex(STATUS_ERROR,
-                      "Out of memory: this sprite edit could not be queued (change not applied).");
-        return;
-    }
-    if (s_actions.sprite_intent_count == s_actions.sprite_intent_cap) {
-        const int capacity = s_actions.sprite_intent_cap ? s_actions.sprite_intent_cap * 2 : 8;
-        sprite_edit_intent *intents = (sprite_edit_intent *)realloc(
-            s_actions.sprite_intents, (size_t)capacity * sizeof *intents);
-        if (!intents) {
-            free(source_key);
-            set_status_ex(STATUS_ERROR,
-                          "Out of memory: this sprite edit could not be queued (change not applied).");
-            return;
-        }
-        s_actions.sprite_intents = intents;
-        s_actions.sprite_intent_cap = capacity;
-    }
-    s_actions.sprite_intents[s_actions.sprite_intent_count++] = (sprite_edit_intent){
-        kind, sprite->atlas_id, sprite->source_id, sprite->expected_revision,
-        source_key, field, ivalue, fvalue};
-}
-
-void gui_queue_sprite_origin(const gui_sprite_ref *sprite, int axis, float value) {
-    queue_sprite_intent(SPRITE_INTENT_ORIGIN, sprite, axis, 0, value);
-}
-void gui_queue_sprite_slice9(const gui_sprite_ref *sprite, int lrtb_index, int value) {
-    queue_sprite_intent(SPRITE_INTENT_SLICE9, sprite, lrtb_index, value, 0.0F);
-}
-void gui_queue_sprite_override(const gui_sprite_ref *sprite, gui_sprite_ov which, int value) {
-    queue_sprite_intent(SPRITE_INTENT_OVERRIDE, sprite, (int)which, value, 0.0F);
-}
-static bool animation_intent_push(animation_edit_intent *intent) {
-    if (!intent || tp_id128_is_nil(intent->animation.atlas_id) ||
-        tp_id128_is_nil(intent->animation.animation_id)) {
-        return false;
-    }
-    if (s_actions.animation_intent_count == s_actions.animation_intent_cap) {
-        const int capacity = s_actions.animation_intent_cap ? s_actions.animation_intent_cap * 2 : 8;
-        animation_edit_intent *intents = (animation_edit_intent *)realloc(
-            s_actions.animation_intents, (size_t)capacity * sizeof *intents);
-        if (!intents) {
-            frame_refs_dispose(intent->frames, intent->frame_count);
-            set_status_ex(STATUS_ERROR,
-                          "Out of memory: this animation edit could not be queued (change not applied).");
-            return false;
-        }
-        s_actions.animation_intents = intents;
-        s_actions.animation_intent_cap = capacity;
-    }
-    s_actions.animation_intents[s_actions.animation_intent_count++] = *intent;
-    return true;
-}
-
-void gui_edit_anim_fps(const gui_animation_ref *animation, float fps) {
-    animation_edit_intent intent = {0};
-    intent.kind = ANIMATION_INTENT_FPS;
-    if (animation) intent.animation = *animation;
-    intent.value = fps;
-    (void)animation_intent_push(&intent);
-}
-void gui_edit_anim_playback(const gui_animation_ref *animation, int playback) {
-    animation_edit_intent intent = {0};
-    intent.kind = ANIMATION_INTENT_PLAYBACK;
-    if (animation) intent.animation = *animation;
-    intent.first = playback;
-    (void)animation_intent_push(&intent);
-}
-void gui_edit_anim_flip(const gui_animation_ref *animation, bool flip_h, bool flip_v) {
-    animation_edit_intent intent = {0};
-    intent.kind = ANIMATION_INTENT_FLIP;
-    if (animation) intent.animation = *animation;
-    intent.flip_h = flip_h;
-    intent.flip_v = flip_v;
-    (void)animation_intent_push(&intent);
-}
-void gui_edit_anim_frame_remove(const gui_animation_ref *animation, int frame_index) {
-    animation_edit_intent intent = {0};
-    intent.kind = ANIMATION_INTENT_FRAME_REMOVE;
-    if (animation) intent.animation = *animation;
-    intent.first = frame_index;
-    (void)animation_intent_push(&intent);
-}
-void gui_edit_anim_frame_move(const gui_animation_ref *animation, int frame_index, int delta) {
-    animation_edit_intent intent = {0};
-    intent.kind = ANIMATION_INTENT_FRAME_MOVE;
-    if (animation) intent.animation = *animation;
-    intent.first = frame_index;
-    intent.second = delta;
-    (void)animation_intent_push(&intent);
-}
-static void edit_capture_target(target_edit_intent *edit,
-                                 const gui_target_ref *target) {
-    if (target) {
-        edit->atlas_id = target->atlas_id;
-        edit->target_id = target->target_id;
-        edit->expected_revision = target->expected_revision;
-    }
-}
-
-static bool edit_copy_exporter_id(char out[TP_EXPORTER_ID_MAX],
-                                  const char *exporter_id) {
-    tp_error error = {0};
-    const tp_status status = tp_exporter_id_validate(exporter_id, &error);
-    if (status != TP_STATUS_OK) {
-        set_statusf_ex(STATUS_ERROR, "Export target edit rejected: %s",
-                       error.msg);
-        return false;
-    }
-    memcpy(out, exporter_id, strlen(exporter_id) + 1U);
-    return true;
-}
-
-void gui_edit_target(const gui_target_ref *target, const char *exporter_id,
-                     const char *out_path, bool enabled) {
-    target_edit_intent e = {0};
-    e.kind = TARGET_INTENT_FULL;
-    edit_capture_target(&e, target);
-    e.b0 = enabled;
-    if (!edit_copy_exporter_id(e.s0, exporter_id)) {
-        return;
-    }
-    e.out_path = edit_strdup(out_path); /* HEAP full path -- a >255 out_path must not truncate (F2) */
-    if (!e.out_path) {
-        set_status_ex(STATUS_ERROR, "Out of memory: export target edit not applied.");
-        return;
-    }
-    (void)target_intent_push(&e);
-}
-/* H/G3: the out-path text field's per-keystroke enqueue. Same heap out_path as gui_edit_target (up to
- * TP_PATH_MAX, no 255 slot), but the drain routes to the COALESCABLE gui_project_set_target_out_path so
- * the field's Enter/blur gesture-commit collapses the whole edit into ONE undo step. */
-void gui_edit_target_out_path(const gui_target_ref *target, const char *out_path) {
-    target_edit_intent e = {0};
-    e.kind = TARGET_INTENT_OUT_PATH;
-    edit_capture_target(&e, target);
-    e.out_path = edit_strdup(out_path); /* HEAP full path -- a >255 out_path must not truncate (F2) */
-    if (!e.out_path) {
-        set_status_ex(STATUS_ERROR, "Out of memory: export target edit not applied.");
-        return;
-    }
-    (void)target_intent_push(&e);
-}
-/* H/G3: discrete enabled toggle. Carries ONLY the new enabled + the target index; the drain setter reads
- * exporter_id + out_path from the committed record AFTER flushing any buffered out-path gesture, so a
- * still-uncommitted typed out-path is preserved (not reverted by a stale re-send). */
-void gui_edit_target_enabled(const gui_target_ref *target, bool enabled) {
-    target_edit_intent e = {0};
-    e.kind = TARGET_INTENT_ENABLED;
-    edit_capture_target(&e, target);
-    e.b0 = enabled;
-    (void)target_intent_push(&e);
-}
-/* H/G3: discrete exporter change. Carries ONLY the new exporter_id + the target index; the drain setter
- * reads out_path + enabled from the committed record post-flush (same anti-stale-revert reason). */
-void gui_edit_target_exporter(const gui_target_ref *target,
-                              const char *exporter_id) {
-    target_edit_intent e = {0};
-    e.kind = TARGET_INTENT_EXPORTER;
-    edit_capture_target(&e, target);
-    if (!edit_copy_exporter_id(e.s0, exporter_id)) {
-        return;
-    }
-    (void)target_intent_push(&e);
-}
-
-/* Enqueue an "add frames" edit carrying a COPY of canonical selection refs (F1). "Add frames" used to
- * commit synchronously from inside declare_animation_editor, which clone-swaps + frees the project
- * under the live `an`/`a` the same declare invocation keeps dereferencing (frame_count, frames[].
- * name) -> a use-after-free on an ordinary click. Deferring it (drain replays via
- * gui_project_anim_add_frames at frame top, no live pointer held) closes that last synchronous
- * commit; refs are copied NOW so a selection change before the drain cannot alter what lands. */
-void gui_edit_anim_add_frames(const gui_animation_ref *animation,
-                              const tp_op_sprite_ref *frames, int count) {
-    if (count <= 0) {
-        return;
-    }
-    animation_edit_intent intent = {0};
-    intent.kind = ANIMATION_INTENT_ADD_FRAMES;
-    if (animation) intent.animation = *animation;
-    intent.frames = frame_refs_copy(frames, count);
-    if (!intent.frames) {
-        set_status_ex(STATUS_ERROR, "Out of memory: add-frames not applied.");
-        return;
-    }
-    intent.frame_count = count;
-    (void)animation_intent_push(&intent);
-}
-
-/* Replays every queued edit through the committing setters, then clears the queue. Runs at
- * frame top (apply_pending) with NO live declare-fn pointer held, so the per-edit clone-swap
- * is safe. Each setter re-fetches by index/name internally. */
-static void drain_edits(void) {
-    for (int i = 0; i < s_actions.atlas_setting_intent_count; i++) {
-        const atlas_setting_intent *intent = &s_actions.atlas_setting_intents[i];
-        (void)gui_project_set_atlas_setting(intent->atlas_id,
-                                            intent->expected_revision,
-                                            intent->field, intent->ivalue,
-                                            intent->fvalue);
-    }
-    s_actions.atlas_setting_intent_count = 0;
-    for (int i = 0; i < s_actions.sprite_intent_count; i++) {
-        sprite_edit_intent *intent = &s_actions.sprite_intents[i];
-        const gui_sprite_ref sprite = {
-            intent->atlas_id, intent->source_id, intent->source_key,
-            intent->expected_revision};
-        switch (intent->kind) {
-            case SPRITE_INTENT_ORIGIN:
-                (void)gui_project_set_sprite_origin(&sprite, intent->field,
-                                                     intent->fvalue);
-                break;
-            case SPRITE_INTENT_SLICE9:
-                (void)gui_project_set_sprite_slice9(&sprite, intent->field,
-                                                     intent->ivalue);
-                break;
-            case SPRITE_INTENT_OVERRIDE:
-                (void)gui_project_set_sprite_override(
-                    &sprite, (gui_sprite_ov)intent->field, intent->ivalue);
-                break;
-        }
-        free(intent->source_key);
-        intent->source_key = NULL;
-    }
-    s_actions.sprite_intent_count = 0;
-    for (int i = 0; i < s_actions.animation_intent_count; i++) {
-        animation_edit_intent *intent = &s_actions.animation_intents[i];
-        switch (intent->kind) {
-            case ANIMATION_INTENT_FPS:
-                (void)gui_project_set_anim_fps(&intent->animation, intent->value);
-                break;
-            case ANIMATION_INTENT_PLAYBACK:
-                (void)gui_project_set_anim_playback(&intent->animation,
-                                                    intent->first);
-                break;
-            case ANIMATION_INTENT_FLIP:
-                (void)gui_project_set_anim_flip(&intent->animation,
-                                                intent->flip_h,
-                                                intent->flip_v);
-                break;
-            case ANIMATION_INTENT_FRAME_REMOVE:
-                (void)gui_project_anim_remove_frame(&intent->animation,
-                                                    intent->first);
-                break;
-            case ANIMATION_INTENT_FRAME_MOVE:
-                (void)gui_project_anim_move_frame(&intent->animation,
-                                                  intent->first,
-                                                  intent->second);
-                break;
-            case ANIMATION_INTENT_ADD_FRAMES:
-                (void)gui_project_anim_add_frames(
-                    &intent->animation, intent->frames,
-                    intent->frame_count);
-                break;
-        }
-        frame_refs_dispose(intent->frames, intent->frame_count);
-        intent->frames = NULL;
-    }
-    s_actions.animation_intent_count = 0;
-    for (int i = 0; i < s_actions.target_intent_count; i++) {
-        target_edit_intent *e = &s_actions.target_intents[i];
-        const gui_target_ref target = {e->atlas_id, e->target_id,
-                                       e->expected_revision};
-        switch (e->kind) {
-            case TARGET_INTENT_FULL:
-                (void)gui_project_set_target(&target, e->s0,
-                                             e->out_path ? e->out_path : "",
-                                             e->b0);
-                break;
-            case TARGET_INTENT_OUT_PATH:
-                (void)gui_project_set_target_out_path(
-                    &target, e->out_path ? e->out_path : "");
-                break;
-            case TARGET_INTENT_ENABLED:
-                (void)gui_project_set_target_enabled(&target, e->b0);
-                break;
-            case TARGET_INTENT_EXPORTER:
-                (void)gui_project_set_target_exporter(&target, e->s0);
-                break;
-        }
-        target_intent_dispose(e);
-    }
-    s_actions.target_intent_count = 0;
-}
-
-/* Set by a view widget the frame its edit GESTURE ENDS (slider release / field Enter+blur / a
- * discrete dropdown/checkbox pick). apply_pending flushes gui_project's pending transaction AFTER
- * drain_edits buffers this frame's value, so the whole gesture commits as ONE undo step
- * (decision 0015). One shared flag suffices: pending_route already flushes a prior
- * gesture when a different-key edit arrives, so the flag always targets the latest buffered edit. */
-void gui_request_gesture_commit(void) { s_actions.gesture_commit = true; }
-// #endregion
 _Static_assert(sizeof s_actions.edit_sprite_source_key == TP_SRCKEY_MAX,
                "editor source-key buffer must match the canonical bound");
 
@@ -893,7 +359,7 @@ static void pending_create_animation_dispose(pending_create_animation *request) 
         return;
     }
     free(request->name);
-    frame_refs_dispose(request->frames, request->frame_count);
+    gui_actions__frame_refs_dispose(request->frames, request->frame_count);
     memset(request, 0, sizeof *request);
 }
 
@@ -915,7 +381,7 @@ void gui_request_create_animation_from_selection(void) {
     }
 
     pending_create_animation request = {0};
-    request.frames = frame_refs_copy(s_sel_sort_refs, frame_count);
+    request.frames = gui_actions__frame_refs_copy(s_sel_sort_refs, frame_count);
     if (!request.frames) {
         set_status_ex(STATUS_ERROR,
                       "Out of memory: animation creation could not be queued.");
@@ -925,7 +391,7 @@ void gui_request_create_animation_from_selection(void) {
 
     char base[192];
     tp_names_common_prefix(s_sel_sort_ptr, frame_count, base, sizeof base);
-    request.name = edit_strdup(base);
+    request.name = gui_actions__strdup(base);
     if (!request.name) {
         pending_create_animation_dispose(&request);
         set_status_ex(STATUS_ERROR,
@@ -1678,7 +1144,7 @@ static tp_status fp_push(fp_entry **arr, int *count, int *cap,
         *arr = ne;
         *cap = nc;
     }
-    char *path = edit_strdup(abs);
+    char *path = gui_actions__strdup(abs);
     if (!path) {
         return tp_error_set(error, TP_STATUS_OOM,
                             "refresh fingerprint path allocation failed");
@@ -2203,10 +1669,10 @@ void apply_pending(void) {
      * declare fns enqueued last frame). Runs here, at frame top, with no live declare-fn pointer
      * held -- so the per-edit clone-swap can never dangle a panel's cached atlas/sprite/anim/target
      * pointer (decision 0015). */
-    drain_edits();
+    gui_actions__drain_edits();
 
     /* A gesture ended last frame (slider release / field Enter+blur / discrete pick): commit the
-     * buffered transaction NOW that drain_edits has folded in this frame's final value, so one
+     * buffered transaction NOW that gui_actions__drain_edits has folded in this frame's final value, so one
      * interaction == one undo step (decision 0015). */
     if (s_actions.gesture_commit) {
         /* fix2: the bool is intentionally IGNORED -- this is the gesture-BOUNDARY commit (one interaction
