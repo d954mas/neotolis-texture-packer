@@ -21,8 +21,8 @@
 #include "tp_pack_constraints_internal.h"
 #include "tp_project_identity_internal.h"
 #include "tp_project_mutation_internal.h"
+#include "tp_source_path_text_internal.h"
 #include "tp_source_plan_internal.h"
-#include "tp_strutil.h"
 #include "tp_utf8_internal.h"
 
 /* Reject NaN / +-inf; `pos` also rejects <= 0. No libm: comparisons only. */
@@ -117,6 +117,22 @@ static tp_status validate_persisted_utf8(const char *value, const char *field,
                                error.msg);
 }
 
+static tp_status validate_source_path_text(const char *value,
+                                           tp_op_reject *reject) {
+    if (!value || value[0] == '\0') {
+        return TP_STATUS_OK; /* Required semantics stay with the op family. */
+    }
+    const tp_status status = tp_source_path_text_admit(value);
+    if (status == TP_STATUS_OK) {
+        return TP_STATUS_OK;
+    }
+    if (status == TP_STATUS_INVALID_UTF8) {
+        return validate_persisted_utf8(value, "key", reject);
+    }
+    return tp_op__reject(reject, status, "key",
+                         "source path exceeds the supported limit");
+}
+
 static tp_status validate_exporter_id(const char *value,
                                       tp_op_reject *reject) {
     tp_error error = {0};
@@ -148,10 +164,18 @@ static tp_status validate_operation_utf8(const tp_operation *operation,
             CHECK_UTF8(operation->u.atlas_rename.name, "name");
             break;
         case TP_OP_SOURCE_ADD:
-            CHECK_UTF8(operation->u.source_add.key, "key");
+            status = validate_source_path_text(operation->u.source_add.key,
+                                               reject);
+            if (status != TP_STATUS_OK) {
+                return status;
+            }
             break;
         case TP_OP_SOURCE_REPLACE:
-            CHECK_UTF8(operation->u.source_ref.key, "key");
+            status = validate_source_path_text(operation->u.source_ref.key,
+                                               reject);
+            if (status != TP_STATUS_OK) {
+                return status;
+            }
             break;
         case TP_OP_SPRITE_OVERRIDE_SET:
             CHECK_UTF8(operation->u.sprite_set.src_key, "src_key");

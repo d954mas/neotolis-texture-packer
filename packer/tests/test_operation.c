@@ -12,6 +12,7 @@
 #include "tp_core/tp_project.h"
 #include "tp_project_mutation_internal.h"
 #include "tp_project_identity_internal.h"
+#include "tp_source_path_text_internal.h"
 #include "tp_test_model.h"
 #include "unity.h"
 
@@ -477,6 +478,44 @@ void test_validate_source_add_dup_path(void) {
     op.u.source_add.key = (char *)"sprites/villain"; /* a genuinely new path passes */
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_operation_validate(p, &op, &rej));
     tp_project_destroy(p);
+}
+
+void test_validate_source_path_text_preflight_is_bounded_and_structured(void) {
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    uint8_t counter = 19U;
+    tp_rng rng = {tp_test_det_fill, &counter};
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_assign_missing_ids(project, &rng, &error));
+
+    tp_operation operation = {0};
+    operation.kind = TP_OP_SOURCE_ADD;
+    operation.atlas_id = project->atlases[0].id;
+    operation.u.source_add.source_id = tp_test_id_of(0xB6);
+    operation.u.source_add.kind = TP_SOURCE_KIND_FOLDER;
+    char invalid_utf8[] = {'a', (char)0xC0, (char)0xAF, '\0'};
+    operation.u.source_add.key = invalid_utf8;
+    tp_op_reject reject;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_UTF8,
+        tp_operation_validate(project, &operation, &reject));
+    TEST_ASSERT_EQUAL_STRING("key", reject.field);
+    TEST_ASSERT_EQUAL_STRING("key contains invalid UTF-8 at offset 1",
+                             reject.message);
+
+    char too_long[TP_SOURCE_PATH_TEXT_CAP + 1U];
+    memset(too_long, 'a', sizeof too_long);
+    too_long[sizeof too_long - 1U] = '\0';
+    operation.u.source_add.key = too_long;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_operation_validate(project, &operation, &reject));
+    TEST_ASSERT_EQUAL_STRING("key", reject.field);
+    TEST_ASSERT_EQUAL_STRING("source path exceeds the supported limit",
+                             reject.message);
+    tp_project_destroy(project);
 }
 
 /* A saved project owns one canonical identity for source paths. Validation must
@@ -1101,6 +1140,7 @@ int main(void) {
     RUN_TEST(test_validate_atlas_name_shape_is_core_owned);
     RUN_TEST(test_validate_anim_rename);
     RUN_TEST(test_validate_source_add_dup_path);
+    RUN_TEST(test_validate_source_path_text_preflight_is_bounded_and_structured);
     RUN_TEST(test_validate_source_add_dup_relative_to_saved_project);
     RUN_TEST(test_validate_saved_source_keys_preserve_empty_and_replace_uniqueness);
     RUN_TEST(test_validate_source_add_bad_kind);
