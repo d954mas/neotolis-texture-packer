@@ -160,5 +160,6 @@ void gui_actions__apply_file_dialogs(void);
 void gui_actions__browse_target(const gui_target_ref *target);
 void gui_actions__poll_pack(void);
 void gui_actions__apply_pack_requests(void);
+void gui_actions__apply_recovery(void);
 
 #endif /* NTPACKER_GUI_ACTIONS_INTERNAL_H */
