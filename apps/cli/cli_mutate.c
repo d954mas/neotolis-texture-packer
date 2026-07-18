@@ -28,6 +28,7 @@
  * status id + field.
  */
 #include "cli_cmds.h"
+#include "cli_mutate_internal.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -48,12 +49,10 @@
 #include "tp_core/tp_srckey.h"
 #include "tp_core/tp_transaction.h"
 
-#define CLI_PATH_MAX TP_IDENTITY_PATH_MAX
-
-static const char *const k_atlas_knobs =
+const char *const k_atlas_knobs =
     "max_size, padding, margin, extrude, alpha_threshold, max_vertices, shape, "
     "allow_transform, power_of_two, pixels_per_unit";
-static const char *const k_sprite_fields =
+const char *const k_sprite_fields =
     "origin, slice9, rename, shape, allow_rotate, max_vertices, margin, extrude";
 
 /* ------------------------------------------------------------------ */
@@ -62,7 +61,7 @@ static const char *const k_sprite_fields =
 
 /* Splits "key=value" at the first '='. Copies the key into kbuf; returns the value
  * pointer (into `tok`) or NULL when there is no '='. */
-static const char *split_kv(const char *tok, char *kbuf, size_t kcap) {
+const char *split_kv(const char *tok, char *kbuf, size_t kcap) {
     const char *eq = strchr(tok, '=');
     if (!eq) {
         return NULL;
@@ -76,7 +75,7 @@ static const char *split_kv(const char *tok, char *kbuf, size_t kcap) {
     return eq + 1;
 }
 
-static bool to_long(const char *s, long *out) {
+bool to_long(const char *s, long *out) {
     if (!s || !*s) {
         return false;
     }
@@ -94,7 +93,7 @@ static bool to_long(const char *s, long *out) {
  * the op's plain-int knob field). The SEMANTIC range (max_size [1..build texture cap],
  * >=0, ...) is core's (tp_operation_validate). A too-big value is a usage error here, never a silent wrap.
  * Uses strtoll so the fit check is meaningful where long == int (Windows LLP64). */
-static bool to_int(const char *s, int *out) {
+bool to_int(const char *s, int *out) {
     if (!s || !*s) {
         return false;
     }
@@ -107,7 +106,7 @@ static bool to_int(const char *s, int *out) {
     return true;
 }
 
-static bool to_bool(const char *s, bool *out) {
+bool to_bool(const char *s, bool *out) {
     if (strcmp(s, "1") == 0 || strcmp(s, "true") == 0) {
         *out = true;
         return true;
@@ -119,7 +118,7 @@ static bool to_bool(const char *s, bool *out) {
     return false;
 }
 
-static bool to_float(const char *s, float *out) {
+bool to_float(const char *s, float *out) {
     if (!s || !*s) {
         return false;
     }
@@ -133,7 +132,7 @@ static bool to_float(const char *s, float *out) {
 }
 
 /* Parses exactly `want` comma-separated longs from `s` into out[]. Too few/many -> false. */
-static bool to_longs_csv(const char *s, long *out, int want) {
+bool to_longs_csv(const char *s, long *out, int want) {
     for (int i = 0; i < want; i++) {
         const char *comma = strchr(s, ',');
         char buf[64];
@@ -158,7 +157,7 @@ static bool to_longs_csv(const char *s, long *out, int want) {
     return true;
 }
 
-static bool to_floats_csv(const char *s, float *out, int want) {
+bool to_floats_csv(const char *s, float *out, int want) {
     for (int i = 0; i < want; i++) {
         const char *comma = strchr(s, ',');
         char buf[64];
@@ -185,7 +184,7 @@ static bool to_floats_csv(const char *s, float *out, int want) {
 
 /* Defold-pinned playback ids (gui_canvas.h): accepts 0..6 or the snake_case names.
  * The enum domain ([0..6]) is parsed here (vocabulary); core also range-checks it. */
-static bool parse_playback(const char *s, int *out) {
+bool parse_playback(const char *s, int *out) {
     static const char *const names[7] = {"once_forward",  "loop_forward",  "once_backward", "loop_backward",
                                          "once_pingpong", "loop_pingpong", "none"};
     long v = 0;
@@ -207,7 +206,7 @@ static bool parse_playback(const char *s, int *out) {
 
 /* Heap dup (the op arms are malloc-owned; tp_operation_free frees them). NULL-safe on
  * a NULL input (returns NULL); the caller distinguishes an OOM from a NULL input. */
-static char *cli_strdup(const char *s) {
+char *cli_strdup(const char *s) {
     if (!s) {
         return NULL;
     }
@@ -220,17 +219,11 @@ static char *cli_strdup(const char *s) {
 }
 
 /* Generates a fresh non-nil structural id via the OS RNG. false on an RNG fault. */
-static bool cli_gen_id(tp_id128 *out) {
+bool cli_gen_id(tp_id128 *out) {
     tp_rng rng = tp_rng_os();
     tp_error err = {0};
     return tp_id128_generate(&rng, out, &err) == TP_STATUS_OK;
 }
-
-typedef struct cli_edit {
-    tp_session *session;
-    tp_session_snapshot *snapshot;
-    const char *path;
-} cli_edit;
 
 static bool status_is_internal_fault(tp_status status) {
     return cli_exit_for_rejected_status(status) == CLI_EXIT_INTERNAL;
@@ -275,7 +268,7 @@ static tp_status emit_selector_error(
     return status;
 }
 
-static void edit_close(cli_edit *edit) {
+void edit_close(cli_edit *edit) {
     if (!edit) {
         return;
     }
@@ -284,7 +277,7 @@ static void edit_close(cli_edit *edit) {
     memset(edit, 0, sizeof *edit);
 }
 
-static int edit_open(cli_edit *edit, const char *path, bool json, bool quiet) {
+int edit_open(cli_edit *edit, const char *path, bool json, bool quiet) {
     memset(edit, 0, sizeof *edit);
     tp_rng rng = tp_rng_os();
     tp_error err = {0};
@@ -303,7 +296,7 @@ static int edit_open(cli_edit *edit, const char *path, bool json, bool quiet) {
     return CLI_EXIT_OK;
 }
 
-static int edit_resolve(cli_edit *edit, tp_id128 atlas_scope,
+int edit_resolve(cli_edit *edit, tp_id128 atlas_scope,
                         tp_selector_kind kind, const char *selector,
                         tp_selector_result *result, bool json, bool quiet) {
     tp_selector_candidates candidates = {0};
@@ -323,7 +316,7 @@ static int edit_resolve(cli_edit *edit, tp_id128 atlas_scope,
                                          : CLI_EXIT_PROJECT;
 }
 
-static int edit_resolve_sprite(cli_edit *edit, tp_id128 atlas_id,
+int edit_resolve_sprite(cli_edit *edit, tp_id128 atlas_id,
                                const char *selector,
                                tp_selector_result *result,
                                tp_id128 *source_id, char *source_key,
@@ -347,7 +340,7 @@ static int edit_resolve_sprite(cli_edit *edit, tp_id128 atlas_id,
                                          : CLI_EXIT_PROJECT;
 }
 
-static int edit_open_atlas(cli_edit *edit, const char *path,
+int edit_open_atlas(cli_edit *edit, const char *path,
                            const char *selector,
                            const tp_snapshot_atlas **atlas, bool json,
                            bool quiet) {
@@ -427,7 +420,7 @@ static void report_save_notices_human(
     }
 }
 
-static int edit_fail_usage(cli_edit *edit, bool json, bool quiet,
+int edit_fail_usage(cli_edit *edit, bool json, bool quiet,
                            const char *id, const char *msg) {
     cli_emit_error(json, quiet, id, "%s", msg);
     edit_close(edit);
@@ -446,7 +439,7 @@ static int emit_save_failure(tp_status status, const tp_error *error,
     return cli_exit_for_save_status(status);
 }
 
-static int commit_session_ops(cli_edit *edit, tp_operation *ops, int nops,
+int commit_session_ops(cli_edit *edit, tp_operation *ops, int nops,
                               const char *verb, int count,
                               const char *human, bool json, bool quiet) {
     tp_txn_request request;
