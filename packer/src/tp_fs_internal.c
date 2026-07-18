@@ -216,6 +216,11 @@ wchar_t *tp_fs_win32_path_alloc(const char *path_utf8) {
         return NULL;
     }
     size_t output_length = prefix_length + (length - skipped);
+    if (output_length >= 32767U) {
+        free(absolute);
+        errno = ENAMETOOLONG;
+        return NULL;
+    }
     wchar_t *extended = (wchar_t *)malloc((output_length + 1U) * sizeof *extended);
     if (!extended) {
         free(absolute);
@@ -226,6 +231,27 @@ wchar_t *tp_fs_win32_path_alloc(const char *path_utf8) {
     memcpy(extended + prefix_length, absolute + skipped, (length - skipped + 1U) * sizeof *extended);
     free(absolute);
     return extended;
+}
+
+bool tp_fs_win32_path_copy(const char *path_utf8, wchar_t *out, size_t cap) {
+    if (!out || cap == 0U) {
+        errno = EINVAL;
+        return false;
+    }
+    out[0] = L'\0';
+    wchar_t *path = tp_fs_win32_path_alloc(path_utf8);
+    if (!path) {
+        return false;
+    }
+    const size_t required = wcslen(path) + 1U;
+    if (required > cap) {
+        free(path);
+        errno = ERANGE;
+        return false;
+    }
+    memcpy(out, path, required * sizeof *out);
+    free(path);
+    return true;
 }
 
 static bool mode_to_wide(const char *mode, wchar_t out[8]) {

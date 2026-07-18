@@ -644,6 +644,17 @@ else
     trap - EXIT
 fi
 
+# 21. The strict UTF-8/long-path policy is one tp_core boundary. apps/common may
+#     retain CRT-local fopen/remove/rename adapters, but must not reimplement
+#     decoding, absolute-path resolution, namespace policy, or Win32 error maps.
+_frontend_fs_policy='(MultiByteToWideChar|GetFullPathNameW|win32_error_to_errno|ERROR_FILENAME_EXCED_RANGE|UNC\\\\)'
+r21=$(grep -nE "$_frontend_fs_policy" apps/common/nt_utf8_fs.c 2>/dev/null)
+[ -n "$r21" ] && hit "R21 duplicate frontend filesystem policy" "$r21"
+if ! printf '    GetFullPathNameW(path, 0, NULL, NULL);\n' |
+    grep -qE "$_frontend_fs_policy"; then
+    hit "R21-selftest" "R21 failed to catch a seeded frontend path-policy implementation"
+fi
+
 if [ "$fail" -eq 0 ]; then
     say "boundaries OK"
 fi

@@ -6,6 +6,8 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#include "tp_core/tp_fs.h"
+
 /* Internal UTF-8 filesystem boundary. Public/core paths stay UTF-8 on every
  * host; this module is the only generic packer-side place that translates them
  * to UTF-16 for Windows filesystem calls. */
@@ -43,7 +45,6 @@ bool tp_fs_create_dir(const char *path_utf8);
 bool tp_fs_remove_file(const char *path_utf8);
 
 bool tp_fs_replace(const char *source_utf8, const char *destination_utf8);
-
 typedef enum tp_fs_move_result {
     TP_FS_MOVE_OK = 0,
     TP_FS_MOVE_DESTINATION_EXISTS,

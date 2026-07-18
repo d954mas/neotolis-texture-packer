@@ -67,7 +67,7 @@ if(WIN32)
         "${CMAKE_SOURCE_DIR}/apps/common/nt_utf8_fs.c")
     target_include_directories(cli_utf8_argv_test PRIVATE
         "${CMAKE_SOURCE_DIR}/apps/common")
-    target_link_libraries(cli_utf8_argv_test PRIVATE unity shell32)
+    target_link_libraries(cli_utf8_argv_test PRIVATE tp_core unity shell32)
     target_compile_definitions(cli_utf8_argv_test PRIVATE _CRT_SECURE_NO_WARNINGS)
     target_compile_options(cli_utf8_argv_test PRIVATE -U_DLL)
     nt_set_warning_flags(cli_utf8_argv_test)
