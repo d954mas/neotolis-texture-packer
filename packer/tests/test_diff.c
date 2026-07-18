@@ -324,6 +324,109 @@ void test_history_codec_rejects_malformed_known_shape_but_falls_back_for_unknown
     tp_model_destroy(m);
 }
 
+static void assert_hostile_collection_remove_rejected(tp_diff_coll coll,
+                                                       bool reverse) {
+    tp_project *project = make_base();
+    tp_project_atlas *atlas = &project->atlases[0];
+    tp_project_anim fake_animation = {.id = tp_test_id_of(0xE1)};
+    tp_project_target fake_target = {.id = tp_test_id_of(0xE2)};
+    tp_diff_op operation = {
+        .shape = TP_DIFF_SHAPE_COLL,
+        .coll = coll,
+        .atlas_id = atlas->id,
+        .anim_id = atlas->animations[0].id,
+        .position = 0,
+        .created = reverse,
+    };
+    switch (coll) {
+        case TP_DIFF_COLL_ATLAS:
+            operation.elem = &project->atlases[1];
+            break;
+        case TP_DIFF_COLL_SOURCE:
+            operation.elem = &atlas->sources[1];
+            break;
+        case TP_DIFF_COLL_ANIM:
+            operation.elem = &fake_animation;
+            break;
+        case TP_DIFF_COLL_TARGET:
+            operation.elem = &fake_target;
+            break;
+        case TP_DIFF_COLL_FRAME:
+            operation.elem = &atlas->animations[0].frames[1];
+            break;
+    }
+    char *before = tp_test_serialize_project(project);
+    tp_error error = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_BAD_PROJECT,
+                          tp_diff_op_apply(project, &operation, reverse,
+                                           &error));
+    char *after = tp_test_serialize_project(project);
+    TEST_ASSERT_EQUAL_STRING(before, after);
+    free(before);
+    free(after);
+    tp_project_destroy(project);
+}
+
+void test_hostile_collection_removals_require_position_identity(void) {
+    for (int coll = TP_DIFF_COLL_ATLAS; coll <= TP_DIFF_COLL_FRAME; ++coll) {
+        assert_hostile_collection_remove_rejected((tp_diff_coll)coll, false);
+        assert_hostile_collection_remove_rejected((tp_diff_coll)coll, true);
+    }
+}
+
+static void assert_hostile_sprite_record_rejected(bool reverse,
+                                                  bool replacement) {
+    tp_project *project = make_base();
+    tp_project_atlas *atlas = &project->atlases[0];
+    tp_project_sprite *current = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_sprite_by_source_key(
+            atlas, atlas->sources[0].id, "hero.png", &current));
+    TEST_ASSERT_NOT_NULL(current);
+    tp_project_sprite other = {
+        .source_ref = atlas->sources[0].id,
+        .src_key = (char *)"enemy.png",
+    };
+    const tp_project_sprite current_identity = *current;
+    tp_diff_op operation = {
+        .shape = TP_DIFF_SHAPE_SPRITE_RECORD,
+        .atlas_id = atlas->id,
+    };
+    if (reverse) {
+        operation.spr_after_present = true;
+        operation.spr_after_index = 0;
+        operation.spr_after = replacement ? current_identity : other;
+        operation.spr_before_present = replacement;
+        operation.spr_before_index = replacement ? 0 : -1;
+        operation.spr_before = other;
+    } else {
+        operation.spr_before_present = true;
+        operation.spr_before_index = 0;
+        operation.spr_before = replacement ? current_identity : other;
+        operation.spr_after_present = replacement;
+        operation.spr_after_index = replacement ? 0 : -1;
+        operation.spr_after = other;
+    }
+    char *before = tp_test_serialize_project(project);
+    tp_error error = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_BAD_PROJECT,
+                          tp_diff_op_apply(project, &operation, reverse,
+                                           &error));
+    char *after = tp_test_serialize_project(project);
+    TEST_ASSERT_EQUAL_STRING(before, after);
+    free(before);
+    free(after);
+    tp_project_destroy(project);
+}
+
+void test_hostile_sprite_remove_and_replace_require_position_identity(void) {
+    assert_hostile_sprite_record_rejected(false, false);
+    assert_hostile_sprite_record_rejected(true, false);
+    assert_hostile_sprite_record_rejected(false, true);
+    assert_hostile_sprite_record_rejected(true, true);
+}
+
 void test_history_codec_atomic_apply_rejects_noncanonical_result(void) {
     tp_model *m = fresh();
     const tp_project_atlas *atlas = &tp_model_project(m)->atlases[0];
@@ -1615,6 +1718,8 @@ int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_history_codec_atlas_name_roundtrip_both_directions);
     RUN_TEST(test_history_codec_rejects_malformed_known_shape_but_falls_back_for_unknown_shape);
+    RUN_TEST(test_hostile_collection_removals_require_position_identity);
+    RUN_TEST(test_hostile_sprite_remove_and_replace_require_position_identity);
     RUN_TEST(test_history_codec_atomic_apply_rejects_noncanonical_result);
     RUN_TEST(test_oracle_atlas_create);
     RUN_TEST(test_oracle_atlas_remove);

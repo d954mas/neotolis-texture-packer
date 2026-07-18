@@ -11,6 +11,7 @@
 
 #include <stddef.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "tp_core/tp_operation.h"
 #include "tp_core/tp_project.h"
@@ -21,6 +22,86 @@
 static tp_project_atlas *atlas_of(tp_project *p, tp_id128 id) {
     int ai = tp_project_find_atlas_by_id(p, id);
     return ai < 0 ? NULL : &p->atlases[ai];
+}
+
+static bool frame_identity_equal(const tp_project_frame *left,
+                                 const tp_project_frame *right) {
+    return left && right && left->src_key && right->src_key &&
+           tp_id128_eq(left->source_ref, right->source_ref) &&
+           strcmp(left->src_key, right->src_key) == 0;
+}
+
+static bool sprite_identity_equal(const tp_project_sprite *left,
+                                  const tp_project_sprite *right) {
+    return left && right && left->src_key && right->src_key &&
+           tp_id128_eq(left->source_ref, right->source_ref) &&
+           strcmp(left->src_key, right->src_key) == 0;
+}
+
+static tp_status require_collection_remove_identity(
+    const tp_project *project, const tp_project_atlas *atlas,
+    const tp_project_anim *animation, const tp_diff_op *operation,
+    tp_error *error) {
+    if (!operation->elem) {
+        return tp_error_set(error, TP_STATUS_BAD_PROJECT,
+                            "diff: removal has no captured identity");
+    }
+    if (operation->position < 0) {
+        return tp_error_set(error, TP_STATUS_OUT_OF_BOUNDS,
+                            "diff: removal position out of range");
+    }
+    bool matches = false;
+    switch (operation->coll) {
+        case TP_DIFF_COLL_ATLAS:
+            if (!project || operation->position >= project->atlas_count) {
+                return tp_error_set(error, TP_STATUS_OUT_OF_BOUNDS,
+                                    "diff: atlas removal position out of range");
+            }
+            matches = tp_id128_eq(
+                project->atlases[operation->position].id,
+                ((const tp_project_atlas *)operation->elem)->id);
+            break;
+        case TP_DIFF_COLL_SOURCE:
+            if (!atlas || operation->position >= atlas->source_count) {
+                return tp_error_set(error, TP_STATUS_OUT_OF_BOUNDS,
+                                    "diff: source removal position out of range");
+            }
+            matches = tp_id128_eq(
+                atlas->sources[operation->position].id,
+                ((const tp_project_source *)operation->elem)->id);
+            break;
+        case TP_DIFF_COLL_ANIM:
+            if (!atlas || operation->position >= atlas->animation_count) {
+                return tp_error_set(error, TP_STATUS_OUT_OF_BOUNDS,
+                                    "diff: animation removal position out of range");
+            }
+            matches = tp_id128_eq(
+                atlas->animations[operation->position].id,
+                ((const tp_project_anim *)operation->elem)->id);
+            break;
+        case TP_DIFF_COLL_TARGET:
+            if (!atlas || operation->position >= atlas->target_count) {
+                return tp_error_set(error, TP_STATUS_OUT_OF_BOUNDS,
+                                    "diff: target removal position out of range");
+            }
+            matches = tp_id128_eq(
+                atlas->targets[operation->position].id,
+                ((const tp_project_target *)operation->elem)->id);
+            break;
+        case TP_DIFF_COLL_FRAME:
+            if (!animation || operation->position >= animation->frame_count) {
+                return tp_error_set(error, TP_STATUS_OUT_OF_BOUNDS,
+                                    "diff: frame removal position out of range");
+            }
+            matches = frame_identity_equal(
+                &animation->frames[operation->position],
+                (const tp_project_frame *)operation->elem);
+            break;
+    }
+    return matches
+               ? TP_STATUS_OK
+               : tp_error_set(error, TP_STATUS_BAD_PROJECT,
+                              "diff: removal position identity mismatch");
 }
 
 /* Adapt tp_diff__dup (NULL src -> NULL/ok, real alloc fail -> NULL/!ok) to the "NULL only on
@@ -64,7 +145,24 @@ static tp_status replace_frames(tp_project_anim *an, const tp_project_frame *src
 /* Reconcile the sparse sprite array from `oth` (the from-state) to `tgt` (target).
  * Under the strict reverse/forward replay invariant the current array matches `oth`. */
 static tp_status reconcile_sprite(tp_project_atlas *a, bool tgt_present, int tgt_index, const tp_project_sprite *tgt,
-                                  bool oth_present, int oth_index) {
+                                  bool oth_present, int oth_index,
+                                  const tp_project_sprite *oth,
+                                  tp_error *err) {
+    if (oth_present) {
+        if (oth_index < 0 || oth_index >= a->sprite_count) {
+            return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                                "diff: sprite position out of range");
+        }
+        if (!sprite_identity_equal(&a->sprites[oth_index], oth)) {
+            return tp_error_set(err, TP_STATUS_BAD_PROJECT,
+                                "diff: sprite position identity mismatch");
+        }
+    }
+    if (oth_present && tgt_present &&
+        (oth_index != tgt_index || !sprite_identity_equal(oth, tgt))) {
+        return tp_error_set(err, TP_STATUS_BAD_PROJECT,
+                            "diff: sprite replacement changes identity");
+    }
     if (oth_present && !tgt_present) {
         return tp_diff__remove_sprite_at(a, oth_index);
     }
@@ -84,12 +182,22 @@ tp_status tp_diff_op_apply(tp_project *clone, const tp_diff_op *e, bool reverse,
             bool do_insert = e->created ? !reverse : reverse;
             switch (e->coll) {
                 case TP_DIFF_COLL_ATLAS:
+                    if (!do_insert) {
+                        tp_status status = require_collection_remove_identity(
+                            clone, NULL, NULL, e, err);
+                        if (status != TP_STATUS_OK) return status;
+                    }
                     return do_insert ? tp_diff__insert_atlas(clone, e->position, (const tp_project_atlas *)e->elem)
                                      : tp_diff__remove_atlas(clone, e->position);
                 case TP_DIFF_COLL_SOURCE: {
                     tp_project_atlas *a = atlas_of(clone, e->atlas_id);
                     if (!a) {
                         return tp_error_set(err, TP_STATUS_NOT_FOUND, "diff: no atlas for source op");
+                    }
+                    if (!do_insert) {
+                        tp_status status = require_collection_remove_identity(
+                            clone, a, NULL, e, err);
+                        if (status != TP_STATUS_OK) return status;
                     }
                     return do_insert ? tp_diff__insert_source(a, e->position, (const tp_project_source *)e->elem)
                                      : tp_diff__remove_source(a, e->position);
@@ -99,6 +207,11 @@ tp_status tp_diff_op_apply(tp_project *clone, const tp_diff_op *e, bool reverse,
                     if (!a) {
                         return tp_error_set(err, TP_STATUS_NOT_FOUND, "diff: no atlas for anim op");
                     }
+                    if (!do_insert) {
+                        tp_status status = require_collection_remove_identity(
+                            clone, a, NULL, e, err);
+                        if (status != TP_STATUS_OK) return status;
+                    }
                     return do_insert ? tp_diff__insert_anim(a, e->position, (const tp_project_anim *)e->elem)
                                      : tp_diff__remove_anim(a, e->position);
                 }
@@ -106,6 +219,11 @@ tp_status tp_diff_op_apply(tp_project *clone, const tp_diff_op *e, bool reverse,
                     tp_project_atlas *a = atlas_of(clone, e->atlas_id);
                     if (!a) {
                         return tp_error_set(err, TP_STATUS_NOT_FOUND, "diff: no atlas for target op");
+                    }
+                    if (!do_insert) {
+                        tp_status status = require_collection_remove_identity(
+                            clone, a, NULL, e, err);
+                        if (status != TP_STATUS_OK) return status;
                     }
                     return do_insert ? tp_diff__insert_target(a, e->position, (const tp_project_target *)e->elem)
                                      : tp_diff__remove_target(a, e->position);
@@ -119,6 +237,11 @@ tp_status tp_diff_op_apply(tp_project *clone, const tp_diff_op *e, bool reverse,
                     if (!an) {
                         return tp_error_set(err, TP_STATUS_NOT_FOUND, "diff: no animation for frame op");
                     }
+                    if (!do_insert) {
+                        tp_status status = require_collection_remove_identity(
+                            clone, a, an, e, err);
+                        if (status != TP_STATUS_OK) return status;
+                    }
                     return do_insert ? tp_diff__insert_frame(an, e->position, (const tp_project_frame *)e->elem)
                                      : tp_diff__remove_frame_at(an, e->position);
                 }
@@ -127,6 +250,10 @@ tp_status tp_diff_op_apply(tp_project *clone, const tp_diff_op *e, bool reverse,
         }
 
         case TP_DIFF_SHAPE_FRAME_MOVE: {
+            /* History v1 carries only parent IDs and from/to indexes for this
+             * shape.  Unlike FRAME collection removal it has no encoded
+             * {source,key} identity to verify.  Keep the bounds guard here and
+             * defer identity binding to an explicit future wire version. */
             tp_project_atlas *a = atlas_of(clone, e->atlas_id);
             if (!a) {
                 return tp_error_set(err, TP_STATUS_NOT_FOUND, "diff: no atlas for frame.move");
@@ -227,7 +354,10 @@ tp_status tp_diff_op_apply(tp_project *clone, const tp_diff_op *e, bool reverse,
             const tp_project_sprite *tgt = reverse ? &e->spr_before : &e->spr_after;
             bool oth_present = reverse ? e->spr_after_present : e->spr_before_present;
             int oth_index = reverse ? e->spr_after_index : e->spr_before_index;
-            return reconcile_sprite(a, tgt_present, tgt_index, tgt, oth_present, oth_index);
+            const tp_project_sprite *oth =
+                reverse ? &e->spr_after : &e->spr_before;
+            return reconcile_sprite(a, tgt_present, tgt_index, tgt, oth_present,
+                                    oth_index, oth, err);
         }
         case TP_DIFF_SHAPE_FRAMES_LIST: {
             tp_project_atlas *a = atlas_of(clone, e->atlas_id);

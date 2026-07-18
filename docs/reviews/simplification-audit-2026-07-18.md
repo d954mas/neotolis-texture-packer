@@ -117,3 +117,13 @@ before structural work; Phase 2 adds the shared primitives and boundary checks.
 Physical splits are authorized only after the Phase 2 reassessment confirms a
 clearer ownership seam and a bounded packet-plan protects the affected
 contracts.
+
+## Residual risk recorded during P0-07
+
+History codec v1 `FRAME_MOVE` stores the parent atlas/animation IDs and the
+`from`/`to` indexes, but not the moved frame's `{source,key}` identity. P0-07
+can therefore harden collection removals and sprite replacement without a wire
+change, while an in-range move against the wrong frame remains detectable only
+by a future versioned history format. This is deferred to the codec work after
+the P1-02 fixed-byte oracle; the simplification packet does not invent an
+incompatible v1 field.
