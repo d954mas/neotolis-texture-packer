@@ -225,16 +225,14 @@ add_test(NAME cli_validate_sprite_records_strict COMMAND ${CMAKE_COMMAND}
     -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0 "-DARGS=validate ${_td}/v5_orphan.ntpacker_project --strict"
     -P "${_run}")
 
-# (i6) C3 duplicate/invalid export targets: a fixture with two atlases whose targets both
-# export to "out/shared" -> a cross-atlas duplicate_out_path collision (a WARNING; core
-# ALLOWS two targets to share an out_path -- they silently overwrite each other). Both
-# atlases resolve the shared `sprites` folder (no empty_atlas / missing_source noise) and
-# use known exporters, so error=0 and the only findings are the two duplicate_out_path
-# warnings (reported per-colliding-target). No --strict -> exit 0.
+# (i6) Deterministic multi-atlas validation contract: two independent duplicate
+# output groups (cardinality 3 and 2) pin core iteration and schema-2 CLI order.
+# Every source resolves and every exporter is known, so these five warnings are
+# the complete platform-neutral report. No --strict -> exit 0.
 add_test(NAME cli_validate_dup_target COMMAND ${CMAKE_COMMAND}
     -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0 "-DARGS=validate ${_td}/dup_target.ntpacker_project --json"
     -DCHECKER=$<TARGET_FILE:cli_json_check>
-    "-DCHECK_ARGS=validate error=0 warning=2 code=duplicate_out_path"
+    "-DCHECK_ARGS=validate error=0 warning=5 code=duplicate_out_path"
     -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_validate_dup_target.json
     -DEXPECT_FILE=${_td}/validate-dup-target.expected.json
     -P "${_run}")

@@ -134,6 +134,19 @@ nt_set_warning_flags(tp_test_validate)
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_validate_test")
 add_test(NAME tp_validate COMMAND tp_test_validate)
 
+# Independent ordered validation oracle over a checked-in, platform-neutral
+# multi-atlas corpus. Keep this separate from rule-level and filesystem cases.
+add_executable(tp_test_validate_contract test_validate_contract.c)
+target_link_libraries(tp_test_validate_contract PRIVATE tp_core unity)
+target_compile_definitions(tp_test_validate_contract PRIVATE
+    TP_CLI_TESTDATA_DIR="${CMAKE_SOURCE_DIR}/apps/cli/testdata"
+    TP_VALIDATE_TEST_DIR="${CMAKE_BINARY_DIR}/tp_validate_contract_test"
+    _CRT_SECURE_NO_WARNINGS)
+target_compile_options(tp_test_validate_contract PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_validate_contract)
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_validate_contract_test")
+add_test(NAME tp_validate_contract COMMAND tp_test_validate_contract)
+
 # Validation resource/complexity gate: a real saved project with 1k resolved
 # sprites, overrides, and frames. Elapsed time is evidence; deterministic probe
 # growth is the hard cross-platform contract.

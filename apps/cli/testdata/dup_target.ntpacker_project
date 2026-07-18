@@ -15,6 +15,11 @@
           "exporter_id": "json-neotolis",
           "id": "target_00000000000000000000000000000303",
           "out_path": "out/shared"
+        },
+        {
+          "exporter_id": "defold",
+          "id": "target_00000000000000000000000000000304",
+          "out_path": "out/secondary"
         }
       ]
     },
@@ -31,6 +36,28 @@
         {
           "exporter_id": "defold",
           "id": "target_00000000000000000000000000000313",
+          "out_path": "out/shared"
+        },
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_00000000000000000000000000000314",
+          "out_path": "out/secondary"
+        }
+      ]
+    },
+    {
+      "id": "atlas_00000000000000000000000000000321",
+      "name": "a3",
+      "sources": [
+        {
+          "id": "source_00000000000000000000000000000322",
+          "path": "sprites"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_00000000000000000000000000000323",
           "out_path": "out/shared"
         }
       ]

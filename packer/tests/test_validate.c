@@ -611,6 +611,37 @@ void test_large_report_is_bounded_and_ends_with_deterministic_summary(void) {
     TEST_ASSERT_TRUE(tp_id128_is_nil(summary->animation_id));
     TEST_ASSERT_TRUE(tp_id128_is_nil(summary->target_id));
 
+    tp_validation_report repeat = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_validate_project_file(path, &repeat, &err));
+    TEST_ASSERT_EQUAL_size_t(report.finding_count, repeat.finding_count);
+    TEST_ASSERT_EQUAL_size_t(report.error_count, repeat.error_count);
+    TEST_ASSERT_EQUAL_size_t(report.warning_count, repeat.warning_count);
+    TEST_ASSERT_EQUAL_size_t(report.total_finding_count,
+                             repeat.total_finding_count);
+    TEST_ASSERT_EQUAL_size_t(report.omitted_finding_count,
+                             repeat.omitted_finding_count);
+    TEST_ASSERT_EQUAL(report.truncated, repeat.truncated);
+    for (size_t i = 0U; i < report.finding_count; ++i) {
+        const tp_validation_finding *first = &report.findings[i];
+        const tp_validation_finding *second = &repeat.findings[i];
+        TEST_ASSERT_EQUAL_INT(first->severity, second->severity);
+        TEST_ASSERT_EQUAL_STRING(first->code, second->code);
+        TEST_ASSERT_EQUAL_STRING(first->message, second->message);
+        TEST_ASSERT_EQUAL_STRING(first->atlas, second->atlas);
+        TEST_ASSERT_TRUE(tp_id128_eq(first->atlas_id, second->atlas_id));
+        TEST_ASSERT_EQUAL_STRING(first->source, second->source);
+        TEST_ASSERT_TRUE(tp_id128_eq(first->source_id, second->source_id));
+        TEST_ASSERT_EQUAL_STRING(first->sprite, second->sprite);
+        TEST_ASSERT_EQUAL_STRING(first->anim, second->anim);
+        TEST_ASSERT_TRUE(
+            tp_id128_eq(first->animation_id, second->animation_id));
+        TEST_ASSERT_EQUAL_STRING(first->frame, second->frame);
+        TEST_ASSERT_EQUAL_STRING(first->target, second->target);
+        TEST_ASSERT_TRUE(tp_id128_eq(first->target_id, second->target_id));
+    }
+
+    tp_validation_report_free(&repeat);
     tp_validation_report_free(&report);
     TEST_ASSERT_EQUAL_INT(0, remove(path));
 }
