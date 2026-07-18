@@ -694,6 +694,91 @@ void test_rejected_commit_does_not_publish_event_or_generation(void) {
     tp_session_destroy(session);
 }
 
+void test_invalid_operation_reject_publishes_no_event_and_id_stays_retryable(void) {
+    static const char transaction_id[] =
+        "bdbdbdbdbdbdbdbdbdbdbdbdbdbdbdbd";
+    tp_session *session = make_session();
+    tp_error error = {{0}};
+    tp_session_snapshot *before = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_snapshot_create(session, &before, &error));
+    const tp_snapshot_atlas *atlas = tp_session_snapshot_atlas_at(before, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+
+    char invalid_name[] = {'b', (char)0xC3, 'x', '\0'};
+    tp_operation operation = {0};
+    operation.kind = TP_OP_ATLAS_RENAME;
+    operation.atlas_id = atlas->id;
+    operation.atlas_id.bytes[0] ^= 0xFFU;
+    operation.u.atlas_rename.name = invalid_name;
+    tp_txn_request request = {0};
+    request.schema = TP_TXN_SCHEMA;
+    memcpy(request.id_hex, transaction_id, sizeof transaction_id);
+    request.ops = &operation;
+    request.op_count = 1;
+
+    tp_txn_result result = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_UTF8,
+        tp_session_apply(session, &request, &result, &error));
+    TEST_ASSERT_FALSE(result.committed);
+    TEST_ASSERT_EQUAL_INT(1, result.error_count);
+    TEST_ASSERT_EQUAL_INT(0, result.errors[0].op_index);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_UTF8, result.errors[0].code);
+    TEST_ASSERT_EQUAL_STRING("name", result.errors[0].field);
+    TEST_ASSERT_EQUAL_STRING("name contains invalid UTF-8 at offset 1",
+                             result.errors[0].message);
+    tp_txn_result_free(&result);
+
+    TEST_ASSERT_EQUAL_UINT64(0, tp_session_event_sequence(session));
+    TEST_ASSERT_FALSE(tp_session_can_undo(session));
+    TEST_ASSERT_FALSE(tp_session_can_redo(session));
+    tp_session_snapshot *rejected = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_snapshot_create(session, &rejected, &error));
+    TEST_ASSERT_EQUAL_INT64(0, tp_session_snapshot_revision(rejected));
+    TEST_ASSERT_EQUAL_UINT64(0,
+                             tp_session_snapshot_model_generation(rejected));
+    TEST_ASSERT_EQUAL_UINT64(1,
+                             tp_session_snapshot_admission_sequence(rejected));
+    TEST_ASSERT_FALSE(tp_session_snapshot_dirty(rejected));
+    TEST_ASSERT_EQUAL_STRING(
+        tp_session_snapshot_atlas_at(before, 0)->name,
+        tp_session_snapshot_atlas_at(rejected, 0)->name);
+
+    operation.atlas_id = atlas->id;
+    operation.u.atlas_rename.name = (char *)"renamed";
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_apply(session, &request, &result, &error));
+    TEST_ASSERT_TRUE(result.committed);
+    TEST_ASSERT_EQUAL_INT64(1, result.revision);
+    tp_txn_result_free(&result);
+    TEST_ASSERT_EQUAL_UINT64(1, tp_session_event_sequence(session));
+    TEST_ASSERT_TRUE(tp_session_can_undo(session));
+    TEST_ASSERT_FALSE(tp_session_can_redo(session));
+
+    tp_session_event event = {0};
+    size_t event_count = 0U;
+    bool resync = true;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_events_after(session, 0U, &event, 1U, &event_count,
+                                &resync, &error));
+    TEST_ASSERT_FALSE(resync);
+    TEST_ASSERT_EQUAL_size_t(1U, event_count);
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_EVENT_MODEL_COMMITTED, event.kind);
+    TEST_ASSERT_EQUAL_STRING(transaction_id, event.transaction_id);
+    TEST_ASSERT_EQUAL_INT64(0, event.revision_before);
+    TEST_ASSERT_EQUAL_INT64(1, event.revision_after);
+
+    tp_session_snapshot_destroy(rejected);
+    tp_session_snapshot_destroy(before);
+    tp_session_destroy(session);
+}
+
 void test_no_change_apply_does_not_publish_event_or_generation(void) {
     tp_session *session = make_session();
     tp_error err = {0};
@@ -2034,6 +2119,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_source_batch_plan_collapses_lexical_and_symlink_aliases);
     RUN_TEST(test_source_batch_plan_rejects_empty_inputs_atomically);
     RUN_TEST(test_rejected_commit_does_not_publish_event_or_generation);
+    RUN_TEST(test_invalid_operation_reject_publishes_no_event_and_id_stays_retryable);
     RUN_TEST(test_no_change_apply_does_not_publish_event_or_generation);
     RUN_TEST(test_undo_redo_are_session_commands_with_ordered_events);
     RUN_TEST(test_journal_append_failure_publishes_nothing);

@@ -77,6 +77,14 @@ tp_status tp_op__canonical_view(const tp_project *project,
                                 tp_operation *view, char *path_buf,
                                 size_t path_buf_size);
 
+/* Apply an operation already accepted by tp_operation_validate() against the
+ * same current project state. Transaction history uses this after validation
+ * and before/after capture so attachments cannot change the first rejection.
+ * Public and recovery callers must use tp_operation_apply(). */
+tp_status tp_op__apply_prevalidated(tp_project *project,
+                                    const tp_operation *operation,
+                                    tp_op_reject *reject);
+
 typedef struct tp_sprite_clear_field {
     const char *token;
     uint32_t bit;

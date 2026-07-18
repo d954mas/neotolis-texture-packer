@@ -1236,6 +1236,16 @@ void test_capture_dangling_atlas_rename(void) {
     assert_enabled_equals_disabled(&op, TP_STATUS_NOT_FOUND);
 }
 
+void test_capture_validation_precedes_missing_parent(void) {
+    char invalid_name[] = {'b', (char)0xC3, 'x', '\0'};
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_ATLAS_RENAME;
+    op.atlas_id = tp_test_id_of(0xEE);
+    op.u.atlas_rename.name = invalid_name;
+    assert_enabled_equals_disabled(&op, TP_STATUS_INVALID_UTF8);
+}
+
 void test_capture_dangling_atlas_settings(void) {
     tp_operation op;
     memset(&op, 0, sizeof op);
@@ -1642,6 +1652,7 @@ int main(void) {
     RUN_TEST(test_no_history_is_f2_02_behavior);
     /* [1]/[2] defensive capture: history on == history off on hostile input, no crash */
     RUN_TEST(test_capture_dangling_atlas_rename);
+    RUN_TEST(test_capture_validation_precedes_missing_parent);
     RUN_TEST(test_capture_dangling_atlas_settings);
     RUN_TEST(test_capture_dangling_atlas_remove);
     RUN_TEST(test_capture_dangling_source_remove);

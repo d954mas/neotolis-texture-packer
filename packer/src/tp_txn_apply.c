@@ -616,15 +616,25 @@ tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_tx
     }
 
     for (int i = 0; i < req->op_count; i++) {
+        tp_op_reject rej;
+        tp_status st = tp_operation_validate(clone, &req->ops[i], &rej);
+        if (st != TP_STATUS_OK) {
+            if (rec) {
+                (void)tp_diff__record_budget_end(NULL);
+            }
+            tp_txn__commit_reject(out, clone, rec, NULL, payload,
+                                  m->revision, i, st, rej.field, rej.message);
+            return tp_error_set(err, st, "operation %d rejected: %s", i,
+                                rej.message);
+        }
+
         tp_diff_op entry;
         memset(&entry, 0, sizeof entry);
         if (rec) {
-            /* Capture runs BEFORE tp_operation_apply validates, so capture itself must
-             * resolve every entity + bounds-check every index before any deref -- a
-             * dangling id / out-of-range index yields a structured status,
-             * never a crash. A NOT_FOUND/OUT_OF_BOUNDS is an op-content rejection at op i
-             * (the same status the history-LESS apply path returns for this input); an OOM
-             * is an allocation fault (op_index -1). */
+            /* Validation above owns deterministic first-reject. Capture still
+             * resolves every entity and bounds-checks every index defensively;
+             * a NOT_FOUND/OUT_OF_BOUNDS here indicates capture drift, while OOM
+             * remains an allocation fault (op_index -1). */
             tp_status cst = tp_diff_capture_before(clone, &req->ops[i], &entry);
             if (cst != TP_STATUS_OK) {
                 const bool over_budget = tp_diff__record_budget_exceeded();
@@ -643,8 +653,7 @@ tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_tx
                                    : tp_error_set(err, cst, "diff capture (before) failed at op %d", i);
             }
         }
-        tp_op_reject rej;
-        tp_status st = tp_operation_apply(clone, &req->ops[i], &rej);
+        st = tp_op__apply_prevalidated(clone, &req->ops[i], &rej);
         if (st != TP_STATUS_OK) {
             if (rec) {
                 (void)tp_diff__record_budget_end(NULL);

@@ -117,6 +117,28 @@ static char *txn_json_with_unknown_ops(int op_count) {
     return json;
 }
 
+static int journal_record_count(tp_journal_io io) {
+    uint8_t *bytes = NULL;
+    size_t length = 0U;
+    TEST_ASSERT_EQUAL_INT(
+        0, io.read_all(io.ctx, TP_JOURNAL_MAX_FILE_BYTES, &bytes, &length));
+    tp_journal_io copy = tp_journal_io_memory();
+    TEST_ASSERT_NOT_NULL(copy.ctx);
+    if (length > 0U) {
+        TEST_ASSERT_EQUAL_INT64((int64_t)length,
+                                copy.write(copy.ctx, bytes, length));
+    }
+    free(bytes);
+
+    tp_journal_peek_result peek = {0};
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_journal_peek(copy, &peek, &error));
+    const int count = peek.record_count;
+    tp_journal_peek_free(&peek);
+    return count;
+}
+
 static char *txn_json_with_nested_operations(int depth, size_t *out_len) {
     static const char prefix[] =
         "{\"schema\":1,\"transaction\":{\"id\":\"00000000000000000000000000000000\","
@@ -834,6 +856,118 @@ void test_semantic_no_change_preserves_redo_branch(void) {
     TEST_ASSERT_TRUE(tp_model_can_redo(model));
     tp_txn_result_free(&result);
     tp_model_destroy(model);
+}
+
+void test_invalid_operation_reject_is_attachment_independent_and_retryable(void) {
+    static const char transaction_id[] =
+        "bcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbc";
+    char invalid_name[] = {'b', (char)0xC3, 'x', '\0'};
+    tp_model *models[2] = {
+        tp_model_wrap(tp_test_base_project()),
+        tp_model_wrap(tp_test_base_project()),
+    };
+    TEST_ASSERT_NOT_NULL(models[0]);
+    TEST_ASSERT_NOT_NULL(models[1]);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_enable_history(models[1]));
+
+    tp_journal_io ios[2] = {tp_journal_io_memory(), tp_journal_io_memory()};
+    tp_journal *journals[2] = {
+        tp_journal_create(ios[0], tp_test_id_of(0xA1)),
+        tp_journal_create(ios[1], tp_test_id_of(0xA2)),
+    };
+    TEST_ASSERT_NOT_NULL(journals[0]);
+    TEST_ASSERT_NOT_NULL(journals[1]);
+    tp_error errors[2] = {{{0}}, {{0}}};
+    for (int i = 0; i < 2; ++i) {
+        TEST_ASSERT_EQUAL_INT(
+            TP_STATUS_OK,
+            tp_model_attach_journal(models[i], journals[i], &errors[i]));
+    }
+
+    char *before[2] = {
+        tp_test_serialize_project(tp_model_project(models[0])),
+        tp_test_serialize_project(tp_model_project(models[1])),
+    };
+    const tp_id128 identity_before[2] = {
+        tp_semantic_identity(tp_model_project(models[0])),
+        tp_semantic_identity(tp_model_project(models[1])),
+    };
+    const int64_t journal_bytes_before[2] = {
+        ios[0].length(ios[0].ctx), ios[1].length(ios[1].ctx)};
+    TEST_ASSERT_EQUAL_INT(1, journal_record_count(ios[0]));
+    TEST_ASSERT_EQUAL_INT(1, journal_record_count(ios[1]));
+
+    tp_operation operation = {0};
+    operation.kind = TP_OP_ATLAS_RENAME;
+    operation.atlas_id = tp_test_id_of(0xEE);
+    operation.u.atlas_rename.name = invalid_name;
+    tp_txn_request request = {0};
+    request.schema = TP_TXN_SCHEMA;
+    memcpy(request.id_hex, transaction_id, sizeof transaction_id);
+    request.ops = &operation;
+    request.op_count = 1;
+
+    for (int i = 0; i < 2; ++i) {
+        tp_txn_result result = {0};
+        TEST_ASSERT_EQUAL_INT(
+            TP_STATUS_INVALID_UTF8,
+            tp_model_apply(models[i], &request, &result, &errors[i]));
+        TEST_ASSERT_FALSE(result.committed);
+        TEST_ASSERT_FALSE(result.no_change);
+        TEST_ASSERT_EQUAL_STRING(transaction_id, result.transaction_id);
+        TEST_ASSERT_EQUAL_INT64(0, result.revision);
+        TEST_ASSERT_EQUAL_INT(1, result.error_count);
+        TEST_ASSERT_EQUAL_INT(0, result.errors[0].op_index);
+        TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_UTF8,
+                              result.errors[0].code);
+        TEST_ASSERT_EQUAL_STRING("name", result.errors[0].field);
+        TEST_ASSERT_EQUAL_STRING("name contains invalid UTF-8 at offset 1",
+                                 result.errors[0].message);
+        tp_txn_result_free(&result);
+
+        char *after = tp_test_serialize_project(tp_model_project(models[i]));
+        TEST_ASSERT_EQUAL_STRING(before[i], after);
+        free(after);
+        TEST_ASSERT_TRUE(tp_id128_eq(
+            identity_before[i],
+            tp_semantic_identity(tp_model_project(models[i]))));
+        TEST_ASSERT_EQUAL_INT64(0, tp_model_revision(models[i]));
+        TEST_ASSERT_FALSE(tp_model_dirty(models[i]));
+        TEST_ASSERT_EQUAL_INT(0, tp_model_undo_depth(models[i]));
+        TEST_ASSERT_EQUAL_INT(0, tp_model_redo_depth(models[i]));
+        TEST_ASSERT_FALSE(tp_model_can_undo(models[i]));
+        TEST_ASSERT_FALSE(tp_model_can_redo(models[i]));
+        TEST_ASSERT_EQUAL_INT64(journal_bytes_before[i],
+                                ios[i].length(ios[i].ctx));
+        TEST_ASSERT_EQUAL_INT(1, journal_record_count(ios[i]));
+        TEST_ASSERT_EQUAL_INT(0, tp_journal_id_count(journals[i]));
+        TEST_ASSERT_FALSE(tp_journal_contains(journals[i], transaction_id));
+    }
+
+    operation.atlas_id = tp_model_project(models[0])->atlases[0].id;
+    operation.u.atlas_rename.name = (char *)"renamed";
+    for (int i = 0; i < 2; ++i) {
+        tp_txn_result result = {0};
+        TEST_ASSERT_EQUAL_INT(
+            TP_STATUS_OK,
+            tp_model_apply(models[i], &request, &result, &errors[i]));
+        TEST_ASSERT_TRUE(result.committed);
+        TEST_ASSERT_EQUAL_INT64(1, result.revision);
+        TEST_ASSERT_EQUAL_STRING(transaction_id, result.transaction_id);
+        tp_txn_result_free(&result);
+        TEST_ASSERT_EQUAL_INT64(1, tp_model_revision(models[i]));
+        TEST_ASSERT_TRUE(tp_model_dirty(models[i]));
+        TEST_ASSERT_TRUE(tp_journal_contains(journals[i], transaction_id));
+        TEST_ASSERT_EQUAL_INT(1, tp_journal_id_count(journals[i]));
+        TEST_ASSERT_EQUAL_INT(2, journal_record_count(ios[i]));
+    }
+    TEST_ASSERT_EQUAL_INT(0, tp_model_undo_depth(models[0]));
+    TEST_ASSERT_EQUAL_INT(1, tp_model_undo_depth(models[1]));
+
+    free(before[0]);
+    free(before[1]);
+    tp_model_destroy(models[0]);
+    tp_model_destroy(models[1]);
 }
 
 void test_committed_result_preserves_distinct_long_sprite_keys(void) {
@@ -2408,6 +2542,7 @@ int main(void) {
     RUN_TEST(test_idempotency_retention_window_evicts_fifo);
     RUN_TEST(test_semantic_no_change_is_not_committed_or_retained);
     RUN_TEST(test_semantic_no_change_preserves_redo_branch);
+    RUN_TEST(test_invalid_operation_reject_is_attachment_independent_and_retryable);
     RUN_TEST(test_committed_result_preserves_distinct_long_sprite_keys);
     RUN_TEST(test_result_echo_oom_rejects_before_publication);
     RUN_TEST(test_journal_less_history_avoids_checkpoint_size_traversals);

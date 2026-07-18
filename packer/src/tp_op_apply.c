@@ -278,17 +278,14 @@ static tp_status apply_source_replace(tp_project_atlas *a, const tp_op_source_re
     return tp_set_owned_dup(&src->path, o->key, stage_strdup);
 }
 
-tp_status tp_operation_apply(tp_project *p, const tp_operation *op, tp_op_reject *rej) {
-    tp_status st = tp_operation_validate(p, op, rej);
-    if (st != TP_STATUS_OK) {
-        return st; /* rejected: model untouched */
-    }
+tp_status tp_op__apply_prevalidated(tp_project *p, const tp_operation *op,
+                                    tp_op_reject *rej) {
     tp_op__reject_ok(rej);
 
     tp_operation canonical;
     char canonical_path[TP_IDENTITY_PATH_MAX];
-    st = tp_op__canonical_view(p, op, &canonical, canonical_path,
-                               sizeof canonical_path);
+    tp_status st = tp_op__canonical_view(p, op, &canonical, canonical_path,
+                                         sizeof canonical_path);
     if (st != TP_STATUS_OK) {
         return tp_op__reject(rej, st, "key",
                              "source path cannot be resolved against the project");
@@ -548,4 +545,13 @@ tp_status tp_operation_apply(tp_project *p, const tp_operation *op, tp_op_reject
         return tp_op__reject(rej, st, "", "apply failed: %s", tp_status_str(st));
     }
     return TP_STATUS_OK;
+}
+
+tp_status tp_operation_apply(tp_project *p, const tp_operation *op,
+                             tp_op_reject *rej) {
+    tp_status st = tp_operation_validate(p, op, rej);
+    if (st != TP_STATUS_OK) {
+        return st; /* rejected: model untouched */
+    }
+    return tp_op__apply_prevalidated(p, op, rej);
 }
