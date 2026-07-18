@@ -187,6 +187,14 @@ nt_set_warning_flags(tp_test_journal)   # AGENTS.md invariant: our test TUs too
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_journal_test")
 add_test(NAME tp_journal COMMAND tp_test_journal "${CMAKE_BINARY_DIR}/tp_journal_test")
 
+add_executable(tp_test_journal_wire_contract test_journal_wire_contract.c)
+target_link_libraries(tp_test_journal_wire_contract PRIVATE tp_core unity)
+target_include_directories(tp_test_journal_wire_contract PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_options(tp_test_journal_wire_contract PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_journal_wire_contract)
+add_test(NAME tp_journal_wire_contract COMMAND tp_test_journal_wire_contract
+    "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/journal_v4_mixed.hex")
+
 # M0 benchmark measurement contract: deterministic percentile math and the
 # fail-closed rule that a rejected operation is never accepted as a timing sample.
 add_executable(tp_test_bench_support test_bench_support.c)
