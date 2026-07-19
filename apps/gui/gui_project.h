@@ -90,9 +90,9 @@ void gui_project_require_recovery(void);
  * name, lock, and scan exclusion. NULL/"" clears the configured directory but
  * does not relax a recovery requirement. */
 void gui_project_enable_recovery(const char *root);
-/* Record a non-fatal startup/setup failure. Required sessions remain available
- * for Save As or Discard, while mutation stays blocked. The UI drains the
- * resulting one-shot warning through gui_project_take_recovery_setup_notice(). */
+/* Record a non-fatal startup/setup failure. Editing, history, and saving remain
+ * available while crash recovery is unavailable. The UI drains the resulting
+ * one-shot warning through gui_project_take_recovery_setup_notice(). */
 void gui_project_note_recovery_setup_failure(const char *reason);
 
 /* UI buffers and loops follow the recovery core's bounded value contract. */
@@ -159,11 +159,10 @@ void gui_project_tick(double now_seconds);
 /* Commit the ONE buffered coalescable gesture NOW (no-op when nothing is buffered): the gesture-end
  * flush called at every commit boundary (save/save-as/new/open/exit/undo/redo/pack/export and before
  * each dirty gate) and by the view layer at a widget's gesture boundary. Committing folds the whole
- * gesture into ONE undo step. Returns FALSE iff a buffered gesture existed and its commit FAILED (a
- * journal append failure) -- i.e. an edit could not be made durable; callers that then persist or
- * discard (save/save-as, undo/redo) MUST abort on false so a journal-failed flush is never mistaken
- * for a clean state (no false "saved"). Returns true when nothing was pending / it was a no-op /
- * it committed OK. */
+ * gesture into ONE undo step. Returns FALSE iff a buffered gesture existed and its transaction was
+ * rejected; callers that then persist, discard, or change history MUST stop rather than act on an
+ * older committed state. Recovery degradation does not make a committed edit fail. Returns true
+ * when nothing was pending, it was a no-op, or it committed successfully. */
 bool gui_project_flush_pending(void);
 /* FALLBACK ONLY: commit a buffered gesture that never got a release/blur/discrete boundary, once the
  * 0.30 s window has elapsed. The caller MUST gate this on no active gesture so it can never split a
@@ -182,7 +181,7 @@ bool gui_project_peek_pending_slice9(const gui_sprite_ref *sprite, int out_lrtb[
 
 /* --- mutation wrappers (all admit typed operations through tp_session) --- */
 /* The remove wrappers return TRUE iff the removal actually committed (fix3 [0]): false on a
- * journal-failed flush-abort, an invalid index, or a commit reject -- so a deferred handler shows
+ * failed pending flush, an invalid index, or a commit reject -- so a deferred handler shows
  * "Removed X (Ctrl+Z)" + resets selection ONLY on a real removal, never a false success. */
 int gui_project_add_atlas(void);                          /* returns new atlas index, or -1 */
 bool gui_project_remove_atlas(tp_id128 atlas_id, int64_t expected_revision); /* true iff removed */

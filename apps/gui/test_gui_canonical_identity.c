@@ -612,37 +612,46 @@ void test_delayed_animation_context_ref_never_retargets_after_index_shift(void) 
     TEST_ASSERT_NOT_NULL(strstr(error, "revision"));
 }
 
-void test_required_recovery_blocks_gui_mutation_without_root(void) {
+void test_required_recovery_without_root_warns_but_allows_edit_undo_redo(void) {
     gui_project_require_recovery();
     gui_project_shutdown();
     gui_project_init();
 
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     const tp_snapshot_atlas *atlas = snapshot
-                                         ? tp_session_snapshot_atlas_at(snapshot, 0)
-                                         : NULL;
+                                          ? tp_session_snapshot_atlas_at(snapshot, 0)
+                                          : NULL;
     TEST_ASSERT_NOT_NULL(atlas);
-    TEST_ASSERT_FALSE(gui_project_set_atlas_name(
-        atlas->id, tp_session_snapshot_revision(snapshot), "must-not-land"));
-    char error[256] = {0};
-    TEST_ASSERT_TRUE(gui_project_take_op_error(error, sizeof error));
-    TEST_ASSERT_NOT_EQUAL(0, error[0]);
-
-    char save_path[1024];
-    (void)snprintf(save_path, sizeof save_path, "%s/required-save.ntpacker_project",
-                   TP_GUI_IDENTITY_TEST_DIR);
-    (void)remove(save_path);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          gui_project_save_as(save_path, error, sizeof error));
-    TEST_ASSERT_TRUE(remove(save_path) == 0);
-
+    TEST_ASSERT_FALSE(
+        tp_session_recovery_available(gui_project_session_for_jobs()));
+    const tp_id128 atlas_id = atlas->id;
+    const int padding_before = atlas->padding;
+    TEST_ASSERT_TRUE(gui_project_set_atlas_setting(
+        atlas_id, tp_session_snapshot_revision(snapshot), GUI_ATLAS_PADDING,
+        padding_before + 1, 0.0F));
+    TEST_ASSERT_TRUE(gui_project_can_undo());
+    TEST_ASSERT_TRUE(gui_project_flush_pending());
     snapshot = gui_project_snapshot();
-    atlas = snapshot ? tp_session_snapshot_atlas_at(snapshot, 0) : NULL;
+    atlas = snapshot ? tp_session_snapshot_atlas_by_id(snapshot, atlas_id) : NULL;
     TEST_ASSERT_NOT_NULL(atlas);
-    TEST_ASSERT_FALSE(gui_project_set_atlas_setting(
-        atlas->id, tp_session_snapshot_revision(snapshot), GUI_ATLAS_PADDING,
-        atlas->padding + 1, 0.0F));
-    TEST_ASSERT_FALSE(gui_project_can_undo());
+    TEST_ASSERT_EQUAL_INT(padding_before + 1, atlas->padding);
+    TEST_ASSERT_TRUE(gui_project_can_undo());
+    TEST_ASSERT_TRUE(gui_project_undo());
+    atlas = tp_session_snapshot_atlas_by_id(gui_project_snapshot(), atlas_id);
+    TEST_ASSERT_NOT_NULL(atlas);
+    TEST_ASSERT_EQUAL_INT(padding_before, atlas->padding);
+    TEST_ASSERT_TRUE(gui_project_can_redo());
+    TEST_ASSERT_TRUE(gui_project_redo());
+    atlas = tp_session_snapshot_atlas_by_id(gui_project_snapshot(), atlas_id);
+    TEST_ASSERT_NOT_NULL(atlas);
+    TEST_ASSERT_EQUAL_INT(padding_before + 1, atlas->padding);
+    TEST_ASSERT_FALSE(
+        tp_session_recovery_available(gui_project_session_for_jobs()));
+
+    char warning[256] = {0};
+    TEST_ASSERT_TRUE(
+        gui_project_take_recovery_setup_notice(warning, sizeof warning));
+    TEST_ASSERT_NOT_NULL(strstr(warning, "Crash recovery is unavailable"));
     gui_project_discard_recovery_on_shutdown();
 }
 
@@ -661,6 +670,6 @@ int main(void) {
     RUN_TEST(test_canvas_cache_key_keeps_core_path_capacity);
     RUN_TEST(test_undo_redo_keep_last_successful_pack_result);
     RUN_TEST(test_pack_result_follows_stable_atlas_across_index_shift);
-    RUN_TEST(test_required_recovery_blocks_gui_mutation_without_root);
+    RUN_TEST(test_required_recovery_without_root_warns_but_allows_edit_undo_redo);
     return UNITY_END();
 }

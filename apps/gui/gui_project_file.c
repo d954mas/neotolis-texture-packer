@@ -101,25 +101,20 @@ bool gui_project_take_save_notice(char *out, size_t cap) {
 // #region undo / redo
 /* A pending buffered edit counts as undoable (undo flushes it into a step, then reverts it). */
 bool gui_project_can_undo(void) {
-    return tp_session_recovery_available(s_project.session) &&
-           (s_project.pending_valid || tp_session_can_undo(s_project.session));
+    return s_project.pending_valid || tp_session_can_undo(s_project.session);
 }
 bool gui_project_can_redo(void) { return tp_session_can_redo(s_project.session); }
 int gui_project_undo_depth(void) { return tp_session_undo_depth(s_project.session); }
 int gui_project_redo_depth(void) { return tp_session_redo_depth(s_project.session); }
 
-/* Undo/Redo is journal-gated inside core. Record a rejected history transition on
- * the same structured soft-error channel as a rejected transaction; no GUI-side
- * durability compensation is needed (and no false "success then degrade" is possible). */
+/* Record an actual history rejection on the same structured soft-error channel as
+ * a rejected transaction. Recovery degradation is only a warning and does not turn
+ * a successful Undo/Redo into a rejection. */
 static void note_history_reject(const char *verb, tp_status st, const tp_error *err) {
     const char *detail = (err && err->msg[0]) ? err->msg : tp_status_str(st);
     s_project.op_error = true;
-    if (st == TP_STATUS_JOURNAL_FAILED) {
-        (void)snprintf(s_project.op_error_msg, sizeof s_project.op_error_msg,
-                       "Could not journal the %s -- disk full? Nothing was changed.", verb);
-    } else {
-        (void)snprintf(s_project.op_error_msg, sizeof s_project.op_error_msg, "%s rejected: %s", verb, detail);
-    }
+    (void)snprintf(s_project.op_error_msg, sizeof s_project.op_error_msg,
+                   "%s rejected: %s", verb, detail);
 }
 
 /* Undo reverses the most recent committed transaction via its captured semantic diff.
@@ -138,7 +133,7 @@ bool gui_project_undo(void) {
         return false;
     }
     gui_project__snapshot_drop();
-    s_project.preview_stale = true;             /* restored model != last-packed; packing is blocked -> always stale */
+    s_project.preview_stale = true; /* restored model no longer matches the last pack */
     gui_project_invalidate_sources();
     return true;
 }

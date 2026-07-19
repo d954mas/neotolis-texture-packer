@@ -19,13 +19,14 @@ static tp_id128 recovery_key(void) {
     return k;
 }
 
-/* Raise the status-bar channel for a degraded recovery notice. A live GUI host
- * requires recovery acknowledgement, so mutation stays blocked until a new
- * session can attach a healthy journal. Save/discard remain available. */
+/* Raise the status-bar channel for a degraded recovery notice. Editing and
+ * history remain available; only crash-recovery coverage is degraded. */
 void gui_project__note_recovery_degraded(const char *msg) {
     s_project.op_error = true;
-    (void)snprintf(s_project.op_error_msg, sizeof s_project.op_error_msg, "Recovery journal unavailable (%s) -- changes are blocked to preserve commit guarantees.",
-                   msg ? msg : "unknown");
+    (void)snprintf(
+        s_project.op_error_msg, sizeof s_project.op_error_msg,
+        "Crash recovery is unavailable (%s). Changes can continue, but unsaved work may not survive an app or system crash.",
+        msg ? msg : "unknown");
 }
 
 static bool recovery_configured(void) {
@@ -47,6 +48,10 @@ void gui_project__attach_recovery_live(tp_session *session) {
         return;
     }
     if (!recovery_configured()) {
+        if (s_project.recovery_required) {
+            gui_project_note_recovery_setup_failure(
+                "the recovery directory is not configured");
+        }
         return;
     }
     const tp_session_snapshot *snapshot = gui_project_snapshot();
@@ -100,7 +105,7 @@ void gui_project_enable_recovery(const char *root) {
 void gui_project_note_recovery_setup_failure(const char *reason) {
     s_project.recovery_setup_notice_pending = true;
     (void)snprintf(s_project.recovery_setup_notice, sizeof s_project.recovery_setup_notice,
-                   "Editing is unavailable because crash recovery could not start (%s).",
+                   "Crash recovery is unavailable (%s). Changes can continue, but unsaved work may not survive an app or system crash.",
                    (reason && reason[0] != '\0') ? reason : "startup setup failed");
 }
 
@@ -118,7 +123,7 @@ bool gui_project_take_recovery_setup_notice(char *out, size_t cap) {
     if (out && cap) {
         (void)snprintf(out, cap, "%s", s_project.recovery_setup_notice[0] != '\0'
                                              ? s_project.recovery_setup_notice
-                                             : "Editing is unavailable because crash recovery could not start.");
+                                             : "Crash recovery is unavailable. Changes can continue, but unsaved work may not survive an app or system crash.");
     }
     s_project.recovery_setup_notice_pending = false;
     s_project.recovery_setup_notice[0] = '\0';

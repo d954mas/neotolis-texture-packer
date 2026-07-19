@@ -123,10 +123,9 @@ bool gui_project_flush_pending(void) {
  * After this returns, s_project.pending_valid is true IFF a same-key pending remains (the replace target). */
 void gui_project_pending_route(const gui_coalesce_key *k) {
     if (s_project.pending_valid && !key_eq(k, &s_project.pending_key)) {
-        /* fix2: the bool is intentionally IGNORED here. On a journal-failed flush the different-key
-         * gesture is dropped WITH the op-error surfaced (commit_txn_now set it); the caller then only
-         * BUFFERS a new (uncommitted) edit -- there is no persist/discard "proceed as clean" decision to
-         * abort. gui_project_flush_elapsed (the timer fallback) is the same case. Audited fix2 [3]. */
+        /* The bool is intentionally ignored here. If the previous transaction is rejected, its
+         * structured error remains available; the caller may still buffer this distinct gesture.
+         * gui_project_flush_elapsed (the timer fallback) follows the same rule. */
         (void)gui_project_flush_pending();
     }
 }
@@ -135,11 +134,6 @@ void gui_project_pending_route(const gui_coalesce_key *k) {
  * valid pending is same-key -> replace its value (latest wins). Preview goes stale immediately;
  * the commit (and model_ver bump) is deferred to the flush. */
 bool gui_project_pending_offer(const gui_coalesce_key *k, tp_operation *op) {
-    if (!tp_session_recovery_available(s_project.session)) {
-        tp_operation_free(op);
-        gui_project__note_recovery_degraded("mutation is unavailable");
-        return false;
-    }
     if (!s_project.pending_valid) {
         s_project.pending_preview_stale_before = s_project.preview_stale;
     }
