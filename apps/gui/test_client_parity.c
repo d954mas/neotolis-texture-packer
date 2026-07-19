@@ -559,6 +559,8 @@ static const char *coverage_oracle(const client_parity_manifest_row *row,
 }
 
 void test_real_client_parity_manifest_covers_every_shipped_mutation(void) {
+    TEST_ASSERT_EQUAL_UINT32((1U << CLIENT_PARITY_DIMENSION_COUNT) - 1U,
+                             CLIENT_PARITY_REQUIRED_COVERAGE);
     uint32_t aggregate = 0U;
     size_t row_count = 0U;
     const client_parity_manifest_row *rows =
@@ -596,6 +598,46 @@ void test_real_client_parity_manifest_covers_every_shipped_mutation(void) {
                               kind == TP_OP_ANIMATION_FRAMES_SET;
         TEST_ASSERT_EQUAL_INT(!reserved, seen[kind]);
     }
+
+    const uint32_t outcome_dimensions =
+        CLIENT_PARITY_ERROR | CLIENT_PARITY_NO_OP |
+        CLIENT_PARITY_AMBIGUITY | CLIENT_PARITY_NOTICE |
+        CLIENT_PARITY_EXIT_CODE;
+    uint32_t seen_outcomes = 0U;
+    size_t outcome_count = 0U;
+    const client_parity_outcome_row *outcomes =
+        client_parity_outcome_rows(&outcome_count);
+    TEST_ASSERT_NOT_NULL(outcomes);
+    TEST_ASSERT_EQUAL_UINT(5U, outcome_count);
+    for (size_t i = 0U; i < outcome_count; ++i) {
+        TEST_ASSERT_NOT_NULL(outcomes[i].family);
+        TEST_ASSERT_TRUE((outcomes[i].dimension & outcome_dimensions) != 0U);
+        TEST_ASSERT_EQUAL_UINT32(
+            outcomes[i].dimension,
+            outcomes[i].dimension & (0U - outcomes[i].dimension));
+        TEST_ASSERT_EQUAL_UINT32(0U,
+                                 seen_outcomes & outcomes[i].dimension);
+        TEST_ASSERT_TRUE(outcomes[i].applicable_clients != 0U);
+        TEST_ASSERT_EQUAL_UINT32(
+            0U, outcomes[i].applicable_clients &
+                    ~(uint32_t)(CLIENT_PARITY_REAL_CLI |
+                                CLIENT_PARITY_REAL_GUI));
+        if ((outcomes[i].applicable_clients & CLIENT_PARITY_REAL_CLI) != 0U) {
+            TEST_ASSERT_TRUE(is_named_executable_oracle(
+                outcomes[i].cli_oracle));
+        } else {
+            TEST_ASSERT_NULL(outcomes[i].cli_oracle);
+        }
+        if ((outcomes[i].applicable_clients & CLIENT_PARITY_REAL_GUI) != 0U) {
+            TEST_ASSERT_TRUE(is_named_executable_oracle(
+                outcomes[i].gui_oracle));
+        } else {
+            TEST_ASSERT_NULL(outcomes[i].gui_oracle);
+        }
+        seen_outcomes |= outcomes[i].dimension;
+        aggregate |= outcomes[i].dimension;
+    }
+    TEST_ASSERT_EQUAL_UINT32(outcome_dimensions, seen_outcomes);
     TEST_ASSERT_EQUAL_UINT32(CLIENT_PARITY_REQUIRED_COVERAGE, aggregate);
 }
 

@@ -70,9 +70,35 @@ static const client_parity_manifest_row rows[] = {
      REAL_ORACLE, SELECT_EVIDENCE},
 };
 
+/* Outcome dimensions are representative contracts, not requirements on every
+ * operation. Applicability is explicit so the CLI-only selector/exit surfaces
+ * do not manufacture GUI claims. tp_client_parity_real executes every row. */
+static const client_parity_outcome_row outcome_rows[] = {
+    {"atlas/settings", CLIENT_PARITY_ERROR,
+     CLIENT_PARITY_REAL_CLI | CLIENT_PARITY_REAL_GUI, REAL_ORACLE,
+     REAL_ORACLE},
+    {"atlas", CLIENT_PARITY_NO_OP,
+     CLIENT_PARITY_REAL_CLI | CLIENT_PARITY_REAL_GUI, REAL_ORACLE,
+     REAL_ORACLE},
+    {"sprite/selector", CLIENT_PARITY_AMBIGUITY, CLIENT_PARITY_REAL_CLI,
+     REAL_ORACLE, NULL},
+    {"target/export", CLIENT_PARITY_NOTICE,
+     CLIENT_PARITY_REAL_CLI | CLIENT_PARITY_REAL_GUI, REAL_ORACLE,
+     REAL_ORACLE},
+    {"cli/status", CLIENT_PARITY_EXIT_CODE, CLIENT_PARITY_REAL_CLI,
+     REAL_ORACLE, NULL},
+};
+
 const client_parity_manifest_row *client_parity_manifest_rows(size_t *count) {
     if (count) {
         *count = sizeof rows / sizeof rows[0];
     }
     return rows;
+}
+
+const client_parity_outcome_row *client_parity_outcome_rows(size_t *count) {
+    if (count) {
+        *count = sizeof outcome_rows / sizeof outcome_rows[0];
+    }
+    return outcome_rows;
 }

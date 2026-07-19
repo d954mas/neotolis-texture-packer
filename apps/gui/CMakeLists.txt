@@ -291,6 +291,7 @@ nt_set_sanitizer_flags(tp_client_parity_replay)
 add_test(NAME tp_client_parity_real COMMAND ${CMAKE_COMMAND}
     -DNTPACKER=$<TARGET_FILE:ntpacker>
     -DREPLAY=$<TARGET_FILE:tp_client_parity_replay>
+    -DSOURCE=${CMAKE_SOURCE_DIR}
     -DWORK=${CMAKE_CURRENT_BINARY_DIR}/tp_client_parity_real_tmp
     -P "${CMAKE_CURRENT_SOURCE_DIR}/client_parity_real.cmake")
 

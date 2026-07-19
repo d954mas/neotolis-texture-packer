@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "tp_core/tp_export.h"
 #include "tp_core/tp_session.h"
 
 static int fail(const char *step, tp_status status, const tp_error *err) {
@@ -212,6 +213,157 @@ static int base_atlas(tp_session *session, tp_id128 *atlas_id,
     *atlas_id = atlas->id;
     tp_session_snapshot_destroy(snapshot);
     return 0;
+}
+
+static int snapshot_counters(tp_session *session, int64_t *revision,
+                             uint64_t *event_sequence, tp_error *err) {
+    tp_session_snapshot *snapshot = NULL;
+    const tp_status status =
+        tp_session_snapshot_create(session, &snapshot, err);
+    if (status != TP_STATUS_OK) {
+        return fail("outcome snapshot", status, err);
+    }
+    *revision = tp_session_snapshot_revision(snapshot);
+    *event_sequence = tp_session_snapshot_event_sequence(snapshot);
+    tp_session_snapshot_destroy(snapshot);
+    return 0;
+}
+
+static int outcome_error(const char *path) {
+    tp_error err = {0};
+    tp_session *session = NULL;
+    tp_id128 atlas_id;
+    if (open_base(path, &session, &err) != 0 ||
+        base_atlas(session, &atlas_id, &err) != 0) {
+        tp_session_destroy(session);
+        return 1;
+    }
+    int64_t revision_before = 0;
+    uint64_t events_before = 0U;
+    if (snapshot_counters(session, &revision_before, &events_before, &err) !=
+        0) {
+        tp_session_destroy(session);
+        return 1;
+    }
+    tp_op_atlas_settings settings;
+    memset(&settings, 0, sizeof settings);
+    settings.mask = TP_AF_PADDING;
+    settings.padding = -1;
+    const tp_status status = gui_session_set_atlas_settings(
+        session, atlas_id, revision_before, &settings, next_txn(), &err);
+    int64_t revision_after = 0;
+    uint64_t events_after = 0U;
+    const int snapshot_rc = snapshot_counters(
+        session, &revision_after, &events_after, &err);
+    tp_session_destroy(session);
+    if (status != TP_STATUS_OUT_OF_RANGE || err.msg[0] == '\0' ||
+        snapshot_rc != 0 || revision_after != revision_before ||
+        events_after != events_before) {
+        (void)fprintf(stderr,
+                      "client parity error outcome mismatch: status=%s "
+                      "revision=%lld/%lld events=%llu/%llu\n",
+                      tp_status_id(status), (long long)revision_before,
+                      (long long)revision_after,
+                      (unsigned long long)events_before,
+                      (unsigned long long)events_after);
+        return 1;
+    }
+    return 0;
+}
+
+static int outcome_no_op(const char *path) {
+    tp_error err = {0};
+    tp_session *session = NULL;
+    tp_id128 atlas_id;
+    if (open_base(path, &session, &err) != 0 ||
+        base_atlas(session, &atlas_id, &err) != 0) {
+        tp_session_destroy(session);
+        return 1;
+    }
+    int64_t revision_before = 0;
+    uint64_t events_before = 0U;
+    if (snapshot_counters(session, &revision_before, &events_before, &err) !=
+        0) {
+        tp_session_destroy(session);
+        return 1;
+    }
+    const tp_status status = gui_session_rename_atlas(
+        session, atlas_id, revision_before, "atlas1", next_txn(), &err);
+    int64_t revision_after = 0;
+    uint64_t events_after = 0U;
+    const int snapshot_rc = snapshot_counters(
+        session, &revision_after, &events_after, &err);
+    tp_session_destroy(session);
+    if (status != TP_STATUS_OK || snapshot_rc != 0 ||
+        revision_after != revision_before || events_after != events_before) {
+        (void)fprintf(stderr,
+                      "client parity no-op mismatch: status=%s "
+                      "revision=%lld/%lld events=%llu/%llu\n",
+                      tp_status_id(status), (long long)revision_before,
+                      (long long)revision_after,
+                      (unsigned long long)events_before,
+                      (unsigned long long)events_after);
+        return 1;
+    }
+    return 0;
+}
+
+static int outcome_notice(const char *path) {
+    tp_error err = {0};
+    tp_session *session = NULL;
+    tp_id128 atlas_id;
+    if (open_base(path, &session, &err) != 0 ||
+        base_atlas(session, &atlas_id, &err) != 0) {
+        tp_session_destroy(session);
+        return 1;
+    }
+    tp_session_snapshot *snapshot = NULL;
+    tp_status status = tp_session_snapshot_create(session, &snapshot, &err);
+    if (status != TP_STATUS_OK) {
+        tp_session_destroy(session);
+        return fail("notice snapshot", status, &err);
+    }
+    const tp_exporter *exporter = tp_exporter_find("defold");
+    tp_export_notices notices;
+    tp_export_notices_init(&notices);
+    status = exporter
+                 ? tp_export_predict_loss_snapshot(
+                       snapshot, atlas_id, &exporter->caps, exporter->id, NULL,
+                       &notices, &err)
+                 : TP_STATUS_NOT_FOUND;
+    bool found = false;
+    for (int i = 0; i < notices.count; ++i) {
+        if (notices.items[i].field_id == TP_NOTICE_FIELD_TRANSFORM &&
+            notices.items[i].reason_id ==
+                TP_NOTICE_REASON_CAPS_UNSUPPORTED) {
+            found = true;
+        }
+    }
+    tp_export_notices_free(&notices);
+    tp_session_snapshot_destroy(snapshot);
+    tp_session_destroy(session);
+    if (status != TP_STATUS_OK || !found) {
+        (void)fprintf(stderr,
+                      "client parity notice outcome mismatch: status=%s "
+                      "transform=%d\n",
+                      tp_status_id(status), found ? 1 : 0);
+        return 1;
+    }
+    return 0;
+}
+
+static int outcome(const char *name, const char *path) {
+    if (strcmp(name, "error") == 0) {
+        return outcome_error(path);
+    }
+    if (strcmp(name, "no_op") == 0) {
+        return outcome_no_op(path);
+    }
+    if (strcmp(name, "notice") == 0) {
+        return outcome_notice(path);
+    }
+    (void)fprintf(stderr, "client parity unknown outcome '%s'\n", name);
+    return 2;
 }
 
 static int replay_atlas(tp_session *session, const harvest_ids *ids,
@@ -468,7 +620,11 @@ int main(int argc, char **argv) {
     if (argc == 6 && strcmp(argv[1], "replay") == 0) {
         return replay(argv[2], argv[3], argv[4], argv[5]);
     }
+    if (argc == 4 && strcmp(argv[1], "outcome") == 0) {
+        return outcome(argv[2], argv[3]);
+    }
     (void)fprintf(stderr,
-                  "usage: client_parity_replay seed PATH | replay FAMILY BASE HARVEST OUT\n");
+                  "usage: client_parity_replay seed PATH | replay FAMILY BASE "
+                  "HARVEST OUT | outcome NAME PROJECT\n");
     return 2;
 }
