@@ -19,8 +19,14 @@ enum client_parity_coverage {
     CLIENT_PARITY_NOTICE = 1u << 9,
     CLIENT_PARITY_EXIT_CODE = 1u << 10,
     CLIENT_PARITY_FINAL_BYTES = 1u << 11,
-    CLIENT_PARITY_REQUIRED_COVERAGE = (1u << 12) - 1u
+    CLIENT_PARITY_REQUIRED_COVERAGE =
+        CLIENT_PARITY_REAL_CLI | CLIENT_PARITY_REAL_GUI |
+        CLIENT_PARITY_SUCCESS | CLIENT_PARITY_SET_MASK |
+        CLIENT_PARITY_OMITTED_PRESENT | CLIENT_PARITY_SELECTOR |
+        CLIENT_PARITY_FINAL_BYTES
 };
+
+#define CLIENT_PARITY_DIMENSION_COUNT 12U
 
 typedef struct client_parity_manifest_row {
     tp_op_kind kind;
@@ -28,6 +34,7 @@ typedef struct client_parity_manifest_row {
     uint32_t coverage;
     const char *cli_oracle;
     const char *gui_oracle;
+    const char *dimension_oracles[CLIENT_PARITY_DIMENSION_COUNT];
 } client_parity_manifest_row;
 
 const client_parity_manifest_row *client_parity_manifest_rows(size_t *count);

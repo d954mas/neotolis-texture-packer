@@ -530,6 +530,34 @@ void test_capability_matrix_is_typed_and_exact(void) {
                                                      &invalid));
 }
 
+static bool is_named_executable_oracle(const char *oracle) {
+    static const char *const known[] = {
+        "cli_mutate_anim",   "cli_mutate_atlas",  "cli_mutate_set",
+        "cli_mutate_source", "cli_mutate_sprite", "cli_mutate_target",
+        "tp_client_parity_real",
+    };
+    if (!oracle || oracle[0] == '\0') {
+        return false;
+    }
+    for (size_t i = 0U; i < sizeof known / sizeof known[0]; ++i) {
+        if (strcmp(oracle, known[i]) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static const char *coverage_oracle(const client_parity_manifest_row *row,
+                                   unsigned bit_index) {
+    if (bit_index == 0U) {
+        return row->cli_oracle;
+    }
+    if (bit_index == 1U) {
+        return row->gui_oracle;
+    }
+    return row->dimension_oracles[bit_index];
+}
+
 void test_real_client_parity_manifest_covers_every_shipped_mutation(void) {
     uint32_t aggregate = 0U;
     size_t row_count = 0U;
@@ -547,12 +575,20 @@ void test_real_client_parity_manifest_covers_every_shipped_mutation(void) {
         TEST_ASSERT_NOT_NULL(rows[i].family);
         TEST_ASSERT_NOT_NULL(rows[i].cli_oracle);
         TEST_ASSERT_NOT_NULL(rows[i].gui_oracle);
-        TEST_ASSERT_BITS_HIGH(CLIENT_PARITY_REAL_CLI |
-                                  CLIENT_PARITY_REAL_GUI |
-                                  CLIENT_PARITY_SUCCESS |
-                                  CLIENT_PARITY_ERROR |
-                                  CLIENT_PARITY_FINAL_BYTES,
-                              rows[i].coverage);
+        for (unsigned bit_index = 0U;
+             bit_index < CLIENT_PARITY_DIMENSION_COUNT; ++bit_index) {
+            const uint32_t bit = 1U << bit_index;
+            const char *oracle = coverage_oracle(&rows[i], bit_index);
+            if ((rows[i].coverage & bit) != 0U) {
+                TEST_ASSERT_TRUE_MESSAGE(
+                    is_named_executable_oracle(oracle),
+                    "every claimed parity dimension needs a named executable oracle");
+            } else {
+                TEST_ASSERT_NULL_MESSAGE(
+                    oracle,
+                    "an unsupported parity dimension must not retain oracle evidence");
+            }
+        }
         aggregate |= rows[i].coverage;
     }
     for (int kind = TP_OP_ATLAS_CREATE; kind < TP_OP_KIND_COUNT; ++kind) {
@@ -560,7 +596,7 @@ void test_real_client_parity_manifest_covers_every_shipped_mutation(void) {
                               kind == TP_OP_ANIMATION_FRAMES_SET;
         TEST_ASSERT_EQUAL_INT(!reserved, seen[kind]);
     }
-    TEST_ASSERT_BITS_HIGH(CLIENT_PARITY_REQUIRED_COVERAGE, aggregate);
+    TEST_ASSERT_EQUAL_UINT32(CLIENT_PARITY_REQUIRED_COVERAGE, aggregate);
 }
 
 void test_live_headless_runs_real_pack_job_and_export_command(void) {
