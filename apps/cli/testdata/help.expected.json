@@ -21,6 +21,7 @@
     "--json",
     "--quiet",
     "--strict",
+    "--dry-run",
     "--help",
     "--version"
   ],

@@ -158,6 +158,11 @@ add_test(NAME cli_help_flag_json COMMAND ${CMAKE_COMMAND}
     -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_help_flag.json
     -DEXPECT_FILE=${CMAKE_CURRENT_SOURCE_DIR}/testdata/help.expected.json
     -DEXPECT_STDERR_EMPTY=ON -P "${_run}")
+add_test(NAME cli_help_human_exact COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0 "-DARGS=help"
+    -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_help.txt
+    -DEXPECT_FILE=${CMAKE_CURRENT_SOURCE_DIR}/testdata/help.expected.txt
+    -DEXPECT_STDERR_EMPTY=ON -P "${_run}")
 
 # --- B2 read verbs: inspect + validate over checked-in fixtures (no GL/pack). ---
 # The fixtures live in the source tree; project_dir resolves sources against them.

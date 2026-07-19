@@ -21,7 +21,9 @@ is the authoritative machine signal (see `cli_exit.h`: 0 ok · 1 internal ·
 
 `help --json` and `--help --json` emit the same schema-1 object. Its `commands`
 and `global_options` arrays are the machine-readable command catalog, and its
-`exit_codes` object freezes the symbolic mapping above.
+`exit_codes` object freezes the symbolic mapping above. The options catalog
+includes `--dry-run`; it previews `pack` and mutation commands, while read-only
+queries such as `anim list` reject it with structured `usage` and exit 2.
 
 `version --json` emits manifest schema 2. Query verbs map directly to their
 payload schema number. Each mutation family maps to a variant object:
@@ -108,7 +110,9 @@ structural IDs, sprite overrides and animation frames use `{source,key}`
 identity, and each animation carries both opaque structural `id` and human
 `name`. The `anim list --json` query shares this schema and animation shape. An
 operator branches on the payload `schema` number; project-file schema is
-reported separately as `project.schema_version`.
+reported separately as `project.schema_version`. Because `anim list` is a
+read-only query, `--dry-run` is not valid for it and yields a structured
+`usage` error with exit 2.
 
 See `apps/cli/cli_inspect.c` / `cli_validate.c` headers. Validate schema 2 keeps
 exact (non-truncated) contexts and adds stable structural identities:

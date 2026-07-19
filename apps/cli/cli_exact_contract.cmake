@@ -178,6 +178,13 @@ assert_exact("${_mutation_ok}" "${EXPECTED}/mutation-success.expected.json")
 run_capture(_mutation_error 2 set "${_mutation_project}" clean max_size=99999 --json)
 assert_exact("${_mutation_error}" "${EXPECTED}/mutation-error.expected.json")
 
+# `anim list` is a read-only query. A mutation preview flag is meaningless here
+# and must fail as a stable structured usage error instead of returning schema 4.
+run_capture(_anim_list_dry_run_error 2 anim list
+    "${TD}/clean.ntpacker_project" clean --dry-run --json)
+assert_exact("${_anim_list_dry_run_error}"
+    "${EXPECTED}/anim-list-dry-run-error.expected.json")
+
 # Post-publication durability is injected below the process boundary; the core
 # failure semantics have their own tests. Pin omission and file-before-recovery
 # ordering for each supported notice combination.

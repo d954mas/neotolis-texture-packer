@@ -180,6 +180,11 @@ int do_anim(const char *const *pos, int npos, const char *opt_at, bool dry_run, 
     const char *sub = pos[1];
     const char *path = pos[2];
     const char *atlas = pos[3];
+    if (dry_run && strcmp(sub, "list") == 0) {
+        cli_emit_error(json, quiet, "usage",
+                       "--dry-run is not valid for the read-only 'anim list' query");
+        return CLI_EXIT_USAGE;
+    }
     if (opt_at && strcmp(sub, "add-frame") != 0) {
         cli_emit_error(json, quiet, "usage", "--at is only valid for 'anim add-frame'");
         return CLI_EXIT_USAGE;

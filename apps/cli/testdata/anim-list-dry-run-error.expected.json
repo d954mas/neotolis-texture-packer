@@ -1,0 +1,1 @@
+{"schema":1,"error":{"id":"usage","message":"--dry-run is not valid for the read-only 'anim list' query"}}

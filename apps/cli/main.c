@@ -32,7 +32,7 @@ static const char *const HELP_COMMANDS[] = {
 };
 
 static const char *const HELP_GLOBAL_OPTIONS[] = {
-    "--json", "--quiet", "--strict", "--help", "--version",
+    "--json", "--quiet", "--strict", "--dry-run", "--help", "--version",
 };
 
 static void indent(cli_sb *sb, int depth) {
@@ -334,8 +334,10 @@ static void print_usage(FILE *out) {
                   "  --atlas <name>     Only pack this atlas (unknown name -> usage error)\n"
                   "  --target <id>      Only export targets with this exporter id\n"
                   "  --out-dir <dir>    Re-root RELATIVE target out_paths under <dir> (vs the project dir)\n"
-                  "  --dry-run          Report what pack WOULD do (pages, would_write, predicted\n"
-                  "                     losses) and write NO files\n"
+                  "\n"
+                  "Pack and mutation preview option:\n"
+                  "  --dry-run          Preview pack or mutation commands without writes; not valid for\n"
+                  "                     the read-only anim list query\n"
                   "\n"
                   "anim add-frame option:\n"
                   "  --at <N>           Insert the frame at index N (default: append)\n"
