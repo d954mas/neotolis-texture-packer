@@ -525,14 +525,17 @@ void test_validate_source_add_dup_relative_to_saved_project(void) {
     tp_project *p = tp_project_create();
     TEST_ASSERT_NOT_NULL(p);
     free(p->project_dir);
+#ifdef _WIN32
+    static const char project_dir[] = "C:/tmp/ntpacker-project";
+#else
     static const char project_dir[] = "/tmp/ntpacker-project";
+#endif
     p->project_dir = (char *)malloc(sizeof project_dir);
     TEST_ASSERT_NOT_NULL(p->project_dir);
     memcpy(p->project_dir, project_dir, sizeof project_dir);
-    static const char source_base[] = "/tmp/ntpacker-project";
-    p->source_base_dir = (char *)malloc(sizeof source_base);
+    p->source_base_dir = (char *)malloc(sizeof project_dir);
     TEST_ASSERT_NOT_NULL(p->source_base_dir);
-    memcpy(p->source_base_dir, source_base, sizeof source_base);
+    memcpy(p->source_base_dir, project_dir, sizeof project_dir);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_project_atlas_add_source(&p->atlases[0],
                                                       "sprites/hero"));
@@ -558,7 +561,11 @@ void test_validate_source_add_dup_relative_to_saved_project(void) {
 void test_validate_saved_source_keys_preserve_empty_and_replace_uniqueness(void) {
     tp_project *p = tp_project_create();
     TEST_ASSERT_NOT_NULL(p);
+#ifdef _WIN32
+    static const char project_dir[] = "C:/tmp/ntpacker-project";
+#else
     static const char project_dir[] = "/tmp/ntpacker-project";
+#endif
     p->project_dir = (char *)malloc(sizeof project_dir);
     p->source_base_dir = (char *)malloc(sizeof project_dir);
     TEST_ASSERT_NOT_NULL(p->project_dir);
