@@ -1184,7 +1184,8 @@ void run_selftest(void) {
             (void)snprintf(fp, sizeof fp, "%s/spr_%03d.tga", sdir, i);
             (void)remove(fp);
         }
-        (void)remove(cfp);
+        NT_ASSERT(nt_utf8_remove(cfp) == 0 &&
+                  "Cyrillic stress fixture must be removed through the UTF-8 filesystem boundary");
 #ifdef _WIN32
         (void)RemoveDirectoryA(sdir);
 #endif
