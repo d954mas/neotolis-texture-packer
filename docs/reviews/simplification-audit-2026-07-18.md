@@ -164,3 +164,111 @@ P1-11 added only the missing deterministic equal-time ranking contract.
 | deterministic scan/ranking | `test_recovery_ranking_contract.c`: adoptability, timestamp, lexical tie-break, permutation-invariant cap |
 | quarantine/discard | failed cleanup remains discoverable; discard deletes only the journal and retains the lock domain |
 | disposable candidate/resolution ownership | receipt binding, cancel invalidation/process-lease release and Save-original exact-fingerprint tests |
+
+## Completion addendum — 2026-07-19
+
+### Verdict
+
+The bounded simplification workstream is complete at `cf127c7`. Feature work
+may resume after the normal three-platform CI merge gate. The implementation
+keeps the owner decisions from this audit: LOC is diagnostic only, cohesive
+functions may keep regions, and a physical split is accepted only when it
+creates a clearer ownership boundary.
+
+All three blocking review findings were closed before structural work:
+
+- deterministic transaction first-reject: `5cff9c0`;
+- shared policy-free constraint facts with separate operation, validation,
+  canonical-admission and Pack policies: `82b7647` through `ad6f930`;
+- hard LOC/complexity gate removed and inventory made non-gating: `fbfb19b`,
+  with the policy retained in `AGENTS.md`.
+
+The related contract gaps were also closed before their dependent moves:
+canonical-v5 bytes (`e592889`), history v1 bytes (`072d547`), journal mixed
+wire fixtures (`069fb6b`), ordered validation corpus (`9565bf8`), CLI payload
+goldens (`9213417`), platform boundaries (`a3439c8`), typed Save outcomes
+(`f85f13f`–`3a3e158`), client parity (`1202a7f`) and GUI action traces
+(`924cd76`).
+
+### Final responsibility decisions
+
+| Baseline owner at `c672ff4` | Baseline LOC | Final family | Family LOC / largest TU | Decision |
+|---|---:|---:|---:|---|
+| `tp_fs_internal.c` | 818 | 3 TUs | 854 / 499 | split checked I/O from Win32 and POSIX backends behind one private contract |
+| `tp_project.c` | 3181 | 6 TUs | 3262 / 1083 | split path, writer, staged Save, parser and Pack bridge; keep model CRUD together |
+| `tp_validate.c` | 1276 | 6 TUs | 1370 / 334 | split report, indexes and rule families; keep one ordered orchestrator |
+| `tp_op_validate.c` | 904 | 5 TUs | 1091 / 282 | split by operation family over shared typed facts |
+| `tp_session_snapshot.c` | 994 | 2 TUs | 980 / 678 | split materialization from query surface |
+| `tp_recovery.c` | 1906 | 6 TUs | 1851 / 392 | split store, claim, scan and platform backends; keep session adapter thin |
+| `tp_txn_apply.c` | 1384 | 4 TUs | 1413 / 567 | split result, model lifecycle and journal integration; keep atomic commit owner |
+| `tp_journal.c` | 1695 | 4 TUs | 2110 / 874 | split wire, I/O, reader and writer under fixed bytes; total LOC was not optimized |
+| `tp_history_codec.c` | 835 | 2 TUs | 842 / 468 | split reader/hostile validation from writer/replay entry |
+| `cli_mutate.c` | 1722 | 6 TUs | 1756 / 540 | split mutation families; retain one common CLI edit lifecycle |
+| `gui_project.c` | 1859 | 5 TUs | 1820 / 1026 | split file, recovery and pending owners; keep typed mutation domain cohesive |
+| `gui_actions.c` | 2368 | 6 TUs | 2317 / 606 | split deferred edit, preview, dialog, Pack and recovery domains |
+| `main.c` | 1232 | 3 TUs | 1289 / 906 | extract parity and concrete resource bootstrap; keep frame orchestration |
+| `gui_pack.c` | 960 | 3 TUs | 962 / 480 | native result slots, session-job adapter and preview each have one owner |
+| `gui_canvas.c` | 950 | 2 TUs | 926 / 587 | extract GPU/image/page lifetime; keep view math, hit-testing, overlays and rendering together |
+| `gui_view_settings.c` | 940 | 1 TU | 940 / 940 | keep: one settings view with clear regions; no one-use view microfiles |
+
+Counts are physical production LOC observations, not acceptance thresholds.
+Family totals may rise when a private contract, explicit fault path or clearer
+ownership replaces implicit coupling. The important result is that the largest
+TU no longer owns unrelated state machines.
+
+Additional explicit keep decisions:
+
+- `tp_session.c` remains the typed session orchestration boundary;
+- `gui_project_mutations.c` remains one mutation domain despite its size;
+- `gui_canvas.c` keeps transform math, hit-testing, overlays and rendering
+  because they share one coordinate model;
+- `gui_view_settings.c` keeps its regions;
+- model-clone and semantic-diff deep copies remain deliberately separate due
+  to allocator and fault-injection ownership.
+
+### Duplication and abstraction review
+
+The final search confirms one owner for the duplicated knowledge identified by
+the original audit:
+
+- stored source-path text: `tp_source_path_text.c`;
+- pack/override representability facts: `tp_pack_constraints.c`;
+- D4 geometry: `tp_transform.c`, consumed by Pack read and GUI canvas;
+- canonical source keys: `tp_srckey.c`;
+- Win32 UTF-8/long-path policy: `tp_fs_win32.c`, consumed by the CRT-local
+  adapters in `apps/common/nt_utf8_fs.c`.
+
+Intentional duplication remains only where policy or ownership is different:
+CLI/GUI parsing and presentation, operation first-reject versus accumulated
+validation versus Pack defensive checks, and allocator-specific deep copies.
+
+No production `Service`, `Manager`, `Facade`, dispatcher, vtable or callback
+layer was introduced. GUI decomposition uses direct concrete owners and four
+family-private headers. R18 limits each header to its registered translation
+units. `gui_pack_internal.h` exposes only native-result publication,
+preview-result publication and preview-slot ownership query;
+`gui_canvas_internal.h` shares only the concrete vertex layout required by VBO
+creation and drawing. Boundary checks report no reverse client-to-core
+dependency or private-header leak.
+
+### Verification evidence
+
+- native-debug build: success; CTest 99/99;
+- native-release build: success; CTest 99/99;
+- focused transaction, job/input-token, canonical GUI, action trace, client
+  parity, transform and UV suites: success;
+- `scripts/check_boundaries.sh`: `boundaries OK`;
+- `git diff --check`: clean at every committed packet;
+- `external/neotolis-engine/`: unchanged and read-only;
+- tracked worktree clean after implementation; user-owned `.serena/` remains
+  untracked and untouched.
+
+One `tp_gui_action_trace` invocation transiently failed in the Save→New case
+during a focused run, then passed immediately in isolation, in the repeated
+focused matrix, and in both full 99-test debug/release runs. No Pack code was
+involved in that scenario; it is recorded as a test-flake observation rather
+than hidden or treated as a product regression.
+
+Linux/macOS/Windows CI and the configured sanitizer job cannot be executed from
+this local Windows workspace without publishing the branch. They remain the
+normal PR merge gate; no local result is presented as a substitute.

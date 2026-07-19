@@ -1,6 +1,8 @@
 # Simplification code review — 2026-07-18
 
-Verdict: do not merge
+Verdict at review time: do not merge. Resolved by the bounded simplification
+series ending at `cf127c7`; completion evidence is recorded in
+`simplification-audit-2026-07-18.md`.
 
 До продолжения simplification-разбиения нужно устранить три P1: зависимость
 первого transaction-reject от включённой истории, неполную pack-domain

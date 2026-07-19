@@ -1,7 +1,7 @@
 # Simplification and legacy decomposition plan
 
-**Status:** reviewed umbrella roadmap; execution authorized only through the
-Phase 2 reassessment gate
+**Status:** completed 2026-07-19; local debug/release verification green,
+three-platform CI remains the merge gate
 
 **Date:** 2026-07-18
 
