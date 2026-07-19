@@ -296,7 +296,8 @@ bool cli_emit_mutation_preview(const char *command,
                                int64_t revision_before,
                                const tp_id_kind *generated_kinds,
                                const tp_id128 *generated_ids,
-                               int generated_count) {
+                               int generated_count,
+                               const char *generated_ids_semantics) {
     cli_sb sb = {0};
     cli_sb_str(&sb, "{\"schema\":2,\"command\":");
     cli_sb_json_str(&sb, command);
@@ -368,7 +369,12 @@ bool cli_emit_mutation_preview(const char *command,
             }
         }
     }
-    cli_sb_str(&sb, "],\"notices\":[]}");
+    cli_sb_putc(&sb, ']');
+    if (generated_ids_semantics) {
+        cli_sb_str(&sb, ",\"generated_ids_semantics\":");
+        cli_sb_json_str(&sb, generated_ids_semantics);
+    }
+    cli_sb_str(&sb, ",\"notices\":[]}");
     if (sb.oom) {
         cli_sb_free(&sb);
         return false;

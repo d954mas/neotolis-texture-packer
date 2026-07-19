@@ -119,14 +119,27 @@ execute_process(
 if(NOT RC EQUAL 0 OR EXISTS "${NEW_PROJ}")
     message(FATAL_ERROR "new dry-run published or failed: exit=${RC}\nstdout=${OUT}\nstderr=${ERR}")
 endif()
+set(FIRST_NEW_OUT "${OUT}")
+execute_process(
+    COMMAND "${EXE}" new "${NEW_PROJ}" --dry-run --json
+    RESULT_VARIABLE SECOND_RC OUTPUT_VARIABLE SECOND_OUT ERROR_VARIABLE SECOND_ERR)
+if(NOT SECOND_RC EQUAL 0 OR EXISTS "${NEW_PROJ}" OR
+   NOT FIRST_NEW_OUT STREQUAL SECOND_OUT)
+    message(FATAL_ERROR
+        "identical new dry-runs were not byte-stable or had side effects\n"
+        "first=${FIRST_NEW_OUT}\nsecond=${SECOND_OUT}\nstderr=${SECOND_ERR}")
+endif()
 string(JSON COMMAND GET "${OUT}" command)
 string(JSON DRY GET "${OUT}" dry_run)
 string(JSON CHANGES GET "${OUT}" would_change)
 string(JSON OPS GET "${OUT}" operation_count)
 string(JSON GENERATED_LEN LENGTH "${OUT}" generated_ids)
+string(JSON GENERATED_SEMANTICS GET "${OUT}" generated_ids_semantics)
 string(JSON NOTICES_LEN LENGTH "${OUT}" notices)
 if(NOT "${COMMAND}" STREQUAL "new" OR NOT DRY OR NOT CHANGES OR
-   NOT "${OPS}" EQUAL 0 OR "${GENERATED_LEN}" LESS 2 OR NOT "${NOTICES_LEN}" EQUAL 0)
+   NOT "${OPS}" EQUAL 0 OR NOT "${GENERATED_LEN}" EQUAL 0 OR
+   NOT "${GENERATED_SEMANTICS}" STREQUAL "assigned_on_apply" OR
+   NOT "${NOTICES_LEN}" EQUAL 0)
     message(FATAL_ERROR "new dry-run contract mismatch: ${OUT}")
 endif()
 

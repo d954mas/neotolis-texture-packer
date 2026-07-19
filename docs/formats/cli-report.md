@@ -151,3 +151,7 @@ reports `command`, `dry_run`, `would_change`, `operation_count`,
 `revision_before`, `revision_after`, `affected_ids`, `generated_ids`, and
 structured `notices`. Machine clients select this decoder from the mutation
 verb's `dry_run` entry in `version --json`.
+
+For `new --dry-run`, `generated_ids` is empty and the append-only field
+`generated_ids_semantics` is `"assigned_on_apply"`. The preview therefore does
+not expose candidate IDs that a later apply cannot reuse.

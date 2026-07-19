@@ -495,7 +495,8 @@ int commit_session_ops(cli_edit *edit, tp_operation *ops, int nops,
     } else if (edit->dry_run) {
         if (json) {
             if (!cli_emit_mutation_preview(
-                    verb, &result, request.expected_revision, NULL, NULL, 0)) {
+                    verb, &result, request.expected_revision, NULL, NULL, 0,
+                    NULL)) {
                 cli_emit_mutation_output_oom(false);
                 rc = CLI_EXIT_INTERNAL;
             }
@@ -548,36 +549,12 @@ static int do_new(const char *path, bool dry_run, bool json, bool quiet) {
     char human[CLI_PATH_MAX + 32];
     (void)snprintf(human, sizeof human, "Created project %s", path);
     if (json && dry_run) {
-        tp_session_snapshot *snapshot = NULL;
-        st = tp_session_snapshot_create(session, &snapshot, &err);
-        if (st != TP_STATUS_OK) {
-            const int exit_code = emit_save_failure(st, &err, true, quiet);
-            tp_session_destroy(session);
-            return exit_code;
-        }
-        tp_id_kind kinds[64];
-        tp_id128 ids[64];
-        int id_count = 0;
-        const int atlas_count = tp_session_snapshot_atlas_count(snapshot);
-        for (int ai = 0; ai < atlas_count && id_count < 64; ++ai) {
-            const tp_snapshot_atlas *atlas = tp_session_snapshot_atlas_at(snapshot, ai);
-            kinds[id_count] = TP_ID_KIND_ATLAS;
-            ids[id_count++] = atlas->id;
-            for (int ti = 0; ti < atlas->target_count && id_count < 64; ++ti) {
-                const tp_snapshot_target *target =
-                    tp_session_snapshot_target_at(snapshot, atlas->id, ti);
-                kinds[id_count] = TP_ID_KIND_TARGET;
-                ids[id_count++] = target->id;
-            }
-        }
-        if (!cli_emit_mutation_preview("new", NULL, 0, kinds, ids,
-                                       id_count)) {
+        if (!cli_emit_mutation_preview("new", NULL, 0, NULL, NULL, 0,
+                                       "assigned_on_apply")) {
             cli_emit_mutation_output_oom(false);
-            tp_session_snapshot_destroy(snapshot);
             tp_session_destroy(session);
             return CLI_EXIT_INTERNAL;
         }
-        tp_session_snapshot_destroy(snapshot);
     } else if (json) {
         if (!cli_emit_mutation("new", 1, &result)) {
             cli_emit_mutation_output_oom(true);

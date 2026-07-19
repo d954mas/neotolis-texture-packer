@@ -72,7 +72,8 @@ bool cli_emit_mutation_preview(const char *command,
                                int64_t revision_before,
                                const tp_id_kind *generated_kinds,
                                const tp_id128 *generated_ids,
-                               int generated_count);
+                               int generated_count,
+                               const char *generated_ids_semantics);
 
 /* Allocation-free structured fallback for an OOM at the mutation JSON output
  * boundary. Apply callers invoke this only after Save/Save As succeeds, so the
