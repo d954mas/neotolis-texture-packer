@@ -10,6 +10,16 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(NTPACKER_CLI_OUT_FAULT_SEAM)
+static void *cli_out_realloc(void *ptr, size_t size) {
+    (void)ptr;
+    (void)size;
+    return NULL;
+}
+#else
+#define cli_out_realloc realloc
+#endif
+
 static void sb_reserve(cli_sb *sb, size_t extra) {
     if (sb->oom) {
         return;
@@ -22,7 +32,7 @@ static void sb_reserve(cli_sb *sb, size_t extra) {
     while (new_cap < need) {
         new_cap *= 2U;
     }
-    char *nb = (char *)realloc(sb->buf, new_cap);
+    char *nb = (char *)cli_out_realloc(sb->buf, new_cap);
     if (!nb) {
         sb->oom = true;
         return;
@@ -215,7 +225,7 @@ void cli_emit_reject(bool json, bool quiet, const char *id, const char *field, i
     va_end(ap);
 }
 
-void cli_emit_mutation(const char *verb, int count,
+bool cli_emit_mutation(const char *verb, int count,
                        const tp_session_save_result *save_result) {
     cli_sb sb = {0};
     cli_sb_str(&sb, "{\"schema\":1,\"ok\":true,\"verb\":");
@@ -260,11 +270,11 @@ void cli_emit_mutation(const char *verb, int count,
     cli_sb_putc(&sb, '}');
     if (sb.oom) { /* the payload is tiny; OOM here is near-impossible, but never crash */
         cli_sb_free(&sb);
-        (void)fputs("{\"schema\":1,\"ok\":true}\n", stdout);
-        return;
+        return false;
     }
     cli_out_stdout(&sb);
     cli_sb_free(&sb);
+    return true;
 }
 
 static void preview_revision(cli_sb *sb, int64_t revision) {
@@ -281,7 +291,7 @@ static void preview_id(cli_sb *sb, tp_id_kind kind, tp_id128 id) {
     }
 }
 
-void cli_emit_mutation_preview(const char *command,
+bool cli_emit_mutation_preview(const char *command,
                                const tp_txn_result *result,
                                int64_t revision_before,
                                const tp_id_kind *generated_kinds,
@@ -361,9 +371,21 @@ void cli_emit_mutation_preview(const char *command,
     cli_sb_str(&sb, "],\"notices\":[]}");
     if (sb.oom) {
         cli_sb_free(&sb);
-        (void)fputs("{\"schema\":2,\"command\":\"mutation\",\"dry_run\":true,\"would_change\":true,\"operation_count\":0,\"revision_before\":0,\"revision_after\":0,\"affected_ids\":[],\"generated_ids\":[],\"notices\":[]}\n", stdout);
-        return;
+        return false;
     }
     cli_out_stdout(&sb);
     cli_sb_free(&sb);
+    return true;
+}
+
+void cli_emit_mutation_output_oom(bool side_effects) {
+    if (side_effects) {
+        (void)fputs(
+            "{\"schema\":1,\"error\":{\"id\":\"oom\",\"message\":\"out of memory rendering mutation result after mutation was applied\",\"phase\":\"output\",\"side_effects\":true,\"mutation_state\":\"applied\"}}\n",
+            stdout);
+    } else {
+        (void)fputs(
+            "{\"schema\":1,\"error\":{\"id\":\"oom\",\"message\":\"out of memory rendering mutation preview\",\"phase\":\"output\",\"side_effects\":false,\"mutation_state\":\"not_applied\"}}\n",
+            stdout);
+    }
 }

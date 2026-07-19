@@ -494,8 +494,11 @@ int commit_session_ops(cli_edit *edit, tp_operation *ops, int nops,
         rc = emit_reject(&result, status, &err, json, quiet);
     } else if (edit->dry_run) {
         if (json) {
-            cli_emit_mutation_preview(verb, &result, request.expected_revision,
-                                      NULL, NULL, 0);
+            if (!cli_emit_mutation_preview(
+                    verb, &result, request.expected_revision, NULL, NULL, 0)) {
+                cli_emit_mutation_output_oom(false);
+                rc = CLI_EXIT_INTERNAL;
+            }
         } else if (!quiet) {
             (void)printf("Dry run: %s\n", human);
         }
@@ -505,7 +508,10 @@ int commit_session_ops(cli_edit *edit, tp_operation *ops, int nops,
         if (status != TP_STATUS_OK) {
             rc = emit_save_failure(status, &err, json, quiet);
         } else if (json) {
-            cli_emit_mutation(verb, count, &save_result);
+            if (!cli_emit_mutation(verb, count, &save_result)) {
+                cli_emit_mutation_output_oom(true);
+                rc = CLI_EXIT_INTERNAL;
+            }
         } else if (!quiet) {
             report_save_notices_human(&save_result, false);
             (void)printf("%s\n", human);
@@ -564,10 +570,20 @@ static int do_new(const char *path, bool dry_run, bool json, bool quiet) {
                 ids[id_count++] = target->id;
             }
         }
-        cli_emit_mutation_preview("new", NULL, 0, kinds, ids, id_count);
+        if (!cli_emit_mutation_preview("new", NULL, 0, kinds, ids,
+                                       id_count)) {
+            cli_emit_mutation_output_oom(false);
+            tp_session_snapshot_destroy(snapshot);
+            tp_session_destroy(session);
+            return CLI_EXIT_INTERNAL;
+        }
         tp_session_snapshot_destroy(snapshot);
     } else if (json) {
-        cli_emit_mutation("new", 1, &result);
+        if (!cli_emit_mutation("new", 1, &result)) {
+            cli_emit_mutation_output_oom(true);
+            tp_session_destroy(session);
+            return CLI_EXIT_INTERNAL;
+        }
     } else if (!quiet) {
         if (dry_run) {
             (void)printf("Dry run: would create project %s\n", path);

@@ -1,0 +1,95 @@
+file(REMOVE_RECURSE "${WORK}")
+file(MAKE_DIRECTORY "${WORK}")
+set(FAILURES "")
+
+set(PROJECT "${WORK}/project.ntpacker_project")
+configure_file("${TD}/clean.ntpacker_project" "${PROJECT}" COPYONLY)
+file(COPY "${TD}/sprites" DESTINATION "${WORK}")
+file(SHA256 "${PROJECT}" BEFORE_PREVIEW_HASH)
+execute_process(
+    COMMAND "${EXE}" set "${PROJECT}" clean max_size=512 --dry-run --json
+    RESULT_VARIABLE PREVIEW_RC
+    OUTPUT_VARIABLE PREVIEW_OUT
+    ERROR_VARIABLE PREVIEW_ERR)
+if(NOT PREVIEW_RC EQUAL 1)
+    string(APPEND FAILURES
+        "preview output OOM exit ${PREVIEW_RC} != 1\nstdout=${PREVIEW_OUT}\nstderr=${PREVIEW_ERR}\n")
+endif()
+file(SHA256 "${PROJECT}" AFTER_PREVIEW_HASH)
+if(NOT BEFORE_PREVIEW_HASH STREQUAL AFTER_PREVIEW_HASH)
+    string(APPEND FAILURES "preview output OOM changed project bytes\n")
+endif()
+string(JSON PREVIEW_ERROR_ID ERROR_VARIABLE PREVIEW_JSON_ERROR
+    GET "${PREVIEW_OUT}" error id)
+string(JSON PREVIEW_ERROR_MESSAGE ERROR_VARIABLE PREVIEW_MESSAGE_ERROR
+    GET "${PREVIEW_OUT}" error message)
+if(NOT PREVIEW_JSON_ERROR STREQUAL "NOTFOUND" OR
+   NOT PREVIEW_MESSAGE_ERROR STREQUAL "NOTFOUND" OR
+   NOT PREVIEW_ERROR_ID STREQUAL "oom" OR
+   NOT PREVIEW_ERROR_MESSAGE STREQUAL
+       "out of memory rendering mutation preview")
+    string(APPEND FAILURES "preview output OOM payload mismatch: ${PREVIEW_OUT}\n")
+endif()
+string(JSON PREVIEW_PHASE ERROR_VARIABLE PREVIEW_PHASE_ERROR
+    GET "${PREVIEW_OUT}" error phase)
+string(JSON PREVIEW_SIDE_EFFECTS ERROR_VARIABLE PREVIEW_SIDE_EFFECTS_ERROR
+    GET "${PREVIEW_OUT}" error side_effects)
+string(JSON PREVIEW_STATE ERROR_VARIABLE PREVIEW_STATE_ERROR
+    GET "${PREVIEW_OUT}" error mutation_state)
+if(NOT PREVIEW_PHASE_ERROR STREQUAL "NOTFOUND" OR
+   NOT PREVIEW_SIDE_EFFECTS_ERROR STREQUAL "NOTFOUND" OR
+   NOT PREVIEW_STATE_ERROR STREQUAL "NOTFOUND" OR
+   NOT PREVIEW_PHASE STREQUAL "output" OR
+   PREVIEW_SIDE_EFFECTS OR
+   NOT PREVIEW_STATE STREQUAL "not_applied")
+    string(APPEND FAILURES "preview output OOM context mismatch: ${PREVIEW_OUT}\n")
+endif()
+
+execute_process(
+    COMMAND "${EXE}" set "${PROJECT}" clean padding=3 --json
+    RESULT_VARIABLE APPLY_RC
+    OUTPUT_VARIABLE APPLY_OUT
+    ERROR_VARIABLE APPLY_ERR)
+if(NOT APPLY_RC EQUAL 1)
+    string(APPEND FAILURES
+        "apply output OOM exit ${APPLY_RC} != 1\nstdout=${APPLY_OUT}\nstderr=${APPLY_ERR}\n")
+endif()
+file(SHA256 "${PROJECT}" AFTER_APPLY_HASH)
+if(BEFORE_PREVIEW_HASH STREQUAL AFTER_APPLY_HASH)
+    string(APPEND FAILURES
+        "apply mutation was not published before its injected output failure\n")
+endif()
+string(JSON APPLY_ERROR_ID ERROR_VARIABLE APPLY_JSON_ERROR
+    GET "${APPLY_OUT}" error id)
+string(JSON APPLY_ERROR_MESSAGE ERROR_VARIABLE APPLY_MESSAGE_ERROR
+    GET "${APPLY_OUT}" error message)
+if(NOT APPLY_JSON_ERROR STREQUAL "NOTFOUND" OR
+   NOT APPLY_MESSAGE_ERROR STREQUAL "NOTFOUND" OR
+   NOT APPLY_ERROR_ID STREQUAL "oom" OR
+   NOT APPLY_ERROR_MESSAGE STREQUAL
+       "out of memory rendering mutation result after mutation was applied")
+    string(APPEND FAILURES "apply output OOM payload mismatch: ${APPLY_OUT}\n")
+endif()
+string(JSON APPLY_PHASE ERROR_VARIABLE APPLY_PHASE_ERROR
+    GET "${APPLY_OUT}" error phase)
+string(JSON APPLY_SIDE_EFFECTS ERROR_VARIABLE APPLY_SIDE_EFFECTS_ERROR
+    GET "${APPLY_OUT}" error side_effects)
+string(JSON APPLY_STATE ERROR_VARIABLE APPLY_STATE_ERROR
+    GET "${APPLY_OUT}" error mutation_state)
+if(NOT APPLY_PHASE_ERROR STREQUAL "NOTFOUND" OR
+   NOT APPLY_SIDE_EFFECTS_ERROR STREQUAL "NOTFOUND" OR
+   NOT APPLY_STATE_ERROR STREQUAL "NOTFOUND" OR
+   NOT APPLY_PHASE STREQUAL "output" OR
+   NOT APPLY_SIDE_EFFECTS OR
+   NOT APPLY_STATE STREQUAL "applied")
+    string(APPEND FAILURES "apply output OOM context mismatch: ${APPLY_OUT}\n")
+endif()
+
+if(NOT PREVIEW_ERR STREQUAL "" OR NOT APPLY_ERR STREQUAL "")
+    string(APPEND FAILURES
+        "JSON output OOM must not write stderr\npreview=${PREVIEW_ERR}\napply=${APPLY_ERR}\n")
+endif()
+
+if(NOT FAILURES STREQUAL "")
+    message(FATAL_ERROR "${FAILURES}")
+endif()

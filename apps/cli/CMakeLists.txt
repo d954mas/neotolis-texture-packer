@@ -35,6 +35,16 @@ ntpacker_configure_target(ntpacker_inspect_fault)
 target_compile_definitions(ntpacker_inspect_fault PRIVATE NTPACKER_CLI_INSPECT_FAULT_SEAM=1)
 set_target_properties(ntpacker_inspect_fault PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CLI_OUTPUT_DIR}")
 
+# Test-only binary whose CLI output builder deterministically rejects every
+# allocation. This exercises the process-level exit/payload contract after a
+# mutation has otherwise reached its normal result-rendering boundary.
+add_executable(ntpacker_output_fault ${_ntpacker_sources})
+ntpacker_configure_target(ntpacker_output_fault)
+target_compile_definitions(ntpacker_output_fault PRIVATE
+    NTPACKER_CLI_OUT_FAULT_SEAM=1)
+set_target_properties(ntpacker_output_fault PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CLI_OUTPUT_DIR}")
+
 # --- e2e ctest: run the built exe, assert the exit-code contract + JSON payload.
 # No GL/display needed, so these give the op layer its first cross-OS CI coverage.
 
@@ -54,6 +64,12 @@ target_compile_options(cli_out_contract_test PRIVATE -U_DLL)
 nt_set_warning_flags(cli_out_contract_test)
 nt_set_sanitizer_flags(cli_out_contract_test)
 add_test(NAME cli_out_contract COMMAND cli_out_contract_test)
+
+add_test(NAME cli_mutation_output_oom_contract COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker_output_fault>
+    -DTD=${CMAKE_CURRENT_SOURCE_DIR}/testdata
+    -DWORK=${CMAKE_CURRENT_BINARY_DIR}/cli_mutation_output_oom_contract
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/cli_mutation_output_oom_contract.cmake")
 
 # Deterministic adapter fixture for the post-publication durability notice. The
 # fault itself is core-tested; this executable pins only the CLI wire payload.

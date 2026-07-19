@@ -62,15 +62,21 @@ void cli_emit_reject(bool json, bool quiet, const char *id, const char *field, i
  * (plan B4 item 8). `count` = the number of primary items affected (sources added,
  * frames added, ...); a scalar edit passes 1. Save degradation is appended as
  * a structured `notices` array without turning an already-published mutation
- * into an error. */
-void cli_emit_mutation(const char *verb, int count,
+ * into an error. Returns false without writing a payload if rendering runs out
+ * of memory; the caller then owns the allocation-free error + exit contract. */
+bool cli_emit_mutation(const char *verb, int count,
                        const struct tp_session_save_result *save_result);
 
-void cli_emit_mutation_preview(const char *command,
+bool cli_emit_mutation_preview(const char *command,
                                const struct tp_txn_result *result,
                                int64_t revision_before,
                                const tp_id_kind *generated_kinds,
                                const tp_id128 *generated_ids,
                                int generated_count);
+
+/* Allocation-free structured fallback for an OOM at the mutation JSON output
+ * boundary. Apply callers invoke this only after Save/Save As succeeds, so the
+ * exact applied/not_applied state is explicit in prose and machine fields. */
+void cli_emit_mutation_output_oom(bool side_effects);
 
 #endif /* NTPACKER_CLI_OUT_H */

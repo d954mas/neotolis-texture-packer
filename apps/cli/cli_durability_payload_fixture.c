@@ -23,6 +23,6 @@ int main(int argc, char **argv) {
     if (!result.file_durability_degraded && !result.recovery_degraded) {
         return 2;
     }
-    cli_emit_mutation("set", 1, &result);
+    (void)cli_emit_mutation("set", 1, &result);
     return 0;
 }
