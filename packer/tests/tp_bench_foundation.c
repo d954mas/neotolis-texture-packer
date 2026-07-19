@@ -521,6 +521,137 @@ static bool bench_normal_transaction(const fixture *f, int warmups, int iteratio
  * the next sample's model. Baseline cloning/setup stays outside the timed
  * region; tp_model_apply still performs its production transactional clone,
  * validation, History capture, result echo, and publication inside it. */
+static bool source_matches_add_operation(const tp_project *project,
+                                         const tp_project_source *source,
+                                         const tp_operation *operation) {
+    if (!project || !source || !operation ||
+        operation->kind != TP_OP_SOURCE_ADD ||
+        !operation->u.source_add.key) {
+        return false;
+    }
+    char canonical_path[TP_IDENTITY_PATH_MAX];
+    return tp_project_resolve_path(project, operation->u.source_add.key,
+                                   canonical_path,
+                                   sizeof canonical_path) == TP_STATUS_OK &&
+           tp_id128_eq(source->id, operation->u.source_add.source_id) &&
+           source->kind == operation->u.source_add.kind && source->path &&
+           strcmp(source->path, canonical_path) == 0;
+}
+
+static bool source_batch_matches_operations(const tp_project *project,
+                                             int source_count_before,
+                                             const tp_operation *operations,
+                                             int operation_count) {
+    if (!project || !operations || operation_count <= 0 ||
+        project->atlas_count <= 0) {
+        return false;
+    }
+    const tp_project_atlas *atlas = &project->atlases[0];
+    if (source_count_before < 0 ||
+        atlas->source_count != source_count_before + operation_count) {
+        return false;
+    }
+    for (int i = 0; i < operation_count; ++i) {
+        if (!source_matches_add_operation(
+                project, &atlas->sources[source_count_before + i],
+                &operations[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Keep the benchmark's correctness oracle honest without timing the check. A
+ * false oracle would accept at least one deliberately wrong expected field. */
+static bool source_batch_oracle_self_check(
+    const tp_project *project, int source_count_before,
+    const tp_operation *operations, int operation_count) {
+    const int middle = operation_count / 2;
+    const tp_project_source *source =
+        &project->atlases[0].sources[source_count_before + middle];
+    tp_operation mismatched = operations[middle];
+    mismatched.u.source_add.source_id.bytes[15] ^= 1U;
+    if (source_matches_add_operation(project, source, &mismatched)) {
+        return false;
+    }
+    mismatched = operations[middle];
+    mismatched.u.source_add.kind = TP_SOURCE_KIND_FOLDER;
+    if (source_matches_add_operation(project, source, &mismatched)) {
+        return false;
+    }
+    mismatched = operations[middle];
+    mismatched.u.source_add.key = (char *)"bench/oracle-mismatch.png";
+    return !source_matches_add_operation(project, source, &mismatched);
+}
+
+/* A later duplicate path fails after earlier source.add operations have already
+ * mutated the transaction clone. Exact serialized equality proves that the live
+ * project and revision were not partially published. This probe is setup-time
+ * correctness evidence, never part of a measured sample. */
+static bool source_batch_rollback_is_atomic(
+    const fixture *f, const tp_operation *operations, int operation_count) {
+    tp_operation *failing =
+        (tp_operation *)calloc((size_t)operation_count, sizeof *failing);
+    tp_project *project = tp_project_clone(f->project);
+    tp_model *model = project ? tp_model_wrap(project) : NULL;
+    char *before = NULL;
+    char *after = NULL;
+    size_t before_len = 0U;
+    size_t after_len = 0U;
+    tp_error error = {{0}};
+    if (!failing || !model ||
+        tp_model_enable_history(model) != TP_STATUS_OK ||
+        tp_project_save_buffer(tp_model_project(model), &before, &before_len,
+                               &error) != TP_STATUS_OK) {
+        free(failing);
+        tp_model_destroy(model);
+        free(before);
+        return false;
+    }
+    memcpy(failing, operations,
+           (size_t)operation_count * sizeof *failing);
+    const int failed_index = operation_count / 2;
+    failing[failed_index].u.source_add.key =
+        failing[failed_index - 1].u.source_add.key;
+
+    tp_txn_request request;
+    memset(&request, 0, sizeof request);
+    request.schema = TP_TXN_SCHEMA;
+    (void)snprintf(request.id_hex, sizeof request.id_hex,
+                   "%032" PRIx64, UINT64_C(0xb47bad));
+    request.expected_revision = tp_model_revision(model);
+    request.label = (char *)"source batch rollback probe";
+    request.ops = failing;
+    request.op_count = operation_count;
+    const int64_t revision_before = tp_model_revision(model);
+    tp_txn_result result = {0};
+    tp_project__test_set_clone_alloc_fail(-1);
+    const tp_status status = tp_model_apply(model, &request, &result, &error);
+    const tp_status save_status = tp_project_save_buffer(
+        tp_model_project(model), &after, &after_len, &error);
+    const bool unchanged =
+        status != TP_STATUS_OK && !result.committed &&
+        result.revision == revision_before &&
+        tp_model_revision(model) == revision_before &&
+        result.error_count > 0 && result.errors[0].op_index == failed_index &&
+        save_status == TP_STATUS_OK && before_len == after_len &&
+        memcmp(before, after, before_len) == 0;
+    if (!unchanged) {
+        (void)fprintf(stderr,
+                      "source batch rollback oracle failed: ops=%d failed_index=%d "
+                      "status=%s result_revision=%" PRId64
+                      " model_revision=%" PRId64 " error=%s\n",
+                      operation_count, failed_index, tp_status_id(status),
+                      result.revision, tp_model_revision(model), error.msg);
+    }
+    tp_txn_result_free(&result);
+    free(after);
+    free(before);
+    tp_model_destroy(model);
+    free(failing);
+    return unchanged;
+}
+
 static bool bench_source_add_batch(const fixture *f, int warmups,
                                    int iterations, int operation_count) {
     if (!f || !f->project || operation_count <= 0 ||
@@ -558,6 +689,11 @@ static bool bench_source_add_batch(const fixture *f, int warmups,
         operations[i].u.source_add.kind = TP_SOURCE_KIND_FILE;
         operations[i].u.source_add.key = paths[i];
     }
+    if (!source_batch_rollback_is_atomic(f, operations, operation_count)) {
+        free(paths);
+        free(operations);
+        return false;
+    }
 
     tp_bench_samples samples;
     tp_bench_samples_init(&samples);
@@ -587,13 +723,15 @@ static bool bench_source_add_batch(const fixture *f, int warmups,
         const tp_status status =
             tp_model_apply(model, &request, &result, &error);
         const double elapsed = tp_bench_now_ms() - start;
-        const tp_project_atlas *atlas =
-            &tp_model_project(model)->atlases[0];
         const bool accepted =
             status == TP_STATUS_OK && result.committed &&
             result.op_count == operation_count &&
-            atlas->source_count ==
-                f->project->atlases[0].source_count + operation_count;
+            source_batch_matches_operations(
+                tp_model_project(model), f->project->atlases[0].source_count,
+                operations, operation_count) &&
+            source_batch_oracle_self_check(
+                tp_model_project(model), f->project->atlases[0].source_count,
+                operations, operation_count);
         const uint64_t allocations =
             (uint64_t)tp_project__test_clone_alloc_count();
         if (allocations > max_clone_allocations) {
