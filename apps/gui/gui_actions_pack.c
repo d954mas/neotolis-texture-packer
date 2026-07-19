@@ -17,7 +17,7 @@
  * Pack starts the same session job and polls its typed result at frame boundaries. */
 void do_pack_blocking(void) {
     if (gui_actions__flush_failed()) {
-        return; /* fix2 [1]: a journal-failed flush dropped the edit -> abort (never pack a stale model + report success) */
+        return; /* A rejected buffered edit must not produce a stale Pack result. */
     }
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     const tp_snapshot_atlas *a = snapshot ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas) : NULL;
@@ -49,7 +49,7 @@ void do_pack_blocking(void) {
  * never freezes. Completion is applied at a frame boundary by poll_async (apply_pending). */
 void do_pack(void) {
     if (gui_actions__flush_failed()) {
-        return; /* fix2 [1]: a journal-failed flush dropped the edit -> abort (never pack a stale model + report success) */
+        return; /* A rejected buffered edit must not produce a stale Pack result. */
     }
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     const tp_snapshot_atlas *a = snapshot ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas) : NULL;
@@ -73,7 +73,7 @@ void do_pack(void) {
  * worker thread (per-atlas failures non-fatal, ux.md §3.5). Completion reported via poll_async. */
 static void do_export(void) {
     if (gui_actions__flush_failed()) {
-        return; /* fix2 [1]: a journal-failed flush dropped the edit -> abort (never export a stale model + report success) */
+        return; /* A rejected buffered edit must not produce a stale Export. */
     }
     if (gui_pack_async_busy()) {
         set_status_ex(STATUS_WARNING, "Busy -- a pack or export is already running.");

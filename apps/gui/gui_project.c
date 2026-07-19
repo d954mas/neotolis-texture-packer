@@ -78,6 +78,7 @@ bool gui_project_take_op_error(char *out, size_t cap) {
         (void)snprintf(out, cap, "%s", s_project.op_error_msg);
     }
     s_project.op_error = false;
+    s_project.op_error_status = TP_STATUS_OK;
     return true;
 }
 
@@ -90,7 +91,8 @@ void gui_project_flush_error(char *out, size_t cap) {
     }
     char m[256] = {0};
     if (!gui_project_take_op_error(m, sizeof m)) {
-        (void)snprintf(m, sizeof m, "Your last edit could not be committed (disk full?) -- resolve it and try again.");
+        (void)snprintf(m, sizeof m,
+                       "Your last edit could not be committed -- correct it and try again.");
     }
     (void)snprintf(out, cap, "%s", m);
 }
@@ -101,14 +103,30 @@ void gui_project__next_transaction_id(char out[33]) {
 
 void gui_project__note_session_reject(tp_status status, const tp_error *err) {
     const char *message = (err && err->msg[0]) ? err->msg : tp_status_str(status);
-    if (status == TP_STATUS_JOURNAL_FAILED) {
-        message = "Could not journal the edit -- disk full? Your change was not applied.";
-    }
     s_project.op_error = true;
+    s_project.op_error_status = status;
     (void)snprintf(s_project.op_error_msg, sizeof s_project.op_error_msg, "%s", message);
 }
 
+void gui_project__sync_recovery_notice(void) {
+    if (!s_project.session) {
+        return;
+    }
+    const tp_session_recovery_health health =
+        tp_session_recovery_health_query(s_project.session);
+    if (!health.degraded) {
+        s_project.recovery_notice_generation = health.generation;
+        return;
+    }
+    if (health.generation == s_project.recovery_notice_generation) {
+        return;
+    }
+    s_project.recovery_notice_generation = health.generation;
+    gui_project__note_recovery_degraded(tp_status_str(health.first_cause));
+}
+
 bool gui_project__refresh_after_session_commit(void) {
+    gui_project__sync_recovery_notice();
     /* Core is the sole semantic no-op owner. A no-change admission leaves the
      * revision unchanged, so keep the current projection and preview state. */
     if (s_project.snapshot &&

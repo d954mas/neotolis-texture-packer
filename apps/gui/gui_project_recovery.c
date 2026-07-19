@@ -23,6 +23,7 @@ static tp_id128 recovery_key(void) {
  * history remain available; only crash-recovery coverage is degraded. */
 void gui_project__note_recovery_degraded(const char *msg) {
     s_project.op_error = true;
+    s_project.op_error_status = TP_STATUS_JOURNAL_FAILED;
     (void)snprintf(
         s_project.op_error_msg, sizeof s_project.op_error_msg,
         "Crash recovery is unavailable (%s). Changes can continue, but unsaved work may not survive an app or system crash.",

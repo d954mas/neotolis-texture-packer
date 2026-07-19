@@ -73,7 +73,7 @@ target_compile_definitions(ntpacker-gui PRIVATE
 option(NTPACKER_GUI_SELFTEST "Run the startup project-ops self-test then auto-quit" OFF)
 if(NTPACKER_GUI_SELFTEST)
     target_compile_definitions(ntpacker-gui PRIVATE NTPACKER_GUI_SELFTEST=1)
-    # The selftest's append-fail regression (F2-05b-ii-B) drives the journal's memory-io fault seams
+    # The selftest's recovery-degradation regression drives the journal's memory-io fault seams
     # declared in packer/src/tp_journal_internal.h -- the same src/-internal include the packer
     # test_journal.c uses. Scoped to the selftest build ONLY (the shipped GUI never sees packer/src),
     # and gui_selftest.c is the boundary-excluded dev-seam TU (check_boundaries.sh), like the CLI tests.

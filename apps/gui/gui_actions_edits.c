@@ -422,8 +422,7 @@ void gui_actions__apply_structural_edits(void) {
         }
     }
     if (s_pending_remove_source) {
-        /* fix3 [0]: side-effects + "Removed" run ONLY on a real removal -- a journal-failed flush
-         * aborts the wrapper (returns false), so no false "Removed" / bad Ctrl+Z (op-error surfaced). */
+        /* Side effects and success text run only after a real removal. */
         if (gui_project_remove_source(s_pending_remove_source_atlas_id,
                                       s_pending_remove_source_id,
                                       s_pending_remove_source_revision)) {
@@ -510,9 +509,9 @@ void gui_actions__apply_structural_edits(void) {
     gui_actions__pending_create_animation_dispose(
         &s_actions.pending_create_anim);
     if (s_actions.pending_remove_anim) {
-            /* fix3 [0]: preview_stop + the selection reset + "Removed" run ONLY on a real removal. A
-             * journal-failed flush aborts the wrapper (returns false) -> the animation is still there,
-             * so we must NOT stop its preview or clear the selection. (preview_stop only resets flags,
+            /* preview_stop + selection reset + success text run only after a real removal.
+             * On any operation rejection the animation remains, so we must not clear its UI state.
+             * (preview_stop only resets flags,
              * so running it AFTER the removal is safe -- no project deref.) */
             const bool was_previewing =
                 s_preview_active &&

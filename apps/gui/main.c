@@ -326,8 +326,8 @@ static void handle_shortcuts(void) {
     }
     if (s_edit_kind == EDIT_NONE && s_sel_anim >= 0 && s_sel_anim_frame >= 0 &&
         nt_input_key_is_pressed(NT_KEY_DELETE)) {
-        /* fix3 completeness: clear the frame selection ONLY on a real removal -- a journal-failed flush
-         * aborts the remove (frame still present), so don't deselect it (op-error surfaces via poll_async). */
+        /* Clear the frame selection only after a real removal. On rejection the
+         * frame remains, so its selection must remain too. */
         gui_animation_ref animation;
         if (gui_project_animation_ref_at(s_sel_atlas, s_sel_anim, &animation) &&
             gui_project_anim_remove_frame(&animation, s_sel_anim_frame)) {

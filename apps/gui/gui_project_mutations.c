@@ -92,8 +92,7 @@ static int64_t revision_after_owned_route(int64_t captured_revision,
  * caller-supplied `const char *` sourced from snapshot DTO storage MUST duplicate it before the flush --
  * see gui_project_set_target / gui_project_remove_animation. */
 int gui_project_add_atlas(void) {
-    /* fix2 [3]: a journal-failed flush dropped the buffered gesture (op-error already surfaced) -> abort
-     * this structural op too, never pair a silent lost edit with an unrelated committed change. */
+    /* Do not pair a rejected buffered gesture with an unrelated structural edit. */
     if (!gui_project_flush_pending()) {
         return -1;
     }
@@ -149,7 +148,7 @@ int gui_project_add_atlas(void) {
 bool gui_project_remove_atlas(tp_id128 atlas_id, int64_t expected_revision) {
     const int64_t revision_before_flush = s_project.session ? tp_session_revision(s_project.session) : 0;
     if (!gui_project_flush_pending()) {
-        return false; /* fix2 [3]: journal-failed flush dropped the gesture -> abort (op-error surfaced) */
+        return false; /* buffered operation rejected */
     }
     if (tp_id128_is_nil(atlas_id) || !s_project.session) {
         return false;
@@ -211,7 +210,7 @@ bool gui_project_add_sources(tp_id128 atlas_id, int64_t expected_revision,
     }
     const int64_t revision_before_flush = s_project.session ? tp_session_revision(s_project.session) : 0;
     if (!gui_project_flush_pending()) {
-        return false; /* fix2 [3]: a journal-failed flush dropped the gesture -> abort (op-error surfaced) */
+        return false; /* buffered operation rejected */
     }
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     if (!snapshot || !tp_session_snapshot_atlas_by_id(snapshot, atlas_id) ||
@@ -291,7 +290,7 @@ bool gui_project_remove_source(tp_id128 atlas_id, tp_id128 source_id,
                                int64_t expected_revision) {
     const int64_t revision_before_flush = s_project.session ? tp_session_revision(s_project.session) : 0;
     if (!gui_project_flush_pending()) {
-        return false; /* fix2 [3]: journal-failed flush dropped the gesture -> abort (op-error surfaced) */
+        return false; /* buffered operation rejected */
     }
     if (!s_project.session || tp_id128_is_nil(atlas_id) || tp_id128_is_nil(source_id)) {
         return false;
@@ -317,7 +316,7 @@ bool gui_project_remove_source(tp_id128 atlas_id, tp_id128 source_id,
 bool gui_project_set_atlas_name(tp_id128 atlas_id, int64_t expected_revision, const char *name) {
     const int64_t revision_before_flush = s_project.session ? tp_session_revision(s_project.session) : 0;
     if (!gui_project_flush_pending()) {
-        return false; /* fix2 [3]: journal-failed flush dropped the gesture -> abort (op-error surfaced) */
+        return false; /* buffered operation rejected */
     }
     if (!s_project.session || !name) {
         return false;
@@ -347,7 +346,7 @@ tp_status gui_project_copy_atlas_name(tp_id128 atlas_id, char *out, size_t capac
 bool gui_project_set_sprite_rename(const gui_sprite_ref *sprite, const char *rename) {
     const int64_t revision_before_flush = s_project.session ? tp_session_revision(s_project.session) : 0;
     if (!gui_project_flush_pending()) {
-        return false; /* fix2 [3]: journal-failed flush dropped the gesture -> abort (op-error surfaced) */
+        return false; /* buffered operation rejected */
     }
     if (!s_project.session || !sprite || tp_id128_is_nil(sprite->atlas_id) ||
         tp_id128_is_nil(sprite->source_id) || !sprite->source_key ||
@@ -536,7 +535,7 @@ bool gui_project_set_sprite_override(const gui_sprite_ref *sprite, gui_sprite_ov
 int gui_project_add_target(tp_id128 atlas_id, int64_t expected_revision) {
     const int64_t revision_before_flush = tp_session_revision(s_project.session);
     if (!gui_project_flush_pending()) {
-        return -1; /* fix2 [3]: journal-failed flush dropped the gesture -> abort (op-error surfaced) */
+        return -1; /* buffered operation rejected */
     }
     /* target.create op for the default json-neotolis target (mirrors seed_default_target's exporter +
      * "out/<name>" path). An OP (not the lifecycle seed) so the added target is captured in the diff
@@ -588,7 +587,7 @@ bool gui_project_remove_target(const gui_target_ref *target) {
     if (!target) return false;
     const int64_t revision_before_flush = tp_session_revision(s_project.session);
     if (!gui_project_flush_pending()) {
-        return false; /* fix2 [3]: journal-failed flush dropped the gesture -> abort (op-error surfaced) */
+        return false; /* buffered operation rejected */
     }
     int64_t expected_revision = target->expected_revision;
     if (expected_revision == revision_before_flush &&
@@ -617,9 +616,8 @@ bool gui_project_set_target(const gui_target_ref *target, const char *exporter_i
      * point into the cached snapshot that a successful flush invalidates. */
     char *exp = dupstr(exporter_id);
     char *outp = dupstr(out_path);
-    /* fix2 [3]: same class as the other structural wrappers -- a journal-failed flush dropped the
-     * buffered gesture (op-error surfaced), so abort THIS target edit too (freeing the pre-dup'd
-     * strings) instead of pairing a lost edit with an unrelated target change. */
+    /* Abort this target edit if the buffered operation was rejected; the copied
+     * strings must still be released on that path. */
     if (!gui_project_flush_pending()) {
         free(exp);
         free(outp);
@@ -696,8 +694,8 @@ bool gui_project_set_target_out_path(const gui_target_ref *target,
  * is now impossible at the op level). They still flush any buffered out-path gesture FIRST: a discrete pick
  * is a gesture boundary, so the pending out-path commits as its own undo step before this one (clean
  * sequential history). An empty out_path is never buffered (gui_project_set_target_out_path guards it), so
- * that flush never rejects on emptiness -- only a genuine journal failure returns false, aborting this edit
- * too. */
+ * that flush never rejects on emptiness. A genuine operation rejection aborts
+ * this edit too. */
 bool gui_project_set_target_enabled(const gui_target_ref *target, bool enabled) {
     if (!target) return false;
     const int64_t revision_before_flush = tp_session_revision(s_project.session);
@@ -796,7 +794,7 @@ int gui_project_create_animation(tp_id128 atlas_id, int64_t expected_revision,
                                  int frame_count) {
     const int64_t revision_before_flush = tp_session_revision(s_project.session);
     if (!gui_project_flush_pending()) {
-        return -1; /* fix2 [3]: journal-failed flush dropped the gesture -> abort (op-error surfaced) */
+        return -1; /* buffered operation rejected */
     }
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     const tp_snapshot_atlas *atlas = snapshot
@@ -879,7 +877,7 @@ bool gui_project_set_anim_id(const gui_animation_ref *animation, const char *new
     }
     const int64_t revision_before_flush = tp_session_revision(s_project.session);
     if (!gui_project_flush_pending()) {
-        return false; /* fix2 [3]: journal-failed flush dropped the gesture -> abort (op-error surfaced) */
+        return false; /* buffered operation rejected */
     }
     int64_t expected_revision = animation->expected_revision;
     if (expected_revision == revision_before_flush &&
@@ -984,7 +982,7 @@ bool gui_project_anim_add_frames(const gui_animation_ref *animation,
     }
     const int64_t revision_before_flush = tp_session_revision(s_project.session);
     if (!gui_project_flush_pending()) {
-        return false; /* fix2 [3]: journal-failed flush dropped the gesture -> abort (op-error surfaced) */
+        return false; /* buffered operation rejected */
     }
     int64_t expected_revision = animation->expected_revision;
     if (expected_revision == revision_before_flush &&
@@ -1015,7 +1013,7 @@ bool gui_project_anim_remove_frame(const gui_animation_ref *animation,
     }
     const int64_t revision_before_flush = tp_session_revision(s_project.session);
     if (!gui_project_flush_pending()) {
-        return false; /* fix2 [3]: journal-failed flush dropped the gesture -> abort (op-error surfaced) */
+        return false; /* buffered operation rejected */
     }
     int64_t expected_revision = animation->expected_revision;
     if (expected_revision == revision_before_flush &&
@@ -1043,7 +1041,7 @@ bool gui_project_anim_move_frame(const gui_animation_ref *animation,
     }
     const int64_t revision_before_flush = tp_session_revision(s_project.session);
     if (!gui_project_flush_pending()) {
-        return false; /* fix2 [3]: journal-failed flush dropped the gesture -> abort (op-error surfaced) */
+        return false; /* buffered operation rejected */
     }
     int64_t expected_revision = animation->expected_revision;
     if (expected_revision == revision_before_flush &&

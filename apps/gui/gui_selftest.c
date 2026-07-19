@@ -29,7 +29,7 @@
 
 #include "tp_core/tp_error.h"   /* tp_status_str / tp_error */
 #include "tp_core/tp_export.h"  /* tp_exporter_count/at (preview-target selector index) */
-#include "tp_core/tp_id.h"      /* tp_id128_eq (F2-05b-ii-B append-fail identity check) */
+#include "tp_core/tp_id.h"      /* stable structural-ID assertions */
 #include "tp_core/tp_model.h"   /* tp_result */
 #include "tp_core/tp_names.h"   /* tp_sprite_export_key (region -> override key) */
 #include "tp_core/tp_journal.h" /* in-memory recovery fixture */
@@ -2260,13 +2260,10 @@ void run_selftest(void) {
         gui_project_new(); /* leave a clean project for the following phases */
     }
 
-    /* --- F2-05b-ii-B: LIVE recovery journal -- append-fail UX + crash-recovery round-trip (both ways) --- */
+    /* --- LIVE best-effort recovery UX + crash-recovery round-trip --- */
     {
-        /* (J1) APPEND-FAIL UX: a recovery-journal append failure (full disk) must reject the commit
-         *      cleanly -- the live model is BYTE-UNCHANGED, dirty is unchanged, a clear status is
-         *      raised, no half-applied edit -- and the editor must keep working once the failure
-         *      clears. Driven deterministically: attach a memory-io recovery journal to a fresh model,
-         *      arm the NEXT journal write to fail, then commit a real (structural, immediate) edit. */
+        /* (J1) Recovery append failure is a visible best-effort degradation, not
+         * a model commit gate. The edit, dirty state, and History remain live. */
         gui_project_new();
         gui_pack_clear(-1);
         s_sel_atlas = 0;
@@ -2276,31 +2273,33 @@ void run_selftest(void) {
                   "J1: memory recovery journal attached to the live model");
         char nm0[64];
         (void)snprintf(nm0, sizeof nm0, "%s", selftest_atlas_at(0, NULL)->name);
-        const tp_id128 id_before = tp_session_snapshot_semantic_identity(gui_project_snapshot());
         const bool dirty_before = gui_project_is_dirty();
         gui_project__test_fail_next_recovery_writes(1); /* the NEXT journal append fails entirely */
-        const bool committed = gui_project_set_atlas_name(0, "append_should_fail"); /* structural -> immediate commit */
+        const bool committed = gui_project_set_atlas_name(0, "committed_without_recovery");
         char emsg[256] = {0};
         const bool surfaced = gui_project_take_op_error(emsg, sizeof emsg);
-        const tp_id128 id_after = tp_session_snapshot_semantic_identity(gui_project_snapshot());
         const char *nm1 = selftest_atlas_at(0, NULL)->name;
         nt_log_info("SELFTEST: J1 append-fail committed=%d surfaced=%d msg='%s' name '%s'->'%s' dirty %d->%d",
                     (int)committed, (int)surfaced, emsg, nm0, nm1, (int)dirty_before, (int)gui_project_is_dirty());
-        NT_ASSERT(!committed && "J1: a journal append failure REJECTS the commit");
-        NT_ASSERT(surfaced && emsg[0] && "J1: the append failure surfaces a status-bar error");
-        NT_ASSERT(tp_id128_eq(id_before, id_after) && strcmp(nm1, nm0) == 0 &&
-                  "J1: the live model is BYTE-UNCHANGED after the rejected append (no half-applied edit)");
-        NT_ASSERT(gui_project_is_dirty() == dirty_before && "J1: dirty is unchanged after the rejected append");
-        /* the fault was one-shot -> a further edit now commits normally (editor still live) */
+        const tp_session_recovery_health j1health =
+            tp_session_recovery_health_query(gui_project__test_session());
+        NT_ASSERT(committed && strcmp(nm1, "committed_without_recovery") == 0 &&
+                  "J1: recovery failure does not reject or roll back the edit");
+        NT_ASSERT(surfaced && strstr(emsg, "recovery") != NULL &&
+                  "J1: recovery degradation surfaces a non-blocking warning");
+        NT_ASSERT(!dirty_before && gui_project_is_dirty() &&
+                  "J1: the committed edit still dirties the project");
+        NT_ASSERT(j1health.degraded && j1health.first_cause == TP_STATUS_JOURNAL_FAILED &&
+                  "J1: recovery health retains the first durable-write cause");
+        /* Sticky degradation skips dependent appends, but editing stays live. */
         NT_ASSERT(gui_project_set_atlas_name(0, "works_after") &&
                   strcmp(selftest_atlas_at(0, NULL)->name, "works_after") == 0 &&
-                  "J1: the editor keeps working once the append failure clears");
-        (void)gui_project_take_op_error(NULL, 0); /* the recovered edit raised no error; clear defensively */
+                  "J1: the editor keeps working while recovery is degraded");
+        NT_ASSERT(!gui_project_take_op_error(NULL, 0) &&
+                  "J1: sticky degradation is not re-announced on every edit");
 
-        /* (J2) fix [3] SAVE MUST ABORT ON A JOURNAL-FAILED FLUSH (no silent data loss / no false clean).
-         *      A buffered gesture whose flush-commit fails during Save must NOT be silently dropped while
-         *      the file is written + the title shows "saved". Buffer a coalescable edit, arm append-fail,
-         *      Save -> assert Save FAILS, the model is NOT marked clean, and NO file is written. */
+        /* (J2) Save flushes the buffered edit even if its recovery append fails,
+         * publishes the project, and heals recovery with a fresh checkpoint. */
         gui_project_new();
         gui_pack_clear(-1);
         s_sel_atlas = 0;
@@ -2317,21 +2316,20 @@ void run_selftest(void) {
         char s2err[256] = {0};
         const tp_status s2st = gui_project_save_as(s2path, s2err, sizeof s2err);
         const bool s2_written = selftest_file_exists(s2path);
-        nt_log_info("SELFTEST: J2 save-with-append-fail st=%s dirty=%d file_written=%d err='%s' (want !OK,1,0)",
+        nt_log_info("SELFTEST: J2 save-with-append-fail st=%s dirty=%d file_written=%d err='%s' (want OK,0,1)",
                     tp_status_str(s2st), (int)gui_project_is_dirty(), (int)s2_written, s2err);
-        NT_ASSERT(s2st != TP_STATUS_OK && "J2/[3]: Save FAILS when the buffered edit cannot be journaled");
-        NT_ASSERT(gui_project_is_dirty() && "J2/[3]: the model is NOT marked clean on a failed save (no false 'saved')");
-        NT_ASSERT(!s2_written && "J2/[3]: no .ntpacker_project is written when the flush commit failed");
-        NT_ASSERT(strcmp(selftest_atlas_at(0, NULL)->name, "before_save") == 0 &&
-                  "J2/[3]: the committed model is intact (the failed save did not corrupt it)");
+        const tp_session_recovery_health j2health =
+            tp_session_recovery_health_query(gui_project__test_session());
+        NT_ASSERT(s2st == TP_STATUS_OK && !gui_project_is_dirty() && s2_written &&
+                  "J2: Save succeeds independently of the failed diff append");
+        NT_ASSERT(selftest_atlas_at(0, NULL)->padding == j2pad + 5 &&
+                  "J2: Save contains the buffered committed gesture");
+        NT_ASSERT(!j2health.degraded && "J2: the successful Save checkpoint heals recovery");
         (void)remove(s2path);
         (void)gui_project_take_op_error(NULL, 0);
 
-        /* (J6) fix2 [3]: a STRUCTURAL wrapper must ABORT when its pre-flush of a buffered gesture fails to
-         *      journal -- never silently drop the gesture AND land an unrelated structural change. Buffer a
-         *      coalescable gesture, arm append-fail, then call set_atlas_name -> its flush commits the
-         *      gesture, the append fails, and the wrapper aborts (returns false; neither the gesture nor the
-         *      rename lands) with the op-error surfaced. */
+        /* (J6) A structural wrapper may continue after its pre-flush commits a
+         * buffered gesture and only recovery recording degrades. Both edits land. */
         gui_project_new();
         gui_pack_clear(-1);
         s_sel_atlas = 0;
@@ -2347,17 +2345,17 @@ void run_selftest(void) {
         const bool j6surfaced = gui_project_take_op_error(j6err, sizeof j6err);
         const char *j6name1 = selftest_atlas_at(0, NULL)->name;
         const int j6pad1 = selftest_atlas_at(0, NULL)->padding;
-        nt_log_info("SELFTEST: J6 structural-abort ret=%d surfaced=%d name '%s'->'%s' pad %d->%d (want 0,1,unchanged)",
+        nt_log_info("SELFTEST: J6 structural-after-degrade ret=%d surfaced=%d name '%s'->'%s' pad %d->%d (want 1,1,changed)",
                     (int)j6ret, (int)j6surfaced, j6name0, j6name1, j6pad, j6pad1);
-        NT_ASSERT(!j6ret && "J6/[3]: a structural op ABORTS when the pre-flush of a buffered gesture fails to journal");
-        NT_ASSERT(j6surfaced && j6err[0] && "J6/[3]: the journal failure is surfaced to the status-bar channel");
-        NT_ASSERT(strcmp(j6name1, j6name0) == 0 && j6pad1 == j6pad &&
-                  "J6/[3]: neither the dropped gesture NOR the structural op landed (both aborted -- no unrelated change)");
+        NT_ASSERT(j6ret && "J6: recovery degradation does not abort the structural op");
+        NT_ASSERT(j6surfaced && strstr(j6err, "recovery") != NULL &&
+                  "J6: recovery degradation is surfaced as a warning");
+        NT_ASSERT(strcmp(j6name1, "structural_should_abort") == 0 && j6pad1 == j6pad + 7 &&
+                  "J6: both the buffered gesture and following structural edit landed");
         (void)gui_project_take_op_error(NULL, 0);
 
-        /* (J7) fix2 [1]: a PACK must ABORT when its pre-flush of a buffered gesture fails to journal --
-         *      never pack a stale model + report success. (do_pack_blocking's flush_failed surfaces the
-         *      op-error to the status bar, so the deterministic assertion is that NO pack result is produced.) */
+        /* (J7) Pack uses the newly committed model even when recovery recording
+         * degraded during the entry flush. */
         gui_project_new();
         gui_pack_clear(-1);
         s_sel_atlas = 0;
@@ -2372,17 +2370,15 @@ void run_selftest(void) {
         const int j7pad = selftest_atlas_at(0, NULL)->padding;
         (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, j7pad + 3, 0.0F); /* buffered */
         gui_project__test_fail_next_recovery_writes(1);
-        do_pack_blocking(); /* flush_failed -> abort BEFORE packing */
+        do_pack_blocking();
         const tp_result *j7r = gui_pack_result(0);
-        nt_log_info("SELFTEST: J7 pack-abort result=%s (want NULL -- pack aborted on the journal-failed flush)",
+        nt_log_info("SELFTEST: J7 pack-after-degrade result=%s (want PRESENT)",
                     j7r ? "PRESENT" : "NULL");
-        NT_ASSERT(j7r == NULL && "J7/[1]: a journal-failed flush ABORTS the pack (no stale result produced)");
+        NT_ASSERT(j7r != NULL && "J7: Pack proceeds from the committed post-flush model");
         (void)gui_project_take_op_error(NULL, 0);
 
-        /* (J8) fix2 [0]: the unsaved-changes GATE. request_new must ABORT on a journal-failed flush, never
-         *      discard the project because is_dirty read clean after the only (buffered) change was dropped.
-         *      Detected via the project PATH: gui_project_new (if it ran) resets the path to ""; an abort
-         *      keeps it. Save to a temp first so the buffered gesture is the ONLY unsaved change. */
+        /* (J8) The buffered edit commits despite recovery degradation, so the
+         * ordinary unsaved-changes gate still protects it before New. */
         gui_project_new();
         gui_pack_clear(-1);
         s_sel_atlas = 0;
@@ -2398,18 +2394,16 @@ void run_selftest(void) {
         const int j8pad = selftest_atlas_at(0, NULL)->padding;
         (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, j8pad + 4, 0.0F); /* the ONLY unsaved change (buffered) */
         gui_project__test_fail_next_recovery_writes(1);
-        request_new(); /* WITH the fix: flush_failed -> abort -> the project + its path are KEPT */
+        request_new();
         const bool j8kept = gui_project_has_path();
-        nt_log_info("SELFTEST: J8 dirty-gate abort has_path=%d (want 1: request_new aborted, project NOT discarded)",
+        nt_log_info("SELFTEST: J8 dirty-gate has_path=%d (want 1: unsaved project kept)",
                     (int)j8kept);
         NT_ASSERT(j8kept &&
-                  "J8/[0]: request_new ABORTS on a journal-failed flush -- the project is NOT silently discarded");
+                  "J8: recovery degradation cannot bypass the ordinary dirty-project gate");
         (void)remove(j8path);
         (void)gui_project_take_op_error(NULL, 0);
 
-        /* (J9) fix3 [0]: a now-bool remove wrapper returns FALSE on a journal-failed flush and the item is
-         *      STILL present (so the deferred handler prints NO false "Removed" / bad Ctrl+Z); the healthy
-         *      journal path returns TRUE and removes. */
+        /* (J9) Remove continues after the buffered edit commits and recovery degrades. */
         gui_project_new();
         gui_pack_clear(-1);
         s_sel_atlas = 0;
@@ -2421,25 +2415,15 @@ void run_selftest(void) {
         const int j9pad = selftest_atlas_at(0, NULL)->padding;
         (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, j9pad + 6, 0.0F); /* buffered gesture */
         gui_project__test_fail_next_recovery_writes(1);
-        const bool j9ret_fail = gui_project_remove_atlas(j9added); /* flush fails -> abort */
+        const bool j9ret_fail = gui_project_remove_atlas(j9added);
         const int j9count1 = tp_session_snapshot_atlas_count(gui_project_snapshot());
-        nt_log_info("SELFTEST: J9 remove-abort ret=%d count %d->%d (want 0, unchanged)", (int)j9ret_fail, j9count0, j9count1);
-        NT_ASSERT(!j9ret_fail && j9count1 == j9count0 &&
-                  "J9/[0]: remove_atlas returns FALSE on a journal-failed flush + the atlas is STILL present");
-        (void)gui_project_take_op_error(NULL, 0);
-        const bool j9ret_ok = gui_project_remove_atlas(j9added); /* healthy journal, no pending -> removes */
-        const int j9count2 = tp_session_snapshot_atlas_count(gui_project_snapshot());
-        nt_log_info("SELFTEST: J9 remove-success ret=%d count %d->%d (want 1, -1)", (int)j9ret_ok, j9count1, j9count2);
-        NT_ASSERT(j9ret_ok && j9count2 == j9count1 - 1 &&
-                  "J9/[0]: a healthy-journal remove returns TRUE + removes (the success case still works)");
+        nt_log_info("SELFTEST: J9 remove-after-degrade ret=%d count %d->%d (want 1, -1)", (int)j9ret_fail, j9count0, j9count1);
+        NT_ASSERT(j9ret_fail && j9count1 == j9count0 - 1 &&
+                  "J9: recovery degradation does not block the requested removal");
         (void)gui_project_take_op_error(NULL, 0);
 
-        /* (J10) H/P1-2: animation rename is a first-class op now. set_anim_id returns false for BOTH a
-         *       name collision AND a journal-failed flush, but the LIVE op-error channel
-         *       (gui_project_take_op_error -- the same one commit_active_edit surfaces) discriminates them
-         *       by MESSAGE. The retired gui_project_anim_id_exists heuristic no longer decides; assert the
-         *       real reject text on each arm, so a disk-full on a unique name is never misreported as a
-         *       duplicate (and the editor is not trapped). */
+        /* (J10) Animation rename remains a first-class operation: collisions
+         * reject, while a unique rename commits despite recovery degradation. */
         gui_project_new();
         gui_pack_clear(-1);
         s_sel_atlas = 0;
@@ -2457,8 +2441,8 @@ void run_selftest(void) {
         NT_ASSERT(!j10_collide_ret && j10_csurfaced && strstr(j10_cerr, "an animation named") != NULL &&
                   strstr(j10_cerr, "already exists") != NULL &&
                   "J10/live: a genuine duplicate -> set_anim_id false AND the op-error IS the core collision message");
-        /* Case B -- journal-failed flush on a UNIQUE name: false AND the op-error is the JOURNAL-fail
-         *   message, NOT a collision (the flush-first entry catches it before the rename op is built). */
+        /* Case B -- recovery-degraded flush on a UNIQUE name: the buffered edit
+         * and rename commit, with a recovery warning rather than a false collision. */
         NT_ASSERT(gui_project__test_attach_memory_recovery() && "J10: memory journal attached");
         const int j10pad = selftest_atlas_at(0, NULL)->padding;
         (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, j10pad + 2, 0.0F); /* buffered */
@@ -2466,21 +2450,16 @@ void run_selftest(void) {
         const bool j10_flush_ret = gui_project_set_anim_id(0, j10b, "totally_unique_name");
         char j10_ferr[256] = {0};
         const bool j10_fsurfaced = gui_project_take_op_error(j10_ferr, sizeof j10_ferr);
-        nt_log_info("SELFTEST: J10 journal-fail ret=%d surfaced=%d msg='%s' (want 0,1 -> journal msg, NOT a collision)",
+        nt_log_info("SELFTEST: J10 recovery-degrade ret=%d surfaced=%d msg='%s' (want 1,1 -> recovery warning)",
                     (int)j10_flush_ret, (int)j10_fsurfaced, j10_ferr);
-        NT_ASSERT(!j10_flush_ret && j10_fsurfaced && strstr(j10_ferr, "journal") != NULL &&
+        NT_ASSERT(j10_flush_ret && j10_fsurfaced && strstr(j10_ferr, "recovery") != NULL &&
                   strstr(j10_ferr, "already exists") == NULL &&
-                  "J10/live: a journal-failed flush on a UNIQUE name -> false with the journal message, never a false collision");
+                  strcmp(selftest_animation_at(0, j10b)->name, "totally_unique_name") == 0 &&
+                  "J10/live: a unique rename commits and recovery failure is only a warning");
         (void)gui_project_take_op_error(NULL, 0);
 
-        /* (J11) H/P1-2: the anim-rename FLUSH-FIRST pattern, asserted through the LIVE op-error channel.
-         *       The retired anim_id_exists heuristic was NOT a valid collision discriminator: it returns
-         *       true for the anim's OWN name, yet renaming to the own name is a no-op SUCCESS -- so on a
-         *       journal-fail (which also makes set_anim_id false) it misreported the OWN/unchanged name as
-         *       "must be unique" + trapped the editor. commit_active_edit now flush-FIRSTs at the entry so
-         *       the journal-fail is caught BEFORE set_anim_id, and post-flush a false carries a genuine
-         *       reject on the op-error channel only. (commit_active_edit is a static UI fn -- not directly
-         *       callable headless; we exercise its building blocks.) */
+        /* (J11) Own-name remains a no-op success. A recovery-degraded entry
+         * flush also succeeds and exposes only the non-blocking warning. */
         gui_project_new();
         gui_pack_clear(-1);
         s_sel_atlas = 0;
@@ -2496,8 +2475,7 @@ void run_selftest(void) {
                     (int)j11_own_ret, (int)j11_own_err);
         NT_ASSERT(j11_own_ret && !j11_own_err &&
                   "J11/live: renaming to the OWN name is a no-op SUCCESS that raises no op-error");
-        /* (flush-first) a journal-failed flush is caught at the ENTRY guard (flush_failed/flush_pending),
-         *     BEFORE set_anim_id -- so a disk-full on the own/unchanged name is never a false collision. */
+        /* Recovery failure during the entry flush is not an operation rejection. */
         NT_ASSERT(gui_project__test_attach_memory_recovery() && "J11: memory journal attached");
         const int j11pad = selftest_atlas_at(0, NULL)->padding;
         (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, j11pad + 1, 0.0F); /* buffered gesture */
@@ -2505,10 +2483,10 @@ void run_selftest(void) {
         const bool j11_entry_flush = gui_project_flush_pending(); /* the entry guard commit_active_edit runs FIRST */
         char j11_ferr[256] = {0};
         const bool j11_fsurfaced = gui_project_take_op_error(j11_ferr, sizeof j11_ferr);
-        nt_log_info("SELFTEST: J11 entry-flush ret=%d surfaced=%d (want 0,1 -> journal-fail caught at the entry)",
+        nt_log_info("SELFTEST: J11 entry-flush ret=%d surfaced=%d (want 1,1 -> recovery warning)",
                     (int)j11_entry_flush, (int)j11_fsurfaced);
-        NT_ASSERT(!j11_entry_flush && j11_fsurfaced &&
-                  "J11/[0]: a journal-failed flush is caught at the flush-first ENTRY (never reaches set_anim_id)");
+        NT_ASSERT(j11_entry_flush && j11_fsurfaced && strstr(j11_ferr, "recovery") != NULL &&
+                  "J11: recovery-degraded entry flush still commits successfully");
         (void)gui_project_take_op_error(NULL, 0);
 
         /* (J11b) A core-rejected atlas rename keeps the inline editor alive on Enter so the user can
@@ -2531,9 +2509,8 @@ void run_selftest(void) {
                   tp_session_snapshot_revision(gui_project_snapshot()) == j11b_revision &&
                   "J11b: forced blur cancels a rejected atlas rename without mutation");
 
-        /* (J12) fix4 [2]: do_undo must NOT report a journal-failed flush as "Nothing to undo." It
-         *       flush-firsts (flush_failed) -- a buffered gesture + armed append-fail surfaces the flush
-         *       error and returns BEFORE gui_project_undo (whose false would else be misread as empty). */
+        /* (J12) Undo flushes and commits the buffered gesture, then reverses it;
+         * recovery degradation does not masquerade as an empty History. */
         gui_project_new();
         gui_pack_clear(-1);
         s_sel_atlas = 0;
@@ -2544,47 +2521,34 @@ void run_selftest(void) {
         (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, j12pad + 5, 0.0F); /* buffered gesture */
         gui_project__test_fail_next_recovery_writes(1);
         set_status("j12_sentinel"); /* a sentinel so we can tell do_undo replaced the status */
-        do_undo();                  /* flush-first: shows the flush error + returns; must NOT be "Nothing to undo." */
-        nt_log_info("SELFTEST: J12 do_undo-after-journal-fail status='%s' (want the disk-full error, NOT 'Nothing to undo.')",
+        do_undo();
+        nt_log_info("SELFTEST: J12 do_undo-after-recovery-fail status='%s' (want Undo)",
                     s_status);
-        NT_ASSERT(strcmp(s_status, "Nothing to undo.") != 0 &&
-                  "J12/[2]: a journal-failed flush is NOT reported as 'Nothing to undo.'");
-        NT_ASSERT(strstr(s_status, "disk full") != NULL &&
-                  "J12/[2]: do_undo surfaces the disk-full flush error on a journal-failed flush");
+        NT_ASSERT(strncmp(s_status, "Undo", 4) == 0 &&
+                  "J12: Undo remains available after recovery degradation");
         (void)gui_project_take_op_error(NULL, 0);
 
-        /* (J12b) P1 history-gate regression: Undo/Redo itself now appends a candidate checkpoint
-         * INSIDE core before publishing the project/cursor move. A failed checkpoint append must
-         * return false, preserve the visible model + depths, and use the existing op-error channel
-         * (never the old post-success degraded-compaction notice). */
+        /* (J12b) Undo/Redo publish History independently of recovery recording. */
         gui_project_new();
         gui_pack_clear(-1);
         s_sel_atlas = 0;
         (void)gui_project_take_op_error(NULL, 0);
         NT_ASSERT(gui_project__test_attach_memory_recovery() && "J12b: memory recovery journal attached");
         NT_ASSERT(gui_project_set_atlas_name(0, "j12b_edit") && "J12b: committed edit populates history");
-        const int j12b_undo0 = gui_project_undo_depth();
-        const int j12b_redo0 = gui_project_redo_depth();
         gui_project__test_fail_next_recovery_writes(1);
         const bool j12b_undo_fail = gui_project_undo();
         char j12b_uerr[256] = {0};
         const bool j12b_usurfaced = gui_project_take_op_error(j12b_uerr, sizeof j12b_uerr);
-        NT_ASSERT(!j12b_undo_fail && j12b_usurfaced && strstr(j12b_uerr, "disk full") != NULL &&
-                  strcmp(selftest_atlas_at(0, NULL)->name, "j12b_edit") == 0 &&
-                  gui_project_undo_depth() == j12b_undo0 && gui_project_redo_depth() == j12b_redo0 &&
-                  "J12b: failed Undo is surfaced and publishes no model/cursor change");
+        NT_ASSERT(j12b_undo_fail && j12b_usurfaced && strstr(j12b_uerr, "recovery") != NULL &&
+                  strcmp(selftest_atlas_at(0, NULL)->name, "atlas1") == 0 &&
+                  "J12b: Undo publishes and surfaces recovery degradation as a warning");
 
-        NT_ASSERT(gui_project_undo() && "J12b: one-shot fault exhausted; Undo remains retryable");
-        const int j12b_undo1 = gui_project_undo_depth();
-        const int j12b_redo1 = gui_project_redo_depth();
-        gui_project__test_fail_next_recovery_writes(1);
         const bool j12b_redo_fail = gui_project_redo();
         char j12b_rerr[256] = {0};
         const bool j12b_rsurfaced = gui_project_take_op_error(j12b_rerr, sizeof j12b_rerr);
-        NT_ASSERT(!j12b_redo_fail && j12b_rsurfaced && strstr(j12b_rerr, "disk full") != NULL &&
-                  strcmp(selftest_atlas_at(0, NULL)->name, "atlas1") == 0 &&
-                  gui_project_undo_depth() == j12b_undo1 && gui_project_redo_depth() == j12b_redo1 &&
-                  "J12b: failed Redo is surfaced and publishes no model/cursor change");
+        NT_ASSERT(j12b_redo_fail && !j12b_rsurfaced &&
+                  strcmp(selftest_atlas_at(0, NULL)->name, "j12b_edit") == 0 &&
+                  "J12b: Redo remains available and sticky degradation is not repeated");
         (void)gui_project_take_op_error(NULL, 0);
 
         /* (J14) The startup decision must never replace recovered work with

@@ -31,6 +31,10 @@ static bool install_session(tp_session *next) {
     }
     tp_session_destroy(s_project.session);
     s_project.session = next;
+    s_project.op_error = false;
+    s_project.op_error_status = TP_STATUS_OK;
+    s_project.op_error_msg[0] = '\0';
+    s_project.recovery_notice_generation = 0U;
     s_project.save_notice_pending = false;
     s_project.save_notice[0] = '\0';
     return true;
@@ -132,6 +136,7 @@ bool gui_project_undo(void) {
         }
         return false;
     }
+    gui_project__sync_recovery_notice();
     gui_project__snapshot_drop();
     s_project.preview_stale = true; /* restored model no longer matches the last pack */
     gui_project_invalidate_sources();
@@ -150,6 +155,7 @@ bool gui_project_redo(void) {
         }
         return false;
     }
+    gui_project__sync_recovery_notice();
     gui_project__snapshot_drop();
     s_project.preview_stale = true;
     gui_project_invalidate_sources();
@@ -222,8 +228,11 @@ tp_status gui_project_save(char *err_out, size_t err_cap) {
         return TP_STATUS_INVALID_ARGUMENT;
     }
     if (!gui_project_flush_pending()) {
+        const tp_status flush_status = s_project.op_error_status != TP_STATUS_OK
+                                           ? s_project.op_error_status
+                                           : TP_STATUS_INVALID_ARGUMENT;
         gui_project_flush_error(err_out, err_cap);
-        return TP_STATUS_JOURNAL_FAILED;
+        return flush_status;
     }
     tp_error err = {0};
     tp_session_save_result result;
@@ -239,6 +248,7 @@ tp_status gui_project_save(char *err_out, size_t err_cap) {
     if (result.recovery_degraded) {
         gui_project__note_recovery_degraded("recovery checkpoint compaction failed");
     }
+    gui_project__sync_recovery_notice();
     if (result.file_durability_degraded) {
         s_project.save_notice_pending = true;
         (void)snprintf(
@@ -271,8 +281,11 @@ tp_status gui_project_save_as(const char *path, char *err_out, size_t err_cap) {
     }
     /* Never save an older snapshot when the pending edit failed to commit. */
     if (!gui_project_flush_pending()) {
+        const tp_status flush_status = s_project.op_error_status != TP_STATUS_OK
+                                           ? s_project.op_error_status
+                                           : TP_STATUS_INVALID_ARGUMENT;
         gui_project_flush_error(err_out, err_cap);
-        return TP_STATUS_JOURNAL_FAILED;
+        return flush_status;
     }
     err = (tp_error){0};
     tp_session_save_result result;
@@ -289,6 +302,7 @@ tp_status gui_project_save_as(const char *path, char *err_out, size_t err_cap) {
     if (result.recovery_degraded) {
         gui_project__note_recovery_degraded("recovery checkpoint compaction failed");
     }
+    gui_project__sync_recovery_notice();
     if (result.file_durability_degraded) {
         s_project.save_notice_pending = true;
         (void)snprintf(

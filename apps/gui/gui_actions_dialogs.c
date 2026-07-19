@@ -175,7 +175,7 @@ static void do_add_files(void) {
                     gui_project_add_sources(atlas_id, revision, ptrs, n,
                                             TP_SOURCE_KIND_FILE, &added, &dup);
     if (!ok) {
-        /* the whole atomic batch was rejected (journal/disk-full, OOM, core) -- the reason is already on
+        /* The whole atomic batch was rejected (OOM, validation, or core) -- the reason is already on
          * the op-error channel; make THIS line an ERROR too, not a benign info-toned "Added 0". */
         set_status_ex(STATUS_ERROR, "Could not add the selected files.");
     } else if (too_long > 0 || overflow > 0) {
@@ -196,8 +196,8 @@ bool gui_actions__flush_failed(void); /* defined below; a discrete browse is a f
 void gui_actions__browse_target(const gui_target_ref *queued) {
     /* H/G3: commit any BUFFERED out-path gesture FIRST so the Save dialog seeds from the just-typed path,
      * not a stale committed one (clicking the "..." button is in-panel, so no blur gesture-commit fired).
-     * Route through gui_actions__flush_failed() like every other flush-first entry: a journal-failed flush surfaces the
-     * error and ABORTS -- never pop a Save dialog over a rejected-commit model. Re-fetch a/t AFTER the flush
+     * Route through gui_actions__flush_failed() like every other flush-first entry: an operation
+     * rejection surfaces the error and aborts. Re-fetch a/t AFTER the flush
      * (a committed flush clone-swaps the project). */
     if (gui_actions__flush_failed()) {
         return;
@@ -300,10 +300,9 @@ static void do_add_folder(void) {
 // #endregion
 
 // #region new/exit confirm flow
-/* fix2 [0]/[1]: a buffered gesture's flush-commit failed (journal append failure) -> the edit is gone
- * AND the model is NOT what the caller expects (clean-or-current). Surface the reason (the op-error is
- * already set by the failed commit) and tell the caller to ABORT, so a destructive gate (New/Open/Exit)
- * never silently discards the project over a lost edit and a pack/export never runs on a stale model.
+/* A rejected buffered gesture leaves the model older than the caller expects.
+ * Surface the operation error and tell the caller to abort, so a destructive
+ * gate never discards the project and Pack never runs on stale state.
  * Returns true when the flush FAILED (the caller must abort); false when it is safe to proceed. */
 bool gui_actions__flush_failed(void) {
     if (gui_project_flush_pending()) {
@@ -320,7 +319,7 @@ void request_new(void) {
         return;
     }
     if (gui_actions__flush_failed()) {
-        return; /* fix2 [0]: journal-failed flush dropped the edit -> abort (never discard over a silent loss) */
+        return; /* A rejected buffered edit must not be silently discarded. */
     }
     if (gui_project_is_dirty()) {
         s_after_confirm = AFTER_NEW;
@@ -341,7 +340,7 @@ void request_exit(void) {
         return;
     }
     if (gui_actions__flush_failed()) {
-        return; /* fix2 [0]: journal-failed flush dropped the edit -> abort the quit (never quit over a silent loss) */
+        return; /* A rejected buffered edit must not be silently discarded. */
     }
     if (gui_project_is_dirty()) {
         s_after_confirm = AFTER_EXIT;
@@ -357,7 +356,7 @@ void request_open(void) {
         return;
     }
     if (gui_actions__flush_failed()) {
-        return; /* fix2 [0]: journal-failed flush dropped the edit -> abort the open (never switch over a silent loss) */
+        return; /* A rejected buffered edit must not be silently discarded. */
     }
     if (gui_project_is_dirty()) {
         s_after_confirm = AFTER_OPEN;

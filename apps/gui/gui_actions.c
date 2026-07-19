@@ -78,9 +78,7 @@ void do_undo(void) {
         return; /* same async-busy guard as new/open/exit -- undo mid-pack then a pre-undo land is confusing */
     }
     if (gui_actions__flush_failed()) {
-        return; /* fix4 [2]: a buffered gesture could not be journaled -> abort (error surfaced), never
-                 * undo a DIFFERENT step. After this, gui_project_undo()'s false means empty-history only
-                 * (undo does NOT journal), so "Nothing to undo." below is correct again. */
+        return; /* The buffered gesture was rejected; do not undo a different step. */
     }
     if (gui_project_undo()) {
         gui_shell_reset_shown_result();
@@ -98,7 +96,7 @@ void do_redo(void) {
         return;
     }
     if (gui_actions__flush_failed()) {
-        return; /* fix4 [2]: a journal-failed flush is not "Nothing to redo" -- abort (error surfaced) */
+        return; /* The buffered gesture was rejected; do not redo a different step. */
     }
     if (gui_project_redo()) {
         gui_shell_reset_shown_result();
@@ -284,16 +282,15 @@ void commit_sprite_rename(void) {
  * keeping a zombie editor (the validation message stays in the status bar). Sprite rename never
  * zombies (empty clears the override). No-op when nothing is being edited.
  *
- * fix4 (DEFINITIVE closure of the journal-failed-flush class): FLUSH-FIRST at the entry via
- * gui_actions__flush_failed(). Any buffered gesture is committed-or-aborted HERE; on a journal-failed flush the
- * neutral error is surfaced and we abort (keeping the editor open unless forced, so the user can retry
- * after freeing disk). After a successful flush, each rename op's OWN internal flush is a guaranteed
+ * FLUSH-FIRST at the entry via gui_actions__flush_failed(). Any buffered gesture is
+ * committed or rejected HERE. Recovery degradation does not make the flush fail;
+ * a real operation rejection is surfaced and keeps the editor open unless forced.
+ * After a successful flush, each rename op's OWN internal flush is a guaranteed
  * no-op, so its return is DOMAIN-ONLY. The anim branch also routes through an op
  * (set_anim_id builds TP_OP_ANIMATION_RENAME -> commit_txn_now), so a false there is a core reject whose
  * structured message rides the op-error channel -- surfaced directly, no anim_id_exists heuristic (fix3's
  * heuristic was wrong: it matched the anim's own unchanged name). set_atlas_name / set_sprite_rename /
- * set_anim_id journal their rename op; on that op's OWN append failure they return false -> no success
- * message + the op-error surfaces (not a false success, not a wrong "already exists"). */
+ * set_anim_id commit their rename op through the shared session contract. */
 static void commit_active_edit(bool force) {
     if (s_edit_kind == EDIT_NONE) {
         return; /* nothing being edited */
@@ -309,7 +306,7 @@ static void commit_active_edit(bool force) {
     const bool rebase_anim = s_edit_kind == EDIT_ANIM &&
                              s_actions.edit_anim_revision == revision_before_flush;
     if (gui_actions__flush_failed()) {
-        /* a buffered gesture could not be journaled -> abort the rename commit (error already surfaced) */
+        /* The buffered gesture was rejected; do not stack a rename on stale state. */
         if (force) {
             cancel_edit();
         }
@@ -368,8 +365,8 @@ static void commit_active_edit(bool force) {
              * core REJECT -- a name collision (validate enforces uniqueness) or a rare OOM/stale-index
              * failure. The structured reject rides commit_txn_now's op-error channel, so surface it
              * DIRECTLY instead of re-deriving the reason with the old anim_id_exists heuristic (which
-             * could not tell the anim's own unchanged name from a real clash). The entry gui_actions__flush_failed()
-             * already handled the journal-fail case, so the op-error here is the domain reject. */
+             * could not tell the anim's own unchanged name from a real clash). The entry
+             * gui_actions__flush_failed() already handled any buffered-operation rejection. */
             char anim_err[256];
             if (gui_project_take_op_error(anim_err, sizeof anim_err)) {
                 set_status_ex(STATUS_WARNING, anim_err);
@@ -419,10 +416,9 @@ void apply_pending(void) {
      * buffered transaction NOW that gui_actions__drain_edits has folded in this frame's final value, so one
      * interaction == one undo step (decision 0015). */
     if (s_actions.gesture_commit) {
-        /* fix2: the bool is intentionally IGNORED -- this is the gesture-BOUNDARY commit (one interaction
-         * = one undo step). A journal-failed flush here drops the gesture WITH the op-error surfaced
-         * (poll_async shows it); there is no persist/discard "proceed as clean" decision after it to
-         * abort (unlike save/new/pack). Audited fix2 [0]/[1]. */
+        /* The bool is intentionally ignored at this gesture boundary. A genuine
+         * operation rejection is already visible on the shared error channel;
+         * recovery degradation returns success and preserves the gesture. */
         (void)gui_project_flush_pending();
         s_actions.gesture_commit = false;
     }
