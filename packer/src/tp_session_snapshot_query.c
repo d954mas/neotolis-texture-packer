@@ -13,6 +13,27 @@
 #include "tp_project_mutation_internal.h"
 #include "tp_session_snapshot_internal.h"
 
+static tp_status resolve_snapshot_source_path(const tp_project *project,
+                                              const char *source_path,
+                                              char *out, size_t capacity,
+                                              tp_error *err) {
+    const tp_status status = tp_project_resolve_source_path(
+        project, source_path, out, capacity);
+    if (status == TP_STATUS_OK) {
+        return TP_STATUS_OK;
+    }
+    if (status == TP_STATUS_PATH_NOT_ABSOLUTE) {
+        return tp_error_set(err, status,
+                            "snapshot source path has no absolute base");
+    }
+    if (status == TP_STATUS_OUT_OF_BOUNDS) {
+        return tp_error_set(err, status,
+                            "resolved snapshot source path exceeds output capacity");
+    }
+    return tp_error_set(err, status,
+                        "snapshot source path resolution failed");
+}
+
 const tp_project *tp_session_snapshot_project_internal(
     const tp_session_snapshot *snapshot) {
     return snapshot ? snapshot->project : NULL;
@@ -166,8 +187,8 @@ tp_status tp_session_snapshot_source_resolved_at(
     }
     const tp_snapshot_source *source = &atlas->sources[source_index];
     *out_source = source;
-    return tp_project_resolve_source_path(snapshot->project, source->path,
-                                          out_path, capacity);
+    return resolve_snapshot_source_path(snapshot->project, source->path,
+                                        out_path, capacity, err);
 }
 
 const tp_snapshot_source *tp_session_snapshot_source_by_id(const tp_session_snapshot *snapshot,
@@ -327,8 +348,8 @@ tp_status tp_session_snapshot_resolve_path(const tp_session_snapshot *snapshot,
     if (!source) {
         return tp_error_set(err, TP_STATUS_NOT_FOUND, "snapshot source id was not found");
     }
-    return tp_project_resolve_source_path(snapshot->project, source->path, out,
-                                          capacity);
+    return resolve_snapshot_source_path(snapshot->project, source->path, out,
+                                        capacity, err);
 }
 
 

@@ -1,9 +1,10 @@
 #include "tp_project_generation_internal.h"
 
-#include <assert.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
+
+#include "core/nt_assert.h"
 
 struct tp_project_generation {
     atomic_uint refs;
@@ -36,7 +37,7 @@ void tp_project_generation_retain(tp_project_generation *generation) {
     const unsigned previous = atomic_fetch_add_explicit(
         &generation->refs, 1U, memory_order_relaxed);
     (void)previous;
-    assert(previous > 0U && previous < UINT_MAX);
+    NT_ASSERT(previous > 0U && previous < UINT_MAX);
 }
 
 void tp_project_generation_release(tp_project_generation *generation) {
@@ -45,7 +46,7 @@ void tp_project_generation_release(tp_project_generation *generation) {
     }
     const unsigned previous = atomic_fetch_sub_explicit(
         &generation->refs, 1U, memory_order_acq_rel);
-    assert(previous > 0U);
+    NT_ASSERT(previous > 0U);
     if (previous == 1U) {
         tp_project_destroy(generation->project);
         free(generation);

@@ -113,6 +113,20 @@ nt_set_warning_flags(tp_test_session)
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_session_test")
 add_test(NAME tp_session COMMAND tp_test_session "${CMAKE_BINARY_DIR}/tp_session_test")
 
+# Owner refcount invariants must remain executable in Release, where libc
+# assert() would compile away. The parent probe succeeds only when its child
+# terminates on the production generation owner's invalid-release path.
+add_executable(tp_test_project_generation_assert
+    test_project_generation_assert.c)
+target_link_libraries(tp_test_project_generation_assert PRIVATE tp_core)
+target_include_directories(tp_test_project_generation_assert PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_definitions(tp_test_project_generation_assert PRIVATE NDEBUG)
+target_compile_options(tp_test_project_generation_assert PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_project_generation_assert)
+add_test(NAME tp_project_generation_assert
+    COMMAND tp_test_project_generation_assert)
+
 # Save I/O propagation at the live owner boundary. This stays separate from the
 # broad session battery so the identity/fingerprint/history outcome table is
 # easy to review when persistence changes.

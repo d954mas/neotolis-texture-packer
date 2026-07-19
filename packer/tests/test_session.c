@@ -1130,6 +1130,71 @@ void test_snapshot_resolves_source_by_direct_indices(void) {
     tp_session_destroy(session);
 }
 
+void test_snapshot_source_resolution_failures_fill_error_context(void) {
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+#ifdef _WIN32
+    const char *absolute_path = "C:/ntpacker/source.png";
+#else
+    const char *absolute_path = "/tmp/ntpacker/source.png";
+#endif
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_source_kind(&project->atlases[0], absolute_path,
+                                         TP_SOURCE_KIND_FILE));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_source_kind(&project->atlases[0], "relative.png",
+                                         TP_SOURCE_KIND_FILE));
+    uint8_t seed = 93U;
+    tp_rng rng = {deterministic_fill, &seed};
+    tp_error err = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_assign_missing_ids(project, &rng, &err));
+    tp_session *session = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_adopt_owned(project, &rng, &session, &err));
+    tp_session_snapshot *snapshot = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_snapshot_create(session, &snapshot, &err));
+    const tp_snapshot_atlas *atlas = tp_session_snapshot_atlas_at(snapshot, 0);
+    const tp_snapshot_source *absolute =
+        tp_session_snapshot_source_at(snapshot, atlas->id, 0);
+    const tp_snapshot_source *relative =
+        tp_session_snapshot_source_at(snapshot, atlas->id, 1);
+    TEST_ASSERT_NOT_NULL(absolute);
+    TEST_ASSERT_NOT_NULL(relative);
+
+    const tp_snapshot_source *resolved_source = NULL;
+    char resolved[1] = {0};
+    memset(&err, 0, sizeof err);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_session_snapshot_source_resolved_at(snapshot, 0, 0,
+                                               &resolved_source, resolved,
+                                               sizeof resolved, &err));
+    TEST_ASSERT_NOT_EQUAL('\0', err.msg[0]);
+
+    memset(&err, 0, sizeof err);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_session_snapshot_resolve_path(snapshot, atlas->id, absolute->id,
+                                         resolved, sizeof resolved, &err));
+    TEST_ASSERT_NOT_EQUAL('\0', err.msg[0]);
+
+    char relative_out[TP_IDENTITY_PATH_MAX] = {0};
+    memset(&err, 0, sizeof err);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_PATH_NOT_ABSOLUTE,
+        tp_session_snapshot_resolve_path(snapshot, atlas->id, relative->id,
+                                         relative_out, sizeof relative_out,
+                                         &err));
+    TEST_ASSERT_NOT_EQUAL('\0', err.msg[0]);
+
+    tp_session_snapshot_destroy(snapshot);
+    tp_session_destroy(session);
+}
+
 void test_snapshot_selector_uses_canonical_ambiguity_and_atlas_scope(void) {
     tp_project *project = tp_project_create();
     TEST_ASSERT_NOT_NULL(project);
@@ -2178,6 +2243,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_detached_recovery_save_publishes_new_model_generation);
     RUN_TEST(test_snapshot_has_id_addressed_nested_dtos);
     RUN_TEST(test_snapshot_resolves_source_by_direct_indices);
+    RUN_TEST(test_snapshot_source_resolution_failures_fill_error_context);
     RUN_TEST(test_snapshot_selector_uses_canonical_ambiguity_and_atlas_scope);
     RUN_TEST(test_snapshot_sprite_selector_matches_headless_canonical_operation);
     RUN_TEST(test_snapshot_frontend_queries_delegate_core_rules);
