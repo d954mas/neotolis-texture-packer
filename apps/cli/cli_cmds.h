@@ -67,6 +67,6 @@ int cmd_pack(const char *path, const char *opt_atlas, const char *opt_target, co
  * usage (bad grammar/vocabulary/value), 3 project (load error, `new`-on-existing, or a
  * selector/state mutator failure), 1 internal (OOM). `anim list` is a read-only query. */
 int cmd_mutate(int npos, const char *const *positionals, const char *opt_at,
-               const char *opt_kind, bool json, bool quiet);
+               const char *opt_kind, bool dry_run, bool json, bool quiet);
 
 #endif /* NTPACKER_CLI_CMDS_H */

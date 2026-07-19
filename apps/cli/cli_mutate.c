@@ -43,6 +43,7 @@
 #include "tp_core/tp_error.h"
 #include "tp_core/tp_id.h"     /* tp_rng_os + id128 generate + shape-ID format */
 #include "tp_core/tp_operation.h"
+#include "tp_core/tp_project.h"
 #include "tp_core/tp_scan.h"            /* tp_scan_exists (new-on-existing guard) */
 #include "tp_core/tp_session.h"
 #include "tp_core/tp_source_plan.h"
@@ -274,16 +275,46 @@ void edit_close(cli_edit *edit) {
     }
     tp_session_snapshot_destroy(edit->snapshot);
     tp_session_destroy(edit->session);
+    tp_model_destroy(edit->model);
     memset(edit, 0, sizeof *edit);
 }
 
-int edit_open(cli_edit *edit, const char *path, bool json, bool quiet) {
+int edit_open(cli_edit *edit, const char *path, bool dry_run, bool json, bool quiet) {
     memset(edit, 0, sizeof *edit);
-    tp_rng rng = tp_rng_os();
     tp_error err = {0};
-    tp_status status = tp_session_open(path, &rng, &edit->session, &err);
-    if (status == TP_STATUS_OK) {
-        status = tp_session_snapshot_create(edit->session, &edit->snapshot, &err);
+    tp_status status;
+    if (dry_run) {
+        status = tp_session_snapshot_load(path, &edit->snapshot, &err);
+        tp_project *project = NULL;
+        tp_id128 loaded_fingerprint = tp_id128_nil();
+        if (status == TP_STATUS_OK) {
+            status = tp_project_load_with_fingerprint(path, &project,
+                                                      &loaded_fingerprint, &err);
+        }
+        tp_id128 snapshot_fingerprint = tp_id128_nil();
+        if (status == TP_STATUS_OK &&
+            (!tp_session_snapshot_saved_file_fingerprint(edit->snapshot,
+                                                         &snapshot_fingerprint) ||
+             !tp_id128_eq(snapshot_fingerprint, loaded_fingerprint))) {
+            status = tp_error_set(&err, TP_STATUS_FILE_CHANGED_EXTERNALLY,
+                                  "project changed while dry-run candidate was loaded");
+        }
+        if (status == TP_STATUS_OK) {
+            edit->model = tp_model_wrap(project);
+            if (!edit->model) {
+                status = tp_error_set(&err, TP_STATUS_OOM,
+                                      "dry-run candidate allocation failed");
+            }
+        }
+        if (!edit->model) {
+            tp_project_destroy(project);
+        }
+    } else {
+        tp_rng rng = tp_rng_os();
+        status = tp_session_open(path, &rng, &edit->session, &err);
+        if (status == TP_STATUS_OK) {
+            status = tp_session_snapshot_create(edit->session, &edit->snapshot, &err);
+        }
     }
     if (status != TP_STATUS_OK) {
         cli_emit_error(json, quiet, tp_status_id(status), "%s",
@@ -293,6 +324,7 @@ int edit_open(cli_edit *edit, const char *path, bool json, bool quiet) {
                                                 : CLI_EXIT_PROJECT;
     }
     edit->path = path;
+    edit->dry_run = dry_run;
     return CLI_EXIT_OK;
 }
 
@@ -342,9 +374,9 @@ int edit_resolve_sprite(cli_edit *edit, tp_id128 atlas_id,
 
 int edit_open_atlas(cli_edit *edit, const char *path,
                            const char *selector,
-                           const tp_snapshot_atlas **atlas, bool json,
+                           const tp_snapshot_atlas **atlas, bool dry_run, bool json,
                            bool quiet) {
-    int rc = edit_open(edit, path, json, quiet);
+    int rc = edit_open(edit, path, dry_run, json, quiet);
     if (rc != CLI_EXIT_OK) {
         return rc;
     }
@@ -454,10 +486,19 @@ int commit_session_ops(cli_edit *edit, tp_operation *ops, int nops,
     tp_txn_result result;
     memset(&result, 0, sizeof result);
     tp_error err = {0};
-    tp_status status = tp_session_apply(edit->session, &request, &result, &err);
+    tp_status status = edit->dry_run
+                           ? tp_model_apply(edit->model, &request, &result, &err)
+                           : tp_session_apply(edit->session, &request, &result, &err);
     int rc = CLI_EXIT_OK;
     if (status != TP_STATUS_OK) {
         rc = emit_reject(&result, status, &err, json, quiet);
+    } else if (edit->dry_run) {
+        if (json) {
+            cli_emit_mutation_preview(verb, &result, request.expected_revision,
+                                      NULL, NULL, 0);
+        } else if (!quiet) {
+            (void)printf("Dry run: %s\n", human);
+        }
     } else {
         tp_session_save_result save_result;
         status = tp_session_save(edit->session, &save_result, &err);
@@ -480,14 +521,17 @@ int commit_session_ops(cli_edit *edit, tp_operation *ops, int nops,
 /* new (session create + Save As)                                     */
 /* ------------------------------------------------------------------ */
 
-static int do_new(const char *path, bool json, bool quiet) {
+static int do_new(const char *path, bool dry_run, bool json, bool quiet) {
     tp_rng rng = tp_rng_os();
     tp_error err = {0};
     tp_session *session = NULL;
     tp_session_save_result result;
     memset(&result, 0, sizeof result);
     tp_status st = tp_session_create_default_project(&rng, &session, &err);
-    if (st == TP_STATUS_OK) {
+    if (st == TP_STATUS_OK && dry_run && tp_scan_exists(path)) {
+        st = tp_error_set(&err, TP_STATUS_FILE_EXISTS,
+                          "tp_project_save: destination already exists: %s", path);
+    } else if (st == TP_STATUS_OK && !dry_run) {
         st = tp_session_save_new(session, path, &result, &err);
     }
     if (st != TP_STATUS_OK) {
@@ -497,11 +541,40 @@ static int do_new(const char *path, bool json, bool quiet) {
     }
     char human[CLI_PATH_MAX + 32];
     (void)snprintf(human, sizeof human, "Created project %s", path);
-    if (json) {
+    if (json && dry_run) {
+        tp_session_snapshot *snapshot = NULL;
+        st = tp_session_snapshot_create(session, &snapshot, &err);
+        if (st != TP_STATUS_OK) {
+            const int exit_code = emit_save_failure(st, &err, true, quiet);
+            tp_session_destroy(session);
+            return exit_code;
+        }
+        tp_id_kind kinds[64];
+        tp_id128 ids[64];
+        int id_count = 0;
+        const int atlas_count = tp_session_snapshot_atlas_count(snapshot);
+        for (int ai = 0; ai < atlas_count && id_count < 64; ++ai) {
+            const tp_snapshot_atlas *atlas = tp_session_snapshot_atlas_at(snapshot, ai);
+            kinds[id_count] = TP_ID_KIND_ATLAS;
+            ids[id_count++] = atlas->id;
+            for (int ti = 0; ti < atlas->target_count && id_count < 64; ++ti) {
+                const tp_snapshot_target *target =
+                    tp_session_snapshot_target_at(snapshot, atlas->id, ti);
+                kinds[id_count] = TP_ID_KIND_TARGET;
+                ids[id_count++] = target->id;
+            }
+        }
+        cli_emit_mutation_preview("new", NULL, 0, kinds, ids, id_count);
+        tp_session_snapshot_destroy(snapshot);
+    } else if (json) {
         cli_emit_mutation("new", 1, &result);
     } else if (!quiet) {
-        report_save_notices_human(&result, false);
-        (void)printf("%s\n", human);
+        if (dry_run) {
+            (void)printf("Dry run: would create project %s\n", path);
+        } else {
+            report_save_notices_human(&result, false);
+            (void)printf("%s\n", human);
+        }
     }
     tp_session_destroy(session);
     return CLI_EXIT_OK;
@@ -515,16 +588,16 @@ static int do_new(const char *path, bool json, bool quiet) {
 
 static int dispatch_mutation(int npos, const char *const *positionals,
                              const char *opt_at, const char *opt_kind,
-                             bool json, bool quiet) {
+                             bool dry_run, bool json, bool quiet) {
     const char *verb = positionals[0];
     if (strcmp(verb, "add") == 0) {
-        return do_add(positionals, npos, opt_kind, json, quiet);
+        return do_add(positionals, npos, opt_kind, dry_run, json, quiet);
     }
     if (strcmp(verb, "remove") == 0) {
-        return do_remove_source(positionals, npos, json, quiet);
+        return do_remove_source(positionals, npos, dry_run, json, quiet);
     }
     if (strcmp(verb, "set") == 0) {
-        return do_set(positionals, npos, json, quiet);
+        return do_set(positionals, npos, dry_run, json, quiet);
     }
     if (strcmp(verb, "sprite") == 0) {
         if (npos < 2) {
@@ -533,10 +606,10 @@ static int dispatch_mutation(int npos, const char *const *positionals,
             return CLI_EXIT_USAGE;
         }
         if (strcmp(positionals[1], "set") == 0) {
-            return do_sprite_set(positionals, npos, json, quiet);
+            return do_sprite_set(positionals, npos, dry_run, json, quiet);
         }
         if (strcmp(positionals[1], "unset") == 0) {
-            return do_sprite_unset(positionals, npos, json, quiet);
+            return do_sprite_unset(positionals, npos, dry_run, json, quiet);
         }
         cli_emit_error(json, quiet, "usage",
                        "unknown sprite sub-command '%s' (want set/unset)",
@@ -544,13 +617,13 @@ static int dispatch_mutation(int npos, const char *const *positionals,
         return CLI_EXIT_USAGE;
     }
     if (strcmp(verb, "anim") == 0) {
-        return do_anim(positionals, npos, opt_at, json, quiet);
+        return do_anim(positionals, npos, opt_at, dry_run, json, quiet);
     }
     if (strcmp(verb, "target") == 0) {
-        return do_target(positionals, npos, json, quiet);
+        return do_target(positionals, npos, dry_run, json, quiet);
     }
     if (strcmp(verb, "atlas") == 0) {
-        return do_atlas(positionals, npos, json, quiet);
+        return do_atlas(positionals, npos, dry_run, json, quiet);
     }
     cli_emit_error(json, quiet, "usage",
                    "unknown command '%s'; try 'ntpacker help'", verb);
@@ -558,7 +631,7 @@ static int dispatch_mutation(int npos, const char *const *positionals,
 }
 
 int cmd_mutate(int npos, const char *const *positionals, const char *opt_at,
-               const char *opt_kind, bool json, bool quiet) {
+               const char *opt_kind, bool dry_run, bool json, bool quiet) {
     const char *verb = positionals[0];
     if (opt_at && strcmp(verb, "anim") != 0) {
         cli_emit_error(json, quiet, "usage",
@@ -571,7 +644,7 @@ int cmd_mutate(int npos, const char *const *positionals, const char *opt_at,
                            "new needs exactly one <path>; try 'ntpacker help'");
             return CLI_EXIT_USAGE;
         }
-        return do_new(positionals[1], json, quiet);
+        return do_new(positionals[1], dry_run, json, quiet);
     }
-    return dispatch_mutation(npos, positionals, opt_at, opt_kind, json, quiet);
+    return dispatch_mutation(npos, positionals, opt_at, opt_kind, dry_run, json, quiet);
 }

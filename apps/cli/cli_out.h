@@ -3,10 +3,13 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include "tp_core/tp_error.h"
+#include "tp_core/tp_id.h"
 
 struct tp_session_save_result;
+struct tp_txn_result;
 
 /* Minimal local JSON/text string builder for the CLI. Deliberately NOT
  * packer/src/tp_sb.h -- that is a tp_core-PRIVATE header and apps/ must not
@@ -62,5 +65,12 @@ void cli_emit_reject(bool json, bool quiet, const char *id, const char *field, i
  * into an error. */
 void cli_emit_mutation(const char *verb, int count,
                        const struct tp_session_save_result *save_result);
+
+void cli_emit_mutation_preview(const char *command,
+                               const struct tp_txn_result *result,
+                               int64_t revision_before,
+                               const tp_id_kind *generated_kinds,
+                               const tp_id128 *generated_ids,
+                               int generated_count);
 
 #endif /* NTPACKER_CLI_OUT_H */

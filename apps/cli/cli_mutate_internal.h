@@ -6,6 +6,7 @@
 
 #include "tp_core/tp_operation.h"
 #include "tp_core/tp_session.h"
+#include "tp_core/tp_transaction.h"
 
 #define CLI_PATH_MAX TP_IDENTITY_PATH_MAX
 
@@ -26,12 +27,14 @@ bool status_is_internal_fault(tp_status status);
 
 typedef struct cli_edit {
     tp_session *session;
+    tp_model *model;
     tp_session_snapshot *snapshot;
     const char *path;
+    bool dry_run;
 } cli_edit;
 
 void edit_close(cli_edit *edit);
-int edit_open(cli_edit *edit, const char *path, bool json, bool quiet);
+int edit_open(cli_edit *edit, const char *path, bool dry_run, bool json, bool quiet);
 int edit_resolve(cli_edit *edit, tp_id128 atlas_scope,
                  tp_selector_kind kind, const char *selector,
                  tp_selector_result *result, bool json, bool quiet);
@@ -40,7 +43,7 @@ int edit_resolve_sprite(cli_edit *edit, tp_id128 atlas_id,
                         tp_id128 *source_id, char *source_key,
                         size_t source_key_capacity, bool json, bool quiet);
 int edit_open_atlas(cli_edit *edit, const char *path, const char *selector,
-                    const tp_snapshot_atlas **atlas, bool json, bool quiet);
+                    const tp_snapshot_atlas **atlas, bool dry_run, bool json, bool quiet);
 int edit_fail_usage(cli_edit *edit, bool json, bool quiet,
                     const char *id, const char *msg);
 int commit_session_ops(cli_edit *edit, tp_operation *ops, int nops,
@@ -49,14 +52,14 @@ int commit_session_ops(cli_edit *edit, tp_operation *ops, int nops,
 void free_ops(tp_operation *ops, int n);
 
 int do_add(const char *const *pos, int npos, const char *opt_kind,
-           bool json, bool quiet);
-int do_remove_source(const char *const *pos, int npos, bool json, bool quiet);
-int do_set(const char *const *pos, int npos, bool json, bool quiet);
-int do_atlas(const char *const *pos, int npos, bool json, bool quiet);
-int do_sprite_set(const char *const *pos, int npos, bool json, bool quiet);
-int do_sprite_unset(const char *const *pos, int npos, bool json, bool quiet);
+           bool dry_run, bool json, bool quiet);
+int do_remove_source(const char *const *pos, int npos, bool dry_run, bool json, bool quiet);
+int do_set(const char *const *pos, int npos, bool dry_run, bool json, bool quiet);
+int do_atlas(const char *const *pos, int npos, bool dry_run, bool json, bool quiet);
+int do_sprite_set(const char *const *pos, int npos, bool dry_run, bool json, bool quiet);
+int do_sprite_unset(const char *const *pos, int npos, bool dry_run, bool json, bool quiet);
 int do_anim(const char *const *pos, int npos, const char *opt_at,
-            bool json, bool quiet);
-int do_target(const char *const *pos, int npos, bool json, bool quiet);
+            bool dry_run, bool json, bool quiet);
+int do_target(const char *const *pos, int npos, bool dry_run, bool json, bool quiet);
 
 #endif /* NTPACKER_CLI_MUTATE_INTERNAL_H */

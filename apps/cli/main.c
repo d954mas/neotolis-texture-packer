@@ -352,7 +352,7 @@ static int ntpacker_main_utf8(int argc, char **argv) {
     bool want_help = false;
     bool want_version = false;
     bool strict = false;
-    bool dry_run = false;           /* pack-only; rejected for other verbs below */
+    bool dry_run = false;           /* pack/export and mutation preview */
     const char *opt_atlas = NULL;   /* pack-only value flags (rejected elsewhere below) */
     const char *opt_target = NULL;
     const char *opt_out_dir = NULL;
@@ -371,7 +371,7 @@ static int ntpacker_main_utf8(int argc, char **argv) {
             continue;
         }
         if (strcmp(a, "--dry-run") == 0) {
-            dry_run = true; /* pack-only; rejected for other verbs below */
+            dry_run = true;
             continue;
         }
         if (strcmp(a, "--atlas") == 0 || strcmp(a, "--target") == 0 || strcmp(a, "--out-dir") == 0 ||
@@ -431,9 +431,16 @@ static int ntpacker_main_utf8(int argc, char **argv) {
     }
     const char *verb = positionals[0];
     const bool is_pack = (strcmp(verb, "pack") == 0 || strcmp(verb, "export") == 0);
-    /* pack-only flags are a usage error on any other verb (mirrors --strict). */
-    if (!is_pack && (opt_atlas || opt_target || opt_out_dir || dry_run)) {
-        cli_emit_error(json, quiet, "usage", "--atlas/--target/--out-dir/--dry-run are only valid for pack");
+    const bool is_mutation = strcmp(verb, "new") == 0 || strcmp(verb, "add") == 0 ||
+                             strcmp(verb, "remove") == 0 || strcmp(verb, "set") == 0 ||
+                             strcmp(verb, "sprite") == 0 || strcmp(verb, "anim") == 0 ||
+                             strcmp(verb, "target") == 0 || strcmp(verb, "atlas") == 0;
+    if (!is_pack && (opt_atlas || opt_target || opt_out_dir)) {
+        cli_emit_error(json, quiet, "usage", "--atlas/--target/--out-dir are only valid for pack");
+        return CLI_EXIT_USAGE;
+    }
+    if (dry_run && !is_pack && !is_mutation) {
+        cli_emit_error(json, quiet, "usage", "--dry-run is only valid for pack or mutation commands");
         return CLI_EXIT_USAGE;
     }
     /* --at is anim-add-frame-only on any verb. */
@@ -485,7 +492,7 @@ static int ntpacker_main_utf8(int argc, char **argv) {
             cli_emit_error(json, quiet, "usage", "--strict is only valid for validate");
             return CLI_EXIT_USAGE;
         }
-        return cmd_mutate(npos, positionals, opt_at, opt_kind, json, quiet);
+        return cmd_mutate(npos, positionals, opt_at, opt_kind, dry_run, json, quiet);
     }
     cli_emit_error(json, quiet, "usage", "unknown command '%s'; try 'ntpacker help'", verb);
     return CLI_EXIT_USAGE;

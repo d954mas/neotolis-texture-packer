@@ -171,7 +171,7 @@ static int fill_anim_settings(tp_op_anim_settings *s, const char *const *pos, in
     return 0;
 }
 
-int do_anim(const char *const *pos, int npos, const char *opt_at, bool json, bool quiet) {
+int do_anim(const char *const *pos, int npos, const char *opt_at, bool dry_run, bool json, bool quiet) {
     /* anim <sub> <project> <atlas> ... */
     if (npos < 4) {
         cli_emit_error(json, quiet, "usage", "anim needs <sub> <project> <atlas> ...; try 'ntpacker help'");
@@ -186,7 +186,7 @@ int do_anim(const char *const *pos, int npos, const char *opt_at, bool json, boo
     }
     cli_edit edit;
     const tp_snapshot_atlas *a = NULL;
-    int rc = edit_open_atlas(&edit, path, atlas, &a, json, quiet);
+    int rc = edit_open_atlas(&edit, path, atlas, &a, dry_run, json, quiet);
     if (rc != CLI_EXIT_OK) {
         return rc;
     }
@@ -437,4 +437,3 @@ int do_anim(const char *const *pos, int npos, const char *opt_at, bool json, boo
     (void)snprintf(m, sizeof m, "unknown anim sub-command '%s'", sub);
     return edit_fail_usage(&edit, json, quiet, "usage", m);
 }
-

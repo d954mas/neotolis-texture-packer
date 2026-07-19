@@ -1,9 +1,11 @@
 #include "cli_out.h"
 
 #include "tp_core/tp_session.h"
+#include "tp_core/tp_transaction.h"
 #include "tp_core/tp_utf8.h"
 
 #include <stdarg.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -259,6 +261,85 @@ void cli_emit_mutation(const char *verb, int count,
     if (sb.oom) { /* the payload is tiny; OOM here is near-impossible, but never crash */
         cli_sb_free(&sb);
         (void)fputs("{\"schema\":1,\"ok\":true}\n", stdout);
+        return;
+    }
+    cli_out_stdout(&sb);
+    cli_sb_free(&sb);
+}
+
+static void preview_revision(cli_sb *sb, int64_t revision) {
+    char text[32];
+    (void)snprintf(text, sizeof text, "%" PRId64, revision);
+    cli_sb_str(sb, text);
+}
+
+static void preview_id(cli_sb *sb, tp_id_kind kind, tp_id128 id) {
+    char text[TP_ID_TEXT_CAP];
+    tp_error err = {0};
+    if (tp_id_format(kind, id, text, sizeof text, &err) == TP_STATUS_OK) {
+        cli_sb_json_str(sb, text);
+    }
+}
+
+void cli_emit_mutation_preview(const char *command,
+                               const tp_txn_result *result,
+                               int64_t revision_before,
+                               const tp_id_kind *generated_kinds,
+                               const tp_id128 *generated_ids,
+                               int generated_count) {
+    cli_sb sb = {0};
+    cli_sb_str(&sb, "{\"schema\":2,\"command\":");
+    cli_sb_json_str(&sb, command);
+    cli_sb_str(&sb, ",\"dry_run\":true,\"would_change\":");
+    cli_sb_str(&sb, result && result->no_change ? "false" : "true");
+    cli_sb_str(&sb, ",\"operation_count\":");
+    cli_sb_int(&sb, result ? result->op_count : 0);
+    cli_sb_str(&sb, ",\"revision_before\":");
+    preview_revision(&sb, revision_before);
+    cli_sb_str(&sb, ",\"revision_after\":");
+    preview_revision(&sb, result ? result->revision : revision_before);
+    cli_sb_str(&sb, ",\"affected_ids\":[");
+    bool comma = false;
+    if (result) {
+        for (int oi = 0; oi < result->op_count; ++oi) {
+            for (int ai = 0; ai < result->ops[oi].addr_count; ++ai) {
+                const tp_txn_addr *addr = &result->ops[oi].addr[ai];
+                if (addr->idk == TP_ID_KIND_INVALID) {
+                    continue;
+                }
+                bool duplicate = false;
+                for (int po = 0; po <= oi && !duplicate; ++po) {
+                    const int limit = po == oi ? ai : result->ops[po].addr_count;
+                    for (int pa = 0; pa < limit; ++pa) {
+                        const tp_txn_addr *prior = &result->ops[po].addr[pa];
+                        if (prior->idk == addr->idk && tp_id128_eq(prior->id, addr->id)) {
+                            duplicate = true;
+                            break;
+                        }
+                    }
+                }
+                if (duplicate) {
+                    continue;
+                }
+                if (comma) {
+                    cli_sb_putc(&sb, ',');
+                }
+                preview_id(&sb, addr->idk, addr->id);
+                comma = true;
+            }
+        }
+    }
+    cli_sb_str(&sb, "],\"generated_ids\":[");
+    for (int i = 0; i < generated_count; ++i) {
+        if (i > 0) {
+            cli_sb_putc(&sb, ',');
+        }
+        preview_id(&sb, generated_kinds[i], generated_ids[i]);
+    }
+    cli_sb_str(&sb, "],\"notices\":[]}");
+    if (sb.oom) {
+        cli_sb_free(&sb);
+        (void)fputs("{\"schema\":2,\"command\":\"mutation\",\"dry_run\":true,\"would_change\":true,\"operation_count\":0,\"revision_before\":0,\"revision_after\":0,\"affected_ids\":[],\"generated_ids\":[],\"notices\":[]}\n", stdout);
         return;
     }
     cli_out_stdout(&sb);

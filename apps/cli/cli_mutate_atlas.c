@@ -97,7 +97,7 @@ static int fill_knob(tp_op_atlas_settings *s, const char *key, const char *val, 
     return 0;
 }
 
-int do_set(const char *const *pos, int npos, bool json, bool quiet) {
+int do_set(const char *const *pos, int npos, bool dry_run, bool json, bool quiet) {
     if (npos < 4) {
         cli_emit_error(json, quiet, "usage", "set needs <project> <atlas> <key>=<value>...; try 'ntpacker help'");
         return CLI_EXIT_USAGE;
@@ -106,7 +106,7 @@ int do_set(const char *const *pos, int npos, bool json, bool quiet) {
     const char *atlas = pos[2];
     cli_edit edit;
     const tp_snapshot_atlas *atlas_dto = NULL;
-    int rc = edit_open_atlas(&edit, path, atlas, &atlas_dto, json, quiet);
+    int rc = edit_open_atlas(&edit, path, atlas, &atlas_dto, dry_run, json, quiet);
     if (rc != CLI_EXIT_OK) {
         return rc;
     }
@@ -139,7 +139,7 @@ int do_set(const char *const *pos, int npos, bool json, bool quiet) {
 /* atlas                                                              */
 /* ------------------------------------------------------------------ */
 
-int do_atlas(const char *const *pos, int npos, bool json, bool quiet) {
+int do_atlas(const char *const *pos, int npos, bool dry_run, bool json, bool quiet) {
     /* atlas <sub> <project> ... (operates at project level, atlases keyed by name) */
     if (npos < 4) {
         cli_emit_error(json, quiet, "usage", "atlas needs <sub> <project> <name>...; try 'ntpacker help'");
@@ -148,7 +148,7 @@ int do_atlas(const char *const *pos, int npos, bool json, bool quiet) {
     const char *sub = pos[1];
     const char *path = pos[2];
     cli_edit edit;
-    int rc = edit_open(&edit, path, json, quiet);
+    int rc = edit_open(&edit, path, dry_run, json, quiet);
     if (rc != CLI_EXIT_OK) {
         return rc;
     }
