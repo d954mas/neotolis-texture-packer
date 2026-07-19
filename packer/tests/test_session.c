@@ -1648,6 +1648,153 @@ void test_save_reports_recovery_degradation_and_keeps_later_mutation_available(v
     (void)remove(path);
 }
 
+void test_save_heals_degraded_recovery_and_resumes_journaling(void) {
+    char path[1024];
+    (void)snprintf(path, sizeof path,
+                   "%s/tp_session_heals_recovery.ntpacker_project",
+                   g_scratch);
+    (void)remove(path);
+    tp_session *session = make_session();
+    tp_error err = {{0}};
+    tp_session_snapshot *snapshot = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_snapshot_create(session, &snapshot, &err));
+    const tp_id128 atlas_id = tp_session_snapshot_atlas_at(snapshot, 0)->id;
+    tp_session_snapshot_destroy(snapshot);
+
+    tp_journal_io io = tp_journal_io_memory();
+    tp_id128 key = {{0x61}};
+    tp_journal *journal = tp_journal_create(io, key);
+    TEST_ASSERT_NOT_NULL(journal);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_attach_journal(session, journal, &err));
+    tp_journal_io_memory__fail_next_sync(io);
+    tp_txn_result txn_result;
+    session_apply_rename(session, "61000000000000000000000000000001",
+                         0, atlas_id, "degraded-before-save", TP_STATUS_OK,
+                         &txn_result, &err);
+    TEST_ASSERT_TRUE(txn_result.committed);
+    tp_txn_result_free(&txn_result);
+    TEST_ASSERT_FALSE(tp_session_recovery_available(session));
+
+    tp_session_save_result save_result = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_save_as(session, path, &save_result, &err));
+    TEST_ASSERT_TRUE(save_result.saved);
+    TEST_ASSERT_FALSE(save_result.recovery_degraded);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, save_result.recovery_status);
+    TEST_ASSERT_TRUE(tp_session_recovery_available(session));
+
+    uint8_t *healed_bytes = NULL;
+    size_t healed_len = 0U;
+    TEST_ASSERT_EQUAL_INT(
+        0, io.read_all(io.ctx, (size_t)TP_JOURNAL_MAX_FILE_BYTES,
+                       &healed_bytes, &healed_len));
+    tp_journal_io recovered_io = tp_journal_io_memory();
+    TEST_ASSERT_NOT_NULL(recovered_io.ctx);
+    TEST_ASSERT_EQUAL_INT64(
+        (int64_t)healed_len,
+        recovered_io.write(recovered_io.ctx, healed_bytes, healed_len));
+    TEST_ASSERT_EQUAL_INT(0, recovered_io.sync(recovered_io.ctx));
+    free(healed_bytes);
+    tp_model *recovered = NULL;
+    tp_journal_recovery recovery = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_model_recover(recovered_io, key, &recovered, &recovery, &err));
+    TEST_ASSERT_NOT_NULL(recovered);
+    TEST_ASSERT_TRUE(tp_journal_contains(
+        tp_model_journal(recovered),
+        "61000000000000000000000000000001"));
+    tp_journal_recovery_free(&recovery);
+    tp_model_destroy(recovered);
+
+    tp_txn__test_encode_stats_reset();
+    session_apply_rename(session, "61000000000000000000000000000002",
+                         1, atlas_id, "journaled-after-heal", TP_STATUS_OK,
+                         &txn_result, &err);
+    TEST_ASSERT_TRUE(txn_result.committed);
+    tp_txn_result_free(&txn_result);
+    TEST_ASSERT_EQUAL_size_t(1U, tp_txn__test_request_encode_calls());
+    TEST_ASSERT_TRUE(tp_journal_contains(journal,
+                                         "61000000000000000000000000000002"));
+
+    tp_session_destroy(session);
+    (void)remove(path);
+}
+
+void test_save_heal_failure_preserves_evidence_and_first_degradation_cause(void) {
+    char path[1024];
+    (void)snprintf(path, sizeof path,
+                   "%s/tp_session_heal_failure.ntpacker_project", g_scratch);
+    (void)remove(path);
+    tp_session *session = make_session();
+    tp_error err = {{0}};
+    tp_session_snapshot *snapshot = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_snapshot_create(session, &snapshot, &err));
+    const tp_id128 atlas_id = tp_session_snapshot_atlas_at(snapshot, 0)->id;
+    tp_session_snapshot_destroy(snapshot);
+
+    tp_journal_io io = tp_journal_io_memory();
+    tp_id128 key = {{0x62}};
+    tp_journal *journal = tp_journal_create(io, key);
+    TEST_ASSERT_NOT_NULL(journal);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_attach_journal(session, journal, &err));
+    tp_journal__test_set_record_limit(1U);
+    tp_txn_result txn_result;
+    session_apply_rename(session, "62000000000000000000000000000001",
+                         0, atlas_id, "degraded-before-failed-heal",
+                         TP_STATUS_OK, &txn_result, &err);
+    tp_txn_result_free(&txn_result);
+    TEST_ASSERT_FALSE(tp_session_recovery_available(session));
+
+    uint8_t *evidence_before = NULL;
+    size_t evidence_before_len = 0U;
+    TEST_ASSERT_EQUAL_INT(
+        0, io.read_all(io.ctx, (size_t)TP_JOURNAL_MAX_FILE_BYTES,
+                       &evidence_before, &evidence_before_len));
+    TEST_ASSERT_GREATER_THAN_size_t(0U, evidence_before_len);
+    const size_t syncs_before = tp_journal_io_memory__sync_count(io);
+    tp_journal_io_memory__fail_next_writes(io, 1);
+
+    tp_session_save_result save_result = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_save_as(session, path, &save_result, &err));
+    TEST_ASSERT_TRUE(save_result.saved);
+    TEST_ASSERT_TRUE(save_result.recovery_degraded);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS,
+                          save_result.recovery_status);
+    TEST_ASSERT_FALSE(tp_session_recovery_available(session));
+    TEST_ASSERT_GREATER_THAN_size_t(syncs_before,
+                                    tp_journal_io_memory__sync_count(io));
+
+    uint8_t *evidence_after = NULL;
+    size_t evidence_after_len = 0U;
+    TEST_ASSERT_EQUAL_INT(
+        0, io.read_all(io.ctx, (size_t)TP_JOURNAL_MAX_FILE_BYTES,
+                       &evidence_after, &evidence_after_len));
+    TEST_ASSERT_EQUAL_size_t(evidence_before_len, evidence_after_len);
+    TEST_ASSERT_EQUAL_MEMORY(evidence_before, evidence_after,
+                             evidence_before_len);
+    TEST_ASSERT_FALSE(tp_journal_contains(
+        journal, "62000000000000000000000000000001"));
+    free(evidence_before);
+    free(evidence_after);
+
+    tp_journal__test_set_record_limit(0U);
+    tp_txn__test_encode_stats_reset();
+    session_apply_rename(session, "62000000000000000000000000000002",
+                         1, atlas_id, "still-editable-after-heal-failure",
+                         TP_STATUS_OK, &txn_result, &err);
+    tp_txn_result_free(&txn_result);
+    TEST_ASSERT_EQUAL_size_t(0U, tp_txn__test_request_encode_calls());
+
+    tp_session_destroy(session);
+    (void)remove(path);
+}
+
 void test_open_holds_project_lease_until_session_close(void) {
     char path[1024];
     (void)snprintf(path, sizeof path, "%s/tp_session_lease_open.ntpacker_project", g_scratch);
@@ -2048,9 +2195,23 @@ void test_save_as_updates_live_recovery_identity_before_compaction(void) {
     const tp_id128 atlas_id = tp_session_snapshot_atlas_at(snapshot, 0)->id;
     const int64_t revision = tp_session_snapshot_revision(snapshot);
     tp_session_snapshot_destroy(snapshot);
+    tp_journal__test_set_record_limit(2U);
     tp_txn_result txn_result;
     session_apply_rename(session, "10000000000000000000000000000075",
-                         revision, atlas_id, "dirty-after-save",
+                         revision, atlas_id, "dirty-before-live-heal",
+                         TP_STATUS_OK, &txn_result, &err);
+    tp_txn_result_free(&txn_result);
+    TEST_ASSERT_FALSE(tp_session_recovery_available(session));
+    tp_journal__test_set_record_limit(0U);
+
+    tp_session_save_result healed_result = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_save(session, &healed_result, &err));
+    TEST_ASSERT_TRUE(healed_result.saved);
+    TEST_ASSERT_FALSE(healed_result.recovery_degraded);
+    TEST_ASSERT_TRUE(tp_session_recovery_available(session));
+    session_apply_rename(session, "10000000000000000000000000000077",
+                         revision + 1, atlas_id, "dirty-after-live-heal",
                          TP_STATUS_OK, &txn_result, &err);
     tp_txn_result_free(&txn_result);
     tp_session_destroy(session);
@@ -2071,7 +2232,7 @@ void test_save_as_updates_live_recovery_identity_before_compaction(void) {
             TEST_ASSERT_EQUAL_STRING("session-save-identity.ntpacker_project",
                                      candidates.items[i].name);
             TEST_ASSERT_TRUE(candidates.items[i].has_file_fingerprint);
-            TEST_ASSERT_TRUE(tp_id128_eq(save_result.file_fingerprint,
+            TEST_ASSERT_TRUE(tp_id128_eq(healed_result.file_fingerprint,
                                          candidates.items[i].file_fingerprint));
         }
     }
@@ -2362,6 +2523,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_source_plan_propagates_stored_base_overflow);
     RUN_TEST(test_future_event_cursor_requires_resync);
     RUN_TEST(test_save_reports_recovery_degradation_and_keeps_later_mutation_available);
+    RUN_TEST(test_save_heals_degraded_recovery_and_resumes_journaling);
+    RUN_TEST(test_save_heal_failure_preserves_evidence_and_first_degradation_cause);
     RUN_TEST(test_open_holds_project_lease_until_session_close);
     RUN_TEST(test_save_new_never_replaces_existing_destination);
     RUN_TEST(test_save_as_acquires_destination_before_releasing_old_lease);

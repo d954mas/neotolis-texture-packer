@@ -36,8 +36,6 @@ void tp_model__replace_owned_project(tp_model *model, tp_project *project);
 /* Recovery durability is subordinate to the live commit point. The first
  * recovery-only failure makes the state sticky-degraded and suppresses later
  * dependent journal work without disabling model mutation or history. */
-void tp_model__degrade_recovery(tp_model *model, tp_status status);
-void tp_model__restore_recovery(tp_model *model);
 
 /* The shared id-set behind a memory idstore (NULL for a foreign store).
  * tp_model_attach_journal uses it to migrate ids the model committed journal-less into

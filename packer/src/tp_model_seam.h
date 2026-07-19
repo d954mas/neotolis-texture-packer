@@ -21,5 +21,11 @@ void tp_model__adopt_project(tp_model *model, tp_project *project);
 
 bool tp_model__recovery_degraded(const tp_model *model);
 tp_status tp_model__recovery_status(const tp_model *model);
+void tp_model__degrade_recovery(tp_model *model, tp_status status);
+void tp_model__restore_recovery(tp_model *model);
+/* Degraded-Save compaction that stages the full live retained-id window and
+ * restores the exact prior bytes/index if the replacement checkpoint cannot
+ * be completed. */
+tp_status tp_model__heal_journal(tp_model *model, tp_error *error);
 
 #endif /* TP_CORE_SRC_TP_MODEL_SEAM_H */

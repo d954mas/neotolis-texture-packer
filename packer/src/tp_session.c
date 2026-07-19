@@ -38,9 +38,6 @@ static void observe_model_recovery(tp_session *session) {
         return;
     }
     session->recovery_healthy = false;
-    if (session->recovery_live) {
-        tp_recovery_live__mark_degraded(session->recovery_live);
-    }
 }
 
 bool tp_session__owns_recovery_live(const tp_session *session,
@@ -310,7 +307,8 @@ void tp_session_destroy(tp_session *session) {
         tp_session_job_release_internal(job);
     }
     if (session->recovery_live) {
-        const bool preserve = !tp_recovery_live_healthy(session->recovery_live) ||
+        const bool preserve = tp_model__recovery_degraded(session->model) ||
+                              !tp_recovery_live_healthy(session->recovery_live) ||
                               (tp_model_dirty(session->model) && !session->discarded);
         (void)tp_recovery_live_finish(session->recovery_live, preserve, NULL);
         tp_recovery_live_destroy(session->recovery_live);
@@ -605,17 +603,25 @@ static tp_status save_as_locked(tp_session *session, const char *path,
     if (file_durability_degraded && err) {
         err->msg[0] = '\0';
     }
+    const bool model_was_degraded =
+        tp_model__recovery_degraded(session->model);
     bool recovery_degraded = !recovery_is_healthy(session);
-    tp_status recovery_status = recovery_degraded
-                                    ? TP_STATUS_JOURNAL_FAILED
-                                    : TP_STATUS_OK;
+    tp_status recovery_status = model_was_degraded
+                                    ? tp_model__recovery_status(session->model)
+                                    : (recovery_degraded
+                                           ? TP_STATUS_JOURNAL_FAILED
+                                           : TP_STATUS_OK);
     if (!recovery_degraded && session->recovery_live) {
         tp_error metadata_error = {{0}};
-        recovery_status = tp_recovery_live__update_saved_identity(
+        const tp_status metadata_status = tp_recovery_live__update_saved_identity(
             session->recovery_live, canonical, &fingerprint, &metadata_error);
-        if (recovery_status != TP_STATUS_OK) {
+        if (metadata_status != TP_STATUS_OK) {
             recovery_degraded = true;
             session->recovery_healthy = false;
+            if (!model_was_degraded) {
+                recovery_status = metadata_status;
+                tp_model__degrade_recovery(session->model, metadata_status);
+            }
         }
     }
     if (recovery_degraded && !same_identity && session->recovery_live) {
@@ -645,13 +651,44 @@ static tp_status save_as_locked(tp_session *session, const char *path,
     session->saved_file_fingerprint = fingerprint;
     session->has_saved_file_fingerprint = true;
     tp_model_mark_saved(session->model);
-    if (!recovery_degraded) {
+    const bool can_heal_degraded_model =
+        model_was_degraded && tp_model_has_journal(session->model) &&
+        (!session->recovery_live ||
+         (same_identity &&
+          tp_recovery_live_healthy(session->recovery_live)));
+    if (!recovery_degraded || can_heal_degraded_model) {
         tp_error compact_error = {{0}};
-        recovery_status = tp_model_compact_journal(session->model, &compact_error);
-        if (recovery_status != TP_STATUS_OK) {
+        const tp_status compact_status = model_was_degraded
+                                             ? tp_model__heal_journal(
+                                                   session->model,
+                                                   &compact_error)
+                                             : tp_model_compact_journal(
+                                                   session->model,
+                                                   &compact_error);
+        if (compact_status != TP_STATUS_OK) {
             recovery_degraded = true;
             session->recovery_healthy = false;
-            tp_recovery_live__mark_degraded(session->recovery_live);
+            if (!model_was_degraded) {
+                recovery_status = compact_status;
+                tp_model__degrade_recovery(session->model, compact_status);
+            }
+        } else {
+            recovery_degraded = false;
+            recovery_status = TP_STATUS_OK;
+            session->recovery_healthy = true;
+            if (model_was_degraded && same_identity &&
+                session->recovery_live) {
+                tp_error metadata_error = {{0}};
+                const tp_status metadata_status =
+                    tp_recovery_live__update_saved_identity(
+                        session->recovery_live, canonical, &fingerprint,
+                        &metadata_error);
+                if (metadata_status != TP_STATUS_OK) {
+                    recovery_degraded = true;
+                    recovery_status = metadata_status;
+                    session->recovery_healthy = false;
+                }
+            }
         }
     }
     if (result) {

@@ -138,12 +138,38 @@ tp_status tp_model__append_history_checkpoint(tp_model *m, const tp_project *can
     return cs;
 }
 
-tp_status tp_model_compact_journal(tp_model *m, tp_error *err) {
+static tp_status compact_journal(tp_model *m, bool preserve_evidence,
+                                 tp_error *err) {
     if (!m) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "null model");
     }
     if (!m->journal) {
         return TP_STATUS_OK; /* no journal attached (recovery off / journal-less): nothing to compact */
+    }
+    tp_idset prior_ids = {0};
+    bool live_ids_staged = false;
+    if (preserve_evidence) {
+        const tp_idset *live_ids = tp_txn_idstore_mem_view(m->idstore);
+        tp_idset replacement_ids = {0};
+        if (!live_ids || tp_idset_reserve(&replacement_ids) != TP_STATUS_OK) {
+            tp_idset_dispose(&replacement_ids);
+            return tp_error_set(
+                err, live_ids ? TP_STATUS_OOM : TP_STATUS_INVALID_ARGUMENT,
+                "could not stage the live retained-id window for recovery healing");
+        }
+        const int live_count = tp_idset_count(live_ids);
+        for (int i = 0; i < live_count; ++i) {
+            char id_hex[TP_IDSET_IDLEN + 1];
+            if (!tp_idset_format_at(live_ids, i, id_hex)) {
+                tp_idset_dispose(&replacement_ids);
+                return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                                    "live retained-id ordering is invalid");
+            }
+            tp_idset_put_reserved(&replacement_ids, id_hex);
+        }
+        prior_ids = m->journal->ids;
+        m->journal->ids = replacement_ids;
+        live_ids_staged = true;
     }
     /* R3 (plan S18 R): compact the recovery journal to one fresh checkpoint == the current committed
      * state -- the Save-window reset. Uses the SAME round-trip-proving snapshot helper as attach, so a
@@ -154,11 +180,19 @@ tp_status tp_model_compact_journal(tp_model *m, tp_error *err) {
     tp_status ss = tp_project_checkpoint_serialized_size_bounded(
         m->project, SIZE_MAX, &measured_len, err);
     if (ss != TP_STATUS_OK) {
+        if (live_ids_staged) {
+            tp_idset_dispose(&m->journal->ids);
+            m->journal->ids = prior_ids;
+        }
         return ss;
     }
     ss = tp_journal__check_checkpoint_compact_bytes(
         m->journal, measured_len, err);
     if (ss != TP_STATUS_OK) {
+        if (live_ids_staged) {
+            tp_idset_dispose(&m->journal->ids);
+            m->journal->ids = prior_ids;
+        }
         return ss;
     }
     char *snap = NULL;
@@ -166,10 +200,71 @@ tp_status tp_model_compact_journal(tp_model *m, tp_error *err) {
     ss = project_checkpoint_snapshot(m->project, measured_len,
                                      &snap, &snap_len, err);
     if (ss != TP_STATUS_OK) {
+        if (live_ids_staged) {
+            tp_idset_dispose(&m->journal->ids);
+            m->journal->ids = prior_ids;
+        }
         return ss; /* snapshot/probe failed BEFORE any truncate: journal untouched, keeps recovering */
     }
+
+    /* Save healing must never trade an older recoverable prefix for an empty
+     * or partial replacement. Preserve the exact byte store and journal state
+     * around the destructive compact primitive; a one-shot replacement fault
+     * can then be rolled back without weakening the low-level fail-closed API. */
+    uint8_t *evidence = NULL;
+    size_t evidence_len = 0U;
+    if (preserve_evidence) {
+        if (!m->journal->io.read_all ||
+            m->journal->io.read_all(m->journal->io.ctx,
+                                    (size_t)TP_JOURNAL_MAX_FILE_BYTES,
+                                    &evidence, &evidence_len) != 0) {
+            free(snap);
+            tp_idset_dispose(&m->journal->ids);
+            m->journal->ids = prior_ids;
+            return tp_error_set(err, TP_STATUS_JOURNAL_FAILED,
+                                "could not preserve recovery evidence before compaction");
+        }
+    }
+    const bool was_poisoned = m->journal->poisoned;
+    const size_t old_record_count = m->journal->record_count;
+    const size_t old_replay_count = m->journal->replay_count;
+    const size_t old_replay_operations = m->journal->replay_operations;
     tp_status cs = tp_journal_compact(m->journal, (const uint8_t *)snap, snap_len, m->revision, err);
     free(snap);
+    if (preserve_evidence && cs != TP_STATUS_OK &&
+        (m->journal->record_count != old_record_count ||
+         m->journal->poisoned != was_poisoned)) {
+        bool restored = m->journal->io.truncate && m->journal->io.write &&
+                        m->journal->io.sync &&
+                        m->journal->io.truncate(m->journal->io.ctx, 0U) == 0;
+        if (restored && evidence_len > 0U) {
+            restored = m->journal->io.write(m->journal->io.ctx, evidence,
+                                             evidence_len) ==
+                       (int64_t)evidence_len;
+        }
+        if (restored) {
+            restored = m->journal->io.sync(m->journal->io.ctx) == 0;
+        }
+        if (restored) {
+            m->journal->poisoned = was_poisoned;
+            m->journal->record_count = old_record_count;
+            m->journal->replay_count = old_replay_count;
+            m->journal->replay_operations = old_replay_operations;
+        } else {
+            m->journal->poisoned = true;
+            cs = tp_error_set(err, TP_STATUS_JOURNAL_FAILED,
+                              "recovery compaction failed and old evidence could not be restored");
+        }
+    }
+    free(evidence);
+    if (live_ids_staged) {
+        if (cs == TP_STATUS_OK) {
+            tp_idset_dispose(&prior_ids);
+        } else {
+            tp_idset_dispose(&m->journal->ids);
+            m->journal->ids = prior_ids;
+        }
+    }
     /* Never auto-detach on a poisoned replacement failure. The older recovery
      * prefix remains available for diagnosis; live idempotency and edits do not
      * depend on the poisoned journal. */
@@ -177,6 +272,14 @@ tp_status tp_model_compact_journal(tp_model *m, tp_error *err) {
         tp_model__restore_recovery(m);
     }
     return cs;
+}
+
+tp_status tp_model_compact_journal(tp_model *m, tp_error *err) {
+    return compact_journal(m, false, err);
+}
+
+tp_status tp_model__heal_journal(tp_model *m, tp_error *err) {
+    return compact_journal(m, true, err);
 }
 
 tp_status tp_model_set_recovery_metadata(tp_model *m, int64_t timestamp, const char *path, const char *name,

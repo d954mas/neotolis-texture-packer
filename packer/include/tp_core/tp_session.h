@@ -131,6 +131,9 @@ typedef struct tp_session_save_result {
      * is a successful Save with a structured warning, not a retryable failure. */
     bool file_durability_degraded;
     tp_status file_durability_status;
+    /* Save attempts a fresh recovery checkpoint after project publication.
+     * Success clears prior model degradation; failure leaves Save successful,
+     * preserves the older evidence, and reports the sticky first cause here. */
     bool recovery_degraded;
     tp_status recovery_status;
     char target_path[TP_IDENTITY_PATH_MAX];
