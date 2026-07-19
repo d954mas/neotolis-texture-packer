@@ -9,4 +9,6 @@ typedef struct canvas_vert {
     float uv[2];
 } canvas_vert;
 
+bool gui_canvas_resource_handles_ready(const gui_canvas *canvas);
+
 #endif /* NTPACKER_GUI_CANVAS_INTERNAL_H */

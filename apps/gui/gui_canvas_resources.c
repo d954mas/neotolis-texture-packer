@@ -49,7 +49,39 @@ static void drop_pages(gui_canvas *canvas) {
     canvas->page_count = 0;
 }
 
+bool gui_canvas_resource_handles_ready(const gui_canvas *canvas) {
+    return canvas && canvas->ibo.id != 0U && canvas->vbo.id != 0U &&
+           canvas->sampler.id != 0U && canvas->vbo_checker.id != 0U &&
+           canvas->checker_tex.id != 0U &&
+           canvas->checker_sampler.id != 0U;
+}
+
+static void drop_buffer_resources(gui_canvas *canvas) {
+    if (canvas->ibo.id != 0U) {
+        nt_gfx_destroy_buffer(canvas->ibo);
+    }
+    if (canvas->vbo.id != 0U) {
+        nt_gfx_destroy_buffer(canvas->vbo);
+    }
+    if (canvas->vbo_checker.id != 0U) {
+        nt_gfx_destroy_buffer(canvas->vbo_checker);
+    }
+    if (canvas->checker_tex.id != 0U) {
+        nt_gfx_destroy_texture(canvas->checker_tex);
+    }
+    canvas->ibo = (nt_buffer_t){0};
+    canvas->vbo = (nt_buffer_t){0};
+    canvas->sampler = (nt_sampler_t){0};
+    canvas->vbo_checker = (nt_buffer_t){0};
+    canvas->checker_tex = (nt_texture_t){0};
+    canvas->checker_sampler = (nt_sampler_t){0};
+    canvas->buffers_ready = false;
+    canvas->checker_valid = false;
+}
+
 void gui_canvas_restore_gpu(gui_canvas *canvas) {
+    canvas->buffers_ready = false;
+    canvas->checker_valid = false;
     static const uint16_t indices[6] = {0, 1, 2, 0, 2, 3};
     canvas->ibo = nt_gfx_make_buffer(&(nt_buffer_desc_t){
         .type = NT_BUFFER_INDEX,
@@ -100,8 +132,11 @@ void gui_canvas_restore_gpu(gui_canvas *canvas) {
         .wrap_v = NT_WRAP_REPEAT,
         .label = "canvas_checker_sampler",
     });
-    canvas->checker_valid = canvas->checker_tex.id != 0U;
-    canvas->buffers_ready = true;
+    canvas->buffers_ready = gui_canvas_resource_handles_ready(canvas);
+    canvas->checker_valid = canvas->buffers_ready;
+    if (!canvas->buffers_ready) {
+        drop_buffer_resources(canvas);
+    }
     canvas->pipe_ready = false;
     canvas->has_tex = false;
     canvas->loaded_path[0] = '\0';
@@ -132,16 +167,13 @@ void gui_canvas_shutdown(gui_canvas *canvas) {
         nt_gfx_destroy_texture(canvas->tex);
         canvas->has_tex = false;
     }
-    if (canvas->checker_valid) {
-        nt_gfx_destroy_texture(canvas->checker_tex);
-        canvas->checker_valid = false;
-    }
     for (int i = 0; i < GUI_CANVAS_MAX_PAGES; i++) {
         if (canvas->page_valid[i]) {
             nt_gfx_destroy_texture(canvas->pages[i]);
             canvas->page_valid[i] = false;
         }
     }
+    drop_buffer_resources(canvas);
 }
 
 void gui_canvas_ensure_pipeline(gui_canvas *canvas,

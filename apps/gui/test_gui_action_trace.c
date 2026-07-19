@@ -12,6 +12,7 @@
 
 #include "gui_actions.h"
 #include "gui_canvas.h"
+#include "gui_canvas_internal.h"
 #include "gui_pack.h"
 #include "gui_project.h"
 #include "gui_rows.h"
@@ -338,6 +339,25 @@ void test_recovery_decision_runs_next_frame_and_failure_keeps_row(void) {
                                 "Recover 'orphan project' failed:"));
 }
 
+void test_canvas_buffer_readiness_requires_every_gpu_handle(void) {
+    gui_canvas canvas = {0};
+    canvas.ibo.id = 1U;
+    canvas.vbo.id = 2U;
+    canvas.sampler.id = 3U;
+    canvas.vbo_checker.id = 4U;
+    canvas.checker_tex.id = 5U;
+    canvas.checker_sampler.id = 6U;
+
+    TEST_ASSERT_TRUE(gui_canvas_resource_handles_ready(&canvas));
+
+    canvas.vbo_checker.id = 0U;
+    TEST_ASSERT_FALSE(gui_canvas_resource_handles_ready(&canvas));
+
+    canvas.vbo_checker.id = 4U;
+    canvas.checker_sampler.id = 0U;
+    TEST_ASSERT_FALSE(gui_canvas_resource_handles_ready(&canvas));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_state_ownership_inventory_preserves_three_classes);
@@ -346,5 +366,6 @@ int main(void) {
     RUN_TEST(test_preview_request_is_deferred_and_selection_reset_stops_it);
     RUN_TEST(test_confirm_save_publishes_before_new_and_new_message_wins);
     RUN_TEST(test_recovery_decision_runs_next_frame_and_failure_keeps_row);
+    RUN_TEST(test_canvas_buffer_readiness_requires_every_gpu_handle);
     return UNITY_END();
 }
