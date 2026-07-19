@@ -300,7 +300,7 @@ void cli_emit_mutation_preview(const char *command,
     preview_revision(&sb, result ? result->revision : revision_before);
     cli_sb_str(&sb, ",\"affected_ids\":[");
     bool comma = false;
-    if (result) {
+    if (result && !result->no_change) {
         for (int oi = 0; oi < result->op_count; ++oi) {
             for (int ai = 0; ai < result->ops[oi].addr_count; ++ai) {
                 const tp_txn_addr *addr = &result->ops[oi].addr[ai];
@@ -330,11 +330,33 @@ void cli_emit_mutation_preview(const char *command,
         }
     }
     cli_sb_str(&sb, "],\"generated_ids\":[");
+    comma = false;
     for (int i = 0; i < generated_count; ++i) {
-        if (i > 0) {
+        if (comma) {
             cli_sb_putc(&sb, ',');
         }
         preview_id(&sb, generated_kinds[i], generated_ids[i]);
+        comma = true;
+    }
+    if (result && !result->no_change) {
+        for (int oi = 0; oi < result->op_count; ++oi) {
+            const tp_op_info *info = tp_op_info_by_wire(result->ops[oi].wire);
+            if (!info || info->effect != TP_OP_CLASS_CREATE) {
+                continue;
+            }
+            for (int ai = 0; ai < result->ops[oi].addr_count; ++ai) {
+                const tp_txn_addr *addr = &result->ops[oi].addr[ai];
+                if (addr->idk != info->target_kind) {
+                    continue;
+                }
+                if (comma) {
+                    cli_sb_putc(&sb, ',');
+                }
+                preview_id(&sb, addr->idk, addr->id);
+                comma = true;
+                break;
+            }
+        }
     }
     cli_sb_str(&sb, "],\"notices\":[]}");
     if (sb.oom) {

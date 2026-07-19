@@ -395,3 +395,9 @@ add_test(NAME cli_mutation_dry_run COMMAND ${CMAKE_COMMAND}
     -DTD=${_td}
     -DWORK=${CMAKE_CURRENT_BINARY_DIR}/cli_mutation_dry_run
     -P "${CMAKE_CURRENT_SOURCE_DIR}/cli_mutation_dry_run.cmake")
+
+add_test(NAME cli_mutation_dry_run_families COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker>
+    -DTD=${_td}
+    -DWORK=${CMAKE_CURRENT_BINARY_DIR}/cli_mutation_dry_run_families
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/cli_mutation_dry_run_families.cmake")

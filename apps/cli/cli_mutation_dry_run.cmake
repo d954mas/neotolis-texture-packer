@@ -17,6 +17,22 @@ if(NOT BEFORE_HASH STREQUAL AFTER_HASH)
     message(FATAL_ERROR "set dry-run changed project bytes")
 endif()
 
+set(EXPLICIT_ATLAS "atlas_00000000000000000000000000000101")
+execute_process(
+    COMMAND "${EXE}" set "${PROJ}" "${EXPLICIT_ATLAS}" padding=3 --dry-run --json
+    RESULT_VARIABLE EXPLICIT_RC OUTPUT_VARIABLE EXPLICIT_OUT ERROR_VARIABLE EXPLICIT_ERR)
+if(NOT EXPLICIT_RC EQUAL 0)
+    message(FATAL_ERROR "explicit-id dry-run failed: ${EXPLICIT_RC} ${EXPLICIT_OUT} ${EXPLICIT_ERR}")
+endif()
+string(JSON EXPLICIT_AFFECTED GET "${EXPLICIT_OUT}" affected_ids 0)
+if(NOT EXPLICIT_AFFECTED STREQUAL EXPLICIT_ATLAS)
+    message(FATAL_ERROR "explicit affected id was not preserved: ${EXPLICIT_OUT}")
+endif()
+file(SHA256 "${PROJ}" EXPLICIT_HASH)
+if(NOT BEFORE_HASH STREQUAL EXPLICIT_HASH)
+    message(FATAL_ERROR "explicit-id dry-run changed project bytes")
+endif()
+
 foreach(KEY schema command dry_run would_change operation_count revision_before revision_after affected_ids generated_ids notices)
     string(JSON VALUE ERROR_VARIABLE JSON_ERROR GET "${OUT}" "${KEY}")
     if(NOT JSON_ERROR STREQUAL "NOTFOUND")
@@ -59,8 +75,17 @@ endif()
 execute_process(
     COMMAND "${EXE}" set "${PROJ}" missing max_size=512 --dry-run --json
     RESULT_VARIABLE RC OUTPUT_VARIABLE OUT ERROR_VARIABLE ERR)
+set(DRY_ERROR_OUT "${OUT}")
+set(DRY_ERROR_ERR "${ERR}")
 if(NOT RC EQUAL 3)
     message(FATAL_ERROR "selector-miss dry-run exit=${RC}: ${OUT} ${ERR}")
+endif()
+execute_process(
+    COMMAND "${EXE}" set "${PROJ}" missing max_size=512 --json
+    RESULT_VARIABLE LIVE_RC OUTPUT_VARIABLE LIVE_OUT ERROR_VARIABLE LIVE_ERR)
+if(NOT LIVE_RC EQUAL 3 OR NOT DRY_ERROR_OUT STREQUAL LIVE_OUT OR
+   NOT DRY_ERROR_ERR STREQUAL LIVE_ERR)
+    message(FATAL_ERROR "selector-miss dry/live mismatch\ndry=${DRY_ERROR_OUT}${DRY_ERROR_ERR}\nlive=${LIVE_OUT}${LIVE_ERR}")
 endif()
 string(JSON ERROR_ID GET "${OUT}" error id)
 if(NOT ERROR_ID STREQUAL "not_found")
@@ -70,8 +95,17 @@ endif()
 execute_process(
     COMMAND "${EXE}" set "${PROJ}" clean max_size=99999 --dry-run --json
     RESULT_VARIABLE RC OUTPUT_VARIABLE OUT ERROR_VARIABLE ERR)
+set(DRY_ERROR_OUT "${OUT}")
+set(DRY_ERROR_ERR "${ERR}")
 if(NOT RC EQUAL 2)
     message(FATAL_ERROR "validation-reject dry-run exit=${RC}: ${OUT} ${ERR}")
+endif()
+execute_process(
+    COMMAND "${EXE}" set "${PROJ}" clean max_size=99999 --json
+    RESULT_VARIABLE LIVE_RC OUTPUT_VARIABLE LIVE_OUT ERROR_VARIABLE LIVE_ERR)
+if(NOT LIVE_RC EQUAL 2 OR NOT DRY_ERROR_OUT STREQUAL LIVE_OUT OR
+   NOT DRY_ERROR_ERR STREQUAL LIVE_ERR)
+    message(FATAL_ERROR "validation dry/live mismatch\ndry=${DRY_ERROR_OUT}${DRY_ERROR_ERR}\nlive=${LIVE_OUT}${LIVE_ERR}")
 endif()
 string(JSON ERROR_ID GET "${OUT}" error id)
 if(NOT ERROR_ID STREQUAL "out_of_range")
@@ -99,8 +133,17 @@ endif()
 execute_process(
     COMMAND "${EXE}" new "${PROJ}" --dry-run --json
     RESULT_VARIABLE RC OUTPUT_VARIABLE OUT ERROR_VARIABLE ERR)
+set(DRY_ERROR_OUT "${OUT}")
+set(DRY_ERROR_ERR "${ERR}")
 if(NOT RC EQUAL 3)
     message(FATAL_ERROR "existing-destination dry-run exit=${RC}: ${OUT} ${ERR}")
+endif()
+execute_process(
+    COMMAND "${EXE}" new "${PROJ}" --json
+    RESULT_VARIABLE LIVE_RC OUTPUT_VARIABLE LIVE_OUT ERROR_VARIABLE LIVE_ERR)
+if(NOT LIVE_RC EQUAL 3 OR NOT DRY_ERROR_OUT STREQUAL LIVE_OUT OR
+   NOT DRY_ERROR_ERR STREQUAL LIVE_ERR)
+    message(FATAL_ERROR "destination dry/live mismatch\ndry=${DRY_ERROR_OUT}${DRY_ERROR_ERR}\nlive=${LIVE_OUT}${LIVE_ERR}")
 endif()
 string(JSON ERROR_ID GET "${OUT}" error id)
 if(NOT ERROR_ID STREQUAL "file_exists")
