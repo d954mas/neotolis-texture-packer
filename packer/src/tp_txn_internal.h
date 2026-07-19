@@ -23,13 +23,21 @@ struct tp_model {
     tp_txn_idstore *idstore;  /* idempotency retention (owned unless borrowed) */
     bool owns_idstore;
     struct tp_history *history; /* optional owned Undo/Redo history */
-    struct tp_journal *journal; /* optional owned acknowledgement journal */
+    struct tp_journal *journal; /* optional owned recovery-prefix journal */
+    bool recovery_degraded;     /* sticky until a fresh checkpoint succeeds */
+    tp_status recovery_status;  /* first recovery-only failure cause */
     struct tp_side_effect_coordinator *coordinator; /* optional borrowed hooks */
 };
 
 /* Allocation-free publication shared by commit, Undo/Redo, and Save. Takes
  * ownership of project and releases the previous direct/shared generation. */
 void tp_model__replace_owned_project(tp_model *model, tp_project *project);
+
+/* Recovery durability is subordinate to the live commit point. The first
+ * recovery-only failure makes the state sticky-degraded and suppresses later
+ * dependent journal work without disabling model mutation or history. */
+void tp_model__degrade_recovery(tp_model *model, tp_status status);
+void tp_model__restore_recovery(tp_model *model);
 
 /* The shared id-set behind a memory idstore (NULL for a foreign store).
  * tp_model_attach_journal uses it to migrate ids the model committed journal-less into
@@ -46,7 +54,7 @@ const struct tp_idset *tp_txn_idstore_mem_view(const tp_txn_idstore *store);
 /* Reset a result to an empty rejected shell tagged with the transaction id. */
 void tp_txn__result_reset(tp_txn_result *out, const char *id_hex);
 
-/* Result echo storage is staged before durable acknowledgement and discarded
+/* Result echo storage is staged before live commit and discarded
  * on any commit rejection. These two ownership operations stay below commit. */
 bool tp_txn__result_echo_prepare(tp_txn_result *out,
                                  const tp_txn_request *request);
@@ -91,10 +99,9 @@ tp_status tp_txn__preflight(tp_model *m, const char *id_hex, int64_t expected_re
  * committed/rejected; the live model is byte-unchanged unless it returns OK. */
 tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_txn_result *out, tp_error *err);
 
-/* Serialize + round-trip-prove `candidate`, then append it as a durable history
- * CHECKPOINT at `revision` when `m` has a journal. A no-op without a journal.
- * The live model is never touched; tp_history.c calls this as the LAST fallible
- * gate before publishing an Undo/Redo candidate + cursor move. */
+/* Serialize + round-trip-prove `candidate`, then append an explicit recovery
+ * checkpoint at `revision` when `m` has a journal. A no-op without a journal;
+ * the helper never mutates the live model. */
 tp_status tp_model__append_history_checkpoint(tp_model *m, const tp_project *candidate, int64_t revision,
                                               size_t snapshot_bytes, tp_error *err);
 
@@ -108,7 +115,7 @@ tp_status tp_model__next_revision(int64_t current, int64_t *next, tp_error *err)
 void tp_txn__test_set_add_error_fail(int nth);
 
 /* Fails the (N+1)th exact result-echo allocation once. Echo reservation runs
- * before durable acknowledgement, so the transaction must remain unchanged. */
+ * before live commit, so the transaction must remain unchanged. */
 void tp_txn__test_set_result_echo_fail(int nth);
 
 /* Deterministic complexity probes for the bounded JSON path. The op-walk counter
@@ -125,6 +132,11 @@ void tp_txn__test_count_op_walk(size_t steps);
 void tp_txn__test_encode_stats_reset(void);
 size_t tp_txn__test_request_encode_calls(void);
 size_t tp_txn__test_last_measure_allocations(void);
+/* Fail the next allocating canonical request encode once. Recovery journal
+ * serialization is best-effort after the live commit point, so this seam
+ * proves an encoder allocation fault degrades recovery without rejecting the
+ * transaction. */
+void tp_txn__test_fail_next_request_encode(void);
 
 /* Run the allocation-free JSON operation-count preflight and report input-byte
  * inspections. The scanner is single-pass; adversarial nesting tests pin work <=

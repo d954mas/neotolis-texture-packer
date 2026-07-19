@@ -163,9 +163,9 @@ tp_status tp_session_save_new(tp_session *session, const char *path,
                               tp_session_save_result *result, tp_error *err);
 tp_status tp_session_discard(tp_session *session, tp_error *err);
 tp_status tp_session_invalidate_sources(tp_session *session, tp_error *err);
-/* Makes recovery acknowledgement mandatory for this live host. Call before
- * attaching recovery so setup/lock failures cannot open an unjournaled
- * mutation window. Session save/discard remain available for escape/cleanup. */
+/* Declares recovery expected for this live host so availability/reporting can
+ * expose missing or degraded recovery. Model commands remain available when
+ * recovery is unavailable. */
 tp_status tp_session_require_recovery(tp_session *session, tp_error *err);
 int64_t tp_session_revision(const tp_session *session);
 bool tp_session_recovery_available(const tp_session *session);

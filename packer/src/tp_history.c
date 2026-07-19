@@ -6,17 +6,17 @@
  *
  * Undo/Redo reuse the clone/swap for STAGE-THEN-COMMIT atomicity: the inverse
  * (or forward) diff is applied to a CLONE and swapped in only on FULL success, so an
- * allocation failure, corrupted diff, compact-transition/checkpoint serialization fault, or durable
- * journal-append failure rolls back with the live model, revision, and cursor
- * byte-unchanged. A successful Undo/Redo bumps the revision by one (a new committed
+ * allocation failure or corrupted diff rolls back with the live model, revision,
+ * and cursor byte-unchanged. Recovery transition encode/append failure occurs
+ * after publication and makes recovery degraded. A successful Undo/Redo bumps the revision by one (a new committed
  * state); dirty stays identity-derived (an Undo to the saved baseline is clean even
  * at a higher revision).
  *
  * HONEST SCOPE: the undo STACK is in-memory session state and is not restored after
  * restart. When a recovery journal is attached, the DOCUMENT STATE produced by each
- * Undo/Redo is crash-durable via an appended compact transition (with a checkpoint
- * fallback only for an unsupported or oversized diff); recovery starts with a fresh
- * empty history stack.
+ * Undo/Redo is recorded via a compact transition while recovery is healthy.
+ * Unsupported/oversized transitions degrade recovery rather than surprising the
+ * caller with a full checkpoint; recovery starts with a fresh empty history stack.
  */
 
 #include "tp_core/tp_diff.h"
@@ -204,7 +204,7 @@ tp_status tp_history_prepare_push(const tp_history *h, const tp_diff_record *r, 
 
 void tp_history_push_prepared(tp_history *h, tp_diff_record *r, const tp_history_push_plan *plan) {
     /* No mutation happened during prepare. Redo and FIFO eviction become visible
-     * together here, after the transaction's durable acknowledgement. */
+     * together at the live commit point. */
     for (int i = h->pos; i < h->count; i++) {
         tp_diff_record_free(h->records[i]);
         h->records[i] = NULL;
@@ -285,7 +285,7 @@ static tp_status prepare_history_transition(
     tp_history_durable_transition *out, tp_error *err) {
     memset(out, 0, sizeof *out);
     out->outcome = TP_HISTORY_CODEC_ERROR;
-    if (!m->journal) return TP_STATUS_OK;
+    if (!m->journal || m->recovery_degraded) return TP_STATUS_OK;
     tp_status status = tp_history_transition_encode(
         record, reverse, m->project,
         (size_t)TP_JOURNAL_MAX_RECORD_BYTES -
@@ -301,14 +301,9 @@ static tp_status prepare_history_transition(
         return status;
     }
     if (out->outcome == TP_HISTORY_CODEC_UNSUPPORTED ||
-        out->outcome == TP_HISTORY_CODEC_OVERSIZED) {
-        /* Fallback appends a CHECKPOINT, which resets the replay window. Do
-         * not apply the full replay-op budget that a HISTORY record would
-         * consume; before staging we can still reject a full record store or
-         * insufficient room for the checkpoint's fixed prefix/id set. The
-         * exact candidate snapshot size is measured after application. */
-        return tp_journal__check_checkpoint_append_bytes(m->journal, 0U, err);
-    }
+        out->outcome == TP_HISTORY_CODEC_OVERSIZED)
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                            "history transition is not journal-encodable");
     return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                         "history transition encoding failed");
 }
@@ -316,27 +311,15 @@ static tp_status prepare_history_transition(
 static tp_status append_history_transition(
     tp_model *m, const tp_project *candidate, int64_t revision,
     const tp_history_durable_transition *prepared, tp_error *err) {
-    if (!m->journal) return TP_STATUS_OK;
+    (void)candidate;
+    if (!m->journal || m->recovery_degraded) return TP_STATUS_OK;
     if (prepared->outcome == TP_HISTORY_CODEC_OK) {
         return tp_journal_append_history_counted(
             m->journal, revision, prepared->blob.data, prepared->blob.len,
             prepared->blob.op_count, err);
     }
-    if (prepared->outcome != TP_HISTORY_CODEC_UNSUPPORTED &&
-        prepared->outcome != TP_HISTORY_CODEC_OVERSIZED) {
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
-                            "invalid prepared history transition");
-    }
-
-    /* Only a genuinely unsupported future diff shape or an intrinsically
-     * oversized compact transition may fall back to a full checkpoint. */
-    size_t checkpoint_bytes = 0U;
-    tp_status status = tp_project_checkpoint_serialized_size_bounded(
-        candidate, SIZE_MAX, &checkpoint_bytes, err);
-    return status == TP_STATUS_OK
-               ? tp_model__append_history_checkpoint(
-                     m, candidate, revision, checkpoint_bytes, err)
-               : status;
+    return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                        "invalid prepared history transition");
 }
 
 tp_status tp_model_undo(tp_model *m, tp_error *err) {
@@ -353,10 +336,14 @@ tp_status tp_model_undo(tp_model *m, tp_error *err) {
         return st;
     }
     tp_history_durable_transition durable;
-    st = prepare_history_transition(m, r, true, &durable, err);
-    if (st != TP_STATUS_OK) {
-        return st;
-    }
+    memset(&durable, 0, sizeof durable);
+    const bool recovery_ready = m->journal && !m->recovery_degraded;
+    tp_error recovery_error = {{0}};
+    tp_status recovery_status = recovery_ready
+                                    ? prepare_history_transition(
+                                          m, r, true, &durable,
+                                          &recovery_error)
+                                    : TP_STATUS_OK;
     tp_project *clone = tp_project_clone(m->project);
     if (!clone) {
         tp_history_transition_blob_free(&durable.blob);
@@ -368,15 +355,17 @@ tp_status tp_model_undo(tp_model *m, tp_error *err) {
         tp_history_transition_blob_free(&durable.blob);
         return st;
     }
-    st = append_history_transition(m, clone, revision, &durable, err);
-    tp_history_transition_blob_free(&durable.blob);
-    if (st != TP_STATUS_OK) {
-        tp_project_destroy(clone); /* durable gate rejected: model + revision + cursor unchanged */
-        return st;
-    }
     tp_model__replace_owned_project(m, clone);
     m->revision = revision;
     tp_history_commit_undo(m->history);
+    if (recovery_ready && recovery_status == TP_STATUS_OK) {
+        recovery_status = append_history_transition(
+            m, m->project, revision, &durable, &recovery_error);
+    }
+    tp_history_transition_blob_free(&durable.blob);
+    if (recovery_ready && recovery_status != TP_STATUS_OK) {
+        tp_model__degrade_recovery(m, recovery_status);
+    }
     return TP_STATUS_OK;
 }
 
@@ -394,10 +383,14 @@ tp_status tp_model_redo(tp_model *m, tp_error *err) {
         return st;
     }
     tp_history_durable_transition durable;
-    st = prepare_history_transition(m, r, false, &durable, err);
-    if (st != TP_STATUS_OK) {
-        return st;
-    }
+    memset(&durable, 0, sizeof durable);
+    const bool recovery_ready = m->journal && !m->recovery_degraded;
+    tp_error recovery_error = {{0}};
+    tp_status recovery_status = recovery_ready
+                                    ? prepare_history_transition(
+                                          m, r, false, &durable,
+                                          &recovery_error)
+                                    : TP_STATUS_OK;
     tp_project *clone = tp_project_clone(m->project);
     if (!clone) {
         tp_history_transition_blob_free(&durable.blob);
@@ -409,14 +402,16 @@ tp_status tp_model_redo(tp_model *m, tp_error *err) {
         tp_history_transition_blob_free(&durable.blob);
         return st;
     }
-    st = append_history_transition(m, clone, revision, &durable, err);
-    tp_history_transition_blob_free(&durable.blob);
-    if (st != TP_STATUS_OK) {
-        tp_project_destroy(clone);
-        return st;
-    }
     tp_model__replace_owned_project(m, clone);
     m->revision = revision;
     tp_history_commit_redo(m->history);
+    if (recovery_ready && recovery_status == TP_STATUS_OK) {
+        recovery_status = append_history_transition(
+            m, m->project, revision, &durable, &recovery_error);
+    }
+    tp_history_transition_blob_free(&durable.blob);
+    if (recovery_ready && recovery_status != TP_STATUS_OK) {
+        tp_model__degrade_recovery(m, recovery_status);
+    }
     return TP_STATUS_OK;
 }

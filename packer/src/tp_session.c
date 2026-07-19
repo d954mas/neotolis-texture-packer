@@ -21,6 +21,9 @@
 
 // #region gate & recovery health
 bool recovery_is_healthy(const tp_session *session) {
+    if (tp_model__recovery_degraded(session->model)) {
+        return false;
+    }
     if (session->recovery_live) {
         return tp_recovery_live_healthy(session->recovery_live);
     }
@@ -28,6 +31,16 @@ bool recovery_is_healthy(const tp_session *session) {
         return session->recovery_healthy;
     }
     return !session->recovery_required && session->recovery_healthy;
+}
+
+static void observe_model_recovery(tp_session *session) {
+    if (!tp_model__recovery_degraded(session->model)) {
+        return;
+    }
+    session->recovery_healthy = false;
+    if (session->recovery_live) {
+        tp_recovery_live__mark_degraded(session->recovery_live);
+    }
 }
 
 bool tp_session__owns_recovery_live(const tp_session *session,
@@ -454,17 +467,13 @@ tp_status tp_session_apply(tp_session *session, const tp_txn_request *request,
         gate_unlock(session);
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "session was discarded");
     }
-    if (!recovery_is_healthy(session)) {
-        gate_unlock(session);
-        return tp_error_set(err, TP_STATUS_JOURNAL_FAILED,
-                            "session recovery is degraded; mutation is unavailable");
-    }
     session->admission_sequence++;
     const int64_t revision_before = tp_model_revision(session->model);
     tp_txn_result local_result;
     tp_txn_result *published_result = result ? result : &local_result;
     tp_status status = tp_model_apply(session->model, request,
                                       published_result, err);
+    observe_model_recovery(session);
     if (status == TP_STATUS_OK && published_result->committed) {
         session->model_generation++;
         publish_event(session, TP_SESSION_EVENT_MODEL_COMMITTED, request->id_hex,
@@ -486,14 +495,10 @@ tp_status tp_session_undo(tp_session *session, tp_error *err) {
         gate_unlock(session);
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "session was discarded");
     }
-    if (!recovery_is_healthy(session)) {
-        gate_unlock(session);
-        return tp_error_set(err, TP_STATUS_JOURNAL_FAILED,
-                            "session recovery is degraded; Undo is unavailable");
-    }
     session->admission_sequence++;
     const int64_t revision_before = tp_model_revision(session->model);
     tp_status status = tp_model_undo(session->model, err);
+    observe_model_recovery(session);
     if (status == TP_STATUS_OK) {
         session->model_generation++;
         publish_event(session, TP_SESSION_EVENT_UNDONE, NULL, revision_before,
@@ -512,14 +517,10 @@ tp_status tp_session_redo(tp_session *session, tp_error *err) {
         gate_unlock(session);
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "session was discarded");
     }
-    if (!recovery_is_healthy(session)) {
-        gate_unlock(session);
-        return tp_error_set(err, TP_STATUS_JOURNAL_FAILED,
-                            "session recovery is degraded; Redo is unavailable");
-    }
     session->admission_sequence++;
     const int64_t revision_before = tp_model_revision(session->model);
     tp_status status = tp_model_redo(session->model, err);
+    observe_model_recovery(session);
     if (status == TP_STATUS_OK) {
         session->model_generation++;
         publish_event(session, TP_SESSION_EVENT_REDONE, NULL, revision_before,
@@ -855,7 +856,7 @@ bool tp_session_can_undo(const tp_session *session) {
         return false;
     }
     gate_lock(session);
-    const bool can_undo = !session->discarded && recovery_is_healthy(session) &&
+    const bool can_undo = !session->discarded &&
                           tp_model_can_undo(session->model);
     gate_unlock(session);
     return can_undo;
@@ -866,7 +867,7 @@ bool tp_session_can_redo(const tp_session *session) {
         return false;
     }
     gate_lock(session);
-    const bool can_redo = !session->discarded && recovery_is_healthy(session) &&
+    const bool can_redo = !session->discarded &&
                           tp_model_can_redo(session->model);
     gate_unlock(session);
     return can_redo;

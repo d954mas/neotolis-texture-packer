@@ -24,6 +24,7 @@
 
 static _Thread_local size_t s_test_request_encode_calls;
 static _Thread_local size_t s_test_last_measure_allocations;
+static _Thread_local bool s_test_fail_next_request_encode;
 
 void tp_txn__test_encode_stats_reset(void) {
     s_test_request_encode_calls = 0U;
@@ -36,6 +37,10 @@ size_t tp_txn__test_request_encode_calls(void) {
 
 size_t tp_txn__test_last_measure_allocations(void) {
     return s_test_last_measure_allocations;
+}
+
+void tp_txn__test_fail_next_request_encode(void) {
+    s_test_fail_next_request_encode = true;
 }
 
 /* Emit `op` at its final depth through the operation encoder's one canonical
@@ -140,6 +145,10 @@ char *tp_txn_request_encode_bounded_for_project(
     bool *too_large) {
     if (too_large) *too_large = false;
     s_test_request_encode_calls++;
+    if (s_test_fail_next_request_encode) {
+        s_test_fail_next_request_encode = false;
+        return NULL;
+    }
     tp_sb sb = {0};
     sb.limit = max_bytes;
     const bool emitted = emit_request(&sb, req, project);

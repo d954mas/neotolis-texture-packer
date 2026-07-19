@@ -3,7 +3,7 @@
 
 /*
  * Atomic typed transactions with monotonic revisions, semantic dirty tracking,
- * bounded idempotency, history, and journal acknowledgement. Apply clones the
+ * bounded live idempotency, history, and best-effort recovery recording. Apply clones the
  * project, validates and applies the complete batch, then publishes with one
  * allocation-free pointer swap. Rejection leaves the live model byte-unchanged.
  * cJSON remains private to the request parser.
@@ -81,7 +81,7 @@ tp_journal *tp_model_journal(tp_model *m);
 struct tp_history *tp_model_history(tp_model *m);
 
 /* The canonical revision. Increments by exactly 1 per committed transaction or
- * acknowledged Undo/Redo history transition; Save does NOT change it (§420). */
+ * Undo/Redo transition; Save does NOT change it (§420). */
 int64_t tp_model_revision(const tp_model *m);
 
 /* dirty = current semantic identity != saved-baseline identity (NOT derived from
@@ -165,9 +165,11 @@ void tp_txn_result_free(tp_txn_result *res);
 
 /* ---- apply --------------------------------------------------------------- *
  * After request admission: duplicate check -> revision check -> clone -> ordered
- * validation/apply -> history and side-effect preparation -> acknowledgement gate
- * (durable when journal-backed) -> allocation-free publish. Any rejection or
- * allocation failure discards the candidate and leaves the live model unchanged.
+ * validation/apply -> history and side-effect preparation -> live idempotency gate
+ * -> allocation-free model/history/side-effect publication -> best-effort recovery
+ * append. Any pre-commit rejection discards the candidate and leaves the live
+ * model unchanged. Recovery admission/encode/append/sync failure occurs after
+ * commit, returns a committed result, and makes recovery sticky-degraded.
  *
  * Returns TP_STATUS_OK on commit, else the first/short-circuit status; `*out` (if
  * non-NULL) is always filled (committed or rejected) and must be freed with
@@ -175,15 +177,15 @@ void tp_txn_result_free(tp_txn_result *res);
 tp_status tp_model_apply(tp_model *m, const tp_txn_request *req, tp_txn_result *out, tp_error *err);
 
 /* ---- side-effect coordinator --------------------------------------------- *
- * Optional hooks stage before acknowledgement, publish after its gate, and
- * abort on rollback. Full Extract binding remains separate. */
+ * Optional hooks stage before the live commit, publish immediately after it
+ * and before recovery recording, and abort only on a pre-commit rollback. */
 typedef struct tp_side_effect_coordinator {
     void *ctx;
-    /* Stage side-effects for `req` before the commit. Non-OK aborts the commit
-     * (rollback, no acknowledgement). May be NULL (treated as OK). */
+    /* Stage side-effects for `req` before the commit. Non-OK rejects the commit.
+     * May be NULL (treated as OK). */
     tp_status (*prepare)(void *ctx, const tp_txn_request *req, tp_error *err);
-    /* Called AFTER the transaction is durably journaled (acknowledged): make staged
-     * side-effects live. Post-acknowledgement, so it must not fail the commit. May be NULL. */
+    /* Called after the irreversible live model/history commit and before the
+     * recovery append. Must be infallible/idempotent. May be NULL. */
     void (*publish)(void *ctx, const tp_txn_request *req);
     /* Called when the commit rolls back after a successful prepare: discard staged
      * side-effects. May be NULL. */
@@ -203,16 +205,17 @@ void tp_model_set_coordinator(tp_model *m, tp_side_effect_coordinator *c);
  * initial CHECKPOINT capturing the current committed project state + revision so the
  * journal is self-sufficient for recovery. Fails INVALID_ARGUMENT if a journal is
  * already attached; on a checkpoint-write failure returns the journal status and does
- * NOT attach (the caller still owns `j`). Once attached, every committed transaction
- * appends to the journal before it is acknowledged (§7.1) and the journal's retained-id
- * index answers idempotency (§7.2). */
+ * NOT attach (the caller still owns `j`). Once attached, a committed transaction
+ * is recorded after live publication. A recording failure preserves the commit,
+ * leaves the journal as an older durable prefix, and suppresses dependent records.
+ * The model's in-memory retained-id store remains live idempotency authority. */
 tp_status tp_model_attach_journal(tp_model *m, struct tp_journal *j, tp_error *err);
 
 /* After a durable Save, compact to one checkpoint containing the current state,
  * revision, and retained IDs. This bounds replay while preserving idempotency.
  * With no journal this is a no-op. Pre-truncate failure preserves the old log;
- * replacement failure after truncate poisons the journal so later edits fail
- * closed. Neither failure rolls back the already completed Save. */
+ * replacement failure after truncate poisons the journal. Neither failure rolls
+ * back the already completed Save or disables later live edits. */
 tp_status tp_model_compact_journal(tp_model *m, tp_error *err);
 
 /* Record recovery metadata on the attached journal. The caller supplies time;
@@ -241,7 +244,7 @@ void tp_model_detach_journal(tp_model *m);
  * whose project is the last good committed snapshot, whose revision is that record's
  * revision, and which OWNS a journal (over the same `io`, index seeded with the
  * retained ids) ready to continue appending -- so a post-restart retry of an
- * acknowledged transaction id de-duplicates. A torn/corrupt tail is truncated away
+ * durably recorded transaction id de-duplicates. A torn/corrupt tail is truncated away
  * before continuing (never guessed). *info (may be NULL) reports how replay
  * classified the store. When nothing is recoverable (empty / bad-header / stale-key /
  * torn-first-record) *out is NULL and info->status says why -- the caller falls back

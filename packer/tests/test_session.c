@@ -876,7 +876,7 @@ void test_undo_redo_are_session_commands_with_ordered_events(void) {
     tp_session_destroy(session);
 }
 
-void test_journal_append_failure_publishes_nothing(void) {
+void test_journal_append_failure_commits_and_sticky_degradation_skips_later_recovery_work(void) {
     tp_session *session = make_session();
     tp_error err;
     tp_session_snapshot *before = NULL;
@@ -894,20 +894,123 @@ void test_journal_append_failure_publishes_nothing(void) {
     tp_journal_io_memory__fail_next_writes(io, 1);
     tp_txn_result result;
     session_apply_rename(session, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 0,
-                         atlas->id, "must-rollback", TP_STATUS_JOURNAL_FAILED,
+                         atlas->id, "committed-despite-journal", TP_STATUS_OK,
                          &result, &err);
+    TEST_ASSERT_TRUE(result.committed);
+    TEST_ASSERT_EQUAL_INT64(1, result.revision);
+    tp_txn_result_free(&result);
+
+    TEST_ASSERT_EQUAL_UINT64(1, tp_session_event_sequence(session));
+    TEST_ASSERT_FALSE(tp_session_recovery_available(session));
+    TEST_ASSERT_TRUE(tp_session_can_undo(session));
+
+    const size_t syncs_after_failure = tp_journal_io_memory__sync_count(io);
+    tp_txn__test_encode_stats_reset();
+    session_apply_rename(session, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 1,
+                         atlas->id, "later-edit", TP_STATUS_OK, &result, &err);
+    TEST_ASSERT_TRUE(result.committed);
+    TEST_ASSERT_EQUAL_INT64(2, result.revision);
+    tp_txn_result_free(&result);
+    TEST_ASSERT_EQUAL_size_t(0U, tp_txn__test_request_encode_calls());
+    TEST_ASSERT_EQUAL_size_t(syncs_after_failure,
+                             tp_journal_io_memory__sync_count(io));
+
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_undo(session, &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_redo(session, &err));
+    TEST_ASSERT_EQUAL_size_t(syncs_after_failure,
+                             tp_journal_io_memory__sync_count(io));
+
+    session_apply_rename(session, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 4,
+                         atlas->id, "duplicate-must-not-reapply",
+                         TP_STATUS_DUPLICATE_ID, &result, &err);
     TEST_ASSERT_FALSE(result.committed);
     tp_txn_result_free(&result);
 
-    TEST_ASSERT_EQUAL_UINT64(0, tp_session_event_sequence(session));
     tp_session_snapshot *after = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_snapshot_create(session, &after, &err));
-    TEST_ASSERT_EQUAL_INT64(0, tp_session_snapshot_revision(after));
-    TEST_ASSERT_EQUAL_UINT64(0, tp_session_snapshot_model_generation(after));
-    TEST_ASSERT_EQUAL_STRING("atlas1", tp_session_snapshot_atlas_at(after, 0)->name);
+    TEST_ASSERT_EQUAL_INT64(4, tp_session_snapshot_revision(after));
+    TEST_ASSERT_EQUAL_UINT64(4, tp_session_snapshot_model_generation(after));
+    TEST_ASSERT_EQUAL_STRING("later-edit", tp_session_snapshot_atlas_at(after, 0)->name);
 
     tp_session_snapshot_destroy(after);
     tp_session_snapshot_destroy(before);
+    tp_session_destroy(session);
+}
+
+static void assert_recovery_fault_commits(tp_session *session, tp_id128 atlas_id,
+                                          const char *transaction_id,
+                                          const char *name) {
+    tp_error err = {{0}};
+    tp_txn_result result;
+    session_apply_rename(session, transaction_id, 0, atlas_id, name,
+                         TP_STATUS_OK, &result, &err);
+    TEST_ASSERT_TRUE(result.committed);
+    TEST_ASSERT_EQUAL_INT64(1, result.revision);
+    TEST_ASSERT_FALSE(tp_session_recovery_available(session));
+    TEST_ASSERT_TRUE(tp_session_can_undo(session));
+    tp_txn_result_free(&result);
+}
+
+void test_journal_admission_failure_commits_and_degrades_recovery(void) {
+    tp_session *session = make_session();
+    tp_error err = {{0}};
+    tp_session_snapshot *snapshot = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_snapshot_create(session, &snapshot, &err));
+    const tp_id128 atlas_id = tp_session_snapshot_atlas_at(snapshot, 0)->id;
+    tp_session_snapshot_destroy(snapshot);
+    tp_journal_io io = tp_journal_io_memory();
+    tp_id128 key = {{0}};
+    tp_journal *journal = tp_journal_create(io, key);
+    TEST_ASSERT_NOT_NULL(journal);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_attach_journal(session, journal, &err));
+    tp_journal__test_set_record_limit(1U);
+    assert_recovery_fault_commits(session, atlas_id,
+                                  "cccccccccccccccccccccccccccccccc",
+                                  "admission-fault");
+    tp_session_destroy(session);
+}
+
+void test_journal_encode_failure_commits_and_degrades_recovery(void) {
+    tp_session *session = make_session();
+    tp_error err = {{0}};
+    tp_session_snapshot *snapshot = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_snapshot_create(session, &snapshot, &err));
+    const tp_id128 atlas_id = tp_session_snapshot_atlas_at(snapshot, 0)->id;
+    tp_session_snapshot_destroy(snapshot);
+    tp_journal_io io = tp_journal_io_memory();
+    tp_id128 key = {{0}};
+    tp_journal *journal = tp_journal_create(io, key);
+    TEST_ASSERT_NOT_NULL(journal);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_attach_journal(session, journal, &err));
+    tp_txn__test_fail_next_request_encode();
+    assert_recovery_fault_commits(session, atlas_id,
+                                  "dddddddddddddddddddddddddddddddd",
+                                  "encode-fault");
+    tp_session_destroy(session);
+}
+
+void test_journal_sync_failure_commits_and_degrades_recovery(void) {
+    tp_session *session = make_session();
+    tp_error err = {{0}};
+    tp_session_snapshot *snapshot = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_snapshot_create(session, &snapshot, &err));
+    const tp_id128 atlas_id = tp_session_snapshot_atlas_at(snapshot, 0)->id;
+    tp_session_snapshot_destroy(snapshot);
+    tp_journal_io io = tp_journal_io_memory();
+    tp_id128 key = {{0}};
+    tp_journal *journal = tp_journal_create(io, key);
+    TEST_ASSERT_NOT_NULL(journal);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_attach_journal(session, journal, &err));
+    tp_journal_io_memory__fail_next_sync(io);
+    assert_recovery_fault_commits(session, atlas_id,
+                                  "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                                  "sync-fault");
     tp_session_destroy(session);
 }
 
@@ -1507,7 +1610,7 @@ void test_future_event_cursor_requires_resync(void) {
     tp_session_destroy(session);
 }
 
-void test_save_reports_recovery_degradation_and_blocks_later_mutation(void) {
+void test_save_reports_recovery_degradation_and_keeps_later_mutation_available(void) {
     char path[1024];
     (void)snprintf(path, sizeof path, "%s/tp_session_degraded.ntpacker_project", g_scratch);
     (void)remove(path);
@@ -1536,7 +1639,9 @@ void test_save_reports_recovery_degradation_and_blocks_later_mutation(void) {
     tp_txn_result txn_result;
     session_apply_rename(session, "cccccccccccccccccccccccccccccccc", 0,
                          atlas->id, "unsafe-after-degrade",
-                         TP_STATUS_JOURNAL_FAILED, &txn_result, &err);
+                         TP_STATUS_OK, &txn_result, &err);
+    TEST_ASSERT_TRUE(txn_result.committed);
+    TEST_ASSERT_EQUAL_INT64(1, txn_result.revision);
     tp_txn_result_free(&txn_result);
     tp_session_snapshot_destroy(before);
     tp_session_destroy(session);
@@ -2122,7 +2227,7 @@ void test_save_as_keeps_published_destination_when_recovery_retire_fails(void) {
     (void)remove(target);
 }
 
-void test_degraded_session_live_blocks_mutation_and_preserves_slot(void) {
+void test_degraded_session_live_keeps_mutation_available_and_preserves_slot(void) {
     char journal[1024];
     (void)snprintf(journal, sizeof journal, "%s/session-degraded.ntpjournal", g_scratch);
     (void)remove(journal);
@@ -2151,8 +2256,10 @@ void test_degraded_session_live_blocks_mutation_and_preserves_slot(void) {
     tp_session_snapshot_destroy(snapshot);
     tp_txn_result result;
     session_apply_rename(session, "10000000000000000000000000000080", 0,
-                         atlas_id, "must-not-commit", TP_STATUS_JOURNAL_FAILED,
+                         atlas_id, "commits-without-recovery", TP_STATUS_OK,
                          &result, &err);
+    TEST_ASSERT_TRUE(result.committed);
+    tp_txn_result_free(&result);
     tp_session_destroy(session);
     TEST_ASSERT_TRUE(tp_scan_is_dir(journal));
     tp_recovery_store_destroy(store);
@@ -2163,7 +2270,7 @@ void test_degraded_session_live_blocks_mutation_and_preserves_slot(void) {
 #endif
 }
 
-void test_required_recovery_blocks_apply_undo_redo_without_journal(void) {
+void test_required_recovery_reports_unavailable_without_blocking_model_commands(void) {
     tp_session *session = make_session();
     tp_error err = {{0}};
     tp_session_snapshot *snapshot = NULL;
@@ -2201,21 +2308,23 @@ void test_required_recovery_blocks_apply_undo_redo_without_journal(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_session_require_recovery(session, &err));
     TEST_ASSERT_FALSE(tp_session_recovery_available(session));
-    TEST_ASSERT_FALSE(tp_session_can_undo(session));
-    TEST_ASSERT_FALSE(tp_session_can_redo(session));
+    TEST_ASSERT_TRUE(tp_session_can_undo(session));
+    TEST_ASSERT_TRUE(tp_session_can_redo(session));
 
     tp_operation rejected = rename_op(atlas_id, "must-not-commit");
     request.ops = &rejected;
     request.expected_revision = 3;
     memcpy(request.id_hex, "10000000000000000000000000000083", 33U);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED,
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_session_apply(session, &request, &result, &err));
+    TEST_ASSERT_TRUE(result.committed);
+    tp_txn_result_free(&result);
     tp_operation_free(&rejected);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED,
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_session_undo(session, &err));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED,
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_session_redo(session, &err));
-    TEST_ASSERT_EQUAL_INT64(3, tp_session_revision(session));
+    TEST_ASSERT_EQUAL_INT64(6, tp_session_revision(session));
     tp_session_destroy(session);
 }
 
@@ -2236,7 +2345,10 @@ int main(int argc, char **argv) {
     RUN_TEST(test_invalid_operation_reject_publishes_no_event_and_id_stays_retryable);
     RUN_TEST(test_no_change_apply_does_not_publish_event_or_generation);
     RUN_TEST(test_undo_redo_are_session_commands_with_ordered_events);
-    RUN_TEST(test_journal_append_failure_publishes_nothing);
+    RUN_TEST(test_journal_append_failure_commits_and_sticky_degradation_skips_later_recovery_work);
+    RUN_TEST(test_journal_admission_failure_commits_and_degrades_recovery);
+    RUN_TEST(test_journal_encode_failure_commits_and_degrades_recovery);
+    RUN_TEST(test_journal_sync_failure_commits_and_degrades_recovery);
     RUN_TEST(test_source_invalidation_is_runtime_only_and_event_window_resyncs);
     RUN_TEST(test_save_as_and_open_are_session_owned_commands);
     RUN_TEST(test_save_as_does_not_mutate_held_snapshot_project_dir);
@@ -2249,7 +2361,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_snapshot_frontend_queries_delegate_core_rules);
     RUN_TEST(test_source_plan_propagates_stored_base_overflow);
     RUN_TEST(test_future_event_cursor_requires_resync);
-    RUN_TEST(test_save_reports_recovery_degradation_and_blocks_later_mutation);
+    RUN_TEST(test_save_reports_recovery_degradation_and_keeps_later_mutation_available);
     RUN_TEST(test_open_holds_project_lease_until_session_close);
     RUN_TEST(test_save_new_never_replaces_existing_destination);
     RUN_TEST(test_save_as_acquires_destination_before_releasing_old_lease);
@@ -2262,7 +2374,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_save_as_updates_live_recovery_identity_before_compaction);
     RUN_TEST(test_cross_identity_save_retires_journal_after_metadata_failure);
     RUN_TEST(test_save_as_keeps_published_destination_when_recovery_retire_fails);
-    RUN_TEST(test_degraded_session_live_blocks_mutation_and_preserves_slot);
-    RUN_TEST(test_required_recovery_blocks_apply_undo_redo_without_journal);
+    RUN_TEST(test_degraded_session_live_keeps_mutation_available_and_preserves_slot);
+    RUN_TEST(test_required_recovery_reports_unavailable_without_blocking_model_commands);
     return UNITY_END();
 }

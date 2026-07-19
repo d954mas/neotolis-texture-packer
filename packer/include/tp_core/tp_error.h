@@ -112,12 +112,10 @@ typedef enum tp_status {
     TP_STATUS_INVALID_REVISION,    /* expected_revision > current: a revision that never existed (tp_transaction) */
 
     /* --- recovery-journal durability fault (master spec §7.1, §22.3) ---
-     * Append-only: new value at the END. A committed transaction is not acknowledged
-     * until its recovery record is durably appended (§7.1); when that durable append
-     * fails the transaction is rolled back (live model byte-unchanged, no committed
-     * event) and this distinct status tells the caller to retry the SAME transaction
-     * id -- it is a durability failure, not OOM and not a validation reject. An
-     * OOM-class journal fault (index/buffer allocation) still reuses OOM. */
+     * Append-only: new value at the END. This status reports that a recovery
+     * record was not durably established. At the model/session boundary that
+     * failure degrades recovery but does not roll back an already-published live
+     * transaction. An OOM-class journal fault still reuses OOM. */
     TP_STATUS_JOURNAL_FAILED,      /* recovery-journal durable append failed (tp_journal) */
     TP_STATUS_FILE_CHANGED_EXTERNALLY, /* saved project bytes differ from the persisted session fingerprint */
     TP_STATUS_RECOVERY_CLEANUP_FAILED, /* recovered output is safe, but its orphan journal could not be removed */

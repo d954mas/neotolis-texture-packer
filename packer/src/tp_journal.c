@@ -4,12 +4,11 @@
  * transaction ids and knows nothing about tp_project; the model<->journal glue lives
  * in tp_model_journal.c.
  *
- * DURABILITY / ACKNOWLEDGEMENT: tp_journal_append_txn is the commit acknowledgement
- * gate (§7.1). It (1) reserves an in-memory retained-id slot, (2) durably writes the
- * framed+checksummed record, (3) infallibly registers the id. A failure at (1) or (2)
- * leaves NOTHING durable and the id UN-registered, so the same transaction id stays
- * retryable -- the "id recorded => commit cannot fail" invariant, now anchored on the
- * durable append instead of an in-memory set. A short/failed write is rolled back to
+ * DURABILITY: tp_journal_append_txn acknowledges one recovery record only after it
+ * (1) reserves an in-memory retained-id slot, (2) durably writes the framed+checksummed
+ * record, and (3) infallibly registers the id. A failure at (1) or (2) leaves NOTHING
+ * durable and the journal id UN-registered. The model's live commit and idempotency
+ * boundary is intentionally separate. A short/failed write is rolled back to
  * the prior length so no torn tail persists (best-effort; if truncation also fails the
  * journal is poisoned and refuses further appends rather than risk hiding good records
  * behind a mid-stream torn record).
@@ -20,7 +19,7 @@
  * The retained-id set + last committed snapshot are recovered up to the last good
  * record. A benign torn TAIL is safe to truncate away; a mid-stream corruption (a bad
  * record with valid records STILL after it) is NOT -- truncating would delete those
- * trailing acknowledged records, so recovery preserves the file and poisons the journal.
+ * trailing durable records, so recovery preserves the file and poisons the journal.
  */
 
 #include "tp_core/tp_journal.h"

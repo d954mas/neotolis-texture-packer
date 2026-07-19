@@ -93,7 +93,7 @@ static tp_status j_req_int(const cJSON *oj, const char *key, int *out,
 
 /* fields[] token array -> sprite override mask. The token vocabulary is closed:
  * accepting a token that the encoder cannot reproduce would make journal replay
- * differ from the acknowledged mutation. */
+ * differ from the recorded mutation. */
 static tp_status lower_clear_mask(const cJSON *oj, uint32_t *out,
                                   tp_error *err) {
     *out = 0U;

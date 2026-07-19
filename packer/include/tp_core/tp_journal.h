@@ -2,10 +2,9 @@
 #define TP_CORE_TP_JOURNAL_H
 
 /*
- * Durable recovery sidecar. A commit is not acknowledged until its recovery
- * record is durably appended; the retained transaction-ID set is recoverable
- * from the journal after a process restart so an acknowledged transaction is
- * never applied twice (§7.2 idempotency).
+ * Durable recovery sidecar. It records a crash-recoverable prefix after live
+ * commits; a recovery-record failure does not roll back the live model. The
+ * retained transaction-ID set reconstructs live idempotency after restart.
  *
  * This is a durable log over an injectable I/O seam. It deals in
  * opaque record payloads (a CHECKPOINT carries a project snapshot; a committed TXN
@@ -33,7 +32,7 @@
  * tp_txn_request_encode blob), not a full snapshot. Only CHECKPOINT records carry a
  * project snapshot. Recovery loads the last checkpoint's snapshot as a base and REPLAYS the
  * post-checkpoint TXN/HISTORY payloads onto it in physical record order (via the
- * model<->journal glue) -- a diff journal, so an acknowledged mutation or
+ * model<->journal glue) -- a diff journal, so a durably recorded mutation or
  * Undo/Redo costs its op bytes, not a whole re-snapshot.
  *
  * The reader is UB-clean on arbitrary/corrupt/short/torn input: every field is
@@ -57,7 +56,7 @@ extern "C" {
 #define TP_JOURNAL_FORMAT_VERSION 4
 
 /* Shared writer/reader bound for one sidecar. Every durable append is rejected before record allocation/write
- * when its framed result would cross this limit, so an acknowledged operation can never create a journal
+ * when its framed result would cross this limit, so a durably recorded operation can never create a journal
  * that startup recovery refuses. Recovery also rejects foreign/legacy oversized files before allocation.
  * Normal Save compaction reclaims the append budget. */
 #define TP_JOURNAL_MAX_FILE_BYTES (64U * 1024U * 1024U)
@@ -142,7 +141,7 @@ tp_status tp_journal_init_checkpoint(tp_journal *j, const uint8_t *snapshot, siz
  * CHECKPOINT capturing `snapshot`/`revision` and the journal's CURRENT retained-id set, so
  * recovery after a Save replays from exactly the saved state. The compaction PRESERVES the
  * retained-id set + revision (only the byte store is reset; the in-memory id index is kept so
- * an already-acknowledged transaction id still de-duplicates after a Save -- §7.2). On a
+ * a durably recorded transaction id still seeds de-duplication after a Save -- §7.2). On a
  * successful truncate the poison flag is cleared (nothing left to hide behind); if the truncate
  * FAILS the store + poison are left intact and TP_STATUS_JOURNAL_FAILED is returned (fail-closed
  * -- nothing partially compacted). NULL journal -> TP_STATUS_INVALID_ARGUMENT. */
@@ -221,7 +220,7 @@ typedef struct tp_journal_recovery {
     size_t stop_offset;    /* byte offset where decoding stopped (end of last good record) */
     bool mid_stream_corrupt; /* CORRUPT with a decodable/complete record STILL PRESENT after the
                               * bad one: the corruption is mid-log, NOT a tail. The tail-cleanup
-                              * truncation is UNSAFE here (it would delete the trailing acknowledged
+                              * truncation is UNSAFE here (it would delete the trailing durable
                               * records); recovery preserves the file and poisons the journal. A
                               * torn tail or a single trailing corrupt record leaves this false. */
     int records_recovered; /* count of good state records (checkpoint + txn/history) */

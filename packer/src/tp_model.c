@@ -31,6 +31,7 @@ tp_model *tp_model_wrap(tp_project *project) {
     m->project = project;
     m->owns_idstore = true;
     m->revision = 0;
+    m->recovery_status = TP_STATUS_OK;
     m->saved_identity = tp_semantic_identity(project); /* freshly wrapped == clean */
     return m;
 }
@@ -60,6 +61,30 @@ const tp_project *tp_model_project(const tp_model *m) {
 }
 tp_journal *tp_model_journal(tp_model *m) { return m ? m->journal : NULL; }
 int64_t tp_model_revision(const tp_model *m) { return m ? m->revision : 0; }
+
+bool tp_model__recovery_degraded(const tp_model *m) {
+    return m && m->recovery_degraded;
+}
+
+tp_status tp_model__recovery_status(const tp_model *m) {
+    return (m && m->recovery_degraded) ? m->recovery_status : TP_STATUS_OK;
+}
+
+void tp_model__degrade_recovery(tp_model *m, tp_status status) {
+    if (!m || m->recovery_degraded) {
+        return;
+    }
+    m->recovery_degraded = true;
+    m->recovery_status = status == TP_STATUS_OK ? TP_STATUS_JOURNAL_FAILED
+                                                : status;
+}
+
+void tp_model__restore_recovery(tp_model *m) {
+    if (m) {
+        m->recovery_degraded = false;
+        m->recovery_status = TP_STATUS_OK;
+    }
+}
 
 void tp_model__test_set_revision(tp_model *m, int64_t revision) {
     if (m) {

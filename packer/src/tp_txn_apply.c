@@ -59,23 +59,21 @@ static void tp_txn__commit_reject(tp_txn_result *out, tp_project *clone, tp_diff
  * Fills `out` committed/rejected. The live model is byte-unchanged unless it returns
  * TP_STATUS_OK. */
 tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_txn_result *out, tp_error *err) {
-    if (m->journal) {
+    bool recovery_ready = m->journal && !m->recovery_degraded;
+    tp_status recovery_failure = TP_STATUS_OK;
+    tp_error recovery_error = {{0}};
+    if (recovery_ready) {
         tp_status replay_st = tp_journal__check_append_admission(
-            m->journal, (size_t)req->op_count, err);
+            m->journal, (size_t)req->op_count, &recovery_error);
         if (replay_st != TP_STATUS_OK) {
-            tp_txn__commit_reject(out, NULL, NULL, NULL, NULL, m->revision, -1,
-                                  replay_st, "operations",
-                                  "journal replay operation budget is exhausted; save/compact is required");
-            return replay_st;
+            recovery_failure = replay_st;
         }
-        /* Even the smallest TXN frame cannot fit: reject before canonical
-         * encoding allocates. The exact request length is checked below. */
-        tp_status byte_st = tp_journal__check_txn_min_bytes(m->journal, err);
-        if (byte_st != TP_STATUS_OK) {
-            tp_txn__commit_reject(out, NULL, NULL, NULL, NULL, m->revision, -1,
-                                  byte_st, "request",
-                                  "journal byte budget is exhausted; save/compact is required");
-            return byte_st;
+        if (recovery_failure == TP_STATUS_OK) {
+            tp_status byte_st = tp_journal__check_txn_min_bytes(
+                m->journal, &recovery_error);
+            if (byte_st != TP_STATUS_OK) {
+                recovery_failure = byte_st;
+            }
         }
     }
     /* Canonical journal payload admission is shared by typed and JSON callers. */
@@ -116,15 +114,11 @@ tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_tx
                                 "canonical transaction request has %zu bytes; maximum is %u",
                                 payload_len, (unsigned)TP_TXN_MAX_REQUEST_BYTES);
         }
-        if (m->journal) {
+        if (recovery_ready && recovery_failure == TP_STATUS_OK) {
             tp_status byte_st = tp_journal__check_txn_bytes(
-                m->journal, payload_len, err);
+                m->journal, payload_len, &recovery_error);
             if (byte_st != TP_STATUS_OK) {
-                tp_txn__commit_reject(
-                    out, NULL, NULL, NULL, NULL, m->revision, -1, byte_st,
-                    "request",
-                    "journal byte budget is exhausted; save/compact is required");
-                return byte_st;
+                recovery_failure = byte_st;
             }
         }
     }
@@ -142,23 +136,19 @@ tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_tx
                             "transaction result echo allocation failed");
     }
     bool payload_too_large = false;
-    char *payload = encodable
+    char *payload = encodable && recovery_ready &&
+                            recovery_failure == TP_STATUS_OK
                         ? tp_txn_request_encode_bounded_for_project(
                               req, m->project,
                               (size_t)TP_TXN_MAX_REQUEST_BYTES,
                               &payload_too_large)
                         : NULL;
     if (payload_too_large) {
-        tp_txn__commit_reject(out, NULL, NULL, NULL, NULL, m->revision, -1, TP_STATUS_OUT_OF_BOUNDS,
-                              "request", "canonical transaction request exceeds the byte limit");
-        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
-                            "canonical transaction request exceeds the %u-byte maximum",
-                            (unsigned)TP_TXN_MAX_REQUEST_BYTES);
+        recovery_failure = TP_STATUS_OUT_OF_BOUNDS;
     }
-    if (encodable && !payload) {
-        tp_txn__commit_reject(out, NULL, NULL, NULL, NULL, m->revision, -1, TP_STATUS_OOM, "request",
-                              "could not serialize the transaction request (out of memory)");
-        return tp_error_set(err, TP_STATUS_OOM, "transaction request serialization failed");
+    if (encodable && recovery_ready && recovery_failure == TP_STATUS_OK &&
+        !payload) {
+        recovery_failure = TP_STATUS_OOM;
     }
     payload_len = payload ? strlen(payload) : 0U;
     tp_project *clone = tp_project_clone(m->project);
@@ -404,14 +394,9 @@ tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_tx
         }
     }
 
-    /* The commit ACKNOWLEDGEMENT gate (spec §7.1): validate/stage -> apply -> APPEND ->
-     * publish. The LAST fallible step before the allocation-free swap is either the
-     * durable journal append (journal-backed) or the in-memory id record (journal-less,
-     * EXACTLY the history-less path). Everything after a successful gate -- swap + revision++
-     * + diff push + side-effect publish -- is allocation-free, so "gate passed => commit
-     * cannot fail" holds. Whichever gate is used registers the transaction id ONLY on
-     * success, so a rolled-back txn never poisons the id into a permanent DUPLICATE_ID. */
-    /* (i) Coordinator prepare -- stage tied side-effects (B1 Extract) BEFORE the gate,
+    /* Coordinator prepare stages tied side-effects before the live idempotency
+     * gate and allocation-free publication. A recovery append is not a commit gate. */
+    /* Stage tied side-effects before the gate,
      * once the ops have applied to the clone. A prepare fault rejects with no side-
      * effects staged (no abort needed). */
     if (m->coordinator && m->coordinator->prepare) {
@@ -423,34 +408,22 @@ tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_tx
         }
     }
 
-    /* (ii) The gate itself: journal-backed durably appends this transaction's SERIALIZED
-     * OPERATION (format B -- a tp_txn_request_encode blob), so recovery re-runs apply from
-     * the last checkpoint (load the checkpoint base, replay the post-checkpoint op-payloads);
-     * journal-less records the id in the in-memory idstore (EXACTLY the history-less path).
-     * Either way the transaction id is registered ONLY on success, so a rolled-back txn
-     * never poisons the id into a permanent DUPLICATE_ID. (Checkpoints, written on attach and
-     * on the R3 compaction cadence, remain full snapshots -- the durable replay baseline.) */
+    /* Live idempotency is part of the in-memory commit and remains authoritative
+     * even when recovery only has an older durable prefix. Record it as the last
+     * fallible gate before the allocation-free model publication. */
     tp_status gate = TP_STATUS_OK;
-    const char *gate_msg = "";
-    if (m->journal) {
-        gate = tp_journal_append_txn_counted(
-            m->journal, req->id_hex, next_revision, (const uint8_t *)payload,
-            payload_len, (size_t)req->op_count, err);
-        gate_msg = "recovery journal append failed (transaction rolled back)";
-    } else if (m->idstore && m->idstore->record) {
+    if (m->idstore && m->idstore->record) {
         gate = m->idstore->record(m->idstore->ctx, req->id_hex, err);
-        gate_msg = "could not record the transaction id (out of memory)";
     }
     if (gate != TP_STATUS_OK) {
-        /* Exact rollback: discard clone, live model byte-unchanged, no acknowledgement,
-         * abort tied side-effects, txn retryable. */
         if (m->coordinator && m->coordinator->abort) {
             m->coordinator->abort(m->coordinator->ctx, req);
         }
-        tp_txn__commit_reject(out, clone, rec, NULL, payload, m->revision, -1, gate, "", gate_msg);
+        tp_txn__commit_reject(out, clone, rec, NULL, payload, m->revision,
+                              -1, gate, "",
+                              "could not record the transaction id (out of memory)");
         return gate;
     }
-    free(payload);
 
     /* The commit: allocation-free pointer swap + one revision bump. */
     tp_model__replace_owned_project(m, clone);
@@ -463,17 +436,27 @@ tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_tx
         tp_history_push_prepared(m->history, rec, &history_plan);
     }
 
-    /* (iii) Publish tied side-effects now that the transaction is durably acknowledged.
-     * BOUNDARY (ADR 0013 §D1, B1-02): publish() has no durability of its own -- a crash
-     * BETWEEN the acknowledged append and this call leaves the txn committed+retained
-     * while its side-effects are unpublished, and a resubmit returns DUPLICATE_ID so
-     * publish never re-runs. The coordinator is a no-op until B1 wires Extract, so this
-     * is not a live bug now; recovery-time re-drive / publish idempotency is B1-02's
-     * responsibility (recovery exposes the retained set for B1 to reconcile staged
-     * side-effects). We deliberately do NOT build 2-phase crash-durability here. */
+    /* Publish infallible/idempotent tied side-effects as part of the live
+     * commit before attempting subordinate recovery recording. */
     if (m->coordinator && m->coordinator->publish) {
         m->coordinator->publish(m->coordinator->ctx, req);
     }
+
+    /* Recovery follows the complete irreversible live commit. Admission, encoding,
+     * append, and sync failures preserve the committed model and make recovery
+     * sticky-degraded; later dependent records are deliberately suppressed. */
+    if (recovery_ready) {
+        if (recovery_failure == TP_STATUS_OK) {
+            recovery_failure = tp_journal_append_txn_counted(
+                m->journal, req->id_hex, next_revision,
+                (const uint8_t *)payload, payload_len,
+                (size_t)req->op_count, &recovery_error);
+        }
+        if (recovery_failure != TP_STATUS_OK) {
+            tp_model__degrade_recovery(m, recovery_failure);
+        }
+    }
+    free(payload);
 
     if (out) {
         out->committed = true;
@@ -529,11 +512,11 @@ tp_status tp_txn__preflight(tp_model *m, const char *id_hex, int64_t expected_re
         return tp_error_set(err, TP_STATUS_ID_MALFORMED, "transaction id must be 32 lowercase hex");
     }
 
-    /* (b) idempotency: a re-submitted committed id rejects (model unchanged). When a
-     * journal is attached its retained-id index is the idempotency authority (§7.2:
-     * recoverable across restart); otherwise the in-memory idstore answers. */
-    bool dup = m->journal ? tp_journal_contains(m->journal, id_hex)
-                          : (m->idstore && m->idstore->contains && m->idstore->contains(m->idstore->ctx, id_hex));
+    /* (b) idempotency: live memory is authoritative. A degraded journal may
+     * retain only an older durable prefix; recovery seeds this store when a
+     * model is rebuilt. */
+    bool dup = m->idstore && m->idstore->contains &&
+               m->idstore->contains(m->idstore->ctx, id_hex);
     if (dup) {
         if (out) {
             out->revision = m->revision;

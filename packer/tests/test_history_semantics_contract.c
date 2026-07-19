@@ -281,18 +281,6 @@ static void free_observation(session_observation *observation) {
     observation->bytes = NULL;
 }
 
-static void assert_same_publication(const session_observation *expected,
-                                    const session_observation *actual) {
-    TEST_ASSERT_EQUAL_STRING(expected->bytes, actual->bytes);
-    TEST_ASSERT_EQUAL_INT64(expected->revision, actual->revision);
-    TEST_ASSERT_EQUAL_UINT64(expected->model_generation,
-                             actual->model_generation);
-    TEST_ASSERT_EQUAL_UINT64(expected->event_sequence, actual->event_sequence);
-    TEST_ASSERT_EQUAL_INT(expected->dirty, actual->dirty);
-    TEST_ASSERT_EQUAL_INT(expected->undo_depth, actual->undo_depth);
-    TEST_ASSERT_EQUAL_INT(expected->redo_depth, actual->redo_depth);
-}
-
 static tp_status session_rename(tp_session *session, tp_id128 atlas_id,
                                 const char *transaction_id, const char *name,
                                 tp_txn_result *result, tp_error *error) {
@@ -311,7 +299,7 @@ static tp_status session_rename(tp_session *session, tp_id128 atlas_id,
     return tp_session_apply(session, &request, result, error);
 }
 
-void test_journal_failure_never_publishes_apply_undo_or_redo(void) {
+void test_journal_failure_preserves_live_apply_undo_redo_publication(void) {
     static const char transaction_id[] =
         "91000000000000000000000000000001";
     uint8_t seed = 1U;
@@ -342,17 +330,6 @@ void test_journal_failure_never_publishes_apply_undo_or_redo(void) {
     tp_journal_io_memory__fail_next_writes(io, 1);
     tp_txn_result result = {0};
     TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_JOURNAL_FAILED,
-        session_rename(session, atlas_id, transaction_id, "changed", &result,
-                       &error));
-    TEST_ASSERT_FALSE(result.committed);
-    tp_txn_result_free(&result);
-    session_observation failed_apply = observe_session(session);
-    assert_same_publication(&a, &failed_apply);
-    TEST_ASSERT_FALSE(tp_journal_contains(journal, transaction_id));
-    TEST_ASSERT_EQUAL_INT(0, tp_journal_id_count(journal));
-
-    TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         session_rename(session, atlas_id, transaction_id, "changed", &result,
                        &error));
@@ -365,15 +342,16 @@ void test_journal_failure_never_publishes_apply_undo_or_redo(void) {
     TEST_ASSERT_TRUE(b.dirty);
     TEST_ASSERT_EQUAL_INT(1, b.undo_depth);
     TEST_ASSERT_EQUAL_INT(0, b.redo_depth);
-    TEST_ASSERT_TRUE(tp_journal_contains(journal, transaction_id));
-    TEST_ASSERT_EQUAL_INT(1, tp_journal_id_count(journal));
+    TEST_ASSERT_FALSE(tp_journal_contains(journal, transaction_id));
+    TEST_ASSERT_EQUAL_INT(0, tp_journal_id_count(journal));
+    TEST_ASSERT_FALSE(tp_session_recovery_available(session));
 
-    tp_journal_io_memory__fail_next_writes(io, 1);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED,
-                          tp_session_undo(session, &error));
-    session_observation failed_undo = observe_session(session);
-    assert_same_publication(&b, &failed_undo);
-    TEST_ASSERT_EQUAL_INT(1, tp_journal_id_count(journal));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_DUPLICATE_ID,
+        session_rename(session, atlas_id, transaction_id, "changed", &result,
+                       &error));
+    TEST_ASSERT_FALSE(result.committed);
+    tp_txn_result_free(&result);
 
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_undo(session, &error));
     session_observation undone = observe_session(session);
@@ -384,13 +362,6 @@ void test_journal_failure_never_publishes_apply_undo_or_redo(void) {
     TEST_ASSERT_EQUAL_INT(0, undone.undo_depth);
     TEST_ASSERT_EQUAL_INT(1, undone.redo_depth);
 
-    tp_journal_io_memory__fail_next_writes(io, 1);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED,
-                          tp_session_redo(session, &error));
-    session_observation failed_redo = observe_session(session);
-    assert_same_publication(&undone, &failed_redo);
-    TEST_ASSERT_EQUAL_INT(1, tp_journal_id_count(journal));
-
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_redo(session, &error));
     session_observation redone = observe_session(session);
     TEST_ASSERT_EQUAL_STRING(b.bytes, redone.bytes);
@@ -399,7 +370,7 @@ void test_journal_failure_never_publishes_apply_undo_or_redo(void) {
     TEST_ASSERT_TRUE(redone.dirty);
     TEST_ASSERT_EQUAL_INT(1, redone.undo_depth);
     TEST_ASSERT_EQUAL_INT(0, redone.redo_depth);
-    TEST_ASSERT_EQUAL_INT(1, tp_journal_id_count(journal));
+    TEST_ASSERT_EQUAL_INT(0, tp_journal_id_count(journal));
 
     tp_session_event events[3] = {0};
     size_t event_count = 0U;
@@ -415,11 +386,8 @@ void test_journal_failure_never_publishes_apply_undo_or_redo(void) {
     TEST_ASSERT_EQUAL_INT(TP_SESSION_EVENT_REDONE, events[2].kind);
 
     free_observation(&redone);
-    free_observation(&failed_redo);
     free_observation(&undone);
-    free_observation(&failed_undo);
     free_observation(&b);
-    free_observation(&failed_apply);
     free_observation(&a);
     tp_session_destroy(session);
 }
@@ -432,6 +400,6 @@ int main(void) {
     RUN_TEST(test_animation_family_history_contract);
     RUN_TEST(test_target_family_history_contract);
     RUN_TEST(test_new_apply_after_undo_discards_only_the_redo_branch);
-    RUN_TEST(test_journal_failure_never_publishes_apply_undo_or_redo);
+    RUN_TEST(test_journal_failure_preserves_live_apply_undo_redo_publication);
     return UNITY_END();
 }

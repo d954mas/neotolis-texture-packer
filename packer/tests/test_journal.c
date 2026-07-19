@@ -622,25 +622,23 @@ void test_total_record_limit_bounds_all_frame_types_before_write_and_recovery(vo
     free(bytes);
 }
 
-/* A model commit must reject an exhausted total-frame slot before canonical encoding or project
- * cloning. The clone allocation counter is the observable staging boundary: zero means no mutable
- * candidate was built. */
+/* Exhausted recovery capacity must not block live commit staging. */
 void test_total_record_admission_precedes_commit_staging(void) {
     tp_journal_io model_io;
     tp_model *model = model_with_journal(tp_test_id_of(0x78), &model_io);
     tp_journal__test_set_record_limit(1U); /* the attach checkpoint owns the only slot */
     tp_project__test_set_clone_alloc_fail(-1);
     TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_OUT_OF_BOUNDS,
+        TP_STATUS_OK,
         commit_rename(model, "78000000000000000000000000000001", 0,
                       "must-not-stage"));
-    TEST_ASSERT_EQUAL_INT(0, tp_project__test_clone_alloc_count());
-    TEST_ASSERT_EQUAL_size_t(0U, tp_project__test_clone_allocation_bytes());
-    TEST_ASSERT_EQUAL_INT64(0, tp_model_revision(model));
+    TEST_ASSERT_GREATER_THAN_INT(0, tp_project__test_clone_alloc_count());
+    TEST_ASSERT_GREATER_THAN_size_t(0U, tp_project__test_clone_allocation_bytes());
+    TEST_ASSERT_EQUAL_INT64(1, tp_model_revision(model));
     tp_model_destroy(model);
 }
 
-/* Same total-frame-slot boundary, but for undo's staging clone rather than a commit's. */
+/* Undo likewise commits while recovery becomes degraded. */
 void test_total_record_admission_precedes_undo_staging(void) {
     tp_error err = {0};
     tp_journal_io model_io;
@@ -652,10 +650,10 @@ void test_total_record_admission_precedes_undo_staging(void) {
         commit_rename(model, "76000000000000000000000000000001", 0,
                       "undo-candidate"));
     tp_project__test_set_clone_alloc_fail(-1);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS, tp_model_undo(model, &err));
-    TEST_ASSERT_EQUAL_INT(0, tp_project__test_clone_alloc_count());
-    TEST_ASSERT_EQUAL_size_t(0U, tp_project__test_clone_allocation_bytes());
-    TEST_ASSERT_EQUAL_INT64(1, tp_model_revision(model));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_undo(model, &err));
+    TEST_ASSERT_GREATER_THAN_INT(0, tp_project__test_clone_alloc_count());
+    TEST_ASSERT_GREATER_THAN_size_t(0U, tp_project__test_clone_allocation_bytes());
+    TEST_ASSERT_EQUAL_INT64(2, tp_model_revision(model));
     tp_model_destroy(model);
 }
 
@@ -721,25 +719,13 @@ void test_file_byte_admission_precedes_transaction_staging_and_metadata_cache_mu
     tp_project__test_set_clone_alloc_fail(-1);
     tp_txn__test_encode_stats_reset();
     TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_JOURNAL_FAILED,
-        commit_rename(model, "75000000000000000000000000000001", 0,
-                      "must-not-stage"));
-    TEST_ASSERT_EQUAL_size_t(0U, tp_txn__test_last_measure_allocations());
-    TEST_ASSERT_EQUAL_size_t(0U, tp_txn__test_request_encode_calls());
-    TEST_ASSERT_EQUAL_INT(0, tp_project__test_clone_alloc_count());
-    TEST_ASSERT_EQUAL_size_t(0U, tp_project__test_clone_allocation_bytes());
-    TEST_ASSERT_EQUAL_INT64(0, tp_model_revision(model));
-
-    /* The exact boundary is admitted, proving the preflight is not a
-     * conservative estimate that rejects a valid transaction. */
-    tp_journal__test_set_file_limit((size_t)checkpoint_bytes + frame_bytes);
-    tp_txn__test_encode_stats_reset();
-    TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         commit_rename(model, "75000000000000000000000000000001", 0,
                       "must-not-stage"));
     TEST_ASSERT_EQUAL_size_t(0U, tp_txn__test_last_measure_allocations());
-    TEST_ASSERT_EQUAL_size_t(1U, tp_txn__test_request_encode_calls());
+    TEST_ASSERT_EQUAL_size_t(0U, tp_txn__test_request_encode_calls());
+    TEST_ASSERT_GREATER_THAN_INT(0, tp_project__test_clone_alloc_count());
+    TEST_ASSERT_GREATER_THAN_size_t(0U, tp_project__test_clone_allocation_bytes());
     TEST_ASSERT_EQUAL_INT64(1, tp_model_revision(model));
     tp_model_destroy(model);
 
@@ -789,30 +775,20 @@ static tp_status materialize_compact(tp_model *m, tp_journal *j, tp_error *err) 
 /* Compact HISTORY frames are measured from the semantic diff before the
  * Undo/Redo candidate clone exists. A byte-limit rejection must therefore do
  * neither checkpoint serialization nor project cloning. */
-static void assert_history_rejects_below_exact(
+static void assert_history_commits_below_exact(
     tp_model *model, size_t exact, materialize_fn materialize, tp_error *err,
     int64_t revision_at_reject) {
     tp_journal__test_set_file_limit(exact - 1U);
     tp_project__test_serialization_stats_reset();
     tp_project__test_set_clone_alloc_fail(-1);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED,
-                          materialize(model, tp_model_journal(model), err));
-    TEST_ASSERT_EQUAL_size_t(0U, tp_project__test_save_buffer_calls());
-    TEST_ASSERT_EQUAL_size_t(0U, tp_project__test_serializer_allocations());
-    TEST_ASSERT_EQUAL_size_t(0U, tp_project__test_load_buffer_calls());
-    TEST_ASSERT_EQUAL_INT(0, tp_project__test_clone_alloc_count());
-    TEST_ASSERT_EQUAL_INT64(revision_at_reject, tp_model_revision(model));
-}
-
-static void assert_history_accepts_at_exact(
-    tp_model *model, size_t exact, materialize_fn materialize, tp_error *err) {
-    tp_journal__test_set_file_limit(exact);
-    tp_project__test_serialization_stats_reset();
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           materialize(model, tp_model_journal(model), err));
     TEST_ASSERT_EQUAL_size_t(0U, tp_project__test_save_buffer_calls());
     TEST_ASSERT_EQUAL_size_t(0U, tp_project__test_serializer_allocations());
     TEST_ASSERT_EQUAL_size_t(0U, tp_project__test_load_buffer_calls());
+    TEST_ASSERT_GREATER_THAN_INT(0, tp_project__test_clone_alloc_count());
+    TEST_ASSERT_EQUAL_INT64(revision_at_reject + 1,
+                            tp_model_revision(model));
 }
 static tp_status materialize_undo(tp_model *m, tp_journal *j, tp_error *err) {
     (void)j;
@@ -998,9 +974,8 @@ void test_history_byte_admission_precedes_undo_redo_staging(void) {
     const size_t undo_exact = history_store_bytes(
         (size_t)io.length(io.ctx), undo_blob.len);
     tp_history_transition_blob_free(&undo_blob);
-    assert_history_rejects_below_exact(model, undo_exact, materialize_undo,
+    assert_history_commits_below_exact(model, undo_exact, materialize_undo,
                                        &err, 1);
-    assert_history_accepts_at_exact(model, undo_exact, materialize_undo, &err);
 
     record = tp_history_redo_record(tp_model_history(model));
     TEST_ASSERT_NOT_NULL(record);
@@ -1011,12 +986,11 @@ void test_history_byte_admission_precedes_undo_redo_staging(void) {
                               record, false, tp_model_project(model), SIZE_MAX,
                               &redo_blob, &outcome, &err));
     TEST_ASSERT_EQUAL_INT(TP_HISTORY_CODEC_OK, outcome);
-    const size_t redo_exact = history_store_bytes(
-        (size_t)io.length(io.ctx), redo_blob.len);
     tp_history_transition_blob_free(&redo_blob);
-    assert_history_rejects_below_exact(model, redo_exact, materialize_redo,
-                                       &err, 2);
-    assert_history_accepts_at_exact(model, redo_exact, materialize_redo, &err);
+    const int64_t bytes_before_redo = io.length(io.ctx);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, materialize_redo(model, NULL, &err));
+    TEST_ASSERT_EQUAL_INT64(3, tp_model_revision(model));
+    TEST_ASSERT_EQUAL_INT64(bytes_before_redo, io.length(io.ctx));
     tp_model_destroy(model);
 }
 
@@ -1213,7 +1187,7 @@ void test_replay_operation_budget_is_prewrite_preclone_and_checkpoint_reset(void
     char *project_before = serialize(tp_model_project(model));
     tp_project__test_set_clone_alloc_fail(0);
     TEST_ASSERT_EQUAL_INT(
-        TP_STATUS_OUT_OF_BOUNDS,
+        TP_STATUS_OOM,
         commit_rename(model, "6b000000000000000000000000000001",
                       revision_before, "must-not-commit"));
     tp_project__test_set_clone_alloc_fail(-1);
@@ -1612,7 +1586,7 @@ void test_duplicate_retry_after_restart(void) {
     tp_model_destroy(m2);
 }
 
-/* ---- append failure after apply -> exact rollback, no ack, retryable ----- */
+/* ---- append failure after apply -> live commit, degraded durable prefix -- */
 
 void test_append_failure_rolls_back(void) {
     tp_id128 key = tp_test_id_of(0x22);
@@ -1625,20 +1599,20 @@ void test_append_failure_rolls_back(void) {
     /* Inject: the next durable write (the append) fails entirely. */
     tp_journal_io_memory__fail_next_writes(io, 1);
     tp_status st = commit_rename(m, "cc000000000000000000000000000002", 1, "two");
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED, st);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, st);
 
-    /* Live model byte-unchanged, revision unchanged, id NOT retained. */
+    /* Live model commits while the durable prefix and journal id set stay put. */
     char *after = serialize(tp_model_project(m));
-    TEST_ASSERT_EQUAL_STRING(before, after);
-    TEST_ASSERT_EQUAL_INT64(rev_before, tp_model_revision(m));
+    TEST_ASSERT_NOT_EQUAL(0, strcmp(before, after));
+    TEST_ASSERT_EQUAL_INT64(rev_before + 1, tp_model_revision(m));
     TEST_ASSERT_FALSE(tp_journal_contains(tp_model_journal(m), "cc000000000000000000000000000002"));
 
-    /* Retry the SAME id -> succeeds (the failed append left no torn tail). */
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "cc000000000000000000000000000002", 1, "two"));
+    /* Retry the SAME committed id is rejected by live idempotency. */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_DUPLICATE_ID,
+                          commit_rename(m, "cc000000000000000000000000000002", 2, "two"));
     TEST_ASSERT_EQUAL_INT64(rev_before + 1, tp_model_revision(m));
-    TEST_ASSERT_TRUE(tp_journal_contains(tp_model_journal(m), "cc000000000000000000000000000002"));
 
-    /* And the retried txn is recoverable exactly once (not duplicated). */
+    /* Recovery sees the last durable prefix, not the degraded live suffix. */
     size_t blen = 0;
     char *committed = serialize(tp_model_project(m));
     uint8_t *bytes = snapshot_and_destroy(io, m, &blen);
@@ -1648,9 +1622,10 @@ void test_append_failure_rolls_back(void) {
     tp_error err;
     tp_model *m2 = recover_expect(io2, key, TP_STATUS_OK, &info, &err);
     TEST_ASSERT_NOT_NULL(m2);
-    TEST_ASSERT_EQUAL_INT(2, tp_journal_id_count(tp_model_journal(m2))); /* id01 + id02, once each */
+    TEST_ASSERT_EQUAL_INT(1, tp_journal_id_count(tp_model_journal(m2)));
     char *rec = serialize(tp_model_project(m2));
-    TEST_ASSERT_EQUAL_STRING(committed, rec);
+    TEST_ASSERT_NOT_EQUAL(0, strcmp(committed, rec));
+    TEST_ASSERT_EQUAL_STRING("one", tp_model_project(m2)->atlases[0].name);
 
     free(before);
     free(after);
@@ -1989,20 +1964,20 @@ void test_coordinator_ordering(void) {
     TEST_ASSERT_EQUAL_INT(1, cnt.pub);
     TEST_ASSERT_EQUAL_INT(0, cnt.abrt);
 
-    /* (b) append failure: prepare + abort, no publish. */
+    /* (b) append failure: live prepare + publish complete; recovery degrades. */
     tp_journal_io_memory__fail_next_writes(io, 1);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED, commit_rename(m, "01000000000000000000000000000002", 1, "two"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "01000000000000000000000000000002", 1, "two"));
     TEST_ASSERT_EQUAL_INT(2, cnt.prep);
-    TEST_ASSERT_EQUAL_INT(1, cnt.pub);
-    TEST_ASSERT_EQUAL_INT(1, cnt.abrt);
+    TEST_ASSERT_EQUAL_INT(2, cnt.pub);
+    TEST_ASSERT_EQUAL_INT(0, cnt.abrt);
 
     /* (c) prepare failure: reject, no gate, no publish, no abort. */
     cnt.prep_ret = TP_STATUS_INVALID_ARGUMENT;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
-                          commit_rename(m, "01000000000000000000000000000003", 1, "three"));
+                          commit_rename(m, "01000000000000000000000000000003", 2, "three"));
     TEST_ASSERT_EQUAL_INT(3, cnt.prep);
-    TEST_ASSERT_EQUAL_INT(1, cnt.pub);
-    TEST_ASSERT_EQUAL_INT(1, cnt.abrt);
+    TEST_ASSERT_EQUAL_INT(2, cnt.pub);
+    TEST_ASSERT_EQUAL_INT(0, cnt.abrt);
 
     tp_model_destroy(m);
 }
@@ -2251,19 +2226,19 @@ void test_file_journal_transaction_rejected_before_crossing_reader_cap(void) {
     TEST_ASSERT_EQUAL_INT(0, io.truncate(io.ctx, (size_t)TP_JOURNAL_MAX_FILE_BYTES - 1U));
     char *before = serialize(tp_model_project(m));
 
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED,
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           commit_rename(m, "c2000000000000000000000000000001", 0, "must-not-commit"));
     char *after = serialize(tp_model_project(m));
-    TEST_ASSERT_EQUAL_STRING(before, after);
-    TEST_ASSERT_EQUAL_INT64(0, tp_model_revision(m));
+    TEST_ASSERT_NOT_EQUAL(0, strcmp(before, after));
+    TEST_ASSERT_EQUAL_INT64(1, tp_model_revision(m));
     TEST_ASSERT_EQUAL_INT64((int64_t)TP_JOURNAL_MAX_FILE_BYTES - 1, io.length(io.ctx));
 
     free(before);
     free(after);
     TEST_ASSERT_EQUAL_INT(0, io.truncate(io.ctx, (size_t)valid_len));
-    /* Limit rejection retained neither bytes nor the id: the exact transaction is retryable. */
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          commit_rename(m, "c2000000000000000000000000000001", 0, "must-not-commit"));
+    /* The live commit id remains authoritative despite the older prefix. */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_DUPLICATE_ID,
+                          commit_rename(m, "c2000000000000000000000000000001", 1, "must-not-commit"));
     TEST_ASSERT_EQUAL_STRING("must-not-commit", tp_model_project(m)->atlases[0].name);
     TEST_ASSERT_EQUAL_INT64(1, tp_model_revision(m));
     tp_model_destroy(m); /* owns and closes j/io */
@@ -2294,16 +2269,14 @@ void test_file_journal_undo_rejected_before_crossing_reader_cap(void) {
     TEST_ASSERT_EQUAL_INT(0, io.truncate(io.ctx, (size_t)TP_JOURNAL_MAX_FILE_BYTES - 1U));
     const int undo_before = tp_model_undo_depth(m);
 
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED, tp_model_undo(m, &err));
-    TEST_ASSERT_EQUAL_STRING("committed", tp_model_project(m)->atlases[0].name);
-    TEST_ASSERT_EQUAL_INT64(1, tp_model_revision(m));
-    TEST_ASSERT_EQUAL_INT(undo_before, tp_model_undo_depth(m));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_undo(m, &err));
+    TEST_ASSERT_EQUAL_STRING("atlas1", tp_model_project(m)->atlases[0].name);
+    TEST_ASSERT_EQUAL_INT64(2, tp_model_revision(m));
+    TEST_ASSERT_EQUAL_INT(undo_before - 1, tp_model_undo_depth(m));
     TEST_ASSERT_EQUAL_INT64((int64_t)TP_JOURNAL_MAX_FILE_BYTES - 1, io.length(io.ctx));
 
     TEST_ASSERT_EQUAL_INT(0, io.truncate(io.ctx, (size_t)valid_len));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_undo(m, &err)); /* same cursor move remains retryable */
-    TEST_ASSERT_EQUAL_STRING("atlas1", tp_model_project(m)->atlases[0].name);
-    TEST_ASSERT_EQUAL_INT64(2, tp_model_revision(m));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_NOT_FOUND, tp_model_undo(m, &err));
     tp_model_destroy(m);
     remove(path);
 }
@@ -2455,9 +2428,11 @@ void test_midstream_corrupt_preserves_trailing(void) {
     TEST_ASSERT_EQUAL_INT64((int64_t)full_len, (int64_t)after_len);
     free(after);
 
-    /* The recovered journal refuses appends behind the corruption (poisoned). */
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED,
+    /* The poisoned prefix refuses the append, but the live edit commits and
+     * marks recovery degraded. */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           commit_rename(m2, "1e000000000000000000000000000003", tp_model_revision(m2), "three"));
+    TEST_ASSERT_EQUAL_STRING("three", tp_model_project(m2)->atlases[0].name);
 
     free(full);
     tp_journal_recovery_free(&info);
@@ -2504,9 +2479,10 @@ void test_midstream_bloated_length_preserves_trailing(void) {
     TEST_ASSERT_EQUAL_INT64((int64_t)full_len, (int64_t)after_len);
     free(after);
 
-    /* Poisoned: refuses appends behind the corruption. */
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED,
+    /* Poisoned recovery does not block the live edit. */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           commit_rename(m2, "1f000000000000000000000000000003", tp_model_revision(m2), "three"));
+    TEST_ASSERT_EQUAL_STRING("three", tp_model_project(m2)->atlases[0].name);
 
     free(full);
     tp_journal_recovery_free(&info);
@@ -2533,8 +2509,8 @@ void test_truncate_failure_poisons_recovery(void) {
     TEST_ASSERT_EQUAL_INT(TP_JOURNAL_RECOVERY_TRUNCATED, info.status);
     TEST_ASSERT_NOT_NULL(m2);
 
-    /* The torn tail could not be cleaned -> the recovered journal is poisoned. */
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED,
+    /* The torn tail could not be cleaned, but live editing remains available. */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           commit_rename(m2, "1f000000000000000000000000000003", tp_model_revision(m2), "three"));
 
     free(full);
@@ -2879,12 +2855,11 @@ void test_compaction_broken_store_keeps_fail_closed_authority(void) {
     req.op_count = 1;
     tp_txn_result result = {0};
     const int64_t revision_before = tp_model_revision(m);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED, tp_model_apply(m, &req, &result, &err));
-    TEST_ASSERT_FALSE(result.committed);
-    TEST_ASSERT_EQUAL_INT64(revision_before, result.revision);
-    TEST_ASSERT_EQUAL_INT(1, result.error_count);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED, result.errors[0].code);
-    TEST_ASSERT_EQUAL_STRING("one", tp_model_project(m)->atlases[0].name);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_apply(m, &req, &result, &err));
+    TEST_ASSERT_TRUE(result.committed);
+    TEST_ASSERT_EQUAL_INT64(revision_before + 1, result.revision);
+    TEST_ASSERT_EQUAL_INT(0, result.error_count);
+    TEST_ASSERT_EQUAL_STRING("two", tp_model_project(m)->atlases[0].name);
     TEST_ASSERT_FALSE(tp_journal_contains(tp_model_journal(m), blocked));
     TEST_ASSERT_EQUAL_INT(retained_before, tp_journal_id_count(tp_model_journal(m)));
     tp_txn_result_free(&result);
@@ -2922,24 +2897,21 @@ void test_journal_undo_append_failure_rolls_back_history_commit(void) {
 
     tp_journal_io_memory__fail_next_writes(io, 1);
     tp_error err = {0};
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED, tp_model_undo(m, &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_undo(m, &err));
 
     char *project_after = serialize(tp_model_project(m));
     size_t journal_after_len = 0;
     uint8_t *journal_after = snapshot_io(io, &journal_after_len);
-    TEST_ASSERT_EQUAL_PTR(project_ptr_before, tp_model_project(m));
-    TEST_ASSERT_EQUAL_STRING(project_before, project_after);
-    TEST_ASSERT_EQUAL_INT64(revision_before, tp_model_revision(m));
-    TEST_ASSERT_EQUAL_INT(undo_before, tp_model_undo_depth(m));
-    TEST_ASSERT_EQUAL_INT(redo_before, tp_model_redo_depth(m));
-    TEST_ASSERT_EQUAL_INT64((int64_t)journal_before_len, (int64_t)journal_after_len);
-    TEST_ASSERT_EQUAL_MEMORY(journal_before, journal_after, journal_before_len);
-
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_undo(m, &err));
+    TEST_ASSERT_NOT_EQUAL(project_ptr_before, tp_model_project(m));
+    TEST_ASSERT_NOT_EQUAL(0, strcmp(project_before, project_after));
     TEST_ASSERT_EQUAL_STRING("atlas1", tp_model_project(m)->atlases[0].name);
     TEST_ASSERT_EQUAL_INT64(revision_before + 1, tp_model_revision(m));
     TEST_ASSERT_EQUAL_INT(undo_before - 1, tp_model_undo_depth(m));
     TEST_ASSERT_EQUAL_INT(redo_before + 1, tp_model_redo_depth(m));
+    TEST_ASSERT_EQUAL_INT64((int64_t)journal_before_len, (int64_t)journal_after_len);
+    TEST_ASSERT_EQUAL_MEMORY(journal_before, journal_after, journal_before_len);
+
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_NOT_FOUND, tp_model_undo(m, &err));
 
     free(project_before);
     free(project_after);
@@ -3018,24 +2990,21 @@ void test_journal_redo_append_failure_rolls_back_history_commit(void) {
     const int redo_before = tp_model_redo_depth(m);
 
     tp_journal_io_memory__fail_next_writes(io, 1);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED, tp_model_redo(m, &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_redo(m, &err));
 
     char *project_after = serialize(tp_model_project(m));
     size_t journal_after_len = 0;
     uint8_t *journal_after = snapshot_io(io, &journal_after_len);
-    TEST_ASSERT_EQUAL_PTR(project_ptr_before, tp_model_project(m));
-    TEST_ASSERT_EQUAL_STRING(project_before, project_after);
-    TEST_ASSERT_EQUAL_INT64(revision_before, tp_model_revision(m));
-    TEST_ASSERT_EQUAL_INT(undo_before, tp_model_undo_depth(m));
-    TEST_ASSERT_EQUAL_INT(redo_before, tp_model_redo_depth(m));
-    TEST_ASSERT_EQUAL_INT64((int64_t)journal_before_len, (int64_t)journal_after_len);
-    TEST_ASSERT_EQUAL_MEMORY(journal_before, journal_after, journal_before_len);
-
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_redo(m, &err));
+    TEST_ASSERT_NOT_EQUAL(project_ptr_before, tp_model_project(m));
+    TEST_ASSERT_NOT_EQUAL(0, strcmp(project_before, project_after));
     TEST_ASSERT_EQUAL_STRING("one", tp_model_project(m)->atlases[0].name);
     TEST_ASSERT_EQUAL_INT64(revision_before + 1, tp_model_revision(m));
     TEST_ASSERT_EQUAL_INT(undo_before + 1, tp_model_undo_depth(m));
     TEST_ASSERT_EQUAL_INT(redo_before - 1, tp_model_redo_depth(m));
+    TEST_ASSERT_EQUAL_INT64((int64_t)journal_before_len, (int64_t)journal_after_len);
+    TEST_ASSERT_EQUAL_MEMORY(journal_before, journal_after, journal_before_len);
+
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_NOT_FOUND, tp_model_redo(m, &err));
 
     free(project_before);
     free(project_after);
@@ -3052,25 +3021,24 @@ void test_history_eviction_waits_for_journal_append_ack(void) {
     tp_model *m = model_with_journal(tp_test_id_of(0x89), &io);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_enable_history(m));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "89000000000000000000000000000001", 0, "one"));
-    const size_t history_bytes = tp_model_history(m)->bytes;
     size_t journal_before_len = 0U;
     uint8_t *journal_before = snapshot_io(io, &journal_before_len);
 
     tp_journal_io_memory__fail_next_writes(io, 1);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED,
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           commit_rename(m, "89000000000000000000000000000002", 1, "two"));
-    TEST_ASSERT_EQUAL_STRING("one", tp_model_project(m)->atlases[0].name);
-    TEST_ASSERT_EQUAL_INT64(1, tp_model_revision(m));
+    TEST_ASSERT_EQUAL_STRING("two", tp_model_project(m)->atlases[0].name);
+    TEST_ASSERT_EQUAL_INT64(2, tp_model_revision(m));
     TEST_ASSERT_EQUAL_INT(1, tp_model_undo_depth(m));
-    TEST_ASSERT_EQUAL_UINT64(history_bytes, tp_model_history(m)->bytes);
+    TEST_ASSERT_GREATER_THAN_UINT64(0U, tp_model_history(m)->bytes);
     size_t journal_after_len = 0U;
     uint8_t *journal_after = snapshot_io(io, &journal_after_len);
     TEST_ASSERT_EQUAL_UINT64(journal_before_len, journal_after_len);
     TEST_ASSERT_EQUAL_MEMORY(journal_before, journal_after, journal_before_len);
 
-    /* The identical id remains retryable. Only the successful ACK replaces the
-     * retained Undo record, so Undo still restores the previous committed state. */
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, commit_rename(m, "89000000000000000000000000000002", 1, "two"));
+    /* The committed live id is not retryable even though recovery lacks it. */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_DUPLICATE_ID,
+                          commit_rename(m, "89000000000000000000000000000002", 2, "two"));
     TEST_ASSERT_EQUAL_INT(1, tp_model_undo_depth(m));
     tp_error err = {0};
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_undo(m, &err));
@@ -3306,10 +3274,10 @@ void test_journal_history_short_write_rolls_back_undo(void) {
     tp_error err = {0};
     const int64_t revision_before = tp_model_revision(m);
     tp_journal_io_memory__short_next_write(io, 1);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED, tp_model_undo(m, &err));
-    TEST_ASSERT_EQUAL_STRING("one", tp_model_project(m)->atlases[0].name);
-    TEST_ASSERT_EQUAL_INT64(revision_before, tp_model_revision(m));
-    TEST_ASSERT_TRUE(tp_model_can_undo(m));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_undo(m, &err));
+    TEST_ASSERT_EQUAL_STRING("atlas1", tp_model_project(m)->atlases[0].name);
+    TEST_ASSERT_EQUAL_INT64(revision_before + 1, tp_model_revision(m));
+    TEST_ASSERT_FALSE(tp_model_can_undo(m));
 
     size_t bytes_len = 0U;
     uint8_t *bytes = snapshot_and_destroy(io, m, &bytes_len);
@@ -3395,12 +3363,12 @@ void test_journal_history_sync_failure_rolls_back_undo_and_poisons(void) {
     tp_error err = {0};
     const int64_t revision_before = tp_model_revision(m);
     tp_journal_io_memory__fail_next_sync(io);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED, tp_model_undo(m, &err));
-    TEST_ASSERT_EQUAL_STRING("one", tp_model_project(m)->atlases[0].name);
-    TEST_ASSERT_EQUAL_INT64(revision_before, tp_model_revision(m));
-    TEST_ASSERT_TRUE(tp_model_can_undo(m));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_model_undo(m, &err));
+    TEST_ASSERT_EQUAL_STRING("atlas1", tp_model_project(m)->atlases[0].name);
+    TEST_ASSERT_EQUAL_INT64(revision_before + 1, tp_model_revision(m));
+    TEST_ASSERT_FALSE(tp_model_can_undo(m));
     TEST_ASSERT_TRUE(tp_journal__is_poisoned(tp_model_journal(m)));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED, tp_model_undo(m, &err));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_NOT_FOUND, tp_model_undo(m, &err));
     tp_model_destroy(m);
 }
 

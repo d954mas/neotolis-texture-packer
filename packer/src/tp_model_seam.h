@@ -19,4 +19,7 @@ tp_status tp_model__retain_project_generation(
  * Takes ownership of `project`; session stays the persistence/orchestration caller. */
 void tp_model__adopt_project(tp_model *model, tp_project *project);
 
+bool tp_model__recovery_degraded(const tp_model *model);
+tp_status tp_model__recovery_status(const tp_model *model);
+
 #endif /* TP_CORE_SRC_TP_MODEL_SEAM_H */

@@ -19,8 +19,8 @@
  * recovered session. Enforcing "the checkpoint must round-trip" HERE in core, below any
  * client's own promotion (e.g. the GUI's ensure_ids), means no caller can persist an
  * unrecoverable base. Shared by tp_model_attach_journal (initial checkpoint) and
- * tp_model_compact_journal (Save-window compaction), and journal-gated Undo/Redo so all
- * checkpoint paths inherit the guarantee. On any
+ * tp_model_compact_journal (Save-window compaction), and explicit history checkpoints
+ * so all checkpoint paths inherit the guarantee. On any
  * failure *snap is NULL/0 and a wrapped error is returned; the caller leaves the journal
  * untouched. */
 static tp_status project_checkpoint_snapshot(const tp_project *project, size_t expected_len,
@@ -59,12 +59,9 @@ tp_status tp_model_attach_journal(tp_model *m, tp_journal *j, tp_error *err) {
     if (m->journal) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "a journal is already attached");
     }
-    /* C1: migrate ids the model already committed journal-less (recorded only in the
-     * in-memory idstore) into the fresh journal's retained-id index BEFORE the initial
-     * checkpoint. Otherwise the post-attach idempotency authority (tp_journal_contains)
-     * would not know those ids and a legitimate re-submit would double-apply (§7.2). The
-     * seed happens pre-checkpoint so the checkpoint's durable id-list carries them too,
-     * and recovery sees them. (A foreign idstore we cannot enumerate -> no migration.) */
+    /* Migrate ids already committed in live memory into the fresh journal before
+     * its initial checkpoint, so a later recovery can seed the rebuilt model's
+     * authoritative in-memory idstore. */
     const tp_idset *pre = tp_txn_idstore_mem_view(m->idstore);
     if (pre) {
         int pre_count = tp_idset_count(pre);
@@ -106,6 +103,7 @@ tp_status tp_model_attach_journal(tp_model *m, tp_journal *j, tp_error *err) {
         return cs;
     }
     m->journal = j; /* ownership transferred */
+    tp_model__restore_recovery(m);
     return TP_STATUS_OK;
 }
 
@@ -172,9 +170,12 @@ tp_status tp_model_compact_journal(tp_model *m, tp_error *err) {
     }
     tp_status cs = tp_journal_compact(m->journal, (const uint8_t *)snap, snap_len, m->revision, err);
     free(snap);
-    /* Never auto-detach on a poisoned replacement failure. The journal remains the
-     * model's idempotency/durability authority and subsequent mutations fail closed
-     * with TP_STATUS_JOURNAL_FAILED until an owner explicitly repairs or replaces it. */
+    /* Never auto-detach on a poisoned replacement failure. The older recovery
+     * prefix remains available for diagnosis; live idempotency and edits do not
+     * depend on the poisoned journal. */
+    if (cs == TP_STATUS_OK) {
+        tp_model__restore_recovery(m);
+    }
     return cs;
 }
 
@@ -200,9 +201,9 @@ tp_status tp_model_set_recovery_metadata_ex(tp_model *m, int64_t timestamp, cons
 
 bool tp_model_has_journal(const tp_model *m) {
     /* m->journal is set ONLY after tp_journal_init_checkpoint durably wrote (see
-     * tp_model_attach_journal), so a non-NULL journal means the current committed state is durably
-     * backed. The GUI adopt-delete guard keys off this: never delete the adopted source when this is
-     * false (journal-less attach), because the source is then the sole durable copy. */
+     * tp_model_attach_journal), so a non-NULL journal proves a durable recovery
+     * baseline exists. It does not promise the latest live revision is recorded
+     * after recovery degradation. */
     return m && m->journal != NULL;
 }
 
@@ -212,6 +213,7 @@ void tp_model_detach_journal(tp_model *m) {
     }
     tp_journal_destroy(m->journal);
     m->journal = NULL;
+    tp_model__restore_recovery(m);
 }
 
 tp_status tp_model_recover(tp_journal_io io, tp_id128 key, tp_model **out, tp_journal_recovery *info, tp_error *err) {
@@ -234,11 +236,11 @@ tp_status tp_model_recover(tp_journal_io io, tp_id128 key, tp_model **out, tp_jo
     /* Clean a torn/incomplete TAIL so continued appends stay recoverable (never guess
      * past the last good record). C2: a MID-STREAM corruption (a bad record with valid
      * records STILL after it) is NOT truncated -- that would physically delete those
-     * trailing acknowledged records. Recover up to the last good record and PRESERVE the
+     * trailing durable records. Recover up to the last good record and PRESERVE the
      * file; tp_journal_recover has already poisoned the journal against appends behind
      * the corruption. A torn tail, or a single trailing corrupt record, is safe to drop.
      * C3: if the tail-clean truncate itself fails, poison the journal -- a still-present
-     * bad record must never hide a later acknowledged append. */
+     * bad record must never hide a later durable append. */
     bool clean_tail = (rec.status == TP_JOURNAL_RECOVERY_TRUNCATED) ||
                       (rec.status == TP_JOURNAL_RECOVERY_CORRUPT && !rec.mid_stream_corrupt);
     if (clean_tail) {
@@ -330,7 +332,7 @@ tp_status tp_model_recover(tp_journal_io io, tp_id128 key, tp_model **out, tp_jo
          * TXN op-payloads onto it in commit order -- the SAME tp_operation_apply, in the SAME order,
          * as the commit path (tp_txn__commit_validated), so the replayed project reaches exactly the
          * committed state. A replay-time decode/apply failure is a HARD fault (the op was already
-         * acknowledged at commit): surface it as a non-OK recover, never silently skip an op. */
+         * durably recorded after commit): surface it as a non-OK recover, never silently skip an op. */
         tp_project *p = NULL;
         tp_status ls = tp_project_load_buffer(rec.snapshot, rec.snapshot_len, &p, err); /* base checkpoint */
         if (ls != TP_STATUS_OK) {
@@ -403,12 +405,33 @@ tp_status tp_model_recover(tp_journal_io io, tp_id128 key, tp_model **out, tp_jo
                     rm->revision = rec.revision; /* the FINAL recovered revision (last record's) */
                     rm->saved_identity = tp_semantic_identity(p);
                     rm->recovered_unsaved = true; /* C5: recovered state is ahead of the project file -> DIRTY */
-                    rm->journal = j;              /* owns j; its index is already seeded by recover */
-                    j_consumed = true;
-                    if (out) {
-                        *out = rm;
+                    tp_status retained_status = TP_STATUS_OK;
+                    const int retained_count = tp_idset_count(&j->ids);
+                    for (int i = 0; i < retained_count; ++i) {
+                        char id_hex[TP_IDSET_IDLEN + 1];
+                        if (!tp_idset_format_at(&j->ids, i, id_hex)) {
+                            retained_status = TP_STATUS_INVALID_ARGUMENT;
+                            break;
+                        }
+                        retained_status = rm->idstore->record(
+                            rm->idstore->ctx, id_hex, err);
+                        if (retained_status != TP_STATUS_OK) {
+                            break;
+                        }
+                    }
+                    if (retained_status != TP_STATUS_OK) {
+                        tp_model_destroy(rm);
+                        ret = tp_error_set(
+                            err, retained_status,
+                            "could not seed live retained transaction ids");
                     } else {
-                        tp_model_destroy(rm); /* also destroys j */
+                        rm->journal = j; /* owns j; both indexes now agree */
+                        j_consumed = true;
+                        if (out) {
+                            *out = rm;
+                        } else {
+                            tp_model_destroy(rm); /* also destroys j */
+                        }
                     }
                 }
             }

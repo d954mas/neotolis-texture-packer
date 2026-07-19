@@ -21,7 +21,7 @@
  * full-snapshot restore.
  *
  * The session is the shipping owner of this primitive: it admits transactions,
- * exposes Undo/Redo, and journals checkpoints. Frontends never maintain a second
+ * exposes Undo/Redo, and records best-effort recovery transitions. Frontends never maintain a second
  * snapshot history. History remains bounded in-memory state; journal recovery
  * reconstructs the recoverable model rather than serializing these allocations.
  */
@@ -37,9 +37,9 @@ extern "C" {
 #endif
 
 /* History is deliberately bounded session state. A transaction whose semantic
- * diff cannot fit the single-record budget is rejected before journal append or
+ * diff cannot fit the single-record budget is rejected before
  * model publication: committing an edit without its Undo record is forbidden.
- * Older undo steps are evicted FIFO only after the transaction's durable ACK. */
+ * Older undo steps are evicted FIFO at the live transaction commit. */
 #define TP_HISTORY_MAX_STEPS 256
 #define TP_HISTORY_MAX_BYTES (64U * 1024U * 1024U)
 #define TP_HISTORY_MAX_RECORD_BYTES (32U * 1024U * 1024U)
@@ -76,6 +76,8 @@ const char *tp_model_undo_author(const tp_model *m);
  * history cursor unchanged. Each Undo/Redo that succeeds bumps the revision by
  * exactly 1 (a new committed state; dirty is recomputed from semantic identity, so
  * an Undo back to the saved baseline is clean even at a higher revision).
+ * A recovery transition encode/append/sync failure occurs after that commit,
+ * leaves Undo/Redo successful, and makes later recovery recording unavailable.
  *
  * A corrupted/hostile diff (a stale or unknown entity id, an out-of-range position)
  * yields a STRUCTURED error (TP_STATUS_NOT_FOUND / TP_STATUS_OUT_OF_BOUNDS), never a
