@@ -79,6 +79,24 @@ static void gui_project__test_fail_next_recovery_writes(int count) {
     tp_journal_io_memory__fail_next_writes(s_test_recovery_io, count);
 }
 
+static bool gui_project__test_recovery_notice(tp_status expected,
+                                              gui_recovery_notice *out) {
+    gui_recovery_notice notice = {0};
+    const tp_session_recovery_health health =
+        tp_session_recovery_health_query(gui_project__test_session());
+    const bool active = gui_project_recovery_notice_query(&notice);
+    const bool exact =
+        active && health.degraded &&
+        strcmp(notice.notice_id, TP_SESSION_NOTICE_RECOVERY_DEGRADED) == 0 &&
+        notice.generation == health.generation &&
+        notice.status == expected && health.first_cause == expected &&
+        strstr(notice.message, tp_status_str(expected)) != NULL;
+    if (out) {
+        *out = notice;
+    }
+    return exact;
+}
+
 /* Dev-seam index conveniences resolve against the same owned snapshot a real
  * widget uses, then exercise the stable-ID production contract. */
 static const tp_snapshot_atlas *selftest_atlas_at(int index,
@@ -2278,17 +2296,18 @@ void run_selftest(void) {
         const bool dirty_before = gui_project_is_dirty();
         gui_project__test_fail_next_recovery_writes(1); /* the NEXT journal append fails entirely */
         const bool committed = gui_project_set_atlas_name(0, "committed_without_recovery");
-        char emsg[256] = {0};
-        const bool surfaced = gui_project_take_op_error(emsg, sizeof emsg);
+        gui_recovery_notice j1notice = {0};
+        const bool surfaced = gui_project__test_recovery_notice(
+            TP_STATUS_JOURNAL_FAILED, &j1notice);
         const char *nm1 = selftest_atlas_at(0, NULL)->name;
         nt_log_info("SELFTEST: J1 append-fail committed=%d surfaced=%d msg='%s' name '%s'->'%s' dirty %d->%d",
-                    (int)committed, (int)surfaced, emsg, nm0, nm1, (int)dirty_before, (int)gui_project_is_dirty());
+                    (int)committed, (int)surfaced, j1notice.message, nm0, nm1, (int)dirty_before, (int)gui_project_is_dirty());
         const tp_session_recovery_health j1health =
             tp_session_recovery_health_query(gui_project__test_session());
         NT_ASSERT(committed && strcmp(nm1, "committed_without_recovery") == 0 &&
                   "J1: recovery failure does not reject or roll back the edit");
-        NT_ASSERT(surfaced && strstr(emsg, "recovery") != NULL &&
-                  "J1: recovery degradation surfaces a non-blocking warning");
+        NT_ASSERT(surfaced && !gui_project_take_op_error(NULL, 0) &&
+                  "J1: exact persistent recovery notice is separate from operation rejects");
         NT_ASSERT(!dirty_before && gui_project_is_dirty() &&
                   "J1: the committed edit still dirties the project");
         NT_ASSERT(j1health.degraded && j1health.first_cause == TP_STATUS_JOURNAL_FAILED &&
@@ -2297,8 +2316,11 @@ void run_selftest(void) {
         NT_ASSERT(gui_project_set_atlas_name(0, "works_after") &&
                   strcmp(selftest_atlas_at(0, NULL)->name, "works_after") == 0 &&
                   "J1: the editor keeps working while recovery is degraded");
-        NT_ASSERT(!gui_project_take_op_error(NULL, 0) &&
-                  "J1: sticky degradation is not re-announced on every edit");
+        gui_recovery_notice j1after = {0};
+        NT_ASSERT(gui_project__test_recovery_notice(
+                      TP_STATUS_JOURNAL_FAILED, &j1after) &&
+                  j1after.generation == j1notice.generation &&
+                  "J1: sticky recovery notice keeps its generation across later edits");
 
         /* (J2) Save flushes the buffered edit even if its recovery append fails,
          * publishes the project, and heals recovery with a fresh checkpoint. */
@@ -2327,6 +2349,8 @@ void run_selftest(void) {
         NT_ASSERT(selftest_atlas_at(0, NULL)->padding == j2pad + 5 &&
                   "J2: Save contains the buffered committed gesture");
         NT_ASSERT(!j2health.degraded && "J2: the successful Save checkpoint heals recovery");
+        NT_ASSERT(!gui_project_recovery_notice_query(NULL) &&
+                  "J2: successful Save publishes the cleared recovery notice state");
         (void)remove(s2path);
         (void)gui_project_take_op_error(NULL, 0);
 
@@ -2343,15 +2367,16 @@ void run_selftest(void) {
         (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, j6pad + 7, 0.0F); /* BUFFERED (uncommitted) */
         gui_project__test_fail_next_recovery_writes(1);                            /* the flush's append fails */
         const bool j6ret = gui_project_set_atlas_name(0, "structural_should_abort");
-        char j6err[256] = {0};
-        const bool j6surfaced = gui_project_take_op_error(j6err, sizeof j6err);
+        gui_recovery_notice j6notice = {0};
+        const bool j6surfaced = gui_project__test_recovery_notice(
+            TP_STATUS_JOURNAL_FAILED, &j6notice);
         const char *j6name1 = selftest_atlas_at(0, NULL)->name;
         const int j6pad1 = selftest_atlas_at(0, NULL)->padding;
         nt_log_info("SELFTEST: J6 structural-after-degrade ret=%d surfaced=%d name '%s'->'%s' pad %d->%d (want 1,1,changed)",
                     (int)j6ret, (int)j6surfaced, j6name0, j6name1, j6pad, j6pad1);
         NT_ASSERT(j6ret && "J6: recovery degradation does not abort the structural op");
-        NT_ASSERT(j6surfaced && strstr(j6err, "recovery") != NULL &&
-                  "J6: recovery degradation is surfaced as a warning");
+        NT_ASSERT(j6surfaced && !gui_project_take_op_error(NULL, 0) &&
+                  "J6: recovery degradation is a persistent exact notice, not an op-error");
         NT_ASSERT(strcmp(j6name1, "structural_should_abort") == 0 && j6pad1 == j6pad + 7 &&
                   "J6: both the buffered gesture and following structural edit landed");
         (void)gui_project_take_op_error(NULL, 0);
@@ -2377,7 +2402,10 @@ void run_selftest(void) {
         nt_log_info("SELFTEST: J7 pack-after-degrade result=%s (want PRESENT)",
                     j7r ? "PRESENT" : "NULL");
         NT_ASSERT(j7r != NULL && "J7: Pack proceeds from the committed post-flush model");
-        (void)gui_project_take_op_error(NULL, 0);
+        NT_ASSERT(gui_project__test_recovery_notice(
+                      TP_STATUS_JOURNAL_FAILED, NULL) &&
+                  !gui_project_take_op_error(NULL, 0) &&
+                  "J7: Pack leaves the recovery warning persistent and non-rejecting");
 
         /* (J8) The buffered edit commits despite recovery degradation, so the
          * ordinary unsaved-changes gate still protects it before New. */
@@ -2402,8 +2430,11 @@ void run_selftest(void) {
                     (int)j8kept);
         NT_ASSERT(j8kept &&
                   "J8: recovery degradation cannot bypass the ordinary dirty-project gate");
+        NT_ASSERT(gui_project__test_recovery_notice(
+                      TP_STATUS_JOURNAL_FAILED, NULL) &&
+                  !gui_project_take_op_error(NULL, 0) &&
+                  "J8: dirty gate preserves the persistent recovery warning");
         (void)remove(j8path);
-        (void)gui_project_take_op_error(NULL, 0);
 
         /* (J9) Remove continues after the buffered edit commits and recovery degrades. */
         gui_project_new();
@@ -2422,7 +2453,10 @@ void run_selftest(void) {
         nt_log_info("SELFTEST: J9 remove-after-degrade ret=%d count %d->%d (want 1, -1)", (int)j9ret_fail, j9count0, j9count1);
         NT_ASSERT(j9ret_fail && j9count1 == j9count0 - 1 &&
                   "J9: recovery degradation does not block the requested removal");
-        (void)gui_project_take_op_error(NULL, 0);
+        NT_ASSERT(gui_project__test_recovery_notice(
+                      TP_STATUS_JOURNAL_FAILED, NULL) &&
+                  !gui_project_take_op_error(NULL, 0) &&
+                  "J9: removal keeps the exact recovery warning separate from rejects");
 
         /* (J10) Animation rename remains a first-class operation: collisions
          * reject, while a unique rename commits despite recovery degradation. */
@@ -2450,15 +2484,16 @@ void run_selftest(void) {
         (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, j10pad + 2, 0.0F); /* buffered */
         gui_project__test_fail_next_recovery_writes(1);
         const bool j10_flush_ret = gui_project_set_anim_id(0, j10b, "totally_unique_name");
-        char j10_ferr[256] = {0};
-        const bool j10_fsurfaced = gui_project_take_op_error(j10_ferr, sizeof j10_ferr);
+        gui_recovery_notice j10_notice = {0};
+        const bool j10_fsurfaced = gui_project__test_recovery_notice(
+            TP_STATUS_JOURNAL_FAILED, &j10_notice);
         nt_log_info("SELFTEST: J10 recovery-degrade ret=%d surfaced=%d msg='%s' (want 1,1 -> recovery warning)",
-                    (int)j10_flush_ret, (int)j10_fsurfaced, j10_ferr);
-        NT_ASSERT(j10_flush_ret && j10_fsurfaced && strstr(j10_ferr, "recovery") != NULL &&
-                  strstr(j10_ferr, "already exists") == NULL &&
+                    (int)j10_flush_ret, (int)j10_fsurfaced, j10_notice.message);
+        NT_ASSERT(j10_flush_ret && j10_fsurfaced &&
+                  strstr(j10_notice.message, "already exists") == NULL &&
+                  !gui_project_take_op_error(NULL, 0) &&
                   strcmp(selftest_animation_at(0, j10b)->name, "totally_unique_name") == 0 &&
                   "J10/live: a unique rename commits and recovery failure is only a warning");
-        (void)gui_project_take_op_error(NULL, 0);
 
         /* (J11) Own-name remains a no-op success. A recovery-degraded entry
          * flush also succeeds and exposes only the non-blocking warning. */
@@ -2483,13 +2518,14 @@ void run_selftest(void) {
         (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, j11pad + 1, 0.0F); /* buffered gesture */
         gui_project__test_fail_next_recovery_writes(1);
         const bool j11_entry_flush = gui_project_flush_pending(); /* the entry guard commit_active_edit runs FIRST */
-        char j11_ferr[256] = {0};
-        const bool j11_fsurfaced = gui_project_take_op_error(j11_ferr, sizeof j11_ferr);
+        gui_recovery_notice j11_notice = {0};
+        const bool j11_fsurfaced = gui_project__test_recovery_notice(
+            TP_STATUS_JOURNAL_FAILED, &j11_notice);
         nt_log_info("SELFTEST: J11 entry-flush ret=%d surfaced=%d (want 1,1 -> recovery warning)",
                     (int)j11_entry_flush, (int)j11_fsurfaced);
-        NT_ASSERT(j11_entry_flush && j11_fsurfaced && strstr(j11_ferr, "recovery") != NULL &&
+        NT_ASSERT(j11_entry_flush && j11_fsurfaced &&
+                  !gui_project_take_op_error(NULL, 0) &&
                   "J11: recovery-degraded entry flush still commits successfully");
-        (void)gui_project_take_op_error(NULL, 0);
 
         /* (J11b) A core-rejected atlas rename keeps the inline editor alive on Enter so the user can
          * correct the value. A forced blur dismisses it without mutating the model. */
@@ -2528,7 +2564,10 @@ void run_selftest(void) {
                     s_status);
         NT_ASSERT(strncmp(s_status, "Undo", 4) == 0 &&
                   "J12: Undo remains available after recovery degradation");
-        (void)gui_project_take_op_error(NULL, 0);
+        NT_ASSERT(gui_project__test_recovery_notice(
+                      TP_STATUS_JOURNAL_FAILED, NULL) &&
+                  !gui_project_take_op_error(NULL, 0) &&
+                  "J12: Undo keeps the persistent recovery warning outside status/op-error");
 
         /* (J12b) Undo/Redo publish History independently of recovery recording. */
         gui_project_new();
@@ -2539,19 +2578,23 @@ void run_selftest(void) {
         NT_ASSERT(gui_project_set_atlas_name(0, "j12b_edit") && "J12b: committed edit populates history");
         gui_project__test_fail_next_recovery_writes(1);
         const bool j12b_undo_fail = gui_project_undo();
-        char j12b_uerr[256] = {0};
-        const bool j12b_usurfaced = gui_project_take_op_error(j12b_uerr, sizeof j12b_uerr);
-        NT_ASSERT(j12b_undo_fail && j12b_usurfaced && strstr(j12b_uerr, "recovery") != NULL &&
+        gui_recovery_notice j12b_undo_notice = {0};
+        const bool j12b_usurfaced = gui_project__test_recovery_notice(
+            TP_STATUS_JOURNAL_FAILED, &j12b_undo_notice);
+        NT_ASSERT(j12b_undo_fail && j12b_usurfaced &&
+                  !gui_project_take_op_error(NULL, 0) &&
                   strcmp(selftest_atlas_at(0, NULL)->name, "atlas1") == 0 &&
                   "J12b: Undo publishes and surfaces recovery degradation as a warning");
 
         const bool j12b_redo_fail = gui_project_redo();
-        char j12b_rerr[256] = {0};
-        const bool j12b_rsurfaced = gui_project_take_op_error(j12b_rerr, sizeof j12b_rerr);
-        NT_ASSERT(j12b_redo_fail && !j12b_rsurfaced &&
+        gui_recovery_notice j12b_redo_notice = {0};
+        const bool j12b_rsurfaced = gui_project__test_recovery_notice(
+            TP_STATUS_JOURNAL_FAILED, &j12b_redo_notice);
+        NT_ASSERT(j12b_redo_fail && j12b_rsurfaced &&
+                  j12b_redo_notice.generation == j12b_undo_notice.generation &&
+                  !gui_project_take_op_error(NULL, 0) &&
                   strcmp(selftest_atlas_at(0, NULL)->name, "j12b_edit") == 0 &&
-                  "J12b: Redo remains available and sticky degradation is not repeated");
-        (void)gui_project_take_op_error(NULL, 0);
+                  "J12b: Redo keeps the same sticky recovery notice generation");
 
         /* (J14) The startup decision must never replace recovered work with
          * a command-line project. Exercise the complete pure truth table. */
