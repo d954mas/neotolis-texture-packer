@@ -581,6 +581,7 @@ nt_set_warning_flags(tp_demo_export)   # AGENTS.md invariant: engine warning fla
 #   tp_bench_foundation [scratch_dir] [iterations] [recovery_ops]
 #   tp_bench_foundation --project <project> [scratch_dir] [iterations] [recovery_ops]
 #   tp_bench_foundation --project-load-scaling [iterations]
+#   tp_bench_foundation --batch-scaling <project> [iterations]
 add_executable(tp_bench_foundation
     tp_bench_foundation.c
     tp_bench_project_load.c)

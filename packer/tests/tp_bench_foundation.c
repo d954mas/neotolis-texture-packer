@@ -517,6 +517,132 @@ static bool bench_normal_transaction(const fixture *f, int warmups, int iteratio
     return true;
 }
 
+/* Measures the real atomic source-import shape without letting one sample grow
+ * the next sample's model. Baseline cloning/setup stays outside the timed
+ * region; tp_model_apply still performs its production transactional clone,
+ * validation, History capture, result echo, and publication inside it. */
+static bool bench_source_add_batch(const fixture *f, int warmups,
+                                   int iterations, int operation_count) {
+    if (!f || !f->project || operation_count <= 0 ||
+        operation_count > TP_TXN_MAX_OPS) {
+        return false;
+    }
+    tp_operation *operations =
+        (tp_operation *)calloc((size_t)operation_count, sizeof *operations);
+    char (*paths)[64] =
+        (char (*)[64])calloc((size_t)operation_count, sizeof *paths);
+    if (!operations || !paths) {
+        free(paths);
+        free(operations);
+        return false;
+    }
+    const tp_id128 atlas_id = f->project->atlases[0].id;
+    for (int i = 0; i < operation_count; ++i) {
+        tp_id128 source_id = {{0}};
+        source_id.bytes[0] = 0xFAU;
+        source_id.bytes[1] = 0xCEU;
+        source_id.bytes[12] = (uint8_t)((unsigned)i >> 24U);
+        source_id.bytes[13] = (uint8_t)((unsigned)i >> 16U);
+        source_id.bytes[14] = (uint8_t)((unsigned)i >> 8U);
+        source_id.bytes[15] = (uint8_t)(unsigned)i;
+        if (tp_project_has_structural_id(f->project, source_id)) {
+            free(paths);
+            free(operations);
+            return false;
+        }
+        (void)snprintf(paths[i], sizeof paths[i],
+                       "bench/import-%04d.png", i);
+        operations[i].kind = TP_OP_SOURCE_ADD;
+        operations[i].atlas_id = atlas_id;
+        operations[i].u.source_add.source_id = source_id;
+        operations[i].u.source_add.kind = TP_SOURCE_KIND_FILE;
+        operations[i].u.source_add.key = paths[i];
+    }
+
+    tp_bench_samples samples;
+    tp_bench_samples_init(&samples);
+    uint64_t max_clone_allocations = 0U;
+    for (int sample = 0; sample < warmups + iterations; ++sample) {
+        tp_project *project = tp_project_clone(f->project);
+        tp_model *model = project ? tp_model_wrap(project) : NULL;
+        if (!model || tp_model_enable_history(model) != TP_STATUS_OK) {
+            tp_model_destroy(model);
+            free(paths);
+            free(operations);
+            return false;
+        }
+        tp_txn_request request;
+        memset(&request, 0, sizeof request);
+        request.schema = TP_TXN_SCHEMA;
+        (void)snprintf(request.id_hex, sizeof request.id_hex,
+                       "%032" PRIx64, (uint64_t)sample + UINT64_C(0xb4700));
+        request.expected_revision = 0;
+        request.label = (char *)"large source-import batch";
+        request.ops = operations;
+        request.op_count = operation_count;
+        tp_txn_result result = {0};
+        tp_error error = {{0}};
+        tp_project__test_set_clone_alloc_fail(-1);
+        const double start = tp_bench_now_ms();
+        const tp_status status =
+            tp_model_apply(model, &request, &result, &error);
+        const double elapsed = tp_bench_now_ms() - start;
+        const tp_project_atlas *atlas =
+            &tp_model_project(model)->atlases[0];
+        const bool accepted =
+            status == TP_STATUS_OK && result.committed &&
+            result.op_count == operation_count &&
+            atlas->source_count ==
+                f->project->atlases[0].source_count + operation_count;
+        const uint64_t allocations =
+            (uint64_t)tp_project__test_clone_alloc_count();
+        if (allocations > max_clone_allocations) {
+            max_clone_allocations = allocations;
+        }
+        tp_txn_result_free(&result);
+        tp_model_destroy(model);
+        if (sample >= warmups &&
+            !tp_bench_samples_record(&samples, accepted, elapsed)) {
+            free(paths);
+            free(operations);
+            return false;
+        }
+        if (!accepted) {
+            (void)fprintf(stderr,
+                          "source batch failed: ops=%d status=%s error=%s\n",
+                          operation_count, tp_status_id(status), error.msg);
+            free(paths);
+            free(operations);
+            return false;
+        }
+    }
+    free(paths);
+    free(operations);
+    if (!tp_bench_samples_valid(&samples)) {
+        return false;
+    }
+    char scenario[64];
+    (void)snprintf(scenario, sizeof scenario, "source_add_batch_%d",
+                   operation_count);
+    report_samples(scenario, f, &samples, max_clone_allocations,
+                   "clone_allocations_max");
+    return true;
+}
+
+static int run_batch_scaling(const char *project_path, int iterations) {
+    fixture checked;
+    if (!fixture_load_project(&checked, project_path)) {
+        return 1;
+    }
+    const int warmups = iterations >= 5 ? 2 : 1;
+    print_fixture(&checked, warmups, iterations, 0);
+    const bool ok = bench_source_add_batch(&checked, warmups, iterations, 32) &&
+                    bench_source_add_batch(&checked, warmups, iterations, 256) &&
+                    bench_source_add_batch(&checked, warmups, iterations, 1000);
+    fixture_free(&checked);
+    return ok ? 0 : 1;
+}
+
 /* Snapshot timing is accepted only after the complete immutable DTO graph has
  * been checked outside the timed region. Atlas count alone would let a broken
  * shallow snapshot look artificially fast. */
@@ -2040,6 +2166,23 @@ static bool run_fixture_benchmarks(const fixture *f, const char *scratch,
 }
 
 int main(int argc, char **argv) {
+    if (argc > 1 && strcmp(argv[1], "--batch-scaling") == 0) {
+        int scaling_iterations = 3;
+        if (argc < 3 || argc > 4 ||
+            (argc == 4 &&
+             !parse_positive(argv[3], (int)TP_BENCH_MAX_SAMPLES,
+                             &scaling_iterations))) {
+            (void)fprintf(
+                stderr,
+                "usage: tp_bench_foundation --batch-scaling <project> [iterations 1..%u]\n",
+                (unsigned)TP_BENCH_MAX_SAMPLES);
+            return 2;
+        }
+        (void)printf(
+            "tp_bench_foundation clock=monotonic source=nt_time_now mode=batch_scaling thresholds=advisory project=%s\n",
+            argv[2]);
+        return run_batch_scaling(argv[2], scaling_iterations);
+    }
     if (argc > 1 && strcmp(argv[1], "--project-load-scaling") == 0) {
         int scaling_iterations = 3;
         if (argc > 3 ||

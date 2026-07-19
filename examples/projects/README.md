@@ -34,3 +34,14 @@ build/_cmake/native-release/packer/tests/tp_bench_foundation \
 The report includes p50/p95/p99/max for an in-memory transaction and for the
 same transaction with the current file-backed journal attached. Timing is
 advisory; correctness and byte accounting fail closed.
+
+Profile atomic source-import batches separately (32 is the current GUI picker
+limit; 256 and 1,000 exercise future machine-client workloads):
+
+```bash
+build/_cmake/native-release/packer/tests/tp_bench_foundation \
+  --batch-scaling examples/projects/large-synthetic.ntpacker_project 3
+```
+
+This mode creates no project or image outputs. Each sample starts from a clone
+of the committed project and reports the complete production transaction path.
