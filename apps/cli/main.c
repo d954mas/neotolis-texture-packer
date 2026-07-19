@@ -295,7 +295,7 @@ static void print_usage(FILE *out) {
                   "  help               Show this help\n"
                   "\n"
                   "Editing (wave 2 -- load -> mutate -> save; --json emits {ok,verb,count}):\n"
-                  "  add <p> <atlas> <path>...            Add image/folder source(s)\n"
+                  "  add <p> <atlas> <path>... [--kind file|folder]  Add source(s); kind is required offline\n"
                   "  remove <p> <atlas> <source>          Remove a source\n"
                   "  set <p> <atlas> <key>=<value>...     Set atlas knobs (max_size, padding, ...)\n"
                   "  sprite set <p> <atlas> <key> <field>=<value>...   Per-sprite override (field=inherit clears)\n"
@@ -357,6 +357,7 @@ static int ntpacker_main_utf8(int argc, char **argv) {
     const char *opt_target = NULL;
     const char *opt_out_dir = NULL;
     const char *opt_at = NULL;    /* anim add-frame only (rejected elsewhere below) */
+    const char *opt_kind = NULL;  /* add-only offline source classification */
     const char *positionals[128]; /* verb + its operands; large enough for many sources/frames/keys */
     int npos = 0;
 
@@ -374,7 +375,7 @@ static int ntpacker_main_utf8(int argc, char **argv) {
             continue;
         }
         if (strcmp(a, "--atlas") == 0 || strcmp(a, "--target") == 0 || strcmp(a, "--out-dir") == 0 ||
-            strcmp(a, "--at") == 0) {
+            strcmp(a, "--at") == 0 || strcmp(a, "--kind") == 0) {
             /* value flags: consume the next token (each rejected for the wrong verb below). */
             if (i + 1 >= argc) {
                 cli_emit_error(json, quiet, "usage", "option '%s' needs a value; try 'ntpacker help'", a);
@@ -387,8 +388,10 @@ static int ntpacker_main_utf8(int argc, char **argv) {
                 opt_target = val;
             } else if (strcmp(a, "--out-dir") == 0) {
                 opt_out_dir = val;
-            } else {
+            } else if (strcmp(a, "--at") == 0) {
                 opt_at = val;
+            } else {
+                opt_kind = val;
             }
             continue;
         }
@@ -438,6 +441,10 @@ static int ntpacker_main_utf8(int argc, char **argv) {
         cli_emit_error(json, quiet, "usage", "--at is only valid for 'anim add-frame'");
         return CLI_EXIT_USAGE;
     }
+    if (opt_kind && strcmp(verb, "add") != 0) {
+        cli_emit_error(json, quiet, "usage", "--kind is only valid for 'add'");
+        return CLI_EXIT_USAGE;
+    }
     if (strcmp(verb, "version") == 0) {
         return cmd_version(json);
     }
@@ -478,7 +485,7 @@ static int ntpacker_main_utf8(int argc, char **argv) {
             cli_emit_error(json, quiet, "usage", "--strict is only valid for validate");
             return CLI_EXIT_USAGE;
         }
-        return cmd_mutate(npos, positionals, opt_at, json, quiet);
+        return cmd_mutate(npos, positionals, opt_at, opt_kind, json, quiet);
     }
     cli_emit_error(json, quiet, "usage", "unknown command '%s'; try 'ntpacker help'", verb);
     return CLI_EXIT_USAGE;

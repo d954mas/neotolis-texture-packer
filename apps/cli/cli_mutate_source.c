@@ -6,19 +6,32 @@
 
 #include "cli_exit.h"
 #include "cli_out.h"
+#include "tp_core/tp_scan.h"
 #include "tp_core/tp_source_plan.h"
 
 /* ------------------------------------------------------------------ */
 /* add / remove source                                                */
 /* ------------------------------------------------------------------ */
 
-int do_add(const char *const *pos, int npos, bool json, bool quiet) {
+int do_add(const char *const *pos, int npos, const char *opt_kind,
+           bool json, bool quiet) {
     if (npos < 4) {
         cli_emit_error(json, quiet, "usage", "add needs <project> <atlas> <path>... ; try 'ntpacker help'");
         return CLI_EXIT_USAGE;
     }
     const char *path = pos[1];
     const char *atlas = pos[2];
+    tp_source_kind forced_kind = TP_SOURCE_KIND_FOLDER;
+    const bool kind_forced = opt_kind != NULL;
+    if (kind_forced) {
+        if (strcmp(opt_kind, "file") == 0) {
+            forced_kind = TP_SOURCE_KIND_FILE;
+        } else if (strcmp(opt_kind, "folder") != 0) {
+            cli_emit_error(json, quiet, "usage",
+                           "--kind must be 'file' or 'folder'");
+            return CLI_EXIT_USAGE;
+        }
+    }
     cli_edit edit;
     const tp_snapshot_atlas *atlas_dto = NULL;
     int rc = edit_open_atlas(&edit, path, atlas, &atlas_dto, json, quiet);
@@ -57,11 +70,28 @@ int do_add(const char *const *pos, int npos, bool json, bool quiet) {
     bool oom = false;
     bool rngfail = false;
     for (int i = 0; i < plan.count; i++) {
+        tp_source_kind kind;
+        if (kind_forced) {
+            kind = forced_kind;
+        } else if (tp_scan_is_dir(plan.items[i].path)) {
+            kind = TP_SOURCE_KIND_FOLDER;
+        } else if (tp_scan_file_stat(plan.items[i].path, NULL, NULL)) {
+            kind = TP_SOURCE_KIND_FILE;
+        } else {
+            cli_emit_error(json, quiet, "source_path_unavailable",
+                           "source path '%s' is missing, inaccessible, or not a regular file/directory",
+                           plan.items[i].path);
+            free_ops(ops, added);
+            free(ops);
+            tp_source_batch_plan_free(&plan);
+            edit_close(&edit);
+            return CLI_EXIT_USAGE;
+        }
         tp_operation *op = &ops[added];
         memset(op, 0, sizeof *op);
         op->kind = TP_OP_SOURCE_ADD;
         op->atlas_id = aid;
-        op->u.source_add.kind = TP_SOURCE_KIND_FOLDER; /* kind-agnostic default (matches add_source) */
+        op->u.source_add.kind = kind;
         op->u.source_add.key = cli_strdup(plan.items[i].path);
         if (!op->u.source_add.key) {
             oom = true;

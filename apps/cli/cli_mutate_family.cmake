@@ -50,6 +50,19 @@ function(run_match EXPECT REGEX)
     endif()
 endfunction()
 
+# run_error_json(<expected-exit> <error-id> <ntpacker args...>): require a
+# parseable structured error payload with the exact stable id.
+function(run_error_json EXPECT ID)
+    _run(${EXPECT} ${ARGN})
+    string(JSON _actual ERROR_VARIABLE _json_error GET "${_out}" error id)
+    if(NOT "${_json_error}" STREQUAL "NOTFOUND" OR
+       NOT "${_actual}" STREQUAL "${ID}")
+        message(FATAL_ERROR
+            "[${FAMILY}] '${ARGN}' did not emit structured error '${ID}'\n"
+            "  parse=${_json_error} actual=${_actual}\n--payload--\n${_out}")
+    endif()
+endfunction()
+
 function(assert_contains NEEDLE)
     file(READ "${PROJ}" _content)
     string(FIND "${_content}" "${NEEDLE}" _pos)
@@ -107,7 +120,17 @@ if(FAMILY STREQUAL "new")
 
 elseif(FAMILY STREQUAL "source")
     run(0 new "${PROJ}")
+    set(HERO "${SPRITES}/hero.png")
+    run_json(0 "mutation;count=1" add "${PROJ}" atlas1 "${HERO}" --json)
+    assert_contains("\"kind\": \"file\"")
+    run_match(0 "\"stored_kind\": \"file\"" inspect "${PROJ}" --json)
+    run_json(0 "inspect;sprites=1" inspect "${PROJ}" --json)
+    run(0 remove "${PROJ}" atlas1 "${HERO}")
+    run_json(0 "inspect;sprites=0" inspect "${PROJ}" --json)
+
     run_json(0 "mutation;count=1" add "${PROJ}" atlas1 "${SPRITES}" --json)
+    assert_absent("\"kind\": \"file\"")
+    run_match(0 "\"stored_kind\": \"folder\"" inspect "${PROJ}" --json)
     run_json(0 "inspect;sprites=2" inspect "${PROJ}" --json)   # folder expands to 2 sprites
     run(0 add "${PROJ}" atlas1 "${SPRITES}")                   # duplicate -> ok no-op
     run(0 add "${PROJ}" atlas1 "${SPRITES}/../sprites")        # lexical alias -> same source, ok no-op
@@ -118,10 +141,32 @@ elseif(FAMILY STREQUAL "source")
     string(REPEAT "oversized_segment_" 260 _oversized_source)
     run_match(2 "\"id\":\"out_of_bounds\"" remove "${PROJ}" atlas1
         "${_oversized_source}" --json)                          # malformed path -> usage, not not-found
+    set(MISSING "${WORK}/offline.png")
+    run_error_json(2 "source_path_unavailable" add "${PROJ}" atlas1
+        "${MISSING}" --json)
+    assert_absent("offline.png")
+    run_json(0 "mutation;count=1" add "${PROJ}" atlas1 "${MISSING}"
+        --kind file --json)
+    assert_contains("\"kind\": \"file\"")
+    run_match(0 "\"stored_kind\": \"file\".*\"kind\": \"missing\""
+        inspect "${PROJ}" --json)
+    run(0 remove "${PROJ}" atlas1 "${MISSING}")
+
+    set(MISSING_DIR "${WORK}/offline-folder")
+    run_json(0 "mutation;count=1" add "${PROJ}" atlas1 "${MISSING_DIR}"
+        --kind folder --json)
+    run_match(0 "\"stored_kind\": \"folder\".*\"kind\": \"missing\""
+        inspect "${PROJ}" --json)
+    run(0 remove "${PROJ}" atlas1 "${MISSING_DIR}")
+    run_error_json(2 "usage" add "${PROJ}" atlas1 "${MISSING}"
+        --kind archive --json)
+    run_error_json(2 "usage" remove "${PROJ}" atlas1 "${MISSING}"
+        --kind file --json)
     # M5 regression: the old 1024-byte frontend buffers silently persisted only
-    # the first 999 bytes while reporting success. The full argument must survive.
+    # the first 999 bytes while reporting success. Explicit offline classification
+    # must preserve the complete path.
     string(REPEAT "long_segment_" 92 _long_source)
-    run(0 add "${PROJ}" atlas1 "${WORK}/${_long_source}")
+    run(0 add "${PROJ}" atlas1 "${WORK}/${_long_source}" --kind file)
     assert_contains("${_long_source}")
 
 elseif(FAMILY STREQUAL "set")

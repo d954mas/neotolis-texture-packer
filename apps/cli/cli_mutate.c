@@ -514,10 +514,11 @@ static int do_new(const char *path, bool json, bool quiet) {
 /* ------------------------------------------------------------------ */
 
 static int dispatch_mutation(int npos, const char *const *positionals,
-                             const char *opt_at, bool json, bool quiet) {
+                             const char *opt_at, const char *opt_kind,
+                             bool json, bool quiet) {
     const char *verb = positionals[0];
     if (strcmp(verb, "add") == 0) {
-        return do_add(positionals, npos, json, quiet);
+        return do_add(positionals, npos, opt_kind, json, quiet);
     }
     if (strcmp(verb, "remove") == 0) {
         return do_remove_source(positionals, npos, json, quiet);
@@ -557,7 +558,7 @@ static int dispatch_mutation(int npos, const char *const *positionals,
 }
 
 int cmd_mutate(int npos, const char *const *positionals, const char *opt_at,
-               bool json, bool quiet) {
+               const char *opt_kind, bool json, bool quiet) {
     const char *verb = positionals[0];
     if (opt_at && strcmp(verb, "anim") != 0) {
         cli_emit_error(json, quiet, "usage",
@@ -572,5 +573,5 @@ int cmd_mutate(int npos, const char *const *positionals, const char *opt_at,
         }
         return do_new(positionals[1], json, quiet);
     }
-    return dispatch_mutation(npos, positionals, opt_at, json, quiet);
+    return dispatch_mutation(npos, positionals, opt_at, opt_kind, json, quiet);
 }
