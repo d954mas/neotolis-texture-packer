@@ -344,6 +344,7 @@ void tp_session_destroy(tp_session *session) {
     if (session->recovery_live) {
         const bool preserve = tp_model__recovery_degraded(session->model) ||
                               !tp_recovery_live_healthy(session->recovery_live) ||
+                              session->file_durability_uncertain ||
                               (tp_model_dirty(session->model) && !session->discarded);
         (void)tp_recovery_live_finish(session->recovery_live, preserve, NULL);
         tp_recovery_live_destroy(session->recovery_live);
@@ -641,6 +642,7 @@ static tp_status save_as_locked(tp_session *session, const char *path,
     if (file_durability_degraded && err) {
         err->msg[0] = '\0';
     }
+    session->file_durability_uncertain = file_durability_degraded;
     const bool model_was_degraded =
         tp_model__recovery_degraded(session->model);
     bool recovery_degraded = !recovery_is_healthy(session);

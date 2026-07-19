@@ -2297,6 +2297,88 @@ void test_session_preserves_dirty_live_recovery_on_destroy(void) {
     tp_recovery_store_destroy(store);
 }
 
+void test_session_preserves_live_recovery_after_uncertain_save_on_destroy(void) {
+    char journal[1024];
+    char target[1024];
+    (void)snprintf(journal, sizeof journal,
+                   "%s/session-uncertain-save.ntpjournal", g_scratch);
+    (void)snprintf(target, sizeof target,
+                   "%s/session-uncertain-save.ntpacker_project", g_scratch);
+    (void)remove(journal);
+    (void)remove(target);
+
+    tp_recovery_store *store = NULL;
+    tp_error err = {{0}};
+    tp_session *session = attach_live_recovery(
+        journal, 72, "session-uncertain-save", &store, &err);
+    tp_session_snapshot *snapshot = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_snapshot_create(session, &snapshot, &err));
+    const tp_id128 atlas_id = tp_session_snapshot_atlas_at(snapshot, 0)->id;
+    tp_session_snapshot_destroy(snapshot);
+
+    tp_txn_result transaction;
+    session_apply_rename(session, "10000000000000000000000000000072",
+                         0, atlas_id, "published-but-not-directory-durable",
+                         TP_STATUS_OK, &transaction, &err);
+    tp_txn_result_free(&transaction);
+
+    tp_project__test_fail_next_parent_sync();
+    tp_session_save_result save_result = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_save_as(session, target, &save_result, &err));
+    TEST_ASSERT_TRUE(save_result.saved);
+    TEST_ASSERT_TRUE(save_result.file_durability_degraded);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_FILE_DURABILITY_UNCERTAIN,
+                          save_result.file_durability_status);
+
+    tp_session_destroy(session);
+    TEST_ASSERT_TRUE_MESSAGE(
+        test_file_exists(journal),
+        "uncertain directory durability must preserve recovery evidence on close");
+
+    tp_recovery_store_destroy(store);
+    (void)remove(journal);
+    (void)remove(target);
+}
+
+void test_durable_retry_clears_uncertain_save_recovery_preservation(void) {
+    char journal[1024];
+    char target[1024];
+    (void)snprintf(journal, sizeof journal,
+                   "%s/session-uncertain-retry.ntpjournal", g_scratch);
+    (void)snprintf(target, sizeof target,
+                   "%s/session-uncertain-retry.ntpacker_project", g_scratch);
+    (void)remove(journal);
+    (void)remove(target);
+
+    tp_recovery_store *store = NULL;
+    tp_error err = {{0}};
+    tp_session *session = attach_live_recovery(
+        journal, 73, "session-uncertain-retry", &store, &err);
+
+    tp_project__test_fail_next_parent_sync();
+    tp_session_save_result save_result = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_save_as(session, target, &save_result, &err));
+    TEST_ASSERT_TRUE(save_result.file_durability_degraded);
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK, tp_session_save(session, &save_result, &err));
+    TEST_ASSERT_FALSE(save_result.file_durability_degraded);
+
+    tp_session_destroy(session);
+    TEST_ASSERT_FALSE_MESSAGE(
+        test_file_exists(journal),
+        "fully durable retry must release uncertain-save preservation");
+
+    tp_recovery_store_destroy(store);
+    (void)remove(target);
+}
+
 void test_save_as_updates_live_recovery_identity_before_compaction(void) {
     char journal[1024];
     char target[1024];
@@ -2791,6 +2873,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_save_rejects_external_change_without_overwriting_it);
     RUN_TEST(test_session_owns_live_recovery_clean_close_order);
     RUN_TEST(test_session_preserves_dirty_live_recovery_on_destroy);
+    RUN_TEST(test_session_preserves_live_recovery_after_uncertain_save_on_destroy);
+    RUN_TEST(test_durable_retry_clears_uncertain_save_recovery_preservation);
     RUN_TEST(test_save_as_updates_live_recovery_identity_before_compaction);
     RUN_TEST(test_cross_identity_save_retires_journal_after_metadata_failure);
     RUN_TEST(test_degraded_cross_identity_save_as_rebinds_fresh_recovery_owner);

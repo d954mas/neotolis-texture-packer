@@ -43,6 +43,7 @@ struct tp_session {
     bool has_recovery_token;
     bool recovery_healthy;
     bool recovery_required;
+    bool file_durability_uncertain;
     bool discarded;
     uint64_t admission_sequence;
     uint64_t model_generation;
