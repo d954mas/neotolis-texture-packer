@@ -1,6 +1,6 @@
 # Post-refactor quality improvement plan
 
-Status: proposed execution plan, 2026-07-19
+Status: implemented and locally verified; cross-platform CI pending, 2026-07-19
 
 Normative source: `docs/ntpacker-master-spec.md`
 
@@ -38,26 +38,41 @@ source tags, target paths, and resolvable relative assets.
 
 `tp_bench_foundation --project` runs the production mutation, journal,
 snapshot, history, and recovery paths over that committed file and reports
-p50/p95/p99/max. A short Windows Debug sample (three measured iterations) gave:
+p50/p95/p99/max. The final Windows native-release run (20 measured
+iterations) gave:
 
-| Scenario | p50 | p99/max | Observation |
-|---|---:|---:|---|
-| one history-enabled normal transaction | 0.521 ms | 0.529 ms | shipped model/history baseline |
-| same transaction with current file journal | 1.198 ms | 1.220 ms | 364-byte append; current per-record durability behavior |
-| session snapshot | 4.244 ms | 5.202 ms | 1,000 sources |
-| recovery of checkpoint + 5 edits | 28.034 ms | 29.086 ms | startup/recovery path, not per-edit UI latency |
+| Scenario | p50 | p95 | p99/max | Observation |
+|---|---:|---:|---:|---|
+| one history-enabled normal transaction | 0.065 ms | 0.083 ms | 0.086 ms | shipped model/history baseline |
+| same transaction with current file journal | 0.618 ms | 0.708 ms | 0.713 ms | 365-byte append plus current durability sync |
+| session snapshot | 1.181 ms | 1.640 ms | 1.759 ms | 1,000 sources |
+| recovery of checkpoint + 100 edits | 7.606 ms | 8.666 ms | 9.308 ms | startup/recovery path, not per-edit UI latency |
 
-These numbers are diagnostic, not release thresholds. Release builds and all
-three supported operating systems still need sampling. The first discarded
-generator design also showed that constructing this graph through a 1,200-op
-history-aware transaction (and then as 100 smaller transactions) exceeded 120
-seconds in Debug. That is a separate large-batch performance hotspot, not a
-reason to weaken transaction correctness.
+The synchronous journal adds about 0.63 ms at p95 and stays below 1 ms in this
+sample. A queue, timer, and split append/sync state would therefore add risk
+without solving a user-visible stall; the optional batched design was not
+implemented.
+
+`tp_bench_foundation --batch-scaling` now isolates complete atomic source-add
+transactions against the same checked project. The final Windows
+native-release sample (three measured iterations) gave:
+
+| Operations | p50 | p95/max | Decision |
+|---:|---:|---:|---|
+| 32 | 3.999 ms | 4.052 ms | current GUI picker limit; no visible stall |
+| 256 | 42.025 ms | 42.144 ms | acceptable bulk diagnostic, monitor for machine clients |
+| 1,000 | 428.205 ms | 436.534 ms | superlinear bulk path; optimize when MCP/Dev API makes this common |
+
+These numbers are diagnostic, not release thresholds. The earlier discarded
+generator mixed graph construction with repeated history-aware transactions
+and exceeded 120 seconds in Debug; the isolated benchmark shows the shipped
+32-operation user path is healthy and preserves one requested atomic batch.
+Linux and macOS timing still belongs to cross-platform CI/manual sampling.
 
 The checked project exposed a Save-As identity defect not present in synthetic
-in-memory fixtures: saving relative sources into another directory reloads
-successfully, but semantic identity can differ because equivalent paths with
-`..` are not reduced to one lexical identity form.
+in-memory fixtures. PATH-01 now uses one lexical absolute identity routine;
+Open -> Save As -> reload preserves semantic identity and exact checkpoint
+round-trip identity (`checkpoint_identity_equal=1`).
 
 ## 3. Actionable findings
 
@@ -264,6 +279,12 @@ dependency and no change to live source spellings merely to satisfy the hash.
 Timing remains advisory across heterogeneous CI machines; correctness, sample
 count, failure count, byte accounting, and RPO are hard gates.
 
+Wave 5 status: completed for the shipped interactive workload. The checked-in
+`--batch-scaling` mode demonstrates a 32-operation p95 of 4.052 ms in Windows
+native-release. The measured 256/1,000-operation superlinear path is retained
+as explicit evidence for the MCP/Dev API phase; no speculative index/cache was
+added to the current core.
+
 ## 5. Explicit follow-up phases, not refactor regressions
 
 The following are real remaining product work but should not be mixed into the
@@ -295,6 +316,9 @@ ctest --preset native-release --output-on-failure
 build/_cmake/native-release/packer/tests/tp_bench_foundation \
   --project examples/projects/large-synthetic.ntpacker_project \
   build/benchmark-scratch 20 100
+
+build/_cmake/native-release/packer/tests/tp_bench_foundation \
+  --batch-scaling examples/projects/large-synthetic.ntpacker_project 3
 ```
 
 The improvement program is complete only when:
@@ -312,3 +336,40 @@ The improvement program is complete only when:
   green;
 - Debug/Release and three-platform CI are green, with no changes under
   `external/neotolis-engine/`.
+
+## 7. Execution record
+
+Locally completed on Windows native Debug and Release:
+
+- Q-01, R-01 through R-03, API-01, CLI-01 through CLI-04, GUI-01,
+  TEST-01, DOC-01, BUILD-01, PATH-01, and ARCH-01 are implemented and
+  regression-covered.
+- PERF-01 is measured by a committed production-path batch benchmark. The
+  current 32-file GUI workload meets the responsiveness goal; 256/1,000-op
+  machine batches remain measurable follow-up evidence rather than a reason to
+  complicate the shipped transaction path.
+- Recovery failure no longer rejects or rolls back edit, Undo, or Redo. It
+  enters a sticky structured degraded state, skips dependent records, preserves
+  corrupt source evidence, and can heal after Save with a fresh checkpoint.
+- The GUI surfaces recovery degradation once per health generation while
+  continuing edit, History, Pack, New/dirty-gate, and Save flows.
+- `NT_ASSERT` and builder-boundary `NT_BUILD_ASSERT` remain intentionally active
+  in Debug and Release; no `NT_ASSERT_MODE=OFF` or libc `assert()` replacement
+  was introduced.
+
+Verification evidence:
+
+- `ctest --preset native-debug --output-on-failure`: 107/107 passed.
+- `ctest --preset native-release --output-on-failure`: 107/107 passed.
+- `NTPACKER_GUI_HEADLESS=1` logical GUI self-test: passed, including the
+  best-effort recovery fault matrix. The non-headless run reaches the optional
+  framebuffer phase but the local Intel driver does not produce the expected
+  outline-pixel delta.
+- checked-project journal benchmark: p95 0.708 ms, max 0.713 ms;
+  `checkpoint_identity_equal=1`.
+- batch benchmark: 32/256/1,000 operations accepted with zero failed samples;
+  p95/max 4.052/42.144/436.534 ms respectively.
+- `git diff --check`: passed; `external/neotolis-engine/` unchanged.
+
+Three-platform GitHub CI and non-Windows timing remain pending until the branch
+is pushed. They are external verification, not locally fabricated results.
