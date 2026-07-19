@@ -159,7 +159,8 @@ absorbed by the packet-B X-macro schema table later.
 
 Exit codes: 0 ok · 1 internal · 2 usage · 3 project load/parse error · 4 pack
 failure · 5 export failure · 6 partial success (some atlases/targets failed) ·
-7 validate findings under `--strict` · 8+ reserved. `validate` without
+7 validate findings under `--strict` · 8 typed pre-publication file I/O failure ·
+9+ reserved. `validate` without
 `--strict` exits 0 when the file parses and validation runs; findings live in
 the payload (agents' normal path). Supersedes ux.md §4.4 (L-1).
 

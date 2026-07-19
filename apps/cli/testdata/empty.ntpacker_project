@@ -1,0 +1,16 @@
+{
+  "version": 5,
+  "atlases": [
+    {
+      "id": "atlas_00000000000000000000000000000201",
+      "name": "empty",
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_00000000000000000000000000000202",
+          "out_path": "out/empty"
+        }
+      ]
+    }
+  ]
+}

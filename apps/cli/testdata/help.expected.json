@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "usage": "ntpacker <command> [options]",
+  "commands": [
+    "pack",
+    "export",
+    "inspect",
+    "validate",
+    "new",
+    "add",
+    "remove",
+    "set",
+    "sprite",
+    "anim",
+    "target",
+    "atlas",
+    "version",
+    "help"
+  ],
+  "global_options": [
+    "--json",
+    "--quiet",
+    "--strict",
+    "--help",
+    "--version"
+  ],
+  "exit_codes": {
+    "ok": 0,
+    "internal": 1,
+    "usage": 2,
+    "project": 3,
+    "pack": 4,
+    "export": 5,
+    "partial": 6,
+    "validate": 7,
+    "file_io": 8
+  }
+}

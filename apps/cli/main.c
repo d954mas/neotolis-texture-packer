@@ -19,6 +19,17 @@
 #include "tp_core/tp_export.h"
 #include "tp_core/tp_project.h"
 
+enum { CLI_HELP_SCHEMA = 1 };
+
+static const char *const HELP_COMMANDS[] = {
+    "pack", "export", "inspect", "validate", "new", "add", "remove",
+    "set", "sprite", "anim", "target", "atlas", "version", "help",
+};
+
+static const char *const HELP_GLOBAL_OPTIONS[] = {
+    "--json", "--quiet", "--strict", "--help", "--version",
+};
+
 static void indent(cli_sb *sb, int depth) {
     for (int i = 0; i < depth; i++) {
         cli_sb_str(sb, "  ");
@@ -98,6 +109,11 @@ static void build_manifest(cli_sb *sb) {
         cli_sb_str(sb, ": 1,\n");
     }
     indent(sb, 2);
+    cli_sb_json_str(sb, "help");
+    cli_sb_str(sb, ": ");
+    cli_sb_int(sb, CLI_HELP_SCHEMA);
+    cli_sb_str(sb, ",\n");
+    indent(sb, 2);
     cli_sb_json_str(sb, "version");
     cli_sb_str(sb, ": 1\n");
     indent(sb, 1);
@@ -160,6 +176,8 @@ static void build_manifest(cli_sb *sb) {
     cli_sb_str(sb, "}");
 }
 
+static void print_usage(FILE *out);
+
 static int cmd_version(bool json) {
     if (!json) {
         (void)printf("ntpacker %s\n", NTPACKER_VERSION);
@@ -170,6 +188,90 @@ static int cmd_version(bool json) {
     if (sb.oom) {
         cli_sb_free(&sb);
         cli_emit_error(true, false, "oom", "out of memory building version manifest");
+        return CLI_EXIT_INTERNAL;
+    }
+    cli_out_stdout(&sb);
+    cli_sb_free(&sb);
+    return CLI_EXIT_OK;
+}
+
+static void emit_string_array(cli_sb *sb, const char *const *items,
+                              size_t count) {
+    cli_sb_str(sb, "[\n");
+    for (size_t i = 0U; i < count; ++i) {
+        indent(sb, 2);
+        cli_sb_json_str(sb, items[i]);
+        cli_sb_str(sb, i + 1U < count ? ",\n" : "\n");
+    }
+    indent(sb, 1);
+    cli_sb_putc(sb, ']');
+}
+
+static void build_help(cli_sb *sb) {
+    static const struct {
+        const char *id;
+        int code;
+    } exit_codes[] = {
+        {"ok", CLI_EXIT_OK},
+        {"internal", CLI_EXIT_INTERNAL},
+        {"usage", CLI_EXIT_USAGE},
+        {"project", CLI_EXIT_PROJECT},
+        {"pack", CLI_EXIT_PACK},
+        {"export", CLI_EXIT_EXPORT},
+        {"partial", CLI_EXIT_PARTIAL},
+        {"validate", CLI_EXIT_VALIDATE},
+        {"file_io", CLI_EXIT_FILE_IO},
+    };
+    cli_sb_str(sb, "{\n");
+    indent(sb, 1);
+    cli_sb_json_str(sb, "schema");
+    cli_sb_str(sb, ": ");
+    cli_sb_int(sb, CLI_HELP_SCHEMA);
+    cli_sb_str(sb, ",\n");
+    indent(sb, 1);
+    cli_sb_json_str(sb, "usage");
+    cli_sb_str(sb, ": ");
+    cli_sb_json_str(sb, "ntpacker <command> [options]");
+    cli_sb_str(sb, ",\n");
+    indent(sb, 1);
+    cli_sb_json_str(sb, "commands");
+    cli_sb_str(sb, ": ");
+    emit_string_array(sb, HELP_COMMANDS,
+                      sizeof HELP_COMMANDS / sizeof HELP_COMMANDS[0]);
+    cli_sb_str(sb, ",\n");
+    indent(sb, 1);
+    cli_sb_json_str(sb, "global_options");
+    cli_sb_str(sb, ": ");
+    emit_string_array(sb, HELP_GLOBAL_OPTIONS,
+                      sizeof HELP_GLOBAL_OPTIONS /
+                          sizeof HELP_GLOBAL_OPTIONS[0]);
+    cli_sb_str(sb, ",\n");
+    indent(sb, 1);
+    cli_sb_json_str(sb, "exit_codes");
+    cli_sb_str(sb, ": {\n");
+    for (size_t i = 0U; i < sizeof exit_codes / sizeof exit_codes[0]; ++i) {
+        indent(sb, 2);
+        cli_sb_json_str(sb, exit_codes[i].id);
+        cli_sb_str(sb, ": ");
+        cli_sb_int(sb, exit_codes[i].code);
+        cli_sb_str(sb, i + 1U < sizeof exit_codes / sizeof exit_codes[0]
+                           ? ",\n"
+                           : "\n");
+    }
+    indent(sb, 1);
+    cli_sb_str(sb, "}\n}");
+}
+
+static int cmd_help(bool json) {
+    if (!json) {
+        print_usage(stdout);
+        return CLI_EXIT_OK;
+    }
+    cli_sb sb = {0};
+    build_help(&sb);
+    if (sb.oom) {
+        cli_sb_free(&sb);
+        cli_emit_error(true, false, "oom", "out of memory building help payload");
         return CLI_EXIT_INTERNAL;
     }
     cli_out_stdout(&sb);
@@ -220,7 +322,7 @@ static void print_usage(FILE *out) {
                   "  --version          Print the version\n"
                   "\n"
                   "Exit codes: 0 ok, 1 internal, 2 usage, 3 project, 4 pack, 5 export,\n"
-                  "            6 partial, 7 validate(--strict).\n",
+                  "            6 partial, 7 validate(--strict), 8 file I/O; 9+ reserved.\n",
                   NTPACKER_VERSION);
 }
 
@@ -315,8 +417,7 @@ static int ntpacker_main_utf8(int argc, char **argv) {
         return cmd_version(json);
     }
     if (want_help) {
-        print_usage(stdout);
-        return CLI_EXIT_OK;
+        return cmd_help(json);
     }
     if (npos == 0) {
         /* No command is a usage error (stderr, exit 2) -- NOT the help payload;
@@ -341,8 +442,7 @@ static int ntpacker_main_utf8(int argc, char **argv) {
         return cmd_version(json);
     }
     if (strcmp(verb, "help") == 0) {
-        print_usage(stdout);
-        return CLI_EXIT_OK;
+        return cmd_help(json);
     }
     if (is_pack) {
         if (strict) {

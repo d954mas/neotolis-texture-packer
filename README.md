@@ -73,7 +73,8 @@ benchmark project.
   add/remove/set) so a script or an AI agent can build and edit a project
   from nothing; `--json` on every verb with a stable, versioned per-verb
   schema; a frozen exit-code contract (0 ok … 6 partial success … 7 validate
-  `--strict` findings); `--dry-run` reports what a pack would write and every
+  `--strict` findings · 8 typed pre-publication file I/O failure); `--dry-run`
+  reports what a pack would write and every
   predicted metadata loss without touching disk. This is the saved-file
   automation interface for humans and agents. Live editing of the same unsaved
   GUI session belongs to the planned Dev API/MCP surface (master spec Part II).

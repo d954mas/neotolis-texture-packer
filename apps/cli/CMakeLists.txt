@@ -40,11 +40,12 @@ set_target_properties(ntpacker_inspect_fault PROPERTIES RUNTIME_OUTPUT_DIRECTORY
 
 # JSON validity checker (test-only helper; parses a captured payload via cJSON).
 # cJSON is engine-vendored, static-CRT -> -U_DLL (same as the packer tests that
-# link it). Warning flags follow the packer/tests convention (helpers exempt).
+# link it). First-party helpers use the repository warning contract too.
 add_executable(cli_json_check cli_json_check.c)
 target_link_libraries(cli_json_check PRIVATE cjson)
 target_compile_definitions(cli_json_check PRIVATE _CRT_SECURE_NO_WARNINGS)
 target_compile_options(cli_json_check PRIVATE -U_DLL)
+nt_set_warning_flags(cli_json_check)
 
 add_executable(cli_out_contract_test cli_out_contract_test.c cli_out.c)
 target_link_libraries(cli_out_contract_test PRIVATE tp_core)
@@ -120,6 +121,21 @@ add_test(NAME cli_version_json COMMAND ${CMAKE_COMMAND}
     -DCHECKER=$<TARGET_FILE:cli_json_check>
     -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_version_manifest.json
     -P "${_run}")
+
+# Explicit JSON help requests are one versioned machine payload for both
+# command and flag spellings; human usage text must never leak into stdout.
+add_test(NAME cli_help_json COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0 "-DARGS=help --json"
+    -DCHECKER=$<TARGET_FILE:cli_json_check> "-DCHECK_ARGS=help"
+    -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_help.json
+    -DEXPECT_FILE=${CMAKE_CURRENT_SOURCE_DIR}/testdata/help.expected.json
+    -DEXPECT_STDERR_EMPTY=ON -P "${_run}")
+add_test(NAME cli_help_flag_json COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0 "-DARGS=--help --json"
+    -DCHECKER=$<TARGET_FILE:cli_json_check> "-DCHECK_ARGS=help"
+    -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_help_flag.json
+    -DEXPECT_FILE=${CMAKE_CURRENT_SOURCE_DIR}/testdata/help.expected.json
+    -DEXPECT_STDERR_EMPTY=ON -P "${_run}")
 
 # --- B2 read verbs: inspect + validate over checked-in fixtures (no GL/pack). ---
 # The fixtures live in the source tree; project_dir resolves sources against them.
@@ -301,8 +317,18 @@ add_test(NAME cli_pack_target_none COMMAND ${CMAKE_COMMAND}
     -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0
     "-DARGS=pack ${_td}/clean.ntpacker_project --json --target defold --out-dir ${CMAKE_CURRENT_BINARY_DIR}/cli_pack_out2"
     -DCHECKER=$<TARGET_FILE:cli_json_check>
-    "-DCHECK_ARGS=pack targets_ok=0 targets_failed=0"
+    "-DCHECK_ARGS=pack targets_ok=0 targets_failed=0 notice=no_enabled_targets"
     -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_pack_none.json
+    -P "${_run}")
+
+# A source-less atlas is a successful skipped outcome, but JSON must carry a
+# stable notice id plus atlas context rather than prose alone.
+add_test(NAME cli_pack_no_usable_images COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0
+    "-DARGS=pack ${_td}/empty.ntpacker_project --json --out-dir ${CMAKE_CURRENT_BINARY_DIR}/cli_pack_empty"
+    -DCHECKER=$<TARGET_FILE:cli_json_check>
+    "-DCHECK_ARGS=pack targets_ok=0 targets_failed=0 notice=no_usable_images"
+    -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_pack_empty.json
     -P "${_run}")
 
 # (m) dangling anim frame aborts the atlas before any target writes (plan L-4

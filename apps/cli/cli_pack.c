@@ -309,8 +309,8 @@ static void emit_target(cli_sb *sb, int depth, const tp_export_report_target *rt
  * records why it was skipped. `pages` uses the PRIMARY pack run (runs[0]); a target
  * on a different run is flagged by its own `pack_run` index. */
 static void emit_atlas(cli_sb *sb, int depth, const char *name, int sprite_count, int missing_sources,
-                       const tp_export_report *report, const tp_export_notices *notices, const char *note,
-                       bool dry_run) {
+                       const tp_export_report *report, const tp_export_notices *notices,
+                       const char *skip_notice_id, const char *note, bool dry_run) {
     bool af = true;
     cli_sb_putc(sb, '{');
     key(sb, depth + 1, &af, "name");
@@ -322,6 +322,24 @@ static void emit_atlas(cli_sb *sb, int depth, const char *name, int sprite_count
     if (note) {
         key(sb, depth + 1, &af, "note");
         cli_sb_json_str(sb, note);
+    }
+    if (skip_notice_id) {
+        key(sb, depth + 1, &af, "notices");
+        cli_sb_str(sb, "[\n");
+        cli_sb_indent(sb, depth + 2);
+        bool nf = true;
+        cli_sb_putc(sb, '{');
+        key(sb, depth + 3, &nf, "id");
+        cli_sb_json_str(sb, skip_notice_id);
+        key(sb, depth + 3, &nf, "atlas");
+        cli_sb_json_str(sb, name);
+        key(sb, depth + 3, &nf, "message");
+        cli_sb_json_str(sb, note ? note : "");
+        cli_sb_str(sb, "\n");
+        cli_sb_indent(sb, depth + 2);
+        cli_sb_str(sb, "}\n");
+        cli_sb_indent(sb, depth + 1);
+        cli_sb_putc(sb, ']');
     }
     key(sb, depth + 1, &af, "pack_runs");
     cli_sb_int(sb, report ? report->run_count : 0);
@@ -538,6 +556,7 @@ int cmd_pack(const char *project_path, const char *opt_atlas, const char *opt_ta
         tp_export_report report;
         memset(&report, 0, sizeof report);
         const char *note = NULL;
+        const char *skip_notice_id = NULL;
         bool ran = false;
 
         arena = tp_arena_create(0);
@@ -552,6 +571,7 @@ int cmd_pack(const char *project_path, const char *opt_atlas, const char *opt_ta
                 ran = run_status != TP_STATUS_NOT_FOUND;
                 if (run_status == TP_STATUS_NOT_FOUND) {
                     note = "no usable images (skipped)";
+                    skip_notice_id = "no_usable_images";
                 } else if (run_status != TP_STATUS_OK && report.target_count == 0) {
                     note = "could not assemble sprites (input build failed)";
                     had_pack_fail = true;
@@ -570,6 +590,7 @@ int cmd_pack(const char *project_path, const char *opt_atlas, const char *opt_ta
                 }
                 if (atlas.enabled_target_count == 0 && run_status == TP_STATUS_OK) {
                     note = "no enabled targets (skipped)";
+                    skip_notice_id = "no_enabled_targets";
                     ran = false;
                 }
         }
@@ -578,8 +599,9 @@ int cmd_pack(const char *project_path, const char *opt_atlas, const char *opt_ta
         if (json) {
             cli_sb_str(&sb, any_atlas_emitted ? ",\n" : "\n");
             cli_sb_indent(&sb, 2);
-            emit_atlas(&sb, 2, atlas.name ? atlas.name : "", sprite_count, missing, ran ? &report : NULL, ran ? &notices : NULL,
-                       note, dry_run);
+            emit_atlas(&sb, 2, atlas.name ? atlas.name : "", sprite_count,
+                       missing, ran ? &report : NULL, ran ? &notices : NULL,
+                       skip_notice_id, note, dry_run);
         } else {
             print_atlas_human(atlas.name ? atlas.name : "", sprite_count, missing, ran ? &report : NULL, note, dry_run);
         }

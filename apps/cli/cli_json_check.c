@@ -4,7 +4,7 @@
  * stdout straight into a JSON parser.
  *
  *   cli_json_check <file> [mode] [k=v ...]
- *     mode = manifest (default) | inspect | validate | pack | anim | mutation
+ *     mode = manifest (default) | help | inspect | validate | pack | anim | mutation
  *     inspect : sprites=N  -> atlases[0].sprites has exactly N entries
  *     validate: error=N warning=N  -> counts assertions
  *               code=NAME (repeatable) -> a finding with that code exists
@@ -87,6 +87,25 @@ static int check_manifest(const cJSON *root) {
         }
     }
     return 0;
+}
+
+/* --- help --json / --help --json --- */
+static int check_help(const cJSON *root) {
+    const cJSON *schema = cJSON_GetObjectItemCaseSensitive(root, "schema");
+    if (!cJSON_IsNumber(schema) || schema->valueint != 1) {
+        return fail("help: schema must equal 1");
+    }
+    if (!cJSON_IsString(cJSON_GetObjectItemCaseSensitive(root, "usage")) ||
+        !cJSON_IsArray(cJSON_GetObjectItemCaseSensitive(root, "commands")) ||
+        !cJSON_IsArray(cJSON_GetObjectItemCaseSensitive(root, "global_options")) ||
+        !cJSON_IsObject(cJSON_GetObjectItemCaseSensitive(root, "exit_codes"))) {
+        return fail("help: missing usage/commands/global_options/exit_codes");
+    }
+    const cJSON *file_io = cJSON_GetObjectItemCaseSensitive(
+        cJSON_GetObjectItemCaseSensitive(root, "exit_codes"), "file_io");
+    return cJSON_IsNumber(file_io) && file_io->valueint == 8
+               ? 0
+               : fail("help: exit_codes.file_io must equal 8");
 }
 
 /* Optional "key=value" arg lookup (first match). Returns NULL if absent. */
@@ -369,6 +388,35 @@ static int check_pack(const cJSON *root, int argc, char **argv) {
         (void)fprintf(stderr, "cli_json_check: pack targets_failed %d != expected %s\n", tfail->valueint, efail);
         return 1;
     }
+    const char *enotice = arg_val(argc, argv, "notice");
+    if (enotice) {
+        bool found = false;
+        const cJSON *atlas = NULL;
+        cJSON_ArrayForEach(atlas, atlases) {
+            const cJSON *atlas_name =
+                cJSON_GetObjectItemCaseSensitive(atlas, "name");
+            const cJSON *atlas_notices =
+                cJSON_GetObjectItemCaseSensitive(atlas, "notices");
+            const cJSON *notice = NULL;
+            cJSON_ArrayForEach(notice, atlas_notices) {
+                const cJSON *id =
+                    cJSON_GetObjectItemCaseSensitive(notice, "id");
+                const cJSON *context =
+                    cJSON_GetObjectItemCaseSensitive(notice, "atlas");
+                const cJSON *message =
+                    cJSON_GetObjectItemCaseSensitive(notice, "message");
+                if (cJSON_IsString(id) && strcmp(id->valuestring, enotice) == 0 &&
+                    cJSON_IsString(atlas_name) && cJSON_IsString(context) &&
+                    strcmp(context->valuestring, atlas_name->valuestring) == 0 &&
+                    cJSON_IsString(message) && message->valuestring[0] != '\0') {
+                    found = true;
+                }
+            }
+        }
+        if (!found) {
+            return fail("pack: expected structured atlas notice not found");
+        }
+    }
     return 0;
 }
 
@@ -393,7 +441,9 @@ int main(int argc, char **argv) {
     }
 
     int rc;
-    if (strcmp(mode, "inspect") == 0) {
+    if (strcmp(mode, "help") == 0) {
+        rc = check_help(root);
+    } else if (strcmp(mode, "inspect") == 0) {
         rc = check_inspect(root, argc, argv);
     } else if (strcmp(mode, "validate") == 0) {
         rc = check_validate(root, argc, argv);

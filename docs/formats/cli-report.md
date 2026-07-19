@@ -16,7 +16,12 @@ Errors with `--json` are also stdout payloads:
 `{"schema":1,"error":{"id":"<tp_status_id>","message":"..."}}`; the exit code
 is the authoritative machine signal (see `cli_exit.h`: 0 ok · 1 internal ·
 2 usage · 3 project load/parse · 4 pack failure · 5 export failure · 6 partial ·
-7 validate --strict findings · 8+ reserved).
+7 validate --strict findings · 8 typed pre-publication file I/O failure ·
+9+ reserved).
+
+`help --json` and `--help --json` emit the same schema-1 object. Its `commands`
+and `global_options` arrays are the machine-readable command catalog, and its
+`exit_codes` object freezes the symbolic mapping above.
 
 ## `pack` report (schema 1)
 
@@ -75,6 +80,9 @@ is the authoritative machine signal (see `cli_exit.h`: 0 ok · 1 internal ·
 - `out_path` is the resolved absolute output **base**: each exporter appends
   its own extension(s) (`<base>.json`, `<base>-<page>.png`, Defold
   `<base>.tpinfo` + sibling `.tpatlas`).
+- A successfully skipped atlas retains the human-readable `note` and adds a
+  structured atlas-level `notices` entry with `{id, atlas, message}`. Stable
+  skip ids are `no_usable_images` and `no_enabled_targets`; both exit 0.
 
 ## `pack` flags
 
