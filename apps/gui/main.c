@@ -830,7 +830,7 @@ static int gui_main_utf8(int argc, char *argv[]) {
      * open the R6b startup recovery MODAL to resolve each one (Discard / Save to original / Save As) via the R6a
      * layer -- the live editor starts FRESH untitled (recovery resolves journals to DISK, never adopts); every
      * non-resolved orphan is LEFT on disk for next launch. Every step is fail-closed + NON-FATAL: a folder/RNG/scan failure leaves the
-     * window available for Save As or Discard while mutation stays blocked. GATED OUT of the headless
+     * editor available, with a warning that crash recovery is unavailable. GATED OUT of the headless
      * selftest build -- that build runs THIS exe non-headless and drives recovery itself on ISOLATED temp
      * folders via R6 test seams, so the production scan must never inspect test journals. */
     /* No migration code: crash recovery is unreleased, so there is no installed base with the old

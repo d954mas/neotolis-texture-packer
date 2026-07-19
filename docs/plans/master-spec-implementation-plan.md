@@ -40,12 +40,11 @@ and full Debug/Release gates.
 
 ## 2026-07-17 history, durability, and path hardening checkpoint
 
-**Status: PARTLY SUPERSEDED BY THE 2026-07-19 OWNER DECISION.** Undo/Redo uses
-compact versioned `HISTORY` transitions with deterministic checkpoint fallback
-only for unsupported/oversized diffs. The implementation still gates commit on
-journal durability, but that behavior is now refactor work rather than the
-target contract. Project Save uses an exclusive
-synced sibling temp, atomic publication, and parent-directory sync; a
+**Status: SUPERSEDED AND REFACTORED BY THE 2026-07-19 OWNER DECISION.** Undo/Redo
+uses compact versioned `HISTORY` transitions; unsupported/oversized recovery
+records now degrade recovery instead of triggering a full-checkpoint fallback.
+Live commit no longer depends on journal durability. Project Save uses an
+exclusive synced sibling temp, atomic publication, and parent-directory sync; a
 post-publication failure is the structured `file_durability_uncertain` success
 notice. Windows client arguments and core filesystem paths use strict UTF-8
 boundaries. Fault injection, hostile-input tests, mixed replay, budgets, and

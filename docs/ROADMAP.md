@@ -79,9 +79,10 @@ best-effort version-4 diff log with a healthy process/power-loss RPO of at most
 5 seconds. Journal failure leaves the edit committed, enters a sticky degraded
 state, and stops later dependent recording until a fresh checkpoint. This
 supersedes every older gate below that says append/sync failure rolls back a
-transaction or that visibility waits for durable acknowledgement. The current
-rollback-on-journal-failure implementation is therefore refactor work, not the
-target contract.
+transaction or that visibility waits for durable acknowledgement. The refactor
+is now implemented: live edits and History commit independently, recovery
+reports a structured sticky health state, and Save can heal it with a fresh
+checkpoint.
 
 ## Граф зависимостей
 
