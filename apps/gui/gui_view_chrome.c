@@ -19,6 +19,7 @@
 #include "gui_canvas.h"
 #include "gui_pack.h"
 #include "gui_project.h"
+#include "gui_recovery_indicator.h"
 #include "gui_version.h" /* NTPACKER_VERSION/NTPACKER_ENGINE_NAME/NTPACKER_REPO_URL (About modal) */
 
 #include <stdint.h>
@@ -192,8 +193,23 @@ void declare_menubar(nt_ui_context_t *ctx) {
         menubar_entry(ctx, s_id_mb_edit, "Edit", &s_edit_state);
         menubar_entry(ctx, s_id_mb_view, "View", &s_view_state);
         menubar_entry(ctx, s_id_mb_help, "Help", &s_help_state);
-        /* right side: project name + dirty dot */
+        /* right side: persistent recovery warning + project name + dirty dot */
         CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}}) {}
+        gui_recovery_notice recovery_notice = {0};
+        const gui_recovery_indicator recovery_indicator =
+            gui_recovery_indicator_present(
+                gui_project_recovery_notice_query(&recovery_notice),
+                &recovery_notice);
+        if (recovery_indicator.visible) {
+            CLAY({.id = {.id = nt_ui_id("ntpacker/recovery_indicator")},
+                  .layout = {
+                      .sizing = {CLAY_SIZING_FIXED(S(16)), CLAY_SIZING_FIT(0)},
+                      .childAlignment = {CLAY_ALIGN_X_CENTER,
+                                         CLAY_ALIGN_Y_CENTER}}}) {
+                nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT),
+                            recovery_indicator.glyph, &g_warn);
+            }
+        }
         if (gui_project_is_dirty()) {
             nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "*", &g_tag);
         }
@@ -316,6 +332,17 @@ void declare_context_menu(nt_ui_context_t *ctx) {
 }
 
 void declare_tooltips(nt_ui_context_t *ctx) {
+    gui_recovery_notice recovery_notice = {0};
+    const gui_recovery_indicator recovery_indicator =
+        gui_recovery_indicator_present(
+            gui_project_recovery_notice_query(&recovery_notice),
+            &recovery_notice);
+    if (recovery_indicator.visible) {
+        (void)nt_ui_tooltip(
+            ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT,
+            nt_ui_id("ntpacker/recovery_indicator"),
+            recovery_indicator.tooltip, &s_tip_style);
+    }
     const char *pack_tip = s_pack_stale
         ? "Pack (Ctrl+P): sources or settings changed -- press to repack now and refresh the atlas preview (session only, no files exported)."
         : "Pack (Ctrl+P): atlas is up to date. Repacks with current settings and refreshes the preview (session only, no files exported).";

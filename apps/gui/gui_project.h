@@ -117,6 +117,21 @@ typedef enum {
 typedef tp_recovery_candidate gui_recovery_entry;
 typedef tp_recovery_candidates gui_recovery_list;
 
+/* Persistent projection of the core recovery-health state. Unlike the
+ * operation-rejection channel, querying this notice never drains it. */
+typedef struct gui_recovery_notice {
+    const char *notice_id;
+    uint64_t generation;
+    tp_status status;
+    bool has_last_durable_revision;
+    int64_t last_durable_revision;
+    char message[256];
+} gui_recovery_notice;
+
+/* Returns true while crash recovery is degraded. A successful healing/rebind
+ * publishes the cleared state by returning false on subsequent queries. */
+bool gui_project_recovery_notice_query(gui_recovery_notice *out);
+
 /* Thin adapter over tp_recovery_scan_root; returns the bounded result count. */
 int gui_recovery_collect(gui_recovery_list *out);
 

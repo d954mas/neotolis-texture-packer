@@ -19,15 +19,36 @@ static tp_id128 recovery_key(void) {
     return k;
 }
 
-/* Raise the status-bar channel for a degraded recovery notice. Editing and
- * history remain available; only crash-recovery coverage is degraded. */
-void gui_project__note_recovery_degraded(const char *msg) {
-    s_project.op_error = true;
-    s_project.op_error_status = TP_STATUS_JOURNAL_FAILED;
+/* Publish a persistent recovery-health projection. It is deliberately separate
+ * from the drainable operation-rejection channel: editing and Undo stay live. */
+void gui_project__note_recovery_degraded(tp_status status) {
+    const tp_session_recovery_health health =
+        tp_session_recovery_health_query(s_project.session);
+    s_project.recovery_notice_active = true;
+    s_project.recovery_notice.notice_id = health.notice_id;
+    s_project.recovery_notice.generation = health.generation;
+    s_project.recovery_notice.status =
+        status == TP_STATUS_OK ? TP_STATUS_JOURNAL_FAILED : status;
+    s_project.recovery_notice.has_last_durable_revision =
+        health.has_last_durable_revision;
+    s_project.recovery_notice.last_durable_revision =
+        health.last_durable_revision;
     (void)snprintf(
-        s_project.op_error_msg, sizeof s_project.op_error_msg,
-        "Crash recovery is unavailable (%s). Changes can continue, but unsaved work may not survive an app or system crash.",
-        msg ? msg : "unknown");
+        s_project.recovery_notice.message,
+        sizeof s_project.recovery_notice.message,
+        "Crash recovery is degraded (%s). Editing and Undo remain available, but recent unsaved changes may not survive an app or system crash.",
+        tp_status_str(s_project.recovery_notice.status));
+}
+
+bool gui_project_recovery_notice_query(gui_recovery_notice *out) {
+    gui_project__sync_recovery_notice();
+    if (!s_project.recovery_notice_active) {
+        return false;
+    }
+    if (out) {
+        *out = s_project.recovery_notice;
+    }
+    return true;
 }
 
 static bool recovery_configured(void) {
@@ -76,9 +97,9 @@ void gui_project__attach_recovery_live(tp_session *session) {
             status == TP_STATUS_RECOVERY_BUSY
                 ? "another ntpacker window owns this recovery slot"
                 : "the recovery storage lock could not be acquired");
-        gui_project__note_recovery_degraded(err.msg[0] ? err.msg
-                                         : "could not checkpoint the recovery journal");
+        gui_project__note_recovery_degraded(status);
     }
+    gui_project__sync_recovery_notice();
 }
 
 

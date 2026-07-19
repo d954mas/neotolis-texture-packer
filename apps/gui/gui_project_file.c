@@ -34,7 +34,8 @@ static bool install_session(tp_session *next) {
     s_project.op_error = false;
     s_project.op_error_status = TP_STATUS_OK;
     s_project.op_error_msg[0] = '\0';
-    s_project.recovery_notice_generation = 0U;
+    s_project.recovery_notice_active = false;
+    s_project.recovery_notice = (gui_recovery_notice){0};
     s_project.save_notice_pending = false;
     s_project.save_notice[0] = '\0';
     return true;
@@ -246,7 +247,7 @@ tp_status gui_project_save(char *err_out, size_t err_cap) {
     gui_project__snapshot_drop();
     recompute_name();
     if (result.recovery_degraded) {
-        gui_project__note_recovery_degraded("recovery checkpoint compaction failed");
+        gui_project__note_recovery_degraded(result.recovery_status);
     }
     gui_project__sync_recovery_notice();
     if (result.file_durability_degraded) {
@@ -299,16 +300,11 @@ tp_status gui_project_save_as(const char *path, char *err_out, size_t err_cap) {
     }
     gui_project__snapshot_drop();
     recompute_name();
+    if (result.recovery_degraded) {
+        gui_project__note_recovery_degraded(result.recovery_status);
+    }
     if (result.recovery_rebind_required) {
         gui_project__attach_recovery_live(s_project.session);
-    }
-    if (result.recovery_degraded &&
-        (result.recovery_status == TP_STATUS_RECOVERY_CLEANUP_FAILED ||
-         tp_session_recovery_health_query(s_project.session).degraded)) {
-        gui_project__note_recovery_degraded(
-            result.recovery_status == TP_STATUS_RECOVERY_CLEANUP_FAILED
-                ? "old recovery slot cleanup failed"
-                : "recovery checkpoint compaction failed");
     }
     gui_project__sync_recovery_notice();
     if (result.file_durability_degraded) {

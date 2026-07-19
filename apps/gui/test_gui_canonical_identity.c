@@ -14,12 +14,16 @@
 #include "gui_canvas.h"
 #include "gui_pack.h"
 #include "gui_project.h"
+#include "gui_recovery_indicator.h"
 #include "gui_rows.h"
 #include "gui_scan.h"
 #include "gui_state.h"
 
 #include "time/nt_time.h"
 #include "tp_core/tp_scan.h"
+#include "tp_core/tp_journal.h"
+#include "tp_journal_internal.h"
+#include "tp_session_internal.h"
 
 #include "unity.h"
 
@@ -27,6 +31,22 @@ static char s_left_dir[512];
 static char s_right_dir[512];
 static char s_left_file[512];
 static char s_right_file[512];
+
+static tp_journal_io attach_memory_recovery(void) {
+    tp_journal_io io = tp_journal_io_memory();
+    TEST_ASSERT_NOT_NULL(io.ctx);
+    const tp_id128 key = {{
+        'g', 'u', 'i', '_', 'r', 'e', 'c', 'o',
+        'v', 'e', 'r', 'y', '_', 'f', '0', '3'}};
+    tp_journal *journal = tp_journal_create(io, key);
+    TEST_ASSERT_NOT_NULL(journal);
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_attach_journal(gui_project_session_for_jobs(), journal,
+                                  &error));
+    return io;
+}
 
 /* gui_actions owns several shell-facing commands that are linked into this
  * headless target but never exercised here. */
@@ -200,6 +220,8 @@ void setUp(void) {
 }
 
 void tearDown(void) {
+    tp_journal__test_set_record_limit(0U);
+    tp_journal__test_set_file_limit(0U);
     multi_sel_clear();
     gui_pack_shutdown();
     gui_project_shutdown();
@@ -655,6 +677,71 @@ void test_required_recovery_without_root_warns_but_allows_edit_undo_redo(void) {
     gui_project_discard_recovery_on_shutdown();
 }
 
+void test_recovery_notice_is_sticky_exact_and_clears_after_save_heals(void) {
+    (void)attach_memory_recovery();
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas = snapshot
+                                         ? tp_session_snapshot_atlas_at(snapshot, 0)
+                                         : NULL;
+    TEST_ASSERT_NOT_NULL(atlas);
+    const tp_id128 atlas_id = atlas->id;
+    tp_journal__test_set_record_limit(1U);
+    TEST_ASSERT_TRUE(gui_project_set_atlas_name(
+        atlas_id, tp_session_snapshot_revision(snapshot), "recovery-notice"));
+
+    char save_path[512];
+    (void)snprintf(save_path, sizeof save_path, "%s/recovery-notice.ntpacker_project",
+                   TP_GUI_IDENTITY_TEST_DIR);
+    (void)remove(save_path);
+    tp_journal__test_set_file_limit(1U);
+    char error[256] = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          gui_project_save_as(save_path, error, sizeof error));
+
+    const tp_session_recovery_health health =
+        tp_session_recovery_health_query(gui_project_session_for_jobs());
+    TEST_ASSERT_TRUE(health.degraded);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS, health.first_cause);
+    gui_recovery_notice notice = {0};
+    TEST_ASSERT_TRUE(gui_project_recovery_notice_query(&notice));
+    TEST_ASSERT_EQUAL_STRING(TP_SESSION_NOTICE_RECOVERY_DEGRADED,
+                             notice.notice_id);
+    TEST_ASSERT_EQUAL_UINT64(health.generation, notice.generation);
+    TEST_ASSERT_EQUAL_INT(health.first_cause, notice.status);
+    TEST_ASSERT_NOT_NULL(strstr(notice.message, "degraded"));
+    TEST_ASSERT_NOT_NULL(strstr(notice.message, "Editing and Undo remain available"));
+    const gui_recovery_indicator indicator =
+        gui_recovery_indicator_present(true, &notice);
+    TEST_ASSERT_TRUE(indicator.visible);
+    TEST_ASSERT_EQUAL_STRING("!", indicator.glyph);
+    TEST_ASSERT_EQUAL_STRING(notice.message, indicator.tooltip);
+    TEST_ASSERT_FALSE(
+        gui_recovery_indicator_present(false, &notice).visible);
+
+    snapshot = gui_project_snapshot();
+    atlas = snapshot ? tp_session_snapshot_atlas_by_id(snapshot, atlas_id) : NULL;
+    TEST_ASSERT_NOT_NULL(atlas);
+    TEST_ASSERT_TRUE(gui_project_set_atlas_setting(
+        atlas_id, tp_session_snapshot_revision(snapshot) + 1,
+        GUI_ATLAS_PADDING, atlas->padding + 1, 0.0F));
+    TEST_ASSERT_FALSE(gui_project_flush_pending());
+    TEST_ASSERT_TRUE(gui_project_take_op_error(error, sizeof error));
+    gui_recovery_notice after_drain = {0};
+    TEST_ASSERT_TRUE(gui_project_recovery_notice_query(&after_drain));
+    TEST_ASSERT_EQUAL_STRING(notice.notice_id, after_drain.notice_id);
+    TEST_ASSERT_EQUAL_UINT64(notice.generation, after_drain.generation);
+    TEST_ASSERT_EQUAL_INT(notice.status, after_drain.status);
+
+    tp_journal__test_set_record_limit(0U);
+    tp_journal__test_set_file_limit(0U);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          gui_project_save(error, sizeof error));
+    TEST_ASSERT_FALSE(gui_project_recovery_notice_query(&after_drain));
+    TEST_ASSERT_FALSE(
+        tp_session_recovery_health_query(gui_project_session_for_jobs()).degraded);
+    (void)remove(save_path);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_rows_apply_renames_by_canonical_source_and_key);
@@ -670,6 +757,7 @@ int main(void) {
     RUN_TEST(test_canvas_cache_key_keeps_core_path_capacity);
     RUN_TEST(test_undo_redo_keep_last_successful_pack_result);
     RUN_TEST(test_pack_result_follows_stable_atlas_across_index_shift);
+    RUN_TEST(test_recovery_notice_is_sticky_exact_and_clears_after_save_heals);
     RUN_TEST(test_required_recovery_without_root_warns_but_allows_edit_undo_redo);
     return UNITY_END();
 }

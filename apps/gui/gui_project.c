@@ -115,14 +115,26 @@ void gui_project__sync_recovery_notice(void) {
     const tp_session_recovery_health health =
         tp_session_recovery_health_query(s_project.session);
     if (!health.degraded) {
-        s_project.recovery_notice_generation = health.generation;
+        /* A failed cross-identity retire can temporarily leave no owner while
+         * Save As asks the frontend to rebind. Preserve the exact result notice
+         * until a healthy owner is actually available. */
+        if (!health.available && s_project.recovery_notice_active) {
+            return;
+        }
+        s_project.recovery_notice_active = false;
+        s_project.recovery_notice.notice_id = health.notice_id;
+        s_project.recovery_notice.generation = health.generation;
+        s_project.recovery_notice.status = TP_STATUS_OK;
+        s_project.recovery_notice.message[0] = '\0';
         return;
     }
-    if (health.generation == s_project.recovery_notice_generation) {
+    if (s_project.recovery_notice_active &&
+        strcmp(health.notice_id, s_project.recovery_notice.notice_id) == 0 &&
+        health.generation == s_project.recovery_notice.generation &&
+        health.first_cause == s_project.recovery_notice.status) {
         return;
     }
-    s_project.recovery_notice_generation = health.generation;
-    gui_project__note_recovery_degraded(tp_status_str(health.first_cause));
+    gui_project__note_recovery_degraded(health.first_cause);
 }
 
 bool gui_project__refresh_after_session_commit(void) {

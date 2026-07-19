@@ -37,7 +37,8 @@ typedef struct gui_project_state {
     bool op_error;
     tp_status op_error_status;
     char op_error_msg[256];
-    uint64_t recovery_notice_generation;
+    bool recovery_notice_active;
+    gui_recovery_notice recovery_notice;
     char recovery_root[TP_IDENTITY_PATH_MAX];
     bool recovery_required;
     bool recovery_setup_notice_pending;
@@ -57,7 +58,7 @@ extern gui_project_state s_project;
 void gui_project__snapshot_drop(void);
 void gui_project__next_transaction_id(char out[33]);
 void gui_project__note_session_reject(tp_status status, const tp_error *err);
-void gui_project__note_recovery_degraded(const char *msg);
+void gui_project__note_recovery_degraded(tp_status status);
 void gui_project__sync_recovery_notice(void);
 bool gui_project__refresh_after_session_commit(void);
 void gui_project__attach_recovery_live(tp_session *session);
