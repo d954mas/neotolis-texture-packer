@@ -139,6 +139,7 @@ static tp_status recovery_resolve_store(
 
     tp_recovery_claim *claim = NULL;
     tp_recovery_resolution *resolution = NULL;
+    bool journal_deleted = false;
     tp_session_save_result receipt;
     memset(&receipt, 0, sizeof receipt);
     if (status == TP_STATUS_OK) {
@@ -146,6 +147,7 @@ static tp_status recovery_resolve_store(
     }
     if (status == TP_STATUS_OK && action == TP_RECOVERY_ACTION_DISCARD) {
         status = tp_recovery_claim_discard(claim, err);
+        journal_deleted = status == TP_STATUS_OK;
     } else if (status == TP_STATUS_OK) {
         if (!rng || !rng->fill) {
             status = tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
@@ -172,11 +174,12 @@ static tp_status recovery_resolve_store(
             (void)tp_fs_write_file(receipt.target_path, invalid_project, sizeof invalid_project - 1U);
         }
         if (status == TP_STATUS_OK) {
-            status = tp_recovery_resolution_finalize(resolution, &receipt, err);
+            status = tp_recovery_resolution_finalize(
+                resolution, &receipt, &journal_deleted, err);
         }
     }
     if (status == TP_STATUS_OK) {
-        out->journal_deleted = true;
+        out->journal_deleted = journal_deleted;
         out->project_saved = action != TP_RECOVERY_ACTION_DISCARD;
         if (out->project_saved) {
             (void)snprintf(out->target_path, sizeof out->target_path, "%s",

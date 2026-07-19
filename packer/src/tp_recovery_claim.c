@@ -102,6 +102,7 @@ tp_status tp_recovery_claim_recover(tp_recovery_claim *claim,
                    : tp_error_set(err, TP_STATUS_BAD_PROJECT,
                                   "recovery journal has no recoverable state");
     }
+    candidate->recovery_status = recovery.status;
     candidate->project = tp_project_clone(tp_model_project(model));
     if (recovery.has_metadata) {
         candidate->metadata = recovery.metadata;
@@ -291,7 +292,11 @@ static bool receipt_equals(const tp_session_save_result *a,
 
 tp_status tp_recovery_resolution_finalize(
     tp_recovery_resolution *resolution,
-    const tp_session_save_result *receipt, tp_error *err) {
+    const tp_session_save_result *receipt, bool *journal_deleted,
+    tp_error *err) {
+    if (journal_deleted) {
+        *journal_deleted = false;
+    }
     if (!resolution || !resolution->session || !resolution->project_lease ||
         !resolution->has_receipt ||
         !receipt_equals(receipt, &resolution->last_receipt)) {
@@ -304,9 +309,17 @@ tp_status tp_recovery_resolution_finalize(
     if (status != TP_STATUS_OK) {
         return status;
     }
-    status = tp_recovery_backend_candidate_delete(&candidate->journal_pin,
-                                  claim->journal_path, err);
+    const bool preserve_original =
+        candidate->recovery_status == TP_JOURNAL_RECOVERY_CORRUPT ||
+        candidate->recovery_status == TP_JOURNAL_RECOVERY_TRUNCATED;
+    if (!preserve_original) {
+        status = tp_recovery_backend_candidate_delete(&candidate->journal_pin,
+                                                       claim->journal_path, err);
+    }
     if (status == TP_STATUS_OK) {
+        if (journal_deleted) {
+            *journal_deleted = !preserve_original;
+        }
         tp_project_lease_release(resolution->project_lease);
         resolution->project_lease = NULL;
         resolution->has_receipt = false;

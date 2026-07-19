@@ -88,6 +88,74 @@ static void write_file(const char *path, const char *bytes) {
     TEST_ASSERT_EQUAL_INT(0, fclose(file));
 }
 
+static uint8_t *read_file_bytes(const char *path, size_t *out_len) {
+    FILE *file = fopen(path, "rb");
+    TEST_ASSERT_NOT_NULL(file);
+    TEST_ASSERT_EQUAL_INT(0, fseek(file, 0, SEEK_END));
+    const long end = ftell(file);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, end);
+    TEST_ASSERT_EQUAL_INT(0, fseek(file, 0, SEEK_SET));
+    const size_t len = (size_t)end;
+    uint8_t *bytes = (uint8_t *)malloc(len > 0U ? len : 1U);
+    TEST_ASSERT_NOT_NULL(bytes);
+    TEST_ASSERT_EQUAL_UINT64(len, fread(bytes, 1U, len, file));
+    TEST_ASSERT_EQUAL_INT(0, fclose(file));
+    *out_len = len;
+    return bytes;
+}
+
+static size_t journal_record_offset_by_type(const uint8_t *bytes, size_t len,
+                                            uint8_t type, size_t occurrence) {
+    size_t offset = (size_t)TP_JRN_HEADER_LEN;
+    size_t found = 0U;
+    while (offset + (size_t)TP_JRN_SYNC_FIELD +
+               (size_t)TP_JRN_LEN_FIELD + (size_t)TP_JRN_CRC_FIELD <=
+           len) {
+        const uint32_t payload_len =
+            tp_jrn_get_u32(bytes + offset + (size_t)TP_JRN_SYNC_FIELD);
+        const size_t frame_len = (size_t)TP_JRN_SYNC_FIELD +
+                                 (size_t)TP_JRN_LEN_FIELD +
+                                 (size_t)payload_len +
+                                 (size_t)TP_JRN_CRC_FIELD;
+        if (frame_len > len - offset || payload_len == 0U) {
+            return SIZE_MAX;
+        }
+        const size_t payload_offset =
+            offset + (size_t)TP_JRN_SYNC_FIELD + (size_t)TP_JRN_LEN_FIELD;
+        if (bytes[payload_offset] == type && found++ == occurrence) {
+            return offset;
+        }
+        offset += frame_len;
+    }
+    return SIZE_MAX;
+}
+
+static void corrupt_second_transaction(const char *path) {
+    size_t len = 0U;
+    uint8_t *bytes = read_file_bytes(path, &len);
+    const size_t record =
+        journal_record_offset_by_type(bytes, len, TP_JRN_REC_TXN, 1U);
+    TEST_ASSERT_NOT_EQUAL(SIZE_MAX, record);
+    const size_t at = record + (size_t)TP_JRN_SYNC_FIELD +
+                      (size_t)TP_JRN_LEN_FIELD + 1U;
+    TEST_ASSERT_LESS_THAN_UINT64(len, at);
+    FILE *file = fopen(path, "rb+");
+    TEST_ASSERT_NOT_NULL(file);
+    TEST_ASSERT_EQUAL_INT(0, fseek(file, (long)at, SEEK_SET));
+    TEST_ASSERT_EQUAL_INT((int)(uint8_t)(bytes[at] ^ 0xFFU),
+                          fputc((int)(uint8_t)(bytes[at] ^ 0xFFU), file));
+    TEST_ASSERT_EQUAL_INT(0, fclose(file));
+    free(bytes);
+}
+
+static void append_torn_tail(const char *path) {
+    FILE *file = fopen(path, "ab");
+    TEST_ASSERT_NOT_NULL(file);
+    const uint8_t partial_sync = (uint8_t)(TP_JRN_SYNC_WORD >> 24U);
+    TEST_ASSERT_EQUAL_UINT64(1U, fwrite(&partial_sync, 1U, 1U, file));
+    TEST_ASSERT_EQUAL_INT(0, fclose(file));
+}
+
 static bool file_exists(const char *path) {
     FILE *file = fopen(path, "rb");
     if (!file) {
@@ -284,7 +352,7 @@ void test_frontend_flow_attaches_scans_and_resolves_without_owner_handles(void) 
     (void)remove(target_path);
 }
 
-void test_frontend_attach_failure_requires_recovery_before_storage_error(void) {
+void test_frontend_attach_failure_does_not_block_model_commit(void) {
     tp_error err = {{0}};
     char journal[TP_IDENTITY_PATH_MAX];
     join_path(journal, sizeof journal, g_root, "flow-live.ntpjournal");
@@ -327,8 +395,11 @@ void test_frontend_attach_failure_requires_recovery_before_storage_error(void) {
     request.op_count = 1U;
     tp_txn_result txn_result;
     memset(&txn_result, 0, sizeof txn_result);
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED,
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_session_apply(session, &request, &txn_result, &err));
+    TEST_ASSERT_TRUE(txn_result.committed);
+    TEST_ASSERT_EQUAL_INT64(1, txn_result.revision);
+    TEST_ASSERT_FALSE(tp_session_recovery_available(session));
     tp_txn_result_free(&txn_result);
     tp_session_snapshot_destroy(snapshot);
     tp_session_destroy(session);
@@ -376,7 +447,8 @@ static tp_status save_model_candidate_with_fingerprint(
     return TP_STATUS_OK;
 }
 
-static void commit_recovery_fixture_change(tp_model *model) {
+static void commit_recovery_fixture_rename(tp_model *model, const char *id,
+                                           char *name) {
     const tp_project *project = tp_model_project(model);
     TEST_ASSERT_NOT_NULL(project);
     TEST_ASSERT_GREATER_THAN_INT(0, project->atlas_count);
@@ -384,10 +456,10 @@ static void commit_recovery_fixture_change(tp_model *model) {
     tp_operation op = {0};
     op.kind = TP_OP_ATLAS_RENAME;
     op.atlas_id = project->atlases[0].id;
-    op.u.atlas_rename.name = "recovery-fixture-dirty";
+    op.u.atlas_rename.name = name;
     tp_txn_request request = {0};
     request.schema = TP_TXN_SCHEMA;
-    memcpy(request.id_hex, "f1000000000000000000000000000001", 33U);
+    memcpy(request.id_hex, id, 33U);
     request.expected_revision = tp_model_revision(model);
     request.ops = &op;
     request.op_count = 1;
@@ -396,6 +468,12 @@ static void commit_recovery_fixture_change(tp_model *model) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_model_apply(model, &request, &result, &err));
     tp_txn_result_free(&result);
+}
+
+static void commit_recovery_fixture_change(tp_model *model) {
+    commit_recovery_fixture_rename(
+        model, "f1000000000000000000000000000001",
+        "recovery-fixture-dirty");
 }
 
 static void make_preserved_live_journal_with_metadata(
@@ -424,6 +502,33 @@ static void make_preserved_live_journal(tp_recovery_store *store,
         .project_name = "candidate",
     };
     make_preserved_live_journal_with_metadata(store, journal, &metadata);
+}
+
+static void make_midstream_corrupt_journal(tp_recovery_store *store,
+                                           const char *journal,
+                                           int64_t timestamp) {
+    const tp_recovery_metadata metadata = {
+        .timestamp = timestamp,
+        .project_path = "",
+        .project_name = "partial-candidate",
+    };
+    tp_recovery_live *live = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_recovery_store_create_live(store, journal, &live, NULL));
+    tp_model *model = create_model();
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_recovery_live_attach(live, model, &metadata, NULL));
+    commit_recovery_fixture_rename(
+        model, "f2000000000000000000000000000001", "valid-prefix");
+    commit_recovery_fixture_rename(
+        model, "f2000000000000000000000000000002", "corrupt-middle");
+    commit_recovery_fixture_rename(
+        model, "f2000000000000000000000000000003", "unreachable-tail");
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_recovery_live_finish(live, true, NULL));
+    tp_recovery_live_destroy(live);
+    tp_model_destroy(model);
+    corrupt_second_transaction(journal);
 }
 
 static void craft_orphan(const char *path, int64_t timestamp) {
@@ -992,7 +1097,8 @@ void test_claimed_candidate_requires_bound_current_save_receipt(void) {
     TEST_ASSERT_TRUE(receipt.has_recovery_token);
     write_file(first_target, "replacement");
     TEST_ASSERT_EQUAL_INT(TP_STATUS_FILE_CHANGED_EXTERNALLY,
-                          tp_recovery_resolution_finalize(resolution, &receipt, &err));
+                          tp_recovery_resolution_finalize(resolution, &receipt,
+                                                          NULL, &err));
     TEST_ASSERT_TRUE(tp_scan_exists(journal));
     tp_recovery_resolution_destroy(resolution);
 
@@ -1004,7 +1110,8 @@ void test_claimed_candidate_requires_bound_current_save_receipt(void) {
                           tp_recovery_resolution_save_as(
                               resolution, second_target, &receipt, &err));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
-                          tp_recovery_resolution_finalize(resolution, &receipt, &err));
+                          tp_recovery_resolution_finalize(resolution, &receipt,
+                                                          NULL, &err));
     TEST_ASSERT_FALSE(tp_scan_exists(journal));
     tp_recovery_resolution_destroy(resolution);
     tp_recovery_claim_release(claim);
@@ -1088,7 +1195,7 @@ void test_resolution_cancel_invalidates_receipt_and_releases_process_lease(void)
                           tp_project_lease_acquire(target, &competitor, &err));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
                           tp_recovery_resolution_finalize(
-                              resolution, &copied_receipt, &err));
+                              resolution, &copied_receipt, NULL, &err));
     TEST_ASSERT_TRUE(tp_scan_exists(journal));
     tp_project_lease_release(competitor);
     tp_recovery_resolution_destroy(resolution);
@@ -1158,7 +1265,7 @@ void test_save_original_requires_lease_and_exact_fingerprint(void) {
                               resolution, &receipt, &err));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_recovery_resolution_finalize(
-                              resolution, &receipt, &err));
+                              resolution, &receipt, NULL, &err));
     TEST_ASSERT_FALSE(tp_scan_exists(journal));
     tp_recovery_resolution_destroy(resolution);
     tp_recovery_claim_release(claim);
@@ -1296,6 +1403,148 @@ void test_scan_reports_corrupt_journal_without_hiding_valid_candidate(void) {
     TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, scan_status, err.msg);
     TEST_ASSERT_TRUE(valid_found);
     TEST_ASSERT_TRUE(diagnostic_found);
+}
+
+void test_midstream_corrupt_save_as_preserves_original_until_explicit_discard(void) {
+    char journal[TP_IDENTITY_PATH_MAX];
+    char target[TP_IDENTITY_PATH_MAX];
+    join_path(journal, sizeof journal, g_root, "partial-corrupt.ntpjournal");
+    join_path(target, sizeof target, g_root,
+              "partial-corrupt.ntpacker_project");
+    (void)remove(journal);
+    (void)remove(target);
+
+    tp_recovery_store *store = NULL;
+    tp_error err = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_recovery_store_create(g_root, recovery_key(), &store, &err));
+    make_midstream_corrupt_journal(store, journal, 120);
+    tp_recovery_store_destroy(store);
+
+    size_t original_len = 0U;
+    uint8_t *original = read_file_bytes(journal, &original_len);
+    tp_recovery_candidates candidates = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_recovery_scan_root(g_root, recovery_key(), NULL,
+                                                &candidates, &err));
+    bool offered = false;
+    for (size_t i = 0U; i < candidates.count; ++i) {
+        if (tp_identity_path_equal(journal, candidates.items[i].journal_path)) {
+            offered = candidates.items[i].adoptable &&
+                      candidates.items[i].status ==
+                          TP_JOURNAL_RECOVERY_CORRUPT;
+        }
+    }
+    TEST_ASSERT_TRUE(offered);
+
+    uint8_t seed = 31U;
+    tp_rng rng = {det_fill, &seed};
+    tp_recovery_resolve_result resolved = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_recovery_resolve_journal(
+            g_root, recovery_key(), journal, NULL, TP_RECOVERY_ACTION_SAVE_AS,
+            target, &rng, &resolved, &err));
+    TEST_ASSERT_TRUE(resolved.project_saved);
+    TEST_ASSERT_FALSE(resolved.journal_deleted);
+    TEST_ASSERT_TRUE(file_exists(journal));
+
+    size_t retained_len = 0U;
+    uint8_t *retained = read_file_bytes(journal, &retained_len);
+    TEST_ASSERT_EQUAL_UINT64(original_len, retained_len);
+    TEST_ASSERT_EQUAL_MEMORY(original, retained, original_len);
+    free(retained);
+    free(original);
+
+    tp_project *saved = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_load(target, &saved, &err));
+    TEST_ASSERT_EQUAL_STRING("valid-prefix", saved->atlases[0].name);
+    tp_project_destroy(saved);
+
+    memset(&candidates, 0, sizeof candidates);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_recovery_scan_root(g_root, recovery_key(), NULL,
+                                                &candidates, &err));
+    offered = false;
+    for (size_t i = 0U; i < candidates.count; ++i) {
+        offered = offered ||
+                  tp_identity_path_equal(journal,
+                                         candidates.items[i].journal_path);
+    }
+    TEST_ASSERT_TRUE(offered);
+
+    memset(&resolved, 0, sizeof resolved);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_recovery_resolve_journal(
+            g_root, recovery_key(), journal, NULL, TP_RECOVERY_ACTION_DISCARD,
+            NULL, NULL, &resolved, &err));
+    TEST_ASSERT_TRUE(resolved.journal_deleted);
+    TEST_ASSERT_FALSE(file_exists(journal));
+    (void)remove(target);
+}
+
+void test_truncated_save_as_preserves_original_until_explicit_discard(void) {
+    char journal[TP_IDENTITY_PATH_MAX];
+    char target[TP_IDENTITY_PATH_MAX];
+    join_path(journal, sizeof journal, g_root, "partial-truncated.ntpjournal");
+    join_path(target, sizeof target, g_root,
+              "partial-truncated.ntpacker_project");
+    (void)remove(journal);
+    (void)remove(target);
+
+    tp_recovery_store *store = NULL;
+    tp_error err = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_recovery_store_create(g_root, recovery_key(), &store, &err));
+    make_preserved_live_journal(store, journal, 121);
+    tp_recovery_store_destroy(store);
+    append_torn_tail(journal);
+
+    size_t original_len = 0U;
+    uint8_t *original = read_file_bytes(journal, &original_len);
+    tp_recovery_candidates candidates = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_recovery_scan_root(g_root, recovery_key(), NULL,
+                                                &candidates, &err));
+    bool offered = false;
+    for (size_t i = 0U; i < candidates.count; ++i) {
+        if (tp_identity_path_equal(journal, candidates.items[i].journal_path)) {
+            offered = candidates.items[i].adoptable &&
+                      candidates.items[i].status ==
+                          TP_JOURNAL_RECOVERY_TRUNCATED;
+        }
+    }
+    TEST_ASSERT_TRUE(offered);
+
+    uint8_t seed = 32U;
+    tp_rng rng = {det_fill, &seed};
+    tp_recovery_resolve_result resolved = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_recovery_resolve_journal(
+            g_root, recovery_key(), journal, NULL, TP_RECOVERY_ACTION_SAVE_AS,
+            target, &rng, &resolved, &err));
+    TEST_ASSERT_TRUE(resolved.project_saved);
+    TEST_ASSERT_FALSE(resolved.journal_deleted);
+    TEST_ASSERT_TRUE(file_exists(journal));
+
+    size_t retained_len = 0U;
+    uint8_t *retained = read_file_bytes(journal, &retained_len);
+    TEST_ASSERT_EQUAL_UINT64(original_len, retained_len);
+    TEST_ASSERT_EQUAL_MEMORY(original, retained, original_len);
+    free(retained);
+    free(original);
+
+    memset(&resolved, 0, sizeof resolved);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_recovery_resolve_journal(
+            g_root, recovery_key(), journal, NULL, TP_RECOVERY_ACTION_DISCARD,
+            NULL, NULL, &resolved, &err));
+    TEST_ASSERT_TRUE(resolved.journal_deleted);
+    TEST_ASSERT_FALSE(file_exists(journal));
+    (void)remove(target);
 }
 
 void test_scan_reports_unreadable_entry_without_hiding_valid_candidate(void) {
@@ -1528,7 +1777,7 @@ int main(int argc, char **argv) {
     UNITY_BEGIN();
     RUN_TEST(test_live_slot_competition_and_permanent_lock);
     RUN_TEST(test_frontend_flow_attaches_scans_and_resolves_without_owner_handles);
-    RUN_TEST(test_frontend_attach_failure_requires_recovery_before_storage_error);
+    RUN_TEST(test_frontend_attach_failure_does_not_block_model_commit);
     RUN_TEST(test_scan_skips_live_then_lists_dead_owner);
     RUN_TEST(test_competing_orphan_claim_and_process_death);
     RUN_TEST(test_stale_lock_is_reused_not_recreated);
@@ -1553,6 +1802,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_claim_discard_deletes_only_journal_and_keeps_lock_domain);
     RUN_TEST(test_scan_surfaces_only_same_key_version_mismatch);
     RUN_TEST(test_scan_reports_corrupt_journal_without_hiding_valid_candidate);
+    RUN_TEST(test_midstream_corrupt_save_as_preserves_original_until_explicit_discard);
+    RUN_TEST(test_truncated_save_as_preserves_original_until_explicit_discard);
     RUN_TEST(test_scan_reports_unreadable_entry_without_hiding_valid_candidate);
     RUN_TEST(test_candidate_preserves_project_path_beyond_legacy_gui_capacity);
 #ifndef _WIN32

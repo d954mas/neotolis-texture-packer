@@ -39,7 +39,8 @@ tp_status tp_recovery_resolution_save_as(
     tp_session_save_result *receipt, tp_error *err);
 tp_status tp_recovery_resolution_finalize(
     tp_recovery_resolution *resolution,
-    const tp_session_save_result *receipt, tp_error *err);
+    const tp_session_save_result *receipt, bool *journal_deleted,
+    tp_error *err);
 void tp_recovery_resolution_cancel(tp_recovery_resolution *resolution);
 void tp_recovery_resolution_destroy(tp_recovery_resolution *resolution);
 tp_status tp_recovery_claim_discard(tp_recovery_claim *claim, tp_error *err);

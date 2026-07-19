@@ -31,6 +31,7 @@ struct tp_recovery_owned_candidate {
     tp_recovery_claim *owner;
     tp_project *project;
     tp_journal_meta metadata;
+    tp_journal_recovery_status recovery_status;
     tp_id128 recovery_token;
     bool has_metadata;
     bool has_recovery_token;
