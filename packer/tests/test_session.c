@@ -1749,6 +1749,13 @@ void test_save_heal_failure_preserves_evidence_and_first_degradation_cause(void)
                          TP_STATUS_OK, &txn_result, &err);
     tp_txn_result_free(&txn_result);
     TEST_ASSERT_FALSE(tp_session_recovery_available(session));
+    const tp_session_recovery_health degraded_health =
+        tp_session_recovery_health_query(session);
+    TEST_ASSERT_TRUE(degraded_health.degraded);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS,
+                          degraded_health.first_cause);
+    TEST_ASSERT_TRUE(degraded_health.has_last_durable_revision);
+    TEST_ASSERT_EQUAL_INT64(0, degraded_health.last_durable_revision);
 
     uint8_t *evidence_before = NULL;
     size_t evidence_before_len = 0U;
@@ -1767,6 +1774,15 @@ void test_save_heal_failure_preserves_evidence_and_first_degradation_cause(void)
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS,
                           save_result.recovery_status);
     TEST_ASSERT_FALSE(tp_session_recovery_available(session));
+    const tp_session_recovery_health failed_heal_health =
+        tp_session_recovery_health_query(session);
+    TEST_ASSERT_TRUE(failed_heal_health.degraded);
+    TEST_ASSERT_EQUAL_INT(degraded_health.first_cause,
+                          failed_heal_health.first_cause);
+    TEST_ASSERT_EQUAL_INT64(degraded_health.last_durable_revision,
+                            failed_heal_health.last_durable_revision);
+    TEST_ASSERT_EQUAL_UINT64(degraded_health.generation,
+                             failed_heal_health.generation);
     TEST_ASSERT_GREATER_THAN_size_t(syncs_before,
                                     tp_journal_io_memory__sync_count(io));
 
@@ -1790,6 +1806,118 @@ void test_save_heal_failure_preserves_evidence_and_first_degradation_cause(void)
                          TP_STATUS_OK, &txn_result, &err);
     tp_txn_result_free(&txn_result);
     TEST_ASSERT_EQUAL_size_t(0U, tp_txn__test_request_encode_calls());
+
+    tp_session_destroy(session);
+    (void)remove(path);
+}
+
+void test_recovery_health_dto_tracks_durable_prefix_and_heal_transition(void) {
+    char path[1024];
+    (void)snprintf(path, sizeof path,
+                   "%s/tp_session_recovery_health.ntpacker_project",
+                   g_scratch);
+    (void)remove(path);
+    tp_session *session = make_session();
+    tp_error err = {{0}};
+
+    tp_session_recovery_health health =
+        tp_session_recovery_health_query(session);
+    TEST_ASSERT_EQUAL_STRING(TP_SESSION_NOTICE_RECOVERY_DEGRADED,
+                             health.notice_id);
+    TEST_ASSERT_TRUE(health.available);
+    TEST_ASSERT_FALSE(health.degraded);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, health.first_cause);
+    TEST_ASSERT_FALSE(health.has_last_durable_revision);
+    TEST_ASSERT_FALSE(health.has_last_durable_time);
+
+    tp_session_snapshot *snapshot = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_snapshot_create(session, &snapshot, &err));
+    const tp_id128 atlas_id = tp_session_snapshot_atlas_at(snapshot, 0)->id;
+    tp_session_snapshot_destroy(snapshot);
+
+    tp_journal_io io = tp_journal_io_memory();
+    tp_id128 key = {{0x63}};
+    tp_journal *journal = tp_journal_create(io, key);
+    TEST_ASSERT_NOT_NULL(journal);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_attach_journal(session, journal, &err));
+    tp_session_recovery_health attached =
+        tp_session_recovery_health_query(session);
+    TEST_ASSERT_TRUE(attached.available);
+    TEST_ASSERT_FALSE(attached.degraded);
+    TEST_ASSERT_TRUE(attached.has_last_durable_revision);
+    TEST_ASSERT_EQUAL_INT64(0, attached.last_durable_revision);
+    TEST_ASSERT_FALSE(attached.has_last_durable_time);
+    TEST_ASSERT_GREATER_THAN_UINT64(health.generation, attached.generation);
+
+    tp_txn_result txn_result;
+    session_apply_rename(session, "63000000000000000000000000000001",
+                         0, atlas_id, "durable-txn", TP_STATUS_OK,
+                         &txn_result, &err);
+    TEST_ASSERT_TRUE(txn_result.committed);
+    tp_txn_result_free(&txn_result);
+    tp_session_recovery_health after_txn =
+        tp_session_recovery_health_query(session);
+    TEST_ASSERT_EQUAL_INT64(1, after_txn.last_durable_revision);
+    TEST_ASSERT_GREATER_THAN_UINT64(attached.generation,
+                                    after_txn.generation);
+
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_undo(session, &err));
+    tp_session_recovery_health after_history =
+        tp_session_recovery_health_query(session);
+    TEST_ASSERT_EQUAL_INT64(2, after_history.last_durable_revision);
+    TEST_ASSERT_GREATER_THAN_UINT64(after_txn.generation,
+                                    after_history.generation);
+
+    tp_journal_io_memory__fail_next_sync(io);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_redo(session, &err));
+    tp_session_recovery_health degraded =
+        tp_session_recovery_health_query(session);
+    TEST_ASSERT_FALSE(degraded.available);
+    TEST_ASSERT_TRUE(degraded.degraded);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED, degraded.first_cause);
+    TEST_ASSERT_TRUE(degraded.has_last_durable_revision);
+    TEST_ASSERT_EQUAL_INT64(2, degraded.last_durable_revision);
+    TEST_ASSERT_FALSE(degraded.has_last_durable_time);
+    TEST_ASSERT_GREATER_THAN_UINT64(after_history.generation,
+                                    degraded.generation);
+
+    session_apply_rename(session, "63000000000000000000000000000002",
+                         3, atlas_id, "suppressed-after-degrade", TP_STATUS_OK,
+                         &txn_result, &err);
+    TEST_ASSERT_TRUE(txn_result.committed);
+    tp_txn_result_free(&txn_result);
+    tp_session_recovery_health suppressed =
+        tp_session_recovery_health_query(session);
+    TEST_ASSERT_EQUAL_INT64(2, suppressed.last_durable_revision);
+    TEST_ASSERT_EQUAL_UINT64(degraded.generation, suppressed.generation);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_JOURNAL_FAILED, suppressed.first_cause);
+
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_snapshot_create(session, &snapshot, &err));
+    tp_session_recovery_health snap_health =
+        tp_session_snapshot_recovery_health_query(snapshot);
+    TEST_ASSERT_EQUAL_UINT64(suppressed.generation, snap_health.generation);
+    TEST_ASSERT_EQUAL_INT64(suppressed.last_durable_revision,
+                            snap_health.last_durable_revision);
+    TEST_ASSERT_EQUAL_INT(suppressed.first_cause, snap_health.first_cause);
+    TEST_ASSERT_TRUE(snap_health.degraded);
+    tp_session_snapshot_destroy(snapshot);
+
+    tp_session_save_result save_result = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_save_as(session, path, &save_result, &err));
+    TEST_ASSERT_FALSE(save_result.recovery_degraded);
+    tp_session_recovery_health healed =
+        tp_session_recovery_health_query(session);
+    TEST_ASSERT_TRUE(healed.available);
+    TEST_ASSERT_FALSE(healed.degraded);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, healed.first_cause);
+    TEST_ASSERT_EQUAL_INT64(4, healed.last_durable_revision);
+    TEST_ASSERT_FALSE(healed.has_last_durable_time);
+    TEST_ASSERT_GREATER_THAN_UINT64(suppressed.generation,
+                                    healed.generation);
 
     tp_session_destroy(session);
     (void)remove(path);
@@ -2317,6 +2445,54 @@ void test_cross_identity_save_retires_journal_after_metadata_failure(void) {
     (void)remove(target);
 }
 
+void test_cross_identity_retire_preserves_sticky_recovery_first_cause(void) {
+    char journal[1024];
+    char target[1024];
+    (void)snprintf(journal, sizeof journal,
+                   "%s/session-sticky-retire.ntpjournal", g_scratch);
+    (void)snprintf(target, sizeof target,
+                   "%s/session-sticky-retire.ntpacker_project", g_scratch);
+    (void)remove(journal);
+    (void)remove(target);
+    tp_error err = {{0}};
+    tp_recovery_store *store = NULL;
+    tp_session *session = attach_live_recovery(
+        journal, 81, "session-sticky-retire", &store, &err);
+
+    tp_session_snapshot *snapshot = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_snapshot_create(session, &snapshot, &err));
+    const tp_id128 atlas_id = tp_session_snapshot_atlas_at(snapshot, 0)->id;
+    tp_session_snapshot_destroy(snapshot);
+    tp_journal__test_set_record_limit(2U);
+    tp_txn_result txn_result;
+    session_apply_rename(session, "10000000000000000000000000000081",
+                         0, atlas_id, "degraded-before-retire", TP_STATUS_OK,
+                         &txn_result, &err);
+    tp_txn_result_free(&txn_result);
+    const tp_session_recovery_health before =
+        tp_session_recovery_health_query(session);
+    TEST_ASSERT_TRUE(before.degraded);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS, before.first_cause);
+    tp_journal__test_set_record_limit(0U);
+
+    tp_session_save_result result = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_save_as(session, target, &result, &err));
+    TEST_ASSERT_TRUE(result.saved);
+    TEST_ASSERT_TRUE(result.recovery_degraded);
+    const tp_session_recovery_health after =
+        tp_session_recovery_health_query(session);
+    TEST_ASSERT_TRUE(after.degraded);
+    TEST_ASSERT_EQUAL_INT(before.first_cause, after.first_cause);
+    TEST_ASSERT_EQUAL_UINT64(before.generation, after.generation);
+
+    tp_session_destroy(session);
+    tp_recovery_store_destroy(store);
+    (void)remove(journal);
+    (void)remove(target);
+}
+
 void test_save_as_keeps_published_destination_when_recovery_retire_fails(void) {
     char journal[1024];
     char original[1024];
@@ -2469,6 +2645,11 @@ void test_required_recovery_reports_unavailable_without_blocking_model_commands(
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_session_require_recovery(session, &err));
     TEST_ASSERT_FALSE(tp_session_recovery_available(session));
+    const tp_session_recovery_health missing =
+        tp_session_recovery_health_query(session);
+    TEST_ASSERT_FALSE(missing.available);
+    TEST_ASSERT_FALSE(missing.degraded);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, missing.first_cause);
     TEST_ASSERT_TRUE(tp_session_can_undo(session));
     TEST_ASSERT_TRUE(tp_session_can_redo(session));
 
@@ -2525,6 +2706,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_save_reports_recovery_degradation_and_keeps_later_mutation_available);
     RUN_TEST(test_save_heals_degraded_recovery_and_resumes_journaling);
     RUN_TEST(test_save_heal_failure_preserves_evidence_and_first_degradation_cause);
+    RUN_TEST(test_recovery_health_dto_tracks_durable_prefix_and_heal_transition);
     RUN_TEST(test_open_holds_project_lease_until_session_close);
     RUN_TEST(test_save_new_never_replaces_existing_destination);
     RUN_TEST(test_save_as_acquires_destination_before_releasing_old_lease);
@@ -2536,6 +2718,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_session_preserves_dirty_live_recovery_on_destroy);
     RUN_TEST(test_save_as_updates_live_recovery_identity_before_compaction);
     RUN_TEST(test_cross_identity_save_retires_journal_after_metadata_failure);
+    RUN_TEST(test_cross_identity_retire_preserves_sticky_recovery_first_cause);
     RUN_TEST(test_save_as_keeps_published_destination_when_recovery_retire_fails);
     RUN_TEST(test_degraded_session_live_keeps_mutation_available_and_preserves_slot);
     RUN_TEST(test_required_recovery_reports_unavailable_without_blocking_model_commands);

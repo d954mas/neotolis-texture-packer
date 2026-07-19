@@ -21,6 +21,8 @@ void gate_unlock(const tp_session *session);
 /* Recovery-health predicate defined in tp_session.c beside the live seam. The
  * writer gates mutation on it and snapshot_create records it, so both TUs need it. */
 bool recovery_is_healthy(const tp_session *session);
+tp_session_recovery_health tp_session__recovery_health_locked(
+    const tp_session *session);
 
 /* Internal Open/recovery construction seam. Always consumes `project`, including
  * every failure path, so ownership cannot become ambiguous under allocation/RNG

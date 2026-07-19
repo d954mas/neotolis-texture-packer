@@ -28,6 +28,27 @@ typedef struct tp_session_input_token {
 bool tp_session_input_token_equal(tp_session_input_token left,
                                   tp_session_input_token right);
 
+/* Stable state-notice vocabulary for recovery durability. `notice_id` in the
+ * DTO below always points at this program-lifetime string; consumers surface it
+ * only while `degraded` is true. */
+#define TP_SESSION_NOTICE_RECOVERY_DEGRADED "recovery_degraded"
+
+typedef struct tp_session_recovery_health {
+    const char *notice_id;
+    bool available;
+    bool degraded;
+    tp_status first_cause;
+    bool has_last_durable_revision;
+    int64_t last_durable_revision;
+    /* Unix seconds when known. The synchronous recovery writer currently has
+     * no trustworthy injected clock, so it reports this explicitly unknown. */
+    bool has_last_durable_time;
+    int64_t last_durable_time;
+    /* Monotonic for this session lifetime. A changed value tells a polling
+     * client to refresh the state notice; wrap is saturated at UINT64_MAX. */
+    uint64_t generation;
+} tp_session_recovery_health;
+
 /* Session calls are synchronous and serialized. They are intentionally
  * non-reentrant: side-effect/journal callbacks invoked during admission must not
  * call back into this same session. There is no actor thread or hidden mailbox. */
@@ -172,6 +193,8 @@ tp_status tp_session_invalidate_sources(tp_session *session, tp_error *err);
 tp_status tp_session_require_recovery(tp_session *session, tp_error *err);
 int64_t tp_session_revision(const tp_session *session);
 bool tp_session_recovery_available(const tp_session *session);
+tp_session_recovery_health tp_session_recovery_health_query(
+    const tp_session *session);
 bool tp_session_can_undo(const tp_session *session);
 bool tp_session_can_redo(const tp_session *session);
 int tp_session_undo_depth(const tp_session *session);
@@ -205,6 +228,8 @@ tp_session_input_token tp_session_snapshot_input_token(
 uint64_t tp_session_snapshot_event_sequence(const tp_session_snapshot *snapshot);
 bool tp_session_snapshot_dirty(const tp_session_snapshot *snapshot);
 bool tp_session_snapshot_recovery_available(const tp_session_snapshot *snapshot);
+tp_session_recovery_health tp_session_snapshot_recovery_health_query(
+    const tp_session_snapshot *snapshot);
 tp_session_identity tp_session_snapshot_identity(const tp_session_snapshot *snapshot);
 /* Borrowed immutable path owned by `snapshot`; empty for an unsaved identity. */
 const char *tp_session_snapshot_canonical_path(const tp_session_snapshot *snapshot);

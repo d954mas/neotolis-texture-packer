@@ -33,6 +33,41 @@ bool recovery_is_healthy(const tp_session *session) {
     return !session->recovery_required && session->recovery_healthy;
 }
 
+tp_session_recovery_health tp_session__recovery_health_locked(
+    const tp_session *session) {
+    tp_session_recovery_health health = {
+        .notice_id = TP_SESSION_NOTICE_RECOVERY_DEGRADED,
+        .first_cause = TP_STATUS_OK,
+    };
+    if (!session) {
+        return health;
+    }
+    const bool model_degraded =
+        tp_model__recovery_degraded(session->model);
+    const bool owner_degraded =
+        (session->recovery_live &&
+         !tp_recovery_live_healthy(session->recovery_live)) ||
+        (tp_model_has_journal(session->model) &&
+         !session->recovery_healthy);
+    health.available = recovery_is_healthy(session);
+    health.degraded = model_degraded || owner_degraded;
+    if (model_degraded) {
+        health.first_cause = tp_model__recovery_status(session->model);
+    } else if (owner_degraded) {
+        health.first_cause = TP_STATUS_JOURNAL_FAILED;
+    }
+    health.has_last_durable_revision =
+        tp_model__recovery_durable_revision(
+            session->model, &health.last_durable_revision);
+    /* No append/checkpoint API currently receives a trustworthy timestamp.
+     * Keep the time explicitly unknown instead of sampling a global clock. */
+    health.has_last_durable_time = false;
+    health.last_durable_time = 0;
+    health.generation =
+        tp_model__recovery_health_generation(session->model);
+    return health;
+}
+
 static void observe_model_recovery(tp_session *session) {
     if (!tp_model__recovery_degraded(session->model)) {
         return;
@@ -432,6 +467,9 @@ tp_status tp_session_attach_recovery_live(tp_session *session,
     session->recovery_live = live;
     tp_status status = tp_recovery_live_attach(live, session->model, metadata, err);
     session->recovery_healthy = status == TP_STATUS_OK;
+    if (status != TP_STATUS_OK) {
+        tp_model__degrade_recovery(session->model, status);
+    }
     gate_unlock(session);
     return status;
 }
@@ -687,6 +725,8 @@ static tp_status save_as_locked(tp_session *session, const char *path,
                     recovery_degraded = true;
                     recovery_status = metadata_status;
                     session->recovery_healthy = false;
+                    tp_model__degrade_recovery(session->model,
+                                               metadata_status);
                 }
             }
         }
@@ -886,6 +926,18 @@ bool tp_session_recovery_available(const tp_session *session) {
     const bool available = recovery_is_healthy(session);
     gate_unlock(session);
     return available;
+}
+
+tp_session_recovery_health tp_session_recovery_health_query(
+    const tp_session *session) {
+    if (!session) {
+        return tp_session__recovery_health_locked(NULL);
+    }
+    gate_lock(session);
+    const tp_session_recovery_health health =
+        tp_session__recovery_health_locked(session);
+    gate_unlock(session);
+    return health;
 }
 
 bool tp_session_can_undo(const tp_session *session) {

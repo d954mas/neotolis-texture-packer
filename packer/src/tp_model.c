@@ -1,6 +1,7 @@
 #include "tp_core/tp_transaction.h"
 
 #include <inttypes.h>
+#include <stdint.h>
 #include <stdlib.h>
 
 #include "tp_diff_internal.h"
@@ -70,20 +71,57 @@ tp_status tp_model__recovery_status(const tp_model *m) {
     return (m && m->recovery_degraded) ? m->recovery_status : TP_STATUS_OK;
 }
 
+static void bump_recovery_health_generation(tp_model *m) {
+    if (m->recovery_health_generation < UINT64_MAX) {
+        m->recovery_health_generation++;
+    }
+}
+
 void tp_model__degrade_recovery(tp_model *m, tp_status status) {
     if (!m || m->recovery_degraded) {
         return;
     }
     m->recovery_degraded = true;
     m->recovery_status = status == TP_STATUS_OK ? TP_STATUS_JOURNAL_FAILED
-                                                : status;
+                                                 : status;
+    bump_recovery_health_generation(m);
 }
 
 void tp_model__restore_recovery(tp_model *m) {
     if (m) {
+        const bool changed = m->recovery_degraded;
         m->recovery_degraded = false;
         m->recovery_status = TP_STATUS_OK;
+        if (changed) {
+            bump_recovery_health_generation(m);
+        }
     }
+}
+
+void tp_model__mark_recovery_durable(tp_model *m, int64_t revision) {
+    if (!m || revision < 0 ||
+        (m->recovery_durable_revision_known &&
+         revision <= m->recovery_durable_revision)) {
+        return;
+    }
+    m->recovery_durable_revision = revision;
+    m->recovery_durable_revision_known = true;
+    bump_recovery_health_generation(m);
+}
+
+bool tp_model__recovery_durable_revision(const tp_model *m,
+                                         int64_t *revision) {
+    if (!m || !m->recovery_durable_revision_known) {
+        return false;
+    }
+    if (revision) {
+        *revision = m->recovery_durable_revision;
+    }
+    return true;
+}
+
+uint64_t tp_model__recovery_health_generation(const tp_model *m) {
+    return m ? m->recovery_health_generation : 0U;
 }
 
 void tp_model__test_set_revision(tp_model *m, int64_t revision) {

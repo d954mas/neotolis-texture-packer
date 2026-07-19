@@ -365,6 +365,8 @@ tp_status tp_model_undo(tp_model *m, tp_error *err) {
     tp_history_transition_blob_free(&durable.blob);
     if (recovery_ready && recovery_status != TP_STATUS_OK) {
         tp_model__degrade_recovery(m, recovery_status);
+    } else if (recovery_ready) {
+        tp_model__mark_recovery_durable(m, revision);
     }
     return TP_STATUS_OK;
 }
@@ -412,6 +414,8 @@ tp_status tp_model_redo(tp_model *m, tp_error *err) {
     tp_history_transition_blob_free(&durable.blob);
     if (recovery_ready && recovery_status != TP_STATUS_OK) {
         tp_model__degrade_recovery(m, recovery_status);
+    } else if (recovery_ready) {
+        tp_model__mark_recovery_durable(m, revision);
     }
     return TP_STATUS_OK;
 }

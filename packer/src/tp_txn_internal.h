@@ -26,6 +26,9 @@ struct tp_model {
     struct tp_journal *journal; /* optional owned recovery-prefix journal */
     bool recovery_degraded;     /* sticky until a fresh checkpoint succeeds */
     tp_status recovery_status;  /* first recovery-only failure cause */
+    bool recovery_durable_revision_known;
+    int64_t recovery_durable_revision; /* latest sync-confirmed checkpoint/record */
+    uint64_t recovery_health_generation;
     struct tp_side_effect_coordinator *coordinator; /* optional borrowed hooks */
 };
 

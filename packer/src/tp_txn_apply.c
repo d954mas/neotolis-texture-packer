@@ -454,6 +454,8 @@ tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_tx
         }
         if (recovery_failure != TP_STATUS_OK) {
             tp_model__degrade_recovery(m, recovery_failure);
+        } else {
+            tp_model__mark_recovery_durable(m, next_revision);
         }
     }
     free(payload);

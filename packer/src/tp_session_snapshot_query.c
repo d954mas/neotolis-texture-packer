@@ -81,7 +81,19 @@ bool tp_session_snapshot_dirty(const tp_session_snapshot *snapshot) {
 }
 
 bool tp_session_snapshot_recovery_available(const tp_session_snapshot *snapshot) {
-    return snapshot && snapshot->recovery_healthy;
+    return snapshot && snapshot->recovery_health.available;
+}
+
+tp_session_recovery_health tp_session_snapshot_recovery_health_query(
+    const tp_session_snapshot *snapshot) {
+    if (snapshot) {
+        return snapshot->recovery_health;
+    }
+    const tp_session_recovery_health health = {
+        .notice_id = TP_SESSION_NOTICE_RECOVERY_DEGRADED,
+        .first_cause = TP_STATUS_OK,
+    };
+    return health;
 }
 
 tp_session_identity tp_session_snapshot_identity(const tp_session_snapshot *snapshot) {

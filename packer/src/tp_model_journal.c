@@ -103,6 +103,7 @@ tp_status tp_model_attach_journal(tp_model *m, tp_journal *j, tp_error *err) {
         return cs;
     }
     m->journal = j; /* ownership transferred */
+    tp_model__mark_recovery_durable(m, m->revision);
     tp_model__restore_recovery(m);
     return TP_STATUS_OK;
 }
@@ -135,6 +136,9 @@ tp_status tp_model__append_history_checkpoint(tp_model *m, const tp_project *can
     }
     tp_status cs = tp_journal_init_checkpoint(m->journal, (const uint8_t *)snap, snap_len, revision, err);
     free(snap);
+    if (cs == TP_STATUS_OK) {
+        tp_model__mark_recovery_durable(m, revision);
+    }
     return cs;
 }
 
@@ -269,6 +273,7 @@ static tp_status compact_journal(tp_model *m, bool preserve_evidence,
      * prefix remains available for diagnosis; live idempotency and edits do not
      * depend on the poisoned journal. */
     if (cs == TP_STATUS_OK) {
+        tp_model__mark_recovery_durable(m, m->revision);
         tp_model__restore_recovery(m);
     }
     return cs;
@@ -316,7 +321,10 @@ void tp_model_detach_journal(tp_model *m) {
     }
     tp_journal_destroy(m->journal);
     m->journal = NULL;
-    tp_model__restore_recovery(m);
+    /* Detaching an unhealthy backend does not establish a fresh durable base.
+     * Keep the sticky first cause until a later successful attach/checkpoint;
+     * otherwise a cross-identity retire would silently rewrite the persistent
+     * recovery notice to a generic owner-unavailable state. */
 }
 
 tp_status tp_model_recover(tp_journal_io io, tp_id128 key, tp_model **out, tp_journal_recovery *info, tp_error *err) {
@@ -529,6 +537,7 @@ tp_status tp_model_recover(tp_journal_io io, tp_id128 key, tp_model **out, tp_jo
                             "could not seed live retained transaction ids");
                     } else {
                         rm->journal = j; /* owns j; both indexes now agree */
+                        tp_model__mark_recovery_durable(rm, rec.revision);
                         j_consumed = true;
                         if (out) {
                             *out = rm;

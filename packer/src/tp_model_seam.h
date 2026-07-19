@@ -23,6 +23,10 @@ bool tp_model__recovery_degraded(const tp_model *model);
 tp_status tp_model__recovery_status(const tp_model *model);
 void tp_model__degrade_recovery(tp_model *model, tp_status status);
 void tp_model__restore_recovery(tp_model *model);
+void tp_model__mark_recovery_durable(tp_model *model, int64_t revision);
+bool tp_model__recovery_durable_revision(const tp_model *model,
+                                         int64_t *revision);
+uint64_t tp_model__recovery_health_generation(const tp_model *model);
 /* Degraded-Save compaction that stages the full live retained-id window and
  * restores the exact prior bytes/index if the replacement checkpoint cannot
  * be completed. */
