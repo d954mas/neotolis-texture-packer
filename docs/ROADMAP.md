@@ -73,6 +73,16 @@ fallback only for unsupported or oversized diffs. Mixed TXN/HISTORY replay,
 append/sync-failure rollback, hostile-input handling and admission budgets are
 test-pinned.
 
+**Owner recovery-policy update (2026-07-19):** the master spec no longer makes
+journal durability part of the model commit contract. Recovery is a bounded
+best-effort version-4 diff log with a healthy process/power-loss RPO of at most
+5 seconds. Journal failure leaves the edit committed, enters a sticky degraded
+state, and stops later dependent recording until a fresh checkpoint. This
+supersedes every older gate below that says append/sync failure rolls back a
+transaction or that visibility waits for durable acknowledgement. The current
+rollback-on-journal-failure implementation is therefore refactor work, not the
+target contract.
+
 ## Граф зависимостей
 
 ```text
@@ -181,9 +191,10 @@ malformed/duplicate IDs и portability collisions возвращаются ка�
 | `F2.6` | Минимальные semantic inverse data и append-only journal до переключения GUI/Undo/Redo на live commit path; ordinary CLI остаётся file-oriented |
 
 **Gate:** batch либо применяется полностью, либо не меняет состояние; один batch
-создаёт одну semantic history unit; journal append failure не публикует state,
-revision или event; revision conflict/invalid revision и retry idempotency
-test-pinned; GUI и CLI не содержат параллельных mutation rules.
+создаёт одну semantic history unit; model commit не зависит от recovery I/O, а
+journal failure оставляет commit видимым и переводит recovery в sticky degraded;
+revision conflict/invalid revision и live-session retry idempotency test-pinned;
+GUI и CLI не содержат параллельных mutation rules.
 
 ### B0 — Native import foundation
 
@@ -234,12 +245,12 @@ project mutation или опубликованный неполный набор
 | `F3.3` | Shared visible History с non-Undoable Save checkpoints |
 | `F3.4` | Immutable asynchronous Pack jobs и ordered result selection |
 | `F3.5` | `pack_input_hash`, stale-preview UX и memory-only byte-budget result LRU |
-| `F3.6` | Extend the implemented bounded local journal/checkpoint policy to ownership transfer and mirrors without changing durable acknowledgement |
+| `F3.6` | Extend bounded best-effort recovery, health/watermark reporting, and the 5-second healthy RPO to ownership transfer and mirrors without making recovery a commit gate |
 
 **Gate:** forward + reverse даёт byte-identical исходное состояние; Undo/Redo
 создают новые revisions; save не меняет revision; stale result остаётся видимым;
-watch/edit/Undo не запускают Pack; journal failure откатывает transaction до
-публикации commit event.
+watch/edit/Undo не запускают Pack; journal failure не откатывает transaction и
+не скрывает commit event, а явно деградирует только recovery.
 
 ### B2 — Format-package registry
 
@@ -293,8 +304,9 @@ OOM, bad output и cancellation изолированы; staged files публи�
 | `A.6` | Ordinary CLI остаётся one-shot/file-oriented и не редактирует скрытую копию live project |
 
 **Gate:** все acceptance criteria master spec §26; end-to-end Epic A outcome из
-§57; mutation видима только после journal acknowledgement; concurrent second
-controller и ambiguous project selection fail explicitly.
+§57; mutation следует общему model commit/event contract, а recovery health и
+durable watermark сообщаются отдельно; concurrent second controller и
+ambiguous project selection fail explicitly.
 
 ### Breadth — Reference formats и расширение ecosystem
 

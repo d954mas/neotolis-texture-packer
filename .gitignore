@@ -4,6 +4,7 @@ compile_commands.json
 *.ntpack
 *.ntpacker.lock
 tmp/
+examples/projects/out/
 
 # Local working area of the lead agent (draw-hash baselines, verification
 # screenshots, one-off probe scripts) — machine-local, never committed.

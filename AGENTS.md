@@ -70,6 +70,11 @@ work itself. Create a new role only when the catalog has no fitting role.
   only prose), and destructive/lossy outcomes are predictable via dry-run.
   Invalid user input must produce a structured error, never an abort/crash.
 - C17, engine warning flags (`nt_set_warning_flags`) on all our targets.
+- Use the owner's Neotolis assertions (`NT_ASSERT`, and `NT_BUILD_ASSERT` at the
+  builder boundary) in both Debug and Release. They are intentionally active in
+  every shipped configuration: never set `NT_ASSERT_MODE=OFF`, remove them, or
+  disable invariant checks as a release optimization. Do not use libc
+  `assert()` for required runtime invariants because `NDEBUG` disables it.
 - Target source model: sources are tagged records. Path files/folders and linked
   atlases share one runtime source/status boundary; external refresh never
   mutates project revision, dirty state, or Undo history and never auto-starts

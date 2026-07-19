@@ -49,7 +49,13 @@ typedef struct fixture {
     fixture_spec spec;
     tp_project *project;
     size_t serialized_bytes;
+    bool checkpoint_identity_equal;
 } fixture;
+
+static bool checkpoint_roundtrip_identity(const tp_project *project,
+                                          tp_id128 *out,
+                                          tp_error *err);
+static void fixture_free(fixture *f);
 
 static int process_id(void) {
 #ifdef _WIN32
@@ -190,6 +196,85 @@ static bool fixture_prepare(fixture *out, fixture_spec spec) {
     free(serialized);
     out->project = project;
     out->serialized_bytes = serialized_len;
+    tp_id128 checkpoint_identity = tp_id128_nil();
+    out->checkpoint_identity_equal =
+        checkpoint_roundtrip_identity(project, &checkpoint_identity, &err) &&
+        tp_id128_eq(tp_semantic_identity(project), checkpoint_identity);
+    if (!out->checkpoint_identity_equal) {
+        fixture_free(out);
+        return false;
+    }
+    return true;
+}
+
+static bool fixture_load_project(fixture *out, const char *path) {
+    memset(out, 0, sizeof *out);
+    tp_error err = {{0}};
+    tp_project *project = NULL;
+    if (tp_project_load(path, &project, &err) != TP_STATUS_OK || !project ||
+        project->atlas_count < 1) {
+        (void)fprintf(stderr, "benchmark project load failed: path=%s error=%s\n",
+                      path, err.msg);
+        tp_project_destroy(project);
+        return false;
+    }
+
+    fixture_spec spec = {"CHECKED_PROJECT", project->atlas_count,
+                         project->atlases[0].source_count,
+                         project->atlases[0].sprite_count,
+                         project->atlases[0].animation_count,
+                         project->atlases[0].animation_count > 0
+                             ? project->atlases[0].animations[0].frame_count
+                             : 0};
+    for (int ai = 0; ai < project->atlas_count; ++ai) {
+        const tp_project_atlas *atlas = &project->atlases[ai];
+        if (atlas->source_count != spec.sources_per_atlas ||
+            atlas->sprite_count != spec.overrides_per_atlas ||
+            atlas->animation_count != spec.animations_per_atlas ||
+            atlas->target_count != 1) {
+            (void)fprintf(stderr,
+                          "benchmark project is not a uniform one-target fixture: path=%s atlas=%d\n",
+                          path, ai);
+            tp_project_destroy(project);
+            return false;
+        }
+        for (int ni = 0; ni < atlas->animation_count; ++ni) {
+            if (atlas->animations[ni].frame_count !=
+                spec.frames_per_animation) {
+                (void)fprintf(stderr,
+                              "benchmark project has nonuniform animation frames: path=%s atlas=%d animation=%d\n",
+                              path, ai, ni);
+                tp_project_destroy(project);
+                return false;
+            }
+        }
+    }
+
+    char *serialized = NULL;
+    size_t serialized_len = 0U;
+    if (tp_project_save_buffer(project, &serialized, &serialized_len, &err) !=
+        TP_STATUS_OK) {
+        (void)fprintf(stderr,
+                      "benchmark project serialization failed: path=%s error=%s\n",
+                      path, err.msg);
+        tp_project_destroy(project);
+        return false;
+    }
+    free(serialized);
+    out->spec = spec;
+    out->project = project;
+    out->serialized_bytes = serialized_len;
+    tp_id128 checkpoint_identity = tp_id128_nil();
+    out->checkpoint_identity_equal = checkpoint_roundtrip_identity(
+        project, &checkpoint_identity, &err) &&
+        tp_id128_eq(tp_semantic_identity(project), checkpoint_identity);
+    if (!out->checkpoint_identity_equal) {
+        (void)fprintf(
+            stdout,
+            "benchmark_known_issue fixture=%s id=PATH-01 checkpoint_identity_equal=0 "
+            "action=benchmark-recovery-against-checkpoint-bytes\n",
+            spec.name);
+    }
     return true;
 }
 
@@ -204,11 +289,12 @@ static void fixture_free(fixture *f) {
 static void print_fixture(const fixture *f, int warmups, int iterations, int recovery_ops) {
     const fixture_spec *s = &f->spec;
     (void)printf("\nfixture=%s atlases=%d sources=%d overrides=%d animations=%d frames=%d "
-                 "serialized_bytes=%zu warmups=%d iterations=%d recovery_ops=%d\n",
+                 "serialized_bytes=%zu checkpoint_identity_equal=%d warmups=%d iterations=%d recovery_ops=%d\n",
                  s->name, s->atlases, s->atlases * s->sources_per_atlas,
                  s->atlases * s->overrides_per_atlas, s->atlases * s->animations_per_atlas,
                  s->atlases * s->animations_per_atlas * s->frames_per_animation,
-                 f->serialized_bytes, warmups, iterations, recovery_ops);
+                 f->serialized_bytes, f->checkpoint_identity_equal ? 1 : 0,
+                 warmups, iterations, recovery_ops);
 }
 
 static void request_padding(tp_txn_request *request, tp_operation *operation,
@@ -266,9 +352,12 @@ static void report_samples(const char *scenario, const fixture *f, tp_bench_samp
     (void)printf("]\n");
     double p50 = tp_bench_samples_percentile(samples, 50U);
     double p95 = tp_bench_samples_percentile(samples, 95U);
-    (void)printf("scenario=%s fixture=%s p50_ms=%.6f p95_ms=%.6f accepted=%zu failed=%zu %s=%" PRIu64 "\n",
-                 scenario, f->spec.name, p50, p95, samples->count, samples->failed,
-                 count_a_name, count_a);
+    double p99 = tp_bench_samples_percentile(samples, 99U);
+    const double maximum = samples->values[samples->count - 1U];
+    (void)printf("scenario=%s fixture=%s p50_ms=%.6f p95_ms=%.6f p99_ms=%.6f max_ms=%.6f "
+                 "accepted=%zu failed=%zu %s=%" PRIu64 "\n",
+                 scenario, f->spec.name, p50, p95, p99, maximum,
+                 samples->count, samples->failed, count_a_name, count_a);
 }
 
 static int run_project_load_scaling(int iterations) {
@@ -374,6 +463,10 @@ static bool bench_normal_transaction(const fixture *f, int warmups, int iteratio
     tp_model *model = clone ? tp_model_wrap(clone) : NULL;
     if (!model) {
         tp_project_destroy(clone);
+        return false;
+    }
+    if (tp_model_enable_history(model) != TP_STATUS_OK) {
+        tp_model_destroy(model);
         return false;
     }
     tp_id128 atlas_id = tp_model_project(model)->atlases[f->spec.atlases - 1].id;
@@ -733,6 +826,82 @@ static bool make_path(char *out, size_t cap, const char *root, const fixture *f,
     return n >= 0 && (size_t)n < cap;
 }
 
+static bool bench_journal_transaction(const fixture *f, const char *scratch,
+                                      int warmups, int iterations) {
+    char journal_path[768];
+    if (!make_path(journal_path, sizeof journal_path, scratch, f,
+                   "journal_transaction", 0)) {
+        return false;
+    }
+    (void)remove(journal_path);
+    tp_project *clone = tp_project_clone(f->project);
+    tp_model *model = clone ? tp_model_wrap(clone) : NULL;
+    if (!model) {
+        tp_project_destroy(clone);
+        return false;
+    }
+    if (tp_model_enable_history(model) != TP_STATUS_OK) {
+        tp_model_destroy(model);
+        (void)remove(journal_path);
+        return false;
+    }
+    tp_journal_io io = tp_journal_io_file(journal_path);
+    tp_journal *journal = io.ctx ? tp_journal_create(io, journal_key()) : NULL;
+    tp_error err = {{0}};
+    if (!journal || tp_model_attach_journal(model, journal, &err) !=
+                        TP_STATUS_OK) {
+        (void)fprintf(stderr,
+                      "journal transaction setup failed: fixture=%s error=%s\n",
+                      f->spec.name, err.msg);
+        if (journal) {
+            tp_journal_destroy(journal);
+        }
+        tp_model_destroy(model);
+        (void)remove(journal_path);
+        return false;
+    }
+
+    const tp_id128 atlas_id =
+        tp_model_project(model)->atlases[f->spec.atlases - 1].id;
+    tp_bench_samples samples;
+    tp_bench_samples_init(&samples);
+    uint64_t max_append_bytes = 0U;
+    bool ok = true;
+    for (int i = 0; i < warmups + iterations; ++i) {
+        const int current_padding =
+            tp_model_project(model)->atlases[f->spec.atlases - 1].padding;
+        const int padding = current_padding == 3 ? 4 : 3;
+        const int64_t before_len = io.length(io.ctx);
+        const double start = tp_bench_now_ms();
+        const bool applied = apply_padding(model, atlas_id,
+                                           (uint64_t)i + UINT64_C(0x700000),
+                                           padding);
+        const double elapsed = tp_bench_now_ms() - start;
+        const int64_t after_len = io.length(io.ctx);
+        ok = applied && before_len >= 0 && after_len > before_len;
+        if (ok && (uint64_t)(after_len - before_len) > max_append_bytes) {
+            max_append_bytes = (uint64_t)(after_len - before_len);
+        }
+        if (!ok ||
+            (i >= warmups &&
+             !tp_bench_samples_record(&samples, true, elapsed))) {
+            break;
+        }
+    }
+    const int64_t journal_bytes = io.length(io.ctx);
+    tp_model_destroy(model);
+    (void)remove(journal_path);
+    if (!ok || journal_bytes <= 0 || !tp_bench_samples_valid(&samples)) {
+        return false;
+    }
+    report_samples("journal_transaction", f, &samples, max_append_bytes,
+                   "append_bytes_max");
+    (void)printf("scenario=journal_transaction fixture=%s journal_bytes=%" PRId64
+                 " durability=current-file-backend\n",
+                 f->spec.name, journal_bytes);
+    return true;
+}
+
 static bool copy_file(const char *source, const char *destination) {
     FILE *in = fopen(source, "rb");
     FILE *out = in ? fopen(destination, "wb") : NULL;
@@ -818,7 +987,12 @@ static bool recovery_baseline_create(const fixture *f, const char *path, int rec
             return false;
         }
     }
-    *out_identity = tp_semantic_identity(tp_model_project(model));
+    if (!checkpoint_roundtrip_identity(tp_model_project(model), out_identity,
+                                       &err)) {
+        tp_model_destroy(model);
+        (void)remove(path);
+        return false;
+    }
     *out_revision = tp_model_revision(model);
     tp_model_destroy(model);
     if (file_size(path) <= 0) {
@@ -835,6 +1009,9 @@ static bool bench_recovery(const fixture *f, const char *scratch, int warmups,
     int64_t expected_revision = 0;
     if (!make_path(baseline, sizeof baseline, scratch, f, "recovery_base", 0) ||
         !recovery_baseline_create(f, baseline, recovery_ops, &expected_identity, &expected_revision)) {
+        (void)fprintf(stderr,
+                      "benchmark_evidence scenario=recovery fixture=%s phase=baseline recovery_ops=%d failed\n",
+                      f->spec.name, recovery_ops);
         return false;
     }
     int64_t baseline_bytes = file_size(baseline);
@@ -891,16 +1068,41 @@ static bool bench_recovery(const fixture *f, const char *scratch, int warmups,
         if (!io.ctx) {
             memset(&info, 0, sizeof info);
         }
-        tp_journal_recovery_free(&info);
-        tp_model_destroy(recovered);
-        (void)remove(sample_path);
         if (!ok) {
+            const bool borrows_raw =
+                tp_journal__test_recovery_ops_borrow_raw(&info);
+            const bool identity_equal =
+                recovered && tp_id128_eq(
+                                 tp_semantic_identity(
+                                     tp_model_project(recovered)),
+                                 expected_identity);
+            (void)fprintf(
+                stderr,
+                "benchmark_evidence scenario=recovery fixture=%s phase=recover sample=%d "
+                "status=%s recovery_status=%d records=%d expected_records=%d ops=%zu "
+                "expected_ops=%d revision=%" PRId64 " expected_revision=%" PRId64
+                " mid_stream=%d raw_copies=%zu raw_bytes=%zu total_bytes=%zu "
+                "checkpoint_copies=%zu op_copies=%zu borrows_raw=%d identity_equal=%d error=%s\n",
+                f->spec.name, i, tp_status_str(status), (int)info.status,
+                info.records_recovered, recovery_ops + 1, info.op_count,
+                recovery_ops, info.revision, expected_revision,
+                info.mid_stream_corrupt ? 1 : 0, copies.raw_storage_copies,
+                copies.raw_storage_bytes, info.bytes_total,
+                copies.checkpoint_payload_copies,
+                copies.operation_payload_copies, borrows_raw ? 1 : 0,
+                identity_equal ? 1 : 0, err.msg);
+            tp_journal_recovery_free(&info);
+            tp_model_destroy(recovered);
+            (void)remove(sample_path);
             if (i >= warmups) {
                 (void)tp_bench_samples_record(&samples, false, elapsed);
             }
             (void)remove(baseline);
             return false;
         }
+        tp_journal_recovery_free(&info);
+        tp_model_destroy(recovered);
+        (void)remove(sample_path);
         if (i >= warmups && !tp_bench_samples_record(&samples, true, elapsed)) {
             (void)remove(baseline);
             return false;
@@ -1822,6 +2024,19 @@ static bool bench_save(const fixture *f, const char *scratch, int warmups, int i
     return true;
 }
 
+static bool run_fixture_benchmarks(const fixture *f, const char *scratch,
+                                   int warmups, int iterations,
+                                   int recovery_ops, bool include_save) {
+    print_fixture(f, warmups, iterations, recovery_ops);
+    return bench_normal_transaction(f, warmups, iterations) &&
+           bench_journal_transaction(f, scratch, warmups, iterations) &&
+           bench_session_snapshot(f, warmups, iterations) &&
+           bench_history(f, scratch, warmups, iterations, false) &&
+           bench_history(f, scratch, warmups, iterations, true) &&
+           bench_recovery(f, scratch, warmups, iterations, recovery_ops) &&
+           (!include_save || bench_save(f, scratch, warmups, iterations));
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "--project-load-scaling") == 0) {
         int scaling_iterations = 3;
@@ -1853,6 +2068,42 @@ int main(int argc, char **argv) {
                      "timing=advisory\n");
         return run_recovery_scaling(scaling_iterations);
     }
+    if (argc > 1 && strcmp(argv[1], "--project") == 0) {
+        const int warmups = 2;
+        const char *scratch = argc > 3 ? argv[3] : "tp_bench_foundation_tmp";
+        int iterations = 20;
+        int recovery_ops = 100;
+        if (argc < 3 || argc > 6 ||
+            (argc > 4 &&
+             !parse_positive(argv[4], (int)TP_BENCH_MAX_SAMPLES,
+                             &iterations)) ||
+            (argc > 5 &&
+             !parse_positive(argv[5], 10000, &recovery_ops))) {
+            (void)fprintf(
+                stderr,
+                "usage: tp_bench_foundation --project <project> [scratch_dir] [iterations 1..%u] [recovery_ops 1..10000]\n",
+                (unsigned)TP_BENCH_MAX_SAMPLES);
+            return 2;
+        }
+        tp_mkdirs(scratch);
+        fixture checked;
+        if (!fixture_load_project(&checked, argv[2])) {
+            return 1;
+        }
+        (void)printf("tp_bench_foundation clock=monotonic source=nt_time_now "
+                     "mode=checked_project thresholds=advisory project=%s\n",
+                     argv[2]);
+        const bool ok = run_fixture_benchmarks(
+            &checked, scratch, warmups, iterations, recovery_ops, false);
+        fixture_free(&checked);
+        if (!ok) {
+            (void)fprintf(stderr,
+                          "benchmark scenario failed: CHECKED_PROJECT\n");
+            return 1;
+        }
+        (void)printf("\ntp_bench_foundation: OK\n");
+        return 0;
+    }
     const char *scratch = argc > 1 ? argv[1] : "tp_bench_foundation_tmp";
     int iterations = 20;
     int recovery_ops = 100;
@@ -1876,13 +2127,8 @@ int main(int argc, char **argv) {
             (void)fprintf(stderr, "fixture setup failed: %s\n", specs[i].name);
             return 1;
         }
-        print_fixture(&f, warmups, iterations, recovery_ops);
-        bool ok = bench_normal_transaction(&f, warmups, iterations) &&
-                  bench_session_snapshot(&f, warmups, iterations) &&
-                  bench_history(&f, scratch, warmups, iterations, false) &&
-                  bench_history(&f, scratch, warmups, iterations, true) &&
-                  bench_recovery(&f, scratch, warmups, iterations, recovery_ops) &&
-                  bench_save(&f, scratch, warmups, iterations);
+        const bool ok = run_fixture_benchmarks(
+            &f, scratch, warmups, iterations, recovery_ops, true);
         fixture_free(&f);
         if (!ok) {
             (void)fprintf(stderr, "benchmark scenario failed: %s\n", specs[i].name);

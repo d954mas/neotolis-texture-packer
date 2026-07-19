@@ -40,18 +40,24 @@ and full Debug/Release gates.
 
 ## 2026-07-17 history, durability, and path hardening checkpoint
 
-**Status: DONE.** Undo/Redo uses compact versioned `HISTORY` transitions with
-deterministic checkpoint fallback only for unsupported/oversized diffs. Journal
-acknowledgement requires its durability barrier. Project Save uses an exclusive
+**Status: PARTLY SUPERSEDED BY THE 2026-07-19 OWNER DECISION.** Undo/Redo uses
+compact versioned `HISTORY` transitions with deterministic checkpoint fallback
+only for unsupported/oversized diffs. The implementation still gates commit on
+journal durability, but that behavior is now refactor work rather than the
+target contract. Project Save uses an exclusive
 synced sibling temp, atomic publication, and parent-directory sync; a
 post-publication failure is the structured `file_durability_uncertain` success
 notice. Windows client arguments and core filesystem paths use strict UTF-8
 boundaries. Fault injection, hostile-input tests, mixed replay, budgets, and
 Debug/Release/boundary gates are the executable evidence.
 
-Any older packet below that says journal sync is optional, Undo/Redo normally
-appends a full checkpoint, canonical-v5 work is pending, or production still
-owns a GUI snapshot-history stack is non-executable implementation history.
+The normative target is master spec §7.1 and §22.3 as updated 2026-07-19:
+ordered best-effort v4 diffs, commit independent of journal I/O, sticky degraded
+recovery, and a healthy durability watermark no older than 5 seconds. Any older
+packet below that which specifies the former acknowledgement-before-visibility
+rule is non-executable implementation history. Statements that Undo/Redo normally
+append a full checkpoint, canonical-v5 work is pending, or production still
+owns a GUI snapshot-history stack are likewise historical.
 
 ## 2026-07-17 builder-containment checkpoint
 
@@ -528,7 +534,9 @@ operation kind; invalid ID/type/range/reference; allocator fail до apply не
 
 ### F2-04 — Minimum recovery journal для side-effect workflows
 
-**Goal / user outcome.** Commit не объявляется успешным, если его recovery record не записан; Extract может безопасно связать published files с project transaction.
+**Goal / user outcome.** Recovery сохраняет большую часть несохранённой работы,
+но его I/O не блокирует и не откатывает model commit. Extract связывает files и
+model собственным stage/publish contract, а не использует journal как atomicity.
 
 **Spec refs.** §7.1–7.2, §22.3, §44.2–44.4, §59 items 19, 46–49, 52.
 
@@ -539,23 +547,35 @@ operation kind; invalid ID/type/range/reference; allocator fail до apply не
 **Ordered bounded tasks.**
 
 1. Реализовать versioned append record и checkpoint reader/writer.
-2. Commit order: validate/stage model → apply → append → publish event/result.
-3. При append failure exact rollback и отсутствие acknowledgement.
-4. Восстанавливать current committed project state и retained transaction IDs.
-5. Добавить explicit side-effect prepare/publish/abort coordinator interface для B1.
-6. Документировать corruption result и safe fallback; не угадывать повреждённые records.
+2. Commit order: validate/stage → irreversible model/history commit → required
+   infallible/idempotent side-effect publish → best-effort append/sync → ordered
+   event/result. Recovery failure не меняет committed result.
+3. При append/sync failure оставить commit, включить sticky
+   `recovery_degraded` и не писать dependent diffs до fresh checkpoint.
+4. Восстанавливать latest valid durable prefix и retained transaction IDs,
+   покрытые этим prefix; healthy synchronous implementation даёт per-record
+   durability, batching допускается только после benchmark и с RPO ≤5 секунд.
+5. Side-effect prepare/publish/abort coordinator остаётся независимым от recovery.
+6. Corrupt middle сохраняет original bytes, preview использует только valid
+   prefix, claim lock освобождается после каждой попытки.
 
 **Public/schema impact.** Local journal, keyed canonical project path для
 saved project и temporary runtime session ID для unsaved; не входит
 `.ntpacker_project`.
 
-**Exact tests / fault injection.** Short write at every byte boundary, torn tail, checksum mismatch, append fail after model apply, checkpoint+journal replay, duplicate retry after restart, stale journal for moved project.
+**Exact tests / fault injection.** Short write at every byte boundary, torn tail,
+checksum mismatch, append/sync fail after model commit (commit остаётся),
+checkpoint+journal replay, restart reconciliation, stale journal for moved
+project, corrupt-prefix relaunch and explicit discard.
 
-**Completion evidence.** Crash/fault suite доказывает: любой acknowledged transaction восстановим и не дублируется; неacknowledged transaction невидим.
+**Completion evidence.** Crash/fault suite доказывает: live commit не зависит от
+recovery, healthy durable prefix восстанавливается, bounded tail может быть
+потерян, degraded state явный и original corrupt journal не удаляется молча.
 
-**Superseded durability note.** Текущий контракт требует durability barrier для
-каждого acknowledged journal record (`fflush` + `fsync`/`_commit`), а локальная
-compaction/cadence policy зафиксирована checkpoint-ом 2026-07-17 выше.
+**Current target note.** Начальная реализация сохраняет synchronous per-record
+durability barrier после model commit. Split append/sync, timer или worker
+допускаются только если checked-project Release benchmark покажет видимый stall;
+тогда barrier обязан завершиться не позднее 5 секунд после oldest undurable edit.
 
 ### F2-05 — CLI/GUI operation adapters и production cutover
 
@@ -577,8 +597,8 @@ wrappers (`apps/cli/cli_mutate.c:1411-1458`,
    one-shot load→commit→save semantics без live journal ownership.
 2. Добавить transaction-aware CLI batch input; одиночный verb
    оборачивать одной transaction.
-3. Перевести GUI mutations/Undo/Redo на operation+transaction+journal
-   commit visibility.
+3. Перевести GUI mutations/Undo/Redo на operation+transaction/session commit
+   visibility; journal остаётся отдельным best-effort recovery recorder.
 4. Перенести frontend validation rules в core и оставить только
    selector/argument parsing и rendering.
 5. Добавить boundary tests против прямых persistent field writes
@@ -1132,7 +1152,8 @@ offline force.
    revoke и reconnect rules keyed canonical path.
 4. Реализовать snapshot, canonical transaction endpoint и event subscription.
 5. Добавить sequence-gap detection и resync.
-6. Не публиковать commit до journal acknowledgement.
+6. Публиковать ordered commit event по общему model contract; recovery health и
+   durable watermark передавать отдельно и никогда не превращать в commit gate.
 
 **Public/schema impact.** Versioned Dev API protocol; operation schema переиспользуется без второго mutation vocabulary.
 
@@ -1141,7 +1162,9 @@ mid-request, explicit controller replacement, partial frame, oversized request,
 disconnect before/after commit, duplicate transaction, slow reader/backpressure,
 sequence gap, stale revision, reconnect, malformed UTF-8/JSON.
 
-**Completion evidence.** Black-box client transcript tests; recovered acknowledged commit виден после host restart ровно один раз.
+**Completion evidence.** Black-box client transcript tests; commit, покрытый
+durable watermark, после host restart виден ровно один раз; uncertain tail
+требует resnapshot/reconciliation и может отсутствовать.
 
 **Non-goals / blockers.** Remote/network exposure запрещён; transport не security boundary против local same-user attacker.
 
@@ -1283,7 +1306,8 @@ round-trip где meaningful, malformed/companion/capability fixtures.
 
 - GUI и MCP подключены к одной authoritative session;
 - multi-edit виден как один commit/Undo;
-- acknowledged transaction переживает crash и не дублируется;
+- live transaction idempotency сохраняется; после host restart клиент
+  resnapshot/reconcile учитывает bounded undurable recovery tail;
 - canonical-path claim исключает hidden second writer;
 - revoke/reconnect/ownership transfer имеют executable process tests.
 
@@ -1385,22 +1409,26 @@ round-trip где meaningful, malformed/companion/capability fixtures.
 9. **G3 (НОВОЕ, из аудита поверхности)** — поле пути таргета (out-path) коммитит `TARGET_SET` НА КАЖДУЮ КЛАВИШУ (`TARGET_SET` структурный, не коалесится → валится прямо в `commit_txn_now`): N undo-шагов + N полных снапшотов; на HUGE = D2-обрыв (17МБ/245мс) на каждую букву; прямо противоречит инварианту коалесинга ADR 0015. Фикс: сделать поле пути/экспортёра коалесящимся (ключ `CK_TARGET`) либо коммит только по Enter/blur (не по `changed`). GUI.
 
 Складываются в **R** (обе про журнал, R его и так переделывает + бампает формат v1→v2):
-- **P1-1 — DONE (compact durable history).** Undo/Redo строят candidate-модель и
-  аппендят versioned compact `HISTORY` transition; deterministic full-checkpoint
-  fallback разрешён только для unsupported/oversized diff. Только после успешной
-  durability barrier публикуются model + history cursor. Ошибка append/sync
-  оставляет model/revision/cursor без изменений. Recovery восстанавливает текущее
-  состояние документа, но не локальный Undo cursor.
+- **P1-1 — AS-BUILT, TARGET SUPERSEDED 2026-07-19.** Undo/Redo строят
+  candidate-модель и compact `HISTORY` transition. Текущий код публикует
+  model/history только после durability barrier, но target сначала коммитит
+  model/history, затем best-effort записывает diff; append/sync failure лишь
+  включает sticky degraded. Unsupported/oversized record не делает surprise
+  full checkpoint, а ждёт explicit Save/reattach healing.
 - **P1-5 — DONE (journal v4 sync-word framing).** Hostile length/corrupt-frame
   cases fail closed without silently consuming a later valid frame; committed
   prefix recovery and mixed TXN/HISTORY replay are executable-test pinned.
 
 Спека/доки (без кода):
-- **P2-9 — РЕШЕНИЕ ВЛАДЕЛЬЦА 2026-07-14: вариант A.** Узаконить `duplicate_id` в мастер-спеке §7.2 как корректный контракт на повтор транзакции. Безопасная суть (не применять дважды; retained-id переживают рестарт) уже реализована и покрыта `test_transaction.c`; снимается только буква §7.2 «вернуть прежний результат». B (durable result-replay) — аддитивный апгрейд, если появится ретраящий сетевой MCP-клиент. Обоснование низкого риска: ретрай физически невозможен у существующих клиентов — GUI in-process/синхронно/свежие монотонные id; CLI one-shot (перезапуск = новый id = новая транзакция, не повтор). Ретрай реален только у будущего долгоживущего MCP-агента по транспорту с потерей ответа; id создаваемых сущностей генерит клиент, единственный «теряемый» датум — точная ревизия.
+- **P2-9 — UPDATED 2026-07-19.** `duplicate_id` остаётся корректным
+  live-session контрактом: payload не применяется дважды. После host restart
+  retained IDs гарантированы только до durable recovery prefix; MCP обязан
+  resnapshot/reconcile, а durable result replay остаётся additive upgrade.
 - **P1-3 superseded by decision 0016.** Sprite overrides and frames match only
   canonical `{source,key}`; the old export-name bridge is not an accepted state.
-  **P1-7 / P2-11 remain reviewed-and-accepted.** P1-7: правки при отказе журнала
-  ОТКЛОНЯЮТСЯ на коммите, а attach-fail и 2-е окно СИГНАЛЯТ пользователю (ADR 0015).
+  **P1-7 superseded 2026-07-19 / P2-11 remains reviewed.** P1-7: правки при
+  отказе журнала остаются committed; recovery становится sticky degraded и
+  СИГНАЛИТ пользователю. Attach-fail не запрещает editing.
   P2-11: recovery сбрасывает revision→0 / retained-id, предотвращая
   `DUPLICATE_ID`-фриз в одно-клиентном GUI.
 

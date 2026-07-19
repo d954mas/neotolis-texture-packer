@@ -217,7 +217,7 @@ Each mutable responsibility has one owner:
 
 | Owner | Owns | Does not own |
 |---|---|---|
-| `tp_model` | mutable project state, revision, semantic saved identity and dirty state, history, idempotency retention, attached journal acknowledgement gate | project path, exact saved-file fingerprint, dialogs, job scheduling, frontend state |
+| `tp_model` | mutable project state, revision, semantic saved identity and dirty state, history, live idempotency retention, attached best-effort recovery recorder and health state | project path, exact saved-file fingerprint, dialogs, job scheduling, frontend state |
 | `tp_session` | the sole live `tp_model`, session identity/path, exact saved-file fingerprint, admission and ordering, runtime generations, event sequence, job handles | model validation, recovery codec, filesystem/lock backends, Pack/Export algorithms, GUI or protocol formatting |
 | `tp_session_snapshot` | one immutable owned read view plus revision/model/source/event generations | mutation authority or borrowed aliases into the live model |
 | `tp_recovery_store` | injected recovery root and backend, bounded orphan scan, orphan-slot handles | live model semantics, project Save policy, controller handoff |
@@ -509,7 +509,7 @@ Create enemy animations
 One agent request creating 100 animations should normally be one transaction and
 one Undo entry.
 
-### 7.1 Unified commit acknowledgement
+### 7.1 Unified commit and recovery recording
 
 All model transactions use one commit contract regardless of origin:
 
@@ -518,19 +518,42 @@ All model transactions use one commit contract regardless of origin:
 - Undo;
 - Redo.
 
-A transaction is not exposed as committed or visible to any frontend until it:
+A transaction reaches its irreversible model commit point after it:
 
 1. was fully validated;
 2. was applied atomically to the authoritative session;
-3. received a new revision;
-4. was appended to the recovery journal.
+3. received a new revision and history position.
 
-Each journal record is acknowledged only after its backend durability barrier
-succeeds (`fflush` plus `fsync`/`_commit`). If append or sync fails, the frame is
-rolled back when possible, the journal authority fails closed, and no model,
-revision, event, or history-position change is published. GUI and external
-controllers therefore receive the same ordered commit guarantee. A full project
-save is not required for transaction acknowledgement.
+The session then publishes one ordered committed event/result. Recovery
+recording is deliberately **not** part of the commit point and cannot change its
+outcome. The compact TXN or HISTORY record is attempted after the irreversible
+model commit; the attempt may occur before the ordered event/result is emitted.
+Recovery-only allocation, encoding, admission, append, or sync failure never
+rejects the transaction: every such failure enters the same degraded-recovery
+path.
+
+The initial target keeps the existing synchronous per-record durability barrier
+(`fflush` plus `fsync`/`_commit`) but moves it after the model commit point. This
+is simpler and stronger than the 5-second RPO when benchmark latency is
+acceptable. Only measured user-visible stalls justify batching. If batching is
+introduced, a runtime-owned wake mechanism independent of further edits, Save,
+or shutdown must **complete** the durability barrier no later than 5 seconds
+after the oldest undurable commit.
+
+If append or durability sync fails, the committed model, revision, event, and
+Undo/Redo position remain published. Recovery enters a sticky degraded state,
+surfaces the persistent structured notice `recovery_degraded` (first cause,
+last durable revision/time, sticky/cleared transition), and stops recording
+later dependent diffs until it is re-established from a fresh checkpoint.
+Editing continues. A successful Save is never blocked by recovery failure; a
+fresh recovery checkpoint after project publication clears degradation and
+resumes recording, while checkpoint failure preserves old evidence and the
+notice.
+
+For operations with external side effects, every fallible preparation happens
+before model commit. Required post-commit publication is infallible or
+idempotently recoverable and completes before the success event/result. Recovery
+recording is neither the atomicity mechanism nor compensation for side effects.
 
 ### 7.2 Idempotency
 
@@ -540,9 +563,12 @@ structured `duplicate_id` result with the current revision and does not apply th
 payload a second time. Duplicate detection precedes the revision precondition,
 so a retry remains a duplicate even after later commits advanced revision.
 
-The retained transaction-ID set must be recoverable from the journal or current
-checkpoint so that an acknowledged transaction is not duplicated after process
-restart. Save-time journal compaction must preserve the retained set.
+The live retained transaction-ID set is authoritative for the current session.
+Recovery persists the retained IDs covered by its latest durable watermark, and
+Save-time compaction preserves that covered set. A host restart may lose the
+same unsynced tail as project recovery; a client detecting a new host/session
+generation must resnapshot and reconcile instead of assuming every pre-crash ID
+remains retained.
 
 Durable replay of the original result is an optional additive transport upgrade,
 not a v1 model requirement. A client that needs the exact original response after
@@ -638,8 +664,9 @@ Undo/Redo history exists only for the current live session.
 
 - GUI/MCP ownership transfer preserves the history.
 - Reconnecting to the same still-live session preserves the history.
-- Crash recovery must restore committed current state but is not required to
-  restore the full Undo/Redo stack.
+- Crash recovery restores the latest valid durably flushed recovery prefix; it
+  may lose the most recent tail and is not required to restore the full
+  Undo/Redo stack.
 - Normal close and reopen starts a new history.
 
 The visible History panel may also contain non-Undoable runtime information such
@@ -1344,12 +1371,12 @@ The agent queries current state only when needed.
 
 ### 22.1 Committed MCP transactions
 
-MCP retains pending transaction IDs and can retry idempotently after connection
-failure.
-
-A success response is sent only after the authoritative host has appended the
-transaction to its recovery journal and its durability barrier has succeeded.
-No full project save is required.
+MCP retains pending transaction IDs and can retry idempotently while the same
+live host/session generation remains authoritative. A success response follows
+the shared model commit and ordered event contract; it does not claim that the
+recovery durability watermark already covers the transaction. After a detected
+host restart, MCP resnapshots and reconciles before retrying an uncertain
+mutation. No full project save is required.
 
 ### 22.2 GUI crash
 
@@ -1366,17 +1393,29 @@ one attach checkpoint, ordered TXN operation records, compact HISTORY
 transitions, and optional metadata. The journal is not written into the project
 repository.
 
-The minimum recovery guarantee is:
+Recovery is an additional best-effort safety net, not a transactional database
+or a precondition for editing. Its minimum policy is:
 
-- all committed model transactions survive process restart;
-- the current committed project state can be reconstructed;
+- under a healthy backend, the power-loss and process-crash recovery-point
+  objective is at most 5 seconds;
+- recovery reconstructs the latest valid durably flushed ordered prefix, so a
+  few recent edits may be lost;
+- minutes or hours of healthy-session work must not be lost merely because the
+  project was not manually saved;
 - full Undo/Redo history does not have to survive a crash;
-- successful normal Save compacts the journal to one fresh checkpoint.
+- successful normal Save publishes the project independently, then attempts to
+  replace recovery with one fresh checkpoint; checkpoint failure does not fail
+  Save.
 
-There is no periodic in-session checkpoint. Unsupported or oversized history
-transitions may fall back deterministically to a full checkpoint. Version
-mismatch, corruption, replay limits, record-size limits, and durability-barrier
-failure all fail closed.
+There is no periodic full-project snapshot: the normal stream remains compact
+version-4 TXN/HISTORY diffs because a large project snapshot can cost tens or
+hundreds of milliseconds. An unsupported or oversized recovery transition marks
+recovery degraded and waits for explicit Save/reattach to establish a fresh
+checkpoint; it does not take a surprise per-edit full snapshot.
+Version mismatch, replay limits, and record-size limits fail closed for
+recovery without blocking live edits. Torn or corrupt input recovers only its
+valid prefix, preserves the original journal for diagnosis/retry, and is never
+automatically deleted as though fully consumed.
 
 ## 23. Authorization
 
@@ -1531,7 +1570,7 @@ Not part of v1:
 - atomic batches;
 - revision conflict reporting;
 - idempotent retry;
-- GUI/MCP/Undo/Redo commit only after recovery-journal append;
+- GUI/MCP/Undo/Redo share one model commit point independent of recovery I/O;
 - one batch equals one Undo entry.
 
 ### Revision and Undo
@@ -1564,7 +1603,7 @@ Not part of v1:
 - GUI crash mirror promotion only after proven death;
 - clean ownership transfer;
 - pending transaction retry;
-- local journal/checkpoint recovery of committed current state;
+- local journal/checkpoint recovery of the latest valid durable prefix;
 - no requirement to restore crash-time Undo stack.
 
 ### Authorization
@@ -2832,9 +2871,10 @@ syntax is not yet fixed.
 ### 52.5 Authority state machine
 
 Finalize stale-controller proof and the singular authority cutover state
-machine. Journal framing, acknowledgement and local compaction are already fixed
-by the version-4 executable contract; cross-host mirror/cutover behavior must
-preserve those guarantees.
+machine. Journal framing and local compaction remain version-4 contracts;
+cross-host mirror/cutover behavior must preserve ordered best-effort recovery,
+the 5-second healthy durability target, and an explicit recovery watermark
+without turning it back into a model commit gate.
 
 ## 53. Critical review
 
@@ -2955,7 +2995,7 @@ This creates a marketable interoperability workflow without requiring Lua or MCP
 ### Phase 4 — live AI
 
 1. In-process session abstraction.
-2. Local Dev API and journal acknowledgement semantics.
+2. Local Dev API and recovery-health/watermark semantics.
 3. MCP mode.
 4. Authorization keyed by canonical path.
 5. Ownership/handoff/recovery and mirror promotion.
@@ -3073,9 +3113,10 @@ reopened.
 17. Undo/Redo history is live-session-local, survives ownership transfer, and
     resets after normal close/reopen.
 18. All live-model mutation passes through one serialized session queue.
-19. GUI, MCP, Undo, and Redo share one commit contract: recovery-journal append
-    plus its durability barrier are required before the transaction becomes
-    committed/visible; a full project save is not required.
+19. GUI, MCP, Undo, and Redo share one model commit contract. Recovery recording
+    follows the ordered committed stream but is not a visibility gate; a healthy
+    backend advances its durability watermark within 5 seconds, while degraded
+    recovery is persistent and explicit. A full project save is not required.
 
 ### Pack, sources, and memory
 
@@ -3139,8 +3180,8 @@ reopened.
 
 50. Ownership transfer preserves current live-session history and committed
     state, but never transfers runtime worker/thread state.
-51. Crash recovery restores committed current state but need not restore the full
-    Undo stack.
+51. Crash recovery restores the latest valid durable recovery prefix, may lose
+    the bounded recent tail, and need not restore the full Undo stack.
 52. Exact public schema/method names are finalized through implementation,
     fixtures, and golden contract tests.
 53. The final architecture remains complete and long-lived; vertical slices are

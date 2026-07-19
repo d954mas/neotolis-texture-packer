@@ -323,6 +323,17 @@ add_test(NAME cli_pack_dry_run COMMAND ${CMAKE_COMMAND}
     "-DNOT_EXIST_FILES=${CMAKE_CURRENT_BINARY_DIR}/cli_pack_dry/out/clean.json.json;${CMAKE_CURRENT_BINARY_DIR}/cli_pack_dry/out/clean.json-0.png;${CMAKE_CURRENT_BINARY_DIR}/cli_pack_dry/out"
     -P "${_run}")
 
+# The checked-in 100-atlas project is not only schema-openable: drive one atlas
+# through real image decode + pack/predict without creating output files.
+add_test(NAME cli_large_project_packable COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0
+    "-DARGS=pack ${CMAKE_SOURCE_DIR}/examples/projects/large-synthetic.ntpacker_project --atlas atlas_000 --dry-run --json --out-dir ${CMAKE_CURRENT_BINARY_DIR}/cli_large_project_dry"
+    -DCHECKER=$<TARGET_FILE:cli_json_check>
+    "-DCHECK_ARGS=pack dry_run=1 targets_ok=1 targets_failed=0"
+    -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_large_project_dry.json
+    -DNOT_EXIST_FILES=${CMAKE_CURRENT_BINARY_DIR}/cli_large_project_dry
+    -P "${_run}")
+
 # (o) B3b parity: `ntpacker pack` == direct-core (tp_demo_export) BYTE-FOR-BYTE on a
 # fixture exercising a nested relative out_path, a rename feeding an anim, a dotfile
 # override, and a fractional pivot (float/locale canary). tp_demo_export lives in

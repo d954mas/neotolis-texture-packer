@@ -68,6 +68,14 @@ jobs:
           rm -f "dist/${stage}"/build_ntpacker_gui_packs*
           cp "build/apps/cli/native-release/ntpacker"* "dist/${stage}/"
           cp README.md LICENSE "dist/${stage}/"
+          cp -r examples "dist/${stage}/"
+          cli="dist/${stage}/ntpacker"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            cli="${cli}.exe"
+          fi
+          "${cli}" pack \
+            "dist/${stage}/examples/projects/large-synthetic.ntpacker_project" \
+            --atlas atlas_000 --dry-run --json >/dev/null
           cd dist
           if [[ "${{ runner.os }}" == "Windows" ]]; then
             7z a "${stage}.zip" "${stage}"

@@ -12,9 +12,11 @@ command line sit alongside the GUI's packing, settings, and animations.
 The shared core now owns typed operations, transactions, revisions, semantic
 history and recovery. Project files use one strict canonical schema (v5); this
 pre-release build intentionally does not load or migrate v1–v4 projects.
-Undo/Redo acknowledgement uses compact durable history records, and project
-Save uses synced sibling-temp atomic publication. Windows arguments and all
-core filesystem paths cross one strict UTF-8 boundary.
+Undo/Redo uses compact semantic history records. Local recovery currently syncs
+those records per edit; the normative target decouples recovery I/O from model
+commit while retaining a healthy RPO of at most 5 seconds. Project Save uses
+synced sibling-temp atomic publication. Windows arguments and all core
+filesystem paths cross one strict UTF-8 boundary.
 
 [`docs/ntpacker-master-spec.md`](docs/ntpacker-master-spec.md) is the normative
 product and architecture specification. [`docs/ROADMAP.md`](docs/ROADMAP.md)
@@ -28,7 +30,9 @@ Prebuilt binaries for Windows / Linux / macOS:
 [**Releases**](https://github.com/d954mas/neotolis-texture-packer/releases).
 Unzip and run `ntpacker-gui`. Try it on
 `examples/showcase/showcase.ntpacker_project` (60 CC0 animal sprites) or the
-Defold comparison demo below.
+Defold comparison demo below. Release archives also include the complete
+[`examples/`](examples/README.md) catalog, including a 100-atlas/1,000-source
+benchmark project.
 
 ## What works today
 
@@ -164,6 +168,7 @@ Run `ntpacker help` for the full verb/flag list, or see
 | `apps/smoke/` | toolchain smoke test |
 | `examples/defold-demo/` | Defold project with real assets (from [extension-texturepacker](https://github.com/defold/extension-texturepacker), MIT) for the three-way atlas comparison: Defold native / TexturePacker / ntpacker |
 | `examples/showcase/` | ready-made project over 60 CC0 animal sprites ([Kenney](https://kenney.nl)) — open it and press Pack |
+| `examples/projects/` | deterministic user-openable test and performance projects, including the 100-atlas/1,000-source fixture |
 | `docs/` | master specification, derived roadmap, implementation plan, format contracts, and research history |
 | `external/neotolis-engine` | the engine (submodule, read-only here — changes go upstream) |
 
