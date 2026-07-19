@@ -299,8 +299,16 @@ tp_status gui_project_save_as(const char *path, char *err_out, size_t err_cap) {
     }
     gui_project__snapshot_drop();
     recompute_name();
-    if (result.recovery_degraded) {
-        gui_project__note_recovery_degraded("recovery checkpoint compaction failed");
+    if (result.recovery_rebind_required) {
+        gui_project__attach_recovery_live(s_project.session);
+    }
+    if (result.recovery_degraded &&
+        (result.recovery_status == TP_STATUS_RECOVERY_CLEANUP_FAILED ||
+         tp_session_recovery_health_query(s_project.session).degraded)) {
+        gui_project__note_recovery_degraded(
+            result.recovery_status == TP_STATUS_RECOVERY_CLEANUP_FAILED
+                ? "old recovery slot cleanup failed"
+                : "recovery checkpoint compaction failed");
     }
     gui_project__sync_recovery_notice();
     if (result.file_durability_degraded) {

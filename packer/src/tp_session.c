@@ -644,6 +644,7 @@ static tp_status save_as_locked(tp_session *session, const char *path,
     const bool model_was_degraded =
         tp_model__recovery_degraded(session->model);
     bool recovery_degraded = !recovery_is_healthy(session);
+    bool recovery_rebind_required = false;
     tp_status recovery_status = model_was_degraded
                                     ? tp_model__recovery_status(session->model)
                                     : (recovery_degraded
@@ -663,9 +664,18 @@ static tp_status save_as_locked(tp_session *session, const char *path,
         }
     }
     if (recovery_degraded && !same_identity && session->recovery_live) {
+        tp_recovery_live *retired_live = session->recovery_live;
         tp_error cleanup_error = {{0}};
         const tp_status cleanup_status =
-            tp_recovery_live_retire(session->recovery_live, &cleanup_error);
+            tp_recovery_live_retire(retired_live, &cleanup_error);
+        /* Retire always finishes the old-identity owner and detaches its
+         * journal, including when physical cleanup reports a failure. Do not
+         * leave that terminal handle installed: a frontend must be able to
+         * attach a fresh slot for the newly published identity. */
+        tp_recovery_live_destroy(retired_live);
+        session->recovery_live = NULL;
+        session->recovery_healthy = false;
+        recovery_rebind_required = true;
         if (cleanup_status != TP_STATUS_OK) {
             /* The destination file is already atomically published. It is now
              * the authoritative saved state even when stale recovery cleanup
@@ -737,6 +747,7 @@ static tp_status save_as_locked(tp_session *session, const char *path,
         result->file_durability_status = file_durability_status;
         result->recovery_degraded = recovery_degraded;
         result->recovery_status = recovery_status;
+        result->recovery_rebind_required = recovery_rebind_required;
         (void)snprintf(result->target_path, sizeof result->target_path, "%s", canonical);
         result->file_fingerprint = fingerprint;
         result->recovery_token = session->recovery_token;

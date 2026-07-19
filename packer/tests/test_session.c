@@ -2445,6 +2445,79 @@ void test_cross_identity_save_retires_journal_after_metadata_failure(void) {
     (void)remove(target);
 }
 
+void test_degraded_cross_identity_save_as_rebinds_fresh_recovery_owner(void) {
+    char retired_journal[1024];
+    char fresh_journal[1024];
+    char target[1024];
+    (void)snprintf(retired_journal, sizeof retired_journal,
+                   "%s/session-rebind-retired.ntpjournal", g_scratch);
+    (void)snprintf(fresh_journal, sizeof fresh_journal,
+                   "%s/session-rebind-fresh.ntpjournal", g_scratch);
+    (void)snprintf(target, sizeof target,
+                   "%s/session-rebind.ntpacker_project", g_scratch);
+    (void)remove(retired_journal);
+    (void)remove(fresh_journal);
+    (void)remove(target);
+
+    tp_error err = {{0}};
+    tp_recovery_store *store = NULL;
+    tp_session *session = attach_live_recovery(
+        retired_journal, 82, "session-rebind", &store, &err);
+    tp_session_snapshot *snapshot = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_snapshot_create(session, &snapshot, &err));
+    const tp_id128 atlas_id = tp_session_snapshot_atlas_at(snapshot, 0)->id;
+    tp_session_snapshot_destroy(snapshot);
+
+    tp_journal__test_set_record_limit(2U);
+    tp_txn_result txn_result;
+    session_apply_rename(session, "10000000000000000000000000000082",
+                         0, atlas_id, "degraded-before-rebind",
+                         TP_STATUS_OK, &txn_result, &err);
+    tp_txn_result_free(&txn_result);
+    TEST_ASSERT_TRUE(tp_session_recovery_health_query(session).degraded);
+    tp_journal__test_set_record_limit(0U);
+
+    tp_session_save_result result = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_save_as(session, target, &result, &err));
+    TEST_ASSERT_TRUE(result.saved);
+    TEST_ASSERT_TRUE(result.recovery_degraded);
+    TEST_ASSERT_TRUE_MESSAGE(
+        result.recovery_rebind_required,
+        "cross-identity degraded Save As must request a fresh recovery slot");
+    TEST_ASSERT_FALSE_MESSAGE(
+        tp_session__has_recovery_owner(session),
+        "retired recovery handle must not remain the session owner");
+
+    const tp_recovery_metadata metadata = {
+        .timestamp = 83,
+        .project_path = result.target_path,
+        .project_name = "session-rebind.ntpacker_project",
+        .file_fingerprint = &result.file_fingerprint,
+    };
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_recovery__test_session_attach_at(
+            g_scratch, recovery_key(), fresh_journal, session, &metadata,
+            &err));
+    const tp_session_recovery_health rebound =
+        tp_session_recovery_health_query(session);
+    TEST_ASSERT_TRUE(rebound.available);
+    TEST_ASSERT_FALSE(rebound.degraded);
+
+    session_apply_rename(session, "10000000000000000000000000000083",
+                         1, atlas_id, "recorded-after-rebind",
+                         TP_STATUS_OK, &txn_result, &err);
+    tp_txn_result_free(&txn_result);
+
+    tp_session_destroy(session);
+    tp_recovery_store_destroy(store);
+    (void)remove(retired_journal);
+    (void)remove(fresh_journal);
+    (void)remove(target);
+}
+
 void test_cross_identity_retire_preserves_sticky_recovery_first_cause(void) {
     char journal[1024];
     char target[1024];
@@ -2543,6 +2616,8 @@ void test_save_as_keeps_published_destination_when_recovery_retire_fails(void) {
     TEST_ASSERT_TRUE(result.recovery_degraded);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_RECOVERY_CLEANUP_FAILED,
                           result.recovery_status);
+    TEST_ASSERT_TRUE(result.recovery_rebind_required);
+    TEST_ASSERT_FALSE(tp_session__has_recovery_owner(session));
     TEST_ASSERT_TRUE(test_file_exists(target));
 
     tp_session_snapshot *snapshot = NULL;
@@ -2718,6 +2793,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_session_preserves_dirty_live_recovery_on_destroy);
     RUN_TEST(test_save_as_updates_live_recovery_identity_before_compaction);
     RUN_TEST(test_cross_identity_save_retires_journal_after_metadata_failure);
+    RUN_TEST(test_degraded_cross_identity_save_as_rebinds_fresh_recovery_owner);
     RUN_TEST(test_cross_identity_retire_preserves_sticky_recovery_first_cause);
     RUN_TEST(test_save_as_keeps_published_destination_when_recovery_retire_fails);
     RUN_TEST(test_degraded_session_live_keeps_mutation_available_and_preserves_slot);

@@ -157,6 +157,10 @@ typedef struct tp_session_save_result {
      * preserves the older evidence, and reports the sticky first cause here. */
     bool recovery_degraded;
     tp_status recovery_status;
+    /* A cross-identity Save As retired the prior live recovery slot. The
+     * frontend should attach a fresh slot for target_path; Save itself remains
+     * successful and recovery stays outside the publication commit point. */
+    bool recovery_rebind_required;
     char target_path[TP_IDENTITY_PATH_MAX];
     tp_id128 file_fingerprint;
     tp_id128 recovery_token;
