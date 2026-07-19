@@ -37,6 +37,7 @@
 #include "tp_core/tp_sprite_index.h" /* canonical A4 selector fixture */
 #include "tp_journal_internal.h" /* bounded write-failure fixture */
 #include "tp_session_internal.h" /* recovery attach fixture */
+#include "nt_utf8_fs.h" /* UTF-8 fixture filenames on Windows */
 
 #include "gui_actions.h"  /* do_pack_blocking / reset_selection / preview_stop / anim ops + gui_request_gesture_commit */
 #include "gui_canvas.h"   /* s_canvas ops + GUI_CANVAS_ATLAS */
@@ -647,7 +648,7 @@ static void write_tga_2x2(const char *path) {
         px[i * 4 + 2] = 160; /* R */
         px[i * 4 + 3] = 255; /* A */
     }
-    FILE *f = fopen(path, "wb");
+    FILE *f = nt_utf8_fopen(path, "wb");
     if (f) {
         (void)fwrite(hdr, 1, sizeof hdr, f);
         (void)fwrite(px, 1, sizeof px, f);
@@ -1147,7 +1148,8 @@ void run_selftest(void) {
             build_rows();
             bool cyr_row = false;
             for (int i = 0; i < s_row_count; i++) {
-                if (strcmp(s_rows[i].sprite_name, CYR_STEM) == 0) {
+                if (s_rows[i].sprite_name &&
+                    strcmp(s_rows[i].sprite_name, CYR_STEM) == 0) {
                     cyr_row = true;
                     break;
                 }
