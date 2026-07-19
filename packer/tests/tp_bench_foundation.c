@@ -270,10 +270,12 @@ static bool fixture_load_project(fixture *out, const char *path) {
         tp_id128_eq(tp_semantic_identity(project), checkpoint_identity);
     if (!out->checkpoint_identity_equal) {
         (void)fprintf(
-            stdout,
-            "benchmark_known_issue fixture=%s id=PATH-01 checkpoint_identity_equal=0 "
-            "action=benchmark-recovery-against-checkpoint-bytes\n",
-            spec.name);
+            stderr,
+            "benchmark contract failed: fixture=%s id=PATH-01 "
+            "checkpoint_identity_equal=0 error=%s\n",
+            spec.name, err.msg);
+        fixture_free(out);
+        return false;
     }
     return true;
 }

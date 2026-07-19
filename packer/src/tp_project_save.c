@@ -145,8 +145,10 @@ static tp_status tp_project_save_stage(tp_project *p, const char *path,
         return tp_error_set(err, st, "tp_project_save: path too long: %s", path);
     }
 
-    /* Relativize absolute sources against the (new) project dir; normalize the
-     * rest to '/'. Absolute paths not relatable to new_dir are kept as-is. */
+    /* Resolve each source against its established source base, collapse lexical
+     * aliases, then express that identity relative to the new project dir.
+     * An unsaved project has no source base yet, so its relative spelling is
+     * retained without silently binding it to the process CWD. */
     for (int ai = 0; ai < p->atlas_count; ai++) {
         tp_project_atlas *a = &p->atlases[ai];
         for (int si = 0; si < a->source_count; si++) {
@@ -156,27 +158,29 @@ static tp_status tp_project_save_stage(tp_project *p, const char *path,
             }
             tp_normalize_slashes(norm);
             char rel[TP_PATH_MAX];
-            if (tp_path_is_absolute(norm)) {
-                st = tp_relativize(norm, new_dir, rel, sizeof rel);
-                if (st != TP_STATUS_OK) {
-                    return tp_error_set(err, st, "tp_project_save: cannot relativize %s", norm);
-                }
-            } else if (p->source_base_dir || p->project_dir) {
-                char resolved[TP_PATH_MAX];
-                st = tp_project_resolve_source_path(p, norm, resolved,
-                                                    sizeof resolved);
-                if (st != TP_STATUS_OK) {
-                    return tp_error_set(err, st,
-                                        "tp_project_save: cannot resolve %s", norm);
-                }
+            char resolved[TP_IDENTITY_PATH_MAX];
+            st = tp_project_source_path_absolute_lexical(
+                p, norm, resolved, sizeof resolved, err);
+            if (st == TP_STATUS_OK) {
                 st = tp_relativize(resolved, new_dir, rel, sizeof rel);
                 if (st != TP_STATUS_OK) {
                     return tp_error_set(err, st,
                                         "tp_project_save: cannot relativize %s",
                                         resolved);
                 }
-            } else if ((size_t)snprintf(rel, sizeof rel, "%s", norm) >= sizeof rel) {
-                return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "tp_project_save: source path too long");
+            } else if (st == TP_STATUS_PATH_NOT_ABSOLUTE) {
+                if (err) {
+                    memset(err, 0, sizeof *err);
+                }
+                if ((size_t)snprintf(rel, sizeof rel, "%s", norm) >=
+                    sizeof rel) {
+                    return tp_error_set(
+                        err, TP_STATUS_OUT_OF_BOUNDS,
+                        "tp_project_save: source path too long");
+                }
+            } else {
+                return tp_error_set(err, st,
+                                    "tp_project_save: cannot resolve %s", norm);
             }
             char *copy = tp_strdup(rel);
             if (!copy) {

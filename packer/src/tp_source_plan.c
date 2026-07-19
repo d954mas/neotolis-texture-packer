@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "tp_project_path_internal.h"
 #include "tp_source_path_text_internal.h"
 #include "tp_source_plan_internal.h"
 
@@ -85,21 +86,19 @@ tp_status tp_source_path_identity_from_stored(const tp_project *project,
                 ? "source path contains invalid UTF-8"
                 : "source path exceeds the supported limit");
     }
-    status = tp_project_resolve_source_path(
-        project, out->canonical, out->absolute, sizeof out->absolute);
+    status = tp_project_source_path_absolute_lexical(
+        project, out->canonical, out->absolute, sizeof out->absolute, err);
     if (status == TP_STATUS_PATH_NOT_ABSOLUTE) {
+        if (err) {
+            memset(err, 0, sizeof *err);
+        }
         status = tp_identity_path_absolute_lexical(
             out->canonical, out->absolute, sizeof out->absolute, err);
     }
     if (status != TP_STATUS_OK) {
         return status;
     }
-    status = tp_identity_path_absolute_lexical(
-        out->absolute, out->canonical, sizeof out->canonical, err);
-    if (status != TP_STATUS_OK) {
-        return status;
-    }
-    memcpy(out->absolute, out->canonical, strlen(out->canonical) + 1U);
+    memcpy(out->canonical, out->absolute, strlen(out->absolute) + 1U);
     out->has_canonical =
         resolve_canonical &&
         tp_identity_path_canonical(out->absolute, out->canonical,

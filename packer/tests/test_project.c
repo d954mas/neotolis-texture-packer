@@ -35,7 +35,9 @@
 #include "tp_core/tp_identity.h"
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_project.h"
+#include "tp_core/tp_transaction.h"
 #include "tp_project_identity_internal.h"
+#include "tp_project_path_internal.h"
 #include "unity.h"
 #include "../src/tp_project_internal.h"
 #include "tp_project_mutation_internal.h"
@@ -898,6 +900,204 @@ void test_resolve_source_path_status_contract(void) {
 
     tp_project_destroy(project);
 }
+
+void test_source_path_absolute_lexical_uses_source_base_without_cwd(void) {
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    char resolved[TP_IDENTITY_PATH_MAX];
+    tp_error error = {{0}};
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_PATH_NOT_ABSOLUTE,
+        tp_project_source_path_absolute_lexical(
+            project, "sprites/hero.png", resolved, sizeof resolved, &error));
+
+#ifdef _WIN32
+    project->project_dir = dupstr("C:/project/current");
+    project->source_base_dir = dupstr("C:\\source\\original");
+#else
+    project->project_dir = dupstr("/project/current");
+    project->source_base_dir = dupstr("/source/original");
+#endif
+    memset(&error, 0, sizeof error);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_source_path_absolute_lexical(
+            project, "../assets/./nested/../hero.png", resolved,
+            sizeof resolved, &error));
+#ifdef _WIN32
+    TEST_ASSERT_EQUAL_STRING("C:/source/assets/hero.png", resolved);
+#else
+    TEST_ASSERT_EQUAL_STRING("/source/assets/hero.png", resolved);
+#endif
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_project_source_path_absolute_lexical(
+            project, "../assets/hero.png", resolved, 4U, &error));
+
+    tp_project_destroy(project);
+}
+
+void test_path01_save_as_checkpoint_and_reload_preserve_source_identity(void) {
+    char old_dir[1024];
+    char new_dir[1024];
+    char assets_dir[1024];
+    char nested_dir[1024];
+    char old_path[1024];
+    char new_path[1024];
+    char hero_path[1024];
+    (void)snprintf(old_dir, sizeof old_dir, "%s/path01-old", g_dir);
+    (void)snprintf(new_dir, sizeof new_dir, "%s/path01-new", g_dir);
+    (void)snprintf(assets_dir, sizeof assets_dir, "%s/path01-assets", g_dir);
+    (void)snprintf(nested_dir, sizeof nested_dir, "%s/nested", assets_dir);
+    (void)snprintf(old_path, sizeof old_path,
+                   "%s/project.ntpacker_project", old_dir);
+    (void)snprintf(new_path, sizeof new_path,
+                   "%s/project.ntpacker_project", new_dir);
+    (void)snprintf(hero_path, sizeof hero_path, "%s/hero.png", assets_dir);
+    (void)TP_TEST_MKDIR(old_dir);
+    (void)TP_TEST_MKDIR(new_dir);
+    (void)TP_TEST_MKDIR(assets_dir);
+    (void)TP_TEST_MKDIR(nested_dir);
+    write_text(hero_path, "path01");
+
+    static const char input[] =
+        "{\n"
+        "  \"version\": 5,\n"
+        "  \"atlases\": [\n"
+        "    {\n"
+        "      \"id\": \"atlas_11111111111111111111111111111111\",\n"
+        "      \"name\": \"path01\",\n"
+        "      \"sources\": [\n"
+        "        {\n"
+        "          \"id\": \"source_22222222222222222222222222222222\",\n"
+        "          \"path\": \"../path01-assets/./nested/../hero.png\"\n"
+        "        }\n"
+        "      ]\n"
+        "    }\n"
+        "  ]\n"
+        "}\n";
+    static const char expected_saved[] =
+        "{\n"
+        "  \"version\": 5,\n"
+        "  \"atlases\": [\n"
+        "    {\n"
+        "      \"id\": \"atlas_11111111111111111111111111111111\",\n"
+        "      \"name\": \"path01\",\n"
+        "      \"sources\": [\n"
+        "        {\n"
+        "          \"id\": \"source_22222222222222222222222222222222\",\n"
+        "          \"path\": \"../path01-assets/hero.png\"\n"
+        "        }\n"
+        "      ]\n"
+        "    }\n"
+        "  ]\n"
+        "}\n";
+    write_text(old_path, input);
+
+    tp_error error = {{0}};
+    tp_project *project = NULL;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK, tp_project_load(old_path, &project, &error), error.msg);
+    const tp_id128 identity_before = tp_semantic_identity(project);
+    char resolved_before[TP_IDENTITY_PATH_MAX];
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_project_source_path_absolute_lexical(
+            project, project->atlases[0].sources[0].path, resolved_before,
+            sizeof resolved_before, &error),
+        error.msg);
+
+    char *checkpoint = NULL;
+    size_t checkpoint_len = 0U;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_project_checkpoint_save_buffer(project, &checkpoint,
+                                          &checkpoint_len, &error),
+        error.msg);
+    tp_project *checkpoint_project = NULL;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_project_load_buffer(checkpoint, checkpoint_len,
+                               &checkpoint_project, &error),
+        error.msg);
+    TEST_ASSERT_TRUE(tp_id128_eq(identity_before,
+                                 tp_semantic_identity(checkpoint_project)));
+    TEST_ASSERT_EQUAL_STRING(
+        resolved_before, checkpoint_project->atlases[0].sources[0].path);
+    free(checkpoint);
+    tp_project_destroy(checkpoint_project);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK, tp_project_save(project, new_path, &error), error.msg);
+    TEST_ASSERT_TRUE(tp_id128_eq(identity_before, tp_semantic_identity(project)));
+    size_t saved_len = 0U;
+    char *saved = read_all(new_path, &saved_len);
+    TEST_ASSERT_EQUAL_size_t(sizeof expected_saved - 1U, saved_len);
+    TEST_ASSERT_EQUAL_MEMORY(expected_saved, saved, saved_len);
+    free(saved);
+
+    tp_project *reloaded = NULL;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK, tp_project_load(new_path, &reloaded, &error), error.msg);
+    TEST_ASSERT_TRUE(tp_id128_eq(identity_before, tp_semantic_identity(reloaded)));
+    char resolved_after[TP_IDENTITY_PATH_MAX];
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_project_source_path_absolute_lexical(
+            reloaded, reloaded->atlases[0].sources[0].path, resolved_after,
+            sizeof resolved_after, &error),
+        error.msg);
+    TEST_ASSERT_EQUAL_STRING(resolved_before, resolved_after);
+    FILE *hero = fopen(resolved_after, "rb");
+    TEST_ASSERT_NOT_NULL(hero);
+    (void)fclose(hero);
+
+    tp_project_destroy(reloaded);
+    tp_project_destroy(project);
+    TEST_ASSERT_EQUAL_INT(0, remove(new_path));
+    TEST_ASSERT_EQUAL_INT(0, remove(old_path));
+    TEST_ASSERT_EQUAL_INT(0, remove(hero_path));
+    TEST_ASSERT_EQUAL_INT(0, TP_TEST_RMDIR(nested_dir));
+    TEST_ASSERT_EQUAL_INT(0, TP_TEST_RMDIR(new_dir));
+    TEST_ASSERT_EQUAL_INT(0, TP_TEST_RMDIR(old_dir));
+    TEST_ASSERT_EQUAL_INT(0, TP_TEST_RMDIR(assets_dir));
+}
+
+#ifdef _WIN32
+void test_semantic_source_identity_uses_windows_ascii_case_policy(void) {
+    static const char upper[] =
+        "{\"version\":5,\"atlases\":[{"
+        "\"id\":\"atlas_11111111111111111111111111111111\","
+        "\"name\":\"case\",\"sources\":[{"
+        "\"id\":\"source_22222222222222222222222222222222\","
+        "\"path\":\"C:/Assets/Hero.png\"}]}]}";
+    static const char lower[] =
+        "{\"version\":5,\"atlases\":[{"
+        "\"id\":\"atlas_11111111111111111111111111111111\","
+        "\"name\":\"case\",\"sources\":[{"
+        "\"id\":\"source_22222222222222222222222222222222\","
+        "\"path\":\"c:/assets/hero.png\"}]}]}";
+    tp_project *left = NULL;
+    tp_project *right = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_project_load_buffer(upper, sizeof upper - 1U, &left, &error),
+        error.msg);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_project_load_buffer(lower, sizeof lower - 1U, &right, &error),
+        error.msg);
+    TEST_ASSERT_TRUE(
+        tp_id128_eq(tp_semantic_identity(left), tp_semantic_identity(right)));
+    TEST_ASSERT_EQUAL_STRING("C:/Assets/Hero.png",
+                             left->atlases[0].sources[0].path);
+    tp_project_destroy(right);
+    tp_project_destroy(left);
+}
+#endif
 
 void test_save_as_preserves_relative_source_target(void) {
     char old_path[512];
@@ -2027,6 +2227,11 @@ int main(int argc, char **argv) {
     RUN_TEST(test_absolute_path_relativized);
     RUN_TEST(test_resolve_path);
     RUN_TEST(test_resolve_source_path_status_contract);
+    RUN_TEST(test_source_path_absolute_lexical_uses_source_base_without_cwd);
+    RUN_TEST(test_path01_save_as_checkpoint_and_reload_preserve_source_identity);
+#ifdef _WIN32
+    RUN_TEST(test_semantic_source_identity_uses_windows_ascii_case_policy);
+#endif
     RUN_TEST(test_save_as_preserves_relative_source_target);
     RUN_TEST(test_to_settings_mapping);
     RUN_TEST(test_mutation_helpers);

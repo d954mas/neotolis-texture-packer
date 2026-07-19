@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "tp_core/tp_identity.h"
+
 #ifdef _WIN32
 #include <direct.h>
 #define tp_getcwd _getcwd
@@ -333,4 +335,43 @@ tp_status tp_project_resolve_source_path(const tp_project *p, const char *rel,
     }
     tp_normalize_slashes(out_abs);
     return TP_STATUS_OK;
+}
+
+tp_status tp_project_source_path_absolute_lexical(
+    const tp_project *project, const char *path, char *out, size_t cap,
+    tp_error *err) {
+    if (!project || !path || !out || cap == 0U) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "source path identity arguments are invalid");
+    }
+
+    char absolute[TP_IDENTITY_PATH_MAX];
+    tp_status status = tp_identity_path_lexical(
+        path, absolute, sizeof absolute, err);
+    if (status == TP_STATUS_OK) {
+        return tp_identity_path_absolute_lexical(path, out, cap, err);
+    }
+    if (status != TP_STATUS_PATH_NOT_ABSOLUTE) {
+        return status;
+    }
+
+    const char *base = project->source_base_dir
+                           ? project->source_base_dir
+                           : project->project_dir;
+    if (!base) {
+        return status;
+    }
+
+    status = tp_identity_path_lexical(base, absolute, sizeof absolute, err);
+    if (status != TP_STATUS_OK) {
+        return status;
+    }
+    char joined[TP_IDENTITY_PATH_MAX];
+    const int written = snprintf(joined, sizeof joined, "%s/%s",
+                                 absolute, path);
+    if (written < 0 || (size_t)written >= sizeof joined) {
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                            "source path exceeds the supported limit");
+    }
+    return tp_identity_path_absolute_lexical(joined, out, cap, err);
 }

@@ -7,6 +7,7 @@
 
 #include "tp_core/tp_identity.h"
 #include "tp_core/tp_names.h"
+#include "tp_project_path_internal.h"
 
 typedef struct tp_hw {
     uint8_t *data;
@@ -71,14 +72,14 @@ static void hw_string(tp_hw *w, const char *s) {
 static bool hw_resolved_path(tp_hw *w, const tp_project *path_context,
                              const char *path) {
     char absolute[TP_IDENTITY_PATH_MAX];
-    if (path_context &&
-        (path_context->source_base_dir || path_context->project_dir) && path &&
-        path[0] != '\0') {
-        if (tp_project_resolve_source_path(path_context, path, absolute,
-                                           sizeof absolute) != TP_STATUS_OK) {
+    if (path_context && path && path[0] != '\0') {
+        const tp_status status = tp_project_source_path_absolute_lexical(
+            path_context, path, absolute, sizeof absolute, NULL);
+        if (status == TP_STATUS_OK) {
+            path = absolute;
+        } else if (status != TP_STATUS_PATH_NOT_ABSOLUTE) {
             return false;
         }
-        path = absolute;
     }
     hw_string(w, path);
     return !w->overflow;

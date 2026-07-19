@@ -45,6 +45,7 @@
 #include "tp_core/tp_id.h"
 #include "tp_core/tp_identity.h"
 #include "tp_core/tp_project.h"
+#include "tp_project_path_internal.h"
 
 /* ---- feed helpers: canonical, endian-stable field mixing ----------------- */
 
@@ -61,6 +62,25 @@ static void feed_str(tp_hasher *h, const char *s) {
         tp_hasher_update(h, s, strlen(s));
     }
     feed_sep(h); /* also distinguishes NULL from "" via presence of no bytes */
+}
+
+static void feed_source_path(tp_hasher *h, const char *path) {
+#ifdef _WIN32
+    /* Match tp_identity_path_equal's Windows ASCII case policy without
+     * rewriting the persistent/live source spelling. */
+    if (path) {
+        for (const unsigned char *c = (const unsigned char *)path; *c; ++c) {
+            const unsigned char folded =
+                *c >= (unsigned char)'A' && *c <= (unsigned char)'Z'
+                    ? (unsigned char)(*c + ('a' - 'A'))
+                    : *c;
+            tp_hasher_update(h, &folded, 1U);
+        }
+    }
+    feed_sep(h);
+#else
+    feed_str(h, path);
+#endif
 }
 
 static void feed_i64(tp_hasher *h, int64_t v) {
@@ -105,16 +125,16 @@ static tp_id128 source_identity(const tp_project *project,
     feed_id(&h, s->id);
     char canonical_path[TP_IDENTITY_PATH_MAX];
     const char *path = s->path;
-    if ((project->source_base_dir &&
-         tp_project_resolve_source_path(project, s->path, canonical_path,
-                                        sizeof canonical_path) == TP_STATUS_OK) ||
-        (!project->source_base_dir &&
-         tp_identity_path_absolute_lexical(s->path, canonical_path,
-                                           sizeof canonical_path,
-                                           NULL) == TP_STATUS_OK)) {
+    tp_status path_status = tp_project_source_path_absolute_lexical(
+        project, s->path, canonical_path, sizeof canonical_path, NULL);
+    if (path_status == TP_STATUS_PATH_NOT_ABSOLUTE) {
+        path_status = tp_identity_path_absolute_lexical(
+            s->path, canonical_path, sizeof canonical_path, NULL);
+    }
+    if (path_status == TP_STATUS_OK) {
         path = canonical_path;
     }
-    feed_str(&h, path);
+    feed_source_path(&h, path);
     feed_i64(&h, (int64_t)s->kind);
     return tp_hasher_final(h);
 }

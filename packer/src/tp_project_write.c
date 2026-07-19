@@ -25,7 +25,7 @@ typedef struct tp_sb {
     bool count_only;
     bool too_large;
     bool absolute_sources;
-    const char *source_base_dir;
+    const tp_project *path_context;
 } tp_sb;
 
 static _Thread_local size_t s_test_save_buffer_calls;
@@ -349,25 +349,19 @@ static void tp_emit_source(tp_sb *sb, int depth, const tp_project_source *s) {
     tp_obj_key(sb, depth + 1, &first, "path");
     const char *path = s->path;
     char absolute_path[TP_PATH_MAX];
-    if (sb->absolute_sources && !tp_path_is_absolute(path)) {
-        if (sb->source_base_dir) {
-            const int written = snprintf(absolute_path, sizeof absolute_path,
-                                         "%s/%s", sb->source_base_dir, path);
-            if (written < 0 || (size_t)written >= sizeof absolute_path) {
-                sb->too_large = true;
-            } else {
-                tp_normalize_slashes(absolute_path);
-                path = absolute_path;
-            }
+    if (sb->absolute_sources) {
+        tp_error path_error = {0};
+        tp_status path_status = tp_project_source_path_absolute_lexical(
+            sb->path_context, path, absolute_path, sizeof absolute_path,
+            &path_error);
+        if (path_status == TP_STATUS_PATH_NOT_ABSOLUTE) {
+            path_status = tp_identity_path_absolute_lexical(
+                path, absolute_path, sizeof absolute_path, &path_error);
+        }
+        if (path_status != TP_STATUS_OK) {
+            sb->too_large = true;
         } else {
-            tp_error path_error = {0};
-            if (tp_identity_path_absolute_lexical(
-                    path, absolute_path, sizeof absolute_path,
-                    &path_error) != TP_STATUS_OK) {
-                sb->too_large = true;
-            } else {
-                path = absolute_path;
-            }
+            path = absolute_path;
         }
     }
     tp_sb_json_string(sb, path);
@@ -526,7 +520,7 @@ static tp_status project_save_buffer_mode(const tp_project *p, bool checkpoint,
     tp_sb sb = {0};
     sb.limit = limits->bytes;
     sb.absolute_sources = checkpoint;
-    sb.source_base_dir = p->source_base_dir ? p->source_base_dir : p->project_dir;
+    sb.path_context = p;
     tp_emit_root(&sb, p, &defaults);
     if (sb.oom || sb.too_large) {
         free(sb.buf);
@@ -584,7 +578,7 @@ static tp_status project_serialized_size_bounded_mode(
     sb.limit = limit;
     sb.count_only = true;
     sb.absolute_sources = checkpoint;
-    sb.source_base_dir = p->source_base_dir ? p->source_base_dir : p->project_dir;
+    sb.path_context = p;
     tp_emit_root(&sb, p, &defaults);
     if (sb.too_large) {
         return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
