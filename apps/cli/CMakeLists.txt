@@ -122,6 +122,12 @@ add_test(NAME cli_version_json COMMAND ${CMAKE_COMMAND}
     -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_version_manifest.json
     -P "${_run}")
 
+add_test(NAME cli_manifest_schema_contract COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker>
+    -DTD=${CMAKE_CURRENT_SOURCE_DIR}/testdata
+    -DWORK=${CMAKE_CURRENT_BINARY_DIR}/cli_manifest_schema_contract
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/cli_manifest_schema_contract.cmake")
+
 # Explicit JSON help requests are one versioned machine payload for both
 # command and flag spellings; human usage text must never leak into stdout.
 add_test(NAME cli_help_json COMMAND ${CMAKE_COMMAND}

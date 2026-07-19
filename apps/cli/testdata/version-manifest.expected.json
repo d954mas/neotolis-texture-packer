@@ -1,21 +1,46 @@
 {
-  "schema": 1,
+  "schema": 2,
   "app_version": "0.2.0",
   "project_schema": 5,
   "verbs": {
     "inspect": 4,
     "validate": 2,
     "pack": 1,
-    "new": 1,
-    "add": 1,
-    "remove": 1,
-    "set": 1,
-    "sprite": 1,
-    "anim": 1,
-    "target": 1,
-    "atlas": 1,
+    "new": {
+      "apply": 1,
+      "dry_run": 2
+    },
+    "add": {
+      "apply": 1,
+      "dry_run": 2
+    },
+    "remove": {
+      "apply": 1,
+      "dry_run": 2
+    },
+    "set": {
+      "apply": 1,
+      "dry_run": 2
+    },
+    "sprite": {
+      "apply": 1,
+      "dry_run": 2
+    },
+    "anim": {
+      "apply": 1,
+      "dry_run": 2,
+      "list": 4
+    },
+    "target": {
+      "apply": 1,
+      "dry_run": 2
+    },
+    "atlas": {
+      "apply": 1,
+      "dry_run": 2
+    },
     "help": 1,
-    "version": 1
+    "version": 2
   },
   "formats": {
     "json-neotolis": 1,

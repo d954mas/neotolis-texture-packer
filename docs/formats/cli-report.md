@@ -23,6 +23,11 @@ is the authoritative machine signal (see `cli_exit.h`: 0 ok · 1 internal ·
 and `global_options` arrays are the machine-readable command catalog, and its
 `exit_codes` object freezes the symbolic mapping above.
 
+`version --json` emits manifest schema 2. Query verbs map directly to their
+payload schema number. Each mutation family maps to a variant object:
+`{"apply":1,"dry_run":2}`. `anim` additionally advertises `"list":4` because
+`anim list` is a query sharing the inspect schema, not a mutation response.
+
 ## `pack` report (schema 1)
 
 ```json
@@ -140,3 +145,9 @@ This is not a failed or absent write: the canonical project bytes were
 published and are authoritative. Clients must surface the notice and must not
 retry as if no write occurred. `recovery_degraded` is likewise a successful
 Save notice about local crash-recovery authority, not project-file publication.
+
+Mutation `--dry-run --json` uses schema 2 instead of the apply schema above. It
+reports `command`, `dry_run`, `would_change`, `operation_count`,
+`revision_before`, `revision_after`, `affected_ids`, `generated_ids`, and
+structured `notices`. Machine clients select this decoder from the mutation
+verb's `dry_run` entry in `version --json`.

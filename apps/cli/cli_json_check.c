@@ -55,8 +55,8 @@ static char *read_file(const char *path) {
 /* --- manifest (version --json) --- */
 static int check_manifest(const cJSON *root) {
     const cJSON *schema = cJSON_GetObjectItemCaseSensitive(root, "schema");
-    if (!cJSON_IsNumber(schema) || schema->valueint != 1) {
-        return fail("manifest: schema must equal 1");
+    if (!cJSON_IsNumber(schema) || schema->valueint != 2) {
+        return fail("manifest: schema must equal 2");
     }
     if (!cJSON_IsString(cJSON_GetObjectItemCaseSensitive(root, "app_version"))) {
         return fail("missing/!string: app_version");
@@ -64,8 +64,26 @@ static int check_manifest(const cJSON *root) {
     if (!cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(root, "project_schema"))) {
         return fail("missing/!number: project_schema");
     }
-    if (!cJSON_IsObject(cJSON_GetObjectItemCaseSensitive(root, "verbs"))) {
+    const cJSON *verbs = cJSON_GetObjectItemCaseSensitive(root, "verbs");
+    if (!cJSON_IsObject(verbs)) {
         return fail("missing/!object: verbs");
+    }
+    static const char *const mutation_verbs[] = {
+        "new", "add", "remove", "set", "sprite", "anim", "target", "atlas",
+    };
+    for (int i = 0; i < (int)(sizeof mutation_verbs / sizeof mutation_verbs[0]); i++) {
+        const cJSON *variants = cJSON_GetObjectItemCaseSensitive(verbs, mutation_verbs[i]);
+        const cJSON *apply = cJSON_GetObjectItemCaseSensitive(variants, "apply");
+        const cJSON *dry_run = cJSON_GetObjectItemCaseSensitive(variants, "dry_run");
+        if (!cJSON_IsObject(variants) || !cJSON_IsNumber(apply) || apply->valueint != 1 ||
+            !cJSON_IsNumber(dry_run) || dry_run->valueint != 2) {
+            return fail("manifest: mutation verb must advertise apply=1 and dry_run=2");
+        }
+    }
+    const cJSON *anim = cJSON_GetObjectItemCaseSensitive(verbs, "anim");
+    const cJSON *anim_list = cJSON_GetObjectItemCaseSensitive(anim, "list");
+    if (!cJSON_IsNumber(anim_list) || anim_list->valueint != 4) {
+        return fail("manifest: anim list query schema must equal 4");
     }
     if (!cJSON_IsObject(cJSON_GetObjectItemCaseSensitive(root, "formats"))) {
         return fail("missing/!object: formats");

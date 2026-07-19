@@ -19,7 +19,12 @@
 #include "tp_core/tp_export.h"
 #include "tp_core/tp_project.h"
 
-enum { CLI_HELP_SCHEMA = 1 };
+enum {
+    CLI_HELP_SCHEMA = 1,
+    CLI_MANIFEST_SCHEMA = 2,
+    CLI_MUTATION_APPLY_SCHEMA = 1,
+    CLI_MUTATION_DRY_RUN_SCHEMA = 2,
+};
 
 static const char *const HELP_COMMANDS[] = {
     "pack", "export", "inspect", "validate", "new", "add", "remove",
@@ -68,7 +73,9 @@ static void build_manifest(cli_sb *sb) {
     cli_sb_str(sb, "{\n");
     indent(sb, 1);
     cli_sb_json_str(sb, "schema");
-    cli_sb_str(sb, ": 1,\n");
+    cli_sb_str(sb, ": ");
+    cli_sb_int(sb, CLI_MANIFEST_SCHEMA);
+    cli_sb_str(sb, ",\n");
     indent(sb, 1);
     cli_sb_json_str(sb, "app_version");
     cli_sb_str(sb, ": ");
@@ -98,15 +105,32 @@ static void build_manifest(cli_sb *sb) {
     indent(sb, 2);
     cli_sb_json_str(sb, "pack");
     cli_sb_str(sb, ": 1,\n");
-    /* B4 mutation verbs: each emits the shared {ok,verb,count} payload (schema 1).
-     * The `anim` VALUE here is that mutation-payload schema; `anim list` is a QUERY
-     * whose payload shares inspect's query schema (CLI_INSPECT_SCHEMA), carried in
-     * its own `schema` field. */
+    /* B4 mutation verbs have distinct apply and dry-run payloads. `anim list` is
+     * a query whose payload shares inspect's schema and is advertised separately. */
     static const char *const mut_verbs[] = {"new", "add", "remove", "set", "sprite", "anim", "target", "atlas"};
     for (int i = 0; i < (int)(sizeof mut_verbs / sizeof mut_verbs[0]); i++) {
         indent(sb, 2);
         cli_sb_json_str(sb, mut_verbs[i]);
-        cli_sb_str(sb, ": 1,\n");
+        cli_sb_str(sb, ": {\n");
+        indent(sb, 3);
+        cli_sb_json_str(sb, "apply");
+        cli_sb_str(sb, ": ");
+        cli_sb_int(sb, CLI_MUTATION_APPLY_SCHEMA);
+        cli_sb_str(sb, ",\n");
+        indent(sb, 3);
+        cli_sb_json_str(sb, "dry_run");
+        cli_sb_str(sb, ": ");
+        cli_sb_int(sb, CLI_MUTATION_DRY_RUN_SCHEMA);
+        if (strcmp(mut_verbs[i], "anim") == 0) {
+            cli_sb_str(sb, ",\n");
+            indent(sb, 3);
+            cli_sb_json_str(sb, "list");
+            cli_sb_str(sb, ": ");
+            cli_sb_int(sb, CLI_INSPECT_SCHEMA);
+        }
+        cli_sb_str(sb, "\n");
+        indent(sb, 2);
+        cli_sb_str(sb, "},\n");
     }
     indent(sb, 2);
     cli_sb_json_str(sb, "help");
@@ -115,7 +139,9 @@ static void build_manifest(cli_sb *sb) {
     cli_sb_str(sb, ",\n");
     indent(sb, 2);
     cli_sb_json_str(sb, "version");
-    cli_sb_str(sb, ": 1\n");
+    cli_sb_str(sb, ": ");
+    cli_sb_int(sb, CLI_MANIFEST_SCHEMA);
+    cli_sb_str(sb, "\n");
     indent(sb, 1);
     cli_sb_str(sb, "},\n");
 
