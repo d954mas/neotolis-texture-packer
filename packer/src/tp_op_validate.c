@@ -15,21 +15,16 @@
 #include "tp_core/tp_project.h"
 #include "tp_op_internal.h"
 #include "tp_op_validate_family_internal.h"
-#include "tp_project_mutation_internal.h"
 #include "tp_source_path_text_internal.h"
 #include "tp_source_plan_internal.h"
 #include "tp_utf8_internal.h"
 
 static const tp_project_atlas *find_atlas(const tp_project *p, tp_id128 id) {
-    int ai = tp_project_find_atlas_by_id(p, id);
-    return ai < 0 ? NULL : &p->atlases[ai];
+    return tp_project_atlas_by_id(p, id);
 }
-/* const adapters over the public id-addressed accessors: validate holds a
- * const project; the accessors take non-const and only READ, so the cast is safe. This
- * removes the lookup loops that duplicated the tp_project_atlas_find_*_by_id accessors. */
 const tp_project_source *tp_op_validate_find_source(const tp_project_atlas *a,
                                                     tp_id128 id) {
-    return tp_project_atlas_find_source_by_id((tp_project_atlas *)a, id);
+    return tp_project_atlas_source_by_id(a, id);
 }
 static tp_status validate_persisted_utf8(const char *value, const char *field,
                                          tp_op_reject *reject) {

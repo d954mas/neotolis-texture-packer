@@ -3,10 +3,8 @@
 #include "tp_core/tp_export.h"
 #include "tp_op_internal.h"
 #include "tp_project_identity_internal.h"
-#include "tp_project_mutation_internal.h"
-
 static const tp_project_target *find_target(const tp_project_atlas *a, tp_id128 id) {
-    return tp_project_atlas_find_target_by_id((tp_project_atlas *)a, id);
+    return tp_project_atlas_target_by_id(a, id);
 }
 
 static tp_status validate_exporter_id(const char *value,

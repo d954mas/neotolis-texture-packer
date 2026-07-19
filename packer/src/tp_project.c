@@ -160,6 +160,12 @@ int tp_project_find_atlas_by_id(const tp_project *p, tp_id128 id) {
     return -1;
 }
 
+const tp_project_atlas *tp_project_atlas_by_id(const tp_project *p,
+                                               tp_id128 id) {
+    const int index = tp_project_find_atlas_by_id(p, id);
+    return index >= 0 ? &p->atlases[index] : NULL;
+}
+
 tp_project_atlas *tp_project_get_atlas(tp_project *p, int index) {
     if (!p || index < 0 || index >= p->atlas_count) {
         return NULL;
@@ -260,7 +266,8 @@ tp_status tp_project_atlas_remove_source(tp_project_atlas *a, int index) {
     return TP_STATUS_OK;
 }
 
-tp_project_source *tp_project_atlas_find_source_by_id(tp_project_atlas *a, tp_id128 id) {
+const tp_project_source *tp_project_atlas_source_by_id(
+    const tp_project_atlas *a, tp_id128 id) {
     if (!a || tp_id128_is_nil(id)) {
         return NULL;
     }
@@ -270,6 +277,11 @@ tp_project_source *tp_project_atlas_find_source_by_id(tp_project_atlas *a, tp_id
         }
     }
     return NULL;
+}
+
+tp_project_source *tp_project_atlas_find_source_by_id(tp_project_atlas *a,
+                                                       tp_id128 id) {
+    return (tp_project_source *)tp_project_atlas_source_by_id(a, id);
 }
 
 tp_status tp_project_atlas_remove_source_by_id(tp_project_atlas *a, tp_id128 id) {
@@ -639,7 +651,8 @@ tp_status tp_project_atlas_remove_target(tp_project_atlas *a, int index) {
     return TP_STATUS_OK;
 }
 
-tp_project_target *tp_project_atlas_find_target_by_id(tp_project_atlas *a, tp_id128 id) {
+const tp_project_target *tp_project_atlas_target_by_id(
+    const tp_project_atlas *a, tp_id128 id) {
     if (!a || tp_id128_is_nil(id)) {
         return NULL;
     }
@@ -649,6 +662,11 @@ tp_project_target *tp_project_atlas_find_target_by_id(tp_project_atlas *a, tp_id
         }
     }
     return NULL;
+}
+
+tp_project_target *tp_project_atlas_find_target_by_id(tp_project_atlas *a,
+                                                       tp_id128 id) {
+    return (tp_project_target *)tp_project_atlas_target_by_id(a, id);
 }
 
 tp_status tp_project_atlas_remove_target_by_id(tp_project_atlas *a, tp_id128 id) {

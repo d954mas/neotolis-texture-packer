@@ -225,6 +225,16 @@ tp_project *tp_project_clone(const tp_project *src);
  * the array index, which reorder/remove invalidates (master spec §5.4). */
 int tp_project_find_atlas_by_id(const tp_project *p, tp_id128 id);
 
+/* Borrowed read-only lookup by structural id. Returns NULL for a NULL owner,
+ * nil/missing id, or absent record. The pointer remains valid until the owning
+ * collection is mutated or the project is destroyed. */
+const tp_project_atlas *tp_project_atlas_by_id(const tp_project *project,
+                                               tp_id128 id);
+const tp_project_source *tp_project_atlas_source_by_id(
+    const tp_project_atlas *atlas, tp_id128 id);
+const tp_project_target *tp_project_atlas_target_by_id(
+    const tp_project_atlas *atlas, tp_id128 id);
+
 /* True when the atlas already holds a source whose '/'-normalized path equals `path`'s
  * -- the exact predicate add_source_kind uses to dedupe. Lets a caller (the op-engine
  * validator) reject a would-be-deduped add BEFORE it strands a new source's id. */

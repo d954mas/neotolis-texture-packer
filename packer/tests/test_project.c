@@ -504,6 +504,52 @@ static void assert_project_equal(const tp_project *a, const tp_project *b) {
     }
 }
 
+void test_const_id_queries_return_owned_records_without_mutable_aliasing(void) {
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    tp_project_atlas *atlas = tp_project_get_atlas(project, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_source(atlas, "art/hero"));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_target(atlas, TP_EXPORTER_ID_JSON_NEOTOLIS,
+                                    "out/atlas", NULL));
+
+    const tp_id128 atlas_id = {{0x11}};
+    const tp_id128 source_id = {{0x22}};
+    const tp_id128 target_id = {{0x33}};
+    const tp_id128 missing_id = {{0x44}};
+    atlas->id = atlas_id;
+    atlas->sources[0].id = source_id;
+    atlas->targets[0].id = target_id;
+
+    const tp_project_atlas *found_atlas =
+        tp_project_atlas_by_id(project, atlas_id);
+    TEST_ASSERT_EQUAL_PTR(atlas, found_atlas);
+    TEST_ASSERT_NULL(tp_project_atlas_by_id(NULL, atlas_id));
+    TEST_ASSERT_NULL(tp_project_atlas_by_id(project, tp_id128_nil()));
+    TEST_ASSERT_NULL(tp_project_atlas_by_id(project, missing_id));
+
+    TEST_ASSERT_EQUAL_PTR(
+        &atlas->sources[0],
+        tp_project_atlas_source_by_id(found_atlas, source_id));
+    TEST_ASSERT_NULL(tp_project_atlas_source_by_id(NULL, source_id));
+    TEST_ASSERT_NULL(
+        tp_project_atlas_source_by_id(found_atlas, tp_id128_nil()));
+    TEST_ASSERT_NULL(tp_project_atlas_source_by_id(found_atlas, missing_id));
+
+    TEST_ASSERT_EQUAL_PTR(
+        &atlas->targets[0],
+        tp_project_atlas_target_by_id(found_atlas, target_id));
+    TEST_ASSERT_NULL(tp_project_atlas_target_by_id(NULL, target_id));
+    TEST_ASSERT_NULL(
+        tp_project_atlas_target_by_id(found_atlas, tp_id128_nil()));
+    TEST_ASSERT_NULL(tp_project_atlas_target_by_id(found_atlas, missing_id));
+
+    tp_project_destroy(project);
+}
+
 /* 1. round-trip: create -> save -> load -> deep-equal -> save -> byte-identical */
 void test_roundtrip_and_byte_identical(void) {
     char p1[512];
@@ -2205,6 +2251,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_save_buffers_obey_project_json_admission_limits);
     RUN_TEST(test_save_buffer_stops_at_byte_limit_before_growth);
     RUN_TEST(test_save_buffer_rejects_invalid_utf8_before_emitting_unloadable_json);
+    RUN_TEST(test_const_id_queries_return_owned_records_without_mutable_aliasing);
     RUN_TEST(test_roundtrip_and_byte_identical);
     RUN_TEST(test_sparse_defaults_absent);
     RUN_TEST(test_determinism);

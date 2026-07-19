@@ -18,21 +18,17 @@
 #include "tp_core/tp_project.h"
 #include "tp_diff_internal.h"
 #include "tp_project_mutation_internal.h"
-
-/* const-read lookups over the public (non-const) id accessors -- capture only
- * reads; the cast mirrors tp_op_validate.c's documented-safe pattern. */
 static const tp_project_atlas *find_atlas(const tp_project *p, tp_id128 id) {
-    int ai = tp_project_find_atlas_by_id(p, id);
-    return ai < 0 ? NULL : &p->atlases[ai];
+    return tp_project_atlas_by_id(p, id);
 }
 static const tp_project_source *find_source(const tp_project_atlas *a, tp_id128 id) {
-    return tp_project_atlas_find_source_by_id((tp_project_atlas *)a, id);
+    return tp_project_atlas_source_by_id(a, id);
 }
 static const tp_project_anim *find_anim(const tp_project_atlas *a, tp_id128 id) {
     return tp_project_atlas_find_animation_by_id((tp_project_atlas *)a, id);
 }
 static const tp_project_target *find_target(const tp_project_atlas *a, tp_id128 id) {
-    return tp_project_atlas_find_target_by_id((tp_project_atlas *)a, id);
+    return tp_project_atlas_target_by_id(a, id);
 }
 static void grab_knobs(tp_diff_knobs *k, const tp_project_atlas *a) {
     k->max_size = a->max_size;

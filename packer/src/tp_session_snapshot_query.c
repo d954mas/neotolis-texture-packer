@@ -10,7 +10,6 @@
 #include "tp_core/tp_sprite_index.h"
 #include "tp_core/tp_srckey.h"
 #include "tp_core/tp_transaction.h"
-#include "tp_project_mutation_internal.h"
 #include "tp_session_snapshot_internal.h"
 
 static tp_status resolve_snapshot_source_path(const tp_project *project,
@@ -351,12 +350,13 @@ tp_status tp_session_snapshot_resolve_path(const tp_session_snapshot *snapshot,
     if (!snapshot || !out || capacity == 0U) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "invalid snapshot path query");
     }
-    const int atlas_index = tp_project_find_atlas_by_id(snapshot->project, atlas_id);
-    if (atlas_index < 0) {
+    const tp_project_atlas *atlas =
+        tp_project_atlas_by_id(snapshot->project, atlas_id);
+    if (!atlas) {
         return tp_error_set(err, TP_STATUS_NOT_FOUND, "snapshot atlas id was not found");
     }
-    tp_project_atlas *atlas = &snapshot->project->atlases[atlas_index];
-    tp_project_source *source = tp_project_atlas_find_source_by_id(atlas, source_id);
+    const tp_project_source *source =
+        tp_project_atlas_source_by_id(atlas, source_id);
     if (!source) {
         return tp_error_set(err, TP_STATUS_NOT_FOUND, "snapshot source id was not found");
     }
@@ -583,13 +583,13 @@ bool tp_session_snapshot_target_out_path_shared(
     if (!snapshot || !out_path) {
         return false;
     }
-    const int atlas_index = tp_project_find_atlas_by_id(snapshot->project,
-                                                        atlas_id);
-    if (atlas_index < 0) {
+    const tp_project_atlas *atlas =
+        tp_project_atlas_by_id(snapshot->project, atlas_id);
+    if (!atlas) {
         return false;
     }
-    const tp_project_target *target = tp_project_atlas_find_target_by_id(
-        &snapshot->project->atlases[atlas_index], target_id);
+    const tp_project_target *target =
+        tp_project_atlas_target_by_id(atlas, target_id);
     return target && tp_project_out_path_shared(snapshot->project, out_path,
                                                 target);
 }
