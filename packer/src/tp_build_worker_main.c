@@ -8,6 +8,7 @@
 #if defined(_WIN32)
 #include <fcntl.h>
 #include <io.h>
+#include <windows.h>
 #endif
 
 #include "log/nt_log.h"
@@ -22,6 +23,19 @@
 
 bool tp_build_is_worker_invocation(int argc, char **argv) {
     return argc >= 2 && argv && argv[1] && strcmp(argv[1], TP_BUILD_WORKER_ARGV1) == 0;
+}
+
+/* The worker exists to die silently when the builder faults: no WER "has
+ * stopped working" dialog, no Debug-CRT abort message box -- an interactive
+ * prompt would block the parent until its safety timeout instead of yielding
+ * an immediate builder_crashed. Error mode is inherited from the parent, so
+ * a launcher that re-enables dialogs (ctest does) would otherwise wedge every
+ * crashing worker on an invisible dialog. */
+static void suppress_fault_dialogs(void) {
+#if defined(_WIN32)
+    (void)SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+    (void)_set_abort_behavior(0U, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+#endif
 }
 
 /* Read stdin to EOF into a freshly malloc'd buffer, capped at `cap`. The parent
@@ -146,6 +160,7 @@ static tp_status pack_request(const tp_build_proto_request *req, tp_error *err) 
 }
 
 int tp_build_worker_main(void) {
+    suppress_fault_dialogs();
     /* Keep stdout a pure response channel: nt_log INFO defaults to stdout and
      * would corrupt the frame, so silence logging entirely for the worker. */
     nt_log_set_level(NT_LOG_LEVEL_NONE);

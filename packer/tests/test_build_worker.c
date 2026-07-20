@@ -13,7 +13,12 @@
  *  - the safety timeout kills a wedged worker as BUILDER_CRASHED and removes
  *    staging;
  *  - a malformed reply after a clean exit fails closed as BUILDER_FAILED;
- *  - a non-zero exit paired with a VALID error reply maps to BUILDER_FAILED.
+ *  - a non-zero exit paired with a VALID error reply maps to BUILDER_FAILED;
+ *  - a sink/full-disk write failure (partial staging file + a BUILDER_FAILED reply)
+ *    publishes nothing and cleans the partial file (H0.5);
+ *  - exit 0 + a valid OK reply but NO staged artifact maps to BUILDER_CRASHED (H0.5);
+ *  - a reply frame declaring a giant payload length, and one truncated on the wire,
+ *    each fail closed as BUILDER_FAILED THROUGH the process with no publish (H0.5).
  *
  * The test executable is BOTH the parent and the normal worker: main() dispatches
  * the hidden __build-worker argv the same way every shipping/pack exe must. The
@@ -54,6 +59,10 @@ static const char *g_worker_crash;
 static const char *g_worker_malformed;
 static const char *g_worker_nonzero;
 static const char *g_worker_hang;
+static const char *g_worker_nowrite;
+static const char *g_worker_oknoart;
+static const char *g_worker_biglen;
+static const char *g_worker_trunc;
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -201,6 +210,41 @@ static int count_staging_dirs(const char *dir) {
 /* THE process oracle: a pack routed through the worker CHILD PROCESS is byte-for-
  * byte identical to a direct nt_builder invocation. Also prints the measured
  * worker round-trip (U-01 budget seam, measurement only). */
+/* Global long-path work dir, prepared by test_direct_reference_builds. */
+static char g_long_dir[LONG_PATH_CAP];
+
+/* Runs FIRST, before any worker spawn: both byte-identity reference artifacts
+ * are built in-process here. The engine's threaded builder can deadlock under
+ * Windows clang-ASan when invoked after a child spawn/reap cycle (pre-existing
+ * engine/env issue, not the containment path), so no direct_nt_build call may
+ * follow a tp_build_worker_run/tp_build_worker_run_exe call in this suite. */
+void test_direct_reference_builds(void) {
+    char direct_path[1024];
+    TEST_ASSERT_TRUE(snprintf(direct_path, sizeof direct_path, "%s/wrk_direct.ntpack", g_dir) > 0);
+    tp_pack_settings s;
+    make_settings(&s, g_dir);
+    direct_nt_build(&s, direct_path);
+
+    /* Unicode + length: build the >300 char destination directory used by
+     * test_worker_publishes_unicode_long_path. */
+    int used = snprintf(g_long_dir, sizeof g_long_dir, "%s", g_dir);
+    TEST_ASSERT_TRUE(used > 0 && used < (int)sizeof g_long_dir);
+    for (unsigned int seg = 0U; strlen(g_long_dir) <= 300U; seg++) {
+        const size_t at = strlen(g_long_dir);
+        const int n = snprintf(g_long_dir + at, sizeof g_long_dir - at,
+                               "/\xD0\xBF\xD0\xB0\xD0\xBA-t\xC3\xAF\x6C\xC3\xA9-seg%02u", seg);
+        TEST_ASSERT_TRUE(n > 0 && (size_t)n < sizeof g_long_dir - at);
+    }
+    tp_mkdirs(g_long_dir);
+    TEST_ASSERT_TRUE_MESSAGE(tp_scan_is_dir(g_long_dir), g_long_dir);
+
+    char long_direct_path[1024];
+    TEST_ASSERT_TRUE(snprintf(long_direct_path, sizeof long_direct_path, "%s/lp_direct.ntpack", g_dir) > 0);
+    tp_pack_settings ls;
+    make_settings(&ls, g_long_dir);
+    direct_nt_build(&ls, long_direct_path);
+}
+
 void test_worker_process_matches_direct_nt_builder(void) {
     char worker_path[1024];
     char direct_path[1024];
@@ -211,13 +255,16 @@ void test_worker_process_matches_direct_nt_builder(void) {
     make_settings(&s, g_dir);
     tp_error err = {{0}};
     const int staging_before = count_staging_dirs(g_dir);
+    /* The reference artifact was built by test_direct_reference_builds (which
+     * runs first): the in-process nt_builder can deadlock under Windows
+     * clang-ASan when it runs after a child spawn/reap cycle (pre-existing
+     * engine/env issue), so every direct build precedes the first spawn. */
     const double t0 = wall_ms();
     TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK,
                                   tp_build_worker_run(&s, NULL, worker_path, &err), err.msg);
     const double rt = wall_ms() - t0;
     printf("[perf] worker round-trip = %.2f ms (U-01 budget seam)\n", rt);
     fflush(stdout);
-    direct_nt_build(&s, direct_path);
 
     size_t ln = 0, rn = 0;
     uint8_t *lb = read_file(worker_path, &ln);
@@ -232,31 +279,21 @@ void test_worker_process_matches_direct_nt_builder(void) {
 /* Unicode + long (>260) destination: the child packs into an ASCII staging dir,
  * the parent publishes to the Unicode long path, byte-identical to direct. */
 void test_worker_publishes_unicode_long_path(void) {
-    char long_dir[LONG_PATH_CAP];
-    int used = snprintf(long_dir, sizeof long_dir, "%s", g_dir);
-    TEST_ASSERT_TRUE(used > 0 && used < (int)sizeof long_dir);
-    /* Unicode + length: build a >300 char destination directory. */
-    for (unsigned int seg = 0U; strlen(long_dir) <= 300U; seg++) {
-        const size_t at = strlen(long_dir);
-        const int n = snprintf(long_dir + at, sizeof long_dir - at,
-                               "/\xD0\xBF\xD0\xB0\xD0\xBA-t\xC3\xAF\x6C\xC3\xA9-seg%02u", seg);
-        TEST_ASSERT_TRUE(n > 0 && (size_t)n < sizeof long_dir - at);
-    }
-    tp_mkdirs(long_dir);
-    TEST_ASSERT_TRUE_MESSAGE(tp_scan_is_dir(long_dir), long_dir);
+    /* g_long_dir and the lp_direct.ntpack reference were prepared by
+     * test_direct_reference_builds (before any spawn -- see its comment). */
+    TEST_ASSERT_TRUE_MESSAGE(tp_scan_is_dir(g_long_dir), g_long_dir);
 
     char worker_path[LONG_PATH_CAP];
     char direct_path[1024];
-    TEST_ASSERT_TRUE(snprintf(worker_path, sizeof worker_path, "%s/lp.ntpack", long_dir) > 0);
+    TEST_ASSERT_TRUE(snprintf(worker_path, sizeof worker_path, "%s/lp.ntpack", g_long_dir) > 0);
     TEST_ASSERT_TRUE(snprintf(direct_path, sizeof direct_path, "%s/lp_direct.ntpack", g_dir) > 0);
     TEST_ASSERT_TRUE(strlen(worker_path) > 260U);
 
     tp_pack_settings s;
-    make_settings(&s, long_dir);
+    make_settings(&s, g_long_dir);
     tp_error err = {{0}};
     TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK,
                                   tp_build_worker_run(&s, NULL, worker_path, &err), err.msg);
-    direct_nt_build(&s, direct_path);
 
     size_t ln = 0, rn = 0;
     uint8_t *lb = read_file_fs(worker_path, &ln);   /* long Unicode: tp_fs read */
@@ -268,7 +305,18 @@ void test_worker_publishes_unicode_long_path(void) {
 }
 
 /* A crashing worker -> BUILDER_CRASHED, the host survives, a prior artifact at the
- * same path is untouched (no publish), and staging is gone. */
+ * same path is untouched (no publish), and staging is gone.
+ *
+ * This pins the on-disk half of decision 0018's "the last successful preview
+ * remains authoritative": a crash publishes nothing, so the prior artifact bytes
+ * survive. The in-memory half is a structural property of the take_result
+ * contract, not something this worker-layer test can observe: tp_pack returns
+ * *out_result == NULL on any non-OK worker status (tp_pack.c:577-580), and
+ * tp_session_job_take_result transfers a pack arena/result ONLY when the job
+ * state is SUCCEEDED (tp_job.c:473-478) -- a FAILED/CRASHED job hands back no
+ * result, so a consumer's last successful preview cannot be replaced. The
+ * positive direction (SUCCEEDED -> non-NULL result) is pinned by
+ * apps/gui/test_client_parity.c:703-713. */
 void test_crashing_worker_reports_crashed_and_preserves_prior_artifact(void) {
     char path[1024];
     TEST_ASSERT_TRUE(snprintf(path, sizeof path, "%s/wrk_crash.ntpack", g_dir) > 0);
@@ -383,6 +431,79 @@ void test_nonzero_exit_with_error_reply_is_builder_failed(void) {
     TEST_ASSERT_NOT_NULL(strstr(err.msg, "worker fault seam"));
 }
 
+/* Full-disk / sink write failure via the seam: the child leaves a PARTIAL artifact
+ * in staging then reports a structured builder/sink failure -> BUILDER_FAILED,
+ * NOTHING is published at the destination, and the partial staging file is cleaned
+ * (staging delta 0). The contract under test is the PARENT's behavior. */
+void test_sink_write_failure_publishes_nothing_and_cleans_staging(void) {
+    char path[1024];
+    TEST_ASSERT_TRUE(snprintf(path, sizeof path, "%s/wrk_nowrite.ntpack", g_dir) > 0);
+    TEST_ASSERT_FALSE(tp_fs_exists(path));
+    tp_pack_settings s;
+    make_settings(&s, g_dir);
+    tp_error err = {{0}};
+    const int staging_before = count_staging_dirs(g_dir);
+    tp_status st = tp_build_worker_run_exe(&s, NULL, path, g_worker_nowrite, &err);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_BUILDER_FAILED, st, err.msg);
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(err.msg, "sink write failed"), err.msg);
+    TEST_ASSERT_FALSE_MESSAGE(tp_fs_exists(path), "sink failure published an artifact");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(staging_before, count_staging_dirs(g_dir),
+                                  "sink failure left a partial staging dir behind");
+}
+
+/* Exit 0 + a valid OK reply but NO staged artifact -> BUILDER_CRASHED ("reported
+ * success but produced no readable artifact"): a lying success cannot publish. */
+void test_ok_reply_missing_artifact_is_builder_crashed(void) {
+    char path[1024];
+    TEST_ASSERT_TRUE(snprintf(path, sizeof path, "%s/wrk_oknoart.ntpack", g_dir) > 0);
+    TEST_ASSERT_FALSE(tp_fs_exists(path));
+    tp_pack_settings s;
+    make_settings(&s, g_dir);
+    tp_error err = {{0}};
+    const int staging_before = count_staging_dirs(g_dir);
+    tp_status st = tp_build_worker_run_exe(&s, NULL, path, g_worker_oknoart, &err);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_BUILDER_CRASHED, st, err.msg);
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(err.msg, "no readable artifact"), err.msg);
+    TEST_ASSERT_FALSE_MESSAGE(tp_fs_exists(path), "missing-artifact OK published an artifact");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(staging_before, count_staging_dirs(g_dir),
+                                  "missing-artifact OK left staging behind");
+}
+
+/* A reply frame declaring a GIANT payload length (header says far more than the
+ * bytes on the wire) fails closed THROUGH the process -> BUILDER_FAILED, no
+ * publish. Codec-level declared-length rejection is #43; this pins the parent. */
+void test_oversized_declared_length_reply_is_builder_failed(void) {
+    char path[1024];
+    TEST_ASSERT_TRUE(snprintf(path, sizeof path, "%s/wrk_biglen.ntpack", g_dir) > 0);
+    TEST_ASSERT_FALSE(tp_fs_exists(path));
+    tp_pack_settings s;
+    make_settings(&s, g_dir);
+    tp_error err = {{0}};
+    const int staging_before = count_staging_dirs(g_dir);
+    tp_status st = tp_build_worker_run_exe(&s, NULL, path, g_worker_biglen, &err);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_BUILDER_FAILED, st, err.msg);
+    TEST_ASSERT_FALSE_MESSAGE(tp_fs_exists(path), "oversized-length reply published an artifact");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(staging_before, count_staging_dirs(g_dir),
+                                  "oversized-length reply left staging behind");
+}
+
+/* A reply frame truncated on the wire (fewer payload bytes than its header
+ * declares) fails closed THROUGH the process -> BUILDER_FAILED, no publish. */
+void test_truncated_reply_frame_is_builder_failed(void) {
+    char path[1024];
+    TEST_ASSERT_TRUE(snprintf(path, sizeof path, "%s/wrk_trunc.ntpack", g_dir) > 0);
+    TEST_ASSERT_FALSE(tp_fs_exists(path));
+    tp_pack_settings s;
+    make_settings(&s, g_dir);
+    tp_error err = {{0}};
+    const int staging_before = count_staging_dirs(g_dir);
+    tp_status st = tp_build_worker_run_exe(&s, NULL, path, g_worker_trunc, &err);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_BUILDER_FAILED, st, err.msg);
+    TEST_ASSERT_FALSE_MESSAGE(tp_fs_exists(path), "truncated reply published an artifact");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(staging_before, count_staging_dirs(g_dir),
+                                  "truncated reply left staging behind");
+}
+
 int main(int argc, char **argv) {
     /* Same first-thing dispatch every pack-capable exe must have: as the worker
      * child, service the request and return -- never fall through to the tests. */
@@ -394,8 +515,13 @@ int main(int argc, char **argv) {
     g_worker_malformed = (argc > 3) ? argv[3] : "";
     g_worker_nonzero = (argc > 4) ? argv[4] : "";
     g_worker_hang = (argc > 5) ? argv[5] : "";
+    g_worker_nowrite = (argc > 6) ? argv[6] : "";
+    g_worker_oknoart = (argc > 7) ? argv[7] : "";
+    g_worker_biglen = (argc > 8) ? argv[8] : "";
+    g_worker_trunc = (argc > 9) ? argv[9] : "";
 
     UNITY_BEGIN();
+    RUN_TEST(test_direct_reference_builds);
     RUN_TEST(test_worker_process_matches_direct_nt_builder);
     RUN_TEST(test_worker_publishes_unicode_long_path);
     RUN_TEST(test_crashing_worker_reports_crashed_and_preserves_prior_artifact);
@@ -403,5 +529,9 @@ int main(int argc, char **argv) {
     RUN_TEST(test_timeout_kills_worker_and_cleans_staging);
     RUN_TEST(test_malformed_reply_is_builder_failed);
     RUN_TEST(test_nonzero_exit_with_error_reply_is_builder_failed);
+    RUN_TEST(test_sink_write_failure_publishes_nothing_and_cleans_staging);
+    RUN_TEST(test_ok_reply_missing_artifact_is_builder_crashed);
+    RUN_TEST(test_oversized_declared_length_reply_is_builder_failed);
+    RUN_TEST(test_truncated_reply_frame_is_builder_failed);
     return UNITY_END();
 }

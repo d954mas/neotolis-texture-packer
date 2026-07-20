@@ -455,8 +455,12 @@ add_test(NAME tp_build_driver_oracle COMMAND tp_test_build_driver_oracle "${CMAK
 # drive the crash / malformed-reply / non-zero-exit outcome mapping. The test exe
 # is BOTH the parent and the normal worker child (its main dispatches __build-worker).
 # HANG (H0.4) joins the fault set: drains stdin then never replies/exits, so the
-# cancel + safety-timeout paths can tree-kill it and clean up staging.
-foreach(_mode CRASH MALFORMED NONZERO HANG)
+# cancel + safety-timeout paths can tree-kill it and clean up staging. H0.5 adds
+# NOWRITE (full-disk/sink write failure: partial staging file + BUILDER_FAILED),
+# OKNOART (exit 0 + valid OK reply + missing artifact -> BUILDER_CRASHED), and
+# BIGLEN/TRUNC (giant declared / short truncated reply frame -> BUILDER_FAILED),
+# proving the PARENT path fails closed through the process (codec-level is #43).
+foreach(_mode CRASH MALFORMED NONZERO HANG NOWRITE OKNOART BIGLEN TRUNC)
     string(TOLOWER "${_mode}" _lc)
     add_executable(tp_build_worker_${_lc} tp_build_worker_fault.c)
     target_link_libraries(tp_build_worker_${_lc} PRIVATE tp_build)
@@ -480,7 +484,15 @@ add_test(NAME tp_build_worker COMMAND tp_test_build_worker
     $<TARGET_FILE:tp_build_worker_crash>
     $<TARGET_FILE:tp_build_worker_malformed>
     $<TARGET_FILE:tp_build_worker_nonzero>
-    $<TARGET_FILE:tp_build_worker_hang>)
+    $<TARGET_FILE:tp_build_worker_hang>
+    $<TARGET_FILE:tp_build_worker_nowrite>
+    $<TARGET_FILE:tp_build_worker_oknoart>
+    $<TARGET_FILE:tp_build_worker_biglen>
+    $<TARGET_FILE:tp_build_worker_trunc>)
+# A regression that failed to kill the hang worker must not wedge CI for the job's
+# full 6h budget: bound the whole worker suite well above its sub-second normal run
+# (the timeout test overrides the 5-min safety timeout down to 400ms).
+set_tests_properties(tp_build_worker PROPERTIES TIMEOUT 120)
 
 # Shared strict-UTF-8 raster ingress: memory decode, bounded resources and
 # explicit allocator ownership.  The scratch tree includes a Cyrillic filename.

@@ -62,19 +62,27 @@ owns a GUI snapshot-history stack are likewise historical.
 
 ## 2026-07-17 builder-containment checkpoint
 
-**Status: IN PROGRESS.** Shared `tp_image` now performs bounded UTF-8 reads and
+**Status: DONE (2026-07-20).** Shared `tp_image` performs bounded UTF-8 reads and
 canonical RGBA8 decode; `tp_pack` supplies raw pixels and preflights the known
 transparent/slice9/footprint/spacing conditions that otherwise reach engine
-assertions. This closes bad-image and Unicode source ingress, but it does not
-make the current engine builder fallible: narrow output-path I/O, allocation,
-codec, write, and unknown assertion failures can still terminate an in-process
-client.
+assertions. The remaining containment gap — narrow output-path I/O, allocation,
+codec, write, and unknown assertion failures terminating an in-process client —
+is now closed by the private build worker (decision 0018, roadmap `H0.3–H0.5`):
+`tp_pack` routes every Pack through a re-exec'd child (`packer/src/tp_build_worker.c`)
+over a versioned bounded protocol, with ASCII relative staging and parent-owned
+UTF-8 publication; builder abort/non-zero exit/malformed reply/missing
+artifact/timeout become structured `builder_crashed`/`builder_failed` and the last
+successful preview is never replaced.
 
-The remaining mandatory packet is roadmap `H0.3–H0.5` / decision 0018: a
-versioned bounded private builder worker, ASCII relative staging, parent-owned
-UTF-8 publication and crash/cancel/malformed/full-disk tests. It is a
-prerequisite of F3's production Pack session gate. Do not mark the core
-crash-proof or substitute additional assertion prechecks for failure isolation.
+Evidence (executable, all three CI OSes via `ctest --preset native-release`):
+`tp_build_proto` (#43 codec fail-closed matrix), `tp_build_driver_oracle`
+(#44 byte-identical driver oracle), and `tp_build_worker` (#45: process oracle,
+Unicode/long-path publish, crash, cancel, timeout, malformed, non-zero,
+sink-write/full-disk, missing-artifact, oversized/truncated). This supersedes the
+former "remaining mandatory packet" note; the F3 production Pack session gate no
+longer waits on it. The engine builder itself remains non-fallible, so a
+qualifying upstream fallible sink API may still replace the process boundary
+without changing client contracts — do not describe the core builder as crash-proof.
 
 ## 2026-07-20 consolidation checkpoint
 
@@ -106,9 +114,9 @@ Base (H0.3–H0.5 + F2 phase-gate audit + F3)
   moves to **B1's own gate** (B1-02); F3 no longer waits on B1.
 - **B0 (pure-core import, no GUI surface) may run in parallel with phase U**,
   since it touches no canvas surface.
-- Base still owes H0.3–H0.5 (decision 0018 fallible builder containment; H0.1/H0.2
-  are done) and a phase-gate audit of the landed F2 foundation before F3 is
-  declared complete.
+- Base has landed H0.3–H0.5 (decision 0018 fallible builder containment; H0
+  complete 2026-07-20) and still owes a phase-gate audit of the landed F2
+  foundation before F3 is declared complete.
 
 Where §3's older dependency prose below contradicts this checkpoint (F3-after-B1,
 no U phase), this checkpoint governs and that prose is historical.

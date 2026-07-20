@@ -72,7 +72,16 @@ paths remain. That replacement is internal and does not change client contracts.
 
 There is one extra process launch and a bounded raw-pixel transfer on a Pack job.
 Pack is already explicit, heavy work, so correctness and host survival take
-priority; measurements decide whether shared memory is needed. Until the worker
-or a qualifying upstream API lands, the repository must report builder output
-failure containment as an open foundation blocker rather than claiming a
-crash-proof core.
+priority; measurements decide whether shared memory is needed.
+
+The private worker landed (2026-07-20): `tp_build` routes every Pack through the
+re-exec'd child (`packer/src/tp_build_worker.c`), so an engine
+user/resource/output-path/allocation/codec/write/assertion failure is contained
+as a structured `builder_crashed`/`builder_failed` result instead of terminating
+the host, and a failed pack never replaces the last successful preview. The
+repository therefore no longer reports builder output failure containment as an
+open foundation blocker. The engine builder itself is still not fallible —
+containment is the process boundary — so a qualifying upstream fallible
+memory/sink API may still replace the worker once its error, ownership,
+cancellation, and UTF-8 contracts are executable-test pinned, without changing
+client contracts.
