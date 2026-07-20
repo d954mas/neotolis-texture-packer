@@ -3,7 +3,8 @@
 **Дата:** 2026-07-12
 **Статус:** initial-policy; реализуется и закрепляется production-тестами в F3-03
 **Принял:** lead (делегировано owner); совпадает с рекомендацией
-`docs/reviews/master-spec-review-2026-07-12.md` (finding 5)
+master-spec-review (см. git history: `docs/reviews/master-spec-review-2026-07-12.md`,
+удалён 2026-07-20; finding 5)
 
 ## Решение
 

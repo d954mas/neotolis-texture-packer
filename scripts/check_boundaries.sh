@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Boundary gates (plan docs/plans/op-layer-and-cli.md §A6): greppable rules that
+# Boundary gates (see git history: docs/plans/op-layer-and-cli.md §A6, removed 2026-07-20): greppable rules that
 # keep the tp_core / frontend split honest. Run from the repo root. Exit 0 = clean.
 # A legit exception is annotated in-source with "boundary-ok:" on the same line.
 set -u

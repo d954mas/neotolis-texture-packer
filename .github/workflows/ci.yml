@@ -36,7 +36,7 @@ jobs:
       - name: Pull submodule LFS files
         run: git submodule foreach --recursive 'git lfs pull || true'
 
-      # Boundary gates (docs/plans/op-layer-and-cli.md §A6): cheap grep rules
+      # Boundary gates (see git history: docs/plans/op-layer-and-cli.md §A6, removed 2026-07-20): cheap grep rules
       # keeping the tp_core/frontend split honest. One leg is enough.
       - name: Check layer boundaries
         if: runner.os == 'Linux'

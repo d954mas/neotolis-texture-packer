@@ -12,7 +12,7 @@ evidence и git history, а не этим заголовком.
 
 ## 2026-07-16 architecture foundation checkpoint
 
-Ownership foundation M0-M5 from `architecture-foundation-plan.md` is implemented.
+Ownership foundation M0-M5 (see git history: `docs/plans/architecture-foundation-plan.md`, removed 2026-07-20) is implemented.
 The current plan §10 points directly to its executable evidence. Exact-SHA
 terminal CI is a handoff gate whose current result is recorded on the PR and in
 the task handoff. This checkpoint supersedes obsolete as-built statements below
@@ -131,7 +131,8 @@ no U phase), this checkpoint governs and that prose is historical.
 
 > Historical baseline: this section captured commit `46b172b` before M0-M5.
 > It is retained as planning history, not a description of the current tree.
-> Use the checkpoint above and architecture-foundation plan §10 for current
+> Use the checkpoint above and the M0-M5 foundation plan §10 (git history:
+> `docs/plans/architecture-foundation-plan.md`, removed 2026-07-20) for current
 > ownership.
 
 У проекта сильная baseline-основа:
@@ -1014,6 +1015,9 @@ latency/frame measurement, so every later U packet is measured, not vibed.
 7. Row utilities: sort (4 keys × 2 directions + "⚠ on top" checkbox, view state), Show in Explorer, Copy name, double-click canvas region ↔ zoom-to. [gui]
 8. Row thumbnails + hover 1:1 preview; async thumbnail cache (LRU, budget-bounded, fixture-proof). [gui]
 9. Async refresh: hash-diff scan off-thread с progress+cancel; adaptive cache (no 32-dir cap); non-blocking at fixture scale. [gui][core]
+10. Alias/duplicate indicator on aliased sprite rows, driven by the model `alias_of` (the GUI never surfaced it) — closes the ux-audit competitor gap (TexturePacker/libGDX). [gui]
+11. Filter sprite rows by attribute (rotated / trimmed / size), and include those attributes among the task-7 sort keys — the name-only Ctrl+F filter does not cover attribute filtering. Closes the ux-audit competitor gap (TexturePacker). [gui]
+12. Copy region coords (page + frame x/y/w/h) alongside the task-7 Copy name — closes the ux-audit competitor gap (TexturePacker). [gui]
 
 **Public/schema impact.** App-state file schema (view state only); no project schema change.
 
@@ -1817,3 +1821,91 @@ round-trip где meaningful, malformed/companion/capability fixtures.
   `DUPLICATE_ID`-фриз в одно-клиентном GUI.
 
 Аудит покрытия (оба прохода, 2026-07-14) — **поверхность чистая**: покрыто 100% (все меню/контекст-меню/шорткаты/поля/экспорт-модалка; OS drag-drop отсутствует); каждая существующая мутация идёт через конвейер `op→txn→diff→history→journal`, КРОМЕ 3 дыр выше (P1-2 rename, P2-13 Add Files, G3 путь-по-клавише); каталог из 20 операций прошит равномерно, ни одна не пропускает слой (validate/lower/apply/diff-прямой+обратный/encode-decode/тесты; есть oracle-тест полноты diff). «Недостающие операции» из нижнего прохода — reorder/MOVE для атласов/источников/анимаций/таргетов (MOVE есть только у кадров) и смена `kind` источника folder↔file — это фичи, которых в GUI НЕТ вовсе (порядок коллекций меняется только add-в-конец/remove, обе операции), → scope только при добавлении drag-reorder/смены типа, НЕ баги. `source.replace` + `animation.frames.set` — зарезервированы намеренно (нет CLI-verb/билдера).
+
+**Residual follow-ups (from gui-code-review-2026-07-11).** The 2026-07-11 GUI code
+review (`docs/design/gui-code-review-2026-07-11.md`, deleted 2026-07-20; git
+history) found 0 P0 / 1 P1 / 7 P2, all since fixed in the decomposition P-7/P-8
+packets. Two self-test coverage gaps were recorded as still open and carry over
+here so they are not lost with the doc:
+
+- **Non-selected-atlas pack landing.** Start a pack on atlas 0, switch to atlas 1
+  before it lands — the slot-swap-vs-`s_shown_result` bind is untested for that
+  ordering. Add a selftest phase that packs one atlas while another is selected.
+- **`thrd_create` failure path.** The worker-spawn failure branch (frees
+  dv + name_owned + snap0 + arena, does **not** set the job active, so no orphan
+  thread/join) has no boundary test; add a seam that forces `thrd_create` to fail.
+
+**Manual TSan procedure for the `gui_pack` worker** (recorded in the deleted
+`gui-decomposition.md` §9; essential steps preserved). `nt_set_sanitizer_flags`
+hard-wires ASan+UBSan on Debug (non-Windows) and disables sanitizers on
+Windows+Clang; ASan and TSan are mutually exclusive, so TSan on the async worker
+is a **manual, Linux-only** step that avoids the built-in ASan via a non-Debug
+config plus explicit `-fsanitize=thread` on compile and link:
+
+```
+cmake -S . -B build-tsan -G Ninja \
+  -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_COMPILER=clang \
+  -DNTPACKER_GUI_SELFTEST=ON \
+  -DCMAKE_C_FLAGS="-fsanitize=thread -fno-omit-frame-pointer -g" \
+  -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
+cmake --build build-tsan --target ntpacker-gui
+./build/apps/gui/*/ntpacker-gui   # from repo root; needs a GL context/display; auto-quits
+```
+
+The self-test drives the worker↔main handoff repeatedly — phases 9 (async ==
+blocking), 12 (async export), 13 (cancel), 14 (mutate-then-land), 15
+(shutdown-while-busy). **Pass = clean exit with no `WARNING: ThreadSanitizer: data
+race`.** Watch `s_job.state` (the release/acquire handoff), the `_Atomic` fields
+(`cancelled`/`exp_cur`/`exp_total`), and `s_slots[]`/`s_preview` (must be touched
+on the main thread only).
+
+## 19. Standing structural invariants (from the 2026-07 simplification workstream)
+
+These are the durable guardrails distilled from the completed simplification and
+legacy-decomposition workstream (`docs/plans/simplification-refactor-plan.md`,
+deleted 2026-07-20; git history has the full plan, per-phase packets, and the LOC
+inventory). They are **not** a backlog: the physical splits landed. They are the
+contracts that must survive any *future* TU split, ownership move, or new module —
+carry them forward when decomposing a hotspot.
+
+### 19.1 Contract-oracle matrix — the oracle a split must not weaken
+
+A physical move or seam change is only allowed once the listed independent oracle
+exists and stays green. No shared policy order/prose/status may back these oracles
+(they must fail on coordinated drift):
+
+| Contract | Required independent oracle |
+|---|---|
+| Operation reject order | Multi-invalid exact result **with and without** history; full non-publication state, retained-ID retry, intra-batch dependencies. |
+| Validation findings | Platform-neutral exact ordered corpus + platform path cases + schema-2 CLI goldens. |
+| Pack constraints | One fact table driven through canonical representability, operation projection, validation accumulation and the Pack barrier **without sharing** policy order/prose. |
+| Canonical v5 writer/parser | Immutable fixed bytes from deterministic IDs + independent positive/negative admission fixtures; writer and parser tested against goldens, not only each other. |
+| History codec v1 | Literal big-endian encode bytes + independent decode fixtures for every diff shape/direction, built without production codec helpers. |
+| Journal wire | Literal big-endian header + META/CHECKPOINT/TXN/HISTORY fixtures, sync/CRC coverage, independent mixed-prefix cases (no `tp_jrn_put_*`/CRC helper in fixtures). |
+| Save/publication | Typed replace/sync fault context + transient diagnostics on top of the existing fault/state suite. |
+| CLI JSON | Exact version/pack/mutation/error/notice goldens; mask only documented timings. |
+| Filesystem paths | Exact Win32 drive/UNC last-valid/first-invalid boundaries + platform conformance table. |
+| Undo/Redo session semantics | Every family: `A → B → Undo → byte-A → Redo → byte-B`, revisions/dirty/branch discard, journal-failure non-publication. |
+| Client parity | Complete shipped mutation-surface manifest through the **real** CLI and GUI lowering adapters with deterministic/shared IDs. |
+| GUI action state | Exact action trace for deferral/coalescing/confirm/recovery/selection/Undo/Save + message/side-effect order. |
+
+### 19.2 Dependency-direction table — which module may depend on which
+
+Directed, drift-guarded ownership. A move commit may change linkage and source
+lists but must not reverse any arrow below; the paired contract is what catches a
+reversal. `scripts/check_boundaries.sh` enforces the frontend↔core edges.
+
+| Area | Allowed direction | Contract that prevents drift |
+|---|---|---|
+| Filesystem | neutral checked I/O → one selected OS backend; consumers → private FS facade | Win32 path, scan, Save I/O, session Save matrices |
+| Project | public entrypoints → model/path/writer/save/parser/pack bridge; **writer and parser do not call each other** | canonical-v5 bytes, load-resource bounds, Save publication matrix |
+| Validation | ordered public orchestrator → rule domains → report owner; an index stays beside its sole rule owner | exact complete ordered finding corpus |
+| Operations | one dispatcher → family validators → shared immutable lookup/constraint facts | operation/transaction rejection + client parity corpora |
+| Snapshot | session → materializer; public queries → one owned immutable DTO (no borrowed live-model alias) | snapshot allocation/lifetime + GUI trace tests |
+| Recovery/history | session adapter → state machine → selected backend/wire primitive; **no backend owns session state** | fixed wire bytes, pin/no-follow, ranking, semantic replay |
+| GUI | views/actions → GUI adapters → public session/job contracts; state passed as one owner or narrow substate | action-state trace, canonical identity, real CLI↔GUI parity |
+
+**Standing rule.** A proposed split returns to `keep` if creating its private seam
+needs broader authority than this table permits, or if its focused oracle cannot
+distinguish a bad move from a good one. That is a safety stop, not a LOC exception —
+size alone never forces or rejects a split (§4, AGENTS.md Simplification Policy).

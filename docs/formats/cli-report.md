@@ -6,7 +6,7 @@ MCP, Import/Export IR, and format-manifest schemas remain open contracts in
 must not be renamed before the matching code, schema version, and golden tests
 migrate together.
 
-Conventions (master spec §4 and the historical ai-first ruling): every payload is a single JSON
+Conventions (master spec §4 and §14.2, the AI-first CLI ruling): every payload is a single JSON
 object on **stdout** (stderr carries diagnostics only), field names are
 **snake_case**, and every payload carries a per-verb `"schema": N` (independent
 of the project-file and export-format schema versions — those are reported by

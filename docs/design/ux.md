@@ -252,3 +252,143 @@ Every UX packet must include:
 Historical audits and visual proposals under `docs/design/` remain evidence,
 not active requirements, unless revalidated against this document, the master
 spec, and current code.
+
+## Visual token reference (from ui-redesign-2026-07-11)
+
+Salvaged from `docs/design/ui-redesign-2026-07-11.md` (deleted 2026-07-20; git
+history has the full redesign rationale + competitor comparison). **These tokens
+are what the shipped GUI currently encodes** — the concrete color/spacing/type/
+icon vocabulary the native `ntpacker-gui` (`nt_ui`/Clay) was built against. Phase
+U (§61) may revise them; until it does, they are the reference. Constants live in
+`apps/gui/main.c` (palette/layout) unless noted.
+
+### Palette tokens (exact RGB)
+
+Clay colors are `{r,g,b,255}`; button `bg_tint` uses `RGBA8(r,g,b)` — author every
+tint through it, never a hand-packed `0xFF..` literal (the hand-packed accent was
+the root of the amber/blue-swap bug).
+
+| Token | Role | RGB |
+|---|---|---|
+| `bg` | window base | 17, 18, 23 |
+| `canvas` | canvas well (darkest surface) | 11, 12, 15 |
+| `panel` | side panels (mid surface) | 28, 31, 40 |
+| `header` | section-header fill (**lighter than panel** so headers advance) | 40, 45, 57 |
+| `input` | field well (recessed, darker than panel) | 21, 23, 30 |
+| `hover` | row/btn hover | 46, 52, 66 |
+| `sel` | selected-row fill (desaturated blue — reads as selection, not a button) | 48, 74, 120 |
+| `border` | 1px separators | 52, 58, 72 |
+| `border-strong` | focus ring / active input | 86, 132, 204 |
+| `accent` | **primary action** (one bright saturated blue; clearly ≠ `sel`) | 64, 140, 214 |
+| `accent-press` | primary pressed | 48, 112, 182 |
+| `warn` | **stale / warning** (amber — distinct hue from every blue) | 228, 158, 92 |
+| `success` | up-to-date / exported (green, notices) | 104, 186, 124 |
+| `danger` | remove / error (red, destructive) | 214, 96, 96 |
+| `text-strong` | values, active row | 230, 234, 242 |
+| `text` | rows, body | 196, 204, 216 |
+| `text-dim` | labels, captions | 140, 148, 164 |
+| `text-faint` | hints, stale stats, disabled | 98, 104, 120 |
+| `link` | hyperlink | 110, 170, 245 |
+
+Retire the separate dim title color; section titles get weight from **uppercase +
+tracking + a 3px `accent` left-rule**, panel/atlas titles use `text-strong`.
+
+### Spacing scale (via `S()`)
+
+4px base. `SP_XS S(4)`, `SP_SM S(6)`, `SP_MD S(8)`, `SP_LG S(12)`, `SP_XL S(16)`.
+Rules: icon↔label gap `SP_SM`; row inner padding `SP_MD` horizontal; section gap
+`SP_LG`; panel padding `SP_MD`. `BASE_ROW_H 27`, strip/header `34/26` heights stay.
+
+### Type scale / tiers (single Slug vector font — weight comes from size + color + case)
+
+| Style | px (base) | Color tier | Use |
+|---|---|---|---|
+| `title` | 16 | text-strong | panel/atlas title |
+| `section` | 13 | text-dim, **UPPERCASE, +8% tracking** | ATLASES / SPRITES / Region / Export targets |
+| `body` | 15 | text | button labels, values, editable fields |
+| `row` | 15 | text | list rows |
+| `caption` | 13 | text-dim | secondary/meta |
+| `hint` | 20 | text-faint | empty-state canvas hint |
+| `tag` | 13 | on-accent/on-warn | chips, badges |
+
+Section headers are the hierarchy backbone: quiet (dim, small, uppercase) but
+structured by the accent rule. Do **not** make them big/bright.
+
+### Status severity color language (§2.8)
+
+The bottom status bar carries the shared severity language (the future problems
+panel — §61/UX-B.6 — inherits it): a leading severity icon + tint — info
+`text-dim`+`info`, success `success`+`check-circle`, warning `warn`+`alert-triangle`,
+error `danger`+`octagon-alert`. Errors must not be overwritten/decolored by the
+next info write. Stale stats keep `text-faint` (they describe the last pack).
+Stale-state is the one place amber is mandatory: amber Pack button + amber
+"outdated — press Pack" chip + `alert-triangle` icon + dim the canvas ~12% with a
+corner "outdated" tag.
+
+### Icon system — Lucide inventory + bake pipeline
+
+**Vehicle:** `nt_ui_image` — an atlas-region image with `color_packed` **tint**,
+composed as a child inside `nt_ui_button_begin/_end` or standalone in a row. Icons
+are baked **monochrome white-on-alpha once** and tinted at render to any text
+tier/accent/warn — one sprite serves every state. No new engine widget.
+
+**Bake pipeline.** Add icons to `ntpacker_ui_atlas` in `apps/gui/build_packs.c`
+(alongside `_white`) — that atlas is `shape=RECT`, `allow_transform=false` (icons
+must never rotate/flip-pack), `LINEAR` min/mag, premultiplied. Codegen emits
+`ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS__PACK` etc.; resolve at runtime like the
+white region (`nt_atlas_find_region` → `nt_atlas_ref_idx` → an
+`nt_atlas_region_ref_t` per icon). Because `build_packs` runs with WORKING_DIRECTORY
+= engine root, pass the ntpacker icons dir as a **new `argv[3]`** from the
+`add_custom_command` (`= ${CMAKE_CURRENT_SOURCE_DIR}/assets/icons`) and join
+absolute in `build_packs.c`.
+
+**Grid & scale survival.** Author on a **24px grid, 2px stroke**; export each
+master PNG at **48px (2×)**; render into logical boxes `S(16)` (strip/menubar/
+row-action), `S(14)` (row type icons), `S(12)` (chevrons). One 48px master
+downsamples crisply via LINEAR at scale 1.0/1.5 and is ~native at 2.0. Hero
+empty-state icon: separate 96px master rendered `S(48)`. **Avoid 1px hairlines**
+(they vanish on downscale) — 2px stroke minimum. Style: stroke/outline, 2px,
+rounded joins, monochrome (Lucide house style); filled variants only for status
+dots. **Source:** vendored Lucide (MIT/ISC), pre-rasterized to PNG, with
+`apps/gui/assets/icons/{*.svg,*.png}`, a `regen_icons.py`, and an `ATTRIBUTION.md`
+checked in (commit the PNGs so the build needs no Python).
+
+Inventory (Lucide glyph → placement → tint):
+
+| Area | Icon | Placement | Tint |
+|---|---|---|---|
+| Strip | `layout-grid` | Pack button | text-strong / on-warn when stale |
+| Strip | `alert-triangle` | prepended on Pack + chip when stale | warn |
+| Strip | `download` | Export | text |
+| Strip | `refresh-cw` | Refresh | text-dim |
+| Strip | `chevron-left`/`chevron-right` | page ◄/► | text-dim |
+| Strip | `minus`/`plus`/`scan`/`maximize-2` | zoom −/+, 100%, Fit | text-dim |
+| Left | `layers` | atlas rows | text / text-strong sel |
+| Left | `folder`/`folder-open` | folder source + expand state | warn-ish (smart) |
+| Left | `image` | sprite/file leaf rows | text-dim |
+| Left | `film` | animation rows | text-dim |
+| Left | `file-plus`/`folder-plus`/`plus` | +Files / +Folder / +Atlas·Animation·Target | text |
+| Left | `x` | remove × on source rows | text-dim → danger hover |
+| Right | `chevron-down`/`chevron-right` | section chevron | text-dim |
+| Right | `check` | checkbox tick | accent |
+| Right | `link`/`external-link` | out-path browse; About repo | link |
+| Canvas | `square-dashed`/`crop`/`crosshair` | overlay toggles outline/trim/pivot | text-dim / accent when on |
+| Status | `info`/`check-circle`/`alert-triangle`/`octagon-alert` | status-bar + notices severity | dim/success/warn/danger |
+| Empty | `folder-plus` (96px) | empty-state hero | text-faint |
+
+Icon-only buttons **require** a tooltip (`nt_ui_tooltip`). Menubar top-level
+(File/Edit/View/Help) stays text; icons go on menu *items* only, optional.
+
+### Responsive breakpoints (logical px, post-scale)
+
+Deterministic, three breakpoints, no reflow/wrapping (the strip must never wrap):
+
+| Logical width | Strip | Panels | Labels |
+|---|---|---|---|
+| **≥ 1180** (wide) | Pack/Export = icon+label; others icon-only | left 300 / right 300 fixed | full label column (`PANEL_LABEL_W` 116) |
+| **900–1180** (mid) | Pack/Export icon+label; hide zoom-% label; chip → icon+2 words | right label column clamps to ~92 | ellipsize values |
+| **< 900** (narrow) | all strip buttons icon-only (tooltip carries the label) | side panels shrink to min (left/right 240) before canvas gives up | label column ~80, ellipsize |
+
+Rules: icon-only buttons always keep a tooltip; never wrap the strip to two lines
+(drop labels instead); the menubar project title ellipsizes rather than pushing
+menus.
