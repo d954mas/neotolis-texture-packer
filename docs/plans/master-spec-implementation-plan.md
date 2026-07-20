@@ -1,7 +1,9 @@
 # План реализации master spec
 
-Статус: derived execution backlog; current ownership facts are in the
-2026-07-16 checkpoint below, accepted decisions, and executable tests
+Статус: THE live task backlog и lock target для реализации master spec. Current
+ownership facts are in the 2026-07-20 consolidation checkpoint below, accepted
+decisions, and executable tests; готовность фиксируется per-packet completion
+evidence и git history, а не этим заголовком.
 
 Нормативный источник: `docs/ntpacker-master-spec.md`
 
@@ -74,6 +76,43 @@ UTF-8 publication and crash/cancel/malformed/full-disk tests. It is a
 prerequisite of F3's production Pack session gate. Do not mark the core
 crash-proof or substitute additional assertion prechecks for failure isolation.
 
+## 2026-07-20 consolidation checkpoint
+
+PR #3 is merged to `main` (`590ef83`): the foundation, best-effort recovery
+journal, simplification, and audit-fix workstreams (H, R, D, and the F2 boundary
+hardening recorded above) are landed. The recovery policy those packets converged
+on is now **decision 0019** (best-effort recovery journal): live commit never
+depends on journal I/O, append/sync failure is sticky `recovery_degraded`, and a
+healthy durable watermark is no older than 5 seconds.
+
+**Canvas UI is a first-class phase.** Per **decision 0020** and master spec
+§54.6/§61, the canvas/workspace refactor is promoted from trailing polish to a
+dedicated phase **U**, built once on top of the finished Base and before either
+epic. Evolving the canvas within the current GUI stack is in scope; a from-scratch
+GUI replacement stays a non-goal (§56 clarifier).
+
+**Execution spine (authoritative):**
+
+```text
+Base (H0.3–H0.5 + F2 phase-gate audit + F3)
+  -> U (canvas UI/UX refactor, §61)
+  -> Epic B (B0 -> B1 -> B2 -> B3)
+  -> Epic A (live automation/AI)
+  -> Breadth (X)
+```
+
+- **F3 prerequisites relaxed** from `{F2, B1, H0}` to `{F2, H0}`. The "Extract
+  Sprites composes with History" concern that motivated the old B1 dependency
+  moves to **B1's own gate** (B1-02); F3 no longer waits on B1.
+- **B0 (pure-core import, no GUI surface) may run in parallel with phase U**,
+  since it touches no canvas surface.
+- Base still owes H0.3–H0.5 (decision 0018 fallible builder containment; H0.1/H0.2
+  are done) and a phase-gate audit of the landed F2 foundation before F3 is
+  declared complete.
+
+Where §3's older dependency prose below contradicts this checkpoint (F3-after-B1,
+no U phase), this checkpoint governs and that prose is historical.
+
 ## 1. Назначение и правила исполнения
 
 Этот документ переводит master spec в проверяемые вертикальные пакеты работ. Он не переопределяет продуктовые решения master spec. При конфликте текст master spec имеет приоритет.
@@ -117,33 +156,32 @@ crash-proof or substitute additional assertion prechecks for failure isolation.
 
 ## 3. Зависимости и рекомендуемый порядок
 
+Authoritative spine — 2026-07-20 consolidation checkpoint выше. Диаграмма ниже
+приведена к нему: F1/M0–M5 сделаны, F3 больше не ждёт B1, добавлена phase U,
+B2 всё ещё после принятого gate F3.
+
 ```text
-F1 identities + tagged path sources
+F1 identities + tagged sources                 [DONE]
   |
   v
-F2 operations + transactions + minimum journal
-  |                    |
-  |                    +------------------+
-  v                                       v
-B0 native import IR                  F3 live session/history/pack
+Base:  F2 operations + transactions + journal
+       H0 fallible builder containment
+       F3 live session/history/pack            [F3 prereq now {F2, H0}]
   |
   v
-B1 linked atlas + Extract
+U   canvas UI/UX refactor (§61)                [B0 может идти параллельно U]
   |
   v
-B2 format packages
+B0 -> B1 -> B2 -> B3   (Epic B; Extract<->History gate живёт в B1; B2 после gate F3)
   |
   v
-B3 Lua + reference formats
+A   live Dev API/MCP
   |
   v
-A live Dev API/MCP
-  |
-  v
-X breadth
+X   breadth
 ```
 
-F2 minimum обязателен до Extract Sprites: filesystem staging не заменяет атомарную model transaction. B0 можно разрабатывать параллельно с поздними частями F2, но нельзя публиковать B1 mutation path в обход operations.
+F2 minimum обязателен до Extract Sprites: filesystem staging не заменяет атомарную model transaction. B0 (pure core, без GUI) можно разрабатывать параллельно с phase U и поздними частями F2, но нельзя публиковать B1 mutation path в обход operations.
 
 Порядок стадий отслеживает `docs/ROADMAP.md`; при расхождении в допустимом
 параллелизме действует более строгий порядок ROADMAP. В частности, стадия B2
@@ -365,7 +403,8 @@ remain Epic A.
 1. Добавить `tp_id128` parse/format/equality/hash и injected generator.
 2. Добавить persistent ID fields atlas/source/animation/target.
 3. Отделить animation ID от display/logical name; мигрировать frame references позднее в F1-03.
-4. Поднять schema version и реализовать утверждённый в decision 0007 legacy-ID promotion:
+4. Поднять schema version и реализовать legacy-ID promotion (правило раньше жило
+   в decision 0007, снятом и заменённом decision 0016 — файла 0007 больше нет):
    read-only load может использовать deterministic synthetic IDs, но writable
    session получает final IDs до первой mutation и сохраняет их без повторной смены.
 5. Promotion всех structural IDs и references выполнять атомарно; save failure
@@ -916,6 +955,352 @@ planned product work.
 **Completion evidence.** Deterministic state-machine tests; UI показывает current/stale корректно; no auto-pack assertions.
 
 **Non-goals / blockers.** Cache memory-only; timestamps/raw bytes/mtime не являются semantic hash.
+
+---
+
+## U — Canvas UI/UX refactor
+
+Phase U rebuilds the canvas/workspace surfaces of the existing GUI onto the
+finished Base — the canvas built **once** before either epic (2026-07-20
+checkpoint, decision 0020, §54.6). Evolving surfaces inside the current GUI stack
+is in scope; a from-scratch GUI replacement is a non-goal (§56 clarifier). Task
+breakdown source: `docs/plans/ux-epics-2026-07-13.md` (UX-G0, UX-A..F); the
+normative canvas/workspace contracts are master spec §61; the visual reference for
+UX-B/UX-C surfaces is `docs/design/mockups/ntpacker-fakeshots.html`. Tags follow
+ux-epics: **[gui]** apps/gui only, **[core]** packer/ core work, **[engine]** needs
+an engine issue+PR, **[F2]** needs the typed-operation layer, **[Δ]** an approved
+delta contract (A1–A11, now folded into §6/§7/§9/§31/§37.2/§61). Owner scale for
+every acceptance budget: 30+ atlases / 5000+ sprites.
+
+### U-01 — Bench fixture и perf harness (UX-G0)
+
+**Goal / user outcome.** Deterministic owner-scale project plus repeatable
+latency/frame measurement, so every later U packet is measured, not vibed.
+
+**Spec refs.** §61.1 (scale calibration), §53.5.
+
+**Dependencies.** None — **do first**; everything else is measured against it. [core][gui]
+
+**Ordered bounded tasks.**
+
+1. Deterministic fixture generator `scripts/gen_bench_project`: 30 atlases / 5000+ sprites with realistic size/folder distribution. [core]
+2. Perf probes: frame-time и action-latency logging за dev flag; `--shot`-style headless run reports timings as numbers. [gui]
+3. Wire budgets as CI regression checks on the fixture: interaction <100 ms, Pack UI never blocked, refresh non-blocking; exceeding a budget fails the check. [gui][core]
+
+**Public/schema impact.** Dev-only script и runtime dev flag; no project schema, no shipped user surface.
+
+**Exact tests / fault injection.** Byte-stable fixture across two runs and OSes; probe output deterministic under fixed seed; a seeded over-budget action fails the regression check.
+
+**Completion evidence.** Fixture regenerates identically on Linux/Windows/macOS CI; budget numbers appear in CI output and gate regressions.
+
+**Non-goals / blockers.** Not a pack-throughput benchmark; probes are dev-only, never a user surface.
+
+### U-02 — Paper cuts (UX-A)
+
+**Goal / user outcome.** Daily friction removed with no schema change and no conflict with Base work.
+
+**Spec refs.** §61.1 (tree, filter, sorting, thumbnails), §61.3 (app-state boundary).
+
+**Dependencies.** U-01. [gui] (+ one [core] refresh path)
+
+**Ordered bounded tasks.**
+
+1. Project-wide tree filter (Ctrl+F), matches shown under their atlases, <100 ms on fixture. [gui]
+2. Folder collapse/expand + scrollable full left panel. [gui]
+3. Keyboard nav (Up/Down/Home/End/Enter/F2-rename), focus ring, list focus model. [gui]
+4. Session persistence — window geometry, UI scale, zoom/camera, recent projects, Open Recent, reopen-last — in the app-state file, **never** in the project (§61.3). [gui]
+5. Undo hygiene: Undo/Redo preserves selection и per-atlas previews of untouched atlases. [gui]
+6. Menu completion: Pack in the Atlas menu; shortcut tooltips everywhere. [gui]
+7. Row utilities: sort (4 keys × 2 directions + "⚠ on top" checkbox, view state), Show in Explorer, Copy name, double-click canvas region ↔ zoom-to. [gui]
+8. Row thumbnails + hover 1:1 preview; async thumbnail cache (LRU, budget-bounded, fixture-proof). [gui]
+9. Async refresh: hash-diff scan off-thread с progress+cancel; adaptive cache (no 32-dir cap); non-blocking at fixture scale. [gui][core]
+
+**Public/schema impact.** App-state file schema (view state only); no project schema change.
+
+**Exact tests / fault injection.** Filter latency on fixture; app-state round-trip и corruption tolerance; Undo preserves selection/preview assertions; refresh cancellation mid-scan; sort determinism.
+
+**Completion evidence.** GUI selftest state fixtures cover each utility; all interactions within budget on the U-01 fixture.
+
+**Non-goals / blockers.** No structural tree change (that is U-03); no operation-schema change.
+
+### U-03 — Unified project tree (UX-B.1/B.2)
+
+**Goal / user outcome.** One project tree (root → atlases → folders/sprites/Animations), virtualized, with list⇄grid sprite modes.
+
+**Spec refs.** §61.1 (unified tree, thumbnails default).
+
+**Dependencies.** U-02. [gui]
+
+**Ordered bounded tasks.**
+
+1. Single project tree с clickable project root node; selecting root shows project settings/export rules in the inspector.
+2. Structure root → atlases → folders/sprites → per-atlas Animations node, replacing the separate ATLASES/SPRITES/ANIMATIONS sections.
+3. Virtualize the tree so 30/5000 stays responsive.
+4. List⇄grid display modes for sprites (header toggle, view state).
+5. Cross-atlas drag in the tree; pages are packer output и never drag targets.
+
+**Public/schema impact.** Display-mode view state in app-state; no project schema change.
+
+**Exact tests / fault injection.** Virtualized scroll <100 ms on fixture; root-node inspector routing; Ctrl+F still matches across the unified tree; drag onto a page rejected.
+
+**Completion evidence.** Unified tree passes selftest structure fixtures at fixture scale; list/grid toggle persists as view state.
+
+**Non-goals / blockers.** Two-level canvas is U-04; participation editor is U-13.
+
+### U-04 — Two-level canvas (UX-B.3, Δ A9)
+
+**Goal / user outcome.** Project level (group-cards, health badges, overview thumbnails) ⇄ Atlas level (all pages spatial, no page tabs), with breadcrumbs.
+
+**Spec refs.** §61.1 (two-level canvas), §10.4/§52.3 (result-store mip thumbnails).
+
+**Dependencies.** U-03, F3-03 (pack-result store thumbnails). [gui][core] [Δ A9 → §61.1/§10.4]
+
+**Ordered bounded tasks.**
+
+1. Project level: atlas group-cards with name, health badges (fill%/outdated/not-packed/warning), visibility eye, last-pack page thumbnails inside the card; large atlas shows first N + "+N pages" tile. [gui]
+2. Atlas level: all pages laid out spatially at once; page tabs removed; double-click page = camera zoom to texels (a camera move, not a mode change); sprites selectable with tree/inspector sync. [gui]
+3. Serve overview/card thumbnails from the pack-result store mips without full-resolution residency (§10.4). [core]
+4. Breadcrumbs `Project > <atlas>`; double-click group-card descends, breadcrumb ascends. [gui]
+
+**Public/schema impact.** Consumes the result-store thumbnail API; no project schema change.
+
+**Exact tests / fault injection.** Level transitions preserve selection; missing/stale result-store mip degrades gracefully; camera-zoom determinism; no full-res atlas residency (accounting seam).
+
+**Completion evidence.** Both levels render the fixture within budget; page tabs absent; card thumbnails come only from the result store.
+
+**Non-goals / blockers.** No single continuous canvas и no third "page" level (§61.4); board layout is U-05.
+
+### U-05 — Board positions и Tidy up (UX-B.11, Δ A10, F2)
+
+**Goal / user outcome.** Freeform board layout on the Project canvas with no auto-reflow; moving a board is an undoable operation.
+
+**Spec refs.** §61.2 (board positions), §61.3 (workspace is model state).
+
+**Dependencies.** U-04, F2. [gui][core][F2] [Δ A10 → §61.2]
+
+**Ordered bounded tasks.**
+
+1. Add a `workspace` section to the project file: per-atlas board position, auto-assigned to free space on atlas create. [core]
+2. Freeform placement, no auto-reflow: growth after Pack wraps pages inside the board (huge atlas shows "+N pages") and never pushes neighbors; shrink leaves the space; overlap is legal, non-semantic (z-order, last-touched on top). [gui][core]
+3. "Move atlas" (`atlas.board.move`) named undoable operation. [F2]
+4. Hidden atlas leaves its spot empty + "N hidden" chip restores it (no compaction). [gui]
+5. "Tidy up" (`workspace.tidy`) — the only tool-initiated movement, user-invoked, undoable. [F2]
+
+**Public/schema impact.** New project `workspace.board` schema; `atlas.board.move` + `workspace.tidy` operations (§6 op registry).
+
+**Exact tests / fault injection.** Auto-place picks free space deterministically; move/tidy Undo restores exact positions; hide leaves the gap; overlap changes no data; page-wrap never moves neighbors.
+
+**Completion evidence.** Board layout survives save/reload as model state; each move и tidy is one Undo entry.
+
+**Non-goals / blockers.** Notes are U-12; no auto-arrange beyond explicit Tidy up.
+
+### U-06 — Atlas visibility eye (UX-B.4, Δ A4, F2)
+
+**Goal / user outcome.** Per-atlas display-only visibility as a named undoable operation; hidden atlases still pack и export.
+
+**Spec refs.** §6 (`atlas.visible.set` op registry), §61.1/§61.2 (eye, hidden chip), §61.3 (model state).
+
+**Dependencies.** U-04, F2. [gui][core][F2] [Δ A4 → §6/§61]
+
+**Ordered bounded tasks.**
+
+1. Add `atlas.visible.set` typed, undoable model operation recorded in history. [core][F2]
+2. Visibility is display-only: a hidden atlas is excluded from canvas flow but still packs and exports. [core]
+3. Wire the eye control on group-cards и tree rows; hidden leaves the board gap и feeds the "N hidden" chip (U-05). [gui]
+
+**Public/schema impact.** Atlas `visible` model field (per §61.3, part of the project workspace/atlas state); `atlas.visible.set` op.
+
+**Exact tests / fault injection.** Toggle is undoable one entry; hidden atlas still present in pack/export output; visibility survives save/reload; the visible flag never affects pack bytes.
+
+**Completion evidence.** The eye toggles as a history entry; export includes hidden atlases; state persists across reload.
+
+**Non-goals / blockers.** Not a pack/export filter; no per-page visibility.
+
+### U-07 — Non-default markers и revert (UX-B.5, Δ A2, F2)
+
+**Goal / user outcome.** Every inspector field shows whether it diverges from the inherited default и can be reverted; a "modified only" filter.
+
+**Spec refs.** §6 (settings inheritance and provenance, `clear_override`), §61.1.
+
+**Dependencies.** U-03, F2. [gui][core][F2] [Δ A2 → §6]
+
+**Ordered bounded tasks.**
+
+1. Compute effective-value provenance for packing/atlas/sprite settings (inherited vs overridden, per field). [core]
+2. Show a non-default marker on every overridden inspector field. [gui]
+3. Revert = `*.clear` / `clear_override` typed operation restoring inheritance. [F2]
+4. "Modified only" inspector filter driven by provenance. [gui]
+
+**Public/schema impact.** `clear_override` semantics on settings ops (§6); provenance is derived, not stored.
+
+**Exact tests / fault injection.** Provenance correct across inherit/override chains; `clear_override` restores the exact inherited value и is undoable; "modified only" filter matches provenance; allocator fail before apply leaves the model unchanged.
+
+**Completion evidence.** Marker + revert + filter agree with provenance on the fixture; revert is one Undo entry.
+
+**Non-goals / blockers.** No new settings fields; provenance is not persisted.
+
+### U-08 — Problems panel и status-bar segments (UX-B.6/B.7)
+
+**Goal / user outcome.** A persistent severity list и clickable status segments, both feeding on structured notices.
+
+**Spec refs.** §61.1, §11.4 (runtime source errors), §4.4 (loss reporting), §37.1.
+
+**Dependencies.** U-03. [gui][core]
+
+**Ordered bounded tasks.**
+
+1. Persistent problems panel: severity list; click → sprite + canvas + field; failed pack ends in action buttons. [gui]
+2. Feed the panel from structured notices, not ad-hoc strings. [core seam]
+3. Clickable status-bar segments: pack state, pages + fill% (→ per-page breakdown popover), ⚠ count, zoom, contextual key hints. [gui]
+
+**Public/schema impact.** Consumes a structured-notice DTO; no project schema change.
+
+**Exact tests / fault injection.** Notice → panel entry → navigation-target mapping; ⚠ count matches the panel; segment click routes correctly; failed pack surfaces action buttons.
+
+**Completion evidence.** Panel и status segments reflect seeded notices deterministically; navigation lands on the exact sprite/field.
+
+**Non-goals / blockers.** No new diagnostic taxonomy beyond existing notices; severity-language audit is UX-F polish.
+
+### U-09 — OS drag&drop ingestion (UX-B.8)
+
+**Goal / user outcome.** Drop files/folders from the OS onto window/tree/canvas to add sources.
+
+**Spec refs.** §5.2 (sources), §61.1.
+
+**Dependencies.** U-03, F2 (source-add as a transaction). [gui][engine]
+
+**Ordered bounded tasks.**
+
+1. Accept OS-level file/folder drops onto window, tree, and canvas; ingest as source-add transactions (batched as one Undo, cf. U-11). [gui]
+2. Route the platform window drop callback through the app; **the engine window drop callback goes as a separate engine issue/PR** (engine tree is read-only). [engine issue+PR]
+3. Path normalization/escape checks on dropped paths (reuse source-key normalization). [core]
+
+**Public/schema impact.** None beyond existing source ops; the engine change is tracked as an upstream issue/PR, never a submodule edit.
+
+**Exact tests / fault injection.** Mixed files/folders drop; traversal/absolute/reserved-name paths; duplicate-path dedupe; drop while busy; engine-callback stub in the headless test.
+
+**Completion evidence.** Dropped sources appear via one transaction; the engine dependency is captured as a linked issue with no submodule modification.
+
+**Non-goals / blockers.** No drag-out/export via DnD; the engine drop callback is not implemented in this repo.
+
+### U-10 — Numeric field upgrade (UX-B.9)
+
+**Goal / user outcome.** One reusable numeric widget with math expressions и label scrubbing, used everywhere.
+
+**Spec refs.** §61.1.
+
+**Dependencies.** U-02. [gui]
+
+**Ordered bounded tasks.**
+
+1. Build one numeric-field widget: evaluate math expressions (e.g. `4*2`, `pad+1`), commit on Enter/blur.
+2. Label scrubbing (drag the label to adjust) with sensible step/range clamping.
+3. Replace ad-hoc numeric inputs across the inspector with the single widget.
+
+**Public/schema impact.** None.
+
+**Exact tests / fault injection.** Expression parse/eval incl. malformed/overflow → structured reject, no NaN commit; scrub clamps to range; commit only on Enter/blur (no per-keystroke transaction — cf. §18 G3).
+
+**Completion evidence.** One widget instance covers every numeric inspector field; expression + scrub unit tests green.
+
+**Non-goals / blockers.** No unit-aware fields; not a general formula engine.
+
+### U-11 — Multi-select mass ops as single transactions (UX-B.10, F2)
+
+**Goal / user outcome.** Multi-select mass operations each commit as exactly one transaction/Undo.
+
+**Spec refs.** §7 (transactions), §9.1 (atomicity), §61.1.
+
+**Dependencies.** U-03, F2. [gui][F2]
+
+**Ordered bounded tasks.**
+
+1. Batch settings edit across a multi-selection as one transaction.
+2. Bulk rename (find/replace) across the selection as one transaction.
+3. Create-animation-from-selection parity as one transaction.
+
+**Public/schema impact.** Reuses existing typed operations; no new schema.
+
+**Exact tests / fault injection.** N-item batch = one Undo entry; partial-failure atomicity (op K fails → 1..K-1 not applied); find/replace on 100 sprites one entry; allocator fault at each staging point.
+
+**Completion evidence.** Each mass op is a single named history entry; the atomicity suite is green.
+
+**Non-goals / blockers.** No cross-project batch; no macro recording.
+
+### U-12 — Canvas notes (UX-B.12, Δ A10, F2)
+
+**Goal / user outcome.** Text-sticker model objects with undo/history/tree/inspector presence и MCP readability.
+
+**Spec refs.** §61.2 (notes), §7 (author identity), §24 (MCP surface).
+
+**Dependencies.** U-05 (workspace section), F2. [gui][core][F2] [Δ A10 → §61.2]
+
+**Ordered bounded tasks.**
+
+1. Note as an ordinary model object: a typed op with a named history entry ("Add note … on enemies"), undoable — content + parent + per-object style `{size,bold,italic,text_color,bg_color,align}` from a fixed token palette. [core][F2]
+2. Spatial auto-parenting: dropped on a board → parented to that atlas (board-relative; moves/hides/deletes with it); dropped on empty canvas → parented to the project (absolute); `note.reparent` on drag between board and canvas. [core][gui]
+3. Surface notes in the tree ("Notes (N)" group per atlas + free "Notes" group under root), inspector (editable), Ctrl+F (searches note text), and MCP/Dev API (content + tokens agent-filterable). [gui][core]
+4. Canvas "show notes" overlay toggle (view state); no separate notes mode. [gui]
+
+**Public/schema impact.** `workspace` note objects + `note.add`/`note.reparent`/`note.*` ops (§6/§61.2); written only on explicit user action (no VCS churn).
+
+**Exact tests / fault injection.** Add/edit/delete/reparent each one Undo entry; deleting an atlas confirms "and N notes" и undo restores; note text found in filter и MCP snapshot; style tokens round-trip; notes live on the Project level only (no atlas-internal anchor).
+
+**Completion evidence.** Notes survive save/reload as model state; visible in tree/inspector/filter/MCP; the overlay toggle is view state.
+
+**Non-goals / blockers.** No arbitrary (non-token) color, no mixed-run rich text, no sprite-attached notes, no drawing layer (§61.2). **May be split into its own mini-epic if it grows.**
+
+### U-13 — Export rework (UX-C, Δ A1/A7/A8)
+
+**Goal / user outcome.** Project-level target rules + per-atlas participation + effective-target resolution + a preflight-only export modal + ZIP delivery.
+
+**Spec refs.** §31 (targets/participation), §37/§37.1/§37.2 (export behavior, delivery modes), §61.1 (Export UX).
+
+**Dependencies.** F2, F3-03, and the B2 descriptor work for the target schema. **NOTE:** its core parts (target model, migration) are real typed-operation core work — sequence the **core sub-tasks first** so GUI surfaces build on the landed schema. [core][F2][gui] [Δ A1/A7/A8 → §31/§37.2]
+
+**Ordered bounded tasks.**
+
+1. **[core, first]** Project-level target records + per-atlas participation record (`enabled_override?`, `path_override?`); effective-target resolution = project rules composed with participation; auto-lift migration that hoists identical per-atlas targets to project scope. [core][F2]
+2. **[core]** Path templates `{atlas}/{page}/{scale_suffix}` in target paths + validation. [core]
+3. **[core]** `--archive` ZIP delivery: canonical `{atlas}/{target}/` layout + versioned `manifest.json` (§37.2); CLI `ntpacker export --archive out.zip`. [core]
+4. **[gui]** Participation inspector: project root shows the rules editor, atlas shows a compact participation block (enable + path override) — one editing surface.
+5. **[gui]** Preflight-only Ctrl+E modal: scope = current selection (nothing selected at Project level = all), dry-run file list, amber overwrites, per-target degradation notices, "Copy CLI command", Enter=run; the modal **never** edits targets. Ctrl+E then Enter = repeat-last-export.
+
+**Public/schema impact.** Target schema moves to project scope + participation record; versioned export report/`manifest.json`; auto-lift migration for existing per-atlas targets.
+
+**Exact tests / fault injection.** Migration lifts identical targets and preserves divergences as overrides; effective-target resolution table; path-template validation incl. traversal/reserved; `--archive` deterministic manifest (no timestamps in byte compare); preflight scope/overwrite/degradation correctness; the modal makes zero target edits.
+
+**Completion evidence.** CLI `--json` и GUI resolve identical effective targets; preflight lists the exact files; ZIP + manifest deterministic; old projects migrate without output drift.
+
+**Non-goals / blockers.** Preflight is read-only — no target editing in the modal (§61.4); no new exporter formats here.
+
+### U-14 — Command palette + named Undo + History v1 (UX-D, F2, Δ A5/A6)
+
+**Goal / user outcome.** A command palette over the op registry, named-undo labels, и a History panel v1 carrying the transaction author.
+
+**Spec refs.** §6 (op registry + argument schema, command palette), §9/§9.2 (visible history, save checkpoints), §7 (author identity).
+
+**Dependencies.** F2, F3-02 (semantic history). [gui][F2] [Δ A5/A6 → §6/§7]
+
+**Ordered bounded tasks.**
+
+1. Command palette (Ctrl+Shift+P): fuzzy over the op registry + navigation ("go to sprite"), inline keybindings, frecency ranking, no-dead-end fallback to sprite search.
+2. Named undo everywhere: history labels from operation label templates; Edit menu shows e.g. "Undo: set padding 4 (3 sprites)". [F2]
+3. History panel v1: list of transactions, click → affected object; each entry carries the transaction author field (`human` / `agent(<id>)`), present и A6-ready. [F2]
+
+**Public/schema impact.** Consumes the op-registry argument schema + label templates + the history-DTO author field; no project schema change.
+
+**Exact tests / fault injection.** Palette lists all registry ops with keybindings; frecency ordering deterministic given history; label templates render correct counts; History entry author present; click routes to the affected object.
+
+**Completion evidence.** Every operation reachable via the palette; Edit menu + History show named labels; the author field is populated on every entry.
+
+**Non-goals / blockers.** Authorship badges as a live surface are UX-E (Epic A); no macro/scripting.
+
+### Non-goals (section U)
+
+- **UX-E agent-presence UI** (presence chip, live activity banner, authorship badges as live surfaces, agent-touched highlights) → **Epic A / MCP**. Author identity is *captured* in U-14; *surfacing it as presence* is Epic A.
+- **UX-F polish pass** (empty states, canvas backdrops, micro-transitions, severity-language audit, "Little Big Updates" release-notes cadence) → **continuous after Epic B**.
+- **No schema changes beyond delta A1–A11** (folded into §6/§7/§9/§31/§37.2/§61).
 
 ---
 
