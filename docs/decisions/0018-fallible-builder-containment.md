@@ -43,6 +43,21 @@ error returns for all user/resource/I/O failures, a memory or caller-owned sink
 for output, bounded ownership, cancellation, and strict UTF-8 path behavior where
 paths remain. That replacement is internal and does not change client contracts.
 
+## Kickoff decisions (owner, 2026-07-20)
+
+- **Worker binary:** no separately shipped executable. Each host re-execs itself
+  with a hidden `__build-worker` argv mode (own module path locates the child);
+  the mode never touches UI or ordinary CLI surfaces.
+- **Platform parity:** Windows and POSIX spawn/kill land in the same gate; the
+  Windows Job Object tree-kill is in-scope for this packet, not deferred.
+- **Timeout policy:** cancellation is the primary control; an internal ~5 minute
+  safety timeout maps to `builder_crashed`. No user-facing timeout setting in
+  this packet.
+- **CI scope:** the full worker fault suite (crash, cancel, malformed reply,
+  full-disk via seam, Unicode/long paths) runs on all three OSes in CI.
+- **v1 transport:** pipe protocol with one bounded raw-pixel copy per Pack;
+  shared memory is revisited only on a measured budget miss on the U-01 fixture.
+
 ## Executable evidence required to close the slice
 
 - a deliberately crashing worker returns `builder_crashed` while the host and
@@ -57,7 +72,16 @@ paths remain. That replacement is internal and does not change client contracts.
 
 There is one extra process launch and a bounded raw-pixel transfer on a Pack job.
 Pack is already explicit, heavy work, so correctness and host survival take
-priority; measurements decide whether shared memory is needed. Until the worker
-or a qualifying upstream API lands, the repository must report builder output
-failure containment as an open foundation blocker rather than claiming a
-crash-proof core.
+priority; measurements decide whether shared memory is needed.
+
+The private worker landed (2026-07-20): `tp_build` routes every Pack through the
+re-exec'd child (`packer/src/tp_build_worker.c`), so an engine
+user/resource/output-path/allocation/codec/write/assertion failure is contained
+as a structured `builder_crashed`/`builder_failed` result instead of terminating
+the host, and a failed pack never replaces the last successful preview. The
+repository therefore no longer reports builder output failure containment as an
+open foundation blocker. The engine builder itself is still not fallible —
+containment is the process boundary — so a qualifying upstream fallible
+memory/sink API may still replace the worker once its error, ownership,
+cancellation, and UTF-8 contracts are executable-test pinned, without changing
+client contracts.

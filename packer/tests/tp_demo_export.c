@@ -27,6 +27,7 @@
 #include "tp_core/tp_input.h"
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_scan.h" /* tp_mkdirs / tp_mkdirs_parent (tp_core owns FS helpers) */
+#include "tp_core/tp_build_worker.h"
 
 static int run_atlas(tp_project *proj, int idx, const char *work_dir) {
     const tp_project_atlas *a = &proj->atlases[idx];
@@ -71,6 +72,9 @@ static int run_atlas(tp_project *proj, int idx, const char *work_dir) {
 }
 
 int main(int argc, char **argv) {
+    if (tp_build_is_worker_invocation(argc, argv)) {
+        return tp_build_worker_main();
+    }
     if (argc < 2) {
         (void)fprintf(stderr, "usage: %s <project.ntpacker_project> [work_dir]\n", argv[0]);
         return 2;

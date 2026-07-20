@@ -150,9 +150,16 @@ packet, который публикует соответствующий API.
 
 ### H0 — Fallible builder containment
 
-**Статус:** `IN PROGRESS` — strict UTF-8 image ingress, canonical RGBA8 decode и
-known-assert preflight реализованы; containment output/allocation/unknown assert
-failures ещё требует private worker по decision 0018.
+**Статус:** `DONE` (2026-07-20) — strict UTF-8 image ingress, canonical RGBA8
+decode, known-assert preflight и private build worker реализованы. `tp_build`
+маршрутизирует каждый Pack через re-exec'd child process
+(`packer/src/tp_build_worker.c`) по versioned bounded protocol, поэтому builder
+abort/allocation/codec/write/output-path/assertion failure становится structured
+`builder_crashed`/`builder_failed` без завершения host и без замены last
+successful preview. Evidence: `tp_build_proto` (#43 codec fail-closed),
+`tp_build_driver_oracle` (#44 byte-identical), `tp_build_worker` (#45: process
+oracle, Unicode/long publish, crash, cancel, timeout, malformed, non-zero,
+sink-write/full-disk, missing-artifact, oversized/truncated).
 **Prerequisite:** текущий `BASELINE`.
 **Основание:** master spec §10.5–§10.6 и acceptance criterion 54.
 

@@ -23,6 +23,7 @@
 #include "tp_core/tp_identity.h"
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_project.h"
+#include "tp_core/tp_build_worker.h"
 #include "tp_project_mutation_internal.h"
 #include "unity.h"
 
@@ -778,6 +779,9 @@ static void test_custom_output_listing_failure_prevents_wet_write_and_matches_dr
 }
 
 int main(int argc, char **argv) {
+    if (tp_build_is_worker_invocation(argc, argv)) {
+        return tp_build_worker_main();
+    }
     const char *dir = (argc > 1) ? argv[1] : ".";
     if (!setup_all(dir)) {
         return 1;

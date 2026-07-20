@@ -168,6 +168,19 @@ tp_status tp_pack_settings_defaults(tp_pack_settings *out);
 tp_status tp_pack(const tp_pack_settings *settings, struct tp_arena *arena, struct tp_result **out_result,
                   tp_error *err);
 
+/* Cooperative cancellation for a long Pack. `poll(ctx)` returns true when the
+ * caller has requested cancellation; the build-worker wait loop checks it while
+ * the child runs and, on a true return, kills the worker, removes its staging,
+ * publishes nothing, and returns TP_STATUS_OK with *out_result == NULL and no
+ * builder error (a cancelled Pack is not a failure). A genuine success always
+ * sets *out_result, so "OK with a NULL result" uniquely means cancelled. A NULL
+ * poll disables cancellation; tp_pack() is exactly this with no poll. */
+typedef bool (*tp_pack_cancel_poll)(void *ctx);
+
+tp_status tp_pack_cancellable(const tp_pack_settings *settings, struct tp_arena *arena,
+                              struct tp_result **out_result, tp_pack_cancel_poll cancel_poll,
+                              void *cancel_ctx, tp_error *err);
+
 #ifdef __cplusplus
 }
 #endif

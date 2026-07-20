@@ -124,13 +124,21 @@ static tp_live_job *job_create(tp_session *session,
     return job;
 }
 
+/* Cooperative cancel bridge: tp_pack's worker wait loop polls this while the
+ * build child runs, so a GUI/live cancel kills the worker promptly instead of
+ * waiting out the whole pack. */
+static bool pack_job_cancel_requested(void *context) {
+    const tp_live_job *job = context;
+    return atomic_load_explicit(&job->cancelled, memory_order_relaxed);
+}
+
 static int pack_worker(void *context) {
     tp_live_job *job = context;
     tp_error error = {{0}};
     tp_result *result = NULL;
     const double start = job_now_ms();
-    const tp_status status = tp_pack(&job->settings, job->arena, &result,
-                                     &error);
+    const tp_status status = tp_pack_cancellable(&job->settings, job->arena, &result,
+                                                 pack_job_cancel_requested, job, &error);
     job->elapsed_ms = job_now_ms() - start;
     job->status = status;
     job->error = error;

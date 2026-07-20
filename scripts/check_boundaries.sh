@@ -447,7 +447,7 @@ tp_diff_internal        tp_diff_entity|tp_diff_apply|tp_diff_capture|tp_history|
 tp_op_internal          tp_op_catalog|tp_op_validate|tp_op_validate_atlas|tp_op_validate_source_sprite|tp_op_validate_animation|tp_op_validate_target|tp_op_apply|tp_op_build|tp_op_encode|tp_model_journal|tp_txn_encode|tp_txn_apply|tp_txn_lower|tp_txn_parse|tp_txn_result
 tp_op_validate_family_internal tp_op_validate|tp_op_validate_atlas|tp_op_validate_source_sprite|tp_op_validate_animation|tp_op_validate_target
 tp_encode_internal      tp_op_encode|tp_txn_encode|tp_txn_apply
-tp_fs_internal          tp_fs_io|tp_fs_win32|tp_fs_posix|tp_export_defold|tp_export_json_neotolis|tp_export_png|tp_identity|tp_image|tp_journal_io|tp_pack_read|tp_project_parse|tp_project_save|tp_project_lease|tp_recovery|tp_recovery_backend_win32|tp_recovery_scan|tp_recovery_store|tp_scan
+tp_fs_internal          tp_fs_io|tp_fs_win32|tp_fs_posix|tp_build_worker|tp_export_defold|tp_export_json_neotolis|tp_export_png|tp_identity|tp_image|tp_journal_io|tp_pack_read|tp_project_parse|tp_project_save|tp_project_lease|tp_recovery|tp_recovery_backend_win32|tp_recovery_scan|tp_recovery_store|tp_scan
 tp_pack_constraints_internal tp_pack_constraints|tp_op_validate_atlas|tp_op_validate_source_sprite|tp_pack|tp_project_identity|tp_project_parse|tp_validate_target_settings
 tp_history_codec_internal tp_history|tp_history_codec|tp_history_codec_read|tp_model_journal|tp_txn_apply
 tp_journal_internal     tp_journal|tp_journal_io|tp_journal_read|tp_journal_wire|tp_history|tp_model|tp_model_journal|tp_txn_apply|tp_recovery_backend_posix|tp_recovery_backend_win32|tp_recovery_claim|tp_recovery_scan|tp_recovery_store
@@ -481,6 +481,10 @@ tp_validate_report_internal tp_validate|tp_validate_report|tp_validate_rules_int
 tp_validate_rules_internal tp_validate|tp_validate_source|tp_validate_sprite|tp_validate_target_settings
 tp_identity_internal    tp_identity|tp_identity_session
 tp_pack_read_internal   tp_pack_read
+tp_build_driver_internal tp_build_driver|tp_build_worker|tp_build_worker_main
+tp_build_proto_internal tp_build_proto|tp_build_worker|tp_build_worker_main
+tp_build_worker_internal tp_build_worker|tp_pack
+tp_proc_internal        tp_proc_win32|tp_proc_posix|tp_build_worker
 EOF
 }
 

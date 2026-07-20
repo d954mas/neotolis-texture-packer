@@ -16,6 +16,7 @@
 #include "tp_core/tp_job.h"
 #include "tp_core/tp_scan.h"
 #include "tp_core/tp_transaction.h"
+#include "tp_core/tp_build_worker.h"
 #include "unity.h"
 
 typedef enum corpus_adapter {
@@ -841,7 +842,10 @@ void test_gui_invalid_intents_are_classified_by_the_shared_core(void) {
     TEST_ASSERT_EQUAL_UINT64(gui.event_sequence, headless.event_sequence);
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    if (tp_build_is_worker_invocation(argc, argv)) {
+        return tp_build_worker_main();
+    }
     UNITY_BEGIN();
     RUN_TEST(test_capability_matrix_is_typed_and_exact);
     RUN_TEST(test_real_client_parity_manifest_covers_every_shipped_mutation);

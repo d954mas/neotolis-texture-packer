@@ -428,6 +428,73 @@ nt_set_warning_flags(tp_test_pack)   # AGENTS.md invariant: our test TUs too
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_pack_test")
 add_test(NAME tp_pack COMMAND tp_test_pack "${CMAKE_BINARY_DIR}/tp_pack_test")
 
+# H0.3-a: versioned build-worker protocol codec (decision 0018). Encode/decode
+# round-trip across representative inputs plus the fail-closed matrix (truncated,
+# oversized declared length, wrong magic, unsupported version, corrupt payload).
+add_executable(tp_test_build_proto test_build_proto.c)
+target_link_libraries(tp_test_build_proto PRIVATE tp_build unity)  # tp_build owns the worker/protocol seam
+target_include_directories(tp_test_build_proto PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_options(tp_test_build_proto PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_build_proto)   # AGENTS.md invariant: our test TUs too
+add_test(NAME tp_build_proto COMMAND tp_test_build_proto)
+
+# H0.3-a: byte-identical oracle. The extracted driver (and tp_pack) produce a
+# .ntpack identical to a direct nt_builder invocation for the same inputs; the
+# permanent normal-result regression for the worker cutover. Needs a scratch dir.
+add_executable(tp_test_build_driver_oracle test_build_driver_oracle.c)
+target_link_libraries(tp_test_build_driver_oracle PRIVATE tp_build unity)  # tp_build: driver + direct nt_builder
+target_include_directories(tp_test_build_driver_oracle PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_options(tp_test_build_driver_oracle PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_build_driver_oracle)   # AGENTS.md invariant: our test TUs too
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_build_driver_oracle_test")
+add_test(NAME tp_build_driver_oracle COMMAND tp_test_build_driver_oracle "${CMAKE_BINARY_DIR}/tp_build_driver_oracle_test")
+
+# H0.3-b: private build-worker process boundary (decision 0018). Fault-injecting
+# worker binaries -- one per mode via a test-only compile def, the same pattern as
+# the CLI NTPACKER_CLI_*_FAULT_SEAM binaries (production exes have no such mode) --
+# drive the crash / malformed-reply / non-zero-exit outcome mapping. The test exe
+# is BOTH the parent and the normal worker child (its main dispatches __build-worker).
+# HANG (H0.4) joins the fault set: drains stdin then never replies/exits, so the
+# cancel + safety-timeout paths can tree-kill it and clean up staging. H0.5 adds
+# NOWRITE (full-disk/sink write failure: partial staging file + BUILDER_FAILED),
+# OKNOART (exit 0 + valid OK reply + missing artifact -> BUILDER_CRASHED), and
+# BIGLEN/TRUNC (giant declared / short truncated reply frame -> BUILDER_FAILED),
+# proving the PARENT path fails closed through the process (codec-level is #43).
+foreach(_mode CRASH MALFORMED NONZERO HANG NOWRITE OKNOART BIGLEN TRUNC FLOOD)
+    string(TOLOWER "${_mode}" _lc)
+    add_executable(tp_build_worker_${_lc} tp_build_worker_fault.c)
+    target_link_libraries(tp_build_worker_${_lc} PRIVATE tp_build)
+    target_include_directories(tp_build_worker_${_lc} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+    target_compile_definitions(tp_build_worker_${_lc} PRIVATE TP_WORKER_FAULT_${_mode}=1)
+    target_compile_options(tp_build_worker_${_lc} PRIVATE -U_DLL)
+    nt_set_warning_flags(tp_build_worker_${_lc})   # AGENTS.md invariant: our test TUs too
+endforeach()
+
+add_executable(tp_test_build_worker test_build_worker.c)
+target_link_libraries(tp_test_build_worker PRIVATE tp_build unity)  # tp_build owns the worker boundary + nt_builder oracle
+target_include_directories(tp_test_build_worker PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_options(tp_test_build_worker PRIVATE -U_DLL)
+# Compile-def (NOT env): the timeout test drives the worker with a tiny safety
+# timeout so it can assert a builder_crashed timeout without a 5-minute wait.
+target_compile_definitions(tp_test_build_worker PRIVATE TP_TEST_WORKER_TIMEOUT_MS=400)
+nt_set_warning_flags(tp_test_build_worker)   # AGENTS.md invariant: our test TUs too
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_build_worker_test")
+add_test(NAME tp_build_worker COMMAND tp_test_build_worker
+    "${CMAKE_BINARY_DIR}/tp_build_worker_test"
+    $<TARGET_FILE:tp_build_worker_crash>
+    $<TARGET_FILE:tp_build_worker_malformed>
+    $<TARGET_FILE:tp_build_worker_nonzero>
+    $<TARGET_FILE:tp_build_worker_hang>
+    $<TARGET_FILE:tp_build_worker_nowrite>
+    $<TARGET_FILE:tp_build_worker_oknoart>
+    $<TARGET_FILE:tp_build_worker_biglen>
+    $<TARGET_FILE:tp_build_worker_trunc>
+    $<TARGET_FILE:tp_build_worker_flood>)
+# A regression that failed to kill the hang worker must not wedge CI for the job's
+# full 6h budget: bound the whole worker suite well above its sub-second normal run
+# (the timeout test overrides the 5-min safety timeout down to 400ms).
+set_tests_properties(tp_build_worker PROPERTIES TIMEOUT 120)
+
 # Shared strict-UTF-8 raster ingress: memory decode, bounded resources and
 # explicit allocator ownership.  The scratch tree includes a Cyrillic filename.
 add_executable(tp_test_image test_image.c)

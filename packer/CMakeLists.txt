@@ -83,7 +83,17 @@ nt_set_sanitizer_flags(tp_core)
 # --- tp_build: pack orchestration (drives nt_builder) ---------------------------
 # Isolated so ONLY pack-time consumers (GUI, CLI, smoke, pack tests) pull
 # nt_builder -> nt_basisu_encoder. Since #283 the GUI links tp_build directly.
-add_library(tp_build STATIC src/tp_pack.c src/tp_export_run.c src/tp_job.c)
+# tp_build_worker.c + tp_build_worker_main.c + the per-OS tp_proc backend add the
+# private child-process Pack boundary (decision 0018, H0.3-b): the production
+# pack re-execs the host in a hidden __build-worker mode so an nt_builder
+# abort/alloc/codec/write failure lands in a child, not the host.
+add_library(tp_build STATIC src/tp_pack.c src/tp_build_driver.c src/tp_build_proto.c
+    src/tp_build_worker.c src/tp_build_worker_main.c src/tp_export_run.c src/tp_job.c)
+if(WIN32)
+    target_sources(tp_build PRIVATE src/tp_proc_win32.c)
+else()
+    target_sources(tp_build PRIVATE src/tp_proc_posix.c)
+endif()
 # nt_builder BEFORE tp_core: GNU ld resolves static archives left-to-right and
 # nt_builder needs nt_log_write from tp_core's PUBLIC nt_log; the old order
 # flattened to ...libnt_log.a...libnt_builder.a and the Linux release link
