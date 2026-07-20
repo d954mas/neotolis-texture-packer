@@ -1,0 +1,44 @@
+ntpacker 0.2.0 -- neotolis texture packer (CLI)
+
+Usage:
+  ntpacker <command> [options]
+
+Commands:
+  pack | export <p>  Pack + export every enabled target (== GUI "Export All")
+  inspect <project>  Dump project state (--json is the contract; text is a summary)
+  validate <project> Report every project problem in one pass
+  new <path>         Create a new project (seeded default target); refuses to overwrite
+  version            Print the version; --json emits the schema manifest
+  help               Show this help
+
+Editing (wave 2 -- load -> mutate -> save; --json emits {ok,verb,count}):
+  add <p> <atlas> <path>... [--kind file|folder]  Add source(s); kind is required offline
+  remove <p> <atlas> <source>          Remove a source
+  set <p> <atlas> <key>=<value>...     Set atlas knobs (max_size, padding, ...)
+  sprite set <p> <atlas> <key> <field>=<value>...   Per-sprite override (field=inherit clears)
+  sprite unset <p> <atlas> <key>       Clear a sprite's whole override
+  anim create|remove|rename|list|add-frame|remove-frame|move-frame|set <p> <atlas> ...
+  target add|remove|set <p> <atlas> ...            Export targets
+  atlas add|remove|rename <p> ...                  Atlases (by name)
+
+pack options:
+  --atlas <name>     Only pack this atlas (unknown name -> usage error)
+  --target <id>      Only export targets with this exporter id
+  --out-dir <dir>    Re-root RELATIVE target out_paths under <dir> (vs the project dir)
+
+Pack and mutation preview option:
+  --dry-run          Preview pack or mutation commands without writes; not valid for
+                     the read-only anim list query
+
+anim add-frame option:
+  --at <N>           Insert the frame at index N (default: append)
+
+Global options:
+  --json             Machine-readable JSON output (stable per-verb schema)
+  --quiet            Suppress progress diagnostics on stderr
+  --strict           validate: exit 7 if any error-severity finding
+  --help             Show this help
+  --version          Print the version
+
+Exit codes: 0 ok, 1 internal, 2 usage, 3 project, 4 pack, 5 export,
+            6 partial, 7 validate(--strict), 8 file I/O; 9+ reserved.

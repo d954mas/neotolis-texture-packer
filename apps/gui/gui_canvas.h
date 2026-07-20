@@ -2,7 +2,7 @@
 #define NTPACKER_GUI_CANVAS_H
 
 /* The center canvas, now DUAL-MODE (ux.md region E / §2.4):
- *   - SOURCE mode: a single stb-decoded source image, letterboxed (selecting a sprite row with no
+ *   - SOURCE mode: a single shared-core-decoded source image, letterboxed (selecting a sprite row with no
  *     pack result). Original Task-5 behaviour.
  *   - ATLAS mode: the REAL packed page texture from a tp_result, drawn at a game-owned zoom/pan with
  *     a checkerboard behind transparency and region overlays (outline / hull / selection) via the
@@ -23,6 +23,7 @@
 #include "material/nt_material.h"
 #include "ui/nt_ui.h"
 
+#include "tp_core/tp_identity.h" /* TP_IDENTITY_PATH_MAX */
 #include "tp_core/tp_model.h" /* tp_result / tp_sprite */
 
 #ifdef __cplusplus
@@ -42,7 +43,7 @@ typedef struct gui_canvas {
     nt_texture_t tex;
     bool has_tex;
     int img_w, img_h;
-    char loaded_path[512]; /* decode cache key */
+    char loaded_path[TP_IDENTITY_PATH_MAX]; /* exact authoritative decode cache key */
 
     /* --- ATLAS pages --- */
     nt_texture_t pages[GUI_CANVAS_MAX_PAGES];

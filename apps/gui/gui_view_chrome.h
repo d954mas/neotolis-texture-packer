@@ -4,10 +4,7 @@
 /* Chrome view: the docked File/Edit/View/Help menu bar (+ its four drop-down menus), the row/canvas
  * right-click context menu, the hover-tooltip passes (per-frame truncated-row tooltips + the fixed
  * toolbar/strip icon-button tooltips), and the three modals (unsaved-changes confirm, About, Export).
- * Split out of main.c (GUI decomposition step 6b) as a pure move -- function bodies + chrome-local
- * statics (menu state, the MK_* item-key enum, the context-menu declare buffer) relocated verbatim,
- * no behavior change. Declare-only: exposes only the entry points frame() calls, plus
- * close_menubar_menus (see below).
+ * Declare-only: exposes only the entry points frame() calls, plus close_menubar_menus (see below).
  *
  * close_menubar_menus is chrome-owned but cross-view-consumed: gui_view_lists.c/gui_view_settings.c/
  * gui_view_canvas.c each call it on their row/canvas right-click trigger (a right-click while a
@@ -45,6 +42,10 @@ void declare_tooltips(nt_ui_context_t *ctx);
 
 /* Unsaved-changes confirm modal (Save / Discard / Cancel). */
 void declare_confirm_modal(nt_ui_context_t *ctx);
+
+/* R6b startup crash-recovery modal: lists every recovered crash-orphan and resolves each one via the
+ * R6a layer (Discard / Save to original / Save As). Dormant while s_recovery_open is false. */
+void declare_recovery_modal(nt_ui_context_t *ctx);
 
 /* About modal (version / engine / repo link). */
 void declare_about_modal(nt_ui_context_t *ctx);

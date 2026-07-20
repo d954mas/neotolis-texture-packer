@@ -1,5 +1,4 @@
-/* Shared mutable editor/UI state for the ntpacker GUI (see gui_state.h). Split out of main.c
- * (GUI decomposition step 1) as a pure move -- definitions relocated verbatim, no behavior change. */
+/* Shared mutable editor/UI state for the ntpacker GUI (see gui_state.h). */
 
 #include "gui_state.h"
 
@@ -44,12 +43,11 @@ void set_statusf_ex(status_sev_t sev, const char *fmt, ...) {
     s_status_dismissed = false;
 }
 
-/* --- pack-button state cached for the tooltip pass (moved from the shell in step 6a; shared with
- * declare_tooltips, which stays in main.c until chrome, step 6b) --- */
+/* --- pack-button state cached for the tooltip pass (shared with declare_tooltips) --- */
 bool s_pack_has_sources, s_pack_stale;
 
 /* --- executable directory --- */
-char s_exe_dir[1024];
+char s_exe_dir[TP_IDENTITY_PATH_MAX];
 
 /* --- nt_ui context + canvas --- */
 nt_ui_context_t *s_ctx;
@@ -69,6 +67,7 @@ uint32_t s_id_strip;
 uint32_t s_id_status_pill;
 uint32_t s_id_right_content;
 uint32_t s_id_export_modal;
+uint32_t s_id_recovery;
 uint32_t s_id_mb_file, s_id_mb_edit, s_id_mb_view, s_id_mb_help;
 uint32_t s_id_menu_file, s_id_menu_edit, s_id_menu_view, s_id_menu_help;
 
@@ -76,11 +75,11 @@ uint32_t s_id_menu_file, s_id_menu_edit, s_id_menu_view, s_id_menu_help;
 int s_sel_atlas;
 int s_sel_src = -1;
 int s_sel_child = -1;
-char s_sel_abs[512];
+char s_sel_abs[TP_IDENTITY_PATH_MAX];
 bool s_sel_missing;
 
-/* --- multi-select set (growable; grown by multi_sel_add in gui_rows.c -- P1 fix, step 7) --- */
-char (*s_multi_sel)[192];
+/* --- multi-select set (growable; grown by multi_sel_add in gui_rows.c) --- */
+gui_selected_sprite *s_multi_sel;
 int s_multi_sel_count;
 int s_multi_sel_cap;
 int s_sel_anchor_row = -1;
@@ -91,7 +90,6 @@ int s_sel_anim_frame = -1;
 
 /* --- export-target preview (EXP-PREVIEW): 0 = Native (default) --- */
 int s_preview_target;
-unsigned s_preview_ver;
 
 /* --- animation preview player --- */
 bool s_preview_active;
@@ -105,8 +103,8 @@ int s_preview_frame_count;
 int s_edit_kind;
 int s_edit_atlas;
 int s_edit_anim;
-char s_edit_sprite[192];
-char s_edit_buf[192];
+char s_edit_sprite[TP_SRCKEY_MAX];
+char s_edit_buf[TP_SRCKEY_MAX];
 
 /* --- runtime column widths --- */
 float s_content_w = 1280.0F;
@@ -120,24 +118,32 @@ bool s_sec_atlas_open = true, s_sec_region_open = true, s_sec_export_open = true
 bool s_atlas_adv_open = false;
 bool s_sec_anim_open = true;
 
-/* --- modal open flags (moved from the shell in step 3; shared with the selftest) --- */
+/* --- modal open flags (shared with the selftest) --- */
 bool s_about_open;
 bool s_export_open;
 
-/* --- context-menu shared state (moved from the shell in step 4; written by left panel/canvas/settings,
- * read by the declare machinery in gui_view_chrome.c since step 6b) --- */
+/* --- context-menu shared state (written by left panel/canvas/settings,
+ * read by the declare machinery in gui_view_chrome.c) --- */
 uint32_t s_id_ctx_menu;
 nt_ui_menu_state_t s_ctx_state;
 int s_ctx_kind;
-int s_ctx_atlas;
-int s_ctx_anim = -1;
-int s_ctx_target = -1;
-int s_ctx_src = -1;
-char s_ctx_sprite[192];
+tp_id128 s_ctx_atlas_id;
+int64_t s_ctx_atlas_revision;
+tp_id128 s_ctx_anim_atlas_id;
+tp_id128 s_ctx_anim_id;
+int64_t s_ctx_anim_revision;
+tp_id128 s_ctx_target_atlas_id;
+tp_id128 s_ctx_target_id;
+int64_t s_ctx_target_revision;
+tp_id128 s_ctx_sprite_atlas_id;
+tp_id128 s_ctx_sprite_source_id;
+int64_t s_ctx_sprite_revision;
+char s_ctx_sprite_source_key[TP_SRCKEY_MAX];
+char s_ctx_sprite_display_name[TP_SRCKEY_MAX];
 bool s_ctx_leaf;
 bool s_ctx_removable;
 
-/* --- shell-set, view-read input-blur flag (moved from the shell in step 4) --- */
+/* --- shell-set, view-read input-blur flag --- */
 bool s_blur_inputs;
 
 /* --- per-frame row tooltips --- */

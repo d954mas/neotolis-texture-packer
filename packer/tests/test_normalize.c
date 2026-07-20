@@ -194,7 +194,11 @@ void test_explicit_animation(void) {
     tp_arena *ar = tp_arena_create(0);
     tp_sprite s[2] = {mk("walk_01", -1), mk("walk_02", -1)};
     tp_result r = mk_result(s, 2);
-    const char *frames[2] = {"walk_02", "walk_01"}; /* deliberately reversed */
+    const tp_id128 source = {{1}};
+    const tp_export_frame_ref frames[2] = {
+        {source, "walk_02"}, {source, "walk_01"}}; /* deliberately reversed */
+    const tp_export_sprite_ref_in refs[2] = {
+        {"walk_01", source, "walk_01"}, {"walk_02", source, "walk_02"}};
     tp_export_anim_in ein;
     memset(&ein, 0, sizeof ein);
     ein.id = "walk";
@@ -205,6 +209,8 @@ void test_explicit_animation(void) {
     tp_normalize_opts_defaults(&o);
     o.animations = &ein;
     o.animation_count = 1;
+    o.sprite_refs = refs;
+    o.sprite_ref_count = 2;
     tp_export_prepared prep;
     tp_error e = {{0}};
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_normalize(&r, &o, ar, &prep, &e));
@@ -226,7 +232,11 @@ void test_frame_follows_rename(void) {
     tp_sprite s[2] = {mk("hero.png", -1), mk("gem.png", -1)};
     tp_result r = mk_result(s, 2);
     tp_export_name_override ov = {.raw_name = "hero.png", .final_name = "champion"};
-    const char *frames[2] = {"hero", "gem"}; /* KEY space (ext stripped) */
+    const tp_id128 source = {{2}};
+    const tp_export_frame_ref frames[2] = {{source, "hero.png"},
+                                           {source, "gem.png"}};
+    const tp_export_sprite_ref_in refs[2] = {{"hero.png", source, "hero.png"},
+                                             {"gem.png", source, "gem.png"}};
     tp_export_anim_in ein;
     memset(&ein, 0, sizeof ein);
     ein.id = "run";
@@ -239,6 +249,8 @@ void test_frame_follows_rename(void) {
     o.override_count = 1;
     o.animations = &ein;
     o.animation_count = 1;
+    o.sprite_refs = refs;
+    o.sprite_ref_count = 2;
     tp_export_prepared prep;
     tp_error e = {{0}};
     TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, tp_normalize(&r, &o, ar, &prep, &e), e.msg);
@@ -259,7 +271,12 @@ void test_frame_key_ext_resolves(void) {
     tp_arena *ar = tp_arena_create(0);
     tp_sprite s[2] = {mk("chars/walk_01.png", -1), mk("chars/walk_02.png", -1)};
     tp_result r = mk_result(s, 2);
-    const char *frames[2] = {"chars/walk_02", "chars/walk_01"}; /* reversed, keys */
+    const tp_id128 source = {{3}};
+    const tp_export_frame_ref frames[2] = {
+        {source, "chars/walk_02.png"}, {source, "chars/walk_01.png"}};
+    const tp_export_sprite_ref_in refs[2] = {
+        {"chars/walk_01.png", source, "chars/walk_01.png"},
+        {"chars/walk_02.png", source, "chars/walk_02.png"}};
     tp_export_anim_in ein;
     memset(&ein, 0, sizeof ein);
     ein.id = "walk";
@@ -269,6 +286,8 @@ void test_frame_key_ext_resolves(void) {
     tp_normalize_opts_defaults(&o);
     o.animations = &ein;
     o.animation_count = 1;
+    o.sprite_refs = refs;
+    o.sprite_ref_count = 2;
     tp_export_prepared prep;
     tp_error e = {{0}};
     TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, tp_normalize(&r, &o, ar, &prep, &e), e.msg);
@@ -285,7 +304,9 @@ void test_dangling_frame(void) {
     tp_arena *ar = tp_arena_create(0);
     tp_sprite s[1] = {mk("hero.png", -1)};
     tp_result r = mk_result(s, 1);
-    const char *frames[1] = {"ghost"};
+    const tp_id128 source = {{4}};
+    const tp_export_frame_ref frames[1] = {{source, "ghost"}};
+    const tp_export_sprite_ref_in refs[1] = {{"hero.png", source, "hero.png"}};
     tp_export_anim_in ein;
     memset(&ein, 0, sizeof ein);
     ein.id = "run";
@@ -295,6 +316,8 @@ void test_dangling_frame(void) {
     tp_normalize_opts_defaults(&o);
     o.animations = &ein;
     o.animation_count = 1;
+    o.sprite_refs = refs;
+    o.sprite_ref_count = 1;
     tp_export_prepared prep;
     tp_error e = {{0}};
     TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT, tp_normalize(&r, &o, ar, &prep, &e));

@@ -1,12 +1,11 @@
-/* Synthetic D4 transform-decode unit test (plan §3.6). Exercises tp_transform_decode
- * (the pure mirror of the engine serializer's transform_point) across all 8 dihedral
- * masks -- independent of whatever transform the packer happens to emit, so it is the
- * only place the diagonal / dim-swap path is guaranteed to be covered deterministically.
+/* Synthetic public D4 geometry contract. Exercises integer and fractional
+ * affine decode across all 8 dihedral masks, independent of whichever transform
+ * the packer happens to emit.
  *
  * Corner space, tw=7 th=3 (non-square catches axis swaps). Expected corner mappings
  * are hand-derived from the reference decode: swap(diagonal) -> flipH -> flipV. */
 
-#include "tp_pack_read_internal.h"
+#include "tp_core/tp_transform.h"
 #include "unity.h"
 
 #include <stdint.h>
@@ -94,6 +93,22 @@ void test_diagonal_flip_hv(void) {
     check_mask(7, e);
 }
 
+void test_fractional_affine_points_cover_all_masks(void) {
+    static const float expected[8][2] = {
+        {1.25F, -0.5F}, {5.75F, -0.5F}, {1.25F, 3.5F},
+        {5.75F, 3.5F},  {-0.5F, 1.25F}, {3.5F, 1.25F},
+        {-0.5F, 5.75F}, {3.5F, 5.75F},
+    };
+    for (uint8_t flags = 0U; flags < 8U; flags++) {
+        float out_x = 0.0F;
+        float out_y = 0.0F;
+        tp_transform_decode_f(1.25F, -0.5F, flags, 7.0F, 3.0F,
+                              &out_x, &out_y);
+        TEST_ASSERT_TRUE(out_x == expected[flags][0]);
+        TEST_ASSERT_TRUE(out_y == expected[flags][1]);
+    }
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_identity);
@@ -104,5 +119,6 @@ int main(void) {
     RUN_TEST(test_diagonal_flip_h);
     RUN_TEST(test_diagonal_flip_v);
     RUN_TEST(test_diagonal_flip_hv);
+    RUN_TEST(test_fractional_affine_points_cover_all_masks);
     return UNITY_END();
 }

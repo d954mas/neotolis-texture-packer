@@ -1,0 +1,79 @@
+{
+  "schema": 2,
+  "app_version": "0.2.0",
+  "project_schema": 5,
+  "verbs": {
+    "inspect": 4,
+    "validate": 2,
+    "pack": 1,
+    "new": {
+      "apply": 1,
+      "dry_run": 2
+    },
+    "add": {
+      "apply": 1,
+      "dry_run": 2
+    },
+    "remove": {
+      "apply": 1,
+      "dry_run": 2
+    },
+    "set": {
+      "apply": 1,
+      "dry_run": 2
+    },
+    "sprite": {
+      "apply": 1,
+      "dry_run": 2
+    },
+    "anim": {
+      "apply": 1,
+      "dry_run": 2,
+      "list": 4
+    },
+    "target": {
+      "apply": 1,
+      "dry_run": 2
+    },
+    "atlas": {
+      "apply": 1,
+      "dry_run": 2
+    },
+    "help": 1,
+    "version": 2
+  },
+  "formats": {
+    "json-neotolis": 1,
+    "defold-tpinfo": "2.0"
+  },
+  "exporters": [
+    {
+      "id": "json-neotolis",
+      "name": "JSON (neotolis, full fidelity)",
+      "ext": "json",
+      "caps": {
+        "rotate90": true,
+        "flips": true,
+        "polygons": true,
+        "pivot": true,
+        "slice9": true,
+        "multipage": true,
+        "aliases": true
+      }
+    },
+    {
+      "id": "defold",
+      "name": "Defold (.tpinfo + .tpatlas)",
+      "ext": "tpinfo",
+      "caps": {
+        "rotate90": true,
+        "flips": false,
+        "polygons": true,
+        "pivot": true,
+        "slice9": false,
+        "multipage": true,
+        "aliases": true
+      }
+    }
+  ]
+}

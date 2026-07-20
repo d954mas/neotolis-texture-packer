@@ -1,5 +1,4 @@
-/* Chrome view (see gui_view_chrome.h). Split out of main.c (GUI decomposition step 6b) as a pure
- * move -- function bodies + chrome-local statics relocated verbatim, no behavior change. */
+/* Chrome view (see gui_view_chrome.h). */
 
 #include "gui_view_chrome.h"
 
@@ -11,6 +10,7 @@
 #include "ui/nt_ui_tooltip.h"
 
 #include "tp_core/tp_export.h" /* exporter registry -> target dropdown (export modal) */
+#include "tp_core/tp_journal.h" /* recovery status labels */
 
 #include "gui_defs.h"
 #include "gui_state.h"
@@ -19,12 +19,14 @@
 #include "gui_canvas.h"
 #include "gui_pack.h"
 #include "gui_project.h"
+#include "gui_recovery_indicator.h"
 #include "gui_version.h" /* NTPACKER_VERSION/NTPACKER_ENGINE_NAME/NTPACKER_REPO_URL (About modal) */
 
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -44,8 +46,8 @@ enum {
 /* Right-click context menu: one cursor-anchored menu whose items depend on the row a right-click
  * armed it over (§3.3e mouse-complete access). Its actions call the same code paths as the [x]
  * buttons / inline editors. The trigger/payload state (s_id_ctx_menu, s_ctx_state, s_ctx_kind, the
- * CTX_ enum, s_ctx_atlas, s_ctx_anim, s_ctx_target, s_ctx_src, s_ctx_sprite, s_ctx_leaf,
- * s_ctx_removable) lives in gui_state (step 4 -- written by three different views); s_ctx_menu is the
+ * CTX_ enum, typed context refs, s_ctx_leaf,
+ * s_ctx_removable) lives in gui_state (written by three different views); s_ctx_menu is the
  * declare-machinery working buffer for declare_context_menu below, chrome-local. */
 static nt_ui_menu_ctx_t s_ctx_menu;
 
@@ -191,8 +193,23 @@ void declare_menubar(nt_ui_context_t *ctx) {
         menubar_entry(ctx, s_id_mb_edit, "Edit", &s_edit_state);
         menubar_entry(ctx, s_id_mb_view, "View", &s_view_state);
         menubar_entry(ctx, s_id_mb_help, "Help", &s_help_state);
-        /* right side: project name + dirty dot */
+        /* right side: persistent recovery warning + project name + dirty dot */
         CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}}) {}
+        gui_recovery_notice recovery_notice = {0};
+        const gui_recovery_indicator recovery_indicator =
+            gui_recovery_indicator_present(
+                gui_project_recovery_notice_query(&recovery_notice),
+                &recovery_notice);
+        if (recovery_indicator.visible) {
+            CLAY({.id = {.id = nt_ui_id("ntpacker/recovery_indicator")},
+                  .layout = {
+                      .sizing = {CLAY_SIZING_FIXED(S(16)), CLAY_SIZING_FIT(0)},
+                      .childAlignment = {CLAY_ALIGN_X_CENTER,
+                                         CLAY_ALIGN_Y_CENTER}}}) {
+                nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT),
+                            recovery_indicator.glyph, &g_warn);
+            }
+        }
         if (gui_project_is_dirty()) {
             nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "*", &g_tag);
         }
@@ -228,51 +245,73 @@ void declare_context_menu(nt_ui_context_t *ctx) {
     nt_ui_menu_begin(&s_ctx_menu, ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, s_id_ctx_menu, &s_ctx_state, &s_menu_style);
     if (s_ctx_kind == CTX_ATLAS) {
         if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_RENAME, "Rename")) {
-            start_atlas_edit(s_ctx_atlas);
+            start_atlas_edit_ref(s_ctx_atlas_id, s_ctx_atlas_revision);
         }
-        const tp_project *cp = gui_project_get();
-        nt_ui_menu_item_opts_t rm = {.disabled = (cp == NULL || cp->atlas_count <= 1)};
+        const tp_session_snapshot *snapshot = gui_project_snapshot();
+        const int atlas_count = snapshot ? tp_session_snapshot_atlas_count(snapshot) : 0;
+        nt_ui_menu_item_opts_t rm = {.disabled = (atlas_count <= 1)};
         if (nt_ui_menu_item_ex(&s_ctx_menu, MK_CTX_REMOVE, "Remove", rm)) {
-            s_pending_remove_atlas = s_ctx_atlas;
+            if (!tp_id128_is_nil(s_ctx_atlas_id)) {
+                s_pending_remove_atlas = true;
+                s_pending_remove_atlas_id = s_ctx_atlas_id;
+                s_pending_remove_atlas_revision = s_ctx_atlas_revision;
+            }
         }
     } else if (s_ctx_kind == CTX_SPRITE) {
         if (s_ctx_leaf) {
             if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_RENAME, "Rename")) {
-                start_sprite_edit_named(s_ctx_sprite);
+                const gui_sprite_ref sprite = {
+                    s_ctx_sprite_atlas_id, s_ctx_sprite_source_id,
+                    s_ctx_sprite_source_key, s_ctx_sprite_revision};
+                start_sprite_edit_ref(&sprite, s_ctx_sprite_display_name);
             }
         }
         if (s_multi_sel_count > 0) {
             char lbl[48];
             (void)snprintf(lbl, sizeof lbl, "Create animation from selection (%d)", s_multi_sel_count);
             if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_CREATE_ANIM, lbl)) {
-                s_pending_create_anim = true;
+                gui_request_create_animation_from_selection();
             }
         }
         if (s_ctx_removable) {
             if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_REMOVE, "Remove")) {
-                s_pending_remove_source = s_ctx_src;
+                if (!tp_id128_is_nil(s_ctx_sprite_atlas_id) &&
+                    !tp_id128_is_nil(s_ctx_sprite_source_id)) {
+                    s_pending_remove_source = true;
+                    s_pending_remove_source_atlas_id =
+                        s_ctx_sprite_atlas_id;
+                    s_pending_remove_source_id = s_ctx_sprite_source_id;
+                    s_pending_remove_source_revision = s_ctx_sprite_revision;
+                }
             }
         }
     } else if (s_ctx_kind == CTX_ANIM) {
+        const gui_animation_ref animation = {
+            s_ctx_anim_atlas_id, s_ctx_anim_id, s_ctx_anim_revision};
         if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_PREVIEW, "Preview")) {
-            s_sel_anim = s_ctx_anim;
-            s_pending_open_preview = true;
+            gui_request_open_preview(&animation);
         }
         if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_RENAME, "Rename")) {
-            start_anim_edit(s_ctx_anim);
+            start_anim_edit_ref(&animation);
         }
         if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_REMOVE, "Remove")) {
-            s_pending_remove_anim = s_ctx_anim;
+            gui_request_remove_animation_ref(&animation);
         }
     } else if (s_ctx_kind == CTX_TARGET) {
-        tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
-        if (a && s_ctx_target >= 0 && s_ctx_target < a->target_count) {
-            tp_project_target *t = &a->targets[s_ctx_target];
+        const tp_session_snapshot *snapshot = gui_project_snapshot();
+        const tp_snapshot_target *t = snapshot
+            ? tp_session_snapshot_target_by_id(
+                  snapshot, s_ctx_target_atlas_id, s_ctx_target_id)
+            : NULL;
+        if (t) {
+            const gui_target_ref target = {
+                s_ctx_target_atlas_id, s_ctx_target_id,
+                s_ctx_target_revision};
             if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_TOGGLE, t->enabled ? "Disable" : "Enable")) {
-                gui_edit_target_enabled(s_sel_atlas, s_ctx_target, !t->enabled); /* H/G3: preserves a buffered out-path edit */
+                gui_edit_target_enabled(&target, !t->enabled);
             }
             if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_REMOVE, "Remove")) {
-                s_pending_remove_target = s_ctx_target;
+                gui_request_remove_target_ref(&target);
             }
         }
     } else if (s_ctx_kind == CTX_CANVAS) {
@@ -293,6 +332,17 @@ void declare_context_menu(nt_ui_context_t *ctx) {
 }
 
 void declare_tooltips(nt_ui_context_t *ctx) {
+    gui_recovery_notice recovery_notice = {0};
+    const gui_recovery_indicator recovery_indicator =
+        gui_recovery_indicator_present(
+            gui_project_recovery_notice_query(&recovery_notice),
+            &recovery_notice);
+    if (recovery_indicator.visible) {
+        (void)nt_ui_tooltip(
+            ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT,
+            nt_ui_id("ntpacker/recovery_indicator"),
+            recovery_indicator.tooltip, &s_tip_style);
+    }
     const char *pack_tip = s_pack_stale
         ? "Pack (Ctrl+P): sources or settings changed -- press to repack now and refresh the atlas preview (session only, no files exported)."
         : "Pack (Ctrl+P): atlas is up to date. Repacks with current settings and refreshes the preview (session only, no files exported).";
@@ -322,25 +372,27 @@ void declare_tooltips(nt_ui_context_t *ctx) {
 
 /* Export dialog (mouse-complete): every atlas's targets, toggle/browse per target, then Export runs the
  * same do_export path. All edits enqueue via gui_edit_target (committed at frame top; dirty + undo,
- * no parallel state) -- never commit while holding p/a/t (F2-05b-i UAF fix). */
+ * no parallel state) -- never commit while holding p/a/t (UAF fix). */
 void declare_export_modal(nt_ui_context_t *ctx) {
     if (!nt_ui_modal_visible(ctx, s_id_export_modal, &s_modal_style, &s_export_open)) {
         return;
     }
-    tp_project *p = gui_project_get();
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const int atlas_count = snapshot ? tp_session_snapshot_atlas_count(snapshot) : 0;
     int enabled_targets = 0;
     int atlases_with = 0;
     int total_targets = 0;
     int line_count = 0;
-    for (int ai = 0; p && ai < p->atlas_count; ai++) {
-        const tp_project_atlas *a = &p->atlases[ai];
+    for (int ai = 0; ai < atlas_count; ai++) {
+        const tp_snapshot_atlas *a = tp_session_snapshot_atlas_at(snapshot, ai);
         if (a->target_count > 0) {
             atlases_with++;
             line_count += 1 + a->target_count;
         }
         for (int ti = 0; ti < a->target_count; ti++) {
             total_targets++;
-            enabled_targets += a->targets[ti].enabled ? 1 : 0;
+            const tp_snapshot_target *target = tp_session_snapshot_target_at(snapshot, a->id, ti);
+            enabled_targets += target && target->enabled ? 1 : 0;
         }
     }
     CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(S(560)), CLAY_SIZING_FIT(0)},
@@ -374,14 +426,17 @@ void declare_export_modal(nt_ui_context_t *ctx) {
         nt_ui_scroll_begin(ctx, NULL, nt_ui_id("export/scroll"), &s_panel_scroll,
                            &(Clay_ElementDeclaration){.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(list_h)}}});
         CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)}, .layoutDirection = CLAY_TOP_TO_BOTTOM, .childGap = Su(4), .padding = {0, Su(8), 0, 0}}}) {
-            for (int ai = 0; ai < p->atlas_count; ai++) {
-                tp_project_atlas *a = &p->atlases[ai];
+            for (int ai = 0; ai < atlas_count; ai++) {
+                const tp_snapshot_atlas *a = tp_session_snapshot_atlas_at(snapshot, ai);
                 if (a->target_count == 0) {
                     continue;
                 }
                 nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), a->name, &g_row);
                 for (int ti = 0; ti < a->target_count && ti < GUI_MAX_TARGETS; ti++) {
-                    tp_project_target *t = &a->targets[ti];
+                    const tp_snapshot_target *t = tp_session_snapshot_target_at(snapshot, a->id, ti);
+                    if (!t) {
+                        continue;
+                    }
                     char idb[48];
                     (void)snprintf(idb, sizeof idb, "export/a%d_t%d", ai, ti);
                     const uint32_t rid = nt_ui_id(idb);
@@ -396,15 +451,17 @@ void declare_export_modal(nt_ui_context_t *ctx) {
                     const bool has_path = (t->out_path && t->out_path[0] != '\0');
                     const nt_ui_events_t pev = nt_ui_events(ctx, nt_ui_child_id(rid, "path"), NULL);
                     if (pev.clicked) {
-                        s_pending_export_browse_atlas = ai;
-                        s_pending_export_browse_target = ti;
+                        gui_request_browse_target(ai, ti);
                     }
                     CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H))},
                                      .padding = {Su(8), Su(6), 0, 0},
                                      .childGap = Su(8),
                                      .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
                         if (tp_checkbox(ctx, nt_ui_child_id(rid, "en"), t->enabled, true)) {
-                            gui_edit_target_enabled(ai, ti, !t->enabled); /* H/G3: preserves a buffered out-path edit */
+                            gui_target_ref target;
+                            if (gui_project_target_ref_at(ai, ti, &target)) {
+                                gui_edit_target_enabled(&target, !t->enabled);
+                            }
                         }
                         CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(S(96)), CLAY_SIZING_GROW(0)}, .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
                             ui_label_fit(ctx, exp_name, &g_caption, S(96), 0U);
@@ -416,8 +473,7 @@ void declare_export_modal(nt_ui_context_t *ctx) {
                             ui_label_fit(ctx, has_path ? t->out_path : "(click to set output path)", has_path ? &g_row : &g_dim, S(300), 0U);
                         }
                         if (ui_btn(ctx, nt_ui_child_id(rid, "br"), "\xE2\x80\xA6", &g_btn_ghost, true, 28.0F, 22.0F, &g_caption)) {
-                            s_pending_export_browse_atlas = ai;
-                            s_pending_export_browse_target = ti;
+                            gui_request_browse_target(ai, ti);
                         }
                     }
                 }
@@ -475,6 +531,110 @@ void declare_confirm_modal(nt_ui_context_t *ctx) {
         }
         nt_ui_modal_end(ctx);
     }
+}
+
+/* R6b startup crash-recovery modal: one row per recovered crash-orphan; each row resolves via the R6a
+ * layer (Discard always; Save-to-original + Save As only for a genuinely recoverable orphan -- an
+ * old-format entry is Discard-only, marked "(old format)"). Actions are requested through gui_actions
+ * (deferred to apply_pending, which runs the Save-As dialog + disk save outside begin/end). "Later"
+ * leaves every orphan on disk for next launch. Mirrors declare_export_modal's scrolled per-row list +
+ * unique per-row button IDs. Dormant when s_recovery_open is false (as in the whole selftest build). */
+void declare_recovery_modal(nt_ui_context_t *ctx) {
+    if (!nt_ui_modal_visible(ctx, s_id_recovery, &s_modal_style, &s_recovery_open)) {
+        return;
+    }
+    const int n = gui_actions_recovery_count();
+    float list_h = (float)n * S(62.0F) + S(6.0F);
+    const float list_cap = S(320.0F);
+    if (list_h > list_cap) {
+        list_h = list_cap;
+    }
+    CLAY({.layout = {.sizing = {CLAY_SIZING_FIXED(S(560)), CLAY_SIZING_FIT(0)},
+                     .padding = {Su(22), Su(22), Su(22), Su(22)},
+                     .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                     .childGap = Su(14)},
+          .backgroundColor = C_PANEL,
+          .cornerRadius = CLAY_CORNER_RADIUS(S(8)),
+          .border = {.color = C_BORDER, .width = {Su(1), Su(1), Su(1), Su(1), 0}}}) {
+        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "Recover unsaved work", &g_body);
+        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT),
+                    "A previous session ended with unsaved changes. Choose what to do with each project.", &g_caption);
+        if (gui_actions_recovery_has_more()) {
+            nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT),
+                        "More recovery sessions remain on disk. Resolve these, then restart to see the rest.",
+                        &g_caption);
+        }
+        nt_ui_scroll_begin(ctx, NULL, nt_ui_id("recovery/scroll"), &s_panel_scroll,
+                           &(Clay_ElementDeclaration){.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(list_h)}}});
+        CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)}, .layoutDirection = CLAY_TOP_TO_BOTTOM, .childGap = Su(6), .padding = {0, Su(8), 0, 0}}}) {
+            for (int i = 0; i < n; i++) {
+                const gui_recovery_entry *e = gui_actions_recovery_at(i);
+                if (e == NULL) {
+                    continue;
+                }
+                char idb[48];
+                (void)snprintf(idb, sizeof idb, "recovery/row%d", i);
+                const uint32_t rid = nt_ui_id(idb);
+                char namebuf[320];
+                const bool partial = e->status == (int)TP_JOURNAL_RECOVERY_TRUNCATED ||
+                                     e->status == (int)TP_JOURNAL_RECOVERY_CORRUPT;
+                if (!e->adoptable) {
+                    (void)snprintf(namebuf, sizeof namebuf, "%s (old format)", e->name);
+                } else if (partial) {
+                    (void)snprintf(namebuf, sizeof namebuf, "%s (partial recovery)", e->name);
+                } else {
+                    (void)snprintf(namebuf, sizeof namebuf, "%s", e->name);
+                }
+                char timebuf[32] = "time unknown";
+                if (e->timestamp > 0) {
+                    time_t when = (time_t)e->timestamp;
+                    struct tm tmv;
+#ifdef _WIN32
+                    if (localtime_s(&tmv, &when) == 0) {
+#else
+                    if (localtime_r(&when, &tmv) != NULL) {
+#endif
+                        (void)strftime(timebuf, sizeof timebuf, "%Y-%m-%d %H:%M", &tmv);
+                    }
+                }
+                char detailbuf[GUI_RECOVERY_PATH_CAP + 48];
+                (void)snprintf(detailbuf, sizeof detailbuf, "%s  |  %s",
+                               e->original_path[0] ? e->original_path : "Untitled project", timebuf);
+                CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(58))},
+                                 .layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = Su(10),
+                                 .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+                    CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)},
+                                     .layoutDirection = CLAY_TOP_TO_BOTTOM, .childGap = Su(2),
+                                     .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+                        ui_label_fit(ctx, namebuf, e->adoptable ? &g_body : &g_dim, S(140), 0U);
+                        ui_label_fit(ctx, detailbuf, &g_dim, S(140), 0U);
+                    }
+                    if (ui_btn(ctx, nt_ui_child_id(rid, "discard"), "Discard", &g_btn, true, 96.0F, 30.0F, &g_body)) {
+                        gui_actions_recovery_request(i, GUI_RECOVERY_DISCARD);
+                    }
+                    if (e->adoptable && e->original_path[0] != '\0') {
+                        if (ui_btn(ctx, nt_ui_child_id(rid, "orig"), "Save to original", &g_btn_primary, true, 150.0F, 30.0F, &g_onaccent)) {
+                            gui_actions_recovery_request(i, GUI_RECOVERY_SAVE_ORIGINAL);
+                        }
+                    }
+                    if (e->adoptable) {
+                        if (ui_btn(ctx, nt_ui_child_id(rid, "saveas"), "Save As\xE2\x80\xA6", &g_btn, true, 110.0F, 30.0F, &g_body)) {
+                            gui_actions_recovery_request(i, GUI_RECOVERY_SAVE_AS);
+                        }
+                    }
+                }
+            }
+        }
+        nt_ui_scroll_end(ctx);
+        /* footer: Later = leave everything on disk, decide next launch (no data loss) */
+        CLAY({.layout = {.layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = Su(12),
+                         .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+            if (ui_btn(ctx, nt_ui_id("ntpacker/recovery_later"), "Later", &g_btn, true, 100.0F, 34.0F, &g_body)) {
+                s_recovery_open = false; /* orphans stay on disk; offered again next launch */
+            }
+        }
+    }
+    nt_ui_modal_end(ctx);
 }
 
 void declare_about_modal(nt_ui_context_t *ctx) {

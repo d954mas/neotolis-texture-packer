@@ -41,8 +41,8 @@ are recoverable from the pinned release if the data ever needs regenerating.
 1. Download the pinned release asset for the new version; record its SHA-256.
 2. Replace `utf8proc.h`, `utf8proc.c`, `utf8proc_data.c`, `LICENSE.md`.
 3. Update the version row and per-file SHA-256s above.
-4. Re-run `ctest` (the `tp_c0_*` NFC/case-fold golden vectors are the regression
-   gate for a data-table change).
+4. Re-run `ctest` (`tp_srckey` and the identity/path tests are the regression
+   gates for an NFC or case-fold data-table change).
 
 Do not edit the vendored `.c`/`.h` by hand -- keep them byte-identical to
 upstream so the checksums above stay verifiable.

@@ -1,5 +1,5 @@
 /*
- * F2-01 determinism: canonical BYTE-STABLE encoders for an operation and an apply
+ * Determinism: canonical BYTE-STABLE encoders for an operation and an apply
  * result. Same conventions as the tp_project writer (src/tp_sb.h): 2-space indent,
  * LF, %.9g floats, keys ASCENDING with the "op" discriminator first, a trailing
  * newline. Endian-independent (no reinterpret), so goldens are byte-identical on
@@ -12,9 +12,11 @@
 #include <string.h>
 
 #include "tp_core/tp_id.h"
+#include "tp_encode_internal.h"
+#include "tp_op_internal.h"
 #include "tp_sb.h"
 
-typedef enum { FT_ID, FT_STR, FT_INT, FT_NUM, FT_BOOL, FT_ARR } ftype;
+typedef enum { FT_ID, FT_STR, FT_INT, FT_NUM, FT_BOOL, FT_ARR, FT_REF, FT_REFS } ftype;
 
 typedef struct {
     const char *key;
@@ -27,6 +29,7 @@ typedef struct {
     bool b;
     char *const *arr;
     int arrn;
+    const tp_op_sprite_ref *refs;
 } efield;
 
 static void emit_str_array(tp_sb *sb, int keydepth, char *const *arr, int n) {
@@ -35,7 +38,7 @@ static void emit_str_array(tp_sb *sb, int keydepth, char *const *arr, int n) {
         return;
     }
     tp_sb_char(sb, '[');
-    for (int i = 0; i < n; i++) {
+    for (int i = 0; i < n && !sb->oom && !sb->limit_exceeded; i++) {
         tp_sb_str(sb, i == 0 ? "\n" : ",\n");
         tp_sb_indent(sb, keydepth + 1);
         tp_sb_json_string(sb, arr[i] ? arr[i] : "");
@@ -45,7 +48,44 @@ static void emit_str_array(tp_sb *sb, int keydepth, char *const *arr, int n) {
     tp_sb_char(sb, ']');
 }
 
-static void emit_value(tp_sb *sb, const efield *f) {
+static void emit_sprite_ref(tp_sb *sb, const tp_op_sprite_ref *ref,
+                            int depth) {
+    char source[TP_ID_TEXT_CAP];
+    if (tp_id_format(TP_ID_KIND_SOURCE, ref->source_id, source,
+                     sizeof source, NULL) != TP_STATUS_OK) {
+        source[0] = '\0';
+    }
+    tp_sb_str(sb, "{\n");
+    tp_sb_indent(sb, depth + 1);
+    tp_sb_str(sb, "\"source_id\": ");
+    tp_sb_json_string(sb, source);
+    tp_sb_str(sb, ",\n");
+    tp_sb_indent(sb, depth + 1);
+    tp_sb_str(sb, "\"src_key\": ");
+    tp_sb_json_string(sb, ref->src_key ? ref->src_key : "");
+    tp_sb_char(sb, '\n');
+    tp_sb_indent(sb, depth);
+    tp_sb_char(sb, '}');
+}
+
+static void emit_sprite_refs(tp_sb *sb, const tp_op_sprite_ref *refs, int n,
+                             int depth) {
+    if (n <= 0) {
+        tp_sb_str(sb, "[]");
+        return;
+    }
+    tp_sb_char(sb, '[');
+    for (int i = 0; i < n && !sb->oom && !sb->limit_exceeded; i++) {
+        tp_sb_str(sb, i == 0 ? "\n" : ",\n");
+        tp_sb_indent(sb, depth + 1);
+        emit_sprite_ref(sb, &refs[i], depth + 1);
+    }
+    tp_sb_char(sb, '\n');
+    tp_sb_indent(sb, depth);
+    tp_sb_char(sb, ']');
+}
+
+static void emit_value(tp_sb *sb, const efield *f, int depth) {
     switch (f->t) {
         case FT_ID: {
             char buf[TP_ID_TEXT_CAP];
@@ -59,12 +99,17 @@ static void emit_value(tp_sb *sb, const efield *f) {
         case FT_INT: tp_sb_int(sb, f->i); break;
         case FT_NUM: tp_sb_num(sb, f->n); break;
         case FT_BOOL: tp_sb_str(sb, f->b ? "true" : "false"); break;
-        case FT_ARR: emit_str_array(sb, 1, f->arr, f->arrn); break;
+        case FT_ARR: emit_str_array(sb, depth, f->arr, f->arrn); break;
+        case FT_REF: emit_sprite_ref(sb, f->refs, depth); break;
+        case FT_REFS: emit_sprite_refs(sb, f->refs, f->arrn, depth); break;
     }
 }
 
-/* Emit the object: `force_first` (or NULL) is emitted first, the rest ASCENDING. */
-static char *emit_object(const char *force_first, efield *f, int n) {
+/* Emit the object at its final indentation: `force_first` (or NULL) is emitted
+ * first, the rest ASCENDING. The same writer serves byte output and the exact
+ * count-only admission pass. */
+static bool emit_object(tp_sb *sb, const char *force_first, efield *f, int n,
+                        int depth, bool trailing_newline) {
     for (int i = 1; i < n; i++) { /* insertion sort by key (ascending ASCII) */
         efield tmp = f[i];
         int j = i - 1;
@@ -74,16 +119,15 @@ static char *emit_object(const char *force_first, efield *f, int n) {
         }
         f[j + 1] = tmp;
     }
-    tp_sb sb = {0};
-    tp_sb_char(&sb, '{');
+    tp_sb_char(sb, '{');
     bool first = true;
     int forced = -1;
     if (force_first) {
         for (int i = 0; i < n; i++) {
             if (strcmp(f[i].key, force_first) == 0) {
                 forced = i;
-                tp_obj_key(&sb, 1, &first, f[i].key);
-                emit_value(&sb, &f[i]);
+                tp_obj_key(sb, depth + 1, &first, f[i].key);
+                emit_value(sb, &f[i], depth + 1);
                 break;
             }
         }
@@ -92,15 +136,16 @@ static char *emit_object(const char *force_first, efield *f, int n) {
         if (i == forced) {
             continue;
         }
-        tp_obj_key(&sb, 1, &first, f[i].key);
-        emit_value(&sb, &f[i]);
+        tp_obj_key(sb, depth + 1, &first, f[i].key);
+        emit_value(sb, &f[i], depth + 1);
     }
-    tp_sb_str(&sb, "\n}\n");
-    if (sb.oom) {
-        free(sb.buf);
-        return NULL;
+    tp_sb_char(sb, '\n');
+    tp_sb_indent(sb, depth);
+    tp_sb_char(sb, '}');
+    if (trailing_newline) {
+        tp_sb_char(sb, '\n');
     }
-    return sb.buf;
+    return !sb->oom && !sb->limit_exceeded;
 }
 
 /* push helpers over a bounded efield array. */
@@ -110,10 +155,13 @@ static char *emit_object(const char *force_first, efield *f, int n) {
 #define PUSH_NUM(K, NV) (f[c].key = (K), f[c].t = FT_NUM, f[c].n = (double)(NV), c++)
 #define PUSH_BOOL(K, BV) (f[c].key = (K), f[c].t = FT_BOOL, f[c].b = (BV), c++)
 #define PUSH_ARR(K, AV, AN) (f[c].key = (K), f[c].t = FT_ARR, f[c].arr = (AV), f[c].arrn = (AN), c++)
+#define PUSH_REF(K, RV) (f[c].key = (K), f[c].t = FT_REF, f[c].refs = (RV), c++)
+#define PUSH_REFS(K, RV, RN) (f[c].key = (K), f[c].t = FT_REFS, f[c].refs = (RV), f[c].arrn = (RN), c++)
 
-char *tp_operation_encode(const tp_operation *op) {
-    if (!op) {
-        return NULL;
+bool tp_operation_emit_canonical(tp_sb *sb, const tp_operation *op, int depth,
+                                 bool trailing_newline) {
+    if (!sb || !op || depth < 0) {
+        return false;
     }
     const tp_op_info *info = tp_op_info_by_kind(op->kind);
     if (!info) {
@@ -180,13 +228,14 @@ char *tp_operation_encode(const tp_operation *op) {
             uint32_t m = op->u.sprite_clear.mask;
             PUSH_ID("source_id", TP_ID_KIND_SOURCE, op->u.sprite_clear.source_id);
             PUSH_STR("src_key", op->u.sprite_clear.src_key);
-            if (m & TP_SPF_ORIGIN) clr_toks[clr_n++] = "origin";
-            if (m & TP_SPF_SLICE9) clr_toks[clr_n++] = "slice9";
-            if (m & TP_SPF_SHAPE) clr_toks[clr_n++] = "shape";
-            if (m & TP_SPF_ALLOW_ROTATE) clr_toks[clr_n++] = "allow_rotate";
-            if (m & TP_SPF_MAX_VERTICES) clr_toks[clr_n++] = "max_vertices";
-            if (m & TP_SPF_MARGIN) clr_toks[clr_n++] = "margin";
-            if (m & TP_SPF_EXTRUDE) clr_toks[clr_n++] = "extrude";
+            size_t clear_count = 0U;
+            const tp_sprite_clear_field *clear_fields =
+                tp_op__sprite_clear_fields(&clear_count);
+            for (size_t i = 0U; i < clear_count; i++) {
+                if ((m & clear_fields[i].bit) != 0U) {
+                    clr_toks[clr_n++] = clear_fields[i].token;
+                }
+            }
             PUSH_ARR("fields", (char *const *)clr_toks, clr_n);
             break;
         }
@@ -203,7 +252,7 @@ char *tp_operation_encode(const tp_operation *op) {
             PUSH_INT("playback", a->playback);
             PUSH_BOOL("flip_h", a->flip_h);
             PUSH_BOOL("flip_v", a->flip_v);
-            PUSH_ARR("frames", a->frames, a->frame_count);
+            PUSH_REFS("frames", a->frames, a->frame_count);
             break;
         }
         case TP_OP_ANIMATION_REMOVE: PUSH_ID("anim_id", TP_ID_KIND_ANIM, op->u.anim_ref.anim_id); break;
@@ -222,11 +271,11 @@ char *tp_operation_encode(const tp_operation *op) {
         }
         case TP_OP_ANIMATION_FRAMES_SET:
             PUSH_ID("anim_id", TP_ID_KIND_ANIM, op->u.anim_frames_set.anim_id);
-            PUSH_ARR("frames", op->u.anim_frames_set.frames, op->u.anim_frames_set.frame_count);
+            PUSH_REFS("frames", op->u.anim_frames_set.frames, op->u.anim_frames_set.frame_count);
             break;
         case TP_OP_ANIMATION_FRAME_ADD:
             PUSH_ID("anim_id", TP_ID_KIND_ANIM, op->u.anim_frame_add.anim_id);
-            PUSH_STR("frame", op->u.anim_frame_add.frame);
+            PUSH_REF("frame", &op->u.anim_frame_add.frame);
             PUSH_INT("index", op->u.anim_frame_add.index);
             break;
         case TP_OP_ANIMATION_FRAME_REMOVE:
@@ -256,7 +305,23 @@ char *tp_operation_encode(const tp_operation *op) {
         case TP_OP_INVALID:
         case TP_OP_KIND_COUNT: break;
     }
-    return emit_object("op", f, c);
+    return emit_object(sb, "op", f, c, depth, trailing_newline);
+}
+
+char *tp_operation_encode_bounded(const tp_operation *op, size_t max_bytes, bool *too_large) {
+    if (too_large) *too_large = false;
+    tp_sb sb = {0};
+    sb.limit = max_bytes;
+    if (!tp_operation_emit_canonical(&sb, op, 0, true)) {
+        if (too_large) *too_large = sb.limit_exceeded;
+        free(sb.buf);
+        return NULL;
+    }
+    return sb.buf;
+}
+
+char *tp_operation_encode(const tp_operation *op) {
+    return tp_operation_encode_bounded(op, 0U, NULL);
 }
 
 char *tp_op_result_encode(const tp_operation *op, const tp_op_reject *rej) {
@@ -274,5 +339,10 @@ char *tp_op_result_encode(const tp_operation *op, const tp_op_reject *rej) {
     } else {
         PUSH_STR("status", "committed");
     }
-    return emit_object(NULL, f, c); /* result keys are pure ascending (no discriminator) */
+    tp_sb sb = {0};
+    if (!emit_object(&sb, NULL, f, c, 0, true)) {
+        free(sb.buf);
+        return NULL;
+    }
+    return sb.buf; /* result keys are pure ascending (no discriminator) */
 }

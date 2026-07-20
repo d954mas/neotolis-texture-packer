@@ -1,5 +1,4 @@
-/* Shared render kit for the ntpacker GUI (see gui_widgets.h). Split out of main.c (GUI
- * decomposition step 1) as a pure move -- function bodies relocated verbatim, no behavior change. */
+/* Shared render kit for the ntpacker GUI (see gui_widgets.h). */
 
 #include "gui_widgets.h"
 

@@ -1,6 +1,6 @@
 /*
- * F2-02 task 3 (decode half, lowering): a shape-valid transaction op JSON object ->
- * a typed F2-01 tp_operation. This is the inverse of tp_operation_encode; it reads
+ * A shape-valid transaction op JSON object ->
+ * a typed tp_operation. This is the inverse of tp_operation_encode; it reads
  * ONLY the closed per-kind field vocabulary (tp_op_fields) and derives each SET op's
  * presence mask from which fields are present. Every number routes through the
  * range-checked j_i64 converter (tp_txn_json.h) -- no out-of-range double->int cast.
@@ -16,11 +16,26 @@
 #include <string.h>
 
 #include "tp_core/tp_id.h"
+#include "tp_op_internal.h"
 #include "tp_txn_json.h"
 
-/* Read the frames[] string array into a fresh char** (each entry duped). absent ->
- * (NULL, 0). A non-array or non-string element -> structured fault. */
-static tp_status lower_frames(const cJSON *oj, char ***out_frames, int *out_n, tp_error *err) {
+static tp_status lower_frame_ref(const cJSON *value, tp_op_sprite_ref *out,
+                                 tp_error *err) {
+    if (!cJSON_IsObject(value)) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "frame must be a {source_id, src_key} object");
+    }
+    tp_status status = j_opt_shape_id(value, "source_id", TP_ID_KIND_SOURCE,
+                                      &out->source_id, err);
+    if (status != TP_STATUS_OK) {
+        return status;
+    }
+    return j_opt_dup(value, "src_key", &out->src_key, err);
+}
+
+/* Read canonical frames[] objects into a fresh array. */
+static tp_status lower_frames(const cJSON *oj, tp_op_sprite_ref **out_frames,
+                              int *out_n, tp_error *err) {
     *out_frames = NULL;
     *out_n = 0;
     const cJSON *arr = cJSON_GetObjectItemCaseSensitive(oj, "frames");
@@ -34,68 +49,75 @@ static tp_status lower_frames(const cJSON *oj, char ***out_frames, int *out_n, t
     if (n == 0) {
         return TP_STATUS_OK;
     }
-    char **frames = (char **)calloc((size_t)n, sizeof(char *));
+    tp_op_sprite_ref *frames = (tp_op_sprite_ref *)calloc((size_t)n,
+                                                          sizeof *frames);
     if (!frames) {
         return tp_error_set(err, TP_STATUS_OOM, "frames alloc");
     }
     for (int i = 0; i < n; i++) {
         const cJSON *el = cJSON_GetArrayItem(arr, i);
-        if (!cJSON_IsString(el)) {
+        tp_status status = lower_frame_ref(el, &frames[i], err);
+        if (status != TP_STATUS_OK) {
             for (int j = 0; j < i; j++) {
-                free(frames[j]);
+                free(frames[j].src_key);
             }
             free(frames);
-            return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "frame %d is not a string", i);
+            return status;
         }
-        size_t len = strlen(el->valuestring) + 1U;
-        frames[i] = (char *)malloc(len);
-        if (!frames[i]) {
-            for (int j = 0; j < i; j++) {
-                free(frames[j]);
-            }
-            free(frames);
-            return tp_error_set(err, TP_STATUS_OOM, "frame dup");
-        }
-        memcpy(frames[i], el->valuestring, len);
     }
     *out_frames = frames;
     *out_n = n;
     return TP_STATUS_OK;
 }
 
-/* fields[] token array -> sprite override mask. Unknown tokens are ignored (the
- * shape pass validated the `fields` key itself; token content is validated by
- * tp_operation_validate rejecting a mask of 0). */
-static uint32_t lower_clear_mask(const cJSON *oj) {
-    uint32_t mask = 0;
+static tp_status require_field(const cJSON *oj, const char *key,
+                               tp_error *err) {
+    if (!cJSON_GetObjectItemCaseSensitive(oj, key)) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "missing required field \"%s\"", key);
+    }
+    return TP_STATUS_OK;
+}
+
+static tp_status j_req_int(const cJSON *oj, const char *key, int *out,
+                           tp_error *err) {
+    bool present = false;
+    tp_status status = j_opt_int(oj, key, out, &present, err);
+    if (status != TP_STATUS_OK) {
+        return status;
+    }
+    return present ? TP_STATUS_OK
+                   : tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                                  "missing required field \"%s\"", key);
+}
+
+/* fields[] token array -> sprite override mask. The token vocabulary is closed:
+ * accepting a token that the encoder cannot reproduce would make journal replay
+ * differ from the recorded mutation. */
+static tp_status lower_clear_mask(const cJSON *oj, uint32_t *out,
+                                  tp_error *err) {
+    *out = 0U;
     const cJSON *arr = cJSON_GetObjectItemCaseSensitive(oj, "fields");
     if (!cJSON_IsArray(arr)) {
-        return 0;
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "fields must be an array");
     }
     int n = cJSON_GetArraySize(arr);
     for (int i = 0; i < n; i++) {
         const cJSON *el = cJSON_GetArrayItem(arr, i);
         if (!cJSON_IsString(el)) {
-            continue;
+            return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                                "fields[%d] must be a string", i);
         }
-        const char *t = el->valuestring;
-        if (strcmp(t, "origin") == 0) {
-            mask |= TP_SPF_ORIGIN;
-        } else if (strcmp(t, "slice9") == 0) {
-            mask |= TP_SPF_SLICE9;
-        } else if (strcmp(t, "shape") == 0) {
-            mask |= TP_SPF_SHAPE;
-        } else if (strcmp(t, "allow_rotate") == 0) {
-            mask |= TP_SPF_ALLOW_ROTATE;
-        } else if (strcmp(t, "max_vertices") == 0) {
-            mask |= TP_SPF_MAX_VERTICES;
-        } else if (strcmp(t, "margin") == 0) {
-            mask |= TP_SPF_MARGIN;
-        } else if (strcmp(t, "extrude") == 0) {
-            mask |= TP_SPF_EXTRUDE;
+        uint32_t bit = 0U;
+        if (!tp_op__sprite_clear_bit(el->valuestring, &bit)) {
+            return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                                "unknown sprite override field '%s'",
+                                el->valuestring);
         }
+        *out |= bit;
     }
-    return mask;
+    return TP_STATUS_OK;
 }
 
 /* TRY: propagate a lowering fault after freeing the partially-filled op. Used only
@@ -135,54 +157,41 @@ static tp_status lower_atlas_settings(const cJSON *oj, tp_op_atlas_settings *s, 
     return TP_STATUS_OK;
 }
 
-/* Optional int16 override field: range-checked int (j_opt_int) THEN bounded to the
- * int16 storage range BEFORE the narrowing cast. Without this bound a client value
- * like ov_margin:65535 wraps to -1 (== TP_PROJECT_OV_INHERIT), validate skips it, and
- * apply COMMITS with the override silently dropped (65536->0, 65537->1). absent ->
- * present=false, *out untouched. */
-static tp_status opt_i16(const cJSON *oj, const char *key, int16_t *out, bool *present, tp_error *err) {
-    int v = 0;
-    tp_status st = j_opt_int(oj, key, &v, present, err);
-    if (st != TP_STATUS_OK || !*present) {
-        return st;
-    }
-    if (v < INT16_MIN || v > INT16_MAX) {
-        return tp_error_set(err, TP_STATUS_OUT_OF_RANGE, "%s = %d must be in [%d..%d]", key, v, INT16_MIN, INT16_MAX);
-    }
-    *out = (int16_t)v;
-    return TP_STATUS_OK;
-}
-
 static tp_status lower_sprite_set(const cJSON *oj, tp_op_sprite_set *s, tp_error *err) {
     tp_status st;
     bool pr = false;
     bool ox = false, oy = false;
     if ((st = j_opt_float(oj, "origin_x", &s->origin_x, &ox, err)) != TP_STATUS_OK) return st;
     if ((st = j_opt_float(oj, "origin_y", &s->origin_y, &oy, err)) != TP_STATUS_OK) return st;
+    if (ox != oy) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "origin_x and origin_y must be provided together");
+    }
     if (ox || oy) s->mask |= TP_SPF_ORIGIN;
-    bool any9 = false;
+    int present9 = 0;
     const char *k9[4] = {"slice9_l", "slice9_r", "slice9_t", "slice9_b"};
     for (int i = 0; i < 4; i++) {
         int v = 0;
         if ((st = j_opt_int(oj, k9[i], &v, &pr, err)) != TP_STATUS_OK) return st;
         if (pr) {
-            any9 = true;
+            present9++;
         }
-        if (v < 0 || v > 65535) {
-            return tp_error_set(err, TP_STATUS_OUT_OF_RANGE, "%s = %d must be in [0..65535]", k9[i], v);
-        }
-        s->slice9[i] = (uint16_t)v;
+        s->slice9[i] = v;
     }
-    if (any9) s->mask |= TP_SPF_SLICE9;
-    if ((st = opt_i16(oj, "ov_shape", &s->ov_shape, &pr, err)) != TP_STATUS_OK) return st;
+    if (present9 != 0 && present9 != 4) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "slice9_l/r/t/b must be provided together");
+    }
+    if (present9 == 4) s->mask |= TP_SPF_SLICE9;
+    if ((st = j_opt_int(oj, "ov_shape", &s->ov_shape, &pr, err)) != TP_STATUS_OK) return st;
     if (pr) s->mask |= TP_SPF_SHAPE;
-    if ((st = opt_i16(oj, "ov_allow_rotate", &s->ov_allow_rotate, &pr, err)) != TP_STATUS_OK) return st;
+    if ((st = j_opt_int(oj, "ov_allow_rotate", &s->ov_allow_rotate, &pr, err)) != TP_STATUS_OK) return st;
     if (pr) s->mask |= TP_SPF_ALLOW_ROTATE;
-    if ((st = opt_i16(oj, "ov_max_vertices", &s->ov_max_vertices, &pr, err)) != TP_STATUS_OK) return st;
+    if ((st = j_opt_int(oj, "ov_max_vertices", &s->ov_max_vertices, &pr, err)) != TP_STATUS_OK) return st;
     if (pr) s->mask |= TP_SPF_MAX_VERTICES;
-    if ((st = opt_i16(oj, "ov_margin", &s->ov_margin, &pr, err)) != TP_STATUS_OK) return st;
+    if ((st = j_opt_int(oj, "ov_margin", &s->ov_margin, &pr, err)) != TP_STATUS_OK) return st;
     if (pr) s->mask |= TP_SPF_MARGIN;
-    if ((st = opt_i16(oj, "ov_extrude", &s->ov_extrude, &pr, err)) != TP_STATUS_OK) return st;
+    if ((st = j_opt_int(oj, "ov_extrude", &s->ov_extrude, &pr, err)) != TP_STATUS_OK) return st;
     if (pr) s->mask |= TP_SPF_EXTRUDE;
     return TP_STATUS_OK;
 }
@@ -225,8 +234,18 @@ tp_status tp_txn__lower_op(const cJSON *oj, tp_operation *out, tp_error *err) {
             TRY(j_opt_dup(oj, "key", &out->u.source_add.key, err));
             const cJSON *kind = cJSON_GetObjectItemCaseSensitive(oj, "kind");
             out->u.source_add.kind = TP_SOURCE_KIND_FOLDER;
-            if (cJSON_IsString(kind) && strcmp(kind->valuestring, "file") == 0) {
+            if (!kind) {
+                break;
+            }
+            if (!cJSON_IsString(kind)) {
+                TRY(tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                                 "\"kind\" must be a string"));
+            }
+            if (strcmp(kind->valuestring, "file") == 0) {
                 out->u.source_add.kind = TP_SOURCE_KIND_FILE;
+            } else if (strcmp(kind->valuestring, "folder") != 0) {
+                TRY(tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                                 "unknown source kind '%s'", kind->valuestring));
             }
             break;
         }
@@ -246,11 +265,12 @@ tp_status tp_txn__lower_op(const cJSON *oj, tp_operation *out, tp_error *err) {
         case TP_OP_SPRITE_OVERRIDE_CLEAR:
             TRY(j_opt_shape_id(oj, "source_id", TP_ID_KIND_SOURCE, &out->u.sprite_clear.source_id, err));
             TRY(j_opt_dup(oj, "src_key", &out->u.sprite_clear.src_key, err));
-            out->u.sprite_clear.mask = lower_clear_mask(oj);
+            TRY(lower_clear_mask(oj, &out->u.sprite_clear.mask, err));
             break;
         case TP_OP_SPRITE_NAME_SET:
             TRY(j_opt_shape_id(oj, "source_id", TP_ID_KIND_SOURCE, &out->u.sprite_name.source_id, err));
             TRY(j_opt_dup(oj, "src_key", &out->u.sprite_name.src_key, err));
+            TRY(require_field(oj, "name", err));
             TRY(j_opt_dup(oj, "name", &out->u.sprite_name.name, err)); /* NULL clears the rename */
             break;
 
@@ -280,27 +300,27 @@ tp_status tp_txn__lower_op(const cJSON *oj, tp_operation *out, tp_error *err) {
             break;
         case TP_OP_ANIMATION_FRAMES_SET:
             TRY(j_opt_shape_id(oj, "anim_id", TP_ID_KIND_ANIM, &out->u.anim_frames_set.anim_id, err));
+            TRY(require_field(oj, "frames", err));
             TRY(lower_frames(oj, &out->u.anim_frames_set.frames, &out->u.anim_frames_set.frame_count, err));
             break;
         case TP_OP_ANIMATION_FRAME_ADD: {
             bool pr = false;
             TRY(j_opt_shape_id(oj, "anim_id", TP_ID_KIND_ANIM, &out->u.anim_frame_add.anim_id, err));
-            TRY(j_opt_dup(oj, "frame", &out->u.anim_frame_add.frame, err));
+            const cJSON *frame = cJSON_GetObjectItemCaseSensitive(oj, "frame");
+            TRY(lower_frame_ref(frame, &out->u.anim_frame_add.frame, err));
             out->u.anim_frame_add.index = -1; /* default append */
             TRY(j_opt_int(oj, "index", &out->u.anim_frame_add.index, &pr, err));
             break;
         }
         case TP_OP_ANIMATION_FRAME_REMOVE: {
-            bool pr = false;
             TRY(j_opt_shape_id(oj, "anim_id", TP_ID_KIND_ANIM, &out->u.anim_frame_rm.anim_id, err));
-            TRY(j_opt_int(oj, "index", &out->u.anim_frame_rm.index, &pr, err));
+            TRY(j_req_int(oj, "index", &out->u.anim_frame_rm.index, err));
             break;
         }
         case TP_OP_ANIMATION_FRAME_MOVE: {
-            bool pr = false;
             TRY(j_opt_shape_id(oj, "anim_id", TP_ID_KIND_ANIM, &out->u.anim_frame_move.anim_id, err));
-            TRY(j_opt_int(oj, "from_index", &out->u.anim_frame_move.from_index, &pr, err));
-            TRY(j_opt_int(oj, "to_index", &out->u.anim_frame_move.to_index, &pr, err));
+            TRY(j_req_int(oj, "from_index", &out->u.anim_frame_move.from_index, err));
+            TRY(j_req_int(oj, "to_index", &out->u.anim_frame_move.to_index, err));
             break;
         }
 
@@ -317,20 +337,24 @@ tp_status tp_txn__lower_op(const cJSON *oj, tp_operation *out, tp_error *err) {
             TRY(j_opt_shape_id(oj, "target_id", TP_ID_KIND_TARGET, &out->u.target_ref.target_id, err));
             break;
         case TP_OP_TARGET_SET: {
-            /* JSON target.set stays FULL-REPLACE (mask = TP_TF_ALL), preserving the pre-mask contract EXACTLY:
-             * validate requires exporter_id (known) + out_path (non-empty), and an omitted "enabled" defaults
-             * to true. The C1 mask is an INTERNAL mechanism (the GUI builds partial-field ops in C); exposing
-             * partial-field target.set over the JSON/dev-API surface is a DELIBERATE future extension that must
-             * come with a spec + tests -- NOT a silent side effect of adding the mask to the struct. */
+            /* R2a: JSON target.set is FIELD-PRESENCE, like every other SET op (atlas.settings.set,
+             * sprite.override.set, animation.settings.set): the mask reflects exactly which of
+             * exporter_id / out_path / enabled are present, so tp_operation_encode -> decode round-trips
+             * faithfully. The diff-recovery journal serializes committed ops via tp_txn_request_encode
+             * (which emits ONLY masked fields) and replays them on recovery; the old full-replace pin
+             * re-added fields the sparse wire form never carried -> silent data loss on replay. validate
+             * is already mask-aware (each field is checked only when its bit is set; mask==0 is rejected),
+             * and a full object (all three fields) still yields TP_TF_ALL, so the pre-R2a contract is a
+             * strict subset. `out` was memset at the top of this function, so mask starts at 0. */
             tp_op_target_set *s = &out->u.target_set;
             bool pr = false;
             TRY(j_opt_shape_id(oj, "target_id", TP_ID_KIND_TARGET, &s->target_id, err));
             TRY(j_opt_dup(oj, "exporter_id", &s->exporter_id, err));
+            if (s->exporter_id) s->mask |= TP_TF_EXPORTER; /* string presence == a non-NULL dup result */
             TRY(j_opt_dup(oj, "out_path", &s->out_path, err));
-            s->enabled = true;
+            if (s->out_path) s->mask |= TP_TF_OUT_PATH;
             TRY(j_opt_bool(oj, "enabled", &s->enabled, &pr, err));
-            (void)pr;
-            s->mask = TP_TF_ALL;
+            if (pr) s->mask |= TP_TF_ENABLED;
             break;
         }
 

@@ -1,0 +1,1 @@
+{"schema":1,"error":{"id":"file_io_failed","message":"could not atomically replace project","phase":"atomic_replace","path":"/workspace/project.ntpacker_project","native_code":13}}

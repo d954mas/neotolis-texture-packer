@@ -34,6 +34,12 @@ endif()
 add_subdirectory(external/neotolis-engine/tools/builder nt_builder)
 
 enable_testing()
+add_custom_target(report_loc_inventory
+    COMMAND ${CMAKE_COMMAND}
+        -DROOT=${CMAKE_SOURCE_DIR}
+        -P ${CMAKE_SOURCE_DIR}/scripts/report_loc_inventory.cmake
+    COMMENT "Reporting production translation-unit LOC (non-gating)"
+    VERBATIM)
 add_subdirectory(apps/smoke)
 add_subdirectory(packer)
 # apps/gui and apps/cli link tp_core/tp_build (packer/), so add them after.

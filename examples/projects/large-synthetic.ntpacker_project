@@ -1,0 +1,6305 @@
+{
+  "version": 5,
+  "atlases": [
+    {
+      "id": "atlas_6c8aa7c4e1fe1b3854728facc9e60320",
+      "name": "atlas_000",
+      "sources": [
+        {
+          "id": "source_6e8aa7c4e1fe1b3856728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_698aa7c4e1fe1b3851728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_688aa7c4e1fe1b3850728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_6b8aa7c4e1fe1b3853728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_6a8aa7c4e1fe1b3852728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_658aa7c4e1fe1b385d728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_648aa7c4e1fe1b385c728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_678aa7c4e1fe1b385f728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_668aa7c4e1fe1b385e728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_618aa7c4e1fe1b3859728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_6f8aa7c4e1fe1b3857728facc9e60320",
+          "out_path": "out/atlas_000"
+        }
+      ]
+    },
+    {
+      "id": "atlas_608aa7c4e1fe1b3858728facc9e60320",
+      "name": "atlas_001",
+      "sources": [
+        {
+          "id": "source_628aa7c4e1fe1b385a728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_7d8aa7c4e1fe1b3845728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_7c8aa7c4e1fe1b3844728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_7f8aa7c4e1fe1b3847728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_7e8aa7c4e1fe1b3846728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_798aa7c4e1fe1b3841728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_788aa7c4e1fe1b3840728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_7b8aa7c4e1fe1b3843728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_7a8aa7c4e1fe1b3842728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_758aa7c4e1fe1b384d728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_638aa7c4e1fe1b385b728facc9e60320",
+          "out_path": "out/atlas_001"
+        }
+      ]
+    },
+    {
+      "id": "atlas_748aa7c4e1fe1b384c728facc9e60320",
+      "name": "atlas_002",
+      "sources": [
+        {
+          "id": "source_768aa7c4e1fe1b384e728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_718aa7c4e1fe1b3849728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_708aa7c4e1fe1b3848728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_738aa7c4e1fe1b384b728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_728aa7c4e1fe1b384a728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_4d8aa7c4e1fe1b3875728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_4c8aa7c4e1fe1b3874728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_4f8aa7c4e1fe1b3877728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_4e8aa7c4e1fe1b3876728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_498aa7c4e1fe1b3871728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_778aa7c4e1fe1b384f728facc9e60320",
+          "out_path": "out/atlas_002"
+        }
+      ]
+    },
+    {
+      "id": "atlas_488aa7c4e1fe1b3870728facc9e60320",
+      "name": "atlas_003",
+      "sources": [
+        {
+          "id": "source_4a8aa7c4e1fe1b3872728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_458aa7c4e1fe1b387d728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_448aa7c4e1fe1b387c728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_478aa7c4e1fe1b387f728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_468aa7c4e1fe1b387e728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_418aa7c4e1fe1b3879728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_408aa7c4e1fe1b3878728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_438aa7c4e1fe1b387b728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_428aa7c4e1fe1b387a728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_5d8aa7c4e1fe1b3865728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_4b8aa7c4e1fe1b3873728facc9e60320",
+          "out_path": "out/atlas_003"
+        }
+      ]
+    },
+    {
+      "id": "atlas_5c8aa7c4e1fe1b3864728facc9e60320",
+      "name": "atlas_004",
+      "sources": [
+        {
+          "id": "source_5e8aa7c4e1fe1b3866728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_598aa7c4e1fe1b3861728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_588aa7c4e1fe1b3860728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_5b8aa7c4e1fe1b3863728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_5a8aa7c4e1fe1b3862728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_558aa7c4e1fe1b386d728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_548aa7c4e1fe1b386c728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_578aa7c4e1fe1b386f728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_568aa7c4e1fe1b386e728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_518aa7c4e1fe1b3869728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_5f8aa7c4e1fe1b3867728facc9e60320",
+          "out_path": "out/atlas_004"
+        }
+      ]
+    },
+    {
+      "id": "atlas_508aa7c4e1fe1b3868728facc9e60320",
+      "name": "atlas_005",
+      "sources": [
+        {
+          "id": "source_528aa7c4e1fe1b386a728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_2d8aa7c4e1fe1b3815728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_2c8aa7c4e1fe1b3814728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_2f8aa7c4e1fe1b3817728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_2e8aa7c4e1fe1b3816728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_298aa7c4e1fe1b3811728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_288aa7c4e1fe1b3810728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_2b8aa7c4e1fe1b3813728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_2a8aa7c4e1fe1b3812728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_258aa7c4e1fe1b381d728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_538aa7c4e1fe1b386b728facc9e60320",
+          "out_path": "out/atlas_005"
+        }
+      ]
+    },
+    {
+      "id": "atlas_248aa7c4e1fe1b381c728facc9e60320",
+      "name": "atlas_006",
+      "sources": [
+        {
+          "id": "source_268aa7c4e1fe1b381e728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_218aa7c4e1fe1b3819728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_208aa7c4e1fe1b3818728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_238aa7c4e1fe1b381b728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_228aa7c4e1fe1b381a728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_3d8aa7c4e1fe1b3805728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_3c8aa7c4e1fe1b3804728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_3f8aa7c4e1fe1b3807728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_3e8aa7c4e1fe1b3806728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_398aa7c4e1fe1b3801728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_278aa7c4e1fe1b381f728facc9e60320",
+          "out_path": "out/atlas_006"
+        }
+      ]
+    },
+    {
+      "id": "atlas_388aa7c4e1fe1b3800728facc9e60320",
+      "name": "atlas_007",
+      "sources": [
+        {
+          "id": "source_3a8aa7c4e1fe1b3802728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_358aa7c4e1fe1b380d728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_348aa7c4e1fe1b380c728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_378aa7c4e1fe1b380f728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_368aa7c4e1fe1b380e728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_318aa7c4e1fe1b3809728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_308aa7c4e1fe1b3808728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_338aa7c4e1fe1b380b728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_328aa7c4e1fe1b380a728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_0d8aa7c4e1fe1b3835728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_3b8aa7c4e1fe1b3803728facc9e60320",
+          "out_path": "out/atlas_007"
+        }
+      ]
+    },
+    {
+      "id": "atlas_0c8aa7c4e1fe1b3834728facc9e60320",
+      "name": "atlas_008",
+      "sources": [
+        {
+          "id": "source_0e8aa7c4e1fe1b3836728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_098aa7c4e1fe1b3831728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_088aa7c4e1fe1b3830728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_0b8aa7c4e1fe1b3833728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_0a8aa7c4e1fe1b3832728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_058aa7c4e1fe1b383d728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_048aa7c4e1fe1b383c728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_078aa7c4e1fe1b383f728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_068aa7c4e1fe1b383e728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_018aa7c4e1fe1b3839728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_0f8aa7c4e1fe1b3837728facc9e60320",
+          "out_path": "out/atlas_008"
+        }
+      ]
+    },
+    {
+      "id": "atlas_008aa7c4e1fe1b3838728facc9e60320",
+      "name": "atlas_009",
+      "sources": [
+        {
+          "id": "source_028aa7c4e1fe1b383a728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_1d8aa7c4e1fe1b3825728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_1c8aa7c4e1fe1b3824728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_1f8aa7c4e1fe1b3827728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_1e8aa7c4e1fe1b3826728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_198aa7c4e1fe1b3821728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_188aa7c4e1fe1b3820728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_1b8aa7c4e1fe1b3823728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_1a8aa7c4e1fe1b3822728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_158aa7c4e1fe1b382d728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_038aa7c4e1fe1b383b728facc9e60320",
+          "out_path": "out/atlas_009"
+        }
+      ]
+    },
+    {
+      "id": "atlas_148aa7c4e1fe1b382c728facc9e60320",
+      "name": "atlas_010",
+      "sources": [
+        {
+          "id": "source_168aa7c4e1fe1b382e728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_118aa7c4e1fe1b3829728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_108aa7c4e1fe1b3828728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_138aa7c4e1fe1b382b728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_128aa7c4e1fe1b382a728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_ed8aa7c4e1fe1b38d5728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_ec8aa7c4e1fe1b38d4728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_ef8aa7c4e1fe1b38d7728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_ee8aa7c4e1fe1b38d6728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_e98aa7c4e1fe1b38d1728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_178aa7c4e1fe1b382f728facc9e60320",
+          "out_path": "out/atlas_010"
+        }
+      ]
+    },
+    {
+      "id": "atlas_e88aa7c4e1fe1b38d0728facc9e60320",
+      "name": "atlas_011",
+      "sources": [
+        {
+          "id": "source_ea8aa7c4e1fe1b38d2728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_e58aa7c4e1fe1b38dd728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_e48aa7c4e1fe1b38dc728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_e78aa7c4e1fe1b38df728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_e68aa7c4e1fe1b38de728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_e18aa7c4e1fe1b38d9728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_e08aa7c4e1fe1b38d8728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_e38aa7c4e1fe1b38db728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_e28aa7c4e1fe1b38da728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_fd8aa7c4e1fe1b38c5728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_eb8aa7c4e1fe1b38d3728facc9e60320",
+          "out_path": "out/atlas_011"
+        }
+      ]
+    },
+    {
+      "id": "atlas_fc8aa7c4e1fe1b38c4728facc9e60320",
+      "name": "atlas_012",
+      "sources": [
+        {
+          "id": "source_fe8aa7c4e1fe1b38c6728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_f98aa7c4e1fe1b38c1728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_f88aa7c4e1fe1b38c0728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_fb8aa7c4e1fe1b38c3728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_fa8aa7c4e1fe1b38c2728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_f58aa7c4e1fe1b38cd728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_f48aa7c4e1fe1b38cc728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_f78aa7c4e1fe1b38cf728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_f68aa7c4e1fe1b38ce728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_f18aa7c4e1fe1b38c9728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_ff8aa7c4e1fe1b38c7728facc9e60320",
+          "out_path": "out/atlas_012"
+        }
+      ]
+    },
+    {
+      "id": "atlas_f08aa7c4e1fe1b38c8728facc9e60320",
+      "name": "atlas_013",
+      "sources": [
+        {
+          "id": "source_f28aa7c4e1fe1b38ca728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_cd8aa7c4e1fe1b38f5728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_cc8aa7c4e1fe1b38f4728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_cf8aa7c4e1fe1b38f7728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_ce8aa7c4e1fe1b38f6728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_c98aa7c4e1fe1b38f1728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_c88aa7c4e1fe1b38f0728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_cb8aa7c4e1fe1b38f3728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_ca8aa7c4e1fe1b38f2728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_c58aa7c4e1fe1b38fd728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_f38aa7c4e1fe1b38cb728facc9e60320",
+          "out_path": "out/atlas_013"
+        }
+      ]
+    },
+    {
+      "id": "atlas_c48aa7c4e1fe1b38fc728facc9e60320",
+      "name": "atlas_014",
+      "sources": [
+        {
+          "id": "source_c68aa7c4e1fe1b38fe728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_c18aa7c4e1fe1b38f9728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_c08aa7c4e1fe1b38f8728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_c38aa7c4e1fe1b38fb728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_c28aa7c4e1fe1b38fa728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_dd8aa7c4e1fe1b38e5728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_dc8aa7c4e1fe1b38e4728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_df8aa7c4e1fe1b38e7728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_de8aa7c4e1fe1b38e6728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_d98aa7c4e1fe1b38e1728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_c78aa7c4e1fe1b38ff728facc9e60320",
+          "out_path": "out/atlas_014"
+        }
+      ]
+    },
+    {
+      "id": "atlas_d88aa7c4e1fe1b38e0728facc9e60320",
+      "name": "atlas_015",
+      "sources": [
+        {
+          "id": "source_da8aa7c4e1fe1b38e2728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_d58aa7c4e1fe1b38ed728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_d48aa7c4e1fe1b38ec728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_d78aa7c4e1fe1b38ef728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_d68aa7c4e1fe1b38ee728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_d18aa7c4e1fe1b38e9728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_d08aa7c4e1fe1b38e8728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_d38aa7c4e1fe1b38eb728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_d28aa7c4e1fe1b38ea728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_ad8aa7c4e1fe1b3895728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_db8aa7c4e1fe1b38e3728facc9e60320",
+          "out_path": "out/atlas_015"
+        }
+      ]
+    },
+    {
+      "id": "atlas_ac8aa7c4e1fe1b3894728facc9e60320",
+      "name": "atlas_016",
+      "sources": [
+        {
+          "id": "source_ae8aa7c4e1fe1b3896728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_a98aa7c4e1fe1b3891728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_a88aa7c4e1fe1b3890728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_ab8aa7c4e1fe1b3893728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_aa8aa7c4e1fe1b3892728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_a58aa7c4e1fe1b389d728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_a48aa7c4e1fe1b389c728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_a78aa7c4e1fe1b389f728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_a68aa7c4e1fe1b389e728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_a18aa7c4e1fe1b3899728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_af8aa7c4e1fe1b3897728facc9e60320",
+          "out_path": "out/atlas_016"
+        }
+      ]
+    },
+    {
+      "id": "atlas_a08aa7c4e1fe1b3898728facc9e60320",
+      "name": "atlas_017",
+      "sources": [
+        {
+          "id": "source_a28aa7c4e1fe1b389a728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_bd8aa7c4e1fe1b3885728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_bc8aa7c4e1fe1b3884728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_bf8aa7c4e1fe1b3887728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_be8aa7c4e1fe1b3886728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_b98aa7c4e1fe1b3881728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_b88aa7c4e1fe1b3880728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_bb8aa7c4e1fe1b3883728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_ba8aa7c4e1fe1b3882728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_b58aa7c4e1fe1b388d728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_a38aa7c4e1fe1b389b728facc9e60320",
+          "out_path": "out/atlas_017"
+        }
+      ]
+    },
+    {
+      "id": "atlas_b48aa7c4e1fe1b388c728facc9e60320",
+      "name": "atlas_018",
+      "sources": [
+        {
+          "id": "source_b68aa7c4e1fe1b388e728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_b18aa7c4e1fe1b3889728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_b08aa7c4e1fe1b3888728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_b38aa7c4e1fe1b388b728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_b28aa7c4e1fe1b388a728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_8d8aa7c4e1fe1b38b5728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_8c8aa7c4e1fe1b38b4728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_8f8aa7c4e1fe1b38b7728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_8e8aa7c4e1fe1b38b6728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_898aa7c4e1fe1b38b1728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_b78aa7c4e1fe1b388f728facc9e60320",
+          "out_path": "out/atlas_018"
+        }
+      ]
+    },
+    {
+      "id": "atlas_888aa7c4e1fe1b38b0728facc9e60320",
+      "name": "atlas_019",
+      "sources": [
+        {
+          "id": "source_8a8aa7c4e1fe1b38b2728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_858aa7c4e1fe1b38bd728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_848aa7c4e1fe1b38bc728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_878aa7c4e1fe1b38bf728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_868aa7c4e1fe1b38be728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_818aa7c4e1fe1b38b9728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_808aa7c4e1fe1b38b8728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_838aa7c4e1fe1b38bb728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_828aa7c4e1fe1b38ba728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_9d8aa7c4e1fe1b38a5728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_8b8aa7c4e1fe1b38b3728facc9e60320",
+          "out_path": "out/atlas_019"
+        }
+      ]
+    },
+    {
+      "id": "atlas_9c8aa7c4e1fe1b38a4728facc9e60320",
+      "name": "atlas_020",
+      "sources": [
+        {
+          "id": "source_9e8aa7c4e1fe1b38a6728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_998aa7c4e1fe1b38a1728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_988aa7c4e1fe1b38a0728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_9b8aa7c4e1fe1b38a3728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_9a8aa7c4e1fe1b38a2728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_958aa7c4e1fe1b38ad728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_948aa7c4e1fe1b38ac728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_978aa7c4e1fe1b38af728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_968aa7c4e1fe1b38ae728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_918aa7c4e1fe1b38a9728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_9f8aa7c4e1fe1b38a7728facc9e60320",
+          "out_path": "out/atlas_020"
+        }
+      ]
+    },
+    {
+      "id": "atlas_908aa7c4e1fe1b38a8728facc9e60320",
+      "name": "atlas_021",
+      "sources": [
+        {
+          "id": "source_928aa7c4e1fe1b38aa728facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_6d8ba7c4e1fe1b3855738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_6c8ba7c4e1fe1b3854738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_6f8ba7c4e1fe1b3857738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_6e8ba7c4e1fe1b3856738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_698ba7c4e1fe1b3851738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_688ba7c4e1fe1b3850738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_6b8ba7c4e1fe1b3853738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_6a8ba7c4e1fe1b3852738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_658ba7c4e1fe1b385d738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_938aa7c4e1fe1b38ab728facc9e60320",
+          "out_path": "out/atlas_021"
+        }
+      ]
+    },
+    {
+      "id": "atlas_648ba7c4e1fe1b385c738facc9e60320",
+      "name": "atlas_022",
+      "sources": [
+        {
+          "id": "source_668ba7c4e1fe1b385e738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_618ba7c4e1fe1b3859738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_608ba7c4e1fe1b3858738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_638ba7c4e1fe1b385b738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_628ba7c4e1fe1b385a738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_7d8ba7c4e1fe1b3845738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_7c8ba7c4e1fe1b3844738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_7f8ba7c4e1fe1b3847738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_7e8ba7c4e1fe1b3846738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_798ba7c4e1fe1b3841738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_678ba7c4e1fe1b385f738facc9e60320",
+          "out_path": "out/atlas_022"
+        }
+      ]
+    },
+    {
+      "id": "atlas_788ba7c4e1fe1b3840738facc9e60320",
+      "name": "atlas_023",
+      "sources": [
+        {
+          "id": "source_7a8ba7c4e1fe1b3842738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_758ba7c4e1fe1b384d738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_748ba7c4e1fe1b384c738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_778ba7c4e1fe1b384f738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_768ba7c4e1fe1b384e738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_718ba7c4e1fe1b3849738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_708ba7c4e1fe1b3848738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_738ba7c4e1fe1b384b738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_728ba7c4e1fe1b384a738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_4d8ba7c4e1fe1b3875738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_7b8ba7c4e1fe1b3843738facc9e60320",
+          "out_path": "out/atlas_023"
+        }
+      ]
+    },
+    {
+      "id": "atlas_4c8ba7c4e1fe1b3874738facc9e60320",
+      "name": "atlas_024",
+      "sources": [
+        {
+          "id": "source_4e8ba7c4e1fe1b3876738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_498ba7c4e1fe1b3871738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_488ba7c4e1fe1b3870738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_4b8ba7c4e1fe1b3873738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_4a8ba7c4e1fe1b3872738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_458ba7c4e1fe1b387d738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_448ba7c4e1fe1b387c738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_478ba7c4e1fe1b387f738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_468ba7c4e1fe1b387e738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_418ba7c4e1fe1b3879738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_4f8ba7c4e1fe1b3877738facc9e60320",
+          "out_path": "out/atlas_024"
+        }
+      ]
+    },
+    {
+      "id": "atlas_408ba7c4e1fe1b3878738facc9e60320",
+      "name": "atlas_025",
+      "sources": [
+        {
+          "id": "source_428ba7c4e1fe1b387a738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_5d8ba7c4e1fe1b3865738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_5c8ba7c4e1fe1b3864738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_5f8ba7c4e1fe1b3867738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_5e8ba7c4e1fe1b3866738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_598ba7c4e1fe1b3861738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_588ba7c4e1fe1b3860738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_5b8ba7c4e1fe1b3863738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_5a8ba7c4e1fe1b3862738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_558ba7c4e1fe1b386d738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_438ba7c4e1fe1b387b738facc9e60320",
+          "out_path": "out/atlas_025"
+        }
+      ]
+    },
+    {
+      "id": "atlas_548ba7c4e1fe1b386c738facc9e60320",
+      "name": "atlas_026",
+      "sources": [
+        {
+          "id": "source_568ba7c4e1fe1b386e738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_518ba7c4e1fe1b3869738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_508ba7c4e1fe1b3868738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_538ba7c4e1fe1b386b738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_528ba7c4e1fe1b386a738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_2d8ba7c4e1fe1b3815738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_2c8ba7c4e1fe1b3814738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_2f8ba7c4e1fe1b3817738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_2e8ba7c4e1fe1b3816738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_298ba7c4e1fe1b3811738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_578ba7c4e1fe1b386f738facc9e60320",
+          "out_path": "out/atlas_026"
+        }
+      ]
+    },
+    {
+      "id": "atlas_288ba7c4e1fe1b3810738facc9e60320",
+      "name": "atlas_027",
+      "sources": [
+        {
+          "id": "source_2a8ba7c4e1fe1b3812738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_258ba7c4e1fe1b381d738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_248ba7c4e1fe1b381c738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_278ba7c4e1fe1b381f738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_268ba7c4e1fe1b381e738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_218ba7c4e1fe1b3819738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_208ba7c4e1fe1b3818738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_238ba7c4e1fe1b381b738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_228ba7c4e1fe1b381a738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_3d8ba7c4e1fe1b3805738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_2b8ba7c4e1fe1b3813738facc9e60320",
+          "out_path": "out/atlas_027"
+        }
+      ]
+    },
+    {
+      "id": "atlas_3c8ba7c4e1fe1b3804738facc9e60320",
+      "name": "atlas_028",
+      "sources": [
+        {
+          "id": "source_3e8ba7c4e1fe1b3806738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_398ba7c4e1fe1b3801738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_388ba7c4e1fe1b3800738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_3b8ba7c4e1fe1b3803738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_3a8ba7c4e1fe1b3802738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_358ba7c4e1fe1b380d738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_348ba7c4e1fe1b380c738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_378ba7c4e1fe1b380f738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_368ba7c4e1fe1b380e738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_318ba7c4e1fe1b3809738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_3f8ba7c4e1fe1b3807738facc9e60320",
+          "out_path": "out/atlas_028"
+        }
+      ]
+    },
+    {
+      "id": "atlas_308ba7c4e1fe1b3808738facc9e60320",
+      "name": "atlas_029",
+      "sources": [
+        {
+          "id": "source_328ba7c4e1fe1b380a738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_0d8ba7c4e1fe1b3835738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_0c8ba7c4e1fe1b3834738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_0f8ba7c4e1fe1b3837738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_0e8ba7c4e1fe1b3836738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_098ba7c4e1fe1b3831738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_088ba7c4e1fe1b3830738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_0b8ba7c4e1fe1b3833738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_0a8ba7c4e1fe1b3832738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_058ba7c4e1fe1b383d738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_338ba7c4e1fe1b380b738facc9e60320",
+          "out_path": "out/atlas_029"
+        }
+      ]
+    },
+    {
+      "id": "atlas_048ba7c4e1fe1b383c738facc9e60320",
+      "name": "atlas_030",
+      "sources": [
+        {
+          "id": "source_068ba7c4e1fe1b383e738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_018ba7c4e1fe1b3839738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_008ba7c4e1fe1b3838738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_038ba7c4e1fe1b383b738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_028ba7c4e1fe1b383a738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_1d8ba7c4e1fe1b3825738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_1c8ba7c4e1fe1b3824738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_1f8ba7c4e1fe1b3827738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_1e8ba7c4e1fe1b3826738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_198ba7c4e1fe1b3821738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_078ba7c4e1fe1b383f738facc9e60320",
+          "out_path": "out/atlas_030"
+        }
+      ]
+    },
+    {
+      "id": "atlas_188ba7c4e1fe1b3820738facc9e60320",
+      "name": "atlas_031",
+      "sources": [
+        {
+          "id": "source_1a8ba7c4e1fe1b3822738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_158ba7c4e1fe1b382d738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_148ba7c4e1fe1b382c738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_178ba7c4e1fe1b382f738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_168ba7c4e1fe1b382e738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_118ba7c4e1fe1b3829738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_108ba7c4e1fe1b3828738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_138ba7c4e1fe1b382b738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_128ba7c4e1fe1b382a738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_ed8ba7c4e1fe1b38d5738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_1b8ba7c4e1fe1b3823738facc9e60320",
+          "out_path": "out/atlas_031"
+        }
+      ]
+    },
+    {
+      "id": "atlas_ec8ba7c4e1fe1b38d4738facc9e60320",
+      "name": "atlas_032",
+      "sources": [
+        {
+          "id": "source_ee8ba7c4e1fe1b38d6738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_e98ba7c4e1fe1b38d1738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_e88ba7c4e1fe1b38d0738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_eb8ba7c4e1fe1b38d3738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_ea8ba7c4e1fe1b38d2738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_e58ba7c4e1fe1b38dd738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_e48ba7c4e1fe1b38dc738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_e78ba7c4e1fe1b38df738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_e68ba7c4e1fe1b38de738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_e18ba7c4e1fe1b38d9738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_ef8ba7c4e1fe1b38d7738facc9e60320",
+          "out_path": "out/atlas_032"
+        }
+      ]
+    },
+    {
+      "id": "atlas_e08ba7c4e1fe1b38d8738facc9e60320",
+      "name": "atlas_033",
+      "sources": [
+        {
+          "id": "source_e28ba7c4e1fe1b38da738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_fd8ba7c4e1fe1b38c5738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_fc8ba7c4e1fe1b38c4738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_ff8ba7c4e1fe1b38c7738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_fe8ba7c4e1fe1b38c6738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_f98ba7c4e1fe1b38c1738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_f88ba7c4e1fe1b38c0738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_fb8ba7c4e1fe1b38c3738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_fa8ba7c4e1fe1b38c2738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_f58ba7c4e1fe1b38cd738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_e38ba7c4e1fe1b38db738facc9e60320",
+          "out_path": "out/atlas_033"
+        }
+      ]
+    },
+    {
+      "id": "atlas_f48ba7c4e1fe1b38cc738facc9e60320",
+      "name": "atlas_034",
+      "sources": [
+        {
+          "id": "source_f68ba7c4e1fe1b38ce738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_f18ba7c4e1fe1b38c9738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_f08ba7c4e1fe1b38c8738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_f38ba7c4e1fe1b38cb738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_f28ba7c4e1fe1b38ca738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_cd8ba7c4e1fe1b38f5738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_cc8ba7c4e1fe1b38f4738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_cf8ba7c4e1fe1b38f7738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_ce8ba7c4e1fe1b38f6738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_c98ba7c4e1fe1b38f1738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_f78ba7c4e1fe1b38cf738facc9e60320",
+          "out_path": "out/atlas_034"
+        }
+      ]
+    },
+    {
+      "id": "atlas_c88ba7c4e1fe1b38f0738facc9e60320",
+      "name": "atlas_035",
+      "sources": [
+        {
+          "id": "source_ca8ba7c4e1fe1b38f2738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_c58ba7c4e1fe1b38fd738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_c48ba7c4e1fe1b38fc738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_c78ba7c4e1fe1b38ff738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_c68ba7c4e1fe1b38fe738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_c18ba7c4e1fe1b38f9738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_c08ba7c4e1fe1b38f8738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_c38ba7c4e1fe1b38fb738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_c28ba7c4e1fe1b38fa738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_dd8ba7c4e1fe1b38e5738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_cb8ba7c4e1fe1b38f3738facc9e60320",
+          "out_path": "out/atlas_035"
+        }
+      ]
+    },
+    {
+      "id": "atlas_dc8ba7c4e1fe1b38e4738facc9e60320",
+      "name": "atlas_036",
+      "sources": [
+        {
+          "id": "source_de8ba7c4e1fe1b38e6738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_d98ba7c4e1fe1b38e1738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_d88ba7c4e1fe1b38e0738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_db8ba7c4e1fe1b38e3738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_da8ba7c4e1fe1b38e2738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_d58ba7c4e1fe1b38ed738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_d48ba7c4e1fe1b38ec738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_d78ba7c4e1fe1b38ef738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_d68ba7c4e1fe1b38ee738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_d18ba7c4e1fe1b38e9738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_df8ba7c4e1fe1b38e7738facc9e60320",
+          "out_path": "out/atlas_036"
+        }
+      ]
+    },
+    {
+      "id": "atlas_d08ba7c4e1fe1b38e8738facc9e60320",
+      "name": "atlas_037",
+      "sources": [
+        {
+          "id": "source_d28ba7c4e1fe1b38ea738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_ad8ba7c4e1fe1b3895738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_ac8ba7c4e1fe1b3894738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_af8ba7c4e1fe1b3897738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_ae8ba7c4e1fe1b3896738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_a98ba7c4e1fe1b3891738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_a88ba7c4e1fe1b3890738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_ab8ba7c4e1fe1b3893738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_aa8ba7c4e1fe1b3892738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_a58ba7c4e1fe1b389d738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_d38ba7c4e1fe1b38eb738facc9e60320",
+          "out_path": "out/atlas_037"
+        }
+      ]
+    },
+    {
+      "id": "atlas_a48ba7c4e1fe1b389c738facc9e60320",
+      "name": "atlas_038",
+      "sources": [
+        {
+          "id": "source_a68ba7c4e1fe1b389e738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_a18ba7c4e1fe1b3899738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_a08ba7c4e1fe1b3898738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_a38ba7c4e1fe1b389b738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_a28ba7c4e1fe1b389a738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_bd8ba7c4e1fe1b3885738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_bc8ba7c4e1fe1b3884738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_bf8ba7c4e1fe1b3887738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_be8ba7c4e1fe1b3886738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_b98ba7c4e1fe1b3881738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_a78ba7c4e1fe1b389f738facc9e60320",
+          "out_path": "out/atlas_038"
+        }
+      ]
+    },
+    {
+      "id": "atlas_b88ba7c4e1fe1b3880738facc9e60320",
+      "name": "atlas_039",
+      "sources": [
+        {
+          "id": "source_ba8ba7c4e1fe1b3882738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_b58ba7c4e1fe1b388d738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_b48ba7c4e1fe1b388c738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_b78ba7c4e1fe1b388f738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_b68ba7c4e1fe1b388e738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_b18ba7c4e1fe1b3889738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_b08ba7c4e1fe1b3888738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_b38ba7c4e1fe1b388b738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_b28ba7c4e1fe1b388a738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_8d8ba7c4e1fe1b38b5738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_bb8ba7c4e1fe1b3883738facc9e60320",
+          "out_path": "out/atlas_039"
+        }
+      ]
+    },
+    {
+      "id": "atlas_8c8ba7c4e1fe1b38b4738facc9e60320",
+      "name": "atlas_040",
+      "sources": [
+        {
+          "id": "source_8e8ba7c4e1fe1b38b6738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_898ba7c4e1fe1b38b1738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_888ba7c4e1fe1b38b0738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_8b8ba7c4e1fe1b38b3738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_8a8ba7c4e1fe1b38b2738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_858ba7c4e1fe1b38bd738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_848ba7c4e1fe1b38bc738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_878ba7c4e1fe1b38bf738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_868ba7c4e1fe1b38be738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_818ba7c4e1fe1b38b9738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_8f8ba7c4e1fe1b38b7738facc9e60320",
+          "out_path": "out/atlas_040"
+        }
+      ]
+    },
+    {
+      "id": "atlas_808ba7c4e1fe1b38b8738facc9e60320",
+      "name": "atlas_041",
+      "sources": [
+        {
+          "id": "source_828ba7c4e1fe1b38ba738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_9d8ba7c4e1fe1b38a5738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_9c8ba7c4e1fe1b38a4738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_9f8ba7c4e1fe1b38a7738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_9e8ba7c4e1fe1b38a6738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_998ba7c4e1fe1b38a1738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_988ba7c4e1fe1b38a0738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_9b8ba7c4e1fe1b38a3738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_9a8ba7c4e1fe1b38a2738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_958ba7c4e1fe1b38ad738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_838ba7c4e1fe1b38bb738facc9e60320",
+          "out_path": "out/atlas_041"
+        }
+      ]
+    },
+    {
+      "id": "atlas_948ba7c4e1fe1b38ac738facc9e60320",
+      "name": "atlas_042",
+      "sources": [
+        {
+          "id": "source_968ba7c4e1fe1b38ae738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_918ba7c4e1fe1b38a9738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_908ba7c4e1fe1b38a8738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_938ba7c4e1fe1b38ab738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_928ba7c4e1fe1b38aa738facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_6d88a7c4e1fe1b3855708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_6c88a7c4e1fe1b3854708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_6f88a7c4e1fe1b3857708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_6e88a7c4e1fe1b3856708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_6988a7c4e1fe1b3851708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_978ba7c4e1fe1b38af738facc9e60320",
+          "out_path": "out/atlas_042"
+        }
+      ]
+    },
+    {
+      "id": "atlas_6888a7c4e1fe1b3850708facc9e60320",
+      "name": "atlas_043",
+      "sources": [
+        {
+          "id": "source_6a88a7c4e1fe1b3852708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_6588a7c4e1fe1b385d708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_6488a7c4e1fe1b385c708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_6788a7c4e1fe1b385f708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_6688a7c4e1fe1b385e708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_6188a7c4e1fe1b3859708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_6088a7c4e1fe1b3858708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_6388a7c4e1fe1b385b708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_6288a7c4e1fe1b385a708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_7d88a7c4e1fe1b3845708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_6b88a7c4e1fe1b3853708facc9e60320",
+          "out_path": "out/atlas_043"
+        }
+      ]
+    },
+    {
+      "id": "atlas_7c88a7c4e1fe1b3844708facc9e60320",
+      "name": "atlas_044",
+      "sources": [
+        {
+          "id": "source_7e88a7c4e1fe1b3846708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_7988a7c4e1fe1b3841708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_7888a7c4e1fe1b3840708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_7b88a7c4e1fe1b3843708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_7a88a7c4e1fe1b3842708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_7588a7c4e1fe1b384d708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_7488a7c4e1fe1b384c708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_7788a7c4e1fe1b384f708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_7688a7c4e1fe1b384e708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_7188a7c4e1fe1b3849708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_7f88a7c4e1fe1b3847708facc9e60320",
+          "out_path": "out/atlas_044"
+        }
+      ]
+    },
+    {
+      "id": "atlas_7088a7c4e1fe1b3848708facc9e60320",
+      "name": "atlas_045",
+      "sources": [
+        {
+          "id": "source_7288a7c4e1fe1b384a708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_4d88a7c4e1fe1b3875708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_4c88a7c4e1fe1b3874708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_4f88a7c4e1fe1b3877708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_4e88a7c4e1fe1b3876708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_4988a7c4e1fe1b3871708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_4888a7c4e1fe1b3870708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_4b88a7c4e1fe1b3873708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_4a88a7c4e1fe1b3872708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_4588a7c4e1fe1b387d708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_7388a7c4e1fe1b384b708facc9e60320",
+          "out_path": "out/atlas_045"
+        }
+      ]
+    },
+    {
+      "id": "atlas_4488a7c4e1fe1b387c708facc9e60320",
+      "name": "atlas_046",
+      "sources": [
+        {
+          "id": "source_4688a7c4e1fe1b387e708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_4188a7c4e1fe1b3879708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_4088a7c4e1fe1b3878708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_4388a7c4e1fe1b387b708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_4288a7c4e1fe1b387a708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_5d88a7c4e1fe1b3865708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_5c88a7c4e1fe1b3864708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_5f88a7c4e1fe1b3867708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_5e88a7c4e1fe1b3866708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_5988a7c4e1fe1b3861708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_4788a7c4e1fe1b387f708facc9e60320",
+          "out_path": "out/atlas_046"
+        }
+      ]
+    },
+    {
+      "id": "atlas_5888a7c4e1fe1b3860708facc9e60320",
+      "name": "atlas_047",
+      "sources": [
+        {
+          "id": "source_5a88a7c4e1fe1b3862708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_5588a7c4e1fe1b386d708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_5488a7c4e1fe1b386c708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_5788a7c4e1fe1b386f708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_5688a7c4e1fe1b386e708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_5188a7c4e1fe1b3869708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_5088a7c4e1fe1b3868708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_5388a7c4e1fe1b386b708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_5288a7c4e1fe1b386a708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_2d88a7c4e1fe1b3815708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_5b88a7c4e1fe1b3863708facc9e60320",
+          "out_path": "out/atlas_047"
+        }
+      ]
+    },
+    {
+      "id": "atlas_2c88a7c4e1fe1b3814708facc9e60320",
+      "name": "atlas_048",
+      "sources": [
+        {
+          "id": "source_2e88a7c4e1fe1b3816708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_2988a7c4e1fe1b3811708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_2888a7c4e1fe1b3810708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_2b88a7c4e1fe1b3813708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_2a88a7c4e1fe1b3812708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_2588a7c4e1fe1b381d708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_2488a7c4e1fe1b381c708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_2788a7c4e1fe1b381f708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_2688a7c4e1fe1b381e708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_2188a7c4e1fe1b3819708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_2f88a7c4e1fe1b3817708facc9e60320",
+          "out_path": "out/atlas_048"
+        }
+      ]
+    },
+    {
+      "id": "atlas_2088a7c4e1fe1b3818708facc9e60320",
+      "name": "atlas_049",
+      "sources": [
+        {
+          "id": "source_2288a7c4e1fe1b381a708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_3d88a7c4e1fe1b3805708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_3c88a7c4e1fe1b3804708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_3f88a7c4e1fe1b3807708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_3e88a7c4e1fe1b3806708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_3988a7c4e1fe1b3801708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_3888a7c4e1fe1b3800708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_3b88a7c4e1fe1b3803708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_3a88a7c4e1fe1b3802708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_3588a7c4e1fe1b380d708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_2388a7c4e1fe1b381b708facc9e60320",
+          "out_path": "out/atlas_049"
+        }
+      ]
+    },
+    {
+      "id": "atlas_3488a7c4e1fe1b380c708facc9e60320",
+      "name": "atlas_050",
+      "sources": [
+        {
+          "id": "source_3688a7c4e1fe1b380e708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_3188a7c4e1fe1b3809708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_3088a7c4e1fe1b3808708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_3388a7c4e1fe1b380b708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_3288a7c4e1fe1b380a708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_0d88a7c4e1fe1b3835708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_0c88a7c4e1fe1b3834708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_0f88a7c4e1fe1b3837708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_0e88a7c4e1fe1b3836708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_0988a7c4e1fe1b3831708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_3788a7c4e1fe1b380f708facc9e60320",
+          "out_path": "out/atlas_050"
+        }
+      ]
+    },
+    {
+      "id": "atlas_0888a7c4e1fe1b3830708facc9e60320",
+      "name": "atlas_051",
+      "sources": [
+        {
+          "id": "source_0a88a7c4e1fe1b3832708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_0588a7c4e1fe1b383d708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_0488a7c4e1fe1b383c708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_0788a7c4e1fe1b383f708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_0688a7c4e1fe1b383e708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_0188a7c4e1fe1b3839708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_0088a7c4e1fe1b3838708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_0388a7c4e1fe1b383b708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_0288a7c4e1fe1b383a708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_1d88a7c4e1fe1b3825708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_0b88a7c4e1fe1b3833708facc9e60320",
+          "out_path": "out/atlas_051"
+        }
+      ]
+    },
+    {
+      "id": "atlas_1c88a7c4e1fe1b3824708facc9e60320",
+      "name": "atlas_052",
+      "sources": [
+        {
+          "id": "source_1e88a7c4e1fe1b3826708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_1988a7c4e1fe1b3821708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_1888a7c4e1fe1b3820708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_1b88a7c4e1fe1b3823708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_1a88a7c4e1fe1b3822708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_1588a7c4e1fe1b382d708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_1488a7c4e1fe1b382c708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_1788a7c4e1fe1b382f708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_1688a7c4e1fe1b382e708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_1188a7c4e1fe1b3829708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_1f88a7c4e1fe1b3827708facc9e60320",
+          "out_path": "out/atlas_052"
+        }
+      ]
+    },
+    {
+      "id": "atlas_1088a7c4e1fe1b3828708facc9e60320",
+      "name": "atlas_053",
+      "sources": [
+        {
+          "id": "source_1288a7c4e1fe1b382a708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_ed88a7c4e1fe1b38d5708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_ec88a7c4e1fe1b38d4708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_ef88a7c4e1fe1b38d7708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_ee88a7c4e1fe1b38d6708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_e988a7c4e1fe1b38d1708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_e888a7c4e1fe1b38d0708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_eb88a7c4e1fe1b38d3708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_ea88a7c4e1fe1b38d2708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_e588a7c4e1fe1b38dd708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_1388a7c4e1fe1b382b708facc9e60320",
+          "out_path": "out/atlas_053"
+        }
+      ]
+    },
+    {
+      "id": "atlas_e488a7c4e1fe1b38dc708facc9e60320",
+      "name": "atlas_054",
+      "sources": [
+        {
+          "id": "source_e688a7c4e1fe1b38de708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_e188a7c4e1fe1b38d9708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_e088a7c4e1fe1b38d8708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_e388a7c4e1fe1b38db708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_e288a7c4e1fe1b38da708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_fd88a7c4e1fe1b38c5708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_fc88a7c4e1fe1b38c4708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_ff88a7c4e1fe1b38c7708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_fe88a7c4e1fe1b38c6708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_f988a7c4e1fe1b38c1708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_e788a7c4e1fe1b38df708facc9e60320",
+          "out_path": "out/atlas_054"
+        }
+      ]
+    },
+    {
+      "id": "atlas_f888a7c4e1fe1b38c0708facc9e60320",
+      "name": "atlas_055",
+      "sources": [
+        {
+          "id": "source_fa88a7c4e1fe1b38c2708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_f588a7c4e1fe1b38cd708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_f488a7c4e1fe1b38cc708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_f788a7c4e1fe1b38cf708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_f688a7c4e1fe1b38ce708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_f188a7c4e1fe1b38c9708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_f088a7c4e1fe1b38c8708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_f388a7c4e1fe1b38cb708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_f288a7c4e1fe1b38ca708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_cd88a7c4e1fe1b38f5708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_fb88a7c4e1fe1b38c3708facc9e60320",
+          "out_path": "out/atlas_055"
+        }
+      ]
+    },
+    {
+      "id": "atlas_cc88a7c4e1fe1b38f4708facc9e60320",
+      "name": "atlas_056",
+      "sources": [
+        {
+          "id": "source_ce88a7c4e1fe1b38f6708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_c988a7c4e1fe1b38f1708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_c888a7c4e1fe1b38f0708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_cb88a7c4e1fe1b38f3708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_ca88a7c4e1fe1b38f2708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_c588a7c4e1fe1b38fd708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_c488a7c4e1fe1b38fc708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_c788a7c4e1fe1b38ff708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_c688a7c4e1fe1b38fe708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_c188a7c4e1fe1b38f9708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_cf88a7c4e1fe1b38f7708facc9e60320",
+          "out_path": "out/atlas_056"
+        }
+      ]
+    },
+    {
+      "id": "atlas_c088a7c4e1fe1b38f8708facc9e60320",
+      "name": "atlas_057",
+      "sources": [
+        {
+          "id": "source_c288a7c4e1fe1b38fa708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_dd88a7c4e1fe1b38e5708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_dc88a7c4e1fe1b38e4708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_df88a7c4e1fe1b38e7708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_de88a7c4e1fe1b38e6708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_d988a7c4e1fe1b38e1708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_d888a7c4e1fe1b38e0708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_db88a7c4e1fe1b38e3708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_da88a7c4e1fe1b38e2708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_d588a7c4e1fe1b38ed708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_c388a7c4e1fe1b38fb708facc9e60320",
+          "out_path": "out/atlas_057"
+        }
+      ]
+    },
+    {
+      "id": "atlas_d488a7c4e1fe1b38ec708facc9e60320",
+      "name": "atlas_058",
+      "sources": [
+        {
+          "id": "source_d688a7c4e1fe1b38ee708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_d188a7c4e1fe1b38e9708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_d088a7c4e1fe1b38e8708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_d388a7c4e1fe1b38eb708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_d288a7c4e1fe1b38ea708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_ad88a7c4e1fe1b3895708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_ac88a7c4e1fe1b3894708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_af88a7c4e1fe1b3897708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_ae88a7c4e1fe1b3896708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_a988a7c4e1fe1b3891708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_d788a7c4e1fe1b38ef708facc9e60320",
+          "out_path": "out/atlas_058"
+        }
+      ]
+    },
+    {
+      "id": "atlas_a888a7c4e1fe1b3890708facc9e60320",
+      "name": "atlas_059",
+      "sources": [
+        {
+          "id": "source_aa88a7c4e1fe1b3892708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_a588a7c4e1fe1b389d708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_a488a7c4e1fe1b389c708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_a788a7c4e1fe1b389f708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_a688a7c4e1fe1b389e708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_a188a7c4e1fe1b3899708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_a088a7c4e1fe1b3898708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_a388a7c4e1fe1b389b708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_a288a7c4e1fe1b389a708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_bd88a7c4e1fe1b3885708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_ab88a7c4e1fe1b3893708facc9e60320",
+          "out_path": "out/atlas_059"
+        }
+      ]
+    },
+    {
+      "id": "atlas_bc88a7c4e1fe1b3884708facc9e60320",
+      "name": "atlas_060",
+      "sources": [
+        {
+          "id": "source_be88a7c4e1fe1b3886708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_b988a7c4e1fe1b3881708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_b888a7c4e1fe1b3880708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_bb88a7c4e1fe1b3883708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_ba88a7c4e1fe1b3882708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_b588a7c4e1fe1b388d708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_b488a7c4e1fe1b388c708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_b788a7c4e1fe1b388f708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_b688a7c4e1fe1b388e708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_b188a7c4e1fe1b3889708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_bf88a7c4e1fe1b3887708facc9e60320",
+          "out_path": "out/atlas_060"
+        }
+      ]
+    },
+    {
+      "id": "atlas_b088a7c4e1fe1b3888708facc9e60320",
+      "name": "atlas_061",
+      "sources": [
+        {
+          "id": "source_b288a7c4e1fe1b388a708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_8d88a7c4e1fe1b38b5708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_8c88a7c4e1fe1b38b4708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_8f88a7c4e1fe1b38b7708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_8e88a7c4e1fe1b38b6708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_8988a7c4e1fe1b38b1708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_8888a7c4e1fe1b38b0708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_8b88a7c4e1fe1b38b3708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_8a88a7c4e1fe1b38b2708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_8588a7c4e1fe1b38bd708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_b388a7c4e1fe1b388b708facc9e60320",
+          "out_path": "out/atlas_061"
+        }
+      ]
+    },
+    {
+      "id": "atlas_8488a7c4e1fe1b38bc708facc9e60320",
+      "name": "atlas_062",
+      "sources": [
+        {
+          "id": "source_8688a7c4e1fe1b38be708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_8188a7c4e1fe1b38b9708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_8088a7c4e1fe1b38b8708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_8388a7c4e1fe1b38bb708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_8288a7c4e1fe1b38ba708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_9d88a7c4e1fe1b38a5708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_9c88a7c4e1fe1b38a4708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_9f88a7c4e1fe1b38a7708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_9e88a7c4e1fe1b38a6708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_9988a7c4e1fe1b38a1708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_8788a7c4e1fe1b38bf708facc9e60320",
+          "out_path": "out/atlas_062"
+        }
+      ]
+    },
+    {
+      "id": "atlas_9888a7c4e1fe1b38a0708facc9e60320",
+      "name": "atlas_063",
+      "sources": [
+        {
+          "id": "source_9a88a7c4e1fe1b38a2708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_9588a7c4e1fe1b38ad708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_9488a7c4e1fe1b38ac708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_9788a7c4e1fe1b38af708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_9688a7c4e1fe1b38ae708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_9188a7c4e1fe1b38a9708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_9088a7c4e1fe1b38a8708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_9388a7c4e1fe1b38ab708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_9288a7c4e1fe1b38aa708facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_6d89a7c4e1fe1b3855718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_9b88a7c4e1fe1b38a3708facc9e60320",
+          "out_path": "out/atlas_063"
+        }
+      ]
+    },
+    {
+      "id": "atlas_6c89a7c4e1fe1b3854718facc9e60320",
+      "name": "atlas_064",
+      "sources": [
+        {
+          "id": "source_6e89a7c4e1fe1b3856718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_6989a7c4e1fe1b3851718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_6889a7c4e1fe1b3850718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_6b89a7c4e1fe1b3853718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_6a89a7c4e1fe1b3852718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_6589a7c4e1fe1b385d718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_6489a7c4e1fe1b385c718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_6789a7c4e1fe1b385f718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_6689a7c4e1fe1b385e718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_6189a7c4e1fe1b3859718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_6f89a7c4e1fe1b3857718facc9e60320",
+          "out_path": "out/atlas_064"
+        }
+      ]
+    },
+    {
+      "id": "atlas_6089a7c4e1fe1b3858718facc9e60320",
+      "name": "atlas_065",
+      "sources": [
+        {
+          "id": "source_6289a7c4e1fe1b385a718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_7d89a7c4e1fe1b3845718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_7c89a7c4e1fe1b3844718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_7f89a7c4e1fe1b3847718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_7e89a7c4e1fe1b3846718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_7989a7c4e1fe1b3841718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_7889a7c4e1fe1b3840718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_7b89a7c4e1fe1b3843718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_7a89a7c4e1fe1b3842718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_7589a7c4e1fe1b384d718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_6389a7c4e1fe1b385b718facc9e60320",
+          "out_path": "out/atlas_065"
+        }
+      ]
+    },
+    {
+      "id": "atlas_7489a7c4e1fe1b384c718facc9e60320",
+      "name": "atlas_066",
+      "sources": [
+        {
+          "id": "source_7689a7c4e1fe1b384e718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_7189a7c4e1fe1b3849718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_7089a7c4e1fe1b3848718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_7389a7c4e1fe1b384b718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_7289a7c4e1fe1b384a718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_4d89a7c4e1fe1b3875718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_4c89a7c4e1fe1b3874718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_4f89a7c4e1fe1b3877718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_4e89a7c4e1fe1b3876718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_4989a7c4e1fe1b3871718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_7789a7c4e1fe1b384f718facc9e60320",
+          "out_path": "out/atlas_066"
+        }
+      ]
+    },
+    {
+      "id": "atlas_4889a7c4e1fe1b3870718facc9e60320",
+      "name": "atlas_067",
+      "sources": [
+        {
+          "id": "source_4a89a7c4e1fe1b3872718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_4589a7c4e1fe1b387d718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_4489a7c4e1fe1b387c718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_4789a7c4e1fe1b387f718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_4689a7c4e1fe1b387e718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_4189a7c4e1fe1b3879718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_4089a7c4e1fe1b3878718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_4389a7c4e1fe1b387b718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_4289a7c4e1fe1b387a718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_5d89a7c4e1fe1b3865718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_4b89a7c4e1fe1b3873718facc9e60320",
+          "out_path": "out/atlas_067"
+        }
+      ]
+    },
+    {
+      "id": "atlas_5c89a7c4e1fe1b3864718facc9e60320",
+      "name": "atlas_068",
+      "sources": [
+        {
+          "id": "source_5e89a7c4e1fe1b3866718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_5989a7c4e1fe1b3861718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_5889a7c4e1fe1b3860718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_5b89a7c4e1fe1b3863718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_5a89a7c4e1fe1b3862718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_5589a7c4e1fe1b386d718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_5489a7c4e1fe1b386c718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_5789a7c4e1fe1b386f718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_5689a7c4e1fe1b386e718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_5189a7c4e1fe1b3869718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_5f89a7c4e1fe1b3867718facc9e60320",
+          "out_path": "out/atlas_068"
+        }
+      ]
+    },
+    {
+      "id": "atlas_5089a7c4e1fe1b3868718facc9e60320",
+      "name": "atlas_069",
+      "sources": [
+        {
+          "id": "source_5289a7c4e1fe1b386a718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_2d89a7c4e1fe1b3815718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_2c89a7c4e1fe1b3814718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_2f89a7c4e1fe1b3817718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_2e89a7c4e1fe1b3816718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_2989a7c4e1fe1b3811718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_2889a7c4e1fe1b3810718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_2b89a7c4e1fe1b3813718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_2a89a7c4e1fe1b3812718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_2589a7c4e1fe1b381d718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_5389a7c4e1fe1b386b718facc9e60320",
+          "out_path": "out/atlas_069"
+        }
+      ]
+    },
+    {
+      "id": "atlas_2489a7c4e1fe1b381c718facc9e60320",
+      "name": "atlas_070",
+      "sources": [
+        {
+          "id": "source_2689a7c4e1fe1b381e718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_2189a7c4e1fe1b3819718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_2089a7c4e1fe1b3818718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_2389a7c4e1fe1b381b718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_2289a7c4e1fe1b381a718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_3d89a7c4e1fe1b3805718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_3c89a7c4e1fe1b3804718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_3f89a7c4e1fe1b3807718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_3e89a7c4e1fe1b3806718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_3989a7c4e1fe1b3801718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_2789a7c4e1fe1b381f718facc9e60320",
+          "out_path": "out/atlas_070"
+        }
+      ]
+    },
+    {
+      "id": "atlas_3889a7c4e1fe1b3800718facc9e60320",
+      "name": "atlas_071",
+      "sources": [
+        {
+          "id": "source_3a89a7c4e1fe1b3802718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_3589a7c4e1fe1b380d718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_3489a7c4e1fe1b380c718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_3789a7c4e1fe1b380f718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_3689a7c4e1fe1b380e718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_3189a7c4e1fe1b3809718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_3089a7c4e1fe1b3808718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_3389a7c4e1fe1b380b718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_3289a7c4e1fe1b380a718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_0d89a7c4e1fe1b3835718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_3b89a7c4e1fe1b3803718facc9e60320",
+          "out_path": "out/atlas_071"
+        }
+      ]
+    },
+    {
+      "id": "atlas_0c89a7c4e1fe1b3834718facc9e60320",
+      "name": "atlas_072",
+      "sources": [
+        {
+          "id": "source_0e89a7c4e1fe1b3836718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_0989a7c4e1fe1b3831718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_0889a7c4e1fe1b3830718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_0b89a7c4e1fe1b3833718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_0a89a7c4e1fe1b3832718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_0589a7c4e1fe1b383d718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_0489a7c4e1fe1b383c718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_0789a7c4e1fe1b383f718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_0689a7c4e1fe1b383e718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_0189a7c4e1fe1b3839718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_0f89a7c4e1fe1b3837718facc9e60320",
+          "out_path": "out/atlas_072"
+        }
+      ]
+    },
+    {
+      "id": "atlas_0089a7c4e1fe1b3838718facc9e60320",
+      "name": "atlas_073",
+      "sources": [
+        {
+          "id": "source_0289a7c4e1fe1b383a718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_1d89a7c4e1fe1b3825718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_1c89a7c4e1fe1b3824718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_1f89a7c4e1fe1b3827718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_1e89a7c4e1fe1b3826718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_1989a7c4e1fe1b3821718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_1889a7c4e1fe1b3820718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_1b89a7c4e1fe1b3823718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_1a89a7c4e1fe1b3822718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_1589a7c4e1fe1b382d718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_0389a7c4e1fe1b383b718facc9e60320",
+          "out_path": "out/atlas_073"
+        }
+      ]
+    },
+    {
+      "id": "atlas_1489a7c4e1fe1b382c718facc9e60320",
+      "name": "atlas_074",
+      "sources": [
+        {
+          "id": "source_1689a7c4e1fe1b382e718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_1189a7c4e1fe1b3829718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_1089a7c4e1fe1b3828718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_1389a7c4e1fe1b382b718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_1289a7c4e1fe1b382a718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_ed89a7c4e1fe1b38d5718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_ec89a7c4e1fe1b38d4718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_ef89a7c4e1fe1b38d7718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_ee89a7c4e1fe1b38d6718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_e989a7c4e1fe1b38d1718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_1789a7c4e1fe1b382f718facc9e60320",
+          "out_path": "out/atlas_074"
+        }
+      ]
+    },
+    {
+      "id": "atlas_e889a7c4e1fe1b38d0718facc9e60320",
+      "name": "atlas_075",
+      "sources": [
+        {
+          "id": "source_ea89a7c4e1fe1b38d2718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_e589a7c4e1fe1b38dd718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_e489a7c4e1fe1b38dc718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_e789a7c4e1fe1b38df718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_e689a7c4e1fe1b38de718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_e189a7c4e1fe1b38d9718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_e089a7c4e1fe1b38d8718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_e389a7c4e1fe1b38db718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_e289a7c4e1fe1b38da718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_fd89a7c4e1fe1b38c5718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_eb89a7c4e1fe1b38d3718facc9e60320",
+          "out_path": "out/atlas_075"
+        }
+      ]
+    },
+    {
+      "id": "atlas_fc89a7c4e1fe1b38c4718facc9e60320",
+      "name": "atlas_076",
+      "sources": [
+        {
+          "id": "source_fe89a7c4e1fe1b38c6718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_f989a7c4e1fe1b38c1718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_f889a7c4e1fe1b38c0718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_fb89a7c4e1fe1b38c3718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_fa89a7c4e1fe1b38c2718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_f589a7c4e1fe1b38cd718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_f489a7c4e1fe1b38cc718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_f789a7c4e1fe1b38cf718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_f689a7c4e1fe1b38ce718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_f189a7c4e1fe1b38c9718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_ff89a7c4e1fe1b38c7718facc9e60320",
+          "out_path": "out/atlas_076"
+        }
+      ]
+    },
+    {
+      "id": "atlas_f089a7c4e1fe1b38c8718facc9e60320",
+      "name": "atlas_077",
+      "sources": [
+        {
+          "id": "source_f289a7c4e1fe1b38ca718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_cd89a7c4e1fe1b38f5718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_cc89a7c4e1fe1b38f4718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_cf89a7c4e1fe1b38f7718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_ce89a7c4e1fe1b38f6718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_c989a7c4e1fe1b38f1718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_c889a7c4e1fe1b38f0718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_cb89a7c4e1fe1b38f3718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_ca89a7c4e1fe1b38f2718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_c589a7c4e1fe1b38fd718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_f389a7c4e1fe1b38cb718facc9e60320",
+          "out_path": "out/atlas_077"
+        }
+      ]
+    },
+    {
+      "id": "atlas_c489a7c4e1fe1b38fc718facc9e60320",
+      "name": "atlas_078",
+      "sources": [
+        {
+          "id": "source_c689a7c4e1fe1b38fe718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_c189a7c4e1fe1b38f9718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_c089a7c4e1fe1b38f8718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_c389a7c4e1fe1b38fb718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_c289a7c4e1fe1b38fa718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_dd89a7c4e1fe1b38e5718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_dc89a7c4e1fe1b38e4718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_df89a7c4e1fe1b38e7718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_de89a7c4e1fe1b38e6718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_d989a7c4e1fe1b38e1718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_c789a7c4e1fe1b38ff718facc9e60320",
+          "out_path": "out/atlas_078"
+        }
+      ]
+    },
+    {
+      "id": "atlas_d889a7c4e1fe1b38e0718facc9e60320",
+      "name": "atlas_079",
+      "sources": [
+        {
+          "id": "source_da89a7c4e1fe1b38e2718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_d589a7c4e1fe1b38ed718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_d489a7c4e1fe1b38ec718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_d789a7c4e1fe1b38ef718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_d689a7c4e1fe1b38ee718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_d189a7c4e1fe1b38e9718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_d089a7c4e1fe1b38e8718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_d389a7c4e1fe1b38eb718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_d289a7c4e1fe1b38ea718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_ad89a7c4e1fe1b3895718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_db89a7c4e1fe1b38e3718facc9e60320",
+          "out_path": "out/atlas_079"
+        }
+      ]
+    },
+    {
+      "id": "atlas_ac89a7c4e1fe1b3894718facc9e60320",
+      "name": "atlas_080",
+      "sources": [
+        {
+          "id": "source_ae89a7c4e1fe1b3896718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_a989a7c4e1fe1b3891718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_a889a7c4e1fe1b3890718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_ab89a7c4e1fe1b3893718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_aa89a7c4e1fe1b3892718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_a589a7c4e1fe1b389d718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_a489a7c4e1fe1b389c718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_a789a7c4e1fe1b389f718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_a689a7c4e1fe1b389e718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_a189a7c4e1fe1b3899718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_af89a7c4e1fe1b3897718facc9e60320",
+          "out_path": "out/atlas_080"
+        }
+      ]
+    },
+    {
+      "id": "atlas_a089a7c4e1fe1b3898718facc9e60320",
+      "name": "atlas_081",
+      "sources": [
+        {
+          "id": "source_a289a7c4e1fe1b389a718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_bd89a7c4e1fe1b3885718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_bc89a7c4e1fe1b3884718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_bf89a7c4e1fe1b3887718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_be89a7c4e1fe1b3886718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_b989a7c4e1fe1b3881718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_b889a7c4e1fe1b3880718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_bb89a7c4e1fe1b3883718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_ba89a7c4e1fe1b3882718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_b589a7c4e1fe1b388d718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_a389a7c4e1fe1b389b718facc9e60320",
+          "out_path": "out/atlas_081"
+        }
+      ]
+    },
+    {
+      "id": "atlas_b489a7c4e1fe1b388c718facc9e60320",
+      "name": "atlas_082",
+      "sources": [
+        {
+          "id": "source_b689a7c4e1fe1b388e718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_b189a7c4e1fe1b3889718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_b089a7c4e1fe1b3888718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_b389a7c4e1fe1b388b718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_b289a7c4e1fe1b388a718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_8d89a7c4e1fe1b38b5718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_8c89a7c4e1fe1b38b4718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_8f89a7c4e1fe1b38b7718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_8e89a7c4e1fe1b38b6718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_8989a7c4e1fe1b38b1718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_b789a7c4e1fe1b388f718facc9e60320",
+          "out_path": "out/atlas_082"
+        }
+      ]
+    },
+    {
+      "id": "atlas_8889a7c4e1fe1b38b0718facc9e60320",
+      "name": "atlas_083",
+      "sources": [
+        {
+          "id": "source_8a89a7c4e1fe1b38b2718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_8589a7c4e1fe1b38bd718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_8489a7c4e1fe1b38bc718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_8789a7c4e1fe1b38bf718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_8689a7c4e1fe1b38be718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_8189a7c4e1fe1b38b9718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_8089a7c4e1fe1b38b8718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_8389a7c4e1fe1b38bb718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_8289a7c4e1fe1b38ba718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_9d89a7c4e1fe1b38a5718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_8b89a7c4e1fe1b38b3718facc9e60320",
+          "out_path": "out/atlas_083"
+        }
+      ]
+    },
+    {
+      "id": "atlas_9c89a7c4e1fe1b38a4718facc9e60320",
+      "name": "atlas_084",
+      "sources": [
+        {
+          "id": "source_9e89a7c4e1fe1b38a6718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_9989a7c4e1fe1b38a1718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_9889a7c4e1fe1b38a0718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_9b89a7c4e1fe1b38a3718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_9a89a7c4e1fe1b38a2718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_9589a7c4e1fe1b38ad718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_9489a7c4e1fe1b38ac718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_9789a7c4e1fe1b38af718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_9689a7c4e1fe1b38ae718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_9189a7c4e1fe1b38a9718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_9f89a7c4e1fe1b38a7718facc9e60320",
+          "out_path": "out/atlas_084"
+        }
+      ]
+    },
+    {
+      "id": "atlas_9089a7c4e1fe1b38a8718facc9e60320",
+      "name": "atlas_085",
+      "sources": [
+        {
+          "id": "source_9289a7c4e1fe1b38aa718facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_6d8ea7c4e1fe1b3855768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_6c8ea7c4e1fe1b3854768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_6f8ea7c4e1fe1b3857768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_6e8ea7c4e1fe1b3856768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_698ea7c4e1fe1b3851768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_688ea7c4e1fe1b3850768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_6b8ea7c4e1fe1b3853768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_6a8ea7c4e1fe1b3852768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_658ea7c4e1fe1b385d768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_9389a7c4e1fe1b38ab718facc9e60320",
+          "out_path": "out/atlas_085"
+        }
+      ]
+    },
+    {
+      "id": "atlas_648ea7c4e1fe1b385c768facc9e60320",
+      "name": "atlas_086",
+      "sources": [
+        {
+          "id": "source_668ea7c4e1fe1b385e768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_618ea7c4e1fe1b3859768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_608ea7c4e1fe1b3858768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_638ea7c4e1fe1b385b768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_628ea7c4e1fe1b385a768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_7d8ea7c4e1fe1b3845768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_7c8ea7c4e1fe1b3844768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_7f8ea7c4e1fe1b3847768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_7e8ea7c4e1fe1b3846768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_798ea7c4e1fe1b3841768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_678ea7c4e1fe1b385f768facc9e60320",
+          "out_path": "out/atlas_086"
+        }
+      ]
+    },
+    {
+      "id": "atlas_788ea7c4e1fe1b3840768facc9e60320",
+      "name": "atlas_087",
+      "sources": [
+        {
+          "id": "source_7a8ea7c4e1fe1b3842768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_758ea7c4e1fe1b384d768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_748ea7c4e1fe1b384c768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_778ea7c4e1fe1b384f768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_768ea7c4e1fe1b384e768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_718ea7c4e1fe1b3849768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_708ea7c4e1fe1b3848768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_738ea7c4e1fe1b384b768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_728ea7c4e1fe1b384a768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_4d8ea7c4e1fe1b3875768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_7b8ea7c4e1fe1b3843768facc9e60320",
+          "out_path": "out/atlas_087"
+        }
+      ]
+    },
+    {
+      "id": "atlas_4c8ea7c4e1fe1b3874768facc9e60320",
+      "name": "atlas_088",
+      "sources": [
+        {
+          "id": "source_4e8ea7c4e1fe1b3876768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_498ea7c4e1fe1b3871768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_488ea7c4e1fe1b3870768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_4b8ea7c4e1fe1b3873768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_4a8ea7c4e1fe1b3872768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_458ea7c4e1fe1b387d768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_448ea7c4e1fe1b387c768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_478ea7c4e1fe1b387f768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_468ea7c4e1fe1b387e768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_418ea7c4e1fe1b3879768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_4f8ea7c4e1fe1b3877768facc9e60320",
+          "out_path": "out/atlas_088"
+        }
+      ]
+    },
+    {
+      "id": "atlas_408ea7c4e1fe1b3878768facc9e60320",
+      "name": "atlas_089",
+      "sources": [
+        {
+          "id": "source_428ea7c4e1fe1b387a768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_5d8ea7c4e1fe1b3865768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_5c8ea7c4e1fe1b3864768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_5f8ea7c4e1fe1b3867768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_5e8ea7c4e1fe1b3866768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_598ea7c4e1fe1b3861768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_588ea7c4e1fe1b3860768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_5b8ea7c4e1fe1b3863768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_5a8ea7c4e1fe1b3862768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_558ea7c4e1fe1b386d768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_438ea7c4e1fe1b387b768facc9e60320",
+          "out_path": "out/atlas_089"
+        }
+      ]
+    },
+    {
+      "id": "atlas_548ea7c4e1fe1b386c768facc9e60320",
+      "name": "atlas_090",
+      "sources": [
+        {
+          "id": "source_568ea7c4e1fe1b386e768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_518ea7c4e1fe1b3869768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_508ea7c4e1fe1b3868768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_538ea7c4e1fe1b386b768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_528ea7c4e1fe1b386a768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_2d8ea7c4e1fe1b3815768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_2c8ea7c4e1fe1b3814768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_2f8ea7c4e1fe1b3817768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_2e8ea7c4e1fe1b3816768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_298ea7c4e1fe1b3811768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_578ea7c4e1fe1b386f768facc9e60320",
+          "out_path": "out/atlas_090"
+        }
+      ]
+    },
+    {
+      "id": "atlas_288ea7c4e1fe1b3810768facc9e60320",
+      "name": "atlas_091",
+      "sources": [
+        {
+          "id": "source_2a8ea7c4e1fe1b3812768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_258ea7c4e1fe1b381d768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_248ea7c4e1fe1b381c768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_278ea7c4e1fe1b381f768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_268ea7c4e1fe1b381e768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_218ea7c4e1fe1b3819768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_208ea7c4e1fe1b3818768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_238ea7c4e1fe1b381b768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_228ea7c4e1fe1b381a768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_3d8ea7c4e1fe1b3805768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_2b8ea7c4e1fe1b3813768facc9e60320",
+          "out_path": "out/atlas_091"
+        }
+      ]
+    },
+    {
+      "id": "atlas_3c8ea7c4e1fe1b3804768facc9e60320",
+      "name": "atlas_092",
+      "sources": [
+        {
+          "id": "source_3e8ea7c4e1fe1b3806768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_398ea7c4e1fe1b3801768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_388ea7c4e1fe1b3800768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_3b8ea7c4e1fe1b3803768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_3a8ea7c4e1fe1b3802768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_358ea7c4e1fe1b380d768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_348ea7c4e1fe1b380c768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_378ea7c4e1fe1b380f768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_368ea7c4e1fe1b380e768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_318ea7c4e1fe1b3809768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_3f8ea7c4e1fe1b3807768facc9e60320",
+          "out_path": "out/atlas_092"
+        }
+      ]
+    },
+    {
+      "id": "atlas_308ea7c4e1fe1b3808768facc9e60320",
+      "name": "atlas_093",
+      "sources": [
+        {
+          "id": "source_328ea7c4e1fe1b380a768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_0d8ea7c4e1fe1b3835768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_0c8ea7c4e1fe1b3834768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_0f8ea7c4e1fe1b3837768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_0e8ea7c4e1fe1b3836768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_098ea7c4e1fe1b3831768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_088ea7c4e1fe1b3830768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_0b8ea7c4e1fe1b3833768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_0a8ea7c4e1fe1b3832768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_058ea7c4e1fe1b383d768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_338ea7c4e1fe1b380b768facc9e60320",
+          "out_path": "out/atlas_093"
+        }
+      ]
+    },
+    {
+      "id": "atlas_048ea7c4e1fe1b383c768facc9e60320",
+      "name": "atlas_094",
+      "sources": [
+        {
+          "id": "source_068ea7c4e1fe1b383e768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_018ea7c4e1fe1b3839768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_008ea7c4e1fe1b3838768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_038ea7c4e1fe1b383b768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_028ea7c4e1fe1b383a768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_1d8ea7c4e1fe1b3825768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_1c8ea7c4e1fe1b3824768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_1f8ea7c4e1fe1b3827768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_1e8ea7c4e1fe1b3826768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_198ea7c4e1fe1b3821768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_078ea7c4e1fe1b383f768facc9e60320",
+          "out_path": "out/atlas_094"
+        }
+      ]
+    },
+    {
+      "id": "atlas_188ea7c4e1fe1b3820768facc9e60320",
+      "name": "atlas_095",
+      "sources": [
+        {
+          "id": "source_1a8ea7c4e1fe1b3822768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_158ea7c4e1fe1b382d768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_148ea7c4e1fe1b382c768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_178ea7c4e1fe1b382f768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_168ea7c4e1fe1b382e768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_118ea7c4e1fe1b3829768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_108ea7c4e1fe1b3828768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_138ea7c4e1fe1b382b768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_128ea7c4e1fe1b382a768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_ed8ea7c4e1fe1b38d5768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_1b8ea7c4e1fe1b3823768facc9e60320",
+          "out_path": "out/atlas_095"
+        }
+      ]
+    },
+    {
+      "id": "atlas_ec8ea7c4e1fe1b38d4768facc9e60320",
+      "name": "atlas_096",
+      "sources": [
+        {
+          "id": "source_ee8ea7c4e1fe1b38d6768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_e98ea7c4e1fe1b38d1768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_e88ea7c4e1fe1b38d0768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_eb8ea7c4e1fe1b38d3768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_ea8ea7c4e1fe1b38d2768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_e58ea7c4e1fe1b38dd768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_e48ea7c4e1fe1b38dc768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_e78ea7c4e1fe1b38df768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_e68ea7c4e1fe1b38de768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_e18ea7c4e1fe1b38d9768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_ef8ea7c4e1fe1b38d7768facc9e60320",
+          "out_path": "out/atlas_096"
+        }
+      ]
+    },
+    {
+      "id": "atlas_e08ea7c4e1fe1b38d8768facc9e60320",
+      "name": "atlas_097",
+      "sources": [
+        {
+          "id": "source_e28ea7c4e1fe1b38da768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_fd8ea7c4e1fe1b38c5768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_fc8ea7c4e1fe1b38c4768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_ff8ea7c4e1fe1b38c7768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_fe8ea7c4e1fe1b38c6768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_f98ea7c4e1fe1b38c1768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_f88ea7c4e1fe1b38c0768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_fb8ea7c4e1fe1b38c3768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_fa8ea7c4e1fe1b38c2768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_f58ea7c4e1fe1b38cd768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_e38ea7c4e1fe1b38db768facc9e60320",
+          "out_path": "out/atlas_097"
+        }
+      ]
+    },
+    {
+      "id": "atlas_f48ea7c4e1fe1b38cc768facc9e60320",
+      "name": "atlas_098",
+      "sources": [
+        {
+          "id": "source_f68ea7c4e1fe1b38ce768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_f18ea7c4e1fe1b38c9768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_f08ea7c4e1fe1b38c8768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_f38ea7c4e1fe1b38cb768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_f28ea7c4e1fe1b38ca768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_cd8ea7c4e1fe1b38f5768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_cc8ea7c4e1fe1b38f4768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_cf8ea7c4e1fe1b38f7768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_ce8ea7c4e1fe1b38f6768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_c98ea7c4e1fe1b38f1768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_f78ea7c4e1fe1b38cf768facc9e60320",
+          "out_path": "out/atlas_098"
+        }
+      ]
+    },
+    {
+      "id": "atlas_c88ea7c4e1fe1b38f0768facc9e60320",
+      "name": "atlas_099",
+      "sources": [
+        {
+          "id": "source_ca8ea7c4e1fe1b38f2768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/elephant.png"
+        },
+        {
+          "id": "source_c58ea7c4e1fe1b38fd768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/giraffe.png"
+        },
+        {
+          "id": "source_c48ea7c4e1fe1b38fc768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/hippo.png"
+        },
+        {
+          "id": "source_c78ea7c4e1fe1b38ff768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/monkey.png"
+        },
+        {
+          "id": "source_c68ea7c4e1fe1b38fe768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/panda.png"
+        },
+        {
+          "id": "source_c18ea7c4e1fe1b38f9768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/parrot.png"
+        },
+        {
+          "id": "source_c08ea7c4e1fe1b38f8768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/penguin.png"
+        },
+        {
+          "id": "source_c38ea7c4e1fe1b38fb768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/pig.png"
+        },
+        {
+          "id": "source_c28ea7c4e1fe1b38fa768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/rabbit.png"
+        },
+        {
+          "id": "source_dd8ea7c4e1fe1b38e5768facc9e60320",
+          "kind": "file",
+          "path": "../showcase/animals/round/snake.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_cb8ea7c4e1fe1b38f3768facc9e60320",
+          "out_path": "out/atlas_099"
+        }
+      ]
+    }
+  ]
+}

@@ -1,10 +1,10 @@
-/* C0-03 task 6: raw-RGBA ownership regression.
+/* Raw-RGBA ownership regression.
  *
  * The engine's nt_builder_atlas_add_raw() DEEP-COPIES the caller's RGBA buffer
  * (external/neotolis-engine/tools/builder/nt_builder_atlas.c:771-775: malloc +
  * memcpy, then sprite->rgba = the copy). The PUBLIC header (nt_builder.h:424)
  * does NOT promise this lifetime -- so this test pins the observed behaviour as
- * an executable regression, and packer/spike/c0/upstream-issue-raw-lifetime.md
+ * an executable regression, and docs/research/neotolis-engine-raw-rgba-lifetime.md
  * asks the engine to document the contract in the public header.
  *
  * Because the copy is CONFIRMED in the source we read, exercising it is safe (no

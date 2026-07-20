@@ -1,8 +1,13 @@
 # 0015 — F2-05b GUI transaction cutover (b-i: mutations → journal-LESS transactions)
 
+> **Foundation addendum (2026-07-16):** accepted, implemented and reviewed. The GUI
+> now uses session-owned snapshots, semantic history and shared recovery; the former
+> GUI project/model/history/recovery authority described in intermediate sections
+> below has been removed. Those sections remain as cutover history only.
+
 **Date:** 2026-07-13
-**Status:** accepted (lead review pending)
-**Decided by:** F2-05b-i implementation agent (delegated), lead review pending
+**Status:** accepted; foundation implementation reviewed 2026-07-16
+**Decided by:** F2-05b-i implementation agent (delegated); foundation lead review complete
 **Implemented in:** `apps/gui/gui_project.c` (mutators → typed ops on a journal-less
 `tp_model`; model-owns-project lifecycle), `apps/gui/gui_actions.c`/`.h` (end-of-frame
 deferred-edit queue + rename-on-Enter deferral + op-reject surfacing), `apps/gui/gui_view_settings.c`,

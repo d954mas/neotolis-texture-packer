@@ -2,7 +2,7 @@
 #define TP_CORE_TP_SELECTOR_H
 
 /*
- * Canonical selector resolver (F1-03, master spec §5.4). Canonical operations,
+ * Canonical selector resolver (master spec §5.4). Canonical operations,
  * history entries, and persistent references target IDs; a frontend (CLI/MCP) may
  * accept a human-friendly selector for convenience, but it MUST resolve to exactly
  * one id before it is used. This resolver is that single seam -- it lives in core so

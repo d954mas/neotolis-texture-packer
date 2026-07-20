@@ -1,7 +1,7 @@
 #ifndef TP_CORE_SRC_TP_TXN_PARSE_PRIV_H
 #define TP_CORE_SRC_TP_TXN_PARSE_PRIV_H
 
-/* F2-02 private interface between the request decoder (tp_txn_parse.c) and the
+/* Private interface between the request decoder (tp_txn_parse.c) and the
  * JSON->tp_operation lowering (tp_txn_lower.c). Carries cJSON types, so it is a
  * src/-private header included ONLY by those two TUs (never by tp_txn_internal.h,
  * which tp_txn_apply.c includes -- cJSON stays out of the apply core). */

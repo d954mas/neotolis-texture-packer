@@ -3,12 +3,10 @@
 
 /*
  * tp_identity internal seam -- lives in src/ (NOT installed). It exposes the
- * host-PARAMETERIZED lexical canonicalizer + the tiny ASCII/lex helpers that
- * were promoted from the C0-01 spike (packer/spike/c0/src/tp_c0_lex.h +
- * tp_c0_path.c).
+ * host-PARAMETERIZED lexical canonicalizer + the tiny ASCII/lex helpers.
  *
  * WHY a host parameter here when the PUBLIC API (tp_identity.h) is native-host
- * (#if defined(_WIN32))?  The public surface is native-host as F1-00 requires,
+ * (#if defined(_WIN32))?  The public surface is native-host as required,
  * but the lexical rules are byte-deterministic for BOTH POSIX and Windows on
  * every OS. Keeping a host-parameterized core lets the production tests run the
  * full cross-OS golden corpus on a single CI runner -- preserving the spike's
@@ -19,7 +17,7 @@
  * frozen contract fixture; production got its OWN adapted copy of the lexical
  * logic (spike is never linked into tp_core -- it is deliberately out of the
  * tp_core/tp_build/apps link closure). Drift between the two copies is caught by
- * porting the identical golden vectors into packer/tests (F1-00 task 5): if the
+ * porting the identical golden vectors into packer/tests: if the
  * production copy ever diverges from the pinned rules, a ported vector fails.
  */
 
@@ -38,7 +36,7 @@ typedef enum tp_host {
 tp_host tp_host_native(void);
 
 /* Lexically canonicalize an ABSOLUTE project path under `host` (touches no
- * filesystem). Promoted from tp_c0_project_path_canonical, tp_status errors:
+ * filesystem). Implements master spec §5.1 and decision 0006; tp_status errors:
  *   - not absolute        -> TP_STATUS_PATH_NOT_ABSOLUTE
  *   - Windows "C:foo"     -> TP_STATUS_PATH_DRIVE_RELATIVE
  *   - malformed UNC       -> TP_STATUS_PATH_BAD_UNC
@@ -53,7 +51,7 @@ tp_status tp_path_canonical_lexical(const char *input, tp_host host, char *out, 
  * POSIX byte-exact; Windows folds ASCII case. */
 bool tp_path_equal_host(const char *canon_a, const char *canon_b, tp_host host);
 
-/* ----- tiny ASCII + path-component helpers (promoted from tp_c0_lex.h) ---- */
+/* ----- tiny ASCII + path-component helpers ------------------------------- */
 
 static inline bool tp_ident_is_alpha(char c) {
     return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');

@@ -3,8 +3,7 @@
 
 /*
  * Persistent source-local key normalization + portability validation (master spec
- * §5.3, §5.6, §59 item 8). Promoted from the accepted, 3-OS-green C0-01 spike
- * (packer/spike/c0/src/tp_c0_srckey.c) into the production tp_status model.
+ * §5.3, §5.6, §59 item 8).
  *
  * A source key addresses a sprite within a source root. Canonical form is:
  *   - UTF-8, Unicode NFC;
@@ -23,8 +22,8 @@
  * outputs go into caller buffers (no cross-CRT malloc handoff): the utf8proc
  * allocation is consumed and freed inside the translation unit.
  *
- * SCOPE: F1-02 promotes these primitives and validates source paths with them;
- * full sprite-key resolution (tp_sprite_id wiring) lands in F1-03.
+ * SCOPE: this header promotes these primitives and validates source paths with them;
+ * full sprite-key resolution (tp_sprite_id wiring) happens separately.
  */
 
 #include <stdbool.h>
@@ -41,6 +40,17 @@ extern "C" {
  * const size_t: macos -Wgnu-folding-constant rejects that as a VLA bound). */
 #define TP_SRCKEY_MAX 4096
 
+typedef enum tp_srckey_canonical_reason {
+    TP_SRCKEY_CANONICAL_OK = 0,
+    TP_SRCKEY_CANONICAL_NORMALIZE_ERROR,
+    TP_SRCKEY_CANONICAL_SPELLING_MISMATCH,
+} tp_srckey_canonical_reason;
+
+typedef struct tp_srckey_canonical_result {
+    tp_srckey_canonical_reason reason;
+    char canonical[TP_SRCKEY_MAX];
+} tp_srckey_canonical_result;
+
 /* Normalize `input` (a source-root-relative path) into a canonical NFC key in
  * `out` (capacity `cap`). Faults:
  *   TP_STATUS_INVALID_ARGUMENT  NULL input/out, or empty result (e.g. "." / "///")
@@ -50,6 +60,17 @@ extern "C" {
  *   TP_STATUS_OUT_OF_BOUNDS     the result does not fit in `cap`
  *   TP_STATUS_OOM               utf8proc allocation failed */
 tp_status tp_srckey_normalize(const char *input, char *out, size_t cap, tp_error *err);
+
+/* Classify canonical admission without owning caller-facing mismatch prose.
+ * On success and spelling mismatch, `canonical` contains the normalized key.
+ * Normalization faults preserve their status/error and leave canonical empty. */
+tp_status tp_srckey_check_canonical(
+    const char *key, tp_srckey_canonical_result *out, tp_error *err);
+
+/* Accepts only an already-canonical persistent source key. Normalization
+ * faults are preserved; a key that is valid but would change is rejected with
+ * TP_STATUS_INVALID_ARGUMENT and the canonical spelling in `err`. */
+tp_status tp_srckey_validate_canonical(const char *key, tp_error *err);
 
 /* Case-fold (Unicode casefold + NFC) a NORMALIZED key into `out`, for use as a
  * collision-map key. Full case-fold can expand the input up to ~3x, so size `out`

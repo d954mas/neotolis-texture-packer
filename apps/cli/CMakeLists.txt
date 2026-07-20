@@ -5,25 +5,115 @@
 # as apps/smoke and the builder-linking tests).
 set(CLI_OUTPUT_DIR "${CMAKE_SOURCE_DIR}/build/apps/cli/${NT_PRESET_NAME}")
 
-add_executable(ntpacker main.c cli_out.c cli_project.c cli_inspect.c cli_validate.c cli_pack.c cli_mutate.c)
-target_link_libraries(ntpacker PRIVATE tp_build)
-target_include_directories(ntpacker PRIVATE "${CMAKE_SOURCE_DIR}/apps/common") # shared ntpacker_version.h
-target_compile_definitions(ntpacker PRIVATE _CRT_SECURE_NO_WARNINGS)
-target_compile_options(ntpacker PRIVATE -U_DLL)
-nt_set_warning_flags(ntpacker) # AGENTS.md invariant: engine warning flags, zero warnings
-nt_set_sanitizer_flags(ntpacker)
+set(_ntpacker_sources main.c cli_exit.c cli_out.c cli_project.c cli_inspect.c cli_validate.c cli_pack.c
+    cli_mutate.c cli_mutate_source.c cli_mutate_atlas.c cli_mutate_sprite.c
+    cli_mutate_anim.c cli_mutate_target.c)
+if(WIN32)
+    list(APPEND _ntpacker_sources "${CMAKE_SOURCE_DIR}/apps/common/nt_utf8_argv.c")
+endif()
+function(ntpacker_configure_target target)
+    target_link_libraries(${target} PRIVATE tp_build)
+    if(WIN32)
+        target_link_libraries(${target} PRIVATE shell32)
+    endif()
+    target_include_directories(${target} PRIVATE "${CMAKE_SOURCE_DIR}/apps/common")
+    target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS)
+    target_compile_options(${target} PRIVATE -U_DLL)
+    nt_set_warning_flags(${target})
+    nt_set_sanitizer_flags(${target})
+endfunction()
+
+add_executable(ntpacker ${_ntpacker_sources})
+ntpacker_configure_target(ntpacker)
 set_target_properties(ntpacker PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CLI_OUTPUT_DIR}")
+
+# Test-only binary with one deterministic fault seam. Production ntpacker has
+# no environment-controlled behavior; this variant proves inspect propagates a
+# sprite-index failure as structured JSON + the internal-error exit code.
+add_executable(ntpacker_inspect_fault ${_ntpacker_sources})
+ntpacker_configure_target(ntpacker_inspect_fault)
+target_compile_definitions(ntpacker_inspect_fault PRIVATE NTPACKER_CLI_INSPECT_FAULT_SEAM=1)
+set_target_properties(ntpacker_inspect_fault PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CLI_OUTPUT_DIR}")
+
+# Test-only binary whose CLI output builder deterministically rejects every
+# allocation. This exercises the process-level exit/payload contract after a
+# mutation has otherwise reached its normal result-rendering boundary.
+add_executable(ntpacker_output_fault ${_ntpacker_sources})
+ntpacker_configure_target(ntpacker_output_fault)
+target_compile_definitions(ntpacker_output_fault PRIVATE
+    NTPACKER_CLI_OUT_FAULT_SEAM=1)
+set_target_properties(ntpacker_output_fault PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CLI_OUTPUT_DIR}")
 
 # --- e2e ctest: run the built exe, assert the exit-code contract + JSON payload.
 # No GL/display needed, so these give the op layer its first cross-OS CI coverage.
 
 # JSON validity checker (test-only helper; parses a captured payload via cJSON).
 # cJSON is engine-vendored, static-CRT -> -U_DLL (same as the packer tests that
-# link it). Warning flags follow the packer/tests convention (helpers exempt).
+# link it). First-party helpers use the repository warning contract too.
 add_executable(cli_json_check cli_json_check.c)
 target_link_libraries(cli_json_check PRIVATE cjson)
 target_compile_definitions(cli_json_check PRIVATE _CRT_SECURE_NO_WARNINGS)
 target_compile_options(cli_json_check PRIVATE -U_DLL)
+nt_set_warning_flags(cli_json_check)
+
+add_executable(cli_out_contract_test cli_out_contract_test.c cli_out.c)
+target_link_libraries(cli_out_contract_test PRIVATE tp_core)
+target_compile_definitions(cli_out_contract_test PRIVATE _CRT_SECURE_NO_WARNINGS)
+target_compile_options(cli_out_contract_test PRIVATE -U_DLL)
+nt_set_warning_flags(cli_out_contract_test)
+nt_set_sanitizer_flags(cli_out_contract_test)
+add_test(NAME cli_out_contract COMMAND cli_out_contract_test)
+
+add_test(NAME cli_mutation_output_oom_contract COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker_output_fault>
+    -DTD=${CMAKE_CURRENT_SOURCE_DIR}/testdata
+    -DWORK=${CMAKE_CURRENT_BINARY_DIR}/cli_mutation_output_oom_contract
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/cli_mutation_output_oom_contract.cmake")
+
+# Deterministic adapter fixture for the post-publication durability notice. The
+# fault itself is core-tested; this executable pins only the CLI wire payload.
+add_executable(cli_durability_payload_fixture
+    cli_durability_payload_fixture.c cli_out.c)
+target_link_libraries(cli_durability_payload_fixture PRIVATE tp_core)
+target_compile_definitions(cli_durability_payload_fixture PRIVATE
+    _CRT_SECURE_NO_WARNINGS)
+target_compile_options(cli_durability_payload_fixture PRIVATE -U_DLL)
+nt_set_warning_flags(cli_durability_payload_fixture)
+nt_set_sanitizer_flags(cli_durability_payload_fixture)
+
+# Deterministic adapter fixture for the typed pre-publication Save error.
+add_executable(cli_file_io_payload_fixture
+    cli_file_io_payload_fixture.c cli_out.c)
+target_link_libraries(cli_file_io_payload_fixture PRIVATE tp_core)
+target_compile_definitions(cli_file_io_payload_fixture PRIVATE
+    _CRT_SECURE_NO_WARNINGS)
+target_compile_options(cli_file_io_payload_fixture PRIVATE -U_DLL)
+nt_set_warning_flags(cli_file_io_payload_fixture)
+nt_set_sanitizer_flags(cli_file_io_payload_fixture)
+
+add_executable(cli_exit_contract_test test_cli_exit.c cli_exit.c)
+target_link_libraries(cli_exit_contract_test PRIVATE tp_core)
+target_compile_definitions(cli_exit_contract_test PRIVATE _CRT_SECURE_NO_WARNINGS)
+target_compile_options(cli_exit_contract_test PRIVATE -U_DLL)
+nt_set_warning_flags(cli_exit_contract_test)
+nt_set_sanitizer_flags(cli_exit_contract_test)
+add_test(NAME cli_exit_contract COMMAND cli_exit_contract_test)
+
+if(WIN32)
+    add_executable(cli_utf8_argv_test
+        test_utf8_argv.c
+        "${CMAKE_SOURCE_DIR}/apps/common/nt_utf8_argv.c"
+        "${CMAKE_SOURCE_DIR}/apps/common/nt_utf8_fs.c")
+    target_include_directories(cli_utf8_argv_test PRIVATE
+        "${CMAKE_SOURCE_DIR}/apps/common")
+    target_link_libraries(cli_utf8_argv_test PRIVATE tp_core unity shell32)
+    target_compile_definitions(cli_utf8_argv_test PRIVATE _CRT_SECURE_NO_WARNINGS)
+    target_compile_options(cli_utf8_argv_test PRIVATE -U_DLL)
+    nt_set_warning_flags(cli_utf8_argv_test)
+    nt_set_sanitizer_flags(cli_utf8_argv_test)
+    add_test(NAME cli_utf8_argv COMMAND cli_utf8_argv_test)
+endif()
 
 set(_run "${CMAKE_CURRENT_SOURCE_DIR}/cli_run_expect.cmake")
 
@@ -50,9 +140,56 @@ add_test(NAME cli_version_json COMMAND ${CMAKE_COMMAND}
     -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_version_manifest.json
     -P "${_run}")
 
+add_test(NAME cli_manifest_schema_contract COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker>
+    -DTD=${CMAKE_CURRENT_SOURCE_DIR}/testdata
+    -DWORK=${CMAKE_CURRENT_BINARY_DIR}/cli_manifest_schema_contract
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/cli_manifest_schema_contract.cmake")
+
+# Explicit JSON help requests are one versioned machine payload for both
+# command and flag spellings; human usage text must never leak into stdout.
+add_test(NAME cli_help_json COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0 "-DARGS=help --json"
+    -DCHECKER=$<TARGET_FILE:cli_json_check> "-DCHECK_ARGS=help"
+    -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_help.json
+    -DEXPECT_FILE=${CMAKE_CURRENT_SOURCE_DIR}/testdata/help.expected.json
+    -DEXPECT_STDERR_EMPTY=ON -P "${_run}")
+add_test(NAME cli_help_flag_json COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0 "-DARGS=--help --json"
+    -DCHECKER=$<TARGET_FILE:cli_json_check> "-DCHECK_ARGS=help"
+    -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_help_flag.json
+    -DEXPECT_FILE=${CMAKE_CURRENT_SOURCE_DIR}/testdata/help.expected.json
+    -DEXPECT_STDERR_EMPTY=ON -P "${_run}")
+add_test(NAME cli_help_human_exact COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0 "-DARGS=help"
+    -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_help.txt
+    -DEXPECT_FILE=${CMAKE_CURRENT_SOURCE_DIR}/testdata/help.expected.txt
+    -DEXPECT_STDERR_EMPTY=ON -P "${_run}")
+
 # --- B2 read verbs: inspect + validate over checked-in fixtures (no GL/pack). ---
 # The fixtures live in the source tree; project_dir resolves sources against them.
 set(_td "${CMAKE_CURRENT_SOURCE_DIR}/testdata")
+
+# P1-05: exact schemas/payloads. Only elapsed time and the two known absolute
+# test roots are normalized; path policy and every suffix are asserted first.
+add_test(NAME cli_exact_payload_contract COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker>
+    -DCHECKER=$<TARGET_FILE:cli_json_check>
+    -DDURABILITY_EXE=$<TARGET_FILE:cli_durability_payload_fixture>
+    -DFILE_IO_EXE=$<TARGET_FILE:cli_file_io_payload_fixture>
+    -DTD=${_td}
+    -DWORK=${CMAKE_CURRENT_BINARY_DIR}/cli_exact_contract
+    -DEXPECTED=${_td}
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/cli_exact_contract.cmake")
+
+# The process exit-code contract includes total export failure (5) and partial
+# success (6). Force portable write failures with directories at output paths.
+add_test(NAME cli_pack_exit_matrix COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker>
+    -DCHECKER=$<TARGET_FILE:cli_json_check>
+    -DTD=${_td}
+    -DWORK=${CMAKE_CURRENT_BINARY_DIR}/cli_pack_exit_matrix
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/cli_pack_exit_matrix.cmake")
 
 # (e) inspect --json on the clean fixture -> exit 0, parses, atlas[0] has 2 sprites.
 add_test(NAME cli_inspect_json COMMAND ${CMAKE_COMMAND}
@@ -61,9 +198,46 @@ add_test(NAME cli_inspect_json COMMAND ${CMAKE_COMMAND}
     -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_inspect.json
     -P "${_run}")
 
+if(WIN32)
+    # Process-level proof for the Windows UTF-16 -> strict UTF-8 ingress and
+    # packer filesystem boundary. CMake launches the child through CreateProcessW.
+    set(_unicode_td "${CMAKE_CURRENT_BINARY_DIR}/нтпакер")
+    file(MAKE_DIRECTORY "${_unicode_td}")
+    configure_file("${_td}/clean.ntpacker_project"
+                   "${_unicode_td}/проект.ntpacker_project" COPYONLY)
+    file(COPY "${_td}/sprites" DESTINATION "${_unicode_td}")
+    add_test(NAME cli_inspect_unicode_path COMMAND ${CMAKE_COMMAND}
+        -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0
+        "-DARGS=inspect ${_unicode_td}/проект.ntpacker_project --json"
+        -DCHECKER=$<TARGET_FILE:cli_json_check>
+        "-DCHECK_ARGS=inspect sprites=2"
+        -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_inspect_unicode.json
+        -P "${_run}")
+endif()
+
+# The documented one-shot CLI accepts project paths relative to its process CWD;
+# the core identity boundary, not each verb, owns that resolution.
+add_test(NAME cli_inspect_relative_project COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0
+    "-DARGS=inspect testdata/clean.ntpacker_project --json"
+    -DCHECKER=$<TARGET_FILE:cli_json_check> "-DCHECK_ARGS=inspect sprites=2"
+    -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_inspect_relative.json
+    -P "${_run}")
+set_tests_properties(cli_inspect_relative_project PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+
 # (f) inspect on a missing file -> project load error, exit 3.
 add_test(NAME cli_inspect_missing COMMAND ${CMAKE_COMMAND}
     -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=3 "-DARGS=inspect ${_td}/no_such.ntpacker_project" -P "${_run}")
+
+add_test(NAME cli_inspect_index_fault COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker_inspect_fault> -DEXPECT=1
+    "-DARGS=inspect ${_td}/clean.ntpacker_project --json"
+    -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_inspect_index_fault.json
+    -DEXPECT_FILE=${_td}/inspect-index-fault.expected.json
+    -DEXPECT_STDERR_EMPTY=ON -P "${_run}")
+set_tests_properties(cli_inspect_index_fault PROPERTIES
+    ENVIRONMENT "NTPACKER_TEST_INSPECT_INDEX_FAIL=1")
 
 # (g) validate --json on the clean fixture -> exit 0, counts 0/0.
 add_test(NAME cli_validate_clean COMMAND ${CMAKE_COMMAND}
@@ -79,11 +253,16 @@ add_test(NAME cli_validate_problems COMMAND ${CMAKE_COMMAND}
     -DCHECKER=$<TARGET_FILE:cli_json_check>
     "-DCHECK_ARGS=validate code=missing_source code=dangling_anim_frame"
     -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_validate_problems.json
+    -DEXPECT_FILE=${_td}/validate-problems.expected.json
     -P "${_run}")
 
-# (i) same fixture WITH --strict -> exit 7 (error-severity findings present).
+# (i) same JSON payload WITH --strict -> exit 7 (error-severity findings present).
 add_test(NAME cli_validate_strict COMMAND ${CMAKE_COMMAND}
-    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=7 "-DARGS=validate ${_td}/problems.ntpacker_project --strict" -P "${_run}")
+    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=7
+    "-DARGS=validate ${_td}/problems.ntpacker_project --strict --json"
+    -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_validate_strict.json
+    -DEXPECT_FILE=${_td}/validate-problems.expected.json
+    -P "${_run}")
 
 # (i2) F1-02 source-key validation: a fixture with case-folding source paths
 # ("Art/hero" vs "art/hero") and a reserved-name path ("con.png") -> exit 0
@@ -116,41 +295,39 @@ add_test(NAME cli_validate_long_paths COMMAND ${CMAKE_COMMAND}
     -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_validate_long_paths.json
     -P "${_run}")
 
-# (i5) F1-03 §5.6 sprite-record integrity: a v4 fixture with a migrated override whose
-# stored source id is absent from the atlas (sprite_bad_source) and another whose
-# (source,key) resolves to no scanned sprite (orphan_sprite). Both are WARNINGS -- a
-# removed source / gone key orphans the override, it does not corrupt data (fix [5]).
-# So error=0 warning=2 and, without --strict, exit 0.
+# (i5) Canonical v5 orphan integrity: both sparse records target a real source ID,
+# but their source-local keys are currently absent. They remain valid orphaned
+# metadata and reactivate if either key returns; no name-only bridge exists.
+# Both findings are warnings, so without --strict the command exits 0.
 add_test(NAME cli_validate_sprite_records COMMAND ${CMAKE_COMMAND}
-    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0 "-DARGS=validate ${_td}/v4_orphan.ntpacker_project --json"
+    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0 "-DARGS=validate ${_td}/v5_orphan.ntpacker_project --json"
     -DCHECKER=$<TARGET_FILE:cli_json_check>
-    "-DCHECK_ARGS=validate error=0 warning=2 code=sprite_bad_source code=orphan_sprite"
+    "-DCHECK_ARGS=validate error=0 warning=2 code=orphan_sprite"
     -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_validate_sprite_records.json
     -P "${_run}")
 
-# (i5b) fix [5] regression: the SAME fixture WITH --strict must still exit 0. A migrated
-# override whose source was removed is an orphan [warning], not an error -- a routine
-# source-removal edit must not flip validate --strict to exit 7.
+# (i5b) The same canonical orphan fixture with --strict still exits 0 because
+# missing physical keys are warnings, not malformed project identity.
 add_test(NAME cli_validate_sprite_records_strict COMMAND ${CMAKE_COMMAND}
-    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0 "-DARGS=validate ${_td}/v4_orphan.ntpacker_project --strict"
+    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0 "-DARGS=validate ${_td}/v5_orphan.ntpacker_project --strict"
     -P "${_run}")
 
-# (i6) C3 duplicate/invalid export targets: a fixture with two atlases whose targets both
-# export to "out/shared" -> a cross-atlas duplicate_out_path collision (a WARNING; core
-# ALLOWS two targets to share an out_path -- they silently overwrite each other). Both
-# atlases resolve the shared `sprites` folder (no empty_atlas / missing_source noise) and
-# use known exporters, so error=0 and the only findings are the two duplicate_out_path
-# warnings (reported per-colliding-target). No --strict -> exit 0.
+# (i6) Deterministic multi-atlas validation contract: two independent duplicate
+# output groups (cardinality 3 and 2) pin core iteration and schema-2 CLI order.
+# Every source resolves and every exporter is known, so these five warnings are
+# the complete platform-neutral report. No --strict -> exit 0.
 add_test(NAME cli_validate_dup_target COMMAND ${CMAKE_COMMAND}
     -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0 "-DARGS=validate ${_td}/dup_target.ntpacker_project --json"
     -DCHECKER=$<TARGET_FILE:cli_json_check>
-    "-DCHECK_ARGS=validate error=0 warning=2 code=duplicate_out_path"
+    "-DCHECK_ARGS=validate error=0 warning=5 code=duplicate_out_path"
     -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_validate_dup_target.json
+    -DEXPECT_FILE=${_td}/validate-dup-target.expected.json
     -P "${_run}")
 
 # (j) validate on an unloadable file -> exit 3.
 add_test(NAME cli_validate_unloadable COMMAND ${CMAKE_COMMAND}
-    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=3 "-DARGS=validate ${_td}/bad.ntpacker_project" -P "${_run}")
+    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=3
+    "-DARGS=validate ${_td}/bad.ntpacker_project --json" -P "${_run}")
 
 # (k) pack the clean fixture: exit 0, report parses (timings masked), files land
 # under --out-dir (never in the source tree).
@@ -169,8 +346,18 @@ add_test(NAME cli_pack_target_none COMMAND ${CMAKE_COMMAND}
     -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0
     "-DARGS=pack ${_td}/clean.ntpacker_project --json --target defold --out-dir ${CMAKE_CURRENT_BINARY_DIR}/cli_pack_out2"
     -DCHECKER=$<TARGET_FILE:cli_json_check>
-    "-DCHECK_ARGS=pack targets_ok=0 targets_failed=0"
+    "-DCHECK_ARGS=pack targets_ok=0 targets_failed=0 notice=no_enabled_targets"
     -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_pack_none.json
+    -P "${_run}")
+
+# A source-less atlas is a successful skipped outcome, but JSON must carry a
+# stable notice id plus atlas context rather than prose alone.
+add_test(NAME cli_pack_no_usable_images COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0
+    "-DARGS=pack ${_td}/empty.ntpacker_project --json --out-dir ${CMAKE_CURRENT_BINARY_DIR}/cli_pack_empty"
+    -DCHECKER=$<TARGET_FILE:cli_json_check>
+    "-DCHECK_ARGS=pack targets_ok=0 targets_failed=0 notice=no_usable_images"
+    -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_pack_empty.json
     -P "${_run}")
 
 # (m) dangling anim frame aborts the atlas before any target writes (plan L-4
@@ -189,6 +376,17 @@ add_test(NAME cli_pack_dry_run COMMAND ${CMAKE_COMMAND}
     "-DCHECK_ARGS=pack dry_run=1 targets_ok=1 targets_failed=0"
     -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_pack_dry.json
     "-DNOT_EXIST_FILES=${CMAKE_CURRENT_BINARY_DIR}/cli_pack_dry/out/clean.json.json;${CMAKE_CURRENT_BINARY_DIR}/cli_pack_dry/out/clean.json-0.png;${CMAKE_CURRENT_BINARY_DIR}/cli_pack_dry/out"
+    -P "${_run}")
+
+# The checked-in 100-atlas project is not only schema-openable: drive one atlas
+# through real image decode + pack/predict without creating output files.
+add_test(NAME cli_large_project_packable COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0
+    "-DARGS=pack ${CMAKE_SOURCE_DIR}/examples/projects/large-synthetic.ntpacker_project --atlas atlas_000 --dry-run --json --out-dir ${CMAKE_CURRENT_BINARY_DIR}/cli_large_project_dry"
+    -DCHECKER=$<TARGET_FILE:cli_json_check>
+    "-DCHECK_ARGS=pack dry_run=1 targets_ok=1 targets_failed=0"
+    -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_large_project_dry.json
+    -DNOT_EXIST_FILES=${CMAKE_CURRENT_BINARY_DIR}/cli_large_project_dry
     -P "${_run}")
 
 # (o) B3b parity: `ntpacker pack` == direct-core (tp_demo_export) BYTE-FOR-BYTE on a
@@ -220,3 +418,15 @@ foreach(_fam new source set sprite anim target atlas stable)
         -DFAMILY=${_fam}
         -P "${_mut}")
 endforeach()
+
+add_test(NAME cli_mutation_dry_run COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker>
+    -DTD=${_td}
+    -DWORK=${CMAKE_CURRENT_BINARY_DIR}/cli_mutation_dry_run
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/cli_mutation_dry_run.cmake")
+
+add_test(NAME cli_mutation_dry_run_families COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker>
+    -DTD=${_td}
+    -DWORK=${CMAKE_CURRENT_BINARY_DIR}/cli_mutation_dry_run_families
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/cli_mutation_dry_run_families.cmake")

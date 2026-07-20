@@ -1,20 +1,22 @@
 /*
- * F2-03 tasks 2/3/5: the diff-record lifecycle + a MINIMAL in-memory undo/redo
+ * The diff-record lifecycle + a MINIMAL in-memory undo/redo
  * history and the model-facing Undo/Redo. A committed transaction pushes ONE record
  * (its ordered per-op diffs + label/author + produced revision); a NEW transaction
  * applied after an Undo discards the redo branch (cursor semantics).
  *
- * Undo/Redo reuse the F2-02 clone/swap for STAGE-THEN-COMMIT atomicity: the inverse
+ * Undo/Redo reuse the clone/swap for STAGE-THEN-COMMIT atomicity: the inverse
  * (or forward) diff is applied to a CLONE and swapped in only on FULL success, so an
- * allocation failure or a corrupted diff rolls back with the live model, revision,
- * and cursor byte-unchanged. A successful Undo/Redo bumps the revision by one (a new
- * committed state); dirty stays identity-derived (an Undo to the saved baseline is
- * clean even at a higher revision).
+ * allocation failure or corrupted diff rolls back with the live model, revision,
+ * and cursor byte-unchanged. Recovery transition encode/append failure occurs
+ * after publication and makes recovery degraded. A successful Undo/Redo bumps the revision by one (a new committed
+ * state); dirty stays identity-derived (an Undo to the saved baseline is clean even
+ * at a higher revision).
  *
- * HONEST SCOPE: this is the ENGINE history primitive. It is in-memory session state
- * (not serialized, not crash-durable -- F2-04) and is NOT wired to the GUI Undo/Redo
- * shortcuts / save-checkpoint / ownership (F3-02) nor routed through the shipping
- * frontends (F2-05).
+ * HONEST SCOPE: the undo STACK is in-memory session state and is not restored after
+ * restart. When a recovery journal is attached, the DOCUMENT STATE produced by each
+ * Undo/Redo is recorded via a compact transition while recovery is healthy.
+ * Unsupported/oversized transitions degrade recovery rather than surprising the
+ * caller with a full checkpoint; recovery starts with a fresh empty history stack.
  */
 
 #include "tp_core/tp_diff.h"
@@ -25,6 +27,10 @@
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_transaction.h"
 #include "tp_diff_internal.h"
+#include "tp_history_codec_internal.h"
+#include "tp_journal_internal.h"
+#include "tp_project_internal.h"
+#include "tp_txn_internal.h"
 
 /* ---- diff record + per-op entry lifecycle -------------------------------- */
 
@@ -109,7 +115,16 @@ void tp_diff_record_push_op(tp_diff_record *r, tp_diff_op *e) {
 
 tp_history *tp_history_create(void) {
     tp_history *h = (tp_history *)calloc(1, sizeof *h);
-    return h; /* records=NULL, count=cap=pos=0 */
+    if (!h) {
+        return NULL;
+    }
+    h->records = (tp_diff_record **)calloc((size_t)TP_HISTORY_MAX_STEPS, sizeof *h->records);
+    if (!h->records) {
+        free(h);
+        return NULL;
+    }
+    h->cap = TP_HISTORY_MAX_STEPS;
+    return h;
 }
 
 void tp_history_destroy(tp_history *h) {
@@ -123,50 +138,102 @@ void tp_history_destroy(tp_history *h) {
     free(h);
 }
 
-/* Test-only fault seam (fix [3] pin): force the next history-slot grow to report OOM
- * once, then re-arm to off. Lets a test prove a reserve OOM happens BEFORE the id is
+/* Test-only fault seam: force the next history admission to report OOM
+ * once, then re-arm to off. Lets a test prove the failure happens BEFORE the id is
  * recorded, so the same transaction id stays retryable (never poisoned to DUPLICATE_ID). */
-static bool s_reserve_fail = false;
+static _Thread_local bool s_reserve_fail = false;
+static _Thread_local int s_test_max_steps = 0;
+static _Thread_local size_t s_test_max_bytes = 0U;
+static _Thread_local size_t s_test_max_record_bytes = 0U;
 void tp_history__test_fail_next_reserve(void) { s_reserve_fail = true; }
 
-tp_status tp_history_reserve(tp_history *h) {
-    if (h->cap >= h->count + 1) {
-        return TP_STATUS_OK;
+void tp_history__test_set_limits(int max_steps, size_t max_bytes, size_t max_record_bytes) {
+    s_test_max_steps = max_steps;
+    s_test_max_bytes = max_bytes;
+    s_test_max_record_bytes = max_record_bytes;
+}
+
+size_t tp_history_record_byte_limit(void) {
+    const size_t max_bytes = s_test_max_bytes > 0U ? s_test_max_bytes : (size_t)TP_HISTORY_MAX_BYTES;
+    const size_t max_record = s_test_max_record_bytes > 0U ? s_test_max_record_bytes
+                                                           : (size_t)TP_HISTORY_MAX_RECORD_BYTES;
+    return max_record < max_bytes ? max_record : max_bytes;
+}
+
+tp_status tp_history_prepare_push(const tp_history *h, const tp_diff_record *r, tp_history_push_plan *plan,
+                                  tp_error *err) {
+    if (!h || !r || !plan) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "invalid history push");
     }
     if (s_reserve_fail) {
         s_reserve_fail = false;
         return TP_STATUS_OOM;
     }
-    int ncap = (h->cap == 0) ? 8 : (h->cap * 2);
-    tp_diff_record **n = (tp_diff_record **)tp_diff__alloc((size_t)ncap * sizeof *n);
-    if (!n) {
-        return TP_STATUS_OOM;
+
+    const int max_steps = s_test_max_steps > 0 ? s_test_max_steps : TP_HISTORY_MAX_STEPS;
+    const size_t max_bytes = s_test_max_bytes > 0U ? s_test_max_bytes : (size_t)TP_HISTORY_MAX_BYTES;
+    const size_t max_record = s_test_max_record_bytes > 0U ? s_test_max_record_bytes
+                                                           : (size_t)TP_HISTORY_MAX_RECORD_BYTES;
+    if (max_steps > h->cap) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "history step limit exceeds fixed capacity");
     }
-    if (h->records && h->count > 0) {
-        memcpy(n, h->records, (size_t)h->count * sizeof *n);
+    if (r->bytes == 0U || r->bytes > max_record || r->bytes > max_bytes) {
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                            "semantic diff has %zu bytes; record maximum is %zu and history maximum is %zu",
+                            r->bytes, max_record, max_bytes);
     }
-    free(h->records);
-    h->records = n;
-    h->cap = ncap;
+
+    size_t kept_bytes = h->bytes;
+    for (int i = h->pos; i < h->count; i++) {
+        kept_bytes -= h->records[i]->bytes; /* redo branch will be discarded after ACK */
+    }
+    int kept_count = h->pos;
+    int drop = 0;
+    while (kept_count >= max_steps || kept_bytes > max_bytes - r->bytes) {
+        if (drop >= h->pos) {
+            return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "semantic diff cannot fit history budget");
+        }
+        kept_bytes -= h->records[drop]->bytes;
+        drop++;
+        kept_count--;
+    }
+    plan->drop_oldest = drop;
+    plan->final_bytes = kept_bytes + r->bytes;
     return TP_STATUS_OK;
 }
 
-void tp_history_push_reserved(tp_history *h, tp_diff_record *r) {
-    /* discard the redo branch (records above the cursor) */
+void tp_history_push_prepared(tp_history *h, tp_diff_record *r, const tp_history_push_plan *plan) {
+    /* No mutation happened during prepare. Redo and FIFO eviction become visible
+     * together at the live commit point. */
     for (int i = h->pos; i < h->count; i++) {
         tp_diff_record_free(h->records[i]);
         h->records[i] = NULL;
     }
-    h->count = h->pos;
-    h->records[h->count] = r; /* cap ensured by tp_history_reserve */
-    h->count++;
-    h->pos++;
+    for (int i = 0; i < plan->drop_oldest; i++) {
+        tp_diff_record_free(h->records[i]);
+        h->records[i] = NULL;
+    }
+    const int kept = h->pos - plan->drop_oldest;
+    if (kept > 0 && plan->drop_oldest > 0) {
+        memmove(h->records, h->records + plan->drop_oldest, (size_t)kept * sizeof *h->records);
+    }
+    for (int i = kept; i < h->count; i++) {
+        h->records[i] = NULL;
+    }
+    h->records[kept] = r;
+    h->count = kept + 1;
+    h->pos = h->count;
+    h->bytes = plan->final_bytes;
 }
 
 tp_diff_record *tp_history_undo_record(tp_history *h) { return h->pos > 0 ? h->records[h->pos - 1] : NULL; }
 tp_diff_record *tp_history_redo_record(tp_history *h) { return h->pos < h->count ? h->records[h->pos] : NULL; }
-void tp_history_commit_undo(tp_history *h) { h->pos--; }
-void tp_history_commit_redo(tp_history *h) { h->pos++; }
+void tp_history_commit_undo(tp_history *h) {
+    h->pos--;
+}
+void tp_history_commit_redo(tp_history *h) {
+    h->pos++;
+}
 
 /* ---- model-facing history API (tp_diff.h) -------------------------------- */
 
@@ -182,6 +249,8 @@ tp_status tp_model_enable_history(tp_model *m) {
 }
 
 bool tp_model_has_history(const tp_model *m) { return m && m->history; }
+
+struct tp_history *tp_model_history(tp_model *m) { return m ? m->history : NULL; }
 
 bool tp_model_can_undo(const tp_model *m) { return m && m->history && m->history->pos > 0; }
 bool tp_model_can_redo(const tp_model *m) { return m && m->history && m->history->pos < m->history->count; }
@@ -203,6 +272,56 @@ const char *tp_model_undo_author(const tp_model *m) {
     return m->history->records[m->history->pos - 1]->author;
 }
 
+typedef struct tp_history_durable_transition {
+    tp_history_transition_blob blob;
+    tp_history_codec_outcome outcome;
+} tp_history_durable_transition;
+
+/* Measure and admit the ordinary compact record before building the mutable
+ * candidate. The semantic diff already contains both sides of every effect, so
+ * this is exact and does not depend on applying Undo/Redo first. */
+static tp_status prepare_history_transition(
+    tp_model *m, const tp_diff_record *record, bool reverse,
+    tp_history_durable_transition *out, tp_error *err) {
+    memset(out, 0, sizeof *out);
+    out->outcome = TP_HISTORY_CODEC_ERROR;
+    if (!m->journal || m->recovery_degraded) return TP_STATUS_OK;
+    tp_status status = tp_history_transition_encode(
+        record, reverse, m->project,
+        (size_t)TP_JOURNAL_MAX_RECORD_BYTES -
+            (size_t)TP_JRN_HISTORY_FIXED,
+        &out->blob, &out->outcome, err);
+    if (status != TP_STATUS_OK) return status;
+    if (out->outcome == TP_HISTORY_CODEC_OK) {
+        status = tp_journal__check_history_append_bytes(
+            m->journal, out->blob.len, out->blob.op_count, err);
+        if (status != TP_STATUS_OK) {
+            tp_history_transition_blob_free(&out->blob);
+        }
+        return status;
+    }
+    if (out->outcome == TP_HISTORY_CODEC_UNSUPPORTED ||
+        out->outcome == TP_HISTORY_CODEC_OVERSIZED)
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                            "history transition is not journal-encodable");
+    return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                        "history transition encoding failed");
+}
+
+static tp_status append_history_transition(
+    tp_model *m, const tp_project *candidate, int64_t revision,
+    const tp_history_durable_transition *prepared, tp_error *err) {
+    (void)candidate;
+    if (!m->journal || m->recovery_degraded) return TP_STATUS_OK;
+    if (prepared->outcome == TP_HISTORY_CODEC_OK) {
+        return tp_journal_append_history_counted(
+            m->journal, revision, prepared->blob.data, prepared->blob.len,
+            prepared->blob.op_count, err);
+    }
+    return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                        "invalid prepared history transition");
+}
+
 tp_status tp_model_undo(tp_model *m, tp_error *err) {
     if (!m || !m->history) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "undo: model has no history");
@@ -211,19 +330,44 @@ tp_status tp_model_undo(tp_model *m, tp_error *err) {
     if (!r) {
         return tp_error_set(err, TP_STATUS_NOT_FOUND, "nothing to undo");
     }
-    tp_project *clone = tp_project_clone(m->project);
-    if (!clone) {
-        return tp_error_set(err, TP_STATUS_OOM, "undo: clone failed");
-    }
-    tp_status st = tp_diff_record_apply(clone, r, /*reverse=*/true, err);
+    int64_t revision = 0;
+    tp_status st = tp_model__next_revision(m->revision, &revision, err);
     if (st != TP_STATUS_OK) {
-        tp_project_destroy(clone); /* rollback: live model byte-unchanged */
         return st;
     }
-    tp_project_destroy(m->project);
-    m->project = clone;
-    m->revision += 1;
+    tp_history_durable_transition durable;
+    memset(&durable, 0, sizeof durable);
+    const bool recovery_ready = m->journal && !m->recovery_degraded;
+    tp_error recovery_error = {{0}};
+    tp_status recovery_status = recovery_ready
+                                    ? prepare_history_transition(
+                                          m, r, true, &durable,
+                                          &recovery_error)
+                                    : TP_STATUS_OK;
+    tp_project *clone = tp_project_clone(m->project);
+    if (!clone) {
+        tp_history_transition_blob_free(&durable.blob);
+        return tp_error_set(err, TP_STATUS_OOM, "undo: clone failed");
+    }
+    st = tp_diff_record_apply(clone, r, /*reverse=*/true, err);
+    if (st != TP_STATUS_OK) {
+        tp_project_destroy(clone); /* rollback: live model byte-unchanged */
+        tp_history_transition_blob_free(&durable.blob);
+        return st;
+    }
+    tp_model__replace_owned_project(m, clone);
+    m->revision = revision;
     tp_history_commit_undo(m->history);
+    if (recovery_ready && recovery_status == TP_STATUS_OK) {
+        recovery_status = append_history_transition(
+            m, m->project, revision, &durable, &recovery_error);
+    }
+    tp_history_transition_blob_free(&durable.blob);
+    if (recovery_ready && recovery_status != TP_STATUS_OK) {
+        tp_model__degrade_recovery(m, recovery_status);
+    } else if (recovery_ready) {
+        tp_model__mark_recovery_durable(m, revision);
+    }
     return TP_STATUS_OK;
 }
 
@@ -235,18 +379,43 @@ tp_status tp_model_redo(tp_model *m, tp_error *err) {
     if (!r) {
         return tp_error_set(err, TP_STATUS_NOT_FOUND, "nothing to redo");
     }
-    tp_project *clone = tp_project_clone(m->project);
-    if (!clone) {
-        return tp_error_set(err, TP_STATUS_OOM, "redo: clone failed");
-    }
-    tp_status st = tp_diff_record_apply(clone, r, /*reverse=*/false, err);
+    int64_t revision = 0;
+    tp_status st = tp_model__next_revision(m->revision, &revision, err);
     if (st != TP_STATUS_OK) {
-        tp_project_destroy(clone);
         return st;
     }
-    tp_project_destroy(m->project);
-    m->project = clone;
-    m->revision += 1;
+    tp_history_durable_transition durable;
+    memset(&durable, 0, sizeof durable);
+    const bool recovery_ready = m->journal && !m->recovery_degraded;
+    tp_error recovery_error = {{0}};
+    tp_status recovery_status = recovery_ready
+                                    ? prepare_history_transition(
+                                          m, r, false, &durable,
+                                          &recovery_error)
+                                    : TP_STATUS_OK;
+    tp_project *clone = tp_project_clone(m->project);
+    if (!clone) {
+        tp_history_transition_blob_free(&durable.blob);
+        return tp_error_set(err, TP_STATUS_OOM, "redo: clone failed");
+    }
+    st = tp_diff_record_apply(clone, r, /*reverse=*/false, err);
+    if (st != TP_STATUS_OK) {
+        tp_project_destroy(clone);
+        tp_history_transition_blob_free(&durable.blob);
+        return st;
+    }
+    tp_model__replace_owned_project(m, clone);
+    m->revision = revision;
     tp_history_commit_redo(m->history);
+    if (recovery_ready && recovery_status == TP_STATUS_OK) {
+        recovery_status = append_history_transition(
+            m, m->project, revision, &durable, &recovery_error);
+    }
+    tp_history_transition_blob_free(&durable.blob);
+    if (recovery_ready && recovery_status != TP_STATUS_OK) {
+        tp_model__degrade_recovery(m, recovery_status);
+    } else if (recovery_ready) {
+        tp_model__mark_recovery_durable(m, revision);
+    }
     return TP_STATUS_OK;
 }

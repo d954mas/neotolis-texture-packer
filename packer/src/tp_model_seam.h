@@ -1,0 +1,40 @@
+#ifndef TP_CORE_SRC_TP_MODEL_SEAM_H
+#define TP_CORE_SRC_TP_MODEL_SEAM_H
+
+#include "tp_core/tp_project.h"
+#include "tp_core/tp_transaction.h"
+
+typedef struct tp_project_generation tp_project_generation;
+
+/* The live project (immutable borrowed view; valid until the next model replace
+ * or destruction). Core-only: clients read owned session snapshots. */
+const tp_project *tp_model_project(const tp_model *model);
+
+/* Lazily installs a shared owner for the current immutable project generation
+ * and returns one retained reference. The model remains unchanged on OOM. */
+tp_status tp_model__retain_project_generation(
+    tp_model *model, tp_project_generation **out, tp_error *error);
+
+/* Model-owned project replacement after a separately staged project persisted.
+ * Takes ownership of `project`; session stays the persistence/orchestration caller. */
+void tp_model__adopt_project(tp_model *model, tp_project *project);
+
+bool tp_model__recovery_degraded(const tp_model *model);
+tp_status tp_model__recovery_status(const tp_model *model);
+void tp_model__degrade_recovery(tp_model *model, tp_status status);
+void tp_model__restore_recovery(tp_model *model);
+void tp_model__mark_recovery_durable(tp_model *model, int64_t revision);
+bool tp_model__recovery_durable_revision(const tp_model *model,
+                                         int64_t *revision);
+uint64_t tp_model__recovery_health_generation(const tp_model *model);
+/* Applies against an isolated project clone at `revision`. The caller's
+ * project remains immutable and the returned transaction result owns its data. */
+tp_status tp_model__apply_snapshot_preview(
+    const tp_project *project, int64_t revision,
+    const tp_txn_request *request, tp_txn_result *result, tp_error *error);
+/* Degraded-Save compaction that stages the full live retained-id window and
+ * restores the exact prior bytes/index if the replacement checkpoint cannot
+ * be completed. */
+tp_status tp_model__heal_journal(tp_model *model, tp_error *error);
+
+#endif /* TP_CORE_SRC_TP_MODEL_SEAM_H */

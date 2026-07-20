@@ -83,7 +83,6 @@ int main(int argc, char **argv) {
         (void)fprintf(stderr, "cannot load project '%s': %s\n", proj_path, e.msg);
         return 1;
     }
-
     /* work_dir holds only transient session .ntpack files (gitignored); default to
      * the current directory so we never resurrect an output tree. */
     const char *work_dir = (argc > 2) ? argv[2] : ".";

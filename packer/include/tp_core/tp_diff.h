@@ -3,15 +3,16 @@
 
 /*
  * Semantic diff / exact inverse (Undo) + redo replay over a committed transaction,
- * and a minimal in-memory undo/redo history (F2-03, master spec §9-9.5, §59 items
- * 15-17). Builds on the F2-02 transaction engine (tp_transaction.h): a committed
+ * and a minimal in-memory undo/redo history (master spec §9-9.5, §59 items
+ * 15-17). Builds on the transaction engine (tp_transaction.h): a committed
  * transaction captures ONE compact SEMANTIC DIFF -- the per-op before/after data +
  * ordering position needed to invert it -- NOT a full project snapshot. The exact
  * inverse restores the pre-transaction state byte-for-byte; redo re-applies it.
  *
  * INVERSE REPRESENTATION -- state-capture, not inverse-operations (docs/decisions/0012):
  * each op's diff records the touched entity's before/after DATA + position (the
- * C0-02 §6 shapes: CREATE=after entity+position, REMOVE=before entity+position,
+ * decision 0012 state-capture shapes: CREATE=after entity+position,
+ * REMOVE=before entity+position,
  * MOVE=from/to index, SET=before/after field values); a dedicated diff-apply
  * restores the data directly. This is byte-exact under the array-order-sensitive
  * serializer (which the append-only op catalog cannot invert positionally) and
@@ -19,17 +20,14 @@
  * proves A->forward->B->inverse->A' is byte-identical to A and equals the legacy
  * full-snapshot restore.
  *
- * HONEST SCOPE (the F1-03/F2-01/F2-02 lesson -- see docs/decisions/0012): F2-03
- * builds and CORE-TESTS the diff/inverse ENGINE + a minimal history primitive. It
- * does NOT wire the GUI Undo/Redo shortcuts, save-checkpoint visibility, or
- * ownership (that SESSION/GUI behavior is F3-02), does NOT route the shipping
- * frontends (F2-05), and does NOT persist history across reopen/crash (F2-04
- * journal). The legacy GUI snapshot stack (apps/gui/gui_history.c) is left in place
- * untouched (not deleted, not rewired); the oracle reproduces its full-snapshot
- * restore via tp_project_save_buffer/tp_project_load_buffer as the comparison oracle.
+ * The session is the shipping owner of this primitive: it admits transactions,
+ * exposes Undo/Redo, and records best-effort recovery transitions. Frontends never maintain a second
+ * snapshot history. History remains bounded in-memory state; journal recovery
+ * reconstructs the recoverable model rather than serializing these allocations.
  */
 
 #include <stdbool.h>
+#include <stddef.h>
 
 #include "tp_core/tp_error.h"
 #include "tp_core/tp_transaction.h" /* tp_model (the history attaches to it) */
@@ -38,12 +36,20 @@
 extern "C" {
 #endif
 
+/* History is deliberately bounded session state. A transaction whose semantic
+ * diff cannot fit the single-record budget is rejected before
+ * model publication: committing an edit without its Undo record is forbidden.
+ * Older undo steps are evicted FIFO at the live transaction commit. */
+#define TP_HISTORY_MAX_STEPS 256
+#define TP_HISTORY_MAX_BYTES (64U * 1024U * 1024U)
+#define TP_HISTORY_MAX_RECORD_BYTES (32U * 1024U * 1024U)
+
 /* ---- attach an in-memory undo/redo history to a model -------------------- *
- * Off by default: a model with no history behaves EXACTLY like F2-02 (a committed
+ * Off by default: a model with no history behaves EXACTLY like the transaction engine (a committed
  * transaction captures nothing). Enabling it makes each subsequently committed
  * transaction capture a compact semantic diff and push it as one undoable step; a
  * NEW transaction applied after an Undo discards the redo branch. History is
- * in-memory session state (not serialized, not crash-durable -- F2-04). Idempotent
+ * in-memory session state (not serialized as a history stack). Idempotent
  * (a no-op if already enabled). Returns TP_STATUS_OOM if the stack cannot allocate.
  * Owned by the model; freed by tp_model_destroy. */
 tp_status tp_model_enable_history(tp_model *m);
@@ -64,12 +70,14 @@ const char *tp_model_undo_author(const tp_model *m);
 /* ---- exact inverse (Undo) + redo replay ---------------------------------- *
  * Undo reverses the most recently committed (or redone) transaction via its
  * captured semantic diff; Redo re-applies the next transaction on the redo branch.
- * STAGE-THEN-COMMIT (reuses the F2-02 clone/swap): the inverse is applied to a CLONE
+ * STAGE-THEN-COMMIT (reuses the clone/swap): the inverse is applied to a CLONE
  * of the live model and swapped in only on FULL success, so an allocation failure
  * mid-inverse ROLLS BACK -- the live model is BYTE-UNCHANGED, the revision and the
  * history cursor unchanged. Each Undo/Redo that succeeds bumps the revision by
  * exactly 1 (a new committed state; dirty is recomputed from semantic identity, so
  * an Undo back to the saved baseline is clean even at a higher revision).
+ * A recovery transition encode/append/sync failure occurs after that commit,
+ * leaves Undo/Redo successful, and makes later recovery recording unavailable.
  *
  * A corrupted/hostile diff (a stale or unknown entity id, an out-of-range position)
  * yields a STRUCTURED error (TP_STATUS_NOT_FOUND / TP_STATUS_OUT_OF_BOUNDS), never a

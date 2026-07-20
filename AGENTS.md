@@ -3,11 +3,11 @@
 ## Repository Role
 
 Standalone texture/atlas packer built on neotolis-engine. The current baseline
-has one shared packing/export core and two shipped clients: the CLI and native
-GUI app (engine `nt_ui`). The target architecture adds one typed
-operation/session layer for capability-equivalent GUI, CLI, MCP, and Dev API
-clients, plus stable structural IDs, tagged sources, a unified format registry,
-and canonical Import/Export IRs.
+has one shared packing/export core, typed operation/session ownership, stable
+structural IDs, canonical-v5 tagged sources, semantic history/recovery, and two
+thin shipped clients: the CLI and native GUI app (engine `nt_ui`). Target work
+adds canonical Import/Export IRs, the unified format registry, and
+capability-equivalent MCP and Dev API clients.
 
 `docs/ntpacker-master-spec.md` is the normative product and architecture source.
 `docs/ROADMAP.md` and `docs/plans/master-spec-implementation-plan.md` are
@@ -41,8 +41,9 @@ work itself. Create a new role only when the catalog has no fitting role.
 
 - `external/neotolis-engine/` — engine submodule. **Read-only for agents.**
 - `packer/` — the current shared project/packing/export core
-  (`tp_core`/`tp_build`). Target operation/session, import, source-runtime,
-  format-registry, and canonical-IR modules also belong here as they land. No
+  (`tp_core`/`tp_build`). Operation/session/history/recovery already live here;
+  target import, source-runtime, format-registry, and canonical-IR modules also
+  belong here as they land. No
   UI, transport, or CLI parsing here.
 - `apps/cli/` — `ntpacker` file-oriented CLI frontend. `apps/gui/` — native
   GUI frontend. Live headless sessions belong to `ntpacker mcp`, not ordinary
@@ -69,6 +70,11 @@ work itself. Create a new role only when the catalog has no fitting role.
   only prose), and destructive/lossy outcomes are predictable via dry-run.
   Invalid user input must produce a structured error, never an abort/crash.
 - C17, engine warning flags (`nt_set_warning_flags`) on all our targets.
+- Use the owner's Neotolis assertions (`NT_ASSERT`, and `NT_BUILD_ASSERT` at the
+  builder boundary) in both Debug and Release. They are intentionally active in
+  every shipped configuration: never set `NT_ASSERT_MODE=OFF`, remove them, or
+  disable invariant checks as a release optimization. Do not use libc
+  `assert()` for required runtime invariants because `NDEBUG` disables it.
 - Target source model: sources are tagged records. Path files/folders and linked
   atlases share one runtime source/status boundary; external refresh never
   mutates project revision, dirty state, or Undo history and never auto-starts
@@ -88,6 +94,21 @@ cmake --build --preset native-debug
 
 Outputs land in `build/<area>/<target>/<preset>/`. Tests run via
 `ctest --preset native-release` (or `native-debug`).
+
+## Simplification Policy
+
+Production LOC and complexity measurements are diagnostic inventory, not
+pass/fail gates. File LOC is an important hotspot signal. There are no hard
+LOC/CC limits, source-size baselines, ratchets, or no-growth rules. Size alone
+never rejects a change or requires a split. Assess large modules by owned
+responsibilities, dependency fan-out, contract risk, and whether a narrower
+seam improves the code.
+
+Do not split a cohesive function only to reduce a metric. Long functions may
+remain when they own one responsibility and have clear regions. Extract a
+function when there is a real semantic boundary or actual reuse, and split a
+translation unit only when the resulting ownership and dependency direction
+are clearer. Keep LOC inventory visible as a non-gating report.
 
 ## CI / Releases
 

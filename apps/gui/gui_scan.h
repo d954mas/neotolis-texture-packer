@@ -2,6 +2,7 @@
 #define NTPACKER_GUI_SCAN_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #include "tp_core/tp_scan.h"
 
@@ -22,10 +23,11 @@ extern "C" {
 typedef tp_scan_entry gui_scan_entry;
 typedef tp_scan_result gui_scan_result;
 
-/* Recursive listing of image files (.png/.jpg/.jpeg/.bmp/.tga, case-insensitive) under
- * abs_dir. Never NULL; count==0 for an empty/missing/inaccessible dir. The result is
- * owned by the module (cached) -- do NOT free or mutate it. */
-const gui_scan_result *gui_scan_get(const char *abs_dir);
+/* Recursive listing of image files under abs_dir. On success, *out_result is a
+ * non-NULL module-owned cached result (possibly empty). Scan/open/read/OOM/path
+ * failures are returned exactly and are never cached as an empty success. */
+tp_status gui_scan_get(const char *abs_dir,
+                       const gui_scan_result **out_result, tp_error *err);
 
 /* True if abs points at an existing directory (distinguishes a folder source from a file
  * source without trusting the extension). False for files, missing paths, and NULL. */
@@ -45,6 +47,21 @@ void gui_scan_invalidate_all(void);
 
 /* Frees all cache memory (shutdown). */
 void gui_scan_shutdown(void);
+
+#if defined(NTPACKER_GUI_BENCH)
+typedef struct gui_scan_bench_counters {
+    uint64_t get_calls;
+    uint64_t directory_walks;
+    uint64_t exists_fs_calls;
+    uint64_t is_dir_fs_calls;
+} gui_scan_bench_counters;
+
+/* Seeds one cached directory without walking it. Takes ownership of
+ * owned_result->entries on success and zeroes *owned_result. */
+bool gui_scan_bench_seed_owned(const char *abs_dir, gui_scan_result *owned_result);
+void gui_scan_bench_reset_counters(void);
+gui_scan_bench_counters gui_scan_bench_get_counters(void);
+#endif
 
 #ifdef __cplusplus
 }

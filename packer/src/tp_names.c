@@ -61,7 +61,8 @@ int tp_nat_cmp(const char *a, const char *b) {
     return 0;
 }
 
-void tp_names_common_prefix(char names[][192], int count, char *out, size_t cap) {
+void tp_names_common_prefix(const char *const *names, int count, char *out,
+                            size_t cap) {
     out[0] = '\0';
     if (count <= 0 || cap == 0) {
         return;

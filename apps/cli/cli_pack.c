@@ -28,8 +28,8 @@
 #include <string.h>
 
 #ifdef _WIN32
-#include <direct.h>
 #include <windows.h>
+#include "nt_utf8_argv.h"
 #else
 #include <time.h>
 #include <unistd.h>
@@ -41,9 +41,8 @@
 #include "tp_core/tp_error.h"
 #include "tp_core/tp_export.h"
 #include "tp_core/tp_export_run.h"
-#include "tp_core/tp_input.h"
-#include "tp_core/tp_project.h"
 #include "tp_core/tp_scan.h"
+#include "tp_core/tp_session.h"
 
 #define CLI_PACK_SCHEMA 1
 
@@ -80,45 +79,84 @@ static bool path_is_abs(const char *p) {
     return false;
 }
 
-/* Makes `p` absolute against the current working directory (path need not exist). */
-static void abspath_cwd(const char *p, char *out, size_t cap) {
-    if (path_is_abs(p)) {
-        (void)snprintf(out, cap, "%s", p);
-        return;
+/* Makes `p` absolute against the current working directory (path need not
+ * exist). Windows retrieves the directory through the UTF-16 OS boundary. */
+static tp_status abspath_cwd(const char *p, char *out, size_t cap,
+                             tp_error *err) {
+    if (!p || !out || cap == 0U) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "invalid output-directory path");
     }
-    char cwd[512];
+    if (path_is_abs(p)) {
+        const int copied = snprintf(out, cap, "%s", p);
+        return copied >= 0 && (size_t)copied < cap
+                   ? TP_STATUS_OK
+                   : tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                                  "output-directory path is too long");
+    }
+    char cwd[TP_IDENTITY_PATH_MAX];
 #ifdef _WIN32
-    if (!_getcwd(cwd, (int)sizeof cwd)) {
-        (void)snprintf(out, cap, "%s", p);
-        return;
+    char platform_error[160] = {0};
+    if (!nt_win_current_directory_utf8(cwd, sizeof cwd, platform_error,
+                                       sizeof platform_error)) {
+        return tp_error_set(err, TP_STATUS_PATH_RESOLVE_FAILED, "%s",
+                            platform_error);
     }
 #else
     if (!getcwd(cwd, sizeof cwd)) {
-        (void)snprintf(out, cap, "%s", p);
-        return;
+        return tp_error_set(err, TP_STATUS_PATH_RESOLVE_FAILED,
+                            "could not read the current directory");
     }
 #endif
-    (void)snprintf(out, cap, "%s/%s", cwd, p);
+    const int joined = snprintf(out, cap, "%s/%s", cwd, p);
+    return joined >= 0 && (size_t)joined < cap
+               ? TP_STATUS_OK
+               : tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                              "absolute output-directory path is too long");
 }
 
 /* A transient work dir for the session .ntpack files (system temp; gitignored). */
-static void cli_work_dir(char *out, size_t cap) {
+static tp_status cli_work_dir(char *out, size_t cap, tp_error *err) {
+    if (!out || cap == 0U) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "invalid pack work-directory output");
+    }
+    char tmp[TP_IDENTITY_PATH_MAX];
 #ifdef _WIN32
-    char tmp[512];
-    DWORD n = GetTempPathA((DWORD)sizeof tmp, tmp); /* ends with a backslash */
-    if (n == 0 || n >= sizeof tmp) {
-        (void)snprintf(out, cap, ".");
-    } else {
-        (void)snprintf(out, cap, "%sntpacker_work", tmp);
+    char platform_error[160] = {0};
+    if (!nt_win_temp_path_utf8(tmp, sizeof tmp, platform_error,
+                               sizeof platform_error)) {
+        return tp_error_set(err, TP_STATUS_PATH_RESOLVE_FAILED, "%s",
+                            platform_error);
     }
 #else
     const char *t = getenv("TMPDIR");
     if (!t || !t[0]) {
         t = "/tmp";
     }
-    (void)snprintf(out, cap, "%s/ntpacker_work", t);
+    const int temp_copied = snprintf(tmp, sizeof tmp, "%s", t);
+    if (temp_copied < 0 || (size_t)temp_copied >= sizeof tmp) {
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                            "temporary-directory path is too long");
+    }
 #endif
+    const size_t temp_length = strlen(tmp);
+    const bool has_separator = temp_length > 0U &&
+                               (tmp[temp_length - 1U] == '/' ||
+                                tmp[temp_length - 1U] == '\\');
+    const int joined = snprintf(out, cap, has_separator ? "%sntpacker_work"
+                                                       : "%s/ntpacker_work",
+                                tmp);
+    if (joined < 0 || (size_t)joined >= cap) {
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                            "pack work-directory path is too long");
+    }
     tp_mkdirs(out);
+    if (!tp_scan_is_dir(out)) {
+        return tp_error_set(err, TP_STATUS_PATH_RESOLVE_FAILED,
+                            "could not create pack work directory '%s'", out);
+    }
+    return TP_STATUS_OK;
 }
 
 /* Stable string names for the structured notice enums (JSON is machine-readable:
@@ -271,8 +309,8 @@ static void emit_target(cli_sb *sb, int depth, const tp_export_report_target *rt
  * records why it was skipped. `pages` uses the PRIMARY pack run (runs[0]); a target
  * on a different run is flagged by its own `pack_run` index. */
 static void emit_atlas(cli_sb *sb, int depth, const char *name, int sprite_count, int missing_sources,
-                       const tp_export_report *report, const tp_export_notices *notices, const char *note,
-                       bool dry_run) {
+                       const tp_export_report *report, const tp_export_notices *notices,
+                       const char *skip_notice_id, const char *note, bool dry_run) {
     bool af = true;
     cli_sb_putc(sb, '{');
     key(sb, depth + 1, &af, "name");
@@ -284,6 +322,24 @@ static void emit_atlas(cli_sb *sb, int depth, const char *name, int sprite_count
     if (note) {
         key(sb, depth + 1, &af, "note");
         cli_sb_json_str(sb, note);
+    }
+    if (skip_notice_id) {
+        key(sb, depth + 1, &af, "notices");
+        cli_sb_str(sb, "[\n");
+        cli_sb_indent(sb, depth + 2);
+        bool nf = true;
+        cli_sb_putc(sb, '{');
+        key(sb, depth + 3, &nf, "id");
+        cli_sb_json_str(sb, skip_notice_id);
+        key(sb, depth + 3, &nf, "atlas");
+        cli_sb_json_str(sb, name);
+        key(sb, depth + 3, &nf, "message");
+        cli_sb_json_str(sb, note ? note : "");
+        cli_sb_str(sb, "\n");
+        cli_sb_indent(sb, depth + 2);
+        cli_sb_str(sb, "}\n");
+        cli_sb_indent(sb, depth + 1);
+        cli_sb_putc(sb, ']');
     }
     key(sb, depth + 1, &af, "pack_runs");
     cli_sb_int(sb, report ? report->run_count : 0);
@@ -315,32 +371,6 @@ static void emit_atlas(cli_sb *sb, int depth, const char *name, int sprite_count
 /* ------------------------------------------------------------------ */
 /* pack                                                               */
 /* ------------------------------------------------------------------ */
-
-/* Rewrites the loaded project's targets for the --target / --out-dir filters. */
-static void apply_filters(tp_project *p, const char *opt_target, const char *opt_out_dir, const char *out_dir_abs) {
-    for (int ai = 0; ai < p->atlas_count; ai++) {
-        tp_project_atlas *a = &p->atlases[ai];
-        for (int t = 0; t < a->target_count; t++) {
-            tp_project_target *tg = &a->targets[t];
-            if (!tg->exporter_id || !tg->out_path) {
-                continue;
-            }
-            bool en = tg->enabled;
-            if (opt_target && strcmp(tg->exporter_id, opt_target) != 0) {
-                en = false;
-            }
-            const char *out = tg->out_path;
-            char newout[700];
-            if (opt_out_dir && !path_is_abs(out)) {
-                (void)snprintf(newout, sizeof newout, "%s/%s", out_dir_abs, out);
-                out = newout;
-            }
-            /* set_target dups both strings BEFORE freeing the old ones, so aliasing
-             * tg->exporter_id / tg->out_path is safe. */
-            (void)tp_project_atlas_set_target(a, t, tg->exporter_id, out, en);
-        }
-    }
-}
 
 /* Emits the stderr progress + notice lines for one completed atlas (human aid;
  * suppressed by --quiet). JSON payload stays on stdout, untouched. */
@@ -406,8 +436,8 @@ static void print_atlas_human(const char *name, int sprite_count, int missing_so
 
 int cmd_pack(const char *project_path, const char *opt_atlas, const char *opt_target, const char *opt_out_dir,
              bool dry_run, bool json, bool quiet) {
-    tp_project *p = NULL;
-    int rc = cli_load_project(project_path, json, quiet, &p);
+    tp_session_snapshot *snapshot = NULL;
+    int rc = cli_load_snapshot(project_path, json, quiet, &snapshot);
     if (rc != CLI_EXIT_OK) {
         return rc;
     }
@@ -415,8 +445,10 @@ int cmd_pack(const char *project_path, const char *opt_atlas, const char *opt_ta
     /* --atlas: an unknown name is a usage error listing the known names. */
     if (opt_atlas) {
         bool found = false;
-        for (int i = 0; i < p->atlas_count; i++) {
-            if (p->atlases[i].name && strcmp(p->atlases[i].name, opt_atlas) == 0) {
+        const int atlas_count = tp_session_snapshot_atlas_count(snapshot);
+        for (int i = 0; i < atlas_count; i++) {
+            const tp_snapshot_atlas *atlas = tp_session_snapshot_atlas_at(snapshot, i);
+            if (atlas->name && strcmp(atlas->name, opt_atlas) == 0) {
                 found = true;
                 break;
             }
@@ -425,28 +457,64 @@ int cmd_pack(const char *project_path, const char *opt_atlas, const char *opt_ta
             char known[512];
             size_t used = 0;
             known[0] = '\0';
-            for (int i = 0; i < p->atlas_count; i++) {
+            for (int i = 0; i < atlas_count; i++) {
+                const tp_snapshot_atlas *atlas = tp_session_snapshot_atlas_at(snapshot, i);
                 int n = snprintf(known + used, sizeof known - used, "%s%s", (i == 0) ? "" : ", ",
-                                 p->atlases[i].name ? p->atlases[i].name : "");
+                                 atlas->name ? atlas->name : "");
                 if (n < 0 || (size_t)n >= sizeof known - used) {
                     break;
                 }
                 used += (size_t)n;
             }
             cli_emit_error(json, quiet, "usage", "unknown atlas '%s' (known: %s)", opt_atlas, known);
-            tp_project_destroy(p);
+            tp_session_snapshot_destroy(snapshot);
             return CLI_EXIT_USAGE;
         }
     }
 
-    char out_dir_abs[600] = {0};
+    char out_dir_abs[TP_IDENTITY_PATH_MAX] = {0};
     if (opt_out_dir) {
-        abspath_cwd(opt_out_dir, out_dir_abs, sizeof out_dir_abs);
+        tp_error path_error = {0};
+        const tp_status path_status = abspath_cwd(
+            opt_out_dir, out_dir_abs, sizeof out_dir_abs, &path_error);
+        if (path_status != TP_STATUS_OK) {
+            cli_emit_error(json, quiet, tp_status_id(path_status), "%s",
+                           path_error.msg[0] ? path_error.msg
+                                             : tp_status_str(path_status));
+            tp_session_snapshot_destroy(snapshot);
+            return path_status == TP_STATUS_OUT_OF_BOUNDS ||
+                           path_status == TP_STATUS_INVALID_ARGUMENT
+                       ? CLI_EXIT_USAGE
+                       : CLI_EXIT_INTERNAL;
+        }
     }
-    apply_filters(p, opt_target, opt_out_dir, out_dir_abs);
+    char work_dir[TP_IDENTITY_PATH_MAX];
+    tp_error work_error = {0};
+    const tp_status work_status =
+        cli_work_dir(work_dir, sizeof work_dir, &work_error);
+    if (work_status != TP_STATUS_OK) {
+        cli_emit_error(json, quiet, tp_status_id(work_status), "%s",
+                       work_error.msg[0] ? work_error.msg
+                                         : tp_status_str(work_status));
+        tp_session_snapshot_destroy(snapshot);
+        return CLI_EXIT_PACK;
+    }
 
-    char work_dir[512];
-    cli_work_dir(work_dir, sizeof work_dir);
+    tp_export_snapshot_job_opts job_opts = {
+        .target_exporter_id = opt_target,
+        .out_dir = opt_out_dir ? out_dir_abs : NULL,
+        .dry_run = dry_run,
+    };
+    tp_export_snapshot_job *job = NULL;
+    tp_error job_error = {0};
+    tp_status job_status = tp_export_snapshot_job_create_ex(
+        snapshot, work_dir, &job_opts, &job, &job_error);
+    tp_session_snapshot_destroy(snapshot);
+    if (job_status != TP_STATUS_OK) {
+        cli_emit_error(json, quiet, tp_status_id(job_status), "%s",
+                       job_error.msg[0] ? job_error.msg : tp_status_str(job_status));
+        return job_status == TP_STATUS_OOM ? CLI_EXIT_INTERNAL : CLI_EXIT_PROJECT;
+    }
 
     int total_targets_ok = 0;
     int total_targets_failed = 0;
@@ -468,23 +536,19 @@ int cmd_pack(const char *project_path, const char *opt_atlas, const char *opt_ta
     }
     bool any_atlas_emitted = false;
 
-    for (int ai = 0; ai < p->atlas_count; ai++) {
-        tp_project_atlas *a = &p->atlases[ai];
-        if (opt_atlas && (!a->name || strcmp(a->name, opt_atlas) != 0)) {
+    const int atlas_count = tp_export_snapshot_job_atlas_count(job);
+    for (int ai = 0; ai < atlas_count; ai++) {
+        tp_export_snapshot_atlas_info atlas = {0};
+        tp_error info_error = {0};
+        if (tp_export_snapshot_job_atlas_info(job, ai, &atlas, &info_error) != TP_STATUS_OK) {
+            had_pack_fail = true;
             continue;
         }
-
-        tp_pack_input input;
-        tp_error e = {0};
-        tp_status bst = tp_pack_input_build(p, ai, &input, &e);
-        int sprite_count = (bst == TP_STATUS_OK) ? input.count : 0;
-        int missing = (bst == TP_STATUS_OK) ? input.missing_sources : 0;
-        int enabled = 0;
-        for (int t = 0; t < a->target_count; t++) {
-            if (a->targets[t].enabled) {
-                enabled++;
-            }
+        if (opt_atlas && (!atlas.name || strcmp(atlas.name, opt_atlas) != 0)) {
+            continue;
         }
+        int sprite_count = 0;
+        int missing = 0;
 
         tp_arena *arena = NULL;
         tp_export_notices notices;
@@ -492,39 +556,26 @@ int cmd_pack(const char *project_path, const char *opt_atlas, const char *opt_ta
         tp_export_report report;
         memset(&report, 0, sizeof report);
         const char *note = NULL;
+        const char *skip_notice_id = NULL;
         bool ran = false;
 
-        if (bst != TP_STATUS_OK) {
-            note = "could not assemble sprites (input build failed)";
+        arena = tp_arena_create(0);
+        if (!arena) {
+            note = "out of memory";
             had_pack_fail = true;
-        } else if (sprite_count == 0) {
-            note = "no usable images (skipped)";
-        } else if (enabled == 0) {
-            note = "no enabled targets (skipped)";
         } else {
-            /* Create each enabled target's output parent dir (tp_export_run needs it).
-             * SKIPPED on a dry run -- ai-first.md item 6: predict without touching the
-             * filesystem (no mkdirs, no writes). */
-            if (!dry_run) {
-                for (int t = 0; t < a->target_count; t++) {
-                    if (!a->targets[t].enabled) {
-                        continue;
-                    }
-                    char out_abs[700];
-                    if (tp_project_resolve_path(p, a->targets[t].out_path, out_abs, sizeof out_abs) == TP_STATUS_OK) {
-                        tp_mkdirs_parent(out_abs);
-                    }
+                tp_error run_error = {0};
+                tp_status run_status = tp_export_snapshot_job_run_atlas_ex(
+                    job, ai, arena, &notices, &report, NULL, &sprite_count,
+                    &missing, &run_error);
+                ran = run_status != TP_STATUS_NOT_FOUND;
+                if (run_status == TP_STATUS_NOT_FOUND) {
+                    note = "no usable images (skipped)";
+                    skip_notice_id = "no_usable_images";
+                } else if (run_status != TP_STATUS_OK && report.target_count == 0) {
+                    note = "could not assemble sprites (input build failed)";
+                    had_pack_fail = true;
                 }
-            }
-            arena = tp_arena_create(0);
-            if (!arena) {
-                note = "out of memory";
-                had_pack_fail = true;
-            } else {
-                tp_error re = {0};
-                tp_export_run_opts opts = {.report = &report, .dry_run = dry_run};
-                (void)tp_export_run_ex(p, ai, input.descs, input.count, work_dir, arena, &notices, NULL, &opts, &re);
-                ran = true;
                 if (report.pack_failed) {
                     had_pack_fail = true;
                 }
@@ -537,32 +588,36 @@ int cmd_pack(const char *project_path, const char *opt_atlas, const char *opt_ta
                         had_export_fail = true;
                     }
                 }
-            }
+                if (atlas.enabled_target_count == 0 && run_status == TP_STATUS_OK) {
+                    note = "no enabled targets (skipped)";
+                    skip_notice_id = "no_enabled_targets";
+                    ran = false;
+                }
         }
 
         /* Emit (JSON payload accumulates; human prints now). */
         if (json) {
             cli_sb_str(&sb, any_atlas_emitted ? ",\n" : "\n");
             cli_sb_indent(&sb, 2);
-            emit_atlas(&sb, 2, a->name ? a->name : "", sprite_count, missing, ran ? &report : NULL, ran ? &notices : NULL,
-                       note, dry_run);
+            emit_atlas(&sb, 2, atlas.name ? atlas.name : "", sprite_count,
+                       missing, ran ? &report : NULL, ran ? &notices : NULL,
+                       skip_notice_id, note, dry_run);
         } else {
-            print_atlas_human(a->name ? a->name : "", sprite_count, missing, ran ? &report : NULL, note, dry_run);
+            print_atlas_human(atlas.name ? atlas.name : "", sprite_count, missing, ran ? &report : NULL, note, dry_run);
         }
         any_atlas_emitted = true;
 
         if (!quiet) {
             if (note && !ran) {
-                (void)fprintf(stderr, "ntpacker: %s: %s\n", a->name ? a->name : "?", note);
+                (void)fprintf(stderr, "ntpacker: %s: %s\n", atlas.name ? atlas.name : "?", note);
             }
-            report_progress(a->name ? a->name : "?", ran ? &report : NULL, ran ? &notices : NULL, json);
+            report_progress(atlas.name ? atlas.name : "?", ran ? &report : NULL, ran ? &notices : NULL, json);
         }
 
         tp_export_notices_free(&notices);
         if (arena) {
             tp_arena_destroy(arena);
         }
-        tp_pack_input_free(&input);
     }
 
     const double elapsed = now_ms() - t0;
@@ -614,7 +669,7 @@ int cmd_pack(const char *project_path, const char *opt_atlas, const char *opt_ta
         cli_sb_str(&sb, "\n}");
         if (sb.oom) {
             cli_sb_free(&sb);
-            tp_project_destroy(p);
+            tp_export_snapshot_job_destroy(job);
             cli_emit_error(true, false, "oom", "out of memory building pack report");
             return CLI_EXIT_INTERNAL;
         }
@@ -632,6 +687,6 @@ int cmd_pack(const char *project_path, const char *opt_atlas, const char *opt_ta
         }
     }
 
-    tp_project_destroy(p);
+    tp_export_snapshot_job_destroy(job);
     return exit_code;
 }

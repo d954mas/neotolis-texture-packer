@@ -1,17 +1,16 @@
 /*
- * F2-01 task 1: the append-only operation catalog + closed field vocabulary.
- * Promoted from the accepted C0-02 spike (packer/spike/c0/src/tp_c0_op_catalog.c)
- * onto the production tp_id_kind. Row order matches the enum so index == kind;
+ * The append-only operation catalog + closed field vocabulary. Row order
+ * matches the enum so index == kind;
  * tp_op_catalog_selfcheck() pins that a reorder can't silently mis-map a kind.
  *
  * Every current ntpacker mutation verb appears in the cli_verb column (a compound
  * verb -- `sprite set`, `new` -- names the verb whose canonical lowering is that
- * single op; see docs/decisions and C0-02-contract.md §1). Reserved rows
+ * single op; see decision 0010 §1). Reserved rows
  * (cli_verb == NULL) are spec-listed ops with no current verb. There is
  * deliberately NO raw field-patch escape hatch (§6.2).
  */
 
-#include "tp_core/tp_operation.h"
+#include "tp_op_internal.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -44,9 +43,44 @@ static const tp_op_info k_ops[TP_OP_KIND_COUNT] = {
     {TP_OP_TARGET_REMOVE, "target.remove", TP_OP_CLASS_REMOVE, TP_ID_KIND_TARGET, "target remove"},
     {TP_OP_TARGET_SET, "target.set", TP_OP_CLASS_SET, TP_ID_KIND_TARGET, "target set"},
 
-    /* H/P1-2: appended (APPEND-ONLY catalog) -- animation rename is a first-class undoable+journaled op. */
+    /* Appended (APPEND-ONLY catalog) -- animation rename is a first-class undoable+journaled op. */
     {TP_OP_ANIMATION_RENAME, "animation.rename", TP_OP_CLASS_SET, TP_ID_KIND_ANIM, "anim rename"},
 };
+
+static const tp_sprite_clear_field k_sprite_clear_fields[] = {
+    {"origin", TP_SPF_ORIGIN},
+    {"slice9", TP_SPF_SLICE9},
+    {"shape", TP_SPF_SHAPE},
+    {"allow_rotate", TP_SPF_ALLOW_ROTATE},
+    {"max_vertices", TP_SPF_MAX_VERTICES},
+    {"margin", TP_SPF_MARGIN},
+    {"extrude", TP_SPF_EXTRUDE},
+};
+
+const tp_sprite_clear_field *tp_op__sprite_clear_fields(size_t *count) {
+    if (count) {
+        *count = sizeof k_sprite_clear_fields /
+                 sizeof k_sprite_clear_fields[0];
+    }
+    return k_sprite_clear_fields;
+}
+
+bool tp_op__sprite_clear_bit(const char *token, uint32_t *bit) {
+    if (!token) {
+        return false;
+    }
+    for (size_t i = 0U;
+         i < sizeof k_sprite_clear_fields / sizeof k_sprite_clear_fields[0];
+         i++) {
+        if (strcmp(k_sprite_clear_fields[i].token, token) == 0) {
+            if (bit) {
+                *bit = k_sprite_clear_fields[i].bit;
+            }
+            return true;
+        }
+    }
+    return false;
+}
 
 const tp_op_info *tp_op_info_by_kind(tp_op_kind kind) {
     if (kind <= TP_OP_INVALID || kind >= TP_OP_KIND_COUNT) {
@@ -193,12 +227,12 @@ bool tp_op_field_allowed(tp_op_kind kind, const char *key) {
 /* tp_operation_free: release the active arm's malloc-owned strings/arrays. Freeing
  * NULL is safe; a zero-initialized op frees nothing. Kept beside the catalog (both
  * are pure metadata about op shape). */
-static void free_frames(char **frames, int count) {
+static void free_frames(tp_op_sprite_ref *frames, int count) {
     if (!frames) {
         return;
     }
     for (int i = 0; i < count; i++) {
-        free(frames[i]);
+        free(frames[i].src_key);
     }
     free(frames);
 }
@@ -227,7 +261,7 @@ void tp_operation_free(tp_operation *op) {
         case TP_OP_ANIMATION_FRAMES_SET:
             free_frames(op->u.anim_frames_set.frames, op->u.anim_frames_set.frame_count);
             break;
-        case TP_OP_ANIMATION_FRAME_ADD: free(op->u.anim_frame_add.frame); break;
+        case TP_OP_ANIMATION_FRAME_ADD: free(op->u.anim_frame_add.frame.src_key); break;
         case TP_OP_TARGET_CREATE:
             free(op->u.target_create.exporter_id);
             free(op->u.target_create.out_path);

@@ -1,10 +1,12 @@
 /*
- * F2-02 task 3 (decode half): structural decode of the versioned transaction
+ * Structural decode of the versioned transaction
  * request envelope + the per-op SHAPE collect-all, and the two public entry points
  * (tp_txn_request_decode, tp_model_apply_json). cJSON is a PRIVATE dep confined to
- * this TU + tp_txn_lower.c + tp_txn_json.h.
+ * the transaction/project decoders and their shared tp_json_internal admission
+ * helper; it never crosses a public header.
  *
- * VALIDATION ORDER (C0-02 §5, pinned): (1) structural decode -- envelope faults fail
+ * VALIDATION ORDER (decision 0011 §6, pinned): (1) structural decode -- envelope
+ * faults fail
  * fast and alone (bad JSON, bad/absent schema, bad version, missing/typed field, bad
  * 32-hex id, a number outside the +/-2^53 range-checked converter, an unknown
  * envelope/transaction key); (2) idempotency -- a re-submitted committed id rejects;
@@ -28,9 +30,294 @@
 
 #include "cJSON.h"
 #include "tp_core/tp_id.h"
+#include "tp_json_internal.h"
+#include "tp_op_internal.h"
 #include "tp_txn_internal.h"
 #include "tp_txn_json.h"
 #include "tp_txn_parse_priv.h"
+
+/* C-string compatibility entry points must not call unbounded strlen before the
+ * wire-size gate. Return MAX+1 as soon as the request is known to be oversized;
+ * the length-aware implementation then rejects without invoking cJSON. */
+static size_t txn_cstr_len_bounded(const char *json) {
+    if (!json) {
+        return 0;
+    }
+    size_t len = 0;
+    while (len <= (size_t)TP_TXN_MAX_REQUEST_BYTES && json[len] != '\0') {
+        len++;
+    }
+    return len;
+}
+
+static tp_status txn_request_bytes_check(const char *json, size_t json_len, tp_error *err) {
+    if (!json) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "null json");
+    }
+    if (json_len > (size_t)TP_TXN_MAX_REQUEST_BYTES) {
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                            "transaction request has %zu bytes; maximum is %u",
+                            json_len, (unsigned)TP_TXN_MAX_REQUEST_BYTES);
+    }
+    return TP_STATUS_OK;
+}
+
+static bool json_ws(char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }
+
+static int json_hex(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+typedef struct json_precheck_scan {
+    const char *json;
+    size_t len;
+    size_t pos;
+    size_t steps;
+} json_precheck_scan;
+
+static bool json_precheck_take(json_precheck_scan *scan, char *out) {
+    if (scan->pos >= scan->len) {
+        return false;
+    }
+    *out = scan->json[scan->pos++];
+    scan->steps++;
+    return true;
+}
+
+/* Allocation-free JSON string token reader used only by the early resource
+ * preflight. The opening quote has already been consumed. It recognizes escaped
+ * ASCII keys (including \uXXXX) without duplicating semantic validation. */
+static bool json_precheck_string_matches(json_precheck_scan *scan, const char *wanted,
+                                         bool *matches) {
+    size_t wi = 0U;
+    bool same = true;
+    char input = '\0';
+    while (json_precheck_take(scan, &input)) {
+        unsigned value = (unsigned char)input;
+        if (value == '"') {
+            *matches = same && wanted[wi] == '\0';
+            return true;
+        }
+        if (value == '\\') {
+            char esc = '\0';
+            if (!json_precheck_take(scan, &esc)) return false;
+            switch (esc) {
+                case '"': value = '"'; break;
+                case '\\': value = '\\'; break;
+                case '/': value = '/'; break;
+                case 'b': value = '\b'; break;
+                case 'f': value = '\f'; break;
+                case 'n': value = '\n'; break;
+                case 'r': value = '\r'; break;
+                case 't': value = '\t'; break;
+                case 'u': {
+                    unsigned code = 0U;
+                    for (int i = 0; i < 4; ++i) {
+                        char digit = '\0';
+                        if (!json_precheck_take(scan, &digit)) return false;
+                        const int nibble = json_hex(digit);
+                        if (nibble < 0) return false;
+                        code = (code << 4U) | (unsigned)nibble;
+                    }
+                    value = code;
+                    break;
+                }
+                default: return false;
+            }
+        }
+        if (same) {
+            if (value > 0x7fU || wanted[wi] == '\0' || value != (unsigned char)wanted[wi]) {
+                same = false;
+            } else {
+                wi++;
+            }
+        }
+    }
+    return false;
+}
+
+typedef enum json_precheck_key {
+    JSON_PRECHECK_KEY_NONE,
+    JSON_PRECHECK_KEY_TRANSACTION,
+    JSON_PRECHECK_KEY_OPERATIONS
+} json_precheck_key;
+
+/* Single forward lexical pass. It recognizes only root.transaction.operations,
+ * counts direct array elements, and leaves all malformed-input/schema semantics to
+ * cJSON. Nested fields named "operations" never trigger a suffix rescan. */
+static tp_status txn_request_op_count_precheck(const char *json, size_t json_len,
+                                               size_t *steps, int *count_out,
+                                               tp_error *err) {
+    json_precheck_scan scan = {json, json_len, 0U, 0U};
+    int depth = 0;
+    int root_depth = 0;
+    int transaction_depth = 0;
+    int operations_depth = 0;
+    int operation_count = 0;
+    bool transaction_seen = false;
+    bool operations_seen = false;
+    bool operations_expect_element = false;
+    json_precheck_key key_candidate = JSON_PRECHECK_KEY_NONE;
+    json_precheck_key expected_value = JSON_PRECHECK_KEY_NONE;
+    tp_status status = TP_STATUS_OK;
+    char c = '\0';
+
+    while (json_precheck_take(&scan, &c)) {
+        if (json_ws(c)) {
+            continue;
+        }
+
+        if (operations_depth > 0 && depth == operations_depth) {
+            if (c == ']') {
+                operations_depth = 0;
+                operations_expect_element = false;
+            } else if (c == ',') {
+                operations_expect_element = true;
+                key_candidate = JSON_PRECHECK_KEY_NONE;
+                continue;
+            } else if (operations_expect_element) {
+                operations_expect_element = false;
+                operation_count++;
+                if (operation_count > TP_TXN_MAX_OPS) {
+                    status = tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                                          "transaction has more than %d operations",
+                                          TP_TXN_MAX_OPS);
+                    break;
+                }
+            }
+        }
+
+        if (c == '"') {
+            const char *wanted = NULL;
+            json_precheck_key kind = JSON_PRECHECK_KEY_NONE;
+            if (root_depth > 0 && depth == root_depth && transaction_depth == 0) {
+                wanted = "transaction";
+                kind = JSON_PRECHECK_KEY_TRANSACTION;
+            } else if (transaction_depth > 0 && depth == transaction_depth &&
+                       operations_depth == 0) {
+                wanted = "operations";
+                kind = JSON_PRECHECK_KEY_OPERATIONS;
+            }
+            bool matches = false;
+            if (!json_precheck_string_matches(&scan, wanted ? wanted : "", &matches)) {
+                break; /* malformed string remains cJSON's responsibility */
+            }
+            key_candidate = matches ? kind : JSON_PRECHECK_KEY_NONE;
+            continue;
+        }
+
+        if (key_candidate != JSON_PRECHECK_KEY_NONE) {
+            if (c == ':') {
+                if (key_candidate == JSON_PRECHECK_KEY_TRANSACTION) {
+                    if (transaction_seen) {
+                        status = tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                                              "duplicate transaction field");
+                        break;
+                    }
+                    transaction_seen = true;
+                } else if (key_candidate == JSON_PRECHECK_KEY_OPERATIONS) {
+                    if (operations_seen) {
+                        status = tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                                              "duplicate operations field");
+                        break;
+                    }
+                    operations_seen = true;
+                }
+                expected_value = key_candidate;
+                key_candidate = JSON_PRECHECK_KEY_NONE;
+                continue;
+            }
+            key_candidate = JSON_PRECHECK_KEY_NONE;
+        }
+
+        if (expected_value != JSON_PRECHECK_KEY_NONE) {
+            const json_precheck_key expected = expected_value;
+            expected_value = JSON_PRECHECK_KEY_NONE;
+            if (expected == JSON_PRECHECK_KEY_TRANSACTION && c == '{' &&
+                depth == root_depth) {
+                depth++;
+                transaction_depth = depth;
+                continue;
+            }
+            if (expected == JSON_PRECHECK_KEY_OPERATIONS && c == '[' &&
+                depth == transaction_depth) {
+                depth++;
+                operations_depth = depth;
+                operation_count = 0;
+                operations_expect_element = true;
+                continue;
+            }
+        }
+
+        if (c == '{' || c == '[') {
+            depth++;
+            if (root_depth == 0 && depth == 1 && c == '{') {
+                root_depth = depth;
+            }
+        } else if (c == '}' || c == ']') {
+            if (c == '}' && depth == transaction_depth) {
+                transaction_depth = 0;
+            }
+            if (depth > 0) {
+                depth--;
+            }
+        }
+    }
+    if (steps) {
+        *steps = scan.steps;
+    }
+    if (count_out && status == TP_STATUS_OK) {
+        *count_out = operation_count;
+    }
+    return status;
+}
+
+tp_status tp_txn__test_json_precheck(const char *json, size_t json_len, size_t *steps,
+                                     tp_error *err) {
+    if (steps) {
+        *steps = 0U;
+    }
+    if (!json) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "null json");
+    }
+    return txn_request_op_count_precheck(json, json_len, steps, NULL, err);
+}
+
+tp_status tp_txn__count_operations_json_n(const char *json, size_t json_len,
+                                          int *count_out, tp_error *err) {
+    if (count_out) {
+        *count_out = 0;
+    }
+    if (!count_out) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "null operation count out");
+    }
+    tp_status byte_st = txn_request_bytes_check(json, json_len, err);
+    if (byte_st != TP_STATUS_OK) {
+        return byte_st;
+    }
+    tp_status string_st = tp_json_reject_c_string_ambiguity(
+        json, json_len, TP_STATUS_INVALID_ARGUMENT, "transaction JSON", err);
+    if (string_st != TP_STATUS_OK) {
+        return string_st;
+    }
+    return txn_request_op_count_precheck(json, json_len, NULL, count_out, err);
+}
+
+static cJSON *txn_parse_exact(const char *json, size_t json_len) {
+    const char *parse_end = NULL;
+    cJSON *root = cJSON_ParseWithLengthOpts(json, json_len, &parse_end, 0);
+    if (!root) return NULL;
+    size_t consumed = (size_t)(parse_end - json);
+    while (consumed < json_len && json_ws(json[consumed])) consumed++;
+    if (consumed != json_len) {
+        cJSON_Delete(root);
+        return NULL;
+    }
+    return root;
+}
 
 /* Map an addressing "*_id" key to the shape-id kind it must carry, or INVALID if
  * the key is not an addressing id. */
@@ -47,6 +334,12 @@ static tp_id_kind addr_kind(const char *key) {
  * envelope fault returns non-OK + `err`, and *out_ops is left NULL. */
 static tp_status parse_envelope(const cJSON *root, tp_txn_request *req, const cJSON **out_ops, tp_error *err) {
     *out_ops = NULL;
+
+    const tp_status duplicate_status = tp_json_reject_duplicate_keys(
+        root, TP_STATUS_INVALID_ARGUMENT, "transaction JSON", err);
+    if (duplicate_status != TP_STATUS_OK) {
+        return duplicate_status;
+    }
 
     const cJSON *schema = cJSON_GetObjectItemCaseSensitive(root, "schema");
     if (!schema) {
@@ -122,8 +415,15 @@ static tp_status parse_envelope(const cJSON *root, tp_txn_request *req, const cJ
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "missing \"operations\" array");
     }
     int n = cJSON_GetArraySize(ops);
-    for (int i = 0; i < n; i++) { /* each op must be an object with a string "op" */
-        const cJSON *oj = cJSON_GetArrayItem(ops, i);
+    tp_status count_st = tp_txn__check_op_count(n, err);
+    if (count_st != TP_STATUS_OK) {
+        return count_st; /* before per-op shape work or typed-array materialization */
+    }
+    int i = 0;
+    for (const cJSON *oj = ops->child; oj; oj = oj->next, ++i) {
+        /* cJSON arrays are linked lists: direct child/next traversal keeps this
+         * accepted max-op path linear. */
+        tp_txn__test_count_op_walk(1U);
         if (!cJSON_IsObject(oj)) {
             return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "operation %d is not an object", i);
         }
@@ -136,6 +436,22 @@ static tp_status parse_envelope(const cJSON *root, tp_txn_request *req, const cJ
     return TP_STATUS_OK;
 }
 
+static void shape_record_error(tp_txn_result *out, int reserved_capacity,
+                               int *fault_count, bool *store_oom, int idx,
+                               tp_status code, const char *field, const char *msg) {
+    (*fault_count)++;
+    if (!out) {
+        return;
+    }
+    const bool stored = reserved_capacity >= 0
+                            ? tp_txn__result_add_error_reserved(
+                                  out, reserved_capacity, idx, code, field, msg)
+                            : tp_txn__result_add_error(out, idx, code, field, msg);
+    if (!stored) {
+        *store_oom = true;
+    }
+}
+
 /* Per-op SHAPE checks, collected into `out` in (op_index, field) order: an unknown
  * op wire (op_unknown, then skip field checks), an unknown field (unknown_field), and
  * a present-but-non-string OR malformed/wrong-kind addressing id (id_malformed).
@@ -143,15 +459,15 @@ static tp_status parse_envelope(const cJSON *root, tp_txn_request *req, const cJ
  * (independent of whether every record could be stored). Sets *store_oom if any fault
  * record could not be stored -- the batch must then reject even though error_count is
  * short, so a shape-faulted batch never falsely commits under allocation pressure. */
-static bool shape_check_op(const cJSON *oj, int idx, tp_txn_result *out, bool *store_oom) {
+static bool shape_check_op(const cJSON *oj, int idx, tp_txn_result *out,
+                           int reserved_capacity, int *fault_count, bool *store_oom) {
     const cJSON *wire = cJSON_GetObjectItemCaseSensitive(oj, "op");
     tp_op_kind kind = tp_op_kind_from_wire(wire->valuestring);
     if (kind == TP_OP_INVALID) {
         char msg[192];
         (void)snprintf(msg, sizeof msg, "unknown operation '%s'", wire->valuestring);
-        if (!tp_txn__result_add_error(out, idx, TP_STATUS_UNKNOWN_OP, "op", msg)) {
-            *store_oom = true;
-        }
+        shape_record_error(out, reserved_capacity, fault_count, store_oom, idx,
+                           TP_STATUS_UNKNOWN_OP, "op", msg);
         return true; /* cannot check fields of an unknown op */
     }
     bool faulted = false;
@@ -162,10 +478,66 @@ static bool shape_check_op(const cJSON *oj, int idx, tp_txn_result *out, bool *s
         if (!tp_op_field_allowed(kind, c->string)) {
             char msg[192];
             (void)snprintf(msg, sizeof msg, "unknown field '%s' for '%s'", c->string, wire->valuestring);
-            if (!tp_txn__result_add_error(out, idx, TP_STATUS_INVALID_ARGUMENT, c->string, msg)) {
-                *store_oom = true;
-            }
+            shape_record_error(out, reserved_capacity, fault_count, store_oom, idx,
+                               TP_STATUS_INVALID_ARGUMENT, c->string, msg);
             faulted = true;
+            continue;
+        }
+        if (kind == TP_OP_SPRITE_OVERRIDE_CLEAR &&
+            strcmp(c->string, "fields") == 0) {
+            char msg[192];
+            bool invalid = !cJSON_IsArray(c);
+            if (invalid) {
+                (void)snprintf(msg, sizeof msg,
+                               "field 'fields' must be an array of known tokens");
+            } else {
+                int token_index = 0;
+                for (const cJSON *token = c->child; token;
+                     token = token->next, token_index++) {
+                    if (!cJSON_IsString(token) ||
+                        !tp_op__sprite_clear_bit(token->valuestring, NULL)) {
+                        invalid = true;
+                        if (cJSON_IsString(token)) {
+                            (void)snprintf(
+                                msg, sizeof msg,
+                                "unknown sprite override field '%s' at fields[%d]",
+                                token->valuestring, token_index);
+                        } else {
+                            (void)snprintf(msg, sizeof msg,
+                                           "fields[%d] must be a string token",
+                                           token_index);
+                        }
+                        break;
+                    }
+                }
+            }
+            if (invalid) {
+                shape_record_error(out, reserved_capacity, fault_count,
+                                   store_oom, idx,
+                                   TP_STATUS_INVALID_ARGUMENT, "fields", msg);
+                faulted = true;
+            }
+            continue;
+        }
+        if (kind == TP_OP_SOURCE_ADD && strcmp(c->string, "kind") == 0) {
+            const bool valid =
+                cJSON_IsString(c) &&
+                (strcmp(c->valuestring, "folder") == 0 ||
+                 strcmp(c->valuestring, "file") == 0);
+            if (!valid) {
+                char msg[192];
+                if (cJSON_IsString(c)) {
+                    (void)snprintf(msg, sizeof msg,
+                                   "unknown source kind '%s'", c->valuestring);
+                } else {
+                    (void)snprintf(msg, sizeof msg,
+                                   "field 'kind' must be a string token");
+                }
+                shape_record_error(out, reserved_capacity, fault_count,
+                                   store_oom, idx,
+                                   TP_STATUS_INVALID_ARGUMENT, "kind", msg);
+                faulted = true;
+            }
             continue;
         }
         tp_id_kind ak = addr_kind(c->string);
@@ -175,9 +547,8 @@ static bool shape_check_op(const cJSON *oj, int idx, tp_txn_result *out, bool *s
         if (!cJSON_IsString(c)) { /* a present-but-non-string addressing id is a shape fault */
             char msg[192];
             (void)snprintf(msg, sizeof msg, "field '%s' must be a string id", c->string);
-            if (!tp_txn__result_add_error(out, idx, TP_STATUS_ID_MALFORMED, c->string, msg)) {
-                *store_oom = true;
-            }
+            shape_record_error(out, reserved_capacity, fault_count, store_oom, idx,
+                               TP_STATUS_ID_MALFORMED, c->string, msg);
             faulted = true;
             continue;
         }
@@ -185,9 +556,8 @@ static bool shape_check_op(const cJSON *oj, int idx, tp_txn_result *out, bool *s
         if (tp_id_parse(c->valuestring, &got, NULL, NULL) != TP_STATUS_OK || got != ak) {
             char msg[192];
             (void)snprintf(msg, sizeof msg, "field '%s' is not a well-formed id", c->string);
-            if (!tp_txn__result_add_error(out, idx, TP_STATUS_ID_MALFORMED, c->string, msg)) {
-                *store_oom = true;
-            }
+            shape_record_error(out, reserved_capacity, fault_count, store_oom, idx,
+                               TP_STATUS_ID_MALFORMED, c->string, msg);
             faulted = true;
         }
     }
@@ -203,8 +573,10 @@ static tp_status lower_all(const cJSON *ops, tp_txn_request *req, tp_error *err)
         return tp_error_set(err, TP_STATUS_OOM, "operations alloc");
     }
     req->op_count = 0;
-    for (int i = 0; i < n; i++) {
-        tp_status st = tp_txn__lower_op(cJSON_GetArrayItem(ops, i), &req->ops[i], err);
+    int i = 0;
+    for (const cJSON *oj = ops->child; oj; oj = oj->next, ++i) {
+        tp_txn__test_count_op_walk(1U);
+        tp_status st = tp_txn__lower_op(oj, &req->ops[i], err);
         if (st != TP_STATUS_OK) {
             return st; /* req->op_count = the count already fully lowered; free frees them */
         }
@@ -213,14 +585,37 @@ static tp_status lower_all(const cJSON *ops, tp_txn_request *req, tp_error *err)
     return TP_STATUS_OK;
 }
 
-tp_status tp_txn_request_decode(const char *json, tp_txn_request **out, tp_error *err) {
+static tp_status txn_request_decode_n_impl(const char *json, size_t json_len,
+                                           int expected_op_count,
+                                           bool prechecked,
+                                           tp_txn_request **out,
+                                           tp_error *err) {
     if (out) {
         *out = NULL;
     }
-    if (!json) {
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "null json");
+    if (!prechecked) {
+        tp_status byte_st = txn_request_bytes_check(json, json_len, err);
+        if (byte_st != TP_STATUS_OK) {
+            return byte_st;
+        }
+    } else if (!json || expected_op_count < 0 ||
+               expected_op_count > TP_TXN_MAX_OPS) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "invalid prechecked transaction span");
     }
-    cJSON *root = cJSON_Parse(json);
+    tp_status string_st = tp_json_reject_c_string_ambiguity(
+        json, json_len, TP_STATUS_INVALID_ARGUMENT, "transaction JSON", err);
+    if (string_st != TP_STATUS_OK) {
+        return string_st;
+    }
+    if (!prechecked) {
+        tp_status count_st = txn_request_op_count_precheck(
+            json, json_len, NULL, NULL, err);
+        if (count_st != TP_STATUS_OK) {
+            return count_st;
+        }
+    }
+    cJSON *root = txn_parse_exact(json, json_len);
     if (!root) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "malformed JSON");
     }
@@ -237,15 +632,23 @@ tp_status tp_txn_request_decode(const char *json, tp_txn_request **out, tp_error
         cJSON_Delete(root);
         return st;
     }
+    if (prechecked && cJSON_GetArraySize(ops) != expected_op_count) {
+        tp_txn_request_free(req);
+        cJSON_Delete(root);
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "prechecked operation count changed during decode");
+    }
 
     /* Fail-fast shape (single fault) for the standalone decoder: the first op with a
      * shape error stops with that error's status. */
-    int n = cJSON_GetArraySize(ops);
-    for (int i = 0; i < n; i++) {
+    int i = 0;
+    for (const cJSON *oj = ops->child; oj; oj = oj->next, ++i) {
         tp_txn_result tmp;
         tp_txn__result_reset(&tmp, req->id_hex);
         bool store_oom = false;
-        if (shape_check_op(cJSON_GetArrayItem(ops, i), i, &tmp, &store_oom)) {
+        int fault_count = 0;
+        tp_txn__test_count_op_walk(1U);
+        if (shape_check_op(oj, i, &tmp, -1, &fault_count, &store_oom)) {
             tp_status code = (tmp.error_count > 0) ? tmp.errors[0].code : TP_STATUS_OOM;
             (void)tp_error_set(err, code, "%s", tmp.error_count > 0 ? tmp.errors[0].message : "out of memory");
             tp_txn_result_free(&tmp);
@@ -271,14 +674,55 @@ tp_status tp_txn_request_decode(const char *json, tp_txn_request **out, tp_error
     return TP_STATUS_OK;
 }
 
+tp_status tp_txn_request_decode_n(const char *json, size_t json_len,
+                                  tp_txn_request **out, tp_error *err) {
+    return txn_request_decode_n_impl(json, json_len, 0, false, out, err);
+}
+
+tp_status tp_txn__decode_prechecked_json_n(const char *json, size_t json_len,
+                                           int expected_op_count,
+                                           tp_txn_request **out,
+                                           tp_error *err) {
+    return txn_request_decode_n_impl(json, json_len, expected_op_count, true,
+                                     out, err);
+}
+
+tp_status tp_txn_request_decode(const char *json, tp_txn_request **out, tp_error *err) {
+    return tp_txn_request_decode_n(json, txn_cstr_len_bounded(json), out, err);
+}
+
 /* The JSON apply flow over a GUARANTEED-non-NULL working result `res` (the wrapper
  * supplies a local when the caller passes out==NULL, so every collect-all path can
  * store into a real result and no path dereferences a NULL out). Does not free
  * `res` (its ops/errors belong to the caller, or to the wrapper's local). */
-static tp_status apply_json_into(tp_model *m, const char *json, tp_txn_result *res, tp_error *err) {
+static tp_status apply_json_into(tp_model *m, const char *json, size_t json_len,
+                                 tp_txn_result *res, tp_error *err) {
     tp_txn__result_reset(res, "");
 
-    cJSON *root = json ? cJSON_Parse(json) : NULL;
+    tp_status byte_st = txn_request_bytes_check(json, json_len, err);
+    if (byte_st != TP_STATUS_OK) {
+        res->revision = m->revision;
+        tp_txn__result_add_error(res, -1, byte_st, "transaction", err ? err->msg : "");
+        return byte_st;
+    }
+
+    tp_status string_st = tp_json_reject_c_string_ambiguity(
+        json, json_len, TP_STATUS_INVALID_ARGUMENT, "transaction JSON", err);
+    if (string_st != TP_STATUS_OK) {
+        res->revision = m->revision;
+        tp_txn__result_add_error(res, -1, string_st, "transaction",
+                                 err ? err->msg : "");
+        return string_st;
+    }
+
+    tp_status count_st = txn_request_op_count_precheck(json, json_len, NULL, NULL, err);
+    if (count_st != TP_STATUS_OK) {
+        res->revision = m->revision;
+        tp_txn__result_add_error(res, -1, count_st, "operations", err ? err->msg : "");
+        return count_st;
+    }
+
+    cJSON *root = txn_parse_exact(json, json_len);
     if (!root) {
         res->revision = m->revision; /* preserve the revision so the client is not told the model reset */
         tp_txn__result_add_error(res, -1, TP_STATUS_INVALID_ARGUMENT, "", "malformed JSON");
@@ -312,15 +756,27 @@ static tp_status apply_json_into(tp_model *m, const char *json, tp_txn_result *r
     }
 
     /* 4. Per-op SHAPE checks, collected in (op_index, field) order. */
-    int n = cJSON_GetArraySize(ops);
-    bool any_fault = false;
+    int shape_fault_count = 0;
     bool store_oom = false;
-    for (int i = 0; i < n; i++) {
-        if (shape_check_op(cJSON_GetArrayItem(ops, i), i, res, &store_oom)) {
-            any_fault = true;
+    int i = 0;
+    for (const cJSON *oj = ops->child; oj; oj = oj->next, ++i) {
+        tp_txn__test_count_op_walk(1U);
+        (void)shape_check_op(oj, i, NULL, 0, &shape_fault_count, &store_oom);
+    }
+    if (shape_fault_count > 0) {
+        if (!tp_txn__result_reserve_errors(res, shape_fault_count)) {
+            store_oom = true;
+        } else {
+            int emitted_faults = 0;
+            i = 0;
+            for (const cJSON *oj = ops->child; oj; oj = oj->next, ++i) {
+                tp_txn__test_count_op_walk(1U);
+                (void)shape_check_op(oj, i, res, shape_fault_count,
+                                     &emitted_faults, &store_oom);
+            }
         }
     }
-    if (any_fault || store_oom) {
+    if (shape_fault_count > 0 || store_oom) {
         res->committed = false;
         res->revision = m->revision;
         tp_txn_request_free(req);
@@ -352,7 +808,8 @@ static tp_status apply_json_into(tp_model *m, const char *json, tp_txn_result *r
     return st;
 }
 
-tp_status tp_model_apply_json(tp_model *m, const char *json, tp_txn_result *out, tp_error *err) {
+tp_status tp_model_apply_json_n(tp_model *m, const char *json, size_t json_len,
+                                tp_txn_result *out, tp_error *err) {
     if (!m) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "null model");
     }
@@ -361,9 +818,13 @@ tp_status tp_model_apply_json(tp_model *m, const char *json, tp_txn_result *out,
      * it here -- no path ever dereferences a NULL out. */
     tp_txn_result local;
     tp_txn_result *res = out ? out : &local;
-    tp_status st = apply_json_into(m, json, res, err);
+    tp_status st = apply_json_into(m, json, json_len, res, err);
     if (!out) {
         tp_txn_result_free(&local);
     }
     return st;
+}
+
+tp_status tp_model_apply_json(tp_model *m, const char *json, tp_txn_result *out, tp_error *err) {
+    return tp_model_apply_json_n(m, json, txn_cstr_len_bounded(json), out, err);
 }

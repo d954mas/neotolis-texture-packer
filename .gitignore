@@ -2,7 +2,9 @@ build/
 .cache/
 compile_commands.json
 *.ntpack
+*.ntpacker.lock
 tmp/
+examples/projects/out/
 
 # Local working area of the lead agent (draw-hash baselines, verification
 # screenshots, one-off probe scripts) — machine-local, never committed.
@@ -11,6 +13,9 @@ tmp/
 # Lead agent's local orchestrator configs (subagent role/model definitions) —
 # machine-local tooling, never committed.
 /.codex/
+
+# Local Serena project metadata — machine-local tooling, never committed.
+/.serena/
 
 # Defold editor artifacts in the demo project
 examples/defold-demo/.internal/

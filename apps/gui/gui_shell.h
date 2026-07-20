@@ -4,8 +4,7 @@
 /* Shell-owned symbols other TUs read, PLUS the one sanctioned chrome-owned/view-consumed surface
  * (close_menubar_menus). main.c owns the pool capacities below; gui_view_chrome.c owns
  * close_menubar_menus. This header exists only so the handful of other TUs that touch them can see
- * the declarations -- it is NOT a god-header, keep it minimal. Split out of main.c as part of the GUI
- * decomposition (step 3).
+ * the declarations -- it is NOT a god-header, keep it minimal.
  *
  * Today that surface is: the nt_ui retained-state pool capacities (main() provisions the UI context
  * with them and the selftest logs them to prove the row model stays bounded), and
@@ -35,16 +34,14 @@ extern "C" {
 
 /* Closes the File/Edit/View/Help menubar menus. Every right-click context-menu trigger calls this
  * first (a right-click while a menubar menu is open should close it, not stack menus). Chrome-owned,
- * view-consumed: defined in gui_view_chrome.c (GUI decomposition step 6b) alongside the menu bar
+ * view-consumed: defined in gui_view_chrome.c alongside the menu bar
  * itself; gui_view_chrome.h re-declares it too (for main.c's frame()) -- this is the sanctioned
  * cross-view surface so gui_view_lists.c/gui_view_settings.c/gui_view_canvas.c don't need to include
  * a sibling view header. */
 void close_menubar_menus(void);
 
-/* Clears the shell's cached "result currently bound to the canvas" pointer (s_shown_result). Called by
- * the destructive flows (undo/redo/new/open) right after gui_pack_clear(-1) frees the slot arenas: the
- * cache would otherwise hold a freed address that next frame's `want != s_shown_result` bind compares
- * (indeterminate-pointer read, C11 6.2.4 -- P2 hardening). NULL is always a valid comparand. */
+/* Releases the canvas result borrow and comparison cache when slots are cleared
+ * or history navigation requires a clean rebind. */
 void gui_shell_reset_shown_result(void);
 
 #ifdef __cplusplus

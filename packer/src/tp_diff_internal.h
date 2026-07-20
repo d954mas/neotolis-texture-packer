@@ -2,7 +2,7 @@
 #define TP_CORE_SRC_TP_DIFF_INTERNAL_H
 
 /*
- * F2-03 semantic-diff internals shared across the diff TUs (entity copy/free +
+ * Semantic-diff internals shared across the diff TUs (entity copy/free +
  * collection primitives / per-op capture / inverse+redo apply / history stack) and
  * the oracle test. NOT a public header -- tests include it from src/ the same way
  * test_transaction.c includes tp_txn_internal.h.
@@ -31,7 +31,8 @@ typedef enum tp_diff_coll {
 } tp_diff_coll;
 
 /* ---- per-op diff shape (drives capture + inverse/redo) ------------------- *
- * Grouped by C0-02 §6 effect class. Only the shape's own fields are populated per
+ * Grouped by decision 0012 effect class. Only the shape's own fields are
+ * populated per
  * entry; every other owned pointer stays NULL so tp_diff_op_free is a safe no-op on
  * it (the tp_operation_free pattern). */
 typedef enum tp_diff_shape {
@@ -63,7 +64,7 @@ typedef struct tp_diff_anim_settings {
 
 /* One committed op's reverse-apply record. The inverse/redo path switches on `shape`
  * (the effect class), not the op kind -- the op kind + class were dead reference/debug
- * fields and are dropped (fix [8]). */
+ * fields and are dropped. */
 typedef struct tp_diff_op {
     tp_diff_shape shape;
 
@@ -119,6 +120,7 @@ typedef struct tp_diff_record {
     int op_count;
     int op_cap;
     int64_t revision; /* the revision this transaction produced (for a future DTO) */
+    size_t bytes;     /* all owned allocations, including this record */
 } tp_diff_record;
 
 /* The in-memory undo/redo stack: records[0..pos-1] are applied (undoable),
@@ -128,7 +130,13 @@ typedef struct tp_history {
     int count;
     int cap;
     int pos;
+    size_t bytes; /* records[0..count), including the redo branch */
 } tp_history;
+
+typedef struct tp_history_push_plan {
+    int drop_oldest;
+    size_t final_bytes;
+} tp_history_push_plan;
 
 /* ---- diff-module allocation fault seam (test-only; default off / -1) ------ *
  * ONE global countdown covering every diff-module allocation (record/op-array/
@@ -144,6 +152,12 @@ void tp_diff__test_reset_alloc_count(void);
 /* Raw diff allocator (fault-seam aware). Public within the diff module. */
 void *tp_diff__alloc(size_t n);
 char *tp_diff__dup(const char *s, bool *ok); /* NULL src -> NULL,*ok=true; real dup fail -> *ok=false */
+/* One active semantic-record admission scope per thread. Every allocation owned
+ * by that record goes through tp_diff__alloc and is rejected before calloc when
+ * it would cross the byte limit. */
+void tp_diff__record_budget_begin(size_t byte_limit);
+bool tp_diff__record_budget_exceeded(void);
+bool tp_diff__record_budget_end(size_t *bytes);
 
 /* ---- element deep-copy / free + collection primitives (tp_diff_entity.c) -- */
 void tp_diff__free_elem(tp_diff_coll coll, void *elem); /* frees an owned captured element */
@@ -202,15 +216,18 @@ void tp_diff_record_push_op(tp_diff_record *r, tp_diff_op *e);
 
 tp_history *tp_history_create(void);
 void tp_history_destroy(tp_history *h);
-/* Ensure room for one more push (may grow the records array; through the diff seam).
- * Called PRE-swap in the commit so the post-swap push is allocation-free. */
-tp_status tp_history_reserve(tp_history *h);
-/* Test-only: force the next tp_history_reserve GROW to return TP_STATUS_OOM once (fix
- * [3] pin -- reserve OOM must leave the transaction id un-recorded / retryable). */
+/* Validate a record against the fixed budgets and calculate the redo/FIFO eviction
+ * without mutating history. The prepared push is allocation-free and is performed
+ * only after durable ACK. */
+tp_status tp_history_prepare_push(const tp_history *h, const tp_diff_record *r, tp_history_push_plan *plan,
+                                  tp_error *err);
+/* Test-only: force the next prepare to return TP_STATUS_OOM once. */
 void tp_history__test_fail_next_reserve(void);
-/* Push a record: discards the redo branch (frees records[pos..count-1]) then stores
- * `r` at the cursor and advances it. Allocation-free (reserve ensured capacity). */
-void tp_history_push_reserved(tp_history *h, tp_diff_record *r);
+/* Test-only limit override (zero values restore the production constants). */
+void tp_history__test_set_limits(int max_steps, size_t max_bytes, size_t max_record_bytes);
+size_t tp_history_record_byte_limit(void);
+/* Apply the prepared eviction and push. Allocation-free; call only after ACK. */
+void tp_history_push_prepared(tp_history *h, tp_diff_record *r, const tp_history_push_plan *plan);
 
 tp_diff_record *tp_history_undo_record(tp_history *h); /* records[pos-1] or NULL (peek) */
 tp_diff_record *tp_history_redo_record(tp_history *h); /* records[pos]   or NULL (peek) */

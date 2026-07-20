@@ -2,13 +2,13 @@
  *
  * PROJECT EDITOR + LIVE PACKER (this iteration): create/open/save .ntpacker_project files,
  * manage atlases, add image files/folders as sources, browse+select sprites, PACK atlases
- * in-process (gui_pack -> tp_pack), render the real packed page on the center canvas with
- * zoom/pan + region overlays + selection sync, and EXPORT target files (gui_pack -> tp_export_run).
- * The single source of truth is the linked tp_project (tp_core) -- the GUI is a thin editor
+ * through typed session jobs, render the real packed page on the center canvas with
+ * zoom/pan + region overlays + selection sync, and export target files through the same boundary.
+ * The session is the single mutable source of truth; the GUI reads owned snapshots as a thin editor
  * (AGENTS tool-parity). The Pack button surfaces the "preview stale" state per ux.md §3.3b.
  *
  * Module split: gui_project (state + dirty bits + load/save), gui_scan (display-only folder
- * enumeration), gui_pack (in-process pack + export orchestration), gui_canvas (dual-mode
+ * enumeration), gui_pack (typed job adapter + presentation slots), gui_canvas (dual-mode
  * source-image / atlas-page custom nt_ui element). main.c is init/frame/shutdown + layout +
  * the OS file dialogs (tinyfiledialogs).
  *
@@ -53,12 +53,17 @@
 #include "window/nt_window.h"
 
 #include "ntpacker_ui_assets.h"
+#if defined(_WIN32)
+#include "nt_utf8_argv.h"
+#endif
 
 #include "clay.h"
 
+#include "tp_core/tp_export.h"
 #include "tp_core/tp_names.h" /* tp_sprite_export_key (slice9 frame-sync key) */
 
 #include "gui_canvas.h"
+#include "gui_bootstrap.h"
 #include "gui_defs.h"
 #include "gui_state.h"
 #include "gui_widgets.h"
@@ -68,7 +73,11 @@
 #include "gui_project.h"
 #include "gui_scan.h"
 #include "gui_shell.h"    /* shell-owned surface the dev seams read (UI pool caps) */
-#include "gui_startup.h"  /* H/P1-8: pure startup open/defer guard (gui_startup_decide) */
+#include "gui_paths.h"    /* app-data root + exe-dir resolver (canonical home for s_exe_dir) */
+#include "gui_log_file.h" /* rotating app-side log file (nt_log sink); no-op under headless */
+#include "gui_parity.h"
+#include "gui_crash.h"    /* crash handler + dump + marker (installed first thing in main) */
+#include "gui_startup.h"  /* pure startup open/defer guard (gui_startup_decide) */
 #include "gui_selftest.h" /* dev seam: headless self-test (compiled out unless flag on) */
 #include "gui_shot.h"     /* dev seam: --shot screenshot capture */
 #include "gui_view_canvas.h"   /* center canvas view (declare_canvas) */
@@ -88,26 +97,15 @@
 #ifdef _WIN32
 #include <windows.h>
 #else
-#include <unistd.h> /* getcwd (absolute s_exe_dir on POSIX) */
+#include <unistd.h> /* POSIX shell APIs (exe-dir getcwd now lives in gui_paths_exe_dir) */
 #endif
 // #endregion
 
 // #region engine state
-/* UI context capacities. UI_STATE_SLOTS / UI_STATE_PROBE_MAX / UI_ROW_ID_RING moved to gui_shell.h
- * in step 3 (shared with the selftest dev-seam); their rationale + values live there. The notes
- * below still describe them. Provisioned with generous headroom for a heavy desktop session
- * (thousands of project rows). The sprite list is virtualized (nt_ui_vlist): only the visible
- * window materializes Clay elements + widget state each frame, and per-row ids RECYCLE through
- * the vlist id_ring, so live widgets are bounded by the viewport, not by project size.
- * nt_ui_state has NO per-frame eviction -- a state cell persists until its id is reused -- so the
- * pool must hold every DISTINCT id that appears over a session. With recycling that is
- * id_ring x per-row stateful children + fixed chrome (menus, overlay cluster, page bar, modals).
- *   UI_STATE_SLOTS     : power-of-2 retained-state cells. Was 512 -> overflowed once a 500-file
- *                        folder scrolled through every ring slot (256 ring x [hit + x] ~= 512).
- *   UI_STATE_PROBE_MAX : linear-probe window. The engine default (4) is far too small at this
- *                        load -- placement failed well below capacity and fired the "pool
- *                        overflow" assert (nt_ui_state.c:38). THIS was the real crash trigger.
- *   UI_MAX_ELEMENTS    : Clay layout-element cap (also Clay's persistent per-id hashmap). */
+/* UI context capacities. UI_STATE_SLOTS / UI_STATE_PROBE_MAX / UI_ROW_ID_RING live in gui_shell.h
+ * (shared with the selftest dev-seam) and exceed the engine defaults because nt_ui_state has no
+ * per-frame eviction: a heavy session scrolling a large folder must retain every distinct row id
+ * or placement overflows the pool. UI_MAX_ELEMENTS is the Clay layout-element cap. */
 #define UI_MAX_ELEMENTS ((uint32_t)8192U)
 #define UI_ARENA_SIZE ((size_t)24U * 1024U * 1024U)
 #define SCRATCH_ARENA_SIZE ((size_t)4U * 1024U * 1024U)
@@ -115,30 +113,15 @@
 static NT_UI_DECLARE_ARENA(s_ui_arena, UI_ARENA_SIZE);
 static nt_buffer_t s_frame_ubo;
 
-static nt_hash32_t s_pack_id;
-static nt_resource_t s_sprite_vs_handle;
-static nt_resource_t s_sprite_fs_handle;
-static nt_resource_t s_text_vs_handle;
-static nt_resource_t s_text_fs_handle;
-static nt_resource_t s_atlas_handle;
-static nt_resource_t s_atlas_tex_handle;
-static nt_resource_t s_font_resource;
-static nt_material_t s_sprite_material;
-static nt_material_t s_text_material;
-static bool s_atlas_bound;
 // #endregion
 
 // #region ui ids gate
-static bool s_ids_ready;
-
-/* s_id_mb_ file/edit/view/help and s_id_menu_ file/edit/view/help (menubar + menu-panel ids), the
- * menu-state buffers (s_file/edit/view/help_state + the four nt_ui_menu_ctx_t working buffers), the
- * MK_ item-key enum, and s_ctx_menu (the context-menu declare-machinery working buffer) moved to
- * gui_view_chrome.c (GUI decomposition step 6b) -- nothing outside chrome ever read them. The ids
- * themselves moved into gui_state (same precedent as s_id_ctx_menu in step 4) rather than staying
- * chrome-local, so ensure_ids below still seeds them directly with no extra hook function; the
- * menu-state buffers and the item-key enum, which nothing outside chrome touches, became
- * chrome-local statics instead. */
+/* s_id_mb_ file/edit/view/help and s_id_menu_ file/edit/view/help (menubar + menu-panel ids) live in
+ * gui_state (same precedent as s_id_ctx_menu); gui_bootstrap seeds them with the other UI ids.
+ * The menu-state buffers (s_file/edit/view/help_state + the four
+ * nt_ui_menu_ctx_t working buffers), the MK_ item-key enum, and s_ctx_menu (the context-menu
+ * declare-machinery working buffer) are chrome-local statics in gui_view_chrome.c -- nothing outside
+ * chrome ever reads them. */
 // #endregion
 
 // #region editor state
@@ -154,54 +137,36 @@ static float s_pan_last_x, s_pan_last_y;
 #define CANVAS_DRAG_THRESHOLD 4.0F
 
 /* The deferred side-effect queue (s_pending_*), the new/open/exit confirm-flow flags (s_after_confirm/
- * s_confirm_open/s_modal_action) and the last-pack timing (s_last_pack_*) moved to gui_actions (step 2);
- * the modal open flags (s_about_open / s_export_open) moved to gui_state (step 3 -- shared with the
- * selftest); s_blur_inputs (set here by frame(), read by the settings-panel field widgets) moved to
- * gui_state too (step 4 -- the view TU needs it). */
+ * s_confirm_open/s_modal_action) and the last-pack timing (s_last_pack_*) live in gui_actions. The
+ * modal open flags (s_about_open / s_export_open) live in gui_state (shared with the selftest); so
+ * does s_blur_inputs -- set here by frame(), read by the settings-panel field widgets in the view TU. */
 
-/* s_pack_has_sources/s_pack_stale (pack-button state cached for the tooltip pass) moved to
- * gui_state (step 6a -- written by gui_view_canvas's declare_canvas_strip, read by gui_view_chrome's
+/* s_pack_has_sources/s_pack_stale (pack-button state cached for the tooltip pass) live in
+ * gui_state (written by gui_view_canvas's declare_canvas_strip, read by gui_view_chrome's
  * declare_tooltips). The right settings panel's disclosure/dropdown-open bits and numeric-field edit
- * buffers moved to gui_view_settings.c (step 4 -- panel-local). GUI_MAX_TARGETS and k_playback_names
+ * buffers are panel-local statics in gui_view_settings.c. GUI_MAX_TARGETS and k_playback_names
  * live in gui_defs.h (shared with gui_view_chrome's declare_export_modal / gui_view_canvas's
  * declare_canvas_preview). */
 
 // #endregion
 
 // #region small helpers
-/* gui_open_url (opens a URL in the OS default browser -- the About link) moved to
- * gui_view_chrome.c (GUI decomposition step 6b) as a pure move: it is chrome-only, the About modal
- * is its sole caller. */
+/* gui_open_url (opens a URL in the OS default browser -- the About link) lives in
+ * gui_view_chrome.c: it is chrome-only, the About modal is its sole caller. */
 
-/* Shell-owned reset of the canvas-bound-result cache (gui_shell.h): the destructive flows call this
- * right after gui_pack_clear(-1) so s_shown_result never holds a freed slot pointer at the next
- * frame's `want != s_shown_result` compare (P2 hardening). */
-void gui_shell_reset_shown_result(void) { s_shown_result = NULL; }
+/* Shell-owned release of the canvas borrow and its comparison cache. Callers
+ * either free pack slots or retain a stale slot across history navigation; the
+ * next frame binds the then-current result without reusing the old borrow. */
+void gui_shell_reset_shown_result(void) {
+    gui_canvas_set_result(&s_canvas, NULL);
+    s_shown_result = NULL;
+}
 // #endregion
 
 // #region init helpers
-static void resolve_exe_dir(void) {
-#ifdef _WIN32
-    char exe[1024];
-    DWORD n = GetModuleFileNameA(NULL, exe, (DWORD)sizeof exe);
-    if (n > 0U && n < (DWORD)sizeof exe) {
-        char *slash = strrchr(exe, '\\');
-        if (slash != NULL) {
-            *slash = '\0';
-            (void)snprintf(s_exe_dir, sizeof s_exe_dir, "%s", exe);
-            return;
-        }
-    }
-#else
-    /* Absolute CWD, not "." -- a relative base made the self-test write scratch files to the CWD while
-     * source paths resolve against the project dir, so sources looked "missing" on Linux CI (stress/caps
-     * packs found 0 images). Windows keeps the exe dir above; "." stays the last-resort fallback. */
-    if (getcwd(s_exe_dir, sizeof s_exe_dir) != NULL) {
-        return;
-    }
-#endif
-    (void)snprintf(s_exe_dir, sizeof s_exe_dir, ".");
-}
+/* Canonical resolver now lives in gui_paths (D1 -- reused by the app-data root + the log file). Kept
+ * as a thin wrapper so the call site + the absolute-CWD-on-CI lesson stay put; behavior is identical. */
+static void resolve_exe_dir(void) { gui_paths_exe_dir(s_exe_dir, sizeof s_exe_dir); }
 
 /* Seed the global UI scale from the system DPI (96 dpi = 100%). GLFW makes the process
  * per-monitor DPI aware, so the framebuffer is physical pixels -- without this the fixed
@@ -222,181 +187,19 @@ static float detect_dpi_scale(void) {
 #endif
 }
 
-static void ensure_ids(void) {
-    if (s_ids_ready) {
-        return;
-    }
-    s_id_btn_pack = nt_ui_id("ntpacker/btn_pack");
-    s_id_btn_export = nt_ui_id("ntpacker/btn_export");
-    s_id_btn_refresh = nt_ui_id("ntpacker/btn_refresh");
-    s_id_vlist = nt_ui_id("ntpacker/sprite_vlist");
-    s_id_canvas = nt_ui_id("ntpacker/canvas");
-    s_id_modal = nt_ui_id("ntpacker/confirm_modal");
-    s_id_about = nt_ui_id("ntpacker/about_modal");
-    s_id_rename = nt_ui_id("ntpacker/rename_input");
-    s_id_right_panel = nt_ui_id("ntpacker/right_panel");
-    s_id_left_panel = nt_ui_id("ntpacker/left_panel");
-    s_id_strip = nt_ui_id("ntpacker/canvas_strip");
-    s_id_status_pill = nt_ui_id("ntpacker/status_pill");
-    s_id_right_content = nt_ui_id("ntpacker/right_content");
-    s_id_export_modal = nt_ui_id("ntpacker/export_modal");
-    s_id_mb_file = nt_ui_id("ntpacker/mb_file");
-    s_id_mb_edit = nt_ui_id("ntpacker/mb_edit");
-    s_id_mb_view = nt_ui_id("ntpacker/mb_view");
-    s_id_mb_help = nt_ui_id("ntpacker/mb_help");
-    s_id_menu_file = nt_ui_id("ntpacker/menu_file");
-    s_id_menu_edit = nt_ui_id("ntpacker/menu_edit");
-    s_id_menu_view = nt_ui_id("ntpacker/menu_view");
-    s_id_menu_help = nt_ui_id("ntpacker/menu_help");
-    s_id_ctx_menu = nt_ui_id("ntpacker/ctx_menu");
-
-    s_menu_style = nt_ui_menu_style_defaults();
-    s_menu_style.icon_size = 0U;
-    /* Floating surfaces must SEPARATE from the panels (owner: open menus blended in). The engine
-     * default is a semi-transparent near-panel gray + a warm hover foreign to the palette. Elevated
-     * surface = opaque header tone (lighter than panel, same as section headers, §2.1); hover = the
-     * app's selection blue; separators = the border tone. */
-    s_menu_style.bg_color = RGBA8(40, 45, 57);         /* C_HEADER: opaque elevated surface */
-    s_menu_style.item_hover_color = RGBA8(48, 74, 120); /* C_SEL: selection blue, not the default amber */
-    s_menu_style.separator_color = RGBA8(52, 58, 72);   /* C_BORDER */
-    s_modal_style = nt_ui_modal_style_defaults();
-    s_tip_style = nt_ui_tooltip_style_defaults();
-
-    s_rename_input = nt_ui_input_style_defaults();
-    s_rename_input.text.font_id = 0;
-    s_rename_input.text.color = (Clay_Color){225.0F, 228.0F, 235.0F, 255.0F};
-    s_rename_input.placeholder.font_id = 0;
-    s_rename_input.placeholder.color = (Clay_Color){120.0F, 126.0F, 138.0F, 255.0F};
-    /* Field well (§2.7 item 7): recessed `input` fill + `border`; focus ring = `border-strong` blue. */
-    s_rename_input.skin[NT_UI_INPUT_IDLE].bg_color = RGBA8(21, 23, 30);
-    s_rename_input.skin[NT_UI_INPUT_IDLE].border_color = RGBA8(52, 58, 72);
-    s_rename_input.skin[NT_UI_INPUT_FOCUSED].bg_color = RGBA8(21, 23, 30);
-    s_rename_input.skin[NT_UI_INPUT_FOCUSED].border_color = RGBA8(86, 132, 204);
-    s_rename_input.border_width = 1.0F;
-
-    /* Settings-panel widget styles. The atlas WHITE region (s_white_ref, bound by now
-     * since can_render gates ensure_ids) is the art for checkbox/slider parts, tinted
-     * per state; the dropdown is flat-color. */
-    s_dd_style = nt_ui_dropdown_style_defaults();
-    s_dd_style.font_id = 0;
-    s_dd_style.trigger_text = RGBA8(214, 220, 230);
-    s_dd_style.row_text = RGBA8(214, 220, 230);
-    /* Well look (§2.7 item 7): recessed `input` fill so combos read as fields, not buttons. The engine
-     * dropdown trigger has no border field, so the recessed fill (darker than panel) carries the well
-     * read; the open state uses the lighter `pressed` tint as its active signal. */
-    s_dd_style.trigger_idle.fill = RGBA8(21, 23, 30);
-    s_dd_style.trigger_hover.fill = RGBA8(30, 34, 44);
-    s_dd_style.trigger_pressed.fill = RGBA8(40, 46, 58);
-    /* The OPEN list is a floating surface, not a well: elevated header tone (was RGBA8(30,33,41),
-     * 2 units off the panel fill -- it blended in; owner report). Matches s_menu_style.bg_color. */
-    s_dd_style.panel_fill = RGBA8(40, 45, 57);
-    s_dd_style.row_idle.fill = 0U;
-    s_dd_style.row_hover.fill = RGBA8(54, 60, 74);
-    s_dd_style.row_pressed.fill = RGBA8(36, 40, 50);
-    s_dd_style.row_selected.fill = RGBA8(52, 78, 120);
-    s_dd_style.panel_corner_radius = 4U;
-    s_dd_style.max_visible_rows = 8U;
-
-    s_slider_style = nt_ui_slider_style_defaults();
-    s_slider_style.states[NT_UI_SLIDER_IDLE].track = s_white_ref;
-    s_slider_style.states[NT_UI_SLIDER_IDLE].track_tint = RGBA8(46, 50, 60);
-    s_slider_style.states[NT_UI_SLIDER_IDLE].fill = s_white_ref;
-    s_slider_style.states[NT_UI_SLIDER_IDLE].fill_tint = RGBA8(78, 126, 192);
-    s_slider_style.states[NT_UI_SLIDER_IDLE].thumb = s_white_ref;
-    s_slider_style.states[NT_UI_SLIDER_IDLE].thumb_tint = RGBA8(220, 228, 238);
-
-    s_num_input = nt_ui_input_style_defaults();
-    s_num_input.text.font_id = 0;
-    s_num_input.text.color = (Clay_Color){225.0F, 228.0F, 235.0F, 255.0F};
-    s_num_input.placeholder.font_id = 0;
-    s_num_input.placeholder.color = (Clay_Color){120.0F, 126.0F, 138.0F, 255.0F};
-    /* Field well (§2.7 item 7): recessed `input` fill + always-on `border`; focus/active = `border-strong`. */
-    s_num_input.skin[NT_UI_INPUT_IDLE].bg_color = RGBA8(21, 23, 30);
-    s_num_input.skin[NT_UI_INPUT_IDLE].border_color = RGBA8(52, 58, 72);
-    s_num_input.skin[NT_UI_INPUT_HOVER].bg_color = RGBA8(21, 23, 30);
-    s_num_input.skin[NT_UI_INPUT_HOVER].border_color = RGBA8(70, 78, 96);
-    s_num_input.skin[NT_UI_INPUT_FOCUSED].bg_color = RGBA8(21, 23, 30);
-    s_num_input.skin[NT_UI_INPUT_FOCUSED].border_color = RGBA8(86, 132, 204);
-    s_num_input.skin[NT_UI_INPUT_DISABLED].bg_color = RGBA8(26, 28, 36);
-    s_num_input.skin[NT_UI_INPUT_DISABLED].border_color = RGBA8(40, 44, 54);
-    s_num_input.border_width = 1.0F;
-
-    s_panel_scroll = nt_ui_scroll_style_defaults();
-    s_panel_scroll.scroll_x = false;
-    s_panel_scroll.scroll_y = true;
-    s_panel_scroll.bar_visibility = NT_UI_SCROLLBAR_AUTO_HIDE;
-    s_panel_scroll.track_ref = s_white_ref;
-    s_panel_scroll.track_tint = RGBA8(30, 33, 41);
-    s_panel_scroll.thumb_ref = s_white_ref;
-    s_panel_scroll.thumb_tint = RGBA8(80, 86, 100);
-
-    s_ids_ready = true;
-}
-
-/* Resolve one baked icon region into a memoized ref, exactly like the white region. The icon MUST be
- * present (build_packs bakes it) -- a miss is a bake/codegen mismatch, so crash early. */
-static nt_atlas_region_ref_t bind_icon_ref(nt_hash64_t region_id) {
-    const uint32_t idx = nt_atlas_find_region(s_atlas_handle, region_id.value);
-    NT_ASSERT(idx != NT_ATLAS_INVALID_REGION && "ntpacker-gui: baked UI icon region missing");
-    return nt_atlas_ref_idx(s_atlas_handle, region_id.value, idx);
-}
-
-static void try_bind_resources(void) {
-    if (s_atlas_bound && s_font_bound) {
-        return;
-    }
-    if (!s_atlas_bound && nt_resource_is_ready(s_atlas_handle)) {
-        const uint32_t white = nt_atlas_find_region(s_atlas_handle, ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS__WHITE.value);
-        NT_ASSERT(white != NT_ATLAS_INVALID_REGION);
-        nt_ui_set_atlas_white_region(s_ctx, s_atlas_handle, white);
-        s_white_ref = nt_atlas_ref_idx(s_atlas_handle, ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS__WHITE.value, white);
-        s_ic_layout_grid = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_LAYOUT_GRID);
-        s_ic_triangle_alert = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_TRIANGLE_ALERT);
-        s_ic_download = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_DOWNLOAD);
-        s_ic_refresh = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_REFRESH_CW);
-        s_ic_chevron_left = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_CHEVRON_LEFT);
-        s_ic_chevron_right = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_CHEVRON_RIGHT);
-        s_ic_minus = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_MINUS);
-        s_ic_plus = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_PLUS);
-        s_ic_scan = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_SCAN);
-        s_ic_maximize = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_MAXIMIZE_2);
-        s_ic_chevron_down = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_CHEVRON_DOWN);
-        s_ic_layers = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_LAYERS);
-        s_ic_folder = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_FOLDER);
-        s_ic_image = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_IMAGE);
-        s_ic_film = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_FILM);
-        s_ic_file_plus = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_FILE_PLUS);
-        s_ic_folder_plus = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_FOLDER_PLUS);
-        s_ic_x = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_X);
-        s_ic_info = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_INFO);
-        s_ic_circle_check = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_CIRCLE_CHECK);
-        s_ic_octagon_alert = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_OCTAGON_ALERT);
-        s_ic_folder_plus_hero = bind_icon_ref(ASSET_ATLAS_REGION_NTPACKER_UI_ATLAS_FOLDER_PLUS_HERO);
-        s_atlas_bound = true;
-        nt_log_info("ntpacker-gui: atlas white + icon regions bound");
-    }
-    if (!s_font_bound && nt_resource_is_ready(s_font_resource)) {
-        nt_font_add(s_font, s_font_resource);
-        nt_ui_set_font(s_ctx, 0U, s_font);
-        s_font_bound = true;
-        nt_log_info("ntpacker-gui: font bound at slot 0");
-    }
-}
 // #endregion
 
 // #region menu bar
 /* close_menubar_menus/close_all_menus, the File/Edit/View/Help menu item builders (file_items/
  * edit_items/scale_item/overlay_item/view_items/help_items), menubar_entry, and declare_menubar
- * moved to gui_view_chrome.c (GUI decomposition step 6b) as a pure move. close_menubar_menus keeps a
- * prototype here via gui_shell.h (the sanctioned cross-view surface the three other views' context-
- * menu triggers read) and in gui_view_chrome.h (for frame() below); its definition lives in
- * gui_view_chrome.c now. */
+ * live in gui_view_chrome.c. close_menubar_menus is declared here via gui_shell.h (the sanctioned
+ * cross-view surface the three other views' context-menu triggers read) and in gui_view_chrome.h
+ * (for frame() below); its definition lives in gui_view_chrome.c. */
 // #endregion
 
 // #region left panel (atlases + sprites)
-/* declare_left_panel + its atlas/sprite/animation row helpers moved to gui_view_lists.c (GUI
- * decomposition step 5). declare_row_tooltips moved to gui_view_chrome.c (step 6b -- chrome-owned
- * per the plan's §3 fan-out table). */
+/* declare_left_panel + its atlas/sprite/animation row helpers live in gui_view_lists.c.
+ * declare_row_tooltips lives in gui_view_chrome.c (chrome-owned per the plan's §3 fan-out table). */
 // #endregion
 
 // #region canvas
@@ -410,7 +213,7 @@ static void handle_canvas_input(void) {
      * stay live while a text field holds focus. A press outside the panels also blurs that field (see
      * the blur-request block before nt_ui_begin). */
     if (gui_canvas_get_mode(&s_canvas) != GUI_CANVAS_ATLAS || !gui_canvas_has_atlas(&s_canvas) ||
-        s_confirm_open || s_about_open || s_export_open || s_edit_kind != EDIT_NONE) {
+        s_confirm_open || s_about_open || s_export_open || s_recovery_open || s_edit_kind != EDIT_NONE) {
         s_lmb_armed = s_lmb_panning = s_mmb_panning = false;
         return;
     }
@@ -490,22 +293,22 @@ static void handle_canvas_input(void) {
 }
 
 /* atlas_fill_pct, strip_group_actions/pages/zoom, declare_canvas_strip, declare_canvas_preview,
- * declare_canvas, status_sev_color/status_sev_icon, and declare_status_pill moved to
- * gui_view_canvas.c (GUI decomposition step 6a) as a pure move. handle_canvas_input above stays
- * here per the P-2 lead ruling (docs/plans/gui-decomposition.md §2). */
+ * declare_canvas, status_sev_color/status_sev_icon, and declare_status_pill live in
+ * gui_view_canvas.c. handle_canvas_input above stays here per the P-2 lead ruling
+ * (docs/plans/gui-decomposition.md §2). */
 // #endregion
 
 // #region status bar + menus + tooltips
-/* status_sev_color, status_sev_icon, declare_status_pill moved to gui_view_canvas.c (GUI
- * decomposition step 6a) as a pure move -- see the note in the canvas region above.
+/* status_sev_color, status_sev_icon, declare_status_pill live in gui_view_canvas.c -- see the note
+ * in the canvas region above.
  *
  * declare_menus, declare_context_menu, declare_tooltips, declare_export_modal, declare_confirm_modal,
- * and declare_about_modal moved to gui_view_chrome.c (GUI decomposition step 6b) as a pure move. */
+ * and declare_about_modal live in gui_view_chrome.c. */
 // #endregion
 
-/* The right settings panel (regions F/G + per-region packing overrides) moved to
- * gui_view_settings.c/h (step 4) as a pure move -- declare_right_panel is called from frame() below;
- * the header exposes only that entry point. */
+/* The right settings panel (regions F/G + per-region packing overrides) lives in
+ * gui_view_settings.c/h -- declare_right_panel is called from frame() below; the header exposes
+ * only that entry point. */
 
 // #region keyboard shortcuts (ux.md §3.3d)
 /* Global shortcuts routed through the SAME actions as the menus. Text-input focus swallows
@@ -514,7 +317,7 @@ static void handle_shortcuts(void) {
     if (gui_shot_active()) {
         return; /* headless capture: the user's live typing must not trigger hotkeys mid-shot */
     }
-    if (nt_ui_input_any_focused(s_ctx) || s_confirm_open || s_about_open || s_export_open) {
+    if (nt_ui_input_any_focused(s_ctx) || s_confirm_open || s_about_open || s_export_open || s_recovery_open) {
         return;
     }
     /* Preview + editor accelerators (each also a button; §3.3e). */
@@ -523,9 +326,11 @@ static void handle_shortcuts(void) {
     }
     if (s_edit_kind == EDIT_NONE && s_sel_anim >= 0 && s_sel_anim_frame >= 0 &&
         nt_input_key_is_pressed(NT_KEY_DELETE)) {
-        /* fix3 completeness: clear the frame selection ONLY on a real removal -- a journal-failed flush
-         * aborts the remove (frame still present), so don't deselect it (op-error surfaces via poll_async). */
-        if (gui_project_anim_remove_frame(s_sel_atlas, s_sel_anim, s_sel_anim_frame)) {
+        /* Clear the frame selection only after a real removal. On rejection the
+         * frame remains, so its selection must remain too. */
+        gui_animation_ref animation;
+        if (gui_project_animation_ref_at(s_sel_atlas, s_sel_anim, &animation) &&
+            gui_project_anim_remove_frame(&animation, s_sel_anim_frame)) {
             s_sel_anim_frame = -1;
         }
     }
@@ -600,7 +405,7 @@ static void frame(void) {
     apply_pending();
 
     /* Fallback commit for a buffered gesture that never got a release/blur/discrete boundary
-     * (F2-05b-ii-A, decision 0015). GATED on no active gesture -- no held pointer and no focused
+     * (decision 0015). GATED on no active gesture -- no held pointer and no focused
      * input -- so it can never split a live drag or a mid-typing field; the 0.30 s window inside
      * only fires when the edit has truly gone idle. Primary commits are gesture-scoped. */
     if (!g_nt_input.pointers[0].buttons[NT_BUTTON_LEFT].is_down && !nt_ui_input_any_focused(s_ctx)) {
@@ -632,6 +437,8 @@ static void frame(void) {
             s_export_open = false;
         } else if (s_about_open) {
             s_about_open = false;
+        } else if (s_recovery_open) {
+            s_recovery_open = false; /* Esc = "Later": leave every orphan on disk, no data loss */
         } else if (s_confirm_open) {
             s_confirm_open = false;
             s_after_confirm = AFTER_NONE;
@@ -663,9 +470,7 @@ static void frame(void) {
         }
     }
 
-    nt_resource_step();
-    nt_material_step();
-    try_bind_resources();
+    const nt_material_info_t *sprite_info = gui_bootstrap_step();
 
     const float fb_w = (float)(g_nt_window.fb_width > 0 ? g_nt_window.fb_width : 800);
     const float fb_h = (float)(g_nt_window.fb_height > 0 ? g_nt_window.fb_height : 600);
@@ -695,9 +500,7 @@ static void frame(void) {
     nt_gfx_begin_frame();
     nt_gfx_begin_segment("frame");
     if (g_nt_gfx.context_restored) {
-        nt_resource_invalidate(NT_ASSET_SHADER_CODE);
-        nt_resource_invalidate(NT_ASSET_TEXTURE);
-        nt_resource_invalidate(NT_ASSET_FONT);
+        gui_bootstrap_restore();
         nt_gfx_destroy_buffer(s_frame_ubo);
         s_frame_ubo = nt_gfx_make_buffer(&(nt_buffer_desc_t){
             .type = NT_BUFFER_UNIFORM,
@@ -709,8 +512,6 @@ static void frame(void) {
         nt_text_renderer_restore_gpu();
         nt_shape_renderer_restore_gpu();
         gui_canvas_restore_gpu(&s_canvas);
-        s_atlas_bound = false;
-        s_font_bound = false;
     }
 
     nt_gfx_begin_pass(&(nt_pass_desc_t){
@@ -720,15 +521,10 @@ static void frame(void) {
 
     nt_font_step();
 
-    const nt_material_info_t *sprite_info = nt_material_get_info(s_sprite_material);
-    const nt_material_info_t *text_info = nt_material_get_info(s_text_material);
-    const bool can_render = s_atlas_bound && s_font_bound && sprite_info && sprite_info->ready && text_info && text_info->ready;
-
-    if (can_render) {
+    if (sprite_info) {
         nt_gfx_update_buffer(s_frame_ubo, &uniforms, sizeof(uniforms));
         nt_gfx_bind_uniform_buffer(s_frame_ubo, 0);
 
-        ensure_ids();
         apply_ui_scale();
         gui_canvas_ensure_pipeline(&s_canvas, sprite_info);
         gui_canvas_set_frame_ubo(&s_canvas, s_frame_ubo);
@@ -737,7 +533,10 @@ static void frame(void) {
         clamp_selection();
         /* keep the animation selection valid after undo/redo/atlas changes */
         {
-            tp_project_atlas *sel_a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
+            const tp_session_snapshot *snapshot = gui_project_snapshot();
+            const tp_snapshot_atlas *sel_a = snapshot
+                                                 ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas)
+                                                 : NULL;
             if (!sel_a || s_sel_anim >= sel_a->animation_count) {
                 s_sel_anim = -1;
                 s_sel_anim_frame = -1;
@@ -746,7 +545,7 @@ static void frame(void) {
                 }
             }
         }
-        build_rows(gui_project_get(), tp_project_get_atlas(gui_project_get(), s_sel_atlas));
+        build_rows();
         s_content_w = scale.logical_w; /* for caption/status truncation */
         compute_panel_widths(scale.logical_w); /* clamp side-panel widths so they never leave the screen */
         gui_shot_tick(); /* screenshot mode: pack + select + (post-draw) capture; no-op unless --shot */
@@ -768,7 +567,7 @@ static void frame(void) {
             }
         }
         /* A blur (press outside the panel while a field held focus) is a field's gesture boundary:
-         * flush its buffered edit as ONE undo step (F2-05b-ii-A, decision 0015). The value is already
+         * flush its buffered edit as ONE undo step (decision 0015). The value is already
          * in gui_project's pending buffer from the last keystroke; apply_pending commits it next frame. */
         if (s_blur_inputs) {
             gui_request_gesture_commit();
@@ -786,20 +585,27 @@ static void frame(void) {
          * owner: "добавил и не вижу"). Result names are the original atlas-relative key + ext. */
         s_canvas.sel_slice9[0] = s_canvas.sel_slice9[1] = s_canvas.sel_slice9[2] = s_canvas.sel_slice9[3] = 0;
         if (want && s_canvas.sel_sprite >= 0 && s_canvas.sel_sprite < want->sprite_count) {
-            tp_project_atlas *sel_a = tp_project_get_atlas(gui_project_get(), s_sel_atlas);
-            if (sel_a) {
-                char s9key[192];
-                tp_sprite_export_key(want->sprites[s_canvas.sel_sprite].name, s9key, sizeof s9key);
+            const sprite_row *selected = gui_rows_selected_leaf();
+            const tp_session_snapshot *snapshot = gui_project_snapshot();
+            const tp_snapshot_atlas *atlas = snapshot
+                                                  ? tp_session_snapshot_atlas_at(snapshot,
+                                                                                 s_sel_atlas)
+                                                  : NULL;
+            if (selected && atlas) {
+                const gui_sprite_ref sprite = {
+                    atlas->id, selected->source_id, selected->source_key,
+                    tp_session_snapshot_revision(snapshot)};
                 /* EFFECTIVE value (#5): a slice9 edit BUFFERS until the gesture boundary, so the committed
                  * record freezes mid-typing. Prefer the buffered slice9 (peek) when one is in flight for
                  * this atlas+sprite, so the guides move THIS frame; else read the committed record. */
                 int eff[4];
-                if (gui_project_peek_pending_slice9(s_sel_atlas, s9key, eff)) {
+                if (gui_project_peek_pending_slice9(&sprite, eff)) {
                     for (int k = 0; k < 4; k++) {
                         s_canvas.sel_slice9[k] = eff[k];
                     }
                 } else {
-                    const tp_project_sprite *s9ov = tp_project_atlas_find_sprite(sel_a, s9key);
+                    const tp_snapshot_sprite *s9ov =
+                        gui_rows_selected_override();
                     if (s9ov) {
                         for (int k = 0; k < 4; k++) {
                             s_canvas.sel_slice9[k] = (int)s9ov->slice9_lrtb[k];
@@ -846,6 +652,7 @@ static void frame(void) {
         declare_context_menu(s_ctx);
         declare_tooltips(s_ctx);
         declare_confirm_modal(s_ctx);
+        declare_recovery_modal(s_ctx);
         declare_about_modal(s_ctx);
         declare_export_modal(s_ctx);
 
@@ -895,78 +702,25 @@ static void frame(void) {
 }
 // #endregion
 
-// #region dev seam: --parity (headless saved-bytes byte-parity check)
-/* Applies a FIXED non-creating edit sequence to `in` through the OP-based gui_project_*
- * setters (the F2-05b-i cutover) and saves it to `out`. Non-creating (rename/settings/
- * override/target on an already-fixed-id project) => deterministic bytes: no random ids
- * are minted, so `out` is byte-comparable to the same logical edits applied by the
- * byte-identity-proven CLI (scripts/gui_parity_check.sh). Runs before any window/GL init
- * (pure model layer). Returns 0 on success, 2 on open/save failure. */
-static int gui_run_parity(const char *in, const char *out) {
-    char err[256] = {0};
-    gui_project_init();
-    if (gui_project_open(in, err, sizeof err) != TP_STATUS_OK) {
-        (void)fprintf(stderr, "parity: open '%s' failed: %s\n", in, err);
-        return 2;
-    }
-    /* atlas rename + all 10 knobs (each a single-knob atlas.settings.set transaction; the
-     * final atlas is identical to the CLI's one multi-knob `set`). */
-    (void)gui_project_set_atlas_name(0, "hero_atlas");
-    (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PADDING, 7, 0.0F);
-    (void)gui_project_set_atlas_setting(0, GUI_ATLAS_MARGIN, 3, 0.0F);
-    (void)gui_project_set_atlas_setting(0, GUI_ATLAS_EXTRUDE, 2, 0.0F);
-    (void)gui_project_set_atlas_setting(0, GUI_ATLAS_SHAPE, 0, 0.0F);
-    (void)gui_project_set_atlas_setting(0, GUI_ATLAS_ALPHA_THRESHOLD, 42, 0.0F);
-    (void)gui_project_set_atlas_setting(0, GUI_ATLAS_MAX_VERTICES, 5, 0.0F);
-    (void)gui_project_set_atlas_setting(0, GUI_ATLAS_MAX_SIZE, 2048, 0.0F);
-    (void)gui_project_set_atlas_setting(0, GUI_ATLAS_ALLOW_TRANSFORM, 0, 0.0F);
-    (void)gui_project_set_atlas_setting(0, GUI_ATLAS_POWER_OF_TWO, 1, 0.0F);
-    (void)gui_project_set_atlas_setting(0, GUI_ATLAS_PIXELS_PER_UNIT, 0, 64.0F);
-    /* a pending (name-keyed) sprite override -- shape + origin + rename on an arbitrary key
-     * (matches the CLI `sprite set <atlas> psp shape=0 origin=0.25,0.75 rename=psp_final`). */
-    (void)gui_project_set_sprite_rename(0, "psp", "psp_final");
-    (void)gui_project_set_sprite_override(0, "psp", GUI_SPRITE_OV_SHAPE, 0);
-    /* origin is now COMPONENT-keyed (#2): set X then Y (matches the CLI `origin=0.25,0.75`). The final
-     * override record is byte-identical -- editing Y flushes the buffered X (X committed), then Y seeds
-     * the committed X, so the saved sprite carries origin=(0.25,0.75) exactly as the single-op form did. */
-    (void)gui_project_set_sprite_origin(0, "psp", 0 /* X */, 0.25F);
-    (void)gui_project_set_sprite_origin(0, "psp", 1 /* Y */, 0.75F);
-    (void)gui_project_set_sprite_slice9(0, "psp", 0, 4);
-    /* target 0: keep its exporter (read from the model -- no exporter-id literal), set path. #4 UAF fix:
-     * FLUSH the buffered slice9 FIRST (it clone-swaps + frees the current project), THEN re-get `a` from
-     * the now-stable project and COPY exporter_id into a local before set_target (whose own flush is now a
-     * no-op) -- the pre-fix code read a->targets[0].exporter_id AFTER set_target's flush had freed it. */
-    {
-        gui_project_flush_pending();
-        tp_project_atlas *a = tp_project_get_atlas(gui_project_get(), 0);
-        if (a && a->target_count > 0) {
-            char exporter[64];
-            (void)snprintf(exporter, sizeof exporter, "%s", a->targets[0].exporter_id);
-            (void)gui_project_set_target(0, 0, exporter, "out/hero", true);
-        }
-    }
-    if (gui_project_save_as(out, err, sizeof err) != TP_STATUS_OK) {
-        (void)fprintf(stderr, "parity: save '%s' failed: %s\n", out, err);
-        return 2;
-    }
-    (void)fprintf(stdout, "parity: wrote %s\n", out);
-    gui_project_shutdown();
-    return 0;
-}
-// #endregion
+
 
 // #region main + init/shutdown
-int main(int argc, char *argv[]) {
+static int gui_main_utf8(int argc, char *argv[]) {
+#ifdef _WIN32
+    /* All client/core paths are UTF-8. tinyfiledialogs defaults to the process
+     * ANSI code page unless this is set before its first native dialog. */
+    tinyfd_winUtf8 = 1;
+#endif
     nt_engine_config_t config = {0};
     config.app_name = "ntpacker-gui";
     config.version = 1;
     if (nt_engine_init(&config) != NT_OK) {
         return 1;
     }
-    nt_log_info("ntpacker-gui: %s build (%s)", nt_engine_build_string(), nt_engine_preset_string());
 
     /* dev seam: --parity <in> <out> runs the headless saved-bytes byte-parity check and exits
-     * BEFORE any window/GL init (pure model layer). */
+     * BEFORE any window/GL init (pure model layer). Returns before file logging installs -> a
+     * byte-parity run stays side-effect-free (no stray app-data log). */
     for (int i = 1; i + 2 < argc; i++) {
         if (strcmp(argv[i], "--parity") == 0) {
             return gui_run_parity(argv[i + 1], argv[i + 2]);
@@ -975,14 +729,47 @@ int main(int argc, char *argv[]) {
 
     /* dev screenshot flags + optional project path (first non-flag arg; see gui_shot.c) */
     const char *proj_arg = NULL;
+    bool selftest_crash = false; /* D2 hidden dev arg: fault after install to exercise the handler */
     for (int i = 1; i < argc; i++) {
         if (gui_shot_parse_arg(argv[i])) {
             /* consumed by the dev screenshot seam (--shot/--size/--scale/--shot-stale/--shot-packing) */
         } else if (strcmp(argv[i], "--auto-pack") == 0) {
             s_auto_pack = true; /* dev: headless async pack of atlas 0 for the heartbeat proof */
+        } else if (strcmp(argv[i], "--selftest-crash") == 0) {
+            selftest_crash = true; /* parse here so it's never mistaken for a project path below */
         } else if (proj_arg == NULL) {
             proj_arg = argv[i];
         }
+    }
+
+    /* D2 crash handler + D1 file log: install for a real windowed run ONLY -- the --shot capture seam
+     * (and --parity, already returned) stay side-effect-free (no stray <app-data>/crash dir, log/sink/
+     * FILE). Crash handler goes in FIRST (before the log) so it protects the log install + the build
+     * line too. NOT literally main()'s first statement: a fault before this point falls back to the OS
+     * default (identical to not-installed, no ntpacker dump) -- acceptable, since the value is catching
+     * interactive-session crashes, and the dev seams must stay clean. Both no-op under
+     * NTPACKER_GUI_HEADLESS and if the app-data dir can't be created; crash install must NOT call nt_log
+     * (see gui_crash_install). --selftest-crash is not a --shot arg, so install still runs for it. */
+    if (!gui_shot_active()) {
+        gui_crash_install();
+        gui_log_file_install();
+#ifndef NTPACKER_GUI_SELFTEST
+        /* D3: if the PREVIOUS run crashed it left a marker -> offer to open the diagnostics root, then
+         * clear it (once). Self-contained startup step: no ordering coupling with the upcoming R
+         * recovery modal. No-op with no marker / headless. Native modal, so before window init is OK.
+         * Disabled in the selftest build (like the recovery journal/notice below): ctest #50 runs THIS
+         * exe NON-headless, so a stale/self-written marker would block ctest on the native modal.
+         * Interactive-only by construction -- the shipped app never sets NTPACKER_GUI_SELFTEST. */
+        gui_crash_report_prompt();
+#endif
+    }
+    nt_log_info("ntpacker-gui: %s build (%s)", nt_engine_build_string(), nt_engine_preset_string());
+
+    /* D2 hidden hand-verification hook: fault NOW (the handler is installed + the log sink is live, so
+     * a real run produces a dump/backtrace + marker AND proves the log tail survived). Self-guards to a
+     * no-op under headless, so it can never fire in CI. */
+    if (selftest_crash) {
+        gui_crash_selftest();
     }
 
     gui_shot_apply_window_size(); /* dev (--shot): request the shot window size before window init */
@@ -1029,55 +816,7 @@ int main(int argc, char *argv[]) {
     });
 
     resolve_exe_dir();
-    char ui_pack_path[1280];
-    (void)snprintf(ui_pack_path, sizeof ui_pack_path, "%s/assets/ntpacker_ui.ntpack", s_exe_dir);
-    s_pack_id = nt_hash32_str("ntpacker_ui");
-    nt_resource_mount(s_pack_id, 100);
-    nt_resource_load_auto(s_pack_id, ui_pack_path);
-
-    s_sprite_vs_handle = nt_resource_request(ASSET_SHADER_ASSETS_SHADERS_SPRITE_VERT, NT_ASSET_SHADER_CODE);
-    s_sprite_fs_handle = nt_resource_request(ASSET_SHADER_ASSETS_SHADERS_SPRITE_FRAG, NT_ASSET_SHADER_CODE);
-    s_text_vs_handle = nt_resource_request(ASSET_SHADER_ASSETS_SHADERS_SLUG_TEXT_VERT, NT_ASSET_SHADER_CODE);
-    s_text_fs_handle = nt_resource_request(ASSET_SHADER_ASSETS_SHADERS_SLUG_TEXT_FRAG, NT_ASSET_SHADER_CODE);
-    s_atlas_handle = nt_resource_request(ASSET_ATLAS_NTPACKER_UI_ATLAS, NT_ASSET_ATLAS);
-    s_atlas_tex_handle = nt_resource_request(ASSET_TEXTURE_NTPACKER_UI_ATLAS_TEX0, NT_ASSET_TEXTURE);
-    s_font_resource = nt_resource_request(ASSET_FONT_NTPACKER_UI_FONT, NT_ASSET_FONT);
-
-    s_sprite_material = nt_material_create(&(nt_material_create_desc_t){
-        .vs = s_sprite_vs_handle,
-        .fs = s_sprite_fs_handle,
-        .textures = {{.name = "u_texture", .resource = s_atlas_tex_handle}},
-        .texture_count = 1,
-        .blend_mode = NT_BLEND_MODE_ALPHA,
-        .depth_test = false,
-        .depth_write = false,
-        .cull_mode = NT_CULL_NONE,
-        .label = "ntpacker_sprite",
-    });
-    s_text_material = nt_material_create(&(nt_material_create_desc_t){
-        .vs = s_text_vs_handle,
-        .fs = s_text_fs_handle,
-        .blend_mode = NT_BLEND_MODE_ALPHA,
-        .depth_test = false,
-        .depth_write = false,
-        .cull_mode = NT_CULL_NONE,
-        .params[0] = {.name = "u_alpha_cutoff", .value = {NT_TEXT_ALPHA_CUTOFF_DEFAULT}},
-        .param_count = 1,
-        .label = "ntpacker_text",
-    });
-
-    nt_ui_set_sprite_material(s_ctx, s_sprite_material);
-    nt_ui_set_text_material(s_ctx, s_text_material);
-
-    s_font = nt_font_create(&(nt_font_create_desc_t){
-        .curve_texture_width = 1024,
-        .curve_texture_height = 512,
-        .band_texture_height = 256,
-        .band_count = 8,
-        .measure_cache_size = 256,
-    });
-
-    nt_resource_set_activate_time_budget(0);
+    gui_bootstrap_init(s_exe_dir);
 
     g_ui_scale = detect_dpi_scale();
     nt_log_info("ntpacker-gui: UI scale %.2f (from system DPI)", (double)g_ui_scale);
@@ -1086,61 +825,82 @@ int main(int argc, char *argv[]) {
     /* editor state + the canvas custom-draw handler (registered outside begin/end) */
     gui_canvas_init(&s_canvas);
     nt_ui_set_custom_handler(s_ctx, gui_canvas_handler, &s_canvas);
-    /* F2-05b-ii-B: crash recovery. The recovery-journal SIDECAR lives at a DETERMINISTIC path under
-     * the exe dir (stable across launches, like pack_session), so a crashed session is recovered on
-     * the next launch WITHOUT a random session id. Disabled in the headless selftest build (which
-     * drives the journal itself, in isolation, and must stay deterministic + file-free). */
+    /* Crash recovery lives in <app-data>/recovery/. Core owns the random
+     * live-slot identity, lock, and scan exclusion. At startup we collect orphaned journals and, if any,
+     * open the R6b startup recovery MODAL to resolve each one (Discard / Save to original / Save As) via the R6a
+     * layer -- the live editor starts FRESH untitled (recovery resolves journals to DISK, never adopts); every
+     * non-resolved orphan is LEFT on disk for next launch. Every step is fail-closed + NON-FATAL: a folder/RNG/scan failure leaves the
+     * editor available, with a warning that crash recovery is unavailable. GATED OUT of the headless
+     * selftest build -- that build runs THIS exe non-headless and drives recovery itself on ISOLATED temp
+     * folders via R6 test seams, so the production scan must never inspect test journals. */
+    /* No migration code: crash recovery is unreleased, so there is no installed base with the old
+     * deterministic exe-dir recovery slot to migrate into this per-session folder. */
 #ifndef NTPACKER_GUI_SELFTEST
-    char recovery_slot[1152];
-    (void)snprintf(recovery_slot, sizeof recovery_slot, "%s/ntpacker_recovery.ntpjournal", s_exe_dir);
-    gui_project_enable_recovery(recovery_slot);
+    gui_project_require_recovery();
+    char rec_root[GUI_PATHS_MAX];
+    char rec_folder[GUI_PATHS_MAX];
+    if (!gui_paths_app_data_root(rec_root, sizeof rec_root)) {
+        gui_project_note_recovery_setup_failure("the application data folder is unavailable");
+    } else {
+        int nf = snprintf(rec_folder, sizeof rec_folder, "%s/recovery", rec_root);
+        if (nf <= 0 || (size_t)nf >= sizeof rec_folder) {
+            gui_project_note_recovery_setup_failure("the recovery directory path is too long");
+        } else if (!gui_paths_ensure_dir(rec_folder)) {
+            gui_project_note_recovery_setup_failure("the recovery directory could not be created");
+        } else {
+            gui_project_enable_recovery(rec_folder);
+            /* R6b: collect orphan journals and open the startup modal. The
+             * live editor stays fresh; recovery resolves only to disk. */
+            gui_recovery_list rlist;
+            /* Screenshot automation cannot dismiss a modal, so it skips the
+             * startup scan without changing recovery ownership. */
+            if (!gui_shot_active() && gui_recovery_collect(&rlist) > 0) {
+                gui_actions_open_recovery(&rlist);
+            }
+        }
+    }
 #endif
-    gui_project_init();
-    /* H/P1-8 fix: TWO distinct startup facets, no longer conflated in one bool.
-     *  - recovery_warn_shown: did EITHER startup recovery warning get shown this launch -- the
-     *    adopted-unsaved-work notice OR the "another window open -> crash recovery is off for this one"
-     *    BUSY notice? Both are STATUS_WARNING that a later terminal default ("Ready...", "Opened %s",
-     *    "project not found") must NOT clobber before the first frame. The busy notice warns that recovery
-     *    is OFF -- silently losing it (finding 1) means a later crash discards work with no prior warning.
-     *  - the actual DATA-SAFETY deferral keys off the DURABLE model predicate
-     *    gui_project_has_recovered_unsaved() (the single source of truth for the condition), read at the
-     *    decision point below -- NOT this drained one-shot notice. The notice is drained here only to
-     *    obtain the warning TEXT. Both stay quiet in the selftest build (no interactive recovery there). */
+    gui_project_init(); /* recovery is resolved to disk by the R6 modal; the live editor always starts fresh */
+    /* Preserve a recovery-unavailable warning across later terminal startup statuses. */
     bool recovery_warn_shown = false;
 #ifndef NTPACKER_GUI_SELFTEST
     {
         char rnotice[256];
-        if (gui_project_take_recovery_notice(rnotice, sizeof rnotice)) {
+        if (gui_project_take_recovery_setup_notice(rnotice, sizeof rnotice)) {
             recovery_warn_shown = true;
-            set_status_ex(STATUS_WARNING, rnotice); /* "Recovered unsaved changes ... Save to keep them." */
-        } else if (gui_project_take_recovery_busy_notice(rnotice, sizeof rnotice)) {
-            recovery_warn_shown = true;             /* fix [1] + finding 1: the BUSY notice must survive too */
-            set_status_ex(STATUS_WARNING, rnotice); /* "Another window open -- crash recovery off." */
+            set_status_ex(STATUS_WARNING, rnotice);
         }
     }
 #endif
 
     /* in-process packing: session .ntpack goes under the exe dir (existing convention) */
-    char pack_session[1152];
+    char pack_session[GUI_PATHS_MAX + 128];
     (void)snprintf(pack_session, sizeof pack_session, "%s/pack_session", s_exe_dir);
-    gui_pack_init(pack_session);
+    const bool pack_work_ready = gui_pack_init(pack_session);
+    if (!pack_work_ready) {
+        set_status_ex(STATUS_ERROR,
+                      "Pack work directory is unavailable or exceeds the supported path limit.");
+    }
 
     /* open a project passed on the command line (errors go to the status bar).
-     * H/P1-8 fix: route the open/defer choice through the PURE gui_startup_decide (single source of truth;
-     * J14 truth-table). `recovered` is the DURABLE model predicate, so a recovered launch DEFERS even when
-     * the arg is stale (DEFER > MISSING -- finding 2). No terminal default status clobbers a recovery
-     * warning that is already up (recovery_warn_shown): "Opened %s" / "project not found" / "Ready..." are
-     * suppressed then. A genuine open ERROR still shows -- see the OPEN case. */
+     * Route the open/defer choice through the PURE gui_startup_decide (single source of truth;
+     * J14 truth-table). A pending R6 modal DEFERS the CLI open even when the arg is stale
+     * (DEFER > MISSING): the modal can
+     * Save-to-original the very file named on the CLI, so opening that file into the live editor behind the
+     * modal would show the STALE pre-crash copy and risk a later Save clobbering the just-recovered state.
+     * Deferring keeps the editor fresh-empty behind the modal (the settled R6b design). No terminal default
+     * status clobbers a recovery warning already up (recovery_warn_shown). A genuine open ERROR still shows. */
     if (proj_arg != NULL) {
         char err[256];
-        switch (gui_startup_decide(true, gui_scan_exists(proj_arg), gui_project_has_recovered_unsaved())) {
+        const bool recovery_pending = s_recovery_open;
+        switch (gui_startup_decide(true, gui_scan_exists(proj_arg), recovery_pending)) {
         case GUI_STARTUP_DEFER:
-            /* Crash-recovery adopted unsaved work at init. Opening the CLI file now would SILENTLY DISCARD it
-             * -- gui_project_open has no dirty prompt (pending_discard + wrap_model + re-checkpoint of the
-             * recovery slot). Defer: keep the recovered model + its slot intact and tell the user to resolve
-             * it first, then open via File>Open (which IS dirty-gated). This arg-specific warning deliberately
-             * replaces the generic recovery notice (both STATUS_WARNING; this one is more actionable). */
-            set_statusf_ex(STATUS_WARNING, "Recovered unsaved changes -- save or discard before opening %s", proj_arg);
+            /* The startup recovery modal is up and can Save-to-original the very file named on the CLI.
+             * Opening it into the live editor now would load the STALE pre-crash copy behind the modal, so a
+             * later Save could clobber the state the user just recovered. Defer: leave the editor fresh-empty
+             * behind the modal (settled R6b design) and tell the user to resolve recovery first, then open via
+             * File>Open. (Pre-R6b this same path fired for an auto-adopted model -- same defer, new cause.) */
+            set_statusf_ex(STATUS_WARNING, "Resolve recovered projects first, then open %s via File > Open", proj_arg);
             break;
         case GUI_STARTUP_MISSING:
             if (!recovery_warn_shown) { /* stale argv -> continue with untitled (F6b); keep any recovery warning */
@@ -1149,21 +909,21 @@ int main(int argc, char *argv[]) {
             break;
         case GUI_STARTUP_OPEN:
             if (gui_project_open(proj_arg, err, sizeof err) == TP_STATUS_OK) {
-                if (!recovery_warn_shown) { /* routine confirmation -> must not clobber the busy "recovery off" warning */
+                if (!recovery_warn_shown) { /* routine confirmation must not clobber the recovery warning */
                     set_statusf("Opened %s", gui_project_display_name());
                 }
             } else {
                 /* A genuine open FAILURE is surfaced even over a recovery warning: it is a concrete,
                  * user-initiated failure the user is actively waiting on (they asked to open THIS file), it
                  * is higher severity (STATUS_ERROR > STATUS_WARNING), and it is rare. Present actionable
-                 * failure wins over the latent "recovery off" warning. */
+                 * failure wins over the latent recovery warning. */
                 set_statusf_ex(STATUS_ERROR, "Open '%s' failed: %s", proj_arg, err);
             }
             break;
         case GUI_STARTUP_IDLE:
             break; /* unreachable with proj_arg != NULL; listed for switch exhaustiveness */
         }
-    } else if (!recovery_warn_shown) {
+    } else if (!recovery_warn_shown && pack_work_ready) {
         set_status("Ready. New project -- add files or a folder to start.");
     }
     /* proj_arg == NULL && recovery_warn_shown: keep the recovery STATUS_WARNING as the first-frame status
@@ -1174,15 +934,12 @@ int main(int argc, char *argv[]) {
 #endif
 
     clamp_selection();
-    nt_log_info("ntpacker-gui: starting (live in-process packing + atlas-page canvas)");
+    nt_log_info("ntpacker-gui: starting (typed session jobs + atlas-page canvas)");
 
     nt_app_run(frame);
 
-    /* The window closed (X / Alt+F4) while a pack/export was still on the worker thread. tp_pack is
-     * non-interruptible (engine limitation), so we cannot abort it -- but instead of blocking the UI
-     * thread in gui_pack_shutdown's bare join (a frozen "not responding" ghost window), keep the OS
-     * message pump alive and poll until the worker lands. Cancel first (export stops between atlases);
-     * the wait is bounded by the pack's remaining time, and gui_pack_shutdown below is then instant. */
+    /* The window closed while a session job was still active. Cancellation is cooperative, so keep
+     * the OS message pump alive and poll until the typed job reaches a terminal state. */
     if (gui_pack_worker_active()) {
         gui_pack_async_cancel();
         while (gui_pack_worker_active()) {
@@ -1193,6 +950,7 @@ int main(int argc, char *argv[]) {
 
     gui_canvas_shutdown(&s_canvas);
     gui_pack_shutdown();
+    gui_rows_shutdown();
     gui_scan_shutdown();
     gui_project_shutdown();
     nt_ui_destroy_context(s_ctx);
@@ -1200,11 +958,7 @@ int main(int argc, char *argv[]) {
     nt_shape_renderer_shutdown();
     nt_text_renderer_shutdown();
     nt_sprite_renderer_shutdown();
-    nt_font_destroy(s_font);
-    nt_font_shutdown();
-    nt_material_destroy(s_sprite_material);
-    nt_material_destroy(s_text_material);
-    nt_material_shutdown();
+    gui_bootstrap_shutdown();
     nt_mem_scratch_shutdown();
     nt_resource_shutdown();
     nt_fs_shutdown();
@@ -1214,7 +968,29 @@ int main(int argc, char *argv[]) {
     nt_gfx_shutdown();
     nt_input_shutdown();
     nt_window_shutdown();
+    gui_log_file_shutdown(); /* unregister the sink + close the file before the engine goes down */
     nt_engine_shutdown();
+    /* Drop the crash marker LAST -- after engine teardown, with nothing left that can fault. Clearing
+     * it earlier would race a teardown fault: the handler is still live during nt_engine_shutdown, so a
+     * crash there would re-create the just-cleared marker -> a false "crashed" next launch. Only a fully
+     * clean run reaches here; remove() on the pre-resolved path is safe post-shutdown. */
+    gui_crash_clear_marker();
     return 0;
 }
 // #endregion
+
+#if defined(_WIN32)
+int main(void) {
+    nt_utf8_argv utf8 = {0};
+    char error[160] = {0};
+    if (!nt_utf8_argv_from_command_line(&utf8, error, sizeof error)) {
+        (void)fprintf(stderr, "ntpacker-gui: invalid Windows command line: %s\n", error);
+        return 2;
+    }
+    const int result = gui_main_utf8(utf8.argc, utf8.argv);
+    nt_utf8_argv_dispose(&utf8);
+    return result;
+}
+#else
+int main(int argc, char *argv[]) { return gui_main_utf8(argc, argv); }
+#endif

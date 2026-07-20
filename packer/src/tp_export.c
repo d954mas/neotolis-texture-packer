@@ -6,6 +6,8 @@
 #include <string.h>
 
 #include "tp_core/tp_project.h"
+#include "tp_core/tp_utf8.h"
+#include "tp_session_internal.h"
 
 /* nt_atlas_shape_t: 0 = RECT (see tp_pack.h shape). Kept as a literal so this
  * TU pulls in no builder header (tp_core stays builder-free, #282). */
@@ -107,17 +109,70 @@ void tp_export_notices_free(tp_export_notices *n) {
 /* output-file enumeration (structured report)                              */
 /* ======================================================================== */
 
-void tp_export_list_page_files(const tp_result *result, const char *out_path_base, tp_export_path_sink sink, void *ud) {
-    if (!result || !out_path_base || !sink) {
-        return;
+tp_status tp_export_output_path(const char *out_path_base, const char *suffix,
+                                char out[TP_IDENTITY_PATH_MAX], tp_error *err) {
+    if (!out_path_base || !suffix || !out) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "export output path requires base, suffix, and output");
     }
+    if (!tp_utf8_is_valid_c_string(out_path_base) || !tp_utf8_is_valid_c_string(suffix)) {
+        out[0] = '\0';
+        return tp_error_set(err, TP_STATUS_INVALID_UTF8,
+                            "export output path must be valid UTF-8");
+    }
+    const int n = snprintf(out, TP_IDENTITY_PATH_MAX, "%s%s", out_path_base, suffix);
+    if (n < 0 || n >= TP_IDENTITY_PATH_MAX) {
+        out[0] = '\0';
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                            "export output path exceeds the %d-byte canonical limit",
+                            TP_IDENTITY_PATH_MAX - 1);
+    }
+    return TP_STATUS_OK;
+}
+
+tp_status tp_export_page_path(const char *out_path_base, int page,
+                              char out[TP_IDENTITY_PATH_MAX], tp_error *err) {
+    if (page < 0) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "export page index must be non-negative");
+    }
+    char suffix[32];
+    const int n = snprintf(suffix, sizeof suffix, "-%d.png", page);
+    if (n < 0 || (size_t)n >= sizeof suffix) {
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                            "export page suffix exceeds the supported limit");
+    }
+    return tp_export_output_path(out_path_base, suffix, out, err);
+}
+
+tp_status tp_export_list_page_files(const tp_result *result, const char *out_path_base,
+                                    tp_export_path_sink sink, void *ud, tp_error *err) {
+    if (!result || !out_path_base || !sink) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "page output listing requires result, base, and sink");
+    }
+    if (result->page_count < 0) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "page output listing received a negative page count");
+    }
+    /* Preflight the complete set so callers never observe a valid prefix followed
+     * by a hidden overflow. */
     for (int p = 0; p < result->page_count; p++) {
-        char path[1024];
-        int n = snprintf(path, sizeof path, "%s-%d.png", out_path_base, p);
-        if (n > 0 && (size_t)n < sizeof path) {
-            sink(ud, path);
+        char path[TP_IDENTITY_PATH_MAX];
+        tp_status st = tp_export_page_path(out_path_base, p, path, err);
+        if (st != TP_STATUS_OK) {
+            return st;
         }
     }
+    for (int p = 0; p < result->page_count; p++) {
+        char path[TP_IDENTITY_PATH_MAX];
+        tp_status st = tp_export_page_path(out_path_base, p, path, err);
+        if (st != TP_STATUS_OK) {
+            return st;
+        }
+        sink(ud, path);
+    }
+    return TP_STATUS_OK;
 }
 
 /* ======================================================================== */
@@ -207,8 +262,30 @@ static const tp_exporter *const g_builtins[] = {&g_json_neotolis, &g_defold};
 static const tp_exporter *g_registered[TP_REGISTERED_MAX];
 static int g_registered_count;
 
+tp_status tp_exporter_id_validate(const char *id, tp_error *err) {
+    if (!id || id[0] == '\0') {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "exporter id must be non-empty");
+    }
+    size_t length = 0U;
+    while (length < TP_EXPORTER_ID_MAX && id[length] != '\0') {
+        length++;
+    }
+    if (length == TP_EXPORTER_ID_MAX) {
+        return tp_error_set(
+            err, TP_STATUS_OUT_OF_BOUNDS,
+            "exporter id exceeds the %d-byte canonical limit",
+            TP_EXPORTER_ID_MAX - 1);
+    }
+    if (!tp_utf8_is_valid_c_string(id)) {
+        return tp_error_set(err, TP_STATUS_INVALID_UTF8,
+                            "exporter id must be valid UTF-8");
+    }
+    return TP_STATUS_OK;
+}
+
 const tp_exporter *tp_exporter_find(const char *id) {
-    if (!id) {
+    if (tp_exporter_id_validate(id, NULL) != TP_STATUS_OK) {
         return NULL;
     }
     for (int i = 0; i < TP_BUILTIN_COUNT; i++) {
@@ -239,6 +316,10 @@ const tp_exporter *tp_exporter_at(int index) {
 tp_status tp_exporter_register(const tp_exporter *e) {
     if (!e || !e->id || !e->write) {
         return TP_STATUS_INVALID_ARGUMENT;
+    }
+    const tp_status id_status = tp_exporter_id_validate(e->id, NULL);
+    if (id_status != TP_STATUS_OK) {
+        return id_status;
     }
     if (tp_exporter_find(e->id)) {
         return TP_STATUS_INVALID_ARGUMENT; /* duplicate id */
@@ -344,4 +425,25 @@ tp_status tp_export_predict_loss(const struct tp_project *project, int atlas_ind
     }
 #undef PREDICT_ADD
     return TP_STATUS_OK;
+}
+
+tp_status tp_export_predict_loss_snapshot(const tp_session_snapshot *snapshot,
+                                          tp_id128 atlas_id,
+                                          const tp_export_caps *caps,
+                                          const char *target_id,
+                                          const tp_export_prepared *opt_prep,
+                                          tp_export_notices *out,
+                                          tp_error *err) {
+    if (!snapshot) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "export loss snapshot requires snapshot");
+    }
+    const tp_project *project = tp_session_snapshot_project_internal(snapshot);
+    const int atlas_index = tp_project_find_atlas_by_id(project, atlas_id);
+    if (atlas_index < 0) {
+        return tp_error_set(err, TP_STATUS_NOT_FOUND,
+                            "export loss atlas id was not found");
+    }
+    return tp_export_predict_loss(project, atlas_index, caps, target_id,
+                                  opt_prep, out, err);
 }

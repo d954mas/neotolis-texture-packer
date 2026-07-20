@@ -13,8 +13,27 @@
 #include "cli_exit.h"
 #include "cli_out.h"
 #include "ntpacker_version.h"
+#if defined(_WIN32)
+#include "nt_utf8_argv.h"
+#endif
 #include "tp_core/tp_export.h"
 #include "tp_core/tp_project.h"
+
+enum {
+    CLI_HELP_SCHEMA = 1,
+    CLI_MANIFEST_SCHEMA = 2,
+    CLI_MUTATION_APPLY_SCHEMA = 1,
+    CLI_MUTATION_DRY_RUN_SCHEMA = 2,
+};
+
+static const char *const HELP_COMMANDS[] = {
+    "pack", "export", "inspect", "validate", "new", "add", "remove",
+    "set", "sprite", "anim", "target", "atlas", "version", "help",
+};
+
+static const char *const HELP_GLOBAL_OPTIONS[] = {
+    "--json", "--quiet", "--strict", "--dry-run", "--help", "--version",
+};
 
 static void indent(cli_sb *sb, int depth) {
     for (int i = 0; i < depth; i++) {
@@ -54,7 +73,9 @@ static void build_manifest(cli_sb *sb) {
     cli_sb_str(sb, "{\n");
     indent(sb, 1);
     cli_sb_json_str(sb, "schema");
-    cli_sb_str(sb, ": 1,\n");
+    cli_sb_str(sb, ": ");
+    cli_sb_int(sb, CLI_MANIFEST_SCHEMA);
+    cli_sb_str(sb, ",\n");
     indent(sb, 1);
     cli_sb_json_str(sb, "app_version");
     cli_sb_str(sb, ": ");
@@ -78,23 +99,49 @@ static void build_manifest(cli_sb *sb) {
     cli_sb_str(sb, ",\n");
     indent(sb, 2);
     cli_sb_json_str(sb, "validate");
-    cli_sb_str(sb, ": 1,\n");
+    cli_sb_str(sb, ": ");
+    cli_sb_int(sb, CLI_VALIDATE_SCHEMA);
+    cli_sb_str(sb, ",\n");
     indent(sb, 2);
     cli_sb_json_str(sb, "pack");
     cli_sb_str(sb, ": 1,\n");
-    /* B4 mutation verbs: each emits the shared {ok,verb,count} payload (schema 1).
-     * The `anim` VALUE here is that mutation-payload schema; `anim list` is a QUERY
-     * whose payload shares inspect's query schema (CLI_INSPECT_SCHEMA), carried in
-     * its own `schema` field. */
+    /* B4 mutation verbs have distinct apply and dry-run payloads. `anim list` is
+     * a query whose payload shares inspect's schema and is advertised separately. */
     static const char *const mut_verbs[] = {"new", "add", "remove", "set", "sprite", "anim", "target", "atlas"};
     for (int i = 0; i < (int)(sizeof mut_verbs / sizeof mut_verbs[0]); i++) {
         indent(sb, 2);
         cli_sb_json_str(sb, mut_verbs[i]);
-        cli_sb_str(sb, ": 1,\n");
+        cli_sb_str(sb, ": {\n");
+        indent(sb, 3);
+        cli_sb_json_str(sb, "apply");
+        cli_sb_str(sb, ": ");
+        cli_sb_int(sb, CLI_MUTATION_APPLY_SCHEMA);
+        cli_sb_str(sb, ",\n");
+        indent(sb, 3);
+        cli_sb_json_str(sb, "dry_run");
+        cli_sb_str(sb, ": ");
+        cli_sb_int(sb, CLI_MUTATION_DRY_RUN_SCHEMA);
+        if (strcmp(mut_verbs[i], "anim") == 0) {
+            cli_sb_str(sb, ",\n");
+            indent(sb, 3);
+            cli_sb_json_str(sb, "list");
+            cli_sb_str(sb, ": ");
+            cli_sb_int(sb, CLI_INSPECT_SCHEMA);
+        }
+        cli_sb_str(sb, "\n");
+        indent(sb, 2);
+        cli_sb_str(sb, "},\n");
     }
     indent(sb, 2);
+    cli_sb_json_str(sb, "help");
+    cli_sb_str(sb, ": ");
+    cli_sb_int(sb, CLI_HELP_SCHEMA);
+    cli_sb_str(sb, ",\n");
+    indent(sb, 2);
     cli_sb_json_str(sb, "version");
-    cli_sb_str(sb, ": 1\n");
+    cli_sb_str(sb, ": ");
+    cli_sb_int(sb, CLI_MANIFEST_SCHEMA);
+    cli_sb_str(sb, "\n");
     indent(sb, 1);
     cli_sb_str(sb, "},\n");
 
@@ -155,6 +202,8 @@ static void build_manifest(cli_sb *sb) {
     cli_sb_str(sb, "}");
 }
 
+static void print_usage(FILE *out);
+
 static int cmd_version(bool json) {
     if (!json) {
         (void)printf("ntpacker %s\n", NTPACKER_VERSION);
@@ -165,6 +214,90 @@ static int cmd_version(bool json) {
     if (sb.oom) {
         cli_sb_free(&sb);
         cli_emit_error(true, false, "oom", "out of memory building version manifest");
+        return CLI_EXIT_INTERNAL;
+    }
+    cli_out_stdout(&sb);
+    cli_sb_free(&sb);
+    return CLI_EXIT_OK;
+}
+
+static void emit_string_array(cli_sb *sb, const char *const *items,
+                              size_t count) {
+    cli_sb_str(sb, "[\n");
+    for (size_t i = 0U; i < count; ++i) {
+        indent(sb, 2);
+        cli_sb_json_str(sb, items[i]);
+        cli_sb_str(sb, i + 1U < count ? ",\n" : "\n");
+    }
+    indent(sb, 1);
+    cli_sb_putc(sb, ']');
+}
+
+static void build_help(cli_sb *sb) {
+    static const struct {
+        const char *id;
+        int code;
+    } exit_codes[] = {
+        {"ok", CLI_EXIT_OK},
+        {"internal", CLI_EXIT_INTERNAL},
+        {"usage", CLI_EXIT_USAGE},
+        {"project", CLI_EXIT_PROJECT},
+        {"pack", CLI_EXIT_PACK},
+        {"export", CLI_EXIT_EXPORT},
+        {"partial", CLI_EXIT_PARTIAL},
+        {"validate", CLI_EXIT_VALIDATE},
+        {"file_io", CLI_EXIT_FILE_IO},
+    };
+    cli_sb_str(sb, "{\n");
+    indent(sb, 1);
+    cli_sb_json_str(sb, "schema");
+    cli_sb_str(sb, ": ");
+    cli_sb_int(sb, CLI_HELP_SCHEMA);
+    cli_sb_str(sb, ",\n");
+    indent(sb, 1);
+    cli_sb_json_str(sb, "usage");
+    cli_sb_str(sb, ": ");
+    cli_sb_json_str(sb, "ntpacker <command> [options]");
+    cli_sb_str(sb, ",\n");
+    indent(sb, 1);
+    cli_sb_json_str(sb, "commands");
+    cli_sb_str(sb, ": ");
+    emit_string_array(sb, HELP_COMMANDS,
+                      sizeof HELP_COMMANDS / sizeof HELP_COMMANDS[0]);
+    cli_sb_str(sb, ",\n");
+    indent(sb, 1);
+    cli_sb_json_str(sb, "global_options");
+    cli_sb_str(sb, ": ");
+    emit_string_array(sb, HELP_GLOBAL_OPTIONS,
+                      sizeof HELP_GLOBAL_OPTIONS /
+                          sizeof HELP_GLOBAL_OPTIONS[0]);
+    cli_sb_str(sb, ",\n");
+    indent(sb, 1);
+    cli_sb_json_str(sb, "exit_codes");
+    cli_sb_str(sb, ": {\n");
+    for (size_t i = 0U; i < sizeof exit_codes / sizeof exit_codes[0]; ++i) {
+        indent(sb, 2);
+        cli_sb_json_str(sb, exit_codes[i].id);
+        cli_sb_str(sb, ": ");
+        cli_sb_int(sb, exit_codes[i].code);
+        cli_sb_str(sb, i + 1U < sizeof exit_codes / sizeof exit_codes[0]
+                           ? ",\n"
+                           : "\n");
+    }
+    indent(sb, 1);
+    cli_sb_str(sb, "}\n}");
+}
+
+static int cmd_help(bool json) {
+    if (!json) {
+        print_usage(stdout);
+        return CLI_EXIT_OK;
+    }
+    cli_sb sb = {0};
+    build_help(&sb);
+    if (sb.oom) {
+        cli_sb_free(&sb);
+        cli_emit_error(true, false, "oom", "out of memory building help payload");
         return CLI_EXIT_INTERNAL;
     }
     cli_out_stdout(&sb);
@@ -188,7 +321,7 @@ static void print_usage(FILE *out) {
                   "  help               Show this help\n"
                   "\n"
                   "Editing (wave 2 -- load -> mutate -> save; --json emits {ok,verb,count}):\n"
-                  "  add <p> <atlas> <path>...            Add image/folder source(s)\n"
+                  "  add <p> <atlas> <path>... [--kind file|folder]  Add source(s); kind is required offline\n"
                   "  remove <p> <atlas> <source>          Remove a source\n"
                   "  set <p> <atlas> <key>=<value>...     Set atlas knobs (max_size, padding, ...)\n"
                   "  sprite set <p> <atlas> <key> <field>=<value>...   Per-sprite override (field=inherit clears)\n"
@@ -201,8 +334,10 @@ static void print_usage(FILE *out) {
                   "  --atlas <name>     Only pack this atlas (unknown name -> usage error)\n"
                   "  --target <id>      Only export targets with this exporter id\n"
                   "  --out-dir <dir>    Re-root RELATIVE target out_paths under <dir> (vs the project dir)\n"
-                  "  --dry-run          Report what pack WOULD do (pages, would_write, predicted\n"
-                  "                     losses) and write NO files\n"
+                  "\n"
+                  "Pack and mutation preview option:\n"
+                  "  --dry-run          Preview pack or mutation commands without writes; not valid for\n"
+                  "                     the read-only anim list query\n"
                   "\n"
                   "anim add-frame option:\n"
                   "  --at <N>           Insert the frame at index N (default: append)\n"
@@ -215,11 +350,11 @@ static void print_usage(FILE *out) {
                   "  --version          Print the version\n"
                   "\n"
                   "Exit codes: 0 ok, 1 internal, 2 usage, 3 project, 4 pack, 5 export,\n"
-                  "            6 partial, 7 validate(--strict).\n",
+                  "            6 partial, 7 validate(--strict), 8 file I/O; 9+ reserved.\n",
                   NTPACKER_VERSION);
 }
 
-int main(int argc, char **argv) {
+static int ntpacker_main_utf8(int argc, char **argv) {
     /* BLOCKER-3: pin dot-decimal float formatting for every payload, before any
      * output. tp_core's %.9g writers and the CLI's cli_sb_num both depend on it. */
     (void)setlocale(LC_NUMERIC, "C");
@@ -245,11 +380,12 @@ int main(int argc, char **argv) {
     bool want_help = false;
     bool want_version = false;
     bool strict = false;
-    bool dry_run = false;           /* pack-only; rejected for other verbs below */
+    bool dry_run = false;           /* pack/export and mutation preview */
     const char *opt_atlas = NULL;   /* pack-only value flags (rejected elsewhere below) */
     const char *opt_target = NULL;
     const char *opt_out_dir = NULL;
     const char *opt_at = NULL;    /* anim add-frame only (rejected elsewhere below) */
+    const char *opt_kind = NULL;  /* add-only offline source classification */
     const char *positionals[128]; /* verb + its operands; large enough for many sources/frames/keys */
     int npos = 0;
 
@@ -263,11 +399,11 @@ int main(int argc, char **argv) {
             continue;
         }
         if (strcmp(a, "--dry-run") == 0) {
-            dry_run = true; /* pack-only; rejected for other verbs below */
+            dry_run = true;
             continue;
         }
         if (strcmp(a, "--atlas") == 0 || strcmp(a, "--target") == 0 || strcmp(a, "--out-dir") == 0 ||
-            strcmp(a, "--at") == 0) {
+            strcmp(a, "--at") == 0 || strcmp(a, "--kind") == 0) {
             /* value flags: consume the next token (each rejected for the wrong verb below). */
             if (i + 1 >= argc) {
                 cli_emit_error(json, quiet, "usage", "option '%s' needs a value; try 'ntpacker help'", a);
@@ -280,8 +416,10 @@ int main(int argc, char **argv) {
                 opt_target = val;
             } else if (strcmp(a, "--out-dir") == 0) {
                 opt_out_dir = val;
-            } else {
+            } else if (strcmp(a, "--at") == 0) {
                 opt_at = val;
+            } else {
+                opt_kind = val;
             }
             continue;
         }
@@ -310,8 +448,7 @@ int main(int argc, char **argv) {
         return cmd_version(json);
     }
     if (want_help) {
-        print_usage(stdout);
-        return CLI_EXIT_OK;
+        return cmd_help(json);
     }
     if (npos == 0) {
         /* No command is a usage error (stderr, exit 2) -- NOT the help payload;
@@ -322,9 +459,16 @@ int main(int argc, char **argv) {
     }
     const char *verb = positionals[0];
     const bool is_pack = (strcmp(verb, "pack") == 0 || strcmp(verb, "export") == 0);
-    /* pack-only flags are a usage error on any other verb (mirrors --strict). */
-    if (!is_pack && (opt_atlas || opt_target || opt_out_dir || dry_run)) {
-        cli_emit_error(json, quiet, "usage", "--atlas/--target/--out-dir/--dry-run are only valid for pack");
+    const bool is_mutation = strcmp(verb, "new") == 0 || strcmp(verb, "add") == 0 ||
+                             strcmp(verb, "remove") == 0 || strcmp(verb, "set") == 0 ||
+                             strcmp(verb, "sprite") == 0 || strcmp(verb, "anim") == 0 ||
+                             strcmp(verb, "target") == 0 || strcmp(verb, "atlas") == 0;
+    if (!is_pack && (opt_atlas || opt_target || opt_out_dir)) {
+        cli_emit_error(json, quiet, "usage", "--atlas/--target/--out-dir are only valid for pack");
+        return CLI_EXIT_USAGE;
+    }
+    if (dry_run && !is_pack && !is_mutation) {
+        cli_emit_error(json, quiet, "usage", "--dry-run is only valid for pack or mutation commands");
         return CLI_EXIT_USAGE;
     }
     /* --at is anim-add-frame-only on any verb. */
@@ -332,12 +476,15 @@ int main(int argc, char **argv) {
         cli_emit_error(json, quiet, "usage", "--at is only valid for 'anim add-frame'");
         return CLI_EXIT_USAGE;
     }
+    if (opt_kind && strcmp(verb, "add") != 0) {
+        cli_emit_error(json, quiet, "usage", "--kind is only valid for 'add'");
+        return CLI_EXIT_USAGE;
+    }
     if (strcmp(verb, "version") == 0) {
         return cmd_version(json);
     }
     if (strcmp(verb, "help") == 0) {
-        print_usage(stdout);
-        return CLI_EXIT_OK;
+        return cmd_help(json);
     }
     if (is_pack) {
         if (strict) {
@@ -373,8 +520,35 @@ int main(int argc, char **argv) {
             cli_emit_error(json, quiet, "usage", "--strict is only valid for validate");
             return CLI_EXIT_USAGE;
         }
-        return cmd_mutate(npos, positionals, opt_at, json, quiet);
+        return cmd_mutate(npos, positionals, opt_at, opt_kind, dry_run, json, quiet);
     }
     cli_emit_error(json, quiet, "usage", "unknown command '%s'; try 'ntpacker help'", verb);
     return CLI_EXIT_USAGE;
 }
+
+#if defined(_WIN32)
+static bool narrow_argv_has_flag(int argc, char **argv, const char *flag) {
+    for (int i = 1; i < argc; ++i) {
+        if (argv[i] && strcmp(argv[i], flag) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+int main(int argc, char **argv) {
+    nt_utf8_argv utf8 = {0};
+    char error[160] = {0};
+    if (!nt_utf8_argv_from_command_line(&utf8, error, sizeof error)) {
+        const bool json = narrow_argv_has_flag(argc, argv, "--json");
+        const bool quiet = narrow_argv_has_flag(argc, argv, "--quiet");
+        cli_emit_error(json, quiet, "invalid_utf16", "%s", error);
+        return CLI_EXIT_USAGE;
+    }
+    const int result = ntpacker_main_utf8(utf8.argc, utf8.argv);
+    nt_utf8_argv_dispose(&utf8);
+    return result;
+}
+#else
+int main(int argc, char **argv) { return ntpacker_main_utf8(argc, argv); }
+#endif

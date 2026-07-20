@@ -2,15 +2,15 @@
 #define TP_CORE_TP_ID_H
 
 /*
- * 128-bit runtime ID primitive + injectable RNG seam (F1-00 task 2), promoted
- * from the accepted C0-01 `tp_c0_id` contract (packer/spike/c0/src/tp_c0_id.c).
+ * 128-bit runtime ID primitive + injectable RNG seam implementing the
+ * structural-ID contract in master spec §5.4.
  *
- * SCOPE / F1-00 <-> F1-01 BOUNDARY (architecture decision, lead review):
- *   F1-00 introduces ONLY what an unsaved-session identity needs: the 16-byte
+ * SCOPE BOUNDARY (architecture decision, lead review):
+ *   This introduces ONLY what an unsaved-session identity needs: the 16-byte
  *   value, nil/equality, and random generation through an injectable RNG seam.
- *   F1-01 owns the FULL id128 surface and EXTENDS this same header/TU -- it adds
+ *   A later extension owns the FULL id128 surface and EXTENDS this same header/TU -- it adds
  *   parse/format (the "atlas_/source_/..." shape IDs), the versioned stable hash
- *   (tp_hash128 / sprite_id), and the persistent schema-v2 ID fields. F1-01 must
+ *   (tp_hash128 / sprite_id), and the persistent schema-v2 ID fields. It must
  *   NOT redefine `tp_id128` or the `tp_rng` seam; it builds on them. Keeping this
  *   minimal here is deliberate so the two packets do not duplicate the primitive.
  *
@@ -66,11 +66,11 @@ tp_status tp_id128_generate(const tp_rng *rng, tp_id128 *out, tp_error *err);
 /* 64-bit bucket hash for in-memory maps/sets (NOT the persistent ID). */
 uint64_t tp_id128_bucket(tp_id128 id);
 
-/* ----- shape ID (F1-01, promoted from C0-01 tp_c0_id) -------------------- *
+/* ----- shape ID -------------------- *
  * The entity kind carried by the textual prefix. Binary IDs do not embed the
  * kind -- the storing field decides it -- so the prefix is a presentation and
  * validation affordance; the persistent binary ID is the 16 bytes. SOURCE is
- * kept in the enum (append-only) for F1-02 even though F1-01 attaches no source
+ * kept in the enum (append-only) for later use, though it attaches no source
  * id field yet. */
 typedef enum tp_id_kind {
     TP_ID_KIND_INVALID = 0,
@@ -119,8 +119,8 @@ tp_id128 tp_hasher_final(tp_hasher h);
 /* sprite_id = stable_hash("sid1" tag + source_id bytes + 0x00 + normalized_key).
  * The "sid1" algorithm tag is versioned: changing the mix is a visible change. A
  * logical/export rename does not change this; a source-local key change does.
- * PROMOTED-BUT-UNUSED in F1-01: it needs a real source_id, introduced in F1-02
- * (tagged sources) and wired into sprite resolution in F1-03. */
+ * PROMOTED-BUT-UNUSED: it needs a real source_id, introduced with tagged sources
+ * and later wired into sprite resolution. */
 tp_id128 tp_sprite_id(tp_id128 source_id, const char *normalized_key);
 
 #ifdef __cplusplus

@@ -4,15 +4,13 @@
 /* Shared render kit for the ntpacker GUI: the per-frame style rescale (apply_ui_scale), the generic
  * button/icon/label/checkbox widgets, the inline rename field, the panel-width layout math, the
  * text-measure/truncation + per-frame row-tooltip helpers, the baked icon-atlas region refs, and the
- * D4-transform-to-string formatter shared by the canvas readout and the settings "Packed" row. Split
- * out of main.c (GUI decomposition step 1) as a pure move -- no behavior change. Include discipline:
- * widgets -> gui_defs + gui_state (+ engine ui headers); it must never include a sibling view/actions/
- * rows header.
+ * D4-transform-to-string formatter shared by the canvas readout and the settings "Packed" row.
+ * Include discipline: widgets -> gui_defs + gui_state (+ engine ui headers); it must never include a
+ * sibling view/actions/rows header.
  *
- * Icon refs (step 4): the ref VALUES are resolved once by main.c's bind_icon_ref/try_bind_resources
+ * Icon refs: the ref VALUES are resolved once by main.c's bind_icon_ref/try_bind_resources
  * (they read init-only engine resource handles, so binding stays shell territory), but the refs
- * themselves are read by every view TU, so the refs live here per the plan's original §2 assignment
- * (step 1 deferred this "for now"; step 4 completes it). */
+ * themselves are read by every view TU, so the refs live here per the plan's original §2 assignment. */
 
 #include <stdbool.h>
 #include <stddef.h>

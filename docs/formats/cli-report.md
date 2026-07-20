@@ -16,7 +16,19 @@ Errors with `--json` are also stdout payloads:
 `{"schema":1,"error":{"id":"<tp_status_id>","message":"..."}}`; the exit code
 is the authoritative machine signal (see `cli_exit.h`: 0 ok · 1 internal ·
 2 usage · 3 project load/parse · 4 pack failure · 5 export failure · 6 partial ·
-7 validate --strict findings · 8+ reserved).
+7 validate --strict findings · 8 typed pre-publication file I/O failure ·
+9+ reserved).
+
+`help --json` and `--help --json` emit the same schema-1 object. Its `commands`
+and `global_options` arrays are the machine-readable command catalog, and its
+`exit_codes` object freezes the symbolic mapping above. The options catalog
+includes `--dry-run`; it previews `pack` and mutation commands, while read-only
+queries such as `anim list` reject it with structured `usage` and exit 2.
+
+`version --json` emits manifest schema 2. Query verbs map directly to their
+payload schema number. Each mutation family maps to a variant object:
+`{"apply":1,"dry_run":2}`. `anim` additionally advertises `"list":4` because
+`anim list` is a query sharing the inspect schema, not a mutation response.
 
 ## `pack` report (schema 1)
 
@@ -75,6 +87,9 @@ is the authoritative machine signal (see `cli_exit.h`: 0 ok · 1 internal ·
 - `out_path` is the resolved absolute output **base**: each exporter appends
   its own extension(s) (`<base>.json`, `<base>-<page>.png`, Defold
   `<base>.tpinfo` + sibling `.tpatlas`).
+- A successfully skipped atlas retains the human-readable `note` and adds a
+  structured atlas-level `notices` entry with `{id, atlas, message}`. Stable
+  skip ids are `no_usable_images` and `no_enabled_targets`; both exit 0.
 
 ## `pack` flags
 
@@ -88,16 +103,59 @@ is the authoritative machine signal (see `cli_exit.h`: 0 ok · 1 internal ·
 - `--dry-run` (B3b) — same report, no files written, predicted degradations
   included.
 
-## `inspect` (schema 2) / `validate` (schema 1)
+## `inspect` (schema 4) / `validate` (schema 2)
 
-Schema 2 (F1-01): each animation object carries an opaque structural `id` (shape-ID)
-plus a human `name`; `name` is the selector every mutation verb uses (`anim <name>`,
-id-based selectors arrive in F1-03). The `anim list --json` query shares this schema
-(same animation shape). An operator branches on the `schema` number to detect the change.
+Schema 4 reports a canonical-v5 project: tagged source objects carry stable
+structural IDs, sprite overrides and animation frames use `{source,key}`
+identity, and each animation carries both opaque structural `id` and human
+`name`. The `anim list --json` query shares this schema and animation shape. An
+operator branches on the payload `schema` number; project-file schema is
+reported separately as `project.schema_version`. Because `anim list` is a
+read-only query, `--dry-run` is not valid for it and yields a structured
+`usage` error with exit 2.
 
-See `apps/cli/cli_inspect.c` / `cli_validate.c` headers; `validate` findings:
-`{severity: error|warning, code: <stable token>, message, atlas?, sprite?,
-anim?, frame?, target?}` with `counts:{error,warning}`. Stable finding codes:
+See `apps/cli/cli_inspect.c` / `cli_validate.c` headers. Validate schema 2 keeps
+exact (non-truncated) contexts and adds stable structural identities:
+`{severity, code, message, atlas?, atlas_id?, source?, source_id?, sprite?,
+anim?, animation_id?, frame?, target?, target_id?}` with
+`counts:{error,warning}`. Examples of stable finding codes:
 `missing_source, empty_atlas, dangling_anim_frame, duplicate_export_key,
 export_name_collision, unknown_exporter, setting_out_of_range,
-input_build_failed`.
+input_build_failed`. The complete append-only vocabulary is defined by
+`TP_VALIDATION_CODE_*` in `packer/include/tp_core/tp_validate.h`; adapters emit
+those tokens verbatim.
+
+## Mutation success (schema 1)
+
+Normal success is
+`{"schema":1,"ok":true,"verb":"<verb>","count":N}`. A successful
+mutation may additionally contain `notices`. In particular:
+
+```json
+{
+  "schema": 1,
+  "ok": true,
+  "verb": "set",
+  "count": 1,
+  "notices": [{
+    "id": "file_durability_uncertain",
+    "message": "project file was published, but storage durability could not be confirmed",
+    "status": "file_durability_uncertain"
+  }]
+}
+```
+
+This is not a failed or absent write: the canonical project bytes were
+published and are authoritative. Clients must surface the notice and must not
+retry as if no write occurred. `recovery_degraded` is likewise a successful
+Save notice about local crash-recovery authority, not project-file publication.
+
+Mutation `--dry-run --json` uses schema 2 instead of the apply schema above. It
+reports `command`, `dry_run`, `would_change`, `operation_count`,
+`revision_before`, `revision_after`, `affected_ids`, `generated_ids`, and
+structured `notices`. Machine clients select this decoder from the mutation
+verb's `dry_run` entry in `version --json`.
+
+For `new --dry-run`, `generated_ids` is empty and the append-only field
+`generated_ids_semantics` is `"assigned_on_apply"`. The preview therefore does
+not expose candidate IDs that a later apply cannot reuse.

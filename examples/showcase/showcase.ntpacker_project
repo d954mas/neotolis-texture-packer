@@ -1,18 +1,24 @@
 {
-  "version": 1,
+  "version": 5,
   "atlases": [
     {
+      "id": "atlas_10000000000000000000000000000001",
       "name": "animals",
       "sources": [
-        "animals"
+        {
+          "id": "source_10000000000000000000000000000002",
+          "path": "animals"
+        }
       ],
       "targets": [
         {
           "exporter_id": "json-neotolis",
-          "out_path": "out/animals.json"
+          "id": "target_10000000000000000000000000000003",
+          "out_path": "out/animals"
         },
         {
           "exporter_id": "defold",
+          "id": "target_10000000000000000000000000000004",
           "out_path": "out/animals-defold"
         }
       ]

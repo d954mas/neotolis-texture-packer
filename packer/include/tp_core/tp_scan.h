@@ -8,14 +8,18 @@
  * parsing here, but plain FS access is fine -- see plan risk R6). */
 
 #include <stdbool.h>
+#include <stdint.h>
+
+#include "tp_core/tp_error.h"
+#include "tp_core/tp_srckey.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 typedef struct tp_scan_entry {
-    char rel[256];   /* path relative to the scanned root, '/'-normalized (e.g. "tank/walk_01.png") */
-    char abs[512];   /* absolute path on disk */
+    char *rel;       /* malloc-owned path relative to root, '/'-normalized */
+    char *abs;       /* malloc-owned absolute path on disk */
     long long size;  /* file size in bytes */
     long long mtime; /* platform last-write time (opaque; compare for equality only) */
 } tp_scan_entry;
@@ -25,15 +29,24 @@ typedef struct tp_scan_result {
     int count;
 } tp_scan_result;
 
-/* Recursive listing of image files (.png/.jpg/.jpeg/.bmp/.tga, case-insensitive) under
- * `abs_dir`, sorted by rel path (byte-wise strcmp, not natural order). *out is always
- * fully written (zeroed first) -- a missing/inaccessible dir, a NULL/empty abs_dir, or
- * an OOM mid-walk all yield count == 0 rather than a partial result. Free with
+/* Recursive listing of image files (.png/.jpg/.jpeg/.bmp/.tga, case-insensitive)
+ * under `abs_dir`, sorted by rel path (byte-wise strcmp, not natural order).
+ * Each entry owns exact-size rel/abs strings; rel is bounded by TP_SRCKEY_MAX and
+ * abs by TP_IDENTITY_PATH_MAX. *out is zeroed first and remains empty on EVERY
+ * failure (bad input, missing/inaccessible/read-failed directory, overflow, or
+ * OOM), so callers never consume a partial scan. Free successful results with
  * tp_scan_free(). */
-void tp_scan_dir(const char *abs_dir, tp_scan_result *out);
+tp_status tp_scan_dir(const char *abs_dir, tp_scan_result *out, tp_error *err);
 
 /* Frees entries and zeroes *out. Safe to call on an already-empty result; safe on NULL. */
 void tp_scan_free(tp_scan_result *out);
+
+/* Streaming counterpart for bounded-memory consumers such as startup recovery. Calls `visit`
+ * once per matching regular filename and includes its size so consumers can bound total I/O
+ * before opening it. Owns no per-entry heap memory. Returning false from the callback stops
+ * enumeration successfully. Directory-open/argument failure returns false. */
+typedef bool (*tp_scan_name_visitor)(void *ctx, const char *name, uint64_t size);
+bool tp_scan_visit_dir(const char *dir, const char *suffix, tp_scan_name_visitor visit, void *ctx);
 
 /* True if abs points at an existing directory (distinguishes a folder source from a file
  * source without trusting the extension). False for files, missing paths, and NULL. */
@@ -41,6 +54,12 @@ bool tp_scan_is_dir(const char *abs);
 
 /* True if `abs` exists on disk (file OR directory). */
 bool tp_scan_exists(const char *abs);
+
+/* Stats one regular file through the same UTF-8 filesystem boundary used by
+ * directory scanning. Size and platform mtime are opaque comparison values;
+ * either output may be NULL. Directories/special/missing paths return false. */
+bool tp_scan_file_stat(const char *abs, long long *out_size,
+                       long long *out_mtime);
 
 /* mkdir -p of `dir` (every missing ancestor + `dir` itself). Best-effort: an
  * already-existing path or a permission error is ignored (the caller surfaces the

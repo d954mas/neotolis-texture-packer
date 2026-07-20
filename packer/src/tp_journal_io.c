@@ -1,6 +1,6 @@
 /*
- * F2-04 journal I/O seams: an in-memory backing store (deterministic; drives the
- * fault suite) and a real file backing store (production durability, F2-05). All
+ * Journal I/O seams: an in-memory backing store (deterministic; drives the
+ * fault suite) and a real file backing store (production durability). All
  * durability the journal core needs goes through the tp_journal_io vtable, so the
  * core is testable on crafted/corrupt bytes without real-fs flakiness. Every path
  * closes its resources (no fd/buffer leak under LSan).
@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "tp_fs_internal.h"
 #include "tp_journal_internal.h"
 
 #if defined(_WIN32)
@@ -26,12 +27,18 @@
 /* Windows `long` is 32-bit: ftell/fseek cap at 2 GB. Use the 64-bit CRT variants. */
 #define TP_FSEEK64(fp, off, whence) _fseeki64((fp), (off), (whence))
 #define TP_FTELL64(fp) _ftelli64((fp))
+#define TP_FDOPEN(fd, mode) _fdopen((fd), (mode))
+#define TP_CLOSE(fd) _close((fd))
+#define TP_FILENO(fp) _fileno((fp))
 _Static_assert(sizeof(long long) == 8, "journal file offsets must be 64-bit");
 #else
 #include <unistd.h> /* ftruncate, fileno */
 /* fseeko/ftello take/return off_t (64-bit under _FILE_OFFSET_BITS=64 above). */
 #define TP_FSEEK64(fp, off, whence) fseeko((fp), (off), (whence))
 #define TP_FTELL64(fp) ftello((fp))
+#define TP_FDOPEN(fd, mode) fdopen((fd), (mode))
+#define TP_CLOSE(fd) close((fd))
+#define TP_FILENO(fp) fileno((fp))
 _Static_assert(sizeof(off_t) >= 8, "journal file offsets must be 64-bit (define _FILE_OFFSET_BITS=64)");
 #endif
 
@@ -44,6 +51,8 @@ typedef struct {
     int fail_writes;    /* fail the next N write() calls entirely */
     int64_t short_next; /* >=0: next write is a short write of this many bytes */
     bool fail_truncate; /* fail the next truncate() call */
+    bool fail_sync;     /* fail the next durability barrier */
+    size_t sync_count;
 } journal_mem;
 
 static int64_t mem_write(void *ctx, const uint8_t *data, size_t len) {
@@ -103,8 +112,12 @@ static int mem_truncate(void *ctx, size_t len) {
     return 0;
 }
 
-static int mem_read_all(void *ctx, uint8_t **out, size_t *out_len) {
+static int mem_read_all(void *ctx, size_t max_len, uint8_t **out,
+                        size_t *out_len) {
     const journal_mem *m = (const journal_mem *)ctx;
+    if (m->len > max_len) {
+        return -1;
+    }
     if (m->len == 0) {
         *out = NULL;
         *out_len = 0;
@@ -121,7 +134,12 @@ static int mem_read_all(void *ctx, uint8_t **out, size_t *out_len) {
 }
 
 static int mem_sync(void *ctx) {
-    (void)ctx;
+    journal_mem *m = (journal_mem *)ctx;
+    m->sync_count++;
+    if (m->fail_sync) {
+        m->fail_sync = false;
+        return -1;
+    }
     return 0;
 }
 
@@ -174,6 +192,16 @@ void tp_journal_io_memory__fail_next_truncate(tp_journal_io io) {
     if (m) {
         m->fail_truncate = true;
     }
+}
+void tp_journal_io_memory__fail_next_sync(tp_journal_io io) {
+    journal_mem *m = mem_of(io);
+    if (m) {
+        m->fail_sync = true;
+    }
+}
+size_t tp_journal_io_memory__sync_count(tp_journal_io io) {
+    journal_mem *m = mem_of(io);
+    return m ? m->sync_count : 0U;
 }
 void tp_journal_io_memory__poke(tp_journal_io io, size_t at, uint8_t val) {
     journal_mem *m = mem_of(io);
@@ -229,7 +257,8 @@ static int file_truncate(void *ctx, size_t len) {
     return (rc == 0) ? 0 : -1;
 }
 
-static int file_read_all(void *ctx, uint8_t **out, size_t *out_len) {
+static int file_read_all(void *ctx, size_t max_len, uint8_t **out,
+                         size_t *out_len) {
     journal_file *f = (journal_file *)ctx;
     if (TP_FSEEK64(f->fp, 0, SEEK_END) != 0) {
         return -1;
@@ -242,6 +271,10 @@ static int file_read_all(void *ctx, uint8_t **out, size_t *out_len) {
         *out = NULL;
         *out_len = 0;
         return 0;
+    }
+    if ((uint64_t)sz > (uint64_t)max_len ||
+        (uint64_t)sz > (uint64_t)SIZE_MAX) {
+        return -1; /* reject before malloc/read: recovery input is untrusted */
     }
     if (TP_FSEEK64(f->fp, 0, SEEK_SET) != 0) {
         return -1;
@@ -262,7 +295,18 @@ static int file_read_all(void *ctx, uint8_t **out, size_t *out_len) {
 
 static int file_sync(void *ctx) {
     journal_file *f = (journal_file *)ctx;
-    return (fflush(f->fp) == 0) ? 0 : -1;
+    if (!f || !f->fp || fflush(f->fp) != 0) {
+        return -1;
+    }
+    const int fd = TP_FILENO(f->fp);
+    if (fd < 0) {
+        return -1;
+    }
+#if defined(_WIN32)
+    return _commit(fd) == 0 ? 0 : -1;
+#else
+    return fsync(fd) == 0 ? 0 : -1;
+#endif
 }
 
 static void file_destroy(void *ctx) {
@@ -275,15 +319,42 @@ static void file_destroy(void *ctx) {
     }
 }
 
+tp_journal_io tp_journal_io_file_adopt_fd(int native_fd) {
+    tp_journal_io io;
+    memset(&io, 0, sizeof io);
+    if (native_fd < 0) {
+        return io;
+    }
+    FILE *fp = TP_FDOPEN(native_fd, "r+b");
+    if (!fp) {
+        (void)TP_CLOSE(native_fd);
+        return io;
+    }
+    journal_file *f = (journal_file *)calloc(1, sizeof *f);
+    if (!f) {
+        (void)fclose(fp);
+        return io;
+    }
+    f->fp = fp;
+    io.ctx = f;
+    io.write = file_write;
+    io.length = file_length;
+    io.truncate = file_truncate;
+    io.read_all = file_read_all;
+    io.sync = file_sync;
+    io.destroy = file_destroy;
+    return io;
+}
+
 tp_journal_io tp_journal_io_file(const char *path) {
     tp_journal_io io;
     memset(&io, 0, sizeof io);
     if (!path) {
         return io;
     }
-    FILE *fp = fopen(path, "r+b"); /* existing journal */
+    FILE *fp = tp_fs_fopen(path, "r+b"); /* existing journal */
     if (!fp) {
-        fp = fopen(path, "w+b"); /* create fresh */
+        fp = tp_fs_fopen(path, "w+b"); /* create fresh */
     }
     if (!fp) {
         return io; /* ctx == NULL => create fails */
@@ -301,5 +372,74 @@ tp_journal_io tp_journal_io_file(const char *path) {
     io.read_all = file_read_all;
     io.sync = file_sync;
     io.destroy = file_destroy;
+    return io;
+}
+
+/* Read-only io write/truncate stubs -- they NEVER touch the file. tp_journal_create
+ * requires non-NULL write/length/truncate/read_all, so these must exist; they fail closed (a durable
+ * append over a read-only handle is a bug, and tp_model_recover's one best-effort tail-truncate simply
+ * poisons the throwaway recovery journal, which the adopt path clones-off and discards). */
+static int64_t file_write_ro(void *ctx, const uint8_t *data, size_t len) {
+    (void)ctx;
+    (void)data;
+    (void)len;
+    return -1; /* read-only: writes fail (never creates/extends a file) */
+}
+static int file_truncate_ro(void *ctx, size_t len) {
+    (void)ctx;
+    (void)len;
+    return -1; /* read-only: cannot truncate */
+}
+
+tp_journal_io tp_journal_io_file_adopt_fd_read(int native_fd) {
+    tp_journal_io io;
+    memset(&io, 0, sizeof io);
+    if (native_fd < 0) {
+        return io;
+    }
+    FILE *fp = TP_FDOPEN(native_fd, "rb");
+    if (!fp) {
+        (void)TP_CLOSE(native_fd);
+        return io;
+    }
+    journal_file *f = (journal_file *)calloc(1, sizeof *f);
+    if (!f) {
+        (void)fclose(fp);
+        return io;
+    }
+    f->fp = fp;
+    io.ctx = f;
+    io.write = file_write_ro;
+    io.length = file_length;
+    io.truncate = file_truncate_ro;
+    io.read_all = file_read_all;
+    io.sync = NULL;
+    io.destroy = file_destroy;
+    return io;
+}
+
+tp_journal_io tp_journal_io_file_read(const char *path) {
+    tp_journal_io io;
+    memset(&io, 0, sizeof io);
+    if (!path) {
+        return io;
+    }
+    FILE *fp = tp_fs_fopen(path, "rb"); /* READ-ONLY, NEVER create (no "w+b" fallback) */
+    if (!fp) {
+        return io; /* missing / unopenable -> ctx == NULL (caller skips this candidate) */
+    }
+    journal_file *f = (journal_file *)calloc(1, sizeof *f);
+    if (!f) {
+        (void)fclose(fp);
+        return io;
+    }
+    f->fp = fp;
+    io.ctx = f;
+    io.write = file_write_ro;     /* stub: read-only io never writes */
+    io.length = file_length;      /* real: seek-to-end query (no mutation) */
+    io.truncate = file_truncate_ro; /* stub: read-only io never truncates */
+    io.read_all = file_read_all;  /* real: the whole point of the read-only opener */
+    io.sync = NULL;               /* nothing to flush on a read handle */
+    io.destroy = file_destroy;    /* real: fclose + free */
     return io;
 }

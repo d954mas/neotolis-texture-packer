@@ -10,6 +10,7 @@
 #include "tp_core/tp_arena.h"
 #include "tp_core/tp_model.h"
 #include "tp_core/tp_name_map.h"
+#include "tp_fs_internal.h"
 #include "tp_pack_read_internal.h"
 
 #include "hash/nt_hash.h"
@@ -21,36 +22,6 @@
  * are #pragma pack(1) and the input buffer's alignment is caller-controlled. */
 
 // #region pure recovery helpers (exposed to tests via tp_pack_read_internal.h)
-
-void tp_transform_decode(int32_t x, int32_t y, uint8_t flags, int32_t tw, int32_t th, int32_t *ox, int32_t *oy) {
-    int32_t rx = x;
-    int32_t ry = y;
-    if (flags & 4u) {
-        int32_t t = rx;
-        rx = ry;
-        ry = t;
-    }
-    int32_t w = (flags & 4u) ? th : tw;
-    int32_t h = (flags & 4u) ? tw : th;
-    if (flags & 1u) {
-        rx = w - rx;
-    }
-    if (flags & 2u) {
-        ry = h - ry;
-    }
-    *ox = rx;
-    *oy = ry;
-}
-
-void tp_transform_out_dims(uint8_t flags, int32_t tw, int32_t th, int32_t *ow, int32_t *oh) {
-    if (flags & 4u) {
-        *ow = th;
-        *oh = tw;
-    } else {
-        *ow = tw;
-        *oh = th;
-    }
-}
 
 /* Builder's idealized encode: round-half-up over an exact page ratio (plan §2.5).
  * The real builder computes this in float32; the golden tests exercise that path.
@@ -70,6 +41,41 @@ uint16_t tp_px_to_uv(int32_t px, int32_t page_dim) {
  * for page_dim up to ~32768 (0.125px at the raised 16384 max). lround absorbs it. */
 int32_t tp_uv_to_px(uint16_t u, int32_t page_dim) {
     return (int32_t)lround(((double)u * (double)page_dim) / 65535.0);
+}
+
+tp_status tp_pack_read_page_name(const char *atlas_name, uint16_t page_count,
+                                 uint16_t page_index, tp_arena *arena,
+                                 const char **out_name, tp_error *err) {
+    if (!atlas_name || !arena || !out_name || page_count == 0U ||
+        page_index >= page_count) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "page name needs an atlas, arena, and valid page index");
+    }
+    char suffix[16] = {0};
+    size_t suffix_length = 0U;
+    if (page_count > 1U) {
+        const int written = snprintf(suffix, sizeof suffix, ".%u",
+                                     (unsigned)page_index);
+        if (written < 0 || (size_t)written >= sizeof suffix) {
+            return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                                "page suffix exceeds internal capacity");
+        }
+        suffix_length = (size_t)written;
+    }
+    const size_t atlas_length = strlen(atlas_name);
+    if (atlas_length > SIZE_MAX - suffix_length - 1U) {
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                            "page name length overflows address space");
+    }
+    char *name = tp_arena_alloc(arena, atlas_length + suffix_length + 1U);
+    if (!name) {
+        return tp_error_set(err, TP_STATUS_OOM,
+                            "arena OOM while allocating page name");
+    }
+    memcpy(name, atlas_name, atlas_length);
+    memcpy(name + atlas_length, suffix, suffix_length + 1U);
+    *out_name = name;
+    return TP_STATUS_OK;
 }
 // #endregion
 
@@ -484,17 +490,13 @@ static tp_status parse_atlas(const uint8_t *data, size_t total, const NtAssetEnt
             if (st != TP_STATUS_OK) {
                 return st;
             }
-            char pbuf[288];
-            if (page_count == 1) {
-                (void)snprintf(pbuf, sizeof pbuf, "%s", atlas_name);
-            } else {
-                (void)snprintf(pbuf, sizeof pbuf, "%s.%u", atlas_name, (unsigned)p);
+            const char *page_name = NULL;
+            st = tp_pack_read_page_name(atlas_name, page_count, p, arena,
+                                        &page_name, err);
+            if (st != TP_STATUS_OK) {
+                return st;
             }
-            char *pn = tp_arena_strdup(arena, pbuf);
-            if (!pn) {
-                return tp_error_set(err, TP_STATUS_OOM, "atlas '%s': arena OOM (page name)", atlas_name);
-            }
-            pages[p].image_name = pn;
+            pages[p].image_name = page_name;
         }
         out->pages = pages;
     }
@@ -659,31 +661,31 @@ tp_status tp_pack_read_file(const char *path, const struct tp_name_map *names, s
     if (!path || !arena || !out_results || !out_count) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_pack_read_file: NULL argument");
     }
-    FILE *f = fopen(path, "rb");
+    FILE *f = tp_fs_fopen(path, "rb");
     if (!f) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "cannot open '%s'", path);
     }
     if (fseek(f, 0, SEEK_END) != 0) {
-        (void)fclose(f);
+        (void)tp_fs_close(f);
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "seek failed on '%s'", path);
     }
     long sz = ftell(f);
     if (sz < 0) {
-        (void)fclose(f);
+        (void)tp_fs_close(f);
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "ftell failed on '%s'", path);
     }
     rewind(f);
     size_t nbytes = (size_t)sz;
     void *bufmem = malloc(nbytes > 0 ? nbytes : 1);
     if (!bufmem) {
-        (void)fclose(f);
+        (void)tp_fs_close(f);
         return tp_error_set(err, TP_STATUS_OOM, "OOM reading '%s' (%zu bytes)", path, nbytes);
     }
-    size_t rd = fread(bufmem, 1, nbytes, f);
-    (void)fclose(f);
-    if (rd != nbytes) {
+    bool read_all = tp_fs_read_all(f, bufmem, nbytes);
+    (void)tp_fs_close(f);
+    if (!read_all) {
         free(bufmem);
-        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "short read on '%s' (%zu of %zu)", path, rd, nbytes);
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "short read on '%s' (expected %zu bytes)", path, nbytes);
     }
     tp_status st = tp_pack_read_memory(bufmem, nbytes, names, arena, out_results, out_count, err);
     free(bufmem);

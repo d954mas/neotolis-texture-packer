@@ -1,13 +1,26 @@
 {
-  "version": 1,
+  "version": 5,
   "atlases": [
     {
+      "id": "atlas_00000000000000000000000000000401",
       "name": "dup",
       "sources": [
-        "assets/x",
-        "assets//x",
-        "./assets/x",
-        "assets/x/"
+        {
+          "id": "source_00000000000000000000000000000402",
+          "path": "assets/x"
+        },
+        {
+          "id": "source_00000000000000000000000000000403",
+          "path": "assets//x"
+        },
+        {
+          "id": "source_00000000000000000000000000000404",
+          "path": "./assets/x"
+        },
+        {
+          "id": "source_00000000000000000000000000000405",
+          "path": "assets/x/"
+        }
       ]
     }
   ]

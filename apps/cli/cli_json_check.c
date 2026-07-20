@@ -4,7 +4,7 @@
  * stdout straight into a JSON parser.
  *
  *   cli_json_check <file> [mode] [k=v ...]
- *     mode = manifest (default) | inspect | validate | pack | anim | mutation
+ *     mode = manifest (default) | help | inspect | validate | pack | anim | mutation
  *     inspect : sprites=N  -> atlases[0].sprites has exactly N entries
  *     validate: error=N warning=N  -> counts assertions
  *               code=NAME (repeatable) -> a finding with that code exists
@@ -54,8 +54,9 @@ static char *read_file(const char *path) {
 
 /* --- manifest (version --json) --- */
 static int check_manifest(const cJSON *root) {
-    if (!cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(root, "schema"))) {
-        return fail("missing/!number: schema");
+    const cJSON *schema = cJSON_GetObjectItemCaseSensitive(root, "schema");
+    if (!cJSON_IsNumber(schema) || schema->valueint != 2) {
+        return fail("manifest: schema must equal 2");
     }
     if (!cJSON_IsString(cJSON_GetObjectItemCaseSensitive(root, "app_version"))) {
         return fail("missing/!string: app_version");
@@ -63,8 +64,26 @@ static int check_manifest(const cJSON *root) {
     if (!cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(root, "project_schema"))) {
         return fail("missing/!number: project_schema");
     }
-    if (!cJSON_IsObject(cJSON_GetObjectItemCaseSensitive(root, "verbs"))) {
+    const cJSON *verbs = cJSON_GetObjectItemCaseSensitive(root, "verbs");
+    if (!cJSON_IsObject(verbs)) {
         return fail("missing/!object: verbs");
+    }
+    static const char *const mutation_verbs[] = {
+        "new", "add", "remove", "set", "sprite", "anim", "target", "atlas",
+    };
+    for (int i = 0; i < (int)(sizeof mutation_verbs / sizeof mutation_verbs[0]); i++) {
+        const cJSON *variants = cJSON_GetObjectItemCaseSensitive(verbs, mutation_verbs[i]);
+        const cJSON *apply = cJSON_GetObjectItemCaseSensitive(variants, "apply");
+        const cJSON *dry_run = cJSON_GetObjectItemCaseSensitive(variants, "dry_run");
+        if (!cJSON_IsObject(variants) || !cJSON_IsNumber(apply) || apply->valueint != 1 ||
+            !cJSON_IsNumber(dry_run) || dry_run->valueint != 2) {
+            return fail("manifest: mutation verb must advertise apply=1 and dry_run=2");
+        }
+    }
+    const cJSON *anim = cJSON_GetObjectItemCaseSensitive(verbs, "anim");
+    const cJSON *anim_list = cJSON_GetObjectItemCaseSensitive(anim, "list");
+    if (!cJSON_IsNumber(anim_list) || anim_list->valueint != 4) {
+        return fail("manifest: anim list query schema must equal 4");
     }
     if (!cJSON_IsObject(cJSON_GetObjectItemCaseSensitive(root, "formats"))) {
         return fail("missing/!object: formats");
@@ -88,6 +107,25 @@ static int check_manifest(const cJSON *root) {
     return 0;
 }
 
+/* --- help --json / --help --json --- */
+static int check_help(const cJSON *root) {
+    const cJSON *schema = cJSON_GetObjectItemCaseSensitive(root, "schema");
+    if (!cJSON_IsNumber(schema) || schema->valueint != 1) {
+        return fail("help: schema must equal 1");
+    }
+    if (!cJSON_IsString(cJSON_GetObjectItemCaseSensitive(root, "usage")) ||
+        !cJSON_IsArray(cJSON_GetObjectItemCaseSensitive(root, "commands")) ||
+        !cJSON_IsArray(cJSON_GetObjectItemCaseSensitive(root, "global_options")) ||
+        !cJSON_IsObject(cJSON_GetObjectItemCaseSensitive(root, "exit_codes"))) {
+        return fail("help: missing usage/commands/global_options/exit_codes");
+    }
+    const cJSON *file_io = cJSON_GetObjectItemCaseSensitive(
+        cJSON_GetObjectItemCaseSensitive(root, "exit_codes"), "file_io");
+    return cJSON_IsNumber(file_io) && file_io->valueint == 8
+               ? 0
+               : fail("help: exit_codes.file_io must equal 8");
+}
+
 /* Optional "key=value" arg lookup (first match). Returns NULL if absent. */
 static const char *arg_val(int argc, char **argv, const char *key) {
     size_t kl = strlen(key);
@@ -104,6 +142,9 @@ static int check_inspect(const cJSON *root, int argc, char **argv) {
     const cJSON *schema = cJSON_GetObjectItemCaseSensitive(root, "schema");
     if (!cJSON_IsNumber(schema)) {
         return fail("inspect: missing/!number: schema");
+    }
+    if (schema->valueint != 4) {
+        return fail("inspect: schema must equal 4");
     }
     const char *eschema = arg_val(argc, argv, "schema");
     if (eschema && schema->valueint != atoi(eschema)) {
@@ -133,7 +174,7 @@ static int check_inspect(const cJSON *root, int argc, char **argv) {
         return fail("inspect: atlas[0] missing name/settings/sources/sprites/animations/targets");
     }
     const cJSON *sprites = cJSON_GetObjectItemCaseSensitive(a0, "sprites");
-    /* Every sprite carries its resolved keys + derived identity (F1-03). */
+    /* Every sprite carries its resolved keys + derived identity. */
     const cJSON *sp = NULL;
     cJSON_ArrayForEach(sp, sprites) {
         if (!cJSON_IsString(cJSON_GetObjectItemCaseSensitive(sp, "name")) ||
@@ -157,8 +198,9 @@ static int check_inspect(const cJSON *root, int argc, char **argv) {
 
 /* --- validate --json --- */
 static int check_validate(const cJSON *root, int argc, char **argv) {
-    if (!cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(root, "schema"))) {
-        return fail("validate: missing/!number: schema");
+    const cJSON *schema = cJSON_GetObjectItemCaseSensitive(root, "schema");
+    if (!cJSON_IsNumber(schema) || schema->valueint != 2) {
+        return fail("validate: schema must equal 2");
     }
     const cJSON *findings = cJSON_GetObjectItemCaseSensitive(root, "findings");
     if (!cJSON_IsArray(findings)) {
@@ -220,6 +262,9 @@ static int check_anim(const cJSON *root, int argc, char **argv) {
     if (!cJSON_IsNumber(schema)) {
         return fail("anim: missing/!number: schema");
     }
+    if (schema->valueint != 4) {
+        return fail("anim: schema must equal 4");
+    }
     const char *eschema = arg_val(argc, argv, "schema");
     if (eschema && schema->valueint != atoi(eschema)) {
         (void)fprintf(stderr, "cli_json_check: anim schema %d != expected %s\n", schema->valueint, eschema);
@@ -252,8 +297,9 @@ static int check_anim(const cJSON *root, int argc, char **argv) {
 
 /* --- mutation success payload ({"schema":1,"ok":true,"verb":..,"count":..}) --- */
 static int check_mutation(const cJSON *root, int argc, char **argv) {
-    if (!cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(root, "schema"))) {
-        return fail("mutation: missing/!number: schema");
+    const cJSON *schema = cJSON_GetObjectItemCaseSensitive(root, "schema");
+    if (!cJSON_IsNumber(schema) || schema->valueint != 1) {
+        return fail("mutation: schema must equal 1");
     }
     const cJSON *ok = cJSON_GetObjectItemCaseSensitive(root, "ok");
     if (!cJSON_IsBool(ok) || !cJSON_IsTrue(ok)) {
@@ -276,8 +322,9 @@ static int check_mutation(const cJSON *root, int argc, char **argv) {
 
 /* --- pack --json --- */
 static int check_pack(const cJSON *root, int argc, char **argv) {
-    if (!cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(root, "schema"))) {
-        return fail("pack: missing/!number: schema");
+    const cJSON *schema = cJSON_GetObjectItemCaseSensitive(root, "schema");
+    if (!cJSON_IsNumber(schema) || schema->valueint != 1) {
+        return fail("pack: schema must equal 1");
     }
     const cJSON *atlases = cJSON_GetObjectItemCaseSensitive(root, "atlases");
     if (!cJSON_IsArray(atlases) || cJSON_GetArraySize(atlases) == 0) {
@@ -359,6 +406,35 @@ static int check_pack(const cJSON *root, int argc, char **argv) {
         (void)fprintf(stderr, "cli_json_check: pack targets_failed %d != expected %s\n", tfail->valueint, efail);
         return 1;
     }
+    const char *enotice = arg_val(argc, argv, "notice");
+    if (enotice) {
+        bool found = false;
+        const cJSON *atlas = NULL;
+        cJSON_ArrayForEach(atlas, atlases) {
+            const cJSON *atlas_name =
+                cJSON_GetObjectItemCaseSensitive(atlas, "name");
+            const cJSON *atlas_notices =
+                cJSON_GetObjectItemCaseSensitive(atlas, "notices");
+            const cJSON *notice = NULL;
+            cJSON_ArrayForEach(notice, atlas_notices) {
+                const cJSON *id =
+                    cJSON_GetObjectItemCaseSensitive(notice, "id");
+                const cJSON *context =
+                    cJSON_GetObjectItemCaseSensitive(notice, "atlas");
+                const cJSON *message =
+                    cJSON_GetObjectItemCaseSensitive(notice, "message");
+                if (cJSON_IsString(id) && strcmp(id->valuestring, enotice) == 0 &&
+                    cJSON_IsString(atlas_name) && cJSON_IsString(context) &&
+                    strcmp(context->valuestring, atlas_name->valuestring) == 0 &&
+                    cJSON_IsString(message) && message->valuestring[0] != '\0') {
+                    found = true;
+                }
+            }
+        }
+        if (!found) {
+            return fail("pack: expected structured atlas notice not found");
+        }
+    }
     return 0;
 }
 
@@ -383,7 +459,9 @@ int main(int argc, char **argv) {
     }
 
     int rc;
-    if (strcmp(mode, "inspect") == 0) {
+    if (strcmp(mode, "help") == 0) {
+        rc = check_help(root);
+    } else if (strcmp(mode, "inspect") == 0) {
         rc = check_inspect(root, argc, argv);
     } else if (strcmp(mode, "validate") == 0) {
         rc = check_validate(root, argc, argv);

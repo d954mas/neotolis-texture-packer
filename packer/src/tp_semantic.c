@@ -1,6 +1,7 @@
 /*
- * F2-02 task 5: semantic-state identity, computed SEPARATELY from the revision
- * counter (master spec §8, C0-02 §4). `dirty = current identity != saved-baseline
+ * Semantic-state identity, computed SEPARATELY from the revision
+ * counter (master spec §8, decision 0011 §4).
+ * `dirty = current identity != saved-baseline
  * identity` -- NOT derived from the revision number, so applying the inverse of an
  * edit returns to clean even at a higher revision, and "mark saved" re-baselines
  * without changing revision.
@@ -11,23 +12,24 @@
  * decimal / "%.9g" text (the same forms the serializer emits) so the identity is
  * byte-identical on every OS regardless of float/int representation.
  *
- * PARTICIPATES (promoted from tp_c0_semantic): atlas name + the 10 packing knobs +
- * id; source id + normalized key (path) + kind; sprite id-key (name bridge +
+ * PARTICIPATES: atlas name + the 10 packing knobs +
+ * id; source id + normalized key (path) + kind; sprite identity (display name +
  * source_ref + src_key) + origin + slice9 + rename + the five ov_* overrides;
  * animation id + name + fps + playback + flips + FRAMES; target exporter_id +
  * out_path + enabled + id; every structural id.
  * EXCLUDED runtime state (never dirty): the revision counter, dirty flag, Undo/Redo,
  * the saved baseline, session/authority, pack results/hashes, source watchers/mtime/
  * pixels, thumbnails, GUI view state + s_model_ver, the project file PATH (identity
- * key, not content), and schema_version (serialization envelope).
+ * key, not content).
  *
- * ORDER RULE (C0-02 §4): ID-keyed collections (atlases/sources/sprites/animations/
+ * ORDER RULE (decision 0011 §4): ID-keyed collections
+ * (atlases/sources/sprites/animations/
  * targets) are ORDER-NORMALIZED -- their per-element hashes are combined with a
  * COMMUTATIVE 128-bit sum, so a reorder does not change identity. The sole exception
  * is an animation's `frames`, whose order IS semantic (playback order): frames fold
  * in array order into the animation hash.
  *
- * A note on source `kind`: the C0-02 field table enumerates {source_id, key}. This
+ * A note on source `kind`: the field table enumerates {source_id, key}. This
  * implementation additionally folds `kind` (folder/file) -- a deliberate, minor,
  * conservative SUPERSET: kind is persistent serialized content whose change alters
  * packing and (for a missing source) sprite-id derivation, so over-detecting a change
@@ -41,6 +43,7 @@
 #include <string.h>
 
 #include "tp_core/tp_id.h"
+#include "tp_core/tp_identity.h"
 #include "tp_core/tp_project.h"
 
 /* ---- feed helpers: canonical, endian-stable field mixing ----------------- */
@@ -58,6 +61,25 @@ static void feed_str(tp_hasher *h, const char *s) {
         tp_hasher_update(h, s, strlen(s));
     }
     feed_sep(h); /* also distinguishes NULL from "" via presence of no bytes */
+}
+
+static void feed_source_path(tp_hasher *h, const char *path) {
+#ifdef _WIN32
+    /* Match tp_identity_path_equal's Windows ASCII case policy without
+     * rewriting the persistent/live source spelling. */
+    if (path) {
+        for (const unsigned char *c = (const unsigned char *)path; *c; ++c) {
+            const unsigned char folded =
+                *c >= (unsigned char)'A' && *c <= (unsigned char)'Z'
+                    ? (unsigned char)(*c + ('a' - 'A'))
+                    : *c;
+            tp_hasher_update(h, &folded, 1U);
+        }
+    }
+    feed_sep(h);
+#else
+    feed_str(h, path);
+#endif
 }
 
 static void feed_i64(tp_hasher *h, int64_t v) {
@@ -95,11 +117,23 @@ static void id128_add(tp_id128 *acc, tp_id128 val) {
 
 /* ---- per-entity hashes --------------------------------------------------- */
 
-static tp_id128 source_identity(const tp_project_source *s) {
+static tp_id128 source_identity(const tp_project *project,
+                                const tp_project_source *s) {
     tp_hasher h = tp_hasher_init();
     feed_str(&h, "src");
     feed_id(&h, s->id);
-    feed_str(&h, s->path);
+    char canonical_path[TP_IDENTITY_PATH_MAX];
+    const char *path = s->path;
+    tp_status path_status = tp_project_source_path_absolute_lexical(
+        project, s->path, canonical_path, sizeof canonical_path, NULL);
+    if (path_status == TP_STATUS_PATH_NOT_ABSOLUTE) {
+        path_status = tp_identity_path_absolute_lexical(
+            s->path, canonical_path, sizeof canonical_path, NULL);
+    }
+    if (path_status == TP_STATUS_OK) {
+        path = canonical_path;
+    }
+    feed_source_path(&h, path);
     feed_i64(&h, (int64_t)s->kind);
     return tp_hasher_final(h);
 }
@@ -107,7 +141,6 @@ static tp_id128 source_identity(const tp_project_source *s) {
 static tp_id128 sprite_identity(const tp_project_sprite *s) {
     tp_hasher h = tp_hasher_init();
     feed_str(&h, "spr");
-    feed_str(&h, s->name); /* export-key bridge: the stable name-addressed key */
     feed_id(&h, s->source_ref);
     feed_str(&h, s->src_key);
     feed_f(&h, (double)s->origin_x);
@@ -136,7 +169,6 @@ static tp_id128 anim_identity(const tp_project_anim *a) {
     /* frames are ORDER-SEMANTIC: fold in array (playback) order. */
     feed_i64(&h, (int64_t)a->frame_count);
     for (int i = 0; i < a->frame_count; i++) {
-        feed_str(&h, a->frames[i].name);
         feed_id(&h, a->frames[i].source_ref);
         feed_str(&h, a->frames[i].src_key);
     }
@@ -166,7 +198,8 @@ static tp_id128 target_identity(const tp_project_target *t) {
         feed_id((H), acc);                                   \
     } while (0)
 
-static tp_id128 atlas_identity(const tp_project_atlas *a) {
+tp_id128 tp_semantic_atlas_identity(const tp_project *project,
+                                    const tp_project_atlas *a) {
     tp_hasher h = tp_hasher_init();
     feed_str(&h, "atl");
     feed_id(&h, a->id);
@@ -181,7 +214,8 @@ static tp_id128 atlas_identity(const tp_project_atlas *a) {
     feed_bool(&h, a->allow_transform);
     feed_bool(&h, a->power_of_two);
     feed_f(&h, (double)a->pixels_per_unit);
-    FOLD_UNORDERED(&h, "sources", a->source_count, source_identity(&a->sources[_i]));
+    FOLD_UNORDERED(&h, "sources", a->source_count,
+                   source_identity(project, &a->sources[_i]));
     FOLD_UNORDERED(&h, "sprites", a->sprite_count, sprite_identity(&a->sprites[_i]));
     FOLD_UNORDERED(&h, "animations", a->animation_count, anim_identity(&a->animations[_i]));
     FOLD_UNORDERED(&h, "targets", a->target_count, target_identity(&a->targets[_i]));
@@ -190,15 +224,15 @@ static tp_id128 atlas_identity(const tp_project_atlas *a) {
 
 tp_id128 tp_semantic_identity(const tp_project *p) {
     tp_hasher h = tp_hasher_init();
-    feed_str(&h, "tp-project-identity/1"); /* algorithm version tag */
+    feed_str(&h, "tp-project-identity/2"); /* canonical-ref algorithm tag */
     if (p) {
-        FOLD_UNORDERED(&h, "atlases", p->atlas_count, atlas_identity(&p->atlases[_i]));
+        FOLD_UNORDERED(&h, "atlases", p->atlas_count,
+                       tp_semantic_atlas_identity(p, &p->atlases[_i]));
     } else {
         feed_str(&h, "atlases");
         feed_i64(&h, 0);
         feed_id(&h, tp_id128_nil());
     }
-    /* schema_version and project_dir are DELIBERATELY excluded (serialization
-     * envelope + identity key, not semantic content). */
+    /* project_dir is identity metadata, not semantic content. */
     return tp_hasher_final(h);
 }

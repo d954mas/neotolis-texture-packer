@@ -1,5 +1,5 @@
 /*
- * F2-01 task 2: ID-only apply of ONE validated operation to the tp_project model.
+ * ID-only apply of ONE validated operation to the tp_project model.
  * Entities are addressed BY STABLE ID (never array index or mutable name); a human
  * selector is resolved to an id at the request edge (tp_op_build_*), not here.
  *
@@ -12,8 +12,8 @@
  * mid-build failure never half-populates an animation. tp_op__test_set_alloc_fail
  * drives that staging path in the fault-injection test.
  *
- * F2-01/F2-05 boundary: this engine is CORE-TESTED groundwork. The shipping CLI/GUI
- * mutators are NOT routed through it here -- that cutover is F2-05.
+ * Boundary: this engine is CORE-TESTED groundwork. The shipping CLI/GUI
+ * mutators are NOT routed through it here -- that cutover comes later.
  */
 
 #include "tp_core/tp_operation.h"
@@ -22,16 +22,38 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "tp_core/tp_identity.h"
 #include "tp_core/tp_names.h"   /* tp_sprite_export_key (override-record bridge key) */
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_srckey.h"  /* TP_SRCKEY_MAX */
+#include "tp_diff_internal.h"
 #include "tp_op_internal.h"
+#include "tp_project_mutation_internal.h"
 #include "tp_strutil.h"         /* tp_set_owned_dup (shared OOM-safe string-field swap) */
 
 /* ---- staging allocation (with a test-only fault seam) -------------------- */
-static int s_alloc_fail = -1; /* countdown; -1 disabled. Fires exactly once. */
+static _Thread_local int s_alloc_fail = -1; /* countdown; -1 disabled. Fires once. */
+static _Thread_local bool s_count_applies = false;
+static _Thread_local size_t s_apply_count = 0U;
 
 void tp_op__test_set_alloc_fail(int nth) { s_alloc_fail = nth; }
+
+void tp_op__test_apply_count_reset(void) {
+    s_apply_count = 0U;
+    s_count_applies = true;
+}
+
+size_t tp_op__test_apply_count_take(void) {
+    const size_t count = s_apply_count;
+    s_count_applies = false;
+    return count;
+}
+
+void tp_op__test_apply_count_publish(size_t count) {
+    if (s_count_applies) {
+        s_apply_count = count;
+    }
+}
 
 static void *stage_alloc(size_t n) {
     if (s_alloc_fail == 0) {
@@ -59,26 +81,36 @@ static tp_project_atlas *atlas_by_id(tp_project *p, tp_id128 id) {
     return ai < 0 ? NULL : &p->atlases[ai];
 }
 
-/* The sprite-override RECORD key (the stored `name` field that the tp_project sprite
- * lookups match on). Two record shapes:
- *   - PENDING (nil source_id): a name-keyed override added BEFORE any source scan --
- *     what the file-oriented CLI `sprite set`/`unset` builds. It stores under the key
- *     the user typed VERBATIM (no dir/ext stripping), byte-identical to the pre-cutover
- *     inline CLI (which did add_sprite/remove_sprite/set_sprite_rename on the raw key).
- *     Verbatim storage is also what lets `sprite unset hero.png` clear a pre-existing
- *     verbatim "hero.png" record instead of keying on the stripped "hero" and silently
- *     missing it. (Pre-cutover parity; the pack/export match of an ext-carrying pending
- *     key is a separate, unchanged question -- see the report / ADR 0014.)
- *   - SOURCE-ATTACHED (real source_id): the src_key is a source-local path, so the
- *     record keys under the export bridge (strip dir+ext) that the pack/export path
- *     (tp_input.c: find_sprite(export_key(scanned_name))) resolves against.
- * tp_sprite_export_key stays the single owner of ext-stripping (boundary R1). */
-static void sprite_store_key(tp_id128 source_id, const char *src_key, char *out, size_t cap) {
-    if (tp_id128_is_nil(source_id)) {
-        (void)snprintf(out, cap, "%s", src_key ? src_key : "");
-    } else {
-        tp_sprite_export_key(src_key, out, cap);
-    }
+static tp_project_sprite *sprite_find(tp_project_atlas *atlas,
+                                      tp_id128 source_id,
+                                      const char *src_key) {
+    return tp_project_atlas_find_sprite_by_source_key(atlas, source_id,
+                                                       src_key);
+}
+
+static tp_status sprite_add(tp_project_atlas *atlas, tp_id128 source_id,
+                            const char *src_key, tp_project_sprite **out) {
+    return tp_project_atlas_add_sprite_by_source_key(atlas, source_id, src_key,
+                                                      out);
+}
+
+static tp_status sprite_remove(tp_project_atlas *atlas, tp_id128 source_id,
+                               const char *src_key) {
+    return tp_project_atlas_remove_sprite_by_source_key(atlas, source_id,
+                                                         src_key);
+}
+
+static tp_status sprite_prune(tp_project_atlas *atlas, tp_id128 source_id,
+                              const char *src_key) {
+    return tp_project_atlas_prune_sprite_by_source_key(atlas, source_id,
+                                                        src_key);
+}
+
+static tp_status sprite_set_rename(tp_project_atlas *atlas,
+                                   tp_id128 source_id, const char *src_key,
+                                   const char *name) {
+    return tp_project_atlas_set_sprite_rename_by_source_key(
+        atlas, source_id, src_key, name);
 }
 
 /* ---- override field set / clear ----------------------------------------- */
@@ -89,23 +121,23 @@ static void sprite_apply_set(tp_project_sprite *s, const tp_op_sprite_set *o) {
     }
     if (o->mask & TP_SPF_SLICE9) {
         for (int k = 0; k < 4; k++) {
-            s->slice9_lrtb[k] = o->slice9[k];
+            s->slice9_lrtb[k] = (uint16_t)o->slice9[k];
         }
     }
     if (o->mask & TP_SPF_SHAPE) {
-        s->ov_shape = o->ov_shape;
+        s->ov_shape = (int16_t)o->ov_shape;
     }
     if (o->mask & TP_SPF_ALLOW_ROTATE) {
-        s->ov_allow_rotate = o->ov_allow_rotate;
+        s->ov_allow_rotate = (int16_t)o->ov_allow_rotate;
     }
     if (o->mask & TP_SPF_MAX_VERTICES) {
-        s->ov_max_vertices = o->ov_max_vertices;
+        s->ov_max_vertices = (int16_t)o->ov_max_vertices;
     }
     if (o->mask & TP_SPF_MARGIN) {
-        s->ov_margin = o->ov_margin;
+        s->ov_margin = (int16_t)o->ov_margin;
     }
     if (o->mask & TP_SPF_EXTRUDE) {
-        s->ov_extrude = o->ov_extrude;
+        s->ov_extrude = (int16_t)o->ov_extrude;
     }
 }
 
@@ -141,7 +173,8 @@ static void sprite_apply_clear(tp_project_sprite *s, uint32_t mask) {
  * the model. On any allocation failure, free the partial staging and return OOM --
  * the model is never touched. Returns TP_STATUS_OK (out owns *out_frames), else
  * TP_STATUS_OOM. n == 0 yields (NULL, 0), a valid empty frame list. */
-static tp_status stage_frames(char *const *names, int n, tp_project_frame **out_frames) {
+static tp_status stage_frames(const tp_op_sprite_ref *refs, int n,
+                              tp_project_frame **out_frames) {
     *out_frames = NULL;
     if (n <= 0) {
         return TP_STATUS_OK;
@@ -152,14 +185,27 @@ static tp_status stage_frames(char *const *names, int n, tp_project_frame **out_
     }
     memset(fr, 0, (size_t)n * sizeof *fr);
     for (int i = 0; i < n; i++) {
-        fr[i].name = stage_strdup(names[i]); /* PENDING frame: keyed by name (matches the CLI) */
-        if (!fr[i].name) {
+        fr[i].src_key = stage_strdup(refs[i].src_key);
+        if (!fr[i].src_key) {
             for (int j = 0; j <= i; j++) {
                 free(fr[j].name);
+                free(fr[j].src_key);
             }
             free(fr);
             return TP_STATUS_OOM;
         }
+        char bridge[TP_SRCKEY_MAX];
+        tp_sprite_export_key(refs[i].src_key, bridge, sizeof bridge);
+        fr[i].name = stage_strdup(bridge);
+        if (!fr[i].name) {
+            for (int j = 0; j <= i; j++) {
+                free(fr[j].name);
+                free(fr[j].src_key);
+            }
+            free(fr);
+            return TP_STATUS_OOM;
+        }
+        fr[i].source_ref = refs[i].source_id;
     }
     *out_frames = fr;
     return TP_STATUS_OK;
@@ -176,13 +222,13 @@ static tp_status apply_anim_create(tp_project_atlas *a, const tp_op_anim_create 
     if (st != TP_STATUS_OK) {
         for (int i = 0; i < c->frame_count; i++) {
             free(frames[i].name);
+            free(frames[i].src_key);
         }
         free(frames);
         return st;
     }
     /* Commit: no more allocations can fail. */
     an->id = c->anim_id;
-    an->id_synthetic = false;
     an->fps = c->fps;
     an->playback = c->playback;
     an->flip_h = c->flip_h;
@@ -232,12 +278,19 @@ static tp_status apply_source_replace(tp_project_atlas *a, const tp_op_source_re
     return tp_set_owned_dup(&src->path, o->key, stage_strdup);
 }
 
-tp_status tp_operation_apply(tp_project *p, const tp_operation *op, tp_op_reject *rej) {
-    tp_status st = tp_operation_validate(p, op, rej);
-    if (st != TP_STATUS_OK) {
-        return st; /* rejected: model untouched */
-    }
+tp_status tp_op__apply_prevalidated(tp_project *p, const tp_operation *op,
+                                    tp_op_reject *rej) {
     tp_op__reject_ok(rej);
+
+    tp_operation canonical;
+    char canonical_path[TP_IDENTITY_PATH_MAX];
+    tp_status st = tp_op__canonical_view(p, op, &canonical, canonical_path,
+                                         sizeof canonical_path);
+    if (st != TP_STATUS_OK) {
+        return tp_op__reject(rej, st, "key",
+                             "source path cannot be resolved against the project");
+    }
+    op = &canonical;
 
     switch (op->kind) {
         case TP_OP_ATLAS_CREATE: {
@@ -245,7 +298,6 @@ tp_status tp_operation_apply(tp_project *p, const tp_operation *op, tp_op_reject
             st = tp_project_add_atlas(p, op->u.atlas_create.name, &idx);
             if (st == TP_STATUS_OK) {
                 p->atlases[idx].id = op->atlas_id; /* deterministic: the op owns the id */
-                p->atlases[idx].id_synthetic = false;
             }
             break;
         }
@@ -295,11 +347,11 @@ tp_status tp_operation_apply(tp_project *p, const tp_operation *op, tp_op_reject
         case TP_OP_SOURCE_ADD: {
             tp_project_atlas *a = atlas_by_id(p, op->atlas_id);
             int before = a->source_count;
-            st = tp_project_atlas_add_source_kind(a, op->u.source_add.key, op->u.source_add.kind);
+            st = tp_project_atlas_add_source_kind(a, op->u.source_add.key,
+                                                  op->u.source_add.kind);
             if (st == TP_STATUS_OK) {
                 if (a->source_count > before) {
                     a->sources[a->source_count - 1].id = op->u.source_add.source_id;
-                    a->sources[a->source_count - 1].id_synthetic = false;
                 } else {
                     /* validate rejects a duplicate path, so a dedupe no-op is unreachable here;
                      * refuse to "commit" one -- it would strand the op's source_id (a false id). */
@@ -311,36 +363,40 @@ tp_status tp_operation_apply(tp_project *p, const tp_operation *op, tp_op_reject
         case TP_OP_SOURCE_REMOVE:
             st = tp_project_atlas_remove_source_by_id(atlas_by_id(p, op->atlas_id), op->u.source_ref.source_id);
             break;
-        case TP_OP_SOURCE_REPLACE:
-            st = apply_source_replace(atlas_by_id(p, op->atlas_id), &op->u.source_ref);
+        case TP_OP_SOURCE_REPLACE: {
+            st = apply_source_replace(atlas_by_id(p, op->atlas_id),
+                                      &op->u.source_ref);
             break;
+        }
 
         case TP_OP_SPRITE_OVERRIDE_SET: {
             tp_project_atlas *a = atlas_by_id(p, op->atlas_id);
-            char bridge[TP_SRCKEY_MAX];
-            sprite_store_key(op->u.sprite_set.source_id, op->u.sprite_set.src_key, bridge, sizeof bridge);
             tp_project_sprite *s = NULL;
-            st = tp_project_atlas_add_sprite(a, bridge, &s);
+            st = sprite_add(a, op->u.sprite_set.source_id,
+                            op->u.sprite_set.src_key, &s);
             if (st == TP_STATUS_OK) {
                 sprite_apply_set(s, &op->u.sprite_set);
-                (void)tp_project_atlas_prune_sprite(a, bridge); /* keep storage sparse (matches the CLI) */
+                (void)sprite_prune(a, op->u.sprite_set.source_id,
+                                   op->u.sprite_set.src_key);
             }
             break;
         }
         case TP_OP_SPRITE_OVERRIDE_CLEAR: {
             tp_project_atlas *a = atlas_by_id(p, op->atlas_id);
-            char bridge[TP_SRCKEY_MAX];
-            sprite_store_key(op->u.sprite_clear.source_id, op->u.sprite_clear.src_key, bridge, sizeof bridge);
             if (op->u.sprite_clear.mask == TP_SPF_ALL) { /* sprite unset: drop the whole record (idempotent) */
-                st = tp_project_atlas_remove_sprite(a, bridge);
+                st = sprite_remove(a, op->u.sprite_clear.source_id,
+                                   op->u.sprite_clear.src_key);
                 if (st == TP_STATUS_OUT_OF_BOUNDS) {
                     st = TP_STATUS_OK; /* absent == already cleared */
                 }
             } else {
-                tp_project_sprite *s = tp_project_atlas_find_sprite(a, bridge);
+                tp_project_sprite *s = sprite_find(
+                    a, op->u.sprite_clear.source_id,
+                    op->u.sprite_clear.src_key);
                 if (s) {
                     sprite_apply_clear(s, op->u.sprite_clear.mask);
-                    (void)tp_project_atlas_prune_sprite(a, bridge);
+                    (void)sprite_prune(a, op->u.sprite_clear.source_id,
+                                       op->u.sprite_clear.src_key);
                 }
                 st = TP_STATUS_OK;
             }
@@ -348,9 +404,9 @@ tp_status tp_operation_apply(tp_project *p, const tp_operation *op, tp_op_reject
         }
         case TP_OP_SPRITE_NAME_SET: {
             tp_project_atlas *a = atlas_by_id(p, op->atlas_id);
-            char bridge[TP_SRCKEY_MAX];
-            sprite_store_key(op->u.sprite_name.source_id, op->u.sprite_name.src_key, bridge, sizeof bridge);
-            st = tp_project_atlas_set_sprite_rename(a, bridge, op->u.sprite_name.name);
+            st = sprite_set_rename(a, op->u.sprite_name.source_id,
+                                   op->u.sprite_name.src_key,
+                                   op->u.sprite_name.name);
             break;
         }
 
@@ -390,7 +446,13 @@ tp_status tp_operation_apply(tp_project *p, const tp_operation *op, tp_op_reject
         case TP_OP_ANIMATION_FRAME_ADD: {
             tp_project_anim *an = tp_project_atlas_find_animation_by_id(atlas_by_id(p, op->atlas_id),
                                                                        op->u.anim_frame_add.anim_id);
-            st = tp_project_anim_add_frame(an, op->u.anim_frame_add.frame);
+            tp_project_frame frame = {0};
+            frame.source_ref = op->u.anim_frame_add.frame.source_id;
+            frame.src_key = op->u.anim_frame_add.frame.src_key;
+            char bridge[TP_SRCKEY_MAX];
+            tp_sprite_export_key(frame.src_key, bridge, sizeof bridge);
+            frame.name = bridge;
+            st = tp_diff__insert_frame(an, an->frame_count, &frame);
             if (st == TP_STATUS_OK && op->u.anim_frame_add.index >= 0) {
                 int last = an->frame_count - 1; /* append then move into place (move clamps) */
                 (void)tp_project_anim_move_frame(an, last, op->u.anim_frame_add.index - last);
@@ -424,7 +486,6 @@ tp_status tp_operation_apply(tp_project *p, const tp_operation *op, tp_op_reject
             st = tp_project_atlas_add_target(a, op->u.target_create.exporter_id, op->u.target_create.out_path, &t);
             if (st == TP_STATUS_OK) {
                 t->id = op->u.target_create.target_id;
-                t->id_synthetic = false;
                 t->enabled = op->u.target_create.enabled;
             }
             break;
@@ -484,4 +545,13 @@ tp_status tp_operation_apply(tp_project *p, const tp_operation *op, tp_op_reject
         return tp_op__reject(rej, st, "", "apply failed: %s", tp_status_str(st));
     }
     return TP_STATUS_OK;
+}
+
+tp_status tp_operation_apply(tp_project *p, const tp_operation *op,
+                             tp_op_reject *rej) {
+    tp_status st = tp_operation_validate(p, op, rej);
+    if (st != TP_STATUS_OK) {
+        return st; /* rejected: model untouched */
+    }
+    return tp_op__apply_prevalidated(p, op, rej);
 }

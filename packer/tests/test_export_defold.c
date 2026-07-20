@@ -41,6 +41,7 @@
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_pack_read.h"
 #include "tp_core/tp_project.h"
+#include "tp_project_mutation_internal.h"
 #include "unity.h"
 
 #include "tp_fixtures.h"
@@ -415,7 +416,11 @@ void test_golden_bytes(void) {
     tp_page page;
     tp_result r = golden_result(sprites, &page);
 
-    const char *spin_frames[2] = {"hero", "gem"};
+    const tp_id128 source = {{1}};
+    const tp_export_frame_ref spin_frames[2] = {{source, "hero"},
+                                                {source, "gem"}};
+    const tp_export_sprite_ref_in sprite_refs[2] = {
+        {"hero", source, "hero"}, {"gem", source, "gem"}};
     tp_export_anim_in spin = {.id = "spin",
                               .frames = spin_frames,
                               .frame_count = 2,
@@ -427,6 +432,8 @@ void test_golden_bytes(void) {
     tp_normalize_opts_defaults(&opts);
     opts.animations = &spin;
     opts.animation_count = 1;
+    opts.sprite_refs = sprite_refs;
+    opts.sprite_ref_count = 2;
 
     tp_export_prepared prep;
     tp_error e = {{0}};
@@ -756,7 +763,11 @@ void test_tpatlas_referential_integrity(void) {
     tp_sprite sprites[2];
     tp_page page;
     tp_result r = golden_result(sprites, &page);
-    const char *spin_frames[2] = {"hero", "gem"};
+    const tp_id128 source = {{2}};
+    const tp_export_frame_ref spin_frames[2] = {{source, "hero"},
+                                                {source, "gem"}};
+    const tp_export_sprite_ref_in sprite_refs[2] = {
+        {"hero", source, "hero"}, {"gem", source, "gem"}};
     tp_export_anim_in spin = {.id = "spin",
                               .frames = spin_frames,
                               .frame_count = 2,
@@ -768,6 +779,8 @@ void test_tpatlas_referential_integrity(void) {
     tp_normalize_opts_defaults(&opts);
     opts.animations = &spin;
     opts.animation_count = 1;
+    opts.sprite_refs = sprite_refs;
+    opts.sprite_ref_count = 2;
     tp_export_prepared prep;
     tp_error e = {{0}};
     TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, tp_normalize(&r, &opts, ar, &prep, &e), e.msg);
@@ -1013,7 +1026,9 @@ void test_playback_enum_and_flags(void) {
     r.sprites = &s;
     r.sprite_count = 1;
 
-    const char *frame_a[1] = {"a"};
+    const tp_id128 source = {{3}};
+    const tp_export_frame_ref frame_a[1] = {{source, "a"}};
+    const tp_export_sprite_ref_in sprite_refs[1] = {{"a", source, "a"}};
     tp_export_anim_in in[8];
     for (int i = 0; i < 8; i++) {
         memset(&in[i], 0, sizeof in[i]);
@@ -1033,6 +1048,8 @@ void test_playback_enum_and_flags(void) {
     tp_normalize_opts opts;
     tp_normalize_opts_defaults(&opts);
     opts.animations = in;
+    opts.sprite_refs = sprite_refs;
+    opts.sprite_ref_count = 1;
     opts.animation_count = 8;
 
     tp_export_prepared prep;
@@ -1153,11 +1170,33 @@ static bool pack_demo_atlas(const demo_atlas *da, tp_arena *ar) {
 
         tp_normalize_opts opts;
         tp_normalize_opts_defaults(&opts);
+        const tp_id128 demo_source = {{4}};
+        tp_export_sprite_ref_in *demo_refs = (tp_export_sprite_ref_in *)tp_arena_alloc(
+            ar, (size_t)da->file_count * sizeof *demo_refs);
+        if (!demo_refs) {
+            ok = false;
+        } else {
+            for (int i = 0; i < da->file_count; i++) {
+                demo_refs[i] = (tp_export_sprite_ref_in){
+                    descs[i].name, demo_source, descs[i].name};
+            }
+            opts.sprite_refs = demo_refs;
+            opts.sprite_ref_count = da->file_count;
+        }
         tp_export_anim_in anim;
-        if (da->anim_id) {
+        if (ok && da->anim_id) {
             memset(&anim, 0, sizeof anim);
             anim.id = da->anim_id;
-            anim.frames = da->anim_frames;
+            tp_export_frame_ref *demo_frames = (tp_export_frame_ref *)tp_arena_alloc(
+                ar, (size_t)da->anim_frame_count * sizeof *demo_frames);
+            if (!demo_frames) {
+                ok = false;
+            }
+            for (int i = 0; ok && i < da->anim_frame_count; i++) {
+                demo_frames[i] = (tp_export_frame_ref){demo_source,
+                                                       da->anim_frames[i]};
+            }
+            anim.frames = demo_frames;
             anim.frame_count = da->anim_frame_count;
             anim.playback = da->anim_playback;
             anim.fps = da->anim_fps;
@@ -1300,6 +1339,49 @@ void test_demo_atlases(void) {
 
     tp_arena_destroy(ar);
 }
+
+typedef struct output_path_count {
+    int count;
+} output_path_count;
+
+static void count_output_path(void *ud, const char *path) {
+    (void)path;
+    ((output_path_count *)ud)->count++;
+}
+
+void test_defold_output_listing_rejects_suffix_overflow_atomically(void) {
+    tp_result result = {.atlas_name = "long-path", .page_count = 0};
+    tp_export_prepared prep = {.result = &result};
+    char base[TP_IDENTITY_PATH_MAX];
+    const size_t base_len = TP_IDENTITY_PATH_MAX - strlen(".tpatlas");
+    memset(base, 'a', base_len);
+    base[base_len] = '\0';
+    output_path_count count = {0};
+    tp_error err = {{0}};
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_export_defold_list_outputs(&prep, base, count_output_path, &count, &err));
+    TEST_ASSERT_EQUAL_INT(0, count.count);
+    TEST_ASSERT_TRUE(strlen(err.msg) > 0U);
+}
+
+void test_defold_metadata_path_above_legacy_limit_reaches_the_filesystem_boundary(void) {
+    tp_result result = {.atlas_name = "long-path", .page_count = 0};
+    tp_export_prepared prep = {.result = &result};
+    tp_export_caps caps = tp_export_caps_full();
+    char base[1200];
+    const int prefix = snprintf(base, sizeof base, "%s/missing-long-path/", g_dir);
+    TEST_ASSERT_TRUE(prefix > 0 && prefix < 1100);
+    memset(base + prefix, 'a', 1100U - (size_t)prefix);
+    base[1100] = '\0';
+    tp_error err = {{0}};
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_BAD_PROJECT,
+        tp_export_defold_write(&prep, &caps, base, NULL, &err));
+    TEST_ASSERT_TRUE(strlen(err.msg) > 0U);
+}
 // #endregion
 
 int main(int argc, char **argv) {
@@ -1320,5 +1402,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_caps_repack_identity_and_slice9_notice);
     RUN_TEST(test_playback_enum_and_flags);
     RUN_TEST(test_demo_atlases);
+    RUN_TEST(test_defold_output_listing_rejects_suffix_overflow_atomically);
+    RUN_TEST(test_defold_metadata_path_above_legacy_limit_reaches_the_filesystem_boundary);
     return UNITY_END();
 }

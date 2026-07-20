@@ -1,48 +1,52 @@
 #ifndef TP_CORE_SRC_TP_IDSET_INTERNAL_H
 #define TP_CORE_SRC_TP_IDSET_INTERNAL_H
 
-/*
- * The one growable 32-hex idempotency id-set, shared by the in-memory idstore
- * (tp_txn_idset.c) and the recovery journal's retained-id index (tp_journal.c) so the
- * set logic lives in ONE place. The journal adds only a reserve/put split on top (it
- * must reserve a slot BEFORE the durable write and fill it alloc-free after), which is
- * why the primitive exposes both the combined add and the split reserve/put_reserved.
- */
+/* Bounded applied-transaction retention shared by the model and journal. Keys
+ * are stored once in binary form. A separate open-address index owns lookup;
+ * `order` is the deterministic oldest-to-newest FIFO eviction order. */
 
 #include <stdbool.h>
+#include <stdint.h>
 
-#include "tp_core/tp_error.h"
+#include "tp_core/tp_transaction.h"
 
-#define TP_IDSET_IDLEN 32 /* a transaction id is 32 lowercase-hex chars */
+#define TP_IDSET_IDLEN 32
+#define TP_IDSET_TABLE_CAP (TP_TXN_RETAINED_ID_CAP * 2)
 
 typedef struct tp_idset {
-    char (*ids)[TP_IDSET_IDLEN + 1]; /* 32 hex + NUL */
+    tp_id128 *order; /* fixed TP_TXN_RETAINED_ID_CAP ring */
+    uint16_t *slots; /* fixed open-address table; ring index + 1, 0 = empty */
     int count;
-    int cap;
+    int head;
 } tp_idset;
 
-/* Membership test. NULL-safe. */
-bool tp_idset_contains(const tp_idset *s, const char *id_hex);
-
-/* Ensure one free slot exists (grows 16-then-double). OOM -> non-OK, set unchanged. */
+/* Allocate the fixed-capacity backing arrays once. Idempotent. */
 tp_status tp_idset_reserve(tp_idset *s);
 
-/* Fill the slot guaranteed by a prior tp_idset_reserve (allocation-free). */
+/* Lowercase 32-hex facade over binary open-address lookup. */
+bool tp_idset_valid_hex(const char *id_hex);
+bool tp_idset_contains(const tp_idset *s, const char *id_hex);
+
+/* Insert into a slot guaranteed by reserve. Duplicate = no-op. When full,
+ * evicts exactly the oldest key. No allocation and no failure. */
 void tp_idset_put_reserved(tp_idset *s, const char *id_hex);
 
-/* contains? no-op : reserve+put. OOM -> non-OK, set unchanged (transactional). */
+/* Validate + reserve + insert. Storage remains unchanged on validation/OOM. */
 tp_status tp_idset_add(tp_idset *s, const char *id_hex);
 
-/* Count of retained ids. NULL-safe (0). */
 int tp_idset_count(const tp_idset *s);
 
-/* The id at `index` (32-hex NUL-terminated), or NULL if out of range. */
-const char *tp_idset_at(const tp_idset *s, int index);
+/* Chronological lookup: index 0 is the oldest retained key. */
+bool tp_idset_at(const tp_idset *s, int index, tp_id128 *out);
+bool tp_idset_format_at(const tp_idset *s, int index, char out[TP_IDSET_IDLEN + 1]);
 
-/* Empty the set but keep the capacity (a checkpoint RESETS the retained set). */
 void tp_idset_reset(tp_idset *s);
-
-/* Free the backing array (does NOT free `s` itself). NULL-safe. */
 void tp_idset_dispose(tp_idset *s);
+
+/* Test-only, thread-local collision/probe instrumentation. bucket < 0 restores
+ * production hashing. reset starts counting slot inspections; take stops counting. */
+void tp_idset__test_force_bucket(int bucket);
+void tp_idset__test_probe_reset(void);
+size_t tp_idset__test_probe_take(void);
 
 #endif /* TP_CORE_SRC_TP_IDSET_INTERNAL_H */

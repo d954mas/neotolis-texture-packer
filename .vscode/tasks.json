@@ -11,6 +11,8 @@
             "label": "build (native-debug)",
             "type": "shell",
             "command": "cmake --build --preset native-debug",
+            "dependsOn": ["configure (native-debug)"],
+            "dependsOrder": "sequence",
             "group": {
                 "kind": "build",
                 "isDefault": true
@@ -38,6 +40,8 @@
             "label": "build (native-release)",
             "type": "shell",
             "command": "cmake --build --preset native-release",
+            "dependsOn": ["configure (native-release)"],
+            "dependsOrder": "sequence",
             "group": "build",
             "problemMatcher": ["$gcc"]
         },

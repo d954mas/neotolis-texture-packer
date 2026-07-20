@@ -1,5 +1,5 @@
-/* ntpacker-gui: pure startup open/defer decision -- see gui_startup.h for the truth table + rationale
- * (H/P1-8). No I/O, no status writes: it exists so main()'s crash-recovery data-loss guard has a single
+/* ntpacker-gui: pure startup open/defer decision -- see gui_startup.h for the truth table + rationale.
+ * No I/O, no status writes: it exists so main()'s crash-recovery data-loss guard has a single
  * source of truth that the headless selftest can drive over its full truth table (J14). */
 #include "gui_startup.h"
 

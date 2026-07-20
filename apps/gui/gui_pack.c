@@ -1,1186 +1,309 @@
-#include "gui_pack.h"
+#include "gui_pack_internal.h"
 
-#include <stdatomic.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-#ifdef _WIN32
-#include <windows.h>
-#else
-#include <sys/stat.h>
-#include <time.h>
-#endif
-
-#include "tinycthread.h" /* C11 threads (vendored via nt_builder); interactive worker thread */
 
 #include "log/nt_log.h"
 
 #include "tp_core/tp_arena.h"
-#include "tp_core/tp_error.h"
-#include "tp_core/tp_export.h"
-#include "tp_core/tp_export_run.h"
 #include "tp_core/tp_input.h"
 #include "tp_core/tp_names.h"
-#include "tp_core/tp_pack.h"
-#include "tp_core/tp_project.h"
-#include "tp_core/tp_scan.h"
 
 #include "gui_project.h"
-#include "gui_scan.h"
 
-// #region state
 #define GUI_PACK_MAX_ATLASES 64
 
+typedef struct pack_ref_entry {
+    uint64_t hash;
+    const char *name;
+    int result_index;
+    bool occupied;
+} pack_ref_entry;
+
 typedef struct {
-    tp_arena *arena;      /* owns `result` (destroy to free); NULL when empty */
+    tp_arena *arena;
     tp_result *result;
+    pack_ref_entry *ref_index;
+    size_t ref_index_cap;
+    tp_id128 atlas_id;
+    uint64_t version;
     bool valid;
 } pack_slot;
 
 static pack_slot s_slots[GUI_PACK_MAX_ATLASES];
-static char s_work_dir[1024];
+static uint64_t s_next_result_version;
 
-/* Export-target preview (EXP-PREVIEW): ONE arena-owned result, separate from the session slots. Keyed
- * by atlas_index so a stale preview from another atlas never binds (gui_pack_preview_result checks it).
- * Only one preview is live at a time (the GUI drops it on atlas switch / edit), so a single slot is
- * sufficient and its lifetime mirrors a session slot: destroy the arena to free the result. */
-typedef struct {
-    tp_arena *arena;
-    tp_result *result;
-    bool valid;
-    int atlas_index; /* atlas this preview belongs to (-1 = none) */
-    char exporter_id[64];
-} preview_slot;
-static preview_slot s_preview = {.atlas_index = -1};
-// #endregion
+#ifdef NTPACKER_GUI_SELFTEST
+static gui_pack_ref_index_work s_ref_index_work;
 
-// #region small helpers
-static double now_ms(void) {
-#ifdef _WIN32
-    LARGE_INTEGER f;
-    LARGE_INTEGER c;
-    QueryPerformanceFrequency(&f);
-    QueryPerformanceCounter(&c);
-    return (double)c.QuadPart * 1000.0 / (double)f.QuadPart;
-#else
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
+void gui_pack_ref_index_work_reset(void) {
+    memset(&s_ref_index_work, 0, sizeof s_ref_index_work);
+}
+
+gui_pack_ref_index_work gui_pack_ref_index_work_get(void) {
+    return s_ref_index_work;
+}
 #endif
+
+static uint64_t pack_ref_hash(const char *text) {
+    uint64_t hash = UINT64_C(1469598103934665603);
+    for (const unsigned char *p = (const unsigned char *)text; *p; ++p) {
+        hash ^= (uint64_t)*p;
+        hash *= UINT64_C(1099511628211);
+    }
+    return hash;
 }
 
-static char *dup_str(const char *s) {
-    if (!s) {
-        return NULL;
-    }
-    size_t n = strlen(s) + 1U;
-    char *p = (char *)malloc(n);
-    if (p) {
-        memcpy(p, s, n);
-    }
-    return p;
+static void pack_ref_index_free(pack_slot *slot) {
+    free(slot->ref_index);
+    slot->ref_index = NULL;
+    slot->ref_index_cap = 0U;
 }
 
-typedef struct {
-    tp_pack_sprite_desc *v;
-    int n;
-    int cap;
-} desc_vec;
-
-static void desc_free(desc_vec *dv) {
-    for (int i = 0; i < dv->n; i++) {
-        free((void *)dv->v[i].name);
-        free((void *)dv->v[i].path);
+static bool pack_ref_index_build(const tp_result *result,
+                                 pack_ref_entry **out_entries,
+                                 size_t *out_capacity) {
+    *out_entries = NULL;
+    *out_capacity = 0U;
+    if (!result || result->sprite_count <= 0) {
+        return true;
     }
-    free(dv->v);
-    dv->v = NULL;
-    dv->n = 0;
-    dv->cap = 0;
-}
-
-/* Assembles sprite descs for atlas `ai` via the core bridge (tp_pack_input_build owns
- * the name/override/encoding policy). Thin adapter: moves the malloc-owned descs into
- * the job's desc_vec (desc_free stays valid). tp_input walks the DISK fresh -- the
- * smart-folder promise is "packs current contents" -- so the row cache is invalidated
- * to let the list catch up next frame. Returns false on error (fills err). */
-static bool assemble(int ai, desc_vec *dv, int *missing, char *err, size_t err_cap) {
-    tp_pack_input in;
-    tp_error e = {{0}};
-    *missing = 0;
-    if (tp_pack_input_build(gui_project_get(), ai, &in, &e) != TP_STATUS_OK) {
-        if (err) {
-            (void)snprintf(err, err_cap, "%s", e.msg[0] ? e.msg : "could not assemble sprites");
-        }
+    const size_t count = (size_t)result->sprite_count;
+    if (count > SIZE_MAX / 2U) {
         return false;
     }
-    dv->v = in.descs;
-    dv->n = in.count;
-    dv->cap = in.count;
-    *missing = in.missing_sources;
-    gui_scan_invalidate_all();
+    const size_t wanted = count * 2U;
+    size_t capacity = 8U;
+    while (capacity < wanted) {
+        if (capacity > SIZE_MAX / 2U) {
+            return false;
+        }
+        capacity *= 2U;
+    }
+    pack_ref_entry *entries = calloc(capacity, sizeof *entries);
+    if (!entries) {
+        return false;
+    }
+    const size_t mask = capacity - 1U;
+    for (int i = 0; i < result->sprite_count; ++i) {
+        const char *name = result->sprites[i].name;
+        if (!name) {
+            free(entries);
+            return false;
+        }
+        const uint64_t hash = pack_ref_hash(name);
+        size_t at = (size_t)hash & mask;
+        while (entries[at].occupied) {
+#ifdef NTPACKER_GUI_SELFTEST
+            s_ref_index_work.build_probes++;
+#endif
+            at = (at + 1U) & mask;
+        }
+#ifdef NTPACKER_GUI_SELFTEST
+        s_ref_index_work.build_items++;
+        s_ref_index_work.build_probes++;
+#endif
+        entries[at] = (pack_ref_entry){hash, name, i, true};
+    }
+    *out_entries = entries;
+    *out_capacity = capacity;
     return true;
 }
 
-/* Target output-dir creation now lives in tp_core (tp_mkdirs_parent, tp_scan.h) --
- * the single home both frontends share (was copy-pasted here as mkdirs_parent). */
-// #endregion
+static void pack_slot_clear(pack_slot *slot) {
+    pack_ref_index_free(slot);
+    if (slot->arena) {
+        tp_arena_destroy(slot->arena);
+    }
+    memset(slot, 0, sizeof *slot);
+}
 
-// #region public
-void gui_pack_init(const char *work_dir) {
-    (void)snprintf(s_work_dir, sizeof s_work_dir, "%s", work_dir ? work_dir : ".");
-#ifdef _WIN32
-    (void)CreateDirectoryA(s_work_dir, NULL); /* ok if it already exists */
-#else
-    (void)mkdir(s_work_dir, 0755);
-#endif
+static uint64_t next_result_version(void) {
+    s_next_result_version++;
+    if (s_next_result_version == 0U) {
+        s_next_result_version = 1U;
+    }
+    return s_next_result_version;
+}
+
+static pack_slot *pack_slot_for_atlas_id(tp_id128 atlas_id) {
+    for (int i = 0; i < GUI_PACK_MAX_ATLASES; ++i) {
+        if (s_slots[i].valid && tp_id128_eq(s_slots[i].atlas_id, atlas_id)) {
+            return &s_slots[i];
+        }
+    }
+    return NULL;
+}
+
+static pack_slot *pack_slot_for_atlas_index(int atlas_index) {
+    if (atlas_index < 0 || atlas_index >= GUI_PACK_MAX_ATLASES) {
+        return NULL;
+    }
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        snapshot ? tp_session_snapshot_atlas_at(snapshot, atlas_index) : NULL;
+    if (!atlas) {
+        return NULL;
+    }
+    if (s_slots[atlas_index].valid &&
+        tp_id128_eq(s_slots[atlas_index].atlas_id, atlas->id)) {
+        return &s_slots[atlas_index];
+    }
+    return pack_slot_for_atlas_id(atlas->id);
+}
+
+static bool snapshot_has_atlas(const tp_session_snapshot *snapshot,
+                               tp_id128 atlas_id) {
+    const int count = snapshot ? tp_session_snapshot_atlas_count(snapshot) : 0;
+    for (int i = 0; i < count; ++i) {
+        const tp_snapshot_atlas *atlas =
+            tp_session_snapshot_atlas_at(snapshot, i);
+        if (atlas && tp_id128_eq(atlas->id, atlas_id)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static pack_slot *pack_slot_for_publish(int atlas_index, tp_id128 atlas_id) {
+    pack_slot *slot = pack_slot_for_atlas_id(atlas_id);
+    if (slot) {
+        return slot;
+    }
+    for (int i = 0; i < GUI_PACK_MAX_ATLASES; ++i) {
+        if (!s_slots[i].valid) {
+            return &s_slots[i];
+        }
+    }
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    for (int i = 0; i < GUI_PACK_MAX_ATLASES; ++i) {
+        if (!snapshot_has_atlas(snapshot, s_slots[i].atlas_id)) {
+            return &s_slots[i];
+        }
+    }
+    return &s_slots[atlas_index];
+}
+
+bool gui_pack_publish_native(tp_session_pack_job_result *pack,
+                             int atlas_index, double elapsed_ms,
+                             gui_pack_result_info *out) {
+    pack_ref_entry *ref_index = NULL;
+    size_t ref_index_cap = 0U;
+    if (!pack_ref_index_build(pack->result, &ref_index, &ref_index_cap)) {
+        if (out) {
+            (void)snprintf(out->err, sizeof out->err,
+                           "out of memory building canonical sprite lookup");
+        }
+        return false;
+    }
+    pack_slot *slot = pack_slot_for_publish(atlas_index, pack->atlas_id);
+    pack_slot_clear(slot);
+    slot->arena = pack->arena;
+    slot->result = pack->result;
+    slot->ref_index = ref_index;
+    slot->ref_index_cap = ref_index_cap;
+    slot->atlas_id = pack->atlas_id;
+    slot->version = next_result_version();
+    slot->valid = true;
+    pack->arena = NULL;
+    nt_log_info("gui_pack(async): atlas '%s' packed %d sprite(s), %d page(s) in %.1f ms",
+                slot->result->atlas_name, slot->result->sprite_count,
+                slot->result->page_count, elapsed_ms);
+    return true;
 }
 
 void gui_pack_clear(int atlas_index) {
-    for (int i = 0; i < GUI_PACK_MAX_ATLASES; i++) {
-        if (atlas_index >= 0 && i != atlas_index) {
-            continue;
+    if (atlas_index >= 0) {
+        pack_slot *slot = pack_slot_for_atlas_index(atlas_index);
+        if (slot) {
+            pack_slot_clear(slot);
         }
-        if (s_slots[i].arena) {
-            tp_arena_destroy(s_slots[i].arena);
+    } else {
+        for (int i = 0; i < GUI_PACK_MAX_ATLASES; i++) {
+            pack_slot_clear(&s_slots[i]);
         }
-        s_slots[i].arena = NULL;
-        s_slots[i].result = NULL;
-        s_slots[i].valid = false;
     }
-    /* The preview is a derived view of the session pack -- clearing the session slot(s) it mirrors
-     * invalidates it too (open/new/undo/redo/repack all pass -1 or the preview's atlas). */
-    if (atlas_index < 0 || atlas_index == s_preview.atlas_index) {
+    if (atlas_index < 0 || gui_pack_preview_belongs_to(atlas_index)) {
         gui_pack_preview_clear();
     }
 }
 
-// #region async worker (one in-flight op max: pack OR export)
-typedef enum { JOB_NONE = 0, JOB_PACK, JOB_EXPORT, JOB_PREVIEW } job_kind;
-
-typedef struct {
-    int atlas_index;
-    desc_vec dv; /* assembled sprite descs (job-owned; abs paths) */
-    int enabled; /* enabled target count (for the export report) */
-} export_atlas;
-
-typedef struct {
-    job_kind kind;
-
-    /* pack input (job-owned; worker reads, all set before thrd_create) */
-    int atlas_index;
-    tp_pack_settings settings; /* .sprites -> dv.v, .atlas_name -> name_owned, .work_dir -> s_work_dir */
-    char *name_owned;          /* dup of the live atlas name (settings.atlas_name aliased the model) */
-    desc_vec dv;               /* owns names/paths + v; freed at completion */
-    tp_arena *arena;           /* worker allocates the result here */
-    int missing;
-    char *snap0; /* model snapshot at start (honest stale compare) */
-    size_t snap0_len;
-    char preview_exporter[64]; /* JOB_PREVIEW: which exporter this preview was clamped for */
-
-    /* export input (job-owned) */
-    tp_project *clone;
-    export_atlas *eatlas;
-    int eatlas_count;
-
-    /* output (worker writes; main reads only after acquiring `state`) */
-    tp_result *result;
-    tp_status status;
-    tp_error err;
-    double elapsed_ms;
-    int exp_targets, exp_notices, exp_atlases_ok, exp_atlases_fail;
-    char exp_first_err[256];
-
-    /* control */
-    _Atomic int state; /* 0 = running, 1 = done */
-    _Atomic bool cancelled;
-    _Atomic int exp_cur; /* export progress (1-based) */
-    _Atomic int exp_total;
-    double start_ms;
-    thrd_t thread;
-} pack_job;
-
-static pack_job s_job;
-static bool s_job_active;                /* main-thread view: worker started, not yet joined */
-static gui_pack_async_kind s_debug_busy; /* --shot-packing override */
-
-static int pack_worker(void *arg) {
-    pack_job *j = (pack_job *)arg;
-    const double t0 = now_ms();
-    tp_result *result = NULL;
-    tp_error e = {{0}};
-    const tp_status st = tp_pack(&j->settings, j->arena, &result, &e);
-    j->elapsed_ms = now_ms() - t0;
-    j->result = result;
-    j->status = st;
-    j->err = e;
-    atomic_store_explicit(&j->state, 1, memory_order_release);
-    return 0;
-}
-
-static int export_worker(void *arg) {
-    pack_job *j = (pack_job *)arg;
-    const double t0 = now_ms();
-    int targets = 0;
-    int notices = 0;
-    int ok = 0;
-    int fail = 0;
-    char first_err[256] = {0};
-    for (int i = 0; i < j->eatlas_count; i++) {
-        if (atomic_load_explicit(&j->cancelled, memory_order_relaxed)) {
-            break; /* already-written atlases stay; no further atlases started */
-        }
-        atomic_store_explicit(&j->exp_cur, i + 1, memory_order_relaxed);
-        export_atlas *ea = &j->eatlas[i];
-        tp_arena *ar = tp_arena_create(0);
-        if (!ar) {
-            fail++;
-            continue;
-        }
-        tp_export_notices nts;
-        tp_export_notices_init(&nts);
-        tp_error e = {{0}};
-        int runs = 0;
-        const tp_status st =
-            tp_export_run(j->clone, ea->atlas_index, ea->dv.v, ea->dv.n, s_work_dir, ar, &nts, &runs, &e);
-        if (st == TP_STATUS_OK) {
-            targets += ea->enabled;
-            notices += nts.count;
-            ok++;
-        } else {
-            fail++;
-            if (first_err[0] == '\0') {
-                const tp_project_atlas *ca = tp_project_get_atlas(j->clone, ea->atlas_index);
-                (void)snprintf(first_err, sizeof first_err, "%s: %s", ca ? ca->name : "?",
-                               e.msg[0] ? e.msg : tp_status_str(st));
-            }
-        }
-        tp_export_notices_free(&nts);
-        tp_arena_destroy(ar);
-    }
-    j->exp_targets = targets;
-    j->exp_notices = notices;
-    j->exp_atlases_ok = ok;
-    j->exp_atlases_fail = fail;
-    memcpy(j->exp_first_err, first_err, sizeof first_err);
-    j->elapsed_ms = now_ms() - t0;
-    atomic_store_explicit(&j->state, 1, memory_order_release);
-    return 0;
-}
-
-static bool model_changed_since(const char *snap, size_t len) {
-    if (!snap) {
-        return true; /* couldn't snapshot at start -> assume changed (safe: shows stale) */
-    }
-    char *cur = NULL;
-    size_t cl = 0;
-    tp_error e = {{0}};
-    if (tp_project_save_buffer(gui_project_get(), &cur, &cl, &e) != TP_STATUS_OK || !cur) {
-        return true;
-    }
-    const bool diff = (cl != len) || memcmp(cur, snap, len) != 0;
-    free(cur);
-    return diff;
-}
-
-bool gui_pack_async_start(int atlas_index, char *err, size_t err_cap) {
-    if (s_job_active) {
-        if (err) {
-            (void)snprintf(err, err_cap, "busy -- a pack or export is already running");
-        }
-        return false;
-    }
-    if (atlas_index < 0 || atlas_index >= GUI_PACK_MAX_ATLASES) {
-        if (err) {
-            (void)snprintf(err, err_cap, "atlas index out of range");
-        }
-        return false;
-    }
-    tp_project *p = gui_project_get();
-    tp_project_atlas *a = tp_project_get_atlas(p, atlas_index);
-    if (!a) {
-        if (err) {
-            (void)snprintf(err, err_cap, "no such atlas");
-        }
-        return false;
-    }
-
-    desc_vec dv = {0};
-    int missing = 0;
-    if (!assemble(atlas_index, &dv, &missing, err, err_cap)) {
-        desc_free(&dv);
-        return false;
-    }
-    if (dv.n == 0) {
-        desc_free(&dv);
-        if (err) {
-            (void)snprintf(err, err_cap, "atlas '%s' has no usable images%s", a->name,
-                           missing > 0 ? " (all sources missing)" : "");
-        }
-        return false;
-    }
-
-    tp_pack_settings settings;
-    tp_error e = {{0}};
-    if (tp_project_atlas_to_settings(p, atlas_index, &settings, &e) != TP_STATUS_OK) {
-        desc_free(&dv);
-        if (err) {
-            (void)snprintf(err, err_cap, "%s", e.msg);
-        }
-        return false;
-    }
-    char *name_owned = dup_str(a->name); /* settings.atlas_name aliases the live model -- own a copy */
-    tp_arena *arena = tp_arena_create(0);
-    if (!name_owned || !arena) {
-        desc_free(&dv);
-        free(name_owned);
-        if (arena) {
-            tp_arena_destroy(arena);
-        }
-        if (err) {
-            (void)snprintf(err, err_cap, "out of memory");
-        }
-        return false;
-    }
-    settings.work_dir = s_work_dir; /* stable static; never mutated after init */
-    settings.atlas_name = name_owned;
-    settings.sprites = dv.v;
-    settings.sprite_count = dv.n;
-
-    char *snap = NULL;
-    size_t snap_len = 0;
-    (void)tp_project_save_buffer(p, &snap, &snap_len, &e); /* best-effort; NULL -> treated as changed */
-
-    memset(&s_job, 0, sizeof s_job);
-    s_job.kind = JOB_PACK;
-    s_job.atlas_index = atlas_index;
-    s_job.settings = settings;
-    s_job.name_owned = name_owned;
-    s_job.dv = dv;
-    s_job.arena = arena;
-    s_job.missing = missing;
-    s_job.snap0 = snap;
-    s_job.snap0_len = snap_len;
-    s_job.start_ms = now_ms();
-    atomic_store_explicit(&s_job.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&s_job.cancelled, false, memory_order_relaxed);
-    if (thrd_create(&s_job.thread, pack_worker, &s_job) != thrd_success) {
-        desc_free(&s_job.dv);
-        free(s_job.name_owned);
-        free(s_job.snap0);
-        tp_arena_destroy(s_job.arena);
-        memset(&s_job, 0, sizeof s_job);
-        if (err) {
-            (void)snprintf(err, err_cap, "could not start worker thread");
-        }
-        return false;
-    }
-    s_job_active = true;
-    return true;
-}
-
-bool gui_pack_export_async_start(char *err, size_t err_cap) {
-    if (s_job_active) {
-        if (err) {
-            (void)snprintf(err, err_cap, "busy -- a pack or export is already running");
-        }
-        return false;
-    }
-    tp_project *p = gui_project_get();
-    if (!p) {
-        if (err) {
-            (void)snprintf(err, err_cap, "no project");
-        }
-        return false;
-    }
-
-    export_atlas tmp[GUI_PACK_MAX_ATLASES];
-    int n = 0;
-    for (int ai = 0; ai < p->atlas_count && ai < GUI_PACK_MAX_ATLASES; ai++) {
-        tp_project_atlas *a = &p->atlases[ai];
-        int enabled = 0;
-        for (int t = 0; t < a->target_count; t++) {
-            if (a->targets[t].enabled) {
-                enabled++;
-            }
-        }
-        if (enabled == 0 || a->source_count == 0) {
-            continue;
-        }
-        bool relerr = false;
-        for (int t = 0; t < a->target_count; t++) {
-            if (!a->targets[t].enabled) {
-                continue;
-            }
-            char out_abs[600];
-            if (tp_project_resolve_path(p, a->targets[t].out_path, out_abs, sizeof out_abs) != TP_STATUS_OK) {
-                relerr = true;
-                break;
-            }
-            tp_mkdirs_parent(out_abs);
-        }
-        if (relerr) {
-            for (int k = 0; k < n; k++) {
-                desc_free(&tmp[k].dv);
-            }
-            if (err) {
-                (void)snprintf(err, err_cap, "save the project first (relative output paths need a project dir)");
-            }
-            return false;
-        }
-        desc_vec dv = {0};
-        int missing = 0;
-        if (!assemble(ai, &dv, &missing, err, err_cap)) {
-            desc_free(&dv);
-            for (int k = 0; k < n; k++) {
-                desc_free(&tmp[k].dv);
-            }
-            return false;
-        }
-        if (dv.n == 0) {
-            desc_free(&dv);
-            continue; /* no usable images: skip this atlas (mirrors do_export) */
-        }
-        tmp[n].atlas_index = ai;
-        tmp[n].dv = dv;
-        tmp[n].enabled = enabled;
-        n++;
-    }
-    if (n == 0) {
-        if (err) {
-            (void)snprintf(err, err_cap, "Nothing to export -- enable a target and add sources.");
-        }
-        return false;
-    }
-
-    /* Snapshot the whole project so the worker never reads live-editable memory. */
-    char *buf = NULL;
-    size_t blen = 0;
-    tp_error e = {{0}};
-    if (tp_project_save_buffer(p, &buf, &blen, &e) != TP_STATUS_OK || !buf) {
-        for (int k = 0; k < n; k++) {
-            desc_free(&tmp[k].dv);
-        }
-        if (err) {
-            (void)snprintf(err, err_cap, "snapshot failed: %s", e.msg);
-        }
-        return false;
-    }
-    tp_project *clone = NULL;
-    const tp_status st = tp_project_load_buffer(buf, blen, &clone, &e);
-    free(buf);
-    if (st != TP_STATUS_OK || !clone) {
-        for (int k = 0; k < n; k++) {
-            desc_free(&tmp[k].dv);
-        }
-        if (err) {
-            (void)snprintf(err, err_cap, "snapshot parse failed: %s", e.msg);
-        }
-        return false;
-    }
-    /* load_buffer leaves project_dir NULL; out-path resolution in the worker needs it. */
-    clone->project_dir = p->project_dir ? dup_str(p->project_dir) : NULL;
-
-    export_atlas *eatlas = (export_atlas *)malloc((size_t)n * sizeof *eatlas);
-    if (!eatlas) {
-        for (int k = 0; k < n; k++) {
-            desc_free(&tmp[k].dv);
-        }
-        tp_project_destroy(clone);
-        if (err) {
-            (void)snprintf(err, err_cap, "out of memory");
-        }
-        return false;
-    }
-    memcpy(eatlas, tmp, (size_t)n * sizeof *eatlas);
-
-    memset(&s_job, 0, sizeof s_job);
-    s_job.kind = JOB_EXPORT;
-    s_job.clone = clone;
-    s_job.eatlas = eatlas;
-    s_job.eatlas_count = n;
-    s_job.start_ms = now_ms();
-    atomic_store_explicit(&s_job.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&s_job.cancelled, false, memory_order_relaxed);
-    atomic_store_explicit(&s_job.exp_cur, 0, memory_order_relaxed);
-    atomic_store_explicit(&s_job.exp_total, n, memory_order_relaxed);
-    if (thrd_create(&s_job.thread, export_worker, &s_job) != thrd_success) {
-        for (int k = 0; k < s_job.eatlas_count; k++) {
-            desc_free(&s_job.eatlas[k].dv);
-        }
-        free(s_job.eatlas);
-        tp_project_destroy(s_job.clone);
-        memset(&s_job, 0, sizeof s_job);
-        if (err) {
-            (void)snprintf(err, err_cap, "could not start worker thread");
-        }
-        return false;
-    }
-    s_job_active = true;
-    return true;
-}
-
-gui_pack_done gui_pack_poll(gui_pack_result_info *out) {
-    if (out) {
-        memset(out, 0, sizeof *out);
-    }
-    if (!s_job_active) {
-        return GUI_PACK_DONE_NONE;
-    }
-    if (atomic_load_explicit(&s_job.state, memory_order_acquire) == 0) {
-        return GUI_PACK_DONE_NONE; /* worker still running */
-    }
-    (void)thrd_join(s_job.thread, NULL);
-    const bool cancelled = atomic_load_explicit(&s_job.cancelled, memory_order_relaxed);
-    gui_pack_done rc = GUI_PACK_DONE_NONE;
-
-    if (s_job.kind == JOB_PACK) {
-        if (s_job.status == TP_STATUS_OK && s_job.result) {
-            if (cancelled) {
-                tp_arena_destroy(s_job.arena); /* discard: abandoned result */
-                rc = GUI_PACK_DONE_PACK_CANCELLED;
-            } else {
-                if (s_slots[s_job.atlas_index].arena) {
-                    tp_arena_destroy(s_slots[s_job.atlas_index].arena);
-                }
-                s_slots[s_job.atlas_index].arena = s_job.arena;
-                s_slots[s_job.atlas_index].result = s_job.result;
-                s_slots[s_job.atlas_index].valid = true;
-                if (out) {
-                    out->atlas_index = s_job.atlas_index;
-                    out->ms = s_job.elapsed_ms;
-                    out->missing = s_job.missing;
-                    out->model_changed = model_changed_since(s_job.snap0, s_job.snap0_len);
-                    if (s_job.missing > 0) {
-                        (void)snprintf(out->note, sizeof out->note, "%d missing file(s) skipped", s_job.missing);
-                    }
-                }
-                nt_log_info("gui_pack(async): atlas '%s' packed %d sprite(s), %d page(s) in %.1f ms",
-                            s_job.result->atlas_name, s_job.result->sprite_count, s_job.result->page_count,
-                            s_job.elapsed_ms);
-                rc = GUI_PACK_DONE_PACK_OK;
-            }
-        } else {
-            tp_arena_destroy(s_job.arena); /* failure: keep the previous slot (canvas stays) */
-            if (cancelled) {
-                rc = GUI_PACK_DONE_PACK_CANCELLED;
-            } else {
-                if (out) {
-                    (void)snprintf(out->err, sizeof out->err, "%s",
-                                   s_job.err.msg[0] ? s_job.err.msg : tp_status_str(s_job.status));
-                }
-                rc = GUI_PACK_DONE_PACK_FAIL;
-            }
-        }
-        desc_free(&s_job.dv);
-        free(s_job.name_owned);
-        free(s_job.snap0);
-    } else if (s_job.kind == JOB_PREVIEW) {
-        if (s_job.status == TP_STATUS_OK && s_job.result && !cancelled) {
-            if (s_preview.arena) {
-                tp_arena_destroy(s_preview.arena); /* free any prior preview */
-            }
-            s_preview.arena = s_job.arena;
-            s_preview.result = s_job.result;
-            s_preview.valid = true;
-            s_preview.atlas_index = s_job.atlas_index;
-            (void)snprintf(s_preview.exporter_id, sizeof s_preview.exporter_id, "%s", s_job.preview_exporter);
-            if (out) {
-                out->atlas_index = s_job.atlas_index;
-                out->ms = s_job.elapsed_ms;
-            }
-            nt_log_info("gui_pack(async): preview '%s' via %s packed %d sprite(s), %d page(s) in %.1f ms",
-                        s_job.result->atlas_name, s_job.preview_exporter, s_job.result->sprite_count,
-                        s_job.result->page_count, s_job.elapsed_ms);
-            rc = GUI_PACK_DONE_PREVIEW_OK;
-        } else {
-            tp_arena_destroy(s_job.arena); /* discard: cancelled or failed -- the session slot is untouched */
-            if (cancelled) {
-                rc = GUI_PACK_DONE_PREVIEW_CANCELLED;
-            } else {
-                if (out) {
-                    (void)snprintf(out->err, sizeof out->err, "%s",
-                                   s_job.err.msg[0] ? s_job.err.msg : tp_status_str(s_job.status));
-                }
-                rc = GUI_PACK_DONE_PREVIEW_FAIL;
-            }
-        }
-        desc_free(&s_job.dv);
-        free(s_job.name_owned);
-    } else { /* JOB_EXPORT */
-        if (out) {
-            out->targets = s_job.exp_targets;
-            out->notices = s_job.exp_notices;
-            out->atlases_ok = s_job.exp_atlases_ok;
-            out->atlases_fail = s_job.exp_atlases_fail;
-            (void)snprintf(out->err, sizeof out->err, "%s", s_job.exp_first_err);
-        }
-        if (cancelled) {
-            rc = GUI_PACK_DONE_EXPORT_CANCELLED;
-        } else if (s_job.exp_atlases_fail > 0) {
-            rc = GUI_PACK_DONE_EXPORT_FAIL;
-        } else {
-            rc = GUI_PACK_DONE_EXPORT_OK;
-        }
-        nt_log_info("gui_pack(async): export %d target(s), %d ok, %d fail, %d notice(s) in %.1f ms", s_job.exp_targets,
-                    s_job.exp_atlases_ok, s_job.exp_atlases_fail, s_job.exp_notices, s_job.elapsed_ms);
-        for (int i = 0; i < s_job.eatlas_count; i++) {
-            desc_free(&s_job.eatlas[i].dv);
-        }
-        free(s_job.eatlas);
-        tp_project_destroy(s_job.clone);
-    }
-
-    memset(&s_job, 0, sizeof s_job);
-    s_job_active = false;
-    if (out) {
-        out->kind = rc;
-    }
-    return rc;
-}
-
-bool gui_pack_async_busy(void) { return s_job_active || s_debug_busy != GUI_PACK_ASYNC_NONE; }
-
-bool gui_pack_worker_active(void) { return s_job_active; } /* real worker only (no --shot debug busy) */
-
-gui_pack_async_kind gui_pack_async_active_kind(void) {
-    if (s_debug_busy != GUI_PACK_ASYNC_NONE) {
-        return s_debug_busy;
-    }
-    if (!s_job_active) {
-        return GUI_PACK_ASYNC_NONE;
-    }
-    return s_job.kind == JOB_EXPORT ? GUI_PACK_ASYNC_EXPORT : GUI_PACK_ASYNC_PACK;
-}
-
-double gui_pack_async_elapsed_sec(void) {
-    if (s_debug_busy != GUI_PACK_ASYNC_NONE) {
-        return 3.2; /* fixed for reproducible --shot-packing captures */
-    }
-    return s_job_active ? (now_ms() - s_job.start_ms) / 1000.0 : 0.0;
-}
-
-void gui_pack_export_progress(int *cur, int *total) {
-    if (s_debug_busy == GUI_PACK_ASYNC_EXPORT) {
-        if (cur) {
-            *cur = 2;
-        }
-        if (total) {
-            *total = 3;
-        }
-        return;
-    }
-    if (cur) {
-        *cur = s_job_active ? atomic_load_explicit(&s_job.exp_cur, memory_order_relaxed) : 0;
-    }
-    if (total) {
-        *total = s_job_active ? atomic_load_explicit(&s_job.exp_total, memory_order_relaxed) : 0;
-    }
-}
-
-void gui_pack_async_cancel(void) {
-    if (s_job_active) {
-        atomic_store_explicit(&s_job.cancelled, true, memory_order_relaxed);
-    }
-}
-
-bool gui_pack_async_cancelling(void) {
-    return s_job_active && atomic_load_explicit(&s_job.cancelled, memory_order_relaxed);
-}
-
-void gui_pack_debug_force_busy(gui_pack_async_kind kind) { s_debug_busy = kind; }
-// #endregion
-
-// #region export-target preview (EXP-PREVIEW)
-/* Assembles descs for `atlas_index` and computes the caps-clamped effective settings for `exporter_id`.
- * On success fills `dv` (caller desc_free's it regardless), *out_name (malloc'd atlas name; caller frees
- * on success, this frees it on its own later failure) and *out (effective settings with .sprites/.name/
- * .work_dir wired). false fills err. Mirrors the session assembly in gui_pack_atlas + the §3.3f
- * effective-extrude rule, then clamps through the exporter caps. */
-static bool preview_prepare(int atlas_index, const char *exporter_id, desc_vec *dv, char **out_name,
-                            tp_pack_settings *out, char *err, size_t err_cap) {
-    *out_name = NULL;
-    if (atlas_index < 0 || atlas_index >= GUI_PACK_MAX_ATLASES) {
-        if (err) {
-            (void)snprintf(err, err_cap, "atlas index out of range");
-        }
-        return false;
-    }
-    const tp_exporter *e = tp_exporter_find(exporter_id);
-    if (!e) {
-        if (err) {
-            (void)snprintf(err, err_cap, "unknown exporter '%s'", exporter_id ? exporter_id : "(null)");
-        }
-        return false;
-    }
-    tp_project *p = gui_project_get();
-    tp_project_atlas *a = tp_project_get_atlas(p, atlas_index);
-    if (!a) {
-        if (err) {
-            (void)snprintf(err, err_cap, "no such atlas");
-        }
-        return false;
-    }
-    int missing = 0;
-    if (!assemble(atlas_index, dv, &missing, err, err_cap)) {
-        return false;
-    }
-    if (dv->n == 0) {
-        if (err) {
-            (void)snprintf(err, err_cap, "atlas '%s' has no usable images%s", a->name,
-                           missing > 0 ? " (all sources missing)" : "");
-        }
-        return false;
-    }
-    tp_pack_settings native;
-    tp_error te = {{0}};
-    if (tp_project_atlas_to_settings(p, atlas_index, &native, &te) != TP_STATUS_OK) {
-        if (err) {
-            (void)snprintf(err, err_cap, "%s", te.msg);
-        }
-        return false;
-    }
-    tp_pack_settings eff;
-    if (tp_export_effective_settings(&native, &e->caps, &eff) != TP_STATUS_OK) {
-        if (err) {
-            (void)snprintf(err, err_cap, "could not clamp settings for '%s'", exporter_id);
-        }
-        return false;
-    }
-    char *name = dup_str(a->name); /* eff.atlas_name would alias the live model -- own a copy */
-    if (!name) {
-        if (err) {
-            (void)snprintf(err, err_cap, "out of memory");
-        }
-        return false;
-    }
-    eff.work_dir = s_work_dir;
-    eff.atlas_name = name;
-    eff.sprites = dv->v;
-    eff.sprite_count = dv->n;
-    *out_name = name;
-    *out = eff;
-    return true;
-}
-
-bool gui_pack_preview_blocking(int atlas_index, const char *exporter_id, char *err, size_t err_cap) {
-    desc_vec dv = {0};
-    char *name = NULL;
-    tp_pack_settings settings;
-    if (!preview_prepare(atlas_index, exporter_id, &dv, &name, &settings, err, err_cap)) {
-        desc_free(&dv);
-        free(name);
-        return false;
-    }
-    tp_arena *arena = tp_arena_create(0);
-    if (!arena) {
-        desc_free(&dv);
-        free(name);
-        if (err) {
-            (void)snprintf(err, err_cap, "out of memory (arena)");
-        }
-        return false;
-    }
-    tp_result *result = NULL;
-    tp_error e = {{0}};
-    const tp_status st = tp_pack(&settings, arena, &result, &e);
-    desc_free(&dv); /* names/paths consumed by tp_pack */
-    free(name);
-    if (st != TP_STATUS_OK || !result) {
-        tp_arena_destroy(arena);
-        if (err) {
-            (void)snprintf(err, err_cap, "%s", e.msg[0] ? e.msg : tp_status_str(st));
-        }
-        return false;
-    }
-    if (s_preview.arena) {
-        tp_arena_destroy(s_preview.arena);
-    }
-    s_preview.arena = arena;
-    s_preview.result = result;
-    s_preview.valid = true;
-    s_preview.atlas_index = atlas_index;
-    (void)snprintf(s_preview.exporter_id, sizeof s_preview.exporter_id, "%s", exporter_id);
-    nt_log_info("gui_pack: preview '%s' via %s -> %d sprite(s), %d page(s)", result->atlas_name, exporter_id,
-                result->sprite_count, result->page_count);
-    return true;
-}
-
-bool gui_pack_preview_async_start(int atlas_index, const char *exporter_id, char *err, size_t err_cap) {
-    if (s_job_active) {
-        if (err) {
-            (void)snprintf(err, err_cap, "busy -- a pack or export is already running");
-        }
-        return false;
-    }
-    desc_vec dv = {0};
-    char *name = NULL;
-    tp_pack_settings settings;
-    if (!preview_prepare(atlas_index, exporter_id, &dv, &name, &settings, err, err_cap)) {
-        desc_free(&dv);
-        free(name);
-        return false;
-    }
-    tp_arena *arena = tp_arena_create(0);
-    if (!arena) {
-        desc_free(&dv);
-        free(name);
-        if (err) {
-            (void)snprintf(err, err_cap, "out of memory");
-        }
-        return false;
-    }
-    memset(&s_job, 0, sizeof s_job);
-    s_job.kind = JOB_PREVIEW;
-    s_job.atlas_index = atlas_index;
-    s_job.settings = settings;
-    s_job.name_owned = name;
-    s_job.dv = dv;
-    s_job.arena = arena;
-    (void)snprintf(s_job.preview_exporter, sizeof s_job.preview_exporter, "%s", exporter_id);
-    s_job.start_ms = now_ms();
-    atomic_store_explicit(&s_job.state, 0, memory_order_relaxed);
-    atomic_store_explicit(&s_job.cancelled, false, memory_order_relaxed);
-    if (thrd_create(&s_job.thread, pack_worker, &s_job) != thrd_success) {
-        desc_free(&s_job.dv);
-        free(s_job.name_owned);
-        tp_arena_destroy(s_job.arena);
-        memset(&s_job, 0, sizeof s_job);
-        if (err) {
-            (void)snprintf(err, err_cap, "could not start worker thread");
-        }
-        return false;
-    }
-    s_job_active = true;
-    return true;
-}
-
-const tp_result *gui_pack_preview_result(int atlas_index) {
-    if (!s_preview.valid || s_preview.atlas_index != atlas_index) {
-        return NULL;
-    }
-    return s_preview.result;
-}
-
-void gui_pack_preview_clear(void) {
-    if (s_preview.arena) {
-        tp_arena_destroy(s_preview.arena);
-    }
-    s_preview.arena = NULL;
-    s_preview.result = NULL;
-    s_preview.valid = false;
-    s_preview.atlas_index = -1;
-    s_preview.exporter_id[0] = '\0';
-}
-
-/* Maps one predicted-loss axis (core field_id) to the chip's short token + the
- * tooltip's long line. These strings are GUI presentation, byte-pinned by selftest
- * phase 11; the core predict pass supplies only the structured field_id. Returns
- * false for an axis the chip does not surface (alias/multipage never reach it --
- * the chip passes a NULL prep, so predict never emits those). */
-static bool preview_field_phrases(int field_id, const char **short_tok, const char **long_line) {
-    switch (field_id) {
-        case TP_NOTICE_FIELD_TRANSFORM:
-            *short_tok = "no rotate/flip";
-            *long_line = "Rotations/flips off -- this format can't encode the full D4 orientation set";
-            return true;
-        case TP_NOTICE_FIELD_POLYGON:
-            *short_tok = "polygons \xE2\x86\x92 rect";
-            *long_line = "Polygon hulls flattened to rectangles -- this format stores quads only";
-            return true;
-        case TP_NOTICE_FIELD_SLICE9:
-            *short_tok = "slice9 dropped";
-            *long_line = "9-slice borders dropped -- this format does not store them";
-            return true;
-        case TP_NOTICE_FIELD_PIVOT:
-            *short_tok = "pivot dropped";
-            *long_line = "Per-sprite pivots dropped -- this format does not store them";
-            return true;
-        default:
-            return false;
-    }
-}
-
-int gui_pack_preview_diff(int atlas_index, const char *exporter_id, char *chip, size_t chip_cap, char *tip,
-                          size_t tip_cap) {
-    if (chip && chip_cap) {
-        chip[0] = '\0';
-    }
-    if (tip && tip_cap) {
-        tip[0] = '\0';
-    }
-    const tp_exporter *e = tp_exporter_find(exporter_id);
-    tp_project *p = gui_project_get();
-    if (!e) {
-        return 0;
-    }
-    /* One core enumeration for both frontends (review §3.1); NULL prep = project-only
-     * preview (no alias/multipage axes -- those need the packed result). */
-    tp_export_notices nz;
-    tp_export_notices_init(&nz);
-    tp_error te = {{0}};
-    if (tp_export_predict_loss(p, atlas_index, &e->caps, exporter_id, NULL, &nz, &te) != TP_STATUS_OK) {
-        tp_export_notices_free(&nz);
-        return 0;
-    }
-
-    int n = 0;
-    /* Rebuild the exact chip/tooltip strings from the structured notices. Guarded so the
-     * write pointer never forms past-end and a truncating snprintf can't advance out of range. */
-    size_t clen = 0;
-    size_t tlen = 0;
-    for (int i = 0; i < nz.count; i++) {
-        const char *short_tok = NULL;
-        const char *long_line = NULL;
-        if (!preview_field_phrases(nz.items[i].field_id, &short_tok, &long_line)) {
-            continue;
-        }
-        if (chip && clen < chip_cap) {
-            const int w_ = snprintf(chip + clen, chip_cap - clen, "%s%s", n > 0 ? ", " : "", short_tok);
-            if (w_ > 0) {
-                clen += (size_t)w_;
-            }
-        }
-        if (tip && tlen < tip_cap) {
-            const int w2_ = snprintf(tip + tlen, tip_cap - tlen, "%s%s", n > 0 ? "\n" : "", long_line);
-            if (w2_ > 0) {
-                tlen += (size_t)w2_;
-            }
-        }
-        n++;
-    }
-    tp_export_notices_free(&nz);
-    return n;
-}
-// #endregion
-
-void gui_pack_shutdown(void) {
-    if (s_job_active) {
-        /* Non-interruptible pack + no thrd_detach in this tinycthread -> join (covers the window
-         * X-button close path, which bypasses the interactive running-op guard). Result discarded. */
-        atomic_store_explicit(&s_job.cancelled, true, memory_order_relaxed);
-        (void)thrd_join(s_job.thread, NULL);
-        if (s_job.kind == JOB_PACK || s_job.kind == JOB_PREVIEW) {
-            if (s_job.arena) {
-                tp_arena_destroy(s_job.arena);
-            }
-            desc_free(&s_job.dv);
-            free(s_job.name_owned);
-            free(s_job.snap0);
-        } else if (s_job.kind == JOB_EXPORT) {
-            for (int i = 0; i < s_job.eatlas_count; i++) {
-                desc_free(&s_job.eatlas[i].dv);
-            }
-            free(s_job.eatlas);
-            tp_project_destroy(s_job.clone);
-        }
-        memset(&s_job, 0, sizeof s_job);
-        s_job_active = false;
-    }
-    gui_pack_clear(-1);
-    gui_pack_preview_clear();
-}
-
 const tp_result *gui_pack_result(int atlas_index) {
-    if (atlas_index < 0 || atlas_index >= GUI_PACK_MAX_ATLASES || !s_slots[atlas_index].valid) {
-        return NULL;
-    }
-    return s_slots[atlas_index].result;
+    const pack_slot *slot = pack_slot_for_atlas_index(atlas_index);
+    return slot ? slot->result : NULL;
 }
 
-int gui_pack_find_sprite(int atlas_index, const char *key) {
-    const tp_result *r = gui_pack_result(atlas_index);
-    if (!r || !key) {
+uint64_t gui_pack_result_version(int atlas_index) {
+    const pack_slot *slot = pack_slot_for_atlas_index(atlas_index);
+    return slot ? slot->version : 0U;
+}
+
+bool gui_pack_sprite_matches_ref(int atlas_index, int sprite_index,
+                                 tp_id128 source_id,
+                                 const char *source_key) {
+    const tp_result *result = gui_pack_result(atlas_index);
+    if (!result || sprite_index < 0 || sprite_index >= result->sprite_count ||
+        tp_id128_is_nil(source_id) || !source_key) {
+        return false;
+    }
+    char canonical_name[TP_PACK_INTERNAL_NAME_CAP];
+    if (tp_pack_input_format_sprite_name(
+            source_id, source_key, canonical_name, sizeof canonical_name,
+            NULL) != TP_STATUS_OK) {
+        return false;
+    }
+    const char *packed_name = result->sprites[sprite_index].name;
+    return packed_name && strcmp(packed_name, canonical_name) == 0;
+}
+
+int gui_pack_find_sprite_ref(int atlas_index, tp_id128 source_id,
+                             const char *source_key) {
+    if (atlas_index < 0 || atlas_index >= GUI_PACK_MAX_ATLASES) {
         return -1;
     }
-    for (int i = 0; i < r->sprite_count; i++) {
-        char sk[256];
-        tp_sprite_export_key(r->sprites[i].name, sk, sizeof sk);
-        if (strcmp(sk, key) == 0) {
-            return i;
+    static const pack_slot *last_slot;
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        snapshot ? tp_session_snapshot_atlas_at(snapshot, atlas_index) : NULL;
+    if (!atlas) {
+        return -1;
+    }
+    const pack_slot *slot = last_slot;
+    if (!slot || !slot->valid || !tp_id128_eq(slot->atlas_id, atlas->id)) {
+        slot = pack_slot_for_atlas_id(atlas->id);
+        last_slot = slot;
+    }
+    if (!slot) {
+        return -1;
+    }
+    char canonical_name[TP_PACK_INTERNAL_NAME_CAP];
+    if (tp_pack_input_format_sprite_name(
+            source_id, source_key, canonical_name, sizeof canonical_name,
+            NULL) != TP_STATUS_OK) {
+        return -1;
+    }
+#ifdef NTPACKER_GUI_SELFTEST
+    s_ref_index_work.lookup_calls++;
+#endif
+    if (!slot->ref_index || slot->ref_index_cap == 0U) {
+        return -1;
+    }
+    const uint64_t hash = pack_ref_hash(canonical_name);
+    const size_t mask = slot->ref_index_cap - 1U;
+    size_t at = (size_t)hash & mask;
+    for (size_t probe = 0U; probe < slot->ref_index_cap; ++probe) {
+        const pack_ref_entry *entry = &slot->ref_index[at];
+#ifdef NTPACKER_GUI_SELFTEST
+        s_ref_index_work.lookup_probes++;
+#endif
+        if (!entry->occupied) {
+            return -1;
         }
+        if (entry->hash == hash && strcmp(entry->name, canonical_name) == 0) {
+            return entry->result_index;
+        }
+        at = (at + 1U) & mask;
     }
     return -1;
 }
-
-bool gui_pack_atlas(int atlas_index, double *out_ms, char *err, size_t err_cap, char *notice, size_t notice_cap) {
-    if (atlas_index < 0 || atlas_index >= GUI_PACK_MAX_ATLASES) {
-        if (err) {
-            (void)snprintf(err, err_cap, "atlas index out of range");
-        }
-        return false;
-    }
-    tp_project *p = gui_project_get();
-    tp_project_atlas *a = tp_project_get_atlas(p, atlas_index);
-    if (!a) {
-        if (err) {
-            (void)snprintf(err, err_cap, "no such atlas");
-        }
-        return false;
-    }
-
-    /* Assemble sprites from the atlas's sources: files as-is, folders expanded (gui_scan). */
-    desc_vec dv = {0};
-    int missing = 0;
-    if (!assemble(atlas_index, &dv, &missing, err, err_cap)) {
-        desc_free(&dv);
-        return false;
-    }
-
-    if (dv.n == 0) {
-        desc_free(&dv);
-        if (err) {
-            (void)snprintf(err, err_cap, "atlas '%s' has no usable images%s", a->name,
-                           missing > 0 ? " (all sources missing)" : "");
-        }
-        return false;
-    }
-
-    tp_pack_settings settings;
-    tp_error e = {{0}};
-    if (tp_project_atlas_to_settings(p, atlas_index, &settings, &e) != TP_STATUS_OK) {
-        desc_free(&dv);
-        if (err) {
-            (void)snprintf(err, err_cap, "%s", e.msg);
-        }
-        return false;
-    }
-    settings.work_dir = s_work_dir;
-    settings.sprites = dv.v;
-    settings.sprite_count = dv.n;
-
-    tp_arena *arena = tp_arena_create(0);
-    if (!arena) {
-        desc_free(&dv);
-        if (err) {
-            (void)snprintf(err, err_cap, "out of memory (arena)");
-        }
-        return false;
-    }
-
-    const double t0 = now_ms();
-    tp_result *result = NULL;
-    tp_status st = tp_pack(&settings, arena, &result, &e);
-    const double dt = now_ms() - t0;
-    desc_free(&dv); /* names/paths consumed by tp_pack; result has its own arena copies */
-
-    if (st != TP_STATUS_OK || !result) {
-        tp_arena_destroy(arena); /* keep any previous result for this slot (canvas stays) */
-        if (err) {
-            (void)snprintf(err, err_cap, "%s", e.msg[0] ? e.msg : tp_status_str(st));
-        }
-        return false;
-    }
-
-    /* Success: swap in the new result, freeing the previous arena. */
-    if (s_slots[atlas_index].arena) {
-        tp_arena_destroy(s_slots[atlas_index].arena);
-    }
-    s_slots[atlas_index].arena = arena;
-    s_slots[atlas_index].result = result;
-    s_slots[atlas_index].valid = true;
-
-    if (out_ms) {
-        *out_ms = dt;
-    }
-    if (notice && notice_cap) {
-        if (missing > 0) {
-            (void)snprintf(notice, notice_cap, "%d missing file(s) skipped", missing);
-        } else {
-            notice[0] = '\0';
-        }
-    }
-    nt_log_info("gui_pack: atlas '%s' packed %d sprite(s), %d page(s) in %.1f ms%s", result->atlas_name,
-                result->sprite_count, result->page_count, dt, missing > 0 ? " (missing skipped)" : "");
-    return true;
-}
-
-bool gui_pack_export(int atlas_index, int *out_targets, int *out_notices, char *err, size_t err_cap, char *notice,
-                     size_t notice_cap) {
-    tp_project *p = gui_project_get();
-    tp_project_atlas *a = tp_project_get_atlas(p, atlas_index);
-    if (!a) {
-        if (err) {
-            (void)snprintf(err, err_cap, "no such atlas");
-        }
-        return false;
-    }
-    /* Resolve + create each enabled target's output parent dir (tp_export_run requires it to exist).
-     * A relative out_path in an unsaved project cannot resolve -> ask the user to save first. */
-    int enabled = 0;
-    for (int t = 0; t < a->target_count; t++) {
-        if (!a->targets[t].enabled) {
-            continue;
-        }
-        char out_abs[600];
-        if (tp_project_resolve_path(p, a->targets[t].out_path, out_abs, sizeof out_abs) != TP_STATUS_OK) {
-            if (err) {
-                (void)snprintf(err, err_cap, "save the project first (relative output paths need a project dir)");
-            }
-            return false;
-        }
-        tp_mkdirs_parent(out_abs);
-        enabled++;
-    }
-    if (enabled == 0) {
-        if (err) {
-            (void)snprintf(err, err_cap, "atlas '%s' has no enabled targets", a->name);
-        }
-        return false;
-    }
-
-    desc_vec dv = {0};
-    int missing = 0;
-    if (!assemble(atlas_index, &dv, &missing, err, err_cap)) {
-        desc_free(&dv);
-        return false;
-    }
-    if (dv.n == 0) {
-        desc_free(&dv);
-        if (err) {
-            (void)snprintf(err, err_cap, "atlas '%s' has no usable images", a->name);
-        }
-        return false;
-    }
-
-    tp_arena *arena = tp_arena_create(0);
-    if (!arena) {
-        desc_free(&dv);
-        if (err) {
-            (void)snprintf(err, err_cap, "out of memory (arena)");
-        }
-        return false;
-    }
-    tp_export_notices notices;
-    tp_export_notices_init(&notices);
-    tp_error e = {{0}};
-    int runs = 0;
-    tp_status st = tp_export_run(p, atlas_index, dv.v, dv.n, s_work_dir, arena, &notices, &runs, &e);
-    desc_free(&dv);
-
-    const int nc = notices.count;
-    if (out_targets) {
-        *out_targets = enabled;
-    }
-    if (out_notices) {
-        *out_notices = nc;
-    }
-    if (notice && notice_cap) {
-        if (nc > 0) {
-            (void)snprintf(notice, notice_cap, "%s%s", notices.items[0].msg, nc > 1 ? " (+more)" : "");
-        } else {
-            notice[0] = '\0';
-        }
-    }
-    tp_export_notices_free(&notices);
-    tp_arena_destroy(arena);
-
-    if (st != TP_STATUS_OK) {
-        if (err) {
-            (void)snprintf(err, err_cap, "%s", e.msg[0] ? e.msg : tp_status_str(st));
-        }
-        return false;
-    }
-    nt_log_info("gui_pack: atlas '%s' exported %d target(s), %d pack run(s), %d notice(s)", a->name, enabled, runs, nc);
-    return true;
-}
-// #endregion

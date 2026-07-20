@@ -7,6 +7,7 @@
 
 #define _CRT_SECURE_NO_WARNINGS
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,18 +16,25 @@
 #include <direct.h>
 #define TP_TEST_MKDIR(p) _mkdir(p)
 #else
+#include <fcntl.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #define TP_TEST_MKDIR(p) mkdir((p), 0777)
 #endif
 
+#include "tp_core/tp_identity.h"
 #include "tp_core/tp_scan.h"
+#include "tp_core/tp_srckey.h"
+#include "../src/tp_fs_internal.h"
 #include "unity.h"
 
 static const char *g_dir; /* scratch dir (argv[1]) */
 static char g_root[600];  /* g_dir/fixture -- the tree tp_scan_dir walks */
 
-void setUp(void) {}
-void tearDown(void) {}
+void tp_scan__test_set_alloc_fail(int nth);
+
+void setUp(void) { tp_scan__test_set_alloc_fail(-1); }
+void tearDown(void) { tp_scan__test_set_alloc_fail(-1); }
 
 // #region fixture helpers
 static void mkdir_p(const char *path) {
@@ -84,6 +92,26 @@ static void build_fixture(void) {
     mkdir_p(g_root);
     char p[700];
 
+    /* Remove artifacts left by older revisions of the UTF-8/long-path tests,
+     * which used to place their images below the four-entry fixture root. */
+    (void)snprintf(p, sizeof p,
+                   "%s/\xD0\xB4\xD0\xB0\xD0\xBD\xD0\xBD\xD1\x8B\xD0\xB5/"
+                   "\xD1\x81\xD0\xBF\xD1\x80\xD0\xB0\xD0\xB9\xD1\x82.png",
+                   g_root);
+    (void)tp_fs_remove_file(p);
+    (void)snprintf(p, sizeof p, "%s", g_root);
+    for (int i = 0; i < 12; i++) {
+        size_t used = strlen(p);
+        if (used + strlen("/longpathsegment") + 1U < sizeof p) {
+            memcpy(p + used, "/longpathsegment", strlen("/longpathsegment") + 1U);
+        }
+    }
+    size_t used = strlen(p);
+    if (used + strlen("/long.png") + 1U < sizeof p) {
+        memcpy(p + used, "/long.png", strlen("/long.png") + 1U);
+        (void)tp_fs_remove_file(p);
+    }
+
     (void)snprintf(p, sizeof p, "%s/hero.png", g_root);
     write_file(p, "HERO-IMG-DATA");
 
@@ -115,27 +143,62 @@ static const tp_scan_entry *find_rel(const tp_scan_result *r, const char *rel) {
     }
     return NULL;
 }
+
+/* R5b-2 dir-lister fixture. Under g_root/listdir:
+ *   A.ntpjournal            regular file, matches ".ntpjournal"
+ *   B.ntpjournal            regular file, matches ".ntpjournal"
+ *   A.ntpjournal.lock       regular file, does NOT match ".ntpjournal" (companion lock)
+ *   notes.txt               regular file, non-matching suffix
+ *   sub/                    subdirectory (must be skipped -- regular files only)
+ *   sub/C.ntpjournal        nested match (must NOT appear -- non-recursive)
+ */
+static char g_listdir[700];
+static void build_listdir_fixture(void) {
+    (void)snprintf(g_listdir, sizeof g_listdir, "%s/listdir", g_root);
+    mkdir_p(g_listdir);
+    char p[800];
+    (void)snprintf(p, sizeof p, "%s/A.ntpjournal", g_listdir);
+    write_file(p, "A");
+    (void)snprintf(p, sizeof p, "%s/B.ntpjournal", g_listdir);
+    write_file(p, "B");
+    (void)snprintf(p, sizeof p, "%s/A.ntpjournal.lock", g_listdir);
+    write_file(p, "L");
+    (void)snprintf(p, sizeof p, "%s/notes.txt", g_listdir);
+    write_file(p, "T");
+    (void)snprintf(p, sizeof p, "%s/sub", g_listdir);
+    mkdir_p(p);
+    (void)snprintf(p, sizeof p, "%s/sub/C.ntpjournal", g_listdir);
+    write_file(p, "C");
+}
+
 // #endregion
 
 // #region tests
-void test_missing_dir_is_empty(void) {
+void test_missing_dir_is_structured_and_atomic(void) {
     char missing[700];
     (void)snprintf(missing, sizeof missing, "%s/does_not_exist", g_dir);
     tp_scan_result r;
-    tp_scan_dir(missing, &r);
+    tp_error error = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_NOT_FOUND,
+                          tp_scan_dir(missing, &r, &error));
     TEST_ASSERT_EQUAL_INT(0, r.count);
     TEST_ASSERT_NULL(r.entries);
+    TEST_ASSERT_NOT_EQUAL(0, error.msg[0]);
     tp_scan_free(&r); /* safe on an empty result */
 }
 
 void test_null_and_empty_abs_dir_are_safe(void) {
     tp_scan_result r;
-    tp_scan_dir(NULL, &r);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_scan_dir(NULL, &r, NULL));
     TEST_ASSERT_EQUAL_INT(0, r.count);
     TEST_ASSERT_NULL(r.entries);
-    tp_scan_dir("", &r);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_scan_dir("", &r, NULL));
     TEST_ASSERT_EQUAL_INT(0, r.count);
     TEST_ASSERT_NULL(r.entries);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_scan_dir(g_root, NULL, NULL));
     tp_scan_free(NULL); /* no crash */
 }
 
@@ -143,7 +206,8 @@ void test_empty_subdir_is_empty(void) {
     char empty_dir[700];
     (void)snprintf(empty_dir, sizeof empty_dir, "%s/empty_dir", g_root);
     tp_scan_result r;
-    tp_scan_dir(empty_dir, &r);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_scan_dir(empty_dir, &r, NULL));
     TEST_ASSERT_EQUAL_INT(0, r.count);
     TEST_ASSERT_NULL(r.entries);
     tp_scan_free(&r);
@@ -153,7 +217,9 @@ void test_empty_subdir_is_empty(void) {
  * non-image exclusion, and today's dotfile/case-insensitive whitelist behavior. */
 void test_fixture_walk(void) {
     tp_scan_result r;
-    tp_scan_dir(g_root, &r);
+    tp_error error = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK,
+                                  tp_scan_dir(g_root, &r, &error), error.msg);
 
     TEST_ASSERT_EQUAL_INT(4, r.count); /* .png, BADGE.PNG, hero.png, tank/walk_01.png -- .txt files excluded */
     TEST_ASSERT_NOT_NULL(r.entries);
@@ -215,18 +281,401 @@ void test_is_dir_and_exists(void) {
     TEST_ASSERT_FALSE(tp_scan_exists(missing));
     TEST_ASSERT_FALSE(tp_scan_exists(NULL));
     TEST_ASSERT_FALSE(tp_scan_exists(""));
+
+    long long size = -1;
+    long long mtime = -1;
+    TEST_ASSERT_TRUE(tp_scan_file_stat(hero, &size, &mtime));
+    TEST_ASSERT_EQUAL_INT64(13, size);
+    TEST_ASSERT_TRUE(mtime >= 0);
+    TEST_ASSERT_FALSE(tp_scan_file_stat(g_root, &size, &mtime));
+    TEST_ASSERT_FALSE(tp_scan_file_stat(missing, &size, &mtime));
 }
+
+typedef struct visit_probe {
+    int count;
+    uint64_t bytes;
+    int stop_after;
+} visit_probe;
+
+static bool count_journal_name(void *ctx, const char *name, uint64_t size) {
+    visit_probe *probe = (visit_probe *)ctx;
+    TEST_ASSERT_NOT_NULL(name);
+    probe->count++;
+    probe->bytes += size;
+    return probe->stop_after == 0 || probe->count < probe->stop_after;
+}
+
+void test_visit_dir_streams_matching_names(void) {
+    visit_probe all = {0};
+    TEST_ASSERT_TRUE(tp_scan_visit_dir(g_listdir, ".ntpjournal", count_journal_name, &all));
+    TEST_ASSERT_EQUAL_INT(2, all.count);
+    TEST_ASSERT_EQUAL_UINT64(2u, all.bytes); /* fixture files contain one byte each */
+
+    visit_probe bounded = {.stop_after = 1};
+    TEST_ASSERT_TRUE(tp_scan_visit_dir(g_listdir, ".ntpjournal", count_journal_name, &bounded));
+    TEST_ASSERT_EQUAL_INT(1, bounded.count);
+}
+
+#ifndef _WIN32
+/* Recovery discovery must never follow symlinks or return special files. The
+ * caller opens every returned journal path, so returning a FIFO can block GUI
+ * startup indefinitely and following a symlink escapes the recovery directory. */
+void test_visit_dir_excludes_fifo_and_symlink(void) {
+    char fifo_path[800];
+    char link_path[800];
+    (void)snprintf(fifo_path, sizeof fifo_path, "%s/pipe.ntpjournal", g_listdir);
+    (void)snprintf(link_path, sizeof link_path, "%s/link.ntpjournal", g_listdir);
+    (void)unlink(fifo_path);
+    (void)unlink(link_path);
+    TEST_ASSERT_EQUAL_INT(0, mkfifo(fifo_path, 0600));
+    TEST_ASSERT_EQUAL_INT(0, symlink("A.ntpjournal", link_path));
+
+    visit_probe probe = {0};
+    TEST_ASSERT_TRUE(tp_scan_visit_dir(g_listdir, ".ntpjournal", count_journal_name, &probe));
+    TEST_ASSERT_EQUAL_INT(2, probe.count);
+    (void)unlink(link_path);
+    (void)unlink(fifo_path);
+}
+#endif
+
+/* A dir-open or argument failure returns false; startup recovery degrades to an empty collect. */
+void test_visit_dir_missing_and_bad_args_return_false(void) {
+    char missing[800];
+    (void)snprintf(missing, sizeof missing, "%s/does_not_exist", g_listdir);
+    visit_probe probe = {0};
+    TEST_ASSERT_FALSE(tp_scan_visit_dir(missing, ".ntpjournal", count_journal_name, &probe));
+    TEST_ASSERT_FALSE(tp_scan_visit_dir(NULL, "", count_journal_name, &probe));
+    TEST_ASSERT_FALSE(tp_scan_visit_dir("", "", count_journal_name, &probe));
+    TEST_ASSERT_FALSE(tp_scan_visit_dir(g_listdir, "", NULL, &probe));
+    TEST_ASSERT_EQUAL_INT(0, probe.count);
+}
+
+void test_utf8_filesystem_backend_round_trips_non_ascii_paths(void) {
+    static const char utf8_dir[] = "\xD0\xB4\xD0\xB0\xD0\xBD\xD0\xBD\xD1\x8B\xD0\xB5"; /* данные */
+    static const char utf8_file[] =
+        "\xD1\x81\xD0\xBF\xD1\x80\xD0\xB0\xD0\xB9\xD1\x82.png"; /* спрайт.png */
+    char dir[800];
+    char path[1100];
+    char rel[1100];
+    char root[800];
+    (void)snprintf(root, sizeof root, "%s/utf8_fixture", g_dir);
+    (void)snprintf(dir, sizeof dir, "%s/%s", root, utf8_dir);
+    (void)snprintf(path, sizeof path, "%s/%s", dir, utf8_file);
+    (void)snprintf(rel, sizeof rel, "%s/%s", utf8_dir, utf8_file);
+
+    tp_mkdirs(dir);
+    FILE *f = tp_fs_fopen(path, "wb");
+    TEST_ASSERT_NOT_NULL(f);
+    TEST_ASSERT_TRUE(tp_fs_write_all(f, "UTF8", 4U));
+    TEST_ASSERT_TRUE(tp_fs_flush(f));
+    TEST_ASSERT_TRUE(tp_fs_close(f));
+
+    tp_fs_info info;
+    TEST_ASSERT_TRUE(tp_fs_stat(path, &info));
+    TEST_ASSERT_EQUAL_INT(TP_FS_KIND_REGULAR, info.kind);
+    TEST_ASSERT_EQUAL_UINT64(4U, info.size);
+    TEST_ASSERT_TRUE(tp_fs_exists(path));
+
+    tp_scan_result r;
+    tp_error error = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK,
+                                  tp_scan_dir(root, &r, &error), error.msg);
+    const tp_scan_entry *entry = find_rel(&r, rel);
+    TEST_ASSERT_NOT_NULL(entry);
+    TEST_ASSERT_EQUAL_INT(4, (int)entry->size);
+    tp_scan_free(&r);
+}
+
+/* A source-local key may be much longer than the old 255-byte GUI-era buffer,
+ * and the resolved decode path may be longer than 511 bytes.  The scanner is
+ * the authority for both values, so neither may be silently dropped. */
+void test_deep_utf8_path_is_not_silently_omitted(void) {
+    char root[TP_IDENTITY_PATH_MAX];
+    char dir[TP_IDENTITY_PATH_MAX];
+    char rel[TP_SRCKEY_MAX];
+    char path[TP_IDENTITY_PATH_MAX];
+    (void)snprintf(root, sizeof root, "%s/deep_utf8_scan", g_dir);
+    (void)snprintf(dir, sizeof dir, "%s", root);
+    rel[0] = '\0';
+
+    static const char component[] =
+        "\xD1\x81\xD0\xB5\xD0\xB3\xD0\xBC\xD0\xB5\xD0\xBD\xD1\x82";
+    for (int i = 0; i < 24; i++) {
+        char segment[96];
+        (void)snprintf(segment, sizeof segment, "%s_%02d_abcdefghijklmnop",
+                       component, i);
+        size_t dir_used = strlen(dir);
+        size_t rel_used = strlen(rel);
+        size_t segment_len = strlen(segment);
+        TEST_ASSERT_TRUE(dir_used + 1U + segment_len + 1U < sizeof dir);
+        TEST_ASSERT_TRUE(rel_used + (rel_used ? 1U : 0U) + segment_len + 1U <
+                         sizeof rel);
+        dir[dir_used++] = '/';
+        memcpy(dir + dir_used, segment, segment_len + 1U);
+        if (rel_used) {
+            rel[rel_used++] = '/';
+        }
+        memcpy(rel + rel_used, segment, segment_len + 1U);
+    }
+    static const char filename[] =
+        "\xD0\xB3\xD0\xBB\xD1\x83\xD0\xB1\xD0\xBE\xD0\xBA\xD0\xB8\xD0\xB9.png";
+    size_t dir_used = strlen(dir);
+    size_t rel_used = strlen(rel);
+    size_t filename_len = strlen(filename);
+    TEST_ASSERT_TRUE(dir_used + 1U + filename_len + 1U < sizeof path);
+    (void)snprintf(path, sizeof path, "%s/%s", dir, filename);
+    TEST_ASSERT_TRUE(rel_used + 1U + filename_len + 1U < sizeof rel);
+    rel[rel_used++] = '/';
+    memcpy(rel + rel_used, filename, filename_len + 1U);
+    TEST_ASSERT_GREATER_THAN_size_t(255U, strlen(rel));
+    TEST_ASSERT_GREATER_THAN_size_t(511U, strlen(path));
+
+    tp_mkdirs(dir);
+    FILE *file = tp_fs_fopen(path, "wb");
+    TEST_ASSERT_NOT_NULL_MESSAGE(file, path);
+    TEST_ASSERT_TRUE(tp_fs_write_all(file, "DEEP", 4U));
+    TEST_ASSERT_TRUE(tp_fs_close(file));
+
+    tp_scan_result result;
+    tp_error error = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK,
+                                  tp_scan_dir(root, &result, &error), error.msg);
+    const tp_scan_entry *entry = find_rel(&result, rel);
+    TEST_ASSERT_NOT_NULL_MESSAGE(entry,
+                                 "deep UTF-8 image must not disappear from scan");
+    TEST_ASSERT_EQUAL_STRING(path, entry->abs);
+    tp_scan_free(&result);
+}
+
+void test_scan_allocation_failure_is_oom_and_never_partial(void) {
+    tp_scan_result result = {0};
+    tp_error error = {0};
+    tp_scan__test_set_alloc_fail(2);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OOM,
+                          tp_scan_dir(g_root, &result, &error));
+    TEST_ASSERT_NULL(result.entries);
+    TEST_ASSERT_EQUAL_INT(0, result.count);
+    TEST_ASSERT_NOT_NULL(strstr(error.msg, "allocation"));
+}
+
+void test_scan_root_overflow_is_structured_and_never_touches_disk(void) {
+    char *oversized = (char *)malloc((size_t)TP_IDENTITY_PATH_MAX + 1U);
+    TEST_ASSERT_NOT_NULL(oversized);
+    memset(oversized, 'x', (size_t)TP_IDENTITY_PATH_MAX);
+    oversized[TP_IDENTITY_PATH_MAX] = '\0';
+    tp_scan_result result = {0};
+    tp_error error = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS,
+                          tp_scan_dir(oversized, &result, &error));
+    TEST_ASSERT_NULL(result.entries);
+    TEST_ASSERT_EQUAL_INT(0, result.count);
+    free(oversized);
+}
+
+void test_existing_non_directory_is_a_scan_error_not_empty_success(void) {
+    char file[TP_IDENTITY_PATH_MAX];
+    (void)snprintf(file, sizeof file, "%s/hero.png", g_root);
+    tp_scan_result result = {0};
+    tp_error error = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_PATH_RESOLVE_FAILED,
+                          tp_scan_dir(file, &result, &error));
+    TEST_ASSERT_NULL(result.entries);
+    TEST_ASSERT_EQUAL_INT(0, result.count);
+    TEST_ASSERT_NOT_NULL(strstr(error.msg, "not a direct directory"));
+}
+
+static void assert_file_byte(const char *path, char expected) {
+    FILE *file = tp_fs_fopen(path, "rb");
+    TEST_ASSERT_NOT_NULL(file);
+    char actual = '\0';
+    TEST_ASSERT_TRUE(tp_fs_read_all(file, &actual, 1U));
+    TEST_ASSERT_EQUAL_INT(expected, actual);
+    TEST_ASSERT_TRUE(tp_fs_close(file));
+}
+
+void test_filesystem_publication_primitives_are_no_clobber_and_replace_safe(void) {
+    char source[800];
+    char destination[800];
+    char moved[800];
+    (void)snprintf(source, sizeof source, "%s/fs-publish-source.tmp", g_dir);
+    (void)snprintf(destination, sizeof destination, "%s/fs-publish-destination.tmp", g_dir);
+    (void)snprintf(moved, sizeof moved, "%s/fs-publish-moved.tmp", g_dir);
+    (void)tp_fs_remove_file(source);
+    (void)tp_fs_remove_file(destination);
+    (void)tp_fs_remove_file(moved);
+
+    FILE *f = tp_fs_create_exclusive(source, false);
+    TEST_ASSERT_NOT_NULL(f);
+    TEST_ASSERT_TRUE(tp_fs_write_all(f, "A", 1U));
+    TEST_ASSERT_TRUE(tp_fs_sync(f));
+    TEST_ASSERT_TRUE(tp_fs_close(f));
+    TEST_ASSERT_NULL(tp_fs_create_exclusive(source, false));
+    TEST_ASSERT_TRUE(tp_fs_write_file(destination, "B", 1U));
+
+    TEST_ASSERT_EQUAL_INT(TP_FS_MOVE_DESTINATION_EXISTS, tp_fs_move_no_replace(source, destination));
+    TEST_ASSERT_TRUE(tp_fs_exists(source));
+    TEST_ASSERT_TRUE(tp_fs_exists(destination));
+    assert_file_byte(source, 'A');
+    assert_file_byte(destination, 'B');
+    TEST_ASSERT_TRUE(tp_fs_replace(source, destination));
+    TEST_ASSERT_FALSE(tp_fs_exists(source));
+    assert_file_byte(destination, 'A');
+
+    f = tp_fs_create_exclusive(source, true);
+    TEST_ASSERT_NOT_NULL(f);
+    TEST_ASSERT_TRUE(tp_fs_write_all(f, "C", 1U));
+    TEST_ASSERT_TRUE(tp_fs_close(f));
+    TEST_ASSERT_EQUAL_INT(TP_FS_MOVE_OK, tp_fs_move_no_replace(source, moved));
+    TEST_ASSERT_FALSE(tp_fs_exists(source));
+    TEST_ASSERT_TRUE(tp_fs_exists(moved));
+    TEST_ASSERT_TRUE(tp_fs_sync_parent(moved));
+
+    TEST_ASSERT_TRUE(tp_fs_remove_file(destination));
+    TEST_ASSERT_TRUE(tp_fs_remove_file(moved));
+}
+
+void test_filesystem_backend_rejects_invalid_utf8(void) {
+    char invalid[900];
+    char sentinel[900];
+    (void)snprintf(invalid, sizeof invalid, "%s/bad-\xC3\x28.tmp", g_root);
+    (void)snprintf(sentinel, sizeof sentinel, "%s/invalid-sentinel.tmp", g_dir);
+    TEST_ASSERT_TRUE(tp_fs_write_file(sentinel, "S", 1U));
+    errno = 0;
+    TEST_ASSERT_NULL(tp_fs_fopen(invalid, "wb"));
+    TEST_ASSERT_EQUAL_INT(EILSEQ, errno);
+    TEST_ASSERT_FALSE(tp_fs_exists(invalid));
+    TEST_ASSERT_EQUAL_INT(EILSEQ, errno);
+    TEST_ASSERT_FALSE(tp_fs_create_dir(invalid));
+    TEST_ASSERT_EQUAL_INT(EILSEQ, errno);
+    TEST_ASSERT_NULL(tp_fs_dir_open(invalid));
+    TEST_ASSERT_EQUAL_INT(EILSEQ, errno);
+    TEST_ASSERT_NULL(tp_fs_create_exclusive(invalid, false));
+    TEST_ASSERT_EQUAL_INT(EILSEQ, errno);
+    TEST_ASSERT_FALSE(tp_fs_remove_file(invalid));
+    TEST_ASSERT_EQUAL_INT(EILSEQ, errno);
+    TEST_ASSERT_FALSE(tp_fs_replace(invalid, sentinel));
+    TEST_ASSERT_EQUAL_INT(EILSEQ, errno);
+    TEST_ASSERT_FALSE(tp_fs_replace(sentinel, invalid));
+    TEST_ASSERT_EQUAL_INT(EILSEQ, errno);
+    TEST_ASSERT_EQUAL_INT(TP_FS_MOVE_ERROR,
+                          tp_fs_move_no_replace(invalid, sentinel));
+    TEST_ASSERT_EQUAL_INT(EILSEQ, errno);
+    TEST_ASSERT_EQUAL_INT(TP_FS_MOVE_ERROR,
+                          tp_fs_move_no_replace(sentinel, invalid));
+    TEST_ASSERT_EQUAL_INT(EILSEQ, errno);
+    TEST_ASSERT_FALSE(tp_fs_sync_parent(invalid));
+    TEST_ASSERT_EQUAL_INT(EILSEQ, errno);
+    assert_file_byte(sentinel, 'S');
+
+    tp_scan_result result = {0};
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_UTF8,
+                          tp_scan_dir(invalid, &result, &error));
+    TEST_ASSERT_NULL(result.entries);
+    TEST_ASSERT_EQUAL_INT(0, result.count);
+    TEST_ASSERT_TRUE(tp_fs_remove_file(sentinel));
+}
+
+#ifndef _WIN32
+void test_posix_directory_iterator_rejects_invalid_utf8_entry_atomically(void) {
+    char invalid_entry[900];
+    (void)snprintf(invalid_entry, sizeof invalid_entry,
+                   "%s/raw-bad-\xC3\x28.png", g_root);
+    errno = 0;
+    int fd = open(invalid_entry, O_CREAT | O_TRUNC | O_WRONLY, 0600);
+    if (fd < 0 && errno == EILSEQ) {
+        TEST_IGNORE_MESSAGE(
+            "filesystem rejects invalid UTF-8 filenames before enumeration");
+    }
+    TEST_ASSERT_TRUE_MESSAGE(
+        fd >= 0, "invalid UTF-8 fixture creation failed unexpectedly");
+    TEST_ASSERT_EQUAL_INT(0, close(fd));
+
+    tp_scan_result result = {0};
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_UTF8,
+                          tp_scan_dir(g_root, &result, &error));
+    TEST_ASSERT_NULL(result.entries);
+    TEST_ASSERT_EQUAL_INT(0, result.count);
+    TEST_ASSERT_EQUAL_INT(0, unlink(invalid_entry));
+}
+#endif
+
+#ifdef _WIN32
+void test_windows_filesystem_utf_conversion_reports_small_buffers(void) {
+    wchar_t too_small_wide[2];
+    errno = 0;
+    TEST_ASSERT_FALSE(tp_fs_win32_utf8_to_utf16("abc", too_small_wide, 2U));
+    TEST_ASSERT_EQUAL_INT(ERANGE, errno);
+    char too_small_utf8[2];
+    errno = 0;
+    TEST_ASSERT_FALSE(tp_fs_win32_utf16_to_utf8(L"abc", too_small_utf8, 2U));
+    TEST_ASSERT_EQUAL_INT(ERANGE, errno);
+}
+
+void test_windows_filesystem_backend_handles_extended_absolute_paths(void) {
+    char long_dir[900];
+    (void)snprintf(long_dir, sizeof long_dir, "%s/long_fixture", g_dir);
+    for (int i = 0; i < 12; i++) {
+        size_t used = strlen(long_dir);
+        TEST_ASSERT_TRUE(used + strlen("/longpathsegment") + 1U < sizeof long_dir);
+        memcpy(long_dir + used, "/longpathsegment", strlen("/longpathsegment") + 1U);
+    }
+    TEST_ASSERT_TRUE(strlen(long_dir) >= 248U);
+    tp_mkdirs(long_dir);
+    TEST_ASSERT_TRUE(tp_fs_is_dir(long_dir));
+
+    char path[960];
+    (void)snprintf(path, sizeof path, "%s/long.png", long_dir);
+    FILE *f = tp_fs_fopen(path, "wb");
+    TEST_ASSERT_NOT_NULL(f);
+    TEST_ASSERT_TRUE(tp_fs_write_all(f, "LONG", 4U));
+    TEST_ASSERT_TRUE(tp_fs_close(f));
+    TEST_ASSERT_TRUE(tp_fs_exists(path));
+
+    wchar_t *native = tp_fs_win32_path_alloc(path);
+    TEST_ASSERT_NOT_NULL(native);
+    TEST_ASSERT_EQUAL_INT(L'\\', native[0]);
+    TEST_ASSERT_EQUAL_INT(L'\\', native[1]);
+    TEST_ASSERT_EQUAL_INT(L'?', native[2]);
+    TEST_ASSERT_EQUAL_INT(L'\\', native[3]);
+    free(native);
+
+    TEST_ASSERT_NULL(tp_fs_win32_path_alloc("\\\\.\\PhysicalDrive0"));
+    TEST_ASSERT_NULL(tp_fs_win32_path_alloc("\\\\?\\C:\\raw-verbatim.tmp"));
+}
+#endif
 // #endregion
 
 int main(int argc, char **argv) {
     g_dir = (argc > 1) ? argv[1] : ".";
     build_fixture();
+    build_listdir_fixture();
 
     UNITY_BEGIN();
-    RUN_TEST(test_missing_dir_is_empty);
+    RUN_TEST(test_missing_dir_is_structured_and_atomic);
     RUN_TEST(test_null_and_empty_abs_dir_are_safe);
     RUN_TEST(test_empty_subdir_is_empty);
     RUN_TEST(test_fixture_walk);
     RUN_TEST(test_is_dir_and_exists);
+    RUN_TEST(test_visit_dir_streams_matching_names);
+#ifndef _WIN32
+    RUN_TEST(test_visit_dir_excludes_fifo_and_symlink);
+#endif
+    RUN_TEST(test_visit_dir_missing_and_bad_args_return_false);
+    RUN_TEST(test_utf8_filesystem_backend_round_trips_non_ascii_paths);
+    RUN_TEST(test_deep_utf8_path_is_not_silently_omitted);
+    RUN_TEST(test_scan_allocation_failure_is_oom_and_never_partial);
+    RUN_TEST(test_scan_root_overflow_is_structured_and_never_touches_disk);
+    RUN_TEST(test_existing_non_directory_is_a_scan_error_not_empty_success);
+    RUN_TEST(test_filesystem_publication_primitives_are_no_clobber_and_replace_safe);
+    RUN_TEST(test_filesystem_backend_rejects_invalid_utf8);
+#ifndef _WIN32
+    RUN_TEST(test_posix_directory_iterator_rejects_invalid_utf8_entry_atomically);
+#endif
+#ifdef _WIN32
+    RUN_TEST(test_windows_filesystem_utf_conversion_reports_small_buffers);
+    RUN_TEST(test_windows_filesystem_backend_handles_extended_absolute_paths);
+#endif
     return UNITY_END();
 }

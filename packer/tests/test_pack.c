@@ -25,6 +25,7 @@
 #include "tp_core/tp_arena.h"
 #include "tp_core/tp_model.h"
 #include "tp_core/tp_pack.h"
+#include "tp_fs_internal.h"
 #include "unity.h"
 
 /* --- sprite pixel generation (apps/smoke fill_disc, verbatim) --- */
@@ -175,6 +176,49 @@ static void compare_results(const tp_result *a, const tp_result *b) {
         TEST_ASSERT_EQUAL_INT(sa->alias_of, sb->alias_of);
     }
 }
+
+static bool write_tga_rgba(const char *path, const uint8_t *rgba, int width,
+                           int height) {
+    if (!path || !rgba || width < 1 || height < 1 || width > UINT16_MAX ||
+        height > UINT16_MAX ||
+        (size_t)width > (SIZE_MAX - 18U) / ((size_t)height * 4U)) {
+        return false;
+    }
+    size_t pixel_bytes = (size_t)width * (size_t)height * 4U;
+    size_t size = 18U + pixel_bytes;
+    uint8_t *tga = (uint8_t *)calloc(size, 1U);
+    if (!tga) {
+        return false;
+    }
+    tga[2] = 2U;
+    tga[12] = (uint8_t)((unsigned int)width & 0xffU);
+    tga[13] = (uint8_t)((unsigned int)width >> 8U);
+    tga[14] = (uint8_t)((unsigned int)height & 0xffU);
+    tga[15] = (uint8_t)((unsigned int)height >> 8U);
+    tga[16] = 32U;
+    tga[17] = 0x28U; /* 8 alpha bits, top-left origin */
+    for (size_t i = 0; i < pixel_bytes / 4U; i++) {
+        tga[18U + i * 4U + 0U] = rgba[i * 4U + 2U];
+        tga[18U + i * 4U + 1U] = rgba[i * 4U + 1U];
+        tga[18U + i * 4U + 2U] = rgba[i * 4U + 0U];
+        tga[18U + i * 4U + 3U] = rgba[i * 4U + 3U];
+    }
+    bool ok = tp_fs_write_file(path, tga, size);
+    free(tga);
+    return ok;
+}
+
+static void fill_path_fixture(uint8_t pixels[8 * 8 * 4]) {
+    for (int y = 0; y < 8; y++) {
+        for (int x = 0; x < 8; x++) {
+            uint8_t *pixel = &pixels[((size_t)y * 8U + (size_t)x) * 4U];
+            pixel[0] = (uint8_t)(20 + x * 20);
+            pixel[1] = (uint8_t)(30 + y * 18);
+            pixel[2] = (uint8_t)(200 - x * 7 - y * 3);
+            pixel[3] = (x == 0 && y == 0) ? 0U : 255U;
+        }
+    }
+}
 // #endregion
 
 // #region tests
@@ -314,6 +358,91 @@ void test_neg_duplicate_sprite_name(void) {
     tp_arena_destroy(ar);
 }
 
+void test_constraint_first_reject_contract(void) {
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_pack_settings settings;
+    tp_result *result = NULL;
+    tp_error error = {0};
+
+    make_settings(&settings, g_dir);
+    settings.max_size = 0;
+    settings.padding = -1;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_pack(&settings, arena, &result, &error));
+    TEST_ASSERT_EQUAL_STRING("tp_pack: max_size 0 out of range [1..16384]",
+                             error.msg);
+
+    make_settings(&settings, g_dir);
+    settings.padding = -1;
+    settings.margin = settings.max_size + 1;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_pack(&settings, arena, &result, &error));
+    TEST_ASSERT_EQUAL_STRING(
+        "tp_pack: padding/margin/extrude must be >= 0", error.msg);
+
+    make_settings(&settings, g_dir);
+    settings.padding = settings.max_size + 1;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_pack(&settings, arena, &result, &error));
+    TEST_ASSERT_EQUAL_STRING(
+        "tp_pack: padding/margin/extrude must not exceed max_size 2048",
+        error.msg);
+
+    make_settings(&settings, g_dir);
+    settings.shape = TP_PACK_SHAPE_MAX;
+    settings.extrude = 1;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_pack(&settings, arena, &result, &error));
+    TEST_ASSERT_EQUAL_STRING(
+        "tp_pack: extrude > 0 is only valid for shape RECT (got shape 2)",
+        error.msg);
+
+    tp_pack_sprite_desc sprite = g_sprites[0];
+    sprite.name = "bad_facts";
+    sprite.ov_mask = TP_PACK_OV_SHAPE | TP_PACK_OV_ROTATE;
+    sprite.ov_shape = 0;
+    sprite.ov_allow_rotate = 0;
+    make_settings(&settings, g_dir);
+    settings.sprites = &sprite;
+    settings.sprite_count = 1;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_pack(&settings, arena, &result, &error));
+    TEST_ASSERT_EQUAL_STRING(
+        "tp_pack: sprite 'bad_facts' shape override 0 invalid", error.msg);
+
+    sprite = g_sprites[0];
+    sprite.name = "bad_spacing";
+    sprite.ov_mask = TP_PACK_OV_MARGIN | TP_PACK_OV_EXTRUDE;
+    sprite.ov_margin = 0;
+    sprite.ov_extrude = 0;
+    make_settings(&settings, g_dir);
+    settings.sprites = &sprite;
+    settings.sprite_count = 1;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_pack(&settings, arena, &result, &error));
+    TEST_ASSERT_EQUAL_STRING(
+        "tp_pack: sprite 'bad_spacing' margin override 0 unrepresentable (omit to inherit, or use >= 1)",
+        error.msg);
+
+    sprite = g_sprites[0];
+    sprite.name = "bad_slice9";
+    sprite.ov_mask = TP_PACK_OV_SHAPE | TP_PACK_OV_EXTRUDE;
+    sprite.ov_shape = TP_PACK_SPRITE_SHAPE_CONCAVE;
+    sprite.ov_extrude = 1;
+    sprite.slice9_lrtb[0] = 1;
+    make_settings(&settings, g_dir);
+    settings.sprites = &sprite;
+    settings.sprite_count = 1;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_pack(&settings, arena, &result, &error));
+    TEST_ASSERT_EQUAL_STRING(
+        "tp_pack: sprite 'bad_slice9' slice9 requires a RECT shape override",
+        error.msg);
+
+    tp_arena_destroy(arena);
+}
+
 /* Per-sprite packing overrides (owner scope 2026-07-10): a RECT override in a
  * CONCAVE atlas packs that sprite as an exact 4-vert rect; a NO-rotate override
  * yields an identity/flip-only transform (no diagonal bit). The default disc stays
@@ -397,7 +526,524 @@ void test_sprite_override_validation(void) {
     e.msg[0] = '\0';
     TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT, tp_pack(&s, ar, &r, &e));
     TEST_ASSERT_NOT_NULL_MESSAGE(strstr(e.msg, "bad_maxv"), "max_vertices error must name the sprite");
+
+    /* Unknown presence bits are rejected instead of being silently ignored. */
+    tp_pack_sprite_desc bad_mask = g_sprites[0];
+    bad_mask.name = "bad_override_mask";
+    bad_mask.ov_mask = UINT8_C(0x80);
+    tp_pack_settings_defaults(&s);
+    s.atlas_name = "ov_bad_mask";
+    s.work_dir = g_dir;
+    s.sprites = &bad_mask;
+    s.sprite_count = 1;
+    s.pixels_per_unit = 1.0F;
+    r = NULL;
+    e.msg[0] = '\0';
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT, tp_pack(&s, ar, &r, &e));
+    TEST_ASSERT_NULL(r);
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(e.msg, "ov_mask"),
+                                 "unknown override-mask error must name the field");
     tp_arena_destroy(ar);
+}
+
+void test_ascii_path_and_equivalent_raw_pixels_pack_byte_identically(void) {
+    uint8_t pixels[8 * 8 * 4];
+    fill_path_fixture(pixels);
+    char image_path[1024];
+    char pack_path[1024];
+    TEST_ASSERT_TRUE(snprintf(image_path, sizeof image_path, "%s/path-source.tga",
+                              g_dir) > 0);
+    TEST_ASSERT_TRUE(write_tga_rgba(image_path, pixels, 8, 8));
+
+    tp_pack_sprite_desc sprite = {
+        .name = "path_equivalence",
+        .path = image_path,
+        .origin_x = 0.5F,
+        .origin_y = 0.5F,
+    };
+    tp_pack_settings settings;
+    tp_pack_settings_defaults(&settings);
+    settings.atlas_name = "path_equivalence";
+    settings.work_dir = g_dir;
+    settings.sprites = &sprite;
+    settings.sprite_count = 1;
+
+    tp_arena *path_arena = tp_arena_create(0);
+    tp_arena *raw_arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(path_arena);
+    TEST_ASSERT_NOT_NULL(raw_arena);
+    tp_result *path_result = NULL;
+    tp_result *raw_result = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK,
+                                  tp_pack(&settings, path_arena, &path_result,
+                                          &error),
+                                  error.msg);
+    TEST_ASSERT_TRUE(snprintf(pack_path, sizeof pack_path,
+                              "%s/path_equivalence.ntpack", g_dir) > 0);
+    size_t path_size = 0U;
+    uint8_t *path_bytes = read_whole_file(pack_path, &path_size);
+    TEST_ASSERT_NOT_NULL(path_bytes);
+
+    sprite.path = NULL;
+    sprite.rgba = pixels;
+    sprite.w = 8;
+    sprite.h = 8;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK,
+                                  tp_pack(&settings, raw_arena, &raw_result,
+                                          &error),
+                                  error.msg);
+    size_t raw_size = 0U;
+    uint8_t *raw_bytes = read_whole_file(pack_path, &raw_size);
+    TEST_ASSERT_NOT_NULL(raw_bytes);
+    TEST_ASSERT_EQUAL_size_t(path_size, raw_size);
+    TEST_ASSERT_EQUAL_INT(0, memcmp(path_bytes, raw_bytes, path_size));
+    compare_results(path_result, raw_result);
+
+    free(path_bytes);
+    free(raw_bytes);
+    tp_arena_destroy(path_arena);
+    tp_arena_destroy(raw_arena);
+}
+
+void test_unicode_path_source_packs_without_engine_path_io(void) {
+    static const char leaf[] =
+        "\xD1\x81\xD0\xBF\xD1\x80\xD0\xB0\xD0\xB9\xD1\x82.tga";
+    uint8_t pixels[8 * 8 * 4];
+    fill_path_fixture(pixels);
+    char image_path[1024];
+    TEST_ASSERT_TRUE(snprintf(image_path, sizeof image_path, "%s/%s", g_dir,
+                              leaf) > 0);
+    TEST_ASSERT_TRUE(write_tga_rgba(image_path, pixels, 8, 8));
+
+    tp_pack_sprite_desc sprite = {
+        .name = "unicode_path",
+        .path = image_path,
+        .origin_x = 0.5F,
+        .origin_y = 0.5F,
+    };
+    tp_pack_settings settings;
+    tp_pack_settings_defaults(&settings);
+    settings.atlas_name = "unicode_path_pack";
+    settings.work_dir = g_dir;
+    settings.sprites = &sprite;
+    settings.sprite_count = 1;
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_result *result = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK,
+                                  tp_pack(&settings, arena, &result, &error),
+                                  error.msg);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQUAL_INT(1, result->sprite_count);
+    TEST_ASSERT_EQUAL_INT(8, result->sprites[0].sourceSize.w);
+    TEST_ASSERT_EQUAL_INT(8, result->sprites[0].sourceSize.h);
+    tp_arena_destroy(arena);
+}
+
+void test_corrupt_path_source_returns_structured_error(void) {
+    char image_path[1024];
+    TEST_ASSERT_TRUE(snprintf(image_path, sizeof image_path, "%s/corrupt-source.img",
+                              g_dir) > 0);
+    static const uint8_t corrupt[] = {1U, 2U, 3U, 4U};
+    TEST_ASSERT_TRUE(tp_fs_write_file(image_path, corrupt, sizeof corrupt));
+    tp_pack_sprite_desc sprite = {
+        .name = "corrupt_path",
+        .path = image_path,
+        .origin_x = 0.5F,
+        .origin_y = 0.5F,
+    };
+    tp_pack_settings settings;
+    tp_pack_settings_defaults(&settings);
+    settings.atlas_name = "corrupt_path_pack";
+    settings.work_dir = g_dir;
+    settings.sprites = &sprite;
+    settings.sprite_count = 1;
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_result *result = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_UNSUPPORTED_TEXTURE,
+                          tp_pack(&settings, arena, &result, &error));
+    TEST_ASSERT_NULL(result);
+    TEST_ASSERT_NOT_NULL(strstr(error.msg, "corrupt_path"));
+    tp_arena_destroy(arena);
+}
+
+void test_fully_transparent_sprite_returns_structured_error(void) {
+    uint8_t transparent[8 * 8 * 4] = {0};
+    tp_pack_sprite_desc sprite = {
+        .name = "transparent",
+        .rgba = transparent,
+        .w = 8,
+        .h = 8,
+        .origin_x = 0.5F,
+        .origin_y = 0.5F,
+    };
+    tp_pack_settings settings;
+    tp_pack_settings_defaults(&settings);
+    settings.atlas_name = "transparent_pack";
+    settings.work_dir = g_dir;
+    settings.sprites = &sprite;
+    settings.sprite_count = 1;
+    settings.alpha_threshold = 1;
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_result *result = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_pack(&settings, arena, &result, &error));
+    TEST_ASSERT_NULL(result);
+    TEST_ASSERT_NOT_NULL(strstr(error.msg, "transparent"));
+    TEST_ASSERT_NOT_NULL(strstr(error.msg, "fully transparent"));
+    tp_arena_destroy(arena);
+}
+
+void test_invalid_slice9_borders_return_structured_error(void) {
+    uint8_t pixels[8 * 8 * 4];
+    fill_path_fixture(pixels);
+    tp_pack_sprite_desc sprite = {
+        .name = "bad_slice9",
+        .rgba = pixels,
+        .w = 8,
+        .h = 8,
+        .origin_x = 0.5F,
+        .origin_y = 0.5F,
+        .slice9_lrtb = {4U, 4U, 0U, 0U},
+    };
+    tp_pack_settings settings;
+    tp_pack_settings_defaults(&settings);
+    settings.atlas_name = "bad_slice9_pack";
+    settings.work_dir = g_dir;
+    settings.sprites = &sprite;
+    settings.sprite_count = 1;
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_result *result = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_pack(&settings, arena, &result, &error));
+    TEST_ASSERT_NULL(result);
+    TEST_ASSERT_NOT_NULL(strstr(error.msg, "bad_slice9"));
+    TEST_ASSERT_NOT_NULL(strstr(error.msg, "left+right"));
+    tp_arena_destroy(arena);
+}
+
+void test_nonrect_slice9_override_returns_structured_error(void) {
+    uint8_t pixels[8 * 8 * 4];
+    fill_path_fixture(pixels);
+    tp_pack_sprite_desc sprite = {
+        .name = "bad_slice9_shape",
+        .rgba = pixels,
+        .w = 8,
+        .h = 8,
+        .origin_x = 0.5F,
+        .origin_y = 0.5F,
+        .slice9_lrtb = {1U, 1U, 1U, 1U},
+        .ov_mask = TP_PACK_OV_SHAPE,
+        .ov_shape = TP_PACK_SPRITE_SHAPE_CONCAVE,
+    };
+    tp_pack_settings settings;
+    tp_pack_settings_defaults(&settings);
+    settings.atlas_name = "bad_slice9_shape_pack";
+    settings.work_dir = g_dir;
+    settings.sprites = &sprite;
+    settings.sprite_count = 1;
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_result *result = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_pack(&settings, arena, &result, &error));
+    TEST_ASSERT_NULL(result);
+    TEST_ASSERT_NOT_NULL(strstr(error.msg, "bad_slice9_shape"));
+    TEST_ASSERT_NOT_NULL(strstr(error.msg, "RECT"));
+    tp_arena_destroy(arena);
+}
+
+void test_sprite_larger_than_page_returns_structured_error(void) {
+    uint8_t pixels[8 * 8 * 4];
+    fill_path_fixture(pixels);
+    tp_pack_sprite_desc sprite = {
+        .name = "too_large",
+        .rgba = pixels,
+        .w = 8,
+        .h = 8,
+        .origin_x = 0.5F,
+        .origin_y = 0.5F,
+    };
+    tp_pack_settings settings;
+    tp_pack_settings_defaults(&settings);
+    settings.atlas_name = "too_large_pack";
+    settings.work_dir = g_dir;
+    settings.sprites = &sprite;
+    settings.sprite_count = 1;
+    settings.max_size = 7;
+    settings.padding = 0;
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_result *result = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_pack(&settings, arena, &result, &error));
+    TEST_ASSERT_NULL(result);
+    TEST_ASSERT_NOT_NULL(strstr(error.msg, "too_large"));
+    TEST_ASSERT_NOT_NULL(strstr(error.msg, "cannot fit"));
+    tp_arena_destroy(arena);
+}
+
+void test_atlas_spacing_larger_than_page_returns_structured_error(void) {
+    tp_pack_settings settings;
+    make_settings(&settings, g_dir);
+    settings.max_size = 16;
+    settings.padding = 17;
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_result *result = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_pack(&settings, arena, &result, &error));
+    TEST_ASSERT_NULL(result);
+    TEST_ASSERT_NOT_NULL(strstr(error.msg, "padding"));
+    tp_arena_destroy(arena);
+}
+
+void test_atlas_margin_larger_than_page_returns_structured_error(void) {
+    tp_pack_settings settings;
+    make_settings(&settings, g_dir);
+    settings.max_size = 16;
+    settings.padding = 0;
+    settings.margin = 17;
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_result *result = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_pack(&settings, arena, &result, &error));
+    TEST_ASSERT_NULL(result);
+    TEST_ASSERT_NOT_NULL(strstr(error.msg, "margin"));
+    tp_arena_destroy(arena);
+}
+
+void test_atlas_extrude_larger_than_page_returns_structured_error(void) {
+    tp_pack_settings settings;
+    make_settings(&settings, g_dir);
+    settings.max_size = 16;
+    settings.padding = 0;
+    settings.margin = 0;
+    settings.extrude = 17;
+    settings.shape = TP_PACK_SHAPE_MIN;
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_result *result = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_pack(&settings, arena, &result, &error));
+    TEST_ASSERT_NULL(result);
+    TEST_ASSERT_NOT_NULL(strstr(error.msg, "extrude"));
+    tp_arena_destroy(arena);
+}
+
+void test_sprite_equal_to_page_boundary_returns_structured_error(void) {
+    uint8_t pixels[8 * 8 * 4];
+    fill_path_fixture(pixels);
+    tp_pack_sprite_desc sprite = {
+        .name = "equal_page",
+        .rgba = pixels,
+        .w = 8,
+        .h = 8,
+        .origin_x = 0.5F,
+        .origin_y = 0.5F,
+    };
+    tp_pack_settings settings;
+    tp_pack_settings_defaults(&settings);
+    settings.atlas_name = "equal_page_pack";
+    settings.work_dir = g_dir;
+    settings.sprites = &sprite;
+    settings.sprite_count = 1;
+    settings.max_size = 8;
+    settings.padding = 0;
+    settings.margin = 0;
+    settings.shape = TP_PACK_SHAPE_MIN;
+    settings.power_of_two = false;
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_result *result = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_pack(&settings, arena, &result, &error));
+    TEST_ASSERT_NULL(result);
+    TEST_ASSERT_NOT_NULL(strstr(error.msg, "equal_page"));
+    TEST_ASSERT_NOT_NULL(strstr(error.msg, "cannot fit"));
+    tp_arena_destroy(arena);
+}
+
+void test_base_margin_footprint_returns_structured_error(void) {
+    uint8_t pixels[8 * 8 * 4];
+    fill_path_fixture(pixels);
+    tp_pack_sprite_desc sprite = {
+        .name = "margin_footprint",
+        .rgba = pixels,
+        .w = 8,
+        .h = 8,
+        .origin_x = 0.5F,
+        .origin_y = 0.5F,
+    };
+    tp_pack_settings settings;
+    tp_pack_settings_defaults(&settings);
+    settings.atlas_name = "margin_footprint_pack";
+    settings.work_dir = g_dir;
+    settings.sprites = &sprite;
+    settings.sprite_count = 1;
+    settings.max_size = 10;
+    settings.padding = 0;
+    settings.margin = 1;
+    settings.shape = TP_PACK_SHAPE_MIN;
+    settings.power_of_two = false;
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_result *result = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_pack(&settings, arena, &result, &error));
+    TEST_ASSERT_NULL(result);
+    TEST_ASSERT_NOT_NULL(strstr(error.msg, "margin_footprint"));
+    TEST_ASSERT_NOT_NULL(strstr(error.msg, "cannot fit"));
+    tp_arena_destroy(arena);
+}
+
+void test_base_padding_footprint_returns_structured_error(void) {
+    uint8_t pixels[8 * 8 * 4];
+    fill_path_fixture(pixels);
+    tp_pack_sprite_desc sprite = {
+        .name = "padding_footprint",
+        .rgba = pixels,
+        .w = 8,
+        .h = 8,
+        .origin_x = 0.5F,
+        .origin_y = 0.5F,
+    };
+    tp_pack_settings settings;
+    tp_pack_settings_defaults(&settings);
+    settings.atlas_name = "padding_footprint_pack";
+    settings.work_dir = g_dir;
+    settings.sprites = &sprite;
+    settings.sprite_count = 1;
+    settings.max_size = 10;
+    settings.padding = 2;
+    settings.margin = 0;
+    settings.shape = TP_PACK_SHAPE_MIN;
+    settings.power_of_two = false;
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_result *result = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_pack(&settings, arena, &result, &error));
+    TEST_ASSERT_NULL(result);
+    TEST_ASSERT_NOT_NULL(strstr(error.msg, "padding_footprint"));
+    TEST_ASSERT_NOT_NULL(strstr(error.msg, "cannot fit"));
+    tp_arena_destroy(arena);
+}
+
+void test_provable_more_than_page_limit_returns_structured_error(void) {
+    enum { SPRITE_COUNT = 74, WIDTH = 15, HEIGHT = 15 };
+    uint8_t pixels[SPRITE_COUNT][WIDTH * HEIGHT * 4];
+    char names[SPRITE_COUNT][32];
+    tp_pack_sprite_desc sprites[SPRITE_COUNT];
+    memset(sprites, 0, sizeof sprites);
+    for (int i = 0; i < SPRITE_COUNT; i++) {
+        (void)snprintf(names[i], sizeof names[i], "page_limit_%02d", i);
+        for (int p = 0; p < WIDTH * HEIGHT; p++) {
+            pixels[i][p * 4 + 0] = (uint8_t)(i + 1);
+            pixels[i][p * 4 + 1] = (uint8_t)(i * 3 + 7);
+            pixels[i][p * 4 + 2] = (uint8_t)(i * 5 + 11);
+            pixels[i][p * 4 + 3] = 255U;
+        }
+        sprites[i] = (tp_pack_sprite_desc){
+            .name = names[i],
+            .rgba = pixels[i],
+            .w = WIDTH,
+            .h = HEIGHT,
+            .origin_x = 0.5F,
+            .origin_y = 0.5F,
+        };
+    }
+
+    tp_pack_settings settings;
+    tp_pack_settings_defaults(&settings);
+    settings.atlas_name = "provable_page_limit";
+    settings.work_dir = g_dir;
+    settings.sprites = sprites;
+    settings.sprite_count = SPRITE_COUNT;
+    settings.max_size = 16;
+    settings.padding = 0;
+    settings.margin = 0;
+    settings.extrude = 0;
+    settings.shape = TP_PACK_SHAPE_MIN;
+    settings.power_of_two = false;
+
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_result *result = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS,
+                          tp_pack(&settings, arena, &result, &error));
+    TEST_ASSERT_NULL(result);
+    TEST_ASSERT_NOT_NULL(strstr(error.msg, "64"));
+    TEST_ASSERT_NOT_NULL(strstr(error.msg, "opaque"));
+    tp_arena_destroy(arena);
+}
+
+void test_exact_duplicates_do_not_consume_page_lower_bound_twice(void) {
+    enum { SPRITE_COUNT = 74, WIDTH = 15, HEIGHT = 15 };
+    uint8_t pixels[WIDTH * HEIGHT * 4];
+    char names[SPRITE_COUNT][32];
+    tp_pack_sprite_desc sprites[SPRITE_COUNT];
+    for (int p = 0; p < WIDTH * HEIGHT; p++) {
+        pixels[p * 4 + 0] = 31U;
+        pixels[p * 4 + 1] = 47U;
+        pixels[p * 4 + 2] = 59U;
+        pixels[p * 4 + 3] = 255U;
+    }
+    memset(sprites, 0, sizeof sprites);
+    for (int i = 0; i < SPRITE_COUNT; i++) {
+        (void)snprintf(names[i], sizeof names[i], "page_duplicate_%02d", i);
+        sprites[i] = (tp_pack_sprite_desc){
+            .name = names[i],
+            .rgba = pixels,
+            .w = WIDTH,
+            .h = HEIGHT,
+            .origin_x = 0.5F,
+            .origin_y = 0.5F,
+        };
+    }
+
+    tp_pack_settings settings;
+    tp_pack_settings_defaults(&settings);
+    settings.atlas_name = "duplicate_page_lower_bound";
+    settings.work_dir = g_dir;
+    settings.sprites = sprites;
+    settings.sprite_count = SPRITE_COUNT;
+    settings.max_size = 16;
+    settings.padding = 0;
+    settings.margin = 0;
+    settings.extrude = 0;
+    settings.shape = TP_PACK_SHAPE_MIN;
+    settings.power_of_two = false;
+
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_result *result = NULL;
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK,
+                                  tp_pack(&settings, arena, &result, &error),
+                                  error.msg);
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQUAL_INT(SPRITE_COUNT, result->sprite_count);
+    TEST_ASSERT_EQUAL_INT(1, result->page_count);
+    tp_arena_destroy(arena);
 }
 // #endregion
 
@@ -440,8 +1086,24 @@ int main(int argc, char **argv) {
     RUN_TEST(test_determinism);
     RUN_TEST(test_neg_invalid_atlas_name);
     RUN_TEST(test_neg_duplicate_sprite_name);
+    RUN_TEST(test_constraint_first_reject_contract);
     RUN_TEST(test_sprite_override_rect_and_rotate);
     RUN_TEST(test_sprite_override_validation);
+    RUN_TEST(test_ascii_path_and_equivalent_raw_pixels_pack_byte_identically);
+    RUN_TEST(test_unicode_path_source_packs_without_engine_path_io);
+    RUN_TEST(test_corrupt_path_source_returns_structured_error);
+    RUN_TEST(test_fully_transparent_sprite_returns_structured_error);
+    RUN_TEST(test_invalid_slice9_borders_return_structured_error);
+    RUN_TEST(test_nonrect_slice9_override_returns_structured_error);
+    RUN_TEST(test_sprite_larger_than_page_returns_structured_error);
+    RUN_TEST(test_atlas_spacing_larger_than_page_returns_structured_error);
+    RUN_TEST(test_atlas_margin_larger_than_page_returns_structured_error);
+    RUN_TEST(test_atlas_extrude_larger_than_page_returns_structured_error);
+    RUN_TEST(test_sprite_equal_to_page_boundary_returns_structured_error);
+    RUN_TEST(test_base_margin_footprint_returns_structured_error);
+    RUN_TEST(test_base_padding_footprint_returns_structured_error);
+    RUN_TEST(test_provable_more_than_page_limit_returns_structured_error);
+    RUN_TEST(test_exact_duplicates_do_not_consume_page_lower_bound_twice);
     int rc = UNITY_END();
 
     tp_arena_destroy(g_arena);

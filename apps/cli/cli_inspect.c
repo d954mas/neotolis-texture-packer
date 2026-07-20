@@ -6,16 +6,19 @@
 #include "cli_cmds.h" /* CLI_INSPECT_SCHEMA */
 
 #include <stdio.h>
+#include <string.h>
+#ifdef NTPACKER_CLI_INSPECT_FAULT_SEAM
+#include <stdlib.h>
+#endif
 
 #include "cli_exit.h"
 #include "cli_out.h"
 #include "ntpacker_id_fmt.h" /* ntpacker_fmt_shape_id (shared with cli_mutate) */
 #include "tp_core/tp_error.h"
-#include "tp_core/tp_input.h"
 #include "tp_core/tp_names.h"
-#include "tp_core/tp_project.h"
 #include "tp_core/tp_scan.h"
-#include "tp_core/tp_sprite_index.h" /* resolved sprite index: sprite_id + owning source (F1-03) */
+#include "tp_core/tp_session.h"
+#include "tp_core/tp_sprite_index.h" /* resolved sprite index: sprite_id + owning source */
 
 /* Emits `,\n` (or `\n` for the first entry) + indent + "key": -- the same
  * first-tracking pattern tp_project.c's writer uses, so nesting stays balanced. */
@@ -35,7 +38,7 @@ static void emit_num_array2(cli_sb *sb, double a, double b) {
     cli_sb_putc(sb, ']');
 }
 
-static void emit_settings(cli_sb *sb, int depth, const tp_project_atlas *a) {
+static void emit_settings(cli_sb *sb, int depth, const tp_snapshot_atlas *a) {
     bool first = true;
     cli_sb_putc(sb, '{');
     /* All knobs AS STORED (not the export-path clamp) -- the raw project state. */
@@ -68,10 +71,13 @@ static void emit_settings(cli_sb *sb, int depth, const tp_project_atlas *a) {
  * resolved abs path, and the RUNTIME kind (file/dir/missing -- what a scan sees on
  * disk right now, which may differ from the stored classification for a missing
  * source). `stored_kind` reports the persisted folder/file classification. */
-static void emit_source(cli_sb *sb, int depth, const tp_project *p, const tp_project_source *s) {
-    char abs[512];
+static void emit_source(cli_sb *sb, int depth, const tp_session_snapshot *snapshot,
+                        int atlas_index, int source_index) {
+    char abs[TP_IDENTITY_PATH_MAX];
+    const tp_snapshot_source *s = NULL;
     const char *kind;
-    if (tp_project_resolve_path(p, s->path, abs, sizeof abs) != TP_STATUS_OK) {
+    if (tp_session_snapshot_source_resolved_at(snapshot, atlas_index, source_index,
+                                               &s, abs, sizeof abs, NULL) != TP_STATUS_OK || !s) {
         abs[0] = '\0';
         kind = "missing";
     } else if (!tp_scan_exists(abs)) {
@@ -92,7 +98,7 @@ static void emit_source(cli_sb *sb, int depth, const tp_project *p, const tp_pro
     key(sb, depth + 1, &first, "abs");
     cli_sb_json_str(sb, abs);
     key(sb, depth + 1, &first, "stored_kind"); /* persisted folder/file classification */
-    cli_sb_json_str(sb, s->kind == TP_SOURCE_KIND_FILE ? "file" : "folder");
+    cli_sb_json_str(sb, s->kind == TP_SNAPSHOT_SOURCE_FILE ? "file" : "folder");
     key(sb, depth + 1, &first, "kind"); /* runtime disk state: file/dir/missing */
     cli_sb_json_str(sb, kind);
     cli_sb_str(sb, "\n");
@@ -104,7 +110,8 @@ static void emit_source(cli_sb *sb, int depth, const tp_project *p, const tp_pro
  * (ext kept), export key, abs decode path, and any per-sprite overrides SET on the
  * project sprite (read from the project model, not the encoded desc -- keeps the
  * frontend clear of the pack-desc encoding, R3 gate). */
-static void emit_sprite(cli_sb *sb, int depth, tp_project_atlas *a, const tp_sprite_ref *r) {
+static void emit_sprite(cli_sb *sb, int depth, const tp_session_snapshot *snapshot,
+                        tp_id128 atlas_id, const tp_sprite_ref *r) {
     const char *keybuf = r->export_key;
     char spid[TP_ID_TEXT_CAP];
     char srcid[TP_ID_TEXT_CAP];
@@ -122,13 +129,14 @@ static void emit_sprite(cli_sb *sb, int depth, tp_project_atlas *a, const tp_spr
     cli_sb_json_str(sb, srcid);
     key(sb, depth + 1, &first, "sprite_id"); /* derived deterministic id (source + key) */
     cli_sb_json_str(sb, spid);
-    const tp_project_sprite *ov = tp_project_atlas_find_sprite(a, keybuf);
+    const tp_snapshot_sprite *ov = tp_session_snapshot_sprite_by_key(
+        snapshot, atlas_id, r->source_id, r->source_key);
     if (ov) {
         if (ov->rename) {
             key(sb, depth + 1, &first, "rename");
             cli_sb_json_str(sb, ov->rename);
         }
-        if (ov->origin_x != TP_PROJECT_ORIGIN_DEFAULT || ov->origin_y != TP_PROJECT_ORIGIN_DEFAULT) {
+        if (ov->origin_x != 0.5f || ov->origin_y != 0.5f) {
             key(sb, depth + 1, &first, "origin");
             emit_num_array2(sb, (double)ov->origin_x, (double)ov->origin_y);
         }
@@ -145,25 +153,25 @@ static void emit_sprite(cli_sb *sb, int depth, tp_project_atlas *a, const tp_spr
         }
         /* Overrides carry the INHERIT sentinel when unset (never emitted). shape/
          * margin/etc. are the stored atlas-shape-semantics values. */
-        if (ov->ov_shape != TP_PROJECT_OV_INHERIT) {
+        if (ov->override_shape != -1) {
             key(sb, depth + 1, &first, "shape");
-            cli_sb_int(sb, (long)ov->ov_shape);
+            cli_sb_int(sb, (long)ov->override_shape);
         }
-        if (ov->ov_allow_rotate != TP_PROJECT_OV_INHERIT) {
+        if (ov->override_allow_rotate != -1) {
             key(sb, depth + 1, &first, "allow_rotate");
-            cli_sb_int(sb, (long)ov->ov_allow_rotate);
+            cli_sb_int(sb, (long)ov->override_allow_rotate);
         }
-        if (ov->ov_max_vertices != TP_PROJECT_OV_INHERIT) {
+        if (ov->override_max_vertices != -1) {
             key(sb, depth + 1, &first, "max_vertices");
-            cli_sb_int(sb, (long)ov->ov_max_vertices);
+            cli_sb_int(sb, (long)ov->override_max_vertices);
         }
-        if (ov->ov_margin != TP_PROJECT_OV_INHERIT) {
+        if (ov->override_margin != -1) {
             key(sb, depth + 1, &first, "margin");
-            cli_sb_int(sb, (long)ov->ov_margin);
+            cli_sb_int(sb, (long)ov->override_margin);
         }
-        if (ov->ov_extrude != TP_PROJECT_OV_INHERIT) {
+        if (ov->override_extrude != -1) {
             key(sb, depth + 1, &first, "extrude");
-            cli_sb_int(sb, (long)ov->ov_extrude);
+            cli_sb_int(sb, (long)ov->override_extrude);
         }
     }
     cli_sb_str(sb, "\n");
@@ -171,7 +179,8 @@ static void emit_sprite(cli_sb *sb, int depth, tp_project_atlas *a, const tp_spr
     cli_sb_putc(sb, '}');
 }
 
-static void emit_anim(cli_sb *sb, int depth, const tp_project_anim *an) {
+static void emit_anim(cli_sb *sb, int depth, const tp_session_snapshot *snapshot,
+                      tp_id128 atlas_id, const tp_snapshot_animation *an) {
     bool first = true;
     cli_sb_putc(sb, '{');
     char idtext[TP_ID_TEXT_CAP];
@@ -196,7 +205,9 @@ static void emit_anim(cli_sb *sb, int depth, const tp_project_anim *an) {
         for (int i = 0; i < an->frame_count; i++) {
             cli_sb_str(sb, i == 0 ? "\n" : ",\n");
             cli_sb_indent(sb, depth + 2);
-            cli_sb_json_str(sb, an->frames[i].name);
+            const tp_snapshot_frame *frame = tp_session_snapshot_animation_frame_at(
+                snapshot, atlas_id, an->id, i);
+            cli_sb_json_str(sb, frame ? frame->name : "");
         }
         cli_sb_str(sb, "\n");
         cli_sb_indent(sb, depth + 1);
@@ -207,7 +218,7 @@ static void emit_anim(cli_sb *sb, int depth, const tp_project_anim *an) {
     cli_sb_putc(sb, '}');
 }
 
-static void emit_target(cli_sb *sb, int depth, const tp_project_target *t) {
+static void emit_target(cli_sb *sb, int depth, const tp_snapshot_target *t) {
     bool first = true;
     cli_sb_putc(sb, '{');
     char idtext[TP_ID_TEXT_CAP];
@@ -225,8 +236,23 @@ static void emit_target(cli_sb *sb, int depth, const tp_project_target *t) {
     cli_sb_putc(sb, '}');
 }
 
-static void emit_atlas(cli_sb *sb, int depth, tp_project *p, int ai) {
-    tp_project_atlas *a = &p->atlases[ai];
+static tp_status inspect_build_sprite_index(
+    const tp_session_snapshot *snapshot, int atlas_index,
+    tp_sprite_index *out, tp_error *err) {
+#ifdef NTPACKER_CLI_INSPECT_FAULT_SEAM
+    if (getenv("NTPACKER_TEST_INSPECT_INDEX_FAIL")) {
+        memset(out, 0, sizeof *out);
+        return tp_error_set(err, TP_STATUS_OOM,
+                            "injected inspect sprite-index failure");
+    }
+#endif
+    return tp_sprite_index_build_snapshot(snapshot, atlas_index, out, err);
+}
+
+static tp_status emit_atlas(cli_sb *sb, int depth,
+                            const tp_session_snapshot *snapshot, int ai,
+                            tp_error *err) {
+    const tp_snapshot_atlas *a = tp_session_snapshot_atlas_at(snapshot, ai);
     bool first = true;
     cli_sb_putc(sb, '{');
 
@@ -249,7 +275,7 @@ static void emit_atlas(cli_sb *sb, int depth, tp_project *p, int ai) {
         for (int i = 0; i < a->source_count; i++) {
             cli_sb_str(sb, i == 0 ? "\n" : ",\n");
             cli_sb_indent(sb, depth + 2);
-            emit_source(sb, depth + 2, p, &a->sources[i]);
+            emit_source(sb, depth + 2, snapshot, ai, i);
         }
         cli_sb_str(sb, "\n");
         cli_sb_indent(sb, depth + 1);
@@ -260,16 +286,19 @@ static void emit_atlas(cli_sb *sb, int depth, tp_project *p, int ai) {
      * derived identity (sprite_id + owning source) alongside its keys/paths. */
     key(sb, depth + 1, &first, "sprites");
     tp_sprite_index idx;
-    tp_error err = {0};
-    tp_status bst = tp_sprite_index_build(p, ai, &idx, &err);
-    if (bst != TP_STATUS_OK || idx.count == 0) {
+    tp_status bst = inspect_build_sprite_index(snapshot, ai, &idx, err);
+    if (bst != TP_STATUS_OK) {
+        tp_sprite_index_free(&idx);
+        return bst;
+    }
+    if (idx.count == 0) {
         cli_sb_str(sb, "[]");
     } else {
         cli_sb_putc(sb, '[');
         for (int i = 0; i < idx.count; i++) {
             cli_sb_str(sb, i == 0 ? "\n" : ",\n");
             cli_sb_indent(sb, depth + 2);
-            emit_sprite(sb, depth + 2, a, &idx.refs[i]);
+            emit_sprite(sb, depth + 2, snapshot, a->id, &idx.refs[i]);
         }
         cli_sb_str(sb, "\n");
         cli_sb_indent(sb, depth + 1);
@@ -285,7 +314,8 @@ static void emit_atlas(cli_sb *sb, int depth, tp_project *p, int ai) {
         for (int i = 0; i < a->animation_count; i++) {
             cli_sb_str(sb, i == 0 ? "\n" : ",\n");
             cli_sb_indent(sb, depth + 2);
-            emit_anim(sb, depth + 2, &a->animations[i]);
+            emit_anim(sb, depth + 2, snapshot, a->id,
+                      tp_session_snapshot_animation_at(snapshot, a->id, i));
         }
         cli_sb_str(sb, "\n");
         cli_sb_indent(sb, depth + 1);
@@ -300,7 +330,8 @@ static void emit_atlas(cli_sb *sb, int depth, tp_project *p, int ai) {
         for (int i = 0; i < a->target_count; i++) {
             cli_sb_str(sb, i == 0 ? "\n" : ",\n");
             cli_sb_indent(sb, depth + 2);
-            emit_target(sb, depth + 2, &a->targets[i]);
+            emit_target(sb, depth + 2,
+                        tp_session_snapshot_target_at(snapshot, a->id, i));
         }
         cli_sb_str(sb, "\n");
         cli_sb_indent(sb, depth + 1);
@@ -310,9 +341,11 @@ static void emit_atlas(cli_sb *sb, int depth, tp_project *p, int ai) {
     cli_sb_str(sb, "\n");
     cli_sb_indent(sb, depth);
     cli_sb_putc(sb, '}');
+    return TP_STATUS_OK;
 }
 
-static void build_inspect(cli_sb *sb, tp_project *p, const char *path) {
+static tp_status build_inspect(cli_sb *sb, const tp_session_snapshot *snapshot,
+                               const char *path, tp_error *err) {
     bool first = true;
     cli_sb_putc(sb, '{');
     key(sb, 1, &first, "schema");
@@ -325,71 +358,106 @@ static void build_inspect(cli_sb *sb, tp_project *p, const char *path) {
         key(sb, 2, &pf, "path");
         cli_sb_json_str(sb, path);
         key(sb, 2, &pf, "schema_version");
-        cli_sb_int(sb, p->schema_version);
+        cli_sb_int(sb, tp_session_snapshot_project_schema_version(snapshot));
         key(sb, 2, &pf, "project_dir");
-        cli_sb_json_str(sb, p->project_dir ? p->project_dir : "");
+        cli_sb_json_str(sb, tp_session_snapshot_project_dir(snapshot));
         cli_sb_str(sb, "\n");
         cli_sb_indent(sb, 1);
         cli_sb_putc(sb, '}');
     }
 
     key(sb, 1, &first, "atlases");
-    if (p->atlas_count == 0) {
+    const int atlas_count = tp_session_snapshot_atlas_count(snapshot);
+    if (atlas_count == 0) {
         cli_sb_str(sb, "[]");
     } else {
         cli_sb_putc(sb, '[');
-        for (int i = 0; i < p->atlas_count; i++) {
+        for (int i = 0; i < atlas_count; i++) {
             cli_sb_str(sb, i == 0 ? "\n" : ",\n");
             cli_sb_indent(sb, 2);
-            emit_atlas(sb, 2, p, i);
+            tp_status st = emit_atlas(sb, 2, snapshot, i, err);
+            if (st != TP_STATUS_OK) {
+                return st;
+            }
         }
         cli_sb_str(sb, "\n");
         cli_sb_indent(sb, 1);
         cli_sb_putc(sb, ']');
     }
     cli_sb_str(sb, "\n}");
+    return TP_STATUS_OK;
 }
 
 /* Cosmetic human summary (NOT a contract): one line per atlas. */
-static void print_inspect_human(tp_project *p, const char *path) {
-    (void)printf("project: %s (schema %d)\n", path, p->schema_version);
-    for (int ai = 0; ai < p->atlas_count; ai++) {
-        tp_project_atlas *a = &p->atlases[ai];
-        tp_pack_input input;
-        tp_error err = {0};
+static tp_status print_inspect_human(const tp_session_snapshot *snapshot,
+                                     const char *path, tp_error *err) {
+    (void)printf("project: %s (schema %d)\n", path,
+                 tp_session_snapshot_project_schema_version(snapshot));
+    const int atlas_count = tp_session_snapshot_atlas_count(snapshot);
+    for (int ai = 0; ai < atlas_count; ai++) {
+        const tp_snapshot_atlas *a = tp_session_snapshot_atlas_at(snapshot, ai);
+        tp_sprite_index index = {0};
         int sprites = 0;
         int missing = 0;
-        if (tp_pack_input_build(p, ai, &input, &err) == TP_STATUS_OK) {
-            sprites = input.count;
-            missing = input.missing_sources;
+        tp_status st = inspect_build_sprite_index(snapshot, ai, &index, err);
+        if (st != TP_STATUS_OK) {
+            tp_sprite_index_free(&index);
+            return st;
         }
-        tp_pack_input_free(&input);
+        sprites = index.count;
+        for (int si = 0; si < a->source_count; ++si) {
+            const tp_snapshot_source *source = NULL;
+            char resolved[TP_IDENTITY_PATH_MAX];
+            if (tp_session_snapshot_source_resolved_at(snapshot, ai, si, &source,
+                                                       resolved, sizeof resolved,
+                                                       NULL) != TP_STATUS_OK ||
+                !tp_scan_exists(resolved)) {
+                missing++;
+            }
+        }
+        tp_sprite_index_free(&index);
         (void)printf("atlas '%s': %d sprites, %d source%s (%d missing), %d target%s, %d animation%s\n", a->name,
                      sprites, a->source_count, a->source_count == 1 ? "" : "s", missing, a->target_count,
                      a->target_count == 1 ? "" : "s", a->animation_count, a->animation_count == 1 ? "" : "s");
     }
+    return TP_STATUS_OK;
 }
 
 int cmd_inspect(const char *path, bool json, bool quiet) {
-    tp_project *p = NULL;
-    int rc = cli_load_project(path, json, quiet, &p);
+    tp_session_snapshot *snapshot = NULL;
+    int rc = cli_load_snapshot(path, json, quiet, &snapshot);
     if (rc != CLI_EXIT_OK) {
         return rc;
     }
+    tp_error inspect_error = {0};
+    tp_status inspect_status = TP_STATUS_OK;
     if (json) {
         cli_sb sb = {0};
-        build_inspect(&sb, p, path);
+        inspect_status = build_inspect(&sb, snapshot, path, &inspect_error);
+        if (inspect_status != TP_STATUS_OK) {
+            cli_sb_free(&sb);
+            tp_session_snapshot_destroy(snapshot);
+            cli_emit_error(true, quiet, tp_status_id(inspect_status), "%s",
+                           inspect_error.msg[0] ? inspect_error.msg : tp_status_str(inspect_status));
+            return inspect_status == TP_STATUS_OOM ? CLI_EXIT_INTERNAL : CLI_EXIT_PROJECT;
+        }
         if (sb.oom) {
             cli_sb_free(&sb);
-            tp_project_destroy(p);
+            tp_session_snapshot_destroy(snapshot);
             cli_emit_error(true, false, "oom", "out of memory building inspect payload");
             return CLI_EXIT_INTERNAL;
         }
         cli_out_stdout(&sb);
         cli_sb_free(&sb);
     } else {
-        print_inspect_human(p, path);
+        inspect_status = print_inspect_human(snapshot, path, &inspect_error);
+        if (inspect_status != TP_STATUS_OK) {
+            tp_session_snapshot_destroy(snapshot);
+            cli_emit_error(false, quiet, tp_status_id(inspect_status), "%s",
+                           inspect_error.msg[0] ? inspect_error.msg : tp_status_str(inspect_status));
+            return inspect_status == TP_STATUS_OOM ? CLI_EXIT_INTERNAL : CLI_EXIT_PROJECT;
+        }
     }
-    tp_project_destroy(p);
+    tp_session_snapshot_destroy(snapshot);
     return CLI_EXIT_OK;
 }

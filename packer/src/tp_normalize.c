@@ -100,27 +100,7 @@ static tp_status build_animations(const tp_export_prepared *prep, const tp_norma
         }
     }
 
-    /* Precompute each packed sprite's export KEY once (frame space is this key
-     * space); the final name it resolves to sits at the same index. Only needed
-     * when there are animations to resolve frames for. */
     int n = prep->sprite_count;
-    const char **keys = NULL;
-    if (total > 0 && n > 0) {
-        keys = (const char **)tp_arena_alloc(arena, (size_t)n * sizeof(char *));
-        if (!keys) {
-            return tp_error_set(err, TP_STATUS_OOM, "tp_normalize: OOM (frame keys)");
-        }
-        for (int i = 0; i < n; i++) {
-            const char *raw = prep->sprites[i].src ? prep->sprites[i].src->name : "";
-            size_t cap = strlen(raw ? raw : "") + 1;
-            char *k = (char *)tp_arena_alloc(arena, cap);
-            if (!k) {
-                return tp_error_set(err, TP_STATUS_OOM, "tp_normalize: OOM (frame key)");
-            }
-            tp_sprite_export_key(raw, k, cap);
-            keys[i] = k;
-        }
-    }
 
     for (int i = 0; i < o->animation_count; i++) {
         const tp_export_anim_in *in = &o->animations[i];
@@ -141,10 +121,21 @@ static tp_status build_animations(const tp_export_prepared *prep, const tp_norma
                 return tp_error_set(err, TP_STATUS_OOM, "tp_normalize: OOM (explicit anim)");
             }
             for (int f = 0; f < in->frame_count; f++) {
-                const char *fkey = in->frames[f] ? in->frames[f] : "";
+                const tp_export_frame_ref *frame = &in->frames[f];
+                const char *raw_name = NULL;
+                for (int r = 0; r < o->sprite_ref_count; r++) {
+                    const tp_export_sprite_ref_in *ref = &o->sprite_refs[r];
+                    if (tp_id128_eq(ref->source_id, frame->source_id) &&
+                        ref->source_key && frame->source_key &&
+                        strcmp(ref->source_key, frame->source_key) == 0) {
+                        raw_name = ref->raw_name;
+                        break;
+                    }
+                }
                 const char *fin = NULL;
-                for (int s = 0; s < n; s++) {
-                    if (strcmp(keys[s], fkey) == 0) {
+                for (int s = 0; raw_name && s < n; s++) {
+                    if (prep->sprites[s].src && prep->sprites[s].src->name &&
+                        strcmp(prep->sprites[s].src->name, raw_name) == 0) {
                         fin = prep->sprites[s].final_name;
                         break;
                     }
@@ -153,7 +144,8 @@ static tp_status build_animations(const tp_export_prepared *prep, const tp_norma
                     return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                                         "tp_normalize: animation '%s' references frame '%s' which matches no "
                                         "packed sprite (dangling frame -- the sprite was removed or never packed)",
-                                        in->id ? in->id : "", fkey);
+                                        in->id ? in->id : "",
+                                        frame->source_key ? frame->source_key : "");
                 }
                 a->frames[f] = tp_arena_strdup(arena, fin);
                 if (!a->frames[f]) {

@@ -22,6 +22,7 @@
 
 #include "tp_core/tp_id.h"
 #include "tp_core/tp_project.h"
+#include "tp_project_mutation_internal.h"
 #include "tp_core/tp_sprite_index.h"
 #include "unity.h"
 

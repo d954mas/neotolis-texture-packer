@@ -1,0 +1,27 @@
+{
+  "version": 5,
+  "atlases": [
+    {
+      "id": "atlas_00000000000000000000000000000a01",
+      "name": "art",
+      "sources": [
+        {
+          "id": "source_00000000000000000000000000000b01",
+          "path": "parity_sprites"
+        }
+      ],
+      "sprites": [
+        {
+          "key": "ghost.png",
+          "origin": [0.1, 0.2],
+          "source": "source_00000000000000000000000000000b01"
+        },
+        {
+          "key": "gone.png",
+          "rename": "champion",
+          "source": "source_00000000000000000000000000000b01"
+        }
+      ]
+    }
+  ]
+}

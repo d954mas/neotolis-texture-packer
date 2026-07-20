@@ -2,8 +2,8 @@
 
 **Дата:** 2026-07-12
 **Статус:** accepted
-**Принял:** lead (делегированные полномочия), C0-01 review
-**Реализуется в:** C0-01 (`tp_c0_project_path_canonical`, master spec §5.1, §16)
+**Принял:** lead (делегированные полномочия)
+**Реализовано в:** `tp_path_canonical_lexical` (master spec §5.1, §16)
 
 ## Решение
 
@@ -17,7 +17,7 @@
   канонизируется как UNC.
 
 Любая другая форма `\\?\...` и **все** `\\.\...` (device namespace) —
-структурная ошибка с токеном `path_device` (`TP_C0_ERR_PATH_DEVICE`).
+структурная ошибка с токеном `path_device` (`TP_STATUS_PATH_DEVICE`).
 
 POSIX-хост не затронут.
 
@@ -36,6 +36,6 @@ Device namespace `\\.\` (и не-drive/не-UNC формы `\\?\`, напр.
 принимать его — значит молча породить нефайловую identity. Отклоняем явно
 структурной ошибкой (не abort — AGENTS.md invariant).
 
-Правило чисто лексическое (как и вся канонизация C0-01); realpath/симлинки
-слой F1-00 добавляет поверх. Golden-тесты закрепляют все четыре ветки в
-`packer/spike/c0/tests/test_c0_path.c`; контракт — C0-01-contract.md §1.
+Правило чисто лексическое; realpath/симлинки слой F1-00 добавляет поверх.
+Production-goldens для обеих host-моделей находятся в
+`packer/tests/test_identity_path.c`; контракт задают master spec §5.1 и это решение.

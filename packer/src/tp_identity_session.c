@@ -6,7 +6,7 @@
 #include "tp_hex.h" /* shared lowercase-hex encoder (same code the drift-guard tests call) */
 
 /* ======================================================================== */
-/* Session identity DTO + Save-As transition (F1-00 tasks 3, 4).             */
+/* Session identity DTO + Save-As transition.                               */
 /*                                                                          */
 /* The atomic-transition guarantee is structural: every transition          */
 /* canonicalizes the destination into a LOCAL buffer first and overwrites    */
@@ -98,8 +98,8 @@ tp_status tp_session_identity_key(const tp_session_identity *id, char *out, size
         return TP_STATUS_OK;
     }
     /* UNSAVED -> "session:" + 32 lowercase hex of the runtime session ID. A plain
-     * hex form (NOT the F1-01 "atlas_/source_/..." shape-ID format, which F1-01
-     * owns); shares tp_hex_encode_lower with the drift-guard tests so the encoding
+     * hex form (NOT the "atlas_/source_/..." shape-ID format, which lives
+     * elsewhere); shares tp_hex_encode_lower with the drift-guard tests so the encoding
      * cannot silently diverge between production and the vectors that pin it. */
     enum { PREFIX_LEN = 8, HEX_LEN = 32 }; /* strlen("session:") + 16*2 */
     if (cap < PREFIX_LEN + HEX_LEN + 1U) {

@@ -1,8 +1,7 @@
 # 0004 — Pack supersession: один running Pack + latest requested intent
 
 **Дата:** 2026-07-12
-**Статус:** initial-policy; закрепляется state-table fixtures в C0-03,
-реализуется в F3-03
+**Статус:** initial-policy; реализуется и закрепляется production-тестами в F3-03
 **Принял:** lead (делегировано owner); совпадает с рекомендацией
 `docs/reviews/master-spec-review-2026-07-12.md` (finding 5)
 

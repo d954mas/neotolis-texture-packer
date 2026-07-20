@@ -20,8 +20,10 @@
 #include "tp_core/tp_arena.h"
 #include "tp_core/tp_export.h"
 #include "tp_core/tp_export_run.h"
+#include "tp_core/tp_identity.h"
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_project.h"
+#include "tp_project_mutation_internal.h"
 #include "unity.h"
 
 /* wide + tall force the packer to rotate the tall sprite (diagonal bit). */
@@ -41,6 +43,8 @@ static char g_C[1024]; /* test-norot base    */
 /* test-only descriptors (borrowed by the registry; must outlive the run). */
 static tp_exporter g_nopivot;
 static tp_exporter g_norot;
+static tp_exporter g_list_error;
+static int g_list_error_write_calls;
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -52,6 +56,26 @@ static void fill(uint8_t *p, int n, uint8_t r, uint8_t g, uint8_t b) {
         p[i * 4 + 2] = b;
         p[i * 4 + 3] = 255;
     }
+}
+
+static tp_status list_error_write(const tp_export_prepared *prep, const tp_export_caps *caps,
+                                  const char *out_path_base, tp_export_notices *notices, tp_error *err) {
+    (void)prep;
+    (void)caps;
+    (void)out_path_base;
+    (void)notices;
+    (void)err;
+    g_list_error_write_calls++;
+    return TP_STATUS_OK;
+}
+
+static tp_status list_error_outputs(const tp_export_prepared *prep, const char *out_path_base,
+                                    tp_export_path_sink sink, void *ud, tp_error *err) {
+    (void)prep;
+    (void)out_path_base;
+    (void)sink;
+    (void)ud;
+    return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "test exporter output path overflow");
 }
 
 static cJSON *load_json(const char *base) {
@@ -201,14 +225,25 @@ void test_rename_and_anim_through_run(void) {
     a->alpha_threshold = 1;
     a->max_size = 1024;
     a->pixels_per_unit = 1.0F;
+    const tp_id128 source_id = {{0x41}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_source(a, "sprites"));
+    a->sources[0].id = source_id;
 
     /* rename the sprite whose KEY is "hero" (raw desc "hero.png") */
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_set_sprite_rename(a, "hero", "champion"));
-    /* an animation whose frames are stored in KEY space (ext stripped) */
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_set_sprite_rename_by_source_key(
+            a, source_id, "hero.png", "champion"));
+    /* An animation whose frames use canonical source-local keys. */
     tp_project_anim *an = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_animation(a, "run", &an));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "hero"));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "gem"));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_anim_add_frame(an, source_id, "hero.png"));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_anim_add_frame(an, source_id, "gem.png"));
 
     char jbase[1024];
     char dbase[1024];
@@ -219,8 +254,8 @@ void test_rename_and_anim_through_run(void) {
 
     tp_pack_sprite_desc sprites[2];
     memset(sprites, 0, sizeof sprites);
-    sprites[0] = (tp_pack_sprite_desc){.name = "hero.png", .rgba = hero, .w = 32, .h = 32, .origin_x = 0.5F, .origin_y = 0.5F};
-    sprites[1] = (tp_pack_sprite_desc){.name = "gem.png", .rgba = gem, .w = 24, .h = 24, .origin_x = 0.5F, .origin_y = 0.5F};
+    sprites[0] = (tp_pack_sprite_desc){.name = "hero.png", .source_id = source_id, .source_key = "hero.png", .logical_name = "hero", .rgba = hero, .w = 32, .h = 32, .origin_x = 0.5F, .origin_y = 0.5F};
+    sprites[1] = (tp_pack_sprite_desc){.name = "gem.png", .source_id = source_id, .source_key = "gem.png", .logical_name = "gem", .rgba = gem, .w = 24, .h = 24, .origin_x = 0.5F, .origin_y = 0.5F};
 
     tp_arena *ar = tp_arena_create(0);
     TEST_ASSERT_NOT_NULL(ar);
@@ -279,15 +314,22 @@ void test_dangling_frame_through_run(void) {
     a->alpha_threshold = 1;
     a->max_size = 256;
     a->pixels_per_unit = 1.0F;
+    const tp_id128 source_id = {{0x42}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_source(a, "sprites"));
+    a->sources[0].id = source_id;
     tp_project_anim *an = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_animation(a, "run", &an));
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_anim_add_frame(an, "ghost")); /* never packed */
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_anim_add_frame(an, source_id,
+                                  "ghost.png")); /* never packed */
     char jbase[1024];
     (void)snprintf(jbase, sizeof jbase, "%s/rn_dangling", g_dir);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_target(a, "json-neotolis", jbase, NULL));
     tp_pack_sprite_desc sprites[1];
     memset(sprites, 0, sizeof sprites);
-    sprites[0] = (tp_pack_sprite_desc){.name = "hero.png", .rgba = px, .w = 16, .h = 16, .origin_x = 0.5F, .origin_y = 0.5F};
+    sprites[0] = (tp_pack_sprite_desc){.name = "hero.png", .source_id = source_id, .source_key = "hero.png", .logical_name = "hero", .rgba = px, .w = 16, .h = 16, .origin_x = 0.5F, .origin_y = 0.5F};
     tp_arena *ar = tp_arena_create(0);
     TEST_ASSERT_NOT_NULL(ar);
     tp_export_notices nts;
@@ -300,6 +342,78 @@ void test_dangling_frame_through_run(void) {
     tp_export_notices_free(&nts);
     tp_arena_destroy(ar);
     tp_project_destroy(proj);
+}
+
+void test_duplicate_source_keys_export_the_canonical_animation_frame(void) {
+    static uint8_t left_pixels[8 * 8 * 4];
+    static uint8_t right_pixels[8 * 8 * 4];
+    fill(left_pixels, 8 * 8, 255, 0, 0);
+    fill(right_pixels, 8 * 8, 0, 255, 0);
+    const tp_id128 left_source = {{0x51}};
+    const tp_id128 right_source = {{0x52}};
+    tp_project *project = tp_project_create();
+    tp_project_atlas *atlas = tp_project_get_atlas(project, 0);
+    atlas->shape = 0;
+    atlas->allow_transform = false;
+    atlas->power_of_two = false;
+    atlas->alpha_threshold = 1;
+    atlas->max_size = 128;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_source(atlas, "left"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_source(atlas, "right"));
+    atlas->sources[0].id = left_source;
+    atlas->sources[1].id = right_source;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_set_sprite_rename_by_source_key(
+                              atlas, left_source, "shared.png", "left"));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_set_sprite_rename_by_source_key(
+                              atlas, right_source, "shared.png", "right"));
+    tp_project_anim *animation = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_animation(atlas, "pick", &animation));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_anim_add_frame(animation, right_source,
+                                                    "shared.png"));
+    char out[1024];
+    (void)snprintf(out, sizeof out, "%s/canonical_frame", g_dir);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_target(atlas, "json-neotolis", out,
+                                                      NULL));
+
+    tp_pack_sprite_desc sprites[2];
+    memset(sprites, 0, sizeof sprites);
+    sprites[0] = (tp_pack_sprite_desc){
+        .name = "left-source:shared.png", .source_id = left_source,
+        .source_key = "shared.png", .logical_name = "shared",
+        .rgba = left_pixels, .w = 8, .h = 8, .origin_x = 0.5F,
+        .origin_y = 0.5F};
+    sprites[1] = (tp_pack_sprite_desc){
+        .name = "right-source:shared.png", .source_id = right_source,
+        .source_key = "shared.png", .logical_name = "shared",
+        .rgba = right_pixels, .w = 8, .h = 8, .origin_x = 0.5F,
+        .origin_y = 0.5F};
+    tp_arena *arena = tp_arena_create(0);
+    tp_export_notices notices;
+    tp_export_notices_init(&notices);
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_export_run(project, 0, sprites, 2, g_dir, arena, &notices, NULL,
+                      &error),
+        error.msg);
+    cJSON *json = load_json(out);
+    TEST_ASSERT_NOT_NULL(json);
+    cJSON *pick = anim_by_id(json, "pick");
+    TEST_ASSERT_NOT_NULL(pick);
+    cJSON *frames = cJSON_GetObjectItemCaseSensitive(pick, "frames");
+    TEST_ASSERT_TRUE(cJSON_IsArray(frames));
+    TEST_ASSERT_EQUAL_STRING("right", cJSON_GetArrayItem(frames, 0)->valuestring);
+    cJSON_Delete(json);
+    tp_export_notices_free(&notices);
+    tp_arena_destroy(arena);
+    tp_project_destroy(project);
 }
 // #endregion
 
@@ -333,7 +447,21 @@ static bool setup_all(const char *dir) {
                                      .multipage = true,
                                      .aliases = true},
                             .write = tp_export_json_neotolis_write};
-    if (tp_exporter_register(&g_nopivot) != TP_STATUS_OK || tp_exporter_register(&g_norot) != TP_STATUS_OK) {
+    g_list_error = (tp_exporter){.id = "test-list-error",
+                                 .display_name = "test list error",
+                                 .extension = "bad",
+                                 .caps = {.rotate90 = true,
+                                          .flips = true,
+                                          .polygons = true,
+                                          .pivot = true,
+                                          .slice9 = true,
+                                          .multipage = true,
+                                          .aliases = true},
+                                 .write = list_error_write,
+                                 .list_outputs = list_error_outputs};
+    if (tp_exporter_register(&g_nopivot) != TP_STATUS_OK ||
+        tp_exporter_register(&g_norot) != TP_STATUS_OK ||
+        tp_exporter_register(&g_list_error) != TP_STATUS_OK) {
         return false;
     }
 
@@ -523,7 +651,7 @@ static void test_dry_run(void) {
     const double d = wet_occ - rd.runs[0].pages[0].occupancy_pct;
     TEST_ASSERT_TRUE_MESSAGE(d > -1e-9 && d < 1e-9, "dry-run occupancy must match the wet run");
     const tp_export_report_target *dt = &rd.targets[0];
-    TEST_ASSERT_TRUE_MESSAGE(dt->ok, "dry-run target is ok (nothing can fail to write)");
+    TEST_ASSERT_TRUE_MESSAGE(dt->ok, "dry-run target output set is valid");
     TEST_ASSERT_EQUAL_INT_MESSAGE(0, dt->written_file_count, "dry-run writes nothing");
     TEST_ASSERT_NULL(dt->written_files);
     TEST_ASSERT_EQUAL_INT_MESSAGE(wet_written, dt->would_write_count,
@@ -540,6 +668,115 @@ static void test_dry_run(void) {
     tp_project_destroy(proj);
 }
 
+/* Every output artifact must fit the canonical path contract, including the
+ * suffix added by the exporter. Dry-run validates that exact same output set,
+ * so it must reject an overflowing page path just like the wet writer does. */
+static void test_dry_run_rejects_the_same_output_path_overflow_as_wet_export(void) {
+    tp_pack_sprite_desc sprite = {
+        .name = "wide",
+        .rgba = g_wide,
+        .w = 120,
+        .h = 24,
+        .origin_x = 0.5F,
+        .origin_y = 0.5F,
+    };
+    tp_project *proj = tp_project_create();
+    TEST_ASSERT_NOT_NULL(proj);
+    tp_project_atlas *atlas = tp_project_get_atlas(proj, 0);
+    atlas->shape = 0;
+    atlas->allow_transform = false;
+    atlas->power_of_two = false;
+    atlas->padding = 0;
+    atlas->margin = 0;
+    atlas->alpha_threshold = 1;
+    atlas->max_size = 256;
+
+    char base[TP_IDENTITY_PATH_MAX];
+#if defined(_WIN32)
+    memcpy(base, "C:/", 3U);
+    size_t prefix_len = 3U;
+#else
+    base[0] = '/';
+    size_t prefix_len = 1U;
+#endif
+    const size_t base_len = TP_IDENTITY_PATH_MAX - strlen("-0.png");
+    memset(base + prefix_len, 'a', base_len - prefix_len);
+    base[base_len] = '\0';
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_target(atlas, TP_EXPORTER_ID_JSON_NEOTOLIS, base, NULL));
+
+    tp_status statuses[2] = {TP_STATUS_OK, TP_STATUS_OK};
+    char errors[2][256] = {{0}};
+    for (int dry = 0; dry < 2; ++dry) {
+        tp_arena *arena = tp_arena_create(0);
+        TEST_ASSERT_NOT_NULL(arena);
+        tp_export_notices notices;
+        tp_export_notices_init(&notices);
+        tp_export_report report;
+        memset(&report, 0, sizeof report);
+        tp_export_run_opts opts = {.report = &report, .dry_run = dry != 0};
+        tp_error err = {{0}};
+
+        statuses[dry] = tp_export_run_ex(proj, 0, &sprite, 1, g_dir, arena, &notices, NULL, &opts, &err);
+
+        TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS, statuses[dry]);
+        TEST_ASSERT_EQUAL_INT(1, report.target_count);
+        TEST_ASSERT_FALSE(report.targets[0].ok);
+        TEST_ASSERT_NOT_NULL(report.targets[0].error);
+        TEST_ASSERT_TRUE(strlen(report.targets[0].error) > 0U);
+        (void)snprintf(errors[dry], sizeof errors[dry], "%s", report.targets[0].error);
+        tp_export_notices_free(&notices);
+        tp_arena_destroy(arena);
+    }
+    TEST_ASSERT_EQUAL_INT(statuses[0], statuses[1]);
+    TEST_ASSERT_EQUAL_STRING(errors[0], errors[1]);
+    tp_project_destroy(proj);
+}
+
+static void test_custom_output_listing_failure_prevents_wet_write_and_matches_dry_run(void) {
+    tp_pack_sprite_desc sprite = {
+        .name = "wide",
+        .rgba = g_wide,
+        .w = 120,
+        .h = 24,
+        .origin_x = 0.5F,
+        .origin_y = 0.5F,
+    };
+    tp_project *proj = tp_project_create();
+    TEST_ASSERT_NOT_NULL(proj);
+    tp_project_atlas *atlas = tp_project_get_atlas(proj, 0);
+    atlas->shape = 0;
+    atlas->allow_transform = false;
+    atlas->power_of_two = false;
+    atlas->alpha_threshold = 1;
+    atlas->max_size = 256;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_target(atlas, "test-list-error", g_dir, NULL));
+
+    g_list_error_write_calls = 0;
+    for (int dry = 0; dry < 2; ++dry) {
+        tp_arena *arena = tp_arena_create(0);
+        TEST_ASSERT_NOT_NULL(arena);
+        tp_export_report report;
+        memset(&report, 0, sizeof report);
+        tp_export_run_opts opts = {.report = &report, .dry_run = dry != 0};
+        tp_export_notices notices;
+        tp_export_notices_init(&notices);
+        tp_error err = {{0}};
+
+        TEST_ASSERT_EQUAL_INT(
+            TP_STATUS_OUT_OF_BOUNDS,
+            tp_export_run_ex(proj, 0, &sprite, 1, g_dir, arena, &notices, NULL, &opts, &err));
+        TEST_ASSERT_EQUAL_INT(1, report.target_count);
+        TEST_ASSERT_FALSE(report.targets[0].ok);
+        TEST_ASSERT_EQUAL_STRING("test exporter output path overflow", report.targets[0].error);
+        tp_export_notices_free(&notices);
+        tp_arena_destroy(arena);
+    }
+    TEST_ASSERT_EQUAL_INT(0, g_list_error_write_calls);
+    tp_project_destroy(proj);
+}
+
 int main(int argc, char **argv) {
     const char *dir = (argc > 1) ? argv[1] : ".";
     if (!setup_all(dir)) {
@@ -552,8 +789,11 @@ int main(int argc, char **argv) {
     RUN_TEST(test_nopivot_drops_pivot_with_notice);
     RUN_TEST(test_rename_and_anim_through_run);
     RUN_TEST(test_dangling_frame_through_run);
+    RUN_TEST(test_duplicate_source_keys_export_the_canonical_animation_frame);
     RUN_TEST(test_report_ex);
     RUN_TEST(test_dry_run);
+    RUN_TEST(test_dry_run_rejects_the_same_output_path_overflow_as_wet_export);
+    RUN_TEST(test_custom_output_listing_failure_prevents_wet_write_and_matches_dry_run);
     int rc = UNITY_END();
     tp_export_notices_free(&g_notices);
     tp_project_destroy(g_proj);

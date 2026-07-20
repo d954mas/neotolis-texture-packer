@@ -3,9 +3,8 @@
 
 /* Center canvas view (ux.md region E): the dual-mode atlas/source canvas card, its action strip
  * (Pack/Export/Refresh + pages + zoom + stale chip), the animation preview player, the floating
- * message pill, the stale-page overlay, and the empty/no-sources hero state. Split out of main.c
- * (GUI decomposition step 6a) as a pure move -- function bodies + canvas-local statics relocated
- * verbatim, no behavior change. Declare-only: exposes the one entry point frame() calls.
+ * message pill, the stale-page overlay, and the empty/no-sources hero state. Declare-only: exposes
+ * the one entry point frame() calls.
  *
  * P-2 lead ruling (recorded in docs/plans/gui-decomposition.md §2): handle_canvas_input (the
  * wheel/pan/click-select mouse state machine) + its mouse statics (s_lmb_armed, s_lmb_panning,

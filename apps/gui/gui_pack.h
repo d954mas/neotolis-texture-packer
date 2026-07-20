@@ -1,53 +1,69 @@
 #ifndef NTPACKER_GUI_PACK_H
 #define NTPACKER_GUI_PACK_H
 
-/* In-process packing for the GUI (ux.md §3.2/§3.3b). Owns the tp_pack input assembly from the
- * live project and one arena-owned tp_result PER ATLAS (the atlas-page canvas renders it).
+/* Thin GUI adapter over session-owned typed Pack/Export jobs (ux.md §3.2/§3.3b).
+ * It owns only presentation result slots; input assembly, algorithms, and worker
+ * lifetime remain below the frontend boundary.
  *
- * Raw-name convention (must match the exporter/CLI path -- see tp_normalize + test_export_run):
- *   - FILE source  -> sprite raw name = the file's BASENAME, extension KEPT (e.g. "a.png").
- *   - FOLDER source-> sprite raw name = the path RELATIVE to the folder root, extension KEPT and
- *     sub-folders preserved (e.g. "anim/test-0.png").
- * The raw name is what tp_name_map hashes; tp_normalize strips the extension (folders kept) at
- * export/preview naming, so the STRIPPED raw name == the sprite-tree override key ("anim/test-0"),
- * which is how selection sync maps a canvas region back to a list row.
+ * Project-built pack results use a collision-free internal name derived from
+ * canonical {source_id, source_key}. GUI selection/preview therefore uses the
+ * canonical lookup below; human/export names remain presentation only.
  *
- * gui_pack_atlas/gui_pack_export are the BLOCKING core (the selftest + --shot use them for
- * determinism). Interactive use runs them on a worker thread via the async API below, so a slow
- * concave pack never freezes the window. Missing files are SKIPPED with a notice (never fatal,
- * ux.md §3.7). */
+ * gui_pack_atlas/gui_pack_export are synchronous adapters used by selftest/shot; they drain the
+ * same session-owned typed jobs as interactive use. */
 
 #include <stddef.h>
 #include <stdbool.h>
+#include <stdint.h>
 
 #include "tp_core/tp_model.h" /* tp_result */
+#include "tp_core/tp_id.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* Stores the session work dir (where tp_pack writes the transient .ntpack) and creates it. */
-void gui_pack_init(const char *work_dir);
+/* Stores the work-dir intent used when starting typed Pack jobs and creates it.
+ * Returns false instead of retaining a truncated or unusable directory. */
+bool gui_pack_init(const char *work_dir);
 
-/* Packs atlas `atlas_index` of the live project: assembles sprites from its sources (files as-is,
- * folders expanded via gui_scan), maps per-sprite origin/slice9 overrides, runs tp_pack, and stores
- * the arena-owned tp_result in the atlas's slot (the previous arena is destroyed first).
+/* Packs atlas `atlas_index` through a typed session job and stores the returned
+ * result in the atlas presentation slot (the previous slot is destroyed first).
  *
  * On success returns true, writes the wall-clock pack time to *out_ms (nullable), and appends any
  * skipped-missing-file count to `notice` (nullable, cap notice_cap). On failure returns false and
  * fills `err` (nullable). An atlas with zero usable sprites is a failure (nothing to show). */
 bool gui_pack_atlas(int atlas_index, double *out_ms, char *err, size_t err_cap, char *notice, size_t notice_cap);
 
-/* The stored result for `atlas_index`, or NULL if never packed / last pack failed. */
+/* The last successful result for `atlas_index`, or NULL if never packed. A
+ * failed Pack leaves it intact; gui_project reports freshness separately. */
 const tp_result *gui_pack_result(int atlas_index);
+/* Changes whenever a successful Pack publishes a new result into this atlas slot. */
+uint64_t gui_pack_result_version(int atlas_index);
 
-/* Sprite index within the stored result whose STRIPPED raw name (ext removed, folders kept) equals
- * `key` (the sprite-tree override key), or -1. Powers list-row -> canvas-region selection sync. */
-int gui_pack_find_sprite(int atlas_index, const char *key);
+/* Canonical lookup used by rows and animation frames. Project-built pack inputs
+ * use a collision-free internal name derived from {source_id, source_key}; display
+ * names are never authoritative here. */
+int gui_pack_find_sprite_ref(int atlas_index, tp_id128 source_id,
+                             const char *source_key);
+bool gui_pack_sprite_matches_ref(int atlas_index, int sprite_index,
+                                 tp_id128 source_id,
+                                 const char *source_key);
 
-/* Exports every ENABLED target of atlas `atlas_index` (tp_export_run packs per target with the
- * atlas settings INTERSECT each target's capabilities, then writes files). Assembles the same sprite
- * set as gui_pack_atlas; creates each target's output parent directory first. Returns true on success
+#ifdef NTPACKER_GUI_SELFTEST
+typedef struct gui_pack_ref_index_work {
+    uint64_t build_items;
+    uint64_t build_probes;
+    uint64_t lookup_calls;
+    uint64_t lookup_probes;
+} gui_pack_ref_index_work;
+void gui_pack_ref_index_work_reset(void);
+gui_pack_ref_index_work gui_pack_ref_index_work_get(void);
+void gui_pack_preview_diff_work_reset(void);
+uint64_t gui_pack_preview_diff_rebuilds(void);
+#endif
+
+/* Exports every ENABLED target of atlas `atlas_index` through a typed session job. Returns true on success
  * and writes the enabled-target count to *out_targets and the metadata-loss notice count to
  * *out_notices (both nullable); a joined notice summary goes to `notice`. On failure returns false and
  * fills `err` (e.g. unsaved project with relative output paths). */
@@ -65,12 +81,12 @@ void gui_pack_clear(int atlas_index);
  * (tp_export_effective_settings). Only one preview is live at a time (dropped on atlas switch / edit),
  * so a single slot keyed by atlas_index guarantees coherent binding. */
 
-/* Blocking preview pack of `atlas_index` for exporter `exporter_id` (deterministic path for the
- * selftest + --shot-preview). Mirrors gui_pack_atlas but lands in the preview slot. false fills err. */
+/* Synchronous preview adapter for selftest/shot-preview; drains the same typed
+ * session Pack job and lands its result in the preview slot. */
 bool gui_pack_preview_blocking(int atlas_index, const char *exporter_id, char *err, size_t err_cap);
 
-/* Async preview pack (interactive): reuses the worker thread; result lands in the preview slot at a
- * frame boundary (gui_pack_poll -> GUI_PACK_DONE_PREVIEW_*). false (fills err) if busy / can't assemble. */
+/* Async preview pack (interactive): uses the session-owned Pack handle; result lands in the preview
+ * slot at a frame boundary (gui_pack_poll -> GUI_PACK_DONE_PREVIEW_*). false (fills err) if busy. */
 bool gui_pack_preview_async_start(int atlas_index, const char *exporter_id, char *err, size_t err_cap);
 
 /* The stored preview result IF it belongs to `atlas_index`, else NULL (coherent binding: a stale slot
@@ -80,7 +96,7 @@ const tp_result *gui_pack_preview_result(int atlas_index);
 /* Drops the preview slot (frees its arena). Call on back-to-Native / atlas switch / model edit. */
 void gui_pack_preview_clear(void);
 
-/* Degradation summary for `exporter_id` on `atlas_index`: diffs the native (session) tp_pack_settings
+/* Degradation summary for `exporter_id` on `atlas_index`: diffs the native session settings
  * against the caps-clamped effective settings, plus the caps-vs-usage metadata drops (slice9/pivot).
  * Writes a SHORT chip caption to `chip` (empty when the format expresses everything) and a longer
  * field-by-field breakdown to `tip` (nullable). Returns the number of degradations found. */
@@ -88,10 +104,9 @@ int gui_pack_preview_diff(int atlas_index, const char *exporter_id, char *chip, 
                           size_t tip_cap);
 
 /* --- async packing (interactive; ux.md §3 worker thread) --------------------------------------
- * One in-flight op MAX (pack OR export). The heavy tp_pack/tp_export_run runs on a worker thread
- * over a self-contained snapshot; the UI stays interactive. Poll each frame and swap the result in
- * at a frame boundary (gui_pack_poll). The blocking gui_pack_atlas/gui_pack_export above stay the
- * deterministic path used by the selftest and --shot. */
+ * One in-flight op MAX (pack OR export). The session owns the concrete worker handle and immutable
+ * input; this frontend only captures intent, polls typed progress, and maps the typed result at a
+ * frame boundary. The synchronous adapters above reuse and drain this exact path. */
 typedef enum {
     GUI_PACK_ASYNC_NONE = 0,
     GUI_PACK_ASYNC_PACK,
@@ -117,7 +132,7 @@ typedef struct {
     gui_pack_done kind;
     int atlas_index;    /* pack: which atlas landed */
     double ms;          /* pack: wall-clock pack time */
-    bool model_changed; /* pack: model differs from the packed snapshot -> keep preview stale */
+    bool input_changed; /* pack: model/source token differs -> keep preview stale */
     int missing;        /* pack: skipped-missing-source count */
     int targets;        /* export: enabled targets written */
     int notices;        /* export: metadata-loss notices */

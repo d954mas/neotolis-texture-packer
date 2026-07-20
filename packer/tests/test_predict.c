@@ -18,6 +18,7 @@
 #include "tp_core/tp_model.h"
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_project.h"
+#include "tp_project_mutation_internal.h"
 #include "unity.h"
 
 void setUp(void) {}
@@ -29,6 +30,8 @@ static uint8_t g_sl_px[30 * 20 * 4];
 
 /* A test-only all-restricted exporter over the json writer: drops every axis. */
 static tp_exporter g_restrict;
+static char g_boundary_exporter_id[TP_EXPORTER_ID_MAX];
+static tp_exporter g_boundary_exporter;
 
 static void fill(uint8_t *p, int n) {
     for (int i = 0; i < n; i++) {
@@ -75,11 +78,21 @@ static tp_project *make_fixture(const char *exporter_id, const char *outbase) {
     a->alpha_threshold = 1;
     a->max_size = 1024;
     a->pixels_per_unit = 1.0F;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_source(a, "sprites"));
+    a->sources[0].id.bytes[0] = 1U;
+    const tp_id128 source_id = a->sources[0].id;
     tp_project_sprite *sp = NULL;
-    (void)tp_project_atlas_add_sprite(a, "piv", &sp);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_sprite_by_source_key(a, source_id, "piv.png",
+                                                  &sp));
     sp->origin_x = 1.5F;
     sp->origin_y = -0.25F;
-    (void)tp_project_atlas_add_sprite(a, "sl", &sp);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_sprite_by_source_key(a, source_id, "sl.png",
+                                                  &sp));
     sp->slice9_lrtb[0] = sp->slice9_lrtb[1] = sp->slice9_lrtb[2] = sp->slice9_lrtb[3] = 4;
     (void)tp_project_atlas_add_target(a, exporter_id, outbase, NULL);
     return p;
@@ -94,6 +107,33 @@ static void build_descs(tp_pack_sprite_desc descs[2]) {
 }
 
 // #region tests
+void test_exporter_registry_enforces_exact_canonical_id_bound(void) {
+    char oversized[TP_EXPORTER_ID_MAX + 1U];
+    memset(oversized, 'x', sizeof oversized - 1U);
+    oversized[sizeof oversized - 1U] = '\0';
+    tp_error error = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_exporter_id_validate(oversized, &error));
+
+    tp_exporter oversized_exporter = g_boundary_exporter;
+    oversized_exporter.id = oversized;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS,
+                          tp_exporter_register(&oversized_exporter));
+
+    memset(g_boundary_exporter_id, 'b',
+           sizeof g_boundary_exporter_id - 1U);
+    g_boundary_exporter_id[sizeof g_boundary_exporter_id - 1U] = '\0';
+    g_boundary_exporter.id = g_boundary_exporter_id;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_exporter_id_validate(g_boundary_exporter_id,
+                                                  &error));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_exporter_register(&g_boundary_exporter));
+    TEST_ASSERT_EQUAL_PTR(&g_boundary_exporter,
+                          tp_exporter_find(g_boundary_exporter_id));
+}
+
 void test_predict_alias_with_prep(void) {
     /* A prep whose sprite "b" dedups to "a" -- exactly what duplicate images pack to.
      * A caps.aliases=false target must predict the dropped alias, but only WITH a prep
@@ -252,12 +292,24 @@ int main(int argc, char **argv) {
                                         .multipage = false,
                                         .aliases = false},
                                .write = tp_export_json_neotolis_write};
+    g_boundary_exporter = (tp_exporter){
+        .display_name = "canonical id boundary",
+        .extension = "json",
+        .caps = {.rotate90 = true,
+                 .flips = true,
+                 .polygons = true,
+                 .pivot = true,
+                 .slice9 = true,
+                 .multipage = true,
+                 .aliases = true},
+        .write = tp_export_json_neotolis_write};
     if (tp_exporter_register(&g_restrict) != TP_STATUS_OK) {
         (void)fprintf(stderr, "failed to register test-restrict exporter\n");
         return 1;
     }
 
     UNITY_BEGIN();
+    RUN_TEST(test_exporter_registry_enforces_exact_canonical_id_bound);
     RUN_TEST(test_predict_alias_with_prep);
     RUN_TEST(test_predict_multipage_with_prep);
     RUN_TEST(test_consistency_restrict);

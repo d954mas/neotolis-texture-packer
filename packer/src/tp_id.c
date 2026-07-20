@@ -12,9 +12,8 @@
 #endif
 
 /* ======================================================================== */
-/* RNG seam (promoted verbatim from C0-01 tp_c0_id.c: no engine-private API,  */
-/* no extra link deps). A short read / failure is surfaced upstream as a     */
-/* structured tp_status, never an abort.                                     */
+/* RNG seam (no engine-private API, no extra link deps). A short read /     */
+/* failure is surfaced upstream as a structured tp_status, never an abort.  */
 /* ======================================================================== */
 
 static int rng_os_fill(void *ctx, uint8_t *out, size_t len) {
@@ -105,7 +104,13 @@ tp_status tp_id128_generate(const tp_rng *rng, tp_id128 *out, tp_error *err) {
     if ((size_t)n != sizeof buf) {
         return tp_error_set(err, TP_STATUS_RNG_FAILED, "rng produced %d of 16 bytes", n);
     }
-    memcpy(out->bytes, buf, sizeof buf);
+    tp_id128 generated;
+    memcpy(generated.bytes, buf, sizeof buf);
+    if (tp_id128_is_nil(generated)) {
+        return tp_error_set(err, TP_STATUS_RNG_FAILED,
+                            "rng produced the reserved nil id");
+    }
+    *out = generated;
     return TP_STATUS_OK;
 }
 

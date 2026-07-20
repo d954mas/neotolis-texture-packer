@@ -12,6 +12,28 @@
 extern "C" {
 #endif
 
+/* Stable Save publication phases. A FILE_IO_FAILED error identifies the exact
+ * pre-publication boundary that failed; NONE is used by every other status. */
+typedef enum tp_file_io_phase {
+    TP_FILE_IO_PHASE_NONE = 0,
+    TP_FILE_IO_PHASE_TEMP_OPEN,
+    TP_FILE_IO_PHASE_TEMP_WRITE,
+    TP_FILE_IO_PHASE_FILE_SYNC,
+    TP_FILE_IO_PHASE_TEMP_CLOSE,
+    TP_FILE_IO_PHASE_ATOMIC_REPLACE,
+    TP_FILE_IO_PHASE_ATOMIC_CREATE
+} tp_file_io_phase;
+
+typedef struct tp_file_io_context {
+    tp_file_io_phase phase;
+    /* Borrowed from the Save caller and valid for the same lifetime as that
+     * input path. Session boundaries remap private canonical buffers before
+     * returning the error to their caller. */
+    const char *path;
+    /* errno-compatible cause captured before cleanup can overwrite it. */
+    int native_code;
+} tp_file_io_context;
+
 typedef enum tp_status {
     TP_STATUS_OK = 0,
     TP_STATUS_UNIMPLEMENTED,
@@ -27,7 +49,7 @@ typedef enum tp_status {
     TP_STATUS_BUILDER_FAILED, /* nt_builder start/finish returned an error (tp_pack) */
     TP_STATUS_BAD_PROJECT,    /* malformed/invalid .ntpacker_project JSON (tp_project) */
 
-    /* --- project identity faults (F1-00, promoted from the C0-01 spike) ---
+    /* --- project identity faults ---
      * Append-only: new values go at the END so existing tokens never shift.
      * Distinct identity faults that a client acts on differently; generic
      * empty/NULL/too-small inputs still reuse INVALID_ARGUMENT / OUT_OF_BOUNDS. */
@@ -40,17 +62,15 @@ typedef enum tp_status {
     TP_STATUS_RNG_FAILED,         /* the injected RNG did not deliver the requested bytes (tp_id) */
     TP_STATUS_IDENTITY_COLLISION, /* Save-As destination canonicalizes to an already-claimed key (tp_identity) */
 
-    /* --- structural-ID faults (F1-01, promoted from the C0-01 id/legacy spike) ---
+    /* --- structural-ID faults ---
      * Append-only: new values go at the END. Distinct id faults a client acts on
      * differently; generic NULL/too-small inputs still reuse INVALID_ARGUMENT /
      * OUT_OF_BOUNDS (a format buffer too small is OUT_OF_BOUNDS). */
     TP_STATUS_ID_MALFORMED,        /* shape-ID text is malformed (bad prefix/hex/length/trailing/empty),
                                     * or a nil ID appears where a real structural ID is required (tp_id) */
     TP_STATUS_DUPLICATE_ID,        /* two structural entities share one persistent ID on load/validate (tp_project) */
-    TP_STATUS_ID_COLLISION_EXHAUSTED, /* deterministic legacy salt sweep could not disambiguate synthetic IDs
-                                       * (unreachable with the default hash; only a degenerate injected hash hits it) */
 
-    /* --- source-key normalization faults (F1-02, promoted from the C0-01 srckey spike) ---
+    /* --- source-key normalization faults ---
      * Append-only: new values go at the END. A source-local key that is invalid
      * UTF-8, absolute, or contains a '..' traversal component; generic empty/NULL
      * inputs still reuse INVALID_ARGUMENT and an overflowing buffer OUT_OF_BOUNDS. */
@@ -58,7 +78,7 @@ typedef enum tp_status {
     TP_STATUS_KEY_ABSOLUTE,        /* source key/path must be source-root-relative, not absolute (tp_srckey) */
     TP_STATUS_KEY_TRAVERSAL,       /* a '..' component would escape the source root (tp_srckey) */
 
-    /* --- selector resolution faults (F1-03, master spec §5.4) ---
+    /* --- selector resolution faults (master spec §5.4) ---
      * Append-only: new values go at the END. A human selector must resolve to
      * EXACTLY ONE id before it is used; zero and >1 matches are distinct faults a
      * client acts on differently (NOT_FOUND surfaces "no such entity", AMBIGUOUS
@@ -67,7 +87,7 @@ typedef enum tp_status {
     TP_STATUS_NOT_FOUND,           /* a selector matched no entity (tp_selector) */
     TP_STATUS_AMBIGUOUS_SELECTOR,  /* a selector matched more than one entity; a candidate list is returned */
 
-    /* --- typed operation-engine faults (F2-01, master spec §6-6.2, §7) ---
+    /* --- typed operation-engine faults (master spec §6-6.2, §7) ---
      * Append-only: new values go at the END. Distinct faults a client acts on
      * differently from the generic INVALID_ARGUMENT: UNKNOWN_OP -> the op kind is
      * not in the catalog (fix the verb/wire); OUT_OF_RANGE -> a payload VALUE is
@@ -79,7 +99,7 @@ typedef enum tp_status {
     TP_STATUS_UNKNOWN_OP,          /* the operation kind/wire is not in the append-only catalog (tp_operation) */
     TP_STATUS_OUT_OF_RANGE,        /* a payload value is outside its allowed range (tp_op_validate) */
 
-    /* --- transaction concurrency faults (F2-02, master spec §8) ---
+    /* --- transaction concurrency faults (master spec §8) ---
      * Append-only: new values go at the END. A transaction carries an
      * expected_revision optimistic-concurrency precondition; the two mismatch
      * directions are distinct faults a client acts on differently. CONFLICT (stale:
@@ -91,19 +111,37 @@ typedef enum tp_status {
     TP_STATUS_REVISION_CONFLICT,   /* expected_revision < current: stale; rebuild and retry (tp_transaction) */
     TP_STATUS_INVALID_REVISION,    /* expected_revision > current: a revision that never existed (tp_transaction) */
 
-    /* --- recovery-journal durability fault (F2-04, master spec §7.1, §22.3) ---
-     * Append-only: new value at the END. A committed transaction is not acknowledged
-     * until its recovery record is durably appended (§7.1); when that durable append
-     * fails the transaction is rolled back (live model byte-unchanged, no committed
-     * event) and this distinct status tells the caller to retry the SAME transaction
-     * id -- it is a durability failure, not OOM and not a validation reject. An
-     * OOM-class journal fault (index/buffer allocation) still reuses OOM. */
-    TP_STATUS_JOURNAL_FAILED       /* recovery-journal durable append failed (tp_journal) */
+    /* --- recovery-journal durability fault (master spec §7.1, §22.3) ---
+     * Append-only: new value at the END. This status reports that a recovery
+     * record was not durably established. At the model/session boundary that
+     * failure degrades recovery but does not roll back an already-published live
+     * transaction. An OOM-class journal fault still reuses OOM. */
+    TP_STATUS_JOURNAL_FAILED,      /* recovery-journal durable append failed (tp_journal) */
+    TP_STATUS_FILE_CHANGED_EXTERNALLY, /* saved project bytes differ from the persisted session fingerprint */
+    TP_STATUS_RECOVERY_CLEANUP_FAILED, /* recovered output is safe, but its orphan journal could not be removed */
+    TP_STATUS_RECOVERY_BUSY,           /* another process claimed this recovery journal */
+    TP_STATUS_RECOVERY_CLAIM_FAILED,   /* recovery journal lock could not be created/acquired for a storage reason */
+    TP_STATUS_PROJECT_LIVE,            /* canonical project identity is leased by another writer */
+    TP_STATUS_UNSUPPORTED_CAPABILITY,  /* the selected client has no authority/surface for this capability */
+    TP_STATUS_FILE_EXISTS,             /* create-only publication found an existing destination */
+    /* The project was atomically published and is the authoritative saved
+     * state, but the containing-directory durability barrier failed. Clients
+     * must report this as a success notice, never retry as if no write occurred. */
+    TP_STATUS_FILE_DURABILITY_UNCERTAIN,
+
+    /* A Save failed before atomic publication. The destination and saved
+     * session baseline are unchanged; file_io carries phase/path/cause. */
+    TP_STATUS_FILE_IO_FAILED
 } tp_status;
 
-/* Fixed-size message buffer -- no heap, safe to embed by value on the stack. */
-typedef struct tp_error {
-    char msg[256];
+/* No heap, safe to embed by value on the stack. The single anonymous aggregate
+ * preserves the long-standing `tp_error error = {{0}}` initializer under the
+ * project's -Wmissing-field-initializers -Werror policy. */
+typedef union tp_error {
+    struct {
+        char msg[256];
+        tp_file_io_context file_io;
+    };
 } tp_error;
 
 #if defined(__GNUC__) || defined(__clang__)
@@ -118,6 +156,9 @@ static inline tp_status tp_error_set(tp_error *err, tp_status status, const char
 
 static inline tp_status tp_error_set(tp_error *err, tp_status status, const char *fmt, ...) {
     if (err) {
+        err->file_io.phase = TP_FILE_IO_PHASE_NONE;
+        err->file_io.path = NULL;
+        err->file_io.native_code = 0;
         if (fmt) {
             va_list args;
             va_start(args, fmt);
@@ -128,6 +169,42 @@ static inline tp_status tp_error_set(tp_error *err, tp_status status, const char
         }
     }
     return status;
+}
+
+static inline tp_status tp_error_set_file_io(
+    tp_error *err, tp_file_io_phase phase, const char *path, int native_code,
+    const char *fmt, ...) TP_PRINTF_ATTR(5, 6);
+
+static inline tp_status tp_error_set_file_io(
+    tp_error *err, tp_file_io_phase phase, const char *path, int native_code,
+    const char *fmt, ...) {
+    if (err) {
+        err->file_io.phase = phase;
+        err->file_io.path = path;
+        err->file_io.native_code = native_code;
+        if (fmt) {
+            va_list args;
+            va_start(args, fmt);
+            (void)vsnprintf(err->msg, sizeof(err->msg), fmt, args);
+            va_end(args);
+        } else {
+            err->msg[0] = '\0';
+        }
+    }
+    return TP_STATUS_FILE_IO_FAILED;
+}
+
+static inline const char *tp_file_io_phase_id(tp_file_io_phase phase) {
+    switch (phase) {
+        case TP_FILE_IO_PHASE_NONE: return "none";
+        case TP_FILE_IO_PHASE_TEMP_OPEN: return "temp_open";
+        case TP_FILE_IO_PHASE_TEMP_WRITE: return "temp_write";
+        case TP_FILE_IO_PHASE_FILE_SYNC: return "file_sync";
+        case TP_FILE_IO_PHASE_TEMP_CLOSE: return "temp_close";
+        case TP_FILE_IO_PHASE_ATOMIC_REPLACE: return "atomic_replace";
+        case TP_FILE_IO_PHASE_ATOMIC_CREATE: return "atomic_create";
+    }
+    return "unknown";
 }
 
 static inline const char *tp_status_str(tp_status status) {
@@ -154,7 +231,6 @@ static inline const char *tp_status_str(tp_status status) {
         case TP_STATUS_IDENTITY_COLLISION: return "identity collision";
         case TP_STATUS_ID_MALFORMED: return "malformed structural id";
         case TP_STATUS_DUPLICATE_ID: return "duplicate structural id";
-        case TP_STATUS_ID_COLLISION_EXHAUSTED: return "legacy id collision sweep exhausted";
         case TP_STATUS_INVALID_UTF8: return "invalid UTF-8";
         case TP_STATUS_KEY_ABSOLUTE: return "source key is not relative";
         case TP_STATUS_KEY_TRAVERSAL: return "source key escapes its root";
@@ -165,6 +241,15 @@ static inline const char *tp_status_str(tp_status status) {
         case TP_STATUS_REVISION_CONFLICT: return "revision conflict";
         case TP_STATUS_INVALID_REVISION: return "invalid revision";
         case TP_STATUS_JOURNAL_FAILED: return "recovery journal append failed";
+        case TP_STATUS_FILE_CHANGED_EXTERNALLY: return "project file changed externally";
+        case TP_STATUS_RECOVERY_CLEANUP_FAILED: return "recovery cleanup failed";
+        case TP_STATUS_RECOVERY_BUSY: return "recovery journal is busy";
+        case TP_STATUS_RECOVERY_CLAIM_FAILED: return "recovery journal claim failed";
+        case TP_STATUS_PROJECT_LIVE: return "project is live in another writer";
+        case TP_STATUS_UNSUPPORTED_CAPABILITY: return "unsupported client capability";
+        case TP_STATUS_FILE_EXISTS: return "file already exists";
+        case TP_STATUS_FILE_DURABILITY_UNCERTAIN: return "project file durability is uncertain";
+        case TP_STATUS_FILE_IO_FAILED: return "project file I/O failed";
     }
     return "unknown status";
 }
@@ -198,7 +283,6 @@ static inline const char *tp_status_id(tp_status status) {
         case TP_STATUS_IDENTITY_COLLISION: return "identity_collision";
         case TP_STATUS_ID_MALFORMED: return "id_malformed";
         case TP_STATUS_DUPLICATE_ID: return "duplicate_id";
-        case TP_STATUS_ID_COLLISION_EXHAUSTED: return "id_collision_exhausted";
         case TP_STATUS_INVALID_UTF8: return "invalid_utf8";
         case TP_STATUS_KEY_ABSOLUTE: return "key_absolute";
         case TP_STATUS_KEY_TRAVERSAL: return "key_traversal";
@@ -209,6 +293,15 @@ static inline const char *tp_status_id(tp_status status) {
         case TP_STATUS_REVISION_CONFLICT: return "revision_conflict";
         case TP_STATUS_INVALID_REVISION: return "invalid_revision";
         case TP_STATUS_JOURNAL_FAILED: return "journal_failed";
+        case TP_STATUS_FILE_CHANGED_EXTERNALLY: return "file_changed_externally";
+        case TP_STATUS_RECOVERY_CLEANUP_FAILED: return "recovery_cleanup_failed";
+        case TP_STATUS_RECOVERY_BUSY: return "recovery_busy";
+        case TP_STATUS_RECOVERY_CLAIM_FAILED: return "recovery_claim_failed";
+        case TP_STATUS_PROJECT_LIVE: return "project_live";
+        case TP_STATUS_UNSUPPORTED_CAPABILITY: return "unsupported_capability";
+        case TP_STATUS_FILE_EXISTS: return "file_exists";
+        case TP_STATUS_FILE_DURABILITY_UNCERTAIN: return "file_durability_uncertain";
+        case TP_STATUS_FILE_IO_FAILED: return "file_io_failed";
     }
     return "unknown_status";
 }

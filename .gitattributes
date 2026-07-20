@@ -1,0 +1,3 @@
+*.ntpacker_project text eol=lf
+*.golden text eol=lf
+*.expected.json text eol=lf

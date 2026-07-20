@@ -1,6 +1,7 @@
 #include "tp_core/tp_export_run.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "tp_core/tp_arena.h"
@@ -9,8 +10,30 @@
 #include "tp_core/tp_names.h"
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_project.h"
+#include "tp_core/tp_input.h"
+#include "tp_core/tp_scan.h"
+#include "tp_project_mutation_internal.h"
+#include "tp_session_internal.h"
 
-#define TP_RUN_PATH_MAX 1024
+#define TP_RUN_PATH_MAX TP_IDENTITY_PATH_MAX
+
+struct tp_export_snapshot_job {
+    tp_project *project;
+    char *work_dir;
+    bool dry_run;
+};
+
+static bool run_path_is_absolute(const char *path) {
+    if (!path || !path[0]) {
+        return false;
+    }
+    if (path[0] == '/' || path[0] == '\\') {
+        return true;
+    }
+    return ((path[0] >= 'A' && path[0] <= 'Z') ||
+            (path[0] >= 'a' && path[0] <= 'z')) &&
+           path[1] == ':';
+}
 
 /* One shared pack run: an effective-settings signature + its packed result and
  * the normalized view every target in the group exports from. */
@@ -34,23 +57,26 @@ typedef struct {
  * array) and final_name into ps->rename; both outlive every tp_normalize call in
  * this run, and final_name is duped by tp_normalize. */
 static tp_status build_norm_opts(const tp_project_atlas *a, const tp_pack_sprite_desc *sprites, int sprite_count,
-                                 tp_export_anim_in *anims, tp_export_name_override *ovs, tp_arena *arena,
+                                 tp_export_anim_in *anims, tp_export_name_override *ovs,
+                                 tp_export_sprite_ref_in *refs, tp_arena *arena,
                                  tp_normalize_opts *out, tp_error *err) {
     tp_normalize_opts_defaults(out);
     for (int i = 0; i < a->animation_count; i++) {
         const tp_project_anim *pa = &a->animations[i];
         anims[i].id = pa->name; /* export "id" is the animation's logical name (id/name split) */
-        /* Frames feed tp_normalize as the export-KEY name space (schema v4: frames are
-         * {source, key} records, so project the `name` bridge -- byte-identical to the
-         * old string frames). tp_normalize dups what it keeps; this array borrows. */
-        const char **fnames = NULL;
+        /* Frames remain canonical {source, key} records through normalization. The
+         * raw-packed-name -> canonical-ref table below resolves them only after pack,
+         * avoiding the legacy display-name bridge and cross-source collisions. */
+        tp_export_frame_ref *fnames = NULL;
         if (pa->frame_count > 0) {
-            fnames = (const char **)tp_arena_alloc(arena, (size_t)pa->frame_count * sizeof(char *));
+            fnames = (tp_export_frame_ref *)tp_arena_alloc(
+                arena, (size_t)pa->frame_count * sizeof *fnames);
             if (!fnames) {
                 return tp_error_set(err, TP_STATUS_OOM, "tp_export_run: OOM (frame names)");
             }
             for (int f = 0; f < pa->frame_count; f++) {
-                fnames[f] = pa->frames[f].name;
+                fnames[f].source_id = pa->frames[f].source_ref;
+                fnames[f].source_key = pa->frames[f].src_key;
             }
         }
         anims[i].frames = fnames;
@@ -64,24 +90,24 @@ static tp_status build_norm_opts(const tp_project_atlas *a, const tp_pack_sprite
     out->animation_count = a->animation_count;
 
     int oc = 0;
-    for (int i = 0; i < a->sprite_count; i++) {
-        const tp_project_sprite *ps = &a->sprites[i];
-        if (!ps->rename || ps->rename[0] == '\0') {
-            continue;
-        }
-        for (int d = 0; d < sprite_count; d++) {
-            char key[TP_RUN_PATH_MAX];
-            tp_sprite_export_key(sprites[d].name, key, sizeof key);
-            if (strcmp(key, ps->name) == 0) {
-                ovs[oc].raw_name = sprites[d].name;
-                ovs[oc].final_name = ps->rename;
-                oc++;
-                break;
-            }
-        }
+    for (int d = 0; d < sprite_count; d++) {
+        refs[d].raw_name = sprites[d].name;
+        refs[d].source_id = sprites[d].source_id;
+        refs[d].source_key = sprites[d].source_key;
+        const tp_project_sprite *ps = tp_project_atlas_find_sprite_by_source_key(
+            (tp_project_atlas *)a, sprites[d].source_id, sprites[d].source_key);
+        ovs[oc].raw_name = sprites[d].name;
+        ovs[oc].final_name = ps && ps->rename && ps->rename[0] != '\0'
+                                 ? ps->rename
+                                 : (sprites[d].logical_name
+                                        ? sprites[d].logical_name
+                                        : sprites[d].name);
+        oc++;
     }
     out->overrides = ovs;
     out->override_count = oc;
+    out->sprite_refs = refs;
+    out->sprite_ref_count = sprite_count;
     return TP_STATUS_OK;
 }
 
@@ -133,30 +159,49 @@ static void file_fill_sink(void *ud, const char *path) {
     fc->files[fc->count++] = dup;
 }
 
+static void ignore_output_path(void *ud, const char *path) {
+    (void)ud;
+    (void)path;
+}
+
 /* Enumerates a target's produced files (exporter list_outputs, or the common
  * "<base>.<ext>" + page PNGs default) into `sink`. */
-static void list_target_outputs(const tp_exporter *exp, const tp_export_prepared *prep, const char *out_base,
-                                tp_export_path_sink sink, void *ud) {
+static tp_status list_target_outputs(const tp_exporter *exp, const tp_export_prepared *prep, const char *out_base,
+                                     tp_export_path_sink sink, void *ud, tp_error *err) {
     if (exp->list_outputs) {
-        exp->list_outputs(prep, out_base, sink, ud);
-        return;
+        return exp->list_outputs(prep, out_base, sink, ud, err);
+    }
+    char suffix[TP_IDENTITY_PATH_MAX];
+    int sn = snprintf(suffix, sizeof suffix, ".%s", exp->extension ? exp->extension : "");
+    if (sn < 0 || (size_t)sn >= sizeof suffix) {
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                            "export extension exceeds the canonical path limit");
     }
     char path[TP_RUN_PATH_MAX];
-    int n = snprintf(path, sizeof path, "%s.%s", out_base, exp->extension ? exp->extension : "");
-    if (n > 0 && (size_t)n < sizeof path) {
-        sink(ud, path);
+    tp_status st = tp_export_output_path(out_base, suffix, path, err);
+    if (st != TP_STATUS_OK) {
+        return st;
     }
-    tp_export_list_page_files(prep->result, out_base, sink, ud);
+    st = tp_export_list_page_files(prep->result, out_base, ignore_output_path, NULL, err);
+    if (st != TP_STATUS_OK) {
+        return st;
+    }
+    sink(ud, path);
+    return tp_export_list_page_files(prep->result, out_base, sink, ud, err);
 }
 
 /* Enumerates the target's output paths (two passes: count then fill) into an
  * arena-owned array, writing out_files + out_count. Used for both the wet-path
  * written_files and the dry-path would_write (identical list; dry just never
- * writes). Returns TP_STATUS_OOM on allocation failure. */
+ * writes). Returns a typed listing error or TP_STATUS_OOM on allocation failure. */
 static tp_status collect_output_files(const tp_exporter *exp, const tp_export_prepared *prep, const char *out_base,
-                                      tp_arena *arena, const char *const **out_files, int *out_count) {
+                                      tp_arena *arena, const char *const **out_files, int *out_count,
+                                      tp_error *err) {
     file_collect c = {.arena = arena};
-    list_target_outputs(exp, prep, out_base, file_count_sink, &c);
+    tp_status st = list_target_outputs(exp, prep, out_base, file_count_sink, &c, err);
+    if (st != TP_STATUS_OK) {
+        return st;
+    }
     int n = c.count;
     if (n <= 0) {
         *out_files = NULL;
@@ -165,15 +210,24 @@ static tp_status collect_output_files(const tp_exporter *exp, const tp_export_pr
     }
     const char **arr = (const char **)tp_arena_alloc(arena, (size_t)n * sizeof(char *));
     if (!arr) {
-        return TP_STATUS_OOM;
+        return tp_error_set(err, TP_STATUS_OOM,
+                            "tp_export_run: OOM collecting output paths");
     }
     file_collect f = {.arena = arena, .files = arr, .cap = n};
-    list_target_outputs(exp, prep, out_base, file_fill_sink, &f);
+    st = list_target_outputs(exp, prep, out_base, file_fill_sink, &f, err);
+    if (st != TP_STATUS_OK) {
+        return st;
+    }
     if (f.oom) {
-        return TP_STATUS_OOM;
+        return tp_error_set(err, TP_STATUS_OOM,
+                            "tp_export_run: OOM copying output paths");
+    }
+    if (f.count != n) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "export output enumeration changed between passes");
     }
     *out_files = arr;
-    *out_count = (f.count < n) ? f.count : n;
+    *out_count = f.count;
     return TP_STATUS_OK;
 }
 
@@ -255,14 +309,20 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
         }
     }
     tp_export_name_override *ovs = NULL;
-    if (a->sprite_count > 0) {
-        ovs = (tp_export_name_override *)tp_arena_alloc(arena, (size_t)a->sprite_count * sizeof(tp_export_name_override));
+    if (sprite_count > 0) {
+        ovs = (tp_export_name_override *)tp_arena_alloc(arena, (size_t)sprite_count * sizeof(tp_export_name_override));
         if (!ovs) {
             return tp_error_set(err, TP_STATUS_OOM, "tp_export_run: OOM (rename opts)");
         }
     }
+    tp_export_sprite_ref_in *refs = (tp_export_sprite_ref_in *)tp_arena_alloc(
+        arena, (size_t)sprite_count * sizeof *refs);
+    if (!refs) {
+        return tp_error_set(err, TP_STATUS_OOM, "tp_export_run: OOM (sprite refs)");
+    }
     tp_normalize_opts nopts;
-    st = build_norm_opts(a, sprites, sprite_count, anims, ovs, arena, &nopts, err);
+    st = build_norm_opts(a, sprites, sprite_count, anims, ovs, refs, arena,
+                         &nopts, err);
     if (st != TP_STATUS_OK) {
         return st;
     }
@@ -410,6 +470,31 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
             rt->notice_begin = nbefore;
         }
 
+        /* The typed output set is a precondition for BOTH execution modes. Do
+         * this before write() so a registered exporter cannot publish files and
+         * only then reveal that its report paths are invalid. The same immutable
+         * list becomes would_write (dry) or written_files (wet). */
+        const char *const *output_files = NULL;
+        int output_file_count = 0;
+        tp_status cst = collect_output_files(exp, prep, out_bases[t], arena,
+                                             &output_files, &output_file_count, err);
+        if (cst != TP_STATUS_OK) {
+            if (rt) {
+                rt->notice_end = nbefore;
+            }
+            if (!report) {
+                return cst;
+            }
+            if (rt) {
+                rt->ok = false;
+                rt->error = tp_arena_strdup(arena, err && err->msg[0] ? err->msg : "output listing failed");
+            }
+            if (first_fail == TP_STATUS_OK) {
+                first_fail = cst;
+            }
+            continue;
+        }
+
         if (dry_run) {
             /* No writes. The wet path's notices come from the writers, which do not
              * run here -- so predict every degradation instead (full axes: the packed
@@ -434,11 +519,8 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
             }
             if (rt) {
                 rt->ok = true;
-                tp_status cst = collect_output_files(exp, prep, out_bases[t], arena, &rt->would_write,
-                                                     &rt->would_write_count);
-                if (cst != TP_STATUS_OK) {
-                    return tp_error_set(err, cst, "tp_export_run: OOM (would-write report)");
-                }
+                rt->would_write = output_files;
+                rt->would_write_count = output_file_count;
             }
             continue;
         }
@@ -462,11 +544,8 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
         }
         if (rt) {
             rt->ok = true;
-            tp_status cst =
-                collect_output_files(exp, prep, out_bases[t], arena, &rt->written_files, &rt->written_file_count);
-            if (cst != TP_STATUS_OK) {
-                return tp_error_set(err, cst, "tp_export_run: OOM (written-files report)");
-            }
+            rt->written_files = output_files;
+            rt->written_file_count = output_file_count;
         }
     }
 
@@ -497,4 +576,169 @@ tp_status tp_export_run(const tp_project *project, int atlas_index, const tp_pac
                         int *out_pack_runs, tp_error *err) {
     return tp_export_run_ex(project, atlas_index, sprites, sprite_count, work_dir, arena, notices, out_pack_runs, NULL,
                             err);
+}
+
+tp_status tp_export_snapshot_job_create(const tp_session_snapshot *snapshot,
+                                        const char *work_dir,
+                                        tp_export_snapshot_job **out,
+                                        tp_error *err) {
+    return tp_export_snapshot_job_create_ex(snapshot, work_dir, NULL, out, err);
+}
+
+tp_status tp_export_snapshot_job_create_ex(const tp_session_snapshot *snapshot,
+                                           const char *work_dir,
+                                           const tp_export_snapshot_job_opts *opts,
+                                           tp_export_snapshot_job **out,
+                                           tp_error *err) {
+    if (!snapshot || !work_dir || !out) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "export snapshot job requires snapshot, work dir, and output");
+    }
+    *out = NULL;
+    tp_export_snapshot_job *job = calloc(1U, sizeof *job);
+    if (!job) {
+        return tp_error_set(err, TP_STATUS_OOM, "export snapshot job allocation failed");
+    }
+    job->project = tp_project_clone(tp_session_snapshot_project_internal(snapshot));
+    const size_t work_dir_len = strlen(work_dir) + 1U;
+    job->work_dir = malloc(work_dir_len);
+    if (job->work_dir) {
+        memcpy(job->work_dir, work_dir, work_dir_len);
+    }
+    if (!job->project || !job->work_dir) {
+        tp_export_snapshot_job_destroy(job);
+        return tp_error_set(err, TP_STATUS_OOM, "export snapshot job clone failed");
+    }
+    job->dry_run = opts && opts->dry_run;
+    for (int ai = 0; opts && (opts->target_exporter_id || opts->out_dir) &&
+                     ai < job->project->atlas_count; ++ai) {
+        tp_project_atlas *atlas = &job->project->atlases[ai];
+        for (int ti = 0; ti < atlas->target_count; ++ti) {
+            tp_project_target *target = &atlas->targets[ti];
+            const bool enabled = target->enabled &&
+                (!opts || !opts->target_exporter_id ||
+                 strcmp(target->exporter_id, opts->target_exporter_id) == 0);
+            const char *out_path = target->out_path;
+            char rerooted[TP_IDENTITY_PATH_MAX];
+            if (opts && opts->out_dir && !run_path_is_absolute(out_path)) {
+                const int n = snprintf(rerooted, sizeof rerooted, "%s/%s",
+                                       opts->out_dir, out_path);
+                if (n < 0 || (size_t)n >= sizeof rerooted) {
+                    tp_export_snapshot_job_destroy(job);
+                    return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                                        "export output path exceeds the supported limit");
+                }
+                out_path = rerooted;
+            }
+            tp_status status = tp_project_atlas_set_target(
+                atlas, ti, target->exporter_id, out_path, enabled);
+            if (status != TP_STATUS_OK) {
+                tp_export_snapshot_job_destroy(job);
+                return tp_error_set(err, status,
+                                    "export snapshot target filter failed");
+            }
+        }
+    }
+    *out = job;
+    return TP_STATUS_OK;
+}
+
+void tp_export_snapshot_job_destroy(tp_export_snapshot_job *job) {
+    if (!job) {
+        return;
+    }
+    tp_project_destroy(job->project);
+    free(job->work_dir);
+    free(job);
+}
+
+int tp_export_snapshot_job_atlas_count(const tp_export_snapshot_job *job) {
+    return job && job->project ? job->project->atlas_count : 0;
+}
+
+tp_status tp_export_snapshot_job_atlas_info(const tp_export_snapshot_job *job,
+                                            int atlas_index,
+                                            tp_export_snapshot_atlas_info *out,
+                                            tp_error *err) {
+    if (!job || !job->project || !out || atlas_index < 0 ||
+        atlas_index >= job->project->atlas_count) {
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                            "export snapshot atlas index is out of range");
+    }
+    const tp_project_atlas *atlas = &job->project->atlases[atlas_index];
+    memset(out, 0, sizeof *out);
+    out->atlas_id = atlas->id;
+    out->name = atlas->name;
+    out->source_count = atlas->source_count;
+    for (int ti = 0; ti < atlas->target_count; ++ti) {
+        out->enabled_target_count += atlas->targets[ti].enabled ? 1 : 0;
+    }
+    return TP_STATUS_OK;
+}
+
+tp_status tp_export_snapshot_job_run_atlas(tp_export_snapshot_job *job,
+                                           int atlas_index,
+                                           tp_arena *arena,
+                                           tp_export_notices *notices,
+                                           int *out_pack_runs,
+                                           int *out_missing_sources,
+                                           tp_error *err) {
+    return tp_export_snapshot_job_run_atlas_ex(
+        job, atlas_index, arena, notices, NULL, out_pack_runs, NULL,
+        out_missing_sources, err);
+}
+
+tp_status tp_export_snapshot_job_run_atlas_ex(tp_export_snapshot_job *job,
+                                              int atlas_index,
+                                              tp_arena *arena,
+                                              tp_export_notices *notices,
+                                              tp_export_report *report,
+                                              int *out_pack_runs,
+                                              int *out_sprite_count,
+                                              int *out_missing_sources,
+                                              tp_error *err) {
+    if (!job || !job->project || atlas_index < 0 ||
+        atlas_index >= job->project->atlas_count) {
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                            "export snapshot atlas index is out of range");
+    }
+    const tp_project_atlas *atlas = &job->project->atlases[atlas_index];
+    tp_pack_input input;
+    tp_status status = tp_pack_input_build(job->project, atlas_index, &input, err);
+    if (status != TP_STATUS_OK) {
+        return status;
+    }
+    if (out_missing_sources) {
+        *out_missing_sources = input.missing_sources;
+    }
+    if (out_sprite_count) {
+        *out_sprite_count = input.count;
+    }
+    if (input.count == 0) {
+        tp_pack_input_free(&input);
+        return tp_error_set(err, TP_STATUS_NOT_FOUND,
+                            "atlas has no usable images");
+    }
+    for (int ti = 0; !job->dry_run && ti < atlas->target_count; ++ti) {
+        if (!atlas->targets[ti].enabled) {
+            continue;
+        }
+        char output_path[TP_RUN_PATH_MAX];
+        status = tp_project_resolve_path(job->project,
+                                         atlas->targets[ti].out_path,
+                                         output_path,
+                                         sizeof output_path);
+        if (status != TP_STATUS_OK) {
+            tp_pack_input_free(&input);
+            return tp_error_set(err, status,
+                                "save the project first (relative output paths need a project dir)");
+        }
+        tp_mkdirs_parent(output_path);
+    }
+    tp_export_run_opts run_opts = {.report = report, .dry_run = job->dry_run};
+    status = tp_export_run_ex(job->project, atlas_index, input.descs, input.count,
+                              job->work_dir, arena, notices, out_pack_runs,
+                              report || job->dry_run ? &run_opts : NULL, err);
+    tp_pack_input_free(&input);
+    return status;
 }

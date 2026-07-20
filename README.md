@@ -9,6 +9,14 @@ it nests true silhouettes (not just rectangles), tries all 8 D4 orientations
 **Status: v0.2.0.** The native GUI and the `ntpacker` CLI both ship: headless
 pack/export, project inspection/validation, and full project editing from the
 command line sit alongside the GUI's packing, settings, and animations.
+The shared core now owns typed operations, transactions, revisions, semantic
+history and recovery. Project files use one strict canonical schema (v5); this
+pre-release build intentionally does not load or migrate v1–v4 projects.
+Undo/Redo uses compact semantic history records. Local recovery currently syncs
+those records per edit; the normative target decouples recovery I/O from model
+commit while retaining a healthy RPO of at most 5 seconds. Project Save uses
+synced sibling-temp atomic publication. Windows arguments and all core
+filesystem paths cross one strict UTF-8 boundary.
 
 [`docs/ntpacker-master-spec.md`](docs/ntpacker-master-spec.md) is the normative
 product and architecture specification. [`docs/ROADMAP.md`](docs/ROADMAP.md)
@@ -22,7 +30,9 @@ Prebuilt binaries for Windows / Linux / macOS:
 [**Releases**](https://github.com/d954mas/neotolis-texture-packer/releases).
 Unzip and run `ntpacker-gui`. Try it on
 `examples/showcase/showcase.ntpacker_project` (60 CC0 animal sprites) or the
-Defold comparison demo below.
+Defold comparison demo below. Release archives also include the complete
+[`examples/`](examples/README.md) catalog, including a 100-atlas/1,000-source
+benchmark project.
 
 ## What works today
 
@@ -63,17 +73,17 @@ Defold comparison demo below.
   add/remove/set) so a script or an AI agent can build and edit a project
   from nothing; `--json` on every verb with a stable, versioned per-verb
   schema; a frozen exit-code contract (0 ok … 6 partial success … 7 validate
-  `--strict` findings); `--dry-run` reports what a pack would write and every
+  `--strict` findings · 8 typed pre-publication file I/O failure); `--dry-run`
+  reports what a pack would write and every
   predicted metadata loss without touching disk. This is the saved-file
   automation interface for humans and agents. Live editing of the same unsaved
   GUI session belongs to the planned Dev API/MCP surface (master spec Part II).
 
 ## Known limitations
 
-- Packing already runs on a GUI worker, but the current session model has no
-  canonical pack-input hash, multi-result memory LRU, or semantic history. A
-  completed preview therefore does not yet implement the full stale/current
-  behavior specified by the master spec.
+- Packing already runs on a GUI worker, and the shared session owns mutation,
+  semantic history and recovery. Canonical pack-input hashes, a multi-result
+  memory LRU and the full stale/current preview behavior are still planned.
 - The Defold target packs without rotations until the engine grows a
   rotation-only transform mode
   ([engine#285](https://github.com/d954mas/neotolis-engine/issues/285));
@@ -81,14 +91,21 @@ Defold comparison demo below.
 - Duplicate frames are only merged when the source files are identical;
   identical-after-trim dedup is engine work in progress
   ([engine#286](https://github.com/d954mas/neotolis-engine/issues/286)).
-- A sprite that cannot fit the page size aborts the process — GUI or CLI
-  ([engine#287](https://github.com/d954mas/neotolis-engine/issues/287)) —
-  keep `max page size` comfortably larger than your biggest sprite.
+- Known user-controlled builder preconditions (including an impossible sprite
+  footprint) are rejected as structured errors. The engine builder is still
+  in-process, so allocation, codec/output I/O, and an unknown engine assertion
+  can terminate GUI or CLI until the private builder-worker boundary in H0.3-H0.5
+  is complete ([engine#287](https://github.com/d954mas/neotolis-engine/issues/287)).
 - Polygon hulls on anti-aliased edges can be noisy — raise the alpha
   threshold or lower max vertices
   ([engine#288](https://github.com/d954mas/neotolis-engine/issues/288)).
 - The window's X button bypasses the unsaved-changes prompt (engine gap);
   window size / recent projects are not remembered yet.
+- The application-owned project/image paths use the strict UTF-8/Win32-wide
+  boundary, but the engine's native resource loader still opens the bundled GUI
+  pack through a narrow path. A Unicode or extended-length installation
+  directory can therefore prevent UI resource loading until the engine public
+  filesystem API is fixed upstream.
 - CLI: no `--verbose` and no machine-readable progress stream yet (needs an
   engine log-writer opt-out so live progress can coexist cleanly with
   `--json`); `--json` payloads themselves are complete — only in-flight
@@ -96,13 +113,13 @@ Defold comparison demo below.
 
 ## Next development sequence
 
-1. Persistent structural IDs, deterministic sprite IDs, tagged sources, and
-   selector contracts.
-2. Typed operations, atomic transactions, semantic Undo/Redo, revision/dirty
-   semantics, and the minimum recovery journal required by the commit contract.
-3. Native Neotolis atlas import, inspection, materialization, Extract Sprites,
-   and linked read-only atlas sources.
-4. Session/Pack semantics, format packages, sandboxed Lua/templates, then live
+1. Complete H0.3-H0.5: isolate the engine builder in a bounded private process,
+   keep UTF-8/publication in the parent, and pin crash/cancel/full-disk parity.
+2. Native Neotolis atlas import, inspection, materialization, and
+   `atlas detect`/`inspect`/`extract`.
+3. Linked read-only atlas sources and transactional Extract Sprites.
+4. Session/Pack hashes and stale/current behavior, format packages, sandboxed
+   Lua/templates, then live
    Dev API/MCP collaboration.
 
 Watchers update runtime source state and mark previews stale; they do **not**
@@ -145,13 +162,14 @@ Run `ntpacker help` for the full verb/flag list, or see
 
 | Path | What |
 |---|---|
-| `packer/` | `tp_core` (model, project IO, `.ntpack` parse-back, normalization, exporters) + `tp_build` (drives the engine builder) + tests |
+| `packer/` | `tp_core` (canonical project I/O, operations/session, semantic history/recovery, validation, normalization and exporters) + `tp_build` (drives the engine builder) + tests |
 | `apps/cli/` | `ntpacker` — headless CLI frontend over `tp_core` |
 | `apps/common/` | shared version header (`ntpacker_version.h`) used by both frontends |
 | `apps/gui/` | `ntpacker-gui` (engine `nt_ui` frontend) |
 | `apps/smoke/` | toolchain smoke test |
 | `examples/defold-demo/` | Defold project with real assets (from [extension-texturepacker](https://github.com/defold/extension-texturepacker), MIT) for the three-way atlas comparison: Defold native / TexturePacker / ntpacker |
 | `examples/showcase/` | ready-made project over 60 CC0 animal sprites ([Kenney](https://kenney.nl)) — open it and press Pack |
+| `examples/projects/` | deterministic user-openable test and performance projects, including the 100-atlas/1,000-source fixture |
 | `docs/` | master specification, derived roadmap, implementation plan, format contracts, and research history |
 | `external/neotolis-engine` | the engine (submodule, read-only here — changes go upstream) |
 

@@ -1,8 +1,8 @@
 /*
- * F2-01 task 3: shared selector -> operation builders (the CLI/MCP convenience
+ * Shared selector -> operation builders (the CLI/MCP convenience
  * layer). A human selector + already-typed args -> a typed, ID-only operation, or a
  * structured ambiguity/not-found. The target is resolved through the production
- * tp_selector (F1-03) so every frontend selects the same entity without guessing --
+ * tp_selector so every frontend selects the same entity without guessing --
  * an ambiguous selector returns a candidate list, never a silent first-match.
  *
  * This is a representative, cohesive set (create / rename / remove / set across
@@ -19,7 +19,7 @@
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_selector.h"
 #include "tp_core/tp_sprite_index.h"
-#include "tp_strutil.h" /* shared tp_strdup (one core definition, fix [9]) */
+#include "tp_strutil.h" /* shared tp_strdup (one core definition) */
 
 /* Resolve `selector` to one entity of `want` kind that OWNED BY atlas `atlas_index`. A
  * project-wide match in a DIFFERENT atlas is treated as not-found -- the atlas scopes the
@@ -112,7 +112,7 @@ tp_status tp_op_build_target_set(const tp_project *p, const char *atlas_sel, con
     if (st != TP_STATUS_OK) {
         return st;
     }
-    tp_selector_result tgt_res; /* scope the target to the resolved atlas (fix [5]) */
+    tp_selector_result tgt_res; /* scope the target to the resolved atlas */
     st = resolve_in_atlas(p, atlas_res.atlas_index, TP_SEL_TARGET, target_sel, &tgt_res, cand, err);
     if (st != TP_STATUS_OK) {
         return st;
@@ -142,7 +142,7 @@ tp_status tp_op_build_anim_remove(const tp_project *p, const char *atlas_sel, co
     if (st != TP_STATUS_OK) {
         return st;
     }
-    tp_selector_result anim_res; /* scope the animation to the resolved atlas (fix [5]) */
+    tp_selector_result anim_res; /* scope the animation to the resolved atlas */
     st = resolve_in_atlas(p, atlas_res.atlas_index, TP_SEL_ANIM, anim_sel, &anim_res, cand, err);
     if (st != TP_STATUS_OK) {
         return st;

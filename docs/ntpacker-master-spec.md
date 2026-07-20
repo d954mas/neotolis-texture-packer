@@ -211,6 +211,31 @@ Heavy work may run on workers using immutable inputs. Worker completion is
 published back through the session queue. Worker threads cannot directly change
 revision, history, dirty state, or the authoritative preview selection.
 
+### 4.7 Ownership boundaries
+
+Each mutable responsibility has one owner:
+
+| Owner | Owns | Does not own |
+|---|---|---|
+| `tp_model` | mutable project state, revision, semantic saved identity and dirty state, history, live idempotency retention, attached best-effort recovery recorder and health state | project path, exact saved-file fingerprint, dialogs, job scheduling, frontend state |
+| `tp_session` | the sole live `tp_model`, session identity/path, exact saved-file fingerprint, admission and ordering, runtime generations, event sequence, job handles | model validation, recovery codec, filesystem/lock backends, Pack/Export algorithms, GUI or protocol formatting |
+| `tp_session_snapshot` | one immutable owned read view plus revision/model/source/event generations | mutation authority or borrowed aliases into the live model |
+| `tp_recovery_store` | injected recovery root and backend, bounded orphan scan, orphan-slot handles | live model semantics, project Save policy, controller handoff |
+| `tp_recovery_live` | one session's live-slot path, OS liveness handle, metadata attachment, clean-close lifecycle | model semantics, Save policy, orphan resolution |
+| `tp_recovery_claim` | exclusive right to inspect, recover, or discard one orphan slot | canonical project authority |
+| `tp_project_lease` | OS-backed reservation of one canonical project identity while a writer has authority | orphan-journal lifecycle or controller handoff policy |
+| frontend adapter | intent capture, native dialogs, presentation and typed result mapping | business rules, persistence, history, recovery policy, mutable model aliases |
+
+The semantic dirty baseline exists only in `tp_model`. The exact on-disk
+fingerprint exists only in the session persistence state.
+
+`tp_session` is an orchestration boundary, not a service locator or a second
+business-logic layer. Responsibilities with independent invariants or fault
+matrices remain in their owning modules and are invoked through narrow typed
+contracts. A session implementation must not absorb model validation, journal
+encoding/decoding, filesystem or lock backends, Pack/Export algorithms, GUI
+state, dialogs, protocol JSON, or transport error formatting.
+
 ## 5. Stable persistent identities
 
 There is no persistent `project_id`.
@@ -246,6 +271,18 @@ save.
 
 Recovery records, live-session claims, and local integration permissions are
 keyed by canonical project path. They are not embedded in the project file.
+
+GUI/CLI argument paths and every `tp_core` filesystem path are strict UTF-8.
+On Windows, clients read the UTF-16 process command line, reject malformed
+UTF-16, and convert once at ingress. The core filesystem boundary converts to
+UTF-16 and uses only W-suffixed Win32 APIs, including controlled extended drive
+and UNC paths for long-path I/O.
+
+Saved source paths are relativized only when project and source share the same
+explicit root: POSIX `/`, Windows drive, or the complete UNC `server/share`
+tuple. Different roots preserve the absolute spelling. Component processing is
+re-entrant and streaming; path depth has no smaller hidden limit than the
+canonical 4095-byte path bound.
 
 ### 5.2 Derived sprite identity
 
@@ -306,27 +343,38 @@ CLI and MCP may accept names, paths, or compound selectors for convenience. A
 selector must resolve to exactly one ID before transaction validation. An
 ambiguous selector produces an error and candidate list; it is never guessed.
 
-### 5.5 Legacy migration
+### 5.5 Canonical project schema
 
-Loading an old project without structural IDs generates deterministic temporary
-IDs from entity kind and stable legacy structure. Repeated loads before save must
-produce the same IDs. The next successful save persists normal random IDs for
-saved structural entities.
+The project file has one accepted representation: schema v5. The loader accepts
+exactly v5 and returns a structured version error for v1-v4 or a future version;
+it never rewrites an unsupported file. Missing or malformed version data is a
+malformed-project error. The production core contains no legacy project converter.
 
-Derived `sprite_id` values remain deterministic from migrated `source_id` and
-normalized source key.
+Every persisted atlas, source, animation, and target has a non-nil, kind-correct,
+unique structural ID. Sources are tagged records. Sprite overrides and animation
+frames use only the canonical `{source, key}` identity, where `key` is the
+normalized source-local key with its extension preserved. Name-only pending forms
+are not valid project states. `sprite_id` remains derived and is never persisted.
+
+New private candidates may temporarily contain missing IDs. The writable session
+adoption boundary assigns all missing IDs atomically and validates the complete
+graph before publication. Saves, checkpoints, and externally visible snapshots
+must already satisfy the canonical invariant. See decision 0016.
 
 ### 5.6 Validation
 
 Validation reports:
 
-- missing, malformed, or duplicate persistent IDs;
+- missing, malformed, wrong-kind, or duplicate persistent IDs;
 - references to unknown IDs;
 - duplicate exact source keys;
 - case-insensitive and platform-name collisions;
 - invalid normalization or traversal;
-- ambiguous legacy references;
-- a persisted sprite record whose stored source key does not reproduce its ID.
+- a sprite override or animation frame that is not canonical `{source, key}`;
+- canonical records whose source entity remains in the graph but whose physical
+  source is unavailable or source-local key is absent, reported as orphaned model
+  state rather than migrated or silently discarded. An unknown source ID is a
+  graph-integrity error and cannot pass adoption, save, or checkpoint publication.
 
 ## 6. Typed operations
 
@@ -353,6 +401,14 @@ target.create
 target.remove
 target.set
 ```
+
+**Field-presence SET operations.** The mask-carrying `*.set` operations -- `atlas.settings.set`,
+`sprite.override.set`, `animation.settings.set`, and `target.set` -- are *field-presence*: an
+operation changes only the fields it actually carries, and its presence mask is derived from which
+fields are present (including in the JSON form). Omitted fields are left unchanged; an operation that
+names no field is rejected. This keeps a serialized operation a faithful round-trip -- the canonical
+encoder emits only the masked fields and the decoder reconstructs the same mask -- which the recovery
+journal relies on to replay committed operations without re-introducing fields that were never sent.
 
 Operations target stable IDs, not array indexes or mutable names. A frontend may
 accept a human-friendly selector, but it resolves that selector to an ID before
@@ -392,6 +448,14 @@ extract_sprites
 format.install
 format.uninstall
 ```
+
+**Runtime events** update non-project observations without changing project
+revision or semantic dirty state by themselves. Examples include source refresh
+status and diagnostics.
+
+`Pack` and `Export` are not session commands. A session may coordinate their
+ordering, immutable inputs, cancellation, and result publication, while their
+job and side-effect contracts remain distinct from session-command atomicity.
 
 `Save` is not a semantic operation. It does not increment revision and is not
 Undoable.
@@ -445,7 +509,7 @@ Create enemy animations
 One agent request creating 100 animations should normally be one transaction and
 one Undo entry.
 
-### 7.1 Unified commit acknowledgement
+### 7.1 Unified commit and recovery recording
 
 All model transactions use one commit contract regardless of origin:
 
@@ -454,30 +518,62 @@ All model transactions use one commit contract regardless of origin:
 - Undo;
 - Redo.
 
-A transaction is not exposed as committed or visible to any frontend until it:
+A transaction reaches its irreversible model commit point after it:
 
 1. was fully validated;
 2. was applied atomically to the authoritative session;
-3. received a new revision;
-4. was appended to the recovery journal.
+3. received a new revision and history position.
 
-If journal append fails, the transaction is rolled back and no committed event is
-published. GUI and external controllers therefore receive the same recovery
-guarantee and observe the same ordered commit stream.
+The session then publishes one ordered committed event/result. Recovery
+recording is deliberately **not** part of the commit point and cannot change its
+outcome. The compact TXN or HISTORY record is attempted after the irreversible
+model commit; the attempt may occur before the ordered event/result is emitted.
+Recovery-only allocation, encoding, admission, append, or sync failure never
+rejects the transaction: every such failure enters the same degraded-recovery
+path.
 
-A full project save or checkpoint is not required. The v1 guarantee covers
-recovery from process failure. It does not require an `fsync` for every operation
-and therefore does not promise survival of an immediate power loss.
+The initial target keeps the existing synchronous per-record durability barrier
+(`fflush` plus `fsync`/`_commit`) but moves it after the model commit point. This
+is simpler and stronger than the 5-second RPO when benchmark latency is
+acceptable. Only measured user-visible stalls justify batching. If batching is
+introduced, a runtime-owned wake mechanism independent of further edits, Save,
+or shutdown must **complete** the durability barrier no later than 5 seconds
+after the oldest undurable commit.
+
+If append or durability sync fails, the committed model, revision, event, and
+Undo/Redo position remain published. Recovery enters a sticky degraded state,
+surfaces the persistent structured notice `recovery_degraded` (first cause,
+last durable revision/time, sticky/cleared transition), and stops recording
+later dependent diffs until it is re-established from a fresh checkpoint.
+Editing continues. A successful Save is never blocked by recovery failure; a
+fresh recovery checkpoint after project publication clears degradation and
+resumes recording, while checkpoint failure preserves old evidence and the
+notice.
+
+For operations with external side effects, every fallible preparation happens
+before model commit. Required post-commit publication is infallible or
+idempotently recoverable and completes before the success event/result. Recovery
+recording is neither the atomicity mechanism nor compensation for side effects.
 
 ### 7.2 Idempotency
 
 External transaction IDs are idempotent within a defined retention window.
-Retrying the same committed transaction returns the existing result rather than
-applying it twice.
+In the v1 contract, retrying a retained committed transaction ID returns the
+structured `duplicate_id` result with the current revision and does not apply the
+payload a second time. Duplicate detection precedes the revision precondition,
+so a retry remains a duplicate even after later commits advanced revision.
 
-The retained transaction-ID set must be recoverable from the journal or current
-checkpoint so that an acknowledged transaction is not duplicated after process
-restart.
+The live retained transaction-ID set is authoritative for the current session.
+Recovery persists the retained IDs covered by its latest durable watermark, and
+Save-time compaction preserves that covered set. A host restart may lose the
+same unsynced tail as project recovery; a client detecting a new host/session
+generation must resnapshot and reconcile instead of assuming every pre-crash ID
+remains retained.
+
+Durable replay of the original result is an optional additive transport upgrade,
+not a v1 model requirement. A client that needs the exact original response after
+losing it must use a surface that explicitly advertises durable result replay;
+otherwise it rebuilds from the returned current revision and a fresh snapshot.
 
 ## 8. Revisions, history position, and dirty state
 
@@ -568,8 +664,9 @@ Undo/Redo history exists only for the current live session.
 
 - GUI/MCP ownership transfer preserves the history.
 - Reconnecting to the same still-live session preserves the history.
-- Crash recovery must restore committed current state but is not required to
-  restore the full Undo/Redo stack.
+- Crash recovery restores the latest valid durably flushed recovery prefix; it
+  may lose the most recent tail and is not required to restore the full
+  Undo/Redo stack.
 - Normal close and reopen starts a new history.
 
 The visible History panel may also contain non-Undoable runtime information such
@@ -587,13 +684,13 @@ Snapshots remain useful for:
 - resynchronization;
 - crash-recovery checkpoints;
 - history compaction;
-- migration tests;
+- exact-inverse and codec tests;
 - debugging.
 
-### 9.5 Migration oracle
+### 9.5 Exactness oracle
 
-The existing snapshot-based Undo implementation remains temporarily as a test
-oracle.
+Production Undo/Redo stores semantic diffs. Checkpoint serialization is a test
+oracle and recovery primitive, not a production Undo stack.
 
 For each new semantic operation:
 
@@ -605,7 +702,7 @@ A
 -> byte-identical A
 ```
 
-The restored project must also match the old snapshot restoration.
+The restored project must serialize byte-identically to state A.
 
 ## 10. Pack results, freshness, and memory cache
 
@@ -705,6 +802,28 @@ contract of `tp_build -> neotolis-engine`.
 Whether the engine copies, adopts, trims, or retains raw RGBA during packing is an
 engine-builder decision to be fixed by API contract and profiling, not by this
 session specification.
+
+### 10.6 Fallible builder containment
+
+Ordinary source, settings, output-path, allocation, codec, and filesystem
+failures must not terminate a GUI, CLI, MCP, or Dev API host. The shared core
+decodes path sources to bounded canonical RGBA8 and validates every known
+user-controlled builder precondition before invoking the engine. This preflight
+is a safety boundary, not a substitute for a fallible builder API.
+
+While the engine builder exposes aborting assertions or narrow path-based output,
+the production integration runs it in a private worker process. The worker
+receives a versioned bounded request containing validated settings and raw pixels,
+uses only private ASCII relative staging names, and returns a versioned result.
+The parent owns cancellation, timeout, crash detection, UTF-8 filesystem reads,
+and final publication. A worker exit, signal, malformed response, or missing
+artifact becomes a structured `builder_crashed`/`builder_failed` result and cannot
+replace the last successful preview.
+
+An upstream fallible memory/sink builder API may replace the process boundary
+after its error, ownership, cancellation, and UTF-8 contracts are executable-test
+pinned. Clients never call the engine builder directly, and this replacement does
+not change public operation/session semantics.
 
 ## 11. Tagged source model and live source state
 
@@ -929,6 +1048,21 @@ this protection.
 Before saving, GUI/headless live hosts compare the project-file fingerprint with
 the version loaded or last saved. External file modification produces
 `file_changed_externally`; it is never overwritten silently.
+
+Project-file Save writes canonical bytes to an exclusively created sibling
+temporary file, durably syncs and closes it, rechecks any expected fingerprint
+immediately before publication, and atomically creates or replaces the
+destination. A pre-publication failure leaves the destination unchanged. A
+post-publication parent-directory sync failure returns
+`file_durability_uncertain`; the published bytes and returned fingerprint remain
+authoritative, so clients surface a warning and do not retry as if no write
+occurred.
+
+Machine validation findings preserve exact UTF-8 context strings and include
+the applicable stable atlas/source/animation/target IDs. Presentation adapters
+may omit absent contexts but must not truncate or substitute them. Reports have
+a hard byte/count budget and end with a deterministic structured truncation
+finding when the complete set does not fit.
 
 ### 14.3 MCP
 
@@ -1237,12 +1371,12 @@ The agent queries current state only when needed.
 
 ### 22.1 Committed MCP transactions
 
-MCP retains pending transaction IDs and can retry idempotently after connection
-failure.
-
-A success response is sent only after the authoritative host has appended the
-transaction to its recovery journal. No full project save or per-operation
-`fsync` is required.
+MCP retains pending transaction IDs and can retry idempotently while the same
+live host/session generation remains authoritative. A success response follows
+the shared model commit and ordered event contract; it does not claim that the
+recovery durability watermark already covers the transaction. After a detected
+host restart, MCP resnapshots and reconciles before retrying an uncertain
+mutation. No full project save is required.
 
 ### 22.2 GUI crash
 
@@ -1254,20 +1388,34 @@ must never accept writes for the same session simultaneously.
 
 ### 22.3 Local recovery journal and checkpoints
 
-The authoritative host maintains a local transaction journal plus periodic/full
-checkpoints. The journal is not written into the project repository.
+The authoritative host maintains a bounded local version-4 journal. It contains
+one attach checkpoint, ordered TXN operation records, compact HISTORY
+transitions, and optional metadata. The journal is not written into the project
+repository.
 
-The minimum recovery guarantee is:
+Recovery is an additional best-effort safety net, not a transactional database
+or a precondition for editing. Its minimum policy is:
 
-- all committed model transactions survive process restart;
-- the current committed project state can be reconstructed;
+- under a healthy backend, the power-loss and process-crash recovery-point
+  objective is at most 5 seconds;
+- recovery reconstructs the latest valid durably flushed ordered prefix, so a
+  few recent edits may be lost;
+- minutes or hours of healthy-session work must not be lost merely because the
+  project was not manually saved;
 - full Undo/Redo history does not have to survive a crash;
-- successful normal save/checkpoint may compact or clear obsolete journal data.
+- successful normal Save publishes the project independently, then attempts to
+  replace recovery with one fresh checkpoint; checkpoint failure does not fail
+  Save.
 
-Power-loss durability without per-operation `fsync` is not guaranteed.
-
-The exact checkpoint cadence, journal record format, deduplication, corruption
-handling, and compaction policy remain open contracts in §60.
+There is no periodic full-project snapshot: the normal stream remains compact
+version-4 TXN/HISTORY diffs because a large project snapshot can cost tens or
+hundreds of milliseconds. An unsupported or oversized recovery transition marks
+recovery degraded and waits for explicit Save/reattach to establish a fresh
+checkpoint; it does not take a surprise per-edit full snapshot.
+Version mismatch, replay limits, and record-size limits fail closed for
+recovery without blocking live edits. Torn or corrupt input recovers only its
+valid prefix, preserves the original journal for diagnosis/retry, and is never
+automatically deleted as though fully consumed.
 
 ## 23. Authorization
 
@@ -1422,7 +1570,7 @@ Not part of v1:
 - atomic batches;
 - revision conflict reporting;
 - idempotent retry;
-- GUI/MCP/Undo/Redo commit only after recovery-journal append;
+- GUI/MCP/Undo/Redo share one model commit point independent of recovery I/O;
 - one batch equals one Undo entry.
 
 ### Revision and Undo
@@ -1455,7 +1603,7 @@ Not part of v1:
 - GUI crash mirror promotion only after proven death;
 - clean ownership transfer;
 - pending transaction retry;
-- local journal/checkpoint recovery of committed current state;
+- local journal/checkpoint recovery of the latest valid durable prefix;
 - no requirement to restore crash-time Undo stack.
 
 ### Authorization
@@ -1676,6 +1824,11 @@ added.
 
 A new `format_id` is used for a materially different representation or semantic
 contract, not for every compatible version increment.
+
+`format_id` is a non-empty strict-UTF-8 machine token of at most 255 bytes
+(256-byte storage including NUL), normally reverse-DNS for external packages.
+The registry, project loader/model, typed operations, jobs, and clients enforce
+this one bound; an ID is either preserved exactly or rejected, never truncated.
 
 ## 32. Handler implementation
 
@@ -2615,7 +2768,7 @@ Built-in packages run through the same descriptor-level tests.
 
 ### B1 — project atlas sources
 
-- tagged source migration;
+- canonical tagged-source extension with linked-atlas descriptors;
 - linked atlas source;
 - read-only behavior;
 - refresh;
@@ -2715,11 +2868,13 @@ Choose or implement the constrained template syntax and escaping/helper set. The
 accepted product decision is that templates exist and are export-only; exact
 syntax is not yet fixed.
 
-### 52.5 Journal and authority state machine
+### 52.5 Authority state machine
 
-Finalize the exact journal record format, GUI commit timing, checkpoint cadence,
-compaction, stale-controller proof, and singular authority cutover state machine.
-These details must satisfy the accepted guarantees in Epic A.
+Finalize stale-controller proof and the singular authority cutover state
+machine. Journal framing and local compaction remain version-4 contracts;
+cross-host mirror/cutover behavior must preserve ordered best-effort recovery,
+the 5-second healthy durability target, and an explicit recovery watermark
+without turning it back into a model commit gate.
 
 ## 53. Critical review
 
@@ -2766,7 +2921,7 @@ Both epics can trigger large refactors simultaneously.
 
 Do not implement:
 
-- source migration;
+- source-model extension;
 - semantic Undo;
 - Dev API;
 - Lua;
@@ -2803,7 +2958,7 @@ implementation order, not a reduction of the final design.
 3. Deterministic sprite IDs and selector resolution.
 4. Typed model operations separated from session commands/jobs.
 5. Transaction/revision/dirty-state tests.
-6. Tagged source schema migration with path sources.
+6. Canonical tagged path-source schema; no legacy project-file migration.
 7. Preserve deterministic save behavior.
 
 ### Phase 1 — source runtime and Epic B immediate value
@@ -2824,7 +2979,7 @@ This creates a marketable interoperability workflow without requiring Lua or MCP
 1. One serialized session queue.
 2. Semantic diff types and forward/reverse tests.
 3. Monotonic revision and semantic saved baseline.
-4. GUI history migration and Save checkpoints.
+4. Shared History presentation and Save checkpoints.
 5. Immutable async Pack jobs.
 6. `pack_input_hash`, stale-preview UX, memory-only compressed Pack-result LRU.
 7. Ownership contract tests with `neotolis-engine` raw RGBA inputs.
@@ -2840,7 +2995,7 @@ This creates a marketable interoperability workflow without requiring Lua or MCP
 ### Phase 4 — live AI
 
 1. In-process session abstraction.
-2. Local Dev API and journal acknowledgement semantics.
+2. Local Dev API and recovery-health/watermark semantics.
 3. MCP mode.
 4. Authorization keyed by canonical path.
 5. Ownership/handoff/recovery and mirror promotion.
@@ -2958,9 +3113,10 @@ reopened.
 17. Undo/Redo history is live-session-local, survives ownership transfer, and
     resets after normal close/reopen.
 18. All live-model mutation passes through one serialized session queue.
-19. GUI, MCP, Undo, and Redo share one commit contract: recovery-journal append
-    is required before the transaction becomes committed/visible, but full save
-    and per-operation `fsync` are not required.
+19. GUI, MCP, Undo, and Redo share one model commit contract. Recovery recording
+    follows the ordered committed stream but is not a visibility gate; a healthy
+    backend advances its durability watermark within 5 seconds, while degraded
+    recovery is persistent and explicit. A full project save is not required.
 
 ### Pack, sources, and memory
 
@@ -3024,12 +3180,15 @@ reopened.
 
 50. Ownership transfer preserves current live-session history and committed
     state, but never transfers runtime worker/thread state.
-51. Crash recovery restores committed current state but need not restore the full
-    Undo stack.
+51. Crash recovery restores the latest valid durable recovery prefix, may lose
+    the bounded recent tail, and need not restore the full Undo stack.
 52. Exact public schema/method names are finalized through implementation,
     fixtures, and golden contract tests.
 53. The final architecture remains complete and long-lived; vertical slices are
     implementation order, not removal of target behavior.
+54. Invalid builder input, output/filesystem failure, and a builder worker crash
+    return structured diagnostics and cannot terminate a client host or replace
+    its last successful preview.
 
 ---
 
@@ -3038,19 +3197,17 @@ reopened.
 The following items were not decided in the discussion and must not be treated as
 settled:
 
-1. **Journal internals.** Exact record format, checkpoint cadence, compaction,
-   dedup retention window, corruption handling, and optional `fsync` modes.
-2. **Ownership state machine.** Exact process-claim mechanism, proof that a host
+1. **Ownership state machine.** Exact process-claim mechanism, proof that a host
    is dead, and the singular authority-cutover protocol.
-3. **Cache budgets.** Exact CPU/GPU memory budgets, compressed Pack
+2. **Cache budgets.** Exact CPU/GPU memory budgets, compressed Pack
    representation, and eviction thresholds.
-4. **Template language.** Concrete syntax and the final mechanically enforced
+3. **Template language.** Concrete syntax and the final mechanically enforced
    boundary between template and Lua.
-5. **Capability vocabulary and public schemas.** Exact field names and modes for
+4. **Capability vocabulary and public schemas.** Exact field names and modes for
    manifests, Import/Export IR, Dev API, MCP resources/tools, and CLI JSON.
-6. **Extraction publication crash recovery.** Exact manifest/cleanup behavior if
+5. **Extraction publication crash recovery.** Exact manifest/cleanup behavior if
    the process fails during final staged-file publication.
-7. **Color-management profile.** Exact deterministic ICC/gamma/orientation
+6. **Color-management profile.** Exact deterministic ICC/gamma/orientation
    normalization rules for all supported raster decoders.
 
 These are open contracts, not missing product direction. They should be closed by

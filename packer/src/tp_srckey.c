@@ -4,11 +4,12 @@
 #include <string.h>
 
 #include "utf8proc.h"
+#include "tp_srckey_internal.h"
 
 /* ------------------------------------------------------------------------- *
- * Internal ASCII + component-lexing helpers (promoted from the C0-01
- * tp_c0_lex.h; kept static in this TU -- no other production TU splits paths
- * this way). Each caller layers its own '.'/'..'/emit policy on top.
+ * Internal ASCII + component-lexing helpers (kept static in this TU -- no
+ * other production TU splits paths this way). Each caller layers its own
+ * '.'/'..'/emit policy on top.
  * ------------------------------------------------------------------------- */
 
 static inline bool sk_is_alpha(char c) { return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'); }
@@ -155,11 +156,64 @@ tp_status tp_srckey_normalize(const char *input, char *out, size_t cap, tp_error
     return utf8_map_into(joined, UTF8PROC_COMPOSE, out, cap, err);
 }
 
+tp_status tp_srckey_check_canonical(
+    const char *key, tp_srckey_canonical_result *out, tp_error *err) {
+    if (!out) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "canonical result is NULL");
+    }
+    out->reason = TP_SRCKEY_CANONICAL_NORMALIZE_ERROR;
+    out->canonical[0] = '\0';
+    const tp_status status = tp_srckey_normalize(
+        key, out->canonical, sizeof out->canonical, err);
+    if (status != TP_STATUS_OK) {
+        out->canonical[0] = '\0';
+        return status;
+    }
+    if (strcmp(key, out->canonical) != 0) {
+        out->reason = TP_SRCKEY_CANONICAL_SPELLING_MISMATCH;
+        return TP_STATUS_INVALID_ARGUMENT;
+    }
+    out->reason = TP_SRCKEY_CANONICAL_OK;
+    return TP_STATUS_OK;
+}
+
+tp_status tp_srckey_validate_canonical(const char *key, tp_error *err) {
+    tp_srckey_canonical_result result;
+    const tp_status status = tp_srckey_check_canonical(key, &result, err);
+    if (result.reason == TP_SRCKEY_CANONICAL_SPELLING_MISMATCH) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "source key must already be normalized as '%s'",
+                            result.canonical);
+    }
+    return status;
+}
+
 tp_status tp_srckey_casefold(const char *normalized_key, char *out, size_t cap, tp_error *err) {
     if (!normalized_key || !out) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "input or out is NULL");
     }
     return utf8_map_into(normalized_key, (utf8proc_option_t)(UTF8PROC_CASEFOLD | UTF8PROC_COMPOSE), out, cap, err);
+}
+
+tp_status tp_srckey__casefold_owned(const char *normalized_key, char **out,
+                                    tp_error *err) {
+    if (!normalized_key || !out) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "input or owned out is NULL");
+    }
+    *out = NULL;
+    utf8proc_uint8_t *folded = NULL;
+    size_t folded_len = 0U;
+    tp_status status = utf8_map_alloc(
+        normalized_key,
+        (utf8proc_option_t)(UTF8PROC_CASEFOLD | UTF8PROC_COMPOSE),
+        &folded, &folded_len, err);
+    (void)folded_len;
+    if (status == TP_STATUS_OK) {
+        *out = (char *)folded;
+    }
+    return status;
 }
 
 tp_status tp_srckey_collides(const char *key_a, const char *key_b, bool *out_collides, tp_error *err) {

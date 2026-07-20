@@ -1,194 +1,68 @@
-/* ntpacker mutation verbs (F2-05a: CLI transaction cutover).
+/* ntpacker mutation verbs: thin file-oriented session adapter.
  *
  * Every mutating verb now BUILDS typed tp_operation(s) and commits them ATOMICALLY
- * through a journal-LESS tp_model (tp_model_wrap -> tp_model_apply, the F2-01/F2-02
- * transaction engine) instead of hand-mutating tp_project fields. The CLI keeps
+ * through tp_session instead of hand-mutating tp_project fields. The CLI keeps
  * exactly three responsibilities (AGENTS.md tool-parity: mutation/validation/naming
  * rules live BELOW the clients):
- *   1. selector + argument PARSING (kv split, csv/enum parse, path canon, name/index
- *      selector resolution, source-path dedupe, exporter-id vocabulary lookup);
+ *   1. argument PARSING (kv split and csv/enum parse);
  *   2. building the typed operation(s) for the verb (one verb = one transaction);
  *   3. rendering the result (structured success/error payloads).
- * The VALUE-RANGE validation (atlas knob ranges, animation fps) moved into core
- * (tp_operation_validate); the CLI no longer re-checks those. Reference/existence
- * and (for atlas.create/rename and animation.rename) name-collision validation is core's;
- * the CLI keeps name-uniqueness as a SELECTION policy where core does not enforce it
- * (animation.create) and where preserving the exact CLI diagnostic matters. See
- * docs/decisions/0014-f2-05a-cli-transaction-cutover.md (and 0015 for animation.rename,
- * which became a first-class op in H/P1-2).
+ * Selector resolution, uniqueness, vocabulary, range, and reference validation are
+ * core-owned. Snapshot DTOs are the only model reads available to this frontend.
  *
- * Journal-LESS one-shot lifecycle (spec: ordinary CLI is FILE-oriented, NOT a live
- * session): load -> wrap in a tp_model with journal==NULL -> apply ONE transaction on
- * the in-memory clone-swap path -> on commit promote ids (§5.5) + save + destroy. No
- * live journal, no revision persisted, no session. The GUI live journal is F2-05b.
+ * One-shot lifecycle (spec: ordinary CLI is FILE-oriented, NOT a live session):
+ * normal mutation uses tp_session_open -> snapshot -> apply -> save; dry-run uses
+ * snapshot_load -> isolated core preview. The session layer owns mutable authority,
+ * locking, external-change detection, id promotion, and persistence in both shapes.
  *
- * Exit-code split (agents branch on these; UNCHANGED from B4):
+ * Exit-code contract (agents branch on these):
  *   2 usage   : bad grammar/vocabulary/value BEFORE the model commits -- wrong arg
  *               count, unknown key, malformed key=value, a value core rejects as
  *               out-of-range, an unknown exporter id, a duplicate atlas/anim name.
  *   3 project : load/parse error, `new` on an existing path, or a selector that names
  *               a missing model element (atlas/source/anim/frame/target).
  *   1 internal: OOM / RNG fault from the transaction, promote, or save.
+ *   8 file I/O: Save failed before atomic publication (typed phase/path/cause).
  *   0 ok.
  * A committed transaction that rejects maps its tp_status to this split
- * (map_reject_exit); the emitted structured error carries the core status id + field.
+ * (cli_exit_for_rejected_status); the emitted structured error carries the core
+ * status id + field.
  */
 #include "cli_cmds.h"
+#include "cli_mutate_internal.h"
 
-#include <ctype.h>
+#include <errno.h>
 #include <limits.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#ifdef _WIN32
-#include <direct.h>
-#define cli_getcwd _getcwd
-#else
-#include <unistd.h>
-#define cli_getcwd getcwd
-#endif
-
 #include "cli_exit.h"
 #include "cli_out.h"
 #include "ntpacker_id_fmt.h" /* ntpacker_fmt_shape_id (shared with cli_inspect) */
 #include "tp_core/tp_error.h"
-#include "tp_core/tp_export.h" /* tp_exporter_find (target-id validation) */
 #include "tp_core/tp_id.h"     /* tp_rng_os + id128 generate + shape-ID format */
 #include "tp_core/tp_operation.h"
-#include "tp_core/tp_project.h"
-#include "tp_core/tp_project_migrate.h" /* tp_project_promote_ids (writable id assignment) */
 #include "tp_core/tp_scan.h"            /* tp_scan_exists (new-on-existing guard) */
-#include "tp_core/tp_transaction.h"     /* tp_model + tp_model_apply (journal-less commit) */
+#include "tp_core/tp_session.h"
+#include "tp_core/tp_source_plan.h"
+#include "tp_core/tp_srckey.h"
+#include "tp_core/tp_transaction.h"
 
-#define CLI_PATH_MAX 1024
-
-static const char *const k_atlas_knobs =
+const char *const k_atlas_knobs =
     "max_size, padding, margin, extrude, alpha_threshold, max_vertices, shape, "
     "allow_transform, power_of_two, pixels_per_unit";
-static const char *const k_sprite_fields =
+const char *const k_sprite_fields =
     "origin, slice9, rename, shape, allow_rotate, max_vertices, margin, extrude";
 
 /* ------------------------------------------------------------------ */
 /* small parse + path helpers                                         */
 /* ------------------------------------------------------------------ */
 
-static void norm_slashes(char *s) {
-    for (; *s; s++) {
-        if (*s == '\\') {
-            *s = '/';
-        }
-    }
-}
-
-static bool path_is_abs(const char *p) {
-    if (!p || !p[0]) {
-        return false;
-    }
-    if (p[0] == '/' || p[0] == '\\') {
-        return true;
-    }
-    if (isalpha((unsigned char)p[0]) && p[1] == ':' && (p[2] == '/' || p[2] == '\\' || p[2] == '\0')) {
-        return true;
-    }
-    return false;
-}
-
-/* Makes `p` absolute against the CWD (need not exist), '/'-normalized. Mirrors how the
- * GUI feeds absolute paths from its file dialogs into tp_project_atlas_add_source; save
- * then relativizes against the project dir. */
-static void abspath_cwd(const char *p, char *out, size_t cap) {
-    if (path_is_abs(p)) {
-        (void)snprintf(out, cap, "%s", p);
-    } else {
-        char cwd[CLI_PATH_MAX];
-        if (cli_getcwd(cwd, (int)sizeof cwd)) {
-            (void)snprintf(out, cap, "%s/%s", cwd, p);
-        } else {
-            (void)snprintf(out, cap, "%s", p);
-        }
-    }
-    norm_slashes(out);
-}
-
-/* Case-insensitive on Windows (paths are), case-sensitive elsewhere. */
-static bool path_eq(const char *a, const char *b) {
-#ifdef _WIN32
-    while (*a && *b) {
-        if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) {
-            return false;
-        }
-        a++;
-        b++;
-    }
-    return *a == *b;
-#else
-    return strcmp(a, b) == 0;
-#endif
-}
-
-/* Lexically canonicalizes `in` (collapse '.'/'..' and duplicate slashes) so two paths
- * that name the same location compare equal -- tp_project_resolve_path returns
- * project_dir + a "../.." relative source verbatim (unresolved), which would not
- * string-equal a clean absolute path. Preserves a POSIX '/' or Windows 'X:/' root;
- * '..' below the root is dropped; a relative input keeps leading '..'. */
-static void path_canon(const char *in, char *out, size_t cap) {
-    char tmp[CLI_PATH_MAX];
-    (void)snprintf(tmp, sizeof tmp, "%s", in);
-    norm_slashes(tmp);
-
-    char root[8] = {0};
-    char *p = tmp;
-    if (isalpha((unsigned char)tmp[0]) && tmp[1] == ':') {
-        root[0] = tmp[0];
-        root[1] = ':';
-        root[2] = '/';
-        root[3] = '\0';
-        p = tmp + 2;
-        if (*p == '/') {
-            p++;
-        }
-    } else if (tmp[0] == '/') {
-        root[0] = '/';
-        root[1] = '\0';
-        p = tmp + 1;
-    }
-
-    char *comps[256];
-    int n = 0;
-    for (char *tok = strtok(p, "/"); tok && n < 256; tok = strtok(NULL, "/")) {
-        if (strcmp(tok, ".") == 0) {
-            continue;
-        }
-        if (strcmp(tok, "..") == 0) {
-            if (n > 0 && strcmp(comps[n - 1], "..") != 0) {
-                n--; /* pop a real component */
-            } else if (root[0] == '\0') {
-                comps[n++] = tok; /* relative path: keep leading '..' */
-            }
-            continue; /* at an absolute root, '..' is dropped */
-        }
-        comps[n++] = tok;
-    }
-
-    size_t used = 0;
-    out[0] = '\0';
-    if (root[0]) {
-        used = (size_t)snprintf(out, cap, "%s", root);
-    }
-    for (int i = 0; i < n && used < cap; i++) {
-        int w = snprintf(out + used, cap - used, "%s%s", comps[i], (i + 1 < n) ? "/" : "");
-        if (w < 0 || (size_t)w >= cap - used) {
-            break;
-        }
-        used += (size_t)w;
-    }
-}
-
 /* Splits "key=value" at the first '='. Copies the key into kbuf; returns the value
  * pointer (into `tok`) or NULL when there is no '='. */
-static const char *split_kv(const char *tok, char *kbuf, size_t kcap) {
+const char *split_kv(const char *tok, char *kbuf, size_t kcap) {
     const char *eq = strchr(tok, '=');
     if (!eq) {
         return NULL;
@@ -202,13 +76,14 @@ static const char *split_kv(const char *tok, char *kbuf, size_t kcap) {
     return eq + 1;
 }
 
-static bool to_long(const char *s, long *out) {
+bool to_long(const char *s, long *out) {
     if (!s || !*s) {
         return false;
     }
     char *end = NULL;
+    errno = 0;
     long v = strtol(s, &end, 10);
-    if (end == s || *end != '\0') {
+    if (errno == ERANGE || end == s || *end != '\0') {
         return false;
     }
     *out = v;
@@ -219,7 +94,7 @@ static bool to_long(const char *s, long *out) {
  * the op's plain-int knob field). The SEMANTIC range (max_size [1..build texture cap],
  * >=0, ...) is core's (tp_operation_validate). A too-big value is a usage error here, never a silent wrap.
  * Uses strtoll so the fit check is meaningful where long == int (Windows LLP64). */
-static bool to_int(const char *s, int *out) {
+bool to_int(const char *s, int *out) {
     if (!s || !*s) {
         return false;
     }
@@ -232,7 +107,7 @@ static bool to_int(const char *s, int *out) {
     return true;
 }
 
-static bool to_bool(const char *s, bool *out) {
+bool to_bool(const char *s, bool *out) {
     if (strcmp(s, "1") == 0 || strcmp(s, "true") == 0) {
         *out = true;
         return true;
@@ -244,7 +119,7 @@ static bool to_bool(const char *s, bool *out) {
     return false;
 }
 
-static bool to_float(const char *s, float *out) {
+bool to_float(const char *s, float *out) {
     if (!s || !*s) {
         return false;
     }
@@ -258,7 +133,7 @@ static bool to_float(const char *s, float *out) {
 }
 
 /* Parses exactly `want` comma-separated longs from `s` into out[]. Too few/many -> false. */
-static bool to_longs_csv(const char *s, long *out, int want) {
+bool to_longs_csv(const char *s, long *out, int want) {
     for (int i = 0; i < want; i++) {
         const char *comma = strchr(s, ',');
         char buf[64];
@@ -283,7 +158,7 @@ static bool to_longs_csv(const char *s, long *out, int want) {
     return true;
 }
 
-static bool to_floats_csv(const char *s, float *out, int want) {
+bool to_floats_csv(const char *s, float *out, int want) {
     for (int i = 0; i < want; i++) {
         const char *comma = strchr(s, ',');
         char buf[64];
@@ -310,7 +185,7 @@ static bool to_floats_csv(const char *s, float *out, int want) {
 
 /* Defold-pinned playback ids (gui_canvas.h): accepts 0..6 or the snake_case names.
  * The enum domain ([0..6]) is parsed here (vocabulary); core also range-checks it. */
-static bool parse_playback(const char *s, int *out) {
+bool parse_playback(const char *s, int *out) {
     static const char *const names[7] = {"once_forward",  "loop_forward",  "once_backward", "loop_backward",
                                          "once_pingpong", "loop_pingpong", "none"};
     long v = 0;
@@ -332,7 +207,7 @@ static bool parse_playback(const char *s, int *out) {
 
 /* Heap dup (the op arms are malloc-owned; tp_operation_free frees them). NULL-safe on
  * a NULL input (returns NULL); the caller distinguishes an OOM from a NULL input. */
-static char *cli_strdup(const char *s) {
+char *cli_strdup(const char *s) {
     if (!s) {
         return NULL;
     }
@@ -345,60 +220,164 @@ static char *cli_strdup(const char *s) {
 }
 
 /* Generates a fresh non-nil structural id via the OS RNG. false on an RNG fault. */
-static bool cli_gen_id(tp_id128 *out) {
+bool cli_gen_id(tp_id128 *out) {
     tp_rng rng = tp_rng_os();
     tp_error err = {0};
     return tp_id128_generate(&rng, out, &err) == TP_STATUS_OK;
 }
 
-/* ------------------------------------------------------------------ */
-/* selector resolution (stays in the CLI: name/index -> entity)       */
-/* ------------------------------------------------------------------ */
-
-static int resolve_atlas(tp_project *p, const char *name) {
-    for (int i = 0; i < p->atlas_count; i++) {
-        if (p->atlases[i].name && strcmp(p->atlases[i].name, name) == 0) {
-            return i;
-        }
-    }
-    return -1;
+bool status_is_internal_fault(tp_status status) {
+    return cli_exit_for_rejected_status(status) == CLI_EXIT_INTERNAL;
 }
 
-static tp_project_anim *find_anim(tp_project_atlas *a, const char *name) {
-    for (int i = 0; i < a->animation_count; i++) {
-        if (a->animations[i].name && strcmp(a->animations[i].name, name) == 0) {
-            return &a->animations[i];
+static tp_status emit_selector_error(
+    bool json, bool quiet, tp_status status, const tp_error *err,
+    const tp_selector_candidates *candidates) {
+    const char *message = err && err->msg[0] ? err->msg : tp_status_str(status);
+    if (!json || status != TP_STATUS_AMBIGUOUS_SELECTOR || !candidates) {
+        cli_emit_error(json, quiet, tp_status_id(status), "%s", message);
+        return status;
+    }
+    cli_sb sb = {0};
+    cli_sb_str(&sb, "{\"schema\":1,\"error\":{\"id\":");
+    cli_sb_json_str(&sb, tp_status_id(status));
+    cli_sb_str(&sb, ",\"message\":");
+    cli_sb_json_str(&sb, message);
+    cli_sb_str(&sb, ",\"candidates\":[");
+    for (int i = 0; i < candidates->count; ++i) {
+        const tp_selector_candidate *candidate = &candidates->v[i];
+        if (i > 0) {
+            cli_sb_putc(&sb, ',');
+        }
+        cli_sb_str(&sb, "{\"id\":");
+        cli_sb_json_str(&sb, candidate->idtext);
+        cli_sb_str(&sb, ",\"kind\":");
+        cli_sb_json_str(&sb, tp_selector_kind_token(candidate->kind));
+        cli_sb_str(&sb, ",\"label\":");
+        cli_sb_json_str(&sb, candidate->label);
+        cli_sb_putc(&sb, '}');
+    }
+    cli_sb_str(&sb, "]}}");
+    if (sb.oom) {
+        cli_sb_free(&sb);
+        cli_emit_error(true, false, "oom",
+                       "out of memory rendering selector candidates");
+        return TP_STATUS_OOM;
+    }
+    cli_out_stdout(&sb);
+    cli_sb_free(&sb);
+    return status;
+}
+
+void edit_close(cli_edit *edit) {
+    if (!edit) {
+        return;
+    }
+    tp_session_snapshot_destroy(edit->snapshot);
+    tp_session_destroy(edit->session);
+    memset(edit, 0, sizeof *edit);
+}
+
+int edit_open(cli_edit *edit, const char *path, bool dry_run, bool json, bool quiet) {
+    memset(edit, 0, sizeof *edit);
+    tp_error err = {0};
+    tp_status status;
+    if (dry_run) {
+        status = tp_session_snapshot_load(path, &edit->snapshot, &err);
+    } else {
+        tp_rng rng = tp_rng_os();
+        status = tp_session_open(path, &rng, &edit->session, &err);
+        if (status == TP_STATUS_OK) {
+            status = tp_session_snapshot_create(edit->session, &edit->snapshot, &err);
         }
     }
-    return NULL;
+    if (status != TP_STATUS_OK) {
+        cli_emit_error(json, quiet, tp_status_id(status), "%s",
+                       err.msg[0] ? err.msg : tp_status_str(status));
+        edit_close(edit);
+        return status_is_internal_fault(status) ? CLI_EXIT_INTERNAL
+                                                : CLI_EXIT_PROJECT;
+    }
+    edit->path = path;
+    edit->dry_run = dry_run;
+    return CLI_EXIT_OK;
+}
+
+int edit_resolve(cli_edit *edit, tp_id128 atlas_scope,
+                        tp_selector_kind kind, const char *selector,
+                        tp_selector_result *result, bool json, bool quiet) {
+    tp_selector_candidates candidates = {0};
+    tp_error err = {0};
+    const tp_status status = tp_session_snapshot_resolve_selector(
+        edit->snapshot, atlas_scope, kind, selector, result, &candidates, &err);
+    if (status == TP_STATUS_OK) {
+        tp_selector_candidates_free(&candidates);
+        return CLI_EXIT_OK;
+    }
+    const tp_status emitted_status =
+        emit_selector_error(json, quiet, status, &err, &candidates);
+    tp_selector_candidates_free(&candidates);
+    return emitted_status == TP_STATUS_OOM ? CLI_EXIT_INTERNAL
+                                   : emitted_status == TP_STATUS_INVALID_ARGUMENT
+                                         ? CLI_EXIT_USAGE
+                                         : CLI_EXIT_PROJECT;
+}
+
+int edit_resolve_sprite(cli_edit *edit, tp_id128 atlas_id,
+                               const char *selector,
+                               tp_selector_result *result,
+                               tp_id128 *source_id, char *source_key,
+                               size_t source_key_capacity, bool json,
+                               bool quiet) {
+    tp_selector_candidates candidates = {0};
+    tp_error err = {0};
+    const tp_status status = tp_session_snapshot_resolve_sprite_selector(
+        edit->snapshot, atlas_id, selector, result, source_id, source_key,
+        source_key_capacity, &candidates, &err);
+    if (status == TP_STATUS_OK) {
+        tp_selector_candidates_free(&candidates);
+        return CLI_EXIT_OK;
+    }
+    const tp_status emitted_status =
+        emit_selector_error(json, quiet, status, &err, &candidates);
+    tp_selector_candidates_free(&candidates);
+    return emitted_status == TP_STATUS_OOM ? CLI_EXIT_INTERNAL
+                                   : emitted_status == TP_STATUS_INVALID_ARGUMENT
+                                         ? CLI_EXIT_USAGE
+                                         : CLI_EXIT_PROJECT;
+}
+
+int edit_open_atlas(cli_edit *edit, const char *path,
+                           const char *selector,
+                           const tp_snapshot_atlas **atlas, bool dry_run, bool json,
+                           bool quiet) {
+    int rc = edit_open(edit, path, dry_run, json, quiet);
+    if (rc != CLI_EXIT_OK) {
+        return rc;
+    }
+    tp_selector_result result;
+    rc = edit_resolve(edit, tp_id128_nil(), TP_SEL_ATLAS, selector, &result,
+                      json, quiet);
+    if (rc == CLI_EXIT_OK) {
+        *atlas = tp_session_snapshot_atlas_by_id(edit->snapshot, result.id);
+        if (*atlas) {
+            return CLI_EXIT_OK;
+        }
+        rc = CLI_EXIT_PROJECT;
+    }
+    edit_close(edit);
+    return rc;
 }
 
 /* ------------------------------------------------------------------ */
 /* commit / error plumbing (transaction engine)                       */
 /* ------------------------------------------------------------------ */
 
-static int fail_usage(tp_project *p, bool json, bool quiet, const char *id, const char *msg) {
-    cli_emit_error(json, quiet, id, "%s", msg);
-    tp_project_destroy(p);
-    return CLI_EXIT_USAGE;
-}
-
 /* Maps a committed-transaction REJECT tp_status to the CLI exit-code contract.
  * OOM/RNG faults are internal (1); a dangling reference / out-of-range slot is a
  * project-state error (3); every other reject (out-of-range value, name collision,
  * bad payload) is a usage error (2) -- the value/vocabulary is fixed BEFORE the model
  * changes, exactly as the pre-cutover inline path classified them. */
-static int map_reject_exit(tp_status code) {
-    switch (code) {
-        case TP_STATUS_OOM:
-        case TP_STATUS_RNG_FAILED:
-        case TP_STATUS_ID_COLLISION_EXHAUSTED: return CLI_EXIT_INTERNAL;
-        case TP_STATUS_NOT_FOUND:
-        case TP_STATUS_OUT_OF_BOUNDS: return CLI_EXIT_PROJECT;
-        default: return CLI_EXIT_USAGE;
-    }
-}
-
 /* Emits the structured error for a rejected transaction (id = core status token,
  * message = the offending op's context) and returns the mapped exit code. */
 static int emit_reject(const tp_txn_result *res, tp_status st, const tp_error *err, bool json, bool quiet) {
@@ -417,1465 +396,224 @@ static int emit_reject(const tp_txn_result *res, tp_status st, const tp_error *e
         op_index = res->errors[0].op_index; /* >=0 = op position; -1 = envelope/revision level */
     }
     cli_emit_reject(json, quiet, tp_status_id(code), field, op_index, "%s", msg);
-    return map_reject_exit(code);
-}
-
-/* Promotes ids (§5.5) and saves the committed project, then emits the success payload.
- * The FILE boundary of the one-shot CLI: assign final random ids to any nil/synthetic
- * structural entity before persisting, then re-saving is byte-stable (idempotent). Does
- * NOT free `p` (the model owns it for the transaction path; do_new frees its own). */
-static int finish_saved(tp_project *p, const char *path, const char *verb, int count, const char *human, bool json,
-                        bool quiet) {
-    tp_error err = {0};
-    tp_rng rng = tp_rng_os();
-    tp_status pst = tp_project_promote_ids(p, &rng, &err);
-    if (pst != TP_STATUS_OK) {
-        cli_emit_error(json, quiet, tp_status_id(pst), "%s", err.msg[0] ? err.msg : tp_status_str(pst));
-        return (pst == TP_STATUS_OOM || pst == TP_STATUS_RNG_FAILED || pst == TP_STATUS_ID_COLLISION_EXHAUSTED)
-                   ? CLI_EXIT_INTERNAL
-                   : CLI_EXIT_PROJECT;
+    if (code == TP_STATUS_NOT_FOUND && strcmp(field, "exporter_id") == 0) {
+        return CLI_EXIT_USAGE;
     }
-    tp_status st = tp_project_save(p, path, &err);
-    if (st != TP_STATUS_OK) {
-        cli_emit_error(json, quiet, tp_status_id(st), "%s", err.msg[0] ? err.msg : tp_status_str(st));
-        return (st == TP_STATUS_OOM) ? CLI_EXIT_INTERNAL : CLI_EXIT_PROJECT;
-    }
-    if (json) {
-        cli_emit_mutation(verb, count);
-    } else if (!quiet) {
-        (void)printf("%s\n", human);
-    }
-    return CLI_EXIT_OK;
+    return cli_exit_for_rejected_status(code);
 }
 
 /* Frees each operation's malloc-owned arms (NOT the array container). */
-static void free_ops(tp_operation *ops, int n) {
+void free_ops(tp_operation *ops, int n) {
     for (int i = 0; i < n; i++) {
         tp_operation_free(&ops[i]);
     }
 }
 
-/* Commits `ops` as ONE atomic transaction on a journal-LESS model wrapping `p` (takes
- * ownership of `p`), then on success promotes + saves. One verb == one transaction.
- * Always frees the op arms + the result; destroys the model. Returns the CLI exit code. */
-static int commit_ops(tp_project *p, const char *path, tp_operation *ops, int nops, const char *verb, int count,
-                      const char *human, bool json, bool quiet) {
-    tp_model *m = tp_model_wrap(p); /* journal==NULL: the in-memory clone-swap path */
-    if (!m) {
-        cli_emit_error(json, quiet, "oom", "out of memory preparing the transaction");
-        free_ops(ops, nops);
-        tp_project_destroy(p); /* wrap did NOT take ownership on failure */
-        return CLI_EXIT_INTERNAL;
+static void report_save_notices_human(
+    const tp_session_save_result *result, bool quiet) {
+    if (!result || quiet) {
+        return;
     }
+    if (result->file_durability_degraded) {
+        (void)fprintf(
+            stderr,
+            "ntpacker: notice [file_durability_uncertain]: project file was published, but storage durability could not be confirmed\n");
+    }
+    if (result->recovery_degraded) {
+        (void)fprintf(
+            stderr,
+            "ntpacker: notice [recovery_degraded]: project was saved, but crash recovery is degraded (%s)\n",
+            tp_status_id(result->recovery_status));
+    }
+}
 
-    tp_txn_request req;
-    memset(&req, 0, sizeof req);
-    req.schema = TP_TXN_SCHEMA;
-    /* The one-shot CLI is FILE-oriented: a fresh journal-LESS model + a fresh in-memory
-     * idstore per process, exactly ONE transaction per invocation. Idempotency is moot,
-     * so the transaction id is a FIXED 32-lowercase-hex constant rather than an OS-RNG
-     * draw -- this removes an RNG failure mode from every verb (the id is never
-     * serialized, so output stays byte-identical). Must be 32 lowercase hex
-     * (tp_txn__preflight rejects anything else). */
-    (void)snprintf(req.id_hex, sizeof req.id_hex, "%s", "00000000000000000000000000000000");
-    req.expected_revision = 0; /* freshly wrapped model is at revision 0 */
-    req.ops = ops;
-    req.op_count = nops;
+int edit_fail_usage(cli_edit *edit, bool json, bool quiet,
+                           const char *id, const char *msg) {
+    cli_emit_error(json, quiet, id, "%s", msg);
+    edit_close(edit);
+    return CLI_EXIT_USAGE;
+}
 
-    tp_txn_result res;
-    memset(&res, 0, sizeof res);
-    tp_error err = {0};
-    tp_status st = tp_model_apply(m, &req, &res, &err);
-
-    int rc;
-    if (st != TP_STATUS_OK) {
-        rc = emit_reject(&res, st, &err, json, quiet); /* rejected: model byte-unchanged, no save */
+static int emit_save_failure(tp_status status, const tp_error *error,
+                             bool json, bool quiet) {
+    if (status == TP_STATUS_FILE_IO_FAILED) {
+        cli_emit_file_io_error(json, quiet, error);
     } else {
-        rc = finish_saved(tp_model_project(m), path, verb, count, human, json, quiet);
+        cli_emit_error(json, quiet, tp_status_id(status), "%s",
+                       error && error->msg[0] ? error->msg
+                                             : tp_status_str(status));
+    }
+    return cli_exit_for_save_status(status);
+}
+
+int commit_session_ops(cli_edit *edit, tp_operation *ops, int nops,
+                              const char *verb, int count,
+                              const char *human, bool json, bool quiet) {
+    tp_txn_request request;
+    memset(&request, 0, sizeof request);
+    request.schema = TP_TXN_SCHEMA;
+    (void)snprintf(request.id_hex, sizeof request.id_hex, "%s",
+                   "00000000000000000000000000000000");
+    request.expected_revision = tp_session_snapshot_revision(edit->snapshot);
+    request.ops = ops;
+    request.op_count = nops;
+
+    tp_txn_result result;
+    memset(&result, 0, sizeof result);
+    tp_error err = {0};
+    tp_status status = edit->dry_run
+                           ? tp_session_snapshot_apply_preview(
+                                 edit->snapshot, &request, &result, &err)
+                           : tp_session_apply(edit->session, &request, &result, &err);
+    int rc = CLI_EXIT_OK;
+    if (status != TP_STATUS_OK) {
+        rc = emit_reject(&result, status, &err, json, quiet);
+    } else if (edit->dry_run) {
+        if (json) {
+            if (!cli_emit_mutation_preview(
+                    verb, &result, request.expected_revision, NULL, NULL, 0,
+                    NULL)) {
+                cli_emit_mutation_output_oom(false);
+                rc = CLI_EXIT_INTERNAL;
+            }
+        } else if (!quiet) {
+            (void)printf("Dry run: %s\n", human);
+        }
+    } else {
+        tp_session_save_result save_result;
+        status = tp_session_save(edit->session, &save_result, &err);
+        if (status != TP_STATUS_OK) {
+            rc = emit_save_failure(status, &err, json, quiet);
+        } else if (json) {
+            if (!cli_emit_mutation(verb, count, &save_result)) {
+                cli_emit_mutation_output_oom(true);
+                rc = CLI_EXIT_INTERNAL;
+            }
+        } else if (!quiet) {
+            report_save_notices_human(&save_result, false);
+            (void)printf("%s\n", human);
+        }
     }
     free_ops(ops, nops);
-    tp_txn_result_free(&res);
-    tp_model_destroy(m);
+    tp_txn_result_free(&result);
+    edit_close(edit);
     return rc;
 }
 
 /* ------------------------------------------------------------------ */
-/* new (project create -- stays direct; no mutation rules)            */
+/* new (session create + Save As)                                     */
 /* ------------------------------------------------------------------ */
 
-static int do_new(const char *path, bool json, bool quiet) {
-    if (tp_scan_exists(path)) {
-        cli_emit_error(json, quiet, "file_exists", "refusing to overwrite existing path '%s'", path);
-        return CLI_EXIT_PROJECT;
+static int do_new(const char *path, bool dry_run, bool json, bool quiet) {
+    tp_rng rng = tp_rng_os();
+    tp_error err = {0};
+    tp_session *session = NULL;
+    tp_session_save_result result;
+    memset(&result, 0, sizeof result);
+    tp_status st = tp_session_create_default_project(&rng, &session, &err);
+    if (st == TP_STATUS_OK && dry_run && tp_scan_exists(path)) {
+        st = tp_error_set(&err, TP_STATUS_FILE_EXISTS,
+                          "tp_project_save: destination already exists: %s", path);
+    } else if (st == TP_STATUS_OK && !dry_run) {
+        st = tp_session_save_new(session, path, &result, &err);
     }
-    tp_project *p = tp_project_create();
-    if (!p) {
-        cli_emit_error(json, quiet, "oom", "out of memory creating project");
-        return CLI_EXIT_INTERNAL;
-    }
-    /* L-5: tp_project_create stays target-free; seeding the default target is the
-     * explicit lifecycle helper -- a project-create concern, not a mutation op. */
-    tp_status st = tp_project_atlas_seed_default_target(p, 0);
     if (st != TP_STATUS_OK) {
-        cli_emit_error(json, quiet, tp_status_id(st), "seed default target: %s", tp_status_str(st));
-        tp_project_destroy(p);
-        return (st == TP_STATUS_OOM) ? CLI_EXIT_INTERNAL : CLI_EXIT_PROJECT;
+        const int exit_code = emit_save_failure(st, &err, json, quiet);
+        tp_session_destroy(session);
+        return exit_code;
     }
     char human[CLI_PATH_MAX + 32];
     (void)snprintf(human, sizeof human, "Created project %s", path);
-    int rc = finish_saved(p, path, "new", 1, human, json, quiet);
-    tp_project_destroy(p);
-    return rc;
-}
-
-/* ------------------------------------------------------------------ */
-/* add / remove source                                                */
-/* ------------------------------------------------------------------ */
-
-/* True when input abs path matches an existing source resolved to abs (cross-form
- * dedupe: existing sources are project-relative post-save, the input is CWD-absolute). */
-static bool source_matches(tp_project *p, const tp_project_atlas *a, const char *in_norm, const char *in_canon,
-                           int *out_index) {
-    for (int i = 0; i < a->source_count; i++) {
-        char stored[CLI_PATH_MAX];
-        (void)snprintf(stored, sizeof stored, "%s", a->sources[i].path);
-        norm_slashes(stored);
-        if (path_eq(stored, in_norm)) { /* exact stored-string match (pasted inspect path) */
-            if (out_index) {
-                *out_index = i;
-            }
-            return true;
+    if (json && dry_run) {
+        if (!cli_emit_mutation_preview("new", NULL, 0, NULL, NULL, 0,
+                                       "assigned_on_apply")) {
+            cli_emit_mutation_output_oom(false);
+            tp_session_destroy(session);
+            return CLI_EXIT_INTERNAL;
         }
-        char abs[CLI_PATH_MAX];
-        if (tp_project_resolve_path(p, a->sources[i].path, abs, sizeof abs) == TP_STATUS_OK) {
-            char canon[CLI_PATH_MAX];
-            path_canon(abs, canon, sizeof canon); /* collapse project_dir + "../.." to a clean abs */
-            if (path_eq(canon, in_canon)) {       /* same on-disk target */
-                if (out_index) {
-                    *out_index = i;
-                }
-                return true;
-            }
+    } else if (json) {
+        if (!cli_emit_mutation("new", 1, &result)) {
+            cli_emit_mutation_output_oom(true);
+            tp_session_destroy(session);
+            return CLI_EXIT_INTERNAL;
         }
-    }
-    return false;
-}
-
-static int do_add(const char *const *pos, int npos, bool json, bool quiet) {
-    if (npos < 4) {
-        cli_emit_error(json, quiet, "usage", "add needs <project> <atlas> <path>... ; try 'ntpacker help'");
-        return CLI_EXIT_USAGE;
-    }
-    const char *path = pos[1];
-    const char *atlas = pos[2];
-    tp_project *p = NULL;
-    int rc = cli_load_project(path, json, quiet, &p);
-    if (rc != CLI_EXIT_OK) {
-        return rc;
-    }
-    int ai = resolve_atlas(p, atlas);
-    if (ai < 0) {
-        cli_emit_error(json, quiet, "atlas_not_found", "no atlas named '%s'", atlas);
-        tp_project_destroy(p);
-        return CLI_EXIT_PROJECT;
-    }
-    tp_project_atlas *a = &p->atlases[ai];
-    tp_id128 aid = a->id;
-
-    int maxn = npos - 3;
-    tp_operation *ops = (tp_operation *)calloc((size_t)maxn, sizeof *ops);
-    char(*qcanon)[CLI_PATH_MAX] = (char(*)[CLI_PATH_MAX])calloc((size_t)maxn, sizeof *qcanon);
-    if (!ops || !qcanon) {
-        free(ops);
-        free(qcanon);
-        cli_emit_error(json, quiet, "oom", "out of memory building sources");
-        tp_project_destroy(p);
-        return CLI_EXIT_INTERNAL;
-    }
-
-    int added = 0;
-    int dup = 0;
-    bool oom = false;
-    bool rngfail = false;
-    for (int i = 3; i < npos; i++) {
-        char in_abs[CLI_PATH_MAX];
-        char in_norm[CLI_PATH_MAX];
-        char in_canon[CLI_PATH_MAX];
-        abspath_cwd(pos[i], in_abs, sizeof in_abs);
-        (void)snprintf(in_norm, sizeof in_norm, "%s", pos[i]);
-        norm_slashes(in_norm);
-        path_canon(in_abs, in_canon, sizeof in_canon);
-        bool is_dup = source_matches(p, a, in_norm, in_canon, NULL); /* against stored sources (canon reused) */
-        for (int q = 0; q < added && !is_dup; q++) {               /* against sources queued this call */
-            if (path_eq(qcanon[q], in_canon)) {
-                is_dup = true;
-            }
-        }
-        if (is_dup) {
-            dup++;
-            continue;
-        }
-        tp_operation *op = &ops[added];
-        memset(op, 0, sizeof *op);
-        op->kind = TP_OP_SOURCE_ADD;
-        op->atlas_id = aid;
-        op->u.source_add.kind = TP_SOURCE_KIND_FOLDER; /* kind-agnostic default (matches add_source) */
-        op->u.source_add.key = cli_strdup(in_abs);     /* stored abs; save relativizes */
-        if (!op->u.source_add.key) {
-            oom = true;
-            break;
-        }
-        if (!cli_gen_id(&op->u.source_add.source_id)) { /* OS-RNG fault, not OOM (F4) */
-            rngfail = true;
-            break;
-        }
-        (void)snprintf(qcanon[added], CLI_PATH_MAX, "%s", in_canon);
-        added++;
-    }
-
-    if (oom || rngfail) {
-        free_ops(ops, added + 1); /* +1: free the partially-built op the loop broke on */
-        free(ops);
-        free(qcanon);
-        if (rngfail) {
-            cli_emit_error(json, quiet, "rng_failed", "could not generate a source id");
+    } else if (!quiet) {
+        if (dry_run) {
+            (void)printf("Dry run: would create project %s\n", path);
         } else {
-            cli_emit_error(json, quiet, "oom", "out of memory building sources");
-        }
-        tp_project_destroy(p);
-        return CLI_EXIT_INTERNAL;
-    }
-
-    char human[128];
-    (void)snprintf(human, sizeof human, "Added %d source(s)%s to '%s'", added,
-                   dup ? " (some already present)" : "", atlas);
-    rc = commit_ops(p, path, ops, added, "add", added, human, json, quiet);
-    free(ops);
-    free(qcanon);
-    return rc;
-}
-
-static int do_remove_source(const char *const *pos, int npos, bool json, bool quiet) {
-    if (npos != 4) {
-        cli_emit_error(json, quiet, "usage", "remove needs <project> <atlas> <source>; try 'ntpacker help'");
-        return CLI_EXIT_USAGE;
-    }
-    const char *path = pos[1];
-    const char *atlas = pos[2];
-    const char *src = pos[3];
-    tp_project *p = NULL;
-    int rc = cli_load_project(path, json, quiet, &p);
-    if (rc != CLI_EXIT_OK) {
-        return rc;
-    }
-    int ai = resolve_atlas(p, atlas);
-    if (ai < 0) {
-        cli_emit_error(json, quiet, "atlas_not_found", "no atlas named '%s'", atlas);
-        tp_project_destroy(p);
-        return CLI_EXIT_PROJECT;
-    }
-    tp_project_atlas *a = &p->atlases[ai];
-    char in_abs[CLI_PATH_MAX];
-    char in_norm[CLI_PATH_MAX];
-    char in_canon[CLI_PATH_MAX];
-    abspath_cwd(src, in_abs, sizeof in_abs);
-    (void)snprintf(in_norm, sizeof in_norm, "%s", src);
-    norm_slashes(in_norm);
-    path_canon(in_abs, in_canon, sizeof in_canon);
-    int idx = -1;
-    if (!source_matches(p, a, in_norm, in_canon, &idx)) {
-        cli_emit_error(json, quiet, "source_not_found", "atlas '%s' has no source matching '%s'", atlas, src);
-        tp_project_destroy(p);
-        return CLI_EXIT_PROJECT;
-    }
-    tp_operation op;
-    memset(&op, 0, sizeof op);
-    op.kind = TP_OP_SOURCE_REMOVE;
-    op.atlas_id = a->id;
-    op.u.source_ref.source_id = a->sources[idx].id;
-    char human[128];
-    (void)snprintf(human, sizeof human, "Removed source '%s' from '%s'", src, atlas);
-    return commit_ops(p, path, &op, 1, "remove", 1, human, json, quiet);
-}
-
-/* ------------------------------------------------------------------ */
-/* set (atlas knobs)                                                  */
-/* ------------------------------------------------------------------ */
-
-/* Parses one atlas knob key=value INTO an atlas.settings op payload (mask + value).
- * Returns 0 or CLI_EXIT_USAGE after emitting a structured error. Only PARSES (the
- * string->typed value + the fits-int marshalling); the numeric RANGE is core's now. */
-static int fill_knob(tp_op_atlas_settings *s, const char *key, const char *val, bool json, bool quiet) {
-    int iv = 0;
-    bool bv = false;
-    float fv = 0.0F;
-    char m[192];
-
-#define BADVAL(fmt, ...)                                                                                                \
-    do {                                                                                                               \
-        (void)snprintf(m, sizeof m, fmt, __VA_ARGS__);                                                                 \
-        cli_emit_error(json, quiet, "usage", "%s", m);                                                                 \
-        return CLI_EXIT_USAGE;                                                                                         \
-    } while (0)
-
-    if (strcmp(key, "max_size") == 0) {
-        if (!to_int(val, &iv)) {
-            BADVAL("max_size = '%s' must be an integer", val);
-        }
-        s->max_size = iv;
-        s->mask |= TP_AF_MAX_SIZE;
-    } else if (strcmp(key, "padding") == 0) {
-        if (!to_int(val, &iv)) {
-            BADVAL("padding = '%s' must be an integer", val);
-        }
-        s->padding = iv;
-        s->mask |= TP_AF_PADDING;
-    } else if (strcmp(key, "margin") == 0) {
-        if (!to_int(val, &iv)) {
-            BADVAL("margin = '%s' must be an integer", val);
-        }
-        s->margin = iv;
-        s->mask |= TP_AF_MARGIN;
-    } else if (strcmp(key, "extrude") == 0) {
-        if (!to_int(val, &iv)) {
-            BADVAL("extrude = '%s' must be an integer", val);
-        }
-        s->extrude = iv;
-        s->mask |= TP_AF_EXTRUDE;
-    } else if (strcmp(key, "alpha_threshold") == 0) {
-        if (!to_int(val, &iv)) {
-            BADVAL("alpha_threshold = '%s' must be an integer", val);
-        }
-        s->alpha_threshold = iv;
-        s->mask |= TP_AF_ALPHA_THRESHOLD;
-    } else if (strcmp(key, "max_vertices") == 0) {
-        if (!to_int(val, &iv)) {
-            BADVAL("max_vertices = '%s' must be an integer", val);
-        }
-        s->max_vertices = iv;
-        s->mask |= TP_AF_MAX_VERTICES;
-    } else if (strcmp(key, "shape") == 0) {
-        if (!to_int(val, &iv)) {
-            BADVAL("shape = '%s' must be an integer", val);
-        }
-        s->shape = iv;
-        s->mask |= TP_AF_SHAPE;
-    } else if (strcmp(key, "allow_transform") == 0) {
-        if (!to_bool(val, &bv)) {
-            BADVAL("allow_transform = '%s' must be 0/1/true/false", val);
-        }
-        s->allow_transform = bv;
-        s->mask |= TP_AF_ALLOW_TRANSFORM;
-    } else if (strcmp(key, "power_of_two") == 0) {
-        if (!to_bool(val, &bv)) {
-            BADVAL("power_of_two = '%s' must be 0/1/true/false", val);
-        }
-        s->power_of_two = bv;
-        s->mask |= TP_AF_POWER_OF_TWO;
-    } else if (strcmp(key, "pixels_per_unit") == 0) {
-        if (!to_float(val, &fv)) {
-            BADVAL("pixels_per_unit = '%s' must be a number", val);
-        }
-        s->pixels_per_unit = fv;
-        s->mask |= TP_AF_PIXELS_PER_UNIT;
-    } else if (strcmp(key, "name") == 0) {
-        BADVAL("%s", "use 'ntpacker atlas rename <project> <old> <new>' to rename an atlas");
-    } else {
-        (void)snprintf(m, sizeof m, "unknown atlas key '%s' (known: %s)", key, k_atlas_knobs);
-        cli_emit_error(json, quiet, "usage", "%s", m);
-        return CLI_EXIT_USAGE;
-    }
-#undef BADVAL
-    return 0;
-}
-
-static int do_set(const char *const *pos, int npos, bool json, bool quiet) {
-    if (npos < 4) {
-        cli_emit_error(json, quiet, "usage", "set needs <project> <atlas> <key>=<value>...; try 'ntpacker help'");
-        return CLI_EXIT_USAGE;
-    }
-    const char *path = pos[1];
-    const char *atlas = pos[2];
-    tp_project *p = NULL;
-    int rc = cli_load_project(path, json, quiet, &p);
-    if (rc != CLI_EXIT_OK) {
-        return rc;
-    }
-    int ai = resolve_atlas(p, atlas);
-    if (ai < 0) {
-        cli_emit_error(json, quiet, "atlas_not_found", "no atlas named '%s'", atlas);
-        tp_project_destroy(p);
-        return CLI_EXIT_PROJECT;
-    }
-    tp_operation op;
-    memset(&op, 0, sizeof op);
-    op.kind = TP_OP_ATLAS_SETTINGS_SET;
-    op.atlas_id = p->atlases[ai].id;
-    int applied = 0;
-    for (int i = 3; i < npos; i++) {
-        char key[64];
-        const char *val = split_kv(pos[i], key, sizeof key);
-        if (!val) {
-            char m[128];
-            (void)snprintf(m, sizeof m, "expected key=value, got '%s'", pos[i]);
-            return fail_usage(p, json, quiet, "usage", m);
-        }
-        int kr = fill_knob(&op.u.atlas_settings, key, val, json, quiet); /* PARSES into the op */
-        if (kr != 0) {
-            tp_project_destroy(p);
-            return kr;
-        }
-        applied++;
-    }
-    char human[128];
-    (void)snprintf(human, sizeof human, "Set %d knob(s) on '%s'", applied, atlas);
-    return commit_ops(p, path, &op, 1, "set", applied, human, json, quiet);
-}
-
-/* ------------------------------------------------------------------ */
-/* sprite set / unset                                                 */
-/* ------------------------------------------------------------------ */
-
-typedef struct {
-    bool set_origin, origin_inherit;
-    float ox, oy;
-    bool set_slice9, slice9_inherit;
-    uint16_t s9[4];
-    bool set_rename, rename_inherit;
-    const char *rename;
-    bool set_shape, shape_inherit;
-    int shape;
-    bool set_rot, rot_inherit;
-    int rot;
-    bool set_maxv, maxv_inherit;
-    int maxv;
-    bool set_margin, margin_inherit;
-    int margin;
-    bool set_extrude, extrude_inherit;
-    int extrude;
-} sprite_edit;
-
-/* Parses one `field=value` (value "inherit" clears). Returns 0 or CLI_EXIT_USAGE.
- * The per-field RANGE checks STAY here: an override is stored in a sparse int16 slot
- * whose sentinel is INHERIT(-1), so parsing a value into that slot legitimately needs
- * the field-specific domain (a stray -1 or an over-32767 value must be a usage error,
- * not a silent inherit/wrap). This is typed marshalling, not project-rule validation;
- * core re-validates the same ranges on commit (tp_operation_validate). */
-static int parse_sprite_field(sprite_edit *e, const char *tok, bool json, bool quiet) {
-    char key[64];
-    const char *val = split_kv(tok, key, sizeof key);
-    char m[160];
-    if (!val) {
-        (void)snprintf(m, sizeof m, "expected field=value, got '%s'", tok);
-        cli_emit_error(json, quiet, "usage", "%s", m);
-        return CLI_EXIT_USAGE;
-    }
-    const bool inherit = (strcmp(val, "inherit") == 0);
-
-#define BADF(fmt, ...)                                                                                                  \
-    do {                                                                                                               \
-        (void)snprintf(m, sizeof m, fmt, __VA_ARGS__);                                                                 \
-        cli_emit_error(json, quiet, "usage", "%s", m);                                                                 \
-        return CLI_EXIT_USAGE;                                                                                         \
-    } while (0)
-
-    if (strcmp(key, "origin") == 0) {
-        e->set_origin = true;
-        e->origin_inherit = inherit;
-        if (!inherit) {
-            float xy[2];
-            if (!to_floats_csv(val, xy, 2)) {
-                BADF("origin = '%s' must be x,y (two numbers) or 'inherit'", val);
-            }
-            e->ox = xy[0];
-            e->oy = xy[1];
-        }
-    } else if (strcmp(key, "slice9") == 0) {
-        e->set_slice9 = true;
-        e->slice9_inherit = inherit;
-        if (!inherit) {
-            long v[4];
-            if (!to_longs_csv(val, v, 4)) {
-                BADF("slice9 = '%s' must be l,r,t,b (four integers) or 'inherit'", val);
-            }
-            for (int k = 0; k < 4; k++) {
-                if (v[k] < 0 || v[k] > 65535) {
-                    BADF("slice9 component %ld out of range [0..65535]", v[k]);
-                }
-                e->s9[k] = (uint16_t)v[k];
-            }
-        }
-    } else if (strcmp(key, "rename") == 0) {
-        e->set_rename = true;
-        e->rename_inherit = inherit || val[0] == '\0';
-        e->rename = inherit ? NULL : val;
-    } else if (strcmp(key, "shape") == 0) {
-        e->set_shape = true;
-        e->shape_inherit = inherit;
-        long v = 0;
-        if (!inherit && (!to_long(val, &v) || v < 0 || v > 2)) {
-            BADF("shape = '%s' must be 0/1/2 or 'inherit'", val);
-        }
-        e->shape = (int)v;
-    } else if (strcmp(key, "allow_rotate") == 0) {
-        e->set_rot = true;
-        e->rot_inherit = inherit;
-        long v = 0;
-        if (!inherit && (!to_long(val, &v) || v < 0 || v > 1)) {
-            BADF("allow_rotate = '%s' must be 0/1 or 'inherit'", val);
-        }
-        e->rot = (int)v;
-    } else if (strcmp(key, "max_vertices") == 0) {
-        e->set_maxv = true;
-        e->maxv_inherit = inherit;
-        long v = 0;
-        if (!inherit && (!to_long(val, &v) || v < 1 || v > 16)) {
-            BADF("max_vertices = '%s' must be in [1..16] or 'inherit'", val);
-        }
-        e->maxv = (int)v;
-    } else if (strcmp(key, "margin") == 0) {
-        e->set_margin = true;
-        e->margin_inherit = inherit;
-        long v = 0;
-        if (!inherit && (!to_long(val, &v) || v < 0 || v > 32767)) {
-            BADF("margin = '%s' must be in [0..32767] or 'inherit'", val);
-        }
-        e->margin = (int)v;
-    } else if (strcmp(key, "extrude") == 0) {
-        e->set_extrude = true;
-        e->extrude_inherit = inherit;
-        long v = 0;
-        if (!inherit && (!to_long(val, &v) || v < 0 || v > 32767)) {
-            BADF("extrude = '%s' must be in [0..32767] or 'inherit'", val);
-        }
-        e->extrude = (int)v;
-    } else {
-        (void)snprintf(m, sizeof m, "unknown sprite field '%s' (known: %s)", key, k_sprite_fields);
-        cli_emit_error(json, quiet, "usage", "%s", m);
-        return CLI_EXIT_USAGE;
-    }
-#undef BADF
-    return 0;
-}
-
-static int do_sprite_set(const char *const *pos, int npos, bool json, bool quiet) {
-    /* sprite set <project> <atlas> <key> <field>=<value>... */
-    if (npos < 6) {
-        cli_emit_error(json, quiet, "usage",
-                       "sprite set needs <project> <atlas> <key> <field>=<value>...; try 'ntpacker help'");
-        return CLI_EXIT_USAGE;
-    }
-    const char *path = pos[2];
-    const char *atlas = pos[3];
-    const char *key = pos[4];
-    tp_project *p = NULL;
-    int rc = cli_load_project(path, json, quiet, &p);
-    if (rc != CLI_EXIT_OK) {
-        return rc;
-    }
-    int ai = resolve_atlas(p, atlas);
-    if (ai < 0) {
-        cli_emit_error(json, quiet, "atlas_not_found", "no atlas named '%s'", atlas);
-        tp_project_destroy(p);
-        return CLI_EXIT_PROJECT;
-    }
-    tp_id128 aid = p->atlases[ai].id;
-
-    /* Parse ALL fields first (a bad field never leaves a half-applied entry). */
-    sprite_edit e;
-    memset(&e, 0, sizeof e);
-    for (int i = 5; i < npos; i++) {
-        int pr = parse_sprite_field(&e, pos[i], json, quiet);
-        if (pr != 0) {
-            tp_project_destroy(p);
-            return pr;
+            report_save_notices_human(&result, false);
+            (void)printf("%s\n", human);
         }
     }
-
-    /* Build up to two ops. Emit the rename (SPRITE_NAME_SET) BEFORE the override
-     * SET/CLEAR, NOT after. When the override clears the last field to INHERIT, the
-     * record becomes all-default and apply's post-set prune drops it; a following
-     * rename would then re-add it at the END of the array -> reorder -> different saved
-     * bytes than the pre-cutover single in-place edit. Doing the rename FIRST leaves the
-     * record non-default (its rename is set) when the override is cleared, so the prune
-     * keeps it IN PLACE. A pure clear (no rename) still prunes to default -> record
-     * dropped, matching the old path; a rename creates the record if absent, exactly as
-     * the old add_sprite did. Sprite ops carry a NIL source_id (a pending, name-keyed
-     * override the CLI adds by name before any source scan) and store under the VERBATIM
-     * key (byte-identical to the pre-cutover inline add_sprite/rename/remove). */
-    tp_operation ops[2];
-    int n = 0;
-    bool any_override = e.set_origin || e.set_slice9 || e.set_shape || e.set_rot || e.set_maxv || e.set_margin ||
-                        e.set_extrude;
-    if (e.set_rename) {
-        tp_operation *op = &ops[n];
-        memset(op, 0, sizeof *op);
-        op->kind = TP_OP_SPRITE_NAME_SET;
-        op->atlas_id = aid;
-        op->u.sprite_name.source_id = tp_id128_nil();
-        op->u.sprite_name.src_key = cli_strdup(key);
-        op->u.sprite_name.name = e.rename_inherit ? NULL : cli_strdup(e.rename);
-        if (!op->u.sprite_name.src_key || (!e.rename_inherit && !op->u.sprite_name.name)) {
-            free_ops(ops, n + 1);
-            cli_emit_error(json, quiet, "oom", "out of memory building sprite op");
-            tp_project_destroy(p);
-            return CLI_EXIT_INTERNAL;
-        }
-        n++;
-    }
-    if (any_override) {
-        tp_operation *op = &ops[n];
-        memset(op, 0, sizeof *op);
-        op->kind = TP_OP_SPRITE_OVERRIDE_SET;
-        op->atlas_id = aid;
-        op->u.sprite_set.source_id = tp_id128_nil();
-        op->u.sprite_set.src_key = cli_strdup(key);
-        if (!op->u.sprite_set.src_key) {
-            free_ops(ops, n + 1); /* also frees the rename op already built at ops[0] */
-            cli_emit_error(json, quiet, "oom", "out of memory building sprite op");
-            tp_project_destroy(p);
-            return CLI_EXIT_INTERNAL;
-        }
-        uint32_t mask = 0;
-        if (e.set_origin) {
-            mask |= TP_SPF_ORIGIN;
-            op->u.sprite_set.origin_x = e.origin_inherit ? TP_PROJECT_ORIGIN_DEFAULT : e.ox;
-            op->u.sprite_set.origin_y = e.origin_inherit ? TP_PROJECT_ORIGIN_DEFAULT : e.oy;
-        }
-        if (e.set_slice9) {
-            mask |= TP_SPF_SLICE9;
-            for (int k = 0; k < 4; k++) {
-                op->u.sprite_set.slice9[k] = e.slice9_inherit ? 0 : e.s9[k];
-            }
-        }
-        if (e.set_shape) {
-            mask |= TP_SPF_SHAPE;
-            op->u.sprite_set.ov_shape = e.shape_inherit ? TP_PROJECT_OV_INHERIT : (int16_t)e.shape;
-        }
-        if (e.set_rot) {
-            mask |= TP_SPF_ALLOW_ROTATE;
-            op->u.sprite_set.ov_allow_rotate = e.rot_inherit ? TP_PROJECT_OV_INHERIT : (int16_t)e.rot;
-        }
-        if (e.set_maxv) {
-            mask |= TP_SPF_MAX_VERTICES;
-            op->u.sprite_set.ov_max_vertices = e.maxv_inherit ? TP_PROJECT_OV_INHERIT : (int16_t)e.maxv;
-        }
-        if (e.set_margin) {
-            mask |= TP_SPF_MARGIN;
-            op->u.sprite_set.ov_margin = e.margin_inherit ? TP_PROJECT_OV_INHERIT : (int16_t)e.margin;
-        }
-        if (e.set_extrude) {
-            mask |= TP_SPF_EXTRUDE;
-            op->u.sprite_set.ov_extrude = e.extrude_inherit ? TP_PROJECT_OV_INHERIT : (int16_t)e.extrude;
-        }
-        op->u.sprite_set.mask = mask;
-        n++;
-    }
-
-    char human[192];
-    (void)snprintf(human, sizeof human, "Set override(s) on sprite '%s' in '%s'", key, atlas);
-    return commit_ops(p, path, ops, n, "sprite", 1, human, json, quiet);
-}
-
-static int do_sprite_unset(const char *const *pos, int npos, bool json, bool quiet) {
-    /* sprite unset <project> <atlas> <key> */
-    if (npos != 5) {
-        cli_emit_error(json, quiet, "usage", "sprite unset needs <project> <atlas> <key>; try 'ntpacker help'");
-        return CLI_EXIT_USAGE;
-    }
-    const char *path = pos[2];
-    const char *atlas = pos[3];
-    const char *key = pos[4];
-    tp_project *p = NULL;
-    int rc = cli_load_project(path, json, quiet, &p);
-    if (rc != CLI_EXIT_OK) {
-        return rc;
-    }
-    int ai = resolve_atlas(p, atlas);
-    if (ai < 0) {
-        cli_emit_error(json, quiet, "atlas_not_found", "no atlas named '%s'", atlas);
-        tp_project_destroy(p);
-        return CLI_EXIT_PROJECT;
-    }
-    /* Declarative clear: SPRITE_OVERRIDE_CLEAR with the ALL mask drops the whole record;
-     * apply treats an absent record as "already unset" -> idempotent OK no-op. */
-    tp_operation op;
-    memset(&op, 0, sizeof op);
-    op.kind = TP_OP_SPRITE_OVERRIDE_CLEAR;
-    op.atlas_id = p->atlases[ai].id;
-    op.u.sprite_clear.source_id = tp_id128_nil();
-    op.u.sprite_clear.src_key = cli_strdup(key);
-    op.u.sprite_clear.mask = TP_SPF_ALL;
-    if (!op.u.sprite_clear.src_key) {
-        cli_emit_error(json, quiet, "oom", "out of memory building sprite op");
-        tp_project_destroy(p);
-        return CLI_EXIT_INTERNAL;
-    }
-    char human[160];
-    (void)snprintf(human, sizeof human, "Cleared overrides on sprite '%s' in '%s'", key, atlas);
-    return commit_ops(p, path, &op, 1, "sprite", 1, human, json, quiet);
-}
-
-/* ------------------------------------------------------------------ */
-/* anim                                                               */
-/* ------------------------------------------------------------------ */
-
-/* anim list is a QUERY: {"schema":CLI_INSPECT_SCHEMA,"animations":[...]} -- its animation
- * shape mirrors inspect's, so it shares inspect's query schema (id + name split). */
-static int anim_list(tp_project_atlas *a, const char *atlas_name, bool json, bool quiet) {
-    (void)quiet;
-    if (!json) {
-        (void)printf("atlas '%s': %d animation(s)\n", atlas_name, a->animation_count);
-        for (int i = 0; i < a->animation_count; i++) {
-            const tp_project_anim *an = &a->animations[i];
-            (void)printf("  %s: %d frame(s), fps %.9g, playback %d%s%s\n", an->name, an->frame_count, (double)an->fps,
-                         an->playback, an->flip_h ? ", flip_h" : "", an->flip_v ? ", flip_v" : "");
-        }
-        return CLI_EXIT_OK;
-    }
-    cli_sb sb = {0};
-    bool first = true;
-    cli_sb_putc(&sb, '{');
-    cli_sb_str(&sb, "\n  \"schema\": ");
-    cli_sb_int(&sb, CLI_INSPECT_SCHEMA);
-    cli_sb_str(&sb, ",\n  \"animations\": ");
-    if (a->animation_count == 0) {
-        cli_sb_str(&sb, "[]");
-    } else {
-        cli_sb_putc(&sb, '[');
-        for (int i = 0; i < a->animation_count; i++) {
-            const tp_project_anim *an = &a->animations[i];
-            cli_sb_str(&sb, i == 0 ? "\n" : ",\n");
-            cli_sb_indent(&sb, 2);
-            cli_sb_putc(&sb, '{');
-            first = true;
-            cli_sb_str(&sb, "\n");
-            cli_sb_indent(&sb, 3);
-            char idtext[TP_ID_TEXT_CAP];
-            ntpacker_fmt_shape_id(idtext, sizeof idtext, TP_ID_KIND_ANIM, an->id);
-            cli_sb_str(&sb, "\"id\": "); /* structural shape-ID */
-            cli_sb_json_str(&sb, idtext);
-            cli_sb_str(&sb, ",\n");
-            cli_sb_indent(&sb, 3);
-            cli_sb_str(&sb, "\"name\": "); /* logical/display name (name-keyed) */
-            cli_sb_json_str(&sb, an->name);
-            cli_sb_str(&sb, ",\n");
-            cli_sb_indent(&sb, 3);
-            cli_sb_str(&sb, "\"fps\": ");
-            cli_sb_num(&sb, (double)an->fps);
-            cli_sb_str(&sb, ",\n");
-            cli_sb_indent(&sb, 3);
-            cli_sb_str(&sb, "\"playback\": ");
-            cli_sb_int(&sb, an->playback);
-            cli_sb_str(&sb, ",\n");
-            cli_sb_indent(&sb, 3);
-            cli_sb_str(&sb, "\"flip_h\": ");
-            cli_sb_str(&sb, an->flip_h ? "true" : "false");
-            cli_sb_str(&sb, ",\n");
-            cli_sb_indent(&sb, 3);
-            cli_sb_str(&sb, "\"flip_v\": ");
-            cli_sb_str(&sb, an->flip_v ? "true" : "false");
-            cli_sb_str(&sb, ",\n");
-            cli_sb_indent(&sb, 3);
-            cli_sb_str(&sb, "\"frames\": ");
-            if (an->frame_count == 0) {
-                cli_sb_str(&sb, "[]");
-            } else {
-                cli_sb_putc(&sb, '[');
-                for (int f = 0; f < an->frame_count; f++) {
-                    cli_sb_str(&sb, f == 0 ? "\n" : ",\n");
-                    cli_sb_indent(&sb, 4);
-                    cli_sb_json_str(&sb, an->frames[f].name);
-                }
-                cli_sb_str(&sb, "\n");
-                cli_sb_indent(&sb, 3);
-                cli_sb_putc(&sb, ']');
-            }
-            (void)first;
-            cli_sb_str(&sb, "\n");
-            cli_sb_indent(&sb, 2);
-            cli_sb_putc(&sb, '}');
-        }
-        cli_sb_str(&sb, "\n  ]");
-    }
-    cli_sb_str(&sb, "\n}");
-    if (sb.oom) {
-        cli_sb_free(&sb);
-        cli_emit_error(true, false, "oom", "out of memory building anim list");
-        return CLI_EXIT_INTERNAL;
-    }
-    cli_out_stdout(&sb);
-    cli_sb_free(&sb);
+    tp_session_destroy(session);
     return CLI_EXIT_OK;
 }
 
-/* Resolves a frame selector: an all-digit token is an index; anything else is matched
- * against frame names (first match). Returns the index or -1. */
-static int resolve_frame(const tp_project_anim *an, const char *sel) {
-    long v = 0;
-    if (to_long(sel, &v)) {
-        if (v >= 0 && v < an->frame_count) {
-            return (int)v;
-        }
-        return -1;
-    }
-    for (int i = 0; i < an->frame_count; i++) {
-        if (an->frames[i].name && strcmp(an->frames[i].name, sel) == 0) {
-            return i;
-        }
-    }
-    return -1;
-}
 
-/* Parses `anim set` fields INTO an animation.settings op payload (mask + values). fps
- * PARSES here; its >0-finite RANGE is core's. playback is an enum parse; flips bool.
- * Emits + destroys `p` on a parse error (returns CLI_EXIT_USAGE). */
-static int fill_anim_settings(tp_op_anim_settings *s, const char *const *pos, int npos, int first, bool json,
-                              bool quiet, tp_project *p) {
-    for (int i = first; i < npos; i++) {
-        char key[32];
-        const char *val = split_kv(pos[i], key, sizeof key);
-        char m[160];
-        if (!val) {
-            (void)snprintf(m, sizeof m, "expected key=value, got '%s'", pos[i]);
-            return fail_usage(p, json, quiet, "usage", m);
-        }
-        if (strcmp(key, "fps") == 0) {
-            float fv = 0.0F;
-            if (!to_float(val, &fv)) {
-                (void)snprintf(m, sizeof m, "fps = '%s' must be a number", val);
-                return fail_usage(p, json, quiet, "usage", m);
-            }
-            s->fps = fv;
-            s->mask |= TP_ANF_FPS;
-        } else if (strcmp(key, "playback") == 0) {
-            int pb = 0;
-            if (!parse_playback(val, &pb)) {
-                (void)snprintf(m, sizeof m, "playback = '%s' must be 0..6 or a mode name", val);
-                return fail_usage(p, json, quiet, "usage", m);
-            }
-            s->playback = pb;
-            s->mask |= TP_ANF_PLAYBACK;
-        } else if (strcmp(key, "flip_h") == 0) {
-            bool bv = false;
-            if (!to_bool(val, &bv)) {
-                (void)snprintf(m, sizeof m, "flip_h = '%s' must be 0/1/true/false", val);
-                return fail_usage(p, json, quiet, "usage", m);
-            }
-            s->flip_h = bv;
-            s->mask |= TP_ANF_FLIP_H;
-        } else if (strcmp(key, "flip_v") == 0) {
-            bool bv = false;
-            if (!to_bool(val, &bv)) {
-                (void)snprintf(m, sizeof m, "flip_v = '%s' must be 0/1/true/false", val);
-                return fail_usage(p, json, quiet, "usage", m);
-            }
-            s->flip_v = bv;
-            s->mask |= TP_ANF_FLIP_V;
-        } else {
-            (void)snprintf(m, sizeof m, "unknown anim key '%s' (known: fps, playback, flip_h, flip_v)", key);
-            return fail_usage(p, json, quiet, "usage", m);
-        }
-    }
-    return 0;
-}
-
-static int do_anim(const char *const *pos, int npos, const char *opt_at, bool json, bool quiet) {
-    /* anim <sub> <project> <atlas> ... */
-    if (npos < 4) {
-        cli_emit_error(json, quiet, "usage", "anim needs <sub> <project> <atlas> ...; try 'ntpacker help'");
-        return CLI_EXIT_USAGE;
-    }
-    const char *sub = pos[1];
-    const char *path = pos[2];
-    const char *atlas = pos[3];
-    if (opt_at && strcmp(sub, "add-frame") != 0) {
-        cli_emit_error(json, quiet, "usage", "--at is only valid for 'anim add-frame'");
-        return CLI_EXIT_USAGE;
-    }
-    tp_project *p = NULL;
-    int rc = cli_load_project(path, json, quiet, &p);
-    if (rc != CLI_EXIT_OK) {
-        return rc;
-    }
-    int ai = resolve_atlas(p, atlas);
-    if (ai < 0) {
-        cli_emit_error(json, quiet, "atlas_not_found", "no atlas named '%s'", atlas);
-        tp_project_destroy(p);
-        return CLI_EXIT_PROJECT;
-    }
-    tp_project_atlas *a = &p->atlases[ai];
-    tp_id128 aid = a->id;
-
-    if (strcmp(sub, "list") == 0) {
-        if (npos != 4) {
-            tp_project_destroy(p);
-            cli_emit_error(json, quiet, "usage", "anim list takes no extra arguments");
-            return CLI_EXIT_USAGE;
-        }
-        int r = anim_list(a, atlas, json, quiet);
-        tp_project_destroy(p);
-        return r; /* read-only: no save */
-    }
-
-    if (strcmp(sub, "create") == 0) {
-        if (npos < 5) {
-            return fail_usage(p, json, quiet, "usage", "anim create needs <id> [frame-key...]");
-        }
-        const char *id = pos[4];
-        if (find_anim(a, id)) { /* CLI naming policy: name-keyed selection stays unambiguous */
-            char m[128];
-            (void)snprintf(m, sizeof m, "animation '%s' already exists", id);
-            return fail_usage(p, json, quiet, "usage", m);
-        }
-        int nframes = npos - 5;
-        tp_operation op;
-        memset(&op, 0, sizeof op);
-        op.kind = TP_OP_ANIMATION_CREATE;
-        op.atlas_id = aid;
-        op.u.anim_create.name = cli_strdup(id);
-        op.u.anim_create.fps = TP_PROJECT_ANIM_FPS_DEFAULT;
-        op.u.anim_create.playback = TP_PROJECT_ANIM_PLAYBACK_DEFAULT;
-        op.u.anim_create.flip_h = false;
-        op.u.anim_create.flip_v = false;
-        op.u.anim_create.frame_count = nframes;
-        if (op.u.anim_create.name == NULL) {
-            tp_operation_free(&op);
-            cli_emit_error(json, quiet, "oom", "out of memory building animation");
-            tp_project_destroy(p);
-            return CLI_EXIT_INTERNAL;
-        }
-        if (!cli_gen_id(&op.u.anim_create.anim_id)) { /* OS-RNG fault, not OOM (F4) */
-            tp_operation_free(&op);
-            cli_emit_error(json, quiet, "rng_failed", "could not generate an animation id");
-            tp_project_destroy(p);
-            return CLI_EXIT_INTERNAL;
-        }
-        bool bad = false;
-        if (nframes > 0) {
-            op.u.anim_create.frames = (char **)calloc((size_t)nframes, sizeof(char *));
-            if (!op.u.anim_create.frames) {
-                bad = true;
-            } else {
-                for (int i = 0; i < nframes; i++) {
-                    op.u.anim_create.frames[i] = cli_strdup(pos[5 + i]);
-                    if (!op.u.anim_create.frames[i]) {
-                        bad = true;
-                        break;
-                    }
-                }
-            }
-        }
-        if (bad) {
-            tp_operation_free(&op);
-            cli_emit_error(json, quiet, "oom", "out of memory building animation");
-            tp_project_destroy(p);
-            return CLI_EXIT_INTERNAL;
-        }
-        char human[160];
-        (void)snprintf(human, sizeof human, "Created animation '%s' with %d frame(s)", id, nframes);
-        return commit_ops(p, path, &op, 1, "anim", nframes, human, json, quiet);
-    }
-
-    if (strcmp(sub, "remove") == 0) {
-        if (npos != 5) {
-            return fail_usage(p, json, quiet, "usage", "anim remove needs <id>");
-        }
-        tp_project_anim *an = find_anim(a, pos[4]);
-        if (!an) {
-            cli_emit_error(json, quiet, "animation_not_found", "no animation named '%s'", pos[4]);
-            tp_project_destroy(p);
-            return CLI_EXIT_PROJECT;
-        }
-        tp_operation op;
-        memset(&op, 0, sizeof op);
-        op.kind = TP_OP_ANIMATION_REMOVE;
-        op.atlas_id = aid;
-        op.u.anim_ref.anim_id = an->id;
-        char human[128];
-        (void)snprintf(human, sizeof human, "Removed animation '%s'", pos[4]);
-        return commit_ops(p, path, &op, 1, "anim", 1, human, json, quiet);
-    }
-
-    /* All the remaining sub-verbs operate on one existing animation. */
-    if (npos < 5) {
-        return fail_usage(p, json, quiet, "usage", "anim needs an <id>");
-    }
-    const char *id = pos[4];
-    tp_project_anim *an = find_anim(a, id);
-    if (!an) {
-        cli_emit_error(json, quiet, "animation_not_found", "no animation named '%s'", id);
-        tp_project_destroy(p);
-        return CLI_EXIT_PROJECT;
-    }
-    tp_id128 anim_id = an->id;
-
-    if (strcmp(sub, "rename") == 0) {
-        if (npos != 6) {
-            return fail_usage(p, json, quiet, "usage", "anim rename needs <id> <new>");
-        }
-        const char *neu = pos[5];
-        if (neu[0] == '\0') {
-            return fail_usage(p, json, quiet, "usage", "animation name must be non-empty");
-        }
-        tp_project_anim *other = find_anim(a, neu);
-        if (other && other != an) { /* CLI policy: rename-to-another-name collision is usage (core also rejects) */
-            char m[128];
-            (void)snprintf(m, sizeof m, "animation '%s' already exists", neu);
-            return fail_usage(p, json, quiet, "usage", m);
-        }
-        tp_operation op;
-        memset(&op, 0, sizeof op);
-        op.kind = TP_OP_ANIMATION_RENAME;
-        op.atlas_id = aid;
-        op.u.anim_rename.anim_id = anim_id;
-        op.u.anim_rename.name = cli_strdup(neu);
-        if (!op.u.anim_rename.name) {
-            tp_operation_free(&op);
-            cli_emit_error(json, quiet, "oom", "out of memory building animation");
-            tp_project_destroy(p);
-            return CLI_EXIT_INTERNAL;
-        }
-        char human[160];
-        (void)snprintf(human, sizeof human, "Renamed animation '%s' -> '%s'", id, neu);
-        return commit_ops(p, path, &op, 1, "anim", 1, human, json, quiet);
-    }
-
-    if (strcmp(sub, "add-frame") == 0) {
-        if (npos != 6) {
-            return fail_usage(p, json, quiet, "usage", "anim add-frame needs <id> <key> [--at N]");
-        }
-        int index = -1; /* append */
-        if (opt_at) {
-            long at = 0;
-            if (!to_long(opt_at, &at) || at < 0) {
-                return fail_usage(p, json, quiet, "usage", "--at must be a non-negative integer");
-            }
-            index = (int)at; /* apply appends then clamps into place, identical to the inline path */
-        }
-        tp_operation op;
-        memset(&op, 0, sizeof op);
-        op.kind = TP_OP_ANIMATION_FRAME_ADD;
-        op.atlas_id = aid;
-        op.u.anim_frame_add.anim_id = anim_id;
-        op.u.anim_frame_add.frame = cli_strdup(pos[5]);
-        op.u.anim_frame_add.index = index;
-        if (!op.u.anim_frame_add.frame) {
-            cli_emit_error(json, quiet, "oom", "out of memory building frame");
-            tp_project_destroy(p);
-            return CLI_EXIT_INTERNAL;
-        }
-        char human[160];
-        (void)snprintf(human, sizeof human, "Added frame '%s' to animation '%s'", pos[5], id);
-        return commit_ops(p, path, &op, 1, "anim", 1, human, json, quiet);
-    }
-
-    if (strcmp(sub, "remove-frame") == 0) {
-        if (npos != 6) {
-            return fail_usage(p, json, quiet, "usage", "anim remove-frame needs <id> <N|key>");
-        }
-        int fi = resolve_frame(an, pos[5]);
-        if (fi < 0) {
-            cli_emit_error(json, quiet, "frame_not_found", "animation '%s' has no frame '%s'", id, pos[5]);
-            tp_project_destroy(p);
-            return CLI_EXIT_PROJECT;
-        }
-        tp_operation op;
-        memset(&op, 0, sizeof op);
-        op.kind = TP_OP_ANIMATION_FRAME_REMOVE;
-        op.atlas_id = aid;
-        op.u.anim_frame_rm.anim_id = anim_id;
-        op.u.anim_frame_rm.index = fi;
-        char human[160];
-        (void)snprintf(human, sizeof human, "Removed frame '%s' from animation '%s'", pos[5], id);
-        return commit_ops(p, path, &op, 1, "anim", 1, human, json, quiet);
-    }
-
-    if (strcmp(sub, "move-frame") == 0) {
-        if (npos != 7) {
-            return fail_usage(p, json, quiet, "usage", "anim move-frame needs <id> <from> <to>");
-        }
-        int from = 0;
-        int to = 0;
-        if (!to_int(pos[5], &from) || !to_int(pos[6], &to)) {
-            return fail_usage(p, json, quiet, "usage", "move-frame <from> and <to> must be integers");
-        }
-        /* F3: preserve the pre-cutover out-of-range diagnostic. The old inline path let
-         * tp_project_anim_move_frame reject an out-of-range `from` with the CLI's own
-         * `frame_not_found` id + "no frame at index N" message (exit 3). Routing straight
-         * through core would instead surface core's `out_of_bounds` id + "from_index N out
-         * of [0..M)" -- a changed structured-error contract for a NORMAL input. Pre-check
-         * `from` here so the emitted bytes match the old path exactly. (`to` stays clamped
-         * by apply, exactly as before.) */
-        if (from < 0 || from >= an->frame_count) {
-            cli_emit_error(json, quiet, "frame_not_found", "animation '%s' has no frame at index %d", id, from);
-            tp_project_destroy(p);
-            return CLI_EXIT_PROJECT;
-        }
-        tp_operation op;
-        memset(&op, 0, sizeof op);
-        op.kind = TP_OP_ANIMATION_FRAME_MOVE;
-        op.atlas_id = aid;
-        op.u.anim_frame_move.anim_id = anim_id;
-        op.u.anim_frame_move.from_index = from; /* pre-checked in range above (F3) */
-        op.u.anim_frame_move.to_index = to;     /* to is clamped by apply (CLI parity) */
-        char human[128];
-        (void)snprintf(human, sizeof human, "Moved frame %d -> %d in animation '%s'", from, to, id);
-        return commit_ops(p, path, &op, 1, "anim", 1, human, json, quiet);
-    }
-
-    if (strcmp(sub, "set") == 0) {
-        if (npos < 6) {
-            return fail_usage(p, json, quiet, "usage", "anim set needs <id> <key>=<value>...");
-        }
-        tp_operation op;
-        memset(&op, 0, sizeof op);
-        op.kind = TP_OP_ANIMATION_SETTINGS_SET;
-        op.atlas_id = aid;
-        op.u.anim_settings.anim_id = anim_id;
-        int sr = fill_anim_settings(&op.u.anim_settings, pos, npos, 5, json, quiet, p); /* emits+destroys on fail */
-        if (sr != 0) {
-            tp_operation_free(&op);
-            return sr;
-        }
-        char human[128];
-        (void)snprintf(human, sizeof human, "Updated animation '%s'", id);
-        return commit_ops(p, path, &op, 1, "anim", 1, human, json, quiet);
-    }
-
-    char m[128];
-    (void)snprintf(m, sizeof m, "unknown anim sub-command '%s'", sub);
-    return fail_usage(p, json, quiet, "usage", m);
-}
-
-/* ------------------------------------------------------------------ */
-/* target                                                             */
-/* ------------------------------------------------------------------ */
-
-static int do_target(const char *const *pos, int npos, bool json, bool quiet) {
-    /* target <sub> <project> <atlas> ... */
-    if (npos < 5) {
-        cli_emit_error(json, quiet, "usage", "target needs <sub> <project> <atlas> ...; try 'ntpacker help'");
-        return CLI_EXIT_USAGE;
-    }
-    const char *sub = pos[1];
-    const char *path = pos[2];
-    const char *atlas = pos[3];
-    tp_project *p = NULL;
-    int rc = cli_load_project(path, json, quiet, &p);
-    if (rc != CLI_EXIT_OK) {
-        return rc;
-    }
-    int ai = resolve_atlas(p, atlas);
-    if (ai < 0) {
-        cli_emit_error(json, quiet, "atlas_not_found", "no atlas named '%s'", atlas);
-        tp_project_destroy(p);
-        return CLI_EXIT_PROJECT;
-    }
-    tp_project_atlas *a = &p->atlases[ai];
-    tp_id128 aid = a->id;
-
-    if (strcmp(sub, "add") == 0) {
-        if (npos != 6) {
-            return fail_usage(p, json, quiet, "usage", "target add needs <exporter-id> <out-path>");
-        }
-        const char *eid = pos[4];
-        const char *out = pos[5];
-        if (!tp_exporter_find(eid)) { /* validate id against the live registry (vocabulary) */
-            char m[160];
-            (void)snprintf(m, sizeof m, "unknown exporter id '%s' (see 'ntpacker version --json' exporters)", eid);
-            return fail_usage(p, json, quiet, "usage", m);
-        }
-        tp_operation op;
-        memset(&op, 0, sizeof op);
-        op.kind = TP_OP_TARGET_CREATE;
-        op.atlas_id = aid;
-        op.u.target_create.exporter_id = cli_strdup(eid);
-        op.u.target_create.out_path = cli_strdup(out);
-        op.u.target_create.enabled = true;
-        if (!op.u.target_create.exporter_id || !op.u.target_create.out_path) {
-            tp_operation_free(&op);
-            cli_emit_error(json, quiet, "oom", "out of memory building target");
-            tp_project_destroy(p);
-            return CLI_EXIT_INTERNAL;
-        }
-        if (!cli_gen_id(&op.u.target_create.target_id)) { /* OS-RNG fault, not OOM (F4) */
-            tp_operation_free(&op);
-            cli_emit_error(json, quiet, "rng_failed", "could not generate a target id");
-            tp_project_destroy(p);
-            return CLI_EXIT_INTERNAL;
-        }
-        char human[192];
-        (void)snprintf(human, sizeof human, "Added target %s -> %s on '%s'", eid, out, atlas);
-        return commit_ops(p, path, &op, 1, "target", 1, human, json, quiet);
-    }
-
-    if (strcmp(sub, "remove") == 0) {
-        if (npos != 5) {
-            return fail_usage(p, json, quiet, "usage", "target remove needs <index-or-id>");
-        }
-        const char *sel = pos[4];
-        long idx = 0;
-        int ti = -1;
-        if (to_long(sel, &idx)) {
-            if (idx >= 0 && idx < a->target_count) {
-                ti = (int)idx;
-            }
-        } else {
-            for (int i = 0; i < a->target_count; i++) {
-                if (a->targets[i].exporter_id && strcmp(a->targets[i].exporter_id, sel) == 0) {
-                    ti = i;
-                    break;
-                }
-            }
-        }
-        if (ti < 0) {
-            cli_emit_error(json, quiet, "target_not_found", "atlas '%s' has no target '%s'", atlas, sel);
-            tp_project_destroy(p);
-            return CLI_EXIT_PROJECT;
-        }
-        tp_operation op;
-        memset(&op, 0, sizeof op);
-        op.kind = TP_OP_TARGET_REMOVE;
-        op.atlas_id = aid;
-        op.u.target_ref.target_id = a->targets[ti].id;
-        char human[160];
-        (void)snprintf(human, sizeof human, "Removed target '%s' from '%s'", sel, atlas);
-        return commit_ops(p, path, &op, 1, "target", 1, human, json, quiet);
-    }
-
-    if (strcmp(sub, "set") == 0) {
-        if (npos < 6) {
-            return fail_usage(p, json, quiet, "usage",
-                              "target set needs <index> [exporter=..] [out=..] [enabled=0|1]");
-        }
-        long idx = 0;
-        if (!to_long(pos[4], &idx) || idx < 0 || idx >= a->target_count) {
-            cli_emit_error(json, quiet, "target_not_found", "atlas '%s' has no target at index '%s'", atlas, pos[4]);
-            tp_project_destroy(p);
-            return CLI_EXIT_PROJECT;
-        }
-        tp_project_target *t = &a->targets[idx];
-        /* Merge onto the current fields (target.set replaces all three atomically). */
-        char eid[128];
-        char out[CLI_PATH_MAX];
-        (void)snprintf(eid, sizeof eid, "%s", t->exporter_id ? t->exporter_id : "");
-        (void)snprintf(out, sizeof out, "%s", t->out_path ? t->out_path : "");
-        bool enabled = t->enabled;
-        tp_id128 tid = t->id;
-        for (int i = 5; i < npos; i++) {
-            char key[32];
-            const char *val = split_kv(pos[i], key, sizeof key);
-            char m[192];
-            if (!val) {
-                (void)snprintf(m, sizeof m, "expected key=value, got '%s'", pos[i]);
-                return fail_usage(p, json, quiet, "usage", m);
-            }
-            if (strcmp(key, "exporter") == 0) {
-                if (!tp_exporter_find(val)) {
-                    (void)snprintf(m, sizeof m, "unknown exporter id '%s'", val);
-                    return fail_usage(p, json, quiet, "usage", m);
-                }
-                (void)snprintf(eid, sizeof eid, "%s", val);
-            } else if (strcmp(key, "out") == 0) {
-                if (val[0] == '\0') {
-                    return fail_usage(p, json, quiet, "usage", "out must be non-empty");
-                }
-                (void)snprintf(out, sizeof out, "%s", val);
-            } else if (strcmp(key, "enabled") == 0) {
-                if (!to_bool(val, &enabled)) {
-                    (void)snprintf(m, sizeof m, "enabled = '%s' must be 0/1/true/false", val);
-                    return fail_usage(p, json, quiet, "usage", m);
-                }
-            } else {
-                (void)snprintf(m, sizeof m, "unknown target key '%s' (known: exporter, out, enabled)", key);
-                return fail_usage(p, json, quiet, "usage", m);
-            }
-        }
-        tp_operation op;
-        memset(&op, 0, sizeof op);
-        op.kind = TP_OP_TARGET_SET;
-        op.atlas_id = aid;
-        op.u.target_set.target_id = tid;
-        op.u.target_set.mask = TP_TF_ALL; /* CLI `target set` replaces all three fields */
-        op.u.target_set.enabled = enabled;
-        op.u.target_set.exporter_id = cli_strdup(eid);
-        op.u.target_set.out_path = cli_strdup(out);
-        if (!op.u.target_set.exporter_id || !op.u.target_set.out_path) {
-            tp_operation_free(&op);
-            cli_emit_error(json, quiet, "oom", "out of memory building target");
-            tp_project_destroy(p);
-            return CLI_EXIT_INTERNAL;
-        }
-        char human[192];
-        (void)snprintf(human, sizeof human, "Updated target %ld on '%s'", idx, atlas);
-        return commit_ops(p, path, &op, 1, "target", 1, human, json, quiet);
-    }
-
-    char m[128];
-    (void)snprintf(m, sizeof m, "unknown target sub-command '%s'", sub);
-    return fail_usage(p, json, quiet, "usage", m);
-}
-
-/* ------------------------------------------------------------------ */
-/* atlas                                                              */
-/* ------------------------------------------------------------------ */
-
-static int do_atlas(const char *const *pos, int npos, bool json, bool quiet) {
-    /* atlas <sub> <project> ... (operates at project level, atlases keyed by name) */
-    if (npos < 4) {
-        cli_emit_error(json, quiet, "usage", "atlas needs <sub> <project> <name>...; try 'ntpacker help'");
-        return CLI_EXIT_USAGE;
-    }
-    const char *sub = pos[1];
-    const char *path = pos[2];
-    tp_project *p = NULL;
-    int rc = cli_load_project(path, json, quiet, &p);
-    if (rc != CLI_EXIT_OK) {
-        return rc;
-    }
-
-    if (strcmp(sub, "add") == 0) {
-        if (npos != 4) {
-            return fail_usage(p, json, quiet, "usage", "atlas add needs <name>");
-        }
-        const char *name = pos[3];
-        if (resolve_atlas(p, name) >= 0) { /* CLI policy: keep name-based selection unambiguous */
-            char m[128];
-            (void)snprintf(m, sizeof m, "atlas '%s' already exists", name);
-            return fail_usage(p, json, quiet, "usage", m);
-        }
-        tp_operation op;
-        memset(&op, 0, sizeof op);
-        op.kind = TP_OP_ATLAS_CREATE;
-        op.u.atlas_create.name = cli_strdup(name);
-        if (!op.u.atlas_create.name) {
-            tp_operation_free(&op);
-            cli_emit_error(json, quiet, "oom", "out of memory building atlas");
-            tp_project_destroy(p);
-            return CLI_EXIT_INTERNAL;
-        }
-        if (!cli_gen_id(&op.atlas_id)) { /* OS-RNG fault, not OOM (F4) */
-            tp_operation_free(&op);
-            cli_emit_error(json, quiet, "rng_failed", "could not generate an atlas id");
-            tp_project_destroy(p);
-            return CLI_EXIT_INTERNAL;
-        }
-        char human[128];
-        (void)snprintf(human, sizeof human, "Added atlas '%s'", name);
-        return commit_ops(p, path, &op, 1, "atlas", 1, human, json, quiet);
-    }
-
-    if (strcmp(sub, "remove") == 0) {
-        if (npos != 4) {
-            return fail_usage(p, json, quiet, "usage", "atlas remove needs <name>");
-        }
-        int ai = resolve_atlas(p, pos[3]);
-        if (ai < 0) {
-            cli_emit_error(json, quiet, "atlas_not_found", "no atlas named '%s'", pos[3]);
-            tp_project_destroy(p);
-            return CLI_EXIT_PROJECT;
-        }
-        tp_operation op;
-        memset(&op, 0, sizeof op);
-        op.kind = TP_OP_ATLAS_REMOVE;
-        op.atlas_id = p->atlases[ai].id;
-        char human[128];
-        (void)snprintf(human, sizeof human, "Removed atlas '%s'", pos[3]);
-        return commit_ops(p, path, &op, 1, "atlas", 1, human, json, quiet);
-    }
-
-    if (strcmp(sub, "rename") == 0) {
-        if (npos != 5) {
-            return fail_usage(p, json, quiet, "usage", "atlas rename needs <old> <new>");
-        }
-        const char *old = pos[3];
-        const char *neu = pos[4];
-        int ai = resolve_atlas(p, old);
-        if (ai < 0) {
-            cli_emit_error(json, quiet, "atlas_not_found", "no atlas named '%s'", old);
-            tp_project_destroy(p);
-            return CLI_EXIT_PROJECT;
-        }
-        int other = resolve_atlas(p, neu);
-        if (other >= 0 && other != ai) { /* CLI policy: rename-to-another-name collision is usage */
-            char m[128];
-            (void)snprintf(m, sizeof m, "atlas '%s' already exists", neu);
-            return fail_usage(p, json, quiet, "usage", m);
-        }
-        tp_operation op;
-        memset(&op, 0, sizeof op);
-        op.kind = TP_OP_ATLAS_RENAME;
-        op.atlas_id = p->atlases[ai].id;
-        op.u.atlas_rename.name = cli_strdup(neu);
-        if (!op.u.atlas_rename.name) {
-            tp_operation_free(&op);
-            cli_emit_error(json, quiet, "oom", "out of memory building atlas");
-            tp_project_destroy(p);
-            return CLI_EXIT_INTERNAL;
-        }
-        char human[160];
-        (void)snprintf(human, sizeof human, "Renamed atlas '%s' -> '%s'", old, neu);
-        return commit_ops(p, path, &op, 1, "atlas", 1, human, json, quiet);
-    }
-
-    char m[128];
-    (void)snprintf(m, sizeof m, "unknown atlas sub-command '%s'", sub);
-    return fail_usage(p, json, quiet, "usage", m);
-}
 
 /* ------------------------------------------------------------------ */
 /* dispatch                                                           */
 /* ------------------------------------------------------------------ */
 
-int cmd_mutate(int npos, const char *const *positionals, const char *opt_at, bool json, bool quiet) {
+static int dispatch_mutation(int npos, const char *const *positionals,
+                             const char *opt_at, const char *opt_kind,
+                             bool dry_run, bool json, bool quiet) {
     const char *verb = positionals[0];
-
-    if (opt_at && strcmp(verb, "anim") != 0) {
-        cli_emit_error(json, quiet, "usage", "--at is only valid for 'anim add-frame'");
-        return CLI_EXIT_USAGE;
-    }
-
-    if (strcmp(verb, "new") == 0) {
-        if (npos != 2) {
-            cli_emit_error(json, quiet, "usage", "new needs exactly one <path>; try 'ntpacker help'");
-            return CLI_EXIT_USAGE;
-        }
-        return do_new(positionals[1], json, quiet);
-    }
     if (strcmp(verb, "add") == 0) {
-        return do_add(positionals, npos, json, quiet);
+        return do_add(positionals, npos, opt_kind, dry_run, json, quiet);
     }
     if (strcmp(verb, "remove") == 0) {
-        return do_remove_source(positionals, npos, json, quiet);
+        return do_remove_source(positionals, npos, dry_run, json, quiet);
     }
     if (strcmp(verb, "set") == 0) {
-        return do_set(positionals, npos, json, quiet);
+        return do_set(positionals, npos, dry_run, json, quiet);
     }
     if (strcmp(verb, "sprite") == 0) {
         if (npos < 2) {
-            cli_emit_error(json, quiet, "usage", "sprite needs 'set' or 'unset'");
+            cli_emit_error(json, quiet, "usage",
+                           "sprite needs 'set' or 'unset'");
             return CLI_EXIT_USAGE;
         }
         if (strcmp(positionals[1], "set") == 0) {
-            return do_sprite_set(positionals, npos, json, quiet);
+            return do_sprite_set(positionals, npos, dry_run, json, quiet);
         }
         if (strcmp(positionals[1], "unset") == 0) {
-            return do_sprite_unset(positionals, npos, json, quiet);
+            return do_sprite_unset(positionals, npos, dry_run, json, quiet);
         }
-        cli_emit_error(json, quiet, "usage", "unknown sprite sub-command '%s' (want set/unset)", positionals[1]);
+        cli_emit_error(json, quiet, "usage",
+                       "unknown sprite sub-command '%s' (want set/unset)",
+                       positionals[1]);
         return CLI_EXIT_USAGE;
     }
     if (strcmp(verb, "anim") == 0) {
-        return do_anim(positionals, npos, opt_at, json, quiet);
+        return do_anim(positionals, npos, opt_at, dry_run, json, quiet);
     }
     if (strcmp(verb, "target") == 0) {
-        return do_target(positionals, npos, json, quiet);
+        return do_target(positionals, npos, dry_run, json, quiet);
     }
     if (strcmp(verb, "atlas") == 0) {
-        return do_atlas(positionals, npos, json, quiet);
+        return do_atlas(positionals, npos, dry_run, json, quiet);
     }
-
-    cli_emit_error(json, quiet, "usage", "unknown command '%s'; try 'ntpacker help'", verb);
+    cli_emit_error(json, quiet, "usage",
+                   "unknown command '%s'; try 'ntpacker help'", verb);
     return CLI_EXIT_USAGE;
+}
+
+int cmd_mutate(int npos, const char *const *positionals, const char *opt_at,
+               const char *opt_kind, bool dry_run, bool json, bool quiet) {
+    const char *verb = positionals[0];
+    if (opt_at && strcmp(verb, "anim") != 0) {
+        cli_emit_error(json, quiet, "usage",
+                       "--at is only valid for 'anim add-frame'");
+        return CLI_EXIT_USAGE;
+    }
+    if (strcmp(verb, "new") == 0) {
+        if (npos != 2) {
+            cli_emit_error(json, quiet, "usage",
+                           "new needs exactly one <path>; try 'ntpacker help'");
+            return CLI_EXIT_USAGE;
+        }
+        return do_new(positionals[1], dry_run, json, quiet);
+    }
+    return dispatch_mutation(npos, positionals, opt_at, opt_kind, dry_run, json, quiet);
 }

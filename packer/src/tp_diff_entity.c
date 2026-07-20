@@ -1,5 +1,5 @@
 /*
- * F2-03: element-level deep-copy / free + positional collection primitives for the
+ * Element-level deep-copy / free + positional collection primitives for the
  * semantic diff. The diff STATE-CAPTURES touched entities (docs/decisions/0012), so
  * it needs to copy one source/sprite/animation/target/frame/atlas-subtree out of the
  * live model and, on inverse/redo, splice a deep copy back in at an exact index.
@@ -7,10 +7,10 @@
  * These mirror tp_project_clone.c's element copies (fill_atlas/anim/source/target/
  * frame/copy_sprite_fields <-> clone_atlas/clone_frames) but are kept SEPARATE on
  * purpose: routing them through the diff fault-seam (tp_diff__alloc), not the clone
- * seam (cl_alloc), keeps F2-02's clone alloc-count goldens byte-stable, and the diff
+ * seam (cl_alloc), keeps tp_project_clone.c's clone alloc-count goldens byte-stable, and the diff
  * owns its captured data with its own single-free discipline (decision 0012 §6).
  *
- * !! FORK-SYNC WARNING (review [5]) !! A persistent field added to tp_project_clone.c
+ * !! FORK-SYNC WARNING !! A persistent field added to tp_project_clone.c
  * MUST be added here too, or Undo/Redo silently restores a non-byte-identical project.
  * The safety net is the completeness oracle test_completeness_oracle_* in test_diff.c:
  * it sets EVERY persistent field of EVERY entity kind non-default and asserts
@@ -30,17 +30,47 @@
 #include <string.h>
 
 #include "tp_diff_internal.h"
+#include "tp_project_mutation_internal.h"
 
 /* ---- allocation fault seam (test-only; default disabled) ------------------ */
-static int s_fail = -1;  /* countdown; -1 disabled. Fires exactly once. */
-static int s_count = 0;  /* allocations since the last reset */
+static _Thread_local int s_fail = -1; /* countdown; -1 disabled. Fires once. */
+static _Thread_local int s_count = 0; /* allocations since the last reset */
+static _Thread_local bool s_record_budget_active = false;
+static _Thread_local bool s_record_budget_exceeded = false;
+static _Thread_local size_t s_record_budget_limit = 0U;
+static _Thread_local size_t s_record_budget_bytes = 0U;
 
 void tp_diff__test_set_alloc_fail(int nth) { s_fail = nth; }
 int tp_diff__test_alloc_count(void) { return s_count; }
 void tp_diff__test_reset_alloc_count(void) { s_count = 0; }
 
+void tp_diff__record_budget_begin(size_t byte_limit) {
+    s_record_budget_active = true;
+    s_record_budget_exceeded = false;
+    s_record_budget_limit = byte_limit;
+    s_record_budget_bytes = 0U;
+}
+
+bool tp_diff__record_budget_exceeded(void) { return s_record_budget_active && s_record_budget_exceeded; }
+
+bool tp_diff__record_budget_end(size_t *bytes) {
+    const bool ok = s_record_budget_active && !s_record_budget_exceeded;
+    if (bytes) {
+        *bytes = ok ? s_record_budget_bytes : 0U;
+    }
+    s_record_budget_active = false;
+    s_record_budget_exceeded = false;
+    s_record_budget_limit = 0U;
+    s_record_budget_bytes = 0U;
+    return ok;
+}
+
 void *tp_diff__alloc(size_t n) {
     s_count++;
+    if (s_record_budget_active && n > s_record_budget_limit - s_record_budget_bytes) {
+        s_record_budget_exceeded = true;
+        return NULL;
+    }
     if (s_fail == 0) {
         s_fail = -1;
         return NULL;
@@ -48,7 +78,11 @@ void *tp_diff__alloc(size_t n) {
     if (s_fail > 0) {
         s_fail--;
     }
-    return calloc(1, n);
+    void *p = calloc(1, n);
+    if (p && s_record_budget_active) {
+        s_record_budget_bytes += n;
+    }
+    return p;
 }
 
 char *tp_diff__dup(const char *s, bool *ok) {
@@ -178,7 +212,6 @@ tp_status tp_diff__copy_sprite_fields(const tp_project_sprite *src, tp_project_s
 
 static tp_status fill_source(tp_project_source *dst, const tp_project_source *src) {
     dst->id = src->id;
-    dst->id_synthetic = src->id_synthetic;
     dst->kind = src->kind;
     bool ok = true;
     dst->path = tp_diff__dup(src->path, &ok);
@@ -187,7 +220,6 @@ static tp_status fill_source(tp_project_source *dst, const tp_project_source *sr
 
 static tp_status fill_target(tp_project_target *dst, const tp_project_target *src) {
     dst->id = src->id;
-    dst->id_synthetic = src->id_synthetic;
     dst->enabled = src->enabled;
     dst->exporter_id = dst->out_path = NULL;
     bool ok = true;
@@ -212,7 +244,7 @@ static tp_status fill_frame(tp_project_frame *dst, const tp_project_frame *src) 
 }
 
 static tp_status fill_anim(tp_project_anim *dst, const tp_project_anim *src) {
-    *dst = *src; /* scalars: id, id_synthetic, fps, playback, flips */
+    *dst = *src; /* scalars: id, fps, playback, flips */
     dst->name = NULL;
     dst->frames = NULL;
     dst->frame_count = dst->frame_cap = 0;
@@ -234,7 +266,7 @@ static tp_status fill_anim(tp_project_anim *dst, const tp_project_anim *src) {
  * sprites + animations w/ frames + targets). Grows each sub-count as it fills so a
  * mid-way OOM leaves a destroy-safe partial atlas. */
 static tp_status fill_atlas(tp_project_atlas *dst, const tp_project_atlas *src) {
-    *dst = *src; /* every scalar knob + id + id_synthetic */
+    *dst = *src; /* every scalar knob + id */
     dst->name = NULL;
     dst->sources = NULL;
     dst->source_count = dst->source_cap = 0;
@@ -452,7 +484,7 @@ tp_status tp_diff__insert_atlas(tp_project *p, int index, const tp_project_atlas
     }
     return fill_atlas((tp_project_atlas *)slot, src);
 }
-/* The positional REMOVE direction delegates to the canonical public remover (fix [6]:
+/* The positional REMOVE direction delegates to the canonical public remover:
  * the bounds-check + element free-discipline + down-shift lives in ONE place, killing
  * the drift risk of a second free-list). Only re-zero the vacated tail slot afterward so
  * the diff's array invariant holds ([count,cap) carry only NULL owned pointers; the
@@ -477,7 +509,7 @@ tp_status tp_diff__insert_source(tp_project_atlas *a, int index, const tp_projec
     return fill_source((tp_project_source *)slot, src);
 }
 tp_status tp_diff__remove_source(tp_project_atlas *a, int index) {
-    tp_status st = tp_project_atlas_remove_source(a, index); /* fix [6]: delegate free+shift */
+    tp_status st = tp_project_atlas_remove_source(a, index); /* delegate free+shift */
     if (st == TP_STATUS_OK) {
         memset(&a->sources[a->source_count], 0, sizeof *a->sources);
     }
@@ -515,7 +547,7 @@ tp_status tp_diff__insert_target(tp_project_atlas *a, int index, const tp_projec
     return fill_target((tp_project_target *)slot, src);
 }
 tp_status tp_diff__remove_target(tp_project_atlas *a, int index) {
-    tp_status st = tp_project_atlas_remove_target(a, index); /* fix [6]: delegate free+shift */
+    tp_status st = tp_project_atlas_remove_target(a, index); /* delegate free+shift */
     if (st == TP_STATUS_OK) {
         memset(&a->targets[a->target_count], 0, sizeof *a->targets);
     }
@@ -533,7 +565,7 @@ tp_status tp_diff__insert_frame(tp_project_anim *an, int index, const tp_project
     return fill_frame((tp_project_frame *)slot, src);
 }
 tp_status tp_diff__remove_frame_at(tp_project_anim *an, int index) {
-    tp_status st = tp_project_anim_remove_frame(an, index); /* fix [6]: delegate free+shift */
+    tp_status st = tp_project_anim_remove_frame(an, index); /* delegate free+shift */
     if (st == TP_STATUS_OK) {
         memset(&an->frames[an->frame_count], 0, sizeof *an->frames);
     }

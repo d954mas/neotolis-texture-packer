@@ -1,8 +1,9 @@
 /*
- * F2-03 task 1: per-op before/after capture. As the F2-02 commit applies each op to
+ * Per-op before/after capture. As the commit applies each op to
  * the transactional clone, we snapshot the touched entity's before (pre-apply) and
  * after (post-apply) state + ordering position -- the compact semantic diff, keyed by
- * effect class (C0-02 §6). capture_before also fixes the entry's shape + addressing
+ * the decision 0012 effect classes. capture_before also fixes the entry's shape +
+ * addressing
  * ids; capture_after fills the created/after data. Either may allocate; on OOM the
  * caller frees the entry and fails the whole commit (model byte-unchanged).
  *
@@ -13,31 +14,22 @@
 #include <stddef.h>
 #include <string.h>
 
-#include "tp_core/tp_names.h"  /* tp_sprite_export_key (override-record bridge key) */
 #include "tp_core/tp_operation.h"
 #include "tp_core/tp_project.h"
-#include "tp_core/tp_srckey.h" /* TP_SRCKEY_MAX */
 #include "tp_diff_internal.h"
-
-/* const-read lookups over the public (non-const) id accessors -- capture only
- * reads; the cast mirrors tp_op_validate.c's documented-safe pattern. */
+#include "tp_project_mutation_internal.h"
 static const tp_project_atlas *find_atlas(const tp_project *p, tp_id128 id) {
-    int ai = tp_project_find_atlas_by_id(p, id);
-    return ai < 0 ? NULL : &p->atlases[ai];
+    return tp_project_atlas_by_id(p, id);
 }
 static const tp_project_source *find_source(const tp_project_atlas *a, tp_id128 id) {
-    return tp_project_atlas_find_source_by_id((tp_project_atlas *)a, id);
+    return tp_project_atlas_source_by_id(a, id);
 }
 static const tp_project_anim *find_anim(const tp_project_atlas *a, tp_id128 id) {
     return tp_project_atlas_find_animation_by_id((tp_project_atlas *)a, id);
 }
 static const tp_project_target *find_target(const tp_project_atlas *a, tp_id128 id) {
-    return tp_project_atlas_find_target_by_id((tp_project_atlas *)a, id);
+    return tp_project_atlas_target_by_id(a, id);
 }
-static const tp_project_sprite *find_sprite(const tp_project_atlas *a, const char *bridge) {
-    return tp_project_atlas_find_sprite((tp_project_atlas *)a, bridge);
-}
-
 static void grab_knobs(tp_diff_knobs *k, const tp_project_atlas *a) {
     k->max_size = a->max_size;
     k->padding = a->padding;
@@ -51,20 +43,29 @@ static void grab_knobs(tp_diff_knobs *k, const tp_project_atlas *a) {
     k->pixels_per_unit = a->pixels_per_unit;
 }
 
-/* The src_key a sprite override op addresses, bridged to the export key the sparse
- * sprite-override storage is keyed by (fix [7]: was duplicated verbatim in
- * capture_before and capture_after, over a pass-through bridge_of alias). */
-static void sprite_bridge_of_op(const tp_operation *op, char *out, size_t cap) {
-    const char *sk = (op->kind == TP_OP_SPRITE_OVERRIDE_SET)     ? op->u.sprite_set.src_key
-                     : (op->kind == TP_OP_SPRITE_OVERRIDE_CLEAR) ? op->u.sprite_clear.src_key
-                                                                 : op->u.sprite_name.src_key;
-    tp_sprite_export_key(sk, out, cap);
+static void sprite_address(const tp_operation *op, tp_id128 *source_id,
+                           const char **src_key) {
+    if (op->kind == TP_OP_SPRITE_OVERRIDE_SET) {
+        *source_id = op->u.sprite_set.source_id;
+        *src_key = op->u.sprite_set.src_key;
+    } else if (op->kind == TP_OP_SPRITE_OVERRIDE_CLEAR) {
+        *source_id = op->u.sprite_clear.source_id;
+        *src_key = op->u.sprite_clear.src_key;
+    } else {
+        *source_id = op->u.sprite_name.source_id;
+        *src_key = op->u.sprite_name.src_key;
+    }
 }
 
-/* Snapshot the sparse override record for `bridge` into (present,index,copy). */
-static tp_status grab_sprite(const tp_project_atlas *a, const char *bridge, bool *present, int *index,
+/* Snapshot exactly the sparse record addressed by the operation. */
+static tp_status grab_sprite(const tp_project_atlas *a, const tp_operation *op,
+                             bool *present, int *index,
                              tp_project_sprite *copy) {
-    const tp_project_sprite *s = find_sprite(a, bridge);
+    tp_id128 source_id;
+    const char *src_key = NULL;
+    sprite_address(op, &source_id, &src_key);
+    const tp_project_sprite *s = tp_project_atlas_find_sprite_by_source_key(
+        (tp_project_atlas *)a, source_id, src_key);
     if (!s) {
         *present = false;
         *index = -1;
@@ -80,7 +81,7 @@ tp_status tp_diff_capture_before(const tp_project *pre, const tp_operation *op, 
     const tp_project_atlas *a = find_atlas(pre, op->atlas_id); /* NULL only for atlas.create */
     /* Capture runs BEFORE tp_operation_apply validates, so it must be equally defensive
      * as tp_diff_apply.c: resolve the parent atlas + the addressed sub-entity and
-     * bounds-check every index BEFORE any dereference (fix [1]/[2]). Every op but
+     * bounds-check every index BEFORE any dereference. Every op but
      * atlas.create addresses an existing atlas; a dangling id yields a structured
      * NOT_FOUND (never a NULL deref), the SAME status the history-less apply returns. */
     if (op->kind != TP_OP_ATLAS_CREATE && !a) {
@@ -141,9 +142,8 @@ tp_status tp_diff_capture_before(const tp_project *pre, const tp_operation *op, 
         case TP_OP_SPRITE_OVERRIDE_CLEAR:
         case TP_OP_SPRITE_NAME_SET: {
             e->shape = TP_DIFF_SHAPE_SPRITE_RECORD;
-            char bridge[TP_SRCKEY_MAX];
-            sprite_bridge_of_op(op, bridge, sizeof bridge);
-            return grab_sprite(a, bridge, &e->spr_before_present, &e->spr_before_index, &e->spr_before);
+            return grab_sprite(a, op, &e->spr_before_present,
+                               &e->spr_before_index, &e->spr_before);
         }
 
         case TP_OP_ANIMATION_CREATE:
@@ -212,7 +212,7 @@ tp_status tp_diff_capture_before(const tp_project *pre, const tp_operation *op, 
             }
             int idx = op->u.anim_frame_rm.index;
             if (idx < 0 || idx >= an->frame_count) {
-                return TP_STATUS_OUT_OF_BOUNDS; /* fix [2]: bounds-check before &an->frames[idx] */
+                return TP_STATUS_OUT_OF_BOUNDS; /* bounds-check before &an->frames[idx] */
             }
             e->position = idx;
             return tp_diff__copy_elem(TP_DIFF_COLL_FRAME, &an->frames[idx], &e->elem);
@@ -312,9 +312,8 @@ tp_status tp_diff_capture_after(const tp_project *post, const tp_operation *op, 
         case TP_OP_SPRITE_OVERRIDE_SET:
         case TP_OP_SPRITE_OVERRIDE_CLEAR:
         case TP_OP_SPRITE_NAME_SET: {
-            char bridge[TP_SRCKEY_MAX];
-            sprite_bridge_of_op(op, bridge, sizeof bridge);
-            return grab_sprite(a, bridge, &e->spr_after_present, &e->spr_after_index, &e->spr_after);
+            return grab_sprite(a, op, &e->spr_after_present,
+                               &e->spr_after_index, &e->spr_after);
         }
 
         case TP_OP_ANIMATION_CREATE: {

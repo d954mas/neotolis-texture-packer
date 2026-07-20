@@ -1,7 +1,7 @@
-/* F1-00 task 5: C0-01 canonical-path fixtures ported into production tp_core.
+/* F1-00 task 5: canonical-path fixtures for production tp_core.
  * These are LEXICAL-DETERMINISTIC vectors: the host rule set is a parameter on
  * the internal core, so BOTH the POSIX and Windows contracts run on every CI OS
- * -- no platform-specific golden output (the C0-01 property is preserved). The
+ * -- no platform-specific golden output. The
  * public native-host wrappers are covered too. The realpath (filesystem) half is
  * exercised separately in test_identity_session.c. */
 
@@ -53,6 +53,26 @@ void test_posix_symlink_is_not_resolved_lexically(void) {
 void test_posix_rejects(void) {
     expect_err("a/b", TP_HOST_POSIX, TP_STATUS_PATH_NOT_ABSOLUTE);
     expect_err("", TP_HOST_POSIX, TP_STATUS_INVALID_ARGUMENT);
+}
+
+void test_identity_paths_reject_invalid_utf8_before_path_rules(void) {
+    const char posix[] = {'/', (char)0xc3, 'x', '\0'};
+    const char windows[] = {'C', ':', '/', (char)0xc3, 'x', '\0'};
+    expect_err(posix, TP_HOST_POSIX, TP_STATUS_INVALID_UTF8);
+    expect_err(windows, TP_HOST_WINDOWS, TP_STATUS_INVALID_UTF8);
+
+    char out[TP_IDENTITY_PATH_MAX];
+#if defined(_WIN32)
+    const char *native = windows;
+#else
+    const char *native = posix;
+#endif
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_UTF8,
+                          tp_identity_path_lexical(native, out, sizeof out,
+                                                   NULL));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_UTF8,
+                          tp_identity_path_canonical(native, out, sizeof out,
+                                                     NULL));
 }
 
 void test_windows_canonical(void) {
@@ -165,6 +185,7 @@ int main(void) {
     RUN_TEST(test_posix_nonexistent_save_as_destination);
     RUN_TEST(test_posix_symlink_is_not_resolved_lexically);
     RUN_TEST(test_posix_rejects);
+    RUN_TEST(test_identity_paths_reject_invalid_utf8_before_path_rules);
     RUN_TEST(test_windows_canonical);
     RUN_TEST(test_windows_unc);
     RUN_TEST(test_windows_unc_separator_collapse);

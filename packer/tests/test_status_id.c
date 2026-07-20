@@ -24,7 +24,7 @@ void test_status_id_tokens(void) {
     TEST_ASSERT_EQUAL_STRING("oom", tp_status_id(TP_STATUS_OOM));
     TEST_ASSERT_EQUAL_STRING("builder_failed", tp_status_id(TP_STATUS_BUILDER_FAILED));
     TEST_ASSERT_EQUAL_STRING("bad_project", tp_status_id(TP_STATUS_BAD_PROJECT));
-    /* F1-00 project-identity faults (promoted from the C0-01 spike vocabulary). */
+    /* F1-00 project-identity faults. */
     TEST_ASSERT_EQUAL_STRING("path_not_absolute", tp_status_id(TP_STATUS_PATH_NOT_ABSOLUTE));
     TEST_ASSERT_EQUAL_STRING("path_drive_relative", tp_status_id(TP_STATUS_PATH_DRIVE_RELATIVE));
     TEST_ASSERT_EQUAL_STRING("path_bad_unc", tp_status_id(TP_STATUS_PATH_BAD_UNC));
@@ -32,11 +32,10 @@ void test_status_id_tokens(void) {
     TEST_ASSERT_EQUAL_STRING("path_resolve_failed", tp_status_id(TP_STATUS_PATH_RESOLVE_FAILED));
     TEST_ASSERT_EQUAL_STRING("rng_failed", tp_status_id(TP_STATUS_RNG_FAILED));
     TEST_ASSERT_EQUAL_STRING("identity_collision", tp_status_id(TP_STATUS_IDENTITY_COLLISION));
-    /* F1-01 structural-ID faults (promoted from the C0-01 id/legacy spike). */
+    /* F1-01 structural-ID faults. */
     TEST_ASSERT_EQUAL_STRING("id_malformed", tp_status_id(TP_STATUS_ID_MALFORMED));
     TEST_ASSERT_EQUAL_STRING("duplicate_id", tp_status_id(TP_STATUS_DUPLICATE_ID));
-    TEST_ASSERT_EQUAL_STRING("id_collision_exhausted", tp_status_id(TP_STATUS_ID_COLLISION_EXHAUSTED));
-    /* F1-02 source-key normalization faults (promoted from the C0-01 srckey spike). */
+    /* F1-02 source-key normalization faults. */
     TEST_ASSERT_EQUAL_STRING("invalid_utf8", tp_status_id(TP_STATUS_INVALID_UTF8));
     TEST_ASSERT_EQUAL_STRING("key_absolute", tp_status_id(TP_STATUS_KEY_ABSOLUTE));
     TEST_ASSERT_EQUAL_STRING("key_traversal", tp_status_id(TP_STATUS_KEY_TRAVERSAL));
@@ -51,11 +50,22 @@ void test_status_id_tokens(void) {
     TEST_ASSERT_EQUAL_STRING("invalid_revision", tp_status_id(TP_STATUS_INVALID_REVISION));
     /* F2-04 recovery-journal durability fault (master spec §7.1, §22.3). */
     TEST_ASSERT_EQUAL_STRING("journal_failed", tp_status_id(TP_STATUS_JOURNAL_FAILED));
+    TEST_ASSERT_EQUAL_STRING("file_changed_externally", tp_status_id(TP_STATUS_FILE_CHANGED_EXTERNALLY));
+    TEST_ASSERT_EQUAL_STRING("recovery_cleanup_failed", tp_status_id(TP_STATUS_RECOVERY_CLEANUP_FAILED));
+    TEST_ASSERT_EQUAL_STRING("recovery_busy", tp_status_id(TP_STATUS_RECOVERY_BUSY));
+    TEST_ASSERT_EQUAL_STRING("recovery_claim_failed", tp_status_id(TP_STATUS_RECOVERY_CLAIM_FAILED));
+    TEST_ASSERT_EQUAL_STRING("project_live", tp_status_id(TP_STATUS_PROJECT_LIVE));
+    TEST_ASSERT_EQUAL_STRING("unsupported_capability", tp_status_id(TP_STATUS_UNSUPPORTED_CAPABILITY));
+    TEST_ASSERT_EQUAL_STRING("file_exists", tp_status_id(TP_STATUS_FILE_EXISTS));
+    TEST_ASSERT_EQUAL_STRING("file_durability_uncertain",
+                             tp_status_id(TP_STATUS_FILE_DURABILITY_UNCERTAIN));
+    TEST_ASSERT_EQUAL_STRING("file_io_failed",
+                             tp_status_id(TP_STATUS_FILE_IO_FAILED));
 }
 
 /* Tokens are machine ids: lowercase, no spaces (unlike tp_status_str prose). */
 void test_status_id_is_machine_token(void) {
-    for (int s = TP_STATUS_OK; s <= TP_STATUS_JOURNAL_FAILED; s++) {
+    for (int s = TP_STATUS_OK; s <= TP_STATUS_FILE_IO_FAILED; s++) {
         const char *id = tp_status_id((tp_status)s);
         for (const char *c = id; *c; c++) {
             TEST_ASSERT_TRUE_MESSAGE(*c != ' ', id);

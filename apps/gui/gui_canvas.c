@@ -1,366 +1,13 @@
-#include "gui_canvas.h"
+#include "gui_canvas_internal.h"
 
 #include <math.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <string.h>
 
 #include "math/nt_math.h"
 #include "renderers/nt_shape_renderer.h"
 
+#include "tp_core/tp_transform.h"
+
 #include "clay.h"
-#include "stb_image.h"
-
-/* Vertex the sprite shaders consume: a_position(loc0, vec3), a_color(loc2, vec4),
- * a_texcoord(loc3, vec2). Tightly packed -> stride 36. */
-typedef struct canvas_vert {
-    float pos[3];
-    float col[4];
-    float uv[2];
-} canvas_vert;
-
-// #region D4 decode (mirror of tp_pack_read.c:25-53 tp_transform_decode / tp_transform_out_dims)
-/* Maps a trim-local corner (x,y) in [0..tw]x[0..th] to its on-page-relative corner given the
- * region's D4 transform mask. Apply order: diagonal -> flipH -> flipV (corner reflection). */
-static void d4_decode(int32_t x, int32_t y, uint8_t flags, int32_t tw, int32_t th, int32_t *ox, int32_t *oy) {
-    int32_t rx = x;
-    int32_t ry = y;
-    if (flags & 4u) {
-        int32_t t = rx;
-        rx = ry;
-        ry = t;
-    }
-    int32_t w = (flags & 4u) ? th : tw;
-    int32_t h = (flags & 4u) ? tw : th;
-    if (flags & 1u) {
-        rx = w - rx;
-    }
-    if (flags & 2u) {
-        ry = h - ry;
-    }
-    *ox = rx;
-    *oy = ry;
-}
-static void d4_out_dims(uint8_t flags, int32_t tw, int32_t th, int32_t *ow, int32_t *oh) {
-    if (flags & 4u) {
-        *ow = th;
-        *oh = tw;
-    } else {
-        *ow = tw;
-        *oh = th;
-    }
-}
-// #endregion
-
-// #region lifecycle
-void gui_canvas_restore_gpu(gui_canvas *c) {
-    static const uint16_t idx[6] = {0, 1, 2, 0, 2, 3};
-    c->ibo = nt_gfx_make_buffer(&(nt_buffer_desc_t){
-        .type = NT_BUFFER_INDEX,
-        .usage = NT_USAGE_IMMUTABLE,
-        .data = idx,
-        .size = sizeof idx,
-        .index_type = NT_INDEX_UINT16,
-        .label = "canvas_ibo",
-    });
-    c->vbo = nt_gfx_make_buffer(&(nt_buffer_desc_t){
-        .type = NT_BUFFER_VERTEX,
-        .usage = NT_USAGE_DYNAMIC,
-        .size = 4U * sizeof(canvas_vert),
-        .label = "canvas_vbo",
-    });
-    c->sampler = nt_gfx_make_sampler(&(nt_sampler_desc_t){
-        .min_filter = NT_FILTER_NEAREST, /* nearest so packed pixels are crisp when zoomed in */
-        .mag_filter = NT_FILTER_NEAREST,
-        .wrap_u = NT_WRAP_CLAMP_TO_EDGE,
-        .wrap_v = NT_WRAP_CLAMP_TO_EDGE,
-        .label = "canvas_sampler",
-    });
-    /* checkerboard: 2x2 two-tone (opaque -> premultiplied blend draws solid), REPEAT-sampled + tiled */
-    c->vbo_checker = nt_gfx_make_buffer(&(nt_buffer_desc_t){
-        .type = NT_BUFFER_VERTEX,
-        .usage = NT_USAGE_DYNAMIC,
-        .size = 4U * sizeof(canvas_vert),
-        .label = "canvas_checker_vbo",
-    });
-    static const uint8_t checker_px[16] = {44, 44, 50, 255, 58, 58, 66, 255, 58, 58, 66, 255, 44, 44, 50, 255};
-    c->checker_tex = nt_gfx_make_texture(&(nt_texture_desc_t){
-        .width = 2,
-        .height = 2,
-        .data = checker_px,
-        .format = NT_PIXEL_RGBA8,
-        .min_filter = NT_FILTER_NEAREST,
-        .mag_filter = NT_FILTER_NEAREST,
-        .wrap_u = NT_WRAP_REPEAT,
-        .wrap_v = NT_WRAP_REPEAT,
-        .label = "canvas_checker_tex",
-    });
-    c->checker_sampler = nt_gfx_make_sampler(&(nt_sampler_desc_t){
-        .min_filter = NT_FILTER_NEAREST,
-        .mag_filter = NT_FILTER_NEAREST,
-        .wrap_u = NT_WRAP_REPEAT,
-        .wrap_v = NT_WRAP_REPEAT,
-        .label = "canvas_checker_sampler",
-    });
-    c->checker_valid = (c->checker_tex.id != 0U);
-    c->buffers_ready = true;
-    /* pipeline + textures are GPU-side: force a rebuild/redecode after a loss */
-    c->pipe_ready = false;
-    c->has_tex = false;
-    c->loaded_path[0] = '\0';
-    for (int i = 0; i < GUI_CANVAS_MAX_PAGES; i++) {
-        c->page_valid[i] = false;
-    }
-    if (c->result) {
-        c->pages_dirty = true; /* re-upload from the (still-borrowed) result */
-    }
-}
-
-void gui_canvas_init(gui_canvas *c) {
-    memset(c, 0, sizeof *c);
-    c->mode = GUI_CANVAS_SOURCE;
-    c->sel_sprite = -1;
-    c->hover_sprite = -1;
-    c->anim_sprite = -1;
-    c->show_outline = true;
-    c->show_slice9 = true; /* silent unless the selected region actually has a slice9 inset */
-    c->overlay_scale = 1.0F;
-    c->scale = 1.0F;
-    c->fit_pending = true;
-    gui_canvas_restore_gpu(c);
-}
-
-void gui_canvas_shutdown(gui_canvas *c) {
-    if (c->has_tex) {
-        nt_gfx_destroy_texture(c->tex);
-        c->has_tex = false;
-    }
-    if (c->checker_valid) {
-        nt_gfx_destroy_texture(c->checker_tex);
-        c->checker_valid = false;
-    }
-    for (int i = 0; i < GUI_CANVAS_MAX_PAGES; i++) {
-        if (c->page_valid[i]) {
-            nt_gfx_destroy_texture(c->pages[i]);
-            c->page_valid[i] = false;
-        }
-    }
-}
-// #endregion
-
-// #region pipeline / frame ubo
-void gui_canvas_ensure_pipeline(gui_canvas *c, const nt_material_info_t *sprite_info) {
-    if (c->pipe_ready || !sprite_info || !sprite_info->ready) {
-        return;
-    }
-    nt_vertex_layout_t layout = {0};
-    layout.attrs[0] = (nt_vertex_attr_t){.location = NT_ATTR_POSITION, .format = NT_FORMAT_FLOAT3, .offset = 0};
-    layout.attrs[1] = (nt_vertex_attr_t){.location = NT_ATTR_COLOR, .format = NT_FORMAT_FLOAT4, .offset = 12};
-    layout.attrs[2] = (nt_vertex_attr_t){.location = NT_ATTR_TEXCOORD0, .format = NT_FORMAT_FLOAT2, .offset = 28};
-    layout.attr_count = 3;
-    layout.stride = (uint16_t)sizeof(canvas_vert);
-    c->pipe = nt_gfx_make_pipeline(&(nt_pipeline_desc_t){
-        .vertex_shader = {.id = sprite_info->resolved_vs},
-        .fragment_shader = {.id = sprite_info->resolved_fs},
-        .layout = layout,
-        .depth_test = false,
-        .depth_write = false,
-        .cull_mode = 0,
-        .blend = true,
-        .blend_src = NT_BLEND_ONE,
-        .blend_dst = NT_BLEND_ONE_MINUS_SRC_ALPHA,
-        .label = "ntpacker_canvas",
-    });
-    c->pipe_ready = (c->pipe.id != 0U);
-}
-
-void gui_canvas_set_frame_ubo(gui_canvas *c, nt_buffer_t ubo) { c->frame_ubo = ubo; }
-void gui_canvas_set_ui_scale(gui_canvas *c, float scale) { c->overlay_scale = (scale > 0.1F) ? scale : 1.0F; }
-// #endregion
-
-// #region source image
-static nt_texture_t upload_rgba_premul(const unsigned char *src, int w, int h, const char *label) {
-    const size_t n = (size_t)w * (size_t)h;
-    unsigned char *px = (unsigned char *)malloc(n * 4U);
-    if (!px) {
-        return (nt_texture_t){0};
-    }
-    for (size_t i = 0; i < n; i++) {
-        const unsigned a = src[i * 4U + 3U];
-        px[i * 4U + 0U] = (unsigned char)((src[i * 4U + 0U] * a) / 255U);
-        px[i * 4U + 1U] = (unsigned char)((src[i * 4U + 1U] * a) / 255U);
-        px[i * 4U + 2U] = (unsigned char)((src[i * 4U + 2U] * a) / 255U);
-        px[i * 4U + 3U] = (unsigned char)a;
-    }
-    nt_texture_t t = nt_gfx_make_texture(&(nt_texture_desc_t){
-        .width = (uint16_t)w,
-        .height = (uint16_t)h,
-        .data = px,
-        .format = NT_PIXEL_RGBA8,
-        .min_filter = NT_FILTER_NEAREST,
-        .mag_filter = NT_FILTER_NEAREST,
-        .wrap_u = NT_WRAP_CLAMP_TO_EDGE,
-        .wrap_v = NT_WRAP_CLAMP_TO_EDGE,
-        .label = label,
-    });
-    free(px);
-    return t;
-}
-
-bool gui_canvas_set_image(gui_canvas *c, const char *abs_path, char *err_out, size_t err_cap) {
-    if (!abs_path || abs_path[0] == '\0') {
-        return false;
-    }
-    if (c->has_tex && strcmp(c->loaded_path, abs_path) == 0) {
-        return true;
-    }
-    int w = 0;
-    int h = 0;
-    int comp = 0;
-    stbi_set_flip_vertically_on_load(0);
-    unsigned char *src = stbi_load(abs_path, &w, &h, &comp, 4);
-    if (!src) {
-        const char *why = stbi_failure_reason();
-        if (err_out && err_cap) {
-            (void)snprintf(err_out, err_cap, "decode failed: %s", why ? why : "unknown");
-        }
-        return false;
-    }
-    uint32_t maxdim = nt_gfx_gpu_caps() ? nt_gfx_gpu_caps()->max_texture_size : 4096U;
-    if (maxdim == 0U) {
-        maxdim = 4096U;
-    }
-    if ((uint32_t)w > maxdim || (uint32_t)h > maxdim) {
-        stbi_image_free(src);
-        if (err_out && err_cap) {
-            (void)snprintf(err_out, err_cap, "image %dx%d exceeds max texture %u", w, h, maxdim);
-        }
-        return false;
-    }
-    if (c->has_tex) {
-        nt_gfx_destroy_texture(c->tex);
-        c->has_tex = false;
-    }
-    c->tex = upload_rgba_premul(src, w, h, "ntpacker_canvas_img");
-    stbi_image_free(src);
-    c->img_w = w;
-    c->img_h = h;
-    c->has_tex = true;
-    (void)snprintf(c->loaded_path, sizeof c->loaded_path, "%s", abs_path);
-    return true;
-}
-
-void gui_canvas_clear(gui_canvas *c) {
-    if (c->has_tex) {
-        nt_gfx_destroy_texture(c->tex);
-        c->has_tex = false;
-    }
-    c->img_w = 0;
-    c->img_h = 0;
-    c->loaded_path[0] = '\0';
-}
-
-void gui_canvas_invalidate(gui_canvas *c) { c->loaded_path[0] = '\0'; }
-const char *gui_canvas_loaded_path(const gui_canvas *c) { return c->loaded_path; }
-bool gui_canvas_has_image(const gui_canvas *c) { return c->has_tex; }
-int gui_canvas_img_w(const gui_canvas *c) { return c->img_w; }
-int gui_canvas_img_h(const gui_canvas *c) { return c->img_h; }
-// #endregion
-
-// #region atlas pages
-static void drop_pages(gui_canvas *c) {
-    for (int i = 0; i < GUI_CANVAS_MAX_PAGES; i++) {
-        if (c->page_valid[i]) {
-            nt_gfx_destroy_texture(c->pages[i]);
-            c->page_valid[i] = false;
-        }
-    }
-    c->page_count = 0;
-}
-
-void gui_canvas_set_result(gui_canvas *c, const tp_result *result) {
-    c->result = result;
-    c->sel_sprite = -1;
-    c->hover_sprite = -1;
-    if (!result) {
-        drop_pages(c);
-        c->pages_dirty = false;
-        c->mode = GUI_CANVAS_SOURCE;
-        return;
-    }
-    c->mode = GUI_CANVAS_ATLAS;
-    c->cur_page = 0;
-    c->fit_pending = true;
-    c->pages_dirty = true; /* GL upload deferred to gui_canvas_upload_pages (render pass) */
-}
-
-void gui_canvas_upload_pages(gui_canvas *c) {
-    if (!c->pages_dirty || !c->result) {
-        return;
-    }
-    drop_pages(c);
-    c->upload_failed = false;
-    /* GPU cap guard: an oversize page (up to 16384 now) that exceeds the GPU's
-     * max_texture_size ASSERTS in nt_gfx_make_texture under debug -- pre-check and
-     * skip instead so the tool degrades to "page not shown" + a notice, never a crash. */
-    const uint32_t gpu_max = g_nt_gfx.gpu_caps.max_texture_size;
-    int n = c->result->page_count;
-    if (n > GUI_CANVAS_MAX_PAGES) {
-        n = GUI_CANVAS_MAX_PAGES;
-    }
-    for (int i = 0; i < n; i++) {
-        const tp_page *pg = &c->result->pages[i];
-        if (!pg->rgba || pg->w <= 0 || pg->h <= 0) {
-            continue;
-        }
-        if ((uint32_t)pg->w > gpu_max || (uint32_t)pg->h > gpu_max) {
-            c->upload_failed = true; /* too big for this GPU -> leave page invalid */
-            c->page_w[i] = pg->w;
-            c->page_h[i] = pg->h;
-            continue;
-        }
-        char label[32];
-        (void)snprintf(label, sizeof label, "ntpacker_page_%d", i);
-        /* tp_page.rgba is straight-alpha (export profile premultiplied=false) -> premultiply here. */
-        c->pages[i] = pg->premultiplied ? nt_gfx_make_texture(&(nt_texture_desc_t){
-                                              .width = (uint16_t)pg->w,
-                                              .height = (uint16_t)pg->h,
-                                              .data = pg->rgba,
-                                              .format = NT_PIXEL_RGBA8,
-                                              .min_filter = NT_FILTER_NEAREST,
-                                              .mag_filter = NT_FILTER_NEAREST,
-                                              .wrap_u = NT_WRAP_CLAMP_TO_EDGE,
-                                              .wrap_v = NT_WRAP_CLAMP_TO_EDGE,
-                                              .label = label,
-                                          })
-                                        : upload_rgba_premul(pg->rgba, pg->w, pg->h, label);
-        c->page_w[i] = pg->w;
-        c->page_h[i] = pg->h;
-        if (c->pages[i].id == 0) {
-            c->upload_failed = true; /* OOM / driver refusal on a huge page -> skip, no assert */
-            continue;
-        }
-        c->page_valid[i] = true;
-    }
-    c->page_count = n;
-    if (c->cur_page >= n) {
-        c->cur_page = 0;
-    }
-    c->pages_dirty = false;
-}
-
-bool gui_canvas_has_atlas(const gui_canvas *c) { return c->result != NULL && c->page_count > 0; }
-int gui_canvas_page_count(const gui_canvas *c) { return c->page_count; }
-int gui_canvas_cur_page(const gui_canvas *c) { return c->cur_page; }
-void gui_canvas_set_page(gui_canvas *c, int page) {
-    if (page >= 0 && page < c->page_count) {
-        c->cur_page = page;
-        c->fit_pending = true;
-    }
-}
-void gui_canvas_set_mode(gui_canvas *c, gui_canvas_mode mode) { c->mode = mode; }
-gui_canvas_mode gui_canvas_get_mode(const gui_canvas *c) { return c->mode; }
-// #endregion
 
 // #region view math
 float gui_canvas_zoom_pct(const gui_canvas *c) { return c->scale * 100.0F; }
@@ -464,7 +111,7 @@ int gui_canvas_hit(const gui_canvas *c, float lx, float ly) {
         }
         int32_t ow = 0;
         int32_t oh = 0;
-        d4_out_dims(s->transform, s->frame.w, s->frame.h, &ow, &oh);
+        tp_transform_out_dims(s->transform, s->frame.w, s->frame.h, &ow, &oh);
         if (px >= (float)s->frame.x && px < (float)(s->frame.x + ow) && py >= (float)s->frame.y &&
             py < (float)(s->frame.y + oh)) {
             best = i; /* last match wins -> topmost in draw order */
@@ -607,13 +254,14 @@ static void draw_anim_frame(gui_canvas *c, const float world[16], const float bo
             pos[i][1] = 2.0F * cy - pos[i][1];
         }
     }
-    /* Each display corner maps to a trim-local corner; d4_decode bakes the page rotation/flip into UV. */
+    /* Each display corner maps to a trim-local corner; the shared D4 decode bakes the page rotation/flip into UV. */
     const int32_t lc[4][2] = {{0, 0}, {s->frame.w, 0}, {s->frame.w, s->frame.h}, {0, s->frame.h}};
     float uv[4][2];
     for (int i = 0; i < 4; i++) {
         int32_t px = 0;
         int32_t py = 0;
-        d4_decode(lc[i][0], lc[i][1], s->transform, s->frame.w, s->frame.h, &px, &py);
+        tp_transform_decode(lc[i][0], lc[i][1], s->transform,
+                            s->frame.w, s->frame.h, &px, &py);
         uv[i][0] = ((float)s->frame.x + (float)px) / pw;
         uv[i][1] = ((float)s->frame.y + (float)py) / ph;
     }
@@ -703,7 +351,8 @@ static int region_polygon(const tp_sprite *s, float ox, float oy, float scale, f
         for (int i = 0; i < s->vert_count; i++) {
             int32_t px = 0;
             int32_t py = 0;
-            d4_decode(s->verts[i].x, s->verts[i].y, s->transform, tw, th, &px, &py);
+            tp_transform_decode(s->verts[i].x, s->verts[i].y,
+                                s->transform, tw, th, &px, &py);
             pts[n][0] = ox + (float)(fx + px) * scale;
             pts[n][1] = oy + (float)(fy + py) * scale;
             n++;
@@ -711,7 +360,7 @@ static int region_polygon(const tp_sprite *s, float ox, float oy, float scale, f
     } else {
         int32_t ow = 0;
         int32_t oh = 0;
-        d4_out_dims(s->transform, tw, th, &ow, &oh);
+        tp_transform_out_dims(s->transform, tw, th, &ow, &oh);
         const int32_t cx[4] = {fx, fx + ow, fx + ow, fx};
         const int32_t cy[4] = {fy, fy, fy + oh, fy + oh};
         for (int i = 0; i < 4; i++) {
@@ -723,12 +372,12 @@ static int region_polygon(const tp_sprite *s, float ox, float oy, float scale, f
     return n;
 }
 
-/* Placed AABB (from d4_out_dims) in page-layout coords -- the rectangular bounds incl. the
+/* Placed AABB (from the shared D4 dimensions) in page-layout coords -- the rectangular bounds incl. the
  * padding gap between regions. Always 4 points. */
 static void region_aabb(const tp_sprite *s, float ox, float oy, float scale, float pts[4][2]) {
     int32_t ow = 0;
     int32_t oh = 0;
-    d4_out_dims(s->transform, s->frame.w, s->frame.h, &ow, &oh);
+    tp_transform_out_dims(s->transform, s->frame.w, s->frame.h, &ow, &oh);
     const int32_t fx = s->frame.x;
     const int32_t fy = s->frame.y;
     const int32_t cx[4] = {fx, fx + ow, fx + ow, fx};
@@ -749,27 +398,6 @@ static void stroke_polygon(const float world[16], const float pts[][2], int n, c
     }
 }
 
-/* Float D4 decode (pivot is fractional). Affine, so it extrapolates outside [0..tw]x[0..th]. */
-static void d4_decode_f(float x, float y, uint8_t flags, float tw, float th, float *ox, float *oy) {
-    float rx = x;
-    float ry = y;
-    if (flags & 4u) {
-        float t = rx;
-        rx = ry;
-        ry = t;
-    }
-    const float w = (flags & 4u) ? th : tw;
-    const float h = (flags & 4u) ? tw : th;
-    if (flags & 1u) {
-        rx = w - rx;
-    }
-    if (flags & 2u) {
-        ry = h - ry;
-    }
-    *ox = rx;
-    *oy = ry;
-}
-
 /* Original (untrimmed) source bounds in page-layout coords: the trim box is [0..tw]x[0..th] in
  * trim-local space; the source box is [-ssx..-ssx+srcW] x [-ssy..-ssy+srcH], mapped through the same
  * (affine) D4 transform + frame offset. Shows how much was trimmed away vs the packed content. */
@@ -787,7 +415,7 @@ static void region_source_rect(const tp_sprite *s, float ox, float oy, float sca
     for (int i = 0; i < 4; i++) {
         int32_t px = 0;
         int32_t py = 0;
-        d4_decode(cx[i], cy[i], s->transform, tw, th, &px, &py);
+        tp_transform_decode(cx[i], cy[i], s->transform, tw, th, &px, &py);
         pts[i][0] = ox + (float)(fx + px) * scale;
         pts[i][1] = oy + (float)(fy + py) * scale;
     }
@@ -801,8 +429,10 @@ static void slice9_line(const float world[16], const tp_sprite *s, float ox, flo
     float ay = 0.0F;
     float bx = 0.0F;
     float by = 0.0F;
-    d4_decode_f(x0, y0, s->transform, (float)s->frame.w, (float)s->frame.h, &ax, &ay);
-    d4_decode_f(x1, y1, s->transform, (float)s->frame.w, (float)s->frame.h, &bx, &by);
+    tp_transform_decode_f(x0, y0, s->transform, (float)s->frame.w,
+                          (float)s->frame.h, &ax, &ay);
+    tp_transform_decode_f(x1, y1, s->transform, (float)s->frame.w,
+                          (float)s->frame.h, &bx, &by);
     float wa[3];
     float wb[3];
     layout_to_world(world, ox + ((float)s->frame.x + ax) * scale, oy + ((float)s->frame.y + ay) * scale, wa);
@@ -817,7 +447,8 @@ static void pivot_point(const tp_sprite *s, float ox, float oy, float scale, flo
     const float pvy = s->pivot.y * (float)s->sourceSize.h - (float)s->spriteSourceSize.y;
     float dx = 0.0F;
     float dy = 0.0F;
-    d4_decode_f(pvx, pvy, s->transform, (float)s->frame.w, (float)s->frame.h, &dx, &dy);
+    tp_transform_decode_f(pvx, pvy, s->transform, (float)s->frame.w,
+                          (float)s->frame.h, &dx, &dy);
     out[0] = ox + ((float)s->frame.x + dx) * scale;
     out[1] = oy + ((float)s->frame.y + dy) * scale;
 }
