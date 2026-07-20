@@ -43,8 +43,11 @@ struct tp_result;
 typedef struct tp_pack_result_cache tp_pack_result_cache;
 
 /* `byte_budget` bounds the total retained bytes of INACTIVE entries (the pinned
- * active entry is never counted). 0 is legal (every demoted entry is evicted
- * immediately, only the active entry survives). Returns NULL on OOM. */
+ * active entry is never counted). 0 is legal: every demoted entry is evicted
+ * immediately EXCEPT the highest-sequence entry, which stays resolvable no matter
+ * the budget (store contract, decision 0004) -- so the active entry and the
+ * max-sequence entry survive, and inactive_bytes may exceed the budget by at most
+ * that one retained entry. Returns NULL on OOM. */
 tp_pack_result_cache *tp_pack_result_cache_create(uint64_t byte_budget);
 void tp_pack_result_cache_destroy(tp_pack_result_cache *cache);
 

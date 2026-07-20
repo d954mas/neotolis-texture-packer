@@ -254,6 +254,69 @@ void test_exact_byte_accounting_and_eviction(void) {
     tp_pack_result_cache_destroy(cache);
 }
 
+/* Zero budget must never demote the "highest sequence is always resolvable"
+ * guarantee (store contract, decision 0004). An out-of-order store (seq 2 stored
+ * first/active, seq 1 stored late, demoting seq 2 to inactive) would otherwise let
+ * the budget-0 LRU evict seq 2 immediately, leaving authoritative() returning the
+ * stale seq 1. The max-sequence entry is exempt from eviction like the active pin;
+ * every OTHER inactive entry is still reclaimed at budget 0. */
+void test_zero_budget_keeps_max_sequence_resolvable(void) {
+    packed_atlas s2; /* seq 2 -- the newest request */
+    packed_atlas s1; /* seq 1 -- an earlier request completing late */
+    packed_atlas s0; /* seq 0 -- an even earlier request, must be reclaimed */
+    pack_one("zbudget2", 1U, &s2);
+    pack_one("zbudget1", 2U, &s1);
+    pack_one("zbudget0", 3U, &s0);
+
+    tp_pack_result_cache *cache = tp_pack_result_cache_create(0U); /* byte_budget = 0 */
+    TEST_ASSERT_NOT_NULL(cache);
+
+    /* seq 2 stores first (active); seq 1 completes late and demotes seq 2 to
+     * inactive. At budget 0 the LRU would evict seq 2 -- it must not. */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, store(cache, id_of(2U), 2U, &s2));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, store(cache, id_of(1U), 1U, &s1));
+    free(s2.bytes);
+    free(s1.bytes);
+
+    tp_pack_result_cache_stats st;
+    tp_pack_result_cache_stats_get(cache, &st);
+    TEST_ASSERT_TRUE_MESSAGE(tp_pack_result_cache_contains(cache, id_of(2U)),
+                             "zero budget must not evict the highest sequence");
+    TEST_ASSERT_TRUE(tp_pack_result_cache_contains(cache, id_of(1U)));
+    TEST_ASSERT_EQUAL_UINT64(0U, st.evicted);
+    /* The retained max-sequence entry keeps its bytes counted, so inactive_bytes
+     * exceeds the zero budget by exactly that one entry. */
+    TEST_ASSERT_EQUAL_UINT64((uint64_t)s2.size, st.inactive_bytes);
+
+    /* A third, lower-sequence store (seq 0) becomes active and demotes seq 1. seq 1
+     * is neither active nor the max sequence, so the zero-budget sweep reclaims it
+     * while seq 2 stays exempt -- eviction is not globally disabled by the exempt. */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, store(cache, id_of(3U), 0U, &s0));
+    free(s0.bytes);
+    tp_pack_result_cache_stats_get(cache, &st);
+    TEST_ASSERT_TRUE_MESSAGE(tp_pack_result_cache_contains(cache, id_of(2U)),
+                             "highest sequence stays exempt across further stores");
+    TEST_ASSERT_FALSE_MESSAGE(tp_pack_result_cache_contains(cache, id_of(1U)),
+                              "a non-max inactive entry must still be reclaimed");
+    TEST_ASSERT_TRUE(tp_pack_result_cache_contains(cache, id_of(3U))); /* active */
+    TEST_ASSERT_EQUAL_UINT64(1U, st.evicted);
+
+    /* authoritative() re-inflates the retained seq-2 bytes and returns them, not
+     * the active seq-0 entry: the highest sequence is authoritative. */
+    const tp_result *r = NULL;
+    tp_id128 h = tp_id128_nil();
+    uint64_t seq = 0U;
+    tp_error e = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_pack_result_cache_authoritative(
+                                            cache, &h, &r, &seq, &e));
+    TEST_ASSERT_TRUE(tp_id128_eq(h, id_of(2U)));
+    TEST_ASSERT_EQUAL_UINT64(2U, seq);
+    TEST_ASSERT_NOT_NULL(r);
+    TEST_ASSERT_EQUAL_STRING(s2.atlas_name, r->atlas_name);
+    TEST_ASSERT_EQUAL_INT(s2.sprite_count, r->sprite_count);
+    tp_pack_result_cache_destroy(cache);
+}
+
 void test_corrupt_retained_entry_is_contained(void) {
     packed_atlas good;
     packed_atlas victim;
@@ -526,6 +589,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_store_active_pin_and_authoritative);
     RUN_TEST(test_inactive_reinflate_from_bytes);
     RUN_TEST(test_exact_byte_accounting_and_eviction);
+    RUN_TEST(test_zero_budget_keeps_max_sequence_resolvable);
     RUN_TEST(test_corrupt_retained_entry_is_contained);
     RUN_TEST(test_selection_by_sequence_ignores_store_order);
     RUN_TEST(test_cancellation_leaves_prior_authoritative);

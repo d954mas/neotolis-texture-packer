@@ -149,20 +149,42 @@ static void remove_entry(tp_pack_result_cache *cache, cache_entry *entry) {
     cache->count--;
 }
 
+/* The entry holding the maximum completion sequence -- the one authoritative()
+ * resolves to absent an explicit selection (decision 0004). Ties keep the
+ * earliest-stored entry, exactly as resolve_target() does. */
+static cache_entry *max_sequence_entry(const tp_pack_result_cache *cache) {
+    cache_entry *best = NULL;
+    for (int i = 0; i < cache->count; i++) {
+        cache_entry *e = cache->entries[i];
+        if (!best || e->sequence > best->sequence) {
+            best = e;
+        }
+    }
+    return best;
+}
+
 static void evict_over_budget(tp_pack_result_cache *cache) {
+    /* The highest-sequence entry must stay resolvable regardless of budget size
+     * (store contract, decision 0004): an out-of-order store can demote it to
+     * inactive, but authoritative() must still return it, never a stale lower
+     * sequence. So it is exempt from eviction unconditionally, the same way the
+     * pinned active entry is -- even at budget 0. Its retained bytes stay counted
+     * in inactive_bytes, so inactive_bytes may exceed the budget by at most this
+     * one entry when it is inactive. */
+    cache_entry *keep = max_sequence_entry(cache);
     while (cache->inactive_bytes > cache->budget) {
         cache_entry *victim = NULL;
         for (int i = 0; i < cache->count; i++) {
             cache_entry *e = cache->entries[i];
-            if (e->arena != NULL) {
-                continue; /* active pin is never evicted */
+            if (e->arena != NULL || e == keep) {
+                continue; /* active pin + highest sequence are never evicted */
             }
             if (!victim || e->touch < victim->touch) {
                 victim = e;
             }
         }
         if (!victim) {
-            break; /* only the active entry remains */
+            break; /* only the active + highest-sequence entries remain */
         }
         cache->inactive_bytes -= victim->ntpack_size;
         remove_entry(cache, victim);
