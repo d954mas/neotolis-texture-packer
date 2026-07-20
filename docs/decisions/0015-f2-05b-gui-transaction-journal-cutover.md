@@ -1,5 +1,12 @@
 # 0015 — F2-05b GUI transaction cutover (b-i: mutations → journal-LESS transactions)
 
+> **PARTIALLY SUPERSEDED (2026-07-19) by decision [0019](0019-best-effort-recovery-journal.md):**
+> append-failure rejecting the commit inside `tp_model_apply`, and the resulting
+> flush-fail→abort cascade across Save/Save-As/Undo/Redo/Pack/Export, plus the
+> full-snapshot journal payload, are replaced by commit-independent best-effort compact
+> v4 diffs with sticky-degraded recovery. The rest of this record remains historical
+> context.
+
 > **Foundation addendum (2026-07-16):** accepted, implemented and reviewed. The GUI
 > now uses session-owned snapshots, semantic history and shared recovery; the former
 > GUI project/model/history/recovery authority described in intermediate sections

@@ -3,6 +3,7 @@
 **Status:** active implementation supplement
 
 **Normative source:** [`../ntpacker-master-spec.md`](../ntpacker-master-spec.md)
+(canvas, workspace, and interaction model: §61)
 
 **Scope:** human-facing interaction and presentation only
 
@@ -49,6 +50,52 @@ status, notices, job progress, connection and freshness
 
 Responsive contraction may collapse secondary panels, but it must not remove
 the current project/atlas identity, primary action, error state, or freshness.
+
+### 2.1 Two canvas levels
+
+The center canvas has two levels and no third "page" level (normative model:
+master spec §61.1):
+
+- **Project level** presents each atlas as a group-card: name, health badges
+  (fill %, outdated, not packed, warning), a visibility eye, and the last pack's
+  page thumbnails. Boards hold freeform positions -- auto-placed when the atlas is
+  created, never moved by the tool, re-gridded only by an explicit "Tidy up".
+  Hiding an atlas leaves its spot empty; an "N hidden" chip restores it.
+  Project-level batch actions include Pack stale (N) and Export all.
+- **Atlas level** lays out all of one atlas's pages spatially at once. Page tabs
+  are removed; double-clicking a page zooms the camera to it (a camera move, not a
+  mode) down to texels; sprites are selectable here.
+
+Breadcrumbs (Project > atlas) ascend. A single continuous canvas and a third page
+level are rejected.
+
+### 2.2 One project tree
+
+The left region is one project tree with a clickable project root node; selecting
+the root shows project settings and export rules in the inspector. The tree is
+root -> atlases -> folders/sprites -> a per-atlas Animations node, replacing the
+separate ATLASES / SPRITES / ANIMATIONS sections. The Ctrl+F filter is
+project-wide and shows matches under their atlases. Cross-atlas drag works in the
+tree; pages are packer output and are never drag targets.
+
+### 2.3 Sorting is view state
+
+Sorting is view state, not project data. Four keys -- name (default), size, file
+mtime, and added_at -- each with two directions (re-clicking the active key flips
+it), plus an independent "warning on top" checkbox that overlays any sort. A key
+applies within each tree level. Atlas order and animation frame order stay manual;
+filesystem-derived rows mirror disk and are never manually reordered.
+
+### 2.4 Thumbnails and display modes
+
+Thumbnails are the default, not a mode: sprite and atlas rows always show previews
+(async thumbnail cache), and hover shows a large 1:1 preview. The sprite area has
+list and grid display modes (a header toggle, view state). The atlas cards view is
+the Project canvas level, not a panel mode.
+
+Performance budgets are validated at the owner's real scale (30 atlases,
+5000 sprites): sub-100 ms interactions, non-blocking refresh, virtualized lists,
+and a bounded thumbnail cache.
 
 ## 3. Project and session state
 
@@ -129,6 +176,17 @@ Severity language:
 - **Error:** no valid artifact can be produced.
 
 Warnings do not disable Export by themselves. A blocking error does.
+
+### 5.1 Export rules and preflight
+
+Export rules (targets) are edited only at the project root; the atlas inspector
+shows a compact participation block -- a per-target enable toggle plus an optional
+path override -- not a second target editor (normative model: master spec §31,
+§61.1). Ctrl+E opens preflight only and never edits targets. Preflight scope is
+the current selection (nothing selected at Project level means all) and it shows
+the dry-run file list, amber overwrites, per-target degradation notices, a
+"Copy CLI command" action, and an optional "Export as ZIP" (§37.2).
+Repeat-last-export is Ctrl+E then Enter.
 
 ## 6. Import and Extract Sprites
 

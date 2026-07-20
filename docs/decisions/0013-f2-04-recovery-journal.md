@@ -1,5 +1,12 @@
 # 0013 — F2-04: минимальный recovery journal для side-effect workflows
 
+> **PARTIALLY SUPERSEDED (2026-07-19) by decision [0019](0019-best-effort-recovery-journal.md):**
+> the acknowledgement-gate (transaction not committed until the journal record is
+> durable), rollback-on-append-failure (`TP_STATUS_JOURNAL_FAILED` rejecting the
+> transaction), and the full-snapshot-per-transaction payload are replaced by
+> commit-independent best-effort compact v4 diffs with sticky-degraded recovery. The
+> rest of this record remains historical context.
+
 > **Foundation addendum (2026-07-16):** accepted, implemented and reviewed through
 > M0/M3/M4. The current journal/recovery ownership, `duplicate_id` contract and
 > triggered P-UNDO follow-up are recorded in the master spec and foundation review.

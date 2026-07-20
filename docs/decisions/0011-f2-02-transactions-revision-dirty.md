@@ -15,7 +15,8 @@ Master spec §7–8, §9.1, §59 items 12–19. Plan F2-02 (строки 395–4
 
 ## Область: что F2-02 РЕАЛЬНО поставляет (groundwork) vs что переносится в F2-03/04/05
 
-Урок F1-03 / F2-01 (decisions 0009/0010): границу фиксируем ЧЕСТНО, без overclaim.
+Урок F1-03 (decision 0009, superseded and removed by 0016) / F2-01 (decision 0010):
+границу фиксируем ЧЕСТНО, без overclaim.
 
 **F2-02 РЕАЛЬНО поставляет (core-tested groundwork):**
 - **Атомарная multi-op транзакция** над живой `tp_project`: validate-all → apply →

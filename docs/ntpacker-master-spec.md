@@ -176,6 +176,8 @@ normally pinned by the project's own version control.
 
 A target-format limitation is visible on the specific export target before
 export, repeated in export preflight, and included in the structured report.
+Targets are declared at the project level and resolved per atlas as effective
+targets (§31, §61.1); loss is reported against the effective target for each atlas.
 
 The user and agent must be able to inspect:
 
@@ -356,6 +358,14 @@ frames use only the canonical `{source, key}` identity, where `key` is the
 normalized source-local key with its extension preserved. Name-only pending forms
 are not valid project states. `sprite_id` remains derived and is never persisted.
 
+Each source record additionally carries a write-once `added_at` stamp, set when
+the source is added and never rewritten (it drives "recently added" sorting and a
+`new` badge). No continuously-updated per-asset timestamp is ever persisted: a
+source file's `mtime` is read live from the filesystem for display and sorting
+only. Persisting churning timestamps is the TexturePacker SmartUpdate anti-pattern
+(needless VCS diffs); "who changed what, when" inside the project is the
+transaction history's job, not a stored field.
+
 New private candidates may temporarily contain missing IDs. The writable session
 adoption boundary assigns all missing IDs atomically and validates the complete
 graph before publication. Saves, checkpoints, and externally visible snapshots
@@ -383,10 +393,13 @@ All persistent model mutation is represented by typed semantic operations.
 Examples:
 
 ```text
+project.defaults.set
 atlas.create
 atlas.remove
 atlas.rename
 atlas.settings.set
+atlas.settings.clear
+atlas.visible.set
 source.add
 source.remove
 source.replace
@@ -400,15 +413,54 @@ animation.settings.set
 target.create
 target.remove
 target.set
+target.participation.set
+note.create
+note.remove
+note.set
+note.reparent
+atlas.board.move
+workspace.tidy
 ```
 
+Export targets (`target.*`) are **project-scope** operations; per-atlas
+participation is the atlas-scope `target.participation.set` operation (§61.1,
+§31). Text objects (`note.*`) and atlas board placement (`atlas.board.move`,
+`workspace.tidy`) are ordinary model operations over the workspace section
+(§61.2).
+
 **Field-presence SET operations.** The mask-carrying `*.set` operations -- `atlas.settings.set`,
-`sprite.override.set`, `animation.settings.set`, and `target.set` -- are *field-presence*: an
+`sprite.override.set`, `animation.settings.set`, `target.set`, `target.participation.set`, and
+`note.set` -- are *field-presence*: an
 operation changes only the fields it actually carries, and its presence mask is derived from which
 fields are present (including in the JSON form). Omitted fields are left unchanged; an operation that
 names no field is rejected. This keeps a serialized operation a faithful round-trip -- the canonical
 encoder emits only the masked fields and the decoder reconstructs the same mask -- which the recovery
 journal relies on to replay committed operations without re-introducing fields that were never sent.
+
+**Settings inheritance and provenance.** Packing/atlas and sprite settings
+resolve along project -> atlas -> sprite. The project `defaults` block holds
+atlas-level setting defaults (padding, max page size, shape, ...); an atlas holds
+sprite-level setting defaults (pivot, ...); a sprite override wins at the leaf.
+For every field the core exposes the **effective value** and its **origin**
+(`default | project | atlas | sprite`) so clients can render non-default markers
+and a "modified only" filter. Reverting a field is a `*.clear` / `clear_override`
+operation at the level that set it -- not a re-assignment to the inherited value.
+Validation always runs on effective values. See §61 for the inspector treatment.
+
+**Display-only visibility.** An atlas carries `visible: bool` (default true).
+`atlas.visible.set` is a named, undoable model operation recorded in history and
+marks the project dirty. Semantics are **display-only**: a hidden atlas still
+packs and exports. A hidden atlas is not a disabled atlas; a `disabled` concept
+(excluded from pack/export) is a possible future feature and must never be
+conflated with `visible` (§61.1).
+
+**Palette-ready operation registry (hard requirement on F2).** Every typed
+operation carries a human-readable **label template** (used for history entries
+and undo toasts, e.g. "Set padding 4 (3 sprites)") and a machine-readable
+**argument schema** (name, type, range/enum). A command palette and machine
+clients can therefore index and invoke parameterized operations
+("set max page size 1024") without per-command UI code. This is a requirement on
+the operation engine, not an optional client convenience.
 
 Operations target stable IDs, not array indexes or mutable names. A frontend may
 accept a human-friendly selector, but it resolves that selector to an ID before
@@ -485,6 +537,12 @@ label
 author/client metadata
 ordered operations[]
 ```
+
+The recorded author is one of `human` or `agent(<external-controller identity>)`
+(§18). Author identity is committed with the transaction and exposed to every
+client so the GUI can render AI/ME authorship badges and a live agent-activity
+surface. Authorization is decided once at the connection level (§23); there are
+no per-action confirmations.
 
 Rules:
 
@@ -649,6 +707,11 @@ History is shared by:
 
 A new model transaction after Undo discards the Redo branch.
 
+Each visible history entry carries its transaction author (`human` or
+`agent(<id>)`, §7). Undo/Redo behave identically regardless of author. The GUI
+uses this to badge AI vs. human authorship and to drive a live agent-activity
+feed; it never gates individual actions on confirmation (§23).
+
 ### 9.2 Save checkpoints in the History panel
 
 A successful Save may appear in the visible History panel as a non-Undoable
@@ -789,6 +852,12 @@ The active result is pinned and may hold decompressed/GPU resources. Inactive
 results use a separate byte-budget LRU. Concrete budgets and compression details
 are implementation policy.
 
+The pack-result store must also serve cheap downscaled page thumbnails (mip
+levels or a cached downscale) for the Project overview canvas at the owner's real
+scale (30+ atlases / 5000+ sprites) without forcing full-resolution page
+residency: full-res pages stay in the LRU and the overview never pins them
+(§52.3, §61.1).
+
 On cache miss, project state is restored immediately and the existing preview
 is marked out of date. Undo/Redo never starts Pack automatically. The user runs
 Pack explicitly when a fresh result is required.
@@ -907,6 +976,9 @@ External source-file changes are not project-model mutations:
 
 A physical rename outside Neotolis is remove-old plus add-new. Neotolis does not
 attempt hash-based rename recovery or sidecar identity.
+
+Live `mtime` observed by the watcher is used for runtime display and the
+"recently modified" sort key only; it is never written to the project file (§5.5).
 
 ### 11.4 Runtime source errors
 
@@ -1063,6 +1135,43 @@ the applicable stable atlas/source/animation/target IDs. Presentation adapters
 may omit absent contexts but must not truncate or substitute them. Reports have
 a hard byte/count budget and end with a deterministic structured truncation
 finding when the complete set does not fit.
+
+**Machine contract.** The CLI is a first-class machine interface. The as-built
+JSON payloads are pinned in [`formats/cli-report.md`](formats/cli-report.md);
+this section states the contract, that document freezes exact values, and the two
+must not contradict:
+
+1. **`--json` everywhere.** Every command has a machine-readable mode whose
+   payload carries a per-verb versioned `"schema": N`; JSON is never lossy
+   relative to the human text.
+2. **Exit codes are a contract.** A stable, test-pinned table -- `0` ok, with
+   distinct codes for internal error, usage, project load/parse, pack failure,
+   export failure, partial success, strict-validate findings, and typed
+   pre-publication file I/O failure. The exact numbers are frozen in
+   `cli-report.md` / `cli_exit.h`; reference them rather than re-numbering.
+3. **Errors and notices are structured data.** An error carries a stable string
+   `id` (a `tp_status` token) alongside its message; a degradation notice carries
+   `{sprite, field, target, reason-id}`. Prose is derived from the data, never the
+   reverse.
+4. **stdout/stderr discipline.** stdout is the requested payload only; stderr
+   carries diagnostics and progress, so an agent can pipe stdout straight into a
+   parser.
+5. **Dry-run / explain.** `pack`/`export --dry-run` and mutation `--dry-run`
+   report what would happen -- pages, occupancy, effective settings, and every
+   predicted degradation -- without writing files.
+6. **One-run query surface.** `inspect` and `validate` report *all* findings in a
+   single run as structured data, so an agent fixes them in one edit cycle rather
+   than one per run.
+7. **Graceful failure, never a crash.** Bad input (oversized sprite, malformed
+   file, missing source) returns a structured error and a non-zero exit code; an
+   aborting process would break an agent loop.
+8. **Published schemas.** JSON Schema is published for the `.ntpacker_project`
+   file and for export/report payloads; the formats are documented as the API.
+9. **Stability policy.** Field additions are non-breaking; a removal or rename
+   bumps the verb's `schema` number, mirroring the project-file discipline.
+
+snake_case field names and dot-decimal floats (`LC_NUMERIC` pinned to `C`) are
+the authoritative as-built details recorded in `cli-report.md`.
 
 ### 14.3 MCP
 
@@ -1620,7 +1729,8 @@ Not part of v1:
 
 - stable IDs;
 - typed operations;
-- transactions;
+- per-operation label templates + argument schema (palette-ready registry, §6);
+- transactions with committed author identity (`human` / `agent(<id>)`, §7);
 - revisions;
 - semantic Undo/Redo;
 - tests against snapshot oracle.
@@ -1808,19 +1918,45 @@ Version of the external atlas representation, such as PixiJS 1.3 or 1.4. A
 single format package represents one logical format family and may support
 multiple import/export data versions and compatibility profiles.
 
-When creating an export target, the user selects a concrete supported data
-version and optional profile. The project stores:
+Export targets are declared once at the **project** level (§61.1). When creating
+a target the user selects a concrete supported data version and optional profile.
+Each project target stores:
 
 ```text
-format_id
-data_version
-profile
-options
+target = {
+  id,
+  format_id,
+  data_version,
+  profile,
+  options,
+  enabled,
+  path_template,   # expands {atlas} {page} {scale} {scale_suffix}
+  image_opts,      # v1: PNG (+premultiply per exporter caps)
+  scale_variants   # default [{factor: 1.0, suffix: ""}]
+}
 ```
 
-It does not store package, manifest, or Format API versions. Existing targets do
-not automatically move to a newer data-format version when package support is
-added.
+A target does not store package, manifest, or Format API versions. Existing
+targets do not automatically move to a newer data-format version when package
+support is added.
+
+Per-atlas state is a **participation record**, not a second target editor: for
+each project target an atlas may carry `{ enabled_override?, path_override? }`.
+An atlas's **effective targets** = project target rules composed with its
+participation overrides. Target CRUD is project-scope (`target.*`); a
+participation toggle is the atlas-scope `target.participation.set` operation.
+CLI `--json` schemas, export preflight, and export orchestration always resolve
+effective targets before writing (§50).
+
+`scale_variants` reserves a schema slot only. Each variant would be its own pack
+(sources scaled *before* packing so padding/extrude stay honest), interacting
+with the pack-result LRU; the Defold-first path does not need it, so
+implementation is deferred and schema stability is the point. Non-1.0 variants,
+and the WebP / PNG-quantization `image_opts`, are deferred and not part of v1.
+
+**Migration.** A project file that still carries identical per-atlas targets is
+auto-lifted on load: identical per-atlas targets collapse to one project target
+rule, and any per-atlas divergence becomes a participation override.
 
 A new `format_id` is used for a materially different representation or semantic
 contract, not for every compatible version increment.
@@ -2053,9 +2189,9 @@ extension.
 
 ### 37.1 Target-specific preview and diagnostics
 
-One logical atlas may have several export targets with different capabilities.
-The project retains the richest shared model; each target computes its own
-effective pack and diagnostics.
+A logical atlas participates in several project-level export targets with
+different capabilities (§31, §61.1). The project retains the richest shared model;
+each effective target computes its own effective pack and diagnostics.
 
 GUI displays target-specific status when a target is selected and as a summary
 badge in the target list. Export preflight and the final structured report repeat
@@ -2069,6 +2205,24 @@ Examples:
 
 These conditions do not prohibit export. A blocking error is reserved for a
 case where a valid declared output cannot be produced.
+
+### 37.2 Delivery modes
+
+Export orchestration first resolves each atlas's effective targets (project
+target rules composed with per-atlas participation, §31) and then delivers the
+same staged output in one of two modes:
+
+- **directory** (default): each effective target writes to its resolved
+  `path_template` location.
+- **archive**: the staged output lands in one ZIP with a canonical
+  `{atlas}/{target}/...` layout (per-target path templates are ignored) plus a
+  versioned `manifest.json` (schema tag, tool version, project name, timestamp,
+  and the file list with sizes/hashes). CLI: `ntpacker export --archive out.zip`.
+
+Because staging is already atomic, archive mode reuses it; export scope and
+dry-run behave identically in both modes. `Package project` -- handing an
+editable project (project file plus sources, paths rewritten relative) to another
+person -- is a distinct future command, not a result archive.
 
 ## 38. Atlas import scope
 
@@ -2707,6 +2861,10 @@ Built-in packages run through the same descriptor-level tests.
 - immutable Export IR;
 - exact capabilities;
 - target stores concrete data-format version/profile;
+- targets are declared at project scope; each atlas carries a participation
+  record, and orchestration resolves effective targets before writing (§31, §61.1);
+- directory and `--archive` delivery, the latter with versioned `manifest.json`
+  (§37.2);
 - deterministic artifacts for the current toolchain;
 - multi-file output;
 - target-specific adaptations and metadata losses shown before export and in
@@ -2782,7 +2940,10 @@ Built-in packages run through the same descriptor-level tests.
 - directory discovery;
 - `.ntformat`;
 - versions/origins;
-- signatures.
+- signatures;
+- project-level targets + per-atlas participation; export orchestration resolves
+  effective targets (project rules composed with participation), directory and
+  `--archive` delivery with versioned `manifest.json` (§31, §37.2).
 
 ### B3 — Lua
 
@@ -2855,6 +3016,8 @@ Architecture is fixed as:
 
 - memory-only compressed Pack-result LRU;
 - separate lazy thumbnail CPU/GPU LRU;
+- pack-result page thumbnails (mip or cached downscale) served to the Project
+  overview at 30-atlas / 5000-sprite scale without full-resolution page residency;
 - no general persistent full-resolution decoded-source cache in v1;
 - selected full source preview on demand;
 - temporary Pack input memory governed by the engine-builder ownership contract.
@@ -2933,6 +3096,13 @@ Deliver vertical slices with tests and user-visible outputs.
 
 ### 53.5 GUI priority
 
+**Owner priority override (2026-07-20):** with no users yet, code order is
+optimized for low rework, not demo value. The canvas/workspace UI refactor is now
+a first-class phase U (see §54.6 and §61), sequenced before both epics. This
+supersedes "GUI visual polish is secondary" and "avoid unrelated GUI redesign"
+below for the canvas/workspace surfaces; cosmetic polish as a standalone goal and
+a full GUI rewrite remain non-priorities.
+
 GUI visual polish is secondary, but minimal GUI hooks are still needed:
 
 - linked source display;
@@ -3009,6 +3179,39 @@ This creates a marketable interoperability workflow without requiring Lua or MCP
 - template runtime refinement;
 - GUI refinements.
 
+### 54.6 Execution-order revision (2026-07-20 owner override)
+
+The Phase 0-5 decomposition above remains the historical work breakdown. With no
+users yet, the owner re-sequenced delivery to minimize rework. The revised spine
+is:
+
+```text
+Base (H0 + F2 + F3) -> Phase U -> Epic B (B0 -> B1 -> B2 -> B3) -> Epic A -> Breadth
+```
+
+- **Base** is the shared engineering foundation: H0 (fallible builder
+  containment, decision 0018), F2 (typed operations, transactions, minimum
+  journal), and F3 (live session, semantic history, pack-result behavior).
+  M0-M5 are already done.
+- **Phase U** is the canvas/workspace UI refactor (§61) -- promoted to a
+  first-class phase and built *once*, before either epic.
+- **Rationale:** both epics are GUI-heavy, and their core is a thin adapter over
+  owned snapshots; building the canvas once on top of the finished Base avoids
+  reworking it twice. This is why the UI refactor precedes the epics rather than
+  trailing them.
+- **B before A is preserved:** Epic A sits on Epic B's package runtime, so B
+  ships first.
+- **F3 prerequisite relaxed** from `{F2, B1, H0}` to `{F2, H0}`. The "Extract
+  Sprites composes with History" concern that motivated the old B1 dependency
+  moves to B1's own gate; F3 no longer waits on B1.
+- **B0 (pure-core import, no GUI) may run in parallel with Phase U**, since it
+  touches no canvas surface.
+
+This is a re-sequencing plus targeted additions, not a reduction of the target
+architecture: every Part II AI/Dev-API/MCP contract and the Part III
+format-package/target/Export-IR design survive unchanged, and determinism remains
+a core property with no dedicated UI.
+
 ## 55. Product positioning after both epics
 
 A concise positioning statement:
@@ -3045,6 +3248,11 @@ The consolidated plan does not require:
 - immediate support for dozens of formats;
 - external native DLL plugins or a plugin marketplace.
 
+Clarifier (2026-07-20): "replacing the current GUI" stays a non-goal. Evolving the
+canvas/workspace surfaces *within* the current GUI stack (phase U, §61) is in
+scope; a from-scratch GUI replacement is not. Rejected canvas/UX directions are
+listed in §61.4.
+
 ---
 
 ## 57. Definition of success
@@ -3076,6 +3284,20 @@ Implementation should additionally remain grounded in:
 - per-format specifications;
 - operation schemas;
 - executable acceptance tests.
+
+The 2026-07-13 UX consolidation adds these companion documents (their normative
+canvas/workspace content is folded into §61):
+
+- [`design/ux-vision-2026-07-13.md`](design/ux-vision-2026-07-13.md) -- vision and
+  rationale;
+- [`design/ux-master-spec-delta-2026-07-13.md`](design/ux-master-spec-delta-2026-07-13.md)
+  -- schema/contract basis, consolidated into §61;
+- [`plans/ux-epics-2026-07-13.md`](plans/ux-epics-2026-07-13.md) -- execution
+  breakdown;
+- [`design/mockups/ntpacker-fakeshots.html`](design/mockups/ntpacker-fakeshots.html)
+  -- visual reference;
+- [`design/ux.md`](design/ux.md) -- living interaction contract (normative source
+  is §61).
 
 Old draft files remain useful only as research history.
 
@@ -3157,8 +3379,13 @@ reopened.
     compatibility layer is required.
 39. One package represents a logical format family and may support several
     external data-format versions and compatibility profiles.
-40. Project export targets store `format_id`, concrete `data_version`, optional
-    profile, and options; they do not store package/API/manifest versions.
+40. Export targets are declared at **project** level and store `format_id`,
+    concrete `data_version`, optional profile, options, `enabled`,
+    `path_template`, `image_opts`, and a reserved `scale_variants` slot; they do
+    not store package/API/manifest versions. Each atlas holds a per-target
+    participation record (`enabled_override?`, `path_override?`); an atlas's
+    effective targets = project rules composed with participation. Identical
+    legacy per-atlas targets auto-lift to one project rule on load (§31, §61.1).
 41. Package version is not pinned in project; reports record the used toolchain.
 42. Probe/signature results are suggestions. Exact unique identity may preselect,
     but users can always change the importer.
@@ -3209,7 +3436,151 @@ settled:
    the process fails during final staged-file publication.
 6. **Color-management profile.** Exact deterministic ICC/gamma/orientation
    normalization rules for all supported raster decoders.
+7. **Note style tokens.** The fixed swatch-palette color tokens (10-12) and the
+   exact note-style schema field names (§61.2).
+8. **Workspace schema field names.** The `workspace` section field names -- board
+   positions and note records (§61.2).
+9. **App-state file location.** The per-platform location of the view-state /
+   app-state file that lives outside the project (§61.3).
+10. **Path-template grammar.** The exact template grammar and escaping for
+    `{atlas}`, `{page}`, `{scale}`, and `{scale_suffix}` (§31, §61.1).
+
+Deferred, not open: non-1.0 scale-variant image options (WebP, PNG quantization)
+and arbitrary (non-token) note colors are settled as out of v1 (§31, §61.2), not
+awaiting a decision.
 
 These are open contracts, not missing product direction. They should be closed by
 focused prototypes, fixtures, and acceptance tests before the corresponding API
 is released.
+
+---
+
+## 61. Canvas UI, workspace, and interaction model (2026-07-13 UX consolidation)
+
+This section is the normative home for the canvas/workspace contracts settled in
+the 2026-07-13 UX session (consolidated from
+[`design/ux-master-spec-delta-2026-07-13.md`](design/ux-master-spec-delta-2026-07-13.md)).
+Full interaction detail lives in [`design/ux.md`](design/ux.md); where the two
+overlap, this section governs.
+
+### 61.1 Two-level canvas and unified project tree
+
+**Two canvas levels.** The workspace has exactly two canvas levels, Project and
+Atlas, and no third "page" level:
+
+- **Project level** shows every atlas as a group-card: name, health badges
+  (fill % / outdated / not packed / warning), a visibility eye, and the last
+  pack's page thumbnails inside the card. Pages of different atlases never mix in
+  one flow; only whole atlas cards are neighbors, and a very large atlas shows the
+  first N pages plus a "+N pages" tile. Batch actions ("Pack stale (N)",
+  "Export all") live here.
+- **Atlas level** is the working level: all of one atlas's pages are laid out
+  spatially at once. Page tabs are removed; double-clicking a page zooms the
+  camera to it (a camera move, not a mode change), down to texels. Sprites are
+  selectable directly at this level with the usual tree/inspector synchronization.
+
+Breadcrumbs (`Project > <atlas>`) ascend; double-clicking a Project group-card
+descends. A single continuous canvas and a third page level are rejected (§61.4).
+
+**Unified project tree.** The left panel is one project tree with a clickable
+**project root node**; selecting the root shows project settings and export rules
+in the inspector (the project is a tangible object, not a hidden mode). The tree
+is root -> atlases -> folders/sprites -> a per-atlas Animations node, replacing the
+separate ATLASES / SPRITES / ANIMATIONS sections. A project-wide filter (Ctrl+F)
+matches anywhere and shows hits under their atlases. Cross-atlas drag works in the
+tree; pages are packer output and are never drag targets.
+
+**Sorting is view state, not data.** Four keys -- name (default), size (packed
+area), file `mtime` (read live), and `added_at` -- each with two directions
+(re-clicking the active key flips it), plus an independent "warning on top"
+checkbox that overlays any sort. A key applies within each tree level. Atlas order
+in the project and animation frame order stay manual (undoable operations);
+filesystem-derived folder/file order mirrors disk and is never manually reordered.
+
+**Thumbnails are the default.** Sprite rows and atlas rows always show previews
+from the async thumbnail cache; hovering shows a large 1:1 preview. The sprite
+area additionally has list and grid display modes (a header toggle, view state).
+The atlas "cards view" is the Project canvas level, not a panel mode. Overview
+thumbnails are served from the pack-result store without full-resolution
+residency (§10.4, §52.3).
+
+**Export UX.** Export rules are edited only at the project root; the atlas
+inspector shows a compact participation block (per-target enable plus optional path
+override, §31). Ctrl+E opens preflight only -- it never edits targets: scope is the
+current selection (nothing selected at Project level = all), and it shows a dry-run
+file list, amber overwrites, degradation notices, a "Copy CLI command" action, and
+an optional "Export as ZIP" (§37.2). Repeat-last-export is Ctrl+E then Enter.
+
+**Scale calibration.** UX performance budgets are validated against a
+30-atlas / 5000-sprite bench fixture (the owner's real scale): sub-100 ms
+interactions, non-blocking refresh, virtualized lists, and a bounded thumbnail
+cache.
+
+### 61.2 Workspace schema: board positions and notes
+
+The project file gains a `workspace` section holding board positions and text
+objects. It is freeform with **no auto-reflow**.
+
+**Board positions.** Every atlas board has a stored position on the Project
+canvas, auto-assigned to free space when the atlas is created. The tool never
+moves boards on its own: hiding an atlas leaves its spot empty (no compaction; an
+"N hidden" chip restores it), board growth after Pack wraps pages inside the board
+(huge atlases show a "+N pages" tile) and never pushes neighbors, and shrinking
+leaves the space. Collisions render as legal overlap (z-order, last-touched on
+top) and are non-semantic: dropping an atlas onto an atlas changes no data.
+"Move atlas" (`atlas.board.move`) is a named undoable operation; "Tidy up"
+(`workspace.tidy`) is the only tool-initiated movement and is user-invoked.
+
+**Notes (text objects).** A note is an ordinary model object -- a typed operation
+with a named history entry ("Add note ... on enemies"), undoable -- not a drawing.
+It is content + parent + **per-object style** (no mixed-run rich text in v1):
+`{ size: S|M|L|XL, bold, italic, text_color: token, bg_color: token|none, align }`,
+where color tokens come from a fixed swatch palette (10-12); `bg=none` renders as a
+plain label, a background renders as a sticker. Parenting is spatial and automatic
+(one object type, no "kind" choice at creation): a note dropped on an atlas board
+is parented to that atlas (board-relative coordinates; it moves with the board,
+hides with the atlas eye, and is deleted with the atlas -- the delete confirmation
+states "and N notes", undo restores); a note dropped on empty canvas is parented to
+the project (absolute coordinates). Re-parenting is a drag between board and canvas
+(`note.reparent`). In v1 notes live on the Project level only (there is no stable
+anchor inside a regenerated atlas pack).
+
+Notes are visible everywhere a model object is: in the tree (attached notes as a
+collapsed "Notes (N)" group inside their atlas, free notes as a "Notes" group under
+the project root after the atlases; click zooms the canvas to the note), in the
+inspector (editable), in the project-wide filter (Ctrl+F searches note text), and
+over MCP / Dev API (content plus tokens are agent-filterable). The canvas has a
+"show notes" overlay toggle (view state, like the pivot/outline toggles); there is
+no separate notes mode. Notes are written only on explicit user action, so they
+never churn VCS.
+
+Deferred, not rejected: arbitrary (non-token) note color (needs an `nt_ui`
+color-picker widget) and mixed-run rich text. Recorded future idea, not planned:
+sprite-attached notes (a badge on a model object, not a canvas object -- pack
+regeneration gives a sprite no stable canvas anchor). A freeform drawing layer
+(arrows/rectangles/free draw) is out of scope on the far horizon.
+
+### 61.3 View-state vs app-state boundary
+
+Window geometry, recent projects, panel view modes (list/grid), sort keys, and the
+canvas level/camera are **view state**: they live in an app-level settings file
+**outside** the project. They never enter the project file, never dirty it, and
+never enter version control. The `workspace` section (§61.2) is the deliberate
+exception -- board positions, notes, and atlas `visible` are model state that
+belongs to the project and is undoable. The per-platform location of the app-state
+file is a non-normative detail (§60).
+
+### 61.4 Rejected canvas/UX directions
+
+The following were considered and explicitly rejected in the 2026-07-13 session;
+do not resurrect them without owner sign-off:
+
+- Auto-pack on edit; an animation timeline editor (flipbook only).
+- Canvas modes "Pack Explain" / "Pack Diff" and a "why here" card. Determinism
+  stays a core property (byte-identical output for identical inputs) with **no
+  dedicated UI**.
+- Per-action AI confirmations (permission is connection-level, §23).
+- Manual reordering of filesystem-derived rows (a smart folder mirrors disk).
+- Continuously-updated per-asset timestamps in the project file (§5.5).
+- Editing export targets inside the Ctrl+E modal (preflight is read-only, §61.1).
+- A single continuous canvas, and a third "page" canvas level (§61.1).

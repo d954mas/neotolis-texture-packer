@@ -27,9 +27,11 @@ implementation-policy выборы). Формат: контекст, решен�
 | [0010](0010-f2-01-typed-operation-engine.md) | F2-01 implementation history: typed operation engine | historical |
 | [0011](0011-f2-02-transactions-revision-dirty.md) | F2-02 implementation history: transactions, revision and dirty state | historical |
 | [0012](0012-f2-03-semantic-diff-inverse.md) | F2-03 implementation history: semantic diff and snapshot oracle | historical |
-| [0013](0013-f2-04-recovery-journal.md) | F2-04 implementation history: recovery journal | historical |
+| [0013](0013-f2-04-recovery-journal.md) | F2-04 implementation history: recovery journal | historical; partially superseded by 0019 |
 | [0014](0014-f2-05a-cli-transaction-cutover.md) | F2-05a implementation history: CLI transaction routing | historical |
-| [0015](0015-f2-05b-gui-transaction-journal-cutover.md) | F2-05b implementation history: GUI/session cutover | historical |
+| [0015](0015-f2-05b-gui-transaction-journal-cutover.md) | F2-05b implementation history: GUI/session cutover | historical; partially superseded by 0019 |
 | [0016](0016-canonical-project-schema-v5.md) | Только canonical project schema v5; legacy migrations и pending project states удалены | accepted |
 | [0017](0017-durable-project-save-publication.md) | Durable sibling-temp project Save; post-publication uncertainty is a structured success notice | accepted |
 | [0018](0018-fallible-builder-containment.md) | Private worker contains aborting/narrow-path engine builder until a fallible sink API exists | accepted |
+| [0019](0019-best-effort-recovery-journal.md) | Recovery journal is best-effort and commit-independent; append/sync failure never rejects a transaction, it enters sticky degraded state | accepted |
+| [0020](0020-canvas-ui-first-class-phase.md) | Canvas UI/UX refactor becomes first-class phase U, sequenced before Epic B/Epic A | accepted |

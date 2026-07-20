@@ -22,7 +22,8 @@ oracle, [6] REMOVE делегирован публичным функциям, [
 
 ## Область: что F2-03 РЕАЛЬНО поставляет (groundwork) vs что переносится
 
-Урок F1-03 / F2-01 / F2-02 (decisions 0009/0010/0011): границу фиксируем ЧЕСТНО, без overclaim.
+Урок F1-03 (decision 0009, superseded and removed by 0016) / F2-01 / F2-02 (decisions
+0010/0011): границу фиксируем ЧЕСТНО, без overclaim.
 
 **F2-03 РЕАЛЬНО поставляет (core-tested groundwork):**
 - **Компактный per-op semantic diff** committed-транзакции: per-op before/after ДАННЫЕ +

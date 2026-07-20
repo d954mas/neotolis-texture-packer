@@ -14,7 +14,8 @@ Master spec §4.1–4.2, §6–6.2, §7, §54 Phase-0 item 4. Plan F2-01.
 
 ## Область: что F2-01 РЕАЛЬНО поставляет (groundwork) vs что переносится в F2-05/F2-02
 
-Урок F1-03 (decision 0009 переоценил «фронтенд подключён»): фиксируем границу ЧЕСТНО.
+Урок F1-03 (decision 0009, superseded and removed by 0016, переоценил «фронтенд
+подключён»): фиксируем границу ЧЕСТНО.
 
 **F2-01 РЕАЛЬНО поставляет (core-tested groundwork):**
 - `tp_operation` — typed tagged union: append-only каталог из 20 op-kind → CLI verb +
@@ -62,7 +63,8 @@ Apply НЕ штампует `{source_ref, src_key}` на запись override: 
 нему — РОВНО как `cli_mutate.c` сегодня, оставляя запись в форме PENDING. Это сохраняет
 байт-идентичность с CLI (parity-тест `test_parity_sprite_override`). Штамповка
 канонической идентичности на запись — это ленивый v3→v4 re-key
-(`tp_project_resolve_atlas_sprites`, decision 0009 §2), НЕ дублируется здесь.
+(`tp_project_resolve_atlas_sprites`, decision 0009 §2 — superseded and removed by 0016),
+НЕ дублируется здесь.
 Итог: **операция id/key-адресована канонически, storage-представление не изменено**.
 Frame references несут name-bridge (pending), идентично модели и CLI.
 
