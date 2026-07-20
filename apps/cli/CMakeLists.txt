@@ -80,6 +80,7 @@ target_compile_definitions(cli_durability_payload_fixture PRIVATE
     _CRT_SECURE_NO_WARNINGS)
 target_compile_options(cli_durability_payload_fixture PRIVATE -U_DLL)
 nt_set_warning_flags(cli_durability_payload_fixture)
+nt_set_sanitizer_flags(cli_durability_payload_fixture)
 
 # Deterministic adapter fixture for the typed pre-publication Save error.
 add_executable(cli_file_io_payload_fixture
@@ -89,6 +90,7 @@ target_compile_definitions(cli_file_io_payload_fixture PRIVATE
     _CRT_SECURE_NO_WARNINGS)
 target_compile_options(cli_file_io_payload_fixture PRIVATE -U_DLL)
 nt_set_warning_flags(cli_file_io_payload_fixture)
+nt_set_sanitizer_flags(cli_file_io_payload_fixture)
 
 add_executable(cli_exit_contract_test test_cli_exit.c cli_exit.c)
 target_link_libraries(cli_exit_contract_test PRIVATE tp_core)

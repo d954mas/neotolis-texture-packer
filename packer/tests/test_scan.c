@@ -581,8 +581,14 @@ void test_posix_directory_iterator_rejects_invalid_utf8_entry_atomically(void) {
     char invalid_entry[900];
     (void)snprintf(invalid_entry, sizeof invalid_entry,
                    "%s/raw-bad-\xC3\x28.png", g_root);
+    errno = 0;
     int fd = open(invalid_entry, O_CREAT | O_TRUNC | O_WRONLY, 0600);
-    TEST_ASSERT_TRUE(fd >= 0);
+    if (fd < 0 && errno == EILSEQ) {
+        TEST_IGNORE_MESSAGE(
+            "filesystem rejects invalid UTF-8 filenames before enumeration");
+    }
+    TEST_ASSERT_TRUE_MESSAGE(
+        fd >= 0, "invalid UTF-8 fixture creation failed unexpectedly");
     TEST_ASSERT_EQUAL_INT(0, close(fd));
 
     tp_scan_result result = {0};

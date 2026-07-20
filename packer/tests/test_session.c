@@ -1600,9 +1600,13 @@ void test_source_plan_propagates_stored_base_overflow(void) {
 
     char long_base[TP_IDENTITY_PATH_MAX];
     memset(long_base, 'a', sizeof long_base);
+#ifdef _WIN32
     long_base[0] = 'C';
     long_base[1] = ':';
     long_base[2] = '/';
+#else
+    long_base[0] = '/';
+#endif
     long_base[sizeof long_base - 1U] = '\0';
     project->source_base_dir = test_dup(long_base);
 
