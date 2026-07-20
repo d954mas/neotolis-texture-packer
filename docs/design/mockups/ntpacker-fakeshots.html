@@ -1,0 +1,868 @@
+<title>ntpacker — UX фейкшоты</title>
+<style>
+  /* ---------- page chrome (theme-aware) ---------- */
+  :root{
+    --pg-bg:#f4f5f8; --pg-fg:#23262e; --pg-dim:#6b7283; --pg-card:#ffffff;
+    --pg-line:#dcdfe8; --pg-acc:#3d8bd4;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --pg-bg:#14151a; --pg-fg:#d6dae4; --pg-dim:#8b91a0; --pg-card:#1c1e26; --pg-line:#2c2f3a; }
+  }
+  :root[data-theme="dark"]{ --pg-bg:#14151a; --pg-fg:#d6dae4; --pg-dim:#8b91a0; --pg-card:#1c1e26; --pg-line:#2c2f3a; }
+  :root[data-theme="light"]{ --pg-bg:#f4f5f8; --pg-fg:#23262e; --pg-dim:#6b7283; --pg-card:#ffffff; --pg-line:#dcdfe8; }
+
+  body{ background:var(--pg-bg); color:var(--pg-fg);
+    font:15px/1.55 -apple-system,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;
+    margin:0; padding:0 0 64px; }
+  .wrap{ max-width:1280px; margin:0 auto; padding:0 20px; }
+  header.page{ padding:28px 0 10px; }
+  header.page h1{ font-size:21px; font-weight:650; margin:0; letter-spacing:.1px; }
+  header.page p{ margin:6px 0 0; color:var(--pg-dim); font-size:14px; max-width:72ch; }
+  header.page code{ font:12.5px/1 "Cascadia Code",Consolas,monospace; }
+
+  nav.tabs{ display:flex; flex-wrap:wrap; gap:6px; margin:16px 0 14px; }
+  nav.tabs button{ font:600 13px/1 -apple-system,"Segoe UI",Roboto,sans-serif;
+    color:var(--pg-dim); background:var(--pg-card); border:1px solid var(--pg-line);
+    border-radius:7px; padding:9px 13px; cursor:pointer; }
+  nav.tabs button:hover{ color:var(--pg-fg); }
+  nav.tabs button.on{ color:#fff; background:var(--pg-acc); border-color:var(--pg-acc); }
+  nav.tabs button:focus-visible{ outline:2px solid var(--pg-acc); outline-offset:2px; }
+  .bar{ display:flex; align-items:center; justify-content:space-between; gap:12px; }
+  .toggle{ font-size:13px; color:var(--pg-dim); display:flex; align-items:center; gap:7px;
+    cursor:pointer; user-select:none; white-space:nowrap; }
+  .toggle input{ accent-color:var(--pg-acc); }
+
+  .stage-wrap{ position:relative; border:1px solid var(--pg-line); border-radius:10px;
+    overflow:hidden; background:#111217; box-shadow:0 8px 28px rgba(0,0,0,.18); }
+  .stage{ width:1440px; height:860px; transform-origin:0 0; position:relative; }
+
+  section.notes{ margin:16px 0 8px; }
+  section.notes h2{ font-size:15px; font-weight:650; margin:0 0 8px; }
+  .note-list{ display:grid; grid-template-columns:repeat(auto-fill,minmax(340px,1fr));
+    gap:8px 18px; margin:0; padding:0; list-style:none; }
+  .note-list li{ display:flex; gap:10px; font-size:13.5px; color:var(--pg-fg); }
+  .note-list li em{ color:var(--pg-dim); font-style:normal; }
+  .nbadge{ flex:0 0 auto; width:20px; height:20px; border-radius:50%; background:var(--pg-acc);
+    color:#fff; font:700 11px/20px "Segoe UI",sans-serif; text-align:center; margin-top:1px; }
+
+  /* ---------- fakeshot tokens (deliberately single-theme: the product is a dark tool) ---------- */
+  .stage{
+    --bg:#111217; --canvas:#0b0c0f; --panel:#1c1f28; --hdr:#272c38; --input:#14161d;
+    --hover:#2e3442; --sel:#2f4a78; --border:#333a48; --bstrong:#5684cc;
+    --acc:#3d8bd4; --warn:#e49e5c; --ok:#67ba7c; --err:#d66060; --ai:#8b7bd8;
+    --t1:#e8ecf4; --t2:#c4ccd8; --t3:#8c94a4; --t4:#5e6474;
+    font:13px/1.45 -apple-system,"Segoe UI",Roboto,sans-serif; color:var(--t2);
+    background:var(--bg);
+    --mono:"Cascadia Code",Consolas,monospace;
+  }
+  .stage *{ box-sizing:border-box; }
+  .stage .mono{ font-family:var(--mono); font-size:12px; }
+
+  /* menubar */
+  .mbar{ height:34px; display:flex; align-items:center; padding:0 12px; gap:2px;
+    border-bottom:1px solid var(--border); background:var(--bg); }
+  .mbar .mi{ padding:5px 10px; border-radius:5px; color:var(--t2); }
+  .mbar .mi:hover{ background:var(--hover); }
+  .mbar .sp{ flex:1; }
+  .mbar .proj{ color:var(--t3); font-size:12.5px; }
+  .mbar .dot{ color:var(--warn); }
+
+  .cols{ display:flex; height:calc(860px - 34px); }
+
+  /* left panel */
+  .lp{ width:300px; background:var(--panel); border-right:1px solid var(--border);
+    display:flex; flex-direction:column; overflow:hidden; }
+  .filter{ margin:8px; height:28px; background:var(--input); border:1px solid var(--border);
+    border-radius:6px; display:flex; align-items:center; gap:7px; padding:0 9px; color:var(--t4); }
+  .filter svg{ flex:0 0 auto; }
+  .filter kbd{ margin-left:auto; }
+  .sect{ display:flex; align-items:center; gap:7px; height:26px; padding:0 10px;
+    background:var(--hdr); border-left:3px solid var(--acc); color:var(--t3);
+    font:600 11px/1 "Segoe UI",sans-serif; letter-spacing:.09em; }
+  .sect .cnt{ color:var(--t4); font-weight:500; }
+  .sect .act{ margin-left:auto; color:var(--t3); font-weight:500; letter-spacing:0; font-size:11.5px; }
+  .sect .act:hover{ color:var(--t1); }
+  .rows{ padding:4px 0; overflow:hidden; }
+  .row{ display:flex; align-items:center; gap:8px; height:27px; padding:0 10px 0 14px; color:var(--t2); }
+  .row:hover{ background:var(--hover); }
+  .row.sel{ background:var(--sel); color:var(--t1); }
+  .row.multi{ background:rgba(47,74,120,.55); color:var(--t1); }
+  .row .ic{ flex:0 0 auto; display:flex; width:15px; justify-content:center; }
+  .row .ic.thumb{ width:20px; height:20px; align-items:center; justify-content:center;
+    background:repeating-conic-gradient(#22252d 0% 25%, #1a1d24 0% 50%) 0 0/8px 8px;
+    border-radius:3px; overflow:hidden; }
+  .row .ic.thumb img{ max-width:20px; max-height:20px; display:block; }
+  .sgrid{ display:grid; grid-template-columns:repeat(3,1fr); gap:6px; padding:6px 10px; }
+  .scard{ position:relative; border-radius:6px; padding:6px 4px 4px; background:var(--input);
+    display:flex; flex-direction:column; align-items:center; gap:4px; }
+  .scard.sel{ background:var(--sel); }
+  .scard .th{ width:56px; height:56px; display:flex; align-items:center; justify-content:center;
+    background:repeating-conic-gradient(#22252d 0% 25%, #1a1d24 0% 50%) 0 0/10px 10px; border-radius:4px; }
+  .scard .th img{ max-width:52px; max-height:52px; }
+  .scard .cn{ font-size:10.5px; color:var(--t3); max-width:82px; overflow:hidden;
+    text-overflow:ellipsis; white-space:nowrap; }
+  .scard.sel .cn{ color:var(--t1); }
+  .agroup{ position:absolute; background:rgba(28,31,40,.55); border:1px solid var(--border);
+    border-radius:10px; padding:10px; }
+  .agroup.sel{ box-shadow:0 0 0 2px var(--acc); }
+  .agroup .gh{ display:flex; align-items:center; gap:7px; padding:0 2px 8px;
+    color:var(--t2); font-weight:600; font-size:12.5px; }
+  .agroup .gh .aux{ margin-left:auto; display:flex; gap:6px; align-items:center;
+    color:var(--t4); font-weight:400; font-size:11.5px; }
+  .agroup .gpages{ display:flex; gap:8px; }
+  .gpage{ position:relative; width:150px; height:150px; border-radius:4px;
+    background:repeating-conic-gradient(#1a1d23 0% 25%, #14161b 0% 50%) 0 0/14px 14px;
+    box-shadow:0 0 0 1px var(--border); overflow:hidden; }
+  .gpage.big{ width:300px; height:300px; }
+  .gpage.sel{ box-shadow:0 0 0 2px var(--acc); }
+  .gpage .pfill{ position:absolute; right:5px; bottom:5px; font:600 10px/1 "Segoe UI",sans-serif;
+    padding:3px 5px; border-radius:4px; background:rgba(0,0,0,.55); color:var(--t2); }
+  .row .nm{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .row .aux{ margin-left:auto; color:var(--t4); font-size:11.5px; display:flex; gap:6px; align-items:center; }
+  .row .chev{ width:12px; flex:0 0 auto; color:var(--t3); text-align:center; }
+  .row.indent{ padding-left:30px; }
+  .row.indent2{ padding-left:46px; }
+  .row.dim{ opacity:.45; }
+  .sgrid.ind{ padding-left:44px; }
+  .badge{ font:600 10px/1 "Segoe UI",sans-serif; padding:2.5px 5px; border-radius:4px; }
+  .badge.warn{ background:rgba(228,158,92,.16); color:var(--warn); }
+  .badge.alias{ background:rgba(139,123,216,.16); color:var(--ai); }
+
+  /* center */
+  .cc{ flex:1; display:flex; flex-direction:column; background:var(--canvas); min-width:0; }
+  .strip{ height:40px; display:flex; align-items:center; gap:6px; padding:0 10px;
+    background:var(--bg); border-bottom:1px solid var(--border); }
+  .btn{ display:inline-flex; align-items:center; gap:7px; height:28px; padding:0 12px;
+    border-radius:6px; background:#262b37; color:var(--t2); border:1px solid transparent; }
+  .btn:hover{ background:var(--hover); }
+  .btn.primary{ background:var(--acc); color:#fff; font-weight:600; }
+  .btn.ghost{ background:transparent; color:var(--t3); padding:0 8px; }
+  .btn.ghost:hover{ background:var(--hover); color:var(--t1); }
+  .btn kbd{ opacity:.75; }
+  kbd{ font:600 10.5px/1 var(--mono); background:rgba(255,255,255,.07); color:var(--t3);
+    padding:2.5px 5px; border-radius:4px; border:1px solid rgba(255,255,255,.09); }
+  .vsep{ width:1px; height:20px; background:var(--border); margin:0 4px; }
+  .seg{ display:flex; background:var(--input); border:1px solid var(--border); border-radius:6px; overflow:hidden; }
+  .seg .sg{ padding:5px 11px; color:var(--t3); font-weight:600; font-size:12px; }
+  .seg .sg.on{ background:var(--sel); color:var(--t1); }
+  .pagetabs{ display:flex; gap:4px; }
+  .pagetabs .pt{ min-width:26px; height:26px; border-radius:6px; display:flex; align-items:center;
+    justify-content:center; color:var(--t3); background:transparent; font-weight:600; }
+  .pagetabs .pt.on{ background:var(--sel); color:var(--t1); }
+
+  .cbody{ flex:1; position:relative; overflow:hidden;
+    background:repeating-conic-gradient(#131519 0% 25%, #0e1013 0% 50%) 0 0/18px 18px; }
+  .page-area{ position:absolute; background:repeating-conic-gradient(#1a1d23 0% 25%, #14161b 0% 50%) 0 0/16px 16px;
+    box-shadow:0 0 0 1px var(--border), 0 10px 40px rgba(0,0,0,.5); }
+  .spr{ position:absolute; }
+  .spr img{ display:block; width:100%; height:100%; image-rendering:auto; }
+  .spr svg.hull{ position:absolute; inset:-2px; width:calc(100% + 4px); height:calc(100% + 4px);
+    overflow:visible; pointer-events:none; }
+
+  .statusbar{ height:26px; display:flex; align-items:center; gap:0; padding:0 6px;
+    background:var(--bg); border-top:1px solid var(--border); color:var(--t3); font-size:12px; }
+  .statusbar .st{ padding:3px 9px; border-radius:5px; display:flex; gap:6px; align-items:center; }
+  .statusbar .st:hover{ background:var(--hover); color:var(--t1); }
+  .statusbar .sp{ flex:1; }
+  .statusbar .hint{ color:var(--t4); }
+
+  .problems{ background:var(--bg); border-top:1px solid var(--border); }
+  .problems .phead{ height:28px; display:flex; align-items:center; gap:8px; padding:0 12px; color:var(--t3); }
+  .problems .phead b{ color:var(--warn); font-weight:600; }
+  .prow{ display:flex; align-items:center; gap:9px; height:27px; padding:0 14px; }
+  .prow:hover{ background:var(--hover); }
+  .prow .fix{ margin-left:auto; display:flex; gap:6px; }
+  .prow .fix .btn{ height:21px; padding:0 8px; font-size:11.5px; }
+
+  /* right panel */
+  .rp{ width:300px; background:var(--panel); border-left:1px solid var(--border);
+    display:flex; flex-direction:column; overflow:hidden; }
+  .prop{ display:flex; align-items:center; height:27px; padding:0 10px 0 12px; position:relative; }
+  .prop .lbl{ width:112px; flex:0 0 auto; color:var(--t3); }
+  .prop .val{ flex:1; display:flex; align-items:center; gap:6px; min-width:0; }
+  .prop .well{ flex:1; height:22px; background:var(--input); border:1px solid var(--border);
+    border-radius:5px; padding:0 8px; display:flex; align-items:center; color:var(--t1);
+    font-family:var(--mono); font-size:12px; min-width:0; }
+  .prop .well.dd::after{ content:"▾"; margin-left:auto; color:var(--t3); font-size:10px; }
+  .prop.mod::before{ content:""; position:absolute; left:2px; top:4px; bottom:4px; width:3px;
+    border-radius:2px; background:var(--acc); }
+  .prop .rev{ color:var(--t3); font-size:13px; }
+  .prop .rev:hover{ color:var(--t1); }
+  .check{ width:15px; height:15px; border-radius:4px; background:var(--acc); color:#fff;
+    font:700 11px/15px sans-serif; text-align:center; }
+  .check.off{ background:var(--input); border:1px solid var(--border); }
+  .modchip{ margin-left:auto; font:600 10.5px/1 "Segoe UI",sans-serif; color:var(--acc);
+    background:rgba(61,140,212,.13); padding:3px 7px; border-radius:4px; letter-spacing:.02em; }
+
+  /* overlays */
+  .scrim{ position:absolute; inset:0; background:rgba(6,7,10,.55); }
+  .palette{ position:absolute; left:50%; top:110px; transform:translateX(-50%); width:640px;
+    background:#191c24; border:1px solid var(--border); border-radius:10px;
+    box-shadow:0 24px 80px rgba(0,0,0,.6); overflow:hidden; }
+  .palette .pin{ display:flex; align-items:center; gap:10px; padding:13px 16px;
+    border-bottom:1px solid var(--border); font-size:15px; color:var(--t1); }
+  .palette .pin .caret{ display:inline-block; width:2px; height:18px; background:var(--acc); }
+  .palette .grp{ padding:7px 16px 4px; font:600 10.5px/1 "Segoe UI",sans-serif;
+    color:var(--t4); letter-spacing:.09em; }
+  .palette .pr{ display:flex; align-items:center; gap:10px; padding:8px 16px; }
+  .palette .pr.on{ background:var(--sel); }
+  .palette .pr .t{ color:var(--t1); }
+  .palette .pr .d{ color:var(--t4); font-size:12px; }
+  .palette .pr kbd{ margin-left:auto; }
+  .palette .pfoot{ display:flex; gap:14px; padding:9px 16px; border-top:1px solid var(--border);
+    color:var(--t4); font-size:11.5px; }
+
+  .modal{ position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); width:660px;
+    background:#191c24; border:1px solid var(--border); border-radius:10px;
+    box-shadow:0 24px 80px rgba(0,0,0,.6); }
+  .modal .mh{ padding:14px 18px 10px; font-size:15px; font-weight:650; color:var(--t1); }
+  .modal .mh .sub{ font:400 12px/1.4 var(--mono); color:var(--t4); margin-top:5px; }
+  .modal .mb{ padding:4px 18px 8px; }
+  .modal .mf{ display:flex; align-items:center; gap:8px; padding:12px 18px 14px;
+    border-top:1px solid var(--border); }
+  .trow{ display:flex; align-items:center; gap:9px; padding:7px 0; }
+  .trow .arrow{ color:var(--t4); }
+  .filelist{ background:var(--input); border:1px solid var(--border); border-radius:7px;
+    padding:9px 12px; margin:8px 0; font-family:var(--mono); font-size:12px; color:var(--t2); }
+  .filelist .fl{ display:flex; gap:8px; padding:2px 0; }
+  .filelist .sz{ margin-left:auto; color:var(--t4); }
+  .notice{ display:flex; gap:8px; align-items:flex-start; padding:7px 10px; border-radius:6px;
+    background:rgba(228,158,92,.1); color:var(--warn); font-size:12.5px; margin:6px 0; }
+
+  .banner{ display:flex; align-items:center; gap:10px; height:34px; padding:0 12px;
+    background:rgba(139,123,216,.1); border-bottom:1px solid rgba(139,123,216,.35); color:var(--t2); }
+  .banner .pulse{ width:8px; height:8px; border-radius:50%; background:var(--ai);
+    box-shadow:0 0 0 3px rgba(139,123,216,.22); animation:pulse 1.6s infinite; }
+  @keyframes pulse{ 50%{ box-shadow:0 0 0 6px rgba(139,123,216,.08); } }
+  @media (prefers-reduced-motion: reduce){ .banner .pulse{ animation:none; } }
+  .who{ font:700 9.5px/1 "Segoe UI",sans-serif; padding:2.5px 5px; border-radius:4px; letter-spacing:.04em; }
+  .who.ai{ background:rgba(139,123,216,.18); color:var(--ai); }
+  .who.me{ background:rgba(61,140,212,.16); color:var(--acc); }
+  .presence{ display:flex; align-items:center; gap:7px; padding:4px 10px; border-radius:6px;
+    background:rgba(139,123,216,.12); border:1px solid rgba(139,123,216,.35); color:var(--t1); font-size:12px; }
+  .presence .pulse{ width:7px; height:7px; border-radius:50%; background:var(--ai);
+    animation:pulse 1.6s infinite; }
+
+  .empty-hero{ position:absolute; inset:0; display:flex; flex-direction:column;
+    align-items:center; justify-content:center; gap:14px; }
+  .dropzone{ width:520px; border:2px dashed #3b4354; border-radius:14px; padding:44px 30px;
+    display:flex; flex-direction:column; align-items:center; gap:12px; background:rgba(28,31,40,.4); }
+  .dropzone .big{ font-size:19px; color:var(--t1); font-weight:600; }
+  .dropzone .dim{ color:var(--t3); }
+  .steps{ display:flex; gap:26px; margin-top:10px; color:var(--t3); font-size:12.5px; }
+  .steps b{ color:var(--t2); font-weight:600; }
+  .steps .kn{ display:inline-flex; width:18px; height:18px; border-radius:50%; background:#262b37;
+    color:var(--t2); font:700 10.5px/18px sans-serif; justify-content:center; margin-right:7px; }
+
+  .card{ background:#191c24; border:1px solid var(--border); border-radius:9px; }
+  .why{ position:absolute; width:280px; padding:11px 13px; font-size:12.5px;
+    box-shadow:0 16px 50px rgba(0,0,0,.55); z-index:4; }
+  .why h4{ margin:0 0 7px; font-size:12.5px; color:var(--t1); display:flex; gap:7px; align-items:center; }
+  .why .kv{ display:flex; gap:8px; padding:2px 0; color:var(--t3); }
+  .why .kv b{ color:var(--t2); font-weight:500; }
+  .legend{ position:absolute; display:flex; gap:12px; padding:8px 12px; font-size:12px; z-index:4; }
+  .legend .li{ display:flex; gap:6px; align-items:center; color:var(--t3); }
+  .legend .sw{ width:10px; height:10px; border-radius:3px; }
+
+  .marker{ position:absolute; z-index:9; width:24px; height:24px; border-radius:50%;
+    background:var(--pg-acc); color:#fff; font:700 12px/24px "Segoe UI",sans-serif; text-align:center;
+    box-shadow:0 0 0 3px rgba(61,140,212,.3), 0 4px 12px rgba(0,0,0,.5); cursor:default; }
+  .stage.no-notes .marker{ display:none; }
+</style>
+
+<header class="page wrap">
+  <h1>ntpacker — UX-фейкшоты будущего интерфейса</h1>
+  <p>Ключевые экраны по vision-документу: скорость до результата, «стеклянный корпус» и человек+агент в одной сессии. Масштаб — инвариант, не режим: те же экраны обслуживают и 60, и 5000 спрайтов. Спрайты — настоящие, из <code>examples/showcase</code>. Разметка токенизирована и пригодна как референс для кодогенерации.</p>
+</header>
+
+<div class="wrap">
+  <div class="bar">
+    <nav class="tabs" id="tabs"></nav>
+    <label class="toggle"><input type="checkbox" id="noteToggle" checked> аннотации</label>
+  </div>
+  <div class="stage-wrap" id="stageWrap"><div class="stage" id="stage"></div></div>
+  <section class="notes" id="notes"></section>
+</div>
+
+<script>
+const SPRITES = {"round/elephant": {"w": 64, "h": 52, "uri": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAAA0CAMAAAANBM47AAAA/1BMVEXS0NC8tbUAAAD+/v7MycnCu7v///80NDTg3t4oKCivra28uLiBfHzu7e27tLS8tbW8tbW8tbX+/v68tbWBfHy7s7POy8vV09Ovra3Nysr+/v7U0tL+/f3W1NT////U0tLV09PAubnAubnAubn9/f3IsrLW1NT/AAD9/PzCu7vS0dHTz8/u7e0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADb6cF8AAAAQHRSTlP+/gD+/v0C////BAz//o/VUa4ucwIvMLL/EdFqixlphtlprZNPBlcBodI+QQwAAAAAAAAAAAAAAAAAAAAAAAAAG6WXFAAAA0xJREFUeNqlludi4jAMgB0jixAHElYohRa6173/853kFdtJW7jTjzZY0mfJQ7KQRlDK7cOyYGkeH7SUFWIlg9hf+uGxMSbG4sWqhHHfyO2TImEt/3/SPKzvus+vr8/uDg0ktdjKlzcPIP1agdFZoR9td9idhZPz7tC1ucVaIloAon6EIhUQoizZF4D/8ndmomCpN8gArKrlQGl9wQbgPuIIzCTLt4oBlVzAiHsuMETAgpxFJdeX+DtKRmhlJVAXKsv+J0kmU4VGkSXwi39GgLUUaQC/+qcE1VSijf2VuEASh1bEGVzknxBgIRp1VQJZEmoZAy70jwmqEf0aqn8BFBHgYv+IQIDm/wBND1DiClEjALgGAP0uLAcACPc4c4rGoT8H/iCp/t5S+YCx+xyN+2up1uEoq2B3U9fFkACiqOubMK7CUd6mGYCoZ7PZ9CYnEHdKitqPg7/PQrtVBD/P1AikBPppx31sDtBQPXAF0Y2X9YztZnWZAvJx8EVNyDYBiKkzzCNwgGkSAdU0IV1F8bnZSINhAFgw59YDVPHCRdXmMBYBADchvmTjEVAGmgBb1W+jW+wZLVZUghmh7LjfHuuzpapMjc2EoMJy1yTAs8elvh/vzwEsyZkbiwnBVANwBnzkkmKv+CD6Ex2WYMuNRfrWxJmW88lkXhobGDRLGrV6p6UATGuTm43ZCJqc1EbmnEkOABHURkuncLOx7b2SfCFU8CcZi6DXznl9uK/5B4Y2/bGcRDIExNrSNCUdXij0uVAQW9hJ4m2YJ2rgI9A/cfiRsp6kku9Cpl5LlCngPgfA9xmQPKcARJxcB5j8QYwBSQBzkhJSAB0RksjoXqaA2+BtqyckPVSFwcC4jQEoV274XQgY6aEQvZSOznRlCSLJ4Fl2PWEEQP87+WxtjzEATQa3DO3OJcA4gBbi3HG41hrjCN59UCj3u9I9L1Xy8OC7tNsbk9UwAjz6pOh8H8x1ju4TmLdmKQ5GbQlHjCJgWblF4Rfw/pQ+bu3D97SXbu+RrWVyEtkZZf+9P+zIx7cf8t693qUWmAE8vP++ez351/2JvYcWKSAV1FQr3BuULp5ZpnHLbwAkG61bU9ah1QZ3LYBmrRYfRfGx2OMPRn8BzqQqsbjVMzkAAAAASUVORK5CYII="}, "round/giraffe": {"w": 61, "h": 64, "uri": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAD0AAABACAMAAACeAI/EAAAA/1BMVEX9ywAAAADMowDougD/1QD//wBWNAnHqwD7xwC4jwDGngD+qwBLKQrdfwCJbAO4jwDLoQDNowDLoQD8yQDmuAD/AADquwD6yADpugDLogDLoQCJbAP8yQD+zAD/1ADrvQD9ygDnuADNowD7yQDGngDmuQD/1ADGngDGngDmtwD/0gD/0gDGngDGngC4jwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACvjFQZAAAAQHRSTlP+AP7+/gH/Bgr//gP/Av8FbtOs0CwB1pNOlEwCKLQUjG9yNFYmrYdrEgpWoVyTLwAAAAAAAAAAAAAAAAAAAAAAL8kjnQAAA+9JREFUeNqNl+liozgMgCUfmEAJECB3m0mbHjOzu+//eCsb29gcSfSjBaNPly3HBhyJ7FRVs7rCwg+d0Iwo7MbKMB44qQ3TcvB4gf+akY06PaJLPHKjy46ozIjCYz/AK/p6n5bYu9bOS2vvYEc2QTZLdO11nW9nr6avjyIffDt68P0ocoXvVveGJ1txN/Ju7d2peYHfRvUbczuSY2VG/pmkbWmZy2LAbzrUSjpHSmr6cBvggvQH2njJpQ++NEnmUSlKH7bMPQNGvdh/tIgDTuq17Dqppev0NGwGGLH92BfmHbSV/RaAX5TzVpr1oWRvrZPKrJ3SVUFdOMB2r7WBbF2J5Rya1tqXRv+GKtWi8D9tq5A2rrYx2nAlEnKCuRGAPaY2L6rb9rUBLc3rpw68r0uKe3DqV8xBttwL4XlHSuevhmVcCEEw/eUZ236ddftRkjCotxLwM3iHlpI9/yWEZQyc6GcBuzOl1IbKnwiBaxrYYvoF2iVn3NP9sxBfKW4hVG/hEr3DrhGwJKLZxcoXiK2BWIa1+1g5ZnmgGb9F4yE/Cw/vY6shvoWg5DBDTz8F+p9U8zsas7Qfo5pju+NL4Q1+pjTwXYtATdtedJfMKMBsVkZ3e6GmLABPtKzT/RXEpLZLtIDrnhoiP5n+1u3zJu7PTzzvxJrNqN+Z0u51aZVMWaJfTTNamjpjnltcNm/9JmfoFHfiKafe+a/eee9bNQs0X+qXftuCSeCuT6alDj2czR4KJvBfYpgNzgM8hHUH+pcPEzrEaQuWJMl6Nto1fWFeb+dpicN8JS9J8rKemb61/pAEc2Yj77BwRRNah7TYGBdZ/8HZFU2hzyGgXac+oSRWGmhrNvHlSbVzQ7/5wiRJT88GrsWVlNbLIp1M6CR5SD8feUj/dnmT8xeSuSlb6w/etYDflu6w8wtVQLZasdl+Y6tV5qsrms7WnH5Kg/4UYmFLjz7QfOfTtTa7+82Z2gUr9WNCmwNjpsUcEyf0sM4LWi6jHFnGQqG3kUaKfmcqMOpvNi9Rf0d7y9CiwNmS8IW9JQjdwiuaOCf+mQeBy+C056vO+4Sz9WrtcHpa21HuKx6c9mhHTyOY0ZpxOP2ndcIiPLVHS3BHOJM596U2jIvbh9HjlLWMTrkyT3XZgxJ5h1lYAl150aR5TOt9VcRTlWXjB4uLsz+TwnAp+LM8V9G8/RmuCBCc67+for+DMz6E14LqCbgKLwgQ3UmqJ+By6WZRuqvXohzjiw2MbkS3zR128zO6FY1uNbRhLEZPd1N/21i4E50k/lT1LKtQnh7dqLT5n+MhNlAfjmrieJZGqXNT79Wm1ibqelO965FSTlX/B8DLNMV7xBYrAAAAAElFTkSuQmCC"}, "round/hippo": {"w": 64, "h": 64, "uri": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAMAAACdt4HsAAAA/1BMVEVRi9pBeMIAAABVkuUzMzM2aK0xLipOh9RVk+c1O0JAd8BBecRQV6JRi9pmhOhQitlBeMM0yus8c7xRjNtQi9pAeMJRi9pBdb0AAP9Ad8ExXpk+ecU8c7xRi9o8c7wHf6NVjuBBeMM2aK1VjuBBdb1BecRVjuA+d8E8c7xUkOI+d8FBdb0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAlSqLpAAAAQHRSTlP+/gD+////DAT/BrED0gIw1AH/r5Nqbf8Bkv8NLkwQAv41Dg0yUyj8QY8hQAAAAAAAAAAAAAAAAAAAAAAAAAAAJ0QrNAAAA0FJREFUeNqdl2mDoyAMhkPQosWzrR2tvefc3f///zbgBRY71XyagbyPCYQUABEvOd4LyciqOilRWRkF6xx7y9dB1E4kdaU8ZXHH/EIDgBghFhnTBhUKGowC7SxEqk0I/W+QqDGsoPHNCi0FDPAo2zGyG6nJUaT7XQy9xbt9ukZMRIS33hXkB/Egwn/MMInk+PUnBk7W6fXf8S5FPKM0vY8YAR4Zs8dO2+ugHYzGtqdHb1hn9pDcutQdYytt7+wMFfs2R2Ba3oZhen+zCmwivGAjxWz9iADVXLmNqGC9QG8Q1oAFzNd3BChoG7GpQ4D5BKCygzyps6WArE5ywAues/l6RchqEtNpTPAuYYHJO0kVAGvc8/l6vqejpQFJmcIiS8ukbShbvkTPt6r7AOkXBkAh0CIAUZYFQCHsqJ1BjgIWm8AcgkVb0IZwwgCSxRnoZUxgnMEvNGv6SjkAnrg1z54hxtM8JYCxBBxCzwsP0031oOYNBFUj4M7wD1ee562mCPygp0NrI8FYQ6715PLmJPC3djrkxipCEPPewfPGHhag5Xte/wEeByD6lJoIlYXuFMLuA32OnOTC8QXPlUMfoBVh4ASs3ICVAyBmAJjnBLxTPY0+sZpag9WYfyX5ezxsiu+tlIVThRTqac8fFPE7YGxW4iEMD/50Kftq3qzE2Cqk9i7y7CyMplUhWaW8oCeNTuPEb/CTjgITLZU92ERbpWtezF+QOxF0FOgwPS4CmzRHWyZAyl+UPyCoIQVA92Arh85zYws3DgKP6T4NdDM1+3rn75MNcvXf5oFADW1NgLwU/XEYvu+bBN8EMKMnlyoCMwRmA3xDPwCYGYAClEm3k8wO2gaMV5L2UD0u1AUjaqvRWjTjoxs7gJZAVRg1Fwx6SuhaGC27odmM9Iqgf5o7QC4oCTbLKAGR9wC6JX3BPAB8kWgAUDbHeYCjXoABQBvyM0f/o3bQAtDAx+v6j14/ABQhe02eHQe9AaDBs3xhKUGeDb0J0C/Q3wHNe9MJUG/gm3wul7fmxesGqJrEzycrkX1iU3+TALo44+VTMldTZZLkeYLPAU2Cf4uHTGRRo539FICCVG7nW1HJTJusiptWC4fzf/iuKjmrws4fAAAAAElFTkSuQmCC"}, "round/monkey": {"w": 64, "h": 53, "uri": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAAA1CAMAAADGWB2eAAAA/1BMVEWhZjkAAAC+hFjAhlqRWzK0eUydYzb+/v0wMDGlaTuQWjGiZjnr2syWdjy+PzFmSDjHjmOQWjGhZjiiZjmPWjJmSDidYzeRWzGeZDehZTiQWjGcYjahZjiWdjyQWjGjZzm7f1KeZDeQWjGcYzbHjmOeZDfAh1swMDEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACSZYDdAAAAQHRSTlP+AP///P/+//8ECNT/AwEE/6xTqyv/MdJubnIMMP9OigSJklUB2AMDAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAG/5sUQAAA09JREFUeNqlV+uaojAMTSntSJGLKLKoo+Ncdt//DTdpC6QFlW83P7TWntOTNCUBxNzKAj/OTb/Pc0DL833fZDhVlAuLYT6VEXoPke2JI1tBYIw49zksWN6f6d8XBLjHMtxSNHMREUEljnt4YvsjLnlCUIkGXthXxBAQlKKHl9aL8hFBIe6wwu6iWCYoxC9YZb84AzD/e4C1DNWMoMzEEVbbcTpNGI/fDP/q6HsajjO5GRMCvPvm9DMsUiohU2rCuZlknIGfk/GBAHt64pQOe6lESkmr8VO59WqckWrU1F0tkAhKUe10qj3erU0cQNH2yTSDw4Eg1Z8VMQBeXoP4dMAn3KQK8YwhTfXO4AUHDAbhvXMhnhgSGc8MEpABwZCJE459CLwAOfnBR3JU5SSk+iQyEIc09QK8A+j6u4qloJB3F59BAsHSA7pADoQE7WazUTPlONm6ydEHcgKsAO6BTDdkcezsZCpDH1AC2AgwAr/UrZ0I3jcjLSfQJ9hFCqzWSe5A0LpZFRGkO/el/4VAu60ZgQ9i+9iFNllBIFU7w3uG1gUJ4AEBuLTFPFB+wJIJr9aQB/ohgQ4zUfm8cPd7uJIJhAo6rgBY/tBO9qcK7tgowBF08Kk5AWOglXS7CTDOygnvUvEzyMSAQUrQjoALmPBDJppOcwK8/0PcpA+CC54M9fvr2BkQ14DAnQRi6SykNxopngIjwVVAxZ8n3geZ1Nu3t+22RigeQW1/yUiBe6JUYAw5weatbERY25L5ITEDF4AOGHShsI8UTiBV/bZgtZpywHlwQDBQTTt0WvMgPCTgHujuQBUObFnC5zKXsEwgEy4An8m2ONnKhIXqmgcStq8E5FcLG0pbeWallcKo6ohiS/igvH6UQXXOxF0FcVSy9iewdefJI6juwkTl/duc8+AkKA+VK5TuO2HlOs+yMm4wgv6ASixhx9tNZVJzB6p5h1KIL94QhFU2UWGn9nupR/oIeySn398Fvj12OB+PujTOoKnVsBY0KxE+7BPjPk07C/ujJujyok61EJf8eXuVH0P8vFc2z3tl87xXtr1X8z/dOmb1t6iQQsVghfA/4rtc98YiLrdIRn67iHVvLJaC9rk0N/vShK9Mt+bimtmFd6a/EfArXEjYd6sAAAAASUVORK5CYII="}, "round/panda": {"w": 64, "h": 54, "uri": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAAA2CAMAAABAzG8wAAAA/1BMVEX+/v4AAAAnJibt7e3///8ZGBhCQkLOzs6Pj4/8/Pz7+/vY2Nibmpr8/Pz+/v5dXFxwb29/fn64uLg4NzcmJCQkJCT5+fklJSUmJSUmJSX4+PgmJCTt7e1BQUEODg4lGxtdXFwlJSUdHBxBQUHY2NgXFhbt7e04Nzd/fn4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAC3VUfGAAAAQHRSTlP+AP3+BP7//v/TU/7/r3D//////0psixbUMS6K2gT/BwOlDXAHwg19BAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWAIa0AAAAsdJREFUeNqdltmioyAMhlFARWvdWq063c467/+EA4qsoec4/0XrQj5CQoIo2nRVV38J/yH5sWQMcTFWHvPl0RUYjCKtYTydTuOwWJfIUbkw9BAPMM6XeNXn+xFBYsf3TznkMo8W4B4Nc6zUYBQQbvSoeeBmyoOTek6TFL1QmlA19KQ9OGv7Gv2gWhPOG8Cwz9CPymwCB4za/oB+oYMmjALwdtlnbxIubxxw3uO/u4pzhO6/jx8UyTtSGUzQDiUql+i5XaZ7AOlm9UQyhLRBu9TIRVyQJHV4HwBvLqC9GXAzsXmA9wKw5cGeFDqpXINI2/2Alq5BfP5PCPUankjsZFqZb4o2sCXStjBvK+HCGQ1ODnAd07gDltR2/EWNna0woGi2QlCsLYem8N6jXWoFYRblbA4v4jW29qKMoNNYLSPlT3g5P0RDVA9Vy0tC5UMTPRlviw8UPXhHwF6rCAJ028G8GzxES7tG39gb1YSqR7PxtzigOICfOL6fKxKnXPLSX91qKn4/2FYhN2FN5dlSVMtNXBXyVBE38W3LOfuQAC6m+mWSJFVWyMTJOalsNkVW8deq8zJ1sJCofN064WIvhQMS0L/u3nC/7w0AeBwX+iQtoPdHAzC9bN6BbjEZAAKXXyWSEt8q+C1RACiK6bKTDgKwBKBJ4RhugNzLAOXZx5kAZJjvCOplIjcAESEM6FcJ3wF879AuAboeI8T4RvLzcBDGoiZEDYjLA5gD7cGXF4S667qKT9tW/KL2QvBleQBEQex+bP8DEdCfeYHtHFK52WsAmfYAJuIC4EWEpBZgfuoGKiJcBd63MlCUeBFchgDAJWAl1x4GOKvAlmD/XYAZSYxhQm7bOwBR2SVoLwklcexdgHidMxDACSyPXHsPIAJEFgRyp2dHYoUvAFjnmHpmhR6zfor86WEAn2Zh5H35Z1HZ5xNZnfMB/wByyh+rycIk1QAAAABJRU5ErkJggg=="}, "round/parrot": {"w": 64, "h": 64, "uri": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAMAAACdt4HsAAAA/1BMVEXTMAcAAAD9/f3PKwRcm/L+ywC7KQU7gd81SGXxCwDcto3/0QDKKwTrXCHRLwXrXCHbkFsAAABql9334ajRLwVnoe/RLgXRLwbTMAavMRG7KQXRLwXTMAZ3IRKTUUTTMAf/ywDTMAevMRHRLwb/ywDWMAfTMAb/0QDrXCH/ygD5zAD/ywDVMQf/zAD/0QD/zAD/0QD/0QAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAASNRKtAAAAQHRSTlP+AP/8//7///8B//4KApD+/////2z/LtLQAwZTlgL/q9Ua/6W7KFd1ZRcuQnmZAXO8wAAAAAAAAAAAAAAAAAAAQK1lRgAAA7VJREFUeNqdl4t6qjAMgNMFN0AERARE0eO87H4u7/9yJy0t9IbuW77NOdL8JGnapsAciRL6SC7b9FDXSFLXh3R7EQ87dzTYD7oFDbzuGrCkSa9HxhbRPQC9qNr1Jjhay687jrgJIP4x5QYIjohnHBFNAxLWlearLQb9li330g9YsKrxmKMZS1MZYYyAKGKlz/zx8dFClHysA6Bn6YQ9RxiEVCPAYL85Oa7TmyXg0UzFaTMQJCBadAfr9cJ0AKBJOHSqIkAVn9d+BNiEk6opkPOX2uHfBNDgVM4m9PNXOnOurAaCPaDsZxNE/VXgzz4qkuMCSSVqkgBRmzTO/OFgg34AQtO2kQBs3ATI+pkqBUkQQQBVQOUre81iIgSAC1UDkAMnmFp8VkJtF3ZkDBtWwV1BvwdwYREkvgx4/PE5yYsB6Ofngi3l4GrsXVImvLB0CFsCaCkkZR6vVnGeoW9bcXQ8jZDowPhBSuwsDb+uTmCcA8weNMnM5Telq6D0jzEJCFO6EnbSIYSVOehB8xQndDSRoI4gzFWIYRiKePMxWblSFGqQ0tUjQL4kXtK4pSCg6UA4KDT3avVliDLsRY+01+2Xg8LQoRlB3A8Tb8qFlkonG8nKhRytAxRjD2BfCNlnMgNcsbeSAL4USEARSClGRSgBqynASgLo30ATJ4RxktGqlDhcLpd8HoPAJPSKwqmE2im1OOZvWZuA9aAwAbUH0EsQ2C54a7GWpewA1jZg7QPQeh4W048AfDFV/uVyD6CmsYK2NgrpuwBZSHULclO2d4N7gBzltgxs682iAwi8OeSbaoLmftC/oLDti9wTASZsOFgMF3J0AIERJOBwsETqZNEGUIAOYG0NEJLQ0UZHtDzbMFuN27Ybgra197sJd2BBOeii47CuslwdHOGTJaE6XPJ8WIjHqOMNBu+QUDu9xLe9Ddhrx5vZYFCLsvC0ODbAbVCaxeZWk/Vs2j+75+3QZPEgtncIHvvt2Ob1jaYjGuHZ1RqNJm913VaVUl4UT09FkTs3GFFCkdFstxaBDoPZfD6fkfA/ZsPA7dvIavcXRhQIs966F/pu4NPx+jZeODbahYXbzwwZCeLKsok8dyYxF+i3Hwk45N+9dCUsOfTHpWvPCSjOykNiXNuMax9V1pbf2zKPPRH4Gmqu1t3TvHh2tLg/Ebz2RAD8pAXc3bz6Er19/atmUJ+H+ezfa3Lv6tvPJ2PvL2duosns/PLOvnP5Fojf9Pn28fJ1/iXk/PXn440e/XbNGfsPBs083ndfJeIAAAAASUVORK5CYII="}, "round/penguin": {"w": 64, "h": 64, "uri": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAMAAACdt4HsAAAA/1BMVEU1WmYAAADw+Pr7mAE6YG0pT101NjauyMxng4vg7PBSVVY0WWUqKiqMjoM1WWUdb3U0WWVTamtSVVY0WWQ1WWU1WmU0WWUuTV01NjZDX2Xm9PeMjoPn9Pfp9vkAAP/0+fpDX2WuyMwqKipng4tTamvl8/euyMzo9fjl8/cAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABaBmdrAAAAQHRSTlP+AP7//v7/////A5H//tECDv//LG2oVAsE/9ICu3QBDAgBDAMEQmUumQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwVmB7wAAA1hJREFUeNqll4mW6iAMQKGW0pUu1qqjzr79/xe+QLEkhY7al+N4HEmuSUghYdyTuoG3/XYodkoxEKV2xbDVXza1r8088xyshwJMYzYJfFTFAIz87RbgwPm2YDEyniAxKzTiTwC42BQsYH11RCPqZcCBv/fL5iOi32svw4Ccb9Wf5gahtiQMhv2/8fOTEzgKB3jmxR3mBlGA8hzw9rzf3WkPhN3++W0GqOv77TWhrimg4Y/YawL/wIDm7vhRHhoHyHn/oD0Q+nE3NeDEt2yFjPWgAflerQGoVwvIH07AlIZcA+p1AYxB1ADIH9xBspc5Z/l6B7QLJ3ZYmYFrMTB4EREgSwb+2h5yMGAHRJyCxEGEaL21eAAASWGVRVpkK3xzaZYySdPI9uh/q6MlnRFEOi1lLfq+YWgP4iyKFgjIHgjI5y3rndL4+7JKq5kWiGbLNLUqDt4zt4ntuJiUZdnBhwq5IDQyhYWyMkqt20imiFIUdWWSJFovwxHAL0u9kCQmTAdXCGDcs2paL6bZMeRkdEEiAA0T/DT2pUR+AgAcGsEmOuIdVtLRTQCSxQxykyQuhjYAaGcASXNAPPDKxO00bIJVm+9CVcJKWcobAKhiAFTWy67abKrOuld1SdLJ6BYAMmSihAi6jZXOblGWBepU0RygUp7sgUBKGScR1QF5EmCjjhskRyGj4NOgXClTlVRsiFAXJCrlflbKVkMcKeBIlt0O9ehxRjHgDF7zyGQgBWD+qnwXtIc+wBHQs/TK0KF8zYKJMABgcpYBfSyTQ1WkMsuk3WMKwOuzQxUf6wLayenkrpx5NZ3r4587Ejn7XL5YjjaM7rh8sXyyen6zzCDHG7crW3272/tdX+/N2ruxMdf7qg7JdUmmxcnXtDixyvP/bbJq1+YNjwcxuDZPDwqhnbDdQLBhoI1mkCBYKqFyoXaheMWS/dRs+9WQoscX17/r8Oi8cCIE0Up6CMqY2p/8gQPKAdln0Uwy1LT0aOhheGQariOPb+8O0viaf3/oOvDr1CKjgEjbFjVkbCNjH4AHBSdCFQWlEnGshtnsORs84cnqWRotSKqnxrr+c/QF+vv3OWz/9P1+a/S1CP5z8Rjnyw/3zUMAKIkXeHv5uvyen4ycfy9f5quPgPI/QMgqg4CUjN4AAAAASUVORK5CYII="}, "round/pig": {"w": 64, "h": 57, "uri": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAAA5CAMAAACxmt3lAAAA/1BMVEXtnu0AAADYh9j0o/TMdcwzMzP7p/v/f/8pLSngi+D/1/+JX4m0hLTtnu3pmunYhtjtnu3tne20hLTZi9lYKljYhdiJX4npm+nxofHYhthCPELYhdjyofLsnezZhtnwofDwoPDyofLtnu3gi+Dgi+DMdMzwofDYhtjgi+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB+UZDsAAAAQHRSTlP+AP7+//8FAv/+Af8E0zDRa1P/Cf9TAhaRLf+t1pOQqzJytM8hCk19EgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAujXZLAAAA0JJREFUeNqdl4uWojAMhhM6UotcVC5ewPEyo7vv/4SbphTbgrqac+Y4Qv6vf9pQCyBFgxxxLPlTxvrL7XzMMqDIsuP5xpfs7djkswzoL0H83e1+S51j5KfzUfgBx3NOtxtOwVLns1ADJNY/EUXR1ik2NErOavBCX9kSQjaY1m2h839qkhJA4k6BvqAA6JqRw0T0iPoHQOl8UDsSE0AWrDeMdjmttoxla9RMKCQBUqwHPYV4pmcXTjLUmEIiC+VceipnhDOcKmQCnoHXep9AFgBbeEvvEaBFKKM39b6HEmr1rt4lqBq+4W29QyC5XYN39HeCKgbAW3oiDIDoEwNuEZ/pBwtRX8IHAOhLaNUHMzBYUC38gY8M9BZIvuMKPgqt3AHqThKf6IXuI4TmWsC9ghfbgZdA/xTXBhK8flsA7Rbr6PmO5CQI+L4i7QcNbnqAgMVsPqseFySiihIWQ3rMe2Iqc3uhms9ms/n+0ZoI2HNCZQm5TAkQ46r/vtC3KWHxCBAkiBWJ9ba+FMbfzEYk7j8G95+IUYJYcgmxBazn/e1+BBIqs9cbhDVACWsLiF3AwgdQp331YTo1THgCqIQ2/OWE9iyqaYCcBPh6JkwBpLMKzhzoEr+CGCUMq5DgaVhGXmbmRyEgChK04ERiDRg6cV3t9/tqPS7AFjEkmL7aMIBOGtn9WYi41R8A7gmcnTXmgJHiYfQ0ssIRm1kInsYDSc0JZRUeR8CMGA1toP8LHxGaQz6hOJMQAvhTC4UaA8wU8BykeJkG8MgRwKQDcdEV9ICwBjavhHXABsKNkyqwAEzKLKBz9ZHyPoKUrEzsOXFsQcB4GcMKjAEDoMPlpIWwDTwD/bnVAGLbzo8thAZOGDsA+nJ4Tgj1h15vATIezaP7PIW/fTSDfQUWQD21ESFB2U5UoV5ssNcPAGqqfHTApn5QKoJRD4ucD+o+gBZlRAB3U/b0KY4BZCoX/3NSJb3EKYD20L0+K3c7Z3wfQCtTbl+d1relXcAJgLa26h4jhOhu6PofATCJ8e/2yRvLBuMEnwH4nSredlPvTB3JffuTAG0Cy9u2A++lrduu6K0uHH4SQEXqKuP8fLhkHJfDMt8gv7GN4x9iBSmpuFDphAAAAABJRU5ErkJggg=="}, "round/rabbit": {"w": 48, "h": 64, "uri": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAABACAMAAABr/gR0AAAA/1BMVEXS0NAAAAC8vLzNy8v9/f3////vpOy9vb2sq6lWNQzh3t9OKgKqqqq8vLyDgH3My8vBwL/n5Oa5ublzWTq7u7u7u7vNzMzPzMzS0dC7u7u7u7vR0NDV09PT0dHQzs7Qzs7U0tKDgH3U0tLT0tLRz87Pzc3WstLWstLBwL8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADS2uFjAAAAQHRSTlP+AP39/wH/Bf///v8D0QIW+v8x/3VRS6pxjrDNEiqUNbL/iVPNef8DrwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAG7R8ywAAA0ZJREFUeNqNVuliIiEMDkSWkY5zVsdbq7a77/+EGxiOMJ1W88MjfF8uQgCEEyXesRk6UYpvokT3r8F3+nYCXrlGKRFnGKXo0K6tPcMTjitSOoaaxUtcaUawWim9uuL4qqobv+S9O4KmDOSo3udBlWIfVt4Jlgg7r7axlhy/jgt7RlDRDgVVVzENVWmZFkTFCKugl6mAPFRHYFVihEZq5RlK1fQ3Ekpn6RshZpel5mL9iSD1GJQSOjkgAtsHnoMrlJ5m4HJQkVDlBF+PiZk9q1LanjHvTlHiteoamRHKuY1za7sxsalSz7RGKMiJpF5lyrw11qxKTgDGb16KklWpi2iYSOR0WWuMFY9wjB+BEncnnDgb7zfr0YsrEj9xWu0Qf8S7fHZKZ4Q1PJE1J1B7ngF/gyOchVKsrGeDvztAc077oMWngadiPh0DbCfdAfAZngAbu3UgKnV8Ae8gx6oiQikG8wLepjEQGJTYwMtyEYoID8DX4AgDEcQp4XEmGWoA1gMXyuFmYK7lMhtBSZsBR2b/o+8/cgaZ7/teRuVDwyatFW8kxcRHT7olRuUFtsla/7Zc2sWxPdEbWZIy+d3ClTlY2sWCJUlROkIfCVc4+N+c4A+0VfYjIZqw8ECQSxcSZfj1ZxScekBeRnKxpPwK+vUnCKk/yEafksa8hLKw2/QVCTauppAZbvIToV20kbBoRyXOwX1HLkginqSdGVVxMuCID4x24RlxoqCrkxdZkNBsGlHe/sLmZfWprAObViRFsciEsG6EBtRAe80yItMmJxiKi6e8pW7KexlzAk7OyAWqB4vJhpsTrIpF9KhAbMMBQlox7WIibYtFEQ/Qlk5cHX02vkQTAWxiJ9V2arAxiRg8oEx4Pi5paqiapzVund0U6dwZfjigVsoOsk8+yFxZirBZvC+QpmvpZqs+5F1LHdu4ymDezAftZitdRafXhvHJ3lrgbrjNU4Yb3ipdKM8YDq/ZHfeEkfDhvaTFBcxP9ygdExqqOnvC0d/6amCOQjpzrQM+EsRfIbZgKTi5oEm5FeltCukRrER9o1V/7P2oNAZuR8Gey5C948Xxfs0Dut5rkb3HIXv520Dr+2042MgPw+1+dM8EjvkPkAsoMiQN8KUAAAAASUVORK5CYII="}, "round/snake": {"w": 56, "h": 64, "uri": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADgAAABACAMAAAB4KUSAAAAA/1BMVEVlyzMAAAB42kdq0zU0NjNNii3TMAcwKTN54kX///hYsT9kyDJklybyAABlyzJYsT9lyzL///h+7UF23EVI4StlzDKAwEXVKgPTMAdmyjNlyjJklyalTRfVKgPTMAd32kXR+LvR+Lto0DRmzDJq0DfTMAeAwEX///j///j///ho0DR920tn0DNn0DN22kXTMAdn0DNNii1IMy1920sAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAz66xIAAAAQHRSTlP+AP7+///6//4F/xX/AdADjvkCAgGzBPsITy0C/hGKagT92WsXtPtQbaVtJb2LQn1HBALTAAAAAAAAAAAAAAAAF6kH3QAAAwBJREFUeNqdl+mCojAMgBMqyiEMcjgCu6POeMx9vv+7bVqgtFCOnfxQIfnIVdIKqEt5Qx+nz+csDIEkDLOHzxPd2pYdQ9Cu0gTRf86AaQLZs4+YpMMgeSsiYaoJv/NWCLURJHf+Wxdq2cjHxAiWKeb3Zqxi73My6oMxfkVshONeoy8y64A36L+OYgJ99WWiILn7SY6HK0mo4+xwzJLCumTcgmXqh8xI9VgW+nHZgGlSZorOMohCZqVYCiASjCY4jYxEmsC5XMtjnCMy5yRgWvrQXWODKQot+HFKYKIF2nbbTNXBJghxWsxoYNdlWoLZ4QQZ4Rawl6GeJjO7pBwf2AjWK6ksLGBmAK0pMEOYiNTIEXKCfKg0bCjDKlb4/5oK8AGy34EZKO8T6w84GFCyEGRtGNgkwIZWi6ZV31BYrEgWtpFkdqU1qlYLLisTOapc1GJQNhxJ/5nePNBTCvQbkD5lOyTo9UGvGyq1owHrp66GirPSoiGwXXL2dDvs9lUG5XWkDntVyqw3qxh4fAEoa7XQV5VpkFesvh4LiEM2NhrNE4SFMXRmlTUonWkFWLBJd/2tp6C5qgydmgNPcywvmTJyYgLl8GgMeXVbTlRTD5eGHOWYpHV5mATX65b0+BVo0bKQDihAO0/R6d2axK4vmc2vOj0tCAK5ParB6aAauNwggW/IfCNXy+Gt157ptyBpM+dbcrUjF6N96HSlaHZkOhpi7szlnJzMlePKfibp7NXjCvc5jyRuqx/J5pEt1x4Ct/huTaCO9S455di5xdPPKOn8nFpOPege8Hq0BvvCrOOVTIxH6wM+bY5D4HHzpHIa6LruZsNRx1FiFhdHUpB66DDv4iMZPL7sLxcBCOZy2b+I2+gO/31wKdgrYnC7XP6pZbm8DRCvFKiLYyCFc0h2ZC1ludwlB35/DBRwgH+XQs7n6vsvBm7PrAvSkxvwDvGuAdF1J0CSGrzD3a4iOTjpUYLEBUFFzgepOB+44793+EHFmQnid3Dm/sRDyOc5+DYY/QOVZTF4i+uljAAAAABJRU5ErkJggg=="}, "square/elephant": {"w": 64, "h": 51, "uri": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAAAzCAMAAAAQAf6DAAAA/1BMVEXS0NC8tbUAAAD+/v7MycnDvLz///81NTXBubnh39+rqqopKSnw7+/Ry8uCenq8tbW8tbW6s7O5s7OCenrW1NTOzMz+/v68tbXBubnS0ND+/v7Ny8v+/v6rqqq7tLTX1dW7tLTEurrCurrU09PBubmrqqr9/f2/xMTBubnw7+/+/v6/xMT///8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABIdiy1AAAAQHRSTlP+/gD+/vwC/wj9Bf/+KP/NqzBMAiZ3cm+kc44FLv+ODRwsY7+UM0T/16jaAaUAAAAAAAAAAAAAAAAAAAAAAAAA25uLeAAAAvxJREFUeNqtlgl32jAMgGXFNknwCGm4VtpC72P7/79v8hnLBPZWptfHSyX5iywrkgGdDBqxflp2Qohu+XREbDUy0S05bL3D7qkmxeAN4H7J2u+ESrLryYOttw6jXViHdgS02O6UVCIKPb+0uK+T7LF9KRx2R6wjoMYbJQUX+fGaR/D6ceKgbhwB/HoPV0pGoaf1ev3TCT04RTRF5xscLEBjr2JgkEuTCTPIkdAiDEMtAoCvl2f/gbAdJY7DAC0u4/a41wVJC5bYQtrANwBC9ZSDFMA3ABQC9NnJ/DNAiB626hqA2sLyOsASuusAHYircqDElQDxHwBX52DiFOiLm14X9ewUTurAecmp5UnP6qCsRPoR9/KUkOuzHDwCduxjIpfFfD67LwlMP35MHX1MW8kBi/lsNp+JsgUE/bvVjyu2BOjzLUgQMyvzRdlQcv24hRpBs4biX2RlKgAbgttN3lBsS50CKBZCDh4B1BQ14NB2ajICCa4Fu9OfBFAKB8oBhSAzwPvMJsvtNcuuzUHSJ4DryjS2foUQ/CmoBb1nQY9jhQm7H2H191kh2Qy4wdLGvipDtfqY2ShyFSSTQ+yo2o+2Fh+cimyNMU2om2KS+aXOLr33gxuv4Ea3z6OEyolp5CSgMd7ubKrbuyuAm841bYIIYb1FwCkATDKDnWuP43S2m6BikFWVEU4AmbWS/gRGgJvQuUdlSoBh1jDbRwDu8ZMBqvwU7Tly6yctYACt76oCIC8BqjutOQB/XwTIEnCLDKCxCMCYEmAMy0KlAyECbpOlie2TlbJVuUKKbpscoLX+isvlRO+N/dramuD4pX0WgO3A5E1ATo4cGQvqDnPAbXj9mfnD9U2exhzQFJ1YZSng97csCSGJekOatTl3k+F6s94USbQxvG3w8Azy7wAJzwfcvPE6cLdp+lutVj+i0GO8QD6OWlKvojcD0C6wuOEj+sFLvbMQjTr5ArfkctDb0HqGAzOwJYBnhXqlB6RPd0ouAFDXD8peAWqtzwP+AMi0Ka5uQt4vAAAAAElFTkSuQmCC"}, "square/giraffe": {"w": 64, "h": 62, "uri": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAAA+CAMAAACsn+1dAAAA/1BMVEX9ywAAAADLogDpuwD/0wD//wBUMgn/zQCshwFKKQraewHvswDLogD9ygC9qgCshwH3xQDBmgDOpABrUQbLogDNowDmuQDpuwDJoADpuwDKoQDougDrvADMogD0wwDqvADBmgDBmgD/0AD5yAD/AAD/1QD/1QBrUQYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAANBDq6AAAAQHRSTlP+AP79/wH/Kf//AgYqagMDBP8U/6zNJ25O0HGHrYyqVjQQZ0kBBiMKAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAKxXMRgAAAvBJREFUeNrtl1mDoyAMgIOARWk9q73b6Ry7//8fLgEVRNHOzss+bB5mBJIvF7EtEE9S8raPouj2JNxucvK8qc39m7tpBLx1Ro6RlqbKB2WeV43ZPSqFRUBOKqMZ0b3VzciedtuVUlkCZOQcRb6upUbR2Q9hAtgPukcizabs08IyrADkHCAfAeTLKWz7FFKyXUshLWSW6np/VtYXn0ns+al300wWqQVIMvx12sjDbXQMQF+Tdne/tErPxKvdNe6dSU0I6iKh21QZXO47qWGAoAOgHIjeUSpn00UbgenjTR+i4wM1BhIBnFyAosC10lFl2dbUMLMBmJ2sMrRrZ3BRC0D/1AjQtouh0fXO7f086qRy7b+FwUDFALylgyDhqyhkgTnc1P9OZIGjdMaNL9JSsBYtB3J11nAyXn/rNjqCNTRH1cnVvxJwA1By36G8Yw47R7AE7/rpjlpOCHABxxyAGcHhY47geHaPRq83usBpDOgFLewKeePzIWcYJTCIcTmsdEBzAEoDAAwhvBoBAimsiTV//AzwAByEWcAytTs9EMiJxNEIA2gAD3A6VCQFnB/5uAYANAg4XR9oiePMcYDkxzLAJ3zoueXdG4nzgmwCKQS6/IsU5o3VvVQ538wVCoKATf/C6wFks9yvCYC8Cgj08zXA0Mjp0QLAjuzEtz1ZADAqSspmASwSJbAVABNxksTd7Hr2IkmSuoOHACxK4jhOYspsI609HtUrgBq14kQwv2qMxlqSki0Aeq24npSdlYkB1IuATiuOqR+CyQAB8DNAvAzoE/3bFEyrbB+9EBLbx/A9iERdC8pmLjYra3UEbO0mOh8/PsE5WR0mn+GvlwEM72A0EryT7MVpNB+FM+IywkUMWfeM5WlcMXcQAYBrLoQo7eM4k3kAg5ErMRCEw9KiVGcAzIsezbTjUowj0F8dZgCT7N0ISr8SPsD9Qm4JnVk5scevoek6YEn+A/5FAMnz5jv2TZ57P/s42X6D0GyH30N/AFqYLrWrlrITAAAAAElFTkSuQmCC"}, "square/hippo": {"w": 62, "h": 64, "uri": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAD4AAABACAMAAAB1NzTHAAAA/1BMVEVRi9pBeMIAAAD+/v8zMzNSitd/f/9TkOEAf4IwZKoox+sxLitRitgAAP82O0M+dcFAeMFJeLg7crxBeME7crxDZatDZatBeML///9BeMP9/f/+/v////9Ad8H+/v8+dcA7crw+dcE+d8BBeMP+/v9TkOFEdrs7cryry+2ry+1BdLk+dcEwZKpIgc4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABuMWmGAAAAQHRSTlP+/gD6/xcC/wL/Af8tAf//Ff//Lw7/BJAF1XFO1qssTzIKLWysAw1JAz0lbg1DAAAAAAAAAAAAAAAAAAAAAAAAYXRTLgAAAhxJREFUeNrtl9t2mzAQRWfGgDAECphrYsexc2vS9v9/rxLiIkACw0pXX3IejMYzW0eCsRcCopzoUFSIWJBDSwocu+ClVXGtQeAfaYHAv0I40+sSbtMvWYtFzgPI6SxhoTQI5mk3iNpaqK6UA71jJ3imaB6PqIC+/kBwRUWVk7venJyLWo4RnECNP5f2flCroRjAfPX2gsZAc1ktuVl4hk205M8QVbAVhxNvm6ft7pELtmibTcIn0Tav9L6Z5ovnnfuHbcDvRIdy3HHutrjbjitx2obTN/6FOGNzLTDITnEGcRabecazwIw4g9D3/dCIyywzuoe+ZVl+qPdnTdbkzjKR5xWZjp9kJ+6hJQv09qHErVDvzuImb1naxbdJv7m5YzzrcM3dZ3GHZ5twfwFv5zc8unbvln7xwr5+NJa2c/jsddZ851kcCoHhuUOdjc1tU7e0setH2X/4g8WJbsbRqGUcFzSL4w0y4nijtDiu0BRHXMkPcMS1vIpP80mSaIaKevygofdcctiPhu90i/i+pffJShxbvJ9nFZ6o7slqXPCJel2JL+kb/9+4S9E2PKhxbq8eaH4o0sXtMYa/C0vc86KT/u9UF8tTSPHmBQ0udLFTITt92Cm6T9N7Nf74/SaqLrbdYBL38u6kNcAfiAb4Y1eWBwrOj7ZSP4OhexAMcV4gNXDvVC65l8P6MV6WL7ujrD3ujjx8PPbxSzmi6S+m2iw212yqSQAAAABJRU5ErkJggg=="}, "square/monkey": {"w": 64, "h": 45, "uri": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAAAtCAMAAAAp3Z1oAAAA/1BMVEWhZjm+hFgAAACRWzLBhlqyeEycYjb+/v4xMjKaXTrHjmLo0sLDgEmgZTh3UTmSWzKRWjF/fwCgZjl3UTmQWjGQWjG5Qj2eZjmQWjKQWjGdYzZ/AACfZDedYzahZjm3flPHjmKfZDeeZjkAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAqEwEIAAAAQHRSTlP+/wD9//7+//8I//8Egf/UkAJ4A0xnAYKpMAcCqNo+AgJ5PAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAhS/0vgAAAqhJREFUeNqdlol2rCAMhiPbiE6rs2hn6f7+D3lDCBLUtuPNOe3MIPn8EwgBFNtBHeFhO+J0NuBPr95hg72jQwnYjy/2cX/7Mu4XCo5bAMeZAozIv24J4dUrTgPE1/teuy0Ap3sfRQTASV07JwHOxb9ioBjB6d0VHQlwUmeNJh5bsjybByy4DEA7BwIk/wTA2YYtOdiKBypbAIgAB3XVAuDQvWJDhzBYjDAzAvRVHeDDdy4D0L8SZmwQJAcqqcB1/gPU4LKCmT+anY0YKxW4QYHvtAihitOFaCPenkRNAN15OOsMYAGYvmquJCSEYUIB5hF6JxQQwNjnutYzgrF1XfNjlwGuh04oiBEY9OfJpX9dh+cFQHegC0Ce+1wAGoKSLkrjBNBLAM8tJZh6ov4foJIA9wvA/BBCzMsqoFsso9Fh6iyJ1XOCzpN40fNlDEtOa542Ufxu4+aIW3ECXGCQgLTxo2vCoCuNmeVO1AP4AgB5C+JMR57hU44WCjyoXhQTFutECIUXijt45EELRTH1CkZfKHA5CpKQ/pvCf1LgR/CpntOJxIkMObN0OIWKTlVdnkhYzRiC5yAkAD2aprExe+gdfojjhAEYgA+Hqr9fnDwT6V3tbrdr2yYa/TAiAgK4y93TqTzeScN04oaFCy4zazmhCYDvv4/cWA7q3E2nPsWwWwFMa0g9ojvH1gTcGW/DmwSsKRApgLfhxt2Rm6v/FM3V/hTCJACb66cvu/Pt9JRb0ZqE4J9b19PpNr8fqAwIQdiY++TdNlYEgAC1/wUQ2xNuAoS0tJZUibkz/gkgQti93FSpEsE9riAQ+BSITTU32kcBoaiSO5XD7IrzN4BvBbEUytc/CshXkuXlZxWw7Zq3Ath4zVveE7+33NK+FzdVLK2vx/2/8l35H3uBI+HgQ0eIAAAAAElFTkSuQmCC"}, "square/panda": {"w": 64, "h": 53, "uri": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAAA1CAMAAADGWB2eAAAA/1BMVEX+/v4AAAAnJibt7e0aGRn///+Wlpb+/v7MzMxnZmYmJSW0tLQmJiYlJSU/Pj7b29snJiYnJiYmJSWDgoJXVlYQDw9XVlb+/v7///8dHR0/Pj4AAAC0tLTb29v///8WFhZnZmY/Pj4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACHxsvCAAAAQHRSTlP+AP3//gP+gf7/sv/ML///cxGU////A8R7DSQhBt88kwUEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAApv8JGAAAAhdJREFUeNrtltmWgyAMhtmGCoi4dvbt/V9yWAREqSP2as6Z/6KnkuRrSEMQQC/Z8hohVPO2g/AKN9JLXXCRYRn4cI6iegkzkv3ChcsE0C1tRu02vl259F0EyBqtxbs0vOMbl1p6QLeN1+bnZfxz1qVzgGy8ziFW8gp51sUQwBX2KK8Wfj1YfW32H+oArwBK/0RSIfTqM3jNGJ2k3oLPjoyiSvX+OOt9ZRAjCfsEIYEGFKgJKQBfAUJLANSn0IP6PkAN0H0A9A/QAH4fgIP2PkAbOvEkQIazcA6gz4I/jecAMs6DUwA7D+A3TwGYDiIXJAaKUwD/djPRDrwAEGZ4NNU6vGrMHBFLgB2bwI9cDxgsm2ymQ+PWhwhwgxv4oT8D6DTXdLULMVdtoh7QpjfTy6e1VORGW4hgsJujny+rqw3CizGw1G9RgmBg5vGyuRvfHMDPuomta8Cm5ey86IAU8DBnYN0IYvYPE2xsmpHZcmCGSERfdEAWoEbzG8zlz+wFoD9cOhUz+Y1qF6ARlVpvGxG/FIw7gCgVrzC1th0CxNtje+ccA/immuhJgG/rAZwB2BMpDMB8qQZcBlD67AisqAFQhfUJTQv5ewaup4nuAtc/hJVugbkXCUrduwUrL6LuYzbovNXA5m4u/xdu628AcKJSAM6oAIBv6CgA418JewC8qx3AUwngKQP4OBLvCR8bQEjhECAmAH8A/aAeFT2MJJkAAAAASUVORK5CYII="}, "square/parrot": {"w": 64, "h": 64, "uri": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAMAAACdt4HsAAAA/1BMVEXSMAf+/f3+zABbm/PQKAO7KQUzMzM5ft7k3eHKpp7/1QBgnPJdS1LZViLkeEEjIyMzgOVNfsr3uCX/zAAjIyPWMQfRLQb/zADQMAj/1QAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABTN5HgAAAAQHRSTlP+//7/////////////////////TwDKTM1G0gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAvUYMFQAAAmdJREFUeNqtlomSgyAMhqONGhS82u7x/i+6HCKnbcX9ZzptTfKRBATg8fOEYj1/HvAFl/QFz2uAi+GfCLHBS/GNUmmw/DRNMQF1XFNM0LnjDjjfhy0MS1PYm3cJgDvpfA1u1MIUvJBiQNiOpmQV/cdqdITPXhytrOWNg7GKkUmNkHeRT41dHIwxUmVEDDDXFLY7jClCmisnEqmDIM8hGQLBN0uNscMY2ikkJPFVFeaAIraHBHT5E1mHQBRaVRWY5fO2bVlSxFYAk1ZOmRxdAnySgEn/JR+go5g28lwKlqpdpBOFI2wZtsbIq7hIVwGfPB9Vg1l3poKN3rYU17BPEW0eLTcpol1jzKNvFfpd2ltAdgw9CINluEkNC+QBexOQsgAdbTTYCQoArs37zLSuTzTchg0hvwdyPZgo6iKCWxytnimVgAzyMtA5mDme3KLbFqMHqIhLsTjeEpi2Vq8AOyiMVwRKvV4AhhiwNfJjwC0jOgJA+i5TJoEUQBCvg7MATHeDUwCGB9vVpwD3LkAZwG1qSQ0sB2BHFaRb5shzAD4eb7thCiNmASzsFcOjbV0eO/kM0CccHgzqUJKAJPwmAd7xRMnRZI5Gc+ohzF3XBYSumwEjt9wJbp8vihBoXjJu6fXA/uIpgGPi9kpxCjIBPHdDigFw8qIoi/AQsyvgRA6LRcwv8z9sCQKXCKWFw2HXEYSwl6/cvKptODdrNkJG93Vdr6vC2EucR0t/70+EWGVk30Otv3rF0SChWVGAhWjzuvoxGrCpN6pfKHWBd77vqFBfFHz3V8L7b7jXFwh9fYfH/bcc8Ht//AHmQiV+A4aXigAAAABJRU5ErkJggg=="}, "square/penguin": {"w": 64, "h": 64, "uri": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAMAAACdt4HsAAAA/1BMVEU1WWXr9vn9mQIzMzMqUF2NoKZlfoWsvsPa5OclJSXRz79EZGy+jjw1WWU3W2gzQEQlJSUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABmdTDcAAAAQHRSTlP+////////////////TM3/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwTQrcgAAAe9JREFUeNrtV9m2pCAMDM0qqN3//7XDKksAvc2Zt64nNaSoLJAjfI4TvsZ5fOCAJRxwrhEsuv/www//D4yxFTMIzrkA9pXZgivioLiZmwfuRpMEJbBZqMusuxuYvMACMYjSqnoMMtF7Iao1e3ql4y6yozBa3pSCo+BVqhj3gVFK+UAhCwLkZtdsb4UkuJ3BGwODZF2JBKjDJto93Ae+eSNV3RBFFhAXlTEwkQRcEpoYWPiaNtkkJlCRezNhKesRiERgXwWrBepIQKFLIBFBVWpTKIBuFgOBjmHaMujari/2mAPdbyP53izc8iDRWKQQlXG21AgDAntSOPfPzm9/eewhButkjanhdbePMmyvmtcF013QqUJ5mAp/xyBagqYKAvHvJcELSWjKGGIcCnB5QCsA1ami31uCOkp0FqoYXIJeDZpEc3wxqjrBmCDXuiOgzEIoUI8A+DAD+VJN9ynKQQhUje7ccObKW3/H/nE0iNnguZ4M19lf8zxN5rMpd6byF7T31l41+9OIbDvfFW7RvzsLRtCELDFIQlYY0MmeNzBMDwWCuCeoh3QLdS9AkinkXRCC3EB8W4FnlWC3ApqR97SFSuhFAXMJ8gmBXCjBTSFmTTxu6LN7MZOn7XiWP98PI6hiOCD//jP5lODq5/P4/APEmBC25WG2dwAAAABJRU5ErkJggg=="}, "square/pig": {"w": 64, "h": 54, "uri": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAAA2CAMAAABAzG8wAAAA/1BMVEXtnu0AAADZh9n0o/TMdcw1NDX/f//snewoLSjtnu3PF8/jjeOeZp7aiNr8p/zWhNa3frfbiNueZp7Zh9nah9rZh9n/wf/mlebuYO7VgtXjjePrm+vOd87snuwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADWzK0UAAAAQHRSTlP+AP3+//8Cu//cAf//0AMR/5ECdE6nAQ8DOBKGG1wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwUchwAAAAg9JREFUeNrtlmuTqjAMhpNGKi6UgiDqXv7/3zxpUxBYKAjfds47zrhjkodc2rCA2OJ3ZZQyVWMRC1wRO9hG/L85FAGvV2tAsTJlaovFR1QF2tqwKwuMvV4dAG8+Xn5r1jJozMv7xsFQYJOpl7LqbvWi7L0aOTdYgEYjv4GI4BIRm0UCMKgBnxJPIiZE1duF8OQeSAd69EYRhC7AZ2jILoBSn9AcAzQQ2roTkFVgjmXQn4q9APUf4O7f0SnUx85BDfZYBhawPnKZaoQH1q6TewCganwAanze9gFuTw4G5L2G9n7pARRBUW+ky936UAag5lV9ps7FLaflx3Z8OvOG1ygAxEcbAKQSlponUMm2XIqlc/vwoQLQIQOCJE34M0ugMnXGPABQzwHy1GWQJjRTNSReaUmLACmgd+rrHcIDfQFQpgGQ+/0N6sQKM+4A0qIFQD4AhHAvH5Kkg/Q2AAbxnrAJoAY+w3hHePUAKDKFJHXKibLTWH7ETklkCi6HnM9KOSkgpMB4NqrYOehenfy401QvYxTQnZrMzy883P8xvq+rAOWT9oW4C6R2AUAqcZHvZwDSt8xHktoH6JrgvyYXdA3ga5iM8U3AZI5quhzWADA5itOluw4YE34t7Q2AwX2eWfpbAH6jyFtrhr4F0P9TOWfZBoi8Yv4coNgDKEaAH3qLQPQzAqBuv94hEH21UgH+AzGCHOCeAslyAAAAAElFTkSuQmCC"}, "square/rabbit": {"w": 42, "h": 64, "uri": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACoAAABACAMAAABbchVVAAAA/1BMVEXS0NC8vLzKyckAAAD9/f3uoO5VNAutrKy+vb3///+rqqpKJgB9Zkvum++ViYm8vLy8vLy7u7vq5enAvr27urq6urqViYm8vLzIx8bU0tLhsd7Ozc3GxsbGxcXU09PIx8fRz8/U09MAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADO24QTAAAAQHRSTlP+/f4A/////wcBBP///wLTjk3//28u/67Ob/81DLgGlHvRAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAi5JWIwAAAjhJREFUeNrtVmmzojAQnJlwJBDAB4Kivuv//8mdHBwJcdfaj69el1rY6fR0JgEFIVoxvtP1TVTiiErIT7yeheJrEKp9dIREZyETyvFqxqwPsOBMyEholRjJjFEnlXPtrBQpzqCU3A8Bz0QHItm2YfkL+aETVwQp3mjRXgLbKhqBJeohgmolrtLOdECK0ybtPrYEgUdXCQXtTrrvQqs2U74wUhlIuStqMd3zR6lJK31Ld6Ze2obSzvdrn9RI5cEVaXRNUKoLHJQIm+WardzmB2zH7H4L1lTRopYtiOa7hYWLWja2Xc/AzqAKS7l+w8EAH0JF9f3J4pvgckxQdQGHI8tAfKjI4SQfMgqFDz7bHCDOZU7RmaL83GkQ9/mTQszz/B4y13m+C/iCF/EFBOa1B8Ezil4zJfjFf8Fs4Gtkss+Ubv6kJ4poglLr4UDquq51TE5MFhhoeXpdFEU97VmuURhSR1JtpIVezw+RNTVkMYQGTlq4tERLfUuWT6RAt5xx21zrSFoWvALOCpQ3Tc7v5sbXlgyz8pdBa22m35rcw8SdtJ7SzefPTfrk5JPbwj7LMi9t8izrLZuckBnkzaJkpI8KUZ95LcMps55iXyotkLygd7MIHR9IBwYPeOkCLAczQomkfajMjHn6ZCNGroRDogEu1iGAXUCkNFRc33YASzzU922NwCum1I6thXFTPrsJbQTgiGin9c+ff3a1bjtw/f6XpwHY/0D/0v0gXF/77SAW3r9f0RJ83/8Anz4deN+xnUsAAAAASUVORK5CYII="}, "square/snake": {"w": 54, "h": 64, "uri": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADYAAABACAMAAABm4HQzAAAA/1BMVEVmyzN42kcAAAAzMzNs0znUMAZWojDUMAb///9+8kz///9520iu7Y3jGwN+8kxrlS914UlWSivjGwNjtzb////UMAamNBNkyjKu7Y1mzDP////jGwP///953Eh73Ep62klmzEF520fUMAaCMR101kN63Un/////zMxmzEFrlS8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACd7tZRAAAAQHRSTlP+/gD//v3/u/3/Aoz+AgT6///+/3ALA4kCBUW5gkOkBv/SegIldzwFBQgAAAAAAAAAAAAAAAAAAAAAAAAAAAAACF9tCwAAAZ5JREFUeNrdlYlygjAQhpd1m1SptDSAeB/VHu//gg0hIEeCJGNnnH7D6MC/XzYmgLBcEDhCiyW4W4UHDwARBQXye7wTtCEPZ5Rplm6KgR0/jbxmSR6LQh5bQASPCxG5zo881sPrnvTfAKf7ytqPnNbxUfd6cH9tIQFjDCwiCUtIYlIQGzOIVSgM2URjambNiFVR3BuS4ipjZNUm9mZ/oDlNEvRiyaU0MJAJlTHzvqm5xMKcMWHdbpD7fc+b6x7/h93XwkArCm5A7opBpW5CA6eV2WsknyxxPSseNEPL/jwYa1S2ThrvQIumr8N47dDVDqO0olY0fpqxJPDiX2tHH+sI22CqIc10+tbimlSlwRbwfAkVuxdNGL62CMMq2ZWVlzNCjhXJsyJBXL83WNfJpi7NAfNIsdyXaYI/EX9qwCOdbDD6LmtzhHoEnBVpgrMM2xrOv3Qyq2sbmvRWK/kx72ny4ueqabU0mRaHQdOJRSsH1BpPU15rrVY9TVFqPEVUXql1sGnSyjLluWg8ww+UR8ZHaymepDUvR8j4SV7oab+7ZxyEe9ePJQAAAABJRU5ErkJggg=="}, "round_simple/elephant": {"w": 64, "h": 64, "uri": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAMAAACdt4HsAAAA/1BMVEXS0NAAAAC8tbXOzMz9/f0zMzP///8qKirg39/GxMTAublxcXHk4+PQzs7T0tLPzc3T0dGupqbT0dGupqZAQEDT0tLPzc3U09PT0tLT0dHPzc1xcXHOzc3Qzs7Aubm2trYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOZTcVAAAAQHRSTlP+AP79//8B//4K////j5PUsAPS//9ubBArUk4CLrIDBwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAs2S5EQAAA3RJREFUeNqdV4mWqzAIRakxUWtdq93e/P9fPpK4hBi7yPTMTAVuCCALRBsSin4N4+1cNQ0gQtNU59s40EP12EqD/+AhSPBWNuBRU94IQ4hPAHT6WAJIAKTPROYLPSqJK94C6NNLEkUIkoRy8CGAH//op8NDZMzoa21lGEBEz0Zqt+0S8WTzZDasAOSfHt6qTxBwdX0Jjn65a7x3kdJBgEW/ruQ3+hpBVvWCALP+g/S/Jlk9ZgSYk+8XfY0w3wKm+J1/0ieE8xRNsPG7ws90tdEEG3/4zn8sFjYfCEDUqvlVXyM0f7UwADU5AH+/Aspr9E8DCDECHAEAGCkSQAa8JBwhpEjUEdTRCIeJ/Ai/pwBPBqDPEQ9YL6AiH9yP6muEOwG85HEfyDKCAY9bAHBRMHoF52NF4gJP6L169daluEpN369wZuy4bd9ciVhtG7MjSljfI2LnaZp28X5ZjzsSyNFRudDPIo5dmiRJmmRhBNJPjEC3ajB1yDWbBPI9gICA6w/sEktpG0JAaNNJoAv5yeGHTVgM2DnB5X8EyJnpW34XjkIXAECYrxM4AHEdEMIWoBMHClKasitiFk+U2RljdVK8KDl5QAJJasjgr+oWQovklp+0q86LctFJlLzrurw1X2KPzFVbI+Cmaklvg5sU80AEmQ+QeQKTRs9eZ9THFEYq3pBWlYX2mxvjEYYLC3Zx0lRkW4BsYrG3uaGi6hZlPM209cHKYmVZF9WA/umU7ek7CLaoKvTst1RwAMZagnhRbmNBOJ32TMgYaw4DtVcFYuksyIS4FzivmGunotZGU4Lt7p4B7yywJujmqrvzQyjPA4UMZiJA4XlhMO2dUHpjwsSUJttCqawzaQ2EHjDshBLV4qLTizkoaMF6Ty3/oulgHrLG+QbFUii8PMiQxVrLDUKsY97dXqFw0jRkwIJAf+/rmGcHTW2dk6W7ADrcxgGKj7rngvfNUEFZG2wxD6rLsF1HpTes444B01zAh227LnCEXQDUL2EtNgtHrQdm/AxgVpZaBHYmEwsMxiFjI8TdXZqALW2qciAwYAD9Uym2trG1j0bfWyNhD8DsbDcjtrd40t6rzOZozsqcG1iIplf+9uuvvsQd+spun8h6goSq/7j6RtN6PRKGsTkjsk6p+mf0zfJt0lJLDbe+rC6GqrLXm/vE8AD+Ay3jJx7HFrDSAAAAAElFTkSuQmCC"}, "round_simple/panda": {"w": 64, "h": 64, "uri": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAMAAACdt4HsAAAA/1BMVEX+/v4AAAAnJibs7Oz+/v4ZGBj9/f2bm5v+/v77+/s4Nzf9/f2ysrL7+/umpqZMS0v9/f3d3d1paGiPj4/u7u7IyMjp6ens7Ozu7u7t7e3v7+/d3d3IyMjv7+8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABcikeVAAAAQHRSTlP+AP/+BP+R/9Bu/y3/rP//VP///9X/EkIuvHMHBJoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB4mj9gAAAqZJREFUeNqtV4uSqyAMTQUE8YV22929j///zQuoGDSxrr1nps50IIe8CAncdpAyfGpXtsaAhzFt6Wq5rGwAlLh0ZRTFMKWTFAXsxesSGJQERU4QNrDiiYInkLc/FbxAJXMGyORrAy9h6owBsPkVnEKFHQFIvoSTKBEDJHnZwmm0MjHAFXnMAIv+P5L3DIsVM8F5+5EfVoLT/t/EYiHw8YcLmPIBggOe5gqB+R3cAJccgIwAr0ANF1F7FTzBTyOYRwIuejD5ES57YFbBmwBvIPjAvUPgPEH7DkHpnfiOPBgJmxgMnW4Et100uhs2cYD8Gt0LpVShaXkdF+95NgIOouhVEaBIBj0v9ljDEtA9Enba4kFYIey8pixaNZigT/Kq2xM062qPCZD9aQdpg0bLd9LFxQrVHGlAm5htsNQJFh3QwZGKalVADINYT1BHJsKQxO0s34zxUDsu/+1CoR6Uil3IE1X0C/uYtqtx0bKf9mALcB50GqVqpyibh7CHy4Mcd0xwZ28TsPWI1mB3n4F9kwYU9mJgSzvwJXVcozbyZRUk64Tlbm7u37agMEVZRIaJIMoLrqSRRbWxfYrEHIHeNkxRlWRWq/4hBj1lohbi4c2h8je+THsbBl9ZVGGLcH74FSGHszqCHhZJqfBYapMal1go+6AUCC8T5UYxxqS3XmttY/qPgnlcQ4NG5pFP+vnMRuuGzCQZn/drHRJqMIIK11ocObc4bzdZgcFdeZjl/2s0D1p1IV407HDQ7IuEg4Yf2HFBZGAHBmAGFrEDM7JkI487kEcMjhx5YizS1HFA0Epm6JrGRmc4+YnBuBs/9kUzZHVEUD23o+t2dg6TadUKMgqm2s2tzPB9+5o4cFTa6ut2YvieJzj/fX5W5fdHxPffX5/PtLAh+AfNRRel+gIsPQAAAABJRU5ErkJggg=="}, "round_simple/pig": {"w": 64, "h": 64, "uri": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAMAAACdt4HsAAAA/1BMVEXtnu0AAAD1o/XMdcwzMzMoLCjfkN/8qPz/f//////snuyuc67tnu3Hhcfom+jzXfPsnezsnOxOQU7tnu3woPDuoO7HhcfxoPHxofF1JHXsnezyofLxoPHfkN+uc651JHUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1zoEfAAAAQHRSTlP+AP3/////BgIBkf/S/xQBbCz/q29UA7OT/0/TLQwCBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHko7nQAAAwtJREFUeNqll+2isjAIgBmWm2aaR03LOu/93+XLNqfOYWpnP/oQeGJAG4AIllL65dWkVZYBrSyr0uYlnWSxYPnglzRl0/WA3oK+a7Qk2QLchXh11sRb5lGXE+IjgFzMu8B4BtEItQ64i3/1qvmAqH+1lzxAirL/ZG4RfeltYwIkSty2zC3iJlQSApJEpHvsNSHV2gtAkhTVLnODqIqRAM5/1e62J0Kr3C4sILmL6oC99sHVFAz5Tw/ZEyEd6gFs/m54FEC5kA6gRHnUXhNKkVhAId/ZYXsiZO97YQDycAAGgtkEUFV9sYFhE1S9IIqDGfQyIQVI8aUDNo4K7l9GwBUDiBy+B0BOMXh+bU+EhgDVXwCpgD/sQBdTDiX6J+926OdKWMJt/Ibx5XKJt85ET4nOWBiTiJfT+Xw+XT4SlkqYgvsf4YUEJxJ/IgRKmDkAxictIuFpfRehEgGGJODDikj4WIR19jVQmgIIP6PsxzH1Wzx+4pVGwNWJSHhFqx5Hw4qtNqM0j84kMxHC0dwgkFWathHIfHtLYAC4BljaGwIPcHUwjw9jb33wlBZ1cB2E5x8dnohZgZIFuFJGeJgqfQCyDthNzJRcKd+mP0Z8vV5jk/Mo4l3wlOzRDq+p0lzZ4RoAl39nxBfk4a1kAfG8kOIREBwozKFsQhDrH3K/jMMj7kgTDQ+I0LmifxgjHqAPVRl4Ntm5D7MnviLdTExvMbgO1nG9GYh4gL5YlJDhSTrELvbfw/NV6puJud1XC4m7XOl6z4POGlbLwHMgN9e76ZB2uBA6MDQY1OLIbJsQ2mdSFutNFneghM3B1OY9cSWX6/bPqc3TgwJT0MGhusjAfdapFmyn5rxirlydwcJrtvleD1cubG2fLNp9tXdcsAODSpYDR7G7YTZtchGOPAWXC9b+ObP3hi4l8nZ76Gpzb/Dzxj5KbNN/Hvv6ZjF7+oPnrxLv+sPg2dfv+cTGjb5Ef9ctO/pCS+Ybo6+tCBqf63YxfGNbl2LP8G1KQmvJ562j+V+vqqufdvpPwvH/P7S0Ihg2oZAPAAAAAElFTkSuQmCC"}, "round_simple/rabbit": {"w": 64, "h": 64, "uri": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAMAAACdt4HsAAAA/1BMVEXS0NAAAAD+/f7Pzc1UMwr///+4t7bunu7h3d+trKxOKwPuoO6+vr7T0dHl5OPT0dHPzc3LycmrqKbT0dFwVjbT0tLT0tLRz8/T09OvjqTPzc3T0dGvjqTPzc3Pzc3jr9jjr9jQzs4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwM5/9AAAAQHRSTlP+AP/9/wH///7///8E0v+UjxQDrv9vK9IO/2tSAlIu/wO1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAg3DB+AAAA4ZJREFUeNqlV4uSqjAMTQ1FQAsCgiiou///kzcpFOkDlb2ZXWdocg5p0tAEhCfySD9d259qpQARlKpPfdvR4nHwrcFdGKQQZV8ocEQVPXFI+YmA3t4WAAkA0t8k+oGWipIo3hLw2wsyRQhKAkXnUoD9+qGZXh4S7UZTsZdhAikeKuGwrQrpEvWwfHgRUHwaeAufKOC2jCUs8MXq5u2NJMWCAWZ8VX+F1wx1NTOAwQ+E/1qSejAMYA7fFjwzmF3AlL/TJjwxnKZswpi/20Y8MdzGbMKYf/guftahGs8DEciqVFvxzKCOldQEFQVgM54YaBM/TCBlC/AXAoCWMgHkwG8CfxGkTFQCKtHCn4XiCN4RwDf15Oj4MIAo7Qjg/BPataVCwI5icHdSEKdpmIHs0zS2Ge5EYBUBwjXKsnMcYECIz1kWXZcqKmzocLFC+CyKouwcfH+kdemSQZXQOkZasqvnAsI5i3zyB9zsDWTRZIW+AxP5wgUkeBF4Cwk6DBSBKORdAcoKwUwwhtHcK6xKM5+AKipMkEUa/jzsWQ5P7UGQ4OL5qSOtjZ4jmkkOqMnHDKF3uKxQncnonPLDYT86QPj9kxeurLvi29LlezSOx80buCYYr9g4xk+lb0IGeb70IMkXqkCFOBWHsGPZv3zgx3xOib3pAEWu8bvJBQrjtBA635QHtF5OMpkzw5iExCyg4wTDLYJ4FDAUic7h9JAb/ctpJrCOcmok3nkSz8rlnguqBtcD+k3RJ8BUq7QHy2LyP6kcrV1AQGfCMW6hu7inIOd/H6+X3aRdOnA+yuw/bzO0BY5N7H6W6aNq47VVHCCAWHPbDPxRLdHCEzjfrUhOJBYDlsK5WJDVu1WhIC3x+mKR9s2iq82CWA+OaUlXG3UJ7u2+YIBlPF0zcoBv50GWfo3kU9xS3jSYk+zalXLQHYpovAZDHwjUCTFhcysZk0aMHYqo5CX4WTBJDd7YVEeympus1R4F1y577k9Mk8UM9+3Nxf3V5v1/o8mt7infgs8JL61mu/qy2Z8b/kq67f7XDPbA8Bo4KnGD7wYOGlkqGZiZOBfJ55EnMfH3h66jKOsPUxPp6tIa26yxj1rfXiXvZ7Zem60NnjT3lnpyDNzbnHzVlO70646+pO2a2oy+41E2o2/dfBx9xTRet8ThSN08xDfDtz6WbNX1TfGr1OWi1G/R8OQ+KRyCfwqLKIZEJA1zAAAAAElFTkSuQmCC"}};
+
+/* ---------- shared svg icons (2px stroke, lucide-style) ---------- */
+const I = (d, s=14, c="currentColor") =>
+  `<svg width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="${c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
+const ic = {
+  search: d=>I('<circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>',d),
+  layers: d=>I('<path d="m12 2 9 4.5-9 4.5L3 6.5 12 2z"/><path d="m3 11.5 9 4.5 9-4.5"/><path d="m3 16.5 9 4.5 9-4.5"/>',d),
+  folder: d=>I('<path d="M4 5h5l2 2h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z"/>',d),
+  image:  d=>I('<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 21"/>',d),
+  film:   d=>I('<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 3v18M17 3v18M3 8h4M3 16h4M17 8h4M17 16h4"/>',d),
+  grid:   d=>I('<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',d),
+  dl:     d=>I('<path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>',d),
+  refresh:d=>I('<path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/>',d),
+  alert:  d=>I('<path d="m12 3 10 17H2L12 3z"/><path d="M12 10v4m0 3h.01"/>',d),
+  zap:    d=>I('<path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z"/>',d),
+  plus:   d=>I('<path d="M12 5v14M5 12h14"/>',d),
+  x:      d=>I('<path d="m6 6 12 12M18 6 6 18"/>',d),
+  play:   d=>I('<path d="m7 5 12 7-12 7V5z"/>',d),
+  minus:  d=>I('<path d="M5 12h14"/>',d),
+  fit:    d=>I('<path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3M3 16v3a2 2 0 0 0 2 2h3m8 0h3a2 2 0 0 0 2-2v-3"/>',d),
+  cmd:    d=>I('<path d="M9 9V6a3 3 0 1 0-3 3h3zm0 0v6m0-6h6m-6 6v3a3 3 0 1 1-3-3h3zm6-6h3a3 3 0 1 0-3-3v3zm0 6v3a3 3 0 1 0 3-3h-3zm0 0H9"/>',d),
+  copy:   d=>I('<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/>',d),
+  eye:    d=>I('<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/>',d),
+  eyeOff: d=>I('<path d="m3 3 18 18"/><path d="M10.6 5.1A11 11 0 0 1 12 5c6.5 0 10 7 10 7a17.8 17.8 0 0 1-2.4 3.3M6.6 6.6C4 8.3 2 12 2 12s3.5 7 10 7c1.4 0 2.7-.3 3.9-.8"/>',d),
+  list:   d=>I('<path d="M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01"/>',d),
+  sort:   d=>I('<path d="M11 5h10M11 10h7M11 15h4"/><path d="m3 15 3 3 3-3M6 4v14"/>',d),
+  box:    d=>I('<path d="M21 8v8l-9 5-9-5V8l9-5 9 5z"/><path d="m3 8 9 5 9-5M12 13v8"/>',d),
+  chevD:  d=>I('<path d="m6 9 6 6 6-6"/>',d),
+  chevR:  d=>I('<path d="m9 6 6 6-6 6"/>',d),
+};
+
+/* ---------- shared chrome builders ---------- */
+const kbd = t => `<kbd>${t}</kbd>`;
+const menubar = (right) => `
+  <div class="mbar">
+    <span class="mi">File</span><span class="mi">Edit</span><span class="mi">View</span>
+    <span class="mi">Atlas</span><span class="mi">Help</span>
+    <span class="sp"></span>${right}
+  </div>`;
+
+function sect(title, extra="", cnt=""){
+  return `<div class="sect"><span>${title}</span>${cnt?`<span class="cnt">${cnt}</span>`:""}${extra?`<span class="act">${extra}</span>`:""}</div>`;
+}
+function row(o){
+  const cls = "row"+(o.sel?" sel":"")+(o.multi?" multi":"")
+    +(o.ind===2?" indent2":(o.indent||o.ind===1?" indent":""))+(o.dim?" dim":"");
+  const lead = o.thumb ? `<span class="ic thumb"><img data-spr="${o.thumb}" alt=""></span>`
+                       : `<span class="ic">${o.ic||""}</span>`;
+  return `<div class="${cls}">${o.chev!==undefined?`<span class="chev">${o.chev}</span>`:""}
+    ${lead}<span class="nm">${o.nm}</span>
+    ${o.aux?`<span class="aux">${o.aux}</span>`:""}</div>`;
+}
+
+function leftPanel(cfg){
+  const filter = `<div class="filter">${ic.search(13)}<span>${cfg.filterText||"Filter sprites"}</span>${kbd("Ctrl+F")}</div>`;
+  return `<div class="lp">${filter}${cfg.body}</div>`;
+}
+
+const gcard = (key,nm,o={}) => `<div class="scard${o.sel?" sel":""}">
+  ${o.badge?`<span class="badge ${o.badge[0]}" style="position:absolute;top:3px;right:3px">${o.badge[1]}</span>`:""}
+  <span class="th"><img data-spr="${key}" alt=""></span><span class="cn">${nm}</span></div>`;
+function projectTree(cfg={}){
+  const mode = cfg.grid ? "grid" : "list";
+  const hdr = `<div class="sect"><span>PROJECT</span><span class="act" style="display:flex;gap:7px;align-items:center">+ Atlas
+    <span title="Sort: name" style="display:inline-flex;align-items:center">${ic.sort(12)}</span>
+    <span style="display:inline-flex;gap:2px">
+      <span style="display:inline-flex;padding:2px;border-radius:4px;${mode==="list"?"background:var(--sel);color:var(--t1)":""}">${ic.list(12)}</span>
+      <span style="display:inline-flex;padding:2px;border-radius:4px;${mode==="grid"?"background:var(--sel);color:var(--t1)":""}">${ic.grid(12)}</span>
+    </span></span></div>`;
+  const eye = (hidden)=> cfg.eyes || hidden ? " "+(hidden?ic.eyeOff(12):ic.eye(12)) : "";
+  const atlasRow = (nm,cnt,o={}) => `<div class="row${o.sel?" sel":""}${o.dim?" dim":""}">
+    <span class="chev">${o.exp?"▾":"▸"}</span><span class="ic">${ic.layers(14)}</span>
+    <span class="nm">${nm}</span><span class="aux">${o.badge||""}${cnt}${eye(o.dim)}</span></div>`;
+  const files = cfg.grid
+    ? `<div class="sgrid ind">
+        ${gcard("square/elephant","elephant",{sel:1})}
+        ${gcard("square/giraffe","giraffe",{sel:1})}
+        ${gcard("square/hippo","hippo",{sel:1})}
+        ${gcard("square/monkey","monkey",{badge:["alias","⧉"]})}
+        ${gcard("square/panda","panda")}
+        ${gcard("square/parrot","parrot")}
+        ${gcard("square/snake","snake",{badge:["warn","⚠"]})}
+        ${gcard("square/penguin","penguin")}
+        ${gcard("square/pig","pig")}
+      </div>`
+    : row({ind:2, thumb:"square/elephant", nm:"elephant.png", sel:true})
+      + row({ind:2, thumb:"square/giraffe", nm:"giraffe.png", multi:true})
+      + row({ind:2, thumb:"square/hippo", nm:"hippo.png", multi:true})
+      + row({ind:2, thumb:"square/monkey", nm:"monkey.png", aux:`<span class="badge alias">alias</span>`})
+      + row({ind:2, thumb:"square/panda", nm:"panda.png"})
+      + row({ind:2, thumb:"square/snake", nm:"snake.png", aux:`<span class="badge warn">⚠</span>`});
+  const animalsBody = cfg.expand!=="animals" ? "" :
+      row({ind:1, chev:"▸", ic:ic.folder(14), nm:"round/", aux:"10"})
+    + row({ind:1, chev:"▾", ic:ic.folder(14), nm:"square/", aux:"10"})
+    + files
+    + row({ind:1, chev:"▸", ic:ic.folder(14), nm:"round_simple/", aux:"10"})
+    + row({ind:1, chev:"▸", ic:ic.folder(14), nm:"round_outline/", aux:"10"})
+    + row({ind:1, chev:"▸", ic:ic.film(13), nm:"Animations", aux:"2"});
+  const enemiesBody = cfg.expand!=="enemies" ? "" :
+      row({ind:1, chev:"▾", ic:ic.folder(14), nm:"boss/", aux:"12"})
+    + row({ind:2, thumb:"round/panda", nm:"boss_idle.png", sel:true})
+    + row({ind:2, thumb:"round/parrot", nm:"boss_walk.png"})
+    + row({ind:1, chev:"▸", ic:ic.folder(14), nm:"minions/", aux:"22"})
+    + row({ind:1, chev:"▸", ic:ic.film(13), nm:"Animations", aux:"4"});
+  const rootRow = `<div class="row" style="font-weight:600"><span class="chev">▾</span>
+    <span class="ic">${ic.box(14)}</span><span class="nm" style="color:var(--t1)">showcase</span>
+    <span class="aux">4 atlases</span></div>`;
+  return hdr + `<div class="rows">` + rootRow
+    + atlasRow("animals","60",{sel:cfg.sel==="animals", exp:cfg.expand==="animals"}) + animalsBody
+    + atlasRow("enemies","34",{sel:cfg.sel==="enemies", exp:cfg.expand==="enemies"}) + enemiesBody
+    + atlasRow("ui","128",{dim:true})
+    + atlasRow("effects","12",{badge:'<span class="badge warn">2</span> '})
+    + `</div>`;
+}
+function toolbar(cfg={}){
+  const mode = cfg.mode ? `<div class="seg">${["Result","Explain","Diff"].map(m=>
+    `<span class="sg${m===cfg.mode?" on":""}">${m}</span>`).join("")}</div><div class="vsep"></div>` : "";
+  return `<div class="strip">
+    <span class="btn primary">${ic.grid(14)} Pack ${kbd("P")}</span>
+    <span class="btn">${ic.dl(14)} Export ${kbd("Ctrl+E")}</span>
+    <span class="btn ghost">${ic.refresh(14)}</span>
+    <div class="vsep"></div>${mode}
+    ${crumbs(cfg.crumb||["Project","animals"])}
+    <div class="vsep"></div>
+    <span class="btn ghost">Native ▾</span>
+    <span style="flex:1"></span>
+    <span class="btn ghost">${ic.minus(13)}</span>
+    <span class="btn ghost mono">45%</span>
+    <span class="btn ghost">${ic.plus(13)}</span>
+    <span class="btn ghost">${ic.fit(13)}</span>
+    <span class="btn ghost mono">1:1</span>
+  </div>`;
+}
+
+function statusbar(left, right){
+  return `<div class="statusbar">${left.map(s=>`<span class="st">${s}</span>`).join("")}
+    <span class="sp"></span>${right.map(s=>`<span class="st hint">${s}</span>`).join("")}</div>`;
+}
+
+/* ---------- packed canvas ---------- */
+const PLACE = [
+  ["round/elephant",  14, 12, 1.35, {sel:1}], ["square/panda",   160, 8,  1.3],
+  ["round/pig",      300, 14, 1.25], ["square/parrot", 428, 10, 1.3],
+  ["round/rabbit",   558, 6,  1.3], ["round/giraffe",  10, 120, 1.3],
+  ["square/monkey",  140, 132, 1.35], ["round/hippo",  290, 118, 1.25],
+  ["square/elephant",422, 128, 1.3, {rot:1}], ["round/panda", 552, 116, 1.28],
+  ["round/monkey",    16, 238, 1.3], ["square/hippo",  150, 232, 1.22],
+  ["round/parrot",   278, 226, 1.3], ["square/rabbit", 408, 238, 1.35],
+  ["round_simple/pig",540, 236, 1.3], ["square/giraffe",  12, 352, 1.3],
+  ["round/penguin",  152, 350, 1.28], ["square/snake",  288, 344, 1.3, {rot:1}],
+  ["round/snake",    420, 352, 1.28], ["round_simple/panda", 546, 350, 1.3],
+  ["square/pig",      16, 470, 1.3], ["round_simple/elephant",150, 468, 1.28],
+  ["square/penguin", 284, 462, 1.3], ["round_simple/rabbit", 416, 470, 1.32],
+];
+function hullSvg(w, h, color, square){
+  if(square) return `<svg class="hull"><rect x="1" y="1" width="${w+2}" height="${h+2}" rx="2" fill="none" stroke="${color}" stroke-width="1.5"/></svg>`;
+  const c = Math.round(Math.min(w,h)*.26);
+  const p = `${c},1 ${w-c},1 ${w+2},${c} ${w+2},${h-c} ${w-c},${h+2} ${c},${h+2} 1,${h-c} 1,${c}`;
+  return `<svg class="hull"><polygon points="${p}" fill="none" stroke="${color}" stroke-width="1.5"/></svg>`;
+}
+function packedPage(opts={}){
+  const {x=90,y=36,size=640} = opts;
+  let out = `<div class="page-area" style="left:${x}px;top:${y}px;width:${size}px;height:${size}px">`;
+  for(const [key,px,py,sc,fl] of PLACE){
+    const s = SPRITES[key]; if(!s) continue;
+    const f = fl||{}; const w = Math.round(s.w*sc), h = Math.round(s.h*sc);
+    const st = opts.styler ? opts.styler(key,f) : {};
+    const color = st.color || (f.sel ? "var(--warn)" : "#4a7fd6");
+    const extra = st.css || "";
+    const rot = f.rot ? `transform:rotate(90deg);transform-origin:center;` : "";
+    out += `<div class="spr" style="left:${px}px;top:${py}px;width:${w}px;height:${h}px;${rot}${extra}">
+      <img data-spr="${key}" alt="${key}">${hullSvg(w,h,color,key.startsWith("square"))}</div>`;
+    if(st.after) out += st.after(px,py,w,h);
+  }
+  out += opts.inner||"";
+  return out + `</div>`;
+}
+
+/* ---------- right inspector ---------- */
+function inspector(cfg={}){
+  const mod = cfg.modified!==false;
+  return `<div class="rp">
+    ${sect("ATLAS SETTINGS · ANIMALS", "", "")}
+    <div style="padding:4px 0 2px">
+      <div class="prop"><span class="lbl">Shape</span><span class="val"><span class="well dd">Concave contour</span></span></div>
+      <div class="prop"><span class="lbl">Max page size</span><span class="val"><span class="well dd">2048</span></span></div>
+      <div class="prop${mod?" mod":""}"><span class="lbl">Padding</span><span class="val"><span class="well">4</span><span class="rev" title="Reset to default (2)">⟲</span></span></div>
+      <div class="prop"><span class="lbl">Allow transform</span><span class="val"><span class="check">✓</span></span></div>
+      <div class="prop"><span class="lbl" style="color:var(--t4)">▸ ADVANCED</span></div>
+    </div>
+    ${sect("REGION", mod?`<span class="modchip">modified · 1</span>`:"")}
+    <div style="padding:4px 0 2px">
+      <div class="prop"><span class="lbl">Final name</span><span class="val"><span class="well">square/elephant</span></span></div>
+      <div class="prop"><span class="lbl">Pivot X · Y</span><span class="val"><span class="well">0.5</span><span class="well">0.5</span></span></div>
+      <div class="prop${mod?" mod":""}"><span class="lbl">Slice9 L R T B</span><span class="val"><span class="well">8</span><span class="well">8</span><span class="well">0</span><span class="well">0</span><span class="rev" title="Reset">⟲</span></span></div>
+      <div class="prop"><span class="lbl">Packed</span><span class="val mono" style="color:var(--t4)">383×306 @ 428,128 · rot</span></div>
+      <div class="prop"><span class="lbl">Modified</span><span class="val mono" style="color:var(--t4)">2 h ago · added 13.07</span></div>
+    </div>
+    ${cfg.extra||""}
+    ${sect("EXPORT","rules → Project")}
+    <div style="padding:4px 0">
+      <div class="prop"><span class="val"><span class="check">✓</span><span style="color:var(--t1)">Defold</span><span class="badge" style="background:rgba(61,140,212,.13);color:var(--acc)">project</span><span class="mono" style="color:var(--t4)">assets/atlases/{atlas}/</span></span></div>
+      <div class="prop"><span class="val"><span class="check off"></span><span style="color:var(--t3)">JSON-debug</span><span class="badge" style="background:rgba(61,140,212,.13);color:var(--acc)">project</span></span></div>
+      <div class="prop"><span class="val" style="color:var(--t4);font-size:12px">path override: —</span></div>
+    </div>`+`</div>`;
+}
+
+/* ---------- problems drawer ---------- */
+function problems(open){
+  const head = `<div class="phead">${ic.alert(13)} <b>1 problem</b><span style="color:var(--t4)">· click to ${open?"collapse":"open"} · ${"Ctrl+Shift+M"}</span></div>`;
+  if(!open) return `<div class="problems">${head}</div>`;
+  return `<div class="problems">${head}
+    <div class="prow"><span style="color:var(--warn)">${ic.alert(13)}</span>
+      <span>snake.png — trimmed to 4×62 px; nearly empty after alpha threshold 12</span>
+      <span class="fix"><span class="btn">Select sprite</span><span class="btn">Set threshold…</span><span class="btn">Exclude</span></span>
+    </div></div>`;
+}
+
+/* ---------- screens ---------- */
+const screens = [];
+
+/* 1 — first run */
+screens.push({
+  id:"start", tab:"1 · Старт",
+  notes:[
+    ["Пустое состояние учит первому действию: и мышиный путь (drop), и клавиши. NN/g: empty state — самый дешёвый онбординг.",""],
+    ["Золотой путь «60 секунд до атласа» показан прямо на экране: drop → P → Ctrl+E. Это же — наша UX-метрика.",""],
+    ["Недавние проекты — прямо на старте (сейчас в приложении нет ни Open Recent, ни persistence).",""],
+    ["Статус-бар с первого экрана подсказывает горячие клавиши по ховеру — UI сам учит шорткатам (Blender/Linear).",""],
+  ],
+  html(){
+    return menubar(`<span class="proj">untitled</span>`) + `<div class="cols">
+      ${leftPanel({body: sect("PROJECT","+ Atlas")+`<div class="rows"><div class="row" style="font-weight:600"><span class="chev">▾</span><span class="ic">${ic.box(14)}</span><span class="nm" style="color:var(--t1)">untitled</span></div>${row({chev:"▾",ic:ic.layers(14),nm:"atlas1",sel:1})}</div>`
+        + `<div style="padding:10px 14px 12px 30px;color:var(--t4);font-size:12.5px">No sources yet.<br>Drop a folder here, or use <b style="color:var(--t3)">+ Files · + Folder</b>.</div>`})}
+      <div class="cc">${toolbar({crumb:["Project","atlas1"]})}<div class="cbody">
+        <div class="empty-hero">
+          <div class="dropzone">
+            ${ic.folder(44)}
+            <span class="big">Drop a folder of PNGs</span>
+            <span class="dim">or ${kbd("Ctrl+O")} open project · ${kbd("Ctrl+Shift+P")} all commands</span>
+          </div>
+          <div class="steps">
+            <span><span class="kn">1</span><b>Drop</b> a folder</span>
+            <span><span class="kn">2</span><b>Pack</b> — ${kbd("P")}</span>
+            <span><span class="kn">3</span><b>Export</b> — ${kbd("Ctrl+E")}</span>
+          </div>
+          <div class="card" style="width:520px;padding:10px 14px;margin-top:12px">
+            <div style="font:600 10.5px/1 'Segoe UI';letter-spacing:.09em;color:var(--t4);padding-bottom:7px">RECENT PROJECTS</div>
+            <div class="row" style="padding-left:2px">${ic.layers(13)}<span class="nm">showcase.ntpacker_project</span><span class="aux">2 h ago</span></div>
+            <div class="row" style="padding-left:2px">${ic.layers(13)}<span class="nm">enemies_pack.ntpacker_project</span><span class="aux">yesterday</span></div>
+          </div>
+        </div>
+        <div class="marker" style="left:520px;top:250px">1</div>
+        <div class="marker" style="left:610px;top:475px">2</div>
+        <div class="marker" style="left:400px;top:545px">3</div>
+      </div>
+      ${statusbar(["● New project"],["LMB select · RMB menu · Space pan","<span class='marker' style='position:static;display:inline-block'>4</span>"])}
+      </div>
+      ${inspector({modified:false})}
+    </div>`;
+  }
+});
+
+/* 2 — workspace hero */
+screens.push({
+  id:"work", tab:"2 · Рабочее",
+  notes:[
+    ["Единое дерево проекта: атлас раскрывается в свои папки, спрайты и Animations — панель зеркалит канвас (Project → Atlas). Фильтр Ctrl+F ищет по всему проекту; списки виртуализированы: 60 или 5000 спрайтов — один UI.",""],
+    ["Превью по умолчанию: миниатюра у каждого спрайта и в списке, и в карточках; секция SPRITES переключается список ⇄ карточки, как в ассет-браузерах. Hover по строке → крупное превью 1:1.",""],
+    ["Сортировка — состояние вида: имя / размер / дата изменения / сначала проблемные. «Свой порядок» = папки: ФС — источник правды, порядок файлов в ней не переопределяется. Счётчики, бейджи, «alias» у дубликатов.",""],
+    ["Мульти-селект (Ctrl/Shift) работает и в карточках; из него создаются флипбук-анимации.",""],
+    ["Инспектор: изменённое от дефолта помечено акцентной полоской + ⟲ revert (Godot/VS Code), счётчик «modified» в заголовке секции.",""],
+    ["Статус-бар — кликабельные сегменты: fill% → разбивка по страницам, ⚠ → problems, stale → Pack.",""],
+    ["Problems-drawer свёрнут в одну строку над статус-баром; ошибка не перетирается тостом, а живёт до починки.",""],
+  ],
+  html(){
+    return menubar(`<span class="proj">showcase.ntpacker_project <span class="dot">●</span></span>`) + `<div class="cols">
+      ${leftPanel({body: projectTree({sel:"animals", expand:"animals", grid:true})})}
+      <div class="cc">${toolbar()}<div class="cbody">
+        ${packedPage({})}
+      </div>
+      ${problems(false)}
+      ${statusbar(
+        ["● Saved","animals · 2 pages","fill 87%","⚠ 1"],
+        ["<span class='mono'>512, 384</span>","45%","LMB select · RMB menu · Ctrl+Scroll zoom"])}
+      </div>
+      ${inspector({})}
+    </div>
+    <div class="marker" style="left:76px;top:48px">1</div>
+    <div class="marker" style="left:262px;top:212px">2</div>
+    <div class="marker" style="left:120px;top:244px">3</div>
+    <div class="marker" style="left:160px;top:330px">4</div>
+    <div class="marker" style="left:1198px;top:120px">5</div>
+    <div class="marker" style="left:420px;top:830px">6</div>
+    <div class="marker" style="left:150px;top:808px">7</div>`;
+  }
+});
+
+/* 3 — project overview */
+const ovMini = (key,x,y,sc=0.55)=>{
+  const s = SPRITES[key]; if(!s) return "";
+  return `<img data-spr="${key}" alt="" style="position:absolute;left:${x}px;top:${y}px;width:${Math.round(s.w*sc)}px;height:${Math.round(s.h*sc)}px">`;
+};
+const gfill = (v,warn)=>`<span class="pfill" style="${warn?"color:var(--warn)":""}">${v}</span>`;
+const crumbs = (parts)=>`<div style="display:flex;gap:7px;align-items:center;font-size:12.5px">${
+  parts.map((p,i)=> i<parts.length-1
+    ? `<span style="color:var(--t3)">${p}</span><span style="color:var(--t4)">▸</span>`
+    : `<span style="color:var(--t1);font-weight:600">${p}</span>`).join("")}</div>`;
+const agroup = (x,y,name,meta,pages,o={})=>`
+  <div class="agroup${o.sel?" sel":""}" style="left:${x}px;top:${y}px">
+    <div class="gh">${ic.layers(13)} ${name}<span class="aux">${o.badges||""}${meta} ${o.hidden?ic.eyeOff(12):ic.eye(12)}</span></div>
+    <div class="gpages">${pages}</div>
+  </div>`;
+const ovStrip = (bc)=>`
+  <div class="strip">
+    <span class="btn primary">${ic.grid(14)} Pack stale · 2</span>
+    <span class="btn">${ic.dl(14)} Export all</span>
+    <span class="btn ghost">${ic.refresh(14)}</span>
+    <div class="vsep"></div>
+    ${bc}
+    <span class="btn ghost">${ic.eyeOff(13)} 1 hidden</span>
+    <span style="flex:1"></span>
+    <span class="btn ghost">${ic.minus(13)}</span>
+    <span class="btn ghost mono">32%</span>
+    <span class="btn ghost">${ic.plus(13)}</span>
+    <span class="btn ghost">${ic.fit(13)}</span>
+  </div>`;
+screens.push({
+  id:"overview", tab:"3 · Обзор",
+  notes:[
+    ["Атлас = группа-карточка: имя, бейджи, глаз — и его страницы внутри. Страницы разных атласов больше не смешиваются в потоке: в строке соседствуют только целые группы, многостраничный атлас читается как один объект.",""],
+    ["Два уровня одного канваса: Project (все атласы) ⇄ Atlas (атлас со всеми его страницами; double-click по группе). Хлебные крошки в тулбаре показывают, где ты; клик по «Project» поднимает наверх.",""],
+    ["Бейджи здоровья на группе: ⚠ 2 и «not packed» у effects; амбер «outdated» у устаревших. Обзор = панель состояния проекта.",""],
+    ["Batch-действия живут на этом уровне: Pack stale · 2, Export all — прогресс прямо на группах.",""],
+    ["Глаз: скрытый ui исчез с канваса, сетка сжалась без дыр, чип «1 hidden» возвращает. Решение владельца: глаз — операция с именем в истории («Hide atlas ui»), undo/redo, часть проекта.",""],
+    ["V2: drag спрайта/папки на другую группу = перенос между атласами (одна транзакция — один undo). Внутри атласа страницы руками не редактируются — это результат пакера, а не документ.",""],
+  ],
+  html(){
+    const pgAnimals1 = `<div class="gpage">${ovMini("round/elephant",6,6,.38)+ovMini("square/panda",64,4,.36)+ovMini("round/giraffe",4,46,.36)+ovMini("square/monkey",58,50,.38)+ovMini("round/hippo",100,44,.36)+ovMini("round/monkey",8,90,.36)+ovMini("square/rabbit",62,92,.38)+gfill("94%")}</div>`;
+    const pgAnimals2 = `<div class="gpage">${ovMini("round_simple/rabbit",10,10,.36)+ovMini("square/snake",66,8,.36)+ovMini("round_simple/elephant",12,58,.36)+gfill("31%",true)}</div>`;
+    const pgEnemies = `<div class="gpage">${ovMini("square/elephant",8,8,.38)+ovMini("round/panda",66,6,.36)+ovMini("square/giraffe",8,52,.36)+ovMini("round/rabbit",70,48,.34)+ovMini("square/hippo",8,100,.36)+gfill("88%")}</div>`;
+    const pgEffects = `<div class="gpage" style="background:none;border:2px dashed #3b4354;box-shadow:none"><div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;color:var(--t4);font-size:11.5px">${ic.grid(20)}<span>Not packed</span><span class="btn" style="height:22px;font-size:11.5px">Pack</span></div></div>`;
+    return menubar(`<span class="proj">showcase.ntpacker_project</span>`) + `<div class="cols">
+      ${leftPanel({body: projectTree({sel:"animals", eyes:true})})}
+      <div class="cc">
+        ${ovStrip(crumbs(["Project"]))}
+        <div class="cbody">
+          ${agroup(70,40,"animals","60 · 2 pages",pgAnimals1+pgAnimals2,{sel:1})}
+          ${agroup(452,40,"enemies","34 · 1 page",pgEnemies)}
+          ${agroup(660,40,"effects","12",pgEffects,{badges:'<span class="badge warn">⚠ 2</span> '})}
+        </div>
+        ${statusbar(["● Saved","3 of 4 atlases shown","4 pages · avg fill 71%","⚠ 2 · 1 stale"],["double-click — open atlas","32%"])}
+      </div>
+      ${inspector({})}
+    </div>
+    <div class="marker" style="left:388px;top:118px">1</div>
+    <div class="marker" style="left:648px;top:44px">2</div>
+    <div class="marker" style="left:1052px;top:118px">3</div>
+    <div class="marker" style="left:330px;top:44px">4</div>
+    <div class="marker" style="left:262px;top:156px">5</div>
+    <div class="marker" style="left:700px;top:560px">6</div>`;
+  }
+});
+
+/* 3b — atlas level: all pages of one atlas */
+screens.push({
+  id:"atlaspages", tab:"4 · Атлас",
+  notes:[
+    ["Рабочий уровень «Атлас»: все страницы рядом на одном пространстве — page-табы не нужны. Спрайты выбираются прямо здесь, двусторонняя синхронизация с деревом и инспектором как обычно. Double-click по странице = зум к странице (движение камеры, не смена режима); дальше зумишь хоть до текселей.",""],
+    ["Двухуровневая модель: Project (все атласы) ⇄ Atlas (атлас со всеми страницами). Хлебные крошки Project ▸ animals показывают, где ты; клик по «Project» — наверх. Pack и Export здесь относятся к этому атласу.",""],
+    ["Страницы — вывод пакера: их не редактируют и не таскают между собой. Выбранная страница подсвечена, её статистика — в статус-баре.",""],
+    ["Бейдж fill% на каждой странице; амберный 31% у недозаполненной — подсказка ужать max page size или доложить спрайты. Экран «Рабочее» — этот же уровень, просто камера внутри страницы 1.",""],
+  ],
+  html(){
+    const page1 = `<div class="gpage big sel">${ovMini("round/elephant",12,12,.7)+ovMini("square/panda",118,8,.68)+ovMini("round/pig",204,14,.6)+ovMini("round/giraffe",8,88,.68)+ovMini("square/monkey",104,96,.7)+ovMini("round/hippo",192,86,.66)+ovMini("round/monkey",14,168,.68)+ovMini("square/rabbit",108,166,.7)+ovMini("round/parrot",196,160,.66)+ovMini("square/pig",14,226,.6)+ovMini("round/penguin",104,222,.62)+gfill("94%")}</div>`;
+    const page2 = `<div class="gpage big">${ovMini("round_simple/rabbit",18,18,.7)+ovMini("square/snake",120,14,.7)+ovMini("round_simple/elephant",20,104,.7)+ovMini("round/snake",124,98,.68)+gfill("31%",true)}</div>`;
+    const label = (t)=>`<div style="font:600 12px 'Segoe UI',sans-serif;color:var(--t3);padding:0 2px 6px">${t}</div>`;
+    return menubar(`<span class="proj">showcase.ntpacker_project</span>`) + `<div class="cols">
+      ${leftPanel({body: projectTree({sel:"animals", expand:"animals", eyes:true})})}
+      <div class="cc">
+        <div class="strip">
+          <span class="btn primary">${ic.grid(14)} Pack ${kbd("P")}</span>
+          <span class="btn">${ic.dl(14)} Export ${kbd("Ctrl+E")}</span>
+          <span class="btn ghost">${ic.refresh(14)}</span>
+          <div class="vsep"></div>
+          ${crumbs(["Project","animals"])}
+          <span style="flex:1"></span>
+          <span class="btn ghost">${ic.minus(13)}</span>
+          <span class="btn ghost mono">48%</span>
+          <span class="btn ghost">${ic.plus(13)}</span>
+          <span class="btn ghost">${ic.fit(13)}</span>
+        </div>
+        <div class="cbody">
+          <div style="position:absolute;left:80px;top:56px">${label("page 1 · 2048×2048")}${page1}</div>
+          <div style="position:absolute;left:420px;top:56px">${label("page 2 · 2048×1024")}${page2}</div>
+        </div>
+        ${statusbar(["● Saved","animals · 2 pages · 60 sprites","fill 94% / 31%"],["double-click — zoom to page","48%"])}
+      </div>
+      ${inspector({})}
+    </div>
+    <div class="marker" style="left:646px;top:44px">2</div>
+    <div class="marker" style="left:390px;top:140px">3</div>
+    <div class="marker" style="left:560px;top:330px">1</div>
+    <div class="marker" style="left:952px;top:396px">4</div>`;
+  }
+});
+
+/* 3 — command palette */
+screens.push({
+  id:"palette", tab:"5 · Палитра",
+  notes:[
+    ["Ctrl+Shift+P индексирует ВСЕ операции — реестр typed operations из master-spec буквально и есть индекс палитры.",""],
+    ["Параметризованные команды: «Set padding to 4» парсит аргумент из строки — settings без похода в инспектор.",""],
+    ["У каждой строки — её шорткат: палитра одновременно обучает клавишам (VS Code/Raycast).",""],
+    ["Ранжирование frecency: недавнее/частое всплывает после 2-3 символов.",""],
+    ["Нет тупиков: если команда не нашлась — fallback в поиск по спрайтам и help (Alfred).",""],
+  ],
+  html(){
+    return menubar(`<span class="proj">showcase.ntpacker_project</span>`) + `<div class="cols">
+      ${leftPanel({body: projectTree({sel:"animals", expand:"animals"})})}
+      <div class="cc">${toolbar()}<div class="cbody">${packedPage({})}</div>
+      ${statusbar(["● Saved","animals · 2 pages","fill 87%","⚠ 1"],["45%"])}
+      </div>
+      ${inspector({})}
+    </div>
+    <div class="scrim"></div>
+    <div class="palette">
+      <div class="pin">${ic.search(15)} <span>pad 4</span><span class="caret"></span></div>
+      <div class="grp">COMMANDS</div>
+      <div class="pr on">${ic.cmd(14)}<span class="t">Set padding to <b>4</b></span><span class="d">atlas · animals</span><kbd>Enter</kbd></div>
+      <div class="pr">${ic.cmd(14)}<span class="t">Set margin to <b>4</b></span><span class="d">atlas · animals</span></div>
+      <div class="pr">${ic.cmd(14)}<span class="t">Set max page size…</span><span class="d">256 – 16384</span></div>
+      <div class="grp">RECENT</div>
+      <div class="pr">${ic.grid(14)}<span class="t">Pack current atlas</span><kbd>P</kbd></div>
+      <div class="pr">${ic.eye(14)}<span class="t">Toggle: pivot overlay</span></div>
+      <div class="pr">${ic.search(14)}<span class="t">Go to sprite: <b>pa</b>nda.png</span><span class="d">round/</span></div>
+      <div class="pfoot"><span>↑↓ navigate</span><span>Enter — run</span><span>Tab — argument</span><span>Esc — close</span></div>
+    </div>
+    <div class="marker" style="left:1052px;top:182px">1</div>
+    <div class="marker" style="left:1052px;top:250px">2</div>
+    <div class="marker" style="left:1052px;top:300px">3</div>
+    <div class="marker" style="left:376px;top:282px">4</div>
+    <div class="marker" style="left:376px;top:372px">5</div>`;
+  }
+});
+
+/* 6 — agent session */
+screens.push({
+  id:"agent", tab:"6 · Агент",
+  notes:[
+    ["Presence-чип в шапке: агент подключён; клик — Disconnect/Revoke. Подтверждений на действие нет (allow-all по спеке) — только видимость.",""],
+    ["Живой баннер: что агент делает прямо сейчас, транзакция N/M; [View] прыгает к затронутому объекту.",""],
+    ["История = единый журнал именованных транзакций с авторством: фиолетовый AI / синий ME. Undo одинаков для обоих.",""],
+    ["Изменения агента подсвечиваются в дереве и на канвасе тем же фиолетовым — видно, ГДЕ он работает.",""],
+  ],
+  html(){
+    const history = sect("HISTORY","", "") + `<div class="rows">
+      ${row({ic:`<span class="who ai">AI</span>`, nm:"Create 4 enemy animations", aux:"2 s"})}
+      ${row({ic:`<span class="who ai">AI</span>`, nm:"Rename 12 sprites (walk_*)", aux:"9 s"})}
+      ${row({ic:`<span class="who me">ME</span>`, nm:"Set padding 4", aux:"1 m"})}
+      ${row({ic:`<span class="who ai">AI</span>`, nm:"Add folder enemies/boss", aux:"2 m"})}
+      ${row({ic:`<span class="who me">ME</span>`, nm:"Pack (2 pages, 87%)", aux:"3 m"})}
+    </div>`;
+    return menubar(`<span class="presence"><span class="pulse"></span> Claude · connected ▾</span>`) + `
+    <div class="banner">${'<span class="pulse"></span>'}
+      <span><b style="color:var(--t1)">Claude</b> is renaming 12 sprites in <b style="color:var(--t1)">enemies</b> — transaction 3/5</span>
+      <span style="margin-left:auto;display:flex;gap:6px">
+        <span class="btn" style="height:22px;font-size:11.5px">View</span>
+        <span class="btn" style="height:22px;font-size:11.5px">Disconnect</span></span>
+    </div>
+    <div class="cols" style="height:calc(860px - 68px)">
+      ${leftPanel({body: projectTree({sel:"enemies", expand:"enemies"})+history})}
+      <div class="cc">${toolbar({crumb:["Project","enemies"]})}<div class="cbody">
+        ${packedPage({styler:(key)=> key.startsWith("square") ? {color:"#8b7bd8"} : {} })}
+        <div class="card" style="position:absolute;right:16px;bottom:14px;padding:8px 12px;font-size:12px;color:var(--t3)">
+          <span class="who ai">AI</span> touched 12 regions in this page — highlighted violet</div>
+      </div>
+      ${statusbar(["● Saved","enemies · 2 pages","fill 87%"],["session: rev 214 · 2 writers","45%"])}
+      </div>
+      ${inspector({})}
+    </div>
+    <div class="marker" style="left:1150px;top:8px">1</div>
+    <div class="marker" style="left:700px;top:44px">2</div>
+    <div class="marker" style="left:150px;top:600px">3</div>
+    <div class="marker" style="left:560px;top:250px">4</div>`;
+  }
+});
+
+/* 7 — export preflight */
+screens.push({
+  id:"export", tab:"7 · Экспорт",
+  notes:[
+    ["Preflight = dry-run: скоуп назван явно в заголовке (= текущее выделение; выделил 2 атласа — будет «2 atlases»), точный список файлов до записи, перезаписи амбером. Ctrl+E ничего не редактирует; повтор экспорта = Ctrl+E → Enter.",""],
+    ["Правила экспорта живут на проекте (корень дерева); у атласа в инспекторе — только блок участия: галочки вкл/выкл по таргетам (бейдж «project») + переопределение пути. Одна поверхность редактирования.",""],
+    ["«Copy CLI command» — тот же экспорт байт-в-байт из CI; «Export as ZIP…» — тот же скоуп в один архив: {atlas}/{target}/ + manifest.json, персональные пути игнорируются.",""],
+    ["Деградации по таргетам (Defold: polygons → rects) и перезаписи — амбером; предупреждения не блокируют экспорт, блокирует только error.",""],
+  ],
+  html(){
+    return menubar(`<span class="proj">showcase.ntpacker_project</span>`) + `<div class="cols">
+      ${leftPanel({body: projectTree({sel:"animals", expand:"animals"})})}
+      <div class="cc">${toolbar()}<div class="cbody">${packedPage({})}</div>
+      ${statusbar(["● Saved"],["45%"])}</div>
+      ${inspector({})}
+    </div>
+    <div class="scrim"></div>
+    <div class="modal">
+      <div class="mh">Export · animals <span style="font:400 12px 'Segoe UI',sans-serif;color:var(--t4)">· scope: selection · 1 atlas · 2 targets</span>
+        <div class="sub">$ ntpacker export showcase.ntpacker_project --atlas animals</div>
+      </div>
+      <div class="mb">
+        <div class="trow"><span class="check">✓</span><b style="color:var(--t1)">Defold</b>
+          <span class="mono" style="color:var(--t4)">.tpinfo + .png</span>
+          <span class="arrow">→</span><span class="mono">out/animals-defold/</span></div>
+        <div class="notice">${ic.alert(13)} polygons → rects: Defold target does not support concave shapes · 60 sprites</div>
+        <div class="trow"><span class="check">✓</span><b style="color:var(--t1)">JSON</b>
+          <span class="mono" style="color:var(--t4)">neotolis v2</span>
+          <span class="arrow">→</span><span class="mono">out/animals.json</span></div>
+        <div class="filelist">
+          <div class="fl">out/animals-defold/animals-0.png <span class="sz">2048×2048 · ~1.9 MB</span></div>
+          <div class="fl">out/animals-defold/animals-1.png <span class="sz">2048×1024 · ~0.8 MB</span></div>
+          <div class="fl">out/animals-defold/animals.tpinfo <span class="sz">new</span></div>
+          <div class="fl" style="color:var(--warn)">out/animals.json <span class="sz">will overwrite</span></div>
+          <div class="fl" style="color:var(--warn)">out/animals-0.meta <span class="sz">will overwrite</span></div>
+        </div>
+        <div style="color:var(--t4);font-size:12px">5 files · 2 overwritten · 0 blocked · staged before publish, atomic</div>
+      </div>
+      <div class="mf">
+        <span class="btn ghost">${ic.copy(13)} Copy CLI command</span>
+        <span class="btn ghost">${ic.dl(13)} Export as ZIP…</span>
+        <span style="flex:1"></span>
+        <span class="btn">Cancel ${kbd("Esc")}</span>
+        <span class="btn primary">Export 5 files ${kbd("Enter")}</span>
+      </div>
+    </div>
+    <div class="marker" style="left:955px;top:203px">1</div>
+    <div class="marker" style="left:1198px;top:468px">2</div>
+    <div class="marker" style="left:600px;top:505px">3</div>
+    <div class="marker" style="left:1038px;top:300px">4</div>`;
+  }
+});
+
+/* ---------- viewer ---------- */
+const tabsEl = document.getElementById("tabs");
+const stage = document.getElementById("stage");
+const notesEl = document.getElementById("notes");
+let cur = 1;
+
+screens.forEach((s,i)=>{
+  const b = document.createElement("button");
+  b.textContent = s.tab;
+  b.onclick = ()=>{ cur=i; render(); };
+  tabsEl.appendChild(b);
+});
+
+function render(){
+  [...tabsEl.children].forEach((b,i)=>b.classList.toggle("on", i===cur));
+  const s = screens[cur];
+  stage.innerHTML = s.html();
+  stage.querySelectorAll("img[data-spr]").forEach(img=>{
+    const d = SPRITES[img.dataset.spr];
+    if(d) img.src = d.uri;
+  });
+  notesEl.innerHTML = `<h2>Что здесь заложено</h2><ul class="note-list">` +
+    s.notes.map((n,i)=>`<li><span class="nbadge">${i+1}</span><span>${n[0]}</span></li>`).join("") + `</ul>`;
+  fit();
+}
+
+const noteToggle = document.getElementById("noteToggle");
+noteToggle.onchange = ()=> stage.classList.toggle("no-notes", !noteToggle.checked);
+
+const wrapEl = document.getElementById("stageWrap");
+function fit(){
+  const w = wrapEl.clientWidth;
+  const sc = Math.min(1, w/1440);
+  stage.style.transform = `scale(${sc})`;
+  wrapEl.style.height = (860*sc)+"px";
+}
+new ResizeObserver(fit).observe(wrapEl);
+render();
+</script>
