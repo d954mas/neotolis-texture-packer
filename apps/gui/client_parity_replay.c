@@ -6,6 +6,7 @@
 
 #include "tp_core/tp_export.h"
 #include "tp_core/tp_session.h"
+#include "tp_core/tp_transaction.h"
 
 static int fail(const char *step, tp_status status, const tp_error *err) {
     (void)fprintf(stderr, "client parity %s failed: %s (%s)\n", step,
@@ -229,6 +230,56 @@ static int snapshot_counters(tp_session *session, int64_t *revision,
     return 0;
 }
 
+/* Applies one already-built op through the same tp_session path the GUI adapter
+ * uses internally (see gui_session_adapter.c apply_atlas_ops), but preserves the
+ * tp_txn_result so a rejected intent's structured {status, field, op_index} can be
+ * surfaced. tp_error -- the adapter's only error channel -- flattens the per-field
+ * token away, so the harness reads the diagnostic from the very result the adapter
+ * itself receives. Copies errors[0] by value (field/message are inline char arrays)
+ * so it stays valid after the result is freed. */
+static tp_status apply_capture(tp_session *session, tp_operation *op,
+                               int64_t expected_revision, tp_txn_error *first,
+                               bool *has_error, tp_error *err) {
+    tp_txn_request request;
+    memset(&request, 0, sizeof request);
+    request.schema = TP_TXN_SCHEMA;
+    (void)snprintf(request.id_hex, sizeof request.id_hex, "%s", next_txn());
+    request.expected_revision = expected_revision;
+    request.ops = op;
+    request.op_count = 1;
+    tp_txn_result result;
+    memset(&result, 0, sizeof result);
+    const tp_status status = tp_session_apply(session, &request, &result, err);
+    *has_error = result.error_count > 0;
+    if (*has_error) {
+        *first = result.errors[0];
+    }
+    tp_txn_result_free(&result);
+    return status;
+}
+
+/* Machine tokens for the structured export-notice enums -- the same closed
+ * vocabulary cli_pack.c's notice_field_name/notice_reason_name emits into the CLI
+ * --json, so the harness can equate the GUI prediction to the CLI dry-run. */
+static const char *notice_field_token(int field_id) {
+    switch (field_id) {
+        case TP_NOTICE_FIELD_TRANSFORM: return "transform";
+        case TP_NOTICE_FIELD_POLYGON: return "polygon";
+        case TP_NOTICE_FIELD_SLICE9: return "slice9";
+        case TP_NOTICE_FIELD_PIVOT: return "pivot";
+        case TP_NOTICE_FIELD_ALIAS: return "alias";
+        case TP_NOTICE_FIELD_MULTIPAGE: return "multipage";
+        default: return "none";
+    }
+}
+
+static const char *notice_reason_token(int reason_id) {
+    switch (reason_id) {
+        case TP_NOTICE_REASON_CAPS_UNSUPPORTED: return "caps_unsupported";
+        default: return "none";
+    }
+}
+
 static int outcome_error(const char *path) {
     tp_error err = {0};
     tp_session *session = NULL;
@@ -255,7 +306,6 @@ static int outcome_error(const char *path) {
     uint64_t events_after = 0U;
     const int snapshot_rc = snapshot_counters(
         session, &revision_after, &events_after, &err);
-    tp_session_destroy(session);
     if (status != TP_STATUS_OUT_OF_RANGE || err.msg[0] == '\0' ||
         snapshot_rc != 0 || revision_after != revision_before ||
         events_after != events_before) {
@@ -266,8 +316,35 @@ static int outcome_error(const char *path) {
                       (long long)revision_after,
                       (unsigned long long)events_before,
                       (unsigned long long)events_after);
+        tp_session_destroy(session);
         return 1;
     }
+    /* Diagnostic parity: the adapter above proves the GUI surface rejects and
+     * leaves the model untouched, but tp_error cannot carry the offending field.
+     * Re-apply the same rejected intent (deterministic, non-mutating) to read the
+     * identical tp_txn_result the adapter received, then surface its structured
+     * {id, field} for the harness to equate to the CLI --json. */
+    tp_operation op;
+    memset(&op, 0, sizeof op);
+    op.kind = TP_OP_ATLAS_SETTINGS_SET;
+    op.atlas_id = atlas_id;
+    op.u.atlas_settings = settings;
+    tp_txn_error diag;
+    memset(&diag, 0, sizeof diag);
+    bool has_diag = false;
+    const tp_status reapply =
+        apply_capture(session, &op, revision_before, &diag, &has_diag, &err);
+    tp_session_destroy(session);
+    if (reapply != TP_STATUS_OUT_OF_RANGE || !has_diag || diag.field[0] == '\0') {
+        (void)fprintf(stderr,
+                      "client parity error diagnostic missing: status=%s "
+                      "has_error=%d field='%s'\n",
+                      tp_status_id(reapply), has_diag ? 1 : 0,
+                      has_diag ? diag.field : "");
+        return 1;
+    }
+    (void)fprintf(stdout, "outcome error id=%s field=%s op_index=%d\n",
+                  tp_status_id(diag.code), diag.field, diag.op_index);
     return 0;
 }
 
@@ -332,11 +409,15 @@ static int outcome_notice(const char *path) {
                        &notices, &err)
                  : TP_STATUS_NOT_FOUND;
     bool found = false;
+    int field_id = TP_NOTICE_FIELD_NONE;
+    int reason_id = TP_NOTICE_REASON_NONE;
     for (int i = 0; i < notices.count; ++i) {
         if (notices.items[i].field_id == TP_NOTICE_FIELD_TRANSFORM &&
             notices.items[i].reason_id ==
                 TP_NOTICE_REASON_CAPS_UNSUPPORTED) {
             found = true;
+            field_id = notices.items[i].field_id;
+            reason_id = notices.items[i].reason_id;
         }
     }
     tp_export_notices_free(&notices);
@@ -349,6 +430,52 @@ static int outcome_notice(const char *path) {
                       tp_status_id(status), found ? 1 : 0);
         return 1;
     }
+    (void)fprintf(stdout, "outcome notice field=%s reason=%s\n",
+                  notice_field_token(field_id), notice_reason_token(reason_id));
+    return 0;
+}
+
+static int outcome_ambiguity(const char *path) {
+    tp_error err = {0};
+    tp_session *session = NULL;
+    tp_id128 atlas_id;
+    if (open_base(path, &session, &err) != 0 ||
+        base_atlas(session, &atlas_id, &err) != 0) {
+        tp_session_destroy(session);
+        return 1;
+    }
+    tp_session_snapshot *snapshot = NULL;
+    tp_status status = tp_session_snapshot_create(session, &snapshot, &err);
+    if (status != TP_STATUS_OK) {
+        tp_session_destroy(session);
+        return fail("ambiguity snapshot", status, &err);
+    }
+    /* Selector-layer diagnostic: resolving the same bare key the CLI rejected must
+     * be AMBIGUOUS_SELECTOR with a candidate list -- the structured equivalent that
+     * the GUI's ID-addressed surface delegates to the shared selector. There is no
+     * single offending `field` here; the diagnostic is candidate-list shaped. */
+    tp_selector_result result;
+    tp_selector_candidates candidates;
+    tp_id128 source_id;
+    char source_key[4096];
+    memset(&result, 0, sizeof result);
+    memset(&candidates, 0, sizeof candidates);
+    status = tp_session_snapshot_resolve_sprite_selector(
+        snapshot, atlas_id, "shared", &result, &source_id, source_key,
+        sizeof source_key, &candidates, &err);
+    const int candidate_count = candidates.count;
+    tp_selector_candidates_free(&candidates);
+    tp_session_snapshot_destroy(snapshot);
+    tp_session_destroy(session);
+    if (status != TP_STATUS_AMBIGUOUS_SELECTOR || candidate_count < 2) {
+        (void)fprintf(stderr,
+                      "client parity ambiguity outcome mismatch: status=%s "
+                      "candidates=%d\n",
+                      tp_status_id(status), candidate_count);
+        return 1;
+    }
+    (void)fprintf(stdout, "outcome ambiguity id=%s candidates=%d\n",
+                  tp_status_id(status), candidate_count);
     return 0;
 }
 
@@ -361,6 +488,9 @@ static int outcome(const char *name, const char *path) {
     }
     if (strcmp(name, "notice") == 0) {
         return outcome_notice(path);
+    }
+    if (strcmp(name, "ambiguity") == 0) {
+        return outcome_ambiguity(path);
     }
     (void)fprintf(stderr, "client parity unknown outcome '%s'\n", name);
     return 2;

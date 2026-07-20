@@ -76,7 +76,6 @@
 #include "gui_shell.h"    /* shell-owned surface the dev seams read (UI pool caps) */
 #include "gui_paths.h"    /* app-data root + exe-dir resolver (canonical home for s_exe_dir) */
 #include "gui_log_file.h" /* rotating app-side log file (nt_log sink); no-op under headless */
-#include "gui_parity.h"
 #include "gui_crash.h"    /* crash handler + dump + marker (installed first thing in main) */
 #include "gui_startup.h"  /* pure startup open/defer guard (gui_startup_decide) */
 #include "gui_selftest.h" /* dev seam: headless self-test (compiled out unless flag on) */
@@ -725,15 +724,6 @@ static int gui_main_utf8(int argc, char *argv[]) {
         return 1;
     }
 
-    /* dev seam: --parity <in> <out> runs the headless saved-bytes byte-parity check and exits
-     * BEFORE any window/GL init (pure model layer). Returns before file logging installs -> a
-     * byte-parity run stays side-effect-free (no stray app-data log). */
-    for (int i = 1; i + 2 < argc; i++) {
-        if (strcmp(argv[i], "--parity") == 0) {
-            return gui_run_parity(argv[i + 1], argv[i + 2]);
-        }
-    }
-
     /* dev screenshot flags + optional project path (first non-flag arg; see gui_shot.c) */
     const char *proj_arg = NULL;
     bool selftest_crash = false; /* D2 hidden dev arg: fault after install to exercise the handler */
@@ -750,7 +740,7 @@ static int gui_main_utf8(int argc, char *argv[]) {
     }
 
     /* D2 crash handler + D1 file log: install for a real windowed run ONLY -- the --shot capture seam
-     * (and --parity, already returned) stay side-effect-free (no stray <app-data>/crash dir, log/sink/
+     * stays side-effect-free (no stray <app-data>/crash dir, log/sink/
      * FILE). Crash handler goes in FIRST (before the log) so it protects the log install + the build
      * line too. NOT literally main()'s first statement: a fault before this point falls back to the OS
      * default (identical to not-installed, no ntpacker dump) -- acceptable, since the value is catching

@@ -33,6 +33,46 @@ function(compare_family family)
     endif()
 endfunction()
 
+# --- structured-diagnostic parity helpers --------------------------------------
+# The real CLI emits its rejected-intent diagnostics as --json; the GUI replay
+# prints the same closed-vocabulary machine tokens as `key=token` lines. These
+# equate the two so the completion evidence "same structured diagnostics in
+# CLI/GUI" is asserted directly, not just an equivalent core outcome.
+
+# First "key":"value" from a JSON blob (tolerates spaces after the colon so the
+# compact reject JSON and the pretty dry-run JSON both parse); "" when absent.
+function(json_string_field json key out_var)
+    if("${json}" MATCHES "\"${key}\"[ \t]*:[ \t]*\"([^\"]*)\"")
+        set(${out_var} "${CMAKE_MATCH_1}" PARENT_SCOPE)
+    else()
+        set(${out_var} "" PARENT_SCOPE)
+    endif()
+endfunction()
+
+# `key=token` machine value (closed vocabulary [A-Za-z0-9_]) from a replay line;
+# "" when absent.
+function(replay_token text key out_var)
+    if("${text}" MATCHES "${key}=([A-Za-z0-9_]+)")
+        set(${out_var} "${CMAKE_MATCH_1}" PARENT_SCOPE)
+    else()
+        set(${out_var} "" PARENT_SCOPE)
+    endif()
+endfunction()
+
+# Fails unless the GUI replay token is present and byte-equal to the CLI JSON value.
+function(assert_diag_equal family key cli_value gui_value)
+    if("${gui_value}" STREQUAL "")
+        message(FATAL_ERROR "${family}: GUI replay produced no '${key}' diagnostic token")
+    endif()
+    if("${cli_value}" STREQUAL "")
+        message(FATAL_ERROR "${family}: CLI --json produced no '${key}' diagnostic value")
+    endif()
+    if(NOT "${cli_value}" STREQUAL "${gui_value}")
+        message(FATAL_ERROR
+            "${family}: CLI/GUI '${key}' diagnostics differ (cli='${cli_value}' gui='${gui_value}')")
+    endif()
+endfunction()
+
 set(BASE "${WORK}/base.ntpacker_project")
 run_ok("${REPLAY}" seed "${BASE}")
 
@@ -47,7 +87,15 @@ if(NOT "${error_json}" MATCHES "\"id\":\"out_of_range\"" OR
     message(FATAL_ERROR
         "structured settings error/exit evidence missing\n${error_json}")
 endif()
-run_ok("${REPLAY}" outcome error "${BASE}")
+# The GUI adapter path must reject with the SAME {id, field} the CLI --json emits
+# (both are tp_status_id(errors[0].code) + errors[0].field over the shared core).
+json_string_field("${error_json}" "id" cli_error_id)
+json_string_field("${error_json}" "field" cli_error_field)
+run_capture(0 error_replay "${REPLAY}" outcome error "${BASE}")
+replay_token("${error_replay}" "id" gui_error_id)
+replay_token("${error_replay}" "field" gui_error_field)
+assert_diag_equal(error id "${cli_error_id}" "${gui_error_id}")
+assert_diag_equal(error field "${cli_error_field}" "${gui_error_field}")
 
 # Same-name rename is an accepted semantic no-op for both clients: success,
 # no revision/event advance, and no canonical byte change.
@@ -134,6 +182,25 @@ execute_process(COMMAND "${CMAKE_COMMAND}" -E compare_files
 if(NOT ambiguity_bytes_rc EQUAL 0)
     message(FATAL_ERROR "ambiguous selector mutated canonical bytes")
 endif()
+# GUI diagnostic parity for the selector layer: resolving the same ambiguous key
+# through the snapshot selector (the layer the GUI uses to turn a typed key into an
+# ID) yields AMBIGUOUS_SELECTOR + a candidate list -- the structured equivalent of
+# the CLI's {id, candidates}. The `before` copy still carries both `shared` sources,
+# so the resolve is deterministically ambiguous. (No 'field': selector ambiguity is
+# candidate-list shaped, not a single offending field.)
+json_string_field("${ambiguity_json}" "id" cli_ambiguity_id)
+run_capture(0 ambiguity_replay "${REPLAY}" outcome ambiguity
+    "${WORK}/ambiguous/before.ntpacker_project")
+replay_token("${ambiguity_replay}" "id" gui_ambiguity_id)
+replay_token("${ambiguity_replay}" "candidates" gui_ambiguity_candidates)
+assert_diag_equal(ambiguity id "${cli_ambiguity_id}" "${gui_ambiguity_id}")
+if("${gui_ambiguity_candidates}" STREQUAL "")
+    message(FATAL_ERROR "ambiguity: GUI selector reported no candidate count")
+endif()
+if(gui_ambiguity_candidates LESS 2)
+    message(FATAL_ERROR
+        "ambiguity: GUI selector reported <2 candidates (got '${gui_ambiguity_candidates}')")
+endif()
 
 # Target/export notices are executable on both surfaces. CLI dry-run emits the
 # structured notice; the GUI replay calls the exact prediction API used by its
@@ -150,8 +217,26 @@ if(NOT "${notice_json}" MATCHES "\"field\": \"transform\"" OR
    NOT "${notice_json}" MATCHES "\"reason\": \"caps_unsupported\"")
     message(FATAL_ERROR "structured export notice evidence missing\n${notice_json}")
 endif()
-run_ok("${REPLAY}" outcome notice
+# GUI diagnostic parity for the export notice: the pre-export prediction the GUI
+# chip calls yields the SAME structured {field, reason} the CLI dry-run --json emits
+# (shared tp_notice_field/reason enum vocabulary). The dry-run may list several
+# notices, so require the GUI-observed pair to appear as a CLI field/reason rather
+# than assuming which notice the CLI prints first.
+run_capture(0 notice_replay "${REPLAY}" outcome notice
     "${WORK}/notice/project.ntpacker_project")
+replay_token("${notice_replay}" "field" gui_notice_field)
+replay_token("${notice_replay}" "reason" gui_notice_reason)
+if("${gui_notice_field}" STREQUAL "" OR "${gui_notice_reason}" STREQUAL "")
+    message(FATAL_ERROR "notice: GUI prediction produced no field/reason tokens")
+endif()
+if(NOT "${notice_json}" MATCHES "\"field\"[ \t]*:[ \t]*\"${gui_notice_field}\"")
+    message(FATAL_ERROR
+        "notice: CLI dry-run --json has no notice field '${gui_notice_field}'")
+endif()
+if(NOT "${notice_json}" MATCHES "\"reason\"[ \t]*:[ \t]*\"${gui_notice_reason}\"")
+    message(FATAL_ERROR
+        "notice: CLI dry-run --json has no notice reason '${gui_notice_reason}'")
+endif()
 
 file(MAKE_DIRECTORY "${WORK}/source_remove")
 configure_file("${WORK}/source/cli.ntpacker_project"

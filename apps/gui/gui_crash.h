@@ -18,8 +18,8 @@ extern "C" {
 #endif
 
 /* Install the crash handler + pre-resolve <app-data>/crash and the marker/dump paths. Call ONCE early
- * in main(), right BEFORE the D1 log install, and only for a real windowed run (NOT the --parity/--shot
- * dev seams, which must stay side-effect-free). It is not literally main()'s first statement: a fault
+ * in main(), right BEFORE the D1 log install, and only for a real windowed run (NOT the --shot
+ * dev seam, which must stay side-effect-free). It is not literally main()'s first statement: a fault
  * before this point falls back to the OS default (same as not-installed) -- acceptable, since the value
  * is catching interactive-session crashes. No-op under NTPACKER_GUI_HEADLESS (CI runs the GUI selftest
  * under sanitizers whose own signal handlers must not be overridden, and headless must not need a

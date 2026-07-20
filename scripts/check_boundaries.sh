@@ -112,7 +112,7 @@ fi
 #    assigning into the loaded project's arrays (R7b), nor through an alias into it (R7c).
 #    Scoped to the mutation-surface TUs (mirrors R6's cli_mutate.c scope). gui_selftest.c (a
 #    boundary-excluded dev-seam test harness that pokes internals -- like the CLI's tests) and
-#    main.c (app shell + the --parity dev seam) are out of scope, as is the sanctioned
+#    main.c (app shell) are out of scope, as is the sanctioned
 #    tp_project_atlas_seed_default_target lifecycle call. (H/P1-2 retired the former
 #    animation-rename direct-write exception: animation rename
 #    now routes through TP_OP_ANIMATION_RENAME.) A legit exception carries a "boundary-ok:" note
