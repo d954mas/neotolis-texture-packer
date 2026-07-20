@@ -15,6 +15,7 @@
 #include "tp_core/tp_export.h"
 #include "tp_core/tp_export_run.h"
 #include "tp_core/tp_input.h"
+#include "tp_core/tp_pack_hash.h"
 #include "tp_job_owner_internal.h"
 
 typedef struct tp_job_export_atlas {
@@ -39,6 +40,7 @@ typedef struct tp_live_job {
 
     tp_id128 atlas_id;
     tp_session_input_token input_token_at_start;
+    tp_id128 pack_input_hash;
     tp_pack_input input;
     tp_pack_settings settings;
     char *atlas_name;
@@ -137,6 +139,21 @@ static int pack_worker(void *context) {
     tp_error error = {{0}};
     tp_result *result = NULL;
     const double start = job_now_ms();
+    /* Canonical pack_input_hash of this job's immutable start inputs (§10.2,
+     * decision 0004). Computed on the worker thread -- it decodes the source
+     * pixels for the semantic image term and must never block the calling
+     * (GUI/session) thread with a full decode. A failed hash (e.g. an unreadable
+     * source) is non-fatal here: it leaves a nil hash and the pack below surfaces
+     * the real failure. */
+    tp_error hash_error = {{0}};
+    if (tp_pack_input_hash_compute(&job->settings,
+                                   job->preview_exporter_id[0]
+                                       ? job->preview_exporter_id
+                                       : NULL,
+                                   NULL, &job->pack_input_hash,
+                                   &hash_error) != TP_STATUS_OK) {
+        job->pack_input_hash = tp_id128_nil();
+    }
     const tp_status status = tp_pack_cancellable(&job->settings, job->arena, &result,
                                                  pack_job_cancel_requested, job, &error);
     job->elapsed_ms = job_now_ms() - start;
@@ -468,6 +485,7 @@ tp_status tp_session_job_take_result(tp_session *session,
         out->pack.atlas_id = job->atlas_id;
         out->pack.missing_sources = job->input.missing_sources;
         out->pack.input_token_at_start = job->input_token_at_start;
+        out->pack.pack_input_hash = job->pack_input_hash;
         memcpy(out->pack.preview_exporter_id, job->preview_exporter_id,
                strlen(job->preview_exporter_id) + 1U);
         if (state == TP_SESSION_JOB_SUCCEEDED) {
@@ -491,4 +509,40 @@ void tp_session_job_result_destroy(tp_session_job_result *result) {
         tp_arena_destroy(result->pack.arena);
     }
     memset(result, 0, sizeof *result);
+}
+
+tp_status tp_session_pack_input_hash(tp_session *session, tp_id128 atlas_id,
+                                     struct tp_pack_image_hash_cache *cache,
+                                     tp_id128 *out_hash, tp_error *err) {
+    if (!session || !out_hash || tp_id128_is_nil(atlas_id)) {
+        return tp_error_set(
+            err, TP_STATUS_INVALID_ARGUMENT,
+            "pack input hash requires session, atlas id, and output");
+    }
+    *out_hash = tp_id128_nil();
+    tp_session_snapshot *snapshot = NULL;
+    tp_status status = tp_session_snapshot_create(session, &snapshot, err);
+    if (status != TP_STATUS_OK) {
+        return status;
+    }
+    tp_pack_input input;
+    memset(&input, 0, sizeof input);
+    tp_pack_settings settings;
+    memset(&settings, 0, sizeof settings);
+    status = tp_pack_input_build_snapshot(snapshot, atlas_id, &input, err);
+    if (status == TP_STATUS_OK) {
+        status =
+            tp_pack_settings_build_snapshot(snapshot, atlas_id, &settings, err);
+    }
+    if (status == TP_STATUS_OK) {
+        settings.sprites = input.descs;
+        settings.sprite_count = input.count;
+        /* Native pack_input_hash (no preview-exporter clamp) -- matches a native
+         * pack job. Preview-exporter-aware recompute is a later refinement (U). */
+        status =
+            tp_pack_input_hash_compute(&settings, NULL, cache, out_hash, err);
+    }
+    tp_pack_input_free(&input);
+    tp_session_snapshot_destroy(snapshot);
+    return status;
 }

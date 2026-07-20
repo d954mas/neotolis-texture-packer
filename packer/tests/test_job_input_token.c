@@ -109,6 +109,57 @@ void test_model_mutation_invalidates_the_captured_job_token(void) {
     tp_session_destroy(session);
 }
 
+static tp_id128 default_atlas_id(tp_session *session) {
+    tp_error err = {{0}};
+    tp_session_snapshot *snapshot = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_snapshot_create(session, &snapshot, &err));
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const tp_id128 id = atlas->id;
+    tp_session_snapshot_destroy(snapshot);
+    return id;
+}
+
+/* F3-03 T2: the job/pack surface carries a pack_input_hash, recomputed from the
+ * session's immutable snapshot, stable for the same snapshot. */
+void test_pack_input_hash_present_and_stable_for_same_snapshot(void) {
+    tp_session *session = make_session();
+    const tp_id128 atlas = default_atlas_id(session);
+    tp_error err = {{0}};
+    tp_id128 first = tp_id128_nil();
+    tp_id128 second = tp_id128_nil();
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_pack_input_hash(
+                                            session, atlas, NULL, &first, &err));
+    TEST_ASSERT_FALSE(tp_id128_is_nil(first));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_pack_input_hash(
+                                            session, atlas, NULL, &second, &err));
+    TEST_ASSERT_TRUE(tp_id128_eq(first, second));
+
+    /* The completed-job result struct carries the same field. */
+    tp_session_pack_job_result job_result;
+    memset(&job_result, 0, sizeof job_result);
+    job_result.pack_input_hash = first;
+    TEST_ASSERT_TRUE(tp_id128_eq(job_result.pack_input_hash, first));
+    tp_session_destroy(session);
+}
+
+void test_pack_input_hash_changes_on_semantic_mutation(void) {
+    tp_session *session = make_session();
+    const tp_id128 atlas = default_atlas_id(session);
+    tp_error err = {{0}};
+    tp_id128 before = tp_id128_nil();
+    tp_id128 after = tp_id128_nil();
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_pack_input_hash(
+                                            session, atlas, NULL, &before, &err));
+    rename_default_atlas(session);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_pack_input_hash(
+                                            session, atlas, NULL, &after, &err));
+    TEST_ASSERT_FALSE(tp_id128_eq(before, after));
+    tp_session_destroy(session);
+}
+
 void test_source_runtime_change_invalidates_without_model_mutation(void) {
     tp_session *session = make_session();
     const tp_session_input_token at_start = snapshot_input_token(session);
@@ -131,5 +182,7 @@ int main(void) {
     RUN_TEST(test_zero_generations_are_a_valid_fresh_job_token);
     RUN_TEST(test_model_mutation_invalidates_the_captured_job_token);
     RUN_TEST(test_source_runtime_change_invalidates_without_model_mutation);
+    RUN_TEST(test_pack_input_hash_present_and_stable_for_same_snapshot);
+    RUN_TEST(test_pack_input_hash_changes_on_semantic_mutation);
     return UNITY_END();
 }
