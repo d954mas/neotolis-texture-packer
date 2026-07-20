@@ -43,6 +43,7 @@ bool tp_fs_exists(const char *path_utf8);
 bool tp_fs_is_dir(const char *path_utf8);
 bool tp_fs_create_dir(const char *path_utf8);
 bool tp_fs_remove_file(const char *path_utf8);
+bool tp_fs_remove_dir(const char *path_utf8); /* removes an empty directory */
 
 bool tp_fs_replace(const char *source_utf8, const char *destination_utf8);
 typedef enum tp_fs_move_result {

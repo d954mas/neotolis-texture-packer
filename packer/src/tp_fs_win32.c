@@ -372,6 +372,21 @@ bool tp_fs_remove_file(const char *path_utf8) {
     return false;
 }
 
+bool tp_fs_remove_dir(const char *path_utf8) {
+    wchar_t *path = tp_fs_win32_path_alloc(path_utf8);
+    if (!path) {
+        return false;
+    }
+    if (RemoveDirectoryW(path)) {
+        free(path);
+        return true;
+    }
+    DWORD error = GetLastError();
+    free(path);
+    win32_error_to_errno(error);
+    return false;
+}
+
 bool tp_fs_replace(const char *source_utf8, const char *destination_utf8) {
     wchar_t *source = tp_fs_win32_path_alloc(source_utf8);
     wchar_t *destination = tp_fs_win32_path_alloc(destination_utf8);

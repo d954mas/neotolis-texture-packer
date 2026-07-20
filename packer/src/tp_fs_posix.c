@@ -121,6 +121,13 @@ bool tp_fs_remove_file(const char *path_utf8) {
     return unlink(path_utf8) == 0;
 }
 
+bool tp_fs_remove_dir(const char *path_utf8) {
+    if (!tp_fs_path_is_valid_utf8(path_utf8)) {
+        return false;
+    }
+    return rmdir(path_utf8) == 0;
+}
+
 bool tp_fs_replace(const char *source_utf8, const char *destination_utf8) {
     if (!tp_fs_path_is_valid_utf8(source_utf8) ||
         !tp_fs_path_is_valid_utf8(destination_utf8)) {

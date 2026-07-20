@@ -1,20 +1,73 @@
 #include "tp_build_worker_internal.h"
 
+#include <errno.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#include <process.h>
+#include <windows.h>
+#define tp_getpid _getpid
+#else
+#include <time.h>
+#include <unistd.h>
+#define tp_getpid getpid
+#endif
+
 #include "tp_core/tp_build_worker.h" /* TP_BUILD_WORKER_ARGV1 */
-#include "tp_build_driver_internal.h"
 #include "tp_build_proto_internal.h"
+#include "tp_fs_internal.h"
 #include "tp_proc_internal.h"
 
 /* A valid reply is header(12) + response_head(16) + artifact(<=4096) +
- * message(<=4096) = ~8.2 KiB; 64 KiB is a comfortable bound. A child that emits
- * more than this fills the buffer without EOF and is treated as a malformed,
- * fail-closed reply. */
+ * message(<=4096) = ~8.2 KiB; 64 KiB is a comfortable bound AND fits a single
+ * pipe buffer, so the child writes its whole reply and exits without the parent
+ * reading concurrently -- the parent waits (with cancel/timeout) THEN reads. A
+ * child that emits more than this fills the buffer without EOF and is treated as
+ * a malformed, fail-closed reply. */
 #define TP_BUILD_WORKER_REPLY_CAP ((size_t)1u << 16)
+
+/* The builder opens a narrow char path, so the child always writes this bare
+ * relative ASCII name inside its ASCII staging CWD; the parent owns the real
+ * UTF-8 destination and publishes to it. */
+#define TP_BUILD_WORKER_OUT_NAME "out.ntpack"
+
+/* Internal safety timeout (decision 0018 kickoff): cancellation is the primary
+ * control; this only bounds a wedged builder. Overridable by the cancel/timeout
+ * test via tp_build_worker_opts.timeout_ms; never user-facing. */
+#define TP_BUILD_WORKER_TIMEOUT_MS (5 * 60 * 1000)
+
+/* Cancel/timeout poll cadence while the child runs. */
+#define TP_BUILD_WORKER_POLL_MS 20
+
+#define TP_STAGING_PATH_MAX 4096
+
+/* Windows caps a process current directory at MAX_PATH regardless of long-path
+ * awareness, so the staging dir (and dir + "/out.ntpack") must stay well under
+ * it; when work_dir is longer the staging dir is relocated up its same-volume
+ * ancestor chain. POSIX has no such cap, so work_dir is always used directly. */
+#if defined(_WIN32)
+#define TP_STAGING_PARENT_BUDGET ((size_t)200)
+#else
+#define TP_STAGING_PARENT_BUDGET ((size_t)-1)
+#endif
+
+static double now_ms(void) {
+#ifdef _WIN32
+    LARGE_INTEGER freq;
+    LARGE_INTEGER counter;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&counter);
+    return (double)counter.QuadPart * 1000.0 / (double)freq.QuadPart;
+#else
+    struct timespec t;
+    (void)clock_gettime(CLOCK_MONOTONIC, &t);
+    return (double)t.tv_sec * 1000.0 + (double)t.tv_nsec / 1000000.0;
+#endif
+}
 
 static void free_loaded_images(tp_image_rgba8 *images, int count) {
     if (!images) {
@@ -26,33 +79,102 @@ static void free_loaded_images(tp_image_rgba8 *images, int count) {
     free(images);
 }
 
-/* The worker out_name carries the resolved out_path verbatim for now, so it
- * must be pure 7-bit ASCII: the builder opens it through a narrow char path and
- * a non-ASCII name would not round-trip on Windows (that ASCII staging dir is
- * H0.4). Empty is not ASCII-usable. */
-static bool path_is_ascii(const char *path) {
-    if (!path || path[0] == '\0') {
+/* The artifact the worker wrote into the staging dir must be a readable, non-empty
+ * regular file before we accept and publish the pack. */
+static bool staged_artifact_ok(const char *staged_path) {
+    tp_fs_info info;
+    return tp_fs_stat(staged_path, &info) && info.kind == TP_FS_KIND_REGULAR &&
+           info.size > 0U;
+}
+
+/* Strip the last path component (drops trailing separators, the component, then
+ * its separator). Returns false at a root / single-component path (no progress). */
+static bool strip_last_component(char *path) {
+    size_t n = strlen(path);
+    const size_t orig = n;
+    while (n > 0U && (path[n - 1U] == '/' || path[n - 1U] == '\\')) {
+        n--;
+    }
+    while (n > 0U && path[n - 1U] != '/' && path[n - 1U] != '\\') {
+        n--;
+    }
+    while (n > 0U && (path[n - 1U] == '/' || path[n - 1U] == '\\')) {
+        n--;
+    }
+    if (n == 0U || n == orig) {
         return false;
     }
-    for (const unsigned char *p = (const unsigned char *)path; *p; p++) {
-        if (*p >= 0x80u) {
-            return false;
-        }
-    }
+    path[n] = '\0';
     return true;
 }
 
-/* The artifact the worker claims to have written must be a readable, non-empty
- * file before we accept the pack. out_path is ASCII in this branch, so a plain
- * fopen is correct (and matches what the builder itself can open). */
-static bool artifact_readable(const char *out_path) {
-    FILE *f = fopen(out_path, "rb");
-    if (!f) {
+/* Create a private ASCII staging dir on the destination's volume and return its
+ * path. The dir is a sibling under work_dir when short enough; on Windows a long
+ * work_dir forces relocation up the (same-volume) ancestor chain so the child's
+ * current directory stays under MAX_PATH. Fails closed on an unwritable parent. */
+static bool make_staging_dir(const char *work_dir, char *out, size_t out_cap) {
+    if (!work_dir || work_dir[0] == '\0') {
         return false;
     }
-    int c = fgetc(f);
-    (void)fclose(f);
-    return c != EOF;
+    char parent[TP_STAGING_PATH_MAX];
+    if ((size_t)snprintf(parent, sizeof parent, "%s", work_dir) >= sizeof parent) {
+        return false;
+    }
+    while (strlen(parent) > TP_STAGING_PARENT_BUDGET) {
+        if (!strip_last_component(parent)) {
+            break;
+        }
+    }
+    static _Atomic uint64_t counter;
+    const unsigned long pid = (unsigned long)tp_getpid();
+    for (unsigned int attempt = 0U; attempt < 256U; attempt++) {
+        const uint64_t serial =
+            atomic_fetch_add_explicit(&counter, UINT64_C(1), memory_order_relaxed) + UINT64_C(1);
+        int n = snprintf(out, out_cap, "%s/pkw-%08lx-%08llx", parent,
+                         pid & 0xffffffffUL, (unsigned long long)(serial & 0xffffffffULL));
+        if (n <= 0 || (size_t)n >= out_cap) {
+            return false;
+        }
+        if (tp_fs_exists(out)) {
+            continue; /* skip a leftover/foreign name rather than adopt it */
+        }
+        errno = 0;
+        if (tp_fs_create_dir(out)) {
+            return true;
+        }
+        if (errno == EEXIST) {
+            continue; /* lost a create race: try the next serial */
+        }
+        return false; /* unwritable parent / real error: fail closed */
+    }
+    return false;
+}
+
+/* Remove the staging dir and everything under it, best effort, on EVERY exit
+ * path. The builder writes a single flat file, but recurse to stay correct if a
+ * future builder ever drops a sidecar. */
+static void remove_staging_dir(const char *staging) {
+    tp_fs_dir *dir = tp_fs_dir_open(staging);
+    if (dir) {
+        tp_fs_dir_entry entry;
+        for (;;) {
+            const tp_fs_dir_result r = tp_fs_dir_next(dir, &entry);
+            if (r != TP_FS_DIR_ENTRY) {
+                break;
+            }
+            char child[TP_STAGING_PATH_MAX];
+            if ((size_t)snprintf(child, sizeof child, "%s/%s", staging, entry.name) >= sizeof child) {
+                continue;
+            }
+            if (entry.info.kind == TP_FS_KIND_DIRECTORY) {
+                remove_staging_dir(child);
+            } else {
+                (void)tp_fs_remove_file(child);
+            }
+        }
+        tp_fs_dir_close(dir);
+    }
+    (void)tp_fs_remove_dir(staging);
 }
 
 /* Serialize settings + decoded pixels into a request frame. Path sprites take
@@ -61,7 +183,7 @@ static bool artifact_readable(const char *out_path) {
  * immediately afterward. */
 static tp_status encode_request(const tp_pack_settings *s,
                                 const tp_image_rgba8 *loaded_images,
-                                const char *out_path, uint8_t **out_bytes,
+                                const char *out_name, uint8_t **out_bytes,
                                 size_t *out_len, tp_error *err) {
     tp_build_proto_sprite *sprites =
         (tp_build_proto_sprite *)calloc((size_t)s->sprite_count, sizeof *sprites);
@@ -107,7 +229,7 @@ static tp_status encode_request(const tp_pack_settings *s,
     req.power_of_two = s->power_of_two ? 1u : 0u;
     req.pixels_per_unit = s->pixels_per_unit;
     req.atlas_name = s->atlas_name;
-    req.out_name = out_path;
+    req.out_name = out_name;
     req.sprites = sprites;
     req.sprite_count = (uint32_t)s->sprite_count;
 
@@ -116,11 +238,12 @@ static tp_status encode_request(const tp_pack_settings *s,
     return st;
 }
 
-/* Map the child's reply + how it terminated onto a tp_status (see the header
- * for the full table). Fills `err` on every non-OK outcome. */
+/* Map the child's reply + how it terminated onto a tp_status (see the header for
+ * the full table). `staged_path` is the child's staging-relative artifact the
+ * parent verifies before publishing. Fills `err` on every non-OK outcome. */
 static tp_status map_outcome(const uint8_t *reply, size_t reply_len, bool read_ok,
                              bool reply_eof, bool waited, tp_proc_result w,
-                             const char *out_path, tp_error *err) {
+                             const char *staged_path, tp_error *err) {
     tp_build_proto_response resp;
     bool reply_valid = read_ok && reply_eof &&
                        tp_build_proto_decode_response(reply, reply_len, &resp, NULL) == TP_STATUS_OK;
@@ -132,7 +255,7 @@ static tp_status map_outcome(const uint8_t *reply, size_t reply_len, bool read_o
     if (reply_valid) {
         tp_status st;
         if (resp.status == TP_STATUS_OK) {
-            if (exited_zero && artifact_readable(out_path)) {
+            if (exited_zero && staged_artifact_ok(staged_path)) {
                 st = TP_STATUS_OK;
             } else {
                 st = tp_error_set(err, TP_STATUS_BUILDER_CRASHED,
@@ -167,63 +290,144 @@ static tp_status map_outcome(const uint8_t *reply, size_t reply_len, bool read_o
 
 tp_status tp_build_worker_run(const tp_pack_settings *settings, tp_image_rgba8 *loaded_images,
                               const char *out_path, tp_error *err) {
-    return tp_build_worker_run_exe(settings, loaded_images, out_path, NULL, err);
+    return tp_build_worker_run_opts(settings, loaded_images, out_path, NULL, err);
 }
 
 tp_status tp_build_worker_run_exe(const tp_pack_settings *settings, tp_image_rgba8 *loaded_images,
                                   const char *out_path, const char *worker_exe, tp_error *err) {
-    /* TEMPORARY H0.3-b: a non-ASCII out_path cannot round-trip through the ASCII
-     * worker out_name yet (the ASCII staging dir + tp_fs publish move is H0.4),
-     * so fall back to the in-process driver. Identical to the pre-worker path,
-     * so no regression -- but ALSO no containment for non-ASCII destinations.
-     * REMOVE this branch once H0.4 lands the staging directory. */
-    if (!path_is_ascii(out_path)) {
-        return tp_build_driver_run(settings, loaded_images, out_path, err);
+    tp_build_worker_opts opts;
+    memset(&opts, 0, sizeof opts);
+    opts.worker_exe = worker_exe;
+    return tp_build_worker_run_opts(settings, loaded_images, out_path, &opts, err);
+}
+
+tp_status tp_build_worker_run_opts(const tp_pack_settings *settings, tp_image_rgba8 *loaded_images,
+                                   const char *out_path, const tp_build_worker_opts *opts,
+                                   tp_error *err) {
+    if (opts && opts->out_cancelled) {
+        *opts->out_cancelled = false;
     }
 
-    /* Resolve the worker executable BEFORE consuming loaded_images, so a
-     * resolution failure can still fall back to the in-process driver. */
+    /* Resolve the worker executable BEFORE consuming loaded_images. A self-path
+     * failure is NOT silently downgraded to an in-process build: that would run
+     * nt_builder in the host and lose containment, so it fails closed. */
     char self[4096];
-    const char *exe = worker_exe;
+    const char *exe = opts ? opts->worker_exe : NULL;
     if (!exe) {
         if (!tp_proc_self_path(self, sizeof self)) {
-            /* TODO(H0.4): if self cannot be located, containment is unavailable;
-             * for now packing must still succeed, so run in-process. */
-            return tp_build_driver_run(settings, loaded_images, out_path, err);
+            free_loaded_images(loaded_images, settings->sprite_count);
+            return tp_error_set(err, TP_STATUS_BUILDER_CRASHED,
+                                "tp_pack: could not locate the build worker executable");
         }
         exe = self;
     }
 
+    /* Private ASCII staging dir on the destination's volume: the child runs with
+     * this as its CWD and writes a bare relative ASCII name, so a Unicode / long
+     * destination never reaches the builder's narrow output path. */
+    char staging[TP_STAGING_PATH_MAX];
+    if (!make_staging_dir(settings->work_dir, staging, sizeof staging)) {
+        free_loaded_images(loaded_images, settings->sprite_count);
+        return tp_error_set(err, TP_STATUS_BUILDER_CRASHED,
+                            "tp_pack: could not create a build worker staging directory under '%s'",
+                            settings->work_dir);
+    }
+    char staged_path[TP_STAGING_PATH_MAX];
+    if ((size_t)snprintf(staged_path, sizeof staged_path, "%s/%s", staging, TP_BUILD_WORKER_OUT_NAME) >=
+        sizeof staged_path) {
+        remove_staging_dir(staging);
+        free_loaded_images(loaded_images, settings->sprite_count);
+        return tp_error_set(err, TP_STATUS_BUILDER_CRASHED, "tp_pack: build worker staging path too long");
+    }
+
     uint8_t *req_bytes = NULL;
     size_t req_len = 0U;
-    tp_status st = encode_request(settings, loaded_images, out_path, &req_bytes, &req_len, err);
+    tp_status st = encode_request(settings, loaded_images, TP_BUILD_WORKER_OUT_NAME, &req_bytes, &req_len, err);
     /* The request now owns a copy of every pixel block; release the caller's
      * decode buffers (mirrors the driver freeing before encode/assembly). */
     free_loaded_images(loaded_images, settings->sprite_count);
     if (st != TP_STATUS_OK) {
+        remove_staging_dir(staging);
         return st;
     }
 
-    tp_proc *proc = tp_proc_spawn(exe, TP_BUILD_WORKER_ARGV1);
+    tp_proc *proc = tp_proc_spawn(exe, TP_BUILD_WORKER_ARGV1, staging);
     if (!proc) {
         free(req_bytes);
+        remove_staging_dir(staging);
         return tp_error_set(err, TP_STATUS_BUILDER_CRASHED, "tp_pack: could not spawn build worker '%s'", exe);
     }
 
+    /* The worker reads its whole request to EOF before producing anything, so this
+     * blocking write always drains; a failed/short write means the child died and
+     * the outcome map covers it. */
     bool wrote = tp_proc_write_stdin(proc, req_bytes, req_len);
     free(req_bytes);
-    (void)wrote; /* a failed write means the child died; the outcome map covers it */
+    (void)wrote;
 
-    uint8_t *reply = (uint8_t *)malloc(TP_BUILD_WORKER_REPLY_CAP);
+    /* Wait for the child while polling cancellation and the safety timeout. This
+     * runs BEFORE reading stdout: a hung child that never closes its stdout can no
+     * longer wedge the parent in a blocking read -- cancel/timeout kills it, which
+     * breaks the pipes and lets the subsequent read reach EOF at once. */
+    const int timeout_ms = (opts && opts->timeout_ms > 0) ? opts->timeout_ms : TP_BUILD_WORKER_TIMEOUT_MS;
+    const double start = now_ms();
+    tp_proc_result w = {TP_PROC_END_ABNORMAL, -1};
+    bool finished = false;
+    bool cancelled = false;
+    bool timed_out = false;
+    for (;;) {
+        if (opts && opts->cancel_poll && opts->cancel_poll(opts->cancel_ctx)) {
+            tp_proc_kill(proc);
+            cancelled = true;
+            break;
+        }
+        bool slice_finished = false;
+        if (!tp_proc_wait_slice(proc, TP_BUILD_WORKER_POLL_MS, &w, &slice_finished)) {
+            tp_proc_kill(proc); /* hard wait error: treat as an abnormal end */
+            break;
+        }
+        if (slice_finished) {
+            finished = true;
+            break;
+        }
+        if (now_ms() - start >= (double)timeout_ms) {
+            tp_proc_kill(proc);
+            timed_out = true;
+            break;
+        }
+    }
+
+    uint8_t *reply = NULL;
     size_t reply_len = 0U;
     bool reply_eof = false;
-    bool read_ok = reply && tp_proc_read_stdout(proc, reply, TP_BUILD_WORKER_REPLY_CAP, &reply_len, &reply_eof);
+    bool read_ok = false;
+    if (finished) {
+        reply = (uint8_t *)malloc(TP_BUILD_WORKER_REPLY_CAP);
+        read_ok = reply && tp_proc_read_stdout(proc, reply, TP_BUILD_WORKER_REPLY_CAP, &reply_len, &reply_eof);
+    }
+    tp_proc_destroy(proc); /* reaps a killed child; a finished child is already reaped */
 
-    tp_proc_result w = {TP_PROC_END_ABNORMAL, -1};
-    bool waited = tp_proc_wait(proc, &w);
-    tp_proc_destroy(proc);
+    if (cancelled) {
+        remove_staging_dir(staging);
+        if (opts && opts->out_cancelled) {
+            *opts->out_cancelled = true;
+        }
+        free(reply);
+        return TP_STATUS_OK; /* nothing published; caller maps this to a cancelled job */
+    }
+    if (timed_out) {
+        remove_staging_dir(staging);
+        free(reply);
+        return tp_error_set(err, TP_STATUS_BUILDER_CRASHED,
+                            "tp_pack: build worker timed out after %d ms (builder timeout)", timeout_ms);
+    }
 
-    st = map_outcome(reply, reply_len, read_ok, reply_eof, waited, w, out_path, err);
+    st = map_outcome(reply, reply_len, read_ok, reply_eof, finished, w, staged_path, err);
+    if (st == TP_STATUS_OK && !tp_fs_replace(staged_path, out_path)) {
+        st = tp_error_set(err, TP_STATUS_BUILDER_CRASHED,
+                          "tp_pack: build worker artifact could not be published to '%s'", out_path);
+    }
+    remove_staging_dir(staging);
     free(reply);
     return st;
 }

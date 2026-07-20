@@ -523,6 +523,12 @@ static tp_status load_path_images(const tp_pack_settings *settings,
 
 tp_status tp_pack(const tp_pack_settings *settings, struct tp_arena *arena, struct tp_result **out_result,
                   tp_error *err) {
+    return tp_pack_cancellable(settings, arena, out_result, NULL, NULL, err);
+}
+
+tp_status tp_pack_cancellable(const tp_pack_settings *settings, struct tp_arena *arena,
+                              struct tp_result **out_result, tp_pack_cancel_poll cancel_poll,
+                              void *cancel_ctx, tp_error *err) {
     if (out_result) {
         *out_result = NULL;
     }
@@ -557,13 +563,21 @@ tp_status tp_pack(const tp_pack_settings *settings, struct tp_arena *arena, stru
         return st;
     }
 
-    /* The worker consumes `path_images` (frees them on every path). It packs in
-     * a private child process; a non-ASCII out path transparently falls back to
-     * the in-process driver for now (H0.3-b seam, see tp_build_worker.c). */
-    st = tp_build_worker_run(settings, path_images, path, err);
-    if (st != TP_STATUS_OK) {
+    /* The worker consumes `path_images` (frees them on every path). It packs in a
+     * private child process, stages an ASCII artifact, and atomically publishes to
+     * `path` (Unicode / long paths included). Cancellation kills the worker, cleans
+     * staging, publishes nothing, and returns OK with no artifact -- there is
+     * nothing to read back, so short-circuit to a benign cancelled result. */
+    tp_build_worker_opts wopts;
+    memset(&wopts, 0, sizeof wopts);
+    bool cancelled = false;
+    wopts.cancel_poll = cancel_poll;
+    wopts.cancel_ctx = cancel_ctx;
+    wopts.out_cancelled = &cancelled;
+    st = tp_build_worker_run_opts(settings, path_images, path, &wopts, err);
+    if (st != TP_STATUS_OK || cancelled) {
         tp_name_map_destroy(names);
-        return st;
+        return st; /* on cancel st is TP_STATUS_OK and *out_result stays NULL */
     }
 
     tp_result **results = NULL;

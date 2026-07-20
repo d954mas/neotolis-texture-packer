@@ -16,6 +16,9 @@
 #if defined(_WIN32)
 #include <fcntl.h>
 #include <io.h>
+#include <windows.h>
+#else
+#include <time.h>
 #endif
 
 #if defined(TP_WORKER_FAULT_NONZERO)
@@ -36,7 +39,21 @@ static void drain_stdin(void) {
 int main(void) {
     drain_stdin();
 
-#if defined(TP_WORKER_FAULT_CRASH)
+#if defined(TP_WORKER_FAULT_HANG)
+    /* Drained the request, then never reply and never exit: the parent's wait
+     * loop must observe cancellation / the safety timeout, tree-kill this child,
+     * and reach EOF on the now-broken stdout pipe. Sleep in bounded chunks so a
+     * missed kill cannot wedge CI forever. */
+    for (int i = 0; i < 6000; i++) {
+#if defined(_WIN32)
+        Sleep(100u);
+#else
+        struct timespec ts = {0, 100 * 1000 * 1000};
+        (void)nanosleep(&ts, NULL);
+#endif
+    }
+    return 0; /* ~10 min ceiling; the parent kills this long before */
+#elif defined(TP_WORKER_FAULT_CRASH)
     /* POSIX: SIGABRT (killed); Windows: exit code 3. No reply is written, so the
      * host maps this to BUILDER_CRASHED. */
     abort();

@@ -454,7 +454,9 @@ add_test(NAME tp_build_driver_oracle COMMAND tp_test_build_driver_oracle "${CMAK
 # the CLI NTPACKER_CLI_*_FAULT_SEAM binaries (production exes have no such mode) --
 # drive the crash / malformed-reply / non-zero-exit outcome mapping. The test exe
 # is BOTH the parent and the normal worker child (its main dispatches __build-worker).
-foreach(_mode CRASH MALFORMED NONZERO)
+# HANG (H0.4) joins the fault set: drains stdin then never replies/exits, so the
+# cancel + safety-timeout paths can tree-kill it and clean up staging.
+foreach(_mode CRASH MALFORMED NONZERO HANG)
     string(TOLOWER "${_mode}" _lc)
     add_executable(tp_build_worker_${_lc} tp_build_worker_fault.c)
     target_link_libraries(tp_build_worker_${_lc} PRIVATE tp_build)
@@ -468,13 +470,17 @@ add_executable(tp_test_build_worker test_build_worker.c)
 target_link_libraries(tp_test_build_worker PRIVATE tp_build unity)  # tp_build owns the worker boundary + nt_builder oracle
 target_include_directories(tp_test_build_worker PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_compile_options(tp_test_build_worker PRIVATE -U_DLL)
+# Compile-def (NOT env): the timeout test drives the worker with a tiny safety
+# timeout so it can assert a builder_crashed timeout without a 5-minute wait.
+target_compile_definitions(tp_test_build_worker PRIVATE TP_TEST_WORKER_TIMEOUT_MS=400)
 nt_set_warning_flags(tp_test_build_worker)   # AGENTS.md invariant: our test TUs too
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_build_worker_test")
 add_test(NAME tp_build_worker COMMAND tp_test_build_worker
     "${CMAKE_BINARY_DIR}/tp_build_worker_test"
     $<TARGET_FILE:tp_build_worker_crash>
     $<TARGET_FILE:tp_build_worker_malformed>
-    $<TARGET_FILE:tp_build_worker_nonzero>)
+    $<TARGET_FILE:tp_build_worker_nonzero>
+    $<TARGET_FILE:tp_build_worker_hang>)
 
 # Shared strict-UTF-8 raster ingress: memory decode, bounded resources and
 # explicit allocator ownership.  The scratch tree includes a Cyrillic filename.

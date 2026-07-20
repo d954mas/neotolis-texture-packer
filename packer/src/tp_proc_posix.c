@@ -9,6 +9,7 @@
 
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #if defined(__APPLE__)
@@ -56,11 +57,14 @@ bool tp_proc_self_path(char *out, size_t out_cap) {
     out[n] = '\0';
     return true;
 #endif
-    /* TODO(H0.4): argv[0]/PATH fallback for platforms without /proc or
-     * _NSGetExecutablePath. The three CI OSes are covered above. */
+    /* No argv[0]/PATH fallback: every supported host resolves its own image
+     * without argv (Windows GetModuleFileNameW, Linux /proc/self/exe, macOS
+     * _NSGetExecutablePath). An argv[0] search would be strictly less reliable
+     * (a caller can spawn us with any argv[0]) and only matters on platforms this
+     * tool does not target, so containment fails closed there instead. */
 }
 
-tp_proc *tp_proc_spawn(const char *exe_utf8, const char *arg1) {
+tp_proc *tp_proc_spawn(const char *exe_utf8, const char *arg1, const char *cwd_utf8) {
     if (!exe_utf8 || exe_utf8[0] == '\0') {
         return NULL;
     }
@@ -102,8 +106,13 @@ tp_proc *tp_proc_spawn(const char *exe_utf8, const char *arg1) {
         return NULL;
     }
     if (pid == 0) {
-        /* Child: only async-signal-safe calls between fork and execv. Wire the
-         * two pipe ends to stdin/stdout, drop every raw pipe fd, keep stderr. */
+        /* Child: only async-signal-safe calls between fork and execv (chdir is on
+         * the POSIX async-signal-safe list). Enter the staging dir first so the
+         * request's relative output name resolves there, wire the two pipe ends to
+         * stdin/stdout, drop every raw pipe fd, keep stderr. */
+        if (cwd_utf8 && cwd_utf8[0] != '\0' && chdir(cwd_utf8) != 0) {
+            _exit(127); /* cannot enter staging: parent maps the non-zero exit */
+        }
         if (dup2(in_fd[0], STDIN_FILENO) < 0 || dup2(out_fd[1], STDOUT_FILENO) < 0) {
             _exit(127);
         }
@@ -198,30 +207,52 @@ bool tp_proc_read_stdout(tp_proc *proc, void *buf, size_t cap, size_t *out_len,
     }
 }
 
-bool tp_proc_wait(tp_proc *proc, tp_proc_result *out) {
+bool tp_proc_wait_slice(tp_proc *proc, int slice_ms, tp_proc_result *out, bool *finished) {
+    if (finished) {
+        *finished = false;
+    }
     if (!proc) {
         return false;
     }
-    if (!proc->reaped) {
-        int status = 0;
-        pid_t r;
-        do {
-            r = waitpid(proc->pid, &status, 0);
-        } while (r < 0 && errno == EINTR);
-        if (r != proc->pid) {
-            return false;
+    if (proc->reaped) {
+        if (finished) {
+            *finished = true;
         }
-        if (WIFEXITED(status)) {
-            proc->result.how = TP_PROC_END_EXITED;
-            proc->result.code = WEXITSTATUS(status);
-        } else if (WIFSIGNALED(status)) {
-            proc->result.how = TP_PROC_END_ABNORMAL;
-            proc->result.code = WTERMSIG(status);
-        } else {
-            proc->result.how = TP_PROC_END_ABNORMAL;
-            proc->result.code = -1;
+        if (out) {
+            *out = proc->result;
         }
-        proc->reaped = true;
+        return true;
+    }
+    int status = 0;
+    pid_t r;
+    do {
+        r = waitpid(proc->pid, &status, WNOHANG);
+    } while (r < 0 && errno == EINTR);
+    if (r < 0) {
+        return false;
+    }
+    if (r == 0) {
+        /* Still running: sleep out the slice so the caller polls at a bounded
+         * cadence rather than spinning. */
+        if (slice_ms > 0) {
+            struct timespec ts = {slice_ms / 1000, (long)(slice_ms % 1000) * 1000000L};
+            (void)nanosleep(&ts, NULL);
+        }
+        return true;
+    }
+    if (WIFEXITED(status)) {
+        proc->result.how = TP_PROC_END_EXITED;
+        proc->result.code = WEXITSTATUS(status);
+    } else if (WIFSIGNALED(status)) {
+        proc->result.how = TP_PROC_END_ABNORMAL;
+        proc->result.code = WTERMSIG(status);
+    } else {
+        proc->result.how = TP_PROC_END_ABNORMAL;
+        proc->result.code = -1;
+    }
+    proc->reaped = true;
+    if (finished) {
+        *finished = true;
     }
     if (out) {
         *out = proc->result;

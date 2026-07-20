@@ -3,6 +3,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0601 /* Windows 7+: Job Objects + PROC_THREAD_ATTRIBUTE_HANDLE_LIST */
+#endif
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -10,6 +13,7 @@
 
 struct tp_proc {
     HANDLE process;
+    HANDLE job;      /* KILL_ON_JOB_CLOSE tree-kill container; NULL if unavailable */
     HANDLE stdin_w;  /* parent writes the request here; NULL once closed */
     HANDLE stdout_r; /* parent reads the reply here; NULL once closed */
     bool waited;
@@ -102,7 +106,42 @@ static wchar_t *build_command_line(const wchar_t *exe_wide, const char *arg1) {
     return cmd;
 }
 
-tp_proc *tp_proc_spawn(const char *exe_utf8, const char *arg1) {
+/* UTF-8 cwd -> inheritable-free wide path with backslash separators. The caller
+ * guarantees the staging dir is short enough to be a process current directory
+ * (Windows caps lpCurrentDirectory at MAX_PATH), so no extended prefix is added
+ * -- CreateProcessW rejects a \\?\ current directory. NULL on failure. */
+static wchar_t *cwd_to_wide(const char *cwd_utf8) {
+    wchar_t *wide = utf8_to_wide(cwd_utf8);
+    if (!wide) {
+        return NULL;
+    }
+    for (wchar_t *p = wide; *p; p++) {
+        if (*p == L'/') {
+            *p = L'\\';
+        }
+    }
+    return wide;
+}
+
+/* Best-effort Job Object with KILL_ON_JOB_CLOSE: the child (and any grandchild)
+ * is torn down when the parent drops the job handle (crash, cancel, exit). A
+ * constrained host that forbids nested jobs simply runs without it. */
+static HANDLE create_kill_on_close_job(void) {
+    HANDLE job = CreateJobObjectW(NULL, NULL);
+    if (!job) {
+        return NULL;
+    }
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION info;
+    memset(&info, 0, sizeof info);
+    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &info, sizeof info)) {
+        (void)CloseHandle(job);
+        return NULL;
+    }
+    return job;
+}
+
+tp_proc *tp_proc_spawn(const char *exe_utf8, const char *arg1, const char *cwd_utf8) {
     if (!exe_utf8 || exe_utf8[0] == '\0') {
         return NULL;
     }
@@ -111,8 +150,10 @@ tp_proc *tp_proc_spawn(const char *exe_utf8, const char *arg1) {
         return NULL;
     }
     wchar_t *cmd = build_command_line(exe_wide, arg1);
-    if (!cmd) {
+    wchar_t *cwd_wide = NULL;
+    if (!cmd || (cwd_utf8 && !(cwd_wide = cwd_to_wide(cwd_utf8)))) {
         free(exe_wide);
+        free(cmd);
         return NULL;
     }
 
@@ -125,8 +166,12 @@ tp_proc *tp_proc_spawn(const char *exe_utf8, const char *arg1) {
     HANDLE stdin_w = NULL;  /* parent writes the request */
     HANDLE stdout_r = NULL; /* parent reads the reply */
     HANDLE stdout_w = NULL; /* child writes the reply */
-    if (!CreatePipe(&stdin_r, &stdin_w, &sa, 0) ||
-        !CreatePipe(&stdout_r, &stdout_w, &sa, 0)) {
+    /* 64 KiB pipe buffers: the reply (<= ~8 KiB) fits entirely, so the child can
+     * write it and exit without the parent reading concurrently -- the parent
+     * waits (with cancel/timeout) THEN reads, never blocking a read on a hung
+     * child. */
+    if (!CreatePipe(&stdin_r, &stdin_w, &sa, 1u << 16) ||
+        !CreatePipe(&stdout_r, &stdout_w, &sa, 1u << 16)) {
         if (stdin_r) {
             (void)CloseHandle(stdin_r);
         }
@@ -135,6 +180,7 @@ tp_proc *tp_proc_spawn(const char *exe_utf8, const char *arg1) {
         }
         free(exe_wide);
         free(cmd);
+        free(cwd_wide);
         return NULL;
     }
     /* Keep only the two child-facing ends inheritable; the parent's ends must
@@ -142,41 +188,91 @@ tp_proc *tp_proc_spawn(const char *exe_utf8, const char *arg1) {
     (void)SetHandleInformation(stdin_w, HANDLE_FLAG_INHERIT, 0);
     (void)SetHandleInformation(stdout_r, HANDLE_FLAG_INHERIT, 0);
 
-    STARTUPINFOW si;
-    memset(&si, 0, sizeof si);
-    si.cb = sizeof si;
-    si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdInput = stdin_r;
-    si.hStdOutput = stdout_w;
-    si.hStdError = GetStdHandle(STD_ERROR_HANDLE); /* inherit parent stderr */
+    /* Restrict inheritance to EXACTLY the two pipe ends via an explicit handle
+     * list (replaces blanket bInheritHandles): an unrelated inheritable handle
+     * can no longer leak into the child and pin a pipe open. stderr is not
+     * inherited -- the worker silences logging, so it never writes there. */
+    SIZE_T attr_size = 0;
+    (void)InitializeProcThreadAttributeList(NULL, 1, 0, &attr_size);
+    LPPROC_THREAD_ATTRIBUTE_LIST attrs =
+        (LPPROC_THREAD_ATTRIBUTE_LIST)malloc(attr_size);
+    HANDLE inherit[2] = {stdin_r, stdout_w};
+    bool attrs_ok = attrs &&
+                    InitializeProcThreadAttributeList(attrs, 1, 0, &attr_size) &&
+                    UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                                              inherit, sizeof inherit, NULL, NULL);
+    if (!attrs_ok) {
+        if (attrs) {
+            free(attrs);
+        }
+        (void)CloseHandle(stdin_r);
+        (void)CloseHandle(stdin_w);
+        (void)CloseHandle(stdout_r);
+        (void)CloseHandle(stdout_w);
+        free(exe_wide);
+        free(cmd);
+        free(cwd_wide);
+        return NULL;
+    }
+
+    STARTUPINFOEXW six;
+    memset(&six, 0, sizeof six);
+    six.StartupInfo.cb = sizeof six;
+    six.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    six.StartupInfo.hStdInput = stdin_r;
+    six.StartupInfo.hStdOutput = stdout_w;
+    six.StartupInfo.hStdError = INVALID_HANDLE_VALUE; /* not inherited: worker is silent */
+    six.lpAttributeList = attrs;
+
+    HANDLE job = create_kill_on_close_job();
 
     PROCESS_INFORMATION pi;
     memset(&pi, 0, sizeof pi);
-    /* bInheritHandles=TRUE with only the two pipe ends marked inheritable.
-     * TODO(H0.4): tighten to an explicit PROC_THREAD_ATTRIBUTE_HANDLE_LIST and
-     * add a Job Object so a parent death or cancel cannot strand a worker. */
-    BOOL ok = CreateProcessW(exe_wide, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+    /* Suspended so the child is assigned to the job (tree-kill) BEFORE it runs. */
+    BOOL ok = CreateProcessW(exe_wide, cmd, NULL, NULL, TRUE,
+                             CREATE_NO_WINDOW | CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT,
+                             NULL, cwd_wide, &six.StartupInfo, &pi);
+    DeleteProcThreadAttributeList(attrs);
+    free(attrs);
     free(exe_wide);
     free(cmd);
+    free(cwd_wide);
     /* The child owns its ends now; the parent must drop them so EOF propagates. */
     (void)CloseHandle(stdin_r);
     (void)CloseHandle(stdout_w);
     if (!ok) {
+        if (job) {
+            (void)CloseHandle(job);
+        }
         (void)CloseHandle(stdin_w);
         (void)CloseHandle(stdout_r);
         return NULL;
     }
+    if (job && !AssignProcessToJobObject(job, pi.hProcess)) {
+        /* A parent job that forbids nesting rejects the assign; drop our (now
+         * empty) job so tp_proc_kill falls back to TerminateProcess on the real
+         * child instead of tree-killing an empty job and stranding it. */
+        (void)CloseHandle(job);
+        job = NULL;
+    }
+    (void)ResumeThread(pi.hThread);
     (void)CloseHandle(pi.hThread);
 
     tp_proc *proc = (tp_proc *)calloc(1U, sizeof *proc);
     if (!proc) {
+        if (job) {
+            (void)TerminateJobObject(job, 1U);
+            (void)CloseHandle(job);
+        } else {
+            (void)TerminateProcess(pi.hProcess, 1U);
+        }
         (void)CloseHandle(stdin_w);
         (void)CloseHandle(stdout_r);
-        (void)TerminateProcess(pi.hProcess, 1U);
         (void)CloseHandle(pi.hProcess);
         return NULL;
     }
     proc->process = pi.hProcess;
+    proc->job = job;
     proc->stdin_w = stdin_w;
     proc->stdout_r = stdout_r;
     proc->waited = false;
@@ -262,24 +358,41 @@ bool tp_proc_read_stdout(tp_proc *proc, void *buf, size_t cap, size_t *out_len,
     }
 }
 
-bool tp_proc_wait(tp_proc *proc, tp_proc_result *out) {
+bool tp_proc_wait_slice(tp_proc *proc, int slice_ms, tp_proc_result *out, bool *finished) {
+    if (finished) {
+        *finished = false;
+    }
     if (!proc || !proc->process) {
         return false;
     }
-    if (!proc->waited) {
-        if (WaitForSingleObject(proc->process, INFINITE) != WAIT_OBJECT_0) {
-            return false;
+    if (proc->waited) {
+        if (finished) {
+            *finished = true;
         }
-        DWORD code = 0U;
-        if (!GetExitCodeProcess(proc->process, &code)) {
-            return false;
+        if (out) {
+            *out = proc->result;
         }
-        /* Windows has no separate "signaled" state; a crash surfaces as the
-         * exception exit code. Report it as a normal exit and let the worker
-         * boundary treat a non-zero code with no valid reply as a crash. */
-        proc->result.how = TP_PROC_END_EXITED;
-        proc->result.code = (int)code;
-        proc->waited = true;
+        return true;
+    }
+    DWORD waited = WaitForSingleObject(proc->process, slice_ms < 0 ? INFINITE : (DWORD)slice_ms);
+    if (waited == WAIT_TIMEOUT) {
+        return true; /* still running: *finished stays false */
+    }
+    if (waited != WAIT_OBJECT_0) {
+        return false;
+    }
+    DWORD code = 0U;
+    if (!GetExitCodeProcess(proc->process, &code)) {
+        return false;
+    }
+    /* Windows has no separate "signaled" state; a crash surfaces as the exception
+     * exit code. Report EXITED and let the worker boundary treat a non-zero code
+     * with no valid reply as a crash. */
+    proc->result.how = TP_PROC_END_EXITED;
+    proc->result.code = (int)code;
+    proc->waited = true;
+    if (finished) {
+        *finished = true;
     }
     if (out) {
         *out = proc->result;
@@ -288,10 +401,14 @@ bool tp_proc_wait(tp_proc *proc, tp_proc_result *out) {
 }
 
 void tp_proc_kill(tp_proc *proc) {
-    if (!proc || !proc->process || proc->waited) {
+    if (!proc || proc->waited) {
         return;
     }
-    (void)TerminateProcess(proc->process, 1U);
+    if (proc->job) {
+        (void)TerminateJobObject(proc->job, 1U); /* tree-kill the whole worker */
+    } else if (proc->process) {
+        (void)TerminateProcess(proc->process, 1U);
+    }
 }
 
 void tp_proc_destroy(tp_proc *proc) {
@@ -306,10 +423,13 @@ void tp_proc_destroy(tp_proc *proc) {
     }
     if (proc->process) {
         if (!proc->waited) {
-            (void)TerminateProcess(proc->process, 1U);
+            tp_proc_kill(proc);
             (void)WaitForSingleObject(proc->process, 2000U);
         }
         (void)CloseHandle(proc->process);
+    }
+    if (proc->job) {
+        (void)CloseHandle(proc->job); /* KILL_ON_JOB_CLOSE reaps any stray tree */
     }
     free(proc);
 }
