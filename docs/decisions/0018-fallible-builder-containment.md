@@ -43,6 +43,21 @@ error returns for all user/resource/I/O failures, a memory or caller-owned sink
 for output, bounded ownership, cancellation, and strict UTF-8 path behavior where
 paths remain. That replacement is internal and does not change client contracts.
 
+## Kickoff decisions (owner, 2026-07-20)
+
+- **Worker binary:** no separately shipped executable. Each host re-execs itself
+  with a hidden `__build-worker` argv mode (own module path locates the child);
+  the mode never touches UI or ordinary CLI surfaces.
+- **Platform parity:** Windows and POSIX spawn/kill land in the same gate; the
+  Windows Job Object tree-kill is in-scope for this packet, not deferred.
+- **Timeout policy:** cancellation is the primary control; an internal ~5 minute
+  safety timeout maps to `builder_crashed`. No user-facing timeout setting in
+  this packet.
+- **CI scope:** the full worker fault suite (crash, cancel, malformed reply,
+  full-disk via seam, Unicode/long paths) runs on all three OSes in CI.
+- **v1 transport:** pipe protocol with one bounded raw-pixel copy per Pack;
+  shared memory is revisited only on a measured budget miss on the U-01 fixture.
+
 ## Executable evidence required to close the slice
 
 - a deliberately crashing worker returns `builder_crashed` while the host and
