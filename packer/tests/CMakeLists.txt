@@ -365,6 +365,8 @@ if(NOT WIN32)
     add_executable(tp_test_project_save_posix_contract
         test_project_save_posix_contract.c)
     target_link_libraries(tp_test_project_save_posix_contract PRIVATE tp_core unity)
+    target_include_directories(tp_test_project_save_posix_contract PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../src)
     target_compile_definitions(tp_test_project_save_posix_contract PRIVATE
         TP_PROJECT_SAVE_TEST_DIR="${CMAKE_BINARY_DIR}/tp_project_save_posix_test")
     target_compile_options(tp_test_project_save_posix_contract PRIVATE -U_DLL)

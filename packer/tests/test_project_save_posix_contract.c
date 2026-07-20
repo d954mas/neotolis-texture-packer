@@ -7,6 +7,7 @@
 
 #include "tp_core/tp_identity.h"
 #include "tp_core/tp_project.h"
+#include "tp_project_identity_internal.h"
 
 #ifndef TP_PROJECT_SAVE_TEST_DIR
 #error "TP_PROJECT_SAVE_TEST_DIR is required"
