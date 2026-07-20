@@ -115,11 +115,26 @@ Base (H0.3–H0.5 + F2 phase-gate audit + F3)
 - **B0 (pure-core import, no GUI surface) may run in parallel with phase U**,
   since it touches no canvas surface.
 - Base has landed H0.3–H0.5 (decision 0018 fallible builder containment; H0
-  complete 2026-07-20) and still owes a phase-gate audit of the landed F2
-  foundation before F3 is declared complete.
+  complete 2026-07-20) and the F2 phase-gate audit (closed 2026-07-21, see the
+  note below); the remaining Base work is the F3 packets.
 
 Where §3's older dependency prose below contradicts this checkpoint (F3-after-B1,
 no U phase), this checkpoint governs and that prose is historical.
+
+**2026-07-21 — F2 phase gate closed.** The landed F2 foundation was audited by a
+six-lens adversarial audit and every gate criterion is now pinned by registered
+executable tests; the fix packet landed as commits `1fbd4e6` (test-gap pins) and
+`f3ceecc` (structured diagnostic CLI/GUI parity + dormant `gui_parity` seam
+deleted). F2 is **DONE**; the Base remainder is the F3 packets. Night-session lead
+decisions:
+
+- **(D-N1)** F3-03's stale `B1-01` dependency is dropped per decision 0020.
+  `pack_input_hash` is defined over the current source model (raw RGBA + settings
+  + target adaptation) with a reserved version byte for future linked sources.
+- **(D-N4)** F3-03 lands **CORE-side** now (hash -> job hash field -> result
+  store + byte-budget LRU -> completion-sequence selection + undo cache probe)
+  while the GUI stale/preview **presentation** defers to `U-04`, because `U.4`
+  thumbnails consume the result store.
 
 ## 1. Назначение и правила исполнения
 
@@ -872,7 +887,7 @@ second session abstraction.
 
 **Spec refs.** §4.6, §6.1, §7.1, §9.1–9.3, §21, §59 items 18–19.
 
-**Current code delta.** GUI pending flags работают на main thread (`apps/gui/gui_actions.c:33-47`), pack worker публикуется polling-ом (`apps/gui/gui_pack.c:522-624`), но general session abstraction отсутствует.
+**Current code delta.** Pack/export — session-owned job handles в `packer/src/tp_job.c`; GUI — тонкий poll/take adapter (`apps/gui/gui_pack_jobs.c`, `apps/gui/gui_pack_preview.c`).
 
 **Dependencies.** F2-05.
 
@@ -890,7 +905,7 @@ second session abstraction.
 
 **Exact tests / fault injection.** Producer ordering, callback reentrancy rejection, admission failure, worker completion after Undo/save/close, close/quiesce semantics, event subscriber disconnect.
 
-**Completion evidence.** Deterministic ordering/reentrancy transcript; synchronization tests where actual cross-thread producers exist; GUI baseline e2e зелёный.
+**Completion evidence.** Deterministic ordering/reentrancy transcript; synchronization tests where actual cross-thread producers exist; GUI baseline e2e зелёный. «Callback reentrancy rejection» и «event subscriber disconnect» — N/A by design: session event surface — pull model (`tp_session_events_after` + resync), client push callbacks не существуют.
 
 **Non-goals / blockers.** Network transport и ownership handoff входят A.
 
@@ -943,9 +958,9 @@ planned product work.
 
 **Spec refs.** §10–10.5, §54 Phase 2 items 5–7, §59 items 20–32.
 
-**Current code delta.** Один result slot на atlas (`apps/gui/gui_pack.c:34-49`), snapshot compare `model_changed` (`:272-285`), refresh epoch latch (`apps/gui/gui_actions.c:54-60,758,807,905`).
+**Current code delta.** Refresh epoch latch удалён из `apps/gui` (2026-07-16 foundation work); GUI-side остаются только `preview_stale` boolean (`apps/gui/gui_project.c`) и один result slot на atlas (`apps/gui/gui_pack.c`).
 
-**Dependencies.** F3-01, B1-01, and decision 0004 Pack supersession policy.
+**Dependencies.** F3-01 and decision 0004 Pack supersession policy. `B1` is not a prerequisite (decision 0020): `pack_input_hash` carries a version byte / reserved input categories so future B1 linked sources extend it additively.
 
 **Ordered bounded tasks.**
 
