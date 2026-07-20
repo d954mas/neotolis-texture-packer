@@ -643,15 +643,25 @@ void test_expected_revision(void) {
     op_atlas_rename(&op, aid, "two");
     req.expected_revision = 0; /* stale */
     (void)snprintf(req.id_hex, sizeof req.id_hex, "%s", "1000000000000000000000000000000b");
+    char *before_conflict = tp_test_serialize_project(tp_model_project(m));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_REVISION_CONFLICT, tp_model_apply(m, &req, &res, &err));
     TEST_ASSERT_EQUAL_INT(1, res.error_count);
     TEST_ASSERT_EQUAL_INT(-1, res.errors[0].op_index);
     tp_txn_result_free(&res);
+    char *after_conflict = tp_test_serialize_project(tp_model_project(m));
+    TEST_ASSERT_EQUAL_STRING(before_conflict, after_conflict); /* below-revision reject: byte-unchanged */
+    free(before_conflict);
+    free(after_conflict);
 
     req.expected_revision = 5; /* never existed */
     (void)snprintf(req.id_hex, sizeof req.id_hex, "%s", "1000000000000000000000000000000c");
+    char *before_invalid = tp_test_serialize_project(tp_model_project(m));
     TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_REVISION, tp_model_apply(m, &req, &res, &err));
     tp_txn_result_free(&res);
+    char *after_invalid = tp_test_serialize_project(tp_model_project(m));
+    TEST_ASSERT_EQUAL_STRING(before_invalid, after_invalid); /* above-revision reject: byte-unchanged */
+    free(before_invalid);
+    free(after_invalid);
 
     req.expected_revision = 1; /* current */
     (void)snprintf(req.id_hex, sizeof req.id_hex, "%s", "1000000000000000000000000000000d");

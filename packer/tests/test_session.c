@@ -822,6 +822,62 @@ void test_invalid_operation_reject_publishes_no_event_and_id_stays_retryable(voi
     tp_session_destroy(session);
 }
 
+/* A batch of 2+ ops is ONE transaction: it publishes exactly one MODEL_COMMITTED
+ * event and advances the revision once (0 -> 1), not once per op. */
+void test_multi_op_batch_publishes_single_commit_event(void) {
+    tp_session *session = make_session();
+    tp_error error = {{0}};
+    tp_session_snapshot *before = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_snapshot_create(session, &before, &error));
+    const tp_snapshot_atlas *atlas = tp_session_snapshot_atlas_at(before, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+
+    tp_operation ops[2];
+    memset(ops, 0, sizeof ops);
+    ops[0].kind = TP_OP_ATLAS_RENAME;
+    ops[0].atlas_id = atlas->id;
+    ops[0].u.atlas_rename.name = (char *)"renamed";
+    ops[1].kind = TP_OP_ATLAS_SETTINGS_SET;
+    ops[1].atlas_id = atlas->id;
+    ops[1].u.atlas_settings.mask = TP_AF_MAX_SIZE;
+    ops[1].u.atlas_settings.max_size = 2048;
+
+    tp_txn_request request = {0};
+    request.schema = TP_TXN_SCHEMA;
+    memcpy(request.id_hex, "20000000000000000000000000000001", 33U);
+    request.ops = ops;
+    request.op_count = 2;
+
+    tp_txn_result result = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_apply(session, &request, &result, &error));
+    TEST_ASSERT_TRUE(result.committed);
+    TEST_ASSERT_EQUAL_INT64(1, result.revision);
+    tp_txn_result_free(&result);
+
+    /* Exactly one event for the whole 2-op batch. */
+    TEST_ASSERT_EQUAL_UINT64(1, tp_session_event_sequence(session));
+
+    tp_session_event event = {0};
+    size_t event_count = 0U;
+    bool resync = true;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_events_after(session, 0U, &event, 1U, &event_count,
+                                &resync, &error));
+    TEST_ASSERT_FALSE(resync);
+    TEST_ASSERT_EQUAL_size_t(1U, event_count);
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_EVENT_MODEL_COMMITTED, event.kind);
+    TEST_ASSERT_EQUAL_INT64(0, event.revision_before);
+    TEST_ASSERT_EQUAL_INT64(1, event.revision_after);
+
+    tp_session_snapshot_destroy(before);
+    tp_session_destroy(session);
+}
+
 void test_no_change_apply_does_not_publish_event_or_generation(void) {
     tp_session *session = make_session();
     tp_error err = {0};
@@ -2889,6 +2945,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_source_batch_plan_rejects_empty_inputs_atomically);
     RUN_TEST(test_rejected_commit_does_not_publish_event_or_generation);
     RUN_TEST(test_invalid_operation_reject_publishes_no_event_and_id_stays_retryable);
+    RUN_TEST(test_multi_op_batch_publishes_single_commit_event);
     RUN_TEST(test_no_change_apply_does_not_publish_event_or_generation);
     RUN_TEST(test_undo_redo_are_session_commands_with_ordered_events);
     RUN_TEST(test_journal_append_failure_commits_and_sticky_degradation_skips_later_recovery_work);

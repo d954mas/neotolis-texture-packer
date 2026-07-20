@@ -501,6 +501,77 @@ void test_alloc_fail_before_commit(void) {
     tp_project_destroy(p);
 }
 
+/* ---- dedicated NOT_FOUND per REMOVE op (dangling id) --------------------- */
+
+/* Each REMOVE op addressed by an id no entity owns is TP_STATUS_NOT_FOUND, names
+ * the structured reject field its validator sets, and removes nothing -- the
+ * serialized project is byte-identical before and after all three rejects. */
+void test_apply_remove_not_found(void) {
+    tp_project *p = tp_test_base_project();
+    tp_id128 aid = p->atlases[0].id;
+    char *before = tp_test_serialize_project(p);
+    tp_op_reject rej;
+    tp_operation op;
+
+    memset(&op, 0, sizeof op); /* atlas.remove: unknown atlas id */
+    op.kind = TP_OP_ATLAS_REMOVE;
+    op.atlas_id = tp_test_id_of(0x99);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_NOT_FOUND, tp_operation_apply(p, &op, &rej));
+    TEST_ASSERT_EQUAL_STRING("atlas_id", rej.field);
+
+    memset(&op, 0, sizeof op); /* animation.remove: unknown anim id */
+    op.kind = TP_OP_ANIMATION_REMOVE;
+    op.atlas_id = aid;
+    op.u.anim_ref.anim_id = tp_test_id_of(0x9A);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_NOT_FOUND, tp_operation_apply(p, &op, &rej));
+    TEST_ASSERT_EQUAL_STRING("anim_id", rej.field);
+
+    memset(&op, 0, sizeof op); /* target.remove: unknown target id */
+    op.kind = TP_OP_TARGET_REMOVE;
+    op.atlas_id = aid;
+    op.u.target_ref.target_id = tp_test_id_of(0x9B);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_NOT_FOUND, tp_operation_apply(p, &op, &rej));
+    TEST_ASSERT_EQUAL_STRING("target_id", rej.field);
+
+    char *after = tp_test_serialize_project(p);
+    TEST_ASSERT_EQUAL_STRING(before, after); /* nothing removed -> byte-unchanged */
+    free(before);
+    free(after);
+    tp_project_destroy(p);
+}
+
+/* ---- target.set field-dup OOM leaves the model BYTE-UNCHANGED ------------- */
+
+/* target.set stages BOTH masked strings before it commits (tp_op_apply.c), so an
+ * OOM on the first field dup leaves the target -- and the whole project -- byte
+ * unchanged. Mirrors test_alloc_fail_before_commit for the target.set path. */
+void test_target_set_alloc_fail_before_commit(void) {
+    tp_project *p = tp_test_base_project();
+    tp_id128 aid = p->atlases[0].id;
+    tp_id128 t0 = p->atlases[0].targets[0].id;
+    char *before = tp_test_serialize_project(p);
+    tp_op_reject rej;
+    tp_operation op;
+
+    memset(&op, 0, sizeof op); /* masked exporter_id + out_path set (a real change) */
+    op.kind = TP_OP_TARGET_SET;
+    op.atlas_id = aid;
+    op.u.target_set.target_id = t0;
+    op.u.target_set.mask = TP_TF_EXPORTER | TP_TF_OUT_PATH;
+    op.u.target_set.exporter_id = (char *)TP_EXPORTER_ID_JSON_NEOTOLIS;
+    op.u.target_set.out_path = (char *)"out/changed";
+
+    tp_op__test_set_alloc_fail(0); /* fail the FIRST staging dup (exporter_id) */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OOM, tp_operation_apply(p, &op, &rej));
+    tp_op__test_set_alloc_fail(-1);
+
+    char *after = tp_test_serialize_project(p);
+    TEST_ASSERT_EQUAL_STRING(before, after); /* byte-unchanged on OOM */
+    free(before);
+    free(after);
+    tp_project_destroy(p);
+}
+
 /* ---- PARITY: op apply == existing mutator (byte-identical project) -------- */
 
 void test_parity_settings(void) {
@@ -816,6 +887,8 @@ int main(void) {
     RUN_TEST(test_apply_anim_rename);
     RUN_TEST(test_apply_target_ops);
     RUN_TEST(test_alloc_fail_before_commit);
+    RUN_TEST(test_apply_remove_not_found);
+    RUN_TEST(test_target_set_alloc_fail_before_commit);
     RUN_TEST(test_parity_settings);
     RUN_TEST(test_sprite_override_preserves_structural_identity);
     RUN_TEST(test_builders);

@@ -40,8 +40,10 @@ typedef struct tp_session_recovery_health {
     tp_status first_cause;
     bool has_last_durable_revision;
     int64_t last_durable_revision;
-    /* Unix seconds when known. The synchronous recovery writer currently has
-     * no trustworthy injected clock, so it reports this explicitly unknown. */
+    /* Unix seconds when known. RESERVED: no producer sets this true today --
+     * the synchronous recovery writer has no trustworthy injected clock, so
+     * tp_session.c hard-codes has_last_durable_time to false. It stays reserved
+     * until a clock is injected; readers need not hunt for a producer. */
     bool has_last_durable_time;
     int64_t last_durable_time;
     /* Monotonic for this session lifetime. A changed value tells a polling

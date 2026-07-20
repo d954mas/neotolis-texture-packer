@@ -2877,10 +2877,11 @@ void test_compaction_broken_store_keeps_fail_closed_authority(void) {
 
 /* ==== R4: journal-gated undo/redo checkpoints (P1-1) ====================== */
 
-/* Undo is a commit, so its durable CHECKPOINT append is part of the SAME stage-then-commit gate as
- * the candidate project swap. A failed append must leave the live document, revision, history cursor,
- * and durable byte store unchanged; the one-shot failure then remains retryable. */
-void test_journal_undo_append_failure_rolls_back_history_commit(void) {
+/* Undo is a commit; its durable CHECKPOINT append is best-effort (decision 0019). When the append
+ * fails, the undo still COMMITS -- the live document, revision, and history cursor advance and stay
+ * VISIBLE -- and only the failed journal record is rolled back, so the durable byte store is left
+ * unchanged. A second undo then finds nothing left to undo. */
+void test_journal_undo_append_failure_commits_and_rolls_back_only_the_journal_record(void) {
     tp_id128 key = tp_test_id_of(0x87);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io);
@@ -2970,9 +2971,10 @@ void test_peek_and_recover_share_retained_id_policy(void) {
     tp_journal_destroy(recover_journal);
 }
 
-/* Redo has the identical durable gate: if its checkpoint append fails, the already-undone live
- * state and cursor stay exactly where they were. */
-void test_journal_redo_append_failure_rolls_back_history_commit(void) {
+/* Redo has the identical best-effort durable gate (decision 0019): when its checkpoint append fails,
+ * the redo still COMMITS -- the redone live state, revision, and cursor advance and stay VISIBLE --
+ * and only the failed journal record is rolled back. A second redo then finds nothing left to redo. */
+void test_journal_redo_append_failure_commits_and_rolls_back_only_the_journal_record(void) {
     tp_id128 key = tp_test_id_of(0x88);
     tp_journal_io io;
     tp_model *m = model_with_journal(key, &io);
@@ -4381,8 +4383,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_compaction_init_failure_poisons);
     RUN_TEST(test_compaction_broken_store_keeps_fail_closed_authority);
     /* Compact durable Undo/Redo transitions. */
-    RUN_TEST(test_journal_undo_append_failure_rolls_back_history_commit);
-    RUN_TEST(test_journal_redo_append_failure_rolls_back_history_commit);
+    RUN_TEST(test_journal_undo_append_failure_commits_and_rolls_back_only_the_journal_record);
+    RUN_TEST(test_journal_redo_append_failure_commits_and_rolls_back_only_the_journal_record);
     RUN_TEST(test_history_eviction_waits_for_journal_append_ack);
     RUN_TEST(test_revision_max_rejects_commit_and_history_without_overflow);
     RUN_TEST(test_recovery_rejects_invalid_or_nonmonotonic_revisions);
