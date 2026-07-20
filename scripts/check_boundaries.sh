@@ -481,6 +481,8 @@ tp_validate_report_internal tp_validate|tp_validate_report|tp_validate_rules_int
 tp_validate_rules_internal tp_validate|tp_validate_source|tp_validate_sprite|tp_validate_target_settings
 tp_identity_internal    tp_identity|tp_identity_session
 tp_pack_read_internal   tp_pack_read
+tp_build_driver_internal tp_build_driver|tp_pack
+tp_build_proto_internal tp_build_proto
 EOF
 }
 

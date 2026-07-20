@@ -13,16 +13,11 @@
 #include "tp_core/tp_name_map.h"
 #include "tp_core/tp_pack_read.h"
 #include "tp_pack_constraints_internal.h"
+#include "tp_build_driver_internal.h"
 
-#include "nt_builder.h"
-
-/* Reader recovers exact frame rects only for page dims <= 4096 (plan §2.5), and
- * that is also the builder's own texture-size cap (nt_builder.h:43). */
-/* The desc override values (tp_pack.h) mirror the engine encoding 1:1. */
-_Static_assert(TP_PACK_SPRITE_SHAPE_RECT == NT_ATLAS_SPRITE_SHAPE_RECT, "sprite shape RECT encoding");
-_Static_assert(TP_PACK_SPRITE_SHAPE_CONVEX == NT_ATLAS_SPRITE_SHAPE_CONVEX, "sprite shape CONVEX encoding");
-_Static_assert(TP_PACK_SPRITE_SHAPE_CONCAVE == NT_ATLAS_SPRITE_SHAPE_CONCAVE, "sprite shape CONCAVE encoding");
-_Static_assert(TP_PACK_SPRITE_ROTATE_NO == NT_ATLAS_SPRITE_ROTATE_NO, "sprite allow_rotate NO encoding");
+/* nt_builder is now confined to the driver TU (tp_build_driver.c): tp_pack keeps
+ * validate/preflight/name-map/read-back and hands decoded pixels to the driver
+ * (decision 0018, ROADMAP H0.3). */
 
 // #region validation
 /* Normalization-invariant per plan §5: reject anything nt_builder_normalize_path
@@ -524,93 +519,6 @@ static tp_status load_path_images(const tp_pack_settings *settings,
     return TP_STATUS_OK;
 }
 
-/* Drive nt_builder for one atlas into `path`. Threaded encode, sequential assembly
- * (nt_builder_set_threads_auto): determinism is covered by the engine's own threaded
- * tests plus our byte-identical determinism suite (test_pack / test_export_*). */
-static tp_status run_builder(const tp_pack_settings *s, const char *path, tp_error *err) {
-    tp_image_rgba8 *path_images = NULL;
-    tp_status load_status = load_path_images(s, &path_images, err);
-    if (load_status != TP_STATUS_OK) {
-        return load_status;
-    }
-
-    NtBuilderContext *ctx = nt_builder_start_pack(path);
-    if (!ctx) {
-        free_loaded_images(path_images, s->sprite_count);
-        return tp_error_set(err, TP_STATUS_BUILDER_FAILED,
-                            "tp_pack: nt_builder_start_pack('%s') failed (bad work_dir?)", path);
-    }
-    nt_builder_set_threads_auto(ctx); /* parallel encode; assembly stays sequential */
-
-    /* §5 export-friendly profile + caller knobs. */
-    nt_atlas_opts_t o = nt_atlas_opts_defaults();
-    o.premultiplied = false; /* straight alpha (R3: expected NT_LOG_WARN, non-fatal) */
-    o.compress = NULL;       /* RAW RGBA8 -- reader requires it (§2.3) */
-    o.gen_mipmaps = false;
-    o.format = NT_TEXTURE_FORMAT_RGBA8;
-    o.debug_png = false;
-    o.max_size = (uint32_t)s->max_size;
-    o.padding = (uint32_t)s->padding;
-    o.margin = (uint32_t)s->margin;
-    o.extrude = (uint32_t)s->extrude;
-    o.alpha_threshold = (uint8_t)s->alpha_threshold;
-    o.max_vertices = (uint8_t)s->max_vertices;
-    o.shape = (nt_atlas_shape_t)s->shape;
-    o.allow_transform = s->allow_transform;
-    o.power_of_two = s->power_of_two;
-    o.pixels_per_unit = s->pixels_per_unit;
-
-    nt_builder_begin_atlas(ctx, s->atlas_name, &o);
-    for (int i = 0; i < s->sprite_count; i++) {
-        const tp_pack_sprite_desc *sp = &s->sprites[i];
-        nt_atlas_sprite_opts_t so = nt_atlas_sprite_opts_defaults();
-        so.name = sp->name;
-        so.origin_x = sp->origin_x;
-        so.origin_y = sp->origin_y;
-        so.slice9_left = sp->slice9_lrtb[0];
-        so.slice9_right = sp->slice9_lrtb[1];
-        so.slice9_top = sp->slice9_lrtb[2];
-        so.slice9_bottom = sp->slice9_lrtb[3];
-        /* Per-sprite overrides: 0 stays "inherit atlas" (engine encoding); we only
-         * write a field when its mask bit is set (validated above). */
-        if (sp->ov_mask & TP_PACK_OV_SHAPE) {
-            so.shape = sp->ov_shape;
-        }
-        if (sp->ov_mask & TP_PACK_OV_ROTATE) {
-            so.allow_rotate = sp->ov_allow_rotate;
-        }
-        if (sp->ov_mask & TP_PACK_OV_MAXVERT) {
-            so.max_vertices = sp->ov_max_vertices;
-        }
-        if (sp->ov_mask & TP_PACK_OV_MARGIN) {
-            so.margin = sp->ov_margin;
-        }
-        if (sp->ov_mask & TP_PACK_OV_EXTRUDE) {
-            so.extrude = sp->ov_extrude;
-        }
-        if (sp->path) {
-            nt_builder_atlas_add_raw(ctx, path_images[i].pixels,
-                                     (uint32_t)path_images[i].width,
-                                     (uint32_t)path_images[i].height, &so);
-        } else {
-            nt_builder_atlas_add_raw(ctx, sp->rgba, (uint32_t)sp->w, (uint32_t)sp->h, &so);
-        }
-    }
-    nt_builder_end_atlas(ctx);
-
-    /* nt_builder_atlas_add_raw deep-copies every image before returning, so the
-     * pack-job-owned decode buffers can be released before encode/assembly. */
-    free_loaded_images(path_images, s->sprite_count);
-
-    nt_build_result_t br = nt_builder_finish_pack(ctx);
-    nt_builder_free_pack(ctx); /* always, per nt_builder.h lifecycle contract */
-    if (br != NT_BUILD_OK) {
-        return tp_error_set(err, TP_STATUS_BUILDER_FAILED, "tp_pack: nt_builder_finish_pack failed (code %d) for '%s'",
-                            (int)br, s->atlas_name);
-    }
-    return TP_STATUS_OK;
-}
-
 tp_status tp_pack(const tp_pack_settings *settings, struct tp_arena *arena, struct tp_result **out_result,
                   tp_error *err) {
     if (out_result) {
@@ -637,7 +545,18 @@ tp_status tp_pack(const tp_pack_settings *settings, struct tp_arena *arena, stru
         return st;
     }
 
-    st = run_builder(settings, path, err);
+    /* Decode path sources to canonical RGBA8 and run the page-area preflight in
+     * the parent (the worker boundary owns UTF-8 reads + validation, decision
+     * 0018); the driver then packs from raw pixels only. */
+    tp_image_rgba8 *path_images = NULL;
+    st = load_path_images(settings, &path_images, err);
+    if (st != TP_STATUS_OK) {
+        tp_name_map_destroy(names);
+        return st;
+    }
+
+    /* The driver consumes `path_images` (frees them on every path). */
+    st = tp_build_driver_run(settings, path_images, path, err);
     if (st != TP_STATUS_OK) {
         tp_name_map_destroy(names);
         return st;

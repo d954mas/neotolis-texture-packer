@@ -83,7 +83,7 @@ nt_set_sanitizer_flags(tp_core)
 # --- tp_build: pack orchestration (drives nt_builder) ---------------------------
 # Isolated so ONLY pack-time consumers (GUI, CLI, smoke, pack tests) pull
 # nt_builder -> nt_basisu_encoder. Since #283 the GUI links tp_build directly.
-add_library(tp_build STATIC src/tp_pack.c src/tp_export_run.c src/tp_job.c)
+add_library(tp_build STATIC src/tp_pack.c src/tp_build_driver.c src/tp_build_proto.c src/tp_export_run.c src/tp_job.c)
 # nt_builder BEFORE tp_core: GNU ld resolves static archives left-to-right and
 # nt_builder needs nt_log_write from tp_core's PUBLIC nt_log; the old order
 # flattened to ...libnt_log.a...libnt_builder.a and the Linux release link

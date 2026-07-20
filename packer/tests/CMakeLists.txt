@@ -428,6 +428,27 @@ nt_set_warning_flags(tp_test_pack)   # AGENTS.md invariant: our test TUs too
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_pack_test")
 add_test(NAME tp_pack COMMAND tp_test_pack "${CMAKE_BINARY_DIR}/tp_pack_test")
 
+# H0.3-a: versioned build-worker protocol codec (decision 0018). Encode/decode
+# round-trip across representative inputs plus the fail-closed matrix (truncated,
+# oversized declared length, wrong magic, unsupported version, corrupt payload).
+add_executable(tp_test_build_proto test_build_proto.c)
+target_link_libraries(tp_test_build_proto PRIVATE tp_build unity)  # tp_build owns the worker/protocol seam
+target_include_directories(tp_test_build_proto PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_options(tp_test_build_proto PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_build_proto)   # AGENTS.md invariant: our test TUs too
+add_test(NAME tp_build_proto COMMAND tp_test_build_proto)
+
+# H0.3-a: byte-identical oracle. The extracted driver (and tp_pack) produce a
+# .ntpack identical to a direct nt_builder invocation for the same inputs; the
+# permanent normal-result regression for the worker cutover. Needs a scratch dir.
+add_executable(tp_test_build_driver_oracle test_build_driver_oracle.c)
+target_link_libraries(tp_test_build_driver_oracle PRIVATE tp_build unity)  # tp_build: driver + direct nt_builder
+target_include_directories(tp_test_build_driver_oracle PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_options(tp_test_build_driver_oracle PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_build_driver_oracle)   # AGENTS.md invariant: our test TUs too
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_build_driver_oracle_test")
+add_test(NAME tp_build_driver_oracle COMMAND tp_test_build_driver_oracle "${CMAKE_BINARY_DIR}/tp_build_driver_oracle_test")
+
 # Shared strict-UTF-8 raster ingress: memory decode, bounded resources and
 # explicit allocator ownership.  The scratch tree includes a Cyrillic filename.
 add_executable(tp_test_image test_image.c)
