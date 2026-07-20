@@ -1,5 +1,6 @@
 #include "tp_project_generation_internal.h"
 
+#include <limits.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
