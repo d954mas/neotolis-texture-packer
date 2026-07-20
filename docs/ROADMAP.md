@@ -274,7 +274,13 @@ project mutation или опубликованный неполный набор
 
 ### F3 — Semantic history и Pack session behavior
 
-**Статус:** `PLANNED`
+**Статус:** `IN PROGRESS` — CORE DONE (2026-07-21): вся engine-семантика F3
+реализована и test-pinned (session-owned History DTO tests в `test_session.c`,
+`tp_pack_input_hash`, `tp_pack_result_cache`, `tp_job_input_token` extension, R13
+scope hardening в `scripts/check_boundaries.sh`). GUI-видимые поверхности (History
+panel consumption, stale/preview presentation, result-cache feeding) отложены в
+phase U per decision 0020/§54.6 ordering, поэтому полный phase gate F3 закрывается
+вместе с этими U-поверхностями.
 **Prerequisites:** `F2`, `H0`.
 **Основание:** master spec §7.1, §9–§10, §27 A1, §54 Phase 2, §54.6.
 
