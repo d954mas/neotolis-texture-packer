@@ -55,6 +55,7 @@ tp_diff_record *tp_diff_record_new(const char *label, const char *author, int op
     r->op_count = 0;
     r->op_cap = 0;
     r->revision = 0;
+    r->transaction_id[0] = '\0';
     if (op_cap > 0) {
         r->ops = (tp_diff_op *)tp_diff__alloc((size_t)op_cap * sizeof *r->ops);
         if (!r->ops) {
@@ -270,6 +271,37 @@ const char *tp_model_undo_author(const tp_model *m) {
         return NULL;
     }
     return m->history->records[m->history->pos - 1]->author;
+}
+
+/* ---- enumerable undo/redo records (the F3 visible-history spine) ---------- *
+ * The in-memory stack is the single authority for edit rows and the cursor. The
+ * session merges these with its non-undoable checkpoint/refresh markers to build
+ * the visible History DTO; it never keeps a second copy of the undo records. */
+int tp_model_history_count(const tp_model *m) {
+    return (m && m->history) ? m->history->count : 0;
+}
+
+int tp_model_history_position(const tp_model *m) {
+    return (m && m->history) ? m->history->pos : 0;
+}
+
+bool tp_model_history_entry_at(const tp_model *m, int index,
+                               tp_model_history_entry *out) {
+    if (!out) {
+        return false;
+    }
+    memset(out, 0, sizeof *out);
+    out->transaction_id = "";
+    if (!m || !m->history || index < 0 || index >= m->history->count) {
+        return false;
+    }
+    const tp_diff_record *r = m->history->records[index];
+    out->revision = r->revision;
+    out->label = r->label;   /* borrowed; NULL when sparse */
+    out->author = r->author; /* borrowed; NULL when sparse */
+    out->transaction_id = r->transaction_id; /* borrowed; "" when unknown */
+    out->undoable = index < m->history->pos;
+    return true;
 }
 
 typedef struct tp_history_durable_transition {

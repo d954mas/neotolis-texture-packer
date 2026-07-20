@@ -119,7 +119,11 @@ typedef struct tp_diff_record {
     tp_diff_op *ops;
     int op_count;
     int op_cap;
-    int64_t revision; /* the revision this transaction produced (for a future DTO) */
+    int64_t revision; /* the revision this transaction produced (for the F3 history DTO) */
+    /* The committing transaction id (32-hex + NUL); "" when unknown/sparse. Inline
+     * (no heap): the fixed 33 bytes ride the record allocation the byte budget already
+     * counts. Surfaced per-record by the F3 visible-history enumeration. */
+    char transaction_id[33];
     size_t bytes;     /* all owned allocations, including this record */
 } tp_diff_record;
 

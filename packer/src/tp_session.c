@@ -165,6 +165,134 @@ static void publish_event(tp_session *session, tp_session_event_kind kind,
 }
 // #endregion
 
+// #region visible history markers
+/* Session-owned NON-undoable rows (Save checkpoints §9.2, runtime refreshes §9.3).
+ * The model's undo stack owns the edit rows and the cursor; these markers only
+ * annotate it. All helpers run under the gate. */
+static char *history_path_dup(const char *path) {
+    if (!path) {
+        return NULL;
+    }
+    const size_t len = strlen(path) + 1U;
+    char *copy = (char *)malloc(len);
+    if (copy) {
+        memcpy(copy, path, len);
+    }
+    return copy;
+}
+
+static void history_marker_drop_at(tp_session *session, size_t index) {
+    free(session->markers[index].path);
+    const size_t tail = session->marker_count - index - 1U;
+    if (tail > 0U) {
+        memmove(&session->markers[index], &session->markers[index + 1U],
+                tail * sizeof session->markers[0]);
+    }
+    session->marker_count--;
+    session->markers[session->marker_count].path = NULL;
+}
+
+static void history_markers_clear(tp_session *session) {
+    for (size_t i = 0U; i < session->marker_count; i++) {
+        free(session->markers[i].path);
+        session->markers[i].path = NULL;
+    }
+    session->marker_count = 0U;
+}
+
+/* Append a marker at the live cursor tip. A NULL path is a refresh marker (never
+ * allocates); a checkpoint whose path dup fails is silently skipped -- visible
+ * History is advisory session state and the Save/refresh already succeeded. FIFO
+ * evicts the oldest marker when the fixed cap is reached. */
+static void history_marker_append(tp_session *session, tp_session_history_kind kind,
+                                  tp_id128 state_identity, const char *path) {
+    char *path_copy = history_path_dup(path);
+    if (path && !path_copy) {
+        return; /* best-effort: drop the row rather than fail the command */
+    }
+    if (session->marker_count == (size_t)TP_SESSION_HISTORY_MARKER_CAP) {
+        history_marker_drop_at(session, 0U);
+    }
+    tp_session_history_marker *marker = &session->markers[session->marker_count++];
+    marker->kind = kind;
+    marker->anchor_pos = tp_model_history_position(session->model);
+    marker->revision = tp_model_revision(session->model);
+    marker->state_identity = state_identity;
+    marker->path = path_copy;
+}
+
+static void history_record_checkpoint(tp_session *session, const char *canonical) {
+    history_marker_append(session, TP_SESSION_HISTORY_SAVE_CHECKPOINT,
+                          tp_semantic_identity(tp_model_project(session->model)),
+                          canonical);
+}
+
+static void history_record_refresh(tp_session *session) {
+    history_marker_append(session, TP_SESSION_HISTORY_RUNTIME_REFRESH,
+                          tp_id128_nil(), NULL);
+}
+
+/* Reconcile markers with the edit stack after a new edit commits. `pos_before` is
+ * the cursor before the push, `pos_after` after it. A new edit (1) discards the
+ * redo branch -- drop markers anchored above `pos_before` -- and (2) may FIFO-evict
+ * `drop_oldest = pos_before + 1 - pos_after` front records -- drop markers anchored
+ * inside that evicted window and shift the rest down. Undo/Redo never call this:
+ * they move only the cursor, so markers (and their undone/undoable projection)
+ * follow for free. Iterating high->low keeps mid-list compaction safe. */
+static void history_markers_after_commit(tp_session *session, int pos_before,
+                                         int pos_after) {
+    for (size_t i = session->marker_count; i-- > 0U;) {
+        if (session->markers[i].anchor_pos > pos_before) {
+            history_marker_drop_at(session, i);
+        }
+    }
+    const int drop_oldest = pos_before + 1 - pos_after;
+    if (drop_oldest <= 0) {
+        return;
+    }
+    for (size_t i = session->marker_count; i-- > 0U;) {
+        if (session->markers[i].anchor_pos < drop_oldest) {
+            history_marker_drop_at(session, i);
+        } else {
+            session->markers[i].anchor_pos -= drop_oldest;
+        }
+    }
+}
+
+static void history_fill_edit(const tp_session *session, int index, int pos,
+                              tp_session_history_entry *out) {
+    tp_model_history_entry entry;
+    (void)tp_model_history_entry_at(session->model, index, &entry);
+    memset(out, 0, sizeof *out);
+    out->kind = TP_SESSION_HISTORY_EDIT;
+    out->revision = entry.revision;
+    if (entry.label) {
+        (void)snprintf(out->label, sizeof out->label, "%s", entry.label);
+    }
+    if (entry.author) {
+        (void)snprintf(out->author, sizeof out->author, "%s", entry.author);
+    }
+    (void)snprintf(out->transaction_id, sizeof out->transaction_id, "%s",
+                   entry.transaction_id ? entry.transaction_id : "");
+    out->undoable = index < pos;
+    out->undone = index >= pos;
+}
+
+static void history_fill_marker(const tp_session *session, size_t mi, int pos,
+                                tp_session_history_entry *out) {
+    const tp_session_history_marker *marker = &session->markers[mi];
+    memset(out, 0, sizeof *out);
+    out->kind = marker->kind;
+    out->revision = marker->revision;
+    out->state_identity = marker->state_identity;
+    if (marker->path) {
+        (void)snprintf(out->path, sizeof out->path, "%s", marker->path);
+    }
+    out->undoable = false;
+    out->undone = marker->anchor_pos > pos;
+}
+// #endregion
+
 // #region lifetime
 static tp_status session_adopt_owned(tp_project *project, const tp_rng *rng,
                                      tp_session **out, tp_error *err) {
@@ -349,6 +477,7 @@ void tp_session_destroy(tp_session *session) {
         (void)tp_recovery_live_finish(session->recovery_live, preserve, NULL);
         tp_recovery_live_destroy(session->recovery_live);
     }
+    history_markers_clear(session);
     tp_model_destroy(session->model);
     tp_project_lease_release(session->project_lease);
     gate_destroy(session);
@@ -506,6 +635,7 @@ tp_status tp_session_apply(tp_session *session, const tp_txn_request *request,
     }
     session->admission_sequence++;
     const int64_t revision_before = tp_model_revision(session->model);
+    const int history_pos_before = tp_model_history_position(session->model);
     tp_txn_result local_result;
     tp_txn_result *published_result = result ? result : &local_result;
     tp_status status = tp_model_apply(session->model, request,
@@ -515,6 +645,11 @@ tp_status tp_session_apply(tp_session *session, const tp_txn_request *request,
         session->model_generation++;
         publish_event(session, TP_SESSION_EVENT_MODEL_COMMITTED, request->id_hex,
                       revision_before, tp_model_revision(session->model));
+        /* A committed edit may have discarded a redo branch and/or FIFO-evicted
+         * old edit records; drop the markers those rows carried so visible
+         * History mirrors the edit stack. */
+        history_markers_after_commit(session, history_pos_before,
+                                     tp_model_history_position(session->model));
     }
     if (!result) {
         tp_txn_result_free(&local_result);
@@ -757,6 +892,10 @@ static tp_status save_as_locked(tp_session *session, const char *path,
     }
     const int64_t revision = tp_model_revision(session->model);
     publish_event(session, TP_SESSION_EVENT_SAVED, NULL, revision, revision);
+    /* Only a successful publication reaches this choke point (a failed Save returned
+     * earlier), so the visible checkpoint (§9.2) is never recorded for a failed Save.
+     * Non-undoable: it does not touch revision, the cursor, or the edit budget. */
+    history_record_checkpoint(session, canonical);
     if (old_lease && old_lease != destination_lease) {
         tp_project_lease_release(old_lease);
     }
@@ -915,6 +1054,9 @@ tp_status tp_session_invalidate_sources(tp_session *session, tp_error *err) {
     session->source_generation++;
     const int64_t revision = tp_model_revision(session->model);
     publish_event(session, TP_SESSION_EVENT_SOURCE_RUNTIME_CHANGED, NULL, revision, revision);
+    /* A runtime source refresh is a visible NON-undoable row (§9.3). It never
+     * mutates revision, dirty, or Undo history -- only the source generation. */
+    history_record_refresh(session);
     gate_unlock(session);
     return TP_STATUS_OK;
 }
@@ -993,6 +1135,57 @@ int tp_session_redo_depth(const tp_session *session) {
     const int depth = tp_model_redo_depth(session->model);
     gate_unlock(session);
     return depth;
+}
+
+int tp_session_history_count(const tp_session *session) {
+    if (!session) {
+        return 0;
+    }
+    gate_lock(session);
+    const int count =
+        tp_model_history_count(session->model) + (int)session->marker_count;
+    gate_unlock(session);
+    return count;
+}
+
+tp_status tp_session_history_at(const tp_session *session, int index,
+                                tp_session_history_entry *out, tp_error *err) {
+    if (!session || !out || index < 0) {
+        return tp_error_set(
+            err, TP_STATUS_INVALID_ARGUMENT,
+            "history query requires a session, output, and a non-negative index");
+    }
+    gate_lock(session);
+    const int pos = tp_model_history_position(session->model);
+    const int edit_count = tp_model_history_count(session->model);
+    /* Chronological spine: markers anchored at cursor depth `a` render just before
+     * edit record `a`; markers anchored at the tip render after the last edit. */
+    int cursor = 0;
+    for (int a = 0; a <= edit_count; a++) {
+        for (size_t mi = 0U; mi < session->marker_count; mi++) {
+            if (session->markers[mi].anchor_pos != a) {
+                continue;
+            }
+            if (cursor == index) {
+                history_fill_marker(session, mi, pos, out);
+                gate_unlock(session);
+                return TP_STATUS_OK;
+            }
+            cursor++;
+        }
+        if (a < edit_count) {
+            if (cursor == index) {
+                history_fill_edit(session, a, pos, out);
+                gate_unlock(session);
+                return TP_STATUS_OK;
+            }
+            cursor++;
+        }
+    }
+    gate_unlock(session);
+    return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                        "history index %d is out of range (%d rows)", index,
+                        cursor);
 }
 
 uint64_t tp_session_event_sequence(const tp_session *session) {

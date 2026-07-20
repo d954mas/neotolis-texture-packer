@@ -67,6 +67,29 @@ int tp_model_redo_depth(const tp_model *m); /* redoable steps above the cursor *
 const char *tp_model_undo_label(const tp_model *m);
 const char *tp_model_undo_author(const tp_model *m);
 
+/* ---- enumerable history records (the F3 visible-history spine) ------------ *
+ * One undo/redo edit record, borrowed for enumeration. The in-memory stack stays
+ * the single authority: the session projects these plus its non-undoable markers
+ * into the shared visible-History DTO. Strings are borrowed and valid only until
+ * the next model mutation; the session copies them out at its own boundary. */
+typedef struct tp_model_history_entry {
+    int64_t revision;           /* the revision this transaction produced */
+    const char *label;          /* borrowed; NULL when sparse */
+    const char *author;         /* borrowed; NULL when sparse (A6 passthrough) */
+    const char *transaction_id; /* borrowed 32-hex id; "" when unknown/sparse */
+    bool undoable;              /* index < position: reversible by the next Undo */
+} tp_model_history_entry;
+
+/* Total edit records retained (undoable records + the redo branch). */
+int tp_model_history_count(const tp_model *m);
+/* Cursor: the number of undoable records. records[0..position) are undoable,
+ * records[position..count) are the already-undone redo branch. */
+int tp_model_history_position(const tp_model *m);
+/* Fills *out for records[index] (0-based, oldest first). false for a NULL model,
+ * no history, or an out-of-range index (out is zeroed, transaction_id ""). */
+bool tp_model_history_entry_at(const tp_model *m, int index,
+                               tp_model_history_entry *out);
+
 /* ---- exact inverse (Undo) + redo replay ---------------------------------- *
  * Undo reverses the most recently committed (or redone) transaction via its
  * captured semantic diff; Redo re-applies the next transaction on the redo branch.

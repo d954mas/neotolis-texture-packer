@@ -177,6 +177,10 @@ tp_status tp_txn__commit_validated(tp_model *m, const tp_txn_request *req, tp_tx
             return tp_error_set(err, rst, over_budget ? "semantic diff exceeds the history record budget"
                                                       : "diff record allocation failed");
         }
+        /* Carry the committing transaction id on the record so the F3 visible-history
+         * enumeration can surface it per row. Inline copy, no budget interaction;
+         * id_hex is a validated 32-hex + NUL by this point. */
+        memcpy(rec->transaction_id, req->id_hex, sizeof rec->transaction_id);
     }
 
     for (int i = 0; i < req->op_count; i++) {

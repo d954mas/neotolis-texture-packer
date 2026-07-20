@@ -22,6 +22,7 @@
 #include "tp_core/tp_source_plan.h"
 #include "tp_core/tp_sprite_index.h"
 #include "tp_core/tp_transaction.h"
+#include "tp_diff_internal.h"
 #include "tp_journal_internal.h"
 #include "tp_project_internal.h"
 #include "tp_project_mutation_internal.h"
@@ -35,9 +36,11 @@ static const char *g_scratch = NULL;
 
 void setUp(void) {
     tp_journal__test_set_record_limit(0U);
+    tp_history__test_set_limits(0, 0U, 0U);
 }
 void tearDown(void) {
     tp_journal__test_set_record_limit(0U);
+    tp_history__test_set_limits(0, 0U, 0U);
 }
 
 static void assert_canonical_path(const char *input, const char *actual) {
@@ -2929,6 +2932,321 @@ void test_required_recovery_reports_unavailable_without_blocking_model_commands(
     tp_session_destroy(session);
 }
 
+/* ---- F3-02 shared visible History DTO ------------------------------------ */
+
+static tp_session_history_entry history_row(tp_session *session, int index) {
+    tp_session_history_entry entry;
+    tp_error err = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_history_at(session, index, &entry, &err));
+    return entry;
+}
+
+static tp_id128 first_atlas_id(tp_session *session) {
+    tp_error err = {{0}};
+    tp_session_snapshot *snapshot = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_snapshot_create(session, &snapshot, &err));
+    const tp_id128 atlas_id = tp_session_snapshot_atlas_at(snapshot, 0)->id;
+    tp_session_snapshot_destroy(snapshot);
+    return atlas_id;
+}
+
+/* Apply one atlas.rename carrying an explicit label/author (the session copies
+ * both onto the committed diff record, which the visible-History row surfaces). */
+static void session_apply_labeled(tp_session *session, const char *id_hex,
+                                  tp_id128 atlas_id, const char *name,
+                                  const char *label, const char *author,
+                                  tp_error *err) {
+    tp_operation op = rename_op(atlas_id, name);
+    tp_txn_request req;
+    memset(&req, 0, sizeof req);
+    req.schema = TP_TXN_SCHEMA;
+    (void)snprintf(req.id_hex, sizeof req.id_hex, "%s", id_hex);
+    req.expected_revision = tp_session_revision(session);
+    req.label = (char *)label;
+    req.author = (char *)author;
+    req.ops = &op;
+    req.op_count = 1;
+    tp_txn_result out;
+    memset(&out, 0, sizeof out);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_apply(session, &req, &out, err));
+    TEST_ASSERT_TRUE(out.committed);
+    tp_txn_result_free(&out);
+    tp_operation_free(&op);
+}
+
+void test_history_dto_starts_empty_and_reopen_resets(void) {
+    tp_session *session = make_session();
+    tp_error err = {{0}};
+    TEST_ASSERT_EQUAL_INT(0, tp_session_history_count(session));
+    /* An out-of-range query is a structured error, never a crash. */
+    tp_session_history_entry entry;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS,
+                          tp_session_history_at(session, 0, &entry, &err));
+
+    const tp_id128 atlas_id = first_atlas_id(session);
+    tp_txn_result r;
+    session_apply_rename(session, "30000000000000000000000000000001", 0,
+                         atlas_id, "edited", TP_STATUS_OK, &r, &err);
+    tp_txn_result_free(&r);
+    TEST_ASSERT_EQUAL_INT(1, tp_session_history_count(session));
+    tp_session_destroy(session);
+
+    /* Normal reopen from disk starts a fresh (empty) History (§9.3). */
+    char path[1024];
+    (void)snprintf(path, sizeof path,
+                   "%s/tp_session_history_reopen.ntpacker_project", g_scratch);
+    (void)remove(path);
+    save_project_with_ids(path, 51U);
+    uint8_t seed = 61U;
+    tp_rng rng = {deterministic_fill, &seed};
+    tp_session *reopened = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_open(path, &rng, &reopened, &err));
+    TEST_ASSERT_EQUAL_INT(0, tp_session_history_count(reopened));
+    tp_session_destroy(reopened);
+    (void)remove(path);
+}
+
+void test_history_dto_edit_row_passthrough_and_cursor_moves(void) {
+    tp_session *session = make_session();
+    tp_error err = {{0}};
+    const tp_id128 atlas_id = first_atlas_id(session);
+
+    session_apply_labeled(session, "31000000000000000000000000000001", atlas_id,
+                          "renamed", "Rename atlas", "agent(bot-7)", &err);
+    TEST_ASSERT_EQUAL_INT(1, tp_session_history_count(session));
+    tp_session_history_entry row = history_row(session, 0);
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_HISTORY_EDIT, row.kind);
+    TEST_ASSERT_EQUAL_INT64(1, row.revision);
+    TEST_ASSERT_EQUAL_STRING("Rename atlas", row.label);
+    TEST_ASSERT_EQUAL_STRING("agent(bot-7)", row.author); /* A6 passthrough */
+    TEST_ASSERT_EQUAL_STRING("31000000000000000000000000000001",
+                             row.transaction_id);
+    TEST_ASSERT_TRUE(row.undoable);
+    TEST_ASSERT_FALSE(row.undone);
+
+    /* Undo MOVES THE CURSOR: the row stays (count unchanged) but reads undone. */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_undo(session, &err));
+    TEST_ASSERT_EQUAL_INT(1, tp_session_history_count(session));
+    row = history_row(session, 0);
+    TEST_ASSERT_FALSE(row.undoable);
+    TEST_ASSERT_TRUE(row.undone);
+    TEST_ASSERT_EQUAL_STRING("agent(bot-7)", row.author);
+
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_redo(session, &err));
+    TEST_ASSERT_EQUAL_INT(1, tp_session_history_count(session));
+    row = history_row(session, 0);
+    TEST_ASSERT_TRUE(row.undoable);
+    TEST_ASSERT_FALSE(row.undone);
+    tp_session_destroy(session);
+}
+
+void test_history_dto_multi_op_batch_is_one_edit_row(void) {
+    tp_session *session = make_session();
+    tp_error err = {{0}};
+    const tp_id128 atlas_id = first_atlas_id(session);
+
+    tp_operation ops[2];
+    memset(ops, 0, sizeof ops);
+    ops[0].kind = TP_OP_ATLAS_RENAME;
+    ops[0].atlas_id = atlas_id;
+    ops[0].u.atlas_rename.name = (char *)"batch-renamed";
+    ops[1].kind = TP_OP_ATLAS_SETTINGS_SET;
+    ops[1].atlas_id = atlas_id;
+    ops[1].u.atlas_settings.mask = TP_AF_MAX_SIZE;
+    ops[1].u.atlas_settings.max_size = 4096;
+    tp_txn_request req = {0};
+    req.schema = TP_TXN_SCHEMA;
+    memcpy(req.id_hex, "32000000000000000000000000000001", 33U);
+    req.ops = ops;
+    req.op_count = 2;
+    tp_txn_result out = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_apply(session, &req, &out, &err));
+    TEST_ASSERT_TRUE(out.committed);
+    tp_txn_result_free(&out);
+
+    /* A 2-op batch is ONE transaction and therefore ONE edit row. */
+    TEST_ASSERT_EQUAL_INT(1, tp_session_history_count(session));
+    tp_session_history_entry row = history_row(session, 0);
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_HISTORY_EDIT, row.kind);
+    TEST_ASSERT_EQUAL_INT64(1, row.revision);
+    tp_session_destroy(session);
+}
+
+void test_history_dto_save_checkpoint_is_visible_non_undoable(void) {
+    char path[1024];
+    (void)snprintf(path, sizeof path,
+                   "%s/tp_session_history_ckpt.ntpacker_project", g_scratch);
+    (void)remove(path);
+    tp_session *session = make_session();
+    tp_error err = {{0}};
+    const tp_id128 atlas_id = first_atlas_id(session);
+
+    tp_txn_result r;
+    session_apply_rename(session, "33000000000000000000000000000001", 0,
+                         atlas_id, "before-save", TP_STATUS_OK, &r, &err);
+    tp_txn_result_free(&r);
+
+    tp_session_save_result save = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_save_as(session, path, &save, &err));
+    TEST_ASSERT_TRUE(save.saved);
+    const int64_t revision_after_save = tp_session_revision(session);
+
+    /* Spine: the edit row (0), then the non-undoable checkpoint (1). */
+    TEST_ASSERT_EQUAL_INT(2, tp_session_history_count(session));
+    tp_session_history_entry edit = history_row(session, 0);
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_HISTORY_EDIT, edit.kind);
+    TEST_ASSERT_TRUE(edit.undoable);
+    tp_session_history_entry ckpt = history_row(session, 1);
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_HISTORY_SAVE_CHECKPOINT, ckpt.kind);
+    TEST_ASSERT_FALSE(ckpt.undoable);
+    TEST_ASSERT_EQUAL_INT64(revision_after_save, ckpt.revision); /* §9.2: Save keeps revision */
+    TEST_ASSERT_FALSE(tp_id128_is_nil(ckpt.state_identity));     /* §9.2: state identity */
+    assert_canonical_path(path, ckpt.path);                      /* §9.2: path context */
+
+    /* Undo SKIPS the checkpoint and undoes the edit below it. */
+    TEST_ASSERT_TRUE(tp_session_can_undo(session));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_undo(session, &err));
+    tp_session_snapshot *undone = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_snapshot_create(session, &undone, &err));
+    TEST_ASSERT_EQUAL_STRING(
+        "atlas1", tp_session_snapshot_atlas_by_id(undone, atlas_id)->name);
+    tp_session_snapshot_destroy(undone);
+    /* The checkpoint row is not consumed by Undo -- it stays visible. */
+    TEST_ASSERT_EQUAL_INT(2, tp_session_history_count(session));
+    tp_session_destroy(session);
+    (void)remove(path);
+}
+
+void test_history_dto_failed_save_records_no_checkpoint(void) {
+    char path[1024];
+    (void)snprintf(path, sizeof path,
+                   "%s/tp_session_history_failsave.ntpacker_project", g_scratch);
+    (void)remove(path);
+    tp_session *session = make_session();
+    tp_error err = {{0}};
+    const tp_id128 atlas_id = first_atlas_id(session);
+    tp_txn_result r;
+    session_apply_rename(session, "34000000000000000000000000000001", 0,
+                         atlas_id, "edited", TP_STATUS_OK, &r, &err);
+    tp_txn_result_free(&r);
+    TEST_ASSERT_EQUAL_INT(1, tp_session_history_count(session));
+
+    tp_project__test_fail_next_temp_create();
+    tp_session_save_result save = {0};
+    TEST_ASSERT_NOT_EQUAL(TP_STATUS_OK,
+                          tp_session_save_as(session, path, &save, &err));
+
+    /* A failed Save creates no checkpoint row -- the edit row stands alone. */
+    TEST_ASSERT_EQUAL_INT(1, tp_session_history_count(session));
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_HISTORY_EDIT, history_row(session, 0).kind);
+    tp_session_destroy(session);
+    (void)remove(path);
+}
+
+void test_history_dto_runtime_refresh_is_visible_and_keeps_revision(void) {
+    tp_session *session = make_session();
+    tp_error err = {{0}};
+    const tp_id128 atlas_id = first_atlas_id(session);
+    tp_txn_result r;
+    session_apply_rename(session, "35000000000000000000000000000001", 0,
+                         atlas_id, "edited", TP_STATUS_OK, &r, &err);
+    tp_txn_result_free(&r);
+    const int64_t revision_before = tp_session_revision(session);
+
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_invalidate_sources(session, &err));
+    /* §9.3: a refresh is a visible NON-undoable row; it does not change revision
+     * or Undo availability. */
+    TEST_ASSERT_EQUAL_INT64(revision_before, tp_session_revision(session));
+    TEST_ASSERT_TRUE(tp_session_can_undo(session));
+    TEST_ASSERT_EQUAL_INT(2, tp_session_history_count(session));
+    tp_session_history_entry refresh = history_row(session, 1);
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_HISTORY_RUNTIME_REFRESH, refresh.kind);
+    TEST_ASSERT_FALSE(refresh.undoable);
+    TEST_ASSERT_EQUAL_INT64(revision_before, refresh.revision);
+    TEST_ASSERT_TRUE(tp_id128_is_nil(refresh.state_identity));
+    TEST_ASSERT_EQUAL_STRING("", refresh.path);
+    tp_session_destroy(session);
+}
+
+void test_history_dto_new_edit_after_undo_discards_redo_rows(void) {
+    tp_session *session = make_session();
+    tp_error err = {{0}};
+    const tp_id128 atlas_id = first_atlas_id(session);
+    tp_txn_result r;
+    session_apply_rename(session, "36000000000000000000000000000001", 0,
+                         atlas_id, "edit-1", TP_STATUS_OK, &r, &err);
+    tp_txn_result_free(&r);
+    session_apply_rename(session, "36000000000000000000000000000002",
+                         tp_session_revision(session), atlas_id, "edit-2",
+                         TP_STATUS_OK, &r, &err);
+    tp_txn_result_free(&r);
+    /* A refresh at the tip is anchored above edit-2 (in the future redo branch). */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_invalidate_sources(session, &err));
+    TEST_ASSERT_EQUAL_INT(3, tp_session_history_count(session));
+
+    /* Undo back past edit-2 (cursor moves; rows remain). */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_undo(session, &err));
+    TEST_ASSERT_EQUAL_INT(3, tp_session_history_count(session));
+
+    /* A NEW edit discards the redo-branch edit AND the marker anchored in it. */
+    session_apply_rename(session, "36000000000000000000000000000003",
+                         tp_session_revision(session), atlas_id, "edit-3",
+                         TP_STATUS_OK, &r, &err);
+    tp_txn_result_free(&r);
+    TEST_ASSERT_EQUAL_INT(2, tp_session_history_count(session)); /* edit-1, edit-3 */
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_HISTORY_EDIT, history_row(session, 0).kind);
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_HISTORY_EDIT, history_row(session, 1).kind);
+    TEST_ASSERT_EQUAL_INT64(1, history_row(session, 0).revision);
+    /* Revision strictly increases: edit-3 sits above edit-1. */
+    TEST_ASSERT_TRUE(history_row(session, 1).revision >
+                     history_row(session, 0).revision);
+    tp_session_destroy(session);
+}
+
+void test_history_dto_budget_eviction_shrinks_rows(void) {
+    tp_session *session = make_session();
+    tp_error err = {{0}};
+    const tp_id128 atlas_id = first_atlas_id(session);
+
+    /* A refresh before any edit anchors at cursor 0 (below the whole spine). */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_invalidate_sources(session, &err));
+    TEST_ASSERT_EQUAL_INT(1, tp_session_history_count(session));
+
+    /* Cap the retained edit steps at 2, then commit 3 edits. */
+    tp_history__test_set_limits(2, 0U, 0U);
+    tp_txn_result r;
+    session_apply_rename(session, "37000000000000000000000000000001",
+                         tp_session_revision(session), atlas_id, "e1",
+                         TP_STATUS_OK, &r, &err);
+    tp_txn_result_free(&r);
+    session_apply_rename(session, "37000000000000000000000000000002",
+                         tp_session_revision(session), atlas_id, "e2",
+                         TP_STATUS_OK, &r, &err);
+    tp_txn_result_free(&r);
+    session_apply_rename(session, "37000000000000000000000000000003",
+                         tp_session_revision(session), atlas_id, "e3",
+                         TP_STATUS_OK, &r, &err);
+    tp_txn_result_free(&r);
+
+    /* FIFO evicted the oldest edit record: the DTO shrinks to the 2 retained edits,
+     * and the refresh marker anchored inside the evicted window is dropped too. */
+    TEST_ASSERT_EQUAL_INT(2, tp_session_history_count(session));
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_HISTORY_EDIT, history_row(session, 0).kind);
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_HISTORY_EDIT, history_row(session, 1).kind);
+
+    tp_history__test_set_limits(0, 0U, 0U); /* restore production limits */
+    tp_session_destroy(session);
+}
+
 int main(int argc, char **argv) {
     TEST_ASSERT_TRUE(argc >= 2);
     g_scratch = argv[1];
@@ -2986,5 +3304,13 @@ int main(int argc, char **argv) {
     RUN_TEST(test_save_as_keeps_published_destination_when_recovery_retire_fails);
     RUN_TEST(test_degraded_session_live_keeps_mutation_available_and_preserves_slot);
     RUN_TEST(test_required_recovery_reports_unavailable_without_blocking_model_commands);
+    RUN_TEST(test_history_dto_starts_empty_and_reopen_resets);
+    RUN_TEST(test_history_dto_edit_row_passthrough_and_cursor_moves);
+    RUN_TEST(test_history_dto_multi_op_batch_is_one_edit_row);
+    RUN_TEST(test_history_dto_save_checkpoint_is_visible_non_undoable);
+    RUN_TEST(test_history_dto_failed_save_records_no_checkpoint);
+    RUN_TEST(test_history_dto_runtime_refresh_is_visible_and_keeps_revision);
+    RUN_TEST(test_history_dto_new_edit_after_undo_discards_redo_rows);
+    RUN_TEST(test_history_dto_budget_eviction_shrinks_rows);
     return UNITY_END();
 }
