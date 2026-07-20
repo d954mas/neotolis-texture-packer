@@ -449,6 +449,33 @@ nt_set_warning_flags(tp_test_build_driver_oracle)   # AGENTS.md invariant: our t
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_build_driver_oracle_test")
 add_test(NAME tp_build_driver_oracle COMMAND tp_test_build_driver_oracle "${CMAKE_BINARY_DIR}/tp_build_driver_oracle_test")
 
+# H0.3-b: private build-worker process boundary (decision 0018). Fault-injecting
+# worker binaries -- one per mode via a test-only compile def, the same pattern as
+# the CLI NTPACKER_CLI_*_FAULT_SEAM binaries (production exes have no such mode) --
+# drive the crash / malformed-reply / non-zero-exit outcome mapping. The test exe
+# is BOTH the parent and the normal worker child (its main dispatches __build-worker).
+foreach(_mode CRASH MALFORMED NONZERO)
+    string(TOLOWER "${_mode}" _lc)
+    add_executable(tp_build_worker_${_lc} tp_build_worker_fault.c)
+    target_link_libraries(tp_build_worker_${_lc} PRIVATE tp_build)
+    target_include_directories(tp_build_worker_${_lc} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+    target_compile_definitions(tp_build_worker_${_lc} PRIVATE TP_WORKER_FAULT_${_mode}=1)
+    target_compile_options(tp_build_worker_${_lc} PRIVATE -U_DLL)
+    nt_set_warning_flags(tp_build_worker_${_lc})   # AGENTS.md invariant: our test TUs too
+endforeach()
+
+add_executable(tp_test_build_worker test_build_worker.c)
+target_link_libraries(tp_test_build_worker PRIVATE tp_build unity)  # tp_build owns the worker boundary + nt_builder oracle
+target_include_directories(tp_test_build_worker PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_options(tp_test_build_worker PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_build_worker)   # AGENTS.md invariant: our test TUs too
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_build_worker_test")
+add_test(NAME tp_build_worker COMMAND tp_test_build_worker
+    "${CMAKE_BINARY_DIR}/tp_build_worker_test"
+    $<TARGET_FILE:tp_build_worker_crash>
+    $<TARGET_FILE:tp_build_worker_malformed>
+    $<TARGET_FILE:tp_build_worker_nonzero>)
+
 # Shared strict-UTF-8 raster ingress: memory decode, bounded resources and
 # explicit allocator ownership.  The scratch tree includes a Cyrillic filename.
 add_executable(tp_test_image test_image.c)

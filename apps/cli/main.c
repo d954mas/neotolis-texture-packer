@@ -16,6 +16,7 @@
 #if defined(_WIN32)
 #include "nt_utf8_argv.h"
 #endif
+#include "tp_core/tp_build_worker.h"
 #include "tp_core/tp_export.h"
 #include "tp_core/tp_project.h"
 
@@ -537,6 +538,12 @@ static bool narrow_argv_has_flag(int argc, char **argv, const char *flag) {
 }
 
 int main(int argc, char **argv) {
+    /* Private build-worker re-exec (decision 0018): argv[1] == "__build-worker".
+     * FIRST thing, before UTF-16 conversion, engine, or arg parsing -- a pack
+     * re-execs this exe as the worker; ASCII arg, so the narrow argv is enough. */
+    if (tp_build_is_worker_invocation(argc, argv)) {
+        return tp_build_worker_main();
+    }
     nt_utf8_argv utf8 = {0};
     char error[160] = {0};
     if (!nt_utf8_argv_from_command_line(&utf8, error, sizeof error)) {
@@ -550,5 +557,10 @@ int main(int argc, char **argv) {
     return result;
 }
 #else
-int main(int argc, char **argv) { return ntpacker_main_utf8(argc, argv); }
+int main(int argc, char **argv) {
+    if (tp_build_is_worker_invocation(argc, argv)) {
+        return tp_build_worker_main();
+    }
+    return ntpacker_main_utf8(argc, argv);
+}
 #endif

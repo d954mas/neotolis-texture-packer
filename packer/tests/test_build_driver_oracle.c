@@ -16,6 +16,7 @@
 #include "tp_core/tp_arena.h"
 #include "tp_core/tp_model.h"
 #include "tp_core/tp_pack.h"
+#include "tp_core/tp_build_worker.h"
 #include "tp_build_driver_internal.h"
 #include "unity.h"
 
@@ -163,6 +164,9 @@ void test_tp_pack_matches_direct_nt_builder(void) {
 }
 
 int main(int argc, char **argv) {
+    if (tp_build_is_worker_invocation(argc, argv)) {
+        return tp_build_worker_main();
+    }
     g_dir = (argc > 1) ? argv[1] : ".";
     UNITY_BEGIN();
     RUN_TEST(test_driver_matches_direct_nt_builder);

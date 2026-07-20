@@ -13,11 +13,13 @@
 #include "tp_core/tp_name_map.h"
 #include "tp_core/tp_pack_read.h"
 #include "tp_pack_constraints_internal.h"
-#include "tp_build_driver_internal.h"
+#include "tp_build_worker_internal.h"
 
-/* nt_builder is now confined to the driver TU (tp_build_driver.c): tp_pack keeps
- * validate/preflight/name-map/read-back and hands decoded pixels to the driver
- * (decision 0018, ROADMAP H0.3). */
+/* nt_builder is confined to the driver TU (tp_build_driver.c), which now runs in
+ * a private child process behind tp_build_worker_run (decision 0018, ROADMAP
+ * H0.3-b): tp_pack keeps validate/preflight/name-map/read-back and hands decoded
+ * pixels to the worker, so a builder abort/allocation/codec/write failure cannot
+ * terminate the host. */
 
 // #region validation
 /* Normalization-invariant per plan §5: reject anything nt_builder_normalize_path
@@ -555,8 +557,10 @@ tp_status tp_pack(const tp_pack_settings *settings, struct tp_arena *arena, stru
         return st;
     }
 
-    /* The driver consumes `path_images` (frees them on every path). */
-    st = tp_build_driver_run(settings, path_images, path, err);
+    /* The worker consumes `path_images` (frees them on every path). It packs in
+     * a private child process; a non-ASCII out path transparently falls back to
+     * the in-process driver for now (H0.3-b seam, see tp_build_worker.c). */
+    st = tp_build_worker_run(settings, path_images, path, err);
     if (st != TP_STATUS_OK) {
         tp_name_map_destroy(names);
         return st;

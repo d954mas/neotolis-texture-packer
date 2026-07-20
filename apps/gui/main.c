@@ -59,6 +59,7 @@
 
 #include "clay.h"
 
+#include "tp_core/tp_build_worker.h" /* private build-worker re-exec dispatch (decision 0018) */
 #include "tp_core/tp_export.h"
 #include "tp_core/tp_names.h" /* tp_sprite_export_key (slice9 frame-sync key) */
 
@@ -706,6 +707,12 @@ static void frame(void) {
 
 // #region main + init/shutdown
 static int gui_main_utf8(int argc, char *argv[]) {
+    /* Private build-worker re-exec (decision 0018): a pack re-execs this exe with
+     * argv[1] == "__build-worker". Service it FIRST -- before engine init, the
+     * window, recovery, or any UI -- and return; never open a window as a worker. */
+    if (tp_build_is_worker_invocation(argc, argv)) {
+        return tp_build_worker_main();
+    }
 #ifdef _WIN32
     /* All client/core paths are UTF-8. tinyfiledialogs defaults to the process
      * ANSI code page unless this is set before its first native dialog. */

@@ -22,6 +22,7 @@
 #include "time/nt_time.h"
 #include "tp_core/tp_scan.h"
 #include "tp_core/tp_journal.h"
+#include "tp_core/tp_build_worker.h"
 #include "tp_journal_internal.h"
 #include "tp_session_internal.h"
 
@@ -742,7 +743,10 @@ void test_recovery_notice_is_sticky_exact_and_clears_after_save_heals(void) {
     (void)remove(save_path);
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    if (tp_build_is_worker_invocation(argc, argv)) {
+        return tp_build_worker_main();
+    }
     UNITY_BEGIN();
     RUN_TEST(test_rows_apply_renames_by_canonical_source_and_key);
     RUN_TEST(test_create_animation_preserves_both_canonical_selected_sprites);

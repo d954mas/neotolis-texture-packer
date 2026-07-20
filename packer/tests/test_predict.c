@@ -18,6 +18,7 @@
 #include "tp_core/tp_model.h"
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_project.h"
+#include "tp_core/tp_build_worker.h"
 #include "tp_project_mutation_internal.h"
 #include "unity.h"
 
@@ -277,6 +278,9 @@ void test_consistency_defold(void) {
 // #endregion
 
 int main(int argc, char **argv) {
+    if (tp_build_is_worker_invocation(argc, argv)) {
+        return tp_build_worker_main();
+    }
     g_dir = (argc > 1) ? argv[1] : ".";
     fill(g_piv_px, 30 * 20);
     fill(g_sl_px, 30 * 20);

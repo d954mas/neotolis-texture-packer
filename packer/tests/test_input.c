@@ -42,6 +42,7 @@
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_scan.h"
 #include "tp_core/tp_sprite_index.h"
+#include "tp_core/tp_build_worker.h"
 #include "tp_project_mutation_internal.h"
 #include "../src/tp_fs_internal.h"
 #include "unity.h"
@@ -749,6 +750,9 @@ void test_concave_extrude_clamp_exports(void) {
 // #endregion
 
 int main(int argc, char **argv) {
+    if (tp_build_is_worker_invocation(argc, argv)) {
+        return tp_build_worker_main();
+    }
     g_dir = (argc > 1) ? argv[1] : ".";
 
     char onedir[700];
