@@ -27,6 +27,11 @@ void tp_model__mark_recovery_durable(tp_model *model, int64_t revision);
 bool tp_model__recovery_durable_revision(const tp_model *model,
                                          int64_t *revision);
 uint64_t tp_model__recovery_health_generation(const tp_model *model);
+/* Applies against an isolated project clone at `revision`. The caller's
+ * project remains immutable and the returned transaction result owns its data. */
+tp_status tp_model__apply_snapshot_preview(
+    const tp_project *project, int64_t revision,
+    const tp_txn_request *request, tp_txn_result *result, tp_error *error);
 /* Degraded-Save compaction that stages the full live retained-id window and
  * restores the exact prior bytes/index if the replacement checkpoint cannot
  * be completed. */

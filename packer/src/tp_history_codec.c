@@ -7,7 +7,7 @@
 
 #include "tp_core/tp_identity.h"
 #include "tp_core/tp_names.h"
-#include "tp_project_path_internal.h"
+#include "tp_core/tp_project.h"
 
 typedef struct tp_hw {
     uint8_t *data;

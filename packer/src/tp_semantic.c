@@ -45,7 +45,6 @@
 #include "tp_core/tp_id.h"
 #include "tp_core/tp_identity.h"
 #include "tp_core/tp_project.h"
-#include "tp_project_path_internal.h"
 
 /* ---- feed helpers: canonical, endian-stable field mixing ----------------- */
 

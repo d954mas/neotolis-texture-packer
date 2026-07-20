@@ -349,6 +349,13 @@ tp_status tp_project_resolve_path(const tp_project *p, const char *rel, char *ou
 tp_status tp_project_resolve_source_path(const tp_project *p, const char *rel,
                                          char *out_abs, size_t cap);
 
+/* Resolves a source spelling to an absolute lexical identity without touching
+ * the filesystem. Unlike tp_project_resolve_source_path, this also accepts an
+ * already-absolute spelling. */
+tp_status tp_project_source_path_absolute_lexical(
+    const tp_project *project, const char *path, char *out, size_t cap,
+    tp_error *err);
+
 /* --- per-sprite effective rules --- */
 
 /* Effective shape for one sprite in ATLAS-shape semantics (0=RECT, 1=CONVEX_HULL,

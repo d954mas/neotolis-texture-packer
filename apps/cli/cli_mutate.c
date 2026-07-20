@@ -11,8 +11,9 @@
  * core-owned. Snapshot DTOs are the only model reads available to this frontend.
  *
  * One-shot lifecycle (spec: ordinary CLI is FILE-oriented, NOT a live session):
- * tp_session_open -> owned snapshot -> apply ONE transaction -> tp_session_save ->
- * destroy. The session owns locking, external-change detection, id promotion, and save.
+ * normal mutation uses tp_session_open -> snapshot -> apply -> save; dry-run uses
+ * snapshot_load -> isolated core preview. The session layer owns mutable authority,
+ * locking, external-change detection, id promotion, and persistence in both shapes.
  *
  * Exit-code contract (agents branch on these):
  *   2 usage   : bad grammar/vocabulary/value BEFORE the model commits -- wrong arg
@@ -43,7 +44,6 @@
 #include "tp_core/tp_error.h"
 #include "tp_core/tp_id.h"     /* tp_rng_os + id128 generate + shape-ID format */
 #include "tp_core/tp_operation.h"
-#include "tp_core/tp_project.h"
 #include "tp_core/tp_scan.h"            /* tp_scan_exists (new-on-existing guard) */
 #include "tp_core/tp_session.h"
 #include "tp_core/tp_source_plan.h"
@@ -275,7 +275,6 @@ void edit_close(cli_edit *edit) {
     }
     tp_session_snapshot_destroy(edit->snapshot);
     tp_session_destroy(edit->session);
-    tp_model_destroy(edit->model);
     memset(edit, 0, sizeof *edit);
 }
 
@@ -285,30 +284,6 @@ int edit_open(cli_edit *edit, const char *path, bool dry_run, bool json, bool qu
     tp_status status;
     if (dry_run) {
         status = tp_session_snapshot_load(path, &edit->snapshot, &err);
-        tp_project *project = NULL;
-        tp_id128 loaded_fingerprint = tp_id128_nil();
-        if (status == TP_STATUS_OK) {
-            status = tp_project_load_with_fingerprint(path, &project,
-                                                      &loaded_fingerprint, &err);
-        }
-        tp_id128 snapshot_fingerprint = tp_id128_nil();
-        if (status == TP_STATUS_OK &&
-            (!tp_session_snapshot_saved_file_fingerprint(edit->snapshot,
-                                                         &snapshot_fingerprint) ||
-             !tp_id128_eq(snapshot_fingerprint, loaded_fingerprint))) {
-            status = tp_error_set(&err, TP_STATUS_FILE_CHANGED_EXTERNALLY,
-                                  "project changed while dry-run candidate was loaded");
-        }
-        if (status == TP_STATUS_OK) {
-            edit->model = tp_model_wrap(project);
-            if (!edit->model) {
-                status = tp_error_set(&err, TP_STATUS_OOM,
-                                      "dry-run candidate allocation failed");
-            }
-        }
-        if (!edit->model) {
-            tp_project_destroy(project);
-        }
     } else {
         tp_rng rng = tp_rng_os();
         status = tp_session_open(path, &rng, &edit->session, &err);
@@ -487,7 +462,8 @@ int commit_session_ops(cli_edit *edit, tp_operation *ops, int nops,
     memset(&result, 0, sizeof result);
     tp_error err = {0};
     tp_status status = edit->dry_run
-                           ? tp_model_apply(edit->model, &request, &result, &err)
+                           ? tp_session_snapshot_apply_preview(
+                                 edit->snapshot, &request, &result, &err)
                            : tp_session_apply(edit->session, &request, &result, &err);
     int rc = CLI_EXIT_OK;
     if (status != TP_STATUS_OK) {

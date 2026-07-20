@@ -37,7 +37,6 @@
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_transaction.h"
 #include "tp_project_identity_internal.h"
-#include "tp_project_path_internal.h"
 #include "unity.h"
 #include "../src/tp_project_internal.h"
 #include "tp_project_mutation_internal.h"

@@ -37,6 +37,31 @@ tp_model *tp_model_wrap(tp_project *project) {
     return m;
 }
 
+tp_status tp_model__apply_snapshot_preview(
+    const tp_project *project, int64_t revision,
+    const tp_txn_request *request, tp_txn_result *result, tp_error *error) {
+    if (!project || !request || revision < 0) {
+        return tp_error_set(error, TP_STATUS_INVALID_ARGUMENT,
+                            "snapshot preview requires project, request, and revision");
+    }
+    tp_project *candidate = tp_project_clone(project);
+    if (!candidate) {
+        return tp_error_set(error, TP_STATUS_OOM,
+                            "snapshot preview project clone failed");
+    }
+    tp_model *preview = tp_model_wrap(candidate);
+    if (!preview) {
+        tp_project_destroy(candidate);
+        return tp_error_set(error, TP_STATUS_OOM,
+                            "snapshot preview model allocation failed");
+    }
+    preview->revision = revision;
+    const tp_status status =
+        tp_model_apply(preview, request, result, error);
+    tp_model_destroy(preview);
+    return status;
+}
+
 void tp_model_destroy(tp_model *m) {
     if (!m) {
         return;

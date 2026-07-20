@@ -27,7 +27,6 @@ bool status_is_internal_fault(tp_status status);
 
 typedef struct cli_edit {
     tp_session *session;
-    tp_model *model;
     tp_session_snapshot *snapshot;
     const char *path;
     bool dry_run;

@@ -222,6 +222,14 @@ tp_status tp_session_snapshot_create(const tp_session *session,
  * identity owner as tp_session_open(). */
 tp_status tp_session_snapshot_load(const char *path,
                                    tp_session_snapshot **out, tp_error *err);
+/* Applies one transaction to an isolated clone of `snapshot` and returns the
+ * same structured result as the live session path. The snapshot and any live
+ * session remain unchanged; no writer lease, journal, event, Save, or other
+ * external side effect is created. This is the mutation-preview boundary for
+ * one-shot clients. */
+tp_status tp_session_snapshot_apply_preview(
+    const tp_session_snapshot *snapshot, const tp_txn_request *request,
+    tp_txn_result *result, tp_error *err);
 void tp_session_snapshot_destroy(tp_session_snapshot *snapshot);
 int64_t tp_session_snapshot_revision(const tp_session_snapshot *snapshot);
 uint64_t tp_session_snapshot_model_generation(const tp_session_snapshot *snapshot);

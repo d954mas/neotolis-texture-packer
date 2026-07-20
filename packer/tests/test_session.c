@@ -69,6 +69,48 @@ static tp_session *make_session(void) {
     return session;
 }
 
+static tp_operation rename_op(tp_id128 atlas_id, const char *name);
+
+void test_snapshot_preview_apply_isolated_and_revision_exact(void) {
+    tp_session *session = make_session();
+    tp_error err = {{0}};
+    tp_session_snapshot *snapshot = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_snapshot_create(session, &snapshot, &err));
+    const tp_snapshot_atlas *before =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(before);
+    char original_name[128];
+    (void)snprintf(original_name, sizeof original_name, "%s", before->name);
+
+    tp_operation operation = rename_op(before->id, "preview-only-name");
+    tp_txn_request request;
+    memset(&request, 0, sizeof request);
+    request.schema = TP_TXN_SCHEMA;
+    memcpy(request.id_hex, "10000000000000000000000000000091", 33U);
+    request.expected_revision = tp_session_snapshot_revision(snapshot);
+    request.ops = &operation;
+    request.op_count = 1;
+    tp_txn_result result;
+    memset(&result, 0, sizeof result);
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_snapshot_apply_preview(snapshot, &request, &result, &err));
+    TEST_ASSERT_TRUE(result.committed);
+    TEST_ASSERT_FALSE(result.no_change);
+    TEST_ASSERT_EQUAL_INT64(request.expected_revision + 1, result.revision);
+    TEST_ASSERT_EQUAL_STRING(
+        original_name, tp_session_snapshot_atlas_at(snapshot, 0)->name);
+    TEST_ASSERT_EQUAL_INT64(0, tp_session_revision(session));
+
+    tp_txn_result_free(&result);
+    tp_operation_free(&operation);
+    tp_session_snapshot_destroy(snapshot);
+    tp_session_destroy(session);
+}
+
 void test_snapshot_allocation_failures_return_structured_oom(void) {
     tp_project *project = tp_project_create();
     TEST_ASSERT_NOT_NULL(project);
@@ -2831,6 +2873,7 @@ int main(int argc, char **argv) {
     TEST_ASSERT_TRUE(argc >= 2);
     g_scratch = argv[1];
     UNITY_BEGIN();
+    RUN_TEST(test_snapshot_preview_apply_isolated_and_revision_exact);
     RUN_TEST(test_snapshot_allocation_failures_return_structured_oom);
     RUN_TEST(test_snapshot_creation_does_not_clone_and_same_generation_shares_project);
     RUN_TEST(test_snapshot_survives_session_destroy);

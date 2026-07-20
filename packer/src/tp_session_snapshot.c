@@ -305,6 +305,17 @@ tp_status tp_session_snapshot_load(const char *path,
     return TP_STATUS_OK;
 }
 
+tp_status tp_session_snapshot_apply_preview(
+    const tp_session_snapshot *snapshot, const tp_txn_request *request,
+    tp_txn_result *result, tp_error *err) {
+    if (!snapshot || !request) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "snapshot preview requires snapshot and request");
+    }
+    return tp_model__apply_snapshot_preview(
+        snapshot->project, snapshot->revision, request, result, err);
+}
+
 void tp_session_snapshot_destroy(tp_session_snapshot *snapshot) {
     if (!snapshot) {
         return;

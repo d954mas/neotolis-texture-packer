@@ -3,7 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "tp_project_path_internal.h"
+#include "tp_core/tp_project.h"
 #include "tp_source_path_text_internal.h"
 #include "tp_source_plan_internal.h"
 
