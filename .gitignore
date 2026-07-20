@@ -14,6 +14,9 @@ examples/projects/out/
 # machine-local tooling, never committed.
 /.codex/
 
+# Local Serena project metadata — machine-local tooling, never committed.
+/.serena/
+
 # Defold editor artifacts in the demo project
 examples/defold-demo/.internal/
 examples/defold-demo/.editor_settings
