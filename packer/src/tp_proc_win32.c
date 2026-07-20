@@ -166,10 +166,12 @@ tp_proc *tp_proc_spawn(const char *exe_utf8, const char *arg1, const char *cwd_u
     HANDLE stdin_w = NULL;  /* parent writes the request */
     HANDLE stdout_r = NULL; /* parent reads the reply */
     HANDLE stdout_w = NULL; /* child writes the reply */
-    /* 64 KiB pipe buffers: the reply (<= ~8 KiB) fits entirely, so the child can
-     * write it and exit without the parent reading concurrently -- the parent
-     * waits (with cancel/timeout) THEN reads, never blocking a read on a hung
-     * child. */
+    /* 64 KiB pipe buffers: the encoder bounds every reply to <= ~8 KiB, so it fits
+     * entirely and the child can write it and exit without the parent reading
+     * concurrently -- the parent waits (with cancel/timeout) THEN reads, never
+     * blocking a read on a hung child. A reply larger than this buffer would block
+     * the child and be caught by the safety timeout (builder_crashed), not the
+     * over-cap read branch. */
     if (!CreatePipe(&stdin_r, &stdin_w, &sa, 1u << 16) ||
         !CreatePipe(&stdout_r, &stdout_w, &sa, 1u << 16)) {
         if (stdin_r) {
@@ -197,11 +199,17 @@ tp_proc *tp_proc_spawn(const char *exe_utf8, const char *arg1, const char *cwd_u
     LPPROC_THREAD_ATTRIBUTE_LIST attrs =
         (LPPROC_THREAD_ATTRIBUTE_LIST)malloc(attr_size);
     HANDLE inherit[2] = {stdin_r, stdout_w};
-    bool attrs_ok = attrs &&
-                    InitializeProcThreadAttributeList(attrs, 1, 0, &attr_size) &&
+    /* Track init separately: a list that Initialize populated must be handed to
+     * DeleteProcThreadAttributeList before free() even if Update fails (MSDN), and
+     * an uninitialized buffer must NOT be passed to Delete. */
+    bool init_ok = attrs && InitializeProcThreadAttributeList(attrs, 1, 0, &attr_size);
+    bool attrs_ok = init_ok &&
                     UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
                                               inherit, sizeof inherit, NULL, NULL);
     if (!attrs_ok) {
+        if (init_ok) {
+            DeleteProcThreadAttributeList(attrs);
+        }
         if (attrs) {
             free(attrs);
         }

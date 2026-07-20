@@ -395,7 +395,13 @@ bool tp_fs_replace(const char *source_utf8, const char *destination_utf8) {
         free(destination);
         return false;
     }
-    BOOL moved = MoveFileExW(source, destination, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+    /* MOVEFILE_COPY_ALLOWED: a same-volume publish stays a pure atomic rename (the
+     * flag is inert), but a degenerate cross-volume case (build-worker staging
+     * relocated up an ancestor chain that a junction/mount point split off the
+     * destination's volume) falls back to a WRITE_THROUGH copy + delete instead of
+     * failing with ERROR_NOT_SAME_DEVICE and spuriously reporting builder_crashed. */
+    BOOL moved = MoveFileExW(source, destination,
+                             MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH | MOVEFILE_COPY_ALLOWED);
     DWORD error = moved ? ERROR_SUCCESS : GetLastError();
     free(source);
     free(destination);

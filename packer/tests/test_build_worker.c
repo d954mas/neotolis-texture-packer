@@ -32,9 +32,13 @@
 #include <string.h>
 
 #ifdef _WIN32
+#include <process.h>
 #include <windows.h>
+#define tp_test_getpid _getpid
 #else
 #include <time.h>
+#include <unistd.h>
+#define tp_test_getpid getpid
 #endif
 
 #include "tp_core/tp_arena.h"
@@ -63,6 +67,7 @@ static const char *g_worker_nowrite;
 static const char *g_worker_oknoart;
 static const char *g_worker_biglen;
 static const char *g_worker_trunc;
+static const char *g_worker_flood;
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -183,11 +188,19 @@ static uint8_t *read_file_fs(const char *path, size_t *out_size) {
     return b;
 }
 
-/* How many private staging dirs remain directly under `dir`. A worker run must
- * leave this UNCHANGED (delta 0) -- an absolute count is fragile because the
- * persistent ctest work dir can hold stale dirs from earlier broken runs.
- * Returns -1 if the dir cannot be opened. */
+/* How many of THIS process's private staging dirs remain directly under `dir`. A
+ * worker run must leave this UNCHANGED (delta 0). Scoped to our own pid prefix
+ * (pkw-<pid>-...): an absolute "pkw-" count is fragile -- the persistent ctest work
+ * dir can hold stale dirs from earlier broken runs, and the cross-run reaper now
+ * sweeps dead-owner leftovers during a pack. Only our own dirs answer "did the pack
+ * leak its staging". Returns -1 if the dir cannot be opened. */
 static int count_staging_dirs(const char *dir) {
+    char prefix[32];
+    int pn = snprintf(prefix, sizeof prefix, "pkw-%08lx-",
+                      (unsigned long)tp_test_getpid() & 0xffffffffUL);
+    if (pn <= 0 || (size_t)pn >= sizeof prefix) {
+        return -1;
+    }
     tp_fs_dir *d = tp_fs_dir_open(dir);
     if (!d) {
         return -1;
@@ -199,7 +212,7 @@ static int count_staging_dirs(const char *dir) {
         if (r != TP_FS_DIR_ENTRY) {
             break;
         }
-        if (strncmp(e.name, "pkw-", 4) == 0) {
+        if (strncmp(e.name, prefix, (size_t)pn) == 0) {
             count++;
         }
     }
@@ -504,6 +517,131 @@ void test_truncated_reply_frame_is_builder_failed(void) {
                                   "truncated reply left staging behind");
 }
 
+/* A missing/renamed worker exe: on Windows CreateProcessW fails (spawn NULL); on
+ * POSIX fork succeeds but execv fails -> _exit(127). Both are parent-owned
+ * BUILDER_CRASHED branches -- fail closed, publish nothing, staging delta 0. */
+void test_missing_worker_exe_is_builder_crashed(void) {
+    char path[1024];
+    TEST_ASSERT_TRUE(snprintf(path, sizeof path, "%s/wrk_nospawn.ntpack", g_dir) > 0);
+    TEST_ASSERT_FALSE(tp_fs_exists(path));
+    tp_pack_settings s;
+    make_settings(&s, g_dir);
+    tp_error err = {{0}};
+    const int staging_before = count_staging_dirs(g_dir);
+    tp_status st = tp_build_worker_run_exe(&s, NULL, path, "ntpacker-no-such-worker", &err);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_BUILDER_CRASHED, st, err.msg);
+    TEST_ASSERT_FALSE_MESSAGE(tp_fs_exists(path), "spawn/exec failure published an artifact");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(staging_before, count_staging_dirs(g_dir),
+                                  "spawn/exec failure left staging behind");
+}
+
+/* A valid artifact the host cannot publish (destination parent dir absent) -> the
+ * publish rename fails AFTER a good build. Kept as BUILDER_CRASHED (no trustworthy
+ * PUBLISHED artifact exists; host survives, nothing written over the destination). */
+void test_publish_failure_maps_to_builder_crashed(void) {
+    char missing_dir[1024];
+    char path[1200];
+    TEST_ASSERT_TRUE(snprintf(missing_dir, sizeof missing_dir, "%s/no_such_pub_dir", g_dir) > 0);
+    TEST_ASSERT_TRUE(snprintf(path, sizeof path, "%s/out.ntpack", missing_dir) > 0);
+    TEST_ASSERT_FALSE(tp_fs_exists(missing_dir));
+    tp_pack_settings s;
+    make_settings(&s, g_dir);
+    tp_error err = {{0}};
+    const int staging_before = count_staging_dirs(g_dir);
+    tp_status st = tp_build_worker_run(&s, NULL, path, &err);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_BUILDER_CRASHED, st, err.msg);
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(err.msg, "could not be published"), err.msg);
+    TEST_ASSERT_FALSE_MESSAGE(tp_fs_exists(path), "publish failure created the artifact");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(staging_before, count_staging_dirs(g_dir),
+                                  "publish failure left staging behind");
+}
+
+/* An over-cap reply THROUGH the process: the flood worker writes more than the
+ * lowered reply_cap (but under the pipe buffer) and exits, so the parent's read
+ * fills the cap without EOF -> the "oversized" fail-closed branch -> BUILDER_FAILED,
+ * no publish. Exercises the reply-cap overflow defense the comment describes. */
+void test_oversized_reply_is_builder_failed(void) {
+    char path[1024];
+    TEST_ASSERT_TRUE(snprintf(path, sizeof path, "%s/wrk_flood.ntpack", g_dir) > 0);
+    TEST_ASSERT_FALSE(tp_fs_exists(path));
+    tp_pack_settings s;
+    make_settings(&s, g_dir);
+    tp_error err = {{0}};
+    const int staging_before = count_staging_dirs(g_dir);
+    tp_build_worker_opts opts;
+    memset(&opts, 0, sizeof opts);
+    opts.worker_exe = g_worker_flood;
+    opts.reply_cap = 1024; /* below the flood (8 KiB) and the 64 KiB pipe buffer */
+    tp_status st = tp_build_worker_run_opts(&s, NULL, path, &opts, &err);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_BUILDER_FAILED, st, err.msg);
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(err.msg, "oversized"), err.msg);
+    TEST_ASSERT_FALSE_MESSAGE(tp_fs_exists(path), "oversized reply published an artifact");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(staging_before, count_staging_dirs(g_dir),
+                                  "oversized reply left staging behind");
+}
+
+/* A staging dir owned by a dead pid (pkw-<hexpid>-<serial>) is a cross-run leftover
+ * from a host killed mid-pack; the next pack's best-effort reaper must sweep it
+ * (contents and all), while our own live staging is untouched. */
+void test_stale_staging_dir_is_reaped(void) {
+    char fake[1024];
+    char fakefile[1200];
+    TEST_ASSERT_TRUE(snprintf(fake, sizeof fake, "%s/pkw-999999-0", g_dir) > 0);
+    TEST_ASSERT_TRUE(tp_fs_create_dir(fake));
+    TEST_ASSERT_TRUE(snprintf(fakefile, sizeof fakefile, "%s/out.ntpack", fake) > 0);
+    static const uint8_t junk[4] = {1U, 2U, 3U, 4U};
+    TEST_ASSERT_TRUE(tp_fs_write_file(fakefile, junk, sizeof junk));
+    TEST_ASSERT_TRUE(tp_fs_exists(fake));
+
+    char path[1024];
+    TEST_ASSERT_TRUE(snprintf(path, sizeof path, "%s/wrk_reap.ntpack", g_dir) > 0);
+    tp_pack_settings s;
+    make_settings(&s, g_dir);
+    tp_error err = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_STATUS_OK, tp_build_worker_run(&s, NULL, path, &err), err.msg);
+    TEST_ASSERT_FALSE_MESSAGE(tp_fs_exists(fake), "dead-owner staging dir was not reaped");
+}
+
+/* A well-encoded but out-of-range request (extrude > 0 with the default non-RECT
+ * shape) bypasses tp_pack's validate_settings and trips an always-on NT_BUILD_ASSERT
+ * in the builder. The abort is CONTAINED to the child (mapped BUILDER_CRASHED here);
+ * the host survives, nothing is published, staging is clean. Defense-in-depth: the
+ * parent validates first in production, so this proves the worker's own robustness. */
+void test_out_of_range_knob_is_contained(void) {
+    char path[1024];
+    TEST_ASSERT_TRUE(snprintf(path, sizeof path, "%s/wrk_badknob.ntpack", g_dir) > 0);
+    TEST_ASSERT_FALSE(tp_fs_exists(path));
+    tp_pack_settings s;
+    make_settings(&s, g_dir);
+    s.extrude = 5; /* extrude > 0 requires shape RECT; default shape is CONCAVE */
+    tp_error err = {{0}};
+    const int staging_before = count_staging_dirs(g_dir);
+    tp_status st = tp_build_worker_run(&s, NULL, path, &err);
+    TEST_ASSERT_TRUE_MESSAGE(st == TP_STATUS_BUILDER_FAILED || st == TP_STATUS_BUILDER_CRASHED, err.msg);
+    TEST_ASSERT_FALSE_MESSAGE(tp_fs_exists(path), "out-of-range knob published an artifact");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(staging_before, count_staging_dirs(g_dir),
+                                  "out-of-range knob left staging behind");
+}
+
+/* A zero-sprite request through the real worker: the builder's end_atlas asserts
+ * "atlas has no sprites" and aborts the child -> contained, mapped to a structured
+ * status here (never a host crash/hang). Nothing published, staging clean. */
+void test_zero_sprite_request_is_contained(void) {
+    char path[1024];
+    TEST_ASSERT_TRUE(snprintf(path, sizeof path, "%s/wrk_nosprite.ntpack", g_dir) > 0);
+    TEST_ASSERT_FALSE(tp_fs_exists(path));
+    tp_pack_settings s;
+    make_settings(&s, g_dir);
+    s.sprite_count = 0; /* codec allows it; the builder rejects an empty atlas */
+    tp_error err = {{0}};
+    const int staging_before = count_staging_dirs(g_dir);
+    tp_status st = tp_build_worker_run(&s, NULL, path, &err);
+    TEST_ASSERT_TRUE_MESSAGE(st == TP_STATUS_BUILDER_FAILED || st == TP_STATUS_BUILDER_CRASHED, err.msg);
+    TEST_ASSERT_FALSE_MESSAGE(tp_fs_exists(path), "zero-sprite request published an artifact");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(staging_before, count_staging_dirs(g_dir),
+                                  "zero-sprite request left staging behind");
+}
+
 int main(int argc, char **argv) {
     /* Same first-thing dispatch every pack-capable exe must have: as the worker
      * child, service the request and return -- never fall through to the tests. */
@@ -519,6 +657,7 @@ int main(int argc, char **argv) {
     g_worker_oknoart = (argc > 7) ? argv[7] : "";
     g_worker_biglen = (argc > 8) ? argv[8] : "";
     g_worker_trunc = (argc > 9) ? argv[9] : "";
+    g_worker_flood = (argc > 10) ? argv[10] : "";
 
     UNITY_BEGIN();
     RUN_TEST(test_direct_reference_builds);
@@ -533,5 +672,11 @@ int main(int argc, char **argv) {
     RUN_TEST(test_ok_reply_missing_artifact_is_builder_crashed);
     RUN_TEST(test_oversized_declared_length_reply_is_builder_failed);
     RUN_TEST(test_truncated_reply_frame_is_builder_failed);
+    RUN_TEST(test_missing_worker_exe_is_builder_crashed);
+    RUN_TEST(test_publish_failure_maps_to_builder_crashed);
+    RUN_TEST(test_oversized_reply_is_builder_failed);
+    RUN_TEST(test_stale_staging_dir_is_reaped);
+    RUN_TEST(test_out_of_range_knob_is_contained);
+    RUN_TEST(test_zero_sprite_request_is_contained);
     return UNITY_END();
 }

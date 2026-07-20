@@ -10,6 +10,8 @@
  *   HANG      drain, then never reply/exit -> parent cancel/safety-timeout kills it
  *   CRASH     abort() with no reply        -> BUILDER_CRASHED, host survives
  *   MALFORMED clean exit + garbage bytes   -> BUILDER_FAILED (fail closed)
+ *   FLOOD     clean exit + more bytes than a lowered reply_cap (but under the pipe
+ *             buffer) -> parent's over-cap read branch -> BUILDER_FAILED (oversized)
  *   NONZERO   non-zero exit + valid error reply -> BUILDER_FAILED (message carried)
  *   NOWRITE   partial staging file + valid BUILDER_FAILED reply (sink/full-disk
  *             seam) -> BUILDER_FAILED, nothing published, partial file cleaned
@@ -121,6 +123,21 @@ int main(void) {
     (void)fwrite(garbage, 1u, sizeof garbage - 1u, stdout);
     (void)fflush(stdout);
     return 0; /* clean exit + malformed reply -> host maps BUILDER_FAILED */
+#elif defined(TP_WORKER_FAULT_FLOOD)
+    /* Emit 8 KiB of bytes then exit 0. That overshoots the test's lowered reply_cap
+     * but stays well under the 64 KiB pipe buffer, so the child write-and-exits (no
+     * deadlock) and the parent's post-wait read fills the cap without EOF -> the
+     * over-cap "oversized" fail-closed branch -> BUILDER_FAILED. */
+#if defined(_WIN32)
+    (void)_setmode(_fileno(stdout), _O_BINARY);
+#endif
+    {
+        static unsigned char flood[8192];
+        memset(flood, 0xA5, sizeof flood);
+        (void)fwrite(flood, 1u, sizeof flood, stdout);
+        (void)fflush(stdout);
+    }
+    return 0;
 #elif defined(TP_WORKER_FAULT_NONZERO)
     {
         uint8_t *bytes = NULL;

@@ -1,6 +1,13 @@
+/* pipe2(O_CLOEXEC) on Linux needs the GNU feature set; harmless elsewhere and the
+ * macOS/other path falls back to pipe()+fcntl. Guarded to avoid a redefinition. */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include "tp_proc_internal.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -64,6 +71,32 @@ bool tp_proc_self_path(char *out, size_t out_cap) {
      * tool does not target, so containment fails closed there instead. */
 }
 
+/* Create a pipe with BOTH ends close-on-exec, so only the two fds the child dup2's
+ * onto stdin/stdout survive exec -- a sibling worker's transport ends (and every
+ * other host fd) are dropped at exec, matching the Windows explicit inherit list
+ * and closing the sibling-pins-stdin-open deadlock. Returns 0 on success. */
+static int make_cloexec_pipe(int fd[2]) {
+#if defined(__linux__)
+    return pipe2(fd, O_CLOEXEC);
+#else
+    /* macOS/other lack pipe2: set FD_CLOEXEC right after creation. The tiny
+     * pipe()->fcntl window is only material to a concurrent fork+exec, which the
+     * spawn path does not do. */
+    if (pipe(fd) != 0) {
+        return -1;
+    }
+    for (int i = 0; i < 2; i++) {
+        int flags = fcntl(fd[i], F_GETFD);
+        if (flags < 0 || fcntl(fd[i], F_SETFD, flags | FD_CLOEXEC) < 0) {
+            (void)close(fd[0]);
+            (void)close(fd[1]);
+            return -1;
+        }
+    }
+    return 0;
+#endif
+}
+
 tp_proc *tp_proc_spawn(const char *exe_utf8, const char *arg1, const char *cwd_utf8) {
     if (!exe_utf8 || exe_utf8[0] == '\0') {
         return NULL;
@@ -72,10 +105,10 @@ tp_proc *tp_proc_spawn(const char *exe_utf8, const char *arg1, const char *cwd_u
 
     int in_fd[2] = {-1, -1};  /* [0] child stdin read, [1] parent write */
     int out_fd[2] = {-1, -1}; /* [0] parent read, [1] child stdout write */
-    if (pipe(in_fd) != 0) {
+    if (make_cloexec_pipe(in_fd) != 0) {
         return NULL;
     }
-    if (pipe(out_fd) != 0) {
+    if (make_cloexec_pipe(out_fd) != 0) {
         (void)close(in_fd[0]);
         (void)close(in_fd[1]);
         return NULL;
@@ -106,20 +139,39 @@ tp_proc *tp_proc_spawn(const char *exe_utf8, const char *arg1, const char *cwd_u
         return NULL;
     }
     if (pid == 0) {
-        /* Child: only async-signal-safe calls between fork and execv (chdir is on
-         * the POSIX async-signal-safe list). Enter the staging dir first so the
-         * request's relative output name resolves there, wire the two pipe ends to
-         * stdin/stdout, drop every raw pipe fd, keep stderr. */
+        /* Child: only async-signal-safe calls between fork and execv (chdir, dup2,
+         * fcntl, close are all on the POSIX async-signal-safe list). Enter the
+         * staging dir first so the request's relative output name resolves there,
+         * wire the two pipe ends to stdin/stdout, drop every other raw pipe fd
+         * (CLOEXEC drops any that slip through at exec), keep stderr. */
         if (cwd_utf8 && cwd_utf8[0] != '\0' && chdir(cwd_utf8) != 0) {
             _exit(127); /* cannot enter staging: parent maps the non-zero exit */
         }
         if (dup2(in_fd[0], STDIN_FILENO) < 0 || dup2(out_fd[1], STDOUT_FILENO) < 0) {
             _exit(127);
         }
-        (void)close(in_fd[0]);
-        (void)close(in_fd[1]);
-        (void)close(out_fd[0]);
-        (void)close(out_fd[1]);
+        /* dup2 clears CLOEXEC on the new fd EXCEPT when oldfd==newfd (a no-op that
+         * keeps the flag), which happens when the host was started with fd 0/1
+         * closed and pipe() handed that number to a pipe end. Clear it explicitly
+         * so the wired stdin/stdout are not auto-closed at exec. */
+        (void)fcntl(STDIN_FILENO, F_SETFD, 0);
+        (void)fcntl(STDOUT_FILENO, F_SETFD, 0);
+        /* Guard each close: a raw pipe fd that dup2 landed on the wired STDIN/STDOUT
+         * slot (host launched with fd 0/1 closed) must not be closed out from under
+         * the child. Every genuine duplicate (fd >= 2) is still dropped; CLOEXEC
+         * drops the rest at exec. */
+        if (in_fd[0] != STDIN_FILENO && in_fd[0] != STDOUT_FILENO) {
+            (void)close(in_fd[0]);
+        }
+        if (in_fd[1] != STDIN_FILENO && in_fd[1] != STDOUT_FILENO) {
+            (void)close(in_fd[1]);
+        }
+        if (out_fd[0] != STDIN_FILENO && out_fd[0] != STDOUT_FILENO) {
+            (void)close(out_fd[0]);
+        }
+        if (out_fd[1] != STDIN_FILENO && out_fd[1] != STDOUT_FILENO) {
+            (void)close(out_fd[1]);
+        }
         (void)execv(exe_utf8, argv);
         _exit(127); /* exec failed: parent sees a non-zero exit + no reply */
     }

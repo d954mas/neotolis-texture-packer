@@ -134,11 +134,15 @@ typedef enum tp_status {
     TP_STATUS_FILE_IO_FAILED,
 
     /* --- fallible builder containment fault (decision 0018, master spec §10.6) ---
-     * Append-only: new value at the END. Distinct from BUILDER_FAILED (the builder
-     * ran and returned a structured error code): the private build worker aborted,
-     * crashed on a signal, timed out, exited non-zero, or returned a malformed or
-     * missing reply, so no trustworthy artifact exists. The host survives and the
-     * last successful preview stays authoritative (tp_build worker boundary). */
+     * Append-only: new value at the END. A PROCESS-LEVEL abnormal outcome of the
+     * private build worker: it aborted, crashed on a signal, timed out, exited
+     * non-zero with no valid reply, reported success but staged no readable
+     * artifact, or produced a valid artifact the host could not publish -- so no
+     * trustworthy PUBLISHED artifact exists. Distinct from BUILDER_FAILED, which
+     * covers a controlled builder/sink failure the worker reported in a VALID reply
+     * OR a clean-exit malformed/truncated/oversized reply (fail closed). The host
+     * survives and the last successful preview stays authoritative (tp_build worker
+     * boundary). */
     TP_STATUS_BUILDER_CRASHED
 } tp_status;
 

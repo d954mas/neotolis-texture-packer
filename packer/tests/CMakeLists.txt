@@ -460,7 +460,7 @@ add_test(NAME tp_build_driver_oracle COMMAND tp_test_build_driver_oracle "${CMAK
 # OKNOART (exit 0 + valid OK reply + missing artifact -> BUILDER_CRASHED), and
 # BIGLEN/TRUNC (giant declared / short truncated reply frame -> BUILDER_FAILED),
 # proving the PARENT path fails closed through the process (codec-level is #43).
-foreach(_mode CRASH MALFORMED NONZERO HANG NOWRITE OKNOART BIGLEN TRUNC)
+foreach(_mode CRASH MALFORMED NONZERO HANG NOWRITE OKNOART BIGLEN TRUNC FLOOD)
     string(TOLOWER "${_mode}" _lc)
     add_executable(tp_build_worker_${_lc} tp_build_worker_fault.c)
     target_link_libraries(tp_build_worker_${_lc} PRIVATE tp_build)
@@ -488,7 +488,8 @@ add_test(NAME tp_build_worker COMMAND tp_test_build_worker
     $<TARGET_FILE:tp_build_worker_nowrite>
     $<TARGET_FILE:tp_build_worker_oknoart>
     $<TARGET_FILE:tp_build_worker_biglen>
-    $<TARGET_FILE:tp_build_worker_trunc>)
+    $<TARGET_FILE:tp_build_worker_trunc>
+    $<TARGET_FILE:tp_build_worker_flood>)
 # A regression that failed to kill the hang worker must not wedge CI for the job's
 # full 6h budget: bound the whole worker suite well above its sub-second normal run
 # (the timeout test overrides the 5-min safety timeout down to 400ms).

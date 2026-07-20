@@ -22,8 +22,20 @@ void setUp(void) {}
 void tearDown(void) {}
 
 /* The frame header and request head are fixed, _Static_assert-pinned wire sizes;
- * the fail-closed cases poke fields by their contract offset. */
-enum { PROTO_FRAME_HDR = 12, PROTO_REQ_HEAD = 48 };
+ * the fail-closed cases poke fields by their contract offset. The sprite head
+ * (40 bytes) follows the request head + the sample's atlas/out names; its rgba_len
+ * is the last u32. encode_sample uses atlas_name "a" (1) and out_name "a.ntpack" (8). */
+enum {
+    PROTO_FRAME_HDR = 12,
+    PROTO_REQ_HEAD = 48,
+    PROTO_SPRITE_HEAD = 40,
+    SAMPLE_ATLAS_LEN = 1,
+    SAMPLE_OUT_LEN = 8,
+    SAMPLE_SPRITE_HEAD_OFF = PROTO_FRAME_HDR + PROTO_REQ_HEAD + SAMPLE_ATLAS_LEN + SAMPLE_OUT_LEN,
+    SAMPLE_RGBA_LEN_OFF = SAMPLE_SPRITE_HEAD_OFF + (PROTO_SPRITE_HEAD - 4),
+    REQ_ATLAS_NAME_LEN_OFF = PROTO_FRAME_HDR + 36, /* atlas_name_len field in request head */
+    REQ_SPRITE_COUNT_OFF = PROTO_FRAME_HDR + PROTO_REQ_HEAD - 4
+};
 
 static uint8_t *make_pixels(uint32_t w, uint32_t h, uint8_t seed) {
     size_t n = (size_t)w * h * 4U;
@@ -313,6 +325,65 @@ void test_fail_closed_corrupt_payload(void) {
     free(bytes);
 }
 
+/* ---- decode-side integrity guards: a well-framed frame with an internally
+ * inconsistent field must fail closed at DECODE (the encoder never emits these). */
+
+/* rgba_len that disagrees with width*height*4 is rejected before any pixel copy. */
+void test_fail_closed_rgba_len_mismatch(void) {
+    size_t len = 0;
+    uint8_t *bytes = encode_sample(&len);
+    /* Sample sprite is 2x2 -> rgba_len 16; claim 15 so decode fails the equality. */
+    put_u32_le(bytes + SAMPLE_RGBA_LEN_OFF, 15U);
+    tp_build_proto_request out;
+    tp_error err = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT, tp_build_proto_decode_request(bytes, len, &out, &err));
+    free(bytes);
+}
+
+/* Extra payload bytes the decode does not consume (r.off != r.len) fail closed. */
+void test_fail_closed_trailing_payload_bytes(void) {
+    size_t len = 0;
+    uint8_t *bytes = encode_sample(&len);
+    uint8_t *bigger = (uint8_t *)realloc(bytes, len + 4U);
+    TEST_ASSERT_NOT_NULL(bigger);
+    bytes = bigger;
+    memset(bytes + len, 0, 4U);
+    /* Declare the 4 extra bytes so the frame length check passes; they then remain
+     * unconsumed after the request decodes -> trailing-bytes fail-closed. */
+    put_u32_le(bytes + 8, (uint32_t)(len - PROTO_FRAME_HDR + 4U));
+    tp_build_proto_request out;
+    tp_error err = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS, tp_build_proto_decode_request(bytes, len + 4U, &out, &err));
+    free(bytes);
+}
+
+/* A sprite name_len over the cap is rejected at decode (encode also caps it). */
+void test_fail_closed_decode_name_len_over_cap(void) {
+    size_t len = 0;
+    uint8_t *bytes = encode_sample(&len);
+    put_u32_le(bytes + SAMPLE_SPRITE_HEAD_OFF, TP_BUILD_PROTO_MAX_NAME_BYTES + 1U); /* sprite name_len */
+    tp_build_proto_request out;
+    tp_error err = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT, tp_build_proto_decode_request(bytes, len, &out, &err));
+    /* Same guard on the atlas name_len in the request head. */
+    uint8_t *b2 = encode_sample(&len);
+    put_u32_le(b2 + REQ_ATLAS_NAME_LEN_OFF, TP_BUILD_PROTO_MAX_NAME_BYTES + 1U);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT, tp_build_proto_decode_request(b2, len, &out, &err));
+    free(b2);
+    free(bytes);
+}
+
+/* A sprite_count over the cap is rejected at decode before any table allocation. */
+void test_fail_closed_decode_sprite_count_over_cap(void) {
+    size_t len = 0;
+    uint8_t *bytes = encode_sample(&len);
+    put_u32_le(bytes + REQ_SPRITE_COUNT_OFF, TP_BUILD_PROTO_MAX_SPRITES + 1U);
+    tp_build_proto_request out;
+    tp_error err = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT, tp_build_proto_decode_request(bytes, len, &out, &err));
+    free(bytes);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_request_roundtrip_multi_sprite);
@@ -324,5 +395,9 @@ int main(void) {
     RUN_TEST(test_fail_closed_wrong_magic);
     RUN_TEST(test_fail_closed_unsupported_version);
     RUN_TEST(test_fail_closed_corrupt_payload);
+    RUN_TEST(test_fail_closed_rgba_len_mismatch);
+    RUN_TEST(test_fail_closed_trailing_payload_bytes);
+    RUN_TEST(test_fail_closed_decode_name_len_over_cap);
+    RUN_TEST(test_fail_closed_decode_sprite_count_over_cap);
     return UNITY_END();
 }

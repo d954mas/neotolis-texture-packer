@@ -19,12 +19,15 @@ extern "C" {
 #endif
 
 /* Optional knobs for a worker run. All-zero = production defaults (own module
- * path, 5-minute safety timeout, no cancellation). `worker_exe` and `timeout_ms`
- * are test seams; `cancel_poll`/`cancel_ctx` carry cooperative cancellation from
+ * path, 5-minute safety timeout, full 64 KiB reply cap, no cancellation).
+ * `worker_exe`, `timeout_ms` and `reply_cap` are test seams;
+ * `cancel_poll`/`cancel_ctx` carry cooperative cancellation from
  * tp_pack_cancellable. */
 typedef struct tp_build_worker_opts {
     const char *worker_exe;           /* NULL = this process's own module path */
     int timeout_ms;                   /* <= 0 = default 5-min safety timeout */
+    size_t reply_cap;                 /* 0 = default 64 KiB; a lowered cap (< pipe buffer)
+                                       * lets a test drive the over-cap fail-closed branch */
     tp_pack_cancel_poll cancel_poll;  /* NULL = no cancellation */
     void *cancel_ctx;
     bool *out_cancelled;              /* set true iff cancellation was observed; may be NULL */
@@ -39,6 +42,8 @@ typedef struct tp_build_worker_opts {
  *   worker exit 0 + valid OK reply + published artifact  -> TP_STATUS_OK
  *   valid reply carrying a builder/sink failure          -> TP_STATUS_BUILDER_FAILED (carried msg)
  *   crash / signal / abnormal / non-zero / timeout       -> TP_STATUS_BUILDER_CRASHED
+ *   OK reply but no readable artifact, or a valid artifact the host could not
+ *     publish (dest locked / parent dir absent / cross-device)  -> TP_STATUS_BUILDER_CRASHED
  *   malformed / truncated / oversized reply, clean exit  -> TP_STATUS_BUILDER_FAILED (fail closed)
  *   cancellation observed                                -> TP_STATUS_OK, *opts->out_cancelled = true, nothing published */
 tp_status tp_build_worker_run(const tp_pack_settings *settings,
