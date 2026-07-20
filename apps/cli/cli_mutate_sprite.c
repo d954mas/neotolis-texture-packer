@@ -1,5 +1,6 @@
 #include "cli_mutate_internal.h"
 
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
