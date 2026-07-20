@@ -2953,6 +2953,11 @@ void selftest_pre_frame(void) {
         }
         s_about_open = false;
         s_export_open = false; /* close the Export dialog exercised during warmup before the pixel probe */
+        s_confirm_open = false; /* a logical phase (J8: request_new on a dirty project, per the PR#3
+                                 * recovery-degradation semantics) leaves the unsaved-changes confirm
+                                 * modal open; it dims the canvas behind it AND its blue Save button
+                                 * reads as static "cyan", masking the outline delta. Dismiss it before
+                                 * the visual probe (like about/export). */
         preview_stop();
         int found = -1;
         const int atlas_count = tp_session_snapshot_atlas_count(gui_project_snapshot());
