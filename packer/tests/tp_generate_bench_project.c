@@ -377,8 +377,18 @@ static tp_status create_one_atlas(tp_project *project, const tp_rng *rng,
     }
 
     for (int i = 0; i < source_count; ++i) {
+        const int before = atlas->source_count;
         status = tp_project_atlas_add_source_kind(atlas, paths[i],
                                                   TP_SOURCE_KIND_FILE);
+        if (status == TP_STATUS_OK && atlas->source_count == before) {
+            /* add_source_kind dedupes by normalized path. A silent no-op here would
+             * misassign this source's id to the PRIOR source and shift the whole RNG
+             * stream, regenerating a self-consistent WRONG file. The pinned manifest has
+             * distinct paths (proven), so this only fails closed on a future manifest edit. */
+            return tp_error_set(
+                error, TP_STATUS_INVALID_ARGUMENT,
+                "bench fixture: duplicate source path within one atlas: %s", paths[i]);
+        }
         tp_project_source *source =
             status == TP_STATUS_OK ? &atlas->sources[atlas->source_count - 1]
                                    : NULL;

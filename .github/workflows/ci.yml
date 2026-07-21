@@ -201,9 +201,10 @@ jobs:
         run: cmake --build --preset native-release --target tp_bench_foundation ntpacker-gui
 
       # Advisory latency numbers land in the log; each probe still hard-fails on its deterministic
-      # gate: --pack-hash-probe exits non-zero on a NON-DETERMINISTIC content hash (cold != warm),
-      # and --bench-perf exits non-zero on a non-blocking-invariant violation (a Pack request that
-      # blocks the caller, or a refresh that mutates project revision/dirty state).
+      # gate: --pack-hash-probe exits non-zero on a NON-DETERMINISTIC content hash (cold != warm) OR
+      # any unreadable atlas (uncovered gap), and --bench-perf exits non-zero on a non-blocking-
+      # invariant violation (a Pack request that packs synchronously / publishes a result on the
+      # caller thread, or a refresh that mutates project revision/dirty state).
       - name: U-01 perf probes (advisory numbers, deterministic hard-gates)
         if: runner.os == 'Linux'
         env:
@@ -213,10 +214,13 @@ jobs:
         run: |
           set -e
           FIXTURE=examples/projects/bench-owner-scale.ntpacker_project
-          BENCH=$(find build -type f -name tp_bench_foundation | head -1)
-          GUI=$(find build -type f -path '*apps/gui*' -name ntpacker-gui | head -1)
-          echo "BENCH=$BENCH"
-          echo "GUI=$GUI"
+          # Pinned native-release output paths (tests -> build/_cmake/<preset>/...,
+          # app -> build/apps/gui/<preset>/...), not a tree-wide `find | head -1`, so a
+          # different preset's binary (e.g. a self-test GUI) can never be picked by accident.
+          BENCH=build/_cmake/native-release/packer/tests/tp_bench_foundation
+          GUI=build/apps/gui/native-release/ntpacker-gui
+          test -x "$BENCH" || { echo "missing bench binary: $BENCH"; find build -name tp_bench_foundation; exit 1; }
+          test -x "$GUI" || { echo "missing gui binary: $GUI"; find build -path '*apps/gui*' -name ntpacker-gui; exit 1; }
           echo "== pack_input_hash cold/warm probe (advisory timings; hard gate = hash determinism) =="
           "$BENCH" --pack-hash-probe "$FIXTURE" 5
           echo "== GUI --bench-perf (advisory timings; hard gate = non-blocking invariants) =="

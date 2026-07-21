@@ -2550,6 +2550,16 @@ static int run_pack_hash_probe(const char *path, int iterations) {
     }
     (void)printf("pack_hash_probe unreadable_atlases=%d hash_stable=%d\n",
                  unreadable, stable ? 1 : 0);
+    if (unreadable > 0) {
+        /* Partial materialization: an atlas whose sources did not decode never enters the
+         * cold-vs-warm comparison, so a silent coverage loss (a future missing/corrupt asset
+         * or a partial git-lfs fetch) must fail closed, not pass green -- the all-unreadable
+         * early return above only catches the total case. */
+        (void)fprintf(stderr,
+                      "pack-hash-probe: %d of %d atlases were unreadable -- the determinism "
+                      "gate cannot cover them; run `git lfs pull` / check the sources.\n",
+                      unreadable, atlas_count);
+    }
 
     tp_pack_image_hash_cache_destroy(cache);
     tp_session_destroy(session);
@@ -2559,9 +2569,10 @@ static int run_pack_hash_probe(const char *path, int iterations) {
     free(expected_hash);
     free(atlas_ids);
 
-    /* Timing is advisory, but a non-deterministic content hash (or a warmed cache
-     * that disagrees with a cold decode) is a real defect -- fail closed. */
-    if (!stable || !cache) {
+    /* Timing is advisory, but a non-deterministic content hash (or a warmed cache that
+     * disagrees with a cold decode) is a real defect, and any unreadable atlas is an
+     * uncovered gap -- fail closed on all three. */
+    if (!stable || !cache || unreadable > 0) {
         return 1;
     }
     return 0;

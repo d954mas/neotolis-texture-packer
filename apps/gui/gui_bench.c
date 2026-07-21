@@ -121,7 +121,7 @@ static size_t s_bench_log_len;
 /* Emit one machine-readable line: to stdout (the canonical channel) and into the file buffer (LF). */
 static void bench_emit(const char *fmt, ...) GUI_PRINTF(1, 2);
 static void bench_emit(const char *fmt, ...) {
-    char line[256];
+    char line[512]; /* wide enough that a failure line carrying a 256-byte err never truncates */
     va_list ap;
     va_start(ap, fmt);
     (void)vsnprintf(line, sizeof line, fmt, ap);
@@ -295,19 +295,26 @@ static void bench_run_probes(void) {
     /* 5. a Pack REQUEST is non-blocking: it must hand off to the async worker, not produce the result
      *    synchronously on the calling thread. Assert the request returns AND a worker is in flight. */
     s_sel_atlas = 0;
+    const uint64_t pack_ver_before = gui_pack_result_version(0);
     char err[256] = {0};
     const double p0 = bench_now_ms();
     const bool started = gui_pack_async_start(0, err, sizeof err);
     const double p1 = bench_now_ms();
     const bool worker = gui_pack_worker_active() || gui_pack_async_busy();
-    const bool pack_ok = started && worker;
+    /* A genuinely async start hands off to the worker WITHOUT producing+publishing a result
+     * on this thread, so atlas 0's result-slot version is unchanged the instant start returns.
+     * A synchronous pack -- the UI-blocking regression this guards -- would have bumped it here.
+     * (worker_active alone can't tell "still running" from "finished but not yet taken".) */
+    const bool no_sync_publish = gui_pack_result_version(0) == pack_ver_before;
+    const bool pack_ok = started && worker && no_sync_publish;
     if (pack_ok) {
-        bench_emit("bench_perf invariant=pack_async ok=1 started=1 worker_active=1 request_ms=%.3f",
+        bench_emit("bench_perf invariant=pack_async ok=1 started=1 worker_active=1 "
+                   "no_sync_publish=1 request_ms=%.3f",
                    p1 - p0);
     } else {
-        bench_emit("bench_perf invariant=pack_async ok=0 started=%d worker_active=%d request_ms=%.3f "
-                   "err=%s",
-                   started ? 1 : 0, worker ? 1 : 0, p1 - p0, err);
+        bench_emit("bench_perf invariant=pack_async ok=0 started=%d worker_active=%d "
+                   "no_sync_publish=%d request_ms=%.3f err=%s",
+                   started ? 1 : 0, worker ? 1 : 0, no_sync_publish ? 1 : 0, p1 - p0, err);
     }
     if (!pack_ok) {
         s_bench_fail = true;
