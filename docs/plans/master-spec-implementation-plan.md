@@ -802,7 +802,10 @@ structured diagnostics в CLI/GUI.
 
 **Spec refs.** §11–11.5, §40.3, §42, §49 Linked sources, §50 B1.
 
-**Current code delta.** Manual scan/stat cache (`apps/gui/gui_scan.c:25-48,72-116`) и F5 fingerprint (`apps/gui/gui_actions.c:657-758`); watcher/generation/status отсутствуют.
+**Current code delta.** Manual scan/stat cache (`apps/gui/gui_scan.c:25-48,72-116`) и F5 fingerprint (`apps/gui/gui_actions.c:657-758`); watcher/generation/status отсутствуют. Folder enumeration
+сегодня живёт в ДВУХ местах с разным кэшированием: row list через `gui_scan` (32-dir GUI
+cache) и pack/export input-build через core `tp_scan_dir` (`packer/src/tp_input.c:228-232`,
+UNCACHED; на caller-треде до фикса U-01a — см. ниже).
 
 **Dependencies.** F1-03, B0-02, F2-02, decision 0005, and
 `docs/research/raster-normalization-goldens.md`.
@@ -822,6 +825,14 @@ structured diagnostics в CLI/GUI.
 9. Добавить typed `source.format.set`/`Change Format`: новый
    importer и options коммитятся только после успешной current-read
    validation; failure сохраняет old format/options.
+10. **Унифицировать folder enumeration за этим generation-keyed scan-кэшем runtime
+    source state** (concurrency review 2026-07-21). Сейчас walk дублируется: row list
+    (`gui_scan`, 32-dir) и pack/export input-build (core `tp_scan_dir`, uncached). Провести оба
+    через один кэшированный scan, ключ — source generation: Pack после row-list скана
+    переиспользует ту же enumeration вместо повторного обхода. Убирает дублирующий и
+    uncached re-walk; кэш инвалидируется по Refresh/watcher generation. Это ДОСТРАИВАЕТ
+    packet U-01a (который сначала лишь уводит walk с UI-треда на воркер): здесь walk ещё и
+    кэшируется и перестаёт дублироваться. Не тянуть раньше B1 — U-01a один уже снимает лаг.
 
 **Public/schema impact.** Schema v2 source variant `atlas`; runtime state не сериализуется.
 
@@ -1083,6 +1094,53 @@ latency/frame measurement, so every later U packet is measured, not vibed.
 **Completion evidence.** Fixture regenerates identically on Linux/Windows/macOS CI; budget numbers appear in CI output and gate regressions.
 
 **Non-goals / blockers.** Not a pack-throughput benchmark; probes are dev-only, never a user surface.
+
+### U-01a — Pack input build off the UI thread (concurrency)
+
+**Goal / user outcome.** Clicking Pack on a folder-source atlas never freezes the UI: the source
+enumeration (recursive folder walk) runs on the Pack worker, not the calling thread — symmetric
+with Export, which already builds its per-atlas input on the worker.
+
+**Spec refs.** §10 (async pack), §61.1 (owner scale, no UI stall). Surfaced by the U-01 concurrency
+review (2026-07-21).
+
+**Current code delta.** `tp_session_pack_job_start` builds the pack input — including the recursive
+`tp_scan_dir` folder walk for folder sources — on the CALLER thread (`packer/src/tp_job.c:312` →
+`packer/src/tp_input.c:191-267`) BEFORE `job_start_thread` (`tp_job.c:364`). Export builds its input
+on the worker (`tp_job.c:207-264` → `tp_export_run.c`), so Pack is the asymmetric one. File sources
+are cheap; a folder source with many files on a slow/network FS is a real UI stall. Pre-existing;
+not a U-01 regression.
+
+**Dependencies.** None (independent core change). Measured against the U-01 bench once folder-source
+scenarios are added there.
+
+**Ordered bounded tasks.**
+
+1. Transfer the immutable `tp_session_snapshot` ownership to the `tp_live_job` so it outlives job
+   start; build the pack input (`tp_pack_input_build_snapshot`) and the empty-input check INSIDE
+   `pack_worker`, not in `tp_session_pack_job_start`; destroy the snapshot in the worker after. [core]
+2. Keep the cheap, no-I/O caller-thread setup (snapshot create, settings build, preview-exporter
+   resolve, arena) synchronous; only the walk/desc-materialize moves to the worker. [core]
+3. Input-build errors (unresolvable/missing source, empty atlas "no usable images", scan failure)
+   become ASYNC pack failures (`GUI_PACK_DONE_PACK_FAIL`) — the exact path Export already uses.
+   Update the GUI/CLI failure surfacing and any test asserting a synchronous pack-start failure. [core][gui]
+4. Add folder-source scenarios to the U-01 bench fixture (a folder source with a realistic file
+   count) so the pack-start walk is measured; report before/after pack-start latency. [core]
+
+**Public/schema impact.** None. Internal job lifetime + error-timing change only.
+
+**Exact tests / fault injection.** Folder source pack: input built on worker (no caller-thread
+walk); missing/unresolvable source → async fail; empty atlas → async "no usable images"; scan
+failure mid-walk → async fail, no partial commit; cancel during the worker-side walk; existing pack
+byte-equivalence unchanged; gui-selftest pack path stays green.
+
+**Completion evidence.** Pack-start returns immediately for a large folder source (the walk is on the
+worker); the U-01 folder-source bench shows the pack-start UI-thread time drop to the cheap setup
+only; no pack output byte changes; Debug/Release + gui-selftest green.
+
+**Non-goals / blockers.** NOT the full scan-cache unification — that is **B1-01 task 10**
+(generation-keyed cached scan shared by the row list + pack input). This packet only moves the walk
+off the UI thread; caching/dedup of the walk stays in B1.
 
 ### U-02 — Paper cuts (UX-A)
 
