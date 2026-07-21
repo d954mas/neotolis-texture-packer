@@ -1150,6 +1150,13 @@ off the UI thread; caching/dedup of the walk stays in B1.
 
 **Dependencies.** U-01. [gui] (+ one [core] refresh path)
 
+**Status (2026-07-22, `feat/U-02-paper-cuts` @ `9592679`, PR #8).** Landed: T1–T3, T5–T7,
+plus a post-review paper-cuts hardening round (Undo/Redo focus re-sync + folder-primary by stable
+id, reveal/open-url shell-safety, Atlas-Pack busy affordance, new `tp_gui_shell_quote` test).
+**Deferred to their own follow-up packets — U-02 is NOT complete while these are open:** **T4**
+(session persistence), T8 (thumbnails), T9 (async refresh), T10 (alias indicator), T11 (attribute
+filter/sort), T12 (copy region coords).
+
 **Ordered bounded tasks.**
 
 1. Project-wide tree filter (Ctrl+F), matches shown under their atlases, <100 ms on fixture. [gui]
