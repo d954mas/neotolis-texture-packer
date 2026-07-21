@@ -6,8 +6,10 @@
 #include "tp_bench_project_load.h"
 
 #include "tp_core/tp_diff.h"
+#include "tp_core/tp_job.h"
 #include "tp_core/tp_journal.h"
 #include "tp_core/tp_operation.h"
+#include "tp_core/tp_pack_hash.h"
 #include "tp_core/tp_project.h"
 #include "tp_project_identity_internal.h"
 #include "tp_core/tp_scan.h"
@@ -2303,7 +2305,282 @@ static bool run_fixture_benchmarks(const fixture *f, const char *scratch,
            (!include_save || bench_save(f, scratch, warmups, iterations));
 }
 
+/* U-01 [core] perf probe. tp_session_pack_input_hash performs a FULL synchronous
+ * decode+hash of every source on the CALLING thread, so a naive cold whole-project
+ * probe stalls for the summed cost of all atlases -- U packets must never call it
+ * cold on the UI thread at owner scale. This mode quantifies that stall and how
+ * much a session-lifetime image-hash cache removes it. Timing is advisory; the
+ * content-addressed hash MUST be deterministic (a hard gate). */
+
+static void pack_hash_summary(tp_bench_samples *samples, double *p50,
+                              double *p95, double *p_max) {
+    /* percentile() sorts ascending in place, so the last element is the max. */
+    *p50 = tp_bench_samples_percentile(samples, 50U);
+    *p95 = tp_bench_samples_percentile(samples, 95U);
+    *p_max = samples->count > 0U ? samples->values[samples->count - 1U] : 0.0;
+}
+
+/* One timed sweep of the probe across every atlas with `cache` (NULL = cold
+ * decode every call). Returns the summed whole-project stall in ms. When
+ * `per_atlas` is non-NULL each atlas latency is appended to per_atlas[a] (one
+ * sample per sweep). Writes the count of atlases returning non-OK or a nil hash
+ * to *unreadable, and clears *stable if a readable atlas ever yields a hash
+ * different from its first observation (a NULL vs warmed cache must agree). */
+static double pack_hash_probe_sweep(tp_session *session,
+                                    const tp_id128 *atlas_ids, int atlas_count,
+                                    tp_pack_image_hash_cache *cache,
+                                    tp_bench_samples *per_atlas,
+                                    tp_id128 *expected_hash, bool *have_expected,
+                                    int *unreadable, bool *stable) {
+    double whole = 0.0;
+    int unread = 0;
+    for (int a = 0; a < atlas_count; ++a) {
+        tp_id128 hash = tp_id128_nil();
+        tp_error err = {{0}};
+        const double start = tp_bench_now_ms();
+        const tp_status status = tp_session_pack_input_hash(
+            session, atlas_ids[a], cache, &hash, &err);
+        const double elapsed = tp_bench_now_ms() - start;
+        whole += elapsed;
+        if (per_atlas) {
+            (void)tp_bench_samples_accept(&per_atlas[a], elapsed);
+        }
+        if (status != TP_STATUS_OK || tp_id128_is_nil(hash)) {
+            unread++;
+        } else if (!have_expected[a]) {
+            expected_hash[a] = hash;
+            have_expected[a] = true;
+        } else if (!tp_id128_eq(hash, expected_hash[a])) {
+            *stable = false;
+        }
+    }
+    if (unreadable) {
+        *unreadable = unread;
+    }
+    return whole;
+}
+
+static int run_pack_hash_probe(const char *path, int iterations) {
+    tp_error err = {{0}};
+    tp_project *project = NULL;
+    if (tp_project_load(path, &project, &err) != TP_STATUS_OK || !project ||
+        project->atlas_count < 1) {
+        (void)fprintf(stderr,
+                      "pack-hash-probe project load failed: path=%s error=%s\n",
+                      path, err.msg);
+        tp_project_destroy(project);
+        return 1;
+    }
+    const int atlas_count = project->atlas_count;
+    /* The per-atlas summary distribution is folded through tp_bench_samples,
+     * whose exact-percentile buffer holds at most TP_BENCH_MAX_SAMPLES entries. */
+    if (atlas_count > (int)TP_BENCH_MAX_SAMPLES) {
+        (void)fprintf(
+            stderr,
+            "pack-hash-probe supports up to %u atlases (project has %d)\n",
+            (unsigned)TP_BENCH_MAX_SAMPLES, atlas_count);
+        tp_project_destroy(project);
+        return 1;
+    }
+
+    tp_id128 *atlas_ids =
+        (tp_id128 *)calloc((size_t)atlas_count, sizeof *atlas_ids);
+    tp_id128 *expected_hash =
+        (tp_id128 *)calloc((size_t)atlas_count, sizeof *expected_hash);
+    bool *have_expected = (bool *)calloc((size_t)atlas_count, sizeof *have_expected);
+    tp_bench_samples *cold_atlas =
+        (tp_bench_samples *)calloc((size_t)atlas_count, sizeof *cold_atlas);
+    tp_bench_samples *warm_atlas =
+        (tp_bench_samples *)calloc((size_t)atlas_count, sizeof *warm_atlas);
+    if (!atlas_ids || !expected_hash || !have_expected || !cold_atlas ||
+        !warm_atlas) {
+        free(warm_atlas);
+        free(cold_atlas);
+        free(have_expected);
+        free(expected_hash);
+        free(atlas_ids);
+        tp_project_destroy(project);
+        return 1;
+    }
+
+    /* Snapshot atlas ids + total source count BEFORE adopt: adopt_owned consumes
+     * `project` on every path, so the pointer must not be read afterward. */
+    long total_sources = 0;
+    for (int a = 0; a < atlas_count; ++a) {
+        atlas_ids[a] = project->atlases[a].id;
+        total_sources += project->atlases[a].source_count;
+        tp_bench_samples_init(&cold_atlas[a]);
+        tp_bench_samples_init(&warm_atlas[a]);
+    }
+
+    uint64_t rng_counter = UINT64_C(0x9ACE01);
+    tp_rng rng = {deterministic_rng, &rng_counter};
+    tp_session *session = NULL;
+    if (tp_session_adopt_owned(project, &rng, &session, &err) != TP_STATUS_OK ||
+        !session) {
+        /* adopt_owned already consumed `project` -- do not destroy it here. */
+        (void)fprintf(stderr, "pack-hash-probe session adopt failed: error=%s\n",
+                      err.msg);
+        free(warm_atlas);
+        free(cold_atlas);
+        free(have_expected);
+        free(expected_hash);
+        free(atlas_ids);
+        return 1;
+    }
+
+    (void)printf("tp_bench_foundation clock=monotonic source=nt_time_now "
+                 "mode=pack_hash_probe thresholds=advisory project=%s\n",
+                 path);
+    (void)printf("pack_hash_probe fixture atlases=%d sources=%ld iterations=%d\n",
+                 atlas_count, total_sources, iterations);
+
+    bool stable = true;
+    int unreadable = atlas_count;
+
+    /* COLD: cache = NULL decodes every source every call. Iteration 0 is a
+     * genuinely cold decode (only the project JSON was read so far), so the
+     * whole-project max captures the true first-call UI-thread stall. */
+    tp_bench_samples cold_whole;
+    tp_bench_samples_init(&cold_whole);
+    for (int i = 0; i < iterations; ++i) {
+        int unread = 0;
+        const double whole =
+            pack_hash_probe_sweep(session, atlas_ids, atlas_count, NULL,
+                                  cold_atlas, expected_hash, have_expected,
+                                  &unread, &stable);
+        (void)tp_bench_samples_accept(&cold_whole, whole);
+        if (i == 0) {
+            unreadable = unread;
+        }
+    }
+
+    if (unreadable >= atlas_count) {
+        (void)printf("pack_hash_probe unreadable_atlases=%d\n", unreadable);
+        (void)fprintf(
+            stderr,
+            "pack-hash-probe: every atlas probe returned nil -- the source PNGs "
+            "are likely unmaterialized git-lfs pointers. Run `git lfs pull` to "
+            "fetch real bytes, then re-run.\n");
+        tp_session_destroy(session);
+        free(warm_atlas);
+        free(cold_atlas);
+        free(have_expected);
+        free(expected_hash);
+        free(atlas_ids);
+        return 1;
+    }
+
+    /* WARM: one shared session-lifetime cache. Prime with one untimed full pass
+     * (decodes everything), then time repeats that reuse the primed cache. */
+    tp_pack_image_hash_cache *cache = tp_pack_image_hash_cache_create();
+    tp_bench_samples warm_whole;
+    tp_bench_samples_init(&warm_whole);
+    if (cache) {
+        int prime_unread = 0;
+        (void)pack_hash_probe_sweep(session, atlas_ids, atlas_count, cache, NULL,
+                                    expected_hash, have_expected, &prime_unread,
+                                    &stable);
+        for (int i = 0; i < iterations; ++i) {
+            int unread = 0;
+            const double whole = pack_hash_probe_sweep(
+                session, atlas_ids, atlas_count, cache, warm_atlas,
+                expected_hash, have_expected, &unread, &stable);
+            (void)tp_bench_samples_accept(&warm_whole, whole);
+        }
+    }
+    tp_pack_image_hash_cache_stats stats;
+    memset(&stats, 0, sizeof stats);
+    if (cache) {
+        tp_pack_image_hash_cache_stats_get(cache, &stats);
+    }
+
+    /* Reduce each atlas to its median across iterations, then report the p50/p95/
+     * max of that per-atlas distribution (spread by atlas size: 12..280 sources).
+     * A pooled atlas*iteration buffer would exceed the 128-sample percentile cap. */
+    tp_bench_samples cold_atlas_summary;
+    tp_bench_samples warm_atlas_summary;
+    tp_bench_samples_init(&cold_atlas_summary);
+    tp_bench_samples_init(&warm_atlas_summary);
+    for (int a = 0; a < atlas_count; ++a) {
+        (void)tp_bench_samples_accept(
+            &cold_atlas_summary, tp_bench_samples_percentile(&cold_atlas[a], 50U));
+        if (cache) {
+            (void)tp_bench_samples_accept(
+                &warm_atlas_summary,
+                tp_bench_samples_percentile(&warm_atlas[a], 50U));
+        }
+    }
+
+    double cw_p50 = 0.0;
+    double cw_p95 = 0.0;
+    double cw_max = 0.0;
+    double ca_p50 = 0.0;
+    double ca_p95 = 0.0;
+    double ca_max = 0.0;
+    pack_hash_summary(&cold_whole, &cw_p50, &cw_p95, &cw_max);
+    pack_hash_summary(&cold_atlas_summary, &ca_p50, &ca_p95, &ca_max);
+    (void)printf("pack_hash_probe cold  whole_project_ms p50=%.6f p95=%.6f "
+                 "max=%.6f ; per_atlas_ms p50=%.6f p95=%.6f max=%.6f\n",
+                 cw_p50, cw_p95, cw_max, ca_p50, ca_p95, ca_max);
+
+    if (cache) {
+        double ww_p50 = 0.0;
+        double ww_p95 = 0.0;
+        double ww_max = 0.0;
+        double wa_p50 = 0.0;
+        double wa_p95 = 0.0;
+        double wa_max = 0.0;
+        pack_hash_summary(&warm_whole, &ww_p50, &ww_p95, &ww_max);
+        pack_hash_summary(&warm_atlas_summary, &wa_p50, &wa_p95, &wa_max);
+        (void)printf(
+            "pack_hash_probe warm  whole_project_ms p50=%.6f p95=%.6f max=%.6f "
+            "; per_atlas_ms p50=%.6f p95=%.6f max=%.6f ; cache decodes=%" PRIu64
+            " hits=%" PRIu64 " misses=%" PRIu64 " entries=%d\n",
+            ww_p50, ww_p95, ww_max, wa_p50, wa_p95, wa_max, stats.decodes,
+            stats.hits, stats.misses, stats.entries);
+        const double speedup = ww_p50 > 0.0 ? cw_p50 / ww_p50 : 0.0;
+        (void)printf("pack_hash_probe speedup whole_project_p50=%.2fx "
+                     "cold_p50_ms=%.6f warm_p50_ms=%.6f\n",
+                     speedup, cw_p50, ww_p50);
+    } else {
+        (void)fprintf(stderr,
+                      "pack-hash-probe: image-hash cache allocation failed; "
+                      "warm pass skipped\n");
+    }
+    (void)printf("pack_hash_probe unreadable_atlases=%d hash_stable=%d\n",
+                 unreadable, stable ? 1 : 0);
+
+    tp_pack_image_hash_cache_destroy(cache);
+    tp_session_destroy(session);
+    free(warm_atlas);
+    free(cold_atlas);
+    free(have_expected);
+    free(expected_hash);
+    free(atlas_ids);
+
+    /* Timing is advisory, but a non-deterministic content hash (or a warmed cache
+     * that disagrees with a cold decode) is a real defect -- fail closed. */
+    if (!stable || !cache) {
+        return 1;
+    }
+    return 0;
+}
+
 int main(int argc, char **argv) {
+    if (argc > 1 && strcmp(argv[1], "--pack-hash-probe") == 0) {
+        int iterations = 20;
+        if (argc < 3 || argc > 4 ||
+            (argc == 4 && !parse_positive(argv[3], (int)TP_BENCH_MAX_SAMPLES,
+                                          &iterations))) {
+            (void)fprintf(
+                stderr,
+                "usage: tp_bench_foundation --pack-hash-probe <project> [iterations 1..%u]\n",
+                (unsigned)TP_BENCH_MAX_SAMPLES);
+            return 2;
+        }
+        return run_pack_hash_probe(argv[2], iterations);
+    }
     if (argc > 1 && strcmp(argv[1], "--batch-scaling") == 0) {
         int scaling_iterations = 3;
         if (argc < 3 || argc > 4 ||

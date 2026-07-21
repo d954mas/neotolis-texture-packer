@@ -678,10 +678,14 @@ nt_set_warning_flags(tp_demo_export)   # AGENTS.md invariant: engine warning fla
 #   tp_bench_foundation --project <project> [scratch_dir] [iterations] [recovery_ops]
 #   tp_bench_foundation --project-load-scaling [iterations]
 #   tp_bench_foundation --batch-scaling <project> [iterations]
+#   tp_bench_foundation --pack-hash-probe <project> [iterations]
 add_executable(tp_bench_foundation
     tp_bench_foundation.c
     tp_bench_project_load.c)
-target_link_libraries(tp_bench_foundation PRIVATE tp_core nt_time cjson)
+# tp_build (not just tp_core): the --pack-hash-probe mode calls the session probe
+# tp_session_pack_input_hash, which lives in tp_job.c (tp_build). tp_build PUBLIC-
+# links tp_core, so the other modes keep their symbols.
+target_link_libraries(tp_bench_foundation PRIVATE tp_build nt_time cjson)
 target_include_directories(tp_bench_foundation PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_compile_options(tp_bench_foundation PRIVATE -U_DLL)
 target_compile_definitions(tp_bench_foundation PRIVATE _CRT_SECURE_NO_WARNINGS)
