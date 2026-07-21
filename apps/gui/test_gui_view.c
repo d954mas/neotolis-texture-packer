@@ -118,6 +118,16 @@ static void add_sources_and_build(tp_id128 *folder_id, tp_id128 *file_id) {
     }
 }
 
+/* Row index (in s_rows) of the leaf whose export name matches, or -1. */
+static int find_row_by_name(const char *name) {
+    for (int i = 0; i < s_row_count; ++i) {
+        if (s_rows[i].sprite_name && strcmp(s_rows[i].sprite_name, name) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
 /* View position of the (only) folder-source row, or -1. build_view emits a
  * source then its children contiguously, so its children are at pos+1.. */
 static int view_folder_pos(void) {
@@ -282,6 +292,50 @@ void test_view_collapse_hides_children_and_filter_overrides(void) {
     TEST_ASSERT_TRUE(gui_rows_is_collapsed(folder_id)); /* state unchanged */
 }
 
+/* 7. gui_selection_revalidate (the mechanism behind U-02 T5 undo-keeps-selection): after the model
+ *    changes, the primary selection is re-resolved by canonical ref (kept if the sprite survives,
+ *    cleared if gone) and multi-select refs pointing at removed sprites are pruned. Here the "model
+ *    change" is deleting a child file + rescanning, standing in for an undo that drops a sprite. */
+void test_selection_revalidate_reresolves_primary_and_prunes_multi(void) {
+    add_sources_and_build(NULL, NULL);
+    build_view();
+
+    const int ai = find_row_by_name("alpha");
+    const int bi = find_row_by_name("beta");
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, ai);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, bi);
+
+    /* primary = alpha; multi-select = {alpha, beta}. */
+    s_sel_src = s_rows[ai].src;
+    s_sel_child = s_rows[ai].child;
+    multi_sel_clear();
+    multi_sel_add_ref(s_rows[ai].source_id, s_rows[ai].source_key);
+    multi_sel_add_ref(s_rows[bi].source_id, s_rows[bi].source_key);
+    TEST_ASSERT_EQUAL_INT(2, s_multi_sel_count);
+
+    gui_selection_capture_reselect(); /* capture alpha's ref BEFORE the model shifts */
+    TEST_ASSERT_TRUE(s_reselect_pending);
+
+    /* beta vanishes from disk; alpha survives. */
+    TEST_ASSERT_EQUAL_INT(0, remove(s_beta));
+    gui_project_invalidate_sources();
+    build_rows();
+    build_view();
+    TEST_ASSERT_EQUAL_INT(-1, find_row_by_name("beta"));
+    const int ai2 = find_row_by_name("alpha");
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, ai2);
+
+    gui_selection_revalidate();
+    TEST_ASSERT_FALSE(s_reselect_pending);
+    /* primary re-resolved to alpha's (possibly shifted) row indices. */
+    TEST_ASSERT_EQUAL_INT(s_rows[ai2].src, s_sel_src);
+    TEST_ASSERT_EQUAL_INT(s_rows[ai2].child, s_sel_child);
+    /* beta pruned, alpha kept. */
+    TEST_ASSERT_EQUAL_INT(1, s_multi_sel_count);
+    TEST_ASSERT_TRUE(
+        multi_sel_contains_ref(s_rows[ai2].source_id, s_rows[ai2].source_key));
+}
+
 int main(int argc, char **argv) {
     if (tp_build_is_worker_invocation(argc, argv)) {
         return tp_build_worker_main();
@@ -293,5 +347,6 @@ int main(int argc, char **argv) {
     RUN_TEST(test_view_sort_name_orders_children_asc_and_desc);
     RUN_TEST(test_view_warn_first_pins_missing_regardless_of_direction);
     RUN_TEST(test_view_collapse_hides_children_and_filter_overrides);
+    RUN_TEST(test_selection_revalidate_reresolves_primary_and_prunes_multi);
     return UNITY_END();
 }
