@@ -9,6 +9,8 @@
 #include "ui/nt_ui_scroll.h"
 #include "ui/nt_ui_tooltip.h"
 
+#include "clipboard/nt_clipboard.h" /* Copy name (U-02 T7) */
+
 #include "tp_core/tp_export.h" /* exporter registry -> target dropdown (export modal) */
 #include "tp_core/tp_journal.h" /* recovery status labels */
 
@@ -41,7 +43,8 @@ enum {
     MK_PACK, MK_ADD_ATLAS,
     MK_ZIN, MK_ZOUT, MK_FIT, MK_ABOUT, MK_S100, MK_S125, MK_S150, MK_S200,
     MK_OV_OUTLINE, MK_OV_FRAME, MK_OV_TRIM, MK_OV_PIVOT, MK_OV_SLICE9, MK_CTX_FIT, MK_CTX_100,
-    MK_CTX_RENAME, MK_CTX_REMOVE, MK_CTX_TOGGLE, MK_CTX_CREATE_ANIM, MK_CTX_PREVIEW
+    MK_CTX_RENAME, MK_CTX_REMOVE, MK_CTX_TOGGLE, MK_CTX_CREATE_ANIM, MK_CTX_PREVIEW,
+    MK_CTX_COPY_NAME, MK_CTX_REVEAL
 };
 
 /* Right-click context menu: one cursor-anchored menu whose items depend on the row a right-click
@@ -70,6 +73,41 @@ static bool gui_open_url(const char *url) {
 #else
     char cmd[1200];
     (void)snprintf(cmd, sizeof cmd, "xdg-open '%s' >/dev/null 2>&1 &", url);
+    return system(cmd) == 0;
+#endif
+}
+
+/* Reveal `path` in the OS file manager, selecting the file (U-02 T7 "Show in Explorer"). Best-effort;
+ * returns whether the reveal was dispatched. Windows selects the item; POSIX opens the containing dir. */
+static bool gui_reveal_in_explorer(const char *path) {
+    if (!path || path[0] == '\0') {
+        return false;
+    }
+#ifdef _WIN32
+    char win[1024];
+    (void)snprintf(win, sizeof win, "%s", path);
+    for (char *p = win; *p; ++p) {
+        if (*p == '/') {
+            *p = '\\'; /* explorer /select wants backslashes */
+        }
+    }
+    char arg[1100];
+    (void)snprintf(arg, sizeof arg, "/select,\"%s\"", win);
+    HINSTANCE rc = ShellExecuteA(NULL, NULL, "explorer.exe", arg, NULL, SW_SHOWNORMAL);
+    return (INT_PTR)rc > 32;
+#elif defined(__APPLE__)
+    char cmd[1200];
+    (void)snprintf(cmd, sizeof cmd, "open -R '%s' >/dev/null 2>&1 &", path);
+    return system(cmd) == 0;
+#else
+    char dir[1024];
+    (void)snprintf(dir, sizeof dir, "%s", path);
+    char *slash = strrchr(dir, '/');
+    if (slash && slash != dir) {
+        *slash = '\0';
+    }
+    char cmd[1200];
+    (void)snprintf(cmd, sizeof cmd, "xdg-open '%s' >/dev/null 2>&1 &", dir[0] ? dir : "/");
     return system(cmd) == 0;
 #endif
 }
@@ -281,6 +319,23 @@ void declare_context_menu(nt_ui_context_t *ctx) {
                     s_ctx_sprite_atlas_id, s_ctx_sprite_source_id,
                     s_ctx_sprite_source_key, s_ctx_sprite_revision};
                 start_sprite_edit_ref(&sprite, s_ctx_sprite_display_name);
+            }
+        }
+        if (s_ctx_sprite_display_name[0] != '\0') {
+            if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_COPY_NAME, "Copy name")) {
+                if (nt_clipboard_available()) {
+                    nt_clipboard_set_text(s_ctx_sprite_display_name);
+                    set_statusf("Copied \"%s\"", s_ctx_sprite_display_name);
+                } else {
+                    set_status_ex(STATUS_WARNING, "Clipboard unavailable.");
+                }
+            }
+        }
+        if (s_sel_abs[0] != '\0') {
+            if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_REVEAL, "Show in Explorer")) {
+                if (!gui_reveal_in_explorer(s_sel_abs)) {
+                    set_status_ex(STATUS_WARNING, "Could not open the file location.");
+                }
             }
         }
         if (s_multi_sel_count > 0) {

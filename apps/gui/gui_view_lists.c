@@ -313,9 +313,62 @@ void filter_type_pump(void) {
     }
 }
 
+/* Compact clickable chip for the sort controls (U-02 T7). Returns true on click. */
+static bool ui_sort_chip(nt_ui_context_t *ctx, uint32_t id, const char *text, bool active) {
+    const nt_ui_events_t ev = nt_ui_events(ctx, id, NULL);
+    const Clay_Color bg = active ? C_SEL : (ev.hovered ? C_HOVER : C_TRANSPARENT);
+    CLAY({.id = {.id = id},
+          .layout = {.sizing = {CLAY_SIZING_FIT(0), CLAY_SIZING_FIXED(S(20.0F))},
+                     .padding = {Su(6), Su(6), 0, 0},
+                     .childAlignment = {CLAY_ALIGN_X_CENTER, CLAY_ALIGN_Y_CENTER}},
+          .backgroundColor = bg,
+          .cornerRadius = CLAY_CORNER_RADIUS(S(4))}) {
+        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), text, active ? &g_row_strong : &g_caption);
+    }
+    return ev.clicked;
+}
+
+/* Sort chips: one cycles the key+direction (Original -> Name asc/desc -> Type asc/desc -> Original),
+ * one toggles "warnings on top". View-only state (gui_rows_set_sort); never touches the model. */
+static void declare_sort_chips(nt_ui_context_t *ctx) {
+    row_sort_key key = ROW_SORT_ORIGINAL;
+    bool desc = false;
+    bool warn = false;
+    gui_rows_get_sort(&key, &desc, &warn);
+    const char *kn = (key == ROW_SORT_NAME) ? "Name" : (key == ROW_SORT_TYPE) ? "Type" : "Orig";
+    char sc[24];
+    (void)snprintf(sc, sizeof sc, "%s%s", kn,
+                   key == ROW_SORT_ORIGINAL ? "" : (desc ? " \xE2\x96\xBE" : " \xE2\x96\xB4"));
+    const uint32_t key_id = nt_ui_id("ntpacker/sort_key");
+    const uint32_t warn_id = nt_ui_id("ntpacker/sort_warn");
+    if (ui_sort_chip(ctx, key_id, sc, key != ROW_SORT_ORIGINAL)) {
+        if (key == ROW_SORT_ORIGINAL) {
+            key = ROW_SORT_NAME;
+            desc = false;
+        } else if (key == ROW_SORT_NAME && !desc) {
+            desc = true;
+        } else if (key == ROW_SORT_NAME) {
+            key = ROW_SORT_TYPE;
+            desc = false;
+        } else if (key == ROW_SORT_TYPE && !desc) {
+            desc = true;
+        } else {
+            key = ROW_SORT_ORIGINAL;
+            desc = false;
+        }
+        gui_rows_set_sort(key, desc, warn);
+    }
+    if (ui_sort_chip(ctx, warn_id, "\xE2\x9A\xA0", warn)) {
+        gui_rows_set_sort(key, desc, !warn);
+    }
+    record_row_tip(key_id, "Sort sprites (cycle: original / name / type, asc/desc)");
+    record_row_tip(warn_id, "Toggle: missing / warning rows on top");
+}
+
 static void declare_sprite_list(nt_ui_context_t *ctx) {
     CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(28))}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
         section_rule_label(ctx, "SPRITES");
+        declare_sort_chips(ctx); /* U-02 T7: sort key/dir + warn-on-top */
         CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}}) {}
         /* Smart folder is the primary input (ux.md principle 3: folders, not files); it keeps its label so
          * the live-linked behaviour is explicit (owner 2026-07-11). Per-file adds are "the exception", so the
