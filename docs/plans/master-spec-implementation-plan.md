@@ -149,10 +149,16 @@ per-sprite change-detection fingerprint), the worker-thread hash on
 active result, inactive `.ntpack` bytes re-inflated under exact byte-budget LRU;
 `b216526`, 116/116 debug, 115/115 release). Deferred to phase U (D-N4, owned by
 `U-04`): GUI stale/preview presentation (F3-03 T3 GUI half), the `preview_stale`
-boolean removal (T7), session-lifetime image-hash cache wiring + fusing the hash
-pixel term with the worker decode, feeding the result cache from
+boolean removal (T7), session-lifetime `tp_pack_image_hash_cache` wiring into
+interactive recompute paths with a mandatory size cap/eviction (hash-pixel-term
+fusion landed in `c56886a`; today the cache is unbounded by design and
+unreachable in production), feeding the result cache from
 `tp_session_job_take_result`, preview-exporter-aware hash recompute, and the
-History panel (U-14).
+History panel (U-14). Review finding as a U constraint:
+`tp_session_pack_input_hash` performs a full synchronous decode+hash of all
+sources on the calling thread, so U packets must never call it cold on the UI
+thread at owner scale (warm the fingerprint cache first or route it through a
+worker) — U-01's bench must measure this probe.
 
 ## 1. Назначение и правила исполнения
 
@@ -1381,7 +1387,7 @@ latency/frame measurement, so every later U packet is measured, not vibed.
 
 **Completion evidence.** Every operation reachable via the palette; Edit menu + History show named labels; the author field is populated on every entry.
 
-**Non-goals / blockers.** Authorship badges as a live surface are UX-E (Epic A); no macro/scripting.
+**Non-goals / blockers.** Authorship badges as a live surface are UX-E (Epic A); no macro/scripting. If U-01 measurements show History panel render cost, replace per-row `tp_session_history_at` enumeration with a batch/single-pass snapshot (the per-row walk is O(edits × markers), bounded ~3-10 ms at the 256/64 ceiling — fine today, avoidable later).
 
 ### Non-goals (section U)
 
