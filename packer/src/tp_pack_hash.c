@@ -234,14 +234,22 @@ static tp_status image_hash_for_sprite(tp_pack_image_hash_cache *cache,
     return TP_STATUS_OK;
 }
 
-tp_status tp_pack_input_hash_compute(const tp_pack_settings *settings,
-                                     const char *preview_exporter_id,
-                                     tp_pack_image_hash_cache *cache,
-                                     tp_id128 *out_hash, tp_error *err) {
-    if (!settings || !out_hash) {
-        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
-                            "tp_pack_hash: settings and out_hash are required");
-    }
+/* Per-sprite pixel-term strategy: yields sprite `index`'s semantic image hash.
+ * One serializer, two sources -- decode-on-demand (image_hash_decode_cb) or a
+ * caller's pre-computed array (image_hash_supplied_cb) -- so both entry points
+ * fold a byte-identical stream. */
+typedef tp_status (*sprite_image_hash_fn)(void *ctx, int index,
+                                          const tp_pack_sprite_desc *sprite,
+                                          tp_id128 *out, tp_error *err);
+
+/* Folds the canonical pack-input stream. Serialization is fixed and shared; only
+ * the per-sprite pixel term varies by `image_hash`. On the first image-hash
+ * failure returns that status with *out_hash left nil. */
+static tp_status hash_input_stream(const tp_pack_settings *settings,
+                                   const char *preview_exporter_id,
+                                   sprite_image_hash_fn image_hash,
+                                   void *image_ctx, tp_id128 *out_hash,
+                                   tp_error *err) {
     *out_hash = tp_id128_nil();
 
     tp_hasher h = tp_hasher_init();
@@ -293,14 +301,64 @@ tp_status tp_pack_input_hash_compute(const tp_pack_settings *settings,
             hash_u16(&h, sp->slice9_lrtb[k]);
         }
         /* semantic_image_hash: the pixel term. */
-        tp_id128 image_hash;
-        tp_status st = image_hash_for_sprite(cache, sp, &image_hash, err);
+        tp_id128 image_hash_val;
+        tp_status st = image_hash(image_ctx, i, sp, &image_hash_val, err);
         if (st != TP_STATUS_OK) {
             return st; /* *out_hash stays nil */
         }
-        tp_hasher_update(&h, image_hash.bytes, sizeof image_hash.bytes);
+        tp_hasher_update(&h, image_hash_val.bytes, sizeof image_hash_val.bytes);
     }
 
     *out_hash = tp_hasher_final(h);
     return TP_STATUS_OK;
+}
+
+static tp_status image_hash_decode_cb(void *ctx, int index,
+                                      const tp_pack_sprite_desc *sprite,
+                                      tp_id128 *out, tp_error *err) {
+    (void)index;
+    return image_hash_for_sprite((tp_pack_image_hash_cache *)ctx, sprite, out,
+                                 err);
+}
+
+static tp_status image_hash_supplied_cb(void *ctx, int index,
+                                        const tp_pack_sprite_desc *sprite,
+                                        tp_id128 *out, tp_error *err) {
+    (void)sprite;
+    (void)err;
+    *out = ((const tp_id128 *)ctx)[index];
+    return TP_STATUS_OK;
+}
+
+tp_status tp_pack_input_hash_compute(const tp_pack_settings *settings,
+                                     const char *preview_exporter_id,
+                                     tp_pack_image_hash_cache *cache,
+                                     tp_id128 *out_hash, tp_error *err) {
+    if (!settings || !out_hash) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "tp_pack_hash: settings and out_hash are required");
+    }
+    return hash_input_stream(settings, preview_exporter_id, image_hash_decode_cb,
+                             cache, out_hash, err);
+}
+
+tp_status tp_pack_input_hash_from_images(const tp_pack_settings *settings,
+                                         const char *preview_exporter_id,
+                                         const tp_id128 *image_hashes,
+                                         int image_hash_count,
+                                         tp_id128 *out_hash, tp_error *err) {
+    if (!settings || !out_hash) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "tp_pack_hash: settings and out_hash are required");
+    }
+    *out_hash = tp_id128_nil();
+    if (!image_hashes || image_hash_count != settings->sprite_count) {
+        return tp_error_set(
+            err, TP_STATUS_INVALID_ARGUMENT,
+            "tp_pack_hash: image_hashes must supply one hash per sprite");
+    }
+    /* Borrowed array threaded through the shared callback signature; the supplied
+     * callback only reads it. */
+    return hash_input_stream(settings, preview_exporter_id, image_hash_supplied_cb,
+                             (void *)image_hashes, out_hash, err);
 }

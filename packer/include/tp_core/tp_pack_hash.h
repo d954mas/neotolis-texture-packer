@@ -99,6 +99,21 @@ tp_status tp_pack_input_hash_compute(const struct tp_pack_settings *settings,
                                      tp_pack_image_hash_cache *cache,
                                      tp_id128 *out_hash, tp_error *err);
 
+/* Folds the canonical pack_input_hash from settings + preview target + an array of
+ * PRE-COMPUTED per-sprite semantic image hashes (one per sprite, in
+ * settings->sprites order, e.g. tp_pack_semantic_image_hash over each decoded
+ * source). This is the seam for a caller that already decoded the pixels once (a
+ * Pack worker collecting hashes from the pack's own decode pass) and must not
+ * decode again: the folded stream is byte-identical to tp_pack_input_hash_compute
+ * for the same pixels. `image_hash_count` must equal settings->sprite_count. No
+ * filesystem access. NULL settings/out_hash, a NULL array, or a count mismatch ->
+ * TP_STATUS_INVALID_ARGUMENT with *out_hash left nil. */
+tp_status tp_pack_input_hash_from_images(const struct tp_pack_settings *settings,
+                                         const char *preview_exporter_id,
+                                         const tp_id128 *image_hashes,
+                                         int image_hash_count,
+                                         tp_id128 *out_hash, tp_error *err);
+
 #ifdef __cplusplus
 }
 #endif

@@ -17,6 +17,7 @@
 #include "tp_core/tp_input.h"
 #include "tp_core/tp_pack_hash.h"
 #include "tp_job_owner_internal.h"
+#include "tp_pack_priv.h"
 
 typedef struct tp_job_export_atlas {
     int index;
@@ -134,28 +135,58 @@ static bool pack_job_cancel_requested(void *context) {
     return atomic_load_explicit(&job->cancelled, memory_order_relaxed);
 }
 
+typedef struct pack_hash_collect {
+    tp_id128 *hashes; /* one slot per sprite, in settings->sprites order */
+    int count;
+} pack_hash_collect;
+
+/* Per-image observer for the pack's single decode pass: stashes each sprite's
+ * semantic image hash so pack_worker folds pack_input_hash from the SAME pixels
+ * the pack consumed -- no second decode. */
+static void pack_worker_collect_image_hash(void *ctx, int sprite_index,
+                                           int width, int height,
+                                           const uint8_t *rgba) {
+    pack_hash_collect *collect = ctx;
+    if (sprite_index < 0 || sprite_index >= collect->count) {
+        return;
+    }
+    collect->hashes[sprite_index] =
+        tp_pack_semantic_image_hash(width, height, rgba);
+}
+
 static int pack_worker(void *context) {
     tp_live_job *job = context;
     tp_error error = {{0}};
     tp_result *result = NULL;
     const double start = job_now_ms();
     /* Canonical pack_input_hash of this job's immutable start inputs (§10.2,
-     * decision 0004). Computed on the worker thread -- it decodes the source
-     * pixels for the semantic image term and must never block the calling
-     * (GUI/session) thread with a full decode. A failed hash (e.g. an unreadable
-     * source) is non-fatal here: it leaves a nil hash and the pack below surfaces
-     * the real failure. */
-    tp_error hash_error = {{0}};
-    if (tp_pack_input_hash_compute(&job->settings,
-                                   job->preview_exporter_id[0]
-                                       ? job->preview_exporter_id
-                                       : NULL,
-                                   NULL, &job->pack_input_hash,
-                                   &hash_error) != TP_STATUS_OK) {
-        job->pack_input_hash = tp_id128_nil();
+     * decision 0004). The semantic image term is folded from the pack's OWN decode
+     * pass via the per-image observer, so a pack decodes each source exactly once
+     * (the purpose-built hash step no longer re-decodes every file). A NULL array
+     * (OOM) simply disables collection; the hash then stays nil, which is benign. */
+    const int sprite_count = job->settings.sprite_count;
+    tp_id128 *image_hashes =
+        sprite_count > 0 ? calloc((size_t)sprite_count, sizeof *image_hashes)
+                         : NULL;
+    pack_hash_collect collect = {image_hashes, sprite_count};
+    const tp_status status = tp_pack_cancellable_observed(
+        &job->settings, job->arena, &result, pack_job_cancel_requested, job,
+        image_hashes ? pack_worker_collect_image_hash : NULL, &collect, &error);
+    /* Fold the hash only for a COMPLETED pack: a failed/cancelled pack has no
+     * cacheable result and leaves the nil start hash (job is calloc'd). A failed
+     * decode already fails the pack itself, so the surviving nil-hash path is for a
+     * hash-metadata failure or a collector OOM -- both non-fatal: the pack stands. */
+    if (status == TP_STATUS_OK && result && image_hashes) {
+        tp_error hash_error = {{0}};
+        if (tp_pack_input_hash_from_images(
+                &job->settings,
+                job->preview_exporter_id[0] ? job->preview_exporter_id : NULL,
+                image_hashes, sprite_count, &job->pack_input_hash,
+                &hash_error) != TP_STATUS_OK) {
+            job->pack_input_hash = tp_id128_nil();
+        }
     }
-    const tp_status status = tp_pack_cancellable(&job->settings, job->arena, &result,
-                                                 pack_job_cancel_requested, job, &error);
+    free(image_hashes);
     job->elapsed_ms = job_now_ms() - start;
     job->status = status;
     job->error = error;

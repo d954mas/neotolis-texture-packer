@@ -12,6 +12,12 @@
  * (INACTIVE) entry holds only its retained bytes and is managed by a byte-budget
  * LRU. A hit re-inflates the retained bytes through tp_pack_read_memory.
  *
+ * TRANSIENT PEAK. An active-entry swap (a store, or authoritative resolution
+ * switching winners) holds TWO fully decompressed results at once for the span of
+ * the swap: the incoming/inflated winner AND the outgoing active result before it
+ * is demoted to retained bytes. Budget and OOM thinking must therefore size for
+ * 2x one decompressed result, not 1x.
+ *
  * SELECTION (§10.3, decision 0004). The authoritative result is the entry with
  * the latest completion SEQUENCE, unless an explicit selection points at a
  * specific cached hash (Undo/Redo and manual selection choose by hash, never by
@@ -47,7 +53,12 @@ typedef struct tp_pack_result_cache tp_pack_result_cache;
  * immediately EXCEPT the highest-sequence entry, which stays resolvable no matter
  * the budget (store contract, decision 0004) -- so the active entry and the
  * max-sequence entry survive, and inactive_bytes may exceed the budget by at most
- * that one retained entry. Returns NULL on OOM. */
+ * that one retained entry. Returns NULL on OOM.
+ *
+ * SIZING. Retained bytes are the serialized .ntpack artifact, whose pages are RAW
+ * RGBA8 (tp_pack_read requires RAW) -- so a budget is raw-pixel-sized, not
+ * codec-compressed: a single 4096x4096 page retains ~64 MiB. Size `byte_budget`
+ * against raw page area x retained-entry count, not a compressed estimate. */
 tp_pack_result_cache *tp_pack_result_cache_create(uint64_t byte_budget);
 void tp_pack_result_cache_destroy(tp_pack_result_cache *cache);
 

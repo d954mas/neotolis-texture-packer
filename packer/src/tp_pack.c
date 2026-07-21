@@ -13,6 +13,7 @@
 #include "tp_core/tp_name_map.h"
 #include "tp_core/tp_pack_read.h"
 #include "tp_pack_constraints_internal.h"
+#include "tp_pack_priv.h"
 #include "tp_build_worker_internal.h"
 
 /* nt_builder is confined to the driver TU (tp_build_driver.c), which now runs in
@@ -450,6 +451,8 @@ static tp_status preflight_sprite_pixels(const tp_pack_settings *settings,
 }
 
 static tp_status load_path_images(const tp_pack_settings *settings,
+                                  tp_pack_image_observer observer,
+                                  void *observer_ctx,
                                   tp_image_rgba8 **out_images,
                                   tp_error *err) {
     *out_images = NULL;
@@ -502,6 +505,11 @@ static tp_status load_path_images(const tp_pack_settings *settings,
             width = images[i].width;
             height = images[i].height;
         }
+        /* Hand the just-resolved pixels to an in-process observer (pack_input_hash
+         * folding) before the preflight -- the pack's single decode is the only one. */
+        if (observer) {
+            observer(observer_ctx, i, width, height, pixels);
+        }
         tp_status status = preflight_sprite_pixels(
             settings, sprite, pixels, width, height, &area_entries[i], err);
         if (status != TP_STATUS_OK) {
@@ -529,6 +537,17 @@ tp_status tp_pack(const tp_pack_settings *settings, struct tp_arena *arena, stru
 tp_status tp_pack_cancellable(const tp_pack_settings *settings, struct tp_arena *arena,
                               struct tp_result **out_result, tp_pack_cancel_poll cancel_poll,
                               void *cancel_ctx, tp_error *err) {
+    return tp_pack_cancellable_observed(settings, arena, out_result, cancel_poll,
+                                        cancel_ctx, NULL, NULL, err);
+}
+
+tp_status tp_pack_cancellable_observed(const tp_pack_settings *settings,
+                                       struct tp_arena *arena,
+                                       struct tp_result **out_result,
+                                       tp_pack_cancel_poll cancel_poll,
+                                       void *cancel_ctx,
+                                       tp_pack_image_observer observer,
+                                       void *observer_ctx, tp_error *err) {
     if (out_result) {
         *out_result = NULL;
     }
@@ -557,7 +576,7 @@ tp_status tp_pack_cancellable(const tp_pack_settings *settings, struct tp_arena 
      * the parent (the worker boundary owns UTF-8 reads + validation, decision
      * 0018); the driver then packs from raw pixels only. */
     tp_image_rgba8 *path_images = NULL;
-    st = load_path_images(settings, &path_images, err);
+    st = load_path_images(settings, observer, observer_ctx, &path_images, err);
     if (st != TP_STATUS_OK) {
         tp_name_map_destroy(names);
         return st;

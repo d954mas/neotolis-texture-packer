@@ -2,13 +2,27 @@
 
 #include <errno.h>
 #include <limits.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "stb_image.h"
 #include "tp_fs_internal.h"
+#include "tp_image_priv.h"
 #include "tp_utf8_internal.h"
+
+/* Successful-decode counter for the tp_image__test_* seam (see header). Relaxed
+ * atomics: a Pack worker thread increments while the test reads after joining it. */
+static _Atomic uint64_t g_test_decode_count;
+
+void tp_image__test_reset_decode_count(void) {
+    atomic_store_explicit(&g_test_decode_count, UINT64_C(0), memory_order_relaxed);
+}
+
+uint64_t tp_image__test_decode_count(void) {
+    return atomic_load_explicit(&g_test_decode_count, memory_order_relaxed);
+}
 
 static tp_status validate_utf8_path(const char *path, tp_error *err) {
     if (!path || path[0] == '\0') {
@@ -167,5 +181,7 @@ tp_status tp_image_load_file(const char *path_utf8, tp_image_rgba8 *out,
     out->pixels = pixels;
     out->width = width;
     out->height = height;
+    atomic_fetch_add_explicit(&g_test_decode_count, UINT64_C(1),
+                              memory_order_relaxed);
     return TP_STATUS_OK;
 }

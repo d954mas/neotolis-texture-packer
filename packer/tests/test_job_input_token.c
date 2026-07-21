@@ -17,6 +17,8 @@
 #include "tp_core/tp_scan.h"
 #include "tp_core/tp_session.h"
 #include "tp_core/tp_transaction.h"
+#include "tp_fs_internal.h" /* scratch teardown */
+#include "tp_image_priv.h"  /* single-decode accounting seam */
 #include "unity.h"
 
 void setUp(void) {}
@@ -53,6 +55,30 @@ static void job_scratch_dir(char *out, size_t cap) {
     }
     const int n = snprintf(out, cap, "%s/tp_job_input_token_scratch", cwd);
     TEST_ASSERT_TRUE(n > 0 && (size_t)n < cap);
+}
+
+/* Best-effort recursive teardown of the runtime scratch dir this suite lays down
+ * under the cwd (dir + job_src.png + the pack .ntpack), so a run leaves no litter.
+ * Mirrors the build worker's staging cleanup; skips "."/".." like tp_fs_dir_next. */
+static void remove_scratch_tree(const char *path) {
+    tp_fs_dir *dir = tp_fs_dir_open(path);
+    if (dir) {
+        tp_fs_dir_entry entry;
+        while (tp_fs_dir_next(dir, &entry) == TP_FS_DIR_ENTRY) {
+            char child[2048];
+            if ((size_t)snprintf(child, sizeof child, "%s/%s", path,
+                                 entry.name) >= sizeof child) {
+                continue;
+            }
+            if (entry.info.kind == TP_FS_KIND_DIRECTORY && !entry.info.reparse) {
+                remove_scratch_tree(child);
+            } else {
+                (void)tp_fs_remove_file(child);
+            }
+        }
+        tp_fs_dir_close(dir);
+    }
+    (void)tp_fs_remove_dir(path);
 }
 
 static void write_png_fixture(const char *path) {
@@ -286,6 +312,53 @@ void test_pack_input_hash_present_and_stable_for_same_snapshot(void) {
 
     tp_session_job_result_destroy(&result);
     tp_session_destroy(session);
+    remove_scratch_tree(work_dir);
+}
+
+/* Single-decode guard: a native Pack job decodes each source EXACTLY once. The
+ * pack_input_hash is folded from the pack's own decode pass, so the former
+ * hash-compute pre-decode (which doubled every source's decode) is gone. */
+void test_pack_job_decodes_each_source_once(void) {
+    tp_session *session = make_session();
+    const tp_id128 atlas = default_atlas_id(session);
+    char work_dir[1024];
+    job_scratch_dir(work_dir, sizeof work_dir);
+    tp_mkdirs(work_dir);
+    add_file_source(session, atlas, work_dir); /* one FILE source */
+
+    tp_error err = {{0}};
+    const tp_pack_job_request request = {
+        .atlas_id = atlas,
+        .work_dir = work_dir,
+        .preview_exporter_id = NULL,
+    };
+    tp_image__test_reset_decode_count();
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_pack_job_start(session, &request, &err));
+    tp_session_job_progress progress;
+    do {
+        memset(&progress, 0, sizeof progress);
+        TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                              tp_session_job_poll(session, &progress, &err));
+    } while (progress.state == TP_SESSION_JOB_RUNNING);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_SESSION_JOB_SUCCEEDED, progress.state,
+                                  "native pack job did not succeed");
+
+    tp_session_job_result result;
+    memset(&result, 0, sizeof result);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_job_take_result(session, &result, &err));
+    /* take_result joined the worker thread, so the decode count is settled. The
+     * build worker runs in a CHILD process that never decodes (it is fed raw
+     * pixels), so this process's only decode is the pack's single load pass. */
+    TEST_ASSERT_EQUAL_UINT64_MESSAGE(
+        1U, tp_image__test_decode_count(),
+        "a pack must decode each source exactly once (no hash-compute re-decode)");
+    TEST_ASSERT_FALSE(tp_id128_is_nil(result.pack.pack_input_hash));
+
+    tp_session_job_result_destroy(&result);
+    tp_session_destroy(session);
+    remove_scratch_tree(work_dir);
 }
 
 void test_pack_input_hash_changes_on_semantic_mutation(void) {
@@ -331,6 +404,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_model_mutation_invalidates_the_captured_job_token);
     RUN_TEST(test_source_runtime_change_invalidates_without_model_mutation);
     RUN_TEST(test_pack_input_hash_present_and_stable_for_same_snapshot);
+    RUN_TEST(test_pack_job_decodes_each_source_once);
     RUN_TEST(test_pack_input_hash_changes_on_semantic_mutation);
     return UNITY_END();
 }

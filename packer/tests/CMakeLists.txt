@@ -153,6 +153,8 @@ add_test(NAME tp_job_owner COMMAND tp_test_job_owner)
 add_executable(tp_test_job_input_token test_job_input_token.c)
 # tp_build: F3-03 T2 extension calls tp_session_pack_input_hash (job/pack surface).
 target_link_libraries(tp_test_job_input_token PRIVATE tp_build unity)
+# ../src: single-decode seam (tp_image_internal.h) + scratch teardown (tp_fs_internal.h).
+target_include_directories(tp_test_job_input_token PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_compile_options(tp_test_job_input_token PRIVATE -U_DLL)
 nt_set_warning_flags(tp_test_job_input_token)
 add_test(NAME tp_job_input_token COMMAND tp_test_job_input_token)
