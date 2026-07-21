@@ -393,6 +393,47 @@ void test_source_runtime_change_invalidates_without_model_mutation(void) {
     tp_session_destroy(session);
 }
 
+/* U-01a: the pack INPUT (incl. the folder walk for folder sources) is now built on
+ * the WORKER, not on the caller/UI thread at pack-start. An atlas with no usable
+ * sources therefore no longer fails SYNCHRONOUSLY at start -- tp_session_pack_job_start
+ * returns OK and the job completes FAILED, the exact async-failure path export already
+ * uses. This pins that the empty-input check moved off the caller thread. */
+void test_empty_atlas_pack_fails_async_not_at_start(void) {
+    tp_session *session = make_session();
+    const tp_id128 atlas = default_atlas_id(session); /* fresh default atlas: no sources */
+    char work_dir[1024];
+    job_scratch_dir(work_dir, sizeof work_dir);
+    tp_mkdirs(work_dir);
+
+    tp_error err = {{0}};
+    const tp_pack_job_request request = {
+        .atlas_id = atlas,
+        .work_dir = work_dir,
+        .preview_exporter_id = NULL,
+    };
+    /* Starts OK now (the "no usable images" check moved to the worker). */
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK, tp_session_pack_job_start(session, &request, &err),
+        "empty-atlas pack must START ok (input build is on the worker now)");
+
+    tp_session_job_progress progress;
+    do {
+        memset(&progress, 0, sizeof progress);
+        TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                              tp_session_job_poll(session, &progress, &err));
+    } while (progress.state == TP_SESSION_JOB_RUNNING);
+    /* ...and fails ASYNC, never producing a usable result. */
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_SESSION_JOB_FAILED, progress.state,
+                                  "empty atlas pack must fail async, not at start");
+
+    tp_session_job_result result;
+    memset(&result, 0, sizeof result);
+    (void)tp_session_job_take_result(session, &result, &err); /* release the handle */
+    tp_session_job_result_destroy(&result);
+    tp_session_destroy(session);
+    remove_scratch_tree(work_dir);
+}
+
 int main(int argc, char **argv) {
     /* The real pack job spawns THIS executable as its build-worker child; service
      * that dispatch first, exactly like every pack-capable exe (and sibling test). */
@@ -406,5 +447,6 @@ int main(int argc, char **argv) {
     RUN_TEST(test_pack_input_hash_present_and_stable_for_same_snapshot);
     RUN_TEST(test_pack_job_decodes_each_source_once);
     RUN_TEST(test_pack_input_hash_changes_on_semantic_mutation);
+    RUN_TEST(test_empty_atlas_pack_fails_async_not_at_start);
     return UNITY_END();
 }
