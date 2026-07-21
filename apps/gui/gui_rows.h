@@ -139,6 +139,14 @@ void gui_rows_bench_shutdown(void);
 /* Selects the sprite-tree row matching a packed-atlas region (region -> row selection sync). */
 void select_row_for_region(int region_idx);
 
+/* --- selection preservation across Undo/Redo (U-02 T5) ---
+ * capture: record the current primary leaf's canonical ref (call BEFORE the undo/redo mutates the
+ * model). revalidate: after the rows rebuild, re-resolve the primary selection to the row carrying
+ * that ref (clears it if the sprite is gone) and drop multi-select refs no longer present. Both are
+ * no-ops unless s_reselect_pending is set. */
+void gui_selection_capture_reselect(void);
+void gui_selection_revalidate(void);
+
 #ifdef __cplusplus
 }
 #endif

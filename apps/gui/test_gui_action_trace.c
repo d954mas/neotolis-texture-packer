@@ -187,7 +187,12 @@ void test_deferred_edit_coalesces_then_undo_redo_trace_is_exact(void) {
     TEST_ASSERT_EQUAL_INT(initial_max_size, atlas_at(0)->max_size);
     TEST_ASSERT_EQUAL_INT(0, gui_project_undo_depth());
     TEST_ASSERT_EQUAL_INT(1, gui_project_redo_depth());
-    TEST_ASSERT_EQUAL_INT(-1, s_sel_src);
+    /* U-02 T5: undo now PRESERVES the sprite selection instead of resetting it to -1. It captures the
+     * primary leaf's canonical ref (arming s_reselect_pending) and leaves the index for
+     * gui_selection_revalidate to re-resolve in the frame loop; with no rows built here, s_sel_src is
+     * left untouched (still 7). */
+    TEST_ASSERT_EQUAL_INT(7, s_sel_src);
+    TEST_ASSERT_TRUE(s_reselect_pending);
     TEST_ASSERT_EQUAL_STRING("Undo (undo:0 redo:1)", s_status);
 
     do_redo();

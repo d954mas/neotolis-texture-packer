@@ -35,6 +35,9 @@ int s_sel_src = -1;
 int s_sel_child = -1;
 char s_sel_abs[TP_IDENTITY_PATH_MAX];
 bool s_sel_missing;
+bool s_reselect_pending;
+tp_id128 s_reselect_source_id;
+char s_reselect_key[TP_SRCKEY_MAX];
 static const tp_session_snapshot *s_fixture_snapshot;
 static uint64_t s_fixture_snapshot_lifetime;
 

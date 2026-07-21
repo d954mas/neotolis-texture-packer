@@ -116,6 +116,13 @@ extern int s_sel_anchor_row; /* VIEW index anchor for Shift-range selection (s_v
 extern int s_focus_view;     /* keyboard-focused row (index into s_view; -1 none) — U-02 list focus model */
 extern bool s_filter_active; /* Ctrl+F speed-search armed: typed chars edit the sprite-tree filter (U-02 T1) */
 
+/* U-02 T5: preserve the sprite selection across Undo/Redo. do_undo captures the primary leaf's
+ * canonical ref BEFORE the model shifts indices; after the rows rebuild, gui_selection_revalidate
+ * re-resolves the primary + prunes the (ref-based) multi-select of sprites that no longer exist. */
+extern bool s_reselect_pending;
+extern tp_id128 s_reselect_source_id;
+extern char s_reselect_key[TP_SRCKEY_MAX];
+
 /* Animation selection + editor state (ux.md §3.7b). */
 extern int s_sel_anim;       /* selected animation index in the current atlas, -1 none */
 extern int s_sel_anim_frame; /* selected frame row in the editor (for the Del hotkey), -1 none */

@@ -992,3 +992,70 @@ void select_row_for_region(int region_idx) {
     }
 }
 // #endregion
+
+// #region selection preservation across Undo/Redo (U-02 T5)
+static bool row_ref_present(tp_id128 source_id, const char *source_key) {
+    for (int i = 0; i < s_row_count; ++i) {
+        if (!s_rows[i].is_folder && s_rows[i].source_key && s_rows[i].source_key[0] != '\0' &&
+            tp_id128_eq(s_rows[i].source_id, source_id) &&
+            strcmp(s_rows[i].source_key, source_key) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void gui_selection_capture_reselect(void) {
+    const sprite_row *leaf = gui_rows_selected_leaf();
+    if (leaf && leaf->source_key && leaf->source_key[0] != '\0') {
+        s_reselect_source_id = leaf->source_id;
+        (void)snprintf(s_reselect_key, sizeof s_reselect_key, "%s", leaf->source_key);
+    } else {
+        s_reselect_source_id = tp_id128_nil();
+        s_reselect_key[0] = '\0';
+    }
+    s_reselect_pending = true;
+}
+
+void gui_selection_revalidate(void) {
+    if (!s_reselect_pending) {
+        return;
+    }
+    s_reselect_pending = false;
+    /* Re-resolve the primary selection to the row still carrying the captured ref (else clear it). */
+    if (!tp_id128_is_nil(s_reselect_source_id) && s_reselect_key[0] != '\0') {
+        bool found = false;
+        for (int i = 0; i < s_row_count; ++i) {
+            if (!s_rows[i].is_folder && s_rows[i].source_key && s_rows[i].source_key[0] != '\0' &&
+                tp_id128_eq(s_rows[i].source_id, s_reselect_source_id) &&
+                strcmp(s_rows[i].source_key, s_reselect_key) == 0) {
+                s_sel_src = s_rows[i].src;
+                s_sel_child = s_rows[i].child;
+                s_sel_missing = s_rows[i].missing;
+                (void)snprintf(s_sel_abs, sizeof s_sel_abs, "%s", s_rows[i].abs);
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            s_sel_src = -1;
+            s_sel_child = -1;
+            s_sel_missing = false;
+            s_sel_abs[0] = '\0';
+        }
+    }
+    /* Prune multi-select refs whose sprite no longer exists after the undo/redo. */
+    for (int i = 0; i < s_multi_sel_count;) {
+        if (!row_ref_present(s_multi_sel[i].source_id, s_multi_sel[i].source_key)) {
+            free(s_multi_sel[i].source_key);
+            for (int j = i; j < s_multi_sel_count - 1; ++j) {
+                s_multi_sel[j] = s_multi_sel[j + 1];
+            }
+            s_multi_sel_count--;
+            s_multi_sel[s_multi_sel_count].source_key = NULL;
+        } else {
+            ++i;
+        }
+    }
+}
+// #endregion

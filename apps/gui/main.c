@@ -589,6 +589,7 @@ static void frame(void) {
         }
         build_rows();
         build_view(); /* filtered/sorted/collapsible view over the row model (U-02) */
+        gui_selection_revalidate(); /* re-resolve/prune the selection preserved across undo (U-02 T5) */
         filter_type_pump(); /* Ctrl+F speed-search: typed chars edit the filter (U-02 T1) */
         handle_list_nav(); /* keyboard list focus/nav on the fresh view (U-02 T3) */
         s_content_w = scale.logical_w; /* for caption/status truncation */

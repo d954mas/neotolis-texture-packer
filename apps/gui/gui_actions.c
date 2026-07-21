@@ -73,6 +73,23 @@ bool gui_actions__busy_block(void) {
 }
 
 // #region undo/redo + refresh actions
+/* U-02 T5: after an undo/redo lands, drop the transient editor/anim/preview state (the model changed)
+ * but KEEP the sprite selection -- gui_selection_revalidate re-resolves the ref-based primary +
+ * multi-select against the rebuilt rows next. Previews of untouched atlases live in their own per-atlas
+ * pack slots and are not cleared here (only the stale flag is recomputed per frame). */
+static void undo_redo_settle(void) {
+    gui_shell_reset_shown_result();
+    cancel_edit();
+    clamp_selection();
+    s_sel_anchor_row = -1; /* view order shifts under the undo; a stale Shift anchor would mis-range */
+    s_sel_anim = -1;
+    s_sel_anim_frame = -1;
+    if (s_preview_active) {
+        preview_stop();
+    }
+    preview_target_reset();
+    gui_canvas_invalidate(&s_canvas);
+}
 void do_undo(void) {
     if (gui_actions__busy_block()) {
         return; /* same async-busy guard as new/open/exit -- undo mid-pack then a pre-undo land is confusing */
@@ -80,14 +97,12 @@ void do_undo(void) {
     if (gui_actions__flush_failed()) {
         return; /* The buffered gesture was rejected; do not undo a different step. */
     }
+    gui_selection_capture_reselect(); /* capture the primary leaf ref BEFORE the model shifts indices */
     if (gui_project_undo()) {
-        gui_shell_reset_shown_result();
-        cancel_edit();
-        clamp_selection();
-        reset_selection();
-        gui_canvas_invalidate(&s_canvas);
+        undo_redo_settle();
         set_statusf("Undo (undo:%d redo:%d)", gui_project_undo_depth(), gui_project_redo_depth());
     } else {
+        s_reselect_pending = false; /* nothing changed -- drop the capture, no revalidation needed */
         set_status("Nothing to undo.");
     }
 }
@@ -98,14 +113,12 @@ void do_redo(void) {
     if (gui_actions__flush_failed()) {
         return; /* The buffered gesture was rejected; do not redo a different step. */
     }
+    gui_selection_capture_reselect();
     if (gui_project_redo()) {
-        gui_shell_reset_shown_result();
-        cancel_edit();
-        clamp_selection();
-        reset_selection();
-        gui_canvas_invalidate(&s_canvas);
+        undo_redo_settle();
         set_statusf("Redo (undo:%d redo:%d)", gui_project_undo_depth(), gui_project_redo_depth());
     } else {
+        s_reselect_pending = false;
         set_status("Nothing to redo.");
     }
 }
