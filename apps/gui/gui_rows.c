@@ -901,6 +901,9 @@ static void selected_cache_refresh(void) {
     if (s_row_cache_snapshot_lifetime !=
         gui_project_snapshot_lifetime_generation()) {
         build_rows();
+        /* The row model was just replaced mid-frame; rebuild the view so s_view never indexes a
+         * stale/shrunk s_rows during the rest of the declaration pass (generation-cached, cheap). */
+        build_view();
     }
     if (s_selected_cache_valid &&
         s_selected_cache_row_generation == s_row_cache_generation &&
@@ -1068,14 +1071,50 @@ static bool row_ref_present(tp_id128 source_id, const char *source_key) {
     return false;
 }
 
+/* Re-pin the keyboard focus (an s_view index) onto whichever visible row now carries the primary
+ * selection, so the focus ring and the selection highlight stay together after an undo/redo
+ * re-resolves the selection onto a shifted row. -1 when the selected row is hidden (collapsed or
+ * filtered out) or nothing is selected; focus_clamp then restarts nav from a list edge. */
+static void focus_sync_to_selection(void) {
+    s_focus_view = -1;
+    if (s_sel_src < 0) {
+        return;
+    }
+    for (int k = 0; k < s_view_count; ++k) {
+        const sprite_row *row = &s_rows[s_view[k]];
+        const bool match = row->is_source
+                               ? (s_sel_src == row->src && s_sel_child == -1)
+                               : (s_sel_src == row->src && s_sel_child == row->child);
+        if (match) {
+            s_focus_view = k;
+            return;
+        }
+    }
+}
+
 void gui_selection_capture_reselect(void) {
     const sprite_row *leaf = gui_rows_selected_leaf();
+    s_reselect_source_id = tp_id128_nil();
+    s_reselect_key[0] = '\0';
     if (leaf && leaf->source_key && leaf->source_key[0] != '\0') {
-        s_reselect_source_id = leaf->source_id;
-        (void)snprintf(s_reselect_key, sizeof s_reselect_key, "%s", leaf->source_key);
-    } else {
-        s_reselect_source_id = tp_id128_nil();
-        s_reselect_key[0] = '\0';
+        const int n = snprintf(s_reselect_key, sizeof s_reselect_key, "%s", leaf->source_key);
+        if (n >= 0 && (size_t)n < sizeof s_reselect_key) {
+            s_reselect_source_id = leaf->source_id;
+        } else {
+            /* Defensive: tp_scan bounds rel by TP_SRCKEY_MAX so this cannot happen today, but a
+             * truncated key would silently re-resolve onto the wrong row -- drop the ref instead. */
+            s_reselect_key[0] = '\0';
+        }
+    } else if (s_sel_src >= 0 && s_sel_child == -1) {
+        /* A folder/source row is the primary (no leaf ref). Preserve it by its stable source id so
+         * an undo that re-inserts sources does not leave s_sel_src pointing at a shifted neighbour. */
+        for (int i = 0; i < s_row_count; ++i) {
+            if (s_rows[i].is_source && s_rows[i].src == s_sel_src &&
+                !tp_id128_is_nil(s_rows[i].source_id)) {
+                s_reselect_source_id = s_rows[i].source_id;
+                break;
+            }
+        }
     }
     s_reselect_pending = true;
 }
@@ -1085,20 +1124,34 @@ void gui_selection_revalidate(void) {
         return;
     }
     s_reselect_pending = false;
-    /* Re-resolve the primary selection to the row still carrying the captured ref (else clear it). */
-    if (!tp_id128_is_nil(s_reselect_source_id) && s_reselect_key[0] != '\0') {
+    /* Re-resolve the primary selection to the row still carrying the captured ref (else clear it).
+     * A non-empty key means a leaf sprite (match by source id + key); an empty key with a non-nil id
+     * means a folder/source primary (match the source row that owns the id). */
+    if (!tp_id128_is_nil(s_reselect_source_id)) {
         bool found = false;
         for (int i = 0; i < s_row_count; ++i) {
-            if (!s_rows[i].is_folder && s_rows[i].source_key && s_rows[i].source_key[0] != '\0' &&
-                tp_id128_eq(s_rows[i].source_id, s_reselect_source_id) &&
-                strcmp(s_rows[i].source_key, s_reselect_key) == 0) {
-                s_sel_src = s_rows[i].src;
-                s_sel_child = s_rows[i].child;
-                s_sel_missing = s_rows[i].missing;
-                (void)snprintf(s_sel_abs, sizeof s_sel_abs, "%s", s_rows[i].abs);
-                found = true;
-                break;
+            const sprite_row *row = &s_rows[i];
+            if (!tp_id128_eq(row->source_id, s_reselect_source_id)) {
+                continue;
             }
+            if (s_reselect_key[0] != '\0') {
+                if (row->is_folder || !row->source_key || row->source_key[0] == '\0' ||
+                    strcmp(row->source_key, s_reselect_key) != 0) {
+                    continue;
+                }
+                s_sel_child = row->child;
+                s_sel_missing = row->missing;
+            } else {
+                if (!row->is_source) {
+                    continue;
+                }
+                s_sel_child = -1;
+                s_sel_missing = false;
+            }
+            s_sel_src = row->src;
+            (void)snprintf(s_sel_abs, sizeof s_sel_abs, "%s", row->abs);
+            found = true;
+            break;
         }
         if (!found) {
             s_sel_src = -1;
@@ -1120,5 +1173,8 @@ void gui_selection_revalidate(void) {
             ++i;
         }
     }
+    /* Keep the keyboard focus ring on the row that now carries the selection. revalidate runs right
+     * after build_view (main loop), so s_view is current and this cannot read a stale index. */
+    focus_sync_to_selection();
 }
 // #endregion
