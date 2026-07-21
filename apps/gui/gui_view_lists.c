@@ -431,7 +431,10 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
                     }
                 }
             }
-            if (ev.double_clicked && !row->is_folder && !row->missing) {
+            if (ev.double_clicked && row->is_folder) {
+                gui_rows_toggle_collapsed(row->source_id); /* U-02 T2: double-click a folder collapses/expands it */
+                s_focus_view = (int)i;
+            } else if (ev.double_clicked && !row->is_folder && !row->missing) {
                 select_sprite_row((int)i, false, false);
                 s_focus_view = (int)i;
                 start_sprite_edit(row);
@@ -492,6 +495,12 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
                   .cornerRadius = CLAY_CORNER_RADIUS(S(4))}) {
                 CLAY({.id = {.id = hit_id},
                       .layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+                    if (row->is_folder) {
+                        /* U-02 T2: disclosure chevron reflects collapsed state (double-click / arrows toggle). */
+                        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT),
+                                    gui_rows_is_collapsed(row->source_id) ? "\xE2\x96\xB8" : "\xE2\x96\xBE",
+                                    selected ? &g_row_strong : &g_caption);
+                    }
                     ui_row_icon(ctx, ic, ic_tint);
                     if (editing) {
                         if (render_rename_field(ctx)) {
