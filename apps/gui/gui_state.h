@@ -91,8 +91,8 @@ extern uint32_t s_id_recovery;     /* R6b: the startup crash-recovery modal */
 /* Menubar buttons + their drop-down panels. Same class as s_id_ctx_menu below (an id seeded once in
  * ensure_ids / the shell, read only by the declare machinery that moved to gui_view_chrome.c in step
  * 6b) -- moved here alongside it rather than left main.c-local, so it can never be view-local either. */
-extern uint32_t s_id_mb_file, s_id_mb_edit, s_id_mb_view, s_id_mb_help;
-extern uint32_t s_id_menu_file, s_id_menu_edit, s_id_menu_view, s_id_menu_help;
+extern uint32_t s_id_mb_file, s_id_mb_edit, s_id_mb_atlas, s_id_mb_view, s_id_mb_help;
+extern uint32_t s_id_menu_file, s_id_menu_edit, s_id_menu_atlas, s_id_menu_view, s_id_menu_help;
 
 /* --- primary selection (s_sel_src/child stays the last-clicked selection for the region panel + canvas sync) --- */
 extern int s_sel_atlas;      /* selected atlas index */

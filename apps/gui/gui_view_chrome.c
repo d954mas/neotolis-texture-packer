@@ -33,11 +33,12 @@
 #endif
 
 /* --- menu bar + context menu state (chrome-local; nothing outside this TU ever read them) --- */
-static nt_ui_menu_state_t s_file_state, s_edit_state, s_view_state, s_help_state;
-static nt_ui_menu_ctx_t s_file_menu, s_edit_menu, s_view_menu, s_help_menu;
+static nt_ui_menu_state_t s_file_state, s_edit_state, s_atlas_state, s_view_state, s_help_state;
+static nt_ui_menu_ctx_t s_file_menu, s_edit_menu, s_atlas_menu, s_view_menu, s_help_menu;
 enum {
     MK_NEW = 1, MK_OPEN, MK_SAVE, MK_SAVEAS, MK_EXPORT, MK_REFRESH, MK_EXIT,
     MK_UNDO, MK_REDO,
+    MK_PACK, MK_ADD_ATLAS,
     MK_ZIN, MK_ZOUT, MK_FIT, MK_ABOUT, MK_S100, MK_S125, MK_S150, MK_S200,
     MK_OV_OUTLINE, MK_OV_FRAME, MK_OV_TRIM, MK_OV_PIVOT, MK_OV_SLICE9, MK_CTX_FIT, MK_CTX_100,
     MK_CTX_RENAME, MK_CTX_REMOVE, MK_CTX_TOGGLE, MK_CTX_CREATE_ANIM, MK_CTX_PREVIEW
@@ -76,6 +77,7 @@ static bool gui_open_url(const char *url) {
 void close_menubar_menus(void) {
     s_file_state.open = false;
     s_edit_state.open = false;
+    s_atlas_state.open = false;
     s_view_state.open = false;
     s_help_state.open = false;
 }
@@ -117,6 +119,17 @@ static void edit_items(nt_ui_menu_ctx_t *m) {
     nt_ui_menu_item_opts_t r = {.shortcut = "Ctrl+Y", .disabled = !gui_project_can_redo()};
     if (nt_ui_menu_item_ex(m, MK_REDO, "Redo", r)) {
         do_redo();
+    }
+}
+/* Atlas menu (U-02 T6): Pack was previously reachable only via Ctrl+P / the canvas strip. */
+static void atlas_items(nt_ui_menu_ctx_t *m) {
+    nt_ui_menu_item_opts_t p = {.shortcut = "Ctrl+P", .disabled = !s_pack_has_sources};
+    if (nt_ui_menu_item_ex(m, MK_PACK, "Pack", p)) {
+        s_pending_pack = true;
+    }
+    nt_ui_menu_separator(m);
+    if (nt_ui_menu_item(m, MK_ADD_ATLAS, "Add atlas")) {
+        s_pending_add_atlas = true;
     }
 }
 /* Radio-style UI-scale item; the active one is marked with a check glyph (baked in the DejaVu font). */
@@ -191,6 +204,7 @@ void declare_menubar(nt_ui_context_t *ctx) {
           .backgroundColor = C_STATUS}) { /* docked: flush to the top edge, no rounded corners */
         menubar_entry(ctx, s_id_mb_file, "File", &s_file_state);
         menubar_entry(ctx, s_id_mb_edit, "Edit", &s_edit_state);
+        menubar_entry(ctx, s_id_mb_atlas, "Atlas", &s_atlas_state);
         menubar_entry(ctx, s_id_mb_view, "View", &s_view_state);
         menubar_entry(ctx, s_id_mb_help, "Help", &s_help_state);
         /* right side: persistent recovery warning + project name + dirty dot */
@@ -231,6 +245,9 @@ void declare_menus(nt_ui_context_t *ctx) {
     nt_ui_menu_begin(&s_edit_menu, ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, s_id_menu_edit, &s_edit_state, &s_menu_style);
     edit_items(&s_edit_menu);
     nt_ui_menu_end(&s_edit_menu);
+    nt_ui_menu_begin(&s_atlas_menu, ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, s_id_menu_atlas, &s_atlas_state, &s_menu_style);
+    atlas_items(&s_atlas_menu);
+    nt_ui_menu_end(&s_atlas_menu);
     nt_ui_menu_begin(&s_view_menu, ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, s_id_menu_view, &s_view_state, &s_menu_style);
     view_items(&s_view_menu);
     nt_ui_menu_end(&s_view_menu);
