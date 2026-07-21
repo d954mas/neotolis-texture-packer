@@ -84,6 +84,7 @@ int s_multi_sel_count;
 int s_multi_sel_cap;
 int s_sel_anchor_row = -1;
 int s_focus_view = -1;
+bool s_filter_active = false;
 
 /* --- animation selection --- */
 int s_sel_anim = -1;

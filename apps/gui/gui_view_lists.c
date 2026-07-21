@@ -245,6 +245,74 @@ void gui_list_focus_collapse(bool expand) {
     s_focus_follow = true;
 }
 
+/* --- Ctrl+F speed-search (U-02 T1) ---
+ * The engine exposes no programmatic text-field focus (focus is click-driven, and the arbiter is
+ * engine-internal / read-only). So the filter is a host-driven speed-search: while armed, typed chars
+ * from the platform char ring edit the sprite-tree filter directly -- no engine input field needed.
+ * The seam stays model-first: this only feeds gui_rows_set_filter(), which build_view() consumes. */
+static int utf8_encode(uint32_t cp, char out[4]) {
+    if (cp < 0x80U) {
+        out[0] = (char)cp;
+        return 1;
+    }
+    if (cp < 0x800U) {
+        out[0] = (char)(0xC0U | (cp >> 6));
+        out[1] = (char)(0x80U | (cp & 0x3FU));
+        return 2;
+    }
+    if (cp < 0x10000U) {
+        out[0] = (char)(0xE0U | (cp >> 12));
+        out[1] = (char)(0x80U | ((cp >> 6) & 0x3FU));
+        out[2] = (char)(0x80U | (cp & 0x3FU));
+        return 3;
+    }
+    if (cp <= 0x10FFFFU) {
+        out[0] = (char)(0xF0U | (cp >> 18));
+        out[1] = (char)(0x80U | ((cp >> 12) & 0x3FU));
+        out[2] = (char)(0x80U | ((cp >> 6) & 0x3FU));
+        out[3] = (char)(0x80U | (cp & 0x3FU));
+        return 4;
+    }
+    return 0;
+}
+
+void filter_type_pump(void) {
+    if (!s_filter_active || nt_ui_input_any_focused(s_ctx)) {
+        return; /* not armed, or an engine text field owns typed chars this frame */
+    }
+    char buf[256];
+    (void)snprintf(buf, sizeof buf, "%s", gui_rows_filter());
+    size_t len = strlen(buf);
+    bool changed = false;
+    if (nt_input_key_is_pressed(NT_KEY_BACKSPACE) && len > 0) {
+        size_t n = len - 1;
+        while (n > 0 && ((unsigned char)buf[n] & 0xC0U) == 0x80U) {
+            n--; /* step back over UTF-8 continuation bytes to delete a whole codepoint */
+        }
+        buf[n] = '\0';
+        len = n;
+        changed = true;
+    }
+    uint32_t cp = 0;
+    while (nt_input_pop_char(&cp)) {
+        if (cp < 0x20U || cp == 0x7FU) {
+            continue; /* drop control chars */
+        }
+        char enc[4];
+        const int k = utf8_encode(cp, enc);
+        if (k <= 0 || len + (size_t)k >= sizeof buf) {
+            continue;
+        }
+        memcpy(buf + len, enc, (size_t)k);
+        len += (size_t)k;
+        buf[len] = '\0';
+        changed = true;
+    }
+    if (changed) {
+        gui_rows_set_filter(buf);
+    }
+}
+
 static void declare_sprite_list(nt_ui_context_t *ctx) {
     CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(28))}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
         section_rule_label(ctx, "SPRITES");
@@ -265,8 +333,36 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
         }
     }
 
-    if (s_row_count == 0) {
-        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), "No sources. Add a smart folder or files.", &g_caption);
+    /* Speed-search filter bar: shown while armed (Ctrl+F) or whenever a query is set. */
+    if (s_filter_active || gui_rows_filter_active()) {
+        const uint32_t clr_id = nt_ui_id("ntpacker/filter_clear");
+        const nt_ui_events_t clr_ev = nt_ui_events(ctx, clr_id, NULL);
+        if (clr_ev.clicked) {
+            gui_rows_set_filter("");
+            s_filter_active = false;
+        }
+        char shown[300];
+        const char *q = gui_rows_filter();
+        (void)snprintf(shown, sizeof shown, "Filter: %s%s", q, s_filter_active ? "|" : "");
+        CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H - 3.0F))},
+                         .padding = {Su(8), Su(4), Su(2), Su(2)},
+                         .childGap = Su(4),
+                         .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}},
+              .backgroundColor = C_HOVER,
+              .cornerRadius = CLAY_CORNER_RADIUS(S(4))}) {
+            nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), shown,
+                        s_filter_active ? &g_row_strong : &g_row);
+            CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}}) {}
+            record_row_tip(clr_id, "Clear filter (Esc)");
+            (void)ui_icon_btn(ctx, clr_id, &s_ic_x, 12.0F, NULL, &g_btn_ghost, true, 24.0F, 22.0F,
+                              clr_ev.hovered ? &g_danger : &g_caption);
+        }
+    }
+
+    if (s_view_count == 0) {
+        const char *msg = gui_rows_filter_active() ? "No sprites match the filter."
+                                                   : "No sources. Add a smart folder or files.";
+        nt_ui_label(ctx, NT_UI_DATA_LAYER(LAYER_TEXT), msg, &g_caption);
         CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}}) {}
         return;
     }

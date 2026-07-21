@@ -28,6 +28,10 @@ void gui_list_focus_activate(void);                /* Enter: toggle folder, else
 void gui_list_focus_rename(void);                  /* F2: inline-rename the focused leaf */
 void gui_list_focus_collapse(bool expand);         /* Right=expand folder / Left=collapse or jump to parent */
 
+/* Ctrl+F speed-search char pump (U-02 T1): while s_filter_active and no engine field is focused,
+ * feeds typed chars/backspace into the sprite-tree filter. Call once per frame after build_view(). */
+void filter_type_pump(void);
+
 #ifdef __cplusplus
 }
 #endif

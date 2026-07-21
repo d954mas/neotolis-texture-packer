@@ -365,6 +365,8 @@ static void handle_shortcuts(void) {
         s_pending_pack = true;
     } else if (nt_input_key_is_pressed(NT_KEY_E)) {
         s_export_open = true;
+    } else if (nt_input_key_is_pressed(NT_KEY_F)) {
+        s_filter_active = true; /* Ctrl+F arms the sprite-tree speed-search filter (U-02 T1) */
     }
 }
 
@@ -478,6 +480,10 @@ static void frame(void) {
         } else if (s_confirm_open) {
             s_confirm_open = false;
             s_after_confirm = AFTER_NONE;
+        } else if (s_filter_active || gui_rows_filter_active()) {
+            gui_rows_set_filter(""); /* Esc clears the sprite-tree speed-search (U-02 T1) */
+            s_filter_active = false;
+            set_status("Filter cleared.");
         } else if (s_preview_active && !s_ctx_state.open) {
             preview_stop();
             set_status("Closed animation preview.");
@@ -583,6 +589,7 @@ static void frame(void) {
         }
         build_rows();
         build_view(); /* filtered/sorted/collapsible view over the row model (U-02) */
+        filter_type_pump(); /* Ctrl+F speed-search: typed chars edit the filter (U-02 T1) */
         handle_list_nav(); /* keyboard list focus/nav on the fresh view (U-02 T3) */
         s_content_w = scale.logical_w; /* for caption/status truncation */
         compute_panel_widths(scale.logical_w); /* clamp side-panel widths so they never leave the screen */
