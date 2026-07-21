@@ -90,11 +90,12 @@ static bool gui_reveal_in_explorer(const char *path) {
     }
 #ifdef _WIN32
     /* explorer /select needs a plain UTF-16 path -- NOT nt_utf8_path_to_utf16, which prepends the
-     * \\?\ long-path prefix that explorer's /select does not accept. Convert directly, then to
-     * backslashes, then build the /select,"<path>" argument without a shell. */
+     * \\?\ long-path prefix that explorer's /select rejects. This is a UI shell argument for
+     * display/selection, not filesystem I/O, so it does not belong to the tp_core path policy
+     * (R21) -- annotated boundary-ok below. Convert, switch to backslashes, then build the argument. */
     wchar_t wpath[TP_IDENTITY_PATH_MAX];
-    if (MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath,
-                            (int)(sizeof wpath / sizeof wpath[0])) == 0) {
+    const int wn = MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, (int)(sizeof wpath / sizeof wpath[0])); /* boundary-ok: explorer /select display arg, not fs path policy */
+    if (wn == 0) {
         return false; /* path too long for the buffer or invalid UTF-8 */
     }
     for (wchar_t *p = wpath; *p != L'\0'; ++p) {
