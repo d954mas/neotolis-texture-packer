@@ -280,6 +280,10 @@ void filter_type_pump(void) {
     if (!s_filter_active || nt_ui_input_any_focused(s_ctx)) {
         return; /* not armed, or an engine text field owns typed chars this frame */
     }
+    if (s_confirm_open || s_about_open || s_export_open || s_recovery_open ||
+        s_edit_kind != EDIT_NONE) {
+        return; /* a modal / inline-rename owns the keyboard -- don't steal its chars into the filter */
+    }
     char buf[256];
     (void)snprintf(buf, sizeof buf, "%s", gui_rows_filter());
     size_t len = strlen(buf);

@@ -646,6 +646,11 @@ static int view_row_cmp(int ia, int ib) {
     if (s_view_sort_desc) {
         c = -c;
     }
+    if (c == 0) {
+        /* Tiebreak by original row index so equal keys keep a STABLE order (qsort is not stable);
+         * without this, same-named siblings could reshuffle frame-to-frame. */
+        c = (ia > ib) - (ia < ib);
+    }
     return c;
 }
 static int view_qsort_child(const void *pa, const void *pb) {
@@ -749,11 +754,47 @@ void gui_rows_toggle_collapsed(tp_id128 source_id) {
     s_view_epoch++;
 }
 
+/* Drop collapse state for folder sources that no longer exist (removed, or rescanned away). Keeps
+ * s_collapsed from accumulating stale ids across a session. O(collapsed * rows); both are tiny. */
+static void collapsed_prune_missing(void) {
+    for (int i = 0; i < s_collapsed_count;) {
+        bool present = false;
+        for (int r = 0; r < s_row_count && !present; ++r) {
+            present = s_rows[r].is_source && s_rows[r].is_folder &&
+                      tp_id128_eq(s_rows[r].source_id, s_collapsed[i]);
+        }
+        if (present) {
+            ++i;
+        } else {
+            for (int j = i; j < s_collapsed_count - 1; ++j) {
+                s_collapsed[j] = s_collapsed[j + 1];
+            }
+            s_collapsed_count--;
+        }
+    }
+}
+
 void build_view(void) {
     if (s_view_cache_valid &&
         s_view_cache_row_generation == s_row_cache_generation &&
         s_view_cache_epoch == s_view_epoch) {
         return;
+    }
+    /* A view-only change (filter/sort/collapse) reorders s_view but not s_rows, so the keyboard
+     * focus + shift-anchor (both s_view positions) can be re-pinned to the SAME row afterwards.
+     * Capture their target rows first; only meaningful when the row model itself is unchanged. */
+    const bool rows_unchanged = s_view_cache_valid &&
+                                s_view_cache_row_generation == s_row_cache_generation;
+    const int keep_focus_row =
+        (rows_unchanged && s_focus_view >= 0 && s_focus_view < s_view_count)
+            ? s_view[s_focus_view]
+            : -1;
+    const int keep_anchor_row =
+        (rows_unchanged && s_sel_anchor_row >= 0 && s_sel_anchor_row < s_view_count)
+            ? s_view[s_sel_anchor_row]
+            : -1;
+    if (!rows_unchanged) {
+        collapsed_prune_missing(); /* the row model changed -> forget collapse of vanished folders */
     }
     s_view_count = 0;
     s_view_cache_valid = true;
@@ -828,6 +869,24 @@ void build_view(void) {
             if (!view_push(s_child_scratch[k])) {
                 view_fallback_identity();
                 return;
+            }
+        }
+    }
+    /* Re-pin keyboard focus + shift-anchor onto their original rows in the reordered view. If a row
+     * was filtered out its old index is left in place (focus_clamp bounds it), never worse than before. */
+    if (keep_focus_row >= 0) {
+        for (int k = 0; k < s_view_count; ++k) {
+            if (s_view[k] == keep_focus_row) {
+                s_focus_view = k;
+                break;
+            }
+        }
+    }
+    if (keep_anchor_row >= 0) {
+        for (int k = 0; k < s_view_count; ++k) {
+            if (s_view[k] == keep_anchor_row) {
+                s_sel_anchor_row = k;
+                break;
             }
         }
     }

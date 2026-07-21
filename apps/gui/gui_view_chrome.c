@@ -11,6 +11,8 @@
 
 #include "clipboard/nt_clipboard.h" /* Copy name (U-02 T7) */
 
+#include "gui_shell_quote.h" /* POSIX shell-word quoting for "Show in Explorer" (U-02 T7) */
+
 #include "tp_core/tp_export.h" /* exporter registry -> target dropdown (export modal) */
 #include "tp_core/tp_journal.h" /* recovery status labels */
 
@@ -78,36 +80,65 @@ static bool gui_open_url(const char *url) {
 }
 
 /* Reveal `path` in the OS file manager, selecting the file (U-02 T7 "Show in Explorer"). Best-effort;
- * returns whether the reveal was dispatched. Windows selects the item; POSIX opens the containing dir. */
+ * returns whether the reveal was dispatched. Windows selects the item; POSIX opens the containing dir.
+ * Windows uses ShellExecuteW on the UTF-16 path (ANSI ShellExecuteA mangled non-ASCII paths -- e.g. a
+ * sprite under a Cyrillic folder); POSIX shell-quotes the path (gui_shell_squote) so an apostrophe or
+ * metacharacter in a filename can never break out of the command. */
 static bool gui_reveal_in_explorer(const char *path) {
     if (!path || path[0] == '\0') {
         return false;
     }
 #ifdef _WIN32
-    char win[1024];
-    (void)snprintf(win, sizeof win, "%s", path);
-    for (char *p = win; *p; ++p) {
-        if (*p == '/') {
-            *p = '\\'; /* explorer /select wants backslashes */
+    /* explorer /select needs a plain UTF-16 path -- NOT nt_utf8_path_to_utf16, which prepends the
+     * \\?\ long-path prefix that explorer's /select does not accept. Convert directly, then to
+     * backslashes, then build the /select,"<path>" argument without a shell. */
+    wchar_t wpath[TP_IDENTITY_PATH_MAX];
+    if (MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath,
+                            (int)(sizeof wpath / sizeof wpath[0])) == 0) {
+        return false; /* path too long for the buffer or invalid UTF-8 */
+    }
+    for (wchar_t *p = wpath; *p != L'\0'; ++p) {
+        if (*p == L'/') {
+            *p = L'\\';
         }
     }
-    char arg[1100];
-    (void)snprintf(arg, sizeof arg, "/select,\"%s\"", win);
-    HINSTANCE rc = ShellExecuteA(NULL, NULL, "explorer.exe", arg, NULL, SW_SHOWNORMAL);
+    wchar_t arg[TP_IDENTITY_PATH_MAX + 16];
+    const wchar_t *const prefix = L"/select,\"";
+    size_t o = 0;
+    for (const wchar_t *p = prefix; *p != L'\0'; ++p) {
+        arg[o++] = *p; /* 9 wchars into a >4096 buffer -- always fits */
+    }
+    for (const wchar_t *p = wpath; *p != L'\0'; ++p) {
+        if (o + 2U >= sizeof arg / sizeof arg[0]) {
+            return false; /* need room for this char + closing quote + NUL */
+        }
+        arg[o++] = *p;
+    }
+    arg[o++] = L'"';
+    arg[o] = L'\0';
+    HINSTANCE rc = ShellExecuteW(NULL, NULL, L"explorer.exe", arg, NULL, SW_SHOWNORMAL);
     return (INT_PTR)rc > 32;
 #elif defined(__APPLE__)
-    char cmd[1200];
-    (void)snprintf(cmd, sizeof cmd, "open -R '%s' >/dev/null 2>&1 &", path);
+    char quoted[TP_IDENTITY_PATH_MAX * 4 + 4]; /* worst case: every byte an escaped ' -> 4x, + quotes */
+    if (!gui_shell_squote(path, quoted, sizeof quoted)) {
+        return false;
+    }
+    char cmd[sizeof quoted + 32];
+    (void)snprintf(cmd, sizeof cmd, "open -R %s >/dev/null 2>&1 &", quoted);
     return system(cmd) == 0;
 #else
-    char dir[1024];
+    char dir[TP_IDENTITY_PATH_MAX];
     (void)snprintf(dir, sizeof dir, "%s", path);
     char *slash = strrchr(dir, '/');
     if (slash && slash != dir) {
         *slash = '\0';
     }
-    char cmd[1200];
-    (void)snprintf(cmd, sizeof cmd, "xdg-open '%s' >/dev/null 2>&1 &", dir[0] ? dir : "/");
+    char quoted[TP_IDENTITY_PATH_MAX * 4 + 4];
+    if (!gui_shell_squote(dir[0] ? dir : "/", quoted, sizeof quoted)) {
+        return false;
+    }
+    char cmd[sizeof quoted + 32];
+    (void)snprintf(cmd, sizeof cmd, "xdg-open %s >/dev/null 2>&1 &", quoted);
     return system(cmd) == 0;
 #endif
 }
