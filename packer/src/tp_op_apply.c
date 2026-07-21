@@ -12,8 +12,9 @@
  * mid-build failure never half-populates an animation. tp_op__test_set_alloc_fail
  * drives that staging path in the fault-injection test.
  *
- * Boundary: this engine is CORE-TESTED groundwork. The shipping CLI/GUI
- * mutators are NOT routed through it here -- that cutover comes later.
+ * Boundary: this is the single model-mutation core. Both shipping frontends
+ * reach it the same way -- tp_session_apply -> the tp_txn engine ->
+ * tp_op__apply_prevalidated; there is no separate CLI/GUI mutation path.
  */
 
 #include "tp_core/tp_operation.h"

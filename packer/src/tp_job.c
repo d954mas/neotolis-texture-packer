@@ -15,7 +15,9 @@
 #include "tp_core/tp_export.h"
 #include "tp_core/tp_export_run.h"
 #include "tp_core/tp_input.h"
+#include "tp_core/tp_pack_hash.h"
 #include "tp_job_owner_internal.h"
+#include "tp_pack_priv.h"
 
 typedef struct tp_job_export_atlas {
     int index;
@@ -39,6 +41,7 @@ typedef struct tp_live_job {
 
     tp_id128 atlas_id;
     tp_session_input_token input_token_at_start;
+    tp_id128 pack_input_hash;
     tp_pack_input input;
     tp_pack_settings settings;
     char *atlas_name;
@@ -132,13 +135,58 @@ static bool pack_job_cancel_requested(void *context) {
     return atomic_load_explicit(&job->cancelled, memory_order_relaxed);
 }
 
+typedef struct pack_hash_collect {
+    tp_id128 *hashes; /* one slot per sprite, in settings->sprites order */
+    int count;
+} pack_hash_collect;
+
+/* Per-image observer for the pack's single decode pass: stashes each sprite's
+ * semantic image hash so pack_worker folds pack_input_hash from the SAME pixels
+ * the pack consumed -- no second decode. */
+static void pack_worker_collect_image_hash(void *ctx, int sprite_index,
+                                           int width, int height,
+                                           const uint8_t *rgba) {
+    pack_hash_collect *collect = ctx;
+    if (sprite_index < 0 || sprite_index >= collect->count) {
+        return;
+    }
+    collect->hashes[sprite_index] =
+        tp_pack_semantic_image_hash(width, height, rgba);
+}
+
 static int pack_worker(void *context) {
     tp_live_job *job = context;
     tp_error error = {{0}};
     tp_result *result = NULL;
     const double start = job_now_ms();
-    const tp_status status = tp_pack_cancellable(&job->settings, job->arena, &result,
-                                                 pack_job_cancel_requested, job, &error);
+    /* Canonical pack_input_hash of this job's immutable start inputs (§10.2,
+     * decision 0004). The semantic image term is folded from the pack's OWN decode
+     * pass via the per-image observer, so a pack decodes each source exactly once
+     * (the purpose-built hash step no longer re-decodes every file). A NULL array
+     * (OOM) simply disables collection; the hash then stays nil, which is benign. */
+    const int sprite_count = job->settings.sprite_count;
+    tp_id128 *image_hashes =
+        sprite_count > 0 ? calloc((size_t)sprite_count, sizeof *image_hashes)
+                         : NULL;
+    pack_hash_collect collect = {image_hashes, sprite_count};
+    const tp_status status = tp_pack_cancellable_observed(
+        &job->settings, job->arena, &result, pack_job_cancel_requested, job,
+        image_hashes ? pack_worker_collect_image_hash : NULL, &collect, &error);
+    /* Fold the hash only for a COMPLETED pack: a failed/cancelled pack has no
+     * cacheable result and leaves the nil start hash (job is calloc'd). A failed
+     * decode already fails the pack itself, so the surviving nil-hash path is for a
+     * hash-metadata failure or a collector OOM -- both non-fatal: the pack stands. */
+    if (status == TP_STATUS_OK && result && image_hashes) {
+        tp_error hash_error = {{0}};
+        if (tp_pack_input_hash_from_images(
+                &job->settings,
+                job->preview_exporter_id[0] ? job->preview_exporter_id : NULL,
+                image_hashes, sprite_count, &job->pack_input_hash,
+                &hash_error) != TP_STATUS_OK) {
+            job->pack_input_hash = tp_id128_nil();
+        }
+    }
+    free(image_hashes);
     job->elapsed_ms = job_now_ms() - start;
     job->status = status;
     job->error = error;
@@ -468,6 +516,7 @@ tp_status tp_session_job_take_result(tp_session *session,
         out->pack.atlas_id = job->atlas_id;
         out->pack.missing_sources = job->input.missing_sources;
         out->pack.input_token_at_start = job->input_token_at_start;
+        out->pack.pack_input_hash = job->pack_input_hash;
         memcpy(out->pack.preview_exporter_id, job->preview_exporter_id,
                strlen(job->preview_exporter_id) + 1U);
         if (state == TP_SESSION_JOB_SUCCEEDED) {
@@ -491,4 +540,40 @@ void tp_session_job_result_destroy(tp_session_job_result *result) {
         tp_arena_destroy(result->pack.arena);
     }
     memset(result, 0, sizeof *result);
+}
+
+tp_status tp_session_pack_input_hash(tp_session *session, tp_id128 atlas_id,
+                                     struct tp_pack_image_hash_cache *cache,
+                                     tp_id128 *out_hash, tp_error *err) {
+    if (!session || !out_hash || tp_id128_is_nil(atlas_id)) {
+        return tp_error_set(
+            err, TP_STATUS_INVALID_ARGUMENT,
+            "pack input hash requires session, atlas id, and output");
+    }
+    *out_hash = tp_id128_nil();
+    tp_session_snapshot *snapshot = NULL;
+    tp_status status = tp_session_snapshot_create(session, &snapshot, err);
+    if (status != TP_STATUS_OK) {
+        return status;
+    }
+    tp_pack_input input;
+    memset(&input, 0, sizeof input);
+    tp_pack_settings settings;
+    memset(&settings, 0, sizeof settings);
+    status = tp_pack_input_build_snapshot(snapshot, atlas_id, &input, err);
+    if (status == TP_STATUS_OK) {
+        status =
+            tp_pack_settings_build_snapshot(snapshot, atlas_id, &settings, err);
+    }
+    if (status == TP_STATUS_OK) {
+        settings.sprites = input.descs;
+        settings.sprite_count = input.count;
+        /* Native pack_input_hash (no preview-exporter clamp) -- matches a native
+         * pack job. Preview-exporter-aware recompute is a later refinement (U). */
+        status =
+            tp_pack_input_hash_compute(&settings, NULL, cache, out_hash, err);
+    }
+    tp_pack_input_free(&input);
+    tp_session_snapshot_destroy(snapshot);
+    return status;
 }

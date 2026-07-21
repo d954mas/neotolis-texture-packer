@@ -115,11 +115,50 @@ Base (H0.3–H0.5 + F2 phase-gate audit + F3)
 - **B0 (pure-core import, no GUI surface) may run in parallel with phase U**,
   since it touches no canvas surface.
 - Base has landed H0.3–H0.5 (decision 0018 fallible builder containment; H0
-  complete 2026-07-20) and still owes a phase-gate audit of the landed F2
-  foundation before F3 is declared complete.
+  complete 2026-07-20) and the F2 phase-gate audit (closed 2026-07-21, see the
+  note below); the remaining Base work is the F3 packets.
 
 Where §3's older dependency prose below contradicts this checkpoint (F3-after-B1,
 no U phase), this checkpoint governs and that prose is historical.
+
+**2026-07-21 — F2 phase gate closed.** The landed F2 foundation was audited by a
+six-lens adversarial audit and every gate criterion is now pinned by registered
+executable tests; the fix packet landed as commits `1fbd4e6` (test-gap pins) and
+`f3ceecc` (structured diagnostic CLI/GUI parity + dormant `gui_parity` seam
+deleted). F2 is **DONE**; the Base remainder is the F3 packets. Night-session lead
+decisions:
+
+- **(D-N1)** F3-03's stale `B1-01` dependency is dropped per decision 0020.
+  `pack_input_hash` is defined over the current source model (raw RGBA + settings
+  + target adaptation) with a reserved version byte for future linked sources.
+- **(D-N4)** F3-03 lands **CORE-side** now (hash -> job hash field -> result
+  store + byte-budget LRU -> completion-sequence selection + undo cache probe)
+  while the GUI stale/preview **presentation** defers to `U-04`, because `U.4`
+  thumbnails consume the result store.
+
+**2026-07-21 — F3 core landed.** With F2 closed, the F3 packets landed their
+engine cores. **F3-01 closed:** R13's Pack/Export ownership rule now scans all
+three gui_pack TUs (`2a4f0ed`) — the last F3-01 remainder; reentrancy/disconnect
+were already recorded N/A by pull design. **F3-02 core:** the session-owned visible
+History DTO (`83c5597`) — `tp_model_history_count/position/entry_at` over the
+semantic edit spine plus `tp_session_history_count/at` interleaving non-undoable
+Save/refresh markers (FIFO-64 cap, txn id on `tp_diff_record`), pinned in
+`test_session.c`. **F3-03 core:** `tp_pack_input_hash` (versioned semantic hash +
+per-sprite change-detection fingerprint), the worker-thread hash on
+`tp_session_pack_job_result`, and `tp_pack_result_cache` (hash-keyed, one pinned
+active result, inactive `.ntpack` bytes re-inflated under exact byte-budget LRU;
+`b216526`, 116/116 debug, 115/115 release). Deferred to phase U (D-N4, owned by
+`U-04`): GUI stale/preview presentation (F3-03 T3 GUI half), the `preview_stale`
+boolean removal (T7), session-lifetime `tp_pack_image_hash_cache` wiring into
+interactive recompute paths with a mandatory size cap/eviction (hash-pixel-term
+fusion landed in `c56886a`; today the cache is unbounded by design and
+unreachable in production), feeding the result cache from
+`tp_session_job_take_result`, preview-exporter-aware hash recompute, and the
+History panel (U-14). Review finding as a U constraint:
+`tp_session_pack_input_hash` performs a full synchronous decode+hash of all
+sources on the calling thread, so U packets must never call it cold on the UI
+thread at owner scale (warm the fingerprint cache first or route it through a
+worker) — U-01's bench must measure this probe.
 
 ## 1. Назначение и правила исполнения
 
@@ -868,11 +907,20 @@ handles now exist. No actor thread or mailbox was introduced. Remaining work in
 this packet is product-level multi-host/controller behavior, not creation of a
 second session abstraction.
 
+**F3-01 closed (2026-07-21).** The last remainder — R13's
+GUI-must-not-re-own-Pack boundary rule — now scans all three gui_pack TUs
+(`gui_pack.c` + `gui_pack_jobs.c` + `gui_pack_preview.c`) with a scope-membership
+self-test (`2a4f0ed`), so the split-out session-job/preview adapters can no longer
+regress a thread/atomic/`tp_pack` authority past the check. The synchronous
+serialized session/ordering boundary was already delivered by the foundation, and
+callback reentrancy / subscriber disconnect stay N/A by pull design (see Completion
+evidence). Remaining multi-host/controller behavior is Epic A.
+
 **Goal / user outcome.** GUI edits, Undo/Redo, refresh и будущий MCP наблюдают один authoritative ordered commit stream.
 
 **Spec refs.** §4.6, §6.1, §7.1, §9.1–9.3, §21, §59 items 18–19.
 
-**Current code delta.** GUI pending flags работают на main thread (`apps/gui/gui_actions.c:33-47`), pack worker публикуется polling-ом (`apps/gui/gui_pack.c:522-624`), но general session abstraction отсутствует.
+**Current code delta.** Pack/export — session-owned job handles в `packer/src/tp_job.c`; GUI — тонкий poll/take adapter (`apps/gui/gui_pack_jobs.c`, `apps/gui/gui_pack_preview.c`).
 
 **Dependencies.** F2-05.
 
@@ -890,7 +938,7 @@ second session abstraction.
 
 **Exact tests / fault injection.** Producer ordering, callback reentrancy rejection, admission failure, worker completion after Undo/save/close, close/quiesce semantics, event subscriber disconnect.
 
-**Completion evidence.** Deterministic ordering/reentrancy transcript; synchronization tests where actual cross-thread producers exist; GUI baseline e2e зелёный.
+**Completion evidence.** Deterministic ordering/reentrancy transcript; synchronization tests where actual cross-thread producers exist; GUI baseline e2e зелёный. «Callback reentrancy rejection» и «event subscriber disconnect» — N/A by design: session event surface — pull model (`tp_session_events_after` + resync), client push callbacks не существуют.
 
 **Non-goals / blockers.** Network transport и ownership handoff входят A.
 
@@ -903,6 +951,18 @@ P-UNDO is **DONE (2026-07-17)**: normal Undo/Redo appends a compact versioned
 `HISTORY` transition; only unsupported or oversized diffs use deterministic
 full-checkpoint fallback. Mixed replay, sync-failure rollback and size/admission
 budgets are test-pinned.
+
+**Core landed (2026-07-21, `83c5597`).** The session-owned visible History DTO is
+live: task 3 (non-undoable Save checkpoints — revision + semantic state identity +
+canonical path, recorded only at the successful-publish choke point §9.2 — plus
+runtime refresh rows §9.3) and the task-5 **core** enumerable DTO
+(`tp_model_history_count/position/entry_at` projecting label/author/transaction_id/
+revision/cursor from `tp_history`, interleaved with `tp_session_history_count/at`
+markers that anchor to cursor depth under a FIFO-64 cap + window-tied eviction; txn
+id now rides `tp_diff_record`) landed on top of the earlier foundation for tasks 1,
+2, 4 (reopen-reset half) and 6; pinned by 8 new `test_session.c` cases. The History
+**panel** that consumes this DTO is **U-14**; ownership-transfer history
+preservation (task 4 remainder) is **Epic A**.
 
 **Goal / user outcome.** Один Ctrl+Z отменяет целую human/agent transaction; save виден checkpoint-ом, но не Undo step.
 
@@ -939,13 +999,33 @@ the GUI refresh epochs and model-only preview generation are deleted. Full
 semantic `pack_input_hash`, result ordering/cache and byte-budget LRU remain
 planned product work.
 
+**Core landed (2026-07-21, `b216526`).** Per task: **T1** `tp_pack_hash` —
+canonical versioned semantic `pack_input_hash` (version byte + reserved
+linked-source category per decision 0020) with a per-sprite
+`semantic_image_hash`(w,h,RGBA8) fingerprinted by `(path,size,mtime)` for change
+detection only (identical pixels re-saved under a new mtime keep the hash); **T2**
+the pack job computes the hash on the worker thread over immutable start inputs and
+carries it on `tp_session_pack_job_result`, plus the `tp_session_pack_input_hash()`
+recompute-without-packing seam; **T4/T5** `tp_pack_result_cache` — hash-keyed, one
+pinned active decompressed result, inactive entries retained as their `.ntpack`
+bytes and re-inflated via `tp_pack_read_memory` on hit, exact inactive-byte LRU
+accounting under a byte budget, corrupt entry contained, authoritative = explicit
+hash selection else highest caller-supplied completion sequence (decision 0004);
+**T6 core** probe — undo/redo recompute + cache hit/miss both leave no job running
+(no auto-pack). Suites `tp_pack_input_hash`, `tp_pack_result_cache`,
+`tp_job_input_token` extension (116/116 debug, 115/115 release). Deferred to
+**U-04**: **T3** GUI stale/preview presentation half and **T7** `preview_stale`
+boolean removal, plus three U-wiring items — the session-lifetime image-hash cache
++ fusing the hash pixel term with the worker's decode, feeding the cache from
+`tp_session_job_take_result`, and preview-exporter-aware hash recompute.
+
 **Goal / user outcome.** После Undo предыдущий preview появляется сразу из cache; завершившийся старый pack остаётся видимым и честно помечается stale.
 
 **Spec refs.** §10–10.5, §54 Phase 2 items 5–7, §59 items 20–32.
 
-**Current code delta.** Один result slot на atlas (`apps/gui/gui_pack.c:34-49`), snapshot compare `model_changed` (`:272-285`), refresh epoch latch (`apps/gui/gui_actions.c:54-60,758,807,905`).
+**Current code delta.** Refresh epoch latch удалён из `apps/gui` (2026-07-16 foundation work); GUI-side остаются только `preview_stale` boolean (`apps/gui/gui_project.c`) и один result slot на atlas (`apps/gui/gui_pack.c`).
 
-**Dependencies.** F3-01, B1-01, and decision 0004 Pack supersession policy.
+**Dependencies.** F3-01 and decision 0004 Pack supersession policy. `B1` is not a prerequisite (decision 0020): `pack_input_hash` carries a version byte / reserved input categories so future B1 linked sources extend it additively.
 
 **Ordered bounded tasks.**
 
@@ -1073,6 +1153,7 @@ latency/frame measurement, so every later U packet is measured, not vibed.
 2. Atlas level: all pages laid out spatially at once; page tabs removed; double-click page = camera zoom to texels (a camera move, not a mode change); sprites selectable with tree/inspector sync. [gui]
 3. Serve overview/card thumbnails from the pack-result store mips without full-resolution residency (§10.4). [core]
 4. Breadcrumbs `Project > <atlas>`; double-click group-card descends, breadcrumb ascends. [gui]
+5. Consume `tp_pack_result_cache` (D-N4 handoff from the F3-03 core): feed the store from `tp_session_job_take_result`, present hash-keyed current/stale results, and retire the GUI-local `preview_stale` boolean. [gui][core]
 
 **Public/schema impact.** Consumes the result-store thumbnail API; no project schema change.
 
@@ -1292,7 +1373,7 @@ latency/frame measurement, so every later U packet is measured, not vibed.
 
 **Spec refs.** §6 (op registry + argument schema, command palette), §9/§9.2 (visible history, save checkpoints), §7 (author identity).
 
-**Dependencies.** F2, F3-02 (semantic history). [gui][F2] [Δ A5/A6 → §6/§7]
+**Dependencies.** F2, F3-02 (semantic history — the History panel v1 consumes the session-owned `tp_session_history_count/at` DTO landed in `83c5597`). [gui][F2] [Δ A5/A6 → §6/§7]
 
 **Ordered bounded tasks.**
 
@@ -1306,7 +1387,7 @@ latency/frame measurement, so every later U packet is measured, not vibed.
 
 **Completion evidence.** Every operation reachable via the palette; Edit menu + History show named labels; the author field is populated on every entry.
 
-**Non-goals / blockers.** Authorship badges as a live surface are UX-E (Epic A); no macro/scripting.
+**Non-goals / blockers.** Authorship badges as a live surface are UX-E (Epic A); no macro/scripting. If U-01 measurements show History panel render cost, replace per-row `tp_session_history_at` enumeration with a batch/single-pass snapshot (the per-row walk is O(edits × markers), bounded ~3-10 ms at the 256/64 ceiling — fine today, avoidable later).
 
 ### Non-goals (section U)
 

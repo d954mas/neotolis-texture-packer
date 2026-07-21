@@ -40,14 +40,75 @@ typedef struct tp_session_recovery_health {
     tp_status first_cause;
     bool has_last_durable_revision;
     int64_t last_durable_revision;
-    /* Unix seconds when known. The synchronous recovery writer currently has
-     * no trustworthy injected clock, so it reports this explicitly unknown. */
+    /* Unix seconds when known. RESERVED: no producer sets this true today --
+     * the synchronous recovery writer has no trustworthy injected clock, so
+     * tp_session.c hard-codes has_last_durable_time to false. It stays reserved
+     * until a clock is injected; readers need not hunt for a producer. */
     bool has_last_durable_time;
     int64_t last_durable_time;
     /* Monotonic for this session lifetime. A changed value tells a polling
      * client to refresh the state notice; wrap is saturated at UINT64_MAX. */
     uint64_t generation;
 } tp_session_recovery_health;
+
+/* ---- shared visible History (F3, master spec §8-§9.5) -------------------- *
+ * One session-owned enumerable History surface shared by every view (GUI/MCP/Dev
+ * API). It is a pull model: a client counts rows and copies each out; there are no
+ * push callbacks, so the F3-01 "subscriber disconnect / callback reentrancy" faults
+ * are N/A here (see the event API note below).
+ *
+ * DESIGN. The model's in-memory undo/redo stack (tp_diff.h) stays the SINGLE
+ * authority for edit rows and the cursor -- the session keeps NO second copy.
+ * Undo/Redo MOVE THE CURSOR; they do not add rows (a row appears once, when its
+ * transaction commits). `undoable`/`undone` on each edit row project the cursor:
+ * rows below it are undoable, rows in the redo branch read `undone`. This is the
+ * §8/§9 semantics -- a new edit after Undo discards the redo branch, so those rows
+ * simply disappear from the enumeration. The UNDO/REDO kinds are reserved (kept for
+ * the append-only enum); the cursor model never materializes them as rows.
+ *
+ * Save checkpoints (§9.2) and runtime-source refreshes (§9.3) are NON-undoable
+ * markers the session interleaves into the spine. They never change revision, the
+ * cursor, or the edit-record budget. Markers are session-side bounded state: a
+ * fixed FIFO cap, plus eviction tied to the edit window -- a marker whose anchoring
+ * edit record is FIFO-evicted or redo-discarded is dropped with it, so markers can
+ * never grow unbounded. A failed Save records no checkpoint. Normal reopen starts a
+ * fresh (empty) History. */
+typedef enum tp_session_history_kind {
+    TP_SESSION_HISTORY_EDIT = 1,
+    TP_SESSION_HISTORY_UNDO = 2,             /* reserved: cursor model, not emitted */
+    TP_SESSION_HISTORY_REDO = 3,             /* reserved: cursor model, not emitted */
+    TP_SESSION_HISTORY_SAVE_CHECKPOINT = 4,
+    TP_SESSION_HISTORY_RUNTIME_REFRESH = 5
+} tp_session_history_kind;
+
+/* Copy-out display bounds for the variable-length transaction strings. Longer
+ * values are truncated for the visible panel; the author id used for A6 badging
+ * fits comfortably ("human", "agent(<id>)"). */
+#define TP_SESSION_HISTORY_LABEL_MAX 256
+#define TP_SESSION_HISTORY_AUTHOR_MAX 128
+
+/* Immutable value DTO copied out by tp_session_history_at (no borrowed pointers
+ * cross the boundary, following tp_session_recovery_health). */
+typedef struct tp_session_history_entry {
+    tp_session_history_kind kind;
+    /* EDIT: the revision the transaction produced. Marker: the model revision at
+     * the marker (a marker never advances revision, so it equals the row below). */
+    int64_t revision;
+    /* EDIT rows only; markers leave these empty. `author` is A6-ready -- it passes
+     * through exactly what the transaction carried (a future MCP writes its own). */
+    char label[TP_SESSION_HISTORY_LABEL_MAX];
+    char author[TP_SESSION_HISTORY_AUTHOR_MAX];
+    char transaction_id[33];
+    /* SAVE_CHECKPOINT (§9.2): the saved state identity + canonical path. Nil id /
+     * empty path on every other kind. */
+    tp_id128 state_identity;
+    char path[TP_IDENTITY_PATH_MAX];
+    /* Cursor projection. An EDIT below the cursor is `undoable`; an EDIT in the redo
+     * branch is `undone`. A marker is never undoable and reads `undone` only while it
+     * sits above the cursor (its saved/refreshed state is ahead of the current one). */
+    bool undoable;
+    bool undone;
+} tp_session_history_entry;
 
 /* Session calls are synchronous and serialized. They are intentionally
  * non-reentrant: side-effect/journal callbacks invoked during admission must not
@@ -203,11 +264,26 @@ bool tp_session_can_undo(const tp_session *session);
 bool tp_session_can_redo(const tp_session *session);
 int tp_session_undo_depth(const tp_session *session);
 int tp_session_redo_depth(const tp_session *session);
+
+/* Shared visible-History enumeration (see the DTO block above). `count` is the
+ * total rows (edit records + interleaved markers); `at` copies the index-th row
+ * (0-based, oldest first) into *out. Out-of-range index -> TP_STATUS_OUT_OF_BOUNDS.
+ * The row set is a snapshot of the moment of the call; the next mutation may change
+ * it, so re-count before re-enumerating. */
+int tp_session_history_count(const tp_session *session);
+tp_status tp_session_history_at(const tp_session *session, int index,
+                                tp_session_history_entry *out, tp_error *err);
+
 uint64_t tp_session_event_sequence(const tp_session *session);
 
 /* Returns committed events after `after_sequence`. If the bounded event window no
  * longer contains the requested sequence, returns zero events and asks the caller
- * to resync from an owned snapshot. */
+ * to resync from an owned snapshot.
+ *
+ * PULL MODEL (F3-01 W4): events are pulled here (events_after) with snapshot resync
+ * on window overflow -- there is no client push callback to register. So that
+ * packet's "event subscriber disconnect" and "callback reentrancy rejection" faults
+ * are N/A by design: nothing to disconnect, and no re-entrant callback can occur. */
 tp_status tp_session_events_after(const tp_session *session, uint64_t after_sequence,
                                   tp_session_event *out, size_t capacity,
                                   size_t *out_count, bool *out_resync_required,

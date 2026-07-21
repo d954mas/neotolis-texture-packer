@@ -151,7 +151,10 @@ add_test(NAME tp_job_owner COMMAND tp_test_job_owner)
 # Architecture foundation job freshness: a result captures both immutable model
 # and source-runtime generations. Generation zero is data, never a stale sentinel.
 add_executable(tp_test_job_input_token test_job_input_token.c)
-target_link_libraries(tp_test_job_input_token PRIVATE tp_core unity)
+# tp_build: F3-03 T2 extension calls tp_session_pack_input_hash (job/pack surface).
+target_link_libraries(tp_test_job_input_token PRIVATE tp_build unity)
+# ../src: single-decode seam (tp_image_internal.h) + scratch teardown (tp_fs_internal.h).
+target_include_directories(tp_test_job_input_token PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_compile_options(tp_test_job_input_token PRIVATE -U_DLL)
 nt_set_warning_flags(tp_test_job_input_token)
 add_test(NAME tp_job_input_token COMMAND tp_test_job_input_token)
@@ -427,6 +430,30 @@ target_compile_options(tp_test_pack PRIVATE -U_DLL)
 nt_set_warning_flags(tp_test_pack)   # AGENTS.md invariant: our test TUs too
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_pack_test")
 add_test(NAME tp_pack COMMAND tp_test_pack "${CMAKE_BINARY_DIR}/tp_pack_test")
+
+# F3-03 T1: canonical semantic pack_input_hash + per-file image-hash cache.
+# Pure tp_core; links stb_image_write to lay down a real PNG for the
+# identical-pixels-changed-mtime case. Needs a scratch dir (argv[1]).
+add_executable(tp_test_pack_input_hash test_pack_input_hash.c)
+target_link_libraries(tp_test_pack_input_hash PRIVATE tp_core unity stb_image_write)
+target_include_directories(tp_test_pack_input_hash PRIVATE
+    $<TARGET_PROPERTY:stb_image_write,INTERFACE_INCLUDE_DIRECTORIES>)
+target_compile_options(tp_test_pack_input_hash PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_pack_input_hash)   # AGENTS.md invariant: our test TUs too
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_pack_input_hash_test")
+add_test(NAME tp_pack_input_hash COMMAND tp_test_pack_input_hash "${CMAKE_BINARY_DIR}/tp_pack_input_hash_test")
+
+# F3-03 T4/T5/T6: memory-only pack-result cache (byte-budget LRU + selection) and
+# the Undo/Redo cache probe. Links tp_build so it can produce real .ntpack
+# artifacts via tp_pack (the binary is also its own build worker, dispatched in
+# main). Needs a scratch dir (argv[1]).
+add_executable(tp_test_pack_result_cache test_pack_result_cache.c)
+target_link_libraries(tp_test_pack_result_cache PRIVATE tp_build unity)
+target_include_directories(tp_test_pack_result_cache PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_options(tp_test_pack_result_cache PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_pack_result_cache)   # AGENTS.md invariant: our test TUs too
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_pack_result_cache_test")
+add_test(NAME tp_pack_result_cache COMMAND tp_test_pack_result_cache "${CMAKE_BINARY_DIR}/tp_pack_result_cache_test")
 
 # H0.3-a: versioned build-worker protocol codec (decision 0018). Encode/decode
 # round-trip across representative inputs plus the fail-closed matrix (truncated,

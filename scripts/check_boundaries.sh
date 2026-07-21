@@ -112,7 +112,7 @@ fi
 #    assigning into the loaded project's arrays (R7b), nor through an alias into it (R7c).
 #    Scoped to the mutation-surface TUs (mirrors R6's cli_mutate.c scope). gui_selftest.c (a
 #    boundary-excluded dev-seam test harness that pokes internals -- like the CLI's tests) and
-#    main.c (app shell + the --parity dev seam) are out of scope, as is the sanctioned
+#    main.c (app shell) are out of scope, as is the sanctioned
 #    tp_project_atlas_seed_default_target lifecycle call. (H/P1-2 retired the former
 #    animation-rename direct-write exception: animation rename
 #    now routes through TP_OP_ANIMATION_RENAME.) A legit exception carries a "boundary-ok:" note
@@ -269,9 +269,15 @@ fi
 #     Worker/thread/atomic job authority belongs to tp_build (tp_job.c), never
 #     to the frontend again. Synchronous selftest helpers must drain this same
 #     typed path; direct input/settings assembly or Pack/Export algorithms are
-#     not a sanctioned second route.
+#     not a sanctioned second route. Scoped to all three gui_pack orchestration
+#     TUs -- gui_pack.c (result/ref-index storage), gui_pack_jobs.c (the
+#     session-job start/poll/cancel adapter that replaced the old worker
+#     thread), and gui_pack_preview.c (preview slot + loss-diff cache) -- so a
+#     thread/atomic/tp_pack authority regression re-introduced into either
+#     split-out file is caught, not only a regression in gui_pack.c.
+_gui_job_srcs="apps/gui/gui_pack.c apps/gui/gui_pack_jobs.c apps/gui/gui_pack_preview.c"
 _gui_job_owner='(^|[^A-Za-z0-9_])(thrd_(create|join)|atomic_[A-Za-z0-9_]*|_Atomic|pack_worker|export_worker|s_job(_active)?|tp_pack[[:space:]]*\(|tp_pack_input_build[A-Za-z0-9_]*[[:space:]]*\(|tp_pack_settings_build[A-Za-z0-9_]*[[:space:]]*\(|tp_export_snapshot_job_[A-Za-z0-9_]*[[:space:]]*\(|tp_pack_sprite_desc)([^A-Za-z0-9_]|$)'
-r13=$(grep -nE "$_gui_job_owner" apps/gui/gui_pack.c 2>/dev/null |
+r13=$(grep -nE "$_gui_job_owner" $_gui_job_srcs 2>/dev/null |
     grep -v 'boundary-ok:')
 [ -n "$r13" ] && hit "R13 GUI owns Pack/Export worker state (use tp_session job API)" "$r13"
 if ! printf '    static _Atomic int s_job_active;\n    thrd_create(&thread, pack_worker, ctx);\n    tp_pack(&settings, arena, &result, &err);\n' |
@@ -281,6 +287,44 @@ fi
 if printf '    tp_session_pack_job_start(session, &request, &err);\n    tp_session_job_poll(session, &progress, &err);\n' |
     grep -qE "$_gui_job_owner"; then
     hit "R13-selftest" "R13 detector false-positives on typed job orchestration"
+fi
+
+# Self-test: prove the file-scope extension itself is intact -- $_gui_job_srcs
+# (the exact argument list r13 greps) must still name both split-out TUs, so a
+# future edit that quietly shrinks the list back to gui_pack.c alone is caught
+# here rather than silently losing coverage of the split files.
+case " $_gui_job_srcs " in
+    *' apps/gui/gui_pack_jobs.c '*) ;;
+    *) hit "R13-selftest" "R13 file scope no longer includes apps/gui/gui_pack_jobs.c" ;;
+esac
+case " $_gui_job_srcs " in
+    *' apps/gui/gui_pack_preview.c '*) ;;
+    *) hit "R13-selftest" "R13 file scope no longer includes apps/gui/gui_pack_preview.c" ;;
+esac
+
+# Self-test: prove the detector, invoked exactly as r13 invokes it (grep across
+# the full $_gui_job_srcs argument list plus one extra file), still fires on a
+# violation seeded into a scratch file named after a split-out TU and still
+# ignores the legitimate session-job API form in that same multi-file scan.
+_r13_dir=$(mktemp -d 2>/dev/null)
+if [ -z "$_r13_dir" ] || [ ! -d "$_r13_dir" ]; then
+    hit "R13-selftest" "R13 self-test could not create a scratch dir (mktemp failed)"
+else
+    trap 'rm -rf "$_r13_dir"' EXIT
+    printf '    thrd_create(&s_job.thread, pack_worker, ctx);\n' >"$_r13_dir/gui_pack_jobs.c"
+    r13_scope=$(grep -nE "$_gui_job_owner" $_gui_job_srcs "$_r13_dir/gui_pack_jobs.c" 2>/dev/null |
+        grep -v 'boundary-ok:')
+    if ! printf '%s\n' "$r13_scope" | grep -q "$_r13_dir/gui_pack_jobs.c"; then
+        hit "R13-selftest" "R13 detector failed to catch a seeded violation in a split-out-TU scan"
+    fi
+    printf '    tp_session_pack_job_start(session, &request, &error);\n' >"$_r13_dir/gui_pack_preview.c"
+    r13_scope2=$(grep -nE "$_gui_job_owner" "$_r13_dir/gui_pack_preview.c" 2>/dev/null |
+        grep -v 'boundary-ok:')
+    if [ -n "$r13_scope2" ]; then
+        hit "R13-selftest" "R13 detector false-positives on typed job orchestration in a split-out-TU scan"
+    fi
+    rm -rf "$_r13_dir"
+    trap - EXIT
 fi
 
 # 14. Core semantic-diff admission is the single no-change owner. The deleted
@@ -447,7 +491,7 @@ tp_diff_internal        tp_diff_entity|tp_diff_apply|tp_diff_capture|tp_history|
 tp_op_internal          tp_op_catalog|tp_op_validate|tp_op_validate_atlas|tp_op_validate_source_sprite|tp_op_validate_animation|tp_op_validate_target|tp_op_apply|tp_op_build|tp_op_encode|tp_model_journal|tp_txn_encode|tp_txn_apply|tp_txn_lower|tp_txn_parse|tp_txn_result
 tp_op_validate_family_internal tp_op_validate|tp_op_validate_atlas|tp_op_validate_source_sprite|tp_op_validate_animation|tp_op_validate_target
 tp_encode_internal      tp_op_encode|tp_txn_encode|tp_txn_apply
-tp_fs_internal          tp_fs_io|tp_fs_win32|tp_fs_posix|tp_build_worker|tp_export_defold|tp_export_json_neotolis|tp_export_png|tp_identity|tp_image|tp_journal_io|tp_pack_read|tp_project_parse|tp_project_save|tp_project_lease|tp_recovery|tp_recovery_backend_win32|tp_recovery_scan|tp_recovery_store|tp_scan
+tp_fs_internal          tp_fs_io|tp_fs_win32|tp_fs_posix|tp_build_worker|tp_export_defold|tp_export_json_neotolis|tp_export_png|tp_identity|tp_image|tp_journal_io|tp_pack_hash|tp_pack_read|tp_project_parse|tp_project_save|tp_project_lease|tp_recovery|tp_recovery_backend_win32|tp_recovery_scan|tp_recovery_store|tp_scan
 tp_pack_constraints_internal tp_pack_constraints|tp_op_validate_atlas|tp_op_validate_source_sprite|tp_pack|tp_project_identity|tp_project_parse|tp_validate_target_settings
 tp_history_codec_internal tp_history|tp_history_codec|tp_history_codec_read|tp_model_journal|tp_txn_apply
 tp_journal_internal     tp_journal|tp_journal_io|tp_journal_read|tp_journal_wire|tp_history|tp_model|tp_model_journal|tp_txn_apply|tp_recovery_backend_posix|tp_recovery_backend_win32|tp_recovery_claim|tp_recovery_scan|tp_recovery_store
