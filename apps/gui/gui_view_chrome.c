@@ -69,12 +69,20 @@ static bool gui_open_url(const char *url) {
     HINSTANCE rc = ShellExecuteA(NULL, "open", url, NULL, NULL, SW_SHOWNORMAL);
     return (INT_PTR)rc > 32; /* ShellExecute returns a value > 32 on success */
 #elif defined(__APPLE__)
-    char cmd[1200];
-    (void)snprintf(cmd, sizeof cmd, "open '%s' >/dev/null 2>&1 &", url);
+    char quoted[1200 * 4 + 4]; /* worst case: every byte an escaped ' -> 4x, + quotes */
+    if (!gui_shell_squote(url, quoted, sizeof quoted)) {
+        return false;
+    }
+    char cmd[sizeof quoted + 32];
+    (void)snprintf(cmd, sizeof cmd, "open %s >/dev/null 2>&1 &", quoted);
     return system(cmd) == 0;
 #else
-    char cmd[1200];
-    (void)snprintf(cmd, sizeof cmd, "xdg-open '%s' >/dev/null 2>&1 &", url);
+    char quoted[1200 * 4 + 4]; /* worst case: every byte an escaped ' -> 4x, + quotes */
+    if (!gui_shell_squote(url, quoted, sizeof quoted)) {
+        return false;
+    }
+    char cmd[sizeof quoted + 32];
+    (void)snprintf(cmd, sizeof cmd, "xdg-open %s >/dev/null 2>&1 &", quoted);
     return system(cmd) == 0;
 #endif
 }
@@ -96,7 +104,8 @@ static bool gui_reveal_in_explorer(const char *path) {
     wchar_t wpath[TP_IDENTITY_PATH_MAX];
     const int wn = MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, (int)(sizeof wpath / sizeof wpath[0])); /* boundary-ok: explorer /select display arg, not fs path policy */
     if (wn == 0) {
-        return false; /* path too long for the buffer or invalid UTF-8 */
+        return false; /* dwFlags=0 replaces bad UTF-8 with U+FFFD, so a 0 return here means the path
+                       * did not fit wpath (over-length) -- skip the reveal rather than open a stub */
     }
     for (wchar_t *p = wpath; *p != L'\0'; ++p) {
         if (*p == L'/') {
@@ -129,7 +138,10 @@ static bool gui_reveal_in_explorer(const char *path) {
     return system(cmd) == 0;
 #else
     char dir[TP_IDENTITY_PATH_MAX];
-    (void)snprintf(dir, sizeof dir, "%s", path);
+    const int dn = snprintf(dir, sizeof dir, "%s", path);
+    if (dn < 0 || dn >= (int)sizeof dir) {
+        return false; /* truncated: revealing the wrong (chopped) folder is worse than not opening */
+    }
     char *slash = strrchr(dir, '/');
     if (slash && slash != dir) {
         *slash = '\0';
@@ -193,7 +205,7 @@ static void edit_items(nt_ui_menu_ctx_t *m) {
 }
 /* Atlas menu (U-02 T6): Pack was previously reachable only via Ctrl+P / the canvas strip. */
 static void atlas_items(nt_ui_menu_ctx_t *m) {
-    nt_ui_menu_item_opts_t p = {.shortcut = "Ctrl+P", .disabled = !s_pack_has_sources};
+    nt_ui_menu_item_opts_t p = {.shortcut = "Ctrl+P", .disabled = !s_pack_has_sources || gui_pack_async_busy()};
     if (nt_ui_menu_item_ex(m, MK_PACK, "Pack", p)) {
         s_pending_pack = true;
     }
