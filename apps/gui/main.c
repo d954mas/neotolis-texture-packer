@@ -80,6 +80,7 @@
 #include "gui_startup.h"  /* pure startup open/defer guard (gui_startup_decide) */
 #include "gui_selftest.h" /* dev seam: headless self-test (compiled out unless flag on) */
 #include "gui_shot.h"     /* dev seam: --shot screenshot capture */
+#include "gui_bench.h"    /* dev seam: --bench-perf headless perf probe */
 #include "gui_view_canvas.h"   /* center canvas view (declare_canvas) */
 #include "gui_view_chrome.h"   /* menubar/menus/context menu/tooltips/modals (frame() entry points) */
 #include "gui_view_lists.h"    /* left panel view (declare_left_panel) */
@@ -314,8 +315,8 @@ static void handle_canvas_input(void) {
 /* Global shortcuts routed through the SAME actions as the menus. Text-input focus swallows
  * them first (no accidental global actions while typing); an open modal blocks them too. */
 static void handle_shortcuts(void) {
-    if (gui_shot_active()) {
-        return; /* headless capture: the user's live typing must not trigger hotkeys mid-shot */
+    if (gui_shot_active() || gui_bench_active()) {
+        return; /* headless capture/probe: the user's live typing must not trigger hotkeys mid-run */
     }
     if (nt_ui_input_any_focused(s_ctx) || s_confirm_open || s_about_open || s_export_open || s_recovery_open) {
         return;
@@ -428,6 +429,7 @@ static void frame(void) {
         }
     }
     auto_pack_tick(); /* dev (--auto-pack): drive a headless async pack for the heartbeat proof */
+    gui_bench_tick(); /* dev (--bench-perf): drive the perf-probe state machine; no-op unless active */
 
     if (nt_input_key_is_pressed(NT_KEY_ESCAPE)) {
         if (s_edit_kind != EDIT_NONE) {
@@ -697,6 +699,7 @@ static void frame(void) {
     selftest_post_draw(); /* read back the drawn overlay before the buffers swap */
 #endif
     gui_shot_post_draw(); /* screenshot mode: full-frame PNG capture at the same pre-swap point */
+    gui_bench_post_draw(); /* perf-probe mode: accrue frame-time samples, write output, then quit */
 
     nt_window_swap_buffers();
 }
@@ -730,6 +733,8 @@ static int gui_main_utf8(int argc, char *argv[]) {
     for (int i = 1; i < argc; i++) {
         if (gui_shot_parse_arg(argv[i])) {
             /* consumed by the dev screenshot seam (--shot/--size/--scale/--shot-stale/--shot-packing) */
+        } else if (gui_bench_parse_arg(argv[i])) {
+            /* consumed by the dev perf-probe seam (--bench-perf[=out.txt]) */
         } else if (strcmp(argv[i], "--auto-pack") == 0) {
             s_auto_pack = true; /* dev: headless async pack of atlas 0 for the heartbeat proof */
         } else if (strcmp(argv[i], "--selftest-crash") == 0) {
@@ -737,6 +742,10 @@ static int gui_main_utf8(int argc, char *argv[]) {
         } else if (proj_arg == NULL) {
             proj_arg = argv[i];
         }
+    }
+    /* dev (--bench-perf): open the owner-scale bench fixture unless a project path was passed. */
+    if (gui_bench_active() && proj_arg == NULL) {
+        proj_arg = gui_bench_default_project();
     }
 
     /* D2 crash handler + D1 file log: install for a real windowed run ONLY -- the --shot capture seam
@@ -746,8 +755,10 @@ static int gui_main_utf8(int argc, char *argv[]) {
      * default (identical to not-installed, no ntpacker dump) -- acceptable, since the value is catching
      * interactive-session crashes, and the dev seams must stay clean. Both no-op under
      * NTPACKER_GUI_HEADLESS and if the app-data dir can't be created; crash install must NOT call nt_log
-     * (see gui_crash_install). --selftest-crash is not a --shot arg, so install still runs for it. */
-    if (!gui_shot_active()) {
+     * (see gui_crash_install). --selftest-crash is not a --shot arg, so install still runs for it. The
+     * --bench-perf probe skips this block too: it must stay side-effect-free and never block on the
+     * crash-report native modal. */
+    if (!gui_shot_active() && !gui_bench_active()) {
         gui_crash_install();
         gui_log_file_install();
 #ifndef NTPACKER_GUI_SELFTEST
@@ -849,9 +860,9 @@ static int gui_main_utf8(int argc, char *argv[]) {
             /* R6b: collect orphan journals and open the startup modal. The
              * live editor stays fresh; recovery resolves only to disk. */
             gui_recovery_list rlist;
-            /* Screenshot automation cannot dismiss a modal, so it skips the
+            /* Screenshot automation + the perf probe cannot dismiss a modal, so they skip the
              * startup scan without changing recovery ownership. */
-            if (!gui_shot_active() && gui_recovery_collect(&rlist) > 0) {
+            if (!gui_shot_active() && !gui_bench_active() && gui_recovery_collect(&rlist) > 0) {
                 gui_actions_open_recovery(&rlist);
             }
         }
@@ -972,7 +983,9 @@ static int gui_main_utf8(int argc, char *argv[]) {
      * crash there would re-create the just-cleared marker -> a false "crashed" next launch. Only a fully
      * clean run reaches here; remove() on the pre-resolved path is safe post-shutdown. */
     gui_crash_clear_marker();
-    return 0;
+    /* 0 for a normal run; --bench-perf returns non-zero iff an invariant assert or a hard fixture-load
+     * failure fired (advisory timings never fail the run). */
+    return gui_bench_exit_code();
 }
 // #endregion
 
