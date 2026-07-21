@@ -118,6 +118,47 @@ static void add_sources_and_build(tp_id128 *folder_id, tp_id128 *file_id) {
     }
 }
 
+/* Same fixture but with the FILE source at index 0 and the FOLDER source at index 1
+ * (reverse add order). Removing source index 0 then shifts the folder's stable source
+ * index 1 -> 0 -- the shift the id-stable re-resolution + the TYPE sort must survive. */
+static void add_sources_reversed_and_build(tp_id128 *folder_id,
+                                           tp_id128 *file_id) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas = tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const tp_id128 atlas_id = atlas->id;
+
+    TEST_ASSERT_EQUAL_INT(
+        GUI_ADD_ADDED,
+        gui_project_add_source_kind(atlas_id,
+                                    tp_session_snapshot_revision(snapshot),
+                                    s_solo, TP_SOURCE_KIND_FILE));
+    snapshot = gui_project_snapshot();
+    TEST_ASSERT_EQUAL_INT(
+        GUI_ADD_ADDED,
+        gui_project_add_source_kind(atlas_id,
+                                    tp_session_snapshot_revision(snapshot),
+                                    s_pack_dir, TP_SOURCE_KIND_FOLDER));
+
+    gui_project_invalidate_sources();
+    s_sel_atlas = 0;
+    build_rows();
+
+    snapshot = gui_project_snapshot();
+    const tp_snapshot_source *file =
+        tp_session_snapshot_source_at(snapshot, atlas_id, 0);
+    const tp_snapshot_source *folder =
+        tp_session_snapshot_source_at(snapshot, atlas_id, 1);
+    TEST_ASSERT_NOT_NULL(file);
+    TEST_ASSERT_NOT_NULL(folder);
+    if (file_id) {
+        *file_id = file->id;
+    }
+    if (folder_id) {
+        *folder_id = folder->id;
+    }
+}
+
 /* Row index (in s_rows) of the leaf whose export name matches, or -1. */
 static int find_row_by_name(const char *name) {
     for (int i = 0; i < s_row_count; ++i) {
@@ -336,6 +377,236 @@ void test_selection_revalidate_reresolves_primary_and_prunes_multi(void) {
         multi_sel_contains_ref(s_rows[ai2].source_id, s_rows[ai2].source_key));
 }
 
+/* View position (index into s_view) of a given s_rows index, or -1 if not shown. */
+static int view_pos_of_row(int row_index) {
+    for (int k = 0; k < s_view_count; ++k) {
+        if (s_view[k] == row_index) {
+            return k;
+        }
+    }
+    return -1;
+}
+
+/* 8. gui_selection_revalidate, PRIMARY-DELETED branch: when the sprite carrying the primary selection
+ *    is itself the one that vanishes, revalidate's `if (!found)` path clears the dangling primary to
+ *    -1 (rather than snapping it onto a surviving neighbour). Here beta is the primary AND the removed
+ *    child. */
+void test_selection_revalidate_clears_primary_when_it_is_deleted(void) {
+    add_sources_and_build(NULL, NULL);
+    build_view();
+
+    const int bi = find_row_by_name("beta");
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, bi);
+    s_sel_src = s_rows[bi].src; /* primary = beta (the child about to disappear) */
+    s_sel_child = s_rows[bi].child;
+
+    gui_selection_capture_reselect();
+    TEST_ASSERT_TRUE(s_reselect_pending);
+
+    TEST_ASSERT_EQUAL_INT(0, remove(s_beta)); /* the primary's backing file is gone */
+    gui_project_invalidate_sources();
+    build_rows();
+    build_view();
+    TEST_ASSERT_EQUAL_INT(-1, find_row_by_name("beta"));
+
+    gui_selection_revalidate();
+    TEST_ASSERT_FALSE(s_reselect_pending);
+    /* the captured primary no longer resolves -> cleared, never re-pinned to alpha/gamma. */
+    TEST_ASSERT_EQUAL_INT(-1, s_sel_src);
+    TEST_ASSERT_EQUAL_INT(-1, s_sel_child);
+    TEST_ASSERT_FALSE(s_sel_missing);
+    TEST_ASSERT_EQUAL_INT(-1, s_focus_view); /* nothing selected -> focus has no home */
+}
+
+/* 9. focus_sync_to_selection (new): after a revalidate re-resolves the primary onto a SHIFTED row,
+ *    the keyboard focus (an s_view index) must re-pin to that row's new view position. And when the
+ *    still-selected row is hidden (collapsed folder), focus falls back to -1. */
+void test_selection_revalidate_resyncs_focus_to_shifted_row(void) {
+    tp_id128 folder_id = {{0}};
+    add_sources_and_build(&folder_id, NULL);
+    build_view();
+
+    const int gi = find_row_by_name("gamma"); /* last child -> a later beta-delete shifts it up */
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, gi);
+    s_sel_src = s_rows[gi].src;
+    s_sel_child = s_rows[gi].child;
+    const int gview = view_pos_of_row(gi);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, gview);
+    s_focus_view = gview; /* focus pinned on gamma's current view row */
+
+    gui_selection_capture_reselect();
+    TEST_ASSERT_TRUE(s_reselect_pending);
+
+    /* a child AHEAD of gamma (beta) disappears -> gamma's row + view index both move up by one. */
+    TEST_ASSERT_EQUAL_INT(0, remove(s_beta));
+    gui_project_invalidate_sources();
+    build_rows();
+    build_view();
+
+    gui_selection_revalidate();
+    TEST_ASSERT_FALSE(s_reselect_pending);
+
+    const int gi2 = find_row_by_name("gamma");
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, gi2);
+    TEST_ASSERT_EQUAL_INT(s_rows[gi2].src, s_sel_src);
+    TEST_ASSERT_EQUAL_INT(s_rows[gi2].child, s_sel_child);
+    const int gview2 = view_pos_of_row(gi2);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, gview2);
+    TEST_ASSERT_EQUAL_INT(gview2, s_focus_view); /* focus followed gamma to its new view position */
+
+    /* Now hide the still-selected row by collapsing its folder: the primary stays resolved in the row
+     * model, but with no visible home the focus index re-pins to -1. */
+    gui_rows_toggle_collapsed(folder_id);
+    TEST_ASSERT_TRUE(gui_rows_is_collapsed(folder_id));
+    gui_selection_capture_reselect();
+    TEST_ASSERT_TRUE(s_reselect_pending);
+    build_view();
+    gui_selection_revalidate();
+    TEST_ASSERT_EQUAL_INT(s_rows[gi2].src, s_sel_src); /* primary unchanged in the model */
+    TEST_ASSERT_EQUAL_INT(s_rows[gi2].child, s_sel_child);
+    TEST_ASSERT_EQUAL_INT(-1, view_pos_of_row(gi2)); /* gamma hidden by the collapse */
+    TEST_ASSERT_EQUAL_INT(-1, s_focus_view);
+}
+
+/* 10. Folder/source PRIMARY preserved by STABLE id (new capture branch): a selected folder source row
+ *     (s_sel_child == -1, no leaf ref) is captured by its source id with an EMPTY key, so an undo that
+ *     shifts the source ordering re-resolves it onto the SAME folder, not a shifted neighbour. */
+void test_selection_revalidate_folder_primary_follows_stable_id(void) {
+    tp_id128 folder_id = {{0}};
+    tp_id128 file_id = {{0}};
+    add_sources_reversed_and_build(&folder_id, &file_id); /* file @ src 0, folder @ src 1 */
+    build_view();
+
+    int folder_row = -1;
+    for (int i = 0; i < s_row_count; ++i) {
+        if (s_rows[i].is_source && s_rows[i].is_folder &&
+            tp_id128_eq(s_rows[i].source_id, folder_id)) {
+            folder_row = i;
+            break;
+        }
+    }
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, folder_row);
+    TEST_ASSERT_EQUAL_INT(1, s_rows[folder_row].src); /* folder is source index 1 here */
+    s_sel_src = s_rows[folder_row].src;
+    s_sel_child = -1; /* primary is the folder/source row, not a leaf */
+
+    gui_selection_capture_reselect();
+    TEST_ASSERT_TRUE(s_reselect_pending);
+    TEST_ASSERT_TRUE(tp_id128_eq(s_reselect_source_id, folder_id));
+    TEST_ASSERT_EQUAL_INT('\0', s_reselect_key[0]); /* empty key == folder/source primary */
+
+    /* remove the FILE source at index 0 -> the folder's source index shifts 1 -> 0. */
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(gui_project_snapshot(), 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    TEST_ASSERT_TRUE(gui_project_remove_source(
+        atlas->id, file_id,
+        tp_session_snapshot_revision(gui_project_snapshot())));
+    gui_project_invalidate_sources();
+    build_rows();
+    build_view();
+
+    gui_selection_revalidate();
+    TEST_ASSERT_FALSE(s_reselect_pending);
+    TEST_ASSERT_EQUAL_INT(-1, s_sel_child);
+    TEST_ASSERT_EQUAL_INT(0, s_sel_src); /* index genuinely moved 1 -> 0 */
+    /* and it is the SAME folder (by id), not whatever else landed at index 0. */
+    int primary_row = -1;
+    for (int i = 0; i < s_row_count; ++i) {
+        if (s_rows[i].is_source && s_rows[i].src == s_sel_src) {
+            primary_row = i;
+            break;
+        }
+    }
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, primary_row);
+    TEST_ASSERT_TRUE(s_rows[primary_row].is_folder);
+    TEST_ASSERT_TRUE(tp_id128_eq(s_rows[primary_row].source_id, folder_id));
+}
+
+/* 11. TYPE sort: folder sources sort ahead of file sources regardless of add order, with a natural
+ *     name tiebreak among equal-type siblings (mirrors the NAME-sort structure of test 4). */
+void test_view_sort_type_orders_folders_before_files(void) {
+    add_sources_reversed_and_build(NULL, NULL); /* FILE added first, FOLDER second */
+
+    gui_rows_set_sort(ROW_SORT_TYPE, false, false);
+    build_view();
+
+    const int fpos = view_folder_pos();
+    TEST_ASSERT_EQUAL_INT(0, fpos); /* folder source pinned first despite being added second */
+    /* children under it keep the natural-name tiebreak (equal type). */
+    TEST_ASSERT_EQUAL_STRING("alpha", s_rows[s_view[fpos + 1]].sprite_name);
+    TEST_ASSERT_EQUAL_STRING("beta", s_rows[s_view[fpos + 2]].sprite_name);
+    TEST_ASSERT_EQUAL_STRING("gamma", s_rows[s_view[fpos + 3]].sprite_name);
+
+    /* the FILE source falls after the whole folder span. */
+    int spos = -1;
+    for (int k = 0; k < s_view_count; ++k) {
+        if (s_rows[s_view[k]].is_source && !s_rows[s_view[k]].is_folder) {
+            spos = k;
+            break;
+        }
+    }
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, spos);
+    TEST_ASSERT_GREATER_THAN_INT(fpos, spos);
+    TEST_ASSERT_EQUAL_STRING("solo", s_rows[s_view[spos]].sprite_name);
+}
+
+/* 12. Empty state: an atlas with zero sources yields an empty row model + view, and revalidate +
+ *     focus-sync stay crash-free (focus -> -1) against that empty s_view. */
+void test_view_empty_state_is_safe(void) {
+    s_sel_atlas = 0; /* default project: one atlas, no sources added */
+    build_rows();
+    build_view();
+    TEST_ASSERT_EQUAL_INT(0, s_row_count);
+    TEST_ASSERT_EQUAL_INT(0, s_view_count);
+
+    /* Arm a stale primary + focus, then revalidate against the empty view: focus_sync must scan the
+     * empty s_view without dereferencing anything and settle on -1. */
+    s_sel_src = 0;
+    s_sel_child = -1;
+    s_focus_view = 5;
+    s_reselect_pending = true;
+    s_reselect_source_id = tp_id128_nil();
+    s_reselect_key[0] = '\0';
+    gui_selection_revalidate();
+    TEST_ASSERT_FALSE(s_reselect_pending);
+    TEST_ASSERT_EQUAL_INT(-1, s_focus_view);
+}
+
+/* 13. collapsed_prune_missing: a collapse entry for a folder source that is later REMOVED from the
+ *     atlas must be dropped on the next rebuild, so the collapsed set never accumulates stale ids and
+ *     the surviving sources are unaffected. */
+void test_view_collapse_pruned_when_folder_source_removed(void) {
+    tp_id128 folder_id = {{0}};
+    tp_id128 file_id = {{0}};
+    add_sources_and_build(&folder_id, &file_id); /* folder @ src 0, solo file @ src 1 */
+    build_view();
+
+    gui_rows_toggle_collapsed(folder_id);
+    TEST_ASSERT_TRUE(gui_rows_is_collapsed(folder_id));
+    build_view();
+    TEST_ASSERT_EQUAL_INT(2, s_view_count); /* folder source + solo (children hidden) */
+
+    /* remove the folder source entirely, then rebuild the row model + view. */
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(gui_project_snapshot(), 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    TEST_ASSERT_TRUE(gui_project_remove_source(
+        atlas->id, folder_id,
+        tp_session_snapshot_revision(gui_project_snapshot())));
+    gui_project_invalidate_sources();
+    build_rows();
+    build_view();
+
+    /* the stale collapse entry was pruned; only the surviving file source remains, untouched. */
+    TEST_ASSERT_FALSE(gui_rows_is_collapsed(folder_id));
+    TEST_ASSERT_EQUAL_INT(1, s_row_count);
+    TEST_ASSERT_EQUAL_INT(1, s_view_count);
+    TEST_ASSERT_TRUE(s_rows[s_view[0]].is_source);
+    TEST_ASSERT_FALSE(s_rows[s_view[0]].is_folder);
+    TEST_ASSERT_TRUE(tp_id128_eq(s_rows[s_view[0]].source_id, file_id));
+}
+
 int main(int argc, char **argv) {
     if (tp_build_is_worker_invocation(argc, argv)) {
         return tp_build_worker_main();
@@ -348,5 +619,11 @@ int main(int argc, char **argv) {
     RUN_TEST(test_view_warn_first_pins_missing_regardless_of_direction);
     RUN_TEST(test_view_collapse_hides_children_and_filter_overrides);
     RUN_TEST(test_selection_revalidate_reresolves_primary_and_prunes_multi);
+    RUN_TEST(test_selection_revalidate_clears_primary_when_it_is_deleted);
+    RUN_TEST(test_selection_revalidate_resyncs_focus_to_shifted_row);
+    RUN_TEST(test_selection_revalidate_folder_primary_follows_stable_id);
+    RUN_TEST(test_view_sort_type_orders_folders_before_files);
+    RUN_TEST(test_view_empty_state_is_safe);
+    RUN_TEST(test_view_collapse_pruned_when_folder_source_removed);
     return UNITY_END();
 }

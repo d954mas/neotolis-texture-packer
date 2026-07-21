@@ -201,6 +201,11 @@ void test_deferred_edit_coalesces_then_undo_redo_trace_is_exact(void) {
     TEST_ASSERT_EQUAL_INT(1024, atlas_at(0)->max_size);
     TEST_ASSERT_EQUAL_INT(1, gui_project_undo_depth());
     TEST_ASSERT_EQUAL_INT(0, gui_project_redo_depth());
+    /* U-02 T5: redo ARMS the same selection-preservation seam as undo -- it captures the primary ref
+     * BEFORE the model shifts (arming s_reselect_pending) and leaves it for the frame loop's
+     * gui_selection_revalidate to consume. Nothing between here and now consumes it, so it is still
+     * pending (mirrors the undo-block assertion above). */
+    TEST_ASSERT_TRUE(s_reselect_pending);
     TEST_ASSERT_EQUAL_STRING("Redo (undo:1 redo:0)", s_status);
 }
 

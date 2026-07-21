@@ -155,6 +155,18 @@ nt_set_warning_flags(tp_test_gui_paths)
 nt_set_sanitizer_flags(tp_test_gui_paths)
 add_test(NAME tp_gui_paths COMMAND tp_test_gui_paths)
 
+# POSIX shell-quote unit test (U-02): gui_shell_quote.h's gui_shell_squote() wraps a user-derived path
+# as ONE single-quoted shell word (apostrophes -> '\''), the single source of truth for the system()-
+# dispatched "open in the OS file manager" helpers. Header-only + POSIX-only, so the test body is
+# #ifndef _WIN32; the local Windows build compiles a trivially-passing stub while Linux CI runs the real
+# assertions under ASan+UBSan. Minimal deps -- only unity (the header pulls in nothing else).
+add_executable(tp_test_gui_shell_quote test_gui_shell_quote.c)
+target_link_libraries(tp_test_gui_shell_quote PRIVATE unity)
+target_compile_options(tp_test_gui_shell_quote PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_gui_shell_quote)
+nt_set_sanitizer_flags(tp_test_gui_shell_quote)
+add_test(NAME tp_gui_shell_quote COMMAND tp_test_gui_shell_quote)
+
 # Canonical GUI identity regression: two distinct sources may expose the same
 # source-local key.  The headless target exercises the production row,
 # selection/action and project/session adapters without creating a window.
