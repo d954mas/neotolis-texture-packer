@@ -786,7 +786,9 @@ void build_view(void) {
         i = j;
     }
     /* 2. Order the source spans (warn-first + key/dir; a no-op reorder for ORIGINAL asc). */
-    qsort(s_spans, (size_t)nspans, sizeof *s_spans, view_qsort_span);
+    if (nspans > 0) { /* qsort's base is nonnull; guard the empty case defensively */
+        qsort(s_spans, (size_t)nspans, sizeof *s_spans, view_qsort_span);
+    }
     /* 3. Emit: source (if visible under the filter) then its filtered+sorted, non-collapsed children. */
     const bool filtering = s_view_filter[0] != '\0';
     for (int s = 0; s < nspans; ++s) {
@@ -811,7 +813,9 @@ void build_view(void) {
                 }
                 s_child_scratch[nch++] = c;
             }
-            qsort(s_child_scratch, (size_t)nch, sizeof *s_child_scratch, view_qsort_child);
+            if (nch > 0) { /* qsort's base is nonnull; s_child_scratch may still be NULL when nch==0 */
+                qsort(s_child_scratch, (size_t)nch, sizeof *s_child_scratch, view_qsort_child);
+            }
         }
         if (filtering && !row_matches_filter(src) && nch == 0) {
             continue; /* neither the source nor any child matched */
