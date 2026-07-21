@@ -678,10 +678,14 @@ nt_set_warning_flags(tp_demo_export)   # AGENTS.md invariant: engine warning fla
 #   tp_bench_foundation --project <project> [scratch_dir] [iterations] [recovery_ops]
 #   tp_bench_foundation --project-load-scaling [iterations]
 #   tp_bench_foundation --batch-scaling <project> [iterations]
+#   tp_bench_foundation --pack-hash-probe <project> [iterations]
 add_executable(tp_bench_foundation
     tp_bench_foundation.c
     tp_bench_project_load.c)
-target_link_libraries(tp_bench_foundation PRIVATE tp_core nt_time cjson)
+# tp_build (not just tp_core): the --pack-hash-probe mode calls the session probe
+# tp_session_pack_input_hash, which lives in tp_job.c (tp_build). tp_build PUBLIC-
+# links tp_core, so the other modes keep their symbols.
+target_link_libraries(tp_bench_foundation PRIVATE tp_build nt_time cjson)
 target_include_directories(tp_bench_foundation PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_compile_options(tp_bench_foundation PRIVATE -U_DLL)
 target_compile_definitions(tp_bench_foundation PRIVATE _CRT_SECURE_NO_WARNINGS)
@@ -704,6 +708,28 @@ add_test(NAME tp_large_project_contract
     COMMAND tp_generate_large_project --check
         "${CMAKE_SOURCE_DIR}/examples/projects/large-synthetic.ntpacker_project"
         "${CMAKE_BINARY_DIR}/tp_large_project_contract")
+
+# Deterministic checked-in owner-scale bench project (U-01): 36 atlases
+# assembled from the 2,020-image Kenney CC0 manifest
+# (examples/bench-assets/manifest.tsv) across five composition groups
+# (homogeneous per-pack, mixed/shared-source, duplicate-source, proto
+# multi-page, size-varied) -- 5,480 total source memberships. Same
+# white-box-construct / public-snapshot-validate split as
+# tp_generate_large_project.
+add_executable(tp_generate_bench_project tp_generate_bench_project.c)
+target_link_libraries(tp_generate_bench_project PRIVATE tp_core)
+target_include_directories(tp_generate_bench_project PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_options(tp_generate_bench_project PRIVATE -U_DLL)
+target_compile_definitions(tp_generate_bench_project PRIVATE
+    _CRT_SECURE_NO_WARNINGS)
+nt_set_warning_flags(tp_generate_bench_project)
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_bench_project_contract")
+add_test(NAME tp_bench_project_contract
+    COMMAND tp_generate_bench_project --manifest
+        "${CMAKE_SOURCE_DIR}/examples/bench-assets/manifest.tsv" --check
+        "${CMAKE_SOURCE_DIR}/examples/projects/bench-owner-scale.ntpacker_project"
+        "${CMAKE_BINARY_DIR}/tp_bench_project_contract")
 
 # Tests are executable boundaries, so sanitizer instrumentation must be linked
 # on each one rather than only on tp_core/tp_build. Keep this directory-wide

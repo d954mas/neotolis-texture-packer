@@ -42,6 +42,10 @@ typedef struct tp_live_job {
     tp_id128 atlas_id;
     tp_session_input_token input_token_at_start;
     tp_id128 pack_input_hash;
+    /* Immutable session snapshot, owned by the job from pack-start until pack_worker
+     * builds the input from it (incl. the folder walk) OFF the UI thread and destroys
+     * it. NULL for export jobs and after the worker consumes it. */
+    tp_session_snapshot *snapshot;
     tp_pack_input input;
     tp_pack_settings settings;
     char *atlas_name;
@@ -101,6 +105,9 @@ static void job_destroy_owned(tp_session_owned_job *owned) {
     }
     job_cancel_owned(owned);
     job_join(job);
+    /* NULL if pack_worker already consumed it; non-NULL only if the worker never
+     * ran (thread-create failure) -- destroy it exactly once here. NULL-safe. */
+    tp_session_snapshot_destroy(job->snapshot);
     tp_pack_input_free(&job->input);
     free(job->atlas_name);
     free(job->work_dir);
@@ -157,8 +164,40 @@ static void pack_worker_collect_image_hash(void *ctx, int sprite_index,
 static int pack_worker(void *context) {
     tp_live_job *job = context;
     tp_error error = {{0}};
-    tp_result *result = NULL;
     const double start = job_now_ms();
+
+    /* Build the pack input HERE, on the worker -- NOT at pack-start on the caller
+     * (UI) thread: the recursive folder walk for folder sources
+     * (tp_pack_input_build_snapshot -> tp_scan_dir) must never stall the UI. This
+     * mirrors export_worker, which already builds its input on the worker. The
+     * snapshot is job-owned; destroy it here once the input is materialized. */
+    tp_status build = tp_pack_input_build_snapshot(job->snapshot, job->atlas_id,
+                                                   &job->input, &error);
+    tp_session_snapshot_destroy(job->snapshot);
+    job->snapshot = NULL;
+    if (build == TP_STATUS_OK && job->input.count == 0) {
+        build = tp_error_set(&error, TP_STATUS_NOT_FOUND,
+                             "atlas has no usable images");
+    }
+    if (build != TP_STATUS_OK) {
+        /* Input-build failures (missing/unresolvable source, empty atlas, scan
+         * failure) are now ASYNC pack failures -- the exact path export_worker uses. */
+        job->elapsed_ms = job_now_ms() - start;
+        job->status = build;
+        job->error = error;
+        atomic_store_explicit(&job->current, 1, memory_order_relaxed);
+        atomic_store_explicit(
+            &job->state,
+            atomic_load_explicit(&job->cancelled, memory_order_relaxed)
+                ? TP_SESSION_JOB_CANCELLED
+                : TP_SESSION_JOB_FAILED,
+            memory_order_release);
+        return 0;
+    }
+    job->settings.sprites = job->input.descs;
+    job->settings.sprite_count = job->input.count;
+
+    tp_result *result = NULL;
     /* Canonical pack_input_hash of this job's immutable start inputs (§10.2,
      * decision 0004). The semantic image term is folded from the pack's OWN decode
      * pass via the per-image observer, so a pack decodes each source exactly once
@@ -309,12 +348,11 @@ tp_status tp_session_pack_job_start(tp_session *session,
     job->input_token_at_start = tp_session_snapshot_input_token(snapshot);
     job->atlas_name = job_strdup(atlas->name);
     job->work_dir = job_strdup(request->work_dir);
-    status = tp_pack_input_build_snapshot(snapshot, request->atlas_id,
-                                          &job->input, err);
-    if (status == TP_STATUS_OK) {
-        status = tp_pack_settings_build_snapshot(snapshot, request->atlas_id,
-                                                 &job->settings, err);
-    }
+    /* Build only the packing SETTINGS (knobs) on the caller -- cheap, no I/O. The
+     * pack INPUT (incl. the recursive folder walk for folder sources) is built on the
+     * worker in pack_worker, so a folder source never stalls the UI thread at Pack. */
+    status = tp_pack_settings_build_snapshot(snapshot, request->atlas_id,
+                                             &job->settings, err);
     if (status == TP_STATUS_OK && request->preview_exporter_id) {
         status = tp_exporter_id_validate(request->preview_exporter_id, err);
         const tp_exporter *exporter =
@@ -337,29 +375,26 @@ tp_status tp_session_pack_job_start(tp_session *session,
             }
         }
     }
-    tp_session_snapshot_destroy(snapshot);
     if (status != TP_STATUS_OK || !job->atlas_name || !job->work_dir) {
         if (status == TP_STATUS_OK) {
             status = tp_error_set(err, TP_STATUS_OOM,
-                                  "Pack job input allocation failed");
+                                  "Pack job setup allocation failed");
         }
+        tp_session_snapshot_destroy(snapshot); /* not yet transferred to the job */
         tp_session_job_release_internal(&job->owner);
         return status;
     }
-    if (job->input.count == 0) {
-        tp_session_job_release_internal(&job->owner);
-        return tp_error_set(err, TP_STATUS_NOT_FOUND,
-                            "atlas has no usable images");
-    }
     job->arena = tp_arena_create(0);
     if (!job->arena) {
+        tp_session_snapshot_destroy(snapshot); /* not yet transferred to the job */
         tp_session_job_release_internal(&job->owner);
         return tp_error_set(err, TP_STATUS_OOM, "Pack job arena allocation failed");
     }
+    /* Transfer snapshot ownership to the job; pack_worker builds the input from it
+     * off the UI thread, then destroys it. */
+    job->snapshot = snapshot;
     job->settings.work_dir = job->work_dir;
     job->settings.atlas_name = job->atlas_name;
-    job->settings.sprites = job->input.descs;
-    job->settings.sprite_count = job->input.count;
     job->total = 1;
     status = job_start_thread(job, pack_worker, err);
     if (status != TP_STATUS_OK) {

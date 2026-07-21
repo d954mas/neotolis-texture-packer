@@ -249,6 +249,50 @@ static void add_file_source(tp_session *session, tp_id128 atlas_id,
     tp_session_snapshot_destroy(snapshot);
 }
 
+/* Adds `folder` (an existing directory) as a FOLDER source on `atlas_id`. The
+ * caller writes the images inside it; the recursive enumeration happens later, on
+ * the pack worker (U-01a). */
+static void add_folder_source(tp_session *session, tp_id128 atlas_id,
+                              const char *folder) {
+    tp_operation operation;
+    memset(&operation, 0, sizeof operation);
+    operation.kind = TP_OP_SOURCE_ADD;
+    operation.atlas_id = atlas_id;
+    operation.u.source_add.kind = TP_SOURCE_KIND_FOLDER;
+    operation.u.source_add.source_id = (tp_id128){{0x22U, 0x33U, 0x44U, 0x55U,
+                                                   0x66U, 0x77U, 0x88U, 0x99U,
+                                                   0xAAU, 0xBBU, 0xCCU, 0xDDU,
+                                                   0xEEU, 0xF0U, 0x0FU, 0x11U}};
+    const size_t key_size = strlen(folder) + 1U;
+    operation.u.source_add.key = malloc(key_size);
+    TEST_ASSERT_NOT_NULL(operation.u.source_add.key);
+    memcpy(operation.u.source_add.key, folder, key_size);
+
+    tp_error err = {{0}};
+    tp_session_snapshot *snapshot = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_snapshot_create(session, &snapshot, &err));
+
+    tp_txn_request request;
+    memset(&request, 0, sizeof request);
+    request.schema = TP_TXN_SCHEMA;
+    memcpy(request.id_hex, "efefefefefefefefefefefefefefefef",
+           sizeof request.id_hex);
+    request.expected_revision = tp_session_snapshot_revision(snapshot);
+    request.ops = &operation;
+    request.op_count = 1U;
+
+    tp_txn_result result;
+    memset(&result, 0, sizeof result);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_apply(session, &request, &result, &err));
+    TEST_ASSERT_TRUE(result.committed);
+
+    tp_txn_result_free(&result);
+    tp_operation_free(&operation);
+    tp_session_snapshot_destroy(snapshot);
+}
+
 /* F3-03 T2: the job/pack surface carries a pack_input_hash, recomputed from the
  * session's immutable snapshot, stable for the same snapshot -- and a REAL native
  * async pack carries that same hash on its completed result. This drives a job to
@@ -393,6 +437,101 @@ void test_source_runtime_change_invalidates_without_model_mutation(void) {
     tp_session_destroy(session);
 }
 
+/* U-01a: the pack INPUT (incl. the folder walk for folder sources) is now built on
+ * the WORKER, not on the caller/UI thread at pack-start. An atlas with no usable
+ * sources therefore no longer fails SYNCHRONOUSLY at start -- tp_session_pack_job_start
+ * returns OK and the job completes FAILED, the exact async-failure path export already
+ * uses. This pins that the empty-input check moved off the caller thread. */
+void test_empty_atlas_pack_fails_async_not_at_start(void) {
+    tp_session *session = make_session();
+    const tp_id128 atlas = default_atlas_id(session); /* fresh default atlas: no sources */
+    char work_dir[1024];
+    job_scratch_dir(work_dir, sizeof work_dir);
+    tp_mkdirs(work_dir);
+
+    tp_error err = {{0}};
+    const tp_pack_job_request request = {
+        .atlas_id = atlas,
+        .work_dir = work_dir,
+        .preview_exporter_id = NULL,
+    };
+    /* Starts OK now (the "no usable images" check moved to the worker). */
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK, tp_session_pack_job_start(session, &request, &err),
+        "empty-atlas pack must START ok (input build is on the worker now)");
+
+    tp_session_job_progress progress;
+    do {
+        memset(&progress, 0, sizeof progress);
+        TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                              tp_session_job_poll(session, &progress, &err));
+    } while (progress.state == TP_SESSION_JOB_RUNNING);
+    /* ...and fails ASYNC, never producing a usable result. */
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_SESSION_JOB_FAILED, progress.state,
+                                  "empty atlas pack must fail async, not at start");
+
+    tp_session_job_result result;
+    memset(&result, 0, sizeof result);
+    (void)tp_session_job_take_result(session, &result, &err); /* release the handle */
+    tp_session_job_result_destroy(&result);
+    tp_session_destroy(session);
+    remove_scratch_tree(work_dir);
+}
+
+/* U-01a: a FOLDER source's recursive enumeration now runs on the pack worker, not
+ * at pack-start on the UI thread. Prove the folder still packs correctly through the
+ * async job -- the worker-side walk finds all the folder's images -- and that start
+ * returned OK before the walk (non-blocking). */
+void test_folder_source_walk_runs_on_worker(void) {
+    tp_session *session = make_session();
+    const tp_id128 atlas = default_atlas_id(session);
+    char work_dir[1024];
+    job_scratch_dir(work_dir, sizeof work_dir);
+    tp_mkdirs(work_dir);
+
+    char folder[1200];
+    TEST_ASSERT_TRUE(snprintf(folder, sizeof folder, "%s/sprites", work_dir) > 0);
+    tp_mkdirs(folder);
+    for (int i = 0; i < 3; ++i) {
+        char png[1320];
+        TEST_ASSERT_TRUE(snprintf(png, sizeof png, "%s/s%d.png", folder, i) > 0);
+        write_png_fixture(png);
+    }
+    add_folder_source(session, atlas, folder);
+
+    tp_error err = {{0}};
+    const tp_pack_job_request request = {
+        .atlas_id = atlas,
+        .work_dir = work_dir,
+        .preview_exporter_id = NULL,
+    };
+    /* Non-blocking: start returns before the worker walks the folder. */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_pack_job_start(session, &request, &err));
+    tp_session_job_progress progress;
+    do {
+        memset(&progress, 0, sizeof progress);
+        TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                              tp_session_job_poll(session, &progress, &err));
+    } while (progress.state == TP_SESSION_JOB_RUNNING);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TP_SESSION_JOB_SUCCEEDED, progress.state,
+                                  "folder-source pack must succeed");
+
+    tp_session_job_result result;
+    memset(&result, 0, sizeof result);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_job_take_result(session, &result, &err));
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_PACK, result.kind);
+    TEST_ASSERT_NOT_NULL(result.pack.result);
+    /* The worker-side walk enumerated all three folder images. */
+    TEST_ASSERT_EQUAL_INT_MESSAGE(3, result.pack.result->sprite_count,
+                                  "the worker-side folder walk must find all 3 images");
+
+    tp_session_job_result_destroy(&result);
+    tp_session_destroy(session);
+    remove_scratch_tree(work_dir);
+}
+
 int main(int argc, char **argv) {
     /* The real pack job spawns THIS executable as its build-worker child; service
      * that dispatch first, exactly like every pack-capable exe (and sibling test). */
@@ -406,5 +545,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_pack_input_hash_present_and_stable_for_same_snapshot);
     RUN_TEST(test_pack_job_decodes_each_source_once);
     RUN_TEST(test_pack_input_hash_changes_on_semantic_mutation);
+    RUN_TEST(test_empty_atlas_pack_fails_async_not_at_start);
+    RUN_TEST(test_folder_source_walk_runs_on_worker);
     return UNITY_END();
 }

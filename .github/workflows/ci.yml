@@ -150,3 +150,78 @@ jobs:
           UBSAN_OPTIONS: "print_stacktrace=1"
           NTPACKER_GUI_HEADLESS: "1"
         run: xvfb-run -a ctest --preset native-tests-debug -R ntpacker_gui_selftest --output-on-failure
+
+  # U-01 perf harness (impl-plan §U). Two-tier gate: wall-clock latency is PRINTED (advisory --
+  # CI runners are noisy, so timing never fails the build) while the DETERMINISTIC invariants are
+  # hard-gated by each probe's exit code. Runs native-release (NTPACKER_GUI_SELFTEST=OFF, so the GUI
+  # binary honours --bench-perf instead of auto-running the self-test; release also gives realistic,
+  # ASan-free numbers). This is the only job with lfs: true -- the decode probes need the real Kenney
+  # bytes; the byte-stable fixture contract (tp_bench_project_contract) stays LFS-independent and runs
+  # in the build-test/gui-selftest jobs without it.
+  perf-probes:
+    name: perf-probes (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          lfs: true # U-01 bench assets (Kenney PNGs) live in Git LFS; the decode probes need real bytes.
+
+      - name: Pull submodule LFS files
+        run: git submodule foreach --recursive 'git lfs pull || true'
+
+      - name: Install dependencies (Linux + headless GL)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update && sudo apt-get install -y clang ninja-build \
+            libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
+            libwayland-dev wayland-protocols libxkbcommon-dev libgl-dev \
+            xvfb libgl1-mesa-dri
+
+      - name: Set up ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: perf-probes-${{ matrix.os }}
+          max-size: "400M"
+
+      - name: Enable ccache compiler launcher
+        shell: bash
+        run: |
+          echo "CMAKE_C_COMPILER_LAUNCHER=ccache" >> $GITHUB_ENV
+          echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache" >> $GITHUB_ENV
+
+      - name: Configure (native-release, self-test OFF)
+        run: cmake --preset native-release
+
+      - name: Build perf targets
+        run: cmake --build --preset native-release --target tp_bench_foundation ntpacker-gui
+
+      # Advisory latency numbers land in the log; each probe still hard-fails on its deterministic
+      # gate: --pack-hash-probe exits non-zero on a NON-DETERMINISTIC content hash (cold != warm) OR
+      # any unreadable atlas (uncovered gap), and --bench-perf exits non-zero on a non-blocking-
+      # invariant violation (a Pack request that packs synchronously / publishes a result on the
+      # caller thread, or a refresh that mutates project revision/dirty state).
+      - name: U-01 perf probes (advisory numbers, deterministic hard-gates)
+        if: runner.os == 'Linux'
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          GALLIUM_DRIVER: llvmpipe
+          NTPACKER_GUI_HEADLESS: "1"
+        run: |
+          set -e
+          FIXTURE=examples/projects/bench-owner-scale.ntpacker_project
+          # Pinned native-release output paths (tests -> build/_cmake/<preset>/...,
+          # app -> build/apps/gui/<preset>/...), not a tree-wide `find | head -1`, so a
+          # different preset's binary (e.g. a self-test GUI) can never be picked by accident.
+          BENCH=build/_cmake/native-release/packer/tests/tp_bench_foundation
+          GUI=build/apps/gui/native-release/ntpacker-gui
+          test -x "$BENCH" || { echo "missing bench binary: $BENCH"; find build -name tp_bench_foundation; exit 1; }
+          test -x "$GUI" || { echo "missing gui binary: $GUI"; find build -path '*apps/gui*' -name ntpacker-gui; exit 1; }
+          echo "== pack_input_hash cold/warm probe (advisory timings; hard gate = hash determinism) =="
+          "$BENCH" --pack-hash-probe "$FIXTURE" 5
+          echo "== GUI --bench-perf (advisory timings; hard gate = non-blocking invariants) =="
+          xvfb-run -a "$GUI" --bench-perf
