@@ -112,7 +112,8 @@ typedef struct gui_selected_sprite {
 extern gui_selected_sprite *s_multi_sel;
 extern int s_multi_sel_count;
 extern int s_multi_sel_cap;  /* allocated slots in s_multi_sel (grow-only; 0 == unallocated) */
-extern int s_sel_anchor_row; /* row index anchor for Shift-range selection */
+extern int s_sel_anchor_row; /* VIEW index anchor for Shift-range selection (s_view space) */
+extern int s_focus_view;     /* keyboard-focused row (index into s_view; -1 none) — U-02 list focus model */
 
 /* Animation selection + editor state (ux.md §3.7b). */
 extern int s_sel_anim;       /* selected animation index in the current atlas, -1 none */

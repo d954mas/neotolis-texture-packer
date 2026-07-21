@@ -148,6 +148,103 @@ static void select_sprite_row(int i, bool ctrl, bool shift) {
     }
 }
 
+/* --- keyboard focus model (U-02 T3) ---
+ * s_focus_view indexes s_view (kept in gui_state so reset_selection can clear it on atlas switch).
+ * s_focus_follow asks declare_sprite_list to ensure-visible ONCE after a keyboard move, so manual
+ * wheel scrolling is never yanked back. */
+static bool s_focus_follow;
+
+static void focus_clamp(void) {
+    if (s_view_count <= 0) {
+        s_focus_view = -1;
+    } else if (s_focus_view >= s_view_count) {
+        s_focus_view = s_view_count - 1;
+    }
+}
+
+void gui_list_focus_step(int delta, bool extend) {
+    if (s_view_count <= 0) {
+        s_focus_view = -1;
+        return;
+    }
+    int f = s_focus_view;
+    if (f < 0) {
+        f = (delta > 0) ? 0 : (s_view_count - 1);
+    } else {
+        f += delta;
+        if (f < 0) {
+            f = 0;
+        } else if (f >= s_view_count) {
+            f = s_view_count - 1;
+        }
+    }
+    s_focus_view = f;
+    s_focus_follow = true;
+    select_sprite_row(f, false, extend);
+}
+
+void gui_list_focus_edge(bool end, bool extend) {
+    if (s_view_count <= 0) {
+        s_focus_view = -1;
+        return;
+    }
+    s_focus_view = end ? (s_view_count - 1) : 0;
+    s_focus_follow = true;
+    select_sprite_row(s_focus_view, false, extend);
+}
+
+void gui_list_focus_activate(void) {
+    focus_clamp();
+    if (s_focus_view < 0) {
+        return;
+    }
+    const sprite_row *row = &s_rows[s_view[s_focus_view]];
+    if (row->is_folder) {
+        gui_rows_toggle_collapsed(row->source_id);
+    } else {
+        select_sprite_row(s_focus_view, false, false);
+    }
+    s_focus_follow = true;
+}
+
+void gui_list_focus_rename(void) {
+    focus_clamp();
+    if (s_focus_view < 0) {
+        return;
+    }
+    const sprite_row *row = &s_rows[s_view[s_focus_view]];
+    const bool leaf = (!row->is_folder && !row->missing && row->sprite_name &&
+                       row->sprite_name[0] != '\0');
+    if (leaf) {
+        select_sprite_row(s_focus_view, false, false);
+        start_sprite_edit(row);
+    }
+}
+
+void gui_list_focus_collapse(bool expand) {
+    focus_clamp();
+    if (s_focus_view < 0) {
+        return;
+    }
+    const sprite_row *row = &s_rows[s_view[s_focus_view]];
+    if (row->is_folder) {
+        const bool collapsed = gui_rows_is_collapsed(row->source_id);
+        if (expand ? collapsed : !collapsed) {
+            gui_rows_toggle_collapsed(row->source_id);
+        }
+    } else if (!expand && row->child >= 0) {
+        /* Left on a folder child jumps focus to its parent source row. */
+        for (int k = s_focus_view - 1; k >= 0; --k) {
+            if (s_rows[s_view[k]].is_source) {
+                s_focus_view = k;
+                select_sprite_row(k, false, false);
+                break;
+            }
+        }
+    }
+    s_focus_follow = true;
+}
+
 static void declare_sprite_list(nt_ui_context_t *ctx) {
     CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(28))}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
         section_rule_label(ctx, "SPRITES");
@@ -174,12 +271,29 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
         return;
     }
 
+    focus_clamp();
     nt_ui_vlist_style_t vs = nt_ui_vlist_style_defaults();
     vs.overscan = 3;
     vs.id_ring = UI_ROW_ID_RING; /* bound per-row state to the viewport, not project size */
     const nt_ui_vlist_range_t r = nt_ui_vlist_begin(
         ctx, NULL, s_id_vlist, (uint32_t)s_view_count, S(BASE_ROW_H), NT_UI_AXIS_Y, &vs,
         &(Clay_ElementDeclaration){.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}});
+    /* Ensure-visible: after a keyboard focus move, scroll the vlist so the focused row is in view
+     * (once — s_focus_follow is consumed here so wheel scrolling is never fought). */
+    if (s_focus_follow && s_focus_view >= 0 && s_focus_view < s_view_count) {
+        const uint32_t fv = (uint32_t)s_focus_view;
+        if (r.last < r.first || fv < r.first) {
+            nt_ui_scroll_to(ctx, s_id_vlist, 0.0F, -(float)fv * S(BASE_ROW_H));
+        } else if (fv > r.last) {
+            const uint32_t win = r.last - r.first + 1U;
+            int top = (int)fv - (int)win + 1;
+            if (top < 0) {
+                top = 0;
+            }
+            nt_ui_scroll_to(ctx, s_id_vlist, 0.0F, -(float)top * S(BASE_ROW_H));
+        }
+        s_focus_follow = false;
+    }
     if (r.first <= r.last) {
         for (uint32_t i = r.first; i <= r.last; i++) {
             const sprite_row *row = &s_rows[s_view[i]];
@@ -223,11 +337,13 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
             }
             if (ev.double_clicked && !row->is_folder && !row->missing) {
                 select_sprite_row((int)i, false, false);
+                s_focus_view = (int)i;
                 start_sprite_edit(row);
             } else if (ev.clicked && !x_clicked) {
                 const bool ctrl = nt_input_key_is_down(NT_KEY_LCTRL) || nt_input_key_is_down(NT_KEY_RCTRL);
                 const bool shift = nt_input_key_is_down(NT_KEY_LSHIFT) || nt_input_key_is_down(NT_KEY_RSHIFT);
                 select_sprite_row((int)i, ctrl, shift);
+                s_focus_view = (int)i; /* click moves keyboard focus here too */
             }
             if (nt_ui_menu_open_trigger(ctx, s_id_ctx_menu, hit_id, false, &s_ctx_state)) {
                 close_menubar_menus();
@@ -261,6 +377,7 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
                 s_ctx_removable = row->is_source;
             }
             const Clay_Color bg = selected ? C_SEL : (ev.hovered ? C_HOVER : C_TRANSPARENT);
+            const uint16_t fw = ((int)i == s_focus_view) ? Su(1) : 0; /* keyboard focus ring */
             const uint16_t indent = Su(8.0F + ((float)row->indent * 16.0F));
             /* Leading type icon: folder for a directory source, image for a sprite leaf (folder child or
              * file source); missing files reuse the image mask tinted warn. Label brightens on selection.
@@ -275,6 +392,7 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
                              .childGap = Su(4),
                              .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}},
                   .backgroundColor = bg,
+                  .border = {.color = C_BORDER_STRONG, .width = {fw, fw, fw, fw, 0}},
                   .cornerRadius = CLAY_CORNER_RADIUS(S(4))}) {
                 CLAY({.id = {.id = hit_id},
                       .layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {

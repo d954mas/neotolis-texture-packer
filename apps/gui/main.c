@@ -367,6 +367,40 @@ static void handle_shortcuts(void) {
         s_export_open = true;
     }
 }
+
+/* Sprite-list keyboard navigation (ux.md §3.3d, U-02 T3). Runs AFTER build_view() so it acts on the
+ * fresh filtered/sorted view. Same gating as handle_shortcuts: no field focus, no modal, not headless,
+ * and Ctrl is reserved for the global shortcuts above. Arrows/Home/End/Enter/F2 drive the list focus. */
+static void handle_list_nav(void) {
+    if (gui_shot_active() || gui_bench_active()) {
+        return;
+    }
+    if (nt_ui_input_any_focused(s_ctx) || s_confirm_open || s_about_open || s_export_open ||
+        s_recovery_open || s_edit_kind != EDIT_NONE) {
+        return;
+    }
+    if (nt_input_key_is_down(NT_KEY_LCTRL) || nt_input_key_is_down(NT_KEY_RCTRL)) {
+        return;
+    }
+    const bool shift = nt_input_key_is_down(NT_KEY_LSHIFT) || nt_input_key_is_down(NT_KEY_RSHIFT);
+    if (nt_input_key_is_pressed(NT_KEY_ARROW_DOWN)) {
+        gui_list_focus_step(+1, shift);
+    } else if (nt_input_key_is_pressed(NT_KEY_ARROW_UP)) {
+        gui_list_focus_step(-1, shift);
+    } else if (nt_input_key_is_pressed(NT_KEY_HOME)) {
+        gui_list_focus_edge(false, shift);
+    } else if (nt_input_key_is_pressed(NT_KEY_END)) {
+        gui_list_focus_edge(true, shift);
+    } else if (nt_input_key_is_pressed(NT_KEY_ARROW_RIGHT)) {
+        gui_list_focus_collapse(true);
+    } else if (nt_input_key_is_pressed(NT_KEY_ARROW_LEFT)) {
+        gui_list_focus_collapse(false);
+    } else if (nt_input_key_is_pressed(NT_KEY_ENTER)) {
+        gui_list_focus_activate();
+    } else if (nt_input_key_is_pressed(NT_KEY_F2)) {
+        gui_list_focus_rename();
+    }
+}
 // #endregion
 
 // #region frame
@@ -549,6 +583,7 @@ static void frame(void) {
         }
         build_rows();
         build_view(); /* filtered/sorted/collapsible view over the row model (U-02) */
+        handle_list_nav(); /* keyboard list focus/nav on the fresh view (U-02 T3) */
         s_content_w = scale.logical_w; /* for caption/status truncation */
         compute_panel_widths(scale.logical_w); /* clamp side-panel widths so they never leave the screen */
         gui_shot_tick(); /* screenshot mode: pack + select + (post-draw) capture; no-op unless --shot */

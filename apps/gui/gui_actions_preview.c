@@ -47,6 +47,7 @@ void reset_selection(void) {
     s_sel_missing = false;
     multi_sel_clear();
     s_sel_anchor_row = -1;
+    s_focus_view = -1;
     s_sel_anim = -1;
     s_sel_anim_frame = -1;
     preview_stop();

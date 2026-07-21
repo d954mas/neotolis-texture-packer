@@ -83,6 +83,7 @@ gui_selected_sprite *s_multi_sel;
 int s_multi_sel_count;
 int s_multi_sel_cap;
 int s_sel_anchor_row = -1;
+int s_focus_view = -1;
 
 /* --- animation selection --- */
 int s_sel_anim = -1;
