@@ -548,6 +548,7 @@ static void frame(void) {
             }
         }
         build_rows();
+        build_view(); /* filtered/sorted/collapsible view over the row model (U-02) */
         s_content_w = scale.logical_w; /* for caption/status truncation */
         compute_panel_widths(scale.logical_w); /* clamp side-panel widths so they never leave the screen */
         gui_shot_tick(); /* screenshot mode: pack + select + (post-draw) capture; no-op unless --shot */

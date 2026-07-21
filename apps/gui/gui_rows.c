@@ -542,7 +542,295 @@ void build_rows(void) {
     s_row_cache_snapshot_lifetime = snapshot_lifetime;
     s_row_cache_valid = true;
 }
+// #endregion
 
+// #region filtered/sorted/collapsible view over the row model (U-02 paper cuts)
+int *s_view;
+int s_view_count;
+static int s_view_cap;
+
+static char s_view_filter[256];
+static row_sort_key s_view_sort_key;
+static bool s_view_sort_desc;
+static bool s_view_sort_warn_first;
+
+/* Collapsed folder sources by stable id. Bounded by the folder-source count (tiny); linear scan. */
+static tp_id128 *s_collapsed;
+static int s_collapsed_count;
+static int s_collapsed_cap;
+
+/* Bumped on any view-control change; part of the view cache key alongside the row generation. */
+static uint64_t s_view_epoch = 1;
+static bool s_view_cache_valid;
+static uint64_t s_view_cache_row_generation;
+static uint64_t s_view_cache_epoch;
+
+/* Reused per-frame scratch (grow-only, freed in shutdown): one span per source row + a child buffer. */
+typedef struct view_span {
+    int row;         /* index of the source row in s_rows */
+    int child_start; /* first child row index (inclusive) */
+    int child_end;   /* one past the last child (exclusive) */
+} view_span;
+static view_span *s_spans;
+static int s_spans_cap;
+static int *s_child_scratch;
+static int s_child_scratch_cap;
+
+static bool ascii_ci_contains(const char *hay, const char *needle) {
+    if (!needle || needle[0] == '\0') {
+        return true;
+    }
+    if (!hay) {
+        return false;
+    }
+    for (const char *h = hay; *h; ++h) {
+        const char *a = h;
+        const char *b = needle;
+        while (*a && *b) {
+            unsigned char ca = (unsigned char)*a;
+            unsigned char cb = (unsigned char)*b;
+            if (ca >= 'A' && ca <= 'Z') {
+                ca = (unsigned char)(ca - 'A' + 'a');
+            }
+            if (cb >= 'A' && cb <= 'Z') {
+                cb = (unsigned char)(cb - 'A' + 'a');
+            }
+            if (ca != cb) {
+                break;
+            }
+            ++a;
+            ++b;
+        }
+        if (*b == '\0') {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool row_matches_filter(const sprite_row *r) {
+    if (s_view_filter[0] == '\0') {
+        return true;
+    }
+    return ascii_ci_contains(r->label, s_view_filter) ||
+           ascii_ci_contains(r->sprite_name, s_view_filter);
+}
+
+static const char *row_sort_name(const sprite_row *r) {
+    return (r->sprite_name && r->sprite_name[0]) ? r->sprite_name : r->label;
+}
+
+/* Single-threaded UI: the sort key/dir live in module statics the qsort adapters read. */
+static int view_row_cmp(int ia, int ib) {
+    const sprite_row *a = &s_rows[ia];
+    const sprite_row *b = &s_rows[ib];
+    if (s_view_sort_warn_first && a->missing != b->missing) {
+        return a->missing ? -1 : 1; /* warnings pinned on top, independent of direction */
+    }
+    int c = 0;
+    switch (s_view_sort_key) {
+    case ROW_SORT_NAME:
+        c = tp_nat_cmp(row_sort_name(a), row_sort_name(b));
+        break;
+    case ROW_SORT_TYPE:
+        c = (b->is_folder ? 1 : 0) - (a->is_folder ? 1 : 0);
+        if (c == 0) {
+            c = tp_nat_cmp(row_sort_name(a), row_sort_name(b));
+        }
+        break;
+    case ROW_SORT_ORIGINAL:
+    default:
+        c = (ia > ib) - (ia < ib);
+        break;
+    }
+    if (s_view_sort_desc) {
+        c = -c;
+    }
+    return c;
+}
+static int view_qsort_child(const void *pa, const void *pb) {
+    return view_row_cmp(*(const int *)pa, *(const int *)pb);
+}
+static int view_qsort_span(const void *pa, const void *pb) {
+    return view_row_cmp(((const view_span *)pa)->row, ((const view_span *)pb)->row);
+}
+
+static bool view_push(int row_index) {
+    if (s_view_count >= s_view_cap) {
+        const int newcap = s_view_cap ? s_view_cap * 2 : ROWS_INIT_CAP;
+        int *grown = realloc(s_view, (size_t)newcap * sizeof *s_view);
+        if (!grown) {
+            return false;
+        }
+        s_view = grown;
+        s_view_cap = newcap;
+    }
+    s_view[s_view_count++] = row_index;
+    return true;
+}
+
+/* OOM fallback: show every row unfiltered/unsorted so the list is never silently emptied. */
+static void view_fallback_identity(void) {
+    s_view_count = 0;
+    for (int i = 0; i < s_row_count; ++i) {
+        if (!view_push(i)) {
+            break;
+        }
+    }
+    set_status_ex(STATUS_ERROR, "Out of memory: sprite view fell back to unfiltered.");
+}
+
+void gui_rows_set_filter(const char *query) {
+    char norm[sizeof s_view_filter];
+    (void)snprintf(norm, sizeof norm, "%s", query ? query : "");
+    if (strcmp(norm, s_view_filter) != 0) {
+        (void)snprintf(s_view_filter, sizeof s_view_filter, "%s", norm);
+        s_view_epoch++;
+    }
+}
+const char *gui_rows_filter(void) {
+    return s_view_filter;
+}
+bool gui_rows_filter_active(void) {
+    return s_view_filter[0] != '\0';
+}
+
+void gui_rows_set_sort(row_sort_key key, bool descending, bool warn_first) {
+    if (key != s_view_sort_key || descending != s_view_sort_desc ||
+        warn_first != s_view_sort_warn_first) {
+        s_view_sort_key = key;
+        s_view_sort_desc = descending;
+        s_view_sort_warn_first = warn_first;
+        s_view_epoch++;
+    }
+}
+void gui_rows_get_sort(row_sort_key *key, bool *descending, bool *warn_first) {
+    if (key) {
+        *key = s_view_sort_key;
+    }
+    if (descending) {
+        *descending = s_view_sort_desc;
+    }
+    if (warn_first) {
+        *warn_first = s_view_sort_warn_first;
+    }
+}
+
+bool gui_rows_is_collapsed(tp_id128 source_id) {
+    for (int i = 0; i < s_collapsed_count; ++i) {
+        if (tp_id128_eq(s_collapsed[i], source_id)) {
+            return true;
+        }
+    }
+    return false;
+}
+void gui_rows_toggle_collapsed(tp_id128 source_id) {
+    for (int i = 0; i < s_collapsed_count; ++i) {
+        if (tp_id128_eq(s_collapsed[i], source_id)) {
+            for (int j = i; j < s_collapsed_count - 1; ++j) {
+                s_collapsed[j] = s_collapsed[j + 1];
+            }
+            s_collapsed_count--;
+            s_view_epoch++;
+            return;
+        }
+    }
+    if (s_collapsed_count >= s_collapsed_cap) {
+        const int newcap = s_collapsed_cap ? s_collapsed_cap * 2 : 16;
+        tp_id128 *grown = realloc(s_collapsed, (size_t)newcap * sizeof *s_collapsed);
+        if (!grown) {
+            set_status_ex(STATUS_ERROR, "Out of memory: folder collapse not recorded.");
+            return;
+        }
+        s_collapsed = grown;
+        s_collapsed_cap = newcap;
+    }
+    s_collapsed[s_collapsed_count++] = source_id;
+    s_view_epoch++;
+}
+
+void build_view(void) {
+    if (s_view_cache_valid &&
+        s_view_cache_row_generation == s_row_cache_generation &&
+        s_view_cache_epoch == s_view_epoch) {
+        return;
+    }
+    s_view_count = 0;
+    s_view_cache_valid = true;
+    s_view_cache_row_generation = s_row_cache_generation;
+    s_view_cache_epoch = s_view_epoch;
+    if (s_row_count == 0) {
+        return;
+    }
+    /* 1. Partition s_rows into source spans (each source row + its contiguous child run). */
+    int nspans = 0;
+    for (int i = 0; i < s_row_count;) {
+        int j = i + 1;
+        while (j < s_row_count && !s_rows[j].is_source) {
+            j++;
+        }
+        if (nspans >= s_spans_cap) {
+            const int newcap = s_spans_cap ? s_spans_cap * 2 : 64;
+            view_span *grown = realloc(s_spans, (size_t)newcap * sizeof *s_spans);
+            if (!grown) {
+                view_fallback_identity();
+                return;
+            }
+            s_spans = grown;
+            s_spans_cap = newcap;
+        }
+        s_spans[nspans].row = i;
+        s_spans[nspans].child_start = i + 1;
+        s_spans[nspans].child_end = j;
+        nspans++;
+        i = j;
+    }
+    /* 2. Order the source spans (warn-first + key/dir; a no-op reorder for ORIGINAL asc). */
+    qsort(s_spans, (size_t)nspans, sizeof *s_spans, view_qsort_span);
+    /* 3. Emit: source (if visible under the filter) then its filtered+sorted, non-collapsed children. */
+    const bool filtering = s_view_filter[0] != '\0';
+    for (int s = 0; s < nspans; ++s) {
+        const view_span *sp = &s_spans[s];
+        const sprite_row *src = &s_rows[sp->row];
+        const bool collapsed = src->is_folder && gui_rows_is_collapsed(src->source_id);
+        int nch = 0;
+        if (!collapsed || filtering) { /* an active filter overrides collapse so matches surface */
+            for (int c = sp->child_start; c < sp->child_end; ++c) {
+                if (filtering && !row_matches_filter(&s_rows[c])) {
+                    continue;
+                }
+                if (nch >= s_child_scratch_cap) {
+                    const int newcap = s_child_scratch_cap ? s_child_scratch_cap * 2 : 256;
+                    int *grown = realloc(s_child_scratch, (size_t)newcap * sizeof *s_child_scratch);
+                    if (!grown) {
+                        view_fallback_identity();
+                        return;
+                    }
+                    s_child_scratch = grown;
+                    s_child_scratch_cap = newcap;
+                }
+                s_child_scratch[nch++] = c;
+            }
+            qsort(s_child_scratch, (size_t)nch, sizeof *s_child_scratch, view_qsort_child);
+        }
+        if (filtering && !row_matches_filter(src) && nch == 0) {
+            continue; /* neither the source nor any child matched */
+        }
+        if (!view_push(sp->row)) {
+            view_fallback_identity();
+            return;
+        }
+        for (int k = 0; k < nch; ++k) {
+            if (!view_push(s_child_scratch[k])) {
+                view_fallback_identity();
+                return;
+            }
+        }
+    }
+}
+// #endregion
+
+// #region selected leaf cache
 static void selected_cache_refresh(void) {
     /* Frame-side actions (notably screenshot pack/refresh) can replace the GUI
      * snapshot after build_rows() ran. Never inspect selected-cache or override
@@ -616,6 +904,29 @@ void gui_rows_shutdown(void) {
     s_rows = NULL;
     s_row_count = 0;
     s_rows_cap = 0;
+
+    free(s_view);
+    s_view = NULL;
+    s_view_count = 0;
+    s_view_cap = 0;
+    free(s_collapsed);
+    s_collapsed = NULL;
+    s_collapsed_count = 0;
+    s_collapsed_cap = 0;
+    free(s_spans);
+    s_spans = NULL;
+    s_spans_cap = 0;
+    free(s_child_scratch);
+    s_child_scratch = NULL;
+    s_child_scratch_cap = 0;
+    s_view_filter[0] = '\0';
+    s_view_sort_key = ROW_SORT_ORIGINAL;
+    s_view_sort_desc = false;
+    s_view_sort_warn_first = false;
+    s_view_epoch = 1;
+    s_view_cache_valid = false;
+    s_view_cache_row_generation = 0U;
+    s_view_cache_epoch = 0U;
 
     free(s_override_index);
     s_override_index = NULL;

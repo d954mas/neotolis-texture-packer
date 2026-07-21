@@ -99,13 +99,15 @@ static void declare_atlas_list(nt_ui_context_t *ctx, const tp_session_snapshot *
     }
 }
 
-/* Applies a click on sprite row `i` (Ctrl toggles, Shift range-selects from the anchor, plain replaces)
- * to the multi-selection, and updates the PRIMARY selection (region panel / canvas sync). */
+/* Applies a click on VIEW row `i` (index into s_view; Ctrl toggles, Shift range-selects from the
+ * anchor in view order, plain replaces) to the multi-selection, and updates the PRIMARY selection
+ * (region panel / canvas sync). The anchor s_sel_anchor_row is a VIEW index so Shift-range follows
+ * the filtered/sorted order the user actually sees. */
 static void select_sprite_row(int i, bool ctrl, bool shift) {
-    if (i < 0 || i >= s_row_count) {
+    if (i < 0 || i >= s_view_count) {
         return;
     }
-    const sprite_row *row = &s_rows[i];
+    const sprite_row *row = &s_rows[s_view[i]];
     const bool leaf = (!row->is_folder && !row->missing && row->sprite_name &&
                        row->sprite_name[0] != '\0');
     s_sel_src = row->src;
@@ -113,12 +115,12 @@ static void select_sprite_row(int i, bool ctrl, bool shift) {
     s_sel_missing = row->missing;
     (void)snprintf(s_sel_abs, sizeof s_sel_abs, "%s", row->abs);
     if (leaf) {
-        if (shift && s_sel_anchor_row >= 0 && s_sel_anchor_row < s_row_count) {
+        if (shift && s_sel_anchor_row >= 0 && s_sel_anchor_row < s_view_count) {
             multi_sel_clear();
             const int lo = (s_sel_anchor_row < i) ? s_sel_anchor_row : i;
             const int hi = (s_sel_anchor_row < i) ? i : s_sel_anchor_row;
             for (int k = lo; k <= hi; k++) {
-                const sprite_row *rk = &s_rows[k];
+                const sprite_row *rk = &s_rows[s_view[k]];
                 if (!rk->is_folder && !rk->missing && rk->sprite_name &&
                     rk->sprite_name[0] != '\0') {
                     multi_sel_add_ref(rk->source_id, rk->source_key);
@@ -176,11 +178,11 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
     vs.overscan = 3;
     vs.id_ring = UI_ROW_ID_RING; /* bound per-row state to the viewport, not project size */
     const nt_ui_vlist_range_t r = nt_ui_vlist_begin(
-        ctx, NULL, s_id_vlist, (uint32_t)s_row_count, S(BASE_ROW_H), NT_UI_AXIS_Y, &vs,
+        ctx, NULL, s_id_vlist, (uint32_t)s_view_count, S(BASE_ROW_H), NT_UI_AXIS_Y, &vs,
         &(Clay_ElementDeclaration){.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}});
     if (r.first <= r.last) {
         for (uint32_t i = r.first; i <= r.last; i++) {
-            const sprite_row *row = &s_rows[i];
+            const sprite_row *row = &s_rows[s_view[i]];
             const uint32_t row_id = nt_ui_vlist_item_id(ctx, i);
             const uint32_t hit_id = nt_ui_child_id(row_id, "hit");
             const uint32_t x_id = nt_ui_child_id(row_id, "x");

@@ -69,6 +69,38 @@ extern int s_row_count;
  * key and performs no allocation or filesystem work. */
 void build_rows(void);
 
+/* --- filtered / sorted / collapsible VIEW over the row model (U-02 paper cuts) ---
+ * s_view[k] is an index into s_rows[]: the left panel iterates the VIEW, never s_rows
+ * directly, so the text filter, folder collapse, and sort are pure functions over the
+ * row model -- a view-only change never invalidates the expensive build_rows() cache,
+ * and the whole seam ports to the U-03 unified tree unchanged. View state is session UI
+ * state: it is NEVER serialized into the project (§61.3 app-state boundary). */
+extern int *s_view;
+extern int s_view_count;
+
+typedef enum {
+    ROW_SORT_ORIGINAL = 0, /* source + natural child order (build_rows order) */
+    ROW_SORT_NAME,         /* natural-order by display/export name */
+    ROW_SORT_TYPE          /* folders before files, then natural name */
+} row_sort_key;
+
+/* Case-insensitive substring filter over row label + export name. NULL/"" clears it.
+ * A matching child keeps its parent folder visible; an active filter overrides collapse. */
+void gui_rows_set_filter(const char *query);
+const char *gui_rows_filter(void);
+bool gui_rows_filter_active(void);
+
+void gui_rows_set_sort(row_sort_key key, bool descending, bool warn_first);
+void gui_rows_get_sort(row_sort_key *key, bool *descending, bool *warn_first);
+
+/* Folder-source disclosure (keyed by stable source id; children hidden when collapsed). */
+void gui_rows_toggle_collapsed(tp_id128 source_id);
+bool gui_rows_is_collapsed(tp_id128 source_id);
+
+/* Rebuilds s_view from s_rows applying {filter, collapse, sort}. Cheap and cached on
+ * {row-cache generation, filter, sort, collapse epoch}; call once per frame after build_rows(). */
+void build_view(void);
+
 /* Releases all row/selection caches owned by this module. Safe before first
  * build and after a partial/OOM build; call once during GUI shutdown. */
 void gui_rows_shutdown(void);
