@@ -235,11 +235,17 @@ tp_status tp_pack_input_build_cancellable(const tp_project *p, int atlas_index,
                                 "tp_pack_input_build: source path %d could not be resolved",
                                 si);
         }
-        if (!tp_scan_exists(abs)) {
+        /* One stat classifies the source (missing / directory / file) instead of the
+         * exists-then-is_dir pair. On a slow/network mount that pair cost TWO blocking
+         * stats between the loop-top cancel poll and the scan's own entry poll; folding
+         * them halves that gap. Outcomes are byte-identical: dir kind -> folder branch,
+         * any other existing kind -> file branch, un-stat'able -> missing. */
+        const tp_scan_kind source_kind = tp_scan_classify(abs);
+        if (source_kind == TP_SCAN_KIND_MISSING) {
             missing++;
             continue;
         }
-        if (tp_scan_is_dir(abs)) {
+        if (source_kind == TP_SCAN_KIND_DIRECTORY) {
             /* Folder: recurse (entries already sorted by rel) and append in scan
              * order. NO global sort across sources -- layout depends on input order.
              * The walk polls `cancel` per entry; a cancelled walk returns

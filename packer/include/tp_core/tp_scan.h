@@ -66,6 +66,20 @@ bool tp_scan_is_dir(const char *abs);
 /* True if `abs` exists on disk (file OR directory). */
 bool tp_scan_exists(const char *abs);
 
+typedef enum tp_scan_kind {
+    TP_SCAN_KIND_MISSING = 0, /* NULL/empty, or the path cannot be stat'd */
+    TP_SCAN_KIND_DIRECTORY,   /* an existing directory (reparse points included) */
+    TP_SCAN_KIND_FILE         /* an existing non-directory (regular/other/reparse) */
+} tp_scan_kind;
+
+/* One-stat source classification: folds tp_scan_exists + tp_scan_is_dir into a SINGLE
+ * filesystem probe so a cancellable caller pays one stat, not two, between polls on a
+ * slow/network mount. Outcomes are identical to the exists-then-is_dir pair -- MISSING
+ * iff the path cannot be stat'd (or is NULL/empty), DIRECTORY iff the stat kind is a
+ * directory (reparse or not -- the folder walk rejects a reparse root itself), else
+ * FILE. Does not follow into the directory or read any entry. */
+tp_scan_kind tp_scan_classify(const char *abs);
+
 /* Stats one regular file through the same UTF-8 filesystem boundary used by
  * directory scanning. Size and platform mtime are opaque comparison values;
  * either output may be NULL. Directories/special/missing paths return false. */

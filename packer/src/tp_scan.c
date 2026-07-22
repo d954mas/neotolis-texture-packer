@@ -408,6 +408,12 @@ tp_status tp_scan_dir_cancellable(const char *abs_dir, tp_scan_result *out,
                             "directory scan root exceeds %u bytes",
                             (unsigned)(TP_IDENTITY_PATH_MAX - 1));
     }
+    /* Poll BEFORE the blocking root stat: a cancel raised while the caller resolved this
+     * source (or finished the previous folder) skips a fresh stat on a slow/network mount.
+     * *out was zeroed above, so a cancelled entry publishes nothing. */
+    if (tp_cancel_requested(cancel)) {
+        return tp_error_set(err, TP_STATUS_CANCELLED, "directory scan cancelled");
+    }
     tp_fs_info root_info;
     if (!tp_fs_stat(abs_dir, &root_info)) {
         const int error = errno;
@@ -425,6 +431,14 @@ tp_status tp_scan_dir_cancellable(const char *abs_dir, tp_scan_result *out,
     if (status != TP_STATUS_OK) {
         scan_vec_drop(&v);
         return status;
+    }
+    /* Poll AFTER the walk but BEFORE sorting: qsort of a large tree's vector is itself a
+     * long, uninterruptible run, and a cancel raised as the final entry was read would
+     * otherwise be waited out here. Drop the accumulated (still-unsorted) walk and report
+     * CANCELLED, matching scan_dir's per-entry cancel site. */
+    if (tp_cancel_requested(cancel)) {
+        scan_vec_drop(&v);
+        return tp_error_set(err, TP_STATUS_CANCELLED, "directory scan cancelled");
     }
     if (v.count > 1) {
         qsort(v.data, (size_t)v.count, sizeof *v.data, entry_cmp);
@@ -490,6 +504,21 @@ bool tp_scan_exists(const char *abs) {
         return false;
     }
     return tp_fs_exists(abs);
+}
+
+tp_scan_kind tp_scan_classify(const char *abs) {
+    if (!abs || abs[0] == '\0') {
+        return TP_SCAN_KIND_MISSING; /* mirrors tp_scan_exists()/tp_scan_is_dir() guard */
+    }
+    tp_fs_info info;
+    if (!tp_fs_stat(abs, &info)) {
+        return TP_SCAN_KIND_MISSING; /* == !tp_fs_exists() */
+    }
+    /* Kind-only split, byte-identical to tp_scan_is_dir (which does NOT reject a reparse
+     * directory): a directory -- reparse or not -- is DIRECTORY, so the folder walk's own
+     * root reparse check stays the single authority; every other existing kind is FILE. */
+    return info.kind == TP_FS_KIND_DIRECTORY ? TP_SCAN_KIND_DIRECTORY
+                                             : TP_SCAN_KIND_FILE;
 }
 
 bool tp_scan_file_stat(const char *abs, long long *out_size,

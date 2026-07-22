@@ -11,6 +11,8 @@
 #include <unistd.h>
 #endif
 
+#include "tinycthread.h"
+
 #include "tp_core/tp_build_worker.h"
 #include "tp_core/tp_job.h"
 #include "tp_core/tp_operation.h"
@@ -41,25 +43,30 @@ int tp_scan__test_visited_entries(void);
 void setUp(void) {}
 void tearDown(void) {}
 
-/* Spins (bounded) until the worker parks in the armed walk. Returns true once
- * ENTERED; the large cap is only a safety timeout for a broken gate, not a normal
- * path -- the worker reaches the gate within microseconds. */
+/* Spins (bounded), yielding the CPU each iteration so the parked worker thread
+ * always gets scheduled, until the worker parks in the armed walk. Returns true
+ * once ENTERED; the large cap is a genuine timeout for a broken gate, not a
+ * normal path -- the worker reaches the gate within microseconds. */
 static bool wait_for_walk_gate(void) {
-    for (long spins = 0; spins < 2000000000L; ++spins) {
+    for (long spins = 0; spins < 10000000L; ++spins) {
         if (tp_scan__test_walk_gate_entered()) {
             return true;
         }
+        thrd_yield();
     }
     return tp_scan__test_walk_gate_entered();
 }
 
 /* Same bounded spin, for the post-entry gate: parks in scan_dir after the first
- * visited entry. The large cap is a safety timeout, not a normal path. */
+ * visited entry, yielding the CPU each iteration so the parked worker always
+ * gets scheduled. The large cap is a genuine timeout for a broken gate, not a
+ * normal path. */
 static bool wait_for_post_entry_gate(void) {
-    for (long spins = 0; spins < 2000000000L; ++spins) {
+    for (long spins = 0; spins < 10000000L; ++spins) {
         if (tp_scan__test_post_entry_gate_entered()) {
             return true;
         }
+        thrd_yield();
     }
     return tp_scan__test_post_entry_gate_entered();
 }

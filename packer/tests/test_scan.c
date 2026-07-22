@@ -696,6 +696,65 @@ void test_cancellable_scan_stops_mid_walk(void) {
     TEST_ASSERT_EQUAL_INT(4, null_tok.count);
     tp_scan_free(&null_tok);
 }
+
+/* U-02: beyond the per-entry loop-top poll, the walk also polls the cancel token at
+ * two points that loop cannot cover -- once at function entry (BEFORE the blocking root
+ * stat) and once AFTER the walk returns OK but BEFORE the qsort of a large tree. This
+ * pins the PRE-SORT poll specifically: a never-cancelling counting token first learns
+ * the total poll count N for this fixture (N counts the pre-sort poll as its LAST poll);
+ * rerunning with cancel_after = N-1 lets every earlier poll pass so ONLY the pre-sort
+ * poll reports cancel. Were that poll deleted the walk would have just N-1 polls, poll
+ * #N would never happen, and the rerun would finish OK (count 4) instead of CANCELLED --
+ * so a CANCELLED result at exactly N polls is what the pre-sort poll uniquely produces.
+ * The ENTRY poll is pinned separately: cancel_after = 0 aborts on the first poll, before
+ * any entry is read, with a clean EMPTY result. */
+void test_cancellable_scan_polls_entry_and_before_sort(void) {
+    /* 1. Full walk, never cancel: N counts every poll INCLUDING the pre-sort one. */
+    scan_cancel_ctx full_ctx = {0, 1000000};
+    const tp_cancel_token full_token = {scan_cancel_after_n, &full_ctx};
+    tp_scan_result full = {0};
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_scan_dir_cancellable(g_root, &full, &full_token, &error), error.msg);
+    TEST_ASSERT_EQUAL_INT(4, full.count);
+    const int total_polls = full_ctx.polls;
+    tp_scan_free(&full);
+    TEST_ASSERT_TRUE_MESSAGE(total_polls >= 2,
+                             "walk must poll at least the entry + pre-sort points");
+
+    /* 2. Cancel ONLY on the last poll: cancel_after = N-1 passes every scan-phase poll
+     * and fires on the pre-sort poll. The accumulated (unsorted) walk is dropped whole. */
+    scan_cancel_ctx sort_ctx = {0, total_polls - 1};
+    const tp_cancel_token sort_token = {scan_cancel_after_n, &sort_ctx};
+    tp_scan_result sorted = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_CANCELLED,
+        tp_scan_dir_cancellable(g_root, &sorted, &sort_token, &error), error.msg);
+    TEST_ASSERT_EQUAL_INT(0, sorted.count);
+    TEST_ASSERT_NULL(sorted.entries);
+    /* Every earlier poll passed, so the walk ran to completion and the pre-sort poll (#N)
+     * is the one that caught the cancel -- deleting it makes this run finish OK instead. */
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        total_polls, sort_ctx.polls,
+        "the walk must complete and cancel on the pre-sort poll, not earlier");
+    TEST_ASSERT_NOT_NULL(strstr(error.msg, "cancel"));
+    tp_scan_free(&sorted);
+
+    /* 3. Entry poll: cancel before the first stat -- exactly one poll, empty result. */
+    scan_cancel_ctx entry_ctx = {0, 0};
+    const tp_cancel_token entry_token = {scan_cancel_after_n, &entry_ctx};
+    tp_scan_result entry = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_CANCELLED,
+        tp_scan_dir_cancellable(g_root, &entry, &entry_token, &error), error.msg);
+    TEST_ASSERT_EQUAL_INT(0, entry.count);
+    TEST_ASSERT_NULL(entry.entries);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        1, entry_ctx.polls,
+        "the entry poll must abort before the walk reads any entry");
+    tp_scan_free(&entry);
+}
 // #endregion
 
 int main(int argc, char **argv) {
@@ -709,6 +768,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_empty_subdir_is_empty);
     RUN_TEST(test_fixture_walk);
     RUN_TEST(test_cancellable_scan_stops_mid_walk);
+    RUN_TEST(test_cancellable_scan_polls_entry_and_before_sort);
     RUN_TEST(test_is_dir_and_exists);
     RUN_TEST(test_visit_dir_streams_matching_names);
 #ifndef _WIN32
