@@ -1,9 +1,9 @@
 /* Deterministic, user-openable owner-scale bench-project fixture generator (U-01).
  *
- * The committed fixture assembles 36 atlases (5,480 total source memberships,
+ * The committed fixture assembles 37 atlases (5,481 total source memberships,
  * one JSON export target per atlas) out of the 2,020-image Kenney CC0 manifest
  * (examples/bench-assets/manifest.tsv), reusing those already-committed PNGs
- * so the repository does not gain duplicate binary assets. Five composition
+ * so the repository does not gain duplicate binary assets. Six composition
  * groups model realistic owner-scale shapes, built in this exact order so
  * `--write` is byte-identical across runs:
  *
@@ -22,6 +22,15 @@
  *                      detects it from the pack result (page_count > 1).
  *   5. Size-varied  -- 2 atlases each blending 60/60/20/10 sources from
  *                      plat/ui/proto/tiny via modulo indexing.
+ *   6. Folder       -- 1 atlas whose single source is a TP_SOURCE_KIND_FOLDER
+ *                      pointing at the committed tiny-dungeon tree. This is the
+ *                      only source that exercises the worker-side folder walk
+ *                      (tp_scan_dir + the descriptor loop -- the U-01a cost) under
+ *                      --bench-perf / --pack-hash-probe. It stays LFS-independent
+ *                      for the byte-stable contract: that check only verifies the
+ *                      folder resolves to a real directory (which exists in every
+ *                      checkout), never scanning the *.png inside it -- so an
+ *                      unmaterialized-LFS checkout degrades like F17, never fails.
  *
  * Construction uses the white-box model helpers; validation deliberately
  * comes back through the public snapshot/load API (mirrors
@@ -33,6 +42,7 @@
 
 #include "tp_core/tp_export.h"
 #include "tp_core/tp_project.h"
+#include "tp_core/tp_scan.h" /* tp_scan_is_dir: folder-source shape check */
 #include "tp_core/tp_session.h"
 #include "tp_project_mutation_internal.h"
 
@@ -52,6 +62,11 @@
 #define BENCH_PROTO_ATLASES 3
 #define BENCH_SV_ATLASES 2
 #define BENCH_SV_SOURCES_PER_ATLAS (60 + 60 + 20 + 10)
+#define BENCH_FOLDER_ATLASES 1
+/* Group 6's lone folder source. BENCH_ASSET_PREFIX already ends in '/', so this
+ * resolves (project-relative) to the committed tiny-dungeon directory. The tree
+ * exists in every checkout even when its *.png are unmaterialized LFS pointers. */
+#define BENCH_FOLDER_SOURCE_PATH BENCH_ASSET_PREFIX "tiny-dungeon"
 
 /* The pinned manifest contract (examples/bench-assets/manifest.tsv). The
  * generator refuses to silently adapt to a different shape -- see the
@@ -69,19 +84,26 @@
 
 #define BENCH_PROTO_ATLAS_START                                              \
     (BENCH_HOMOGENEOUS_ATLASES + BENCH_MIX_ATLASES + BENCH_DUP_ATLASES)
-#define BENCH_EXPECTED_ATLAS_COUNT                                           \
+/* The folder group is built LAST, so its atlas occupies the final index range;
+ * placing it after size-varied keeps BENCH_PROTO_ATLAS_START (and every earlier
+ * atlas index) unchanged. */
+#define BENCH_FOLDER_ATLAS_START                                             \
     (BENCH_HOMOGENEOUS_ATLASES + BENCH_MIX_ATLASES + BENCH_DUP_ATLASES +     \
      BENCH_PROTO_ATLASES + BENCH_SV_ATLASES)
+#define BENCH_EXPECTED_ATLAS_COUNT                                           \
+    (BENCH_FOLDER_ATLAS_START + BENCH_FOLDER_ATLASES)
 
 /* The first BENCH_DUP_ATLASES homogeneous atlases are always full BENCH_CHUNK
  * chunks (the platformer-art-deluxe pack alone yields more than that many
  * chunks), so the duplicate group always contributes exactly
  * BENCH_DUP_ATLASES * BENCH_CHUNK memberships. */
+/* The folder group contributes one MEMBERSHIP per atlas (a folder source is a
+ * single source entry regardless of how many files it enumerates at pack time). */
 #define BENCH_EXPECTED_MEMBERSHIP_COUNT                                      \
     (BENCH_EXPECTED_PLAT_COUNT + BENCH_EXPECTED_UI_COUNT +                   \
      BENCH_EXPECTED_TINY_COUNT + (BENCH_MIX_ATLASES * BENCH_MIX_SIZE) +      \
      (BENCH_DUP_ATLASES * BENCH_CHUNK) + BENCH_EXPECTED_PROTO_COUNT +        \
-     (BENCH_SV_ATLASES * BENCH_SV_SOURCES_PER_ATLAS))
+     (BENCH_SV_ATLASES * BENCH_SV_SOURCES_PER_ATLAS) + BENCH_FOLDER_ATLASES)
 
 /* Project-relative source paths for one manifest pool, in manifest order. */
 typedef struct path_pool {
@@ -336,11 +358,13 @@ static tp_status parse_manifest(const char *manifest_path, path_pool *plat,
 }
 
 /* Creates one atlas (name "bench_%04d", target out_path "out/bench_%04d",
- * exactly `source_count` sources from `paths` in order), driving structural
- * IDs from `rng` in creation order (atlas, then target, then each source). */
+ * exactly `source_count` sources from `paths` in order, each added with
+ * `source_kind`), driving structural IDs from `rng` in creation order (atlas,
+ * then target, then each source). */
 static tp_status create_one_atlas(tp_project *project, const tp_rng *rng,
                                   int atlas_seq, char *const *paths,
-                                  int source_count, tp_error *error) {
+                                  int source_count, tp_source_kind source_kind,
+                                  tp_error *error) {
     char *atlas_name = indexed_text("bench_", atlas_seq);
     char *out_path = indexed_text("out/bench_", atlas_seq);
     if (!atlas_name || !out_path) {
@@ -378,8 +402,7 @@ static tp_status create_one_atlas(tp_project *project, const tp_rng *rng,
 
     for (int i = 0; i < source_count; ++i) {
         const int before = atlas->source_count;
-        status = tp_project_atlas_add_source_kind(atlas, paths[i],
-                                                  TP_SOURCE_KIND_FILE);
+        status = tp_project_atlas_add_source_kind(atlas, paths[i], source_kind);
         if (status == TP_STATUS_OK && atlas->source_count == before) {
             /* add_source_kind dedupes by normalized path. A silent no-op here would
              * misassign this source's id to the PRIOR source and shift the whole RNG
@@ -420,7 +443,7 @@ static tp_status build_homogeneous_group(
                 dup_snapshots[*atlas_seq].count = count;
             }
             status = create_one_atlas(project, rng, *atlas_seq, chunk_paths,
-                                      count, error);
+                                      count, TP_SOURCE_KIND_FILE, error);
             if (status == TP_STATUS_OK) {
                 *atlas_seq += 1;
             }
@@ -445,7 +468,7 @@ static tp_status build_mixed_group(tp_project *project, const tp_rng *rng,
             mix_paths[i] = concat[index];
         }
         status = create_one_atlas(project, rng, *atlas_seq, mix_paths,
-                                  BENCH_MIX_SIZE, error);
+                                  BENCH_MIX_SIZE, TP_SOURCE_KIND_FILE, error);
         if (status == TP_STATUS_OK) {
             *atlas_seq += 1;
         }
@@ -462,7 +485,7 @@ static tp_status build_duplicate_group(
     for (int d = 0; d < BENCH_DUP_ATLASES && status == TP_STATUS_OK; ++d) {
         status = create_one_atlas(project, rng, *atlas_seq,
                                   dup_snapshots[d].paths, dup_snapshots[d].count,
-                                  error);
+                                  TP_SOURCE_KIND_FILE, error);
         if (status == TP_STATUS_OK) {
             *atlas_seq += 1;
         }
@@ -484,7 +507,8 @@ static tp_status build_proto_group(tp_project *project, const tp_rng *rng,
         const int remaining = proto->count - offset;
         const int count = remaining < chunk_size ? remaining : chunk_size;
         status = create_one_atlas(project, rng, *atlas_seq,
-                                  proto->paths + offset, count, error);
+                                  proto->paths + offset, count,
+                                  TP_SOURCE_KIND_FILE, error);
         if (status == TP_STATUS_OK) {
             *atlas_seq += 1;
         }
@@ -515,11 +539,28 @@ static tp_status build_size_varied_group(tp_project *project, const tp_rng *rng,
         for (int t = 0; t < 10; ++t) {
             sv_paths[n++] = tiny->paths[(j * 10 + t) % tiny->count];
         }
-        status =
-            create_one_atlas(project, rng, *atlas_seq, sv_paths, n, error);
+        status = create_one_atlas(project, rng, *atlas_seq, sv_paths, n,
+                                  TP_SOURCE_KIND_FILE, error);
         if (status == TP_STATUS_OK) {
             *atlas_seq += 1;
         }
+    }
+    return status;
+}
+
+/* Group 6: one atlas whose single source is a FOLDER (recursively scanned at pack
+ * time), pointing at the committed tiny-dungeon tree. The folder-enumeration path
+ * (tp_scan_dir + the descriptor loop) is exercised only when this atlas is packed
+ * with real bytes (--bench-perf / --pack-hash-probe, the LFS perf leg). The byte-
+ * stable contract never scans it: validate_committed_shape only checks the source
+ * resolves to a real directory, so the check stays LFS-independent. */
+static tp_status build_folder_group(tp_project *project, const tp_rng *rng,
+                                    int *atlas_seq, tp_error *error) {
+    char *const paths[1] = {(char *)BENCH_FOLDER_SOURCE_PATH};
+    tp_status status = create_one_atlas(project, rng, *atlas_seq, paths, 1,
+                                        TP_SOURCE_KIND_FOLDER, error);
+    if (status == TP_STATUS_OK) {
+        *atlas_seq += 1;
     }
     return status;
 }
@@ -594,6 +635,9 @@ static tp_status create_bench_project(const char *manifest_path,
             status = build_size_varied_group(project, &rng, &atlas_seq, &plat,
                                             &ui, &proto, &tiny, error);
         }
+        if (status == TP_STATUS_OK) {
+            status = build_folder_group(project, &rng, &atlas_seq, error);
+        }
     }
 
     path_pool_free(&plat);
@@ -653,18 +697,33 @@ static bool validate_committed_shape(const char *path, size_t *out_bytes) {
         const bool is_proto_atlas =
             atlas && atlas_index >= BENCH_PROTO_ATLAS_START &&
             atlas_index < BENCH_PROTO_ATLAS_START + BENCH_PROTO_ATLASES;
+        /* Group 6 (folder) lives at the final index range. Its lone source is a
+         * FOLDER, checked LFS-independently: resolve + directory existence, never a
+         * scan of the *.png inside (which may be unmaterialized LFS pointers). */
+        const bool is_folder_atlas =
+            atlas && atlas_index >= BENCH_FOLDER_ATLAS_START &&
+            atlas_index < BENCH_FOLDER_ATLAS_START + BENCH_FOLDER_ATLASES;
         for (int source_index = 0; valid && source_index < atlas->source_count;
              ++source_index) {
             const tp_snapshot_source *source = tp_session_snapshot_source_at(
                 snapshot, atlas->id, source_index);
             char resolved[TP_IDENTITY_PATH_MAX];
-            valid = source && source->kind == TP_SNAPSHOT_SOURCE_FILE &&
+            const tp_snapshot_source_kind expected_kind =
+                is_folder_atlas ? TP_SNAPSHOT_SOURCE_FOLDER
+                                : TP_SNAPSHOT_SOURCE_FILE;
+            valid = source && source->kind == expected_kind &&
                     tp_session_snapshot_resolve_path(
                         snapshot, atlas->id, source->id, resolved,
                         sizeof resolved, &error) == TP_STATUS_OK &&
-                    file_exists(resolved) &&
+                    /* A folder resolves to a directory that exists in any checkout;
+                     * a file source resolves to a (possibly LFS-pointer) file that
+                     * still exists on disk. Both stay green without `git lfs pull`. */
+                    (is_folder_atlas ? tp_scan_is_dir(resolved)
+                                     : file_exists(resolved)) &&
                     (!is_proto_atlas ||
-                     strstr(source->path, "prototype-textures/") != NULL);
+                     strstr(source->path, "prototype-textures/") != NULL) &&
+                    (!is_folder_atlas ||
+                     strstr(source->path, "tiny-dungeon") != NULL);
         }
         if (valid) {
             source_total += atlas->source_count;

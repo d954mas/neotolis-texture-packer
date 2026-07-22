@@ -747,6 +747,65 @@ void test_concave_extrude_clamp_exports(void) {
     tp_arena_destroy(ar2);
     tp_project_destroy(p);
 }
+/* P2.8: a cancel raised while the post-scan descriptor loop is materializing a large
+ * folder must be honored INSIDE that loop -- not only after it finishes. The cancel
+ * counter is armed to fire well past every scan-phase poll (1 source-top poll + one
+ * poll per scanned entry) but within reach of the descriptor loop, so it can only fire
+ * during materialization. Pre-fix (no poll in the ci loop) the whole loop runs and the
+ * build returns OK; post-fix it stops early with TP_STATUS_CANCELLED, *out left empty,
+ * and the partial scan + descs freed (ASan proves no leak). */
+typedef struct desc_cancel_counter {
+    int polls;
+    int fire_at;
+} desc_cancel_counter;
+
+static bool desc_cancel_after_n(void *ctx) {
+    desc_cancel_counter *c = (desc_cancel_counter *)ctx;
+    c->polls++;
+    return c->polls >= c->fire_at;
+}
+
+void test_cancel_mid_descriptor_materialization_is_honored(void) {
+    /* A flat folder of many images: the scan polls exactly once per entry, so the
+     * descriptor loop is a distinct, later run of polls the cancel can target. */
+    char root[600];
+    (void)snprintf(root, sizeof root, "%s/cancel_materialize", g_dir);
+    mkdir_p(root);
+    enum { FILE_COUNT = 64 };
+    for (int i = 0; i < FILE_COUNT; i++) {
+        char f[800];
+        (void)snprintf(f, sizeof f, "%s/img_%03d.png", root, i);
+        write_file(f, "X");
+    }
+
+    tp_project *p = tp_project_create();
+    TEST_ASSERT_NOT_NULL(p);
+    tp_project_atlas *a = tp_project_get_atlas(p, 0);
+    a->id = test_id(0x10U);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_project_atlas_add_source(a, root));
+    a->sources[0].id = test_id(0x11U);
+
+    /* fire_at is above every scan-phase poll (1 + FILE_COUNT = 65) yet below the
+     * total available (65 + FILE_COUNT = 129), so the cancel can ONLY be observed in
+     * the descriptor loop, after several descriptors have already been materialized. */
+    desc_cancel_counter counter = {0, 100};
+    const tp_cancel_token cancel = {desc_cancel_after_n, &counter};
+
+    tp_pack_input in = {0};
+    tp_error e = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_CANCELLED,
+        tp_pack_input_build_cancellable(p, 0, &in, &cancel, &e),
+        "a cancel raised during descriptor materialization must return CANCELLED");
+    TEST_ASSERT_NULL_MESSAGE(in.descs,
+                             "a cancelled build must leave *out empty (no partial descs)");
+    TEST_ASSERT_EQUAL_INT(0, in.count);
+    TEST_ASSERT_TRUE_MESSAGE(counter.polls >= counter.fire_at,
+                             "the cancel must have fired in the descriptor loop, not the scan");
+    TEST_ASSERT_NOT_NULL(strstr(e.msg, "cancel"));
+    tp_pack_input_free(&in); /* NULL-safe no-op; asserts the empty-output contract */
+    tp_project_destroy(p);
+}
 // #endregion
 
 int main(int argc, char **argv) {
@@ -784,5 +843,6 @@ int main(int argc, char **argv) {
     RUN_TEST(test_bad_args);
     RUN_TEST(test_unrepresentable_project_overrides_fail_before_descriptor_narrowing);
     RUN_TEST(test_concave_extrude_clamp_exports);
+    RUN_TEST(test_cancel_mid_descriptor_materialization_is_honored);
     return UNITY_END();
 }

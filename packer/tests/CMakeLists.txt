@@ -709,12 +709,12 @@ add_test(NAME tp_large_project_contract
         "${CMAKE_SOURCE_DIR}/examples/projects/large-synthetic.ntpacker_project"
         "${CMAKE_BINARY_DIR}/tp_large_project_contract")
 
-# Deterministic checked-in owner-scale bench project (U-01): 36 atlases
+# Deterministic checked-in owner-scale bench project (U-01): 37 atlases
 # assembled from the 2,020-image Kenney CC0 manifest
-# (examples/bench-assets/manifest.tsv) across five composition groups
+# (examples/bench-assets/manifest.tsv) across six composition groups
 # (homogeneous per-pack, mixed/shared-source, duplicate-source, proto
-# multi-page, size-varied) -- 5,480 total source memberships. Same
-# white-box-construct / public-snapshot-validate split as
+# multi-page, size-varied, folder-source) -- 5,481 total source memberships.
+# Same white-box-construct / public-snapshot-validate split as
 # tp_generate_large_project.
 add_executable(tp_generate_bench_project tp_generate_bench_project.c)
 target_link_libraries(tp_generate_bench_project PRIVATE tp_core)

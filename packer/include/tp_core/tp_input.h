@@ -55,12 +55,13 @@ typedef struct tp_pack_input {
  * empty (except a NULL `out`, which is untouched). */
 tp_status tp_pack_input_build(const struct tp_project *p, int atlas_index, tp_pack_input *out, tp_error *err);
 
-/* Cancellable form of tp_pack_input_build: `cancel` is polled once per source and
- * threaded into the folder walk (per directory entry), so the async pack worker can
- * interrupt a slow / network folder source promptly. A NULL `cancel` means "never
- * cancel" -- tp_pack_input_build() is exactly this. On cancellation the partial input
- * is freed, *out is left empty, and TP_STATUS_CANCELLED is returned (a clean stop, not
- * a failure). All other semantics match tp_pack_input_build. */
+/* Cancellable form of tp_pack_input_build: `cancel` is polled once per source, threaded
+ * into the folder walk (per directory entry), and polled again per descriptor while a
+ * folder's scan result is materialized, so the async pack worker can interrupt a slow /
+ * network folder source -- or a large folder's descriptor build -- promptly. A NULL
+ * `cancel` means "never cancel" -- tp_pack_input_build() is exactly this. On cancellation
+ * the partial input is freed, *out is left empty, and TP_STATUS_CANCELLED is returned (a
+ * clean stop, not a failure). All other semantics match tp_pack_input_build. */
 tp_status tp_pack_input_build_cancellable(const struct tp_project *p, int atlas_index,
                                           tp_pack_input *out,
                                           const tp_cancel_token *cancel,

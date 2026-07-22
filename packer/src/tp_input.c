@@ -255,6 +255,17 @@ tp_status tp_pack_input_build_cancellable(const tp_project *p, int atlas_index,
                 return scan_status;
             }
             for (int ci = 0; ci < sc.count; ci++) {
+                /* Materializing the descriptors for a large folder is itself a long
+                 * loop; poll `cancel` here (per entry, mirroring the scan above) so a
+                 * cancel raised during materialization is honored promptly instead of
+                 * only after the whole loop finishes. Free the partial scan + descs
+                 * and report CANCELLED exactly like the scan-level cancel does. */
+                if (tp_cancel_requested(cancel)) {
+                    tp_scan_free(&sc);
+                    desc_vec_free(&dv);
+                    return tp_error_set(err, TP_STATUS_CANCELLED,
+                                        "pack input build cancelled");
+                }
                 tp_status status = desc_add(
                     &dv, a, a->sources[si].id, sc.entries[ci].rel,
                     sc.entries[ci].abs, err);
