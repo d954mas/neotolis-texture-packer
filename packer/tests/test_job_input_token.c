@@ -21,8 +21,27 @@
 #include "tp_image_priv.h"  /* single-decode accounting seam */
 #include "unity.h"
 
+/* Cross-thread walk-gate seam (tp_scan.c): arms the next folder walk to PARK until
+ * released, so a job test can prove the walk runs on the pack worker (start() returns
+ * while the worker is parked here) and drive a mid-walk cancel deterministically. */
+void tp_scan__test_arm_walk_gate(void);
+bool tp_scan__test_walk_gate_entered(void);
+void tp_scan__test_release_walk_gate(void);
+
 void setUp(void) {}
 void tearDown(void) {}
+
+/* Spins (bounded) until the worker parks in the armed walk. Returns true once
+ * ENTERED; the large cap is only a safety timeout for a broken gate, not a normal
+ * path -- the worker reaches the gate within microseconds. */
+static bool wait_for_walk_gate(void) {
+    for (long spins = 0; spins < 2000000000L; ++spins) {
+        if (tp_scan__test_walk_gate_entered()) {
+            return true;
+        }
+    }
+    return tp_scan__test_walk_gate_entered();
+}
 
 /* A minimal, valid 4x4 fully-opaque RGBA PNG (stb_image decodes it). A real pack
  * job needs a decodable source on disk, so the end-to-end token test below lays
@@ -478,10 +497,12 @@ void test_empty_atlas_pack_fails_async_not_at_start(void) {
     remove_scratch_tree(work_dir);
 }
 
-/* U-01a: a FOLDER source's recursive enumeration now runs on the pack worker, not
- * at pack-start on the UI thread. Prove the folder still packs correctly through the
- * async job -- the worker-side walk finds all the folder's images -- and that start
- * returned OK before the walk (non-blocking). */
+/* U-01a / U-02 F16: a FOLDER source's recursive enumeration runs on the pack WORKER,
+ * not at pack-start on the UI thread. The walk gate parks the worker INSIDE the folder
+ * walk; while it is parked we prove start() has already returned with the job still
+ * RUNNING (the walk had NOT completed on the caller thread) -- a deterministic pin of
+ * the non-blocking-walk property, not a timing race. Releasing the gate lets the walk
+ * finish and the folder packs (all three images enumerated). */
 void test_folder_source_walk_runs_on_worker(void) {
     tp_session *session = make_session();
     const tp_id128 atlas = default_atlas_id(session);
@@ -505,10 +526,24 @@ void test_folder_source_walk_runs_on_worker(void) {
         .work_dir = work_dir,
         .preview_exporter_id = NULL,
     };
-    /* Non-blocking: start returns before the worker walks the folder. */
+    tp_scan__test_arm_walk_gate(); /* park the worker inside the folder walk */
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_session_pack_job_start(session, &request, &err));
+
+    /* The walk is executing on the worker (it reached the gate). start() returned
+     * while the worker is parked mid-walk, so the job is still RUNNING -- proving the
+     * walk did NOT run synchronously on the caller thread. */
+    TEST_ASSERT_TRUE_MESSAGE(wait_for_walk_gate(),
+                             "the folder walk must run on the worker (gate never entered)");
     tp_session_job_progress progress;
+    memset(&progress, 0, sizeof progress);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_job_poll(session, &progress, &err));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_SESSION_JOB_RUNNING, progress.state,
+        "start() must return while the worker is still mid-walk (non-blocking)");
+
+    tp_scan__test_release_walk_gate(); /* let the walk finish */
     do {
         memset(&progress, 0, sizeof progress);
         TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
@@ -532,6 +567,63 @@ void test_folder_source_walk_runs_on_worker(void) {
     remove_scratch_tree(work_dir);
 }
 
+/* U-02 F11: a cancel raised while the worker is mid-folder-walk is observed
+ * cooperatively -- the walk aborts and the job ends CANCELLED (never SUCCEEDED),
+ * proving cancel now reaches INTO the scan instead of only being checked after the
+ * whole build. The gate parks the worker in the walk; we request cancel while it is
+ * parked, then release so the walk resumes, polls the cancel, and stops. */
+void test_folder_walk_cancels_mid_scan(void) {
+    tp_session *session = make_session();
+    const tp_id128 atlas = default_atlas_id(session);
+    char work_dir[1024];
+    job_scratch_dir(work_dir, sizeof work_dir);
+    tp_mkdirs(work_dir);
+
+    char folder[1200];
+    TEST_ASSERT_TRUE(snprintf(folder, sizeof folder, "%s/sprites", work_dir) > 0);
+    tp_mkdirs(folder);
+    for (int i = 0; i < 5; ++i) {
+        char png[1320];
+        TEST_ASSERT_TRUE(snprintf(png, sizeof png, "%s/s%d.png", folder, i) > 0);
+        write_png_fixture(png);
+    }
+    add_folder_source(session, atlas, folder);
+
+    tp_error err = {{0}};
+    const tp_pack_job_request request = {
+        .atlas_id = atlas,
+        .work_dir = work_dir,
+        .preview_exporter_id = NULL,
+    };
+    tp_scan__test_arm_walk_gate();
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_pack_job_start(session, &request, &err));
+    TEST_ASSERT_TRUE_MESSAGE(wait_for_walk_gate(),
+                             "the folder walk must reach the worker gate");
+
+    /* Cancel while parked mid-walk, THEN release: the walk resumes, polls the cancel
+     * on its next entry, and aborts -- so the job must end CANCELLED. */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_job_cancel(session, &err));
+    tp_scan__test_release_walk_gate();
+
+    tp_session_job_progress progress;
+    do {
+        memset(&progress, 0, sizeof progress);
+        TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                              tp_session_job_poll(session, &progress, &err));
+    } while (progress.state == TP_SESSION_JOB_RUNNING);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_SESSION_JOB_CANCELLED, progress.state,
+        "a cancel raised mid-walk must end the job CANCELLED, not SUCCEEDED");
+
+    tp_session_job_result result;
+    memset(&result, 0, sizeof result);
+    (void)tp_session_job_take_result(session, &result, &err); /* release the handle */
+    tp_session_job_result_destroy(&result);
+    tp_session_destroy(session);
+    remove_scratch_tree(work_dir);
+}
+
 int main(int argc, char **argv) {
     /* The real pack job spawns THIS executable as its build-worker child; service
      * that dispatch first, exactly like every pack-capable exe (and sibling test). */
@@ -547,5 +639,6 @@ int main(int argc, char **argv) {
     RUN_TEST(test_pack_input_hash_changes_on_semantic_mutation);
     RUN_TEST(test_empty_atlas_pack_fails_async_not_at_start);
     RUN_TEST(test_folder_source_walk_runs_on_worker);
+    RUN_TEST(test_folder_walk_cancels_mid_scan);
     return UNITY_END();
 }

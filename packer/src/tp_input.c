@@ -189,6 +189,13 @@ static void desc_vec_free(desc_vec *dv) {
 }
 
 tp_status tp_pack_input_build(const tp_project *p, int atlas_index, tp_pack_input *out, tp_error *err) {
+    return tp_pack_input_build_cancellable(p, atlas_index, out, NULL, err);
+}
+
+tp_status tp_pack_input_build_cancellable(const tp_project *p, int atlas_index,
+                                          tp_pack_input *out,
+                                          const tp_cancel_token *cancel,
+                                          tp_error *err) {
     if (!out) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_pack_input_build: out is NULL");
     }
@@ -211,6 +218,13 @@ tp_status tp_pack_input_build(const tp_project *p, int atlas_index, tp_pack_inpu
     desc_vec dv = {0};
     int missing = 0;
     for (int si = 0; si < a->source_count; si++) {
+        /* Poll between sources: a long source list (or a cancel raised while the
+         * previous folder walked) stops here rather than resolving/scanning more. */
+        if (tp_cancel_requested(cancel)) {
+            desc_vec_free(&dv);
+            return tp_error_set(err, TP_STATUS_CANCELLED,
+                                "pack input build cancelled");
+        }
         const char *src_path = a->sources[si].path;
         char abs[TP_IDENTITY_PATH_MAX];
         tp_status resolve_status =
@@ -227,9 +241,11 @@ tp_status tp_pack_input_build(const tp_project *p, int atlas_index, tp_pack_inpu
         }
         if (tp_scan_is_dir(abs)) {
             /* Folder: recurse (entries already sorted by rel) and append in scan
-             * order. NO global sort across sources -- layout depends on input order. */
+             * order. NO global sort across sources -- layout depends on input order.
+             * The walk polls `cancel` per entry; a cancelled walk returns
+             * TP_STATUS_CANCELLED, freeing the partial input below. */
             tp_scan_result sc = {0};
-            tp_status scan_status = tp_scan_dir(abs, &sc, err);
+            tp_status scan_status = tp_scan_dir_cancellable(abs, &sc, cancel, err);
             if (scan_status == TP_STATUS_NOT_FOUND) {
                 missing++;
                 continue;
@@ -269,6 +285,13 @@ tp_status tp_pack_input_build(const tp_project *p, int atlas_index, tp_pack_inpu
 tp_status tp_pack_input_build_snapshot(const tp_session_snapshot *snapshot,
                                        tp_id128 atlas_id, tp_pack_input *out,
                                        tp_error *err) {
+    return tp_pack_input_build_snapshot_cancellable(snapshot, atlas_id, out, NULL,
+                                                    err);
+}
+
+tp_status tp_pack_input_build_snapshot_cancellable(
+    const tp_session_snapshot *snapshot, tp_id128 atlas_id, tp_pack_input *out,
+    const tp_cancel_token *cancel, tp_error *err) {
     if (!snapshot) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "pack snapshot input requires snapshot");
@@ -279,7 +302,7 @@ tp_status tp_pack_input_build_snapshot(const tp_session_snapshot *snapshot,
         return tp_error_set(err, TP_STATUS_NOT_FOUND,
                             "pack snapshot atlas id was not found");
     }
-    return tp_pack_input_build(project, atlas_index, out, err);
+    return tp_pack_input_build_cancellable(project, atlas_index, out, cancel, err);
 }
 
 tp_status tp_pack_settings_build_snapshot(const tp_session_snapshot *snapshot,

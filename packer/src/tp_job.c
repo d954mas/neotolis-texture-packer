@@ -12,6 +12,7 @@
 
 #include "tinycthread.h"
 
+#include "tp_core/tp_cancel.h"
 #include "tp_core/tp_export.h"
 #include "tp_core/tp_export_run.h"
 #include "tp_core/tp_input.h"
@@ -166,13 +167,32 @@ static int pack_worker(void *context) {
     tp_error error = {{0}};
     const double start = job_now_ms();
 
+    /* Already cancelled (close/cancel between start and this thread running)? End
+     * clean without walking the folder at all. */
+    if (atomic_load_explicit(&job->cancelled, memory_order_relaxed)) {
+        tp_session_snapshot_destroy(job->snapshot);
+        job->snapshot = NULL;
+        job->elapsed_ms = job_now_ms() - start;
+        job->status = tp_error_set(&error, TP_STATUS_CANCELLED,
+                                   "pack cancelled before input build");
+        job->error = error;
+        atomic_store_explicit(&job->current, 1, memory_order_relaxed);
+        atomic_store_explicit(&job->state, TP_SESSION_JOB_CANCELLED,
+                              memory_order_release);
+        return 0;
+    }
+
     /* Build the pack input HERE, on the worker -- NOT at pack-start on the caller
      * (UI) thread: the recursive folder walk for folder sources
      * (tp_pack_input_build_snapshot -> tp_scan_dir) must never stall the UI. This
      * mirrors export_worker, which already builds its input on the worker. The
-     * snapshot is job-owned; destroy it here once the input is materialized. */
-    tp_status build = tp_pack_input_build_snapshot(job->snapshot, job->atlas_id,
-                                                   &job->input, &error);
+     * snapshot is job-owned; destroy it here once the input is materialized. The
+     * cancel token (the same pack_job_cancel_requested the pack step already uses)
+     * threads into the folder walk so a GUI/live cancel or close kills a slow /
+     * network scan promptly instead of blocking shutdown on the thread join. */
+    const tp_cancel_token cancel = {pack_job_cancel_requested, job};
+    tp_status build = tp_pack_input_build_snapshot_cancellable(
+        job->snapshot, job->atlas_id, &job->input, &cancel, &error);
     tp_session_snapshot_destroy(job->snapshot);
     job->snapshot = NULL;
     if (build == TP_STATUS_OK && job->input.count == 0) {

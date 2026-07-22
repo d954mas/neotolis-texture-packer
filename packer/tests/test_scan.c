@@ -645,6 +645,57 @@ void test_windows_filesystem_backend_handles_extended_absolute_paths(void) {
     TEST_ASSERT_NULL(tp_fs_win32_path_alloc("\\\\?\\C:\\raw-verbatim.tmp"));
 }
 #endif
+
+/* U-02 F11: the recursive walk polls the cancel token per directory entry, so a
+ * cancel raised mid-scan aborts BEFORE the tree is finished and returns
+ * TP_STATUS_CANCELLED with a clean, EMPTY (never partial) result. The callback
+ * reports cancellation once it has been polled past `cancel_after`, so the walk
+ * provably stops after only a couple of entries -- fewer than g_root's tree. A token
+ * that never cancels (and a NULL token) scans the whole tree, proving the added
+ * parameter is backward compatible. */
+typedef struct {
+    int polls;
+    int cancel_after;
+} scan_cancel_ctx;
+
+static bool scan_cancel_after_n(void *ctx) {
+    scan_cancel_ctx *c = (scan_cancel_ctx *)ctx;
+    return ++c->polls > c->cancel_after;
+}
+
+void test_cancellable_scan_stops_mid_walk(void) {
+    scan_cancel_ctx ctx = {0, 1}; /* one poll through, then cancel */
+    const tp_cancel_token token = {scan_cancel_after_n, &ctx};
+    tp_scan_result r = {0};
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_CANCELLED,
+        tp_scan_dir_cancellable(g_root, &r, &token, &error), error.msg);
+    /* Clean stop: the partial walk was freed, never surfaced as a corrupt result. */
+    TEST_ASSERT_EQUAL_INT(0, r.count);
+    TEST_ASSERT_NULL(r.entries);
+    /* Provably early: it aborted right after the cancel, not after the whole tree. */
+    TEST_ASSERT_TRUE_MESSAGE(ctx.polls <= 2,
+                             "walk must abort at the cancel, not scan the full tree");
+    tp_scan_free(&r);
+
+    /* A token that never fires scans the whole 4-image tree (backward compatible). */
+    scan_cancel_ctx never = {0, 1000000};
+    const tp_cancel_token never_token = {scan_cancel_after_n, &never};
+    tp_scan_result full = {0};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_scan_dir_cancellable(g_root, &full, &never_token, &error), error.msg);
+    TEST_ASSERT_EQUAL_INT(4, full.count);
+    tp_scan_free(&full);
+
+    /* A NULL token is identical to tp_scan_dir(). */
+    tp_scan_result null_tok = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_scan_dir_cancellable(g_root, &null_tok, NULL, &error));
+    TEST_ASSERT_EQUAL_INT(4, null_tok.count);
+    tp_scan_free(&null_tok);
+}
 // #endregion
 
 int main(int argc, char **argv) {
@@ -657,6 +708,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_null_and_empty_abs_dir_are_safe);
     RUN_TEST(test_empty_subdir_is_empty);
     RUN_TEST(test_fixture_walk);
+    RUN_TEST(test_cancellable_scan_stops_mid_walk);
     RUN_TEST(test_is_dir_and_exists);
     RUN_TEST(test_visit_dir_streams_matching_names);
 #ifndef _WIN32

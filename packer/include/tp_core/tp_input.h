@@ -10,6 +10,7 @@
  * by hand (AGENTS.md: features land in core first). Depends only on tp_core
  * (tp_scan/tp_names/tp_project + the tp_pack.h desc struct) -- no builder. */
 
+#include "tp_core/tp_cancel.h"
 #include "tp_core/tp_error.h"
 #include "tp_core/tp_id.h"
 #include "tp_core/tp_pack.h" /* tp_pack_sprite_desc */
@@ -54,11 +55,29 @@ typedef struct tp_pack_input {
  * empty (except a NULL `out`, which is untouched). */
 tp_status tp_pack_input_build(const struct tp_project *p, int atlas_index, tp_pack_input *out, tp_error *err);
 
+/* Cancellable form of tp_pack_input_build: `cancel` is polled once per source and
+ * threaded into the folder walk (per directory entry), so the async pack worker can
+ * interrupt a slow / network folder source promptly. A NULL `cancel` means "never
+ * cancel" -- tp_pack_input_build() is exactly this. On cancellation the partial input
+ * is freed, *out is left empty, and TP_STATUS_CANCELLED is returned (a clean stop, not
+ * a failure). All other semantics match tp_pack_input_build. */
+tp_status tp_pack_input_build_cancellable(const struct tp_project *p, int atlas_index,
+                                          tp_pack_input *out,
+                                          const tp_cancel_token *cancel,
+                                          tp_error *err);
+
 /* Frontend-safe pack admission: resolves a stable atlas ID inside an immutable
  * session snapshot and returns only the typed, caller-owned pack input. */
 tp_status tp_pack_input_build_snapshot(const struct tp_session_snapshot *snapshot,
                                        tp_id128 atlas_id, tp_pack_input *out,
                                        tp_error *err);
+
+/* Cancellable form of tp_pack_input_build_snapshot (NULL `cancel` => never cancel,
+ * exactly the non-cancellable form). Cancellation returns TP_STATUS_CANCELLED with
+ * *out left empty. */
+tp_status tp_pack_input_build_snapshot_cancellable(
+    const struct tp_session_snapshot *snapshot, tp_id128 atlas_id,
+    tp_pack_input *out, const tp_cancel_token *cancel, tp_error *err);
 tp_status tp_pack_settings_build_snapshot(const struct tp_session_snapshot *snapshot,
                                           tp_id128 atlas_id,
                                           tp_pack_settings *out,

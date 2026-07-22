@@ -143,7 +143,16 @@ typedef enum tp_status {
      * OR a clean-exit malformed/truncated/oversized reply (fail closed). The host
      * survives and the last successful preview stays authoritative (tp_build worker
      * boundary). */
-    TP_STATUS_BUILDER_CRASHED
+    TP_STATUS_BUILDER_CRASHED,
+
+    /* --- cooperative cancellation (U-02) ---
+     * Append-only: new value at the END. A caller-requested cooperative cancel
+     * stopped an interruptible core walk (the recursive folder scan / pack-input
+     * build) before it completed. NOT a failure: the partial result is freed and the
+     * output left empty, and the async pack job surfaces this as
+     * TP_SESSION_JOB_CANCELLED. Distinct from the generic faults so a caller can tell
+     * "you asked me to stop" apart from "the input was bad". */
+    TP_STATUS_CANCELLED
 } tp_status;
 
 /* No heap, safe to embed by value on the stack. The single anonymous aggregate
@@ -263,6 +272,7 @@ static inline const char *tp_status_str(tp_status status) {
         case TP_STATUS_FILE_DURABILITY_UNCERTAIN: return "project file durability is uncertain";
         case TP_STATUS_FILE_IO_FAILED: return "project file I/O failed";
         case TP_STATUS_BUILDER_CRASHED: return "builder crashed";
+        case TP_STATUS_CANCELLED: return "cancelled";
     }
     return "unknown status";
 }
@@ -316,6 +326,7 @@ static inline const char *tp_status_id(tp_status status) {
         case TP_STATUS_FILE_DURABILITY_UNCERTAIN: return "file_durability_uncertain";
         case TP_STATUS_FILE_IO_FAILED: return "file_io_failed";
         case TP_STATUS_BUILDER_CRASHED: return "builder_crashed";
+        case TP_STATUS_CANCELLED: return "cancelled";
     }
     return "unknown_status";
 }

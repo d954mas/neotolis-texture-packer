@@ -708,6 +708,337 @@ static int write_fixture(const char *manifest_path, const char *path) {
     return 0;
 }
 
+/* ---- F17: on-disk asset <-> manifest content verification ------------------------
+ * The structural contract above only checks that each source path RESOLVES and the
+ * file EXISTS -- so a source PNG could be swapped for different bytes without touching
+ * the manifest and the contract would stay green. This pass reads each asset the
+ * manifest names and verifies its byte size, SHA-256, and PNG dimensions against the
+ * manifest's columns, failing on any mismatch. It stays LFS-independent: an
+ * unmaterialized git-lfs POINTER (the state in CI legs without `git lfs pull`) is
+ * detected and skipped -- but never silently: the count is logged. A compact SHA-256
+ * (FIPS 180-4), self-checked against a known vector before use. */
+
+static uint32_t sha256_rotr(uint32_t x, unsigned n) {
+    return (x >> n) | (x << (32U - n));
+}
+
+static void sha256_compress(uint32_t state[8], const uint8_t *p) {
+    static const uint32_t K[64] = {
+        0x428a2f98U, 0x71374491U, 0xb5c0fbcfU, 0xe9b5dba5U, 0x3956c25bU, 0x59f111f1U,
+        0x923f82a4U, 0xab1c5ed5U, 0xd807aa98U, 0x12835b01U, 0x243185beU, 0x550c7dc3U,
+        0x72be5d74U, 0x80deb1feU, 0x9bdc06a7U, 0xc19bf174U, 0xe49b69c1U, 0xefbe4786U,
+        0x0fc19dc6U, 0x240ca1ccU, 0x2de92c6fU, 0x4a7484aaU, 0x5cb0a9dcU, 0x76f988daU,
+        0x983e5152U, 0xa831c66dU, 0xb00327c8U, 0xbf597fc7U, 0xc6e00bf3U, 0xd5a79147U,
+        0x06ca6351U, 0x14292967U, 0x27b70a85U, 0x2e1b2138U, 0x4d2c6dfcU, 0x53380d13U,
+        0x650a7354U, 0x766a0abbU, 0x81c2c92eU, 0x92722c85U, 0xa2bfe8a1U, 0xa81a664bU,
+        0xc24b8b70U, 0xc76c51a3U, 0xd192e819U, 0xd6990624U, 0xf40e3585U, 0x106aa070U,
+        0x19a4c116U, 0x1e376c08U, 0x2748774cU, 0x34b0bcb5U, 0x391c0cb3U, 0x4ed8aa4aU,
+        0x5b9cca4fU, 0x682e6ff3U, 0x748f82eeU, 0x78a5636fU, 0x84c87814U, 0x8cc70208U,
+        0x90befffaU, 0xa4506cebU, 0xbef9a3f7U, 0xc67178f2U};
+    uint32_t w[64];
+    for (int i = 0; i < 16; ++i) {
+        w[i] = ((uint32_t)p[i * 4] << 24) | ((uint32_t)p[i * 4 + 1] << 16) |
+               ((uint32_t)p[i * 4 + 2] << 8) | (uint32_t)p[i * 4 + 3];
+    }
+    for (int i = 16; i < 64; ++i) {
+        const uint32_t s0 = sha256_rotr(w[i - 15], 7U) ^
+                            sha256_rotr(w[i - 15], 18U) ^ (w[i - 15] >> 3);
+        const uint32_t s1 = sha256_rotr(w[i - 2], 17U) ^
+                            sha256_rotr(w[i - 2], 19U) ^ (w[i - 2] >> 10);
+        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    }
+    uint32_t a = state[0], b = state[1], c = state[2], d = state[3];
+    uint32_t e = state[4], f = state[5], g = state[6], h = state[7];
+    for (int i = 0; i < 64; ++i) {
+        const uint32_t big1 =
+            sha256_rotr(e, 6U) ^ sha256_rotr(e, 11U) ^ sha256_rotr(e, 25U);
+        const uint32_t ch = (e & f) ^ (~e & g);
+        const uint32_t t1 = h + big1 + ch + K[i] + w[i];
+        const uint32_t big0 =
+            sha256_rotr(a, 2U) ^ sha256_rotr(a, 13U) ^ sha256_rotr(a, 22U);
+        const uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
+        const uint32_t t2 = big0 + maj;
+        h = g; g = f; f = e; e = d + t1;
+        d = c; c = b; b = a; a = t1 + t2;
+    }
+    state[0] += a; state[1] += b; state[2] += c; state[3] += d;
+    state[4] += e; state[5] += f; state[6] += g; state[7] += h;
+}
+
+static void sha256_compute(const uint8_t *data, size_t len, uint8_t out[32]) {
+    uint32_t state[8] = {0x6a09e667U, 0xbb67ae85U, 0x3c6ef372U, 0xa54ff53aU,
+                         0x510e527fU, 0x9b05688cU, 0x1f83d9abU, 0x5be0cd19U};
+    size_t i = 0;
+    for (; i + 64U <= len; i += 64U) {
+        sha256_compress(state, data + i);
+    }
+    uint8_t tail[128];
+    const size_t rem = len - i; /* 0..63 */
+    memcpy(tail, data + i, rem);
+    tail[rem] = (uint8_t)0x80;
+    const size_t tail_len = (rem < 56U) ? 64U : 128U;
+    for (size_t j = rem + 1U; j < tail_len - 8U; ++j) {
+        tail[j] = 0U;
+    }
+    const uint64_t bits = (uint64_t)len * 8U;
+    for (unsigned b = 0; b < 8U; ++b) {
+        tail[tail_len - 8U + b] = (uint8_t)(bits >> (56U - 8U * b));
+    }
+    for (size_t off = 0; off < tail_len; off += 64U) {
+        sha256_compress(state, tail + off);
+    }
+    for (int j = 0; j < 8; ++j) {
+        out[j * 4] = (uint8_t)(state[j] >> 24);
+        out[j * 4 + 1] = (uint8_t)(state[j] >> 16);
+        out[j * 4 + 2] = (uint8_t)(state[j] >> 8);
+        out[j * 4 + 3] = (uint8_t)state[j];
+    }
+}
+
+static void sha256_hex(const uint8_t digest[32], char out[65]) {
+    static const char hexchars[] = "0123456789abcdef";
+    for (int i = 0; i < 32; ++i) {
+        out[i * 2] = hexchars[(digest[i] >> 4) & 0x0F];
+        out[i * 2 + 1] = hexchars[digest[i] & 0x0F];
+    }
+    out[64] = '\0';
+}
+
+static bool sha256_selftest(void) {
+    uint8_t digest[32];
+    char hex[65];
+    sha256_compute((const uint8_t *)"abc", 3U, digest);
+    sha256_hex(digest, hex);
+    return strcmp(
+               hex,
+               "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") ==
+           0;
+}
+
+/* An unmaterialized Git LFS pointer file starts with this spec line. */
+static bool looks_like_lfs_pointer(const uint8_t *bytes, size_t len) {
+    static const char sig[] = "version https://git-lfs";
+    const size_t n = sizeof sig - 1U;
+    return len >= n && memcmp(bytes, sig, n) == 0;
+}
+
+/* Reads a PNG's IHDR width/height. False for anything not a PNG with an IHDR. */
+static bool png_dimensions(const uint8_t *b, size_t len, int *width, int *height) {
+    static const uint8_t sig[8] = {0x89U, 0x50U, 0x4EU, 0x47U,
+                                   0x0DU, 0x0AU, 0x1AU, 0x0AU};
+    if (len < 24U || memcmp(b, sig, sizeof sig) != 0 ||
+        memcmp(b + 12, "IHDR", 4) != 0) {
+        return false;
+    }
+    *width = (int)(((uint32_t)b[16] << 24) | ((uint32_t)b[17] << 16) |
+                   ((uint32_t)b[18] << 8) | (uint32_t)b[19]);
+    *height = (int)(((uint32_t)b[20] << 24) | ((uint32_t)b[21] << 16) |
+                    ((uint32_t)b[22] << 8) | (uint32_t)b[23]);
+    return true;
+}
+
+/* Directory component of `path` (without the trailing separator); "." if none. */
+static bool path_dirname(const char *path, char *out, size_t cap) {
+    size_t len = strlen(path);
+    while (len > 0U && path[len - 1U] != '/' && path[len - 1U] != '\\') {
+        --len;
+    }
+    if (len == 0U) {
+        if (cap < 2U) {
+            return false;
+        }
+        out[0] = '.';
+        out[1] = '\0';
+        return true;
+    }
+    const size_t dlen = len - 1U; /* drop the separator */
+    if (dlen + 1U > cap) {
+        return false;
+    }
+    memcpy(out, path, dlen);
+    out[dlen] = '\0';
+    return true;
+}
+
+/* Splits `line` into exactly 5 tab-separated fields; false if not exactly 5. */
+static bool split_tsv5(const char *line, size_t len, const char *fields[5],
+                       size_t lens[5]) {
+    size_t start = 0U;
+    int idx = 0;
+    for (size_t i = 0; i <= len; ++i) {
+        if (i == len || line[i] == '\t') {
+            if (idx >= 5) {
+                return false;
+            }
+            fields[idx] = line + start;
+            lens[idx] = i - start;
+            ++idx;
+            start = i + 1U;
+        }
+    }
+    return idx == 5;
+}
+
+/* Verifies every manifest-named asset's on-disk bytes against the manifest columns.
+ * Assets live at <dirname(manifest)>/kenney/<relpath> (BENCH_ASSET_PREFIX resolves the
+ * same tree from the project side). Materialized assets are fully checked (size +
+ * SHA-256 + PNG dimensions); LFS pointer files are skipped and counted (logged). Any
+ * present-but-mismatching asset fails. */
+static bool verify_manifest_assets(const char *manifest_path, int *out_verified,
+                                   int *out_skipped) {
+    *out_verified = 0;
+    *out_skipped = 0;
+    if (!sha256_selftest()) {
+        (void)fprintf(stderr,
+                      "bench asset verify: internal SHA-256 self-test failed\n");
+        return false;
+    }
+    char base_dir[TP_IDENTITY_PATH_MAX];
+    if (!path_dirname(manifest_path, base_dir, sizeof base_dir)) {
+        (void)fprintf(stderr, "bench asset verify: manifest dir path too long\n");
+        return false;
+    }
+
+    uint8_t *buffer = NULL;
+    size_t length = 0U;
+    if (!read_file(manifest_path, &buffer, &length)) {
+        (void)fprintf(stderr, "bench asset verify: manifest unreadable: %s\n",
+                      manifest_path);
+        return false;
+    }
+
+    bool ok = true;
+    int verified = 0;
+    int skipped = 0;
+    int rows = 0;
+    size_t pos = 0U;
+    bool first_line = true;
+    while (pos < length && ok) {
+        const size_t line_start = pos;
+        while (pos < length && buffer[pos] != (uint8_t)'\n') {
+            ++pos;
+        }
+        size_t line_end = pos;
+        if (pos < length) {
+            ++pos;
+        }
+        if (line_end > line_start && buffer[line_end - 1U] == (uint8_t)'\r') {
+            --line_end;
+        }
+        const size_t line_len = line_end - line_start;
+        const char *line = (const char *)buffer + line_start;
+        if (first_line) {
+            first_line = false;
+            continue; /* '#' header, already validated by parse_manifest */
+        }
+        if (line_len == 0U) {
+            continue;
+        }
+
+        const char *field[5];
+        size_t flen[5];
+        int width = 0;
+        int height = 0;
+        int bytes = 0;
+        char relpath[TP_IDENTITY_PATH_MAX];
+        if (!split_tsv5(line, line_len, field, flen) || flen[0] == 0U ||
+            flen[0] >= sizeof relpath || flen[4] != 64U ||
+            !parse_uint_field(field[1], flen[1], &width) ||
+            !parse_uint_field(field[2], flen[2], &height) ||
+            !parse_uint_field(field[3], flen[3], &bytes)) {
+            (void)fprintf(stderr,
+                          "bench asset verify: malformed manifest row #%d\n",
+                          rows + 1);
+            ok = false;
+            break;
+        }
+        memcpy(relpath, field[0], flen[0]);
+        relpath[flen[0]] = '\0';
+        char sha_expected[65];
+        memcpy(sha_expected, field[4], 64U);
+        sha_expected[64] = '\0';
+        ++rows;
+
+        char asset_path[TP_IDENTITY_PATH_MAX];
+        const int written = snprintf(asset_path, sizeof asset_path, "%s/kenney/%s",
+                                     base_dir, relpath);
+        if (written < 0 || (size_t)written >= sizeof asset_path) {
+            (void)fprintf(stderr,
+                          "bench asset verify: asset path too long: %s\n", relpath);
+            ok = false;
+            break;
+        }
+
+        uint8_t *content = NULL;
+        size_t clen = 0U;
+        if (!read_file(asset_path, &content, &clen)) {
+            (void)fprintf(stderr,
+                          "bench asset verify: missing/unreadable asset: %s\n",
+                          asset_path);
+            ok = false;
+            break;
+        }
+        if (looks_like_lfs_pointer(content, clen)) {
+            ++skipped; /* unmaterialized LFS pointer: cannot verify content here */
+            free(content);
+            continue;
+        }
+        if (clen != (size_t)bytes) {
+            (void)fprintf(stderr,
+                          "bench asset verify: size mismatch for %s: manifest=%d "
+                          "on_disk=%zu\n",
+                          relpath, bytes, clen);
+            ok = false;
+        }
+        if (ok) {
+            uint8_t digest[32];
+            char hex[65];
+            sha256_compute(content, clen, digest);
+            sha256_hex(digest, hex);
+            if (strcmp(hex, sha_expected) != 0) {
+                (void)fprintf(stderr,
+                              "bench asset verify: sha256 mismatch for %s:\n"
+                              "  manifest=%s\n  on_disk =%s\n",
+                              relpath, sha_expected, hex);
+                ok = false;
+            }
+        }
+        if (ok) {
+            int dw = 0;
+            int dh = 0;
+            if (png_dimensions(content, clen, &dw, &dh) &&
+                (dw != width || dh != height)) {
+                (void)fprintf(stderr,
+                              "bench asset verify: dimension mismatch for %s: "
+                              "manifest=%dx%d on_disk=%dx%d\n",
+                              relpath, width, height, dw, dh);
+                ok = false;
+            }
+        }
+        free(content);
+        if (ok) {
+            ++verified;
+        }
+    }
+    free(buffer);
+    if (!ok) {
+        return false;
+    }
+    /* No silent skip: always report how many assets could not be content-verified
+     * because they are unmaterialized LFS pointers (the CI legs without `git lfs
+     * pull`). verified==0 there is expected and NOT a failure. */
+    if (skipped > 0) {
+        (void)fprintf(stderr,
+                      "bench asset verify: %d/%d assets are unmaterialized git-lfs "
+                      "pointers (content check skipped; run `git lfs pull` to "
+                      "verify them)\n",
+                      skipped, rows);
+    }
+    *out_verified = verified;
+    *out_skipped = skipped;
+    return true;
+}
+
 static int check_fixture(const char *manifest_path, const char *committed_path,
                          const char *scratch_dir) {
     char generated_path[TP_IDENTITY_PATH_MAX];
@@ -742,10 +1073,22 @@ static int check_fixture(const char *manifest_path, const char *committed_path,
                       committed_path);
         return 1;
     }
+    /* F17: content-verify each manifest-named asset (size + SHA-256 + PNG dims) so a
+     * swapped source PNG cannot pass with a stale manifest. LFS-pointer assets are
+     * skipped-with-log, keeping the contract green in CI legs without `git lfs pull`. */
+    int assets_verified = 0;
+    int assets_skipped = 0;
+    if (!verify_manifest_assets(manifest_path, &assets_verified, &assets_skipped)) {
+        (void)fprintf(stderr,
+                      "bench fixture asset content check failed: manifest=%s\n",
+                      manifest_path);
+        return 1;
+    }
     (void)printf(
-        "tp_bench_project_contract: OK atlases=%d memberships=%d bytes=%zu\n",
+        "tp_bench_project_contract: OK atlases=%d memberships=%d bytes=%zu "
+        "assets_verified=%d assets_skipped_lfs=%d\n",
         BENCH_EXPECTED_ATLAS_COUNT, BENCH_EXPECTED_MEMBERSHIP_COUNT,
-        structural_bytes);
+        structural_bytes, assets_verified, assets_skipped);
     return 0;
 }
 

@@ -10,6 +10,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "tp_core/tp_cancel.h"
 #include "tp_core/tp_error.h"
 #include "tp_core/tp_srckey.h"
 
@@ -37,6 +38,16 @@ typedef struct tp_scan_result {
  * OOM), so callers never consume a partial scan. Free successful results with
  * tp_scan_free(). */
 tp_status tp_scan_dir(const char *abs_dir, tp_scan_result *out, tp_error *err);
+
+/* Cancellable form of tp_scan_dir: the recursive walk polls `cancel` once per
+ * directory entry, so a caller (e.g. the async pack worker) can interrupt a slow /
+ * network directory promptly instead of waiting the whole tree out. A NULL `cancel`
+ * (or a token whose callback is NULL) means "never cancel" -- tp_scan_dir() is
+ * exactly this with a NULL token. On cancellation the partial walk is freed, *out is
+ * left empty, and TP_STATUS_CANCELLED is returned (a clean stop, not a failure). All
+ * other semantics match tp_scan_dir. */
+tp_status tp_scan_dir_cancellable(const char *abs_dir, tp_scan_result *out,
+                                  const tp_cancel_token *cancel, tp_error *err);
 
 /* Frees entries and zeroes *out. Safe to call on an already-empty result; safe on NULL. */
 void tp_scan_free(tp_scan_result *out);
