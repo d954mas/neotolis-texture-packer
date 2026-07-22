@@ -1150,7 +1150,7 @@ off the UI thread; caching/dedup of the walk stays in B1.
 
 **Dependencies.** U-01. [gui] (+ one [core] refresh path)
 
-**Status (2026-07-22, `feat/U-02-paper-cuts` @ `4b407ef`, PR #8).** Landed: T1–T3, T5–T7, plus FOUR
+**Status (2026-07-22, `feat/U-02-paper-cuts` @ `8656e6c`, PR #8).** Landed: T1–T3, T5–T7, plus FIVE
 post-review rounds. Round 1 (paper-cuts hardening): Undo/Redo focus re-sync + folder-primary by
 stable id, reveal/open-url shell-safety, Atlas-Pack busy affordance, `tp_gui_shell_quote` test.
 Round 2 (second external review — 18 findings verified by 4 lenses, **0 survived as P1**): confirmed
@@ -1180,6 +1180,19 @@ the effective rename; P1.1 scan cancel polled before opendir/each readdir (micro
 inside the syscall needs async I/O, U-04); #8 the cancel test now pins scan early-stop; #5 the bench
 contract verifies git-lfs pointer integrity (F17 was inert in CI). Pre-existing, not fixed
 (origin/main): refresh returns before `mark_stale` on a second-fingerprint error.
+Round 5 (fifth external review — verdict **"merge with fixes"**: 4 confirmed + 1 plausible, all
+fixed): 2×P1 wrong-entity — a canvas-region click re-pins keyboard focus + Shift-anchor onto the
+selected row (F2 no longer renames the previously focused sprite; `s_focus_follow` promoted to
+gui_state), and right-click moves keyboard focus to the clicked row; 2×P2 cancel gaps —
+`tp_scan_classify` folds the exists+is_dir stat pair into one probe and the walk polls at entry
+(before the root stat) + before the final qsort (poll-count-pinned test); P2 layout (plausible →
+confirmed by arithmetic) — atlas/animation section caps are panel-relative (min(180, max(2 rows,
+30% of prev-frame panel bbox))) so a 300–500px window no longer starves the sprite vlist. Lead
+battery caught a gate-wait spin flake in `test_job_input_token` (counted 2e9 spin, no yield) —
+now a yield-per-spin genuine timeout. Pre-existing, noticed, NOT fixed: the Pack decode loop
+(`tp_pack.c`) does not poll cancel between path-image decodes (→ U-04 off-UI-thread scope), and
+`stat` EACCES/EIO is indistinguishable from a missing source (silently counted missing — own
+follow-up packet).
 
 **T1 filter is per-atlas in U-02; the spec's project-wide "matches under their atlases" requires the
 unified tree and is deferred to U-03** (U-02 non-goal: "no structural tree change (that is U-03)").
