@@ -1150,9 +1150,21 @@ off the UI thread; caching/dedup of the walk stays in B1.
 
 **Dependencies.** U-01. [gui] (+ one [core] refresh path)
 
-**Status (2026-07-22, `feat/U-02-paper-cuts` @ `9592679`, PR #8).** Landed: T1–T3, T5–T7,
-plus a post-review paper-cuts hardening round (Undo/Redo focus re-sync + folder-primary by stable
-id, reveal/open-url shell-safety, Atlas-Pack busy affordance, new `tp_gui_shell_quote` test).
+**Status (2026-07-22, `feat/U-02-paper-cuts` @ `1eb8f4f`, PR #8).** Landed: T1–T3, T5–T7, plus TWO
+post-review rounds. Round 1 (paper-cuts hardening): Undo/Redo focus re-sync + folder-primary by
+stable id, reveal/open-url shell-safety, Atlas-Pack busy affordance, `tp_gui_shell_quote` test.
+Round 2 (second external review — 18 findings verified by 4 lenses, **0 survived as P1**): confirmed
+bugs fixed — F1 Undo/Redo permitted during Pack per §10; F2 selected atlas preserved by stable id
+across undo; F3 canvas-highlight re-derive; F5 missing-state; F6 focus cleared when its row is
+filtered/collapsed out; F9 collapse survives an atlas switch; F10 sort/Copy use the effective
+rename; F12 reveal uses a frozen context-menu payload; F15 bench measures real refresh cost; F11
+cooperative cancel-token through the folder scan (`TP_STATUS_CANCELLED`); F16–F18 bench/test rigor.
+**T7 sort brought to spec §61.1** — 4 keys name(default)/size/mtime/added_at × 2 dirs + warn-on-top.
+F14 (CI perf gate) refuted as an intentional two-tier design; F4/F13 no-action (documented intent).
+
+**T1 filter is per-atlas in U-02; the spec's project-wide "matches under their atlases" requires the
+unified tree and is deferred to U-03** (U-02 non-goal: "no structural tree change (that is U-03)").
+
 **Deferred to their own follow-up packets — U-02 is NOT complete while these are open:** **T4**
 (session persistence), T8 (thumbnails), T9 (async refresh), T10 (alias indicator), T11 (attribute
 filter/sort), T12 (copy region coords).
