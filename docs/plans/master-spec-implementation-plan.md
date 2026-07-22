@@ -1150,7 +1150,7 @@ off the UI thread; caching/dedup of the walk stays in B1.
 
 **Dependencies.** U-01. [gui] (+ one [core] refresh path)
 
-**Status (2026-07-22, `feat/U-02-paper-cuts` @ `1eb8f4f`, PR #8).** Landed: T1–T3, T5–T7, plus TWO
+**Status (2026-07-22, `feat/U-02-paper-cuts` @ `126c247`, PR #8).** Landed: T1–T3, T5–T7, plus THREE
 post-review rounds. Round 1 (paper-cuts hardening): Undo/Redo focus re-sync + folder-primary by
 stable id, reveal/open-url shell-safety, Atlas-Pack busy affordance, `tp_gui_shell_quote` test.
 Round 2 (second external review — 18 findings verified by 4 lenses, **0 survived as P1**): confirmed
@@ -1161,6 +1161,15 @@ rename; F12 reveal uses a frozen context-menu payload; F15 bench measures real r
 cooperative cancel-token through the folder scan (`TP_STATUS_CANCELLED`); F16–F18 bench/test rigor.
 **T7 sort brought to spec §61.1** — 4 keys name(default)/size/mtime/added_at × 2 dirs + warn-on-top.
 F14 (CI perf gate) refuted as an intentional two-tier design; F4/F13 no-action (documented intent).
+Round 3 (third external review — 11 findings + 2 pre-existing, 2-lens verified): confirmed fixes —
+P1.1 Refresh preserves selection by stable id; P1.3 sort UI made spec-literal (four key controls,
+re-click flips direction); P1.4 perf gate fails on a broken action; P2.5 refresh invariant renamed
+to semantic-purity; P2.7 view cache invalidated on OOM fallback; P2.8 cancel polled inside descriptor
+materialization; P2.9 root-`/` reveal; P2.10 bench fixture gains a folder-kind source (now 37
+atlases); P2.11 real row string-alloc metric; NULL source_key guard. **P1.2 `added_at`** kept as the
+append-only `si` proxy (persisted write-once field = schema epic, out of U-02's no-schema scope).
+Not fixed, out of scope: P2.6 panel-scoped keyboard focus (no competing key consumer; large), and the
+pre-existing generation-token-vs-`pack_input_hash` staleness (U-04).
 
 **T1 filter is per-atlas in U-02; the spec's project-wide "matches under their atlases" requires the
 unified tree and is deferred to U-03** (U-02 non-goal: "no structural tree change (that is U-03)").
