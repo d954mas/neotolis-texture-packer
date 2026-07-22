@@ -332,40 +332,50 @@ static bool ui_sort_chip(nt_ui_context_t *ctx, uint32_t id, const char *text, bo
     return ev.clicked;
 }
 
-/* Sort chips: one cycles the key+direction (Original -> Name asc/desc -> Type asc/desc -> Original),
- * one toggles "warnings on top". View-only state (gui_rows_set_sort); never touches the model. */
+/* Short chip caption for each §61.1 sort key. */
+static const char *sort_key_label(row_sort_key key) {
+    switch (key) {
+    case ROW_SORT_SIZE:
+        return "Size";
+    case ROW_SORT_MTIME:
+        return "Time";
+    case ROW_SORT_ADDED:
+        return "Added";
+    case ROW_SORT_NAME:
+    default:
+        return "Name";
+    }
+}
+
+/* Sort chips (§61.1): one chip cycles the four keys x two directions, one toggles "warnings on top".
+ * The active key always sorts (there is no "off" state -- `name` is the default), so the chip shows
+ * "<Key> <arrow>". Re-clicking the active key flips its direction; the second click advances to the
+ * next key (Name -> Size -> Time -> Added -> Name), skipping the internal build-order baseline. This is
+ * view-only state (gui_rows_set_sort); it never touches the model. */
 static void declare_sort_chips(nt_ui_context_t *ctx) {
-    row_sort_key key = ROW_SORT_ORIGINAL;
+    row_sort_key key = ROW_SORT_NAME;
     bool desc = false;
     bool warn = false;
     gui_rows_get_sort(&key, &desc, &warn);
-    const char *kn = (key == ROW_SORT_NAME) ? "Name" : (key == ROW_SORT_TYPE) ? "Type" : "Orig";
     char sc[24];
-    (void)snprintf(sc, sizeof sc, "%s%s", kn,
-                   key == ROW_SORT_ORIGINAL ? "" : (desc ? " \xE2\x96\xBE" : " \xE2\x96\xB4"));
+    (void)snprintf(sc, sizeof sc, "%s %s", sort_key_label(key),
+                   desc ? "\xE2\x96\xBE" : "\xE2\x96\xB4");
     const uint32_t key_id = nt_ui_id("ntpacker/sort_key");
     const uint32_t warn_id = nt_ui_id("ntpacker/sort_warn");
-    if (ui_sort_chip(ctx, key_id, sc, key != ROW_SORT_ORIGINAL)) {
-        if (key == ROW_SORT_ORIGINAL) {
-            key = ROW_SORT_NAME;
-            desc = false;
-        } else if (key == ROW_SORT_NAME && !desc) {
-            desc = true;
-        } else if (key == ROW_SORT_NAME) {
-            key = ROW_SORT_TYPE;
-            desc = false;
-        } else if (key == ROW_SORT_TYPE && !desc) {
-            desc = true;
+    const bool non_default = (key != ROW_SORT_NAME) || desc; /* highlight when not the default name-asc */
+    if (ui_sort_chip(ctx, key_id, sc, non_default)) {
+        if (!desc) {
+            desc = true; /* re-click the active key: ascending -> descending */
         } else {
-            key = ROW_SORT_ORIGINAL;
-            desc = false;
+            desc = false; /* second re-click: advance to the next key, ascending */
+            key = (key == ROW_SORT_ADDED) ? ROW_SORT_NAME : (row_sort_key)(key + 1);
         }
         gui_rows_set_sort(key, desc, warn);
     }
     if (ui_sort_chip(ctx, warn_id, "\xE2\x9A\xA0", warn)) {
         gui_rows_set_sort(key, desc, !warn);
     }
-    record_row_tip(key_id, "Sort sprites (cycle: original / name / type, asc/desc)");
+    record_row_tip(key_id, "Sort sprites: click to cycle name / size / time / added (ascending then descending)");
     record_row_tip(warn_id, "Toggle: missing / warning rows on top");
 }
 
@@ -528,7 +538,7 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
                                row->source_key);
                 (void)snprintf(s_ctx_sprite_display_name,
                                sizeof s_ctx_sprite_display_name, "%s",
-                               row->sprite_name);
+                               gui_rows_effective_name(row)); /* F10: Copy name / Rename use the rename */
                 (void)snprintf(s_ctx_sprite_abs, sizeof s_ctx_sprite_abs, "%s",
                                row->abs ? row->abs : ""); /* F12: freeze the reveal path at arm time */
                 s_ctx_leaf = leaf_row;

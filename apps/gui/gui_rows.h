@@ -59,6 +59,10 @@ typedef struct sprite_row {
     char label[224];          /* display label (rename-aware: "final (file.png)") */
     char *sprite_name;        /* malloc-owned exact export key */
     char *abs;                /* malloc-owned exact resolved decode path */
+    /* --- sort inputs (§61.1); populated per-atlas by build_rows, read by the view comparator --- */
+    long long size;           /* packed area (frame w*h) from this atlas's pack result; 0 if unpacked/no region */
+    long long mtime;          /* live file mtime (scan entry / gui_scan_stat); 0 if missing/unstattable/folder */
+    int added_at;             /* source insertion index -- the order the source was added to the project */
 } sprite_row;
 extern sprite_row *s_rows;
 extern int s_row_count;
@@ -78,11 +82,24 @@ void build_rows(void);
 extern int *s_view;
 extern int s_view_count;
 
+/* Sort keys (§61.1): four user-facing keys, each with two directions, plus the independent
+ * "warning on top" pin. ROW_SORT_NAME is 0 so the zero-init/default is `name` (the spec default).
+ * ROW_SORT_BUILD is an INTERNAL build/scan-order baseline: it is NOT part of the UI cycle
+ * (declare_sort_chips never selects it); it exists so the pure-projection invariant -- build_view over
+ * an unsorted key yields the identity of s_rows -- stays testable independent of fixture ordering. */
 typedef enum {
-    ROW_SORT_ORIGINAL = 0, /* source + natural child order (build_rows order) */
-    ROW_SORT_NAME,         /* natural-order by display/export name */
-    ROW_SORT_TYPE          /* folders before files, then natural name */
+    ROW_SORT_NAME = 0, /* natural-order by EFFECTIVE display name (override rename, else export key); DEFAULT */
+    ROW_SORT_SIZE,     /* packed area (frame w*h) of the current atlas's pack region; 0 sorts smallest */
+    ROW_SORT_MTIME,    /* file modification time, read live */
+    ROW_SORT_ADDED,    /* order the source was added to the project (source insertion index) */
+    ROW_SORT_BUILD     /* INTERNAL build/scan-order baseline; never exposed in the UI sort cycle */
 } row_sort_key;
+
+/* Effective export/display name for a row: the sparse project override rename if one is present,
+ * else the canonical export key (sprite_name); "" for rows without a name (folders/missing). F10: the
+ * NAME sort and "Copy name" both resolve through this so a renamed sprite sorts and copies by its NEW
+ * name, consistent with Rename itself. Valid after build_rows() populated the current atlas. */
+const char *gui_rows_effective_name(const sprite_row *row);
 
 /* Case-insensitive substring filter over row label + export name. NULL/"" clears it.
  * A matching child keeps its parent folder visible; an active filter overrides collapse. */

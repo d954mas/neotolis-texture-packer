@@ -239,6 +239,7 @@ static tp_id128 s_row_cache_atlas_id;
 static uint64_t s_row_cache_snapshot_generation;
 static uint64_t s_row_cache_source_generation;
 static uint64_t s_row_cache_snapshot_lifetime;
+static uint64_t s_row_cache_pack_version; /* packed-area (§61.1 size) source: a repack must re-stamp row sizes */
 static uint64_t s_row_cache_generation;
 static bool s_selected_cache_valid;
 static uint64_t s_selected_cache_row_generation;
@@ -354,6 +355,9 @@ static const tp_snapshot_sprite *override_by_key(tp_id128 source_id,
 #if defined(NTPACKER_GUI_BENCH)
     s_bench_counters.override_lookup_calls++;
 #endif
+    if (s_override_index_cap == 0U) {
+        return NULL; /* no index built yet (no atlas / empty) -- never index a NULL table */
+    }
     const size_t mask = s_override_index_cap - 1U;
     size_t slot = (size_t)override_hash(source_id, source_key) & mask;
     for (;;) {
@@ -406,6 +410,35 @@ static sprite_row *rows_push(void) {
     return &s_rows[s_row_count++];
 }
 
+/* §61.1 `size` = packed AREA of the sprite's placed region (frame w*h, rotation-invariant), read from
+ * the current atlas's pack result by canonical {source_id, source_key}. 0 when the atlas is not packed
+ * or the sprite has no region (sorts as smallest). Bounded to the current atlas (build_rows is per-atlas). */
+static long long row_packed_area(tp_id128 source_id, const char *source_key) {
+    if (tp_id128_is_nil(source_id) || !source_key || source_key[0] == '\0') {
+        return 0;
+    }
+    const tp_result *result = gui_pack_result(s_sel_atlas);
+    if (!result) {
+        return 0;
+    }
+    const int idx = gui_pack_find_sprite_ref(s_sel_atlas, source_id, source_key);
+    if (idx < 0 || idx >= result->sprite_count) {
+        return 0;
+    }
+    const tp_sprite *sprite = &result->sprites[idx];
+    return (long long)sprite->frame.w * (long long)sprite->frame.h;
+}
+
+/* §61.1 `mtime` = live file modification time via the shared stat facility. 0 when the path is empty,
+ * a directory, or unstattable (sorts as oldest). Folder children reuse the scan entry's mtime instead. */
+static long long row_stat_mtime(const char *abs) {
+    long long mtime = 0;
+    if (abs && abs[0] != '\0') {
+        (void)gui_scan_stat(abs, NULL, &mtime); /* false leaves mtime at 0 */
+    }
+    return mtime;
+}
+
 void build_rows(void) {
 #if defined(NTPACKER_GUI_BENCH)
     s_bench_counters.cache_key_checks++;
@@ -420,10 +453,14 @@ void build_rows(void) {
         tp_session_snapshot_source_generation(snapshot);
     const uint64_t snapshot_lifetime =
         gui_project_snapshot_lifetime_generation();
+    /* §61.1 size reads live pack regions: a repack publishes a new result (new version) without touching
+     * the model/source generations, so fold the pack version into the key or sort-by-size would stay stale. */
+    const uint64_t pack_version = gui_pack_result_version(s_sel_atlas);
     if (a && s_row_cache_valid && tp_id128_eq(s_row_cache_atlas_id, a->id) &&
         s_row_cache_snapshot_generation == snapshot_generation &&
         s_row_cache_source_generation == source_generation &&
-        s_row_cache_snapshot_lifetime == snapshot_lifetime) {
+        s_row_cache_snapshot_lifetime == snapshot_lifetime &&
+        s_row_cache_pack_version == pack_version) {
         return;
     }
     s_row_cache_valid = false;
@@ -467,6 +504,7 @@ void build_rows(void) {
         }
         memset(r, 0, sizeof *r);
         r->src = si;
+        r->added_at = si; /* §61.1 added_at: source insertion index == the order it was added to the project */
         r->child = -1;
         r->is_source = true;
         r->is_folder = is_dir;
@@ -509,9 +547,11 @@ void build_rows(void) {
                 }
                 memset(cr, 0, sizeof *cr);
                 cr->src = si;
+                cr->added_at = si; /* children inherit their folder source's add order */
                 cr->child = ci;
                 cr->indent = 1;
                 cr->source_id = source->id;
+                cr->mtime = sc->entries[ci].mtime; /* scan already stat'd every child -- no re-stat */
                 if (!row_set_strings(cr, sc->entries[ci].rel,
                                      sc->entries[ci].rel,
                                      sc->entries[ci].abs)) {
@@ -520,6 +560,7 @@ void build_rows(void) {
                                   "Out of memory: sprite list unavailable.");
                     return;
                 }
+                cr->size = row_packed_area(cr->source_id, cr->source_key);
                 row_display(cr->source_id, cr->source_key, sc->entries[ci].rel,
                             path_last(sc->entries[ci].rel), cr->label,
                             sizeof cr->label);
@@ -531,6 +572,8 @@ void build_rows(void) {
                               "Out of memory: sprite list unavailable.");
                 return;
             }
+            r->mtime = row_stat_mtime(abs); /* file source: not part of a scan result, stat it live */
+            r->size = row_packed_area(r->source_id, r->source_key);
             row_display(r->source_id, r->source_key, r->sprite_name,
                         path_last(sp), r->label,
                         sizeof r->label);
@@ -540,6 +583,7 @@ void build_rows(void) {
     s_row_cache_snapshot_generation = snapshot_generation;
     s_row_cache_source_generation = source_generation;
     s_row_cache_snapshot_lifetime = snapshot_lifetime;
+    s_row_cache_pack_version = pack_version;
     s_row_cache_valid = true;
 }
 // #endregion
@@ -620,8 +664,25 @@ static bool row_matches_filter(const sprite_row *r) {
            ascii_ci_contains(r->sprite_name, s_view_filter);
 }
 
+const char *gui_rows_effective_name(const sprite_row *row) {
+    if (!row) {
+        return "";
+    }
+    if (row->source_key && row->source_key[0] != '\0' &&
+        !tp_id128_is_nil(row->source_id)) {
+        const tp_snapshot_sprite *ov = override_by_key(row->source_id, row->source_key);
+        if (ov && ov->rename && ov->rename[0] != '\0') {
+            return ov->rename; /* F10: the renamed export name wins over the canonical key */
+        }
+    }
+    return (row->sprite_name && row->sprite_name[0] != '\0') ? row->sprite_name : "";
+}
+
+/* NAME-sort key: the EFFECTIVE name (override rename else export key), falling back to the display
+ * label for nameless rows (folder/missing sources) so they still order deterministically. */
 static const char *row_sort_name(const sprite_row *r) {
-    return (r->sprite_name && r->sprite_name[0]) ? r->sprite_name : r->label;
+    const char *eff = gui_rows_effective_name(r);
+    return (eff && eff[0] != '\0') ? eff : r->label;
 }
 
 /* Single-threaded UI: the sort key/dir live in module statics the qsort adapters read. */
@@ -633,18 +694,30 @@ static int view_row_cmp(int ia, int ib) {
     }
     int c = 0;
     switch (s_view_sort_key) {
-    case ROW_SORT_NAME:
-        c = tp_nat_cmp(row_sort_name(a), row_sort_name(b));
+    case ROW_SORT_SIZE:
+        c = (a->size > b->size) - (a->size < b->size);
+        if (c == 0) {
+            c = tp_nat_cmp(row_sort_name(a), row_sort_name(b)); /* stable NAME tiebreak */
+        }
         break;
-    case ROW_SORT_TYPE:
-        c = (b->is_folder ? 1 : 0) - (a->is_folder ? 1 : 0);
+    case ROW_SORT_MTIME:
+        c = (a->mtime > b->mtime) - (a->mtime < b->mtime);
         if (c == 0) {
             c = tp_nat_cmp(row_sort_name(a), row_sort_name(b));
         }
         break;
-    case ROW_SORT_ORIGINAL:
+    case ROW_SORT_ADDED:
+        c = (a->added_at > b->added_at) - (a->added_at < b->added_at);
+        if (c == 0) {
+            c = tp_nat_cmp(row_sort_name(a), row_sort_name(b));
+        }
+        break;
+    case ROW_SORT_BUILD:
+        c = (ia > ib) - (ia < ib); /* internal build/scan-order baseline */
+        break;
+    case ROW_SORT_NAME:
     default:
-        c = (ia > ib) - (ia < ib);
+        c = tp_nat_cmp(row_sort_name(a), row_sort_name(b));
         break;
     }
     if (s_view_sort_desc) {
@@ -1008,7 +1081,7 @@ void gui_rows_shutdown(void) {
     s_child_scratch = NULL;
     s_child_scratch_cap = 0;
     s_view_filter[0] = '\0';
-    s_view_sort_key = ROW_SORT_ORIGINAL;
+    s_view_sort_key = ROW_SORT_NAME; /* §61.1 default sort key is `name` */
     s_view_sort_desc = false;
     s_view_sort_warn_first = false;
     s_view_epoch = 1;
@@ -1026,6 +1099,7 @@ void gui_rows_shutdown(void) {
     s_row_cache_snapshot_generation = 0U;
     s_row_cache_source_generation = 0U;
     s_row_cache_snapshot_lifetime = 0U;
+    s_row_cache_pack_version = 0U;
     s_row_cache_generation = 0U;
     s_selected_cache_valid = false;
     s_selected_cache_row_generation = 0U;

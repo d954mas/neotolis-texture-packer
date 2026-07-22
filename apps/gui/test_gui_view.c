@@ -196,10 +196,12 @@ void tearDown(void) {
     remove_fixture_files();
 }
 
-/* 1. No filter, ORIGINAL sort, nothing collapsed -> the view is the identity
- *    projection of the whole row model. */
+/* 1. No filter, internal BUILD-order baseline, nothing collapsed -> the view is the identity
+ *    projection of the whole row model (the pure-projection invariant). ROW_SORT_BUILD is the
+ *    unsorted baseline (not a UI-exposed key); the user-facing default is `name` (tested separately). */
 void test_view_passthrough_is_identity(void) {
     add_sources_and_build(NULL, NULL);
+    gui_rows_set_sort(ROW_SORT_BUILD, false, false);
     build_view();
 
     TEST_ASSERT_EQUAL_INT(5, s_row_count); /* folder + 3 children + solo */
@@ -281,22 +283,22 @@ void test_view_warn_first_pins_missing_regardless_of_direction(void) {
     build_rows();
     TEST_ASSERT_EQUAL_INT(5, s_row_count);
 
-    /* Baseline: without warn_first the missing row is NOT pinned (original order
+    /* Baseline: without warn_first the missing row is NOT pinned (build order
      * keeps the folder span first, the now-missing solo span last). */
-    gui_rows_set_sort(ROW_SORT_ORIGINAL, false, false);
+    gui_rows_set_sort(ROW_SORT_BUILD, false, false);
     build_view();
     TEST_ASSERT_EQUAL_INT(5, s_view_count);
     TEST_ASSERT_FALSE(s_rows[s_view[0]].missing);
     TEST_ASSERT_TRUE(s_rows[s_view[s_view_count - 1]].missing);
 
     /* warn_first ascending: missing row pinned on top. */
-    gui_rows_set_sort(ROW_SORT_ORIGINAL, false, true);
+    gui_rows_set_sort(ROW_SORT_BUILD, false, true);
     build_view();
     TEST_ASSERT_EQUAL_INT(5, s_view_count);
     TEST_ASSERT_TRUE(s_rows[s_view[0]].missing);
 
     /* warn_first descending: still pinned on top (direction-independent). */
-    gui_rows_set_sort(ROW_SORT_ORIGINAL, true, true);
+    gui_rows_set_sort(ROW_SORT_BUILD, true, true);
     build_view();
     TEST_ASSERT_EQUAL_INT(5, s_view_count);
     TEST_ASSERT_TRUE(s_rows[s_view[0]].missing);
@@ -524,32 +526,30 @@ void test_selection_revalidate_folder_primary_follows_stable_id(void) {
     TEST_ASSERT_TRUE(tp_id128_eq(s_rows[primary_row].source_id, folder_id));
 }
 
-/* 11. TYPE sort: folder sources sort ahead of file sources regardless of add order, with a natural
- *     name tiebreak among equal-type siblings (mirrors the NAME-sort structure of test 4). */
-void test_view_sort_type_orders_folders_before_files(void) {
-    add_sources_reversed_and_build(NULL, NULL); /* FILE added first, FOLDER second */
+/* 11. ADDED sort (§61.1): source spans order by the order they were added to the project (source
+ *     insertion index), independent of name or type. The reversed fixture adds the FILE first (added_at
+ *     0) and the FOLDER second (added_at 1); ascending leads with the file, descending with the folder. */
+void test_view_sort_added_orders_by_add_order(void) {
+    add_sources_reversed_and_build(NULL, NULL); /* FILE @ src 0 (added first), FOLDER @ src 1 */
 
-    gui_rows_set_sort(ROW_SORT_TYPE, false, false);
+    gui_rows_set_sort(ROW_SORT_ADDED, false, false);
     build_view();
+    /* ascending: the file source (added first) leads; the folder span follows. */
+    TEST_ASSERT_TRUE(s_rows[s_view[0]].is_source);
+    TEST_ASSERT_FALSE(s_rows[s_view[0]].is_folder);
+    TEST_ASSERT_EQUAL_STRING("solo", s_rows[s_view[0]].sprite_name);
+    TEST_ASSERT_EQUAL_INT(0, s_rows[s_view[0]].added_at);
+    const int fpos_asc = view_folder_pos();
+    TEST_ASSERT_GREATER_THAN_INT(0, fpos_asc); /* folder (added second) after the file */
+    TEST_ASSERT_EQUAL_INT(1, s_rows[s_view[fpos_asc]].added_at);
 
-    const int fpos = view_folder_pos();
-    TEST_ASSERT_EQUAL_INT(0, fpos); /* folder source pinned first despite being added second */
-    /* children under it keep the natural-name tiebreak (equal type). */
-    TEST_ASSERT_EQUAL_STRING("alpha", s_rows[s_view[fpos + 1]].sprite_name);
-    TEST_ASSERT_EQUAL_STRING("beta", s_rows[s_view[fpos + 2]].sprite_name);
-    TEST_ASSERT_EQUAL_STRING("gamma", s_rows[s_view[fpos + 3]].sprite_name);
-
-    /* the FILE source falls after the whole folder span. */
-    int spos = -1;
-    for (int k = 0; k < s_view_count; ++k) {
-        if (s_rows[s_view[k]].is_source && !s_rows[s_view[k]].is_folder) {
-            spos = k;
-            break;
-        }
-    }
-    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, spos);
-    TEST_ASSERT_GREATER_THAN_INT(fpos, spos);
-    TEST_ASSERT_EQUAL_STRING("solo", s_rows[s_view[spos]].sprite_name);
+    gui_rows_set_sort(ROW_SORT_ADDED, true, false);
+    build_view();
+    /* descending: the folder (added last) leads; the file trails. */
+    TEST_ASSERT_EQUAL_INT(0, view_folder_pos());
+    TEST_ASSERT_TRUE(s_rows[s_view[s_view_count - 1]].is_source);
+    TEST_ASSERT_FALSE(s_rows[s_view[s_view_count - 1]].is_folder);
+    TEST_ASSERT_EQUAL_STRING("solo", s_rows[s_view[s_view_count - 1]].sprite_name);
 }
 
 /* 12. Empty state: an atlas with zero sources yields an empty row model + view, and revalidate +
@@ -798,6 +798,108 @@ void test_undo_preserves_selected_atlas_by_stable_id(void) {
     TEST_ASSERT_EQUAL_INT(s_rows[bi2].child, s_sel_child);
 }
 
+/* 18. SIZE sort (§61.1): orders leaves by packed AREA. The headless harness never runs the packer, so
+ *     (a) build_rows leaves every packed area at 0 when the atlas is unpacked, and (b) the SIZE
+ *     comparator is exercised with a CONTROLLED area written straight onto the built rows (the task's
+ *     sanctioned "controlled area" path -- the real build_rows->gui_pack_result plumbing ships in the
+ *     GUI and is covered by the selftest). */
+void test_view_sort_size_orders_by_packed_area(void) {
+    add_sources_and_build(NULL, NULL); /* folder children alpha,beta,gamma + solo */
+    build_view();
+
+    for (int i = 0; i < s_row_count; ++i) {
+        TEST_ASSERT_EQUAL_INT(0, (int)s_rows[i].size); /* unpacked atlas -> no region -> area 0 */
+    }
+
+    const int ai = find_row_by_name("alpha");
+    const int bi = find_row_by_name("beta");
+    const int gi = find_row_by_name("gamma");
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, ai);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, bi);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, gi);
+    s_rows[ai].size = 300; /* controlled areas: beta < gamma < alpha */
+    s_rows[bi].size = 100;
+    s_rows[gi].size = 200;
+
+    gui_rows_set_sort(ROW_SORT_SIZE, false, false);
+    build_view();
+    int pos = view_folder_pos();
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, pos);
+    TEST_ASSERT_EQUAL_STRING("beta", s_rows[s_view[pos + 1]].sprite_name);  /* 100 */
+    TEST_ASSERT_EQUAL_STRING("gamma", s_rows[s_view[pos + 2]].sprite_name); /* 200 */
+    TEST_ASSERT_EQUAL_STRING("alpha", s_rows[s_view[pos + 3]].sprite_name); /* 300 */
+
+    gui_rows_set_sort(ROW_SORT_SIZE, true, false);
+    build_view();
+    pos = view_folder_pos();
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, pos);
+    TEST_ASSERT_EQUAL_STRING("alpha", s_rows[s_view[pos + 1]].sprite_name); /* 300 */
+    TEST_ASSERT_EQUAL_STRING("gamma", s_rows[s_view[pos + 2]].sprite_name); /* 200 */
+    TEST_ASSERT_EQUAL_STRING("beta", s_rows[s_view[pos + 3]].sprite_name);  /* 100 */
+}
+
+/* 19. MTIME sort (§61.1): orders leaves by live file mtime. build_rows populates mtime for existing
+ *     files (> 0); the comparator is then exercised with controlled mtimes (granularity-independent). */
+void test_view_sort_mtime_orders_by_modification_time(void) {
+    add_sources_and_build(NULL, NULL);
+    build_view();
+
+    const int ai = find_row_by_name("alpha");
+    const int bi = find_row_by_name("beta");
+    const int gi = find_row_by_name("gamma");
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, ai);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, bi);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, gi);
+    TEST_ASSERT_TRUE(s_rows[ai].mtime > 0); /* existing files carry a real live mtime */
+
+    s_rows[ai].mtime = 3000; /* controlled: gamma oldest, beta newest */
+    s_rows[bi].mtime = 3000000;
+    s_rows[gi].mtime = 1000;
+
+    gui_rows_set_sort(ROW_SORT_MTIME, false, false);
+    build_view();
+    const int pos = view_folder_pos();
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, pos);
+    TEST_ASSERT_EQUAL_STRING("gamma", s_rows[s_view[pos + 1]].sprite_name); /* 1000 */
+    TEST_ASSERT_EQUAL_STRING("alpha", s_rows[s_view[pos + 2]].sprite_name); /* 3000 */
+    TEST_ASSERT_EQUAL_STRING("beta", s_rows[s_view[pos + 3]].sprite_name);  /* 3000000 */
+}
+
+/* 20. F10: a rename override changes the EFFECTIVE name used by both sort and Copy name. gamma is the
+ *     natural-last child; renaming it to "aaa" makes it sort FIRST and copy as "aaa", while its
+ *     canonical export key stays "gamma". Mirrors gui_actions_preview.c using the override for Rename. */
+void test_view_sort_and_copy_use_effective_rename(void) {
+    add_sources_and_build(NULL, NULL);
+
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas = tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    int gi = find_row_by_name("gamma");
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, gi);
+    const gui_sprite_ref ref = {atlas->id, s_rows[gi].source_id,
+                                s_rows[gi].source_key,
+                                tp_session_snapshot_revision(snapshot)};
+    TEST_ASSERT_TRUE(gui_project_set_sprite_rename(&ref, "aaa"));
+
+    build_rows(); /* model changed -> row cache rebuilds; the override now carries the rename */
+    build_view();
+
+    gi = find_row_by_name("gamma"); /* find_row_by_name matches the canonical key, still "gamma" */
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, gi);
+    /* effective name (what Copy name copies) is the rename, not the canonical key. */
+    TEST_ASSERT_EQUAL_STRING("aaa", gui_rows_effective_name(&s_rows[gi]));
+
+    gui_rows_set_sort(ROW_SORT_NAME, false, false);
+    build_view();
+    const int pos = view_folder_pos();
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, pos);
+    /* "aaa" (renamed gamma) now sorts ahead of "alpha" and "beta". */
+    TEST_ASSERT_EQUAL_STRING("gamma", s_rows[s_view[pos + 1]].sprite_name); /* row identity unchanged */
+    TEST_ASSERT_EQUAL_STRING("aaa", gui_rows_effective_name(&s_rows[s_view[pos + 1]]));
+    TEST_ASSERT_EQUAL_STRING("alpha", s_rows[s_view[pos + 2]].sprite_name);
+    TEST_ASSERT_EQUAL_STRING("beta", s_rows[s_view[pos + 3]].sprite_name);
+}
+
 int main(int argc, char **argv) {
     if (tp_build_is_worker_invocation(argc, argv)) {
         return tp_build_worker_main();
@@ -813,12 +915,15 @@ int main(int argc, char **argv) {
     RUN_TEST(test_selection_revalidate_clears_primary_when_it_is_deleted);
     RUN_TEST(test_selection_revalidate_resyncs_focus_to_shifted_row);
     RUN_TEST(test_selection_revalidate_folder_primary_follows_stable_id);
-    RUN_TEST(test_view_sort_type_orders_folders_before_files);
+    RUN_TEST(test_view_sort_added_orders_by_add_order);
     RUN_TEST(test_view_empty_state_is_safe);
     RUN_TEST(test_view_collapse_pruned_when_folder_source_removed);
     RUN_TEST(test_selection_revalidate_keeps_missing_state_on_source_reselect);
     RUN_TEST(test_view_focus_cleared_when_focused_row_filtered_out);
     RUN_TEST(test_view_collapse_survives_atlas_switch);
     RUN_TEST(test_undo_preserves_selected_atlas_by_stable_id);
+    RUN_TEST(test_view_sort_size_orders_by_packed_area);
+    RUN_TEST(test_view_sort_mtime_orders_by_modification_time);
+    RUN_TEST(test_view_sort_and_copy_use_effective_rename);
     return UNITY_END();
 }
