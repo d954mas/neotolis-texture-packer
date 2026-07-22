@@ -558,6 +558,10 @@ static bool s_view_sort_warn_first;
 static tp_id128 *s_collapsed;
 static int s_collapsed_count;
 static int s_collapsed_cap;
+/* F9: the atlas id the collapse set was last built/pruned against. collapsed_prune_missing drops
+ * collapse ids ABSENT from the current atlas's rows, so it must run only on a SAME-ATLAS source
+ * mutation -- never on an atlas switch (which would forget the other atlas's collapse state). */
+static tp_id128 s_collapse_prune_atlas_id;
 
 /* Bumped on any view-control change; part of the view cache key alongside the row generation. */
 static uint64_t s_view_epoch = 1;
@@ -793,9 +797,15 @@ void build_view(void) {
         (rows_unchanged && s_sel_anchor_row >= 0 && s_sel_anchor_row < s_view_count)
             ? s_view[s_sel_anchor_row]
             : -1;
-    if (!rows_unchanged) {
-        collapsed_prune_missing(); /* the row model changed -> forget collapse of vanished folders */
+    if (!rows_unchanged &&
+        tp_id128_eq(s_row_cache_atlas_id, s_collapse_prune_atlas_id)) {
+        /* SAME atlas as the last build + the row model changed -> a source mutation: forget collapse of
+         * vanished folders. An atlas SWITCH (id differs) must NOT prune, or B's build would drop A's
+         * collapse (F9). A collapsed id for a folder removed while its atlas was off-screen lingers
+         * harmlessly -- a stable id never matches a row. */
+        collapsed_prune_missing();
     }
+    s_collapse_prune_atlas_id = s_row_cache_atlas_id; /* remember which atlas this view built for */
     s_view_count = 0;
     s_view_cache_valid = true;
     s_view_cache_row_generation = s_row_cache_generation;
@@ -873,21 +883,32 @@ void build_view(void) {
         }
     }
     /* Re-pin keyboard focus + shift-anchor onto their original rows in the reordered view. If a row
-     * was filtered out its old index is left in place (focus_clamp bounds it), never worse than before. */
+     * was filtered/collapsed OUT of the rebuilt view, clear the index to -1 (F6): leaving the stale
+     * numeric index in place would silently alias a DIFFERENT visible row (or point out of range). */
     if (keep_focus_row >= 0) {
+        bool found = false;
         for (int k = 0; k < s_view_count; ++k) {
             if (s_view[k] == keep_focus_row) {
                 s_focus_view = k;
+                found = true;
                 break;
             }
         }
+        if (!found) {
+            s_focus_view = -1;
+        }
     }
     if (keep_anchor_row >= 0) {
+        bool found = false;
         for (int k = 0; k < s_view_count; ++k) {
             if (s_view[k] == keep_anchor_row) {
                 s_sel_anchor_row = k;
+                found = true;
                 break;
             }
+        }
+        if (!found) {
+            s_sel_anchor_row = -1;
         }
     }
 }
@@ -979,6 +1000,7 @@ void gui_rows_shutdown(void) {
     s_collapsed = NULL;
     s_collapsed_count = 0;
     s_collapsed_cap = 0;
+    s_collapse_prune_atlas_id = tp_id128_nil();
     free(s_spans);
     s_spans = NULL;
     s_spans_cap = 0;
@@ -1096,6 +1118,18 @@ void gui_selection_capture_reselect(void) {
     const sprite_row *leaf = gui_rows_selected_leaf();
     s_reselect_source_id = tp_id128_nil();
     s_reselect_key[0] = '\0';
+    /* F2: preserve the VIEWED ATLAS by its stable id (regardless of the leaf/folder branch below) so an
+     * undo/redo that inserts or removes an atlas before it -- shifting s_sel_atlas -- re-resolves onto the
+     * same atlas, not a positional neighbour. nil when there is no atlas at s_sel_atlas. */
+    s_reselect_atlas_id = tp_id128_nil();
+    {
+        const tp_session_snapshot *snapshot = gui_project_snapshot();
+        const tp_snapshot_atlas *atlas =
+            snapshot ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas) : NULL;
+        if (atlas) {
+            s_reselect_atlas_id = atlas->id;
+        }
+    }
     if (leaf && leaf->source_key && leaf->source_key[0] != '\0') {
         const int n = snprintf(s_reselect_key, sizeof s_reselect_key, "%s", leaf->source_key);
         if (n >= 0 && (size_t)n < sizeof s_reselect_key) {
@@ -1146,7 +1180,7 @@ void gui_selection_revalidate(void) {
                     continue;
                 }
                 s_sel_child = -1;
-                s_sel_missing = false;
+                s_sel_missing = row->missing; /* F5: a missing source stays missing on reselect (mirror the leaf branch) */
             }
             s_sel_src = row->src;
             (void)snprintf(s_sel_abs, sizeof s_sel_abs, "%s", row->abs);

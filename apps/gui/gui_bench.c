@@ -274,10 +274,17 @@ static void bench_run_probes(void) {
     gui_bench_samples refresh;
     bench_samples_init(&refresh);
     for (int i = 0; i < GUI_BENCH_REPEATS; i++) {
+        int r_added = 0;
+        int r_removed = 0;
+        int r_changed = 0;
         const double t0 = bench_now_ms();
-        gui_project_invalidate_sources(); /* the refresh action's core: drop scan cache + republish */
+        /* Drive the REAL refresh cost (fp_collect x2 folder-walk/stat + invalidate + diff), not just the
+         * near-free invalidate the earlier probe measured. The headless seam omits the UI/status/canvas
+         * side effects, so the refresh-nonblocking invariant asserted below still holds. */
+        const bool refresh_ok = gui_actions_refresh_diff_headless(
+            &r_added, &r_removed, &r_changed);
         const double t1 = bench_now_ms();
-        bench_samples_accept(&refresh, t1 - t0);
+        bench_samples_record(&refresh, refresh_ok, t1 - t0);
     }
     bench_emit_action("refresh", &refresh);
     snap = gui_project_snapshot();

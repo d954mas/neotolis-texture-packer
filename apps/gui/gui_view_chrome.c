@@ -375,9 +375,11 @@ void declare_context_menu(nt_ui_context_t *ctx) {
                 }
             }
         }
-        if (s_sel_abs[0] != '\0') {
+        if (s_ctx_sprite_abs[0] != '\0') {
             if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_REVEAL, "Show in Explorer")) {
-                if (!gui_reveal_in_explorer(s_sel_abs)) {
+                /* F12: reveal the row the menu was ARMED over (frozen payload), not the live s_sel_abs --
+                 * a keyboard-Down after opening the menu must not redirect this to a different row. */
+                if (!gui_reveal_in_explorer(s_ctx_sprite_abs)) {
                     set_status_ex(STATUS_WARNING, "Could not open the file location.");
                 }
             }

@@ -122,6 +122,12 @@ extern bool s_filter_active; /* Ctrl+F speed-search armed: typed chars edit the 
 extern bool s_reselect_pending;
 extern tp_id128 s_reselect_source_id;
 extern char s_reselect_key[TP_SRCKEY_MAX];
+/* F2: the VIEWED atlas's stable id, captured alongside the primary ref so undo_redo_settle can
+ * re-resolve s_sel_atlas (a positional index) onto the same atlas after an atlas insert/remove. */
+extern tp_id128 s_reselect_atlas_id;
+/* F3: one-shot -- undo_redo_settle raises it so the frame loop re-derives the canvas region highlight
+ * from the preserved primary leaf (gui_shell_reset_shown_result/set_result drop sel_sprite on rebind). */
+extern bool s_undo_canvas_resync;
 
 /* Animation selection + editor state (ux.md §3.7b). */
 extern int s_sel_anim;       /* selected animation index in the current atlas, -1 none */
@@ -195,6 +201,9 @@ extern tp_id128 s_ctx_sprite_source_id;
 extern int64_t s_ctx_sprite_revision;
 extern char s_ctx_sprite_source_key[TP_SRCKEY_MAX];
 extern char s_ctx_sprite_display_name[TP_SRCKEY_MAX];
+/* F12: the right-clicked row's resolved abs path, FROZEN at menu-arm time. "Show in Explorer" reads
+ * this (not the live s_sel_abs) so a keyboard-Down after opening the menu can't reveal the wrong row. */
+extern char s_ctx_sprite_abs[TP_IDENTITY_PATH_MAX];
 extern bool s_ctx_leaf;        /* a renamable leaf sprite (file source or folder child) */
 extern bool s_ctx_removable;   /* a removable source row (has an [x] today) */
 

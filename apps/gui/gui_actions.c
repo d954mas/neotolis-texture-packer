@@ -80,6 +80,17 @@ bool gui_actions__busy_block(void) {
 static void undo_redo_settle(void) {
     gui_shell_reset_shown_result();
     cancel_edit();
+    /* F2: re-resolve the VIEWED atlas by its captured stable id BEFORE clamp. If the undone/redone op
+     * inserted or removed an atlas before it, s_sel_atlas (a positional index) now points at a DIFFERENT
+     * atlas; without this the sprite selection is lost (revalidate can't find the ref in the wrong atlas).
+     * If the atlas was removed by the op, the id no longer resolves -> leave s_sel_atlas for clamp. */
+    if (!tp_id128_is_nil(s_reselect_atlas_id)) {
+        const int idx = gui_actions__snapshot_atlas_index_by_id(
+            gui_project_snapshot(), s_reselect_atlas_id);
+        if (idx >= 0) {
+            s_sel_atlas = idx;
+        }
+    }
     clamp_selection();
     s_sel_anchor_row = -1; /* view order shifts under the undo; a stale Shift anchor would mis-range */
     s_sel_anim = -1;
@@ -89,11 +100,13 @@ static void undo_redo_settle(void) {
     }
     preview_target_reset();
     gui_canvas_invalidate(&s_canvas);
+    s_undo_canvas_resync = true; /* F3: the frame loop re-derives the canvas region highlight next */
 }
 void do_undo(void) {
-    if (gui_actions__busy_block()) {
-        return; /* same async-busy guard as new/open/exit -- undo mid-pack then a pre-undo land is confusing */
-    }
+    /* F1 / spec §10: Undo/Redo are explicitly permitted while an async Pack runs (it packs on an
+     * immutable snapshot; a completed result is shown "out of date", never force-fresh -- see poll_async).
+     * So there is NO async-busy guard here. The flush guard stays: a rejected buffered gesture must not
+     * silently undo a DIFFERENT step. */
     if (gui_actions__flush_failed()) {
         return; /* The buffered gesture was rejected; do not undo a different step. */
     }
@@ -107,9 +120,7 @@ void do_undo(void) {
     }
 }
 void do_redo(void) {
-    if (gui_actions__busy_block()) {
-        return;
-    }
+    /* F1 / spec §10: permitted during an async Pack (see do_undo). Keep only the flush guard. */
     if (gui_actions__flush_failed()) {
         return; /* The buffered gesture was rejected; do not redo a different step. */
     }
@@ -222,17 +233,19 @@ static const fp_entry *fp_find(const fp_entry *arr, int n, const char *abs) {
     return NULL;
 }
 
-/* F4: rescan all sources, diff, evict the canvas cache, mark preview stale (NOT dirty). */
-static void do_refresh(void) {
+/* The synchronous cost of a refresh: fingerprint every source (fp_collect), publish the external
+ * runtime refresh (invalidate), fingerprint again, and diff. This is the folder-walk/stat-heavy part,
+ * with NO UI/status/canvas/preview-stale side effects -- so it stays a pure, revision/dirty-preserving
+ * computation shared by do_refresh (which adds the side effects) and the --bench-perf headless seam. */
+static tp_status refresh_diff_core(int *out_added, int *out_removed,
+                                   int *out_changed, tp_error *error) {
     fp_entry *before = NULL;
     int bn = 0;
     int bc = 0;
-    tp_error error = {0};
-    tp_status status = fp_collect(&before, &bn, &bc, &error);
+    tp_status status = fp_collect(&before, &bn, &bc, error);
     if (status != TP_STATUS_OK) {
         fp_free(before, bn);
-        set_statusf_ex(STATUS_ERROR, "Refresh failed: %s", error.msg);
-        return;
+        return status;
     }
 
     gui_project_invalidate_sources(); /* publish the external runtime refresh */
@@ -240,12 +253,11 @@ static void do_refresh(void) {
     fp_entry *after = NULL;
     int an = 0;
     int ac = 0;
-    status = fp_collect(&after, &an, &ac, &error);
+    status = fp_collect(&after, &an, &ac, error);
     if (status != TP_STATUS_OK) {
         fp_free(before, bn);
         fp_free(after, an);
-        set_statusf_ex(STATUS_ERROR, "Refresh failed: %s", error.msg);
-        return;
+        return status;
     }
 
     int added = 0;
@@ -267,9 +279,43 @@ static void do_refresh(void) {
     fp_free(before, bn);
     fp_free(after, an);
 
+    if (out_added) {
+        *out_added = added;
+    }
+    if (out_removed) {
+        *out_removed = removed;
+    }
+    if (out_changed) {
+        *out_changed = changed;
+    }
+    return TP_STATUS_OK;
+}
+
+/* F4: rescan all sources, diff, evict the canvas cache, mark preview stale (NOT dirty). */
+static void do_refresh(void) {
+    int added = 0;
+    int removed = 0;
+    int changed = 0;
+    tp_error error = {0};
+    if (refresh_diff_core(&added, &removed, &changed, &error) != TP_STATUS_OK) {
+        set_statusf_ex(STATUS_ERROR, "Refresh failed: %s", error.msg);
+        return;
+    }
+
     gui_canvas_invalidate(&s_canvas); /* force the shown image to reload (or show missing) */
     gui_project_mark_stale();         /* disk changed -> preview stale, project NOT dirtied */
     set_statusf("Refresh: +%d new, %d removed, %d changed", added, removed, changed);
+}
+
+/* F15 (bench seam): run the REAL synchronous refresh cost (fp_collect x2 + invalidate + diff)
+ * headlessly, WITHOUT the UI/status/canvas/preview-stale side effects, so --bench-perf times the
+ * actual folder-walk/stat work do_refresh performs instead of the near-free invalidate alone. Preserves
+ * the refresh-nonblocking invariant (no revision/dirty change). Returns false on a scan failure. */
+bool gui_actions_refresh_diff_headless(int *out_added, int *out_removed,
+                                       int *out_changed) {
+    tp_error error = {0};
+    return refresh_diff_core(out_added, out_removed, out_changed, &error) ==
+           TP_STATUS_OK;
 }
 
 // #endregion

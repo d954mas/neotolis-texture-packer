@@ -118,6 +118,11 @@ void do_pack(void);          /* interactive async pack of the selected atlas */
 void do_pack_blocking(void); /* deterministic blocking pack (selftest + --shot) */
 void do_undo(void);
 void do_redo(void);
+/* F15: the synchronous refresh cost (fp_collect x2 + source invalidate + diff) with NO UI/status/canvas
+ * side effects -- for the --bench-perf headless probe. Preserves the refresh-nonblocking invariant
+ * (no revision/dirty change). Out params may be NULL; returns false on a scan failure. */
+bool gui_actions_refresh_diff_headless(int *out_added, int *out_removed,
+                                       int *out_changed);
 
 /* --- new/open/exit confirm flow entry points --- */
 void request_new(void);

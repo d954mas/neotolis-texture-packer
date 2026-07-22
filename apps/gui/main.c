@@ -626,6 +626,24 @@ static void frame(void) {
             gui_canvas_set_result(&s_canvas, want);
             s_shown_result = want;
         }
+        /* F3: an Undo/Redo settle dropped the canvas region highlight (set_result clears sel_sprite on
+         * the rebind above). Now that gui_selection_revalidate re-resolved the tree selection, re-derive
+         * the highlight ONCE from the preserved primary leaf so it survives the undo without a re-click.
+         * One-shot (gated on the settle flag) so it never fights a normal click; guarded against an
+         * absent/stale shown pack and a leaf not present in it (gui_pack_find_sprite_ref -> -1). */
+        if (s_undo_canvas_resync) {
+            s_undo_canvas_resync = false;
+            if (want && gui_canvas_get_mode(&s_canvas) == GUI_CANVAS_ATLAS) {
+                const sprite_row *leaf = gui_rows_selected_leaf();
+                if (leaf && leaf->source_key && leaf->source_key[0] != '\0') {
+                    const int region = gui_pack_find_sprite_ref(
+                        s_sel_atlas, leaf->source_id, leaf->source_key);
+                    if (region >= 0 && region < want->sprite_count) {
+                        gui_canvas_select(&s_canvas, region);
+                    }
+                }
+            }
+        }
         /* Feed the selected region's LIVE slice9 override to the canvas guides: the project is the
          * source of truth, so typing in the Region panel moves the lines this same frame (no repack;
          * owner: "добавил и не вижу"). Result names are the original atlas-relative key + ext. */

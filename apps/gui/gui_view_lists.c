@@ -529,6 +529,8 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
                 (void)snprintf(s_ctx_sprite_display_name,
                                sizeof s_ctx_sprite_display_name, "%s",
                                row->sprite_name);
+                (void)snprintf(s_ctx_sprite_abs, sizeof s_ctx_sprite_abs, "%s",
+                               row->abs ? row->abs : ""); /* F12: freeze the reveal path at arm time */
                 s_ctx_leaf = leaf_row;
                 s_ctx_removable = row->is_source;
             }

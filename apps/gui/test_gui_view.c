@@ -20,6 +20,7 @@
 #define test_rmdir rmdir
 #endif
 
+#include "gui_actions.h"
 #include "gui_project.h"
 #include "gui_rows.h"
 #include "gui_scan.h"
@@ -607,6 +608,196 @@ void test_view_collapse_pruned_when_folder_source_removed(void) {
     TEST_ASSERT_TRUE(tp_id128_eq(s_rows[s_view[0]].source_id, file_id));
 }
 
+/* 14. F5: a MISSING file source selected as the primary (folder/source branch, empty reselect key)
+ *     keeps its missing state through revalidate. Before the fix the source branch hardcoded
+ *     s_sel_missing=false, flashing a spurious decode/error status on undo with a missing file selected. */
+void test_selection_revalidate_keeps_missing_state_on_source_reselect(void) {
+    add_sources_and_build(NULL, NULL);
+
+    TEST_ASSERT_EQUAL_INT(0, remove(s_solo)); /* solo.png gone -> its file source goes missing */
+    gui_project_invalidate_sources();
+    build_rows();
+    build_view();
+
+    int mi = -1; /* the missing file-source row */
+    for (int i = 0; i < s_row_count; ++i) {
+        if (s_rows[i].is_source && !s_rows[i].is_folder && s_rows[i].missing) {
+            mi = i;
+            break;
+        }
+    }
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, mi);
+    const tp_id128 missing_id = s_rows[mi].source_id;
+
+    /* primary = the missing source row (no leaf ref -> captured by stable id with an empty key). */
+    s_sel_src = s_rows[mi].src;
+    s_sel_child = -1;
+    gui_selection_capture_reselect();
+    TEST_ASSERT_TRUE(s_reselect_pending);
+    TEST_ASSERT_EQUAL_INT('\0', s_reselect_key[0]);
+    TEST_ASSERT_TRUE(tp_id128_eq(s_reselect_source_id, missing_id));
+
+    s_sel_missing = false; /* stand in for the spurious clear the source branch used to hardcode */
+    gui_selection_revalidate();
+    TEST_ASSERT_FALSE(s_reselect_pending);
+    TEST_ASSERT_EQUAL_INT(-1, s_sel_child);
+    TEST_ASSERT_TRUE(s_sel_missing); /* F5: missing state preserved on the source reselect branch */
+
+    int mi2 = -1;
+    for (int i = 0; i < s_row_count; ++i) {
+        if (s_rows[i].is_source && s_rows[i].src == s_sel_src) {
+            mi2 = i;
+            break;
+        }
+    }
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, mi2);
+    TEST_ASSERT_TRUE(s_rows[mi2].missing);
+    TEST_ASSERT_TRUE(tp_id128_eq(s_rows[mi2].source_id, missing_id));
+}
+
+/* 15. F6: when the keyboard-focused (or shift-anchor) row is FILTERED OUT of the rebuilt view, its
+ *     stale numeric index must be cleared to -1, never left aliasing a different visible row. A
+ *     surviving focused row still re-pins to its new view position. */
+void test_view_focus_cleared_when_focused_row_filtered_out(void) {
+    add_sources_and_build(NULL, NULL);
+    build_view(); /* identity; view cache now valid so the re-pin path engages on the next build */
+
+    const int alpha = find_row_by_name("alpha");
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, alpha);
+    const int alpha_view = view_pos_of_row(alpha);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, alpha_view);
+    s_focus_view = alpha_view;      /* focus + anchor both pinned on a folder child */
+    s_sel_anchor_row = alpha_view;
+
+    gui_rows_set_filter("solo"); /* only the solo file source survives; the whole folder span drops */
+    build_view();
+    TEST_ASSERT_EQUAL_INT(-1, view_pos_of_row(alpha)); /* alpha gone from the view */
+    TEST_ASSERT_EQUAL_INT(-1, s_focus_view);           /* F6: stale focus cleared, not left aliasing */
+    TEST_ASSERT_EQUAL_INT(-1, s_sel_anchor_row);       /* F6: stale shift-anchor cleared too */
+
+    /* Positive control: a SURVIVING focused row re-pins to its new position under the filter. */
+    gui_rows_set_filter("");
+    build_view();
+    const int solo = find_row_by_name("solo");
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, solo);
+    s_focus_view = view_pos_of_row(solo);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, s_focus_view);
+    gui_rows_set_filter("solo");
+    build_view();
+    const int solo_view = view_pos_of_row(solo);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, solo_view);
+    TEST_ASSERT_EQUAL_INT(solo_view, s_focus_view); /* focus followed the surviving row */
+}
+
+/* 16. F9: folder collapse is keyed by stable SOURCE id and must survive an atlas round-trip. Two
+ *     atlases each carry a folder source; collapsing atlas A's folder must not be pruned when atlas B
+ *     is built (build_view only prunes on a SAME-atlas source mutation). */
+void test_view_collapse_survives_atlas_switch(void) {
+    tp_id128 folder0 = {{0}};
+    add_sources_and_build(&folder0, NULL); /* A0: folder @ src 0, solo @ src 1 */
+
+    TEST_ASSERT_EQUAL_INT(1, gui_project_add_atlas()); /* A1 at index 1 */
+    const tp_session_snapshot *snap = gui_project_snapshot();
+    const tp_snapshot_atlas *a1 = tp_session_snapshot_atlas_at(snap, 1);
+    TEST_ASSERT_NOT_NULL(a1);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_ADD_ADDED,
+        gui_project_add_source_kind(a1->id, tp_session_snapshot_revision(snap),
+                                    s_pack_dir, TP_SOURCE_KIND_FOLDER));
+    gui_project_invalidate_sources();
+
+    /* View A0, collapse its folder. */
+    s_sel_atlas = 0;
+    build_rows();
+    build_view();
+    gui_rows_toggle_collapsed(folder0);
+    build_view();
+    TEST_ASSERT_TRUE(gui_rows_is_collapsed(folder0));
+    TEST_ASSERT_EQUAL_INT(2, s_view_count); /* folder (collapsed) + solo */
+
+    /* Switch to A1 (B). Building B must NOT prune A0's collapse id. */
+    s_sel_atlas = 1;
+    build_rows();
+    build_view();
+    TEST_ASSERT_TRUE(gui_rows_is_collapsed(folder0)); /* F9: survives the switch */
+
+    /* Back to A0: still collapsed, children still hidden. */
+    s_sel_atlas = 0;
+    build_rows();
+    build_view();
+    TEST_ASSERT_TRUE(gui_rows_is_collapsed(folder0));
+    TEST_ASSERT_EQUAL_INT(2, s_view_count);
+}
+
+/* 17. F2: the viewed ATLAS is preserved by stable id across an Undo that re-inserts an atlas before it.
+ *     Two atlases; view A1 with a sprite selected; remove A0 (A1 shifts 1->0); Undo re-inserts A0 (A1
+ *     back to 1). do_undo's settle must re-resolve s_sel_atlas onto A1 by id (not leave the positional
+ *     index on the now-different atlas), so the sprite selection re-resolves in the correct atlas. */
+void test_undo_preserves_selected_atlas_by_stable_id(void) {
+    const tp_session_snapshot *snap = gui_project_snapshot();
+    const tp_snapshot_atlas *a0 = tp_session_snapshot_atlas_at(snap, 0);
+    TEST_ASSERT_NOT_NULL(a0);
+    const tp_id128 a0_id = a0->id;
+    TEST_ASSERT_EQUAL_INT(
+        GUI_ADD_ADDED,
+        gui_project_add_source_kind(a0_id, tp_session_snapshot_revision(snap),
+                                    s_pack_dir, TP_SOURCE_KIND_FOLDER));
+
+    TEST_ASSERT_EQUAL_INT(1, gui_project_add_atlas()); /* A1 at index 1 */
+    snap = gui_project_snapshot();
+    const tp_snapshot_atlas *a1 = tp_session_snapshot_atlas_at(snap, 1);
+    TEST_ASSERT_NOT_NULL(a1);
+    const tp_id128 a1_id = a1->id;
+    TEST_ASSERT_EQUAL_INT(
+        GUI_ADD_ADDED,
+        gui_project_add_source_kind(a1_id, tp_session_snapshot_revision(snap),
+                                    s_pack_dir, TP_SOURCE_KIND_FOLDER));
+    gui_project_invalidate_sources();
+
+    /* View A1 (index 1); select the beta leaf in it. */
+    s_sel_atlas = 1;
+    build_rows();
+    build_view();
+    int bi = find_row_by_name("beta");
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, bi);
+    s_sel_src = s_rows[bi].src;
+    s_sel_child = s_rows[bi].child;
+
+    /* Remove A0 (the op we will undo): A1 shifts index 1 -> 0. */
+    snap = gui_project_snapshot();
+    TEST_ASSERT_TRUE(
+        gui_project_remove_atlas(a0_id, tp_session_snapshot_revision(snap)));
+    TEST_ASSERT_TRUE(tp_id128_eq(
+        tp_session_snapshot_atlas_at(gui_project_snapshot(), 0)->id, a1_id));
+    /* Re-establish a clean selection while viewing A1 at its new index 0. */
+    s_sel_atlas = 0;
+    build_rows();
+    build_view();
+    bi = find_row_by_name("beta");
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, bi);
+    s_sel_src = s_rows[bi].src;
+    s_sel_child = s_rows[bi].child;
+
+    /* Undo the removal: A0 re-inserted at 0, A1 shifts back to 1. */
+    do_undo();
+    TEST_ASSERT_TRUE(s_reselect_pending);
+    /* Complete the frame loop that follows an undo: rebuild + revalidate the preserved selection. */
+    build_rows();
+    build_view();
+    gui_selection_revalidate();
+
+    /* F2: the viewed atlas is A1 again (index 1), NOT the positional index 0 (now A0). */
+    TEST_ASSERT_EQUAL_INT(2, tp_session_snapshot_atlas_count(gui_project_snapshot()));
+    TEST_ASSERT_EQUAL_INT(1, s_sel_atlas);
+    TEST_ASSERT_TRUE(tp_id128_eq(
+        tp_session_snapshot_atlas_at(gui_project_snapshot(), 1)->id, a1_id));
+    /* and the beta selection survived, re-resolved in the correct atlas (not cleared). */
+    const int bi2 = find_row_by_name("beta");
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, bi2);
+    TEST_ASSERT_EQUAL_INT(s_rows[bi2].src, s_sel_src);
+    TEST_ASSERT_EQUAL_INT(s_rows[bi2].child, s_sel_child);
+}
+
 int main(int argc, char **argv) {
     if (tp_build_is_worker_invocation(argc, argv)) {
         return tp_build_worker_main();
@@ -625,5 +816,9 @@ int main(int argc, char **argv) {
     RUN_TEST(test_view_sort_type_orders_folders_before_files);
     RUN_TEST(test_view_empty_state_is_safe);
     RUN_TEST(test_view_collapse_pruned_when_folder_source_removed);
+    RUN_TEST(test_selection_revalidate_keeps_missing_state_on_source_reselect);
+    RUN_TEST(test_view_focus_cleared_when_focused_row_filtered_out);
+    RUN_TEST(test_view_collapse_survives_atlas_switch);
+    RUN_TEST(test_undo_preserves_selected_atlas_by_stable_id);
     return UNITY_END();
 }
