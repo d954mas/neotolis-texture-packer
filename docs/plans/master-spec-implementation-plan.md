@@ -1150,7 +1150,7 @@ off the UI thread; caching/dedup of the walk stays in B1.
 
 **Dependencies.** U-01. [gui] (+ one [core] refresh path)
 
-**Status (2026-07-22, `feat/U-02-paper-cuts` @ `126c247`, PR #8).** Landed: T1–T3, T5–T7, plus THREE
+**Status (2026-07-22, `feat/U-02-paper-cuts` @ `4b407ef`, PR #8).** Landed: T1–T3, T5–T7, plus FOUR
 post-review rounds. Round 1 (paper-cuts hardening): Undo/Redo focus re-sync + folder-primary by
 stable id, reveal/open-url shell-safety, Atlas-Pack busy affordance, `tp_gui_shell_quote` test.
 Round 2 (second external review — 18 findings verified by 4 lenses, **0 survived as P1**): confirmed
@@ -1170,6 +1170,16 @@ atlases); P2.11 real row string-alloc metric; NULL source_key guard. **P1.2 `add
 append-only `si` proxy (persisted write-once field = schema epic, out of U-02's no-schema scope).
 Not fixed, out of scope: P2.6 panel-scoped keyboard focus (no competing key consumer; large), and the
 pre-existing generation-token-vs-`pack_input_hash` staleness (U-04).
+Round 4 (fourth external review — 8 findings + 1 pre-existing, 2-lens verified): confirmed fixes —
+P1.2 keyboard focus re-anchored across a row-model rebuild (rename/repack no longer aims F2 at the
+wrong sprite); **T2's "scrollable full left panel" now implemented** (bounded per-section scroll for
+the atlas & animation lists, sprites GROW — closes the T2 acceptance gap the 37-atlas fixture
+exposed); #7 sort chips moved to their own row (P1.3 header overflow); #4 canvas highlight re-derived
+after any result rebind (undo-during-pack / repack), dead one-shot flag retired; #6 filter searches
+the effective rename; P1.1 scan cancel polled before opendir/each readdir (micro-tighten — a hang
+inside the syscall needs async I/O, U-04); #8 the cancel test now pins scan early-stop; #5 the bench
+contract verifies git-lfs pointer integrity (F17 was inert in CI). Pre-existing, not fixed
+(origin/main): refresh returns before `mark_stale` on a second-fingerprint error.
 
 **T1 filter is per-atlas in U-02; the spec's project-wide "matches under their atlases" requires the
 unified tree and is deferred to U-03** (U-02 non-goal: "no structural tree change (that is U-03)").
