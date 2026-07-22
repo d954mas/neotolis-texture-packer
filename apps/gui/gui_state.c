@@ -84,6 +84,7 @@ int s_multi_sel_count;
 int s_multi_sel_cap;
 int s_sel_anchor_row = -1;
 int s_focus_view = -1;
+bool s_focus_follow = false;
 bool s_filter_active = false;
 bool s_reselect_pending = false;
 tp_id128 s_reselect_source_id;

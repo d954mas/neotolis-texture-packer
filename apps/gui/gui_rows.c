@@ -1199,6 +1199,15 @@ void select_row_for_region(int region_idx) {
             s_sel_child = s_rows[i].child;
             s_sel_missing = false;
             (void)snprintf(s_sel_abs, sizeof s_sel_abs, "%s", s_rows[i].abs);
+            /* Re-pin keyboard focus + the Shift-range anchor onto the newly selected row so F2/arrows
+             * act on THIS sprite, not the previously focused one. focus_sync lands -1 when the row is
+             * hidden (filtered/collapsed) -- clearing the anchor too, so a stale Shift anchor cannot
+             * mis-range (mirrors undo_redo_settle). Request an ensure-visible only for a visible focus. */
+            focus_sync_to_selection();
+            s_sel_anchor_row = s_focus_view;
+            if (s_focus_view >= 0) {
+                s_focus_follow = true;
+            }
             return;
         }
     }

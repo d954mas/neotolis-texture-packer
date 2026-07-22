@@ -42,6 +42,7 @@ tp_id128 s_reselect_atlas_id;                /* F2: referenced by gui_selection_
 char s_ctx_sprite_abs[TP_IDENTITY_PATH_MAX]; /* F12: not referenced by gui_rows.c, defined for parity */
 int s_focus_view = -1;     /* build_view() re-pins keyboard focus; the bench never drives a view */
 int s_sel_anchor_row = -1; /* build_view() re-pins the shift-anchor; unused in the row benchmark */
+bool s_focus_follow;       /* select_row_for_region requests ensure-visible; unused in the row benchmark */
 static const tp_session_snapshot *s_fixture_snapshot;
 static uint64_t s_fixture_snapshot_lifetime;
 

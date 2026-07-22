@@ -1017,6 +1017,34 @@ void run_selftest(void) {
                         okr ? "" : pe);
             NT_ASSERT(okr && rr && rr->sprite_count == 3 && rr->page_count >= 1 && "pack rotate");
             NT_ASSERT(rotate_a >= 0 && "canonical region lookup 'a.png'");
+
+            /* U-02 finding-1: a canvas-region click (select_row_for_region) must re-pin BOTH the keyboard
+             * focus and the Shift-range anchor onto the newly selected row, so F2/arrows act on the clicked
+             * sprite, not the previously focused one. Build the row model + view for the packed atlas, seed
+             * the stale-focus state a real click starts from (focus/anchor on a DIFFERENT row A), then assert
+             * the click re-pins both onto 'a.png'. Headless-reachable (run_selftest), unlike the visual-phase
+             * select_row_for_region callsites which the NTPACKER_GUI_HEADLESS jump to phase 16 skips. */
+            s_sel_atlas = i_rotate;
+            build_rows();
+            build_view();
+            s_focus_view = -1;      /* pre-fix left focus on row A here; the re-pin must move it */
+            s_sel_anchor_row = -1;
+            select_row_for_region(rotate_a);
+            NT_ASSERT(s_focus_view >= 0 && s_focus_view < s_view_count &&
+                      "select_row_for_region re-pins keyboard focus onto the selected row");
+            {
+                const sprite_row *frow = &s_rows[s_view[s_focus_view]];
+                const bool focus_on_selection =
+                    frow->is_source ? (s_sel_src == frow->src && s_sel_child == -1)
+                                    : (s_sel_src == frow->src && s_sel_child == frow->child);
+                NT_ASSERT(focus_on_selection &&
+                          "the re-pinned focus row is the one carrying the primary selection");
+            }
+            NT_ASSERT(s_sel_anchor_row == s_focus_view &&
+                      "select_row_for_region anchors the Shift-range on the new focus");
+            nt_log_info("SELFTEST: canvas-click focus re-pin OK (focus_view=%d anchor=%d view_count=%d)",
+                        s_focus_view, s_sel_anchor_row, s_view_count);
+
             char pe2[256] = {0};
             const bool okb = (i_basic >= 0) && gui_pack_atlas(i_basic, &ms_b, pe2, sizeof pe2, note, sizeof note);
             const tp_result *rb = gui_pack_result(i_basic);

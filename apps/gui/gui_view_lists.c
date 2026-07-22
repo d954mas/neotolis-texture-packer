@@ -29,6 +29,21 @@ static const nt_ui_events_cfg_t s_dbl_cfg = {.long_press_secs = 0.0F, .double_cl
 /* start_atlas_edit/start_anim_edit/start_sprite_edit_ref/start_sprite_edit moved to gui_actions
  * (the entry side of the edit lifecycle, needed by both this panel and the settings view). */
 
+/* U-02 T2: per-section height cap for the two bounded list regions (atlases, animations). At short window
+ * heights both capped regions plus the fixed chrome would starve the GROW sprite vlist, so each is capped at
+ * min(180, 30% of the panel's ACTUAL height): tall panels still reach the full 180 (identical to before),
+ * short panels shrink both so the sprite list keeps a usable share. Panel height comes from the previous
+ * frame -- stable, since the left panel is a vertical-GROW child sized by the window, not by its own
+ * (clipped) content, so there is no feedback loop; the first frame has no bbox and falls back to the fixed
+ * 180 cap. Floored at 2 rows so a region never collapses below one visible entry. */
+static float left_section_cap_h(const nt_ui_context_t *ctx) {
+    const nt_ui_bbox_t panel = nt_ui_get_bbox(ctx, s_id_left_panel);
+    if (!panel.found) {
+        return S(BASE_LIST_SECTION_CAP_H);
+    }
+    return fminf(S(BASE_LIST_SECTION_CAP_H), fmaxf(2.0F * S(BASE_ROW_H), 0.30F * panel.height));
+}
+
 static void declare_atlas_list(nt_ui_context_t *ctx, const tp_session_snapshot *snapshot) {
     CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(20.0F))}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
         section_rule_label(ctx, "ATLASES");
@@ -37,10 +52,11 @@ static void declare_atlas_list(nt_ui_context_t *ctx, const tp_session_snapshot *
     const int64_t revision = snapshot ? tp_session_snapshot_revision(snapshot) : 0;
     /* U-02 T2: atlas rows live in a bounded, vertically-scrollable region (height = min(content, cap)) so a
      * long list scrolls inside its own region instead of consuming the whole panel and starving the sprite
-     * vlist + animations below. begin/end are guard-balanced by has_atlas_rows so the row loop is unchanged. */
+     * vlist + animations below. The cap is panel-relative (left_section_cap_h) so a short window shrinks it.
+     * begin/end are guard-balanced by has_atlas_rows so the row loop is unchanged. */
     const bool has_atlas_rows = atlas_count > 0;
     if (has_atlas_rows) {
-        const float atlas_rows_h = fminf((float)atlas_count * S(BASE_ROW_H), S(BASE_LIST_SECTION_CAP_H));
+        const float atlas_rows_h = fminf((float)atlas_count * S(BASE_ROW_H), left_section_cap_h(ctx));
         nt_ui_scroll_begin(ctx, NULL, nt_ui_id("ntpacker/atlas_scroll"), &s_panel_scroll,
                            &(Clay_ElementDeclaration){.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(atlas_rows_h)},
                                                                  .layoutDirection = CLAY_TOP_TO_BOTTOM}});
@@ -165,8 +181,8 @@ static void select_sprite_row(int i, bool ctrl, bool shift) {
 /* --- keyboard focus model (U-02 T3) ---
  * s_focus_view indexes s_view (kept in gui_state so reset_selection can clear it on atlas switch).
  * s_focus_follow asks declare_sprite_list to ensure-visible ONCE after a keyboard move, so manual
- * wheel scrolling is never yanked back. */
-static bool s_focus_follow;
+ * wheel scrolling is never yanked back; it lives in gui_state (like s_focus_view) so the canvas-click
+ * re-pin in gui_rows.c (select_row_for_region) can request the same scroll-into-view. */
 
 static void focus_clamp(void) {
     if (s_view_count <= 0) {
@@ -589,6 +605,8 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
                                row->abs ? row->abs : ""); /* F12: freeze the reveal path at arm time */
                 s_ctx_leaf = leaf_row;
                 s_ctx_removable = row->is_source;
+                s_focus_view = (int)i; /* right-click moves keyboard focus here too, so F2/arrows act from this row */
+                s_focus_follow = true;
             }
             const Clay_Color bg = selected ? C_SEL : (ev.hovered ? C_HOVER : C_TRANSPARENT);
             const uint16_t fw = ((int)i == s_focus_view) ? Su(1) : 0; /* keyboard focus ring */
@@ -662,9 +680,10 @@ static void declare_animations_list(nt_ui_context_t *ctx,
         return;
     }
     /* U-02 T2: animation rows in a bounded, vertically-scrollable region (height = min(content, cap)) so a
-     * long list scrolls inside its own region instead of drawing past the panel bottom. Reached only when
-     * animation_count > 0 (the empty-state hint returns early), so begin/end are unconditional here. */
-    const float anim_rows_h = fminf((float)a->animation_count * S(BASE_ROW_H), S(BASE_LIST_SECTION_CAP_H));
+     * long list scrolls inside its own region instead of drawing past the panel bottom. The cap is panel-
+     * relative (left_section_cap_h) so a short window shrinks it, keeping the sprite vlist usable. Reached
+     * only when animation_count > 0 (the empty-state hint returns early), so begin/end are unconditional. */
+    const float anim_rows_h = fminf((float)a->animation_count * S(BASE_ROW_H), left_section_cap_h(ctx));
     nt_ui_scroll_begin(ctx, NULL, nt_ui_id("ntpacker/anim_scroll"), &s_panel_scroll,
                        &(Clay_ElementDeclaration){.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(anim_rows_h)},
                                                              .layoutDirection = CLAY_TOP_TO_BOTTOM}});
