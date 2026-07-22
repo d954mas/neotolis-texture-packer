@@ -46,6 +46,12 @@ const char *path_last(const char *p) {
     return b;
 }
 
+#if defined(NTPACKER_GUI_BENCH)
+/* Bench counters, defined up here (not with the other row-cache state) so this shared string helper can
+ * count every row-string heap alloc it performs; the reset/get seam and other counter sites are below. */
+static gui_rows_bench_counters s_bench_counters;
+#endif
+
 static char *rows_strdup(const char *text) {
     if (!text) {
         return NULL;
@@ -54,6 +60,9 @@ static char *rows_strdup(const char *text) {
     char *copy = (char *)malloc(length);
     if (copy) {
         memcpy(copy, text, length);
+#if defined(NTPACKER_GUI_BENCH)
+        s_bench_counters.row_string_allocs++; /* count real per-row strdup allocs (~3x/row) */
+#endif
     }
     return copy;
 }
@@ -247,9 +256,6 @@ static int s_selected_cache_src;
 static int s_selected_cache_child;
 static int s_selected_cache_row;
 static const tp_snapshot_sprite *s_selected_cache_override;
-#if defined(NTPACKER_GUI_BENCH)
-static gui_rows_bench_counters s_bench_counters;
-#endif
 
 static uint64_t override_hash(tp_id128 source_id, const char *source_key) {
     uint64_t hash = UINT64_C(1469598103934665603);
@@ -504,7 +510,10 @@ void build_rows(void) {
         }
         memset(r, 0, sizeof *r);
         r->src = si;
-        r->added_at = si; /* §61.1 added_at: source insertion index == the order it was added to the project */
+        /* added_at = si is the U-02 interim add-order proxy: sources are append-only / non-reorderable,
+         * so the insertion index equals add order for every reachable state. A persisted write-once
+         * added_at is an F1 schema-identity follow-up, out of U-02's no-schema-change scope. */
+        r->added_at = si;
         r->child = -1;
         r->is_source = true;
         r->is_folder = is_dir;
@@ -751,6 +760,10 @@ static bool view_push(int row_index) {
 
 /* OOM fallback: show every row unfiltered/unsorted so the list is never silently emptied. */
 static void view_fallback_identity(void) {
+    /* build_view stamped the cache valid (+ epoch/generation) before the realloc that just OOM'd, so
+     * leave it invalid here or the next frame early-returns this identity view and never retries the
+     * real filtered/sorted build once memory frees. */
+    s_view_cache_valid = false;
     s_view_count = 0;
     for (int i = 0; i < s_row_count; ++i) {
         if (!view_push(i)) {

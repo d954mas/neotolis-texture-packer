@@ -293,6 +293,11 @@ static tp_status refresh_diff_core(int *out_added, int *out_removed,
 
 /* F4: rescan all sources, diff, evict the canvas cache, mark preview stale (NOT dirty). */
 static void do_refresh(void) {
+    /* Arm the reselect machinery BEFORE refresh_diff_core's gui_project_invalidate_sources() rebuilds the
+     * source set, so the per-frame gui_selection_revalidate re-anchors by {source_id, source_key} rather
+     * than by a bare index a source add/remove would silently shift onto a different sprite. Safe with
+     * nothing selected (captures a nil ref -> revalidate no-ops). */
+    gui_selection_capture_reselect();
     int added = 0;
     int removed = 0;
     int changed = 0;
@@ -310,7 +315,7 @@ static void do_refresh(void) {
 /* F15 (bench seam): run the REAL synchronous refresh cost (fp_collect x2 + invalidate + diff)
  * headlessly, WITHOUT the UI/status/canvas/preview-stale side effects, so --bench-perf times the
  * actual folder-walk/stat work do_refresh performs instead of the near-free invalidate alone. Preserves
- * the refresh-nonblocking invariant (no revision/dirty change). Returns false on a scan failure. */
+ * the refresh semantic-purity invariant (no revision/dirty change). Returns false on a scan failure. */
 bool gui_actions_refresh_diff_headless(int *out_added, int *out_removed,
                                        int *out_changed) {
     tp_error error = {0};

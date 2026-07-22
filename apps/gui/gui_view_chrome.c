@@ -143,7 +143,9 @@ static bool gui_reveal_in_explorer(const char *path) {
         return false; /* truncated: revealing the wrong (chopped) folder is worse than not opening */
     }
     char *slash = strrchr(dir, '/');
-    if (slash && slash != dir) {
+    if (slash == dir) {
+        dir[1] = '\0'; /* root-level file ("/x.png"): reveal "/" itself, not the file */
+    } else if (slash) {
         *slash = '\0';
     }
     char quoted[TP_IDENTITY_PATH_MAX * 4 + 4];

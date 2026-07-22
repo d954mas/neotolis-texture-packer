@@ -900,6 +900,56 @@ void test_view_sort_and_copy_use_effective_rename(void) {
     TEST_ASSERT_EQUAL_STRING("beta", s_rows[s_view[pos + 3]].sprite_name);
 }
 
+/* Mirror of declare_sort_chips' §61.1 click rule (gui_view_lists.c sort_chip_next): clicking the ACTIVE
+ * key flips its direction (asc<->desc); clicking a DIFFERENT key selects it ascending. The headless view
+ * test target does not link the Clay/nt_ui view TU, so we drive the SAME rule through the public sort
+ * state API and assert the resulting (key,desc) via gui_rows_get_sort. */
+static void sort_chip_click(row_sort_key clicked) {
+    row_sort_key key = ROW_SORT_NAME;
+    bool desc = false;
+    bool warn = false;
+    gui_rows_get_sort(&key, &desc, &warn);
+    if (clicked == key) {
+        desc = !desc; /* re-click the active key: flip direction */
+    } else {
+        key = clicked; /* select a different key ascending */
+        desc = false;
+    }
+    gui_rows_set_sort(key, desc, warn);
+}
+
+/* 21. §61.1 four-key sort UI mapping: from Name-asc, re-clicking Name flips it to Name-desc and back to
+ *     Name-asc; clicking Size (a different key) selects Size-asc; re-clicking Size flips it to Size-desc.
+ *     The warn-first pin is independent of key clicks. */
+void test_sort_chip_click_selects_and_flips(void) {
+    gui_rows_set_sort(ROW_SORT_NAME, false, false); /* default: Name ascending, warn-first off */
+    row_sort_key key = ROW_SORT_SIZE;
+    bool desc = true;
+    bool warn = true;
+
+    sort_chip_click(ROW_SORT_NAME); /* re-click active Name: asc -> desc */
+    gui_rows_get_sort(&key, &desc, &warn);
+    TEST_ASSERT_EQUAL_INT(ROW_SORT_NAME, key);
+    TEST_ASSERT_TRUE(desc);
+    TEST_ASSERT_FALSE(warn);
+
+    sort_chip_click(ROW_SORT_NAME); /* re-click active Name again: desc -> asc (the spec behaviour) */
+    gui_rows_get_sort(&key, &desc, &warn);
+    TEST_ASSERT_EQUAL_INT(ROW_SORT_NAME, key);
+    TEST_ASSERT_FALSE(desc);
+
+    sort_chip_click(ROW_SORT_SIZE); /* click a DIFFERENT key while Name active: Size ascending */
+    gui_rows_get_sort(&key, &desc, &warn);
+    TEST_ASSERT_EQUAL_INT(ROW_SORT_SIZE, key);
+    TEST_ASSERT_FALSE(desc);
+
+    sort_chip_click(ROW_SORT_SIZE); /* re-click active Size: asc -> desc */
+    gui_rows_get_sort(&key, &desc, &warn);
+    TEST_ASSERT_EQUAL_INT(ROW_SORT_SIZE, key);
+    TEST_ASSERT_TRUE(desc);
+    TEST_ASSERT_FALSE(warn); /* key clicks never disturb the warn-first pin */
+}
+
 int main(int argc, char **argv) {
     if (tp_build_is_worker_invocation(argc, argv)) {
         return tp_build_worker_main();
@@ -925,5 +975,6 @@ int main(int argc, char **argv) {
     RUN_TEST(test_view_sort_size_orders_by_packed_area);
     RUN_TEST(test_view_sort_mtime_orders_by_modification_time);
     RUN_TEST(test_view_sort_and_copy_use_effective_rename);
+    RUN_TEST(test_sort_chip_click_selects_and_flips);
     return UNITY_END();
 }

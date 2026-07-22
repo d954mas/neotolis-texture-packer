@@ -34,7 +34,7 @@
 #include "gui_rows.h"    /* build_rows / select_row_for_region */
 #include "gui_state.h"   /* s_sel_atlas + GUI_PRINTF (printf-format attribute) */
 
-/* Default owner-scale fixture (36 atlases / 5480 sprites). Relative to the CWD, like a CLI project
+/* Default owner-scale fixture (37 atlases / 5481 memberships, incl. one folder source). Relative to the CWD, like a CLI project
  * arg; the verify commands run from the repo root, where this resolves. */
 #define GUI_BENCH_DEFAULT_PROJECT "examples/projects/bench-owner-scale.ntpacker_project"
 
@@ -137,6 +137,12 @@ static void bench_emit(const char *fmt, ...) {
 }
 
 static void bench_emit_action(const char *name, gui_bench_samples *s) {
+    /* Hard perf-gate: a probe that produced no samples or recorded any failed operation exits non-zero,
+     * so a broken build_rows/edit/undo/redo/refresh cannot slip through on a mere "failed=N" line. The
+     * selection probe accepts 20 samples with failed=0 even when regions<=0, so it is never tripped here. */
+    if (s->count == 0U || s->failed > 0U) {
+        s_bench_fail = true;
+    }
     if (s->count == 0U) {
         bench_emit("bench_perf action=%s ms no_samples=1 failed=%zu", name, s->failed);
         return;
@@ -266,8 +272,10 @@ static void bench_run_probes(void) {
     bench_emit_action("undo", &undo);
     bench_emit_action("redo", &redo);
 
-    /* 4. refresh / rescan + the non-blocking invariant: an external source refresh must NOT mutate the
-     *    project revision or dirty state (AGENTS hard invariant). Compare revision + dirty before/after. */
+    /* 4. refresh / rescan + the semantic-purity invariant: an external source refresh must NOT mutate the
+     *    project revision or dirty state (AGENTS hard invariant). Compare revision + dirty before/after.
+     *    NOTE: this checks semantic invariance only -- the refresh it times is still fully synchronous;
+     *    the async/off-UI-thread handoff is U-04, so this is deliberately NOT a responsiveness gate. */
     snap = gui_project_snapshot();
     const int64_t rev_before = snap ? tp_session_snapshot_revision(snap) : 0;
     const bool dirty_before = gui_project_is_dirty();
@@ -280,7 +288,7 @@ static void bench_run_probes(void) {
         const double t0 = bench_now_ms();
         /* Drive the REAL refresh cost (fp_collect x2 folder-walk/stat + invalidate + diff), not just the
          * near-free invalidate the earlier probe measured. The headless seam omits the UI/status/canvas
-         * side effects, so the refresh-nonblocking invariant asserted below still holds. */
+         * side effects, so the refresh semantic-purity invariant asserted below still holds. */
         const bool refresh_ok = gui_actions_refresh_diff_headless(
             &r_added, &r_removed, &r_changed);
         const double t1 = bench_now_ms();
@@ -291,7 +299,7 @@ static void bench_run_probes(void) {
     const int64_t rev_after = snap ? tp_session_snapshot_revision(snap) : 0;
     const bool dirty_after = gui_project_is_dirty();
     const bool refresh_ok = (rev_after == rev_before) && (dirty_after == dirty_before);
-    bench_emit("bench_perf invariant=refresh_nonblocking ok=%d rev_before=%lld rev_after=%lld "
+    bench_emit("bench_perf invariant=refresh_semantic_purity ok=%d rev_before=%lld rev_after=%lld "
                "dirty_before=%d dirty_after=%d",
                refresh_ok ? 1 : 0, (long long)rev_before, (long long)rev_after,
                dirty_before ? 1 : 0, dirty_after ? 1 : 0);

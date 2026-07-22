@@ -133,6 +133,7 @@ const tp_snapshot_sprite *gui_rows_selected_override(void);
 typedef struct gui_rows_bench_counters {
     uint64_t row_realloc_calls;
     uint64_t override_index_realloc_calls;
+    uint64_t row_string_allocs; /* per-row string heap allocs (rows_strdup: source_key/name/abs, ~3x/row) */
     uint64_t cache_key_checks;
     uint64_t rebuilds;
     uint64_t override_inserts;

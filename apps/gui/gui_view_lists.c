@@ -347,35 +347,60 @@ static const char *sort_key_label(row_sort_key key) {
     }
 }
 
-/* Sort chips (§61.1): one chip cycles the four keys x two directions, one toggles "warnings on top".
- * The active key always sorts (there is no "off" state -- `name` is the default), so the chip shows
- * "<Key> <arrow>". Re-clicking the active key flips its direction; the second click advances to the
- * next key (Name -> Size -> Time -> Added -> Name), skipping the internal build-order baseline. This is
- * view-only state (gui_rows_set_sort); it never touches the model. */
+/* Pure §61.1 click->sort decision, factored out so the mapping is reviewable in isolation (and mirrored
+ * by test_gui_view.c through the public sort API -- the headless view test target does not link this
+ * Clay/nt_ui TU). Clicking the ALREADY-active key FLIPS its direction (asc<->desc); clicking any OTHER
+ * key selects it ascending. This makes "Name-desc -> click Name -> Name-asc" (the spec behaviour) and
+ * keeps every key independently reachable. */
+static void sort_chip_next(row_sort_key active_key, bool active_desc, row_sort_key clicked_key,
+                           row_sort_key *out_key, bool *out_desc) {
+    if (clicked_key == active_key) {
+        *out_key = active_key;
+        *out_desc = !active_desc; /* re-click the active key: flip direction */
+    } else {
+        *out_key = clicked_key;
+        *out_desc = false; /* select a different key ascending */
+    }
+}
+
+/* Sort controls (§61.1): FOUR selectable key chips (Name / Size / Time / Added) plus one "warnings on
+ * top" toggle. Each key has two directions -- clicking a non-active key selects it ascending, re-clicking
+ * the active key flips its direction. The active chip shows its direction arrow; the internal
+ * ROW_SORT_BUILD baseline is never exposed. This is view-only state (gui_rows_set_sort); it never touches
+ * the model. */
 static void declare_sort_chips(nt_ui_context_t *ctx) {
     row_sort_key key = ROW_SORT_NAME;
     bool desc = false;
     bool warn = false;
     gui_rows_get_sort(&key, &desc, &warn);
-    char sc[24];
-    (void)snprintf(sc, sizeof sc, "%s %s", sort_key_label(key),
-                   desc ? "\xE2\x96\xBE" : "\xE2\x96\xB4");
-    const uint32_t key_id = nt_ui_id("ntpacker/sort_key");
-    const uint32_t warn_id = nt_ui_id("ntpacker/sort_warn");
-    const bool non_default = (key != ROW_SORT_NAME) || desc; /* highlight when not the default name-asc */
-    if (ui_sort_chip(ctx, key_id, sc, non_default)) {
-        if (!desc) {
-            desc = true; /* re-click the active key: ascending -> descending */
+
+    static const row_sort_key keys[] = {ROW_SORT_NAME, ROW_SORT_SIZE, ROW_SORT_MTIME, ROW_SORT_ADDED};
+    static const char *const key_ids[] = {"ntpacker/sort_name", "ntpacker/sort_size",
+                                          "ntpacker/sort_mtime", "ntpacker/sort_added"};
+    for (size_t i = 0; i < sizeof keys / sizeof keys[0]; ++i) {
+        const bool active = (key == keys[i]);
+        char sc[24];
+        if (active) {
+            (void)snprintf(sc, sizeof sc, "%s %s", sort_key_label(keys[i]),
+                           desc ? "\xE2\x96\xBE" : "\xE2\x96\xB4"); /* active key shows its direction */
         } else {
-            desc = false; /* second re-click: advance to the next key, ascending */
-            key = (key == ROW_SORT_ADDED) ? ROW_SORT_NAME : (row_sort_key)(key + 1);
+            (void)snprintf(sc, sizeof sc, "%s", sort_key_label(keys[i]));
         }
-        gui_rows_set_sort(key, desc, warn);
+        const uint32_t chip_id = nt_ui_id(key_ids[i]);
+        if (ui_sort_chip(ctx, chip_id, sc, active)) {
+            row_sort_key next_key = key;
+            bool next_desc = desc;
+            sort_chip_next(key, desc, keys[i], &next_key, &next_desc);
+            gui_rows_set_sort(next_key, next_desc, warn);
+        }
+        record_row_tip(chip_id, active ? "Active sort key: click to flip ascending/descending"
+                                       : "Sort sprites by this key (re-click the active key to flip)");
     }
+
+    const uint32_t warn_id = nt_ui_id("ntpacker/sort_warn");
     if (ui_sort_chip(ctx, warn_id, "\xE2\x9A\xA0", warn)) {
         gui_rows_set_sort(key, desc, !warn);
     }
-    record_row_tip(key_id, "Sort sprites: click to cycle name / size / time / added (ascending then descending)");
     record_row_tip(warn_id, "Toggle: missing / warning rows on top");
 }
 
@@ -535,7 +560,7 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
                     : 0;
                 (void)snprintf(s_ctx_sprite_source_key,
                                sizeof s_ctx_sprite_source_key, "%s",
-                               row->source_key);
+                               row->source_key ? row->source_key : ""); /* folder/source/missing rows have no key */
                 (void)snprintf(s_ctx_sprite_display_name,
                                sizeof s_ctx_sprite_display_name, "%s",
                                gui_rows_effective_name(row)); /* F10: Copy name / Rename use the rename */

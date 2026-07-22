@@ -576,11 +576,10 @@ static bool run_fixture(row_fixture *fixture, int iterations) {
     const double p50 = tp_bench_samples_percentile(&samples, 50U);
     const double p95 = tp_bench_samples_percentile(&samples, 95U);
     (void)printf("   steady_p50=%.6f ms steady_p95=%.6f ms accepted=%zu "
-                 "failed=%zu key_checks=%llu row_heap_allocs=%llu fs_calls=0\n",
+                 "failed=%zu key_checks=%llu row_string_allocs=%llu fs_calls=0\n",
                  p50, p95, samples.count, samples.failed,
                  (unsigned long long)rows.cache_key_checks,
-                 (unsigned long long)(rows.row_realloc_calls +
-                                      rows.override_index_realloc_calls));
+                 (unsigned long long)rows.row_string_allocs);
 
     /* Invalidation and snapshot replacement stay outside each timed rebuild. */
     tp_bench_samples rebuild_samples;
@@ -649,7 +648,7 @@ static bool run_fixture(row_fixture *fixture, int iterations) {
     (void)printf("   rebuild_p50=%.6f ms rebuild_p95=%.6f ms accepted=%zu "
                  "failed=%zu sources=%llu children=%llu "
                  "override_inserts=%llu override_lookups=%llu "
-                 "override_probes=%llu linear_units=%llu row_heap_allocs=0\n",
+                 "override_probes=%llu linear_units=%llu row_string_allocs=%llu\n",
                  tp_bench_samples_percentile(&rebuild_samples, 50U),
                  tp_bench_samples_percentile(&rebuild_samples, 95U),
                  rebuild_samples.count, rebuild_samples.failed,
@@ -658,7 +657,8 @@ static bool run_fixture(row_fixture *fixture, int iterations) {
                  (unsigned long long)rebuild_rows.override_inserts,
                  (unsigned long long)rebuild_rows.override_lookup_calls,
                  (unsigned long long)rebuild_rows.override_probes,
-                 (unsigned long long)linear_units);
+                 (unsigned long long)linear_units,
+                 (unsigned long long)rebuild_rows.row_string_allocs);
     return true;
 }
 
