@@ -560,7 +560,6 @@ void build_rows(void) {
                                   "Out of memory: sprite list unavailable.");
                     return;
                 }
-                cr->size = row_packed_area(cr->source_id, cr->source_key);
                 row_display(cr->source_id, cr->source_key, sc->entries[ci].rel,
                             path_last(sc->entries[ci].rel), cr->label,
                             sizeof cr->label);
@@ -573,7 +572,6 @@ void build_rows(void) {
                 return;
             }
             r->mtime = row_stat_mtime(abs); /* file source: not part of a scan result, stat it live */
-            r->size = row_packed_area(r->source_id, r->source_key);
             row_display(r->source_id, r->source_key, r->sprite_name,
                         path_last(sp), r->label,
                         sizeof r->label);
@@ -885,6 +883,23 @@ void build_view(void) {
     s_view_cache_epoch = s_view_epoch;
     if (s_row_count == 0) {
         return;
+    }
+    /* Sort-by-size needs each leaf's packed area, one pack-ref lookup per row. Compute it lazily HERE
+     * (build_view re-runs on a sort-key change; the cached build_rows does not) and ONLY when the SIZE
+     * key is active, so the default path -- and the O(S+F) canonical-preview invariant asserted by the
+     * GUI selftest -- pay nothing. build_rows leaves size at 0; view_row_cmp reads it only for SIZE. */
+    if (s_view_sort_key == ROW_SORT_SIZE) {
+        for (int i = 0; i < s_row_count; ++i) {
+            /* size 0 is the "packed area not yet resolved for this row generation" sentinel: build_rows
+             * memsets it, and a repack bumps the row generation (pack_version is in the build_rows cache
+             * key) so a rebuild re-zeros then re-resolves. A real packed region has area >= 1, so a
+             * non-zero value is authoritative and skipped -- which also lets the headless unit test
+             * inject a controlled area (it cannot run the packer). */
+            if (s_rows[i].size == 0 && !s_rows[i].is_folder && s_rows[i].source_key &&
+                s_rows[i].source_key[0] != '\0') {
+                s_rows[i].size = row_packed_area(s_rows[i].source_id, s_rows[i].source_key);
+            }
+        }
     }
     /* 1. Partition s_rows into source spans (each source row + its contiguous child run). */
     int nspans = 0;
