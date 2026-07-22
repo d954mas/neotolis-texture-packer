@@ -127,7 +127,6 @@ extern char s_reselect_key[TP_SRCKEY_MAX];
 extern tp_id128 s_reselect_atlas_id;
 /* F3: one-shot -- undo_redo_settle raises it so the frame loop re-derives the canvas region highlight
  * from the preserved primary leaf (gui_shell_reset_shown_result/set_result drop sel_sprite on rebind). */
-extern bool s_undo_canvas_resync;
 
 /* Animation selection + editor state (ux.md §3.7b). */
 extern int s_sel_anim;       /* selected animation index in the current atlas, -1 none */

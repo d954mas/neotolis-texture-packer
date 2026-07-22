@@ -625,14 +625,16 @@ static void frame(void) {
         if (want != s_shown_result) {
             gui_canvas_set_result(&s_canvas, want);
             s_shown_result = want;
-        }
-        /* F3: an Undo/Redo settle dropped the canvas region highlight (set_result clears sel_sprite on
-         * the rebind above). Now that gui_selection_revalidate re-resolved the tree selection, re-derive
-         * the highlight ONCE from the preserved primary leaf so it survives the undo without a re-click.
-         * One-shot (gated on the settle flag) so it never fights a normal click; guarded against an
-         * absent/stale shown pack and a leaf not present in it (gui_pack_find_sprite_ref -> -1). */
-        if (s_undo_canvas_resync) {
-            s_undo_canvas_resync = false;
+            /* #4: gui_canvas_set_result just cleared the region highlight (sel_sprite -> -1). Re-derive it
+             * from the tree's primary leaf so the accent outline survives ANY result rebind -- an Undo/Redo
+             * settle, an ordinary repack, an atlas switch, OR a pack that lands LATER (a pack completing
+             * during an undo): the rebind fires again the frame its result pointer appears, so unlike the
+             * old post-undo one-shot this is never missed. ATLAS-mode only (a non-NULL want puts the canvas
+             * in ATLAS mode); guarded against an absent shown pack and a leaf not present in it
+             * (gui_pack_find_sprite_ref -> -1). A user atlas switch clears the selection first
+             * (reset_selection), so this is a no-op there -- it never fabricates a stale highlight. Runs
+             * here, BEFORE handle_canvas_input() below, so it can never fight a click. This replaces the
+             * former post-undo one-shot (now retired). */
             if (want && gui_canvas_get_mode(&s_canvas) == GUI_CANVAS_ATLAS) {
                 const sprite_row *leaf = gui_rows_selected_leaf();
                 if (leaf && leaf->source_key && leaf->source_key[0] != '\0') {

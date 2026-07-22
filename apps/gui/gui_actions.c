@@ -100,7 +100,6 @@ static void undo_redo_settle(void) {
     }
     preview_target_reset();
     gui_canvas_invalidate(&s_canvas);
-    s_undo_canvas_resync = true; /* F3: the frame loop re-derives the canvas region highlight next */
 }
 void do_undo(void) {
     /* F1 / spec §10: Undo/Redo are explicitly permitted while an async Pack runs (it packs on an

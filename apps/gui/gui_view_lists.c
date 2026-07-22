@@ -3,6 +3,7 @@
 #include "gui_view_lists.h"
 
 #include "clay.h"
+#include "ui/nt_ui_scroll.h"
 #include "ui/nt_ui_vlist.h"
 
 #include "input/nt_input.h"
@@ -34,6 +35,16 @@ static void declare_atlas_list(nt_ui_context_t *ctx, const tp_session_snapshot *
     }
     const int atlas_count = snapshot ? tp_session_snapshot_atlas_count(snapshot) : 0;
     const int64_t revision = snapshot ? tp_session_snapshot_revision(snapshot) : 0;
+    /* U-02 T2: atlas rows live in a bounded, vertically-scrollable region (height = min(content, cap)) so a
+     * long list scrolls inside its own region instead of consuming the whole panel and starving the sprite
+     * vlist + animations below. begin/end are guard-balanced by has_atlas_rows so the row loop is unchanged. */
+    const bool has_atlas_rows = atlas_count > 0;
+    if (has_atlas_rows) {
+        const float atlas_rows_h = fminf((float)atlas_count * S(BASE_ROW_H), S(BASE_LIST_SECTION_CAP_H));
+        nt_ui_scroll_begin(ctx, NULL, nt_ui_id("ntpacker/atlas_scroll"), &s_panel_scroll,
+                           &(Clay_ElementDeclaration){.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(atlas_rows_h)},
+                                                                 .layoutDirection = CLAY_TOP_TO_BOTTOM}});
+    }
     for (int i = 0; i < atlas_count; i++) {
         const tp_snapshot_atlas *atlas = tp_session_snapshot_atlas_at(snapshot, i);
         if (!atlas) {
@@ -93,6 +104,9 @@ static void declare_atlas_list(nt_ui_context_t *ctx, const tp_session_snapshot *
                                   xev.hovered ? &g_danger : &g_caption);
             }
         }
+    }
+    if (has_atlas_rows) {
+        nt_ui_scroll_end(ctx);
     }
     if (ui_icon_btn(ctx, nt_ui_id("ntpacker/add_atlas"), &s_ic_plus, 16.0F, "Atlas", &g_btn_ghost, true, 0.0F, 26.0F, &g_caption)) {
         s_pending_add_atlas = true;
@@ -407,7 +421,6 @@ static void declare_sort_chips(nt_ui_context_t *ctx) {
 static void declare_sprite_list(nt_ui_context_t *ctx) {
     CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(28))}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
         section_rule_label(ctx, "SPRITES");
-        declare_sort_chips(ctx); /* U-02 T7: sort key/dir + warn-on-top */
         CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}}) {}
         /* Smart folder is the primary input (ux.md principle 3: folders, not files); it keeps its label so
          * the live-linked behaviour is explicit (owner 2026-07-11). Per-file adds are "the exception", so the
@@ -423,6 +436,14 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
         if (ui_icon_btn(ctx, nt_ui_id("ntpacker/add_folder"), &s_ic_folder_plus, 16.0F, folder_lbl, &g_btn_ghost, true, 0.0F, 24.0F, &g_caption)) {
             s_pending_add_folder = true;
         }
+    }
+
+    /* U-02 #7: the sort controls get their OWN full-width row directly under the SPRITES header. Four key chips
+     * + warn toggle overran the header row (label + chips + two Add buttons) on a standard/narrow panel where
+     * Clay can't wrap and X-clip is forbidden; on their own row (~212px at scale 1) they fit with margin. */
+    CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(24))}, .childGap = Su(4), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+        declare_sort_chips(ctx); /* U-02 T7: sort key/dir + warn-on-top */
+        CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}}) {}
     }
 
     /* Speed-search filter bar: shown while armed (Ctrl+F) or whenever a query is set. */
@@ -640,6 +661,13 @@ static void declare_animations_list(nt_ui_context_t *ctx,
                     &g_caption);
         return;
     }
+    /* U-02 T2: animation rows in a bounded, vertically-scrollable region (height = min(content, cap)) so a
+     * long list scrolls inside its own region instead of drawing past the panel bottom. Reached only when
+     * animation_count > 0 (the empty-state hint returns early), so begin/end are unconditional here. */
+    const float anim_rows_h = fminf((float)a->animation_count * S(BASE_ROW_H), S(BASE_LIST_SECTION_CAP_H));
+    nt_ui_scroll_begin(ctx, NULL, nt_ui_id("ntpacker/anim_scroll"), &s_panel_scroll,
+                       &(Clay_ElementDeclaration){.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(anim_rows_h)},
+                                                             .layoutDirection = CLAY_TOP_TO_BOTTOM}});
     for (int i = 0; i < a->animation_count; i++) {
         const tp_snapshot_animation *animation = tp_session_snapshot_animation_at(
             snapshot, a->id, i);
@@ -704,6 +732,7 @@ static void declare_animations_list(nt_ui_context_t *ctx,
                               xev.hovered ? &g_danger : &g_caption);
         }
     }
+    nt_ui_scroll_end(ctx);
 }
 
 void declare_left_panel(nt_ui_context_t *ctx) {

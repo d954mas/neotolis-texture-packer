@@ -667,8 +667,13 @@ static bool row_matches_filter(const sprite_row *r) {
     if (s_view_filter[0] == '\0') {
         return true;
     }
+    /* #6: also search the EFFECTIVE name (override rename, else export key). r->label is a bounded
+     * char[224] that TRUNCATES a long "rename (file.png)" display string, and r->sprite_name holds only
+     * the canonical key -- so a rename longer than ~223 bytes would be unfindable by Ctrl+F without this.
+     * One override_by_key lookup per row, only on the active-filter path. */
     return ascii_ci_contains(r->label, s_view_filter) ||
-           ascii_ci_contains(r->sprite_name, s_view_filter);
+           ascii_ci_contains(r->sprite_name, s_view_filter) ||
+           ascii_ci_contains(gui_rows_effective_name(r), s_view_filter);
 }
 
 const char *gui_rows_effective_name(const sprite_row *row) {
@@ -862,6 +867,11 @@ static void collapsed_prune_missing(void) {
     }
 }
 
+/* Forward decl: defined in the selection-preservation region below. build_view calls it at the END of a
+ * MODEL REBUILD to re-anchor the keyboard focus onto the row still carrying the primary selection -- the
+ * view-only re-pin only covers reorders where the row model itself is unchanged. */
+static void focus_sync_to_selection(void);
+
 void build_view(void) {
     if (s_view_cache_valid &&
         s_view_cache_row_generation == s_row_cache_generation &&
@@ -1011,6 +1021,18 @@ void build_view(void) {
         if (!found) {
             s_sel_anchor_row = -1;
         }
+    }
+    /* P1.2: on a MODEL REBUILD (the row generation bumped -- a sprite rename while sorting by name, or a
+     * repack while sorting by size, reorders the view) keep_focus_row was -1, so the view-only re-pin
+     * above did NOT run and s_focus_view still holds its pre-rebuild numeric index, silently aliasing a
+     * DIFFERENT sprite (F2/arrows would act on the wrong row). Re-anchor it to the row that now carries
+     * the primary selection (-1 if none/hidden). On the undo path build_view runs BEFORE
+     * gui_selection_revalidate with a stale selection, but that revalidate re-runs focus_sync with the
+     * corrected selection, so it self-corrects; on a rename/repack (no revalidate) the selection is
+     * unchanged, so focus follows the moved sprite. The view-only (rows_unchanged) re-pin above is left
+     * untouched. */
+    if (!rows_unchanged) {
+        focus_sync_to_selection();
     }
 }
 // #endregion

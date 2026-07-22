@@ -89,7 +89,6 @@ bool s_reselect_pending = false;
 tp_id128 s_reselect_source_id;
 char s_reselect_key[TP_SRCKEY_MAX];
 tp_id128 s_reselect_atlas_id; /* F2: viewed-atlas stable id captured for undo/redo re-resolution */
-bool s_undo_canvas_resync;    /* F3: re-derive the canvas region highlight after an undo/redo settle */
 
 /* --- animation selection --- */
 int s_sel_anim = -1;

@@ -950,6 +950,88 @@ void test_sort_chip_click_selects_and_flips(void) {
     TEST_ASSERT_FALSE(warn); /* key clicks never disturb the warn-first pin */
 }
 
+/* 22. P1.2: keyboard focus follows a sprite across a MODEL-REBUILD reorder. Sorting by name, focus is
+ *     pinned on gamma (the natural-last child). Renaming gamma to "aaa" bumps the row generation (a model
+ *     rebuild, NOT a view-only reorder) AND makes it sort FIRST -- and the view-only re-pin is skipped on
+ *     a rebuild, so without the end-of-build_view re-anchor s_focus_view would keep gamma's OLD slot and
+ *     alias a different sprite. The fix re-anchors focus onto the row still carrying the primary selection
+ *     (gamma) at its new view position. */
+void test_view_focus_follows_selection_across_model_rebuild(void) {
+    add_sources_and_build(NULL, NULL);
+    gui_rows_set_sort(ROW_SORT_NAME, false, false);
+    build_view();
+
+    int gi = find_row_by_name("gamma");
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, gi);
+    s_sel_src = s_rows[gi].src; /* primary selection = gamma */
+    s_sel_child = s_rows[gi].child;
+    const int gview = view_pos_of_row(gi);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, gview);
+    s_focus_view = gview; /* focus pinned on gamma's current (natural-last) view slot */
+
+    /* Rename gamma -> "aaa": bumps the model generation (rebuild) and makes it sort first. */
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas = tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const gui_sprite_ref ref = {atlas->id, s_rows[gi].source_id, s_rows[gi].source_key,
+                                tp_session_snapshot_revision(snapshot)};
+    TEST_ASSERT_TRUE(gui_project_set_sprite_rename(&ref, "aaa"));
+
+    build_rows(); /* model generation bumped -> row cache rebuilds */
+    build_view(); /* model-rebuild path: view-only re-pin skipped, focus re-anchored at the end */
+
+    gi = find_row_by_name("gamma"); /* row identity/canonical key unchanged by the rename */
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, gi);
+    const int pos = view_folder_pos();
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, pos);
+    const int gview2 = view_pos_of_row(gi);
+    TEST_ASSERT_EQUAL_INT(pos + 1, gview2);      /* renamed gamma now leads its siblings */
+    TEST_ASSERT_TRUE(gview2 != gview);           /* its view slot genuinely moved */
+    TEST_ASSERT_EQUAL_INT(gview2, s_focus_view); /* P1.2: focus followed gamma, not left on the stale slot */
+}
+
+/* 23. #6: Ctrl+F must find a sprite by a LONG rename whose searchable tail is truncated out of the
+ *     224-byte display label. gamma is renamed to 250 'a's + a unique marker; the marker sits past the
+ *     label cutoff (and is absent from the canonical key "gamma"), so ONLY the effective-name search
+ *     added to row_matches_filter can surface the row. */
+void test_view_filter_finds_long_rename_beyond_label(void) {
+    add_sources_and_build(NULL, NULL);
+
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas = tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    int gi = find_row_by_name("gamma");
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, gi);
+
+    /* 250 'a's then a unique marker -> length 257 > 223, so the marker lands past the label truncation. */
+    char long_rename[258];
+    memset(long_rename, 'a', 250);
+    memcpy(long_rename + 250, "zqmark9", sizeof "zqmark9"); /* 7 marker chars + NUL */
+    TEST_ASSERT_EQUAL_INT(257, (int)strlen(long_rename));
+
+    const gui_sprite_ref ref = {atlas->id, s_rows[gi].source_id, s_rows[gi].source_key,
+                                tp_session_snapshot_revision(snapshot)};
+    TEST_ASSERT_TRUE(gui_project_set_sprite_rename(&ref, long_rename));
+
+    build_rows();
+    build_view();
+
+    gi = find_row_by_name("gamma"); /* canonical key still "gamma" */
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, gi);
+    /* the full rename is retained (it would overflow the 224-byte label) and the marker is NOT in the
+     * label -- so label + canonical-key search alone cannot find it. */
+    TEST_ASSERT_EQUAL_STRING(long_rename, gui_rows_effective_name(&s_rows[gi]));
+    TEST_ASSERT_NULL(strstr(s_rows[gi].label, "zqmark9"));
+    TEST_ASSERT_NULL(strstr(s_rows[gi].sprite_name, "zqmark9"));
+
+    /* Filtering by the marker (present only in the effective rename) surfaces gamma + its parent. */
+    gui_rows_set_filter("zqmark9");
+    build_view();
+    TEST_ASSERT_EQUAL_INT(2, s_view_count); /* folder parent + gamma */
+    TEST_ASSERT_TRUE(s_rows[s_view[0]].is_folder);
+    TEST_ASSERT_EQUAL_STRING("gamma", s_rows[s_view[1]].sprite_name);
+}
+
 int main(int argc, char **argv) {
     if (tp_build_is_worker_invocation(argc, argv)) {
         return tp_build_worker_main();
@@ -976,5 +1058,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_view_sort_mtime_orders_by_modification_time);
     RUN_TEST(test_view_sort_and_copy_use_effective_rename);
     RUN_TEST(test_sort_chip_click_selects_and_flips);
+    RUN_TEST(test_view_focus_follows_selection_across_model_rebuild);
+    RUN_TEST(test_view_filter_finds_long_rename_beyond_label);
     return UNITY_END();
 }
