@@ -76,6 +76,60 @@ static void scan_gate_wait(void) {
     }
 }
 
+/* Test-only POST-entry gate + visited-entry counter (paper-cut #8). Where scan_gate_wait
+ * parks BEFORE the walk starts, this trips AFTER the FIRST entry is visited INSIDE
+ * scan_dir and counts EVERY visited entry -- so a job test can request cancel while the
+ * walk is parked mid-scan and then PROVE the scan stopped early (visited < total) rather
+ * than only that the job ended CANCELLED (which the shared cancel flag yields even if the
+ * scan ran to completion and only the pack observed the cancel). The counter is a
+ * process-global atomic the test reads AFTER the cancelled result is freed (sprite_count
+ * is gone by then). Production never arms it, so scan_post_entry_gate() is a no-op. */
+static atomic_int s_scan_post_armed;    /* 1 = counting active for the armed scan */
+static atomic_int s_scan_post_park;     /* 1 = park at the FIRST counted entry (one-shot) */
+static atomic_int s_scan_post_entered;  /* set once the walk parks in the gate */
+static atomic_int s_scan_post_released; /* set by the test to unpark the walk */
+static atomic_int s_scan_visited;       /* entries visited since the last arm */
+
+void tp_scan__test_arm_post_entry_gate(void) {
+    atomic_store(&s_scan_visited, 0);
+    atomic_store(&s_scan_post_entered, 0);
+    atomic_store(&s_scan_post_released, 0);
+    atomic_store(&s_scan_post_park, 1);
+    atomic_store(&s_scan_post_armed, 1);
+}
+
+bool tp_scan__test_post_entry_gate_entered(void) {
+    return atomic_load(&s_scan_post_entered) != 0;
+}
+
+void tp_scan__test_release_post_entry_gate(void) {
+    /* Clear only the one-shot PARK (so a test that armed but never walked cannot park a
+     * later scan); deliberately leave counting ARMED so that if the loop-top cancel poll
+     * is ever deleted, the resumed walk keeps visiting and the counter climbs to N --
+     * which is exactly what makes the mid-scan-cancel test fail. */
+    atomic_store(&s_scan_post_park, 0);
+    atomic_store(&s_scan_post_released, 1);
+}
+
+int tp_scan__test_visited_entries(void) {
+    return atomic_load(&s_scan_visited);
+}
+
+static void scan_post_entry_gate(void) {
+    if (atomic_load(&s_scan_post_armed) == 0) {
+        return; /* production / not armed: no-op (mirrors scan_gate_wait) */
+    }
+    atomic_fetch_add(&s_scan_visited, 1);
+    if (atomic_load(&s_scan_post_park) == 0) {
+        return; /* park was one-shot on the first entry; keep only counting */
+    }
+    atomic_store(&s_scan_post_park, 0); /* one-shot */
+    atomic_store(&s_scan_post_entered, 1);
+    /* Busy-wait until the test releases (it requests cancel first, then releases). */
+    while (atomic_load(&s_scan_post_released) == 0) {
+    }
+}
+
 static void *scan_alloc(size_t size) {
     return scan_should_fail_alloc() ? NULL : malloc(size);
 }
@@ -252,11 +306,19 @@ static tp_status scan_join(const char *left, const char *right, size_t limit,
 // #region platform recursion
 /* Recurse `abs_dir` (physical path) accumulating image files; `rel_prefix` is the
  * '/'-normalized path from the scan root (empty at the top). `cancel` is polled once
- * per directory entry (NULL => never cancel); a cancelled walk aborts with
- * TP_STATUS_CANCELLED and the caller frees whatever was accumulated. */
+ * before each level's opendir and again at the top of the entry loop before each
+ * readdir (NULL => never cancel); a cancelled walk aborts with TP_STATUS_CANCELLED
+ * and the caller frees whatever was accumulated. */
 static tp_status scan_dir(const char *abs_dir, const char *rel_prefix,
                           scan_vec *out, const tp_cancel_token *cancel,
                           tp_error *err) {
+    /* Poll BEFORE the (recursive) opendir so an already-set cancel skips a fresh
+     * blocking open at each level. This bounds latency but does NOT preempt a cancel
+     * raised while already blocked inside opendir/readdir on a wedged mount -- that
+     * needs killable/async I/O (out of scope). */
+    if (tp_cancel_requested(cancel)) {
+        return tp_error_set(err, TP_STATUS_CANCELLED, "directory scan cancelled");
+    }
     tp_fs_dir *dir = tp_fs_dir_open(abs_dir);
     if (!dir) {
         const int error = errno;
@@ -264,15 +326,23 @@ static tp_status scan_dir(const char *abs_dir, const char *rel_prefix,
     }
     tp_status status = TP_STATUS_OK;
     tp_fs_dir_entry entry;
-    tp_fs_dir_result next;
-    while ((next = tp_fs_dir_next(dir, &entry)) == TP_FS_DIR_ENTRY) {
-        /* Poll BEFORE processing each entry -- so also before recursing into a
-         * subdirectory below -- to bound cancel latency to one entry per level. */
+    tp_fs_dir_result next = TP_FS_DIR_ENTRY;
+    for (;;) {
+        /* Poll at the loop TOP -- BEFORE each blocking tp_fs_dir_next, and before
+         * recursing into a subdirectory below -- so cancel latency is bounded to one
+         * entry per level and a cancel set while a child level was blocked is observed
+         * before this level reads its next entry. */
         if (tp_cancel_requested(cancel)) {
             status = tp_error_set(err, TP_STATUS_CANCELLED,
                                   "directory scan cancelled");
             break;
         }
+        next = tp_fs_dir_next(dir, &entry);
+        if (next != TP_FS_DIR_ENTRY) {
+            break;
+        }
+        scan_post_entry_gate(); /* test-only: count this entry; park after the first
+                                 * (no-op in production) */
         if (entry.info.reparse) {
             continue; /* never recurse through links/junctions */
         }

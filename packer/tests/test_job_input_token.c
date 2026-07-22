@@ -28,6 +28,16 @@ void tp_scan__test_arm_walk_gate(void);
 bool tp_scan__test_walk_gate_entered(void);
 void tp_scan__test_release_walk_gate(void);
 
+/* Post-entry gate + visited-entry counter seam (tp_scan.c, paper-cut #8): trips AFTER
+ * the FIRST entry is visited INSIDE the walk and counts every visited entry, so the
+ * mid-scan-cancel test can prove the scan STOPPED EARLY (visited < N) rather than only
+ * that the job ended CANCELLED -- the shared cancel flag yields CANCELLED even if the
+ * scan ran to completion and only the pack observed the cancel. */
+void tp_scan__test_arm_post_entry_gate(void);
+bool tp_scan__test_post_entry_gate_entered(void);
+void tp_scan__test_release_post_entry_gate(void);
+int tp_scan__test_visited_entries(void);
+
 void setUp(void) {}
 void tearDown(void) {}
 
@@ -41,6 +51,17 @@ static bool wait_for_walk_gate(void) {
         }
     }
     return tp_scan__test_walk_gate_entered();
+}
+
+/* Same bounded spin, for the post-entry gate: parks in scan_dir after the first
+ * visited entry. The large cap is a safety timeout, not a normal path. */
+static bool wait_for_post_entry_gate(void) {
+    for (long spins = 0; spins < 2000000000L; ++spins) {
+        if (tp_scan__test_post_entry_gate_entered()) {
+            return true;
+        }
+    }
+    return tp_scan__test_post_entry_gate_entered();
 }
 
 /* A minimal, valid 4x4 fully-opaque RGBA PNG (stb_image decodes it). A real pack
@@ -567,11 +588,17 @@ void test_folder_source_walk_runs_on_worker(void) {
     remove_scratch_tree(work_dir);
 }
 
-/* U-02 F11: a cancel raised while the worker is mid-folder-walk is observed
- * cooperatively -- the walk aborts and the job ends CANCELLED (never SUCCEEDED),
- * proving cancel now reaches INTO the scan instead of only being checked after the
- * whole build. The gate parks the worker in the walk; we request cancel while it is
- * parked, then release so the walk resumes, polls the cancel, and stops. */
+/* U-02 F11 / paper-cut #8: a cancel raised while the worker is mid-folder-walk is
+ * observed cooperatively INSIDE the scan -- the walk aborts EARLY and the job ends
+ * CANCELLED (never SUCCEEDED). The POST-entry gate parks the worker right after its
+ * FIRST visited entry; we request cancel while it is parked, then release so the walk
+ * resumes and polls the cancel at the loop top BEFORE reading a second entry.
+ *
+ * The load-bearing assertion is the visited-entry counter: it stays at 1 because the
+ * scan stopped early. This pins the SCAN-level poll specifically -- delete the loop-top
+ * cancel poll (tp_scan.c) and the resumed walk runs to completion, visiting all N
+ * entries; the job still ends CANCELLED (the shared cancel flag is seen later by the
+ * pack), so ONLY the counter catches the regression. */
 void test_folder_walk_cancels_mid_scan(void) {
     tp_session *session = make_session();
     const tp_id128 atlas = default_atlas_id(session);
@@ -582,7 +609,8 @@ void test_folder_walk_cancels_mid_scan(void) {
     char folder[1200];
     TEST_ASSERT_TRUE(snprintf(folder, sizeof folder, "%s/sprites", work_dir) > 0);
     tp_mkdirs(folder);
-    for (int i = 0; i < 5; ++i) {
+    enum { k_folder_images = 5 };
+    for (int i = 0; i < k_folder_images; ++i) {
         char png[1320];
         TEST_ASSERT_TRUE(snprintf(png, sizeof png, "%s/s%d.png", folder, i) > 0);
         write_png_fixture(png);
@@ -595,16 +623,22 @@ void test_folder_walk_cancels_mid_scan(void) {
         .work_dir = work_dir,
         .preview_exporter_id = NULL,
     };
-    tp_scan__test_arm_walk_gate();
+    tp_scan__test_arm_post_entry_gate(); /* count every entry; park after the first */
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_session_pack_job_start(session, &request, &err));
-    TEST_ASSERT_TRUE_MESSAGE(wait_for_walk_gate(),
-                             "the folder walk must reach the worker gate");
+    TEST_ASSERT_TRUE_MESSAGE(
+        wait_for_post_entry_gate(),
+        "the folder walk must reach the worker gate after its first entry");
+    /* Parked after exactly one visited entry. */
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        1, tp_scan__test_visited_entries(),
+        "the walk must park after visiting exactly one entry");
 
-    /* Cancel while parked mid-walk, THEN release: the walk resumes, polls the cancel
-     * on its next entry, and aborts -- so the job must end CANCELLED. */
+    /* Cancel while parked mid-walk, THEN release: the walk resumes, polls the cancel at
+     * the loop top, and aborts before reading a second entry -- so the job ends
+     * CANCELLED and the visited counter never climbs past 1. */
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_job_cancel(session, &err));
-    tp_scan__test_release_walk_gate();
+    tp_scan__test_release_post_entry_gate();
 
     tp_session_job_progress progress;
     do {
@@ -612,9 +646,19 @@ void test_folder_walk_cancels_mid_scan(void) {
         TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                               tp_session_job_poll(session, &progress, &err));
     } while (progress.state == TP_SESSION_JOB_RUNNING);
+    /* (a) terminal CANCELLED. */
     TEST_ASSERT_EQUAL_INT_MESSAGE(
         TP_SESSION_JOB_CANCELLED, progress.state,
         "a cancel raised mid-walk must end the job CANCELLED, not SUCCEEDED");
+    /* (b) the SCAN stopped early -- it did not visit every entry. This is what fails if
+     * the loop-top cancel poll is removed (the walk then visits all k_folder_images). */
+    const int visited = tp_scan__test_visited_entries();
+    TEST_ASSERT_TRUE_MESSAGE(
+        visited < k_folder_images,
+        "the scan must abort mid-walk (visited < total), not run to completion");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        1, visited,
+        "the scan must stop right after the first entry once cancel is observed");
 
     tp_session_job_result result;
     memset(&result, 0, sizeof result);

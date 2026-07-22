@@ -46,6 +46,7 @@
 #include "tp_core/tp_session.h"
 #include "tp_project_mutation_internal.h"
 
+#include <limits.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -772,10 +773,13 @@ static int write_fixture(const char *manifest_path, const char *path) {
  * file EXISTS -- so a source PNG could be swapped for different bytes without touching
  * the manifest and the contract would stay green. This pass reads each asset the
  * manifest names and verifies its byte size, SHA-256, and PNG dimensions against the
- * manifest's columns, failing on any mismatch. It stays LFS-independent: an
- * unmaterialized git-lfs POINTER (the state in CI legs without `git lfs pull`) is
- * detected and skipped -- but never silently: the count is logged. A compact SHA-256
- * (FIPS 180-4), self-checked against a known vector before use. */
+ * manifest's columns, failing on any mismatch. It stays LFS-independent WITHOUT going
+ * blind: an unmaterialized git-lfs POINTER (the state in CI legs without `git lfs pull`)
+ * carries the object's own sha256 + size -- byte-identical to the manifest columns -- so
+ * those two are parsed from the pointer and compared, catching a swapped asset even on a
+ * non-LFS checkout (only PNG dimensions need the real bytes and stay unverifiable there;
+ * the count of pointer-verified assets is logged). A compact SHA-256 (FIPS 180-4),
+ * self-checked against a known vector before use. */
 
 static uint32_t sha256_rotr(uint32_t x, unsigned n) {
     return (x >> n) | (x << (32U - n));
@@ -881,6 +885,70 @@ static bool looks_like_lfs_pointer(const uint8_t *bytes, size_t len) {
     return len >= n && memcmp(bytes, sig, n) == 0;
 }
 
+/* Parses a git-lfs pointer's `oid sha256:<64hex>` and `size <n>` lines. On success
+ * returns true with the 64-char lowercase-hex oid and the byte size. The pointer is a
+ * tiny (<200 byte) text file whose lines are '\n'-separated per the git-lfs v1 spec.
+ * The oid and size are both computed over the FULL object bytes -- byte-identical to the
+ * manifest's sha256 and bytes columns -- which is what lets a non-LFS checkout detect a
+ * swapped asset from the pointer alone, without materializing the real bytes. */
+static bool parse_lfs_pointer(const uint8_t *bytes, size_t len, char oid_hex[65],
+                              long long *out_size) {
+    static const char oid_prefix[] = "oid sha256:";
+    static const char size_prefix[] = "size ";
+    const size_t oid_n = sizeof oid_prefix - 1U;
+    const size_t size_n = sizeof size_prefix - 1U;
+    bool have_oid = false;
+    bool have_size = false;
+    size_t pos = 0U;
+    while (pos < len) {
+        const size_t line_start = pos;
+        while (pos < len && bytes[pos] != (uint8_t)'\n') {
+            ++pos;
+        }
+        size_t line_end = pos;
+        if (pos < len) {
+            ++pos;
+        }
+        if (line_end > line_start && bytes[line_end - 1U] == (uint8_t)'\r') {
+            --line_end;
+        }
+        const char *line = (const char *)bytes + line_start;
+        const size_t line_len = line_end - line_start;
+        if (line_len == oid_n + 64U && memcmp(line, oid_prefix, oid_n) == 0) {
+            bool all_hex = true;
+            for (size_t i = 0U; i < 64U; ++i) {
+                const char c = line[oid_n + i];
+                if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+                    all_hex = false;
+                    break;
+                }
+            }
+            if (all_hex) {
+                memcpy(oid_hex, line + oid_n, 64U);
+                oid_hex[64] = '\0';
+                have_oid = true;
+            }
+        } else if (line_len > size_n && memcmp(line, size_prefix, size_n) == 0) {
+            long long value = 0;
+            bool digits = true;
+            for (size_t i = size_n; i < line_len; ++i) {
+                const char c = line[i];
+                if (c < '0' || c > '9' ||
+                    value > (LLONG_MAX - (c - '0')) / 10) {
+                    digits = false; /* non-digit or would overflow long long */
+                    break;
+                }
+                value = value * 10 + (c - '0');
+            }
+            if (digits) {
+                *out_size = value;
+                have_size = true;
+            }
+        }
+    }
+    return have_oid && have_size;
+}
+
 /* Reads a PNG's IHDR width/height. False for anything not a PNG with an IHDR. */
 static bool png_dimensions(const uint8_t *b, size_t len, int *width, int *height) {
     static const uint8_t sig[8] = {0x89U, 0x50U, 0x4EU, 0x47U,
@@ -941,12 +1009,16 @@ static bool split_tsv5(const char *line, size_t len, const char *fields[5],
 /* Verifies every manifest-named asset's on-disk bytes against the manifest columns.
  * Assets live at <dirname(manifest)>/kenney/<relpath> (BENCH_ASSET_PREFIX resolves the
  * same tree from the project side). Materialized assets are fully checked (size +
- * SHA-256 + PNG dimensions); LFS pointer files are skipped and counted (logged). Any
- * present-but-mismatching asset fails. */
+ * SHA-256 + PNG dimensions). An unmaterialized git-lfs POINTER (the state on CI legs
+ * without `git lfs pull`) cannot be hashed here, but the pointer itself carries the
+ * object's sha256 and byte size -- byte-identical to the manifest's columns -- so those
+ * two are parsed and compared: a swapped asset with a stale manifest is caught even on a
+ * non-LFS checkout (only PNG dimensions stay unverifiable without the real bytes). Any
+ * mismatch -- materialized OR pointer -- fails. */
 static bool verify_manifest_assets(const char *manifest_path, int *out_verified,
-                                   int *out_skipped) {
+                                   int *out_verified_pointer) {
     *out_verified = 0;
-    *out_skipped = 0;
+    *out_verified_pointer = 0;
     if (!sha256_selftest()) {
         (void)fprintf(stderr,
                       "bench asset verify: internal SHA-256 self-test failed\n");
@@ -968,7 +1040,7 @@ static bool verify_manifest_assets(const char *manifest_path, int *out_verified,
 
     bool ok = true;
     int verified = 0;
-    int skipped = 0;
+    int verified_pointer = 0;
     int rows = 0;
     size_t pos = 0U;
     bool first_line = true;
@@ -1038,8 +1110,32 @@ static bool verify_manifest_assets(const char *manifest_path, int *out_verified,
             break;
         }
         if (looks_like_lfs_pointer(content, clen)) {
-            ++skipped; /* unmaterialized LFS pointer: cannot verify content here */
+            /* Unmaterialized LFS pointer: cannot hash the real bytes, but the pointer's
+             * own `oid sha256:` and `size` are computed over the full object -- identical
+             * to the manifest's field[4]/field[3]. Parse and compare so a swapped asset
+             * with a stale manifest still fails on a non-LFS checkout. PNG dimensions
+             * remain unverifiable from a pointer (they need the real bytes). */
+            char oid_hex[65];
+            long long ptr_size = 0;
+            if (!parse_lfs_pointer(content, clen, oid_hex, &ptr_size)) {
+                (void)fprintf(stderr,
+                              "bench asset verify: malformed git-lfs pointer: %s\n",
+                              asset_path);
+                ok = false;
+            } else if (ptr_size != (long long)bytes ||
+                       strcmp(oid_hex, sha_expected) != 0) {
+                (void)fprintf(stderr,
+                              "bench asset verify: git-lfs pointer mismatch for %s:\n"
+                              "  manifest size=%d sha256=%s\n"
+                              "  pointer  size=%lld sha256=%s\n",
+                              relpath, bytes, sha_expected, ptr_size, oid_hex);
+                ok = false;
+            }
             free(content);
+            if (!ok) {
+                break;
+            }
+            ++verified_pointer;
             continue;
         }
         if (clen != (size_t)bytes) {
@@ -1083,18 +1179,18 @@ static bool verify_manifest_assets(const char *manifest_path, int *out_verified,
     if (!ok) {
         return false;
     }
-    /* No silent skip: always report how many assets could not be content-verified
-     * because they are unmaterialized LFS pointers (the CI legs without `git lfs
-     * pull`). verified==0 there is expected and NOT a failure. */
-    if (skipped > 0) {
+    /* No silent skip: on the CI legs without `git lfs pull`, every asset is a pointer and
+     * is verified via its sha256+size (verified==0, verified_pointer==rows). Report it so
+     * the pointer-only path is visible and never mistaken for "nothing was checked". */
+    if (verified_pointer > 0) {
         (void)fprintf(stderr,
-                      "bench asset verify: %d/%d assets are unmaterialized git-lfs "
-                      "pointers (content check skipped; run `git lfs pull` to "
-                      "verify them)\n",
-                      skipped, rows);
+                      "bench asset verify: %d/%d assets verified via git-lfs pointer "
+                      "(sha256 + size only; run `git lfs pull` for full byte + PNG-dim "
+                      "verification)\n",
+                      verified_pointer, rows);
     }
     *out_verified = verified;
-    *out_skipped = skipped;
+    *out_verified_pointer = verified_pointer;
     return true;
 }
 
@@ -1132,12 +1228,15 @@ static int check_fixture(const char *manifest_path, const char *committed_path,
                       committed_path);
         return 1;
     }
-    /* F17: content-verify each manifest-named asset (size + SHA-256 + PNG dims) so a
-     * swapped source PNG cannot pass with a stale manifest. LFS-pointer assets are
-     * skipped-with-log, keeping the contract green in CI legs without `git lfs pull`. */
+    /* F17: content-verify each manifest-named asset so a swapped source PNG cannot pass
+     * with a stale manifest. Materialized assets are checked by size + SHA-256 + PNG
+     * dims; unmaterialized LFS pointers are checked by their carried sha256 + size
+     * (identical to the manifest columns), keeping the swap-detection live on every CI
+     * leg -- with or without `git lfs pull`. */
     int assets_verified = 0;
-    int assets_skipped = 0;
-    if (!verify_manifest_assets(manifest_path, &assets_verified, &assets_skipped)) {
+    int assets_verified_pointer = 0;
+    if (!verify_manifest_assets(manifest_path, &assets_verified,
+                                &assets_verified_pointer)) {
         (void)fprintf(stderr,
                       "bench fixture asset content check failed: manifest=%s\n",
                       manifest_path);
@@ -1145,9 +1244,9 @@ static int check_fixture(const char *manifest_path, const char *committed_path,
     }
     (void)printf(
         "tp_bench_project_contract: OK atlases=%d memberships=%d bytes=%zu "
-        "assets_verified=%d assets_skipped_lfs=%d\n",
+        "assets_verified=%d assets_verified_pointer=%d\n",
         BENCH_EXPECTED_ATLAS_COUNT, BENCH_EXPECTED_MEMBERSHIP_COUNT,
-        structural_bytes, assets_verified, assets_skipped);
+        structural_bytes, assets_verified, assets_verified_pointer);
     return 0;
 }
 
