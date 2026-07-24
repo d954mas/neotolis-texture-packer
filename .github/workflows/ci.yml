@@ -205,7 +205,8 @@ jobs:
       # any unreadable atlas (uncovered gap), and --bench-perf exits non-zero on an async- or
       # semantic-invariant violation (a Pack request that packs synchronously / publishes a result on the
       # caller thread, or a refresh that mutates project revision/dirty state -- its semantic-purity gate,
-      # not a responsiveness one; the async refresh handoff is U-04).
+      # not a responsiveness one; the async refresh handoff is U-02 task 9, with cooperative
+      # scan/decode cancellation hardening tracked separately by U-02a).
       - name: U-01 perf probes (advisory numbers, deterministic hard-gates)
         if: runner.os == 'Linux'
         env:

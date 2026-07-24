@@ -133,8 +133,14 @@ static const tp_result *s_shown_result; /* pack result currently bound to the ca
 static bool s_lmb_armed;      /* left button pressed on the canvas, click vs drag undecided */
 static bool s_lmb_panning;    /* left drag crossed the threshold -> panning */
 static bool s_mmb_panning;    /* middle-drag pan */
+static bool s_lmb_zoomed;     /* second press zoomed; suppress its release hit-test */
 static float s_press_x, s_press_y; /* left-press origin (threshold test) */
 static float s_pan_last_x, s_pan_last_y;
+static gui_canvas_double_click_ref s_canvas_double_click;
+static const nt_ui_events_cfg_t s_canvas_dbl_cfg = {
+    .long_press_secs = 0.0F,
+    .double_click = true,
+};
 #define CANVAS_DRAG_THRESHOLD 4.0F
 
 /* The deferred side-effect queue (s_pending_*), the new/open/exit confirm-flow flags (s_after_confirm/
@@ -216,6 +222,8 @@ static void handle_canvas_input(void) {
     if (gui_canvas_get_mode(&s_canvas) != GUI_CANVAS_ATLAS || !gui_canvas_has_atlas(&s_canvas) ||
         s_confirm_open || s_about_open || s_export_open || s_recovery_open || s_edit_kind != EDIT_NONE) {
         s_lmb_armed = s_lmb_panning = s_mmb_panning = false;
+        s_lmb_zoomed = false;
+        gui_canvas_double_click_reset(&s_canvas_double_click);
         return;
     }
     /* Use the box the handler actually drew the page into (captured last frame). Layout px ==
@@ -223,6 +231,8 @@ static void handle_canvas_input(void) {
     const float *box = s_canvas.last_bb;
     if (box[2] <= 1.0F) {
         s_lmb_armed = s_lmb_panning = s_mmb_panning = false;
+        s_lmb_zoomed = false;
+        gui_canvas_double_click_reset(&s_canvas_double_click);
         return;
     }
     const nt_pointer_t *p = &g_nt_input.pointers[0];
@@ -277,7 +287,9 @@ static void handle_canvas_input(void) {
         }
     }
     if (s_lmb_armed && p->buttons[NT_BUTTON_LEFT].is_released) {
-        if (!s_lmb_panning) { /* click: select region under cursor, or clear on empty */
+        if (s_lmb_panning) {
+            gui_canvas_double_click_reset(&s_canvas_double_click);
+        } else if (!s_lmb_zoomed) { /* click: select region under cursor, or clear on empty */
             const int hit = gui_canvas_hit(&s_canvas, p->x, p->y);
             gui_canvas_select(&s_canvas, hit);
             if (hit >= 0) {
@@ -286,10 +298,43 @@ static void handle_canvas_input(void) {
         }
         s_lmb_armed = false;
         s_lmb_panning = false;
+        s_lmb_zoomed = false;
     }
 
     if (inside && !s_lmb_panning && !s_mmb_panning) {
         s_canvas.hover_sprite = gui_canvas_hit(&s_canvas, p->x, p->y);
+    }
+}
+
+/* Engine-owned timing/radius decides whether this press is a double-click;
+ * the canonical {result, region} gate prevents A->B presses on the shared
+ * canvas id from zooming the wrong sprite. Called after nt_ui_begin so the
+ * event cell is current, while hit geometry still comes from the last draw. */
+static void handle_canvas_double_click(void) {
+    if (gui_canvas_get_mode(&s_canvas) != GUI_CANVAS_ATLAS ||
+        !gui_canvas_has_atlas(&s_canvas) || s_confirm_open || s_about_open ||
+        s_export_open || s_recovery_open || s_edit_kind != EDIT_NONE) {
+        gui_canvas_double_click_reset(&s_canvas_double_click);
+        return;
+    }
+    const nt_ui_events_t ev =
+        nt_ui_events(s_ctx, s_id_canvas, &s_canvas_dbl_cfg);
+    if (!ev.pressed_now) {
+        return;
+    }
+    const nt_pointer_t *pointer = &g_nt_input.pointers[0];
+    const int hit = gui_canvas_hit(&s_canvas, pointer->x, pointer->y);
+    if (gui_canvas_double_click_press(&s_canvas_double_click, s_canvas.result,
+                                      hit, ev.double_clicked)) {
+        gui_canvas_select(&s_canvas, hit);
+        select_row_for_region(hit);
+        if (gui_canvas_zoom_to_sprite(&s_canvas, s_canvas.last_bb, hit)) {
+            /* A zero-hold injected click can press+release in this same frame;
+             * its release was already processed before nt_ui_begin, so only
+             * arm suppression while a future release is still pending. */
+            s_lmb_zoomed =
+                !pointer->buttons[NT_BUTTON_LEFT].is_released;
+        }
     }
 }
 
@@ -685,6 +730,7 @@ static void frame(void) {
 
         nt_ui_begin(s_ctx, scale.logical_w, scale.logical_h, g_nt_app.dt, &g_nt_input.pointers[0], 1);
         nt_ui_set_viewport(s_ctx, nt_ui_viewport_from_scale(&scale));
+        handle_canvas_double_click();
 
         /* Docked chrome (owner 2026-07-11 pass 2): NO outer margin (root padding 0 -> the menubar fuses
          * flush to the top edge and the middle row fills to the window edges) + a thin 2px C_BG seam between

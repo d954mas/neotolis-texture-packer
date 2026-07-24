@@ -6,6 +6,7 @@
 #include "gui_project.h"
 #include "gui_scan.h"
 #include "gui_pack.h"
+#include "gui_left_layout.h"
 
 #include "tp_core/tp_names.h" /* canonical key / natural order / common prefix (op layer) */
 
@@ -604,6 +605,9 @@ static char s_view_filter[256];
 static row_sort_key s_view_sort_key;
 static bool s_view_sort_desc;
 static bool s_view_sort_warn_first;
+static bool s_double_click_ref_valid;
+static tp_id128 s_double_click_source_id;
+static char *s_double_click_source_key;
 
 /* Collapsed folder sources by stable id. Bounded by the folder-source count (tiny); linear scan. */
 static tp_id128 *s_collapsed;
@@ -812,6 +816,67 @@ void gui_rows_get_sort(row_sort_key *key, bool *descending, bool *warn_first) {
     if (warn_first) {
         *warn_first = s_view_sort_warn_first;
     }
+}
+
+float gui_rows_left_section_cap(float panel_height, float ui_scale,
+                                bool filter_visible) {
+    if (ui_scale <= 0.0F) {
+        ui_scale = 1.0F;
+    }
+
+    /* Worst case: both bounded scrollers exist. Reserve panel padding, fixed
+     * chrome, every direct-child gap, and two sprite rows before splitting the
+     * remainder between atlas and animation lists. */
+    const gui_left_layout_budget budget =
+        gui_left_layout_budget_make(ui_scale, filter_visible);
+    float cap = (panel_height - budget.padding - budget.fixed_chrome -
+                 budget.gaps - budget.sprite_min) *
+                0.5F;
+    if (cap < 0.0F) {
+        cap = 0.0F;
+    }
+    const float max_cap = GUI_LEFT_SECTION_MAX_H * ui_scale;
+    return cap < max_cap ? cap : max_cap;
+}
+
+void gui_rows_sort_chip_click(row_sort_key clicked) {
+    row_sort_key key = ROW_SORT_NAME;
+    bool descending = false;
+    bool warn_first = false;
+    gui_rows_get_sort(&key, &descending, &warn_first);
+    if (clicked == key) {
+        descending = !descending;
+    } else {
+        key = clicked;
+        descending = false;
+    }
+    gui_rows_set_sort(key, descending, warn_first);
+}
+
+void gui_rows_double_click_reset(void) {
+    free(s_double_click_source_key);
+    s_double_click_source_key = NULL;
+    s_double_click_source_id = tp_id128_nil();
+    s_double_click_ref_valid = false;
+}
+
+bool gui_rows_double_click_press(tp_id128 source_id, const char *source_key,
+                                 bool engine_double_clicked) {
+    const char *key = source_key ? source_key : "";
+    const bool same_ref =
+        s_double_click_ref_valid &&
+        tp_id128_eq(s_double_click_source_id, source_id) &&
+        strcmp(s_double_click_source_key, key) == 0;
+    char *key_copy = rows_strdup(key);
+    if (!key_copy) {
+        gui_rows_double_click_reset();
+        return false;
+    }
+    free(s_double_click_source_key);
+    s_double_click_source_key = key_copy;
+    s_double_click_source_id = source_id;
+    s_double_click_ref_valid = !tp_id128_is_nil(source_id);
+    return engine_double_clicked && same_ref;
 }
 
 bool gui_rows_is_collapsed(tp_id128 source_id) {
@@ -1134,6 +1199,7 @@ void gui_rows_shutdown(void) {
     s_view_sort_key = ROW_SORT_NAME; /* §61.1 default sort key is `name` */
     s_view_sort_desc = false;
     s_view_sort_warn_first = false;
+    gui_rows_double_click_reset();
     s_view_epoch = 1;
     s_view_cache_valid = false;
     s_view_cache_row_generation = 0U;

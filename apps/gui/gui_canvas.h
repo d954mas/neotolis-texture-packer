@@ -36,6 +36,12 @@ typedef enum { GUI_CANVAS_SOURCE = 0, GUI_CANVAS_ATLAS, GUI_CANVAS_ANIM } gui_ca
 
 #define GUI_CANVAS_MAX_PAGES 16
 
+typedef struct gui_canvas_double_click_ref {
+    const tp_result *result;
+    int sprite_index;
+    bool valid;
+} gui_canvas_double_click_ref;
+
 typedef struct gui_canvas {
     gui_canvas_mode mode;
 
@@ -130,6 +136,14 @@ void gui_canvas_fit(gui_canvas *c);
 void gui_canvas_set_zoom_pct(gui_canvas *c, const float bb[4], float pct);
 void gui_canvas_zoom_at(gui_canvas *c, const float bb[4], float cursor_x, float cursor_y, float wheel_notches);
 void gui_canvas_pan(gui_canvas *c, const float bb[4], float dx, float dy);
+/* Fits one packed region into the canvas and centers it. Uses transformed
+ * placed dimensions, so rotated/diagonal D4 sprites frame correctly. */
+bool gui_canvas_zoom_to_sprite(gui_canvas *c, const float bb[4],
+                               int sprite_index);
+void gui_canvas_double_click_reset(gui_canvas_double_click_ref *ref);
+bool gui_canvas_double_click_press(gui_canvas_double_click_ref *ref,
+                                   const tp_result *result, int sprite_index,
+                                   bool engine_double_clicked);
 
 /* Region hit-test at layout point (lx,ly): the sprite index on the current page whose placed AABB
  * contains the point, or -1. Uses the last drawn geometry. */

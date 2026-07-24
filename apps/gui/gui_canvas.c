@@ -97,6 +97,67 @@ void gui_canvas_pan(gui_canvas *c, const float bb[4], float dx, float dy) {
     clamp_cam(c, bb);
 }
 
+bool gui_canvas_zoom_to_sprite(gui_canvas *c, const float bb[4],
+                               int sprite_index) {
+    if (!c || !bb || !c->result || sprite_index < 0 ||
+        sprite_index >= c->result->sprite_count || bb[2] <= 0.0F ||
+        bb[3] <= 0.0F) {
+        return false;
+    }
+    const tp_sprite *sprite = &c->result->sprites[sprite_index];
+    const int page = sprite->page;
+    if (page < 0 || page >= c->page_count || c->page_w[page] <= 0 ||
+        c->page_h[page] <= 0) {
+        return false;
+    }
+    int32_t out_w = 0;
+    int32_t out_h = 0;
+    tp_transform_out_dims(sprite->transform, sprite->frame.w, sprite->frame.h,
+                          &out_w, &out_h);
+    if (out_w <= 0 || out_h <= 0) {
+        return false;
+    }
+
+    const float sx = bb[2] / (float)out_w;
+    const float sy = bb[3] / (float)out_h;
+    const float scale = clampf((sx < sy ? sx : sy) * 0.96F, 0.05F, 16.0F);
+    const float region_cx =
+        (float)sprite->frame.x + (float)out_w * 0.5F;
+    const float region_cy =
+        (float)sprite->frame.y + (float)out_h * 0.5F;
+
+    c->cur_page = page;
+    c->scale = scale;
+    c->cam_x =
+        ((float)c->page_w[page] * 0.5F - region_cx) * scale;
+    c->cam_y =
+        ((float)c->page_h[page] * 0.5F - region_cy) * scale;
+    c->fit_pending = false;
+    clamp_cam(c, bb);
+    return true;
+}
+
+void gui_canvas_double_click_reset(gui_canvas_double_click_ref *ref) {
+    if (ref) {
+        *ref = (gui_canvas_double_click_ref){0};
+    }
+}
+
+bool gui_canvas_double_click_press(gui_canvas_double_click_ref *ref,
+                                   const tp_result *result, int sprite_index,
+                                   bool engine_double_clicked) {
+    if (!ref) {
+        return false;
+    }
+    const bool same_ref =
+        ref->valid && ref->result == result &&
+        ref->sprite_index == sprite_index;
+    ref->result = result;
+    ref->sprite_index = sprite_index;
+    ref->valid = result != NULL && sprite_index >= 0;
+    return engine_double_clicked && same_ref && ref->valid;
+}
+
 int gui_canvas_hit(const gui_canvas *c, float lx, float ly) {
     if (!c->result || c->last_scale <= 0.0F) {
         return -1;

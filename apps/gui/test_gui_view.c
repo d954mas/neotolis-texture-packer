@@ -9,6 +9,7 @@
  * test_gui_canonical_identity.c. */
 
 #include <stdbool.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -21,6 +22,9 @@
 #endif
 
 #include "gui_actions.h"
+#include "gui_canvas.h"
+#include "gui_left_layout.h"
+#include "gui_pack.h"
 #include "gui_project.h"
 #include "gui_rows.h"
 #include "gui_scan.h"
@@ -53,15 +57,52 @@ static void remove_fixture_files(void) {
     (void)test_rmdir(TP_GUI_VIEW_TEST_DIR);
 }
 
-/* build_rows only stats/enumerates the directory (gui_scan), it never decodes,
- * so a minimal PNG signature is all a child file needs to be listed. */
-static bool write_fixture_file(const char *path) {
+/* Small valid RGBA PNGs with deliberately different dimensions. Most view
+ * tests only stat/enumerate them; the SIZE-sort regression runs the real pack
+ * path and verifies that build_rows obtains packed areas through gui_pack. */
+static const unsigned char s_png_alpha_3x2[] = {
+    0x89U, 0x50U, 0x4eU, 0x47U, 0x0dU, 0x0aU, 0x1aU, 0x0aU, 0x00U, 0x00U,
+    0x00U, 0x0dU, 0x49U, 0x48U, 0x44U, 0x52U, 0x00U, 0x00U, 0x00U, 0x03U,
+    0x00U, 0x00U, 0x00U, 0x02U, 0x08U, 0x06U, 0x00U, 0x00U, 0x00U, 0x9dU,
+    0x74U, 0x66U, 0x1aU, 0x00U, 0x00U, 0x00U, 0x11U, 0x49U, 0x44U, 0x41U,
+    0x54U, 0x78U, 0xdaU, 0x63U, 0xf8U, 0xcfU, 0xc0U, 0xf0U, 0x1fU, 0x86U,
+    0x19U, 0x90U, 0x39U, 0x00U, 0x9bU, 0x7eU, 0x0bU, 0xf5U, 0x0fU, 0x5fU,
+    0x26U, 0x22U, 0x00U, 0x00U, 0x00U, 0x00U, 0x49U, 0x45U, 0x4eU, 0x44U,
+    0xaeU, 0x42U, 0x60U, 0x82U};
+static const unsigned char s_png_beta_1x1[] = {
+    0x89U, 0x50U, 0x4eU, 0x47U, 0x0dU, 0x0aU, 0x1aU, 0x0aU, 0x00U, 0x00U,
+    0x00U, 0x0dU, 0x49U, 0x48U, 0x44U, 0x52U, 0x00U, 0x00U, 0x00U, 0x01U,
+    0x00U, 0x00U, 0x00U, 0x01U, 0x08U, 0x06U, 0x00U, 0x00U, 0x00U, 0x1fU,
+    0x15U, 0xc4U, 0x89U, 0x00U, 0x00U, 0x00U, 0x0dU, 0x49U, 0x44U, 0x41U,
+    0x54U, 0x78U, 0xdaU, 0x63U, 0x60U, 0xf8U, 0xcfU, 0xf0U, 0x1fU, 0x00U,
+    0x04U, 0x01U, 0x01U, 0xffU, 0xaeU, 0xb5U, 0x55U, 0xf5U, 0x00U, 0x00U,
+    0x00U, 0x00U, 0x49U, 0x45U, 0x4eU, 0x44U, 0xaeU, 0x42U, 0x60U, 0x82U};
+static const unsigned char s_png_gamma_2x2[] = {
+    0x89U, 0x50U, 0x4eU, 0x47U, 0x0dU, 0x0aU, 0x1aU, 0x0aU, 0x00U, 0x00U,
+    0x00U, 0x0dU, 0x49U, 0x48U, 0x44U, 0x52U, 0x00U, 0x00U, 0x00U, 0x02U,
+    0x00U, 0x00U, 0x00U, 0x02U, 0x08U, 0x06U, 0x00U, 0x00U, 0x00U, 0x72U,
+    0xb6U, 0x0dU, 0x24U, 0x00U, 0x00U, 0x00U, 0x10U, 0x49U, 0x44U, 0x41U,
+    0x54U, 0x78U, 0xdaU, 0x63U, 0x60U, 0x60U, 0xf8U, 0xffU, 0x1fU, 0x82U,
+    0xa1U, 0x0cU, 0x00U, 0x3fU, 0xd2U, 0x07U, 0xf9U, 0x5cU, 0x13U, 0xe0U,
+    0x42U, 0x00U, 0x00U, 0x00U, 0x00U, 0x49U, 0x45U, 0x4eU, 0x44U, 0xaeU,
+    0x42U, 0x60U, 0x82U};
+static const unsigned char s_png_solo_1x2[] = {
+    0x89U, 0x50U, 0x4eU, 0x47U, 0x0dU, 0x0aU, 0x1aU, 0x0aU, 0x00U, 0x00U,
+    0x00U, 0x0dU, 0x49U, 0x48U, 0x44U, 0x52U, 0x00U, 0x00U, 0x00U, 0x01U,
+    0x00U, 0x00U, 0x00U, 0x02U, 0x08U, 0x06U, 0x00U, 0x00U, 0x00U, 0x99U,
+    0x81U, 0xb6U, 0x27U, 0x00U, 0x00U, 0x00U, 0x11U, 0x49U, 0x44U, 0x41U,
+    0x54U, 0x78U, 0xdaU, 0x63U, 0xf8U, 0xffU, 0x9fU, 0x01U, 0x08U, 0xffU,
+    0x33U, 0xfcU, 0x07U, 0x00U, 0x1eU, 0xebU, 0x05U, 0xfbU, 0xd5U, 0x42U,
+    0x5bU, 0x8aU, 0x00U, 0x00U, 0x00U, 0x00U, 0x49U, 0x45U, 0x4eU, 0x44U,
+    0xaeU, 0x42U, 0x60U, 0x82U};
+
+static bool write_fixture_file(const char *path, const unsigned char *bytes,
+                               size_t byte_count) {
     FILE *file = fopen(path, "wb");
     if (!file) {
         return false;
     }
-    const unsigned char bytes[] = {0x89U, 0x50U, 0x4eU, 0x47U};
-    const bool ok = fwrite(bytes, 1U, sizeof bytes, file) == sizeof bytes;
+    const bool ok = fwrite(bytes, 1U, byte_count, file) == byte_count;
     return fclose(file) == 0 && ok;
 }
 
@@ -74,8 +115,14 @@ static bool prepare_files(void) {
     (void)snprintf(s_solo, sizeof s_solo, "%s/solo.png", TP_GUI_VIEW_TEST_DIR);
     remove_fixture_files();
     tp_mkdirs(s_pack_dir);
-    return write_fixture_file(s_alpha) && write_fixture_file(s_beta) &&
-           write_fixture_file(s_gamma) && write_fixture_file(s_solo);
+    return write_fixture_file(s_alpha, s_png_alpha_3x2,
+                              sizeof s_png_alpha_3x2) &&
+           write_fixture_file(s_beta, s_png_beta_1x1,
+                              sizeof s_png_beta_1x1) &&
+           write_fixture_file(s_gamma, s_png_gamma_2x2,
+                              sizeof s_png_gamma_2x2) &&
+           write_fixture_file(s_solo, s_png_solo_1x2,
+                              sizeof s_png_solo_1x2);
 }
 
 /* Adds the folder source (index 0) then the file source (index 1) to the
@@ -190,6 +237,7 @@ void setUp(void) {
 }
 
 void tearDown(void) {
+    gui_pack_shutdown();
     gui_rows_shutdown();
     gui_project_shutdown();
     gui_scan_shutdown();
@@ -798,11 +846,10 @@ void test_undo_preserves_selected_atlas_by_stable_id(void) {
     TEST_ASSERT_EQUAL_INT(s_rows[bi2].child, s_sel_child);
 }
 
-/* 18. SIZE sort (§61.1): orders leaves by packed AREA. The headless harness never runs the packer, so
- *     (a) build_rows leaves every packed area at 0 when the atlas is unpacked, and (b) the SIZE
- *     comparator is exercised with a CONTROLLED area written straight onto the built rows (the task's
- *     sanctioned "controlled area" path -- the real build_rows->gui_pack_result plumbing ships in the
- *     GUI and is covered by the selftest). */
+/* 18. SIZE sort (§61.1): run the real blocking pack, then force the row cache
+ *     through its pack-version key. The areas below come only from production
+ *     canonical lookup (gui_pack_result -> gui_pack_find_sprite_ref), so a
+ *     broken publication, invalidation, or source/key join fails this test. */
 void test_view_sort_size_orders_by_packed_area(void) {
     add_sources_and_build(NULL, NULL); /* folder children alpha,beta,gamma + solo */
     build_view();
@@ -811,31 +858,55 @@ void test_view_sort_size_orders_by_packed_area(void) {
         TEST_ASSERT_EQUAL_INT(0, (int)s_rows[i].size); /* unpacked atlas -> no region -> area 0 */
     }
 
+    TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_VIEW_TEST_DIR));
+    do_pack_blocking();
+    TEST_ASSERT_NOT_NULL(gui_pack_result(0));
+    build_rows(); /* pack-result version changed: production cache must rebuild */
+
     const int ai = find_row_by_name("alpha");
     const int bi = find_row_by_name("beta");
     const int gi = find_row_by_name("gamma");
     TEST_ASSERT_GREATER_OR_EQUAL_INT(0, ai);
     TEST_ASSERT_GREATER_OR_EQUAL_INT(0, bi);
     TEST_ASSERT_GREATER_OR_EQUAL_INT(0, gi);
-    s_rows[ai].size = 300; /* controlled areas: beta < gamma < alpha */
-    s_rows[bi].size = 100;
-    s_rows[gi].size = 200;
 
+    /* Packed areas are intentionally resolved only when SIZE is active. This
+     * drives the production lazy lookup after the pack-version rebuild. */
     gui_rows_set_sort(ROW_SORT_SIZE, false, false);
     build_view();
+    const tp_result *packed = gui_pack_result(0);
+    const int ap = gui_pack_find_sprite_ref(
+        0, s_rows[ai].source_id, s_rows[ai].source_key);
+    const int bp = gui_pack_find_sprite_ref(
+        0, s_rows[bi].source_id, s_rows[bi].source_key);
+    const int gp = gui_pack_find_sprite_ref(
+        0, s_rows[gi].source_id, s_rows[gi].source_key);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, ap);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, bp);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, gp);
+    TEST_ASSERT_EQUAL_INT(packed->sprites[ap].frame.w *
+                              packed->sprites[ap].frame.h,
+                          (int)s_rows[ai].size);
+    TEST_ASSERT_EQUAL_INT(packed->sprites[bp].frame.w *
+                              packed->sprites[bp].frame.h,
+                          (int)s_rows[bi].size);
+    TEST_ASSERT_EQUAL_INT(packed->sprites[gp].frame.w *
+                              packed->sprites[gp].frame.h,
+                          (int)s_rows[gi].size);
+
     int pos = view_folder_pos();
     TEST_ASSERT_GREATER_OR_EQUAL_INT(0, pos);
-    TEST_ASSERT_EQUAL_STRING("beta", s_rows[s_view[pos + 1]].sprite_name);  /* 100 */
-    TEST_ASSERT_EQUAL_STRING("gamma", s_rows[s_view[pos + 2]].sprite_name); /* 200 */
-    TEST_ASSERT_EQUAL_STRING("alpha", s_rows[s_view[pos + 3]].sprite_name); /* 300 */
+    TEST_ASSERT_EQUAL_STRING("beta", s_rows[s_view[pos + 1]].sprite_name);  /* 1 */
+    TEST_ASSERT_EQUAL_STRING("gamma", s_rows[s_view[pos + 2]].sprite_name); /* 4 */
+    TEST_ASSERT_EQUAL_STRING("alpha", s_rows[s_view[pos + 3]].sprite_name); /* 6 */
 
     gui_rows_set_sort(ROW_SORT_SIZE, true, false);
     build_view();
     pos = view_folder_pos();
     TEST_ASSERT_GREATER_OR_EQUAL_INT(0, pos);
-    TEST_ASSERT_EQUAL_STRING("alpha", s_rows[s_view[pos + 1]].sprite_name); /* 300 */
-    TEST_ASSERT_EQUAL_STRING("gamma", s_rows[s_view[pos + 2]].sprite_name); /* 200 */
-    TEST_ASSERT_EQUAL_STRING("beta", s_rows[s_view[pos + 3]].sprite_name);  /* 100 */
+    TEST_ASSERT_EQUAL_STRING("alpha", s_rows[s_view[pos + 1]].sprite_name); /* 6 */
+    TEST_ASSERT_EQUAL_STRING("gamma", s_rows[s_view[pos + 2]].sprite_name); /* 4 */
+    TEST_ASSERT_EQUAL_STRING("beta", s_rows[s_view[pos + 3]].sprite_name);  /* 1 */
 }
 
 /* 19. MTIME sort (§61.1): orders leaves by live file mtime. build_rows populates mtime for existing
@@ -900,50 +971,33 @@ void test_view_sort_and_copy_use_effective_rename(void) {
     TEST_ASSERT_EQUAL_STRING("beta", s_rows[s_view[pos + 3]].sprite_name);
 }
 
-/* Mirror of declare_sort_chips' §61.1 click rule (gui_view_lists.c sort_chip_next): clicking the ACTIVE
- * key flips its direction (asc<->desc); clicking a DIFFERENT key selects it ascending. The headless view
- * test target does not link the Clay/nt_ui view TU, so we drive the SAME rule through the public sort
- * state API and assert the resulting (key,desc) via gui_rows_get_sort. */
-static void sort_chip_click(row_sort_key clicked) {
-    row_sort_key key = ROW_SORT_NAME;
-    bool desc = false;
-    bool warn = false;
-    gui_rows_get_sort(&key, &desc, &warn);
-    if (clicked == key) {
-        desc = !desc; /* re-click the active key: flip direction */
-    } else {
-        key = clicked; /* select a different key ascending */
-        desc = false;
-    }
-    gui_rows_set_sort(key, desc, warn);
-}
-
 /* 21. §61.1 four-key sort UI mapping: from Name-asc, re-clicking Name flips it to Name-desc and back to
  *     Name-asc; clicking Size (a different key) selects Size-asc; re-clicking Size flips it to Size-desc.
- *     The warn-first pin is independent of key clicks. */
+ *     The warn-first pin is independent of key clicks. This invokes the same
+ *     production helper used by declare_sort_chips; there is no test mirror. */
 void test_sort_chip_click_selects_and_flips(void) {
     gui_rows_set_sort(ROW_SORT_NAME, false, false); /* default: Name ascending, warn-first off */
     row_sort_key key = ROW_SORT_SIZE;
     bool desc = true;
     bool warn = true;
 
-    sort_chip_click(ROW_SORT_NAME); /* re-click active Name: asc -> desc */
+    gui_rows_sort_chip_click(ROW_SORT_NAME); /* re-click active Name: asc -> desc */
     gui_rows_get_sort(&key, &desc, &warn);
     TEST_ASSERT_EQUAL_INT(ROW_SORT_NAME, key);
     TEST_ASSERT_TRUE(desc);
     TEST_ASSERT_FALSE(warn);
 
-    sort_chip_click(ROW_SORT_NAME); /* re-click active Name again: desc -> asc (the spec behaviour) */
+    gui_rows_sort_chip_click(ROW_SORT_NAME); /* re-click active Name again: desc -> asc */
     gui_rows_get_sort(&key, &desc, &warn);
     TEST_ASSERT_EQUAL_INT(ROW_SORT_NAME, key);
     TEST_ASSERT_FALSE(desc);
 
-    sort_chip_click(ROW_SORT_SIZE); /* click a DIFFERENT key while Name active: Size ascending */
+    gui_rows_sort_chip_click(ROW_SORT_SIZE); /* different key: ascending */
     gui_rows_get_sort(&key, &desc, &warn);
     TEST_ASSERT_EQUAL_INT(ROW_SORT_SIZE, key);
     TEST_ASSERT_FALSE(desc);
 
-    sort_chip_click(ROW_SORT_SIZE); /* re-click active Size: asc -> desc */
+    gui_rows_sort_chip_click(ROW_SORT_SIZE); /* active Size: asc -> desc */
     gui_rows_get_sort(&key, &desc, &warn);
     TEST_ASSERT_EQUAL_INT(ROW_SORT_SIZE, key);
     TEST_ASSERT_TRUE(desc);
@@ -1032,6 +1086,149 @@ void test_view_filter_finds_long_rename_beyond_label(void) {
     TEST_ASSERT_EQUAL_STRING("gamma", s_rows[s_view[1]].sprite_name);
 }
 
+/* 24. A short left panel must budget its two bounded list caps only
+ *     after reserving fixed chrome, gaps/padding, and at least two sprite
+ *     rows. This is the worst case where both capped lists exist. */
+static void assert_short_panel_keeps_sprite_rows(float panel_height,
+                                                 float scale,
+                                                 bool filter_visible) {
+    const float cap =
+        gui_rows_left_section_cap(panel_height, scale, filter_visible);
+    const gui_left_layout_budget budget =
+        gui_left_layout_budget_make(scale, filter_visible);
+    const float worst_case_used =
+        budget.padding + budget.fixed_chrome + budget.gaps +
+        budget.sprite_min + 2.0F * cap;
+
+    TEST_ASSERT_TRUE(cap >= budget.sprite_min);
+    TEST_ASSERT_TRUE(worst_case_used <= panel_height + 0.01F);
+}
+
+void test_left_section_caps_preserve_sprite_vlist_at_short_heights(void) {
+    assert_short_panel_keeps_sprite_rows(466.0F, 1.0F, false);
+    assert_short_panel_keeps_sprite_rows(466.0F, 1.0F, true);
+    assert_short_panel_keeps_sprite_rows(500.0F, 1.0F, false);
+    assert_short_panel_keeps_sprite_rows(500.0F, 1.0F, true);
+    assert_short_panel_keeps_sprite_rows(699.0F, 1.5F, false);
+    assert_short_panel_keeps_sprite_rows(699.0F, 1.5F, true);
+}
+
+/* 25. nt_ui_vlist recycles a bounded id ring by VIEW slot. An engine-level
+ *     double-click is therefore only actionable when the prior pressed row's
+ *     canonical {source_id, source_key} is still the same after a view remap. */
+void test_recycled_view_id_double_click_requires_same_canonical_row(void) {
+    add_sources_and_build(NULL, NULL);
+    const int ai = find_row_by_name("alpha");
+    const int bi = find_row_by_name("beta");
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, ai);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, bi);
+
+    const sprite_row *alpha = &s_rows[ai];
+    const sprite_row *beta = &s_rows[bi];
+    TEST_ASSERT_TRUE(tp_id128_eq(alpha->source_id, beta->source_id));
+    TEST_ASSERT_NOT_EQUAL(0, strcmp(alpha->source_key, beta->source_key));
+
+    gui_rows_double_click_reset();
+    TEST_ASSERT_FALSE(gui_rows_double_click_press(
+        alpha->source_id, alpha->source_key, false));
+    TEST_ASSERT_TRUE(gui_rows_double_click_press(
+        alpha->source_id, alpha->source_key, true));
+
+    gui_rows_double_click_reset();
+    TEST_ASSERT_FALSE(gui_rows_double_click_press(
+        alpha->source_id, alpha->source_key, false));
+    TEST_ASSERT_FALSE(gui_rows_double_click_press(
+        beta->source_id, beta->source_key, true)); /* recycled id, remapped row */
+
+    /* The mismatched engine pair was consumed. A fresh B pair must still work. */
+    TEST_ASSERT_FALSE(gui_rows_double_click_press(
+        beta->source_id, beta->source_key, false));
+    TEST_ASSERT_TRUE(gui_rows_double_click_press(
+        beta->source_id, beta->source_key, true));
+}
+
+/* 26. Region zoom uses transformed placed dimensions and centers that region
+ *     in the current canvas without changing modes or requiring GL. */
+void test_canvas_zoom_to_sprite_centers_transformed_region(void) {
+    tp_page page = {.w = 100, .h = 80};
+    tp_sprite sprite = {
+        .page = 0,
+        .frame = {.x = 20, .y = 10, .w = 10, .h = 20},
+        .transform = TP_TRANSFORM_DIAGONAL,
+    };
+    tp_result result = {
+        .pages = &page,
+        .page_count = 1,
+        .sprites = &sprite,
+        .sprite_count = 1,
+    };
+    gui_canvas canvas = {
+        .result = &result,
+        .page_count = 1,
+        .cur_page = 0,
+        .scale = 1.0F,
+        .fit_pending = true,
+    };
+    canvas.page_w[0] = page.w;
+    canvas.page_h[0] = page.h;
+    const float box[4] = {0.0F, 0.0F, 200.0F, 100.0F};
+
+    TEST_ASSERT_TRUE(gui_canvas_zoom_to_sprite(&canvas, box, 0));
+    TEST_ASSERT_TRUE(fabsf(canvas.scale - 9.6F) < 0.0001F);
+    TEST_ASSERT_FALSE(canvas.fit_pending);
+
+    int32_t out_w = 0;
+    int32_t out_h = 0;
+    tp_transform_out_dims(sprite.transform, sprite.frame.w, sprite.frame.h,
+                          &out_w, &out_h);
+    const float page_origin_x =
+        box[0] + box[2] * 0.5F + canvas.cam_x -
+        (float)page.w * canvas.scale * 0.5F;
+    const float page_origin_y =
+        box[1] + box[3] * 0.5F + canvas.cam_y -
+        (float)page.h * canvas.scale * 0.5F;
+    const float projected_center_x =
+        page_origin_x +
+        ((float)sprite.frame.x + (float)out_w * 0.5F) * canvas.scale;
+    const float projected_center_y =
+        page_origin_y +
+        ((float)sprite.frame.y + (float)out_h * 0.5F) * canvas.scale;
+    TEST_ASSERT_TRUE(fabsf(projected_center_x -
+                           (box[0] + box[2] * 0.5F)) < 0.0001F);
+    TEST_ASSERT_TRUE(fabsf(projected_center_y -
+                           (box[1] + box[3] * 0.5F)) < 0.0001F);
+
+    const float old_scale = canvas.scale;
+    const float old_cam_x = canvas.cam_x;
+    const float old_cam_y = canvas.cam_y;
+    TEST_ASSERT_FALSE(gui_canvas_zoom_to_sprite(&canvas, box, 1));
+    TEST_ASSERT_TRUE(canvas.scale == old_scale);
+    TEST_ASSERT_TRUE(canvas.cam_x == old_cam_x);
+    TEST_ASSERT_TRUE(canvas.cam_y == old_cam_y);
+
+    gui_canvas_double_click_ref click_ref = {0};
+    TEST_ASSERT_FALSE(gui_canvas_double_click_press(
+        &click_ref, &result, 0, false));
+    TEST_ASSERT_TRUE(gui_canvas_double_click_press(
+        &click_ref, &result, 0, true));
+    gui_canvas_double_click_reset(&click_ref);
+    TEST_ASSERT_FALSE(gui_canvas_double_click_press(
+        &click_ref, &result, 0, false));
+    TEST_ASSERT_FALSE(gui_canvas_double_click_press(
+        &click_ref, &result, 1, true));
+    TEST_ASSERT_FALSE(gui_canvas_double_click_press(
+        &click_ref, &result, 1, false));
+    TEST_ASSERT_TRUE(gui_canvas_double_click_press(
+        &click_ref, &result, 1, true));
+
+    tp_result replacement = result;
+    gui_canvas_double_click_reset(&click_ref);
+    TEST_ASSERT_FALSE(gui_canvas_double_click_press(
+        &click_ref, &result, 0, false));
+    TEST_ASSERT_FALSE(gui_canvas_double_click_press(
+        &click_ref, &replacement, 0, true));
+}
+
 int main(int argc, char **argv) {
     if (tp_build_is_worker_invocation(argc, argv)) {
         return tp_build_worker_main();
@@ -1060,5 +1257,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_sort_chip_click_selects_and_flips);
     RUN_TEST(test_view_focus_follows_selection_across_model_rebuild);
     RUN_TEST(test_view_filter_finds_long_rename_beyond_label);
+    RUN_TEST(test_left_section_caps_preserve_sprite_vlist_at_short_heights);
+    RUN_TEST(test_recycled_view_id_double_click_requires_same_canonical_row);
+    RUN_TEST(test_canvas_zoom_to_sprite_centers_transformed_region);
     return UNITY_END();
 }

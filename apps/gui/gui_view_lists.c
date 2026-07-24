@@ -29,23 +29,23 @@ static const nt_ui_events_cfg_t s_dbl_cfg = {.long_press_secs = 0.0F, .double_cl
 /* start_atlas_edit/start_anim_edit/start_sprite_edit_ref/start_sprite_edit moved to gui_actions
  * (the entry side of the edit lifecycle, needed by both this panel and the settings view). */
 
-/* U-02 T2: per-section height cap for the two bounded list regions (atlases, animations). At short window
- * heights both capped regions plus the fixed chrome would starve the GROW sprite vlist, so each is capped at
- * min(180, 30% of the panel's ACTUAL height): tall panels still reach the full 180 (identical to before),
- * short panels shrink both so the sprite list keeps a usable share. Panel height comes from the previous
- * frame -- stable, since the left panel is a vertical-GROW child sized by the window, not by its own
- * (clipped) content, so there is no feedback loop; the first frame has no bbox and falls back to the fixed
- * 180 cap. Floored at 2 rows so a region never collapses below one visible entry. */
+/* U-02 T2: per-section height cap for the two bounded list regions (atlases,
+ * animations). The shared budget reserves panel padding, every fixed child and
+ * gap, plus two sprite rows, then divides only the remainder between these two
+ * scrollers (up to 180 each). Panel height comes from the previous frame; the
+ * first frame has no bbox and uses the fixed cap until geometry is available. */
 static float left_section_cap_h(const nt_ui_context_t *ctx) {
     const nt_ui_bbox_t panel = nt_ui_get_bbox(ctx, s_id_left_panel);
     if (!panel.found) {
         return S(BASE_LIST_SECTION_CAP_H);
     }
-    return fminf(S(BASE_LIST_SECTION_CAP_H), fmaxf(2.0F * S(BASE_ROW_H), 0.30F * panel.height));
+    return gui_rows_left_section_cap(
+        panel.height, g_ui_scale,
+        s_filter_active || gui_rows_filter_active());
 }
 
 static void declare_atlas_list(nt_ui_context_t *ctx, const tp_session_snapshot *snapshot) {
-    CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(20.0F))}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+    CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(GUI_LEFT_ATLAS_HEADER_H))}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
         section_rule_label(ctx, "ATLASES");
     }
     const int atlas_count = snapshot ? tp_session_snapshot_atlas_count(snapshot) : 0;
@@ -124,7 +124,7 @@ static void declare_atlas_list(nt_ui_context_t *ctx, const tp_session_snapshot *
     if (has_atlas_rows) {
         nt_ui_scroll_end(ctx);
     }
-    if (ui_icon_btn(ctx, nt_ui_id("ntpacker/add_atlas"), &s_ic_plus, 16.0F, "Atlas", &g_btn_ghost, true, 0.0F, 26.0F, &g_caption)) {
+    if (ui_icon_btn(ctx, nt_ui_id("ntpacker/add_atlas"), &s_ic_plus, 16.0F, "Atlas", &g_btn_ghost, true, 0.0F, GUI_LEFT_ADD_ATLAS_H, &g_caption)) {
         s_pending_add_atlas = true;
     }
 }
@@ -377,22 +377,6 @@ static const char *sort_key_label(row_sort_key key) {
     }
 }
 
-/* Pure §61.1 click->sort decision, factored out so the mapping is reviewable in isolation (and mirrored
- * by test_gui_view.c through the public sort API -- the headless view test target does not link this
- * Clay/nt_ui TU). Clicking the ALREADY-active key FLIPS its direction (asc<->desc); clicking any OTHER
- * key selects it ascending. This makes "Name-desc -> click Name -> Name-asc" (the spec behaviour) and
- * keeps every key independently reachable. */
-static void sort_chip_next(row_sort_key active_key, bool active_desc, row_sort_key clicked_key,
-                           row_sort_key *out_key, bool *out_desc) {
-    if (clicked_key == active_key) {
-        *out_key = active_key;
-        *out_desc = !active_desc; /* re-click the active key: flip direction */
-    } else {
-        *out_key = clicked_key;
-        *out_desc = false; /* select a different key ascending */
-    }
-}
-
 /* Sort controls (§61.1): FOUR selectable key chips (Name / Size / Time / Added) plus one "warnings on
  * top" toggle. Each key has two directions -- clicking a non-active key selects it ascending, re-clicking
  * the active key flips its direction. The active chip shows its direction arrow; the internal
@@ -418,10 +402,7 @@ static void declare_sort_chips(nt_ui_context_t *ctx) {
         }
         const uint32_t chip_id = nt_ui_id(key_ids[i]);
         if (ui_sort_chip(ctx, chip_id, sc, active)) {
-            row_sort_key next_key = key;
-            bool next_desc = desc;
-            sort_chip_next(key, desc, keys[i], &next_key, &next_desc);
-            gui_rows_set_sort(next_key, next_desc, warn);
+            gui_rows_sort_chip_click(keys[i]);
         }
         record_row_tip(chip_id, active ? "Active sort key: click to flip ascending/descending"
                                        : "Sort sprites by this key (re-click the active key to flip)");
@@ -435,7 +416,7 @@ static void declare_sort_chips(nt_ui_context_t *ctx) {
 }
 
 static void declare_sprite_list(nt_ui_context_t *ctx) {
-    CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(28))}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+    CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(GUI_LEFT_SPRITE_HEADER_H))}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
         section_rule_label(ctx, "SPRITES");
         CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}}) {}
         /* Smart folder is the primary input (ux.md principle 3: folders, not files); it keeps its label so
@@ -457,7 +438,7 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
     /* U-02 #7: the sort controls get their OWN full-width row directly under the SPRITES header. Four key chips
      * + warn toggle overran the header row (label + chips + two Add buttons) on a standard/narrow panel where
      * Clay can't wrap and X-clip is forbidden; on their own row (~212px at scale 1) they fit with margin. */
-    CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(24))}, .childGap = Su(4), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+    CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(GUI_LEFT_SORT_H))}, .childGap = Su(4), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
         declare_sort_chips(ctx); /* U-02 T7: sort key/dir + warn-on-top */
         CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}}) {}
     }
@@ -473,7 +454,7 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
         char shown[300];
         const char *q = gui_rows_filter();
         (void)snprintf(shown, sizeof shown, "Filter: %s%s", q, s_filter_active ? "|" : "");
-        CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H - 3.0F))},
+        CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(GUI_LEFT_FILTER_H))},
                          .padding = {Su(8), Su(4), Su(2), Su(2)},
                          .childGap = Su(4),
                          .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}},
@@ -537,6 +518,10 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
                                                    row->source_id,
                                                    row->source_key));
             const nt_ui_events_t ev = nt_ui_events(ctx, hit_id, &s_dbl_cfg);
+            const bool canonical_double =
+                ev.pressed_now &&
+                gui_rows_double_click_press(row->source_id, row->source_key,
+                                            ev.double_clicked);
             bool x_clicked = false;
             nt_ui_events_t xev = {0}; /* hoisted: the render below reads xev.hovered for the danger tint */
             if (row->is_source) {
@@ -560,10 +545,10 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
                     }
                 }
             }
-            if (ev.double_clicked && row->is_folder) {
+            if (canonical_double && row->is_folder) {
                 gui_rows_toggle_collapsed(row->source_id); /* U-02 T2: double-click a folder collapses/expands it */
                 s_focus_view = (int)i;
-            } else if (ev.double_clicked && !row->is_folder && !row->missing) {
+            } else if (canonical_double && !row->is_folder && !row->missing) {
                 select_sprite_row((int)i, false, false);
                 s_focus_view = (int)i;
                 start_sprite_edit(row);
@@ -667,7 +652,7 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
 static void declare_animations_list(nt_ui_context_t *ctx,
                                     const tp_session_snapshot *snapshot,
                                     const tp_snapshot_atlas *a) {
-    CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(28))}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+    CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(GUI_LEFT_ANIM_HEADER_H))}, .childGap = Su(6), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
         section_rule_label(ctx, "ANIMATIONS");
         CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}}}) {}
         if (ui_icon_btn(ctx, nt_ui_id("ntpacker/add_anim"), &s_ic_plus, 16.0F, "Animation", &g_btn_ghost, true, 0.0F, 24.0F, &g_caption)) {
@@ -762,9 +747,9 @@ void declare_left_panel(nt_ui_context_t *ctx) {
     s_row_tip_count = 0; /* per-frame; filled by ui_label_fit when a row truncates */
     CLAY({.id = {.id = s_id_left_panel},
           .layout = {.sizing = {CLAY_SIZING_FIXED(s_left_panel_w), CLAY_SIZING_GROW(0)},
-                     .padding = {Su(8), Su(8), Su(8), Su(8)},
+                     .padding = {Su(8), Su(8), Su(GUI_LEFT_PANEL_PAD_Y), Su(GUI_LEFT_PANEL_PAD_Y)},
                      .layoutDirection = CLAY_TOP_TO_BOTTOM,
-                     .childGap = Su(6),
+                     .childGap = Su(GUI_LEFT_CHILD_GAP),
                      .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_TOP}},
           .backgroundColor = C_PANEL,
           /* Docked region (pass 2): no card corner/border -- the 2px C_BG seam to the canvas is the divider.
@@ -773,9 +758,9 @@ void declare_left_panel(nt_ui_context_t *ctx) {
            * The sprite vlist keeps its own inner scroll. */
           .clip = {.vertical = true}}) {
         declare_atlas_list(ctx, snapshot);
-        CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(1))}}, .backgroundColor = C_BORDER}) {}
+        CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(GUI_LEFT_DIVIDER_H))}}, .backgroundColor = C_BORDER}) {}
         declare_sprite_list(ctx);
-        CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(1))}}, .backgroundColor = C_BORDER}) {}
+        CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(GUI_LEFT_DIVIDER_H))}}, .backgroundColor = C_BORDER}) {}
         declare_animations_list(ctx, snapshot, a);
     }
 }

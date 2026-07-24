@@ -110,6 +110,18 @@ bool gui_rows_filter_active(void);
 void gui_rows_set_sort(row_sort_key key, bool descending, bool warn_first);
 void gui_rows_get_sort(row_sort_key *key, bool *descending, bool *warn_first);
 
+/* Shared list-view interaction/layout rules. These live below the Clay view so
+ * production and headless tests exercise one implementation. */
+float gui_rows_left_section_cap(float panel_height, float ui_scale,
+                                bool filter_visible);
+void gui_rows_sort_chip_click(row_sort_key clicked);
+
+/* nt_ui_vlist recycles ids by visible slot. A double-click is actionable only
+ * when the canonical row ref matches the preceding press. */
+void gui_rows_double_click_reset(void);
+bool gui_rows_double_click_press(tp_id128 source_id, const char *source_key,
+                                 bool engine_double_clicked);
+
 /* Folder-source disclosure (keyed by stable source id; children hidden when collapsed). */
 void gui_rows_toggle_collapsed(tp_id128 source_id);
 bool gui_rows_is_collapsed(tp_id128 source_id);

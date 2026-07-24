@@ -1150,9 +1150,10 @@ off the UI thread; caching/dedup of the walk stays in B1.
 
 **Dependencies.** U-01. [gui] (+ one [core] refresh path)
 
-**Status (2026-07-22, `feat/U-02-paper-cuts` @ `8656e6c`, PR #8).** Landed: T1–T3, T5–T7, plus FIVE
-post-review rounds. Round 1 (paper-cuts hardening): Undo/Redo focus re-sync + folder-primary by
-stable id, reveal/open-url shell-safety, Atlas-Pack busy affordance, `tp_gui_shell_quote` test.
+**Status (2026-07-23, `feat/U-02-paper-cuts`, PR #8 worktree).** Implemented and verified in the
+current worktree: T1–T3 and T5–T7, plus SIX post-review rounds. Round 1 (paper-cuts hardening): Undo/Redo focus re-sync +
+folder-primary by stable id, reveal/open-url shell-safety, Atlas-Pack busy affordance,
+`tp_gui_shell_quote` test.
 Round 2 (second external review — 18 findings verified by 4 lenses, **0 survived as P1**): confirmed
 bugs fixed — F1 Undo/Redo permitted during Pack per §10; F2 selected atlas preserved by stable id
 across undo; F3 canvas-highlight re-derive; F5 missing-state; F6 focus cleared when its row is
@@ -1177,8 +1178,9 @@ the atlas & animation lists, sprites GROW — closes the T2 acceptance gap the 3
 exposed); #7 sort chips moved to their own row (P1.3 header overflow); #4 canvas highlight re-derived
 after any result rebind (undo-during-pack / repack), dead one-shot flag retired; #6 filter searches
 the effective rename; P1.1 scan cancel polled before opendir/each readdir (micro-tighten — a hang
-inside the syscall needs async I/O, U-04); #8 the cancel test now pins scan early-stop; #5 the bench
-contract verifies git-lfs pointer integrity (F17 was inert in CI). Pre-existing, not fixed
+inside the syscall needs cancellable/asynchronous I/O and belongs to U-02a, not the canvas packet);
+#8 the cancel test now pins scan early-stop; #5 the bench contract verifies git-lfs pointer
+integrity (F17 was inert in CI). Pre-existing, not fixed
 (origin/main): refresh returns before `mark_stale` on a second-fingerprint error.
 Round 5 (fifth external review — verdict **"merge with fixes"**: 4 confirmed + 1 plausible, all
 fixed): 2×P1 wrong-entity — a canvas-region click re-pins keyboard focus + Shift-anchor onto the
@@ -1187,19 +1189,25 @@ gui_state), and right-click moves keyboard focus to the clicked row; 2×P2 cance
 `tp_scan_classify` folds the exists+is_dir stat pair into one probe and the walk polls at entry
 (before the root stat) + before the final qsort (poll-count-pinned test); P2 layout (plausible →
 confirmed by arithmetic) — atlas/animation section caps are panel-relative (min(180, max(2 rows,
-30% of prev-frame panel bbox))) so a 300–500px window no longer starves the sprite vlist. Lead
+30% of prev-frame panel bbox))) as the initial short-window mitigation. Lead
 battery caught a gate-wait spin flake in `test_job_input_token` (counted 2e9 spin, no yield) —
 now a yield-per-spin genuine timeout. Pre-existing, noticed, NOT fixed: the Pack decode loop
-(`tp_pack.c`) does not poll cancel between path-image decodes (→ U-04 off-UI-thread scope), and
+(`tp_pack.c`) does not poll cancel between path-image decodes (→ U-02a cancellation hardening), and
 `stat` EACCES/EIO is indistinguishable from a missing source (silently counted missing — own
 follow-up packet).
+Round 6 (sixth external review — verdict **"merge with fixes"**): the capped atlas/animation
+sections now reserve the complete fixed-chrome/gap budget and two sprite rows before splitting the
+remainder; recycled vlist ids are gated by canonical row refs before accepting a double-click;
+canvas-region double-click performs a transformed-D4-aware zoom-to and preserves selection sync;
+the sort-chip test calls the production transition helper; and size-sort runs a real Pack and
+checks the production result-version/canonical-ref path.
 
 **T1 filter is per-atlas in U-02; the spec's project-wide "matches under their atlases" requires the
 unified tree and is deferred to U-03** (U-02 non-goal: "no structural tree change (that is U-03)").
 
 **Deferred to their own follow-up packets — U-02 is NOT complete while these are open:** **T4**
-(session persistence), T8 (thumbnails), T9 (async refresh), T10 (alias indicator), T11 (attribute
-filter/sort), T12 (copy region coords).
+(session persistence), T8 (thumbnails), T9 (async refresh), T10 (alias indicator), T11
+(attribute filter/sort), T12 (copy region coords).
 
 **Ordered bounded tasks.**
 
@@ -1223,6 +1231,44 @@ filter/sort), T12 (copy region coords).
 **Completion evidence.** GUI selftest state fixtures cover each utility; all interactions within budget on the U-01 fixture.
 
 **Non-goals / blockers.** No structural tree change (that is U-03); no operation-schema change.
+
+### U-02a — Cooperative scan/decode cancellation hardening
+
+**Goal / user outcome.** Cancelled Refresh and Pack work stops at the next safe source-I/O boundary,
+never publishes a partial result, and does not misrepresent a currently blocked platform syscall or
+single-image decode as synchronously interruptible.
+
+**Spec refs.** §6.1 (job cancellation ownership), §10/§10.6 (Pack job and parent-owned
+cancellation), §11.2–§11.4 (Refresh/source-runtime behavior), §61.1 (non-blocking refresh at owner
+scale).
+
+**Dependencies.** The Pack half depends on U-01a worker-owned input construction; the Refresh half
+depends on the U-02 task 9 async handoff. This is source-work hardening, not U-04
+two-level-canvas work. [core][gui]
+
+**Ordered bounded tasks.**
+
+1. Carry the shared cancellation token through Refresh scanning/materialization and Pack path-image
+   decode; poll at walk entry, around every scan boundary, and between image decodes. Return the
+   structured cancelled result without publishing a partial Pack result or replacing the last
+   successful preview; any incremental Refresh status remains runtime-only. [core]
+2. Make the cancellation boundary explicit: cooperative polling cannot preempt an `opendir`,
+   `readdir`, `stat`, file read, or one decoder invocation already blocked inside the platform or
+   codec call. Add a delayed/blocking I/O seam and, where the owner-scale responsiveness budget
+   requires a hard bound, move that unit behind the existing worker/timeout boundary or introduce a
+   narrow cancellable asynchronous backend without bypassing the shared filesystem/decoder facade.
+   [core]
+3. Add deterministic cancel tests for scan entry/mid-walk/final sort and for multi-image decode
+   before/between/after images; assert bounded handoff at the modeled blocking seam, no partial
+   publication, and unchanged output for the non-cancelled path. [core][gui]
+
+**Public/schema impact.** None; cancellation timing and structured job-result behavior only.
+
+**Completion evidence.** Refresh and Pack cancellation fault matrices pass in Debug/Release and the
+GUI selftest; owner-scale probes show no caller-thread scan/decode work; cancellation never changes
+project revision/dirty/history and never lands a partial Pack result or preview.
+
+**Non-goals / blockers.** No canvas/layout work and no scan-cache unification (B1-01 task 10).
 
 ### U-03 — Unified project tree (UX-B.1/B.2)
 
