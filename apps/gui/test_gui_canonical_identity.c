@@ -20,6 +20,7 @@
 #include "gui_state.h"
 
 #include "time/nt_time.h"
+#include "tp_core/tp_input.h"
 #include "tp_core/tp_scan.h"
 #include "tp_core/tp_journal.h"
 #include "tp_core/tp_build_worker.h"
@@ -228,6 +229,68 @@ void tearDown(void) {
     gui_project_shutdown();
     gui_scan_shutdown();
     remove_fixture_files();
+}
+
+void test_arbitrary_result_lookup_follows_displayed_sprite_order(void) {
+    tp_id128 left_id = tp_id128_nil();
+    tp_id128 right_id = tp_id128_nil();
+    left_id.bytes[0] = 0x11U;
+    right_id.bytes[0] = 0x22U;
+
+    char left_name[TP_PACK_INTERNAL_NAME_CAP];
+    char right_name[TP_PACK_INTERNAL_NAME_CAP];
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_pack_input_format_sprite_name(left_id, "shared.png", left_name,
+                                         sizeof left_name, NULL));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_pack_input_format_sprite_name(right_id, "shared.png", right_name,
+                                         sizeof right_name, NULL));
+
+    tp_sprite native_sprites[2] = {
+        {.name = left_name},
+        {.name = right_name},
+    };
+    tp_sprite preview_sprites[2] = {
+        {.name = right_name},
+        {.name = left_name},
+    };
+    const tp_result native = {
+        .sprites = native_sprites,
+        .sprite_count = 2,
+    };
+    const tp_result preview = {
+        .sprites = preview_sprites,
+        .sprite_count = 2,
+    };
+
+    TEST_ASSERT_EQUAL_INT(
+        0, gui_pack_find_sprite_ref_in_result(&native, left_id, "shared.png"));
+    TEST_ASSERT_EQUAL_INT(
+        1, gui_pack_find_sprite_ref_in_result(&preview, left_id, "shared.png"));
+    TEST_ASSERT_EQUAL_INT(
+        0, gui_pack_find_sprite_ref_in_result(&preview, right_id, "shared.png"));
+}
+
+void test_canvas_result_rebind_resets_double_click_identity(void) {
+    tp_result first = {0};
+    tp_result second = {0};
+    gui_canvas canvas = {0};
+    gui_canvas_double_click_ref click = {0};
+
+    TEST_ASSERT_FALSE(
+        gui_canvas_double_click_press(&click, &first, 0, false));
+    TEST_ASSERT_TRUE(click.valid);
+    TEST_ASSERT_EQUAL_PTR(&first, click.result);
+
+    gui_canvas_rebind_result(&canvas, &click, &second);
+
+    TEST_ASSERT_EQUAL_PTR(&second, canvas.result);
+    TEST_ASSERT_FALSE(click.valid);
+    TEST_ASSERT_NULL(click.result);
+    TEST_ASSERT_FALSE(
+        gui_canvas_double_click_press(&click, &second, 0, true));
 }
 
 void test_preview_result_rejects_source_refresh_after_job_capture(void) {
@@ -748,6 +811,8 @@ int main(int argc, char **argv) {
         return tp_build_worker_main();
     }
     UNITY_BEGIN();
+    RUN_TEST(test_arbitrary_result_lookup_follows_displayed_sprite_order);
+    RUN_TEST(test_canvas_result_rebind_resets_double_click_identity);
     RUN_TEST(test_rows_apply_renames_by_canonical_source_and_key);
     RUN_TEST(test_create_animation_preserves_both_canonical_selected_sprites);
     RUN_TEST(test_add_frames_preserves_both_canonical_selected_sprites);

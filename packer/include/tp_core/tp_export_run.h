@@ -123,6 +123,17 @@ typedef struct tp_export_report_target {
     bool ok;
 } tp_export_report_target;
 
+/* Typed admission result produced by the snapshot orchestration wrapper before
+ * any target runs. This distinguishes a valid source set containing no usable
+ * images from a source/input failure without status-message parsing. Direct
+ * tp_export_run_ex callers leave the field NOT_EVALUATED. */
+typedef enum tp_export_input_outcome {
+    TP_EXPORT_INPUT_NOT_EVALUATED = 0,
+    TP_EXPORT_INPUT_READY,
+    TP_EXPORT_INPUT_NO_USABLE_IMAGES,
+    TP_EXPORT_INPUT_FAILED
+} tp_export_input_outcome;
+
 /* Whole per-atlas run report. `pack_failed` is set when a pack/normalize/settings
  * error aborted the run before any target could write (nothing was produced -- the
  * caller maps this to a pack failure rather than a per-target export failure).
@@ -135,6 +146,7 @@ struct tp_export_report {
     int target_count;
     bool pack_failed;
     bool dry_run;
+    tp_export_input_outcome input_outcome;
 };
 
 /* Runs every enabled target of project->atlases[atlas_index] over `sprites`.

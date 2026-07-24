@@ -310,7 +310,9 @@ static void emit_target(cli_sb *sb, int depth, const tp_export_report_target *rt
  * on a different run is flagged by its own `pack_run` index. */
 static void emit_atlas(cli_sb *sb, int depth, const char *name, int sprite_count, int missing_sources,
                        const tp_export_report *report, const tp_export_notices *notices,
-                       const char *skip_notice_id, const char *note, bool dry_run) {
+                       const char *skip_notice_id, const char *note,
+                       tp_status error_status, const tp_error *error,
+                       bool dry_run) {
     bool af = true;
     cli_sb_putc(sb, '{');
     key(sb, depth + 1, &af, "name");
@@ -340,6 +342,22 @@ static void emit_atlas(cli_sb *sb, int depth, const char *name, int sprite_count
         cli_sb_str(sb, "}\n");
         cli_sb_indent(sb, depth + 1);
         cli_sb_putc(sb, ']');
+    }
+    if (error_status != TP_STATUS_OK) {
+        key(sb, depth + 1, &af, "error");
+        bool ef = true;
+        cli_sb_putc(sb, '{');
+        key(sb, depth + 2, &ef, "id");
+        cli_sb_json_str(sb, tp_status_id(error_status));
+        key(sb, depth + 2, &ef, "atlas");
+        cli_sb_json_str(sb, name);
+        key(sb, depth + 2, &ef, "message");
+        cli_sb_json_str(
+            sb, error && error->msg[0] ? error->msg
+                                      : tp_status_str(error_status));
+        cli_sb_str(sb, "\n");
+        cli_sb_indent(sb, depth + 1);
+        cli_sb_putc(sb, '}');
     }
     key(sb, depth + 1, &af, "pack_runs");
     cli_sb_int(sb, report ? report->run_count : 0);
@@ -557,6 +575,9 @@ int cmd_pack(const char *project_path, const char *opt_atlas, const char *opt_ta
         memset(&report, 0, sizeof report);
         const char *note = NULL;
         const char *skip_notice_id = NULL;
+        tp_status atlas_error_status = TP_STATUS_OK;
+        tp_error atlas_error = {0};
+        char note_buffer[384] = {0};
         bool ran = false;
 
         arena = tp_arena_create(0);
@@ -568,12 +589,20 @@ int cmd_pack(const char *project_path, const char *opt_atlas, const char *opt_ta
                 tp_status run_status = tp_export_snapshot_job_run_atlas_ex(
                     job, ai, arena, &notices, &report, NULL, &sprite_count,
                     &missing, &run_error);
-                ran = run_status != TP_STATUS_NOT_FOUND;
-                if (run_status == TP_STATUS_NOT_FOUND) {
+                ran = report.input_outcome == TP_EXPORT_INPUT_READY;
+                if (report.input_outcome ==
+                    TP_EXPORT_INPUT_NO_USABLE_IMAGES) {
                     note = "no usable images (skipped)";
                     skip_notice_id = "no_usable_images";
                 } else if (run_status != TP_STATUS_OK && report.target_count == 0) {
-                    note = "could not assemble sprites (input build failed)";
+                    atlas_error_status = run_status;
+                    atlas_error = run_error;
+                    (void)snprintf(
+                        note_buffer, sizeof note_buffer,
+                        "could not assemble sprites: %s",
+                        run_error.msg[0] ? run_error.msg
+                                         : tp_status_str(run_status));
+                    note = note_buffer;
                     had_pack_fail = true;
                 }
                 if (report.pack_failed) {
@@ -601,7 +630,8 @@ int cmd_pack(const char *project_path, const char *opt_atlas, const char *opt_ta
             cli_sb_indent(&sb, 2);
             emit_atlas(&sb, 2, atlas.name ? atlas.name : "", sprite_count,
                        missing, ran ? &report : NULL, ran ? &notices : NULL,
-                       skip_notice_id, note, dry_run);
+                       skip_notice_id, note, atlas_error_status, &atlas_error,
+                       dry_run);
         } else {
             print_atlas_human(atlas.name ? atlas.name : "", sprite_count, missing, ran ? &report : NULL, note, dry_run);
         }

@@ -31,6 +31,7 @@
 #include "gui_state.h"
 
 #include "tp_core/tp_build_worker.h"
+#include "tp_core/tp_input.h"
 #include "tp_core/tp_scan.h"
 
 #include "unity.h"
@@ -738,8 +739,8 @@ void test_view_focus_cleared_when_focused_row_filtered_out(void) {
 }
 
 /* 16. F9: folder collapse is keyed by stable SOURCE id and must survive an atlas round-trip. Two
- *     atlases each carry a folder source; collapsing atlas A's folder must not be pruned when atlas B
- *     is built (build_view only prunes on a SAME-atlas source mutation). */
+ *     atlases each carry a folder source; snapshot-wide pruning must retain atlas A's live source
+ *     while atlas B is displayed. */
 void test_view_collapse_survives_atlas_switch(void) {
     tp_id128 folder0 = {{0}};
     add_sources_and_build(&folder0, NULL); /* A0: folder @ src 0, solo @ src 1 */
@@ -1147,7 +1148,196 @@ void test_recycled_view_id_double_click_requires_same_canonical_row(void) {
         beta->source_id, beta->source_key, true));
 }
 
-/* 26. Region zoom uses transformed placed dimensions and centers that region
+/* 26. Focus-follow must reason about the actual viewport, not the vlist's
+ *     overscanned render window. With five complete rows visible and three
+ *     overscan rows, focus on row 7 is rendered but still below the viewport. */
+void test_focus_scroll_top_ignores_overscan_rows(void) {
+    TEST_ASSERT_EQUAL_INT(
+        3, gui_rows_focus_scroll_top(7, 0, 5));
+    TEST_ASSERT_EQUAL_INT(
+        -1, gui_rows_focus_scroll_top(4, 0, 5));
+    TEST_ASSERT_EQUAL_INT(
+        6, gui_rows_focus_scroll_top(6, 9, 5));
+}
+
+/* 27. A selected child can temporarily disappear from the projection under a
+ *     filter or collapse. When the view reveals it again, keyboard focus must
+ *     return to that selected row rather than remaining detached at -1. */
+void test_view_focus_returns_when_selected_row_is_revealed(void) {
+    tp_id128 folder_id = {{0}};
+    add_sources_and_build(&folder_id, NULL);
+    build_view();
+
+    const int alpha = find_row_by_name("alpha");
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, alpha);
+    s_sel_src = s_rows[alpha].src;
+    s_sel_child = s_rows[alpha].child;
+    s_focus_view = view_pos_of_row(alpha);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, s_focus_view);
+
+    gui_rows_set_filter("solo");
+    build_view();
+    TEST_ASSERT_EQUAL_INT(-1, s_focus_view);
+    gui_rows_set_filter("");
+    build_view();
+    TEST_ASSERT_EQUAL_INT(view_pos_of_row(alpha), s_focus_view);
+
+    gui_rows_toggle_collapsed(folder_id);
+    build_view();
+    TEST_ASSERT_EQUAL_INT(-1, s_focus_view);
+    gui_rows_toggle_collapsed(folder_id);
+    build_view();
+    TEST_ASSERT_EQUAL_INT(view_pos_of_row(alpha), s_focus_view);
+}
+
+/* 28. Collapse state is session-global across atlases, so pruning must compare
+ *     against the whole snapshot. Removing an atlas while another atlas is
+ *     displayed must discard the deleted atlas's retained source ids. */
+void test_view_collapse_prunes_sources_owned_by_deleted_atlas(void) {
+    tp_id128 deleted_folder_id = {{0}};
+    add_sources_and_build(&deleted_folder_id, NULL);
+    build_view();
+    gui_rows_toggle_collapsed(deleted_folder_id);
+    TEST_ASSERT_TRUE(gui_rows_is_collapsed(deleted_folder_id));
+
+    TEST_ASSERT_EQUAL_INT(1, gui_project_add_atlas());
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *kept_atlas =
+        tp_session_snapshot_atlas_at(snapshot, 1);
+    TEST_ASSERT_NOT_NULL(kept_atlas);
+    const tp_id128 kept_atlas_id = kept_atlas->id;
+    s_sel_atlas = 1;
+    build_rows();
+    build_view();
+
+    snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *deleted_atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(deleted_atlas);
+    TEST_ASSERT_TRUE(gui_project_remove_atlas(
+        deleted_atlas->id, tp_session_snapshot_revision(snapshot)));
+    TEST_ASSERT_TRUE(tp_id128_eq(
+        tp_session_snapshot_atlas_at(gui_project_snapshot(), 0)->id,
+        kept_atlas_id));
+
+    s_sel_atlas = 0;
+    build_rows();
+    build_view();
+    TEST_ASSERT_FALSE(gui_rows_is_collapsed(deleted_folder_id));
+}
+
+/* 29. Atlas and animation row ids are positional and can be recycled after
+ *     Undo. Double-click dispatch therefore validates the stable entity id. */
+void test_recycled_entity_double_click_requires_same_stable_id(void) {
+    gui_rows_entity_double_click_ref ref = {0};
+    tp_id128 a = {{1}};
+    tp_id128 b = {{2}};
+
+    TEST_ASSERT_FALSE(gui_rows_entity_double_click_press(&ref, a, false));
+    TEST_ASSERT_FALSE(gui_rows_entity_double_click_press(&ref, b, true));
+    TEST_ASSERT_FALSE(gui_rows_entity_double_click_press(&ref, b, false));
+    TEST_ASSERT_TRUE(gui_rows_entity_double_click_press(&ref, b, true));
+
+    gui_rows_entity_double_click_reset(&ref);
+    TEST_ASSERT_FALSE(gui_rows_entity_double_click_press(&ref, a, false));
+    TEST_ASSERT_TRUE(gui_rows_entity_double_click_press(&ref, a, true));
+}
+
+/* 30. Once Refresh invalidates source runtime state, any later fingerprint
+ *     failure must still make the retained preview stale. */
+void test_refresh_failure_after_invalidation_requires_stale_preview(void) {
+    TEST_ASSERT_FALSE(gui_actions_refresh_should_mark_stale(
+        TP_STATUS_OOM, false));
+    TEST_ASSERT_TRUE(gui_actions_refresh_should_mark_stale(
+        TP_STATUS_OOM, true));
+    TEST_ASSERT_TRUE(gui_actions_refresh_should_mark_stale(
+        TP_STATUS_OK, true));
+}
+
+/* 31. Region-to-row selection must resolve against the displayed result, not
+ *     an unrelated native result whose sprite ordering may differ. */
+void test_result_region_selection_uses_provided_result(void) {
+    add_sources_and_build(NULL, NULL);
+    build_view();
+    const int alpha = find_row_by_name("alpha");
+    const int beta = find_row_by_name("beta");
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, alpha);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, beta);
+
+    char alpha_name[TP_PACK_INTERNAL_NAME_CAP];
+    char beta_name[TP_PACK_INTERNAL_NAME_CAP];
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_pack_input_format_sprite_name(
+            s_rows[alpha].source_id, s_rows[alpha].source_key,
+            alpha_name, sizeof alpha_name, NULL));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_pack_input_format_sprite_name(
+            s_rows[beta].source_id, s_rows[beta].source_key,
+            beta_name, sizeof beta_name, NULL));
+    tp_sprite sprites[2] = {
+        {.name = beta_name},
+        {.name = alpha_name},
+    };
+    const tp_result displayed = {
+        .sprites = sprites,
+        .sprite_count = 2,
+    };
+
+    s_sel_src = -1;
+    s_sel_child = -1;
+    select_row_for_result_region(&displayed, 0);
+    TEST_ASSERT_EQUAL_INT(s_rows[beta].src, s_sel_src);
+    TEST_ASSERT_EQUAL_INT(s_rows[beta].child, s_sel_child);
+}
+
+/* 32. Primary tree selection maps against the displayed result, while a
+ *     folder/source primary clears any stale region outline. */
+void test_primary_row_mapping_uses_displayed_result_and_rejects_non_leaf(void) {
+    add_sources_and_build(NULL, NULL);
+    const int alpha = find_row_by_name("alpha");
+    const int beta = find_row_by_name("beta");
+    int folder = -1;
+    for (int i = 0; i < s_row_count; ++i) {
+        if (s_rows[i].is_folder) {
+            folder = i;
+            break;
+        }
+    }
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, alpha);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, beta);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, folder);
+
+    char alpha_name[TP_PACK_INTERNAL_NAME_CAP];
+    char beta_name[TP_PACK_INTERNAL_NAME_CAP];
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_pack_input_format_sprite_name(
+            s_rows[alpha].source_id, s_rows[alpha].source_key,
+            alpha_name, sizeof alpha_name, NULL));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_pack_input_format_sprite_name(
+            s_rows[beta].source_id, s_rows[beta].source_key,
+            beta_name, sizeof beta_name, NULL));
+    tp_sprite sprites[2] = {
+        {.name = beta_name},
+        {.name = alpha_name},
+    };
+    const tp_result displayed = {
+        .sprites = sprites,
+        .sprite_count = 2,
+    };
+    TEST_ASSERT_EQUAL_INT(
+        1, gui_rows_result_region_for_primary(&s_rows[alpha], &displayed));
+    TEST_ASSERT_EQUAL_INT(
+        -1, gui_rows_result_region_for_primary(&s_rows[folder], &displayed));
+    TEST_ASSERT_EQUAL_INT(
+        -1, gui_rows_result_region_for_primary(&s_rows[alpha], NULL));
+}
+
+/* 33. Region zoom uses transformed placed dimensions and centers that region
  *     in the current canvas without changing modes or requiring GL. */
 void test_canvas_zoom_to_sprite_centers_transformed_region(void) {
     tp_page page = {.w = 100, .h = 80};
@@ -1259,6 +1449,13 @@ int main(int argc, char **argv) {
     RUN_TEST(test_view_filter_finds_long_rename_beyond_label);
     RUN_TEST(test_left_section_caps_preserve_sprite_vlist_at_short_heights);
     RUN_TEST(test_recycled_view_id_double_click_requires_same_canonical_row);
+    RUN_TEST(test_focus_scroll_top_ignores_overscan_rows);
+    RUN_TEST(test_view_focus_returns_when_selected_row_is_revealed);
+    RUN_TEST(test_view_collapse_prunes_sources_owned_by_deleted_atlas);
+    RUN_TEST(test_recycled_entity_double_click_requires_same_stable_id);
+    RUN_TEST(test_refresh_failure_after_invalidation_requires_stale_preview);
+    RUN_TEST(test_result_region_selection_uses_provided_result);
+    RUN_TEST(test_primary_row_mapping_uses_displayed_result_and_rejects_non_leaf);
     RUN_TEST(test_canvas_zoom_to_sprite_centers_transformed_region);
     return UNITY_END();
 }

@@ -67,17 +67,20 @@ bool tp_scan_is_dir(const char *abs);
 bool tp_scan_exists(const char *abs);
 
 typedef enum tp_scan_kind {
-    TP_SCAN_KIND_MISSING = 0, /* NULL/empty, or the path cannot be stat'd */
+    TP_SCAN_KIND_MISSING = 0, /* absent, or the checked probe's error sentinel */
     TP_SCAN_KIND_DIRECTORY,   /* an existing directory (reparse points included) */
     TP_SCAN_KIND_FILE         /* an existing non-directory (regular/other/reparse) */
 } tp_scan_kind;
 
-/* One-stat source classification: folds tp_scan_exists + tp_scan_is_dir into a SINGLE
- * filesystem probe so a cancellable caller pays one stat, not two, between polls on a
- * slow/network mount. Outcomes are identical to the exists-then-is_dir pair -- MISSING
- * iff the path cannot be stat'd (or is NULL/empty), DIRECTORY iff the stat kind is a
- * directory (reparse or not -- the folder walk rejects a reparse root itself), else
- * FILE. Does not follow into the directory or read any entry. */
+/* Structured one-stat source classification. An absent path returns NOT_FOUND and
+ * sets *out to MISSING; permission, I/O, invalid-path, and other stat failures keep
+ * their distinct status instead of being collapsed into "missing". */
+tp_status tp_scan_classify_checked(const char *abs, tp_scan_kind *out,
+                                   tp_error *err);
+
+/* Compatibility value-only classification. Prefer the checked form whenever a
+ * caller must distinguish absence from an unreadable/unstatable path. Errors map
+ * to MISSING because this legacy API has no status channel. */
 tp_scan_kind tp_scan_classify(const char *abs);
 
 /* Stats one regular file through the same UTF-8 filesystem boundary used by

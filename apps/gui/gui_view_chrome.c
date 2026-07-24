@@ -57,6 +57,31 @@ enum {
  * declare-machinery working buffer for declare_context_menu below, chrome-local. */
 static nt_ui_menu_ctx_t s_ctx_menu;
 
+bool gui_view_chrome_any_menu_open(void) {
+    return s_ctx_state.open || s_file_state.open || s_edit_state.open ||
+           s_atlas_state.open || s_view_state.open || s_help_state.open;
+}
+
+bool gui_view_chrome_consume_escape(void) {
+    if (!gui_view_chrome_any_menu_open()) {
+        return false;
+    }
+    close_all_menus();
+    return true;
+}
+
+#ifdef NTPACKER_GUI_SELFTEST
+void gui_view_chrome_selftest_set_menubar_open(int index, bool open) {
+    nt_ui_menu_state_t *states[] = {
+        &s_file_state, &s_edit_state, &s_atlas_state, &s_view_state,
+        &s_help_state,
+    };
+    if (index >= 0 && index < (int)(sizeof states / sizeof states[0])) {
+        states[index]->open = open;
+    }
+}
+#endif
+
 /* Opens `url` in the OS default browser. Reusable helper (About link now; future notices/docs links
  * reuse it). Windows: ShellExecuteA (shell32 -- already linked via tinyfiledialogs). POSIX:
  * xdg-open/open, best-effort. Returns true if the open was dispatched. Chrome-only (the About modal

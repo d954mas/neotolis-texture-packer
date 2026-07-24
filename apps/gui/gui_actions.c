@@ -237,7 +237,12 @@ static const fp_entry *fp_find(const fp_entry *arr, int n, const char *abs) {
  * with NO UI/status/canvas/preview-stale side effects -- so it stays a pure, revision/dirty-preserving
  * computation shared by do_refresh (which adds the side effects) and the --bench-perf headless seam. */
 static tp_status refresh_diff_core(int *out_added, int *out_removed,
-                                   int *out_changed, tp_error *error) {
+                                   int *out_changed,
+                                   bool *out_sources_invalidated,
+                                   tp_error *error) {
+    if (out_sources_invalidated) {
+        *out_sources_invalidated = false;
+    }
     fp_entry *before = NULL;
     int bn = 0;
     int bc = 0;
@@ -248,6 +253,9 @@ static tp_status refresh_diff_core(int *out_added, int *out_removed,
     }
 
     gui_project_invalidate_sources(); /* publish the external runtime refresh */
+    if (out_sources_invalidated) {
+        *out_sources_invalidated = true;
+    }
 
     fp_entry *after = NULL;
     int an = 0;
@@ -290,6 +298,11 @@ static tp_status refresh_diff_core(int *out_added, int *out_removed,
     return TP_STATUS_OK;
 }
 
+bool gui_actions_refresh_should_mark_stale(tp_status status,
+                                           bool sources_invalidated) {
+    return status == TP_STATUS_OK || sources_invalidated;
+}
+
 /* F4: rescan all sources, diff, evict the canvas cache, mark preview stale (NOT dirty). */
 static void do_refresh(void) {
     /* Arm the reselect machinery BEFORE refresh_diff_core's gui_project_invalidate_sources() rebuilds the
@@ -300,8 +313,16 @@ static void do_refresh(void) {
     int added = 0;
     int removed = 0;
     int changed = 0;
+    bool sources_invalidated = false;
     tp_error error = {0};
-    if (refresh_diff_core(&added, &removed, &changed, &error) != TP_STATUS_OK) {
+    const tp_status status =
+        refresh_diff_core(&added, &removed, &changed, &sources_invalidated,
+                          &error);
+    if (status != TP_STATUS_OK) {
+        if (gui_actions_refresh_should_mark_stale(status,
+                                                  sources_invalidated)) {
+            gui_project_mark_stale();
+        }
         set_statusf_ex(STATUS_ERROR, "Refresh failed: %s", error.msg);
         return;
     }
@@ -318,8 +339,8 @@ static void do_refresh(void) {
 bool gui_actions_refresh_diff_headless(int *out_added, int *out_removed,
                                        int *out_changed) {
     tp_error error = {0};
-    return refresh_diff_core(out_added, out_removed, out_changed, &error) ==
-           TP_STATUS_OK;
+    return refresh_diff_core(out_added, out_removed, out_changed, NULL,
+                             &error) == TP_STATUS_OK;
 }
 
 // #endregion

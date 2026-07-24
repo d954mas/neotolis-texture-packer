@@ -34,8 +34,9 @@ tp_status tp_pack_input_format_sprite_name(tp_id128 source_id,
 /* Assembled pack input for one atlas. `descs` and each descriptor's `name`,
  * `path`, `source_key`, and `logical_name` are malloc-owned (free with
  * tp_pack_input_free), independent of the project -- the input outlives a
- * tp_project_destroy. `missing_sources` counts sources that resolved but do not
- * exist on disk (skipped, not fatal -- ux.md §3.7). */
+ * tp_project_destroy. `missing_sources` is retained for result ABI compatibility;
+ * strict Pack admission fails on an unavailable source, so successful newly-built
+ * inputs report zero. */
 typedef struct tp_pack_input {
     tp_pack_sprite_desc *descs;
     int count;
@@ -49,10 +50,11 @@ typedef struct tp_pack_input {
  * -- packing layout depends on input order (arch review R2). Each sprite's
  * per-sprite overrides are looked up by tp_sprite_export_key and encoded onto the
  * desc. Zero descs is not an error (the caller decides whether "empty" is fatal).
- * A source that resolves but is absent is counted as missing and skipped. Source
- * resolution, directory open/read, UTF-8/key normalization, path-bound, and OOM
- * failures propagate their precise tp_status/tp_error. On any error *out is left
- * empty (except a NULL `out`, which is untouched). */
+ * An absent, unreadable, or unstatable source fails the complete build rather than
+ * publishing a partial input. Source resolution, stat, directory open/read,
+ * UTF-8/key normalization, path-bound, and OOM failures propagate their precise
+ * tp_status/tp_error. On any error *out is left empty (except a NULL `out`, which
+ * is untouched). */
 tp_status tp_pack_input_build(const struct tp_project *p, int atlas_index, tp_pack_input *out, tp_error *err);
 
 /* Cancellable form of tp_pack_input_build: `cancel` is polled once per source, threaded

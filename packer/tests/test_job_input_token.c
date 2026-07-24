@@ -40,6 +40,16 @@ bool tp_scan__test_post_entry_gate_entered(void);
 void tp_scan__test_release_post_entry_gate(void);
 int tp_scan__test_visited_entries(void);
 
+/* Job-terminal gate: parks after Pack has privately produced its result but before
+ * the job publishes status/result/state. This makes the late-cancel boundary
+ * deterministic instead of relying on scheduler timing. */
+void tp_job__test_arm_before_terminal_gate(void);
+bool tp_job__test_before_terminal_gate_entered(void);
+void tp_job__test_release_before_terminal_gate(void);
+void tp_job__test_arm_after_cancel_observation_gate(void);
+bool tp_job__test_after_cancel_observation_gate_entered(void);
+void tp_job__test_release_after_cancel_observation_gate(void);
+
 void setUp(void) {}
 void tearDown(void) {}
 
@@ -69,6 +79,26 @@ static bool wait_for_post_entry_gate(void) {
         thrd_yield();
     }
     return tp_scan__test_post_entry_gate_entered();
+}
+
+static bool wait_for_before_terminal_gate(void) {
+    for (long spins = 0; spins < 10000000L; ++spins) {
+        if (tp_job__test_before_terminal_gate_entered()) {
+            return true;
+        }
+        thrd_yield();
+    }
+    return tp_job__test_before_terminal_gate_entered();
+}
+
+static bool wait_for_after_cancel_observation_gate(void) {
+    for (long spins = 0; spins < 10000000L; ++spins) {
+        if (tp_job__test_after_cancel_observation_gate_entered()) {
+            return true;
+        }
+        thrd_yield();
+    }
+    return tp_job__test_after_cancel_observation_gate_entered();
 }
 
 /* A minimal, valid 4x4 fully-opaque RGBA PNG (stb_image decodes it). A real pack
@@ -669,7 +699,151 @@ void test_folder_walk_cancels_mid_scan(void) {
 
     tp_session_job_result result;
     memset(&result, 0, sizeof result);
-    (void)tp_session_job_take_result(session, &result, &err); /* release the handle */
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_job_take_result(session, &result, &err));
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_CANCELLED, result.state);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_CANCELLED, result.status);
+    TEST_ASSERT_NULL(result.pack.arena);
+    TEST_ASSERT_NULL(result.pack.result);
+    TEST_ASSERT_TRUE(tp_id128_is_nil(result.pack.pack_input_hash));
+    tp_session_job_result_destroy(&result);
+    tp_session_destroy(session);
+    remove_scratch_tree(work_dir);
+}
+
+/* A cancel requested after a private Pack result exists but before terminal
+ * publication must produce one coherent CANCELLED outcome: cancelled status,
+ * no transferable arena/result/hash, and no accidental success publication. */
+void test_late_pack_cancel_has_coherent_terminal_result(void) {
+    tp_session *session = make_session();
+    const tp_id128 atlas = default_atlas_id(session);
+    char work_dir[1024];
+    job_scratch_dir(work_dir, sizeof work_dir);
+    tp_mkdirs(work_dir);
+    add_file_source(session, atlas, work_dir);
+
+    tp_error err = {{0}};
+    const tp_pack_job_request request = {
+        .atlas_id = atlas,
+        .work_dir = work_dir,
+        .preview_exporter_id = NULL,
+    };
+    tp_job__test_arm_before_terminal_gate();
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_pack_job_start(session, &request, &err));
+    TEST_ASSERT_TRUE_MESSAGE(
+        wait_for_before_terminal_gate(),
+        "pack worker did not reach the pre-terminal publication gate");
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_job_cancel(session, &err));
+    tp_job__test_release_before_terminal_gate();
+
+    tp_session_job_progress progress;
+    do {
+        memset(&progress, 0, sizeof progress);
+        TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                              tp_session_job_poll(session, &progress, &err));
+    } while (progress.state == TP_SESSION_JOB_RUNNING);
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_CANCELLED, progress.state);
+
+    tp_session_job_result result;
+    memset(&result, 0, sizeof result);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_job_take_result(session, &result, &err));
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_CANCELLED, result.state);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_CANCELLED, result.status);
+    TEST_ASSERT_NULL(result.pack.arena);
+    TEST_ASSERT_NULL(result.pack.result);
+    TEST_ASSERT_TRUE(tp_id128_is_nil(result.pack.pack_input_hash));
+
+    tp_session_job_result_destroy(&result);
+    tp_session_destroy(session);
+    remove_scratch_tree(work_dir);
+}
+
+/* The worker's last cancellation observation and terminal publication must be
+ * one handshake. A cancel accepted inside that former race window must still
+ * own the terminal outcome. */
+void test_cancel_after_last_observation_wins_terminal_publication(void) {
+    tp_session *session = make_session();
+    const tp_id128 atlas = default_atlas_id(session);
+    char work_dir[1024];
+    job_scratch_dir(work_dir, sizeof work_dir);
+    tp_mkdirs(work_dir);
+    add_file_source(session, atlas, work_dir);
+
+    tp_error err = {{0}};
+    const tp_pack_job_request request = {
+        .atlas_id = atlas,
+        .work_dir = work_dir,
+        .preview_exporter_id = NULL,
+    };
+    tp_job__test_arm_after_cancel_observation_gate();
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_pack_job_start(session, &request, &err));
+    TEST_ASSERT_TRUE_MESSAGE(
+        wait_for_after_cancel_observation_gate(),
+        "pack worker did not reach the post-observation terminal gate");
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_session_job_cancel(session, &err));
+    tp_job__test_release_after_cancel_observation_gate();
+
+    tp_session_job_progress progress;
+    do {
+        memset(&progress, 0, sizeof progress);
+        TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                              tp_session_job_poll(session, &progress, &err));
+    } while (progress.state == TP_SESSION_JOB_RUNNING);
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_CANCELLED, progress.state);
+
+    tp_session_job_result result;
+    memset(&result, 0, sizeof result);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_job_take_result(session, &result, &err));
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_CANCELLED, result.state);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_CANCELLED, result.status);
+    TEST_ASSERT_NULL(result.pack.arena);
+    TEST_ASSERT_NULL(result.pack.result);
+    TEST_ASSERT_TRUE(tp_id128_is_nil(result.pack.pack_input_hash));
+    tp_session_job_result_destroy(&result);
+    tp_session_destroy(session);
+    remove_scratch_tree(work_dir);
+}
+
+/* Once terminal publication has claimed the outcome, cancellation must report
+ * that it was not accepted instead of returning a misleading success. */
+void test_cancel_after_terminal_publication_is_rejected(void) {
+    tp_session *session = make_session();
+    const tp_id128 atlas = default_atlas_id(session);
+    char work_dir[1024];
+    job_scratch_dir(work_dir, sizeof work_dir);
+    tp_mkdirs(work_dir);
+    add_file_source(session, atlas, work_dir);
+
+    tp_error err = {{0}};
+    const tp_pack_job_request request = {
+        .atlas_id = atlas,
+        .work_dir = work_dir,
+        .preview_exporter_id = NULL,
+    };
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_pack_job_start(session, &request, &err));
+    tp_session_job_progress progress;
+    do {
+        memset(&progress, 0, sizeof progress);
+        TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                              tp_session_job_poll(session, &progress, &err));
+    } while (progress.state == TP_SESSION_JOB_RUNNING);
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_SUCCEEDED, progress.state);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_session_job_cancel(session, &err));
+
+    tp_session_job_result result;
+    memset(&result, 0, sizeof result);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_job_take_result(session, &result, &err));
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_SUCCEEDED, result.state);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, result.status);
+    TEST_ASSERT_NOT_NULL(result.pack.arena);
+    TEST_ASSERT_NOT_NULL(result.pack.result);
     tp_session_job_result_destroy(&result);
     tp_session_destroy(session);
     remove_scratch_tree(work_dir);
@@ -691,5 +865,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_empty_atlas_pack_fails_async_not_at_start);
     RUN_TEST(test_folder_source_walk_runs_on_worker);
     RUN_TEST(test_folder_walk_cancels_mid_scan);
+    RUN_TEST(test_late_pack_cancel_has_coherent_terminal_result);
+    RUN_TEST(test_cancel_after_last_observation_wins_terminal_publication);
+    RUN_TEST(test_cancel_after_terminal_publication_is_rejected);
     return UNITY_END();
 }

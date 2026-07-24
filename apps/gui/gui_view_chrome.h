@@ -4,7 +4,8 @@
 /* Chrome view: the docked File/Edit/View/Help menu bar (+ its four drop-down menus), the row/canvas
  * right-click context menu, the hover-tooltip passes (per-frame truncated-row tooltips + the fixed
  * toolbar/strip icon-button tooltips), and the three modals (unsaved-changes confirm, About, Export).
- * Declare-only: exposes only the entry points frame() calls, plus close_menubar_menus (see below).
+ * Exposes the frame declaration entry points, menu close operations, and one
+ * read-only menu-open query used by shell keyboard routing.
  *
  * close_menubar_menus is chrome-owned but cross-view-consumed: gui_view_lists.c/gui_view_settings.c/
  * gui_view_canvas.c each call it on their row/canvas right-click trigger (a right-click while a
@@ -27,7 +28,7 @@ extern "C" {
 /* Docked top menu bar: File/Edit/View/Help buttons + the project name/dirty-dot on the right. */
 void declare_menubar(nt_ui_context_t *ctx);
 
-/* The four File/Edit/View/Help drop-down menus (declared every frame; items no-op while closed). */
+/* The File/Edit/Atlas/View/Help drop-down menus (declared every frame; items no-op while closed). */
 void declare_menus(nt_ui_context_t *ctx);
 
 /* Row/canvas right-click context menu (ux.md §3.3e): items depend on which row armed it. */
@@ -60,6 +61,19 @@ void close_all_menus(void);
 /* Closes only the File/Edit/View/Help menubar menus (not the context menu). The sanctioned
  * cross-view surface -- see the header comment above; gui_shell.h re-declares this one. */
 void close_menubar_menus(void);
+
+/* True while either the shared context menu or any menubar dropdown owns
+ * keyboard navigation. Global/list handlers must return while this is true. */
+bool gui_view_chrome_any_menu_open(void);
+
+/* Closes and consumes Escape when any menu is open. Call before non-menu
+ * Escape fallbacks so one key press cannot mutate unrelated view state. */
+bool gui_view_chrome_consume_escape(void);
+
+#ifdef NTPACKER_GUI_SELFTEST
+/* Test-only state driver: index order is File/Edit/Atlas/View/Help. */
+void gui_view_chrome_selftest_set_menubar_open(int index, bool open);
+#endif
 
 #ifdef __cplusplus
 }

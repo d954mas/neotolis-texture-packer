@@ -116,11 +116,33 @@ float gui_rows_left_section_cap(float panel_height, float ui_scale,
                                 bool filter_visible);
 void gui_rows_sort_chip_click(row_sort_key clicked);
 
+/* Returns the row that should become the viewport top to make `focus_row`
+ * fully visible, or -1 when it is already inside the ACTUAL (non-overscanned)
+ * viewport. `visible_rows` counts complete rows. */
+int gui_rows_focus_scroll_top(int focus_row, int first_visible_row,
+                              int visible_rows);
+
 /* nt_ui_vlist recycles ids by visible slot. A double-click is actionable only
  * when the canonical row ref matches the preceding press. */
 void gui_rows_double_click_reset(void);
 bool gui_rows_double_click_press(tp_id128 source_id, const char *source_key,
                                  bool engine_double_clicked);
+
+/* Atlas/animation list row ids are positional. Keep their double-click
+ * identity in caller-owned refs keyed by the entity's stable id. */
+typedef struct gui_rows_entity_double_click_ref {
+    tp_id128 entity_id;
+    bool valid;
+} gui_rows_entity_double_click_ref;
+void gui_rows_entity_double_click_reset(gui_rows_entity_double_click_ref *ref);
+bool gui_rows_entity_double_click_press(gui_rows_entity_double_click_ref *ref,
+                                        tp_id128 entity_id,
+                                        bool engine_double_clicked);
+
+/* Pure canonical mapping for view-owned canvas synchronization. Returns the
+ * displayed result region for a leaf row, or -1 for non-leaf/unmatched rows. */
+int gui_rows_result_region_for_primary(const sprite_row *row,
+                                       const tp_result *result);
 
 /* Folder-source disclosure (keyed by stable source id; children hidden when collapsed). */
 void gui_rows_toggle_collapsed(tp_id128 source_id);
@@ -166,7 +188,10 @@ gui_rows_bench_counters gui_rows_bench_get_counters(void);
 void gui_rows_bench_shutdown(void);
 #endif
 
-/* Selects the sprite-tree row matching a packed-atlas region (region -> row selection sync). */
+/* Selects the sprite-tree row matching a region in the explicitly displayed
+ * result. The native wrapper remains for callers that intentionally use the
+ * selected atlas's native pack result. */
+void select_row_for_result_region(const tp_result *result, int region_idx);
 void select_row_for_region(int region_idx);
 
 /* --- selection preservation across Undo/Redo (U-02 T5) ---

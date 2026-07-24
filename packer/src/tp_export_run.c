@@ -702,10 +702,25 @@ tp_status tp_export_snapshot_job_run_atlas_ex(tp_export_snapshot_job *job,
         return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
                             "export snapshot atlas index is out of range");
     }
+    if (report) {
+        memset(report, 0, sizeof *report);
+    }
+    if (out_pack_runs) {
+        *out_pack_runs = 0;
+    }
+    if (out_sprite_count) {
+        *out_sprite_count = 0;
+    }
+    if (out_missing_sources) {
+        *out_missing_sources = 0;
+    }
     const tp_project_atlas *atlas = &job->project->atlases[atlas_index];
     tp_pack_input input;
     tp_status status = tp_pack_input_build(job->project, atlas_index, &input, err);
     if (status != TP_STATUS_OK) {
+        if (report) {
+            report->input_outcome = TP_EXPORT_INPUT_FAILED;
+        }
         return status;
     }
     if (out_missing_sources) {
@@ -715,9 +730,15 @@ tp_status tp_export_snapshot_job_run_atlas_ex(tp_export_snapshot_job *job,
         *out_sprite_count = input.count;
     }
     if (input.count == 0) {
+        if (report) {
+            report->input_outcome = TP_EXPORT_INPUT_NO_USABLE_IMAGES;
+        }
         tp_pack_input_free(&input);
         return tp_error_set(err, TP_STATUS_NOT_FOUND,
                             "atlas has no usable images");
+    }
+    if (report) {
+        report->input_outcome = TP_EXPORT_INPUT_READY;
     }
     for (int ti = 0; !job->dry_run && ti < atlas->target_count; ++ti) {
         if (!atlas->targets[ti].enabled) {
@@ -739,6 +760,11 @@ tp_status tp_export_snapshot_job_run_atlas_ex(tp_export_snapshot_job *job,
     status = tp_export_run_ex(job->project, atlas_index, input.descs, input.count,
                               job->work_dir, arena, notices, out_pack_runs,
                               report || job->dry_run ? &run_opts : NULL, err);
+    /* tp_export_run_ex initializes its report from scratch; restore the already
+     * completed snapshot-admission result after that lower-layer reset. */
+    if (report) {
+        report->input_outcome = TP_EXPORT_INPUT_READY;
+    }
     tp_pack_input_free(&input);
     return status;
 }

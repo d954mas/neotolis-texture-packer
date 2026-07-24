@@ -8,6 +8,7 @@
 #include "gui_pack.h"
 #include "gui_left_layout.h"
 
+#include "tp_core/tp_input.h"
 #include "tp_core/tp_names.h" /* canonical key / natural order / common prefix (op layer) */
 
 #include <limits.h>
@@ -613,16 +614,13 @@ static char *s_double_click_source_key;
 static tp_id128 *s_collapsed;
 static int s_collapsed_count;
 static int s_collapsed_cap;
-/* F9: the atlas id the collapse set was last built/pruned against. collapsed_prune_missing drops
- * collapse ids ABSENT from the current atlas's rows, so it must run only on a SAME-ATLAS source
- * mutation -- never on an atlas switch (which would forget the other atlas's collapse state). */
-static tp_id128 s_collapse_prune_atlas_id;
 
 /* Bumped on any view-control change; part of the view cache key alongside the row generation. */
 static uint64_t s_view_epoch = 1;
 static bool s_view_cache_valid;
 static uint64_t s_view_cache_row_generation;
 static uint64_t s_view_cache_epoch;
+static bool s_focus_reveal_pending;
 
 /* Reused per-frame scratch (grow-only, freed in shutdown): one span per source row + a child buffer. */
 typedef struct view_span {
@@ -853,6 +851,21 @@ void gui_rows_sort_chip_click(row_sort_key clicked) {
     gui_rows_set_sort(key, descending, warn_first);
 }
 
+int gui_rows_focus_scroll_top(int focus_row, int first_visible_row,
+                              int visible_rows) {
+    if (focus_row < 0 || first_visible_row < 0 || visible_rows <= 0) {
+        return -1;
+    }
+    if (focus_row < first_visible_row) {
+        return focus_row;
+    }
+    if (focus_row >= first_visible_row + visible_rows) {
+        const int top = focus_row - visible_rows + 1;
+        return top > 0 ? top : 0;
+    }
+    return -1;
+}
+
 void gui_rows_double_click_reset(void) {
     free(s_double_click_source_key);
     s_double_click_source_key = NULL;
@@ -877,6 +890,49 @@ bool gui_rows_double_click_press(tp_id128 source_id, const char *source_key,
     s_double_click_source_id = source_id;
     s_double_click_ref_valid = !tp_id128_is_nil(source_id);
     return engine_double_clicked && same_ref;
+}
+
+void gui_rows_entity_double_click_reset(gui_rows_entity_double_click_ref *ref) {
+    if (!ref) {
+        return;
+    }
+    ref->entity_id = tp_id128_nil();
+    ref->valid = false;
+}
+
+bool gui_rows_entity_double_click_press(gui_rows_entity_double_click_ref *ref,
+                                        tp_id128 entity_id,
+                                        bool engine_double_clicked) {
+    if (!ref) {
+        return false;
+    }
+    const bool same_ref =
+        ref->valid && tp_id128_eq(ref->entity_id, entity_id);
+    ref->entity_id = entity_id;
+    ref->valid = !tp_id128_is_nil(entity_id);
+    return engine_double_clicked && same_ref;
+}
+
+int gui_rows_result_region_for_primary(const sprite_row *row,
+                                       const tp_result *result) {
+    if (!row || !result || row->is_folder || row->missing ||
+        !row->sprite_name || row->sprite_name[0] == '\0' ||
+        !row->source_key || row->source_key[0] == '\0') {
+        return -1;
+    }
+    char canonical_name[TP_PACK_INTERNAL_NAME_CAP];
+    if (tp_pack_input_format_sprite_name(
+            row->source_id, row->source_key, canonical_name,
+            sizeof canonical_name, NULL) != TP_STATUS_OK) {
+        return -1;
+    }
+    for (int i = 0; i < result->sprite_count; ++i) {
+        const char *packed_name = result->sprites[i].name;
+        if (packed_name && strcmp(packed_name, canonical_name) == 0) {
+            return i;
+        }
+    }
+    return -1;
 }
 
 bool gui_rows_is_collapsed(tp_id128 source_id) {
@@ -912,14 +968,31 @@ void gui_rows_toggle_collapsed(tp_id128 source_id) {
     s_view_epoch++;
 }
 
-/* Drop collapse state for folder sources that no longer exist (removed, or rescanned away). Keeps
- * s_collapsed from accumulating stale ids across a session. O(collapsed * rows); both are tiny. */
+/* Drop collapse state for folder source owners that no longer exist anywhere in
+ * the current snapshot. Collapse state spans atlas switches, so comparing only
+ * against the displayed atlas would either forget live off-screen folders or
+ * retain ids from deleted atlases forever. */
 static void collapsed_prune_missing(void) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const int atlas_count =
+        snapshot ? tp_session_snapshot_atlas_count(snapshot) : 0;
     for (int i = 0; i < s_collapsed_count;) {
         bool present = false;
-        for (int r = 0; r < s_row_count && !present; ++r) {
-            present = s_rows[r].is_source && s_rows[r].is_folder &&
-                      tp_id128_eq(s_rows[r].source_id, s_collapsed[i]);
+        for (int ai = 0; ai < atlas_count && !present; ++ai) {
+            const tp_snapshot_atlas *atlas =
+                tp_session_snapshot_atlas_at(snapshot, ai);
+            if (!atlas) {
+                continue;
+            }
+            for (int si = 0; si < atlas->source_count; ++si) {
+                const tp_snapshot_source *source =
+                    tp_session_snapshot_source_at(snapshot, atlas->id, si);
+                if (source && source->kind == TP_SNAPSHOT_SOURCE_FOLDER &&
+                    tp_id128_eq(source->id, s_collapsed[i])) {
+                    present = true;
+                    break;
+                }
+            }
         }
         if (present) {
             ++i;
@@ -937,6 +1010,13 @@ static void collapsed_prune_missing(void) {
  * view-only re-pin only covers reorders where the row model itself is unchanged. */
 static void focus_sync_to_selection(void);
 
+static bool row_carries_primary(const sprite_row *row) {
+    return row &&
+           (row->is_source
+                ? (s_sel_src == row->src && s_sel_child == -1)
+                : (s_sel_src == row->src && s_sel_child == row->child));
+}
+
 void build_view(void) {
     if (s_view_cache_valid &&
         s_view_cache_row_generation == s_row_cache_generation &&
@@ -952,19 +1032,18 @@ void build_view(void) {
         (rows_unchanged && s_focus_view >= 0 && s_focus_view < s_view_count)
             ? s_view[s_focus_view]
             : -1;
+    const bool keep_focus_is_primary =
+        keep_focus_row >= 0 &&
+        row_carries_primary(&s_rows[keep_focus_row]);
     const int keep_anchor_row =
         (rows_unchanged && s_sel_anchor_row >= 0 && s_sel_anchor_row < s_view_count)
             ? s_view[s_sel_anchor_row]
             : -1;
-    if (!rows_unchanged &&
-        tp_id128_eq(s_row_cache_atlas_id, s_collapse_prune_atlas_id)) {
-        /* SAME atlas as the last build + the row model changed -> a source mutation: forget collapse of
-         * vanished folders. An atlas SWITCH (id differs) must NOT prune, or B's build would drop A's
-         * collapse (F9). A collapsed id for a folder removed while its atlas was off-screen lingers
-         * harmlessly -- a stable id never matches a row. */
+    if (!rows_unchanged) {
+        /* A structural rebuild is the pruning boundary. The snapshot-wide scan
+         * preserves live off-screen folders while dropping deleted owners. */
         collapsed_prune_missing();
     }
-    s_collapse_prune_atlas_id = s_row_cache_atlas_id; /* remember which atlas this view built for */
     s_view_count = 0;
     s_view_cache_valid = true;
     s_view_cache_row_generation = s_row_cache_generation;
@@ -1072,6 +1151,9 @@ void build_view(void) {
         }
         if (!found) {
             s_focus_view = -1;
+            if (keep_focus_is_primary) {
+                s_focus_reveal_pending = true;
+            }
         }
     }
     if (keep_anchor_row >= 0) {
@@ -1096,7 +1178,7 @@ void build_view(void) {
      * corrected selection, so it self-corrects; on a rename/repack (no revalidate) the selection is
      * unchanged, so focus follows the moved sprite. The view-only (rows_unchanged) re-pin above is left
      * untouched. */
-    if (!rows_unchanged) {
+    if (!rows_unchanged || s_focus_reveal_pending) {
         focus_sync_to_selection();
     }
 }
@@ -1188,7 +1270,6 @@ void gui_rows_shutdown(void) {
     s_collapsed = NULL;
     s_collapsed_count = 0;
     s_collapsed_cap = 0;
-    s_collapse_prune_atlas_id = tp_id128_nil();
     free(s_spans);
     s_spans = NULL;
     s_spans_cap = 0;
@@ -1204,6 +1285,7 @@ void gui_rows_shutdown(void) {
     s_view_cache_valid = false;
     s_view_cache_row_generation = 0U;
     s_view_cache_epoch = 0U;
+    s_focus_reveal_pending = false;
 
     free(s_override_index);
     s_override_index = NULL;
@@ -1249,18 +1331,27 @@ void gui_rows_bench_shutdown(void) {
 // #endregion
 
 // #region canvas region -> row selection sync
-/* Selects the sprite-tree row matching a canvas region by canonical source/key. */
-void select_row_for_region(int region_idx) {
-    const tp_result *r = gui_pack_result(s_sel_atlas);
-    if (!r || region_idx < 0 || region_idx >= r->sprite_count) {
+/* Selects the sprite-tree row matching a displayed result region by the
+ * canonical packed name encoded from {source_id, source_key}. */
+void select_row_for_result_region(const tp_result *result, int region_idx) {
+    if (!result || region_idx < 0 || region_idx >= result->sprite_count) {
+        return;
+    }
+    const char *packed_name = result->sprites[region_idx].name;
+    if (!packed_name) {
         return;
     }
     for (int i = 0; i < s_row_count; i++) {
-        if (!s_rows[i].is_folder && s_rows[i].source_key &&
-            s_rows[i].source_key[0] != '\0' &&
-            gui_pack_sprite_matches_ref(s_sel_atlas, region_idx,
-                                        s_rows[i].source_id,
-                                        s_rows[i].source_key)) {
+        const sprite_row *row = &s_rows[i];
+        if (row->is_folder || !row->source_key ||
+            row->source_key[0] == '\0') {
+            continue;
+        }
+        char canonical_name[TP_PACK_INTERNAL_NAME_CAP];
+        if (tp_pack_input_format_sprite_name(
+                row->source_id, row->source_key, canonical_name,
+                sizeof canonical_name, NULL) == TP_STATUS_OK &&
+            strcmp(packed_name, canonical_name) == 0) {
             s_sel_src = s_rows[i].src;
             s_sel_child = s_rows[i].child;
             s_sel_missing = false;
@@ -1277,6 +1368,10 @@ void select_row_for_region(int region_idx) {
             return;
         }
     }
+}
+
+void select_row_for_region(int region_idx) {
+    select_row_for_result_region(gui_pack_result(s_sel_atlas), region_idx);
 }
 // #endregion
 
@@ -1298,6 +1393,7 @@ static bool row_ref_present(tp_id128 source_id, const char *source_key) {
  * filtered out) or nothing is selected; focus_clamp then restarts nav from a list edge. */
 static void focus_sync_to_selection(void) {
     s_focus_view = -1;
+    s_focus_reveal_pending = false;
     if (s_sel_src < 0) {
         return;
     }
@@ -1311,6 +1407,7 @@ static void focus_sync_to_selection(void) {
             return;
         }
     }
+    s_focus_reveal_pending = true;
 }
 
 void gui_selection_capture_reselect(void) {

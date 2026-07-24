@@ -658,6 +658,9 @@ typedef struct {
     int cancel_after;
 } scan_cancel_ctx;
 
+void tp_scan__test_reset_sort_finished(void);
+bool tp_scan__test_sort_finished(void);
+
 static bool scan_cancel_after_n(void *ctx) {
     scan_cancel_ctx *c = (scan_cancel_ctx *)ctx;
     return ++c->polls > c->cancel_after;
@@ -755,6 +758,31 @@ void test_cancellable_scan_polls_entry_and_before_sort(void) {
         "the entry poll must abort before the walk reads any entry");
     tp_scan_free(&entry);
 }
+
+/* Cancellation may arrive while qsort is running. The test seam reports when
+ * sorting has completed; the token stays false through every earlier poll and
+ * becomes true only after qsort, requiring one final poll before publication. */
+static bool cancel_after_sort(void *ctx) {
+    (void)ctx;
+    return tp_scan__test_sort_finished();
+}
+
+void test_cancellable_scan_polls_after_sort_before_publication(void) {
+    tp_scan__test_reset_sort_finished();
+    const tp_cancel_token token = {cancel_after_sort, NULL};
+    tp_scan_result result = {
+        .entries = (tp_scan_entry *)(uintptr_t)1U,
+        .count = 7,
+    };
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_CANCELLED,
+        tp_scan_dir_cancellable(g_root, &result, &token, &error), error.msg);
+    TEST_ASSERT_TRUE(tp_scan__test_sort_finished());
+    TEST_ASSERT_NULL(result.entries);
+    TEST_ASSERT_EQUAL_INT(0, result.count);
+    TEST_ASSERT_NOT_NULL(strstr(error.msg, "cancel"));
+}
 // #endregion
 
 int main(int argc, char **argv) {
@@ -769,6 +797,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_fixture_walk);
     RUN_TEST(test_cancellable_scan_stops_mid_walk);
     RUN_TEST(test_cancellable_scan_polls_entry_and_before_sort);
+    RUN_TEST(test_cancellable_scan_polls_after_sort_before_publication);
     RUN_TEST(test_is_dir_and_exists);
     RUN_TEST(test_visit_dir_streams_matching_names);
 #ifndef _WIN32

@@ -25,12 +25,19 @@ typedef struct tp_job_export_atlas {
     int enabled_targets;
 } tp_job_export_atlas;
 
+typedef enum tp_job_terminal_claim {
+    TP_JOB_TERMINAL_OPEN = 0,
+    TP_JOB_TERMINAL_CANCEL_REQUESTED,
+    TP_JOB_TERMINAL_CLAIMED
+} tp_job_terminal_claim;
+
 typedef struct tp_live_job {
     tp_session_owned_job owner;
     tp_session_job_kind kind;
     tp_session *session;
     _Atomic int state;
     _Atomic bool cancelled;
+    _Atomic int terminal_claim;
     _Atomic int current;
     int total;
     bool thread_started;
@@ -61,6 +68,65 @@ typedef struct tp_live_job {
     tp_session_export_job_result export_result;
 } tp_live_job;
 
+static atomic_int s_before_terminal_gate_armed;
+static atomic_int s_before_terminal_gate_entered;
+static atomic_int s_before_terminal_gate_released;
+static atomic_int s_after_cancel_observation_gate_armed;
+static atomic_int s_after_cancel_observation_gate_entered;
+static atomic_int s_after_cancel_observation_gate_released;
+
+void tp_job__test_arm_before_terminal_gate(void) {
+    atomic_store(&s_before_terminal_gate_entered, 0);
+    atomic_store(&s_before_terminal_gate_released, 0);
+    atomic_store(&s_before_terminal_gate_armed, 1);
+}
+
+bool tp_job__test_before_terminal_gate_entered(void) {
+    return atomic_load(&s_before_terminal_gate_entered) != 0;
+}
+
+void tp_job__test_release_before_terminal_gate(void) {
+    atomic_store(&s_before_terminal_gate_armed, 0);
+    atomic_store(&s_before_terminal_gate_released, 1);
+}
+
+static void job_before_terminal_gate_wait(void) {
+    if (atomic_load(&s_before_terminal_gate_armed) == 0) {
+        return;
+    }
+    atomic_store(&s_before_terminal_gate_armed, 0);
+    atomic_store(&s_before_terminal_gate_entered, 1);
+    while (atomic_load(&s_before_terminal_gate_released) == 0) {
+        thrd_yield();
+    }
+}
+
+void tp_job__test_arm_after_cancel_observation_gate(void) {
+    atomic_store(&s_after_cancel_observation_gate_entered, 0);
+    atomic_store(&s_after_cancel_observation_gate_released, 0);
+    atomic_store(&s_after_cancel_observation_gate_armed, 1);
+}
+
+bool tp_job__test_after_cancel_observation_gate_entered(void) {
+    return atomic_load(&s_after_cancel_observation_gate_entered) != 0;
+}
+
+void tp_job__test_release_after_cancel_observation_gate(void) {
+    atomic_store(&s_after_cancel_observation_gate_armed, 0);
+    atomic_store(&s_after_cancel_observation_gate_released, 1);
+}
+
+static void job_after_cancel_observation_gate_wait(void) {
+    if (atomic_load(&s_after_cancel_observation_gate_armed) == 0) {
+        return;
+    }
+    atomic_store(&s_after_cancel_observation_gate_armed, 0);
+    atomic_store(&s_after_cancel_observation_gate_entered, 1);
+    while (atomic_load(&s_after_cancel_observation_gate_released) == 0) {
+        thrd_yield();
+    }
+}
+
 static double job_now_ms(void) {
 #ifdef _WIN32
     LARGE_INTEGER frequency;
@@ -87,9 +153,41 @@ static char *job_strdup(const char *text) {
     return copy;
 }
 
+/* Cancellation and terminal completion contend for one private claim. The
+ * externally visible state remains RUNNING until the worker has filled every
+ * result field, so poll/take never race partially-published terminal data. */
+static bool job_request_cancel(tp_live_job *job) {
+    int expected = TP_JOB_TERMINAL_OPEN;
+    if (!atomic_compare_exchange_strong_explicit(
+            &job->terminal_claim, &expected,
+            TP_JOB_TERMINAL_CANCEL_REQUESTED, memory_order_acq_rel,
+            memory_order_acquire)) {
+        return false;
+    }
+    atomic_store_explicit(&job->cancelled, true, memory_order_release);
+    return true;
+}
+
+/* Returns true iff an accepted cancellation owns the terminal outcome. Once
+ * this function claims completion, later cancel calls are rejected. */
+static bool job_claim_terminal(tp_live_job *job) {
+    int expected = TP_JOB_TERMINAL_OPEN;
+    if (atomic_compare_exchange_strong_explicit(
+            &job->terminal_claim, &expected, TP_JOB_TERMINAL_CLAIMED,
+            memory_order_acq_rel, memory_order_acquire)) {
+        return false;
+    }
+    if (expected == TP_JOB_TERMINAL_CANCEL_REQUESTED) {
+        atomic_store_explicit(&job->terminal_claim, TP_JOB_TERMINAL_CLAIMED,
+                              memory_order_release);
+        return true;
+    }
+    return false;
+}
+
 static void job_cancel_owned(tp_session_owned_job *owned) {
     tp_live_job *job = (tp_live_job *)owned;
-    atomic_store_explicit(&job->cancelled, true, memory_order_relaxed);
+    (void)job_request_cancel(job);
 }
 
 static void job_join(tp_live_job *job) {
@@ -131,6 +229,7 @@ static tp_live_job *job_create(tp_session *session,
     job->status = TP_STATUS_OK;
     atomic_init(&job->state, TP_SESSION_JOB_RUNNING);
     atomic_init(&job->cancelled, false);
+    atomic_init(&job->terminal_claim, TP_JOB_TERMINAL_OPEN);
     atomic_init(&job->current, 0);
     return job;
 }
@@ -173,6 +272,7 @@ static int pack_worker(void *context) {
         tp_session_snapshot_destroy(job->snapshot);
         job->snapshot = NULL;
         job->elapsed_ms = job_now_ms() - start;
+        (void)job_claim_terminal(job);
         job->status = tp_error_set(&error, TP_STATUS_CANCELLED,
                                    "pack cancelled before input build");
         job->error = error;
@@ -203,15 +303,18 @@ static int pack_worker(void *context) {
         /* Input-build failures (missing/unresolvable source, empty atlas, scan
          * failure) are now ASYNC pack failures -- the exact path export_worker uses. */
         job->elapsed_ms = job_now_ms() - start;
-        job->status = build;
+        const bool cancelled =
+            job_claim_terminal(job) || build == TP_STATUS_CANCELLED;
+        job->status =
+            cancelled
+                ? tp_error_set(&error, TP_STATUS_CANCELLED, "pack cancelled")
+                : build;
         job->error = error;
         atomic_store_explicit(&job->current, 1, memory_order_relaxed);
-        atomic_store_explicit(
-            &job->state,
-            atomic_load_explicit(&job->cancelled, memory_order_relaxed)
-                ? TP_SESSION_JOB_CANCELLED
-                : TP_SESSION_JOB_FAILED,
-            memory_order_release);
+        atomic_store_explicit(&job->state,
+                              cancelled ? TP_SESSION_JOB_CANCELLED
+                                        : TP_SESSION_JOB_FAILED,
+                              memory_order_release);
         return 0;
     }
     job->settings.sprites = job->input.descs;
@@ -246,13 +349,20 @@ static int pack_worker(void *context) {
         }
     }
     free(image_hashes);
+    job_before_terminal_gate_wait();
     job->elapsed_ms = job_now_ms() - start;
-    job->status = status;
+    job_after_cancel_observation_gate_wait();
+    const bool cancelled = job_claim_terminal(job);
+    job->status =
+        cancelled ? tp_error_set(&error, TP_STATUS_CANCELLED, "pack cancelled")
+                  : status;
     job->error = error;
-    job->pack_result = result;
+    if (cancelled) {
+        job->pack_input_hash = tp_id128_nil();
+    } else {
+        job->pack_result = result;
+    }
     atomic_store_explicit(&job->current, 1, memory_order_relaxed);
-    const bool cancelled = atomic_load_explicit(&job->cancelled,
-                                                 memory_order_relaxed);
     atomic_store_explicit(
         &job->state,
         cancelled ? TP_SESSION_JOB_CANCELLED
@@ -308,9 +418,12 @@ static int export_worker(void *context) {
         tp_arena_destroy(arena);
     }
     job->elapsed_ms = job_now_ms() - start;
-    const bool cancelled = atomic_load_explicit(&job->cancelled,
-                                                 memory_order_relaxed);
-    job->status = first_status;
+    const bool cancelled = job_claim_terminal(job);
+    job->status =
+        cancelled
+            ? tp_error_set(&first_error, TP_STATUS_CANCELLED,
+                           "export cancelled")
+            : first_status;
     job->error = first_error;
     atomic_store_explicit(
         &job->state,
@@ -519,14 +632,18 @@ tp_status tp_session_job_poll(const tp_session *session,
 }
 
 tp_status tp_session_job_cancel(tp_session *session, tp_error *err) {
-    tp_session_owned_job *job = tp_session_job_acquire_internal(session);
+    tp_live_job *job =
+        (tp_live_job *)tp_session_job_acquire_internal(session);
     if (!job) {
         return tp_error_set(err, TP_STATUS_NOT_FOUND,
                             "session has no active job");
     }
-    job->cancel(job);
-    tp_session_job_release_internal(job);
-    return TP_STATUS_OK;
+    const bool accepted = job_request_cancel(job);
+    tp_session_job_release_internal(&job->owner);
+    return accepted
+               ? TP_STATUS_OK
+               : tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                              "job cancellation was already requested or the job is terminal");
 }
 
 tp_status tp_session_job_take_result(tp_session *session,

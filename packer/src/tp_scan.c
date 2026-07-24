@@ -23,8 +23,13 @@ typedef struct scan_vec {
  * seam in this module lets the atomic-result contract be swept without replacing
  * the process allocator. */
 static _Thread_local int s_scan_alloc_fail = -1;
+static _Thread_local int s_scan_stat_error;
+static _Thread_local bool s_scan_sort_finished;
 
 void tp_scan__test_set_alloc_fail(int nth) { s_scan_alloc_fail = nth; }
+void tp_scan__test_set_stat_error(int error) { s_scan_stat_error = error; }
+void tp_scan__test_reset_sort_finished(void) { s_scan_sort_finished = false; }
+bool tp_scan__test_sort_finished(void) { return s_scan_sort_finished; }
 
 static bool scan_should_fail_alloc(void) {
     if (s_scan_alloc_fail < 0) {
@@ -443,6 +448,12 @@ tp_status tp_scan_dir_cancellable(const char *abs_dir, tp_scan_result *out,
     if (v.count > 1) {
         qsort(v.data, (size_t)v.count, sizeof *v.data, entry_cmp);
     }
+    s_scan_sort_finished = true; /* test observation seam; otherwise inert */
+    if (tp_cancel_requested(cancel)) {
+        scan_vec_drop(&v);
+        return tp_error_set(err, TP_STATUS_CANCELLED,
+                            "directory scan cancelled");
+    }
     out->entries = v.data;
     out->count = v.count;
     if (err) {
@@ -506,19 +517,38 @@ bool tp_scan_exists(const char *abs) {
     return tp_fs_exists(abs);
 }
 
-tp_scan_kind tp_scan_classify(const char *abs) {
+tp_status tp_scan_classify_checked(const char *abs, tp_scan_kind *out,
+                                   tp_error *err) {
+    if (!out) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "source classification output is required");
+    }
+    *out = TP_SCAN_KIND_MISSING;
     if (!abs || abs[0] == '\0') {
-        return TP_SCAN_KIND_MISSING; /* mirrors tp_scan_exists()/tp_scan_is_dir() guard */
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "source classification path is empty");
+    }
+    if (s_scan_stat_error != 0) {
+        errno = s_scan_stat_error;
+        return scan_errno_status(errno, "stat", abs, err);
     }
     tp_fs_info info;
     if (!tp_fs_stat(abs, &info)) {
-        return TP_SCAN_KIND_MISSING; /* == !tp_fs_exists() */
+        const int error = errno;
+        return scan_errno_status(error, "stat", abs, err);
     }
-    /* Kind-only split, byte-identical to tp_scan_is_dir (which does NOT reject a reparse
-     * directory): a directory -- reparse or not -- is DIRECTORY, so the folder walk's own
-     * root reparse check stays the single authority; every other existing kind is FILE. */
-    return info.kind == TP_FS_KIND_DIRECTORY ? TP_SCAN_KIND_DIRECTORY
+    *out = info.kind == TP_FS_KIND_DIRECTORY ? TP_SCAN_KIND_DIRECTORY
                                              : TP_SCAN_KIND_FILE;
+    if (err) {
+        err->msg[0] = '\0';
+    }
+    return TP_STATUS_OK;
+}
+
+tp_scan_kind tp_scan_classify(const char *abs) {
+    tp_scan_kind kind = TP_SCAN_KIND_MISSING;
+    (void)tp_scan_classify_checked(abs, &kind, NULL);
+    return kind;
 }
 
 bool tp_scan_file_stat(const char *abs, long long *out_size,

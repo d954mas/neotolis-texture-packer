@@ -48,6 +48,7 @@
 #include "gui_shell.h"    /* UI_STATE_SLOTS / UI_STATE_PROBE_MAX / UI_ROW_ID_RING */
 #include "gui_startup.h"  /* H/P1-8: gui_startup_decide + GUI_STARTUP_* (J14 truth table) */
 #include "gui_state.h"    /* s_canvas / s_sel_* / s_sec_* / s_about_open / s_export_open / s_ctx / s_id_* */
+#include "gui_view_chrome.h" /* menu-open keyboard guard */
 
 static tp_journal_io s_test_recovery_io; /* borrowed while the session owns ctx */
 
@@ -826,6 +827,29 @@ void run_selftest(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
     nt_log_info("SELFTEST: begin");
+
+    close_all_menus();
+    NT_ASSERT(!gui_view_chrome_any_menu_open() &&
+              "closed chrome must not block keyboard routing");
+    NT_ASSERT(!gui_view_chrome_consume_escape() &&
+              "Escape must remain available when no menu is open");
+    s_ctx_state.open = true;
+    NT_ASSERT(gui_view_chrome_any_menu_open() &&
+              "an open context menu blocks global/list keyboard routing");
+    NT_ASSERT(gui_view_chrome_consume_escape() &&
+              "Escape must be consumed by an open context menu");
+    NT_ASSERT(!gui_view_chrome_any_menu_open() &&
+              "consumed Escape must close the context menu");
+    for (int menu = 0; menu < 5; ++menu) {
+        gui_view_chrome_selftest_set_menubar_open(menu, true);
+        NT_ASSERT(gui_view_chrome_any_menu_open() &&
+                  "every menubar dropdown blocks global/list keyboard routing");
+        NT_ASSERT(gui_view_chrome_consume_escape() &&
+                  "Escape must be consumed by every menubar dropdown");
+        NT_ASSERT(!gui_view_chrome_any_menu_open() &&
+                  "consumed Escape must close every menubar dropdown");
+    }
+
     gui_project_init();
     NT_ASSERT(tp_session_snapshot_atlas_count(gui_project_snapshot()) == 1);
 

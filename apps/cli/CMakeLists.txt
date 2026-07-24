@@ -360,6 +360,26 @@ add_test(NAME cli_pack_no_usable_images COMMAND ${CMAKE_COMMAND}
     -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_pack_empty.json
     -P "${_run}")
 
+# A present folder with no matching images is the same typed skipped outcome as
+# a source-less atlas, not an unavailable-source failure.
+add_test(NAME cli_pack_empty_folder COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0
+    "-DARGS=pack ${_td}/empty-folder.ntpacker_project --json --out-dir ${CMAKE_CURRENT_BINARY_DIR}/cli_pack_empty_folder"
+    -DCHECKER=$<TARGET_FILE:cli_json_check>
+    "-DCHECK_ARGS=pack targets_ok=0 targets_failed=0 notice=no_usable_images"
+    -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_pack_empty_folder.json
+    -P "${_run}")
+
+# Missing sources fail without partial output and retain a stable status id,
+# message, and atlas context in the machine-readable report.
+add_test(NAME cli_pack_missing_source_error COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=4
+    "-DARGS=pack ${_td}/missing-source.ntpacker_project --json --quiet --out-dir ${CMAKE_CURRENT_BINARY_DIR}/cli_pack_missing_source"
+    -DCHECKER=$<TARGET_FILE:cli_json_check>
+    "-DCHECK_ARGS=pack targets_ok=0 targets_failed=0 error_id=not_found error_atlas=missing-source"
+    -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_pack_missing_source.json
+    -P "${_run}")
+
 # (m) dangling anim frame aborts the atlas before any target writes (plan L-4
 # through the CLI): pack failure, exit 4.
 add_test(NAME cli_pack_problems COMMAND ${CMAKE_COMMAND}

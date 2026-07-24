@@ -121,6 +121,11 @@ int gui_canvas_img_h(const gui_canvas *c);
 /* Borrows `result` (NULL clears the atlas view). Marks pages dirty; the actual GPU upload happens in
  * gui_canvas_upload_pages (call inside the render pass). Switches mode to ATLAS and refits. */
 void gui_canvas_set_result(gui_canvas *c, const tp_result *result);
+/* Rebinds the displayed result and invalidates the shell-owned double-click
+ * identity before the previous result arena can be observed again. */
+void gui_canvas_rebind_result(gui_canvas *c,
+                              gui_canvas_double_click_ref *double_click,
+                              const tp_result *result);
 /* Uploads any pending page textures (GL; call once per frame inside the pass). No-op when clean. */
 void gui_canvas_upload_pages(gui_canvas *c);
 bool gui_canvas_has_atlas(const gui_canvas *c);

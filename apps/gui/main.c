@@ -165,7 +165,7 @@ static const nt_ui_events_cfg_t s_canvas_dbl_cfg = {
  * either free pack slots or retain a stale slot across history navigation; the
  * next frame binds the then-current result without reusing the old borrow. */
 void gui_shell_reset_shown_result(void) {
-    gui_canvas_set_result(&s_canvas, NULL);
+    gui_canvas_rebind_result(&s_canvas, &s_canvas_double_click, NULL);
     s_shown_result = NULL;
 }
 // #endregion
@@ -293,7 +293,7 @@ static void handle_canvas_input(void) {
             const int hit = gui_canvas_hit(&s_canvas, p->x, p->y);
             gui_canvas_select(&s_canvas, hit);
             if (hit >= 0) {
-                select_row_for_region(hit);
+                select_row_for_result_region(s_canvas.result, hit);
             }
         }
         s_lmb_armed = false;
@@ -327,7 +327,7 @@ static void handle_canvas_double_click(void) {
     if (gui_canvas_double_click_press(&s_canvas_double_click, s_canvas.result,
                                       hit, ev.double_clicked)) {
         gui_canvas_select(&s_canvas, hit);
-        select_row_for_region(hit);
+        select_row_for_result_region(s_canvas.result, hit);
         if (gui_canvas_zoom_to_sprite(&s_canvas, s_canvas.last_bb, hit)) {
             /* A zero-hold injected click can press+release in this same frame;
              * its release was already processed before nt_ui_begin, so only
@@ -363,7 +363,8 @@ static void handle_shortcuts(void) {
     if (gui_shot_active() || gui_bench_active()) {
         return; /* headless capture/probe: the user's live typing must not trigger hotkeys mid-run */
     }
-    if (nt_ui_input_any_focused(s_ctx) || s_confirm_open || s_about_open || s_export_open || s_recovery_open) {
+    if (nt_ui_input_any_focused(s_ctx) || gui_view_chrome_any_menu_open() ||
+        s_confirm_open || s_about_open || s_export_open || s_recovery_open) {
         return;
     }
     /* Preview + editor accelerators (each also a button; §3.3e). */
@@ -422,8 +423,9 @@ static void handle_list_nav(void) {
     if (gui_shot_active() || gui_bench_active()) {
         return;
     }
-    if (nt_ui_input_any_focused(s_ctx) || s_confirm_open || s_about_open || s_export_open ||
-        s_recovery_open || s_edit_kind != EDIT_NONE) {
+    if (nt_ui_input_any_focused(s_ctx) || gui_view_chrome_any_menu_open() ||
+        s_confirm_open || s_about_open || s_export_open || s_recovery_open ||
+        s_edit_kind != EDIT_NONE) {
         return;
     }
     if (nt_input_key_is_down(NT_KEY_LCTRL) || nt_input_key_is_down(NT_KEY_RCTRL)) {
@@ -513,7 +515,10 @@ static void frame(void) {
     gui_bench_tick(); /* dev (--bench-perf): drive the perf-probe state machine; no-op unless active */
 
     if (nt_input_key_is_pressed(NT_KEY_ESCAPE)) {
-        if (s_edit_kind != EDIT_NONE) {
+        if (gui_view_chrome_consume_escape()) {
+            /* Menus own Escape while open. Do not also clear filters or stop
+             * either preview mode on the same key press. */
+        } else if (s_edit_kind != EDIT_NONE) {
             cancel_edit();
             set_status("Rename cancelled.");
         } else if (s_export_open) {
@@ -529,7 +534,7 @@ static void frame(void) {
             gui_rows_set_filter(""); /* Esc clears the sprite-tree speed-search (U-02 T1) */
             s_filter_active = false;
             set_status("Filter cleared.");
-        } else if (s_preview_active && !s_ctx_state.open) {
+        } else if (s_preview_active) {
             preview_stop();
             set_status("Closed animation preview.");
         } else if (s_preview_target != 0) {
@@ -668,7 +673,7 @@ static void frame(void) {
          * while one is active + visible, else the native session pack (preview_target_result). */
         const tp_result *want = preview_target_result();
         if (want != s_shown_result) {
-            gui_canvas_set_result(&s_canvas, want);
+            gui_canvas_rebind_result(&s_canvas, &s_canvas_double_click, want);
             s_shown_result = want;
             /* #4: gui_canvas_set_result just cleared the region highlight (sel_sprite -> -1). Re-derive it
              * from the tree's primary leaf so the accent outline survives ANY result rebind -- an Undo/Redo
@@ -676,15 +681,15 @@ static void frame(void) {
              * during an undo): the rebind fires again the frame its result pointer appears, so unlike the
              * old post-undo one-shot this is never missed. ATLAS-mode only (a non-NULL want puts the canvas
              * in ATLAS mode); guarded against an absent shown pack and a leaf not present in it
-             * (gui_pack_find_sprite_ref -> -1). A user atlas switch clears the selection first
+             * (gui_pack_find_sprite_ref_in_result -> -1). A user atlas switch clears the selection first
              * (reset_selection), so this is a no-op there -- it never fabricates a stale highlight. Runs
              * here, BEFORE handle_canvas_input() below, so it can never fight a click. This replaces the
              * former post-undo one-shot (now retired). */
             if (want && gui_canvas_get_mode(&s_canvas) == GUI_CANVAS_ATLAS) {
                 const sprite_row *leaf = gui_rows_selected_leaf();
                 if (leaf && leaf->source_key && leaf->source_key[0] != '\0') {
-                    const int region = gui_pack_find_sprite_ref(
-                        s_sel_atlas, leaf->source_id, leaf->source_key);
+                    const int region = gui_pack_find_sprite_ref_in_result(
+                        want, leaf->source_id, leaf->source_key);
                     if (region >= 0 && region < want->sprite_count) {
                         gui_canvas_select(&s_canvas, region);
                     }

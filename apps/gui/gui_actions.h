@@ -123,6 +123,10 @@ void do_redo(void);
  * (no revision/dirty change). Out params may be NULL; returns false on a scan failure. */
 bool gui_actions_refresh_diff_headless(int *out_added, int *out_removed,
                                        int *out_changed);
+/* Refresh policy seam: after runtime invalidation, even a later diff failure
+ * leaves the retained preview stale. */
+bool gui_actions_refresh_should_mark_stale(tp_status status,
+                                           bool sources_invalidated);
 
 /* --- new/open/exit confirm flow entry points --- */
 void request_new(void);

@@ -10,7 +10,7 @@
  *     the A1 fix repaired ("tank/.png" keys as "tank/.png", not "tank/");
  *   - effective shape: slice9 forces RECT, else ov_shape, else atlas shape; the
  *     extrude override is encoded only when the effective shape is RECT;
- *   - missing sources counted (not fatal);
+ *   - missing/unreadable sources fail the complete input atomically;
  *   - the export-path clamp hole: a CONCAVE atlas with extrude>0 now packs AND
  *     exports cleanly instead of hard-rejecting in tp_pack.
  *
@@ -19,6 +19,7 @@
 
 #define _CRT_SECURE_NO_WARNINGS
 
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,9 +53,16 @@ static char g_hero[700];          /* <dir>/one/hero.png -- a single reusable fil
 static uint8_t g_rgba[32 * 32 * 4]; /* opaque square for the clamp pack regression */
 
 void tp_scan__test_set_alloc_fail(int nth);
+void tp_scan__test_set_stat_error(int error);
 
-void setUp(void) { tp_scan__test_set_alloc_fail(-1); }
-void tearDown(void) { tp_scan__test_set_alloc_fail(-1); }
+void setUp(void) {
+    tp_scan__test_set_alloc_fail(-1);
+    tp_scan__test_set_stat_error(0);
+}
+void tearDown(void) {
+    tp_scan__test_set_alloc_fail(-1);
+    tp_scan__test_set_stat_error(0);
+}
 
 void test_internal_pack_name_has_one_core_formatter(void) {
     tp_id128 source_id = {{0}};
@@ -457,9 +465,10 @@ void test_same_source_key_in_two_sources_keeps_distinct_override_identity(void) 
     tp_project_destroy(project);
 }
 
-/* A resolvable-but-absent source is counted as missing and contributes no descs;
- * a present source alongside it still yields its sprite. */
-void test_missing_source_count(void) {
+/* A Pack must never silently omit an unavailable source. Even when an earlier
+ * source was valid and already materialized, a later missing source fails the
+ * complete input atomically with a structured NOT_FOUND result. */
+void test_missing_source_fails_atomically(void) {
     char nope[700];
     (void)snprintf(nope, sizeof nope, "%s/does_not_exist_%d.png", g_dir, 12345);
 
@@ -472,11 +481,14 @@ void test_missing_source_count(void) {
     a->sources[1].id = test_id(0x12U);
     tp_pack_input in;
     tp_error e = {0};
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_pack_input_build(p, 0, &in, &e));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_NOT_FOUND,
+                          tp_pack_input_build(p, 0, &in, &e));
     tp_project_destroy(p);
 
-    TEST_ASSERT_EQUAL_INT(1, in.count);
-    TEST_ASSERT_EQUAL_INT(1, in.missing_sources);
+    TEST_ASSERT_NULL(in.descs);
+    TEST_ASSERT_EQUAL_INT(0, in.count);
+    TEST_ASSERT_EQUAL_INT(0, in.missing_sources);
+    TEST_ASSERT_NOT_NULL(strstr(e.msg, "source"));
     tp_pack_input_free(&in);
 }
 
@@ -499,11 +511,59 @@ void test_long_resolved_source_path_is_not_silently_dropped(void) {
 
     tp_pack_input in = {0};
     tp_error e = {0};
-    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, tp_pack_input_build(p, 0, &in, &e));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_NOT_FOUND,
+                          tp_pack_input_build(p, 0, &in, &e));
+    TEST_ASSERT_NULL(in.descs);
     TEST_ASSERT_EQUAL_INT(0, in.count);
-    TEST_ASSERT_EQUAL_INT(1, in.missing_sources);
+    TEST_ASSERT_EQUAL_INT(0, in.missing_sources);
     tp_pack_input_free(&in);
     tp_project_destroy(p);
+}
+
+/* A failed stat is not equivalent to an absent path. The scan seam injects an
+ * access failure for an otherwise-valid source, and input assembly must preserve
+ * the distinct PATH_RESOLVE_FAILED status while publishing no partial input. */
+void test_source_stat_failure_is_not_reported_as_missing(void) {
+    tp_project *p = tp_project_create();
+    TEST_ASSERT_NOT_NULL(p);
+    tp_project_atlas *a = tp_project_get_atlas(p, 0);
+    a->id = test_id(0x10U);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_source(a, g_hero));
+    a->sources[0].id = test_id(0x11U);
+
+    tp_scan__test_set_stat_error(EACCES);
+    tp_pack_input in = {
+        .descs = (tp_pack_sprite_desc *)(uintptr_t)1U,
+        .count = 7,
+        .missing_sources = 9,
+    };
+    tp_error e = {0};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_PATH_RESOLVE_FAILED,
+                          tp_pack_input_build(p, 0, &in, &e));
+    TEST_ASSERT_NULL(in.descs);
+    TEST_ASSERT_EQUAL_INT(0, in.count);
+    TEST_ASSERT_EQUAL_INT(0, in.missing_sources);
+    TEST_ASSERT_NOT_NULL(strstr(e.msg, "stat"));
+    tp_project_destroy(p);
+}
+
+/* Snapshot admission owns the same atomic-output contract as direct project
+ * admission. It must zero a caller's stale output before any validation return. */
+void test_snapshot_input_early_error_zeroes_output(void) {
+    tp_pack_input in = {
+        .descs = (tp_pack_sprite_desc *)(uintptr_t)1U,
+        .count = 7,
+        .missing_sources = 9,
+    };
+    tp_error e = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_pack_input_build_snapshot_cancellable(NULL, tp_id128_nil(), &in,
+                                                 NULL, &e));
+    TEST_ASSERT_NULL(in.descs);
+    TEST_ASSERT_EQUAL_INT(0, in.count);
+    TEST_ASSERT_EQUAL_INT(0, in.missing_sources);
 }
 
 void test_source_path_beyond_identity_limit_is_structured_failure(void) {
@@ -806,6 +866,40 @@ void test_cancel_mid_descriptor_materialization_is_honored(void) {
     tp_pack_input_free(&in); /* NULL-safe no-op; asserts the empty-output contract */
     tp_project_destroy(p);
 }
+
+/* The last cancellation poll belongs immediately before ownership publication.
+ * Two simple file sources consume two loop-top polls; firing on poll three therefore
+ * allows all descriptors to build, then requires the completed private candidate
+ * to be dropped instead of published. */
+void test_cancel_before_input_publication_is_atomic(void) {
+    char second[700];
+    (void)snprintf(second, sizeof second, "%s/one/second.png", g_dir);
+    write_file(second, "SECOND");
+
+    tp_project *p = tp_project_create();
+    TEST_ASSERT_NOT_NULL(p);
+    tp_project_atlas *a = tp_project_get_atlas(p, 0);
+    a->id = test_id(0x10U);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_source(a, g_hero));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_source(a, second));
+    a->sources[0].id = test_id(0x11U);
+    a->sources[1].id = test_id(0x12U);
+
+    desc_cancel_counter counter = {0, 3};
+    const tp_cancel_token cancel = {desc_cancel_after_n, &counter};
+    tp_pack_input in = {0};
+    tp_error e = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_CANCELLED,
+        tp_pack_input_build_cancellable(p, 0, &in, &cancel, &e));
+    TEST_ASSERT_EQUAL_INT(3, counter.polls);
+    TEST_ASSERT_NULL(in.descs);
+    TEST_ASSERT_EQUAL_INT(0, in.count);
+    TEST_ASSERT_EQUAL_INT(0, in.missing_sources);
+    tp_project_destroy(p);
+}
 // #endregion
 
 int main(int argc, char **argv) {
@@ -835,8 +929,10 @@ int main(int argc, char **argv) {
     RUN_TEST(test_extrude_gating);
     RUN_TEST(test_per_source_order);
     RUN_TEST(test_same_source_key_in_two_sources_keeps_distinct_override_identity);
-    RUN_TEST(test_missing_source_count);
+    RUN_TEST(test_missing_source_fails_atomically);
     RUN_TEST(test_long_resolved_source_path_is_not_silently_dropped);
+    RUN_TEST(test_source_stat_failure_is_not_reported_as_missing);
+    RUN_TEST(test_snapshot_input_early_error_zeroes_output);
     RUN_TEST(test_source_path_beyond_identity_limit_is_structured_failure);
     RUN_TEST(test_deep_utf8_scan_pack_input_and_sprite_index_keep_exact_paths);
     RUN_TEST(test_scan_failure_leaves_pack_input_and_index_atomic);
@@ -844,5 +940,6 @@ int main(int argc, char **argv) {
     RUN_TEST(test_unrepresentable_project_overrides_fail_before_descriptor_narrowing);
     RUN_TEST(test_concave_extrude_clamp_exports);
     RUN_TEST(test_cancel_mid_descriptor_materialization_is_honored);
+    RUN_TEST(test_cancel_before_input_publication_is_atomic);
     return UNITY_END();
 }

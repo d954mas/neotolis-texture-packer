@@ -98,6 +98,10 @@ tp_status tp_session_export_start(tp_session *session,
 bool tp_session_job_active(const tp_session *session);
 tp_status tp_session_job_poll(const tp_session *session,
                               tp_session_job_progress *out, tp_error *err);
+/* Accepts cancellation only while the worker has not claimed its terminal
+ * outcome. A repeated request or a request after terminal claim returns
+ * TP_STATUS_INVALID_ARGUMENT; an accepted request owns the eventual CANCELLED
+ * result even if the worker has finished its algorithmic work. */
 tp_status tp_session_job_cancel(tp_session *session, tp_error *err);
 /* Succeeds only after poll reports a terminal state. Transfers a successful
  * Pack arena/result to `out` and releases the session-owned job handle. */

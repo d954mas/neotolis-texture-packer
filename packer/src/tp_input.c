@@ -216,7 +216,6 @@ tp_status tp_pack_input_build_cancellable(const tp_project *p, int atlas_index,
     const tp_project_atlas *a = &p->atlases[atlas_index];
 
     desc_vec dv = {0};
-    int missing = 0;
     for (int si = 0; si < a->source_count; si++) {
         /* Poll between sources: a long source list (or a cancel raised while the
          * previous folder walked) stops here rather than resolving/scanning more. */
@@ -235,15 +234,19 @@ tp_status tp_pack_input_build_cancellable(const tp_project *p, int atlas_index,
                                 "tp_pack_input_build: source path %d could not be resolved",
                                 si);
         }
-        /* One stat classifies the source (missing / directory / file) instead of the
-         * exists-then-is_dir pair. On a slow/network mount that pair cost TWO blocking
-         * stats between the loop-top cancel poll and the scan's own entry poll; folding
-         * them halves that gap. Outcomes are byte-identical: dir kind -> folder branch,
-         * any other existing kind -> file branch, un-stat'able -> missing. */
-        const tp_scan_kind source_kind = tp_scan_classify(abs);
-        if (source_kind == TP_SCAN_KIND_MISSING) {
-            missing++;
-            continue;
+        /* One structured stat classifies the source without collapsing an absent
+         * path and permission/I/O failures into the same "missing" value. */
+        tp_scan_kind source_kind = TP_SCAN_KIND_MISSING;
+        tp_error probe_error = {{0}};
+        const tp_status probe_status =
+            tp_scan_classify_checked(abs, &source_kind, &probe_error);
+        if (probe_status != TP_STATUS_OK) {
+            desc_vec_free(&dv);
+            return tp_error_set(
+                err, probe_status,
+                "tp_pack_input_build: source %d stat failed: %s", si,
+                probe_error.msg[0] ? probe_error.msg
+                                   : tp_status_str(probe_status));
         }
         if (source_kind == TP_SCAN_KIND_DIRECTORY) {
             /* Folder: recurse (entries already sorted by rel) and append in scan
@@ -252,10 +255,6 @@ tp_status tp_pack_input_build_cancellable(const tp_project *p, int atlas_index,
              * TP_STATUS_CANCELLED, freeing the partial input below. */
             tp_scan_result sc = {0};
             tp_status scan_status = tp_scan_dir_cancellable(abs, &sc, cancel, err);
-            if (scan_status == TP_STATUS_NOT_FOUND) {
-                missing++;
-                continue;
-            }
             if (scan_status != TP_STATUS_OK) {
                 desc_vec_free(&dv);
                 return scan_status;
@@ -293,9 +292,16 @@ tp_status tp_pack_input_build_cancellable(const tp_project *p, int atlas_index,
         }
     }
 
+    /* Keep the complete descriptor candidate private until the final cooperative
+     * boundary. A cancel raised during the last source must publish nothing. */
+    if (tp_cancel_requested(cancel)) {
+        desc_vec_free(&dv);
+        return tp_error_set(err, TP_STATUS_CANCELLED,
+                            "pack input build cancelled");
+    }
     out->descs = dv.v;
     out->count = dv.n;
-    out->missing_sources = missing;
+    out->missing_sources = 0;
     return TP_STATUS_OK;
 }
 
@@ -309,6 +315,13 @@ tp_status tp_pack_input_build_snapshot(const tp_session_snapshot *snapshot,
 tp_status tp_pack_input_build_snapshot_cancellable(
     const tp_session_snapshot *snapshot, tp_id128 atlas_id, tp_pack_input *out,
     const tp_cancel_token *cancel, tp_error *err) {
+    if (!out) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "pack snapshot input requires output");
+    }
+    out->descs = NULL;
+    out->count = 0;
+    out->missing_sources = 0;
     if (!snapshot) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "pack snapshot input requires snapshot");

@@ -23,6 +23,7 @@
 #include "tp_core/tp_identity.h"
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_project.h"
+#include "tp_core/tp_session.h"
 #include "tp_core/tp_build_worker.h"
 #include "tp_project_mutation_internal.h"
 #include "unity.h"
@@ -778,6 +779,68 @@ static void test_custom_output_listing_failure_prevents_wet_write_and_matches_dr
     tp_project_destroy(proj);
 }
 
+/* Snapshot input admission is complete before target output paths are resolved.
+ * A later orchestration failure must therefore retain READY instead of leaving
+ * the admission outcome at its NOT_EVALUATED zero value. */
+static void test_snapshot_report_marks_nonempty_input_ready_before_output_resolution(void) {
+    char source_path[1200];
+    TEST_ASSERT_TRUE(
+        snprintf(source_path, sizeof source_path, "%s-0.png", g_A) > 0);
+
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    tp_project_atlas *atlas = tp_project_get_atlas(project, 0);
+    atlas->id = (tp_id128){{0x31U}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_source(atlas, source_path));
+    atlas->sources[0].id = (tp_id128){{0x32U}};
+
+    char out_path[TP_IDENTITY_PATH_MAX];
+    memset(out_path, 'a', sizeof out_path - 2U);
+    out_path[sizeof out_path - 2U] = '\0';
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_target(atlas, TP_EXPORTER_ID_JSON_NEOTOLIS,
+                                    out_path, NULL));
+    atlas->targets[0].id = (tp_id128){{0x33U}};
+
+    char project_path[1200];
+    TEST_ASSERT_TRUE(snprintf(project_path, sizeof project_path,
+                              "%s/admission-outcome.ntpacker_project",
+                              g_dir) > 0);
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_save(project, project_path, &error));
+    tp_project_destroy(project);
+
+    tp_session_snapshot *snapshot = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_snapshot_load(project_path, &snapshot,
+                                                   &error));
+    tp_export_snapshot_job *job = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_export_snapshot_job_create(snapshot, g_dir, &job, &error));
+    tp_session_snapshot_destroy(snapshot);
+
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_export_notices notices;
+    tp_export_notices_init(&notices);
+    tp_export_report report;
+    memset(&report, 0, sizeof report);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_export_snapshot_job_run_atlas_ex(
+            job, 0, arena, &notices, &report, NULL, NULL, NULL, &error));
+    TEST_ASSERT_EQUAL_INT(TP_EXPORT_INPUT_READY, report.input_outcome);
+
+    tp_export_notices_free(&notices);
+    tp_arena_destroy(arena);
+    tp_export_snapshot_job_destroy(job);
+    (void)remove(project_path);
+}
+
 int main(int argc, char **argv) {
     if (tp_build_is_worker_invocation(argc, argv)) {
         return tp_build_worker_main();
@@ -798,6 +861,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_dry_run);
     RUN_TEST(test_dry_run_rejects_the_same_output_path_overflow_as_wet_export);
     RUN_TEST(test_custom_output_listing_failure_prevents_wet_write_and_matches_dry_run);
+    RUN_TEST(test_snapshot_report_marks_nonempty_input_ready_before_output_resolution);
     int rc = UNITY_END();
     tp_export_notices_free(&g_notices);
     tp_project_destroy(g_proj);

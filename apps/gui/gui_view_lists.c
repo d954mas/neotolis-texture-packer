@@ -14,7 +14,6 @@
 #include "gui_actions.h"
 #include "gui_rows.h"
 #include "gui_canvas.h"
-#include "gui_pack.h"
 #include "gui_project.h"
 #include "gui_shell.h" /* close_menubar_menus */
 
@@ -25,6 +24,8 @@
 
 /* --- left panel (atlases + sprites + animations) --- */
 static const nt_ui_events_cfg_t s_dbl_cfg = {.long_press_secs = 0.0F, .double_click = true};
+static gui_rows_entity_double_click_ref s_atlas_double_click;
+static gui_rows_entity_double_click_ref s_animation_double_click;
 
 /* start_atlas_edit/start_anim_edit/start_sprite_edit_ref/start_sprite_edit moved to gui_actions
  * (the entry side of the edit lifecycle, needed by both this panel and the settings view). */
@@ -74,11 +75,15 @@ static void declare_atlas_list(nt_ui_context_t *ctx, const tp_session_snapshot *
         const bool selected = (i == s_sel_atlas);
         const nt_ui_events_t ev = nt_ui_events(ctx, row_id, &s_dbl_cfg);
         const nt_ui_events_t xev = nt_ui_events(ctx, x_id, NULL);
+        const bool stable_double =
+            ev.pressed_now &&
+            gui_rows_entity_double_click_press(
+                &s_atlas_double_click, atlas->id, ev.double_clicked);
         if (xev.clicked) {
             s_pending_remove_atlas = true;
             s_pending_remove_atlas_id = atlas->id;
             s_pending_remove_atlas_revision = revision;
-        } else if (ev.double_clicked) {
+        } else if (stable_double) {
             start_atlas_edit(i);
         } else if (ev.clicked && i != s_sel_atlas) {
             s_sel_atlas = i;
@@ -133,6 +138,15 @@ static void declare_atlas_list(nt_ui_context_t *ctx, const tp_session_snapshot *
  * anchor in view order, plain replaces) to the multi-selection, and updates the PRIMARY selection
  * (region panel / canvas sync). The anchor s_sel_anchor_row is a VIEW index so Shift-range follows
  * the filtered/sorted order the user actually sees. */
+static void sync_primary_row_to_canvas(const sprite_row *row) {
+    if (gui_canvas_get_mode(&s_canvas) != GUI_CANVAS_ATLAS) {
+        return;
+    }
+    gui_canvas_select(
+        &s_canvas,
+        gui_rows_result_region_for_primary(row, s_canvas.result));
+}
+
 static void select_sprite_row(int i, bool ctrl, bool shift) {
     if (i < 0 || i >= s_view_count) {
         return;
@@ -171,11 +185,7 @@ static void select_sprite_row(int i, bool ctrl, bool shift) {
         multi_sel_clear();
         s_sel_anchor_row = -1;
     }
-    if (gui_canvas_get_mode(&s_canvas) == GUI_CANVAS_ATLAS && leaf) {
-        gui_canvas_select(&s_canvas,
-                          gui_pack_find_sprite_ref(s_sel_atlas, row->source_id,
-                                                   row->source_key));
-    }
+    sync_primary_row_to_canvas(row);
 }
 
 /* --- keyboard focus model (U-02 T3) ---
@@ -488,14 +498,34 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
      * (once — s_focus_follow is consumed here so wheel scrolling is never fought). */
     if (s_focus_follow && s_focus_view >= 0 && s_focus_view < s_view_count) {
         const uint32_t fv = (uint32_t)s_focus_view;
-        if (r.last < r.first || fv < r.first) {
-            nt_ui_scroll_to(ctx, s_id_vlist, 0.0F, -(float)fv * S(BASE_ROW_H));
-        } else if (fv > r.last) {
-            const uint32_t win = r.last - r.first + 1U;
-            int top = (int)fv - (int)win + 1;
-            if (top < 0) {
-                top = 0;
+        const nt_ui_bbox_t viewport = nt_ui_get_bbox(ctx, s_id_vlist);
+        const nt_ui_bbox_t focus_bbox = nt_ui_get_bbox(
+            ctx, nt_ui_vlist_item_id(ctx, fv));
+        const float row_h = S(BASE_ROW_H);
+        int visible_rows =
+            viewport.found ? (int)floorf(viewport.height / row_h) : 1;
+        if (visible_rows < 1) {
+            visible_rows = 1;
+        }
+        int first_visible =
+            r.first > 0U ? (int)r.first + vs.overscan : 0;
+        /* The item id is ring-recycled. Trust its previous-frame bbox only
+         * while this absolute row is in the current render window; a far
+         * Home/End jump may share the same id with an unrelated old row. */
+        if (focus_bbox.found && viewport.found &&
+            fv >= r.first && fv <= r.last) {
+            if (focus_bbox.y < viewport.y) {
+                first_visible = (int)fv + 1;
+            } else if (focus_bbox.y + focus_bbox.height >
+                       viewport.y + viewport.height) {
+                first_visible = (int)fv - visible_rows;
+            } else {
+                first_visible = (int)fv;
             }
+        }
+        const int top = gui_rows_focus_scroll_top(
+            (int)fv, first_visible, visible_rows);
+        if (top >= 0) {
             nt_ui_scroll_to(ctx, s_id_vlist, 0.0F, -(float)top * S(BASE_ROW_H));
         }
         s_focus_follow = false;
@@ -569,6 +599,7 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
                     s_sel_child = row->child;
                     s_sel_missing = row->missing;
                     (void)snprintf(s_sel_abs, sizeof s_sel_abs, "%s", row->abs);
+                    sync_primary_row_to_canvas(row);
                 }
                 s_ctx_kind = CTX_SPRITE;
                 const tp_session_snapshot *snapshot = gui_project_snapshot();
@@ -686,9 +717,14 @@ static void declare_animations_list(nt_ui_context_t *ctx,
         const bool selected = (i == s_sel_anim);
         const nt_ui_events_t ev = nt_ui_events(ctx, row_id, &s_dbl_cfg);
         const nt_ui_events_t xev = nt_ui_events(ctx, x_id, NULL);
+        const bool stable_double =
+            ev.pressed_now &&
+            gui_rows_entity_double_click_press(
+                &s_animation_double_click, animation->id,
+                ev.double_clicked);
         if (xev.clicked) {
             gui_request_remove_animation(i);
-        } else if (ev.double_clicked) {
+        } else if (stable_double) {
             s_sel_anim = i;
             s_sel_anim_frame = -1;
             const gui_animation_ref preview = {
