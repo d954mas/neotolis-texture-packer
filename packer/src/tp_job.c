@@ -387,15 +387,20 @@ static int export_worker(void *context) {
         tp_arena *arena = tp_arena_create(0);
         tp_export_notices notices;
         tp_export_notices_init(&notices);
+        tp_export_report report;
+        memset(&report, 0, sizeof report);
         tp_error error = {{0}};
         int runs = 0;
         int missing = 0;
         tp_status status = arena
-            ? tp_export_snapshot_job_run_atlas(
-                  job->export_job, atlas->index, arena, &notices, &runs,
-                  &missing, &error)
+            ? tp_export_snapshot_job_run_atlas_ex(
+                  job->export_job, atlas->index, arena, &notices, &report,
+                  &runs, NULL, &missing, &error)
             : TP_STATUS_OOM;
-        if (status == TP_STATUS_OK) {
+        if (report.input_outcome == TP_EXPORT_INPUT_NO_USABLE_IMAGES) {
+            job->export_result.atlases_skipped++;
+            status = TP_STATUS_OK;
+        } else if (status == TP_STATUS_OK) {
             job->export_result.targets += atlas->enabled_targets;
             job->export_result.notices += notices.count;
             job->export_result.atlases_ok++;
@@ -417,8 +422,14 @@ static int export_worker(void *context) {
         tp_export_notices_free(&notices);
         tp_arena_destroy(arena);
     }
+    job_before_terminal_gate_wait();
     job->elapsed_ms = job_now_ms() - start;
-    const bool cancelled = job_claim_terminal(job);
+    const bool cancel_requested = job_claim_terminal(job);
+    const int atlases_completed = job->export_result.atlases_ok +
+                                  job->export_result.atlases_failed +
+                                  job->export_result.atlases_skipped;
+    const bool cancelled =
+        cancel_requested && atlases_completed < job->export_atlas_count;
     job->status =
         cancelled
             ? tp_error_set(&first_error, TP_STATUS_CANCELLED,
@@ -578,7 +589,7 @@ tp_status tp_session_export_start(tp_session *session,
         }
         const bool selected = tp_id128_is_nil(request->atlas_id) ||
                               tp_id128_eq(request->atlas_id, info.atlas_id);
-        if (selected && info.enabled_target_count > 0 && info.source_count > 0) {
+        if (selected && info.enabled_target_count > 0) {
             tp_job_export_atlas *target =
                 &job->export_atlases[job->export_atlas_count++];
             target->index = i;

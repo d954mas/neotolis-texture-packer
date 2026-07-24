@@ -81,14 +81,9 @@ static void scan_gate_wait(void) {
     }
 }
 
-/* Test-only POST-entry gate + visited-entry counter (paper-cut #8). Where scan_gate_wait
- * parks BEFORE the walk starts, this trips AFTER the FIRST entry is visited INSIDE
- * scan_dir and counts EVERY visited entry -- so a job test can request cancel while the
- * walk is parked mid-scan and then PROVE the scan stopped early (visited < total) rather
- * than only that the job ended CANCELLED (which the shared cancel flag yields even if the
- * scan ran to completion and only the pack observed the cancel). The counter is a
- * process-global atomic the test reads AFTER the cancelled result is freed (sprite_count
- * is gone by then). Production never arms it, so scan_post_entry_gate() is a no-op. */
+/* Test-only post-entry gate. It parks after the first visited entry and counts
+ * later visits so cancellation tests can distinguish an early stop from a walk
+ * that completed before observing cancellation. Production never arms it. */
 static atomic_int s_scan_post_armed;    /* 1 = counting active for the armed scan */
 static atomic_int s_scan_post_park;     /* 1 = park at the FIRST counted entry (one-shot) */
 static atomic_int s_scan_post_entered;  /* set once the walk parks in the gate */

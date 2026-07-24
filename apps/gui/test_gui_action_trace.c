@@ -1,4 +1,5 @@
 #include <stdbool.h>
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -25,6 +26,8 @@
 
 static char s_save_path[1024];
 
+void tp_scan__test_set_stat_error(int error);
+
 /* gui_actions links the production shell reset seam; the trace is headless. */
 void gui_shell_reset_shown_result(void) {}
 
@@ -39,10 +42,7 @@ typedef struct state_owner_entry {
     trace_owner_class owner;
 } state_owner_entry;
 
-/* P1-10 ownership inventory.  These are semantic state groups, not a promise
- * that all fields remain globals.  A future gui_actions_state may contain the
- * action-private groups, but must not absorb the session-shared or view-local
- * groups merely to reduce the number of structs. */
+/* Ownership inventory keeps session, action, and view state boundaries explicit. */
 static const state_owner_entry k_state_owners[] = {
     {"selection", TRACE_SESSION_SHARED},
     {"status", TRACE_SESSION_SHARED},
@@ -88,6 +88,7 @@ static void reset_public_action_state(void) {
 }
 
 void setUp(void) {
+    tp_scan__test_set_stat_error(0);
     (void)snprintf(s_save_path, sizeof s_save_path,
                    "%s/action-trace.ntpacker_project",
                    TP_GUI_TRACE_TEST_DIR);
@@ -104,6 +105,7 @@ void setUp(void) {
 }
 
 void tearDown(void) {
+    tp_scan__test_set_stat_error(0);
     multi_sel_clear();
     gui_pack_shutdown();
     gui_project_discard_recovery_on_shutdown();
@@ -187,10 +189,7 @@ void test_deferred_edit_coalesces_then_undo_redo_trace_is_exact(void) {
     TEST_ASSERT_EQUAL_INT(initial_max_size, atlas_at(0)->max_size);
     TEST_ASSERT_EQUAL_INT(0, gui_project_undo_depth());
     TEST_ASSERT_EQUAL_INT(1, gui_project_redo_depth());
-    /* U-02 T5: undo now PRESERVES the sprite selection instead of resetting it to -1. It captures the
-     * primary leaf's canonical ref (arming s_reselect_pending) and leaves the index for
-     * gui_selection_revalidate to re-resolve in the frame loop; with no rows built here, s_sel_src is
-     * left untouched (still 7). */
+    /* Selection remains captured for canonical revalidation in the frame loop. */
     TEST_ASSERT_EQUAL_INT(7, s_sel_src);
     TEST_ASSERT_TRUE(s_reselect_pending);
     TEST_ASSERT_EQUAL_STRING("Undo (undo:0 redo:1)", s_status);
@@ -201,10 +200,7 @@ void test_deferred_edit_coalesces_then_undo_redo_trace_is_exact(void) {
     TEST_ASSERT_EQUAL_INT(1024, atlas_at(0)->max_size);
     TEST_ASSERT_EQUAL_INT(1, gui_project_undo_depth());
     TEST_ASSERT_EQUAL_INT(0, gui_project_redo_depth());
-    /* U-02 T5: redo ARMS the same selection-preservation seam as undo -- it captures the primary ref
-     * BEFORE the model shifts (arming s_reselect_pending) and leaves it for the frame loop's
-     * gui_selection_revalidate to consume. Nothing between here and now consumes it, so it is still
-     * pending (mirrors the undo-block assertion above). */
+    /* Redo preserves the same pending canonical selection as Undo. */
     TEST_ASSERT_TRUE(s_reselect_pending);
     TEST_ASSERT_EQUAL_STRING("Redo (undo:1 redo:0)", s_status);
 }
@@ -368,6 +364,25 @@ void test_canvas_buffer_readiness_requires_every_gpu_handle(void) {
     TEST_ASSERT_FALSE(gui_canvas_resource_handles_ready(&canvas));
 }
 
+void test_refresh_reports_source_stat_failure(void) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas = tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+
+    char source_path[1200];
+    TEST_ASSERT_TRUE(snprintf(source_path, sizeof source_path, "%s/source.png",
+                              TP_GUI_TRACE_TEST_DIR) > 0);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_ADD_ADDED,
+        gui_project_add_source_kind(
+            atlas->id, tp_session_snapshot_revision(snapshot), source_path,
+            TP_SOURCE_KIND_FILE));
+
+    tp_scan__test_set_stat_error(EACCES);
+    TEST_ASSERT_FALSE(gui_actions_refresh_diff_headless(NULL, NULL, NULL));
+    tp_scan__test_set_stat_error(0);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_state_ownership_inventory_preserves_three_classes);
@@ -377,5 +392,6 @@ int main(void) {
     RUN_TEST(test_confirm_save_publishes_before_new_and_new_message_wins);
     RUN_TEST(test_recovery_decision_runs_next_frame_and_failure_keeps_row);
     RUN_TEST(test_canvas_buffer_readiness_requires_every_gpu_handle);
+    RUN_TEST(test_refresh_reports_source_stat_failure);
     return UNITY_END();
 }

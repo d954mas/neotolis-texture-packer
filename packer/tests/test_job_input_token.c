@@ -30,7 +30,7 @@ void tp_scan__test_arm_walk_gate(void);
 bool tp_scan__test_walk_gate_entered(void);
 void tp_scan__test_release_walk_gate(void);
 
-/* Post-entry gate + visited-entry counter seam (tp_scan.c, paper-cut #8): trips AFTER
+/* Post-entry gate + visited-entry counter seam (tp_scan.c): trips after
  * the FIRST entry is visited INSIDE the walk and counts every visited entry, so the
  * mid-scan-cancel test can prove the scan STOPPED EARLY (visited < N) rather than only
  * that the job ended CANCELLED -- the shared cancel flag yields CANCELLED even if the
@@ -40,9 +40,8 @@ bool tp_scan__test_post_entry_gate_entered(void);
 void tp_scan__test_release_post_entry_gate(void);
 int tp_scan__test_visited_entries(void);
 
-/* Job-terminal gate: parks after Pack has privately produced its result but before
- * the job publishes status/result/state. This makes the late-cancel boundary
- * deterministic instead of relying on scheduler timing. */
+/* Parks a completed worker before terminal publication, making late cancellation
+ * deterministic for Pack results and committed Export outputs. */
 void tp_job__test_arm_before_terminal_gate(void);
 bool tp_job__test_before_terminal_gate_entered(void);
 void tp_job__test_release_before_terminal_gate(void);
@@ -182,6 +181,18 @@ static tp_session *make_session(void) {
     tp_session *session = NULL;
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_session_create(&rng, &session, &err));
+    TEST_ASSERT_NOT_NULL(session);
+    return session;
+}
+
+static tp_session *make_default_project_session(void) {
+    uint8_t seed = 1U;
+    const tp_rng rng = {deterministic_fill, &seed};
+    tp_error err = {{0}};
+    tp_session *session = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_create_default_project(&rng, &session, &err));
     TEST_ASSERT_NOT_NULL(session);
     return session;
 }
@@ -370,7 +381,86 @@ static void add_folder_source(tp_session *session, tp_id128 atlas_id,
     tp_session_snapshot_destroy(snapshot);
 }
 
-/* F3-03 T2: the job/pack surface carries a pack_input_hash, recomputed from the
+static tp_session_job_result wait_for_job_result(tp_session *session) {
+    tp_error err = {{0}};
+    tp_session_job_progress progress;
+    do {
+        memset(&progress, 0, sizeof progress);
+        TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                              tp_session_job_poll(session, &progress, &err));
+    } while (progress.state == TP_SESSION_JOB_RUNNING);
+
+    tp_session_job_result result;
+    memset(&result, 0, sizeof result);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_job_take_result(session, &result, &err));
+    return result;
+}
+
+void test_source_less_export_succeeds_as_skipped(void) {
+    tp_session *session = make_default_project_session();
+    char work_dir[1024];
+    job_scratch_dir(work_dir, sizeof work_dir);
+    tp_mkdirs(work_dir);
+
+    tp_error err = {{0}};
+    const tp_export_command_request request = {
+        .work_dir = work_dir,
+        .atlas_id = default_atlas_id(session),
+    };
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK, tp_session_export_start(session, &request, &err),
+        "a source-less atlas must start and publish a skipped result");
+
+    tp_session_job_result result = wait_for_job_result(session);
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_EXPORT, result.kind);
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_SUCCEEDED, result.state);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, result.status);
+    TEST_ASSERT_EQUAL_INT(0, result.export_result.targets);
+    TEST_ASSERT_EQUAL_INT(0, result.export_result.atlases_ok);
+    TEST_ASSERT_EQUAL_INT(0, result.export_result.atlases_failed);
+    TEST_ASSERT_EQUAL_INT(1, result.export_result.atlases_skipped);
+
+    tp_session_job_result_destroy(&result);
+    tp_session_destroy(session);
+    remove_scratch_tree(work_dir);
+}
+
+void test_empty_folder_export_succeeds_as_skipped(void) {
+    tp_session *session = make_default_project_session();
+    const tp_id128 atlas = default_atlas_id(session);
+    char work_dir[1024];
+    job_scratch_dir(work_dir, sizeof work_dir);
+    tp_mkdirs(work_dir);
+    char folder[1200];
+    TEST_ASSERT_TRUE(
+        snprintf(folder, sizeof folder, "%s/empty", work_dir) > 0);
+    tp_mkdirs(folder);
+    add_folder_source(session, atlas, folder);
+
+    tp_error err = {{0}};
+    const tp_export_command_request request = {
+        .work_dir = work_dir,
+        .atlas_id = atlas,
+    };
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_export_start(session, &request, &err));
+
+    tp_session_job_result result = wait_for_job_result(session);
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_EXPORT, result.kind);
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_SUCCEEDED, result.state);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, result.status);
+    TEST_ASSERT_EQUAL_INT(0, result.export_result.targets);
+    TEST_ASSERT_EQUAL_INT(0, result.export_result.atlases_ok);
+    TEST_ASSERT_EQUAL_INT(0, result.export_result.atlases_failed);
+    TEST_ASSERT_EQUAL_INT(1, result.export_result.atlases_skipped);
+
+    tp_session_job_result_destroy(&result);
+    tp_session_destroy(session);
+    remove_scratch_tree(work_dir);
+}
+
+/* The job/pack surface carries a pack_input_hash, recomputed from the
  * session's immutable snapshot, stable for the same snapshot -- and a REAL native
  * async pack carries that same hash on its completed result. This drives a job to
  * completion (worker-thread hash compute, tp_job.c) and asserts the taken result's
@@ -555,7 +645,7 @@ void test_empty_atlas_pack_fails_async_not_at_start(void) {
     remove_scratch_tree(work_dir);
 }
 
-/* U-01a / U-02 F16: a FOLDER source's recursive enumeration runs on the pack WORKER,
+/* A folder source's recursive enumeration runs on the pack worker,
  * not at pack-start on the UI thread. The walk gate parks the worker INSIDE the folder
  * walk; while it is parked we prove start() has already returned with the job still
  * RUNNING (the walk had NOT completed on the caller thread) -- a deterministic pin of
@@ -625,7 +715,7 @@ void test_folder_source_walk_runs_on_worker(void) {
     remove_scratch_tree(work_dir);
 }
 
-/* U-02 F11 / paper-cut #8: a cancel raised while the worker is mid-folder-walk is
+/* A cancel raised while the worker is mid-folder-walk is
  * observed cooperatively INSIDE the scan -- the walk aborts EARLY and the job ends
  * CANCELLED (never SUCCEEDED). The POST-entry gate parks the worker right after its
  * FIRST visited entry; we request cancel while it is parked, then release so the walk
@@ -760,6 +850,61 @@ void test_late_pack_cancel_has_coherent_terminal_result(void) {
     remove_scratch_tree(work_dir);
 }
 
+void test_late_export_cancel_preserves_committed_success(void) {
+    tp_session *session = make_default_project_session();
+    const tp_id128 atlas = default_atlas_id(session);
+    char work_dir[1024];
+    job_scratch_dir(work_dir, sizeof work_dir);
+    tp_mkdirs(work_dir);
+    add_file_source(session, atlas, work_dir);
+
+    char project_path[1200];
+    TEST_ASSERT_TRUE(snprintf(project_path, sizeof project_path,
+                              "%s/job.ntpacker_project", work_dir) > 0);
+    tp_session_save_result save_result;
+    memset(&save_result, 0, sizeof save_result);
+    tp_error err = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_save_new(session, project_path, &save_result, &err));
+
+    const tp_export_command_request request = {
+        .work_dir = work_dir,
+        .atlas_id = atlas,
+    };
+    tp_job__test_arm_before_terminal_gate();
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_export_start(session, &request, &err));
+    const bool gate_entered = wait_for_before_terminal_gate();
+    if (!gate_entered) {
+        tp_job__test_release_before_terminal_gate();
+    }
+    TEST_ASSERT_TRUE_MESSAGE(
+        gate_entered,
+        "export worker did not reach the post-commit publication gate");
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK, tp_session_job_cancel(session, &err));
+    tp_job__test_release_before_terminal_gate();
+
+    tp_session_job_result result = wait_for_job_result(session);
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_EXPORT, result.kind);
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_SUCCEEDED, result.state);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, result.status);
+    TEST_ASSERT_EQUAL_INT(1, result.export_result.atlases_ok);
+    TEST_ASSERT_EQUAL_INT(0, result.export_result.atlases_failed);
+
+    char json_path[1200];
+    TEST_ASSERT_TRUE(
+        snprintf(json_path, sizeof json_path, "%s/out/atlas1.json", work_dir) >
+        0);
+    TEST_ASSERT_TRUE_MESSAGE(tp_fs_exists(json_path),
+                             "successful terminal result must match committed output");
+
+    tp_session_job_result_destroy(&result);
+    tp_session_destroy(session);
+    remove_scratch_tree(work_dir);
+}
+
 /* The worker's last cancellation observation and terminal publication must be
  * one handshake. A cancel accepted inside that former race window must still
  * own the terminal outcome. */
@@ -862,10 +1007,13 @@ int main(int argc, char **argv) {
     RUN_TEST(test_pack_input_hash_present_and_stable_for_same_snapshot);
     RUN_TEST(test_pack_job_decodes_each_source_once);
     RUN_TEST(test_pack_input_hash_changes_on_semantic_mutation);
+    RUN_TEST(test_source_less_export_succeeds_as_skipped);
+    RUN_TEST(test_empty_folder_export_succeeds_as_skipped);
     RUN_TEST(test_empty_atlas_pack_fails_async_not_at_start);
     RUN_TEST(test_folder_source_walk_runs_on_worker);
     RUN_TEST(test_folder_walk_cancels_mid_scan);
     RUN_TEST(test_late_pack_cancel_has_coherent_terminal_result);
+    RUN_TEST(test_late_export_cancel_preserves_committed_success);
     RUN_TEST(test_cancel_after_last_observation_wins_terminal_publication);
     RUN_TEST(test_cancel_after_terminal_publication_is_rejected);
     return UNITY_END();

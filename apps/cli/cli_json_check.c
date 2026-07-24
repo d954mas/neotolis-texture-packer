@@ -463,6 +463,40 @@ static int check_pack(const cJSON *root, int argc, char **argv) {
             return fail("pack: expected structured atlas error not found");
         }
     }
+    const char *eerror_contains = arg_val(argc, argv, "error_contains");
+    if (eerror_contains) {
+        bool found = false;
+        const cJSON *atlas = NULL;
+        cJSON_ArrayForEach(atlas, atlases) {
+            const cJSON *error =
+                cJSON_GetObjectItemCaseSensitive(atlas, "error");
+            const cJSON *message =
+                cJSON_GetObjectItemCaseSensitive(error, "message");
+            if (cJSON_IsString(message) &&
+                strstr(message->valuestring, eerror_contains) != NULL) {
+                found = true;
+            }
+        }
+        if (!found) {
+            return fail("pack: expected atlas error fragment not found");
+        }
+    }
+    const char *enote_contains = arg_val(argc, argv, "note_contains");
+    if (enote_contains) {
+        bool found = false;
+        const cJSON *atlas = NULL;
+        cJSON_ArrayForEach(atlas, atlases) {
+            const cJSON *note =
+                cJSON_GetObjectItemCaseSensitive(atlas, "note");
+            if (cJSON_IsString(note) &&
+                strstr(note->valuestring, enote_contains) != NULL) {
+                found = true;
+            }
+        }
+        if (!found) {
+            return fail("pack: expected atlas note fragment not found");
+        }
+    }
     return 0;
 }
 

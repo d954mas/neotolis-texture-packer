@@ -580,11 +580,24 @@ int cmd_pack(const char *project_path, const char *opt_atlas, const char *opt_ta
         char note_buffer[384] = {0};
         bool ran = false;
 
-        arena = tp_arena_create(0);
-        if (!arena) {
-            note = "out of memory";
-            had_pack_fail = true;
+        if (atlas.enabled_target_count == 0) {
+            note = "no enabled targets (skipped)";
+            skip_notice_id = "no_enabled_targets";
         } else {
+#ifdef NTPACKER_CLI_PACK_ARENA_FAULT_SEAM
+            if (!getenv("NTPACKER_TEST_PACK_ARENA_FAIL")) {
+                arena = tp_arena_create(0);
+            }
+#else
+            arena = tp_arena_create(0);
+#endif
+            if (!arena) {
+                atlas_error_status = TP_STATUS_OOM;
+                (void)tp_error_set(&atlas_error, TP_STATUS_OOM,
+                                   "could not allocate atlas packing arena");
+                note = "out of memory allocating atlas packing arena";
+                had_pack_fail = true;
+            } else {
                 tp_error run_error = {0};
                 tp_status run_status = tp_export_snapshot_job_run_atlas_ex(
                     job, ai, arena, &notices, &report, NULL, &sprite_count,
@@ -596,14 +609,29 @@ int cmd_pack(const char *project_path, const char *opt_atlas, const char *opt_ta
                     skip_notice_id = "no_usable_images";
                 } else if (run_status != TP_STATUS_OK && report.target_count == 0) {
                     atlas_error_status = run_status;
-                    atlas_error = run_error;
-                    (void)snprintf(
-                        note_buffer, sizeof note_buffer,
-                        "could not assemble sprites: %s",
-                        run_error.msg[0] ? run_error.msg
-                                         : tp_status_str(run_status));
+                    if (report.input_outcome == TP_EXPORT_INPUT_READY) {
+                        const char *detail =
+                            run_status == TP_STATUS_OUT_OF_BOUNDS
+                                ? "resolved target-output path exceeds supported length"
+                                : (run_error.msg[0] ? run_error.msg
+                                                    : tp_status_str(run_status));
+                        (void)tp_error_set(
+                            &atlas_error, run_status,
+                            "could not resolve target-output path: %s", detail);
+                        (void)snprintf(
+                            note_buffer, sizeof note_buffer, "%s",
+                            atlas_error.msg);
+                        had_export_fail = true;
+                    } else {
+                        atlas_error = run_error;
+                        (void)snprintf(
+                            note_buffer, sizeof note_buffer,
+                            "could not assemble sprites: %s",
+                            run_error.msg[0] ? run_error.msg
+                                             : tp_status_str(run_status));
+                        had_pack_fail = true;
+                    }
                     note = note_buffer;
-                    had_pack_fail = true;
                 }
                 if (report.pack_failed) {
                     had_pack_fail = true;
@@ -617,11 +645,7 @@ int cmd_pack(const char *project_path, const char *opt_atlas, const char *opt_ta
                         had_export_fail = true;
                     }
                 }
-                if (atlas.enabled_target_count == 0 && run_status == TP_STATUS_OK) {
-                    note = "no enabled targets (skipped)";
-                    skip_notice_id = "no_enabled_targets";
-                    ran = false;
-                }
+            }
         }
 
         /* Emit (JSON payload accumulates; human prints now). */

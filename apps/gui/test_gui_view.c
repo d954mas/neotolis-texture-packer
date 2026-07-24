@@ -1,4 +1,4 @@
-/* U-02 sprite-tree VIEW-layer regression (gui_rows.c / gui_rows.h).
+/* Sprite-tree view-layer regression (gui_rows.c / gui_rows.h).
  *
  * Exercises the pure filter/sort/collapse VIEW that sits over the cached row
  * model: build_rows() flattens the selected atlas into s_rows[], build_view()
@@ -385,7 +385,7 @@ void test_view_collapse_hides_children_and_filter_overrides(void) {
     TEST_ASSERT_TRUE(gui_rows_is_collapsed(folder_id)); /* state unchanged */
 }
 
-/* 7. gui_selection_revalidate (the mechanism behind U-02 T5 undo-keeps-selection): after the model
+/* 7. After the model
  *    changes, the primary selection is re-resolved by canonical ref (kept if the sprite survives,
  *    cleared if gone) and multi-select refs pointing at removed sprites are pruned. Here the "model
  *    change" is deleting a child file + rescanning, standing in for an undo that drops a sprite. */
@@ -657,9 +657,8 @@ void test_view_collapse_pruned_when_folder_source_removed(void) {
     TEST_ASSERT_TRUE(tp_id128_eq(s_rows[s_view[0]].source_id, file_id));
 }
 
-/* 14. F5: a MISSING file source selected as the primary (folder/source branch, empty reselect key)
- *     keeps its missing state through revalidate. Before the fix the source branch hardcoded
- *     s_sel_missing=false, flashing a spurious decode/error status on undo with a missing file selected. */
+/* 14. A missing file source selected as the primary keeps its missing state
+ * through revalidation. */
 void test_selection_revalidate_keeps_missing_state_on_source_reselect(void) {
     add_sources_and_build(NULL, NULL);
 
@@ -690,7 +689,7 @@ void test_selection_revalidate_keeps_missing_state_on_source_reselect(void) {
     gui_selection_revalidate();
     TEST_ASSERT_FALSE(s_reselect_pending);
     TEST_ASSERT_EQUAL_INT(-1, s_sel_child);
-    TEST_ASSERT_TRUE(s_sel_missing); /* F5: missing state preserved on the source reselect branch */
+    TEST_ASSERT_TRUE(s_sel_missing); /* Missing state survives source reselect. */
 
     int mi2 = -1;
     for (int i = 0; i < s_row_count; ++i) {
@@ -704,7 +703,7 @@ void test_selection_revalidate_keeps_missing_state_on_source_reselect(void) {
     TEST_ASSERT_TRUE(tp_id128_eq(s_rows[mi2].source_id, missing_id));
 }
 
-/* 15. F6: when the keyboard-focused (or shift-anchor) row is FILTERED OUT of the rebuilt view, its
+/* 15. When the keyboard-focused (or shift-anchor) row is filtered out of the rebuilt view, its
  *     stale numeric index must be cleared to -1, never left aliasing a different visible row. A
  *     surviving focused row still re-pins to its new view position. */
 void test_view_focus_cleared_when_focused_row_filtered_out(void) {
@@ -721,8 +720,8 @@ void test_view_focus_cleared_when_focused_row_filtered_out(void) {
     gui_rows_set_filter("solo"); /* only the solo file source survives; the whole folder span drops */
     build_view();
     TEST_ASSERT_EQUAL_INT(-1, view_pos_of_row(alpha)); /* alpha gone from the view */
-    TEST_ASSERT_EQUAL_INT(-1, s_focus_view);           /* F6: stale focus cleared, not left aliasing */
-    TEST_ASSERT_EQUAL_INT(-1, s_sel_anchor_row);       /* F6: stale shift-anchor cleared too */
+    TEST_ASSERT_EQUAL_INT(-1, s_focus_view);           /* Stale focus cannot alias another row. */
+    TEST_ASSERT_EQUAL_INT(-1, s_sel_anchor_row);       /* The range anchor is cleared too. */
 
     /* Positive control: a SURVIVING focused row re-pins to its new position under the filter. */
     gui_rows_set_filter("");
@@ -738,7 +737,7 @@ void test_view_focus_cleared_when_focused_row_filtered_out(void) {
     TEST_ASSERT_EQUAL_INT(solo_view, s_focus_view); /* focus followed the surviving row */
 }
 
-/* 16. F9: folder collapse is keyed by stable SOURCE id and must survive an atlas round-trip. Two
+/* 16. Folder collapse is keyed by stable source id and must survive an atlas round-trip. Two
  *     atlases each carry a folder source; snapshot-wide pruning must retain atlas A's live source
  *     while atlas B is displayed. */
 void test_view_collapse_survives_atlas_switch(void) {
@@ -768,7 +767,7 @@ void test_view_collapse_survives_atlas_switch(void) {
     s_sel_atlas = 1;
     build_rows();
     build_view();
-    TEST_ASSERT_TRUE(gui_rows_is_collapsed(folder0)); /* F9: survives the switch */
+    TEST_ASSERT_TRUE(gui_rows_is_collapsed(folder0)); /* Survives the switch. */
 
     /* Back to A0: still collapsed, children still hidden. */
     s_sel_atlas = 0;
@@ -778,7 +777,7 @@ void test_view_collapse_survives_atlas_switch(void) {
     TEST_ASSERT_EQUAL_INT(2, s_view_count);
 }
 
-/* 17. F2: the viewed ATLAS is preserved by stable id across an Undo that re-inserts an atlas before it.
+/* 17. The viewed atlas is preserved by stable id across an Undo that re-inserts an atlas before it.
  *     Two atlases; view A1 with a sprite selected; remove A0 (A1 shifts 1->0); Undo re-inserts A0 (A1
  *     back to 1). do_undo's settle must re-resolve s_sel_atlas onto A1 by id (not leave the positional
  *     index on the now-different atlas), so the sprite selection re-resolves in the correct atlas. */
@@ -835,7 +834,7 @@ void test_undo_preserves_selected_atlas_by_stable_id(void) {
     build_view();
     gui_selection_revalidate();
 
-    /* F2: the viewed atlas is A1 again (index 1), NOT the positional index 0 (now A0). */
+    /* The viewed atlas is A1 again, not the positional neighbor A0. */
     TEST_ASSERT_EQUAL_INT(2, tp_session_snapshot_atlas_count(gui_project_snapshot()));
     TEST_ASSERT_EQUAL_INT(1, s_sel_atlas);
     TEST_ASSERT_TRUE(tp_id128_eq(
@@ -937,9 +936,9 @@ void test_view_sort_mtime_orders_by_modification_time(void) {
     TEST_ASSERT_EQUAL_STRING("beta", s_rows[s_view[pos + 3]].sprite_name);  /* 3000000 */
 }
 
-/* 20. F10: a rename override changes the EFFECTIVE name used by both sort and Copy name. gamma is the
+/* 20. A rename override changes the effective name used by both sort and Copy name. gamma is the
  *     natural-last child; renaming it to "aaa" makes it sort FIRST and copy as "aaa", while its
- *     canonical export key stays "gamma". Mirrors gui_actions_preview.c using the override for Rename. */
+ *     canonical export key stays "gamma". */
 void test_view_sort_and_copy_use_effective_rename(void) {
     add_sources_and_build(NULL, NULL);
 
@@ -1005,12 +1004,8 @@ void test_sort_chip_click_selects_and_flips(void) {
     TEST_ASSERT_FALSE(warn); /* key clicks never disturb the warn-first pin */
 }
 
-/* 22. P1.2: keyboard focus follows a sprite across a MODEL-REBUILD reorder. Sorting by name, focus is
- *     pinned on gamma (the natural-last child). Renaming gamma to "aaa" bumps the row generation (a model
- *     rebuild, NOT a view-only reorder) AND makes it sort FIRST -- and the view-only re-pin is skipped on
- *     a rebuild, so without the end-of-build_view re-anchor s_focus_view would keep gamma's OLD slot and
- *     alias a different sprite. The fix re-anchors focus onto the row still carrying the primary selection
- *     (gamma) at its new view position. */
+/* 22. Keyboard focus follows the selected sprite across a model-rebuild
+ * reorder instead of retaining a numeric slot that now names another row. */
 void test_view_focus_follows_selection_across_model_rebuild(void) {
     add_sources_and_build(NULL, NULL);
     gui_rows_set_sort(ROW_SORT_NAME, false, false);
@@ -1042,10 +1037,62 @@ void test_view_focus_follows_selection_across_model_rebuild(void) {
     const int gview2 = view_pos_of_row(gi);
     TEST_ASSERT_EQUAL_INT(pos + 1, gview2);      /* renamed gamma now leads its siblings */
     TEST_ASSERT_TRUE(gview2 != gview);           /* its view slot genuinely moved */
-    TEST_ASSERT_EQUAL_INT(gview2, s_focus_view); /* P1.2: focus followed gamma, not left on the stale slot */
+    TEST_ASSERT_EQUAL_INT(gview2, s_focus_view); /* Focus followed gamma. */
 }
 
-/* 23. #6: Ctrl+F must find a sprite by a LONG rename whose searchable tail is truncated out of the
+/* A model rebuild can reorder rows while the Shift-range anchor is stored as
+ * a view index. The anchor must follow the same canonical sprite, not keep an
+ * index that now names a different row. */
+void test_view_anchor_follows_sprite_across_model_rebuild(void) {
+    add_sources_and_build(NULL, NULL);
+    gui_rows_set_sort(ROW_SORT_NAME, false, false);
+    build_view();
+
+    int gi = find_row_by_name("gamma");
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, gi);
+    const int gview = view_pos_of_row(gi);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, gview);
+    s_sel_anchor_row = gview;
+
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const gui_sprite_ref ref = {
+        atlas->id, s_rows[gi].source_id, s_rows[gi].source_key,
+        tp_session_snapshot_revision(snapshot)};
+    TEST_ASSERT_TRUE(gui_project_set_sprite_rename(&ref, "aaa"));
+
+    build_rows();
+    build_view();
+
+    gi = find_row_by_name("gamma");
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, gi);
+    const int gview2 = view_pos_of_row(gi);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, gview2);
+    TEST_ASSERT_TRUE(gview2 != gview);
+    TEST_ASSERT_EQUAL_INT(gview2, s_sel_anchor_row);
+}
+
+/* The OOM identity projection is a different row ordering. Numeric interaction
+ * indices from the abandoned projection must not survive into it. */
+void test_view_oom_fallback_clears_focus_and_anchor(void) {
+    add_sources_and_build(NULL, NULL);
+    s_focus_view = 1;
+    s_sel_anchor_row = 2;
+
+    gui_rows_test_fail_next_view_alloc();
+    build_view();
+
+    TEST_ASSERT_EQUAL_INT(s_row_count, s_view_count);
+    for (int i = 0; i < s_view_count; ++i) {
+        TEST_ASSERT_EQUAL_INT(i, s_view[i]);
+    }
+    TEST_ASSERT_EQUAL_INT(-1, s_focus_view);
+    TEST_ASSERT_EQUAL_INT(-1, s_sel_anchor_row);
+}
+
+/* 23. Ctrl+F must find a sprite by a long rename whose searchable tail is truncated out of the
  *     224-byte display label. gamma is renamed to 250 'a's + a unique marker; the marker sits past the
  *     label cutoff (and is absent from the canonical key "gamma"), so ONLY the effective-name search
  *     added to row_matches_filter can surface the row. */
@@ -1446,6 +1493,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_view_sort_and_copy_use_effective_rename);
     RUN_TEST(test_sort_chip_click_selects_and_flips);
     RUN_TEST(test_view_focus_follows_selection_across_model_rebuild);
+    RUN_TEST(test_view_anchor_follows_sprite_across_model_rebuild);
+    RUN_TEST(test_view_oom_fallback_clears_focus_and_anchor);
     RUN_TEST(test_view_filter_finds_long_rename_beyond_label);
     RUN_TEST(test_left_section_caps_preserve_sprite_vlist_at_short_heights);
     RUN_TEST(test_recycled_view_id_double_click_requires_same_canonical_row);

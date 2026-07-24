@@ -73,7 +73,7 @@ extern int s_row_count;
  * key and performs no allocation or filesystem work. */
 void build_rows(void);
 
-/* --- filtered / sorted / collapsible VIEW over the row model (U-02 paper cuts) ---
+/* --- filtered / sorted / collapsible view over the row model ---
  * s_view[k] is an index into s_rows[]: the left panel iterates the VIEW, never s_rows
  * directly, so the text filter, folder collapse, and sort are pure functions over the
  * row model -- a view-only change never invalidates the expensive build_rows() cache,
@@ -96,7 +96,7 @@ typedef enum {
 } row_sort_key;
 
 /* Effective export/display name for a row: the sparse project override rename if one is present,
- * else the canonical export key (sprite_name); "" for rows without a name (folders/missing). F10: the
+ * else the canonical export key (sprite_name); "" for rows without a name (folders/missing). The
  * NAME sort and "Copy name" both resolve through this so a renamed sprite sorts and copies by its NEW
  * name, consistent with Rename itself. Valid after build_rows() populated the current atlas. */
 const char *gui_rows_effective_name(const sprite_row *row);
@@ -152,6 +152,12 @@ bool gui_rows_is_collapsed(tp_id128 source_id);
  * {row-cache generation, filter, sort, collapse epoch}; call once per frame after build_rows(). */
 void build_view(void);
 
+#if defined(TP_GUI_VIEW_TEST_DIR)
+/* Makes the next view-owned allocation fail so fallback behavior is
+ * deterministic in the headless projection tests. */
+void gui_rows_test_fail_next_view_alloc(void);
+#endif
+
 /* Releases all row/selection caches owned by this module. Safe before first
  * build and after a partial/OOM build; call once during GUI shutdown. */
 void gui_rows_shutdown(void);
@@ -194,7 +200,7 @@ void gui_rows_bench_shutdown(void);
 void select_row_for_result_region(const tp_result *result, int region_idx);
 void select_row_for_region(int region_idx);
 
-/* --- selection preservation across Undo/Redo (U-02 T5) ---
+/* --- selection preservation across Undo/Redo ---
  * capture: record the current primary leaf's canonical ref (call BEFORE the undo/redo mutates the
  * model). revalidate: after the rows rebuild, re-resolve the primary selection to the row carrying
  * that ref (clears it if the sprite is gone) and drop multi-select refs no longer present. Both are

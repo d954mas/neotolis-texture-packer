@@ -9,9 +9,9 @@
 #include "ui/nt_ui_scroll.h"
 #include "ui/nt_ui_tooltip.h"
 
-#include "clipboard/nt_clipboard.h" /* Copy name (U-02 T7) */
+#include "clipboard/nt_clipboard.h" /* Copy sprite display names. */
 
-#include "gui_shell_quote.h" /* POSIX shell-word quoting for "Show in Explorer" (U-02 T7) */
+#include "gui_shell_quote.h" /* POSIX quoting for file-manager commands. */
 
 #include "tp_core/tp_export.h" /* exporter registry -> target dropdown (export modal) */
 #include "tp_core/tp_journal.h" /* recovery status labels */
@@ -112,7 +112,7 @@ static bool gui_open_url(const char *url) {
 #endif
 }
 
-/* Reveal `path` in the OS file manager, selecting the file (U-02 T7 "Show in Explorer"). Best-effort;
+/* Reveal `path` in the OS file manager, selecting the file when supported. Best-effort;
  * returns whether the reveal was dispatched. Windows selects the item; POSIX opens the containing dir.
  * Windows uses ShellExecuteW on the UTF-16 path (ANSI ShellExecuteA mangled non-ASCII paths -- e.g. a
  * sprite under a Cyrillic folder); POSIX shell-quotes the path (gui_shell_squote) so an apostrophe or
@@ -230,7 +230,7 @@ static void edit_items(nt_ui_menu_ctx_t *m) {
         do_redo();
     }
 }
-/* Atlas menu (U-02 T6): Pack was previously reachable only via Ctrl+P / the canvas strip. */
+/* Atlas menu mirrors the canvas Pack action and its busy state. */
 static void atlas_items(nt_ui_menu_ctx_t *m) {
     nt_ui_menu_item_opts_t p = {.shortcut = "Ctrl+P", .disabled = !s_pack_has_sources || gui_pack_async_busy()};
     if (nt_ui_menu_item_ex(m, MK_PACK, "Pack", p)) {
@@ -404,8 +404,8 @@ void declare_context_menu(nt_ui_context_t *ctx) {
         }
         if (s_ctx_sprite_abs[0] != '\0') {
             if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_REVEAL, "Show in Explorer")) {
-                /* F12: reveal the row the menu was ARMED over (frozen payload), not the live s_sel_abs --
-                 * a keyboard-Down after opening the menu must not redirect this to a different row. */
+                /* Use the frozen context-menu payload so later keyboard movement
+                 * cannot redirect the action to another row. */
                 if (!gui_reveal_in_explorer(s_ctx_sprite_abs)) {
                     set_status_ex(STATUS_WARNING, "Could not open the file location.");
                 }

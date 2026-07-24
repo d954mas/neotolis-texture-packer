@@ -61,9 +61,7 @@ gui_actions_state s_actions = {.recovery_pending_row = -1};
 _Static_assert(sizeof s_actions.edit_sprite_source_key == TP_SRCKEY_MAX,
                "editor source-key buffer must match the canonical bound");
 
-/* True (and raises a status) when an async pack/export is running: the destructive ops (new/open/exit/
- * undo/redo) refuse while busy. Centralizes the guard the request_* fns had copy-pasted, and closes the
- * gap where undo/redo skipped it (P2 -- undo mid-pack then a pre-undo result landing was confusing). */
+/* True (and raises a status) when an async job blocks a destructive action. */
 bool gui_actions__busy_block(void) {
     if (gui_pack_async_busy()) {
         set_status_ex(STATUS_WARNING, "Wait for the pack/export to finish (or Cancel) first.");
@@ -73,17 +71,12 @@ bool gui_actions__busy_block(void) {
 }
 
 // #region undo/redo + refresh actions
-/* U-02 T5: after an undo/redo lands, drop the transient editor/anim/preview state (the model changed)
- * but KEEP the sprite selection -- gui_selection_revalidate re-resolves the ref-based primary +
- * multi-select against the rebuilt rows next. Previews of untouched atlases live in their own per-atlas
- * pack slots and are not cleared here (only the stale flag is recomputed per frame). */
+/* After undo/redo, drop transient editor and preview state but retain canonical
+ * selection refs for revalidation against rebuilt rows. */
 static void undo_redo_settle(void) {
     gui_shell_reset_shown_result();
     cancel_edit();
-    /* F2: re-resolve the VIEWED atlas by its captured stable id BEFORE clamp. If the undone/redone op
-     * inserted or removed an atlas before it, s_sel_atlas (a positional index) now points at a DIFFERENT
-     * atlas; without this the sprite selection is lost (revalidate can't find the ref in the wrong atlas).
-     * If the atlas was removed by the op, the id no longer resolves -> leave s_sel_atlas for clamp. */
+    /* Resolve by stable id before a positional index can alias another atlas. */
     if (!tp_id128_is_nil(s_reselect_atlas_id)) {
         const int idx = gui_actions__snapshot_atlas_index_by_id(
             gui_project_snapshot(), s_reselect_atlas_id);
@@ -102,10 +95,8 @@ static void undo_redo_settle(void) {
     gui_canvas_invalidate(&s_canvas);
 }
 void do_undo(void) {
-    /* F1 / spec §10: Undo/Redo are explicitly permitted while an async Pack runs (it packs on an
-     * immutable snapshot; a completed result is shown "out of date", never force-fresh -- see poll_async).
-     * So there is NO async-busy guard here. The flush guard stays: a rejected buffered gesture must not
-     * silently undo a DIFFERENT step. */
+    /* Pack uses an immutable snapshot, so only a rejected buffered gesture
+     * blocks Undo while it runs. */
     if (gui_actions__flush_failed()) {
         return; /* The buffered gesture was rejected; do not undo a different step. */
     }
@@ -119,7 +110,7 @@ void do_undo(void) {
     }
 }
 void do_redo(void) {
-    /* F1 / spec §10: permitted during an async Pack (see do_undo). Keep only the flush guard. */
+    /* Redo follows the same immutable-snapshot rule as Undo. */
     if (gui_actions__flush_failed()) {
         return; /* The buffered gesture was rejected; do not redo a different step. */
     }
@@ -190,11 +181,22 @@ static tp_status fp_collect(fp_entry **arr, int *count, int *cap,
         for (int si = 0; si < a->source_count; si++) {
             const tp_snapshot_source *source = tp_session_snapshot_source_at(snapshot, a->id, si);
             char abs[TP_IDENTITY_PATH_MAX];
-            if (!source || tp_session_snapshot_resolve_path(snapshot, a->id, source->id,
-                                                            abs, sizeof abs, error) != TP_STATUS_OK) {
-                continue;
+            if (!source) {
+                return tp_error_set(error, TP_STATUS_NOT_FOUND,
+                                    "refresh source %d in atlas %d is unavailable",
+                                    si, ai);
             }
-            if (gui_scan_is_dir(abs)) {
+            tp_status status = tp_session_snapshot_resolve_path(
+                snapshot, a->id, source->id, abs, sizeof abs, error);
+            if (status != TP_STATUS_OK) {
+                return status;
+            }
+            tp_scan_kind kind = TP_SCAN_KIND_MISSING;
+            status = tp_scan_classify_checked(abs, &kind, error);
+            if (status != TP_STATUS_OK) {
+                return status;
+            }
+            if (kind == TP_SCAN_KIND_DIRECTORY) {
                 const gui_scan_result *sc = NULL;
                 tp_status scan_status = gui_scan_get(abs, &sc, error);
                 if (scan_status != TP_STATUS_OK) {
@@ -211,7 +213,11 @@ static tp_status fp_collect(fp_entry **arr, int *count, int *cap,
             } else {
                 long long sz = -1;
                 long long mt = -1;
-                (void)gui_scan_stat(abs, &sz, &mt);
+                if (!gui_scan_stat(abs, &sz, &mt)) {
+                    return tp_error_set(
+                        error, TP_STATUS_PATH_RESOLVE_FAILED,
+                        "refresh could not stat regular source '%s'", abs);
+                }
                 tp_status push_status = fp_push(arr, count, cap, abs, sz, mt,
                                                 error);
                 if (push_status != TP_STATUS_OK) {
@@ -303,7 +309,7 @@ bool gui_actions_refresh_should_mark_stale(tp_status status,
     return status == TP_STATUS_OK || sources_invalidated;
 }
 
-/* F4: rescan all sources, diff, evict the canvas cache, mark preview stale (NOT dirty). */
+/* Rescan sources and mark derived preview data stale without dirtying the model. */
 static void do_refresh(void) {
     /* Arm the reselect machinery BEFORE refresh_diff_core's gui_project_invalidate_sources() rebuilds the
      * source set, so the per-frame gui_selection_revalidate re-anchors by {source_id, source_key} rather
@@ -332,10 +338,8 @@ static void do_refresh(void) {
     set_statusf("Refresh: +%d new, %d removed, %d changed", added, removed, changed);
 }
 
-/* F15 (bench seam): run the REAL synchronous refresh cost (fp_collect x2 + invalidate + diff)
- * headlessly, WITHOUT the UI/status/canvas/preview-stale side effects, so --bench-perf times the
- * actual folder-walk/stat work do_refresh performs instead of the near-free invalidate alone. Preserves
- * the refresh semantic-purity invariant (no revision/dirty change). Returns false on a scan failure. */
+/* Headless bench seam for the real refresh cost without UI or preview side
+ * effects. Revision and dirty state remain unchanged. */
 bool gui_actions_refresh_diff_headless(int *out_added, int *out_removed,
                                        int *out_changed) {
     tp_error error = {0};

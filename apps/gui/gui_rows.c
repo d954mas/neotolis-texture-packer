@@ -17,14 +17,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Growable-storage policy shared by the multi-select set, the
- * selection-sort companions, and the sprite-row array. These used to be fixed 4096/512-cap arrays
- * that silently DROPPED entries past the cap (sprites packed fine but vanished from the UI). Now:
- * realloc-keep-capacity -- grow geometrically (x2) on a new high-water mark, NEVER shrink, so the
- * per-frame producers (build_rows, the preview loop) never malloc in the steady state. Failure
- * policy: on realloc OOM we KEEP the old capacity and raise a STATUS_ERROR ("... truncated") -- the
- * truncation becomes LOUD, never silent, and never a crash/out-of-bounds write. The buffers are
- * module-owned, grow-only during the session, and released by gui_rows_shutdown(). */
+/* Module-owned buffers grow geometrically, never shrink during a session, and
+ * retain their prior capacity on OOM. Callers surface truncation as a status
+ * error and never write beyond the retained capacity. */
 #define MULTI_SEL_INIT_CAP 64
 #define SEL_SORT_INIT_CAP 64
 #define ROWS_INIT_CAP 256
@@ -252,6 +247,10 @@ static uint64_t s_row_cache_source_generation;
 static uint64_t s_row_cache_snapshot_lifetime;
 static uint64_t s_row_cache_pack_version; /* packed-area (§61.1 size) source: a repack must re-stamp row sizes */
 static uint64_t s_row_cache_generation;
+static bool s_anchor_ref_pending;
+static bool s_anchor_ref_is_source;
+static tp_id128 s_anchor_ref_source_id;
+static char s_anchor_ref_source_key[TP_SRCKEY_MAX];
 static bool s_selected_cache_valid;
 static uint64_t s_selected_cache_row_generation;
 static int s_selected_cache_src;
@@ -471,6 +470,20 @@ void build_rows(void) {
         s_row_cache_pack_version == pack_version) {
         return;
     }
+    s_anchor_ref_pending = false;
+    if (s_sel_anchor_row >= 0 && s_sel_anchor_row < s_view_count) {
+        const int row_index = s_view[s_sel_anchor_row];
+        if (row_index >= 0 && row_index < s_row_count) {
+            const sprite_row *anchor = &s_rows[row_index];
+            s_anchor_ref_is_source = anchor->is_source;
+            s_anchor_ref_source_id = anchor->source_id;
+            (void)snprintf(s_anchor_ref_source_key,
+                           sizeof s_anchor_ref_source_key, "%s",
+                           anchor->source_key ? anchor->source_key : "");
+            s_anchor_ref_pending =
+                !tp_id128_is_nil(s_anchor_ref_source_id);
+        }
+    }
     s_row_cache_valid = false;
     s_selected_cache_valid = false;
     s_row_cache_generation++;
@@ -512,9 +525,8 @@ void build_rows(void) {
         }
         memset(r, 0, sizeof *r);
         r->src = si;
-        /* added_at = si is the U-02 interim add-order proxy: sources are append-only / non-reorderable,
-         * so the insertion index equals add order for every reachable state. A persisted write-once
-         * added_at is an F1 schema-identity follow-up, out of U-02's no-schema-change scope. */
+        /* Sources are append-only and non-reorderable, so their current array
+         * position is their insertion order. */
         r->added_at = si;
         r->child = -1;
         r->is_source = true;
@@ -597,7 +609,7 @@ void build_rows(void) {
 }
 // #endregion
 
-// #region filtered/sorted/collapsible view over the row model (U-02 paper cuts)
+// #region filtered/sorted/collapsible view over the row model
 int *s_view;
 int s_view_count;
 static int s_view_cap;
@@ -632,6 +644,24 @@ static view_span *s_spans;
 static int s_spans_cap;
 static int *s_child_scratch;
 static int s_child_scratch_cap;
+
+#if defined(TP_GUI_VIEW_TEST_DIR)
+static bool s_test_fail_next_view_alloc;
+
+void gui_rows_test_fail_next_view_alloc(void) {
+    s_test_fail_next_view_alloc = true;
+}
+#endif
+
+static void *view_realloc(void *ptr, size_t size) {
+#if defined(TP_GUI_VIEW_TEST_DIR)
+    if (s_test_fail_next_view_alloc) {
+        s_test_fail_next_view_alloc = false;
+        return NULL;
+    }
+#endif
+    return realloc(ptr, size);
+}
 
 static bool ascii_ci_contains(const char *hay, const char *needle) {
     if (!needle || needle[0] == '\0') {
@@ -669,7 +699,7 @@ static bool row_matches_filter(const sprite_row *r) {
     if (s_view_filter[0] == '\0') {
         return true;
     }
-    /* #6: also search the EFFECTIVE name (override rename, else export key). r->label is a bounded
+    /* Also search the effective name (override rename, else export key). r->label is a bounded
      * char[224] that TRUNCATES a long "rename (file.png)" display string, and r->sprite_name holds only
      * the canonical key -- so a rename longer than ~223 bytes would be unfindable by Ctrl+F without this.
      * One override_by_key lookup per row, only on the active-filter path. */
@@ -686,7 +716,7 @@ const char *gui_rows_effective_name(const sprite_row *row) {
         !tp_id128_is_nil(row->source_id)) {
         const tp_snapshot_sprite *ov = override_by_key(row->source_id, row->source_key);
         if (ov && ov->rename && ov->rename[0] != '\0') {
-            return ov->rename; /* F10: the renamed export name wins over the canonical key */
+            return ov->rename; /* The renamed export name wins over the canonical key. */
         }
     }
     return (row->sprite_name && row->sprite_name[0] != '\0') ? row->sprite_name : "";
@@ -754,7 +784,7 @@ static int view_qsort_span(const void *pa, const void *pb) {
 static bool view_push(int row_index) {
     if (s_view_count >= s_view_cap) {
         const int newcap = s_view_cap ? s_view_cap * 2 : ROWS_INIT_CAP;
-        int *grown = realloc(s_view, (size_t)newcap * sizeof *s_view);
+        int *grown = view_realloc(s_view, (size_t)newcap * sizeof *s_view);
         if (!grown) {
             return false;
         }
@@ -771,6 +801,10 @@ static void view_fallback_identity(void) {
      * leave it invalid here or the next frame early-returns this identity view and never retries the
      * real filtered/sorted build once memory frees. */
     s_view_cache_valid = false;
+    s_focus_view = -1;
+    s_sel_anchor_row = -1;
+    s_focus_reveal_pending = false;
+    s_anchor_ref_pending = false;
     s_view_count = 0;
     for (int i = 0; i < s_row_count; ++i) {
         if (!view_push(i)) {
@@ -1049,6 +1083,8 @@ void build_view(void) {
     s_view_cache_row_generation = s_row_cache_generation;
     s_view_cache_epoch = s_view_epoch;
     if (s_row_count == 0) {
+        s_sel_anchor_row = -1;
+        s_anchor_ref_pending = false;
         return;
     }
     /* Sort-by-size needs each leaf's packed area, one pack-ref lookup per row. Compute it lazily HERE
@@ -1077,7 +1113,8 @@ void build_view(void) {
         }
         if (nspans >= s_spans_cap) {
             const int newcap = s_spans_cap ? s_spans_cap * 2 : 64;
-            view_span *grown = realloc(s_spans, (size_t)newcap * sizeof *s_spans);
+            view_span *grown =
+                view_realloc(s_spans, (size_t)newcap * sizeof *s_spans);
             if (!grown) {
                 view_fallback_identity();
                 return;
@@ -1109,7 +1146,9 @@ void build_view(void) {
                 }
                 if (nch >= s_child_scratch_cap) {
                     const int newcap = s_child_scratch_cap ? s_child_scratch_cap * 2 : 256;
-                    int *grown = realloc(s_child_scratch, (size_t)newcap * sizeof *s_child_scratch);
+                    int *grown = view_realloc(
+                        s_child_scratch,
+                        (size_t)newcap * sizeof *s_child_scratch);
                     if (!grown) {
                         view_fallback_identity();
                         return;
@@ -1138,7 +1177,7 @@ void build_view(void) {
         }
     }
     /* Re-pin keyboard focus + shift-anchor onto their original rows in the reordered view. If a row
-     * was filtered/collapsed OUT of the rebuilt view, clear the index to -1 (F6): leaving the stale
+     * was filtered/collapsed out of the rebuilt view, clear the index to -1: leaving the stale
      * numeric index in place would silently alias a DIFFERENT visible row (or point out of range). */
     if (keep_focus_row >= 0) {
         bool found = false;
@@ -1169,15 +1208,24 @@ void build_view(void) {
             s_sel_anchor_row = -1;
         }
     }
-    /* P1.2: on a MODEL REBUILD (the row generation bumped -- a sprite rename while sorting by name, or a
-     * repack while sorting by size, reorders the view) keep_focus_row was -1, so the view-only re-pin
-     * above did NOT run and s_focus_view still holds its pre-rebuild numeric index, silently aliasing a
-     * DIFFERENT sprite (F2/arrows would act on the wrong row). Re-anchor it to the row that now carries
-     * the primary selection (-1 if none/hidden). On the undo path build_view runs BEFORE
-     * gui_selection_revalidate with a stale selection, but that revalidate re-runs focus_sync with the
-     * corrected selection, so it self-corrects; on a rename/repack (no revalidate) the selection is
-     * unchanged, so focus follows the moved sprite. The view-only (rows_unchanged) re-pin above is left
-     * untouched. */
+    if (!rows_unchanged) {
+        s_sel_anchor_row = -1;
+        if (s_anchor_ref_pending) {
+            for (int k = 0; k < s_view_count; ++k) {
+                const sprite_row *row = &s_rows[s_view[k]];
+                const char *key = row->source_key ? row->source_key : "";
+                if (row->is_source == s_anchor_ref_is_source &&
+                    tp_id128_eq(row->source_id, s_anchor_ref_source_id) &&
+                    strcmp(key, s_anchor_ref_source_key) == 0) {
+                    s_sel_anchor_row = k;
+                    break;
+                }
+            }
+        }
+        s_anchor_ref_pending = false;
+    }
+    /* A model rebuild invalidates row indices. Re-anchor focus to the visible
+     * primary selection; selection revalidation corrects it again after undo. */
     if (!rows_unchanged || s_focus_reveal_pending) {
         focus_sync_to_selection();
     }
@@ -1299,6 +1347,10 @@ void gui_rows_shutdown(void) {
     s_row_cache_snapshot_lifetime = 0U;
     s_row_cache_pack_version = 0U;
     s_row_cache_generation = 0U;
+    s_anchor_ref_pending = false;
+    s_anchor_ref_is_source = false;
+    s_anchor_ref_source_id = tp_id128_nil();
+    s_anchor_ref_source_key[0] = '\0';
     s_selected_cache_valid = false;
     s_selected_cache_row_generation = 0U;
     s_selected_cache_src = -1;
@@ -1375,7 +1427,7 @@ void select_row_for_region(int region_idx) {
 }
 // #endregion
 
-// #region selection preservation across Undo/Redo (U-02 T5)
+// #region selection preservation across Undo/Redo
 static bool row_ref_present(tp_id128 source_id, const char *source_key) {
     for (int i = 0; i < s_row_count; ++i) {
         if (!s_rows[i].is_folder && s_rows[i].source_key && s_rows[i].source_key[0] != '\0' &&
@@ -1414,7 +1466,7 @@ void gui_selection_capture_reselect(void) {
     const sprite_row *leaf = gui_rows_selected_leaf();
     s_reselect_source_id = tp_id128_nil();
     s_reselect_key[0] = '\0';
-    /* F2: preserve the VIEWED ATLAS by its stable id (regardless of the leaf/folder branch below) so an
+    /* Preserve the viewed atlas by its stable id regardless of row kind, so an
      * undo/redo that inserts or removes an atlas before it -- shifting s_sel_atlas -- re-resolves onto the
      * same atlas, not a positional neighbour. nil when there is no atlas at s_sel_atlas. */
     s_reselect_atlas_id = tp_id128_nil();
@@ -1476,7 +1528,7 @@ void gui_selection_revalidate(void) {
                     continue;
                 }
                 s_sel_child = -1;
-                s_sel_missing = row->missing; /* F5: a missing source stays missing on reselect (mirror the leaf branch) */
+                s_sel_missing = row->missing; /* Missing state survives reselect. */
             }
             s_sel_src = row->src;
             (void)snprintf(s_sel_abs, sizeof s_sel_abs, "%s", row->abs);

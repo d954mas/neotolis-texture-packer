@@ -412,11 +412,11 @@ static void handle_shortcuts(void) {
     } else if (nt_input_key_is_pressed(NT_KEY_E)) {
         s_export_open = true;
     } else if (nt_input_key_is_pressed(NT_KEY_F)) {
-        s_filter_active = true; /* Ctrl+F arms the sprite-tree speed-search filter (U-02 T1) */
+        s_filter_active = true; /* Ctrl+F arms the sprite-tree speed-search filter. */
     }
 }
 
-/* Sprite-list keyboard navigation (ux.md §3.3d, U-02 T3). Runs AFTER build_view() so it acts on the
+/* Sprite-list keyboard navigation (ux.md §3.3d). Runs after build_view() so it acts on the
  * fresh filtered/sorted view. Same gating as handle_shortcuts: no field focus, no modal, not headless,
  * and Ctrl is reserved for the global shortcuts above. Arrows/Home/End/Enter/F2 drive the list focus. */
 static void handle_list_nav(void) {
@@ -531,7 +531,7 @@ static void frame(void) {
             s_confirm_open = false;
             s_after_confirm = AFTER_NONE;
         } else if (s_filter_active || gui_rows_filter_active()) {
-            gui_rows_set_filter(""); /* Esc clears the sprite-tree speed-search (U-02 T1) */
+            gui_rows_set_filter(""); /* Esc clears the sprite-tree speed-search. */
             s_filter_active = false;
             set_status("Filter cleared.");
         } else if (s_preview_active) {
@@ -638,10 +638,10 @@ static void frame(void) {
             }
         }
         build_rows();
-        build_view(); /* filtered/sorted/collapsible view over the row model (U-02) */
-        gui_selection_revalidate(); /* re-resolve/prune the selection preserved across undo (U-02 T5) */
-        filter_type_pump(); /* Ctrl+F speed-search: typed chars edit the filter (U-02 T1) */
-        handle_list_nav(); /* keyboard list focus/nav on the fresh view (U-02 T3) */
+        filter_type_pump();
+        build_view();
+        gui_selection_revalidate();
+        handle_list_nav();
         s_content_w = scale.logical_w; /* for caption/status truncation */
         compute_panel_widths(scale.logical_w); /* clamp side-panel widths so they never leave the screen */
         gui_shot_tick(); /* screenshot mode: pack + select + (post-draw) capture; no-op unless --shot */
@@ -675,16 +675,9 @@ static void frame(void) {
         if (want != s_shown_result) {
             gui_canvas_rebind_result(&s_canvas, &s_canvas_double_click, want);
             s_shown_result = want;
-            /* #4: gui_canvas_set_result just cleared the region highlight (sel_sprite -> -1). Re-derive it
-             * from the tree's primary leaf so the accent outline survives ANY result rebind -- an Undo/Redo
-             * settle, an ordinary repack, an atlas switch, OR a pack that lands LATER (a pack completing
-             * during an undo): the rebind fires again the frame its result pointer appears, so unlike the
-             * old post-undo one-shot this is never missed. ATLAS-mode only (a non-NULL want puts the canvas
-             * in ATLAS mode); guarded against an absent shown pack and a leaf not present in it
-             * (gui_pack_find_sprite_ref_in_result -> -1). A user atlas switch clears the selection first
-             * (reset_selection), so this is a no-op there -- it never fabricates a stale highlight. Runs
-             * here, BEFORE handle_canvas_input() below, so it can never fight a click. This replaces the
-             * former post-undo one-shot (now retired). */
+            /* Result rebinding clears the highlight. Restore it from the
+             * primary leaf before canvas input when that leaf exists in the
+             * displayed atlas result. */
             if (want && gui_canvas_get_mode(&s_canvas) == GUI_CANVAS_ATLAS) {
                 const sprite_row *leaf = gui_rows_selected_leaf();
                 if (leaf && leaf->source_key && leaf->source_key[0] != '\0') {
@@ -711,7 +704,7 @@ static void frame(void) {
                 const gui_sprite_ref sprite = {
                     atlas->id, selected->source_id, selected->source_key,
                     tp_session_snapshot_revision(snapshot)};
-                /* EFFECTIVE value (#5): a slice9 edit BUFFERS until the gesture boundary, so the committed
+                /* A slice9 edit buffers until the gesture boundary, so the committed
                  * record freezes mid-typing. Prefer the buffered slice9 (peek) when one is in flight for
                  * this atlas+sprite, so the guides move THIS frame; else read the committed record. */
                 int eff[4];
@@ -880,7 +873,7 @@ static int gui_main_utf8(int argc, char *argv[]) {
         /* D3: if the PREVIOUS run crashed it left a marker -> offer to open the diagnostics root, then
          * clear it (once). Self-contained startup step: no ordering coupling with the upcoming R
          * recovery modal. No-op with no marker / headless. Native modal, so before window init is OK.
-         * Disabled in the selftest build (like the recovery journal/notice below): ctest #50 runs THIS
+         * Disabled in the selftest build (like the recovery journal/notice below): the integration test runs this
          * exe NON-headless, so a stale/self-written marker would block ctest on the native modal.
          * Interactive-only by construction -- the shipped app never sets NTPACKER_GUI_SELFTEST. */
         gui_crash_report_prompt();
@@ -1026,7 +1019,7 @@ static int gui_main_utf8(int argc, char *argv[]) {
             set_statusf_ex(STATUS_WARNING, "Resolve recovered projects first, then open %s via File > Open", proj_arg);
             break;
         case GUI_STARTUP_MISSING:
-            if (!recovery_warn_shown) { /* stale argv -> continue with untitled (F6b); keep any recovery warning */
+            if (!recovery_warn_shown) { /* Stale argv continues untitled; preserve recovery warnings. */
                 set_statusf_ex(STATUS_WARNING, "project not found: %s", proj_arg);
             }
             break;
