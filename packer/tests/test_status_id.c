@@ -64,11 +64,13 @@ void test_status_id_tokens(void) {
     /* H0.3 fallible builder containment fault (decision 0018). */
     TEST_ASSERT_EQUAL_STRING("builder_crashed",
                              tp_status_id(TP_STATUS_BUILDER_CRASHED));
+    /* U-02 cooperative cancellation. */
+    TEST_ASSERT_EQUAL_STRING("cancelled", tp_status_id(TP_STATUS_CANCELLED));
 }
 
 /* Tokens are machine ids: lowercase, no spaces (unlike tp_status_str prose). */
 void test_status_id_is_machine_token(void) {
-    for (int s = TP_STATUS_OK; s <= TP_STATUS_BUILDER_CRASHED; s++) {
+    for (int s = TP_STATUS_OK; s <= TP_STATUS_CANCELLED; s++) {
         const char *id = tp_status_id((tp_status)s);
         for (const char *c = id; *c; c++) {
             TEST_ASSERT_TRUE_MESSAGE(*c != ' ', id);

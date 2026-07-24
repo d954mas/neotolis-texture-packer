@@ -37,6 +37,11 @@ bool gui_scan_is_dir(const char *abs);
  * (ux.md §3.7) and to keep a stale argv Open from being fatal (F6b). */
 bool gui_scan_exists(const char *abs);
 
+/* Typed form used by source rows: preserves NOT_FOUND versus probe failures
+ * while retaining the same benchmark accounting as gui_scan_exists(). */
+tp_status gui_scan_classify_checked(const char *abs, tp_scan_kind *out,
+                                    tp_error *err);
+
 /* Stats a FILE at `abs`: writes size + platform mtime, returns true if it exists as a
  * regular file. Change detection for Refresh (F4). Any out pointer may be NULL. */
 bool gui_scan_stat(const char *abs, long long *out_size, long long *out_mtime);

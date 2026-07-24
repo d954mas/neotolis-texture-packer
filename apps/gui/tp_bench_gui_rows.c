@@ -35,6 +35,14 @@ int s_sel_src = -1;
 int s_sel_child = -1;
 char s_sel_abs[TP_IDENTITY_PATH_MAX];
 bool s_sel_missing;
+bool s_reselect_pending;
+tp_id128 s_reselect_source_id;
+char s_reselect_key[TP_SRCKEY_MAX];
+tp_id128 s_reselect_atlas_id;                /* F2: referenced by gui_selection_capture_reselect */
+char s_ctx_sprite_abs[TP_IDENTITY_PATH_MAX]; /* F12: not referenced by gui_rows.c, defined for parity */
+int s_focus_view = -1;     /* build_view() re-pins keyboard focus; the bench never drives a view */
+int s_sel_anchor_row = -1; /* build_view() re-pins the shift-anchor; unused in the row benchmark */
+bool s_focus_follow;       /* select_row_for_region requests ensure-visible; unused in the row benchmark */
 static const tp_session_snapshot *s_fixture_snapshot;
 static uint64_t s_fixture_snapshot_lifetime;
 
@@ -61,6 +69,19 @@ void set_statusf_ex(status_sev_t sev, const char *fmt, ...) {
 const tp_result *gui_pack_result(int atlas_index) {
     (void)atlas_index;
     return NULL;
+}
+
+uint64_t gui_pack_result_version(int atlas_index) {
+    (void)atlas_index;
+    return 0U; /* no pack-result slot in the row benchmark -> stable version, packed area stays 0 */
+}
+
+int gui_pack_find_sprite_ref(int atlas_index, tp_id128 source_id,
+                             const char *source_key) {
+    (void)atlas_index;
+    (void)source_id;
+    (void)source_key;
+    return -1; /* no packed regions -> every §61.1 `size` resolves to 0 */
 }
 
 bool gui_pack_sprite_matches_ref(int atlas_index, int sprite_index,
@@ -556,11 +577,10 @@ static bool run_fixture(row_fixture *fixture, int iterations) {
     const double p50 = tp_bench_samples_percentile(&samples, 50U);
     const double p95 = tp_bench_samples_percentile(&samples, 95U);
     (void)printf("   steady_p50=%.6f ms steady_p95=%.6f ms accepted=%zu "
-                 "failed=%zu key_checks=%llu row_heap_allocs=%llu fs_calls=0\n",
+                 "failed=%zu key_checks=%llu row_string_allocs=%llu fs_calls=0\n",
                  p50, p95, samples.count, samples.failed,
                  (unsigned long long)rows.cache_key_checks,
-                 (unsigned long long)(rows.row_realloc_calls +
-                                      rows.override_index_realloc_calls));
+                 (unsigned long long)rows.row_string_allocs);
 
     /* Invalidation and snapshot replacement stay outside each timed rebuild. */
     tp_bench_samples rebuild_samples;
@@ -573,7 +593,9 @@ static bool run_fixture(row_fixture *fixture, int iterations) {
     const uint64_t expected_lookups = (uint64_t)fixture->spec.children +
                                       (fixture->spec.children > 0 ? 1U : 0U);
     const uint64_t expected_gets = fixture->spec.children > 0 ? 1U : 0U;
-    const uint64_t expected_is_dir = fixture->spec.children > 0 ? 1U : 0U;
+    /* Source kind is canonical model data; rebuild must not spend another
+     * filesystem probe rediscovering folder versus file. */
+    const uint64_t expected_is_dir = 0U;
     (void)printf("   rebuild_samples_ms:");
     for (int i = 0; i < warmup_iterations + iterations; ++i) {
         if (!fixture_publish_source_generation(fixture)) {
@@ -629,7 +651,7 @@ static bool run_fixture(row_fixture *fixture, int iterations) {
     (void)printf("   rebuild_p50=%.6f ms rebuild_p95=%.6f ms accepted=%zu "
                  "failed=%zu sources=%llu children=%llu "
                  "override_inserts=%llu override_lookups=%llu "
-                 "override_probes=%llu linear_units=%llu row_heap_allocs=0\n",
+                 "override_probes=%llu linear_units=%llu row_string_allocs=%llu\n",
                  tp_bench_samples_percentile(&rebuild_samples, 50U),
                  tp_bench_samples_percentile(&rebuild_samples, 95U),
                  rebuild_samples.count, rebuild_samples.failed,
@@ -638,7 +660,8 @@ static bool run_fixture(row_fixture *fixture, int iterations) {
                  (unsigned long long)rebuild_rows.override_inserts,
                  (unsigned long long)rebuild_rows.override_lookup_calls,
                  (unsigned long long)rebuild_rows.override_probes,
-                 (unsigned long long)linear_units);
+                 (unsigned long long)linear_units,
+                 (unsigned long long)rebuild_rows.row_string_allocs);
     return true;
 }
 

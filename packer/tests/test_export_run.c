@@ -23,6 +23,7 @@
 #include "tp_core/tp_identity.h"
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_project.h"
+#include "tp_core/tp_session.h"
 #include "tp_core/tp_build_worker.h"
 #include "tp_project_mutation_internal.h"
 #include "unity.h"
@@ -46,6 +47,8 @@ static tp_exporter g_nopivot;
 static tp_exporter g_norot;
 static tp_exporter g_list_error;
 static int g_list_error_write_calls;
+
+void tp_export_run__test_set_report_alloc_fail(int nth);
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -778,6 +781,170 @@ static void test_custom_output_listing_failure_prevents_wet_write_and_matches_dr
     tp_project_destroy(proj);
 }
 
+/* Snapshot input admission is complete before target output paths are resolved.
+ * A later orchestration failure must therefore retain READY instead of leaving
+ * the admission outcome at its NOT_EVALUATED zero value. */
+static void test_snapshot_report_marks_nonempty_input_ready_before_output_resolution(void) {
+    char source_path[1200];
+    TEST_ASSERT_TRUE(
+        snprintf(source_path, sizeof source_path, "%s-0.png", g_A) > 0);
+
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    tp_project_atlas *atlas = tp_project_get_atlas(project, 0);
+    atlas->id = (tp_id128){{0x31U}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_source(atlas, source_path));
+    atlas->sources[0].id = (tp_id128){{0x32U}};
+
+    char out_path[TP_IDENTITY_PATH_MAX];
+    memset(out_path, 'a', sizeof out_path - 2U);
+    out_path[sizeof out_path - 2U] = '\0';
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_target(atlas, TP_EXPORTER_ID_JSON_NEOTOLIS,
+                                    out_path, NULL));
+    atlas->targets[0].id = (tp_id128){{0x33U}};
+
+    char project_path[1200];
+    TEST_ASSERT_TRUE(snprintf(project_path, sizeof project_path,
+                              "%s/admission-outcome.ntpacker_project",
+                              g_dir) > 0);
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_save(project, project_path, &error));
+    tp_project_destroy(project);
+
+    tp_session_snapshot *snapshot = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_snapshot_load(project_path, &snapshot,
+                                                   &error));
+    tp_export_snapshot_job *job = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_export_snapshot_job_create(snapshot, g_dir, &job, &error));
+    tp_session_snapshot_destroy(snapshot);
+
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_export_notices notices;
+    tp_export_notices_init(&notices);
+    tp_export_report report;
+    memset(&report, 0, sizeof report);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_export_snapshot_job_run_atlas_ex(
+            job, 0, arena, &notices, &report, NULL, NULL, NULL, &error));
+    TEST_ASSERT_EQUAL_INT(TP_EXPORT_INPUT_READY, report.input_outcome);
+
+    tp_export_notices_free(&notices);
+    tp_arena_destroy(arena);
+    tp_export_snapshot_job_destroy(job);
+    (void)remove(project_path);
+}
+
+static void test_report_marks_pre_target_setup_failure_as_pack_failed(void) {
+    tp_pack_sprite_desc sprite = {
+        .name = "wide",
+        .rgba = g_wide,
+        .w = 120,
+        .h = 24,
+        .origin_x = 0.5F,
+        .origin_y = 0.5F,
+    };
+    tp_export_report report;
+    memset(&report, 0, sizeof report);
+    const tp_export_run_opts opts = {.report = &report};
+    tp_export_notices notices;
+    tp_export_notices_init(&notices);
+    tp_error error = {{0}};
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_export_run_ex(g_proj, 0, &sprite, 1, g_dir, NULL, &notices, NULL,
+                         &opts, &error));
+    TEST_ASSERT_TRUE_MESSAGE(
+        report.pack_failed,
+        "a failure before target reporting must retain its pack/setup class");
+    TEST_ASSERT_EQUAL_INT(0, report.target_count);
+
+    tp_export_notices_free(&notices);
+}
+
+static void test_report_page_oom_leaves_no_partial_runs(void) {
+    tp_pack_sprite_desc sprites[3];
+    memset(sprites, 0, sizeof sprites);
+    sprites[0] = (tp_pack_sprite_desc){
+        .name = "wide", .rgba = g_wide, .w = 120, .h = 24,
+        .origin_x = 0.5F, .origin_y = 0.5F};
+    sprites[1] = (tp_pack_sprite_desc){
+        .name = "tall", .rgba = g_tall, .w = 24, .h = 100,
+        .origin_x = 0.5F, .origin_y = 0.5F};
+    sprites[2] = (tp_pack_sprite_desc){
+        .name = "piv", .rgba = g_piv, .w = 30, .h = 20,
+        .origin_x = 1.5F, .origin_y = -0.25F};
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_export_notices notices;
+    tp_export_notices_init(&notices);
+    tp_export_report report;
+    memset(&report, 0, sizeof report);
+    const tp_export_run_opts opts = {.report = &report, .dry_run = true};
+    tp_error error = {{0}};
+
+    tp_export_run__test_set_report_alloc_fail(1);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OOM,
+        tp_export_run_ex(g_proj, 0, sprites, 3, g_dir, arena, &notices, NULL,
+                         &opts, &error));
+    TEST_ASSERT_EQUAL_INT(0, report.run_count);
+    TEST_ASSERT_NULL(report.runs);
+    TEST_ASSERT_TRUE(report.report_failed);
+
+    tp_export_notices_free(&notices);
+    tp_arena_destroy(arena);
+}
+
+static bool cancel_export_run(void *ctx) {
+    (void)ctx;
+    return true;
+}
+
+static void test_export_run_honors_cancel_before_safe_pack_phase(void) {
+    tp_pack_sprite_desc sprite = {
+        .name = "cancelled",
+        .rgba = g_piv,
+        .w = 30,
+        .h = 20,
+        .origin_x = 0.5F,
+        .origin_y = 0.5F,
+    };
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_export_notices notices;
+    tp_export_notices_init(&notices);
+    tp_export_report report;
+    memset(&report, 0, sizeof report);
+    const tp_cancel_token cancel = {cancel_export_run, NULL};
+    const tp_export_run_opts opts = {
+        .report = &report,
+        .cancel = &cancel,
+    };
+    tp_error error = {{0}};
+    int runs = -1;
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_CANCELLED,
+        tp_export_run_ex(g_proj, 0, &sprite, 1, g_dir, arena, &notices,
+                         &runs, &opts, &error));
+    TEST_ASSERT_EQUAL_INT(0, runs);
+    TEST_ASSERT_EQUAL_INT(0, report.target_count);
+    TEST_ASSERT_NOT_NULL(strstr(error.msg, "cancel"));
+
+    tp_export_notices_free(&notices);
+    tp_arena_destroy(arena);
+}
+
 int main(int argc, char **argv) {
     if (tp_build_is_worker_invocation(argc, argv)) {
         return tp_build_worker_main();
@@ -798,6 +965,10 @@ int main(int argc, char **argv) {
     RUN_TEST(test_dry_run);
     RUN_TEST(test_dry_run_rejects_the_same_output_path_overflow_as_wet_export);
     RUN_TEST(test_custom_output_listing_failure_prevents_wet_write_and_matches_dry_run);
+    RUN_TEST(test_snapshot_report_marks_nonempty_input_ready_before_output_resolution);
+    RUN_TEST(test_report_marks_pre_target_setup_failure_as_pack_failed);
+    RUN_TEST(test_report_page_oom_leaves_no_partial_runs);
+    RUN_TEST(test_export_run_honors_cancel_before_safe_pack_phase);
     int rc = UNITY_END();
     tp_export_notices_free(&g_notices);
     tp_project_destroy(g_proj);

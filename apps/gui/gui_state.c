@@ -68,8 +68,8 @@ uint32_t s_id_status_pill;
 uint32_t s_id_right_content;
 uint32_t s_id_export_modal;
 uint32_t s_id_recovery;
-uint32_t s_id_mb_file, s_id_mb_edit, s_id_mb_view, s_id_mb_help;
-uint32_t s_id_menu_file, s_id_menu_edit, s_id_menu_view, s_id_menu_help;
+uint32_t s_id_mb_file, s_id_mb_edit, s_id_mb_atlas, s_id_mb_view, s_id_mb_help;
+uint32_t s_id_menu_file, s_id_menu_edit, s_id_menu_atlas, s_id_menu_view, s_id_menu_help;
 
 /* --- primary selection --- */
 int s_sel_atlas;
@@ -83,6 +83,13 @@ gui_selected_sprite *s_multi_sel;
 int s_multi_sel_count;
 int s_multi_sel_cap;
 int s_sel_anchor_row = -1;
+int s_focus_view = -1;
+bool s_focus_follow = false;
+bool s_filter_active = false;
+bool s_reselect_pending = false;
+tp_id128 s_reselect_source_id;
+char s_reselect_key[TP_SRCKEY_MAX];
+tp_id128 s_reselect_atlas_id; /* F2: viewed-atlas stable id captured for undo/redo re-resolution */
 
 /* --- animation selection --- */
 int s_sel_anim = -1;
@@ -140,6 +147,7 @@ tp_id128 s_ctx_sprite_source_id;
 int64_t s_ctx_sprite_revision;
 char s_ctx_sprite_source_key[TP_SRCKEY_MAX];
 char s_ctx_sprite_display_name[TP_SRCKEY_MAX];
+char s_ctx_sprite_abs[TP_IDENTITY_PATH_MAX]; /* F12: frozen reveal path (see gui_state.h) */
 bool s_ctx_leaf;
 bool s_ctx_removable;
 

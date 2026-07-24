@@ -48,6 +48,7 @@
 #include "gui_shell.h"    /* UI_STATE_SLOTS / UI_STATE_PROBE_MAX / UI_ROW_ID_RING */
 #include "gui_startup.h"  /* H/P1-8: gui_startup_decide + GUI_STARTUP_* (J14 truth table) */
 #include "gui_state.h"    /* s_canvas / s_sel_* / s_sec_* / s_about_open / s_export_open / s_ctx / s_id_* */
+#include "gui_view_chrome.h" /* menu-open keyboard guard */
 
 static tp_journal_io s_test_recovery_io; /* borrowed while the session owns ctx */
 
@@ -826,6 +827,29 @@ void run_selftest(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
     nt_log_info("SELFTEST: begin");
+
+    close_all_menus();
+    NT_ASSERT(!gui_view_chrome_any_menu_open() &&
+              "closed chrome must not block keyboard routing");
+    NT_ASSERT(!gui_view_chrome_consume_escape() &&
+              "Escape must remain available when no menu is open");
+    s_ctx_state.open = true;
+    NT_ASSERT(gui_view_chrome_any_menu_open() &&
+              "an open context menu blocks global/list keyboard routing");
+    NT_ASSERT(gui_view_chrome_consume_escape() &&
+              "Escape must be consumed by an open context menu");
+    NT_ASSERT(!gui_view_chrome_any_menu_open() &&
+              "consumed Escape must close the context menu");
+    for (int menu = 0; menu < 5; ++menu) {
+        gui_view_chrome_selftest_set_menubar_open(menu, true);
+        NT_ASSERT(gui_view_chrome_any_menu_open() &&
+                  "every menubar dropdown blocks global/list keyboard routing");
+        NT_ASSERT(gui_view_chrome_consume_escape() &&
+                  "Escape must be consumed by every menubar dropdown");
+        NT_ASSERT(!gui_view_chrome_any_menu_open() &&
+                  "consumed Escape must close every menubar dropdown");
+    }
+
     gui_project_init();
     NT_ASSERT(tp_session_snapshot_atlas_count(gui_project_snapshot()) == 1);
 
@@ -1017,6 +1041,34 @@ void run_selftest(void) {
                         okr ? "" : pe);
             NT_ASSERT(okr && rr && rr->sprite_count == 3 && rr->page_count >= 1 && "pack rotate");
             NT_ASSERT(rotate_a >= 0 && "canonical region lookup 'a.png'");
+
+            /* U-02 finding-1: a canvas-region click (select_row_for_region) must re-pin BOTH the keyboard
+             * focus and the Shift-range anchor onto the newly selected row, so F2/arrows act on the clicked
+             * sprite, not the previously focused one. Build the row model + view for the packed atlas, seed
+             * the stale-focus state a real click starts from (focus/anchor on a DIFFERENT row A), then assert
+             * the click re-pins both onto 'a.png'. Headless-reachable (run_selftest), unlike the visual-phase
+             * select_row_for_region callsites which the NTPACKER_GUI_HEADLESS jump to phase 16 skips. */
+            s_sel_atlas = i_rotate;
+            build_rows();
+            build_view();
+            s_focus_view = -1;      /* pre-fix left focus on row A here; the re-pin must move it */
+            s_sel_anchor_row = -1;
+            select_row_for_region(rotate_a);
+            NT_ASSERT(s_focus_view >= 0 && s_focus_view < s_view_count &&
+                      "select_row_for_region re-pins keyboard focus onto the selected row");
+            {
+                const sprite_row *frow = &s_rows[s_view[s_focus_view]];
+                const bool focus_on_selection =
+                    frow->is_source ? (s_sel_src == frow->src && s_sel_child == -1)
+                                    : (s_sel_src == frow->src && s_sel_child == frow->child);
+                NT_ASSERT(focus_on_selection &&
+                          "the re-pinned focus row is the one carrying the primary selection");
+            }
+            NT_ASSERT(s_sel_anchor_row == s_focus_view &&
+                      "select_row_for_region anchors the Shift-range on the new focus");
+            nt_log_info("SELFTEST: canvas-click focus re-pin OK (focus_view=%d anchor=%d view_count=%d)",
+                        s_focus_view, s_sel_anchor_row, s_view_count);
+
             char pe2[256] = {0};
             const bool okb = (i_basic >= 0) && gui_pack_atlas(i_basic, &ms_b, pe2, sizeof pe2, note, sizeof note);
             const tp_result *rb = gui_pack_result(i_basic);

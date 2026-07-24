@@ -155,6 +155,18 @@ nt_set_warning_flags(tp_test_gui_paths)
 nt_set_sanitizer_flags(tp_test_gui_paths)
 add_test(NAME tp_gui_paths COMMAND tp_test_gui_paths)
 
+# POSIX shell-quote unit test (U-02): gui_shell_quote.h's gui_shell_squote() wraps a user-derived path
+# as ONE single-quoted shell word (apostrophes -> '\''), the single source of truth for the system()-
+# dispatched "open in the OS file manager" helpers. Header-only + POSIX-only, so the test body is
+# #ifndef _WIN32; the local Windows build compiles a trivially-passing stub while Linux CI runs the real
+# assertions under ASan+UBSan. Minimal deps -- only unity (the header pulls in nothing else).
+add_executable(tp_test_gui_shell_quote test_gui_shell_quote.c)
+target_link_libraries(tp_test_gui_shell_quote PRIVATE unity)
+target_compile_options(tp_test_gui_shell_quote PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_gui_shell_quote)
+nt_set_sanitizer_flags(tp_test_gui_shell_quote)
+add_test(NAME tp_gui_shell_quote COMMAND tp_test_gui_shell_quote)
+
 # Canonical GUI identity regression: two distinct sources may expose the same
 # source-local key.  The headless target exercises the production row,
 # selection/action and project/session adapters without creating a window.
@@ -209,6 +221,60 @@ target_compile_options(tp_test_gui_canonical_identity PRIVATE -U_DLL)
 nt_set_warning_flags(tp_test_gui_canonical_identity)
 nt_set_sanitizer_flags(tp_test_gui_canonical_identity)
 add_test(NAME tp_gui_canonical_identity COMMAND tp_test_gui_canonical_identity)
+
+# U-02 sprite-tree VIEW-layer regression: the filter/sort/collapse projection
+# (s_view over s_rows) is a pure function of the cached row model.  Same headless
+# harness + link set as the canonical-identity target -- no window, GL, or pack job.
+add_executable(tp_test_gui_view
+    test_gui_view.c
+    gui_state.c
+    gui_actions.c
+    gui_actions_dialogs.c
+    gui_actions_edits.c
+    gui_actions_pack.c
+    gui_actions_preview.c
+    gui_actions_recovery.c
+    gui_rows.c
+    gui_project.c
+    gui_project_file.c
+    gui_project_mutations.c
+    gui_project_pending.c
+    gui_project_recovery.c
+    gui_session_adapter.c
+    gui_scan.c
+    gui_canvas.c
+    gui_canvas_resources.c
+    gui_pack.c
+    gui_pack_jobs.c
+    gui_pack_preview.c
+    gui_paths.c
+)
+if(WIN32)
+    target_sources(tp_test_gui_view PRIVATE
+        "${CMAKE_SOURCE_DIR}/apps/common/nt_utf8_argv.c")
+endif()
+target_link_libraries(tp_test_gui_view PRIVATE
+    nt_core nt_app nt_window nt_input nt_math nt_log nt_time nt_resource
+    nt_material nt_shared nt_atlas
+    nt_sprite_renderer nt_text_renderer nt_font nt_ui
+    nt_render nt_hash nt_mem_scratch nt_shape_renderer
+    nt_gfx nt_http_stub nt_fs nt_clipboard
+    tp_build stb_image tinyfiledialogs tinycthread unity
+)
+target_include_directories(tp_test_gui_view PRIVATE
+    "${CMAKE_SOURCE_DIR}/packer/src"
+    "${CMAKE_SOURCE_DIR}/apps/common"
+)
+target_compile_definitions(tp_test_gui_view PRIVATE
+    TP_GUI_VIEW_TEST_DIR="${CMAKE_CURRENT_BINARY_DIR}/tp_gui_view_tmp"
+    _CRT_SECURE_NO_WARNINGS
+    NT_INTROSPECT_ENABLED=$<BOOL:${NT_INTROSPECT_ENABLED}>
+    NT_INTROSPECT_WRITE_ENABLED=$<BOOL:${NT_INTROSPECT_WRITE_ENABLED}>
+)
+target_compile_options(tp_test_gui_view PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_gui_view)
+nt_set_sanitizer_flags(tp_test_gui_view)
+add_test(NAME tp_gui_view COMMAND tp_test_gui_view)
 
 # P1-10 action/state trace oracle.  This is deliberately a separate headless
 # target: decomposition of gui_actions/gui_project must preserve between-frame

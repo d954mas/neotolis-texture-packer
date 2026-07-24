@@ -189,6 +189,13 @@ static void desc_vec_free(desc_vec *dv) {
 }
 
 tp_status tp_pack_input_build(const tp_project *p, int atlas_index, tp_pack_input *out, tp_error *err) {
+    return tp_pack_input_build_cancellable(p, atlas_index, out, NULL, err);
+}
+
+tp_status tp_pack_input_build_cancellable(const tp_project *p, int atlas_index,
+                                          tp_pack_input *out,
+                                          const tp_cancel_token *cancel,
+                                          tp_error *err) {
     if (!out) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_pack_input_build: out is NULL");
     }
@@ -209,8 +216,14 @@ tp_status tp_pack_input_build(const tp_project *p, int atlas_index, tp_pack_inpu
     const tp_project_atlas *a = &p->atlases[atlas_index];
 
     desc_vec dv = {0};
-    int missing = 0;
     for (int si = 0; si < a->source_count; si++) {
+        /* Poll between sources: a long source list (or a cancel raised while the
+         * previous folder walked) stops here rather than resolving/scanning more. */
+        if (tp_cancel_requested(cancel)) {
+            desc_vec_free(&dv);
+            return tp_error_set(err, TP_STATUS_CANCELLED,
+                                "pack input build cancelled");
+        }
         const char *src_path = a->sources[si].path;
         char abs[TP_IDENTITY_PATH_MAX];
         tp_status resolve_status =
@@ -221,24 +234,43 @@ tp_status tp_pack_input_build(const tp_project *p, int atlas_index, tp_pack_inpu
                                 "tp_pack_input_build: source path %d could not be resolved",
                                 si);
         }
-        if (!tp_scan_exists(abs)) {
-            missing++;
-            continue;
+        /* One structured stat classifies the source without collapsing an absent
+         * path and permission/I/O failures into the same "missing" value. */
+        tp_scan_kind source_kind = TP_SCAN_KIND_MISSING;
+        tp_error probe_error = {{0}};
+        const tp_status probe_status =
+            tp_scan_classify_checked(abs, &source_kind, &probe_error);
+        if (probe_status != TP_STATUS_OK) {
+            desc_vec_free(&dv);
+            return tp_error_set(
+                err, probe_status,
+                "tp_pack_input_build: source %d stat failed: %s", si,
+                probe_error.msg[0] ? probe_error.msg
+                                   : tp_status_str(probe_status));
         }
-        if (tp_scan_is_dir(abs)) {
+        if (source_kind == TP_SCAN_KIND_DIRECTORY) {
             /* Folder: recurse (entries already sorted by rel) and append in scan
-             * order. NO global sort across sources -- layout depends on input order. */
+             * order. NO global sort across sources -- layout depends on input order.
+             * The walk polls `cancel` per entry; a cancelled walk returns
+             * TP_STATUS_CANCELLED, freeing the partial input below. */
             tp_scan_result sc = {0};
-            tp_status scan_status = tp_scan_dir(abs, &sc, err);
-            if (scan_status == TP_STATUS_NOT_FOUND) {
-                missing++;
-                continue;
-            }
+            tp_status scan_status = tp_scan_dir_cancellable(abs, &sc, cancel, err);
             if (scan_status != TP_STATUS_OK) {
                 desc_vec_free(&dv);
                 return scan_status;
             }
             for (int ci = 0; ci < sc.count; ci++) {
+                /* Materializing the descriptors for a large folder is itself a long
+                 * loop; poll `cancel` here (per entry, mirroring the scan above) so a
+                 * cancel raised during materialization is honored promptly instead of
+                 * only after the whole loop finishes. Free the partial scan + descs
+                 * and report CANCELLED exactly like the scan-level cancel does. */
+                if (tp_cancel_requested(cancel)) {
+                    tp_scan_free(&sc);
+                    desc_vec_free(&dv);
+                    return tp_error_set(err, TP_STATUS_CANCELLED,
+                                        "pack input build cancelled");
+                }
                 tp_status status = desc_add(
                     &dv, a, a->sources[si].id, sc.entries[ci].rel,
                     sc.entries[ci].abs, err);
@@ -260,15 +292,36 @@ tp_status tp_pack_input_build(const tp_project *p, int atlas_index, tp_pack_inpu
         }
     }
 
+    /* Keep the complete descriptor candidate private until the final cooperative
+     * boundary. A cancel raised during the last source must publish nothing. */
+    if (tp_cancel_requested(cancel)) {
+        desc_vec_free(&dv);
+        return tp_error_set(err, TP_STATUS_CANCELLED,
+                            "pack input build cancelled");
+    }
     out->descs = dv.v;
     out->count = dv.n;
-    out->missing_sources = missing;
+    out->missing_sources = 0;
     return TP_STATUS_OK;
 }
 
 tp_status tp_pack_input_build_snapshot(const tp_session_snapshot *snapshot,
                                        tp_id128 atlas_id, tp_pack_input *out,
                                        tp_error *err) {
+    return tp_pack_input_build_snapshot_cancellable(snapshot, atlas_id, out, NULL,
+                                                    err);
+}
+
+tp_status tp_pack_input_build_snapshot_cancellable(
+    const tp_session_snapshot *snapshot, tp_id128 atlas_id, tp_pack_input *out,
+    const tp_cancel_token *cancel, tp_error *err) {
+    if (!out) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "pack snapshot input requires output");
+    }
+    out->descs = NULL;
+    out->count = 0;
+    out->missing_sources = 0;
     if (!snapshot) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "pack snapshot input requires snapshot");
@@ -279,7 +332,7 @@ tp_status tp_pack_input_build_snapshot(const tp_session_snapshot *snapshot,
         return tp_error_set(err, TP_STATUS_NOT_FOUND,
                             "pack snapshot atlas id was not found");
     }
-    return tp_pack_input_build(project, atlas_index, out, err);
+    return tp_pack_input_build_cancellable(project, atlas_index, out, cancel, err);
 }
 
 tp_status tp_pack_settings_build_snapshot(const tp_session_snapshot *snapshot,

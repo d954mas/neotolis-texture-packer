@@ -91,8 +91,8 @@ extern uint32_t s_id_recovery;     /* R6b: the startup crash-recovery modal */
 /* Menubar buttons + their drop-down panels. Same class as s_id_ctx_menu below (an id seeded once in
  * ensure_ids / the shell, read only by the declare machinery that moved to gui_view_chrome.c in step
  * 6b) -- moved here alongside it rather than left main.c-local, so it can never be view-local either. */
-extern uint32_t s_id_mb_file, s_id_mb_edit, s_id_mb_view, s_id_mb_help;
-extern uint32_t s_id_menu_file, s_id_menu_edit, s_id_menu_view, s_id_menu_help;
+extern uint32_t s_id_mb_file, s_id_mb_edit, s_id_mb_atlas, s_id_mb_view, s_id_mb_help;
+extern uint32_t s_id_menu_file, s_id_menu_edit, s_id_menu_atlas, s_id_menu_view, s_id_menu_help;
 
 /* --- primary selection (s_sel_src/child stays the last-clicked selection for the region panel + canvas sync) --- */
 extern int s_sel_atlas;      /* selected atlas index */
@@ -112,7 +112,22 @@ typedef struct gui_selected_sprite {
 extern gui_selected_sprite *s_multi_sel;
 extern int s_multi_sel_count;
 extern int s_multi_sel_cap;  /* allocated slots in s_multi_sel (grow-only; 0 == unallocated) */
-extern int s_sel_anchor_row; /* row index anchor for Shift-range selection */
+extern int s_sel_anchor_row; /* VIEW index anchor for Shift-range selection (s_view space) */
+extern int s_focus_view;     /* keyboard-focused row (index into s_view; -1 none) — U-02 list focus model */
+extern bool s_focus_follow;  /* one-shot ensure-visible request; set by keyboard nav AND canvas-click re-pin, consumed by declare_sprite_list */
+extern bool s_filter_active; /* Ctrl+F speed-search armed: typed chars edit the sprite-tree filter (U-02 T1) */
+
+/* U-02 T5: preserve the sprite selection across Undo/Redo. do_undo captures the primary leaf's
+ * canonical ref BEFORE the model shifts indices; after the rows rebuild, gui_selection_revalidate
+ * re-resolves the primary + prunes the (ref-based) multi-select of sprites that no longer exist. */
+extern bool s_reselect_pending;
+extern tp_id128 s_reselect_source_id;
+extern char s_reselect_key[TP_SRCKEY_MAX];
+/* F2: the VIEWED atlas's stable id, captured alongside the primary ref so undo_redo_settle can
+ * re-resolve s_sel_atlas (a positional index) onto the same atlas after an atlas insert/remove. */
+extern tp_id128 s_reselect_atlas_id;
+/* F3: one-shot -- undo_redo_settle raises it so the frame loop re-derives the canvas region highlight
+ * from the preserved primary leaf (gui_shell_reset_shown_result/set_result drop sel_sprite on rebind). */
 
 /* Animation selection + editor state (ux.md §3.7b). */
 extern int s_sel_anim;       /* selected animation index in the current atlas, -1 none */
@@ -186,6 +201,9 @@ extern tp_id128 s_ctx_sprite_source_id;
 extern int64_t s_ctx_sprite_revision;
 extern char s_ctx_sprite_source_key[TP_SRCKEY_MAX];
 extern char s_ctx_sprite_display_name[TP_SRCKEY_MAX];
+/* F12: the right-clicked row's resolved abs path, FROZEN at menu-arm time. "Show in Explorer" reads
+ * this (not the live s_sel_abs) so a keyboard-Down after opening the menu can't reveal the wrong row. */
+extern char s_ctx_sprite_abs[TP_IDENTITY_PATH_MAX];
 extern bool s_ctx_leaf;        /* a renamable leaf sprite (file source or folder child) */
 extern bool s_ctx_removable;   /* a removable source row (has an [x] today) */
 

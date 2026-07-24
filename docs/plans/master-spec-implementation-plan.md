@@ -1150,6 +1150,65 @@ off the UI thread; caching/dedup of the walk stays in B1.
 
 **Dependencies.** U-01. [gui] (+ one [core] refresh path)
 
+**Status (2026-07-23, `feat/U-02-paper-cuts`, PR #8 worktree).** Implemented and verified in the
+current worktree: T1–T3 and T5–T7, plus SIX post-review rounds. Round 1 (paper-cuts hardening): Undo/Redo focus re-sync +
+folder-primary by stable id, reveal/open-url shell-safety, Atlas-Pack busy affordance,
+`tp_gui_shell_quote` test.
+Round 2 (second external review — 18 findings verified by 4 lenses, **0 survived as P1**): confirmed
+bugs fixed — F1 Undo/Redo permitted during Pack per §10; F2 selected atlas preserved by stable id
+across undo; F3 canvas-highlight re-derive; F5 missing-state; F6 focus cleared when its row is
+filtered/collapsed out; F9 collapse survives an atlas switch; F10 sort/Copy use the effective
+rename; F12 reveal uses a frozen context-menu payload; F15 bench measures real refresh cost; F11
+cooperative cancel-token through the folder scan (`TP_STATUS_CANCELLED`); F16–F18 bench/test rigor.
+**T7 sort brought to spec §61.1** — 4 keys name(default)/size/mtime/added_at × 2 dirs + warn-on-top.
+F14 (CI perf gate) refuted as an intentional two-tier design; F4/F13 no-action (documented intent).
+Round 3 (third external review — 11 findings + 2 pre-existing, 2-lens verified): confirmed fixes —
+P1.1 Refresh preserves selection by stable id; P1.3 sort UI made spec-literal (four key controls,
+re-click flips direction); P1.4 perf gate fails on a broken action; P2.5 refresh invariant renamed
+to semantic-purity; P2.7 view cache invalidated on OOM fallback; P2.8 cancel polled inside descriptor
+materialization; P2.9 root-`/` reveal; P2.10 bench fixture gains a folder-kind source (now 37
+atlases); P2.11 real row string-alloc metric; NULL source_key guard. **P1.2 `added_at`** kept as the
+append-only `si` proxy (persisted write-once field = schema epic, out of U-02's no-schema scope).
+Not fixed, out of scope: P2.6 panel-scoped keyboard focus (no competing key consumer; large), and the
+pre-existing generation-token-vs-`pack_input_hash` staleness (U-04).
+Round 4 (fourth external review — 8 findings + 1 pre-existing, 2-lens verified): confirmed fixes —
+P1.2 keyboard focus re-anchored across a row-model rebuild (rename/repack no longer aims F2 at the
+wrong sprite); **T2's "scrollable full left panel" now implemented** (bounded per-section scroll for
+the atlas & animation lists, sprites GROW — closes the T2 acceptance gap the 37-atlas fixture
+exposed); #7 sort chips moved to their own row (P1.3 header overflow); #4 canvas highlight re-derived
+after any result rebind (undo-during-pack / repack), dead one-shot flag retired; #6 filter searches
+the effective rename; P1.1 scan cancel polled before opendir/each readdir (micro-tighten — a hang
+inside the syscall needs cancellable/asynchronous I/O and belongs to U-02a, not the canvas packet);
+#8 the cancel test now pins scan early-stop; #5 the bench contract verifies git-lfs pointer
+integrity (F17 was inert in CI). Pre-existing, not fixed
+(origin/main): refresh returns before `mark_stale` on a second-fingerprint error.
+Round 5 (fifth external review — verdict **"merge with fixes"**: 4 confirmed + 1 plausible, all
+fixed): 2×P1 wrong-entity — a canvas-region click re-pins keyboard focus + Shift-anchor onto the
+selected row (F2 no longer renames the previously focused sprite; `s_focus_follow` promoted to
+gui_state), and right-click moves keyboard focus to the clicked row; 2×P2 cancel gaps —
+`tp_scan_classify` folds the exists+is_dir stat pair into one probe and the walk polls at entry
+(before the root stat) + before the final qsort (poll-count-pinned test); P2 layout (plausible →
+confirmed by arithmetic) — atlas/animation section caps are panel-relative (min(180, max(2 rows,
+30% of prev-frame panel bbox))) as the initial short-window mitigation. Lead
+battery caught a gate-wait spin flake in `test_job_input_token` (counted 2e9 spin, no yield) —
+now a yield-per-spin genuine timeout. Pre-existing, noticed, NOT fixed: the Pack decode loop
+(`tp_pack.c`) does not poll cancel between path-image decodes (→ U-02a cancellation hardening), and
+`stat` EACCES/EIO is indistinguishable from a missing source (silently counted missing — own
+follow-up packet).
+Round 6 (sixth external review — verdict **"merge with fixes"**): the capped atlas/animation
+sections now reserve the complete fixed-chrome/gap budget and two sprite rows before splitting the
+remainder; recycled vlist ids are gated by canonical row refs before accepting a double-click;
+canvas-region double-click performs a transformed-D4-aware zoom-to and preserves selection sync;
+the sort-chip test calls the production transition helper; and size-sort runs a real Pack and
+checks the production result-version/canonical-ref path.
+
+**T1 filter is per-atlas in U-02; the spec's project-wide "matches under their atlases" requires the
+unified tree and is deferred to U-03** (U-02 non-goal: "no structural tree change (that is U-03)").
+
+**Deferred to their own follow-up packets — U-02 is NOT complete while these are open:** **T4**
+(session persistence), T8 (thumbnails), T9 (async refresh), T10 (alias indicator), T11
+(attribute filter/sort), T12 (copy region coords).
+
 **Ordered bounded tasks.**
 
 1. Project-wide tree filter (Ctrl+F), matches shown under their atlases, <100 ms on fixture. [gui]
@@ -1172,6 +1231,44 @@ off the UI thread; caching/dedup of the walk stays in B1.
 **Completion evidence.** GUI selftest state fixtures cover each utility; all interactions within budget on the U-01 fixture.
 
 **Non-goals / blockers.** No structural tree change (that is U-03); no operation-schema change.
+
+### U-02a — Cooperative scan/decode cancellation hardening
+
+**Goal / user outcome.** Cancelled Refresh and Pack work stops at the next safe source-I/O boundary,
+never publishes a partial result, and does not misrepresent a currently blocked platform syscall or
+single-image decode as synchronously interruptible.
+
+**Spec refs.** §6.1 (job cancellation ownership), §10/§10.6 (Pack job and parent-owned
+cancellation), §11.2–§11.4 (Refresh/source-runtime behavior), §61.1 (non-blocking refresh at owner
+scale).
+
+**Dependencies.** The Pack half depends on U-01a worker-owned input construction; the Refresh half
+depends on the U-02 task 9 async handoff. This is source-work hardening, not U-04
+two-level-canvas work. [core][gui]
+
+**Ordered bounded tasks.**
+
+1. Carry the shared cancellation token through Refresh scanning/materialization and Pack path-image
+   decode; poll at walk entry, around every scan boundary, and between image decodes. Return the
+   structured cancelled result without publishing a partial Pack result or replacing the last
+   successful preview; any incremental Refresh status remains runtime-only. [core]
+2. Make the cancellation boundary explicit: cooperative polling cannot preempt an `opendir`,
+   `readdir`, `stat`, file read, or one decoder invocation already blocked inside the platform or
+   codec call. Add a delayed/blocking I/O seam and, where the owner-scale responsiveness budget
+   requires a hard bound, move that unit behind the existing worker/timeout boundary or introduce a
+   narrow cancellable asynchronous backend without bypassing the shared filesystem/decoder facade.
+   [core]
+3. Add deterministic cancel tests for scan entry/mid-walk/final sort and for multi-image decode
+   before/between/after images; assert bounded handoff at the modeled blocking seam, no partial
+   publication, and unchanged output for the non-cancelled path. [core][gui]
+
+**Public/schema impact.** None; cancellation timing and structured job-result behavior only.
+
+**Completion evidence.** Refresh and Pack cancellation fault matrices pass in Debug/Release and the
+GUI selftest; owner-scale probes show no caller-thread scan/decode work; cancellation never changes
+project revision/dirty/history and never lands a partial Pack result or preview.
+
+**Non-goals / blockers.** No canvas/layout work and no scan-cache unification (B1-01 task 10).
 
 ### U-03 — Unified project tree (UX-B.1/B.2)
 

@@ -36,6 +36,25 @@ typedef enum { GUI_CANVAS_SOURCE = 0, GUI_CANVAS_ATLAS, GUI_CANVAS_ANIM } gui_ca
 
 #define GUI_CANVAS_MAX_PAGES 16
 
+typedef struct gui_canvas_double_click_ref {
+    const tp_result *result;
+    int sprite_index;
+    bool valid;
+} gui_canvas_double_click_ref;
+
+typedef struct gui_canvas_input_state {
+    bool lmb_armed;
+    bool lmb_panning;
+    bool mmb_panning;
+    bool lmb_zoomed;
+    gui_canvas_double_click_ref double_click;
+} gui_canvas_input_state;
+
+typedef enum gui_canvas_hit_action {
+    GUI_CANVAS_HIT_SELECT_SPRITE = 0,
+    GUI_CANVAS_HIT_CLEAR_SELECTION
+} gui_canvas_hit_action;
+
 typedef struct gui_canvas {
     gui_canvas_mode mode;
 
@@ -115,6 +134,11 @@ int gui_canvas_img_h(const gui_canvas *c);
 /* Borrows `result` (NULL clears the atlas view). Marks pages dirty; the actual GPU upload happens in
  * gui_canvas_upload_pages (call inside the render pass). Switches mode to ATLAS and refits. */
 void gui_canvas_set_result(gui_canvas *c, const tp_result *result);
+/* Rebinds the displayed result and invalidates the shell-owned double-click
+ * identity before the previous result arena can be observed again. */
+void gui_canvas_rebind_result(gui_canvas *c,
+                              gui_canvas_double_click_ref *double_click,
+                              const tp_result *result);
 /* Uploads any pending page textures (GL; call once per frame inside the pass). No-op when clean. */
 void gui_canvas_upload_pages(gui_canvas *c);
 bool gui_canvas_has_atlas(const gui_canvas *c);
@@ -130,12 +154,29 @@ void gui_canvas_fit(gui_canvas *c);
 void gui_canvas_set_zoom_pct(gui_canvas *c, const float bb[4], float pct);
 void gui_canvas_zoom_at(gui_canvas *c, const float bb[4], float cursor_x, float cursor_y, float wheel_notches);
 void gui_canvas_pan(gui_canvas *c, const float bb[4], float dx, float dy);
+/* Fits one packed region into the canvas and centers it. Uses transformed
+ * placed dimensions, so rotated/diagonal D4 sprites frame correctly. */
+bool gui_canvas_zoom_to_sprite(gui_canvas *c, const float bb[4],
+                               int sprite_index);
+void gui_canvas_double_click_reset(gui_canvas_double_click_ref *ref);
+bool gui_canvas_double_click_press(gui_canvas_double_click_ref *ref,
+                                   const tp_result *result, int sprite_index,
+                                   bool engine_double_clicked);
+/* Shared raw-input ownership gate. Menus/modal editors own the pointer while
+ * open, so all armed click/pan and retained double-click state is cancelled. */
+bool gui_canvas_input_blocked(gui_canvas_input_state *state, bool menu_open,
+                              bool transient_owner);
 
 /* Region hit-test at layout point (lx,ly): the sprite index on the current page whose placed AABB
  * contains the point, or -1. Uses the last drawn geometry. */
 int gui_canvas_hit(const gui_canvas *c, float lx, float ly);
 /* Selects a region (accent outline); -1 clears. If the region is on another page, switches to it. */
 void gui_canvas_select(gui_canvas *c, int sprite_index);
+/* Applies the canvas-local highlight and tells the shell whether the shared
+ * tree/inspector selection must select a sprite or clear through its contract. */
+gui_canvas_hit_action gui_canvas_apply_hit_selection(gui_canvas *c,
+                                                      int sprite_index,
+                                                      void (*clear_selection)(void));
 int gui_canvas_selected(const gui_canvas *c);
 
 /* The CUSTOM element draw handler. Register via nt_ui_set_custom_handler(ctx, fn, c). */

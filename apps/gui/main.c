@@ -130,11 +130,13 @@ static const tp_result *s_shown_result; /* pack result currently bound to the ca
 /* Canvas mouse model: a left press arms a potential click; if the pointer moves past a small
  * threshold while held it becomes a PAN (no selection on release); otherwise release = click-select.
  * Middle-drag always pans; wheel always zooms. Selection never captures later pan/zoom. */
-static bool s_lmb_armed;      /* left button pressed on the canvas, click vs drag undecided */
-static bool s_lmb_panning;    /* left drag crossed the threshold -> panning */
-static bool s_mmb_panning;    /* middle-drag pan */
+static gui_canvas_input_state s_canvas_input;
 static float s_press_x, s_press_y; /* left-press origin (threshold test) */
 static float s_pan_last_x, s_pan_last_y;
+static const nt_ui_events_cfg_t s_canvas_dbl_cfg = {
+    .long_press_secs = 0.0F,
+    .double_click = true,
+};
 #define CANVAS_DRAG_THRESHOLD 4.0F
 
 /* The deferred side-effect queue (s_pending_*), the new/open/exit confirm-flow flags (s_after_confirm/
@@ -159,8 +161,18 @@ static float s_pan_last_x, s_pan_last_y;
  * either free pack slots or retain a stale slot across history navigation; the
  * next frame binds the then-current result without reusing the old borrow. */
 void gui_shell_reset_shown_result(void) {
-    gui_canvas_set_result(&s_canvas, NULL);
+    gui_canvas_rebind_result(&s_canvas, &s_canvas_input.double_click, NULL);
     s_shown_result = NULL;
+}
+
+/* Empty atlas space clears the shared tree/inspector selection. reset_selection
+ * also drops an export-target preview, whose result may currently be borrowed
+ * by the canvas, so rebind the retained native result before this frame draws. */
+static void clear_canvas_shared_selection(void) {
+    reset_selection();
+    const tp_result *native = preview_target_result();
+    gui_canvas_rebind_result(&s_canvas, &s_canvas_input.double_click, native);
+    s_shown_result = native;
 }
 // #endregion
 
@@ -213,16 +225,20 @@ static void handle_canvas_input(void) {
     /* NOTE: intentionally NOT gated on nt_ui_input_any_focused -- pan/zoom/select over the atlas must
      * stay live while a text field holds focus. A press outside the panels also blurs that field (see
      * the blur-request block before nt_ui_begin). */
-    if (gui_canvas_get_mode(&s_canvas) != GUI_CANVAS_ATLAS || !gui_canvas_has_atlas(&s_canvas) ||
-        s_confirm_open || s_about_open || s_export_open || s_recovery_open || s_edit_kind != EDIT_NONE) {
-        s_lmb_armed = s_lmb_panning = s_mmb_panning = false;
+    const bool transient_owner =
+        gui_canvas_get_mode(&s_canvas) != GUI_CANVAS_ATLAS ||
+        !gui_canvas_has_atlas(&s_canvas) || s_confirm_open || s_about_open ||
+        s_export_open || s_recovery_open || s_edit_kind != EDIT_NONE;
+    if (gui_canvas_input_blocked(&s_canvas_input,
+                                 gui_view_chrome_any_menu_open(),
+                                 transient_owner)) {
         return;
     }
     /* Use the box the handler actually drew the page into (captured last frame). Layout px ==
      * framebuffer px in this app (STRETCH ref = fb). */
     const float *box = s_canvas.last_bb;
     if (box[2] <= 1.0F) {
-        s_lmb_armed = s_lmb_panning = s_mmb_panning = false;
+        (void)gui_canvas_input_blocked(&s_canvas_input, false, true);
         return;
     }
     const nt_pointer_t *p = &g_nt_input.pointers[0];
@@ -244,52 +260,94 @@ static void handle_canvas_input(void) {
 
     /* middle-drag: always pan */
     if (inside && p->buttons[NT_BUTTON_MIDDLE].is_pressed) {
-        s_mmb_panning = true;
+        s_canvas_input.mmb_panning = true;
         s_pan_last_x = p->x;
         s_pan_last_y = p->y;
     }
-    if (s_mmb_panning && p->buttons[NT_BUTTON_MIDDLE].is_down) {
+    if (s_canvas_input.mmb_panning && p->buttons[NT_BUTTON_MIDDLE].is_down) {
         gui_canvas_pan(&s_canvas, box, p->x - s_pan_last_x, p->y - s_pan_last_y);
         s_pan_last_x = p->x;
         s_pan_last_y = p->y;
     } else {
-        s_mmb_panning = false;
+        s_canvas_input.mmb_panning = false;
     }
 
     /* left: arm on press, decide click-vs-pan by movement, resolve on release */
     if (inside && p->buttons[NT_BUTTON_LEFT].is_pressed) {
-        s_lmb_armed = true;
-        s_lmb_panning = false;
+        s_canvas_input.lmb_armed = true;
+        s_canvas_input.lmb_panning = false;
         s_press_x = p->x;
         s_press_y = p->y;
         s_pan_last_x = p->x;
         s_pan_last_y = p->y;
     }
-    if (s_lmb_armed && p->buttons[NT_BUTTON_LEFT].is_down) {
-        if (!s_lmb_panning &&
+    if (s_canvas_input.lmb_armed && p->buttons[NT_BUTTON_LEFT].is_down) {
+        if (!s_canvas_input.lmb_panning &&
             (fabsf(p->x - s_press_x) > CANVAS_DRAG_THRESHOLD || fabsf(p->y - s_press_y) > CANVAS_DRAG_THRESHOLD)) {
-            s_lmb_panning = true;
+            s_canvas_input.lmb_panning = true;
         }
-        if (s_lmb_panning) {
+        if (s_canvas_input.lmb_panning) {
             gui_canvas_pan(&s_canvas, box, p->x - s_pan_last_x, p->y - s_pan_last_y);
             s_pan_last_x = p->x;
             s_pan_last_y = p->y;
         }
     }
-    if (s_lmb_armed && p->buttons[NT_BUTTON_LEFT].is_released) {
-        if (!s_lmb_panning) { /* click: select region under cursor, or clear on empty */
+    if (s_canvas_input.lmb_armed && p->buttons[NT_BUTTON_LEFT].is_released) {
+        if (s_canvas_input.lmb_panning) {
+            gui_canvas_double_click_reset(&s_canvas_input.double_click);
+        } else if (!s_canvas_input.lmb_zoomed) { /* click: select region under cursor, or clear on empty */
             const int hit = gui_canvas_hit(&s_canvas, p->x, p->y);
-            gui_canvas_select(&s_canvas, hit);
-            if (hit >= 0) {
-                select_row_for_region(hit);
+            const gui_canvas_hit_action action =
+                gui_canvas_apply_hit_selection(&s_canvas, hit,
+                                               clear_canvas_shared_selection);
+            if (action == GUI_CANVAS_HIT_SELECT_SPRITE) {
+                select_row_for_result_region(s_canvas.result, hit);
             }
         }
-        s_lmb_armed = false;
-        s_lmb_panning = false;
+        s_canvas_input.lmb_armed = false;
+        s_canvas_input.lmb_panning = false;
+        s_canvas_input.lmb_zoomed = false;
     }
 
-    if (inside && !s_lmb_panning && !s_mmb_panning) {
+    if (inside && !s_canvas_input.lmb_panning &&
+        !s_canvas_input.mmb_panning) {
         s_canvas.hover_sprite = gui_canvas_hit(&s_canvas, p->x, p->y);
+    }
+}
+
+/* Engine-owned timing/radius decides whether this press is a double-click;
+ * the canonical {result, region} gate prevents A->B presses on the shared
+ * canvas id from zooming the wrong sprite. Called after nt_ui_begin so the
+ * event cell is current, while hit geometry still comes from the last draw. */
+static void handle_canvas_double_click(void) {
+    const bool transient_owner =
+        gui_canvas_get_mode(&s_canvas) != GUI_CANVAS_ATLAS ||
+        !gui_canvas_has_atlas(&s_canvas) || s_confirm_open || s_about_open ||
+        s_export_open || s_recovery_open || s_edit_kind != EDIT_NONE;
+    if (gui_canvas_input_blocked(&s_canvas_input,
+                                 gui_view_chrome_any_menu_open(),
+                                 transient_owner)) {
+        return;
+    }
+    const nt_ui_events_t ev =
+        nt_ui_events(s_ctx, s_id_canvas, &s_canvas_dbl_cfg);
+    if (!ev.pressed_now) {
+        return;
+    }
+    const nt_pointer_t *pointer = &g_nt_input.pointers[0];
+    const int hit = gui_canvas_hit(&s_canvas, pointer->x, pointer->y);
+    if (gui_canvas_double_click_press(&s_canvas_input.double_click,
+                                      s_canvas.result,
+                                      hit, ev.double_clicked)) {
+        gui_canvas_select(&s_canvas, hit);
+        select_row_for_result_region(s_canvas.result, hit);
+        if (gui_canvas_zoom_to_sprite(&s_canvas, s_canvas.last_bb, hit)) {
+            /* A zero-hold injected click can press+release in this same frame;
+             * its release was already processed before nt_ui_begin, so only
+             * arm suppression while a future release is still pending. */
+            s_canvas_input.lmb_zoomed =
+                !pointer->buttons[NT_BUTTON_LEFT].is_released;
+        }
     }
 }
 
@@ -318,7 +376,8 @@ static void handle_shortcuts(void) {
     if (gui_shot_active() || gui_bench_active()) {
         return; /* headless capture/probe: the user's live typing must not trigger hotkeys mid-run */
     }
-    if (nt_ui_input_any_focused(s_ctx) || s_confirm_open || s_about_open || s_export_open || s_recovery_open) {
+    if (nt_ui_input_any_focused(s_ctx) || gui_view_chrome_any_menu_open() ||
+        s_confirm_open || s_about_open || s_export_open || s_recovery_open) {
         return;
     }
     /* Preview + editor accelerators (each also a button; §3.3e). */
@@ -365,6 +424,43 @@ static void handle_shortcuts(void) {
         s_pending_pack = true;
     } else if (nt_input_key_is_pressed(NT_KEY_E)) {
         s_export_open = true;
+    } else if (nt_input_key_is_pressed(NT_KEY_F)) {
+        s_filter_active = true; /* Ctrl+F arms the sprite-tree speed-search filter. */
+    }
+}
+
+/* Sprite-list keyboard navigation (ux.md §3.3d). Runs after build_view() so it acts on the
+ * fresh filtered/sorted view. Same gating as handle_shortcuts: no field focus, no modal, not headless,
+ * and Ctrl is reserved for the global shortcuts above. Arrows/Home/End/Enter/F2 drive the list focus. */
+static void handle_list_nav(void) {
+    if (gui_shot_active() || gui_bench_active()) {
+        return;
+    }
+    if (nt_ui_input_any_focused(s_ctx) || gui_view_chrome_any_menu_open() ||
+        s_confirm_open || s_about_open || s_export_open || s_recovery_open ||
+        s_edit_kind != EDIT_NONE) {
+        return;
+    }
+    if (nt_input_key_is_down(NT_KEY_LCTRL) || nt_input_key_is_down(NT_KEY_RCTRL)) {
+        return;
+    }
+    const bool shift = nt_input_key_is_down(NT_KEY_LSHIFT) || nt_input_key_is_down(NT_KEY_RSHIFT);
+    if (nt_input_key_is_pressed(NT_KEY_ARROW_DOWN)) {
+        gui_list_focus_step(+1, shift);
+    } else if (nt_input_key_is_pressed(NT_KEY_ARROW_UP)) {
+        gui_list_focus_step(-1, shift);
+    } else if (nt_input_key_is_pressed(NT_KEY_HOME)) {
+        gui_list_focus_edge(false, shift);
+    } else if (nt_input_key_is_pressed(NT_KEY_END)) {
+        gui_list_focus_edge(true, shift);
+    } else if (nt_input_key_is_pressed(NT_KEY_ARROW_RIGHT)) {
+        gui_list_focus_collapse(true);
+    } else if (nt_input_key_is_pressed(NT_KEY_ARROW_LEFT)) {
+        gui_list_focus_collapse(false);
+    } else if (nt_input_key_is_pressed(NT_KEY_ENTER)) {
+        gui_list_focus_activate();
+    } else if (nt_input_key_is_pressed(NT_KEY_F2)) {
+        gui_list_focus_rename();
     }
 }
 // #endregion
@@ -432,7 +528,10 @@ static void frame(void) {
     gui_bench_tick(); /* dev (--bench-perf): drive the perf-probe state machine; no-op unless active */
 
     if (nt_input_key_is_pressed(NT_KEY_ESCAPE)) {
-        if (s_edit_kind != EDIT_NONE) {
+        if (gui_view_chrome_consume_escape()) {
+            /* Menus own Escape while open. Do not also clear filters or stop
+             * either preview mode on the same key press. */
+        } else if (s_edit_kind != EDIT_NONE) {
             cancel_edit();
             set_status("Rename cancelled.");
         } else if (s_export_open) {
@@ -444,7 +543,11 @@ static void frame(void) {
         } else if (s_confirm_open) {
             s_confirm_open = false;
             s_after_confirm = AFTER_NONE;
-        } else if (s_preview_active && !s_ctx_state.open) {
+        } else if (s_filter_active || gui_rows_filter_active()) {
+            gui_rows_set_filter(""); /* Esc clears the sprite-tree speed-search. */
+            s_filter_active = false;
+            set_status("Filter cleared.");
+        } else if (s_preview_active) {
             preview_stop();
             set_status("Closed animation preview.");
         } else if (s_preview_target != 0) {
@@ -548,6 +651,10 @@ static void frame(void) {
             }
         }
         build_rows();
+        filter_type_pump();
+        build_view();
+        gui_selection_revalidate();
+        handle_list_nav();
         s_content_w = scale.logical_w; /* for caption/status truncation */
         compute_panel_widths(scale.logical_w); /* clamp side-panel widths so they never leave the screen */
         gui_shot_tick(); /* screenshot mode: pack + select + (post-draw) capture; no-op unless --shot */
@@ -579,8 +686,22 @@ static void frame(void) {
          * while one is active + visible, else the native session pack (preview_target_result). */
         const tp_result *want = preview_target_result();
         if (want != s_shown_result) {
-            gui_canvas_set_result(&s_canvas, want);
+            gui_canvas_rebind_result(&s_canvas, &s_canvas_input.double_click,
+                                     want);
             s_shown_result = want;
+            /* Result rebinding clears the highlight. Restore it from the
+             * primary leaf before canvas input when that leaf exists in the
+             * displayed atlas result. */
+            if (want && gui_canvas_get_mode(&s_canvas) == GUI_CANVAS_ATLAS) {
+                const sprite_row *leaf = gui_rows_selected_leaf();
+                if (leaf && leaf->source_key && leaf->source_key[0] != '\0') {
+                    const int region = gui_pack_find_sprite_ref_in_result(
+                        want, leaf->source_id, leaf->source_key);
+                    if (region >= 0 && region < want->sprite_count) {
+                        gui_canvas_select(&s_canvas, region);
+                    }
+                }
+            }
         }
         /* Feed the selected region's LIVE slice9 override to the canvas guides: the project is the
          * source of truth, so typing in the Region panel moves the lines this same frame (no repack;
@@ -597,7 +718,7 @@ static void frame(void) {
                 const gui_sprite_ref sprite = {
                     atlas->id, selected->source_id, selected->source_key,
                     tp_session_snapshot_revision(snapshot)};
-                /* EFFECTIVE value (#5): a slice9 edit BUFFERS until the gesture boundary, so the committed
+                /* A slice9 edit buffers until the gesture boundary, so the committed
                  * record freezes mid-typing. Prefer the buffered slice9 (peek) when one is in flight for
                  * this atlas+sprite, so the guides move THIS frame; else read the committed record. */
                 int eff[4];
@@ -621,6 +742,7 @@ static void frame(void) {
 
         nt_ui_begin(s_ctx, scale.logical_w, scale.logical_h, g_nt_app.dt, &g_nt_input.pointers[0], 1);
         nt_ui_set_viewport(s_ctx, nt_ui_viewport_from_scale(&scale));
+        handle_canvas_double_click();
 
         /* Docked chrome (owner 2026-07-11 pass 2): NO outer margin (root padding 0 -> the menubar fuses
          * flush to the top edge and the middle row fills to the window edges) + a thin 2px C_BG seam between
@@ -765,7 +887,7 @@ static int gui_main_utf8(int argc, char *argv[]) {
         /* D3: if the PREVIOUS run crashed it left a marker -> offer to open the diagnostics root, then
          * clear it (once). Self-contained startup step: no ordering coupling with the upcoming R
          * recovery modal. No-op with no marker / headless. Native modal, so before window init is OK.
-         * Disabled in the selftest build (like the recovery journal/notice below): ctest #50 runs THIS
+         * Disabled in the selftest build (like the recovery journal/notice below): the integration test runs this
          * exe NON-headless, so a stale/self-written marker would block ctest on the native modal.
          * Interactive-only by construction -- the shipped app never sets NTPACKER_GUI_SELFTEST. */
         gui_crash_report_prompt();
@@ -911,7 +1033,7 @@ static int gui_main_utf8(int argc, char *argv[]) {
             set_statusf_ex(STATUS_WARNING, "Resolve recovered projects first, then open %s via File > Open", proj_arg);
             break;
         case GUI_STARTUP_MISSING:
-            if (!recovery_warn_shown) { /* stale argv -> continue with untitled (F6b); keep any recovery warning */
+            if (!recovery_warn_shown) { /* Stale argv continues untitled; preserve recovery warnings. */
                 set_statusf_ex(STATUS_WARNING, "project not found: %s", proj_arg);
             }
             break;

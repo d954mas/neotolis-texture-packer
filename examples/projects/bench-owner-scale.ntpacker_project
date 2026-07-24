@@ -27868,6 +27868,23 @@
           "out_path": "out/bench_0035"
         }
       ]
+    },
+    {
+      "id": "atlas_dc9fa7c4e1fe1b38e4678facc9e60320",
+      "name": "bench_0036",
+      "sources": [
+        {
+          "id": "source_de9fa7c4e1fe1b38e6678facc9e60320",
+          "path": "../bench-assets/kenney/tiny-dungeon"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_df9fa7c4e1fe1b38e7678facc9e60320",
+          "out_path": "out/bench_0036"
+        }
+      ]
     }
   ]
 }

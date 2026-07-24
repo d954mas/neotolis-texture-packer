@@ -45,6 +45,15 @@ target_compile_definitions(ntpacker_output_fault PRIVATE
 set_target_properties(ntpacker_output_fault PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CLI_OUTPUT_DIR}")
 
+# Test-only binary whose per-atlas arena allocation can be failed
+# deterministically. Production ntpacker has no environment-controlled behavior.
+add_executable(ntpacker_pack_arena_fault ${_ntpacker_sources})
+ntpacker_configure_target(ntpacker_pack_arena_fault)
+target_compile_definitions(ntpacker_pack_arena_fault PRIVATE
+    NTPACKER_CLI_PACK_ARENA_FAULT_SEAM=1)
+set_target_properties(ntpacker_pack_arena_fault PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CLI_OUTPUT_DIR}")
+
 # --- e2e ctest: run the built exe, assert the exit-code contract + JSON payload.
 # No GL/display needed, so these give the op layer its first cross-OS CI coverage.
 
@@ -169,6 +178,30 @@ add_test(NAME cli_help_human_exact COMMAND ${CMAKE_COMMAND}
 # --- B2 read verbs: inspect + validate over checked-in fixtures (no GL/pack). ---
 # The fixtures live in the source tree; project_dir resolves sources against them.
 set(_td "${CMAKE_CURRENT_SOURCE_DIR}/testdata")
+
+# A valid, admitted source followed by an overlong relative target output path
+# reaches the pre-target output-resolution failure boundary.
+string(REPEAT "a" 4070 _cli_overlong_out_path)
+set(_cli_output_resolution_project
+    "${CMAKE_CURRENT_BINARY_DIR}/cli-output-resolution.ntpacker_project")
+file(WRITE "${_cli_output_resolution_project}"
+"{
+  \"version\": 5,
+  \"atlases\": [{
+    \"id\": \"atlas_00000000000000000000000000000901\",
+    \"name\": \"output-resolution\",
+    \"sources\": [{
+      \"id\": \"source_00000000000000000000000000000902\",
+      \"path\": \"${_td}/sprites\"
+    }],
+    \"targets\": [{
+      \"exporter_id\": \"json-neotolis\",
+      \"id\": \"target_00000000000000000000000000000903\",
+      \"out_path\": \"${_cli_overlong_out_path}\"
+    }]
+  }]
+}
+")
 
 # P1-05: exact schemas/payloads. Only elapsed time and the two known absolute
 # test roots are normalized; path policy and every suffix are asserted first.
@@ -350,6 +383,51 @@ add_test(NAME cli_pack_target_none COMMAND ${CMAKE_COMMAND}
     -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_pack_none.json
     -P "${_run}")
 
+# Target filtering is decided before source admission: an unavailable source is
+# irrelevant when no target remains enabled.
+add_test(NAME cli_pack_target_none_missing_source COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0
+    "-DARGS=pack ${_td}/missing-source.ntpacker_project --json --target defold --out-dir ${CMAKE_CURRENT_BINARY_DIR}/cli_pack_none_missing"
+    -DCHECKER=$<TARGET_FILE:cli_json_check>
+    "-DCHECK_ARGS=pack targets_ok=0 targets_failed=0 notice=no_enabled_targets"
+    -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_pack_none_missing.json
+    -P "${_run}")
+
+# READY input followed by failure before a target report exists is an export
+# failure, not a pack failure, and the atlas diagnostic names that boundary.
+add_test(NAME cli_pack_output_resolution_failure COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=5
+    "-DARGS=pack ${_cli_output_resolution_project} --json --quiet"
+    -DCHECKER=$<TARGET_FILE:cli_json_check>
+    "-DCHECK_ARGS=pack targets_ok=0 targets_failed=0 error_id=out_of_bounds error_atlas=output-resolution error_contains=target-output note_contains=target-output"
+    -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_pack_output_resolution.json
+    -P "${_run}")
+
+# Atlas arena allocation failure remains machine-readable instead of degrading
+# to a prose-only note.
+add_test(NAME cli_pack_arena_oom_contract COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker_pack_arena_fault> -DEXPECT=4
+    "-DARGS=pack ${_td}/clean.ntpacker_project --json --quiet"
+    -DCHECKER=$<TARGET_FILE:cli_json_check>
+    "-DCHECK_ARGS=pack targets_ok=0 targets_failed=0 error_id=oom error_atlas=clean"
+    -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_pack_arena_oom.json
+    -P "${_run}")
+set_tests_properties(cli_pack_arena_oom_contract PROPERTIES
+    ENVIRONMENT "NTPACKER_TEST_PACK_ARENA_FAIL=1")
+
+# Report-page allocation failure happens after target execution. The CLI must
+# retain successful target counts, emit a structured atlas error, and return the
+# partial-success exit instead of treating the incomplete report as clean.
+add_test(NAME cli_pack_report_oom_contract COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker_pack_arena_fault> -DEXPECT=6
+    "-DARGS=pack ${_td}/clean.ntpacker_project --json --quiet --out-dir ${CMAKE_CURRENT_BINARY_DIR}/cli_pack_report_oom"
+    -DCHECKER=$<TARGET_FILE:cli_json_check>
+    "-DCHECK_ARGS=pack targets_ok=1 targets_failed=0 error_id=oom error_atlas=clean"
+    -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_pack_report_oom.json
+    -P "${_run}")
+set_tests_properties(cli_pack_report_oom_contract PROPERTIES
+    ENVIRONMENT "NTPACKER_TEST_REPORT_ALLOC_FAIL=1")
+
 # A source-less atlas is a successful skipped outcome, but JSON must carry a
 # stable notice id plus atlas context rather than prose alone.
 add_test(NAME cli_pack_no_usable_images COMMAND ${CMAKE_COMMAND}
@@ -358,6 +436,26 @@ add_test(NAME cli_pack_no_usable_images COMMAND ${CMAKE_COMMAND}
     -DCHECKER=$<TARGET_FILE:cli_json_check>
     "-DCHECK_ARGS=pack targets_ok=0 targets_failed=0 notice=no_usable_images"
     -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_pack_empty.json
+    -P "${_run}")
+
+# A present folder with no matching images is the same typed skipped outcome as
+# a source-less atlas, not an unavailable-source failure.
+add_test(NAME cli_pack_empty_folder COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=0
+    "-DARGS=pack ${_td}/empty-folder.ntpacker_project --json --out-dir ${CMAKE_CURRENT_BINARY_DIR}/cli_pack_empty_folder"
+    -DCHECKER=$<TARGET_FILE:cli_json_check>
+    "-DCHECK_ARGS=pack targets_ok=0 targets_failed=0 notice=no_usable_images"
+    -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_pack_empty_folder.json
+    -P "${_run}")
+
+# Missing sources fail without partial output and retain a stable status id,
+# message, and atlas context in the machine-readable report.
+add_test(NAME cli_pack_missing_source_error COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=4
+    "-DARGS=pack ${_td}/missing-source.ntpacker_project --json --quiet --out-dir ${CMAKE_CURRENT_BINARY_DIR}/cli_pack_missing_source"
+    -DCHECKER=$<TARGET_FILE:cli_json_check>
+    "-DCHECK_ARGS=pack targets_ok=0 targets_failed=0 error_id=not_found error_atlas=missing-source"
+    -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_pack_missing_source.json
     -P "${_run}")
 
 # (m) dangling anim frame aborts the atlas before any target writes (plan L-4

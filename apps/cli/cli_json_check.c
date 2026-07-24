@@ -11,6 +11,7 @@
  *     pack    : targets_ok=N targets_failed=N -> totals assertions
  *               dry_run=1 -> report.dry_run true, every ok target carries a
  *                            would_write array + empty written_files, 0 files written
+ *               error_id=ID error_atlas=NAME -> a contextual atlas error exists
  *     anim    : animations[] well-formed; count=N -> exact animation count
  *     mutation: {schema,ok:true,verb,count}; count=N -> exact count
  *
@@ -433,6 +434,67 @@ static int check_pack(const cJSON *root, int argc, char **argv) {
         }
         if (!found) {
             return fail("pack: expected structured atlas notice not found");
+        }
+    }
+    const char *eerror_id = arg_val(argc, argv, "error_id");
+    const char *eerror_atlas = arg_val(argc, argv, "error_atlas");
+    if (eerror_id || eerror_atlas) {
+        bool found = false;
+        const cJSON *atlas = NULL;
+        cJSON_ArrayForEach(atlas, atlases) {
+            const cJSON *error =
+                cJSON_GetObjectItemCaseSensitive(atlas, "error");
+            const cJSON *id =
+                cJSON_GetObjectItemCaseSensitive(error, "id");
+            const cJSON *context =
+                cJSON_GetObjectItemCaseSensitive(error, "atlas");
+            const cJSON *message =
+                cJSON_GetObjectItemCaseSensitive(error, "message");
+            if (cJSON_IsObject(error) && cJSON_IsString(id) &&
+                (!eerror_id || strcmp(id->valuestring, eerror_id) == 0) &&
+                cJSON_IsString(context) &&
+                (!eerror_atlas ||
+                 strcmp(context->valuestring, eerror_atlas) == 0) &&
+                cJSON_IsString(message) && message->valuestring[0] != '\0') {
+                found = true;
+            }
+        }
+        if (!found) {
+            return fail("pack: expected structured atlas error not found");
+        }
+    }
+    const char *eerror_contains = arg_val(argc, argv, "error_contains");
+    if (eerror_contains) {
+        bool found = false;
+        const cJSON *atlas = NULL;
+        cJSON_ArrayForEach(atlas, atlases) {
+            const cJSON *error =
+                cJSON_GetObjectItemCaseSensitive(atlas, "error");
+            const cJSON *message =
+                cJSON_GetObjectItemCaseSensitive(error, "message");
+            if (cJSON_IsString(message) &&
+                strstr(message->valuestring, eerror_contains) != NULL) {
+                found = true;
+            }
+        }
+        if (!found) {
+            return fail("pack: expected atlas error fragment not found");
+        }
+    }
+    const char *enote_contains = arg_val(argc, argv, "note_contains");
+    if (enote_contains) {
+        bool found = false;
+        const cJSON *atlas = NULL;
+        cJSON_ArrayForEach(atlas, atlases) {
+            const cJSON *note =
+                cJSON_GetObjectItemCaseSensitive(atlas, "note");
+            if (cJSON_IsString(note) &&
+                strstr(note->valuestring, enote_contains) != NULL) {
+                found = true;
+            }
+        }
+        if (!found) {
+            return fail("pack: expected atlas note fragment not found");
         }
     }
     return 0;

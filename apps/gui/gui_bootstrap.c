@@ -58,10 +58,12 @@ static void ensure_ids(void) {
     s_id_recovery = nt_ui_id("ntpacker/recovery_modal");
     s_id_mb_file = nt_ui_id("ntpacker/mb_file");
     s_id_mb_edit = nt_ui_id("ntpacker/mb_edit");
+    s_id_mb_atlas = nt_ui_id("ntpacker/mb_atlas");
     s_id_mb_view = nt_ui_id("ntpacker/mb_view");
     s_id_mb_help = nt_ui_id("ntpacker/mb_help");
     s_id_menu_file = nt_ui_id("ntpacker/menu_file");
     s_id_menu_edit = nt_ui_id("ntpacker/menu_edit");
+    s_id_menu_atlas = nt_ui_id("ntpacker/menu_atlas");
     s_id_menu_view = nt_ui_id("ntpacker/menu_view");
     s_id_menu_help = nt_ui_id("ntpacker/menu_help");
     s_id_ctx_menu = nt_ui_id("ntpacker/ctx_menu");

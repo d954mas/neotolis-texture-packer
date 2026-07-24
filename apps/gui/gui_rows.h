@@ -56,9 +56,14 @@ typedef struct sprite_row {
     tp_id128 source_id;
     char *source_key;         /* malloc-owned exact authoritative key */
     bool missing;             /* source path gone from disk (§3.7) */
+    tp_status runtime_status; /* typed display-scan failure; OK on normal materialization */
     char label[224];          /* display label (rename-aware: "final (file.png)") */
     char *sprite_name;        /* malloc-owned exact export key */
     char *abs;                /* malloc-owned exact resolved decode path */
+    /* --- sort inputs (§61.1); populated per-atlas by build_rows, read by the view comparator --- */
+    long long size;           /* packed area (frame w*h) from this atlas's pack result; 0 if unpacked/no region */
+    long long mtime;          /* live file mtime (scan entry / gui_scan_stat); 0 if missing/unstattable/folder */
+    int added_at;             /* source insertion index -- the order the source was added to the project */
 } sprite_row;
 extern sprite_row *s_rows;
 extern int s_row_count;
@@ -68,6 +73,101 @@ extern int s_row_count;
  * generation, source scan generation}; an unchanged call only compares that
  * key and performs no allocation or filesystem work. */
 void build_rows(void);
+
+/* --- filtered / sorted / collapsible view over the row model ---
+ * s_view[k] is an index into s_rows[]: the left panel iterates the VIEW, never s_rows
+ * directly, so the text filter, folder collapse, and sort are pure functions over the
+ * row model -- a view-only change never invalidates the expensive build_rows() cache,
+ * and the whole seam ports to the U-03 unified tree unchanged. View state is session UI
+ * state: it is NEVER serialized into the project (§61.3 app-state boundary). */
+extern int *s_view;
+extern int s_view_count;
+
+/* Sort keys (§61.1): four user-facing keys, each with two directions, plus the independent
+ * "warning on top" pin. ROW_SORT_NAME is 0 so the zero-init/default is `name` (the spec default).
+ * ROW_SORT_BUILD is an INTERNAL build/scan-order baseline: it is NOT part of the UI cycle
+ * (declare_sort_chips never selects it); it exists so the pure-projection invariant -- build_view over
+ * an unsorted key yields the identity of s_rows -- stays testable independent of fixture ordering. */
+typedef enum {
+    ROW_SORT_NAME = 0, /* natural-order by EFFECTIVE display name (override rename, else export key); DEFAULT */
+    ROW_SORT_SIZE,     /* packed area (frame w*h) of the current atlas's pack region; 0 sorts smallest */
+    ROW_SORT_MTIME,    /* file modification time, read live */
+    ROW_SORT_ADDED,    /* order the source was added to the project (source insertion index) */
+    ROW_SORT_BUILD     /* INTERNAL build/scan-order baseline; never exposed in the UI sort cycle */
+} row_sort_key;
+
+/* Effective export/display name for a row: the sparse project override rename if one is present,
+ * else the canonical export key (sprite_name); "" for rows without a name (folders/missing). The
+ * NAME sort and "Copy name" both resolve through this so a renamed sprite sorts and copies by its NEW
+ * name, consistent with Rename itself. Valid after build_rows() populated the current atlas. */
+const char *gui_rows_effective_name(const sprite_row *row);
+
+/* Canonical identity comparison used by retained UI press/release guards.
+ * NULL keys compare as empty; nil entity ids never match. */
+bool gui_rows_identity_matches(tp_id128 captured_id, const char *captured_key,
+                               tp_id128 current_id, const char *current_key);
+
+/* Unicode case-folded substring match (NFC + full casefold through tp_core's
+ * shared source-key text facility). Invalid/oversized input falls back to the
+ * previous ASCII-safe comparison rather than making the view disappear. */
+bool gui_rows_text_contains_ci(const char *haystack, const char *needle);
+
+/* Case-insensitive substring filter over row label + export name. NULL/"" clears it.
+ * A matching child keeps its parent folder visible; an active filter overrides collapse. */
+void gui_rows_set_filter(const char *query);
+const char *gui_rows_filter(void);
+bool gui_rows_filter_active(void);
+
+void gui_rows_set_sort(row_sort_key key, bool descending, bool warn_first);
+void gui_rows_get_sort(row_sort_key *key, bool *descending, bool *warn_first);
+
+/* Shared list-view interaction/layout rules. These live below the Clay view so
+ * production and headless tests exercise one implementation. */
+float gui_rows_left_section_cap(float panel_height, float ui_scale,
+                                bool filter_visible);
+void gui_rows_sort_chip_click(row_sort_key clicked);
+
+/* Returns the row that should become the viewport top to make `focus_row`
+ * fully visible, or -1 when it is already inside the ACTUAL (non-overscanned)
+ * viewport. `visible_rows` counts complete rows. */
+int gui_rows_focus_scroll_top(int focus_row, int first_visible_row,
+                              int visible_rows);
+
+/* nt_ui_vlist recycles ids by visible slot. A double-click is actionable only
+ * when the canonical row ref matches the preceding press. */
+void gui_rows_double_click_reset(void);
+bool gui_rows_double_click_press(tp_id128 source_id, const char *source_key,
+                                 bool engine_double_clicked);
+
+/* Atlas/animation list row ids are positional. Keep their double-click
+ * identity in caller-owned refs keyed by the entity's stable id. */
+typedef struct gui_rows_entity_double_click_ref {
+    tp_id128 entity_id;
+    bool valid;
+} gui_rows_entity_double_click_ref;
+void gui_rows_entity_double_click_reset(gui_rows_entity_double_click_ref *ref);
+bool gui_rows_entity_double_click_press(gui_rows_entity_double_click_ref *ref,
+                                        tp_id128 entity_id,
+                                        bool engine_double_clicked);
+
+/* Pure canonical mapping for view-owned canvas synchronization. Returns the
+ * displayed result region for a leaf row, or -1 for non-leaf/unmatched rows. */
+int gui_rows_result_region_for_primary(const sprite_row *row,
+                                       const tp_result *result);
+
+/* Folder-source disclosure (keyed by stable source id; children hidden when collapsed). */
+void gui_rows_toggle_collapsed(tp_id128 source_id);
+bool gui_rows_is_collapsed(tp_id128 source_id);
+
+/* Rebuilds s_view from s_rows applying {filter, collapse, sort}. Cheap and cached on
+ * {row-cache generation, filter, sort, collapse epoch}; call once per frame after build_rows(). */
+void build_view(void);
+
+#if defined(TP_GUI_VIEW_TEST_DIR)
+/* Makes the next view-owned allocation fail so fallback behavior is
+ * deterministic in the headless projection tests. */
+void gui_rows_test_fail_next_view_alloc(void);
+#endif
 
 /* Releases all row/selection caches owned by this module. Safe before first
  * build and after a partial/OOM build; call once during GUI shutdown. */
@@ -84,6 +184,7 @@ const tp_snapshot_sprite *gui_rows_selected_override(void);
 typedef struct gui_rows_bench_counters {
     uint64_t row_realloc_calls;
     uint64_t override_index_realloc_calls;
+    uint64_t row_string_allocs; /* per-row string heap allocs (rows_strdup: source_key/name/abs, ~3x/row) */
     uint64_t cache_key_checks;
     uint64_t rebuilds;
     uint64_t override_inserts;
@@ -104,8 +205,19 @@ gui_rows_bench_counters gui_rows_bench_get_counters(void);
 void gui_rows_bench_shutdown(void);
 #endif
 
-/* Selects the sprite-tree row matching a packed-atlas region (region -> row selection sync). */
+/* Selects the sprite-tree row matching a region in the explicitly displayed
+ * result. The native wrapper remains for callers that intentionally use the
+ * selected atlas's native pack result. */
+void select_row_for_result_region(const tp_result *result, int region_idx);
 void select_row_for_region(int region_idx);
+
+/* --- selection preservation across Undo/Redo ---
+ * capture: record the current primary leaf's canonical ref (call BEFORE the undo/redo mutates the
+ * model). revalidate: after the rows rebuild, re-resolve the primary selection to the row carrying
+ * that ref (clears it if the sprite is gone) and drop multi-select refs no longer present. Both are
+ * no-ops unless s_reselect_pending is set. */
+void gui_selection_capture_reselect(void);
+void gui_selection_revalidate(void);
 
 #ifdef __cplusplus
 }

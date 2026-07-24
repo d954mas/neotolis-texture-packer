@@ -10,6 +10,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "tp_core/tp_cancel.h"
 #include "tp_core/tp_error.h"
 #include "tp_core/tp_srckey.h"
 
@@ -38,6 +39,16 @@ typedef struct tp_scan_result {
  * tp_scan_free(). */
 tp_status tp_scan_dir(const char *abs_dir, tp_scan_result *out, tp_error *err);
 
+/* Cancellable form of tp_scan_dir: the recursive walk polls `cancel` once per
+ * directory entry, so a caller (e.g. the async pack worker) can interrupt a slow /
+ * network directory promptly instead of waiting the whole tree out. A NULL `cancel`
+ * (or a token whose callback is NULL) means "never cancel" -- tp_scan_dir() is
+ * exactly this with a NULL token. On cancellation the partial walk is freed, *out is
+ * left empty, and TP_STATUS_CANCELLED is returned (a clean stop, not a failure). All
+ * other semantics match tp_scan_dir. */
+tp_status tp_scan_dir_cancellable(const char *abs_dir, tp_scan_result *out,
+                                  const tp_cancel_token *cancel, tp_error *err);
+
 /* Frees entries and zeroes *out. Safe to call on an already-empty result; safe on NULL. */
 void tp_scan_free(tp_scan_result *out);
 
@@ -54,6 +65,23 @@ bool tp_scan_is_dir(const char *abs);
 
 /* True if `abs` exists on disk (file OR directory). */
 bool tp_scan_exists(const char *abs);
+
+typedef enum tp_scan_kind {
+    TP_SCAN_KIND_MISSING = 0, /* absent, or the checked probe's error sentinel */
+    TP_SCAN_KIND_DIRECTORY,   /* an existing directory (reparse points included) */
+    TP_SCAN_KIND_FILE         /* an existing non-directory (regular/other/reparse) */
+} tp_scan_kind;
+
+/* Structured one-stat source classification. An absent path returns NOT_FOUND and
+ * sets *out to MISSING; permission, I/O, invalid-path, and other stat failures keep
+ * their distinct status instead of being collapsed into "missing". */
+tp_status tp_scan_classify_checked(const char *abs, tp_scan_kind *out,
+                                   tp_error *err);
+
+/* Compatibility value-only classification. Prefer the checked form whenever a
+ * caller must distinguish absence from an unreadable/unstatable path. Errors map
+ * to MISSING because this legacy API has no status channel. */
+tp_scan_kind tp_scan_classify(const char *abs);
 
 /* Stats one regular file through the same UTF-8 filesystem boundary used by
  * directory scanning. Size and platform mtime are opaque comparison values;

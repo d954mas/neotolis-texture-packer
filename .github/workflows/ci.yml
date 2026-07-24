@@ -202,9 +202,11 @@ jobs:
 
       # Advisory latency numbers land in the log; each probe still hard-fails on its deterministic
       # gate: --pack-hash-probe exits non-zero on a NON-DETERMINISTIC content hash (cold != warm) OR
-      # any unreadable atlas (uncovered gap), and --bench-perf exits non-zero on a non-blocking-
-      # invariant violation (a Pack request that packs synchronously / publishes a result on the
-      # caller thread, or a refresh that mutates project revision/dirty state).
+      # any unreadable atlas (uncovered gap), and --bench-perf exits non-zero on an async- or
+      # semantic-invariant violation (a Pack request that packs synchronously / publishes a result on the
+      # caller thread, or a refresh that mutates project revision/dirty state -- its semantic-purity gate,
+      # not a responsiveness one; the async refresh handoff is U-02 task 9, with cooperative
+      # scan/decode cancellation hardening tracked separately by U-02a).
       - name: U-01 perf probes (advisory numbers, deterministic hard-gates)
         if: runner.os == 'Linux'
         env:
