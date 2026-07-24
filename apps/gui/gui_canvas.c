@@ -158,6 +158,19 @@ bool gui_canvas_double_click_press(gui_canvas_double_click_ref *ref,
     return engine_double_clicked && same_ref && ref->valid;
 }
 
+bool gui_canvas_input_blocked(gui_canvas_input_state *state, bool menu_open,
+                              bool transient_owner) {
+    if (!state || (!menu_open && !transient_owner)) {
+        return false;
+    }
+    state->lmb_armed = false;
+    state->lmb_panning = false;
+    state->mmb_panning = false;
+    state->lmb_zoomed = false;
+    gui_canvas_double_click_reset(&state->double_click);
+    return true;
+}
+
 int gui_canvas_hit(const gui_canvas *c, float lx, float ly) {
     if (!c->result || c->last_scale <= 0.0F) {
         return -1;
@@ -189,6 +202,18 @@ void gui_canvas_select(gui_canvas *c, int sprite_index) {
             c->cur_page = pg;
         }
     }
+}
+gui_canvas_hit_action gui_canvas_apply_hit_selection(gui_canvas *c,
+                                                      int sprite_index,
+                                                      void (*clear_selection)(void)) {
+    gui_canvas_select(c, sprite_index);
+    if (sprite_index >= 0) {
+        return GUI_CANVAS_HIT_SELECT_SPRITE;
+    }
+    if (clear_selection) {
+        clear_selection();
+    }
+    return GUI_CANVAS_HIT_CLEAR_SELECTION;
 }
 int gui_canvas_selected(const gui_canvas *c) { return c->sel_sprite; }
 // #endregion

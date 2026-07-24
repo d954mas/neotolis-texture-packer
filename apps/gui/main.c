@@ -130,13 +130,9 @@ static const tp_result *s_shown_result; /* pack result currently bound to the ca
 /* Canvas mouse model: a left press arms a potential click; if the pointer moves past a small
  * threshold while held it becomes a PAN (no selection on release); otherwise release = click-select.
  * Middle-drag always pans; wheel always zooms. Selection never captures later pan/zoom. */
-static bool s_lmb_armed;      /* left button pressed on the canvas, click vs drag undecided */
-static bool s_lmb_panning;    /* left drag crossed the threshold -> panning */
-static bool s_mmb_panning;    /* middle-drag pan */
-static bool s_lmb_zoomed;     /* second press zoomed; suppress its release hit-test */
+static gui_canvas_input_state s_canvas_input;
 static float s_press_x, s_press_y; /* left-press origin (threshold test) */
 static float s_pan_last_x, s_pan_last_y;
-static gui_canvas_double_click_ref s_canvas_double_click;
 static const nt_ui_events_cfg_t s_canvas_dbl_cfg = {
     .long_press_secs = 0.0F,
     .double_click = true,
@@ -165,8 +161,18 @@ static const nt_ui_events_cfg_t s_canvas_dbl_cfg = {
  * either free pack slots or retain a stale slot across history navigation; the
  * next frame binds the then-current result without reusing the old borrow. */
 void gui_shell_reset_shown_result(void) {
-    gui_canvas_rebind_result(&s_canvas, &s_canvas_double_click, NULL);
+    gui_canvas_rebind_result(&s_canvas, &s_canvas_input.double_click, NULL);
     s_shown_result = NULL;
+}
+
+/* Empty atlas space clears the shared tree/inspector selection. reset_selection
+ * also drops an export-target preview, whose result may currently be borrowed
+ * by the canvas, so rebind the retained native result before this frame draws. */
+static void clear_canvas_shared_selection(void) {
+    reset_selection();
+    const tp_result *native = preview_target_result();
+    gui_canvas_rebind_result(&s_canvas, &s_canvas_input.double_click, native);
+    s_shown_result = native;
 }
 // #endregion
 
@@ -219,20 +225,20 @@ static void handle_canvas_input(void) {
     /* NOTE: intentionally NOT gated on nt_ui_input_any_focused -- pan/zoom/select over the atlas must
      * stay live while a text field holds focus. A press outside the panels also blurs that field (see
      * the blur-request block before nt_ui_begin). */
-    if (gui_canvas_get_mode(&s_canvas) != GUI_CANVAS_ATLAS || !gui_canvas_has_atlas(&s_canvas) ||
-        s_confirm_open || s_about_open || s_export_open || s_recovery_open || s_edit_kind != EDIT_NONE) {
-        s_lmb_armed = s_lmb_panning = s_mmb_panning = false;
-        s_lmb_zoomed = false;
-        gui_canvas_double_click_reset(&s_canvas_double_click);
+    const bool transient_owner =
+        gui_canvas_get_mode(&s_canvas) != GUI_CANVAS_ATLAS ||
+        !gui_canvas_has_atlas(&s_canvas) || s_confirm_open || s_about_open ||
+        s_export_open || s_recovery_open || s_edit_kind != EDIT_NONE;
+    if (gui_canvas_input_blocked(&s_canvas_input,
+                                 gui_view_chrome_any_menu_open(),
+                                 transient_owner)) {
         return;
     }
     /* Use the box the handler actually drew the page into (captured last frame). Layout px ==
      * framebuffer px in this app (STRETCH ref = fb). */
     const float *box = s_canvas.last_bb;
     if (box[2] <= 1.0F) {
-        s_lmb_armed = s_lmb_panning = s_mmb_panning = false;
-        s_lmb_zoomed = false;
-        gui_canvas_double_click_reset(&s_canvas_double_click);
+        (void)gui_canvas_input_blocked(&s_canvas_input, false, true);
         return;
     }
     const nt_pointer_t *p = &g_nt_input.pointers[0];
@@ -254,54 +260,57 @@ static void handle_canvas_input(void) {
 
     /* middle-drag: always pan */
     if (inside && p->buttons[NT_BUTTON_MIDDLE].is_pressed) {
-        s_mmb_panning = true;
+        s_canvas_input.mmb_panning = true;
         s_pan_last_x = p->x;
         s_pan_last_y = p->y;
     }
-    if (s_mmb_panning && p->buttons[NT_BUTTON_MIDDLE].is_down) {
+    if (s_canvas_input.mmb_panning && p->buttons[NT_BUTTON_MIDDLE].is_down) {
         gui_canvas_pan(&s_canvas, box, p->x - s_pan_last_x, p->y - s_pan_last_y);
         s_pan_last_x = p->x;
         s_pan_last_y = p->y;
     } else {
-        s_mmb_panning = false;
+        s_canvas_input.mmb_panning = false;
     }
 
     /* left: arm on press, decide click-vs-pan by movement, resolve on release */
     if (inside && p->buttons[NT_BUTTON_LEFT].is_pressed) {
-        s_lmb_armed = true;
-        s_lmb_panning = false;
+        s_canvas_input.lmb_armed = true;
+        s_canvas_input.lmb_panning = false;
         s_press_x = p->x;
         s_press_y = p->y;
         s_pan_last_x = p->x;
         s_pan_last_y = p->y;
     }
-    if (s_lmb_armed && p->buttons[NT_BUTTON_LEFT].is_down) {
-        if (!s_lmb_panning &&
+    if (s_canvas_input.lmb_armed && p->buttons[NT_BUTTON_LEFT].is_down) {
+        if (!s_canvas_input.lmb_panning &&
             (fabsf(p->x - s_press_x) > CANVAS_DRAG_THRESHOLD || fabsf(p->y - s_press_y) > CANVAS_DRAG_THRESHOLD)) {
-            s_lmb_panning = true;
+            s_canvas_input.lmb_panning = true;
         }
-        if (s_lmb_panning) {
+        if (s_canvas_input.lmb_panning) {
             gui_canvas_pan(&s_canvas, box, p->x - s_pan_last_x, p->y - s_pan_last_y);
             s_pan_last_x = p->x;
             s_pan_last_y = p->y;
         }
     }
-    if (s_lmb_armed && p->buttons[NT_BUTTON_LEFT].is_released) {
-        if (s_lmb_panning) {
-            gui_canvas_double_click_reset(&s_canvas_double_click);
-        } else if (!s_lmb_zoomed) { /* click: select region under cursor, or clear on empty */
+    if (s_canvas_input.lmb_armed && p->buttons[NT_BUTTON_LEFT].is_released) {
+        if (s_canvas_input.lmb_panning) {
+            gui_canvas_double_click_reset(&s_canvas_input.double_click);
+        } else if (!s_canvas_input.lmb_zoomed) { /* click: select region under cursor, or clear on empty */
             const int hit = gui_canvas_hit(&s_canvas, p->x, p->y);
-            gui_canvas_select(&s_canvas, hit);
-            if (hit >= 0) {
+            const gui_canvas_hit_action action =
+                gui_canvas_apply_hit_selection(&s_canvas, hit,
+                                               clear_canvas_shared_selection);
+            if (action == GUI_CANVAS_HIT_SELECT_SPRITE) {
                 select_row_for_result_region(s_canvas.result, hit);
             }
         }
-        s_lmb_armed = false;
-        s_lmb_panning = false;
-        s_lmb_zoomed = false;
+        s_canvas_input.lmb_armed = false;
+        s_canvas_input.lmb_panning = false;
+        s_canvas_input.lmb_zoomed = false;
     }
 
-    if (inside && !s_lmb_panning && !s_mmb_panning) {
+    if (inside && !s_canvas_input.lmb_panning &&
+        !s_canvas_input.mmb_panning) {
         s_canvas.hover_sprite = gui_canvas_hit(&s_canvas, p->x, p->y);
     }
 }
@@ -311,10 +320,13 @@ static void handle_canvas_input(void) {
  * canvas id from zooming the wrong sprite. Called after nt_ui_begin so the
  * event cell is current, while hit geometry still comes from the last draw. */
 static void handle_canvas_double_click(void) {
-    if (gui_canvas_get_mode(&s_canvas) != GUI_CANVAS_ATLAS ||
+    const bool transient_owner =
+        gui_canvas_get_mode(&s_canvas) != GUI_CANVAS_ATLAS ||
         !gui_canvas_has_atlas(&s_canvas) || s_confirm_open || s_about_open ||
-        s_export_open || s_recovery_open || s_edit_kind != EDIT_NONE) {
-        gui_canvas_double_click_reset(&s_canvas_double_click);
+        s_export_open || s_recovery_open || s_edit_kind != EDIT_NONE;
+    if (gui_canvas_input_blocked(&s_canvas_input,
+                                 gui_view_chrome_any_menu_open(),
+                                 transient_owner)) {
         return;
     }
     const nt_ui_events_t ev =
@@ -324,7 +336,8 @@ static void handle_canvas_double_click(void) {
     }
     const nt_pointer_t *pointer = &g_nt_input.pointers[0];
     const int hit = gui_canvas_hit(&s_canvas, pointer->x, pointer->y);
-    if (gui_canvas_double_click_press(&s_canvas_double_click, s_canvas.result,
+    if (gui_canvas_double_click_press(&s_canvas_input.double_click,
+                                      s_canvas.result,
                                       hit, ev.double_clicked)) {
         gui_canvas_select(&s_canvas, hit);
         select_row_for_result_region(s_canvas.result, hit);
@@ -332,7 +345,7 @@ static void handle_canvas_double_click(void) {
             /* A zero-hold injected click can press+release in this same frame;
              * its release was already processed before nt_ui_begin, so only
              * arm suppression while a future release is still pending. */
-            s_lmb_zoomed =
+            s_canvas_input.lmb_zoomed =
                 !pointer->buttons[NT_BUTTON_LEFT].is_released;
         }
     }
@@ -673,7 +686,8 @@ static void frame(void) {
          * while one is active + visible, else the native session pack (preview_target_result). */
         const tp_result *want = preview_target_result();
         if (want != s_shown_result) {
-            gui_canvas_rebind_result(&s_canvas, &s_canvas_double_click, want);
+            gui_canvas_rebind_result(&s_canvas, &s_canvas_input.double_click,
+                                     want);
             s_shown_result = want;
             /* Result rebinding clears the highlight. Restore it from the
              * primary leaf before canvas input when that leaf exists in the

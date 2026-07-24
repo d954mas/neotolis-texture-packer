@@ -905,6 +905,46 @@ static void test_report_page_oom_leaves_no_partial_runs(void) {
     tp_arena_destroy(arena);
 }
 
+static bool cancel_export_run(void *ctx) {
+    (void)ctx;
+    return true;
+}
+
+static void test_export_run_honors_cancel_before_safe_pack_phase(void) {
+    tp_pack_sprite_desc sprite = {
+        .name = "cancelled",
+        .rgba = g_piv,
+        .w = 30,
+        .h = 20,
+        .origin_x = 0.5F,
+        .origin_y = 0.5F,
+    };
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_export_notices notices;
+    tp_export_notices_init(&notices);
+    tp_export_report report;
+    memset(&report, 0, sizeof report);
+    const tp_cancel_token cancel = {cancel_export_run, NULL};
+    const tp_export_run_opts opts = {
+        .report = &report,
+        .cancel = &cancel,
+    };
+    tp_error error = {{0}};
+    int runs = -1;
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_CANCELLED,
+        tp_export_run_ex(g_proj, 0, &sprite, 1, g_dir, arena, &notices,
+                         &runs, &opts, &error));
+    TEST_ASSERT_EQUAL_INT(0, runs);
+    TEST_ASSERT_EQUAL_INT(0, report.target_count);
+    TEST_ASSERT_NOT_NULL(strstr(error.msg, "cancel"));
+
+    tp_export_notices_free(&notices);
+    tp_arena_destroy(arena);
+}
+
 int main(int argc, char **argv) {
     if (tp_build_is_worker_invocation(argc, argv)) {
         return tp_build_worker_main();
@@ -928,6 +968,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_snapshot_report_marks_nonempty_input_ready_before_output_resolution);
     RUN_TEST(test_report_marks_pre_target_setup_failure_as_pack_failed);
     RUN_TEST(test_report_page_oom_leaves_no_partial_runs);
+    RUN_TEST(test_export_run_honors_cancel_before_safe_pack_phase);
     int rc = UNITY_END();
     tp_export_notices_free(&g_notices);
     tp_project_destroy(g_proj);

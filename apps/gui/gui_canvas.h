@@ -42,6 +42,19 @@ typedef struct gui_canvas_double_click_ref {
     bool valid;
 } gui_canvas_double_click_ref;
 
+typedef struct gui_canvas_input_state {
+    bool lmb_armed;
+    bool lmb_panning;
+    bool mmb_panning;
+    bool lmb_zoomed;
+    gui_canvas_double_click_ref double_click;
+} gui_canvas_input_state;
+
+typedef enum gui_canvas_hit_action {
+    GUI_CANVAS_HIT_SELECT_SPRITE = 0,
+    GUI_CANVAS_HIT_CLEAR_SELECTION
+} gui_canvas_hit_action;
+
 typedef struct gui_canvas {
     gui_canvas_mode mode;
 
@@ -149,12 +162,21 @@ void gui_canvas_double_click_reset(gui_canvas_double_click_ref *ref);
 bool gui_canvas_double_click_press(gui_canvas_double_click_ref *ref,
                                    const tp_result *result, int sprite_index,
                                    bool engine_double_clicked);
+/* Shared raw-input ownership gate. Menus/modal editors own the pointer while
+ * open, so all armed click/pan and retained double-click state is cancelled. */
+bool gui_canvas_input_blocked(gui_canvas_input_state *state, bool menu_open,
+                              bool transient_owner);
 
 /* Region hit-test at layout point (lx,ly): the sprite index on the current page whose placed AABB
  * contains the point, or -1. Uses the last drawn geometry. */
 int gui_canvas_hit(const gui_canvas *c, float lx, float ly);
 /* Selects a region (accent outline); -1 clears. If the region is on another page, switches to it. */
 void gui_canvas_select(gui_canvas *c, int sprite_index);
+/* Applies the canvas-local highlight and tells the shell whether the shared
+ * tree/inspector selection must select a sprite or clear through its contract. */
+gui_canvas_hit_action gui_canvas_apply_hit_selection(gui_canvas *c,
+                                                      int sprite_index,
+                                                      void (*clear_selection)(void));
 int gui_canvas_selected(const gui_canvas *c);
 
 /* The CUSTOM element draw handler. Register via nt_ui_set_custom_handler(ctx, fn, c). */

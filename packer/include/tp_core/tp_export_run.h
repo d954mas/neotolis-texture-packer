@@ -191,6 +191,12 @@ typedef struct tp_export_run_opts {
      * not run). Meaningful only with a non-NULL report (would_write/notices live
      * there); a dry run without a report just skips the writes. */
     bool dry_run;
+
+    /* Optional cooperative cancellation. Polls guard safe orchestration
+     * boundaries, including immediately before every irreversible writer call.
+     * A single decoder invocation already in flight remains non-preemptible
+     * (U-02a); cancellation is observed at the next safe boundary. */
+    const tp_cancel_token *cancel;
 } tp_export_run_opts;
 
 /* tp_export_run plus optional behavior selected by `opts` (nullable == defaults;

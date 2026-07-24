@@ -1592,6 +1592,63 @@ void test_missing_folder_retains_folder_kind_and_missing_state(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, s_rows[0].runtime_status);
 }
 
+void test_canvas_menu_owner_cancels_raw_gesture_and_double_click(void) {
+    tp_result result = {0};
+    gui_canvas_input_state input = {
+        .lmb_armed = true,
+        .lmb_panning = true,
+        .mmb_panning = true,
+        .lmb_zoomed = true,
+        .double_click = {
+            .result = &result,
+            .sprite_index = 3,
+            .valid = true,
+        },
+    };
+
+    TEST_ASSERT_TRUE(gui_canvas_input_blocked(&input, true, false));
+    TEST_ASSERT_FALSE(input.lmb_armed);
+    TEST_ASSERT_FALSE(input.lmb_panning);
+    TEST_ASSERT_FALSE(input.mmb_panning);
+    TEST_ASSERT_FALSE(input.lmb_zoomed);
+    TEST_ASSERT_FALSE(input.double_click.valid);
+
+    input.lmb_armed = true;
+    input.double_click.valid = true;
+    TEST_ASSERT_FALSE(gui_canvas_input_blocked(&input, false, false));
+    TEST_ASSERT_TRUE(input.lmb_armed);
+    TEST_ASSERT_TRUE(input.double_click.valid);
+}
+
+void test_empty_canvas_hit_clears_shared_sprite_selection(void) {
+    add_sources_and_build(NULL, NULL);
+    build_view();
+    TEST_ASSERT_GREATER_THAN(1, s_row_count);
+
+    s_sel_src = s_rows[1].src;
+    s_sel_child = s_rows[1].child;
+    s_sel_missing = true;
+    (void)snprintf(s_sel_abs, sizeof s_sel_abs, "%s", s_rows[1].abs);
+    multi_sel_add_ref(s_rows[1].source_id, s_rows[1].source_key);
+    s_sel_anchor_row = 1;
+    s_focus_view = 1;
+
+    gui_canvas canvas = {0};
+    canvas.sel_sprite = 4;
+    const gui_canvas_hit_action action =
+        gui_canvas_apply_hit_selection(&canvas, -1, reset_selection);
+    TEST_ASSERT_EQUAL_INT(GUI_CANVAS_HIT_CLEAR_SELECTION, action);
+
+    TEST_ASSERT_EQUAL_INT(-1, canvas.sel_sprite);
+    TEST_ASSERT_EQUAL_INT(-1, s_sel_src);
+    TEST_ASSERT_EQUAL_INT(-1, s_sel_child);
+    TEST_ASSERT_EQUAL_STRING("", s_sel_abs);
+    TEST_ASSERT_FALSE(s_sel_missing);
+    TEST_ASSERT_EQUAL_INT(0, s_multi_sel_count);
+    TEST_ASSERT_EQUAL_INT(-1, s_sel_anchor_row);
+    TEST_ASSERT_EQUAL_INT(-1, s_focus_view);
+}
+
 int main(int argc, char **argv) {
     if (tp_build_is_worker_invocation(argc, argv)) {
         return tp_build_worker_main();
@@ -1637,5 +1694,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_folder_scan_failure_keeps_other_rows_and_typed_status);
     RUN_TEST(test_source_probe_failure_is_typed_warning_not_missing);
     RUN_TEST(test_missing_folder_retains_folder_kind_and_missing_state);
+    RUN_TEST(test_canvas_menu_owner_cancels_raw_gesture_and_double_click);
+    RUN_TEST(test_empty_canvas_hit_clears_shared_sprite_selection);
     return UNITY_END();
 }

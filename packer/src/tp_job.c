@@ -406,6 +406,7 @@ static int export_worker(void *context) {
     const double start = job_now_ms();
     tp_status first_status = TP_STATUS_OK;
     tp_error first_error = {{0}};
+    bool cancellation_owned_terminal = false;
     const tp_cancel_token cancel = {pack_job_cancel_requested, job};
     for (int i = 0; i < job->export_atlas_count; ++i) {
         if (pack_job_cancel_requested(job)) {
@@ -457,15 +458,18 @@ static int export_worker(void *context) {
         }
         tp_export_notices_free(&notices);
         tp_arena_destroy(arena);
+        if (i + 1 == job->export_atlas_count) {
+            /* The last atlas has crossed its irreversible output boundary. Claim
+             * terminal ownership now: a cancel already accepted wins CANCELLED;
+             * any request after this point is late and must be rejected. Result
+             * fields remain private until the state release below. */
+            cancellation_owned_terminal = job_claim_terminal(job);
+        }
     }
     job_before_terminal_gate_wait();
     job->elapsed_ms = job_now_ms() - start;
-    const bool cancel_requested = job_claim_terminal(job);
-    const int atlases_completed = job->export_result.atlases_ok +
-                                  job->export_result.atlases_failed +
-                                  job->export_result.atlases_skipped;
     const bool cancelled =
-        cancel_requested && atlases_completed < job->export_atlas_count;
+        cancellation_owned_terminal || job_claim_terminal(job);
     job->status =
         cancelled
             ? tp_error_set(&first_error, TP_STATUS_CANCELLED,

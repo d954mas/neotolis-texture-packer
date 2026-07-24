@@ -16,6 +16,7 @@
 #include "tinyfiledialogs.h"
 
 #include "tp_core/tp_export.h" /* tp_exporter_at -> the preview selector's exporter list */
+#include "tp_core/tp_id.h"
 #include "tp_core/tp_names.h"  /* tp_names_common_prefix (anim id from selection) */
 
 #include "app/nt_app.h"
@@ -71,9 +72,20 @@ bool gui_actions__busy_block(void) {
 }
 
 // #region undo/redo + refresh actions
+static tp_id128 selected_animation_id(void) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        snapshot ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas) : NULL;
+    const tp_snapshot_animation *animation =
+        atlas && s_sel_anim >= 0
+            ? tp_session_snapshot_animation_at(snapshot, atlas->id, s_sel_anim)
+            : NULL;
+    return animation ? animation->id : tp_id128_nil();
+}
+
 /* After undo/redo, drop transient editor and preview state but retain canonical
  * selection refs for revalidation against rebuilt rows. */
-static void undo_redo_settle(void) {
+static void undo_redo_settle(tp_id128 animation_id) {
     gui_shell_reset_shown_result();
     cancel_edit();
     /* Resolve by stable id before a positional index can alias another atlas. */
@@ -87,6 +99,20 @@ static void undo_redo_settle(void) {
     clamp_selection();
     s_sel_anchor_row = -1; /* view order shifts under the undo; a stale Shift anchor would mis-range */
     s_sel_anim = -1;
+    if (!tp_id128_is_nil(animation_id)) {
+        const tp_session_snapshot *snapshot = gui_project_snapshot();
+        const tp_snapshot_atlas *atlas =
+            snapshot ? tp_session_snapshot_atlas_at(snapshot, s_sel_atlas)
+                     : NULL;
+        for (int i = 0; atlas && i < atlas->animation_count; ++i) {
+            const tp_snapshot_animation *animation =
+                tp_session_snapshot_animation_at(snapshot, atlas->id, i);
+            if (animation && tp_id128_eq(animation->id, animation_id)) {
+                s_sel_anim = i;
+                break;
+            }
+        }
+    }
     s_sel_anim_frame = -1;
     if (s_preview_active) {
         preview_stop();
@@ -100,9 +126,10 @@ void do_undo(void) {
     if (gui_actions__flush_failed()) {
         return; /* The buffered gesture was rejected; do not undo a different step. */
     }
+    const tp_id128 animation_id = selected_animation_id();
     gui_selection_capture_reselect(); /* capture the primary leaf ref BEFORE the model shifts indices */
     if (gui_project_undo()) {
-        undo_redo_settle();
+        undo_redo_settle(animation_id);
         set_statusf("Undo (undo:%d redo:%d)", gui_project_undo_depth(), gui_project_redo_depth());
     } else {
         s_reselect_pending = false; /* nothing changed -- drop the capture, no revalidation needed */
@@ -114,9 +141,10 @@ void do_redo(void) {
     if (gui_actions__flush_failed()) {
         return; /* The buffered gesture was rejected; do not redo a different step. */
     }
+    const tp_id128 animation_id = selected_animation_id();
     gui_selection_capture_reselect();
     if (gui_project_redo()) {
-        undo_redo_settle();
+        undo_redo_settle(animation_id);
         set_statusf("Redo (undo:%d redo:%d)", gui_project_undo_depth(), gui_project_redo_depth());
     } else {
         s_reselect_pending = false;
@@ -137,6 +165,7 @@ static fp_entry *s_refresh_fingerprint;
 static int s_refresh_fingerprint_count;
 static bool s_refresh_fingerprint_valid;
 static const tp_session *s_refresh_fingerprint_session;
+static tp_id128 s_refresh_membership_hash;
 static tp_status fp_collect(fp_entry **arr, int *count, int *cap,
                             tp_error *error);
 
@@ -153,6 +182,7 @@ void gui_actions_refresh_fingerprint_reset(void) {
     s_refresh_fingerprint_count = 0;
     s_refresh_fingerprint_valid = false;
     s_refresh_fingerprint_session = NULL;
+    s_refresh_membership_hash = tp_id128_nil();
 }
 
 static void fp_bind_current_session(void) {
@@ -163,25 +193,38 @@ static void fp_bind_current_session(void) {
     }
 }
 
-/* The first normal frame after a session install is the initial runtime source
- * observation boundary. Retain it without invalidating sources or publishing UI
- * state, so the first later manual Refresh compares against something real. */
-static void refresh_fingerprint_prime_if_needed(void) {
-    fp_bind_current_session();
-    if (s_refresh_fingerprint_valid || !s_refresh_fingerprint_session) {
-        return;
+/* Exact source-membership signature: model source transactions rebase the
+ * filesystem baseline, while unrelated model edits keep external deltas visible. */
+static tp_id128 fp_membership_hash(void) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    tp_hasher hasher = tp_hasher_init();
+    static const char tag[] = "gui-refresh-membership-v1";
+    tp_hasher_update(&hasher, tag, sizeof tag);
+    const int atlas_count =
+        snapshot ? tp_session_snapshot_atlas_count(snapshot) : 0;
+    tp_hasher_update(&hasher, &atlas_count, sizeof atlas_count);
+    for (int ai = 0; ai < atlas_count; ++ai) {
+        const tp_snapshot_atlas *atlas =
+            tp_session_snapshot_atlas_at(snapshot, ai);
+        if (!atlas) {
+            continue;
+        }
+        tp_hasher_update(&hasher, atlas->id.bytes, sizeof atlas->id.bytes);
+        tp_hasher_update(&hasher, &atlas->source_count,
+                         sizeof atlas->source_count);
+        for (int si = 0; si < atlas->source_count; ++si) {
+            const tp_snapshot_source *source =
+                tp_session_snapshot_source_at(snapshot, atlas->id, si);
+            if (!source) {
+                continue;
+            }
+            tp_hasher_update(&hasher, source->id.bytes, sizeof source->id.bytes);
+            tp_hasher_update(&hasher, &source->kind, sizeof source->kind);
+            const char *path = source->path ? source->path : "";
+            tp_hasher_update(&hasher, path, strlen(path) + 1U);
+        }
     }
-    fp_entry *entries = NULL;
-    int count = 0;
-    int cap = 0;
-    tp_error error = {0};
-    if (fp_collect(&entries, &count, &cap, &error) != TP_STATUS_OK) {
-        fp_free(entries, count);
-        return; /* Manual Refresh owns the structured warning/error path. */
-    }
-    s_refresh_fingerprint = entries;
-    s_refresh_fingerprint_count = count;
-    s_refresh_fingerprint_valid = true;
+    return tp_hasher_final(hasher);
 }
 
 static tp_status fp_push(fp_entry **arr, int *count, int *cap,
@@ -315,15 +358,24 @@ static tp_status refresh_diff_core(int *out_added, int *out_removed,
         *out_sources_invalidated = false;
     }
     fp_bind_current_session();
+    const tp_id128 membership_hash = fp_membership_hash();
 
     fp_entry *before = NULL;
     int bn = 0;
     int bc = 0;
-    const bool retained_before = s_refresh_fingerprint_valid;
+    const bool retained_before =
+        s_refresh_fingerprint_valid &&
+        tp_id128_eq(s_refresh_membership_hash, membership_hash);
     if (retained_before) {
         before = s_refresh_fingerprint;
         bn = s_refresh_fingerprint_count;
     } else {
+        if (s_refresh_fingerprint_valid) {
+            fp_free(s_refresh_fingerprint, s_refresh_fingerprint_count);
+            s_refresh_fingerprint = NULL;
+            s_refresh_fingerprint_count = 0;
+            s_refresh_fingerprint_valid = false;
+        }
         tp_status status = fp_collect(&before, &bn, &bc, error);
         if (status != TP_STATUS_OK) {
             fp_free(before, bn);
@@ -378,6 +430,7 @@ static tp_status refresh_diff_core(int *out_added, int *out_removed,
     s_refresh_fingerprint = after;
     s_refresh_fingerprint_count = an;
     s_refresh_fingerprint_valid = true;
+    s_refresh_membership_hash = membership_hash;
 
     if (out_added) {
         *out_added = added;
@@ -623,7 +676,6 @@ void apply_pending(void) {
 
     gui_actions__apply_file_dialogs();
     gui_actions__apply_structural_edits();
-    refresh_fingerprint_prime_if_needed();
     if (s_pending_refresh) {
         do_refresh();
     }

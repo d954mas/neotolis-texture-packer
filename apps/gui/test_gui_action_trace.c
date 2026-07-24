@@ -211,6 +211,47 @@ void test_deferred_edit_coalesces_then_undo_redo_trace_is_exact(void) {
     TEST_ASSERT_EQUAL_STRING("Redo (undo:1 redo:0)", s_status);
 }
 
+void test_undo_redo_preserves_selected_animation_by_stable_id(void) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas = tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const tp_id128 atlas_id = atlas->id;
+
+    TEST_ASSERT_EQUAL_INT(
+        0, gui_project_create_animation(
+               atlas_id, tp_session_snapshot_revision(snapshot), "idle", NULL,
+               0));
+    snapshot = gui_project_snapshot();
+    TEST_ASSERT_EQUAL_INT(
+        1, gui_project_create_animation(
+               atlas_id, tp_session_snapshot_revision(snapshot), "walk", NULL,
+               0));
+    snapshot = gui_project_snapshot();
+    const tp_snapshot_animation *selected =
+        tp_session_snapshot_animation_at(snapshot, atlas_id, 1);
+    TEST_ASSERT_NOT_NULL(selected);
+    const tp_id128 selected_id = selected->id;
+    s_sel_anim = 1;
+
+    TEST_ASSERT_TRUE(gui_project_set_atlas_setting(
+        atlas_id, tp_session_snapshot_revision(snapshot), GUI_ATLAS_MAX_SIZE,
+        1024, 0.0F));
+
+    do_undo();
+    TEST_ASSERT_GREATER_OR_EQUAL(0, s_sel_anim);
+    selected = tp_session_snapshot_animation_at(
+        gui_project_snapshot(), atlas_id, s_sel_anim);
+    TEST_ASSERT_NOT_NULL(selected);
+    TEST_ASSERT_TRUE(tp_id128_eq(selected_id, selected->id));
+
+    do_redo();
+    TEST_ASSERT_GREATER_OR_EQUAL(0, s_sel_anim);
+    selected = tp_session_snapshot_animation_at(
+        gui_project_snapshot(), atlas_id, s_sel_anim);
+    TEST_ASSERT_NOT_NULL(selected);
+    TEST_ASSERT_TRUE(tp_id128_eq(selected_id, selected->id));
+}
+
 void test_deferred_action_mutates_before_publishing_success_status(void) {
     TEST_ASSERT_EQUAL_INT(1, tp_session_snapshot_atlas_count(
                                  gui_project_snapshot()));
@@ -407,9 +448,10 @@ void test_refresh_modified_file_reports_changed_from_last_success(void) {
             atlas->id, tp_session_snapshot_revision(snapshot), source_path,
             TP_SOURCE_KIND_FILE));
 
-    /* The first normal frame is the runtime observation boundary. It retains
-     * this live file before the user requests their first Refresh. */
-    apply_pending();
+    /* Establish an explicit successful runtime observation. Project open/frame
+     * pumping must not synchronously scan every source. */
+    TEST_ASSERT_TRUE(
+        gui_actions_refresh_diff_headless(NULL, NULL, NULL));
 
     source = fopen(source_path, "wb");
     TEST_ASSERT_NOT_NULL(source);
@@ -442,8 +484,8 @@ void test_refresh_deleted_file_invalidates_preview_without_model_mutation(void) 
             atlas->id, tp_session_snapshot_revision(snapshot), source_path,
             TP_SOURCE_KIND_FILE));
 
-    /* Prime from normal runtime observation, not from a prior manual Refresh. */
-    apply_pending();
+    TEST_ASSERT_TRUE(
+        gui_actions_refresh_diff_headless(NULL, NULL, NULL));
 
     gui_project_mark_packed();
     TEST_ASSERT_FALSE(gui_project_is_stale());
@@ -484,7 +526,8 @@ void test_refresh_unreadable_source_warns_without_model_mutation(void) {
         gui_project_add_source_kind(
             atlas->id, tp_session_snapshot_revision(snapshot), source_path,
             TP_SOURCE_KIND_FILE));
-    apply_pending(); /* retain the last successful runtime observation */
+    TEST_ASSERT_TRUE(
+        gui_actions_refresh_diff_headless(NULL, NULL, NULL));
     gui_project_mark_packed();
 
     const int64_t revision_before =
@@ -537,6 +580,69 @@ void test_refresh_fingerprint_resets_when_session_is_replaced(void) {
     TEST_ASSERT_EQUAL_INT(0, remove(source_path));
 }
 
+void test_refresh_ignores_source_membership_transactions(void) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas = tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const tp_id128 atlas_id = atlas->id;
+
+    char first_path[1200];
+    char second_path[1200];
+    TEST_ASSERT_TRUE(snprintf(first_path, sizeof first_path, "%s/first.png",
+                              TP_GUI_TRACE_TEST_DIR) > 0);
+    TEST_ASSERT_TRUE(snprintf(second_path, sizeof second_path, "%s/second.png",
+                              TP_GUI_TRACE_TEST_DIR) > 0);
+    FILE *source = fopen(first_path, "wb");
+    TEST_ASSERT_NOT_NULL(source);
+    TEST_ASSERT_EQUAL_size_t(1U, fwrite("a", 1U, 1U, source));
+    TEST_ASSERT_EQUAL_INT(0, fclose(source));
+    source = fopen(second_path, "wb");
+    TEST_ASSERT_NOT_NULL(source);
+    TEST_ASSERT_EQUAL_size_t(1U, fwrite("b", 1U, 1U, source));
+    TEST_ASSERT_EQUAL_INT(0, fclose(source));
+
+    TEST_ASSERT_EQUAL_INT(
+        GUI_ADD_ADDED,
+        gui_project_add_source_kind(
+            atlas_id, tp_session_snapshot_revision(snapshot), first_path,
+            TP_SOURCE_KIND_FILE));
+    TEST_ASSERT_TRUE(
+        gui_actions_refresh_diff_headless(NULL, NULL, NULL));
+
+    snapshot = gui_project_snapshot();
+    TEST_ASSERT_EQUAL_INT(
+        GUI_ADD_ADDED,
+        gui_project_add_source_kind(
+            atlas_id, tp_session_snapshot_revision(snapshot), second_path,
+            TP_SOURCE_KIND_FILE));
+    snapshot = gui_project_snapshot();
+    const tp_snapshot_source *second =
+        tp_session_snapshot_source_at(snapshot, atlas_id, 1);
+    TEST_ASSERT_NOT_NULL(second);
+    const tp_id128 second_id = second->id;
+
+    int added = -1;
+    int removed = -1;
+    int changed = -1;
+    TEST_ASSERT_TRUE(
+        gui_actions_refresh_diff_headless(&added, &removed, &changed));
+    TEST_ASSERT_EQUAL_INT(0, added);
+    TEST_ASSERT_EQUAL_INT(0, removed);
+    TEST_ASSERT_EQUAL_INT(0, changed);
+
+    snapshot = gui_project_snapshot();
+    TEST_ASSERT_TRUE(gui_project_remove_source(
+        atlas_id, second_id, tp_session_snapshot_revision(snapshot)));
+    TEST_ASSERT_TRUE(
+        gui_actions_refresh_diff_headless(&added, &removed, &changed));
+    TEST_ASSERT_EQUAL_INT(0, added);
+    TEST_ASSERT_EQUAL_INT(0, removed);
+    TEST_ASSERT_EQUAL_INT(0, changed);
+
+    TEST_ASSERT_EQUAL_INT(0, remove(first_path));
+    TEST_ASSERT_EQUAL_INT(0, remove(second_path));
+}
+
 void test_late_export_cancel_keeps_completed_success_outcome(void) {
     TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_TRACE_TEST_DIR));
     tp_job__test_arm_before_terminal_gate();
@@ -557,8 +663,9 @@ void test_late_export_cancel_keeps_completed_success_outcome(void) {
     TEST_ASSERT_TRUE(entered);
 
     gui_pack_async_cancel();
-    TEST_ASSERT_TRUE(gui_pack_async_cancelling());
+    const bool cancelling = gui_pack_async_cancelling();
     tp_job__test_release_before_terminal_gate();
+    TEST_ASSERT_FALSE(cancelling);
 
     gui_pack_result_info info;
     gui_pack_done done = GUI_PACK_DONE_NONE;
@@ -593,6 +700,7 @@ int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_state_ownership_inventory_preserves_three_classes);
     RUN_TEST(test_deferred_edit_coalesces_then_undo_redo_trace_is_exact);
+    RUN_TEST(test_undo_redo_preserves_selected_animation_by_stable_id);
     RUN_TEST(test_deferred_action_mutates_before_publishing_success_status);
     RUN_TEST(test_preview_request_is_deferred_and_selection_reset_stops_it);
     RUN_TEST(test_confirm_save_publishes_before_new_and_new_message_wins);
@@ -604,6 +712,7 @@ int main(void) {
         test_refresh_deleted_file_invalidates_preview_without_model_mutation);
     RUN_TEST(test_refresh_unreadable_source_warns_without_model_mutation);
     RUN_TEST(test_refresh_fingerprint_resets_when_session_is_replaced);
+    RUN_TEST(test_refresh_ignores_source_membership_transactions);
     RUN_TEST(test_late_export_cancel_keeps_completed_success_outcome);
     RUN_TEST(test_empty_export_surfaces_skipped_atlas_warning);
     return UNITY_END();
