@@ -23,6 +23,23 @@ struct tp_export_snapshot_job {
     bool dry_run;
 };
 
+static _Thread_local int s_report_alloc_fail = -1;
+
+void tp_export_run__test_set_report_alloc_fail(int nth) {
+    s_report_alloc_fail = nth;
+}
+
+static void *report_alloc(tp_arena *arena, size_t size) {
+    if (s_report_alloc_fail == 0) {
+        s_report_alloc_fail = -1;
+        return NULL;
+    }
+    if (s_report_alloc_fail > 0) {
+        s_report_alloc_fail--;
+    }
+    return tp_arena_alloc(arena, size);
+}
+
 static bool run_path_is_absolute(const char *path) {
     if (!path || !path[0]) {
         return false;
@@ -237,7 +254,8 @@ static tp_status fill_run_report(tp_export_report_run *run, const tp_result *r, 
     run->page_count = r->page_count;
     run->pages = NULL;
     if (r->page_count > 0) {
-        run->pages = (tp_export_report_page *)tp_arena_alloc(arena, (size_t)r->page_count * sizeof(*run->pages));
+        run->pages = (tp_export_report_page *)report_alloc(
+            arena, (size_t)r->page_count * sizeof(*run->pages));
         if (!run->pages) {
             return TP_STATUS_OOM;
         }
@@ -284,6 +302,9 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
         *out_pack_runs = 0;
     }
     if (!project || !sprites || sprite_count <= 0 || !work_dir || !arena) {
+        if (report) {
+            report->pack_failed = true;
+        }
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_export_run: NULL/empty required argument");
     }
     if (atlas_index < 0 || atlas_index >= project->atlas_count) {
@@ -294,6 +315,9 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
     tp_pack_settings base;
     tp_status st = tp_project_atlas_to_settings(project, atlas_index, &base, err);
     if (st != TP_STATUS_OK) {
+        if (report) {
+            report->pack_failed = true;
+        }
         return st;
     }
     base.work_dir = work_dir;
@@ -305,6 +329,9 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
     if (a->animation_count > 0) {
         anims = (tp_export_anim_in *)tp_arena_alloc(arena, (size_t)a->animation_count * sizeof(tp_export_anim_in));
         if (!anims) {
+            if (report) {
+                report->pack_failed = true;
+            }
             return tp_error_set(err, TP_STATUS_OOM, "tp_export_run: OOM (anim opts)");
         }
     }
@@ -312,18 +339,27 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
     if (sprite_count > 0) {
         ovs = (tp_export_name_override *)tp_arena_alloc(arena, (size_t)sprite_count * sizeof(tp_export_name_override));
         if (!ovs) {
+            if (report) {
+                report->pack_failed = true;
+            }
             return tp_error_set(err, TP_STATUS_OOM, "tp_export_run: OOM (rename opts)");
         }
     }
     tp_export_sprite_ref_in *refs = (tp_export_sprite_ref_in *)tp_arena_alloc(
         arena, (size_t)sprite_count * sizeof *refs);
     if (!refs) {
+        if (report) {
+            report->pack_failed = true;
+        }
         return tp_error_set(err, TP_STATUS_OOM, "tp_export_run: OOM (sprite refs)");
     }
     tp_normalize_opts nopts;
     st = build_norm_opts(a, sprites, sprite_count, anims, ovs, refs, arena,
                          &nopts, err);
     if (st != TP_STATUS_OK) {
+        if (report) {
+            report->pack_failed = true;
+        }
         return st;
     }
 
@@ -335,6 +371,9 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
     const char **out_bases = (const char **)tp_arena_alloc(arena, (size_t)a->target_count * sizeof(char *));
     int *rtidx = (int *)tp_arena_alloc(arena, (size_t)a->target_count * sizeof(int));
     if (!groups || !target_group || !out_bases || !rtidx) {
+        if (report) {
+            report->pack_failed = true;
+        }
         return tp_error_set(err, TP_STATUS_OOM, "tp_export_run: OOM (groups)");
     }
     int group_count = 0;
@@ -348,6 +387,7 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
         report->targets =
             (tp_export_report_target *)tp_arena_alloc(arena, (size_t)enabled_count * sizeof(*report->targets));
         if (!report->targets) {
+            report->pack_failed = true;
             return tp_error_set(err, TP_STATUS_OOM, "tp_export_run: OOM (report targets)");
         }
         memset(report->targets, 0, (size_t)enabled_count * sizeof(*report->targets));
@@ -550,19 +590,26 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
     }
 
     if (report) {
-        report->run_count = group_count;
         if (group_count > 0) {
-            report->runs = (tp_export_report_run *)tp_arena_alloc(arena, (size_t)group_count * sizeof(*report->runs));
-            if (!report->runs) {
+            tp_export_report_run *report_runs = report_alloc(
+                arena, (size_t)group_count * sizeof(*report->runs));
+            if (!report_runs) {
+                report->report_failed = true;
                 return tp_error_set(err, TP_STATUS_OOM, "tp_export_run: OOM (report runs)");
             }
+            memset(report_runs, 0,
+                   (size_t)group_count * sizeof(*report_runs));
             for (int g = 0; g < group_count; g++) {
-                tp_status fst = fill_run_report(&report->runs[g], groups[g].result, arena);
+                tp_status fst =
+                    fill_run_report(&report_runs[g], groups[g].result, arena);
                 if (fst != TP_STATUS_OK) {
+                    report->report_failed = true;
                     return tp_error_set(err, fst, "tp_export_run: OOM (report pages)");
                 }
             }
+            report->runs = report_runs;
         }
+        report->run_count = group_count;
     }
 
     if (out_pack_runs) {
@@ -697,6 +744,16 @@ tp_status tp_export_snapshot_job_run_atlas_ex(tp_export_snapshot_job *job,
                                               int *out_sprite_count,
                                               int *out_missing_sources,
                                               tp_error *err) {
+    return tp_export_snapshot_job_run_atlas_ex_cancellable(
+        job, atlas_index, arena, notices, report, out_pack_runs,
+        out_sprite_count, out_missing_sources, NULL, err);
+}
+
+tp_status tp_export_snapshot_job_run_atlas_ex_cancellable(
+    tp_export_snapshot_job *job, int atlas_index, tp_arena *arena,
+    tp_export_notices *notices, tp_export_report *report, int *out_pack_runs,
+    int *out_sprite_count, int *out_missing_sources,
+    const tp_cancel_token *cancel, tp_error *err) {
     if (!job || !job->project || atlas_index < 0 ||
         atlas_index >= job->project->atlas_count) {
         return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
@@ -716,7 +773,8 @@ tp_status tp_export_snapshot_job_run_atlas_ex(tp_export_snapshot_job *job,
     }
     const tp_project_atlas *atlas = &job->project->atlases[atlas_index];
     tp_pack_input input;
-    tp_status status = tp_pack_input_build(job->project, atlas_index, &input, err);
+    tp_status status = tp_pack_input_build_cancellable(
+        job->project, atlas_index, &input, cancel, err);
     if (status != TP_STATUS_OK) {
         if (report) {
             report->input_outcome = TP_EXPORT_INPUT_FAILED;
@@ -740,6 +798,10 @@ tp_status tp_export_snapshot_job_run_atlas_ex(tp_export_snapshot_job *job,
     if (report) {
         report->input_outcome = TP_EXPORT_INPUT_READY;
     }
+    if (tp_cancel_requested(cancel)) {
+        tp_pack_input_free(&input);
+        return tp_error_set(err, TP_STATUS_CANCELLED, "export cancelled");
+    }
     for (int ti = 0; !job->dry_run && ti < atlas->target_count; ++ti) {
         if (!atlas->targets[ti].enabled) {
             continue;
@@ -755,6 +817,10 @@ tp_status tp_export_snapshot_job_run_atlas_ex(tp_export_snapshot_job *job,
                                 "save the project first (relative output paths need a project dir)");
         }
         tp_mkdirs_parent(output_path);
+    }
+    if (tp_cancel_requested(cancel)) {
+        tp_pack_input_free(&input);
+        return tp_error_set(err, TP_STATUS_CANCELLED, "export cancelled");
     }
     tp_export_run_opts run_opts = {.report = report, .dry_run = job->dry_run};
     status = tp_export_run_ex(job->project, atlas_index, input.descs, input.count,

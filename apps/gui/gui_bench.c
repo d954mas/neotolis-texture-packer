@@ -177,6 +177,19 @@ static void bench_write_file(void) {
 /* --- probes ------------------------------------------------------------------------------------ */
 static bool bench_headless(void) { return getenv("NTPACKER_GUI_HEADLESS") != NULL; }
 
+static void bench_sort_projection(row_sort_key key, const char *name) {
+    gui_bench_samples samples;
+    bench_samples_init(&samples);
+    for (int i = 0; i < GUI_BENCH_REPEATS; ++i) {
+        gui_rows_set_sort(key, (i & 1) != 0, (i & 2) != 0);
+        const double t0 = bench_now_ms();
+        build_view();
+        const double t1 = bench_now_ms();
+        bench_samples_accept(&samples, t1 - t0);
+    }
+    bench_emit_action(name, &samples);
+}
+
 /* All action-latency + invariant probes, on the main thread, in one (untimed) frame. */
 static void bench_run_probes(void) {
     /* Hard load gate: a successful fixture open leaves a saved path + many atlases; a failed open
@@ -199,9 +212,7 @@ static void bench_run_probes(void) {
     bench_emit("bench_perf fixture project=%s atlases=%d sources=%d repeats=%d",
                gui_project_display_name(), atlas_count, total_sources, GUI_BENCH_REPEATS);
 
-    /* 1. build_rows: flip the selected atlas each repeat so the {atlas id, model gen, source gen,
-     *    snapshot lifetime} row cache always misses and a full tree/row-model rebuild is measured.
-     *    (This is the harness U-02's tree filter will be measured against -- there is no filter yet.) */
+    /* 1. Row-model rebuild plus the filter projection over each selected atlas. */
     gui_bench_samples build;
     bench_samples_init(&build);
     for (int i = 0; i < GUI_BENCH_REPEATS; i++) {
@@ -213,15 +224,38 @@ static void bench_run_probes(void) {
     }
     bench_emit_action("build_rows", &build);
 
+    gui_bench_samples filter;
+    bench_samples_init(&filter);
+    for (int i = 0; i < GUI_BENCH_REPEATS; ++i) {
+        s_sel_atlas = i % atlas_count;
+        build_rows();
+        gui_rows_set_filter((i & 1) != 0 ? "a" : "e");
+        const double t0 = bench_now_ms();
+        build_view();
+        const double t1 = bench_now_ms();
+        bench_samples_accept(&filter, t1 - t0);
+    }
+    bench_emit_action("filter", &filter);
+    gui_rows_set_filter("");
+
     /* Prepare atlas 0 for the selection probe: a blocking pack gives region -> row mapping real data. */
     s_sel_atlas = 0;
     build_rows();
     do_pack_blocking();
     const tp_result *packed = gui_pack_result(0);
     build_rows(); /* row cache still keyed to atlas 0; ensure rows are present for the scan */
+    build_view();
     const int regions = packed ? packed->sprite_count : 0;
 
-    /* 2. selection change through the canvas-region -> tree-row sync (a full row scan + ref match). */
+    /* 2. Every user-facing sort key, including the packed-area lookup path. */
+    bench_sort_projection(ROW_SORT_NAME, "sort_name");
+    bench_sort_projection(ROW_SORT_SIZE, "sort_size");
+    bench_sort_projection(ROW_SORT_MTIME, "sort_mtime");
+    bench_sort_projection(ROW_SORT_ADDED, "sort_added");
+    gui_rows_set_sort(ROW_SORT_NAME, false, false);
+    build_view();
+
+    /* 3. Selection change through the canvas-region -> tree-row sync. */
     gui_bench_samples selection;
     bench_samples_init(&selection);
     for (int i = 0; i < GUI_BENCH_REPEATS; i++) {
@@ -236,7 +270,7 @@ static void bench_run_probes(void) {
     }
     bench_emit_action("selection", &selection);
 
-    /* 3. a reversible model edit (an atlas padding knob) + undo + redo on atlas 0, timed separately. */
+    /* 4. A reversible model edit plus undo and redo on atlas 0. */
     gui_bench_samples edit;
     gui_bench_samples undo;
     gui_bench_samples redo;
@@ -272,7 +306,7 @@ static void bench_run_probes(void) {
     bench_emit_action("undo", &undo);
     bench_emit_action("redo", &redo);
 
-    /* 4. refresh / rescan + the semantic-purity invariant: an external source refresh must NOT mutate the
+    /* 5. Refresh/rescan plus the semantic-purity invariant: an external source refresh must NOT mutate the
      *    project revision or dirty state (AGENTS hard invariant). Compare revision + dirty before/after.
      *    NOTE: this checks semantic invariance only -- the refresh it times is still fully synchronous;
      *    the async/off-UI-thread handoff is U-04, so this is deliberately NOT a responsiveness gate. */
@@ -307,7 +341,7 @@ static void bench_run_probes(void) {
         s_bench_fail = true;
     }
 
-    /* 5. a Pack REQUEST is non-blocking: it must hand off to the async worker, not produce the result
+    /* 6. A Pack request is non-blocking: it must hand off to the async worker, not produce the result
      *    synchronously on the calling thread. Assert the request returns AND a worker is in flight. */
     s_sel_atlas = 0;
     const uint64_t pack_ver_before = gui_pack_result_version(0);

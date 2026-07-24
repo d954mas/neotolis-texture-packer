@@ -9,6 +9,7 @@
  * test_gui_canonical_identity.c. */
 
 #include <stdbool.h>
+#include <errno.h>
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -39,6 +40,8 @@
 /* gui_actions/gui_project own several shell-facing commands linked into this
  * headless target but never exercised here. */
 void gui_shell_reset_shown_result(void) {}
+void tp_scan__test_set_alloc_fail(int nth);
+void tp_scan__test_set_stat_error(int error);
 
 /* One FOLDER source (pack/ with alpha/beta/gamma.png children) + one FILE
  * source (solo.png) -- enough to drive filter, sort, collapse, and the missing
@@ -231,6 +234,8 @@ static int view_folder_pos(void) {
 }
 
 void setUp(void) {
+    tp_scan__test_set_alloc_fail(-1);
+    tp_scan__test_set_stat_error(0);
     TEST_ASSERT_TRUE(prepare_files());
     gui_project_init();
     s_sel_atlas = 0;
@@ -238,6 +243,8 @@ void setUp(void) {
 }
 
 void tearDown(void) {
+    tp_scan__test_set_alloc_fail(-1);
+    tp_scan__test_set_stat_error(0);
     gui_pack_shutdown();
     gui_rows_shutdown();
     gui_project_shutdown();
@@ -1466,6 +1473,125 @@ void test_canvas_zoom_to_sprite_centers_transformed_region(void) {
         &click_ref, &replacement, 0, true));
 }
 
+void test_recycled_click_identity_rejects_remapped_rows(void) {
+    tp_id128 first = tp_id128_nil();
+    tp_id128 second = tp_id128_nil();
+    first.bytes[0] = 1U;
+    second.bytes[0] = 2U;
+
+    TEST_ASSERT_TRUE(
+        gui_rows_identity_matches(first, "hero.png", first, "hero.png"));
+    TEST_ASSERT_FALSE(
+        gui_rows_identity_matches(first, "hero.png", second, "hero.png"));
+    TEST_ASSERT_FALSE(
+        gui_rows_identity_matches(first, "hero.png", first, "enemy.png"));
+    TEST_ASSERT_TRUE(gui_rows_identity_matches(first, NULL, first, ""));
+}
+
+void test_filter_casefold_matches_realistic_non_ascii_pairs(void) {
+    TEST_ASSERT_TRUE(gui_rows_text_contains_ci(
+        "\xD0\x81\xD0\xBB\xD0\xBA\xD0\xB0",  /* Ёлка */
+        "\xD1\x91\xD0\xBB"));                  /* ёл */
+    TEST_ASSERT_TRUE(gui_rows_text_contains_ci(
+        "Stra\xC3\x9F" "e", "STRASSE"));
+    TEST_ASSERT_FALSE(gui_rows_text_contains_ci(
+        "\xD0\x81\xD0\xBB\xD0\xBA\xD0\xB0",
+        "\xD0\x94\xD1\x83\xD0\xB1"));          /* Дуб */
+}
+
+void test_folder_scan_failure_keeps_other_rows_and_typed_status(void) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const tp_id128 atlas_id = atlas->id;
+
+    TEST_ASSERT_EQUAL_INT(
+        GUI_ADD_ADDED,
+        gui_project_add_source_kind(
+            atlas_id, tp_session_snapshot_revision(snapshot), s_pack_dir,
+            TP_SOURCE_KIND_FOLDER));
+    snapshot = gui_project_snapshot();
+    TEST_ASSERT_EQUAL_INT(
+        GUI_ADD_ADDED,
+        gui_project_add_source_kind(
+            atlas_id, tp_session_snapshot_revision(snapshot), s_solo,
+            TP_SOURCE_KIND_FILE));
+
+    gui_project_invalidate_sources();
+    tp_scan__test_set_alloc_fail(0);
+    build_rows();
+    tp_scan__test_set_alloc_fail(-1);
+
+    TEST_ASSERT_EQUAL_INT(2, s_row_count);
+    TEST_ASSERT_TRUE(s_rows[0].is_source);
+    TEST_ASSERT_TRUE(s_rows[0].is_folder);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OOM, s_rows[0].runtime_status);
+    TEST_ASSERT_TRUE(s_rows[1].is_source);
+    TEST_ASSERT_EQUAL_STRING("solo", s_rows[1].sprite_name);
+}
+
+void test_source_probe_failure_is_typed_warning_not_missing(void) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const tp_id128 atlas_id = atlas->id;
+
+    TEST_ASSERT_EQUAL_INT(
+        GUI_ADD_ADDED,
+        gui_project_add_source_kind(
+            atlas_id, tp_session_snapshot_revision(snapshot), s_pack_dir,
+            TP_SOURCE_KIND_FOLDER));
+    snapshot = gui_project_snapshot();
+    TEST_ASSERT_EQUAL_INT(
+        GUI_ADD_ADDED,
+        gui_project_add_source_kind(
+            atlas_id, tp_session_snapshot_revision(snapshot), s_solo,
+            TP_SOURCE_KIND_FILE));
+
+    gui_project_invalidate_sources();
+    tp_scan__test_set_stat_error(EACCES);
+    build_rows();
+    tp_scan__test_set_stat_error(0);
+
+    TEST_ASSERT_EQUAL_INT(2, s_row_count);
+    TEST_ASSERT_TRUE(s_rows[0].is_folder);
+    TEST_ASSERT_FALSE(s_rows[0].missing);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_PATH_RESOLVE_FAILED,
+                          s_rows[0].runtime_status);
+    TEST_ASSERT_FALSE(s_rows[1].missing);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_PATH_RESOLVE_FAILED,
+                          s_rows[1].runtime_status);
+    TEST_ASSERT_EQUAL_INT(STATUS_WARNING, s_status_sev);
+}
+
+void test_missing_folder_retains_folder_kind_and_missing_state(void) {
+    (void)remove(s_alpha);
+    (void)remove(s_beta);
+    (void)remove(s_gamma);
+    (void)test_rmdir(s_pack_dir);
+
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_ADD_ADDED,
+        gui_project_add_source_kind(
+            atlas->id, tp_session_snapshot_revision(snapshot), s_pack_dir,
+            TP_SOURCE_KIND_FOLDER));
+
+    gui_project_invalidate_sources();
+    build_rows();
+
+    TEST_ASSERT_EQUAL_INT(1, s_row_count);
+    TEST_ASSERT_TRUE(s_rows[0].is_source);
+    TEST_ASSERT_TRUE(s_rows[0].is_folder);
+    TEST_ASSERT_TRUE(s_rows[0].missing);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, s_rows[0].runtime_status);
+}
+
 int main(int argc, char **argv) {
     if (tp_build_is_worker_invocation(argc, argv)) {
         return tp_build_worker_main();
@@ -1506,5 +1632,10 @@ int main(int argc, char **argv) {
     RUN_TEST(test_result_region_selection_uses_provided_result);
     RUN_TEST(test_primary_row_mapping_uses_displayed_result_and_rejects_non_leaf);
     RUN_TEST(test_canvas_zoom_to_sprite_centers_transformed_region);
+    RUN_TEST(test_recycled_click_identity_rejects_remapped_rows);
+    RUN_TEST(test_filter_casefold_matches_realistic_non_ascii_pairs);
+    RUN_TEST(test_folder_scan_failure_keeps_other_rows_and_typed_status);
+    RUN_TEST(test_source_probe_failure_is_typed_warning_not_missing);
+    RUN_TEST(test_missing_folder_retains_folder_kind_and_missing_state);
     return UNITY_END();
 }

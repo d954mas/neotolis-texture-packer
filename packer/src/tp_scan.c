@@ -24,11 +24,16 @@ typedef struct scan_vec {
  * the process allocator. */
 static _Thread_local int s_scan_alloc_fail = -1;
 static _Thread_local int s_scan_stat_error;
+static _Thread_local bool s_scan_sort_started;
 static _Thread_local bool s_scan_sort_finished;
 
 void tp_scan__test_set_alloc_fail(int nth) { s_scan_alloc_fail = nth; }
 void tp_scan__test_set_stat_error(int error) { s_scan_stat_error = error; }
-void tp_scan__test_reset_sort_finished(void) { s_scan_sort_finished = false; }
+void tp_scan__test_reset_sort_finished(void) {
+    s_scan_sort_started = false;
+    s_scan_sort_finished = false;
+}
+bool tp_scan__test_sort_started(void) { return s_scan_sort_started; }
 bool tp_scan__test_sort_finished(void) { return s_scan_sort_finished; }
 
 static bool scan_should_fail_alloc(void) {
@@ -219,6 +224,55 @@ static bool has_image_ext(const char *name) {
 
 static int entry_cmp(const void *a, const void *b) {
     return strcmp(((const tp_scan_entry *)a)->rel, ((const tp_scan_entry *)b)->rel);
+}
+
+static void entry_swap(tp_scan_entry *a, tp_scan_entry *b) {
+    const tp_scan_entry tmp = *a;
+    *a = *b;
+    *b = tmp;
+}
+
+static void entry_heap_sift_down(tp_scan_entry *entries, int root, int count) {
+    for (;;) {
+        if (root >= count / 2) {
+            return; /* Leaf: also keeps root * 2 + 1 inside the signed range. */
+        }
+        const int left = root * 2 + 1;
+        int largest = left;
+        const int right = left + 1;
+        if (right < count &&
+            entry_cmp(&entries[largest], &entries[right]) < 0) {
+            largest = right;
+        }
+        if (entry_cmp(&entries[root], &entries[largest]) >= 0) {
+            return;
+        }
+        entry_swap(&entries[root], &entries[largest]);
+        root = largest;
+    }
+}
+
+/* In-place heapsort preserves the scan's allocation behavior and exposes
+ * cancellation points between bounded O(log n) sift operations. */
+static tp_status entry_sort_cancellable(scan_vec *v,
+                                        const tp_cancel_token *cancel,
+                                        tp_error *err) {
+    for (int start = v->count / 2; start > 0; --start) {
+        if (tp_cancel_requested(cancel)) {
+            return tp_error_set(err, TP_STATUS_CANCELLED,
+                                "directory scan cancelled during sort");
+        }
+        entry_heap_sift_down(v->data, start - 1, v->count);
+    }
+    for (int end = v->count - 1; end > 0; --end) {
+        if (tp_cancel_requested(cancel)) {
+            return tp_error_set(err, TP_STATUS_CANCELLED,
+                                "directory scan cancelled during sort");
+        }
+        entry_swap(&v->data[0], &v->data[end]);
+        entry_heap_sift_down(v->data, 0, end);
+    }
+    return TP_STATUS_OK;
 }
 
 /* True iff `name` ends with `suffix` (case-sensitive byte compare; "" matches everything). */
@@ -432,16 +486,18 @@ tp_status tp_scan_dir_cancellable(const char *abs_dir, tp_scan_result *out,
         scan_vec_drop(&v);
         return status;
     }
-    /* Poll AFTER the walk but BEFORE sorting: qsort of a large tree's vector is itself a
-     * long, uninterruptible run, and a cancel raised as the final entry was read would
-     * otherwise be waited out here. Drop the accumulated (still-unsorted) walk and report
-     * CANCELLED, matching scan_dir's per-entry cancel site. */
+    /* Poll after the walk before entering the bounded cancellable sort. */
     if (tp_cancel_requested(cancel)) {
         scan_vec_drop(&v);
         return tp_error_set(err, TP_STATUS_CANCELLED, "directory scan cancelled");
     }
+    s_scan_sort_started = true; /* test observation seam; otherwise inert */
     if (v.count > 1) {
-        qsort(v.data, (size_t)v.count, sizeof *v.data, entry_cmp);
+        status = entry_sort_cancellable(&v, cancel, err);
+        if (status != TP_STATUS_OK) {
+            scan_vec_drop(&v);
+            return status;
+        }
     }
     s_scan_sort_finished = true; /* test observation seam; otherwise inert */
     if (tp_cancel_requested(cancel)) {

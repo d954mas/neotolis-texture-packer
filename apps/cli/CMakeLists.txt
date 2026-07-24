@@ -415,6 +415,19 @@ add_test(NAME cli_pack_arena_oom_contract COMMAND ${CMAKE_COMMAND}
 set_tests_properties(cli_pack_arena_oom_contract PROPERTIES
     ENVIRONMENT "NTPACKER_TEST_PACK_ARENA_FAIL=1")
 
+# Report-page allocation failure happens after target execution. The CLI must
+# retain successful target counts, emit a structured atlas error, and return the
+# partial-success exit instead of treating the incomplete report as clean.
+add_test(NAME cli_pack_report_oom_contract COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker_pack_arena_fault> -DEXPECT=6
+    "-DARGS=pack ${_td}/clean.ntpacker_project --json --quiet --out-dir ${CMAKE_CURRENT_BINARY_DIR}/cli_pack_report_oom"
+    -DCHECKER=$<TARGET_FILE:cli_json_check>
+    "-DCHECK_ARGS=pack targets_ok=1 targets_failed=0 error_id=oom error_atlas=clean"
+    -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_pack_report_oom.json
+    -P "${_run}")
+set_tests_properties(cli_pack_report_oom_contract PROPERTIES
+    ENVIRONMENT "NTPACKER_TEST_REPORT_ALLOC_FAIL=1")
+
 # A source-less atlas is a successful skipped outcome, but JSON must carry a
 # stable notice id plus atlas context rather than prose alone.
 add_test(NAME cli_pack_no_usable_images COMMAND ${CMAKE_COMMAND}

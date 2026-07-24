@@ -14,6 +14,7 @@
 #include "tinycthread.h"
 
 #include "tp_core/tp_build_worker.h"
+#include "tp_core/tp_export.h"
 #include "tp_core/tp_job.h"
 #include "tp_core/tp_operation.h"
 #include "tp_core/tp_scan.h"
@@ -48,6 +49,9 @@ void tp_job__test_release_before_terminal_gate(void);
 void tp_job__test_arm_after_cancel_observation_gate(void);
 bool tp_job__test_after_cancel_observation_gate_entered(void);
 void tp_job__test_release_after_cancel_observation_gate(void);
+void tp_job__test_arm_after_cancel_claim_gate(void);
+bool tp_job__test_after_cancel_claim_gate_entered(void);
+void tp_job__test_release_after_cancel_claim_gate(void);
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -98,6 +102,16 @@ static bool wait_for_after_cancel_observation_gate(void) {
         thrd_yield();
     }
     return tp_job__test_after_cancel_observation_gate_entered();
+}
+
+static bool wait_for_after_cancel_claim_gate(void) {
+    for (long spins = 0; spins < 10000000L; ++spins) {
+        if (tp_job__test_after_cancel_claim_gate_entered()) {
+            return true;
+        }
+        thrd_yield();
+    }
+    return tp_job__test_after_cancel_claim_gate_entered();
 }
 
 /* A minimal, valid 4x4 fully-opaque RGBA PNG (stb_image decodes it). A real pack
@@ -395,6 +409,85 @@ static tp_session_job_result wait_for_job_result(tp_session *session) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_session_job_take_result(session, &result, &err));
     return result;
+}
+
+static tp_status partial_failure_write(
+    const tp_export_prepared *prepared, const tp_export_caps *caps,
+    const char *out_path_base, tp_export_notices *notices, tp_error *err) {
+    (void)prepared;
+    (void)caps;
+    (void)out_path_base;
+    const tp_status notice_status = tp_export_notice_addf(
+        notices, "intentional partial-export notice");
+    if (notice_status != TP_STATUS_OK) {
+        return notice_status;
+    }
+    return tp_error_set(err, TP_STATUS_PATH_RESOLVE_FAILED,
+                        "intentional partial-export failure");
+}
+
+static void add_partial_failure_target(tp_session *session, tp_id128 atlas_id) {
+    const tp_exporter *base = tp_exporter_find("json-neotolis");
+    TEST_ASSERT_NOT_NULL(base);
+    static tp_exporter failing;
+    failing = *base;
+    failing.id = "test-partial-failure";
+    failing.display_name = "Test partial failure";
+    failing.write = partial_failure_write;
+    const tp_status registration = tp_exporter_register(&failing);
+    TEST_ASSERT_TRUE(registration == TP_STATUS_OK ||
+                     tp_exporter_find(failing.id) != NULL);
+
+    tp_operation operation;
+    memset(&operation, 0, sizeof operation);
+    operation.kind = TP_OP_TARGET_CREATE;
+    operation.atlas_id = atlas_id;
+    operation.u.target_create.target_id =
+        (tp_id128){{0x43U, 0x33U, 0x44U, 0x55U, 0x66U, 0x77U, 0x88U, 0x99U,
+                    0xAAU, 0xBBU, 0xCCU, 0xDDU, 0xEEU, 0xF0U, 0x0FU, 0x11U}};
+    operation.u.target_create.exporter_id =
+        malloc(sizeof "test-partial-failure");
+    operation.u.target_create.out_path = malloc(sizeof "out/partial");
+    TEST_ASSERT_NOT_NULL(operation.u.target_create.exporter_id);
+    TEST_ASSERT_NOT_NULL(operation.u.target_create.out_path);
+    memcpy(operation.u.target_create.exporter_id, "test-partial-failure",
+           sizeof "test-partial-failure");
+    memcpy(operation.u.target_create.out_path, "out/partial",
+           sizeof "out/partial");
+    operation.u.target_create.enabled = true;
+
+    tp_error err = {{0}};
+    tp_session_snapshot *snapshot = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_snapshot_create(session, &snapshot, &err));
+    tp_txn_request request;
+    memset(&request, 0, sizeof request);
+    request.schema = TP_TXN_SCHEMA;
+    memcpy(request.id_hex, "43434343434343434343434343434343",
+           sizeof request.id_hex);
+    request.expected_revision = tp_session_snapshot_revision(snapshot);
+    request.ops = &operation;
+    request.op_count = 1U;
+    tp_txn_result result;
+    memset(&result, 0, sizeof result);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_apply(session, &request, &result, &err));
+    TEST_ASSERT_TRUE(result.committed);
+    tp_txn_result_free(&result);
+    tp_operation_free(&operation);
+    tp_session_snapshot_destroy(snapshot);
+}
+
+typedef struct cancel_thread_ctx {
+    tp_session *session;
+    tp_status status;
+    tp_error error;
+} cancel_thread_ctx;
+
+static int request_cancel_thread(void *context) {
+    cancel_thread_ctx *ctx = context;
+    ctx->status = tp_session_job_cancel(ctx->session, &ctx->error);
+    return 0;
 }
 
 void test_source_less_export_succeeds_as_skipped(void) {
@@ -905,6 +998,101 @@ void test_late_export_cancel_preserves_committed_success(void) {
     remove_scratch_tree(work_dir);
 }
 
+void test_export_scan_observes_the_accepted_cancel_claim(void) {
+    tp_session *session = make_default_project_session();
+    const tp_id128 atlas = default_atlas_id(session);
+    char work_dir[1024];
+    job_scratch_dir(work_dir, sizeof work_dir);
+    tp_mkdirs(work_dir);
+    char folder[1200];
+    TEST_ASSERT_TRUE(snprintf(folder, sizeof folder, "%s/folder", work_dir) > 0);
+    tp_mkdirs(folder);
+    char png_path[1400];
+    TEST_ASSERT_TRUE(
+        snprintf(png_path, sizeof png_path, "%s/export.png", folder) > 0);
+    write_png_fixture(png_path);
+    add_folder_source(session, atlas, folder);
+
+    char project_path[1200];
+    TEST_ASSERT_TRUE(snprintf(project_path, sizeof project_path,
+                              "%s/job.ntpacker_project", work_dir) > 0);
+    tp_session_save_result save_result;
+    memset(&save_result, 0, sizeof save_result);
+    tp_error err = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_save_new(session, project_path, &save_result, &err));
+
+    const tp_export_command_request request = {
+        .work_dir = work_dir,
+        .atlas_id = atlas,
+    };
+    tp_scan__test_arm_walk_gate();
+    tp_job__test_arm_after_cancel_claim_gate();
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_export_start(session, &request, &err));
+    TEST_ASSERT_TRUE_MESSAGE(wait_for_walk_gate(),
+                             "export input scan did not enter the walk gate");
+
+    cancel_thread_ctx cancel = {.session = session};
+    thrd_t cancel_thread;
+    TEST_ASSERT_EQUAL_INT(thrd_success,
+                          thrd_create(&cancel_thread, request_cancel_thread,
+                                      &cancel));
+    TEST_ASSERT_TRUE_MESSAGE(
+        wait_for_after_cancel_claim_gate(),
+        "cancel request did not reach its accepted-claim gate");
+    tp_scan__test_release_walk_gate();
+
+    tp_session_job_result result = wait_for_job_result(session);
+    tp_job__test_release_after_cancel_claim_gate();
+    TEST_ASSERT_EQUAL_INT(thrd_success, thrd_join(cancel_thread, NULL));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, cancel.status);
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_CANCELLED, result.state);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_CANCELLED, result.status);
+    TEST_ASSERT_EQUAL_INT(0, result.export_result.targets);
+
+    tp_session_job_result_destroy(&result);
+    tp_session_destroy(session);
+    remove_scratch_tree(work_dir);
+}
+
+void test_partial_export_counts_successful_targets_and_notices(void) {
+    tp_session *session = make_default_project_session();
+    const tp_id128 atlas = default_atlas_id(session);
+    char work_dir[1024];
+    job_scratch_dir(work_dir, sizeof work_dir);
+    tp_mkdirs(work_dir);
+    add_file_source(session, atlas, work_dir);
+    add_partial_failure_target(session, atlas);
+
+    char project_path[1200];
+    TEST_ASSERT_TRUE(snprintf(project_path, sizeof project_path,
+                              "%s/job.ntpacker_project", work_dir) > 0);
+    tp_session_save_result save_result;
+    memset(&save_result, 0, sizeof save_result);
+    tp_error err = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_save_new(session, project_path, &save_result, &err));
+    const tp_export_command_request request = {
+        .work_dir = work_dir,
+        .atlas_id = atlas,
+    };
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_export_start(session, &request, &err));
+
+    tp_session_job_result result = wait_for_job_result(session);
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_FAILED, result.state);
+    TEST_ASSERT_EQUAL_INT(1, result.export_result.targets);
+    TEST_ASSERT_EQUAL_INT(1, result.export_result.atlases_failed);
+    TEST_ASSERT_EQUAL_INT(1, result.export_result.notices);
+
+    tp_session_job_result_destroy(&result);
+    tp_session_destroy(session);
+    remove_scratch_tree(work_dir);
+}
+
 /* The worker's last cancellation observation and terminal publication must be
  * one handshake. A cancel accepted inside that former race window must still
  * own the terminal outcome. */
@@ -1014,6 +1202,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_folder_walk_cancels_mid_scan);
     RUN_TEST(test_late_pack_cancel_has_coherent_terminal_result);
     RUN_TEST(test_late_export_cancel_preserves_committed_success);
+    RUN_TEST(test_export_scan_observes_the_accepted_cancel_claim);
+    RUN_TEST(test_partial_export_counts_successful_targets_and_notices);
     RUN_TEST(test_cancel_after_last_observation_wins_terminal_publication);
     RUN_TEST(test_cancel_after_terminal_publication_is_rejected);
     return UNITY_END();

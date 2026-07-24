@@ -44,6 +44,10 @@
 #include "tp_core/tp_scan.h"
 #include "tp_core/tp_session.h"
 
+#ifdef NTPACKER_CLI_PACK_ARENA_FAULT_SEAM
+void tp_export_run__test_set_report_alloc_fail(int nth);
+#endif
+
 #define CLI_PACK_SCHEMA 1
 
 /* ------------------------------------------------------------------ */
@@ -598,6 +602,11 @@ int cmd_pack(const char *project_path, const char *opt_atlas, const char *opt_ta
                 note = "out of memory allocating atlas packing arena";
                 had_pack_fail = true;
             } else {
+#ifdef NTPACKER_CLI_PACK_ARENA_FAULT_SEAM
+                if (getenv("NTPACKER_TEST_REPORT_ALLOC_FAIL")) {
+                    tp_export_run__test_set_report_alloc_fail(1);
+                }
+#endif
                 tp_error run_error = {0};
                 tp_status run_status = tp_export_snapshot_job_run_atlas_ex(
                     job, ai, arena, &notices, &report, NULL, &sprite_count,
@@ -607,9 +616,28 @@ int cmd_pack(const char *project_path, const char *opt_atlas, const char *opt_ta
                     TP_EXPORT_INPUT_NO_USABLE_IMAGES) {
                     note = "no usable images (skipped)";
                     skip_notice_id = "no_usable_images";
+                } else if (run_status != TP_STATUS_OK &&
+                           report.report_failed) {
+                    atlas_error_status = run_status;
+                    atlas_error = run_error;
+                    (void)snprintf(
+                        note_buffer, sizeof note_buffer,
+                        "targets completed, but the export report failed: %s",
+                        run_error.msg[0] ? run_error.msg
+                                         : tp_status_str(run_status));
+                    note = note_buffer;
+                    had_export_fail = true;
                 } else if (run_status != TP_STATUS_OK && report.target_count == 0) {
                     atlas_error_status = run_status;
-                    if (report.input_outcome == TP_EXPORT_INPUT_READY) {
+                    if (report.pack_failed) {
+                        atlas_error = run_error;
+                        (void)snprintf(
+                            note_buffer, sizeof note_buffer,
+                            "could not pack atlas: %s",
+                            run_error.msg[0] ? run_error.msg
+                                             : tp_status_str(run_status));
+                        had_pack_fail = true;
+                    } else if (report.input_outcome == TP_EXPORT_INPUT_READY) {
                         const char *detail =
                             run_status == TP_STATUS_OUT_OF_BOUNDS
                                 ? "resolved target-output path exceeds supported length"

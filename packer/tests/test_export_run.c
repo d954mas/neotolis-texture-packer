@@ -48,6 +48,8 @@ static tp_exporter g_norot;
 static tp_exporter g_list_error;
 static int g_list_error_write_calls;
 
+void tp_export_run__test_set_report_alloc_fail(int nth);
+
 void setUp(void) {}
 void tearDown(void) {}
 
@@ -841,6 +843,68 @@ static void test_snapshot_report_marks_nonempty_input_ready_before_output_resolu
     (void)remove(project_path);
 }
 
+static void test_report_marks_pre_target_setup_failure_as_pack_failed(void) {
+    tp_pack_sprite_desc sprite = {
+        .name = "wide",
+        .rgba = g_wide,
+        .w = 120,
+        .h = 24,
+        .origin_x = 0.5F,
+        .origin_y = 0.5F,
+    };
+    tp_export_report report;
+    memset(&report, 0, sizeof report);
+    const tp_export_run_opts opts = {.report = &report};
+    tp_export_notices notices;
+    tp_export_notices_init(&notices);
+    tp_error error = {{0}};
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_export_run_ex(g_proj, 0, &sprite, 1, g_dir, NULL, &notices, NULL,
+                         &opts, &error));
+    TEST_ASSERT_TRUE_MESSAGE(
+        report.pack_failed,
+        "a failure before target reporting must retain its pack/setup class");
+    TEST_ASSERT_EQUAL_INT(0, report.target_count);
+
+    tp_export_notices_free(&notices);
+}
+
+static void test_report_page_oom_leaves_no_partial_runs(void) {
+    tp_pack_sprite_desc sprites[3];
+    memset(sprites, 0, sizeof sprites);
+    sprites[0] = (tp_pack_sprite_desc){
+        .name = "wide", .rgba = g_wide, .w = 120, .h = 24,
+        .origin_x = 0.5F, .origin_y = 0.5F};
+    sprites[1] = (tp_pack_sprite_desc){
+        .name = "tall", .rgba = g_tall, .w = 24, .h = 100,
+        .origin_x = 0.5F, .origin_y = 0.5F};
+    sprites[2] = (tp_pack_sprite_desc){
+        .name = "piv", .rgba = g_piv, .w = 30, .h = 20,
+        .origin_x = 1.5F, .origin_y = -0.25F};
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_export_notices notices;
+    tp_export_notices_init(&notices);
+    tp_export_report report;
+    memset(&report, 0, sizeof report);
+    const tp_export_run_opts opts = {.report = &report, .dry_run = true};
+    tp_error error = {{0}};
+
+    tp_export_run__test_set_report_alloc_fail(1);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OOM,
+        tp_export_run_ex(g_proj, 0, sprites, 3, g_dir, arena, &notices, NULL,
+                         &opts, &error));
+    TEST_ASSERT_EQUAL_INT(0, report.run_count);
+    TEST_ASSERT_NULL(report.runs);
+    TEST_ASSERT_TRUE(report.report_failed);
+
+    tp_export_notices_free(&notices);
+    tp_arena_destroy(arena);
+}
+
 int main(int argc, char **argv) {
     if (tp_build_is_worker_invocation(argc, argv)) {
         return tp_build_worker_main();
@@ -862,6 +926,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_dry_run_rejects_the_same_output_path_overflow_as_wet_export);
     RUN_TEST(test_custom_output_listing_failure_prevents_wet_write_and_matches_dry_run);
     RUN_TEST(test_snapshot_report_marks_nonempty_input_ready_before_output_resolution);
+    RUN_TEST(test_report_marks_pre_target_setup_failure_as_pack_failed);
+    RUN_TEST(test_report_page_oom_leaves_no_partial_runs);
     int rc = UNITY_END();
     tp_export_notices_free(&g_notices);
     tp_project_destroy(g_proj);

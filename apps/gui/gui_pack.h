@@ -144,6 +144,7 @@ typedef struct {
     int notices;        /* export: metadata-loss notices */
     int atlases_ok;     /* export: atlases exported OK */
     int atlases_fail;   /* export: atlases that failed */
+    int atlases_skipped; /* export: atlases skipped for no usable input */
     char err[256];      /* failure / first-error text */
     char note[128];     /* pack: notice text */
 } gui_pack_result_info;

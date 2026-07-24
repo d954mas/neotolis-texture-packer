@@ -593,7 +593,9 @@ static bool run_fixture(row_fixture *fixture, int iterations) {
     const uint64_t expected_lookups = (uint64_t)fixture->spec.children +
                                       (fixture->spec.children > 0 ? 1U : 0U);
     const uint64_t expected_gets = fixture->spec.children > 0 ? 1U : 0U;
-    const uint64_t expected_is_dir = fixture->spec.children > 0 ? 1U : 0U;
+    /* Source kind is canonical model data; rebuild must not spend another
+     * filesystem probe rediscovering folder versus file. */
+    const uint64_t expected_is_dir = 0U;
     (void)printf("   rebuild_samples_ms:");
     for (int i = 0; i < warmup_iterations + iterations; ++i) {
         if (!fixture_publish_source_generation(fixture)) {

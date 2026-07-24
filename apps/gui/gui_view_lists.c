@@ -27,6 +27,43 @@ static const nt_ui_events_cfg_t s_dbl_cfg = {.long_press_secs = 0.0F, .double_cl
 static gui_rows_entity_double_click_ref s_atlas_double_click;
 static gui_rows_entity_double_click_ref s_animation_double_click;
 
+typedef struct gui_row_press_ref {
+    tp_id128 entity_id;
+    char key[TP_SRCKEY_MAX];
+    bool valid;
+} gui_row_press_ref;
+
+static gui_row_press_ref s_atlas_press;
+static gui_row_press_ref s_atlas_remove_press;
+static gui_row_press_ref s_sprite_press;
+static gui_row_press_ref s_sprite_remove_press;
+static gui_row_press_ref s_animation_press;
+static gui_row_press_ref s_animation_remove_press;
+
+/* nt_ui events retain capture by widget id. Lists recycle/position those ids,
+ * so a release is actionable only when the row still carries the canonical
+ * entity captured on press. Same-frame press+release remains supported. */
+static bool canonical_click(gui_row_press_ref *ref, tp_id128 entity_id,
+                            const char *key, const nt_ui_events_t *events) {
+    const char *canonical_key = key ? key : "";
+    if (events->pressed_now) {
+        const int n = snprintf(ref->key, sizeof ref->key, "%s",
+                               canonical_key);
+        ref->entity_id = entity_id;
+        ref->valid = !tp_id128_is_nil(entity_id) && n >= 0 &&
+                     (size_t)n < sizeof ref->key;
+    }
+    if (!events->released) {
+        return false;
+    }
+    const bool accepted =
+        events->clicked && ref->valid &&
+        gui_rows_identity_matches(ref->entity_id, ref->key, entity_id,
+                                  canonical_key);
+    ref->valid = false;
+    return accepted;
+}
+
 /* start_atlas_edit/start_anim_edit/start_sprite_edit_ref/start_sprite_edit moved to gui_actions
  * (the entry side of the edit lifecycle, needed by both this panel and the settings view). */
 
@@ -75,17 +112,21 @@ static void declare_atlas_list(nt_ui_context_t *ctx, const tp_session_snapshot *
         const bool selected = (i == s_sel_atlas);
         const nt_ui_events_t ev = nt_ui_events(ctx, row_id, &s_dbl_cfg);
         const nt_ui_events_t xev = nt_ui_events(ctx, x_id, NULL);
+        const bool row_clicked =
+            canonical_click(&s_atlas_press, atlas->id, NULL, &ev);
+        const bool x_clicked =
+            canonical_click(&s_atlas_remove_press, atlas->id, NULL, &xev);
         const bool stable_double =
             ev.pressed_now &&
             gui_rows_entity_double_click_press(
                 &s_atlas_double_click, atlas->id, ev.double_clicked);
-        if (xev.clicked) {
+        if (x_clicked) {
             s_pending_remove_atlas = true;
             s_pending_remove_atlas_id = atlas->id;
             s_pending_remove_atlas_revision = revision;
         } else if (stable_double) {
             start_atlas_edit(i);
-        } else if (ev.clicked && i != s_sel_atlas) {
+        } else if (row_clicked && i != s_sel_atlas) {
             s_sel_atlas = i;
             reset_selection();
             cancel_edit();
@@ -548,6 +589,8 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
                                                    row->source_id,
                                                    row->source_key));
             const nt_ui_events_t ev = nt_ui_events(ctx, hit_id, &s_dbl_cfg);
+            const bool row_clicked = canonical_click(
+                &s_sprite_press, row->source_id, row->source_key, &ev);
             const bool canonical_double =
                 ev.pressed_now &&
                 gui_rows_double_click_press(row->source_id, row->source_key,
@@ -556,7 +599,9 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
             nt_ui_events_t xev = {0}; /* hoisted: the render below reads xev.hovered for the danger tint */
             if (row->is_source) {
                 xev = nt_ui_events(ctx, x_id, NULL);
-                x_clicked = xev.clicked;
+                x_clicked = canonical_click(
+                    &s_sprite_remove_press, row->source_id, row->source_key,
+                    &xev);
                 if (x_clicked) {
                     const tp_session_snapshot *snapshot = gui_project_snapshot();
                     const tp_snapshot_atlas *atlas = snapshot
@@ -582,7 +627,7 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
                 select_sprite_row((int)i, false, false);
                 s_focus_view = (int)i;
                 start_sprite_edit(row);
-            } else if (ev.clicked && !x_clicked) {
+            } else if (row_clicked && !x_clicked) {
                 const bool ctrl = nt_input_key_is_down(NT_KEY_LCTRL) || nt_input_key_is_down(NT_KEY_RCTRL);
                 const bool shift = nt_input_key_is_down(NT_KEY_LSHIFT) || nt_input_key_is_down(NT_KEY_RSHIFT);
                 select_sprite_row((int)i, ctrl, shift);
@@ -631,9 +676,16 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
              * file source); missing files reuse the image mask tinted warn. Label brightens on selection.
              * Smart-folder distinction (TexturePacker convention): the folder icon is AMBER (warn) vs the
              * neutral file icons, so a live-linked folder reads as a special input at a glance. */
-            const nt_ui_label_style_t *lbl = row->missing ? &g_warn : (selected ? &g_row_strong : &g_row);
+            const bool row_warning =
+                row->missing || row->runtime_status != TP_STATUS_OK;
+            const nt_ui_label_style_t *lbl =
+                row_warning ? &g_warn
+                            : (selected ? &g_row_strong : &g_row);
             nt_atlas_region_ref_t *ic = row->is_folder ? &s_ic_folder : &s_ic_image;
-            const nt_ui_label_style_t *ic_tint = (row->missing || row->is_folder) ? &g_warn : (selected ? &g_row_strong : &g_caption);
+            const nt_ui_label_style_t *ic_tint =
+                (row_warning || row->is_folder)
+                    ? &g_warn
+                    : (selected ? &g_row_strong : &g_caption);
             CLAY({.id = {.id = row_id},
                   .layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(S(BASE_ROW_H))},
                              .padding = {indent, Su(4), 0, 0},
@@ -717,12 +769,16 @@ static void declare_animations_list(nt_ui_context_t *ctx,
         const bool selected = (i == s_sel_anim);
         const nt_ui_events_t ev = nt_ui_events(ctx, row_id, &s_dbl_cfg);
         const nt_ui_events_t xev = nt_ui_events(ctx, x_id, NULL);
+        const bool row_clicked = canonical_click(
+            &s_animation_press, animation->id, NULL, &ev);
+        const bool x_clicked = canonical_click(
+            &s_animation_remove_press, animation->id, NULL, &xev);
         const bool stable_double =
             ev.pressed_now &&
             gui_rows_entity_double_click_press(
                 &s_animation_double_click, animation->id,
                 ev.double_clicked);
-        if (xev.clicked) {
+        if (x_clicked) {
             gui_request_remove_animation(i);
         } else if (stable_double) {
             s_sel_anim = i;
@@ -731,7 +787,7 @@ static void declare_animations_list(nt_ui_context_t *ctx,
                 a->id, animation->id,
                 tp_session_snapshot_revision(snapshot)};
             gui_request_open_preview(&preview);
-        } else if (ev.clicked) {
+        } else if (row_clicked) {
             s_sel_anim = i;
             s_sel_anim_frame = -1;
             cancel_edit();

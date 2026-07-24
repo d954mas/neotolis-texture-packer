@@ -123,6 +123,9 @@ void do_redo(void);
  * (no revision/dirty change). Out params may be NULL; returns false on a scan failure. */
 bool gui_actions_refresh_diff_headless(int *out_added, int *out_removed,
                                        int *out_changed);
+/* Drops the retained last-successful runtime fingerprint. Production refresh
+ * also resets automatically when the owning session changes. */
+void gui_actions_refresh_fingerprint_reset(void);
 /* Refresh policy seam: after runtime invalidation, even a later diff failure
  * leaves the retained preview stale. */
 bool gui_actions_refresh_should_mark_stale(tp_status status,

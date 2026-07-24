@@ -22,11 +22,15 @@
 
 #include "tp_core/tp_scan.h"
 
+#include "time/nt_time.h"
 #include "unity.h"
 
 static char s_save_path[1024];
 
 void tp_scan__test_set_stat_error(int error);
+void tp_job__test_arm_before_terminal_gate(void);
+bool tp_job__test_before_terminal_gate_entered(void);
+void tp_job__test_release_before_terminal_gate(void);
 
 /* gui_actions links the production shell reset seam; the trace is headless. */
 void gui_shell_reset_shown_result(void) {}
@@ -89,6 +93,7 @@ static void reset_public_action_state(void) {
 
 void setUp(void) {
     tp_scan__test_set_stat_error(0);
+    gui_actions_refresh_fingerprint_reset();
     (void)snprintf(s_save_path, sizeof s_save_path,
                    "%s/action-trace.ntpacker_project",
                    TP_GUI_TRACE_TEST_DIR);
@@ -106,6 +111,7 @@ void setUp(void) {
 
 void tearDown(void) {
     tp_scan__test_set_stat_error(0);
+    gui_actions_refresh_fingerprint_reset();
     multi_sel_clear();
     gui_pack_shutdown();
     gui_project_discard_recovery_on_shutdown();
@@ -383,6 +389,206 @@ void test_refresh_reports_source_stat_failure(void) {
     tp_scan__test_set_stat_error(0);
 }
 
+void test_refresh_modified_file_reports_changed_from_last_success(void) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas = tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+
+    char source_path[1200];
+    TEST_ASSERT_TRUE(snprintf(source_path, sizeof source_path, "%s/changed.png",
+                              TP_GUI_TRACE_TEST_DIR) > 0);
+    FILE *source = fopen(source_path, "wb");
+    TEST_ASSERT_NOT_NULL(source);
+    TEST_ASSERT_EQUAL_size_t(1U, fwrite("x", 1U, 1U, source));
+    TEST_ASSERT_EQUAL_INT(0, fclose(source));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_ADD_ADDED,
+        gui_project_add_source_kind(
+            atlas->id, tp_session_snapshot_revision(snapshot), source_path,
+            TP_SOURCE_KIND_FILE));
+
+    /* The first normal frame is the runtime observation boundary. It retains
+     * this live file before the user requests their first Refresh. */
+    apply_pending();
+
+    source = fopen(source_path, "wb");
+    TEST_ASSERT_NOT_NULL(source);
+    TEST_ASSERT_EQUAL_size_t(7U, fwrite("changed", 1U, 7U, source));
+    TEST_ASSERT_EQUAL_INT(0, fclose(source));
+    s_pending_refresh = true;
+    apply_pending();
+
+    TEST_ASSERT_EQUAL_INT(STATUS_INFO, s_status_sev);
+    TEST_ASSERT_NOT_NULL(strstr(s_status, "1 changed"));
+    TEST_ASSERT_EQUAL_INT(0, remove(source_path));
+}
+
+void test_refresh_deleted_file_invalidates_preview_without_model_mutation(void) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas = tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+
+    char source_path[1200];
+    TEST_ASSERT_TRUE(snprintf(source_path, sizeof source_path, "%s/deleted.png",
+                              TP_GUI_TRACE_TEST_DIR) > 0);
+    FILE *source = fopen(source_path, "wb");
+    TEST_ASSERT_NOT_NULL(source);
+    TEST_ASSERT_EQUAL_size_t(1U, fwrite("x", 1U, 1U, source));
+    TEST_ASSERT_EQUAL_INT(0, fclose(source));
+
+    TEST_ASSERT_EQUAL_INT(
+        GUI_ADD_ADDED,
+        gui_project_add_source_kind(
+            atlas->id, tp_session_snapshot_revision(snapshot), source_path,
+            TP_SOURCE_KIND_FILE));
+
+    /* Prime from normal runtime observation, not from a prior manual Refresh. */
+    apply_pending();
+
+    gui_project_mark_packed();
+    TEST_ASSERT_FALSE(gui_project_is_stale());
+
+    const int64_t revision_before =
+        tp_session_snapshot_revision(gui_project_snapshot());
+    const bool dirty_before = gui_project_is_dirty();
+    TEST_ASSERT_EQUAL_INT(0, remove(source_path));
+
+    s_pending_refresh = true;
+    apply_pending();
+
+    TEST_ASSERT_TRUE(gui_project_is_stale());
+    TEST_ASSERT_EQUAL_INT64(
+        revision_before,
+        tp_session_snapshot_revision(gui_project_snapshot()));
+    TEST_ASSERT_EQUAL_INT(dirty_before, gui_project_is_dirty());
+    TEST_ASSERT_EQUAL_INT(STATUS_WARNING, s_status_sev);
+    TEST_ASSERT_NOT_NULL(strstr(s_status, "1 removed"));
+    TEST_ASSERT_NOT_NULL(strstr(s_status, "1 source unavailable"));
+}
+
+void test_refresh_unreadable_source_warns_without_model_mutation(void) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas = tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+
+    char source_path[1200];
+    TEST_ASSERT_TRUE(snprintf(source_path, sizeof source_path,
+                              "%s/unreadable.png",
+                              TP_GUI_TRACE_TEST_DIR) > 0);
+    FILE *source = fopen(source_path, "wb");
+    TEST_ASSERT_NOT_NULL(source);
+    TEST_ASSERT_EQUAL_size_t(1U, fwrite("x", 1U, 1U, source));
+    TEST_ASSERT_EQUAL_INT(0, fclose(source));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_ADD_ADDED,
+        gui_project_add_source_kind(
+            atlas->id, tp_session_snapshot_revision(snapshot), source_path,
+            TP_SOURCE_KIND_FILE));
+    apply_pending(); /* retain the last successful runtime observation */
+    gui_project_mark_packed();
+
+    const int64_t revision_before =
+        tp_session_snapshot_revision(gui_project_snapshot());
+    const bool dirty_before = gui_project_is_dirty();
+    tp_scan__test_set_stat_error(EACCES);
+    s_pending_refresh = true;
+    apply_pending();
+    tp_scan__test_set_stat_error(0);
+
+    TEST_ASSERT_TRUE(gui_project_is_stale());
+    TEST_ASSERT_EQUAL_INT64(
+        revision_before,
+        tp_session_snapshot_revision(gui_project_snapshot()));
+    TEST_ASSERT_EQUAL_INT(dirty_before, gui_project_is_dirty());
+    TEST_ASSERT_EQUAL_INT(STATUS_WARNING, s_status_sev);
+    TEST_ASSERT_NOT_NULL(strstr(s_status, "Refresh warning:"));
+    TEST_ASSERT_EQUAL_INT(0, remove(source_path));
+}
+
+void test_refresh_fingerprint_resets_when_session_is_replaced(void) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas = tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+
+    char source_path[1200];
+    TEST_ASSERT_TRUE(snprintf(source_path, sizeof source_path,
+                              "%s/old-session.png",
+                              TP_GUI_TRACE_TEST_DIR) > 0);
+    FILE *source = fopen(source_path, "wb");
+    TEST_ASSERT_NOT_NULL(source);
+    TEST_ASSERT_EQUAL_size_t(1U, fwrite("x", 1U, 1U, source));
+    TEST_ASSERT_EQUAL_INT(0, fclose(source));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_ADD_ADDED,
+        gui_project_add_source_kind(
+            atlas->id, tp_session_snapshot_revision(snapshot), source_path,
+            TP_SOURCE_KIND_FILE));
+    apply_pending();
+
+    TEST_ASSERT_TRUE(gui_project_new());
+    int added = -1;
+    int removed = -1;
+    int changed = -1;
+    TEST_ASSERT_TRUE(
+        gui_actions_refresh_diff_headless(&added, &removed, &changed));
+    TEST_ASSERT_EQUAL_INT(0, added);
+    TEST_ASSERT_EQUAL_INT(0, removed);
+    TEST_ASSERT_EQUAL_INT(0, changed);
+    TEST_ASSERT_EQUAL_INT(0, remove(source_path));
+}
+
+void test_late_export_cancel_keeps_completed_success_outcome(void) {
+    TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_TRACE_TEST_DIR));
+    tp_job__test_arm_before_terminal_gate();
+
+    char error[256] = {0};
+    TEST_ASSERT_TRUE(gui_pack_export_async_start(error, sizeof error));
+
+    bool entered = false;
+    for (int i = 0; i < 5000 && !entered; ++i) {
+        entered = tp_job__test_before_terminal_gate_entered();
+        if (!entered) {
+            nt_time_sleep(0.001);
+        }
+    }
+    if (!entered) {
+        tp_job__test_release_before_terminal_gate();
+    }
+    TEST_ASSERT_TRUE(entered);
+
+    gui_pack_async_cancel();
+    TEST_ASSERT_TRUE(gui_pack_async_cancelling());
+    tp_job__test_release_before_terminal_gate();
+
+    gui_pack_result_info info;
+    gui_pack_done done = GUI_PACK_DONE_NONE;
+    for (int i = 0; i < 5000 && done == GUI_PACK_DONE_NONE; ++i) {
+        done = gui_pack_poll(&info);
+        if (done == GUI_PACK_DONE_NONE) {
+            nt_time_sleep(0.001);
+        }
+    }
+    TEST_ASSERT_EQUAL_INT(GUI_PACK_DONE_EXPORT_OK, done);
+    TEST_ASSERT_EQUAL_INT(1, info.atlases_skipped);
+}
+
+void test_empty_export_surfaces_skipped_atlas_warning(void) {
+    TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_TRACE_TEST_DIR));
+
+    char error[256] = {0};
+    TEST_ASSERT_TRUE(gui_pack_export_async_start(error, sizeof error));
+
+    for (int i = 0; i < 5000 && gui_pack_async_busy(); ++i) {
+        apply_pending();
+        if (gui_pack_async_busy()) {
+            nt_time_sleep(0.001);
+        }
+    }
+    TEST_ASSERT_FALSE(gui_pack_async_busy());
+    TEST_ASSERT_EQUAL_INT(STATUS_WARNING, s_status_sev);
+    TEST_ASSERT_NOT_NULL(strstr(s_status, "1 atlas(es) skipped"));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_state_ownership_inventory_preserves_three_classes);
@@ -393,5 +599,12 @@ int main(void) {
     RUN_TEST(test_recovery_decision_runs_next_frame_and_failure_keeps_row);
     RUN_TEST(test_canvas_buffer_readiness_requires_every_gpu_handle);
     RUN_TEST(test_refresh_reports_source_stat_failure);
+    RUN_TEST(test_refresh_modified_file_reports_changed_from_last_success);
+    RUN_TEST(
+        test_refresh_deleted_file_invalidates_preview_without_model_mutation);
+    RUN_TEST(test_refresh_unreadable_source_warns_without_model_mutation);
+    RUN_TEST(test_refresh_fingerprint_resets_when_session_is_replaced);
+    RUN_TEST(test_late_export_cancel_keeps_completed_success_outcome);
+    RUN_TEST(test_empty_export_surfaces_skipped_atlas_warning);
     return UNITY_END();
 }

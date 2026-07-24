@@ -10,6 +10,7 @@
 
 #include "tp_core/tp_input.h"
 #include "tp_core/tp_names.h" /* canonical key / natural order / common prefix (op layer) */
+#include "tp_core/tp_srckey.h"
 
 #include <limits.h>
 #include <stddef.h>
@@ -512,11 +513,17 @@ void build_rows(void) {
             continue;
         }
         const char *sp = source->path;
-        if (path_status != TP_STATUS_OK) {
+        tp_scan_kind disk_kind = TP_SCAN_KIND_MISSING;
+        tp_status probe_status = path_status;
+        if (probe_status == TP_STATUS_OK) {
+            probe_status =
+                gui_scan_classify_checked(abs, &disk_kind, &error);
+        } else {
             abs[0] = '\0';
         }
-        const bool exists = gui_scan_exists(abs);
-        const bool is_dir = exists && gui_scan_is_dir(abs);
+        /* Source type belongs to the model. A temporarily missing/unreadable
+         * folder remains a folder row and retains disclosure state. */
+        const bool is_dir = source->kind == TP_SNAPSHOT_SOURCE_FOLDER;
         sprite_row *r = rows_push();
         if (!r) {
             rows_clear();
@@ -532,7 +539,23 @@ void build_rows(void) {
         r->is_source = true;
         r->is_folder = is_dir;
         r->source_id = source->id;
-        if (!exists) {
+        if (probe_status != TP_STATUS_OK &&
+            probe_status != TP_STATUS_NOT_FOUND) {
+            r->runtime_status = probe_status;
+            (void)snprintf(r->label, sizeof r->label,
+                           "\xE2\x9A\xA0 %s%s  \xC2\xB7  inspect failed",
+                           path_last(sp), is_dir ? "/" : "");
+            if (!row_set_strings(r, NULL, NULL, abs)) {
+                rows_clear();
+                set_status_ex(STATUS_ERROR,
+                              "Out of memory: sprite list unavailable.");
+                return;
+            }
+            set_statusf_ex(STATUS_WARNING, "Could not inspect source: %s",
+                           error.msg);
+            continue;
+        }
+        if (probe_status == TP_STATUS_NOT_FOUND) {
             r->missing = true;
             (void)snprintf(r->label, sizeof r->label, "\xE2\x9A\xA0 %s", path_last(sp));
             if (!row_set_strings(r, NULL, NULL, abs)) {
@@ -545,10 +568,19 @@ void build_rows(void) {
             const gui_scan_result *sc = NULL;
             const tp_status scan_status = gui_scan_get(abs, &sc, &error);
             if (scan_status != TP_STATUS_OK) {
-                rows_clear();
-                set_statusf_ex(STATUS_ERROR, "Could not scan source: %s",
+                r->runtime_status = scan_status;
+                (void)snprintf(r->label, sizeof r->label,
+                               "\xE2\x9A\xA0 %s/  \xC2\xB7  scan failed",
+                               path_last(sp));
+                if (!row_set_strings(r, NULL, NULL, abs)) {
+                    rows_clear();
+                    set_status_ex(STATUS_ERROR,
+                                  "Out of memory: sprite list unavailable.");
+                    return;
+                }
+                set_statusf_ex(STATUS_WARNING, "Could not scan source: %s",
                                error.msg);
-                return;
+                continue;
             }
             (void)snprintf(r->label, sizeof r->label, "%s/  \xC2\xB7  %d",
                            path_last(sp), sc->count);
@@ -615,6 +647,9 @@ int s_view_count;
 static int s_view_cap;
 
 static char s_view_filter[256];
+static char s_view_filter_folded[TP_SRCKEY_MAX];
+static bool s_view_filter_folded_valid;
+static bool s_view_filter_ascii;
 static row_sort_key s_view_sort_key;
 static bool s_view_sort_desc;
 static bool s_view_sort_warn_first;
@@ -695,6 +730,65 @@ static bool ascii_ci_contains(const char *hay, const char *needle) {
     return false;
 }
 
+static bool text_is_ascii(const char *text) {
+    if (!text) {
+        return true;
+    }
+    for (const unsigned char *p = (const unsigned char *)text; *p; ++p) {
+        if (*p >= 0x80U) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool gui_rows_identity_matches(tp_id128 captured_id, const char *captured_key,
+                               tp_id128 current_id, const char *current_key) {
+    const char *left = captured_key ? captured_key : "";
+    const char *right = current_key ? current_key : "";
+    return !tp_id128_is_nil(captured_id) &&
+           tp_id128_eq(captured_id, current_id) &&
+           strcmp(left, right) == 0;
+}
+
+bool gui_rows_text_contains_ci(const char *haystack, const char *needle) {
+    if (!needle || needle[0] == '\0') {
+        return true;
+    }
+    if (!haystack) {
+        return false;
+    }
+    char folded_haystack[TP_SRCKEY_MAX];
+    char folded_needle[TP_SRCKEY_MAX];
+    if (tp_srckey_casefold(haystack, folded_haystack,
+                           sizeof folded_haystack, NULL) != TP_STATUS_OK ||
+        tp_srckey_casefold(needle, folded_needle, sizeof folded_needle,
+                           NULL) != TP_STATUS_OK) {
+        return ascii_ci_contains(haystack, needle);
+    }
+    return strstr(folded_haystack, folded_needle) != NULL;
+}
+
+static bool text_contains_folded_filter(const char *haystack) {
+    if (!haystack) {
+        return false;
+    }
+    /* The overwhelmingly common all-ASCII path allocates nothing. A Unicode
+     * candidate is folded once; the query was already folded when it changed. */
+    if (s_view_filter_ascii && text_is_ascii(haystack)) {
+        return ascii_ci_contains(haystack, s_view_filter);
+    }
+    if (!s_view_filter_folded_valid) {
+        return ascii_ci_contains(haystack, s_view_filter);
+    }
+    char folded_haystack[TP_SRCKEY_MAX];
+    if (tp_srckey_casefold(haystack, folded_haystack,
+                           sizeof folded_haystack, NULL) != TP_STATUS_OK) {
+        return ascii_ci_contains(haystack, s_view_filter);
+    }
+    return strstr(folded_haystack, s_view_filter_folded) != NULL;
+}
+
 static bool row_matches_filter(const sprite_row *r) {
     if (s_view_filter[0] == '\0') {
         return true;
@@ -703,9 +797,14 @@ static bool row_matches_filter(const sprite_row *r) {
      * char[224] that TRUNCATES a long "rename (file.png)" display string, and r->sprite_name holds only
      * the canonical key -- so a rename longer than ~223 bytes would be unfindable by Ctrl+F without this.
      * One override_by_key lookup per row, only on the active-filter path. */
-    return ascii_ci_contains(r->label, s_view_filter) ||
-           ascii_ci_contains(r->sprite_name, s_view_filter) ||
-           ascii_ci_contains(gui_rows_effective_name(r), s_view_filter);
+    const char *effective = gui_rows_effective_name(r);
+    return text_contains_folded_filter(r->label) ||
+           (r->sprite_name && strcmp(r->sprite_name, r->label) != 0 &&
+            text_contains_folded_filter(r->sprite_name)) ||
+           (effective &&
+            (!r->sprite_name || strcmp(effective, r->sprite_name) != 0) &&
+            strcmp(effective, r->label) != 0 &&
+            text_contains_folded_filter(effective));
 }
 
 const char *gui_rows_effective_name(const sprite_row *row) {
@@ -733,8 +832,10 @@ static const char *row_sort_name(const sprite_row *r) {
 static int view_row_cmp(int ia, int ib) {
     const sprite_row *a = &s_rows[ia];
     const sprite_row *b = &s_rows[ib];
-    if (s_view_sort_warn_first && a->missing != b->missing) {
-        return a->missing ? -1 : 1; /* warnings pinned on top, independent of direction */
+    const bool a_warning = a->missing || a->runtime_status != TP_STATUS_OK;
+    const bool b_warning = b->missing || b->runtime_status != TP_STATUS_OK;
+    if (s_view_sort_warn_first && a_warning != b_warning) {
+        return a_warning ? -1 : 1; /* warnings pinned on top, independent of direction */
     }
     int c = 0;
     switch (s_view_sort_key) {
@@ -819,6 +920,15 @@ void gui_rows_set_filter(const char *query) {
     (void)snprintf(norm, sizeof norm, "%s", query ? query : "");
     if (strcmp(norm, s_view_filter) != 0) {
         (void)snprintf(s_view_filter, sizeof s_view_filter, "%s", norm);
+        s_view_filter_ascii = text_is_ascii(s_view_filter);
+        s_view_filter_folded_valid =
+            s_view_filter[0] == '\0' ||
+            tp_srckey_casefold(s_view_filter, s_view_filter_folded,
+                               sizeof s_view_filter_folded,
+                               NULL) == TP_STATUS_OK;
+        if (!s_view_filter_folded_valid) {
+            s_view_filter_folded[0] = '\0';
+        }
         s_view_epoch++;
     }
 }

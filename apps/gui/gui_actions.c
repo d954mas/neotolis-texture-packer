@@ -133,11 +133,55 @@ typedef struct fp_entry {
     long long mtime;
 } fp_entry;
 
+static fp_entry *s_refresh_fingerprint;
+static int s_refresh_fingerprint_count;
+static bool s_refresh_fingerprint_valid;
+static const tp_session *s_refresh_fingerprint_session;
+static tp_status fp_collect(fp_entry **arr, int *count, int *cap,
+                            tp_error *error);
+
 static void fp_free(fp_entry *entries, int count) {
     for (int i = 0; i < count; ++i) {
         free(entries[i].abs);
     }
     free(entries);
+}
+
+void gui_actions_refresh_fingerprint_reset(void) {
+    fp_free(s_refresh_fingerprint, s_refresh_fingerprint_count);
+    s_refresh_fingerprint = NULL;
+    s_refresh_fingerprint_count = 0;
+    s_refresh_fingerprint_valid = false;
+    s_refresh_fingerprint_session = NULL;
+}
+
+static void fp_bind_current_session(void) {
+    const tp_session *session = gui_project_session_for_jobs();
+    if (session != s_refresh_fingerprint_session) {
+        gui_actions_refresh_fingerprint_reset();
+        s_refresh_fingerprint_session = session;
+    }
+}
+
+/* The first normal frame after a session install is the initial runtime source
+ * observation boundary. Retain it without invalidating sources or publishing UI
+ * state, so the first later manual Refresh compares against something real. */
+static void refresh_fingerprint_prime_if_needed(void) {
+    fp_bind_current_session();
+    if (s_refresh_fingerprint_valid || !s_refresh_fingerprint_session) {
+        return;
+    }
+    fp_entry *entries = NULL;
+    int count = 0;
+    int cap = 0;
+    tp_error error = {0};
+    if (fp_collect(&entries, &count, &cap, &error) != TP_STATUS_OK) {
+        fp_free(entries, count);
+        return; /* Manual Refresh owns the structured warning/error path. */
+    }
+    s_refresh_fingerprint = entries;
+    s_refresh_fingerprint_count = count;
+    s_refresh_fingerprint_valid = true;
 }
 
 static tp_status fp_push(fp_entry **arr, int *count, int *cap,
@@ -193,6 +237,14 @@ static tp_status fp_collect(fp_entry **arr, int *count, int *cap,
             }
             tp_scan_kind kind = TP_SCAN_KIND_MISSING;
             status = tp_scan_classify_checked(abs, &kind, error);
+            if (status == TP_STATUS_NOT_FOUND &&
+                kind == TP_SCAN_KIND_MISSING) {
+                status = fp_push(arr, count, cap, abs, -1, -1, error);
+                if (status != TP_STATUS_OK) {
+                    return status;
+                }
+                continue;
+            }
             if (status != TP_STATUS_OK) {
                 return status;
             }
@@ -244,18 +296,39 @@ static const fp_entry *fp_find(const fp_entry *arr, int n, const char *abs) {
  * computation shared by do_refresh (which adds the side effects) and the --bench-perf headless seam. */
 static tp_status refresh_diff_core(int *out_added, int *out_removed,
                                    int *out_changed,
+                                   int *out_unavailable,
                                    bool *out_sources_invalidated,
                                    tp_error *error) {
+    if (out_added) {
+        *out_added = 0;
+    }
+    if (out_removed) {
+        *out_removed = 0;
+    }
+    if (out_changed) {
+        *out_changed = 0;
+    }
+    if (out_unavailable) {
+        *out_unavailable = 0;
+    }
     if (out_sources_invalidated) {
         *out_sources_invalidated = false;
     }
+    fp_bind_current_session();
+
     fp_entry *before = NULL;
     int bn = 0;
     int bc = 0;
-    tp_status status = fp_collect(&before, &bn, &bc, error);
-    if (status != TP_STATUS_OK) {
-        fp_free(before, bn);
-        return status;
+    const bool retained_before = s_refresh_fingerprint_valid;
+    if (retained_before) {
+        before = s_refresh_fingerprint;
+        bn = s_refresh_fingerprint_count;
+    } else {
+        tp_status status = fp_collect(&before, &bn, &bc, error);
+        if (status != TP_STATUS_OK) {
+            fp_free(before, bn);
+            return status;
+        }
     }
 
     gui_project_invalidate_sources(); /* publish the external runtime refresh */
@@ -266,9 +339,11 @@ static tp_status refresh_diff_core(int *out_added, int *out_removed,
     fp_entry *after = NULL;
     int an = 0;
     int ac = 0;
-    status = fp_collect(&after, &an, &ac, error);
+    tp_status status = fp_collect(&after, &an, &ac, error);
     if (status != TP_STATUS_OK) {
-        fp_free(before, bn);
+        if (!retained_before) {
+            fp_free(before, bn);
+        }
         fp_free(after, an);
         return status;
     }
@@ -276,21 +351,33 @@ static tp_status refresh_diff_core(int *out_added, int *out_removed,
     int added = 0;
     int removed = 0;
     int changed = 0;
+    int unavailable = 0;
     for (int i = 0; i < an; i++) {
         const fp_entry *b = fp_find(before, bn, after[i].abs);
-        if (!b) {
+        if (after[i].size < 0) {
+            unavailable++;
+            if (b && b->size >= 0) {
+                removed++;
+            }
+        } else if (!b || b->size < 0) {
             added++;
         } else if (b->size != after[i].size || b->mtime != after[i].mtime) {
             changed++;
         }
     }
     for (int i = 0; i < bn; i++) {
-        if (!fp_find(after, an, before[i].abs)) {
+        if (before[i].size >= 0 && !fp_find(after, an, before[i].abs)) {
             removed++;
         }
     }
-    fp_free(before, bn);
-    fp_free(after, an);
+    if (retained_before) {
+        fp_free(s_refresh_fingerprint, s_refresh_fingerprint_count);
+    } else {
+        fp_free(before, bn);
+    }
+    s_refresh_fingerprint = after;
+    s_refresh_fingerprint_count = an;
+    s_refresh_fingerprint_valid = true;
 
     if (out_added) {
         *out_added = added;
@@ -300,6 +387,9 @@ static tp_status refresh_diff_core(int *out_added, int *out_removed,
     }
     if (out_changed) {
         *out_changed = changed;
+    }
+    if (out_unavailable) {
+        *out_unavailable = unavailable;
     }
     return TP_STATUS_OK;
 }
@@ -319,23 +409,39 @@ static void do_refresh(void) {
     int added = 0;
     int removed = 0;
     int changed = 0;
+    int unavailable = 0;
     bool sources_invalidated = false;
     tp_error error = {0};
     const tp_status status =
-        refresh_diff_core(&added, &removed, &changed, &sources_invalidated,
-                          &error);
+        refresh_diff_core(&added, &removed, &changed, &unavailable,
+                          &sources_invalidated, &error);
     if (status != TP_STATUS_OK) {
         if (gui_actions_refresh_should_mark_stale(status,
                                                   sources_invalidated)) {
             gui_project_mark_stale();
         }
-        set_statusf_ex(STATUS_ERROR, "Refresh failed: %s", error.msg);
+        const bool runtime_source_warning =
+            status == TP_STATUS_NOT_FOUND ||
+            status == TP_STATUS_PATH_RESOLVE_FAILED ||
+            status == TP_STATUS_INVALID_UTF8;
+        set_statusf_ex(runtime_source_warning ? STATUS_WARNING : STATUS_ERROR,
+                       runtime_source_warning ? "Refresh warning: %s"
+                                              : "Refresh failed: %s",
+                       error.msg);
         return;
     }
 
     gui_canvas_invalidate(&s_canvas); /* force the shown image to reload (or show missing) */
     gui_project_mark_stale();         /* disk changed -> preview stale, project NOT dirtied */
-    set_statusf("Refresh: +%d new, %d removed, %d changed", added, removed, changed);
+    if (unavailable > 0) {
+        set_statusf_ex(
+            STATUS_WARNING,
+            "Refresh: +%d new, %d removed, %d changed; %d source unavailable",
+            added, removed, changed, unavailable);
+    } else {
+        set_statusf("Refresh: +%d new, %d removed, %d changed", added, removed,
+                    changed);
+    }
 }
 
 /* Headless bench seam for the real refresh cost without UI or preview side
@@ -343,7 +449,7 @@ static void do_refresh(void) {
 bool gui_actions_refresh_diff_headless(int *out_added, int *out_removed,
                                        int *out_changed) {
     tp_error error = {0};
-    return refresh_diff_core(out_added, out_removed, out_changed, NULL,
+    return refresh_diff_core(out_added, out_removed, out_changed, NULL, NULL,
                              &error) == TP_STATUS_OK;
 }
 
@@ -517,6 +623,7 @@ void apply_pending(void) {
 
     gui_actions__apply_file_dialogs();
     gui_actions__apply_structural_edits();
+    refresh_fingerprint_prime_if_needed();
     if (s_pending_refresh) {
         do_refresh();
     }

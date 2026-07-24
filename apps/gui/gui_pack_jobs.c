@@ -194,8 +194,7 @@ gui_pack_done gui_pack_poll(gui_pack_result_info *out) {
                    ? GUI_PACK_DONE_EXPORT_FAIL
                    : GUI_PACK_DONE_PACK_FAIL;
     }
-    const bool cancelled = s_adapter.cancel_requested ||
-                           result.state == TP_SESSION_JOB_CANCELLED;
+    const bool cancelled = result.state == TP_SESSION_JOB_CANCELLED;
     const bool preview = result.kind == TP_SESSION_JOB_PACK &&
                          result.pack.preview_exporter_id[0] != '\0';
     gui_pack_done done = GUI_PACK_DONE_NONE;
@@ -257,6 +256,7 @@ gui_pack_done gui_pack_poll(gui_pack_result_info *out) {
             out->notices = result.export_result.notices;
             out->atlases_ok = result.export_result.atlases_ok;
             out->atlases_fail = result.export_result.atlases_failed;
+            out->atlases_skipped = result.export_result.atlases_skipped;
             (void)snprintf(out->err, sizeof out->err, "%s",
                            result.export_result.first_error);
         }
@@ -498,7 +498,11 @@ bool gui_pack_export(int atlas_index, int *out_targets, int *out_notices,
         *out_notices = info.notices;
     }
     if (notice && notice_cap > 0U) {
-        if (info.notices > 0) {
+        if (info.atlases_skipped > 0) {
+            (void)snprintf(notice, notice_cap,
+                           "%d atlas(es) skipped (no usable images)",
+                           info.atlases_skipped);
+        } else if (info.notices > 0) {
             (void)snprintf(notice, notice_cap, "%d metadata notice(s)",
                            info.notices);
         } else {

@@ -56,6 +56,7 @@ typedef struct sprite_row {
     tp_id128 source_id;
     char *source_key;         /* malloc-owned exact authoritative key */
     bool missing;             /* source path gone from disk (§3.7) */
+    tp_status runtime_status; /* typed display-scan failure; OK on normal materialization */
     char label[224];          /* display label (rename-aware: "final (file.png)") */
     char *sprite_name;        /* malloc-owned exact export key */
     char *abs;                /* malloc-owned exact resolved decode path */
@@ -100,6 +101,16 @@ typedef enum {
  * NAME sort and "Copy name" both resolve through this so a renamed sprite sorts and copies by its NEW
  * name, consistent with Rename itself. Valid after build_rows() populated the current atlas. */
 const char *gui_rows_effective_name(const sprite_row *row);
+
+/* Canonical identity comparison used by retained UI press/release guards.
+ * NULL keys compare as empty; nil entity ids never match. */
+bool gui_rows_identity_matches(tp_id128 captured_id, const char *captured_key,
+                               tp_id128 current_id, const char *current_key);
+
+/* Unicode case-folded substring match (NFC + full casefold through tp_core's
+ * shared source-key text facility). Invalid/oversized input falls back to the
+ * previous ASCII-safe comparison rather than making the view disappear. */
+bool gui_rows_text_contains_ci(const char *haystack, const char *needle);
 
 /* Case-insensitive substring filter over row label + export name. NULL/"" clears it.
  * A matching child keeps its parent folder visible; an active filter overrides collapse. */
