@@ -49,8 +49,13 @@ set_target_properties(ntpacker_output_fault PROPERTIES
 # deterministically. Production ntpacker has no environment-controlled behavior.
 add_executable(ntpacker_pack_arena_fault ${_ntpacker_sources})
 ntpacker_configure_target(ntpacker_pack_arena_fault)
+target_sources(ntpacker_pack_arena_fault PRIVATE
+    ${CMAKE_SOURCE_DIR}/packer/src/tp_export_run.c)
+target_include_directories(ntpacker_pack_arena_fault PRIVATE
+    ${CMAKE_SOURCE_DIR}/packer/src)
 target_compile_definitions(ntpacker_pack_arena_fault PRIVATE
-    NTPACKER_CLI_PACK_ARENA_FAULT_SEAM=1)
+    NTPACKER_CLI_PACK_ARENA_FAULT_SEAM=1
+    TP_ENABLE_TEST_SEAMS=1)
 set_target_properties(ntpacker_pack_arena_fault PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CLI_OUTPUT_DIR}")
 
@@ -456,6 +461,9 @@ add_test(NAME cli_pack_report_oom_contract COMMAND ${CMAKE_COMMAND}
     -DCHECKER=$<TARGET_FILE:cli_json_check>
     "-DCHECK_ARGS=pack targets_ok=1 targets_failed=0 error_id=oom error_atlas=clean"
     -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_pack_report_oom.json
+    -DEXACT_FILES_ROOT=${CMAKE_CURRENT_BINARY_DIR}/cli_pack_report_oom
+    -DEXACT_FILES_SAFE_PARENT=${CMAKE_CURRENT_BINARY_DIR}
+    "-DEXACT_FILES=out/clean.json-0.png;out/clean.json.json"
     -P "${_run}")
 set_tests_properties(cli_pack_report_oom_contract PROPERTIES
     ENVIRONMENT "NTPACKER_TEST_REPORT_ALLOC_FAIL=1")

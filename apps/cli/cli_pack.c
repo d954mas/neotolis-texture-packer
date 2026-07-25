@@ -275,9 +275,10 @@ static void emit_target(cli_sb *sb, int depth, const tp_export_report_target *rt
     cli_sb_int(sb, rt->pack_run);
     key(sb, depth + 1, &tf, "status");
     cli_sb_json_str(sb, rt->ok ? "ok" : "failed");
-    if (!rt->ok && rt->error) {
+    if (!rt->ok) {
         key(sb, depth + 1, &tf, "error");
-        cli_sb_json_str(sb, rt->error);
+        cli_sb_json_str(sb, rt->error ? rt->error
+                                      : "export target failed (error detail unavailable)");
     }
     /* written_files is always present (empty on a dry run); would_write is added
      * only on a dry run -- the paths that WOULD be produced (docs/formats/cli-report.md). */

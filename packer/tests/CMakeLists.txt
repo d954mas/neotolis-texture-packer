@@ -150,11 +150,13 @@ add_test(NAME tp_job_owner COMMAND tp_test_job_owner)
 
 # Architecture foundation job freshness: a result captures both immutable model
 # and source-runtime generations. Generation zero is data, never a stale sentinel.
-add_executable(tp_test_job_input_token test_job_input_token.c)
+add_executable(tp_test_job_input_token test_job_input_token.c
+    ../src/tp_scan.c ../src/tp_export_run.c ../src/tp_job.c)
 # tp_build: F3-03 T2 extension calls tp_session_pack_input_hash (job/pack surface).
 target_link_libraries(tp_test_job_input_token PRIVATE tp_build unity)
 # ../src: single-decode seam (tp_image_internal.h) + scratch teardown (tp_fs_internal.h).
 target_include_directories(tp_test_job_input_token PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_definitions(tp_test_job_input_token PRIVATE TP_ENABLE_TEST_SEAMS=1)
 target_compile_options(tp_test_job_input_token PRIVATE -U_DLL)
 nt_set_warning_flags(tp_test_job_input_token)
 add_test(NAME tp_job_input_token COMMAND tp_test_job_input_token)
@@ -343,8 +345,10 @@ add_test(NAME tp_names COMMAND tp_test_names)
 
 # A2 op-layer: tp_scan directory recursion + image-ext whitelist, moved out of the
 # GUI. Builds a fixture tree under a scratch dir at runtime (argv[1]).
-add_executable(tp_test_scan test_scan.c)
+add_executable(tp_test_scan test_scan.c ../src/tp_scan.c)
 target_link_libraries(tp_test_scan PRIVATE tp_core unity)
+target_include_directories(tp_test_scan PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_definitions(tp_test_scan PRIVATE TP_ENABLE_TEST_SEAMS=1)
 target_compile_options(tp_test_scan PRIVATE -U_DLL)
 nt_set_warning_flags(tp_test_scan)   # AGENTS.md invariant: our test TUs too
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_scan_test")
@@ -384,9 +388,10 @@ endif()
 # tp_project_atlas_to_settings. Links tp_build so the CONCAVE+extrude clamp
 # regression can pack + export (tp_pack/tp_export_run); the pure input-build asserts
 # only need tp_core. Builds a fixture tree under a scratch dir at runtime (argv[1]).
-add_executable(tp_test_input test_input.c)
+add_executable(tp_test_input test_input.c ../src/tp_scan.c)
 target_link_libraries(tp_test_input PRIVATE tp_build unity)
 target_include_directories(tp_test_input PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_definitions(tp_test_input PRIVATE TP_ENABLE_TEST_SEAMS=1)
 target_compile_options(tp_test_input PRIVATE -U_DLL)
 nt_set_warning_flags(tp_test_input)   # AGENTS.md invariant: our test TUs too
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_input_test")
@@ -611,9 +616,10 @@ add_test(NAME tp_export_png COMMAND tp_test_export_png "${CMAKE_BINARY_DIR}/tp_e
 
 # Phase 2 per-target packing: test-only capability-restricted descriptors prove
 # effective-settings repack, shared runs, and metadata-loss notices.
-add_executable(tp_test_export_run test_export_run.c)
+add_executable(tp_test_export_run test_export_run.c ../src/tp_export_run.c)
 target_link_libraries(tp_test_export_run PRIVATE tp_build unity cjson)
 target_include_directories(tp_test_export_run PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_definitions(tp_test_export_run PRIVATE TP_ENABLE_TEST_SEAMS=1)
 target_compile_options(tp_test_export_run PRIVATE -U_DLL)
 nt_set_warning_flags(tp_test_export_run)   # AGENTS.md invariant: our test TUs too
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_export_run_test")

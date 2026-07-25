@@ -23,46 +23,20 @@
 #include "tp_core/tp_transaction.h"
 #include "tp_fs_internal.h" /* scratch teardown */
 #include "tp_image_priv.h"  /* single-decode accounting seam */
+#include "tp_test_seams.h"
 #include "unity.h"
 
-/* Cross-thread walk-gate seam (tp_scan.c): arms the next folder walk to PARK until
- * released, so a job test can prove the walk runs on the pack worker (start() returns
- * while the worker is parked here) and drive a mid-walk cancel deterministically. */
-void tp_scan__test_arm_walk_gate(void);
-bool tp_scan__test_walk_gate_entered(void);
-void tp_scan__test_release_walk_gate(void);
+void setUp(void) {
+    tp_scan__test_reset_all();
+    tp_job__test_reset_all();
+    tp_export_run__test_reset_all();
+}
 
-/* Post-entry gate + visited-entry counter seam (tp_scan.c): trips after
- * the FIRST entry is visited INSIDE the walk and counts every visited entry, so the
- * mid-scan-cancel test can prove the scan STOPPED EARLY (visited < N) rather than only
- * that the job ended CANCELLED -- the shared cancel flag yields CANCELLED even if the
- * scan ran to completion and only the pack observed the cancel. */
-void tp_scan__test_arm_post_entry_gate(void);
-bool tp_scan__test_post_entry_gate_entered(void);
-void tp_scan__test_release_post_entry_gate(void);
-int tp_scan__test_visited_entries(void);
-
-/* Parks a completed worker before terminal publication, making late cancellation
- * deterministic for Pack results and committed Export outputs. */
-void tp_job__test_arm_before_terminal_gate(void);
-bool tp_job__test_before_terminal_gate_entered(void);
-void tp_job__test_release_before_terminal_gate(void);
-void tp_job__test_arm_after_cancel_observation_gate(void);
-bool tp_job__test_after_cancel_observation_gate_entered(void);
-void tp_job__test_release_after_cancel_observation_gate(void);
-void tp_job__test_arm_after_cancel_claim_gate(void);
-bool tp_job__test_after_cancel_claim_gate_entered(void);
-void tp_job__test_release_after_cancel_claim_gate(void);
-void tp_export_run__test_arm_before_write_gate(void);
-bool tp_export_run__test_before_write_gate_entered(void);
-void tp_export_run__test_release_before_write_gate(void);
-void tp_export_run__test_arm_after_terminal_boundary_gate(void);
-bool tp_export_run__test_after_terminal_boundary_gate_entered(void);
-void tp_export_run__test_release_after_terminal_boundary_gate(void);
-void tp_export_run__test_fail_next_error_copy(void);
-
-void setUp(void) {}
-void tearDown(void) {}
+void tearDown(void) {
+    tp_scan__test_reset_all();
+    tp_job__test_reset_all();
+    tp_export_run__test_reset_all();
+}
 
 /* Spins (bounded), yielding the CPU each iteration so the parked worker thread
  * always gets scheduled, until the worker parks in the armed walk. Returns true
@@ -444,7 +418,25 @@ static tp_status partial_failure_write(
     const char *out_path_base, tp_export_notices *notices, tp_error *err) {
     (void)prepared;
     (void)caps;
-    (void)out_path_base;
+    char path[1200];
+    const int n = snprintf(path, sizeof path, "%s.json", out_path_base);
+    if (n <= 0 || (size_t)n >= sizeof path) {
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                            "test partial output path overflow");
+    }
+    FILE *file = fopen(path, "wb");
+    if (!file) {
+        return tp_error_set(err, TP_STATUS_PATH_RESOLVE_FAILED,
+                            "could not create test partial output");
+    }
+    static const char partial[] = "partial";
+    const bool wrote =
+        fwrite(partial, 1U, sizeof partial - 1U, file) == sizeof partial - 1U;
+    const bool closed = fclose(file) == 0;
+    if (!wrote || !closed) {
+        return tp_error_set(err, TP_STATUS_PATH_RESOLVE_FAILED,
+                            "could not write test partial output");
+    }
     const tp_status notice_status = tp_export_notice_addf(
         notices, "intentional partial-export notice");
     if (notice_status != TP_STATUS_OK) {
@@ -1273,6 +1265,48 @@ void test_folder_walk_cancels_mid_scan(void) {
     remove_scratch_tree(work_dir);
 }
 
+/* Reset must synchronously release and acknowledge a parked worker before a
+ * following test can arm the same one-shot gate generation. */
+void test_reset_all_test_seams_releases_a_parked_worker(void) {
+    tp_session *session = make_session();
+    const tp_id128 atlas = default_atlas_id(session);
+    char work_dir[1024];
+    job_scratch_dir(work_dir, sizeof work_dir);
+    tp_mkdirs(work_dir);
+    add_file_source(session, atlas, work_dir);
+
+    tp_error err = {{0}};
+    const tp_pack_job_request request = {
+        .atlas_id = atlas,
+        .work_dir = work_dir,
+        .preview_exporter_id = NULL,
+    };
+    tp_job__test_arm_before_terminal_gate();
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_pack_job_start(session, &request, &err));
+    TEST_ASSERT_TRUE_MESSAGE(
+        wait_for_before_terminal_gate(),
+        "pack worker did not reach the pre-terminal publication gate");
+
+    /* This is the path Unity tearDown takes after an assertion failure. */
+    tp_job__test_reset_all();
+    /* Re-arm immediately, before waiting for the old job to finish. The reset
+     * contract must have received the old worker's acknowledgement first;
+     * otherwise this arm can revoke its transient release and deadlock it. */
+    tp_job__test_arm_before_terminal_gate();
+
+    tp_session_job_result result = wait_for_job_result(session);
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_SUCCEEDED, result.state);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, result.status);
+    TEST_ASSERT_FALSE_MESSAGE(
+        tp_job__test_before_terminal_gate_entered(),
+        "the old worker must not consume the next generation's gate arm");
+    tp_job__test_release_before_terminal_gate();
+    tp_session_job_result_destroy(&result);
+    tp_session_destroy(session);
+    remove_scratch_tree(work_dir);
+}
+
 /* A cancel requested after a private Pack result exists but before terminal
  * publication must produce one coherent CANCELLED outcome: cancelled status,
  * no transferable arena/result/hash, and no accidental success publication. */
@@ -1497,6 +1531,52 @@ void test_export_cancel_after_failed_writer_reports_uncertain_publication(void) 
     remove_scratch_tree(work_dir);
 }
 
+void test_export_failed_writer_without_cancel_reports_uncertain_publication(void) {
+    tp_session *session = make_session();
+    const tp_id128 atlas = default_atlas_id(session);
+    char work_dir[1024];
+    job_scratch_dir(work_dir, sizeof work_dir);
+    tp_mkdirs(work_dir);
+    add_file_source(session, atlas, work_dir);
+    add_partial_failure_target(session, atlas);
+
+    char project_path[1200];
+    TEST_ASSERT_TRUE(snprintf(project_path, sizeof project_path,
+                              "%s/job.ntpacker_project", work_dir) > 0);
+    tp_session_save_result save_result;
+    memset(&save_result, 0, sizeof save_result);
+    tp_error err = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_save_new(session, project_path, &save_result, &err));
+
+    char partial_path[1200];
+    TEST_ASSERT_TRUE(snprintf(partial_path, sizeof partial_path,
+                              "%s/out/partial.json", work_dir) > 0);
+    const tp_export_command_request request = {
+        .work_dir = work_dir,
+        .atlas_id = atlas,
+    };
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_export_start(session, &request, &err));
+
+    tp_session_job_result result = wait_for_job_result(session);
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_FAILED, result.state);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_PATH_RESOLVE_FAILED, result.status);
+    TEST_ASSERT_FALSE(result.export_result.partial_publication);
+    TEST_ASSERT_TRUE_MESSAGE(
+        result.export_result.publication_uncertain,
+        "a failed direct writer cannot prove that it published no artifacts");
+    TEST_ASSERT_EQUAL_INT(0, result.export_result.targets);
+    TEST_ASSERT_EQUAL_INT(0, result.export_result.files);
+    TEST_ASSERT_EQUAL_INT(1, result.export_result.atlases_failed);
+    TEST_ASSERT_TRUE(tp_fs_exists(partial_path));
+
+    tp_session_job_result_destroy(&result);
+    tp_session_destroy(session);
+    remove_scratch_tree(work_dir);
+}
+
 void test_export_final_failed_writer_cancel_reports_uncertain_publication(void) {
     tp_session *session = make_session();
     const tp_id128 atlas = default_atlas_id(session);
@@ -1541,9 +1621,9 @@ void test_export_final_failed_writer_cancel_reports_uncertain_publication(void) 
     TEST_ASSERT_EQUAL_INT(0, result.export_result.targets);
     TEST_ASSERT_EQUAL_INT(0, result.export_result.files);
     TEST_ASSERT_EQUAL_INT(1, result.export_result.atlases_failed);
-    TEST_ASSERT_NOT_NULL(strstr(
-        result.export_result.first_error,
-        "export writer failed"));
+    TEST_ASSERT_EQUAL_STRING(
+        "atlas1: export target failed (error detail unavailable)",
+        result.export_result.first_error);
 
     tp_session_job_result_destroy(&result);
     tp_session_destroy(session);
@@ -1767,7 +1847,7 @@ void test_partial_export_counts_successful_targets_and_notices(void) {
     TEST_ASSERT_EQUAL_INT(1, result.export_result.targets);
     TEST_ASSERT_TRUE(result.export_result.files > 0);
     TEST_ASSERT_FALSE(result.export_result.partial_publication);
-    TEST_ASSERT_FALSE(result.export_result.publication_uncertain);
+    TEST_ASSERT_TRUE(result.export_result.publication_uncertain);
     TEST_ASSERT_EQUAL_INT(1, result.export_result.atlases_failed);
     TEST_ASSERT_EQUAL_INT(1, result.export_result.notices);
     TEST_ASSERT_NOT_NULL(strstr(result.export_result.first_error,
@@ -1885,11 +1965,13 @@ int main(int argc, char **argv) {
     RUN_TEST(test_empty_atlas_pack_fails_async_not_at_start);
     RUN_TEST(test_folder_source_walk_runs_on_worker);
     RUN_TEST(test_folder_walk_cancels_mid_scan);
+    RUN_TEST(test_reset_all_test_seams_releases_a_parked_worker);
     RUN_TEST(test_late_pack_cancel_has_coherent_terminal_result);
     RUN_TEST(test_cancel_after_export_commit_is_rejected);
     RUN_TEST(test_export_cancel_accepted_before_final_commit_owns_terminal);
     RUN_TEST(test_export_cancel_between_writers_reports_partial_publication);
     RUN_TEST(test_export_cancel_after_failed_writer_reports_uncertain_publication);
+    RUN_TEST(test_export_failed_writer_without_cancel_reports_uncertain_publication);
     RUN_TEST(test_export_final_failed_writer_cancel_reports_uncertain_publication);
     RUN_TEST(test_export_nonfinal_failed_writer_cancel_reports_uncertain_publication);
     RUN_TEST(test_export_scan_observes_the_accepted_cancel_claim);

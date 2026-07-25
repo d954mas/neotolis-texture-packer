@@ -27,6 +27,7 @@
 #include "tp_core/tp_build_worker.h"
 #include "tp_fs_internal.h"
 #include "tp_project_mutation_internal.h"
+#include "tp_test_seams.h"
 #include "unity.h"
 
 /* wide + tall force the packer to rotate the tall sprite (diagonal bit). */
@@ -50,11 +51,8 @@ static tp_exporter g_list_error;
 static tp_exporter g_write_error;
 static int g_list_error_write_calls;
 
-void tp_export_run__test_set_report_alloc_fail(int nth);
-void tp_export_run__test_fail_next_error_copy(void);
-
-void setUp(void) {}
-void tearDown(void) {}
+void setUp(void) { tp_export_run__test_reset_all(); }
+void tearDown(void) { tp_export_run__test_reset_all(); }
 
 static void fill(uint8_t *p, int n, uint8_t r, uint8_t g, uint8_t b) {
     for (int i = 0; i < n; i++) {
@@ -811,7 +809,49 @@ static void test_custom_output_listing_failure_prevents_wet_write_and_matches_dr
     tp_project_destroy(proj);
 }
 
-static void test_failed_writer_outcome_does_not_depend_on_error_copy(void) {
+static void test_unknown_exporter_error_falls_back_when_error_copy_fails(void) {
+    tp_pack_sprite_desc sprite = {
+        .name = "wide",
+        .rgba = g_wide,
+        .w = 120,
+        .h = 24,
+        .origin_x = 0.5F,
+        .origin_y = 0.5F,
+    };
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    tp_project_atlas *atlas = tp_project_get_atlas(project, 0);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_target(atlas, "test-missing-exporter", g_dir, NULL));
+
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_export_report report;
+    memset(&report, 0, sizeof report);
+    const tp_export_run_opts opts = {.report = &report};
+    tp_export_notices notices;
+    tp_export_notices_init(&notices);
+    tp_error error = {{0}};
+
+    tp_export_run__test_fail_next_error_copy();
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_export_run_ex(project, 0, &sprite, 1, g_dir, arena, &notices,
+                         NULL, &opts, &error));
+    TEST_ASSERT_EQUAL_INT(1, report.target_count);
+    TEST_ASSERT_FALSE(report.targets[0].ok);
+    TEST_ASSERT_EQUAL_STRING("export target failed (error detail unavailable)",
+                             report.targets[0].error);
+    TEST_ASSERT_EQUAL_INT(TP_EXPORT_WRITER_NOT_ATTEMPTED,
+                          report.targets[0].writer_outcome);
+
+    tp_export_notices_free(&notices);
+    tp_arena_destroy(arena);
+    tp_project_destroy(project);
+}
+
+static void test_failed_writer_error_falls_back_when_error_copy_fails(void) {
     tp_pack_sprite_desc sprite = {
         .name = "wide",
         .rgba = g_wide,
@@ -848,7 +888,8 @@ static void test_failed_writer_outcome_does_not_depend_on_error_copy(void) {
                          NULL, &opts, &error));
     TEST_ASSERT_EQUAL_INT(1, report.target_count);
     TEST_ASSERT_FALSE(report.targets[0].ok);
-    TEST_ASSERT_NULL(report.targets[0].error);
+    TEST_ASSERT_EQUAL_STRING("export target failed (error detail unavailable)",
+                             report.targets[0].error);
     TEST_ASSERT_EQUAL_INT(TP_EXPORT_WRITER_FAILED,
                           report.targets[0].writer_outcome);
 
@@ -1191,7 +1232,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_dry_run);
     RUN_TEST(test_dry_run_rejects_the_same_output_path_overflow_as_wet_export);
     RUN_TEST(test_custom_output_listing_failure_prevents_wet_write_and_matches_dry_run);
-    RUN_TEST(test_failed_writer_outcome_does_not_depend_on_error_copy);
+    RUN_TEST(test_unknown_exporter_error_falls_back_when_error_copy_fails);
+    RUN_TEST(test_failed_writer_error_falls_back_when_error_copy_fails);
     RUN_TEST(test_snapshot_report_marks_nonempty_input_ready_before_output_resolution);
     RUN_TEST(test_report_marks_pre_target_setup_failure_as_pack_failed);
     RUN_TEST(test_report_page_oom_leaves_no_partial_runs);

@@ -34,6 +34,7 @@
 #include "tp_core/tp_build_worker.h"
 #include "tp_core/tp_input.h"
 #include "tp_core/tp_scan.h"
+#include "tp_test_seams.h"
 
 #include "unity.h"
 
@@ -234,8 +235,7 @@ static int view_folder_pos(void) {
 }
 
 void setUp(void) {
-    tp_scan__test_set_alloc_fail(-1);
-    tp_scan__test_set_stat_error(0);
+    tp_scan__test_reset_all();
     TEST_ASSERT_TRUE(prepare_files());
     gui_project_init();
     s_sel_atlas = 0;
@@ -243,8 +243,7 @@ void setUp(void) {
 }
 
 void tearDown(void) {
-    tp_scan__test_set_alloc_fail(-1);
-    tp_scan__test_set_stat_error(0);
+    tp_scan__test_reset_all();
     gui_pack_shutdown();
     gui_rows_shutdown();
     gui_project_shutdown();

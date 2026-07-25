@@ -26,12 +26,9 @@
 #include "tp_core/tp_build_worker.h"
 #include "tp_journal_internal.h"
 #include "tp_session_internal.h"
+#include "tp_test_seams.h"
 
 #include "unity.h"
-
-void tp_job__test_arm_before_terminal_gate(void);
-bool tp_job__test_before_terminal_gate_entered(void);
-void tp_job__test_release_before_terminal_gate(void);
 
 static char s_left_dir[512];
 static char s_right_dir[512];
@@ -219,6 +216,7 @@ static bool animation_has_frame(const tp_session_snapshot *snapshot,
 }
 
 void setUp(void) {
+    tp_job__test_reset_all();
     TEST_ASSERT_TRUE(prepare_files());
     gui_project_init();
     s_sel_atlas = 0;
@@ -226,6 +224,7 @@ void setUp(void) {
 }
 
 void tearDown(void) {
+    tp_job__test_reset_all();
     tp_journal__test_set_record_limit(0U);
     tp_journal__test_set_file_limit(0U);
     multi_sel_clear();

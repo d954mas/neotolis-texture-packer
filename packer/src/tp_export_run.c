@@ -17,6 +17,9 @@
 #include "tp_core/tp_scan.h"
 #include "tp_project_mutation_internal.h"
 #include "tp_session_internal.h"
+#ifdef TP_ENABLE_TEST_SEAMS
+#include "tp_test_gate.h"
+#endif
 
 #define TP_RUN_PATH_MAX TP_IDENTITY_PATH_MAX
 
@@ -28,14 +31,15 @@ struct tp_export_snapshot_job {
     void *terminal_boundary_context;
 };
 
+#ifdef TP_ENABLE_TEST_SEAMS
 static _Thread_local int s_report_alloc_fail = -1;
 static _Thread_local bool s_fail_next_error_copy;
-static atomic_int s_before_write_gate_armed;
-static atomic_int s_before_write_gate_entered;
-static atomic_int s_before_write_gate_released;
-static atomic_int s_after_terminal_boundary_gate_armed;
-static atomic_int s_after_terminal_boundary_gate_entered;
-static atomic_int s_after_terminal_boundary_gate_released;
+static tp_test_gate s_before_write_gate = TP_TEST_GATE_INIT;
+static tp_test_gate s_after_terminal_boundary_gate = TP_TEST_GATE_INIT;
+
+static void export_test_gate_yield(void) {
+    thrd_yield();
+}
 
 void tp_export_run__test_set_report_alloc_fail(int nth) {
     s_report_alloc_fail = nth;
@@ -46,57 +50,52 @@ void tp_export_run__test_fail_next_error_copy(void) {
 }
 
 void tp_export_run__test_arm_before_write_gate(void) {
-    atomic_store(&s_before_write_gate_entered, 0);
-    atomic_store(&s_before_write_gate_released, 0);
-    atomic_store(&s_before_write_gate_armed, 1);
+    tp_test_gate_arm(&s_before_write_gate, export_test_gate_yield);
 }
 
 bool tp_export_run__test_before_write_gate_entered(void) {
-    return atomic_load(&s_before_write_gate_entered) != 0;
+    return tp_test_gate_entered(&s_before_write_gate);
 }
 
 void tp_export_run__test_release_before_write_gate(void) {
-    atomic_store(&s_before_write_gate_armed, 0);
-    atomic_store(&s_before_write_gate_released, 1);
-    atomic_store(&s_before_write_gate_entered, 0);
+    tp_test_gate_release(&s_before_write_gate, export_test_gate_yield);
 }
 
 static void export_before_write_gate_wait(void) {
-    if (atomic_load(&s_before_write_gate_armed) == 0) {
-        return;
-    }
-    atomic_store(&s_before_write_gate_armed, 0);
-    atomic_store(&s_before_write_gate_entered, 1);
-    while (atomic_load(&s_before_write_gate_released) == 0) {
-        thrd_yield();
-    }
+    tp_test_gate_wait(&s_before_write_gate, export_test_gate_yield);
 }
 
 void tp_export_run__test_arm_after_terminal_boundary_gate(void) {
-    atomic_store(&s_after_terminal_boundary_gate_entered, 0);
-    atomic_store(&s_after_terminal_boundary_gate_released, 0);
-    atomic_store(&s_after_terminal_boundary_gate_armed, 1);
+    tp_test_gate_arm(&s_after_terminal_boundary_gate,
+                     export_test_gate_yield);
 }
 
 bool tp_export_run__test_after_terminal_boundary_gate_entered(void) {
-    return atomic_load(&s_after_terminal_boundary_gate_entered) != 0;
+    return tp_test_gate_entered(&s_after_terminal_boundary_gate);
 }
 
 void tp_export_run__test_release_after_terminal_boundary_gate(void) {
-    atomic_store(&s_after_terminal_boundary_gate_armed, 0);
-    atomic_store(&s_after_terminal_boundary_gate_released, 1);
+    tp_test_gate_release(&s_after_terminal_boundary_gate,
+                         export_test_gate_yield);
 }
 
 static void export_after_terminal_boundary_gate_wait(void) {
-    if (atomic_load(&s_after_terminal_boundary_gate_armed) == 0) {
-        return;
-    }
-    atomic_store(&s_after_terminal_boundary_gate_armed, 0);
-    atomic_store(&s_after_terminal_boundary_gate_entered, 1);
-    while (atomic_load(&s_after_terminal_boundary_gate_released) == 0) {
-        thrd_yield();
-    }
+    tp_test_gate_wait(&s_after_terminal_boundary_gate,
+                      export_test_gate_yield);
 }
+
+void tp_export_run__test_reset_all(void) {
+    s_report_alloc_fail = -1;
+    s_fail_next_error_copy = false;
+
+    tp_test_gate_reset(&s_before_write_gate, export_test_gate_yield);
+    tp_test_gate_reset(&s_after_terminal_boundary_gate,
+                       export_test_gate_yield);
+}
+#else
+#define export_before_write_gate_wait() ((void)0)
+#define export_after_terminal_boundary_gate_wait() ((void)0)
+#endif
 
 static tp_status export_cancel_poll(const tp_cancel_token *cancel,
                                     tp_error *err) {
@@ -110,6 +109,7 @@ static bool export_pack_cancel_poll(void *context) {
 }
 
 static void *report_alloc(tp_arena *arena, size_t size) {
+#ifdef TP_ENABLE_TEST_SEAMS
     if (s_report_alloc_fail == 0) {
         s_report_alloc_fail = -1;
         return NULL;
@@ -117,15 +117,19 @@ static void *report_alloc(tp_arena *arena, size_t size) {
     if (s_report_alloc_fail > 0) {
         s_report_alloc_fail--;
     }
+#endif
     return tp_arena_alloc(arena, size);
 }
 
-static char *report_error_strdup(tp_arena *arena, const char *text) {
+static const char *report_error_copy(tp_arena *arena, const char *text) {
+#ifdef TP_ENABLE_TEST_SEAMS
     if (s_fail_next_error_copy) {
         s_fail_next_error_copy = false;
-        return NULL;
+        return "export target failed (error detail unavailable)";
     }
-    return tp_arena_strdup(arena, text);
+#endif
+    const char *copy = tp_arena_strdup(arena, text);
+    return copy ? copy : "export target failed (error detail unavailable)";
 }
 
 static bool run_path_is_absolute(const char *path) {
@@ -517,7 +521,9 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
                 return ust;
             }
             if (rt) {
-                rt->error = tp_arena_strdup(arena, err && err->msg[0] ? err->msg : "unknown exporter");
+                rt->error = report_error_copy(
+                    arena,
+                    err && err->msg[0] ? err->msg : "unknown exporter");
             }
             if (first_fail == TP_STATUS_OK) {
                 first_fail = ust;
@@ -534,7 +540,9 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
                 return st;
             }
             if (rt) {
-                rt->error = tp_arena_strdup(arena, err && err->msg[0] ? err->msg : "cannot resolve out_path");
+                rt->error = report_error_copy(
+                    arena,
+                    err && err->msg[0] ? err->msg : "cannot resolve out_path");
             }
             if (first_fail == TP_STATUS_OK) {
                 first_fail = st;
@@ -649,7 +657,9 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
             }
             if (rt) {
                 rt->ok = false;
-                rt->error = tp_arena_strdup(arena, err && err->msg[0] ? err->msg : "output listing failed");
+                rt->error = report_error_copy(
+                    arena,
+                    err && err->msg[0] ? err->msg : "output listing failed");
             }
             if (first_fail == TP_STATUS_OK) {
                 first_fail = cst;
@@ -672,7 +682,9 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
                 }
                 if (rt) {
                     rt->ok = false;
-                    rt->error = tp_arena_strdup(arena, err && err->msg[0] ? err->msg : "predict-loss failed");
+                    rt->error = report_error_copy(
+                        arena,
+                        err && err->msg[0] ? err->msg : "predict-loss failed");
                 }
                 if (first_fail == TP_STATUS_OK) {
                     first_fail = st;
@@ -713,7 +725,7 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
             }
             if (rt) {
                 rt->ok = false;
-                rt->error = report_error_strdup(
+                rt->error = report_error_copy(
                     arena,
                     err && err->msg[0] ? err->msg : "export write failed");
             }

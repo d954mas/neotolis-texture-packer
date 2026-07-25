@@ -21,16 +21,12 @@
 #include "gui_state.h"
 
 #include "tp_core/tp_scan.h"
+#include "tp_test_seams.h"
 
 #include "time/nt_time.h"
 #include "unity.h"
 
 static char s_save_path[1024];
-
-void tp_scan__test_set_stat_error(int error);
-void tp_job__test_arm_before_terminal_gate(void);
-bool tp_job__test_before_terminal_gate_entered(void);
-void tp_job__test_release_before_terminal_gate(void);
 
 /* gui_actions links the production shell reset seam; the trace is headless. */
 void gui_shell_reset_shown_result(void) {}
@@ -92,7 +88,8 @@ static void reset_public_action_state(void) {
 }
 
 void setUp(void) {
-    tp_scan__test_set_stat_error(0);
+    tp_scan__test_reset_all();
+    tp_job__test_reset_all();
     gui_actions_refresh_fingerprint_reset();
     (void)snprintf(s_save_path, sizeof s_save_path,
                    "%s/action-trace.ntpacker_project",
@@ -110,7 +107,8 @@ void setUp(void) {
 }
 
 void tearDown(void) {
-    tp_scan__test_set_stat_error(0);
+    tp_scan__test_reset_all();
+    tp_job__test_reset_all();
     gui_actions_refresh_fingerprint_reset();
     multi_sel_clear();
     gui_pack_shutdown();
@@ -903,6 +901,26 @@ void test_export_cancel_formatter_distinguishes_uncertain_partial_and_clean(void
     TEST_ASSERT_EQUAL_STRING("Export cancelled.", status);
 }
 
+void test_export_failure_formatter_warns_about_uncertain_publication(void) {
+    const gui_pack_result_info uncertain = {
+        .targets = 1,
+        .atlases_fail = 1,
+        .publication_uncertain = true,
+        .err = "intentional failure",
+    };
+    char status[256] = {0};
+    TEST_ASSERT_TRUE(
+        gui_pack_format_export_failed(&uncertain, status, sizeof status));
+    TEST_ASSERT_NOT_NULL(strstr(status, "Export failed"));
+    TEST_ASSERT_NOT_NULL(strstr(status, "output may be partially updated"));
+    TEST_ASSERT_NOT_NULL(strstr(status, "1 target"));
+    TEST_ASSERT_NOT_NULL(strstr(status, "1 atlas"));
+
+    const gui_pack_result_info certain = {0};
+    TEST_ASSERT_FALSE(
+        gui_pack_format_export_failed(&certain, status, sizeof status));
+}
+
 void test_late_export_cancel_keeps_completed_success_outcome(void) {
     TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_TRACE_TEST_DIR));
     tp_job__test_arm_before_terminal_gate();
@@ -981,6 +999,7 @@ int main(void) {
     RUN_TEST(test_refresh_retains_external_change_when_source_is_removed);
     RUN_TEST(
         test_export_cancel_formatter_distinguishes_uncertain_partial_and_clean);
+    RUN_TEST(test_export_failure_formatter_warns_about_uncertain_publication);
     RUN_TEST(test_late_export_cancel_keeps_completed_success_outcome);
     RUN_TEST(test_empty_export_surfaces_skipped_atlas_warning);
     return UNITY_END();

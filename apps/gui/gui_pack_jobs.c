@@ -49,6 +49,24 @@ bool gui_pack_format_export_cancelled(const gui_pack_result_info *info,
     return uncertain || partial;
 }
 
+bool gui_pack_format_export_failed(const gui_pack_result_info *info,
+                                   char *out, size_t cap) {
+    const bool uncertain = info && info->publication_uncertain;
+    if (out && cap > 0U) {
+        if (uncertain) {
+            (void)snprintf(
+                out, cap,
+                "Export failed; output may be partially updated. Exported %d "
+                "target(s); %d atlas(es) failed%s%s",
+                info->targets, info->atlases_fail,
+                info->err[0] ? " -- " : "", info->err);
+        } else {
+            out[0] = '\0';
+        }
+    }
+    return uncertain;
+}
+
 static tp_session *job_session(void) {
     return gui_project_session_for_jobs();
 }

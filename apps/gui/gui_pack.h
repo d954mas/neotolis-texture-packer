@@ -147,7 +147,7 @@ typedef struct {
     int atlases_fail;   /* export: atlases that failed */
     int atlases_skipped; /* export: atlases skipped for no usable input */
     bool partial_publication; /* cancelled export left committed outputs */
-    bool publication_uncertain; /* cancellation raced a writer boundary */
+    bool publication_uncertain; /* failed writer may have published artifacts */
     char err[256];      /* failure / first-error text */
     char note[128];     /* pack: notice text */
 } gui_pack_result_info;
@@ -156,6 +156,10 @@ typedef struct {
  * irrevocably published targets/files and should be presented as a warning. */
 bool gui_pack_format_export_cancelled(const gui_pack_result_info *info,
                                       char *out, size_t cap);
+/* Formats the uncertainty warning for a failed direct writer. Returns false
+ * when the failure has no known publication risk. */
+bool gui_pack_format_export_failed(const gui_pack_result_info *info,
+                                   char *out, size_t cap);
 
 /* Starts an async pack of `atlas_index`. false (fills err) if busy or the input can't assemble. */
 bool gui_pack_async_start(int atlas_index, char *err, size_t err_cap);

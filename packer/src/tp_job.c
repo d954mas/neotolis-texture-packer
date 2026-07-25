@@ -19,6 +19,9 @@
 #include "tp_core/tp_pack_hash.h"
 #include "tp_job_owner_internal.h"
 #include "tp_pack_priv.h"
+#ifdef TP_ENABLE_TEST_SEAMS
+#include "tp_test_gate.h"
+#endif
 
 typedef struct tp_job_export_atlas {
     int index;
@@ -70,93 +73,74 @@ typedef struct tp_live_job {
     tp_session_export_job_result export_result;
 } tp_live_job;
 
-static atomic_int s_before_terminal_gate_armed;
-static atomic_int s_before_terminal_gate_entered;
-static atomic_int s_before_terminal_gate_released;
-static atomic_int s_after_cancel_observation_gate_armed;
-static atomic_int s_after_cancel_observation_gate_entered;
-static atomic_int s_after_cancel_observation_gate_released;
-static atomic_int s_after_cancel_claim_gate_armed;
-static atomic_int s_after_cancel_claim_gate_entered;
-static atomic_int s_after_cancel_claim_gate_released;
+#ifdef TP_ENABLE_TEST_SEAMS
+static tp_test_gate s_before_terminal_gate = TP_TEST_GATE_INIT;
+static tp_test_gate s_after_cancel_observation_gate = TP_TEST_GATE_INIT;
+static tp_test_gate s_after_cancel_claim_gate = TP_TEST_GATE_INIT;
+
+static void job_test_gate_yield(void) {
+    thrd_yield();
+}
 
 void tp_job__test_arm_before_terminal_gate(void) {
-    atomic_store(&s_before_terminal_gate_entered, 0);
-    atomic_store(&s_before_terminal_gate_released, 0);
-    atomic_store(&s_before_terminal_gate_armed, 1);
+    tp_test_gate_arm(&s_before_terminal_gate, job_test_gate_yield);
 }
 
 bool tp_job__test_before_terminal_gate_entered(void) {
-    return atomic_load(&s_before_terminal_gate_entered) != 0;
+    return tp_test_gate_entered(&s_before_terminal_gate);
 }
 
 void tp_job__test_release_before_terminal_gate(void) {
-    atomic_store(&s_before_terminal_gate_armed, 0);
-    atomic_store(&s_before_terminal_gate_released, 1);
+    tp_test_gate_release(&s_before_terminal_gate, job_test_gate_yield);
 }
 
 static void job_before_terminal_gate_wait(void) {
-    if (atomic_load(&s_before_terminal_gate_armed) == 0) {
-        return;
-    }
-    atomic_store(&s_before_terminal_gate_armed, 0);
-    atomic_store(&s_before_terminal_gate_entered, 1);
-    while (atomic_load(&s_before_terminal_gate_released) == 0) {
-        thrd_yield();
-    }
+    tp_test_gate_wait(&s_before_terminal_gate, job_test_gate_yield);
 }
 
 void tp_job__test_arm_after_cancel_observation_gate(void) {
-    atomic_store(&s_after_cancel_observation_gate_entered, 0);
-    atomic_store(&s_after_cancel_observation_gate_released, 0);
-    atomic_store(&s_after_cancel_observation_gate_armed, 1);
+    tp_test_gate_arm(&s_after_cancel_observation_gate, job_test_gate_yield);
 }
 
 bool tp_job__test_after_cancel_observation_gate_entered(void) {
-    return atomic_load(&s_after_cancel_observation_gate_entered) != 0;
+    return tp_test_gate_entered(&s_after_cancel_observation_gate);
 }
 
 void tp_job__test_release_after_cancel_observation_gate(void) {
-    atomic_store(&s_after_cancel_observation_gate_armed, 0);
-    atomic_store(&s_after_cancel_observation_gate_released, 1);
+    tp_test_gate_release(&s_after_cancel_observation_gate,
+                         job_test_gate_yield);
 }
 
 static void job_after_cancel_observation_gate_wait(void) {
-    if (atomic_load(&s_after_cancel_observation_gate_armed) == 0) {
-        return;
-    }
-    atomic_store(&s_after_cancel_observation_gate_armed, 0);
-    atomic_store(&s_after_cancel_observation_gate_entered, 1);
-    while (atomic_load(&s_after_cancel_observation_gate_released) == 0) {
-        thrd_yield();
-    }
+    tp_test_gate_wait(&s_after_cancel_observation_gate, job_test_gate_yield);
 }
 
 void tp_job__test_arm_after_cancel_claim_gate(void) {
-    atomic_store(&s_after_cancel_claim_gate_entered, 0);
-    atomic_store(&s_after_cancel_claim_gate_released, 0);
-    atomic_store(&s_after_cancel_claim_gate_armed, 1);
+    tp_test_gate_arm(&s_after_cancel_claim_gate, job_test_gate_yield);
 }
 
 bool tp_job__test_after_cancel_claim_gate_entered(void) {
-    return atomic_load(&s_after_cancel_claim_gate_entered) != 0;
+    return tp_test_gate_entered(&s_after_cancel_claim_gate);
 }
 
 void tp_job__test_release_after_cancel_claim_gate(void) {
-    atomic_store(&s_after_cancel_claim_gate_armed, 0);
-    atomic_store(&s_after_cancel_claim_gate_released, 1);
+    tp_test_gate_release(&s_after_cancel_claim_gate, job_test_gate_yield);
 }
 
 static void job_after_cancel_claim_gate_wait(void) {
-    if (atomic_load(&s_after_cancel_claim_gate_armed) == 0) {
-        return;
-    }
-    atomic_store(&s_after_cancel_claim_gate_armed, 0);
-    atomic_store(&s_after_cancel_claim_gate_entered, 1);
-    while (atomic_load(&s_after_cancel_claim_gate_released) == 0) {
-        thrd_yield();
-    }
+    tp_test_gate_wait(&s_after_cancel_claim_gate, job_test_gate_yield);
 }
+
+void tp_job__test_reset_all(void) {
+    tp_test_gate_reset(&s_before_terminal_gate, job_test_gate_yield);
+    tp_test_gate_reset(&s_after_cancel_observation_gate, job_test_gate_yield);
+    tp_test_gate_reset(&s_after_cancel_claim_gate, job_test_gate_yield);
+}
+#else
+#define job_before_terminal_gate_wait() ((void)0)
+#define job_after_cancel_observation_gate_wait() ((void)0)
+#define job_after_cancel_claim_gate_wait() ((void)0)
+#endif
 
 static double job_now_ms(void) {
 #ifdef _WIN32
@@ -521,7 +505,7 @@ static int export_worker(void *context) {
     job->export_result.partial_publication =
         cancelled && job->export_result.targets > 0;
     job->export_result.publication_uncertain =
-        cancelled && job->failed_writer_may_have_published;
+        job->failed_writer_may_have_published;
     job->status =
         cancelled
             ? tp_error_set(&first_error, TP_STATUS_CANCELLED,

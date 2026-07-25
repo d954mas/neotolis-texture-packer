@@ -79,8 +79,8 @@ typedef struct tp_session_export_job_result {
     int atlases_skipped;
     /* True only when cancellation won after at least one target committed. */
     bool partial_publication;
-    /* True when cancellation followed a failed direct writer, whose API cannot
-     * prove that it left no partially published artifacts. */
+    /* True when a direct writer failed and its API cannot prove that it left no
+     * partially published artifacts, regardless of terminal cancellation. */
     bool publication_uncertain;
 } tp_session_export_job_result;
 

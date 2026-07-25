@@ -196,7 +196,18 @@ static void poll_async(void) {
             }
             break;
         case GUI_PACK_DONE_EXPORT_FAIL:
-            set_statusf_ex(STATUS_ERROR, "Exported %d target(s); %d atlas(es) failed -- %s", info.targets, info.atlases_fail, info.err);
+            {
+                char message[512];
+                if (gui_pack_format_export_failed(
+                        &info, message, sizeof message)) {
+                    set_status_ex(STATUS_ERROR, message);
+                } else {
+                    set_statusf_ex(
+                        STATUS_ERROR,
+                        "Exported %d target(s); %d atlas(es) failed -- %s",
+                        info.targets, info.atlases_fail, info.err);
+                }
+            }
             break;
         case GUI_PACK_DONE_EXPORT_CANCELLED:
             {

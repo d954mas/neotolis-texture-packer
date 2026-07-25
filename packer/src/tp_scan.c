@@ -2,7 +2,9 @@
 
 #include <errno.h>
 #include <limits.h>
+#ifdef TP_ENABLE_TEST_SEAMS
 #include <stdatomic.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,6 +13,9 @@
 #include "tp_core/tp_identity.h"
 #include "tp_core/tp_srckey.h"
 #include "tp_fs_internal.h"
+#ifdef TP_ENABLE_TEST_SEAMS
+#include "tp_test_gate.h"
+#endif
 
 // #region growable entry vector (scan-local)
 typedef struct scan_vec {
@@ -19,9 +24,9 @@ typedef struct scan_vec {
     int cap;
 } scan_vec;
 
-/* Test-only allocation seam. Production leaves it disabled (-1). Keeping the
- * seam in this module lets the atomic-result contract be swept without replacing
- * the process allocator. */
+#ifdef TP_ENABLE_TEST_SEAMS
+/* Test-only allocation seam. Keeping the seam in this module lets the
+ * atomic-result contract be swept without replacing the process allocator. */
 static _Thread_local int s_scan_alloc_fail = -1;
 static _Thread_local int s_scan_stat_error;
 static _Thread_local bool s_scan_sort_started;
@@ -53,58 +58,40 @@ static bool scan_should_fail_alloc(void) {
  * thread-local alloc-fail seam this is CROSS-thread (global atomics): it lets an
  * async-job test prove the folder walk runs on the pack WORKER -- start() returns
  * while the worker is parked here -- and drive a mid-walk cancel deterministically.
- * Production never arms it (the atomics stay zero), so scan_gate_wait() is a no-op. */
-static atomic_int s_scan_gate_armed;    /* 1 while a test wants the next walk to park */
-static atomic_int s_scan_gate_entered;  /* set by the walk once it reaches the gate */
-static atomic_int s_scan_gate_released; /* set by the test to let the walk proceed */
+ * This entire block is absent from production builds. */
+static tp_test_gate s_scan_gate = TP_TEST_GATE_INIT;
 
 void tp_scan__test_arm_walk_gate(void) {
-    atomic_store(&s_scan_gate_entered, 0);
-    atomic_store(&s_scan_gate_released, 0);
-    atomic_store(&s_scan_gate_armed, 1);
+    tp_test_gate_arm(&s_scan_gate, NULL);
 }
 
 bool tp_scan__test_walk_gate_entered(void) {
-    return atomic_load(&s_scan_gate_entered) != 0;
+    return tp_test_gate_entered(&s_scan_gate);
 }
 
 void tp_scan__test_release_walk_gate(void) {
-    /* Also disarm so a test that armed but never walked cannot park a later scan. */
-    atomic_store(&s_scan_gate_armed, 0);
-    atomic_store(&s_scan_gate_released, 1);
+    tp_test_gate_release(&s_scan_gate, NULL);
 }
 
 static void scan_gate_wait(void) {
-    if (atomic_load(&s_scan_gate_armed) == 0) {
-        return; /* production / not armed: no-op */
-    }
-    atomic_store(&s_scan_gate_armed, 0); /* one-shot */
-    atomic_store(&s_scan_gate_entered, 1);
-    /* Busy-wait: the test releases within microseconds; on a single core the
-     * scheduler quantum still breaks the spin. Reached only when a test armed it. */
-    while (atomic_load(&s_scan_gate_released) == 0) {
-    }
+    tp_test_gate_wait(&s_scan_gate, NULL);
 }
 
 /* Test-only post-entry gate. It parks after the first visited entry and counts
  * later visits so cancellation tests can distinguish an early stop from a walk
- * that completed before observing cancellation. Production never arms it. */
+ * that completed before observing cancellation. */
 static atomic_int s_scan_post_armed;    /* 1 = counting active for the armed scan */
-static atomic_int s_scan_post_park;     /* 1 = park at the FIRST counted entry (one-shot) */
-static atomic_int s_scan_post_entered;  /* set once the walk parks in the gate */
-static atomic_int s_scan_post_released; /* set by the test to unpark the walk */
+static tp_test_gate s_scan_post_gate = TP_TEST_GATE_INIT;
 static atomic_int s_scan_visited;       /* entries visited since the last arm */
 
 void tp_scan__test_arm_post_entry_gate(void) {
     atomic_store(&s_scan_visited, 0);
-    atomic_store(&s_scan_post_entered, 0);
-    atomic_store(&s_scan_post_released, 0);
-    atomic_store(&s_scan_post_park, 1);
     atomic_store(&s_scan_post_armed, 1);
+    tp_test_gate_arm(&s_scan_post_gate, NULL);
 }
 
 bool tp_scan__test_post_entry_gate_entered(void) {
-    return atomic_load(&s_scan_post_entered) != 0;
+    return tp_test_gate_entered(&s_scan_post_gate);
 }
 
 void tp_scan__test_release_post_entry_gate(void) {
@@ -112,8 +99,7 @@ void tp_scan__test_release_post_entry_gate(void) {
      * later scan); deliberately leave counting ARMED so that if the loop-top cancel poll
      * is ever deleted, the resumed walk keeps visiting and the counter climbs to N --
      * which is exactly what makes the mid-scan-cancel test fail. */
-    atomic_store(&s_scan_post_park, 0);
-    atomic_store(&s_scan_post_released, 1);
+    tp_test_gate_release(&s_scan_post_gate, NULL);
 }
 
 int tp_scan__test_visited_entries(void) {
@@ -122,18 +108,28 @@ int tp_scan__test_visited_entries(void) {
 
 static void scan_post_entry_gate(void) {
     if (atomic_load(&s_scan_post_armed) == 0) {
-        return; /* production / not armed: no-op (mirrors scan_gate_wait) */
+        return;
     }
     atomic_fetch_add(&s_scan_visited, 1);
-    if (atomic_load(&s_scan_post_park) == 0) {
-        return; /* park was one-shot on the first entry; keep only counting */
-    }
-    atomic_store(&s_scan_post_park, 0); /* one-shot */
-    atomic_store(&s_scan_post_entered, 1);
-    /* Busy-wait until the test releases (it requests cancel first, then releases). */
-    while (atomic_load(&s_scan_post_released) == 0) {
-    }
+    tp_test_gate_wait(&s_scan_post_gate, NULL);
 }
+
+void tp_scan__test_reset_all(void) {
+    s_scan_alloc_fail = -1;
+    s_scan_stat_error = 0;
+    s_scan_sort_started = false;
+    s_scan_sort_finished = false;
+
+    tp_test_gate_reset(&s_scan_gate, NULL);
+    tp_test_gate_reset(&s_scan_post_gate, NULL);
+    atomic_store(&s_scan_post_armed, 0);
+    atomic_store(&s_scan_visited, 0);
+}
+#else
+#define scan_should_fail_alloc() false
+#define scan_gate_wait() ((void)0)
+#define scan_post_entry_gate() ((void)0)
+#endif
 
 static void *scan_alloc(size_t size) {
     return scan_should_fail_alloc() ? NULL : malloc(size);
@@ -491,7 +487,9 @@ tp_status tp_scan_dir_cancellable(const char *abs_dir, tp_scan_result *out,
         scan_vec_drop(&v);
         return tp_error_set(err, TP_STATUS_CANCELLED, "directory scan cancelled");
     }
-    s_scan_sort_started = true; /* test observation seam; otherwise inert */
+#ifdef TP_ENABLE_TEST_SEAMS
+    s_scan_sort_started = true;
+#endif
     if (v.count > 1) {
         status = entry_sort_cancellable(&v, cancel, err);
         if (status != TP_STATUS_OK) {
@@ -499,7 +497,9 @@ tp_status tp_scan_dir_cancellable(const char *abs_dir, tp_scan_result *out,
             return status;
         }
     }
-    s_scan_sort_finished = true; /* test observation seam; otherwise inert */
+#ifdef TP_ENABLE_TEST_SEAMS
+    s_scan_sort_finished = true;
+#endif
     if (tp_cancel_requested(cancel)) {
         scan_vec_drop(&v);
         return tp_error_set(err, TP_STATUS_CANCELLED,
@@ -579,10 +579,12 @@ tp_status tp_scan_classify_checked(const char *abs, tp_scan_kind *out,
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "source classification path is empty");
     }
+#ifdef TP_ENABLE_TEST_SEAMS
     if (s_scan_stat_error != 0) {
         errno = s_scan_stat_error;
         return scan_errno_status(errno, "stat", abs, err);
     }
+#endif
     tp_fs_info info;
     if (!tp_fs_stat(abs, &info)) {
         const int error = errno;

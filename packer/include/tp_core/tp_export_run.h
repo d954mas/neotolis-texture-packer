@@ -126,8 +126,9 @@ typedef enum tp_export_writer_outcome {
  * bound this target's slice of the caller's notices list ([begin,end)); on a dry
  * run those notices come from tp_export_predict_loss (the writers never run), on a
  * wet run from the writers themselves. `pack_run` indexes report.runs (-1 if the
- * target failed before packing). `error` holds the failure reason when !ok (arena
- * string), NULL when ok. */
+ * target failed before packing). `error` holds the failure reason when !ok
+ * (normally an arena string, with a static fallback if copying that detail
+ * fails), NULL when ok. */
 typedef struct tp_export_report_target {
     const char *exporter_id;
     const char *out_path; /* resolved absolute output base (no extension) */

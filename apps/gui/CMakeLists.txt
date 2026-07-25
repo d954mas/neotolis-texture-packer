@@ -172,6 +172,7 @@ add_test(NAME tp_gui_shell_quote COMMAND tp_test_gui_shell_quote)
 # selection/action and project/session adapters without creating a window.
 add_executable(tp_test_gui_canonical_identity
     test_gui_canonical_identity.c
+    "${CMAKE_SOURCE_DIR}/packer/src/tp_job.c"
     gui_state.c
     gui_actions.c
     gui_actions_dialogs.c
@@ -211,6 +212,7 @@ target_include_directories(tp_test_gui_canonical_identity PRIVATE
     "${CMAKE_SOURCE_DIR}/apps/common"
 )
 target_compile_definitions(tp_test_gui_canonical_identity PRIVATE
+    TP_ENABLE_TEST_SEAMS=1
     TP_GUI_IDENTITY_TEST_DIR="${CMAKE_CURRENT_BINARY_DIR}/tp_gui_identity_tmp"
     TP_TEST_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
     _CRT_SECURE_NO_WARNINGS
@@ -227,6 +229,7 @@ add_test(NAME tp_gui_canonical_identity COMMAND tp_test_gui_canonical_identity)
 # harness + link set as the canonical-identity target -- no window, GL, or pack job.
 add_executable(tp_test_gui_view
     test_gui_view.c
+    "${CMAKE_SOURCE_DIR}/packer/src/tp_scan.c"
     gui_state.c
     gui_actions.c
     gui_actions_dialogs.c
@@ -266,6 +269,7 @@ target_include_directories(tp_test_gui_view PRIVATE
     "${CMAKE_SOURCE_DIR}/apps/common"
 )
 target_compile_definitions(tp_test_gui_view PRIVATE
+    TP_ENABLE_TEST_SEAMS=1
     TP_GUI_VIEW_TEST_DIR="${CMAKE_CURRENT_BINARY_DIR}/tp_gui_view_tmp"
     _CRT_SECURE_NO_WARNINGS
     NT_INTROSPECT_ENABLED=$<BOOL:${NT_INTROSPECT_ENABLED}>
@@ -282,6 +286,8 @@ add_test(NAME tp_gui_view COMMAND tp_test_gui_view)
 # another responsibility.
 add_executable(tp_test_gui_action_trace
     test_gui_action_trace.c
+    "${CMAKE_SOURCE_DIR}/packer/src/tp_scan.c"
+    "${CMAKE_SOURCE_DIR}/packer/src/tp_job.c"
     gui_state.c
     gui_actions.c
     gui_actions_dialogs.c
@@ -321,6 +327,7 @@ target_include_directories(tp_test_gui_action_trace PRIVATE
     "${CMAKE_SOURCE_DIR}/apps/common"
 )
 target_compile_definitions(tp_test_gui_action_trace PRIVATE
+    TP_ENABLE_TEST_SEAMS=1
     TP_GUI_TRACE_TEST_DIR="${CMAKE_CURRENT_BINARY_DIR}/tp_gui_trace_tmp"
     _CRT_SECURE_NO_WARNINGS
     NT_INTROSPECT_ENABLED=$<BOOL:${NT_INTROSPECT_ENABLED}>
