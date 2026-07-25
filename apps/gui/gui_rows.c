@@ -1015,6 +1015,15 @@ float gui_rows_left_section_cap(float panel_height, float ui_scale,
     return cap < max_cap ? cap : max_cap;
 }
 
+bool gui_rows_left_panel_has_usable_room(float panel_height, float ui_scale,
+                                         bool filter_visible) {
+    if (ui_scale <= 0.0F) {
+        ui_scale = 1.0F;
+    }
+    return gui_rows_left_section_cap(panel_height, ui_scale, filter_visible) >=
+           GUI_LEFT_ROW_H * ui_scale;
+}
+
 void gui_rows_sort_chip_click(row_sort_key clicked) {
     row_sort_key key = ROW_SORT_NAME;
     bool descending = false;

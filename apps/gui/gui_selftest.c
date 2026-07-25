@@ -3441,7 +3441,8 @@ void selftest_pre_frame(void) {
         /* Stable publication identity (req 4d): pack atlas index 1, then remove the
          * earlier atlas while the worker flies.  The survivor shifts to index 0;
          * completion must resolve its captured atlas ID instead of publishing into
-         * stale slot 1.  The structural edit also keeps the landed result stale. */
+         * stale slot 1. Removing a different atlas does not change the survivor's
+         * canonical pack_input_hash, so the landed result remains current. */
         g_ui_scale = 1.0F;
         g_nt_window.fb_width = 1280;
         g_nt_window.fb_height = 800;
@@ -3470,8 +3471,8 @@ void selftest_pre_frame(void) {
                           strcmp(survivor_result->atlas_name, "survivor") == 0 &&
                           gui_pack_result(1) == NULL &&
                       "SELFTEST: async result must follow the survivor atlas ID to index 0");
-            NT_ASSERT(gui_project_is_stale() &&
-                      "SELFTEST: shifted-atlas result must stay stale after model change");
+            NT_ASSERT(!gui_project_is_stale() &&
+                      "SELFTEST: unrelated atlas removal must not stale the survivor result");
             nt_log_info("SELFTEST: async result followed stable atlas id after index shift");
             s_st_phase = 15;
             s_st_pf = 0;

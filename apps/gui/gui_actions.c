@@ -390,9 +390,13 @@ static tp_status fp_collect(fp_entry **arr, int *count, int *cap,
     return TP_STATUS_OK;
 }
 
-static const fp_entry *fp_find(const fp_entry *arr, int n, const char *abs) {
+static const fp_entry *fp_find(const fp_entry *arr, int n,
+                               tp_id128 atlas_id, tp_id128 source_id,
+                               const char *abs) {
     for (int i = 0; i < n; i++) {
-        if (strcmp(arr[i].abs, abs) == 0) {
+        if (tp_id128_eq(arr[i].atlas_id, atlas_id) &&
+            tp_id128_eq(arr[i].source_id, source_id) &&
+            strcmp(arr[i].abs, abs) == 0) {
             return &arr[i];
         }
     }
@@ -524,6 +528,10 @@ static tp_status refresh_diff_core(int *out_added, int *out_removed,
         if (status != TP_STATUS_OK) {
             fp_free(current, current_count);
             fp_sources_free(current_sources, current_source_count);
+            gui_project_invalidate_sources();
+            if (out_sources_invalidated) {
+                *out_sources_invalidated = true;
+            }
             return status;
         }
         if (s_refresh_fingerprint_valid) {
@@ -574,7 +582,9 @@ static tp_status refresh_diff_core(int *out_added, int *out_removed,
     int changed = 0;
     int unavailable = 0;
     for (int i = 0; i < an; i++) {
-        const fp_entry *b = fp_find(before, bn, after[i].abs);
+        const fp_entry *b =
+            fp_find(before, bn, after[i].atlas_id, after[i].source_id,
+                    after[i].abs);
         if (after[i].size < 0) {
             unavailable++;
             if (b && b->size >= 0) {
@@ -587,7 +597,9 @@ static tp_status refresh_diff_core(int *out_added, int *out_removed,
         }
     }
     for (int i = 0; i < bn; i++) {
-        if (before[i].size >= 0 && !fp_find(after, an, before[i].abs)) {
+        if (before[i].size >= 0 &&
+            !fp_find(after, an, before[i].atlas_id, before[i].source_id,
+                     before[i].abs)) {
             removed++;
         }
     }

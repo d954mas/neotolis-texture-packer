@@ -203,6 +203,30 @@ file(WRITE "${_cli_output_resolution_project}"
 }
 ")
 
+# A valid source can still fail in the packer after report target slots have
+# been allocated.  The atlas-level structured error must survive that shape.
+set(_cli_pack_failure_project
+    "${CMAKE_CURRENT_BINARY_DIR}/cli-pack-failure.ntpacker_project")
+file(WRITE "${_cli_pack_failure_project}"
+"{
+  \"version\": 5,
+  \"atlases\": [{
+    \"id\": \"atlas_00000000000000000000000000000911\",
+    \"name\": \"pack-failure\",
+    \"max_size\": 1,
+    \"sources\": [{
+      \"id\": \"source_00000000000000000000000000000912\",
+      \"path\": \"${_td}/sprites\"
+    }],
+    \"targets\": [{
+      \"exporter_id\": \"json-neotolis\",
+      \"id\": \"target_00000000000000000000000000000913\",
+      \"out_path\": \"out/pack-failure.json\"
+    }]
+  }]
+}
+")
+
 # P1-05: exact schemas/payloads. Only elapsed time and the two known absolute
 # test roots are normalized; path policy and every suffix are asserted first.
 add_test(NAME cli_exact_payload_contract COMMAND ${CMAKE_COMMAND}
@@ -401,6 +425,14 @@ add_test(NAME cli_pack_output_resolution_failure COMMAND ${CMAKE_COMMAND}
     -DCHECKER=$<TARGET_FILE:cli_json_check>
     "-DCHECK_ARGS=pack targets_ok=0 targets_failed=0 error_id=out_of_bounds error_atlas=output-resolution error_contains=target-output note_contains=target-output"
     -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_pack_output_resolution.json
+    -P "${_run}")
+
+add_test(NAME cli_pack_failure_after_target_slots_is_structured COMMAND ${CMAKE_COMMAND}
+    -DEXE=$<TARGET_FILE:ntpacker> -DEXPECT=4
+    "-DARGS=pack ${_cli_pack_failure_project} --json --quiet"
+    -DCHECKER=$<TARGET_FILE:cli_json_check>
+    "-DCHECK_ARGS=pack targets_ok=0 targets_failed=1 error_id=invalid_argument error_atlas=pack-failure error_contains=max_size"
+    -DOUTFILE=${CMAKE_CURRENT_BINARY_DIR}/cli_pack_failure_after_targets.json
     -P "${_run}")
 
 # Atlas arena allocation failure remains machine-readable instead of degrading

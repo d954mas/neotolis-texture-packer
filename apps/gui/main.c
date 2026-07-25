@@ -749,17 +749,24 @@ static void frame(void) {
          * regions so panels read as docked, not floating cards. compute_panel_widths' overhead term mirrors
          * these values (root L/R padding 0 + two inter-column gaps of Su(2)). The permanent status bar row is
          * gone (owner: "странная панель"); messages now float as a pill over the canvas (declare_status_pill). */
+        const uint16_t root_row_gap = Su(2.0F);
         CLAY({.id = CLAY_ID("root"),
               .layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)},
                          .padding = {0, 0, 0, 0},
                          .layoutDirection = CLAY_TOP_TO_BOTTOM,
-                         .childGap = Su(2),
+                         .childGap = root_row_gap,
                          .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_TOP}},
               .backgroundColor = C_BG}) {
             declare_menubar(s_ctx);
             /* Below this the columns can't lay out without collapsing a clip/input box to 0 (empty-scissor
              * assert); skip the whole middle row rather than declare a degenerate subtree. */
-            const bool have_room = scale.logical_w >= S(280.0F) && scale.logical_h >= S(200.0F);
+            const float middle_height =
+                scale.logical_h - S(BASE_MENUBAR_H) - (float)root_row_gap;
+            const bool have_room =
+                scale.logical_w >= S(280.0F) &&
+                gui_rows_left_panel_has_usable_room(
+                    middle_height, g_ui_scale,
+                    s_filter_active || gui_rows_filter_active());
             CLAY({.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)}, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = Su(2), .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_TOP}}}) {
                 if (have_room) {
                     declare_left_panel(s_ctx);

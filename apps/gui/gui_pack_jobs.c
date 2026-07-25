@@ -102,6 +102,24 @@ static bool input_changed_since(tp_session_input_token token) {
                             tp_session_snapshot_input_token(snapshot), token);
 }
 
+static bool native_pack_input_changed_since(
+    const tp_session_pack_job_result *pack) {
+    if (!pack || tp_id128_is_nil(pack->pack_input_hash)) {
+        return !pack || input_changed_since(pack->input_token_at_start);
+    }
+    tp_session *session = job_session();
+    tp_id128 current_hash = tp_id128_nil();
+    tp_error error = {{0}};
+    if (!session ||
+        tp_session_pack_input_hash(session, pack->atlas_id, NULL,
+                                   &current_hash, &error) != TP_STATUS_OK) {
+        /* A failed current-hash probe cannot prove freshness. Preserve the
+         * conservative generation-token fallback and keep the result stale. */
+        return input_changed_since(pack->input_token_at_start);
+    }
+    return !tp_id128_eq(pack->pack_input_hash, current_hash);
+}
+
 bool gui_pack_init(const char *work_dir) {
     s_adapter.work_dir_ready = false;
     if (!gui_paths_copy_normalized(work_dir ? work_dir : ".",
@@ -248,8 +266,8 @@ gui_pack_done gui_pack_poll(gui_pack_result_info *out) {
                     out->atlas_index = atlas_index;
                     out->ms = result.elapsed_ms;
                     out->missing = result.pack.missing_sources;
-                    out->input_changed = input_changed_since(
-                        result.pack.input_token_at_start);
+                    out->input_changed =
+                        native_pack_input_changed_since(&result.pack);
                     if (result.pack.missing_sources > 0) {
                         (void)snprintf(out->note, sizeof out->note,
                                        "%d missing file(s) skipped",

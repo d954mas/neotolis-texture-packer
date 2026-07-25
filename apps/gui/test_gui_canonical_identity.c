@@ -29,6 +29,10 @@
 
 #include "unity.h"
 
+void tp_job__test_arm_before_terminal_gate(void);
+bool tp_job__test_before_terminal_gate_entered(void);
+void tp_job__test_release_before_terminal_gate(void);
+
 static char s_left_dir[512];
 static char s_right_dir[512];
 static char s_left_file[512];
@@ -312,6 +316,52 @@ void test_preview_result_rejects_source_refresh_after_job_capture(void) {
     TEST_ASSERT_EQUAL_INT(GUI_PACK_DONE_PREVIEW_OK, done);
     TEST_ASSERT_TRUE(info.input_changed);
     TEST_ASSERT_NULL(gui_pack_preview_result(0));
+}
+
+void test_native_pack_ignores_unrelated_atlas_edit_during_job(void) {
+    const tp_id128 packed_atlas_id = add_coin_source_to_atlas(0);
+    TEST_ASSERT_EQUAL_INT(1, gui_project_add_atlas());
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *other =
+        tp_session_snapshot_atlas_at(snapshot, 1);
+    TEST_ASSERT_NOT_NULL(other);
+    const tp_id128 other_atlas_id = other->id;
+
+    TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_IDENTITY_TEST_DIR));
+    tp_job__test_arm_before_terminal_gate();
+    char error[256] = {0};
+    TEST_ASSERT_TRUE(gui_pack_async_start(0, error, sizeof error));
+    bool gated = false;
+    for (int i = 0; i < 5000; ++i) {
+        if (tp_job__test_before_terminal_gate_entered()) {
+            gated = true;
+            break;
+        }
+        nt_time_sleep(0.001);
+    }
+    TEST_ASSERT_TRUE(gated);
+
+    snapshot = gui_project_snapshot();
+    TEST_ASSERT_TRUE(gui_project_set_atlas_name(
+        other_atlas_id, tp_session_snapshot_revision(snapshot),
+        "unrelated-edit"));
+    tp_job__test_release_before_terminal_gate();
+
+    gui_pack_result_info info = {0};
+    gui_pack_done done = GUI_PACK_DONE_NONE;
+    for (int i = 0; i < 5000 && done == GUI_PACK_DONE_NONE; ++i) {
+        done = gui_pack_poll(&info);
+        if (done == GUI_PACK_DONE_NONE) {
+            nt_time_sleep(0.001);
+        }
+    }
+    TEST_ASSERT_EQUAL_INT(GUI_PACK_DONE_PACK_OK, done);
+    TEST_ASSERT_FALSE(info.input_changed);
+    snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *packed =
+        tp_session_snapshot_atlas_by_id(snapshot, packed_atlas_id);
+    TEST_ASSERT_NOT_NULL(packed);
+    TEST_ASSERT_NOT_NULL(gui_pack_result(0));
 }
 
 void test_long_sprite_keys_with_shared_prefix_never_coalesce(void) {
@@ -820,6 +870,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_sprite_edit_rejects_genuinely_stale_captured_revision);
     RUN_TEST(test_delayed_animation_context_ref_never_retargets_after_index_shift);
     RUN_TEST(test_preview_result_rejects_source_refresh_after_job_capture);
+    RUN_TEST(test_native_pack_ignores_unrelated_atlas_edit_during_job);
     RUN_TEST(test_long_sprite_keys_with_shared_prefix_never_coalesce);
     RUN_TEST(test_oversized_names_cannot_enter_a_truncating_editor);
     RUN_TEST(test_recovery_entry_keeps_core_path_capacity);

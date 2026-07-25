@@ -627,7 +627,9 @@ int cmd_pack(const char *project_path, const char *opt_atlas, const char *opt_ta
                                          : tp_status_str(run_status));
                     note = note_buffer;
                     had_export_fail = true;
-                } else if (run_status != TP_STATUS_OK && report.target_count == 0) {
+                } else if (run_status != TP_STATUS_OK &&
+                           (report.pack_failed ||
+                            report.target_count == 0)) {
                     atlas_error_status = run_status;
                     if (report.pack_failed) {
                         atlas_error = run_error;

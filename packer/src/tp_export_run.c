@@ -29,6 +29,7 @@ struct tp_export_snapshot_job {
 };
 
 static _Thread_local int s_report_alloc_fail = -1;
+static _Thread_local bool s_fail_next_error_copy;
 static atomic_int s_before_write_gate_armed;
 static atomic_int s_before_write_gate_entered;
 static atomic_int s_before_write_gate_released;
@@ -38,6 +39,10 @@ static atomic_int s_after_terminal_boundary_gate_released;
 
 void tp_export_run__test_set_report_alloc_fail(int nth) {
     s_report_alloc_fail = nth;
+}
+
+void tp_export_run__test_fail_next_error_copy(void) {
+    s_fail_next_error_copy = true;
 }
 
 void tp_export_run__test_arm_before_write_gate(void) {
@@ -113,6 +118,14 @@ static void *report_alloc(tp_arena *arena, size_t size) {
         s_report_alloc_fail--;
     }
     return tp_arena_alloc(arena, size);
+}
+
+static char *report_error_strdup(tp_arena *arena, const char *text) {
+    if (s_fail_next_error_copy) {
+        s_fail_next_error_copy = false;
+        return NULL;
+    }
+    return tp_arena_strdup(arena, text);
 }
 
 static bool run_path_is_absolute(const char *path) {
@@ -682,6 +695,11 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
             return st;
         }
         st = exp->write(prep, &exp->caps, out_bases[t], notices, err);
+        if (rt) {
+            rt->writer_outcome = st == TP_STATUS_OK
+                                     ? TP_EXPORT_WRITER_SUCCEEDED
+                                     : TP_EXPORT_WRITER_FAILED;
+        }
         if (t == last_writer_target && opts && opts->terminal_boundary &&
             opts->terminal_boundary(opts->terminal_boundary_context)) {
             export_after_terminal_boundary_gate_wait();
@@ -695,7 +713,9 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
             }
             if (rt) {
                 rt->ok = false;
-                rt->error = tp_arena_strdup(arena, err && err->msg[0] ? err->msg : "export write failed");
+                rt->error = report_error_strdup(
+                    arena,
+                    err && err->msg[0] ? err->msg : "export write failed");
             }
             if (first_fail == TP_STATUS_OK) {
                 first_fail = st;

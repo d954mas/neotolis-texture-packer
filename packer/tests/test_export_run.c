@@ -47,9 +47,11 @@ static char g_C[1024]; /* test-norot base    */
 static tp_exporter g_nopivot;
 static tp_exporter g_norot;
 static tp_exporter g_list_error;
+static tp_exporter g_write_error;
 static int g_list_error_write_calls;
 
 void tp_export_run__test_set_report_alloc_fail(int nth);
+void tp_export_run__test_fail_next_error_copy(void);
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -81,6 +83,19 @@ static tp_status list_error_outputs(const tp_export_prepared *prep, const char *
     (void)sink;
     (void)ud;
     return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "test exporter output path overflow");
+}
+
+static tp_status write_error_write(const tp_export_prepared *prep,
+                                   const tp_export_caps *caps,
+                                   const char *out_path_base,
+                                   tp_export_notices *notices,
+                                   tp_error *err) {
+    (void)prep;
+    (void)caps;
+    (void)out_path_base;
+    (void)notices;
+    return tp_error_set(err, TP_STATUS_PATH_RESOLVE_FAILED,
+                        "test writer failed after its publication attempt");
 }
 
 static cJSON *load_json(const char *base) {
@@ -464,9 +479,21 @@ static bool setup_all(const char *dir) {
                                           .aliases = true},
                                  .write = list_error_write,
                                  .list_outputs = list_error_outputs};
+    g_write_error = (tp_exporter){.id = "test-write-error",
+                                  .display_name = "test write error",
+                                  .extension = "bad",
+                                  .caps = {.rotate90 = true,
+                                           .flips = true,
+                                           .polygons = true,
+                                           .pivot = true,
+                                           .slice9 = true,
+                                           .multipage = true,
+                                           .aliases = true},
+                                  .write = write_error_write};
     if (tp_exporter_register(&g_nopivot) != TP_STATUS_OK ||
         tp_exporter_register(&g_norot) != TP_STATUS_OK ||
-        tp_exporter_register(&g_list_error) != TP_STATUS_OK) {
+        tp_exporter_register(&g_list_error) != TP_STATUS_OK ||
+        tp_exporter_register(&g_write_error) != TP_STATUS_OK) {
         return false;
     }
 
@@ -775,11 +802,59 @@ static void test_custom_output_listing_failure_prevents_wet_write_and_matches_dr
         TEST_ASSERT_EQUAL_INT(1, report.target_count);
         TEST_ASSERT_FALSE(report.targets[0].ok);
         TEST_ASSERT_EQUAL_STRING("test exporter output path overflow", report.targets[0].error);
+        TEST_ASSERT_EQUAL_INT(TP_EXPORT_WRITER_NOT_ATTEMPTED,
+                              report.targets[0].writer_outcome);
         tp_export_notices_free(&notices);
         tp_arena_destroy(arena);
     }
     TEST_ASSERT_EQUAL_INT(0, g_list_error_write_calls);
     tp_project_destroy(proj);
+}
+
+static void test_failed_writer_outcome_does_not_depend_on_error_copy(void) {
+    tp_pack_sprite_desc sprite = {
+        .name = "wide",
+        .rgba = g_wide,
+        .w = 120,
+        .h = 24,
+        .origin_x = 0.5F,
+        .origin_y = 0.5F,
+    };
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    tp_project_atlas *atlas = tp_project_get_atlas(project, 0);
+    atlas->shape = 0;
+    atlas->allow_transform = false;
+    atlas->power_of_two = false;
+    atlas->alpha_threshold = 1;
+    atlas->max_size = 256;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_target(atlas, "test-write-error", g_dir, NULL));
+
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_export_report report;
+    memset(&report, 0, sizeof report);
+    const tp_export_run_opts opts = {.report = &report};
+    tp_export_notices notices;
+    tp_export_notices_init(&notices);
+    tp_error error = {{0}};
+
+    tp_export_run__test_fail_next_error_copy();
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_PATH_RESOLVE_FAILED,
+        tp_export_run_ex(project, 0, &sprite, 1, g_dir, arena, &notices,
+                         NULL, &opts, &error));
+    TEST_ASSERT_EQUAL_INT(1, report.target_count);
+    TEST_ASSERT_FALSE(report.targets[0].ok);
+    TEST_ASSERT_NULL(report.targets[0].error);
+    TEST_ASSERT_EQUAL_INT(TP_EXPORT_WRITER_FAILED,
+                          report.targets[0].writer_outcome);
+
+    tp_export_notices_free(&notices);
+    tp_arena_destroy(arena);
+    tp_project_destroy(project);
 }
 
 /* Snapshot input admission is complete before target output paths are resolved.
@@ -1116,6 +1191,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_dry_run);
     RUN_TEST(test_dry_run_rejects_the_same_output_path_overflow_as_wet_export);
     RUN_TEST(test_custom_output_listing_failure_prevents_wet_write_and_matches_dry_run);
+    RUN_TEST(test_failed_writer_outcome_does_not_depend_on_error_copy);
     RUN_TEST(test_snapshot_report_marks_nonempty_input_ready_before_output_resolution);
     RUN_TEST(test_report_marks_pre_target_setup_failure_as_pack_failed);
     RUN_TEST(test_report_page_oom_leaves_no_partial_runs);

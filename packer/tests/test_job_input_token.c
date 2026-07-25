@@ -59,6 +59,7 @@ void tp_export_run__test_release_before_write_gate(void);
 void tp_export_run__test_arm_after_terminal_boundary_gate(void);
 bool tp_export_run__test_after_terminal_boundary_gate_entered(void);
 void tp_export_run__test_release_after_terminal_boundary_gate(void);
+void tp_export_run__test_fail_next_error_copy(void);
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -510,6 +511,7 @@ static tp_status final_cancel_partial_failure_write(
     tp_export_run__test_release_before_write_gate();
     s_final_writer_cancel_status = tp_session_job_cancel(
         s_final_writer_cancel_session, &s_final_writer_cancel_error);
+    tp_export_run__test_fail_next_error_copy();
     return status;
 }
 
@@ -1541,7 +1543,7 @@ void test_export_final_failed_writer_cancel_reports_uncertain_publication(void) 
     TEST_ASSERT_EQUAL_INT(1, result.export_result.atlases_failed);
     TEST_ASSERT_NOT_NULL(strstr(
         result.export_result.first_error,
-        "intentional partial publication failure"));
+        "export writer failed"));
 
     tp_session_job_result_destroy(&result);
     tp_session_destroy(session);

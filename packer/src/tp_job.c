@@ -439,17 +439,24 @@ static int export_worker(void *context) {
                   job->export_job, atlas->index, arena, &notices, &report,
                   &runs, NULL, &missing, &cancel, &error)
             : TP_STATUS_OOM;
-        const char *writer_error = NULL;
+        const char *target_error = NULL;
+        bool writer_failed = false;
         for (int target = 0; target < report.target_count; ++target) {
             if (report.targets[target].ok) {
                 job->export_result.targets++;
                 job->export_result.files +=
                     report.targets[target].written_file_count;
-            } else if (!writer_error && report.targets[target].error) {
-                writer_error = report.targets[target].error;
+            } else {
+                writer_failed =
+                    writer_failed ||
+                    report.targets[target].writer_outcome ==
+                        TP_EXPORT_WRITER_FAILED;
+                if (!target_error && report.targets[target].error) {
+                    target_error = report.targets[target].error;
+                }
             }
         }
-        if (writer_error) {
+        if (writer_failed) {
             job->failed_writer_may_have_published = true;
         }
         job->export_result.notices += notices.count;
@@ -457,7 +464,7 @@ static int export_worker(void *context) {
             job->cancellation_owned_terminal ||
             (status == TP_STATUS_CANCELLED && pack_job_cancel_requested(job));
         if (cancellation_owns_atlas) {
-            if (writer_error) {
+            if (target_error || writer_failed) {
                 job->export_result.atlases_failed++;
                 if (!job->export_result.first_error[0]) {
                     tp_export_snapshot_atlas_info info;
@@ -467,7 +474,9 @@ static int export_worker(void *context) {
                     (void)snprintf(job->export_result.first_error,
                                    sizeof job->export_result.first_error,
                                    "%s: %s", info.name ? info.name : "?",
-                                   writer_error);
+                                   target_error
+                                       ? target_error
+                                       : "export writer failed after publication attempt");
                 }
             }
             tp_export_notices_free(&notices);

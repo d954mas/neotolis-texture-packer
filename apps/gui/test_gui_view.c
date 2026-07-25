@@ -1236,6 +1236,34 @@ void test_left_section_caps_preserve_sprite_vlist_at_short_heights(void) {
     assert_short_panel_keeps_sprite_rows(699.0F, 1.5F, true);
 }
 
+/* 25. The shell must not declare the left panel at a height where its bounded
+ *     atlas/animation scrollers collapse to zero. The room gate consumes the
+ *     same panel budget as the cap and admits only heights with one full row in
+ *     both bounded sections. */
+void test_left_panel_room_gate_rejects_zero_height_scrollers(void) {
+    static const float old_main_panel_heights[] = {166.0F, 216.0F, 266.0F};
+    for (size_t i = 0;
+         i < sizeof old_main_panel_heights / sizeof old_main_panel_heights[0];
+         ++i) {
+        const float panel_height = old_main_panel_heights[i];
+        TEST_ASSERT_TRUE(
+            gui_rows_left_section_cap(panel_height, 1.0F, true) == 0.0F);
+        TEST_ASSERT_FALSE(
+            gui_rows_left_panel_has_usable_room(panel_height, 1.0F, true));
+    }
+
+    const gui_left_layout_budget budget =
+        gui_left_layout_budget_make(1.0F, true);
+    const float one_row_panel_height =
+        budget.padding + budget.fixed_chrome + budget.gaps +
+        budget.sprite_min + 2.0F * GUI_LEFT_ROW_H;
+    TEST_ASSERT_TRUE(gui_rows_left_panel_has_usable_room(
+        one_row_panel_height, 1.0F, true));
+    TEST_ASSERT_TRUE(gui_rows_left_section_cap(
+                         one_row_panel_height, 1.0F, true) >=
+                     GUI_LEFT_ROW_H);
+}
+
 /* 25. nt_ui_vlist recycles a bounded id ring by VIEW slot. An engine-level
  *     double-click is therefore only actionable when the prior pressed row's
  *     canonical {source_id, source_key} is still the same after a view remap. */
@@ -1751,6 +1779,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_view_oom_fallback_clears_focus_and_anchor);
     RUN_TEST(test_view_filter_finds_long_rename_beyond_label);
     RUN_TEST(test_left_section_caps_preserve_sprite_vlist_at_short_heights);
+    RUN_TEST(test_left_panel_room_gate_rejects_zero_height_scrollers);
     RUN_TEST(test_recycled_view_id_double_click_requires_same_canonical_row);
     RUN_TEST(test_focus_scroll_top_ignores_overscan_rows);
     RUN_TEST(test_view_focus_returns_when_selected_row_is_revealed);

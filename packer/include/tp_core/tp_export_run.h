@@ -112,6 +112,12 @@ typedef struct tp_export_report_run {
     int sprite_count; /* placed sprites in this run (original placements + aliases) */
 } tp_export_report_run;
 
+typedef enum tp_export_writer_outcome {
+    TP_EXPORT_WRITER_NOT_ATTEMPTED = 0,
+    TP_EXPORT_WRITER_SUCCEEDED,
+    TP_EXPORT_WRITER_FAILED
+} tp_export_writer_outcome;
+
 /* One ENABLED target's outcome. `written_files` are the absolute paths its writer
  * produced (NULL/empty when it failed, and ALWAYS empty on a dry run -- see
  * `would_write`). `would_write` is populated only on a DRY run: the paths the
@@ -133,6 +139,10 @@ typedef struct tp_export_report_target {
     int notice_begin;
     int notice_end;
     const char *error;
+    /* Typed independently from the optional arena-owned error string. Phase-one,
+     * output-listing, dry-run, and cancellation-before-write paths remain
+     * NOT_ATTEMPTED. */
+    tp_export_writer_outcome writer_outcome;
     bool ok;
 } tp_export_report_target;
 

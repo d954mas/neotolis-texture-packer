@@ -430,6 +430,45 @@ void test_refresh_reports_source_stat_failure(void) {
     tp_scan__test_set_stat_error(0);
 }
 
+void test_first_refresh_stat_failure_invalidates_runtime_and_preview(void) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+
+    char source_path[1200];
+    TEST_ASSERT_TRUE(snprintf(source_path, sizeof source_path,
+                              "%s/first-refresh-unreadable.png",
+                              TP_GUI_TRACE_TEST_DIR) > 0);
+    FILE *source = fopen(source_path, "wb");
+    TEST_ASSERT_NOT_NULL(source);
+    TEST_ASSERT_EQUAL_size_t(1U, fwrite("x", 1U, 1U, source));
+    TEST_ASSERT_EQUAL_INT(0, fclose(source));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_ADD_ADDED,
+        gui_project_add_source_kind(
+            atlas->id, tp_session_snapshot_revision(snapshot), source_path,
+            TP_SOURCE_KIND_FILE));
+
+    gui_project_mark_packed();
+    TEST_ASSERT_FALSE(gui_project_is_stale());
+    const uint64_t source_generation_before =
+        tp_session_snapshot_source_generation(gui_project_snapshot());
+
+    tp_scan__test_set_stat_error(EACCES);
+    s_pending_refresh = true;
+    apply_pending();
+    tp_scan__test_set_stat_error(0);
+
+    TEST_ASSERT_TRUE(gui_project_is_stale());
+    TEST_ASSERT_TRUE(
+        tp_session_snapshot_source_generation(gui_project_snapshot()) >
+        source_generation_before);
+    TEST_ASSERT_EQUAL_INT(STATUS_WARNING, s_status_sev);
+    TEST_ASSERT_NOT_NULL(strstr(s_status, "Refresh warning:"));
+    TEST_ASSERT_EQUAL_INT(0, remove(source_path));
+}
+
 void test_refresh_modified_file_reports_changed_from_last_success(void) {
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     const tp_snapshot_atlas *atlas = tp_session_snapshot_atlas_at(snapshot, 0);
@@ -641,6 +680,56 @@ void test_refresh_ignores_source_membership_transactions(void) {
 
     TEST_ASSERT_EQUAL_INT(0, remove(first_path));
     TEST_ASSERT_EQUAL_INT(0, remove(second_path));
+}
+
+void test_refresh_same_path_memberships_do_not_double_count_change(void) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *first_atlas =
+        tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(first_atlas);
+
+    char source_path[1200];
+    TEST_ASSERT_TRUE(snprintf(source_path, sizeof source_path,
+                              "%s/shared-membership.png",
+                              TP_GUI_TRACE_TEST_DIR) > 0);
+    FILE *source = fopen(source_path, "wb");
+    TEST_ASSERT_NOT_NULL(source);
+    TEST_ASSERT_EQUAL_size_t(1U, fwrite("a", 1U, 1U, source));
+    TEST_ASSERT_EQUAL_INT(0, fclose(source));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_ADD_ADDED,
+        gui_project_add_source_kind(
+            first_atlas->id, tp_session_snapshot_revision(snapshot),
+            source_path, TP_SOURCE_KIND_FILE));
+    TEST_ASSERT_TRUE(
+        gui_actions_refresh_diff_headless(NULL, NULL, NULL));
+
+    source = fopen(source_path, "wb");
+    TEST_ASSERT_NOT_NULL(source);
+    TEST_ASSERT_EQUAL_size_t(
+        7U, fwrite("changed", 1U, 7U, source));
+    TEST_ASSERT_EQUAL_INT(0, fclose(source));
+
+    TEST_ASSERT_EQUAL_INT(1, gui_project_add_atlas());
+    snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *second_atlas =
+        tp_session_snapshot_atlas_at(snapshot, 1);
+    TEST_ASSERT_NOT_NULL(second_atlas);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_ADD_ADDED,
+        gui_project_add_source_kind(
+            second_atlas->id, tp_session_snapshot_revision(snapshot),
+            source_path, TP_SOURCE_KIND_FILE));
+
+    int added = -1;
+    int removed = -1;
+    int changed = -1;
+    TEST_ASSERT_TRUE(
+        gui_actions_refresh_diff_headless(&added, &removed, &changed));
+    TEST_ASSERT_EQUAL_INT(0, added);
+    TEST_ASSERT_EQUAL_INT(0, removed);
+    TEST_ASSERT_EQUAL_INT(1, changed);
+    TEST_ASSERT_EQUAL_INT(0, remove(source_path));
 }
 
 void test_refresh_retains_external_change_when_source_is_added(void) {
@@ -878,12 +967,16 @@ int main(void) {
     RUN_TEST(test_recovery_decision_runs_next_frame_and_failure_keeps_row);
     RUN_TEST(test_canvas_buffer_readiness_requires_every_gpu_handle);
     RUN_TEST(test_refresh_reports_source_stat_failure);
+    RUN_TEST(
+        test_first_refresh_stat_failure_invalidates_runtime_and_preview);
     RUN_TEST(test_refresh_modified_file_reports_changed_from_last_success);
     RUN_TEST(
         test_refresh_deleted_file_invalidates_preview_without_model_mutation);
     RUN_TEST(test_refresh_unreadable_source_warns_without_model_mutation);
     RUN_TEST(test_refresh_fingerprint_resets_when_session_is_replaced);
     RUN_TEST(test_refresh_ignores_source_membership_transactions);
+    RUN_TEST(
+        test_refresh_same_path_memberships_do_not_double_count_change);
     RUN_TEST(test_refresh_retains_external_change_when_source_is_added);
     RUN_TEST(test_refresh_retains_external_change_when_source_is_removed);
     RUN_TEST(

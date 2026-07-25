@@ -129,6 +129,8 @@ void gui_rows_get_sort(row_sort_key *key, bool *descending, bool *warn_first);
  * production and headless tests exercise one implementation. */
 float gui_rows_left_section_cap(float panel_height, float ui_scale,
                                 bool filter_visible);
+bool gui_rows_left_panel_has_usable_room(float panel_height, float ui_scale,
+                                         bool filter_visible);
 void gui_rows_sort_chip_click(row_sort_key clicked);
 
 /* Returns the row that should become the viewport top to make `focus_row`
