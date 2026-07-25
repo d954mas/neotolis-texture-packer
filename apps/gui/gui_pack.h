@@ -141,13 +141,21 @@ typedef struct {
     bool input_changed; /* pack: model/source token differs -> keep preview stale */
     int missing;        /* pack: skipped-missing-source count */
     int targets;        /* export: enabled targets written */
+    int files;          /* export: files committed by successful targets */
     int notices;        /* export: metadata-loss notices */
     int atlases_ok;     /* export: atlases exported OK */
     int atlases_fail;   /* export: atlases that failed */
     int atlases_skipped; /* export: atlases skipped for no usable input */
+    bool partial_publication; /* cancelled export left committed outputs */
+    bool publication_uncertain; /* cancellation raced a writer boundary */
     char err[256];      /* failure / first-error text */
     char note[128];     /* pack: notice text */
 } gui_pack_result_info;
+
+/* Formats a typed Export cancellation. Returns true when the message reports
+ * irrevocably published targets/files and should be presented as a warning. */
+bool gui_pack_format_export_cancelled(const gui_pack_result_info *info,
+                                      char *out, size_t cap);
 
 /* Starts an async pack of `atlas_index`. false (fills err) if busy or the input can't assemble. */
 bool gui_pack_async_start(int atlas_index, char *err, size_t err_cap);

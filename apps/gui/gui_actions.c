@@ -157,16 +157,28 @@ void do_redo(void) {
  * size==-1 so a vanish/restore reads as removed/added. */
 typedef struct fp_entry {
     char *abs;
+    tp_id128 atlas_id;
+    tp_id128 source_id;
     long long size;
     long long mtime;
 } fp_entry;
 
+typedef struct fp_source {
+    tp_id128 atlas_id;
+    tp_id128 source_id;
+    char *abs;
+} fp_source;
+
 static fp_entry *s_refresh_fingerprint;
 static int s_refresh_fingerprint_count;
+static fp_source *s_refresh_sources;
+static int s_refresh_source_count;
 static bool s_refresh_fingerprint_valid;
 static const tp_session *s_refresh_fingerprint_session;
 static tp_id128 s_refresh_membership_hash;
 static tp_status fp_collect(fp_entry **arr, int *count, int *cap,
+                            fp_source **sources, int *source_count,
+                            int *source_cap,
                             tp_error *error);
 
 static void fp_free(fp_entry *entries, int count) {
@@ -176,10 +188,20 @@ static void fp_free(fp_entry *entries, int count) {
     free(entries);
 }
 
+static void fp_sources_free(fp_source *sources, int count) {
+    for (int i = 0; i < count; ++i) {
+        free(sources[i].abs);
+    }
+    free(sources);
+}
+
 void gui_actions_refresh_fingerprint_reset(void) {
     fp_free(s_refresh_fingerprint, s_refresh_fingerprint_count);
+    fp_sources_free(s_refresh_sources, s_refresh_source_count);
     s_refresh_fingerprint = NULL;
     s_refresh_fingerprint_count = 0;
+    s_refresh_sources = NULL;
+    s_refresh_source_count = 0;
     s_refresh_fingerprint_valid = false;
     s_refresh_fingerprint_session = NULL;
     s_refresh_membership_hash = tp_id128_nil();
@@ -228,6 +250,7 @@ static tp_id128 fp_membership_hash(void) {
 }
 
 static tp_status fp_push(fp_entry **arr, int *count, int *cap,
+                         tp_id128 atlas_id, tp_id128 source_id,
                          const char *abs, long long size, long long mtime,
                          tp_error *error) {
     if (*count == *cap) {
@@ -254,12 +277,47 @@ static tp_status fp_push(fp_entry **arr, int *count, int *cap,
         return tp_error_set(error, TP_STATUS_OOM,
                             "refresh fingerprint path allocation failed");
     }
-    (*arr)[*count] = (fp_entry){path, size, mtime};
+    (*arr)[*count] =
+        (fp_entry){path, atlas_id, source_id, size, mtime};
+    (*count)++;
+    return TP_STATUS_OK;
+}
+
+static tp_status fp_source_push(fp_source **arr, int *count, int *cap,
+                                tp_id128 atlas_id, tp_id128 source_id,
+                                const char *abs, tp_error *error) {
+    if (*count == *cap) {
+        if (*cap > INT_MAX / 2) {
+            return tp_error_set(error, TP_STATUS_OUT_OF_BOUNDS,
+                                "refresh has too many sources");
+        }
+        const int nc = *cap ? *cap * 2 : 16;
+        if ((size_t)nc > SIZE_MAX / sizeof **arr) {
+            return tp_error_set(error, TP_STATUS_OUT_OF_BOUNDS,
+                                "refresh source table overflows size_t");
+        }
+        fp_source *grown =
+            (fp_source *)realloc(*arr, (size_t)nc * sizeof *grown);
+        if (!grown) {
+            return tp_error_set(error, TP_STATUS_OOM,
+                                "refresh source table allocation failed");
+        }
+        *arr = grown;
+        *cap = nc;
+    }
+    char *path = gui_actions__strdup(abs);
+    if (!path) {
+        return tp_error_set(error, TP_STATUS_OOM,
+                            "refresh source path allocation failed");
+    }
+    (*arr)[*count] = (fp_source){atlas_id, source_id, path};
     (*count)++;
     return TP_STATUS_OK;
 }
 
 static tp_status fp_collect(fp_entry **arr, int *count, int *cap,
+                            fp_source **sources, int *source_count,
+                            int *source_cap,
                             tp_error *error) {
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     const int atlas_count = snapshot ? tp_session_snapshot_atlas_count(snapshot) : 0;
@@ -278,11 +336,17 @@ static tp_status fp_collect(fp_entry **arr, int *count, int *cap,
             if (status != TP_STATUS_OK) {
                 return status;
             }
+            status = fp_source_push(sources, source_count, source_cap, a->id,
+                                    source->id, abs, error);
+            if (status != TP_STATUS_OK) {
+                return status;
+            }
             tp_scan_kind kind = TP_SCAN_KIND_MISSING;
             status = tp_scan_classify_checked(abs, &kind, error);
             if (status == TP_STATUS_NOT_FOUND &&
                 kind == TP_SCAN_KIND_MISSING) {
-                status = fp_push(arr, count, cap, abs, -1, -1, error);
+                status = fp_push(arr, count, cap, a->id, source->id, abs, -1,
+                                 -1, error);
                 if (status != TP_STATUS_OK) {
                     return status;
                 }
@@ -299,7 +363,8 @@ static tp_status fp_collect(fp_entry **arr, int *count, int *cap,
                 }
                 for (int ci = 0; ci < sc->count; ci++) {
                     tp_status push_status = fp_push(
-                        arr, count, cap, sc->entries[ci].abs,
+                        arr, count, cap, a->id, source->id,
+                        sc->entries[ci].abs,
                         sc->entries[ci].size, sc->entries[ci].mtime, error);
                     if (push_status != TP_STATUS_OK) {
                         return push_status;
@@ -313,8 +378,9 @@ static tp_status fp_collect(fp_entry **arr, int *count, int *cap,
                         error, TP_STATUS_PATH_RESOLVE_FAILED,
                         "refresh could not stat regular source '%s'", abs);
                 }
-                tp_status push_status = fp_push(arr, count, cap, abs, sz, mt,
-                                                error);
+                tp_status push_status =
+                    fp_push(arr, count, cap, a->id, source->id, abs, sz, mt,
+                            error);
                 if (push_status != TP_STATUS_OK) {
                     return push_status;
                 }
@@ -331,6 +397,79 @@ static const fp_entry *fp_find(const fp_entry *arr, int n, const char *abs) {
         }
     }
     return NULL;
+}
+
+static const fp_source *fp_source_find(const fp_source *sources, int count,
+                                       tp_id128 atlas_id,
+                                       tp_id128 source_id) {
+    for (int i = 0; i < count; ++i) {
+        if (tp_id128_eq(sources[i].atlas_id, atlas_id) &&
+            tp_id128_eq(sources[i].source_id, source_id)) {
+            return &sources[i];
+        }
+    }
+    return NULL;
+}
+
+static bool fp_source_membership_contains(const fp_source *sources, int count,
+                                          const fp_source *candidate) {
+    const fp_source *found =
+        fp_source_find(sources, count, candidate->atlas_id,
+                       candidate->source_id);
+    return found && strcmp(found->abs, candidate->abs) == 0;
+}
+
+/* Preserve the last successful observation for source memberships that still
+ * exist with the same stable IDs and resolved paths. Entries from newly added
+ * memberships are rebased to their current state so the model transaction
+ * itself is not reported as an external filesystem delta. */
+static tp_status fp_rebase_membership(
+    const fp_entry *old_entries, int old_count,
+    const fp_source *old_sources, int old_source_count,
+    const fp_entry *current_entries, int current_count,
+    const fp_source *current_sources, int current_source_count,
+    fp_entry **out_entries, int *out_count, int *out_cap,
+    tp_error *error) {
+    for (int i = 0; i < old_count; ++i) {
+        const fp_source *owner =
+            fp_source_find(old_sources, old_source_count,
+                           old_entries[i].atlas_id,
+                           old_entries[i].source_id);
+        if (!owner ||
+            !fp_source_membership_contains(current_sources,
+                                           current_source_count, owner)) {
+            continue;
+        }
+        tp_status status =
+            fp_push(out_entries, out_count, out_cap,
+                    old_entries[i].atlas_id, old_entries[i].source_id,
+                    old_entries[i].abs, old_entries[i].size,
+                    old_entries[i].mtime, error);
+        if (status != TP_STATUS_OK) {
+            return status;
+        }
+    }
+    for (int i = 0; i < current_count; ++i) {
+        const fp_source *owner =
+            fp_source_find(current_sources, current_source_count,
+                           current_entries[i].atlas_id,
+                           current_entries[i].source_id);
+        if (!owner ||
+            fp_source_membership_contains(old_sources, old_source_count,
+                                          owner)) {
+            continue;
+        }
+        tp_status status =
+            fp_push(out_entries, out_count, out_cap,
+                    current_entries[i].atlas_id,
+                    current_entries[i].source_id, current_entries[i].abs,
+                    current_entries[i].size, current_entries[i].mtime,
+                    error);
+        if (status != TP_STATUS_OK) {
+            return status;
+        }
+    }
+    return TP_STATUS_OK;
 }
 
 /* The synchronous cost of a refresh: fingerprint every source (fp_collect), publish the external
@@ -363,24 +502,48 @@ static tp_status refresh_diff_core(int *out_added, int *out_removed,
     fp_entry *before = NULL;
     int bn = 0;
     int bc = 0;
+    bool before_is_retained = false;
     const bool retained_before =
         s_refresh_fingerprint_valid &&
         tp_id128_eq(s_refresh_membership_hash, membership_hash);
     if (retained_before) {
         before = s_refresh_fingerprint;
         bn = s_refresh_fingerprint_count;
+        before_is_retained = true;
     } else {
-        if (s_refresh_fingerprint_valid) {
-            fp_free(s_refresh_fingerprint, s_refresh_fingerprint_count);
-            s_refresh_fingerprint = NULL;
-            s_refresh_fingerprint_count = 0;
-            s_refresh_fingerprint_valid = false;
-        }
-        tp_status status = fp_collect(&before, &bn, &bc, error);
+        fp_entry *current = NULL;
+        int current_count = 0;
+        int current_cap = 0;
+        fp_source *current_sources = NULL;
+        int current_source_count = 0;
+        int current_source_cap = 0;
+        tp_status status =
+            fp_collect(&current, &current_count, &current_cap,
+                       &current_sources, &current_source_count,
+                       &current_source_cap, error);
         if (status != TP_STATUS_OK) {
-            fp_free(before, bn);
+            fp_free(current, current_count);
+            fp_sources_free(current_sources, current_source_count);
             return status;
         }
+        if (s_refresh_fingerprint_valid) {
+            status = fp_rebase_membership(
+                s_refresh_fingerprint, s_refresh_fingerprint_count,
+                s_refresh_sources, s_refresh_source_count, current,
+                current_count, current_sources, current_source_count,
+                &before, &bn, &bc, error);
+            fp_free(current, current_count);
+            if (status != TP_STATUS_OK) {
+                fp_free(before, bn);
+                fp_sources_free(current_sources, current_source_count);
+                return status;
+            }
+        } else {
+            before = current;
+            bn = current_count;
+            bc = current_cap;
+        }
+        fp_sources_free(current_sources, current_source_count);
     }
 
     gui_project_invalidate_sources(); /* publish the external runtime refresh */
@@ -391,12 +554,18 @@ static tp_status refresh_diff_core(int *out_added, int *out_removed,
     fp_entry *after = NULL;
     int an = 0;
     int ac = 0;
-    tp_status status = fp_collect(&after, &an, &ac, error);
+    fp_source *after_sources = NULL;
+    int after_source_count = 0;
+    int after_source_cap = 0;
+    tp_status status =
+        fp_collect(&after, &an, &ac, &after_sources, &after_source_count,
+                   &after_source_cap, error);
     if (status != TP_STATUS_OK) {
-        if (!retained_before) {
+        if (!before_is_retained) {
             fp_free(before, bn);
         }
         fp_free(after, an);
+        fp_sources_free(after_sources, after_source_count);
         return status;
     }
 
@@ -422,13 +591,17 @@ static tp_status refresh_diff_core(int *out_added, int *out_removed,
             removed++;
         }
     }
-    if (retained_before) {
+    if (s_refresh_fingerprint_valid) {
         fp_free(s_refresh_fingerprint, s_refresh_fingerprint_count);
-    } else {
+        fp_sources_free(s_refresh_sources, s_refresh_source_count);
+    }
+    if (!before_is_retained) {
         fp_free(before, bn);
     }
     s_refresh_fingerprint = after;
     s_refresh_fingerprint_count = an;
+    s_refresh_sources = after_sources;
+    s_refresh_source_count = after_source_count;
     s_refresh_fingerprint_valid = true;
     s_refresh_membership_hash = membership_hash;
 

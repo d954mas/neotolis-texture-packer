@@ -68,13 +68,20 @@ typedef struct tp_session_pack_job_result {
 } tp_session_pack_job_result;
 
 typedef struct tp_session_export_job_result {
+    /* Successfully committed target/file counts survive a cancelled command. */
     int targets;
+    int files;
     int notices;
     int atlases_ok;
     int atlases_failed;
     char first_error[256];
     /* Selected atlases with enabled targets but no usable input images. */
     int atlases_skipped;
+    /* True only when cancellation won after at least one target committed. */
+    bool partial_publication;
+    /* True when cancellation followed a failed direct writer, whose API cannot
+     * prove that it left no partially published artifacts. */
+    bool publication_uncertain;
 } tp_session_export_job_result;
 
 typedef struct tp_session_job_result {
@@ -100,9 +107,10 @@ tp_status tp_session_export_start(tp_session *session,
 bool tp_session_job_active(const tp_session *session);
 tp_status tp_session_job_poll(const tp_session *session,
                               tp_session_job_progress *out, tp_error *err);
-/* Accepts cancellation only before terminal claim. Repeated or late requests
- * return TP_STATUS_INVALID_ARGUMENT. A completed Export remains successful when
- * its final outputs committed before the accepted request was observed. */
+/* Accepts cancellation only before the terminal-boundary claim. Export
+ * linearizes that claim immediately after its final eligible writer returns;
+ * a request accepted before the claim may own the outcome even if that writer
+ * just returned. Repeated requests and requests after the claim are rejected. */
 tp_status tp_session_job_cancel(tp_session *session, tp_error *err);
 /* Succeeds only after poll reports a terminal state. Transfers a successful
  * Pack arena/result to `out` and releases the session-owned job handle. */

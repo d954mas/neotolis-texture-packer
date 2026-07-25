@@ -132,6 +132,25 @@ void multi_sel_set_single_ref(tp_id128 source_id, const char *source_key) {
     multi_sel_add_ref(source_id, source_key);
 }
 
+void gui_rows_context_refocus(int view_index) {
+    if (view_index < 0 || view_index >= s_view_count) {
+        return;
+    }
+    const int row_index = s_view[view_index];
+    if (row_index < 0 || row_index >= s_row_count) {
+        return;
+    }
+    const sprite_row *row = &s_rows[row_index];
+    s_sel_src = row->src;
+    s_sel_child = row->child;
+    s_sel_missing = row->missing;
+    (void)snprintf(s_sel_abs, sizeof s_sel_abs, "%s",
+                   row->abs ? row->abs : "");
+    s_sel_anchor_row = view_index;
+    s_focus_view = view_index;
+    s_focus_follow = true;
+}
+
 /* qsort adapter over the core natural-order comparator (tp_names). */
 int nat_cmp_qsort(const void *a, const void *b) {
     const gui_selected_sprite *left = (const gui_selected_sprite *)a;
@@ -189,9 +208,11 @@ static void row_drop(sprite_row *row) {
         return;
     }
     free(row->source_key);
+    free(row->source_name);
     free(row->sprite_name);
     free(row->abs);
     row->source_key = NULL;
+    row->source_name = NULL;
     row->sprite_name = NULL;
     row->abs = NULL;
 }
@@ -539,6 +560,13 @@ void build_rows(void) {
         r->is_source = true;
         r->is_folder = is_dir;
         r->source_id = source->id;
+        r->source_name = rows_strdup(path_last(sp));
+        if (!r->source_name) {
+            rows_clear();
+            set_status_ex(STATUS_ERROR,
+                          "Out of memory: sprite list unavailable.");
+            return;
+        }
         if (probe_status != TP_STATUS_OK &&
             probe_status != TP_STATUS_NOT_FOUND) {
             r->runtime_status = probe_status;
@@ -821,11 +849,17 @@ const char *gui_rows_effective_name(const sprite_row *row) {
     return (row->sprite_name && row->sprite_name[0] != '\0') ? row->sprite_name : "";
 }
 
-/* NAME-sort key: the EFFECTIVE name (override rename else export key), falling back to the display
- * label for nameless rows (folder/missing sources) so they still order deterministically. */
+/* NAME-sort key: the EFFECTIVE name (override rename else export key), falling
+ * back to the raw source basename for nameless source rows. Display labels are
+ * decorated with warning/status/count text and are never sort data. */
 static const char *row_sort_name(const sprite_row *r) {
     const char *eff = gui_rows_effective_name(r);
-    return (eff && eff[0] != '\0') ? eff : r->label;
+    if (eff && eff[0] != '\0') {
+        return eff;
+    }
+    return (r->source_name && r->source_name[0] != '\0')
+               ? r->source_name
+               : "";
 }
 
 /* Single-threaded UI: the sort key/dir live in module statics the qsort adapters read. */

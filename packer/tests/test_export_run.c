@@ -25,6 +25,7 @@
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_session.h"
 #include "tp_core/tp_build_worker.h"
+#include "tp_fs_internal.h"
 #include "tp_project_mutation_internal.h"
 #include "unity.h"
 
@@ -910,6 +911,156 @@ static bool cancel_export_run(void *ctx) {
     return true;
 }
 
+typedef struct cancel_after_poll_count {
+    int polls;
+    int cancel_at;
+} cancel_after_poll_count;
+
+static bool cancel_after_n_polls(void *ctx) {
+    cancel_after_poll_count *state = ctx;
+    state->polls++;
+    return state->polls >= state->cancel_at;
+}
+
+static void test_export_run_cancels_the_pack_worker_before_artifact_publication(void) {
+    tp_pack_sprite_desc sprite = {
+        .name = "cancelled-during-pack",
+        .rgba = g_piv,
+        .w = 30,
+        .h = 20,
+        .origin_x = 0.5F,
+        .origin_y = 0.5F,
+    };
+    char artifact[1200];
+    const tp_project_atlas *atlas = tp_project_get_atlas(g_proj, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    TEST_ASSERT_TRUE(snprintf(artifact, sizeof artifact, "%s/%s.ntpack",
+                              g_dir, atlas->name) > 0);
+    (void)remove(artifact);
+
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_export_notices notices;
+    tp_export_notices_init(&notices);
+    tp_export_report report;
+    memset(&report, 0, sizeof report);
+    cancel_after_poll_count cancel_state = {.cancel_at = 4};
+    const tp_cancel_token cancel = {cancel_after_n_polls, &cancel_state};
+    const tp_export_run_opts opts = {
+        .report = &report,
+        .cancel = &cancel,
+    };
+    tp_error error = {{0}};
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_CANCELLED,
+        tp_export_run_ex(g_proj, 0, &sprite, 1, g_dir, arena, &notices,
+                         NULL, &opts, &error));
+    TEST_ASSERT_TRUE(cancel_state.polls >= cancel_state.cancel_at);
+    const bool artifact_exists = tp_fs_exists(artifact);
+    (void)remove(artifact);
+    TEST_ASSERT_FALSE_MESSAGE(
+        artifact_exists,
+        "accepted Export cancellation during Pack must prevent .ntpack publication");
+
+    tp_export_notices_free(&notices);
+    tp_arena_destroy(arena);
+}
+
+typedef struct cancel_when_path_exists {
+    const char *path;
+} cancel_when_path_exists;
+
+static bool cancel_after_first_output_directory(void *ctx) {
+    const cancel_when_path_exists *state = ctx;
+    return tp_fs_exists(state->path);
+}
+
+static void test_snapshot_export_polls_cancel_before_each_output_directory_creation(void) {
+    char source_path[1200];
+    char first_dir[1200];
+    char second_dir[1200];
+    char first_out[1200];
+    char second_out[1200];
+    char project_path[1200];
+    TEST_ASSERT_TRUE(snprintf(source_path, sizeof source_path, "%s-0.png",
+                              g_A) > 0);
+    TEST_ASSERT_TRUE(snprintf(first_dir, sizeof first_dir,
+                              "%s/cancel-mkdir-first", g_dir) > 0);
+    TEST_ASSERT_TRUE(snprintf(second_dir, sizeof second_dir,
+                              "%s/cancel-mkdir-second", g_dir) > 0);
+    TEST_ASSERT_TRUE(snprintf(first_out, sizeof first_out, "%s/atlas",
+                              first_dir) > 0);
+    TEST_ASSERT_TRUE(snprintf(second_out, sizeof second_out, "%s/atlas",
+                              second_dir) > 0);
+    TEST_ASSERT_TRUE(snprintf(project_path, sizeof project_path,
+                              "%s/cancel-mkdir.ntpacker_project", g_dir) > 0);
+    (void)tp_fs_remove_dir(first_dir);
+    (void)tp_fs_remove_dir(second_dir);
+    (void)remove(project_path);
+
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    tp_project_atlas *atlas = tp_project_get_atlas(project, 0);
+    atlas->id = (tp_id128){{0x61U}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_source(atlas, source_path));
+    atlas->sources[0].id = (tp_id128){{0x62U}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_target(atlas, TP_EXPORTER_ID_JSON_NEOTOLIS,
+                                    first_out, NULL));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_target(atlas, TP_EXPORTER_ID_JSON_NEOTOLIS,
+                                    second_out, NULL));
+    atlas->targets[0].id = (tp_id128){{0x63U}};
+    atlas->targets[1].id = (tp_id128){{0x64U}};
+
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_save(project, project_path, &error));
+    tp_project_destroy(project);
+    tp_session_snapshot *snapshot = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_snapshot_load(project_path, &snapshot,
+                                                   &error));
+    tp_export_snapshot_job *job = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_export_snapshot_job_create(snapshot, g_dir, &job, &error));
+    tp_session_snapshot_destroy(snapshot);
+
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_export_notices notices;
+    tp_export_notices_init(&notices);
+    tp_export_report report;
+    memset(&report, 0, sizeof report);
+    cancel_when_path_exists cancel_state = {.path = first_dir};
+    const tp_cancel_token cancel = {
+        cancel_after_first_output_directory, &cancel_state};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_CANCELLED,
+        tp_export_snapshot_job_run_atlas_ex_cancellable(
+            job, 0, arena, &notices, &report, NULL, NULL, NULL, &cancel,
+            &error));
+    TEST_ASSERT_TRUE_MESSAGE(
+        tp_fs_exists(first_dir),
+        "the first target directory is the deterministic cancellation trigger");
+    const bool second_exists = tp_fs_exists(second_dir);
+
+    tp_export_notices_free(&notices);
+    tp_arena_destroy(arena);
+    tp_export_snapshot_job_destroy(job);
+    (void)tp_fs_remove_dir(first_dir);
+    (void)tp_fs_remove_dir(second_dir);
+    (void)remove(project_path);
+    TEST_ASSERT_FALSE_MESSAGE(
+        second_exists,
+        "cancellation must be polled before creating the next target directory");
+}
+
 static void test_export_run_honors_cancel_before_safe_pack_phase(void) {
     tp_pack_sprite_desc sprite = {
         .name = "cancelled",
@@ -969,6 +1120,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_report_marks_pre_target_setup_failure_as_pack_failed);
     RUN_TEST(test_report_page_oom_leaves_no_partial_runs);
     RUN_TEST(test_export_run_honors_cancel_before_safe_pack_phase);
+    RUN_TEST(test_export_run_cancels_the_pack_worker_before_artifact_publication);
+    RUN_TEST(test_snapshot_export_polls_cancel_before_each_output_directory_creation);
     int rc = UNITY_END();
     tp_export_notices_free(&g_notices);
     tp_project_destroy(g_proj);

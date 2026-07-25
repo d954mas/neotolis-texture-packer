@@ -24,12 +24,17 @@ struct tp_export_snapshot_job {
     tp_project *project;
     char *work_dir;
     bool dry_run;
+    tp_export_terminal_boundary_fn terminal_boundary;
+    void *terminal_boundary_context;
 };
 
 static _Thread_local int s_report_alloc_fail = -1;
 static atomic_int s_before_write_gate_armed;
 static atomic_int s_before_write_gate_entered;
 static atomic_int s_before_write_gate_released;
+static atomic_int s_after_terminal_boundary_gate_armed;
+static atomic_int s_after_terminal_boundary_gate_entered;
+static atomic_int s_after_terminal_boundary_gate_released;
 
 void tp_export_run__test_set_report_alloc_fail(int nth) {
     s_report_alloc_fail = nth;
@@ -48,6 +53,7 @@ bool tp_export_run__test_before_write_gate_entered(void) {
 void tp_export_run__test_release_before_write_gate(void) {
     atomic_store(&s_before_write_gate_armed, 0);
     atomic_store(&s_before_write_gate_released, 1);
+    atomic_store(&s_before_write_gate_entered, 0);
 }
 
 static void export_before_write_gate_wait(void) {
@@ -61,11 +67,41 @@ static void export_before_write_gate_wait(void) {
     }
 }
 
+void tp_export_run__test_arm_after_terminal_boundary_gate(void) {
+    atomic_store(&s_after_terminal_boundary_gate_entered, 0);
+    atomic_store(&s_after_terminal_boundary_gate_released, 0);
+    atomic_store(&s_after_terminal_boundary_gate_armed, 1);
+}
+
+bool tp_export_run__test_after_terminal_boundary_gate_entered(void) {
+    return atomic_load(&s_after_terminal_boundary_gate_entered) != 0;
+}
+
+void tp_export_run__test_release_after_terminal_boundary_gate(void) {
+    atomic_store(&s_after_terminal_boundary_gate_armed, 0);
+    atomic_store(&s_after_terminal_boundary_gate_released, 1);
+}
+
+static void export_after_terminal_boundary_gate_wait(void) {
+    if (atomic_load(&s_after_terminal_boundary_gate_armed) == 0) {
+        return;
+    }
+    atomic_store(&s_after_terminal_boundary_gate_armed, 0);
+    atomic_store(&s_after_terminal_boundary_gate_entered, 1);
+    while (atomic_load(&s_after_terminal_boundary_gate_released) == 0) {
+        thrd_yield();
+    }
+}
+
 static tp_status export_cancel_poll(const tp_cancel_token *cancel,
                                     tp_error *err) {
     return tp_cancel_requested(cancel)
                ? tp_error_set(err, TP_STATUS_CANCELLED, "export cancelled")
                : TP_STATUS_OK;
+}
+
+static bool export_pack_cancel_poll(void *context) {
+    return tp_cancel_requested((const tp_cancel_token *)context);
 }
 
 static void *report_alloc(tp_arena *arena, size_t size) {
@@ -526,10 +562,9 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
             if (st != TP_STATUS_OK) {
                 return st;
             }
-            /* tp_pack may finish one decoder invocation already in flight; U-02a
-             * owns finer decode-loop polling. The post-pack poll below prevents
-             * normalization or publication after an observed cancellation. */
-            st = tp_pack(&eff, arena, &groups[g].result, err);
+            st = tp_pack_cancellable(
+                &eff, arena, &groups[g].result,
+                cancel ? export_pack_cancel_poll : NULL, (void *)cancel, err);
             if (st != TP_STATUS_OK) {
                 if (report) {
                     report->pack_failed = true;
@@ -555,6 +590,13 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
         target_group[t] = g;
         if (rt) {
             rt->pack_run = g;
+        }
+    }
+
+    int last_writer_target = -1;
+    for (int t = 0; t < a->target_count; ++t) {
+        if (target_group[t] >= 0) {
+            last_writer_target = t;
         }
     }
 
@@ -640,6 +682,10 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
             return st;
         }
         st = exp->write(prep, &exp->caps, out_bases[t], notices, err);
+        if (t == last_writer_target && opts && opts->terminal_boundary &&
+            opts->terminal_boundary(opts->terminal_boundary_context)) {
+            export_after_terminal_boundary_gate_wait();
+        }
         if (rt) {
             rt->notice_end = notices ? notices->count : nbefore;
         }
@@ -731,6 +777,9 @@ tp_status tp_export_snapshot_job_create_ex(const tp_session_snapshot *snapshot,
         return tp_error_set(err, TP_STATUS_OOM, "export snapshot job clone failed");
     }
     job->dry_run = opts && opts->dry_run;
+    job->terminal_boundary = opts ? opts->terminal_boundary : NULL;
+    job->terminal_boundary_context =
+        opts ? opts->terminal_boundary_context : NULL;
     for (int ai = 0; opts && (opts->target_exporter_id || opts->out_dir) &&
                      ai < job->project->atlas_count; ++ai) {
         tp_project_atlas *atlas = &job->project->atlases[ai];
@@ -866,8 +915,7 @@ tp_status tp_export_snapshot_job_run_atlas_ex_cancellable(
             report->input_outcome = TP_EXPORT_INPUT_NO_USABLE_IMAGES;
         }
         tp_pack_input_free(&input);
-        return tp_error_set(err, TP_STATUS_NOT_FOUND,
-                            "atlas has no usable images");
+        return TP_STATUS_OK;
     }
     if (report) {
         report->input_outcome = TP_EXPORT_INPUT_READY;
@@ -890,6 +938,10 @@ tp_status tp_export_snapshot_job_run_atlas_ex_cancellable(
             return tp_error_set(err, status,
                                 "save the project first (relative output paths need a project dir)");
         }
+        if (tp_cancel_requested(cancel)) {
+            tp_pack_input_free(&input);
+            return tp_error_set(err, TP_STATUS_CANCELLED, "export cancelled");
+        }
         tp_mkdirs_parent(output_path);
     }
     if (tp_cancel_requested(cancel)) {
@@ -900,6 +952,8 @@ tp_status tp_export_snapshot_job_run_atlas_ex_cancellable(
         .report = report,
         .dry_run = job->dry_run,
         .cancel = cancel,
+        .terminal_boundary = job->terminal_boundary,
+        .terminal_boundary_context = job->terminal_boundary_context,
     };
     status = tp_export_run_ex(job->project, atlas_index, input.descs, input.count,
                               job->work_dir, arena, notices, out_pack_runs,

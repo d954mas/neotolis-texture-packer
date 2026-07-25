@@ -64,6 +64,9 @@ typedef struct tp_live_job {
     tp_export_snapshot_job *export_job;
     tp_job_export_atlas *export_atlases;
     int export_atlas_count;
+    bool export_terminal_atlas;
+    bool cancellation_owned_terminal;
+    bool failed_writer_may_have_published;
     tp_session_export_job_result export_result;
 } tp_live_job;
 
@@ -270,6 +273,15 @@ static bool pack_job_cancel_requested(void *context) {
            TP_JOB_TERMINAL_CANCEL_REQUESTED;
 }
 
+static bool export_job_terminal_boundary(void *context) {
+    tp_live_job *job = context;
+    if (!job->export_terminal_atlas) {
+        return false;
+    }
+    job->cancellation_owned_terminal = job_claim_terminal(job);
+    return true;
+}
+
 typedef struct pack_hash_collect {
     tp_id128 *hashes; /* one slot per sprite, in settings->sprites order */
     int count;
@@ -406,13 +418,13 @@ static int export_worker(void *context) {
     const double start = job_now_ms();
     tp_status first_status = TP_STATUS_OK;
     tp_error first_error = {{0}};
-    bool cancellation_owned_terminal = false;
     const tp_cancel_token cancel = {pack_job_cancel_requested, job};
     for (int i = 0; i < job->export_atlas_count; ++i) {
         if (pack_job_cancel_requested(job)) {
             break;
         }
         atomic_store_explicit(&job->current, i + 1, memory_order_relaxed);
+        job->export_terminal_atlas = i + 1 == job->export_atlas_count;
         const tp_job_export_atlas *atlas = &job->export_atlases[i];
         tp_arena *arena = tp_arena_create(0);
         tp_export_notices notices;
@@ -427,18 +439,43 @@ static int export_worker(void *context) {
                   job->export_job, atlas->index, arena, &notices, &report,
                   &runs, NULL, &missing, &cancel, &error)
             : TP_STATUS_OOM;
+        const char *writer_error = NULL;
         for (int target = 0; target < report.target_count; ++target) {
-            job->export_result.targets += report.targets[target].ok ? 1 : 0;
+            if (report.targets[target].ok) {
+                job->export_result.targets++;
+                job->export_result.files +=
+                    report.targets[target].written_file_count;
+            } else if (!writer_error && report.targets[target].error) {
+                writer_error = report.targets[target].error;
+            }
+        }
+        if (writer_error) {
+            job->failed_writer_may_have_published = true;
         }
         job->export_result.notices += notices.count;
-        if (status == TP_STATUS_CANCELLED && pack_job_cancel_requested(job)) {
+        const bool cancellation_owns_atlas =
+            job->cancellation_owned_terminal ||
+            (status == TP_STATUS_CANCELLED && pack_job_cancel_requested(job));
+        if (cancellation_owns_atlas) {
+            if (writer_error) {
+                job->export_result.atlases_failed++;
+                if (!job->export_result.first_error[0]) {
+                    tp_export_snapshot_atlas_info info;
+                    memset(&info, 0, sizeof info);
+                    (void)tp_export_snapshot_job_atlas_info(
+                        job->export_job, atlas->index, &info, NULL);
+                    (void)snprintf(job->export_result.first_error,
+                                   sizeof job->export_result.first_error,
+                                   "%s: %s", info.name ? info.name : "?",
+                                   writer_error);
+                }
+            }
             tp_export_notices_free(&notices);
             tp_arena_destroy(arena);
             break;
         }
         if (report.input_outcome == TP_EXPORT_INPUT_NO_USABLE_IMAGES) {
             job->export_result.atlases_skipped++;
-            status = TP_STATUS_OK;
         } else if (status == TP_STATUS_OK) {
             job->export_result.atlases_ok++;
         } else {
@@ -463,13 +500,19 @@ static int export_worker(void *context) {
              * terminal ownership now: a cancel already accepted wins CANCELLED;
              * any request after this point is late and must be rejected. Result
              * fields remain private until the state release below. */
-            cancellation_owned_terminal = job_claim_terminal(job);
+            job->cancellation_owned_terminal =
+                job->cancellation_owned_terminal || job_claim_terminal(job);
         }
+        job->export_terminal_atlas = false;
     }
     job_before_terminal_gate_wait();
     job->elapsed_ms = job_now_ms() - start;
     const bool cancelled =
-        cancellation_owned_terminal || job_claim_terminal(job);
+        job->cancellation_owned_terminal || job_claim_terminal(job);
+    job->export_result.partial_publication =
+        cancelled && job->export_result.targets > 0;
+    job->export_result.publication_uncertain =
+        cancelled && job->failed_writer_may_have_published;
     job->status =
         cancelled
             ? tp_error_set(&first_error, TP_STATUS_CANCELLED,
@@ -604,8 +647,12 @@ tp_status tp_session_export_start(tp_session *session,
         tp_session_snapshot_destroy(snapshot);
         return tp_error_set(err, TP_STATUS_OOM, "Export job allocation failed");
     }
-    status = tp_export_snapshot_job_create(snapshot, request->work_dir,
-                                           &job->export_job, err);
+    const tp_export_snapshot_job_opts export_opts = {
+        .terminal_boundary = export_job_terminal_boundary,
+        .terminal_boundary_context = job,
+    };
+    status = tp_export_snapshot_job_create_ex(
+        snapshot, request->work_dir, &export_opts, &job->export_job, err);
     tp_session_snapshot_destroy(snapshot);
     if (status != TP_STATUS_OK) {
         tp_session_job_release_internal(&job->owner);

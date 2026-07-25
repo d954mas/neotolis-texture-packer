@@ -34,6 +34,9 @@ void multi_sel_clear(void);
 void multi_sel_add_ref(tp_id128 source_id, const char *source_key);
 void multi_sel_remove_ref(tp_id128 source_id, const char *source_key);
 void multi_sel_set_single_ref(tp_id128 source_id, const char *source_key);
+/* Makes an already-selected context-menu row the primary/focused row and the
+ * next Shift-range anchor without changing the canonical multi-selection. */
+void gui_rows_context_refocus(int view_index);
 
 /* qsort adapter for natural order (wraps tp_nat_cmp; digit runs compare numerically). */
 int nat_cmp_qsort(const void *a, const void *b);
@@ -55,6 +58,7 @@ typedef struct sprite_row {
     bool is_folder;
     tp_id128 source_id;
     char *source_key;         /* malloc-owned exact authoritative key */
+    char *source_name;        /* malloc-owned raw basename; stable NAME key for source rows */
     bool missing;             /* source path gone from disk (§3.7) */
     tp_status runtime_status; /* typed display-scan failure; OK on normal materialization */
     char label[224];          /* display label (rename-aware: "final (file.png)") */

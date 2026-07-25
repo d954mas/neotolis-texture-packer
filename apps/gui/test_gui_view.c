@@ -328,6 +328,31 @@ void test_view_sort_name_orders_children_asc_and_desc(void) {
     TEST_ASSERT_EQUAL_STRING("alpha", s_rows[s_view[pos + 3]].sprite_name);
 }
 
+/* NAME sort is keyed by the raw source basename, not its decorated display
+ * label. Runtime warning/status/count text may change the label between scans,
+ * but warning-on-top is the only status overlay allowed to reorder rows. */
+void test_view_name_sort_ignores_source_status_decorations(void) {
+    add_sources_and_build(NULL, NULL);
+
+    gui_rows_set_sort(ROW_SORT_NAME, false, false);
+    build_view();
+    TEST_ASSERT_EQUAL_INT(0, view_folder_pos()); /* raw "pack" precedes "solo" */
+
+    sprite_row *folder = &s_rows[s_view[0]];
+    TEST_ASSERT_TRUE(folder->is_source);
+    TEST_ASSERT_TRUE(folder->is_folder);
+    (void)snprintf(folder->label, sizeof folder->label,
+                   "\xE2\x9A\xA0 pack/  \xC2\xB7  scan failed");
+
+    /* Force a fresh projection without rebuilding the row cache. */
+    gui_rows_set_sort(ROW_SORT_BUILD, false, false);
+    build_view();
+    gui_rows_set_sort(ROW_SORT_NAME, false, false);
+    build_view();
+
+    TEST_ASSERT_EQUAL_INT(0, view_folder_pos());
+}
+
 /* 5. warn_first pins a MISSING source row to the top of its sibling group
  *    regardless of sort direction. The file source is made missing by deleting
  *    its backing file and rescanning (the task's suggested reliable method). */
@@ -1081,6 +1106,49 @@ void test_view_anchor_follows_sprite_across_model_rebuild(void) {
     TEST_ASSERT_EQUAL_INT(gview2, s_sel_anchor_row);
 }
 
+/* Right-clicking a leaf already inside a multi-selection keeps the set, but
+ * makes that row primary/focused and therefore the new Shift-range anchor. */
+void test_context_refocus_updates_anchor_without_collapsing_multi_selection(void) {
+    add_sources_and_build(NULL, NULL);
+    gui_rows_set_sort(ROW_SORT_NAME, false, false);
+    build_view();
+
+    const int ai = find_row_by_name("alpha");
+    const int bi = find_row_by_name("beta");
+    const int gi = find_row_by_name("gamma");
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, ai);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, bi);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, gi);
+    const int av = view_pos_of_row(ai);
+    const int bv = view_pos_of_row(bi);
+    const int gv = view_pos_of_row(gi);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, av);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, bv);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(0, gv);
+
+    multi_sel_add_ref(s_rows[ai].source_id, s_rows[ai].source_key);
+    multi_sel_add_ref(s_rows[gi].source_id, s_rows[gi].source_key);
+    s_sel_src = s_rows[ai].src;
+    s_sel_child = s_rows[ai].child;
+    s_sel_anchor_row = bv; /* stale anchor from the previous primary */
+    s_focus_view = av;
+    s_focus_follow = false;
+
+    gui_rows_context_refocus(gv);
+
+    TEST_ASSERT_EQUAL_INT(2, s_multi_sel_count);
+    TEST_ASSERT_TRUE(
+        multi_sel_contains_ref(s_rows[ai].source_id, s_rows[ai].source_key));
+    TEST_ASSERT_TRUE(
+        multi_sel_contains_ref(s_rows[gi].source_id, s_rows[gi].source_key));
+    TEST_ASSERT_EQUAL_INT(s_rows[gi].src, s_sel_src);
+    TEST_ASSERT_EQUAL_INT(s_rows[gi].child, s_sel_child);
+    TEST_ASSERT_EQUAL_STRING(s_rows[gi].abs, s_sel_abs);
+    TEST_ASSERT_EQUAL_INT(gv, s_focus_view);
+    TEST_ASSERT_EQUAL_INT(gv, s_sel_anchor_row);
+    TEST_ASSERT_TRUE(s_focus_follow);
+}
+
 /* The OOM identity projection is a different row ordering. Numeric interaction
  * indices from the abandoned projection must not survive into it. */
 void test_view_oom_fallback_clears_focus_and_anchor(void) {
@@ -1658,6 +1726,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_view_filter_is_case_insensitive_and_keeps_parent);
     RUN_TEST(test_view_filter_no_match_empties_view);
     RUN_TEST(test_view_sort_name_orders_children_asc_and_desc);
+    RUN_TEST(test_view_name_sort_ignores_source_status_decorations);
     RUN_TEST(test_view_warn_first_pins_missing_regardless_of_direction);
     RUN_TEST(test_view_collapse_hides_children_and_filter_overrides);
     RUN_TEST(test_selection_revalidate_reresolves_primary_and_prunes_multi);
@@ -1677,6 +1746,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_sort_chip_click_selects_and_flips);
     RUN_TEST(test_view_focus_follows_selection_across_model_rebuild);
     RUN_TEST(test_view_anchor_follows_sprite_across_model_rebuild);
+    RUN_TEST(
+        test_context_refocus_updates_anchor_without_collapsing_multi_selection);
     RUN_TEST(test_view_oom_fallback_clears_focus_and_anchor);
     RUN_TEST(test_view_filter_finds_long_rename_beyond_label);
     RUN_TEST(test_left_section_caps_preserve_sprite_vlist_at_short_heights);

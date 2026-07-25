@@ -32,6 +32,11 @@ struct tp_session_snapshot;
 typedef struct tp_export_snapshot_job tp_export_snapshot_job;
 typedef struct tp_export_report tp_export_report;
 
+/* Called after an atlas's final writer attempt has returned and no further
+ * output side effects remain for that atlas. Return true when this atlas also
+ * fixes the owning command's terminal outcome. */
+typedef bool (*tp_export_terminal_boundary_fn)(void *context);
+
 typedef struct tp_export_snapshot_atlas_info {
     tp_id128 atlas_id;
     const char *name;
@@ -43,6 +48,8 @@ typedef struct tp_export_snapshot_job_opts {
     const char *target_exporter_id; /* NULL keeps every enabled target */
     const char *out_dir;            /* NULL preserves target paths; must be absolute */
     bool dry_run;
+    tp_export_terminal_boundary_fn terminal_boundary;
+    void *terminal_boundary_context;
 } tp_export_snapshot_job_opts;
 
 tp_status tp_export_snapshot_job_create(const struct tp_session_snapshot *snapshot,
@@ -197,6 +204,12 @@ typedef struct tp_export_run_opts {
      * A single decoder invocation already in flight remains non-preemptible
      * (U-02a); cancellation is observed at the next safe boundary. */
     const tp_cancel_token *cancel;
+
+    /* Optional owner handshake after the final writer attempt returns (success
+     * or failure), before report assembly. Returning true marks the owning
+     * command terminal and enables its deterministic post-boundary test gate. */
+    tp_export_terminal_boundary_fn terminal_boundary;
+    void *terminal_boundary_context;
 } tp_export_run_opts;
 
 /* tp_export_run plus optional behavior selected by `opts` (nullable == defaults;

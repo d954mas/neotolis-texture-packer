@@ -640,10 +640,7 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
                                                          row->source_key))) {
                     select_sprite_row((int)i, false, false);
                 } else {
-                    s_sel_src = row->src;
-                    s_sel_child = row->child;
-                    s_sel_missing = row->missing;
-                    (void)snprintf(s_sel_abs, sizeof s_sel_abs, "%s", row->abs);
+                    gui_rows_context_refocus((int)i);
                     sync_primary_row_to_canvas(row);
                 }
                 s_ctx_kind = CTX_SPRITE;

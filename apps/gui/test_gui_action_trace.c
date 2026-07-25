@@ -643,6 +643,177 @@ void test_refresh_ignores_source_membership_transactions(void) {
     TEST_ASSERT_EQUAL_INT(0, remove(second_path));
 }
 
+void test_refresh_retains_external_change_when_source_is_added(void) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas = tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const tp_id128 atlas_id = atlas->id;
+
+    char first_path[1200];
+    char second_path[1200];
+    TEST_ASSERT_TRUE(snprintf(first_path, sizeof first_path,
+                              "%s/changed-before-add.png",
+                              TP_GUI_TRACE_TEST_DIR) > 0);
+    TEST_ASSERT_TRUE(snprintf(second_path, sizeof second_path,
+                              "%s/new-membership.png",
+                              TP_GUI_TRACE_TEST_DIR) > 0);
+    FILE *source = fopen(first_path, "wb");
+    TEST_ASSERT_NOT_NULL(source);
+    TEST_ASSERT_EQUAL_size_t(1U, fwrite("a", 1U, 1U, source));
+    TEST_ASSERT_EQUAL_INT(0, fclose(source));
+    source = fopen(second_path, "wb");
+    TEST_ASSERT_NOT_NULL(source);
+    TEST_ASSERT_EQUAL_size_t(1U, fwrite("b", 1U, 1U, source));
+    TEST_ASSERT_EQUAL_INT(0, fclose(source));
+
+    TEST_ASSERT_EQUAL_INT(
+        GUI_ADD_ADDED,
+        gui_project_add_source_kind(
+            atlas_id, tp_session_snapshot_revision(snapshot), first_path,
+            TP_SOURCE_KIND_FILE));
+    TEST_ASSERT_TRUE(
+        gui_actions_refresh_diff_headless(NULL, NULL, NULL));
+
+    source = fopen(first_path, "wb");
+    TEST_ASSERT_NOT_NULL(source);
+    TEST_ASSERT_EQUAL_size_t(
+        17U, fwrite("changed-before-add", 1U, 17U, source));
+    TEST_ASSERT_EQUAL_INT(0, fclose(source));
+
+    snapshot = gui_project_snapshot();
+    TEST_ASSERT_EQUAL_INT(
+        GUI_ADD_ADDED,
+        gui_project_add_source_kind(
+            atlas_id, tp_session_snapshot_revision(snapshot), second_path,
+            TP_SOURCE_KIND_FILE));
+    const int64_t revision_before =
+        tp_session_snapshot_revision(gui_project_snapshot());
+    const bool dirty_before = gui_project_is_dirty();
+    const int history_before = gui_project_undo_depth();
+
+    int added = -1;
+    int removed = -1;
+    int changed = -1;
+    const bool refreshed =
+        gui_actions_refresh_diff_headless(&added, &removed, &changed);
+    const int64_t revision_after =
+        tp_session_snapshot_revision(gui_project_snapshot());
+    const bool dirty_after = gui_project_is_dirty();
+    const int history_after = gui_project_undo_depth();
+    (void)remove(first_path);
+    (void)remove(second_path);
+
+    TEST_ASSERT_TRUE(refreshed);
+    TEST_ASSERT_EQUAL_INT(0, added);
+    TEST_ASSERT_EQUAL_INT(0, removed);
+    TEST_ASSERT_EQUAL_INT(1, changed);
+    TEST_ASSERT_EQUAL_INT64(revision_before, revision_after);
+    TEST_ASSERT_EQUAL_INT(dirty_before, dirty_after);
+    TEST_ASSERT_EQUAL_INT(history_before, history_after);
+}
+
+void test_refresh_retains_external_change_when_source_is_removed(void) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas = tp_session_snapshot_atlas_at(snapshot, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    const tp_id128 atlas_id = atlas->id;
+
+    char first_path[1200];
+    char second_path[1200];
+    TEST_ASSERT_TRUE(snprintf(first_path, sizeof first_path,
+                              "%s/changed-before-remove.png",
+                              TP_GUI_TRACE_TEST_DIR) > 0);
+    TEST_ASSERT_TRUE(snprintf(second_path, sizeof second_path,
+                              "%s/removed-membership.png",
+                              TP_GUI_TRACE_TEST_DIR) > 0);
+    FILE *source = fopen(first_path, "wb");
+    TEST_ASSERT_NOT_NULL(source);
+    TEST_ASSERT_EQUAL_size_t(1U, fwrite("a", 1U, 1U, source));
+    TEST_ASSERT_EQUAL_INT(0, fclose(source));
+    source = fopen(second_path, "wb");
+    TEST_ASSERT_NOT_NULL(source);
+    TEST_ASSERT_EQUAL_size_t(1U, fwrite("b", 1U, 1U, source));
+    TEST_ASSERT_EQUAL_INT(0, fclose(source));
+
+    TEST_ASSERT_EQUAL_INT(
+        GUI_ADD_ADDED,
+        gui_project_add_source_kind(
+            atlas_id, tp_session_snapshot_revision(snapshot), first_path,
+            TP_SOURCE_KIND_FILE));
+    snapshot = gui_project_snapshot();
+    TEST_ASSERT_EQUAL_INT(
+        GUI_ADD_ADDED,
+        gui_project_add_source_kind(
+            atlas_id, tp_session_snapshot_revision(snapshot), second_path,
+            TP_SOURCE_KIND_FILE));
+    snapshot = gui_project_snapshot();
+    const tp_snapshot_source *second =
+        tp_session_snapshot_source_at(snapshot, atlas_id, 1);
+    TEST_ASSERT_NOT_NULL(second);
+    const tp_id128 second_id = second->id;
+    TEST_ASSERT_TRUE(
+        gui_actions_refresh_diff_headless(NULL, NULL, NULL));
+
+    source = fopen(first_path, "wb");
+    TEST_ASSERT_NOT_NULL(source);
+    TEST_ASSERT_EQUAL_size_t(
+        20U, fwrite("changed-before-remove", 1U, 20U, source));
+    TEST_ASSERT_EQUAL_INT(0, fclose(source));
+    snapshot = gui_project_snapshot();
+    TEST_ASSERT_TRUE(gui_project_remove_source(
+        atlas_id, second_id, tp_session_snapshot_revision(snapshot)));
+    const int64_t revision_before =
+        tp_session_snapshot_revision(gui_project_snapshot());
+    const bool dirty_before = gui_project_is_dirty();
+    const int history_before = gui_project_undo_depth();
+
+    int added = -1;
+    int removed = -1;
+    int changed = -1;
+    const bool refreshed =
+        gui_actions_refresh_diff_headless(&added, &removed, &changed);
+    const int64_t revision_after =
+        tp_session_snapshot_revision(gui_project_snapshot());
+    const bool dirty_after = gui_project_is_dirty();
+    const int history_after = gui_project_undo_depth();
+    (void)remove(first_path);
+    (void)remove(second_path);
+
+    TEST_ASSERT_TRUE(refreshed);
+    TEST_ASSERT_EQUAL_INT(0, added);
+    TEST_ASSERT_EQUAL_INT(0, removed);
+    TEST_ASSERT_EQUAL_INT(1, changed);
+    TEST_ASSERT_EQUAL_INT64(revision_before, revision_after);
+    TEST_ASSERT_EQUAL_INT(dirty_before, dirty_after);
+    TEST_ASSERT_EQUAL_INT(history_before, history_after);
+}
+
+void test_export_cancel_formatter_distinguishes_uncertain_partial_and_clean(void) {
+    const gui_pack_result_info uncertain = {
+        .publication_uncertain = true,
+    };
+    char status[128] = {0};
+    TEST_ASSERT_TRUE(gui_pack_format_export_cancelled(
+        &uncertain, status, sizeof status));
+    TEST_ASSERT_NOT_NULL(strstr(status, "output may be partially updated"));
+
+    const gui_pack_result_info partial = {
+        .targets = 2,
+        .files = 5,
+        .partial_publication = true,
+    };
+    TEST_ASSERT_TRUE(gui_pack_format_export_cancelled(
+        &partial, status, sizeof status));
+    TEST_ASSERT_NOT_NULL(strstr(status, "Export cancelled after publishing"));
+    TEST_ASSERT_NOT_NULL(strstr(status, "2 target"));
+    TEST_ASSERT_NOT_NULL(strstr(status, "5 file"));
+
+    const gui_pack_result_info clean = {0};
+    TEST_ASSERT_FALSE(gui_pack_format_export_cancelled(
+        &clean, status, sizeof status));
+    TEST_ASSERT_EQUAL_STRING("Export cancelled.", status);
+}
+
 void test_late_export_cancel_keeps_completed_success_outcome(void) {
     TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_TRACE_TEST_DIR));
     tp_job__test_arm_before_terminal_gate();
@@ -713,6 +884,10 @@ int main(void) {
     RUN_TEST(test_refresh_unreadable_source_warns_without_model_mutation);
     RUN_TEST(test_refresh_fingerprint_resets_when_session_is_replaced);
     RUN_TEST(test_refresh_ignores_source_membership_transactions);
+    RUN_TEST(test_refresh_retains_external_change_when_source_is_added);
+    RUN_TEST(test_refresh_retains_external_change_when_source_is_removed);
+    RUN_TEST(
+        test_export_cancel_formatter_distinguishes_uncertain_partial_and_clean);
     RUN_TEST(test_late_export_cancel_keeps_completed_success_outcome);
     RUN_TEST(test_empty_export_surfaces_skipped_atlas_warning);
     return UNITY_END();

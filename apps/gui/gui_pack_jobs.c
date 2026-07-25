@@ -28,6 +28,27 @@ typedef struct {
 
 static gui_pack_job_state s_adapter;
 
+bool gui_pack_format_export_cancelled(const gui_pack_result_info *info,
+                                      char *out, size_t cap) {
+    const bool uncertain = info && info->publication_uncertain;
+    const bool partial = info && info->partial_publication;
+    if (out && cap > 0U) {
+        if (uncertain) {
+            (void)snprintf(
+                out, cap,
+                "Export cancelled; output may be partially updated.");
+        } else if (partial) {
+            (void)snprintf(
+                out, cap,
+                "Export cancelled after publishing %d target(s) / %d file(s).",
+                info->targets, info->files);
+        } else {
+            (void)snprintf(out, cap, "Export cancelled.");
+        }
+    }
+    return uncertain || partial;
+}
+
 static tp_session *job_session(void) {
     return gui_project_session_for_jobs();
 }
@@ -253,10 +274,15 @@ gui_pack_done gui_pack_poll(gui_pack_result_info *out) {
     } else {
         if (out) {
             out->targets = result.export_result.targets;
+            out->files = result.export_result.files;
             out->notices = result.export_result.notices;
             out->atlases_ok = result.export_result.atlases_ok;
             out->atlases_fail = result.export_result.atlases_failed;
             out->atlases_skipped = result.export_result.atlases_skipped;
+            out->partial_publication =
+                result.export_result.partial_publication;
+            out->publication_uncertain =
+                result.export_result.publication_uncertain;
             (void)snprintf(out->err, sizeof out->err, "%s",
                            result.export_result.first_error);
         }

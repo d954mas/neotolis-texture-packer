@@ -15,6 +15,7 @@
 
 #include "tp_core/tp_build_worker.h"
 #include "tp_core/tp_export.h"
+#include "tp_core/tp_export_run.h"
 #include "tp_core/tp_job.h"
 #include "tp_core/tp_operation.h"
 #include "tp_core/tp_scan.h"
@@ -55,6 +56,9 @@ void tp_job__test_release_after_cancel_claim_gate(void);
 void tp_export_run__test_arm_before_write_gate(void);
 bool tp_export_run__test_before_write_gate_entered(void);
 void tp_export_run__test_release_before_write_gate(void);
+void tp_export_run__test_arm_after_terminal_boundary_gate(void);
+bool tp_export_run__test_after_terminal_boundary_gate_entered(void);
+void tp_export_run__test_release_after_terminal_boundary_gate(void);
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -125,6 +129,16 @@ static bool wait_for_before_export_write_gate(void) {
         thrd_yield();
     }
     return tp_export_run__test_before_write_gate_entered();
+}
+
+static bool wait_for_after_export_terminal_boundary_gate(void) {
+    for (int i = 0; i < 1000000; ++i) {
+        if (tp_export_run__test_after_terminal_boundary_gate_entered()) {
+            return true;
+        }
+        thrd_yield();
+    }
+    return tp_export_run__test_after_terminal_boundary_gate_entered();
 }
 
 /* A minimal, valid 4x4 fully-opaque RGBA PNG (stb_image decodes it). A real pack
@@ -439,6 +453,66 @@ static tp_status partial_failure_write(
                         "intentional partial-export failure");
 }
 
+static tp_status gated_success_write(
+    const tp_export_prepared *prepared, const tp_export_caps *caps,
+    const char *out_path_base, tp_export_notices *notices, tp_error *err) {
+    const tp_status status = tp_export_json_neotolis_write(
+        prepared, caps, out_path_base, notices, err);
+    if (status == TP_STATUS_OK) {
+        tp_export_run__test_arm_before_write_gate();
+    }
+    return status;
+}
+
+static tp_status gated_partial_failure_write(
+    const tp_export_prepared *prepared, const tp_export_caps *caps,
+    const char *out_path_base, tp_export_notices *notices, tp_error *err) {
+    (void)prepared;
+    (void)caps;
+    char path[1200];
+    const int n = snprintf(path, sizeof path, "%s.json", out_path_base);
+    if (n <= 0 || (size_t)n >= sizeof path) {
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                            "test partial output path overflow");
+    }
+    FILE *file = fopen(path, "wb");
+    if (!file) {
+        return tp_error_set(err, TP_STATUS_PATH_RESOLVE_FAILED,
+                            "could not create test partial output");
+    }
+    static const char partial[] = "partial";
+    const bool wrote =
+        fwrite(partial, 1U, sizeof partial - 1U, file) == sizeof partial - 1U;
+    const bool closed = fclose(file) == 0;
+    if (!wrote || !closed) {
+        return tp_error_set(err, TP_STATUS_PATH_RESOLVE_FAILED,
+                            "could not write test partial output");
+    }
+    const tp_status notice_status = tp_export_notice_addf(
+        notices, "intentional uncertain-publication notice");
+    if (notice_status != TP_STATUS_OK) {
+        return notice_status;
+    }
+    tp_export_run__test_arm_before_write_gate();
+    return tp_error_set(err, TP_STATUS_PATH_RESOLVE_FAILED,
+                        "intentional partial publication failure");
+}
+
+static tp_session *s_final_writer_cancel_session;
+static tp_status s_final_writer_cancel_status;
+static tp_error s_final_writer_cancel_error;
+
+static tp_status final_cancel_partial_failure_write(
+    const tp_export_prepared *prepared, const tp_export_caps *caps,
+    const char *out_path_base, tp_export_notices *notices, tp_error *err) {
+    const tp_status status = gated_partial_failure_write(
+        prepared, caps, out_path_base, notices, err);
+    tp_export_run__test_release_before_write_gate();
+    s_final_writer_cancel_status = tp_session_job_cancel(
+        s_final_writer_cancel_session, &s_final_writer_cancel_error);
+    return status;
+}
+
 static void add_partial_failure_target(tp_session *session, tp_id128 atlas_id) {
     const tp_exporter *base = tp_exporter_find("json-neotolis");
     TEST_ASSERT_NOT_NULL(base);
@@ -491,6 +565,271 @@ static void add_partial_failure_target(tp_session *session, tp_id128 atlas_id) {
     tp_session_snapshot_destroy(snapshot);
 }
 
+static void add_gated_success_targets(tp_session *session, tp_id128 atlas_id) {
+    const tp_exporter *base = tp_exporter_find("json-neotolis");
+    TEST_ASSERT_NOT_NULL(base);
+    static tp_exporter gated;
+    gated = *base;
+    gated.id = "test-gated-success";
+    gated.display_name = "Test gated success";
+    gated.write = gated_success_write;
+    const tp_status registration = tp_exporter_register(&gated);
+    TEST_ASSERT_TRUE(registration == TP_STATUS_OK ||
+                     tp_exporter_find(gated.id) != NULL);
+
+    tp_operation operations[2];
+    memset(operations, 0, sizeof operations);
+    operations[0].kind = TP_OP_TARGET_CREATE;
+    operations[0].atlas_id = atlas_id;
+    operations[0].u.target_create.target_id =
+        (tp_id128){{0x53U, 0x33U, 0x44U, 0x55U, 0x66U, 0x77U, 0x88U, 0x99U,
+                    0xAAU, 0xBBU, 0xCCU, 0xDDU, 0xEEU, 0xF0U, 0x0FU, 0x11U}};
+    operations[0].u.target_create.exporter_id =
+        malloc(sizeof "test-gated-success");
+    operations[0].u.target_create.out_path = malloc(sizeof "out/first");
+    TEST_ASSERT_NOT_NULL(operations[0].u.target_create.exporter_id);
+    TEST_ASSERT_NOT_NULL(operations[0].u.target_create.out_path);
+    memcpy(operations[0].u.target_create.exporter_id, "test-gated-success",
+           sizeof "test-gated-success");
+    memcpy(operations[0].u.target_create.out_path, "out/first",
+           sizeof "out/first");
+    operations[0].u.target_create.enabled = true;
+
+    operations[1].kind = TP_OP_TARGET_CREATE;
+    operations[1].atlas_id = atlas_id;
+    operations[1].u.target_create.target_id =
+        (tp_id128){{0x54U, 0x33U, 0x44U, 0x55U, 0x66U, 0x77U, 0x88U, 0x99U,
+                    0xAAU, 0xBBU, 0xCCU, 0xDDU, 0xEEU, 0xF0U, 0x0FU, 0x11U}};
+    operations[1].u.target_create.exporter_id =
+        malloc(sizeof "json-neotolis");
+    operations[1].u.target_create.out_path = malloc(sizeof "out/second");
+    TEST_ASSERT_NOT_NULL(operations[1].u.target_create.exporter_id);
+    TEST_ASSERT_NOT_NULL(operations[1].u.target_create.out_path);
+    memcpy(operations[1].u.target_create.exporter_id, "json-neotolis",
+           sizeof "json-neotolis");
+    memcpy(operations[1].u.target_create.out_path, "out/second",
+           sizeof "out/second");
+    operations[1].u.target_create.enabled = true;
+
+    tp_error err = {{0}};
+    tp_session_snapshot *snapshot = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_snapshot_create(session, &snapshot, &err));
+    tp_txn_request request;
+    memset(&request, 0, sizeof request);
+    request.schema = TP_TXN_SCHEMA;
+    memcpy(request.id_hex, "53535353535353535353535353535353",
+           sizeof request.id_hex);
+    request.expected_revision = tp_session_snapshot_revision(snapshot);
+    request.ops = operations;
+    request.op_count = 2U;
+    tp_txn_result result;
+    memset(&result, 0, sizeof result);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_apply(session, &request, &result, &err));
+    TEST_ASSERT_TRUE(result.committed);
+    tp_txn_result_free(&result);
+    tp_operation_free(&operations[0]);
+    tp_operation_free(&operations[1]);
+    tp_session_snapshot_destroy(snapshot);
+}
+
+static void add_gated_failure_targets(tp_session *session, tp_id128 atlas_id) {
+    const tp_exporter *base = tp_exporter_find("json-neotolis");
+    TEST_ASSERT_NOT_NULL(base);
+    static tp_exporter failing;
+    failing = *base;
+    failing.id = "test-gated-partial-failure";
+    failing.display_name = "Test gated partial failure";
+    failing.write = gated_partial_failure_write;
+    const tp_status registration = tp_exporter_register(&failing);
+    TEST_ASSERT_TRUE(registration == TP_STATUS_OK ||
+                     tp_exporter_find(failing.id) != NULL);
+
+    tp_operation operations[2];
+    memset(operations, 0, sizeof operations);
+    operations[0].kind = TP_OP_TARGET_CREATE;
+    operations[0].atlas_id = atlas_id;
+    operations[0].u.target_create.target_id =
+        (tp_id128){{0x55U, 0x33U, 0x44U, 0x55U, 0x66U, 0x77U, 0x88U, 0x99U,
+                    0xAAU, 0xBBU, 0xCCU, 0xDDU, 0xEEU, 0xF0U, 0x0FU, 0x11U}};
+    operations[0].u.target_create.exporter_id =
+        malloc(sizeof "test-gated-partial-failure");
+    operations[0].u.target_create.out_path =
+        malloc(sizeof "out/uncertain");
+    TEST_ASSERT_NOT_NULL(operations[0].u.target_create.exporter_id);
+    TEST_ASSERT_NOT_NULL(operations[0].u.target_create.out_path);
+    memcpy(operations[0].u.target_create.exporter_id,
+           "test-gated-partial-failure",
+           sizeof "test-gated-partial-failure");
+    memcpy(operations[0].u.target_create.out_path, "out/uncertain",
+           sizeof "out/uncertain");
+    operations[0].u.target_create.enabled = true;
+
+    operations[1].kind = TP_OP_TARGET_CREATE;
+    operations[1].atlas_id = atlas_id;
+    operations[1].u.target_create.target_id =
+        (tp_id128){{0x56U, 0x33U, 0x44U, 0x55U, 0x66U, 0x77U, 0x88U, 0x99U,
+                    0xAAU, 0xBBU, 0xCCU, 0xDDU, 0xEEU, 0xF0U, 0x0FU, 0x11U}};
+    operations[1].u.target_create.exporter_id =
+        malloc(sizeof "json-neotolis");
+    operations[1].u.target_create.out_path =
+        malloc(sizeof "out/after-failure");
+    TEST_ASSERT_NOT_NULL(operations[1].u.target_create.exporter_id);
+    TEST_ASSERT_NOT_NULL(operations[1].u.target_create.out_path);
+    memcpy(operations[1].u.target_create.exporter_id, "json-neotolis",
+           sizeof "json-neotolis");
+    memcpy(operations[1].u.target_create.out_path, "out/after-failure",
+           sizeof "out/after-failure");
+    operations[1].u.target_create.enabled = true;
+
+    tp_error err = {{0}};
+    tp_session_snapshot *snapshot = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_snapshot_create(session, &snapshot, &err));
+    tp_txn_request request;
+    memset(&request, 0, sizeof request);
+    request.schema = TP_TXN_SCHEMA;
+    memcpy(request.id_hex, "56565656565656565656565656565656",
+           sizeof request.id_hex);
+    request.expected_revision = tp_session_snapshot_revision(snapshot);
+    request.ops = operations;
+    request.op_count = 2U;
+    tp_txn_result result;
+    memset(&result, 0, sizeof result);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_apply(session, &request, &result, &err));
+    TEST_ASSERT_TRUE(result.committed);
+    tp_txn_result_free(&result);
+    tp_operation_free(&operations[0]);
+    tp_operation_free(&operations[1]);
+    tp_session_snapshot_destroy(snapshot);
+}
+
+static void add_final_cancel_failure_target(tp_session *session,
+                                            tp_id128 atlas_id) {
+    const tp_exporter *base = tp_exporter_find("json-neotolis");
+    TEST_ASSERT_NOT_NULL(base);
+    static tp_exporter failing;
+    failing = *base;
+    failing.id = "test-final-cancel-failure";
+    failing.display_name = "Test final cancel failure";
+    failing.write = final_cancel_partial_failure_write;
+    const tp_status registration = tp_exporter_register(&failing);
+    TEST_ASSERT_TRUE(registration == TP_STATUS_OK ||
+                     tp_exporter_find(failing.id) != NULL);
+
+    tp_operation operation;
+    memset(&operation, 0, sizeof operation);
+    operation.kind = TP_OP_TARGET_CREATE;
+    operation.atlas_id = atlas_id;
+    operation.u.target_create.target_id =
+        (tp_id128){{0x57U, 0x33U, 0x44U, 0x55U, 0x66U, 0x77U, 0x88U, 0x99U,
+                    0xAAU, 0xBBU, 0xCCU, 0xDDU, 0xEEU, 0xF0U, 0x0FU, 0x11U}};
+    operation.u.target_create.exporter_id =
+        malloc(sizeof "test-final-cancel-failure");
+    operation.u.target_create.out_path =
+        malloc(sizeof "out/final-uncertain");
+    TEST_ASSERT_NOT_NULL(operation.u.target_create.exporter_id);
+    TEST_ASSERT_NOT_NULL(operation.u.target_create.out_path);
+    memcpy(operation.u.target_create.exporter_id,
+           "test-final-cancel-failure",
+           sizeof "test-final-cancel-failure");
+    memcpy(operation.u.target_create.out_path, "out/final-uncertain",
+           sizeof "out/final-uncertain");
+    operation.u.target_create.enabled = true;
+
+    tp_error err = {{0}};
+    tp_session_snapshot *snapshot = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_snapshot_create(session, &snapshot, &err));
+    tp_txn_request request;
+    memset(&request, 0, sizeof request);
+    request.schema = TP_TXN_SCHEMA;
+    memcpy(request.id_hex, "57575757575757575757575757575757",
+           sizeof request.id_hex);
+    request.expected_revision = tp_session_snapshot_revision(snapshot);
+    request.ops = &operation;
+    request.op_count = 1U;
+    tp_txn_result result;
+    memset(&result, 0, sizeof result);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_apply(session, &request, &result, &err));
+    TEST_ASSERT_TRUE(result.committed);
+    tp_txn_result_free(&result);
+    tp_operation_free(&operation);
+    tp_session_snapshot_destroy(snapshot);
+}
+
+static tp_id128 add_second_export_atlas(tp_session *session,
+                                        const char *work_dir) {
+    const tp_id128 atlas_id =
+        (tp_id128){{0x71U, 0x33U, 0x44U, 0x55U, 0x66U, 0x77U, 0x88U, 0x99U,
+                    0xAAU, 0xBBU, 0xCCU, 0xDDU, 0xEEU, 0xF0U, 0x0FU, 0x11U}};
+    tp_operation operations[3];
+    memset(operations, 0, sizeof operations);
+    operations[0].kind = TP_OP_ATLAS_CREATE;
+    operations[0].atlas_id = atlas_id;
+    operations[0].u.atlas_create.name = malloc(sizeof "atlas2");
+    TEST_ASSERT_NOT_NULL(operations[0].u.atlas_create.name);
+    memcpy(operations[0].u.atlas_create.name, "atlas2", sizeof "atlas2");
+
+    operations[1].kind = TP_OP_SOURCE_ADD;
+    operations[1].atlas_id = atlas_id;
+    operations[1].u.source_add.source_id =
+        (tp_id128){{0x72U, 0x33U, 0x44U, 0x55U, 0x66U, 0x77U, 0x88U, 0x99U,
+                    0xAAU, 0xBBU, 0xCCU, 0xDDU, 0xEEU, 0xF0U, 0x0FU, 0x11U}};
+    operations[1].u.source_add.kind = TP_SOURCE_KIND_FILE;
+    char source_path[1200];
+    TEST_ASSERT_TRUE(snprintf(source_path, sizeof source_path,
+                              "%s/job_src.png", work_dir) > 0);
+    const size_t source_size = strlen(source_path) + 1U;
+    operations[1].u.source_add.key = malloc(source_size);
+    TEST_ASSERT_NOT_NULL(operations[1].u.source_add.key);
+    memcpy(operations[1].u.source_add.key, source_path, source_size);
+
+    operations[2].kind = TP_OP_TARGET_CREATE;
+    operations[2].atlas_id = atlas_id;
+    operations[2].u.target_create.target_id =
+        (tp_id128){{0x73U, 0x33U, 0x44U, 0x55U, 0x66U, 0x77U, 0x88U, 0x99U,
+                    0xAAU, 0xBBU, 0xCCU, 0xDDU, 0xEEU, 0xF0U, 0x0FU, 0x11U}};
+    operations[2].u.target_create.exporter_id =
+        malloc(sizeof "json-neotolis");
+    operations[2].u.target_create.out_path =
+        malloc(sizeof "out/second-atlas");
+    TEST_ASSERT_NOT_NULL(operations[2].u.target_create.exporter_id);
+    TEST_ASSERT_NOT_NULL(operations[2].u.target_create.out_path);
+    memcpy(operations[2].u.target_create.exporter_id, "json-neotolis",
+           sizeof "json-neotolis");
+    memcpy(operations[2].u.target_create.out_path, "out/second-atlas",
+           sizeof "out/second-atlas");
+    operations[2].u.target_create.enabled = true;
+
+    tp_error err = {{0}};
+    tp_session_snapshot *snapshot = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_snapshot_create(session, &snapshot, &err));
+    tp_txn_request request;
+    memset(&request, 0, sizeof request);
+    request.schema = TP_TXN_SCHEMA;
+    memcpy(request.id_hex, "71717171717171717171717171717171",
+           sizeof request.id_hex);
+    request.expected_revision = tp_session_snapshot_revision(snapshot);
+    request.ops = operations;
+    request.op_count = 3U;
+    tp_txn_result result;
+    memset(&result, 0, sizeof result);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_apply(session, &request, &result, &err));
+    TEST_ASSERT_TRUE(result.committed);
+    tp_txn_result_free(&result);
+    for (int i = 0; i < 3; ++i) {
+        tp_operation_free(&operations[i]);
+    }
+    tp_session_snapshot_destroy(snapshot);
+    return atlas_id;
+}
+
 typedef struct cancel_thread_ctx {
     tp_session *session;
     tp_status status;
@@ -510,6 +849,31 @@ void test_source_less_export_succeeds_as_skipped(void) {
     tp_mkdirs(work_dir);
 
     tp_error err = {{0}};
+    tp_session_snapshot *snapshot = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_snapshot_create(session, &snapshot, &err));
+    tp_export_snapshot_job *snapshot_job = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_export_snapshot_job_create(snapshot, work_dir, &snapshot_job, &err));
+    tp_session_snapshot_destroy(snapshot);
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_export_notices notices;
+    tp_export_notices_init(&notices);
+    tp_export_report report;
+    memset(&report, 0, sizeof report);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_export_snapshot_job_run_atlas_ex(
+            snapshot_job, 0, arena, &notices, &report, NULL, NULL, NULL,
+            &err));
+    TEST_ASSERT_EQUAL_INT(TP_EXPORT_INPUT_NO_USABLE_IMAGES,
+                          report.input_outcome);
+    tp_export_notices_free(&notices);
+    tp_arena_destroy(arena);
+    tp_export_snapshot_job_destroy(snapshot_job);
+
     const tp_export_command_request request = {
         .work_dir = work_dir,
         .atlas_id = default_atlas_id(session),
@@ -978,19 +1342,19 @@ void test_cancel_after_export_commit_is_rejected(void) {
         .work_dir = work_dir,
         .atlas_id = atlas,
     };
-    tp_job__test_arm_before_terminal_gate();
+    tp_export_run__test_arm_after_terminal_boundary_gate();
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_session_export_start(session, &request, &err));
-    const bool gate_entered = wait_for_before_terminal_gate();
+    const bool gate_entered = wait_for_after_export_terminal_boundary_gate();
     if (!gate_entered) {
-        tp_job__test_release_before_terminal_gate();
+        tp_export_run__test_release_after_terminal_boundary_gate();
     }
     TEST_ASSERT_TRUE_MESSAGE(
         gate_entered,
-        "export worker did not reach the post-commit publication gate");
+        "export worker did not reach the post-terminal-writer boundary gate");
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_INVALID_ARGUMENT, tp_session_job_cancel(session, &err));
-    tp_job__test_release_before_terminal_gate();
+    tp_export_run__test_release_after_terminal_boundary_gate();
 
     tp_session_job_result result = wait_for_job_result(session);
     TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_EXPORT, result.kind);
@@ -998,6 +1362,8 @@ void test_cancel_after_export_commit_is_rejected(void) {
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, result.status);
     TEST_ASSERT_EQUAL_INT(1, result.export_result.atlases_ok);
     TEST_ASSERT_EQUAL_INT(0, result.export_result.atlases_failed);
+    TEST_ASSERT_FALSE(result.export_result.partial_publication);
+    TEST_ASSERT_TRUE(result.export_result.files > 0);
 
     char json_path[1200];
     TEST_ASSERT_TRUE(
@@ -1005,6 +1371,235 @@ void test_cancel_after_export_commit_is_rejected(void) {
         0);
     TEST_ASSERT_TRUE_MESSAGE(tp_fs_exists(json_path),
                              "successful terminal result must match committed output");
+
+    tp_session_job_result_destroy(&result);
+    tp_session_destroy(session);
+    remove_scratch_tree(work_dir);
+}
+
+void test_export_cancel_between_writers_reports_partial_publication(void) {
+    tp_session *session = make_session();
+    const tp_id128 atlas = default_atlas_id(session);
+    char work_dir[1024];
+    job_scratch_dir(work_dir, sizeof work_dir);
+    tp_mkdirs(work_dir);
+    add_file_source(session, atlas, work_dir);
+    add_gated_success_targets(session, atlas);
+
+    char project_path[1200];
+    TEST_ASSERT_TRUE(snprintf(project_path, sizeof project_path,
+                              "%s/job.ntpacker_project", work_dir) > 0);
+    tp_session_save_result save_result;
+    memset(&save_result, 0, sizeof save_result);
+    tp_error err = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_save_new(session, project_path, &save_result, &err));
+
+    const tp_export_command_request request = {
+        .work_dir = work_dir,
+        .atlas_id = atlas,
+    };
+    char first_path[1200];
+    char second_path[1200];
+    TEST_ASSERT_TRUE(snprintf(first_path, sizeof first_path,
+                              "%s/out/first.json", work_dir) > 0);
+    TEST_ASSERT_TRUE(snprintf(second_path, sizeof second_path,
+                              "%s/out/second.json", work_dir) > 0);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_export_start(session, &request, &err));
+    TEST_ASSERT_TRUE_MESSAGE(
+        wait_for_before_export_write_gate(),
+        "export did not park between the first and second target writers");
+    TEST_ASSERT_TRUE_MESSAGE(tp_fs_exists(first_path),
+                             "the first target must already be published");
+    TEST_ASSERT_FALSE_MESSAGE(tp_fs_exists(second_path),
+                              "the second target must not be published yet");
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_job_cancel(session, &err));
+    tp_export_run__test_release_before_write_gate();
+
+    tp_session_job_result result = wait_for_job_result(session);
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_CANCELLED, result.state);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_CANCELLED, result.status);
+    TEST_ASSERT_TRUE(result.export_result.partial_publication);
+    TEST_ASSERT_FALSE(result.export_result.publication_uncertain);
+    TEST_ASSERT_EQUAL_INT(1, result.export_result.targets);
+    TEST_ASSERT_TRUE(result.export_result.files > 0);
+    TEST_ASSERT_TRUE(tp_fs_exists(first_path));
+    TEST_ASSERT_FALSE(tp_fs_exists(second_path));
+
+    tp_session_job_result_destroy(&result);
+    tp_session_destroy(session);
+    remove_scratch_tree(work_dir);
+}
+
+void test_export_cancel_after_failed_writer_reports_uncertain_publication(void) {
+    tp_session *session = make_session();
+    const tp_id128 atlas = default_atlas_id(session);
+    char work_dir[1024];
+    job_scratch_dir(work_dir, sizeof work_dir);
+    tp_mkdirs(work_dir);
+    add_file_source(session, atlas, work_dir);
+    add_gated_failure_targets(session, atlas);
+
+    char project_path[1200];
+    TEST_ASSERT_TRUE(snprintf(project_path, sizeof project_path,
+                              "%s/job.ntpacker_project", work_dir) > 0);
+    tp_session_save_result save_result;
+    memset(&save_result, 0, sizeof save_result);
+    tp_error err = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_save_new(session, project_path, &save_result, &err));
+    char partial_path[1200];
+    char second_path[1200];
+    TEST_ASSERT_TRUE(snprintf(partial_path, sizeof partial_path,
+                              "%s/out/uncertain.json", work_dir) > 0);
+    TEST_ASSERT_TRUE(snprintf(second_path, sizeof second_path,
+                              "%s/out/after-failure.json", work_dir) > 0);
+
+    const tp_export_command_request request = {
+        .work_dir = work_dir,
+        .atlas_id = atlas,
+    };
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_export_start(session, &request, &err));
+    TEST_ASSERT_TRUE_MESSAGE(
+        wait_for_before_export_write_gate(),
+        "export did not park after the failed writer");
+    TEST_ASSERT_TRUE_MESSAGE(
+        tp_fs_exists(partial_path),
+        "the failed direct writer must demonstrate possible partial publication");
+    TEST_ASSERT_FALSE(tp_fs_exists(second_path));
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_job_cancel(session, &err));
+    tp_export_run__test_release_before_write_gate();
+
+    tp_session_job_result result = wait_for_job_result(session);
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_CANCELLED, result.state);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_CANCELLED, result.status);
+    TEST_ASSERT_FALSE(result.export_result.partial_publication);
+    TEST_ASSERT_TRUE(result.export_result.publication_uncertain);
+    TEST_ASSERT_EQUAL_INT(0, result.export_result.targets);
+    TEST_ASSERT_EQUAL_INT(0, result.export_result.files);
+    TEST_ASSERT_EQUAL_INT(1, result.export_result.atlases_failed);
+    TEST_ASSERT_NOT_NULL(strstr(
+        result.export_result.first_error,
+        "intentional partial publication failure"));
+    TEST_ASSERT_TRUE(tp_fs_exists(partial_path));
+    TEST_ASSERT_FALSE(tp_fs_exists(second_path));
+
+    tp_session_job_result_destroy(&result);
+    tp_session_destroy(session);
+    remove_scratch_tree(work_dir);
+}
+
+void test_export_final_failed_writer_cancel_reports_uncertain_publication(void) {
+    tp_session *session = make_session();
+    const tp_id128 atlas = default_atlas_id(session);
+    char work_dir[1024];
+    job_scratch_dir(work_dir, sizeof work_dir);
+    tp_mkdirs(work_dir);
+    add_file_source(session, atlas, work_dir);
+    add_final_cancel_failure_target(session, atlas);
+
+    char project_path[1200];
+    TEST_ASSERT_TRUE(snprintf(project_path, sizeof project_path,
+                              "%s/job.ntpacker_project", work_dir) > 0);
+    tp_session_save_result save_result;
+    memset(&save_result, 0, sizeof save_result);
+    tp_error err = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_save_new(session, project_path, &save_result, &err));
+    char partial_path[1200];
+    TEST_ASSERT_TRUE(snprintf(partial_path, sizeof partial_path,
+                              "%s/out/final-uncertain.json", work_dir) > 0);
+
+    s_final_writer_cancel_session = session;
+    s_final_writer_cancel_status = TP_STATUS_INVALID_ARGUMENT;
+    memset(&s_final_writer_cancel_error, 0,
+           sizeof s_final_writer_cancel_error);
+    const tp_export_command_request request = {
+        .work_dir = work_dir,
+        .atlas_id = atlas,
+    };
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_export_start(session, &request, &err));
+    tp_session_job_result result = wait_for_job_result(session);
+    s_final_writer_cancel_session = NULL;
+
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, s_final_writer_cancel_status);
+    TEST_ASSERT_TRUE(tp_fs_exists(partial_path));
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_CANCELLED, result.state);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_CANCELLED, result.status);
+    TEST_ASSERT_FALSE(result.export_result.partial_publication);
+    TEST_ASSERT_TRUE(result.export_result.publication_uncertain);
+    TEST_ASSERT_EQUAL_INT(0, result.export_result.targets);
+    TEST_ASSERT_EQUAL_INT(0, result.export_result.files);
+    TEST_ASSERT_EQUAL_INT(1, result.export_result.atlases_failed);
+    TEST_ASSERT_NOT_NULL(strstr(
+        result.export_result.first_error,
+        "intentional partial publication failure"));
+
+    tp_session_job_result_destroy(&result);
+    tp_session_destroy(session);
+    remove_scratch_tree(work_dir);
+}
+
+void test_export_nonfinal_failed_writer_cancel_reports_uncertain_publication(void) {
+    tp_session *session = make_session();
+    const tp_id128 first_atlas = default_atlas_id(session);
+    char work_dir[1024];
+    job_scratch_dir(work_dir, sizeof work_dir);
+    tp_mkdirs(work_dir);
+    add_file_source(session, first_atlas, work_dir);
+    add_final_cancel_failure_target(session, first_atlas);
+    (void)add_second_export_atlas(session, work_dir);
+
+    char project_path[1200];
+    TEST_ASSERT_TRUE(snprintf(project_path, sizeof project_path,
+                              "%s/job.ntpacker_project", work_dir) > 0);
+    tp_session_save_result save_result;
+    memset(&save_result, 0, sizeof save_result);
+    tp_error err = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_save_new(session, project_path, &save_result, &err));
+    char partial_path[1200];
+    char second_path[1200];
+    TEST_ASSERT_TRUE(snprintf(partial_path, sizeof partial_path,
+                              "%s/out/final-uncertain.json", work_dir) > 0);
+    TEST_ASSERT_TRUE(snprintf(second_path, sizeof second_path,
+                              "%s/out/second-atlas.json", work_dir) > 0);
+
+    s_final_writer_cancel_session = session;
+    s_final_writer_cancel_status = TP_STATUS_INVALID_ARGUMENT;
+    memset(&s_final_writer_cancel_error, 0,
+           sizeof s_final_writer_cancel_error);
+    const tp_export_command_request request = {
+        .work_dir = work_dir,
+        .atlas_id = {{0}},
+    };
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_export_start(session, &request, &err));
+    tp_session_job_result result = wait_for_job_result(session);
+    s_final_writer_cancel_session = NULL;
+
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, s_final_writer_cancel_status);
+    TEST_ASSERT_TRUE(tp_fs_exists(partial_path));
+    TEST_ASSERT_FALSE(tp_fs_exists(second_path));
+    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_CANCELLED, result.state);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_CANCELLED, result.status);
+    TEST_ASSERT_FALSE(result.export_result.partial_publication);
+    TEST_ASSERT_TRUE(result.export_result.publication_uncertain);
+    TEST_ASSERT_EQUAL_INT(0, result.export_result.targets);
+    TEST_ASSERT_EQUAL_INT(0, result.export_result.files);
+    TEST_ASSERT_EQUAL_INT(1, result.export_result.atlases_failed);
+    TEST_ASSERT_NOT_NULL(strstr(
+        result.export_result.first_error,
+        "intentional partial publication failure"));
 
     tp_session_job_result_destroy(&result);
     tp_session_destroy(session);
@@ -1152,14 +1747,29 @@ void test_partial_export_counts_successful_targets_and_notices(void) {
         .work_dir = work_dir,
         .atlas_id = atlas,
     };
+    tp_export_run__test_arm_after_terminal_boundary_gate();
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_session_export_start(session, &request, &err));
+    TEST_ASSERT_TRUE_MESSAGE(
+        wait_for_after_export_terminal_boundary_gate(),
+        "failed final writer did not reach the terminal side-effect boundary");
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_INVALID_ARGUMENT,
+                          tp_session_job_cancel(session, &err));
+    tp_export_run__test_release_after_terminal_boundary_gate();
 
     tp_session_job_result result = wait_for_job_result(session);
     TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_FAILED, result.state);
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_PATH_RESOLVE_FAILED, result.status);
+    TEST_ASSERT_EQUAL_STRING("intentional partial-export failure",
+                             result.error.msg);
     TEST_ASSERT_EQUAL_INT(1, result.export_result.targets);
+    TEST_ASSERT_TRUE(result.export_result.files > 0);
+    TEST_ASSERT_FALSE(result.export_result.partial_publication);
+    TEST_ASSERT_FALSE(result.export_result.publication_uncertain);
     TEST_ASSERT_EQUAL_INT(1, result.export_result.atlases_failed);
     TEST_ASSERT_EQUAL_INT(1, result.export_result.notices);
+    TEST_ASSERT_NOT_NULL(strstr(result.export_result.first_error,
+                                "intentional partial-export failure"));
 
     tp_session_job_result_destroy(&result);
     tp_session_destroy(session);
@@ -1276,6 +1886,10 @@ int main(int argc, char **argv) {
     RUN_TEST(test_late_pack_cancel_has_coherent_terminal_result);
     RUN_TEST(test_cancel_after_export_commit_is_rejected);
     RUN_TEST(test_export_cancel_accepted_before_final_commit_owns_terminal);
+    RUN_TEST(test_export_cancel_between_writers_reports_partial_publication);
+    RUN_TEST(test_export_cancel_after_failed_writer_reports_uncertain_publication);
+    RUN_TEST(test_export_final_failed_writer_cancel_reports_uncertain_publication);
+    RUN_TEST(test_export_nonfinal_failed_writer_cancel_reports_uncertain_publication);
     RUN_TEST(test_export_scan_observes_the_accepted_cancel_claim);
     RUN_TEST(test_partial_export_counts_successful_targets_and_notices);
     RUN_TEST(test_cancel_after_last_observation_wins_terminal_publication);
