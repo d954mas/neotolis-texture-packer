@@ -74,6 +74,8 @@ uint64_t gui_session_client_snapshot_lifetime_generation(
     const gui_session_client *client);
 uint64_t gui_session_client_source_runtime_generation(
     const gui_session_client *client);
+tp_session_job_observed_state gui_session_client_job_state(
+    const gui_session_client *client);
 bool gui_session_client_frame_is_pinned(
     const gui_session_client *client);
 

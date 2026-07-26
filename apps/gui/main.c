@@ -501,6 +501,23 @@ static void frame(void) {
     /* dialogs + model mutations queued last frame run here, cleanly between frames */
     apply_pending();
 
+    const gui_project_host_lifecycle host_lifecycle =
+        gui_project_host_lifecycle_query();
+    if (host_lifecycle == GUI_PROJECT_HOST_OPEN ||
+        host_lifecycle == GUI_PROJECT_HOST_DRAINING) {
+        tp_error host_error = {{0}};
+        const tp_status host_status =
+            gui_project_host_drain(&host_error);
+        if (host_status != TP_STATUS_OK) {
+            set_statusf_ex(
+                STATUS_ERROR,
+                "Session host admission failed: %s",
+                host_error.msg[0]
+                    ? host_error.msg
+                    : tp_status_str(host_status));
+        }
+    }
+
     /* Fallback commit for a buffered gesture that never got a release/blur/discrete boundary
      * (decision 0015). GATED on no active gesture -- no held pointer and no focused
      * input -- so it can never split a live drag or a mid-typing field; the 0.30 s window inside
@@ -520,8 +537,9 @@ static void frame(void) {
                 ? observation_error.msg
                 : tp_status_str(observation_status));
     }
+    gui_actions_poll_host_completion();
 
-    /* Heartbeat: the frame loop keeps ticking while a pack/export runs on the worker thread, so a slow
+    /* Heartbeat: the frame loop keeps ticking while a pack/export runs in the owned process, so a slow
      * concave pack never freezes the window. Throttled to ~2 Hz; the frames-since count shows the rate. */
     if (gui_pack_async_busy()) {
         static double s_hb_last;
@@ -1090,13 +1108,48 @@ static int gui_main_utf8(int argc, char *argv[]) {
 
     nt_app_run(frame);
 
-    /* The window closed while a session job was still active. Cancellation is cooperative, so keep
-     * the OS message pump alive and poll until the typed job reaches a terminal state. */
-    if (gui_pack_worker_active()) {
-        gui_pack_async_cancel();
-        while (gui_pack_worker_active()) {
-            nt_window_poll();
-            (void)gui_pack_poll(NULL); /* joins + frees the job the frame it signals done */
+    /* Stop ingress, request cancellation through the single host owner, and
+     * keep only the non-blocking OS/process pumps alive until cutover is safe. */
+    if (gui_project_host_lifecycle_query() ==
+        GUI_PROJECT_HOST_OPEN) {
+        tp_error drain_error = {{0}};
+        const tp_status drain_status =
+            gui_project_host_begin_drain(
+                &drain_error);
+        if (drain_status != TP_STATUS_OK) {
+            nt_log_error(
+                "GUI host drain failed: %s",
+                drain_error.msg[0]
+                    ? drain_error.msg
+                    : tp_status_str(drain_status));
+        }
+    }
+    while (gui_project_host_lifecycle_query() ==
+           GUI_PROJECT_HOST_DRAINING) {
+        nt_window_poll();
+        tp_error drain_error = {{0}};
+        const tp_status drain_status =
+            gui_project_host_drain(
+                &drain_error);
+        if (drain_status != TP_STATUS_OK) {
+            nt_log_error(
+                "GUI host shutdown pump failed: %s",
+                drain_error.msg[0]
+                    ? drain_error.msg
+                    : tp_status_str(drain_status));
+        }
+        tp_error observation_error = {{0}};
+        const tp_status observation_status =
+            gui_project_frame_begin(
+                &observation_error);
+        gui_project_frame_end();
+        if (observation_status != TP_STATUS_OK) {
+            nt_log_error(
+                "GUI host shutdown observation failed: %s",
+                observation_error.msg[0]
+                    ? observation_error.msg
+                    : tp_status_str(
+                          observation_status));
         }
     }
 

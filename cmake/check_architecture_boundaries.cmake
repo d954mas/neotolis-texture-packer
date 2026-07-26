@@ -69,6 +69,12 @@ foreach(_source IN LISTS _arch_sources)
     if(_relative MATCHES "(^|/)[^/]*(worker|transport|dev[_-]?api|mcp|host_queue)[^/]*\\.(c|h)$")
         set(_is_async true)
     endif()
+    # The GUI host admission owner borrows the live session only during its
+    # host-thread drain call. Its no-retained-field rule and exclusive direct
+    # admission symbols are pinned below; it is not background async code.
+    if(_relative MATCHES "^apps/gui/gui_host_queue\\.(c|h)$")
+        set(_is_async false)
+    endif()
 
     file(STRINGS "${_source}" _lines)
     set(_line_number 0)
@@ -300,9 +306,9 @@ _arch_count_matches(
     "${_gui_pack_jobs}"
     "tp_session[ \t]*\\*"
     _gui_pack_raw_sessions)
-if(NOT _gui_pack_raw_sessions EQUAL 8)
+if(NOT _gui_pack_raw_sessions EQUAL 0)
     message(FATAL_ERROR
-        "R2b debt gui_pack_jobs raw session aliases changed: expected 8, got ${_gui_pack_raw_sessions}")
+        "R2b raw-session deletion regressed: expected 0, got ${_gui_pack_raw_sessions}")
 endif()
 
 # Completed R1c deletion manifest. These zero-count pins make the cutover
@@ -315,26 +321,78 @@ foreach(_entry IN ITEMS
     _arch_assert_symbol("packer/src/tp_job.c" "${_entry}" 0
                         "R1c completed")
 endforeach()
-_arch_assert_symbol("apps/gui/gui_pack_jobs.c" "gui_pack_shutdown" 1 "R2d")
-_arch_assert_symbol("apps/gui/gui_pack_jobs.c" "wait_for_job" 4 "R2b/R2d")
-_arch_assert_symbol("apps/gui/main.c" "gui_pack_shutdown" 1 "R2d")
+_arch_assert_symbol("apps/gui/gui_pack_jobs.c" "gui_pack_shutdown" 1 "R2b completed")
+_arch_assert_symbol("apps/gui/gui_pack_jobs.c" "wait_for_job" 0 "R2b completed")
+_arch_assert_symbol("apps/gui/main.c" "gui_pack_shutdown" 1 "R2b completed")
+
+foreach(_symbol IN ITEMS
+        job_session
+        tp_session_job_active
+        tp_session_job_poll
+        tp_session_job_take_result
+        tp_session_job_cancel
+        tp_session_pack_job_start
+        tp_session_export_start)
+    _arch_assert_symbol("apps/gui/gui_pack_jobs.c" "${_symbol}" 0 "R2b completed")
+endforeach()
+_arch_assert_symbol("apps/gui/gui_project.c"
+                    "gui_project_session_for_jobs" 0 "R2b completed")
+_arch_assert_symbol("apps/gui/gui_project.h"
+                    "gui_project_session_for_jobs" 0 "R2b completed")
+_arch_assert_symbol("apps/gui/gui_actions.c"
+                    "gui_project_session_for_jobs" 0 "R2b completed")
+_arch_assert_symbol("apps/gui/gui_actions.c"
+                    "s_refresh_fingerprint_session" 0 "R2b completed")
+_arch_assert_symbol("apps/gui/main.c"
+                    "gui_pack_worker_active" 0 "R2b completed")
+_arch_assert_symbol("apps/gui/main.c"
+                    "gui_pack_poll" 0 "R2b completed")
 
 foreach(_entry IN ITEMS
-        "job_session|10" "tp_session_job_active|3" "tp_session_job_poll|4"
-        "tp_session_job_take_result|1" "tp_session_job_cancel|1"
-        "tp_session_job_result_destroy|1" "tp_session_pack_job_start|2"
-        "tp_session_export_start|1")
+        "tp_session_pack_job_start|1"
+        "tp_session_export_start|1"
+        "tp_session_job_poll|1"
+        "tp_session_job_take_result|1"
+        "tp_session_job_cancel|1")
     string(REPLACE "|" ";" _parts "${_entry}")
     list(GET _parts 0 _symbol)
     list(GET _parts 1 _count)
-    _arch_assert_symbol("apps/gui/gui_pack_jobs.c" "${_symbol}" "${_count}" "R2b")
+    _arch_assert_symbol("apps/gui/gui_host_queue.c"
+                        "${_symbol}" "${_count}" "R2b single host owner")
 endforeach()
-_arch_assert_symbol("apps/gui/gui_project.c"
-                    "gui_project_session_for_jobs" 1 "R2b")
-_arch_assert_symbol("apps/gui/gui_project.h"
-                    "gui_project_session_for_jobs" 1 "R2b")
-_arch_assert_symbol("apps/gui/gui_actions.c"
-                    "gui_project_session_for_jobs" 1 "R2b")
+file(GLOB _gui_host_owned_sources LIST_DIRECTORIES false
+    "${_arch_root}/apps/gui/gui*.c"
+    "${_arch_root}/apps/gui/main.c")
+foreach(_source IN LISTS _gui_host_owned_sources)
+    cmake_path(GET _source FILENAME _filename)
+    if(_filename STREQUAL "gui_host_queue.c")
+        continue()
+    endif()
+    cmake_path(RELATIVE_PATH _source BASE_DIRECTORY "${_arch_root}"
+               OUTPUT_VARIABLE _relative)
+    foreach(_symbol IN ITEMS
+            tp_session_pack_job_start
+            tp_session_export_start
+            tp_session_job_active
+            tp_session_job_poll
+            tp_session_job_take_result
+            tp_session_job_cancel)
+        _arch_assert_symbol(
+            "${_relative}" "${_symbol}" 0
+            "R2b single GUI host admission owner")
+    endforeach()
+endforeach()
+_arch_assert_symbol(
+    "apps/gui/gui_host_queue.h"
+    "tp_session[ \t]*\\*[ \t]*[A-Za-z_][A-Za-z0-9_]*[ \t]*;"
+    0 "R2b no retained raw session")
+_arch_count_matches("${_arch_root}/apps/gui/CMakeLists.txt"
+                    "(^|[ \t(])gui_host_queue\\.c([ \t\r\n)]|$)"
+                    _host_queue_source_registrations)
+if(NOT _host_queue_source_registrations EQUAL 5)
+    message(FATAL_ERROR
+        "R2b gui_host_queue.c registrations expected 5, got ${_host_queue_source_registrations}")
+endif()
 
 # Completed R2a deletion manifest. GUI observation and immutable snapshot
 # lifetime have one owner; presentation does not assemble or refresh snapshots.
@@ -436,8 +494,6 @@ _arch_assert_function_symbol("apps/gui/gui_project_file.c" "gui_project_new"
                              "gui_project_pending_discard" 1 "R2d")
 _arch_assert_function_symbol("apps/gui/gui_project_file.c" "gui_project_open"
                              "gui_project_pending_discard" 1 "R2d")
-_arch_assert_symbol("apps/gui/gui_actions.c"
-                    "s_refresh_fingerprint_session" 4 "R2d")
 foreach(_symbol IN ITEMS request_new request_open request_exit)
     _arch_assert_symbol("apps/gui/gui_view_chrome.c" "${_symbol}" 1 "R2d")
 endforeach()

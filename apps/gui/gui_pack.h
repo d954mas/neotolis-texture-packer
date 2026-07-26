@@ -18,6 +18,7 @@
 
 #include "tp_core/tp_model.h" /* tp_result */
 #include "tp_core/tp_id.h"
+#include "tp_core/tp_session.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -109,7 +110,7 @@ void gui_pack_preview_clear(void);
 int gui_pack_preview_diff(int atlas_index, const char *exporter_id, char *chip, size_t chip_cap, char *tip,
                           size_t tip_cap);
 
-/* --- async packing (interactive; ux.md §3 worker thread) --------------------------------------
+/* --- async packing (interactive; owned worker process) -----------------------------------------
  * One in-flight op MAX (pack OR export). The session owns the concrete worker handle and immutable
  * input; this frontend only captures intent, polls typed progress, and maps the typed result at a
  * frame boundary. The synchronous adapters above reuse and drain this exact path. */
@@ -136,6 +137,8 @@ typedef enum {
 
 typedef struct {
     gui_pack_done kind;
+    tp_session_job_rejection rejection;
+    tp_status status;
     int atlas_index;    /* pack: which atlas landed */
     double ms;          /* pack: wall-clock pack time */
     bool input_changed; /* pack: model/source token differs -> keep preview stale */
@@ -166,24 +169,25 @@ bool gui_pack_async_start(int atlas_index, char *err, size_t err_cap);
 /* Starts an async export of every exporting atlas. false (fills err) if busy / nothing to export /
  * relative out-paths need a saved project. */
 bool gui_pack_export_async_start(char *err, size_t err_cap);
-/* Call once per frame. If a worker finished, joins it, applies the pack slot swap (pack), and
- * returns the completion (else GUI_PACK_DONE_NONE). Fills *out. */
+/* Consumes one completion only after host drain + atomic observation classified
+ * its envelope. Applies a Pack slot swap only for an accepted result. */
 gui_pack_done gui_pack_poll(gui_pack_result_info *out);
 bool gui_pack_async_busy(void);
-/* True only when a REAL worker thread is in flight (excludes the --shot-packing debug-forced busy that
- * gui_pack_async_busy also reports). The shutdown drain (window X-close) waits on this so it never spins
- * on the fake shot busy, which has no thread to join. */
+/* True for real queued/admitted/staged host work; excludes screenshot-only
+ * synthetic busy presentation. */
 bool gui_pack_worker_active(void);
 gui_pack_async_kind gui_pack_async_active_kind(void);
 double gui_pack_async_elapsed_sec(void);
 void gui_pack_export_progress(int *cur, int *total); /* export "atlas cur/total" for the strip */
-/* Requests cancel: the non-interruptible worker runs to completion, but its result is discarded when
- * it lands (pack) / no further atlases are started (export). */
-void gui_pack_async_cancel(void);
+/* Enqueues typed cancellation for the host admission phase. Rejections remain
+ * structured (duplicate, closed host, or no live job). */
+tp_status gui_pack_async_cancel(tp_error *err);
 bool gui_pack_async_cancelling(void);
 /* DEV (--shot-packing): force the busy strip state without a real worker, for screenshots. */
 void gui_pack_debug_force_busy(gui_pack_async_kind kind);
 
+/* Non-blocking: stops host ingress and releases presentation-owned results.
+ * The frame/shutdown host pump owns cancellation and terminal drain. */
 void gui_pack_shutdown(void);
 
 #ifdef __cplusplus

@@ -105,8 +105,11 @@ void gui_edit_target_enabled(const gui_target_ref *target, bool enabled);
 void gui_edit_target_exporter(const gui_target_ref *target,
                               const char *exporter_id);
 
-/* --- deferred side-effect pump: lands async pack/export, commits blur edits, drains the queue --- */
+/* --- deferred semantic ingress: commits blur edits and drains action queues --- */
 void apply_pending(void);
+/* Consumes only host-classified Pack/Export completions after the frame's
+ * atomic observation has reduced them. */
+void gui_actions_poll_host_completion(void);
 
 /* Raised by a view widget when an EDIT GESTURE ENDS (slider release / field Enter+blur / a discrete
  * dropdown/checkbox pick): apply_pending flushes gui_project's pending transaction AFTER the queue

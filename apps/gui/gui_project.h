@@ -31,6 +31,7 @@
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_operation.h"
 #include "tp_core/tp_recovery.h"
+#include "tp_core/tp_job.h"
 #include "tp_core/tp_session_snapshot_query.h"
 #include "gui_project_view.h"
 
@@ -40,6 +41,26 @@ extern "C" {
 
 /* Result of an add-source attempt (the GUI surfaces "already added" distinctly). */
 typedef enum { GUI_ADD_FAILED = 0, GUI_ADD_ADDED, GUI_ADD_DUPLICATE } gui_add_status;
+
+typedef enum gui_project_host_lifecycle {
+    GUI_PROJECT_HOST_CLOSED = 0,
+    GUI_PROJECT_HOST_OPEN,
+    GUI_PROJECT_HOST_DRAINING,
+    GUI_PROJECT_HOST_READY_TO_CUTOVER
+} gui_project_host_lifecycle;
+
+typedef struct gui_project_job_completion {
+    bool present;
+    bool publish_result;
+    uint64_t session_instance_generation;
+    uint64_t request_id;
+    tp_session_job_kind kind;
+    tp_session_job_state state;
+    tp_session_job_rejection rejection;
+    tp_status status;
+    tp_error error;
+    tp_session_job_result result;
+} gui_project_job_completion;
 
 /* Creates the initial fresh in-memory project (one default atlas, no path, clean). Crash recovery is
  * collected and resolved separately through the R6 APIs below; startup never adopts an orphan live. */
@@ -98,9 +119,26 @@ uint64_t gui_project_source_runtime_generation(void);
 tp_status gui_project_frame_begin(tp_error *err);
 void gui_project_frame_end(void);
 bool gui_project_frame_is_pinned(void);
-/* Narrow orchestration seam for the derived Pack / side-effect Export job
- * adapter. The session remains opaque and owns the one active typed handle. */
-tp_session *gui_project_session_for_jobs(void);
+/* Host-thread admission facade. Request payloads are copied on enqueue; the
+ * queue never exposes or retains the mutable session. */
+tp_status gui_project_job_enqueue_pack(
+    tp_id128 atlas_id, const char *work_dir,
+    const char *preview_exporter_id, tp_error *err);
+tp_status gui_project_job_enqueue_export(
+    tp_id128 atlas_id, const char *work_dir, tp_error *err);
+tp_status gui_project_job_enqueue_cancel(tp_error *err);
+tp_status gui_project_host_drain(tp_error *err);
+tp_status gui_project_host_begin_drain(tp_error *err);
+bool gui_project_host_take_completion(
+    gui_project_job_completion *out);
+void gui_project_job_completion_destroy(
+    gui_project_job_completion *completion);
+bool gui_project_job_busy(void);
+bool gui_project_job_cancelling(void);
+tp_session_job_kind gui_project_job_active_kind(void);
+tp_session_job_observed_state gui_project_job_observed_state(void);
+gui_project_host_lifecycle gui_project_host_lifecycle_query(void);
+uint64_t gui_project_session_instance_generation(void);
 uint64_t gui_project_snapshot_model_generation(void);
 tp_status gui_project_snapshot_serialize(char **out, size_t *out_len,
                                          tp_error *err);
@@ -269,9 +307,13 @@ bool gui_project_take_op_error(char *out, size_t cap);
  * every flush-failure abort path so they use one wording. */
 void gui_project_flush_error(char *out, size_t cap);
 
-#ifdef NTPACKER_GUI_SELFTEST
-/* Borrowed dev-seam access for gui_selftest.c only. */
+#if defined(NTPACKER_GUI_SELFTEST) || defined(TP_ENABLE_TEST_SEAMS)
+/* Borrowed test-only access for recovery and external-observer proofs. */
 tp_session *gui_project__test_session(void);
+#endif
+#ifdef TP_ENABLE_TEST_SEAMS
+void gui_project__test_fail_next_observe(void);
+bool gui_project__test_host_has_staged_completion(void);
 #endif
 
 #ifdef __cplusplus

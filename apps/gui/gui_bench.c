@@ -369,7 +369,7 @@ static void bench_run_probes(void) {
         s_bench_fail = true;
     }
     if (started) {
-        gui_pack_async_cancel(); /* discard the result; main()'s frame poll + drain join the worker */
+        (void)gui_pack_async_cancel(NULL);
     }
 }
 

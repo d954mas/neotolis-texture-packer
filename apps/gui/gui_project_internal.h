@@ -2,6 +2,7 @@
 #define NTPACKER_GUI_PROJECT_INTERNAL_H
 
 #include "gui_project.h"
+#include "gui_host_queue.h"
 #include "gui_session_client.h"
 #include "tp_core/tp_srckey.h"
 
@@ -29,6 +30,7 @@ typedef struct gui_coalesce_key {
 typedef struct gui_project_state {
     tp_session *session;
     gui_session_client client;
+    gui_host_queue host_queue;
     uint64_t observed_instance_generation;
     int64_t observed_revision;
     bool client_initialized;

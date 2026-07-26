@@ -325,6 +325,15 @@ gui_session_client_source_runtime_generation(
                : 0U;
 }
 
+tp_session_job_observed_state
+gui_session_client_job_state(
+    const gui_session_client *client) {
+    return client && client->latest
+               ? tp_session_observation_job_state(
+                     client->latest)
+               : (tp_session_job_observed_state){0};
+}
+
 bool gui_session_client_frame_is_pinned(
     const gui_session_client *client) {
     return client && client->frame_pinned;

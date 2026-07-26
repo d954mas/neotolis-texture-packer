@@ -46,8 +46,8 @@ void do_pack_blocking(void) {
     }
 }
 
-/* Interactive Pack (Ctrl+P / strip / stale chip): starts the pack on a worker thread so the window
- * never freezes. Completion is applied at a frame boundary by poll_async (apply_pending). */
+/* Interactive Pack (Ctrl+P / strip / stale chip): enqueues immutable host
+ * intent. Completion is applied only after host drain + atomic observation. */
 void do_pack(void) {
     if (gui_actions__flush_failed()) {
         return; /* A rejected buffered edit must not produce a stale Pack result. */
@@ -71,7 +71,8 @@ void do_pack(void) {
 }
 
 /* Ctrl+E / Export: starts an async export of every atlas with sources + >=1 enabled target on a
- * worker thread (per-atlas failures non-fatal, ux.md §3.5). Completion reported via poll_async. */
+ * owned worker process (per-atlas failures non-fatal, ux.md §3.5).
+ * Completion is reported through the classified host receipt. */
 static void do_export(void) {
     if (gui_actions__flush_failed()) {
         return; /* A rejected buffered edit must not produce a stale Export. */

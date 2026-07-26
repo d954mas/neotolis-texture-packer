@@ -3427,7 +3427,10 @@ void selftest_pre_frame(void) {
             char aerr[256] = {0};
             const bool started = gui_pack_async_start(0, aerr, sizeof aerr);
             NT_ASSERT(started && "SELFTEST: cancel-phase pack must start");
-            gui_pack_async_cancel(); /* cancel before it can land -> result discarded on landing */
+            NT_ASSERT(
+                gui_pack_async_cancel(NULL) ==
+                    TP_STATUS_OK &&
+                "SELFTEST: cancel-phase request must be admitted");
         } else if (gui_pack_async_busy()) {
             NT_ASSERT(s_st_pf < 3000 && "SELFTEST: cancelled pack did not land");
         } else {
@@ -3554,31 +3557,56 @@ void selftest_pre_frame(void) {
             s_st_pf = 0;
         }
     } else if (s_st_phase == 16) {
-        /* Shutdown-while-busy (req 4c): start an async pack, then gui_pack_shutdown() must cancel + JOIN the
-         * worker + free + reset without hanging (the window X-close path). Runs to completion in one frame --
-         * gui_pack_shutdown joins synchronously, so afterward the job is idle. main() calls it AGAIN at exit
-         * (idempotent -- the second call sees !busy). Kept LAST because it tears the pack session down. */
-        g_ui_scale = 1.0F;
-        g_nt_window.fb_width = 1280;
-        g_nt_window.fb_height = 800;
-        gui_project_new();
-        gui_pack_clear(-1);
-        s_sel_atlas = 0;
-        reset_selection();
-        char afolder[512];
-        to_abs("examples/defold-demo/examples/anim_trim/anims", afolder, sizeof afolder);
-        (void)gui_project_add_source(0, afolder);
-        gui_scan_invalidate_all();
-        char aerr[256] = {0};
-        const bool started = gui_pack_async_start(0, aerr, sizeof aerr);
-        NT_ASSERT(started && gui_pack_async_busy() && "SELFTEST: shutdown-phase pack must start busy");
-        gui_pack_shutdown(); /* busy branch: cancel + join + free + reset */
-        NT_ASSERT(!gui_pack_async_busy() && "SELFTEST: shutdown-while-busy must join + reset (no hang)");
+        /* Shutdown-while-busy: shutdown stops ingress without blocking. The
+         * normal frame host then owns cancel, process pump, observation, and
+         * terminal receipt classification over subsequent frames. */
+        if (s_st_pf == 1) {
+            g_ui_scale = 1.0F;
+            g_nt_window.fb_width = 1280;
+            g_nt_window.fb_height = 800;
+            gui_project_new();
+            gui_pack_clear(-1);
+            s_sel_atlas = 0;
+            reset_selection();
+            char afolder[512];
+            to_abs("examples/defold-demo/examples/anim_trim/anims", afolder, sizeof afolder);
+            (void)gui_project_add_source(0, afolder);
+            gui_scan_invalidate_all();
+            char aerr[256] = {0};
+            const bool started = gui_pack_async_start(0, aerr, sizeof aerr);
+            NT_ASSERT(started && gui_pack_async_busy() &&
+                      "SELFTEST: shutdown-phase pack must start busy");
+            return;
+        }
+        if (s_st_pf == 2) {
+            NT_ASSERT(
+                gui_pack_async_busy() &&
+                "SELFTEST: shutdown-phase pack must reach host admission");
+            gui_pack_shutdown();
+            NT_ASSERT(
+                (gui_project_host_lifecycle_query() ==
+                    GUI_PROJECT_HOST_READY_TO_CUTOVER &&
+                 !gui_pack_async_busy()) ||
+                    gui_project_host_lifecycle_query() ==
+                        GUI_PROJECT_HOST_DRAINING);
+            return;
+        }
+        NT_ASSERT(
+            s_st_pf < 3000 &&
+            "SELFTEST: shutdown drain exceeded the frame cap");
+        if (gui_project_host_lifecycle_query() ==
+                GUI_PROJECT_HOST_DRAINING ||
+            gui_pack_async_busy()) {
+            return;
+        }
+        NT_ASSERT(
+            gui_project_host_lifecycle_query() ==
+            GUI_PROJECT_HOST_READY_TO_CUTOVER);
         gui_shell_reset_shown_result();
         NT_ASSERT(!gui_canvas_has_atlas(&s_canvas) &&
                   gui_canvas_get_mode(&s_canvas) == GUI_CANVAS_SOURCE &&
                   "SELFTEST: pack shutdown must release the canvas result borrow");
-        nt_log_info("SELFTEST: shutdown-while-busy joined cleanly");
+        nt_log_info("SELFTEST: shutdown-while-busy drained cleanly");
         s_st_phase = 17;
         s_st_pf = 0;
     } else {

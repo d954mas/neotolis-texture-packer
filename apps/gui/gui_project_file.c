@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "core/nt_assert.h"
 #include "tp_core/tp_identity.h"
 #include "tp_core/tp_session.h"
 
@@ -13,6 +14,12 @@ static tp_status install_session(
             err, TP_STATUS_INVALID_ARGUMENT,
             "GUI session installation requires a candidate");
     }
+    if (!gui_host_queue_can_replace(
+            &s_project.host_queue)) {
+        return tp_error_set(
+            err, TP_STATUS_INVALID_ARGUMENT,
+            "GUI session replacement requires an idle open host");
+    }
     const tp_status attach_status =
         gui_session_client_attach(
             &s_project.client, next, err);
@@ -21,6 +28,28 @@ static tp_status install_session(
             attach_status, err);
         return attach_status;
     }
+    const gui_host_lifecycle_state lifecycle =
+        gui_host_queue_lifecycle(
+            &s_project.host_queue);
+    if (lifecycle == GUI_HOST_OPEN) {
+        const tp_status drain_status =
+            gui_host_queue_begin_drain(
+                &s_project.host_queue, NULL);
+        NT_ASSERT(drain_status == TP_STATUS_OK);
+        NT_ASSERT(
+            gui_host_queue_lifecycle(
+                &s_project.host_queue) ==
+            GUI_HOST_READY_TO_CUTOVER);
+    } else {
+        NT_ASSERT(lifecycle == GUI_HOST_CLOSED);
+    }
+    const tp_status open_status =
+        gui_host_queue_open(
+            &s_project.host_queue,
+            gui_session_client_instance_generation(
+                &s_project.client),
+            NULL);
+    NT_ASSERT(open_status == TP_STATUS_OK);
     tp_session *old = s_project.session;
     s_project.session = next;
     gui_project__snapshot_drop();
@@ -86,6 +115,27 @@ void gui_project_shutdown(void) {
     (void)(!s_project.session || gui_project_flush_pending());
     gui_project_pending_discard();
     gui_project__snapshot_drop();
+    if (gui_host_queue_lifecycle(
+            &s_project.host_queue) ==
+        GUI_HOST_OPEN) {
+        NT_ASSERT(!gui_host_queue_busy(
+            &s_project.host_queue));
+        const tp_status drain_status =
+            gui_host_queue_begin_drain(
+                &s_project.host_queue, NULL);
+        NT_ASSERT(drain_status == TP_STATUS_OK);
+    }
+    NT_ASSERT(
+        gui_host_queue_lifecycle(
+            &s_project.host_queue) ==
+            GUI_HOST_READY_TO_CUTOVER ||
+        gui_host_queue_lifecycle(
+            &s_project.host_queue) ==
+            GUI_HOST_CLOSED);
+    const tp_status close_status =
+        gui_host_queue_close(
+            &s_project.host_queue, NULL);
+    NT_ASSERT(close_status == TP_STATUS_OK);
     gui_session_client_detach(&s_project.client);
     if (s_project.session && s_project.discard_recovery_on_shutdown) {
         (void)tp_session_discard(s_project.session, NULL);

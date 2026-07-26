@@ -93,15 +93,32 @@ static void reduce_project_observation(
     }
 }
 
+static void reduce_host_observation(
+    void *context,
+    const tp_session_observation *observation,
+    uint64_t instance_generation) {
+    gui_project_state *project = context;
+    NT_ASSERT(project != NULL);
+    gui_host_queue_reduce_observation(
+        &project->host_queue, observation,
+        instance_generation);
+}
+
 tp_status gui_project__client_init(tp_error *err) {
     if (s_project.client_initialized) {
         return TP_STATUS_OK;
     }
     gui_session_client_init(&s_project.client);
-    const tp_status status =
+    gui_host_queue_init(&s_project.host_queue);
+    tp_status status =
         gui_session_client_register_reducer(
             &s_project.client,
             reduce_project_observation, &s_project, err);
+    if (status == TP_STATUS_OK) {
+        status = gui_session_client_register_reducer(
+            &s_project.client,
+            reduce_host_observation, &s_project, err);
+    }
     if (status == TP_STATUS_OK) {
         s_project.client_initialized = true;
     }
@@ -152,7 +169,137 @@ bool gui_project_frame_is_pinned(void) {
         &s_project.client);
 }
 
-tp_session *gui_project_session_for_jobs(void) { return s_project.session; }
+tp_status gui_project_job_enqueue_pack(
+    tp_id128 atlas_id, const char *work_dir,
+    const char *preview_exporter_id, tp_error *err) {
+    return gui_host_queue_enqueue_pack(
+        &s_project.host_queue, atlas_id, work_dir,
+        preview_exporter_id, err);
+}
+
+tp_status gui_project_job_enqueue_export(
+    tp_id128 atlas_id, const char *work_dir,
+    tp_error *err) {
+    return gui_host_queue_enqueue_export(
+        &s_project.host_queue, atlas_id, work_dir,
+        err);
+}
+
+tp_status gui_project_job_enqueue_cancel(
+    tp_error *err) {
+    return gui_host_queue_enqueue_cancel(
+        &s_project.host_queue, err);
+}
+
+tp_status gui_project_host_drain(tp_error *err) {
+    if (!s_project.session) {
+        return tp_error_set(
+            err, TP_STATUS_NOT_FOUND,
+            "GUI host has no live session");
+    }
+    NT_ASSERT(
+        s_project.host_queue
+                .session_instance_generation ==
+        gui_session_client_instance_generation(
+            &s_project.client));
+    return gui_host_queue_drain(
+        &s_project.host_queue, s_project.session, err);
+}
+
+tp_status gui_project_host_begin_drain(
+    tp_error *err) {
+    return gui_host_queue_begin_drain(
+        &s_project.host_queue, err);
+}
+
+bool gui_project_host_take_completion(
+    gui_project_job_completion *out) {
+    if (!out) {
+        return false;
+    }
+    gui_host_completion completion = {0};
+    if (!gui_host_queue_take_completion(
+            &s_project.host_queue, &completion)) {
+        return false;
+    }
+    *out = (gui_project_job_completion){
+        .present = completion.present,
+        .publish_result = completion.publish_result,
+        .session_instance_generation =
+            completion.envelope
+                .session_instance_generation,
+        .request_id = completion.envelope.request_id,
+        .kind = completion.envelope.kind,
+        .state = completion.state,
+        .rejection = completion.rejection,
+        .status = completion.status,
+        .error = completion.error,
+        .result = completion.result,
+    };
+    completion.result = (tp_session_job_result){0};
+    gui_host_completion_destroy(&completion);
+    return true;
+}
+
+void gui_project_job_completion_destroy(
+    gui_project_job_completion *completion) {
+    if (!completion) {
+        return;
+    }
+    tp_session_job_result_destroy(
+        &completion->result);
+    *completion =
+        (gui_project_job_completion){0};
+}
+
+bool gui_project_job_busy(void) {
+    const tp_session_job_observed_state state =
+        gui_session_client_job_state(
+            &s_project.client);
+    if (state.present &&
+        state.session_instance_generation ==
+            gui_session_client_instance_generation(
+                &s_project.client) &&
+        !state.terminal) {
+        return true;
+    }
+    /* Before the next atomic observation, ingress and staged receipts are
+     * host lifecycle facts rather than a second runtime-state projection.
+     * `active` also keeps admission fail-safe if observation refresh failed. */
+    return s_project.host_queue.command_count > 0U ||
+           s_project.host_queue.staged.present ||
+           s_project.host_queue.active;
+}
+
+bool gui_project_job_cancelling(void) {
+    return gui_host_queue_cancelling(
+        &s_project.host_queue);
+}
+
+tp_session_job_kind
+gui_project_job_active_kind(void) {
+    return gui_host_queue_active_kind(
+        &s_project.host_queue);
+}
+
+tp_session_job_observed_state
+gui_project_job_observed_state(void) {
+    return gui_session_client_job_state(
+        &s_project.client);
+}
+
+gui_project_host_lifecycle
+gui_project_host_lifecycle_query(void) {
+    return (gui_project_host_lifecycle)
+        gui_host_queue_lifecycle(
+            &s_project.host_queue);
+}
+
+uint64_t
+gui_project_session_instance_generation(void) {
+    return gui_session_client_instance_generation(
+        &s_project.client);
+}
 
 void gui_project_invalidate_sources(void) {
     gui_scan_invalidate_all();
@@ -268,9 +415,20 @@ bool gui_project__refresh_after_session_commit(void) {
 // #endregion
 
 // #region lifecycle dev seams (selftest only)
-#ifdef NTPACKER_GUI_SELFTEST
+#if defined(NTPACKER_GUI_SELFTEST) || defined(TP_ENABLE_TEST_SEAMS)
 tp_session *gui_project__test_session(void) { return s_project.session; }
 
+#endif
+#ifdef TP_ENABLE_TEST_SEAMS
+void gui_project__test_fail_next_observe(void) {
+    gui_session_client__test_fail_next_observe();
+}
+
+bool
+gui_project__test_host_has_staged_completion(void) {
+    return gui_host_queue__test_has_staged(
+        &s_project.host_queue);
+}
 #endif
 // #endregion
 

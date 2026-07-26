@@ -49,7 +49,7 @@ static tp_journal_io attach_memory_recovery(void) {
     tp_error error = {{0}};
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
-        tp_session_attach_journal(gui_project_session_for_jobs(), journal,
+        tp_session_attach_journal(gui_project__test_session(), journal,
                                   &error));
     return io;
 }
@@ -57,6 +57,32 @@ static tp_journal_io attach_memory_recovery(void) {
 /* gui_actions owns several shell-facing commands that are linked into this
  * headless target but never exercised here. */
 void gui_shell_reset_shown_result(void) {}
+
+static gui_pack_done pump_pack_frame(
+    gui_pack_result_info *info) {
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_host_drain(&error));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_frame_begin(&error));
+    const gui_pack_done done =
+        gui_pack_poll(info);
+    gui_project_frame_end();
+    return done;
+}
+
+static void admit_queued_job(void) {
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_host_drain(&error));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_frame_begin(&error));
+    gui_project_frame_end();
+}
 
 static void remove_fixture_files(void) {
     (void)remove(s_left_file);
@@ -305,12 +331,13 @@ void test_preview_result_rejects_source_refresh_after_job_capture(void) {
     char error[256] = {0};
     TEST_ASSERT_TRUE(gui_pack_preview_async_start(0, "defold", error,
                                                   sizeof error));
+    admit_queued_job();
     gui_project_invalidate_sources();
 
     gui_pack_result_info info;
     gui_pack_done done = GUI_PACK_DONE_NONE;
     for (int i = 0; i < 5000 && done == GUI_PACK_DONE_NONE; ++i) {
-        done = gui_pack_poll(&info);
+        done = pump_pack_frame(&info);
         if (done == GUI_PACK_DONE_NONE) {
             nt_time_sleep(0.001);
         }
@@ -332,6 +359,7 @@ void test_native_pack_marks_token_change_stale_without_host_side_probe(void) {
     TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_IDENTITY_TEST_DIR));
     char error[256] = {0};
     TEST_ASSERT_TRUE(gui_pack_async_start(0, error, sizeof error));
+    admit_queued_job();
 
     snapshot = gui_project_snapshot();
     TEST_ASSERT_TRUE(gui_project_set_atlas_name(
@@ -341,7 +369,7 @@ void test_native_pack_marks_token_change_stale_without_host_side_probe(void) {
     gui_pack_result_info info = {0};
     gui_pack_done done = GUI_PACK_DONE_NONE;
     for (int i = 0; i < 5000 && done == GUI_PACK_DONE_NONE; ++i) {
-        done = gui_pack_poll(&info);
+        done = pump_pack_frame(&info);
         if (done == GUI_PACK_DONE_NONE) {
             nt_time_sleep(0.001);
         }
@@ -403,6 +431,7 @@ void test_gui_poll_does_not_decode_sources_on_gui_thread(void) {
     TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_IDENTITY_TEST_DIR));
     char error[256] = {0};
     TEST_ASSERT_TRUE(gui_pack_async_start(0, error, sizeof error));
+    admit_queued_job();
 
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     char hero_path[1024];
@@ -417,26 +446,72 @@ void test_gui_poll_does_not_decode_sources_on_gui_thread(void) {
 
     tp_image__test_reset_decode_count();
 
-    tp_session_job_progress progress = {0};
-    for (int i = 0; i < 5000; ++i) {
-        TEST_ASSERT_EQUAL_INT(
-            TP_STATUS_OK,
-            tp_session_job_poll(gui_project_session_for_jobs(), &progress,
-                                NULL));
-        if (progress.state != TP_SESSION_JOB_RUNNING) {
+    gui_pack_result_info info = {0};
+    gui_pack_done done = GUI_PACK_DONE_NONE;
+    uint64_t decodes_before_poll = 0U;
+    for (int i = 0;
+         i < 5000 &&
+         done == GUI_PACK_DONE_NONE; ++i) {
+        decodes_before_poll =
+            tp_image__test_decode_count();
+        done = pump_pack_frame(&info);
+        if (done != GUI_PACK_DONE_NONE) {
             break;
         }
         nt_time_sleep(0.001);
     }
-    TEST_ASSERT_NOT_EQUAL(TP_SESSION_JOB_RUNNING, progress.state);
 
-    const uint64_t decodes_before_poll = tp_image__test_decode_count();
-    gui_pack_result_info info = {0};
-    const gui_pack_done done = gui_pack_poll(&info);
     TEST_ASSERT_EQUAL_INT(GUI_PACK_DONE_PACK_OK, done);
     TEST_ASSERT_TRUE(info.input_changed);
     TEST_ASSERT_EQUAL_UINT64(
         decodes_before_poll, tp_image__test_decode_count());
+}
+
+void test_deleted_pack_target_is_typed_failure_not_cancelled(void) {
+    TEST_ASSERT_EQUAL_INT(
+        1, gui_project_add_atlas());
+    const tp_id128 target_atlas_id =
+        add_coin_source_to_atlas(1);
+    TEST_ASSERT_TRUE(
+        gui_pack_init(
+            TP_GUI_IDENTITY_TEST_DIR));
+    char error[256] = {0};
+    TEST_ASSERT_TRUE(
+        gui_pack_async_start(
+            1, error, sizeof error));
+
+    /* Host admission captures the target before the model mutation, but
+     * observation classification intentionally happens after deletion. */
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_host_drain(NULL));
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    TEST_ASSERT_TRUE(
+        gui_project_remove_atlas(
+            target_atlas_id,
+            tp_session_snapshot_revision(
+                snapshot)));
+
+    gui_pack_result_info info = {0};
+    gui_pack_done done =
+        GUI_PACK_DONE_NONE;
+    for (int attempt = 0;
+         attempt < 5000 &&
+         done == GUI_PACK_DONE_NONE;
+         ++attempt) {
+        done = pump_pack_frame(&info);
+        if (done == GUI_PACK_DONE_NONE) {
+            nt_time_sleep(0.001);
+        }
+    }
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PACK_DONE_PACK_FAIL, done);
+    TEST_ASSERT_EQUAL_INT(
+        TP_SESSION_JOB_REJECTION_TARGET_DELETED,
+        info.rejection);
+    TEST_ASSERT_NOT_NULL(
+        strstr(info.err, "target was deleted"));
 }
 
 void test_long_sprite_keys_with_shared_prefix_never_coalesce(void) {
@@ -834,7 +909,7 @@ void test_required_recovery_without_root_warns_but_allows_edit_undo_redo(void) {
                                           : NULL;
     TEST_ASSERT_NOT_NULL(atlas);
     TEST_ASSERT_FALSE(
-        tp_session_recovery_available(gui_project_session_for_jobs()));
+        tp_session_recovery_available(gui_project__test_session()));
     const tp_id128 atlas_id = atlas->id;
     const int padding_before = atlas->padding;
     TEST_ASSERT_TRUE(gui_project_set_atlas_setting(
@@ -857,7 +932,7 @@ void test_required_recovery_without_root_warns_but_allows_edit_undo_redo(void) {
     TEST_ASSERT_NOT_NULL(atlas);
     TEST_ASSERT_EQUAL_INT(padding_before + 1, atlas->padding);
     TEST_ASSERT_FALSE(
-        tp_session_recovery_available(gui_project_session_for_jobs()));
+        tp_session_recovery_available(gui_project__test_session()));
 
     char warning[256] = {0};
     TEST_ASSERT_TRUE(
@@ -888,7 +963,7 @@ void test_recovery_notice_is_sticky_exact_and_clears_after_save_heals(void) {
                           gui_project_save_as(save_path, error, sizeof error));
 
     const tp_session_recovery_health health =
-        tp_session_recovery_health_query(gui_project_session_for_jobs());
+        tp_session_recovery_health_query(gui_project__test_session());
     TEST_ASSERT_TRUE(health.degraded);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OUT_OF_BOUNDS, health.first_cause);
     gui_recovery_notice notice = {0};
@@ -927,11 +1002,12 @@ void test_recovery_notice_is_sticky_exact_and_clears_after_save_heals(void) {
                           gui_project_save(error, sizeof error));
     TEST_ASSERT_FALSE(gui_project_recovery_notice_query(&after_drain));
     TEST_ASSERT_FALSE(
-        tp_session_recovery_health_query(gui_project_session_for_jobs()).degraded);
+        tp_session_recovery_health_query(gui_project__test_session()).degraded);
     (void)remove(save_path);
 }
 
 int main(int argc, char **argv) {
+    (void)setvbuf(stdout, NULL, _IONBF, 0);
     if (tp_build_is_worker_invocation(argc, argv)) {
         return tp_build_worker_main();
     }
@@ -950,6 +1026,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_nil_completed_pack_input_hash_is_stale);
     RUN_TEST(test_failed_current_hash_probe_is_stale);
     RUN_TEST(test_gui_poll_does_not_decode_sources_on_gui_thread);
+    RUN_TEST(
+        test_deleted_pack_target_is_typed_failure_not_cancelled);
     RUN_TEST(test_long_sprite_keys_with_shared_prefix_never_coalesce);
     RUN_TEST(test_oversized_names_cannot_enter_a_truncating_editor);
     RUN_TEST(test_recovery_entry_keeps_core_path_capacity);

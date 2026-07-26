@@ -175,7 +175,7 @@ static int s_refresh_fingerprint_count;
 static fp_source *s_refresh_sources;
 static int s_refresh_source_count;
 static bool s_refresh_fingerprint_valid;
-static const tp_session *s_refresh_fingerprint_session;
+static uint64_t s_refresh_fingerprint_instance_generation;
 static tp_id128 s_refresh_membership_hash;
 static tp_status fp_collect(fp_entry **arr, int *count, int *cap,
                             fp_source **sources, int *source_count,
@@ -204,15 +204,18 @@ void gui_actions_refresh_fingerprint_reset(void) {
     s_refresh_sources = NULL;
     s_refresh_source_count = 0;
     s_refresh_fingerprint_valid = false;
-    s_refresh_fingerprint_session = NULL;
+    s_refresh_fingerprint_instance_generation = 0U;
     s_refresh_membership_hash = tp_id128_nil();
 }
 
 static void fp_bind_current_session(void) {
-    const tp_session *session = gui_project_session_for_jobs();
-    if (session != s_refresh_fingerprint_session) {
+    const uint64_t instance_generation =
+        gui_project_session_instance_generation();
+    if (instance_generation !=
+        s_refresh_fingerprint_instance_generation) {
         gui_actions_refresh_fingerprint_reset();
-        s_refresh_fingerprint_session = session;
+        s_refresh_fingerprint_instance_generation =
+            instance_generation;
     }
 }
 
@@ -821,8 +824,6 @@ static void commit_active_edit(bool force) {
 
 // #region deferred side-effects (run at the top of the frame, between frames)
 void apply_pending(void) {
-    gui_actions__poll_pack();
-
     /* A press landed outside the active inline editor last frame -> commit it (desktop rename UX).
      * Also fires before any pending model change (remove/refresh/open/new) so no orphaned editor
      * survives a mutation. */
@@ -868,5 +869,9 @@ void apply_pending(void) {
     gui_actions__apply_pack_requests();
 
     gui_actions__clear_pending();
+}
+
+void gui_actions_poll_host_completion(void) {
+    gui_actions__poll_pack();
 }
 // #endregion

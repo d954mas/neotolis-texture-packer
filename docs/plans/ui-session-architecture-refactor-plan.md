@@ -544,26 +544,49 @@ construction.
 - new `apps/gui/gui_host_queue.h`
 - new `apps/gui/gui_host_queue.c`
 - `apps/gui/main.c`
+- `apps/gui/gui_pack.h`
 - `apps/gui/gui_pack_jobs.c`
 - `apps/gui/gui_project.c`
 - `apps/gui/gui_project.h`
+- `apps/gui/gui_project_file.c`
+- `apps/gui/gui_project_internal.h`
+- `apps/gui/gui_session_client.h`
+- `apps/gui/gui_session_client.c`
 - `apps/gui/gui_actions.c`
+- `apps/gui/gui_actions.h`
+- `apps/gui/gui_actions_pack.c`
+- `apps/gui/gui_bench.c`
+- `apps/gui/gui_selftest.c`
+- `apps/gui/gui_view_canvas.c`
 - `cmake/check_architecture_boundaries.cmake`
 - `apps/gui/CMakeLists.txt`
 - new `apps/gui/test_gui_host_queue.c`
+- `apps/gui/test_gui_action_trace.c`
+- `apps/gui/test_gui_canonical_identity.c`
 
 **Tasks:**
 
 1. Add host state
    `OPEN -> DRAINING -> READY_TO_CUTOVER -> OPEN/CLOSED`.
-2. Drain immutable completions before session observation.
-3. Validate instance generation and supersession before applying completion.
+2. Queue owned immutable start/cancel commands, then drain and stage owned
+   terminal receipts on the host thread before session observation.
+3. Classify each staged receipt in a client reducer against the authoritative
+   R1b observed job state/result and exact
+   `{session_instance_generation, request_id}` envelope. Only a classified,
+   accepted receipt may publish a Pack/Export presentation result.
 4. Ensure workers never mutate GUI/session authority directly.
-5. Integrate R1b coalesced observable state.
+5. Make R1b coalesced observable state the source for progress, kind, busy,
+   cancellation, rejection, and accepted-result identity. Do not duplicate
+   core target-deletion/cancellation/supersession policy in GUI code.
 6. Keep platform/frame pumping during drain and join only after confirmed
    terminal state.
 7. Provide the bounded owned-worker termination escalation used when
    cooperative cancellation reaches its R1c deadline.
+8. Execute the frame boundary in the exact order: apply prior-frame semantic
+   ingress; drain host starts/cancels/completions; atomically observe/reduce;
+   consume only reducer-classified presentation receipts; declare/render.
+9. Keep `gui_host_queue` free of retained `tp_session *`; the lifecycle owner
+   passes the host-thread session only for one admission/drain call.
 
 **Deletion manifest:**
 
@@ -571,7 +594,12 @@ construction.
 - `gui_project_session_for_jobs()` and its pointer-identity use;
 - direct `tp_session_job_*`, `tp_session_pack_job_start`, and
   `tp_session_export_start` calls from `apps/gui/gui_pack_jobs.c`, replaced by
-  the host-owned queue/admission port.
+  the host-owned queue/admission port;
+- `wait_for_job` and its polling/sleep loop;
+- `gui_pack_shutdown`'s cancel/poll/sleep ownership and the duplicate
+  post-`nt_app_run` polling loop in `apps/gui/main.c`;
+- `s_refresh_fingerprint_session` pointer identity, replaced by client session
+  instance generation.
 
 **Gate:** completion lifecycle tests pass with no raw session pointer in worker
 payloads.
@@ -674,7 +702,6 @@ Shutdown.
 
 - direct production destruction/replacement of `s_project.session`;
 - `install_session` old-session discard/destroy/assignment;
-- `s_refresh_fingerprint_session` pointer-identity cache binding;
 - lifecycle snapshot drops and `snapshot_lifetime_generation` binding;
 - pre-prepare pending discard in New/Open;
 - synchronous view-facing New/Open/Close execution during declaration.

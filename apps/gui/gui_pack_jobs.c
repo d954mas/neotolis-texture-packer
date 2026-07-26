@@ -3,14 +3,10 @@
 #include <stdio.h>
 #include <string.h>
 
-#ifdef _WIN32
-#include <windows.h>
-#else
-#include <time.h>
-#endif
-
 #include "log/nt_log.h"
+#include "time/nt_time.h"
 
+#include "core/nt_assert.h"
 #include "tp_core/tp_error.h"
 #include "tp_core/tp_scan.h"
 
@@ -23,7 +19,7 @@ typedef struct {
     char work_dir[TP_IDENTITY_PATH_MAX];
     bool work_dir_ready;
     gui_pack_async_kind debug_busy;
-    bool cancel_requested;
+    double started_at;
 } gui_pack_job_state;
 
 static gui_pack_job_state s_adapter;
@@ -67,13 +63,27 @@ bool gui_pack_format_export_failed(const gui_pack_result_info *info,
     return uncertain;
 }
 
-static tp_session *job_session(void) {
-    return gui_project_session_for_jobs();
-}
-
-static bool job_active(void) {
-    tp_session *session = job_session();
-    return session && tp_session_job_active(session);
+static const char *job_rejection_message(
+    tp_session_job_rejection rejection) {
+    switch (rejection) {
+    case TP_SESSION_JOB_REJECTION_NONE:
+        return "";
+    case TP_SESSION_JOB_REJECTION_SUPERSEDED:
+        return "job result was superseded";
+    case TP_SESSION_JOB_REJECTION_CANCELLED:
+        return "job was cancelled";
+    case TP_SESSION_JOB_REJECTION_TARGET_DELETED:
+        return "job target was deleted";
+    case TP_SESSION_JOB_REJECTION_OLD_INSTANCE:
+        return "job belongs to an old session instance";
+    case TP_SESSION_JOB_REJECTION_DUPLICATE:
+        return "duplicate job result";
+    case TP_SESSION_JOB_REJECTION_SESSION_CLOSED:
+        return "session closed before result admission";
+    default:
+        NT_ASSERT(false);
+        return "unknown job rejection";
+    }
 }
 
 static int current_atlas_index(tp_id128 atlas_id) {
@@ -92,7 +102,7 @@ static int current_atlas_index(tp_id128 atlas_id) {
 static bool report_job_start(tp_status status, const tp_error *error,
                              char *err, size_t err_cap) {
     if (status == TP_STATUS_OK) {
-        s_adapter.cancel_requested = false;
+        s_adapter.started_at = nt_time_now();
         return true;
     }
     if (err && err_cap > 0U) {
@@ -158,7 +168,7 @@ bool gui_pack_async_start(int atlas_index, char *err, size_t err_cap) {
     if (!require_work_dir(err, err_cap)) {
         return false;
     }
-    if (job_active()) {
+    if (gui_project_job_busy()) {
         if (err) {
             (void)snprintf(err, err_cap,
                            "busy -- a pack or export is already running");
@@ -183,13 +193,11 @@ bool gui_pack_async_start(int atlas_index, char *err, size_t err_cap) {
     }
 
     tp_error error = {{0}};
-    const tp_pack_job_request request = {
-        .atlas_id = atlas->id,
-        .work_dir = s_adapter.work_dir,
-        .preview_exporter_id = NULL,
-    };
     return report_job_start(
-        tp_session_pack_job_start(job_session(), &request, &error), &error,
+        gui_project_job_enqueue_pack(
+            atlas->id, s_adapter.work_dir,
+            NULL, &error),
+        &error,
         err, err_cap);
 }
 
@@ -197,7 +205,7 @@ static bool export_start(tp_id128 atlas_id, char *err, size_t err_cap) {
     if (!require_work_dir(err, err_cap)) {
         return false;
     }
-    if (job_active()) {
+    if (gui_project_job_busy()) {
         if (err) {
             (void)snprintf(err, err_cap,
                            "busy -- a pack or export is already running");
@@ -205,21 +213,12 @@ static bool export_start(tp_id128 atlas_id, char *err, size_t err_cap) {
         return false;
     }
     gui_project_invalidate_sources();
-    tp_session *session = job_session();
-    if (!session) {
-        if (err) {
-            (void)snprintf(err, err_cap, "no project");
-        }
-        return false;
-    }
-
     tp_error error = {{0}};
-    const tp_export_command_request request = {
-        .work_dir = s_adapter.work_dir,
-        .atlas_id = atlas_id,
-    };
-    return report_job_start(tp_session_export_start(session, &request, &error),
-                            &error, err, err_cap);
+    return report_job_start(
+        gui_project_job_enqueue_export(
+            atlas_id, s_adapter.work_dir,
+            &error),
+        &error, err, err_cap);
 }
 
 bool gui_pack_export_async_start(char *err, size_t err_cap) {
@@ -230,38 +229,63 @@ gui_pack_done gui_pack_poll(gui_pack_result_info *out) {
     if (out) {
         memset(out, 0, sizeof *out);
     }
-    tp_session *session = job_session();
-    if (!session || !tp_session_job_active(session)) {
+    gui_project_job_completion completion = {0};
+    if (!gui_project_host_take_completion(
+            &completion)) {
         return GUI_PACK_DONE_NONE;
     }
-    tp_error error = {{0}};
-    tp_session_job_progress progress;
-    if (tp_session_job_poll(session, &progress, &error) != TP_STATUS_OK ||
-        progress.state == TP_SESSION_JOB_RUNNING) {
-        return GUI_PACK_DONE_NONE;
+    tp_session_job_result result =
+        completion.result;
+    completion.result =
+        (tp_session_job_result){0};
+    if (result.kind == TP_SESSION_JOB_NONE) {
+        result.kind = completion.kind;
+        result.state = completion.state;
+        result.status = completion.status;
+        result.error = completion.error;
     }
-    tp_session_job_result result;
-    memset(&result, 0, sizeof result);
-    if (tp_session_job_take_result(session, &result, &error) != TP_STATUS_OK) {
-        if (out) {
-            (void)snprintf(out->err, sizeof out->err, "%s",
-                           error.msg[0] ? error.msg
-                                        : "could not take job result");
-        }
-        return progress.kind == TP_SESSION_JOB_EXPORT
-                   ? GUI_PACK_DONE_EXPORT_FAIL
-                   : GUI_PACK_DONE_PACK_FAIL;
+    const bool publish_result =
+        completion.publish_result;
+    const tp_session_job_rejection rejection =
+        completion.rejection;
+    const tp_status completion_status =
+        completion.status;
+    gui_project_job_completion_destroy(
+        &completion);
+    const bool cancelled =
+        result.state == TP_SESSION_JOB_CANCELLED ||
+        rejection ==
+            TP_SESSION_JOB_REJECTION_CANCELLED;
+    const bool rejected_failure =
+        rejection != TP_SESSION_JOB_REJECTION_NONE &&
+        rejection !=
+            TP_SESSION_JOB_REJECTION_CANCELLED;
+    if (out) {
+        out->rejection = rejection;
+        out->status = completion_status;
     }
-    const bool cancelled = result.state == TP_SESSION_JOB_CANCELLED;
     const bool preview = result.kind == TP_SESSION_JOB_PACK &&
                          result.pack.preview_exporter_id[0] != '\0';
     gui_pack_done done = GUI_PACK_DONE_NONE;
 
     if (result.kind == TP_SESSION_JOB_PACK) {
-        if (result.state == TP_SESSION_JOB_SUCCEEDED &&
+        if (rejected_failure) {
+            if (out) {
+                (void)snprintf(
+                    out->err, sizeof out->err,
+                    "%s",
+                    job_rejection_message(
+                        rejection));
+            }
+            done = preview
+                       ? GUI_PACK_DONE_PREVIEW_FAIL
+                       : GUI_PACK_DONE_PACK_FAIL;
+        } else if (publish_result &&
+            result.state == TP_SESSION_JOB_SUCCEEDED &&
             result.status == TP_STATUS_OK && result.pack.result) {
             const int atlas_index = current_atlas_index(result.pack.atlas_id);
-            if (cancelled || atlas_index < 0) {
+            NT_ASSERT(atlas_index >= 0);
+            if (cancelled) {
                 done = preview ? GUI_PACK_DONE_PREVIEW_CANCELLED
                                : GUI_PACK_DONE_PACK_CANCELLED;
             } else if (preview) {
@@ -309,6 +333,9 @@ gui_pack_done gui_pack_poll(gui_pack_result_info *out) {
                            : GUI_PACK_DONE_PACK_FAIL;
         }
     } else {
+        NT_ASSERT(
+            result.kind ==
+            TP_SESSION_JOB_EXPORT);
         if (out) {
             out->targets = result.export_result.targets;
             out->files = result.export_result.files;
@@ -323,7 +350,16 @@ gui_pack_done gui_pack_poll(gui_pack_result_info *out) {
             (void)snprintf(out->err, sizeof out->err, "%s",
                            result.export_result.first_error);
         }
-        if (cancelled) {
+        if (rejected_failure) {
+            if (out) {
+                (void)snprintf(
+                    out->err, sizeof out->err,
+                    "%s",
+                    job_rejection_message(
+                        rejection));
+            }
+            done = GUI_PACK_DONE_EXPORT_FAIL;
+        } else if (cancelled) {
             done = GUI_PACK_DONE_EXPORT_CANCELLED;
         } else if (result.state == TP_SESSION_JOB_FAILED ||
                    result.export_result.atlases_failed > 0) {
@@ -341,67 +377,106 @@ gui_pack_done gui_pack_poll(gui_pack_result_info *out) {
     }
 
     tp_session_job_result_destroy(&result);
-    s_adapter.cancel_requested = false;
     if (out) {
         out->kind = done;
     }
     return done;
 }
 
-static gui_pack_done wait_for_job(gui_pack_result_info *out) {
-    for (;;) {
-        const gui_pack_done done = gui_pack_poll(out);
-        if (done != GUI_PACK_DONE_NONE) {
-            return done;
+static gui_pack_done drive_host_to_completion(
+    gui_pack_result_info *out) {
+    if (gui_project_frame_is_pinned()) {
+        if (out) {
+            (void)snprintf(
+                out->err, sizeof out->err,
+                "blocking Pack/Export is forbidden during a pinned frame");
         }
-        if (!job_active()) {
+        return GUI_PACK_DONE_PACK_FAIL;
+    }
+    for (;;) {
+        tp_error error = {{0}};
+        const tp_status drain_status =
+            gui_project_host_drain(&error);
+        if (drain_status != TP_STATUS_OK) {
             if (out) {
-                (void)snprintf(out->err, sizeof out->err,
-                               "session job ended without a typed result");
+                (void)snprintf(
+                    out->err, sizeof out->err,
+                    "%s",
+                    error.msg[0]
+                        ? error.msg
+                        : tp_status_str(
+                              drain_status));
             }
             return GUI_PACK_DONE_PACK_FAIL;
         }
-#ifdef _WIN32
-        Sleep(1);
-#else
-        const struct timespec pause = {.tv_sec = 0, .tv_nsec = 1000000};
-        (void)nanosleep(&pause, NULL);
-#endif
+        const tp_status observe_status =
+            gui_project_frame_begin(&error);
+        const gui_pack_done done =
+            observe_status == TP_STATUS_OK
+                ? gui_pack_poll(out)
+                : GUI_PACK_DONE_NONE;
+        gui_project_frame_end();
+        if (observe_status != TP_STATUS_OK) {
+            if (out) {
+                (void)snprintf(
+                    out->err, sizeof out->err,
+                    "%s",
+                    error.msg[0]
+                        ? error.msg
+                        : tp_status_str(
+                              observe_status));
+            }
+            return GUI_PACK_DONE_PACK_FAIL;
+        }
+        if (done != GUI_PACK_DONE_NONE) {
+            return done;
+        }
+        if (!gui_project_job_busy()) {
+            if (out) {
+                (void)snprintf(out->err, sizeof out->err,
+                               "host job ended without a classified result");
+            }
+            return GUI_PACK_DONE_PACK_FAIL;
+        }
+        nt_time_sleep(0.001);
     }
 }
 
 bool gui_pack_async_busy(void) {
-    return job_active() || s_adapter.debug_busy != GUI_PACK_ASYNC_NONE;
+    return gui_project_job_busy() ||
+           s_adapter.debug_busy !=
+               GUI_PACK_ASYNC_NONE;
 }
 
 bool gui_pack_worker_active(void) {
-    return job_active();
+    return gui_project_job_busy();
 }
 
 gui_pack_async_kind gui_pack_async_active_kind(void) {
     if (s_adapter.debug_busy != GUI_PACK_ASYNC_NONE) {
         return s_adapter.debug_busy;
     }
-    tp_session *session = job_session();
-    if (!session || !tp_session_job_active(session)) {
-        return GUI_PACK_ASYNC_NONE;
-    }
-    tp_session_job_progress progress;
-    return tp_session_job_poll(session, &progress, NULL) == TP_STATUS_OK &&
-                   progress.kind == TP_SESSION_JOB_EXPORT
+    const tp_session_job_observed_state state =
+        gui_project_job_observed_state();
+    const tp_session_job_kind kind =
+        state.present && !state.terminal
+            ? state.kind
+            : gui_project_job_active_kind();
+    return kind == TP_SESSION_JOB_EXPORT
                ? GUI_PACK_ASYNC_EXPORT
-               : GUI_PACK_ASYNC_PACK;
+               : kind == TP_SESSION_JOB_PACK
+                     ? GUI_PACK_ASYNC_PACK
+                     : GUI_PACK_ASYNC_NONE;
 }
 
 double gui_pack_async_elapsed_sec(void) {
     if (s_adapter.debug_busy != GUI_PACK_ASYNC_NONE) {
         return 3.2;
     }
-    tp_session *session = job_session();
-    tp_session_job_progress progress;
-    return session &&
-                   tp_session_job_poll(session, &progress, NULL) == TP_STATUS_OK
-               ? progress.elapsed_ms / 1000.0
+    return gui_project_job_busy() &&
+                   s_adapter.started_at > 0.0
+               ? nt_time_now() -
+                     s_adapter.started_at
                : 0.0;
 }
 
@@ -415,28 +490,29 @@ void gui_pack_export_progress(int *cur, int *total) {
         }
         return;
     }
-    tp_session_job_progress progress;
-    tp_session *session = job_session();
-    const bool have = session &&
-                      tp_session_job_poll(session, &progress, NULL) ==
-                          TP_STATUS_OK;
+    const tp_session_job_observed_state state =
+        gui_project_job_observed_state();
+    const bool have =
+        state.present && !state.terminal &&
+        state.kind == TP_SESSION_JOB_EXPORT;
     if (cur) {
-        *cur = have ? progress.current : 0;
+        *cur = have ? state.current : 0;
     }
     if (total) {
-        *total = have ? progress.total : 0;
+        *total = have ? state.total : 0;
     }
 }
 
-void gui_pack_async_cancel(void) {
-    tp_session *session = job_session();
-    if (session && tp_session_job_cancel(session, NULL) == TP_STATUS_OK) {
-        s_adapter.cancel_requested = true;
-    }
+tp_status gui_pack_async_cancel(tp_error *err) {
+    return gui_project_job_enqueue_cancel(err);
 }
 
 bool gui_pack_async_cancelling(void) {
-    return job_active() && s_adapter.cancel_requested;
+    const tp_session_job_observed_state state =
+        gui_project_job_observed_state();
+    return state.present &&
+           !state.terminal &&
+           state.cancellation_requested;
 }
 
 void gui_pack_debug_force_busy(gui_pack_async_kind kind) {
@@ -449,7 +525,8 @@ bool gui_pack_preview_blocking(int atlas_index, const char *exporter_id,
         return false;
     }
     gui_pack_result_info info;
-    const gui_pack_done done = wait_for_job(&info);
+    const gui_pack_done done =
+        drive_host_to_completion(&info);
     if (done == GUI_PACK_DONE_PREVIEW_OK && info.atlas_index == atlas_index &&
         !info.input_changed) {
         return true;
@@ -467,7 +544,7 @@ bool gui_pack_preview_async_start(int atlas_index, const char *exporter_id,
     if (!require_work_dir(err, err_cap)) {
         return false;
     }
-    if (job_active()) {
+    if (gui_project_job_busy()) {
         if (err) {
             (void)snprintf(err, err_cap,
                            "busy -- a pack or export is already running");
@@ -485,30 +562,18 @@ bool gui_pack_preview_async_start(int atlas_index, const char *exporter_id,
         return false;
     }
     tp_error error = {{0}};
-    const tp_pack_job_request request = {
-        .atlas_id = atlas->id,
-        .work_dir = s_adapter.work_dir,
-        .preview_exporter_id = exporter_id,
-    };
     return report_job_start(
-        tp_session_pack_job_start(job_session(), &request, &error), &error,
+        gui_project_job_enqueue_pack(
+            atlas->id, s_adapter.work_dir,
+            exporter_id, &error),
+        &error,
         err, err_cap);
 }
 
 void gui_pack_shutdown(void) {
-    if (job_active()) {
-        gui_pack_async_cancel();
-        while (job_active()) {
-            if (gui_pack_poll(NULL) != GUI_PACK_DONE_NONE) {
-                break;
-            }
-#ifdef _WIN32
-            Sleep(1);
-#else
-            const struct timespec pause = {.tv_sec = 0, .tv_nsec = 1000000};
-            (void)nanosleep(&pause, NULL);
-#endif
-        }
+    if (gui_project_host_lifecycle_query() ==
+        GUI_PROJECT_HOST_OPEN) {
+        (void)gui_project_host_begin_drain(NULL);
     }
     gui_pack_clear(-1);
     gui_pack_preview_clear();
@@ -520,7 +585,8 @@ bool gui_pack_atlas(int atlas_index, double *out_ms, char *err,
         return false;
     }
     gui_pack_result_info info;
-    const gui_pack_done done = wait_for_job(&info);
+    const gui_pack_done done =
+        drive_host_to_completion(&info);
     if (done != GUI_PACK_DONE_PACK_OK || info.atlas_index != atlas_index) {
         if (err && err_cap > 0U) {
             (void)snprintf(err, err_cap, "%s",
@@ -553,7 +619,8 @@ bool gui_pack_export(int atlas_index, int *out_targets, int *out_notices,
         return false;
     }
     gui_pack_result_info info;
-    const gui_pack_done done = wait_for_job(&info);
+    const gui_pack_done done =
+        drive_host_to_completion(&info);
     if (out_targets) {
         *out_targets = info.targets;
     }

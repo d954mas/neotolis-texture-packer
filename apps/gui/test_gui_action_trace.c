@@ -33,6 +33,19 @@ static char s_save_path[1024];
 /* gui_actions links the production shell reset seam; the trace is headless. */
 void gui_shell_reset_shown_result(void) {}
 
+static void pump_action_frame(void) {
+    apply_pending();
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_host_drain(&error));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_frame_begin(&error));
+    gui_actions_poll_host_completion();
+    gui_project_frame_end();
+}
+
 typedef enum trace_owner_class {
     TRACE_SESSION_SHARED = 0,
     TRACE_ACTION_PRIVATE,
@@ -475,7 +488,7 @@ void test_external_save_is_visible_through_the_observation_reducer(void) {
     TEST_ASSERT_EQUAL_INT(
         TP_STATUS_OK,
         tp_session_save_as(
-            gui_project_session_for_jobs(), s_save_path,
+            gui_project__test_session(), s_save_path,
             &result, &error));
 
     TEST_ASSERT_EQUAL_INT(
@@ -979,33 +992,110 @@ void test_late_export_cancel_keeps_completed_success_outcome(void) {
     char error[256] = {0};
     TEST_ASSERT_TRUE(gui_pack_export_async_start(error, sizeof error));
 
-    tp_session_job_progress progress = {0};
+    tp_session_job_observed_state state = {0};
     for (int i = 0; i < 5000; ++i) {
         TEST_ASSERT_EQUAL_INT(
             TP_STATUS_OK,
-            tp_session_job_poll(
-                gui_project_session_for_jobs(), &progress, NULL));
-        if (progress.state != TP_SESSION_JOB_RUNNING) {
+            gui_project_host_drain(NULL));
+        TEST_ASSERT_EQUAL_INT(
+            TP_STATUS_OK,
+            gui_project_frame_begin(NULL));
+        state =
+            gui_project_job_observed_state();
+        gui_project_frame_end();
+        if (state.present && state.terminal) {
             break;
         }
         nt_time_sleep(0.001);
     }
-    TEST_ASSERT_NOT_EQUAL(TP_SESSION_JOB_RUNNING, progress.state);
+    TEST_ASSERT_TRUE(state.present);
+    TEST_ASSERT_TRUE(state.terminal);
 
     /* Terminal admission wins before this late cancellation request. */
-    gui_pack_async_cancel();
+    tp_error cancel_error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_NOT_FOUND,
+        gui_pack_async_cancel(
+            &cancel_error));
+    TEST_ASSERT_NOT_EQUAL(
+        '\0', cancel_error.msg[0]);
     TEST_ASSERT_FALSE(gui_pack_async_cancelling());
 
     gui_pack_result_info info;
-    gui_pack_done done = GUI_PACK_DONE_NONE;
-    for (int i = 0; i < 5000 && done == GUI_PACK_DONE_NONE; ++i) {
-        done = gui_pack_poll(&info);
-        if (done == GUI_PACK_DONE_NONE) {
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_frame_begin(NULL));
+    const gui_pack_done done =
+        gui_pack_poll(&info);
+    gui_project_frame_end();
+    TEST_ASSERT_EQUAL_INT(GUI_PACK_DONE_EXPORT_OK, done);
+    TEST_ASSERT_EQUAL_INT(1, info.atlases_skipped);
+}
+
+void test_observation_failure_leaves_terminal_receipt_retryable(void) {
+    TEST_ASSERT_TRUE(
+        gui_pack_init(
+            TP_GUI_TRACE_TEST_DIR));
+    char error[256] = {0};
+    TEST_ASSERT_TRUE(
+        gui_pack_export_async_start(
+            error, sizeof error));
+    for (int attempt = 0;
+         attempt < 5000 &&
+         !gui_project__test_host_has_staged_completion();
+         ++attempt) {
+        TEST_ASSERT_EQUAL_INT(
+            TP_STATUS_OK,
+            gui_project_host_drain(NULL));
+        if (!gui_project__test_host_has_staged_completion()) {
             nt_time_sleep(0.001);
         }
     }
-    TEST_ASSERT_EQUAL_INT(GUI_PACK_DONE_EXPORT_OK, done);
-    TEST_ASSERT_EQUAL_INT(1, info.atlases_skipped);
+    TEST_ASSERT_TRUE(
+        gui_project__test_host_has_staged_completion());
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_host_begin_drain(NULL));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_HOST_DRAINING,
+        gui_project_host_lifecycle_query());
+
+    gui_project__test_fail_next_observe();
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OOM,
+        gui_project_frame_begin(NULL));
+    gui_project_frame_end();
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PACK_DONE_NONE,
+        gui_pack_poll(NULL));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_host_drain(NULL));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_HOST_DRAINING,
+        gui_project_host_lifecycle_query());
+
+    gui_project__test_fail_next_observe();
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OOM,
+        gui_project_frame_begin(NULL));
+    gui_project_frame_end();
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_host_drain(NULL));
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PROJECT_HOST_DRAINING,
+        gui_project_host_lifecycle_query());
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_frame_begin(NULL));
+    gui_pack_result_info info = {0};
+    const gui_pack_done done =
+        gui_pack_poll(&info);
+    gui_project_frame_end();
+    TEST_ASSERT_EQUAL_INT(
+        GUI_PACK_DONE_EXPORT_OK, done);
 }
 
 void test_empty_export_surfaces_skipped_atlas_warning(void) {
@@ -1015,7 +1105,7 @@ void test_empty_export_surfaces_skipped_atlas_warning(void) {
     TEST_ASSERT_TRUE(gui_pack_export_async_start(error, sizeof error));
 
     for (int i = 0; i < 5000 && gui_pack_async_busy(); ++i) {
-        apply_pending();
+        pump_action_frame();
         if (gui_pack_async_busy()) {
             nt_time_sleep(0.001);
         }
@@ -1058,6 +1148,8 @@ int main(int argc, char **argv) {
         test_export_cancel_formatter_distinguishes_uncertain_partial_and_clean);
     RUN_TEST(test_export_failure_formatter_warns_about_uncertain_publication);
     RUN_TEST(test_late_export_cancel_keeps_completed_success_outcome);
+    RUN_TEST(
+        test_observation_failure_leaves_terminal_receipt_retryable);
     RUN_TEST(test_empty_export_surfaces_skipped_atlas_warning);
     return UNITY_END();
 }
