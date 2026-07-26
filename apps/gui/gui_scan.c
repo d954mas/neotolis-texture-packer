@@ -121,6 +121,14 @@ bool gui_scan_exists(const char *abs) {
     return tp_scan_exists(abs);
 }
 
+tp_status gui_scan_classify_checked(const char *abs, tp_scan_kind *out,
+                                    tp_error *err) {
+#if defined(NTPACKER_GUI_BENCH)
+    s_bench_counters.exists_fs_calls++;
+#endif
+    return tp_scan_classify_checked(abs, out, err);
+}
+
 bool gui_scan_stat(const char *abs, long long *out_size, long long *out_mtime) {
     return tp_scan_file_stat(abs, out_size, out_mtime);
 }

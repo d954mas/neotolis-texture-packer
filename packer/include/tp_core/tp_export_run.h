@@ -16,6 +16,7 @@
 
 #include <stdbool.h>
 
+#include "tp_core/tp_cancel.h"
 #include "tp_core/tp_error.h"
 #include "tp_core/tp_id.h"
 
@@ -31,6 +32,11 @@ struct tp_session_snapshot;
 typedef struct tp_export_snapshot_job tp_export_snapshot_job;
 typedef struct tp_export_report tp_export_report;
 
+/* Called after an atlas's final writer attempt has returned and no further
+ * output side effects remain for that atlas. Return true when this atlas also
+ * fixes the owning command's terminal outcome. */
+typedef bool (*tp_export_terminal_boundary_fn)(void *context);
+
 typedef struct tp_export_snapshot_atlas_info {
     tp_id128 atlas_id;
     const char *name;
@@ -42,6 +48,8 @@ typedef struct tp_export_snapshot_job_opts {
     const char *target_exporter_id; /* NULL keeps every enabled target */
     const char *out_dir;            /* NULL preserves target paths; must be absolute */
     bool dry_run;
+    tp_export_terminal_boundary_fn terminal_boundary;
+    void *terminal_boundary_context;
 } tp_export_snapshot_job_opts;
 
 tp_status tp_export_snapshot_job_create(const struct tp_session_snapshot *snapshot,
@@ -75,6 +83,11 @@ tp_status tp_export_snapshot_job_run_atlas_ex(tp_export_snapshot_job *job,
                                               int *out_sprite_count,
                                               int *out_missing_sources,
                                               tp_error *err);
+tp_status tp_export_snapshot_job_run_atlas_ex_cancellable(
+    tp_export_snapshot_job *job, int atlas_index, struct tp_arena *arena,
+    struct tp_export_notices *notices, tp_export_report *report,
+    int *out_pack_runs, int *out_sprite_count, int *out_missing_sources,
+    const tp_cancel_token *cancel, tp_error *err);
 
 /* --- Structured export report (optional, produced by tp_export_run_ex) --------
  * The CLI build report (and, follow-up, GUI export stats) consume this instead of
@@ -99,6 +112,12 @@ typedef struct tp_export_report_run {
     int sprite_count; /* placed sprites in this run (original placements + aliases) */
 } tp_export_report_run;
 
+typedef enum tp_export_writer_outcome {
+    TP_EXPORT_WRITER_NOT_ATTEMPTED = 0,
+    TP_EXPORT_WRITER_SUCCEEDED,
+    TP_EXPORT_WRITER_FAILED
+} tp_export_writer_outcome;
+
 /* One ENABLED target's outcome. `written_files` are the absolute paths its writer
  * produced (NULL/empty when it failed, and ALWAYS empty on a dry run -- see
  * `would_write`). `would_write` is populated only on a DRY run: the paths the
@@ -107,8 +126,9 @@ typedef struct tp_export_report_run {
  * bound this target's slice of the caller's notices list ([begin,end)); on a dry
  * run those notices come from tp_export_predict_loss (the writers never run), on a
  * wet run from the writers themselves. `pack_run` indexes report.runs (-1 if the
- * target failed before packing). `error` holds the failure reason when !ok (arena
- * string), NULL when ok. */
+ * target failed before packing). `error` holds the failure reason when !ok
+ * (normally an arena string, with a static fallback if copying that detail
+ * fails), NULL when ok. */
 typedef struct tp_export_report_target {
     const char *exporter_id;
     const char *out_path; /* resolved absolute output base (no extension) */
@@ -120,12 +140,30 @@ typedef struct tp_export_report_target {
     int notice_begin;
     int notice_end;
     const char *error;
+    /* Typed independently from the optional arena-owned error string. Phase-one,
+     * output-listing, dry-run, and cancellation-before-write paths remain
+     * NOT_ATTEMPTED. */
+    tp_export_writer_outcome writer_outcome;
     bool ok;
 } tp_export_report_target;
 
-/* Whole per-atlas run report. `pack_failed` is set when a pack/normalize/settings
- * error aborted the run before any target could write (nothing was produced -- the
- * caller maps this to a pack failure rather than a per-target export failure).
+/* Typed admission result produced by the snapshot orchestration wrapper before
+ * any target runs. This distinguishes a valid source set containing no usable
+ * images from a source/input failure without status-message parsing. Direct
+ * tp_export_run_ex callers leave the field NOT_EVALUATED. */
+typedef enum tp_export_input_outcome {
+    TP_EXPORT_INPUT_NOT_EVALUATED = 0,
+    TP_EXPORT_INPUT_READY,
+    TP_EXPORT_INPUT_NO_USABLE_IMAGES,
+    TP_EXPORT_INPUT_FAILED
+} tp_export_input_outcome;
+
+/* Whole per-atlas run report. `pack_failed` is set when pack setup, settings,
+ * packing, or normalization aborted the run before any target could write
+ * (nothing was produced -- the caller maps this to a pack failure rather than a
+ * per-target export failure).
+ * `report_failed` means target execution completed but the optional run/page
+ * reporting payload could not be constructed; `runs`/`run_count` stay empty.
  * `dry_run` mirrors the request: true when NO target files were written (each ok
  * target instead carries a `would_write` list + predicted-loss notices). */
 struct tp_export_report {
@@ -134,7 +172,9 @@ struct tp_export_report {
     tp_export_report_target *targets;
     int target_count;
     bool pack_failed;
+    bool report_failed;
     bool dry_run;
+    tp_export_input_outcome input_outcome;
 };
 
 /* Runs every enabled target of project->atlases[atlas_index] over `sprites`.
@@ -169,6 +209,18 @@ typedef struct tp_export_run_opts {
      * not run). Meaningful only with a non-NULL report (would_write/notices live
      * there); a dry run without a report just skips the writes. */
     bool dry_run;
+
+    /* Optional cooperative cancellation. Polls guard safe orchestration
+     * boundaries, including immediately before every irreversible writer call.
+     * A single decoder invocation already in flight remains non-preemptible
+     * (U-02a); cancellation is observed at the next safe boundary. */
+    const tp_cancel_token *cancel;
+
+    /* Optional owner handshake after the final writer attempt returns (success
+     * or failure), before report assembly. Returning true marks the owning
+     * command terminal and enables its deterministic post-boundary test gate. */
+    tp_export_terminal_boundary_fn terminal_boundary;
+    void *terminal_boundary_context;
 } tp_export_run_opts;
 
 /* tp_export_run plus optional behavior selected by `opts` (nullable == defaults;

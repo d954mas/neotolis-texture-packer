@@ -10,6 +10,8 @@
 #include "clay.h"
 #include "ui/nt_ui_label.h" /* nt_ui_label_style_t + Clay_Color (base label styles below) */
 
+#include "gui_left_layout.h"
+
 /* --- layout constants + render layers + global UI scale --- */
 #define LAYER_IMG 1
 #define LAYER_TEXT 2
@@ -26,7 +28,11 @@ static inline uint16_t Su(float px) { return (uint16_t)((px * g_ui_scale) + 0.5F
 #define BASE_MENUBAR_H 32.0F
 #define BASE_LEFT_PANEL_W 300.0F
 #define BASE_RIGHT_PANEL_W 300.0F /* settings panel (regions F/G), fixed width, own scroll */
-#define BASE_ROW_H 27.0F
+#define BASE_ROW_H GUI_LEFT_ROW_H
+/* U-02 T2: cap (design px, pre-S) on the left panel's ATLAS + ANIMATION row regions. Each is a bounded,
+ * vertically-scrollable sub-region sized min(content, cap), so a long atlas list scrolls inside its own
+ * region instead of consuming the whole panel and starving the sprite vlist below. ~6-7 rows at scale 1. */
+#define BASE_LIST_SECTION_CAP_H GUI_LEFT_SECTION_MAX_H
 #define PANEL_LABEL_W 116.0F /* settings-row label column (base; runtime-clamped in compute_panel_widths) */
 /* Canvas-column budget (design px, pre-S()). MIN_CANVAS_W is reserved for the canvas so the strip never
  * forces the middle row wider than the window; it is >= the compact two-row strip's min-content. Below

@@ -6,6 +6,8 @@
 #include "tp_core/tp_image.h"
 #include "tp_core/tp_pack.h" /* tp_pack_settings, tp_pack_sprite_desc */
 #include "tp_fs_internal.h"  /* tp_fs_stat: (size, mtime) change-detection */
+#include "tp_image_priv.h"
+#include "tp_pack_hash_priv.h"
 
 /* ---- fixed-width little-endian serialization into the streaming hasher ------
  * Every integer is emitted as explicit LE bytes so the folded stream is
@@ -65,13 +67,15 @@ tp_id128 tp_pack_semantic_image_hash(int width, int height,
     return tp_hasher_final(h);
 }
 
-/* ---- per-file image-hash cache (path,size,mtime) -> semantic_image_hash ----- */
+/* Per-file cache: path/metadata candidate + exact encoded-content verification
+ * -> semantic_image_hash. Content verification reads but does not decode. */
 
 typedef struct img_cache_entry {
     char *path; /* owned; NULL = empty slot */
     uint64_t size;
     int64_t mtime;
-    tp_id128 hash;
+    tp_id128 content_hash;
+    tp_id128 semantic_hash;
 } img_cache_entry;
 
 struct tp_pack_image_hash_cache {
@@ -82,6 +86,11 @@ struct tp_pack_image_hash_cache {
     uint64_t hits;
     uint64_t misses;
 };
+
+size_t tp_pack_image_hash_cache_capacity_for_test(
+    const tp_pack_image_hash_cache *cache) {
+    return cache ? cache->cap : 0U;
+}
 
 tp_pack_image_hash_cache *tp_pack_image_hash_cache_create(void) {
     return calloc(1U, sizeof(tp_pack_image_hash_cache));
@@ -166,6 +175,48 @@ static bool img_cache_grow(tp_pack_image_hash_cache *cache) {
     return true;
 }
 
+tp_status tp_pack_image_hash_cache_seed(
+    tp_pack_image_hash_cache *cache, const char *path, uint64_t size,
+    int64_t mtime, tp_id128 content_hash, tp_id128 semantic_hash,
+    tp_error *err) {
+    if (!cache || !path || !path[0] || tp_id128_is_nil(content_hash) ||
+        tp_id128_is_nil(semantic_hash)) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "tp_pack_hash: cache seed is incomplete");
+    }
+    if (cache->cap > 0U) {
+        const size_t existing = img_cache_slot(cache, path);
+        img_cache_entry *slot = &cache->slots[existing];
+        if (slot->path) {
+            slot->size = size;
+            slot->mtime = mtime;
+            slot->content_hash = content_hash;
+            slot->semantic_hash = semantic_hash;
+            return TP_STATUS_OK;
+        }
+    }
+    if (cache->count + 1U > (cache->cap ? cache->cap / 2U : 0U) &&
+        !img_cache_grow(cache)) {
+        return tp_error_set(err, TP_STATUS_OOM,
+                            "tp_pack_hash: image cache grow failed");
+    }
+    const size_t at = img_cache_slot(cache, path);
+    img_cache_entry *slot = &cache->slots[at];
+    if (!slot->path) {
+        slot->path = dup_cstr(path);
+        if (!slot->path) {
+            return tp_error_set(err, TP_STATUS_OOM,
+                                "tp_pack_hash: image cache key alloc failed");
+        }
+        cache->count++;
+    }
+    slot->size = size;
+    slot->mtime = mtime;
+    slot->content_hash = content_hash;
+    slot->semantic_hash = semantic_hash;
+    return TP_STATUS_OK;
+}
+
 /* Resolves the semantic image hash for one sprite, decoding through the bounded
  * tp_image ingress and serving repeat calls from the fingerprint cache. */
 static tp_status image_hash_for_sprite(tp_pack_image_hash_cache *cache,
@@ -185,27 +236,45 @@ static tp_status image_hash_for_sprite(tp_pack_image_hash_cache *cache,
     }
 
     if (cache) {
-        if (cache->count + 1U > (cache->cap ? cache->cap / 2U : 0U)) {
+        img_cache_entry *slot = NULL;
+        if (cache->cap > 0U) {
+            slot = &cache->slots[img_cache_slot(cache, sprite->path)];
+        }
+        if (slot && slot->path && slot->size == info.size &&
+            slot->mtime == info.mtime) {
+            tp_id128 current_content_hash = tp_id128_nil();
+            const tp_status fingerprint_status = tp_image_file_fingerprint(
+                sprite->path, &current_content_hash, err);
+            if (fingerprint_status != TP_STATUS_OK) {
+                return fingerprint_status;
+            }
+            if (tp_id128_eq(slot->content_hash, current_content_hash)) {
+                cache->hits++;
+                *out = slot->semantic_hash;
+                return TP_STATUS_OK;
+            }
+        }
+
+        cache->misses++;
+        const bool inserting = !slot || !slot->path;
+        if (inserting &&
+            cache->count + 1U >
+                (cache->cap ? cache->cap / 2U : 0U)) {
             if (!img_cache_grow(cache)) {
                 return tp_error_set(err, TP_STATUS_OOM,
                                     "tp_pack_hash: image cache grow failed");
             }
+            slot = &cache->slots[img_cache_slot(cache, sprite->path)];
         }
-        const size_t at = img_cache_slot(cache, sprite->path);
-        img_cache_entry *slot = &cache->slots[at];
-        if (slot->path && slot->size == info.size && slot->mtime == info.mtime) {
-            cache->hits++;
-            *out = slot->hash;
-            return TP_STATUS_OK;
-        }
-        cache->misses++;
         tp_image_rgba8 image = {0};
-        tp_status st = tp_image_load_file(sprite->path, &image, err);
+        tp_id128 content_hash = tp_id128_nil();
+        tp_status st = tp_image_load_file_fingerprinted(
+            sprite->path, &image, &content_hash, err);
         if (st != TP_STATUS_OK) {
             return st;
         }
         cache->decodes++;
-        const tp_id128 hash =
+        const tp_id128 semantic_hash =
             tp_pack_semantic_image_hash(image.width, image.height, image.pixels);
         tp_image_free(&image);
         if (!slot->path) {
@@ -218,8 +287,9 @@ static tp_status image_hash_for_sprite(tp_pack_image_hash_cache *cache,
         }
         slot->size = info.size;
         slot->mtime = info.mtime;
-        slot->hash = hash;
-        *out = hash;
+        slot->content_hash = content_hash;
+        slot->semantic_hash = semantic_hash;
+        *out = semantic_hash;
         return TP_STATUS_OK;
     }
 

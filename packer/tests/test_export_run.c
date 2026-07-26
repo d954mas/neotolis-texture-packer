@@ -23,8 +23,11 @@
 #include "tp_core/tp_identity.h"
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_project.h"
+#include "tp_core/tp_session.h"
 #include "tp_core/tp_build_worker.h"
+#include "tp_fs_internal.h"
 #include "tp_project_mutation_internal.h"
+#include "tp_test_seams.h"
 #include "unity.h"
 
 /* wide + tall force the packer to rotate the tall sprite (diagonal bit). */
@@ -45,10 +48,11 @@ static char g_C[1024]; /* test-norot base    */
 static tp_exporter g_nopivot;
 static tp_exporter g_norot;
 static tp_exporter g_list_error;
+static tp_exporter g_write_error;
 static int g_list_error_write_calls;
 
-void setUp(void) {}
-void tearDown(void) {}
+void setUp(void) { tp_export_run__test_reset_all(); }
+void tearDown(void) { tp_export_run__test_reset_all(); }
 
 static void fill(uint8_t *p, int n, uint8_t r, uint8_t g, uint8_t b) {
     for (int i = 0; i < n; i++) {
@@ -77,6 +81,19 @@ static tp_status list_error_outputs(const tp_export_prepared *prep, const char *
     (void)sink;
     (void)ud;
     return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "test exporter output path overflow");
+}
+
+static tp_status write_error_write(const tp_export_prepared *prep,
+                                   const tp_export_caps *caps,
+                                   const char *out_path_base,
+                                   tp_export_notices *notices,
+                                   tp_error *err) {
+    (void)prep;
+    (void)caps;
+    (void)out_path_base;
+    (void)notices;
+    return tp_error_set(err, TP_STATUS_PATH_RESOLVE_FAILED,
+                        "test writer failed after its publication attempt");
 }
 
 static cJSON *load_json(const char *base) {
@@ -460,9 +477,21 @@ static bool setup_all(const char *dir) {
                                           .aliases = true},
                                  .write = list_error_write,
                                  .list_outputs = list_error_outputs};
+    g_write_error = (tp_exporter){.id = "test-write-error",
+                                  .display_name = "test write error",
+                                  .extension = "bad",
+                                  .caps = {.rotate90 = true,
+                                           .flips = true,
+                                           .polygons = true,
+                                           .pivot = true,
+                                           .slice9 = true,
+                                           .multipage = true,
+                                           .aliases = true},
+                                  .write = write_error_write};
     if (tp_exporter_register(&g_nopivot) != TP_STATUS_OK ||
         tp_exporter_register(&g_norot) != TP_STATUS_OK ||
-        tp_exporter_register(&g_list_error) != TP_STATUS_OK) {
+        tp_exporter_register(&g_list_error) != TP_STATUS_OK ||
+        tp_exporter_register(&g_write_error) != TP_STATUS_OK) {
         return false;
     }
 
@@ -771,11 +800,416 @@ static void test_custom_output_listing_failure_prevents_wet_write_and_matches_dr
         TEST_ASSERT_EQUAL_INT(1, report.target_count);
         TEST_ASSERT_FALSE(report.targets[0].ok);
         TEST_ASSERT_EQUAL_STRING("test exporter output path overflow", report.targets[0].error);
+        TEST_ASSERT_EQUAL_INT(TP_EXPORT_WRITER_NOT_ATTEMPTED,
+                              report.targets[0].writer_outcome);
         tp_export_notices_free(&notices);
         tp_arena_destroy(arena);
     }
     TEST_ASSERT_EQUAL_INT(0, g_list_error_write_calls);
     tp_project_destroy(proj);
+}
+
+static void test_unknown_exporter_error_falls_back_when_error_copy_fails(void) {
+    tp_pack_sprite_desc sprite = {
+        .name = "wide",
+        .rgba = g_wide,
+        .w = 120,
+        .h = 24,
+        .origin_x = 0.5F,
+        .origin_y = 0.5F,
+    };
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    tp_project_atlas *atlas = tp_project_get_atlas(project, 0);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_target(atlas, "test-missing-exporter", g_dir, NULL));
+
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_export_report report;
+    memset(&report, 0, sizeof report);
+    const tp_export_run_opts opts = {.report = &report};
+    tp_export_notices notices;
+    tp_export_notices_init(&notices);
+    tp_error error = {{0}};
+
+    tp_export_run__test_fail_next_error_copy();
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_export_run_ex(project, 0, &sprite, 1, g_dir, arena, &notices,
+                         NULL, &opts, &error));
+    TEST_ASSERT_EQUAL_INT(1, report.target_count);
+    TEST_ASSERT_FALSE(report.targets[0].ok);
+    TEST_ASSERT_EQUAL_STRING("export target failed (error detail unavailable)",
+                             report.targets[0].error);
+    TEST_ASSERT_EQUAL_INT(TP_EXPORT_WRITER_NOT_ATTEMPTED,
+                          report.targets[0].writer_outcome);
+
+    tp_export_notices_free(&notices);
+    tp_arena_destroy(arena);
+    tp_project_destroy(project);
+}
+
+static void test_failed_writer_error_falls_back_when_error_copy_fails(void) {
+    tp_pack_sprite_desc sprite = {
+        .name = "wide",
+        .rgba = g_wide,
+        .w = 120,
+        .h = 24,
+        .origin_x = 0.5F,
+        .origin_y = 0.5F,
+    };
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    tp_project_atlas *atlas = tp_project_get_atlas(project, 0);
+    atlas->shape = 0;
+    atlas->allow_transform = false;
+    atlas->power_of_two = false;
+    atlas->alpha_threshold = 1;
+    atlas->max_size = 256;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_target(atlas, "test-write-error", g_dir, NULL));
+
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_export_report report;
+    memset(&report, 0, sizeof report);
+    const tp_export_run_opts opts = {.report = &report};
+    tp_export_notices notices;
+    tp_export_notices_init(&notices);
+    tp_error error = {{0}};
+
+    tp_export_run__test_fail_next_error_copy();
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_PATH_RESOLVE_FAILED,
+        tp_export_run_ex(project, 0, &sprite, 1, g_dir, arena, &notices,
+                         NULL, &opts, &error));
+    TEST_ASSERT_EQUAL_INT(1, report.target_count);
+    TEST_ASSERT_FALSE(report.targets[0].ok);
+    TEST_ASSERT_EQUAL_STRING("export target failed (error detail unavailable)",
+                             report.targets[0].error);
+    TEST_ASSERT_EQUAL_INT(TP_EXPORT_WRITER_FAILED,
+                          report.targets[0].writer_outcome);
+
+    tp_export_notices_free(&notices);
+    tp_arena_destroy(arena);
+    tp_project_destroy(project);
+}
+
+/* Snapshot input admission is complete before target output paths are resolved.
+ * A later orchestration failure must therefore retain READY instead of leaving
+ * the admission outcome at its NOT_EVALUATED zero value. */
+static void test_snapshot_report_marks_nonempty_input_ready_before_output_resolution(void) {
+    char source_path[1200];
+    TEST_ASSERT_TRUE(
+        snprintf(source_path, sizeof source_path, "%s-0.png", g_A) > 0);
+
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    tp_project_atlas *atlas = tp_project_get_atlas(project, 0);
+    atlas->id = (tp_id128){{0x31U}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_source(atlas, source_path));
+    atlas->sources[0].id = (tp_id128){{0x32U}};
+
+    char out_path[TP_IDENTITY_PATH_MAX];
+    memset(out_path, 'a', sizeof out_path - 2U);
+    out_path[sizeof out_path - 2U] = '\0';
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_target(atlas, TP_EXPORTER_ID_JSON_NEOTOLIS,
+                                    out_path, NULL));
+    atlas->targets[0].id = (tp_id128){{0x33U}};
+
+    char project_path[1200];
+    TEST_ASSERT_TRUE(snprintf(project_path, sizeof project_path,
+                              "%s/admission-outcome.ntpacker_project",
+                              g_dir) > 0);
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_save(project, project_path, &error));
+    tp_project_destroy(project);
+
+    tp_session_snapshot *snapshot = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_snapshot_load(project_path, &snapshot,
+                                                   &error));
+    tp_export_snapshot_job *job = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_export_snapshot_job_create(snapshot, g_dir, &job, &error));
+    tp_session_snapshot_destroy(snapshot);
+
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_export_notices notices;
+    tp_export_notices_init(&notices);
+    tp_export_report report;
+    memset(&report, 0, sizeof report);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OUT_OF_BOUNDS,
+        tp_export_snapshot_job_run_atlas_ex(
+            job, 0, arena, &notices, &report, NULL, NULL, NULL, &error));
+    TEST_ASSERT_EQUAL_INT(TP_EXPORT_INPUT_READY, report.input_outcome);
+
+    tp_export_notices_free(&notices);
+    tp_arena_destroy(arena);
+    tp_export_snapshot_job_destroy(job);
+    (void)remove(project_path);
+}
+
+static void test_report_marks_pre_target_setup_failure_as_pack_failed(void) {
+    tp_pack_sprite_desc sprite = {
+        .name = "wide",
+        .rgba = g_wide,
+        .w = 120,
+        .h = 24,
+        .origin_x = 0.5F,
+        .origin_y = 0.5F,
+    };
+    tp_export_report report;
+    memset(&report, 0, sizeof report);
+    const tp_export_run_opts opts = {.report = &report};
+    tp_export_notices notices;
+    tp_export_notices_init(&notices);
+    tp_error error = {{0}};
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        tp_export_run_ex(g_proj, 0, &sprite, 1, g_dir, NULL, &notices, NULL,
+                         &opts, &error));
+    TEST_ASSERT_TRUE_MESSAGE(
+        report.pack_failed,
+        "a failure before target reporting must retain its pack/setup class");
+    TEST_ASSERT_EQUAL_INT(0, report.target_count);
+
+    tp_export_notices_free(&notices);
+}
+
+static void test_report_page_oom_leaves_no_partial_runs(void) {
+    tp_pack_sprite_desc sprites[3];
+    memset(sprites, 0, sizeof sprites);
+    sprites[0] = (tp_pack_sprite_desc){
+        .name = "wide", .rgba = g_wide, .w = 120, .h = 24,
+        .origin_x = 0.5F, .origin_y = 0.5F};
+    sprites[1] = (tp_pack_sprite_desc){
+        .name = "tall", .rgba = g_tall, .w = 24, .h = 100,
+        .origin_x = 0.5F, .origin_y = 0.5F};
+    sprites[2] = (tp_pack_sprite_desc){
+        .name = "piv", .rgba = g_piv, .w = 30, .h = 20,
+        .origin_x = 1.5F, .origin_y = -0.25F};
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_export_notices notices;
+    tp_export_notices_init(&notices);
+    tp_export_report report;
+    memset(&report, 0, sizeof report);
+    const tp_export_run_opts opts = {.report = &report, .dry_run = true};
+    tp_error error = {{0}};
+
+    tp_export_run__test_set_report_alloc_fail(1);
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OOM,
+        tp_export_run_ex(g_proj, 0, sprites, 3, g_dir, arena, &notices, NULL,
+                         &opts, &error));
+    TEST_ASSERT_EQUAL_INT(0, report.run_count);
+    TEST_ASSERT_NULL(report.runs);
+    TEST_ASSERT_TRUE(report.report_failed);
+
+    tp_export_notices_free(&notices);
+    tp_arena_destroy(arena);
+}
+
+static bool cancel_export_run(void *ctx) {
+    (void)ctx;
+    return true;
+}
+
+typedef struct cancel_after_poll_count {
+    int polls;
+    int cancel_at;
+} cancel_after_poll_count;
+
+static bool cancel_after_n_polls(void *ctx) {
+    cancel_after_poll_count *state = ctx;
+    state->polls++;
+    return state->polls >= state->cancel_at;
+}
+
+static void test_export_run_cancels_the_pack_worker_before_artifact_publication(void) {
+    tp_pack_sprite_desc sprite = {
+        .name = "cancelled-during-pack",
+        .rgba = g_piv,
+        .w = 30,
+        .h = 20,
+        .origin_x = 0.5F,
+        .origin_y = 0.5F,
+    };
+    char artifact[1200];
+    const tp_project_atlas *atlas = tp_project_get_atlas(g_proj, 0);
+    TEST_ASSERT_NOT_NULL(atlas);
+    TEST_ASSERT_TRUE(snprintf(artifact, sizeof artifact, "%s/%s.ntpack",
+                              g_dir, atlas->name) > 0);
+    (void)remove(artifact);
+
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_export_notices notices;
+    tp_export_notices_init(&notices);
+    tp_export_report report;
+    memset(&report, 0, sizeof report);
+    cancel_after_poll_count cancel_state = {.cancel_at = 4};
+    const tp_cancel_token cancel = {cancel_after_n_polls, &cancel_state};
+    const tp_export_run_opts opts = {
+        .report = &report,
+        .cancel = &cancel,
+    };
+    tp_error error = {{0}};
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_CANCELLED,
+        tp_export_run_ex(g_proj, 0, &sprite, 1, g_dir, arena, &notices,
+                         NULL, &opts, &error));
+    TEST_ASSERT_TRUE(cancel_state.polls >= cancel_state.cancel_at);
+    const bool artifact_exists = tp_fs_exists(artifact);
+    (void)remove(artifact);
+    TEST_ASSERT_FALSE_MESSAGE(
+        artifact_exists,
+        "accepted Export cancellation during Pack must prevent .ntpack publication");
+
+    tp_export_notices_free(&notices);
+    tp_arena_destroy(arena);
+}
+
+typedef struct cancel_when_path_exists {
+    const char *path;
+} cancel_when_path_exists;
+
+static bool cancel_after_first_output_directory(void *ctx) {
+    const cancel_when_path_exists *state = ctx;
+    return tp_fs_exists(state->path);
+}
+
+static void test_snapshot_export_polls_cancel_before_each_output_directory_creation(void) {
+    char source_path[1200];
+    char first_dir[1200];
+    char second_dir[1200];
+    char first_out[1200];
+    char second_out[1200];
+    char project_path[1200];
+    TEST_ASSERT_TRUE(snprintf(source_path, sizeof source_path, "%s-0.png",
+                              g_A) > 0);
+    TEST_ASSERT_TRUE(snprintf(first_dir, sizeof first_dir,
+                              "%s/cancel-mkdir-first", g_dir) > 0);
+    TEST_ASSERT_TRUE(snprintf(second_dir, sizeof second_dir,
+                              "%s/cancel-mkdir-second", g_dir) > 0);
+    TEST_ASSERT_TRUE(snprintf(first_out, sizeof first_out, "%s/atlas",
+                              first_dir) > 0);
+    TEST_ASSERT_TRUE(snprintf(second_out, sizeof second_out, "%s/atlas",
+                              second_dir) > 0);
+    TEST_ASSERT_TRUE(snprintf(project_path, sizeof project_path,
+                              "%s/cancel-mkdir.ntpacker_project", g_dir) > 0);
+    (void)tp_fs_remove_dir(first_dir);
+    (void)tp_fs_remove_dir(second_dir);
+    (void)remove(project_path);
+
+    tp_project *project = tp_project_create();
+    TEST_ASSERT_NOT_NULL(project);
+    tp_project_atlas *atlas = tp_project_get_atlas(project, 0);
+    atlas->id = (tp_id128){{0x61U}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_atlas_add_source(atlas, source_path));
+    atlas->sources[0].id = (tp_id128){{0x62U}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_target(atlas, TP_EXPORTER_ID_JSON_NEOTOLIS,
+                                    first_out, NULL));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_project_atlas_add_target(atlas, TP_EXPORTER_ID_JSON_NEOTOLIS,
+                                    second_out, NULL));
+    atlas->targets[0].id = (tp_id128){{0x63U}};
+    atlas->targets[1].id = (tp_id128){{0x64U}};
+
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_project_save(project, project_path, &error));
+    tp_project_destroy(project);
+    tp_session_snapshot *snapshot = NULL;
+    TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
+                          tp_session_snapshot_load(project_path, &snapshot,
+                                                   &error));
+    tp_export_snapshot_job *job = NULL;
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_export_snapshot_job_create(snapshot, g_dir, &job, &error));
+    tp_session_snapshot_destroy(snapshot);
+
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_export_notices notices;
+    tp_export_notices_init(&notices);
+    tp_export_report report;
+    memset(&report, 0, sizeof report);
+    cancel_when_path_exists cancel_state = {.path = first_dir};
+    const tp_cancel_token cancel = {
+        cancel_after_first_output_directory, &cancel_state};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_CANCELLED,
+        tp_export_snapshot_job_run_atlas_ex_cancellable(
+            job, 0, arena, &notices, &report, NULL, NULL, NULL, &cancel,
+            &error));
+    TEST_ASSERT_TRUE_MESSAGE(
+        tp_fs_exists(first_dir),
+        "the first target directory is the deterministic cancellation trigger");
+    const bool second_exists = tp_fs_exists(second_dir);
+
+    tp_export_notices_free(&notices);
+    tp_arena_destroy(arena);
+    tp_export_snapshot_job_destroy(job);
+    (void)tp_fs_remove_dir(first_dir);
+    (void)tp_fs_remove_dir(second_dir);
+    (void)remove(project_path);
+    TEST_ASSERT_FALSE_MESSAGE(
+        second_exists,
+        "cancellation must be polled before creating the next target directory");
+}
+
+static void test_export_run_honors_cancel_before_safe_pack_phase(void) {
+    tp_pack_sprite_desc sprite = {
+        .name = "cancelled",
+        .rgba = g_piv,
+        .w = 30,
+        .h = 20,
+        .origin_x = 0.5F,
+        .origin_y = 0.5F,
+    };
+    tp_arena *arena = tp_arena_create(0);
+    TEST_ASSERT_NOT_NULL(arena);
+    tp_export_notices notices;
+    tp_export_notices_init(&notices);
+    tp_export_report report;
+    memset(&report, 0, sizeof report);
+    const tp_cancel_token cancel = {cancel_export_run, NULL};
+    const tp_export_run_opts opts = {
+        .report = &report,
+        .cancel = &cancel,
+    };
+    tp_error error = {{0}};
+    int runs = -1;
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_CANCELLED,
+        tp_export_run_ex(g_proj, 0, &sprite, 1, g_dir, arena, &notices,
+                         &runs, &opts, &error));
+    TEST_ASSERT_EQUAL_INT(0, runs);
+    TEST_ASSERT_EQUAL_INT(0, report.target_count);
+    TEST_ASSERT_NOT_NULL(strstr(error.msg, "cancel"));
+
+    tp_export_notices_free(&notices);
+    tp_arena_destroy(arena);
 }
 
 int main(int argc, char **argv) {
@@ -798,6 +1232,14 @@ int main(int argc, char **argv) {
     RUN_TEST(test_dry_run);
     RUN_TEST(test_dry_run_rejects_the_same_output_path_overflow_as_wet_export);
     RUN_TEST(test_custom_output_listing_failure_prevents_wet_write_and_matches_dry_run);
+    RUN_TEST(test_unknown_exporter_error_falls_back_when_error_copy_fails);
+    RUN_TEST(test_failed_writer_error_falls_back_when_error_copy_fails);
+    RUN_TEST(test_snapshot_report_marks_nonempty_input_ready_before_output_resolution);
+    RUN_TEST(test_report_marks_pre_target_setup_failure_as_pack_failed);
+    RUN_TEST(test_report_page_oom_leaves_no_partial_runs);
+    RUN_TEST(test_export_run_honors_cancel_before_safe_pack_phase);
+    RUN_TEST(test_export_run_cancels_the_pack_worker_before_artifact_publication);
+    RUN_TEST(test_snapshot_export_polls_cancel_before_each_output_directory_creation);
     int rc = UNITY_END();
     tp_export_notices_free(&g_notices);
     tp_project_destroy(g_proj);

@@ -23,6 +23,7 @@
 
 #include "tinyfiledialogs.h" /* D3 next-launch report prompt (yes/no messageBox); vendored, apps/gui/deps */
 #include "gui_paths.h"        /* <app-data> root + ensure-dir (shared with D1) */
+#include "gui_shell_quote.h"  /* shared POSIX shell-word quoting (reveal path in the file manager) */
 
 #include "log/nt_log.h" /* used by gui_crash_selftest + gui_crash_report_prompt (main thread, after the
                          * log is up); NEVER by the crash handler (it must stay async-signal-safe). */
@@ -295,42 +296,6 @@ static bool crash_marker_exists(void) {
     return true;
 }
 
-#ifndef _WIN32
-/* Wrap `in` as ONE POSIX shell word for system(): surround it with single quotes and rewrite every
- * embedded ' as the '\'' escape. The crash dir is USER-DERIVED (it sits under $HOME), so a home with
- * an apostrophe -- /home/o'brien/... -- would otherwise break the quoting and let path metacharacters
- * inject into the shell command. Writes out[out_size]; returns false (caller then skips the open) if it
- * would not fit. Windows passes the UTF-16 path directly to ShellExecuteW. A fork+execlp with argv
- * would avoid the POSIX shell entirely; escaping is the smaller change and keeps this parallel to
- * gui_view_chrome.c's gui_open_url. */
-static bool crash_shell_squote(const char *in, char *out, size_t out_size) {
-    size_t o = 0;
-    if (out_size < 3) { /* need at least '' + NUL */
-        return false;
-    }
-    out[o++] = '\'';
-    for (const char *p = in; *p != '\0'; p++) {
-        if (*p == '\'') {
-            if (o + 6 > out_size) { /* 4 bytes for '\'' + the eventual closing ' + NUL */
-                return false;
-            }
-            out[o++] = '\'';
-            out[o++] = '\\';
-            out[o++] = '\'';
-            out[o++] = '\'';
-        } else {
-            if (o + 2 >= out_size) { /* this char + closing ' + NUL */
-                return false;
-            }
-            out[o++] = *p;
-        }
-    }
-    out[o++] = '\'';
-    out[o] = '\0';
-    return true;
-}
-#endif
-
 /* Open `dir` in the OS file explorer, best-effort; returns true if the open was dispatched. Mirrors
  * gui_view_chrome.c's gui_open_url: Windows ShellExecuteW (shell32 -- already linked for
  * tinyfiledialogs), POSIX open/xdg-open. A failed open is non-fatal (the prompt already showed the
@@ -346,7 +311,7 @@ static bool crash_open_folder(const char *dir) {
     return (INT_PTR)rc > 32; /* returns > 32 on success (path parameter, not shell) */
 #else
     char quoted[GUI_PATHS_MAX * 4 + 4]; /* worst case: every byte an escaped ' -> 4x, + the two quotes */
-    if (!crash_shell_squote(dir, quoted, sizeof quoted)) {
+    if (!gui_shell_squote(dir, quoted, sizeof quoted)) {
         return false;
     }
     char cmd[sizeof quoted + 32];

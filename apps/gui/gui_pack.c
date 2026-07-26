@@ -257,6 +257,27 @@ bool gui_pack_sprite_matches_ref(int atlas_index, int sprite_index,
     return packed_name && strcmp(packed_name, canonical_name) == 0;
 }
 
+int gui_pack_find_sprite_ref_in_result(const tp_result *result,
+                                       tp_id128 source_id,
+                                       const char *source_key) {
+    if (!result || tp_id128_is_nil(source_id) || !source_key) {
+        return -1;
+    }
+    char canonical_name[TP_PACK_INTERNAL_NAME_CAP];
+    if (tp_pack_input_format_sprite_name(
+            source_id, source_key, canonical_name, sizeof canonical_name,
+            NULL) != TP_STATUS_OK) {
+        return -1;
+    }
+    for (int i = 0; i < result->sprite_count; ++i) {
+        const char *packed_name = result->sprites[i].name;
+        if (packed_name && strcmp(packed_name, canonical_name) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
 int gui_pack_find_sprite_ref(int atlas_index, tp_id128 source_id,
                              const char *source_key) {
     if (atlas_index < 0 || atlas_index >= GUI_PACK_MAX_ATLASES) {

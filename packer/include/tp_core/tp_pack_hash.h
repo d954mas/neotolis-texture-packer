@@ -69,9 +69,10 @@ typedef enum tp_pack_hash_category {
  * filesystem, no cache; the same pixels always yield the same id on every OS. */
 tp_id128 tp_pack_semantic_image_hash(int width, int height, const uint8_t *rgba);
 
-/* Session-lifetime per-file image-hash cache keyed by (path, size, mtime).
- * In-memory only. Opaque. NULL is a valid "no cache" argument to the compute
- * call. */
+/* Session-lifetime per-file image-hash cache. Path/size/mtime provide a cheap
+ * candidate lookup; an exact encoded-content fingerprint verifies every hit
+ * before the cached semantic RGBA hash is reused. In-memory only. Opaque. NULL
+ * is a valid "no cache" argument to the compute call. */
 typedef struct tp_pack_image_hash_cache tp_pack_image_hash_cache;
 
 tp_pack_image_hash_cache *tp_pack_image_hash_cache_create(void);
@@ -79,7 +80,7 @@ void tp_pack_image_hash_cache_destroy(tp_pack_image_hash_cache *cache);
 
 typedef struct tp_pack_image_hash_cache_stats {
     uint64_t decodes; /* files actually decoded (misses served by re-decode) */
-    uint64_t hits;    /* fingerprint matched -- decode skipped */
+    uint64_t hits;    /* exact encoded-content fingerprint matched */
     uint64_t misses;  /* absent or fingerprint changed -- decode performed */
     int entries;      /* distinct paths currently retained */
 } tp_pack_image_hash_cache_stats;

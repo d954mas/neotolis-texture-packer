@@ -47,6 +47,7 @@ void reset_selection(void) {
     s_sel_missing = false;
     multi_sel_clear();
     s_sel_anchor_row = -1;
+    s_focus_view = -1;
     s_sel_anim = -1;
     s_sel_anim_frame = -1;
     preview_stop();
@@ -265,8 +266,8 @@ const tp_snapshot_animation *preview_animation(void) {
                : NULL;
 }
 
-static int snapshot_atlas_index_by_id(const tp_session_snapshot *snapshot,
-                                      tp_id128 atlas_id) {
+int gui_actions__snapshot_atlas_index_by_id(const tp_session_snapshot *snapshot,
+                                            tp_id128 atlas_id) {
     const int count = snapshot ? tp_session_snapshot_atlas_count(snapshot) : 0;
     for (int i = 0; i < count; ++i) {
         const tp_snapshot_atlas *atlas =
@@ -586,7 +587,7 @@ void update_preview(void) {
                                                 s_actions.preview_animation_ref.atlas_id,
                                                 s_actions.preview_animation_ref.animation_id)
                                           : NULL;
-    const int atlas_index = snapshot_atlas_index_by_id(
+    const int atlas_index = gui_actions__snapshot_atlas_index_by_id(
         snapshot, s_actions.preview_animation_ref.atlas_id);
     const tp_result *pr = gui_pack_result(atlas_index);
     const uint64_t result_version = gui_pack_result_version(atlas_index);

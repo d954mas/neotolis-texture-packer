@@ -12,9 +12,22 @@
 
 #include <stdint.h>
 
+#include "tp_core/tp_id.h"
+#include "tp_core/tp_image.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* Private ingress variants used by the Pack/hash cache. The fingerprint is the
+ * exact encoded byte stream read from the file, not filesystem metadata. */
+tp_status tp_image_load_file_fingerprinted(const char *path_utf8,
+                                           tp_image_rgba8 *out,
+                                           tp_id128 *out_fingerprint,
+                                           tp_error *err);
+tp_status tp_image_file_fingerprint(const char *path_utf8,
+                                    tp_id128 *out_fingerprint,
+                                    tp_error *err);
 
 void tp_image__test_reset_decode_count(void);
 uint64_t tp_image__test_decode_count(void);

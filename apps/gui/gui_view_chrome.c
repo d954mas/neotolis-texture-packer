@@ -9,6 +9,10 @@
 #include "ui/nt_ui_scroll.h"
 #include "ui/nt_ui_tooltip.h"
 
+#include "clipboard/nt_clipboard.h" /* Copy sprite display names. */
+
+#include "gui_shell_quote.h" /* POSIX quoting for file-manager commands. */
+
 #include "tp_core/tp_export.h" /* exporter registry -> target dropdown (export modal) */
 #include "tp_core/tp_journal.h" /* recovery status labels */
 
@@ -33,14 +37,16 @@
 #endif
 
 /* --- menu bar + context menu state (chrome-local; nothing outside this TU ever read them) --- */
-static nt_ui_menu_state_t s_file_state, s_edit_state, s_view_state, s_help_state;
-static nt_ui_menu_ctx_t s_file_menu, s_edit_menu, s_view_menu, s_help_menu;
+static nt_ui_menu_state_t s_file_state, s_edit_state, s_atlas_state, s_view_state, s_help_state;
+static nt_ui_menu_ctx_t s_file_menu, s_edit_menu, s_atlas_menu, s_view_menu, s_help_menu;
 enum {
     MK_NEW = 1, MK_OPEN, MK_SAVE, MK_SAVEAS, MK_EXPORT, MK_REFRESH, MK_EXIT,
     MK_UNDO, MK_REDO,
+    MK_PACK, MK_ADD_ATLAS,
     MK_ZIN, MK_ZOUT, MK_FIT, MK_ABOUT, MK_S100, MK_S125, MK_S150, MK_S200,
     MK_OV_OUTLINE, MK_OV_FRAME, MK_OV_TRIM, MK_OV_PIVOT, MK_OV_SLICE9, MK_CTX_FIT, MK_CTX_100,
-    MK_CTX_RENAME, MK_CTX_REMOVE, MK_CTX_TOGGLE, MK_CTX_CREATE_ANIM, MK_CTX_PREVIEW
+    MK_CTX_RENAME, MK_CTX_REMOVE, MK_CTX_TOGGLE, MK_CTX_CREATE_ANIM, MK_CTX_PREVIEW,
+    MK_CTX_COPY_NAME, MK_CTX_REVEAL
 };
 
 /* Right-click context menu: one cursor-anchored menu whose items depend on the row a right-click
@@ -50,6 +56,31 @@ enum {
  * s_ctx_removable) lives in gui_state (written by three different views); s_ctx_menu is the
  * declare-machinery working buffer for declare_context_menu below, chrome-local. */
 static nt_ui_menu_ctx_t s_ctx_menu;
+
+bool gui_view_chrome_any_menu_open(void) {
+    return s_ctx_state.open || s_file_state.open || s_edit_state.open ||
+           s_atlas_state.open || s_view_state.open || s_help_state.open;
+}
+
+bool gui_view_chrome_consume_escape(void) {
+    if (!gui_view_chrome_any_menu_open()) {
+        return false;
+    }
+    close_all_menus();
+    return true;
+}
+
+#ifdef NTPACKER_GUI_SELFTEST
+void gui_view_chrome_selftest_set_menubar_open(int index, bool open) {
+    nt_ui_menu_state_t *states[] = {
+        &s_file_state, &s_edit_state, &s_atlas_state, &s_view_state,
+        &s_help_state,
+    };
+    if (index >= 0 && index < (int)(sizeof states / sizeof states[0])) {
+        states[index]->open = open;
+    }
+}
+#endif
 
 /* Opens `url` in the OS default browser. Reusable helper (About link now; future notices/docs links
  * reuse it). Windows: ShellExecuteA (shell32 -- already linked via tinyfiledialogs). POSIX:
@@ -63,12 +94,91 @@ static bool gui_open_url(const char *url) {
     HINSTANCE rc = ShellExecuteA(NULL, "open", url, NULL, NULL, SW_SHOWNORMAL);
     return (INT_PTR)rc > 32; /* ShellExecute returns a value > 32 on success */
 #elif defined(__APPLE__)
-    char cmd[1200];
-    (void)snprintf(cmd, sizeof cmd, "open '%s' >/dev/null 2>&1 &", url);
+    char quoted[1200 * 4 + 4]; /* worst case: every byte an escaped ' -> 4x, + quotes */
+    if (!gui_shell_squote(url, quoted, sizeof quoted)) {
+        return false;
+    }
+    char cmd[sizeof quoted + 32];
+    (void)snprintf(cmd, sizeof cmd, "open %s >/dev/null 2>&1 &", quoted);
     return system(cmd) == 0;
 #else
-    char cmd[1200];
-    (void)snprintf(cmd, sizeof cmd, "xdg-open '%s' >/dev/null 2>&1 &", url);
+    char quoted[1200 * 4 + 4]; /* worst case: every byte an escaped ' -> 4x, + quotes */
+    if (!gui_shell_squote(url, quoted, sizeof quoted)) {
+        return false;
+    }
+    char cmd[sizeof quoted + 32];
+    (void)snprintf(cmd, sizeof cmd, "xdg-open %s >/dev/null 2>&1 &", quoted);
+    return system(cmd) == 0;
+#endif
+}
+
+/* Reveal `path` in the OS file manager, selecting the file when supported. Best-effort;
+ * returns whether the reveal was dispatched. Windows selects the item; POSIX opens the containing dir.
+ * Windows uses ShellExecuteW on the UTF-16 path (ANSI ShellExecuteA mangled non-ASCII paths -- e.g. a
+ * sprite under a Cyrillic folder); POSIX shell-quotes the path (gui_shell_squote) so an apostrophe or
+ * metacharacter in a filename can never break out of the command. */
+static bool gui_reveal_in_explorer(const char *path) {
+    if (!path || path[0] == '\0') {
+        return false;
+    }
+#ifdef _WIN32
+    /* explorer /select needs a plain UTF-16 path -- NOT nt_utf8_path_to_utf16, which prepends the
+     * \\?\ long-path prefix that explorer's /select rejects. This is a UI shell argument for
+     * display/selection, not filesystem I/O, so it does not belong to the tp_core path policy
+     * (R21) -- annotated boundary-ok below. Convert, switch to backslashes, then build the argument. */
+    wchar_t wpath[TP_IDENTITY_PATH_MAX];
+    const int wn = MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, (int)(sizeof wpath / sizeof wpath[0])); /* boundary-ok: explorer /select display arg, not fs path policy */
+    if (wn == 0) {
+        return false; /* dwFlags=0 replaces bad UTF-8 with U+FFFD, so a 0 return here means the path
+                       * did not fit wpath (over-length) -- skip the reveal rather than open a stub */
+    }
+    for (wchar_t *p = wpath; *p != L'\0'; ++p) {
+        if (*p == L'/') {
+            *p = L'\\';
+        }
+    }
+    wchar_t arg[TP_IDENTITY_PATH_MAX + 16];
+    const wchar_t *const prefix = L"/select,\"";
+    size_t o = 0;
+    for (const wchar_t *p = prefix; *p != L'\0'; ++p) {
+        arg[o++] = *p; /* 9 wchars into a >4096 buffer -- always fits */
+    }
+    for (const wchar_t *p = wpath; *p != L'\0'; ++p) {
+        if (o + 2U >= sizeof arg / sizeof arg[0]) {
+            return false; /* need room for this char + closing quote + NUL */
+        }
+        arg[o++] = *p;
+    }
+    arg[o++] = L'"';
+    arg[o] = L'\0';
+    HINSTANCE rc = ShellExecuteW(NULL, NULL, L"explorer.exe", arg, NULL, SW_SHOWNORMAL);
+    return (INT_PTR)rc > 32;
+#elif defined(__APPLE__)
+    char quoted[TP_IDENTITY_PATH_MAX * 4 + 4]; /* worst case: every byte an escaped ' -> 4x, + quotes */
+    if (!gui_shell_squote(path, quoted, sizeof quoted)) {
+        return false;
+    }
+    char cmd[sizeof quoted + 32];
+    (void)snprintf(cmd, sizeof cmd, "open -R %s >/dev/null 2>&1 &", quoted);
+    return system(cmd) == 0;
+#else
+    char dir[TP_IDENTITY_PATH_MAX];
+    const int dn = snprintf(dir, sizeof dir, "%s", path);
+    if (dn < 0 || dn >= (int)sizeof dir) {
+        return false; /* truncated: revealing the wrong (chopped) folder is worse than not opening */
+    }
+    char *slash = strrchr(dir, '/');
+    if (slash == dir) {
+        dir[1] = '\0'; /* root-level file ("/x.png"): reveal "/" itself, not the file */
+    } else if (slash) {
+        *slash = '\0';
+    }
+    char quoted[TP_IDENTITY_PATH_MAX * 4 + 4];
+    if (!gui_shell_squote(dir[0] ? dir : "/", quoted, sizeof quoted)) {
+        return false;
+    }
+    char cmd[sizeof quoted + 32];
+    (void)snprintf(cmd, sizeof cmd, "xdg-open %s >/dev/null 2>&1 &", quoted);
     return system(cmd) == 0;
 #endif
 }
@@ -76,6 +186,7 @@ static bool gui_open_url(const char *url) {
 void close_menubar_menus(void) {
     s_file_state.open = false;
     s_edit_state.open = false;
+    s_atlas_state.open = false;
     s_view_state.open = false;
     s_help_state.open = false;
 }
@@ -117,6 +228,17 @@ static void edit_items(nt_ui_menu_ctx_t *m) {
     nt_ui_menu_item_opts_t r = {.shortcut = "Ctrl+Y", .disabled = !gui_project_can_redo()};
     if (nt_ui_menu_item_ex(m, MK_REDO, "Redo", r)) {
         do_redo();
+    }
+}
+/* Atlas menu mirrors the canvas Pack action and its busy state. */
+static void atlas_items(nt_ui_menu_ctx_t *m) {
+    nt_ui_menu_item_opts_t p = {.shortcut = "Ctrl+P", .disabled = !s_pack_has_sources || gui_pack_async_busy()};
+    if (nt_ui_menu_item_ex(m, MK_PACK, "Pack", p)) {
+        s_pending_pack = true;
+    }
+    nt_ui_menu_separator(m);
+    if (nt_ui_menu_item(m, MK_ADD_ATLAS, "Add atlas")) {
+        s_pending_add_atlas = true;
     }
 }
 /* Radio-style UI-scale item; the active one is marked with a check glyph (baked in the DejaVu font). */
@@ -191,6 +313,7 @@ void declare_menubar(nt_ui_context_t *ctx) {
           .backgroundColor = C_STATUS}) { /* docked: flush to the top edge, no rounded corners */
         menubar_entry(ctx, s_id_mb_file, "File", &s_file_state);
         menubar_entry(ctx, s_id_mb_edit, "Edit", &s_edit_state);
+        menubar_entry(ctx, s_id_mb_atlas, "Atlas", &s_atlas_state);
         menubar_entry(ctx, s_id_mb_view, "View", &s_view_state);
         menubar_entry(ctx, s_id_mb_help, "Help", &s_help_state);
         /* right side: persistent recovery warning + project name + dirty dot */
@@ -231,6 +354,9 @@ void declare_menus(nt_ui_context_t *ctx) {
     nt_ui_menu_begin(&s_edit_menu, ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, s_id_menu_edit, &s_edit_state, &s_menu_style);
     edit_items(&s_edit_menu);
     nt_ui_menu_end(&s_edit_menu);
+    nt_ui_menu_begin(&s_atlas_menu, ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, s_id_menu_atlas, &s_atlas_state, &s_menu_style);
+    atlas_items(&s_atlas_menu);
+    nt_ui_menu_end(&s_atlas_menu);
     nt_ui_menu_begin(&s_view_menu, ctx, NT_UI_DATA_LAYER(LAYER_IMG), LAYER_TEXT, s_id_menu_view, &s_view_state, &s_menu_style);
     view_items(&s_view_menu);
     nt_ui_menu_end(&s_view_menu);
@@ -264,6 +390,25 @@ void declare_context_menu(nt_ui_context_t *ctx) {
                     s_ctx_sprite_atlas_id, s_ctx_sprite_source_id,
                     s_ctx_sprite_source_key, s_ctx_sprite_revision};
                 start_sprite_edit_ref(&sprite, s_ctx_sprite_display_name);
+            }
+        }
+        if (s_ctx_sprite_display_name[0] != '\0') {
+            if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_COPY_NAME, "Copy name")) {
+                if (nt_clipboard_available()) {
+                    nt_clipboard_set_text(s_ctx_sprite_display_name);
+                    set_statusf("Copied \"%s\"", s_ctx_sprite_display_name);
+                } else {
+                    set_status_ex(STATUS_WARNING, "Clipboard unavailable.");
+                }
+            }
+        }
+        if (s_ctx_sprite_abs[0] != '\0') {
+            if (nt_ui_menu_item(&s_ctx_menu, MK_CTX_REVEAL, "Show in Explorer")) {
+                /* Use the frozen context-menu payload so later keyboard movement
+                 * cannot redirect the action to another row. */
+                if (!gui_reveal_in_explorer(s_ctx_sprite_abs)) {
+                    set_status_ex(STATUS_WARNING, "Could not open the file location.");
+                }
             }
         }
         if (s_multi_sel_count > 0) {

@@ -28,6 +28,45 @@ typedef struct {
 
 static gui_pack_job_state s_adapter;
 
+bool gui_pack_format_export_cancelled(const gui_pack_result_info *info,
+                                      char *out, size_t cap) {
+    const bool uncertain = info && info->publication_uncertain;
+    const bool partial = info && info->partial_publication;
+    if (out && cap > 0U) {
+        if (uncertain) {
+            (void)snprintf(
+                out, cap,
+                "Export cancelled; output may be partially updated.");
+        } else if (partial) {
+            (void)snprintf(
+                out, cap,
+                "Export cancelled after publishing %d target(s) / %d file(s).",
+                info->targets, info->files);
+        } else {
+            (void)snprintf(out, cap, "Export cancelled.");
+        }
+    }
+    return uncertain || partial;
+}
+
+bool gui_pack_format_export_failed(const gui_pack_result_info *info,
+                                   char *out, size_t cap) {
+    const bool uncertain = info && info->publication_uncertain;
+    if (out && cap > 0U) {
+        if (uncertain) {
+            (void)snprintf(
+                out, cap,
+                "Export failed; output may be partially updated. Exported %d "
+                "target(s); %d atlas(es) failed%s%s",
+                info->targets, info->atlases_fail,
+                info->err[0] ? " -- " : "", info->err);
+        } else {
+            out[0] = '\0';
+        }
+    }
+    return uncertain;
+}
+
 static tp_session *job_session(void) {
     return gui_project_session_for_jobs();
 }
@@ -80,6 +119,25 @@ static bool input_changed_since(tp_session_input_token token) {
     return !snapshot || !tp_session_input_token_equal(
                             tp_session_snapshot_input_token(snapshot), token);
 }
+
+static bool native_pack_input_changed_since(
+    const tp_session_pack_job_result *pack) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    if (!pack || !snapshot) {
+        return true;
+    }
+    const tp_session_input_token live_token =
+        tp_session_snapshot_input_token(snapshot);
+    return tp_session_pack_result_freshness(pack, live_token, NULL) !=
+           TP_PACK_FRESHNESS_CURRENT;
+}
+
+#ifdef TP_ENABLE_TEST_SEAMS
+bool gui_pack__test_native_pack_input_changed_since(
+    const tp_session_pack_job_result *pack) {
+    return native_pack_input_changed_since(pack);
+}
+#endif
 
 bool gui_pack_init(const char *work_dir) {
     s_adapter.work_dir_ready = false;
@@ -194,8 +252,7 @@ gui_pack_done gui_pack_poll(gui_pack_result_info *out) {
                    ? GUI_PACK_DONE_EXPORT_FAIL
                    : GUI_PACK_DONE_PACK_FAIL;
     }
-    const bool cancelled = s_adapter.cancel_requested ||
-                           result.state == TP_SESSION_JOB_CANCELLED;
+    const bool cancelled = result.state == TP_SESSION_JOB_CANCELLED;
     const bool preview = result.kind == TP_SESSION_JOB_PACK &&
                          result.pack.preview_exporter_id[0] != '\0';
     gui_pack_done done = GUI_PACK_DONE_NONE;
@@ -228,8 +285,8 @@ gui_pack_done gui_pack_poll(gui_pack_result_info *out) {
                     out->atlas_index = atlas_index;
                     out->ms = result.elapsed_ms;
                     out->missing = result.pack.missing_sources;
-                    out->input_changed = input_changed_since(
-                        result.pack.input_token_at_start);
+                    out->input_changed =
+                        native_pack_input_changed_since(&result.pack);
                     if (result.pack.missing_sources > 0) {
                         (void)snprintf(out->note, sizeof out->note,
                                        "%d missing file(s) skipped",
@@ -254,9 +311,15 @@ gui_pack_done gui_pack_poll(gui_pack_result_info *out) {
     } else {
         if (out) {
             out->targets = result.export_result.targets;
+            out->files = result.export_result.files;
             out->notices = result.export_result.notices;
             out->atlases_ok = result.export_result.atlases_ok;
             out->atlases_fail = result.export_result.atlases_failed;
+            out->atlases_skipped = result.export_result.atlases_skipped;
+            out->partial_publication =
+                result.export_result.partial_publication;
+            out->publication_uncertain =
+                result.export_result.publication_uncertain;
             (void)snprintf(out->err, sizeof out->err, "%s",
                            result.export_result.first_error);
         }
@@ -498,7 +561,11 @@ bool gui_pack_export(int atlas_index, int *out_targets, int *out_notices,
         *out_notices = info.notices;
     }
     if (notice && notice_cap > 0U) {
-        if (info.notices > 0) {
+        if (info.atlases_skipped > 0) {
+            (void)snprintf(notice, notice_cap,
+                           "%d atlas(es) skipped (no usable images)",
+                           info.atlases_skipped);
+        } else if (info.notices > 0) {
             (void)snprintf(notice, notice_cap, "%d metadata notice(s)",
                            info.notices);
         } else {

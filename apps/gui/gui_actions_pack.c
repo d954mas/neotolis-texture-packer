@@ -183,14 +183,39 @@ static void poll_async(void) {
             set_status_ex(STATUS_INFO, "Pack cancelled.");
             break;
         case GUI_PACK_DONE_EXPORT_OK:
-            set_statusf_ex(info.notices > 0 ? STATUS_WARNING : STATUS_SUCCESS, "Exported %d target(s)%s", info.targets,
-                           info.notices > 0 ? " (metadata notices raised)" : "");
+            if (info.atlases_skipped > 0) {
+                set_statusf_ex(
+                    STATUS_WARNING,
+                    "Exported %d target(s); %d atlas(es) skipped (no usable images)",
+                    info.targets, info.atlases_skipped);
+            } else {
+                set_statusf_ex(
+                    info.notices > 0 ? STATUS_WARNING : STATUS_SUCCESS,
+                    "Exported %d target(s)%s", info.targets,
+                    info.notices > 0 ? " (metadata notices raised)" : "");
+            }
             break;
         case GUI_PACK_DONE_EXPORT_FAIL:
-            set_statusf_ex(STATUS_ERROR, "Exported %d target(s); %d atlas(es) failed -- %s", info.targets, info.atlases_fail, info.err);
+            {
+                char message[512];
+                if (gui_pack_format_export_failed(
+                        &info, message, sizeof message)) {
+                    set_status_ex(STATUS_ERROR, message);
+                } else {
+                    set_statusf_ex(
+                        STATUS_ERROR,
+                        "Exported %d target(s); %d atlas(es) failed -- %s",
+                        info.targets, info.atlases_fail, info.err);
+                }
+            }
             break;
         case GUI_PACK_DONE_EXPORT_CANCELLED:
-            set_status_ex(STATUS_INFO, "Export cancelled.");
+            {
+                char message[128];
+                const bool warning = gui_pack_format_export_cancelled(
+                    &info, message, sizeof message);
+                set_status_ex(warning ? STATUS_WARNING : STATUS_INFO, message);
+            }
             break;
         case GUI_PACK_DONE_PREVIEW_OK:
             if (info.input_changed) {

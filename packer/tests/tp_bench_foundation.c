@@ -2436,7 +2436,13 @@ static int run_pack_hash_probe(const char *path, int iterations) {
                  atlas_count, total_sources, iterations);
 
     bool stable = true;
-    int unreadable = atlas_count;
+    /* F18: the MAX unreadable-atlas count across ALL sweeps (cold every iteration,
+     * warm prime, warm repeats), not just cold sweep 0. An atlas that reads non-nil
+     * cold but nil on a prime/warm sweep otherwise escaped both this gate and the
+     * stability check. Starts at 0 and only grows; the cold loop still reproduces the
+     * old cold-sweep-0 value for the all-unreadable early return below, since a
+     * NULL-cache cold sweep is deterministic. */
+    int unreadable = 0;
 
     /* COLD: cache = NULL decodes every source every call. Iteration 0 is a
      * genuinely cold decode (only the project JSON was read so far), so the
@@ -2450,8 +2456,8 @@ static int run_pack_hash_probe(const char *path, int iterations) {
                                   cold_atlas, expected_hash, have_expected,
                                   &unread, &stable);
         (void)tp_bench_samples_accept(&cold_whole, whole);
-        if (i == 0) {
-            unreadable = unread;
+        if (unread > unreadable) {
+            unreadable = unread; /* F18: max-accumulate every cold sweep */
         }
     }
 
@@ -2481,12 +2487,18 @@ static int run_pack_hash_probe(const char *path, int iterations) {
         (void)pack_hash_probe_sweep(session, atlas_ids, atlas_count, cache, NULL,
                                     expected_hash, have_expected, &prime_unread,
                                     &stable);
+        if (prime_unread > unreadable) {
+            unreadable = prime_unread; /* F18: the warm prime sweep counts too */
+        }
         for (int i = 0; i < iterations; ++i) {
             int unread = 0;
             const double whole = pack_hash_probe_sweep(
                 session, atlas_ids, atlas_count, cache, warm_atlas,
                 expected_hash, have_expected, &unread, &stable);
             (void)tp_bench_samples_accept(&warm_whole, whole);
+            if (unread > unreadable) {
+                unreadable = unread; /* F18: every warm sweep counts too */
+            }
         }
     }
     tp_pack_image_hash_cache_stats stats;

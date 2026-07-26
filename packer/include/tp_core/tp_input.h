@@ -10,6 +10,7 @@
  * by hand (AGENTS.md: features land in core first). Depends only on tp_core
  * (tp_scan/tp_names/tp_project + the tp_pack.h desc struct) -- no builder. */
 
+#include "tp_core/tp_cancel.h"
 #include "tp_core/tp_error.h"
 #include "tp_core/tp_id.h"
 #include "tp_core/tp_pack.h" /* tp_pack_sprite_desc */
@@ -33,8 +34,9 @@ tp_status tp_pack_input_format_sprite_name(tp_id128 source_id,
 /* Assembled pack input for one atlas. `descs` and each descriptor's `name`,
  * `path`, `source_key`, and `logical_name` are malloc-owned (free with
  * tp_pack_input_free), independent of the project -- the input outlives a
- * tp_project_destroy. `missing_sources` counts sources that resolved but do not
- * exist on disk (skipped, not fatal -- ux.md §3.7). */
+ * tp_project_destroy. `missing_sources` is retained for result ABI compatibility;
+ * strict Pack admission fails on an unavailable source, so successful newly-built
+ * inputs report zero. */
 typedef struct tp_pack_input {
     tp_pack_sprite_desc *descs;
     int count;
@@ -48,17 +50,37 @@ typedef struct tp_pack_input {
  * -- packing layout depends on input order (arch review R2). Each sprite's
  * per-sprite overrides are looked up by tp_sprite_export_key and encoded onto the
  * desc. Zero descs is not an error (the caller decides whether "empty" is fatal).
- * A source that resolves but is absent is counted as missing and skipped. Source
- * resolution, directory open/read, UTF-8/key normalization, path-bound, and OOM
- * failures propagate their precise tp_status/tp_error. On any error *out is left
- * empty (except a NULL `out`, which is untouched). */
+ * An absent, unreadable, or unstatable source fails the complete build rather than
+ * publishing a partial input. Source resolution, stat, directory open/read,
+ * UTF-8/key normalization, path-bound, and OOM failures propagate their precise
+ * tp_status/tp_error. On any error *out is left empty (except a NULL `out`, which
+ * is untouched). */
 tp_status tp_pack_input_build(const struct tp_project *p, int atlas_index, tp_pack_input *out, tp_error *err);
+
+/* Cancellable form of tp_pack_input_build: `cancel` is polled once per source, threaded
+ * into the folder walk (per directory entry), and polled again per descriptor while a
+ * folder's scan result is materialized, so the async pack worker can interrupt a slow /
+ * network folder source -- or a large folder's descriptor build -- promptly. A NULL
+ * `cancel` means "never cancel" -- tp_pack_input_build() is exactly this. On cancellation
+ * the partial input is freed, *out is left empty, and TP_STATUS_CANCELLED is returned (a
+ * clean stop, not a failure). All other semantics match tp_pack_input_build. */
+tp_status tp_pack_input_build_cancellable(const struct tp_project *p, int atlas_index,
+                                          tp_pack_input *out,
+                                          const tp_cancel_token *cancel,
+                                          tp_error *err);
 
 /* Frontend-safe pack admission: resolves a stable atlas ID inside an immutable
  * session snapshot and returns only the typed, caller-owned pack input. */
 tp_status tp_pack_input_build_snapshot(const struct tp_session_snapshot *snapshot,
                                        tp_id128 atlas_id, tp_pack_input *out,
                                        tp_error *err);
+
+/* Cancellable form of tp_pack_input_build_snapshot (NULL `cancel` => never cancel,
+ * exactly the non-cancellable form). Cancellation returns TP_STATUS_CANCELLED with
+ * *out left empty. */
+tp_status tp_pack_input_build_snapshot_cancellable(
+    const struct tp_session_snapshot *snapshot, tp_id128 atlas_id,
+    tp_pack_input *out, const tp_cancel_token *cancel, tp_error *err);
 tp_status tp_pack_settings_build_snapshot(const struct tp_session_snapshot *snapshot,
                                           tp_id128 atlas_id,
                                           tp_pack_settings *out,

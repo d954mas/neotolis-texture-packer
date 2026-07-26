@@ -12,24 +12,35 @@
 
 #include "tinycthread.h"
 
+#include "tp_core/tp_cancel.h"
 #include "tp_core/tp_export.h"
 #include "tp_core/tp_export_run.h"
 #include "tp_core/tp_input.h"
 #include "tp_core/tp_pack_hash.h"
 #include "tp_job_owner_internal.h"
+#include "tp_pack_hash_priv.h"
 #include "tp_pack_priv.h"
+#ifdef TP_ENABLE_TEST_SEAMS
+#include "tp_test_gate.h"
+#endif
 
 typedef struct tp_job_export_atlas {
     int index;
     int enabled_targets;
 } tp_job_export_atlas;
 
+typedef enum tp_job_terminal_claim {
+    TP_JOB_TERMINAL_OPEN = 0,
+    TP_JOB_TERMINAL_CANCEL_REQUESTED,
+    TP_JOB_TERMINAL_CLAIMED
+} tp_job_terminal_claim;
+
 typedef struct tp_live_job {
     tp_session_owned_job owner;
     tp_session_job_kind kind;
     tp_session *session;
     _Atomic int state;
-    _Atomic bool cancelled;
+    _Atomic int terminal_claim;
     _Atomic int current;
     int total;
     bool thread_started;
@@ -42,6 +53,13 @@ typedef struct tp_live_job {
     tp_id128 atlas_id;
     tp_session_input_token input_token_at_start;
     tp_id128 pack_input_hash;
+    tp_pack_image_hash_cache *image_hash_cache;
+    tp_id128 current_pack_input_hash;
+    tp_session_input_token freshness_token;
+    tp_pack_freshness freshness;
+    tp_pack_freshness_reason freshness_reason;
+    tp_status freshness_status;
+    tp_error freshness_error;
     /* Immutable session snapshot, owned by the job from pack-start until pack_worker
      * builds the input from it (incl. the folder walk) OFF the UI thread and destroys
      * it. NULL for export jobs and after the worker consumes it. */
@@ -57,8 +75,80 @@ typedef struct tp_live_job {
     tp_export_snapshot_job *export_job;
     tp_job_export_atlas *export_atlases;
     int export_atlas_count;
+    bool export_terminal_atlas;
+    bool cancellation_owned_terminal;
+    bool failed_writer_may_have_published;
     tp_session_export_job_result export_result;
 } tp_live_job;
+
+#ifdef TP_ENABLE_TEST_SEAMS
+static tp_test_gate s_before_terminal_gate = TP_TEST_GATE_INIT;
+static tp_test_gate s_after_cancel_observation_gate = TP_TEST_GATE_INIT;
+static tp_test_gate s_after_cancel_claim_gate = TP_TEST_GATE_INIT;
+
+static void job_test_gate_yield(void) {
+    thrd_yield();
+}
+
+void tp_job__test_arm_before_terminal_gate(void) {
+    tp_test_gate_arm(&s_before_terminal_gate, job_test_gate_yield);
+}
+
+bool tp_job__test_before_terminal_gate_entered(void) {
+    return tp_test_gate_entered(&s_before_terminal_gate);
+}
+
+void tp_job__test_release_before_terminal_gate(void) {
+    tp_test_gate_release(&s_before_terminal_gate, job_test_gate_yield);
+}
+
+static void job_before_terminal_gate_wait(void) {
+    tp_test_gate_wait(&s_before_terminal_gate, job_test_gate_yield);
+}
+
+void tp_job__test_arm_after_cancel_observation_gate(void) {
+    tp_test_gate_arm(&s_after_cancel_observation_gate, job_test_gate_yield);
+}
+
+bool tp_job__test_after_cancel_observation_gate_entered(void) {
+    return tp_test_gate_entered(&s_after_cancel_observation_gate);
+}
+
+void tp_job__test_release_after_cancel_observation_gate(void) {
+    tp_test_gate_release(&s_after_cancel_observation_gate,
+                         job_test_gate_yield);
+}
+
+static void job_after_cancel_observation_gate_wait(void) {
+    tp_test_gate_wait(&s_after_cancel_observation_gate, job_test_gate_yield);
+}
+
+void tp_job__test_arm_after_cancel_claim_gate(void) {
+    tp_test_gate_arm(&s_after_cancel_claim_gate, job_test_gate_yield);
+}
+
+bool tp_job__test_after_cancel_claim_gate_entered(void) {
+    return tp_test_gate_entered(&s_after_cancel_claim_gate);
+}
+
+void tp_job__test_release_after_cancel_claim_gate(void) {
+    tp_test_gate_release(&s_after_cancel_claim_gate, job_test_gate_yield);
+}
+
+static void job_after_cancel_claim_gate_wait(void) {
+    tp_test_gate_wait(&s_after_cancel_claim_gate, job_test_gate_yield);
+}
+
+void tp_job__test_reset_all(void) {
+    tp_test_gate_reset(&s_before_terminal_gate, job_test_gate_yield);
+    tp_test_gate_reset(&s_after_cancel_observation_gate, job_test_gate_yield);
+    tp_test_gate_reset(&s_after_cancel_claim_gate, job_test_gate_yield);
+}
+#else
+#define job_before_terminal_gate_wait() ((void)0)
+#define job_after_cancel_observation_gate_wait() ((void)0)
+#define job_after_cancel_claim_gate_wait() ((void)0)
+#endif
 
 static double job_now_ms(void) {
 #ifdef _WIN32
@@ -86,9 +176,41 @@ static char *job_strdup(const char *text) {
     return copy;
 }
 
+/* Cancellation and terminal completion contend for one private claim. The
+ * externally visible state remains RUNNING until the worker has filled every
+ * result field, so poll/take never race partially-published terminal data. */
+static bool job_request_cancel(tp_live_job *job) {
+    int expected = TP_JOB_TERMINAL_OPEN;
+    if (!atomic_compare_exchange_strong_explicit(
+            &job->terminal_claim, &expected,
+            TP_JOB_TERMINAL_CANCEL_REQUESTED, memory_order_acq_rel,
+            memory_order_acquire)) {
+        return false;
+    }
+    job_after_cancel_claim_gate_wait();
+    return true;
+}
+
+/* Returns true iff an accepted cancellation owns the terminal outcome. Once
+ * this function claims completion, later cancel calls are rejected. */
+static bool job_claim_terminal(tp_live_job *job) {
+    int expected = TP_JOB_TERMINAL_OPEN;
+    if (atomic_compare_exchange_strong_explicit(
+            &job->terminal_claim, &expected, TP_JOB_TERMINAL_CLAIMED,
+            memory_order_acq_rel, memory_order_acquire)) {
+        return false;
+    }
+    if (expected == TP_JOB_TERMINAL_CANCEL_REQUESTED) {
+        atomic_store_explicit(&job->terminal_claim, TP_JOB_TERMINAL_CLAIMED,
+                              memory_order_release);
+        return true;
+    }
+    return false;
+}
+
 static void job_cancel_owned(tp_session_owned_job *owned) {
     tp_live_job *job = (tp_live_job *)owned;
-    atomic_store_explicit(&job->cancelled, true, memory_order_relaxed);
+    (void)job_request_cancel(job);
 }
 
 static void job_join(tp_live_job *job) {
@@ -109,6 +231,7 @@ static void job_destroy_owned(tp_session_owned_job *owned) {
      * ran (thread-create failure) -- destroy it exactly once here. NULL-safe. */
     tp_session_snapshot_destroy(job->snapshot);
     tp_pack_input_free(&job->input);
+    tp_pack_image_hash_cache_destroy(job->image_hash_cache);
     free(job->atlas_name);
     free(job->work_dir);
     tp_arena_destroy(job->arena);
@@ -129,7 +252,7 @@ static tp_live_job *job_create(tp_session *session,
     job->session = session;
     job->status = TP_STATUS_OK;
     atomic_init(&job->state, TP_SESSION_JOB_RUNNING);
-    atomic_init(&job->cancelled, false);
+    atomic_init(&job->terminal_claim, TP_JOB_TERMINAL_OPEN);
     atomic_init(&job->current, 0);
     return job;
 }
@@ -139,11 +262,22 @@ static tp_live_job *job_create(tp_session *session,
  * waiting out the whole pack. */
 static bool pack_job_cancel_requested(void *context) {
     const tp_live_job *job = context;
-    return atomic_load_explicit(&job->cancelled, memory_order_relaxed);
+    return atomic_load_explicit(&job->terminal_claim, memory_order_acquire) ==
+           TP_JOB_TERMINAL_CANCEL_REQUESTED;
+}
+
+static bool export_job_terminal_boundary(void *context) {
+    tp_live_job *job = context;
+    if (!job->export_terminal_atlas) {
+        return false;
+    }
+    job->cancellation_owned_terminal = job_claim_terminal(job);
+    return true;
 }
 
 typedef struct pack_hash_collect {
     tp_id128 *hashes; /* one slot per sprite, in settings->sprites order */
+    tp_pack_image_fingerprint *fingerprints;
     int count;
 } pack_hash_collect;
 
@@ -152,13 +286,84 @@ typedef struct pack_hash_collect {
  * the pack consumed -- no second decode. */
 static void pack_worker_collect_image_hash(void *ctx, int sprite_index,
                                            int width, int height,
-                                           const uint8_t *rgba) {
+                                           const uint8_t *rgba,
+                                           const tp_pack_image_fingerprint
+                                               *fingerprint) {
     pack_hash_collect *collect = ctx;
     if (sprite_index < 0 || sprite_index >= collect->count) {
         return;
     }
     collect->hashes[sprite_index] =
         tp_pack_semantic_image_hash(width, height, rgba);
+    if (collect->fingerprints && fingerprint) {
+        collect->fingerprints[sprite_index] = *fingerprint;
+    }
+}
+
+static tp_status pack_input_hash_snapshot(
+    const tp_session_snapshot *snapshot, tp_id128 atlas_id,
+    const char *preview_exporter_id, tp_pack_image_hash_cache *cache,
+    tp_id128 *out_hash, tp_error *err) {
+    tp_pack_input input;
+    memset(&input, 0, sizeof input);
+    tp_pack_settings settings;
+    memset(&settings, 0, sizeof settings);
+    tp_status status =
+        tp_pack_input_build_snapshot(snapshot, atlas_id, &input, err);
+    if (status == TP_STATUS_OK) {
+        status =
+            tp_pack_settings_build_snapshot(snapshot, atlas_id, &settings, err);
+    }
+    if (status == TP_STATUS_OK) {
+        settings.sprites = input.descs;
+        settings.sprite_count = input.count;
+        status = tp_pack_input_hash_compute(
+            &settings,
+            preview_exporter_id && preview_exporter_id[0]
+                ? preview_exporter_id
+                : NULL,
+            cache, out_hash, err);
+    }
+    tp_pack_input_free(&input);
+    return status;
+}
+
+static void pack_worker_probe_freshness(tp_live_job *job) {
+    job->freshness = TP_PACK_FRESHNESS_STALE;
+    job->freshness_reason = TP_PACK_FRESHNESS_RESULT_HASH_NIL;
+    job->freshness_status = TP_STATUS_OK;
+    job->current_pack_input_hash = tp_id128_nil();
+    memset(&job->freshness_error, 0, sizeof job->freshness_error);
+    if (tp_id128_is_nil(job->pack_input_hash)) {
+        return;
+    }
+
+    tp_session_snapshot *snapshot = NULL;
+    job->freshness_status = tp_session_snapshot_create(
+        job->session, &snapshot, &job->freshness_error);
+    if (job->freshness_status != TP_STATUS_OK) {
+        job->freshness_reason = TP_PACK_FRESHNESS_PROBE_ERROR;
+        return;
+    }
+    job->freshness_token = tp_session_snapshot_input_token(snapshot);
+    job->freshness_status = pack_input_hash_snapshot(
+        snapshot, job->atlas_id, job->preview_exporter_id,
+        job->image_hash_cache, &job->current_pack_input_hash,
+        &job->freshness_error);
+    tp_session_snapshot_destroy(snapshot);
+    if (job->freshness_status != TP_STATUS_OK ||
+        tp_id128_is_nil(job->current_pack_input_hash)) {
+        job->freshness = TP_PACK_FRESHNESS_STALE;
+        job->freshness_reason = TP_PACK_FRESHNESS_PROBE_ERROR;
+        return;
+    }
+    if (tp_id128_eq(job->pack_input_hash, job->current_pack_input_hash)) {
+        job->freshness = TP_PACK_FRESHNESS_CURRENT;
+        job->freshness_reason = TP_PACK_FRESHNESS_MATCH;
+    } else {
+        job->freshness = TP_PACK_FRESHNESS_STALE;
+        job->freshness_reason = TP_PACK_FRESHNESS_HASH_MISMATCH;
+    }
 }
 
 static int pack_worker(void *context) {
@@ -166,13 +371,33 @@ static int pack_worker(void *context) {
     tp_error error = {{0}};
     const double start = job_now_ms();
 
+    /* Already cancelled (close/cancel between start and this thread running)? End
+     * clean without walking the folder at all. */
+    if (pack_job_cancel_requested(job)) {
+        tp_session_snapshot_destroy(job->snapshot);
+        job->snapshot = NULL;
+        job->elapsed_ms = job_now_ms() - start;
+        (void)job_claim_terminal(job);
+        job->status = tp_error_set(&error, TP_STATUS_CANCELLED,
+                                   "pack cancelled before input build");
+        job->error = error;
+        atomic_store_explicit(&job->current, 1, memory_order_relaxed);
+        atomic_store_explicit(&job->state, TP_SESSION_JOB_CANCELLED,
+                              memory_order_release);
+        return 0;
+    }
+
     /* Build the pack input HERE, on the worker -- NOT at pack-start on the caller
      * (UI) thread: the recursive folder walk for folder sources
      * (tp_pack_input_build_snapshot -> tp_scan_dir) must never stall the UI. This
      * mirrors export_worker, which already builds its input on the worker. The
-     * snapshot is job-owned; destroy it here once the input is materialized. */
-    tp_status build = tp_pack_input_build_snapshot(job->snapshot, job->atlas_id,
-                                                   &job->input, &error);
+     * snapshot is job-owned; destroy it here once the input is materialized. The
+     * cancel token (the same pack_job_cancel_requested the pack step already uses)
+     * threads into the folder walk so a GUI/live cancel or close kills a slow /
+     * network scan promptly instead of blocking shutdown on the thread join. */
+    const tp_cancel_token cancel = {pack_job_cancel_requested, job};
+    tp_status build = tp_pack_input_build_snapshot_cancellable(
+        job->snapshot, job->atlas_id, &job->input, &cancel, &error);
     tp_session_snapshot_destroy(job->snapshot);
     job->snapshot = NULL;
     if (build == TP_STATUS_OK && job->input.count == 0) {
@@ -183,15 +408,18 @@ static int pack_worker(void *context) {
         /* Input-build failures (missing/unresolvable source, empty atlas, scan
          * failure) are now ASYNC pack failures -- the exact path export_worker uses. */
         job->elapsed_ms = job_now_ms() - start;
-        job->status = build;
+        const bool cancelled =
+            job_claim_terminal(job) || build == TP_STATUS_CANCELLED;
+        job->status =
+            cancelled
+                ? tp_error_set(&error, TP_STATUS_CANCELLED, "pack cancelled")
+                : build;
         job->error = error;
         atomic_store_explicit(&job->current, 1, memory_order_relaxed);
-        atomic_store_explicit(
-            &job->state,
-            atomic_load_explicit(&job->cancelled, memory_order_relaxed)
-                ? TP_SESSION_JOB_CANCELLED
-                : TP_SESSION_JOB_FAILED,
-            memory_order_release);
+        atomic_store_explicit(&job->state,
+                              cancelled ? TP_SESSION_JOB_CANCELLED
+                                        : TP_SESSION_JOB_FAILED,
+                              memory_order_release);
         return 0;
     }
     job->settings.sprites = job->input.descs;
@@ -207,7 +435,11 @@ static int pack_worker(void *context) {
     tp_id128 *image_hashes =
         sprite_count > 0 ? calloc((size_t)sprite_count, sizeof *image_hashes)
                          : NULL;
-    pack_hash_collect collect = {image_hashes, sprite_count};
+    tp_pack_image_fingerprint *fingerprints =
+        image_hashes
+            ? calloc((size_t)sprite_count, sizeof *fingerprints)
+            : NULL;
+    pack_hash_collect collect = {image_hashes, fingerprints, sprite_count};
     const tp_status status = tp_pack_cancellable_observed(
         &job->settings, job->arena, &result, pack_job_cancel_requested, job,
         image_hashes ? pack_worker_collect_image_hash : NULL, &collect, &error);
@@ -223,16 +455,48 @@ static int pack_worker(void *context) {
                 image_hashes, sprite_count, &job->pack_input_hash,
                 &hash_error) != TP_STATUS_OK) {
             job->pack_input_hash = tp_id128_nil();
+        } else if (!job->preview_exporter_id[0] && fingerprints) {
+            job->image_hash_cache = tp_pack_image_hash_cache_create();
+            for (int i = 0; job->image_hash_cache && i < sprite_count; ++i) {
+                const tp_pack_sprite_desc *sprite = &job->settings.sprites[i];
+                if (!sprite->path) {
+                    continue;
+                }
+                if (!fingerprints[i].valid ||
+                    tp_pack_image_hash_cache_seed(
+                        job->image_hash_cache, sprite->path,
+                        fingerprints[i].size, fingerprints[i].mtime,
+                        fingerprints[i].content_hash, image_hashes[i],
+                        &hash_error) != TP_STATUS_OK) {
+                    tp_pack_image_hash_cache_destroy(job->image_hash_cache);
+                    job->image_hash_cache = NULL;
+                }
+            }
         }
     }
+    free(fingerprints);
     free(image_hashes);
+    job_before_terminal_gate_wait();
+    if (status == TP_STATUS_OK && result) {
+        /* Freshness is a second core-owned worker phase. Snapshot capture is
+         * thread-safe: it retains the immutable project generation under the
+         * session gate, then all folder walking/stat/decode work happens here.
+         * The GUI receives only a typed verdict and performs no filesystem I/O. */
+        pack_worker_probe_freshness(job);
+    }
     job->elapsed_ms = job_now_ms() - start;
-    job->status = status;
+    job_after_cancel_observation_gate_wait();
+    const bool cancelled = job_claim_terminal(job);
+    job->status =
+        cancelled ? tp_error_set(&error, TP_STATUS_CANCELLED, "pack cancelled")
+                  : status;
     job->error = error;
-    job->pack_result = result;
+    if (cancelled) {
+        job->pack_input_hash = tp_id128_nil();
+    } else {
+        job->pack_result = result;
+    }
     atomic_store_explicit(&job->current, 1, memory_order_relaxed);
-    const bool cancelled = atomic_load_explicit(&job->cancelled,
-                                                 memory_order_relaxed);
     atomic_store_explicit(
         &job->state,
         cancelled ? TP_SESSION_JOB_CANCELLED
@@ -248,26 +512,74 @@ static int export_worker(void *context) {
     const double start = job_now_ms();
     tp_status first_status = TP_STATUS_OK;
     tp_error first_error = {{0}};
+    const tp_cancel_token cancel = {pack_job_cancel_requested, job};
     for (int i = 0; i < job->export_atlas_count; ++i) {
-        if (atomic_load_explicit(&job->cancelled, memory_order_relaxed)) {
+        if (pack_job_cancel_requested(job)) {
             break;
         }
         atomic_store_explicit(&job->current, i + 1, memory_order_relaxed);
+        job->export_terminal_atlas = i + 1 == job->export_atlas_count;
         const tp_job_export_atlas *atlas = &job->export_atlases[i];
         tp_arena *arena = tp_arena_create(0);
         tp_export_notices notices;
         tp_export_notices_init(&notices);
+        tp_export_report report;
+        memset(&report, 0, sizeof report);
         tp_error error = {{0}};
         int runs = 0;
         int missing = 0;
         tp_status status = arena
-            ? tp_export_snapshot_job_run_atlas(
-                  job->export_job, atlas->index, arena, &notices, &runs,
-                  &missing, &error)
+            ? tp_export_snapshot_job_run_atlas_ex_cancellable(
+                  job->export_job, atlas->index, arena, &notices, &report,
+                  &runs, NULL, &missing, &cancel, &error)
             : TP_STATUS_OOM;
-        if (status == TP_STATUS_OK) {
-            job->export_result.targets += atlas->enabled_targets;
-            job->export_result.notices += notices.count;
+        const char *target_error = NULL;
+        bool writer_failed = false;
+        for (int target = 0; target < report.target_count; ++target) {
+            if (report.targets[target].ok) {
+                job->export_result.targets++;
+                job->export_result.files +=
+                    report.targets[target].written_file_count;
+            } else {
+                writer_failed =
+                    writer_failed ||
+                    report.targets[target].writer_outcome ==
+                        TP_EXPORT_WRITER_FAILED;
+                if (!target_error && report.targets[target].error) {
+                    target_error = report.targets[target].error;
+                }
+            }
+        }
+        if (writer_failed) {
+            job->failed_writer_may_have_published = true;
+        }
+        job->export_result.notices += notices.count;
+        const bool cancellation_owns_atlas =
+            job->cancellation_owned_terminal ||
+            (status == TP_STATUS_CANCELLED && pack_job_cancel_requested(job));
+        if (cancellation_owns_atlas) {
+            if (target_error || writer_failed) {
+                job->export_result.atlases_failed++;
+                if (!job->export_result.first_error[0]) {
+                    tp_export_snapshot_atlas_info info;
+                    memset(&info, 0, sizeof info);
+                    (void)tp_export_snapshot_job_atlas_info(
+                        job->export_job, atlas->index, &info, NULL);
+                    (void)snprintf(job->export_result.first_error,
+                                   sizeof job->export_result.first_error,
+                                   "%s: %s", info.name ? info.name : "?",
+                                   target_error
+                                       ? target_error
+                                       : "export writer failed after publication attempt");
+                }
+            }
+            tp_export_notices_free(&notices);
+            tp_arena_destroy(arena);
+            break;
+        }
+        if (report.input_outcome == TP_EXPORT_INPUT_NO_USABLE_IMAGES) {
+            job->export_result.atlases_skipped++;
+        } else if (status == TP_STATUS_OK) {
             job->export_result.atlases_ok++;
         } else {
             job->export_result.atlases_failed++;
@@ -286,11 +598,29 @@ static int export_worker(void *context) {
         }
         tp_export_notices_free(&notices);
         tp_arena_destroy(arena);
+        if (i + 1 == job->export_atlas_count) {
+            /* The last atlas has crossed its irreversible output boundary. Claim
+             * terminal ownership now: a cancel already accepted wins CANCELLED;
+             * any request after this point is late and must be rejected. Result
+             * fields remain private until the state release below. */
+            job->cancellation_owned_terminal =
+                job->cancellation_owned_terminal || job_claim_terminal(job);
+        }
+        job->export_terminal_atlas = false;
     }
+    job_before_terminal_gate_wait();
     job->elapsed_ms = job_now_ms() - start;
-    const bool cancelled = atomic_load_explicit(&job->cancelled,
-                                                 memory_order_relaxed);
-    job->status = first_status;
+    const bool cancelled =
+        job->cancellation_owned_terminal || job_claim_terminal(job);
+    job->export_result.partial_publication =
+        cancelled && job->export_result.targets > 0;
+    job->export_result.publication_uncertain =
+        job->failed_writer_may_have_published;
+    job->status =
+        cancelled
+            ? tp_error_set(&first_error, TP_STATUS_CANCELLED,
+                           "export cancelled")
+            : first_status;
     job->error = first_error;
     atomic_store_explicit(
         &job->state,
@@ -420,8 +750,12 @@ tp_status tp_session_export_start(tp_session *session,
         tp_session_snapshot_destroy(snapshot);
         return tp_error_set(err, TP_STATUS_OOM, "Export job allocation failed");
     }
-    status = tp_export_snapshot_job_create(snapshot, request->work_dir,
-                                           &job->export_job, err);
+    const tp_export_snapshot_job_opts export_opts = {
+        .terminal_boundary = export_job_terminal_boundary,
+        .terminal_boundary_context = job,
+    };
+    status = tp_export_snapshot_job_create_ex(
+        snapshot, request->work_dir, &export_opts, &job->export_job, err);
     tp_session_snapshot_destroy(snapshot);
     if (status != TP_STATUS_OK) {
         tp_session_job_release_internal(&job->owner);
@@ -445,7 +779,7 @@ tp_status tp_session_export_start(tp_session *session,
         }
         const bool selected = tp_id128_is_nil(request->atlas_id) ||
                               tp_id128_eq(request->atlas_id, info.atlas_id);
-        if (selected && info.enabled_target_count > 0 && info.source_count > 0) {
+        if (selected && info.enabled_target_count > 0) {
             tp_job_export_atlas *target =
                 &job->export_atlases[job->export_atlas_count++];
             target->index = i;
@@ -499,14 +833,18 @@ tp_status tp_session_job_poll(const tp_session *session,
 }
 
 tp_status tp_session_job_cancel(tp_session *session, tp_error *err) {
-    tp_session_owned_job *job = tp_session_job_acquire_internal(session);
+    tp_live_job *job =
+        (tp_live_job *)tp_session_job_acquire_internal(session);
     if (!job) {
         return tp_error_set(err, TP_STATUS_NOT_FOUND,
                             "session has no active job");
     }
-    job->cancel(job);
-    tp_session_job_release_internal(job);
-    return TP_STATUS_OK;
+    const bool accepted = job_request_cancel(job);
+    tp_session_job_release_internal(&job->owner);
+    return accepted
+               ? TP_STATUS_OK
+               : tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                              "job cancellation was already requested or the job is terminal");
 }
 
 tp_status tp_session_job_take_result(tp_session *session,
@@ -552,6 +890,12 @@ tp_status tp_session_job_take_result(tp_session *session,
         out->pack.missing_sources = job->input.missing_sources;
         out->pack.input_token_at_start = job->input_token_at_start;
         out->pack.pack_input_hash = job->pack_input_hash;
+        out->pack.current_pack_input_hash = job->current_pack_input_hash;
+        out->pack.freshness_token = job->freshness_token;
+        out->pack.freshness = job->freshness;
+        out->pack.freshness_reason = job->freshness_reason;
+        out->pack.freshness_status = job->freshness_status;
+        out->pack.freshness_error = job->freshness_error;
         memcpy(out->pack.preview_exporter_id, job->preview_exporter_id,
                strlen(job->preview_exporter_id) + 1U);
         if (state == TP_SESSION_JOB_SUCCEEDED) {
@@ -577,6 +921,27 @@ void tp_session_job_result_destroy(tp_session_job_result *result) {
     memset(result, 0, sizeof *result);
 }
 
+tp_pack_freshness tp_session_pack_result_freshness(
+    const tp_session_pack_job_result *result,
+    tp_session_input_token live_token,
+    tp_pack_freshness_reason *out_reason) {
+    tp_pack_freshness_reason reason = TP_PACK_FRESHNESS_RESULT_HASH_NIL;
+    tp_pack_freshness freshness = TP_PACK_FRESHNESS_STALE;
+    if (result && !tp_id128_is_nil(result->pack_input_hash)) {
+        if (!tp_session_input_token_equal(result->freshness_token,
+                                          live_token)) {
+            reason = TP_PACK_FRESHNESS_TOKEN_CHANGED;
+        } else {
+            reason = result->freshness_reason;
+            freshness = result->freshness;
+        }
+    }
+    if (out_reason) {
+        *out_reason = reason;
+    }
+    return freshness;
+}
+
 tp_status tp_session_pack_input_hash(tp_session *session, tp_id128 atlas_id,
                                      struct tp_pack_image_hash_cache *cache,
                                      tp_id128 *out_hash, tp_error *err) {
@@ -591,24 +956,8 @@ tp_status tp_session_pack_input_hash(tp_session *session, tp_id128 atlas_id,
     if (status != TP_STATUS_OK) {
         return status;
     }
-    tp_pack_input input;
-    memset(&input, 0, sizeof input);
-    tp_pack_settings settings;
-    memset(&settings, 0, sizeof settings);
-    status = tp_pack_input_build_snapshot(snapshot, atlas_id, &input, err);
-    if (status == TP_STATUS_OK) {
-        status =
-            tp_pack_settings_build_snapshot(snapshot, atlas_id, &settings, err);
-    }
-    if (status == TP_STATUS_OK) {
-        settings.sprites = input.descs;
-        settings.sprite_count = input.count;
-        /* Native pack_input_hash (no preview-exporter clamp) -- matches a native
-         * pack job. Preview-exporter-aware recompute is a later refinement (U). */
-        status =
-            tp_pack_input_hash_compute(&settings, NULL, cache, out_hash, err);
-    }
-    tp_pack_input_free(&input);
+    status = pack_input_hash_snapshot(snapshot, atlas_id, NULL, cache,
+                                      out_hash, err);
     tp_session_snapshot_destroy(snapshot);
     return status;
 }

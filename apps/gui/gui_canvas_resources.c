@@ -315,6 +315,13 @@ void gui_canvas_set_result(gui_canvas *canvas, const tp_result *result) {
     canvas->pages_dirty = true;
 }
 
+void gui_canvas_rebind_result(gui_canvas *canvas,
+                              gui_canvas_double_click_ref *double_click,
+                              const tp_result *result) {
+    gui_canvas_double_click_reset(double_click);
+    gui_canvas_set_result(canvas, result);
+}
+
 void gui_canvas_upload_pages(gui_canvas *canvas) {
     if (!canvas->pages_dirty || !canvas->result) {
         return;

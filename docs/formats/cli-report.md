@@ -90,6 +90,11 @@ payload schema number. Each mutation family maps to a variant object:
 - A successfully skipped atlas retains the human-readable `note` and adds a
   structured atlas-level `notices` entry with `{id, atlas, message}`. Stable
   skip ids are `no_usable_images` and `no_enabled_targets`; both exit 0.
+- An atlas-level input failure adds
+  `"error":{"id":"<tp_status_id>","atlas":"<name>","message":"..."}`.
+  Missing/unreadable sources therefore remain distinct from the typed
+  `no_usable_images` skip and produce a non-zero exit without losing source
+  context.
 
 ## `pack` flags
 

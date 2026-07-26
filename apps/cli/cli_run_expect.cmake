@@ -9,6 +9,27 @@ if(NOT DEFINED ARGS)
 endif()
 separate_arguments(_args NATIVE_COMMAND "${ARGS}")
 
+# Exact artifact checks must observe only this invocation, never stale outputs
+# from a previous test run. The explicitly supplied safe parent prevents a bad
+# test argument from turning this targeted cleanup into a broad deletion.
+if(DEFINED EXACT_FILES_ROOT OR DEFINED EXACT_FILES OR
+   DEFINED EXACT_FILES_SAFE_PARENT)
+    if(NOT DEFINED EXACT_FILES_ROOT OR NOT DEFINED EXACT_FILES OR
+       NOT DEFINED EXACT_FILES_SAFE_PARENT)
+        message(FATAL_ERROR
+            "EXACT_FILES_ROOT, EXACT_FILES, and EXACT_FILES_SAFE_PARENT must be provided together")
+    endif()
+    cmake_path(NORMAL_PATH EXACT_FILES_ROOT OUTPUT_VARIABLE _exact_root)
+    cmake_path(NORMAL_PATH EXACT_FILES_SAFE_PARENT OUTPUT_VARIABLE _exact_safe_parent)
+    string(FIND "${_exact_root}/" "${_exact_safe_parent}/" _exact_prefix)
+    if(NOT _exact_prefix EQUAL 0 OR
+       "${_exact_root}" STREQUAL "${_exact_safe_parent}")
+        message(FATAL_ERROR
+            "EXACT_FILES_ROOT must be a child of EXACT_FILES_SAFE_PARENT")
+    endif()
+    file(REMOVE_RECURSE "${_exact_root}")
+endif()
+
 execute_process(
     COMMAND "${EXE}" ${_args}
     RESULT_VARIABLE _code
@@ -33,6 +54,24 @@ if(DEFINED EXIST_FILES)
             message(FATAL_ERROR "expected output file missing: ${_f}\n--stderr--\n${_err}")
         endif()
     endforeach()
+endif()
+
+# EXACT_FILES_ROOT + EXACT_FILES: assert the complete regular-file set below
+# one output root. Paths in EXACT_FILES are relative to EXACT_FILES_ROOT.
+if(DEFINED EXACT_FILES_ROOT)
+    file(GLOB_RECURSE _exact_actual
+        LIST_DIRECTORIES FALSE
+        RELATIVE "${_exact_root}"
+        "${_exact_root}/*")
+    set(_exact_expected ${EXACT_FILES})
+    list(SORT _exact_actual)
+    list(SORT _exact_expected)
+    if(NOT "${_exact_actual}" STREQUAL "${_exact_expected}")
+        message(FATAL_ERROR
+            "output files differ below ${_exact_root}\n"
+            "expected: ${_exact_expected}\nactual: ${_exact_actual}\n"
+            "--stderr--\n${_err}")
+    endif()
 endif()
 
 # NOT_EXIST_FILES: assert each path is ABSENT after the run (dry-run coverage --

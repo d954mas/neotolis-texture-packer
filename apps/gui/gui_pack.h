@@ -49,6 +49,12 @@ int gui_pack_find_sprite_ref(int atlas_index, tp_id128 source_id,
 bool gui_pack_sprite_matches_ref(int atlas_index, int sprite_index,
                                  tp_id128 source_id,
                                  const char *source_key);
+/* Canonical lookup against the exact result a consumer is displaying. This is
+ * required for export previews, whose sprite ordering may differ from the
+ * native atlas slot. */
+int gui_pack_find_sprite_ref_in_result(const tp_result *result,
+                                       tp_id128 source_id,
+                                       const char *source_key);
 
 #ifdef NTPACKER_GUI_SELFTEST
 typedef struct gui_pack_ref_index_work {
@@ -135,12 +141,25 @@ typedef struct {
     bool input_changed; /* pack: model/source token differs -> keep preview stale */
     int missing;        /* pack: skipped-missing-source count */
     int targets;        /* export: enabled targets written */
+    int files;          /* export: files committed by successful targets */
     int notices;        /* export: metadata-loss notices */
     int atlases_ok;     /* export: atlases exported OK */
     int atlases_fail;   /* export: atlases that failed */
+    int atlases_skipped; /* export: atlases skipped for no usable input */
+    bool partial_publication; /* cancelled export left committed outputs */
+    bool publication_uncertain; /* failed writer may have published artifacts */
     char err[256];      /* failure / first-error text */
     char note[128];     /* pack: notice text */
 } gui_pack_result_info;
+
+/* Formats a typed Export cancellation. Returns true when the message reports
+ * irrevocably published targets/files and should be presented as a warning. */
+bool gui_pack_format_export_cancelled(const gui_pack_result_info *info,
+                                      char *out, size_t cap);
+/* Formats the uncertainty warning for a failed direct writer. Returns false
+ * when the failure has no known publication risk. */
+bool gui_pack_format_export_failed(const gui_pack_result_info *info,
+                                   char *out, size_t cap);
 
 /* Starts an async pack of `atlas_index`. false (fills err) if busy or the input can't assemble. */
 bool gui_pack_async_start(int atlas_index, char *err, size_t err_cap);

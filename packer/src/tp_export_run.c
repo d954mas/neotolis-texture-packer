@@ -1,8 +1,11 @@
 #include "tp_core/tp_export_run.h"
 
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "tinycthread.h"
 
 #include "tp_core/tp_arena.h"
 #include "tp_core/tp_export.h"
@@ -14,6 +17,9 @@
 #include "tp_core/tp_scan.h"
 #include "tp_project_mutation_internal.h"
 #include "tp_session_internal.h"
+#ifdef TP_ENABLE_TEST_SEAMS
+#include "tp_test_gate.h"
+#endif
 
 #define TP_RUN_PATH_MAX TP_IDENTITY_PATH_MAX
 
@@ -21,7 +27,110 @@ struct tp_export_snapshot_job {
     tp_project *project;
     char *work_dir;
     bool dry_run;
+    tp_export_terminal_boundary_fn terminal_boundary;
+    void *terminal_boundary_context;
 };
+
+#ifdef TP_ENABLE_TEST_SEAMS
+static _Thread_local int s_report_alloc_fail = -1;
+static _Thread_local bool s_fail_next_error_copy;
+static tp_test_gate s_before_write_gate = TP_TEST_GATE_INIT;
+static tp_test_gate s_after_terminal_boundary_gate = TP_TEST_GATE_INIT;
+
+static void export_test_gate_yield(void) {
+    thrd_yield();
+}
+
+void tp_export_run__test_set_report_alloc_fail(int nth) {
+    s_report_alloc_fail = nth;
+}
+
+void tp_export_run__test_fail_next_error_copy(void) {
+    s_fail_next_error_copy = true;
+}
+
+void tp_export_run__test_arm_before_write_gate(void) {
+    tp_test_gate_arm(&s_before_write_gate, export_test_gate_yield);
+}
+
+bool tp_export_run__test_before_write_gate_entered(void) {
+    return tp_test_gate_entered(&s_before_write_gate);
+}
+
+void tp_export_run__test_release_before_write_gate(void) {
+    tp_test_gate_release(&s_before_write_gate, export_test_gate_yield);
+}
+
+static void export_before_write_gate_wait(void) {
+    tp_test_gate_wait(&s_before_write_gate, export_test_gate_yield);
+}
+
+void tp_export_run__test_arm_after_terminal_boundary_gate(void) {
+    tp_test_gate_arm(&s_after_terminal_boundary_gate,
+                     export_test_gate_yield);
+}
+
+bool tp_export_run__test_after_terminal_boundary_gate_entered(void) {
+    return tp_test_gate_entered(&s_after_terminal_boundary_gate);
+}
+
+void tp_export_run__test_release_after_terminal_boundary_gate(void) {
+    tp_test_gate_release(&s_after_terminal_boundary_gate,
+                         export_test_gate_yield);
+}
+
+static void export_after_terminal_boundary_gate_wait(void) {
+    tp_test_gate_wait(&s_after_terminal_boundary_gate,
+                      export_test_gate_yield);
+}
+
+void tp_export_run__test_reset_all(void) {
+    s_report_alloc_fail = -1;
+    s_fail_next_error_copy = false;
+
+    tp_test_gate_reset(&s_before_write_gate, export_test_gate_yield);
+    tp_test_gate_reset(&s_after_terminal_boundary_gate,
+                       export_test_gate_yield);
+}
+#else
+#define export_before_write_gate_wait() ((void)0)
+#define export_after_terminal_boundary_gate_wait() ((void)0)
+#endif
+
+static tp_status export_cancel_poll(const tp_cancel_token *cancel,
+                                    tp_error *err) {
+    return tp_cancel_requested(cancel)
+               ? tp_error_set(err, TP_STATUS_CANCELLED, "export cancelled")
+               : TP_STATUS_OK;
+}
+
+static bool export_pack_cancel_poll(void *context) {
+    return tp_cancel_requested((const tp_cancel_token *)context);
+}
+
+static void *report_alloc(tp_arena *arena, size_t size) {
+#ifdef TP_ENABLE_TEST_SEAMS
+    if (s_report_alloc_fail == 0) {
+        s_report_alloc_fail = -1;
+        return NULL;
+    }
+    if (s_report_alloc_fail > 0) {
+        s_report_alloc_fail--;
+    }
+#endif
+    return tp_arena_alloc(arena, size);
+}
+
+static const char *report_error_copy(tp_arena *arena, const char *text) {
+#ifdef TP_ENABLE_TEST_SEAMS
+    if (s_fail_next_error_copy) {
+        s_fail_next_error_copy = false;
+        return "export target failed (error detail unavailable)";
+    }
+#endif
+    const char *copy = tp_arena_strdup(arena, text);
+    return copy ? copy : "export target failed (error detail unavailable)";
+}
 
 static bool run_path_is_absolute(const char *path) {
     if (!path || !path[0]) {
@@ -237,7 +346,8 @@ static tp_status fill_run_report(tp_export_report_run *run, const tp_result *r, 
     run->page_count = r->page_count;
     run->pages = NULL;
     if (r->page_count > 0) {
-        run->pages = (tp_export_report_page *)tp_arena_alloc(arena, (size_t)r->page_count * sizeof(*run->pages));
+        run->pages = (tp_export_report_page *)report_alloc(
+            arena, (size_t)r->page_count * sizeof(*run->pages));
         if (!run->pages) {
             return TP_STATUS_OOM;
         }
@@ -276,6 +386,7 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
                            int *out_pack_runs, const tp_export_run_opts *opts, tp_error *err) {
     tp_export_report *report = opts ? opts->report : NULL;
     const bool dry_run = opts && opts->dry_run;
+    const tp_cancel_token *cancel = opts ? opts->cancel : NULL;
     if (report) {
         memset(report, 0, sizeof *report);
         report->dry_run = dry_run;
@@ -284,16 +395,26 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
         *out_pack_runs = 0;
     }
     if (!project || !sprites || sprite_count <= 0 || !work_dir || !arena) {
+        if (report) {
+            report->pack_failed = true;
+        }
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT, "tp_export_run: NULL/empty required argument");
     }
     if (atlas_index < 0 || atlas_index >= project->atlas_count) {
         return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS, "tp_export_run: atlas index %d out of range", atlas_index);
     }
+    tp_status st = export_cancel_poll(cancel, err);
+    if (st != TP_STATUS_OK) {
+        return st;
+    }
     const tp_project_atlas *a = &project->atlases[atlas_index];
 
     tp_pack_settings base;
-    tp_status st = tp_project_atlas_to_settings(project, atlas_index, &base, err);
+    st = tp_project_atlas_to_settings(project, atlas_index, &base, err);
     if (st != TP_STATUS_OK) {
+        if (report) {
+            report->pack_failed = true;
+        }
         return st;
     }
     base.work_dir = work_dir;
@@ -305,6 +426,9 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
     if (a->animation_count > 0) {
         anims = (tp_export_anim_in *)tp_arena_alloc(arena, (size_t)a->animation_count * sizeof(tp_export_anim_in));
         if (!anims) {
+            if (report) {
+                report->pack_failed = true;
+            }
             return tp_error_set(err, TP_STATUS_OOM, "tp_export_run: OOM (anim opts)");
         }
     }
@@ -312,18 +436,27 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
     if (sprite_count > 0) {
         ovs = (tp_export_name_override *)tp_arena_alloc(arena, (size_t)sprite_count * sizeof(tp_export_name_override));
         if (!ovs) {
+            if (report) {
+                report->pack_failed = true;
+            }
             return tp_error_set(err, TP_STATUS_OOM, "tp_export_run: OOM (rename opts)");
         }
     }
     tp_export_sprite_ref_in *refs = (tp_export_sprite_ref_in *)tp_arena_alloc(
         arena, (size_t)sprite_count * sizeof *refs);
     if (!refs) {
+        if (report) {
+            report->pack_failed = true;
+        }
         return tp_error_set(err, TP_STATUS_OOM, "tp_export_run: OOM (sprite refs)");
     }
     tp_normalize_opts nopts;
     st = build_norm_opts(a, sprites, sprite_count, anims, ovs, refs, arena,
                          &nopts, err);
     if (st != TP_STATUS_OK) {
+        if (report) {
+            report->pack_failed = true;
+        }
         return st;
     }
 
@@ -335,6 +468,9 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
     const char **out_bases = (const char **)tp_arena_alloc(arena, (size_t)a->target_count * sizeof(char *));
     int *rtidx = (int *)tp_arena_alloc(arena, (size_t)a->target_count * sizeof(int));
     if (!groups || !target_group || !out_bases || !rtidx) {
+        if (report) {
+            report->pack_failed = true;
+        }
         return tp_error_set(err, TP_STATUS_OOM, "tp_export_run: OOM (groups)");
     }
     int group_count = 0;
@@ -348,6 +484,7 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
         report->targets =
             (tp_export_report_target *)tp_arena_alloc(arena, (size_t)enabled_count * sizeof(*report->targets));
         if (!report->targets) {
+            report->pack_failed = true;
             return tp_error_set(err, TP_STATUS_OOM, "tp_export_run: OOM (report targets)");
         }
         memset(report->targets, 0, (size_t)enabled_count * sizeof(*report->targets));
@@ -367,6 +504,10 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
         if (!tg->enabled) {
             continue;
         }
+        st = export_cancel_poll(cancel, err);
+        if (st != TP_STATUS_OK) {
+            return st;
+        }
         tp_export_report_target *rt = (report && rtidx[t] >= 0) ? &report->targets[rtidx[t]] : NULL;
         if (rt) {
             rt->exporter_id = tp_arena_strdup(arena, tg->exporter_id ? tg->exporter_id : "");
@@ -380,7 +521,9 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
                 return ust;
             }
             if (rt) {
-                rt->error = tp_arena_strdup(arena, err && err->msg[0] ? err->msg : "unknown exporter");
+                rt->error = report_error_copy(
+                    arena,
+                    err && err->msg[0] ? err->msg : "unknown exporter");
             }
             if (first_fail == TP_STATUS_OK) {
                 first_fail = ust;
@@ -397,7 +540,9 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
                 return st;
             }
             if (rt) {
-                rt->error = tp_arena_strdup(arena, err && err->msg[0] ? err->msg : "cannot resolve out_path");
+                rt->error = report_error_copy(
+                    arena,
+                    err && err->msg[0] ? err->msg : "cannot resolve out_path");
             }
             if (first_fail == TP_STATUS_OK) {
                 first_fail = st;
@@ -434,11 +579,21 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
         if (g < 0) {
             g = group_count++;
             groups[g].eff = eff;
-            st = tp_pack(&eff, arena, &groups[g].result, err);
+            st = export_cancel_poll(cancel, err);
+            if (st != TP_STATUS_OK) {
+                return st;
+            }
+            st = tp_pack_cancellable(
+                &eff, arena, &groups[g].result,
+                cancel ? export_pack_cancel_poll : NULL, (void *)cancel, err);
             if (st != TP_STATUS_OK) {
                 if (report) {
                     report->pack_failed = true;
                 }
+                return st;
+            }
+            st = export_cancel_poll(cancel, err);
+            if (st != TP_STATUS_OK) {
                 return st;
             }
             st = tp_normalize(groups[g].result, &nopts, arena, &groups[g].prep, err);
@@ -448,6 +603,10 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
                 }
                 return st;
             }
+            st = export_cancel_poll(cancel, err);
+            if (st != TP_STATUS_OK) {
+                return st;
+            }
         }
         target_group[t] = g;
         if (rt) {
@@ -455,10 +614,21 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
         }
     }
 
+    int last_writer_target = -1;
+    for (int t = 0; t < a->target_count; ++t) {
+        if (target_group[t] >= 0) {
+            last_writer_target = t;
+        }
+    }
+
     /* Phase 2: each ready target writes its files from its group's prepared. */
     for (int t = 0; t < a->target_count; t++) {
         if (target_group[t] < 0) {
             continue; /* disabled (-1) or failed in phase 1 (-2) */
+        }
+        st = export_cancel_poll(cancel, err);
+        if (st != TP_STATUS_OK) {
+            return st;
         }
         const tp_project_target *tg = &a->targets[t];
         const tp_exporter *exp = tp_exporter_find(tg->exporter_id);
@@ -487,7 +657,9 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
             }
             if (rt) {
                 rt->ok = false;
-                rt->error = tp_arena_strdup(arena, err && err->msg[0] ? err->msg : "output listing failed");
+                rt->error = report_error_copy(
+                    arena,
+                    err && err->msg[0] ? err->msg : "output listing failed");
             }
             if (first_fail == TP_STATUS_OK) {
                 first_fail = cst;
@@ -510,7 +682,9 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
                 }
                 if (rt) {
                     rt->ok = false;
-                    rt->error = tp_arena_strdup(arena, err && err->msg[0] ? err->msg : "predict-loss failed");
+                    rt->error = report_error_copy(
+                        arena,
+                        err && err->msg[0] ? err->msg : "predict-loss failed");
                 }
                 if (first_fail == TP_STATUS_OK) {
                     first_fail = st;
@@ -525,7 +699,23 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
             continue;
         }
 
+        /* Deterministic test seam at the last reversible boundary. Production is
+         * a no-op; after release, poll before invoking the irreversible writer. */
+        export_before_write_gate_wait();
+        st = export_cancel_poll(cancel, err);
+        if (st != TP_STATUS_OK) {
+            return st;
+        }
         st = exp->write(prep, &exp->caps, out_bases[t], notices, err);
+        if (rt) {
+            rt->writer_outcome = st == TP_STATUS_OK
+                                     ? TP_EXPORT_WRITER_SUCCEEDED
+                                     : TP_EXPORT_WRITER_FAILED;
+        }
+        if (t == last_writer_target && opts && opts->terminal_boundary &&
+            opts->terminal_boundary(opts->terminal_boundary_context)) {
+            export_after_terminal_boundary_gate_wait();
+        }
         if (rt) {
             rt->notice_end = notices ? notices->count : nbefore;
         }
@@ -535,7 +725,9 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
             }
             if (rt) {
                 rt->ok = false;
-                rt->error = tp_arena_strdup(arena, err && err->msg[0] ? err->msg : "export write failed");
+                rt->error = report_error_copy(
+                    arena,
+                    err && err->msg[0] ? err->msg : "export write failed");
             }
             if (first_fail == TP_STATUS_OK) {
                 first_fail = st;
@@ -550,19 +742,26 @@ tp_status tp_export_run_ex(const tp_project *project, int atlas_index, const tp_
     }
 
     if (report) {
-        report->run_count = group_count;
         if (group_count > 0) {
-            report->runs = (tp_export_report_run *)tp_arena_alloc(arena, (size_t)group_count * sizeof(*report->runs));
-            if (!report->runs) {
+            tp_export_report_run *report_runs = report_alloc(
+                arena, (size_t)group_count * sizeof(*report->runs));
+            if (!report_runs) {
+                report->report_failed = true;
                 return tp_error_set(err, TP_STATUS_OOM, "tp_export_run: OOM (report runs)");
             }
+            memset(report_runs, 0,
+                   (size_t)group_count * sizeof(*report_runs));
             for (int g = 0; g < group_count; g++) {
-                tp_status fst = fill_run_report(&report->runs[g], groups[g].result, arena);
+                tp_status fst =
+                    fill_run_report(&report_runs[g], groups[g].result, arena);
                 if (fst != TP_STATUS_OK) {
+                    report->report_failed = true;
                     return tp_error_set(err, fst, "tp_export_run: OOM (report pages)");
                 }
             }
+            report->runs = report_runs;
         }
+        report->run_count = group_count;
     }
 
     if (out_pack_runs) {
@@ -610,6 +809,9 @@ tp_status tp_export_snapshot_job_create_ex(const tp_session_snapshot *snapshot,
         return tp_error_set(err, TP_STATUS_OOM, "export snapshot job clone failed");
     }
     job->dry_run = opts && opts->dry_run;
+    job->terminal_boundary = opts ? opts->terminal_boundary : NULL;
+    job->terminal_boundary_context =
+        opts ? opts->terminal_boundary_context : NULL;
     for (int ai = 0; opts && (opts->target_exporter_id || opts->out_dir) &&
                      ai < job->project->atlas_count; ++ai) {
         tp_project_atlas *atlas = &job->project->atlases[ai];
@@ -697,15 +899,41 @@ tp_status tp_export_snapshot_job_run_atlas_ex(tp_export_snapshot_job *job,
                                               int *out_sprite_count,
                                               int *out_missing_sources,
                                               tp_error *err) {
+    return tp_export_snapshot_job_run_atlas_ex_cancellable(
+        job, atlas_index, arena, notices, report, out_pack_runs,
+        out_sprite_count, out_missing_sources, NULL, err);
+}
+
+tp_status tp_export_snapshot_job_run_atlas_ex_cancellable(
+    tp_export_snapshot_job *job, int atlas_index, tp_arena *arena,
+    tp_export_notices *notices, tp_export_report *report, int *out_pack_runs,
+    int *out_sprite_count, int *out_missing_sources,
+    const tp_cancel_token *cancel, tp_error *err) {
     if (!job || !job->project || atlas_index < 0 ||
         atlas_index >= job->project->atlas_count) {
         return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
                             "export snapshot atlas index is out of range");
     }
+    if (report) {
+        memset(report, 0, sizeof *report);
+    }
+    if (out_pack_runs) {
+        *out_pack_runs = 0;
+    }
+    if (out_sprite_count) {
+        *out_sprite_count = 0;
+    }
+    if (out_missing_sources) {
+        *out_missing_sources = 0;
+    }
     const tp_project_atlas *atlas = &job->project->atlases[atlas_index];
     tp_pack_input input;
-    tp_status status = tp_pack_input_build(job->project, atlas_index, &input, err);
+    tp_status status = tp_pack_input_build_cancellable(
+        job->project, atlas_index, &input, cancel, err);
     if (status != TP_STATUS_OK) {
+        if (report) {
+            report->input_outcome = TP_EXPORT_INPUT_FAILED;
+        }
         return status;
     }
     if (out_missing_sources) {
@@ -715,9 +943,18 @@ tp_status tp_export_snapshot_job_run_atlas_ex(tp_export_snapshot_job *job,
         *out_sprite_count = input.count;
     }
     if (input.count == 0) {
+        if (report) {
+            report->input_outcome = TP_EXPORT_INPUT_NO_USABLE_IMAGES;
+        }
         tp_pack_input_free(&input);
-        return tp_error_set(err, TP_STATUS_NOT_FOUND,
-                            "atlas has no usable images");
+        return TP_STATUS_OK;
+    }
+    if (report) {
+        report->input_outcome = TP_EXPORT_INPUT_READY;
+    }
+    if (tp_cancel_requested(cancel)) {
+        tp_pack_input_free(&input);
+        return tp_error_set(err, TP_STATUS_CANCELLED, "export cancelled");
     }
     for (int ti = 0; !job->dry_run && ti < atlas->target_count; ++ti) {
         if (!atlas->targets[ti].enabled) {
@@ -733,12 +970,32 @@ tp_status tp_export_snapshot_job_run_atlas_ex(tp_export_snapshot_job *job,
             return tp_error_set(err, status,
                                 "save the project first (relative output paths need a project dir)");
         }
+        if (tp_cancel_requested(cancel)) {
+            tp_pack_input_free(&input);
+            return tp_error_set(err, TP_STATUS_CANCELLED, "export cancelled");
+        }
         tp_mkdirs_parent(output_path);
     }
-    tp_export_run_opts run_opts = {.report = report, .dry_run = job->dry_run};
+    if (tp_cancel_requested(cancel)) {
+        tp_pack_input_free(&input);
+        return tp_error_set(err, TP_STATUS_CANCELLED, "export cancelled");
+    }
+    tp_export_run_opts run_opts = {
+        .report = report,
+        .dry_run = job->dry_run,
+        .cancel = cancel,
+        .terminal_boundary = job->terminal_boundary,
+        .terminal_boundary_context = job->terminal_boundary_context,
+    };
     status = tp_export_run_ex(job->project, atlas_index, input.descs, input.count,
                               job->work_dir, arena, notices, out_pack_runs,
-                              report || job->dry_run ? &run_opts : NULL, err);
+                              report || job->dry_run || cancel ? &run_opts : NULL,
+                              err);
+    /* tp_export_run_ex initializes its report from scratch; restore the already
+     * completed snapshot-admission result after that lower-layer reset. */
+    if (report) {
+        report->input_outcome = TP_EXPORT_INPUT_READY;
+    }
     tp_pack_input_free(&input);
     return status;
 }

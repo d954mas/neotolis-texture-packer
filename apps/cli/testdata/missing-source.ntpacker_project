@@ -1,0 +1,22 @@
+{
+  "version": 5,
+  "atlases": [
+    {
+      "id": "atlas_00000000000000000000000000000401",
+      "name": "missing-source",
+      "sources": [
+        {
+          "id": "source_00000000000000000000000000000402",
+          "path": "does-not-exist.png"
+        }
+      ],
+      "targets": [
+        {
+          "exporter_id": "json-neotolis",
+          "id": "target_00000000000000000000000000000403",
+          "out_path": "out/missing-source"
+        }
+      ]
+    }
+  ]
+}
