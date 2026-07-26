@@ -244,10 +244,12 @@ A frontend presenting a live session observes committed state through an owned
 session observation plus the ordered event/resync contract. One observation has
 a single linearization point: its composite observation token, high-water event
 sequence, retained immutable model generation, snapshot scalars, coalesced
-source/job/result generations, and copied events/resync result describe the same
-session cut. The token advances when any observable generation changes, even
-when no model event is published. A frontend must not compose correctness from
-independently sampled event and snapshot calls.
+source/recovery-owner/recovery-health/job/result generations, and copied
+events/resync result describe the same session cut. The token advances when any
+observable generation changes, even when no model event is published. Recovery
+scalars are available directly from the observation so a recovery-only change
+does not force project materialization. A frontend must not compose correctness
+from independently sampled event and snapshot calls.
 
 Frontend correctness must not depend on private invalidation performed only by
 the frontend that submitted the command. A client observes its own

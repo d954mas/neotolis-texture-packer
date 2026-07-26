@@ -65,6 +65,13 @@ size_t tp_session__test_snapshot_allocation_bytes(void);
 void tp_session__test_fail_snapshot_allocation_after(size_t successful);
 void tp_session__test_fail_next_generation_owner_allocation(void);
 
+typedef void (*tp_session_test_observe_after_cut_fn)(void *context);
+/* One-shot thread-local seam invoked after the observation releases the gate
+ * but before retained state is materialized. Tests use it to inject the commit
+ * that could previously split events_after() from snapshot_create(). */
+void tp_session__test_set_observe_after_cut(
+    tp_session_test_observe_after_cut_fn hook, void *context);
+
 /* Recovery orchestration uses this only to complete the ownership transfer on
  * an attach error: accepted live handles remain session-owned even degraded. */
 bool tp_session__owns_recovery_live(const tp_session *session,

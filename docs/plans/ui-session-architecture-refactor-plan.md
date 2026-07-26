@@ -235,12 +235,18 @@ future Track B/C prerequisite and survives R5 without becoming a Track A task.
 - `packer/CMakeLists.txt`
 - new `packer/tests/test_session_observation.c`
 - `packer/tests/CMakeLists.txt`
+- `docs/ntpacker-master-spec.md`
+- `docs/design/ui-session-architecture-spec.md`
+- `docs/plans/ui-session-architecture-refactor-plan.md`
 
 **Tasks:**
 
 1. Add an owned `tp_session_observation` API with the final composite token
-   shape. R1a implements event/model/source components; job-state and result
-   components are reserved zero values until their R1b owners land.
+   shape. R1a implements event/model/source and both independently changing
+   recovery components (model health plus session recovery ownership);
+   job-state and result components are reserved zero values until their R1b
+   owners land. Recovery scalars are copied directly so recovery-only deltas do
+   not materialize the project.
 2. Under one gate:
    - fix cut event sequence;
    - copy retained events through the cut or mark resync;

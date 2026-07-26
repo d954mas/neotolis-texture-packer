@@ -4,6 +4,7 @@
 #include "tp_core/tp_session_snapshot_query.h"
 
 typedef struct tp_project_generation tp_project_generation;
+typedef struct tp_session tp_session;
 
 typedef struct tp_snapshot_atlas_storage {
     tp_snapshot_atlas dto;
@@ -31,5 +32,14 @@ struct tp_session_snapshot {
     tp_id128 saved_file_fingerprint;
     bool has_saved_file_fingerprint;
 };
+
+/* Caller holds the session gate. The capture retains the exact immutable
+ * generation and scalar cut but does not materialize DTO arrays. */
+tp_status tp_session_snapshot__capture_locked(
+    const tp_session *session, tp_session_snapshot **out, tp_error *err);
+/* Materializes a captured snapshot outside the session gate. On failure the
+ * capture is destroyed; on success ownership remains with the caller. */
+tp_status tp_session_snapshot__materialize_captured(
+    tp_session_snapshot *snapshot, tp_error *err);
 
 #endif /* TP_SESSION_SNAPSHOT_INTERNAL_H */

@@ -235,6 +235,8 @@ as:
 typedef struct tp_session_observation_token {
     uint64_t event_sequence;
     uint64_t source_runtime_generation;
+    uint64_t recovery_health_generation;
+    uint64_t recovery_owner_generation;
     uint64_t job_state_generation;
     uint64_t result_generation;
 } tp_session_observation_token;
@@ -266,6 +268,11 @@ Under one session gate, observation:
 
 The observation owns every returned snapshot/handle lifetime. Borrowed aliases
 must not outlive it.
+
+Recovery health has two independently changing inputs: model durability health
+and session-owned recovery attachment/requirement state. Both generations
+participate in the token; the typed recovery scalar is copied directly into the
+observation so a recovery-only change does not require project materialization.
 
 ### 7.2 Empty observation
 

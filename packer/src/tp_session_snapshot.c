@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "core/nt_assert.h"
 #include "tp_core/tp_id.h"
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_sprite_index.h"
@@ -79,22 +80,37 @@ tp_status tp_session_snapshot_create(const tp_session *session,
                             "snapshot requires session and output");
     }
     *out = NULL;
-    tp_session_snapshot *snapshot = (tp_session_snapshot *)snapshot_calloc(1U, sizeof *snapshot);
+    tp_session_snapshot *snapshot = NULL;
+    gate_lock(session);
+    tp_status status =
+        tp_session_snapshot__capture_locked(session, &snapshot, err);
+    gate_unlock(session);
+    if (status != TP_STATUS_OK) {
+        return status;
+    }
+    status = tp_session_snapshot__materialize_captured(snapshot, err);
+    if (status == TP_STATUS_OK) {
+        *out = snapshot;
+    }
+    return status;
+}
+
+tp_status tp_session_snapshot__capture_locked(
+    const tp_session *session, tp_session_snapshot **out, tp_error *err) {
+    NT_ASSERT(session != NULL);
+    NT_ASSERT(out != NULL);
+    *out = NULL;
+    tp_session_snapshot *snapshot =
+        (tp_session_snapshot *)snapshot_calloc(1U, sizeof *snapshot);
     if (!snapshot) {
         return tp_error_set(err, TP_STATUS_OOM, "snapshot allocation failed");
     }
-
-    /* Only generation retention and scalar metadata capture require a
-     * consistent admission point. The retained generation is immutable, so DTO
-     * materialization must not keep the single-writer gate held. */
-    gate_lock(session);
     tp_project_generation *generation = NULL;
-    tp_status retain_status = tp_model__retain_project_generation(
+    tp_status status = tp_model__retain_project_generation(
         session->model, &generation, err);
-    if (retain_status != TP_STATUS_OK) {
-        gate_unlock(session);
+    if (status != TP_STATUS_OK) {
         free(snapshot);
-        return retain_status;
+        return status;
     }
     snapshot->generation = generation;
     snapshot->project = tp_project_generation_project(generation);
@@ -109,14 +125,17 @@ tp_status tp_session_snapshot_create(const tp_session *session,
         tp_session__recovery_health_locked(session);
     snapshot->identity = session->identity;
     snapshot->saved_file_fingerprint = session->saved_file_fingerprint;
-    snapshot->has_saved_file_fingerprint = session->has_saved_file_fingerprint;
-    gate_unlock(session);
+    snapshot->has_saved_file_fingerprint =
+        session->has_saved_file_fingerprint;
+    *out = snapshot;
+    return TP_STATUS_OK;
+}
 
-    tp_status status = snapshot_materialize(snapshot, err);
-    if (status == TP_STATUS_OK) {
-        *out = snapshot;
-    }
-    return status;
+tp_status tp_session_snapshot__materialize_captured(
+    tp_session_snapshot *snapshot, tp_error *err) {
+    NT_ASSERT(snapshot != NULL);
+    NT_ASSERT(snapshot->generation != NULL);
+    return snapshot_materialize(snapshot, err);
 }
 
 static tp_status snapshot_materialize(tp_session_snapshot *snapshot,

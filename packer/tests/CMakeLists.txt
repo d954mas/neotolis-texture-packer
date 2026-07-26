@@ -113,6 +113,14 @@ nt_set_warning_flags(tp_test_session)
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_session_test")
 add_test(NAME tp_session COMMAND tp_test_session "${CMAKE_BINARY_DIR}/tp_session_test")
 
+add_executable(tp_test_session_observation test_session_observation.c)
+target_link_libraries(tp_test_session_observation PRIVATE tp_core unity)
+target_include_directories(tp_test_session_observation PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_options(tp_test_session_observation PRIVATE -U_DLL)
+nt_set_warning_flags(tp_test_session_observation)
+add_test(NAME tp_session_observation COMMAND tp_test_session_observation)
+
 # Owner refcount invariants must remain executable in Release, where libc
 # assert() would compile away. The parent probe succeeds only when its child
 # terminates on the production generation owner's invalid-release path.

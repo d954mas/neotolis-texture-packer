@@ -4,8 +4,9 @@
 #include "tp_session_internal.h"
 
 /* struct tp_session embeds the platform lock by value, so the session family's
- * layout header carries the lock type. Only tp_session.c and tp_session_snapshot.c
- * read the layout; the other includers keep using tp_session as an opaque handle. */
+ * layout header carries the lock type. Only the session writer, snapshot, and
+ * atomic-observation TUs read the layout; other includers keep tp_session
+ * opaque. */
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -22,6 +23,9 @@ typedef struct tp_project_lease tp_project_lease;
 typedef struct tp_session_owned_job tp_session_owned_job;
 
 #define TP_SESSION_EVENT_CAPACITY 64U
+_Static_assert(TP_SESSION_EVENT_CAPACITY ==
+                   TP_SESSION_OBSERVATION_EVENT_CAPACITY,
+               "public observation capacity must match the retained ring");
 
 /* Fixed FIFO cap on session-side visible-History markers (Save checkpoints /
  * runtime refreshes). Bounds the memory unconditionally; markers are also evicted
@@ -65,6 +69,7 @@ struct tp_session {
     uint64_t admission_sequence;
     uint64_t model_generation;
     uint64_t source_generation;
+    uint64_t recovery_owner_generation;
     uint64_t event_sequence;
     tp_session_event events[TP_SESSION_EVENT_CAPACITY];
     size_t event_count;

@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "core/nt_assert.h"
 #include "tp_core/tp_diff.h"
 #include "tp_core/tp_project_lease.h"
 #include "tp_core/tp_recovery.h"
@@ -75,6 +76,13 @@ static void observe_model_recovery(tp_session *session) {
     session->recovery_healthy = false;
 }
 
+static void bump_recovery_owner_generation(tp_session *session) {
+    NT_ASSERT(session != NULL);
+    if (session->recovery_owner_generation < UINT64_MAX) {
+        session->recovery_owner_generation++;
+    }
+}
+
 bool tp_session__owns_recovery_live(const tp_session *session,
                                     const tp_recovery_live *live) {
     if (!session || !live) {
@@ -140,7 +148,8 @@ void gate_unlock(const tp_session *session) {
 // #region event log
 static void publish_event(tp_session *session, tp_session_event_kind kind,
                           const char *transaction_id, int64_t revision_before,
-                          int64_t revision_after) {
+                          int64_t revision_after, const char *label,
+                          const char *author) {
     const uint64_t sequence = ++session->event_sequence;
     size_t slot;
     if (session->event_count < TP_SESSION_EVENT_CAPACITY) {
@@ -161,6 +170,12 @@ static void publish_event(tp_session *session, tp_session_event_kind kind,
     event->source_generation = session->source_generation;
     if (transaction_id) {
         (void)snprintf(event->transaction_id, sizeof event->transaction_id, "%s", transaction_id);
+    }
+    if (label) {
+        (void)snprintf(event->label, sizeof event->label, "%s", label);
+    }
+    if (author) {
+        (void)snprintf(event->author, sizeof event->author, "%s", author);
     }
 }
 // #endregion
@@ -575,6 +590,7 @@ tp_status tp_session_attach_journal(tp_session *session, tp_journal *journal,
     tp_status status = tp_model_attach_journal(session->model, journal, err);
     if (status == TP_STATUS_OK) {
         session->recovery_healthy = true;
+        bump_recovery_owner_generation(session);
     }
     gate_unlock(session);
     return status;
@@ -600,6 +616,7 @@ tp_status tp_session_attach_recovery_live(tp_session *session,
     if (status != TP_STATUS_OK) {
         tp_model__degrade_recovery(session->model, status);
     }
+    bump_recovery_owner_generation(session);
     gate_unlock(session);
     return status;
 }
@@ -615,7 +632,10 @@ tp_status tp_session_require_recovery(tp_session *session, tp_error *err) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "session was discarded");
     }
-    session->recovery_required = true;
+    if (!session->recovery_required) {
+        session->recovery_required = true;
+        bump_recovery_owner_generation(session);
+    }
     gate_unlock(session);
     return TP_STATUS_OK;
 }
@@ -644,7 +664,8 @@ tp_status tp_session_apply(tp_session *session, const tp_txn_request *request,
     if (status == TP_STATUS_OK && published_result->committed) {
         session->model_generation++;
         publish_event(session, TP_SESSION_EVENT_MODEL_COMMITTED, request->id_hex,
-                      revision_before, tp_model_revision(session->model));
+                      revision_before, tp_model_revision(session->model),
+                      request->label, request->author);
         /* A committed edit may have discarded a redo branch and/or FIFO-evicted
          * old edit records; drop the markers those rows carried so visible
          * History mirrors the edit stack. */
@@ -674,7 +695,7 @@ tp_status tp_session_undo(tp_session *session, tp_error *err) {
     if (status == TP_STATUS_OK) {
         session->model_generation++;
         publish_event(session, TP_SESSION_EVENT_UNDONE, NULL, revision_before,
-                      tp_model_revision(session->model));
+                      tp_model_revision(session->model), NULL, NULL);
     }
     gate_unlock(session);
     return status;
@@ -696,7 +717,7 @@ tp_status tp_session_redo(tp_session *session, tp_error *err) {
     if (status == TP_STATUS_OK) {
         session->model_generation++;
         publish_event(session, TP_SESSION_EVENT_REDONE, NULL, revision_before,
-                      tp_model_revision(session->model));
+                      tp_model_revision(session->model), NULL, NULL);
     }
     gate_unlock(session);
     return status;
@@ -891,7 +912,8 @@ static tp_status save_as_locked(tp_session *session, const char *path,
         result->has_recovery_token = session->has_recovery_token;
     }
     const int64_t revision = tp_model_revision(session->model);
-    publish_event(session, TP_SESSION_EVENT_SAVED, NULL, revision, revision);
+    publish_event(session, TP_SESSION_EVENT_SAVED, NULL, revision, revision,
+                  NULL, NULL);
     /* Only a successful publication reaches this choke point (a failed Save returned
      * earlier), so the visible checkpoint (§9.2) is never recorded for a failed Save.
      * Non-undoable: it does not touch revision, the cursor, or the edit budget. */
@@ -1035,7 +1057,8 @@ tp_status tp_session_discard(tp_session *session, tp_error *err) {
     session->admission_sequence++;
     session->discarded = true;
     const int64_t revision = tp_model_revision(session->model);
-    publish_event(session, TP_SESSION_EVENT_DISCARDED, NULL, revision, revision);
+    publish_event(session, TP_SESSION_EVENT_DISCARDED, NULL, revision,
+                  revision, NULL, NULL);
     gate_unlock(session);
     return TP_STATUS_OK;
 }
@@ -1053,7 +1076,8 @@ tp_status tp_session_invalidate_sources(tp_session *session, tp_error *err) {
     session->admission_sequence++;
     session->source_generation++;
     const int64_t revision = tp_model_revision(session->model);
-    publish_event(session, TP_SESSION_EVENT_SOURCE_RUNTIME_CHANGED, NULL, revision, revision);
+    publish_event(session, TP_SESSION_EVENT_SOURCE_RUNTIME_CHANGED, NULL,
+                  revision, revision, NULL, NULL);
     /* A runtime source refresh is a visible NON-undoable row (§9.3). It never
      * mutates revision, dirty, or Undo history -- only the source generation. */
     history_record_refresh(session);

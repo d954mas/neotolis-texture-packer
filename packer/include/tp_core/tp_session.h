@@ -14,6 +14,7 @@ extern "C" {
 #endif
 
 typedef struct tp_session tp_session;
+typedef struct tp_session_observation tp_session_observation;
 typedef struct tp_txn_request tp_txn_request;
 typedef struct tp_txn_result tp_txn_result;
 typedef struct tp_project tp_project;
@@ -100,7 +101,46 @@ typedef struct tp_session_event {
     uint64_t model_generation;
     uint64_t source_generation;
     char transaction_id[33];
+    char label[TP_SESSION_HISTORY_LABEL_MAX];
+    char author[TP_SESSION_HISTORY_AUTHOR_MAX];
 } tp_session_event;
+
+/* One linearizable session cut. Event/model/source/recovery components land in
+ * R1a; the typed job/result slots are reserved at zero until their R1b owner
+ * lands. A NULL `after` requests an initial complete resync. */
+typedef struct tp_session_observation_token {
+    uint64_t event_sequence;
+    uint64_t source_runtime_generation;
+    uint64_t recovery_health_generation;
+    uint64_t recovery_owner_generation;
+    uint64_t job_state_generation;
+    uint64_t result_generation;
+} tp_session_observation_token;
+
+#define TP_SESSION_OBSERVATION_EVENT_CAPACITY 64U
+
+bool tp_session_observation_token_equal(
+    tp_session_observation_token left,
+    tp_session_observation_token right);
+tp_status tp_session_observe(
+    const tp_session *session,
+    const tp_session_observation_token *after,
+    tp_session_observation **out,
+    tp_error *err);
+void tp_session_observation_destroy(tp_session_observation *observation);
+tp_session_observation_token tp_session_observation_token_query(
+    const tp_session_observation *observation);
+bool tp_session_observation_resync_required(
+    const tp_session_observation *observation);
+size_t tp_session_observation_event_count(
+    const tp_session_observation *observation);
+const tp_session_event *tp_session_observation_event_at(
+    const tp_session_observation *observation, size_t index);
+tp_session_recovery_health tp_session_observation_recovery_health(
+    const tp_session_observation *observation);
+/* Borrowed and possibly NULL for a source/runtime/recovery-only delta. */
+const tp_session_snapshot *tp_session_observation_snapshot(
+    const tp_session_observation *observation);
 
 typedef struct tp_session_save_result {
     bool saved;
