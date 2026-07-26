@@ -283,16 +283,16 @@ _arch_assert_symbol("apps/gui/gui_view_settings.c"
 _arch_assert_symbol("apps/gui/gui_rows.h" "tp_scan\\.h" 1
                     "SR-BASE/PV-tree-list")
 
-# Named current owners do not match the future worker/transport filename rule,
-# so pin their exact raw-session debt separately. These counts are removed by
-# the owning Track A packets; any increase or premature drift fails this gate.
+# tp_job.c is the host-side process owner and does not match the filename-based
+# async scan. Pin the completed R1c deletion explicitly so a raw session alias
+# or an in-process thread authority cannot be reintroduced there.
 set(_tp_job "${_arch_root}/packer/src/tp_job.c")
 file(STRINGS "${_tp_job}" _tp_job_session_field_lines
      REGEX "^[ \t]+tp_session[ \t]*\\*[ \t]*session;")
 list(LENGTH _tp_job_session_field_lines _tp_job_session_fields)
-if(NOT _tp_job_session_fields EQUAL 1)
+if(NOT _tp_job_session_fields EQUAL 0)
     message(FATAL_ERROR
-        "R1c debt tp_live_job.session changed: expected 1, got ${_tp_job_session_fields}")
+        "R1c raw-session deletion regressed: expected 0, got ${_tp_job_session_fields}")
 endif()
 
 set(_gui_pack_jobs "${_arch_root}/apps/gui/gui_pack_jobs.c")
@@ -305,20 +305,19 @@ if(NOT _gui_pack_raw_sessions EQUAL 8)
         "R2b debt gui_pack_jobs raw session aliases changed: expected 8, got ${_gui_pack_raw_sessions}")
 endif()
 
-# Track A deletion manifests. Each packet removes its entries and the matching
-# assertions in the same commit; counts changing in either direction before
-# that cutover are an architectural drift.
+# Completed R1c deletion manifest. These zero-count pins make the cutover
+# irreversible without an explicit architecture decision.
 foreach(_entry IN ITEMS
-        "thrd_t|1" "thrd_create|1" "job_join|3" "pack_worker|2"
-        "export_worker|2" "job_start_thread|3")
-    string(REPLACE "|" ";" _parts "${_entry}")
-    list(GET _parts 0 _symbol)
-    list(GET _parts 1 _count)
-    _arch_assert_symbol("packer/src/tp_job.c" "${_symbol}" "${_count}" "R1c")
+        "thrd_t" "thrd_create" "thrd_join" "job_join"
+        "pack_worker" "export_worker" "job_start_thread"
+        "job_thread_start" "job_thread_start_context"
+        "fail_next_thread_create")
+    _arch_assert_symbol("packer/src/tp_job.c" "${_entry}" 0
+                        "R1c completed")
 endforeach()
-_arch_assert_symbol("apps/gui/gui_pack_jobs.c" "gui_pack_shutdown" 1 "R1c")
-_arch_assert_symbol("apps/gui/gui_pack_jobs.c" "wait_for_job" 4 "R1c")
-_arch_assert_symbol("apps/gui/main.c" "gui_pack_shutdown" 1 "R1c")
+_arch_assert_symbol("apps/gui/gui_pack_jobs.c" "gui_pack_shutdown" 1 "R2d")
+_arch_assert_symbol("apps/gui/gui_pack_jobs.c" "wait_for_job" 4 "R2b/R2d")
+_arch_assert_symbol("apps/gui/main.c" "gui_pack_shutdown" 1 "R2d")
 
 foreach(_entry IN ITEMS
         "job_session|10" "tp_session_job_active|3" "tp_session_job_poll|4"

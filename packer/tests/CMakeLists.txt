@@ -757,6 +757,47 @@ add_test(NAME tp_bench_project_contract
         "${CMAKE_SOURCE_DIR}/examples/projects/bench-owner-scale.ntpacker_project"
         "${CMAKE_BINARY_DIR}/tp_bench_project_contract")
 
+add_executable(tp_test_proc_job_transport test_proc_job_transport.c)
+target_link_libraries(tp_test_proc_job_transport PRIVATE tp_build unity)
+target_include_directories(tp_test_proc_job_transport PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_options(tp_test_proc_job_transport PRIVATE -U_DLL)
+target_compile_definitions(tp_test_proc_job_transport PRIVATE
+    _CRT_SECURE_NO_WARNINGS)
+nt_set_warning_flags(tp_test_proc_job_transport)
+add_test(NAME tp_proc_job_transport COMMAND tp_test_proc_job_transport)
+
+add_executable(tp_test_job_worker_proto test_job_worker_proto.c)
+target_link_libraries(tp_test_job_worker_proto PRIVATE tp_build unity)
+target_include_directories(tp_test_job_worker_proto PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_options(tp_test_job_worker_proto PRIVATE -U_DLL)
+target_compile_definitions(tp_test_job_worker_proto PRIVATE
+    _CRT_SECURE_NO_WARNINGS)
+nt_set_warning_flags(tp_test_job_worker_proto)
+add_test(NAME tp_job_worker_proto COMMAND tp_test_job_worker_proto)
+
+add_executable(tp_test_job_worker_process
+    test_job_worker_process.c
+    ../src/tp_job_worker.c
+    ../src/tp_job_worker_proto.c)
+if(WIN32)
+    target_sources(tp_test_job_worker_process PRIVATE
+        ../src/tp_proc_win32.c)
+else()
+    target_sources(tp_test_job_worker_process PRIVATE
+        ../src/tp_proc_posix.c)
+endif()
+target_link_libraries(tp_test_job_worker_process PRIVATE
+    tp_core tinycthread unity)
+target_include_directories(tp_test_job_worker_process PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_options(tp_test_job_worker_process PRIVATE -U_DLL)
+target_compile_definitions(tp_test_job_worker_process PRIVATE
+    TP_ENABLE_TEST_SEAMS=1 _CRT_SECURE_NO_WARNINGS)
+nt_set_warning_flags(tp_test_job_worker_process)
+add_test(NAME tp_job_worker_process COMMAND tp_test_job_worker_process)
+
 # Tests are executable boundaries, so sanitizer instrumentation must be linked
 # on each one rather than only on tp_core/tp_build. Keep this directory-wide
 # gate at the end so newly added first-party tests cannot silently miss it.

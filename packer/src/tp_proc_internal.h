@@ -1,10 +1,10 @@
 #ifndef TP_PROC_INTERNAL_H
 #define TP_PROC_INTERNAL_H
 
-/* Minimal portable child-process transport for the private build worker
- * (decision 0018, ROADMAP H0.3-b). A parent spawns a child whose stdin is a
- * pipe the parent writes and whose stdout is a pipe the parent reads; stderr is
- * inherited from the parent. Only those two pipe ends are handed to the child.
+/* Minimal portable child-process transport for private workers. A parent spawns
+ * a child whose stdin is a pipe the parent writes and whose stdout is a pipe the
+ * parent reads; stderr is inherited from the parent. Only those two pipe ends
+ * are handed to the child.
  *
  * The child is spawned with a caller-chosen working directory so the request can
  * carry a bare relative ASCII output name (the builder opens a narrow path); the
@@ -12,7 +12,9 @@
  * Job Object with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE (parent death or cancel
  * tree-kills a stranded worker) and inherits ONLY the two pipe ends via
  * PROC_THREAD_ATTRIBUTE_HANDLE_LIST. Cancel/timeout are driven by the caller via
- * tp_proc_wait_slice + tp_proc_kill. */
+ * tp_proc_wait_slice + tp_proc_kill. The build-worker protocol uses one request
+ * followed by EOF. Long-lived job workers keep stdin open after their bounded
+ * request and reserve the trailing byte stream for cooperative control. */
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -22,6 +24,8 @@ extern "C" {
 #endif
 
 typedef struct tp_proc tp_proc;
+
+enum { TP_PROC_CANCEL_BYTE = 0x03 };
 
 /* How a finished child terminated. EXITED means a normal process exit and
  * `code` is the exit status; ABNORMAL means it died on a signal / crashed /
@@ -37,6 +41,18 @@ typedef struct tp_proc_result {
     tp_proc_end how;
     int code;
 } tp_proc_result;
+
+/* Child-side result from polling the control tail of stdin. A job worker first
+ * reads its bounded request exactly, then calls tp_proc_child_poll_stdin().
+ * NONE is non-blocking and means no control byte is currently available.
+ * CLOSED is clean EOF. ERROR includes an unexpected control byte and I/O errors,
+ * so malformed parent input fails closed. */
+typedef enum tp_proc_stdin_event {
+    TP_PROC_STDIN_EVENT_NONE = 0,
+    TP_PROC_STDIN_EVENT_CANCEL,
+    TP_PROC_STDIN_EVENT_CLOSED,
+    TP_PROC_STDIN_EVENT_ERROR
+} tp_proc_stdin_event;
 
 /* Resolve the current executable's own path as UTF-8 (Windows
  * GetModuleFileNameW; Linux /proc/self/exe; macOS _NSGetExecutablePath). On
@@ -54,10 +70,44 @@ bool tp_proc_self_path(char *out, size_t out_cap);
  * long-path awareness); the caller guarantees this. */
 tp_proc *tp_proc_spawn(const char *exe_utf8, const char *arg1, const char *cwd_utf8);
 
-/* Write all `size` bytes to the child's stdin, then close stdin so the child
- * observes EOF. Returns false on a short write / broken pipe (the child died
- * mid-request); stdin is closed either way. */
+/* Spawn an outer job worker with process-tree ownership. POSIX places the child
+ * in a dedicated process group (ordinary nested tp_proc_spawn children inherit
+ * that group); Windows requires successful Job Object assignment before resume.
+ * Returns NULL rather than launching without tree containment. */
+tp_proc *tp_proc_spawn_owned_tree(const char *exe_utf8, const char *arg1,
+                                  const char *cwd_utf8);
+
+/* One non-blocking stdin pump step. Consumes at most `size` bytes, reports the
+ * consumed prefix and whether pipe backpressure prevented further progress.
+ * The caller retains an unconsumed suffix and retries on a later host step.
+ * Windows may keep the submitted buffer borrowed until the next call reports
+ * its completion, so that slice must remain stable while would_block is true. */
+bool tp_proc_try_write_stdin(tp_proc *proc, const void *data, size_t size,
+                             size_t *out_consumed, bool *out_would_block);
+
+/* Write all `size` bytes to the child's stdin and leave it open for cooperative
+ * control bytes. This blocking convenience API is for small bounded frames; the
+ * frame-bounded job pump uses tp_proc_try_write_stdin instead. Returns false on
+ * invalid input, a short write, or a broken pipe. The caller still owns the open
+ * pipe after success and must explicitly close it. */
+bool tp_proc_write_stdin_keep_open(tp_proc *proc, const void *data, size_t size);
+
+/* Append the one-byte cooperative cancellation signal to a still-open worker
+ * stdin. This requests cancellation; it does not kill or wait for the child. */
+bool tp_proc_send_cancel(tp_proc *proc);
+
+/* Explicitly close the parent's worker-stdin pipe so the child observes EOF.
+ * Returns false when the process is invalid or stdin was already closed. */
+bool tp_proc_close_stdin(tp_proc *proc);
+
+/* Build-worker framing primitive: write all `size` bytes, then close
+ * stdin so the child observes EOF. Implemented as keep-open + explicit close.
+ * Returns false on a short write / broken pipe; stdin is closed either way. */
 bool tp_proc_write_stdin(tp_proc *proc, const void *data, size_t size);
+
+/* Child-side, non-blocking poll of the stdin control tail. The child must have
+ * consumed exactly its bounded request before calling this helper. */
+tp_proc_stdin_event tp_proc_child_poll_stdin(void);
 
 /* Read the child's stdout until EOF into `buf` (at most `cap` bytes). Stores the
  * byte count in *out_len and whether EOF was reached within `cap` in *out_eof
@@ -65,6 +115,14 @@ bool tp_proc_write_stdin(tp_proc *proc, const void *data, size_t size);
  * caller treats as malformed). Returns false only on a hard read error. */
 bool tp_proc_read_stdout(tp_proc *proc, void *buf, size_t cap, size_t *out_len,
                          bool *out_eof);
+
+/* Non-blocking stdout pump for long-lived workers. Reads up to `cap` bytes that
+ * are available now, stores the count in *out_len, and reports clean pipe EOF
+ * through *out_eof. A successful call with zero bytes and out_eof=false means
+ * "no output yet". Unlike tp_proc_read_stdout, filling `cap` does not consume a
+ * probe byte; the caller pumps again on a later host step. */
+bool tp_proc_try_read_stdout(tp_proc *proc, void *buf, size_t cap, size_t *out_len,
+                             bool *out_eof);
 
 /* Bounded wait: block up to `slice_ms` for the child. On return *finished is true
  * iff the child has terminated (and *out is filled + the child reaped); false if

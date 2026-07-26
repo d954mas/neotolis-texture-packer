@@ -219,6 +219,13 @@ reply, output-cap overflow, and forced termination map to structured terminal
 job results. Orphan staging cleanup is deterministic and tested. The host can
 therefore confirm terminal process state before any join/reap operation.
 
+Cancellation and terminal completion linearize in the host owner. A cancel
+accepted before that owner admits the terminal frame owns the `CANCELLED`
+outcome even if the worker has already queued its reply; the reply still carries
+explicit full/partial/uncertain publication metadata. Once the host admits the
+terminal frame, a later cancel is rejected. No worker-side timing guess is a
+second authority.
+
 New/Open/Discard/Shutdown and fail-atomic session replacement use this owner.
 No caller may preserve the old composite observation token, transaction
 acknowledgement, draft target binding, or borrowed pointer across a replacement.

@@ -14,10 +14,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <poll.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+
+#include "tinycthread.h"
 
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
@@ -25,6 +28,7 @@
 
 struct tp_proc {
     pid_t pid;
+    pid_t pgid;   /* pid when this handle owns a process group, -1 otherwise */
     int stdin_w;  /* parent writes the request here; -1 once closed */
     int stdout_r; /* parent reads the reply here; -1 once closed */
     bool reaped;
@@ -97,7 +101,8 @@ static int make_cloexec_pipe(int fd[2]) {
 #endif
 }
 
-tp_proc *tp_proc_spawn(const char *exe_utf8, const char *arg1, const char *cwd_utf8) {
+static tp_proc *tp_proc_spawn_impl(const char *exe_utf8, const char *arg1,
+                                   const char *cwd_utf8, bool own_tree) {
     if (!exe_utf8 || exe_utf8[0] == '\0') {
         return NULL;
     }
@@ -111,6 +116,22 @@ tp_proc *tp_proc_spawn(const char *exe_utf8, const char *arg1, const char *cwd_u
     if (make_cloexec_pipe(out_fd) != 0) {
         (void)close(in_fd[0]);
         (void)close(in_fd[1]);
+        return NULL;
+    }
+    int stdout_flags = fcntl(out_fd[0], F_GETFL);
+    if (stdout_flags < 0 || fcntl(out_fd[0], F_SETFL, stdout_flags | O_NONBLOCK) < 0) {
+        (void)close(in_fd[0]);
+        (void)close(in_fd[1]);
+        (void)close(out_fd[0]);
+        (void)close(out_fd[1]);
+        return NULL;
+    }
+    int stdin_flags = fcntl(in_fd[1], F_GETFL);
+    if (stdin_flags < 0 || fcntl(in_fd[1], F_SETFL, stdin_flags | O_NONBLOCK) < 0) {
+        (void)close(in_fd[0]);
+        (void)close(in_fd[1]);
+        (void)close(out_fd[0]);
+        (void)close(out_fd[1]);
         return NULL;
     }
 
@@ -144,6 +165,9 @@ tp_proc *tp_proc_spawn(const char *exe_utf8, const char *arg1, const char *cwd_u
          * staging dir first so the request's relative output name resolves there,
          * wire the two pipe ends to stdin/stdout, drop every other raw pipe fd
          * (CLOEXEC drops any that slip through at exec), keep stderr. */
+        if (own_tree && setpgid(0, 0) != 0) {
+            _exit(127); /* outer worker containment is mandatory */
+        }
         if (cwd_utf8 && cwd_utf8[0] != '\0' && chdir(cwd_utf8) != 0) {
             _exit(127); /* cannot enter staging: parent maps the non-zero exit */
         }
@@ -179,34 +203,154 @@ tp_proc *tp_proc_spawn(const char *exe_utf8, const char *arg1, const char *cwd_u
     /* Parent: keep the write-to-child and read-from-child ends only. */
     (void)close(in_fd[0]);
     (void)close(out_fd[1]);
+    if (own_tree && setpgid(pid, pid) != 0 && getpgid(pid) != pid) {
+        (void)kill(pid, SIGKILL);
+        int status = 0;
+        while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+        }
+        (void)close(in_fd[1]);
+        (void)close(out_fd[0]);
+        free(proc);
+        return NULL;
+    }
     proc->pid = pid;
+    proc->pgid = own_tree ? pid : -1;
     proc->stdin_w = in_fd[1];
     proc->stdout_r = out_fd[0];
     proc->reaped = false;
     return proc;
 }
 
-bool tp_proc_write_stdin(tp_proc *proc, const void *data, size_t size) {
-    if (!proc || proc->stdin_w < 0) {
+tp_proc *tp_proc_spawn(const char *exe_utf8, const char *arg1, const char *cwd_utf8) {
+    return tp_proc_spawn_impl(exe_utf8, arg1, cwd_utf8, false);
+}
+
+tp_proc *tp_proc_spawn_owned_tree(const char *exe_utf8, const char *arg1,
+                                  const char *cwd_utf8) {
+    return tp_proc_spawn_impl(exe_utf8, arg1, cwd_utf8, true);
+}
+
+bool tp_proc_write_stdin_keep_open(tp_proc *proc, const void *data, size_t size) {
+    if (!proc || proc->stdin_w < 0 || (!data && size != 0U)) {
         return false;
     }
     const unsigned char *bytes = (const unsigned char *)data;
     size_t off = 0U;
-    bool ok = true;
     while (off < size) {
-        ssize_t n = write(proc->stdin_w, bytes + off, size - off);
-        if (n < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            ok = false; /* EPIPE (child gone) or a real write error */
-            break;
+        size_t consumed = 0U;
+        bool would_block = false;
+        if (!tp_proc_try_write_stdin(proc, bytes + off, size - off, &consumed,
+                                     &would_block)) {
+            return false;
         }
-        off += (size_t)n;
+        off += consumed;
+        if (would_block) {
+            struct pollfd fd = {
+                .fd = proc->stdin_w,
+                .events = POLLOUT,
+                .revents = 0
+            };
+            int ready;
+            do {
+                ready = poll(&fd, 1U, -1);
+            } while (ready < 0 && errno == EINTR);
+            if (ready <= 0 || (fd.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
+                return false;
+            }
+        }
     }
-    (void)close(proc->stdin_w); /* EOF for the child either way */
+    return true;
+}
+
+bool tp_proc_try_write_stdin(tp_proc *proc, const void *data, size_t size,
+                             size_t *out_consumed, bool *out_would_block) {
+    if (out_consumed) {
+        *out_consumed = 0U;
+    }
+    if (out_would_block) {
+        *out_would_block = false;
+    }
+    if (!proc || proc->stdin_w < 0 || (!data && size != 0U)) {
+        return false;
+    }
+    if (size == 0U) {
+        return true;
+    }
+
+    ssize_t wrote;
+    do {
+        wrote = write(proc->stdin_w, data, size);
+    } while (wrote < 0 && errno == EINTR);
+    if (wrote < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            if (out_would_block) {
+                *out_would_block = true;
+            }
+            return true;
+        }
+        return false;
+    }
+    if (out_consumed) {
+        *out_consumed = (size_t)wrote;
+    }
+    if ((size_t)wrote < size && out_would_block) {
+        *out_would_block = true;
+    }
+    return true;
+}
+
+bool tp_proc_send_cancel(tp_proc *proc) {
+    const unsigned char signal = TP_PROC_CANCEL_BYTE;
+    return tp_proc_write_stdin_keep_open(proc, &signal, sizeof signal);
+}
+
+bool tp_proc_close_stdin(tp_proc *proc) {
+    if (!proc || proc->stdin_w < 0) {
+        return false;
+    }
+    const bool ok = close(proc->stdin_w) == 0;
     proc->stdin_w = -1;
-    return ok && off == size;
+    return ok;
+}
+
+bool tp_proc_write_stdin(tp_proc *proc, const void *data, size_t size) {
+    const bool wrote = tp_proc_write_stdin_keep_open(proc, data, size);
+    const bool closed = tp_proc_close_stdin(proc);
+    return wrote && closed;
+}
+
+tp_proc_stdin_event tp_proc_child_poll_stdin(void) {
+    struct pollfd fd = {
+        .fd = STDIN_FILENO,
+        .events = POLLIN | POLLHUP,
+        .revents = 0
+    };
+    int ready;
+    do {
+        ready = poll(&fd, 1U, 0);
+    } while (ready < 0 && errno == EINTR);
+    if (ready < 0 || (fd.revents & (POLLERR | POLLNVAL)) != 0) {
+        return TP_PROC_STDIN_EVENT_ERROR;
+    }
+    if (ready == 0) {
+        return TP_PROC_STDIN_EVENT_NONE;
+    }
+
+    unsigned char control = 0U;
+    ssize_t got;
+    do {
+        got = read(STDIN_FILENO, &control, sizeof control);
+    } while (got < 0 && errno == EINTR);
+    if (got == 0) {
+        return TP_PROC_STDIN_EVENT_CLOSED;
+    }
+    if (got < 0) {
+        return (errno == EAGAIN || errno == EWOULDBLOCK)
+                   ? TP_PROC_STDIN_EVENT_NONE
+                   : TP_PROC_STDIN_EVENT_ERROR;
+    }
+    return control == TP_PROC_CANCEL_BYTE ? TP_PROC_STDIN_EVENT_CANCEL
+                                          : TP_PROC_STDIN_EVENT_ERROR;
 }
 
 bool tp_proc_read_stdout(tp_proc *proc, void *buf, size_t cap, size_t *out_len,
@@ -244,6 +388,20 @@ bool tp_proc_read_stdout(tp_proc *proc, void *buf, size_t cap, size_t *out_len,
             if (errno == EINTR) {
                 continue;
             }
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                struct pollfd fd = {
+                    .fd = proc->stdout_r,
+                    .events = POLLIN | POLLHUP,
+                    .revents = 0
+                };
+                int ready;
+                do {
+                    ready = poll(&fd, 1U, -1);
+                } while (ready < 0 && errno == EINTR);
+                if (ready > 0 && (fd.revents & (POLLERR | POLLNVAL)) == 0) {
+                    continue;
+                }
+            }
             return false;
         }
         if (n == 0) {
@@ -257,6 +415,69 @@ bool tp_proc_read_stdout(tp_proc *proc, void *buf, size_t cap, size_t *out_len,
         }
         total += (size_t)n;
     }
+}
+
+bool tp_proc_try_read_stdout(tp_proc *proc, void *buf, size_t cap, size_t *out_len,
+                             bool *out_eof) {
+    if (out_len) {
+        *out_len = 0U;
+    }
+    if (out_eof) {
+        *out_eof = false;
+    }
+    if (!proc || proc->stdout_r < 0 || (!buf && cap != 0U)) {
+        return false;
+    }
+
+    struct pollfd fd = {
+        .fd = proc->stdout_r,
+        .events = POLLIN | POLLHUP,
+        .revents = 0
+    };
+    int ready;
+    do {
+        ready = poll(&fd, 1U, 0);
+    } while (ready < 0 && errno == EINTR);
+    if (ready < 0 || (fd.revents & (POLLERR | POLLNVAL)) != 0) {
+        return false;
+    }
+    if (ready == 0) {
+        return true;
+    }
+    if (cap == 0U) {
+        if ((fd.revents & POLLHUP) != 0 && (fd.revents & POLLIN) == 0 &&
+            out_eof) {
+            *out_eof = true;
+        }
+        return true;
+    }
+
+    unsigned char *bytes = (unsigned char *)buf;
+    size_t total = 0U;
+    while (total < cap) {
+        ssize_t got = read(proc->stdout_r, bytes + total, cap - total);
+        if (got > 0) {
+            total += (size_t)got;
+            continue;
+        }
+        if (got == 0) {
+            if (out_eof) {
+                *out_eof = true;
+            }
+            break;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            break;
+        }
+        return false;
+    }
+    if (out_len) {
+        *out_len = total;
+    }
+    return true;
 }
 
 bool tp_proc_wait_slice(tp_proc *proc, int slice_ms, tp_proc_result *out, bool *finished) {
@@ -313,10 +534,25 @@ bool tp_proc_wait_slice(tp_proc *proc, int slice_ms, tp_proc_result *out, bool *
 }
 
 void tp_proc_kill(tp_proc *proc) {
-    if (!proc || proc->reaped) {
+    if (!proc) {
         return;
     }
-    (void)kill(proc->pid, SIGKILL);
+    if (proc->pgid > 0) {
+        (void)kill(-proc->pgid, SIGKILL);
+    } else if (!proc->reaped) {
+        (void)kill(proc->pid, SIGKILL);
+    }
+}
+
+static int reap_destroyed_process(void *context) {
+    tp_proc *proc = context;
+    int status = 0;
+    pid_t result;
+    do {
+        result = waitpid(proc->pid, &status, 0);
+    } while (result < 0 && errno == EINTR);
+    free(proc);
+    return 0;
 }
 
 void tp_proc_destroy(tp_proc *proc) {
@@ -329,14 +565,42 @@ void tp_proc_destroy(tp_proc *proc) {
     if (proc->stdout_r >= 0) {
         (void)close(proc->stdout_r);
     }
+    if (proc->pgid > 0) {
+        /* The leader may already be reaped while one of its nested workers is
+         * still alive; owned-tree teardown must still kill the whole group. */
+        (void)kill(-proc->pgid, SIGKILL);
+    }
     if (!proc->reaped) {
-        (void)kill(proc->pid, SIGKILL);
+        if (proc->pgid <= 0) {
+            (void)kill(proc->pid, SIGKILL);
+            int status = 0;
+            pid_t result;
+            do {
+                result = waitpid(proc->pid, &status, 0);
+            } while (result < 0 && errno == EINTR);
+            proc->reaped = true;
+            free(proc);
+            return;
+        }
         int status = 0;
         pid_t r;
         do {
-            r = waitpid(proc->pid, &status, 0);
+            r = waitpid(proc->pid, &status, WNOHANG);
         } while (r < 0 && errno == EINTR);
-        proc->reaped = true; /* reaped to avoid a zombie */
+        if (r == 0) {
+            thrd_t reaper;
+            if (thrd_create(
+                    &reaper, reap_destroyed_process, proc) ==
+                thrd_success) {
+                (void)thrd_detach(reaper);
+                return;
+            }
+            /* The child has already received SIGKILL. A reaper allocation
+             * failure must not turn teardown into an unbounded host wait;
+             * retain the tiny handle rather than blocking the caller. */
+            return;
+        }
+        proc->reaped = true;
     }
     free(proc);
 }

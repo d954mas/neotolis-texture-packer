@@ -20,6 +20,8 @@
 #include "gui_scan.h"
 #include "gui_state.h"
 
+#include "tp_core/tp_build_worker.h"
+#include "tp_core/tp_job.h"
 #include "tp_core/tp_scan.h"
 #include "tp_test_seams.h"
 
@@ -923,27 +925,26 @@ void test_export_failure_formatter_warns_about_uncertain_publication(void) {
 
 void test_late_export_cancel_keeps_completed_success_outcome(void) {
     TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_TRACE_TEST_DIR));
-    tp_job__test_arm_before_terminal_gate();
 
     char error[256] = {0};
     TEST_ASSERT_TRUE(gui_pack_export_async_start(error, sizeof error));
 
-    bool entered = false;
-    for (int i = 0; i < 5000 && !entered; ++i) {
-        entered = tp_job__test_before_terminal_gate_entered();
-        if (!entered) {
-            nt_time_sleep(0.001);
+    tp_session_job_progress progress = {0};
+    for (int i = 0; i < 5000; ++i) {
+        TEST_ASSERT_EQUAL_INT(
+            TP_STATUS_OK,
+            tp_session_job_poll(
+                gui_project_session_for_jobs(), &progress, NULL));
+        if (progress.state != TP_SESSION_JOB_RUNNING) {
+            break;
         }
+        nt_time_sleep(0.001);
     }
-    if (!entered) {
-        tp_job__test_release_before_terminal_gate();
-    }
-    TEST_ASSERT_TRUE(entered);
+    TEST_ASSERT_NOT_EQUAL(TP_SESSION_JOB_RUNNING, progress.state);
 
+    /* Terminal admission wins before this late cancellation request. */
     gui_pack_async_cancel();
-    const bool cancelling = gui_pack_async_cancelling();
-    tp_job__test_release_before_terminal_gate();
-    TEST_ASSERT_FALSE(cancelling);
+    TEST_ASSERT_FALSE(gui_pack_async_cancelling());
 
     gui_pack_result_info info;
     gui_pack_done done = GUI_PACK_DONE_NONE;
@@ -974,7 +975,10 @@ void test_empty_export_surfaces_skipped_atlas_warning(void) {
     TEST_ASSERT_NOT_NULL(strstr(s_status, "1 atlas(es) skipped"));
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    if (tp_build_is_worker_invocation(argc, argv)) {
+        return tp_build_worker_main();
+    }
     UNITY_BEGIN();
     RUN_TEST(test_state_ownership_inventory_preserves_three_classes);
     RUN_TEST(test_deferred_edit_coalesces_then_undo_redo_trace_is_exact);

@@ -91,7 +91,9 @@ nt_set_sanitizer_flags(tp_core)
 # pack re-execs the host in a hidden __build-worker mode so an nt_builder
 # abort/alloc/codec/write failure lands in a child, not the host.
 add_library(tp_build STATIC src/tp_pack.c src/tp_build_driver.c src/tp_build_proto.c
-    src/tp_build_worker.c src/tp_build_worker_main.c src/tp_export_run.c src/tp_job.c)
+    src/tp_build_worker.c src/tp_build_worker_main.c src/tp_export_run.c
+    src/tp_job.c src/tp_job_worker.c src/tp_job_worker_main.c
+    src/tp_job_worker_proto.c)
 if(WIN32)
     target_sources(tp_build PRIVATE src/tp_proc_win32.c)
 else()
@@ -103,6 +105,9 @@ endif()
 # failed (lld/ld64 don't care about order). nt_log repeated after nt_builder
 # as belt-and-suspenders against future reordering.
 target_link_libraries(tp_build PUBLIC nt_builder tp_core nt_log)
+if(NOT WIN32)
+    target_link_libraries(tp_build PRIVATE tinycthread)
+endif()
 target_compile_definitions(tp_build PRIVATE _CRT_SECURE_NO_WARNINGS)
 target_compile_options(tp_build PRIVATE -U_DLL)   # static CRT: match nt_builder (see apps/smoke)
 nt_set_warning_flags(tp_build)

@@ -371,42 +371,68 @@ joining a potentially blocked in-process thread.
 
 **Owned production files:**
 
+- `docs/ntpacker-master-spec.md`
+- `docs/design/ui-session-architecture-spec.md`
+- `docs/plans/ui-session-architecture-refactor-plan.md`
 - new `packer/include/tp_core/tp_job_worker.h`
+- `packer/include/tp_core/tp_job.h`
+- `packer/include/tp_core/tp_build_worker.h`
 - new `packer/src/tp_job_worker.c`
 - new `packer/src/tp_job_worker_main.c`
 - new `packer/src/tp_job_worker_proto.c`
 - new `packer/src/tp_job_worker_internal.h`
+- new `packer/src/tp_job_worker_process_internal.h`
 - `packer/src/tp_job.c`
+- `packer/src/tp_session.c`
+- `packer/src/tp_session_observation.c`
+- `packer/src/tp_job_owner_internal.h`
 - `packer/src/tp_input.c`
 - `packer/src/tp_scan.c`
 - `packer/src/tp_image.c`
 - `packer/src/tp_export_run.c`
 - `packer/src/tp_proc_posix.c`
 - `packer/src/tp_proc_win32.c`
+- `packer/src/tp_proc_internal.h`
+- `packer/src/tp_pack.c`
+- `packer/src/tp_build_driver_internal.h`
+- `packer/src/tp_project_internal.h`
 - existing `packer/src/tp_build_worker.c`
 - existing `packer/src/tp_build_worker_main.c`
 - existing `packer/src/tp_build_proto.c`
+- existing `packer/src/tp_build_proto_internal.h`
 - existing `packer/src/tp_build_driver.c`
+- existing `packer/src/tp_build_worker_internal.h`
 - `cmake/check_architecture_boundaries.cmake`
+- `scripts/check_boundaries.sh`
 - `packer/CMakeLists.txt`
-- `apps/gui/main.c`
 - new `packer/tests/test_job_worker_proto.c`
+- new `packer/tests/test_job_worker_process.c`
+- new `packer/tests/test_proc_job_transport.c`
 - `packer/tests/test_job_owner.c`
+- `packer/tests/test_job_input_token.c`
+- `packer/src/tp_test_seams.h`
 - `packer/tests/test_build_worker.c`
 - `packer/tests/CMakeLists.txt`
+- `apps/gui/test_gui_action_trace.c`
+- `apps/gui/test_gui_canonical_identity.c`
+- `apps/gui/test_client_parity.c`
 
 **Tasks:**
 
 1. Define a bounded versioned request/progress/result protocol for immutable
    Pack/Export job input.
-2. Dispatch the private job-worker invocation before engine/window/session
-   initialization.
+2. Reuse the already mandatory early `__build-worker` invocation and dispatch
+   Build versus outer Job protocol by the bounded wire magic before any
+   engine/window/session initialization. Do not add a second argv mode whose
+   correctness would depend on every pack-capable executable duplicating another
+   dispatch branch.
 3. Run source traversal/current-read, file I/O, decode, Pack input construction,
    builder execution, and Export job I/O in the owned process.
 4. Keep project model, session admission, history, and result authority in the
    host.
-5. Replace the in-process `thrd_t` job with non-blocking process
-   poll/progress/result ownership.
+5. Replace the in-process `thrd_t` job with a non-blocking process
+   poll/progress/result owner. Incremental request/reply transport must not fill
+   a pipe or make a frame poll wait for child progress.
 6. Request cooperative cancellation first; kill the owned process tree after a
    bounded deadline; reap only after terminal process state.
 7. Bound request/reply/progress sizes and fail closed on malformed/truncated
@@ -427,12 +453,17 @@ joining a potentially blocked in-process thread.
 
 - `tp_live_job.thread`, `thrd_create`, and `job_join` from
   `packer/src/tp_job.c`;
+- `job_thread_start_context`, `job_thread_start`, the thread-create fault seam,
+  and the production tinycthread dependency from `packer/src/tp_job.c`;
 - in-process `pack_worker`/`export_worker` and `job_start_thread` blocking
   execution paths;
 - `tp_live_job.session` and its worker-side freshness dereference;
-- `gui_pack_shutdown`, `main.c` shutdown busy-poll, and `wait_for_job` blocking
-  wait paths once the process owner provides non-blocking terminalization;
 - any direct worker alias to live `tp_session`/`tp_model`.
+
+The GUI's `wait_for_job`, shutdown drain, and direct job calls are not deleted
+in R1c: they are host-orchestration owners whose replacement does not exist
+until R2b/R2d. R1c makes every underlying poll/cancel/reap step non-blocking;
+R2b/R2d then delete those GUI loops together with the old lifecycle owner.
 
 **Gate:** every potentially unbounded Pack/Export job path is process-owned;
 forced termination reaches structured terminal state and permits non-blocking

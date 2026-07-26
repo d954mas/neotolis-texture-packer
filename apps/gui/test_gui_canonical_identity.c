@@ -320,7 +320,7 @@ void test_preview_result_rejects_source_refresh_after_job_capture(void) {
     TEST_ASSERT_NULL(gui_pack_preview_result(0));
 }
 
-void test_native_pack_ignores_unrelated_atlas_edit_during_job(void) {
+void test_native_pack_marks_token_change_stale_without_host_side_probe(void) {
     const tp_id128 packed_atlas_id = add_coin_source_to_atlas(0);
     TEST_ASSERT_EQUAL_INT(1, gui_project_add_atlas());
     const tp_session_snapshot *snapshot = gui_project_snapshot();
@@ -330,24 +330,13 @@ void test_native_pack_ignores_unrelated_atlas_edit_during_job(void) {
     const tp_id128 other_atlas_id = other->id;
 
     TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_IDENTITY_TEST_DIR));
-    tp_job__test_arm_before_terminal_gate();
     char error[256] = {0};
     TEST_ASSERT_TRUE(gui_pack_async_start(0, error, sizeof error));
-    bool gated = false;
-    for (int i = 0; i < 5000; ++i) {
-        if (tp_job__test_before_terminal_gate_entered()) {
-            gated = true;
-            break;
-        }
-        nt_time_sleep(0.001);
-    }
-    TEST_ASSERT_TRUE(gated);
 
     snapshot = gui_project_snapshot();
     TEST_ASSERT_TRUE(gui_project_set_atlas_name(
         other_atlas_id, tp_session_snapshot_revision(snapshot),
         "unrelated-edit"));
-    tp_job__test_release_before_terminal_gate();
 
     gui_pack_result_info info = {0};
     gui_pack_done done = GUI_PACK_DONE_NONE;
@@ -358,7 +347,11 @@ void test_native_pack_ignores_unrelated_atlas_edit_during_job(void) {
         }
     }
     TEST_ASSERT_EQUAL_INT(GUI_PACK_DONE_PACK_OK, done);
-    TEST_ASSERT_FALSE(info.input_changed);
+    /* R1c removes the worker's raw-session freshness dereference. Until the
+     * separate source-runtime/hash remediation, a changed composite input
+     * token is intentionally conservative: the host never decodes or reads
+     * files to refine this result during GUI polling. */
+    TEST_ASSERT_TRUE(info.input_changed);
     snapshot = gui_project_snapshot();
     const tp_snapshot_atlas *packed =
         tp_session_snapshot_atlas_by_id(snapshot, packed_atlas_id);
@@ -408,19 +401,8 @@ void test_failed_current_hash_probe_is_stale(void) {
 void test_gui_poll_does_not_decode_sources_on_gui_thread(void) {
     const tp_id128 atlas_id = add_coin_source();
     TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_IDENTITY_TEST_DIR));
-    tp_job__test_arm_before_terminal_gate();
     char error[256] = {0};
     TEST_ASSERT_TRUE(gui_pack_async_start(0, error, sizeof error));
-
-    bool gated = false;
-    for (int i = 0; i < 5000; ++i) {
-        if (tp_job__test_before_terminal_gate_entered()) {
-            gated = true;
-            break;
-        }
-        nt_time_sleep(0.001);
-    }
-    TEST_ASSERT_TRUE(gated);
 
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     char hero_path[1024];
@@ -434,7 +416,6 @@ void test_gui_poll_does_not_decode_sources_on_gui_thread(void) {
             TP_SOURCE_KIND_FILE));
 
     tp_image__test_reset_decode_count();
-    tp_job__test_release_before_terminal_gate();
 
     tp_session_job_progress progress = {0};
     for (int i = 0; i < 5000; ++i) {
@@ -964,7 +945,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_sprite_edit_rejects_genuinely_stale_captured_revision);
     RUN_TEST(test_delayed_animation_context_ref_never_retargets_after_index_shift);
     RUN_TEST(test_preview_result_rejects_source_refresh_after_job_capture);
-    RUN_TEST(test_native_pack_ignores_unrelated_atlas_edit_during_job);
+    RUN_TEST(
+        test_native_pack_marks_token_change_stale_without_host_side_probe);
     RUN_TEST(test_nil_completed_pack_input_hash_is_stale);
     RUN_TEST(test_failed_current_hash_probe_is_stale);
     RUN_TEST(test_gui_poll_does_not_decode_sources_on_gui_thread);

@@ -748,10 +748,11 @@ void test_live_headless_runs_real_pack_job_and_export_command(void) {
                               tp_session_job_poll(session, &progress, &err));
     } while (progress.state == TP_SESSION_JOB_RUNNING);
     TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_EXPORT, progress.kind);
-    TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_SUCCEEDED, progress.state);
     memset(&result, 0, sizeof result);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK,
                           tp_session_job_take_result(session, &result, &err));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_SESSION_JOB_SUCCEEDED, progress.state, result.error.msg);
     TEST_ASSERT_EQUAL_INT(TP_SESSION_JOB_EXPORT, result.kind);
     TEST_ASSERT_EQUAL_INT(TP_STATUS_OK, result.status);
     TEST_ASSERT_EQUAL_INT(1, result.export_result.targets);

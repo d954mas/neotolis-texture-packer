@@ -9,17 +9,22 @@
 #include <fcntl.h>
 #include <io.h>
 #include <windows.h>
+#else
+#include <errno.h>
+#include <unistd.h>
 #endif
 
 #include "log/nt_log.h"
 
 #include "tp_build_driver_internal.h"
 #include "tp_build_proto_internal.h"
+#include "tp_job_worker_internal.h"
 
 /* The child reads at most one request frame: header(12) + payload. The proto
  * caps the payload at TP_BUILD_PROTO_MAX_FRAME_BYTES; anything larger is a
  * malformed request the child rejects before allocating for it. */
 #define TP_BUILD_WORKER_REQUEST_CAP (TP_BUILD_PROTO_MAX_FRAME_BYTES + 16u)
+#define TP_WORKER_FRAME_HEADER_BYTES 12U
 
 bool tp_build_is_worker_invocation(int argc, char **argv) {
     return argc >= 2 && argv && argv[1] && strcmp(argv[1], TP_BUILD_WORKER_ARGV1) == 0;
@@ -38,15 +43,56 @@ static void suppress_fault_dialogs(void) {
 #endif
 }
 
-/* Read stdin to EOF into a freshly malloc'd buffer, capped at `cap`. The parent
- * closes the child's stdin after the request, so EOF is the frame boundary.
- * Returns TP_STATUS_OK with an owned buffer, or a fail-closed status. */
-static tp_status read_stdin_all(uint8_t **out_bytes, size_t *out_len, tp_error *err) {
+static bool read_native(uint8_t *bytes, size_t capacity, size_t *out_read) {
+    *out_read = 0U;
+#if defined(_WIN32)
+    DWORD read_count = 0U;
+    const DWORD chunk = capacity > (size_t)UINT32_MAX
+                            ? UINT32_MAX
+                            : (DWORD)capacity;
+    if (!ReadFile(GetStdHandle(STD_INPUT_HANDLE), bytes, chunk,
+                  &read_count, NULL)) {
+        return GetLastError() == ERROR_BROKEN_PIPE;
+    }
+    *out_read = (size_t)read_count;
+    return true;
+#else
+    ssize_t read_count = 0;
+    do {
+        read_count = read(STDIN_FILENO, bytes, capacity);
+    } while (read_count < 0 && errno == EINTR);
+    if (read_count < 0) {
+        return false;
+    }
+    *out_read = (size_t)read_count;
+    return true;
+#endif
+}
+
+static tp_status read_exact(uint8_t *bytes, size_t length, tp_error *err) {
+    size_t offset = 0U;
+    while (offset < length) {
+        size_t read_count = 0U;
+        if (!read_native(bytes + offset, length - offset, &read_count)) {
+            return tp_error_set(err, TP_STATUS_BUILDER_FAILED,
+                                "worker: request channel read failed");
+        }
+        if (read_count == 0U) {
+            return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                                "worker: truncated request frame");
+        }
+        offset += read_count;
+    }
+    return TP_STATUS_OK;
+}
+
+/* Build requests retain their original EOF framing. Raw OS reads are mandatory:
+ * stdio read-ahead could consume an outer job's trailing cancel byte before the
+ * job service polls it. */
+static tp_status read_build_request(uint8_t **out_bytes, size_t *out_len,
+                                    tp_error *err) {
     *out_bytes = NULL;
     *out_len = 0U;
-#if defined(_WIN32)
-    (void)_setmode(_fileno(stdin), _O_BINARY); /* no CRLF translation of binary frames */
-#endif
     size_t cap = 1u << 16;
     size_t len = 0U;
     uint8_t *buf = (uint8_t *)malloc(cap);
@@ -71,14 +117,93 @@ static tp_status read_stdin_all(uint8_t **out_bytes, size_t *out_len, tp_error *
             buf = grown;
             cap = next;
         }
-        size_t got = fread(buf + len, 1u, cap - len, stdin);
+        size_t got = 0U;
+        if (!read_native(buf + len, cap - len, &got)) {
+            free(buf);
+            return tp_error_set(err, TP_STATUS_BUILDER_FAILED,
+                                "build worker: request channel read failed");
+        }
         len += got;
         if (got == 0U) {
-            break; /* EOF or error: either way the frame is complete or invalid */
+            break;
         }
     }
     *out_bytes = buf;
     *out_len = len;
+    return TP_STATUS_OK;
+}
+
+static uint32_t read_le_u32(const uint8_t *bytes) {
+    return (uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8U) |
+           ((uint32_t)bytes[2] << 16U) |
+           ((uint32_t)bytes[3] << 24U);
+}
+
+static tp_status read_dispatched_request(uint8_t **out_bytes,
+                                         size_t *out_len,
+                                         bool *out_job,
+                                         tp_error *err) {
+    uint8_t header[TP_WORKER_FRAME_HEADER_BYTES];
+    tp_status status = read_exact(header, sizeof header, err);
+    if (status != TP_STATUS_OK) {
+        return status;
+    }
+    const uint32_t magic = read_le_u32(header);
+    if (magic == TP_BUILD_PROTO_REQUEST_MAGIC) {
+        uint8_t *tail = NULL;
+        size_t tail_length = 0U;
+        status = read_build_request(&tail, &tail_length, err);
+        if (status != TP_STATUS_OK) {
+            return status;
+        }
+        if (tail_length >
+            TP_BUILD_WORKER_REQUEST_CAP - sizeof header) {
+            free(tail);
+            return tp_error_set(
+                err, TP_STATUS_OUT_OF_BOUNDS,
+                "build worker: request exceeds the frame cap");
+        }
+        uint8_t *request = malloc(sizeof header + tail_length);
+        if (!request) {
+            free(tail);
+            return tp_error_set(
+                err, TP_STATUS_OOM,
+                "build worker: request buffer allocation failed");
+        }
+        memcpy(request, header, sizeof header);
+        memcpy(request + sizeof header, tail, tail_length);
+        free(tail);
+        *out_bytes = request;
+        *out_len = sizeof header + tail_length;
+        *out_job = false;
+        return TP_STATUS_OK;
+    }
+    if (magic != TP_JOB_WORKER_PROTO_REQUEST_MAGIC) {
+        return tp_error_set(err, TP_STATUS_BAD_MAGIC,
+                            "worker: unknown request magic");
+    }
+    const size_t payload_length =
+        (size_t)read_le_u32(header + 8U);
+    if (payload_length > TP_JOB_WORKER_PROTO_MAX_FRAME_BYTES ||
+        payload_length > SIZE_MAX - sizeof header) {
+        return tp_error_set(err, TP_STATUS_OUT_OF_BOUNDS,
+                            "job worker: request exceeds the frame cap");
+    }
+    const size_t total = sizeof header + payload_length;
+    uint8_t *request = malloc(total);
+    if (!request) {
+        return tp_error_set(err, TP_STATUS_OOM,
+                            "job worker: request buffer allocation failed");
+    }
+    memcpy(request, header, sizeof header);
+    status = read_exact(request + sizeof header, payload_length, err);
+    if (status != TP_STATUS_OK) {
+        free(request);
+        return status;
+    }
+    *out_bytes = request;
+    *out_len = total;
+    *out_job = true;
     return TP_STATUS_OK;
 }
 
@@ -168,11 +293,19 @@ int tp_build_worker_main(void) {
     tp_error err = {{0}};
     uint8_t *req_bytes = NULL;
     size_t req_len = 0U;
-    tp_status st = read_stdin_all(&req_bytes, &req_len, &err);
+    bool is_job = false;
+    tp_status st = read_dispatched_request(
+        &req_bytes, &req_len, &is_job, &err);
     if (st != TP_STATUS_OK) {
         (void)write_response(st, "", err.msg);
         free(req_bytes);
         return 0; /* a reply was emitted; the parent maps it (BUILDER_FAILED) */
+    }
+    if (is_job) {
+        const int result =
+            tp_job_worker_main_request(req_bytes, req_len);
+        free(req_bytes);
+        return result;
     }
 
     tp_build_proto_request req;

@@ -511,6 +511,7 @@ void tp_session_owned_job_init(tp_session_owned_job *job,
     }
     atomic_init(&job->refs, 1U);
     job->cancel = cancel;
+    job->pump = NULL;
     job->destroy = destroy;
     memset(&job->observation_descriptor, 0,
            sizeof job->observation_descriptor);
@@ -563,13 +564,20 @@ tp_status tp_session_job_start_internal(
         gate_unlock(session);
         return validation_status;
     }
-    /* The worker may start running here, but any session call it makes blocks
-     * on this gate. Nothing observable changes unless creation succeeds. */
-    if (!start(start_context)) {
+    /* Reserve the request identity before process creation so the exact
+     * admitted identity is encoded into the child request. A failed spawn may
+     * consume an id, but publishes no job/result state. */
+    if (job->observation_descriptor.request_id == 0U) {
+        NT_ASSERT(session->next_job_request_id < UINT64_MAX);
+        job->observation_descriptor.request_id =
+            ++session->next_job_request_id;
+    }
+    /* Process creation is fail-atomic with observable publication. The start
+     * callback only spawns/encodes; it never pumps or calls the session. */
+    const tp_status start_status = start(start_context, err);
+    if (start_status != TP_STATUS_OK) {
         gate_unlock(session);
-        return tp_error_set(
-            err, TP_STATUS_OOM,
-            "could not create Pack/Export worker thread");
+        return start_status;
     }
     tp_session_owned_job *retired = NULL;
     const tp_status observation_status =

@@ -311,10 +311,18 @@ share the type-erased result owner, so the final release destroys the heavy
 Pack arena exactly once. Session observation never includes or inspects
 `tp_build` private job state.
 
+For session jobs, cancellation versus terminal completion linearizes in the
+host process owner. A cancellation accepted before the owner admits the bounded
+terminal frame owns the cancelled outcome; any completed Export side effects
+remain explicit in the frame's full/partial/uncertain publication metadata.
+After terminal admission, cancellation is rejected. The worker never maintains
+a competing terminal authority.
+
 The accepted-result slot retains its own immutable completion envelope. A later
 job start changes the current job projection without relabelling the prior
-accepted result. Thread creation is part of admission: failure publishes no
-job-state or result-token change and preserves the prior owners.
+accepted result. Worker creation is part of admission: failure publishes no
+job-state or result-token change and preserves the prior owners. Pack/Export
+use process creation at this boundary; no in-process job thread exists.
 
 A candidate for the same canonical saved identity must not acquire a second
 writer lease or destroy the old session merely to retry. Until a dedicated
@@ -1009,10 +1017,21 @@ While the engine builder exposes aborting assertions or narrow path-based output
 the production integration runs it in a private worker process. The worker
 receives a versioned bounded request containing validated settings and raw pixels,
 uses only private ASCII relative staging names, and returns a versioned result.
-The parent owns cancellation, timeout, crash detection, UTF-8 filesystem reads,
-and final publication. A worker exit, signal, malformed response, or missing
-artifact becomes a structured `builder_crashed`/`builder_failed` result and cannot
-replace the last successful preview.
+The parent owns cancellation, timeout, crash detection, admission, and retained
+result publication. The outer job worker owns source traversal/current-read,
+UTF-8 file I/O, decode, builder execution, and Export publication. It returns a
+bounded completion envelope and a bounded Pack readback manifest; the host
+never rescans live sources to reconstruct a result. A worker exit, signal,
+malformed response, or missing artifact becomes a structured
+`builder_crashed`/`builder_failed` result and cannot replace the last successful
+preview.
+
+Inside that outer job process, the existing raw-RGBA build-worker containment
+may remain as a nested child around the assertion-capable engine builder. The
+outer process is its parent and owns its bounded protocol; the host owns the
+outer process group/Job Object, so forced cancellation terminates both levels
+without stranding the nested builder. This is one job authority with a nested
+fault-containment detail, not two competing job owners.
 
 An upstream fallible memory/sink builder API may replace the process boundary
 after its error, ownership, cancellation, and UTF-8 contracts are executable-test

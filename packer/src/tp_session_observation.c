@@ -91,6 +91,18 @@ tp_status tp_session_observe(
     }
     *out = NULL;
 
+    /* Transport pumping is deliberately outside the session gate. The pump
+     * only advances private process/atomic state; the locked refresh below is
+     * the sole admission point into authoritative observable state. */
+    tp_session_owned_job *pump_job =
+        tp_session_job_acquire_internal(session);
+    if (pump_job) {
+        if (pump_job->pump) {
+            pump_job->pump(pump_job);
+        }
+        tp_session_job_release_internal(pump_job);
+    }
+
     gate_lock(session);
     tp_session_owned_job *retired_result =
         tp_session_job_observation__refresh_locked(
