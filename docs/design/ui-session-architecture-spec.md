@@ -373,11 +373,13 @@ Borrowed mutable pointers are forbidden.
 
 `tp_core` owns the observable slot and token generations. `tp_build` job code
 exposes a constant-time, allocation-free projection callback through its
-refcounted opaque job owner. The host-thread observation path pulls that
-projection under the session gate, validates/adopts it, and retains the
-type-erased owner as the result handle. Workers update only their private
+refcounted opaque job owner. The explicit host-thread job poll/admission step
+pulls that projection under the session gate, validates/adopts it, and retains
+the type-erased owner as the result handle. Workers update only their private
 atomics and immutable terminal payload; they never push into the session.
-Observation must not depend on, include, or inspect `tp_build` private state.
+`tp_session_observe()` is read-only: it does not pump transport or admit job
+state. Observation must not depend on, include, or inspect `tp_build` private
+state.
 The result receipt and GUI presentation slots share the same retained owner;
 the final release destroys the Pack arena exactly once.
 

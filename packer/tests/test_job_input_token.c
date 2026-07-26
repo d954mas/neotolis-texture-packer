@@ -195,7 +195,7 @@ static tp_session_job_result wait_for_result(tp_session *session) {
     return result;
 }
 
-void test_process_pack_terminal_is_published_by_atomic_observation(void) {
+void test_process_pack_terminal_is_published_after_host_poll(void) {
     tp_session *session = make_session();
     char work_dir[1024];
     scratch_dir(work_dir, sizeof work_dir);
@@ -219,6 +219,11 @@ void test_process_pack_terminal_is_published_by_atomic_observation(void) {
     tp_session_observation_token token = {0};
     bool terminal = false;
     for (long spin = 0; spin < 10000000L; ++spin) {
+        tp_session_job_progress progress = {0};
+        TEST_ASSERT_EQUAL_INT_MESSAGE(
+            TP_STATUS_OK,
+            tp_session_job_poll(session, &progress, &error),
+            error.msg);
         TEST_ASSERT_EQUAL_INT_MESSAGE(
             TP_STATUS_OK,
             tp_session_observe(session, observation ? &token : NULL,
@@ -361,7 +366,7 @@ int main(int argc, char **argv) {
     }
     UNITY_BEGIN();
     RUN_TEST(
-        test_process_pack_terminal_is_published_by_atomic_observation);
+        test_process_pack_terminal_is_published_after_host_poll);
     RUN_TEST(test_host_cancel_owns_process_terminal_result);
     RUN_TEST(test_worker_timeout_is_a_structured_terminal_failure);
     RUN_TEST(test_export_target_allocation_failure_is_fail_atomic);

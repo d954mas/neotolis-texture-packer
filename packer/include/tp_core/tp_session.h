@@ -194,6 +194,8 @@ typedef struct tp_session_observation_token {
 bool tp_session_observation_token_equal(
     tp_session_observation_token left,
     tp_session_observation_token right);
+/* Read-only. The host admits commands/job progress before observing; this call
+ * never pumps transport or mutates session authority. */
 tp_status tp_session_observe(
     const tp_session *session,
     const tp_session_observation_token *after,

@@ -304,12 +304,14 @@ structured terminal results; they never mutate the project model directly.
 
 The dependency direction remains `tp_build -> tp_core`. Job code publishes a
 retained immutable job/result projection into a narrow core-owned session slot.
-Publication is a host-thread pull from a constant-time projection callback on
-the opaque refcounted job owner; workers never push into the session. The slot,
-atomic observations, owned result receipts, and presentation caches
-share the type-erased result owner, so the final release destroys the heavy
-Pack arena exactly once. Session observation never includes or inspects
-`tp_build` private job state.
+Publication is an explicit host-thread job poll/admission pull from a
+constant-time projection callback on the opaque refcounted job owner; workers
+never push into the session. `tp_session_observe()` only reads already-admitted
+state and never pumps transport or performs admission. The slot, atomic
+observations, owned result receipts, and presentation caches share the
+type-erased result owner, so the final release destroys the heavy Pack arena
+exactly once. Session observation never includes or inspects `tp_build` private
+job state.
 
 For session jobs, cancellation versus terminal completion linearizes in the
 host process owner. A cancellation accepted before the owner admits the bounded

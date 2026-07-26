@@ -656,7 +656,7 @@ bool tp_session_job_active(const tp_session *session) {
     return active;
 }
 
-tp_status tp_session_job_poll(const tp_session *session,
+tp_status tp_session_job_poll(tp_session *session,
                               tp_session_job_progress *out,
                               tp_error *err) {
     if (!session || !out) {
@@ -672,6 +672,8 @@ tp_status tp_session_job_poll(const tp_session *session,
     if (job->owner.pump) {
         job->owner.pump(&job->owner);
     }
+    (void)tp_session_job_observation_admit_internal(
+        session, &job->owner);
     memset(out, 0, sizeof *out);
     out->kind = job->kind;
     out->state = (tp_session_job_state)atomic_load_explicit(
@@ -717,9 +719,6 @@ tp_status tp_session_job_take_result(tp_session *session,
         return tp_error_set(err, TP_STATUS_NOT_FOUND,
                             "session has no active job");
     }
-    if (job->owner.pump) {
-        job->owner.pump(&job->owner);
-    }
     if ((tp_session_job_state)atomic_load_explicit(
             &job->state, memory_order_acquire) ==
         TP_SESSION_JOB_RUNNING) {
@@ -727,8 +726,6 @@ tp_status tp_session_job_take_result(tp_session *session,
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "job is still running");
     }
-    (void)tp_session_job_observation_admit_internal(
-        session, &job->owner);
     const tp_status status = tp_session_job_detach_internal(
         session, &job->owner, err);
     if (status != TP_STATUS_OK) {

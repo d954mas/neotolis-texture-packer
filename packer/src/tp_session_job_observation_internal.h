@@ -52,8 +52,6 @@ tp_session_job_admission tp_session_job_observation_admit_internal(
     tp_session *session, tp_session_owned_job *job);
 
 /* Session-family locked helpers. */
-tp_session_owned_job *tp_session_job_observation__refresh_locked(
-    tp_session *session);
 void tp_session_job_observation__copy_locked(
     tp_session *session, tp_session_job_observed_state *out_state,
     tp_session_job_observed_result *out_result,

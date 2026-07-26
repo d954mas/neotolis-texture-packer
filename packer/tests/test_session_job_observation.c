@@ -61,6 +61,7 @@ typedef struct fake_job {
     tp_session_job_sample sample;
     tp_session_job_result terminal_result;
     tp_session_job_target targets[2];
+    int pump_count;
     int destroy_count;
 } fake_job;
 
@@ -72,6 +73,11 @@ static void fake_cancel(tp_session_owned_job *owner) {
 static void fake_destroy(tp_session_owned_job *owner) {
     fake_job *job = (fake_job *)owner;
     job->destroy_count++;
+}
+
+static void fake_pump(tp_session_owned_job *owner) {
+    fake_job *job = (fake_job *)owner;
+    job->pump_count++;
 }
 
 static bool fake_observe(tp_session_owned_job *owner,
@@ -86,6 +92,7 @@ static void fake_job_init(fake_job *job, uint64_t instance_generation,
                           tp_session_job_kind kind) {
     memset(job, 0, sizeof *job);
     tp_session_owned_job_init(&job->owner, fake_cancel, fake_destroy);
+    job->owner.pump = fake_pump;
     job->targets[0].kind = TP_SESSION_JOB_TARGET_ATLAS;
     job->targets[0].atlas_id = target;
     job->sample.state = TP_SESSION_JOB_RUNNING;
@@ -404,6 +411,10 @@ void test_progress_burst_is_coalesced_without_event_or_project_snapshot(void) {
     for (int current = 1; current <= 100; ++current) {
         job.sample.current = current;
     }
+    TEST_ASSERT_EQUAL_INT(
+        TP_SESSION_JOB_ADMISSION_PROGRESS,
+        tp_session_job_observation_admit_internal(
+            session, &job.owner));
     tp_session__test_reset_snapshot_allocations();
 
     tp_session_observation *delta = NULL;
@@ -432,6 +443,46 @@ void test_progress_burst_is_coalesced_without_event_or_project_snapshot(void) {
     tp_session_job_release_internal(&job.owner);
 }
 
+void test_observe_does_not_admit_job_progress(void) {
+    tp_session *session = make_session();
+    fake_job job;
+    fake_job_init(&job, 80U, 81U, first_atlas_id(session),
+                  TP_SESSION_JOB_EXPORT);
+    tp_error err = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_job_observation_begin_internal(
+            session, &job.owner, &err));
+
+    const tp_session_observation_token before = initial_token(session);
+    job.sample.current = 50;
+
+    tp_session_observation *unchanged =
+        (tp_session_observation *)(uintptr_t)1U;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_observe(session, &before, &unchanged, &err), err.msg);
+    TEST_ASSERT_NULL(unchanged);
+    TEST_ASSERT_EQUAL_INT(0, job.pump_count);
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_SESSION_JOB_ADMISSION_PROGRESS,
+        tp_session_job_observation_admit_internal(
+            session, &job.owner));
+
+    tp_session_observation *delta = NULL;
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        TP_STATUS_OK,
+        tp_session_observe(session, &before, &delta, &err), err.msg);
+    TEST_ASSERT_NOT_NULL(delta);
+    TEST_ASSERT_EQUAL_INT(
+        50, tp_session_observation_job_state(delta).current);
+
+    tp_session_observation_destroy(delta);
+    tp_session_destroy(session);
+    tp_session_job_release_internal(&job.owner);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_reverse_completion_accepts_only_latest_request);
@@ -444,5 +495,6 @@ int main(void) {
         test_old_instance_and_post_close_completions_are_rejected);
     RUN_TEST(
         test_progress_burst_is_coalesced_without_event_or_project_snapshot);
+    RUN_TEST(test_observe_does_not_admit_job_progress);
     return UNITY_END();
 }

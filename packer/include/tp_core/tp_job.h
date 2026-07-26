@@ -129,7 +129,9 @@ tp_status tp_session_export_start(tp_session *session,
                                   const tp_export_command_request *request,
                                   tp_error *err);
 bool tp_session_job_active(const tp_session *session);
-tp_status tp_session_job_poll(const tp_session *session,
+/* Host-thread admission step: pumps the owned process and publishes its latest
+ * typed progress/terminal projection into session-observed state. */
+tp_status tp_session_job_poll(tp_session *session,
                               tp_session_job_progress *out, tp_error *err);
 /* Accepts cancellation only before the terminal-boundary claim. Export
  * linearizes that claim immediately after its final eligible writer returns;
