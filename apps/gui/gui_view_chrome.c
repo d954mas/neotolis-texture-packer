@@ -22,7 +22,7 @@
 #include "gui_actions.h"
 #include "gui_canvas.h"
 #include "gui_pack.h"
-#include "gui_project.h"
+#include "gui_project_view.h"
 #include "gui_recovery_indicator.h"
 #include "gui_version.h" /* NTPACKER_VERSION/NTPACKER_ENGINE_NAME/NTPACKER_REPO_URL (About modal) */
 

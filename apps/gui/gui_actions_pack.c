@@ -1,4 +1,5 @@
 #include "gui_actions_internal.h"
+#include "gui_project.h"
 
 #include <stdio.h>
 

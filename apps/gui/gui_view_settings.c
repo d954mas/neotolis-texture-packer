@@ -21,7 +21,7 @@
 #include "gui_widgets.h"
 #include "gui_actions.h"
 #include "gui_rows.h"
-#include "gui_project.h"
+#include "gui_project_view.h"
 #include "gui_pack.h"
 #include "gui_shell.h" /* close_menubar_menus */
 

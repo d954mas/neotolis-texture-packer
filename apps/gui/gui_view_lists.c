@@ -14,7 +14,7 @@
 #include "gui_actions.h"
 #include "gui_rows.h"
 #include "gui_canvas.h"
-#include "gui_project.h"
+#include "gui_project_view.h"
 #include "gui_shell.h" /* close_menubar_menus */
 
 #include <math.h>

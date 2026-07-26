@@ -259,7 +259,10 @@ change event.
 The native GUI uses a session-observing controller with passive boundaries:
 
 - a frame pins one immutable observation/snapshot;
-- simple views may read that snapshot through a read-only query API;
+- simple views may read that snapshot through
+  `tp_core/tp_session_snapshot_query.h`, which exposes immutable DTOs and
+  read-only operations over a caller-pinned snapshot but no session/snapshot
+  lifetime, admission, command, mutation-preview, or job-start API;
 - derived, virtualized, identity-sensitive, or policy-bearing presentation is
   prepared by explicit projections/reducers;
 - a view emits typed semantic actions and does not mutate the session;
@@ -296,6 +299,10 @@ in a joinable in-process thread. It polls progress non-blockingly, requests
 cooperative cancellation, and may terminate the owned process after the bounded
 deadline. Process exit, protocol failure, and forced termination become
 structured terminal results; they never mutate the project model directly.
+
+The dependency direction remains `tp_build -> tp_core`. Job code publishes a
+retained immutable job/result projection into a narrow core-owned session slot;
+session observation never includes or inspects `tp_build` private job state.
 
 A candidate for the same canonical saved identity must not acquire a second
 writer lease or destroy the old session merely to retry. Until a dedicated

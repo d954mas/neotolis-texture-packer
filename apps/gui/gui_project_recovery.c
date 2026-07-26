@@ -6,6 +6,7 @@
 
 #include "tp_core/tp_id.h"
 #include "tp_core/tp_recovery.h"
+#include "tp_core/tp_session.h"
 static int64_t recovery_now(void) {
     return (int64_t)time(NULL);
 }

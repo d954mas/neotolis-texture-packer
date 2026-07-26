@@ -30,7 +30,8 @@
 #include "tp_core/tp_project.h"
 #include "tp_core/tp_operation.h"
 #include "tp_core/tp_recovery.h"
-#include "tp_core/tp_session.h"
+#include "tp_core/tp_session_snapshot_query.h"
+#include "gui_project_view.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -38,39 +39,6 @@ extern "C" {
 
 /* Result of an add-source attempt (the GUI surfaces "already added" distinctly). */
 typedef enum { GUI_ADD_FAILED = 0, GUI_ADD_ADDED, GUI_ADD_DUPLICATE } gui_add_status;
-
-/* Per-sprite packing-override field selector (region-panel "Packing overrides"). */
-typedef enum {
-    GUI_SPRITE_OV_SHAPE = 0,
-    GUI_SPRITE_OV_ROTATE,
-    GUI_SPRITE_OV_MAXVERT,
-    GUI_SPRITE_OV_MARGIN,
-    GUI_SPRITE_OV_EXTRUDE
-} gui_sprite_ov;
-
-typedef struct gui_sprite_ref {
-    tp_id128 atlas_id;
-    tp_id128 source_id;
-    const char *source_key;
-    int64_t expected_revision;
-} gui_sprite_ref;
-
-typedef struct gui_animation_ref {
-    tp_id128 atlas_id;
-    tp_id128 animation_id;
-    int64_t expected_revision;
-} gui_animation_ref;
-
-typedef struct gui_target_ref {
-    tp_id128 atlas_id;
-    tp_id128 target_id;
-    int64_t expected_revision;
-} gui_target_ref;
-
-bool gui_project_animation_ref_at(int atlas_index, int animation_index,
-                                  gui_animation_ref *out);
-bool gui_project_target_ref_at(int atlas_index, int target_index,
-                               gui_target_ref *out);
 
 /* Creates the initial fresh in-memory project (one default atlas, no path, clean). Crash recovery is
  * collected and resolved separately through the R6 APIs below; startup never adopts an orphan live. */
@@ -95,9 +63,6 @@ void gui_project_enable_recovery(const char *root);
  * one-shot warning through gui_project_take_recovery_setup_notice(). */
 void gui_project_note_recovery_setup_failure(const char *reason);
 
-/* UI buffers and loops follow the recovery core's bounded value contract. */
-#define GUI_RECOVERY_MAX_CANDIDATES TP_RECOVERY_MAX_CANDIDATES
-#define GUI_RECOVERY_PATH_CAP TP_IDENTITY_PATH_MAX
 /* Drains the one-shot "crash recovery is unavailable" notice. The text distinguishes another live
  * owner from path/directory/lock setup failures. */
 bool gui_project_take_recovery_setup_notice(char *out, size_t cap);
@@ -105,28 +70,6 @@ bool gui_project_take_recovery_setup_notice(char *out, size_t cap);
 /* Drains the one-shot warning raised when Save published the file but could
  * not confirm the containing-directory durability barrier. */
 bool gui_project_take_save_notice(char *out, size_t cap);
-
-/* Startup-modal choices mapped onto the core recovery action vocabulary. */
-typedef enum {
-    GUI_RECOVERY_DISCARD = 0,   /* delete the journal; the permanent lock file remains */
-    GUI_RECOVERY_SAVE_ORIGINAL, /* atomically save the recovered state over its ORIGINAL file (no backup; atomic replace) */
-    GUI_RECOVERY_SAVE_AS        /* save the recovered state to a NEW target file (the original is untouched) */
-} gui_recovery_action;
-
-/* The modal consumes the core-owned recovery value contract directly. */
-typedef tp_recovery_candidate gui_recovery_entry;
-typedef tp_recovery_candidates gui_recovery_list;
-
-/* Persistent projection of the core recovery-health state. Unlike the
- * operation-rejection channel, querying this notice never drains it. */
-typedef struct gui_recovery_notice {
-    const char *notice_id;
-    uint64_t generation;
-    tp_status status;
-    bool has_last_durable_revision;
-    int64_t last_durable_revision;
-    char message[256];
-} gui_recovery_notice;
 
 /* Returns true while crash recovery is degraded. A successful healing/rebind
  * publishes the cleared state by returning false on subsequent queries. */
@@ -223,22 +166,6 @@ tp_status gui_project_copy_atlas_name(tp_id128 atlas_id, char *out, size_t capac
                                       tp_error *err);
 /* Sets/clears a sprite's rename export-name override (empty/NULL clears it). */
 bool gui_project_set_sprite_rename(const gui_sprite_ref *sprite, const char *rename);
-
-/* The 10 atlas packing knobs, as a closed selector for gui_project_set_atlas_setting.
- * Each maps to one tp_atlas_field_mask bit; the panel edits ONE knob per
- * gesture, so the op carries a single-bit mask (byte-identical to the old in-place write). */
-typedef enum {
-    GUI_ATLAS_MAX_SIZE = 0,
-    GUI_ATLAS_PADDING,
-    GUI_ATLAS_MARGIN,
-    GUI_ATLAS_EXTRUDE,
-    GUI_ATLAS_ALPHA_THRESHOLD,
-    GUI_ATLAS_MAX_VERTICES,
-    GUI_ATLAS_SHAPE,
-    GUI_ATLAS_ALLOW_TRANSFORM,
-    GUI_ATLAS_POWER_OF_TWO,
-    GUI_ATLAS_PIXELS_PER_UNIT
-} gui_atlas_field;
 
 /* Sets ONE atlas knob via an atlas.settings.set transaction. The int/bool knobs read
  * `ivalue` (bool as 0/1); pixels_per_unit reads `fvalue`. Value RANGES are core's now

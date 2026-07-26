@@ -119,6 +119,36 @@ The serialized `R2a -> R2b -> R2c -> R2d` chain is intentional: `R2a` and `R2b`
 both touch `main.c`, while lifecycle teardown in `R2d` depends on completion
 admission from `R2b` and submit ownership from `R2c`.
 
+### 4.1 R0 baseline ownership map
+
+This map is pinned to `d9ff3ff` and is the implementation baseline:
+
+| Authority | Current owner/path | Required Track A cutover |
+|---|---|---|
+| Project/revision/history/dirty | `tp_model`; retained generations in `tp_project_generation.c` | remains authoritative |
+| Admission/events/identity/job handle | `tp_session` / `tp_session_layout.h` | observation and host admission are added without a second writer |
+| Immutable snapshot | `tp_session_snapshot.c`; queries in `tp_session_snapshot_query.c`, but public declarations are mixed into `tp_session.h` | R0 public read-only header split; R1a atomic observation |
+| Event stream | 64-entry ring in `tp_session_layout.h`; caller-capacity `tp_session_events_after()` may return a partial retained range | R1a owned full-range delta or complete resync |
+| GUI live owner/cache | `s_project.session`, `s_project.snapshot`, `snapshot_lifetime_generation` in `gui_project_internal.h` | R2a/R2d move observation and lifecycle to `gui_session_client`/host binding |
+| GUI submit/invalidation | `gui_session_adapter.c::apply_atlas_ops`; `gui_project__refresh_after_session_commit`; sequential `txn_seq` | R2c client submit/echo and deletion |
+| Jobs | `tp_live_job` retains raw `tp_session *` plus `thrd_t`; GUI reaches it through `job_session()` | R1c process owner, then R2b host completion admission |
+| Drafts | broad pending operation in `gui_project_pending.c`, inline state in `gui_state.*`/`gui_actions_internal.h`, field buffers in views | R3a-R3d exact reducer migration and deletion |
+| Selection | global cross-frame indices plus reselect bridge in `gui_state.*`/`gui_rows.c` | R4 per-view structural identity |
+
+`tp_core` remains below `tp_build`: R1b installs a core-owned immutable
+job/result observation slot populated through a narrow port. Observation never
+depends on `tp_build` private state.
+
+### 4.2 Boundary-ratchet rule
+
+R0 does not pull deferred presentation/source-runtime work into Track A.
+Mechanical checks reject every new violation and pin each existing violation by
+exact rule, file, token/count, and owning removal packet. A count change in
+either direction fails until the owning packet updates the manifest in the same
+commit. Track A exceptions expire in R1c/R2b/R2c/R2d/R3/R4. Existing
+platform/policy/source-runtime presentation debt remains pinned to its named
+future Track B/C prerequisite and survives R5 without becoming a Track A task.
+
 ## 5. Detailed packets
 
 ### R0 — Freeze contracts and manifests
@@ -131,22 +161,56 @@ admission from `R2b` and submit ownership from `R2c`.
 - `docs/design/ui-session-architecture-spec.md`
 - `docs/plans/ui-session-architecture-refactor-plan.md`
 - new `cmake/check_architecture_boundaries.cmake`
+- new `cmake/fixtures/architecture_boundaries/**`
+- `scripts/check_boundaries.sh`
+- `.gitattributes`
 - `apps/gui/CMakeLists.txt`
+- new `apps/gui/gui_project_view.h`
+- `apps/gui/gui_project.h`
+- `apps/gui/gui_actions.h`
+- `apps/gui/gui_actions.c`
+- `apps/gui/gui_actions_dialogs.c`
+- `apps/gui/gui_actions_edits.c`
+- `apps/gui/gui_actions_pack.c`
+- `apps/gui/gui_view_canvas.c`
+- `apps/gui/gui_view_chrome.c`
+- `apps/gui/gui_view_lists.c`
+- `apps/gui/gui_view_settings.c`
+- `apps/gui/gui_rows.h`
+- `apps/gui/gui_bench.c`
+- new `packer/include/tp_core/tp_session_snapshot_query.h`
+- new `packer/include/tp_core/tp_recovery_query.h`
+- `packer/include/tp_core/tp_recovery.h`
+- `packer/include/tp_core/tp_session.h`
+- `packer/include/tp_core/tp_source_plan.h`
+- `packer/src/tp_session_snapshot_internal.h`
+- `packer/src/tp_session_snapshot_query.c`
 - `packer/CMakeLists.txt`
 
 **Tasks:**
 
 1. Pin the atomic observation, host-thread, draft, identity, and Save As rules.
-2. Split read-only snapshot query API from session mutation/lifetime API.
+2. Move immutable snapshot DTOs and read-only operations over a caller-pinned
+   snapshot to `tp_session_snapshot_query.h`; it exposes no session/snapshot
+   lifetime, admission, command, mutation-preview, or job-start API. Migrate
+   views to the narrow `gui_project_view.h` read/action boundary so the broad
+   project mutation/lifecycle surface is not transitively visible.
 3. Add boundary checks:
    - views cannot call session mutation/admission;
    - views cannot include filesystem scan, platform, or mutable-model APIs;
-   - core cannot include GUI/transport/protocol formatting;
+   - core/session observation cannot include frontend or transport framing
+     (canonical project/transaction JSON and the core-owned job protocol remain
+     valid);
    - worker and transport modules cannot own raw session pointers.
 4. Permit direct read-only snapshot queries from views.
 5. Define which feature views require projections.
-6. Create symbol/deletion manifests for R2c, R2d, R3/R5, and each `PV-*` slice.
-7. Add one negative fixture per boundary category.
+6. Create exact symbol/deletion manifests for Track A R1c, R2b, R2c, R2d,
+   R3/R5, and R4. Future `PV-*` slices keep their own later measured manifests.
+7. Add negative fixtures that positively prove detection of view admission,
+   view I/O, view platform, view model/policy, core-to-frontend, and async raw
+   session violations.
+8. Pin current exceptions by exact token/count and removal packet; wildcard
+   allowlists and inline suppression comments are forbidden.
 
 **Deletion manifest:** none; this packet adds normative and mechanical guards.
 
@@ -159,27 +223,35 @@ admission from `R2b` and submit ownership from `R2c`.
 **Owned production files:**
 
 - `packer/include/tp_core/tp_session.h`
+- `packer/include/tp_core/tp_session_snapshot_query.h`
 - new `packer/src/tp_session_observation.c`
+- `packer/src/tp_session.c`
 - `packer/src/tp_session_internal.h`
+- `packer/src/tp_session_layout.h`
+- `packer/src/tp_session_snapshot.c`
 - `packer/src/tp_session_snapshot_internal.h`
+- `scripts/check_boundaries.sh`
+- `cmake/check_architecture_boundaries.cmake`
 - `packer/CMakeLists.txt`
 - new `packer/tests/test_session_observation.c`
 - `packer/tests/CMakeLists.txt`
 
 **Tasks:**
 
-1. Add an owned `tp_session_observation` API with a composite observed token
-   covering event, source-runtime, job-state, and result generations.
+1. Add an owned `tp_session_observation` API with the final composite token
+   shape. R1a implements event/model/source components; job-state and result
+   components are reserved zero values until their R1b owners land.
 2. Under one gate:
    - fix cut event sequence;
    - copy retained events through the cut or mark resync;
    - retain the matching immutable project generation;
    - capture revision/admission/generations/identity/dirty/recovery scalars.
 3. Materialize owned DTO data after unlock.
-4. Return an allocation-free/no-project-materialization empty delta when no
-   token component changed.
-5. When only runtime/job/result generation changed, return its retained
-   immutable state without materializing the project.
+4. Return `TP_STATUS_OK` with `*out == NULL` and no project materialization when
+   no implemented token component changed; the caller retains its old token and
+   observation.
+5. Return the complete retained event range through the fixed cut or a complete
+   resync; never expose a caller-capacity partial range as a valid delta.
 6. Define event capacity and resync behavior without a caller-sized partial
    range.
 7. Include author/label in committed model event data.
@@ -191,7 +263,8 @@ admission from `R2b` and submit ownership from `R2c`.
 
 - commit injected at former event-read/snapshot-capture seam;
 - event window exact edge and overflow;
-- future event-sequence component/session generation change;
+- future event-sequence component (host session-instance replacement belongs to
+  R2a/R2d);
 - OOM before and after generation retention;
 - no-event allocation/materialization counters;
 - no-op result without event;
@@ -209,10 +282,14 @@ without flooding the model-event ring.
 **Owned production files:**
 
 - `packer/include/tp_core/tp_session.h`
+- `packer/include/tp_core/tp_job.h`
 - `packer/src/tp_session_observation.c`
 - new `packer/src/tp_session_job_observation.c`
 - new `packer/src/tp_session_job_observation_internal.h`
 - `packer/src/tp_session_internal.h`
+- `packer/src/tp_session_layout.h`
+- `packer/src/tp_job.c`
+- `packer/src/tp_job_owner_internal.h`
 - `packer/CMakeLists.txt`
 - new `packer/tests/test_session_job_observation.c`
 - `packer/tests/CMakeLists.txt`
@@ -231,6 +308,8 @@ without flooding the model-event ring.
 6. Reject superseded, cancelled, deleted-target, old-generation, duplicate, and
    post-close completions.
 7. Keep protocol serialization outside the session gate.
+8. Publish retained immutable job/result projections from `tp_build` into a
+   narrow core-owned slot; never add a `tp_core -> tp_build` dependency.
 
 **Tests:**
 
@@ -266,6 +345,11 @@ joining a potentially blocked in-process thread.
 - `packer/src/tp_export_run.c`
 - `packer/src/tp_proc_posix.c`
 - `packer/src/tp_proc_win32.c`
+- existing `packer/src/tp_build_worker.c`
+- existing `packer/src/tp_build_worker_main.c`
+- existing `packer/src/tp_build_proto.c`
+- existing `packer/src/tp_build_driver.c`
+- `cmake/check_architecture_boundaries.cmake`
 - `packer/CMakeLists.txt`
 - `apps/gui/main.c`
 - new `packer/tests/test_job_worker_proto.c`
@@ -305,7 +389,11 @@ joining a potentially blocked in-process thread.
 
 - `tp_live_job.thread`, `thrd_create`, and `job_join` from
   `packer/src/tp_job.c`;
-- in-process `pack_job_main`/`export_job_main` blocking execution paths;
+- in-process `pack_worker`/`export_worker` and `job_start_thread` blocking
+  execution paths;
+- `tp_live_job.session` and its worker-side freshness dereference;
+- `gui_pack_shutdown`, `main.c` shutdown busy-poll, and `wait_for_job` blocking
+  wait paths once the process owner provides non-blocking terminalization;
 - any direct worker alias to live `tp_session`/`tp_model`.
 
 **Gate:** every potentially unbounded Pack/Export job path is process-owned;
@@ -356,6 +444,10 @@ construction.
 - new `apps/gui/gui_host_queue.c`
 - `apps/gui/main.c`
 - `apps/gui/gui_pack_jobs.c`
+- `apps/gui/gui_project.c`
+- `apps/gui/gui_project.h`
+- `apps/gui/gui_actions.c`
+- `cmake/check_architecture_boundaries.cmake`
 - `apps/gui/CMakeLists.txt`
 - new `apps/gui/test_gui_host_queue.c`
 
@@ -375,6 +467,7 @@ construction.
 **Deletion manifest:**
 
 - `job_session()` from `apps/gui/gui_pack_jobs.c`;
+- `gui_project_session_for_jobs()` and its pointer-identity use;
 - direct `tp_session_job_*`, `tp_session_pack_job_start`, and
   `tp_session_export_start` calls from `apps/gui/gui_pack_jobs.c`, replaced by
   the host-owned queue/admission port.
@@ -398,6 +491,9 @@ delete mutation-specific model/Save invalidation.
 - `apps/gui/gui_project.c`
 - `apps/gui/gui_project_file.c`
 - `apps/gui/gui_project_internal.h`
+- `apps/gui/gui_actions.c`
+- `apps/gui/gui_actions.h`
+- `cmake/check_architecture_boundaries.cmake`
 - `apps/gui/test_gui_session_adapter.c`
 - `apps/gui/test_client_parity.c`
 
@@ -416,8 +512,12 @@ delete mutation-specific model/Save invalidation.
 **Deletion manifest:**
 
 - direct GUI adapter `tp_session_apply`;
-- model/Save snapshot-drop calls whose only purpose was local mutation;
-- process-local sequential transaction ID generator.
+- `gui_project__refresh_after_session_commit` and its pending/mutation callers;
+- Undo/Redo/Save/Save-As and mutation-only `gui_project__snapshot_drop` calls
+  (source-runtime invalidation remains separate; lifecycle drops belong R2d);
+- `gui_project_state.txn_seq`, `gui_project__next_transaction_id`, and all
+  production callers;
+- synchronous view-facing Undo/Redo submission during declaration.
 
 **Gate:** `USA-08` through `USA-14`.
 
@@ -435,6 +535,10 @@ Shutdown.
 - `apps/gui/gui_session_client.c`
 - `apps/gui/gui_host_queue.h`
 - `apps/gui/gui_host_queue.c`
+- `apps/gui/gui_actions.c`
+- `apps/gui/gui_actions_dialogs.c`
+- `apps/gui/gui_project_recovery.c`
+- `cmake/check_architecture_boundaries.cmake`
 - new `apps/gui/gui_host_binding.h`
 - new `apps/gui/gui_host_binding.c`
 - `apps/gui/CMakeLists.txt`
@@ -468,8 +572,11 @@ Shutdown.
 **Deletion manifest:**
 
 - direct production destruction/replacement of `s_project.session`;
-- pointer-identity-based cache binding;
-- lifecycle paths retaining old snapshot/composite token.
+- `install_session` old-session discard/destroy/assignment;
+- `s_refresh_fingerprint_session` pointer-identity cache binding;
+- lifecycle snapshot drops and `snapshot_lifetime_generation` binding;
+- pre-prepare pending discard in New/Open;
+- synchronous view-facing New/Open/Close execution during declaration.
 
 **Gate:** `USA-06`, `USA-29`, `USA-32`, fail-atomic Open/New/replace tests, and
 same-identity already-open lease test.
@@ -484,6 +591,10 @@ same-identity already-open lease test.
 - new `apps/gui/gui_edit_state.c`
 - `apps/gui/gui_view_settings.c`
 - `apps/gui/gui_actions_edits.c`
+- `apps/gui/gui_state.h`
+- `apps/gui/gui_state.c`
+- `apps/gui/gui_actions_internal.h`
+- `cmake/check_architecture_boundaries.cmake`
 - `apps/gui/CMakeLists.txt`
 - new `apps/gui/test_gui_edit_state.c`
 
@@ -514,6 +625,11 @@ broad pending operation.
 - `apps/gui/gui_project_pending.c`
 - `apps/gui/gui_project_mutations.c`
 - `apps/gui/gui_view_settings.c`
+- `apps/gui/gui_view_lists.c`
+- `apps/gui/gui_widgets.c`
+- `apps/gui/gui_state.h`
+- `apps/gui/gui_state.c`
+- `apps/gui/gui_actions_internal.h`
 - `apps/gui/gui_actions_dialogs.c`
 - `apps/gui/main.c`
 - `apps/gui/test_gui_edit_state.c`
@@ -576,6 +692,12 @@ overwrite or continued outer action after failed submit.
 - `apps/gui/gui_project_mutations.c`
 - `apps/gui/main.c`
 - `apps/gui/gui_selftest.c`
+- `apps/gui/gui_state.h`
+- `apps/gui/gui_state.c`
+- `apps/gui/gui_view_settings.c`
+- `apps/gui/gui_view_lists.c`
+- `apps/gui/gui_widgets.c`
+- `cmake/check_architecture_boundaries.cmake`
 - `apps/gui/test_gui_action_trace.c`
 - `apps/gui/test_gui_canonical_identity.c`
 - `apps/gui/CMakeLists.txt`
@@ -594,8 +716,14 @@ overwrite or continued outer action after failed submit.
   `pending_expected_revision`, and `pending_preview_stale_before` from
   `gui_project_state`;
 - `gui_project_flush_pending`, `gui_project_pending_route`,
-  `gui_project_pending_offer`, and every `gui_project_peek_pending_*`;
-- `gui_project_pending.c` source registration in `apps/gui/CMakeLists.txt`;
+  `gui_project_pending_offer`, `gui_project_peek_pending_slice9`,
+  `gui_project_flush_elapsed`, and `gui_project_pending_discard`;
+- `gui_actions__flush_failed` fallback after every lifecycle trigger has an
+  explicit reducer transition;
+- `gui_project_pending.c` source registration from all four GUI/test target
+  source lists in `apps/gui/CMakeLists.txt`;
+- legacy inline draft globals in `gui_state.*`, `s_actions.edit_*` fields, and
+  superseded view field buffers;
 - obsolete timer-coalescing callers and tests.
 
 **Gate:** forbidden-symbol scan finds no old pending architecture.
@@ -613,6 +741,19 @@ shipping windows.
 - `apps/gui/gui_state.c`
 - `apps/gui/gui_rows.c`
 - `apps/gui/gui_canvas.c`
+- `apps/gui/gui_view_canvas.c`
+- `apps/gui/gui_view_lists.c`
+- `apps/gui/gui_view_settings.c`
+- `apps/gui/gui_actions.c`
+- `apps/gui/gui_actions_dialogs.c`
+- `apps/gui/gui_actions_edits.c`
+- `apps/gui/gui_actions_pack.c`
+- `apps/gui/gui_actions_preview.c`
+- `apps/gui/gui_bench.c`
+- `apps/gui/gui_shot.c`
+- `apps/gui/gui_selftest.c`
+- `apps/gui/main.c`
+- `cmake/check_architecture_boundaries.cmake`
 - `apps/gui/CMakeLists.txt`
 - `apps/gui/test_gui_canonical_identity.c`
 
@@ -629,8 +770,11 @@ shipping windows.
 
 - cross-frame authority of `s_sel_atlas`, `s_sel_src`, `s_sel_child`,
   `s_sel_anim`, and `s_sel_anim_frame`;
-- old reselect/index fallback fields superseded by canonical view identity;
-- pointer/lifetime identity used as a retained selection key.
+- `s_sel_anchor_row`, `s_focus_view`, `s_sel_abs`, and `s_sel_missing` as
+  retained cross-frame authority;
+- `s_reselect_pending`, `s_reselect_source_id`, `s_reselect_key`, and
+  `s_reselect_atlas_id` bridge fields/capture-reconcile path;
+- any pointer/lifetime identity introduced as a retained selection key.
 
 **Gate:** `USA-18`, `USA-24`; no wrong-entity selection after external structural
 change.

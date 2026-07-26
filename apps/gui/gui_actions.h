@@ -17,7 +17,7 @@
 
 #include "tp_core/tp_model.h"   /* tp_result (preview_target_result return type) */
 
-#include "gui_project.h" /* gui_atlas_field / gui_sprite_ov (deferred-edit enqueue types) */
+#include "gui_project_view.h" /* passive identities + deferred-edit enqueue types */
 #include "gui_rows.h"    /* sprite_row (start_sprite_edit parameter) */
 
 #ifdef __cplusplus

@@ -7,6 +7,7 @@
 #include "gui_scan.h"
 
 #include "tp_core/tp_identity.h"
+#include "tp_core/tp_session.h"
 #ifdef NTPACKER_GUI_SELFTEST
 #include "tp_session_internal.h"
 #endif

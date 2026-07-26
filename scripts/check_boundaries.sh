@@ -199,13 +199,14 @@ fi
 # 10. tp_session is orchestration only. It may call public recovery/lease APIs,
 #     but may not depend on a frontend/protocol or contain a recovery codec,
 #     filesystem/lock backend, Pack, or Export implementation. The snapshot/query
-#     TU tp_session_snapshot.c is the same orchestration boundary and is gated too.
+#     Snapshot creation/query TUs are the same orchestration boundary and are
+#     gated too.
 _session_deps='#include[[:space:]]*[<"][^>"]*(apps/|gui|cli|protocol|cJSON)'
 _session_impl='(^|[^A-Za-z0-9_])(fopen|fwrite|open|CreateFile|LockFile|tp_journal_(encode|decode)[A-Za-z0-9_]*|tp_pack|tp_export_run)[[:space:]]*\('
-# Both session TUs plus the shared private header. R10c's mutable-project-ownership
-# scan runs over the two .c TUs only (the header declares no ->project code).
-_session_gate_srcs="packer/src/tp_session.c packer/src/tp_session_snapshot.c packer/src/tp_session_internal.h"
-_session_gate_owner_srcs="packer/src/tp_session.c packer/src/tp_session_snapshot.c"
+# All session TUs plus the shared private header. R10c's
+# mutable-project-ownership scan runs over the .c TUs only.
+_session_gate_srcs="packer/src/tp_session.c packer/src/tp_session_snapshot.c packer/src/tp_session_snapshot_query.c packer/src/tp_session_internal.h"
+_session_gate_owner_srcs="packer/src/tp_session.c packer/src/tp_session_snapshot.c packer/src/tp_session_snapshot_query.c"
 r10a=$(grep -nE "$_session_deps" $_session_gate_srcs 2>/dev/null |
     grep -v 'boundary-ok:')
 [ -n "$r10a" ] && hit "R10a frontend/protocol dependency in tp_session" "$r10a"

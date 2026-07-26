@@ -3,6 +3,7 @@
 
 #include "gui_actions.h"
 #include "gui_actions_internal.h"
+#include "gui_project.h"
 
 #include "gui_defs.h" /* S() -- the compact-strip stop that folds the preview selector away */
 #include "gui_state.h"

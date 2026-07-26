@@ -1,7 +1,7 @@
 #ifndef TP_SESSION_SNAPSHOT_INTERNAL_H
 #define TP_SESSION_SNAPSHOT_INTERNAL_H
 
-#include "tp_core/tp_session.h"
+#include "tp_core/tp_session_snapshot_query.h"
 
 typedef struct tp_project_generation tp_project_generation;
 

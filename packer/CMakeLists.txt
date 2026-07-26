@@ -109,4 +109,48 @@ nt_set_warning_flags(tp_build)
 nt_set_sanitizer_flags(tp_build)
 
 enable_testing()
+
+set(TP_ARCHITECTURE_CHECK
+    "${CMAKE_SOURCE_DIR}/cmake/check_architecture_boundaries.cmake")
+add_test(NAME tp_architecture_boundaries
+    COMMAND "${CMAKE_COMMAND}"
+        "-DARCH_ROOT=${CMAKE_SOURCE_DIR}"
+        -P "${TP_ARCHITECTURE_CHECK}")
+set_tests_properties(tp_architecture_boundaries PROPERTIES
+    LABELS "architecture")
+
+foreach(TP_ARCH_RULE IN ITEMS
+        VIEW_ADMISSION
+        VIEW_IO
+        VIEW_PLATFORM
+        VIEW_MODEL_POLICY
+        CORE_FRONTEND
+        ASYNC_RAW_SESSION)
+    string(TOLOWER "${TP_ARCH_RULE}" TP_ARCH_FIXTURE)
+    add_test(NAME "tp_architecture_negative_${TP_ARCH_FIXTURE}"
+        COMMAND "${CMAKE_COMMAND}"
+            "-DARCH_ROOT=${CMAKE_SOURCE_DIR}"
+            "-DARCH_SCAN_ROOT=${CMAKE_SOURCE_DIR}/cmake/fixtures/architecture_boundaries/${TP_ARCH_FIXTURE}"
+            "-DARCH_EXPECT_RULE=${TP_ARCH_RULE}"
+            -P "${TP_ARCHITECTURE_CHECK}")
+    set_tests_properties("tp_architecture_negative_${TP_ARCH_FIXTURE}"
+        PROPERTIES LABELS "architecture")
+endforeach()
+
+foreach(TP_ARCH_CALL_FIXTURE IN ITEMS
+        view_io
+        view_platform
+        view_model_policy
+        core_frontend)
+    string(TOUPPER "${TP_ARCH_CALL_FIXTURE}" TP_ARCH_CALL_RULE)
+    add_test(NAME "tp_architecture_negative_${TP_ARCH_CALL_FIXTURE}_call"
+        COMMAND "${CMAKE_COMMAND}"
+            "-DARCH_ROOT=${CMAKE_SOURCE_DIR}"
+            "-DARCH_SCAN_ROOT=${CMAKE_SOURCE_DIR}/cmake/fixtures/architecture_boundaries/${TP_ARCH_CALL_FIXTURE}_call"
+            "-DARCH_EXPECT_RULE=${TP_ARCH_CALL_RULE}"
+            -P "${TP_ARCHITECTURE_CHECK}")
+    set_tests_properties("tp_architecture_negative_${TP_ARCH_CALL_FIXTURE}_call"
+        PROPERTIES LABELS "architecture")
+endforeach()
+
 add_subdirectory(tests)

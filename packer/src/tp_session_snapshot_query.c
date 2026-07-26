@@ -1,5 +1,5 @@
 /* Immutable snapshot query and selector surface. */
-#include "tp_core/tp_session.h"
+#include "tp_core/tp_session_snapshot_query.h"
 
 #include <stdio.h>
 #include <stdlib.h>

@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "tp_core/tp_identity.h"
+#include "tp_core/tp_session.h"
 static void recompute_name(void) {
     const tp_session_snapshot *snapshot = gui_project_snapshot();
     const tp_session_identity identity = tp_session_snapshot_identity(snapshot);

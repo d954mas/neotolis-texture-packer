@@ -25,7 +25,7 @@
 #include "nt_utf8_fs.h" /* nt_utf8_fopen (UTF-8 output path on Windows) */
 
 #include "tp_core/tp_identity.h" /* TP_IDENTITY_PATH_MAX */
-#include "tp_core/tp_session.h"  /* snapshot atlas/revision accessors */
+#include "tp_core/tp_session_snapshot_query.h"
 #include "tp_core/tp_utf8.h"     /* tp_utf8_is_valid_c_string (validate --bench-perf=path) */
 
 #include "gui_actions.h" /* do_pack_blocking */

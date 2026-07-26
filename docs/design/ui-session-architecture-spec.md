@@ -270,8 +270,9 @@ must not outlive it.
 ### 7.2 Empty observation
 
 If no component of the composite token changed, observation may return an empty
-delta without cloning/materializing the project. Normal no-change frame polling
-must remain cheap.
+delta without cloning/materializing the project. The exact C contract is
+`TP_STATUS_OK` with `*out == NULL`; the caller retains its prior observation and
+token. Normal no-change frame polling must remain cheap.
 
 If only a coalesced source/job/result generation changed, observation returns
 the matching retained immutable state without materializing a new project
@@ -355,6 +356,10 @@ instance, superseded request, deleted target, or cancelled owner.
 Runtime and result snapshots are either retained in the atomic observation
 bundle or independently immutable with explicit generation-matching rules.
 Borrowed mutable pointers are forbidden.
+
+`tp_core` owns the observable slot and token generations. `tp_build` job code
+publishes retained immutable projections through that narrow port; observation
+must not depend on, include, or inspect `tp_build` private state.
 
 ### 8.3 Event impact
 
@@ -444,13 +449,16 @@ The GUI uses a hybrid selected for immediate-mode C:
 A simple view may consume:
 
 - frame-pinned `const tp_session_snapshot *` through a read-only snapshot-query
-  header;
+  header, frozen as `tp_core/tp_session_snapshot_query.h`;
 - `const gui_view_state *`;
 - `const gui_edit_state *`;
 - a narrow feature action sink.
 
-The read-only query header must not expose session mutation, lifetime, or
-admission functions.
+The read-only query header exposes immutable DTOs and operations that only
+inspect a caller-pinned snapshot. Some queries may fill caller-owned buffers or
+allocate an owned serialized value. It must not expose session
+creation/destruction, snapshot creation/destruction, mutation-preview,
+admission, command, or job-start functions.
 
 Visual layout, text truncation, color, widget mechanics, and direct display of a
 snapshot scalar may remain in the view.
