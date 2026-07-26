@@ -2,6 +2,7 @@
 #define NTPACKER_GUI_PROJECT_INTERNAL_H
 
 #include "gui_project.h"
+#include "gui_session_client.h"
 #include "tp_core/tp_srckey.h"
 
 /* Private storage shared only by the physical gui_project implementation files.
@@ -27,8 +28,10 @@ typedef struct gui_coalesce_key {
 
 typedef struct gui_project_state {
     tp_session *session;
-    tp_session_snapshot *snapshot;
-    uint64_t snapshot_lifetime_generation;
+    gui_session_client client;
+    uint64_t observed_instance_generation;
+    int64_t observed_revision;
+    bool client_initialized;
     uint64_t txn_seq;
     bool preview_stale;
     char name[256];
@@ -56,6 +59,7 @@ typedef struct gui_project_state {
 extern gui_project_state s_project;
 
 void gui_project__snapshot_drop(void);
+tp_status gui_project__client_init(tp_error *err);
 void gui_project__next_transaction_id(char out[33]);
 void gui_project__note_session_reject(tp_status status, const tp_error *err);
 void gui_project__note_recovery_degraded(tp_status status);

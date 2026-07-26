@@ -6,6 +6,7 @@
 
 #include "gui_scan.h"
 
+#include "core/nt_assert.h"
 #include "tp_core/tp_identity.h"
 #include "tp_core/tp_session.h"
 #ifdef NTPACKER_GUI_SELFTEST
@@ -19,26 +20,136 @@
 gui_project_state s_project;
 
 // #region helpers
-void gui_project__snapshot_drop(void) {
-    if (s_project.snapshot) {
-        s_project.snapshot_lifetime_generation++;
+static void reduce_project_display_name(
+    gui_project_state *project,
+    const tp_session_snapshot *snapshot) {
+    NT_ASSERT(project != NULL);
+    NT_ASSERT(snapshot != NULL);
+    const tp_session_identity identity =
+        tp_session_snapshot_identity(snapshot);
+    const char *path =
+        identity.kind == TP_IDENTITY_SAVED
+            ? identity.canonical_path
+            : "";
+    if (path[0] == '\0') {
+        (void)snprintf(
+            project->name, sizeof project->name,
+            "untitled");
+        return;
     }
-    tp_session_snapshot_destroy(s_project.snapshot);
-    s_project.snapshot = NULL;
+    const char *base = path;
+    for (const char *cursor = path; *cursor;
+         ++cursor) {
+        if (*cursor == '/' || *cursor == '\\') {
+            base = cursor + 1;
+        }
+    }
+    (void)snprintf(
+        project->name, sizeof project->name,
+        "%s", base);
+}
+
+static void reduce_project_observation(
+    void *context, const tp_session_observation *observation,
+    uint64_t instance_generation) {
+    gui_project_state *project = context;
+    const tp_session_snapshot *snapshot =
+        tp_session_observation_snapshot(observation);
+    if (project->observed_instance_generation !=
+        instance_generation) {
+        reduce_project_display_name(
+            project, snapshot);
+        project->observed_instance_generation =
+            instance_generation;
+        project->observed_revision =
+            snapshot
+                ? tp_session_snapshot_revision(snapshot)
+                : 0;
+        return;
+    }
+    if (tp_session_observation_resync_required(observation)) {
+        if (snapshot &&
+            project->observed_revision !=
+                tp_session_snapshot_revision(snapshot)) {
+            project->preview_stale = true;
+        }
+    }
+    const size_t event_count =
+        tp_session_observation_event_count(observation);
+    for (size_t index = 0U; index < event_count; ++index) {
+        const tp_session_event *event =
+            tp_session_observation_event_at(
+                observation, index);
+        if (event &&
+            event->kind != TP_SESSION_EVENT_SAVED) {
+            project->preview_stale = true;
+        }
+    }
+    if (snapshot) {
+        reduce_project_display_name(
+            project, snapshot);
+        project->observed_revision =
+            tp_session_snapshot_revision(snapshot);
+    }
+}
+
+tp_status gui_project__client_init(tp_error *err) {
+    if (s_project.client_initialized) {
+        return TP_STATUS_OK;
+    }
+    gui_session_client_init(&s_project.client);
+    const tp_status status =
+        gui_session_client_register_reducer(
+            &s_project.client,
+            reduce_project_observation, &s_project, err);
+    if (status == TP_STATUS_OK) {
+        s_project.client_initialized = true;
+    }
+    return status;
+}
+
+void gui_project__snapshot_drop(void) {
+    if (!s_project.client_initialized ||
+        !s_project.session) {
+        return;
+    }
+    tp_error err = {{0}};
+    const tp_status status =
+        gui_session_client_request_observe(
+            &s_project.client, &err);
+    if (status != TP_STATUS_OK) {
+        gui_project__note_session_reject(status, &err);
+    }
 }
 
 const tp_session_snapshot *gui_project_snapshot(void) {
-    if (!s_project.snapshot && s_project.session) {
-        tp_error err = {0};
-        if (tp_session_snapshot_create(s_project.session, &s_project.snapshot, &err) != TP_STATUS_OK) {
-            s_project.snapshot = NULL;
-        }
-    }
-    return s_project.snapshot;
+    return gui_session_client_snapshot(
+        &s_project.client);
 }
 
 uint64_t gui_project_snapshot_lifetime_generation(void) {
-    return s_project.snapshot_lifetime_generation;
+    return gui_session_client_snapshot_lifetime_generation(
+        &s_project.client);
+}
+
+uint64_t gui_project_source_runtime_generation(void) {
+    return gui_session_client_source_runtime_generation(
+        &s_project.client);
+}
+
+tp_status gui_project_frame_begin(tp_error *err) {
+    return gui_session_client_frame_begin(
+        &s_project.client, err);
+}
+
+void gui_project_frame_end(void) {
+    gui_session_client_frame_end(
+        &s_project.client);
+}
+
+bool gui_project_frame_is_pinned(void) {
+    return gui_session_client_frame_is_pinned(
+        &s_project.client);
 }
 
 tp_session *gui_project_session_for_jobs(void) { return s_project.session; }
@@ -142,8 +253,11 @@ bool gui_project__refresh_after_session_commit(void) {
     gui_project__sync_recovery_notice();
     /* Core is the sole semantic no-op owner. A no-change admission leaves the
      * revision unchanged, so keep the current projection and preview state. */
-    if (s_project.snapshot &&
-        tp_session_snapshot_revision(s_project.snapshot) == tp_session_revision(s_project.session)) {
+    const tp_session_snapshot *snapshot =
+        gui_project_snapshot();
+    if (snapshot &&
+        tp_session_snapshot_revision(snapshot) ==
+            tp_session_revision(s_project.session)) {
         return false;
     }
     s_project.preview_stale = true;

@@ -82,8 +82,8 @@ foreach(_source IN LISTS _arch_sources)
         endif()
 
         if(_is_view)
-            if(_trimmed MATCHES "^#[ \t]*include[ \t]*[<\"](tp_core/tp_(session|job)\\.h|gui_project\\.h)[>\"]"
-               OR _trimmed MATCHES "(^|[^A-Za-z0-9_])(tp_session_(apply|undo|redo|save|save_as|save_new|discard|invalidate_sources|require_recovery|pack_job_start|export_start|job_cancel|job_take_result)|gui_project_(new|open|save|save_as|discard|undo|redo|invalidate_sources))[ \t]*\\(")
+            if(_trimmed MATCHES "^#[ \t]*include[ \t]*[<\"](tp_core/tp_(session|job)\\.h|gui_project\\.h|gui_session_client\\.h)[>\"]"
+               OR _trimmed MATCHES "(^|[^A-Za-z0-9_])(tp_session_(apply|undo|redo|save|save_as|save_new|discard|invalidate_sources|require_recovery|pack_job_start|export_start|job_cancel|job_take_result)|gui_project_(new|open|save|save_as|discard|undo|redo|invalidate_sources)|gui_session_client_[A-Za-z0-9_]*)[ \t]*\\(")
                 _arch_hit(VIEW_ADMISSION "${_relative}" "${_line_number}")
             endif()
 
@@ -336,6 +336,56 @@ _arch_assert_symbol("apps/gui/gui_project.h"
 _arch_assert_symbol("apps/gui/gui_actions.c"
                     "gui_project_session_for_jobs" 1 "R2b")
 
+# Completed R2a deletion manifest. GUI observation and immutable snapshot
+# lifetime have one owner; presentation does not assemble or refresh snapshots.
+foreach(_entry IN ITEMS
+        "apps/gui/gui_project.c|tp_session_snapshot_create"
+        "apps/gui/gui_project.c|tp_session_snapshot_destroy"
+        "apps/gui/gui_project.c|tp_session_observe"
+        "apps/gui/gui_project_file.c|tp_session_observe"
+        "apps/gui/gui_project_internal.h|tp_session_snapshot[ \t]*\\*[ \t]*snapshot"
+        "apps/gui/gui_project_internal.h|snapshot_lifetime_generation"
+        "apps/gui/gui_rows.c|tp_session_snapshot_source_generation"
+        "apps/gui/gui_project_file.c|recompute_name")
+    string(REPLACE "|" ";" _parts "${_entry}")
+    list(GET _parts 0 _path)
+    list(GET _parts 1 _symbol)
+    _arch_assert_symbol("${_path}" "${_symbol}" 0 "R2a completed")
+endforeach()
+_arch_assert_symbol("apps/gui/gui_session_client.c"
+                    "tp_session_observe" 1 "R2a completed")
+
+file(GLOB _gui_shipping_observation_sources LIST_DIRECTORIES false
+    "${_arch_root}/apps/gui/*.c"
+    "${_arch_root}/apps/gui/*.h")
+foreach(_source IN LISTS _gui_shipping_observation_sources)
+    cmake_path(RELATIVE_PATH _source BASE_DIRECTORY "${_arch_root}"
+               OUTPUT_VARIABLE _relative)
+    cmake_path(CONVERT "${_relative}" TO_CMAKE_PATH_LIST
+               _relative NORMALIZE)
+    if(_relative MATCHES
+       "^apps/gui/(gui_session_client|gui_selftest|tp_bench_[^/]*|test_[^/]*|client_parity_[^/]*)\\.(c|h)$")
+        continue()
+    endif()
+    foreach(_symbol IN ITEMS
+            tp_session_observe
+            tp_session_observation_destroy
+            tp_session_snapshot_create
+            tp_session_snapshot_destroy)
+        _arch_assert_symbol(
+            "${_relative}" "${_symbol}" 0
+            "R2a single GUI observation owner")
+    endforeach()
+endforeach()
+
+_arch_count_matches("${_arch_root}/apps/gui/CMakeLists.txt"
+                    "(^|[ \t(])gui_session_client\\.c([ \t\r\n)]|$)"
+                    _client_source_registrations)
+if(NOT _client_source_registrations EQUAL 5)
+    message(FATAL_ERROR
+        "R2a manifest gui_session_client.c registrations expected 5, got ${_client_source_registrations}")
+endif()
+
 _arch_assert_symbol("apps/gui/gui_session_adapter.c" "tp_session_apply" 1 "R2c")
 foreach(_entry IN ITEMS
         "apps/gui/gui_project.c|gui_project__refresh_after_session_commit|1"
@@ -380,7 +430,7 @@ _arch_assert_function_symbol("apps/gui/gui_project_file.c" "install_session"
 _arch_assert_function_symbol("apps/gui/gui_project_file.c"
                              "gui_project_shutdown"
                              "s_project\\.session[ \t]*=" 1 "R2d")
-_arch_assert_symbol("apps/gui/gui_project_file.c" "tp_session_destroy" 3 "R2d")
+_arch_assert_symbol("apps/gui/gui_project_file.c" "tp_session_destroy" 4 "R2d")
 _arch_assert_symbol("apps/gui/gui_project_file.c" "tp_session_discard" 2 "R2d")
 _arch_assert_function_symbol("apps/gui/gui_project_file.c" "gui_project_new"
                              "gui_project_pending_discard" 1 "R2d")
@@ -388,8 +438,6 @@ _arch_assert_function_symbol("apps/gui/gui_project_file.c" "gui_project_open"
                              "gui_project_pending_discard" 1 "R2d")
 _arch_assert_symbol("apps/gui/gui_actions.c"
                     "s_refresh_fingerprint_session" 4 "R2d")
-_arch_assert_symbol("apps/gui/gui_project_internal.h"
-                    "snapshot_lifetime_generation" 1 "R2d")
 foreach(_symbol IN ITEMS request_new request_open request_exit)
     _arch_assert_symbol("apps/gui/gui_view_chrome.c" "${_symbol}" 1 "R2d")
 endforeach()

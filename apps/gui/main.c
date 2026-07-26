@@ -509,6 +509,18 @@ static void frame(void) {
         gui_project_flush_elapsed();
     }
 
+    tp_error observation_error = {{0}};
+    const tp_status observation_status =
+        gui_project_frame_begin(&observation_error);
+    if (observation_status != TP_STATUS_OK) {
+        set_statusf_ex(
+            STATUS_ERROR,
+            "Presentation observation failed: %s",
+            observation_error.msg[0]
+                ? observation_error.msg
+                : tp_status_str(observation_status));
+    }
+
     /* Heartbeat: the frame loop keeps ticking while a pack/export runs on the worker thread, so a slow
      * concave pack never freezes the window. Throttled to ~2 Hz; the frames-since count shows the rate. */
     if (gui_pack_async_busy()) {
@@ -831,6 +843,9 @@ static void frame(void) {
     gui_bench_post_draw(); /* perf-probe mode: accrue frame-time samples, write output, then quit */
 
     nt_window_swap_buffers();
+    if (gui_project_frame_is_pinned()) {
+        gui_project_frame_end();
+    }
 }
 // #endregion
 

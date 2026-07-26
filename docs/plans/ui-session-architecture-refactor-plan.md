@@ -477,10 +477,17 @@ reap. This gate is mandatory before R2b/R2d and `USA-32`.
 
 - new `apps/gui/gui_session_client.h`
 - new `apps/gui/gui_session_client.c`
+- `apps/gui/gui_project.h`
+- `apps/gui/gui_project.c`
+- `apps/gui/gui_project_file.c`
 - `apps/gui/gui_project_internal.h`
+- `apps/gui/gui_rows.c`
+- `apps/gui/tp_bench_gui_rows.c`
 - `apps/gui/main.c`
 - `apps/gui/CMakeLists.txt`
+- `cmake/check_architecture_boundaries.cmake`
 - new `apps/gui/test_gui_session_client.c`
+- `apps/gui/test_gui_action_trace.c`
 
 **Tasks:**
 
@@ -493,12 +500,37 @@ reap. This gate is mandatory before R2b/R2d and `USA-32`.
    observation.
 6. Keep current submission and invalidation temporarily, but assert that
    observation independently reaches the same state.
+7. Route the existing `gui_project_snapshot()` and snapshot-lifetime accessors
+   through the client-owned frame observation. The legacy
+   `gui_project__snapshot_drop()` name may temporarily request an earlier
+   observation, but it must not destroy or replace a frame-pinned observation.
+8. Attach the client at the existing `install_session()` replacement seam so
+   New/Open cannot leave the GUI client bound to the prior session.
+9. Consume source-runtime generation from the client observation token for
+   presentation cache invalidation. Runtime-only deltas must not be forced
+   through or synthesized into a model snapshot.
+10. Derive the displayed project basename in the observation reducer so an
+    external Save is presentation-visible without wrapper-specific refresh.
+11. Preserve the exact structured status when candidate attachment fails, and
+    ratchet the single observation owner across every shipped GUI translation
+    unit. Views must not include or call the raw session-client lifecycle API.
 
 **Temporary dual-path rule:** only observation determines the displayed frame.
 Old invalidation may force earlier observation but cannot supply state.
 
-**Deletion manifest:** none; mutation invalidation is removed by R2c after this
-observer is proven.
+**Deletion manifest:**
+
+- `gui_project_state.snapshot` and
+  `gui_project_state.snapshot_lifetime_generation` storage;
+- direct `tp_session_snapshot_create()` / `tp_session_snapshot_destroy()` and
+  the independent lazy snapshot cache in `apps/gui/gui_project.c`;
+- wrapper-specific `recompute_name()` calls in `apps/gui/gui_project_file.c`.
+
+The `gui_project_snapshot()` and snapshot-lifetime accessors remain as thin
+client-backed read facades. `gui_project__snapshot_drop()` and its current
+callers remain temporarily, but the function may only request an earlier atomic
+observation; it cannot construct state or destroy/swap a frame-pinned
+observation. R2c/R2d remove the mutation/lifecycle callers.
 
 **Gate:** external commits and Save are visible without wrapper-specific state
 construction.

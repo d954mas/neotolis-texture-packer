@@ -453,7 +453,7 @@ void test_first_refresh_stat_failure_invalidates_runtime_and_preview(void) {
     gui_project_mark_packed();
     TEST_ASSERT_FALSE(gui_project_is_stale());
     const uint64_t source_generation_before =
-        tp_session_snapshot_source_generation(gui_project_snapshot());
+        gui_project_source_runtime_generation();
 
     tp_scan__test_set_stat_error(EACCES);
     s_pending_refresh = true;
@@ -462,11 +462,61 @@ void test_first_refresh_stat_failure_invalidates_runtime_and_preview(void) {
 
     TEST_ASSERT_TRUE(gui_project_is_stale());
     TEST_ASSERT_TRUE(
-        tp_session_snapshot_source_generation(gui_project_snapshot()) >
+        gui_project_source_runtime_generation() >
         source_generation_before);
     TEST_ASSERT_EQUAL_INT(STATUS_WARNING, s_status_sev);
     TEST_ASSERT_NOT_NULL(strstr(s_status, "Refresh warning:"));
     TEST_ASSERT_EQUAL_INT(0, remove(source_path));
+}
+
+void test_external_save_is_visible_through_the_observation_reducer(void) {
+    tp_session_save_result result = {0};
+    tp_error error = {{0}};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_save_as(
+            gui_project_session_for_jobs(), s_save_path,
+            &result, &error));
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_frame_begin(&error));
+    TEST_ASSERT_TRUE(gui_project_has_path());
+    TEST_ASSERT_EQUAL_STRING(
+        "action-trace.ntpacker_project",
+        gui_project_display_name());
+    gui_project_frame_end();
+}
+
+void test_open_propagates_non_oom_attach_rejection(void) {
+    tp_rng rng = tp_rng_os();
+    tp_session *candidate = NULL;
+    tp_error error = {{0}};
+    tp_session_save_result save_result = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_create_default_project(
+            &rng, &candidate, &error));
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_session_save_as(
+            candidate, s_save_path, &save_result, &error));
+    tp_session_destroy(candidate);
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        gui_project_frame_begin(&error));
+    char open_error[256] = {0};
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_INVALID_ARGUMENT,
+        gui_project_open(
+            s_save_path, open_error,
+            sizeof open_error));
+    TEST_ASSERT_NOT_NULL(
+        strstr(open_error, "pinned frame"));
+    TEST_ASSERT_EQUAL_STRING(
+        "untitled", gui_project_display_name());
+    gui_project_frame_end();
 }
 
 void test_refresh_modified_file_reports_changed_from_last_success(void) {
@@ -991,6 +1041,9 @@ int main(int argc, char **argv) {
     RUN_TEST(test_refresh_reports_source_stat_failure);
     RUN_TEST(
         test_first_refresh_stat_failure_invalidates_runtime_and_preview);
+    RUN_TEST(
+        test_external_save_is_visible_through_the_observation_reducer);
+    RUN_TEST(test_open_propagates_non_oom_attach_rejection);
     RUN_TEST(test_refresh_modified_file_reports_changed_from_last_success);
     RUN_TEST(
         test_refresh_deleted_file_invalidates_preview_without_model_mutation);

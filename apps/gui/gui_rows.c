@@ -604,7 +604,7 @@ void build_rows(void) {
     const uint64_t snapshot_generation =
         tp_session_snapshot_model_generation(snapshot);
     const uint64_t source_generation =
-        tp_session_snapshot_source_generation(snapshot);
+        gui_project_source_runtime_generation();
     const uint64_t snapshot_lifetime =
         gui_project_snapshot_lifetime_generation();
     /* §61.1 size reads live pack regions: a repack publishes a new result (new version) without touching

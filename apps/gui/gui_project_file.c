@@ -5,33 +5,29 @@
 
 #include "tp_core/tp_identity.h"
 #include "tp_core/tp_session.h"
-static void recompute_name(void) {
-    const tp_session_snapshot *snapshot = gui_project_snapshot();
-    const tp_session_identity identity = tp_session_snapshot_identity(snapshot);
-    const char *path = identity.kind == TP_IDENTITY_SAVED ? identity.canonical_path : "";
-    if (path[0] == '\0') {
-        (void)snprintf(s_project.name, sizeof s_project.name, "untitled");
-        return;
-    }
-    const char *base = path;
-    for (const char *p = path; *p; p++) {
-        if (*p == '/' || *p == '\\') {
-            base = p + 1;
-        }
-    }
-    (void)snprintf(s_project.name, sizeof s_project.name, "%s", base);
-}
 
-static bool install_session(tp_session *next) {
+static tp_status install_session(
+    tp_session *next, tp_error *err) {
     if (!next) {
-        return false;
+        return tp_error_set(
+            err, TP_STATUS_INVALID_ARGUMENT,
+            "GUI session installation requires a candidate");
     }
-    gui_project__snapshot_drop();
-    if (s_project.session) {
-        (void)tp_session_discard(s_project.session, NULL);
+    const tp_status attach_status =
+        gui_session_client_attach(
+            &s_project.client, next, err);
+    if (attach_status != TP_STATUS_OK) {
+        gui_project__note_session_reject(
+            attach_status, err);
+        return attach_status;
     }
-    tp_session_destroy(s_project.session);
+    tp_session *old = s_project.session;
     s_project.session = next;
+    gui_project__snapshot_drop();
+    if (old) {
+        (void)tp_session_discard(old, NULL);
+    }
+    tp_session_destroy(old);
     s_project.op_error = false;
     s_project.op_error_status = TP_STATUS_OK;
     s_project.op_error_msg[0] = '\0';
@@ -39,7 +35,7 @@ static bool install_session(tp_session *next) {
     s_project.recovery_notice = (gui_recovery_notice){0};
     s_project.save_notice_pending = false;
     s_project.save_notice[0] = '\0';
-    return true;
+    return TP_STATUS_OK;
 }
 
 static bool install_fresh_session(void) {
@@ -49,7 +45,12 @@ static bool install_fresh_session(void) {
     if (tp_session_create_default_project(&rng, &next, &err) != TP_STATUS_OK) {
         return false;
     }
-    return install_session(next);
+    if (install_session(next, &err) !=
+        TP_STATUS_OK) {
+        tp_session_destroy(next);
+        return false;
+    }
+    return true;
 }
 
 // #region lifecycle
@@ -57,7 +58,6 @@ static bool install_fresh_session(void) {
  * the live slot (no-op when recovery is off). */
 static void fresh_init(void) {
     (void)install_fresh_session();
-    recompute_name();
     gui_project__attach_recovery_live(s_project.session);
     s_project.preview_stale = false;
     gui_project__snapshot_drop();
@@ -65,6 +65,14 @@ static void fresh_init(void) {
 
 void gui_project_init(void) {
     if (s_project.session) {
+        return;
+    }
+    tp_error err = {{0}};
+    const tp_status client_status =
+        gui_project__client_init(&err);
+    if (client_status != TP_STATUS_OK) {
+        gui_project__note_session_reject(
+            client_status, &err);
         return;
     }
     gui_project_pending_discard();
@@ -78,6 +86,7 @@ void gui_project_shutdown(void) {
     (void)(!s_project.session || gui_project_flush_pending());
     gui_project_pending_discard();
     gui_project__snapshot_drop();
+    gui_session_client_detach(&s_project.client);
     if (s_project.session && s_project.discard_recovery_on_shutdown) {
         (void)tp_session_discard(s_project.session, NULL);
     }
@@ -171,7 +180,6 @@ bool gui_project_new(void) {
     if (!install_fresh_session()) {
         return false;
     }
-    recompute_name();
     gui_project__attach_recovery_live(s_project.session);
     s_project.preview_stale = false;
     gui_project_invalidate_sources();
@@ -207,14 +215,15 @@ tp_status gui_project_open(const char *path, char *err_out, size_t err_cap) {
         }
         return st;
     }
-    if (!install_session(opened)) {
+    const tp_status install_status =
+        install_session(opened, &err);
+    if (install_status != TP_STATUS_OK) {
         tp_session_destroy(opened);
         if (err_out && err_cap) {
             (void)snprintf(err_out, err_cap, "%s", err.msg[0] ? err.msg : "could not install opened session");
         }
-        return TP_STATUS_OOM;
+        return install_status;
     }
-    recompute_name();
     gui_project__attach_recovery_live(s_project.session);
     s_project.preview_stale = true; /* nothing packed this session yet */
     gui_project_invalidate_sources();
@@ -246,7 +255,6 @@ tp_status gui_project_save(char *err_out, size_t err_cap) {
         return st;
     }
     gui_project__snapshot_drop();
-    recompute_name();
     if (result.recovery_degraded) {
         gui_project__note_recovery_degraded(result.recovery_status);
     }
@@ -300,7 +308,6 @@ tp_status gui_project_save_as(const char *path, char *err_out, size_t err_cap) {
         return st;
     }
     gui_project__snapshot_drop();
-    recompute_name();
     if (result.recovery_degraded) {
         gui_project__note_recovery_degraded(result.recovery_status);
     }

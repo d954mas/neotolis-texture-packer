@@ -24,7 +24,7 @@ if(WIN32)
     target_link_libraries(tinyfiledialogs PUBLIC comdlg32 ole32 shell32 user32)
 endif()
 
-add_executable(ntpacker-gui main.c gui_state.c gui_widgets.c gui_actions.c gui_actions_dialogs.c gui_actions_edits.c gui_actions_pack.c gui_actions_preview.c gui_actions_recovery.c gui_rows.c gui_selftest.c gui_shot.c gui_bench.c gui_startup.c gui_paths.c gui_log_file.c gui_crash.c gui_bootstrap.c gui_project.c gui_project_file.c gui_project_mutations.c gui_project_pending.c gui_project_recovery.c gui_session_adapter.c gui_scan.c gui_canvas.c gui_canvas_resources.c gui_pack.c gui_pack_jobs.c gui_pack_preview.c gui_view_settings.c gui_view_lists.c gui_view_canvas.c gui_view_chrome.c
+add_executable(ntpacker-gui main.c gui_state.c gui_widgets.c gui_actions.c gui_actions_dialogs.c gui_actions_edits.c gui_actions_pack.c gui_actions_preview.c gui_actions_recovery.c gui_rows.c gui_selftest.c gui_shot.c gui_bench.c gui_startup.c gui_paths.c gui_log_file.c gui_crash.c gui_bootstrap.c gui_project.c gui_project_file.c gui_project_mutations.c gui_project_pending.c gui_project_recovery.c gui_session_adapter.c gui_session_client.c gui_scan.c gui_canvas.c gui_canvas_resources.c gui_pack.c gui_pack_jobs.c gui_pack_preview.c gui_view_settings.c gui_view_lists.c gui_view_canvas.c gui_view_chrome.c
     "${CMAKE_SOURCE_DIR}/apps/common/nt_utf8_fs.c")
 if(WIN32)
     target_sources(ntpacker-gui PRIVATE "${CMAKE_SOURCE_DIR}/apps/common/nt_utf8_argv.c")
@@ -141,6 +141,18 @@ nt_set_warning_flags(tp_test_gui_session_adapter)
 nt_set_sanitizer_flags(tp_test_gui_session_adapter)
 add_test(NAME tp_gui_session_adapter COMMAND tp_test_gui_session_adapter)
 
+add_executable(tp_test_gui_session_client
+    test_gui_session_client.c
+    gui_session_client.c)
+target_link_libraries(tp_test_gui_session_client PRIVATE tp_core unity)
+target_compile_options(tp_test_gui_session_client PRIVATE -U_DLL)
+target_compile_definitions(tp_test_gui_session_client PRIVATE
+    TP_ENABLE_TEST_SEAMS=1
+    TP_GUI_SESSION_CLIENT_TEST_DIR="${CMAKE_CURRENT_BINARY_DIR}")
+nt_set_warning_flags(tp_test_gui_session_client)
+nt_set_sanitizer_flags(tp_test_gui_session_client)
+add_test(NAME tp_gui_session_client COMMAND tp_test_gui_session_client)
+
 add_executable(tp_test_gui_paths test_gui_paths.c gui_paths.c)
 target_link_libraries(tp_test_gui_paths PRIVATE tp_core unity)
 target_compile_options(tp_test_gui_paths PRIVATE -U_DLL)
@@ -187,6 +199,7 @@ add_executable(tp_test_gui_canonical_identity
     gui_project_pending.c
     gui_project_recovery.c
     gui_session_adapter.c
+    gui_session_client.c
     gui_scan.c
     gui_canvas.c
     gui_canvas_resources.c
@@ -244,6 +257,7 @@ add_executable(tp_test_gui_view
     gui_project_pending.c
     gui_project_recovery.c
     gui_session_adapter.c
+    gui_session_client.c
     gui_scan.c
     gui_canvas.c
     gui_canvas_resources.c
@@ -302,6 +316,7 @@ add_executable(tp_test_gui_action_trace
     gui_project_pending.c
     gui_project_recovery.c
     gui_session_adapter.c
+    gui_session_client.c
     gui_scan.c
     gui_canvas.c
     gui_canvas_resources.c

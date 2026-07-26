@@ -54,6 +54,11 @@ uint64_t gui_project_snapshot_lifetime_generation(void) {
     return s_fixture_snapshot_lifetime;
 }
 
+uint64_t gui_project_source_runtime_generation(void) {
+    return tp_session_snapshot_source_generation(
+        s_fixture_snapshot);
+}
+
 static bool s_status_failed;
 void set_status_ex(status_sev_t sev, const char *msg) {
     (void)msg;

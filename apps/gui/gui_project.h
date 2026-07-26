@@ -14,7 +14,8 @@
  *
  * Every mutation becomes typed operation intent and commits atomically through tp_session;
  * one accepted transaction captures one semantic diff and one undo step. Undo/Redo also
- * run through tp_session, and cached snapshots are invalidated after each transition.
+ * run through tp_session. One gui_session_client atomically observes and frame-pins the
+ * immutable state consumed by presentation.
  * Value edits (slider/field/etc.) coalesce through gui_project's ONE pending transaction and commit
  * per GESTURE (gui_project_flush_pending), so one interaction == one undo step (decision 0015).
  *
@@ -84,12 +85,19 @@ tp_status gui_recovery_resolve_entry(const gui_recovery_entry *entry, gui_recove
                                      const char *target_path, char *err_out, size_t err_cap);
 
 /* --- accessors --- */
-/* Cached immutable read view. Invalidated only at model-change chokepoints. */
+/* Immutable read view owned and frame-pinned by gui_session_client. */
 const tp_session_snapshot *gui_project_snapshot(void);
-/* Changes whenever the cached snapshot object is destroyed, including Save
- * paths whose model/source generations remain unchanged. Borrowing GUI caches
- * include this token in their lifetime key. */
+/* Changes whenever the client publishes or releases a model snapshot.
+ * Borrowing GUI caches include this token in their lifetime key. */
 uint64_t gui_project_snapshot_lifetime_generation(void);
+/* Coalesced source-runtime observation component. Runtime-only changes do not
+ * replace or synthesize a model snapshot. */
+uint64_t gui_project_source_runtime_generation(void);
+/* Host-frame observation seam. begin atomically observes/reduces and pins the
+ * immutable snapshot; end releases the pin after render/present. */
+tp_status gui_project_frame_begin(tp_error *err);
+void gui_project_frame_end(void);
+bool gui_project_frame_is_pinned(void);
 /* Narrow orchestration seam for the derived Pack / side-effect Export job
  * adapter. The session remains opaque and owns the one active typed handle. */
 tp_session *gui_project_session_for_jobs(void);
