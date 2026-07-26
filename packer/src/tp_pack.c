@@ -12,7 +12,7 @@
 #include "tp_core/tp_model.h"
 #include "tp_core/tp_name_map.h"
 #include "tp_core/tp_pack_read.h"
-#include "tp_fs_internal.h"
+#include "tp_core/tp_scan.h"
 #include "tp_image_priv.h"
 #include "tp_pack_constraints_internal.h"
 #include "tp_pack_priv.h"
@@ -495,10 +495,11 @@ static tp_status load_path_images(const tp_pack_settings *settings,
         int height = sprite->h;
         tp_pack_image_fingerprint fingerprint = {0};
         if (sprite->path) {
-            tp_fs_info before = {0};
+            long long before_size = 0;
+            long long before_mtime = 0;
             const bool had_before =
-                observer && tp_fs_stat(sprite->path, &before) &&
-                before.kind == TP_FS_KIND_REGULAR;
+                observer && tp_scan_file_stat(sprite->path, &before_size,
+                                              &before_mtime);
             tp_error cause = {{0}};
             tp_id128 content_hash = tp_id128_nil();
             tp_status status = observer
@@ -516,12 +517,13 @@ static tp_status load_path_images(const tp_pack_settings *settings,
             pixels = images[i].pixels;
             width = images[i].width;
             height = images[i].height;
-            tp_fs_info after = {0};
-            if (had_before && tp_fs_stat(sprite->path, &after) &&
-                after.kind == TP_FS_KIND_REGULAR &&
-                before.size == after.size && before.mtime == after.mtime) {
-                fingerprint.size = after.size;
-                fingerprint.mtime = after.mtime;
+            long long after_size = 0;
+            long long after_mtime = 0;
+            if (had_before &&
+                tp_scan_file_stat(sprite->path, &after_size, &after_mtime) &&
+                before_size == after_size && before_mtime == after_mtime) {
+                fingerprint.size = (uint64_t)after_size;
+                fingerprint.mtime = (int64_t)after_mtime;
                 fingerprint.content_hash = content_hash;
                 fingerprint.valid = !tp_id128_is_nil(content_hash);
             }
