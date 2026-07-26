@@ -238,6 +238,70 @@ contracts. A session implementation must not absorb model validation, journal
 encoding/decoding, filesystem or lock backends, Pack/Export algorithms, GUI
 state, dialogs, protocol JSON, or transport error formatting.
 
+### 4.8 Session-observed frontends and separated presentation
+
+A frontend presenting a live session observes committed state through an owned
+session observation plus the ordered event/resync contract. One observation has
+a single linearization point: its composite observation token, high-water event
+sequence, retained immutable model generation, snapshot scalars, coalesced
+source/job/result generations, and copied events/resync result describe the same
+session cut. The token advances when any observable generation changes, even
+when no model event is published. A frontend must not compose correctness from
+independently sampled event and snapshot calls.
+
+Frontend correctness must not depend on private invalidation performed only by
+the frontend that submitted the command. A client observes its own
+revision-changing command through the same committed event path used for
+commands from other GUI views, MCP, Dev API, Undo/Redo, and session-owned worker
+completion. A successful semantic no-op has a terminal result but no committed
+change event.
+
+The native GUI uses a session-observing controller with passive boundaries:
+
+- a frame pins one immutable observation/snapshot;
+- simple views may read that snapshot through a read-only query API;
+- derived, virtualized, identity-sensitive, or policy-bearing presentation is
+  prepared by explicit projections/reducers;
+- a view emits typed semantic actions and does not mutate the session;
+- session observation, local edit/view state, projections, platform I/O, and
+  GPU resources have separate owners;
+- filesystem scan, source-runtime classification, freshness, validation,
+  history, and capability rules never live in view declarations;
+- retained selection and edit targets use stable structural identity, while
+  row/widget indices are valid only inside one projection generation.
+
+The GUI may retain view-local selection, camera, filter, layout, modal, and
+uncommitted draft state. It must not retain a second mutable project model.
+No binding framework, universal panel DTO graph, or global catch-all intent
+union is required.
+
+The authoritative host has one admission thread. Dev API transport threads and
+workers enqueue immutable requests/completions tagged with session-instance
+generation; they never call or retain a raw `tp_session *`. Shutdown stops
+ingress and enters a draining state, requests cancellation, and continues its
+event/render pump until old jobs report terminal state. A join occurs only
+after terminal confirmation and must not block a GUI frame. The host then
+invalidates the generation, rejects remaining queued work, detaches observers,
+and destroys the session.
+Fail-atomic replacement first constructs the detached candidate session, its
+initial observation, and every fallible attachment resource. Failure destroys
+only the candidate. The host cuts over from the still-live old session only
+after preparation succeeds and old jobs finish draining. The candidate is not
+published during the drain.
+
+Any session-owned job step that may block indefinitely in filesystem traversal,
+file read/write, decode, or external builder execution runs in an owned killable
+worker process over a bounded versioned protocol. The host never runs that work
+in a joinable in-process thread. It polls progress non-blockingly, requests
+cooperative cancellation, and may terminate the owned process after the bounded
+deadline. Process exit, protocol failure, and forced termination become
+structured terminal results; they never mutate the project model directly.
+
+A candidate for the same canonical saved identity must not acquire a second
+writer lease or destroy the old session merely to retry. Until a dedicated
+in-place reload/lease-transfer contract exists, opening the already-open
+identity is a structured no-op/rejection and leaves the live session untouched.
+
 ## 5. Stable persistent identities
 
 There is no persistent `project_id`.
@@ -657,6 +721,48 @@ expected > current
 
 No automatic field-level merge or CRDT is part of v1. The caller inspects current
 state, rebuilds its intended transaction, and retries.
+
+### 8.1 Uncommitted frontend drafts under concurrent commits
+
+An in-progress GUI text, field, slider, or drag gesture is view-local draft
+state, not a project transaction and not part of session history. The draft
+stores stable target identity, the exact edited field/component, the user value,
+and the revision on which editing began. It does not store a mutable model
+pointer, visual index, broad copied object, or a ready-to-retry operation
+containing sibling fields from an older snapshot.
+
+If any model transaction, Undo, or Redo advances revision while the draft is
+active, except the exact transaction submitted by that same draft instance:
+
+- the GUI immediately observes and presents the new committed snapshot;
+- the user's draft value remains visible and enters an explicit conflicted
+  state;
+- the GUI does not automatically merge, rebase, change `expected_revision`, or
+  retry;
+- the user explicitly chooses Apply Mine or Discard;
+- Apply Mine resolves the stable target against a fresh snapshot, rebuilds one
+  narrow typed operation, and submits once at the fresh revision;
+- if the target was removed or the field is no longer applicable, Apply Mine is
+  unavailable and the draft remains discardable/copyable;
+- a second race returns to the conflicted state.
+
+Save, source-runtime refresh, and job/result events do not advance model
+revision and therefore do not conflict a draft. A frontend may recognize its own
+committed event by transaction ID for acknowledgement, but the event still
+passes through the common observation/reducer path.
+
+A synchronous successful semantic no-op terminates the submitted draft without
+waiting for an event. On event-window resynchronization, a draft uses its known
+terminal submit result; an active draft whose base revision differs from the
+resynchronized snapshot becomes conflicted. Pending transaction identity is
+scoped by GUI view and draft instance, not merely by process or GUI client.
+
+Lifecycle preflight precedes draft submission. Save, Save As, Pack, and Export
+continue only after the active draft reaches terminal success/no-change.
+Undo/Redo do not silently combine with an active draft. Open, New, project
+Discard, and Close require an explicit Apply and Continue / Discard and
+Continue / Cancel decision. A failed draft prerequisite aborts the outer
+action; no draft crosses a session-instance replacement.
 
 Revision, Undo/Redo history position, and saved state are separate concepts.
 Dirty state is not calculated from revision numbers.
