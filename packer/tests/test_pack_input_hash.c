@@ -26,6 +26,7 @@
 #include "tp_core/tp_id.h"
 #include "tp_core/tp_pack.h"
 #include "tp_core/tp_pack_hash.h"
+#include "tp_pack_hash_priv.h"
 #include "unity.h"
 
 static const char *g_dir;
@@ -271,6 +272,70 @@ void test_identical_pixels_changed_mtime_same_hash(void) {
     tp_pack_image_hash_cache_destroy(cache);
 }
 
+void test_changed_pixels_same_size_and_mtime_invalidate_cache(void) {
+    uint8_t first_pixels[8 * 8 * 4];
+    uint8_t second_pixels[8 * 8 * 4];
+    fill_pixels(first_pixels, 7U);
+    fill_pixels(second_pixels, 19U);
+    char bmp[1024];
+    TEST_ASSERT_TRUE(snprintf(bmp, sizeof bmp, "%s/content.bmp", g_dir) > 0);
+    TEST_ASSERT_NOT_EQUAL(
+        0, stbi_write_bmp(bmp, 8, 8, 4, first_pixels));
+    set_mtime(bmp, (time_t)1234567890);
+
+    tp_pack_sprite_desc d;
+    memset(&d, 0, sizeof d);
+    d.name = "sprite";
+    d.path = bmp;
+    d.origin_x = 0.5F;
+    d.origin_y = 0.5F;
+    tp_pack_settings s;
+    base_settings(&s, &d, 1);
+
+    tp_pack_image_hash_cache *cache = tp_pack_image_hash_cache_create();
+    TEST_ASSERT_NOT_NULL(cache);
+    const tp_id128 first_hash = compute(&s, NULL, cache);
+
+    TEST_ASSERT_NOT_EQUAL(
+        0, stbi_write_bmp(bmp, 8, 8, 4, second_pixels));
+    set_mtime(bmp, (time_t)1234567890);
+    const tp_id128 second_hash = compute(&s, NULL, cache);
+    TEST_ASSERT_FALSE_MESSAGE(
+        tp_id128_eq(first_hash, second_hash),
+        "changed pixels must invalidate a cache hit even when size and mtime match");
+
+    tp_pack_image_hash_cache_destroy(cache);
+}
+
+void test_seed_existing_path_does_not_grow_cache(void) {
+    tp_pack_image_hash_cache *cache = tp_pack_image_hash_cache_create();
+    TEST_ASSERT_NOT_NULL(cache);
+    const tp_id128 hash = {{1U}};
+    tp_error err = {{0}};
+    char path[32];
+
+    for (int i = 0; i < 8; ++i) {
+        TEST_ASSERT_TRUE(snprintf(path, sizeof path, "seed-%d.png", i) > 0);
+        TEST_ASSERT_EQUAL_INT(
+            TP_STATUS_OK,
+            tp_pack_image_hash_cache_seed(cache, path, 100U, 200, hash, hash,
+                                          &err));
+    }
+    const size_t capacity =
+        tp_pack_image_hash_cache_capacity_for_test(cache);
+    TEST_ASSERT_EQUAL_UINT64(16U, (uint64_t)capacity);
+
+    TEST_ASSERT_EQUAL_INT(
+        TP_STATUS_OK,
+        tp_pack_image_hash_cache_seed(cache, "seed-0.png", 101U, 201, hash,
+                                      hash, &err));
+    TEST_ASSERT_EQUAL_UINT64(
+        (uint64_t)capacity,
+        (uint64_t)tp_pack_image_hash_cache_capacity_for_test(cache));
+
+    tp_pack_image_hash_cache_destroy(cache);
+}
+
 int main(int argc, char **argv) {
     g_dir = (argc > 1) ? argv[1] : ".";
     UNITY_BEGIN();
@@ -281,5 +346,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_settings_override_target_changes);
     RUN_TEST(test_path_and_raw_pixels_hash_identically);
     RUN_TEST(test_identical_pixels_changed_mtime_same_hash);
+    RUN_TEST(test_changed_pixels_same_size_and_mtime_invalidate_cache);
+    RUN_TEST(test_seed_existing_path_does_not_grow_cache);
     return UNITY_END();
 }

@@ -50,10 +50,28 @@ const char *path_last(const char *p) {
 static gui_rows_bench_counters s_bench_counters;
 #endif
 
+#if defined(TP_GUI_VIEW_TEST_DIR)
+static int s_test_rows_strdup_successes_before_failure = -1;
+
+void gui_rows_test_fail_rows_strdup_after(int successful_copies) {
+    s_test_rows_strdup_successes_before_failure =
+        successful_copies >= 0 ? successful_copies : -1;
+}
+#endif
+
 static char *rows_strdup(const char *text) {
     if (!text) {
         return NULL;
     }
+#if defined(TP_GUI_VIEW_TEST_DIR)
+    if (s_test_rows_strdup_successes_before_failure == 0) {
+        s_test_rows_strdup_successes_before_failure = -1;
+        return NULL;
+    }
+    if (s_test_rows_strdup_successes_before_failure > 0) {
+        s_test_rows_strdup_successes_before_failure--;
+    }
+#endif
     const size_t length = strlen(text) + 1U;
     char *copy = (char *)malloc(length);
     if (copy) {
@@ -68,11 +86,32 @@ static char *rows_strdup(const char *text) {
 // #endregion
 
 // #region multi-select + natural sort (ux.md §3.7b selection gesture)
+#if defined(TP_GUI_VIEW_TEST_DIR)
+static uint64_t s_test_selection_identity_comparisons;
+static uint64_t s_test_selection_compaction_moves;
+
+void gui_rows_test_reset_selection_identity_comparisons(void) {
+    s_test_selection_identity_comparisons = 0U;
+    s_test_selection_compaction_moves = 0U;
+}
+
+uint64_t gui_rows_test_selection_identity_comparisons(void) {
+    return s_test_selection_identity_comparisons;
+}
+
+uint64_t gui_rows_test_selection_compaction_moves(void) {
+    return s_test_selection_compaction_moves;
+}
+#endif
+
 bool multi_sel_contains_ref(tp_id128 source_id, const char *source_key) {
     if (tp_id128_is_nil(source_id) || !source_key || !source_key[0]) {
         return false;
     }
     for (int i = 0; i < s_multi_sel_count; i++) {
+#if defined(TP_GUI_VIEW_TEST_DIR)
+        s_test_selection_identity_comparisons++;
+#endif
         if (tp_id128_eq(s_multi_sel[i].source_id, source_id) &&
             strcmp(s_multi_sel[i].source_key, source_key) == 0) {
             return true;
@@ -80,6 +119,29 @@ bool multi_sel_contains_ref(tp_id128 source_id, const char *source_key) {
     }
     return false;
 }
+
+static bool multi_sel_reserve(int required) {
+    if (required <= s_multi_sel_cap) {
+        return true;
+    }
+    int newcap = s_multi_sel_cap ? s_multi_sel_cap : MULTI_SEL_INIT_CAP;
+    while (newcap < required) {
+        if (newcap > INT_MAX / 2) {
+            newcap = required;
+            break;
+        }
+        newcap *= 2;
+    }
+    gui_selected_sprite *grown =
+        realloc(s_multi_sel, (size_t)newcap * sizeof *s_multi_sel);
+    if (!grown) {
+        return false;
+    }
+    s_multi_sel = grown;
+    s_multi_sel_cap = newcap;
+    return true;
+}
+
 void multi_sel_clear(void) {
     for (int i = 0; i < s_multi_sel_count; ++i) {
         free(s_multi_sel[i].source_key);
@@ -97,17 +159,10 @@ void multi_sel_add_ref(tp_id128 source_id, const char *source_key) {
         set_status_ex(STATUS_ERROR, "Out of memory: selection not fully updated.");
         return;
     }
-    if (s_multi_sel_count >= s_multi_sel_cap) {
-        const int newcap = s_multi_sel_cap ? s_multi_sel_cap * 2 : MULTI_SEL_INIT_CAP;
-        gui_selected_sprite *grown = realloc(s_multi_sel,
-                                             (size_t)newcap * sizeof *s_multi_sel);
-        if (!grown) {
-            free(key_copy);
-            set_status_ex(STATUS_ERROR, "Out of memory: selection not fully updated.");
-            return; /* keep old capacity + the entries already in it; loud, never silent */
-        }
-        s_multi_sel = grown;
-        s_multi_sel_cap = newcap;
+    if (!multi_sel_reserve(s_multi_sel_count + 1)) {
+        free(key_copy);
+        set_status_ex(STATUS_ERROR, "Out of memory: selection not fully updated.");
+        return; /* keep old capacity + the entries already in it; loud, never silent */
     }
     s_multi_sel[s_multi_sel_count].source_id = source_id;
     s_multi_sel[s_multi_sel_count].source_key = key_copy;
@@ -130,6 +185,76 @@ void multi_sel_remove_ref(tp_id128 source_id, const char *source_key) {
 void multi_sel_set_single_ref(tp_id128 source_id, const char *source_key) {
     multi_sel_clear();
     multi_sel_add_ref(source_id, source_key);
+}
+
+bool multi_sel_set_view_range(int lo, int hi) {
+    if (lo < 0 || hi < lo || hi >= s_view_count) {
+        return false;
+    }
+    int selectable_count = 0;
+    for (int k = lo; k <= hi; ++k) {
+        const sprite_row *row = &s_rows[s_view[k]];
+        if (!row->is_folder && !row->missing && row->sprite_name &&
+            row->sprite_name[0] != '\0' &&
+            !tp_id128_is_nil(row->source_id) && row->source_key &&
+            row->source_key[0] != '\0') {
+            selectable_count++;
+        }
+    }
+    if ((size_t)selectable_count >
+        SIZE_MAX / sizeof(gui_selected_sprite)) {
+        set_status_ex(STATUS_ERROR, "Out of memory: selection not fully updated.");
+        return false;
+    }
+    gui_selected_sprite *replacement =
+        selectable_count > 0
+            ? calloc((size_t)selectable_count, sizeof *replacement)
+            : NULL;
+    if (selectable_count > 0 && !replacement) {
+        set_status_ex(STATUS_ERROR, "Out of memory: selection not fully updated.");
+        return false;
+    }
+    int replacement_count = 0;
+    for (int k = lo; k <= hi; ++k) {
+        const sprite_row *row = &s_rows[s_view[k]];
+        if (!row->is_folder && !row->missing && row->sprite_name &&
+            row->sprite_name[0] != '\0' &&
+            !tp_id128_is_nil(row->source_id) && row->source_key &&
+            row->source_key[0] != '\0') {
+            char *key_copy = rows_strdup(row->source_key);
+            if (!key_copy) {
+                set_status_ex(
+                    STATUS_ERROR,
+                    "Out of memory: selection not fully updated.");
+                for (int i = 0; i < replacement_count; ++i) {
+                    free(replacement[i].source_key);
+                }
+                free(replacement);
+                return false;
+            }
+            /* s_view projects each canonical {source_id, source_key} once, so
+             * the range is already unique and needs no prefix scan. */
+            replacement[replacement_count].source_id = row->source_id;
+            replacement[replacement_count].source_key = key_copy;
+            replacement_count++;
+        }
+    }
+    if (!multi_sel_reserve(replacement_count)) {
+        for (int i = 0; i < replacement_count; ++i) {
+            free(replacement[i].source_key);
+        }
+        free(replacement);
+        set_status_ex(STATUS_ERROR, "Out of memory: selection not fully updated.");
+        return false;
+    }
+    multi_sel_clear();
+    if (replacement_count > 0) {
+        memcpy(s_multi_sel, replacement,
+               (size_t)replacement_count * sizeof *replacement);
+    }
+    s_multi_sel_count = replacement_count;
+    free(replacement);
+    return true;
 }
 
 void gui_rows_context_refocus(int view_index) {
@@ -1581,13 +1706,94 @@ void select_row_for_region(int region_idx) {
 // #endregion
 
 // #region selection preservation across Undo/Redo
+typedef struct row_ref_slot {
+    tp_id128 source_id;
+    const char *source_key;
+    bool occupied;
+} row_ref_slot;
+
 static bool row_ref_present(tp_id128 source_id, const char *source_key) {
     for (int i = 0; i < s_row_count; ++i) {
+#if defined(TP_GUI_VIEW_TEST_DIR)
+        s_test_selection_identity_comparisons++;
+#endif
         if (!s_rows[i].is_folder && s_rows[i].source_key && s_rows[i].source_key[0] != '\0' &&
             tp_id128_eq(s_rows[i].source_id, source_id) &&
             strcmp(s_rows[i].source_key, source_key) == 0) {
             return true;
         }
+    }
+    return false;
+}
+
+static row_ref_slot *row_ref_index_build(size_t *out_capacity) {
+    *out_capacity = 0U;
+    if (s_row_count <= 0) {
+        return NULL;
+    }
+    const size_t count = (size_t)s_row_count;
+    if (count > (SIZE_MAX - 1U) / 2U) {
+        return NULL;
+    }
+    const size_t wanted = count * 2U + 1U;
+    size_t capacity = 8U;
+    while (capacity < wanted) {
+        if (capacity > SIZE_MAX / 2U) {
+            return NULL;
+        }
+        capacity *= 2U;
+    }
+    row_ref_slot *slots = calloc(capacity, sizeof *slots);
+    if (!slots) {
+        return NULL;
+    }
+    const size_t mask = capacity - 1U;
+    for (int i = 0; i < s_row_count; ++i) {
+        const sprite_row *row = &s_rows[i];
+        if (row->is_folder || tp_id128_is_nil(row->source_id) ||
+            !row->source_key || row->source_key[0] == '\0') {
+            continue;
+        }
+        size_t at =
+            (size_t)override_hash(row->source_id, row->source_key) & mask;
+        while (slots[at].occupied) {
+#if defined(TP_GUI_VIEW_TEST_DIR)
+            s_test_selection_identity_comparisons++;
+#endif
+            if (tp_id128_eq(slots[at].source_id, row->source_id) &&
+                strcmp(slots[at].source_key, row->source_key) == 0) {
+                break;
+            }
+            at = (at + 1U) & mask;
+        }
+        if (!slots[at].occupied) {
+            slots[at].source_id = row->source_id;
+            slots[at].source_key = row->source_key;
+            slots[at].occupied = true;
+        }
+    }
+    *out_capacity = capacity;
+    return slots;
+}
+
+static bool row_ref_index_contains(const row_ref_slot *slots, size_t capacity,
+                                   tp_id128 source_id,
+                                   const char *source_key) {
+    if (!slots || capacity == 0U || tp_id128_is_nil(source_id) ||
+        !source_key || source_key[0] == '\0') {
+        return false;
+    }
+    const size_t mask = capacity - 1U;
+    size_t at = (size_t)override_hash(source_id, source_key) & mask;
+    while (slots[at].occupied) {
+#if defined(TP_GUI_VIEW_TEST_DIR)
+        s_test_selection_identity_comparisons++;
+#endif
+        if (tp_id128_eq(slots[at].source_id, source_id) &&
+            strcmp(slots[at].source_key, source_key) == 0) {
+            return true;
+        }
+        at = (at + 1U) & mask;
     }
     return false;
 }
@@ -1695,19 +1901,38 @@ void gui_selection_revalidate(void) {
             s_sel_abs[0] = '\0';
         }
     }
-    /* Prune multi-select refs whose sprite no longer exists after the undo/redo. */
-    for (int i = 0; i < s_multi_sel_count;) {
-        if (!row_ref_present(s_multi_sel[i].source_id, s_multi_sel[i].source_key)) {
-            free(s_multi_sel[i].source_key);
-            for (int j = i; j < s_multi_sel_count - 1; ++j) {
-                s_multi_sel[j] = s_multi_sel[j + 1];
+    /* Prune against one borrowed canonical row index, then compact once. */
+    size_t row_ref_capacity = 0U;
+    row_ref_slot *row_refs = row_ref_index_build(&row_ref_capacity);
+    const int old_count = s_multi_sel_count;
+    int write = 0;
+    for (int read = 0; read < old_count; ++read) {
+        const bool present =
+            row_refs
+                ? row_ref_index_contains(
+                      row_refs, row_ref_capacity,
+                      s_multi_sel[read].source_id,
+                      s_multi_sel[read].source_key)
+                : row_ref_present(s_multi_sel[read].source_id,
+                                  s_multi_sel[read].source_key);
+        if (present) {
+            if (write != read) {
+#if defined(TP_GUI_VIEW_TEST_DIR)
+                s_test_selection_compaction_moves++;
+#endif
+                s_multi_sel[write] = s_multi_sel[read];
             }
-            s_multi_sel_count--;
-            s_multi_sel[s_multi_sel_count].source_key = NULL;
+            write++;
         } else {
-            ++i;
+            free(s_multi_sel[read].source_key);
+            s_multi_sel[read].source_key = NULL;
         }
     }
+    for (int i = write; i < old_count; ++i) {
+        s_multi_sel[i].source_key = NULL;
+    }
+    s_multi_sel_count = write;
+    free(row_refs);
     /* Keep the keyboard focus ring on the row that now carries the selection. revalidate runs right
      * after build_view (main loop), so s_view is current and this cannot read a stale index. */
     focus_sync_to_selection();

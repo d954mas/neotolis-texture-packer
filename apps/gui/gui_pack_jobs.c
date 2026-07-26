@@ -122,21 +122,22 @@ static bool input_changed_since(tp_session_input_token token) {
 
 static bool native_pack_input_changed_since(
     const tp_session_pack_job_result *pack) {
-    if (!pack || tp_id128_is_nil(pack->pack_input_hash)) {
-        return !pack || input_changed_since(pack->input_token_at_start);
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    if (!pack || !snapshot) {
+        return true;
     }
-    tp_session *session = job_session();
-    tp_id128 current_hash = tp_id128_nil();
-    tp_error error = {{0}};
-    if (!session ||
-        tp_session_pack_input_hash(session, pack->atlas_id, NULL,
-                                   &current_hash, &error) != TP_STATUS_OK) {
-        /* A failed current-hash probe cannot prove freshness. Preserve the
-         * conservative generation-token fallback and keep the result stale. */
-        return input_changed_since(pack->input_token_at_start);
-    }
-    return !tp_id128_eq(pack->pack_input_hash, current_hash);
+    const tp_session_input_token live_token =
+        tp_session_snapshot_input_token(snapshot);
+    return tp_session_pack_result_freshness(pack, live_token, NULL) !=
+           TP_PACK_FRESHNESS_CURRENT;
 }
+
+#ifdef TP_ENABLE_TEST_SEAMS
+bool gui_pack__test_native_pack_input_changed_since(
+    const tp_session_pack_job_result *pack) {
+    return native_pack_input_changed_since(pack);
+}
+#endif
 
 bool gui_pack_init(const char *work_dir) {
     s_adapter.work_dir_ready = false;

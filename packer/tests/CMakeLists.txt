@@ -442,7 +442,8 @@ add_test(NAME tp_pack COMMAND tp_test_pack "${CMAKE_BINARY_DIR}/tp_pack_test")
 add_executable(tp_test_pack_input_hash test_pack_input_hash.c)
 target_link_libraries(tp_test_pack_input_hash PRIVATE tp_core unity stb_image_write)
 target_include_directories(tp_test_pack_input_hash PRIVATE
-    $<TARGET_PROPERTY:stb_image_write,INTERFACE_INCLUDE_DIRECTORIES>)
+    $<TARGET_PROPERTY:stb_image_write,INTERFACE_INCLUDE_DIRECTORIES>
+    "${CMAKE_SOURCE_DIR}/packer/src")
 target_compile_options(tp_test_pack_input_hash PRIVATE -U_DLL)
 nt_set_warning_flags(tp_test_pack_input_hash)   # AGENTS.md invariant: our test TUs too
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/tp_pack_input_hash_test")

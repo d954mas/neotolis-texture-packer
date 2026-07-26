@@ -18,6 +18,13 @@ extern "C" {
 struct tp_arena;
 struct tp_result;
 
+typedef struct tp_pack_image_fingerprint {
+    uint64_t size;
+    int64_t mtime;
+    tp_id128 content_hash;
+    bool valid;
+} tp_pack_image_fingerprint;
+
 /* Per-image observer for the pack's single decode pass. Fired once per sprite, in
  * settings->sprites order, right after that sprite's canonical RGBA8 pixels are
  * resolved (decoded for a path sprite, borrowed for a raw sprite) and BEFORE the
@@ -25,8 +32,9 @@ struct tp_result;
  * the call. It lets an in-process caller derive per-sprite terms (the semantic
  * image hash for pack_input_hash) from the SAME decode the pack consumes, so a
  * pack pays exactly ONE decode per source. */
-typedef void (*tp_pack_image_observer)(void *ctx, int sprite_index, int width,
-                                       int height, const uint8_t *rgba);
+typedef void (*tp_pack_image_observer)(
+    void *ctx, int sprite_index, int width, int height, const uint8_t *rgba,
+    const tp_pack_image_fingerprint *fingerprint);
 
 /* tp_pack_cancellable plus the per-image observer seam. `observer` may be NULL
  * (then this is exactly tp_pack_cancellable). The pack RESULT is byte-identical

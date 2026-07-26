@@ -12,6 +12,7 @@
 #include <errno.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #ifdef _WIN32
@@ -1148,6 +1149,146 @@ void test_context_refocus_updates_anchor_without_collapsing_multi_selection(void
     TEST_ASSERT_TRUE(s_focus_follow);
 }
 
+/* Shift-range replacement must not probe the already-built prefix for every
+ * subsequent row. That produces triangular identity work as the range grows. */
+void test_shift_range_selection_identity_work_is_linear(void) {
+    add_sources_and_build(NULL, NULL);
+    gui_rows_set_sort(ROW_SORT_NAME, false, false);
+    build_view();
+
+    int selectable_count = 0;
+    for (int i = 0; i < s_view_count; ++i) {
+        const sprite_row *row = &s_rows[s_view[i]];
+        if (!row->is_folder && !row->missing && row->sprite_name &&
+            row->sprite_name[0] != '\0') {
+            selectable_count++;
+        }
+    }
+    TEST_ASSERT_GREATER_THAN(2, selectable_count);
+
+    gui_rows_test_reset_selection_identity_comparisons();
+    multi_sel_set_view_range(0, s_view_count - 1);
+    const uint64_t comparisons =
+        gui_rows_test_selection_identity_comparisons();
+
+    TEST_ASSERT_EQUAL_INT(selectable_count, s_multi_sel_count);
+    TEST_ASSERT_LESS_OR_EQUAL_UINT64((uint64_t)selectable_count, comparisons);
+    for (int i = 0; i < s_view_count; ++i) {
+        const sprite_row *row = &s_rows[s_view[i]];
+        if (!row->is_folder && !row->missing && row->sprite_name &&
+            row->sprite_name[0] != '\0') {
+            TEST_ASSERT_TRUE(
+                multi_sel_contains_ref(row->source_id, row->source_key));
+        }
+    }
+}
+
+void test_shift_range_oom_keeps_previous_selection_atomically(void) {
+    add_sources_and_build(NULL, NULL);
+    gui_rows_set_sort(ROW_SORT_NAME, false, false);
+    build_view();
+
+    int first_leaf = -1;
+    int last_leaf = -1;
+    for (int i = 0; i < s_view_count; ++i) {
+        const sprite_row *row = &s_rows[s_view[i]];
+        if (!row->is_folder && !row->missing && row->sprite_name &&
+            row->sprite_name[0] != '\0') {
+            if (first_leaf < 0) {
+                first_leaf = i;
+            }
+            last_leaf = i;
+        }
+    }
+    TEST_ASSERT_GREATER_OR_EQUAL(0, first_leaf);
+    TEST_ASSERT_GREATER_THAN(first_leaf, last_leaf);
+    const sprite_row *previous = &s_rows[s_view[last_leaf]];
+    const tp_id128 previous_id = previous->source_id;
+    char previous_key[TP_SRCKEY_MAX];
+    TEST_ASSERT_LESS_THAN_INT(
+        (int)sizeof previous_key,
+        snprintf(previous_key, sizeof previous_key, "%s",
+                 previous->source_key));
+    multi_sel_set_single_ref(previous_id, previous_key);
+    TEST_ASSERT_EQUAL_INT(1, s_multi_sel_count);
+
+    gui_rows_test_fail_rows_strdup_after(1);
+    multi_sel_set_view_range(first_leaf, last_leaf);
+
+    TEST_ASSERT_EQUAL_INT(1, s_multi_sel_count);
+    TEST_ASSERT_TRUE(multi_sel_contains_ref(previous_id, previous_key));
+}
+
+#define LARGE_SELECTION_COUNT 5000
+
+static void install_large_synthetic_selection(void) {
+    gui_rows_shutdown();
+    s_rows = calloc(LARGE_SELECTION_COUNT, sizeof *s_rows);
+    s_view = calloc(LARGE_SELECTION_COUNT, sizeof *s_view);
+    TEST_ASSERT_NOT_NULL(s_rows);
+    TEST_ASSERT_NOT_NULL(s_view);
+    s_row_count = LARGE_SELECTION_COUNT;
+    s_view_count = LARGE_SELECTION_COUNT;
+
+    for (int i = 0; i < LARGE_SELECTION_COUNT; ++i) {
+        char key[32];
+        (void)snprintf(key, sizeof key, "sprite-%04d.png", i);
+        const size_t key_size = strlen(key) + 1U;
+        s_rows[i].source_key = malloc(key_size);
+        s_rows[i].sprite_name = malloc(key_size);
+        TEST_ASSERT_NOT_NULL(s_rows[i].source_key);
+        TEST_ASSERT_NOT_NULL(s_rows[i].sprite_name);
+        memcpy(s_rows[i].source_key, key, key_size);
+        memcpy(s_rows[i].sprite_name, key, key_size);
+        s_rows[i].source_id = tp_id128_nil();
+        s_rows[i].source_id.bytes[0] = 1U;
+        memcpy(&s_rows[i].source_id.bytes[4], &i, sizeof i);
+        s_rows[i].src = i;
+        s_rows[i].child = 0;
+        s_view[i] = i;
+    }
+    multi_sel_set_view_range(0, LARGE_SELECTION_COUNT - 1);
+    TEST_ASSERT_EQUAL_INT(LARGE_SELECTION_COUNT, s_multi_sel_count);
+    s_sel_src = 0;
+    s_sel_child = 0;
+    s_sel_missing = false;
+}
+
+void test_selection_revalidate_5000_present_refs_has_linear_identity_work(void) {
+    install_large_synthetic_selection();
+    s_reselect_pending = true;
+    s_reselect_source_id = tp_id128_nil();
+    s_reselect_key[0] = '\0';
+    gui_rows_test_reset_selection_identity_comparisons();
+
+    gui_selection_revalidate();
+
+    TEST_ASSERT_EQUAL_INT(LARGE_SELECTION_COUNT, s_multi_sel_count);
+    TEST_ASSERT_LESS_OR_EQUAL_UINT64(
+        (uint64_t)LARGE_SELECTION_COUNT * 8U,
+        gui_rows_test_selection_identity_comparisons());
+    TEST_ASSERT_LESS_OR_EQUAL_UINT64(
+        (uint64_t)LARGE_SELECTION_COUNT,
+        gui_rows_test_selection_compaction_moves());
+}
+
+void test_selection_revalidate_5000_deleted_refs_compacts_linearly(void) {
+    install_large_synthetic_selection();
+    s_reselect_pending = true;
+    s_reselect_source_id = tp_id128_nil();
+    s_reselect_key[0] = '\0';
+    gui_rows_test_reset_selection_identity_comparisons();
+    s_row_count = 0;
+
+    gui_selection_revalidate();
+
+    s_row_count = LARGE_SELECTION_COUNT; /* let tearDown release synthetic rows */
+    TEST_ASSERT_EQUAL_INT(0, s_multi_sel_count);
+    TEST_ASSERT_LESS_OR_EQUAL_UINT64(
+        (uint64_t)LARGE_SELECTION_COUNT,
+        gui_rows_test_selection_compaction_moves());
+}
+
 /* The OOM identity projection is a different row ordering. Numeric interaction
  * indices from the abandoned projection must not survive into it. */
 void test_view_oom_fallback_clears_focus_and_anchor(void) {
@@ -1775,6 +1916,12 @@ int main(int argc, char **argv) {
     RUN_TEST(test_view_anchor_follows_sprite_across_model_rebuild);
     RUN_TEST(
         test_context_refocus_updates_anchor_without_collapsing_multi_selection);
+    RUN_TEST(test_shift_range_selection_identity_work_is_linear);
+    RUN_TEST(test_shift_range_oom_keeps_previous_selection_atomically);
+    RUN_TEST(
+        test_selection_revalidate_5000_present_refs_has_linear_identity_work);
+    RUN_TEST(
+        test_selection_revalidate_5000_deleted_refs_compacts_linearly);
     RUN_TEST(test_view_oom_fallback_clears_focus_and_anchor);
     RUN_TEST(test_view_filter_finds_long_rename_beyond_label);
     RUN_TEST(test_left_section_caps_preserve_sprite_vlist_at_short_heights);

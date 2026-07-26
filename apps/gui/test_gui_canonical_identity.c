@@ -13,6 +13,7 @@
 #include "gui_actions.h"
 #include "gui_canvas.h"
 #include "gui_pack.h"
+#include "gui_pack_internal.h"
 #include "gui_project.h"
 #include "gui_recovery_indicator.h"
 #include "gui_rows.h"
@@ -23,8 +24,10 @@
 #include "tp_core/tp_input.h"
 #include "tp_core/tp_scan.h"
 #include "tp_core/tp_journal.h"
+#include "tp_core/tp_pack_hash.h"
 #include "tp_core/tp_build_worker.h"
 #include "tp_journal_internal.h"
+#include "tp_image_priv.h"
 #include "tp_session_internal.h"
 #include "tp_test_seams.h"
 
@@ -361,6 +364,98 @@ void test_native_pack_ignores_unrelated_atlas_edit_during_job(void) {
         tp_session_snapshot_atlas_by_id(snapshot, packed_atlas_id);
     TEST_ASSERT_NOT_NULL(packed);
     TEST_ASSERT_NOT_NULL(gui_pack_result(0));
+}
+
+void test_nil_completed_pack_input_hash_is_stale(void) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        snapshot ? tp_session_snapshot_atlas_at(snapshot, 0) : NULL;
+    TEST_ASSERT_NOT_NULL(atlas);
+
+    const tp_session_pack_job_result completed = {
+        .atlas_id = atlas->id,
+        .input_token_at_start =
+            tp_session_snapshot_input_token(snapshot),
+        .pack_input_hash = {{0}},
+    };
+
+    TEST_ASSERT_TRUE(
+        gui_pack__test_native_pack_input_changed_since(&completed));
+}
+
+void test_failed_current_hash_probe_is_stale(void) {
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    const tp_snapshot_atlas *atlas =
+        snapshot ? tp_session_snapshot_atlas_at(snapshot, 0) : NULL;
+    TEST_ASSERT_NOT_NULL(atlas);
+    tp_id128 completed_hash = tp_id128_nil();
+    completed_hash.bytes[0] = 0x7fU;
+    const tp_session_pack_job_result completed = {
+        .atlas_id = atlas->id,
+        .input_token_at_start =
+            tp_session_snapshot_input_token(snapshot),
+        .pack_input_hash = completed_hash,
+        .freshness_token = tp_session_snapshot_input_token(snapshot),
+        .freshness = TP_PACK_FRESHNESS_STALE,
+        .freshness_reason = TP_PACK_FRESHNESS_PROBE_ERROR,
+        .freshness_status = TP_STATUS_INVALID_ARGUMENT,
+    };
+
+    TEST_ASSERT_TRUE(
+        gui_pack__test_native_pack_input_changed_since(&completed));
+}
+
+void test_gui_poll_does_not_decode_sources_on_gui_thread(void) {
+    const tp_id128 atlas_id = add_coin_source();
+    TEST_ASSERT_TRUE(gui_pack_init(TP_GUI_IDENTITY_TEST_DIR));
+    tp_job__test_arm_before_terminal_gate();
+    char error[256] = {0};
+    TEST_ASSERT_TRUE(gui_pack_async_start(0, error, sizeof error));
+
+    bool gated = false;
+    for (int i = 0; i < 5000; ++i) {
+        if (tp_job__test_before_terminal_gate_entered()) {
+            gated = true;
+            break;
+        }
+        nt_time_sleep(0.001);
+    }
+    TEST_ASSERT_TRUE(gated);
+
+    const tp_session_snapshot *snapshot = gui_project_snapshot();
+    char hero_path[1024];
+    (void)snprintf(hero_path, sizeof hero_path,
+                   "%s/apps/cli/testdata/sprites/hero.png",
+                   TP_TEST_SOURCE_DIR);
+    TEST_ASSERT_EQUAL_INT(
+        GUI_ADD_ADDED,
+        gui_project_add_source_kind(
+            atlas_id, tp_session_snapshot_revision(snapshot), hero_path,
+            TP_SOURCE_KIND_FILE));
+
+    tp_image__test_reset_decode_count();
+    tp_job__test_release_before_terminal_gate();
+
+    tp_session_job_progress progress = {0};
+    for (int i = 0; i < 5000; ++i) {
+        TEST_ASSERT_EQUAL_INT(
+            TP_STATUS_OK,
+            tp_session_job_poll(gui_project_session_for_jobs(), &progress,
+                                NULL));
+        if (progress.state != TP_SESSION_JOB_RUNNING) {
+            break;
+        }
+        nt_time_sleep(0.001);
+    }
+    TEST_ASSERT_NOT_EQUAL(TP_SESSION_JOB_RUNNING, progress.state);
+
+    const uint64_t decodes_before_poll = tp_image__test_decode_count();
+    gui_pack_result_info info = {0};
+    const gui_pack_done done = gui_pack_poll(&info);
+    TEST_ASSERT_EQUAL_INT(GUI_PACK_DONE_PACK_OK, done);
+    TEST_ASSERT_TRUE(info.input_changed);
+    TEST_ASSERT_EQUAL_UINT64(
+        decodes_before_poll, tp_image__test_decode_count());
 }
 
 void test_long_sprite_keys_with_shared_prefix_never_coalesce(void) {
@@ -870,6 +965,9 @@ int main(int argc, char **argv) {
     RUN_TEST(test_delayed_animation_context_ref_never_retargets_after_index_shift);
     RUN_TEST(test_preview_result_rejects_source_refresh_after_job_capture);
     RUN_TEST(test_native_pack_ignores_unrelated_atlas_edit_during_job);
+    RUN_TEST(test_nil_completed_pack_input_hash_is_stale);
+    RUN_TEST(test_failed_current_hash_probe_is_stale);
+    RUN_TEST(test_gui_poll_does_not_decode_sources_on_gui_thread);
     RUN_TEST(test_long_sprite_keys_with_shared_prefix_never_coalesce);
     RUN_TEST(test_oversized_names_cannot_enter_a_truncating_editor);
     RUN_TEST(test_recovery_entry_keeps_core_path_capacity);

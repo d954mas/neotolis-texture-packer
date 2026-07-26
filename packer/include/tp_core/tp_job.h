@@ -52,6 +52,21 @@ typedef struct tp_session_job_progress {
     double elapsed_ms;
 } tp_session_job_progress;
 
+struct tp_pack_image_hash_cache;
+
+typedef enum tp_pack_freshness {
+    TP_PACK_FRESHNESS_STALE = 0,
+    TP_PACK_FRESHNESS_CURRENT
+} tp_pack_freshness;
+
+typedef enum tp_pack_freshness_reason {
+    TP_PACK_FRESHNESS_RESULT_HASH_NIL = 0,
+    TP_PACK_FRESHNESS_MATCH,
+    TP_PACK_FRESHNESS_HASH_MISMATCH,
+    TP_PACK_FRESHNESS_PROBE_ERROR,
+    TP_PACK_FRESHNESS_TOKEN_CHANGED
+} tp_pack_freshness_reason;
+
 typedef struct tp_session_pack_job_result {
     tp_id128 atlas_id;
     tp_arena *arena;
@@ -64,6 +79,16 @@ typedef struct tp_session_pack_job_result {
      * hash could not be computed (e.g. an unreadable source) -- a nil hash reads
      * as "always stale" and never matches a current hash. */
     tp_id128 pack_input_hash;
+    /* Core-owned freshness verdict computed on the Pack worker before terminal
+     * publication. `freshness_token` identifies the immutable session snapshot
+     * used by that probe; clients must pass their current token through
+     * tp_session_pack_result_freshness so a later edit fails closed as stale. */
+    tp_id128 current_pack_input_hash;
+    tp_session_input_token freshness_token;
+    tp_pack_freshness freshness;
+    tp_pack_freshness_reason freshness_reason;
+    tp_status freshness_status;
+    tp_error freshness_error;
     char preview_exporter_id[TP_EXPORTER_ID_MAX];
 } tp_session_pack_job_result;
 
@@ -119,6 +144,14 @@ tp_status tp_session_job_take_result(tp_session *session,
                                      tp_error *err);
 void tp_session_job_result_destroy(tp_session_job_result *result);
 
+/* Returns the typed core freshness verdict for a completed Pack result. A live
+ * token newer than the worker's verified snapshot always yields STALE with
+ * TOKEN_CHANGED; clients do not implement their own nil/error fallback rules. */
+tp_pack_freshness tp_session_pack_result_freshness(
+    const tp_session_pack_job_result *result,
+    tp_session_input_token live_token,
+    tp_pack_freshness_reason *out_reason);
+
 /* Recomputes the CURRENT pack_input_hash for `atlas_id` from the live session's
  * immutable snapshot, WITHOUT starting a job (master spec §10.2-10.3, decision
  * 0004). This is the freshness/selection primitive: compare it against a
@@ -127,7 +160,6 @@ void tp_session_job_result_destroy(tp_session_job_result *result);
  * session-lifetime tp_pack_image_hash_cache for cheap repeats; caching never
  * changes the hash value. On a source that cannot be read the underlying status
  * propagates and *out_hash is left nil. Never auto-packs. */
-struct tp_pack_image_hash_cache;
 tp_status tp_session_pack_input_hash(tp_session *session, tp_id128 atlas_id,
                                      struct tp_pack_image_hash_cache *cache,
                                      tp_id128 *out_hash, tp_error *err);

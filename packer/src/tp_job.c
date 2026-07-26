@@ -18,6 +18,7 @@
 #include "tp_core/tp_input.h"
 #include "tp_core/tp_pack_hash.h"
 #include "tp_job_owner_internal.h"
+#include "tp_pack_hash_priv.h"
 #include "tp_pack_priv.h"
 #ifdef TP_ENABLE_TEST_SEAMS
 #include "tp_test_gate.h"
@@ -52,6 +53,13 @@ typedef struct tp_live_job {
     tp_id128 atlas_id;
     tp_session_input_token input_token_at_start;
     tp_id128 pack_input_hash;
+    tp_pack_image_hash_cache *image_hash_cache;
+    tp_id128 current_pack_input_hash;
+    tp_session_input_token freshness_token;
+    tp_pack_freshness freshness;
+    tp_pack_freshness_reason freshness_reason;
+    tp_status freshness_status;
+    tp_error freshness_error;
     /* Immutable session snapshot, owned by the job from pack-start until pack_worker
      * builds the input from it (incl. the folder walk) OFF the UI thread and destroys
      * it. NULL for export jobs and after the worker consumes it. */
@@ -223,6 +231,7 @@ static void job_destroy_owned(tp_session_owned_job *owned) {
      * ran (thread-create failure) -- destroy it exactly once here. NULL-safe. */
     tp_session_snapshot_destroy(job->snapshot);
     tp_pack_input_free(&job->input);
+    tp_pack_image_hash_cache_destroy(job->image_hash_cache);
     free(job->atlas_name);
     free(job->work_dir);
     tp_arena_destroy(job->arena);
@@ -268,6 +277,7 @@ static bool export_job_terminal_boundary(void *context) {
 
 typedef struct pack_hash_collect {
     tp_id128 *hashes; /* one slot per sprite, in settings->sprites order */
+    tp_pack_image_fingerprint *fingerprints;
     int count;
 } pack_hash_collect;
 
@@ -276,13 +286,84 @@ typedef struct pack_hash_collect {
  * the pack consumed -- no second decode. */
 static void pack_worker_collect_image_hash(void *ctx, int sprite_index,
                                            int width, int height,
-                                           const uint8_t *rgba) {
+                                           const uint8_t *rgba,
+                                           const tp_pack_image_fingerprint
+                                               *fingerprint) {
     pack_hash_collect *collect = ctx;
     if (sprite_index < 0 || sprite_index >= collect->count) {
         return;
     }
     collect->hashes[sprite_index] =
         tp_pack_semantic_image_hash(width, height, rgba);
+    if (collect->fingerprints && fingerprint) {
+        collect->fingerprints[sprite_index] = *fingerprint;
+    }
+}
+
+static tp_status pack_input_hash_snapshot(
+    const tp_session_snapshot *snapshot, tp_id128 atlas_id,
+    const char *preview_exporter_id, tp_pack_image_hash_cache *cache,
+    tp_id128 *out_hash, tp_error *err) {
+    tp_pack_input input;
+    memset(&input, 0, sizeof input);
+    tp_pack_settings settings;
+    memset(&settings, 0, sizeof settings);
+    tp_status status =
+        tp_pack_input_build_snapshot(snapshot, atlas_id, &input, err);
+    if (status == TP_STATUS_OK) {
+        status =
+            tp_pack_settings_build_snapshot(snapshot, atlas_id, &settings, err);
+    }
+    if (status == TP_STATUS_OK) {
+        settings.sprites = input.descs;
+        settings.sprite_count = input.count;
+        status = tp_pack_input_hash_compute(
+            &settings,
+            preview_exporter_id && preview_exporter_id[0]
+                ? preview_exporter_id
+                : NULL,
+            cache, out_hash, err);
+    }
+    tp_pack_input_free(&input);
+    return status;
+}
+
+static void pack_worker_probe_freshness(tp_live_job *job) {
+    job->freshness = TP_PACK_FRESHNESS_STALE;
+    job->freshness_reason = TP_PACK_FRESHNESS_RESULT_HASH_NIL;
+    job->freshness_status = TP_STATUS_OK;
+    job->current_pack_input_hash = tp_id128_nil();
+    memset(&job->freshness_error, 0, sizeof job->freshness_error);
+    if (tp_id128_is_nil(job->pack_input_hash)) {
+        return;
+    }
+
+    tp_session_snapshot *snapshot = NULL;
+    job->freshness_status = tp_session_snapshot_create(
+        job->session, &snapshot, &job->freshness_error);
+    if (job->freshness_status != TP_STATUS_OK) {
+        job->freshness_reason = TP_PACK_FRESHNESS_PROBE_ERROR;
+        return;
+    }
+    job->freshness_token = tp_session_snapshot_input_token(snapshot);
+    job->freshness_status = pack_input_hash_snapshot(
+        snapshot, job->atlas_id, job->preview_exporter_id,
+        job->image_hash_cache, &job->current_pack_input_hash,
+        &job->freshness_error);
+    tp_session_snapshot_destroy(snapshot);
+    if (job->freshness_status != TP_STATUS_OK ||
+        tp_id128_is_nil(job->current_pack_input_hash)) {
+        job->freshness = TP_PACK_FRESHNESS_STALE;
+        job->freshness_reason = TP_PACK_FRESHNESS_PROBE_ERROR;
+        return;
+    }
+    if (tp_id128_eq(job->pack_input_hash, job->current_pack_input_hash)) {
+        job->freshness = TP_PACK_FRESHNESS_CURRENT;
+        job->freshness_reason = TP_PACK_FRESHNESS_MATCH;
+    } else {
+        job->freshness = TP_PACK_FRESHNESS_STALE;
+        job->freshness_reason = TP_PACK_FRESHNESS_HASH_MISMATCH;
+    }
 }
 
 static int pack_worker(void *context) {
@@ -354,7 +435,11 @@ static int pack_worker(void *context) {
     tp_id128 *image_hashes =
         sprite_count > 0 ? calloc((size_t)sprite_count, sizeof *image_hashes)
                          : NULL;
-    pack_hash_collect collect = {image_hashes, sprite_count};
+    tp_pack_image_fingerprint *fingerprints =
+        image_hashes
+            ? calloc((size_t)sprite_count, sizeof *fingerprints)
+            : NULL;
+    pack_hash_collect collect = {image_hashes, fingerprints, sprite_count};
     const tp_status status = tp_pack_cancellable_observed(
         &job->settings, job->arena, &result, pack_job_cancel_requested, job,
         image_hashes ? pack_worker_collect_image_hash : NULL, &collect, &error);
@@ -370,10 +455,35 @@ static int pack_worker(void *context) {
                 image_hashes, sprite_count, &job->pack_input_hash,
                 &hash_error) != TP_STATUS_OK) {
             job->pack_input_hash = tp_id128_nil();
+        } else if (!job->preview_exporter_id[0] && fingerprints) {
+            job->image_hash_cache = tp_pack_image_hash_cache_create();
+            for (int i = 0; job->image_hash_cache && i < sprite_count; ++i) {
+                const tp_pack_sprite_desc *sprite = &job->settings.sprites[i];
+                if (!sprite->path) {
+                    continue;
+                }
+                if (!fingerprints[i].valid ||
+                    tp_pack_image_hash_cache_seed(
+                        job->image_hash_cache, sprite->path,
+                        fingerprints[i].size, fingerprints[i].mtime,
+                        fingerprints[i].content_hash, image_hashes[i],
+                        &hash_error) != TP_STATUS_OK) {
+                    tp_pack_image_hash_cache_destroy(job->image_hash_cache);
+                    job->image_hash_cache = NULL;
+                }
+            }
         }
     }
+    free(fingerprints);
     free(image_hashes);
     job_before_terminal_gate_wait();
+    if (status == TP_STATUS_OK && result) {
+        /* Freshness is a second core-owned worker phase. Snapshot capture is
+         * thread-safe: it retains the immutable project generation under the
+         * session gate, then all folder walking/stat/decode work happens here.
+         * The GUI receives only a typed verdict and performs no filesystem I/O. */
+        pack_worker_probe_freshness(job);
+    }
     job->elapsed_ms = job_now_ms() - start;
     job_after_cancel_observation_gate_wait();
     const bool cancelled = job_claim_terminal(job);
@@ -780,6 +890,12 @@ tp_status tp_session_job_take_result(tp_session *session,
         out->pack.missing_sources = job->input.missing_sources;
         out->pack.input_token_at_start = job->input_token_at_start;
         out->pack.pack_input_hash = job->pack_input_hash;
+        out->pack.current_pack_input_hash = job->current_pack_input_hash;
+        out->pack.freshness_token = job->freshness_token;
+        out->pack.freshness = job->freshness;
+        out->pack.freshness_reason = job->freshness_reason;
+        out->pack.freshness_status = job->freshness_status;
+        out->pack.freshness_error = job->freshness_error;
         memcpy(out->pack.preview_exporter_id, job->preview_exporter_id,
                strlen(job->preview_exporter_id) + 1U);
         if (state == TP_SESSION_JOB_SUCCEEDED) {
@@ -805,6 +921,27 @@ void tp_session_job_result_destroy(tp_session_job_result *result) {
     memset(result, 0, sizeof *result);
 }
 
+tp_pack_freshness tp_session_pack_result_freshness(
+    const tp_session_pack_job_result *result,
+    tp_session_input_token live_token,
+    tp_pack_freshness_reason *out_reason) {
+    tp_pack_freshness_reason reason = TP_PACK_FRESHNESS_RESULT_HASH_NIL;
+    tp_pack_freshness freshness = TP_PACK_FRESHNESS_STALE;
+    if (result && !tp_id128_is_nil(result->pack_input_hash)) {
+        if (!tp_session_input_token_equal(result->freshness_token,
+                                          live_token)) {
+            reason = TP_PACK_FRESHNESS_TOKEN_CHANGED;
+        } else {
+            reason = result->freshness_reason;
+            freshness = result->freshness;
+        }
+    }
+    if (out_reason) {
+        *out_reason = reason;
+    }
+    return freshness;
+}
+
 tp_status tp_session_pack_input_hash(tp_session *session, tp_id128 atlas_id,
                                      struct tp_pack_image_hash_cache *cache,
                                      tp_id128 *out_hash, tp_error *err) {
@@ -819,24 +956,8 @@ tp_status tp_session_pack_input_hash(tp_session *session, tp_id128 atlas_id,
     if (status != TP_STATUS_OK) {
         return status;
     }
-    tp_pack_input input;
-    memset(&input, 0, sizeof input);
-    tp_pack_settings settings;
-    memset(&settings, 0, sizeof settings);
-    status = tp_pack_input_build_snapshot(snapshot, atlas_id, &input, err);
-    if (status == TP_STATUS_OK) {
-        status =
-            tp_pack_settings_build_snapshot(snapshot, atlas_id, &settings, err);
-    }
-    if (status == TP_STATUS_OK) {
-        settings.sprites = input.descs;
-        settings.sprite_count = input.count;
-        /* Native pack_input_hash (no preview-exporter clamp) -- matches a native
-         * pack job. Preview-exporter-aware recompute is a later refinement (U). */
-        status =
-            tp_pack_input_hash_compute(&settings, NULL, cache, out_hash, err);
-    }
-    tp_pack_input_free(&input);
+    status = pack_input_hash_snapshot(snapshot, atlas_id, NULL, cache,
+                                      out_hash, err);
     tp_session_snapshot_destroy(snapshot);
     return status;
 }

@@ -34,6 +34,10 @@ void multi_sel_clear(void);
 void multi_sel_add_ref(tp_id128 source_id, const char *source_key);
 void multi_sel_remove_ref(tp_id128 source_id, const char *source_key);
 void multi_sel_set_single_ref(tp_id128 source_id, const char *source_key);
+/* Replaces the canonical multi-selection with every selectable leaf in the
+ * inclusive visible range. Returns false without changing the previous
+ * selection when the replacement cannot be allocated. */
+bool multi_sel_set_view_range(int lo, int hi);
 /* Makes an already-selected context-menu row the primary/focused row and the
  * next Shift-range anchor without changing the canonical multi-selection. */
 void gui_rows_context_refocus(int view_index);
@@ -173,6 +177,11 @@ void build_view(void);
 /* Makes the next view-owned allocation fail so fallback behavior is
  * deterministic in the headless projection tests. */
 void gui_rows_test_fail_next_view_alloc(void);
+/* Fails rows_strdup after exactly `successful_copies` subsequent successes. */
+void gui_rows_test_fail_rows_strdup_after(int successful_copies);
+void gui_rows_test_reset_selection_identity_comparisons(void);
+uint64_t gui_rows_test_selection_identity_comparisons(void);
+uint64_t gui_rows_test_selection_compaction_moves(void);
 #endif
 
 /* Releases all row/selection caches owned by this module. Safe before first

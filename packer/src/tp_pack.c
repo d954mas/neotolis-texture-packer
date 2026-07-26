@@ -12,6 +12,8 @@
 #include "tp_core/tp_model.h"
 #include "tp_core/tp_name_map.h"
 #include "tp_core/tp_pack_read.h"
+#include "tp_fs_internal.h"
+#include "tp_image_priv.h"
 #include "tp_pack_constraints_internal.h"
 #include "tp_pack_priv.h"
 #include "tp_build_worker_internal.h"
@@ -491,10 +493,20 @@ static tp_status load_path_images(const tp_pack_settings *settings,
         const uint8_t *pixels = sprite->rgba;
         int width = sprite->w;
         int height = sprite->h;
+        tp_pack_image_fingerprint fingerprint = {0};
         if (sprite->path) {
+            tp_fs_info before = {0};
+            const bool had_before =
+                observer && tp_fs_stat(sprite->path, &before) &&
+                before.kind == TP_FS_KIND_REGULAR;
             tp_error cause = {{0}};
-            tp_status status =
-                tp_image_load_file(sprite->path, &images[i], &cause);
+            tp_id128 content_hash = tp_id128_nil();
+            tp_status status = observer
+                                   ? tp_image_load_file_fingerprinted(
+                                         sprite->path, &images[i],
+                                         &content_hash, &cause)
+                                   : tp_image_load_file(sprite->path,
+                                                        &images[i], &cause);
             if (status != TP_STATUS_OK) {
                 free(area_entries);
                 free_loaded_images(images, settings->sprite_count);
@@ -504,11 +516,20 @@ static tp_status load_path_images(const tp_pack_settings *settings,
             pixels = images[i].pixels;
             width = images[i].width;
             height = images[i].height;
+            tp_fs_info after = {0};
+            if (had_before && tp_fs_stat(sprite->path, &after) &&
+                after.kind == TP_FS_KIND_REGULAR &&
+                before.size == after.size && before.mtime == after.mtime) {
+                fingerprint.size = after.size;
+                fingerprint.mtime = after.mtime;
+                fingerprint.content_hash = content_hash;
+                fingerprint.valid = !tp_id128_is_nil(content_hash);
+            }
         }
         /* Hand the just-resolved pixels to an in-process observer (pack_input_hash
          * folding) before the preflight -- the pack's single decode is the only one. */
         if (observer) {
-            observer(observer_ctx, i, width, height, pixels);
+            observer(observer_ctx, i, width, height, pixels, &fingerprint);
         }
         tp_status status = preflight_sprite_pixels(
             settings, sprite, pixels, width, height, &area_entries[i], err);

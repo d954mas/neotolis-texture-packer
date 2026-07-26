@@ -72,14 +72,20 @@ void tp_image_free(tp_image_rgba8 *image) {
     image->height = 0;
 }
 
-tp_status tp_image_load_file(const char *path_utf8, tp_image_rgba8 *out,
-                             tp_error *err) {
-    if (!out) {
+static tp_status read_encoded_file(const char *path_utf8,
+                                   unsigned char **out_encoded,
+                                   size_t *out_size,
+                                   tp_id128 *out_fingerprint,
+                                   tp_error *err) {
+    if (!out_encoded || !out_size) {
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
-                            "image load: out is required");
+                            "image load: encoded outputs are required");
     }
-    memset(out, 0, sizeof *out);
-
+    *out_encoded = NULL;
+    *out_size = 0U;
+    if (out_fingerprint) {
+        *out_fingerprint = tp_id128_nil();
+    }
     tp_status status = validate_utf8_path(path_utf8, err);
     if (status != TP_STATUS_OK) {
         return status;
@@ -131,6 +137,52 @@ tp_status tp_image_load_file(const char *path_utf8, tp_image_rgba8 *out,
         return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
                             "image load: file changed or failed while reading '%s'",
                             path_utf8);
+    }
+    if (out_fingerprint) {
+        tp_hasher hasher = tp_hasher_init();
+        tp_hasher_update(&hasher, encoded, encoded_size);
+        *out_fingerprint = tp_hasher_final(hasher);
+    }
+    *out_encoded = encoded;
+    *out_size = encoded_size;
+    return TP_STATUS_OK;
+}
+
+tp_status tp_image_file_fingerprint(const char *path_utf8,
+                                    tp_id128 *out_fingerprint,
+                                    tp_error *err) {
+    if (!out_fingerprint) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "image fingerprint: output is required");
+    }
+    unsigned char *encoded = NULL;
+    size_t encoded_size = 0U;
+    const tp_status status = read_encoded_file(
+        path_utf8, &encoded, &encoded_size, out_fingerprint, err);
+    free(encoded);
+    return status;
+}
+
+tp_status tp_image_load_file(const char *path_utf8, tp_image_rgba8 *out,
+                             tp_error *err) {
+    return tp_image_load_file_fingerprinted(path_utf8, out, NULL, err);
+}
+
+tp_status tp_image_load_file_fingerprinted(const char *path_utf8,
+                                           tp_image_rgba8 *out,
+                                           tp_id128 *out_fingerprint,
+                                           tp_error *err) {
+    if (!out) {
+        return tp_error_set(err, TP_STATUS_INVALID_ARGUMENT,
+                            "image load: out is required");
+    }
+    memset(out, 0, sizeof *out);
+    unsigned char *encoded = NULL;
+    size_t encoded_size = 0U;
+    tp_status status = read_encoded_file(
+        path_utf8, &encoded, &encoded_size, out_fingerprint, err);
+    if (status != TP_STATUS_OK) {
+        return status;
     }
 
     int expected_width = 0;

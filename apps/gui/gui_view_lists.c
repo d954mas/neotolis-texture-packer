@@ -188,28 +188,19 @@ static void sync_primary_row_to_canvas(const sprite_row *row) {
         gui_rows_result_region_for_primary(row, s_canvas.result));
 }
 
-static void select_sprite_row(int i, bool ctrl, bool shift) {
+static bool select_sprite_row(int i, bool ctrl, bool shift) {
     if (i < 0 || i >= s_view_count) {
-        return;
+        return false;
     }
     const sprite_row *row = &s_rows[s_view[i]];
     const bool leaf = (!row->is_folder && !row->missing && row->sprite_name &&
                        row->sprite_name[0] != '\0');
-    s_sel_src = row->src;
-    s_sel_child = row->child;
-    s_sel_missing = row->missing;
-    (void)snprintf(s_sel_abs, sizeof s_sel_abs, "%s", row->abs);
     if (leaf) {
         if (shift && s_sel_anchor_row >= 0 && s_sel_anchor_row < s_view_count) {
-            multi_sel_clear();
             const int lo = (s_sel_anchor_row < i) ? s_sel_anchor_row : i;
             const int hi = (s_sel_anchor_row < i) ? i : s_sel_anchor_row;
-            for (int k = lo; k <= hi; k++) {
-                const sprite_row *rk = &s_rows[s_view[k]];
-                if (!rk->is_folder && !rk->missing && rk->sprite_name &&
-                    rk->sprite_name[0] != '\0') {
-                    multi_sel_add_ref(rk->source_id, rk->source_key);
-                }
+            if (!multi_sel_set_view_range(lo, hi)) {
+                return false;
             }
         } else if (ctrl) {
             if (multi_sel_contains_ref(row->source_id, row->source_key)) {
@@ -226,7 +217,12 @@ static void select_sprite_row(int i, bool ctrl, bool shift) {
         multi_sel_clear();
         s_sel_anchor_row = -1;
     }
+    s_sel_src = row->src;
+    s_sel_child = row->child;
+    s_sel_missing = row->missing;
+    (void)snprintf(s_sel_abs, sizeof s_sel_abs, "%s", row->abs);
     sync_primary_row_to_canvas(row);
+    return true;
 }
 
 /* --- keyboard focus model (U-02 T3) ---
@@ -259,9 +255,10 @@ void gui_list_focus_step(int delta, bool extend) {
             f = s_view_count - 1;
         }
     }
-    s_focus_view = f;
-    s_focus_follow = true;
-    select_sprite_row(f, false, extend);
+    if (select_sprite_row(f, false, extend)) {
+        s_focus_view = f;
+        s_focus_follow = true;
+    }
 }
 
 void gui_list_focus_edge(bool end, bool extend) {
@@ -269,9 +266,11 @@ void gui_list_focus_edge(bool end, bool extend) {
         s_focus_view = -1;
         return;
     }
-    s_focus_view = end ? (s_view_count - 1) : 0;
-    s_focus_follow = true;
-    select_sprite_row(s_focus_view, false, extend);
+    const int target = end ? (s_view_count - 1) : 0;
+    if (select_sprite_row(target, false, extend)) {
+        s_focus_view = target;
+        s_focus_follow = true;
+    }
 }
 
 void gui_list_focus_activate(void) {
@@ -630,8 +629,9 @@ static void declare_sprite_list(nt_ui_context_t *ctx) {
             } else if (row_clicked && !x_clicked) {
                 const bool ctrl = nt_input_key_is_down(NT_KEY_LCTRL) || nt_input_key_is_down(NT_KEY_RCTRL);
                 const bool shift = nt_input_key_is_down(NT_KEY_LSHIFT) || nt_input_key_is_down(NT_KEY_RSHIFT);
-                select_sprite_row((int)i, ctrl, shift);
-                s_focus_view = (int)i; /* click moves keyboard focus here too */
+                if (select_sprite_row((int)i, ctrl, shift)) {
+                    s_focus_view = (int)i; /* click moves keyboard focus here too */
+                }
             }
             if (nt_ui_menu_open_trigger(ctx, s_id_ctx_menu, hit_id, false, &s_ctx_state)) {
                 close_menubar_menus();
